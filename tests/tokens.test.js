@@ -104,8 +104,8 @@ test('createCalibrator: observe() converges toward the observed ratio over repea
 test('createCalibrator: observe() clamps the observed sample before averaging', () => {
   const cal = createCalibrator(1);
   for (let i = 0; i < 500; i += 1) cal.observe(1000, 100000); // sample ratio 100, clamped to 1.6
-  // The EMA blend of ratio and a clamped sample is not itself re-clamped, so tiny
-  // floating-point drift above RATIO_MAX is expected; only gross drift is a bug.
-  assert.ok(cal.ratio <= 1.6 + 1e-9, `ratio must stay within float noise of RATIO_MAX, got ${cal.ratio}`);
-  assert.ok(Math.abs(cal.ratio - 1.6) < 0.001);
+  // The blended EMA result is itself re-clamped, so it must never exceed RATIO_MAX,
+  // not even by floating-point noise (see the fix in createCalibrator.observe()).
+  assert.ok(cal.ratio <= 1.6, `ratio must never exceed RATIO_MAX, got ${cal.ratio}`);
+  assert.equal(cal.ratio, 1.6);
 });

@@ -62,7 +62,10 @@ export function createCalibrator(initial = 1) {
     observe(rawEstimate, actualTokens) {
       if (!(rawEstimate > 200) || !(actualTokens > 0)) return ratio;
       const sample = Math.min(RATIO_MAX, Math.max(RATIO_MIN, actualTokens / rawEstimate));
-      ratio = ratio * (1 - EMA_ALPHA) + sample * EMA_ALPHA;
+      const blended = ratio * (1 - EMA_ALPHA) + sample * EMA_ALPHA;
+      // Re-clamp: floating-point rounding can otherwise nudge the blend a hair
+      // outside [RATIO_MIN, RATIO_MAX] even when ratio and sample are both in range.
+      ratio = Math.min(RATIO_MAX, Math.max(RATIO_MIN, blended));
       return ratio;
     },
   };
