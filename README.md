@@ -1,16 +1,16 @@
 # neptunia-bot
 
-A generic engine for a Discord pseudo-user with a pluggable personality.
+SillyTavern-inspired Discord pseudo-user engine with a pluggable personality.
 
 Node.js 20+, one dependency (discord.js), any OpenRouter-compatible endpoint. Ships with a working example character; write your own without touching code. Each instance serves one server, one bot account, one personality. For a second server or character, run a second copy with its own `.env`, `config.local.json`, `prompts.local/` and `data/`.
 
 Discord marks bot accounts with an APP badge. The engine does not disguise that; the goal is behaviour and voice.
 
-The persona responds to mentions, replies and name triggers, sometimes ignoring them. It cuts into conversations at random intervals and starts topics in dead channels. It remembers people, tracks attitudes from -100 to 100, and lets those shape how it engages -- the score never appears in chat. All config and prompts are hot-reloaded; owner commands tune the bot live from Discord.
+The persona responds to mentions, replies and name triggers, sometimes ignoring them. It cuts into conversations at random intervals and starts topics in dead channels. It remembers people, tracks attitudes from -100 to 100, and lets those shape how it engages — the score never appears in chat. All config and prompts are hot-reloaded; owner commands tune the bot live from Discord.
 
 ## Quick start
 
-Create a Discord application at [discord.com/developers](https://discord.com/developers/applications). Enable the **Message Content** privileged intent on the Bot page. The invite URL must carry both scopes -- `scope=bot%20applications.commands` -- with `permissions=68672` (view channels, send messages, read history, add reactions). If slash commands do not appear after the bot joins, the log says why; re-opening the invite URL and walking through it again fixes registration without removing the bot.
+Create a Discord application at [discord.com/developers](https://discord.com/developers/applications). Enable the **Message Content** privileged intent on the Bot page. The invite URL must carry both scopes — `scope=bot%20applications.commands` — with `permissions=68672` (view channels, send messages, read history, add reactions). If slash commands do not appear after the bot joins, the log says why; re-opening the invite URL and walking through it again fixes registration without removing the bot.
 
 Get an API key from [OpenRouter](https://openrouter.ai/keys) (or any compatible endpoint).
 
@@ -34,14 +34,14 @@ Edit `.env` with your Discord token and API key. Create `config.local.json` with
 npm start
 ```
 
-When `bot.guildId` is empty and the bot is in exactly one server, it locks to that server automatically. If the bot is in several servers, it refuses to start -- set `bot.guildId` in `config.local.json`.
+When `bot.guildId` is empty and the bot is in exactly one server, it locks to that server automatically. If the bot is in several servers, it refuses to start — set `bot.guildId` in `config.local.json`.
 
 ## Prompt layers
 
 Prompts load from two directories:
 
-- **`prompts/`** -- tracked engine defaults (English). Ships with a working example character.
-- **`prompts.local/`** -- your personality (gitignored). A file here replaces the same-named file in `prompts/`. `labels.json` is deep-merged, so you only override the keys you change.
+- **`prompts/`** — tracked engine defaults. Ships with a working example character.
+- **`prompts.local/`** — your personality (gitignored). A file here replaces the same-named file in `prompts/`. `labels.json` is deep-merged, so you only override the keys you change.
 
 Both are hot-reloaded.
 
@@ -52,7 +52,7 @@ Both are hot-reloaded.
 | `system-prompt.md` | yes | How to pass for a human chat member. Character-agnostic |
 | `character-card.md` | yes | The personality: who they are, how they talk, what they care about |
 | `rules.md` | no | Owner's live corrections, appended by `/nep rule add` |
-| `format.md` | yes | Output protocol -- tags the model uses to act |
+| `format.md` | yes | Output protocol — tags the model uses to act |
 | `reply.md` | yes | Task: someone addressed the persona |
 | `interject.md` | yes | Task: cut into a live conversation |
 | `initiate.md` | yes | Task: break a silence, start a topic |
@@ -61,13 +61,13 @@ Both are hot-reloaded.
 
 **The only file you must rewrite is `character-card.md`.** Copy it to `prompts.local/` and write your persona. Everything else works as-is, or override individual files as needed.
 
-Write your prompts in the language the character speaks. Translate `labels.json` too -- copy it to `prompts.local/`, change the `locale` and values, so the model reads one language throughout.
+Write your prompts in the language the character speaks. Translate `labels.json` too — copy it to `prompts.local/`, change the `locale` and values, so the model reads one language throughout.
 
-The memory analyzer judges how the character feels about people. It receives your character card, so include what your character likes and dislikes -- that drives the relationship scores.
+The memory analyzer judges how the character feels about people. It receives your character card, so include what your character likes and dislikes — that drives the relationship scores.
 
 ### Tips
 
-The system prompt handles sounding human, so the card is purely personality. Give the character opinions and a default mood rather than agreeability. Keep reference lines short and varied -- they anchor style over long conversations. Write the card in the character's voice. Make profanity carry meaning, not fill space. Make silence a real option -- a character that always answers is the most obvious bot tell.
+The system prompt handles sounding human, so the card is purely personality. Give the character opinions and a default mood rather than agreeability. Keep reference lines short and varied — they anchor style over long conversations. Write the card in the character's voice. Make profanity carry meaning, not fill space. Make silence a real option — a character that always answers is the most obvious bot tell.
 
 ## Configuration
 
@@ -86,7 +86,7 @@ The system prompt handles sounding human, so the card is purely personality. Giv
 | `memory` | `true` | Build profiles, track server patterns, record self-claims |
 | `relationships` | `true` | Per-member attitude scores (-100..100) |
 | `reactions` | `true` | Emoji reactions |
-| `multiMessage` | `true` | Allow 2--3 messages in a row |
+| `multiMessage` | `true` | Allow 2–3 messages in a row |
 | `vision` | `true` | Process attached images |
 | `typingSimulation` | `true` | Simulate typing speed |
 | `adminCommands` | `true` | Owner slash commands; `false` unregisters them |
@@ -229,17 +229,17 @@ The budget `warmup.maxTokens` is counted from the provider's reported usage. War
 | `channelDepths` | `{}` | Per-channel depth override by channel id (`0` skips a channel); `messagesPerChannel` is the fallback |
 | `onlyListed` | `false` | Read only channels in `channelDepths` plus the primary; skip everything else |
 
-Read order: the primary channel, then listed channels sorted by depth (ties broken by recent activity), then the rest by recent activity. A channel's history window is frozen when it is first read -- changing its depth afterwards needs `warmup reset`.
+Read order: the primary channel, then listed channels sorted by depth (ties broken by recent activity), then the rest by recent activity. A channel's history window is frozen when it is first read — changing its depth afterwards needs `warmup reset`.
 
 ## Dry run
 
-With `features.dryRun: true` the bot runs the full pipeline -- warm-up, memory, triggers, LLM calls -- but never sends a message or reaction. Output goes to the log (`dry-run: would send` / `dry-run: would react`). Set `bot.dryRunChannelId` to a private channel for a readable mirror; everything posted in that channel is ignored by the bot. Slash commands work in any channel, the mirror included, because they are not messages.
+With `features.dryRun: true` the bot runs the full pipeline — warm-up, memory, triggers, LLM calls — but never sends a message or reaction. Output goes to the log (`dry-run: would send` / `dry-run: would react`). Set `bot.dryRunChannelId` to a private channel for a readable mirror; everything posted in that channel is ignored by the bot. Slash commands work in any channel, the mirror included, because they are not messages.
 
 First run on a new server: enable `features.dryRun`, plan the warm-up with `/nep warmup` commands, watch the mirror or `journalctl -u neptunia-bot -f`, tune live, then `/nep set features.dryRun false`.
 
 ## Owner commands
 
-One Discord slash command, `/nep` (the name comes from `bot.commandName`). Guild commands, registered on start for the served server. Hidden from ordinary members (`default_member_permissions: 0`) and restricted to the ids in `bot.owners`. Every answer is ephemeral -- only the owner sees it, in whatever channel it was typed. Channels and users are picked from Discord's own pickers; `set`/`unset` autocomplete config paths. The bot does not read direct messages.
+One Discord slash command, `/nep` (the name comes from `bot.commandName`). Guild commands, registered on start for the served server. Hidden from ordinary members (`default_member_permissions: 0`) and restricted to the ids in `bot.owners`. Every answer is ephemeral — only the owner sees it, in whatever channel it was typed. Channels and users are picked from Discord's own pickers; `set`/`unset` autocomplete config paths. The bot does not read direct messages.
 
 | Command | What it does |
 |---|---|
@@ -269,17 +269,17 @@ One Discord slash command, `/nep` (the name comes from `bot.commandName`). Guild
 
 ## How a turn works
 
-A message passes through guild, channel and self-message filters. If the persona was called -- @mention, reply, or name trigger -- an ignore heuristic rolls against a base chance adjusted for bare pings, repeated tags, spam, and the caller's relationship score. Spontaneous turns fire from a chaotic timer or the per-message eavesdrop chance.
+A message passes through guild, channel and self-message filters. If the persona was called — @mention, reply, or name trigger — an ignore heuristic rolls against a base chance adjusted for bare pings, repeated tags, spam, and the caller's relationship score. Spontaneous turns fire from a chaotic timer or the per-message eavesdrop chance.
 
-The turn collects the channel transcript and neighbouring channels, then builds one LLM request inside the token budget. Sections fill in priority order: system prompt and task are never cut; then the caller's profile, server habits and self-facts, the channel map, the transcript (newest first), other profiles, and neighbouring channels. The model sees a map of the server's channels -- purpose, topics, tone, activity level -- with the current channel marked.
+The turn collects the channel transcript and neighbouring channels, then builds one LLM request inside the token budget. Sections fill in priority order: system prompt and task are never cut; then the caller's profile, server habits and self-facts, the channel map, the transcript (newest first), other profiles, and neighbouring channels. The model sees a map of the server's channels — purpose, topics, tone, activity level — with the current channel marked.
 
-The model responds with `<think>` (hidden planning), `<msg>` (1--3 chat messages; `reply="#87"` replies to a transcript line), `<react>` (one emoji reaction), or `<skip/>` (silence). After parsing, typing is simulated at human speed and `@nick` in the output becomes a real mention.
+The model responds with `<think>` (hidden planning), `<msg>` (1–3 chat messages; `reply="#87"` replies to a transcript line), `<react>` (one emoji reaction), or `<skip/>` (silence). After parsing, typing is simulated at human speed and `@nick` in the output becomes a real mention.
 
 The memory analyzer runs as a separate LLM call when enough messages accumulate. It receives the character card and judges each person through the character's eyes, returning small attitude deltas, updated profiles, channel observations, and server-level notes.
 
 ## Cost and privacy
 
-Each turn is one LLM request; a memory update adds a second. Cost depends on the model and endpoint -- `llm.model` and `llm.baseUrl` accept any compatible values. The daily cap (`llm.maxRequestsPerDay`) prevents runaway spending.
+Each turn is one LLM request; a memory update adds a second. Cost depends on the model and endpoint — `llm.model` and `llm.baseUrl` accept any compatible values. The daily cap (`llm.maxRequestsPerDay`) prevents runaway spending.
 
 **Privacy.** `data/` holds per-member profiles, relationship scores, channel observations and server patterns. It stays on your machine, is gitignored, and is only sent to the LLM as context. The analyzer is instructed not to store sensitive details. `/nep memory forget` deletes a profile entirely.
 
@@ -318,7 +318,7 @@ config.json                defaults for every setting, hot-reloaded
 .env.example               template for DISCORD_TOKEN and OPENROUTER_API_KEY
 prompts/
   system-prompt.md         how to pass for a human chat member
-  character-card.md        the personality (example -- rewrite this one)
+  character-card.md        the personality (example — rewrite this one)
   rules.md                 owner's live corrections
   format.md                output tags the model uses
   reply.md                 task: someone called you
@@ -361,7 +361,3 @@ data/                      persistent state (gitignored, created at runtime)
   guilds/<id>/users/       per-member profiles and relationships
   guilds/<id>/channels/    channel observations from the analyzer
 ```
-
-## License
-
-[MIT](LICENSE)
