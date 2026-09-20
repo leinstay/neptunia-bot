@@ -86,7 +86,7 @@
     "batchMessages": 60,
     "minBatchMessages": 15,
     "maxBatchAgeMinutes": 180,
-    "maxOutputTokens": 4000,
+    "maxOutputTokens": 8000,
     "fieldChars": 400,
     "maxDetails": 15,
     "maxInjokes": 15,

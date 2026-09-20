@@ -11,6 +11,7 @@ import { createStore } from '../src/memory/store.js';
 import { isDue, buildMemoryRequest, applyMemoryUpdate, createMemoryUpdater, touchMemory } from '../src/memory/update.js';
 import { createCalibrator, estimateTokens, estimateMessages } from '../src/llm/tokens.js';
 import { formatTranscript } from '../src/discord/format.js';
+import { TokenLimitError } from '../src/llm/openrouter.js';
 import { labels } from './fixtures/labels.js';
 
 function tempDir() {
@@ -873,6 +874,48 @@ test('run: a failure keeps the buffer untouched and backs the guild off for 15 m
   });
 });
 
+test('run: a truncated failure halves the next batch size for that guild; a success restores it', async () => {
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    const base = Date.now();
+    for (let i = 0; i < 90; i += 1) {
+      store.pushBuffer(guildId, slimMessage({ id: `m${i}`, content: `hi ${i}`, ts: base + i * 1000 }), 200);
+    }
+
+    const hot = {
+      config: makeConfig({ memory: { ...makeConfig().memory, batchMessages: 15, minBatchMessages: 1 } }),
+      prompts: { memory: 'memory system prompt', labels },
+    };
+    const calibrator = createCalibrator();
+    let call = 0;
+    const llm = {
+      complete: async () => {
+        call += 1;
+        if (call === 1) {
+          // Cut mid-JSON by the output token cap: never going to parse.
+          return {
+            text: '{"users": {"1": {"interests": "cut off here',
+            usage: { prompt_tokens: 1000, completion_tokens: 1000 },
+            estimated: 2000,
+            finishReason: 'length',
+          };
+        }
+        return { text: JSON.stringify({ guild: { patterns: 'ok' } }) };
+      },
+    };
+    const updater = createMemoryUpdater({ hot, store, llm, calibrator, getSelfName: () => 'Nept' });
+
+    await updater.run(guildId); // fails 'truncated': halves the factor for next time
+    assert.equal(store.getBuffer(guildId).length, 90, 'a failed run never shifts the buffer');
+
+    await updater.run(guildId); // succeeds, but only at the halved size
+    assert.equal(store.getBuffer(guildId).length, 70, 'only 20 (half of 30, floored at 20) were consumed, not 30');
+
+    await updater.run(guildId); // succeeds again, size restored to normal
+    assert.equal(store.getBuffer(guildId).length, 40, 'back to normal: 30 consumed this time, not another 20');
+  });
+});
+
 // ---- touchMemory -----------------------------------------------------------
 
 test('touchMemory: touches the user profile and the channel for a human message', () => {
@@ -948,6 +991,42 @@ test('analyze: swallows a thrown error and returns { ok: false, error }', async 
     assert.equal(outcome.usage, null);
     assert.ok(outcome.error instanceof Error);
     assert.equal(outcome.error.message, 'boom');
+    assert.equal(outcome.reason, 'llm-error');
+    assert.equal(outcome.detail, 'boom');
+  });
+});
+
+test('analyze: a TokenLimitError from llm.complete reports reason "token-limit"', async () => {
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    const hot = { config: makeConfig(), prompts: { memory: 'sys', labels } };
+    const calibrator = createCalibrator();
+    const llm = { complete: async () => { throw new TokenLimitError('request estimated at 90000 tokens, cap is 50000'); } };
+    const updater = createMemoryUpdater({ hot, store, llm, calibrator, getSelfName: () => 'Nept' });
+
+    const outcome = await updater.analyze(guildId, [slimMessage({ id: 'm1' })]);
+
+    assert.equal(outcome.ok, false);
+    assert.equal(outcome.usage, null);
+    assert.equal(outcome.reason, 'token-limit');
+    assert.equal(outcome.detail, 'request estimated at 90000 tokens, cap is 50000');
+  });
+});
+
+test('analyze: a network/provider error message is trimmed to 200 chars in detail', async () => {
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    const hot = { config: makeConfig(), prompts: { memory: 'sys', labels } };
+    const calibrator = createCalibrator();
+    const longMessage = 'x'.repeat(300);
+    const llm = { complete: async () => { throw new Error(longMessage); } };
+    const updater = createMemoryUpdater({ hot, store, llm, calibrator, getSelfName: () => 'Nept' });
+
+    const outcome = await updater.analyze(guildId, [slimMessage({ id: 'm1' })]);
+
+    assert.equal(outcome.reason, 'llm-error');
+    assert.equal(outcome.detail, longMessage.slice(0, 200));
+    assert.equal(outcome.detail.length, 200);
   });
 });
 
@@ -972,6 +1051,55 @@ test('analyze: a completion that fails to parse still reports the real usage/est
     assert.equal(outcome.estimated, 90);
     assert.equal(outcome.result, null);
     assert.ok(outcome.error instanceof Error);
+    assert.equal(outcome.reason, 'bad-json', 'no "{" at all is not a truncation, just garbage');
+  });
+});
+
+test('analyze: a completion with no closing "}" for its first "{" reports reason "truncated"', async () => {
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    const hot = { config: makeConfig(), prompts: { memory: 'sys', labels } };
+    const calibrator = createCalibrator();
+    const llm = {
+      complete: async () => ({
+        text: '{"users": {"1": {"interests": "a lot of anime and video games and',
+        usage: { prompt_tokens: 4000, completion_tokens: 4000 },
+        estimated: 8000,
+        // finishReason omitted on purpose: the missing "}" alone must be enough
+      }),
+    };
+    const updater = createMemoryUpdater({ hot, store, llm, calibrator, getSelfName: () => 'Nept' });
+
+    const outcome = await updater.analyze(guildId, [slimMessage({ id: 'm1' })]);
+
+    assert.equal(outcome.ok, false);
+    assert.equal(outcome.reason, 'truncated');
+    assert.deepEqual(outcome.usage, { prompt_tokens: 4000, completion_tokens: 4000 });
+    assert.equal(outcome.estimated, 8000);
+  });
+});
+
+test('analyze: finishReason "length" alone reports reason "truncated", even with a closing brace', async () => {
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    const hot = { config: makeConfig(), prompts: { memory: 'sys', labels } };
+    const calibrator = createCalibrator();
+    const llm = {
+      complete: async () => ({
+        // A closing "}" is present, but it belongs to a nested object cut
+        // mid-string by max_tokens -- JSON.parse still fails on it.
+        text: '{"users": {"1": {"interests": "anime"}',
+        usage: { prompt_tokens: 100, completion_tokens: 50 },
+        estimated: 150,
+        finishReason: 'length',
+      }),
+    };
+    const updater = createMemoryUpdater({ hot, store, llm, calibrator, getSelfName: () => 'Nept' });
+
+    const outcome = await updater.analyze(guildId, [slimMessage({ id: 'm1' })]);
+
+    assert.equal(outcome.ok, false);
+    assert.equal(outcome.reason, 'truncated');
   });
 });
 
@@ -1023,6 +1151,7 @@ test('analyze: no memory prompt configured returns { ok: false } without calling
 
     assert.equal(outcome.ok, false);
     assert.equal(calls, 0);
+    assert.equal(outcome.reason, 'no-prompt');
   });
 });
 

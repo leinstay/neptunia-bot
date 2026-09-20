@@ -10,10 +10,32 @@ import { fitSections } from '../llm/budget.js';
 import { estimateTokens, estimateMessages } from '../llm/tokens.js';
 import { formatTranscript, renderTranscript } from '../discord/format.js';
 import { parseJsonObject } from '../llm/parse.js';
+import { TokenLimitError } from '../llm/openrouter.js';
 import { log } from '../log.js';
 import { emptyAffinity } from './affinity.js';
 
 const BACKOFF_MS = 15 * 60_000;
+const MIN_LIVE_BATCH = 20; // the live analyzer never shrinks below this many messages
+
+/** `error?.message`, trimmed to 200 chars — never message contents. */
+function detailOf(err) {
+  return err?.message ? String(err.message).slice(0, 200) : undefined;
+}
+
+/**
+ * Whether a completion looks cut off by the output token cap: the provider
+ * said so (`finish_reason: 'length'`), or the text has no closing `}` for
+ * its first `{` (the same condition `parseJsonObject` fails on).
+ * @param {string} text
+ * @param {string|undefined} finishReason
+ */
+function looksTruncated(text, finishReason) {
+  if (finishReason === 'length') return true;
+  const start = String(text ?? '').indexOf('{');
+  if (start === -1) return false;
+  const end = String(text ?? '').lastIndexOf('}');
+  return end <= start;
+}
 
 /**
  * Whether the buffered messages of one guild are ready for a memory update.
@@ -294,6 +316,11 @@ export function touchMemory(store, guildId, normalized) {
 export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, now = Date.now }) {
   const running = new Set();
   const backoffUntil = new Map();
+  // Per-guild in-memory factor on the live batch size (1 = normal). Halved on
+  // a 'truncated'/'bad-json' failure so the next attempt for that guild asks
+  // for less, floored at MIN_LIVE_BATCH messages; deleted (back to 1) on the
+  // next success. Never persisted: a restart always starts at normal size.
+  const sizeFactors = new Map();
 
   /**
    * Called for every guild message the persona sees, including its own.
@@ -373,7 +400,7 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
     const promptText = hot.prompts.memory;
     if (!promptText) {
       log.warn('memory: no memory prompt configured, skipping', { guildId });
-      return { ok: false, usage: null, estimated: 0, result: null };
+      return { ok: false, usage: null, estimated: 0, result: null, reason: 'no-prompt' };
     }
 
     const { authorIds, profiles, channelIds, channels } = collectContext(guildId, messages);
@@ -400,7 +427,8 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
     } catch (err) {
       // Nothing was billed: the request never left this process, or the
       // provider never returned a completion.
-      return { ok: false, usage: null, estimated: 0, result: null, error: err };
+      const reason = err instanceof TokenLimitError ? 'token-limit' : 'llm-error';
+      return { ok: false, usage: null, estimated: 0, result: null, error: err, reason, detail: detailOf(err) };
     }
 
     try {
@@ -417,8 +445,18 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
     } catch (err) {
       // The completion arrived (and was billed) but its answer was garbage:
       // report the real usage/estimated so a caller charging a budget still
-      // charges it.
-      return { ok: false, usage: completion.usage ?? null, estimated: completion.estimated ?? 0, result: null, error: err };
+      // charges it. `reason` tells a cut-off completion (never going to
+      // parse, no matter how many times it is retried) from plain bad JSON.
+      const reason = looksTruncated(completion.text, completion.finishReason) ? 'truncated' : 'bad-json';
+      return {
+        ok: false,
+        usage: completion.usage ?? null,
+        estimated: completion.estimated ?? 0,
+        result: null,
+        error: err,
+        reason,
+        detail: detailOf(err),
+      };
     }
   }
 
@@ -461,20 +499,41 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
     try {
       const cfg = hot.config.memory;
       const buffer = store.getBuffer(guildId);
-      const take = Math.min(buffer.length, cfg.batchMessages * 2);
+      const factor = sizeFactors.get(guildId) ?? 1;
+      const normalTake = cfg.batchMessages * 2;
+      // Only the degraded (factor < 1) path is floored at MIN_LIVE_BATCH; the
+      // normal size is left exactly as configured either way.
+      const desired = factor === 1 ? normalTake : Math.max(MIN_LIVE_BATCH, Math.floor(normalTake * factor));
+      const take = Math.min(buffer.length, desired);
       const messages = buffer.slice(0, take);
 
       const outcome = await analyze(guildId, messages);
       if (outcome.ok) {
+        sizeFactors.delete(guildId); // back to normal size after a success
         store.shiftBuffer(guildId, messages.length);
         store.flush();
         log.info('memory: update applied', { guildId, consumed: messages.length, ...outcome.result });
         return;
       }
 
-      backoffUntil.set(guildId, now() + BACKOFF_MS);
-      if (outcome.error) {
-        log.warn('memory: update failed, backing off', { guildId, error: outcome.error });
+      if (outcome.reason === 'truncated' || outcome.reason === 'bad-json') {
+        // Retrying the same-size batch can never succeed: the completion is
+        // being cut by the output token cap, not by transient bad luck.
+        // Halve the batch size for next time instead of the usual back-off.
+        sizeFactors.set(guildId, factor / 2);
+        log.warn('memory: update failed, halving the batch size for next time', {
+          guildId,
+          reason: outcome.reason,
+          detail: outcome.detail,
+        });
+      } else {
+        backoffUntil.set(guildId, now() + BACKOFF_MS);
+        log.warn('memory: update failed, backing off', {
+          guildId,
+          reason: outcome.reason,
+          detail: outcome.detail,
+          error: outcome.error,
+        });
       }
     } finally {
       running.delete(guildId);

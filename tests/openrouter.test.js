@@ -255,6 +255,34 @@ test('complete: countAgainstDailyCap: false still enforces the per-request token
   assert.equal(called, false);
 });
 
+test('complete: passes through choices[0].finish_reason as finishReason', async () => {
+  const llm = createLlm({
+    apiKey: 'k',
+    getConfig: () => baseConfig(),
+    calibrator: fakeCalibrator(),
+    state: fakeState(),
+    fetchImpl: async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ choices: [{ message: { content: 'cut off' }, finish_reason: 'length' }], usage: {} }),
+    }),
+  });
+  const result = await llm.complete([{ role: 'user', content: 'hi' }]);
+  assert.equal(result.finishReason, 'length');
+});
+
+test('complete: finishReason is undefined when the provider omits it', async () => {
+  const llm = createLlm({
+    apiKey: 'k',
+    getConfig: () => baseConfig(),
+    calibrator: fakeCalibrator(),
+    state: fakeState(),
+    fetchImpl: async () => okResponse('hi'), // okResponse's choices carry no finish_reason
+  });
+  const result = await llm.complete([{ role: 'user', content: 'hi' }]);
+  assert.equal(result.finishReason, undefined);
+});
+
 // Only ONE test exercises the real retry backoff sleep (~1.5s at attempt 1).
 test('complete: retries once on a 503 then succeeds', async () => {
   let calls = 0;

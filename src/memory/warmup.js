@@ -20,9 +20,20 @@ import { log } from '../log.js';
 const MAX_CONSECUTIVE_FAILURES = 3;
 const RETRY_DELAY_MS = 5000;
 const BATCH_OVERHEAD_TOKENS = 500; // a rough allowance for the prompt scaffolding around the transcript
+const SPLIT_FLOOR = 20; // a piece this small or smaller that still fails a 'truncated'/'bad-json' analysis is skipped, not split further
 
 function realSleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * A batch this size produces an analyzer JSON longer than the model can
+ * finish in one completion: retrying the exact same input can never
+ * succeed. Splitting it (instead of the plain retry/abort path) is the only
+ * way forward.
+ */
+function isUnrecoverableSize(reason) {
+  return reason === 'truncated' || reason === 'bad-json';
 }
 
 /**
@@ -116,6 +127,7 @@ function freshState() {
     finishedAt: null,
     tokensUsed: 0,
     requests: 0,
+    skippedMessages: 0,
     channels: {},
   };
 }
@@ -155,17 +167,136 @@ export function createWarmup({ hot, store, client, memory, getGuildId, now = Dat
     return true;
   }
 
-  async function runChannel(guildId, cfg, channel, st, consecutiveFailures) {
+  /**
+   * Analyze one piece of a batch (the whole batch on the first call, a half
+   * of it once split). Never retries a 'truncated'/'bad-json' failure on the
+   * same input: it halves the piece instead (oldest half first), recursing
+   * down to `SPLIT_FLOOR` messages; a piece that size or smaller that still
+   * fails that way is SKIPPED (counted in `st.skippedMessages`) so a single
+   * poisonous piece can never stall or abort the whole warm-up. Every other
+   * failure reason keeps the existing retry-once + 3-consecutive-cycles
+   * abort behaviour, unchanged.
+   *
+   * @returns {Promise<{ consecutiveFailures: number, stop: boolean }>}
+   *   `stop: true` means the budget ran out or the run aborted — the caller
+   *   must not advance `batchesDone` and must stop processing this channel.
+   */
+  async function analyzePiece(guildId, channelId, batchIndex, cfg, st, piece, consecutiveFailures) {
+    for (;;) {
+      const estimate = estimateBatch(guildId, piece, hot, memory);
+      if (remainingBudget(st, cfg.maxTokens) < estimate) {
+        st.done = true;
+        st.finishedAt = now();
+        persist();
+        log.info('warmup: budget spent, stopping', { tokensUsed: st.tokensUsed, maxTokens: cfg.maxTokens });
+        return { consecutiveFailures, stop: true };
+      }
+
+      // Every attempt that reached the provider is charged against the
+      // budget as soon as it comes back, first try or retry, successful or
+      // not — a failure after a completion was received is still billed.
+      let outcome = await memory.analyze(guildId, piece, { countAgainstDailyCap: false });
+      chargeAttempt(st, outcome);
+      persist();
+
+      // A 'truncated'/'bad-json' failure is never retried on the same
+      // input — see isUnrecoverableSize. Every other reason keeps the
+      // original retry-once behaviour below.
+      if (!outcome.ok && !isUnrecoverableSize(outcome.reason) && remainingBudget(st, cfg.maxTokens) >= estimate) {
+        await sleep(RETRY_DELAY_MS);
+        outcome = await memory.analyze(guildId, piece, { countAgainstDailyCap: false });
+        chargeAttempt(st, outcome);
+        persist();
+      }
+
+      if (outcome.ok) {
+        // Bookkeeping (touchUser/touchChannel) happens only once a piece is
+        // actually applied — computed the same way `observe()` does it, via
+        // the shared helper, so a resume never re-touches an already-counted
+        // message and a mid-cycle retry never double-counts one either.
+        for (const message of piece) touchMemory(store, guildId, message);
+        return { consecutiveFailures: 0, stop: false };
+      }
+
+      if (isUnrecoverableSize(outcome.reason)) {
+        if (piece.length > SPLIT_FLOOR) {
+          const mid = Math.ceil(piece.length / 2);
+          log.warn('warmup: batch failed, splitting', {
+            guildId,
+            channel: channelId,
+            batchIndex,
+            messages: piece.length,
+            reason: outcome.reason,
+            detail: outcome.detail,
+          });
+          const first = await analyzePiece(guildId, channelId, batchIndex, cfg, st, piece.slice(0, mid), consecutiveFailures);
+          if (first.stop) return first;
+          return analyzePiece(guildId, channelId, batchIndex, cfg, st, piece.slice(mid), first.consecutiveFailures);
+        }
+
+        st.skippedMessages = (st.skippedMessages ?? 0) + piece.length;
+        persist();
+        log.warn('warmup: batch failed at the floor, skipping', {
+          guildId,
+          channel: channelId,
+          batchIndex,
+          messages: piece.length,
+          reason: outcome.reason,
+          detail: outcome.detail,
+        });
+        return { consecutiveFailures, stop: false };
+      }
+
+      consecutiveFailures += 1;
+      log.warn('warmup: batch failed, giving up on this attempt', {
+        guildId,
+        channel: channelId,
+        batchIndex,
+        messages: piece.length,
+        reason: outcome.reason,
+        detail: outcome.detail,
+        consecutiveFailures,
+      });
+      if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+        st.aborted = true;
+        persist();
+        log.error('warmup: aborting after repeated failures', {
+          guildId,
+          tokensUsed: st.tokensUsed,
+          requests: st.requests,
+        });
+        return { consecutiveFailures, stop: true };
+      }
+      // Retry the same piece — unless the billed failure(s) above already
+      // ate the budget it needs, in which case the top of the loop stops the
+      // run instead of looping on an attempt it cannot afford.
+    }
+  }
+
+  function countChannelsDone(st) {
+    return Object.values(st.channels).filter((c) => c.done).length;
+  }
+
+  async function runChannel(guildId, cfg, channel, st, consecutiveFailures, channelsTotal) {
     const channelState = (st.channels[channel.id] ??= { anchorId: null, messages: 0, batchesDone: 0, done: false });
     if (channelState.done) return consecutiveFailures;
+
+    function finishChannel() {
+      channelState.done = true;
+      persist();
+      log.info('warmup: channel done', {
+        channel: channel.id,
+        channelsDone: countChannelsDone(st),
+        channelsTotal,
+      });
+    }
 
     if (!channelState.anchorId) {
       channelState.anchorId = channel.lastMessageId ?? null;
       persist();
     }
     if (!channelState.anchorId) {
-      channelState.done = true;
-      persist();
+      finishChannel();
       return consecutiveFailures;
     }
 
@@ -179,75 +310,33 @@ export function createWarmup({ hot, store, client, memory, getGuildId, now = Dat
 
     const batches = planBatches(window, cfg.batchMessages);
     if (batches.length === 0) {
-      channelState.done = true;
-      persist();
+      finishChannel();
       return consecutiveFailures;
     }
 
-    for (let i = channelState.batchesDone; i < batches.length; ) {
+    for (let i = channelState.batchesDone; i < batches.length; i += 1) {
       const batch = batches[i];
-      const estimate = estimateBatch(guildId, batch, hot, memory);
-      if (remainingBudget(st, cfg.maxTokens) < estimate) {
-        st.done = true;
-        st.finishedAt = now();
-        persist();
-        log.info('warmup: budget spent, stopping', { tokensUsed: st.tokensUsed, maxTokens: cfg.maxTokens });
-        return consecutiveFailures;
-      }
+      const result = await analyzePiece(guildId, channel.id, i, cfg, st, batch, consecutiveFailures);
+      consecutiveFailures = result.consecutiveFailures;
+      if (result.stop) return consecutiveFailures;
 
-      // Every attempt that reached the provider is charged against the
-      // budget as soon as it comes back, first try or retry, successful or
-      // not — a failure after a completion was received is still billed.
-      let outcome = await memory.analyze(guildId, batch, { countAgainstDailyCap: false });
-      chargeAttempt(st, outcome);
-      persist();
-
-      if (!outcome.ok && remainingBudget(st, cfg.maxTokens) >= estimate) {
-        await sleep(RETRY_DELAY_MS);
-        outcome = await memory.analyze(guildId, batch, { countAgainstDailyCap: false });
-        chargeAttempt(st, outcome);
-        persist();
-      }
-
-      if (!outcome.ok) {
-        consecutiveFailures += 1;
-        log.warn('warmup: batch failed, giving up on this attempt', {
-          guildId,
-          channel: channel.id,
-          batchIndex: i,
-          consecutiveFailures,
-        });
-        if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
-          st.aborted = true;
-          persist();
-          log.error('warmup: aborting after repeated failures', {
-            guildId,
-            tokensUsed: st.tokensUsed,
-            requests: st.requests,
-          });
-          return consecutiveFailures;
-        }
-        // Retry the same batch — unless the billed failure(s) above already
-        // ate the budget this batch needs, in which case the top of the loop
-        // stops the run instead of looping on an attempt it cannot afford.
-        continue;
-      }
-
-      // Bookkeeping (touchUser/touchChannel) happens only once a batch is
-      // actually applied — computed the same way `observe()` does it, via
-      // the shared helper, so a resume never re-touches an already-counted
-      // message and a mid-cycle retry never double-counts one either.
-      for (const message of batch) touchMemory(store, guildId, message);
-
-      consecutiveFailures = 0;
+      // The batch's index-based progress advances only once every piece of
+      // it (however it was split) has been analyzed or skipped.
       channelState.batchesDone = i + 1;
       channelState.messages += batch.length;
       persist();
-      i += 1;
+      log.info('warmup: batch done', {
+        channel: channel.id,
+        batchIndex: i,
+        batches: batches.length,
+        messages: batch.length,
+        tokensUsed: st.tokensUsed,
+        maxTokens: cfg.maxTokens,
+        requests: st.requests,
+      });
     }
 
-    channelState.done = true;
-    persist();
+    finishChannel();
     return consecutiveFailures;
   }
 
@@ -274,7 +363,7 @@ export function createWarmup({ hot, store, client, memory, getGuildId, now = Dat
     let consecutiveFailures = 0;
     for (const channel of ordered) {
       if (st.done || st.aborted) break;
-      consecutiveFailures = await runChannel(guildId, cfg, channel, st, consecutiveFailures);
+      consecutiveFailures = await runChannel(guildId, cfg, channel, st, consecutiveFailures, ordered.length);
       if (st.aborted) break;
     }
 
@@ -329,6 +418,7 @@ export function createWarmup({ hot, store, client, memory, getGuildId, now = Dat
       channelsDone,
       channelsTotal,
       messagesAnalyzed: messages,
+      skippedMessages: st.skippedMessages ?? 0,
     };
   }
 

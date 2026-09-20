@@ -19,6 +19,36 @@ function snowflake(ts) {
   return SnowflakeUtil.generate({ timestamp: ts }).toString();
 }
 
+/** Runs `fn`, capturing every `process.stdout.write` call (the log module's only sink) and
+ * restoring the original afterwards even if `fn` throws. Returns the parsed JSON log entries
+ * alongside `fn`'s resolved value; non-JSON stdout noise is silently skipped. */
+async function withCapturedLogs(fn) {
+  const original = process.stdout.write.bind(process.stdout);
+  const chunks = [];
+  process.stdout.write = (chunk) => {
+    chunks.push(String(chunk));
+    return true;
+  };
+  let result;
+  try {
+    result = await fn();
+  } finally {
+    process.stdout.write = original;
+  }
+  const logs = [];
+  for (const chunk of chunks) {
+    for (const line of chunk.split('\n')) {
+      if (!line.trim()) continue;
+      try {
+        logs.push(JSON.parse(line));
+      } catch {
+        // not one of our JSON log lines -- ignore
+      }
+    }
+  }
+  return { result, logs };
+}
+
 // ---------------------------------------------------------------------------
 // Pure helpers
 // ---------------------------------------------------------------------------
@@ -494,6 +524,134 @@ test('run: three consecutive failed batches abort the run; isBlocking() drops, r
 });
 
 // ---------------------------------------------------------------------------
+// Split on a 'truncated'/'bad-json' failure, instead of retrying blindly
+// ---------------------------------------------------------------------------
+
+test('run: splits a batch that fails "truncated", oldest half first, and succeeds on both halves', async () => {
+  const dir = tempDir();
+  try {
+    const store = createStore({ dataDir: dir });
+    const now = Date.now();
+    const history = makeHistory({ count: 40, startTs: now - 60_000, spacingMs: 1000, authorId: 'u1' });
+    const channel = fakeChannel('c1', history);
+    const guild = fakeGuild('g1', [channel]);
+    const client = fakeClient(guild);
+    const hot = fakeHot({ warmup: { batchMessages: 40 } });
+
+    let n = 0;
+    const memory = fakeMemory(() => {
+      n += 1;
+      if (n === 1) {
+        return { ok: false, usage: { prompt_tokens: 500, completion_tokens: 100 }, estimated: 600, result: null, reason: 'truncated', detail: 'cut mid-object' };
+      }
+      return { ok: true, usage: { prompt_tokens: 50, completion_tokens: 20 }, estimated: 70, result: {} };
+    });
+    const sleep = fakeSleep();
+
+    const warmup = createWarmup({ hot, store, client, memory, getGuildId: () => 'g1', sleep });
+    const { result, logs } = await withCapturedLogs(() => warmup.run());
+
+    assert.equal(memory.calls.length, 3, 'the whole batch, then its two halves');
+    assert.deepEqual(memory.calls[0].batch.map((m) => m.content), Array.from({ length: 40 }, (_, i) => `msg ${i}`));
+    assert.deepEqual(memory.calls[1].batch.map((m) => m.content), Array.from({ length: 20 }, (_, i) => `msg ${i}`), 'oldest half first');
+    assert.deepEqual(memory.calls[2].batch.map((m) => m.content), Array.from({ length: 20 }, (_, i) => `msg ${20 + i}`));
+    for (const call of memory.calls) assert.equal(call.opts.countAgainstDailyCap, false);
+    assert.equal(sleep.calls.length, 0, 'a truncated failure is never retried on the same input, only split');
+
+    assert.equal(store.getUser('g1', 'u1').messageCount, 40, 'bookkeeping happens once per message, not once per attempt');
+    assert.equal(store.state.data.warmup.channels.c1.batchesDone, 1, 'the index advances once, after every piece is done');
+    assert.equal(store.state.data.warmup.requests, 3, 'every attempt, including the failed whole-batch one, is charged');
+    assert.equal(store.state.data.warmup.tokensUsed, 600 + 70 + 70);
+    assert.equal(store.state.data.warmup.skippedMessages, 0);
+    assert.equal(result.done, true);
+    assert.equal(result.aborted, false);
+
+    const splitLog = logs.find((l) => l.msg === 'warmup: batch failed, splitting');
+    assert.ok(splitLog);
+    assert.equal(splitLog.reason, 'truncated');
+    assert.equal(splitLog.messages, 40);
+    const dump = JSON.stringify(logs);
+    for (let i = 0; i < 40; i += 1) assert.ok(!dump.includes(`"msg ${i}"`), 'no message contents in any log line');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('run: recurses down to the floor, then skips a piece that still fails, and the run continues', async () => {
+  const dir = tempDir();
+  try {
+    const store = createStore({ dataDir: dir });
+    const now = Date.now();
+    const history = makeHistory({ count: 42, startTs: now - 60_000, spacingMs: 1000, authorId: 'u1' });
+    const channel = fakeChannel('c1', history);
+    const guild = fakeGuild('g1', [channel]);
+    const client = fakeClient(guild);
+    const hot = fakeHot({ warmup: { batchMessages: 21 } });
+
+    let n = 0;
+    const memory = fakeMemory(() => {
+      n += 1;
+      if (n === 1) return { ok: false, usage: { prompt_tokens: 10, completion_tokens: 10 }, estimated: 20, result: null, reason: 'truncated' };
+      if (n === 2) return { ok: false, usage: { prompt_tokens: 10, completion_tokens: 10 }, estimated: 20, result: null, reason: 'bad-json' };
+      return { ok: true, usage: { prompt_tokens: 10, completion_tokens: 10 }, estimated: 20, result: {} };
+    });
+    const sleep = fakeSleep();
+
+    const warmup = createWarmup({ hot, store, client, memory, getGuildId: () => 'g1', sleep });
+    const { result, logs } = await withCapturedLogs(() => warmup.run());
+
+    // Batch 1 (21 msgs) fails truncated -> splits into 11 + 10 (both at/under
+    // the floor of 20). The first half (11) fails bad-json at the floor and
+    // is skipped; the second half (10) succeeds. Batch 2 (21 msgs) then
+    // succeeds outright: the run is not stalled or aborted by the skip.
+    assert.equal(memory.calls.length, 4);
+    assert.equal(memory.calls[0].batch.length, 21);
+    assert.equal(memory.calls[1].batch.length, 11);
+    assert.equal(memory.calls[2].batch.length, 10);
+    assert.equal(memory.calls[3].batch.length, 21);
+    assert.equal(sleep.calls.length, 0);
+
+    assert.equal(store.state.data.warmup.skippedMessages, 11);
+    assert.equal(store.getUser('g1', 'u1').messageCount, 31, '10 (second half) + 21 (batch 2), the skipped 11 are not counted');
+    assert.equal(store.state.data.warmup.channels.c1.batchesDone, 2, 'both top-level batches finished (one via split+skip)');
+    assert.equal(result.aborted, false);
+    assert.equal(result.done, true);
+
+    const skipLog = logs.find((l) => l.msg === 'warmup: batch failed at the floor, skipping');
+    assert.ok(skipLog);
+    assert.equal(skipLog.reason, 'bad-json');
+    assert.equal(skipLog.messages, 11);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('run: an "llm-error" failure keeps the retry-once + abort-after-three behaviour, never split', async () => {
+  const dir = tempDir();
+  try {
+    const store = createStore({ dataDir: dir });
+    const now = Date.now();
+    const history = makeHistory({ count: 2, startTs: now - 60_000, spacingMs: 1000, authorId: 'u1' });
+    const channel = fakeChannel('c1', history);
+    const guild = fakeGuild('g1', [channel]);
+    const client = fakeClient(guild);
+    const hot = fakeHot({ warmup: { batchMessages: 10 } });
+    const memory = fakeMemory(() => ({ ok: false, usage: null, estimated: 0, result: null, reason: 'llm-error', detail: 'network blip' }));
+    const sleep = fakeSleep();
+
+    const warmup = createWarmup({ hot, store, client, memory, getGuildId: () => 'g1', sleep });
+    const result = await warmup.run();
+
+    assert.equal(result.aborted, true);
+    assert.equal(memory.calls.length, 6, '3 cycles * (try + retry), same as an undefined reason');
+    assert.equal(sleep.calls.length, 3);
+    assert.equal(store.state.data.warmup.skippedMessages, 0);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
 // Resume after a restart
 // ---------------------------------------------------------------------------
 
@@ -540,6 +698,49 @@ test('run: resume after a restart skips finished batches and channels, no double
     assert.equal(store.getChannel('g1', 'chanA').messageCount, 4);
     assert.equal(store.getUser('g1', 'u2').messageCount, 4);
     assert.equal(store.getChannel('g1', 'chanB').messageCount, 4);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('run: resume after a restart in the middle of a split batch re-does only that batch', async () => {
+  const dir = tempDir();
+  try {
+    const store = createStore({ dataDir: dir });
+    const now = Date.now();
+    const history = makeHistory({ count: 40, startTs: now - 60_000, spacingMs: 1000, authorId: 'u1' });
+    const channel = fakeChannel('c1', history);
+    const guild = fakeGuild('g1', [channel]);
+    const client = fakeClient(guild);
+    const hot = fakeHot({ warmup: { batchMessages: 40 } });
+
+    // The whole 40-message batch fails 'truncated' and splits in half. The
+    // first half (20) succeeds; the second half (20) fails with a plain
+    // 'llm-error' on every attempt, aborting the run after 3 cycles — the
+    // top-level batch never finishes, so batchesDone stays at 0.
+    let n = 0;
+    const memory1 = fakeMemory(() => {
+      n += 1;
+      if (n === 1) return { ok: false, usage: { prompt_tokens: 10, completion_tokens: 5 }, estimated: 15, result: null, reason: 'truncated' };
+      if (n === 2) return { ok: true, usage: { prompt_tokens: 10, completion_tokens: 5 }, estimated: 15, result: {} };
+      return { ok: false, usage: null, estimated: 0, result: null, reason: 'llm-error' };
+    });
+
+    const warmup1 = createWarmup({ hot, store, client, memory: memory1, getGuildId: () => 'g1', sleep: fakeSleep() });
+    const result1 = await warmup1.run();
+
+    assert.equal(result1.aborted, true);
+    assert.equal(store.state.data.warmup.channels.c1.batchesDone, 0, 'the whole top-level batch is still unfinished');
+
+    // Simulate a process restart: a brand-new factory over the same store/dir.
+    const memory2 = fakeMemory(alwaysOk());
+    const warmup2 = createWarmup({ hot, store, client, memory: memory2, getGuildId: () => 'g1', sleep: fakeSleep() });
+    const result2 = await warmup2.run();
+
+    assert.equal(result2.done, true);
+    assert.equal(memory2.calls.length, 1, 'the whole 40-message batch is re-analyzed in one piece, resume is index-based');
+    assert.equal(memory2.calls[0].batch.length, 40);
+    assert.equal(store.state.data.warmup.channels.c1.batchesDone, 1);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -608,6 +809,68 @@ test('run: maxAgeDays drops messages older than the cutoff', async () => {
     assert.equal(memory.calls.length, 1);
     assert.equal(memory.calls[0].batch.length, 3, 'only the 3 messages within maxAgeDays survive');
     assert.equal(store.getUser('g1', 'u1').messageCount, 3);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Progress logs
+// ---------------------------------------------------------------------------
+
+test('run: emits "warmup: batch done" and "warmup: channel done" with counts only, no message text', async () => {
+  const dir = tempDir();
+  try {
+    const store = createStore({ dataDir: dir });
+    const now = Date.now();
+    const history = makeHistory({ count: 4, startTs: now - 60_000, spacingMs: 1000, authorId: 'u1' });
+    const channel = fakeChannel('c1', history);
+    const guild = fakeGuild('g1', [channel]);
+    const client = fakeClient(guild);
+    const hot = fakeHot({ warmup: { batchMessages: 10 } });
+    const memory = fakeMemory(alwaysOk());
+
+    const warmup = createWarmup({ hot, store, client, memory, getGuildId: () => 'g1', sleep: fakeSleep() });
+    const { logs } = await withCapturedLogs(() => warmup.run());
+
+    const batchDone = logs.find((l) => l.msg === 'warmup: batch done');
+    assert.ok(batchDone);
+    assert.equal(batchDone.channel, 'c1');
+    assert.equal(batchDone.batchIndex, 0);
+    assert.equal(batchDone.batches, 1);
+    assert.equal(batchDone.messages, 4);
+    assert.equal(typeof batchDone.tokensUsed, 'number');
+    assert.equal(typeof batchDone.maxTokens, 'number');
+    assert.equal(typeof batchDone.requests, 'number');
+
+    const channelDone = logs.find((l) => l.msg === 'warmup: channel done');
+    assert.ok(channelDone);
+    assert.equal(channelDone.channel, 'c1');
+    assert.equal(channelDone.channelsDone, 1);
+    assert.equal(channelDone.channelsTotal, 1);
+
+    const dump = JSON.stringify(logs);
+    for (let i = 0; i < 4; i += 1) assert.ok(!dump.includes(`"msg ${i}"`), 'no message contents in any log line');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// status()
+// ---------------------------------------------------------------------------
+
+test('status: reports skippedMessages, 0 by default', () => {
+  const dir = tempDir();
+  try {
+    const store = createStore({ dataDir: dir });
+    const hot = fakeHot();
+    const warmup = createWarmup({ hot, store, client: fakeClient(fakeGuild('g1', [])), memory: {}, getGuildId: () => 'g1' });
+
+    assert.equal(warmup.status().skippedMessages, 0);
+
+    store.state.data.warmup = { done: false, aborted: false, channels: {}, tokensUsed: 0, requests: 0, skippedMessages: 7 };
+    assert.equal(warmup.status().skippedMessages, 7);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

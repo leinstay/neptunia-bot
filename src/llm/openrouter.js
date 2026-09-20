@@ -48,7 +48,11 @@ export function createLlm({ apiKey, getConfig, calibrator, state, fetchImpl = fe
   }
 
   /**
-   * Send one chat completion. Returns `{ text, usage, estimated }`.
+   * Send one chat completion. Returns `{ text, usage, estimated, finishReason }`.
+   * `finishReason` is the provider's `choices[0].finish_reason` verbatim
+   * (e.g. `'stop'`, `'length'`), or `undefined` when the provider omitted it —
+   * callers use it to tell a cut-off completion (`'length'`) from a genuinely
+   * bad answer.
    * `options.model` / `options.maxOutputTokens` override the config defaults.
    * `options.countAgainstDailyCap` (default true) — see the header comment
    * for the one deliberate exception.
@@ -102,11 +106,12 @@ export function createLlm({ apiKey, getConfig, calibrator, state, fetchImpl = fe
         if (json.error) throw new Error(`OpenRouter error: ${JSON.stringify(json.error).slice(0, 500)}`);
         const text = json.choices?.[0]?.message?.content ?? '';
         const usage = json.usage ?? {};
+        const finishReason = json.choices?.[0]?.finish_reason ?? undefined;
         if (usage.prompt_tokens) calibrator.observe(raw, usage.prompt_tokens);
         if (usage.prompt_tokens > cfg.maxRequestTokens) {
           log.warn('llm: provider counted more prompt tokens than the cap', { usage, estimated });
         }
-        return { text: typeof text === 'string' ? text : '', usage, estimated };
+        return { text: typeof text === 'string' ? text : '', usage, estimated, finishReason };
       } catch (err) {
         if (err.statusCode && !RETRY_STATUS.has(err.statusCode)) throw err;
         lastError = err;
