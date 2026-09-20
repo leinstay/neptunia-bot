@@ -10,7 +10,7 @@ The persona responds to mentions, replies and name triggers, sometimes ignoring 
 
 ## Quick start
 
-Create a Discord application at [discord.com/developers](https://discord.com/developers/applications). Enable the **Message Content** privileged intent on the Bot page. Invite the bot with permissions to read message history, send messages, and add reactions.
+Create a Discord application at [discord.com/developers](https://discord.com/developers/applications). Enable the **Message Content** privileged intent on the Bot page. The invite URL must carry both scopes -- `scope=bot%20applications.commands` -- with `permissions=68672` (view channels, send messages, read history, add reactions). If slash commands do not appear after the bot joins, the log says why; re-opening the invite URL and walking through it again fixes registration without removing the bot.
 
 Get an API key from [OpenRouter](https://openrouter.ai/keys) (or any compatible endpoint).
 
@@ -51,7 +51,7 @@ Both are hot-reloaded.
 |---|---|---|
 | `system-prompt.md` | yes | How to pass for a human chat member. Character-agnostic |
 | `character-card.md` | yes | The personality: who they are, how they talk, what they care about |
-| `rules.md` | no | Owner's live corrections, appended by `!nep rule` |
+| `rules.md` | no | Owner's live corrections, appended by `/nep rule add` |
 | `format.md` | yes | Output protocol -- tags the model uses to act |
 | `reply.md` | yes | Task: someone addressed the persona |
 | `interject.md` | yes | Task: cut into a live conversation |
@@ -89,7 +89,7 @@ The system prompt handles sounding human, so the card is purely personality. Giv
 | `multiMessage` | `true` | Allow 2--3 messages in a row |
 | `vision` | `true` | Process attached images |
 | `typingSimulation` | `true` | Simulate typing speed |
-| `adminCommands` | `true` | Owner commands via DM or channel |
+| `adminCommands` | `true` | Owner slash commands; `false` unregisters them |
 
 ### `bot`
 
@@ -97,7 +97,7 @@ The system prompt handles sounding human, so the card is purely personality. Giv
 |---|---|---|
 | `timezone` | `"UTC"` | Timezone for model timestamps |
 | `owners` | `[]` | User IDs for owner commands |
-| `commandPrefix` | `"!nep"` | Owner command prefix |
+| `commandName` | `"nep"` | Slash command name (lowercase `a-z 0-9 _ -`, up to 32 chars; re-registered on change) |
 | `nameTriggers` | `[]` | Extra trigger strings besides @mention |
 | `guildId` | `""` | Server to lock to; auto-detected if in exactly one |
 | `dryRunChannelId` | `""` | Channel for dry-run mirror (see [Dry run](#dry-run)) |
@@ -212,7 +212,7 @@ With `warmup.enabled: true`, the bot reads channel history before speaking. It f
 
 The budget `warmup.maxTokens` is counted from the provider's reported usage. Warm-up is exempt from `llm.maxRequestsPerDay` but the per-request cap applies. Progress persists across restarts. A batch whose analysis is truncated at `memory.maxOutputTokens` is split in half and the halves analyzed separately; splitting recurses down to 20 messages, then the piece is skipped and counted. Other failures log their reason; three in a row abort without leaving the bot mute. Progress is logged per batch (`warmup: batch done`) and per channel (`warmup: channel done`).
 
-`warmup stop` pauses after the batch in flight; `warmup run` resumes from the saved progress. Suggested flow for a first run: leave `warmup.enabled` off, plan the channels with the `warmup` commands, check `warmup plan`, then `warmup run`.
+`/nep warmup stop` pauses after the batch in flight; `/nep warmup run` resumes from the saved progress. Suggested flow for a first run: leave `warmup.enabled` off, plan the channels with `/nep warmup` commands, check `/nep warmup plan`, then `/nep warmup run`.
 
 **Cost note.** The warm-up budget is real money. Set `memory.model` to a cheaper model for the analyzer and warm-up.
 
@@ -233,39 +233,39 @@ Read order: the primary channel, then listed channels sorted by depth (ties brok
 
 ## Dry run
 
-With `features.dryRun: true` the bot runs the full pipeline -- warm-up, memory, triggers, LLM calls -- but never sends a message or reaction. Output goes to the log (`dry-run: would send` / `dry-run: would react`). Set `bot.dryRunChannelId` to a private channel for a readable mirror; messages in that channel are ignored by the bot.
+With `features.dryRun: true` the bot runs the full pipeline -- warm-up, memory, triggers, LLM calls -- but never sends a message or reaction. Output goes to the log (`dry-run: would send` / `dry-run: would react`). Set `bot.dryRunChannelId` to a private channel for a readable mirror; everything posted in that channel is ignored by the bot. Slash commands work in any channel, the mirror included, because they are not messages.
 
-First run on a new server: enable `features.dryRun`, plan the warm-up with `warmup` commands, watch the mirror or `journalctl -u neptunia-bot -f`, tune live, then `!nep set features.dryRun false`.
+First run on a new server: enable `features.dryRun`, plan the warm-up with `/nep warmup` commands, watch the mirror or `journalctl -u neptunia-bot -f`, tune live, then `/nep set features.dryRun false`.
 
 ## Owner commands
 
-Send in a DM or channel. Replies come by DM; in a channel, a checkmark or cross reaction confirms the result. Owner commands also work inside the dry-run mirror channel; everything else posted there is ignored.
+One Discord slash command, `/nep` (the name comes from `bot.commandName`). Guild commands, registered on start for the served server. Hidden from ordinary members (`default_member_permissions: 0`) and restricted to the ids in `bot.owners`. Every answer is ephemeral -- only the owner sees it, in whatever channel it was typed. Channels and users are picked from Discord's own pickers; `set`/`unset` autocomplete config paths. The bot does not read direct messages.
 
 | Command | What it does |
 |---|---|
-| `help` | Show the command list |
-| `rule <text>` | Append a rule to `prompts.local/rules.md` |
-| `rules` | List current rules, numbered |
-| `unrule <n>` | Remove rule #n |
-| `set <dotted.path> <json>` | Override a config value (writes to `config.local.json`) |
-| `unset <dotted.path>` | Remove a config override |
-| `reload` | Force-reload config and prompts |
-| `status` | Model, calibration, daily quota, per-guild stats |
-| `poke [interject\|initiate] [channel]` | Force a spontaneous action |
-| `memory <@user\|id>` | Show a stored profile |
-| `affinity <@user\|id> [score] [reason]` | Show or set attitude (-100..100) |
-| `forget <@user\|id>` | Delete a stored profile |
-| `warmup` | Show warm-up status |
-| `warmup plan` | Show the ordered read plan |
-| `warmup channel <#chan\|id> <depth\|default>` | Set a channel's read depth |
-| `warmup primary <#chan\|id\|none>` | Set the channel read first |
-| `warmup only <on\|off>` | Read only channels with a set depth |
-| `warmup depth <n>` | Default read depth (1..1000000) |
-| `warmup budget <tokens>` | Warm-up token budget (`500k` / `10m` accepted) |
-| `warmup output <tokens>` | Analyzer output limit (256..32000) |
-| `warmup run` | Start or resume the warm-up now |
-| `warmup stop` | Pause after the batch in flight |
-| `warmup reset` | Clear warm-up progress (refused while running) |
+| `/nep status` | Model, calibration, quotas and per-guild memory status |
+| `/nep reload` | Reload config and prompts now |
+| `/nep poke [mode] [channel]` | Force a spontaneous action |
+| `/nep set <path> <value>` | Override a config value (writes to `config.local.json`) |
+| `/nep unset <path>` | Remove a config override |
+| `/nep rule add <text>` | Append a rule to `prompts.local/rules.md` |
+| `/nep rule list` | List the rules, numbered |
+| `/nep rule remove <number>` | Remove a rule by number |
+| `/nep memory show <user>` | Show a stored profile |
+| `/nep memory forget <user>` | Delete a stored profile |
+| `/nep memory affinity <user> [score] [reason]` | Show or set attitude (-100..100) |
+| `/nep warmup status` | Warm-up status |
+| `/nep warmup plan` | The ordered read plan |
+| `/nep warmup run` | Start or resume the warm-up now |
+| `/nep warmup stop` | Pause after the batch in flight |
+| `/nep warmup reset` | Clear warm-up progress (refused while running) |
+| `/nep warmup primary [channel]` | Set the channel read first; omit to clear |
+| `/nep warmup channel <channel> <depth>` | Set a channel's read depth (0 skips it) |
+| `/nep warmup channel-default <channel>` | Remove a channel's depth override |
+| `/nep warmup only <enabled>` | Read only channels with a set depth |
+| `/nep warmup depth <messages>` | Default read depth (1..1000000) |
+| `/nep warmup budget <tokens>` | Warm-up token budget (`500k` / `10m` accepted) |
+| `/nep warmup output <tokens>` | Analyzer output limit (256..32000) |
 
 ## How a turn works
 
@@ -281,7 +281,7 @@ The memory analyzer runs as a separate LLM call when enough messages accumulate.
 
 Each turn is one LLM request; a memory update adds a second. Cost depends on the model and endpoint -- `llm.model` and `llm.baseUrl` accept any compatible values. The daily cap (`llm.maxRequestsPerDay`) prevents runaway spending.
 
-**Privacy.** `data/` holds per-member profiles, relationship scores, channel observations and server patterns. It stays on your machine, is gitignored, and is only sent to the LLM as context. The analyzer is instructed not to store sensitive details. `!nep forget <@user>` deletes a profile entirely.
+**Privacy.** `data/` holds per-member profiles, relationship scores, channel observations and server patterns. It stays on your machine, is gitignored, and is only sent to the LLM as context. The analyzer is instructed not to store sensitive details. `/nep memory forget` deletes a profile entirely.
 
 Tell your server members. They should know their messages are processed by an LLM and that the bot keeps notes.
 

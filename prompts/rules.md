@@ -1,4 +1,4 @@
-These are the owner's live corrections — they override both the system prompt and the character card. New rules are appended at the end, either manually or by the `!nep rule` command.
+These are the owner's live corrections — they override both the system prompt and the character card. New rules are appended at the end, either manually or by the `/nep rule add` command.
 
 ## Rules
 
