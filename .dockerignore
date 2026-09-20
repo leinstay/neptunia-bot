@@ -1,0 +1,13 @@
+.git
+node_modules
+data
+prompts.local
+config.local.json
+.env
+.env.*
+!.env.example
+.claude
+CLAUDE.md
+AGENTS.md
+tests
+*.log
