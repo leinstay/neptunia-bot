@@ -56,9 +56,75 @@ function pickOtherProfiles(store, guildId, history, exceptId, count) {
   return profiles;
 }
 
+/** Display name of the author of `messageId` in `history`, or null when the message is not there. */
+function authorNameFor(history, messageId) {
+  const message = history.find((m) => m.id === messageId);
+  return message?.authorName ?? null;
+}
+
 export function createTurnRunner({ hot, store, llm, calibrator, client, rng = Math.random }) {
   const busy = new Set();
   const lastPostAt = new Map(); // channelId -> ts of the persona's last message
+
+  /**
+   * Post one readable mirror of a would-be action into `dryRunChannelId`, when
+   * one is configured. Never throws: a fetch or send failure is logged and
+   * swallowed, so a misconfigured mirror channel never costs the persona (or
+   * the turn) anything. The channel is fetched fresh every time -- nothing is
+   * cached long-lived, so pointing the mirror elsewhere needs no restart.
+   */
+  async function mirrorDryRun(dryRunChannelId, header, body) {
+    if (!dryRunChannelId) return;
+    try {
+      const mirror = await client.channels.fetch(dryRunChannelId);
+      if (!mirror) return;
+      await mirror.send({ content: `${header}\n${body}`, allowedMentions: { parse: [] } });
+    } catch (err) {
+      log.warn('turn: dry-run mirror failed', { dryRunChannelId, error: err });
+    }
+  }
+
+  /**
+   * Dry-run stand-in for `act()`: does everything `act()` would have decided
+   * to do, but never touches the target channel -- no sendTyping, no send, no
+   * react, no artificial timing. Logs one line per would-be action and, when
+   * `bot.dryRunChannelId` is configured, mirrors it there in plain language.
+   */
+  async function dryAct(channel, parsed, idByIndex, history, mode) {
+    const channelName = channel.name ?? null;
+    const dryRunChannelId = hot.config.bot?.dryRunChannelId || '';
+
+    for (const reaction of parsed.reactions) {
+      const targetId = idByIndex.get(reaction.to);
+      if (!targetId) continue;
+      const authorName = authorNameFor(history, targetId) ?? '—';
+      // The ONE deliberate exception to "never log message contents": this is
+      // the persona's own output, not a user's, and only while dry-run is on.
+      log.info('dry-run: would react', { channel: channel.id, channelName, to: targetId, emoji: reaction.emoji });
+      await mirrorDryRun(
+        dryRunChannelId,
+        `[dry-run] #${channelName} · ${mode} · reply to ${authorName}`,
+        `reacts with ${reaction.emoji} to ${authorName}`,
+      );
+      lastPostAt.set(channel.id, Date.now());
+    }
+
+    for (const message of parsed.messages) {
+      const replyId = message.replyTo !== null ? idByIndex.get(message.replyTo) : null;
+      const authorName = replyId ? (authorNameFor(history, replyId) ?? '—') : '—';
+      // Same deliberate exception as above: the persona's own output, dry-run only.
+      const { text } = resolveMentions(message.text, history);
+      log.info('dry-run: would send', { channel: channel.id, channelName, mode, replyTo: replyId ?? null, text });
+      // The mirror shows @name as the model wrote it: resolving it to a real
+      // mention here would ping someone in a channel meant to be invisible to them.
+      await mirrorDryRun(
+        dryRunChannelId,
+        `[dry-run] #${channelName} · ${mode} · reply to ${authorName}`,
+        message.text,
+      );
+      lastPostAt.set(channel.id, Date.now());
+    }
+  }
 
   async function act(channel, parsed, idByIndex, history) {
     const cfg = hot.config.typing;
@@ -184,6 +250,14 @@ export function createTurnRunner({ hot, store, llm, calibrator, client, rng = Ma
       store.state.markDirty();
 
       if (parsed.skip || nothingToDo) return { outcome: 'skip', mode: finalMode };
+
+      // Read fresh right here, not from the `features` snapshot taken at the
+      // top of this turn: unlike the other switches this one defaults to OFF,
+      // and whether to actually post is the very last decision of a turn.
+      if (hot.config.features?.dryRun === true) {
+        await dryAct(channel, parsed, request.idByIndex, history, finalMode);
+        return { outcome: 'spoke', mode: finalMode, dryRun: true };
+      }
       await act(channel, parsed, request.idByIndex, history);
       return { outcome: 'spoke', mode: finalMode };
     } catch (err) {

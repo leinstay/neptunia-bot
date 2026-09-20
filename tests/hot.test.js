@@ -20,13 +20,13 @@ function makeRoot({ config = { bot: { timezone: 'UTC' } }, prompts = {} } = {}) 
 test('createHot: loads config and prompts from the given root at creation', () => {
   const dir = makeRoot({
     config: { bot: { timezone: 'Europe/Moscow' } },
-    prompts: { persona: 'Ты Непка.', rules: '## Правила\n- будь собой' },
+    prompts: { persona: 'Είσαι η Ζωή.', rules: '## Κανόνες\n- να είσαι ο εαυτός σου' },
   });
   const hot = createHot({ rootDir: dir });
   try {
     assert.deepEqual(hot.config, { bot: { timezone: 'Europe/Moscow' } });
-    assert.equal(hot.prompts.persona, 'Ты Непка.');
-    assert.ok(hot.prompts.rules.includes('## Правила'));
+    assert.equal(hot.prompts.persona, 'Είσαι η Ζωή.');
+    assert.ok(hot.prompts.rules.includes('## Κανόνες'));
   } finally {
     hot.close();
     fs.rmSync(dir, { recursive: true, force: true });

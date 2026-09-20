@@ -13,7 +13,7 @@ function baseConfig(overrides = {}) {
   return deepMerge(structuredClone(readConfig()), overrides);
 }
 
-function fakeGuild(id = 'g1', displayName = 'Нептуния') {
+function fakeGuild(id = 'g1', displayName = 'Ζωή') {
   return { id, members: { me: { displayName } } };
 }
 
@@ -213,13 +213,13 @@ test('events: a plain message is observed and handed to the spontaneous schedule
   const admin = fakeAdmin(() => false);
   const handler = makeHandler({ memory, spontaneous, turns, admin });
 
-  const message = fakeMessage({ cleanContent: 'просто сообщение без триггера' });
+  const message = fakeMessage({ cleanContent: 'ένα μήνυμα χωρίς πρόκληση' });
   await handler(message);
 
   assert.equal(memory.observeCalls.length, 1);
   assert.equal(spontaneous.onMessageCalls.length, 1);
   assert.equal(spontaneous.onMessageCalls[0][0], message.channel);
-  assert.equal(spontaneous.onMessageCalls[0][1].content, 'просто сообщение без триггера');
+  assert.equal(spontaneous.onMessageCalls[0][1].content, 'ένα μήνυμα χωρίς πρόκληση');
 });
 
 test('events: a mention with rng above ignoreChance runs a reply turn', async () => {
@@ -234,7 +234,7 @@ test('events: a mention with rng above ignoreChance runs a reply turn', async ()
   const handler = makeHandler({ turns, memory, rng: scripted([0.99]) });
 
   const message = fakeMessage({
-    cleanContent: 'привет',
+    cleanContent: 'γεια',
     mentions: { users: new Map([['self1', { id: 'self1' }]]) },
   });
   await handler(message);
@@ -246,7 +246,7 @@ test('events: a mention with rng above ignoreChance runs a reply turn', async ()
   assert.equal(seenArgs.channel, message.channel);
   assert.equal(seenArgs.mode, 'reply');
   assert.equal(seenArgs.triggerKind, 'mention');
-  assert.equal(seenArgs.trigger.content, 'привет');
+  assert.equal(seenArgs.trigger.content, 'γεια');
   assert.equal(memory.observeCalls.length, 1);
 });
 
@@ -257,7 +257,7 @@ test('events: a mention with rng below ignoreChance is observed but not answered
   const handler = makeHandler({ turns, memory, rng: scripted([0.0]) });
 
   const message = fakeMessage({
-    cleanContent: 'привет',
+    cleanContent: 'γεια',
     mentions: { users: new Map([['self1', { id: 'self1' }]]) },
   });
   await handler(message);
@@ -285,7 +285,7 @@ test('events: a reply to its own message is detected as kind "reply"', async () 
     guild,
     channel,
     channelId: 'c1',
-    cleanContent: 'ты права',
+    cleanContent: 'έχεις δίκιο',
     reference: { messageId: 'm100' },
   });
   await handler(message);
@@ -297,17 +297,17 @@ test('events: a reply to its own message is detected as kind "reply"', async () 
 
 test('events: a name trigger respects config.mention.nameTriggerChance', async () => {
   let calls = 0;
-  const config = baseConfig({ bot: { nameTriggers: ['непка'] } });
+  const config = baseConfig({ bot: { nameTriggers: ['νεπτούνια'] } });
   const turnsRespond = fakeTurns({ runTurn: async () => { calls += 1; return { outcome: 'spoke' }; } });
   const handlerRespond = makeHandler({ config, turns: turnsRespond, rng: scripted([0.1]) });
-  const message1 = fakeMessage({ cleanContent: 'эй непка красотка' });
+  const message1 = fakeMessage({ cleanContent: 'γεια νεπτούνια όμορφη' });
   await handlerRespond(message1);
   await Promise.resolve();
   assert.equal(calls, 1, 'rng below nameTriggerChance should respond');
 
   const turnsIgnore = fakeTurns({ runTurn: async () => { calls += 1; return { outcome: 'spoke' }; } });
   const handlerIgnore = makeHandler({ config, turns: turnsIgnore, rng: scripted([0.99]) });
-  const message2 = fakeMessage({ cleanContent: 'эй непка красотка' });
+  const message2 = fakeMessage({ cleanContent: 'γεια νεπτούνια όμορφη' });
   await handlerIgnore(message2);
   await Promise.resolve();
   assert.equal(calls, 1, 'rng above nameTriggerChance should not respond');
@@ -364,7 +364,7 @@ test('events: a throwing dependency does not escape the handler', async () => {
   });
   const handler = makeHandler({ memory });
 
-  const message = fakeMessage({ cleanContent: 'что угодно' });
+  const message = fakeMessage({ cleanContent: 'οτιδήποτε' });
   await assert.doesNotReject(() => handler(message));
 });
 
@@ -380,7 +380,7 @@ test('features.mentions=false: a plain @mention is no longer a trigger', async (
   const handler = makeHandler({ config, turns, spontaneous, rng: scripted([0.99]) });
 
   const message = fakeMessage({
-    cleanContent: 'привет',
+    cleanContent: 'γεια',
     mentions: { users: new Map([['self1', { id: 'self1' }]]) },
   });
   await handler(message);
@@ -396,7 +396,7 @@ test('features.mentions=true (default): a plain @mention still triggers', async 
   const handler = makeHandler({ turns, rng: scripted([0.99]) });
 
   const message = fakeMessage({
-    cleanContent: 'привет',
+    cleanContent: 'γεια',
     mentions: { users: new Map([['self1', { id: 'self1' }]]) },
   });
   await handler(message);
@@ -416,7 +416,7 @@ test('features.replies=false: a reply to its own message is no longer a trigger 
   const config = baseConfig({ features: { replies: false } });
   const handler = makeHandler({ config, turns, spontaneous, rng: scripted([0.99]) });
 
-  const message = fakeMessage({ guild, channel, channelId: 'c1', cleanContent: 'ты права', reference: { messageId: 'm100' } });
+  const message = fakeMessage({ guild, channel, channelId: 'c1', cleanContent: 'έχεις δίκιο', reference: { messageId: 'm100' } });
   await handler(message);
   await Promise.resolve();
 
@@ -443,7 +443,7 @@ test('features.replies=false: a reply that also pings still counts as a mention'
     guild,
     channel,
     channelId: 'c1',
-    cleanContent: 'ты права',
+    cleanContent: 'έχεις δίκιο',
     reference: { messageId: 'm100' },
     mentions: { users: new Map([['self1', { id: 'self1' }]]) },
   });
@@ -458,10 +458,10 @@ test('features.nameTriggers=false: a name is never a trigger, even when configur
   let called = false;
   const spontaneous = fakeSpontaneous();
   const turns = fakeTurns({ runTurn: async () => { called = true; return { outcome: 'spoke' }; } });
-  const config = baseConfig({ bot: { nameTriggers: ['непка'] }, features: { nameTriggers: false } });
+  const config = baseConfig({ bot: { nameTriggers: ['νεπτούνια'] }, features: { nameTriggers: false } });
   const handler = makeHandler({ config, turns, spontaneous, rng: scripted([0.1]) });
 
-  const message = fakeMessage({ cleanContent: 'эй непка красотка' });
+  const message = fakeMessage({ cleanContent: 'γεια νεπτούνια όμορφη' });
   await handler(message);
   await Promise.resolve();
 
@@ -501,7 +501,7 @@ test('features.memory=false: a regular message is never observed', async () => {
   const config = baseConfig({ features: { memory: false } });
   const handler = makeHandler({ config, memory, spontaneous });
 
-  const message = fakeMessage({ cleanContent: 'просто сообщение' });
+  const message = fakeMessage({ cleanContent: 'ένα απλό μήνυμα' });
   await handler(message);
 
   assert.equal(memory.observeCalls.length, 0);
@@ -529,7 +529,7 @@ test('a config with no "features" key at all behaves as if every switch were on'
   const handler = makeHandler({ config, turns, rng: scripted([0.99]) });
 
   const message = fakeMessage({
-    cleanContent: 'привет',
+    cleanContent: 'γεια',
     mentions: { users: new Map([['self1', { id: 'self1' }]]) },
   });
   await handler(message);
@@ -546,7 +546,7 @@ test('events: a triggering message is observed with direct: true', async () => {
   const handler = makeHandler({ memory, rng: scripted([0.99]) });
 
   const message = fakeMessage({
-    cleanContent: 'привет',
+    cleanContent: 'γεια',
     mentions: { users: new Map([['self1', { id: 'self1' }]]) },
   });
   await handler(message);
@@ -561,7 +561,7 @@ test('events: a non-triggering message is observed with direct: false', async ()
   const spontaneous = fakeSpontaneous();
   const handler = makeHandler({ memory, spontaneous });
 
-  const message = fakeMessage({ cleanContent: 'просто сообщение без триггера' });
+  const message = fakeMessage({ cleanContent: 'ένα μήνυμα χωρίς πρόκληση' });
   await handler(message);
 
   assert.equal(memory.observeCalls.length, 1);
@@ -580,7 +580,7 @@ test('events: affinityScore is read from the caller\'s stored profile and passed
   const handler = makeHandler({ turns, store, rng: scripted([0.99]) });
 
   const message = fakeMessage({
-    cleanContent: 'привет',
+    cleanContent: 'γεια',
     mentions: { users: new Map([['self1', { id: 'self1' }]]) },
   });
   await handler(message);
@@ -596,7 +596,7 @@ test('features.relationships=false: affinityScore is never looked up or passed',
   const handler = makeHandler({ config, store, rng: scripted([0.99]) });
 
   const message = fakeMessage({
-    cleanContent: 'привет',
+    cleanContent: 'γεια',
     mentions: { users: new Map([['self1', { id: 'self1' }]]) },
   });
   await handler(message);
@@ -614,7 +614,7 @@ test('events: while warming up a plain message is observed but no turn or eavesd
   const turns = fakeTurns();
   const handler = makeHandler({ memory, spontaneous, turns, isWarmingUp: () => true });
 
-  const message = fakeMessage({ cleanContent: 'просто сообщение' });
+  const message = fakeMessage({ cleanContent: 'ένα απλό μήνυμα' });
   await handler(message);
 
   assert.equal(memory.observeCalls.length, 1);
@@ -630,7 +630,7 @@ test('events: while warming up a mention never runs a turn, even though it would
   const handler = makeHandler({ turns, memory, spontaneous, isWarmingUp: () => true, rng: scripted([0.99]) });
 
   const message = fakeMessage({
-    cleanContent: 'привет',
+    cleanContent: 'γεια',
     mentions: { users: new Map([['self1', { id: 'self1' }]]) },
   });
   await handler(message);
@@ -660,7 +660,7 @@ test('events: isWarmingUp defaults to false when not provided', async () => {
   const handler = makeHandler({ turns, rng: scripted([0.99]) });
 
   const message = fakeMessage({
-    cleanContent: 'привет',
+    cleanContent: 'γεια',
     mentions: { users: new Map([['self1', { id: 'self1' }]]) },
   });
   await handler(message);
@@ -669,13 +669,66 @@ test('events: isWarmingUp defaults to false when not provided', async () => {
   assert.equal(called, true);
 });
 
+// ---------------------------------------------------------------------------
+// bot.dryRunChannelId: the dry-run mirror channel (src/behavior/turn.js) is
+// never conversation -- not even the persona's own mirrored messages there.
+
+test('events: the dry-run mirror channel is ignored entirely, before admin, memory or the scheduler', async () => {
+  const memory = fakeMemory();
+  const spontaneous = fakeSpontaneous();
+  const turns = fakeTurns();
+  const admin = fakeAdmin(() => true);
+  const config = baseConfig({ bot: { dryRunChannelId: 'mirror1' } });
+  const channel = fakeChannel('mirror1', fakeGuild());
+  const handler = makeHandler({ config, memory, spontaneous, turns, admin });
+
+  const message = fakeMessage({ channel, channelId: 'mirror1', cleanContent: '!nep status' });
+  await handler(message);
+
+  assert.equal(admin.handleCalls.length, 0);
+  assert.equal(memory.observeCalls.length, 0);
+  assert.equal(spontaneous.onMessageCalls.length, 0);
+  assert.equal(turns.notePostCalls.length, 0);
+});
+
+test('events: the persona\'s own messages mirrored into the dry-run channel are never observed', async () => {
+  const memory = fakeMemory();
+  const turns = fakeTurns();
+  const config = baseConfig({ bot: { dryRunChannelId: 'mirror1' } });
+  const channel = fakeChannel('mirror1', fakeGuild());
+  const handler = makeHandler({ config, memory, turns });
+
+  const message = fakeMessage({
+    channel,
+    channelId: 'mirror1',
+    author: { id: 'self1', bot: true, globalName: 'Bot', username: 'bot' },
+  });
+  await handler(message);
+
+  assert.equal(memory.observeCalls.length, 0);
+  assert.equal(turns.notePostCalls.length, 0);
+});
+
+test('events: an empty bot.dryRunChannelId (default) does not affect any channel', async () => {
+  const memory = fakeMemory();
+  const spontaneous = fakeSpontaneous();
+  const config = baseConfig({ bot: { dryRunChannelId: '' } });
+  const handler = makeHandler({ config, memory, spontaneous });
+
+  const message = fakeMessage({ cleanContent: 'just a plain message, no trigger' });
+  await handler(message);
+
+  assert.equal(memory.observeCalls.length, 1);
+  assert.equal(spontaneous.onMessageCalls.length, 1);
+});
+
 test('features.memory=false: affinityScore is never looked up even when relationships is on', async () => {
   const store = fakeStore({ u1: { affinity: { score: -100 } } });
   const config = baseConfig({ features: { memory: false } });
   const handler = makeHandler({ config, store, rng: scripted([0.99]) });
 
   const message = fakeMessage({
-    cleanContent: 'привет',
+    cleanContent: 'γεια',
     mentions: { users: new Map([['self1', { id: 'self1' }]]) },
   });
   await handler(message);

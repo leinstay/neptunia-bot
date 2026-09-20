@@ -152,22 +152,22 @@ test('renderChannel: activityLive/Slow/Dead select the right label for {activity
   assert.ok(renderChannel(c, labels, { activity: 'dead' }).includes(`activity: ${labels.server.activityDead}`));
 });
 
-test('renderChannel: works with a non-English (Cyrillic) labels object', () => {
-  const ruLabels = {
+test('renderChannel: works with a non-English (Greek) labels object', () => {
+  const grLabels = {
     server: {
-      currentMark: ' (ты тут)',
-      category: 'категория: {text}',
-      topic: 'тема: {text}',
-      purpose: 'назначение: {text}',
-      topics: 'о чём пишут: {text}',
-      tone: 'тон: {text}',
-      activity: 'активность: {activity}',
-      activityLive: 'живой',
-      activitySlow: 'вялый',
-      activityDead: 'мёртвый',
+      currentMark: ' (είσαι εδώ)',
+      category: 'κατηγορία: {text}',
+      topic: 'θέμα: {text}',
+      purpose: 'σκοπός: {text}',
+      topics: 'τι γράφουν: {text}',
+      tone: 'ύφος: {text}',
+      activity: 'δραστηριότητα: {activity}',
+      activityLive: 'ζωντανό',
+      activitySlow: 'αργό',
+      activityDead: 'νεκρό',
     },
   };
-  const c = channel({ name: 'общий', purpose: 'болталка' });
-  const text = renderChannel(c, ruLabels, { current: true, activity: 'live' });
-  assert.equal(text, '# общий (ты тут)\nназначение: болталка\nактивность: живой');
+  const c = channel({ name: 'γενικά', purpose: 'κουβέντα' });
+  const text = renderChannel(c, grLabels, { current: true, activity: 'live' });
+  assert.equal(text, '# γενικά (είσαι εδώ)\nσκοπός: κουβέντα\nδραστηριότητα: ζωντανό');
 });

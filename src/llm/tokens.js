@@ -1,4 +1,4 @@
-// Token estimation without a tokenizer dependency. Cyrillic costs far more
+// Token estimation without a tokenizer dependency. Non-Latin text (Cyrillic, Greek, CJK) costs far more
 // tokens per character than ASCII, so the two are weighed separately and both
 // weights are deliberately pessimistic. The estimate is then multiplied by a
 // calibration ratio learned from the real `usage.prompt_tokens` OpenRouter

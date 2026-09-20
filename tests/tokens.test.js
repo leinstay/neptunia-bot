@@ -3,10 +3,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { estimateTokens, estimateMessages, createCalibrator } from '../src/llm/tokens.js';
 
-test('estimateTokens: Cyrillic costs more tokens than the same length of ASCII', () => {
+test('estimateTokens: non-ASCII costs more tokens than the same length of ASCII', () => {
   const ascii = estimateTokens('a'.repeat(20));
-  const cyrillic = estimateTokens('я'.repeat(20));
-  assert.ok(cyrillic > ascii, `expected cyrillic (${cyrillic}) > ascii (${ascii})`);
+  const nonAscii = estimateTokens('α'.repeat(20));
+  assert.ok(nonAscii > ascii, `expected non-ASCII (${nonAscii}) > ascii (${ascii})`);
 });
 
 test('estimateTokens: empty input costs 0 tokens', () => {
@@ -15,9 +15,9 @@ test('estimateTokens: empty input costs 0 tokens', () => {
   assert.equal(estimateTokens(null), 0);
 });
 
-test('estimateTokens: mixed ASCII + Cyrillic charges each char at its own rate', () => {
-  // 7 ascii chars -> ceil(7/3.5) = 2; 4 cyrillic chars -> ceil(4/2) = 2; total 4.
-  assert.equal(estimateTokens('abcdefg' + 'привет'.slice(0, 4)), 4);
+test('estimateTokens: mixed ASCII + non-ASCII charges each char at its own rate', () => {
+  // 7 ascii chars -> ceil(7/3.5) = 2; 4 non-ASCII chars -> ceil(4/2) = 2; total 4.
+  assert.equal(estimateTokens('abcdefg' + 'γεια'.slice(0, 4)), 4);
 });
 
 test('estimateMessages: string content costs overhead + text tokens', () => {

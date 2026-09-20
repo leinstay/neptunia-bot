@@ -377,14 +377,14 @@ test('renderProfile: the band label is chosen from labels.affinity.bands, thresh
 });
 
 test('renderProfile: works with a non-English labels object for the attitude line', () => {
-  const ruLabels = {
+  const grLabels = {
     ...labels,
-    profile: { ...labels.profile, affinity: 'отношение: {score} ({band}) — {reason}' },
-    affinity: { bands: { ...labels.affinity.bands, warm: 'тепло' } },
+    profile: { ...labels.profile, affinity: 'στάση: {score} ({band}) — {reason}' },
+    affinity: { bands: { ...labels.affinity.bands, warm: 'ζεστή' } },
   };
-  const profile = { id: 'p1', names: ['Карл'], affinity: { score: 10, reason: 'помог', history: [] } };
-  const text = renderProfile(profile, ruLabels, { relationships: true });
-  assert.ok(text.includes('отношение: 10 (тепло) — помог'));
+  const profile = { id: 'p1', names: ['Κάρολος'], affinity: { score: 10, reason: 'βοήθησε', history: [] } };
+  const text = renderProfile(profile, grLabels, { relationships: true });
+  assert.ok(text.includes('στάση: 10 (ζεστή) — βοήθησε'));
 });
 
 test('renderProfile: a neutral score with no reason gets no attitude line', () => {
@@ -436,18 +436,18 @@ test('buildRequest: features.relationships=false hides the attitude line entirel
 });
 
 test('buildRequest: a non-English labels object drives the same blocks, proving nothing is language-bound', () => {
-  const ruLabels = {
+  const grLabels = {
     ...labels,
-    locale: 'ru-RU',
-    self: '{name} (ты)',
-    triggers: { mention: 'тегнул тебя', reply: 'ответил тебе', name: 'назвал по имени' },
+    locale: 'el-GR',
+    self: '{name} (εσύ)',
+    triggers: { mention: 'σε ετικέτησε', reply: 'σου απάντησε', name: 'σε φώναξε με τ\' όνομα' },
   };
   const trigger = makeMessage(1, NOW - MIN, { authorName: 'Alice' });
   const request = buildRequest(
-    baseInput({ prompts: fakePrompts({ labels: ruLabels }), history: [trigger], trigger, triggerKind: 'mention' }),
+    baseInput({ prompts: fakePrompts({ labels: grLabels }), history: [trigger], trigger, triggerKind: 'mention' }),
   );
   const user = request.messages[1].content;
-  assert.ok(user.includes('тегнул тебя'));
+  assert.ok(user.includes('σε ετικέτησε'));
   assert.ok(user.includes('<now>'));
   assert.ok(user.includes('<task>'));
 });

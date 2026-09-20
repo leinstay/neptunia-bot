@@ -370,7 +370,11 @@ export function createAdmin({ hot, store, client, spontaneous, calibrator, getGu
   function cmdStatus() {
     const cfg = hot.config;
     const data = store.state.data ?? {};
+    const dryRunOn = cfg?.features?.dryRun === true;
+    const dryRunChannelId = cfg?.bot?.dryRunChannelId || '';
+    const dryRunLine = dryRunOn ? `dry-run: ON → log${dryRunChannelId ? ` + #${dryRunChannelId}` : ''}` : 'dry-run: off';
     const lines = [
+      dryRunLine,
       `model: ${cfg?.llm?.model ?? '-'}`,
       `calibration ratio: ${calibrator ? calibrator.ratio.toFixed(3) : '-'}`,
       `llm requests today: ${data.llmCount ?? 0} / ${cfg?.llm?.maxRequestsPerDay ?? '-'} (day: ${data.llmDay ?? '-'})`,

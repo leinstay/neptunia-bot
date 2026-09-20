@@ -63,8 +63,8 @@ test('listRules: reads the bullets under an English ## heading', () => {
   assert.deepEqual(listRules(text), ['Rule one', 'Rule two']);
 });
 
-test('listRules: reads the bullets under a Cyrillic ## heading', () => {
-  const text = '# Rules file\n\nSome intro.\n\n## Правила\n\n- Rule one\n- Rule two\n';
+test('listRules: reads the bullets under a non-Latin ## heading', () => {
+  const text = '# Rules file\n\nSome intro.\n\n## Κανόνες\n\n- Rule one\n- Rule two\n';
   assert.deepEqual(listRules(text), ['Rule one', 'Rule two']);
 });
 
@@ -110,10 +110,10 @@ test('appendRule: normalizes trailing whitespace to exactly one final newline', 
   assert.ok(result.endsWith('\n') && !result.endsWith('\n\n'));
 });
 
-test('appendRule: keeps Cyrillic rule text intact and the file ends with the bullet list', () => {
-  const result = appendRule('## Правила\n\n- старое правило\n', 'никогда не говори по-английски');
-  assert.equal(result, '## Правила\n\n- старое правило\n- никогда не говори по-английски\n');
-  assert.deepEqual(listRules(result), ['старое правило', 'никогда не говори по-английски']);
+test('appendRule: keeps non-Latin rule text intact and the file ends with the bullet list', () => {
+  const result = appendRule('## Κανόνες\n\n- παλιός κανόνας\n', 'ποτέ μην μιλάς αγγλικά');
+  assert.equal(result, '## Κανόνες\n\n- παλιός κανόνας\n- ποτέ μην μιλάς αγγλικά\n');
+  assert.deepEqual(listRules(result), ['παλιός κανόνας', 'ποτέ μην μιλάς αγγλικά']);
 });
 
 test('appendRule: appends under the last of two ## headings', () => {
@@ -585,6 +585,47 @@ test('handle: status reports model, calibration ratio and the daily request coun
   assert.match(body, /1\.200/);
   assert.match(body, /5 \/ 300/);
   assert.match(body, /guild: The Server \(g1\)/);
+});
+
+test('handle: status reports dry-run off by default, as its first line', async () => {
+  const rootDir = makeRoot();
+  const hot = makeHot(rootDir);
+  const store = makeStore();
+  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 }, getGuildId: () => 'g1' });
+
+  const message = makeMessage({ content: '!nep status' });
+  await admin.handle(message);
+
+  // sendReply wraps a multi-line reply in a ``` code fence: the status text itself starts on line 2.
+  assert.equal(message.sent[0].split('\n')[1], 'dry-run: off');
+});
+
+test('handle: status reports dry-run ON, logging only, when no mirror channel is configured', async () => {
+  const rootDir = makeRoot();
+  const hot = makeHot(rootDir);
+  hot.config.features = { dryRun: true };
+  hot.config.bot.dryRunChannelId = '';
+  const store = makeStore();
+  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 }, getGuildId: () => 'g1' });
+
+  const message = makeMessage({ content: '!nep status' });
+  await admin.handle(message);
+
+  assert.equal(message.sent[0].split('\n')[1], 'dry-run: ON → log');
+});
+
+test('handle: status reports dry-run ON with the mirror channel id when one is configured', async () => {
+  const rootDir = makeRoot();
+  const hot = makeHot(rootDir);
+  hot.config.features = { dryRun: true };
+  hot.config.bot.dryRunChannelId = '999888777';
+  const store = makeStore();
+  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 }, getGuildId: () => 'g1' });
+
+  const message = makeMessage({ content: '!nep status' });
+  await admin.handle(message);
+
+  assert.equal(message.sent[0].split('\n')[1], 'dry-run: ON → log + #999888777');
 });
 
 test('handle: status reports the guild as not resolved yet before startup finishes', async () => {

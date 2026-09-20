@@ -23,17 +23,17 @@ const MIN = 60_000;
 const HOUR = 60 * MIN;
 const DAY = 24 * HOUR;
 
-// A handful of Cyrillic values proves the code never assumes English/labels
-// language; only the values differ, the code path is identical.
-const ruLabels = {
+// A handful of non-Latin (Greek) values proves the code never assumes
+// English/labels language; only the values differ, the code path is identical.
+const grLabels = {
   ...labels,
-  locale: 'ru-RU',
-  self: '{name} (ты)',
-  units: { lessThanMinute: 'меньше минуты', minute: 'мин', hour: 'ч', day: 'дн' },
+  locale: 'el-GR',
+  self: '{name} (εσύ)',
+  units: { lessThanMinute: 'λιγότερο από ένα λεπτό', minute: 'λεπτό', hour: 'ώρα', day: 'μέρα' },
   transcript: {
     ...labels.transcript,
-    gap: '--- прошло {duration} ---',
-    empty: '(пусто)',
+    gap: '--- πέρασαν {duration} ---',
+    empty: '(κενό)',
   },
 };
 
@@ -136,7 +136,7 @@ test('formatDuration: rounding at 23 h 59.5 min rolls over to the day form, not 
 });
 
 test('formatDuration: works with a non-English units object', () => {
-  assert.equal(formatDuration(3 * HOUR + 12 * MIN, ruLabels.units), '3 ч 12 мин');
+  assert.equal(formatDuration(3 * HOUR + 12 * MIN, grLabels.units), '3 ώρα 12 λεπτό');
 });
 
 // --- formatTranscript: gap markers and date changes -----------------------
@@ -183,8 +183,8 @@ test('formatTranscript: a gap over the threshold AND a date change combines both
 test('formatTranscript: labels drive the wording even for non-English deployments', () => {
   const t0 = Date.UTC(2026, 8, 20, 10, 0, 0);
   const messages = [msg('a', t0), msg('b', t0 + 25 * MIN)];
-  const items = formatTranscript(messages, { timezone: TZ, gapMinutes: 20, maxChars: 100, selfName: 'Nept', labels: ruLabels });
-  assert.ok(items[1].text.startsWith('--- прошло 25 мин ---'));
+  const items = formatTranscript(messages, { timezone: TZ, gapMinutes: 20, maxChars: 100, selfName: 'Nept', labels: grLabels });
+  assert.ok(items[1].text.startsWith('--- πέρασαν 25 λεπτό ---'));
 });
 
 // --- formatTranscript: line shape ------------------------------------------
@@ -396,7 +396,7 @@ test('formatTranscript: chat mode never adds a channel heading, even across a ch
 
 test('renderTranscript: empty items render as labels.transcript.empty', () => {
   assert.equal(renderTranscript([], TZ, labels), '(empty)');
-  assert.equal(renderTranscript([], TZ, ruLabels), '(пусто)');
+  assert.equal(renderTranscript([], TZ, grLabels), '(κενό)');
 });
 
 test('renderTranscript: prefixes a date header taken from the first item', () => {
@@ -579,6 +579,6 @@ test('renderTempo: does not mention the unanswered line when there is a trigger'
 });
 
 test('renderTempo: works with a non-English labels object', () => {
-  const text = renderTempo(baseTempo({ last10min: 4 }), ruLabels);
-  assert.ok(text.includes(ruLabels.tempo.verdictLive));
+  const text = renderTempo(baseTempo({ last10min: 4 }), grLabels);
+  assert.ok(text.includes(grLabels.tempo.verdictLive));
 });

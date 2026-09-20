@@ -69,6 +69,13 @@ export function createMessageHandler({
       if (message.channel.isThread?.()) return;
       if (!channelAllowed(message.channel, config.bot)) return;
 
+      // 3b. The dry-run mirror channel carries the persona's own rehearsal
+      // output (src/behavior/turn.js), never real conversation: everything
+      // posted there is ignored entirely, so it can never feed back into
+      // memory, a trigger or the spontaneous scheduler.
+      const dryRunChannelId = config.bot.dryRunChannelId;
+      if (dryRunChannelId && message.channel.id === dryRunChannelId) return;
+
       // 4. Normalize.
       const selfId = client.user.id;
       const normalized = normalizeMessage(message, selfId);

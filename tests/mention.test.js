@@ -4,7 +4,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { detectTrigger, strippedLength, createTagHistory, decideMention, repeatWindowMs } from '../src/behavior/mention.js';
 
-const NAME_TRIGGERS = ['нептуния', 'непка'];
+const NAME_TRIGGERS = ['νεπτούνια'];
 
 // --- detectTrigger ----------------------------------------------------------
 
@@ -17,7 +17,7 @@ test('detectTrigger: a mention takes priority over a name match', () => {
   const kind = detectTrigger({
     mentionsSelf: true,
     repliesToSelf: false,
-    content: 'непка привет',
+    content: 'νεπτούνια γεια',
     nameTriggers: NAME_TRIGGERS,
   });
   assert.equal(kind, 'mention');
@@ -27,7 +27,7 @@ test('detectTrigger: falls back to a name match when neither reply nor mention',
   const kind = detectTrigger({
     mentionsSelf: false,
     repliesToSelf: false,
-    content: 'эй непка как дела',
+    content: 'έι νεπτούνια πώς είσαι',
     nameTriggers: NAME_TRIGGERS,
   });
   assert.equal(kind, 'name');
@@ -37,7 +37,7 @@ test('detectTrigger: returns null when nothing matches', () => {
   const kind = detectTrigger({
     mentionsSelf: false,
     repliesToSelf: false,
-    content: 'просто болтовня',
+    content: 'απλή κουβέντα',
     nameTriggers: NAME_TRIGGERS,
   });
   assert.equal(kind, null);
@@ -47,7 +47,7 @@ test('detectTrigger: name matching is case-insensitive', () => {
   const kind = detectTrigger({
     mentionsSelf: false,
     repliesToSelf: false,
-    content: 'ЭЙ НЕПКА ЧТО ТАМ',
+    content: 'ΕΙ ΝΕΠΤΟΎΝΙΑ ΤΙ ΓΙΝΕΤΑΙ',
     nameTriggers: NAME_TRIGGERS,
   });
   assert.equal(kind, 'name');
@@ -57,43 +57,43 @@ test('detectTrigger: only matches whole words, not a substring inside a longer w
   const kind = detectTrigger({
     mentionsSelf: false,
     repliesToSelf: false,
-    content: 'непканепонятно вообще',
+    content: 'νεπτούνιαπου ακατανόητο εντελώς',
     nameTriggers: NAME_TRIGGERS,
   });
   assert.equal(kind, null);
 });
 
-test('detectTrigger: whole-word matching works with Cyrillic word boundaries (punctuation)', () => {
+test('detectTrigger: whole-word matching works with non-Latin word boundaries (punctuation)', () => {
   const kind = detectTrigger({
     mentionsSelf: false,
     repliesToSelf: false,
-    content: 'слушай, непка, ты тут?',
+    content: 'άκου, νεπτούνια, είσαι εδώ;',
     nameTriggers: NAME_TRIGGERS,
   });
   assert.equal(kind, 'name');
 });
 
 test('detectTrigger: a name at the very start or end of the message still matches', () => {
-  const start = detectTrigger({ mentionsSelf: false, repliesToSelf: false, content: 'непка', nameTriggers: NAME_TRIGGERS });
+  const start = detectTrigger({ mentionsSelf: false, repliesToSelf: false, content: 'νεπτούνια', nameTriggers: NAME_TRIGGERS });
   assert.equal(start, 'name');
 });
 
 // --- strippedLength -----------------------------------------------------------
 
 test('strippedLength: a bare @name mention leaves nothing', () => {
-  assert.equal(strippedLength('@Непка', 'Непка'), 0);
+  assert.equal(strippedLength('@Νεπτούνια', 'Νεπτούνια'), 0);
 });
 
 test('strippedLength: a bare Discord <@id> mention leaves nothing', () => {
-  assert.equal(strippedLength('<@123456>', 'Непка'), 0);
+  assert.equal(strippedLength('<@123456>', 'Νεπτούνια'), 0);
 });
 
 test('strippedLength: a nickname mention format <@!id> is also stripped', () => {
-  assert.equal(strippedLength('<@!123456>', 'Непка'), 0);
+  assert.equal(strippedLength('<@!123456>', 'Νεπτούνια'), 0);
 });
 
 test('strippedLength: counts the remaining text after removing the mention', () => {
-  assert.equal(strippedLength('@Непка как дела?', 'Непка'), 'как дела?'.length);
+  assert.equal(strippedLength('@Νεπτούνια πώς είσαι;', 'Νεπτούνια'), 'πώς είσαι;'.length);
 });
 
 // --- createTagHistory -----------------------------------------------------------

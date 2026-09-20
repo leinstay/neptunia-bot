@@ -1,5 +1,6 @@
 {
   "features": {
+    "dryRun": false,
     "mentions": true,
     "replies": true,
     "nameTriggers": true,
@@ -19,6 +20,7 @@
     "commandPrefix": "!nep",
     "nameTriggers": [],
     "guildId": "",
+    "dryRunChannelId": "",
     "channels": { "allow": [], "deny": [] }
   },
   "llm": {

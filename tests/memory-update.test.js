@@ -236,11 +236,11 @@ test('buildMemoryRequest: memory transcript lines use "[hh:mm] nick (id:1): text
 test('buildMemoryRequest: works with a non-English labels object, proving nothing is language-bound', () => {
   const config = makeConfig();
   const calibrator = createCalibrator();
-  const ruLabels = { ...labels, locale: 'ru-RU', self: '{name} (ты)' };
+  const grLabels = { ...labels, locale: 'el-GR', self: '{name} (εσύ)' };
   const messages = [slimMessage({ id: 'm1', self: true, authorName: 'Nept', content: 'privet', ts: Date.UTC(2026, 0, 1, 14, 32, 0) })];
 
   const { messages: llmMessages } = buildMemoryRequest({
-    prompts: { memory: 'sys', labels: ruLabels },
+    prompts: { memory: 'sys', labels: grLabels },
     config,
     calibrator,
     profiles: {},
@@ -249,7 +249,7 @@ test('buildMemoryRequest: works with a non-English labels object, proving nothin
     selfName: 'Nept',
   });
 
-  assert.ok(llmMessages[1].content.includes('Nept (ты): privet'));
+  assert.ok(llmMessages[1].content.includes('Nept (εσύ): privet'));
 });
 
 test('buildMemoryRequest: a tiny token limit still consumes everything but keeps only the newest lines', () => {

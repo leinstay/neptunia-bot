@@ -78,9 +78,9 @@ test('updateUser: merges fields and stamps updatedAt', () => {
   const dir = tmpDataDir();
   const store = createStore({ dataDir: dir });
   store.touchUser('g1', 'u1', 'Alice', 1000);
-  const profile = store.updateUser('g1', 'u1', { character: 'дерзкая', interests: 'игры' });
-  assert.equal(profile.character, 'дерзкая');
-  assert.equal(profile.interests, 'игры');
+  const profile = store.updateUser('g1', 'u1', { character: 'τολμηρή', interests: 'παιχνίδια' });
+  assert.equal(profile.character, 'τολμηρή');
+  assert.equal(profile.interests, 'παιχνίδια');
   assert.ok(profile.updatedAt);
 });
 
@@ -113,8 +113,8 @@ test('getGuild: returns the default empty guild memory when nothing is stored', 
 test('updateGuild: merges fields and stamps updatedAt', () => {
   const dir = tmpDataDir();
   const store = createStore({ dataDir: dir });
-  const guild = store.updateGuild('g1', { patterns: 'мемы про котов' });
-  assert.equal(guild.patterns, 'мемы про котов');
+  const guild = store.updateGuild('g1', { patterns: 'μιμίδια για γάτες' });
+  assert.equal(guild.patterns, 'μιμίδια για γάτες');
   assert.ok(guild.updatedAt);
 });
 
@@ -139,16 +139,16 @@ test('flush + a new store instance: profiles, guild memory and buffer survive a 
   const dir = tmpDataDir();
   const storeA = createStore({ dataDir: dir });
   storeA.touchUser('g1', 'u1', 'Alice', 1000);
-  storeA.updateUser('g1', 'u1', { character: 'дерзкая' });
-  storeA.updateGuild('g1', { patterns: 'мемы' });
+  storeA.updateUser('g1', 'u1', { character: 'τολμηρή' });
+  storeA.updateGuild('g1', { patterns: 'μιμίδια' });
   storeA.pushBuffer('g1', { text: 'hi' }, 100);
   storeA.flush();
 
   const storeB = createStore({ dataDir: dir });
   const profile = storeB.getUser('g1', 'u1');
-  assert.equal(profile.character, 'дерзкая');
+  assert.equal(profile.character, 'τολμηρή');
   assert.deepEqual(profile.names, ['Alice']);
-  assert.equal(storeB.getGuild('g1').patterns, 'мемы');
+  assert.equal(storeB.getGuild('g1').patterns, 'μιμίδια');
   assert.deepEqual(storeB.getBuffer('g1'), [{ text: 'hi' }]);
 });
 

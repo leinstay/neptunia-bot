@@ -4,9 +4,9 @@ import assert from 'node:assert/strict';
 import { parseOutput, parseJsonObject } from '../src/llm/parse.js';
 
 test('parseOutput: a single <msg> with no reply', () => {
-  const result = parseOutput('<msg>привет</msg>');
+  const result = parseOutput('<msg>γεια</msg>');
   assert.equal(result.skip, false);
-  assert.deepEqual(result.messages, [{ text: 'привет', replyTo: null }]);
+  assert.deepEqual(result.messages, [{ text: 'γεια', replyTo: null }]);
   assert.deepEqual(result.reactions, []);
 });
 
@@ -26,14 +26,14 @@ test('parseOutput: at most 3 messages are kept, extras are dropped', () => {
 });
 
 test('parseOutput: <think> is stripped from output and returned separately', () => {
-  const result = parseOutput('<think> тут план </think><msg>привет</msg>');
-  assert.equal(result.think, 'тут план');
-  assert.deepEqual(result.messages, [{ text: 'привет', replyTo: null }]);
+  const result = parseOutput('<think> το σχέδιο </think><msg>γεια</msg>');
+  assert.equal(result.think, 'το σχέδιο');
+  assert.deepEqual(result.messages, [{ text: 'γεια', replyTo: null }]);
   assert.equal(result.skip, false);
 });
 
 test('parseOutput: an unclosed <think> means silence, even with a <msg> after it', () => {
-  const result = parseOutput('<think> план без конца <msg>это не должно отправиться</msg>');
+  const result = parseOutput('<think> σχέδιο χωρίς τέλος <msg>αυτό δεν πρέπει να σταλεί</msg>');
   assert.equal(result.skip, true);
   assert.deepEqual(result.messages, []);
 });
@@ -58,19 +58,19 @@ test('parseOutput: a reaction alone is not silence', () => {
 });
 
 test('parseOutput: plain text with no tags falls back to one message when short', () => {
-  const result = parseOutput('просто текст без тегов');
+  const result = parseOutput('απλό κείμενο χωρίς ετικέτες');
   assert.equal(result.skip, false);
-  assert.deepEqual(result.messages, [{ text: 'просто текст без тегов', replyTo: null }]);
+  assert.deepEqual(result.messages, [{ text: 'απλό κείμενο χωρίς ετικέτες', replyTo: null }]);
 });
 
 test('parseOutput: plain text with no tags falls back to silence when too long', () => {
-  const result = parseOutput('а'.repeat(601));
+  const result = parseOutput('α'.repeat(601));
   assert.equal(result.skip, true);
   assert.deepEqual(result.messages, []);
 });
 
 test('parseOutput: plain text of exactly the fallback limit still becomes one message', () => {
-  const result = parseOutput('а'.repeat(600));
+  const result = parseOutput('α'.repeat(600));
   assert.equal(result.skip, false);
   assert.equal(result.messages.length, 1);
 });
@@ -83,8 +83,8 @@ test('parseOutput: an emoji reaction longer than 16 chars is dropped', () => {
 });
 
 test('parseOutput: an empty <msg> is ignored, but a later non-empty one is kept', () => {
-  const result = parseOutput('<msg>   </msg><msg>реальное сообщение</msg>');
-  assert.deepEqual(result.messages, [{ text: 'реальное сообщение', replyTo: null }]);
+  const result = parseOutput('<msg>   </msg><msg>πραγματικό μήνυμα</msg>');
+  assert.deepEqual(result.messages, [{ text: 'πραγματικό μήνυμα', replyTo: null }]);
 });
 
 test('parseOutput: only empty <msg> tags and no reactions results in skip, not a text fallback', () => {
@@ -99,7 +99,7 @@ test('parseOutput: messages longer than MAX_MESSAGE_CHARS are truncated', () => 
 });
 
 test('parseOutput: <msg> and <react> can appear together', () => {
-  const result = parseOutput('<msg>ха</msg><react to="#3">🔥</react>');
+  const result = parseOutput('<msg>χα</msg><react to="#3">🔥</react>');
   assert.equal(result.messages.length, 1);
   assert.equal(result.reactions.length, 1);
   assert.equal(result.skip, false);
