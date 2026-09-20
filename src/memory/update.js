@@ -1,9 +1,9 @@
 // Turns the raw stream of Discord messages into long-term memory. Every
-// message she sees is buffered (`observe`); once enough have piled up
+// message the persona sees is buffered (`observe`); once enough have piled up
 // (`isDue`), a periodic tick (`tick`, called by index.js every 60s) asks the
 // LLM to merge what happened into per-user profiles, server-wide patterns and
-// facts she has claimed about herself (`run`, via `buildMemoryRequest` +
-// `applyMemoryUpdate`). Memory is persistent: nothing here ever wipes it —
+// facts the persona has claimed about itself (`run`, via `buildMemoryRequest`
+// + `applyMemoryUpdate`). Memory is persistent: nothing here ever wipes it —
 // a failed update just leaves the buffer alone and backs off for a while.
 
 import { fitSections } from '../llm/budget.js';
@@ -33,6 +33,19 @@ function block(tag, body) {
   return body ? `<${tag}>\n${body}\n</${tag}>` : '';
 }
 
+function fillTemplate(template, values) {
+  return (template ?? '').replace(/\{\{(\w+)\}\}/g, (all, key) => values[key] ?? all);
+}
+
+/** A deployment with no/broken labels.json must fail loudly, not send a broken prompt. */
+function requireLabels(prompts) {
+  const labels = prompts?.labels;
+  if (!labels || !labels.transcript) {
+    throw new Error('prompts.labels is missing or incomplete: labels.transcript is required');
+  }
+  return labels;
+}
+
 /** Only the fields the memory prompt is allowed to see/update for a user profile. */
 function pickProfileFields(profile) {
   const { names = [], character = '', interests = '', style = '', details = [], relationship = '' } = profile ?? {};
@@ -56,12 +69,13 @@ function pickGuildFields(guildMemory) {
  * @param {object} input.profiles     Stored profiles of the batch's distinct non-self authors, keyed by user id.
  * @param {object} input.guildMemory  Stored guild memory.
  * @param {object[]} input.messages   Slim buffered messages (oldest first) to summarize.
- * @param {string} input.selfName     Her display name in this guild.
+ * @param {string} input.selfName     The persona's display name in this guild.
  * @returns {{ messages: object[], consumed: number }}
  */
 export function buildMemoryRequest({ prompts, config, calibrator, profiles, guildMemory, messages, selfName }) {
   const { timezone } = config.bot;
-  const system = prompts.memory ?? '';
+  const labels = requireLabels(prompts);
+  const system = fillTemplate(prompts.memory, { name: selfName });
 
   const existingProfiles = {};
   for (const [id, profile] of Object.entries(profiles ?? {})) {
@@ -76,6 +90,7 @@ export function buildMemoryRequest({ prompts, config, calibrator, profiles, guil
     maxChars: config.context.maxMessageChars,
     selfName,
     mode: 'memory',
+    labels,
   };
   const transcriptItems = formatTranscript(messages, formatOptions);
   const transcriptTexts = transcriptItems.map((item) => item.text);
@@ -93,7 +108,7 @@ export function buildMemoryRequest({ prompts, config, calibrator, profiles, guil
   );
 
   const keptTranscriptItems = transcriptItems.slice(transcriptItems.length - kept.transcript.length);
-  const newMessagesBlock = block('new_messages', renderTranscript(keptTranscriptItems, timezone));
+  const newMessagesBlock = block('new_messages', renderTranscript(keptTranscriptItems, timezone, labels));
 
   const user = [profilesBlock, guildBlock, newMessagesBlock].filter(Boolean).join('\n\n');
 
@@ -197,7 +212,7 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
   const running = new Set();
   const backoffUntil = new Map();
 
-  /** Called for every guild message she sees, including her own. */
+  /** Called for every guild message the persona sees, including its own. */
   function observe(guildId, normalized) {
     if (normalized.bot) return;
     if (!normalized.self) {

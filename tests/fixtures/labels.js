@@ -1,0 +1,60 @@
+// English test fixture covering every key of the labels.json contract
+// (.claude/docs/prompt-contract.md, "labels.json keys"). Terse technical
+// wording on purpose -- this is a fixture for the tests, not shipped prompt
+// text (that belongs to prompts/labels.json, written by nep-writer).
+export const labels = {
+  locale: 'en-US',
+  self: '{name} (you)',
+  units: {
+    lessThanMinute: 'less than a minute',
+    minute: 'min',
+    hour: 'h',
+    day: 'd',
+  },
+  transcript: {
+    gap: '--- {duration} passed ---',
+    gapWithDate: '--- {duration} passed · {date} ---',
+    date: '--- {date} ---',
+    header: '=== {date} ===',
+    empty: '(empty)',
+    replyTo: '(replying to #{index})',
+    replyToOld: '(replying to an older message)',
+    image: '[image]',
+    file: '[file: {name}]',
+    sticker: '[sticker: {name}]',
+  },
+  tempo: {
+    counts: 'messages in the last 10 min: {last10min}, last hour: {lastHour}, last day: {lastDay}',
+    authors: 'distinct people in the last hour: {authors}',
+    emptyChannel: 'the channel is empty, nobody has written anything yet',
+    silenceBeforeTrigger: 'before the message that called you, the channel was silent for: {duration}',
+    lastMessageAgo: 'the last message in the channel was: {duration} ago',
+    sinceOwn: 'you last wrote here: {duration} ago',
+    ownUnanswered: 'the last message in the channel is yours, nobody answered it',
+    verdict: 'verdict: {verdict}',
+    verdictLive: 'a live conversation is happening right now',
+    verdictSlow: 'a slow conversation, people write rarely',
+    verdictDead: 'a dead chat',
+  },
+  profile: {
+    interlocutorMark: ' -- INTERLOCUTOR, they are the one who called you',
+    formerNames: 'formerly known as: {names}',
+    character: 'character: {text}',
+    interests: 'interests: {text}',
+    style: 'style: {text}',
+    details: 'details: {text}',
+    relationship: 'relationship with you: {text}',
+    unknown: 'you barely know anything about this person yet',
+    messageCount: 'messages you have seen from them: {count}',
+  },
+  aboutChat: {
+    patterns: 'how people talk here: {text}',
+    starters: 'how people start conversations and cut in: {text}',
+    injokes: 'local in-jokes: {text}',
+  },
+  triggers: {
+    mention: 'tagged you',
+    reply: 'replied to your message',
+    name: 'mentioned you by name, without a tag',
+  },
+};

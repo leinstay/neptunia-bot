@@ -1,9 +1,10 @@
 // Pure text formatting of normalized messages (see normalizeMessage in
 // collect.js) into the transcript the model reads. No discord.js imports here,
-// so everything is unit-testable. The line format is a contract shared with
-// prompts/format.md:
-//   #87 [14:32] nick: text (в ответ на #80) [картинка]
-//   --- прошло 3 ч 12 мин ---
+// so everything is unit-testable. Every word that ends up in the prompt comes
+// from `labels` (see prompts/labels.json and .claude/docs/prompt-contract.md);
+// this module only knows the shape of a transcript line, e.g.:
+//   #87 [14:32] nick: text (replyTo marker) [image]
+//   --- {duration} passed ---
 // Time gaps and date changes are spelled out because the model must tell a
 // live conversation from a dead chat that somebody has just poked.
 
@@ -13,56 +14,94 @@ const DAY = 24 * HOUR;
 
 const formatters = new Map();
 
-function formatter(timezone, options) {
-  const key = timezone + JSON.stringify(options);
+function formatter(timezone, locale, options) {
+  const key = `${timezone}|${locale}|${JSON.stringify(options)}`;
   if (!formatters.has(key)) {
-    formatters.set(key, new Intl.DateTimeFormat('ru-RU', { timeZone: timezone, ...options }));
+    formatters.set(key, new Intl.DateTimeFormat(locale, { timeZone: timezone, ...options }));
   }
   return formatters.get(key);
 }
 
-export function formatClock(ts, timezone) {
-  return formatter(timezone, { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(ts);
+/**
+ * Fill `{key}` placeholders in a label template with `values[key]`. Unknown
+ * keys are left untouched (e.g. a typo in a deployment's labels.json does not
+ * silently swallow text); a missing/empty template returns ''.
+ * @param {string} template
+ * @param {object} [values]
+ */
+export function fill(template, values = {}) {
+  if (!template) return '';
+  return template.replace(/\{(\w+)\}/g, (all, key) =>
+    Object.prototype.hasOwnProperty.call(values, key) ? String(values[key]) : all,
+  );
 }
 
-export function formatDate(ts, timezone) {
-  return formatter(timezone, { weekday: 'short', day: 'numeric', month: 'long' }).format(ts);
+export function formatClock(ts, timezone, locale = 'en-US') {
+  return formatter(timezone, locale, { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(ts);
 }
 
-export function formatNow(ts, timezone) {
-  const date = formatter(timezone, { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }).format(ts);
-  return `${date}, ${formatClock(ts, timezone)} (${timezone})`;
+export function formatDate(ts, timezone, locale = 'en-US') {
+  return formatter(timezone, locale, { weekday: 'short', day: 'numeric', month: 'long' }).format(ts);
 }
 
-/** Local hour 0–23 in the given timezone. */
+export function formatNow(ts, timezone, locale = 'en-US') {
+  const date = formatter(timezone, locale, { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }).format(ts);
+  return `${date}, ${formatClock(ts, timezone, locale)} (${timezone})`;
+}
+
+/** Local hour 0-23 in the given timezone. Locale-independent by design. */
 export function localHour(ts, timezone) {
-  return Number(formatter(timezone, { hour: 'numeric', hourCycle: 'h23' }).format(ts)) % 24;
+  return Number(formatter(timezone, 'en-US', { hour: 'numeric', hourCycle: 'h23' }).format(ts)) % 24;
 }
 
-/** "5 мин", "3 ч 12 мин", "2 дн 4 ч" — coarse on purpose. */
-export function formatDuration(ms) {
-  if (ms < MINUTE) return 'меньше минуты';
-  if (ms < HOUR) return `${Math.round(ms / MINUTE)} мин`;
+/**
+ * Coarse, human-scale duration, e.g. "5 min", "3 h 12 min", "2 d 4 h". Rounds
+ * to the nearest minute/hour and rolls the result over into the next unit
+ * rather than ever printing "60 min" or "24 h".
+ * @param {number} ms
+ * @param {{lessThanMinute: string, minute: string, hour: string, day: string}} units
+ */
+export function formatDuration(ms, units) {
+  if (ms < MINUTE) return units.lessThanMinute;
+
+  if (ms < HOUR) {
+    const minutes = Math.round(ms / MINUTE);
+    if (minutes >= 60) return `1 ${units.hour}`;
+    return `${minutes} ${units.minute}`;
+  }
+
   if (ms < DAY) {
     const hours = Math.floor(ms / HOUR);
-    const minutes = Math.round((ms - hours * HOUR) / MINUTE);
-    return minutes ? `${hours} ч ${minutes} мин` : `${hours} ч`;
+    let minutes = Math.round((ms - hours * HOUR) / MINUTE);
+    let wholeHours = hours;
+    if (minutes >= 60) {
+      wholeHours += 1;
+      minutes = 0;
+    }
+    if (wholeHours >= 24) return `1 ${units.day}`;
+    return minutes ? `${wholeHours} ${units.hour} ${minutes} ${units.minute}` : `${wholeHours} ${units.hour}`;
   }
+
   const days = Math.floor(ms / DAY);
-  const hours = Math.round((ms - days * DAY) / HOUR);
-  return hours ? `${days} дн ${hours} ч` : `${days} дн`;
+  let hours = Math.round((ms - days * DAY) / HOUR);
+  let wholeDays = days;
+  if (hours >= 24) {
+    wholeDays += 1;
+    hours = 0;
+  }
+  return hours ? `${wholeDays} ${units.day} ${hours} ${units.hour}` : `${wholeDays} ${units.day}`;
 }
 
 function truncate(text, maxChars) {
   return text.length > maxChars ? `${text.slice(0, maxChars)}…` : text;
 }
 
-function attachmentTags(message) {
+function attachmentTags(message, labels) {
   const tags = [];
   for (const attachment of message.attachments ?? []) {
-    tags.push(attachment.kind === 'image' ? '[картинка]' : `[файл: ${attachment.name}]`);
+    tags.push(attachment.kind === 'image' ? labels.transcript.image : fill(labels.transcript.file, { name: attachment.name }));
   }
-  for (const sticker of message.stickers ?? []) tags.push(`[стикер: ${sticker}]`);
+  for (const sticker of message.stickers ?? []) tags.push(fill(labels.transcript.sticker, { name: sticker }));
   return tags;
 }
 
@@ -76,12 +115,15 @@ function attachmentTags(message) {
  * @param {string} options.timezone
  * @param {number} options.gapMinutes   Silence longer than this gets a marker.
  * @param {number} options.maxChars     Per-message content limit.
- * @param {string} options.selfName     Her display name; own lines read "<name> (ты)".
+ * @param {string} options.selfName     The persona's display name, used to fill `labels.self`.
+ * @param {object} options.labels       Live `prompts.labels` (locale, self, units, transcript.*).
  * @param {'chat'|'memory'} [options.mode]  'memory' drops #indexes and adds user ids.
  * @returns {{ id: string, index: number, ts: number, text: string }[]}
  */
 export function formatTranscript(messages, options) {
-  const { timezone, gapMinutes, maxChars, selfName, mode = 'chat' } = options;
+  const { timezone, gapMinutes, maxChars, selfName, labels, mode = 'chat' } = options;
+  const locale = labels.locale;
+  const selfLabel = fill(labels.self, { name: selfName });
   const indexById = new Map(messages.map((message, i) => [message.id, i + 1]));
   const items = [];
   let previous = null;
@@ -92,26 +134,27 @@ export function formatTranscript(messages, options) {
 
     if (previous) {
       const gap = message.ts - previous.ts;
-      const dayChanged = formatDate(message.ts, timezone) !== formatDate(previous.ts, timezone);
+      const date = formatDate(message.ts, timezone, locale);
+      const dayChanged = date !== formatDate(previous.ts, timezone, locale);
       if (gap >= gapMinutes * MINUTE) {
-        const day = dayChanged ? ` · ${formatDate(message.ts, timezone)}` : '';
-        parts.push(`--- прошло ${formatDuration(gap)}${day} ---`);
+        const duration = formatDuration(gap, labels.units);
+        parts.push(dayChanged ? fill(labels.transcript.gapWithDate, { duration, date }) : fill(labels.transcript.gap, { duration }));
       } else if (dayChanged) {
-        parts.push(`--- ${formatDate(message.ts, timezone)} ---`);
+        parts.push(fill(labels.transcript.date, { date }));
       }
     }
 
-    const name = message.self ? `${selfName} (ты)` : message.authorName;
+    const name = message.self ? selfLabel : message.authorName;
     const who = mode === 'memory' && !message.self ? `${name} (id:${message.authorId})` : name;
-    const head = mode === 'memory' ? `[${formatClock(message.ts, timezone)}]` : `#${index} [${formatClock(message.ts, timezone)}]`;
+    const head = mode === 'memory' ? `[${formatClock(message.ts, timezone, locale)}]` : `#${index} [${formatClock(message.ts, timezone, locale)}]`;
 
     const body = [];
     if (message.content) body.push(truncate(message.content, maxChars));
     if (message.replyToId && mode === 'chat') {
       const target = indexById.get(message.replyToId);
-      body.push(target ? `(в ответ на #${target})` : '(в ответ на старое сообщение)');
+      body.push(target ? fill(labels.transcript.replyTo, { index: target }) : labels.transcript.replyToOld);
     }
-    body.push(...attachmentTags(message));
+    body.push(...attachmentTags(message, labels));
 
     parts.push(`${head} ${who}: ${body.join(' ')}`.trimEnd());
     items.push({ id: message.id, index, ts: message.ts, text: parts.join('\n') });
@@ -122,14 +165,16 @@ export function formatTranscript(messages, options) {
 }
 
 /** Join kept items under a date header taken from the first surviving message. */
-export function renderTranscript(items, timezone) {
-  if (items.length === 0) return '(пусто)';
-  return [`=== ${formatDate(items[0].ts, timezone)} ===`, ...items.map((item) => item.text)].join('\n');
+export function renderTranscript(items, timezone, labels) {
+  if (items.length === 0) return labels.transcript.empty;
+  return [fill(labels.transcript.header, { date: formatDate(items[0].ts, timezone, labels.locale) }), ...items.map((item) => item.text)].join(
+    '\n',
+  );
 }
 
 /**
- * Facts about the pace of a channel. `trigger` is the message that called her
- * (null for spontaneous turns, where silence is measured up to `now`).
+ * Facts about the pace of a channel. `trigger` is the message that called the
+ * persona (null for spontaneous turns, where silence is measured up to `now`).
  */
 export function computeTempo(messages, now, trigger = null) {
   const others = trigger ? messages.filter((message) => message.id !== trigger.id) : messages;
@@ -151,26 +196,27 @@ export function computeTempo(messages, now, trigger = null) {
   };
 }
 
-export function renderTempo(tempo) {
+export function renderTempo(tempo, labels) {
+  const t = labels.tempo;
   const lines = [
-    `сообщений за последние 10 минут: ${tempo.last10min}, за час: ${tempo.lastHour}, за сутки: ${tempo.lastDay}`,
-    `разных людей за последний час: ${tempo.authorsLastHour}`,
+    fill(t.counts, { last10min: tempo.last10min, lastHour: tempo.lastHour, lastDay: tempo.lastDay }),
+    fill(t.authors, { authors: tempo.authorsLastHour }),
   ];
   if (tempo.silenceMs === null) {
-    lines.push('канал пустой, до этого никто ничего не писал');
+    lines.push(t.emptyChannel);
   } else if (tempo.hasTrigger) {
-    lines.push(`перед сообщением, которым тебя позвали, в канале молчали: ${formatDuration(tempo.silenceMs)}`);
+    lines.push(fill(t.silenceBeforeTrigger, { duration: formatDuration(tempo.silenceMs, labels.units) }));
   } else {
-    lines.push(`последнее сообщение в канале было: ${formatDuration(tempo.silenceMs)} назад`);
+    lines.push(fill(t.lastMessageAgo, { duration: formatDuration(tempo.silenceMs, labels.units) }));
   }
   if (tempo.sinceOwnMs !== null) {
-    lines.push(`ты сама последний раз писала сюда: ${formatDuration(tempo.sinceOwnMs)} назад`);
+    lines.push(fill(t.sinceOwn, { duration: formatDuration(tempo.sinceOwnMs, labels.units) }));
   }
-  if (tempo.lastIsOwn && !tempo.hasTrigger) lines.push('последнее сообщение в канале твоё, на него никто не ответил');
+  if (tempo.lastIsOwn && !tempo.hasTrigger) lines.push(t.ownUnanswered);
 
-  let verdict = 'мёртвый чат';
-  if (tempo.last10min >= 4) verdict = 'живой разговор идёт прямо сейчас';
-  else if (tempo.lastHour >= 3) verdict = 'вялый разговор, пишут редко';
-  lines.push(`итог: ${verdict}`);
+  let verdict = t.verdictDead;
+  if (tempo.last10min >= 4) verdict = t.verdictLive;
+  else if (tempo.lastHour >= 3) verdict = t.verdictSlow;
+  lines.push(fill(t.verdict, { verdict }));
   return lines.join('\n');
 }

@@ -1,9 +1,12 @@
 // Tests for src/behavior/prompt.js: buildRequest, the one-shot LLM request
-// assembler. Uses fake prompts/config only -- never reads prompts/ or data/.
+// assembler. Uses fake prompts/config/labels only -- never reads prompts/ or
+// data/. tests/fixtures/labels.js is an English fixture covering every key of
+// the prompt contract.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { buildRequest } from '../src/behavior/prompt.js';
 import { estimateTokens } from '../src/llm/tokens.js';
+import { labels } from './fixtures/labels.js';
 
 const NOW = Date.UTC(2026, 8, 20, 10, 0, 0); // Sun 20 Sep 2026, 13:00 Moscow
 const MIN = 60_000;
@@ -14,12 +17,15 @@ function identityCalibrator() {
 
 function fakePrompts(overrides = {}) {
   return {
-    persona: 'PERSONA_TEXT',
+    'system-prompt': 'SYSTEM_TEXT for {{name}}',
+    'character-card': 'CARD_TEXT',
     rules: 'RULES_TEXT',
     format: 'FORMAT_TEXT',
-    reply: 'Тебя позвал {{author}}, он {{trigger}}. Ответь на {{target}}.',
-    interject: 'INTERJECT_TASK',
-    initiate: 'INITIATE_TASK',
+    reply: 'Called by {{author}}, they {{trigger}}. Answer {{target}} as {{name}}. Target: {{target}}.',
+    interject: 'INTERJECT_TASK for {{name}}',
+    initiate: 'INITIATE_TASK for {{name}}',
+    memory: 'MEMORY_TEXT for {{name}}',
+    labels,
     ...overrides,
   };
 }
@@ -31,18 +37,11 @@ function fakeConfig(overrides = {}) {
       gapMarkerMinutes: 20,
       maxMessageChars: 800,
       caps: { interlocutor: 2500, aboutChat: 2500, people: 4000, neighbors: 3000 },
-      vision: { enabled: true, maxImages: 2, tokensPerImage: 1600 },
+      vision: { maxImages: 2, tokensPerImage: 1600 },
       ...overrides.context,
     },
+    features: { vision: true, ...overrides.features },
     llm: { maxRequestTokens: 50000, safetyMargin: 0.9, ...overrides.llm },
-    mention: {
-      triggerPhrases: {
-        mention: 'тегнул(а) тебя',
-        reply: 'ответил(а) на твоё сообщение',
-        name: 'упомянул(а) тебя по имени, без тега',
-      },
-      ...overrides.mention,
-    },
   };
 }
 
@@ -69,7 +68,7 @@ function baseInput(overrides = {}) {
     calibrator: identityCalibrator(),
     mode: 'reply',
     now: NOW,
-    selfName: 'Непка',
+    selfName: 'Nept',
     history,
     neighbors: [],
     trigger: null,
@@ -81,17 +80,25 @@ function baseInput(overrides = {}) {
   };
 }
 
-test('buildRequest: system message is persona + rules + format, joined', () => {
+test('buildRequest: system message is system-prompt + character-card + rules + format, joined', () => {
   const request = buildRequest(baseInput());
   assert.equal(request.messages[0].role, 'system');
-  assert.equal(request.messages[0].content, 'PERSONA_TEXT\n\nRULES_TEXT\n\nFORMAT_TEXT');
+  assert.equal(request.messages[0].content, 'SYSTEM_TEXT for Nept\n\nCARD_TEXT\n\nRULES_TEXT\n\nFORMAT_TEXT');
 });
 
-test('buildRequest: fills {{author}}, {{trigger}} and {{target}} in the task template', () => {
+test('buildRequest: {{name}} is filled with selfName in every system part', () => {
+  const request = buildRequest(
+    baseInput({ prompts: fakePrompts({ 'system-prompt': 'Hi, I am {{name}}.', 'character-card': 'card of {{name}}' }) }),
+  );
+  assert.ok(request.messages[0].content.includes('Hi, I am Nept.'));
+  assert.ok(request.messages[0].content.includes('card of Nept'));
+});
+
+test('buildRequest: fills {{author}}, {{trigger}}, {{target}} and {{name}} in the task template', () => {
   const trigger = makeMessage(1, NOW - MIN, { authorName: 'Alice' });
   const request = buildRequest(baseInput({ history: [trigger], trigger, triggerKind: 'mention' }));
   const user = request.messages[1].content;
-  assert.ok(user.includes('Тебя позвал Alice, он тегнул(а) тебя. Ответь на #1.'));
+  assert.ok(user.includes(`Called by Alice, they ${labels.triggers.mention}. Answer #1 as Nept. Target: #1.`));
 });
 
 test('buildRequest: target is the #index of the trigger message in the transcript', () => {
@@ -100,7 +107,14 @@ test('buildRequest: target is the #index of the trigger message in the transcrip
   const trigger = makeMessage(3, NOW - MIN, { authorName: 'Bob' });
   const request = buildRequest(baseInput({ history: [m1, m2, trigger], trigger, triggerKind: 'reply' }));
   const user = request.messages[1].content;
-  assert.ok(user.includes('Ответь на #3.'));
+  assert.ok(user.includes('Answer #3 as Nept. Target: #3.'));
+});
+
+test('buildRequest: {{trigger}} resolves through labels.triggers, not config.mention', () => {
+  const trigger = makeMessage(1, NOW - MIN, { authorName: 'Alice' });
+  const request = buildRequest(baseInput({ history: [trigger], trigger, triggerKind: 'name' }));
+  const user = request.messages[1].content;
+  assert.ok(user.includes(labels.triggers.name));
 });
 
 test('buildRequest: blocks appear in the documented order', () => {
@@ -110,8 +124,8 @@ test('buildRequest: blocks appear in the documented order', () => {
       history: [trigger],
       trigger,
       triggerKind: 'mention',
-      guildMemory: { patterns: 'как тут говорят', self: ['она любит игры'] },
-      otherProfiles: [{ id: 'p2', names: ['Carl'], character: 'спокойный' }],
+      guildMemory: { patterns: 'talks fast', self: ['likes games'] },
+      otherProfiles: [{ id: 'p2', names: ['Carl'], character: 'calm' }],
       neighbors: [{ channelName: 'general', messages: [makeMessage(9, NOW - 5 * MIN)] }],
     }),
   );
@@ -137,25 +151,34 @@ test('buildRequest: empty blocks (about_chat, self_facts, people, other_channels
   assert.ok(user.includes('<task>'));
 });
 
-test('buildRequest: the interlocutor is marked СОБЕСЕДНИК and rendered before other profiles', () => {
+test('buildRequest: the interlocutor is marked with labels.profile.interlocutorMark and rendered before other profiles', () => {
   const trigger = makeMessage(1, NOW - MIN, { authorName: 'Alice' });
-  const interlocutor = { id: 'author-1', names: ['Alice'], character: 'болтливая' };
-  const other = { id: 'p2', names: ['Carl'], character: 'спокойный' };
+  const interlocutor = { id: 'author-1', names: ['Alice'], character: 'talkative' };
+  const other = { id: 'p2', names: ['Carl'], character: 'calm' };
   const request = buildRequest(
     baseInput({ history: [trigger], trigger, triggerKind: 'mention', interlocutor, otherProfiles: [other] }),
   );
   const user = request.messages[1].content;
-  assert.ok(user.includes('СОБЕСЕДНИК'));
+  assert.ok(user.includes(labels.profile.interlocutorMark.trim()));
   const peopleBlockStart = user.indexOf('<people>');
   const aliceIdx = user.indexOf('## Alice', peopleBlockStart);
   const carlIdx = user.indexOf('## Carl', peopleBlockStart);
   assert.ok(aliceIdx !== -1 && carlIdx !== -1 && aliceIdx < carlIdx);
 });
 
+test('buildRequest: throws a clear error when prompts.labels is missing', () => {
+  assert.throws(() => buildRequest(baseInput({ prompts: fakePrompts({ labels: undefined }) })), /labels/);
+});
+
+test('buildRequest: throws a clear error when prompts.labels has no transcript section', () => {
+  const brokenLabels = { ...labels, transcript: undefined };
+  assert.throws(() => buildRequest(baseInput({ prompts: fakePrompts({ labels: brokenLabels }) })), /labels/);
+});
+
 test('buildRequest: under a tiny token budget, neighbours and other profiles are dropped before chat', () => {
   const history = [];
   for (let i = 1; i <= 10; i += 1) {
-    history.push(makeMessage(i, NOW - (11 - i) * MIN, { content: `сообщение номер ${i} с некоторым текстом` }));
+    history.push(makeMessage(i, NOW - (11 - i) * MIN, { content: `message number ${i} with some text` }));
   }
   const otherProfiles = [
     { id: 'p2', names: ['Carl'], character: 'x'.repeat(200) },
@@ -175,15 +198,14 @@ test('buildRequest: under a tiny token budget, neighbours and other profiles are
   assert.deepEqual(request.stats.people.kept, 0);
   assert.deepEqual(request.stats.neighbors.kept, 0);
   assert.ok(request.stats.chat.kept > 0, 'expected at least some chat lines to survive');
-  // The newest message must be among the survivors.
   const user = request.messages[1].content;
-  assert.ok(user.includes('сообщение номер 10'));
+  assert.ok(user.includes('message number 10'));
 });
 
 test('buildRequest: total token usage never exceeds maxRequestTokens * safetyMargin', () => {
   const history = [];
   for (let i = 1; i <= 30; i += 1) {
-    history.push(makeMessage(i, NOW - (31 - i) * MIN, { content: 'слово '.repeat(20) }));
+    history.push(makeMessage(i, NOW - (31 - i) * MIN, { content: 'word '.repeat(20) }));
   }
   const config = fakeConfig({ llm: { maxRequestTokens: 500, safetyMargin: 0.8 } });
   const request = buildRequest(baseInput({ history, config }));
@@ -191,7 +213,7 @@ test('buildRequest: total token usage never exceeds maxRequestTokens * safetyMar
   assert.ok(request.stats.used <= cap, `used ${request.stats.used} must be <= cap ${cap}`);
 });
 
-test('buildRequest: images are attached only when vision is enabled, capped by maxImages', () => {
+test('buildRequest: images are attached only when features.vision is enabled, capped by maxImages', () => {
   const trigger = makeMessage(1, NOW - MIN, {
     attachments: [
       { kind: 'image', url: 'img1' },
@@ -200,7 +222,7 @@ test('buildRequest: images are attached only when vision is enabled, capped by m
       { kind: 'file', url: 'file1' },
     ],
   });
-  const config = fakeConfig({ context: { vision: { enabled: true, maxImages: 2, tokensPerImage: 1600 } } });
+  const config = fakeConfig({ features: { vision: true }, context: { vision: { maxImages: 2, tokensPerImage: 1600 } } });
   const request = buildRequest(baseInput({ history: [trigger], trigger, triggerKind: 'mention', config }));
   const content = request.messages[1].content;
   assert.ok(Array.isArray(content));
@@ -211,7 +233,7 @@ test('buildRequest: images are attached only when vision is enabled, capped by m
 
 test('buildRequest: vision disabled means plain string content, even with image attachments', () => {
   const trigger = makeMessage(1, NOW - MIN, { attachments: [{ kind: 'image', url: 'img1' }] });
-  const config = fakeConfig({ context: { vision: { enabled: false, maxImages: 2, tokensPerImage: 1600 } } });
+  const config = fakeConfig({ features: { vision: false }, context: { vision: { maxImages: 2, tokensPerImage: 1600 } } });
   const request = buildRequest(baseInput({ history: [trigger], trigger, triggerKind: 'mention', config }));
   assert.equal(typeof request.messages[1].content, 'string');
 });
@@ -227,7 +249,7 @@ test('buildRequest: idByIndex maps every transcript index to its message id', ()
 test('buildRequest: idByIndex still covers messages later trimmed out of the rendered chat', () => {
   const history = [];
   for (let i = 1; i <= 10; i += 1) {
-    history.push(makeMessage(i, NOW - (11 - i) * MIN, { content: 'слово '.repeat(20) }));
+    history.push(makeMessage(i, NOW - (11 - i) * MIN, { content: 'word '.repeat(20) }));
   }
   const config = fakeConfig({ llm: { maxRequestTokens: 220, safetyMargin: 1 } });
   const request = buildRequest(baseInput({ history, config }));
@@ -240,4 +262,23 @@ test('buildRequest: sanity check on estimateTokens used for the cost function st
   // Not a behavioural assertion about buildRequest itself -- just confirms the
   // shared cost primitive it relies on has not silently changed shape.
   assert.equal(typeof estimateTokens('x'), 'number');
+});
+
+// --- language independence --------------------------------------------------
+
+test('buildRequest: a non-English labels object drives the same blocks, proving nothing is language-bound', () => {
+  const ruLabels = {
+    ...labels,
+    locale: 'ru-RU',
+    self: '{name} (ты)',
+    triggers: { mention: 'тегнул тебя', reply: 'ответил тебе', name: 'назвал по имени' },
+  };
+  const trigger = makeMessage(1, NOW - MIN, { authorName: 'Alice' });
+  const request = buildRequest(
+    baseInput({ prompts: fakePrompts({ labels: ruLabels }), history: [trigger], trigger, triggerKind: 'mention' }),
+  );
+  const user = request.messages[1].content;
+  assert.ok(user.includes('тегнул тебя'));
+  assert.ok(user.includes('<now>'));
+  assert.ok(user.includes('<task>'));
 });
