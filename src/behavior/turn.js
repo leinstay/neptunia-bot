@@ -1,0 +1,193 @@
+// One "turn": collect context → build the request under the token cap → ask
+// the model → act in Discord like a person would (pause, typing indicator
+// proportional to the text, several short messages in a row, reactions).
+// Used for answering a call ('reply') and for spontaneous turns
+// ('interject' / 'initiate').
+
+import { fetchHistory, fetchNeighbors } from '../discord/collect.js';
+import { buildRequest } from './prompt.js';
+import { parseOutput } from '../llm/parse.js';
+import { DailyCapError, TokenLimitError } from '../llm/openrouter.js';
+import { log } from '../log.js';
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Uniform random number inside a `[min, max]` config pair. */
+export function between([min, max], rng) {
+  return min + (max - min) * rng();
+}
+
+/** How long a person would type `text`, per config.typing. */
+export function typingMs(text, cfg, rng) {
+  const ms = text.length * between(cfg.msPerChar, rng);
+  return Math.round(Math.min(cfg.maxMs, Math.max(cfg.minMs, ms)));
+}
+
+/** Turn `@nick` written by the model into real mentions for people seen in the transcript. */
+export function resolveMentions(text, history) {
+  const people = new Map();
+  for (const message of history) {
+    if (!message.self && !message.bot && message.authorName) people.set(message.authorName, message.authorId);
+  }
+  const names = [...people.keys()].sort((a, b) => b.length - a.length);
+  const userIds = new Set();
+  let resolved = text;
+  for (const name of names) {
+    if (!resolved.includes(`@${name}`)) continue;
+    resolved = resolved.replaceAll(`@${name}`, `<@${people.get(name)}>`);
+    userIds.add(people.get(name));
+  }
+  return { text: resolved, userIds: [...userIds] };
+}
+
+/** Profiles of the people most recently active in the transcript, excluding `exceptId`. */
+function pickOtherProfiles(store, guildId, history, exceptId, count) {
+  const seen = new Set();
+  const profiles = [];
+  for (const message of [...history].reverse()) {
+    if (message.self || message.bot || message.authorId === exceptId || seen.has(message.authorId)) continue;
+    seen.add(message.authorId);
+    const profile = store.getUser(guildId, message.authorId);
+    if (profile) profiles.push(profile);
+    if (profiles.length >= count) break;
+  }
+  return profiles;
+}
+
+export function createTurnRunner({ hot, store, llm, calibrator, client, rng = Math.random }) {
+  const busy = new Set();
+  const lastPostAt = new Map(); // channelId -> ts of her last message
+
+  async function act(channel, parsed, idByIndex, history) {
+    const cfg = hot.config.typing;
+
+    for (const reaction of parsed.reactions) {
+      const targetId = idByIndex.get(reaction.to);
+      if (!targetId) continue;
+      await sleep(between(cfg.reactionDelayMs, rng));
+      try {
+        const target = await channel.messages.fetch(targetId);
+        await target.react(reaction.emoji);
+      } catch (err) {
+        log.warn('turn: reaction failed', { emoji: reaction.emoji, error: err });
+      }
+    }
+
+    let first = true;
+    for (const message of parsed.messages) {
+      if (!first) await sleep(between(cfg.betweenMessagesMs, rng));
+      first = false;
+
+      const { text, userIds } = resolveMentions(message.text, history);
+      await channel.sendTyping().catch(() => {});
+      await sleep(typingMs(text, cfg, rng));
+
+      const replyId = message.replyTo !== null ? idByIndex.get(message.replyTo) : null;
+      await channel.send({
+        content: text,
+        reply: replyId ? { messageReference: replyId, failIfNotExists: false } : undefined,
+        allowedMentions: { parse: [], users: userIds, repliedUser: true },
+      });
+      lastPostAt.set(channel.id, Date.now());
+    }
+  }
+
+  /**
+   * @param {object} params
+   * @param {import('discord.js').TextBasedChannel} params.channel
+   * @param {'reply'|'interject'|'initiate'|'auto'} params.mode  'auto' lets `chooseMode` pick
+   *   between interject/initiate/nothing once the history is known (spontaneous turns).
+   * @param {object} [params.trigger]      Normalized message that called her.
+   * @param {string} [params.triggerKind]
+   * @param {(history: object[], now: number) => string|null} [params.chooseMode]
+   * @returns {Promise<{ outcome: string, mode?: string }>}
+   */
+  async function runTurn({ channel, mode, trigger = null, triggerKind = null, chooseMode = null }) {
+    if (busy.has(channel.id)) return { outcome: 'busy' };
+    busy.add(channel.id);
+    try {
+      const config = hot.config;
+      const selfId = client.user.id;
+      const guildId = channel.guild.id;
+      const now = Date.now();
+
+      const history = await fetchHistory(channel, config.context.channelMessages, selfId);
+
+      let finalMode = mode;
+      if (mode === 'auto') {
+        finalMode = chooseMode(history, now);
+        if (!finalMode) return { outcome: 'not-now' };
+      }
+
+      const neighbors = await fetchNeighbors(channel, config, selfId, now);
+      const request = buildRequest({
+        config,
+        prompts: hot.prompts,
+        calibrator,
+        mode: finalMode,
+        now,
+        selfName: channel.guild.members.me?.displayName ?? client.user.username,
+        history,
+        neighbors,
+        trigger,
+        triggerKind,
+        guildMemory: store.getGuild(guildId),
+        interlocutor: trigger ? store.getUser(guildId, trigger.authorId) : null,
+        otherProfiles: pickOtherProfiles(store, guildId, history, trigger?.authorId, config.context.otherProfiles),
+      });
+
+      let completion;
+      try {
+        completion = await llm.complete(request.messages);
+      } catch (err) {
+        // A Discord CDN image the provider cannot fetch must not cost her the reply.
+        if (request.stats.images > 0 && err.statusCode >= 400 && err.statusCode < 500) {
+          const textOnly = request.messages.map((m) =>
+            Array.isArray(m.content) ? { ...m, content: m.content.find((part) => part.type === 'text').text } : m,
+          );
+          completion = await llm.complete(textOnly);
+        } else {
+          throw err;
+        }
+      }
+
+      const parsed = parseOutput(completion.text);
+      log.info('turn: model answered', {
+        mode: finalMode,
+        channel: channel.id,
+        estimated: completion.estimated,
+        usage: completion.usage,
+        calibration: Number(calibrator.ratio.toFixed(3)),
+        budget: request.stats,
+        think: parsed.think,
+        skip: parsed.skip,
+        messages: parsed.messages.length,
+        reactions: parsed.reactions.length,
+      });
+      store.state.data.calibration = calibrator.ratio;
+      store.state.markDirty();
+
+      if (parsed.skip) return { outcome: 'skip', mode: finalMode };
+      await act(channel, parsed, request.idByIndex, history);
+      return { outcome: 'spoke', mode: finalMode };
+    } catch (err) {
+      if (err instanceof DailyCapError || err instanceof TokenLimitError) {
+        log.warn('turn: refused by a safety rail', { error: err });
+        return { outcome: 'refused' };
+      }
+      log.error('turn: failed', { channel: channel.id, error: err });
+      return { outcome: 'error' };
+    } finally {
+      busy.delete(channel.id);
+    }
+  }
+
+  return {
+    runTurn,
+    isBusy: (channelId) => busy.has(channelId),
+    lastPostAt: (channelId) => lastPostAt.get(channelId) ?? 0,
+    notePost: (channelId, ts) => lastPostAt.set(channelId, ts),
+  };
+}
