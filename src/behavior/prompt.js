@@ -4,9 +4,10 @@
 //   1. system prompt (persona + live rules + output format), task, clock, tempo — never cut
 //   2. memory about the person the persona is talking to
 //   3. how this server talks + what the persona has said about itself
-//   4. the channel transcript, newest messages first
-//   5. memory about other people present in the transcript
-//   6. neighbouring channels
+//   4. the map of the server's channels
+//   5. the channel transcript, newest messages first
+//   6. memory about other people present in the transcript
+//   7. neighbouring channels
 // The rendered order is different: reference material first, the chat and the
 // task last, where the model attends best.
 
@@ -14,6 +15,7 @@ import { fitSections } from '../llm/budget.js';
 import { estimateTokens } from '../llm/tokens.js';
 import { computeTempo, fill, formatNow, formatTranscript, renderTempo, renderTranscript } from '../discord/format.js';
 import { affinityBand } from '../memory/affinity.js';
+import { channelActivity, renderChannel } from '../memory/channels.js';
 
 const TAG_OVERHEAD = 60;
 
@@ -55,6 +57,26 @@ export function renderProfile(profile, labels, { interlocutor = false, relations
   return `## ${name}${mark}\n${lines.join('\n')}`;
 }
 
+/**
+ * Render the <server> block: the current channel first (marked via
+ * `labels.server.currentMark`), then the rest by `lastMessageAt` descending —
+ * a channel never seen yet sorts last. See .claude/docs/prompt-contract.md,
+ * "Server memory (the channel map)".
+ */
+function serverItems(channels, currentChannelId, now, activityCfg, labels) {
+  const current = channels.find((channel) => channel.id === currentChannelId);
+  const rest = channels
+    .filter((channel) => channel.id !== currentChannelId)
+    .sort((a, b) => (b.lastMessageAt ?? 0) - (a.lastMessageAt ?? 0));
+  const ordered = current ? [current, ...rest] : rest;
+  return ordered.map((channel) =>
+    renderChannel(channel, labels, {
+      current: channel.id === currentChannelId,
+      activity: channelActivity(channel, now, activityCfg),
+    }),
+  );
+}
+
 function aboutChatItems(guildMemory, labels) {
   const a = labels.aboutChat;
   const items = [];
@@ -92,10 +114,12 @@ function requireLabels(prompts) {
  * @param {object} input.guildMemory
  * @param {object|null} input.interlocutor Profile of the trigger's author.
  * @param {object[]} input.otherProfiles   Profiles of other people in the transcript, most relevant first.
+ * @param {object[]} [input.channels]      The server's channel map (store.listChannels), [] when memory is off.
+ * @param {string|null} [input.currentChannelId]  Id of the channel this turn happens in.
  * @returns {{ messages: object[], stats: object, idByIndex: Map<number, string>, tempo: object }}
  */
 export function buildRequest(input) {
-  const { config, prompts, calibrator, mode, now, selfName, history, neighbors, trigger, triggerKind } = input;
+  const { config, prompts, calibrator, mode, now, selfName, history, neighbors, trigger, triggerKind, channels = [], currentChannelId = null } = input;
   const labels = requireLabels(prompts);
   const { timezone } = config.bot;
   const relationships = config.features?.relationships !== false;
@@ -153,6 +177,12 @@ export function buildRequest(input) {
       },
       { name: 'aboutChat', cap: caps.aboutChat, items: aboutChatItems(input.guildMemory, labels) },
       { name: 'self', cap: caps.aboutChat, items: (input.guildMemory?.self ?? []).map((fact) => `- ${fact}`) },
+      {
+        name: 'server',
+        cap: caps.server ?? 2500,
+        keep: 'first',
+        items: serverItems(channels, currentChannelId, now, config.context.channelActivity, labels),
+      },
       { name: 'chat', keep: 'newest', items: chatItems.map((item) => item.text) },
       {
         name: 'people',
@@ -169,6 +199,7 @@ export function buildRequest(input) {
   const user = [
     block('now', formatNow(now, timezone, labels.locale)),
     block('about_chat', kept.aboutChat.join('\n')),
+    block('server', kept.server.join('\n\n')),
     block('self_facts', kept.self.join('\n')),
     block('people', [...kept.interlocutor, ...kept.people].join('\n\n')),
     block('other_channels', kept.neighbors.join('\n\n')),

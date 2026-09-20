@@ -17,6 +17,9 @@ export function normalizeMessage(message, selfId) {
   return {
     id: message.id,
     channelId: message.channelId,
+    channelName: message.channel?.name ?? null,
+    channelCategory: message.channel?.parent?.name ?? null,
+    channelTopic: message.channel?.topic ?? null,
     authorId: message.author.id,
     authorName: message.member?.displayName ?? message.author.globalName ?? message.author.username,
     self: message.author.id === selfId,

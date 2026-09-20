@@ -17,6 +17,10 @@ const DAY = 24 * HOUR;
 // from general chatter. See .claude/docs/prompt-contract.md, "Memory update".
 const DIRECT_MARKER = '→ '; // "→ "
 
+// A value no real channelId can equal, so the very first message of a memory
+// transcript always opens with a channel heading (see formatTranscript).
+const NO_CHANNEL = Symbol('no-channel');
+
 const formatters = new Map();
 
 function formatter(timezone, locale, options) {
@@ -122,8 +126,16 @@ function attachmentTags(message, labels) {
  * @param {number} options.maxChars     Per-message content limit.
  * @param {string} options.selfName     The persona's display name, used to fill `labels.self`.
  * @param {object} options.labels       Live `prompts.labels` (locale, self, units, transcript.*).
- * @param {'chat'|'memory'} [options.mode]  'memory' drops #indexes and adds user ids.
+ * @param {'chat'|'memory'} [options.mode]  'memory' drops #indexes and adds user ids;
+ *   it also groups by channel (see below).
  * @returns {{ id: string, index: number, ts: number, text: string }[]}
+ *
+ * In `mode: 'memory'`, messages come from possibly several channels (see
+ * .claude/docs/prompt-contract.md, "Memory update"): whenever the channel
+ * changes between two consecutive messages — including before the very first
+ * one — the item opens with a `## #channel-name (id:channelId)` heading, and
+ * the gap/date marker is computed against the previous message of the SAME
+ * channel run, never across a channel switch.
  */
 export function formatTranscript(messages, options) {
   const { timezone, gapMinutes, maxChars, selfName, labels, mode = 'chat' } = options;
@@ -132,15 +144,22 @@ export function formatTranscript(messages, options) {
   const indexById = new Map(messages.map((message, i) => [message.id, i + 1]));
   const items = [];
   let previous = null;
+  let previousChannelId = NO_CHANNEL;
 
   for (const message of messages) {
     const index = indexById.get(message.id);
     const parts = [];
 
-    if (previous) {
-      const gap = message.ts - previous.ts;
+    const channelChanged = mode === 'memory' && message.channelId !== previousChannelId;
+    if (channelChanged) {
+      parts.push(`## #${message.channelName} (id:${message.channelId})`);
+    }
+
+    const gapPrevious = channelChanged ? null : previous;
+    if (gapPrevious) {
+      const gap = message.ts - gapPrevious.ts;
       const date = formatDate(message.ts, timezone, locale);
-      const dayChanged = date !== formatDate(previous.ts, timezone, locale);
+      const dayChanged = date !== formatDate(gapPrevious.ts, timezone, locale);
       if (gap >= gapMinutes * MINUTE) {
         const duration = formatDuration(gap, labels.units);
         parts.push(dayChanged ? fill(labels.transcript.gapWithDate, { duration, date }) : fill(labels.transcript.gap, { duration }));
@@ -165,6 +184,7 @@ export function formatTranscript(messages, options) {
     parts.push(`${marker}${head} ${who}: ${body.join(' ')}`.trimEnd());
     items.push({ id: message.id, index, ts: message.ts, text: parts.join('\n') });
     previous = message;
+    previousChannelId = message.channelId;
   }
 
   return items;

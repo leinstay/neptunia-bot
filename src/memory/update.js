@@ -66,6 +66,12 @@ function pickGuildFields(guildMemory) {
   return { patterns, starters, injokes, self };
 }
 
+/** Only the fields the memory prompt is allowed to see/update for a channel entry. */
+function pickChannelFields(channel) {
+  const { name = '', category = null, topic = null, purpose = '', topics = '', tone = '' } = channel ?? {};
+  return { name, category, topic, purpose, topics, tone };
+}
+
 /**
  * Build one memory-update LLM request. Pure: no I/O, no clock reads besides
  * what is already baked into `messages`.
@@ -76,11 +82,12 @@ function pickGuildFields(guildMemory) {
  * @param {object} input.calibrator   From createCalibrator().
  * @param {object} input.profiles     Stored profiles of the batch's distinct non-self authors, keyed by user id.
  * @param {object} input.guildMemory  Stored guild memory.
+ * @param {object} [input.channels]   Stored channel entries of the batch's distinct channels, keyed by channel id.
  * @param {object[]} input.messages   Slim buffered messages (oldest first) to summarize.
  * @param {string} input.selfName     The persona's display name in this guild.
  * @returns {{ messages: object[], consumed: number }}
  */
-export function buildMemoryRequest({ prompts, config, calibrator, profiles, guildMemory, messages, selfName }) {
+export function buildMemoryRequest({ prompts, config, calibrator, profiles, guildMemory, channels, messages, selfName }) {
   const { timezone } = config.bot;
   const labels = requireLabels(prompts);
   const relationships = config.features?.relationships !== false;
@@ -99,6 +106,12 @@ export function buildMemoryRequest({ prompts, config, calibrator, profiles, guil
   const profilesBlock = block('existing_profiles', JSON.stringify(existingProfiles));
   const guildBlock = block('existing_guild', JSON.stringify(pickGuildFields(guildMemory)));
 
+  const existingChannels = {};
+  for (const [id, channel] of Object.entries(channels ?? {})) {
+    existingChannels[id] = pickChannelFields(channel);
+  }
+  const channelsBlock = block('existing_channels', JSON.stringify(existingChannels));
+
   const formatOptions = {
     timezone,
     gapMinutes: config.context.gapMarkerMinutes,
@@ -115,7 +128,7 @@ export function buildMemoryRequest({ prompts, config, calibrator, profiles, guil
 
   const { kept } = fitSections(
     [
-      { name: 'fixed', required: true, items: [system, characterBlock, profilesBlock, guildBlock].filter(Boolean) },
+      { name: 'fixed', required: true, items: [system, characterBlock, profilesBlock, guildBlock, channelsBlock].filter(Boolean) },
       { name: 'transcript', keep: 'newest', items: transcriptTexts },
     ],
     limit,
@@ -125,7 +138,7 @@ export function buildMemoryRequest({ prompts, config, calibrator, profiles, guil
   const keptTranscriptItems = transcriptItems.slice(transcriptItems.length - kept.transcript.length);
   const newMessagesBlock = block('new_messages', renderTranscript(keptTranscriptItems, timezone, labels));
 
-  const user = [characterBlock, profilesBlock, guildBlock, newMessagesBlock].filter(Boolean).join('\n\n');
+  const user = [characterBlock, profilesBlock, guildBlock, channelsBlock, newMessagesBlock].filter(Boolean).join('\n\n');
 
   return {
     messages: [
@@ -160,13 +173,15 @@ function clampStringArray(value, maxChars, maxItems) {
  * @param {unknown} update         Parsed model output; treated as untrusted.
  * @param {object} cfg             `config.memory`.
  * @param {Set<string>} knownUserIds
+ * @param {Set<string>} [knownChannelIds]  Channel ids present in the batch; a channel outside
+ *   this set is rejected, mirroring `knownUserIds`.
  * @param {{ enabled: boolean, maxDeltaPerUpdate: number, historySize: number, now?: number }} [relationships]
  *   Only when `enabled`, `raw.affinity` (a `{ delta, reason }` change) is folded into the
  *   stored score via `store.adjustAffinity`. Absent/disabled -> affinity is ignored entirely.
- * @returns {{ users: number, guild: boolean, self: boolean, affinity: number }}
+ * @returns {{ users: number, guild: boolean, self: boolean, affinity: number, channels: number }}
  */
-export function applyMemoryUpdate(store, guildId, update, cfg, knownUserIds, relationships) {
-  const result = { users: 0, guild: false, self: false, affinity: 0 };
+export function applyMemoryUpdate(store, guildId, update, cfg, knownUserIds, knownChannelIds = new Set(), relationships) {
+  const result = { users: 0, guild: false, self: false, affinity: 0, channels: 0 };
   if (!update || typeof update !== 'object' || Array.isArray(update)) return result;
 
   if (update.users && typeof update.users === 'object' && !Array.isArray(update.users)) {
@@ -195,6 +210,21 @@ export function applyMemoryUpdate(store, guildId, update, cfg, knownUserIds, rel
         });
         if (after.score !== before) result.affinity += 1;
       }
+    }
+  }
+
+  if (update.channels && typeof update.channels === 'object' && !Array.isArray(update.channels)) {
+    for (const [channelId, raw] of Object.entries(update.channels)) {
+      if (!knownChannelIds.has(String(channelId))) continue;
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) continue;
+
+      const fields = {};
+      for (const key of ['purpose', 'topics', 'tone']) {
+        if (typeof raw[key] === 'string') fields[key] = clampString(raw[key], cfg.fieldChars);
+      }
+
+      store.updateChannel(guildId, channelId, fields);
+      result.channels += 1;
     }
   }
 
@@ -251,9 +281,17 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
     if (!normalized.self) {
       store.touchUser(guildId, normalized.authorId, normalized.authorName, normalized.ts);
     }
+    store.touchChannel(
+      guildId,
+      normalized.channelId,
+      { name: normalized.channelName, category: normalized.channelCategory, topic: normalized.channelTopic },
+      normalized.ts,
+    );
 
     const slim = {
       id: normalized.id,
+      channelId: normalized.channelId,
+      channelName: normalized.channelName,
       authorId: normalized.authorId,
       authorName: normalized.authorName,
       self: normalized.self,
@@ -291,12 +329,20 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
         if (profile) profiles[id] = profile;
       }
 
+      const channelIds = [...new Set(messages.map((m) => m.channelId).filter((id) => id != null))];
+      const channels = {};
+      for (const id of channelIds) {
+        const channel = store.getChannel(guildId, id);
+        if (channel) channels[id] = channel;
+      }
+
       const { messages: llmMessages, consumed } = buildMemoryRequest({
         prompts: hot.prompts,
         config: hot.config,
         calibrator,
         profiles,
         guildMemory: store.getGuild(guildId),
+        channels,
         messages,
         selfName: getSelfName(guildId),
       });
@@ -308,11 +354,12 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
       });
       const update = parseJsonObject(completion.text);
       const knownUserIds = new Set(authorIds.map(String));
+      const knownChannelIds = new Set(channelIds.map(String));
       const relationshipsOn = hot.config.features?.relationships !== false;
       const relationships = relationshipsOn
         ? { enabled: true, ...hot.config.relationships, now: now() }
         : undefined;
-      const result = applyMemoryUpdate(store, guildId, update, cfg, knownUserIds, relationships);
+      const result = applyMemoryUpdate(store, guildId, update, cfg, knownUserIds, knownChannelIds, relationships);
 
       store.shiftBuffer(guildId, consumed);
       store.flush();

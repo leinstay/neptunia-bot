@@ -64,6 +64,18 @@ export const labels = {
     starters: 'how people start conversations and cut in: {text}',
     injokes: 'local in-jokes: {text}',
   },
+  server: {
+    currentMark: ' ← you are here',
+    category: 'category: {text}',
+    topic: 'topic: {text}',
+    purpose: 'purpose: {text}',
+    topics: 'what people write here: {text}',
+    tone: 'tone: {text}',
+    activity: 'activity: {activity}',
+    activityLive: 'live',
+    activitySlow: 'slow',
+    activityDead: 'dead',
+  },
   triggers: {
     mention: 'tagged you',
     reply: 'replied to your message',

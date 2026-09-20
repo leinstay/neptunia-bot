@@ -5,6 +5,7 @@
 //   data/guilds/<guildId>/guild.json         how this server talks, in-jokes, what the persona said about itself
 //   data/guilds/<guildId>/buffer.json        messages observed since the last memory update
 //   data/guilds/<guildId>/users/<userId>.json  one profile per active member
+//   data/guilds/<guildId>/channels/<channelId>.json  one entry per channel the persona has seen (the server map)
 //
 // Everything is cached in memory, marked dirty on change and flushed on a
 // timer and on shutdown. Writes are atomic (temp file + rename) so a crash
@@ -58,6 +59,28 @@ export function emptyGuild() {
   return { patterns: '', starters: '', injokes: [], self: [], updatedAt: null };
 }
 
+export function emptyChannel(id) {
+  return {
+    id,
+    name: '',
+    category: null,
+    topic: null,
+    purpose: '',
+    topics: '',
+    tone: '',
+    days: {},
+    messageCount: 0,
+    lastMessageAt: null,
+    updatedAt: null,
+  };
+}
+
+/** Keep only the newest `max` UTC-date keys of a `days` counter map. */
+function trimDays(days, max) {
+  const keys = Object.keys(days).sort();
+  for (const key of keys.slice(0, Math.max(0, keys.length - max))) delete days[key];
+}
+
 export function createStore({ dataDir }) {
   const entries = new Map(); // file path -> { value, dirty }
 
@@ -74,6 +97,8 @@ export function createStore({ dataDir }) {
   const userFile = (guildId, userId) => path.join(guildDir(guildId), 'users', `${userId}.json`);
   const guildFile = (guildId) => path.join(guildDir(guildId), 'guild.json');
   const bufferFile = (guildId) => path.join(guildDir(guildId), 'buffer.json');
+  const channelsDir = (guildId) => path.join(guildDir(guildId), 'channels');
+  const channelFile = (guildId, channelId) => path.join(channelsDir(guildId), `${channelId}.json`);
   const stateFile = path.join(dataDir, 'state.json');
 
   const stateEntry = entry(stateFile, () => ({}));
@@ -167,6 +192,66 @@ export function createStore({ dataDir }) {
     updateGuild(guildId, fields) {
       const item = entry(guildFile(guildId), emptyGuild);
       Object.assign(item.value, fields, { updatedAt: new Date().toISOString() });
+      item.dirty = true;
+      return item.value;
+    },
+
+    /** One channel's stored entry (the server map), or null when never seen. */
+    getChannel(guildId, channelId) {
+      const file = channelFile(guildId, channelId);
+      if (!entries.has(file) && !fs.existsSync(file)) return null;
+      return entry(file, () => emptyChannel(String(channelId))).value;
+    },
+
+    /** Every channel entry stored for a guild, cached or on disk. */
+    listChannels(guildId) {
+      const ids = new Set();
+      try {
+        for (const name of fs.readdirSync(channelsDir(guildId))) {
+          if (name.endsWith('.json')) ids.add(name.slice(0, -5));
+        }
+      } catch {
+        // no channels directory yet
+      }
+      const prefix = channelsDir(guildId) + path.sep;
+      for (const file of entries.keys()) {
+        if (file.startsWith(prefix)) ids.add(path.basename(file, '.json'));
+      }
+      return [...ids].map((id) => entry(channelFile(guildId, id), () => emptyChannel(String(id))).value);
+    },
+
+    /**
+     * Record one observed message in a channel: Discord facts (name, category,
+     * topic), counters and the per-day activity histogram. Creates the entry.
+     */
+    touchChannel(guildId, channelId, facts, ts = Date.now()) {
+      const item = entry(channelFile(guildId, channelId), () => emptyChannel(String(channelId)));
+      const channel = item.value;
+      const { name, category = null, topic = null } = facts ?? {};
+      if (name) channel.name = name;
+      channel.category = category;
+      channel.topic = topic;
+      channel.messageCount += 1;
+      channel.lastMessageAt = channel.lastMessageAt === null ? ts : Math.max(channel.lastMessageAt, ts);
+      const dateKey = new Date(ts).toISOString().slice(0, 10);
+      channel.days[dateKey] = (channel.days[dateKey] ?? 0) + 1;
+      trimDays(channel.days, 30);
+      item.dirty = true;
+      return channel;
+    },
+
+    /**
+     * Merge analyzer-extracted fields into a channel entry. Only `purpose`,
+     * `topics`, `tone` travel through here — everything else (counters,
+     * Discord facts) is stripped, mirroring `updateUser`.
+     */
+    updateChannel(guildId, channelId, fields) {
+      const item = entry(channelFile(guildId, channelId), () => emptyChannel(String(channelId)));
+      const patch = {};
+      for (const key of ['purpose', 'topics', 'tone']) {
+        if (typeof fields?.[key] === 'string') patch[key] = fields[key];
+      }
+      Object.assign(item.value, patch, { updatedAt: new Date().toISOString() });
       item.dirty = true;
       return item.value;
     },

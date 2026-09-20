@@ -187,10 +187,11 @@ function fakeLlm(responseText) {
   };
 }
 
-function fakeStore({ guildMemory = {}, userProfiles = {} } = {}) {
+function fakeStore({ guildMemory = {}, userProfiles = {}, channels = [] } = {}) {
   return {
     getGuild: () => guildMemory,
     getUser: (guildId, userId) => userProfiles[userId] ?? null,
+    listChannels: () => channels,
     state: { data: {}, markDirty() {} },
   };
 }
@@ -319,4 +320,37 @@ test('createTurnRunner: features.memory=false sends no <people> or <about_chat> 
   assert.equal(typeof userMessage, 'string');
   assert.ok(!userMessage.includes('<people>'));
   assert.ok(!userMessage.includes('<about_chat>'));
+});
+
+test('createTurnRunner: features.memory=true (default) renders the <server> channel map', async () => {
+  const raw = rawMessage({ id: 'm1' });
+  const channel = fakeTurnChannel({ id: 'c1', historyMessages: [raw] });
+  const llm = fakeLlm('<msg>ok</msg>');
+  const store = fakeStore({
+    channels: [{ id: 'c1', name: 'general', category: null, topic: null, purpose: '', topics: '', tone: '', days: {}, lastMessageAt: null }],
+  });
+  const hot = fakeHot({});
+  const turns = createTurnRunner({ hot, store, llm, calibrator: identityCalibrator(), client: fakeClient() });
+
+  await turns.runTurn({ channel, mode: 'reply', trigger: normalizedTrigger(raw), triggerKind: 'mention' });
+
+  const userMessage = llm.calls[0][1].content;
+  assert.ok(userMessage.includes('<server>'));
+  assert.ok(userMessage.includes(`# general${labels.server.currentMark}`));
+});
+
+test('createTurnRunner: features.memory=false sends no <server> block, even with channels on record', async () => {
+  const raw = rawMessage({ id: 'm1' });
+  const channel = fakeTurnChannel({ id: 'c1', historyMessages: [raw] });
+  const llm = fakeLlm('<msg>ok</msg>');
+  const store = fakeStore({
+    channels: [{ id: 'c1', name: 'general', category: null, topic: null, purpose: '', topics: '', tone: '', days: {}, lastMessageAt: null }],
+  });
+  const hot = fakeHot({ memory: false });
+  const turns = createTurnRunner({ hot, store, llm, calibrator: identityCalibrator(), client: fakeClient() });
+
+  await turns.runTurn({ channel, mode: 'reply', trigger: normalizedTrigger(raw), triggerKind: 'mention' });
+
+  const userMessage = llm.calls[0][1].content;
+  assert.ok(!userMessage.includes('<server>'));
 });

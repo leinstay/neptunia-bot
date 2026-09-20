@@ -272,6 +272,144 @@ test('updateUser: cannot overwrite affinity via LLM-extracted fields', () => {
   assert.equal(profile.affinity.reason, 'liked');
 });
 
+// --- channels (the server map) ----------------------------------------------
+
+test('getChannel: returns null for a channel that has never been seen', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  assert.equal(store.getChannel('g1', 'nochannel'), null);
+});
+
+test('touchChannel: creates a channel entry with Discord facts, counters and the day histogram', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  const channel = store.touchChannel('g1', 'c1', { name: 'general', category: 'Text', topic: 'chat' }, Date.UTC(2026, 8, 20, 10, 0, 0));
+  assert.equal(channel.id, 'c1');
+  assert.equal(channel.name, 'general');
+  assert.equal(channel.category, 'Text');
+  assert.equal(channel.topic, 'chat');
+  assert.equal(channel.messageCount, 1);
+  assert.equal(channel.lastMessageAt, Date.UTC(2026, 8, 20, 10, 0, 0));
+  assert.deepEqual(channel.days, { '2026-09-20': 1 });
+});
+
+test('touchChannel: repeated calls the same UTC day increment the same bucket', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  const facts = { name: 'general', category: null, topic: null };
+  store.touchChannel('g1', 'c1', facts, Date.UTC(2026, 8, 20, 1, 0, 0));
+  const channel = store.touchChannel('g1', 'c1', facts, Date.UTC(2026, 8, 20, 23, 0, 0));
+  assert.equal(channel.messageCount, 2);
+  assert.deepEqual(channel.days, { '2026-09-20': 2 });
+});
+
+test('touchChannel: lastMessageAt keeps the maximum timestamp seen, even out of order', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  const facts = { name: 'general', category: null, topic: null };
+  store.touchChannel('g1', 'c1', facts, 5000);
+  const channel = store.touchChannel('g1', 'c1', facts, 1000); // arrives "late", out of order
+  assert.equal(channel.lastMessageAt, 5000);
+});
+
+test('touchChannel: Discord facts (name/category/topic) refresh on every call', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  store.touchChannel('g1', 'c1', { name: 'general', category: 'Text', topic: 'old topic' }, 1000);
+  const channel = store.touchChannel('g1', 'c1', { name: 'general-renamed', category: null, topic: null }, 2000);
+  assert.equal(channel.name, 'general-renamed');
+  assert.equal(channel.category, null);
+  assert.equal(channel.topic, null);
+});
+
+test('touchChannel: trims the day histogram to the newest 30 dates', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  const facts = { name: 'general', category: null, topic: null };
+  let channel;
+  for (let day = 0; day < 35; day += 1) {
+    channel = store.touchChannel('g1', 'c1', facts, Date.UTC(2026, 0, 1 + day, 12, 0, 0));
+  }
+  const keys = Object.keys(channel.days).sort();
+  assert.equal(keys.length, 30);
+  assert.equal(keys[0], '2026-01-06'); // the oldest 5 days were trimmed
+  assert.equal(keys.at(-1), '2026-02-04');
+});
+
+test('updateChannel: merges purpose/topics/tone and stamps updatedAt', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  store.touchChannel('g1', 'c1', { name: 'general', category: null, topic: null }, 1000);
+  const channel = store.updateChannel('g1', 'c1', { purpose: 'chatter', topics: 'games', tone: 'casual' });
+  assert.equal(channel.purpose, 'chatter');
+  assert.equal(channel.topics, 'games');
+  assert.equal(channel.tone, 'casual');
+  assert.ok(channel.updatedAt);
+});
+
+test('updateChannel: the analyzer cannot overwrite counters or Discord facts', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  store.touchChannel('g1', 'c1', { name: 'general', category: 'Text', topic: 'chat' }, 1000);
+  store.updateChannel('g1', 'c1', {
+    purpose: 'chatter',
+    name: 'hacked-name',
+    messageCount: 999,
+    lastMessageAt: 1,
+    days: { '2000-01-01': 999 },
+  });
+  const channel = store.getChannel('g1', 'c1');
+  assert.equal(channel.purpose, 'chatter');
+  assert.equal(channel.name, 'general', 'name must survive an updateChannel call untouched');
+  assert.equal(channel.messageCount, 1, 'messageCount must survive an updateChannel call untouched');
+  assert.equal(channel.lastMessageAt, 1000, 'lastMessageAt must survive an updateChannel call untouched');
+  assert.deepEqual(channel.days, { '1970-01-01': 1 }, 'days must survive an updateChannel call untouched');
+});
+
+test('updateChannel: creates the channel if it did not already exist', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  const channel = store.updateChannel('g1', 'newchannel', { purpose: 'x' });
+  assert.equal(channel.id, 'newchannel');
+  assert.equal(channel.purpose, 'x');
+});
+
+test('listChannels: lists every channel entry of a guild', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  store.touchChannel('g1', 'c1', { name: 'general', category: null, topic: null }, 1000);
+  store.touchChannel('g1', 'c2', { name: 'random', category: null, topic: null }, 1000);
+  const channels = store.listChannels('g1').map((c) => c.id).sort();
+  assert.deepEqual(channels, ['c1', 'c2']);
+});
+
+test('listChannels: returns an empty array for a guild with no channels yet', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  assert.deepEqual(store.listChannels('unknown-guild'), []);
+});
+
+test('listChannels: includes a channel that is only cached, not yet flushed', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  store.touchChannel('g1', 'c1', { name: 'general', category: null, topic: null }, 1000);
+  assert.deepEqual(store.listChannels('g1').map((c) => c.id), ['c1']);
+});
+
+test('flush + a new store instance: channels survive a "restart"', () => {
+  const dir = tmpDataDir();
+  const storeA = createStore({ dataDir: dir });
+  storeA.touchChannel('g1', 'c1', { name: 'general', category: 'Text', topic: 'chat' }, 1000);
+  storeA.updateChannel('g1', 'c1', { purpose: 'chatter' });
+  storeA.flush();
+
+  const storeB = createStore({ dataDir: dir });
+  const channel = storeB.getChannel('g1', 'c1');
+  assert.equal(channel.name, 'general');
+  assert.equal(channel.purpose, 'chatter');
+  assert.deepEqual(channel.days, { '1970-01-01': 1 });
+});
+
 test('adjustAffinity: persists across store instances', () => {
   const dir = tmpDataDir();
   const storeA = createStore({ dataDir: dir });

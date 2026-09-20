@@ -38,7 +38,7 @@ const ruLabels = {
 };
 
 function msg(id, ts, overrides = {}) {
-  return { id, ts, authorId: 'u1', authorName: 'Nick', content: 'text', ...overrides };
+  return { id, ts, authorId: 'u1', authorName: 'Nick', content: 'text', channelId: 'c1', channelName: 'general', ...overrides };
 }
 
 // --- fill --------------------------------------------------------------
@@ -269,7 +269,8 @@ test('formatTranscript: mode "memory" marks a message addressed to the persona w
     labels,
     mode: 'memory',
   });
-  assert.ok(items[0].text.startsWith('→ [17:32] nick (id:1): text'));
+  const lines = items[0].text.split('\n');
+  assert.equal(lines.at(-1), '→ [17:32] nick (id:1): text');
 });
 
 test('formatTranscript: mode "memory" leaves a non-direct message unmarked', () => {
@@ -282,7 +283,8 @@ test('formatTranscript: mode "memory" leaves a non-direct message unmarked', () 
     labels,
     mode: 'memory',
   });
-  assert.ok(items[0].text.startsWith('[17:32] nick (id:1): text'));
+  const lines = items[0].text.split('\n');
+  assert.equal(lines.at(-1), '[17:32] nick (id:1): text');
   assert.ok(!items[0].text.includes('→'));
 });
 
@@ -309,7 +311,85 @@ test('formatTranscript: mode "memory" for the persona\'s own line omits the id',
     mode: 'memory',
   });
   assert.ok(items[0].text.includes('Nept (you): hi'));
-  assert.ok(!items[0].text.includes('(id:'));
+  const messageLine = items[0].text.split('\n').at(-1);
+  assert.ok(!messageLine.includes('(id:'));
+});
+
+// --- formatTranscript: mode "memory" groups by channel ----------------------
+
+test('formatTranscript: mode "memory" opens with a channel heading before the very first message', () => {
+  const t0 = Date.UTC(2026, 8, 20, 10, 0, 0);
+  const items = formatTranscript([msg('a', t0, { channelId: 'c1', channelName: 'general' })], {
+    timezone: TZ,
+    gapMinutes: 20,
+    maxChars: 100,
+    selfName: 'Nept',
+    labels,
+    mode: 'memory',
+  });
+  assert.ok(items[0].text.startsWith('## #general (id:c1)\n'));
+});
+
+test('formatTranscript: mode "memory" does not repeat the heading while the channel stays the same', () => {
+  const t0 = Date.UTC(2026, 8, 20, 10, 0, 0);
+  const messages = [
+    msg('a', t0, { channelId: 'c1', channelName: 'general' }),
+    msg('b', t0 + MIN, { channelId: 'c1', channelName: 'general' }),
+  ];
+  const items = formatTranscript(messages, { timezone: TZ, gapMinutes: 20, maxChars: 100, selfName: 'Nept', labels, mode: 'memory' });
+  assert.ok(!items[1].text.includes('##'));
+});
+
+test('formatTranscript: mode "memory" opens a new heading when the channel changes', () => {
+  const t0 = Date.UTC(2026, 8, 20, 10, 0, 0);
+  const messages = [
+    msg('a', t0, { channelId: 'c1', channelName: 'general' }),
+    msg('b', t0 + MIN, { channelId: 'c2', channelName: 'random' }),
+  ];
+  const items = formatTranscript(messages, { timezone: TZ, gapMinutes: 20, maxChars: 100, selfName: 'Nept', labels, mode: 'memory' });
+  assert.ok(items[0].text.startsWith('## #general (id:c1)\n'));
+  assert.ok(items[1].text.startsWith('## #random (id:c2)\n'));
+});
+
+test('formatTranscript: mode "memory" re-opens a heading when returning to a previously-seen channel', () => {
+  const t0 = Date.UTC(2026, 8, 20, 10, 0, 0);
+  const messages = [
+    msg('a', t0, { channelId: 'c1', channelName: 'general' }),
+    msg('b', t0 + MIN, { channelId: 'c2', channelName: 'random' }),
+    msg('c', t0 + 2 * MIN, { channelId: 'c1', channelName: 'general' }),
+  ];
+  const items = formatTranscript(messages, { timezone: TZ, gapMinutes: 20, maxChars: 100, selfName: 'Nept', labels, mode: 'memory' });
+  assert.ok(items[2].text.startsWith('## #general (id:c1)\n'));
+});
+
+test('formatTranscript: mode "memory" gap markers are computed within a channel run, not across a switch', () => {
+  const t0 = Date.UTC(2026, 8, 20, 10, 0, 0);
+  const messages = [
+    msg('a', t0, { channelId: 'c1', channelName: 'general' }),
+    // Big gap AND a channel switch: must show only the heading, no "passed" marker.
+    msg('b', t0 + 5 * HOUR, { channelId: 'c2', channelName: 'random' }),
+  ];
+  const items = formatTranscript(messages, { timezone: TZ, gapMinutes: 20, maxChars: 100, selfName: 'Nept', labels, mode: 'memory' });
+  assert.ok(!items[1].text.includes('passed'));
+  assert.ok(items[1].text.startsWith('## #random (id:c2)\n'));
+});
+
+test('formatTranscript: mode "memory" still marks a gap within the same channel run', () => {
+  const t0 = Date.UTC(2026, 8, 20, 10, 0, 0);
+  const messages = [
+    msg('a', t0, { channelId: 'c1', channelName: 'general' }),
+    msg('b', t0 + 25 * MIN, { channelId: 'c1', channelName: 'general' }),
+  ];
+  const items = formatTranscript(messages, { timezone: TZ, gapMinutes: 20, maxChars: 100, selfName: 'Nept', labels, mode: 'memory' });
+  assert.ok(items[1].text.includes('25 min passed'));
+});
+
+test('formatTranscript: chat mode never adds a channel heading, even across a channelId change', () => {
+  const t0 = Date.UTC(2026, 8, 20, 10, 0, 0);
+  const messages = [msg('a', t0, { channelId: 'c1' }), msg('b', t0 + MIN, { channelId: 'c2' })];
+  const items = formatTranscript(messages, { timezone: TZ, gapMinutes: 20, maxChars: 100, selfName: 'Nept', labels });
+  assert.ok(!items[0].text.includes('##'));
+  assert.ok(!items[1].text.includes('##'));
 });
 
 // --- renderTranscript -------------------------------------------------------

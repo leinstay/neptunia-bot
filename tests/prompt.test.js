@@ -36,7 +36,7 @@ function fakeConfig(overrides = {}) {
     context: {
       gapMarkerMinutes: 20,
       maxMessageChars: 800,
-      caps: { interlocutor: 2500, aboutChat: 2500, people: 4000, neighbors: 3000 },
+      caps: { interlocutor: 2500, aboutChat: 2500, people: 4000, neighbors: 3000, server: 2500 },
       vision: { maxImages: 2, tokensPerImage: 1600 },
       ...overrides.context,
     },
@@ -127,10 +127,12 @@ test('buildRequest: blocks appear in the documented order', () => {
       guildMemory: { patterns: 'talks fast', self: ['likes games'] },
       otherProfiles: [{ id: 'p2', names: ['Carl'], character: 'calm' }],
       neighbors: [{ channelName: 'general', messages: [makeMessage(9, NOW - 5 * MIN)] }],
+      channels: [{ id: 'c1', name: 'general', lastMessageAt: NOW, days: {} }],
+      currentChannelId: 'c1',
     }),
   );
   const user = request.messages[1].content;
-  const order = ['<now>', '<about_chat>', '<self_facts>', '<people>', '<other_channels>', '<chat>', '<tempo>', '<task>'];
+  const order = ['<now>', '<about_chat>', '<server>', '<self_facts>', '<people>', '<other_channels>', '<chat>', '<tempo>', '<task>'];
   const positions = order.map((tag) => user.indexOf(tag));
   assert.ok(positions.every((p) => p !== -1), `expected all tags present: ${JSON.stringify(positions)}`);
   for (let i = 1; i < positions.length; i += 1) {
@@ -138,10 +140,11 @@ test('buildRequest: blocks appear in the documented order', () => {
   }
 });
 
-test('buildRequest: empty blocks (about_chat, self_facts, people, other_channels) are omitted', () => {
-  const request = buildRequest(baseInput({ guildMemory: {}, otherProfiles: [], neighbors: [], trigger: null }));
+test('buildRequest: empty blocks (about_chat, server, self_facts, people, other_channels) are omitted', () => {
+  const request = buildRequest(baseInput({ guildMemory: {}, otherProfiles: [], neighbors: [], trigger: null, channels: [] }));
   const user = request.messages[1].content;
   assert.ok(!user.includes('<about_chat>'));
+  assert.ok(!user.includes('<server>'));
   assert.ok(!user.includes('<self_facts>'));
   assert.ok(!user.includes('<people>'));
   assert.ok(!user.includes('<other_channels>'));
@@ -281,6 +284,72 @@ test('buildRequest: config.context.tempo reaches the tempo verdict rendered in <
   const tunedRequest = buildRequest(baseInput({ history, trigger: null, config }));
   const tunedUser = tunedRequest.messages[1].content;
   assert.ok(tunedUser.includes(labels.tempo.verdictLive));
+});
+
+// --- <server>: the channel map -----------------------------------------------
+
+function fakeChannel(id, overrides = {}) {
+  return { id, name: `chan-${id}`, category: null, topic: null, purpose: '', topics: '', tone: '', days: {}, lastMessageAt: null, ...overrides };
+}
+
+test('buildRequest: hides <server> entirely when channels is empty', () => {
+  const request = buildRequest(baseInput({ channels: [], currentChannelId: 'c1' }));
+  assert.ok(!request.messages[1].content.includes('<server>'));
+});
+
+test('buildRequest: the current channel is first and carries labels.server.currentMark', () => {
+  const channels = [
+    fakeChannel('c1', { name: 'general', lastMessageAt: NOW - 5 * MIN }),
+    fakeChannel('c2', { name: 'random', lastMessageAt: NOW }), // more recent, but not the current channel
+  ];
+  const request = buildRequest(baseInput({ channels, currentChannelId: 'c1' }));
+  const user = request.messages[1].content;
+  const serverStart = user.indexOf('<server>');
+  const generalIdx = user.indexOf('# general', serverStart);
+  const randomIdx = user.indexOf('# random', serverStart);
+  assert.ok(generalIdx !== -1 && randomIdx !== -1 && generalIdx < randomIdx, 'current channel renders first');
+  assert.ok(user.includes(`# general${labels.server.currentMark}`));
+});
+
+test('buildRequest: channels other than the current one are ordered by lastMessageAt descending', () => {
+  const channels = [
+    fakeChannel('c1', { name: 'oldest', lastMessageAt: NOW - 3 * MIN }),
+    fakeChannel('c2', { name: 'newest', lastMessageAt: NOW - 1 * MIN }),
+    fakeChannel('c3', { name: 'never-active', lastMessageAt: null }),
+  ];
+  const request = buildRequest(baseInput({ channels, currentChannelId: 'other-channel' }));
+  const user = request.messages[1].content;
+  const serverStart = user.indexOf('<server>');
+  const newestIdx = user.indexOf('# newest', serverStart);
+  const oldestIdx = user.indexOf('# oldest', serverStart);
+  const neverIdx = user.indexOf('# never-active', serverStart);
+  assert.ok(newestIdx < oldestIdx && oldestIdx < neverIdx);
+});
+
+test('buildRequest: every channel is listed even with no purpose/topics/tone, name and activity survive', () => {
+  const channels = [fakeChannel('c1', { name: 'quiet-room', lastMessageAt: null })];
+  const request = buildRequest(baseInput({ channels, currentChannelId: 'c1' }));
+  const user = request.messages[1].content;
+  assert.ok(user.includes('# quiet-room'));
+  assert.ok(user.includes(`activity: ${labels.server.activityDead}`));
+});
+
+test('buildRequest: under a tiny server cap, the map is trimmed but <chat> still survives', () => {
+  const history = [];
+  for (let i = 1; i <= 10; i += 1) {
+    history.push(makeMessage(i, NOW - (11 - i) * MIN, { content: `message number ${i} with some text` }));
+  }
+  const channels = [
+    fakeChannel('c1', { name: 'general', purpose: 'x'.repeat(200), lastMessageAt: NOW }),
+    fakeChannel('c2', { name: 'random', purpose: 'y'.repeat(200), lastMessageAt: NOW - MIN }),
+  ];
+  const config = fakeConfig({ llm: { maxRequestTokens: 220, safetyMargin: 1 } });
+  const request = buildRequest(baseInput({ history, channels, currentChannelId: 'c1', config }));
+
+  assert.equal(request.stats.server.kept, 0);
+  assert.ok(request.stats.chat.kept > 0, 'expected at least some chat lines to survive');
+  const user = request.messages[1].content;
+  assert.ok(user.includes('message number 10'));
 });
 
 // --- language independence --------------------------------------------------

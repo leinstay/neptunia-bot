@@ -67,6 +67,8 @@ function makeConfig(overrides = {}) {
 function slimMessage(overrides) {
   return {
     id: 'm1',
+    channelId: 'c1',
+    channelName: 'general',
     authorId: '1',
     authorName: 'nick',
     self: false,
@@ -258,9 +260,11 @@ test('buildMemoryRequest: a tiny token limit still consumes everything but keeps
   const system = 'S';
   const profilesJson = JSON.stringify({});
   const guildJson = JSON.stringify({ patterns: '', starters: '', injokes: [], self: [] });
+  const channelsJson = JSON.stringify({});
   const profilesBlock = `<existing_profiles>\n${profilesJson}\n</existing_profiles>`;
   const guildBlock = `<existing_guild>\n${guildJson}\n</existing_guild>`;
-  const fixedCost = cost(system) + cost(profilesBlock) + cost(guildBlock);
+  const channelsBlock = `<existing_channels>\n${channelsJson}\n</existing_channels>`;
+  const fixedCost = cost(system) + cost(profilesBlock) + cost(guildBlock) + cost(channelsBlock);
 
   const base = Date.UTC(2026, 0, 1, 0, 0, 0);
   const messages = [0, 1, 2, 3, 4].map((i) =>
@@ -390,6 +394,121 @@ test('buildMemoryRequest: a direct message gets the arrow marker in the transcri
   assert.match(llmMessages[1].content, /→ \[14:32\] nick \(id:1\): hey you/);
 });
 
+// ---- buildMemoryRequest: <existing_channels> + channel grouping -----------
+
+test('buildMemoryRequest: always renders an <existing_channels> block, keyed by channel id', () => {
+  const config = makeConfig();
+  const calibrator = createCalibrator();
+  const messages = [slimMessage({ id: 'm1', channelId: 'c1', channelName: 'general', ts: Date.UTC(2026, 0, 1, 12, 0, 0) })];
+
+  const { messages: llmMessages } = buildMemoryRequest({
+    prompts: { memory: 'sys', labels },
+    config,
+    calibrator,
+    profiles: {},
+    guildMemory: {},
+    channels: { c1: { name: 'general', category: 'Text', topic: 'chat', purpose: 'chatter', topics: 'games', tone: 'casual' } },
+    messages,
+    selfName: 'Nept',
+  });
+
+  const user = llmMessages[1].content;
+  const channels = JSON.parse(/<existing_channels>\n([\s\S]*?)\n<\/existing_channels>/.exec(user)[1]);
+  assert.deepEqual(channels, {
+    c1: { name: 'general', category: 'Text', topic: 'chat', purpose: 'chatter', topics: 'games', tone: 'casual' },
+  });
+});
+
+test('buildMemoryRequest: an empty/absent channels map still renders an empty <existing_channels> block', () => {
+  const config = makeConfig();
+  const calibrator = createCalibrator();
+  const messages = [slimMessage({ id: 'm1', ts: Date.UTC(2026, 0, 1, 12, 0, 0) })];
+
+  const { messages: llmMessages } = buildMemoryRequest({
+    prompts: { memory: 'sys', labels },
+    config,
+    calibrator,
+    profiles: {},
+    guildMemory: {},
+    messages,
+    selfName: 'Nept',
+  });
+
+  assert.match(llmMessages[1].content, /<existing_channels>\n\{\}\n<\/existing_channels>/);
+});
+
+test('buildMemoryRequest: <new_messages> groups messages by channel with a heading on every switch', () => {
+  const config = makeConfig();
+  const calibrator = createCalibrator();
+  const base = Date.UTC(2026, 0, 1, 12, 0, 0);
+  const messages = [
+    slimMessage({ id: 'm1', channelId: 'c1', channelName: 'general', content: 'first', ts: base }),
+    slimMessage({ id: 'm2', channelId: 'c2', channelName: 'random', content: 'second', ts: base + 60_000 }),
+  ];
+
+  const { messages: llmMessages } = buildMemoryRequest({
+    prompts: { memory: 'sys', labels },
+    config,
+    calibrator,
+    profiles: {},
+    guildMemory: {},
+    messages,
+    selfName: 'Nept',
+  });
+
+  const user = llmMessages[1].content;
+  const generalIdx = user.indexOf('## #general (id:c1)');
+  const randomIdx = user.indexOf('## #random (id:c2)');
+  assert.ok(generalIdx !== -1 && randomIdx !== -1 && generalIdx < randomIdx);
+});
+
+// ---- applyMemoryUpdate: channels --------------------------------------------
+
+test('applyMemoryUpdate: merges purpose/topics/tone for a known channel id, clamped to fieldChars', () => {
+  withStore((store) => {
+    const guildId = 'g1';
+    store.touchChannel(guildId, 'c1', { name: 'general', category: null, topic: null }, Date.now());
+    const cfg = { fieldChars: 5, maxDetails: 2, maxInjokes: 2, maxSelfFacts: 2 };
+
+    const update = { channels: { c1: { purpose: 'a long purpose text', topics: 'games', tone: 'chill' } } };
+    const result = applyMemoryUpdate(store, guildId, update, cfg, new Set(), new Set(['c1']));
+
+    assert.equal(result.channels, 1);
+    const channel = store.getChannel(guildId, 'c1');
+    assert.equal(channel.purpose, 'a lon');
+    assert.equal(channel.topics, 'games');
+    assert.equal(channel.tone, 'chill');
+  });
+});
+
+test('applyMemoryUpdate: rejects a channel id outside knownChannelIds', () => {
+  withStore((store) => {
+    const guildId = 'g1';
+    const cfg = { fieldChars: 400, maxDetails: 15, maxInjokes: 15, maxSelfFacts: 20 };
+
+    const result = applyMemoryUpdate(store, guildId, { channels: { c999: { purpose: 'x' } } }, cfg, new Set(), new Set(['c1']));
+
+    assert.equal(result.channels, 0);
+    assert.equal(store.getChannel(guildId, 'c999'), null);
+  });
+});
+
+test('applyMemoryUpdate: a channel field absent from the update leaves the stored value untouched', () => {
+  withStore((store) => {
+    const guildId = 'g1';
+    store.touchChannel(guildId, 'c1', { name: 'general', category: null, topic: null }, Date.now());
+    store.updateChannel(guildId, 'c1', { purpose: 'old purpose', tone: 'calm' });
+    const cfg = { fieldChars: 400, maxDetails: 15, maxInjokes: 15, maxSelfFacts: 20 };
+
+    const result = applyMemoryUpdate(store, guildId, { channels: { c1: { tone: 'excited' } } }, cfg, new Set(), new Set(['c1']));
+
+    assert.equal(result.channels, 1);
+    const channel = store.getChannel(guildId, 'c1');
+    assert.equal(channel.tone, 'excited');
+    assert.equal(channel.purpose, 'old purpose');
+  });
+});
+
 // ---- applyMemoryUpdate ------------------------------------------------------
 
 test('applyMemoryUpdate: clamps string and detail fields to the configured limits', () => {
@@ -468,7 +587,7 @@ test('applyMemoryUpdate: garbage input changes nothing and never throws', () => 
 
     for (const garbage of [null, undefined, 'not an object', 42, [1, 2, 3]]) {
       const result = applyMemoryUpdate(store, guildId, garbage, cfg, new Set(['1']));
-      assert.deepEqual(result, { users: 0, guild: false, self: false, affinity: 0 });
+      assert.deepEqual(result, { users: 0, guild: false, self: false, affinity: 0, channels: 0 });
     }
     assert.deepEqual(store.getGuild(guildId), before);
   });
@@ -485,7 +604,7 @@ test('applyMemoryUpdate: relationships enabled applies and clamps the affinity d
     store.touchUser(guildId, '1', 'nick', Date.now());
 
     const update = { users: { 1: { interests: 'anime', affinity: { delta: 999, reason: 'was really kind' } } } };
-    const result = applyMemoryUpdate(store, guildId, update, MEMORY_CFG, new Set(['1']), RELATIONSHIPS_CFG);
+    const result = applyMemoryUpdate(store, guildId, update, MEMORY_CFG, new Set(['1']), new Set(), RELATIONSHIPS_CFG);
 
     assert.equal(result.users, 1);
     assert.equal(result.affinity, 1);
@@ -501,7 +620,7 @@ test('applyMemoryUpdate: a zero/absent affinity delta does not count as a change
     store.touchUser(guildId, '1', 'nick', Date.now());
 
     const update = { users: { 1: { interests: 'anime', affinity: { delta: 0, reason: 'no change' } } } };
-    const result = applyMemoryUpdate(store, guildId, update, MEMORY_CFG, new Set(['1']), RELATIONSHIPS_CFG);
+    const result = applyMemoryUpdate(store, guildId, update, MEMORY_CFG, new Set(['1']), new Set(), RELATIONSHIPS_CFG);
     assert.equal(result.affinity, 0);
 
     const noAffinityField = applyMemoryUpdate(
@@ -510,6 +629,7 @@ test('applyMemoryUpdate: a zero/absent affinity delta does not count as a change
       { users: { 1: { interests: 'anime again' } } },
       MEMORY_CFG,
       new Set(['1']),
+      new Set(),
       RELATIONSHIPS_CFG,
     );
     assert.equal(noAffinityField.affinity, 0);
@@ -527,6 +647,7 @@ test('applyMemoryUpdate: an affinity delta for an unknown user id is ignored ent
       { users: { 999: { affinity: { delta: 20, reason: 'x' } } } },
       MEMORY_CFG,
       new Set(['1']),
+      new Set(),
       RELATIONSHIPS_CFG,
     );
 
@@ -542,7 +663,7 @@ test('applyMemoryUpdate: relationships disabled (or absent) ignores affinity ent
     store.touchUser(guildId, '1', 'nick', Date.now());
 
     const update = { users: { 1: { affinity: { delta: 50, reason: 'should be ignored' } } } };
-    const resultDisabled = applyMemoryUpdate(store, guildId, update, MEMORY_CFG, new Set(['1']), { enabled: false });
+    const resultDisabled = applyMemoryUpdate(store, guildId, update, MEMORY_CFG, new Set(['1']), new Set(), { enabled: false });
     assert.equal(resultDisabled.affinity, 0);
     assert.equal(store.getUser(guildId, '1').affinity.score, 0);
 
@@ -563,6 +684,7 @@ test('applyMemoryUpdate: a malformed affinity value is ignored, other fields sti
       { users: { 1: { interests: 'games', affinity: 'not an object' } } },
       MEMORY_CFG,
       new Set(['1']),
+      new Set(),
       RELATIONSHIPS_CFG,
     );
 
@@ -617,6 +739,32 @@ test('observe: strips attachment urls before buffering', () => {
     assert.deepEqual(buffered.attachments, [{ kind: 'image', name: 'a.png' }]);
     assert.equal('url' in buffered.attachments[0], false);
     assert.deepEqual(buffered.stickers, ['wow']);
+  });
+});
+
+test('observe: touches the channel entry for both human and the persona\'s own messages', () => {
+  withStore((store) => {
+    const hot = { config: makeConfig() };
+    const updater = createMemoryUpdater({ hot, store, llm: {}, calibrator: createCalibrator(), getSelfName: () => 'Nept' });
+
+    updater.observe('g1', slimMessage({ id: 'm1', channelId: 'c1', channelName: 'general', authorId: '1', self: false }));
+    updater.observe('g1', slimMessage({ id: 'm2', channelId: 'c1', channelName: 'general', authorId: 'self1', self: true, bot: false }));
+
+    const channel = store.getChannel('g1', 'c1');
+    assert.ok(channel);
+    assert.equal(channel.name, 'general');
+    assert.equal(channel.messageCount, 2);
+  });
+});
+
+test('observe: never touches a channel for another bot\'s message', () => {
+  withStore((store) => {
+    const hot = { config: makeConfig() };
+    const updater = createMemoryUpdater({ hot, store, llm: {}, calibrator: createCalibrator(), getSelfName: () => 'Nept' });
+
+    updater.observe('g1', slimMessage({ channelId: 'c1', channelName: 'general', authorId: 'b1', bot: true }));
+
+    assert.equal(store.getChannel('g1', 'c1'), null);
   });
 });
 
