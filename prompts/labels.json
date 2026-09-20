@@ -21,7 +21,7 @@
   },
   "tempo": {
     "counts": "Messages: {last10min} in 10 min · {lastHour} in 1 h · {lastDay} in 24 h",
-    "authors": "Active: {authors}",
+    "authors": "People writing last hour: {authors}",
     "emptyChannel": "No messages in this channel yet.",
     "silenceBeforeTrigger": "The channel was silent for {duration} before this.",
     "lastMessageAgo": "Last message was {duration} ago.",
