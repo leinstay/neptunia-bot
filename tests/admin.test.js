@@ -57,45 +57,55 @@ test('parseCommand: rejects non-string content or an empty prefix', () => {
 // listRules / appendRule / removeRule
 // ---------------------------------------------------------------------------
 
-test('listRules: reads the bullets under the ## Правила heading', () => {
+test('listRules: reads the bullets under an English ## heading', () => {
+  const text = '# Rules file\n\nSome intro.\n\n## Rules\n\n- Rule one\n- Rule two\n';
+  assert.deepEqual(listRules(text), ['Rule one', 'Rule two']);
+});
+
+test('listRules: reads the bullets under a Cyrillic ## heading', () => {
   const text = '# Rules file\n\nSome intro.\n\n## Правила\n\n- Rule one\n- Rule two\n';
   assert.deepEqual(listRules(text), ['Rule one', 'Rule two']);
 });
 
-test('listRules: stops at the next heading so unrelated bullets are excluded', () => {
-  const text = '## Правила\n\n- Rule one\n\n## Other section\n\n- not a rule\n';
+test('listRules: stops at the next heading (any level) so unrelated bullets are excluded', () => {
+  const text = '## Rules\n\n- Rule one\n\n### Other section\n\n- not a rule\n';
   assert.deepEqual(listRules(text), ['Rule one']);
 });
 
-test('listRules: falls back to every top-level bullet when the heading is missing', () => {
+test('listRules: with two ## headings, only the bullets under the last one count', () => {
+  const text = '## Old section\n\n- not a rule\n\n## Rules\n\n- Rule one\n- Rule two\n';
+  assert.deepEqual(listRules(text), ['Rule one', 'Rule two']);
+});
+
+test('listRules: falls back to every top-level bullet when there is no ## heading', () => {
   const text = 'Intro\n- first\n- second\n';
   assert.deepEqual(listRules(text), ['first', 'second']);
 });
 
 test('listRules: an empty or heading-only file has no rules', () => {
   assert.deepEqual(listRules(''), []);
-  assert.deepEqual(listRules('## Правила\n'), []);
+  assert.deepEqual(listRules('## Rules\n'), []);
 });
 
 test('appendRule: appends the bullet as the last line', () => {
-  const text = '## Правила\n\n- existing\n';
-  assert.equal(appendRule(text, 'new one'), '## Правила\n\n- existing\n- new one\n');
+  const text = '## Rules\n\n- existing\n';
+  assert.equal(appendRule(text, 'new one'), '## Rules\n\n- existing\n- new one\n');
 });
 
 test('appendRule: collapses newlines inside the rule into single spaces', () => {
-  const result = appendRule('## Правила\n', 'first line\nsecond line');
+  const result = appendRule('## Rules\n', 'first line\nsecond line');
   assert.equal(listRules(result).at(-1), 'first line second line');
 });
 
-test('appendRule: creates the ## Правила heading when it is missing', () => {
+test('appendRule: creates a ## heading when the file has none at all', () => {
   const result = appendRule('Some preamble.', 'be nice');
-  assert.match(result, /## Правила/);
+  assert.match(result, /^## /m);
   assert.deepEqual(listRules(result), ['be nice']);
 });
 
 test('appendRule: normalizes trailing whitespace to exactly one final newline', () => {
-  const result = appendRule('## Правила\n\n\n\n', 'one rule');
-  assert.equal(result, '## Правила\n- one rule\n');
+  const result = appendRule('## Rules\n\n\n\n', 'one rule');
+  assert.equal(result, '## Rules\n- one rule\n');
   assert.ok(result.endsWith('\n') && !result.endsWith('\n\n'));
 });
 
@@ -105,15 +115,21 @@ test('appendRule: keeps Cyrillic rule text intact and the file ends with the bul
   assert.deepEqual(listRules(result), ['старое правило', 'никогда не говори по-английски']);
 });
 
+test('appendRule: appends under the last of two ## headings', () => {
+  const result = appendRule('## Old\n\n- stale\n\n## Rules\n\n- existing\n', 'new one');
+  assert.equal(result, '## Old\n\n- stale\n\n## Rules\n\n- existing\n- new one\n');
+  assert.deepEqual(listRules(result), ['existing', 'new one']);
+});
+
 test('removeRule: removes the nth bullet in listRules order and reports it', () => {
-  const text = '## Правила\n\n- one\n- two\n- three\n';
+  const text = '## Rules\n\n- one\n- two\n- three\n';
   const result = removeRule(text, 2);
   assert.equal(result.removed, 'two');
   assert.deepEqual(listRules(result.text), ['one', 'three']);
 });
 
 test('removeRule: returns null for n out of range', () => {
-  const text = '## Правила\n\n- only one\n';
+  const text = '## Rules\n\n- only one\n';
   assert.equal(removeRule(text, 0), null);
   assert.equal(removeRule(text, 2), null);
 });
@@ -173,7 +189,7 @@ test('unsetPath: rejects prototype-pollution paths', () => {
 function makeRoot() {
   const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'nep-admin-'));
   fs.mkdirSync(path.join(rootDir, 'prompts'));
-  fs.writeFileSync(path.join(rootDir, 'prompts', 'rules.md'), '## Правила\n\n- be kind\n');
+  fs.writeFileSync(path.join(rootDir, 'prompts', 'rules.md'), '## Rules\n\n- be kind\n');
   return rootDir;
 }
 
@@ -183,8 +199,10 @@ function makeHot(rootDir) {
       bot: { owners: ['42'], commandPrefix: '!nep' },
       llm: { model: 'anthropic/claude-opus-4.6', maxRequestsPerDay: 300 },
     },
-    prompts: { persona: 'who she is' },
+    prompts: { persona: 'who she is', labels: { locale: 'en-US' } },
+    promptSources: { persona: 'base', labels: 'base' },
     promptsDir: path.join(rootDir, 'prompts'),
+    localPromptsDir: path.join(rootDir, 'prompts.local'),
     rootDir,
     reloadConfigCalls: 0,
     reloadPromptsCalls: 0,
@@ -259,6 +277,7 @@ test('handle: ignores a command from a non-owner and writes nothing', async () =
   assert.equal(handled, false);
   assert.equal(message.sent.length, 0);
   assert.equal(fs.readFileSync(path.join(rootDir, 'prompts', 'rules.md'), 'utf8'), before);
+  assert.equal(fs.existsSync(path.join(rootDir, 'prompts.local')), false);
 });
 
 test('handle: ignores a message that is not a command', async () => {
@@ -271,29 +290,46 @@ test('handle: ignores a message that is not a command', async () => {
   assert.equal(await admin.handle(message), false);
 });
 
-test('handle: rule appends the bullet to prompts/rules.md and reloads prompts', async () => {
+test('handle: rule seeds prompts.local/rules.md from the base file, leaving prompts/rules.md untouched', async () => {
   const rootDir = makeRoot();
   const hot = makeHot(rootDir);
   const store = makeStore();
   const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 } });
 
-  const message = makeMessage({ content: '!nep rule Никогда не спойлерь финал', guild: { id: 'g1' } });
+  const baseBefore = fs.readFileSync(path.join(rootDir, 'prompts', 'rules.md'));
+  const message = makeMessage({ content: '!nep rule Never spoil the ending', guild: { id: 'g1' } });
   const handled = await admin.handle(message);
 
   assert.equal(handled, true);
-  const rulesText = fs.readFileSync(path.join(rootDir, 'prompts', 'rules.md'), 'utf8');
-  assert.deepEqual(listRules(rulesText), ['be kind', 'Никогда не спойлерь финал']);
+  const localFile = path.join(rootDir, 'prompts.local', 'rules.md');
+  assert.ok(fs.existsSync(localFile));
+  const rulesText = fs.readFileSync(localFile, 'utf8');
+  assert.deepEqual(listRules(rulesText), ['be kind', 'Never spoil the ending']);
+  // the tracked base file is byte-identical to before
+  assert.deepEqual(fs.readFileSync(path.join(rootDir, 'prompts', 'rules.md')), baseBefore);
   assert.equal(hot.reloadPromptsCalls, 1);
   assert.ok(message.sent[0].includes('Rule added'));
   assert.deepEqual(message.reactions, ['✅']);
 });
 
-test('handle: rules lists the numbered rules; unrule removes one', async () => {
+test('handle: rule creates the prompts.local directory when it does not exist yet', async () => {
   const rootDir = makeRoot();
   const hot = makeHot(rootDir);
   const store = makeStore();
   const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 } });
 
+  assert.equal(fs.existsSync(path.join(rootDir, 'prompts.local')), false);
+  await admin.handle(makeMessage({ content: '!nep rule be nice' }));
+  assert.ok(fs.statSync(path.join(rootDir, 'prompts.local')).isDirectory());
+});
+
+test('handle: rules lists the numbered rules; unrule removes one from the local layer, leaving the base file untouched', async () => {
+  const rootDir = makeRoot();
+  const hot = makeHot(rootDir);
+  const store = makeStore();
+  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 } });
+
+  const baseBefore = fs.readFileSync(path.join(rootDir, 'prompts', 'rules.md'));
   await admin.handle(makeMessage({ content: '!nep rule second rule' }));
   const listed = makeMessage({ content: '!nep rules' });
   await admin.handle(listed);
@@ -301,8 +337,24 @@ test('handle: rules lists the numbered rules; unrule removes one', async () => {
   assert.ok(listed.sent[0].includes('2. second rule'));
 
   await admin.handle(makeMessage({ content: '!nep unrule 1' }));
-  const rulesText = fs.readFileSync(path.join(rootDir, 'prompts', 'rules.md'), 'utf8');
+  const rulesText = fs.readFileSync(path.join(rootDir, 'prompts.local', 'rules.md'), 'utf8');
   assert.deepEqual(listRules(rulesText), ['second rule']);
+  assert.deepEqual(fs.readFileSync(path.join(rootDir, 'prompts', 'rules.md')), baseBefore);
+});
+
+test('handle: rule seeds from an empty text when the base rules.md is missing', async () => {
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'nep-admin-'));
+  fs.mkdirSync(path.join(rootDir, 'prompts'));
+  const hot = makeHot(rootDir);
+  const store = makeStore();
+  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 } });
+
+  const message = makeMessage({ content: '!nep rule only rule' });
+  const handled = await admin.handle(message);
+
+  assert.equal(handled, true);
+  const rulesText = fs.readFileSync(path.join(rootDir, 'prompts.local', 'rules.md'), 'utf8');
+  assert.deepEqual(listRules(rulesText), ['only rule']);
 });
 
 test('handle: set writes an override to config.local.json and reloads config', async () => {

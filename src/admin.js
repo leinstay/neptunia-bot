@@ -1,9 +1,11 @@
 // Owner commands (`!nep …`) so the owner can tune the running bot from
 // Discord without a restart and without ever touching data/: live rules
-// (prompts/rules.md), config overrides (config.local.json, hot-reloaded),
-// status, a manual poke of the spontaneous scheduler, and profile
-// inspection/deletion. This is the ONLY place in the project allowed to
-// delete a stored profile (via store.forgetUser).
+// (prompts.local/rules.md, seeded from prompts/rules.md), config overrides
+// (config.local.json, hot-reloaded), status, a manual poke of the
+// spontaneous scheduler, and profile inspection/deletion. This is the ONLY
+// place in the project allowed to delete a stored profile (via
+// store.forgetUser). The tracked prompts/ layer is never written at runtime
+// — live corrections always land in the untracked prompts.local/ layer.
 //
 // Everything below the pure-function section is thin I/O glued around them;
 // the pure functions (parseCommand, listRules, appendRule, removeRule,
@@ -13,7 +15,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-const RULES_HEADING = '## Правила';
 const FORBIDDEN_SEGMENTS = new Set(['__proto__', 'constructor', 'prototype']);
 const REPLY_CHUNK_CHARS = 1900;
 
@@ -42,15 +43,26 @@ export function parseCommand(content, prefix) {
   return { name: rest.slice(0, spaceIdx).toLowerCase(), args: rest.slice(spaceIdx + 1).trim() };
 }
 
-/** Locate the bullet lines (`- …`) that belong to the rules list. */
+/**
+ * Locate the bullet lines (`- …`) that belong to the rules list: those under
+ * the LAST `## ` heading of the file, in whatever language it is written.
+ * When the file has no `## ` heading at all, every top-level bullet counts.
+ */
 function locateBullets(text) {
   const lines = text.split('\n');
-  const headingIdx = text.indexOf(RULES_HEADING);
+  let headingIdx = -1;
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    if (/^## /.test(lines[i])) {
+      headingIdx = i;
+      break;
+    }
+  }
+
   let start = 0;
   let end = lines.length;
 
   if (headingIdx !== -1) {
-    start = text.slice(0, headingIdx).split('\n').length; // first line after the heading
+    start = headingIdx + 1;
     end = lines.length;
     for (let i = start; i < lines.length; i += 1) {
       if (/^#/.test(lines[i])) {
@@ -68,9 +80,9 @@ function locateBullets(text) {
 }
 
 /**
- * Bullet texts (lines starting with `- `) under the `## Правила` heading, in
- * order. When the heading is missing, every top-level `- ` bullet in the
- * file is returned instead.
+ * Bullet texts (lines starting with `- `) under the last `## ` heading of the
+ * file, in order. When the file has no `## ` heading at all, every top-level
+ * `- ` bullet in the file is returned instead.
  */
 export function listRules(rulesText) {
   const { lines, indices } = locateBullets(String(rulesText ?? ''));
@@ -80,8 +92,10 @@ export function listRules(rulesText) {
 /**
  * Append `- <rule>` as the last line of `rulesText`. Newlines inside `rule`
  * collapse to single spaces (the file's rule list stays one bullet per
- * line). The `## Правила` heading is created first when missing. Trailing
- * whitespace of the result is normalized to exactly one final `\n`.
+ * line). When the file has no `## ` heading at all, a plain `## Rules`
+ * heading is created first — this technical fallback marker, not persona
+ * text. Trailing whitespace of the result is normalized to exactly one
+ * final `\n`.
  */
 export function appendRule(rulesText, rule) {
   let text = String(rulesText ?? '');
@@ -91,8 +105,8 @@ export function appendRule(rulesText, rule) {
     .filter(Boolean)
     .join(' ');
 
-  if (!text.includes(RULES_HEADING)) {
-    text = `${text.replace(/\s*$/, '')}\n\n${RULES_HEADING}\n\n`;
+  if (!/^## /m.test(text)) {
+    text = `${text.replace(/\s*$/, '')}\n\n## Rules\n\n`;
   }
 
   text = `${text.replace(/\s*$/, '')}\n- ${singleLine}`;
@@ -210,7 +224,7 @@ function writeLocalConfig(localPath, value) {
 const HELP_TEXT = [
   'Owner commands:',
   '  help                                 this list',
-  '  rule <text>                          append a bullet to prompts/rules.md',
+  '  rule <text>                          append a bullet to prompts.local/rules.md',
   '  rules                                list the rules, numbered',
   '  unrule <n>                           remove rule #n',
   '  set <dotted.path> <json>             override a config.json value (config.local.json)',
@@ -238,20 +252,34 @@ export function createAdmin({ hot, store, client, spontaneous, calibrator }) {
     return owners.map(String).includes(String(userId));
   }
 
-  function rulesFile() {
+  function localRulesFile() {
+    return path.join(hot.localPromptsDir, 'rules.md');
+  }
+
+  function baseRulesFile() {
     return path.join(hot.promptsDir, 'rules.md');
   }
 
+  /** The effective rules text: the local override when it exists, else the base file, else empty. */
   function readRules() {
-    const file = rulesFile();
-    return fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '';
+    const localFile = localRulesFile();
+    if (fs.existsSync(localFile)) return fs.readFileSync(localFile, 'utf8');
+    const baseFile = baseRulesFile();
+    return fs.existsSync(baseFile) ? fs.readFileSync(baseFile, 'utf8') : '';
+  }
+
+  /** Write `text` to prompts.local/rules.md, creating the directory when needed. The tracked base file is never touched. */
+  function writeLocalRules(text) {
+    const file = localRulesFile();
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, text);
   }
 
   function cmdRule(args) {
     const rule = args.trim();
     if (!rule) throw new Error('usage: rule <text>');
     const next = appendRule(readRules(), rule);
-    fs.writeFileSync(rulesFile(), next);
+    writeLocalRules(next);
     hot.reloadPrompts();
     return `Rule added: ${rule}`;
   }
@@ -267,7 +295,7 @@ export function createAdmin({ hot, store, client, spontaneous, calibrator }) {
     if (!Number.isInteger(n)) throw new Error('usage: unrule <n>');
     const result = removeRule(readRules(), n);
     if (!result) throw new Error(`no rule #${n}`);
-    fs.writeFileSync(rulesFile(), result.text);
+    writeLocalRules(result.text);
     hot.reloadPrompts();
     return `Removed rule #${n}: ${result.removed}`;
   }
@@ -348,8 +376,13 @@ export function createAdmin({ hot, store, client, spontaneous, calibrator }) {
     }
 
     const prompts = hot.prompts ?? {};
+    const sources = hot.promptSources ?? {};
     for (const name of Object.keys(prompts)) {
-      lines.push(`prompt ${name}: ${prompts[name].length} chars`);
+      if (name === 'labels') {
+        lines.push(`prompt labels: locale=${prompts.labels?.locale ?? '-'} source=${sources.labels ?? '-'}`);
+        continue;
+      }
+      lines.push(`prompt ${name}: ${prompts[name].length} chars source=${sources[name] ?? '-'}`);
     }
 
     return lines.join('\n');
