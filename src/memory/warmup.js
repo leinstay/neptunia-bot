@@ -68,10 +68,44 @@ export function orderChannels(candidates) {
   return [...candidates].sort((a, b) => b.lastActivity - a.lastActivity);
 }
 
-/** A conservative, cheap estimate of what one batch's analyzer request will cost. */
+/**
+ * A conservative, cheap estimate of what one batch's analyzer request will
+ * cost, counting only message contents + a flat overhead. Kept only as the
+ * fallback for `estimateBatch` below, for the rare case `memory.estimate`
+ * itself throws — the real pre-batch check is the full request estimate.
+ */
 function estimateBatchCost(batch, memoryCfg) {
   const contentTokens = batch.reduce((sum, m) => sum + estimateTokens(m.content ?? ''), 0);
   return contentTokens + (memoryCfg?.maxOutputTokens ?? 0) + BATCH_OVERHEAD_TOKENS;
+}
+
+/**
+ * What one batch's analyzer request will really cost: the calibrated
+ * input-token estimate of the exact request (`memory.estimate`, which
+ * mirrors what `analyze` builds — prompt, character card, existing
+ * profiles/channels JSON, transcript) plus the output tokens it is allowed
+ * to spend. Falls back to the cheap heuristic if `memory.estimate` itself
+ * throws, so this check alone can never crash a warm-up run.
+ */
+function estimateBatch(guildId, batch, hot, memory) {
+  try {
+    return memory.estimate(guildId, batch) + (hot.config.memory?.maxOutputTokens ?? 0);
+  } catch {
+    return estimateBatchCost(batch, hot.config.memory);
+  }
+}
+
+/**
+ * Charge one analyzer attempt (first try or retry) against the warm-up
+ * budget whenever it carries real usage or a non-zero estimate — i.e.
+ * whenever the provider actually billed something, successful or not. A
+ * genuinely free failure (no completion ever received: `usage: null,
+ * estimated: 0`) charges nothing, matching `analyze`'s contract.
+ */
+function chargeAttempt(st, outcome) {
+  if (outcome.usage == null && !(outcome.estimated > 0)) return;
+  st.tokensUsed += spentTokens(outcome.usage, outcome.estimated);
+  st.requests += 1;
 }
 
 function freshState() {
@@ -91,7 +125,7 @@ function freshState() {
  * @param {object} deps.hot       Live config; read at the moment of use.
  * @param {object} deps.store
  * @param {import('discord.js').Client} deps.client
- * @param {{ analyze: Function }} deps.memory  From createMemoryUpdater().
+ * @param {{ analyze: Function, estimate: Function }} deps.memory  From createMemoryUpdater().
  * @param {() => string | null} deps.getGuildId
  * @param {() => number} [deps.now]
  * @param {(ms: number) => Promise<void>} [deps.sleep]
@@ -152,7 +186,7 @@ export function createWarmup({ hot, store, client, memory, getGuildId, now = Dat
 
     for (let i = channelState.batchesDone; i < batches.length; ) {
       const batch = batches[i];
-      const estimate = estimateBatchCost(batch, hot.config.memory);
+      const estimate = estimateBatch(guildId, batch, hot, memory);
       if (remainingBudget(st, cfg.maxTokens) < estimate) {
         st.done = true;
         st.finishedAt = now();
@@ -161,10 +195,18 @@ export function createWarmup({ hot, store, client, memory, getGuildId, now = Dat
         return consecutiveFailures;
       }
 
+      // Every attempt that reached the provider is charged against the
+      // budget as soon as it comes back, first try or retry, successful or
+      // not — a failure after a completion was received is still billed.
       let outcome = await memory.analyze(guildId, batch, { countAgainstDailyCap: false });
-      if (!outcome.ok) {
+      chargeAttempt(st, outcome);
+      persist();
+
+      if (!outcome.ok && remainingBudget(st, cfg.maxTokens) >= estimate) {
         await sleep(RETRY_DELAY_MS);
         outcome = await memory.analyze(guildId, batch, { countAgainstDailyCap: false });
+        chargeAttempt(st, outcome);
+        persist();
       }
 
       if (!outcome.ok) {
@@ -185,7 +227,10 @@ export function createWarmup({ hot, store, client, memory, getGuildId, now = Dat
           });
           return consecutiveFailures;
         }
-        continue; // retry the same batch
+        // Retry the same batch — unless the billed failure(s) above already
+        // ate the budget this batch needs, in which case the top of the loop
+        // stops the run instead of looping on an attempt it cannot afford.
+        continue;
       }
 
       // Bookkeeping (touchUser/touchChannel) happens only once a batch is
@@ -195,8 +240,6 @@ export function createWarmup({ hot, store, client, memory, getGuildId, now = Dat
       for (const message of batch) touchMemory(store, guildId, message);
 
       consecutiveFailures = 0;
-      st.tokensUsed += spentTokens(outcome.usage, outcome.estimated);
-      st.requests += 1;
       channelState.batchesDone = i + 1;
       channelState.messages += batch.length;
       persist();

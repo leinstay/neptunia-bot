@@ -9,7 +9,7 @@ import path from 'node:path';
 
 import { createStore } from '../src/memory/store.js';
 import { isDue, buildMemoryRequest, applyMemoryUpdate, createMemoryUpdater, touchMemory } from '../src/memory/update.js';
-import { createCalibrator, estimateTokens } from '../src/llm/tokens.js';
+import { createCalibrator, estimateTokens, estimateMessages } from '../src/llm/tokens.js';
 import { formatTranscript } from '../src/discord/format.js';
 import { labels } from './fixtures/labels.js';
 
@@ -951,6 +951,48 @@ test('analyze: swallows a thrown error and returns { ok: false, error }', async 
   });
 });
 
+test('analyze: a completion that fails to parse still reports the real usage/estimated — it was billed', async () => {
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    const hot = { config: makeConfig(), prompts: { memory: 'sys', labels } };
+    const calibrator = createCalibrator();
+    const llm = {
+      complete: async () => ({
+        text: 'not a JSON object at all',
+        usage: { prompt_tokens: 80, completion_tokens: 10 },
+        estimated: 90,
+      }),
+    };
+    const updater = createMemoryUpdater({ hot, store, llm, calibrator, getSelfName: () => 'Nept' });
+
+    const outcome = await updater.analyze(guildId, [slimMessage({ id: 'm1' })]);
+
+    assert.equal(outcome.ok, false);
+    assert.deepEqual(outcome.usage, { prompt_tokens: 80, completion_tokens: 10 });
+    assert.equal(outcome.estimated, 90);
+    assert.equal(outcome.result, null);
+    assert.ok(outcome.error instanceof Error);
+  });
+});
+
+test('analyze: a request that fails to build (e.g. missing labels) reports usage: null, nothing was billed', async () => {
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    const hot = { config: makeConfig(), prompts: { memory: 'sys' } }; // no labels: buildMemoryRequest throws
+    const calibrator = createCalibrator();
+    let calls = 0;
+    const llm = { complete: async () => { calls += 1; return { text: '{}' }; } };
+    const updater = createMemoryUpdater({ hot, store, llm, calibrator, getSelfName: () => 'Nept' });
+
+    const outcome = await updater.analyze(guildId, [slimMessage({ id: 'm1' })]);
+
+    assert.equal(outcome.ok, false);
+    assert.equal(outcome.usage, null);
+    assert.equal(outcome.estimated, 0);
+    assert.equal(calls, 0, 'the LLM is never called when the request cannot be built');
+  });
+});
+
 test('analyze: forwards countAgainstDailyCap to llm.complete, default true', async () => {
   await withStoreAsync(async (store) => {
     const guildId = 'g1';
@@ -998,5 +1040,68 @@ test('run: does nothing when prompts.memory is missing', async () => {
 
     assert.equal(calls, 0);
     assert.equal(store.getBuffer(guildId).length, 1);
+  });
+});
+
+// ---- estimate ---------------------------------------------------------------
+
+test('estimate: matches the calibrated cost of the exact request analyze would build', () => {
+  withStore((store) => {
+    const guildId = 'g1';
+    store.touchUser(guildId, '1', 'nick', Date.now());
+    store.updateUser(guildId, '1', { character: 'cheerful, talks a lot about anime and games' });
+    const hot = { config: makeConfig(), prompts: { memory: 'memory system prompt', labels } };
+    const calibrator = createCalibrator();
+    const updater = createMemoryUpdater({ hot, store, llm: {}, calibrator, getSelfName: () => 'Nept' });
+
+    const messages = [
+      slimMessage({ id: 'm1', authorId: '1', channelId: 'c1', channelName: 'general', content: 'hello there', ts: Date.UTC(2026, 0, 1, 12, 0, 0) }),
+    ];
+
+    const got = updater.estimate(guildId, messages);
+
+    const { messages: llmMessages } = buildMemoryRequest({
+      prompts: hot.prompts,
+      config: hot.config,
+      calibrator,
+      profiles: { 1: store.getUser(guildId, '1') },
+      guildMemory: store.getGuild(guildId),
+      channels: {},
+      messages,
+      selfName: 'Nept',
+    });
+    const expected = calibrator.apply(estimateMessages(llmMessages));
+
+    assert.equal(got, expected);
+    assert.ok(got > 0);
+  });
+});
+
+test('estimate: never touches the buffer or the store beyond reading it', () => {
+  withStore((store) => {
+    const guildId = 'g1';
+    const hot = { config: makeConfig(), prompts: { memory: 'sys', labels } };
+    const calibrator = createCalibrator();
+    const updater = createMemoryUpdater({ hot, store, llm: {}, calibrator, getSelfName: () => 'Nept' });
+    store.pushBuffer(guildId, slimMessage({ id: 'buffered' }), 100);
+
+    updater.estimate(guildId, [slimMessage({ id: 'm1' })]);
+
+    assert.equal(store.getBuffer(guildId).length, 1, 'the live buffer is untouched');
+  });
+});
+
+test('estimate: falls back to a content-only heuristic when the request cannot be built', () => {
+  withStore((store) => {
+    const guildId = 'g1';
+    const hot = { config: makeConfig(), prompts: {} }; // no labels: buildMemoryRequest throws
+    const calibrator = createCalibrator();
+    const updater = createMemoryUpdater({ hot, store, llm: {}, calibrator, getSelfName: () => 'Nept' });
+
+    const messages = [slimMessage({ content: 'hello world' }), slimMessage({ id: 'm2', content: 'second one' })];
+    const got = updater.estimate(guildId, messages);
+
+    const expected = estimateTokens('hello world') + estimateTokens('second one');
+    assert.equal(got, expected);
   });
 });

@@ -7,7 +7,7 @@
 // a failed update just leaves the buffer alone and backs off for a while.
 
 import { fitSections } from '../llm/budget.js';
-import { estimateTokens } from '../llm/tokens.js';
+import { estimateTokens, estimateMessages } from '../llm/tokens.js';
 import { formatTranscript, renderTranscript } from '../discord/format.js';
 import { parseJsonObject } from '../llm/parse.js';
 import { log } from '../log.js';
@@ -324,12 +324,42 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
   }
 
   /**
+   * The stored profiles/channels `analyze()` and `estimate()` both need for
+   * `messages`, plus the distinct author/channel ids they were built from
+   * (kept as strings-to-be via `knownUserIds`/`knownChannelIds` downstream).
+   */
+  function collectContext(guildId, messages) {
+    const authorIds = [...new Set(messages.filter((m) => !m.self).map((m) => m.authorId))];
+    const profiles = {};
+    for (const id of authorIds) {
+      const profile = store.getUser(guildId, id);
+      if (profile) profiles[id] = profile;
+    }
+
+    const channelIds = [...new Set(messages.map((m) => m.channelId).filter((id) => id != null))];
+    const channels = {};
+    for (const id of channelIds) {
+      const channel = store.getChannel(guildId, id);
+      if (channel) channels[id] = channel;
+    }
+
+    return { authorIds, profiles, channelIds, channels };
+  }
+
+  /**
    * The one analyzer code path: build the memory-update request from
    * `messages`, send it to the LLM, parse the reply and apply it to the
    * store. Used both by `run()` (a batch shifted off the live buffer) and by
    * the memory warm-up (history batches, see src/memory/warmup.js). Never
    * touches the live buffer and never throws — a failure is reported in the
    * returned `error`, not raised.
+   *
+   * `usage`/`estimated` reflect a completion whenever one was actually
+   * received from the provider — including when `ok: false` because parsing
+   * or applying the answer failed afterwards, since those tokens were billed
+   * regardless. Only a failure before/without a completion (a build error,
+   * `TokenLimitError`, a network/provider error, a missing prompt) reports
+   * `usage: null, estimated: 0`: nothing was spent.
    *
    * @param {string} guildId
    * @param {object[]} messages  Slim messages (oldest first) to summarize; NOT read from or removed off any buffer.
@@ -339,28 +369,17 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
    * @returns {Promise<{ ok: boolean, usage: object|null, estimated: number, result: object|null, error?: Error }>}
    */
   async function analyze(guildId, messages, { countAgainstDailyCap = true } = {}) {
+    const cfg = hot.config.memory;
+    const promptText = hot.prompts.memory;
+    if (!promptText) {
+      log.warn('memory: no memory prompt configured, skipping', { guildId });
+      return { ok: false, usage: null, estimated: 0, result: null };
+    }
+
+    const { authorIds, profiles, channelIds, channels } = collectContext(guildId, messages);
+
+    let completion;
     try {
-      const cfg = hot.config.memory;
-      const promptText = hot.prompts.memory;
-      if (!promptText) {
-        log.warn('memory: no memory prompt configured, skipping', { guildId });
-        return { ok: false, usage: null, estimated: 0, result: null };
-      }
-
-      const authorIds = [...new Set(messages.filter((m) => !m.self).map((m) => m.authorId))];
-      const profiles = {};
-      for (const id of authorIds) {
-        const profile = store.getUser(guildId, id);
-        if (profile) profiles[id] = profile;
-      }
-
-      const channelIds = [...new Set(messages.map((m) => m.channelId).filter((id) => id != null))];
-      const channels = {};
-      for (const id of channelIds) {
-        const channel = store.getChannel(guildId, id);
-        if (channel) channels[id] = channel;
-      }
-
       const { messages: llmMessages } = buildMemoryRequest({
         prompts: hot.prompts,
         config: hot.config,
@@ -372,12 +391,19 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
         selfName: getSelfName(guildId),
       });
 
-      const completion = await llm.complete(llmMessages, {
+      completion = await llm.complete(llmMessages, {
         model: cfg.model ?? undefined,
         maxOutputTokens: cfg.maxOutputTokens,
         temperature: 0.3,
         countAgainstDailyCap,
       });
+    } catch (err) {
+      // Nothing was billed: the request never left this process, or the
+      // provider never returned a completion.
+      return { ok: false, usage: null, estimated: 0, result: null, error: err };
+    }
+
+    try {
       const update = parseJsonObject(completion.text);
       const knownUserIds = new Set(authorIds.map(String));
       const knownChannelIds = new Set(channelIds.map(String));
@@ -389,7 +415,43 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
 
       return { ok: true, usage: completion.usage ?? null, estimated: completion.estimated ?? 0, result };
     } catch (err) {
-      return { ok: false, usage: null, estimated: 0, result: null, error: err };
+      // The completion arrived (and was billed) but its answer was garbage:
+      // report the real usage/estimated so a caller charging a budget still
+      // charges it.
+      return { ok: false, usage: completion.usage ?? null, estimated: completion.estimated ?? 0, result: null, error: err };
+    }
+  }
+
+  /**
+   * Calibrated input-token estimate of the exact memory-update request
+   * `analyze` would send for `messages`, built through the same
+   * `buildMemoryRequest` path — so it carries the memory prompt, the
+   * character card and the stored profiles/channels JSON, not just the raw
+   * message contents. Used by the warm-up (src/memory/warmup.js) to judge
+   * whether a batch is affordable before spending a real request on it.
+   * Never throws: if the request cannot even be built (e.g. broken prompts),
+   * falls back to a cheap content-only heuristic so that check alone cannot
+   * crash a warm-up run.
+   * @param {string} guildId
+   * @param {object[]} messages  Slim messages (oldest first), same shape `analyze` expects.
+   * @returns {number}
+   */
+  function estimate(guildId, messages) {
+    try {
+      const { profiles, channels } = collectContext(guildId, messages);
+      const { messages: llmMessages } = buildMemoryRequest({
+        prompts: hot.prompts,
+        config: hot.config,
+        calibrator,
+        profiles,
+        guildMemory: store.getGuild(guildId),
+        channels,
+        messages,
+        selfName: getSelfName(guildId),
+      });
+      return calibrator.apply(estimateMessages(llmMessages));
+    } catch {
+      return messages.reduce((sum, m) => sum + estimateTokens(m.content ?? ''), 0);
     }
   }
 
@@ -434,5 +496,5 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
     await Promise.all(jobs);
   }
 
-  return { observe, tick, run, analyze };
+  return { observe, tick, run, analyze, estimate };
 }

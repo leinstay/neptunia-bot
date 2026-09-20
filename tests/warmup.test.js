@@ -142,7 +142,7 @@ function fakeHot(overrides = {}) {
   return {
     config: {
       bot: { channels: { allow: [], deny: [] } },
-      memory: { maxOutputTokens: 100 },
+      memory: { maxOutputTokens: 100, ...overrides.memory },
       warmup: {
         enabled: true,
         maxTokens: 1_000_000,
@@ -156,15 +156,26 @@ function fakeHot(overrides = {}) {
   };
 }
 
-/** A scripted memory.analyze: `script(callIndex, batch)` returns the outcome for that call. */
-function fakeMemory(script) {
+/**
+ * A scripted memory.analyze: `script(callIndex, batch)` returns the outcome
+ * for that call. `estimateFn(guildId, batch)` fakes the calibrated
+ * full-request estimate `estimate()` would return; small by default so it
+ * never gets in the way of tests that are not about the budget itself.
+ */
+function fakeMemory(script, estimateFn = () => 10) {
   const calls = [];
+  const estimateCalls = [];
   return {
     calls,
+    estimateCalls,
     analyze: async (guildId, batch, opts) => {
       const outcome = script(calls.length, batch, opts);
       calls.push({ guildId, batch, opts });
       return outcome;
+    },
+    estimate: (guildId, batch) => {
+      estimateCalls.push({ guildId, batch });
+      return estimateFn(guildId, batch);
     },
   };
 }
@@ -282,6 +293,131 @@ test('run: stops once the budget is spent, never starting a batch it cannot affo
     assert.equal(result.tokensUsed, 5000);
     assert.equal(store.state.data.warmup.channels.c1.batchesDone, 1);
     assert.equal(store.state.data.warmup.channels.c1.done, false, 'the channel itself is not finished, just the budget');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('run: the pre-batch check uses the full request estimate, not just message contents', async () => {
+  const dir = tempDir();
+  try {
+    const store = createStore({ dataDir: dir });
+    const now = Date.now();
+    // Tiny message contents: a content-only heuristic would judge this batch
+    // dirt cheap. A fake memory.estimate reporting the true (large) cost of
+    // the full request must still stop the run before any batch runs.
+    const history = makeHistory({ count: 2, startTs: now - 60_000, spacingMs: 1000, authorId: 'u1' });
+    const channel = fakeChannel('c1', history);
+    const guild = fakeGuild('g1', [channel]);
+    const client = fakeClient(guild);
+    const hot = fakeHot({ warmup: { batchMessages: 10, maxTokens: 1000 } });
+    const memory = fakeMemory(alwaysOk(), () => 5000);
+
+    const warmup = createWarmup({ hot, store, client, memory, getGuildId: () => 'g1', sleep: fakeSleep() });
+    const result = await warmup.run();
+
+    assert.equal(memory.calls.length, 0, 'the batch never runs: the full estimate already exceeds the budget');
+    assert.equal(memory.estimateCalls.length, 1);
+    assert.equal(result.done, true);
+    assert.equal(result.tokensUsed, 0);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('run: a failed-but-billed attempt still charges the budget and counts as a request', async () => {
+  const dir = tempDir();
+  try {
+    const store = createStore({ dataDir: dir });
+    const now = Date.now();
+    const history = makeHistory({ count: 2, startTs: now - 60_000, spacingMs: 1000, authorId: 'u1' });
+    const channel = fakeChannel('c1', history);
+    const guild = fakeGuild('g1', [channel]);
+    const client = fakeClient(guild);
+    // A budget that affords exactly the try + the retry (each billed 120)
+    // but not a third attempt, so the run stops for lack of budget right
+    // after this one cycle instead of looping into the 3-consecutive-failure
+    // abort — keeping this test about charging, not about the abort path.
+    const hot = fakeHot({ warmup: { batchMessages: 10, maxTokens: 250 } });
+    // Both attempts reach the provider and are billed, but parsing/applying
+    // the reply keeps failing (ok: false) — the tokens were spent regardless.
+    const memory = fakeMemory(() => ({
+      ok: false,
+      usage: { prompt_tokens: 100, completion_tokens: 20 },
+      estimated: 120,
+      result: null,
+    }));
+    const sleep = fakeSleep();
+
+    const warmup = createWarmup({ hot, store, client, memory, getGuildId: () => 'g1', sleep });
+    const result = await warmup.run();
+
+    assert.equal(memory.calls.length, 2, 'try + retry, both billed');
+    assert.equal(result.tokensUsed, 240, 'both billed attempts are charged, even though neither succeeded');
+    assert.equal(store.state.data.warmup.requests, 2);
+    assert.equal(store.state.data.warmup.channels.c1.batchesDone, 0, 'the batch itself never succeeded');
+    assert.equal(result.done, true, 'stopped for lack of budget, not aborted');
+    assert.equal(result.aborted, false);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('run: billed failures can exhaust the budget and stop with done: true instead of looping', async () => {
+  const dir = tempDir();
+  try {
+    const store = createStore({ dataDir: dir });
+    const now = Date.now();
+    const history = makeHistory({ count: 2, startTs: now - 60_000, spacingMs: 1000, authorId: 'u1' });
+    const channel = fakeChannel('c1', history);
+    const guild = fakeGuild('g1', [channel]);
+    const client = fakeClient(guild);
+    // The estimate (900) plus this batch's real, billed cost (1000) exactly
+    // spends the whole budget on the very first attempt, so the retry is
+    // skipped as unaffordable and the run stops on the next budget check
+    // instead of ever reaching MAX_CONSECUTIVE_FAILURES.
+    const hot = fakeHot({ warmup: { batchMessages: 10, maxTokens: 1000 }, memory: { maxOutputTokens: 0 } });
+    const memory = fakeMemory(
+      () => ({ ok: false, usage: { prompt_tokens: 900, completion_tokens: 100 }, estimated: 1000, result: null }),
+      () => 900,
+    );
+    const sleep = fakeSleep();
+
+    const warmup = createWarmup({ hot, store, client, memory, getGuildId: () => 'g1', sleep });
+    const result = await warmup.run();
+
+    assert.equal(memory.calls.length, 1, 'the billed failure alone exhausts the budget: no retry, no second cycle');
+    assert.equal(sleep.calls.length, 0, 'the retry is skipped, never slept on');
+    assert.equal(result.done, true);
+    assert.equal(result.aborted, false);
+    assert.equal(result.tokensUsed, 1000);
+    assert.equal(result.requests, 1);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('run: a retry is skipped once the remaining budget can no longer afford it', async () => {
+  const dir = tempDir();
+  try {
+    const store = createStore({ dataDir: dir });
+    const now = Date.now();
+    const history = makeHistory({ count: 2, startTs: now - 60_000, spacingMs: 1000, authorId: 'u1' });
+    const channel = fakeChannel('c1', history);
+    const guild = fakeGuild('g1', [channel]);
+    const client = fakeClient(guild);
+    const hot = fakeHot({ warmup: { batchMessages: 10, maxTokens: 1000 }, memory: { maxOutputTokens: 0 } });
+    const memory = fakeMemory(
+      () => ({ ok: false, usage: { prompt_tokens: 900, completion_tokens: 100 }, estimated: 1000, result: null }),
+      () => 900,
+    );
+    const sleep = fakeSleep();
+
+    const warmup = createWarmup({ hot, store, client, memory, getGuildId: () => 'g1', sleep });
+    await warmup.run();
+
+    assert.equal(memory.calls.length, 1, 'only the first attempt ran; the retry was unaffordable');
+    assert.equal(sleep.calls.length, 0, 'no sleep(5000) before a retry that cannot be paid for');
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
