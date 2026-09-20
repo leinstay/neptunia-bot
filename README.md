@@ -192,7 +192,7 @@ The system prompt handles sounding human, so the card is purely personality. Giv
 | `batchMessages` | `60` | Ideal batch size |
 | `minBatchMessages` | `15` | Min messages before update |
 | `maxBatchAgeMinutes` | `180` | Force update after (min) |
-| `maxOutputTokens` | `4000` | Max analyzer output tokens |
+| `maxOutputTokens` | `8000` | Max analyzer output tokens |
 | `fieldChars` | `400` | Profile field limit (chars) |
 | `maxDetails` | `15` | Max detail items per profile |
 | `maxInjokes` | `15` | Max server in-jokes |
@@ -208,9 +208,11 @@ The system prompt handles sounding human, so the card is purely personality. Giv
 
 ## Warm-up
 
-With `warmup.enabled: true`, the bot reads channel history before speaking. It feeds messages oldest-first through the memory analyzer in large batches, building profiles, attitudes, the channel map and in-jokes. The bot stays mute until warm-up finishes; incoming messages are still observed and owner commands work.
+With `warmup.enabled: true`, the bot reads channel history before speaking. It feeds messages oldest-first through the memory analyzer in large batches, building profiles, attitudes, the channel map and in-jokes. The bot stays mute until warm-up finishes (including runs started by command); incoming messages are still observed and owner commands work.
 
-The budget `warmup.maxTokens` is counted from the provider's reported usage. Warm-up is exempt from `llm.maxRequestsPerDay` but the per-request cap applies. Progress persists across restarts. Three failed batches in a row abort without leaving the bot mute.
+The budget `warmup.maxTokens` is counted from the provider's reported usage. Warm-up is exempt from `llm.maxRequestsPerDay` but the per-request cap applies. Progress persists across restarts. A batch whose analysis is truncated at `memory.maxOutputTokens` is split in half and the halves analyzed separately; splitting recurses down to 20 messages, then the piece is skipped and counted. Other failures log their reason; three in a row abort without leaving the bot mute. Progress is logged per batch (`warmup: batch done`) and per channel (`warmup: channel done`).
+
+`warmup stop` pauses after the batch in flight; `warmup run` resumes from the saved progress. Suggested flow for a first run: leave `warmup.enabled` off, plan the channels with the `warmup` commands, check `warmup plan`, then `warmup run`.
 
 **Cost note.** The warm-up budget is real money. Set `memory.model` to a cheaper model for the analyzer and warm-up.
 
@@ -219,21 +221,25 @@ The budget `warmup.maxTokens` is counted from the provider's reported usage. War
 | Key | Default | Meaning |
 |---|---|---|
 | `enabled` | `false` | Warm up before talking |
-| `maxTokens` | `1000000` | Token budget (input + output) |
-| `messagesPerChannel` | `2000` | Max messages to read per channel |
+| `maxTokens` | `1000000` | Token budget (input + output); caps the run regardless of the plan |
+| `messagesPerChannel` | `2000` | Default depth: messages read per channel, counting back from the newest |
 | `batchMessages` | `150` | Messages per analyzer batch |
 | `maxAgeDays` | `0` | Max message age in days (0 = unlimited) |
-| `channels` | `[]` | Channels to warm up (empty = all readable) |
+| `primaryChannelId` | `""` | Channel read first, so the first picture of the server comes from it |
+| `channelDepths` | `{}` | Per-channel depth override by channel id (`0` skips a channel); `messagesPerChannel` is the fallback |
+| `onlyListed` | `false` | Read only channels in `channelDepths` plus the primary; skip everything else |
+
+Read order: the primary channel, then listed channels sorted by depth (ties broken by recent activity), then the rest by recent activity. A channel's history window is frozen when it is first read -- changing its depth afterwards needs `warmup reset`.
 
 ## Dry run
 
 With `features.dryRun: true` the bot runs the full pipeline -- warm-up, memory, triggers, LLM calls -- but never sends a message or reaction. Output goes to the log (`dry-run: would send` / `dry-run: would react`). Set `bot.dryRunChannelId` to a private channel for a readable mirror; messages in that channel are ignored by the bot.
 
-First run on a new server: enable `warmup.enabled` and `features.dryRun`, watch the mirror or `journalctl -u neptunia-bot -f`, tune live, then `!nep set features.dryRun false`.
+First run on a new server: enable `features.dryRun`, plan the warm-up with `warmup` commands, watch the mirror or `journalctl -u neptunia-bot -f`, tune live, then `!nep set features.dryRun false`.
 
 ## Owner commands
 
-Send in a DM or channel. Replies come by DM; in a channel, a checkmark or cross reaction confirms the result.
+Send in a DM or channel. Replies come by DM; in a channel, a checkmark or cross reaction confirms the result. Owner commands also work inside the dry-run mirror channel; everything else posted there is ignored.
 
 | Command | What it does |
 |---|---|
@@ -250,8 +256,16 @@ Send in a DM or channel. Replies come by DM; in a channel, a checkmark or cross 
 | `affinity <@user\|id> [score] [reason]` | Show or set attitude (-100..100) |
 | `forget <@user\|id>` | Delete a stored profile |
 | `warmup` | Show warm-up status |
-| `warmup run` | Start warm-up regardless of warmup.enabled |
-| `warmup reset` | Clear warm-up progress (memory untouched) |
+| `warmup plan` | Show the ordered read plan |
+| `warmup channel <#chan\|id> <depth\|default>` | Set a channel's read depth |
+| `warmup primary <#chan\|id\|none>` | Set the channel read first |
+| `warmup only <on\|off>` | Read only channels with a set depth |
+| `warmup depth <n>` | Default read depth (1..1000000) |
+| `warmup budget <tokens>` | Warm-up token budget (`500k` / `10m` accepted) |
+| `warmup output <tokens>` | Analyzer output limit (256..32000) |
+| `warmup run` | Start or resume the warm-up now |
+| `warmup stop` | Pause after the batch in flight |
+| `warmup reset` | Clear warm-up progress (refused while running) |
 
 ## How a turn works
 
