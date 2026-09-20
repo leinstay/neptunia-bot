@@ -26,13 +26,16 @@
     "audio": "[audio: {name}, {duration}]",
     "link": "[link: {site} — {title}]",
     "linkText": "[link: {site} — {title} | {text}]",
+    "thumbnailDescribed": "[preview: {text}]",
     "filePreview": "[file: {name} | {text}]",
     "forwarded": "[forwarded: {text}]",
     "forwardedFrom": "[forwarded from #{channel}: {text}]",
     "frameAttached": "[still frame: attached image {n}]",
     "unknownDuration": "?:??",
     "file": "[file: {name}]",
-    "sticker": "[sticker: {name}]"
+    "sticker": "[sticker: {name}]",
+    "stickerDescribed": "[sticker: {name} — {text}]",
+    "emojiDescribed": "[:{name}: {text}]"
   },
   "senses": {
     "imageSee": "Pictures marked as attached you see yourself.",
@@ -43,8 +46,12 @@
     "videoDescribed": "Videos show a name, a duration and a description of a single still frame — you have never watched or heard any video.",
     "videoBlind": "Videos show a name and a duration — you have never watched or heard any video.",
     "voice": "Voice messages and audio files show only a duration — you cannot hear them.",
-    "links": "Links show the site, the title and sometimes a text snippet — you cannot open the page.",
-    "files": "Text files show their beginning; other files show only a name."
+    "links": "Links show the site, the title and sometimes a text snippet; a preview picture may come described — you cannot open the page.",
+    "files": "Text files show their beginning; other files show only a name.",
+    "stickerSee": "A sticker marked as attached you see yourself.",
+    "stickerDescribed": "Stickers and custom emoji come with a short description from a helper.",
+    "stickerBlind": "Stickers and custom emoji appear as a name — you cannot see what they depict.",
+    "lottie": "Discord's built-in animated stickers are Lottie animations, not pictures — they are always only a name."
   },
   "tempo": {
     "counts": "Messages: {last10min} in 10 min · {lastHour} in 1 h · {lastDay} in 24 h",

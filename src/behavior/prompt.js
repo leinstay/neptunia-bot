@@ -221,6 +221,18 @@ function renderSenses(config, labels) {
   lines.push(describedOn ? senses.imageDescribed : senses.imageBlind);
   lines.push(describedOn ? senses.gifDescribed : senses.gifBlind);
   lines.push(describedOn ? senses.videoDescribed : senses.videoBlind);
+
+  // Stickers get their own lines (a picture-format one behaves like an
+  // image); senses.lottie only shows up alongside them -- an animated
+  // built-in (Lottie) sticker is never a picture, name only, regardless of
+  // vision/mediaDescriptions.
+  const stickerLines = [];
+  if (visionOn) stickerLines.push(senses.stickerSee);
+  stickerLines.push(describedOn ? senses.stickerDescribed : senses.stickerBlind);
+  const shownStickerLines = stickerLines.filter(Boolean);
+  lines.push(...shownStickerLines);
+  if (shownStickerLines.length > 0) lines.push(senses.lottie);
+
   lines.push(senses.voice, senses.links, senses.files);
   return lines.filter(Boolean).join('\n');
 }
@@ -354,12 +366,20 @@ export function buildRequest(input) {
     textFallback = assembleUser({ now, timezone, labels, sensesText, kept, tempoText, task, chatItems: keptChatBlind });
   }
 
+  // A sticker's URL is already fully sized (see src/discord/media.js
+  // stickerUrl: `size=`, not width/height/format) -- the media proxy must
+  // never touch it again.
+  const pictureUrl = (picture) =>
+    picture.kind === 'sticker'
+      ? picture.url
+      : mediaProxyUrl(picture.url, { width: visionCfg.imageSize, height: visionCfg.imageSize, format: 'webp' });
+
   const content = pictures.length
     ? [
         { type: 'text', text: user },
         ...pictures.map((picture) => ({
           type: 'image_url',
-          image_url: { url: mediaProxyUrl(picture.url, { width: visionCfg.imageSize, height: visionCfg.imageSize, format: 'webp' }) },
+          image_url: { url: pictureUrl(picture) },
         })),
       ]
     : user;

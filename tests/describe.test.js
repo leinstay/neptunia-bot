@@ -213,6 +213,80 @@ test('describe: an image request resizes through the media proxy at media.imageS
   assert.equal(new URL(sentUrl).searchParams.get('width'), '256');
 });
 
+// --- F17: stickers, custom emoji, link thumbnails -------------------------
+
+test('describe: a sticker item is sent as-is, never through the media proxy (already sized via ?size=)', async () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  const hot = fakeHot();
+  const llm = fakeLlm({ text: 'a frog gives a thumbs up' });
+  const describer = createDescriber({ hot, store, llm });
+
+  const stickerPicture = pictureItem('sticker:s1', { kind: 'sticker', url: 'https://media.discordapp.net/stickers/s1.png?size=160' });
+  await describer.describe('g1', stickerPicture);
+  const sentUrl = llm.calls[0].messages[1].content[0].image_url.url;
+  assert.equal(sentUrl, 'https://media.discordapp.net/stickers/s1.png?size=160');
+});
+
+test('describe: an emoji item is sent as-is, never through the media proxy (cdn.discordapp.com host must survive)', async () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  const hot = fakeHot();
+  const llm = fakeLlm({ text: 'a surprised cat face' });
+  const describer = createDescriber({ hot, store, llm });
+
+  const emojiPicture = pictureItem('emoji:e1', { kind: 'emoji', url: 'https://cdn.discordapp.com/emojis/e1.webp?size=96' });
+  await describer.describe('g1', emojiPicture);
+  const sentUrl = llm.calls[0].messages[1].content[0].image_url.url;
+  assert.equal(sentUrl, 'https://cdn.discordapp.com/emojis/e1.webp?size=96');
+});
+
+test('describe: a link-thumbnail item resizes through the media proxy exactly like an image', async () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  const hot = fakeHot({ config: { features: { mediaDescriptions: true }, media: { imageSize: 256 } } });
+  const llm = fakeLlm({ text: 'a cat plays piano' });
+  const describer = createDescriber({ hot, store, llm });
+
+  const linkPicture = pictureItem('link:abcd1234', { kind: 'link', url: 'https://cdn.discordapp.com/x/thumb.jpg' });
+  await describer.describe('g1', linkPicture);
+  const sentUrl = llm.calls[0].messages[1].content[0].image_url.url;
+  assert.equal(new URL(sentUrl).searchParams.get('width'), '256');
+});
+
+test('describe: a link-thumbnail item on a non-Discord host (e.g. i.ytimg.com) is passed through untouched', async () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  const hot = fakeHot();
+  const llm = fakeLlm({ text: 'a cat plays piano' });
+  const describer = createDescriber({ hot, store, llm });
+
+  const linkPicture = pictureItem('link:abcd1234', { kind: 'link', url: 'https://i.ytimg.com/vi/xyz/hq.jpg' });
+  await describer.describe('g1', linkPicture);
+  const sentUrl = llm.calls[0].messages[1].content[0].image_url.url;
+  assert.equal(sentUrl, 'https://i.ytimg.com/vi/xyz/hq.jpg');
+});
+
+test('describe: a cache HIT refreshes the entry\'s recency (sticker/emoji/link keys are ordinary LRU entries)', async () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  const hot = fakeHot({ config: { features: { mediaDescriptions: true }, media: { cacheEntries: 2 } } });
+  const llm = fakeLlm([{ text: 'one' }, { text: 'two' }, { text: 'three' }]);
+  const describer = createDescriber({ hot, store, llm });
+
+  await describer.describe('g1', pictureItem('sticker:s1', { kind: 'sticker', url: 'https://media.discordapp.net/stickers/s1.png?size=160' }));
+  await describer.describe('g1', pictureItem('emoji:e1', { kind: 'emoji', url: 'https://cdn.discordapp.com/emojis/e1.webp?size=96' }));
+  // Re-describe the sticker (cache hit): it becomes the most-recently-used.
+  const hit = await describer.describe('g1', pictureItem('sticker:s1', { kind: 'sticker', url: 'https://media.discordapp.net/stickers/s1.png?size=160' }));
+  assert.equal(hit.cached, true);
+  assert.equal(llm.calls.length, 2, 'the re-describe was a cache hit, no third LLM call yet');
+
+  // A third distinct item must evict emoji:e1 (now the least-recently-used), not sticker:s1.
+  await describer.describe('g1', pictureItem('link:abcd1234', { kind: 'link', url: 'https://cdn.discordapp.com/x/thumb.jpg' }));
+  const cache = store.getMediaCache('g1');
+  assert.deepEqual(Object.keys(cache).sort(), ['link:abcd1234', 'sticker:s1']);
+});
+
 test('describe: forwards countAgainstDailyCap to llm.complete', async () => {
   const dir = tmpDataDir();
   const store = createStore({ dataDir: dir });

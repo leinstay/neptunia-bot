@@ -755,6 +755,50 @@ test('events: at most 2 pictures per message are handed to the describer', async
   assert.equal(describer.calls[0].items.length, 2);
 });
 
+test('events: a picture-format sticker warms the describer cache too', async () => {
+  const describer = fakeDescriber();
+  const config = baseConfig({ features: { mediaDescriptions: true } });
+  const handler = makeHandler({ config, describer });
+
+  const message = fakeMessage({ stickers: new Map([['s1', { id: 's1', name: 'pepe', format: 1 }]]) });
+  await handler(message);
+
+  assert.equal(describer.calls.length, 1);
+  assert.equal(describer.calls[0].items[0].itemId, 'sticker:s1');
+});
+
+test('events: a custom emoji in the text warms the describer cache too', async () => {
+  const describer = fakeDescriber();
+  const config = baseConfig({ features: { mediaDescriptions: true } });
+  const handler = makeHandler({ config, describer });
+
+  const message = fakeMessage({ cleanContent: 'nice <:pog:111>' });
+  await handler(message);
+
+  assert.equal(describer.calls.length, 1);
+  assert.equal(describer.calls[0].items[0].itemId, 'emoji:111');
+});
+
+test('events: pictures come before a message\'s emoji within the shared 2-per-message cap', async () => {
+  const describer = fakeDescriber();
+  const config = baseConfig({ features: { mediaDescriptions: true } });
+  const handler = makeHandler({ config, describer });
+
+  const message = fakeMessage({
+    cleanContent: 'look <:pog:111>',
+    attachments: pictureAttachments(1),
+    stickers: new Map([['s1', { id: 's1', name: 'pepe', format: 1 }]]),
+  });
+  await handler(message);
+
+  assert.equal(describer.calls.length, 1);
+  assert.deepEqual(
+    describer.calls[0].items.map((i) => i.itemId),
+    ['a1', 'sticker:s1'],
+    'the attachment and the sticker (both pictures) fill the cap before the emoji is ever considered',
+  );
+});
+
 test('events: no describer wired in never throws, even with mediaDescriptions on and a picture', async () => {
   const config = baseConfig({ features: { mediaDescriptions: true } });
   const handler = makeHandler({ config });

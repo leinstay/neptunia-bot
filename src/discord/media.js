@@ -3,8 +3,12 @@
 // (vision selection): classifying an attachment/embed into a kind, choosing
 // which label form a media item takes in a transcript line, rewriting a
 // Discord CDN URL through the media proxy for resizing, and picking which
-// pictures of a channel a live turn may see. No I/O, no discord.js import —
-// callers hand in plain data already read off a discord.js Message/Embed.
+// pictures of a channel a live turn may see. No network I/O, no discord.js
+// import — callers hand in plain data already read off a discord.js
+// Message/Embed (node:crypto is used only for a deterministic, synchronous
+// hash, not for any I/O).
+
+import { createHash } from 'node:crypto';
 
 const DISCORD_CDN_HOSTS = new Set(['cdn.discordapp.com', 'media.discordapp.net']);
 const GIF_PROVIDERS = new Set(['tenor', 'giphy']);
@@ -40,9 +44,26 @@ const EXT_KIND = {
 // image_url part (see selectPictures/collectPictures below).
 const PICTURE_ATTACHMENT_KINDS = new Set(['image', 'gif', 'video']);
 // Media kinds the describer (src/memory/describe.js) can produce a caption
-// for. A video-site link embed (kind 'link') never gets one: there is no
-// labels.transcript slot for it, only its thumbnail may be attached as-is.
-const DESCRIBABLE_KINDS = new Set(['image', 'gif', 'video']);
+// for. 'sticker'/'emoji' are added here for the same reason a picture-format
+// sticker or a custom emoji is describable, even though neither is a Discord
+// attachment/embed kind. 'link' (a video-site embed such as YouTube) is
+// describable through its thumbnail alone -- collectPictures only ever
+// offers a 'link' item that actually carries one (see below), so the kind
+// alone is a safe signal here.
+const DESCRIBABLE_KINDS = new Set(['image', 'gif', 'video', 'sticker', 'emoji', 'link']);
+
+// Sticker format types (Discord's `sticker.format`): PNG=1, APNG=2, Lottie=3,
+// GIF=4 -- Lottie is a vector animation, never a raster picture, so it is
+// deliberately absent from this map (see stickerUrl below).
+const STICKER_FORMAT_EXT = { 1: 'png', 2: 'png', 4: 'gif' };
+// Verified against the live CDN: media.discordapp.net/stickers/<id>.<ext>
+// takes a `size` query param (a power of two), NOT width/height/format —
+// cdn.discordapp.com 404s on a GIF sticker entirely, so that host is never
+// used here.
+const STICKER_SIZE = 160;
+// Verified against the live CDN: this exact host+path+size serves both a
+// static and an animated custom emoji as image/webp.
+const EMOJI_SIZE = 96;
 
 function extOf(name) {
   const match = /\.([a-z0-9]+)$/i.exec(String(name ?? ''));
@@ -88,8 +109,13 @@ export function classifyAttachment({ contentType, name, isVoice = false } = {}) 
  * thumbnailUrl, kind, url }`. `kind` is `'gif'` for a tenor/giphy embed (its
  * thumbnail is the frame to describe), else `'link'` — a video-site embed
  * (e.g. YouTube) keeps `kind: 'link'` but still carries `thumbnailUrl`.
+ * `thumbnail.proxyURL` is preferred over `thumbnail.url` when discord.js
+ * exposes one: Discord's own embed proxy (`media.discordapp.net` /
+ * `images-ext-*.discordapp.net`) is reliably fetchable, unlike some
+ * third-party thumbnail hosts.
  * @param {{ url?: string|null, title?: string|null, description?: string|null,
- *   thumbnail?: { url?: string|null }|null, provider?: { name?: string|null }|null }} embed
+ *   thumbnail?: { url?: string|null, proxyURL?: string|null }|null,
+ *   provider?: { name?: string|null }|null }} embed
  * @param {{ embedTextChars?: number }} [options]
  */
 export function classifyEmbed(embed, { embedTextChars = 200 } = {}) {
@@ -102,10 +128,30 @@ export function classifyEmbed(embed, { embedTextChars = 200 } = {}) {
     site,
     title: truncateText(embed?.title ?? '', embedTextChars),
     text: truncateText(embed?.description ?? '', embedTextChars),
-    thumbnailUrl: embed?.thumbnail?.url ?? null,
+    thumbnailUrl: embed?.thumbnail?.proxyURL ?? embed?.thumbnail?.url ?? null,
     kind: isGif ? 'gif' : 'link',
     url,
   };
+}
+
+/**
+ * A stable cache key for a link/embed thumbnail: `link:<sha1 prefix of the
+ * URL without its query string>`. A signed Discord proxy URL (or any
+ * re-fetched embed) carries a query string that changes between fetches of
+ * the very same picture; the origin+path does not, so it is dropped before
+ * hashing. Deterministic and pure (no I/O) -- see stickerUrl/emojiUrl for the
+ * same "rebuild an id from stable inputs" idea.
+ * @param {string} url
+ */
+export function linkThumbnailCacheKey(url) {
+  let base = String(url ?? '');
+  try {
+    const parsed = new URL(base);
+    base = `${parsed.origin}${parsed.pathname}`;
+  } catch {
+    // An unparsable URL still hashes to something stable -- best effort.
+  }
+  return `link:${createHash('sha1').update(base).digest('hex').slice(0, 16)}`;
 }
 
 /** `m:ss`, floored/rounded to the nearest second, never negative. */
@@ -149,6 +195,31 @@ export function mediaProxyUrl(url, { width, height, format } = {}) {
 }
 
 /**
+ * Rebuild a sticker's picture URL from just its id/format -- the only two
+ * fields the slim memory buffer keeps for a sticker (see src/memory/update.js
+ * `observe()`), so the live analyzer never needs a stored URL to look up a
+ * description-cache entry. `null` for a Lottie sticker (format 3) or any
+ * other non-picture format: it is never a picture, name only.
+ * @param {string} id
+ * @param {number} format
+ */
+export function stickerUrl(id, format) {
+  const ext = STICKER_FORMAT_EXT[format];
+  return ext ? `https://media.discordapp.net/stickers/${id}.${ext}?size=${STICKER_SIZE}` : null;
+}
+
+/**
+ * Rebuild a custom emoji's picture URL from just its id -- the only field the
+ * slim memory buffer keeps for an emoji (see src/memory/update.js
+ * `observe()`). The same URL serves a static and an animated emoji alike
+ * (image/webp either way).
+ * @param {string} id
+ */
+export function emojiUrl(id) {
+  return `https://cdn.discordapp.com/emojis/${id}.webp?size=${EMOJI_SIZE}`;
+}
+
+/**
  * `m:ss` for a known duration, or `unknownDuration` when `durationSec` is
  * null/undefined -- Discord's own `duration_secs` is usually present on a
  * video/voice/audio attachment but can be missing; this must never silently
@@ -169,14 +240,18 @@ function durationOrUnknown(durationSec, unknownDuration) {
  * `imageAttached`. A video or gif whose still frame is attached keeps its
  * normal form (`video`/`videoDescribed`/`gif`/`gifDescribed` -- so the
  * persona still knows it WAS a video, its name, its duration) and carries a
- * second tag in `extra`: `frameAttached`, numbered the same way.
+ * second tag in `extra`: `frameAttached`, numbered the same way. A `link`
+ * (a video-site embed, e.g. YouTube) never swaps its own tag: the plain
+ * `link`/`linkText` form always stays, and ONE extra tag follows it —
+ * `frameAttached` when its thumbnail is attached, else `thumbnailDescribed`
+ * when a caption exists, else nothing.
  * @param {object} item
  * @param {{ attachedIndex?: number|null, description?: string|null, unknownDuration?: string }} [context]
  * @returns {{ key: string, values: object, extra?: { key: string, values: object } }}
  */
 export function mediaLabelFor(item, { attachedIndex = null, description = null, unknownDuration = '?' } = {}) {
   const isPicture = PICTURE_ATTACHMENT_KINDS.has(item.kind) || (item.kind === 'link' && item.thumbnailUrl);
-  if (attachedIndex != null && isPicture) {
+  if (attachedIndex != null && isPicture && item.kind !== 'link') {
     if (item.kind === 'video' || item.kind === 'gif') {
       const base = mediaLabelFor(item, { description, unknownDuration });
       return { ...base, extra: { key: 'frameAttached', values: { n: attachedIndex } } };
@@ -205,22 +280,54 @@ export function mediaLabelFor(item, { attachedIndex = null, description = null, 
       return item.previewText
         ? { key: 'filePreview', values: { name: item.name ?? '', text: item.previewText } }
         : { key: 'file', values: { name: item.name ?? '' } };
-    case 'link':
-      return item.text
+    case 'link': {
+      const base = item.text
         ? { key: 'linkText', values: { site: item.site ?? '', title: item.title ?? '', text: item.text } }
         : { key: 'link', values: { site: item.site ?? '', title: item.title ?? '' } };
+      if (attachedIndex != null && item.thumbnailUrl) {
+        return { ...base, extra: { key: 'frameAttached', values: { n: attachedIndex } } };
+      }
+      return description ? { ...base, extra: { key: 'thumbnailDescribed', values: { text: description } } } : base;
+    }
     default:
       return { key: 'file', values: { name: item.name ?? '' } };
   }
 }
 
 /**
+ * Choose which `labels.transcript.*` key (and fill values) renders one
+ * sticker item, mirroring `mediaLabelFor`'s priority for the picture-format
+ * ones (PNG/APNG/GIF -- `sticker.url` is set, see stickerUrl): attached >
+ * described > blind (plain `sticker`, name only). A Lottie sticker
+ * (`sticker.url` is null) is never a picture: always the plain `sticker`
+ * form, regardless of `attachedIndex`/`description` -- see
+ * `senses.lottie`.
+ * @param {{ name: string, url: string|null }} sticker
+ * @param {{ attachedIndex?: number|null, description?: string|null }} [context]
+ * @returns {{ key: string, values: object, extra?: { key: string, values: object } }}
+ */
+export function stickerLabelFor(sticker, { attachedIndex = null, description = null } = {}) {
+  if (!sticker.url) return { key: 'sticker', values: { name: sticker.name } };
+  if (attachedIndex != null) {
+    const base = stickerLabelFor(sticker, { description });
+    return { ...base, extra: { key: 'frameAttached', values: { n: attachedIndex } } };
+  }
+  return description
+    ? { key: 'stickerDescribed', values: { name: sticker.name, text: description } }
+    : { key: 'sticker', values: { name: sticker.name } };
+}
+
+/**
  * Every "picture" of one normalized message, in the order they appear in it
- * (attachments first, then embeds/links): an image/gif/video attachment, or
- * any embed carrying a thumbnail (gif or link kind alike). Each item is
- * stamped with a stable `itemId` (the attachment's Discord id, or the
- * message+embed-index for a link) so it can be looked up in a
- * vision-selection or description-cache map.
+ * (attachments first, then embeds/links, then a picture-format sticker): an
+ * image/gif/video attachment, any embed carrying a thumbnail (gif or link
+ * kind alike), or a PNG/APNG/GIF sticker (never a Lottie one -- `sticker.url`
+ * is null for those, see stickerUrl). Each item is stamped with a stable
+ * `itemId` (the attachment's Discord id, the message+embed-index for a link,
+ * or `sticker:<id>`) so it can be looked up in a vision-selection or
+ * description-cache map. Custom emoji are never included here -- see
+ * collectEmojiItems: they are never eligible to be attached as a vision
+ * picture, only describable.
  * @param {object} message  A normalized message (see src/discord/collect.js).
  */
 export function collectPictures(message) {
@@ -248,10 +355,40 @@ export function collectPictures(message) {
       name: link.title || link.site,
     });
   });
+  for (const sticker of message.stickers ?? []) {
+    if (!sticker.url) continue; // Lottie: name only, never a picture
+    items.push({
+      source: 'sticker',
+      messageId: message.id,
+      itemId: `sticker:${sticker.id}`,
+      kind: 'sticker',
+      url: sticker.url,
+      name: sticker.name,
+    });
+  }
   return items;
 }
 
-/** Whether a picture item (see collectPictures) is one the describer can caption. */
+/**
+ * Every custom emoji written in one normalized message's text (see
+ * src/discord/collect.js), as a describable item -- never a vision picture
+ * (too small a slot to spend an attached-image budget on, see
+ * .claude/docs/prompt-contract.md), so this is kept apart from
+ * collectPictures on purpose: nothing here is ever picked by selectPictures.
+ * @param {object} message  A normalized message (see src/discord/collect.js).
+ */
+export function collectEmojiItems(message) {
+  return (message.emojis ?? []).map((emoji) => ({
+    source: 'emoji',
+    messageId: message.id,
+    itemId: `emoji:${emoji.id}`,
+    kind: 'emoji',
+    url: emoji.url,
+    name: emoji.name,
+  }));
+}
+
+/** Whether a picture item (see collectPictures/collectEmojiItems) is one the describer can caption. */
 export function isDescribable(item) {
   return DESCRIBABLE_KINDS.has(item.kind);
 }
@@ -266,6 +403,11 @@ export function isDescribable(item) {
  * by where the picture actually sits in the transcript (oldest message
  * first, then item order within a message) — not by selection priority — so
  * the persona reads its own the numbering top-to-bottom as it reads the chat.
+ *
+ * A picture-format sticker (see collectPictures) is only ever eligible from
+ * the TRIGGER's own message, at the same priority as its images -- never from
+ * the message it replies to, nor from the "recent" tier, nor for a
+ * spontaneous turn (no trigger at all).
  * @param {object} params
  * @param {object|null} params.trigger   Normalized trigger message, or null.
  * @param {object[]} params.history      Normalized channel messages, oldest first.
@@ -280,9 +422,10 @@ export function selectPictures({ trigger, history, visionCfg, now }) {
   const seen = new Set();
   const order = new Map(history.map((message, index) => [message.id, index]));
 
-  function addFrom(message) {
+  function addFrom(message, { allowStickers = false } = {}) {
     if (!message || picked.length >= maxImages) return;
     for (const item of collectPictures(message)) {
+      if (item.source === 'sticker' && !allowStickers) continue;
       if (picked.length >= maxImages) break;
       if (seen.has(item.itemId)) continue;
       seen.add(item.itemId);
@@ -291,7 +434,7 @@ export function selectPictures({ trigger, history, visionCfg, now }) {
   }
 
   if (trigger) {
-    addFrom(trigger);
+    addFrom(trigger, { allowStickers: true });
     if (picked.length < maxImages && trigger.replyToId) {
       addFrom(history.find((message) => message.id === trigger.replyToId));
     }
@@ -305,6 +448,7 @@ export function selectPictures({ trigger, history, visionCfg, now }) {
       const message = history[i];
       if (message.ts < minTs) break;
       for (const item of collectPictures(message)) {
+        if (item.source === 'sticker') continue;
         if (recentTaken >= recentImages || picked.length >= maxImages) break;
         if (seen.has(item.itemId)) continue;
         seen.add(item.itemId);

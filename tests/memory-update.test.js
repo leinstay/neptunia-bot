@@ -561,6 +561,82 @@ test('analyze: a cache miss (or nothing cached yet) renders the blind form, neve
   });
 });
 
+test('analyze: a cached sticker description renders via stickerDescribed, keyed sticker:<id> -- no URL ever needed', async () => {
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    const hot = { config: makeConfig({ features: { mediaDescriptions: true } }), prompts: { memory: 'sys', labels } };
+    const calibrator = createCalibrator();
+    let seenUser = null;
+    const llm = { complete: async (messages) => { seenUser = messages[1].content; return { text: '{}' }; } };
+    const updater = createMemoryUpdater({ hot, store, llm, calibrator, getSelfName: () => 'Nept' });
+    store.getMediaCache(guildId)['sticker:s1'] = { text: 'a frog gives a thumbs up', ts: Date.now() };
+
+    const messages = [slimMessage({ id: 'm1', content: '', stickers: [{ id: 's1', name: 'pepe', format: 1 }] })];
+    await updater.analyze(guildId, messages);
+
+    assert.ok(seenUser.includes(labels.transcript.stickerDescribed.replace('{name}', 'pepe').replace('{text}', 'a frog gives a thumbs up')));
+  });
+});
+
+test('analyze: a Lottie sticker never looks up a cache entry, always the plain name form', async () => {
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    const hot = { config: makeConfig({ features: { mediaDescriptions: true } }), prompts: { memory: 'sys', labels } };
+    const calibrator = createCalibrator();
+    let seenUser = null;
+    const llm = { complete: async (messages) => { seenUser = messages[1].content; return { text: '{}' }; } };
+    const updater = createMemoryUpdater({ hot, store, llm, calibrator, getSelfName: () => 'Nept' });
+    // Even if a cache entry somehow existed under this key, a Lottie sticker must never use it.
+    store.getMediaCache(guildId)['sticker:s1'] = { text: 'should never show', ts: Date.now() };
+
+    const messages = [slimMessage({ id: 'm1', content: '', stickers: [{ id: 's1', name: 'wiggle', format: 3 }] })];
+    await updater.analyze(guildId, messages);
+
+    assert.ok(seenUser.includes(labels.transcript.sticker.replace('{name}', 'wiggle')));
+    assert.ok(!seenUser.includes('should never show'));
+  });
+});
+
+test('analyze: a cached emoji description renders via emojiDescribed, keyed emoji:<id>', async () => {
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    const hot = { config: makeConfig({ features: { mediaDescriptions: true } }), prompts: { memory: 'sys', labels } };
+    const calibrator = createCalibrator();
+    let seenUser = null;
+    const llm = { complete: async (messages) => { seenUser = messages[1].content; return { text: '{}' }; } };
+    const updater = createMemoryUpdater({ hot, store, llm, calibrator, getSelfName: () => 'Nept' });
+    store.getMediaCache(guildId)['emoji:e1'] = { text: 'a surprised cat face', ts: Date.now() };
+
+    const messages = [slimMessage({ id: 'm1', content: 'nice :pog:', emojis: [{ id: 'e1', name: 'pog' }] })];
+    await updater.analyze(guildId, messages);
+
+    assert.ok(seenUser.includes(labels.transcript.emojiDescribed.replace('{name}', 'pog').replace('{text}', 'a surprised cat face')));
+  });
+});
+
+test('analyze: a described link thumbnail renders via thumbnailDescribed, keyed by the id already stored (the stable hash)', async () => {
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    const hot = { config: makeConfig({ features: { mediaDescriptions: true } }), prompts: { memory: 'sys', labels } };
+    const calibrator = createCalibrator();
+    let seenUser = null;
+    const llm = { complete: async (messages) => { seenUser = messages[1].content; return { text: '{}' }; } };
+    const updater = createMemoryUpdater({ hot, store, llm, calibrator, getSelfName: () => 'Nept' });
+    store.getMediaCache(guildId)['link:abcd1234'] = { text: 'a cat plays piano', ts: Date.now() };
+
+    const messages = [
+      slimMessage({
+        id: 'm1',
+        content: '',
+        links: [{ id: 'link:abcd1234', kind: 'link', name: 'Cool video', durationSec: null }],
+      }),
+    ];
+    await updater.analyze(guildId, messages);
+
+    assert.ok(seenUser.includes(labels.transcript.thumbnailDescribed.replace('{text}', 'a cat plays piano')));
+  });
+});
+
 test('analyze: an explicitly-passed descriptions map (the warm-up path) is used as-is, the cache never consulted', async () => {
   await withStoreAsync(async (store) => {
     const guildId = 'g1';
@@ -1132,7 +1208,8 @@ test('observe: strips attachment/link urls before buffering, keeps the item id f
         content: 'look',
         attachments: [{ id: 'a1', kind: 'image', name: 'a.png', url: 'https://cdn.example/secret', durationSec: null }],
         links: [{ id: 'm1#e0', kind: 'gif', site: 'Tenor', title: 'cat', thumbnailUrl: 'https://t.tenor.com/x.png' }],
-        stickers: ['wow'],
+        stickers: [{ id: 's1', name: 'wow', format: 1, url: 'https://media.discordapp.net/stickers/s1.png?size=160' }],
+        emojis: [{ id: 'e1', name: 'pog', animated: false, url: 'https://cdn.discordapp.com/emojis/e1.webp?size=96' }],
       }),
     );
 
@@ -1142,7 +1219,10 @@ test('observe: strips attachment/link urls before buffering, keeps the item id f
     assert.deepEqual(buffered.links, [{ kind: 'gif', name: 'cat', id: 'm1#e0', durationSec: null }]);
     assert.equal('url' in buffered.links[0], false);
     assert.equal('thumbnailUrl' in buffered.links[0], false);
-    assert.deepEqual(buffered.stickers, ['wow']);
+    assert.deepEqual(buffered.stickers, [{ id: 's1', name: 'wow', format: 1 }]);
+    assert.equal('url' in buffered.stickers[0], false);
+    assert.deepEqual(buffered.emojis, [{ id: 'e1', name: 'pog' }]);
+    assert.equal('url' in buffered.emojis[0], false);
   });
 });
 

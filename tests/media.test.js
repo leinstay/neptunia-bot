@@ -8,7 +8,12 @@ import {
   formatDurationShort,
   mediaProxyUrl,
   mediaLabelFor,
+  stickerLabelFor,
+  stickerUrl,
+  emojiUrl,
+  linkThumbnailCacheKey,
   collectPictures,
+  collectEmojiItems,
   isDescribable,
   selectPictures,
 } from '../src/discord/media.js';
@@ -202,15 +207,40 @@ test('mediaLabelFor: an attached video/gif still frame with a description uses t
   );
 });
 
-test('mediaLabelFor: an attached link-embed thumbnail also renders imageAttached', () => {
-  const item = { kind: 'link', thumbnailUrl: 'https://x/y.jpg' };
-  assert.deepEqual(mediaLabelFor(item, { attachedIndex: 1 }), { key: 'imageAttached', values: { n: 1 } });
+test('mediaLabelFor: an attached link-embed thumbnail keeps the link tag and adds frameAttached (never bare imageAttached)', () => {
+  const item = { kind: 'link', site: 's', title: 't', thumbnailUrl: 'https://x/y.jpg' };
+  assert.deepEqual(mediaLabelFor(item, { attachedIndex: 1 }), {
+    key: 'link',
+    values: { site: 's', title: 't' },
+    extra: { key: 'frameAttached', values: { n: 1 } },
+  });
+});
+
+test('mediaLabelFor: an attached link-embed thumbnail with a description still prefers frameAttached over thumbnailDescribed', () => {
+  const item = { kind: 'link', site: 's', title: 't', thumbnailUrl: 'https://x/y.jpg' };
+  const result = mediaLabelFor(item, { attachedIndex: 1, description: 'a video preview' });
+  assert.equal(result.extra.key, 'frameAttached');
 });
 
 test('mediaLabelFor: a link without a thumbnail is never attachable, even with an index passed by mistake', () => {
   const item = { kind: 'link', site: 's', title: 't' };
   const result = mediaLabelFor(item, { attachedIndex: 1 });
   assert.notEqual(result.key, 'imageAttached');
+  assert.equal(result.extra, undefined);
+});
+
+test('mediaLabelFor: a link thumbnail description appends thumbnailDescribed, the link tag itself never swaps', () => {
+  const item = { kind: 'link', site: 's', title: 't', thumbnailUrl: 'https://x/y.jpg' };
+  assert.deepEqual(mediaLabelFor(item, { description: 'a video preview' }), {
+    key: 'link',
+    values: { site: 's', title: 't' },
+    extra: { key: 'thumbnailDescribed', values: { text: 'a video preview' } },
+  });
+});
+
+test('mediaLabelFor: a link thumbnail with no description and no attachment renders the plain link tag, no extra', () => {
+  const item = { kind: 'link', site: 's', title: 't', thumbnailUrl: 'https://x/y.jpg' };
+  assert.deepEqual(mediaLabelFor(item), { key: 'link', values: { site: 's', title: 't' } });
 });
 
 test('mediaLabelFor: image blind vs described', () => {
@@ -315,11 +345,17 @@ test('collectPictures: includes any embed with a thumbnail, gif or link kind ali
   assert.deepEqual(pictures.map((p) => p.itemId), ['m1#e0', 'm1#e1']);
 });
 
-test('isDescribable: true for image/gif/video, false for link (even with a thumbnail)', () => {
+test('isDescribable: true for image/gif/video/sticker/emoji/link (a link thumbnail is describable, see F17)', () => {
   assert.equal(isDescribable({ kind: 'image' }), true);
   assert.equal(isDescribable({ kind: 'gif' }), true);
   assert.equal(isDescribable({ kind: 'video' }), true);
-  assert.equal(isDescribable({ kind: 'link', thumbnailUrl: 'x' }), false);
+  assert.equal(isDescribable({ kind: 'sticker' }), true);
+  assert.equal(isDescribable({ kind: 'emoji' }), true);
+  assert.equal(isDescribable({ kind: 'link', thumbnailUrl: 'x' }), true);
+  assert.equal(isDescribable({ kind: 'audio' }), false);
+  assert.equal(isDescribable({ kind: 'voice' }), false);
+  assert.equal(isDescribable({ kind: 'text' }), false);
+  assert.equal(isDescribable({ kind: 'file' }), false);
 });
 
 // --- selectPictures -------------------------------------------------------------
@@ -432,4 +468,164 @@ test('selectPictures: never picks the same item twice across tiers', () => {
     now,
   });
   assert.deepEqual(picked.map((p) => p.itemId), ['shared']);
+});
+
+// --- stickerUrl / emojiUrl / linkThumbnailCacheKey (F17) ------------------------
+
+test('stickerUrl: PNG and APNG sizes to media.discordapp.net/.../<id>.png?size=160', () => {
+  assert.equal(stickerUrl('123', 1), 'https://media.discordapp.net/stickers/123.png?size=160');
+  assert.equal(stickerUrl('123', 2), 'https://media.discordapp.net/stickers/123.png?size=160');
+});
+
+test('stickerUrl: GIF sizes to media.discordapp.net/.../<id>.gif?size=160, never cdn.discordapp.com', () => {
+  const url = stickerUrl('123', 4);
+  assert.equal(url, 'https://media.discordapp.net/stickers/123.gif?size=160');
+  assert.ok(!url.includes('cdn.discordapp.com'));
+});
+
+test('stickerUrl: Lottie (format 3) is never a picture -- null', () => {
+  assert.equal(stickerUrl('123', 3), null);
+});
+
+test('stickerUrl: an unknown/missing format is never a picture -- null', () => {
+  assert.equal(stickerUrl('123', undefined), null);
+  assert.equal(stickerUrl('123', 99), null);
+});
+
+test('emojiUrl: cdn.discordapp.com/emojis/<id>.webp?size=96, same for static and animated', () => {
+  assert.equal(emojiUrl('456'), 'https://cdn.discordapp.com/emojis/456.webp?size=96');
+});
+
+test('linkThumbnailCacheKey: stable across different signed query strings for the same picture', () => {
+  const a = linkThumbnailCacheKey('https://i.ytimg.com/vi/xyz/hq.jpg?ex=1&is=2&hm=abc');
+  const b = linkThumbnailCacheKey('https://i.ytimg.com/vi/xyz/hq.jpg?ex=9&is=8&hm=zzz');
+  assert.equal(a, b);
+  assert.ok(a.startsWith('link:'));
+});
+
+test('linkThumbnailCacheKey: a different path hashes to a different key', () => {
+  const a = linkThumbnailCacheKey('https://i.ytimg.com/vi/xyz/hq.jpg');
+  const b = linkThumbnailCacheKey('https://i.ytimg.com/vi/other/hq.jpg');
+  assert.notEqual(a, b);
+});
+
+test('linkThumbnailCacheKey: an unparsable URL never throws, still deterministic', () => {
+  assert.equal(linkThumbnailCacheKey('not a url'), linkThumbnailCacheKey('not a url'));
+});
+
+// --- stickerLabelFor -------------------------------------------------------------
+
+function sticker(name, url) {
+  return { name, url };
+}
+
+test('stickerLabelFor: a Lottie sticker (url null) is always the plain name form, ignoring attached/description', () => {
+  assert.deepEqual(stickerLabelFor(sticker('dancing-cat', null)), { key: 'sticker', values: { name: 'dancing-cat' } });
+  assert.deepEqual(stickerLabelFor(sticker('dancing-cat', null), { attachedIndex: 1, description: 'a cat dances' }), {
+    key: 'sticker',
+    values: { name: 'dancing-cat' },
+  });
+});
+
+test('stickerLabelFor: a picture-format sticker blind vs described', () => {
+  assert.deepEqual(stickerLabelFor(sticker('pepe', 'https://x')), { key: 'sticker', values: { name: 'pepe' } });
+  assert.deepEqual(stickerLabelFor(sticker('pepe', 'https://x'), { description: 'a frog gives a thumbs up' }), {
+    key: 'stickerDescribed',
+    values: { name: 'pepe', text: 'a frog gives a thumbs up' },
+  });
+});
+
+test('stickerLabelFor: attached wins over described, keeps the sticker tag and adds frameAttached', () => {
+  const result = stickerLabelFor(sticker('pepe', 'https://x'), { attachedIndex: 2, description: 'a frog gives a thumbs up' });
+  assert.deepEqual(result, {
+    key: 'stickerDescribed',
+    values: { name: 'pepe', text: 'a frog gives a thumbs up' },
+    extra: { key: 'frameAttached', values: { n: 2 } },
+  });
+});
+
+test('stickerLabelFor: attached with no description keeps the blind sticker tag plus frameAttached', () => {
+  assert.deepEqual(stickerLabelFor(sticker('pepe', 'https://x'), { attachedIndex: 1 }), {
+    key: 'sticker',
+    values: { name: 'pepe' },
+    extra: { key: 'frameAttached', values: { n: 1 } },
+  });
+});
+
+// --- collectPictures / collectEmojiItems: stickers and emoji (F17) --------------
+
+function stickerMessage(id, ts, stickers) {
+  return message(id, { ts, stickers });
+}
+
+test('collectPictures: a picture-format sticker is included, a Lottie one is not', () => {
+  const m = stickerMessage('m1', 0, [
+    { id: 's1', name: 'pepe', format: 1, url: 'https://media.discordapp.net/stickers/s1.png?size=160' },
+    { id: 's2', name: 'dance', format: 3, url: null },
+  ]);
+  const pictures = collectPictures(m);
+  assert.deepEqual(pictures.map((p) => p.itemId), ['sticker:s1']);
+  assert.equal(pictures[0].kind, 'sticker');
+  assert.equal(pictures[0].source, 'sticker');
+});
+
+test('collectEmojiItems: every distinct emoji of a message becomes a describable, never-a-picture item', () => {
+  const m = message('m1', {
+    emojis: [
+      { id: 'e1', name: 'pog', animated: false, url: 'https://cdn.discordapp.com/emojis/e1.webp?size=96' },
+      { id: 'e2', name: 'kekw', animated: true, url: 'https://cdn.discordapp.com/emojis/e2.webp?size=96' },
+    ],
+  });
+  const items = collectEmojiItems(m);
+  assert.deepEqual(items.map((i) => i.itemId), ['emoji:e1', 'emoji:e2']);
+  assert.ok(items.every((i) => i.source === 'emoji' && isDescribable(i)));
+  // Never eligible for vision: collectPictures ignores message.emojis entirely.
+  assert.deepEqual(collectPictures(m).map((p) => p.itemId), []);
+});
+
+// --- selectPictures: sticker vision eligibility (F17) ---------------------------
+
+test('selectPictures: the trigger\'s own picture-format sticker is eligible, same priority as its images', () => {
+  const now = 1_000_000;
+  const trigger = stickerMessage('t', now, [
+    { id: 's1', name: 'pepe', format: 1, url: 'https://media.discordapp.net/stickers/s1.png?size=160' },
+  ]);
+  const picked = selectPictures({ trigger, history: [trigger], visionCfg: { maxImages: 4, recentImages: 3, recentImageMinutes: 30 }, now });
+  assert.deepEqual(picked.map((p) => p.itemId), ['sticker:s1']);
+});
+
+test('selectPictures: a Lottie sticker on the trigger is never vision-eligible (no url to attach)', () => {
+  const now = 1_000_000;
+  const trigger = stickerMessage('t', now, [{ id: 's1', name: 'dance', format: 3, url: null }]);
+  const picked = selectPictures({ trigger, history: [trigger], visionCfg: { maxImages: 4, recentImages: 3, recentImageMinutes: 30 }, now });
+  assert.deepEqual(picked, []);
+});
+
+test('selectPictures: a sticker on the REPLIED-TO message is never vision-eligible, only the trigger\'s own', () => {
+  const now = 1_000_000;
+  const replied = stickerMessage('r', now - 5 * MIN, [
+    { id: 's1', name: 'pepe', format: 1, url: 'https://media.discordapp.net/stickers/s1.png?size=160' },
+  ]);
+  const trigger = { ...message('t', { ts: now }), replyToId: 'r' };
+  const picked = selectPictures({
+    trigger,
+    history: [replied, trigger],
+    visionCfg: { maxImages: 4, recentImages: 3, recentImageMinutes: 30 },
+    now,
+  });
+  assert.deepEqual(picked, []);
+});
+
+test('selectPictures: a sticker in the "recent" tier is never vision-eligible, even with room to spare', () => {
+  const now = 1_000_000;
+  const recent = stickerMessage('m1', now - MIN, [
+    { id: 's1', name: 'pepe', format: 1, url: 'https://media.discordapp.net/stickers/s1.png?size=160' },
+  ]);
+  const picked = selectPictures({
+    trigger: null,
+    history: [recent],
+    visionCfg: { maxImages: 4, recentImages: 3, recentImageMinutes: 30 },
+    now,
+  });
+  assert.deepEqual(picked, []);
 });

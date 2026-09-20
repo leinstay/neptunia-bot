@@ -8,7 +8,7 @@ import { fetchHistory, fetchNeighbors, withTextPreviews } from '../discord/colle
 import { buildRequest } from './prompt.js';
 import { parseOutput } from '../llm/parse.js';
 import { DailyCapError, TokenLimitError } from '../llm/openrouter.js';
-import { collectPictures, isDescribable, selectPictures } from '../discord/media.js';
+import { collectPictures, collectEmojiItems, isDescribable, selectPictures } from '../discord/media.js';
 import { log } from '../log.js';
 
 function sleep(ms) {
@@ -64,15 +64,16 @@ function authorNameFor(history, messageId) {
 }
 
 /**
- * Describable pictures (image/gif/video, never a link embed — see
- * src/discord/media.js#isDescribable) of `history` that are NOT among
- * `pickedIds` (the ones already attached as image_url parts), newest message
- * first — so a per-turn cap spends its budget on what the persona just saw.
+ * Describable pictures (image/gif/video/sticker/link-thumbnail, plus custom
+ * emoji — see src/discord/media.js#isDescribable) of `history` that are NOT
+ * among `pickedIds` (the ones already attached as image_url parts), newest
+ * message first — so a per-turn cap spends its budget on what the persona
+ * just saw. Pictures (collectPictures) come before that message's emoji.
  */
 function describableCandidates(history, pickedIds) {
   const out = [];
   for (let i = history.length - 1; i >= 0; i -= 1) {
-    for (const item of collectPictures(history[i])) {
+    for (const item of [...collectPictures(history[i]), ...collectEmojiItems(history[i])]) {
       if (pickedIds.has(item.itemId) || !isDescribable(item)) continue;
       out.push(item);
     }

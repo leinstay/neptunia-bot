@@ -8,7 +8,7 @@
 // tests.
 
 import { normalizeMessage, channelAllowed, canSend } from './collect.js';
-import { collectPictures, isDescribable } from './media.js';
+import { collectPictures, collectEmojiItems, isDescribable } from './media.js';
 import { detectTrigger, strippedLength, decideMention, repeatWindowMs } from '../behavior/mention.js';
 import { log } from '../log.js';
 
@@ -68,7 +68,11 @@ export function createMessageHandler({
    */
   function warmMediaCache(guildId, normalized) {
     if (!describer || hot.config.features?.mediaDescriptions !== true) return;
-    const candidates = collectPictures(normalized).filter(isDescribable).slice(0, MAX_WARM_PICTURES_PER_MESSAGE);
+    // Pictures (attachments/embeds/stickers) before the message's custom
+    // emoji, both filtered to what the describer can actually caption.
+    const candidates = [...collectPictures(normalized), ...collectEmojiItems(normalized)]
+      .filter(isDescribable)
+      .slice(0, MAX_WARM_PICTURES_PER_MESSAGE);
     if (candidates.length === 0) return;
     describer.describeMany(guildId, candidates).catch((err) => log.warn('events: media cache warm-up failed', { error: err }));
   }

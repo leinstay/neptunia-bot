@@ -196,7 +196,10 @@ test('buildRequest: under a tiny token budget, neighbours and other profiles are
       history,
       neighbors,
       otherProfiles,
-      config: fakeConfig({ llm: { maxRequestTokens: 340, safetyMargin: 1 } }),
+      // 340 was tight enough pre-F17; the <senses> block grew a few lines
+      // (stickers/lottie, part of the always-kept "fixed" section) so the
+      // budget needs a little more headroom to still leave room for chat.
+      config: fakeConfig({ llm: { maxRequestTokens: 400, safetyMargin: 1 } }),
     }),
   );
 
@@ -298,6 +301,29 @@ test('buildRequest: the media proxy resizes a Discord CDN picture to context.vis
   const url = new URL(imagePart.image_url.url);
   assert.equal(url.searchParams.get('width'), '256');
   assert.equal(url.searchParams.get('format'), 'webp');
+});
+
+// --- vision: the trigger's own sticker (F17) --------------------------------
+
+test('buildRequest: the trigger\'s picture-format sticker is attached, rendered as the sticker tag + frameAttached', () => {
+  const trigger = makeMessage(1, NOW - MIN, {
+    stickers: [{ id: 's1', name: 'pepe', format: 1, url: 'https://media.discordapp.net/stickers/s1.png?size=160' }],
+  });
+  const config = fakeConfig({
+    features: { vision: true },
+    context: { vision: { maxImages: 4, tokensPerImage: 400, imageSize: 512, recentImages: 0, recentImageMinutes: 0 } },
+  });
+  const request = buildRequest(baseInput({ history: [trigger], trigger, triggerKind: 'mention', config }));
+
+  const content = request.messages[1].content;
+  assert.ok(Array.isArray(content));
+  const imagePart = content.find((part) => part.type === 'image_url');
+  // A sticker's URL is already fully sized (see stickerUrl) -- the media
+  // proxy must never touch it, unlike a plain attachment/embed picture.
+  assert.equal(imagePart.image_url.url, 'https://media.discordapp.net/stickers/s1.png?size=160');
+
+  const user = content.find((part) => part.type === 'text').text;
+  assert.ok(user.includes('[sticker: pepe] [its still frame is attached image 1]'));
 });
 
 test('buildRequest: idByIndex maps every transcript index to its message id', () => {
@@ -402,7 +428,10 @@ test('buildRequest: under a tiny server cap, the map is trimmed but <chat> still
     fakeChannel('c1', { name: 'general', purpose: 'x'.repeat(200), lastMessageAt: NOW }),
     fakeChannel('c2', { name: 'random', purpose: 'y'.repeat(200), lastMessageAt: NOW - MIN }),
   ];
-  const config = fakeConfig({ llm: { maxRequestTokens: 340, safetyMargin: 1 } });
+  // 340 was tight enough pre-F17; the <senses> block grew a few lines
+  // (stickers/lottie, part of the always-kept "fixed" section) so the
+  // budget needs a little more headroom to still leave room for chat.
+  const config = fakeConfig({ llm: { maxRequestTokens: 400, safetyMargin: 1 } });
   const request = buildRequest(baseInput({ history, channels, currentChannelId: 'c1', config }));
 
   assert.equal(request.stats.server.kept, 0);
@@ -659,6 +688,44 @@ test('buildRequest: <senses> is omitted entirely when labels has no senses secti
   const request = buildRequest(baseInput({ prompts: fakePrompts({ labels: brokenLabels }) }));
   const user = request.messages[1].content;
   assert.ok(!user.includes('<senses>'));
+});
+
+// --- <senses>: stickers/Lottie (F17) ---------------------------------------
+
+test('buildRequest: vision on, mediaDescriptions off -> stickerSee + stickerBlind + lottie', () => {
+  const config = fakeConfig({ features: { vision: true, mediaDescriptions: false } });
+  const request = buildRequest(baseInput({ config }));
+  const senses = sensesOf(request);
+  assert.ok(senses.includes(labels.senses.stickerSee));
+  assert.ok(senses.includes(labels.senses.stickerBlind));
+  assert.ok(!senses.includes(labels.senses.stickerDescribed));
+  assert.ok(senses.includes(labels.senses.lottie));
+});
+
+test('buildRequest: vision off -> no stickerSee line, stickerBlind and lottie still shown', () => {
+  const config = fakeConfig({ features: { vision: false } });
+  const request = buildRequest(baseInput({ config }));
+  const senses = sensesOf(request);
+  assert.ok(!senses.includes(labels.senses.stickerSee));
+  assert.ok(senses.includes(labels.senses.stickerBlind));
+  assert.ok(senses.includes(labels.senses.lottie));
+});
+
+test('buildRequest: mediaDescriptions on -> stickerDescribed replaces stickerBlind, lottie still shown', () => {
+  const config = fakeConfig({ features: { vision: true, mediaDescriptions: true } });
+  const request = buildRequest(baseInput({ config }));
+  const senses = sensesOf(request);
+  assert.ok(senses.includes(labels.senses.stickerDescribed));
+  assert.ok(!senses.includes(labels.senses.stickerBlind));
+  assert.ok(senses.includes(labels.senses.lottie));
+});
+
+test('buildRequest: an older labels.json with no sticker senses keys omits them (and lottie) without breaking the rest', () => {
+  const oldLabels = { ...labels, senses: { ...labels.senses, stickerSee: undefined, stickerDescribed: undefined, stickerBlind: undefined } };
+  const request = buildRequest(baseInput({ prompts: fakePrompts({ labels: oldLabels }) }));
+  const senses = sensesOf(request);
+  assert.ok(!senses.includes(labels.senses.lottie));
+  assert.ok(senses.includes(labels.senses.imageSee));
 });
 
 // --- <lore> ------------------------------------------------------------------

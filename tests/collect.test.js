@@ -132,6 +132,141 @@ test('normalizeMessage: no messageSnapshots means an empty forwarded array', () 
   assert.deepEqual(m.forwarded, []);
 });
 
+// --- normalizeMessage: stickers (F17) ----------------------------------------
+
+function sticker(id, name, format) {
+  return { id, name, format };
+}
+
+test('normalizeMessage: stickers become { id, name, format, url }, PNG/APNG/GIF sized via media.discordapp.net', () => {
+  const raw = rawMessage({
+    stickers: new Map([
+      ['s1', sticker('s1', 'pepe', 1)],
+      ['s2', sticker('s2', 'wave', 2)],
+      ['s3', sticker('s3', 'dance', 4)],
+    ]),
+  });
+  const m = normalizeMessage(raw, 'self');
+  assert.deepEqual(m.stickers[0], { id: 's1', name: 'pepe', format: 1, url: 'https://media.discordapp.net/stickers/s1.png?size=160' });
+  assert.deepEqual(m.stickers[1], { id: 's2', name: 'wave', format: 2, url: 'https://media.discordapp.net/stickers/s2.png?size=160' });
+  assert.deepEqual(m.stickers[2], { id: 's3', name: 'dance', format: 4, url: 'https://media.discordapp.net/stickers/s3.gif?size=160' });
+});
+
+test('normalizeMessage: a Lottie sticker (format 3) has a null url, name only', () => {
+  const raw = rawMessage({ stickers: new Map([['s1', sticker('s1', 'wiggle', 3)]]) });
+  const m = normalizeMessage(raw, 'self');
+  assert.deepEqual(m.stickers[0], { id: 's1', name: 'wiggle', format: 3, url: null });
+});
+
+// --- normalizeMessage: custom emoji extraction (F17) -------------------------
+
+test('normalizeMessage: a static custom emoji is extracted, text keeps reading as :name:', () => {
+  const raw = rawMessage({ cleanContent: 'nice <:pog:111> job' });
+  const m = normalizeMessage(raw, 'self');
+  assert.equal(m.content, 'nice :pog: job');
+  assert.deepEqual(m.emojis, [{ id: '111', name: 'pog', animated: false, url: 'https://cdn.discordapp.com/emojis/111.webp?size=96' }]);
+});
+
+test('normalizeMessage: an animated custom emoji is marked animated, same webp URL pattern', () => {
+  const raw = rawMessage({ cleanContent: 'lol <a:kekw:222>' });
+  const m = normalizeMessage(raw, 'self');
+  assert.equal(m.content, 'lol :kekw:');
+  assert.deepEqual(m.emojis, [{ id: '222', name: 'kekw', animated: true, url: 'https://cdn.discordapp.com/emojis/222.webp?size=96' }]);
+});
+
+test('normalizeMessage: the same custom emoji repeated in one message is de-duplicated', () => {
+  const raw = rawMessage({ cleanContent: '<:pog:111> <:pog:111> <:pog:111>' });
+  const m = normalizeMessage(raw, 'self');
+  assert.equal(m.emojis.length, 1);
+});
+
+test('normalizeMessage: distinct custom emoji are capped at 5 per message, first-appearance order', () => {
+  const ids = Array.from({ length: 8 }, (_, i) => i + 1);
+  const content = ids.map((id) => `<:e${id}:${id}>`).join(' ');
+  const raw = rawMessage({ cleanContent: content });
+  const m = normalizeMessage(raw, 'self');
+  assert.equal(m.emojis.length, 5);
+  assert.deepEqual(m.emojis.map((e) => e.id), ['1', '2', '3', '4', '5']);
+});
+
+test('normalizeMessage: no custom emoji means an empty emojis array', () => {
+  const raw = rawMessage({ cleanContent: 'plain text, no emoji' });
+  const m = normalizeMessage(raw, 'self');
+  assert.deepEqual(m.emojis, []);
+});
+
+test('normalizeMessage: a forwarded snapshot also carries its own stickers and emoji', () => {
+  const raw = rawMessage({
+    cleanContent: '',
+    messageSnapshots: new Map([
+      [
+        'snap1',
+        {
+          id: 'snap1',
+          cleanContent: 'look <:pog:111>',
+          attachments: new Map(),
+          embeds: [],
+          stickers: new Map([['s1', sticker('s1', 'pepe', 1)]]),
+          flags: flagsWith([]),
+        },
+      ],
+    ]),
+  });
+  const m = normalizeMessage(raw, 'self');
+  assert.equal(m.forwarded[0].content, 'look :pog:');
+  assert.deepEqual(m.forwarded[0].emojis, [{ id: '111', name: 'pog', animated: false, url: 'https://cdn.discordapp.com/emojis/111.webp?size=96' }]);
+  assert.deepEqual(m.forwarded[0].stickers, [{ id: 's1', name: 'pepe', format: 1, url: 'https://media.discordapp.net/stickers/s1.png?size=160' }]);
+});
+
+// --- normalizeMessage: describable link thumbnails get a stable id (F17) ----
+
+test('normalizeMessage: a link embed with a thumbnail (e.g. YouTube) gets a stable hash id, not the per-message index', () => {
+  const raw = rawMessage({
+    embeds: [
+      {
+        url: 'https://www.youtube.com/watch?v=xyz',
+        provider: { name: 'YouTube' },
+        title: 'Cool video',
+        thumbnail: { url: 'https://i.ytimg.com/vi/xyz/hq.jpg' },
+      },
+    ],
+  });
+  const m = normalizeMessage(raw, 'self');
+  assert.equal(m.links[0].kind, 'link');
+  assert.ok(m.links[0].id.startsWith('link:'));
+  assert.notEqual(m.links[0].id, 'm1#e0');
+});
+
+test('normalizeMessage: the same link thumbnail on two different messages gets the same stable id', () => {
+  const embed = () => ({
+    url: 'https://www.youtube.com/watch?v=xyz',
+    provider: { name: 'YouTube' },
+    title: 'Cool video',
+    thumbnail: { url: 'https://i.ytimg.com/vi/xyz/hq.jpg?ex=1&hm=aaa' },
+  });
+  const m1 = normalizeMessage(rawMessage({ id: 'm1', embeds: [embed()] }), 'self');
+  const m2 = normalizeMessage(
+    rawMessage({ id: 'm2', embeds: [{ ...embed(), thumbnail: { url: 'https://i.ytimg.com/vi/xyz/hq.jpg?ex=9&hm=zzz' } }] }),
+    'self',
+  );
+  assert.equal(m1.links[0].id, m2.links[0].id);
+});
+
+test('normalizeMessage: an embed thumbnail prefers proxyURL over url when discord.js exposes one', () => {
+  const raw = rawMessage({
+    embeds: [
+      {
+        url: 'https://www.youtube.com/watch?v=xyz',
+        provider: { name: 'YouTube' },
+        title: 'Cool video',
+        thumbnail: { url: 'https://i.ytimg.com/vi/xyz/hq.jpg', proxyURL: 'https://media.discordapp.net/external/abc/hq.jpg' },
+      },
+    ],
+  });
+  const m = normalizeMessage(raw, 'self');
+  assert.equal(m.links[0].thumbnailUrl, 'https://media.discordapp.net/external/abc/hq.jpg');
+});
+
 // --- normalizeMessage: forward vs. plain reply -------------------------------
 // A real forwarded message's own content is empty; `message.reference` is
 // `{ type: MessageReferenceType.Forward, channel_id: <source>, guild_id,

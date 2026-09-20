@@ -30,7 +30,7 @@
 import { readableChannels, lastActivity, fetchHistoryWindow } from '../discord/collect.js';
 import { touchMemory } from './update.js';
 import { estimateTokens } from '../llm/tokens.js';
-import { collectPictures, isDescribable } from '../discord/media.js';
+import { collectPictures, collectEmojiItems, isDescribable } from '../discord/media.js';
 import { log } from '../log.js';
 
 const MAX_CONSECUTIVE_FAILURES = 3;
@@ -323,7 +323,7 @@ export function createWarmup({ hot, store, client, memory, getGuildId, now = Dat
 
     const candidates = [];
     for (const message of batch) {
-      for (const item of collectPictures(message)) {
+      for (const item of [...collectPictures(message), ...collectEmojiItems(message)]) {
         if (isDescribable(item)) candidates.push(item);
       }
     }

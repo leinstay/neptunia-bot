@@ -4,13 +4,45 @@
 
 import { PermissionFlagsBits, SnowflakeUtil, MessageReferenceType } from 'discord.js';
 import { log } from '../log.js';
-import { classifyAttachment, classifyEmbed } from './media.js';
+import { classifyAttachment, classifyEmbed, stickerUrl, emojiUrl, linkThumbnailCacheKey } from './media.js';
 
 const TEXT_PREVIEW_SIZE_GUARD = 256 * 1024; // 256 KB — never fetch a bigger "text" attachment
+const MAX_EMOJIS_PER_MESSAGE = 5;
+const CUSTOM_EMOJI_RE = /<(a)?:(\w+):(\d+)>/g;
 
 /** Custom emoji markup `<:name:id>` / `<a:name:id>` reads better as `:name:`. */
 function cleanEmoji(text) {
   return text.replace(/<a?:(\w+):\d+>/g, ':$1:');
+}
+
+/**
+ * Custom emoji `<:name:id>` / `<a:name:id>` written in a message's text (the
+ * text itself keeps reading as `:name:`, see cleanEmoji above): de-duplicated
+ * by id, in first-appearance order, capped at MAX_EMOJIS_PER_MESSAGE.
+ * @param {string} text  The same raw (pre-cleanEmoji) content cleanEmoji reads.
+ * @returns {{ id: string, name: string, animated: boolean, url: string }[]}
+ */
+function extractEmojis(text) {
+  const seen = new Map();
+  CUSTOM_EMOJI_RE.lastIndex = 0;
+  let match;
+  while ((match = CUSTOM_EMOJI_RE.exec(String(text ?? '')))) {
+    const [, animatedFlag, name, id] = match;
+    if (seen.has(id)) continue;
+    seen.set(id, { id, name, animated: Boolean(animatedFlag), url: emojiUrl(id) });
+    if (seen.size >= MAX_EMOJIS_PER_MESSAGE) break;
+  }
+  return [...seen.values()];
+}
+
+/** Classified stickers of a message/snapshot: `{ id, name, format, url }` (see stickerUrl). */
+function normalizeStickers(stickers) {
+  return [...(stickers?.values?.() ?? [])].map((sticker) => ({
+    id: sticker.id,
+    name: sticker.name,
+    format: sticker.format,
+    url: stickerUrl(sticker.id, sticker.format),
+  }));
 }
 
 /** Whether the message carries Discord's voice-message flag (the whole message is flagged, not the attachment). */
@@ -34,11 +66,28 @@ function normalizeAttachments(attachments, isVoice) {
   }));
 }
 
-/** Classified embeds (only the ones with a URL: nothing to de-dupe or describe otherwise). */
+/**
+ * Classified embeds (only the ones with a URL: nothing to de-dupe or describe
+ * otherwise). A `kind: 'link'` embed carrying a thumbnail (the newly
+ * describable video-site preview, e.g. YouTube) gets a STABLE id
+ * (`linkThumbnailCacheKey`, derived from the thumbnail URL, not the message)
+ * instead of the usual per-message-index one, so a repost of the same video
+ * shares one description-cache entry and the slim memory buffer never has to
+ * store the URL to look it up again later (see src/memory/update.js
+ * `observe()`/`analyze()`). A `kind: 'gif'` embed (tenor/giphy) keeps the
+ * existing per-message-index id, unchanged.
+ */
 function normalizeLinks(idPrefix, embeds, embedTextChars) {
   return [...(embeds ?? [])]
     .filter((embed) => embed?.url)
-    .map((embed, index) => ({ id: `${idPrefix}#e${index}`, ...classifyEmbed(embed, { embedTextChars }) }));
+    .map((embed, index) => {
+      const classified = classifyEmbed(embed, { embedTextChars });
+      const id =
+        classified.kind === 'link' && classified.thumbnailUrl
+          ? linkThumbnailCacheKey(classified.thumbnailUrl)
+          : `${idPrefix}#e${index}`;
+      return { id, ...classified };
+    });
 }
 
 /** Remove the raw URL of every rendered link/gif embed from the message text, so it never appears twice. */
@@ -56,12 +105,15 @@ function normalizeSnapshot(snapshot, embedTextChars) {
   const isVoice = isVoiceMessageFlag(snapshot);
   const attachments = normalizeAttachments(snapshot.attachments, isVoice);
   const links = normalizeLinks(snapshot.id ?? 'fwd', snapshot.embeds, embedTextChars);
-  const rawContent = cleanEmoji(snapshot.cleanContent ?? snapshot.content ?? '').trim();
+  const cleanContent = snapshot.cleanContent ?? snapshot.content ?? '';
+  const emojis = extractEmojis(cleanContent);
+  const rawContent = cleanEmoji(cleanContent).trim();
   return {
     content: stripEmbedUrls(rawContent, links),
     attachments,
     links,
-    stickers: [...(snapshot.stickers?.values?.() ?? [])].map((sticker) => sticker.name),
+    stickers: normalizeStickers(snapshot.stickers),
+    emojis,
   };
 }
 
@@ -75,7 +127,9 @@ export function normalizeMessage(message, selfId, options = {}) {
   const isVoice = isVoiceMessageFlag(message);
   const attachments = normalizeAttachments(message.attachments, isVoice);
   const links = normalizeLinks(message.id, message.embeds, embedTextChars);
-  const rawContent = cleanEmoji(message.cleanContent ?? '').trim();
+  const cleanContent = message.cleanContent ?? '';
+  const emojis = extractEmojis(cleanContent);
+  const rawContent = cleanEmoji(cleanContent).trim();
   const forwarded = [...(message.messageSnapshots?.values?.() ?? [])].map((snapshot) => normalizeSnapshot(snapshot, embedTextChars));
 
   // A forward's `message.reference.messageId` is the ORIGINAL message, not
@@ -105,7 +159,8 @@ export function normalizeMessage(message, selfId, options = {}) {
     attachments,
     links,
     forwarded,
-    stickers: [...message.stickers.values()].map((sticker) => sticker.name),
+    stickers: normalizeStickers(message.stickers),
+    emojis,
   };
 }
 

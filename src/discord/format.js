@@ -8,7 +8,7 @@
 // Time gaps and date changes are spelled out because the model must tell a
 // live conversation from a dead chat that somebody has just poked.
 
-import { mediaLabelFor } from './media.js';
+import { mediaLabelFor, stickerLabelFor, stickerUrl } from './media.js';
 
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
@@ -108,12 +108,14 @@ function truncate(text, maxChars) {
 }
 
 /**
- * One rendered tag per attachment/embed of `message`, most informative form
- * available (see .claude/docs/prompt-contract.md, "Media in a transcript
- * line" and src/discord/media.js#mediaLabelFor): attached to this request >
- * described > blind. `context.attachedIndex`/`context.descriptions` are
- * optional `Map`s keyed by the item's id (an attachment's Discord id, or a
- * link's synthesized id — see normalizeMessage).
+ * One rendered tag per attachment/embed/sticker of `message`, most
+ * informative form available (see .claude/docs/prompt-contract.md, "Media in
+ * a transcript line" and src/discord/media.js#mediaLabelFor/stickerLabelFor):
+ * attached to this request > described > blind, plus one extra tag per
+ * distinct described custom emoji. `context.attachedIndex`/
+ * `context.descriptions` are optional `Map`s keyed by the item's id (an
+ * attachment's Discord id, a link's synthesized id, `sticker:<id>` or
+ * `emoji:<id>` — see normalizeMessage).
  */
 function mediaTags(message, labels, context = {}) {
   const unknownDuration = labels.transcript.unknownDuration ?? '?';
@@ -129,10 +131,34 @@ function mediaTags(message, labels, context = {}) {
   }
   for (const link of message.links ?? []) {
     const attachedIndex = context.attachedIndex?.get(link.id) ?? null;
-    const description = context.descriptions?.get(link.id) ?? null;
+    // A plain 'link' (video-site preview) thumbnail description is a new,
+    // optional tag (transcript.thumbnailDescribed): an older labels.json
+    // without that key must render exactly as before -- a 'gif' embed's own
+    // description (gifDescribed) is a base contract key and is never gated
+    // this way.
+    const canDescribe = link.kind !== 'link' || Boolean(labels.transcript.thumbnailDescribed);
+    const description = canDescribe ? (context.descriptions?.get(link.id) ?? null) : null;
     pushLabel(mediaLabelFor(link, { attachedIndex, description, unknownDuration }));
   }
-  for (const sticker of message.stickers ?? []) tags.push(fill(labels.transcript.sticker, { name: sticker }));
+  for (const sticker of message.stickers ?? []) {
+    const attachedIndex = context.attachedIndex?.get(`sticker:${sticker.id}`) ?? null;
+    const description = labels.transcript.stickerDescribed
+      ? (context.descriptions?.get(`sticker:${sticker.id}`) ?? null)
+      : null;
+    // The slim memory buffer keeps no `url` (see src/memory/update.js
+    // `observe()`) -- rebuild it from id/format when absent, so a memory
+    // transcript tells a picture-format sticker from a Lottie one exactly
+    // like a live chat transcript does.
+    const url = sticker.url ?? stickerUrl(sticker.id, sticker.format);
+    pushLabel(stickerLabelFor({ ...sticker, url }, { attachedIndex, description }));
+  }
+  if (labels.transcript.emojiDescribed) {
+    for (const emoji of message.emojis ?? []) {
+      const description = context.descriptions?.get(`emoji:${emoji.id}`) ?? null;
+      if (!description) continue;
+      tags.push(fill(labels.transcript.emojiDescribed, { name: emoji.name, text: description }));
+    }
+  }
   // A label key missing from an older labels.json (fill() returns '' for it)
   // must not leave a stray double space where that tag would have sat.
   return tags.filter(Boolean);

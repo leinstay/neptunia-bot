@@ -221,7 +221,7 @@ test('formatTranscript: attachments and stickers get tagged', () => {
     msg('a', t0, {
       content: '',
       attachments: [{ kind: 'image' }, { kind: 'file', name: 'report.pdf' }],
-      stickers: ['pepe'],
+      stickers: [{ id: 's1', name: 'pepe', format: 1, url: 'https://media.discordapp.net/stickers/s1.png?size=160' }],
     }),
   ];
   const items = formatTranscript(messages, { timezone: TZ, gapMinutes: 20, maxChars: 100, selfName: 'Nept', labels });
@@ -237,7 +237,7 @@ test('formatTranscript: a media tag rendering empty (missing label key) never le
     msg('a', t0, {
       content: 'text before',
       attachments: [{ kind: 'image' }],
-      stickers: ['pepe'],
+      stickers: [{ id: 's1', name: 'pepe', format: 1, url: 'https://media.discordapp.net/stickers/s1.png?size=160' }],
     }),
   ];
   const items = formatTranscript(messages, { timezone: TZ, gapMinutes: 20, maxChars: 100, selfName: 'Nept', labels: noImageLabel });
@@ -536,6 +536,208 @@ test('formatTranscript: a tenor/giphy embed (kind gif) keeps its gif form and ad
   });
   assert.ok(attached[0].text.includes('[gif: cat] [its still frame is attached image 1]'));
   assert.ok(!attached[0].text.includes('[picture #1, attached]'), 'the site/title must survive, not collapse into bare imageAttached');
+});
+
+// --- formatTranscript: a plain 'link' embed's thumbnail can be described too
+// (F17) -- the link/linkText tag itself never swaps, one extra tag follows.
+
+test('formatTranscript: a link thumbnail description appends thumbnailDescribed, the link tag stays', () => {
+  const t0 = Date.UTC(2026, 8, 20, 10, 0, 0);
+  const messages = [
+    msg('a', t0, {
+      content: '',
+      links: [{ id: 'link:abcd1234', kind: 'link', site: 'YouTube', title: 'Cool video', thumbnailUrl: 'https://i.ytimg.com/x.jpg' }],
+    }),
+  ];
+  const blind = formatTranscript(messages, { timezone: TZ, gapMinutes: 20, maxChars: 100, selfName: 'Nept', labels });
+  assert.ok(blind[0].text.includes('[link: YouTube — Cool video]'));
+  assert.ok(!blind[0].text.includes('thumbnail'));
+
+  const described = formatTranscript(messages, {
+    timezone: TZ,
+    gapMinutes: 20,
+    maxChars: 100,
+    selfName: 'Nept',
+    labels,
+    descriptions: new Map([['link:abcd1234', 'a cat plays piano']]),
+  });
+  assert.ok(described[0].text.includes('[link: YouTube — Cool video] [thumbnail: a cat plays piano]'));
+});
+
+test('formatTranscript: an older labels.json with no thumbnailDescribed key renders the plain link tag only', () => {
+  const t0 = Date.UTC(2026, 8, 20, 10, 0, 0);
+  const oldLabels = { ...labels, transcript: { ...labels.transcript, thumbnailDescribed: undefined } };
+  const messages = [
+    msg('a', t0, {
+      content: '',
+      links: [{ id: 'link:abcd1234', kind: 'link', site: 'YouTube', title: 'Cool video', thumbnailUrl: 'https://i.ytimg.com/x.jpg' }],
+    }),
+  ];
+  const items = formatTranscript(messages, {
+    timezone: TZ,
+    gapMinutes: 20,
+    maxChars: 100,
+    selfName: 'Nept',
+    labels: oldLabels,
+    descriptions: new Map([['link:abcd1234', 'a cat plays piano']]),
+  });
+  assert.ok(items[0].text.includes('[link: YouTube — Cool video]'));
+  assert.ok(!items[0].text.includes('a cat plays piano'));
+  assert.ok(!items[0].text.includes('  '), 'no stray double space from the omitted tag');
+});
+
+test('formatTranscript: an attached link thumbnail keeps the link tag and adds frameAttached instead of the description', () => {
+  const t0 = Date.UTC(2026, 8, 20, 10, 0, 0);
+  const messages = [
+    msg('a', t0, {
+      content: '',
+      links: [{ id: 'link:abcd1234', kind: 'link', site: 'YouTube', title: 'Cool video', thumbnailUrl: 'https://i.ytimg.com/x.jpg' }],
+    }),
+  ];
+  const items = formatTranscript(messages, {
+    timezone: TZ,
+    gapMinutes: 20,
+    maxChars: 100,
+    selfName: 'Nept',
+    labels,
+    attachedIndex: new Map([['link:abcd1234', 1]]),
+    descriptions: new Map([['link:abcd1234', 'a cat plays piano']]),
+  });
+  assert.ok(items[0].text.includes('[link: YouTube — Cool video] [its still frame is attached image 1]'));
+  assert.ok(!items[0].text.includes('a cat plays piano'));
+});
+
+// --- formatTranscript: stickers (F17) ---------------------------------------
+
+function stickerItem(id, name, url) {
+  return { id, name, url };
+}
+
+test('formatTranscript: a picture-format sticker attached to the request keeps the sticker tag and adds frameAttached', () => {
+  const t0 = Date.UTC(2026, 8, 20, 10, 0, 0);
+  const messages = [msg('a', t0, { content: '', stickers: [stickerItem('s1', 'pepe', 'https://x/s1.png')] })];
+  const items = formatTranscript(messages, {
+    timezone: TZ,
+    gapMinutes: 20,
+    maxChars: 100,
+    selfName: 'Nept',
+    labels,
+    attachedIndex: new Map([['sticker:s1', 1]]),
+  });
+  assert.ok(items[0].text.includes('[sticker: pepe] [its still frame is attached image 1]'));
+});
+
+test('formatTranscript: a described sticker (not attached) renders stickerDescribed', () => {
+  const t0 = Date.UTC(2026, 8, 20, 10, 0, 0);
+  const messages = [msg('a', t0, { content: '', stickers: [stickerItem('s1', 'pepe', 'https://x/s1.png')] })];
+  const items = formatTranscript(messages, {
+    timezone: TZ,
+    gapMinutes: 20,
+    maxChars: 100,
+    selfName: 'Nept',
+    labels,
+    descriptions: new Map([['sticker:s1', 'a frog giving a thumbs up']]),
+  });
+  assert.ok(items[0].text.includes('[sticker: pepe: a frog giving a thumbs up]'));
+});
+
+test('formatTranscript: an older labels.json with no stickerDescribed key falls back to the plain sticker tag', () => {
+  const t0 = Date.UTC(2026, 8, 20, 10, 0, 0);
+  const oldLabels = { ...labels, transcript: { ...labels.transcript, stickerDescribed: undefined } };
+  const messages = [msg('a', t0, { content: '', stickers: [stickerItem('s1', 'pepe', 'https://x/s1.png')] })];
+  const items = formatTranscript(messages, {
+    timezone: TZ,
+    gapMinutes: 20,
+    maxChars: 100,
+    selfName: 'Nept',
+    labels: oldLabels,
+    descriptions: new Map([['sticker:s1', 'a frog giving a thumbs up']]),
+  });
+  assert.ok(items[0].text.includes('[sticker: pepe]'));
+  assert.ok(!items[0].text.includes('thumbs up'));
+});
+
+test('formatTranscript: a Lottie sticker (url null) is always the plain sticker tag, even with a matching description entry', () => {
+  const t0 = Date.UTC(2026, 8, 20, 10, 0, 0);
+  const messages = [msg('a', t0, { content: '', stickers: [stickerItem('s1', 'wiggle', null)] })];
+  const items = formatTranscript(messages, {
+    timezone: TZ,
+    gapMinutes: 20,
+    maxChars: 100,
+    selfName: 'Nept',
+    labels,
+    attachedIndex: new Map([['sticker:s1', 1]]),
+    descriptions: new Map([['sticker:s1', 'should never show']]),
+  });
+  assert.ok(items[0].text.includes('[sticker: wiggle]'));
+  assert.ok(!items[0].text.includes('should never show'));
+  assert.ok(!items[0].text.includes('still frame'));
+});
+
+// --- formatTranscript: custom emoji (F17) -----------------------------------
+
+test('formatTranscript: a described custom emoji appends ONE emojiDescribed tag, text keeps reading :name:', () => {
+  const t0 = Date.UTC(2026, 8, 20, 10, 0, 0);
+  const messages = [msg('a', t0, { content: 'nice :pog:', emojis: [{ id: 'e1', name: 'pog' }] })];
+  const items = formatTranscript(messages, {
+    timezone: TZ,
+    gapMinutes: 20,
+    maxChars: 100,
+    selfName: 'Nept',
+    labels,
+    descriptions: new Map([['emoji:e1', 'a surprised cat face']]),
+  });
+  assert.ok(items[0].text.includes('nice :pog: [:pog: a surprised cat face]'));
+});
+
+test('formatTranscript: an undescribed custom emoji renders no extra tag at all', () => {
+  const t0 = Date.UTC(2026, 8, 20, 10, 0, 0);
+  const messages = [msg('a', t0, { content: 'nice :pog:', emojis: [{ id: 'e1', name: 'pog' }] })];
+  const items = formatTranscript(messages, { timezone: TZ, gapMinutes: 20, maxChars: 100, selfName: 'Nept', labels });
+  assert.ok(items[0].text.endsWith('nice :pog:'));
+  assert.ok(!items[0].text.includes('[:pog:'));
+});
+
+test('formatTranscript: an older labels.json with no emojiDescribed key renders no extra tag, today\'s behaviour', () => {
+  const t0 = Date.UTC(2026, 8, 20, 10, 0, 0);
+  const oldLabels = { ...labels, transcript: { ...labels.transcript, emojiDescribed: undefined } };
+  const messages = [msg('a', t0, { content: 'nice :pog:', emojis: [{ id: 'e1', name: 'pog' }] })];
+  const items = formatTranscript(messages, {
+    timezone: TZ,
+    gapMinutes: 20,
+    maxChars: 100,
+    selfName: 'Nept',
+    labels: oldLabels,
+    descriptions: new Map([['emoji:e1', 'a surprised cat face']]),
+  });
+  assert.equal(items[0].text.includes('a surprised cat face'), false);
+  assert.ok(!items[0].text.includes('  '));
+});
+
+test('formatTranscript: multiple distinct described emoji each get their own tag', () => {
+  const t0 = Date.UTC(2026, 8, 20, 10, 0, 0);
+  const messages = [
+    msg('a', t0, {
+      content: ':pog: and :kekw:',
+      emojis: [
+        { id: 'e1', name: 'pog' },
+        { id: 'e2', name: 'kekw' },
+      ],
+    }),
+  ];
+  const items = formatTranscript(messages, {
+    timezone: TZ,
+    gapMinutes: 20,
+    maxChars: 100,
+    selfName: 'Nept',
+    labels,
+    descriptions: new Map([
+      ['emoji:e1', 'a surprised cat face'],
+      ['emoji:e2', 'a laughing face'],
+    ]),
+  });
+  assert.ok(items[0].text.includes('[:pog: a surprised cat face]'));
+  assert.ok(items[0].text.includes('[:kekw: a laughing face]'));
 });
 
 test('formatTranscript: a forwarded message-snapshot wraps its content and media in labels.transcript.forwarded', () => {

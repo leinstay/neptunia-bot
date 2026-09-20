@@ -1376,6 +1376,18 @@ function withImage(message, itemId) {
   return message;
 }
 
+/** Attaches one picture-format sticker (Discord-shaped) to a raw fixture message. */
+function withSticker(message, itemId, name = 'pepe') {
+  message.stickers = new Map([[itemId, { id: itemId, name, format: 1 }]]);
+  return message;
+}
+
+/** Puts one custom emoji in the raw fixture message's text. */
+function withEmoji(message, id, name = 'pog') {
+  message.cleanContent = `${message.cleanContent} <:${name}:${id}>`;
+  return message;
+}
+
 function fakeHotWithMedia(overrides = {}) {
   const hot = fakeHot(overrides);
   hot.config.features = { mediaDescriptions: true, ...overrides.features };
@@ -1409,6 +1421,33 @@ test('warm-up: describes a batch\'s pictures and charges its own budget, threadi
     const st = store.state.data.warmup;
     assert.equal(st.tokensUsed, 120 + 15, 'describe (120) + analyze (10+5, from alwaysOk)');
     assert.equal(st.requests, 2, 'one describe request + one analyze request');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('warm-up: describes a batch\'s stickers and custom emoji too, pictures before emoji, threading them into analyze', async () => {
+  const dir = tempDir();
+  try {
+    const store = createStore({ dataDir: dir });
+    const now = Date.now();
+    const history = makeHistory({ count: 2, startTs: now, spacingMs: 1000, authorId: 'u1' });
+    withSticker(history[0], 'sticker1');
+    withEmoji(history[1], '222');
+    const channel = fakeChannel('c1', history);
+    const guild = fakeGuild('g1', [channel]);
+    const client = fakeClient(guild);
+    const hot = fakeHotWithMedia({ warmup: { batchMessages: 10 } });
+    const memory = fakeMemory(alwaysOk());
+    const describer = fakeDescriber(() => ({ text: 'described', usage: { prompt_tokens: 10, completion_tokens: 5 }, estimated: 15 }));
+
+    const warmup = createWarmup({ hot, store, client, memory, describer, getGuildId: () => 'g1', sleep: fakeSleep() });
+    await warmup.run();
+
+    assert.equal(describer.calls.length, 2);
+    assert.deepEqual(describer.calls.map((c) => c.item.itemId).sort(), ['emoji:222', 'sticker:sticker1']);
+    assert.equal(memory.calls[0].opts.descriptions.get('sticker:sticker1'), 'described');
+    assert.equal(memory.calls[0].opts.descriptions.get('emoji:222'), 'described');
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

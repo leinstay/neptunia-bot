@@ -112,7 +112,15 @@ test('resolveMentions: text with no mentions is returned unchanged with empty us
 const NOW = Date.UTC(2026, 8, 20, 12, 0, 0);
 
 /** A discord.js-shaped raw message, just enough for normalizeMessage. */
-function rawMessage({ id, authorId = 'u1', authorName = 'Alice', ts = NOW - 1000, content = 'hey bot', attachments = new Map() }) {
+function rawMessage({
+  id,
+  authorId = 'u1',
+  authorName = 'Alice',
+  ts = NOW - 1000,
+  content = 'hey bot',
+  attachments = new Map(),
+  stickers = new Map(),
+}) {
   return {
     id,
     channelId: 'c1',
@@ -122,7 +130,7 @@ function rawMessage({ id, authorId = 'u1', authorName = 'Alice', ts = NOW - 1000
     createdTimestamp: ts,
     reference: null,
     attachments,
-    stickers: new Map(),
+    stickers,
   };
 }
 
@@ -475,6 +483,46 @@ test('createTurnRunner: features.mediaDescriptions on describes an un-attached p
   assert.equal(describer.calls[0].options.maxNew, 6);
   const userMessage = llm.calls[0][1].content;
   assert.ok(userMessage.includes(labels.transcript.imageDescribed.replace('{text}', 'a grey cat')));
+});
+
+test('createTurnRunner: features.mediaDescriptions on describes a picture-format sticker via the same describer/cache path', async () => {
+  const raw = rawMessage({
+    id: 'm1',
+    stickers: new Map([['s1', { id: 's1', name: 'pepe', format: 1 }]]),
+  });
+  const channel = fakeTurnChannel({ historyMessages: [raw] });
+  const llm = fakeLlm('<msg>ok</msg>');
+  const store = fakeStore();
+  const hot = fakeHot({ mediaDescriptions: true });
+  const describer = fakeDescriber({ 'sticker:s1': 'a frog gives a thumbs up' });
+  const turns = createTurnRunner({ hot, store, llm, calibrator: identityCalibrator(), client: fakeClient(), describer });
+
+  await turns.runTurn({ channel, mode: 'reply', trigger: normalizedTrigger(raw), triggerKind: 'mention' });
+
+  assert.equal(describer.calls.length, 1);
+  assert.equal(describer.calls[0].items[0].itemId, 'sticker:s1');
+  const userMessage = llm.calls[0][1].content;
+  assert.ok(
+    userMessage.includes(labels.transcript.stickerDescribed.replace('{name}', 'pepe').replace('{text}', 'a frog gives a thumbs up')),
+  );
+});
+
+test('createTurnRunner: features.mediaDescriptions on describes a custom emoji in the text, appended as an extra tag', async () => {
+  const raw = rawMessage({ id: 'm1', content: 'nice <:pog:111> job' });
+  const channel = fakeTurnChannel({ historyMessages: [raw] });
+  const llm = fakeLlm('<msg>ok</msg>');
+  const store = fakeStore();
+  const hot = fakeHot({ mediaDescriptions: true });
+  const describer = fakeDescriber({ 'emoji:111': 'a surprised cat face' });
+  const turns = createTurnRunner({ hot, store, llm, calibrator: identityCalibrator(), client: fakeClient(), describer });
+
+  await turns.runTurn({ channel, mode: 'reply', trigger: normalizedTrigger(raw), triggerKind: 'mention' });
+
+  assert.equal(describer.calls.length, 1);
+  assert.equal(describer.calls[0].items[0].itemId, 'emoji:111');
+  const userMessage = llm.calls[0][1].content;
+  assert.ok(userMessage.includes('nice :pog: job'));
+  assert.ok(userMessage.includes(labels.transcript.emojiDescribed.replace('{name}', 'pog').replace('{text}', 'a surprised cat face')));
 });
 
 test('createTurnRunner: a text attachment is fetched lazily and rendered via filePreview', async () => {

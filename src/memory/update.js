@@ -11,7 +11,7 @@ import { estimateTokens, estimateMessages } from '../llm/tokens.js';
 import { formatTranscript, renderTranscript } from '../discord/format.js';
 import { parseJsonObject } from '../llm/parse.js';
 import { TokenLimitError } from '../llm/openrouter.js';
-import { isDescribable } from '../discord/media.js';
+import { isDescribable, stickerUrl } from '../discord/media.js';
 import { log } from '../log.js';
 import { emptyAffinity } from './affinity.js';
 import { keywordMatches } from './lore.js';
@@ -401,10 +401,14 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
       replyToId: normalized.replyToId,
       // No URL ever survives into the buffer -- but the item `id` does, so
       // the live analyzer can look up a describer caption already warmed
-      // into the cache by src/discord/events.js (see analyze() below).
+      // into the cache by src/discord/events.js (see analyze() below). A
+      // sticker keeps `id`/`name`/`format` (its URL is rebuilt from those via
+      // stickerUrl when needed); a custom emoji keeps only `id`/`name` (its
+      // URL is rebuilt via emojiUrl).
       attachments: (normalized.attachments ?? []).map((a) => ({ kind: a.kind, name: a.name, id: a.id, durationSec: a.durationSec ?? null })),
       links: (normalized.links ?? []).map((l) => ({ kind: l.kind, name: l.title || l.site || '', id: l.id, durationSec: null })),
-      stickers: normalized.stickers,
+      stickers: (normalized.stickers ?? []).map((s) => ({ id: s.id, name: s.name, format: s.format })),
+      emojis: (normalized.emojis ?? []).map((e) => ({ id: e.id, name: e.name })),
       direct: Boolean(direct),
     };
     const cfg = hot.config.memory;
@@ -483,6 +487,21 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
           if (item.id == null || !isDescribable(item)) continue;
           const cached = cache[item.id];
           if (cached && !cached.miss) effectiveDescriptions.set(item.id, cached.text);
+        }
+        // Stickers/emoji keep no URL in the buffer (see observe() above) --
+        // stickerUrl rebuilds it from id/format only to tell a Lottie
+        // sticker (never describable) apart, the cache is still looked up by
+        // the stable `sticker:<id>` / `emoji:<id>` key alone.
+        for (const sticker of message.stickers ?? []) {
+          if (!stickerUrl(sticker.id, sticker.format)) continue;
+          const itemId = `sticker:${sticker.id}`;
+          const cached = cache[itemId];
+          if (cached && !cached.miss) effectiveDescriptions.set(itemId, cached.text);
+        }
+        for (const emoji of message.emojis ?? []) {
+          const itemId = `emoji:${emoji.id}`;
+          const cached = cache[itemId];
+          if (cached && !cached.miss) effectiveDescriptions.set(itemId, cached.text);
         }
       }
     }
