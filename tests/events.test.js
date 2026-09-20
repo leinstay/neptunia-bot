@@ -91,17 +91,6 @@ function fakeMemory({ observe } = {}) {
   };
 }
 
-function fakeAdmin(handle) {
-  const calls = [];
-  return {
-    handle: async (message) => {
-      calls.push(message);
-      return handle ? handle(message) : false;
-    },
-    handleCalls: calls,
-  };
-}
-
 function scripted(values) {
   const queue = [...values];
   return () => {
@@ -121,7 +110,7 @@ function fakeStore(profiles = {}) {
   };
 }
 
-function makeHandler({ config, turns, spontaneous, memory, admin, tagHistory, rng, client, store, getGuildId, isWarmingUp } = {}) {
+function makeHandler({ config, turns, spontaneous, memory, tagHistory, rng, client, store, getGuildId, isWarmingUp } = {}) {
   return createMessageHandler({
     hot: { config: config ?? baseConfig() },
     store: store ?? fakeStore(),
@@ -129,7 +118,6 @@ function makeHandler({ config, turns, spontaneous, memory, admin, tagHistory, rn
     turns: turns ?? fakeTurns(),
     spontaneous: spontaneous ?? fakeSpontaneous(),
     memory: memory ?? fakeMemory(),
-    admin: admin ?? fakeAdmin(),
     tagHistory: tagHistory ?? createTagHistory(),
     getGuildId: getGuildId ?? (() => 'g1'),
     isWarmingUp,
@@ -141,18 +129,32 @@ function makeHandler({ config, turns, spontaneous, memory, admin, tagHistory, rn
 // Tests
 // ---------------------------------------------------------------------------
 
-test('events: a DM is handed only to admin, never to the chat pipeline', async () => {
-  const admin = fakeAdmin(() => true);
+// Owner commands are a separate pipeline entirely now (slash commands via
+// interactionCreate, src/discord/commands.js) — this createMessageHandler
+// no longer takes an `admin` dependency at all.
+
+test('events: a DM is ignored entirely, never reaches memory or the spontaneous scheduler', async () => {
   const turns = fakeTurns();
   const spontaneous = fakeSpontaneous();
   const memory = fakeMemory();
-  const handler = makeHandler({ admin, turns, spontaneous, memory });
+  const handler = makeHandler({ turns, spontaneous, memory });
 
   const message = fakeMessage({ guild: null, channel: null, channelId: undefined });
   await handler(message);
 
-  assert.equal(admin.handleCalls.length, 1);
-  assert.equal(admin.handleCalls[0], message);
+  assert.equal(memory.observeCalls.length, 0);
+  assert.equal(spontaneous.onMessageCalls.length, 0);
+  assert.equal(turns.notePostCalls.length, 0);
+});
+
+test('events: a DM whose content looks like an old-style owner command is still just ignored', async () => {
+  const memory = fakeMemory();
+  const spontaneous = fakeSpontaneous();
+  const handler = makeHandler({ memory, spontaneous });
+
+  const message = fakeMessage({ guild: null, channel: null, channelId: undefined, cleanContent: '/nep status' });
+  await handler(message);
+
   assert.equal(memory.observeCalls.length, 0);
   assert.equal(spontaneous.onMessageCalls.length, 0);
 });
@@ -161,8 +163,7 @@ test('events: its own message notes the post and is observed, never turned into 
   const turns = fakeTurns();
   const memory = fakeMemory();
   const spontaneous = fakeSpontaneous();
-  const admin = fakeAdmin();
-  const handler = makeHandler({ turns, memory, spontaneous, admin });
+  const handler = makeHandler({ turns, memory, spontaneous });
 
   const message = fakeMessage({ author: { id: 'self1', bot: true, globalName: 'Neptunia', username: 'neptunia' } });
   await handler(message);
@@ -172,46 +173,27 @@ test('events: its own message notes the post and is observed, never turned into 
   assert.equal(memory.observeCalls.length, 1);
   assert.equal(memory.observeCalls[0][0], 'g1');
   assert.equal(memory.observeCalls[0][1].self, true);
-  assert.equal(admin.handleCalls.length, 0);
 });
 
 test('events: another bot is ignored entirely', async () => {
   const turns = fakeTurns();
   const memory = fakeMemory();
   const spontaneous = fakeSpontaneous();
-  const admin = fakeAdmin();
-  const handler = makeHandler({ turns, memory, spontaneous, admin });
+  const handler = makeHandler({ turns, memory, spontaneous });
 
   const message = fakeMessage({ author: { id: 'otherbot', bot: true, globalName: 'Other', username: 'other' } });
   await handler(message);
 
   assert.equal(memory.observeCalls.length, 0);
   assert.equal(spontaneous.onMessageCalls.length, 0);
-  assert.equal(admin.handleCalls.length, 0);
   assert.equal(turns.notePostCalls.length, 0);
-});
-
-test('events: an owner command short-circuits and is never observed', async () => {
-  const admin = fakeAdmin(() => true);
-  const memory = fakeMemory();
-  const spontaneous = fakeSpontaneous();
-  const turns = fakeTurns();
-  const handler = makeHandler({ admin, memory, spontaneous, turns });
-
-  const message = fakeMessage({ cleanContent: '!nep status' });
-  await handler(message);
-
-  assert.equal(admin.handleCalls.length, 1);
-  assert.equal(memory.observeCalls.length, 0);
-  assert.equal(spontaneous.onMessageCalls.length, 0);
 });
 
 test('events: a plain message is observed and handed to the spontaneous scheduler, no turn', async () => {
   const memory = fakeMemory();
   const spontaneous = fakeSpontaneous();
   const turns = fakeTurns();
-  const admin = fakeAdmin(() => false);
-  const handler = makeHandler({ memory, spontaneous, turns, admin });
+  const handler = makeHandler({ memory, spontaneous, turns });
 
   const message = fakeMessage({ cleanContent: 'ένα μήνυμα χωρίς πρόκληση' });
   await handler(message);
@@ -220,6 +202,21 @@ test('events: a plain message is observed and handed to the spontaneous schedule
   assert.equal(spontaneous.onMessageCalls.length, 1);
   assert.equal(spontaneous.onMessageCalls[0][0], message.channel);
   assert.equal(spontaneous.onMessageCalls[0][1].content, 'ένα μήνυμα χωρίς πρόκληση');
+});
+
+test('events: a message that looks like an old-style owner command is now just an ordinary message', async () => {
+  const memory = fakeMemory();
+  const spontaneous = fakeSpontaneous();
+  // bot.nameTriggers is cleared explicitly: a deployment's own name triggers
+  // (config.local.json, not read here) must not turn the old prefix into one.
+  const config = baseConfig({ bot: { nameTriggers: [] } });
+  const handler = makeHandler({ config, memory, spontaneous });
+
+  const message = fakeMessage({ cleanContent: 'hey, old bang-prefix status command, remember that?' });
+  await handler(message);
+
+  assert.equal(memory.observeCalls.length, 1);
+  assert.equal(spontaneous.onMessageCalls.length, 1);
 });
 
 test('events: a mention with rng above ignoreChance runs a reply turn', async () => {
@@ -316,31 +313,27 @@ test('events: a name trigger respects config.mention.nameTriggerChance', async (
 test('events: a denied channel is ignored before anything else runs', async () => {
   const memory = fakeMemory();
   const spontaneous = fakeSpontaneous();
-  const admin = fakeAdmin(() => true);
   const config = baseConfig({ bot: { channels: { deny: ['c1'] } } });
-  const handler = makeHandler({ config, memory, spontaneous, admin });
+  const handler = makeHandler({ config, memory, spontaneous });
 
-  const message = fakeMessage({ cleanContent: '!nep status' });
+  const message = fakeMessage({ cleanContent: 'just chatting' });
   await handler(message);
 
   assert.equal(memory.observeCalls.length, 0);
   assert.equal(spontaneous.onMessageCalls.length, 0);
-  assert.equal(admin.handleCalls.length, 0);
 });
 
 test('events: a message from a guild other than the one this instance serves is ignored entirely', async () => {
   const memory = fakeMemory();
   const spontaneous = fakeSpontaneous();
-  const admin = fakeAdmin(() => true);
   const turns = fakeTurns();
-  const handler = makeHandler({ memory, spontaneous, admin, turns, getGuildId: () => 'the-served-guild' });
+  const handler = makeHandler({ memory, spontaneous, turns, getGuildId: () => 'the-served-guild' });
 
-  const message = fakeMessage({ guild: fakeGuild('some-other-guild'), cleanContent: '!nep status' });
+  const message = fakeMessage({ guild: fakeGuild('some-other-guild'), cleanContent: 'just chatting' });
   await handler(message);
 
   assert.equal(memory.observeCalls.length, 0);
   assert.equal(spontaneous.onMessageCalls.length, 0);
-  assert.equal(admin.handleCalls.length, 0);
   assert.equal(turns.notePostCalls.length, 0);
 });
 
@@ -467,32 +460,6 @@ test('features.nameTriggers=false: a name is never a trigger, even when configur
 
   assert.equal(called, false);
   assert.equal(spontaneous.onMessageCalls.length, 1);
-});
-
-test('features.adminCommands=false: a DM is ignored entirely, admin.handle is never called', async () => {
-  const admin = fakeAdmin(() => true);
-  const config = baseConfig({ features: { adminCommands: false } });
-  const handler = makeHandler({ config, admin });
-
-  const message = fakeMessage({ guild: null, channel: null, channelId: undefined });
-  await handler(message);
-
-  assert.equal(admin.handleCalls.length, 0);
-});
-
-test('features.adminCommands=false: an owner command in a guild channel is never handed to admin', async () => {
-  const admin = fakeAdmin(() => true);
-  const memory = fakeMemory();
-  const spontaneous = fakeSpontaneous();
-  const config = baseConfig({ features: { adminCommands: false } });
-  const handler = makeHandler({ config, admin, memory, spontaneous });
-
-  const message = fakeMessage({ cleanContent: '!nep status' });
-  await handler(message);
-
-  assert.equal(admin.handleCalls.length, 0);
-  // Without admin short-circuiting it, the message falls through to the regular pipeline.
-  assert.equal(memory.observeCalls.length, 1);
 });
 
 test('features.memory=false: a regular message is never observed', async () => {
@@ -642,18 +609,6 @@ test('events: while warming up a mention never runs a turn, even though it would
   assert.deepEqual(memory.observeCalls[0][2], { direct: false });
 });
 
-test('events: while warming up an owner command still works', async () => {
-  const admin = fakeAdmin(() => true);
-  const memory = fakeMemory();
-  const handler = makeHandler({ admin, memory, isWarmingUp: () => true });
-
-  const message = fakeMessage({ cleanContent: '!nep status' });
-  await handler(message);
-
-  assert.equal(admin.handleCalls.length, 1);
-  assert.equal(memory.observeCalls.length, 0, 'the owner command short-circuits before the warm-up gate, as usual');
-});
-
 test('events: isWarmingUp defaults to false when not provided', async () => {
   let called = false;
   const turns = fakeTurns({ runTurn: async () => { called = true; return { outcome: 'spoke' }; } });
@@ -672,87 +627,43 @@ test('events: isWarmingUp defaults to false when not provided', async () => {
 // ---------------------------------------------------------------------------
 // bot.dryRunChannelId: the dry-run mirror channel (src/behavior/turn.js)
 // carries the persona's own rehearsal output and is the owner's private test
-// room. Owner commands still work there; nothing else is ever conversation --
-// not even the persona's own mirrored messages there.
+// room. It goes back to being ignored entirely: nothing there is observed or
+// triggers anything, not even a message that looks like an owner command
+// (owner commands live in interactionCreate now, not here at all).
 
-test('events: an owner command in the dry-run mirror channel reaches admin.handle exactly once and nothing else', async () => {
+test('events: any message in the dry-run mirror channel is ignored entirely', async () => {
   const memory = fakeMemory();
   const spontaneous = fakeSpontaneous();
   const turns = fakeTurns();
-  const admin = fakeAdmin(() => true);
   const config = baseConfig({ bot: { dryRunChannelId: 'mirror1' } });
   const channel = fakeChannel('mirror1', fakeGuild());
-  const handler = makeHandler({ config, memory, spontaneous, turns, admin });
-
-  const message = fakeMessage({ channel, channelId: 'mirror1', cleanContent: '!nep warmup' });
-  await handler(message);
-
-  assert.equal(admin.handleCalls.length, 1);
-  assert.equal(admin.handleCalls[0], message);
-  assert.equal(memory.observeCalls.length, 0);
-  assert.equal(spontaneous.onMessageCalls.length, 0);
-  assert.equal(turns.notePostCalls.length, 0);
-});
-
-test('events: a non-command message in the dry-run mirror channel is not observed and triggers nothing', async () => {
-  const memory = fakeMemory();
-  const spontaneous = fakeSpontaneous();
-  const turns = fakeTurns();
-  const admin = fakeAdmin(() => false);
-  const config = baseConfig({ bot: { dryRunChannelId: 'mirror1' } });
-  const channel = fakeChannel('mirror1', fakeGuild());
-  const handler = makeHandler({ config, memory, spontaneous, turns, admin });
+  const handler = makeHandler({ config, memory, spontaneous, turns });
 
   const message = fakeMessage({ channel, channelId: 'mirror1', cleanContent: 'just chatting, no command' });
   await handler(message);
 
-  assert.equal(admin.handleCalls.length, 1);
   assert.equal(memory.observeCalls.length, 0);
   assert.equal(spontaneous.onMessageCalls.length, 0);
   assert.equal(turns.notePostCalls.length, 0);
 });
 
-test("events: the persona's own message in the dry-run mirror channel never reaches admin.handle", async () => {
+test('events: a message that looks like an owner command in the dry-run mirror channel is still just ignored', async () => {
   const memory = fakeMemory();
   const spontaneous = fakeSpontaneous();
   const turns = fakeTurns();
-  const admin = fakeAdmin(() => true);
   const config = baseConfig({ bot: { dryRunChannelId: 'mirror1' } });
   const channel = fakeChannel('mirror1', fakeGuild());
-  const handler = makeHandler({ config, memory, spontaneous, turns, admin });
+  const handler = makeHandler({ config, memory, spontaneous, turns });
 
-  const message = fakeMessage({
-    channel,
-    channelId: 'mirror1',
-    author: { id: 'self1', bot: true, globalName: 'Bot', username: 'bot' },
-  });
+  const message = fakeMessage({ channel, channelId: 'mirror1', cleanContent: 'old bang-prefix warmup command' });
   await handler(message);
 
-  assert.equal(admin.handleCalls.length, 0);
   assert.equal(memory.observeCalls.length, 0);
   assert.equal(spontaneous.onMessageCalls.length, 0);
   assert.equal(turns.notePostCalls.length, 0);
 });
 
-test('features.adminCommands=false: nothing at all is called in the dry-run mirror channel', async () => {
-  const memory = fakeMemory();
-  const spontaneous = fakeSpontaneous();
-  const turns = fakeTurns();
-  const admin = fakeAdmin(() => true);
-  const config = baseConfig({ bot: { dryRunChannelId: 'mirror1' }, features: { adminCommands: false } });
-  const channel = fakeChannel('mirror1', fakeGuild());
-  const handler = makeHandler({ config, memory, spontaneous, turns, admin });
-
-  const message = fakeMessage({ channel, channelId: 'mirror1', cleanContent: '!nep warmup' });
-  await handler(message);
-
-  assert.equal(admin.handleCalls.length, 0);
-  assert.equal(memory.observeCalls.length, 0);
-  assert.equal(spontaneous.onMessageCalls.length, 0);
-  assert.equal(turns.notePostCalls.length, 0);
-});
-
-test('events: the persona\'s own messages mirrored into the dry-run channel are never observed', async () => {
+test("events: the persona's own messages mirrored into the dry-run channel are never observed", async () => {
   const memory = fakeMemory();
   const turns = fakeTurns();
   const config = baseConfig({ bot: { dryRunChannelId: 'mirror1' } });

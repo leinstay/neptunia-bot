@@ -1,16 +1,21 @@
-// Owner commands (`!nep …`) so the owner can tune the running bot from
-// Discord without a restart and without ever touching data/: live rules
-// (prompts.local/rules.md, seeded from prompts/rules.md), config overrides
-// (config.local.json, hot-reloaded), status, a manual poke of the
-// spontaneous scheduler, and profile inspection/deletion. This is the ONLY
-// place in the project allowed to delete a stored profile (via
-// store.forgetUser). The tracked prompts/ layer is never written at runtime
-// — live corrections always land in the untracked prompts.local/ layer.
+// Owner commands, driven by Discord slash commands (src/discord/commands.js)
+// so the owner can tune the running bot from Discord without a restart and
+// without ever touching data/: live rules (prompts.local/rules.md, seeded
+// from prompts/rules.md), config overrides (config.local.json, hot-reloaded),
+// status, a manual poke of the spontaneous scheduler, and profile
+// inspection/deletion. This is the ONLY place in the project allowed to
+// delete a stored profile (via store.forgetUser). The tracked prompts/ layer
+// is never written at runtime — live corrections always land in the
+// untracked prompts.local/ layer.
 //
-// Everything below the pure-function section is thin I/O glued around them;
-// the pure functions (parseCommand, listRules, appendRule, removeRule,
-// setPath, unsetPath) are unit-tested directly with no filesystem or Discord
-// involved.
+// This module knows nothing about discord.js: `createAdmin(deps).run` takes
+// a `commandKey` (e.g. `'warmup.channel'`), a plain `args` object and a
+// `context` (`{ guildId, channelId, userId }`) and returns the reply text, or
+// throws an `Error` with an operator-facing message on bad input. Mapping a
+// discord.js interaction's options onto `args` is src/discord/commands.js's
+// job. Everything below the pure-function section is thin I/O glued around
+// them; the pure functions (listRules, appendRule, removeRule, setPath,
+// unsetPath) are unit-tested directly with no filesystem or Discord involved.
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -18,32 +23,10 @@ import { emptyAffinity, affinityBand } from './memory/affinity.js';
 import { log } from './log.js';
 
 const FORBIDDEN_SEGMENTS = new Set(['__proto__', 'constructor', 'prototype']);
-const REPLY_CHUNK_CHARS = 1900;
 
 // ---------------------------------------------------------------------------
 // Pure functions
 // ---------------------------------------------------------------------------
-
-/**
- * Parse `content` as an owner command. Returns `{ name, args }` (`name`
- * lowercased, `args` the rest trimmed in its original case) or null when
- * `content` does not start with `prefix` followed by whitespace or end of
- * string. A bare prefix parses as the `help` command.
- */
-export function parseCommand(content, prefix) {
-  if (typeof content !== 'string' || typeof prefix !== 'string' || !prefix) return null;
-  if (!content.startsWith(prefix)) return null;
-
-  const after = content.slice(prefix.length);
-  if (after.length > 0 && !/^\s/.test(after)) return null;
-
-  const rest = after.trim();
-  if (!rest) return { name: 'help', args: '' };
-
-  const spaceIdx = rest.search(/\s/);
-  if (spaceIdx === -1) return { name: rest.toLowerCase(), args: '' };
-  return { name: rest.slice(0, spaceIdx).toLowerCase(), args: rest.slice(spaceIdx + 1).trim() };
-}
 
 /**
  * Locate the bullet lines (`- …`) that belong to the rules list: those under
@@ -190,37 +173,6 @@ function pathExists(object, dottedPath) {
   return true;
 }
 
-function chunkText(text, maxLen) {
-  if (text.length <= maxLen) return [text];
-  const chunks = [];
-  let rest = text;
-  while (rest.length > maxLen) {
-    let cut = rest.lastIndexOf('\n', maxLen);
-    if (cut <= 0) cut = maxLen;
-    chunks.push(rest.slice(0, cut));
-    rest = rest.slice(cut).replace(/^\n/, '');
-  }
-  if (rest) chunks.push(rest);
-  return chunks;
-}
-
-function extractUserId(arg) {
-  const trimmed = String(arg ?? '').trim();
-  const mention = /^<@!?(\d+)>$/.exec(trimmed);
-  if (mention) return mention[1];
-  if (/^\d+$/.test(trimmed)) return trimmed;
-  return null;
-}
-
-/** A `<#channelId>` channel mention or a raw id. */
-function extractChannelId(arg) {
-  const trimmed = String(arg ?? '').trim();
-  const mention = /^<#(\d+)>$/.exec(trimmed);
-  if (mention) return mention[1];
-  if (/^\d+$/.test(trimmed)) return trimmed;
-  return null;
-}
-
 /**
  * A token amount: a plain integer, or an integer followed by `k` (x1,000) or
  * `m` (x1,000,000) — e.g. `500k`, `10m`. Returns null for anything else.
@@ -247,33 +199,6 @@ function writeLocalConfig(localPath, value) {
   fs.writeFileSync(localPath, `${JSON.stringify(value, null, 2)}\n`);
 }
 
-const HELP_TEXT = [
-  'Owner commands:',
-  '  help                                 this list',
-  '  rule <text>                          append a bullet to prompts.local/rules.md',
-  '  rules                                list the rules, numbered',
-  '  unrule <n>                           remove rule #n',
-  '  set <dotted.path> <json>             override a config.json value (config.local.json)',
-  '  unset <dotted.path>                  remove a config override',
-  '  reload                               reload config and prompts now',
-  '  status                               model, calibration, quotas, per-guild memory',
-  '  poke [interject|initiate] [channel]  force a spontaneous action',
-  '  memory <@mention|userId>             show a stored profile',
-  '  affinity <@mention|userId> [score] [reason…]  show, or set (-100..100) an attitude',
-  '  forget <@mention|userId>             delete a stored profile',
-  '  warmup                               memory warm-up status',
-  '  warmup plan                          the ordered read plan',
-  '  warmup channel <#chan|id> <depth|default>  set a channel\'s read depth',
-  '  warmup primary <#chan|id|none>       set the channel read first',
-  '  warmup only <on|off>                 read only channels with a set depth',
-  '  warmup depth <n>                     default read depth (1..1000000)',
-  '  warmup budget <tokens>                warm-up token budget (k/m ok, e.g. 500k)',
-  '  warmup output <tokens>                analyzer output limit (256..32000)',
-  '  warmup run                           start/resume the warm-up now',
-  '  warmup stop                          pause after the batch in flight',
-  '  warmup reset                         clear warm-up progress (refused while running)',
-].join('\n');
-
 // ---------------------------------------------------------------------------
 // Factory
 // ---------------------------------------------------------------------------
@@ -285,7 +210,10 @@ const HELP_TEXT = [
  * `calibrator` — token calibrator (src/llm/tokens.js), read for `.ratio`.
  * `getGuildId` — the single guild this instance serves, or null before it resolves.
  * `warmup` — from createWarmup() (src/memory/warmup.js), optional: `run()`, `stop()`, `status()`, `plan()`,
- *   `reset()`. When absent, the `warmup` command reports it is not available.
+ *   `reset()`. When absent, every `warmup.*` command reports it is not available.
+ *
+ * `run(commandKey, args, context)` throws a plain `Error` (operator-facing
+ * message) on bad input; it never touches discord.js.
  */
 export function createAdmin({ hot, store, client, spontaneous, calibrator, getGuildId, warmup }) {
   function isOwner(userId) {
@@ -316,24 +244,24 @@ export function createAdmin({ hot, store, client, spontaneous, calibrator, getGu
     fs.writeFileSync(file, text);
   }
 
-  function cmdRule(args) {
-    const rule = args.trim();
-    if (!rule) throw new Error('usage: rule <text>');
+  function cmdRuleAdd(args) {
+    const rule = String(args?.text ?? '').trim();
+    if (!rule) throw new Error('rule text is required');
     const next = appendRule(readRules(), rule);
     writeLocalRules(next);
     hot.reloadPrompts();
     return `Rule added: ${rule}`;
   }
 
-  function cmdRules() {
+  function cmdRuleList() {
     const rules = listRules(readRules());
     if (!rules.length) return 'No rules yet.';
     return rules.map((rule, i) => `${i + 1}. ${rule}`).join('\n');
   }
 
-  function cmdUnrule(args) {
-    const n = Number.parseInt(args.trim(), 10);
-    if (!Number.isInteger(n)) throw new Error('usage: unrule <n>');
+  function cmdRuleRemove(args) {
+    const n = args?.number;
+    if (!Number.isInteger(n)) throw new Error('a rule number is required');
     const result = removeRule(readRules(), n);
     if (!result) throw new Error(`no rule #${n}`);
     writeLocalRules(result.text);
@@ -342,10 +270,9 @@ export function createAdmin({ hot, store, client, spontaneous, calibrator, getGu
   }
 
   function cmdSet(args) {
-    const spaceIdx = args.search(/\s/);
-    if (spaceIdx === -1) throw new Error('usage: set <dotted.path> <json>');
-    const dottedPath = args.slice(0, spaceIdx).trim();
-    const rawValue = args.slice(spaceIdx + 1).trim();
+    const dottedPath = String(args?.path ?? '').trim();
+    const rawValue = String(args?.value ?? '').trim();
+    if (!dottedPath) throw new Error('a config path is required');
     if (!pathExists(hot.config, dottedPath)) throw new Error(`unknown config path: ${dottedPath}`);
 
     let value;
@@ -363,8 +290,8 @@ export function createAdmin({ hot, store, client, spontaneous, calibrator, getGu
   }
 
   function cmdUnset(args) {
-    const dottedPath = args.trim();
-    if (!dottedPath) throw new Error('usage: unset <dotted.path>');
+    const dottedPath = String(args?.path ?? '').trim();
+    if (!dottedPath) throw new Error('a config path is required');
     const localPath = path.join(hot.rootDir, 'config.local.json');
     const next = unsetPath(readLocalConfig(localPath), dottedPath);
     writeLocalConfig(localPath, next);
@@ -437,39 +364,27 @@ export function createAdmin({ hot, store, client, spontaneous, calibrator, getGu
     return lines.join('\n');
   }
 
-  async function cmdPoke(args, message) {
-    const tokens = args.split(/\s+/).filter(Boolean);
-    let mode = 'interject';
-    let channelId = null;
-    for (const token of tokens) {
-      if (token === 'interject' || token === 'initiate') mode = token;
-      else channelId = token;
-    }
+  async function cmdPoke(args, context) {
+    const mode = args?.mode === 'initiate' ? 'initiate' : 'interject';
+    const channelId = args?.channelId || context?.channelId;
+    if (!channelId) throw new Error('a channel is required');
 
-    let channel;
-    if (channelId) {
-      channel = await client.channels.fetch(channelId);
-    } else if (message.guild) {
-      channel = message.channel;
-    } else {
-      throw new Error('a channelId is required in a DM');
-    }
+    const channel = await client.channels.fetch(channelId);
     if (!channel) throw new Error(`channel not found: ${channelId}`);
 
     const result = await spontaneous.poke(channel, mode);
     return `poke ${mode} on ${channel.id}: ${JSON.stringify(result) ?? 'ok'}`;
   }
 
-  /** The single guild this instance serves: `message.guild.id` when the command runs there, else `getGuildId()`. */
-  function resolvedGuildId(message) {
-    return message.guild?.id ?? getGuildId?.() ?? null;
+  function resolvedGuildId(context) {
+    return context?.guildId ?? getGuildId?.() ?? null;
   }
 
-  function cmdMemory(args, message) {
-    const userId = extractUserId(args);
-    if (!userId) throw new Error('usage: memory <@mention|userId>');
+  function cmdMemoryShow(args, context) {
+    const userId = args?.userId;
+    if (!userId) throw new Error('a user is required');
 
-    const guildId = resolvedGuildId(message);
+    const guildId = resolvedGuildId(context);
     if (!guildId) throw new Error('no guild resolved yet');
 
     const profile = store.getUser(guildId, userId);
@@ -477,17 +392,26 @@ export function createAdmin({ hot, store, client, spontaneous, calibrator, getGu
     return JSON.stringify(profile, null, 2);
   }
 
-  function cmdAffinity(args, message) {
-    const spaceIdx = args.search(/\s/);
-    const firstArg = spaceIdx === -1 ? args : args.slice(0, spaceIdx);
-    const rest = spaceIdx === -1 ? '' : args.slice(spaceIdx + 1).trim();
-    const userId = extractUserId(firstArg);
-    if (!userId) throw new Error('usage: affinity <@mention|userId> [score] [reason…]');
+  function cmdMemoryForget(args, context) {
+    const userId = args?.userId;
+    if (!userId) throw new Error('a user is required');
 
-    const guildId = resolvedGuildId(message);
+    const guildId = resolvedGuildId(context);
     if (!guildId) throw new Error('no guild resolved yet');
 
-    if (!rest) {
+    store.forgetUser(guildId, userId);
+    return `Forgot ${userId}.`;
+  }
+
+  function cmdMemoryAffinity(args, context) {
+    const userId = args?.userId;
+    if (!userId) throw new Error('a user is required');
+
+    const guildId = resolvedGuildId(context);
+    if (!guildId) throw new Error('no guild resolved yet');
+
+    const score = args?.score;
+    if (score === undefined || score === null) {
       const profile = store.getUser(guildId, userId);
       if (!profile) throw new Error(`no profile for ${userId}`);
       const affinity = profile.affinity ?? emptyAffinity();
@@ -503,17 +427,14 @@ export function createAdmin({ hot, store, client, spontaneous, calibrator, getGu
       ].join('\n');
     }
 
-    const scoreSpaceIdx = rest.search(/\s/);
-    const scoreArg = (scoreSpaceIdx === -1 ? rest : rest.slice(0, scoreSpaceIdx)).trim();
-    const reasonArg = scoreSpaceIdx === -1 ? '' : rest.slice(scoreSpaceIdx + 1).trim();
-    const score = Number.parseInt(scoreArg, 10);
-    if (!Number.isInteger(score) || String(score) !== scoreArg || score < -100 || score > 100) {
+    if (!Number.isInteger(score) || score < -100 || score > 100) {
       throw new Error('score must be an integer between -100 and 100');
     }
 
+    const reason = String(args?.reason ?? '').trim();
     const current = store.getUser(guildId, userId)?.affinity?.score ?? 0;
     const relCfg = hot.config?.relationships ?? {};
-    const affinity = store.adjustAffinity(guildId, userId, score - current, reasonArg || 'set by owner', {
+    const affinity = store.adjustAffinity(guildId, userId, score - current, reason || 'set by owner', {
       maxDelta: Infinity, // the owner's explicit override bypasses maxDeltaPerUpdate
       historySize: relCfg.historySize ?? 10,
       now: Date.now(),
@@ -572,69 +493,60 @@ export function createAdmin({ hot, store, client, spontaneous, calibrator, getGu
     return lines.join('\n');
   }
 
-  function cmdWarmupChannel(rest) {
-    const spaceIdx = rest.search(/\s/);
-    if (spaceIdx === -1) throw new Error('usage: warmup channel <#mention|id> <depth|default>');
-    const channelId = extractChannelId(rest.slice(0, spaceIdx).trim());
-    const valueArg = rest.slice(spaceIdx + 1).trim();
-    if (!channelId) throw new Error('usage: warmup channel <#mention|id> <depth|default>');
-
-    if (valueArg.toLowerCase() === 'default') {
-      const ok = unsetWarmupConfig(`warmup.channelDepths.${channelId}`);
-      return `Channel ${channelId}: depth reset to the default (reload ${ok ? 'ok' : 'FAILED'})`;
-    }
-
-    const depth = Number.parseInt(valueArg, 10);
-    if (!Number.isInteger(depth) || String(depth) !== valueArg || depth < 0 || depth > 1_000_000) {
-      throw new Error('usage: warmup channel <#mention|id> <depth 0..1000000|default>');
+  function cmdWarmupChannel(args) {
+    const channelId = args?.channelId;
+    const depth = args?.depth;
+    if (!channelId) throw new Error('a channel is required');
+    if (!Number.isInteger(depth) || depth < 0 || depth > 1_000_000) {
+      throw new Error('depth must be an integer between 0 and 1000000');
     }
     const ok = writeWarmupConfig(`warmup.channelDepths.${channelId}`, depth);
     return `Channel ${channelId}: depth set to ${depth}${depth === 0 ? ' (will be skipped)' : ''} (reload ${ok ? 'ok' : 'FAILED'})`;
   }
 
-  function cmdWarmupPrimary(rest) {
-    const arg = rest.trim();
-    if (!arg) throw new Error('usage: warmup primary <#mention|id|none>');
+  function cmdWarmupChannelDefault(args) {
+    const channelId = args?.channelId;
+    if (!channelId) throw new Error('a channel is required');
+    const ok = unsetWarmupConfig(`warmup.channelDepths.${channelId}`);
+    return `Channel ${channelId}: depth reset to the default (reload ${ok ? 'ok' : 'FAILED'})`;
+  }
 
-    if (arg.toLowerCase() === 'none') {
+  function cmdWarmupPrimary(args) {
+    const channelId = args?.channelId;
+    if (!channelId) {
       const ok = writeWarmupConfig('warmup.primaryChannelId', '');
       return `Primary channel cleared (reload ${ok ? 'ok' : 'FAILED'})`;
     }
-    const channelId = extractChannelId(arg);
-    if (!channelId) throw new Error('usage: warmup primary <#mention|id|none>');
     const ok = writeWarmupConfig('warmup.primaryChannelId', channelId);
     return `Primary channel set to ${channelId} (reload ${ok ? 'ok' : 'FAILED'})`;
   }
 
-  function cmdWarmupOnly(rest) {
-    const arg = rest.trim().toLowerCase();
-    if (arg !== 'on' && arg !== 'off') throw new Error('usage: warmup only <on|off>');
-    const ok = writeWarmupConfig('warmup.onlyListed', arg === 'on');
-    return `Only listed channels: ${arg === 'on'} (reload ${ok ? 'ok' : 'FAILED'})`;
+  function cmdWarmupOnly(args) {
+    const enabled = Boolean(args?.enabled);
+    const ok = writeWarmupConfig('warmup.onlyListed', enabled);
+    return `Only listed channels: ${enabled} (reload ${ok ? 'ok' : 'FAILED'})`;
   }
 
-  function cmdWarmupDepth(rest) {
-    const trimmed = rest.trim();
-    const n = Number.parseInt(trimmed, 10);
-    if (!Number.isInteger(n) || String(n) !== trimmed || n < 1 || n > 1_000_000) {
-      throw new Error('usage: warmup depth <n> (1..1000000)');
+  function cmdWarmupDepth(args) {
+    const n = args?.messages;
+    if (!Number.isInteger(n) || n < 1 || n > 1_000_000) {
+      throw new Error('messages must be an integer between 1 and 1000000');
     }
     const ok = writeWarmupConfig('warmup.messagesPerChannel', n);
     return `Default read depth set to ${n} (reload ${ok ? 'ok' : 'FAILED'})`;
   }
 
-  function cmdWarmupBudget(rest) {
-    const tokens = parseTokenAmount(rest.trim());
-    if (tokens == null || tokens < 1) throw new Error('usage: warmup budget <tokens> (k/m ok, e.g. 500k, 10m)');
+  function cmdWarmupBudget(args) {
+    const tokens = parseTokenAmount(args?.tokens);
+    if (tokens == null || tokens < 1) throw new Error('tokens must be an amount like 500k or 10m');
     const ok = writeWarmupConfig('warmup.maxTokens', tokens);
     return `Warm-up token budget set to ${tokens} (reload ${ok ? 'ok' : 'FAILED'})`;
   }
 
-  function cmdWarmupOutput(rest) {
-    const trimmed = rest.trim();
-    const n = Number.parseInt(trimmed, 10);
-    if (!Number.isInteger(n) || String(n) !== trimmed || n < 256 || n > 32000) {
-      throw new Error('usage: warmup output <tokens> (256..32000)');
+  function cmdWarmupOutput(args) {
+    const n = args?.tokens;
+    if (!Number.isInteger(n) || n < 256 || n > 32000) {
+      throw new Error('tokens must be an integer between 256 and 32000');
     }
     const ok = writeWarmupConfig('memory.maxOutputTokens', n);
     return `Analyzer output limit set to ${n} (reload ${ok ? 'ok' : 'FAILED'})`;
@@ -660,92 +572,50 @@ export function createAdmin({ hot, store, client, spontaneous, calibrator, getGu
     return 'Warm-up progress reset.';
   }
 
-  async function cmdWarmup(args) {
-    if (!warmup) return 'warm-up is not available';
-    const trimmed = args.trim();
-    const spaceIdx = trimmed.search(/\s/);
-    const sub = spaceIdx === -1 ? trimmed : trimmed.slice(0, spaceIdx);
-    const rest = spaceIdx === -1 ? '' : trimmed.slice(spaceIdx + 1).trim();
-
-    if (!sub) return cmdWarmupStatus();
-    if (sub === 'plan') return cmdWarmupPlan();
-    if (sub === 'channel') return cmdWarmupChannel(rest);
-    if (sub === 'primary') return cmdWarmupPrimary(rest);
-    if (sub === 'only') return cmdWarmupOnly(rest);
-    if (sub === 'depth') return cmdWarmupDepth(rest);
-    if (sub === 'budget') return cmdWarmupBudget(rest);
-    if (sub === 'output') return cmdWarmupOutput(rest);
-    if (sub === 'run') return cmdWarmupRun();
-    if (sub === 'stop') return cmdWarmupStop();
-    if (sub === 'reset') return cmdWarmupReset();
-
-    throw new Error('usage: warmup [plan|channel|primary|only|depth|budget|output|run|stop|reset]');
-  }
-
-  function cmdForget(args, message) {
-    const userId = extractUserId(args);
-    if (!userId) throw new Error('usage: forget <@mention|userId>');
-
-    const guildId = resolvedGuildId(message);
-    if (!guildId) throw new Error('no guild resolved yet');
-
-    store.forgetUser(guildId, userId);
-    return `Forgot ${userId}.`;
+  /** Wraps a `warmup.*` handler so every one of them reports the same thing when the dependency is absent. */
+  function withWarmup(fn) {
+    return (args, context) => {
+      if (!warmup) return 'warm-up is not available';
+      return fn(args, context);
+    };
   }
 
   const commands = {
-    help: () => HELP_TEXT,
-    rule: (args) => cmdRule(args),
-    rules: () => cmdRules(),
-    unrule: (args) => cmdUnrule(args),
+    status: () => cmdStatus(),
+    reload: () => cmdReload(),
+    poke: (args, context) => cmdPoke(args, context),
     set: (args) => cmdSet(args),
     unset: (args) => cmdUnset(args),
-    reload: () => cmdReload(),
-    status: () => cmdStatus(),
-    poke: (args, message) => cmdPoke(args, message),
-    memory: (args, message) => cmdMemory(args, message),
-    affinity: (args, message) => cmdAffinity(args, message),
-    forget: (args, message) => cmdForget(args, message),
-    warmup: (args) => cmdWarmup(args),
+    'rule.add': (args) => cmdRuleAdd(args),
+    'rule.list': () => cmdRuleList(),
+    'rule.remove': (args) => cmdRuleRemove(args),
+    'memory.show': (args, context) => cmdMemoryShow(args, context),
+    'memory.forget': (args, context) => cmdMemoryForget(args, context),
+    'memory.affinity': (args, context) => cmdMemoryAffinity(args, context),
+    'warmup.status': withWarmup(() => cmdWarmupStatus()),
+    'warmup.plan': withWarmup(() => cmdWarmupPlan()),
+    'warmup.run': withWarmup(() => cmdWarmupRun()),
+    'warmup.stop': withWarmup(() => cmdWarmupStop()),
+    'warmup.reset': withWarmup(() => cmdWarmupReset()),
+    'warmup.primary': withWarmup((args) => cmdWarmupPrimary(args)),
+    'warmup.channel': withWarmup((args) => cmdWarmupChannel(args)),
+    'warmup.channel-default': withWarmup((args) => cmdWarmupChannelDefault(args)),
+    'warmup.only': withWarmup((args) => cmdWarmupOnly(args)),
+    'warmup.depth': withWarmup((args) => cmdWarmupDepth(args)),
+    'warmup.budget': withWarmup((args) => cmdWarmupBudget(args)),
+    'warmup.output': withWarmup((args) => cmdWarmupOutput(args)),
   };
 
-  async function sendReply(message, text) {
-    const body = String(text ?? '');
-    const wrap = body.includes('\n');
-    for (const chunk of chunkText(body, REPLY_CHUNK_CHARS)) {
-      await message.author.send(wrap ? `\`\`\`\n${chunk}\n\`\`\`` : chunk);
-    }
+  /**
+   * Run one command. `commandKey` is `'<name>'` for a top-level command or
+   * `'<group>.<name>'` for a grouped one. Throws an operator-facing `Error`
+   * on bad input or an unknown key; never touches discord.js.
+   */
+  async function run(commandKey, args = {}, context = {}) {
+    const handler = Object.hasOwn(commands, commandKey) ? commands[commandKey] : null;
+    if (!handler) throw new Error(`unknown command: ${commandKey}`);
+    return handler(args, context);
   }
 
-  async function react(message, ok) {
-    if (!message.guild) return;
-    try {
-      await message.react(ok ? '✅' : '❌');
-    } catch {
-      // best effort — the reply already carries the outcome
-    }
-  }
-
-  async function handle(message) {
-    const authorId = message?.author?.id;
-    if (!isOwner(authorId)) return false;
-
-    const prefix = hot.config?.bot?.commandPrefix || '!nep';
-    const parsed = parseCommand(String(message?.content ?? ''), prefix);
-    if (!parsed) return false;
-
-    const handler = Object.hasOwn(commands, parsed.name) ? commands[parsed.name] : null;
-    try {
-      const reply = handler ? await handler(parsed.args, message) : `Unknown command: ${parsed.name}\n\n${HELP_TEXT}`;
-      await sendReply(message, reply);
-      await react(message, true);
-    } catch (err) {
-      // The owner may have DMs closed; the reaction still tells them it failed.
-      await sendReply(message, `Error: ${err?.message ?? String(err)}`).catch(() => {});
-      await react(message, false);
-    }
-    return true;
-  }
-
-  return { isOwner, handle };
+  return { isOwner, run };
 }

@@ -5,7 +5,7 @@
 // src/behavior, src/memory, src/llm and src/discord.
 
 import path from 'node:path';
-import { Client, Events, GatewayIntentBits, Partials } from 'discord.js';
+import { Client, Events, GatewayIntentBits } from 'discord.js';
 
 import { ROOT_DIR, loadDotEnv, need } from './config.js';
 import { createHot } from './hot.js';
@@ -21,6 +21,7 @@ import { createAdmin } from './admin.js';
 import { createTagHistory } from './behavior/mention.js';
 import { createMessageHandler } from './discord/events.js';
 import { resolveGuild } from './discord/guild.js';
+import { isValidCommandName, registerCommands, createInteractionHandler } from './discord/commands.js';
 
 const REQUIRED_PROMPTS = ['system-prompt', 'character-card', 'format', 'reply', 'interject', 'initiate', 'memory'];
 
@@ -58,18 +59,19 @@ if (missingPrompts.length > 0) {
   );
 }
 
+if (!isValidCommandName(hot.config.bot.commandName)) {
+  fail(
+    `index: invalid bot.commandName "${hot.config.bot.commandName}" — must match ^[a-z0-9_-]{1,32}$ ` +
+      '(config.local.json).',
+  );
+}
+
 const store = createStore({ dataDir: path.join(ROOT_DIR, 'data') });
 const calibrator = createCalibrator(store.state.data.calibration);
 const llm = createLlm({ apiKey: openrouterKey, getConfig: () => hot.config, calibrator, state: store.state });
 
 const client = new Client({
-  intents: [
-    GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent,
-    GatewayIntentBits.DirectMessages,
-  ],
-  partials: [Partials.Channel], // required to receive DM messageCreate events
+  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent],
 });
 
 // This instance serves exactly one Discord server. `instance.guildId` is set
@@ -99,11 +101,12 @@ const onMessage = createMessageHandler({
   turns,
   spontaneous,
   memory,
-  admin,
   tagHistory,
   getGuildId,
   isWarmingUp: () => warmup.isBlocking(),
 });
+
+const onInteraction = createInteractionHandler({ hot, admin, getGuildId });
 
 const timers = [];
 
@@ -118,7 +121,10 @@ function every(ms, fn, label) {
   timers.push(id);
 }
 
-client.once(Events.ClientReady, () => {
+let lastCommandName = hot.config.bot.commandName;
+let lastAdminCommandsOn = hot.config.features?.adminCommands !== false;
+
+client.once(Events.ClientReady, async () => {
   const guilds = [...client.guilds.cache.values()].map((guild) => ({ id: guild.id, name: guild.name }));
   const resolved = resolveGuild(hot.config.bot.guildId, guilds);
   if (resolved.error) fail(`index: ${resolved.error}`);
@@ -131,6 +137,9 @@ client.once(Events.ClientReady, () => {
   }
 
   log.info('index: ready', { guild: instance.guildId, tag: client.user.tag });
+
+  const guild = client.guilds.cache.get(instance.guildId);
+  await registerCommands(guild, hot.config);
 
   // Before the persona is allowed to speak: run the memory warm-up if one is
   // due (config.warmup.enabled and not already done/aborted). Not awaited —
@@ -175,9 +184,24 @@ hot.on('change', ({ what }) => {
       configured,
     });
   }
+
+  // The command tree (and whether it is registered at all) depends on
+  // bot.commandName and features.adminCommands — re-push it only when one of
+  // those actually changed, never on every unrelated config edit.
+  const commandName = hot.config.bot.commandName;
+  const adminCommandsOn = hot.config.features?.adminCommands !== false;
+  if (commandName !== lastCommandName || adminCommandsOn !== lastAdminCommandsOn) {
+    lastCommandName = commandName;
+    lastAdminCommandsOn = adminCommandsOn;
+    const guild = client.guilds.cache.get(instance.guildId);
+    if (guild) {
+      registerCommands(guild, hot.config).catch((err) => log.error('index: failed to re-register commands', { error: err }));
+    }
+  }
 });
 
 client.on('messageCreate', onMessage);
+client.on('interactionCreate', onInteraction);
 
 let shuttingDown = false;
 

@@ -5,7 +5,6 @@ import path from 'node:path';
 import os from 'node:os';
 
 import {
-  parseCommand,
   listRules,
   appendRule,
   removeRule,
@@ -14,45 +13,6 @@ import {
   createAdmin,
 } from '../src/admin.js';
 import { emptyAffinity, applyDelta } from '../src/memory/affinity.js';
-
-// ---------------------------------------------------------------------------
-// parseCommand
-// ---------------------------------------------------------------------------
-
-test('parseCommand: splits a prefixed command into a lowercased name and trimmed args', () => {
-  assert.deepEqual(parseCommand('!nep rule Never spoil the ending', '!nep'), {
-    name: 'rule',
-    args: 'Never spoil the ending',
-  });
-});
-
-test('parseCommand: lowercases the command name but keeps args in their original case', () => {
-  assert.deepEqual(parseCommand('!nep SET llm.Model "Foo"', '!nep'), {
-    name: 'set',
-    args: 'llm.Model "Foo"',
-  });
-});
-
-test('parseCommand: a bare prefix parses as help', () => {
-  assert.deepEqual(parseCommand('!nep', '!nep'), { name: 'help', args: '' });
-});
-
-test('parseCommand: a prefix followed only by whitespace parses as help', () => {
-  assert.deepEqual(parseCommand('!nep   ', '!nep'), { name: 'help', args: '' });
-});
-
-test('parseCommand: rejects content that does not start with the prefix', () => {
-  assert.equal(parseCommand('hello !nep rule x', '!nep'), null);
-});
-
-test('parseCommand: rejects the prefix glued to more text with no separating whitespace', () => {
-  assert.equal(parseCommand('!nephelp', '!nep'), null);
-});
-
-test('parseCommand: rejects non-string content or an empty prefix', () => {
-  assert.equal(parseCommand(null, '!nep'), null);
-  assert.equal(parseCommand('!nep help', ''), null);
-});
 
 // ---------------------------------------------------------------------------
 // listRules / appendRule / removeRule
@@ -184,7 +144,7 @@ test('unsetPath: rejects prototype-pollution paths', () => {
 });
 
 // ---------------------------------------------------------------------------
-// createAdmin().handle — fakes on a temp dir
+// createAdmin().run — fakes on a temp dir
 // ---------------------------------------------------------------------------
 
 function makeRoot() {
@@ -197,7 +157,7 @@ function makeRoot() {
 function makeHot(rootDir) {
   return {
     config: {
-      bot: { owners: ['42'], commandPrefix: '!nep' },
+      bot: { owners: ['42'] },
       llm: { model: 'anthropic/claude-opus-4.6', maxRequestsPerDay: 300 },
     },
     prompts: { persona: 'who she is', labels: { locale: 'en-US' } },
@@ -251,64 +211,61 @@ function makeStore() {
   };
 }
 
-function makeMessage({ authorId = '42', content, guild = null, channel = null }) {
-  const sent = [];
-  const reactions = [];
-  return {
-    content,
-    guild,
-    channel,
-    author: {
-      id: authorId,
-      async send(text) {
-        sent.push(text);
-      },
-    },
-    async react(emoji) {
-      reactions.push(emoji);
-    },
-    sent,
-    reactions,
-  };
+function makeAdmin(rootDir, extra = {}) {
+  const hot = extra.hot ?? makeHot(rootDir);
+  const store = extra.store ?? makeStore();
+  const admin = createAdmin({
+    hot,
+    store,
+    client: extra.client ?? {},
+    spontaneous: extra.spontaneous ?? {},
+    calibrator: extra.calibrator ?? { ratio: 1 },
+    getGuildId: extra.getGuildId ?? (() => 'g1'),
+    warmup: extra.warmup,
+  });
+  return { admin, hot, store };
 }
 
-test('handle: ignores a command from a non-owner and writes nothing', async () => {
+function readLocal(rootDir) {
+  return JSON.parse(fs.readFileSync(path.join(rootDir, 'config.local.json'), 'utf8'));
+}
+
+function hasLocal(rootDir) {
+  return fs.existsSync(path.join(rootDir, 'config.local.json'));
+}
+
+// ---------------------------------------------------------------------------
+// isOwner
+// ---------------------------------------------------------------------------
+
+test('isOwner: true for a listed owner id, false otherwise', () => {
   const rootDir = makeRoot();
-  const hot = makeHot(rootDir);
-  const store = makeStore();
-  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 }, getGuildId: () => 'g1' });
-
-  const before = fs.readFileSync(path.join(rootDir, 'prompts', 'rules.md'), 'utf8');
-  const message = makeMessage({ authorId: '999', content: '!nep rule sneaky rule' });
-  const handled = await admin.handle(message);
-
-  assert.equal(handled, false);
-  assert.equal(message.sent.length, 0);
-  assert.equal(fs.readFileSync(path.join(rootDir, 'prompts', 'rules.md'), 'utf8'), before);
-  assert.equal(fs.existsSync(path.join(rootDir, 'prompts.local')), false);
+  const { admin } = makeAdmin(rootDir);
+  assert.equal(admin.isOwner('42'), true);
+  assert.equal(admin.isOwner('999'), false);
 });
 
-test('handle: ignores a message that is not a command', async () => {
-  const rootDir = makeRoot();
-  const hot = makeHot(rootDir);
-  const store = makeStore();
-  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 }, getGuildId: () => 'g1' });
+// ---------------------------------------------------------------------------
+// run: unknown command
+// ---------------------------------------------------------------------------
 
-  const message = makeMessage({ content: 'just chatting' });
-  assert.equal(await admin.handle(message), false);
+test('run: throws on an unknown command key', async () => {
+  const rootDir = makeRoot();
+  const { admin } = makeAdmin(rootDir);
+  await assert.rejects(() => admin.run('nonsense', {}, {}), /unknown command/);
 });
 
-test('handle: rule seeds prompts.local/rules.md from the base file, leaving prompts/rules.md untouched', async () => {
+// ---------------------------------------------------------------------------
+// rule.add / rule.list / rule.remove
+// ---------------------------------------------------------------------------
+
+test('run: rule.add seeds prompts.local/rules.md from the base file, leaving prompts/rules.md untouched', async () => {
   const rootDir = makeRoot();
-  const hot = makeHot(rootDir);
-  const store = makeStore();
-  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 }, getGuildId: () => 'g1' });
+  const { admin, hot } = makeAdmin(rootDir);
 
   const baseBefore = fs.readFileSync(path.join(rootDir, 'prompts', 'rules.md'));
-  const message = makeMessage({ content: '!nep rule Never spoil the ending', guild: { id: 'g1' } });
-  const handled = await admin.handle(message);
+  const result = await admin.run('rule.add', { text: 'Never spoil the ending' }, { guildId: 'g1' });
 
-  assert.equal(handled, true);
   const localFile = path.join(rootDir, 'prompts.local', 'rules.md');
   assert.ok(fs.existsSync(localFile));
   const rulesText = fs.readFileSync(localFile, 'utf8');
@@ -316,328 +273,313 @@ test('handle: rule seeds prompts.local/rules.md from the base file, leaving prom
   // the tracked base file is byte-identical to before
   assert.deepEqual(fs.readFileSync(path.join(rootDir, 'prompts', 'rules.md')), baseBefore);
   assert.equal(hot.reloadPromptsCalls, 1);
-  assert.ok(message.sent[0].includes('Rule added'));
-  assert.deepEqual(message.reactions, ['✅']);
+  assert.ok(result.includes('Rule added'));
 });
 
-test('handle: rule creates the prompts.local directory when it does not exist yet', async () => {
+test('run: rule.add creates the prompts.local directory when it does not exist yet', async () => {
   const rootDir = makeRoot();
-  const hot = makeHot(rootDir);
-  const store = makeStore();
-  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 }, getGuildId: () => 'g1' });
+  const { admin } = makeAdmin(rootDir);
 
   assert.equal(fs.existsSync(path.join(rootDir, 'prompts.local')), false);
-  await admin.handle(makeMessage({ content: '!nep rule be nice' }));
+  await admin.run('rule.add', { text: 'be nice' }, {});
   assert.ok(fs.statSync(path.join(rootDir, 'prompts.local')).isDirectory());
 });
 
-test('handle: rules lists the numbered rules; unrule removes one from the local layer, leaving the base file untouched', async () => {
+test('run: rule.add rejects empty text', async () => {
   const rootDir = makeRoot();
-  const hot = makeHot(rootDir);
-  const store = makeStore();
-  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 }, getGuildId: () => 'g1' });
+  const { admin } = makeAdmin(rootDir);
+  await assert.rejects(() => admin.run('rule.add', { text: '   ' }, {}));
+});
+
+test('run: rule.list lists the numbered rules; rule.remove removes one from the local layer, leaving the base file untouched', async () => {
+  const rootDir = makeRoot();
+  const { admin } = makeAdmin(rootDir);
 
   const baseBefore = fs.readFileSync(path.join(rootDir, 'prompts', 'rules.md'));
-  await admin.handle(makeMessage({ content: '!nep rule second rule' }));
-  const listed = makeMessage({ content: '!nep rules' });
-  await admin.handle(listed);
-  assert.ok(listed.sent[0].includes('1. be kind'));
-  assert.ok(listed.sent[0].includes('2. second rule'));
+  await admin.run('rule.add', { text: 'second rule' }, {});
+  const listed = await admin.run('rule.list', {}, {});
+  assert.ok(listed.includes('1. be kind'));
+  assert.ok(listed.includes('2. second rule'));
 
-  await admin.handle(makeMessage({ content: '!nep unrule 1' }));
+  await admin.run('rule.remove', { number: 1 }, {});
   const rulesText = fs.readFileSync(path.join(rootDir, 'prompts.local', 'rules.md'), 'utf8');
   assert.deepEqual(listRules(rulesText), ['second rule']);
   assert.deepEqual(fs.readFileSync(path.join(rootDir, 'prompts', 'rules.md')), baseBefore);
 });
 
-test('handle: rule seeds from an empty text when the base rules.md is missing', async () => {
+test('run: rule.remove rejects an out-of-range number', async () => {
+  const rootDir = makeRoot();
+  const { admin } = makeAdmin(rootDir);
+  await assert.rejects(() => admin.run('rule.remove', { number: 5 }, {}), /no rule #5/);
+});
+
+test('run: rule.add seeds from an empty text when the base rules.md is missing', async () => {
   const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'nep-admin-'));
   fs.mkdirSync(path.join(rootDir, 'prompts'));
-  const hot = makeHot(rootDir);
-  const store = makeStore();
-  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 }, getGuildId: () => 'g1' });
+  const { admin } = makeAdmin(rootDir);
 
-  const message = makeMessage({ content: '!nep rule only rule' });
-  const handled = await admin.handle(message);
+  const result = await admin.run('rule.add', { text: 'only rule' }, {});
 
-  assert.equal(handled, true);
   const rulesText = fs.readFileSync(path.join(rootDir, 'prompts.local', 'rules.md'), 'utf8');
   assert.deepEqual(listRules(rulesText), ['only rule']);
+  assert.ok(result.includes('Rule added'));
 });
 
-test('handle: set writes an override to config.local.json and reloads config', async () => {
+// ---------------------------------------------------------------------------
+// set / unset
+// ---------------------------------------------------------------------------
+
+test('run: set writes an override to config.local.json and reloads config', async () => {
   const rootDir = makeRoot();
-  const hot = makeHot(rootDir);
-  const store = makeStore();
-  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 }, getGuildId: () => 'g1' });
+  const { admin, hot } = makeAdmin(rootDir);
 
-  const message = makeMessage({ content: '!nep set llm.model "openrouter/test-model"' });
-  const handled = await admin.handle(message);
+  const result = await admin.run('set', { path: 'llm.model', value: '"openrouter/test-model"' }, {});
 
-  assert.equal(handled, true);
-  const local = JSON.parse(fs.readFileSync(path.join(rootDir, 'config.local.json'), 'utf8'));
-  assert.deepEqual(local, { llm: { model: 'openrouter/test-model' } });
+  assert.deepEqual(readLocal(rootDir), { llm: { model: 'openrouter/test-model' } });
   assert.equal(hot.reloadConfigCalls, 1);
-  assert.ok(message.sent[0].includes('Set llm.model'));
+  assert.ok(result.includes('Set llm.model'));
 });
 
-test('handle: set rejects an unknown config path and writes nothing', async () => {
+test('run: set falls back to the raw string when the value is not valid JSON', async () => {
   const rootDir = makeRoot();
-  const hot = makeHot(rootDir);
-  const store = makeStore();
-  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 }, getGuildId: () => 'g1' });
+  const { admin } = makeAdmin(rootDir);
 
-  const message = makeMessage({ content: '!nep set llm.doesNotExist 1', guild: { id: 'g1' } });
-  const handled = await admin.handle(message);
+  await admin.run('set', { path: 'llm.model', value: 'plain-text-model' }, {});
+  assert.deepEqual(readLocal(rootDir), { llm: { model: 'plain-text-model' } });
+});
 
-  assert.equal(handled, true);
+test('run: set rejects an unknown config path and writes nothing', async () => {
+  const rootDir = makeRoot();
+  const { admin } = makeAdmin(rootDir);
+
+  await assert.rejects(
+    () => admin.run('set', { path: 'llm.doesNotExist', value: '1' }, {}),
+    /unknown config path/,
+  );
   assert.equal(fs.existsSync(path.join(rootDir, 'config.local.json')), false);
-  assert.ok(message.sent[0].includes('Error'));
-  assert.ok(message.sent[0].includes('unknown config path'));
-  assert.deepEqual(message.reactions, ['❌']);
 });
 
-test('handle: unset removes a previously set override', async () => {
+test('run: unset removes a previously set override', async () => {
   const rootDir = makeRoot();
-  const hot = makeHot(rootDir);
-  const store = makeStore();
-  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 }, getGuildId: () => 'g1' });
+  const { admin, hot } = makeAdmin(rootDir);
 
-  await admin.handle(makeMessage({ content: '!nep set llm.model "temp-model"' }));
-  await admin.handle(makeMessage({ content: '!nep unset llm.model' }));
+  await admin.run('set', { path: 'llm.model', value: '"temp-model"' }, {});
+  await admin.run('unset', { path: 'llm.model' }, {});
 
-  const local = JSON.parse(fs.readFileSync(path.join(rootDir, 'config.local.json'), 'utf8'));
-  assert.deepEqual(local, {});
+  assert.deepEqual(readLocal(rootDir), {});
   assert.equal(hot.reloadConfigCalls, 2);
 });
 
-test('handle: forget calls store.forgetUser and clears the profile', async () => {
+// ---------------------------------------------------------------------------
+// memory.forget / memory.show / memory.affinity
+// ---------------------------------------------------------------------------
+
+test('run: memory.forget calls store.forgetUser and clears the profile', async () => {
   const rootDir = makeRoot();
-  const hot = makeHot(rootDir);
-  const store = makeStore();
+  const { admin, store } = makeAdmin(rootDir);
   store.profiles.set('g1:123', { id: '123', character: 'chatty' });
-  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 }, getGuildId: () => 'g1' });
 
-  const message = makeMessage({ content: '!nep forget <@123>', guild: { id: 'g1' } });
-  const handled = await admin.handle(message);
+  const result = await admin.run('memory.forget', { userId: '123' }, { guildId: 'g1' });
 
-  assert.equal(handled, true);
   assert.deepEqual(store.forgotten, [['g1', '123']]);
   assert.equal(store.getUser('g1', '123'), null);
-  assert.ok(message.sent[0].includes('Forgot 123'));
+  assert.ok(result.includes('Forgot 123'));
 });
 
-test('handle: memory reports an unknown profile as an error, reacting with the cross mark', async () => {
+test('run: memory.show reports an unknown profile as an error', async () => {
   const rootDir = makeRoot();
-  const hot = makeHot(rootDir);
-  const store = makeStore();
-  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 }, getGuildId: () => 'g1' });
+  const { admin } = makeAdmin(rootDir);
 
-  const message = makeMessage({ content: '!nep memory 555', guild: { id: 'g1' } });
-  await admin.handle(message);
-
-  assert.ok(message.sent[0].includes('Error'));
-  assert.deepEqual(message.reactions, ['❌']);
+  await assert.rejects(() => admin.run('memory.show', { userId: '555' }, { guildId: 'g1' }), /no profile/);
 });
 
-test('handle: affinity shows the current score, band, reason and recent history', async () => {
+test('run: memory.affinity shows the current score, band, reason and recent history', async () => {
   const rootDir = makeRoot();
-  const hot = makeHot(rootDir);
-  const store = makeStore();
-  store.profiles.set('g1:123', { id: '123', affinity: { score: 42, reason: 'helped once', history: [{ ts: 't1', delta: 42, score: 42, reason: 'helped once' }] } });
-  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 }, getGuildId: () => 'g1' });
+  const { admin, store } = makeAdmin(rootDir);
+  store.profiles.set('g1:123', {
+    id: '123',
+    affinity: { score: 42, reason: 'helped once', history: [{ ts: 't1', delta: 42, score: 42, reason: 'helped once' }] },
+  });
 
-  const message = makeMessage({ content: '!nep affinity 123', guild: { id: 'g1' } });
-  const handled = await admin.handle(message);
+  const result = await admin.run('memory.affinity', { userId: '123' }, { guildId: 'g1' });
 
-  assert.equal(handled, true);
-  assert.ok(message.sent[0].includes('score: 42'));
-  assert.ok(message.sent[0].includes('band: fond'));
-  assert.ok(message.sent[0].includes('reason: helped once'));
-  assert.ok(message.sent[0].includes('helped once'));
-  assert.deepEqual(message.reactions, ['✅']);
+  assert.ok(result.includes('score: 42'));
+  assert.ok(result.includes('band: fond'));
+  assert.ok(result.includes('reason: helped once'));
+  assert.ok(result.includes('helped once'));
 });
 
-test('handle: affinity show reports an error for an unknown profile', async () => {
+test('run: memory.affinity show reports an error for an unknown profile', async () => {
   const rootDir = makeRoot();
-  const hot = makeHot(rootDir);
-  const store = makeStore();
-  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 }, getGuildId: () => 'g1' });
-
-  const message = makeMessage({ content: '!nep affinity 999', guild: { id: 'g1' } });
-  await admin.handle(message);
-
-  assert.ok(message.sent[0].includes('Error'));
-  assert.deepEqual(message.reactions, ['❌']);
+  const { admin } = makeAdmin(rootDir);
+  await assert.rejects(() => admin.run('memory.affinity', { userId: '999' }, { guildId: 'g1' }), /no profile/);
 });
 
-test('handle: affinity with a score sets it exactly, bypassing maxDeltaPerUpdate', async () => {
+test('run: memory.affinity with a score sets it exactly, bypassing maxDeltaPerUpdate', async () => {
   const rootDir = makeRoot();
-  const hot = makeHot(rootDir);
+  const { admin, hot, store } = makeAdmin(rootDir);
   hot.config.relationships = { maxDeltaPerUpdate: 15, historySize: 10 };
-  const store = makeStore();
-  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 }, getGuildId: () => 'g1' });
 
-  const message = makeMessage({ content: '!nep affinity 123 77 owner really likes them', guild: { id: 'g1' } });
-  const handled = await admin.handle(message);
+  const result = await admin.run(
+    'memory.affinity',
+    { userId: '123', score: 77, reason: 'owner really likes them' },
+    { guildId: 'g1' },
+  );
 
-  assert.equal(handled, true);
   const affinity = store.getUser('g1', '123').affinity;
   assert.equal(affinity.score, 77, 'the score is set exactly, well beyond maxDeltaPerUpdate of 15');
   assert.equal(affinity.reason, 'owner really likes them');
-  assert.deepEqual(message.reactions, ['✅']);
+  assert.ok(result.includes('77'));
 });
 
-test('handle: affinity with a score but no reason defaults to "set by owner"', async () => {
+test('run: memory.affinity with a score but no reason defaults to "set by owner"', async () => {
   const rootDir = makeRoot();
-  const hot = makeHot(rootDir);
-  const store = makeStore();
-  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 }, getGuildId: () => 'g1' });
+  const { admin, store } = makeAdmin(rootDir);
 
-  await admin.handle(makeMessage({ content: '!nep affinity 123 -30', guild: { id: 'g1' } }));
+  await admin.run('memory.affinity', { userId: '123', score: -30 }, { guildId: 'g1' });
 
   const affinity = store.getUser('g1', '123').affinity;
   assert.equal(affinity.score, -30);
   assert.equal(affinity.reason, 'set by owner');
 });
 
-test('handle: affinity rejects an out-of-range score and writes nothing', async () => {
+test('run: memory.affinity rejects an out-of-range score and writes nothing', async () => {
   const rootDir = makeRoot();
-  const hot = makeHot(rootDir);
-  const store = makeStore();
-  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 }, getGuildId: () => 'g1' });
+  const { admin, store } = makeAdmin(rootDir);
 
-  const message = makeMessage({ content: '!nep affinity 123 150', guild: { id: 'g1' } });
-  const handled = await admin.handle(message);
-
-  assert.equal(handled, true);
-  assert.ok(message.sent[0].includes('Error'));
-  assert.deepEqual(message.reactions, ['❌']);
+  await assert.rejects(
+    () => admin.run('memory.affinity', { userId: '123', score: 150 }, { guildId: 'g1' }),
+    /-100 and 100/,
+  );
   assert.equal(store.getUser('g1', '123'), null);
 });
 
-test('handle: affinity rejects a non-integer score', async () => {
+test('run: memory.affinity rejects a non-integer score', async () => {
   const rootDir = makeRoot();
-  const hot = makeHot(rootDir);
-  const store = makeStore();
-  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 }, getGuildId: () => 'g1' });
-
-  const message = makeMessage({ content: '!nep affinity 123 4.5', guild: { id: 'g1' } });
-  await admin.handle(message);
-
-  assert.ok(message.sent[0].includes('Error'));
-  assert.deepEqual(message.reactions, ['❌']);
+  const { admin } = makeAdmin(rootDir);
+  await assert.rejects(() => admin.run('memory.affinity', { userId: '123', score: 4.5 }, { guildId: 'g1' }));
 });
 
-test('handle: affinity is ignored entirely for a non-owner', async () => {
+test('run: memory.affinity falls back to the single served guild when context.guildId is absent', async () => {
   const rootDir = makeRoot();
-  const hot = makeHot(rootDir);
-  const store = makeStore();
-  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 }, getGuildId: () => 'g1' });
-
-  const message = makeMessage({ authorId: '999', content: '!nep affinity 123 80', guild: { id: 'g1' } });
-  const handled = await admin.handle(message);
-
-  assert.equal(handled, false);
-  assert.equal(message.sent.length, 0);
-  assert.equal(store.getUser('g1', '123'), null);
-});
-
-test('handle: affinity in a DM uses the single served guild, not a search across guilds', async () => {
-  const rootDir = makeRoot();
-  const hot = makeHot(rootDir);
-  const store = makeStore();
+  const client = { guilds: { cache: new Map([['g1', { id: 'g1', name: 'The Server' }]]) } };
+  const { admin, store } = makeAdmin(rootDir, { client, getGuildId: () => 'g1' });
   store.profiles.set('g1:123', { id: '123', affinity: { score: 5, reason: 'ok so far', history: [] } });
-  const client = { guilds: { cache: new Map([['g1', { id: 'g1', name: 'The Server' }]]) } };
-  const admin = createAdmin({ hot, store, client, spontaneous: {}, calibrator: { ratio: 1 }, getGuildId: () => 'g1' });
 
-  const message = makeMessage({ content: '!nep affinity 123' });
-  await admin.handle(message);
-
-  assert.ok(message.sent[0].includes('score: 5'));
+  const result = await admin.run('memory.affinity', { userId: '123' }, {});
+  assert.ok(result.includes('score: 5'));
 });
 
-test('handle: affinity/memory/forget in a DM report an error before the guild has been resolved', async () => {
+test('run: memory.show/memory.forget report an error before the guild has been resolved', async () => {
   const rootDir = makeRoot();
-  const hot = makeHot(rootDir);
-  const store = makeStore();
-  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 }, getGuildId: () => null });
+  const { admin } = makeAdmin(rootDir, { getGuildId: () => null });
 
-  const message = makeMessage({ content: '!nep memory 123' });
-  await admin.handle(message);
-
-  assert.ok(message.sent[0].includes('Error'));
-  assert.match(message.sent[0], /no guild resolved yet/);
+  await assert.rejects(() => admin.run('memory.show', { userId: '123' }, {}), /no guild resolved yet/);
 });
 
-test('handle: status reports model, calibration ratio and the daily request count', async () => {
+// ---------------------------------------------------------------------------
+// status / reload
+// ---------------------------------------------------------------------------
+
+test('run: status reports model, calibration ratio and the daily request count', async () => {
   const rootDir = makeRoot();
-  const hot = makeHot(rootDir);
-  const store = makeStore();
   const client = { guilds: { cache: new Map([['g1', { id: 'g1', name: 'The Server' }]]) } };
-  const admin = createAdmin({ hot, store, client, spontaneous: {}, calibrator: { ratio: 1.2 }, getGuildId: () => 'g1' });
+  const { admin } = makeAdmin(rootDir, { client, calibrator: { ratio: 1.2 } });
 
-  const message = makeMessage({ content: '!nep status' });
-  await admin.handle(message);
+  const body = await admin.run('status', {}, {});
 
-  const body = message.sent[0];
   assert.match(body, /anthropic\/claude-opus-4\.6/);
   assert.match(body, /1\.200/);
   assert.match(body, /5 \/ 300/);
   assert.match(body, /guild: The Server \(g1\)/);
 });
 
-test('handle: status reports dry-run off by default, as its first line', async () => {
+test('run: status reports dry-run off by default, as its first line', async () => {
   const rootDir = makeRoot();
-  const hot = makeHot(rootDir);
-  const store = makeStore();
-  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 }, getGuildId: () => 'g1' });
+  const { admin } = makeAdmin(rootDir);
 
-  const message = makeMessage({ content: '!nep status' });
-  await admin.handle(message);
-
-  // sendReply wraps a multi-line reply in a ``` code fence: the status text itself starts on line 2.
-  assert.equal(message.sent[0].split('\n')[1], 'dry-run: off');
+  const body = await admin.run('status', {}, {});
+  assert.equal(body.split('\n')[0], 'dry-run: off');
 });
 
-test('handle: status reports dry-run ON, logging only, when no mirror channel is configured', async () => {
+test('run: status reports dry-run ON, logging only, when no mirror channel is configured', async () => {
   const rootDir = makeRoot();
-  const hot = makeHot(rootDir);
+  const { admin, hot } = makeAdmin(rootDir);
   hot.config.features = { dryRun: true };
   hot.config.bot.dryRunChannelId = '';
-  const store = makeStore();
-  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 }, getGuildId: () => 'g1' });
 
-  const message = makeMessage({ content: '!nep status' });
-  await admin.handle(message);
-
-  assert.equal(message.sent[0].split('\n')[1], 'dry-run: ON → log');
+  const body = await admin.run('status', {}, {});
+  assert.equal(body.split('\n')[0], 'dry-run: ON → log');
 });
 
-test('handle: status reports dry-run ON with the mirror channel id when one is configured', async () => {
+test('run: status reports dry-run ON with the mirror channel id when one is configured', async () => {
   const rootDir = makeRoot();
-  const hot = makeHot(rootDir);
+  const { admin, hot } = makeAdmin(rootDir);
   hot.config.features = { dryRun: true };
   hot.config.bot.dryRunChannelId = '999888777';
-  const store = makeStore();
-  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 }, getGuildId: () => 'g1' });
 
-  const message = makeMessage({ content: '!nep status' });
-  await admin.handle(message);
-
-  assert.equal(message.sent[0].split('\n')[1], 'dry-run: ON → log + #999888777');
+  const body = await admin.run('status', {}, {});
+  assert.equal(body.split('\n')[0], 'dry-run: ON → log + #999888777');
 });
 
-test('handle: status reports the guild as not resolved yet before startup finishes', async () => {
+test('run: status reports the guild as not resolved yet before startup finishes', async () => {
   const rootDir = makeRoot();
-  const hot = makeHot(rootDir);
-  const store = makeStore();
-  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 }, getGuildId: () => null });
+  const { admin } = makeAdmin(rootDir, { getGuildId: () => null });
 
-  const message = makeMessage({ content: '!nep status' });
-  await admin.handle(message);
+  const body = await admin.run('status', {}, {});
+  assert.match(body, /guild: not resolved yet/);
+});
 
-  assert.match(message.sent[0], /guild: not resolved yet/);
+test('run: reload reports both config and prompts reload outcomes', async () => {
+  const rootDir = makeRoot();
+  const { admin } = makeAdmin(rootDir);
+  const body = await admin.run('reload', {}, {});
+  assert.match(body, /config reload: ok/);
+  assert.match(body, /prompts reload: ok/);
+});
+
+// ---------------------------------------------------------------------------
+// poke
+// ---------------------------------------------------------------------------
+
+function fakeSpontaneous(pokeResult) {
+  const calls = [];
+  return {
+    calls,
+    poke: async (channel, mode) => {
+      calls.push([channel.id, mode]);
+      return pokeResult ?? { ok: true };
+    },
+  };
+}
+
+test('run: poke uses the context channel when no channel argument is given', async () => {
+  const rootDir = makeRoot();
+  const spontaneous = fakeSpontaneous();
+  const client = { channels: { fetch: async (id) => ({ id }) } };
+  const { admin } = makeAdmin(rootDir, { spontaneous, client });
+
+  const result = await admin.run('poke', {}, { channelId: 'c1' });
+
+  assert.deepEqual(spontaneous.calls, [['c1', 'interject']]);
+  assert.ok(result.includes('poke interject on c1'));
+});
+
+test('run: poke uses the mode and channel arguments when given', async () => {
+  const rootDir = makeRoot();
+  const spontaneous = fakeSpontaneous();
+  const client = { channels: { fetch: async (id) => ({ id }) } };
+  const { admin } = makeAdmin(rootDir, { spontaneous, client });
+
+  await admin.run('poke', { mode: 'initiate', channelId: 'other' }, { channelId: 'c1' });
+
+  assert.deepEqual(spontaneous.calls, [['other', 'initiate']]);
+});
+
+test('run: poke throws when no channel is available at all', async () => {
+  const rootDir = makeRoot();
+  const { admin } = makeAdmin(rootDir, { spontaneous: fakeSpontaneous() });
+  await assert.rejects(() => admin.run('poke', {}, {}), /channel/);
 });
 
 // ---------------------------------------------------------------------------
@@ -697,376 +639,243 @@ function fakeWarmup(overrides = {}) {
   };
 }
 
-function readLocal(rootDir) {
-  return JSON.parse(fs.readFileSync(path.join(rootDir, 'config.local.json'), 'utf8'));
-}
-
-function hasLocal(rootDir) {
-  return fs.existsSync(path.join(rootDir, 'config.local.json'));
-}
-
-test('handle: warmup with no subcommand reports the extended status', async () => {
+test('run: warmup.status reports the extended status', async () => {
   const rootDir = makeRoot();
-  const hot = makeHot(rootDir);
-  const store = makeStore();
   const warmup = fakeWarmup();
-  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 }, getGuildId: () => 'g1', warmup });
+  const { admin } = makeAdmin(rootDir, { warmup });
 
-  const message = makeMessage({ content: '!nep warmup', guild: { id: 'g1' } });
-  const handled = await admin.handle(message);
+  const body = await admin.run('warmup.status', {}, {});
 
-  assert.equal(handled, true);
-  assert.ok(message.sent[0].includes('tokens: 100 / 1000'));
-  assert.ok(message.sent[0].includes('channels: 1 / 3'));
-  assert.ok(message.sent[0].includes('paused: false'));
-  assert.ok(message.sent[0].includes('skipped messages: 3'));
-  assert.ok(message.sent[0].includes('primary channel: 55555'));
-  assert.ok(message.sent[0].includes('only listed channels: true'));
-  assert.ok(message.sent[0].includes('#general (111)'));
-  assert.deepEqual(message.reactions, ['✅']);
+  assert.ok(body.includes('tokens: 100 / 1000'));
+  assert.ok(body.includes('channels: 1 / 3'));
+  assert.ok(body.includes('paused: false'));
+  assert.ok(body.includes('skipped messages: 3'));
+  assert.ok(body.includes('primary channel: 55555'));
+  assert.ok(body.includes('only listed channels: true'));
+  assert.ok(body.includes('#general (111)'));
 });
 
-test('handle: warmup plan reports the ordered plan, missing ids and budget line', async () => {
+test('run: warmup.plan reports the ordered plan, missing ids and budget line', async () => {
   const rootDir = makeRoot();
-  const hot = makeHot(rootDir);
-  const store = makeStore();
   const warmup = fakeWarmup();
-  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 }, getGuildId: () => 'g1', warmup });
+  const { admin } = makeAdmin(rootDir, { warmup });
 
-  const message = makeMessage({ content: '!nep warmup plan' });
-  const handled = await admin.handle(message);
-
-  assert.equal(handled, true);
-  const lines = message.sent[0].split('\n');
+  const body = await admin.run('warmup.plan', {}, {});
+  const lines = body.split('\n');
   assert.ok(lines.some((l) => l.includes('1. #general (55555) — 500, primary')));
   assert.ok(lines.some((l) => l.includes('2. #lore (222) — 1000, listed')));
   assert.ok(lines.some((l) => l.includes('missing: 999999')));
   assert.ok(lines.some((l) => l.includes('budget: 1000000 tokens') && l.includes('output limit: 8000') && l.includes('batch size: 150')));
 });
 
-test('handle: warmup channel sets a numeric depth override', async () => {
+test('run: warmup.channel sets a numeric depth override', async () => {
   const rootDir = makeRoot();
-  const hot = makeHot(rootDir);
-  const store = makeStore();
-  const warmup = fakeWarmup();
-  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 }, getGuildId: () => 'g1', warmup });
+  const { admin, hot } = makeAdmin(rootDir, { warmup: fakeWarmup() });
 
-  const message = makeMessage({ content: '!nep warmup channel <#123456> 500' });
-  const handled = await admin.handle(message);
+  const result = await admin.run('warmup.channel', { channelId: '123456', depth: 500 }, {});
 
-  assert.equal(handled, true);
   assert.deepEqual(readLocal(rootDir), { warmup: { channelDepths: { '123456': 500 } } });
   assert.equal(hot.reloadConfigCalls, 1);
-  assert.ok(message.sent[0].includes('depth set to 500'));
+  assert.ok(result.includes('depth set to 500'));
 });
 
-test('handle: warmup channel 0 skips the channel', async () => {
+test('run: warmup.channel with depth 0 skips the channel', async () => {
   const rootDir = makeRoot();
-  const hot = makeHot(rootDir);
-  const store = makeStore();
-  const warmup = fakeWarmup();
-  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 }, getGuildId: () => 'g1', warmup });
+  const { admin } = makeAdmin(rootDir, { warmup: fakeWarmup() });
 
-  const message = makeMessage({ content: '!nep warmup channel 123456 0' });
-  await admin.handle(message);
+  const result = await admin.run('warmup.channel', { channelId: '123456', depth: 0 }, {});
 
   assert.deepEqual(readLocal(rootDir), { warmup: { channelDepths: { '123456': 0 } } });
-  assert.ok(message.sent[0].includes('skipped'));
+  assert.ok(result.includes('skipped'));
 });
 
-test('handle: warmup channel default removes a previously set override', async () => {
+test('run: warmup.channel-default removes a previously set override', async () => {
   const rootDir = makeRoot();
-  const hot = makeHot(rootDir);
-  const store = makeStore();
-  const warmup = fakeWarmup();
-  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 }, getGuildId: () => 'g1', warmup });
+  const { admin } = makeAdmin(rootDir, { warmup: fakeWarmup() });
 
-  await admin.handle(makeMessage({ content: '!nep warmup channel 123456 500' }));
-  await admin.handle(makeMessage({ content: '!nep warmup channel 123456 default' }));
+  await admin.run('warmup.channel', { channelId: '123456', depth: 500 }, {});
+  await admin.run('warmup.channel-default', { channelId: '123456' }, {});
 
   assert.deepEqual(readLocal(rootDir), {});
 });
 
-test('handle: warmup channel rejects an out-of-range or non-integer depth and writes nothing', async () => {
+test('run: warmup.channel rejects an out-of-range depth and writes nothing', async () => {
   const rootDir = makeRoot();
-  const hot = makeHot(rootDir);
-  const store = makeStore();
-  const warmup = fakeWarmup();
-  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 }, getGuildId: () => 'g1', warmup });
+  const { admin } = makeAdmin(rootDir, { warmup: fakeWarmup() });
 
-  const message = makeMessage({ content: '!nep warmup channel 123456 -1', guild: { id: 'g1' } });
-  const handled = await admin.handle(message);
-
-  assert.equal(handled, true);
+  await assert.rejects(() => admin.run('warmup.channel', { channelId: '123456', depth: -1 }, {}));
   assert.equal(hasLocal(rootDir), false);
-  assert.ok(message.sent[0].includes('Error'));
-  assert.deepEqual(message.reactions, ['❌']);
 });
 
-test('handle: warmup channel rejects an unparseable channel argument and writes nothing', async () => {
+test('run: warmup.channel requires a channel', async () => {
   const rootDir = makeRoot();
-  const hot = makeHot(rootDir);
-  const store = makeStore();
-  const warmup = fakeWarmup();
-  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 }, getGuildId: () => 'g1', warmup });
-
-  const message = makeMessage({ content: '!nep warmup channel not-a-channel 500', guild: { id: 'g1' } });
-  await admin.handle(message);
-
-  assert.equal(hasLocal(rootDir), false);
-  assert.deepEqual(message.reactions, ['❌']);
+  const { admin } = makeAdmin(rootDir, { warmup: fakeWarmup() });
+  await assert.rejects(() => admin.run('warmup.channel', { depth: 500 }, {}));
 });
 
-test('handle: warmup primary sets the primary channel from a mention', async () => {
+test('run: warmup.primary sets the primary channel', async () => {
   const rootDir = makeRoot();
-  const hot = makeHot(rootDir);
-  const store = makeStore();
-  const warmup = fakeWarmup();
-  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 }, getGuildId: () => 'g1', warmup });
+  const { admin } = makeAdmin(rootDir, { warmup: fakeWarmup() });
 
-  const message = makeMessage({ content: '!nep warmup primary <#777888>' });
-  await admin.handle(message);
-
+  await admin.run('warmup.primary', { channelId: '777888' }, {});
   assert.deepEqual(readLocal(rootDir), { warmup: { primaryChannelId: '777888' } });
 });
 
-test('handle: warmup primary none clears the primary channel', async () => {
+test('run: warmup.primary with no channel clears the primary channel', async () => {
   const rootDir = makeRoot();
-  const hot = makeHot(rootDir);
-  const store = makeStore();
-  const warmup = fakeWarmup();
-  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 }, getGuildId: () => 'g1', warmup });
+  const { admin } = makeAdmin(rootDir, { warmup: fakeWarmup() });
 
-  await admin.handle(makeMessage({ content: '!nep warmup primary 777888' }));
-  await admin.handle(makeMessage({ content: '!nep warmup primary none' }));
+  await admin.run('warmup.primary', { channelId: '777888' }, {});
+  await admin.run('warmup.primary', {}, {});
 
   assert.deepEqual(readLocal(rootDir), { warmup: { primaryChannelId: '' } });
 });
 
-test('handle: warmup only on/off toggles onlyListed', async () => {
+test('run: warmup.only toggles onlyListed', async () => {
   const rootDir = makeRoot();
-  const hot = makeHot(rootDir);
-  const store = makeStore();
-  const warmup = fakeWarmup();
-  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 }, getGuildId: () => 'g1', warmup });
+  const { admin } = makeAdmin(rootDir, { warmup: fakeWarmup() });
 
-  await admin.handle(makeMessage({ content: '!nep warmup only on' }));
+  await admin.run('warmup.only', { enabled: true }, {});
   assert.deepEqual(readLocal(rootDir), { warmup: { onlyListed: true } });
 
-  await admin.handle(makeMessage({ content: '!nep warmup only off' }));
+  await admin.run('warmup.only', { enabled: false }, {});
   assert.deepEqual(readLocal(rootDir), { warmup: { onlyListed: false } });
 });
 
-test('handle: warmup only rejects garbage and writes nothing', async () => {
+test('run: warmup.depth sets the default read depth', async () => {
   const rootDir = makeRoot();
-  const hot = makeHot(rootDir);
-  const store = makeStore();
-  const warmup = fakeWarmup();
-  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 }, getGuildId: () => 'g1', warmup });
+  const { admin } = makeAdmin(rootDir, { warmup: fakeWarmup() });
 
-  const message = makeMessage({ content: '!nep warmup only maybe', guild: { id: 'g1' } });
-  await admin.handle(message);
-
-  assert.equal(hasLocal(rootDir), false);
-  assert.deepEqual(message.reactions, ['❌']);
-});
-
-test('handle: warmup depth sets the default read depth', async () => {
-  const rootDir = makeRoot();
-  const hot = makeHot(rootDir);
-  const store = makeStore();
-  const warmup = fakeWarmup();
-  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 }, getGuildId: () => 'g1', warmup });
-
-  const message = makeMessage({ content: '!nep warmup depth 5000' });
-  await admin.handle(message);
-
+  await admin.run('warmup.depth', { messages: 5000 }, {});
   assert.deepEqual(readLocal(rootDir), { warmup: { messagesPerChannel: 5000 } });
 });
 
-test('handle: warmup depth rejects 0 and values above 1000000', async () => {
+test('run: warmup.depth rejects 0 and values above 1000000', async () => {
   const rootDir = makeRoot();
-  const hot = makeHot(rootDir);
-  const store = makeStore();
-  const warmup = fakeWarmup();
-  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 }, getGuildId: () => 'g1', warmup });
+  const { admin } = makeAdmin(rootDir, { warmup: fakeWarmup() });
 
-  await admin.handle(makeMessage({ content: '!nep warmup depth 0' }));
-  await admin.handle(makeMessage({ content: '!nep warmup depth 2000000' }));
-
+  await assert.rejects(() => admin.run('warmup.depth', { messages: 0 }, {}));
+  await assert.rejects(() => admin.run('warmup.depth', { messages: 2_000_000 }, {}));
   assert.equal(hasLocal(rootDir), false);
 });
 
-test('handle: warmup budget parses plain integers and the k/m suffixes', async () => {
+test('run: warmup.budget parses plain integers and the k/m suffixes', async () => {
   const rootDir = makeRoot();
-  const hot = makeHot(rootDir);
-  const store = makeStore();
-  const warmup = fakeWarmup();
-  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 }, getGuildId: () => 'g1', warmup });
+  const { admin } = makeAdmin(rootDir, { warmup: fakeWarmup() });
 
-  await admin.handle(makeMessage({ content: '!nep warmup budget 500k' }));
+  await admin.run('warmup.budget', { tokens: '500k' }, {});
   assert.deepEqual(readLocal(rootDir), { warmup: { maxTokens: 500_000 } });
 
-  await admin.handle(makeMessage({ content: '!nep warmup budget 10m' }));
+  await admin.run('warmup.budget', { tokens: '10m' }, {});
   assert.deepEqual(readLocal(rootDir), { warmup: { maxTokens: 10_000_000 } });
 
-  await admin.handle(makeMessage({ content: '!nep warmup budget 42' }));
+  await admin.run('warmup.budget', { tokens: '42' }, {});
   assert.deepEqual(readLocal(rootDir), { warmup: { maxTokens: 42 } });
 });
 
-test('handle: warmup budget rejects garbage and writes nothing', async () => {
+test('run: warmup.budget rejects garbage and writes nothing', async () => {
   const rootDir = makeRoot();
-  const hot = makeHot(rootDir);
-  const store = makeStore();
-  const warmup = fakeWarmup();
-  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 }, getGuildId: () => 'g1', warmup });
+  const { admin } = makeAdmin(rootDir, { warmup: fakeWarmup() });
 
-  const message = makeMessage({ content: '!nep warmup budget lots', guild: { id: 'g1' } });
-  await admin.handle(message);
-
+  await assert.rejects(() => admin.run('warmup.budget', { tokens: 'lots' }, {}));
   assert.equal(hasLocal(rootDir), false);
-  assert.deepEqual(message.reactions, ['❌']);
 });
 
-test('handle: warmup output sets memory.maxOutputTokens within 256..32000', async () => {
+test('run: warmup.output sets memory.maxOutputTokens within 256..32000', async () => {
   const rootDir = makeRoot();
-  const hot = makeHot(rootDir);
-  const store = makeStore();
-  const warmup = fakeWarmup();
-  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 }, getGuildId: () => 'g1', warmup });
+  const { admin } = makeAdmin(rootDir, { warmup: fakeWarmup() });
 
-  const message = makeMessage({ content: '!nep warmup output 4000' });
-  await admin.handle(message);
-
+  await admin.run('warmup.output', { tokens: 4000 }, {});
   assert.deepEqual(readLocal(rootDir), { memory: { maxOutputTokens: 4000 } });
 });
 
-test('handle: warmup output rejects a value outside 256..32000 and writes nothing', async () => {
+test('run: warmup.output rejects a value outside 256..32000 and writes nothing', async () => {
   const rootDir = makeRoot();
-  const hot = makeHot(rootDir);
-  const store = makeStore();
-  const warmup = fakeWarmup();
-  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 }, getGuildId: () => 'g1', warmup });
+  const { admin } = makeAdmin(rootDir, { warmup: fakeWarmup() });
 
-  await admin.handle(makeMessage({ content: '!nep warmup output 100' }));
-  await admin.handle(makeMessage({ content: '!nep warmup output 40000' }));
-
+  await assert.rejects(() => admin.run('warmup.output', { tokens: 100 }, {}));
+  await assert.rejects(() => admin.run('warmup.output', { tokens: 40_000 }, {}));
   assert.equal(hasLocal(rootDir), false);
 });
 
-test('handle: warmup run starts the warm-up when it is neither running nor done', async () => {
+test('run: warmup.run starts the warm-up when it is neither running nor done', async () => {
   const rootDir = makeRoot();
-  const hot = makeHot(rootDir);
-  const store = makeStore();
   const warmup = fakeWarmup();
-  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 }, getGuildId: () => 'g1', warmup });
+  const { admin } = makeAdmin(rootDir, { warmup });
 
-  const message = makeMessage({ content: '!nep warmup run' });
-  const handled = await admin.handle(message);
+  const result = await admin.run('warmup.run', {}, {});
 
-  assert.equal(handled, true);
   assert.equal(warmup.calls.run, 1);
-  assert.ok(message.sent[0].includes('started'));
+  assert.ok(result.includes('started'));
 });
 
-test('handle: warmup run reports it is already running instead of starting a second one', async () => {
+test('run: warmup.run reports it is already running instead of starting a second one', async () => {
   const rootDir = makeRoot();
-  const hot = makeHot(rootDir);
-  const store = makeStore();
-  const warmup = fakeWarmup({ status: { enabled: true, done: false, paused: false, aborted: false, running: true, tokensUsed: 0, maxTokens: 1000, requests: 0, channelsDone: 0, channelsTotal: 1, messagesAnalyzed: 0, skippedMessages: 0, primaryChannelId: '', onlyListed: false, channels: [] } });
-  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 }, getGuildId: () => 'g1', warmup });
+  const warmup = fakeWarmup({
+    status: {
+      enabled: true, done: false, paused: false, aborted: false, running: true, tokensUsed: 0, maxTokens: 1000,
+      requests: 0, channelsDone: 0, channelsTotal: 1, messagesAnalyzed: 0, skippedMessages: 0, primaryChannelId: '',
+      onlyListed: false, channels: [],
+    },
+  });
+  const { admin } = makeAdmin(rootDir, { warmup });
 
-  const message = makeMessage({ content: '!nep warmup run' });
-  await admin.handle(message);
-
+  const result = await admin.run('warmup.run', {}, {});
   assert.equal(warmup.calls.run, 0);
-  assert.ok(message.sent[0].includes('already running'));
+  assert.ok(result.includes('already running'));
 });
 
-test('handle: warmup stop requests a pause while running', async () => {
+test('run: warmup.stop requests a pause while running', async () => {
   const rootDir = makeRoot();
-  const hot = makeHot(rootDir);
-  const store = makeStore();
-  const warmup = fakeWarmup({ status: { enabled: true, done: false, paused: false, aborted: false, running: true, tokensUsed: 0, maxTokens: 1000, requests: 0, channelsDone: 0, channelsTotal: 1, messagesAnalyzed: 0, skippedMessages: 0, primaryChannelId: '', onlyListed: false, channels: [] } });
-  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 }, getGuildId: () => 'g1', warmup });
+  const warmup = fakeWarmup({
+    status: {
+      enabled: true, done: false, paused: false, aborted: false, running: true, tokensUsed: 0, maxTokens: 1000,
+      requests: 0, channelsDone: 0, channelsTotal: 1, messagesAnalyzed: 0, skippedMessages: 0, primaryChannelId: '',
+      onlyListed: false, channels: [],
+    },
+  });
+  const { admin } = makeAdmin(rootDir, { warmup });
 
-  const message = makeMessage({ content: '!nep warmup stop' });
-  const handled = await admin.handle(message);
-
-  assert.equal(handled, true);
+  const result = await admin.run('warmup.stop', {}, {});
   assert.equal(warmup.calls.stop, 1);
-  assert.ok(message.sent[0].includes('pause'));
+  assert.ok(result.includes('pause'));
 });
 
-test('handle: warmup stop reports it is not running instead of stopping nothing', async () => {
+test('run: warmup.stop reports it is not running instead of stopping nothing', async () => {
   const rootDir = makeRoot();
-  const hot = makeHot(rootDir);
-  const store = makeStore();
   const warmup = fakeWarmup();
-  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 }, getGuildId: () => 'g1', warmup });
+  const { admin } = makeAdmin(rootDir, { warmup });
 
-  const message = makeMessage({ content: '!nep warmup stop' });
-  await admin.handle(message);
-
+  const result = await admin.run('warmup.stop', {}, {});
   assert.equal(warmup.calls.stop, 0);
-  assert.ok(message.sent[0].includes('not running'));
+  assert.ok(result.includes('not running'));
 });
 
-test('handle: warmup reset clears progress and reports success', async () => {
+test('run: warmup.reset clears progress and reports success', async () => {
   const rootDir = makeRoot();
-  const hot = makeHot(rootDir);
-  const store = makeStore();
   const warmup = fakeWarmup();
-  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 }, getGuildId: () => 'g1', warmup });
+  const { admin } = makeAdmin(rootDir, { warmup });
 
-  const message = makeMessage({ content: '!nep warmup reset', guild: { id: 'g1' } });
-  const handled = await admin.handle(message);
-
-  assert.equal(handled, true);
+  const result = await admin.run('warmup.reset', {}, {});
   assert.equal(warmup.calls.reset, 1);
-  assert.ok(message.sent[0].includes('reset'));
-  assert.deepEqual(message.reactions, ['✅']);
+  assert.ok(result.includes('reset'));
 });
 
-test('handle: warmup reset while running surfaces the error and reacts with the cross mark', async () => {
+test('run: warmup.reset while running surfaces the error', async () => {
   const rootDir = makeRoot();
-  const hot = makeHot(rootDir);
-  const store = makeStore();
   const warmup = fakeWarmup({ resetThrows: new Error('warmup: cannot reset while running') });
-  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 }, getGuildId: () => 'g1', warmup });
+  const { admin } = makeAdmin(rootDir, { warmup });
 
-  const message = makeMessage({ content: '!nep warmup reset', guild: { id: 'g1' } });
-  await admin.handle(message);
-
-  assert.ok(message.sent[0].includes('Error'));
-  assert.deepEqual(message.reactions, ['❌']);
+  await assert.rejects(() => admin.run('warmup.reset', {}, {}), /cannot reset while running/);
 });
 
-test('handle: warmup reports unavailable when no warmup dependency was injected', async () => {
+test('run: every warmup.* command reports unavailable when no warmup dependency was injected', async () => {
   const rootDir = makeRoot();
-  const hot = makeHot(rootDir);
-  const store = makeStore();
-  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 }, getGuildId: () => 'g1' });
+  const { admin } = makeAdmin(rootDir);
 
-  const message = makeMessage({ content: '!nep warmup' });
-  const handled = await admin.handle(message);
+  const result = await admin.run('warmup.status', {}, {});
+  assert.ok(result.includes('not available'));
 
-  assert.equal(handled, true);
-  assert.ok(message.sent[0].includes('not available'));
-});
-
-test('handle: warmup sub-commands are ignored entirely for a non-owner', async () => {
-  const rootDir = makeRoot();
-  const hot = makeHot(rootDir);
-  const store = makeStore();
-  const warmup = fakeWarmup();
-  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 }, getGuildId: () => 'g1', warmup });
-
-  const message = makeMessage({ authorId: '999', content: '!nep warmup budget 500k' });
-  const handled = await admin.handle(message);
-
-  assert.equal(handled, false);
-  assert.equal(message.sent.length, 0);
-  assert.equal(hasLocal(rootDir), false);
-  assert.equal(warmup.calls.run + warmup.calls.stop + warmup.calls.reset + warmup.calls.plan, 0);
+  const result2 = await admin.run('warmup.run', {}, {});
+  assert.ok(result2.includes('not available'));
 });

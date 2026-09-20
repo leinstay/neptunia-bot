@@ -1,9 +1,11 @@
 // The message pipeline: turns a raw discord.js `messageCreate` event into one
-// of a handful of outcomes (ignore, hand to admin, observe into memory, let
-// the spontaneous scheduler eavesdrop, or run a turn) without ever throwing
-// into discord.js. Kept free of discord.js-specific assumptions beyond the
-// shape already used by src/discord/collect.js, so it can be driven with
-// plain fake objects in tests.
+// of a handful of outcomes (ignore, observe into memory, let the spontaneous
+// scheduler eavesdrop, or run a turn) without ever throwing into discord.js.
+// Owner commands are a separate pipeline entirely (src/discord/commands.js,
+// driven by `interactionCreate`, not `messageCreate`). Kept free of
+// discord.js-specific assumptions beyond the shape already used by
+// src/discord/collect.js, so it can be driven with plain fake objects in
+// tests.
 
 import { normalizeMessage, channelAllowed, canSend } from './collect.js';
 import { detectTrigger, strippedLength, decideMention, repeatWindowMs } from '../behavior/mention.js';
@@ -17,11 +19,10 @@ import { log } from '../log.js';
  * @param {ReturnType<import('../behavior/turn.js').createTurnRunner>} deps.turns
  * @param {ReturnType<import('../behavior/spontaneous.js').createSpontaneous>} deps.spontaneous
  * @param {ReturnType<import('../memory/update.js').createMemoryUpdater>} deps.memory
- * @param {ReturnType<import('../admin.js').createAdmin>} deps.admin
  * @param {ReturnType<import('../behavior/mention.js').createTagHistory>} deps.tagHistory
  * @param {() => string | null} deps.getGuildId  the single guild this instance serves, or null before it resolves
  * @param {() => boolean} [deps.isWarmingUp]  true while the memory warm-up (src/memory/warmup.js) is still due or
- *   running: messages are still observed and owner commands still work, but no trigger, turn or eavesdrop happens.
+ *   running: messages are still observed, but no trigger, turn or eavesdrop happens.
  * @param {() => number} [deps.rng]
  * @param {() => number} [deps.now]
  * @returns {(message: import('discord.js').Message) => Promise<void>}
@@ -33,7 +34,6 @@ export function createMessageHandler({
   turns,
   spontaneous,
   memory,
-  admin,
   tagHistory,
   getGuildId,
   isWarmingUp = () => false,
@@ -55,14 +55,12 @@ export function createMessageHandler({
 
       const config = hot.config;
       const features = config.features ?? {};
-      const adminCommandsOn = features.adminCommands !== false;
       const memoryOn = features.memory !== false;
 
-      // 2. DMs: only the owner admin console lives there, the persona never chats in DMs.
-      if (!message.guild) {
-        if (adminCommandsOn) await admin.handle(message);
-        return;
-      }
+      // 2. DMs: the persona never chats in DMs, and owner commands are slash
+      // commands now (src/discord/commands.js, interactionCreate) — a DM
+      // carries nothing this pipeline needs to see.
+      if (!message.guild) return;
 
       // 3. This instance serves exactly one guild; channel allowlist/denylist, no threads.
       if (message.guild.id !== getGuildId()) return;
@@ -70,16 +68,11 @@ export function createMessageHandler({
       if (!channelAllowed(message.channel, config.bot)) return;
 
       // 3b. The dry-run mirror channel is the owner's private test room: it
-      // also carries the persona's own rehearsal output (src/behavior/turn.js),
-      // never real conversation. Owner commands still work here, same as
-      // everywhere else, but nothing else does -- nothing posted here is ever
-      // observed into memory, no trigger is detected, no turn runs, no
-      // eavesdrop.
+      // carries the persona's own rehearsal output (src/behavior/turn.js),
+      // never real conversation. Nothing posted here is ever observed into
+      // memory, no trigger is detected, no turn runs, no eavesdrop.
       const dryRunChannelId = config.bot.dryRunChannelId;
-      if (dryRunChannelId && message.channel.id === dryRunChannelId) {
-        if (adminCommandsOn && !message.author.bot) await admin.handle(message);
-        return;
-      }
+      if (dryRunChannelId && message.channel.id === dryRunChannelId) return;
 
       // 4. Normalize.
       const selfId = client.user.id;
@@ -96,10 +89,7 @@ export function createMessageHandler({
       // 6. Other bots are never answered, never memorised.
       if (message.author.bot) return;
 
-      // 7. Owner commands short-circuit before anything is observed.
-      if (adminCommandsOn && (await admin.handle(message))) return;
-
-      // 7b. The memory warm-up is still running/due: the persona stays mute
+      // 7. The memory warm-up is still running/due: the persona stays mute
       // (no trigger, no turn, no eavesdrop), but the message still feeds the
       // memory buffer like any other observed message.
       if (isWarmingUp()) {

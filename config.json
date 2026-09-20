@@ -17,7 +17,7 @@
   "bot": {
     "timezone": "UTC",
     "owners": [],
-    "commandPrefix": "!nep",
+    "commandName": "nep",
     "nameTriggers": [],
     "guildId": "",
     "dryRunChannelId": "",
