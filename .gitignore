@@ -1,0 +1,26 @@
+/CLAUDE.md
+/AGENTS.md
+/.claude/
+
+.env
+.env.*
+!.env.example
+config.local.json
+
+# Persistent bot state: user memory, guild patterns, scheduler state
+/data/
+
+*.log
+*.bak
+*.bak-*
+
+Thumbs.db
+.DS_Store
+.vscode/
+.idea/
+
+# Local specs and plans
+/docs/
+
+# Node
+node_modules/

@@ -1,0 +1,81 @@
+{
+  "bot": {
+    "timezone": "Europe/Moscow",
+    "owners": [],
+    "commandPrefix": "!nep",
+    "nameTriggers": ["нептуния", "нептунию", "нептунии", "нептунией", "непка", "непту"],
+    "guilds": [],
+    "channels": { "allow": [], "deny": [] }
+  },
+  "llm": {
+    "model": "anthropic/claude-opus-4.6",
+    "temperature": 1,
+    "maxOutputTokens": 700,
+    "maxRequestTokens": 50000,
+    "safetyMargin": 0.9,
+    "timeoutMs": 90000,
+    "retries": 2,
+    "maxRequestsPerDay": 300
+  },
+  "context": {
+    "channelMessages": 100,
+    "neighborMessages": 5,
+    "neighborMaxAgeMinutes": 60,
+    "neighborMaxChannels": 8,
+    "maxMessageChars": 800,
+    "gapMarkerMinutes": 20,
+    "otherProfiles": 6,
+    "caps": { "interlocutor": 2500, "aboutChat": 2500, "people": 4000, "neighbors": 3000 },
+    "vision": { "enabled": true, "maxImages": 2, "tokensPerImage": 1600 }
+  },
+  "mention": {
+    "ignoreChance": 0.12,
+    "emptyMentionIgnoreChance": 0.35,
+    "repeatWindowMinutes": 10,
+    "repeatPenalty": 0.25,
+    "spamThreshold": 4,
+    "spamIgnoreChance": 0.9,
+    "replyToBotCounts": true,
+    "nameTriggerChance": 0.5,
+    "neverIgnore": [],
+    "triggerPhrases": {
+      "mention": "тегнул(а) тебя",
+      "reply": "ответил(а) на твоё сообщение",
+      "name": "упомянул(а) тебя по имени, без тега"
+    }
+  },
+  "typing": {
+    "reactionDelayMs": [800, 4000],
+    "msPerChar": [35, 75],
+    "minMs": 900,
+    "maxMs": 12000,
+    "betweenMessagesMs": [700, 3500]
+  },
+  "spontaneous": {
+    "enabled": true,
+    "channels": [],
+    "minIntervalMinutes": 25,
+    "maxIntervalMinutes": 420,
+    "burstChance": 0.15,
+    "burstMinutes": [3, 15],
+    "activeHours": { "from": 10, "to": 3 },
+    "liveWindowMinutes": 15,
+    "liveMinMessages": 4,
+    "deadAfterMinutes": 90,
+    "initiateChance": 0.35,
+    "eavesdropChance": 0.02,
+    "eavesdropDelayMs": [5000, 40000],
+    "minGapMinutes": 12
+  },
+  "memory": {
+    "model": null,
+    "batchMessages": 60,
+    "minBatchMessages": 15,
+    "maxBatchAgeMinutes": 180,
+    "maxOutputTokens": 4000,
+    "fieldChars": 400,
+    "maxDetails": 15,
+    "maxInjokes": 15,
+    "maxSelfFacts": 20
+  }
+}
