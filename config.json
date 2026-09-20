@@ -18,7 +18,7 @@
     "owners": [],
     "commandPrefix": "!nep",
     "nameTriggers": [],
-    "guilds": [],
+    "guildId": "",
     "channels": { "allow": [], "deny": [] }
   },
   "llm": {
@@ -41,7 +41,8 @@
     "gapMarkerMinutes": 20,
     "otherProfiles": 6,
     "tempo": { "liveMessages10min": 4, "deadSilenceMinutes": 45 },
-    "caps": { "interlocutor": 2500, "aboutChat": 2500, "people": 4000, "neighbors": 3000 },
+    "caps": { "interlocutor": 2500, "aboutChat": 2500, "people": 4000, "neighbors": 3000, "server": 2500 },
+    "channelActivity": { "liveMessagesPerDay": 20, "deadAfterDays": 7 },
     "vision": { "maxImages": 2, "tokensPerImage": 1600 }
   },
   "mention": {
@@ -93,5 +94,13 @@
     "maxDeltaPerUpdate": 15,
     "historySize": 10,
     "directTriggerCount": 6
+  },
+  "warmup": {
+    "enabled": false,
+    "maxTokens": 1000000,
+    "messagesPerChannel": 2000,
+    "batchMessages": 150,
+    "maxAgeDays": 0,
+    "channels": []
   }
 }

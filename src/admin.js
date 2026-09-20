@@ -247,8 +247,9 @@ const HELP_TEXT = [
  * `client` — a discord.js Client (used for channels.fetch and guilds.cache).
  * `spontaneous` — the spontaneous scheduler: `poke(channel, mode)` and `status()`.
  * `calibrator` — token calibrator (src/llm/tokens.js), read for `.ratio`.
+ * `getGuildId` — the single guild this instance serves, or null before it resolves.
  */
-export function createAdmin({ hot, store, client, spontaneous, calibrator }) {
+export function createAdmin({ hot, store, client, spontaneous, calibrator, getGuildId }) {
   function isOwner(userId) {
     const owners = hot.config?.bot?.owners ?? [];
     return owners.map(String).includes(String(userId));
@@ -369,12 +370,16 @@ export function createAdmin({ hot, store, client, spontaneous, calibrator }) {
       `llm requests today: ${data.llmCount ?? 0} / ${cfg?.llm?.maxRequestsPerDay ?? '-'} (day: ${data.llmDay ?? '-'})`,
     ];
 
-    const guildIds = typeof store.listGuilds === 'function' ? store.listGuilds() : [];
-    for (const guildId of guildIds) {
+    const guildId = getGuildId?.() ?? null;
+    if (guildId) {
+      const guildName = client?.guilds?.cache?.get(guildId)?.name;
+      const label = guildName ? `${guildName} (${guildId})` : guildId;
       const profiles = store.countUsers(guildId);
       const buffer = store.getBuffer(guildId);
       const next = nextSpontaneousFor(guildId);
-      lines.push(`guild ${guildId}: profiles=${profiles} buffer=${buffer.length} nextSpontaneous=${next ?? '-'}`);
+      lines.push(`guild: ${label} profiles=${profiles} buffer=${buffer.length} nextSpontaneous=${next ?? '-'}`);
+    } else {
+      lines.push('guild: not resolved yet');
     }
 
     const prompts = hot.prompts ?? {};
@@ -413,34 +418,21 @@ export function createAdmin({ hot, store, client, spontaneous, calibrator }) {
     return `poke ${mode} on ${channel.id}: ${JSON.stringify(result) ?? 'ok'}`;
   }
 
+  /** The single guild this instance serves: `message.guild.id` when the command runs there, else `getGuildId()`. */
+  function resolvedGuildId(message) {
+    return message.guild?.id ?? getGuildId?.() ?? null;
+  }
+
   function cmdMemory(args, message) {
     const userId = extractUserId(args);
     if (!userId) throw new Error('usage: memory <@mention|userId>');
 
-    if (message.guild) {
-      const profile = store.getUser(message.guild.id, userId);
-      if (!profile) throw new Error(`no profile for ${userId} in this guild`);
-      return JSON.stringify(profile, null, 2);
-    }
+    const guildId = resolvedGuildId(message);
+    if (!guildId) throw new Error('no guild resolved yet');
 
-    for (const guild of client.guilds.cache.values()) {
-      const profile = store.getUser(guild.id, userId);
-      if (profile) return `guild ${guild.id}:\n${JSON.stringify(profile, null, 2)}`;
-    }
-    throw new Error(`no profile for ${userId} in any guild`);
-  }
-
-  /** Find the profile of `userId`, in `message.guild` or, in a DM, searching every known guild. */
-  function findProfile(userId, message) {
-    if (message.guild) {
-      const profile = store.getUser(message.guild.id, userId);
-      return profile ? { guildId: message.guild.id, profile } : null;
-    }
-    for (const guild of client.guilds.cache.values()) {
-      const profile = store.getUser(guild.id, userId);
-      if (profile) return { guildId: guild.id, profile };
-    }
-    return null;
+    const profile = store.getUser(guildId, userId);
+    if (!profile) throw new Error(`no profile for ${userId}`);
+    return JSON.stringify(profile, null, 2);
   }
 
   function cmdAffinity(args, message) {
@@ -450,10 +442,13 @@ export function createAdmin({ hot, store, client, spontaneous, calibrator }) {
     const userId = extractUserId(firstArg);
     if (!userId) throw new Error('usage: affinity <@mention|userId> [score] [reason…]');
 
+    const guildId = resolvedGuildId(message);
+    if (!guildId) throw new Error('no guild resolved yet');
+
     if (!rest) {
-      const found = findProfile(userId, message);
-      if (!found) throw new Error(`no profile for ${userId} in ${message.guild ? 'this guild' : 'any guild'}`);
-      const affinity = found.profile.affinity ?? emptyAffinity();
+      const profile = store.getUser(guildId, userId);
+      if (!profile) throw new Error(`no profile for ${userId}`);
+      const affinity = profile.affinity ?? emptyAffinity();
       const history = (affinity.history ?? [])
         .slice(-5)
         .map((h) => `${h.ts} ${h.delta >= 0 ? '+' : ''}${h.delta} -> ${h.score}${h.reason ? `: ${h.reason}` : ''}`)
@@ -474,15 +469,6 @@ export function createAdmin({ hot, store, client, spontaneous, calibrator }) {
       throw new Error('score must be an integer between -100 and 100');
     }
 
-    let guildId;
-    if (message.guild) {
-      guildId = message.guild.id;
-    } else {
-      const found = findProfile(userId, message);
-      if (!found) throw new Error(`no profile for ${userId} in any guild`);
-      guildId = found.guildId;
-    }
-
     const current = store.getUser(guildId, userId)?.affinity?.score ?? 0;
     const relCfg = hot.config?.relationships ?? {};
     const affinity = store.adjustAffinity(guildId, userId, score - current, reasonArg || 'set by owner', {
@@ -490,27 +476,18 @@ export function createAdmin({ hot, store, client, spontaneous, calibrator }) {
       historySize: relCfg.historySize ?? 10,
       now: Date.now(),
     });
-    return `Set affinity for ${userId} in guild ${guildId} to ${affinity.score} (${affinityBand(affinity.score)}).`;
+    return `Set affinity for ${userId} to ${affinity.score} (${affinityBand(affinity.score)}).`;
   }
 
   function cmdForget(args, message) {
     const userId = extractUserId(args);
     if (!userId) throw new Error('usage: forget <@mention|userId>');
 
-    if (message.guild) {
-      store.forgetUser(message.guild.id, userId);
-      return `Forgot ${userId} in guild ${message.guild.id}.`;
-    }
+    const guildId = resolvedGuildId(message);
+    if (!guildId) throw new Error('no guild resolved yet');
 
-    let found = false;
-    for (const guild of client.guilds.cache.values()) {
-      if (store.getUser(guild.id, userId)) {
-        store.forgetUser(guild.id, userId);
-        found = true;
-      }
-    }
-    if (!found) throw new Error(`no profile for ${userId} in any guild`);
-    return `Forgot ${userId} everywhere.`;
+    store.forgetUser(guildId, userId);
+    return `Forgot ${userId}.`;
   }
 
   const commands = {

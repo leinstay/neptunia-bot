@@ -19,6 +19,7 @@ import { log } from '../log.js';
  * @param {ReturnType<import('../memory/update.js').createMemoryUpdater>} deps.memory
  * @param {ReturnType<import('../admin.js').createAdmin>} deps.admin
  * @param {ReturnType<import('../behavior/mention.js').createTagHistory>} deps.tagHistory
+ * @param {() => string | null} deps.getGuildId  the single guild this instance serves, or null before it resolves
  * @param {() => number} [deps.rng]
  * @param {() => number} [deps.now]
  * @returns {(message: import('discord.js').Message) => Promise<void>}
@@ -32,6 +33,7 @@ export function createMessageHandler({
   memory,
   admin,
   tagHistory,
+  getGuildId,
   rng = Math.random,
   now = Date.now,
 }) {
@@ -59,9 +61,8 @@ export function createMessageHandler({
         return;
       }
 
-      // 3. Guild allowlist, channel allowlist/denylist, no threads.
-      const allowedGuilds = config.bot.guilds ?? [];
-      if (allowedGuilds.length > 0 && !allowedGuilds.includes(message.guild.id)) return;
+      // 3. This instance serves exactly one guild; channel allowlist/denylist, no threads.
+      if (message.guild.id !== getGuildId()) return;
       if (message.channel.isThread?.()) return;
       if (!channelAllowed(message.channel, config.bot)) return;
 

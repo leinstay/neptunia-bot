@@ -19,6 +19,7 @@ import { createMemoryUpdater } from './memory/update.js';
 import { createAdmin } from './admin.js';
 import { createTagHistory } from './behavior/mention.js';
 import { createMessageHandler } from './discord/events.js';
+import { resolveGuild } from './discord/guild.js';
 
 const REQUIRED_PROMPTS = ['system-prompt', 'character-card', 'format', 'reply', 'interject', 'initiate', 'memory'];
 
@@ -70,8 +71,15 @@ const client = new Client({
   partials: [Partials.Channel], // required to receive DM messageCreate events
 });
 
+// This instance serves exactly one Discord server. `instance.guildId` is set
+// once, right after ClientReady resolves it (see below), and every component
+// that needs it reads it through `getGuildId` instead of caching it, so a
+// switch to a different guild always requires a restart, never a silent swap.
+const instance = { guildId: null };
+const getGuildId = () => instance.guildId;
+
 const turns = createTurnRunner({ hot, store, llm, calibrator, client });
-const spontaneous = createSpontaneous({ hot, store, client, turns });
+const spontaneous = createSpontaneous({ hot, store, client, turns, getGuildId });
 const memory = createMemoryUpdater({
   hot,
   store,
@@ -79,10 +87,10 @@ const memory = createMemoryUpdater({
   calibrator,
   getSelfName: (guildId) => client.guilds.cache.get(guildId)?.members.me?.displayName ?? client.user?.username ?? 'bot',
 });
-const admin = createAdmin({ hot, store, client, spontaneous, calibrator });
+const admin = createAdmin({ hot, store, client, spontaneous, calibrator, getGuildId });
 const tagHistory = createTagHistory();
 
-const onMessage = createMessageHandler({ hot, store, client, turns, spontaneous, memory, admin, tagHistory });
+const onMessage = createMessageHandler({ hot, store, client, turns, spontaneous, memory, admin, tagHistory, getGuildId });
 
 const timers = [];
 
@@ -98,12 +106,37 @@ function every(ms, fn, label) {
 }
 
 client.once(Events.ClientReady, () => {
-  log.info('index: ready', { guilds: client.guilds.cache.size, tag: client.user.tag });
+  const guilds = [...client.guilds.cache.values()].map((guild) => ({ id: guild.id, name: guild.name }));
+  const resolved = resolveGuild(hot.config.bot.guildId, guilds);
+  if (resolved.error) fail(`index: ${resolved.error}`);
+
+  instance.guildId = resolved.guildId;
+  if (!hot.config.bot.guildId) {
+    log.info('index: bot.guildId is not set, using the only guild the bot is in — pin it in config.local.json', {
+      guildId: instance.guildId,
+    });
+  }
+
+  log.info('index: ready', { guild: instance.guildId, tag: client.user.tag });
   every(30_000, () => spontaneous.tick(), 'spontaneous.tick');
   // The tick still runs on schedule even with the switch off, so flipping it
   // back on later needs no restart; it is the wrapper here that no-ops.
   every(60_000, () => (hot.config.features?.memory !== false ? memory.tick() : undefined), 'memory.tick');
   every(30_000, () => store.flush(), 'store.flush');
+});
+
+// A running instance never switches servers live: bot.guildId is only read at
+// startup. If the owner later points it at a different, non-empty guild while
+// the process is up, keep serving the original one and just say so.
+hot.on('change', ({ what }) => {
+  if (what !== 'config' || !instance.guildId) return;
+  const configured = hot.config.bot.guildId;
+  if (configured && configured !== instance.guildId) {
+    log.warn('index: bot.guildId changed while running, restart required to switch servers', {
+      serving: instance.guildId,
+      configured,
+    });
+  }
 });
 
 client.on('messageCreate', onMessage);

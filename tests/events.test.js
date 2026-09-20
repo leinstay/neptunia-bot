@@ -121,7 +121,7 @@ function fakeStore(profiles = {}) {
   };
 }
 
-function makeHandler({ config, turns, spontaneous, memory, admin, tagHistory, rng, client, store } = {}) {
+function makeHandler({ config, turns, spontaneous, memory, admin, tagHistory, rng, client, store, getGuildId } = {}) {
   return createMessageHandler({
     hot: { config: config ?? baseConfig() },
     store: store ?? fakeStore(),
@@ -131,6 +131,7 @@ function makeHandler({ config, turns, spontaneous, memory, admin, tagHistory, rn
     memory: memory ?? fakeMemory(),
     admin: admin ?? fakeAdmin(),
     tagHistory: tagHistory ?? createTagHistory(),
+    getGuildId: getGuildId ?? (() => 'g1'),
     rng: rng ?? Math.random,
   });
 }
@@ -326,11 +327,26 @@ test('events: a denied channel is ignored before anything else runs', async () =
   assert.equal(admin.handleCalls.length, 0);
 });
 
-test('events: a guild outside config.bot.guilds is ignored', async () => {
+test('events: a message from a guild other than the one this instance serves is ignored entirely', async () => {
   const memory = fakeMemory();
   const spontaneous = fakeSpontaneous();
-  const config = baseConfig({ bot: { guilds: ['some-other-guild'] } });
-  const handler = makeHandler({ config, memory, spontaneous });
+  const admin = fakeAdmin(() => true);
+  const turns = fakeTurns();
+  const handler = makeHandler({ memory, spontaneous, admin, turns, getGuildId: () => 'the-served-guild' });
+
+  const message = fakeMessage({ guild: fakeGuild('some-other-guild'), cleanContent: '!nep status' });
+  await handler(message);
+
+  assert.equal(memory.observeCalls.length, 0);
+  assert.equal(spontaneous.onMessageCalls.length, 0);
+  assert.equal(admin.handleCalls.length, 0);
+  assert.equal(turns.notePostCalls.length, 0);
+});
+
+test('events: a foreign-guild message is ignored even when the instance has not resolved a guild yet', async () => {
+  const memory = fakeMemory();
+  const spontaneous = fakeSpontaneous();
+  const handler = makeHandler({ memory, spontaneous, getGuildId: () => null });
 
   const message = fakeMessage();
   await handler(message);

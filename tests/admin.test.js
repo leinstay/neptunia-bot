@@ -276,7 +276,7 @@ test('handle: ignores a command from a non-owner and writes nothing', async () =
   const rootDir = makeRoot();
   const hot = makeHot(rootDir);
   const store = makeStore();
-  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 } });
+  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 }, getGuildId: () => 'g1' });
 
   const before = fs.readFileSync(path.join(rootDir, 'prompts', 'rules.md'), 'utf8');
   const message = makeMessage({ authorId: '999', content: '!nep rule sneaky rule' });
@@ -292,7 +292,7 @@ test('handle: ignores a message that is not a command', async () => {
   const rootDir = makeRoot();
   const hot = makeHot(rootDir);
   const store = makeStore();
-  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 } });
+  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 }, getGuildId: () => 'g1' });
 
   const message = makeMessage({ content: 'just chatting' });
   assert.equal(await admin.handle(message), false);
@@ -302,7 +302,7 @@ test('handle: rule seeds prompts.local/rules.md from the base file, leaving prom
   const rootDir = makeRoot();
   const hot = makeHot(rootDir);
   const store = makeStore();
-  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 } });
+  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 }, getGuildId: () => 'g1' });
 
   const baseBefore = fs.readFileSync(path.join(rootDir, 'prompts', 'rules.md'));
   const message = makeMessage({ content: '!nep rule Never spoil the ending', guild: { id: 'g1' } });
@@ -324,7 +324,7 @@ test('handle: rule creates the prompts.local directory when it does not exist ye
   const rootDir = makeRoot();
   const hot = makeHot(rootDir);
   const store = makeStore();
-  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 } });
+  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 }, getGuildId: () => 'g1' });
 
   assert.equal(fs.existsSync(path.join(rootDir, 'prompts.local')), false);
   await admin.handle(makeMessage({ content: '!nep rule be nice' }));
@@ -335,7 +335,7 @@ test('handle: rules lists the numbered rules; unrule removes one from the local 
   const rootDir = makeRoot();
   const hot = makeHot(rootDir);
   const store = makeStore();
-  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 } });
+  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 }, getGuildId: () => 'g1' });
 
   const baseBefore = fs.readFileSync(path.join(rootDir, 'prompts', 'rules.md'));
   await admin.handle(makeMessage({ content: '!nep rule second rule' }));
@@ -355,7 +355,7 @@ test('handle: rule seeds from an empty text when the base rules.md is missing', 
   fs.mkdirSync(path.join(rootDir, 'prompts'));
   const hot = makeHot(rootDir);
   const store = makeStore();
-  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 } });
+  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 }, getGuildId: () => 'g1' });
 
   const message = makeMessage({ content: '!nep rule only rule' });
   const handled = await admin.handle(message);
@@ -369,7 +369,7 @@ test('handle: set writes an override to config.local.json and reloads config', a
   const rootDir = makeRoot();
   const hot = makeHot(rootDir);
   const store = makeStore();
-  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 } });
+  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 }, getGuildId: () => 'g1' });
 
   const message = makeMessage({ content: '!nep set llm.model "openrouter/test-model"' });
   const handled = await admin.handle(message);
@@ -385,7 +385,7 @@ test('handle: set rejects an unknown config path and writes nothing', async () =
   const rootDir = makeRoot();
   const hot = makeHot(rootDir);
   const store = makeStore();
-  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 } });
+  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 }, getGuildId: () => 'g1' });
 
   const message = makeMessage({ content: '!nep set llm.doesNotExist 1', guild: { id: 'g1' } });
   const handled = await admin.handle(message);
@@ -401,7 +401,7 @@ test('handle: unset removes a previously set override', async () => {
   const rootDir = makeRoot();
   const hot = makeHot(rootDir);
   const store = makeStore();
-  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 } });
+  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 }, getGuildId: () => 'g1' });
 
   await admin.handle(makeMessage({ content: '!nep set llm.model "temp-model"' }));
   await admin.handle(makeMessage({ content: '!nep unset llm.model' }));
@@ -416,7 +416,7 @@ test('handle: forget calls store.forgetUser and clears the profile', async () =>
   const hot = makeHot(rootDir);
   const store = makeStore();
   store.profiles.set('g1:123', { id: '123', character: 'chatty' });
-  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 } });
+  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 }, getGuildId: () => 'g1' });
 
   const message = makeMessage({ content: '!nep forget <@123>', guild: { id: 'g1' } });
   const handled = await admin.handle(message);
@@ -431,7 +431,7 @@ test('handle: memory reports an unknown profile as an error, reacting with the c
   const rootDir = makeRoot();
   const hot = makeHot(rootDir);
   const store = makeStore();
-  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 } });
+  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 }, getGuildId: () => 'g1' });
 
   const message = makeMessage({ content: '!nep memory 555', guild: { id: 'g1' } });
   await admin.handle(message);
@@ -445,7 +445,7 @@ test('handle: affinity shows the current score, band, reason and recent history'
   const hot = makeHot(rootDir);
   const store = makeStore();
   store.profiles.set('g1:123', { id: '123', affinity: { score: 42, reason: 'helped once', history: [{ ts: 't1', delta: 42, score: 42, reason: 'helped once' }] } });
-  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 } });
+  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 }, getGuildId: () => 'g1' });
 
   const message = makeMessage({ content: '!nep affinity 123', guild: { id: 'g1' } });
   const handled = await admin.handle(message);
@@ -462,7 +462,7 @@ test('handle: affinity show reports an error for an unknown profile', async () =
   const rootDir = makeRoot();
   const hot = makeHot(rootDir);
   const store = makeStore();
-  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 } });
+  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 }, getGuildId: () => 'g1' });
 
   const message = makeMessage({ content: '!nep affinity 999', guild: { id: 'g1' } });
   await admin.handle(message);
@@ -476,7 +476,7 @@ test('handle: affinity with a score sets it exactly, bypassing maxDeltaPerUpdate
   const hot = makeHot(rootDir);
   hot.config.relationships = { maxDeltaPerUpdate: 15, historySize: 10 };
   const store = makeStore();
-  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 } });
+  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 }, getGuildId: () => 'g1' });
 
   const message = makeMessage({ content: '!nep affinity 123 77 owner really likes them', guild: { id: 'g1' } });
   const handled = await admin.handle(message);
@@ -492,7 +492,7 @@ test('handle: affinity with a score but no reason defaults to "set by owner"', a
   const rootDir = makeRoot();
   const hot = makeHot(rootDir);
   const store = makeStore();
-  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 } });
+  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 }, getGuildId: () => 'g1' });
 
   await admin.handle(makeMessage({ content: '!nep affinity 123 -30', guild: { id: 'g1' } }));
 
@@ -505,7 +505,7 @@ test('handle: affinity rejects an out-of-range score and writes nothing', async 
   const rootDir = makeRoot();
   const hot = makeHot(rootDir);
   const store = makeStore();
-  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 } });
+  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 }, getGuildId: () => 'g1' });
 
   const message = makeMessage({ content: '!nep affinity 123 150', guild: { id: 'g1' } });
   const handled = await admin.handle(message);
@@ -520,7 +520,7 @@ test('handle: affinity rejects a non-integer score', async () => {
   const rootDir = makeRoot();
   const hot = makeHot(rootDir);
   const store = makeStore();
-  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 } });
+  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 }, getGuildId: () => 'g1' });
 
   const message = makeMessage({ content: '!nep affinity 123 4.5', guild: { id: 'g1' } });
   await admin.handle(message);
@@ -533,7 +533,7 @@ test('handle: affinity is ignored entirely for a non-owner', async () => {
   const rootDir = makeRoot();
   const hot = makeHot(rootDir);
   const store = makeStore();
-  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 } });
+  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 }, getGuildId: () => 'g1' });
 
   const message = makeMessage({ authorId: '999', content: '!nep affinity 123 80', guild: { id: 'g1' } });
   const handled = await admin.handle(message);
@@ -543,13 +543,13 @@ test('handle: affinity is ignored entirely for a non-owner', async () => {
   assert.equal(store.getUser('g1', '123'), null);
 });
 
-test('handle: affinity in a DM searches every known guild, like memory does', async () => {
+test('handle: affinity in a DM uses the single served guild, not a search across guilds', async () => {
   const rootDir = makeRoot();
   const hot = makeHot(rootDir);
   const store = makeStore();
   store.profiles.set('g1:123', { id: '123', affinity: { score: 5, reason: 'ok so far', history: [] } });
-  const client = { guilds: { cache: new Map([['g1', { id: 'g1' }]]) } };
-  const admin = createAdmin({ hot, store, client, spontaneous: {}, calibrator: { ratio: 1 } });
+  const client = { guilds: { cache: new Map([['g1', { id: 'g1', name: 'The Server' }]]) } };
+  const admin = createAdmin({ hot, store, client, spontaneous: {}, calibrator: { ratio: 1 }, getGuildId: () => 'g1' });
 
   const message = makeMessage({ content: '!nep affinity 123' });
   await admin.handle(message);
@@ -557,11 +557,25 @@ test('handle: affinity in a DM searches every known guild, like memory does', as
   assert.ok(message.sent[0].includes('score: 5'));
 });
 
+test('handle: affinity/memory/forget in a DM report an error before the guild has been resolved', async () => {
+  const rootDir = makeRoot();
+  const hot = makeHot(rootDir);
+  const store = makeStore();
+  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 }, getGuildId: () => null });
+
+  const message = makeMessage({ content: '!nep memory 123' });
+  await admin.handle(message);
+
+  assert.ok(message.sent[0].includes('Error'));
+  assert.match(message.sent[0], /no guild resolved yet/);
+});
+
 test('handle: status reports model, calibration ratio and the daily request count', async () => {
   const rootDir = makeRoot();
   const hot = makeHot(rootDir);
   const store = makeStore();
-  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1.2 } });
+  const client = { guilds: { cache: new Map([['g1', { id: 'g1', name: 'The Server' }]]) } };
+  const admin = createAdmin({ hot, store, client, spontaneous: {}, calibrator: { ratio: 1.2 }, getGuildId: () => 'g1' });
 
   const message = makeMessage({ content: '!nep status' });
   await admin.handle(message);
@@ -570,4 +584,17 @@ test('handle: status reports model, calibration ratio and the daily request coun
   assert.match(body, /anthropic\/claude-opus-4\.6/);
   assert.match(body, /1\.200/);
   assert.match(body, /5 \/ 300/);
+  assert.match(body, /guild: The Server \(g1\)/);
+});
+
+test('handle: status reports the guild as not resolved yet before startup finishes', async () => {
+  const rootDir = makeRoot();
+  const hot = makeHot(rootDir);
+  const store = makeStore();
+  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 }, getGuildId: () => null });
+
+  const message = makeMessage({ content: '!nep status' });
+  await admin.handle(message);
+
+  assert.match(message.sent[0], /guild: not resolved yet/);
 });

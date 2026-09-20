@@ -238,7 +238,7 @@ function fakeGuild(id) {
 
 function baseConfig(spontaneousOverrides = {}, features = {}) {
   return {
-    bot: { timezone: 'UTC', guilds: [], channels: { allow: [], deny: [] } },
+    bot: { timezone: 'UTC', channels: { allow: [], deny: [] } },
     features,
     spontaneous: { ...SPONTANEOUS_CFG, ...spontaneousOverrides },
   };
@@ -278,7 +278,7 @@ test('tick: schedules a first run for a guild with no entry yet, without firing'
   // Active hour (10 UTC is inside default 10-to-3 window) so a due entry would fire; here there's no entry at all.
   const now = () => Date.UTC(2026, 0, 5, 12, 0, 0);
 
-  const spontaneous = createSpontaneous({ hot: { config: baseConfig() }, store, client, turns, rng: () => 0.5, now });
+  const spontaneous = createSpontaneous({ hot: { config: baseConfig() }, store, client, turns, getGuildId: () => 'g1', rng: () => 0.5, now });
   await spontaneous.tick();
 
   assert.equal(calls, 0);
@@ -301,7 +301,7 @@ test('tick: fires a turn once it is due and inside active hours', async () => {
     },
   });
 
-  const spontaneous = createSpontaneous({ hot: { config: baseConfig() }, store, client, turns, rng: () => 0.1, now: () => t });
+  const spontaneous = createSpontaneous({ hot: { config: baseConfig() }, store, client, turns, getGuildId: () => 'g1', rng: () => 0.1, now: () => t });
   await spontaneous.tick();
 
   assert.equal(seenChannel, channel);
@@ -318,7 +318,7 @@ test('tick: reschedules to a wake time when due but outside active hours', async
   let calls = 0;
   const turns = fakeTurns({ runTurn: async () => { calls += 1; return { outcome: 'spoke' }; } });
 
-  const spontaneous = createSpontaneous({ hot: { config: baseConfig() }, store, client, turns, rng: () => 0.5, now: () => t });
+  const spontaneous = createSpontaneous({ hot: { config: baseConfig() }, store, client, turns, getGuildId: () => 'g1', rng: () => 0.5, now: () => t });
   await spontaneous.tick();
 
   assert.equal(calls, 0);
@@ -337,6 +337,7 @@ test('tick: does nothing when features.spontaneous is false', async () => {
     store,
     client,
     turns,
+    getGuildId: () => 'g1',
     rng: () => 0.5,
     now: () => Date.UTC(2026, 0, 5, 12, 0, 0),
   });
@@ -363,7 +364,7 @@ test('tick: runs normally when config.features is entirely absent (missing = on)
 
   const config = baseConfig();
   delete config.features;
-  const spontaneous = createSpontaneous({ hot: { config }, store, client, turns, rng: () => 0.1, now: () => t });
+  const spontaneous = createSpontaneous({ hot: { config }, store, client, turns, getGuildId: () => 'g1', rng: () => 0.1, now: () => t });
   await spontaneous.tick();
 
   assert.equal(seenChannel, channel);
@@ -387,7 +388,7 @@ test('tick: never runs two spontaneous turns for the same guild concurrently', a
       }),
   });
 
-  const spontaneous = createSpontaneous({ hot: { config: baseConfig() }, store, client, turns, rng: () => 0.1, now: () => t });
+  const spontaneous = createSpontaneous({ hot: { config: baseConfig() }, store, client, turns, getGuildId: () => 'g1', rng: () => 0.1, now: () => t });
 
   const both = Promise.all([spontaneous.tick(), spontaneous.tick()]);
   await Promise.resolve(); // let both ticks run up to their awaits
@@ -407,25 +408,50 @@ test('tick: pulls the next run in sooner when a turn found nothing to say', asyn
   const store = fakeStore({ spontaneous: { g1: t } });
   const turns = fakeTurns({ runTurn: async () => ({ outcome: 'not-now' }) });
 
-  const spontaneous = createSpontaneous({ hot: { config: baseConfig() }, store, client, turns, rng: () => 0.5, now: () => t });
+  const spontaneous = createSpontaneous({ hot: { config: baseConfig() }, store, client, turns, getGuildId: () => 'g1', rng: () => 0.5, now: () => t });
   await spontaneous.tick();
 
   const scheduled = store.state.data.spontaneous.g1;
   assert.ok(scheduled > t && scheduled <= t + 40 * MINUTE, `expected a 10-40min pull-in, got ${scheduled - t}ms`);
 });
 
-test('tick: respects the bot.guilds allowlist', async () => {
+test('tick: does nothing while the served guild has not been resolved yet', async () => {
   const guild = fakeGuild('g1');
   const client = { guilds: { cache: new Map([[guild.id, guild]]) } };
   const store = fakeStore();
   const turns = fakeTurns();
 
-  const config = baseConfig();
-  config.bot.guilds = ['some-other-guild'];
-  const spontaneous = createSpontaneous({ hot: { config }, store, client, turns, rng: () => 0.5, now: () => Date.now() });
+  const spontaneous = createSpontaneous({
+    hot: { config: baseConfig() },
+    store,
+    client,
+    turns,
+    getGuildId: () => null,
+    rng: () => 0.5,
+    now: () => Date.now(),
+  });
   await spontaneous.tick();
 
-  assert.deepEqual(store.state.data.spontaneous ?? {}, {}, 'a disallowed guild must not get a schedule entry');
+  assert.deepEqual(store.state.data.spontaneous ?? {}, {}, 'an unresolved instance must not get a schedule entry');
+});
+
+test('tick: does nothing when the resolved guild is not (or no longer) in the client\'s cache', async () => {
+  const client = { guilds: { cache: new Map() } };
+  const store = fakeStore();
+  const turns = fakeTurns();
+
+  const spontaneous = createSpontaneous({
+    hot: { config: baseConfig() },
+    store,
+    client,
+    turns,
+    getGuildId: () => 'g1',
+    rng: () => 0.5,
+    now: () => Date.now(),
+  });
+  await spontaneous.tick();
+
+  assert.deepEqual(store.state.data.spontaneous ?? {}, {});
 });
 
 // ---------------------------------------------------------------------------
@@ -446,11 +472,41 @@ test('onMessage: eavesdrops when spontaneous and eavesdrop are both on (missing 
   const turns = fakeTurns({ runTurn: async () => { calls += 1; return { outcome: 'spoke' }; } });
   const now = () => Date.UTC(2026, 0, 5, 12, 0, 0);
 
-  const spontaneous = createSpontaneous({ hot: { config: eagerEavesdropConfig() }, store: fakeStore(), client: {}, turns, rng: () => 0, now });
+  const spontaneous = createSpontaneous({
+    hot: { config: eagerEavesdropConfig() },
+    store: fakeStore(),
+    client: {},
+    turns,
+    getGuildId: () => 'g1',
+    rng: () => 0,
+    now,
+  });
   spontaneous.onMessage(channel, { self: false, bot: false });
   await flushTimers();
 
   assert.equal(calls, 1);
+});
+
+test('onMessage: ignores a message from a guild other than the one this instance serves', async () => {
+  const guild = fakeGuild('g1');
+  const channel = fakeChannel('c1', guild);
+  let calls = 0;
+  const turns = fakeTurns({ runTurn: async () => { calls += 1; return { outcome: 'spoke' }; } });
+  const now = () => Date.UTC(2026, 0, 5, 12, 0, 0);
+
+  const spontaneous = createSpontaneous({
+    hot: { config: eagerEavesdropConfig() },
+    store: fakeStore(),
+    client: {},
+    turns,
+    getGuildId: () => 'some-other-guild',
+    rng: () => 0,
+    now,
+  });
+  spontaneous.onMessage(channel, { self: false, bot: false });
+  await flushTimers();
+
+  assert.equal(calls, 0);
 });
 
 test('onMessage: does nothing when features.eavesdrop is false', async () => {
@@ -465,6 +521,7 @@ test('onMessage: does nothing when features.eavesdrop is false', async () => {
     store: fakeStore(),
     client: {},
     turns,
+    getGuildId: () => 'g1',
     rng: () => 0,
     now,
   });
@@ -486,6 +543,7 @@ test('onMessage: does nothing when features.spontaneous is false, even with eave
     store: fakeStore(),
     client: {},
     turns,
+    getGuildId: () => 'g1',
     rng: () => 0,
     now,
   });

@@ -123,17 +123,13 @@ export function pickChannel(candidates, now, rng) {
  * @param {ReturnType<import('../memory/store.js').createStore>} params.store
  * @param {import('discord.js').Client} params.client
  * @param {ReturnType<import('./turn.js').createTurnRunner>} params.turns
+ * @param {() => string | null} params.getGuildId  the single guild this instance serves, or null before it resolves
  * @param {() => number} [params.rng]
  * @param {() => number} [params.now]
  */
-export function createSpontaneous({ hot, store, client, turns, rng = Math.random, now = Date.now }) {
+export function createSpontaneous({ hot, store, client, turns, getGuildId, rng = Math.random, now = Date.now }) {
   const running = new Set(); // guildIds with a spontaneous turn in flight
   const eavesdropTimers = new Set();
-
-  function guildAllowed(guildId, botConfig) {
-    const allow = botConfig.guilds ?? [];
-    return allow.length === 0 || allow.includes(guildId);
-  }
 
   function passesFilters(channel, config, cfg, t) {
     return (
@@ -160,56 +156,56 @@ export function createSpontaneous({ hot, store, client, turns, rng = Math.random
     const cfg = config.spontaneous;
     if (config.features?.spontaneous === false) return;
 
+    const guildId = getGuildId();
+    if (!guildId) return; // not resolved yet — nothing to do
+    const guild = client.guilds.cache.get(guildId);
+    if (!guild) return;
+    if (running.has(guildId)) return;
+
     const schedule = (store.state.data.spontaneous ??= {});
     const t = now();
 
-    for (const guild of client.guilds.cache.values()) {
-      const guildId = guild.id;
-      if (!guildAllowed(guildId, config.bot)) continue;
-      if (running.has(guildId)) continue;
-
-      if (schedule[guildId] === undefined) {
-        schedule[guildId] = t + nextDelayMs(cfg, rng);
-        store.state.markDirty();
-        continue;
-      }
-      if (t < schedule[guildId]) continue;
-
-      const hour = localHour(t, config.bot.timezone);
-      if (!isActiveHour(hour, cfg.activeHours)) {
-        schedule[guildId] = t + msUntilActive(t, config.bot.timezone, cfg.activeHours, rng);
-        store.state.markDirty();
-        log.info('spontaneous: outside active hours, sleeping', { guild: guildId, wakeAt: schedule[guildId] });
-        continue;
-      }
-
-      const channel = pickChannel(channelCandidates(guild, config, cfg, t), t, rng);
-
-      // Reschedule before awaiting the turn, so a slow turn cannot double-fire.
+    if (schedule[guildId] === undefined) {
       schedule[guildId] = t + nextDelayMs(cfg, rng);
       store.state.markDirty();
+      return;
+    }
+    if (t < schedule[guildId]) return;
 
-      if (!channel) {
-        schedule[guildId] = t + between(REWAKE_MINUTES, rng) * MINUTE;
+    const hour = localHour(t, config.bot.timezone);
+    if (!isActiveHour(hour, cfg.activeHours)) {
+      schedule[guildId] = t + msUntilActive(t, config.bot.timezone, cfg.activeHours, rng);
+      store.state.markDirty();
+      log.info('spontaneous: outside active hours, sleeping', { guild: guildId, wakeAt: schedule[guildId] });
+      return;
+    }
+
+    const channel = pickChannel(channelCandidates(guild, config, cfg, t), t, rng);
+
+    // Reschedule before awaiting the turn, so a slow turn cannot double-fire.
+    schedule[guildId] = t + nextDelayMs(cfg, rng);
+    store.state.markDirty();
+
+    if (!channel) {
+      schedule[guildId] = t + between(REWAKE_MINUTES, rng) * MINUTE;
+      store.state.markDirty();
+      log.info('spontaneous: no eligible channel', { guild: guildId });
+      return;
+    }
+
+    running.add(guildId);
+    log.info('spontaneous: firing a turn', { guild: guildId, channel: channel.id });
+    try {
+      const result = await turns.runTurn({ channel, mode: 'auto', chooseMode: makeChooseMode(cfg) });
+      log.info('spontaneous: turn finished', { guild: guildId, channel: channel.id, outcome: result.outcome });
+      if (result.outcome === 'not-now') {
+        schedule[guildId] = now() + between(REWAKE_MINUTES, rng) * MINUTE;
         store.state.markDirty();
-        log.info('spontaneous: no eligible channel', { guild: guildId });
-        continue;
       }
-
-      running.add(guildId);
-      log.info('spontaneous: firing a turn', { guild: guildId, channel: channel.id });
-      try {
-        const result = await turns.runTurn({ channel, mode: 'auto', chooseMode: makeChooseMode(cfg) });
-        log.info('spontaneous: turn finished', { guild: guildId, channel: channel.id, outcome: result.outcome });
-        if (result.outcome === 'not-now') {
-          schedule[guildId] = now() + between(REWAKE_MINUTES, rng) * MINUTE;
-          store.state.markDirty();
-        }
-      } catch (err) {
-        log.error('spontaneous: turn failed', { guild: guildId, error: err });
-      } finally {
-        running.delete(guildId);
-      }
+    } catch (err) {
+      log.error('spontaneous: turn failed', { guild: guildId, error: err });
+    } finally {
+      running.delete(guildId);
     }
   }
 
@@ -221,7 +217,7 @@ export function createSpontaneous({ hot, store, client, turns, rng = Math.random
     // Eavesdropping is a form of spontaneous speech: it needs both switches on.
     if (features.spontaneous === false || features.eavesdrop === false) return;
     if (normalized.self || normalized.bot) return;
-    if (!guildAllowed(channel.guild.id, config.bot)) return;
+    if (channel.guild.id !== getGuildId()) return;
 
     const t = now();
     if (!isActiveHour(localHour(t, config.bot.timezone), cfg.activeHours)) return;
