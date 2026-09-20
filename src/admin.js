@@ -3,10 +3,13 @@
 // without ever touching data/: live rules (prompts.local/rules.md, seeded
 // from prompts/rules.md), config overrides (config.local.json, hot-reloaded),
 // status, a manual poke of the spontaneous scheduler, and profile
-// inspection/deletion. This is the ONLY place in the project allowed to
-// delete a stored profile (via store.forgetUser). The tracked prompts/ layer
-// is never written at runtime — live corrections always land in the
-// untracked prompts.local/ layer.
+// inspection/deletion. This is the ONLY place in the project that ever
+// deletes stored memory, through the two functions store.js allows for it:
+// store.forgetUser (one profile) and store.wipeGuild (a whole guild's memory,
+// `/nep memory wipe`, gated by the served guild's exact name and refused
+// while a warm-up is running). The tracked prompts/ layer is never written at
+// runtime — live corrections always land in the untracked prompts.local/
+// layer.
 //
 // This module knows nothing about discord.js: `createAdmin(deps).run` takes
 // a `commandKey` (e.g. `'warmup.channel'`), a plain `args` object and a
@@ -412,6 +415,48 @@ export function createAdmin({ hot, store, client, spontaneous, calibrator, getGu
     return `Forgot ${userId}.`;
   }
 
+  /**
+   * A deliberate, owner-only clean start: wipes this guild's whole stored
+   * memory (store.wipeGuild) and resets warm-up progress with it, so a
+   * re-run never double-counts against old data. Runs only when `confirm`
+   * matches the served guild's name exactly (trimmed, case-sensitive) —
+   * otherwise nothing changes and the reply says what to type. Refused
+   * outright while a warm-up is running.
+   */
+  function cmdMemoryWipe(args, context) {
+    const guildId = resolvedGuildId(context);
+    if (!guildId) throw new Error('no guild resolved yet');
+
+    if (warmup && typeof warmup.status === 'function') {
+      let running = false;
+      try {
+        running = Boolean(warmup.status()?.running);
+      } catch {
+        running = false;
+      }
+      if (running) throw new Error('a warm-up is running — run /nep warmup stop first');
+    }
+
+    const guildName = client?.guilds?.cache?.get(guildId)?.name || guildId;
+    const confirm = String(args?.confirm ?? '').trim();
+    if (confirm !== guildName) {
+      return `This deletes all remembered members, server habits, channel map and analyzer lore for this server. To confirm, run again with confirm: ${guildName}`;
+    }
+
+    const counts = store.wipeGuild(guildId);
+    log.info('admin: memory wiped', counts);
+
+    return [
+      `Memory wiped for ${guildName}.`,
+      `users removed: ${counts.users}`,
+      `channels removed: ${counts.channels}`,
+      `lore removed: ${counts.loreRemoved} (kept: ${counts.loreKept})`,
+      `buffer messages cleared: ${counts.bufferMessages}`,
+      'Kept: owner lore, the media description cache, token calibration, the daily request count and the spontaneous schedule.',
+      'Warm-up progress was cleared. Next step: /nep warmup run.',
+    ].join('\n');
+  }
+
   function cmdMemoryAffinity(args, context) {
     const userId = args?.userId;
     if (!userId) throw new Error('a user is required');
@@ -698,6 +743,7 @@ function warmupLocalConfigPath() {
     'rule.remove': (args) => cmdRuleRemove(args),
     'memory.show': (args, context) => cmdMemoryShow(args, context),
     'memory.forget': (args, context) => cmdMemoryForget(args, context),
+    'memory.wipe': (args, context) => cmdMemoryWipe(args, context),
     'memory.affinity': (args, context) => cmdMemoryAffinity(args, context),
     'lore.add': (args, context) => cmdLoreAdd(args, context),
     'lore.list': (args, context) => cmdLoreList(args, context),

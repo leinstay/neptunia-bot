@@ -604,3 +604,131 @@ test('lore: persists across store instances', () => {
   assert.equal(entries.length, 1);
   assert.equal(entries[0].title, 'The Flood');
 });
+
+// --- wipeGuild --------------------------------------------------------------
+
+function seedGuild(store) {
+  store.touchUser('g1', 'u1', 'Alice', 1000);
+  store.touchUser('g1', 'u2', 'Bob', 1000);
+  store.updateGuild('g1', { patterns: 'μιμίδια' });
+  store.touchChannel('g1', 'c1', { name: 'general', category: null, topic: null }, 1000);
+  store.touchChannel('g1', 'c2', { name: 'random', category: null, topic: null }, 1000);
+  store.pushBuffer('g1', { text: 'hi' }, 100);
+  store.pushBuffer('g1', { text: 'there' }, 100);
+  store.setLore('g1', [{ title: 'The Flood', keys: ['flood'], text: 'It flooded once.' }], { source: 'analyzer', now: 1000 });
+  store.setLore('g1', [{ title: 'Founders Day', keys: ['founders'], text: 'Owner text.', always: true }], {
+    source: 'owner',
+    now: 1000,
+  });
+  const cache = store.getMediaCache('g1');
+  cache.a1 = { text: 'a cat', ts: 1000 };
+  store.markMediaCacheDirty('g1');
+  store.state.data.warmup = { done: false, channels: { c1: { batchesDone: 2 } } };
+  store.state.data.llmDay = '2026-09-20';
+  store.state.data.llmCount = 7;
+  store.state.markDirty();
+}
+
+test('wipeGuild: removes profiles, guild memory, channels, buffer and analyzer lore; keeps owner lore, media cache and non-warm-up state', () => {
+  const dir = tmpDataDir();
+  const storeA = createStore({ dataDir: dir });
+  seedGuild(storeA);
+  storeA.flush();
+
+  const counts = storeA.wipeGuild('g1');
+  assert.deepEqual(counts, { users: 2, channels: 2, loreRemoved: 1, loreKept: 1, bufferMessages: 2 });
+
+  // cache is immediately usable
+  assert.equal(storeA.getUser('g1', 'u1'), null);
+  assert.equal(storeA.getUser('g1', 'u2'), null);
+  assert.deepEqual(storeA.getGuild('g1'), { patterns: '', starters: '', injokes: [], self: [], updatedAt: null });
+  assert.deepEqual(storeA.listChannels('g1'), []);
+  assert.deepEqual(storeA.getBuffer('g1'), []);
+  const lore = storeA.getLore('g1');
+  assert.equal(lore.length, 1);
+  assert.equal(lore[0].title, 'Founders Day');
+  assert.equal(lore[0].source, 'owner');
+  assert.deepEqual(storeA.getMediaCache('g1'), { a1: { text: 'a cat', ts: 1000 } });
+  assert.equal(storeA.state.data.warmup, undefined);
+  assert.equal(storeA.state.data.llmDay, '2026-09-20');
+  assert.equal(storeA.state.data.llmCount, 7);
+
+  // disk agrees, verified with a fresh store instance on the same temp dir
+  const storeB = createStore({ dataDir: dir });
+  assert.equal(storeB.getUser('g1', 'u1'), null);
+  assert.equal(storeB.getUser('g1', 'u2'), null);
+  assert.deepEqual(storeB.getGuild('g1'), { patterns: '', starters: '', injokes: [], self: [], updatedAt: null });
+  assert.deepEqual(storeB.listChannels('g1'), []);
+  assert.deepEqual(storeB.getBuffer('g1'), []);
+  const loreB = storeB.getLore('g1');
+  assert.equal(loreB.length, 1);
+  assert.equal(loreB[0].title, 'Founders Day');
+  assert.deepEqual(storeB.getMediaCache('g1'), { a1: { text: 'a cat', ts: 1000 } });
+  assert.equal(storeB.state.data.warmup, undefined);
+  assert.equal(storeB.state.data.llmDay, '2026-09-20');
+  assert.equal(storeB.state.data.llmCount, 7);
+});
+
+test('wipeGuild: the store stays fully usable afterwards without a restart', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  seedGuild(store);
+  store.flush();
+  store.wipeGuild('g1');
+
+  const profile = store.touchUser('g1', 'u3', 'Carol', 2000);
+  assert.equal(profile.messageCount, 1);
+  const guild = store.getGuild('g1');
+  assert.equal(guild.patterns, '');
+  store.flush();
+
+  const storeB = createStore({ dataDir: dir });
+  assert.equal(storeB.getUser('g1', 'u3').names[0], 'Carol');
+});
+
+test('wipeGuild: safe when nothing was ever stored for the guild', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  const counts = store.wipeGuild('never-seen');
+  assert.deepEqual(counts, { users: 0, channels: 0, loreRemoved: 0, loreKept: 0, bufferMessages: 0 });
+  assert.doesNotThrow(() => store.touchUser('never-seen', 'u1', 'Dee', 1000));
+});
+
+test('wipeGuild: keepOwnerLore false also removes owner lore', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  seedGuild(store);
+  store.flush();
+
+  const counts = store.wipeGuild('g1', { keepOwnerLore: false });
+  assert.equal(counts.loreRemoved, 2);
+  assert.equal(counts.loreKept, 0);
+  assert.deepEqual(store.getLore('g1'), []);
+});
+
+test('wipeGuild: keepMediaCache false also clears the media cache, on disk too', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  seedGuild(store);
+  store.flush();
+
+  store.wipeGuild('g1', { keepMediaCache: false });
+  assert.deepEqual(store.getMediaCache('g1'), {});
+
+  const storeB = createStore({ dataDir: dir });
+  assert.deepEqual(storeB.getMediaCache('g1'), {});
+});
+
+test('wipeGuild: does not touch another guild\'s memory', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  seedGuild(store);
+  store.touchUser('g2', 'u9', 'Eve', 1000);
+  store.flush();
+
+  store.wipeGuild('g1');
+
+  assert.ok(store.getUser('g2', 'u9'));
+  const storeB = createStore({ dataDir: dir });
+  assert.ok(storeB.getUser('g2', 'u9'));
+});

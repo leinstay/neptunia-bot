@@ -147,6 +147,19 @@ export function buildCommandTree(commandName) {
                 { type: STRING, name: 'reason', description: 'Why (only used together with score).', required: false },
               ],
             },
+            {
+              type: SUBCOMMAND,
+              name: 'wipe',
+              description: 'Delete ALL remembered members, server habits, channel map and analyzer lore for this server.',
+              options: [
+                {
+                  type: STRING,
+                  name: 'confirm',
+                  description: "Type this server's exact name to confirm.",
+                  required: true,
+                },
+              ],
+            },
           ],
         },
         {
@@ -385,6 +398,7 @@ const OPTION_MAPPERS = {
   'rule.remove': (options) => ({ number: options.getInteger('number', true) }),
   'memory.show': (options) => ({ userId: options.getUser('user', true).id }),
   'memory.forget': (options) => ({ userId: options.getUser('user', true).id }),
+  'memory.wipe': (options) => ({ confirm: options.getString('confirm', true) }),
   'memory.affinity': (options) => ({
     userId: options.getUser('user', true).id,
     score: options.getInteger('score') ?? undefined,

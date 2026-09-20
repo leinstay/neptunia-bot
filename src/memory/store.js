@@ -10,6 +10,10 @@
 // Everything is cached in memory, marked dirty on change and flushed on a
 // timer and on shutdown. Writes are atomic (temp file + rename) so a crash
 // mid-write never corrupts a profile.
+//
+// `forgetUser` and `wipeGuild` are the only two functions in the whole
+// project allowed to delete stored memory (see src/admin.js, the owner-only
+// `/nep memory forget` and `/nep memory wipe` commands).
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -96,6 +100,35 @@ export function createStore({ dataDir }) {
     return item;
   }
 
+  /** Every id found under `dir`'s `.json` files, on disk or only cached (no side effects on the cache). */
+  function idsUnder(dir) {
+    const ids = new Set();
+    try {
+      for (const name of fs.readdirSync(dir)) {
+        if (name.endsWith('.json')) ids.add(name.slice(0, -5));
+      }
+    } catch {
+      // the directory does not exist yet
+    }
+    const prefix = dir + path.sep;
+    for (const file of entries.keys()) {
+      if (file.startsWith(prefix)) ids.add(path.basename(file, '.json'));
+    }
+    return [...ids];
+  }
+
+  function flushAll() {
+    for (const [file, item] of entries) {
+      if (!item.dirty) continue;
+      try {
+        writeJsonAtomic(file, item.value);
+        item.dirty = false;
+      } catch (err) {
+        log.error('store: flush failed', { file, error: err });
+      }
+    }
+  }
+
   const guildDir = (guildId) => path.join(dataDir, 'guilds', String(guildId));
   const userFile = (guildId, userId) => path.join(guildDir(guildId), 'users', `${userId}.json`);
   const guildFile = (guildId) => path.join(guildDir(guildId), 'guild.json');
@@ -179,6 +212,7 @@ export function createStore({ dataDir }) {
       return next;
     },
 
+    /** Delete one member's profile, cache and disk alike. See also `wipeGuild` below. */
     forgetUser(guildId, userId) {
       const file = userFile(guildId, userId);
       entries.delete(file);
@@ -343,16 +377,79 @@ export function createStore({ dataDir }) {
       item.dirty = true;
     },
 
-    flush() {
-      for (const [file, item] of entries) {
-        if (!item.dirty) continue;
-        try {
-          writeJsonAtomic(file, item.value);
-          item.dirty = false;
-        } catch (err) {
-          log.error('store: flush failed', { file, error: err });
-        }
+    /**
+     * A deliberate, owner-only clean start for one guild's memory (see
+     * src/admin.js `/nep memory wipe`). Together with `forgetUser` above,
+     * this is the ONLY other place in the project allowed to delete stored
+     * memory. Removes, from both the cache and disk: every user profile
+     * (affinity and episodes included), `guild.json`, every channel entry,
+     * the live observation buffer, and lorebook entries whose `source` is
+     * `'analyzer'` (every entry, owner included, when `keepOwnerLore` is
+     * false). Keeps, by default, owner lore (`source: 'owner'`) and the
+     * media description cache, and always keeps everything in `state.json`
+     * except `state.warmup`, which is cleared so the next warm-up run
+     * starts from the top — token calibration, the daily LLM counter and
+     * the spontaneous schedule survive untouched. Safe when some files
+     * never existed; the store stays fully usable afterwards (a following
+     * `touchUser`/`getGuild` works and persists), no restart required.
+     * @param {string} guildId
+     * @param {{ keepOwnerLore?: boolean, keepMediaCache?: boolean }} [opts]
+     * @returns {{ users: number, channels: number, loreRemoved: number, loreKept: number, bufferMessages: number }}
+     */
+    wipeGuild(guildId, { keepOwnerLore = true, keepMediaCache = true } = {}) {
+      const userIds = idsUnder(path.join(guildDir(guildId), 'users'));
+      for (const id of userIds) {
+        const file = userFile(guildId, id);
+        entries.delete(file);
+        fs.rmSync(file, { force: true });
       }
+
+      const channelIds = idsUnder(channelsDir(guildId));
+      for (const id of channelIds) {
+        const file = channelFile(guildId, id);
+        entries.delete(file);
+        fs.rmSync(file, { force: true });
+      }
+
+      {
+        const file = guildFile(guildId);
+        entries.delete(file);
+        fs.rmSync(file, { force: true });
+      }
+
+      const bufferFileName = bufferFile(guildId);
+      const bufferMessages = entry(bufferFileName, () => []).value.length;
+      entries.delete(bufferFileName);
+      fs.rmSync(bufferFileName, { force: true });
+
+      const loreItem = entry(loreFile(guildId), () => []);
+      const storedLore = loreItem.value;
+      const keptLore = keepOwnerLore ? storedLore.filter((e) => e.source === 'owner') : [];
+      const loreRemoved = storedLore.length - keptLore.length;
+      const loreKept = keptLore.length;
+      if (loreRemoved > 0) {
+        loreItem.value = keptLore;
+        loreItem.dirty = true;
+      }
+
+      if (!keepMediaCache) {
+        const file = mediaCacheFile(guildId);
+        entries.delete(file);
+        fs.rmSync(file, { force: true });
+      }
+
+      if (stateEntry.value.warmup !== undefined) {
+        delete stateEntry.value.warmup;
+        stateEntry.dirty = true;
+      }
+
+      flushAll();
+
+      return { users: userIds.length, channels: channelIds.length, loreRemoved, loreKept, bufferMessages };
+    },
+
+    flush() {
+      flushAll();
     },
   };
 

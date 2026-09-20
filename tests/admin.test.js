@@ -225,6 +225,11 @@ function makeStore() {
     listGuilds() {
       return [];
     },
+    wipeCalls: [],
+    wipeGuild(guildId, opts) {
+      this.wipeCalls.push([String(guildId), opts]);
+      return { users: 2, channels: 1, loreRemoved: 3, loreKept: 1, bufferMessages: 5 };
+    },
   };
 }
 
@@ -580,6 +585,88 @@ test('run: memory.show/memory.forget report an error before the guild has been r
   const { admin } = makeAdmin(rootDir, { getGuildId: () => null });
 
   await assert.rejects(() => admin.run('memory.show', { userId: '123' }, {}), /no guild resolved yet/);
+});
+
+// ---------------------------------------------------------------------------
+// memory.wipe
+// ---------------------------------------------------------------------------
+
+function clientWithGuild(guildId, name) {
+  return { guilds: { cache: new Map([[guildId, { id: guildId, name }]]) } };
+}
+
+test('run: memory.wipe with the wrong confirmation text changes nothing and says what to type', async () => {
+  const rootDir = makeRoot();
+  const client = clientWithGuild('g1', 'The Server');
+  const { admin, store } = makeAdmin(rootDir, { client });
+
+  const result = await admin.run('memory.wipe', { confirm: 'nope' }, { guildId: 'g1' });
+
+  assert.equal(store.wipeCalls.length, 0);
+  assert.ok(result.includes('confirm: The Server'));
+});
+
+test('run: memory.wipe with a missing confirmation changes nothing', async () => {
+  const rootDir = makeRoot();
+  const client = clientWithGuild('g1', 'The Server');
+  const { admin, store } = makeAdmin(rootDir, { client });
+
+  const result = await admin.run('memory.wipe', {}, { guildId: 'g1' });
+
+  assert.equal(store.wipeCalls.length, 0);
+  assert.ok(result.includes('The Server'));
+});
+
+test('run: memory.wipe is refused while a warm-up is running', async () => {
+  const rootDir = makeRoot();
+  const client = clientWithGuild('g1', 'The Server');
+  const warmup = fakeWarmup({
+    status: {
+      enabled: true, done: false, paused: false, aborted: false, running: true, tokensUsed: 0, maxTokens: 1000,
+      requests: 0, channelsDone: 0, channelsTotal: 1, messagesAnalyzed: 0, skippedMessages: 0, primaryChannelId: '',
+      onlyListed: false, channels: [],
+    },
+  });
+  const { admin, store } = makeAdmin(rootDir, { client, warmup });
+
+  await assert.rejects(
+    () => admin.run('memory.wipe', { confirm: 'The Server' }, { guildId: 'g1' }),
+    /warm-up is running.*\/nep warmup stop/,
+  );
+  assert.equal(store.wipeCalls.length, 0);
+});
+
+test('run: memory.wipe with the exact guild name wipes the guild and reports the counts', async () => {
+  const rootDir = makeRoot();
+  const client = clientWithGuild('g1', 'The Server');
+  const { admin, store } = makeAdmin(rootDir, { client });
+
+  const result = await admin.run('memory.wipe', { confirm: 'The Server' }, { guildId: 'g1' });
+
+  assert.deepEqual(store.wipeCalls, [['g1', undefined]]);
+  assert.ok(result.includes('users removed: 2'));
+  assert.ok(result.includes('channels removed: 1'));
+  assert.ok(result.includes('lore removed: 3 (kept: 1)'));
+  assert.ok(result.includes('buffer messages cleared: 5'));
+  assert.ok(result.includes('/nep warmup run'));
+});
+
+test('run: memory.wipe trims the confirmation text but stays case-sensitive', async () => {
+  const rootDir = makeRoot();
+  const client = clientWithGuild('g1', 'The Server');
+  const { admin, store } = makeAdmin(rootDir, { client });
+
+  await admin.run('memory.wipe', { confirm: '  The Server  ' }, { guildId: 'g1' });
+  assert.equal(store.wipeCalls.length, 1);
+
+  await admin.run('memory.wipe', { confirm: 'the server' }, { guildId: 'g1' });
+  assert.equal(store.wipeCalls.length, 1, 'a case mismatch must not run the wipe');
+});
+
+test('run: memory.wipe requires a resolved guild', async () => {
+  const rootDir = makeRoot();
+  const { admin } = makeAdmin(rootDir, { getGuildId: () => null });
+  await assert.rejects(() => admin.run('memory.wipe', { confirm: 'anything' }, {}), /no guild resolved yet/);
 });
 
 test('run: memory.show also prints the stored episodes (date, weight, what, quote)', async () => {

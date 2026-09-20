@@ -116,7 +116,7 @@ test('buildCommandTree: memory group (show/forget/affinity)', () => {
   assert.equal(memory.type, 2);
   assert.deepEqual(
     memory.options.map((o) => o.name),
-    ['show', 'forget', 'affinity'],
+    ['show', 'forget', 'affinity', 'wipe'],
   );
 
   const show = findOption(memory.options, 'show');
@@ -133,6 +133,12 @@ test('buildCommandTree: memory group (show/forget/affinity)', () => {
   assert.equal(score.max_value, 100);
   const reason = findOption(affinity.options, 'reason');
   assert.equal(reason.required, false);
+
+  const wipe = findOption(memory.options, 'wipe');
+  assert.equal(wipe.type, 1); // SUBCOMMAND
+  const confirm = findOption(wipe.options, 'confirm');
+  assert.equal(confirm.type, 3); // STRING
+  assert.equal(confirm.required, true);
 });
 
 test('buildCommandTree: lore group (add/list/show/remove)', () => {
@@ -459,6 +465,21 @@ test('interaction handler: memory.show maps the user option to userId', async ()
 
   assert.equal(admin.runCalls[0][0], 'memory.show');
   assert.deepEqual(admin.runCalls[0][1], { userId: 'target1' });
+});
+
+test('interaction handler: memory.wipe maps the confirm string option straight through', async () => {
+  const admin = fakeAdmin();
+  const handler = createInteractionHandler({ hot: baseHot(), admin, getGuildId: () => 'g1' });
+
+  const interaction = fakeInteraction({
+    group: 'memory',
+    subcommand: 'wipe',
+    optionValues: { confirm: 'The Server' },
+  });
+  await handler(interaction);
+
+  assert.equal(admin.runCalls[0][0], 'memory.wipe');
+  assert.deepEqual(admin.runCalls[0][1], { confirm: 'The Server' });
 });
 
 test('interaction handler: lore.add maps title/keys/text/always straight through', async () => {
