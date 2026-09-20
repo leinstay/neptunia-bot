@@ -13,6 +13,7 @@
 import { fitSections } from '../llm/budget.js';
 import { estimateTokens } from '../llm/tokens.js';
 import { computeTempo, fill, formatNow, formatTranscript, renderTempo, renderTranscript } from '../discord/format.js';
+import { affinityBand } from '../memory/affinity.js';
 
 const TAG_OVERHEAD = 60;
 
@@ -20,12 +21,27 @@ function block(tag, body) {
   return body ? `<${tag}>\n${body}\n</${tag}>` : '';
 }
 
-/** One person's memory as prompt text; '' when nothing has been learned yet. */
-export function renderProfile(profile, labels, { interlocutor = false } = {}) {
+/**
+ * One person's memory as prompt text; '' when nothing has been learned yet.
+ * When `relationships` is on and the profile carries a non-neutral (non-zero
+ * score or non-empty reason) affinity, an attitude line is inserted right
+ * after the heading — even when it ends up being the profile's only content,
+ * since the persona's attitude toward someone is useful on its own.
+ */
+export function renderProfile(profile, labels, { interlocutor = false, relationships = false } = {}) {
   if (!profile) return '';
   const p = labels.profile;
   const name = profile.names?.[0] ?? profile.id;
   const lines = [];
+
+  const affinity = profile.affinity;
+  const hasAffinity = relationships && affinity && (affinity.score !== 0 || Boolean(affinity.reason));
+  if (hasAffinity) {
+    lines.push(
+      fill(p.affinity, { score: affinity.score, band: labels.affinity?.bands?.[affinityBand(affinity.score)], reason: affinity.reason }),
+    );
+  }
+
   if (profile.names?.length > 1) lines.push(fill(p.formerNames, { names: profile.names.slice(1).join(', ') }));
   if (profile.character) lines.push(fill(p.character, { text: profile.character }));
   if (profile.interests) lines.push(fill(p.interests, { text: profile.interests }));
@@ -82,6 +98,7 @@ export function buildRequest(input) {
   const { config, prompts, calibrator, mode, now, selfName, history, neighbors, trigger, triggerKind } = input;
   const labels = requireLabels(prompts);
   const { timezone } = config.bot;
+  const relationships = config.features?.relationships !== false;
   const formatOptions = {
     timezone,
     gapMinutes: config.context.gapMarkerMinutes,
@@ -131,12 +148,16 @@ export function buildRequest(input) {
       {
         name: 'interlocutor',
         cap: caps.interlocutor,
-        items: [renderProfile(input.interlocutor, labels, { interlocutor: true })].filter(Boolean),
+        items: [renderProfile(input.interlocutor, labels, { interlocutor: true, relationships })].filter(Boolean),
       },
       { name: 'aboutChat', cap: caps.aboutChat, items: aboutChatItems(input.guildMemory, labels) },
       { name: 'self', cap: caps.aboutChat, items: (input.guildMemory?.self ?? []).map((fact) => `- ${fact}`) },
       { name: 'chat', keep: 'newest', items: chatItems.map((item) => item.text) },
-      { name: 'people', cap: caps.people, items: input.otherProfiles.map((profile) => renderProfile(profile, labels)).filter(Boolean) },
+      {
+        name: 'people',
+        cap: caps.people,
+        items: input.otherProfiles.map((profile) => renderProfile(profile, labels, { relationships })).filter(Boolean),
+      },
       { name: 'neighbors', cap: caps.neighbors, items: neighborItems },
     ],
     limit,

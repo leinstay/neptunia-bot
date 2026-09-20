@@ -4,7 +4,7 @@
 // the prompt contract.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildRequest } from '../src/behavior/prompt.js';
+import { buildRequest, renderProfile } from '../src/behavior/prompt.js';
 import { estimateTokens } from '../src/llm/tokens.js';
 import { labels } from './fixtures/labels.js';
 
@@ -265,6 +265,87 @@ test('buildRequest: sanity check on estimateTokens used for the cost function st
 });
 
 // --- language independence --------------------------------------------------
+
+// --- renderProfile: relationships / affinity ---------------------------------
+
+test('renderProfile: relationships off never renders an attitude line, even with a non-zero score', () => {
+  const profile = { id: 'p1', names: ['Carl'], character: 'calm', affinity: { score: 80, reason: 'saved my day', history: [] } };
+  const text = renderProfile(profile, labels, { relationships: false });
+  assert.ok(!text.includes('attitude:'));
+});
+
+test('renderProfile: relationships on renders the attitude line right after the heading', () => {
+  const profile = { id: 'p1', names: ['Carl'], character: 'calm', affinity: { score: 80, reason: 'saved my day', history: [] } };
+  const text = renderProfile(profile, labels, { relationships: true });
+  const lines = text.split('\n');
+  assert.equal(lines[0], '## Carl');
+  assert.equal(lines[1], 'attitude: 80 (devoted) — saved my day');
+});
+
+test('renderProfile: the band label is chosen from labels.affinity.bands, thresholds fixed in code', () => {
+  const profile = { id: 'p1', names: ['Carl'], affinity: { score: -70, reason: 'burned a bridge', history: [] } };
+  const text = renderProfile(profile, labels, { relationships: true });
+  assert.ok(text.includes('attitude: -70 (hostile) — burned a bridge'));
+});
+
+test('renderProfile: works with a non-English labels object for the attitude line', () => {
+  const ruLabels = {
+    ...labels,
+    profile: { ...labels.profile, affinity: 'отношение: {score} ({band}) — {reason}' },
+    affinity: { bands: { ...labels.affinity.bands, warm: 'тепло' } },
+  };
+  const profile = { id: 'p1', names: ['Карл'], affinity: { score: 10, reason: 'помог', history: [] } };
+  const text = renderProfile(profile, ruLabels, { relationships: true });
+  assert.ok(text.includes('отношение: 10 (тепло) — помог'));
+});
+
+test('renderProfile: a neutral score with no reason gets no attitude line', () => {
+  const profile = { id: 'p1', names: ['Carl'], character: 'calm', affinity: { score: 0, reason: '', history: [] } };
+  const text = renderProfile(profile, labels, { relationships: true });
+  assert.ok(!text.includes('attitude:'));
+});
+
+test('renderProfile: a zero score with a non-empty reason still gets an attitude line', () => {
+  const profile = { id: 'p1', names: ['Carl'], character: 'calm', affinity: { score: 0, reason: 'used to dislike them, now unsure', history: [] } };
+  const text = renderProfile(profile, labels, { relationships: true });
+  assert.ok(text.includes('attitude: 0 (neutral) — used to dislike them, now unsure'));
+});
+
+test('renderProfile: a profile whose only content is the attitude line is still rendered', () => {
+  const profile = { id: 'p1', names: ['Carl'], affinity: { score: -30, reason: 'annoying', history: [] } };
+  const text = renderProfile(profile, labels, { relationships: true, interlocutor: false });
+  assert.equal(text, '## Carl\nattitude: -30 (dislike) — annoying');
+  assert.ok(!text.includes(labels.profile.unknown));
+});
+
+test('renderProfile: a profile with no affinity at all (pre-relationships data) renders as before', () => {
+  const profile = { id: 'p1', names: ['Carl'], character: 'calm' };
+  const text = renderProfile(profile, labels, { relationships: true });
+  assert.equal(text, '## Carl\ncharacter: calm');
+});
+
+test('buildRequest: relationships default to on (features.relationships missing counts as on)', () => {
+  const trigger = makeMessage(1, NOW - MIN, { authorName: 'Alice' });
+  const interlocutor = { id: 'author-1', names: ['Alice'], affinity: { score: 40, reason: 'fun to talk to', history: [] } };
+  const config = fakeConfig();
+  delete config.features.relationships;
+  const request = buildRequest(
+    baseInput({ config, history: [trigger], trigger, triggerKind: 'mention', interlocutor }),
+  );
+  const user = request.messages[1].content;
+  assert.ok(user.includes('attitude: 40 (fond) — fun to talk to'));
+});
+
+test('buildRequest: features.relationships=false hides the attitude line entirely', () => {
+  const trigger = makeMessage(1, NOW - MIN, { authorName: 'Alice' });
+  const interlocutor = { id: 'author-1', names: ['Alice'], affinity: { score: 40, reason: 'fun to talk to', history: [] } };
+  const config = fakeConfig({ features: { relationships: false } });
+  const request = buildRequest(
+    baseInput({ config, history: [trigger], trigger, triggerKind: 'mention', interlocutor }),
+  );
+  const user = request.messages[1].content;
+  assert.ok(!user.includes('attitude:'));
+});
 
 test('buildRequest: a non-English labels object drives the same blocks, proving nothing is language-bound', () => {
   const ruLabels = {

@@ -110,10 +110,21 @@ function scripted(values) {
   };
 }
 
-function makeHandler({ config, turns, spontaneous, memory, admin, tagHistory, rng, client } = {}) {
+function fakeStore(profiles = {}) {
+  const calls = [];
+  return {
+    getUser: (guildId, userId) => {
+      calls.push([guildId, userId]);
+      return profiles[userId] ?? null;
+    },
+    getUserCalls: calls,
+  };
+}
+
+function makeHandler({ config, turns, spontaneous, memory, admin, tagHistory, rng, client, store } = {}) {
   return createMessageHandler({
     hot: { config: config ?? baseConfig() },
-    store: {},
+    store: store ?? fakeStore(),
     client: client ?? fakeClient(),
     turns: turns ?? fakeTurns(),
     spontaneous: spontaneous ?? fakeSpontaneous(),
@@ -508,4 +519,86 @@ test('a config with no "features" key at all behaves as if every switch were on'
   await Promise.resolve();
 
   assert.equal(called, true);
+});
+
+// ---------------------------------------------------------------------------
+// relationships: `direct` on observe, affinityScore into decideMention
+
+test('events: a triggering message is observed with direct: true', async () => {
+  const memory = fakeMemory();
+  const handler = makeHandler({ memory, rng: scripted([0.99]) });
+
+  const message = fakeMessage({
+    cleanContent: 'привет',
+    mentions: { users: new Map([['self1', { id: 'self1' }]]) },
+  });
+  await handler(message);
+  await Promise.resolve();
+
+  assert.equal(memory.observeCalls.length, 1);
+  assert.deepEqual(memory.observeCalls[0][2], { direct: true });
+});
+
+test('events: a non-triggering message is observed with direct: false', async () => {
+  const memory = fakeMemory();
+  const spontaneous = fakeSpontaneous();
+  const handler = makeHandler({ memory, spontaneous });
+
+  const message = fakeMessage({ cleanContent: 'просто сообщение без триггера' });
+  await handler(message);
+
+  assert.equal(memory.observeCalls.length, 1);
+  assert.deepEqual(memory.observeCalls[0][2], { direct: false });
+});
+
+test('events: affinityScore is read from the caller\'s stored profile and passed to decideMention', async () => {
+  let seenArgs = null;
+  const turns = fakeTurns({
+    runTurn: async (args) => {
+      seenArgs = args;
+      return { outcome: 'spoke' };
+    },
+  });
+  const store = fakeStore({ u1: { affinity: { score: -42 } } });
+  const handler = makeHandler({ turns, store, rng: scripted([0.99]) });
+
+  const message = fakeMessage({
+    cleanContent: 'привет',
+    mentions: { users: new Map([['self1', { id: 'self1' }]]) },
+  });
+  await handler(message);
+  await Promise.resolve();
+
+  assert.ok(seenArgs, 'expected the ignore-chance to allow the turn');
+  assert.ok(store.getUserCalls.some(([guildId, userId]) => guildId === 'g1' && userId === 'u1'));
+});
+
+test('features.relationships=false: affinityScore is never looked up or passed', async () => {
+  const store = fakeStore({ u1: { affinity: { score: -100 } } });
+  const config = baseConfig({ features: { relationships: false } });
+  const handler = makeHandler({ config, store, rng: scripted([0.99]) });
+
+  const message = fakeMessage({
+    cleanContent: 'привет',
+    mentions: { users: new Map([['self1', { id: 'self1' }]]) },
+  });
+  await handler(message);
+  await Promise.resolve();
+
+  assert.equal(store.getUserCalls.length, 0, 'store.getUser must not be called when relationships is off');
+});
+
+test('features.memory=false: affinityScore is never looked up even when relationships is on', async () => {
+  const store = fakeStore({ u1: { affinity: { score: -100 } } });
+  const config = baseConfig({ features: { memory: false } });
+  const handler = makeHandler({ config, store, rng: scripted([0.99]) });
+
+  const message = fakeMessage({
+    cleanContent: 'привет',
+    mentions: { users: new Map([['self1', { id: 'self1' }]]) },
+  });
+  await handler(message);
+  await Promise.resolve();
+
+  assert.equal(store.getUserCalls.length, 0);
 });

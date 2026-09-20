@@ -14,6 +14,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { emptyAffinity, affinityBand } from './memory/affinity.js';
 
 const FORBIDDEN_SEGMENTS = new Set(['__proto__', 'constructor', 'prototype']);
 const REPLY_CHUNK_CHARS = 1900;
@@ -233,6 +234,7 @@ const HELP_TEXT = [
   '  status                               model, calibration, quotas, per-guild memory',
   '  poke [interject|initiate] [channel]  force a spontaneous action',
   '  memory <@mention|userId>             show a stored profile',
+  '  affinity <@mention|userId> [score] [reason…]  show, or set (-100..100) an attitude',
   '  forget <@mention|userId>             delete a stored profile',
 ].join('\n');
 
@@ -428,6 +430,69 @@ export function createAdmin({ hot, store, client, spontaneous, calibrator }) {
     throw new Error(`no profile for ${userId} in any guild`);
   }
 
+  /** Find the profile of `userId`, in `message.guild` or, in a DM, searching every known guild. */
+  function findProfile(userId, message) {
+    if (message.guild) {
+      const profile = store.getUser(message.guild.id, userId);
+      return profile ? { guildId: message.guild.id, profile } : null;
+    }
+    for (const guild of client.guilds.cache.values()) {
+      const profile = store.getUser(guild.id, userId);
+      if (profile) return { guildId: guild.id, profile };
+    }
+    return null;
+  }
+
+  function cmdAffinity(args, message) {
+    const spaceIdx = args.search(/\s/);
+    const firstArg = spaceIdx === -1 ? args : args.slice(0, spaceIdx);
+    const rest = spaceIdx === -1 ? '' : args.slice(spaceIdx + 1).trim();
+    const userId = extractUserId(firstArg);
+    if (!userId) throw new Error('usage: affinity <@mention|userId> [score] [reason…]');
+
+    if (!rest) {
+      const found = findProfile(userId, message);
+      if (!found) throw new Error(`no profile for ${userId} in ${message.guild ? 'this guild' : 'any guild'}`);
+      const affinity = found.profile.affinity ?? emptyAffinity();
+      const history = (affinity.history ?? [])
+        .slice(-5)
+        .map((h) => `${h.ts} ${h.delta >= 0 ? '+' : ''}${h.delta} -> ${h.score}${h.reason ? `: ${h.reason}` : ''}`)
+        .join('\n');
+      return [
+        `score: ${affinity.score}`,
+        `band: ${affinityBand(affinity.score)}`,
+        `reason: ${affinity.reason || '-'}`,
+        history ? `history:\n${history}` : 'history: (empty)',
+      ].join('\n');
+    }
+
+    const scoreSpaceIdx = rest.search(/\s/);
+    const scoreArg = (scoreSpaceIdx === -1 ? rest : rest.slice(0, scoreSpaceIdx)).trim();
+    const reasonArg = scoreSpaceIdx === -1 ? '' : rest.slice(scoreSpaceIdx + 1).trim();
+    const score = Number.parseInt(scoreArg, 10);
+    if (!Number.isInteger(score) || String(score) !== scoreArg || score < -100 || score > 100) {
+      throw new Error('score must be an integer between -100 and 100');
+    }
+
+    let guildId;
+    if (message.guild) {
+      guildId = message.guild.id;
+    } else {
+      const found = findProfile(userId, message);
+      if (!found) throw new Error(`no profile for ${userId} in any guild`);
+      guildId = found.guildId;
+    }
+
+    const current = store.getUser(guildId, userId)?.affinity?.score ?? 0;
+    const relCfg = hot.config?.relationships ?? {};
+    const affinity = store.adjustAffinity(guildId, userId, score - current, reasonArg || 'set by owner', {
+      maxDelta: Infinity, // the owner's explicit override bypasses maxDeltaPerUpdate
+      historySize: relCfg.historySize ?? 10,
+      now: Date.now(),
+    });
+    return `Set affinity for ${userId} in guild ${guildId} to ${affinity.score} (${affinityBand(affinity.score)}).`;
+  }
+
   function cmdForget(args, message) {
     const userId = extractUserId(args);
     if (!userId) throw new Error('usage: forget <@mention|userId>');
@@ -459,6 +524,7 @@ export function createAdmin({ hot, store, client, spontaneous, calibrator }) {
     status: () => cmdStatus(),
     poke: (args, message) => cmdPoke(args, message),
     memory: (args, message) => cmdMemory(args, message),
+    affinity: (args, message) => cmdAffinity(args, message),
     forget: (args, message) => cmdForget(args, message),
   };
 

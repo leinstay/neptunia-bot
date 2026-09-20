@@ -6,6 +6,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createStore } from '../src/memory/store.js';
+import { emptyAffinity } from '../src/memory/affinity.js';
 
 function tmpDataDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'nep-store-'));
@@ -219,4 +220,68 @@ test('countUsers: returns 0 when the guild has no users directory yet', () => {
   const dir = tmpDataDir();
   const store = createStore({ dataDir: dir });
   assert.equal(store.countUsers('unknown-guild'), 0);
+});
+
+// --- affinity ---------------------------------------------------------------
+
+test('emptyProfile: a fresh profile starts with a neutral affinity', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  const profile = store.touchUser('g1', 'u1', 'Alice', 1000);
+  assert.deepEqual(profile.affinity, emptyAffinity());
+});
+
+test('adjustAffinity: applies a delta to a fresh profile and returns the new affinity', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  store.touchUser('g1', 'u1', 'Alice', 1000);
+  const affinity = store.adjustAffinity('g1', 'u1', 10, 'was kind', { maxDelta: 15, historySize: 10, now: 1000 });
+  assert.equal(affinity.score, 10);
+  assert.equal(affinity.reason, 'was kind');
+  assert.equal(store.getUser('g1', 'u1').affinity.score, 10);
+});
+
+test('adjustAffinity: creates the affinity object for a profile written before this feature existed', () => {
+  const dir = tmpDataDir();
+  const guildDir = path.join(dir, 'guilds', 'g1', 'users');
+  fs.mkdirSync(guildDir, { recursive: true });
+  // A pre-relationships profile on disk: no `affinity` key at all.
+  fs.writeFileSync(path.join(guildDir, 'u1.json'), JSON.stringify({ id: 'u1', names: ['Alice'], messageCount: 3 }));
+
+  const store = createStore({ dataDir: dir });
+  const before = store.getUser('g1', 'u1');
+  assert.equal(before.affinity, undefined);
+
+  const affinity = store.adjustAffinity('g1', 'u1', 5, 'welcomed back', { maxDelta: 15, historySize: 10, now: 1000 });
+  assert.equal(affinity.score, 5);
+  assert.equal(store.getUser('g1', 'u1').affinity.score, 5);
+  assert.equal(store.getUser('g1', 'u1').names[0], 'Alice', 'the rest of the old profile survives untouched');
+});
+
+test('updateUser: cannot overwrite affinity via LLM-extracted fields', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  store.touchUser('g1', 'u1', 'Alice', 1000);
+  store.adjustAffinity('g1', 'u1', 20, 'liked', { maxDelta: 30, historySize: 10, now: 1000 });
+
+  store.updateUser('g1', 'u1', { character: 'chatty', affinity: { score: -100, reason: 'hostile takeover attempt' } });
+
+  const profile = store.getUser('g1', 'u1');
+  assert.equal(profile.character, 'chatty');
+  assert.equal(profile.affinity.score, 20, 'affinity must survive an updateUser call untouched');
+  assert.equal(profile.affinity.reason, 'liked');
+});
+
+test('adjustAffinity: persists across store instances', () => {
+  const dir = tmpDataDir();
+  const storeA = createStore({ dataDir: dir });
+  storeA.touchUser('g1', 'u1', 'Alice', 1000);
+  storeA.adjustAffinity('g1', 'u1', 12, 'nice chat', { maxDelta: 15, historySize: 10, now: 1000 });
+  storeA.flush();
+
+  const storeB = createStore({ dataDir: dir });
+  const affinity = storeB.getUser('g1', 'u1').affinity;
+  assert.equal(affinity.score, 12);
+  assert.equal(affinity.reason, 'nice chat');
+  assert.equal(affinity.history.length, 1);
 });

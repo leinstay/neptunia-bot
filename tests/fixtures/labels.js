@@ -46,6 +46,18 @@ export const labels = {
     relationship: 'relationship with you: {text}',
     unknown: 'you barely know anything about this person yet',
     messageCount: 'messages you have seen from them: {count}',
+    affinity: 'attitude: {score} ({band}) — {reason}',
+  },
+  affinity: {
+    bands: {
+      hostile: 'hostile',
+      dislike: 'dislike',
+      cool: 'cool',
+      neutral: 'neutral',
+      warm: 'warm',
+      fond: 'fond',
+      devoted: 'devoted',
+    },
   },
   aboutChat: {
     patterns: 'how people talk here: {text}',

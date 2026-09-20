@@ -13,6 +13,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { log } from '../log.js';
+import { emptyAffinity, applyDelta } from './affinity.js';
 
 function readJson(file, fallback) {
   try {
@@ -48,6 +49,7 @@ export function emptyProfile(id) {
     style: '',
     details: [],
     relationship: '',
+    affinity: emptyAffinity(),
     updatedAt: null,
   };
 }
@@ -106,12 +108,27 @@ export function createStore({ dataDir }) {
       return profile;
     },
 
-    /** Merge LLM-extracted fields into a profile. */
+    /**
+     * Merge LLM-extracted fields into a profile. `affinity` is never taken
+     * from here — it only ever changes through `adjustAffinity`, which keeps
+     * its clamping and history bookkeeping in one place.
+     */
     updateUser(guildId, userId, fields) {
       const item = entry(userFile(guildId, userId), () => emptyProfile(String(userId)));
-      Object.assign(item.value, fields, { updatedAt: new Date().toISOString() });
+      const { affinity, ...safeFields } = fields ?? {};
+      Object.assign(item.value, safeFields, { updatedAt: new Date().toISOString() });
       item.dirty = true;
       return item.value;
+    },
+
+    /** Fold one delta into a member's stored affinity (see src/memory/affinity.js). */
+    adjustAffinity(guildId, userId, delta, reason, opts) {
+      const item = entry(userFile(guildId, userId), () => emptyProfile(String(userId)));
+      const current = item.value.affinity ?? emptyAffinity();
+      const next = applyDelta(current, delta, reason, opts);
+      item.value.affinity = next;
+      item.dirty = true;
+      return next;
     },
 
     forgetUser(guildId, userId) {

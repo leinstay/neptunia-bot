@@ -6,6 +6,7 @@
     "spontaneous": true,
     "eavesdrop": true,
     "memory": true,
+    "relationships": true,
     "reactions": true,
     "multiMessage": true,
     "vision": true,
@@ -50,7 +51,9 @@
     "spamThreshold": 4,
     "spamIgnoreChance": 0.9,
     "nameTriggerChance": 0.5,
-    "neverIgnore": []
+    "neverIgnore": [],
+    "affinityIgnoreBonus": 0.3,
+    "affinityLikeBonus": 0.08
   },
   "typing": {
     "reactionDelayMs": [800, 4000],
@@ -84,5 +87,10 @@
     "maxDetails": 15,
     "maxInjokes": 15,
     "maxSelfFacts": 20
+  },
+  "relationships": {
+    "maxDeltaPerUpdate": 15,
+    "historySize": 10,
+    "directTriggerCount": 6
   }
 }

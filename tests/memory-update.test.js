@@ -106,6 +106,27 @@ test('isDue: false when minBatchMessages is met but the oldest message is still 
   assert.equal(isDue(buffer, 5 * 60_000, cfg), false);
 });
 
+test('isDue: a pile-up of direct messages triggers early, before the regular batch fills', () => {
+  const cfg = { batchMessages: 100, minBatchMessages: 100, maxBatchAgeMinutes: 999 };
+  const relationshipsCfg = { directTriggerCount: 3 };
+  const buffer = [{ ts: 0, direct: true }, { ts: 0, direct: false }, { ts: 0, direct: true }, { ts: 0, direct: true }];
+  assert.equal(isDue(buffer, 1, cfg, relationshipsCfg), true);
+});
+
+test('isDue: direct messages below directTriggerCount do not trigger', () => {
+  const cfg = { batchMessages: 100, minBatchMessages: 100, maxBatchAgeMinutes: 999 };
+  const relationshipsCfg = { directTriggerCount: 3 };
+  const buffer = [{ ts: 0, direct: true }, { ts: 0, direct: true }];
+  assert.equal(isDue(buffer, 1, cfg, relationshipsCfg), false);
+});
+
+test('isDue: relationshipsCfg absent or directTriggerCount 0 never triggers on direct messages alone', () => {
+  const cfg = { batchMessages: 100, minBatchMessages: 100, maxBatchAgeMinutes: 999 };
+  const buffer = [{ ts: 0, direct: true }, { ts: 0, direct: true }, { ts: 0, direct: true }];
+  assert.equal(isDue(buffer, 1, cfg, undefined), false);
+  assert.equal(isDue(buffer, 1, cfg, { directTriggerCount: 0 }), false);
+});
+
 // ---- buildMemoryRequest -----------------------------------------------------
 
 test('buildMemoryRequest: carries the memory prompt and both JSON blocks', () => {
@@ -271,6 +292,104 @@ test('buildMemoryRequest: a tiny token limit still consumes everything but keeps
   assert.ok(!user.includes('message number 0'), 'oldest line is dropped first');
 });
 
+// ---- relationships: <character> block + affinity in existing profiles ------
+
+test('buildMemoryRequest: relationships on prepends a <character> block with {{name}} filled', () => {
+  const config = makeConfig({ features: { relationships: true } });
+  const calibrator = createCalibrator();
+  const messages = [slimMessage({ id: 'm1', ts: Date.UTC(2026, 0, 1, 12, 0, 0) })];
+
+  const { messages: llmMessages } = buildMemoryRequest({
+    prompts: { memory: 'sys', 'character-card': 'Card of {{name}}, a cheerful person.', labels },
+    config,
+    calibrator,
+    profiles: {},
+    guildMemory: {},
+    messages,
+    selfName: 'Nept',
+  });
+
+  const user = llmMessages[1].content;
+  assert.match(user, /<character>[\s\S]*Card of Nept, a cheerful person\.[\s\S]*<\/character>/);
+});
+
+test('buildMemoryRequest: relationships off never renders a <character> block', () => {
+  const config = makeConfig({ features: { relationships: false } });
+  const calibrator = createCalibrator();
+  const messages = [slimMessage({ id: 'm1', ts: Date.UTC(2026, 0, 1, 12, 0, 0) })];
+
+  const { messages: llmMessages } = buildMemoryRequest({
+    prompts: { memory: 'sys', 'character-card': 'Card of {{name}}.', labels },
+    config,
+    calibrator,
+    profiles: {},
+    guildMemory: {},
+    messages,
+    selfName: 'Nept',
+  });
+
+  assert.ok(!llmMessages[1].content.includes('<character>'));
+  assert.ok(!llmMessages[1].content.includes('Card of Nept'));
+});
+
+test('buildMemoryRequest: relationships on adds affinity: { score, reason } to each existing profile', () => {
+  const config = makeConfig({ features: { relationships: true } });
+  const calibrator = createCalibrator();
+  const messages = [slimMessage({ id: 'm1', ts: Date.UTC(2026, 0, 1, 12, 0, 0) })];
+
+  const { messages: llmMessages } = buildMemoryRequest({
+    prompts: { memory: 'sys', labels },
+    config,
+    calibrator,
+    profiles: { 1: { names: ['nick'], character: '', interests: '', style: '', details: [], relationship: '', affinity: { score: 42, reason: 'helped once', history: [] } } },
+    guildMemory: {},
+    messages,
+    selfName: 'Nept',
+  });
+
+  const user = llmMessages[1].content;
+  const profiles = JSON.parse(/<existing_profiles>\n([\s\S]*?)\n<\/existing_profiles>/.exec(user)[1]);
+  assert.deepEqual(profiles['1'].affinity, { score: 42, reason: 'helped once' });
+});
+
+test('buildMemoryRequest: relationships off never adds affinity to existing profiles', () => {
+  const config = makeConfig({ features: { relationships: false } });
+  const calibrator = createCalibrator();
+  const messages = [slimMessage({ id: 'm1', ts: Date.UTC(2026, 0, 1, 12, 0, 0) })];
+
+  const { messages: llmMessages } = buildMemoryRequest({
+    prompts: { memory: 'sys', labels },
+    config,
+    calibrator,
+    profiles: { 1: { names: ['nick'], character: '', interests: '', style: '', details: [], relationship: '', affinity: { score: 42, reason: 'helped once', history: [] } } },
+    guildMemory: {},
+    messages,
+    selfName: 'Nept',
+  });
+
+  const user = llmMessages[1].content;
+  const profiles = JSON.parse(/<existing_profiles>\n([\s\S]*?)\n<\/existing_profiles>/.exec(user)[1]);
+  assert.equal(profiles['1'].affinity, undefined);
+});
+
+test('buildMemoryRequest: a direct message gets the arrow marker in the transcript', () => {
+  const config = makeConfig();
+  const calibrator = createCalibrator();
+  const messages = [slimMessage({ id: 'm1', authorId: '1', authorName: 'nick', content: 'hey you', direct: true, ts: Date.UTC(2026, 0, 1, 14, 32, 0) })];
+
+  const { messages: llmMessages } = buildMemoryRequest({
+    prompts: { memory: 'sys', labels },
+    config,
+    calibrator,
+    profiles: {},
+    guildMemory: {},
+    messages,
+    selfName: 'Nept',
+  });
+
+  assert.match(llmMessages[1].content, /→ \[14:32\] nick \(id:1\): hey you/);
+});
+
 // ---- applyMemoryUpdate ------------------------------------------------------
 
 test('applyMemoryUpdate: clamps string and detail fields to the configured limits', () => {
@@ -349,9 +468,107 @@ test('applyMemoryUpdate: garbage input changes nothing and never throws', () => 
 
     for (const garbage of [null, undefined, 'not an object', 42, [1, 2, 3]]) {
       const result = applyMemoryUpdate(store, guildId, garbage, cfg, new Set(['1']));
-      assert.deepEqual(result, { users: 0, guild: false, self: false });
+      assert.deepEqual(result, { users: 0, guild: false, self: false, affinity: 0 });
     }
     assert.deepEqual(store.getGuild(guildId), before);
+  });
+});
+
+// ---- applyMemoryUpdate: relationships -------------------------------------
+
+const RELATIONSHIPS_CFG = { enabled: true, maxDeltaPerUpdate: 15, historySize: 10, now: Date.UTC(2026, 0, 1) };
+const MEMORY_CFG = { fieldChars: 400, maxDetails: 15, maxInjokes: 15, maxSelfFacts: 20 };
+
+test('applyMemoryUpdate: relationships enabled applies and clamps the affinity delta, counts changed scores', () => {
+  withStore((store) => {
+    const guildId = 'g1';
+    store.touchUser(guildId, '1', 'nick', Date.now());
+
+    const update = { users: { 1: { interests: 'anime', affinity: { delta: 999, reason: 'was really kind' } } } };
+    const result = applyMemoryUpdate(store, guildId, update, MEMORY_CFG, new Set(['1']), RELATIONSHIPS_CFG);
+
+    assert.equal(result.users, 1);
+    assert.equal(result.affinity, 1);
+    const profile = store.getUser(guildId, '1');
+    assert.equal(profile.affinity.score, 15, 'delta is clamped to maxDeltaPerUpdate');
+    assert.equal(profile.affinity.reason, 'was really kind');
+  });
+});
+
+test('applyMemoryUpdate: a zero/absent affinity delta does not count as a change', () => {
+  withStore((store) => {
+    const guildId = 'g1';
+    store.touchUser(guildId, '1', 'nick', Date.now());
+
+    const update = { users: { 1: { interests: 'anime', affinity: { delta: 0, reason: 'no change' } } } };
+    const result = applyMemoryUpdate(store, guildId, update, MEMORY_CFG, new Set(['1']), RELATIONSHIPS_CFG);
+    assert.equal(result.affinity, 0);
+
+    const noAffinityField = applyMemoryUpdate(
+      store,
+      guildId,
+      { users: { 1: { interests: 'anime again' } } },
+      MEMORY_CFG,
+      new Set(['1']),
+      RELATIONSHIPS_CFG,
+    );
+    assert.equal(noAffinityField.affinity, 0);
+  });
+});
+
+test('applyMemoryUpdate: an affinity delta for an unknown user id is ignored entirely', () => {
+  withStore((store) => {
+    const guildId = 'g1';
+    store.touchUser(guildId, '1', 'nick', Date.now());
+
+    const result = applyMemoryUpdate(
+      store,
+      guildId,
+      { users: { 999: { affinity: { delta: 20, reason: 'x' } } } },
+      MEMORY_CFG,
+      new Set(['1']),
+      RELATIONSHIPS_CFG,
+    );
+
+    assert.equal(result.users, 0);
+    assert.equal(result.affinity, 0);
+    assert.equal(store.getUser(guildId, '999'), null);
+  });
+});
+
+test('applyMemoryUpdate: relationships disabled (or absent) ignores affinity entirely', () => {
+  withStore((store) => {
+    const guildId = 'g1';
+    store.touchUser(guildId, '1', 'nick', Date.now());
+
+    const update = { users: { 1: { affinity: { delta: 50, reason: 'should be ignored' } } } };
+    const resultDisabled = applyMemoryUpdate(store, guildId, update, MEMORY_CFG, new Set(['1']), { enabled: false });
+    assert.equal(resultDisabled.affinity, 0);
+    assert.equal(store.getUser(guildId, '1').affinity.score, 0);
+
+    const resultAbsent = applyMemoryUpdate(store, guildId, update, MEMORY_CFG, new Set(['1']));
+    assert.equal(resultAbsent.affinity, 0);
+    assert.equal(store.getUser(guildId, '1').affinity.score, 0);
+  });
+});
+
+test('applyMemoryUpdate: a malformed affinity value is ignored, other fields still apply', () => {
+  withStore((store) => {
+    const guildId = 'g1';
+    store.touchUser(guildId, '1', 'nick', Date.now());
+
+    const result = applyMemoryUpdate(
+      store,
+      guildId,
+      { users: { 1: { interests: 'games', affinity: 'not an object' } } },
+      MEMORY_CFG,
+      new Set(['1']),
+      RELATIONSHIPS_CFG,
+    );
+
+    assert.equal(result.users, 1);
+    assert.equal(result.affinity, 0);
+    assert.equal(store.getUser(guildId, '1').interests, 'games');
   });
 });
 
@@ -417,6 +634,20 @@ test('observe: touches the user profile for a human message but not for the pers
     assert.deepEqual(profile.names, ['nick']);
     assert.equal(store.getUser('g1', 'self1'), null);
     assert.equal(store.getBuffer('g1').length, 2, 'both messages, including the persona\'s own, are buffered');
+  });
+});
+
+test('observe: marks a message as direct only when told to', () => {
+  withStore((store) => {
+    const hot = { config: makeConfig() };
+    const updater = createMemoryUpdater({ hot, store, llm: {}, calibrator: createCalibrator(), getSelfName: () => 'Nept' });
+
+    updater.observe('g1', slimMessage({ id: 'm1' }), { direct: true });
+    updater.observe('g1', slimMessage({ id: 'm2' }));
+
+    const [first, second] = store.getBuffer('g1');
+    assert.equal(first.direct, true);
+    assert.equal(second.direct, false);
   });
 });
 

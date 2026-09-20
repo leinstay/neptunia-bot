@@ -13,6 +13,7 @@ import {
   unsetPath,
   createAdmin,
 } from '../src/admin.js';
+import { emptyAffinity, applyDelta } from '../src/memory/affinity.js';
 
 // ---------------------------------------------------------------------------
 // parseCommand
@@ -227,6 +228,13 @@ function makeStore() {
     getUser(guildId, userId) {
       return profiles.get(`${guildId}:${userId}`) ?? null;
     },
+    adjustAffinity(guildId, userId, delta, reason, opts) {
+      const key = `${guildId}:${userId}`;
+      const profile = profiles.get(key) ?? { id: String(userId), affinity: emptyAffinity() };
+      profile.affinity = applyDelta(profile.affinity ?? emptyAffinity(), delta, reason, opts);
+      profiles.set(key, profile);
+      return profile.affinity;
+    },
     forgetUser(guildId, userId) {
       forgotten.push([String(guildId), String(userId)]);
       profiles.delete(`${guildId}:${userId}`);
@@ -430,6 +438,123 @@ test('handle: memory reports an unknown profile as an error, reacting with the c
 
   assert.ok(message.sent[0].includes('Error'));
   assert.deepEqual(message.reactions, ['❌']);
+});
+
+test('handle: affinity shows the current score, band, reason and recent history', async () => {
+  const rootDir = makeRoot();
+  const hot = makeHot(rootDir);
+  const store = makeStore();
+  store.profiles.set('g1:123', { id: '123', affinity: { score: 42, reason: 'helped once', history: [{ ts: 't1', delta: 42, score: 42, reason: 'helped once' }] } });
+  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 } });
+
+  const message = makeMessage({ content: '!nep affinity 123', guild: { id: 'g1' } });
+  const handled = await admin.handle(message);
+
+  assert.equal(handled, true);
+  assert.ok(message.sent[0].includes('score: 42'));
+  assert.ok(message.sent[0].includes('band: fond'));
+  assert.ok(message.sent[0].includes('reason: helped once'));
+  assert.ok(message.sent[0].includes('helped once'));
+  assert.deepEqual(message.reactions, ['✅']);
+});
+
+test('handle: affinity show reports an error for an unknown profile', async () => {
+  const rootDir = makeRoot();
+  const hot = makeHot(rootDir);
+  const store = makeStore();
+  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 } });
+
+  const message = makeMessage({ content: '!nep affinity 999', guild: { id: 'g1' } });
+  await admin.handle(message);
+
+  assert.ok(message.sent[0].includes('Error'));
+  assert.deepEqual(message.reactions, ['❌']);
+});
+
+test('handle: affinity with a score sets it exactly, bypassing maxDeltaPerUpdate', async () => {
+  const rootDir = makeRoot();
+  const hot = makeHot(rootDir);
+  hot.config.relationships = { maxDeltaPerUpdate: 15, historySize: 10 };
+  const store = makeStore();
+  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 } });
+
+  const message = makeMessage({ content: '!nep affinity 123 77 owner really likes them', guild: { id: 'g1' } });
+  const handled = await admin.handle(message);
+
+  assert.equal(handled, true);
+  const affinity = store.getUser('g1', '123').affinity;
+  assert.equal(affinity.score, 77, 'the score is set exactly, well beyond maxDeltaPerUpdate of 15');
+  assert.equal(affinity.reason, 'owner really likes them');
+  assert.deepEqual(message.reactions, ['✅']);
+});
+
+test('handle: affinity with a score but no reason defaults to "set by owner"', async () => {
+  const rootDir = makeRoot();
+  const hot = makeHot(rootDir);
+  const store = makeStore();
+  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 } });
+
+  await admin.handle(makeMessage({ content: '!nep affinity 123 -30', guild: { id: 'g1' } }));
+
+  const affinity = store.getUser('g1', '123').affinity;
+  assert.equal(affinity.score, -30);
+  assert.equal(affinity.reason, 'set by owner');
+});
+
+test('handle: affinity rejects an out-of-range score and writes nothing', async () => {
+  const rootDir = makeRoot();
+  const hot = makeHot(rootDir);
+  const store = makeStore();
+  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 } });
+
+  const message = makeMessage({ content: '!nep affinity 123 150', guild: { id: 'g1' } });
+  const handled = await admin.handle(message);
+
+  assert.equal(handled, true);
+  assert.ok(message.sent[0].includes('Error'));
+  assert.deepEqual(message.reactions, ['❌']);
+  assert.equal(store.getUser('g1', '123'), null);
+});
+
+test('handle: affinity rejects a non-integer score', async () => {
+  const rootDir = makeRoot();
+  const hot = makeHot(rootDir);
+  const store = makeStore();
+  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 } });
+
+  const message = makeMessage({ content: '!nep affinity 123 4.5', guild: { id: 'g1' } });
+  await admin.handle(message);
+
+  assert.ok(message.sent[0].includes('Error'));
+  assert.deepEqual(message.reactions, ['❌']);
+});
+
+test('handle: affinity is ignored entirely for a non-owner', async () => {
+  const rootDir = makeRoot();
+  const hot = makeHot(rootDir);
+  const store = makeStore();
+  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 } });
+
+  const message = makeMessage({ authorId: '999', content: '!nep affinity 123 80', guild: { id: 'g1' } });
+  const handled = await admin.handle(message);
+
+  assert.equal(handled, false);
+  assert.equal(message.sent.length, 0);
+  assert.equal(store.getUser('g1', '123'), null);
+});
+
+test('handle: affinity in a DM searches every known guild, like memory does', async () => {
+  const rootDir = makeRoot();
+  const hot = makeHot(rootDir);
+  const store = makeStore();
+  store.profiles.set('g1:123', { id: '123', affinity: { score: 5, reason: 'ok so far', history: [] } });
+  const client = { guilds: { cache: new Map([['g1', { id: 'g1' }]]) } };
+  const admin = createAdmin({ hot, store, client, spontaneous: {}, calibrator: { ratio: 1 } });
+
+  const message = makeMessage({ content: '!nep affinity 123' });
+  await admin.handle(message);
+
+  assert.ok(message.sent[0].includes('score: 5'));
 });
 
 test('handle: status reports model, calibration ratio and the daily request count', async () => {

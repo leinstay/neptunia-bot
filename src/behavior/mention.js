@@ -4,6 +4,8 @@
 // it, and almost always ignores tag spam. The model gets a second veto later
 // (<skip/>) for calls that are simply not interesting.
 
+import { ignoreAdjustment } from '../memory/affinity.js';
+
 const MINUTE = 60_000;
 
 /** How the persona was called. Order matters: a pinged reply is a 'reply', not a 'mention'. */
@@ -51,11 +53,14 @@ export function createTagHistory() {
  * @param {number} input.textLength     Length of the message without the mention.
  * @param {number} input.recentCalls    Calls by this user within the repeat window, this one included.
  * @param {boolean} input.neverIgnore
+ * @param {number} [input.affinityScore]  The caller's stored affinity score, if known
+ *   (features.relationships). Nudges the ignore chance up for someone disliked, down
+ *   for someone liked; never for neverIgnore, a name trigger, or tag spam.
  * @param {object} input.cfg            config.mention
  * @param {() => number} input.rng
  * @returns {{ respond: boolean, reason: string, ignoreChance: number }}
  */
-export function decideMention({ kind, textLength, recentCalls, neverIgnore, cfg, rng }) {
+export function decideMention({ kind, textLength, recentCalls, neverIgnore, affinityScore, cfg, rng }) {
   if (neverIgnore) return { respond: true, reason: 'never-ignore', ignoreChance: 0 };
 
   if (kind === 'name') {
@@ -77,6 +82,7 @@ export function decideMention({ kind, textLength, recentCalls, neverIgnore, cfg,
       ignoreChance += cfg.repeatPenalty * (recentCalls - 1);
       reason = 'repeat';
     }
+    ignoreChance += ignoreAdjustment(affinityScore, cfg);
   }
   ignoreChance = Math.min(0.97, Math.max(0, ignoreChance));
 

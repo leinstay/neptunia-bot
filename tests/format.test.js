@@ -259,6 +259,45 @@ test('formatTranscript: mode "memory" drops the #index and adds the user id, omi
   assert.ok(!items[0].text.includes('replying'));
 });
 
+test('formatTranscript: mode "memory" marks a message addressed to the persona with a leading arrow', () => {
+  const t0 = Date.UTC(2026, 8, 20, 14, 32, 0);
+  const items = formatTranscript([msg('a', t0, { authorName: 'nick', authorId: '1', content: 'text', direct: true })], {
+    timezone: TZ,
+    gapMinutes: 20,
+    maxChars: 100,
+    selfName: 'Nept',
+    labels,
+    mode: 'memory',
+  });
+  assert.ok(items[0].text.startsWith('→ [17:32] nick (id:1): text'));
+});
+
+test('formatTranscript: mode "memory" leaves a non-direct message unmarked', () => {
+  const t0 = Date.UTC(2026, 8, 20, 14, 32, 0);
+  const items = formatTranscript([msg('a', t0, { authorName: 'nick', authorId: '1', content: 'text', direct: false })], {
+    timezone: TZ,
+    gapMinutes: 20,
+    maxChars: 100,
+    selfName: 'Nept',
+    labels,
+    mode: 'memory',
+  });
+  assert.ok(items[0].text.startsWith('[17:32] nick (id:1): text'));
+  assert.ok(!items[0].text.includes('→'));
+});
+
+test('formatTranscript: "direct" has no effect in chat mode', () => {
+  const t0 = Date.UTC(2026, 8, 20, 14, 32, 0);
+  const items = formatTranscript([msg('a', t0, { content: 'text', direct: true })], {
+    timezone: TZ,
+    gapMinutes: 20,
+    maxChars: 100,
+    selfName: 'Nept',
+    labels,
+  });
+  assert.ok(!items[0].text.includes('→'));
+});
+
 test('formatTranscript: mode "memory" for the persona\'s own line omits the id', () => {
   const t0 = Date.UTC(2026, 8, 20, 10, 0, 0);
   const items = formatTranscript([msg('a', t0, { self: true, content: 'hi' })], {

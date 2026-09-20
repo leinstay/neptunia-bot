@@ -11,6 +11,7 @@ import { estimateTokens } from '../llm/tokens.js';
 import { formatTranscript, renderTranscript } from '../discord/format.js';
 import { parseJsonObject } from '../llm/parse.js';
 import { log } from '../log.js';
+import { emptyAffinity } from './affinity.js';
 
 const BACKOFF_MS = 15 * 60_000;
 
@@ -19,12 +20,19 @@ const BACKOFF_MS = 15 * 60_000;
  * @param {object[]} buffer  Buffered slim messages, oldest first.
  * @param {number} now
  * @param {object} cfg       `config.memory`.
+ * @param {object} [relationshipsCfg]  `config.relationships`, only when the feature is on. A
+ *   pile-up of messages addressed to the persona (`direct: true`) triggers an update early,
+ *   so reactions to how people talk TO it do not wait for a full batch.
  */
-export function isDue(buffer, now, cfg) {
+export function isDue(buffer, now, cfg, relationshipsCfg) {
   if (buffer.length >= cfg.batchMessages) return true;
   if (buffer.length >= cfg.minBatchMessages) {
     const oldest = buffer[0];
     if (oldest && now - oldest.ts >= cfg.maxBatchAgeMinutes * 60_000) return true;
+  }
+  if (relationshipsCfg?.directTriggerCount > 0) {
+    const directCount = buffer.reduce((count, message) => count + (message.direct ? 1 : 0), 0);
+    if (directCount >= relationshipsCfg.directTriggerCount) return true;
   }
   return false;
 }
@@ -75,11 +83,18 @@ function pickGuildFields(guildMemory) {
 export function buildMemoryRequest({ prompts, config, calibrator, profiles, guildMemory, messages, selfName }) {
   const { timezone } = config.bot;
   const labels = requireLabels(prompts);
+  const relationships = config.features?.relationships !== false;
   const system = fillTemplate(prompts.memory, { name: selfName });
+  const characterBlock = relationships ? block('character', fillTemplate(prompts['character-card'], { name: selfName })) : '';
 
   const existingProfiles = {};
   for (const [id, profile] of Object.entries(profiles ?? {})) {
-    existingProfiles[id] = pickProfileFields(profile);
+    const fields = pickProfileFields(profile);
+    if (relationships) {
+      const affinity = profile?.affinity ?? emptyAffinity();
+      fields.affinity = { score: affinity.score, reason: affinity.reason };
+    }
+    existingProfiles[id] = fields;
   }
   const profilesBlock = block('existing_profiles', JSON.stringify(existingProfiles));
   const guildBlock = block('existing_guild', JSON.stringify(pickGuildFields(guildMemory)));
@@ -100,7 +115,7 @@ export function buildMemoryRequest({ prompts, config, calibrator, profiles, guil
 
   const { kept } = fitSections(
     [
-      { name: 'fixed', required: true, items: [system, profilesBlock, guildBlock] },
+      { name: 'fixed', required: true, items: [system, characterBlock, profilesBlock, guildBlock].filter(Boolean) },
       { name: 'transcript', keep: 'newest', items: transcriptTexts },
     ],
     limit,
@@ -110,7 +125,7 @@ export function buildMemoryRequest({ prompts, config, calibrator, profiles, guil
   const keptTranscriptItems = transcriptItems.slice(transcriptItems.length - kept.transcript.length);
   const newMessagesBlock = block('new_messages', renderTranscript(keptTranscriptItems, timezone, labels));
 
-  const user = [profilesBlock, guildBlock, newMessagesBlock].filter(Boolean).join('\n\n');
+  const user = [characterBlock, profilesBlock, guildBlock, newMessagesBlock].filter(Boolean).join('\n\n');
 
   return {
     messages: [
@@ -145,10 +160,13 @@ function clampStringArray(value, maxChars, maxItems) {
  * @param {unknown} update         Parsed model output; treated as untrusted.
  * @param {object} cfg             `config.memory`.
  * @param {Set<string>} knownUserIds
- * @returns {{ users: number, guild: boolean, self: boolean }}
+ * @param {{ enabled: boolean, maxDeltaPerUpdate: number, historySize: number, now?: number }} [relationships]
+ *   Only when `enabled`, `raw.affinity` (a `{ delta, reason }` change) is folded into the
+ *   stored score via `store.adjustAffinity`. Absent/disabled -> affinity is ignored entirely.
+ * @returns {{ users: number, guild: boolean, self: boolean, affinity: number }}
  */
-export function applyMemoryUpdate(store, guildId, update, cfg, knownUserIds) {
-  const result = { users: 0, guild: false, self: false };
+export function applyMemoryUpdate(store, guildId, update, cfg, knownUserIds, relationships) {
+  const result = { users: 0, guild: false, self: false, affinity: 0 };
   if (!update || typeof update !== 'object' || Array.isArray(update)) return result;
 
   if (update.users && typeof update.users === 'object' && !Array.isArray(update.users)) {
@@ -166,6 +184,17 @@ export function applyMemoryUpdate(store, guildId, update, cfg, knownUserIds) {
 
       store.updateUser(guildId, userId, fields);
       result.users += 1;
+
+      if (relationships?.enabled && raw.affinity && typeof raw.affinity === 'object' && !Array.isArray(raw.affinity)) {
+        const before = store.getUser(guildId, userId)?.affinity?.score ?? 0;
+        const after = store.adjustAffinity(guildId, userId, raw.affinity.delta, raw.affinity.reason, {
+          // The model's verdict is never applied unclamped, even if the config block is missing.
+          maxDelta: relationships.maxDeltaPerUpdate ?? 15,
+          historySize: relationships.historySize ?? 10,
+          now: relationships.now,
+        });
+        if (after.score !== before) result.affinity += 1;
+      }
     }
   }
 
@@ -212,8 +241,12 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
   const running = new Set();
   const backoffUntil = new Map();
 
-  /** Called for every guild message the persona sees, including its own. */
-  function observe(guildId, normalized) {
+  /**
+   * Called for every guild message the persona sees, including its own.
+   * `direct` marks a message addressed to the persona (a trigger), so the
+   * analyzer can tell how people talk TO it apart from general chatter.
+   */
+  function observe(guildId, normalized, { direct = false } = {}) {
     if (normalized.bot) return;
     if (!normalized.self) {
       store.touchUser(guildId, normalized.authorId, normalized.authorName, normalized.ts);
@@ -230,6 +263,7 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
       replyToId: normalized.replyToId,
       attachments: (normalized.attachments ?? []).map((a) => ({ kind: a.kind, name: a.name })),
       stickers: normalized.stickers,
+      direct: Boolean(direct),
     };
     const cfg = hot.config.memory;
     store.pushBuffer(guildId, slim, cfg.batchMessages * 3);
@@ -274,7 +308,11 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
       });
       const update = parseJsonObject(completion.text);
       const knownUserIds = new Set(authorIds.map(String));
-      const result = applyMemoryUpdate(store, guildId, update, cfg, knownUserIds);
+      const relationshipsOn = hot.config.features?.relationships !== false;
+      const relationships = relationshipsOn
+        ? { enabled: true, ...hot.config.relationships, now: now() }
+        : undefined;
+      const result = applyMemoryUpdate(store, guildId, update, cfg, knownUserIds, relationships);
 
       store.shiftBuffer(guildId, consumed);
       store.flush();
@@ -291,11 +329,12 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
   async function tick() {
     const nowMs = now();
     const cfg = hot.config.memory;
+    const relationshipsCfg = hot.config.features?.relationships !== false ? hot.config.relationships : undefined;
     const jobs = [];
     for (const guildId of store.listGuilds()) {
       if (running.has(guildId)) continue;
       if (nowMs < (backoffUntil.get(guildId) ?? 0)) continue;
-      if (!isDue(store.getBuffer(guildId), nowMs, cfg)) continue;
+      if (!isDue(store.getBuffer(guildId), nowMs, cfg, relationshipsCfg)) continue;
       jobs.push(run(guildId));
     }
     await Promise.all(jobs);

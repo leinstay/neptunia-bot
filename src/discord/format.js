@@ -12,6 +12,11 @@ const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
 const DAY = 24 * HOUR;
 
+// A language-neutral marker (memory transcript only) for a message addressed
+// to the persona, so the analyzer can weigh "how people talk TO it" apart
+// from general chatter. See .claude/docs/prompt-contract.md, "Memory update".
+const DIRECT_MARKER = '→ '; // "→ "
+
 const formatters = new Map();
 
 function formatter(timezone, locale, options) {
@@ -156,7 +161,8 @@ export function formatTranscript(messages, options) {
     }
     body.push(...attachmentTags(message, labels));
 
-    parts.push(`${head} ${who}: ${body.join(' ')}`.trimEnd());
+    const marker = mode === 'memory' && message.direct ? DIRECT_MARKER : '';
+    parts.push(`${marker}${head} ${who}: ${body.join(' ')}`.trimEnd());
     items.push({ id: message.id, index, ts: message.ts, text: parts.join('\n') });
     previous = message;
   }

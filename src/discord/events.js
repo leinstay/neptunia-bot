@@ -83,11 +83,9 @@ export function createMessageHandler({
       // 7. Owner commands short-circuit before anything is observed.
       if (adminCommandsOn && (await admin.handle(message))) return;
 
-      // 8. Everyone else feeds memory.
-      if (memoryOn) memory.observe(guildId, normalized);
-
-      // 9. Detect how (if at all) the persona was called, masking each input
-      // by its own feature switch so detectTrigger itself stays pure.
+      // 8. Detect how (if at all) the persona was called, masking each input
+      // by its own feature switch so detectTrigger itself stays pure. Done
+      // BEFORE memory observes the message, so the buffer can mark it.
       const mentionsSelf = features.mentions !== false && message.mentions.users.has(selfId);
       const repliesToSelf = features.replies !== false && (await resolveReference(message, selfId));
       const nameTriggers = features.nameTriggers !== false ? config.bot.nameTriggers : [];
@@ -97,6 +95,10 @@ export function createMessageHandler({
         content: normalized.content,
         nameTriggers,
       });
+
+      // 9. Everyone else feeds memory; a message addressed to the persona is
+      // marked `direct` so the analyzer can weigh it separately.
+      if (memoryOn) memory.observe(guildId, normalized, { direct: Boolean(kind) });
 
       // 10. No trigger: let the spontaneous scheduler eavesdrop, nothing more.
       if (!kind) {
@@ -109,11 +111,15 @@ export function createMessageHandler({
 
       const recentCalls = tagHistory.hit(normalized.authorId, now(), repeatWindowMs(config.mention));
       const selfName = message.guild.members.me?.displayName ?? client.user.username;
+      const relationshipsOn = features.relationships !== false;
+      const affinityScore =
+        memoryOn && relationshipsOn ? store?.getUser?.(guildId, normalized.authorId)?.affinity?.score : undefined;
       const decision = decideMention({
         kind,
         textLength: strippedLength(normalized.content, selfName),
         recentCalls,
         neverIgnore: config.mention.neverIgnore.includes(normalized.authorId),
+        affinityScore,
         cfg: config.mention,
         rng,
       });

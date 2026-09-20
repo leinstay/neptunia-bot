@@ -130,6 +130,8 @@ const CFG = {
   spamThreshold: 4,
   spamIgnoreChance: 0.9,
   nameTriggerChance: 0.5,
+  affinityIgnoreBonus: 0.3,
+  affinityLikeBonus: 0.08,
 };
 
 function rngReturning(value) {
@@ -217,4 +219,90 @@ test('decideMention: plain random ignore uses the base ignoreChance for a non-em
   assert.equal(result.ignoreChance, CFG.ignoreChance);
   assert.equal(result.reason, 'ignored:random');
   assert.equal(result.respond, false); // rng 0 < 0.12
+});
+
+// --- decideMention: affinityScore -------------------------------------------
+
+test('decideMention: a disliked caller (negative affinity) raises the ignore chance', () => {
+  const neutral = decideMention({ kind: 'reply', textLength: 5, recentCalls: 1, neverIgnore: false, cfg: CFG, rng: rngReturning(0) });
+  const disliked = decideMention({
+    kind: 'reply',
+    textLength: 5,
+    recentCalls: 1,
+    neverIgnore: false,
+    affinityScore: -100,
+    cfg: CFG,
+    rng: rngReturning(0),
+  });
+  assert.equal(disliked.ignoreChance, neutral.ignoreChance + CFG.affinityIgnoreBonus);
+});
+
+test('decideMention: a liked caller (positive affinity) lowers the ignore chance', () => {
+  const neutral = decideMention({ kind: 'reply', textLength: 5, recentCalls: 1, neverIgnore: false, cfg: CFG, rng: rngReturning(0) });
+  const liked = decideMention({
+    kind: 'reply',
+    textLength: 5,
+    recentCalls: 1,
+    neverIgnore: false,
+    affinityScore: 100,
+    cfg: CFG,
+    rng: rngReturning(0),
+  });
+  assert.equal(liked.ignoreChance, neutral.ignoreChance - CFG.affinityLikeBonus);
+});
+
+test('decideMention: the affinity adjustment still respects the 0..0.97 clamp', () => {
+  const cfg = { ...CFG, ignoreChance: 0.9 };
+  const result = decideMention({
+    kind: 'reply',
+    textLength: 5,
+    recentCalls: 1,
+    neverIgnore: false,
+    affinityScore: -100,
+    cfg,
+    rng: rngReturning(0.99),
+  });
+  assert.equal(result.ignoreChance, 0.97);
+});
+
+test('decideMention: affinityScore is ignored for neverIgnore', () => {
+  const result = decideMention({
+    kind: 'reply',
+    textLength: 5,
+    recentCalls: 1,
+    neverIgnore: true,
+    affinityScore: -100,
+    cfg: CFG,
+    rng: rngReturning(0.999),
+  });
+  assert.deepEqual(result, { respond: true, reason: 'never-ignore', ignoreChance: 0 });
+});
+
+test('decideMention: affinityScore is ignored for the "name" kind', () => {
+  const withAffinity = decideMention({
+    kind: 'name',
+    textLength: 5,
+    recentCalls: 1,
+    neverIgnore: false,
+    affinityScore: -100,
+    cfg: CFG,
+    rng: rngReturning(0.4),
+  });
+  const withoutAffinity = decideMention({ kind: 'name', textLength: 5, recentCalls: 1, neverIgnore: false, cfg: CFG, rng: rngReturning(0.4) });
+  assert.deepEqual(withAffinity, withoutAffinity);
+});
+
+test('decideMention: affinityScore is ignored inside the spam branch', () => {
+  const withAffinity = decideMention({
+    kind: 'reply',
+    textLength: 5,
+    recentCalls: 4,
+    neverIgnore: false,
+    affinityScore: -100,
+    cfg: CFG,
+    rng: rngReturning(0),
+  });
+  const withoutAffinity = decideMention({ kind: 'reply', textLength: 5, recentCalls: 4, neverIgnore: false, cfg: CFG, rng: rngReturning(0) });
+  assert.equal(withAffinity.ignoreChance, withoutAffinity.ignoreChance);
+  assert.equal(withAffinity.ignoreChance, CFG.spamIgnoreChance);
 });
