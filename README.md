@@ -21,6 +21,7 @@ Node.js, one runtime dependency (discord.js), any OpenRouter-compatible endpoint
 - **Hard limits.** 50,000 tokens per request with a self-calibrating estimate that adjusts against real usage. A daily request cap covers all activity.
 - **Hot reload.** Edit a prompt file or config and save -- changes apply to the next message, no restart, memory untouched.
 - **Owner console.** Commands sent in a DM or channel for live tuning: add behaviour rules, override config values, inspect and delete profiles, adjust relationships, force a spontaneous message.
+- **Dry run.** A mode that runs the full pipeline -- triggers, memory, LLM calls -- but never sends a message or reaction. Would-be output goes to the log and an optional mirror channel, so you can watch the bot think before you let it talk.
 
 ## Quick start
 
@@ -107,6 +108,7 @@ Every feature is an independent toggle.
 
 | Key | Default | Meaning |
 |---|---|---|
+| `dryRun` | `false` | Run the full pipeline but never send -- the one switch that defaults to OFF (see [Testing it invisibly](#testing-it-invisibly)) |
 | `mentions` | `true` | Respond to @mentions |
 | `replies` | `true` | Respond to replies to the bot's messages |
 | `nameTriggers` | `true` | Respond when someone says the bot's name |
@@ -129,6 +131,7 @@ Every feature is an independent toggle.
 | `commandPrefix` | `"!nep"` | Prefix for owner commands |
 | `nameTriggers` | `[]` | Extra strings that trigger a response besides @mention |
 | `guildId` | `""` | The server this instance runs. When empty and the bot is in one server, adopts it; in several, refuses to start. Pin it in `config.local.json` |
+| `dryRunChannelId` | `""` | Private channel for dry-run mirror output (see [Testing it invisibly](#testing-it-invisibly)) |
 | `channels.allow` | `[]` | Limit to these channel IDs (empty = all visible) |
 | `channels.deny` | `[]` | Ignore these channel IDs |
 
@@ -252,6 +255,12 @@ The token budget `warmup.maxTokens` is counted from the provider's reported usag
 | `channels` | `[]` | Channel IDs to warm up (empty = all readable channels) |
 
 **Cost note.** The warm-up budget is real money at the analyzer model's price. `memory.model` can point the analyzer -- and therefore the warm-up -- at a cheaper model than the one that talks.
+
+## Testing it invisibly
+
+With `features.dryRun: true` the bot does everything for real -- warm-up, memory updates, relationship changes, trigger decisions, LLM requests (so it costs real tokens) -- but never types, sends or reacts in the chat. Every would-be message and reaction goes to the log (`dry-run: would send` / `dry-run: would react` -- the one place message text is logged). When `bot.dryRunChannelId` points at a private channel, a readable mirror is posted there without pinging anyone; messages in that mirror channel are ignored by the bot. It still paces itself as if it had spoken.
+
+Suggested first run on a new server: turn on `warmup.enabled` and `features.dryRun`, watch the mirror channel or `journalctl -u neptunia-bot -f`, tune the character and the numbers live, then switch dry-run off with `!nep set features.dryRun false` -- no restart needed. `!nep status` shows the dry-run state on its first line.
 
 ## Tuning it live
 
