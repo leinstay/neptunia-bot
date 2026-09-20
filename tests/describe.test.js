@@ -224,6 +224,17 @@ test('describe: forwards countAgainstDailyCap to llm.complete', async () => {
   assert.equal(llm.calls[0].options.countAgainstDailyCap, false);
 });
 
+test('describe: passes llm.timeoutMs (the chat timeout, not the analyzer\'s) as options.timeoutMs', async () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  const hot = fakeHot({ config: { llm: { timeoutMs: 90000 } } });
+  const llm = fakeLlm({ text: 'a cat' });
+  const describer = createDescriber({ hot, store, llm });
+
+  await describer.describe('g1', pictureItem('a1'));
+  assert.equal(llm.calls[0].options.timeoutMs, 90000);
+});
+
 // --- describeMany --------------------------------------------------------
 
 test('describeMany: caps NEW descriptions at maxNew, cache hits are free', async () => {

@@ -230,6 +230,36 @@ test('formatTranscript: attachments and stickers get tagged', () => {
   assert.ok(items[0].text.includes('[sticker: pepe]'));
 });
 
+test('formatTranscript: a media tag rendering empty (missing label key) never leaves a double space', () => {
+  const t0 = Date.UTC(2026, 8, 20, 10, 0, 0);
+  const noImageLabel = { ...labels, transcript: { ...labels.transcript, image: undefined } };
+  const messages = [
+    msg('a', t0, {
+      content: 'text before',
+      attachments: [{ kind: 'image' }],
+      stickers: ['pepe'],
+    }),
+  ];
+  const items = formatTranscript(messages, { timezone: TZ, gapMinutes: 20, maxChars: 100, selfName: 'Nept', labels: noImageLabel });
+  assert.ok(!items[0].text.includes('  '), `expected no double space, got: ${JSON.stringify(items[0].text)}`);
+  assert.ok(items[0].text.includes('text before [sticker: pepe]'));
+});
+
+test('formatTranscript: a forward with an empty-rendering media tag never leaves a double space', () => {
+  const t0 = Date.UTC(2026, 8, 20, 10, 0, 0);
+  const noImageLabel = { ...labels, transcript: { ...labels.transcript, image: undefined } };
+  const messages = [
+    msg('a', t0, {
+      content: '',
+      forwardedFrom: null,
+      forwarded: [{ content: 'the news', attachments: [{ kind: 'image' }], links: [], stickers: [] }],
+    }),
+  ];
+  const items = formatTranscript(messages, { timezone: TZ, gapMinutes: 20, maxChars: 100, selfName: 'Nept', labels: noImageLabel });
+  assert.ok(!items[0].text.includes('  '), `expected no double space, got: ${JSON.stringify(items[0].text)}`);
+  assert.ok(items[0].text.includes('[forwarded: the news]'));
+});
+
 test('formatTranscript: content longer than maxChars is truncated with an ellipsis', () => {
   const t0 = Date.UTC(2026, 8, 20, 10, 0, 0);
   const items = formatTranscript([msg('a', t0, { content: 'a'.repeat(10) })], {

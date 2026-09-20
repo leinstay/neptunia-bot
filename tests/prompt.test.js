@@ -6,6 +6,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { buildRequest, renderProfile } from '../src/behavior/prompt.js';
 import { estimateTokens } from '../src/llm/tokens.js';
+import { fill } from '../src/discord/format.js';
 import { labels } from './fixtures/labels.js';
 
 const NOW = Date.UTC(2026, 8, 20, 10, 0, 0); // Sun 20 Sep 2026, 13:00 Moscow
@@ -36,12 +37,13 @@ function fakeConfig(overrides = {}) {
     context: {
       gapMarkerMinutes: 20,
       maxMessageChars: 800,
-      caps: { interlocutor: 2500, aboutChat: 2500, people: 4000, neighbors: 3000, server: 2500 },
+      caps: { interlocutor: 2500, aboutChat: 2500, people: 4000, neighbors: 3000, server: 2500, lore: 1500 },
       vision: { maxImages: 2, tokensPerImage: 400, imageSize: 512, recentImages: 0, recentImageMinutes: 0 },
       ...overrides.context,
     },
     features: { vision: true, ...overrides.features },
     llm: { maxRequestTokens: 50000, safetyMargin: 0.9, ...overrides.llm },
+    lore: { scanMessages: 30, maxMatches: 8, ...overrides.lore },
   };
 }
 
@@ -469,6 +471,97 @@ test('renderProfile: a profile with no affinity at all (pre-relationships data) 
   assert.equal(text, '## Carl\ncharacter: calm');
 });
 
+// --- renderProfile: episodes --------------------------------------------------
+
+function episodeFixture(overrides = {}) {
+  return { date: '2026-01-01', what: 'said something memorable', quote: 'never forget this', feeling: 'touched', weight: 3, addedAt: 'a', ...overrides };
+}
+
+test('renderProfile: episodes render only for the interlocutor, right after the attitude line', () => {
+  const profile = {
+    id: 'p1',
+    names: ['Carl'],
+    affinity: { score: 10, reason: 'nice', history: [] },
+    episodes: [episodeFixture()],
+  };
+  const text = renderProfile(profile, labels, { relationships: true, interlocutor: true, episodes: { enabled: true } });
+  const lines = text.split('\n');
+  assert.equal(lines[0], '## Carl -- INTERLOCUTOR, they are the one who called you');
+  assert.equal(lines[1], 'attitude: 10 (warm) — nice');
+  assert.equal(lines[2], labels.profile.episodes);
+  assert.equal(lines[3], '2026-01-01: said something memorable — "never forget this" (touched)');
+});
+
+test('renderProfile: episodes are never rendered for a non-interlocutor profile', () => {
+  const profile = { id: 'p1', names: ['Carl'], character: 'calm', episodes: [episodeFixture()] };
+  const text = renderProfile(profile, labels, { relationships: true, interlocutor: false, episodes: { enabled: true } });
+  assert.ok(!text.includes(labels.profile.episodes));
+});
+
+test('renderProfile: episodes are never rendered when episodes.enabled is false/absent', () => {
+  const profile = { id: 'p1', names: ['Carl'], episodes: [episodeFixture()] };
+  const text = renderProfile(profile, labels, { relationships: true, interlocutor: true });
+  assert.ok(!text.includes(labels.profile.episodes));
+});
+
+test('renderProfile: an episode with no quote uses profile.episodeNoQuote', () => {
+  const profile = { id: 'p1', names: ['Carl'], episodes: [episodeFixture({ quote: '' })] };
+  const text = renderProfile(profile, labels, { interlocutor: true, episodes: { enabled: true } });
+  assert.ok(text.includes('2026-01-01: said something memorable (touched)'));
+  assert.ok(!text.includes('"'));
+});
+
+test('renderProfile: episodes render heaviest weight first, then newest', () => {
+  const profile = {
+    id: 'p1',
+    names: ['Carl'],
+    episodes: [
+      episodeFixture({ what: 'light-old', weight: 1, date: '2026-01-01' }),
+      episodeFixture({ what: 'heavy', weight: 5, date: '2026-01-01' }),
+      episodeFixture({ what: 'light-new', weight: 1, date: '2026-02-01' }),
+    ],
+  };
+  const text = renderProfile(profile, labels, { interlocutor: true, episodes: { enabled: true } });
+  const order = ['heavy', 'light-new', 'light-old'].map((w) => text.indexOf(w));
+  assert.ok(order[0] < order[1] && order[1] < order[2]);
+});
+
+test('renderProfile: episodes are not rendered when labels lack episode/episodeNoQuote/episodes keys', () => {
+  const brokenLabels = { ...labels, profile: { ...labels.profile, episodes: undefined } };
+  const profile = { id: 'p1', names: ['Carl'], episodes: [episodeFixture()] };
+  const text = renderProfile(profile, brokenLabels, { interlocutor: true, episodes: { enabled: true } });
+  assert.ok(!text.includes('said something memorable'));
+});
+
+test('renderProfile: a tight episodes cap drops the lightest episodes first', () => {
+  const profile = {
+    id: 'p1',
+    names: ['Carl'],
+    character: 'calm',
+    episodes: [
+      episodeFixture({ what: 'heaviest', weight: 5, quote: '' }),
+      episodeFixture({ what: 'lightest', weight: 1, quote: '' }),
+    ],
+  };
+  const cost = (text) => text.length; // a simple, deterministic stand-in for the real token cost
+  const restText = renderProfile({ ...profile, episodes: [] }, labels, { interlocutor: true, episodes: { enabled: true } });
+  const heading = labels.profile.episodes;
+  const heavyLine = fill(labels.profile.episodeNoQuote, { date: '2026-01-01', what: 'heaviest', feeling: 'touched' });
+  // Room for the rest of the profile plus exactly the heading and one episode line.
+  const cap = cost(restText) + cost(heading) + cost(heavyLine);
+
+  const text = renderProfile(profile, labels, { interlocutor: true, episodes: { enabled: true, cap, cost } });
+  assert.ok(text.includes('heaviest'));
+  assert.ok(!text.includes('lightest'));
+});
+
+test('renderProfile: an episodes cap too small even for the heading renders no episodes at all', () => {
+  const profile = { id: 'p1', names: ['Carl'], episodes: [episodeFixture()] };
+  const cost = (text) => text.length;
+  const text = renderProfile(profile, labels, { interlocutor: true, episodes: { enabled: true, cap: 1, cost } });
+  assert.ok(!text.includes(labels.profile.episodes));
+});
+
 test('buildRequest: relationships default to on (features.relationships missing counts as on)', () => {
   const trigger = makeMessage(1, NOW - MIN, { authorName: 'Alice' });
   const interlocutor = { id: 'author-1', names: ['Alice'], affinity: { score: 40, reason: 'fun to talk to', history: [] } };
@@ -566,4 +659,84 @@ test('buildRequest: <senses> is omitted entirely when labels has no senses secti
   const request = buildRequest(baseInput({ prompts: fakePrompts({ labels: brokenLabels }) }));
   const user = request.messages[1].content;
   assert.ok(!user.includes('<senses>'));
+});
+
+// --- <lore> ------------------------------------------------------------------
+
+function loreEntry(overrides = {}) {
+  return { id: 'l1', title: 'The Great Flood', keys: ['flood'], text: 'It flooded once.', always: false, source: 'analyzer', weight: 3, ...overrides };
+}
+
+test('buildRequest: <lore> sits after <server> and before <self_facts>', () => {
+  const history = [makeMessage(1, NOW - MIN, { content: 'remember the flood?' })];
+  const request = buildRequest(
+    baseInput({
+      history,
+      guildMemory: { self: ['likes tea'] },
+      channels: [{ id: 'c1', name: 'general', lastMessageAt: NOW, days: {} }],
+      currentChannelId: 'c1',
+      loreEntries: [loreEntry()],
+    }),
+  );
+  const user = request.messages[1].content;
+  const serverIdx = user.indexOf('<server>');
+  const loreIdx = user.indexOf('<lore>');
+  const selfIdx = user.indexOf('<self_facts>');
+  assert.ok(serverIdx !== -1 && loreIdx !== -1 && selfIdx !== -1);
+  assert.ok(serverIdx < loreIdx && loreIdx < selfIdx);
+  assert.ok(user.includes(labels.lore.entry.replace('{title}', 'The Great Flood').replace('{text}', 'It flooded once.')));
+});
+
+test('buildRequest: no <lore> block when nothing matches the recent chat', () => {
+  const history = [makeMessage(1, NOW - MIN, { content: 'completely unrelated chatter' })];
+  const request = buildRequest(baseInput({ history, loreEntries: [loreEntry()] }));
+  assert.ok(!request.messages[1].content.includes('<lore>'));
+});
+
+test('buildRequest: no <lore> block when there is no stored lore at all', () => {
+  const history = [makeMessage(1, NOW - MIN, { content: 'the flood happened' })];
+  const request = buildRequest(baseInput({ history, loreEntries: [] }));
+  assert.ok(!request.messages[1].content.includes('<lore>'));
+});
+
+test('buildRequest: an "always" lore entry appears even without a textual match', () => {
+  const history = [makeMessage(1, NOW - MIN, { content: 'nothing relevant here' })];
+  const request = buildRequest(baseInput({ history, loreEntries: [loreEntry({ always: true, keys: ['never-said'] })] }));
+  assert.ok(request.messages[1].content.includes('<lore>'));
+});
+
+test('buildRequest: features.lore=false never renders <lore>, even with a match', () => {
+  const history = [makeMessage(1, NOW - MIN, { content: 'the flood happened' })];
+  const config = fakeConfig({ features: { lore: false } });
+  const request = buildRequest(baseInput({ history, config, loreEntries: [loreEntry()] }));
+  assert.ok(!request.messages[1].content.includes('<lore>'));
+});
+
+test('buildRequest: <lore> is omitted when labels.lore.entry is missing (older labels.json)', () => {
+  const history = [makeMessage(1, NOW - MIN, { content: 'the flood happened' })];
+  const brokenLabels = { ...labels, lore: undefined };
+  const request = buildRequest(
+    baseInput({ history, prompts: fakePrompts({ labels: brokenLabels }), loreEntries: [loreEntry()] }),
+  );
+  assert.ok(!request.messages[1].content.includes('<lore>'));
+});
+
+test('buildRequest: the trigger message also counts toward the lore scan window', () => {
+  const trigger = makeMessage(2, NOW - MIN, { authorName: 'Alice', content: 'the flood story again' });
+  const history = [makeMessage(1, NOW - 2 * MIN, { content: 'unrelated' }), trigger];
+  const request = buildRequest(baseInput({ history, trigger, triggerKind: 'mention', loreEntries: [loreEntry()] }));
+  assert.ok(request.messages[1].content.includes('<lore>'));
+});
+
+test('buildRequest: under a tiny lore cap, only the entries that fit survive', () => {
+  const history = [makeMessage(1, NOW - MIN, { content: 'flood and fire, the two old stories' })];
+  const config = fakeConfig({ context: { caps: { interlocutor: 2500, aboutChat: 2500, people: 4000, neighbors: 3000, server: 2500, lore: 1 } } });
+  const request = buildRequest(
+    baseInput({
+      history,
+      config,
+      loreEntries: [loreEntry({ id: 'l1', title: 'Flood', keys: ['flood'], text: 'x'.repeat(200) }), loreEntry({ id: 'l2', title: 'Fire', keys: ['fire'], text: 'y'.repeat(200) })],
+    }),
+  );
+  assert.equal(request.stats.lore.kept, 0);
 });

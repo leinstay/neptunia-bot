@@ -709,7 +709,7 @@ test('applyMemoryUpdate: garbage input changes nothing and never throws', () => 
 
     for (const garbage of [null, undefined, 'not an object', 42, [1, 2, 3]]) {
       const result = applyMemoryUpdate(store, guildId, garbage, cfg, new Set(['1']));
-      assert.deepEqual(result, { users: 0, guild: false, self: false, affinity: 0, channels: 0 });
+      assert.deepEqual(result, { users: 0, guild: false, self: false, affinity: 0, channels: 0, episodes: 0, lore: 0 });
     }
     assert.deepEqual(store.getGuild(guildId), before);
   });
@@ -826,6 +826,284 @@ test('applyMemoryUpdate: a non-empty self array replaces guild.self wholesale', 
 
     assert.equal(result.self, true);
     assert.deepEqual(store.getGuild(guildId).self, ['new fact 1', 'new fact 2']);
+  });
+});
+
+// ---- applyMemoryUpdate: episodes ----------------------------------------------
+
+const EPISODES_CFG = { enabled: true, maxEpisodes: 20, maxNew: 3, now: Date.UTC(2026, 0, 1) };
+
+test('applyMemoryUpdate: routes raw.episodes through store.addEpisodes, result gains the added count', () => {
+  withStore((store) => {
+    const guildId = 'g1';
+    store.touchUser(guildId, '1', 'nick', Date.now());
+
+    const update = { users: { 1: { episodes: [{ what: 'promised to help with the move' }] } } };
+    const result = applyMemoryUpdate(store, guildId, update, MEMORY_CFG, new Set(['1']), new Set(), undefined, EPISODES_CFG);
+
+    assert.equal(result.episodes, 1);
+    const profile = store.getUser(guildId, '1');
+    assert.equal(profile.episodes.length, 1);
+    assert.equal(profile.episodes[0].what, 'promised to help with the move');
+  });
+});
+
+test('applyMemoryUpdate: features.episodes off (episodes cfg absent) ignores raw.episodes entirely', () => {
+  withStore((store) => {
+    const guildId = 'g1';
+    store.touchUser(guildId, '1', 'nick', Date.now());
+
+    const update = { users: { 1: { episodes: [{ what: 'should be ignored' }] } } };
+    const result = applyMemoryUpdate(store, guildId, update, MEMORY_CFG, new Set(['1']));
+
+    assert.equal(result.episodes, 0);
+    assert.deepEqual(store.getUser(guildId, '1').episodes, []);
+  });
+});
+
+test('applyMemoryUpdate: updateUser can never overwrite episodes via a normal profile field', () => {
+  withStore((store) => {
+    const guildId = 'g1';
+    store.touchUser(guildId, '1', 'nick', Date.now());
+    store.addEpisodes(guildId, '1', [{ what: 'a real episode' }], { maxEpisodes: 20, maxNew: 3, now: 1000 });
+
+    const update = { users: { 1: { character: 'nice', episodes: 'this is not routed through this key' } } };
+    applyMemoryUpdate(store, guildId, update, MEMORY_CFG, new Set(['1']));
+
+    const profile = store.getUser(guildId, '1');
+    assert.equal(profile.character, 'nice');
+    assert.equal(profile.episodes.length, 1);
+    assert.equal(profile.episodes[0].what, 'a real episode');
+  });
+});
+
+// ---- applyMemoryUpdate: lore ---------------------------------------------------
+
+const LORE_CFG = { enabled: true, maxEntries: 500, now: Date.UTC(2026, 0, 1) };
+
+test('applyMemoryUpdate: routes update.lore through store.setLore, result gains the upserted count', () => {
+  withStore((store) => {
+    const guildId = 'g1';
+    const update = { lore: [{ title: 'The Flood', keys: ['flood'], text: 'It flooded once.' }] };
+    const result = applyMemoryUpdate(store, guildId, update, MEMORY_CFG, new Set(), new Set(), undefined, undefined, LORE_CFG);
+
+    assert.equal(result.lore, 1);
+    assert.equal(store.getLore(guildId).length, 1);
+    assert.equal(store.getLore(guildId)[0].source, 'analyzer');
+  });
+});
+
+test('applyMemoryUpdate: features.lore off (lore cfg absent) ignores update.lore entirely', () => {
+  withStore((store) => {
+    const guildId = 'g1';
+    const update = { lore: [{ title: 'The Flood', keys: ['flood'], text: 'It flooded once.' }] };
+    const result = applyMemoryUpdate(store, guildId, update, MEMORY_CFG, new Set());
+
+    assert.equal(result.lore, 0);
+    assert.deepEqual(store.getLore(guildId), []);
+  });
+});
+
+test('applyMemoryUpdate: lore never overwrites an existing owner entry', () => {
+  withStore((store) => {
+    const guildId = 'g1';
+    store.setLore(guildId, [{ title: 'Founders Day', keys: ['founders'], text: 'owner text', always: true }], {
+      source: 'owner',
+      now: 1000,
+    });
+
+    const update = { lore: [{ title: 'Founders Day', keys: ['founders'], text: 'analyzer overwrite attempt' }] };
+    applyMemoryUpdate(store, guildId, update, MEMORY_CFG, new Set(), new Set(), undefined, undefined, LORE_CFG);
+
+    assert.equal(store.getLore(guildId)[0].text, 'owner text');
+  });
+});
+
+// ---- buildMemoryRequest: episodes in <existing_profiles> ----------------------
+
+test('buildMemoryRequest: relationships/episodes on adds episodes {date, what, quote, weight} to existing profiles', () => {
+  const config = makeConfig({ features: { episodes: true } });
+  const calibrator = createCalibrator();
+  const messages = [slimMessage({ id: 'm1', ts: Date.UTC(2026, 0, 1, 12, 0, 0) })];
+
+  const { messages: llmMessages } = buildMemoryRequest({
+    prompts: { memory: 'sys', labels },
+    config,
+    calibrator,
+    profiles: {
+      1: {
+        names: ['nick'],
+        character: '',
+        interests: '',
+        style: '',
+        details: [],
+        relationship: '',
+        episodes: [{ date: '2026-01-01', what: 'said hi', quote: 'hi there', feeling: 'pleased', weight: 3, addedAt: 'x' }],
+      },
+    },
+    guildMemory: {},
+    messages,
+    selfName: 'Nept',
+  });
+
+  const user = llmMessages[1].content;
+  const profiles = JSON.parse(/<existing_profiles>\n([\s\S]*?)\n<\/existing_profiles>/.exec(user)[1]);
+  assert.deepEqual(profiles['1'].episodes, [{ date: '2026-01-01', what: 'said hi', quote: 'hi there', weight: 3 }]);
+});
+
+test('buildMemoryRequest: features.episodes=false never adds episodes to existing profiles', () => {
+  const config = makeConfig({ features: { episodes: false } });
+  const calibrator = createCalibrator();
+  const messages = [slimMessage({ id: 'm1', ts: Date.UTC(2026, 0, 1, 12, 0, 0) })];
+
+  const { messages: llmMessages } = buildMemoryRequest({
+    prompts: { memory: 'sys', labels },
+    config,
+    calibrator,
+    profiles: { 1: { names: ['nick'], character: '', interests: '', style: '', details: [], relationship: '', episodes: [{ date: '2026-01-01', what: 'x' }] } },
+    guildMemory: {},
+    messages,
+    selfName: 'Nept',
+  });
+
+  const user = llmMessages[1].content;
+  const profiles = JSON.parse(/<existing_profiles>\n([\s\S]*?)\n<\/existing_profiles>/.exec(user)[1]);
+  assert.equal(profiles['1'].episodes, undefined);
+});
+
+// ---- buildMemoryRequest: <existing_lore> ---------------------------------------
+
+test('buildMemoryRequest: <existing_lore> lists all stored titles+keys and the full text of matched entries', () => {
+  const config = makeConfig();
+  const calibrator = createCalibrator();
+  const messages = [slimMessage({ id: 'm1', content: 'remember the great flood', ts: Date.UTC(2026, 0, 1, 12, 0, 0) })];
+  const loreEntries = [
+    { id: 'a', title: 'The Flood', keys: ['flood'], text: 'It flooded once.', always: false, source: 'analyzer', weight: 3, updatedAt: '2026-01-01T00:00:00.000Z' },
+    { id: 'b', title: 'Unrelated Thing', keys: ['banana'], text: 'A banana story.', always: false, source: 'analyzer', weight: 3, updatedAt: '2026-01-02T00:00:00.000Z' },
+  ];
+
+  const { messages: llmMessages } = buildMemoryRequest({
+    prompts: { memory: 'sys', labels },
+    config,
+    calibrator,
+    profiles: {},
+    guildMemory: {},
+    messages,
+    selfName: 'Nept',
+    loreEntries,
+  });
+
+  const user = llmMessages[1].content;
+  const lore = JSON.parse(/<existing_lore>\n([\s\S]*?)\n<\/existing_lore>/.exec(user)[1]);
+  assert.deepEqual(
+    lore.titles.map((t) => t.title).sort(),
+    ['The Flood', 'Unrelated Thing'],
+  );
+  assert.deepEqual(lore.matched, [{ title: 'The Flood', keys: ['flood'], text: 'It flooded once.' }]);
+});
+
+test('buildMemoryRequest: <existing_lore> titles are capped to the 200 most recently updated', () => {
+  const config = makeConfig();
+  const calibrator = createCalibrator();
+  const messages = [slimMessage({ id: 'm1', content: 'nothing relevant', ts: Date.UTC(2026, 0, 1, 12, 0, 0) })];
+  const loreEntries = Array.from({ length: 205 }, (_, i) => ({
+    id: `e${i}`,
+    title: `Entry ${i}`,
+    keys: ['x'.repeat(3)],
+    text: 'text',
+    always: false,
+    source: 'analyzer',
+    weight: 3,
+    updatedAt: new Date(Date.UTC(2026, 0, 1) + i * 60_000).toISOString(),
+  }));
+
+  const { messages: llmMessages } = buildMemoryRequest({
+    prompts: { memory: 'sys', labels },
+    config,
+    calibrator,
+    profiles: {},
+    guildMemory: {},
+    messages,
+    selfName: 'Nept',
+    loreEntries,
+  });
+
+  const user = llmMessages[1].content;
+  const lore = JSON.parse(/<existing_lore>\n([\s\S]*?)\n<\/existing_lore>/.exec(user)[1]);
+  assert.equal(lore.titles.length, 200);
+  assert.ok(lore.titles.some((t) => t.title === 'Entry 204'), 'the most recently updated entry survives the cap');
+  assert.ok(!lore.titles.some((t) => t.title === 'Entry 0'), 'the oldest updated entry is cut');
+});
+
+test('buildMemoryRequest: no <existing_lore> block when there is no stored lore', () => {
+  const config = makeConfig();
+  const calibrator = createCalibrator();
+  const messages = [slimMessage({ id: 'm1', ts: Date.UTC(2026, 0, 1, 12, 0, 0) })];
+
+  const { messages: llmMessages } = buildMemoryRequest({
+    prompts: { memory: 'sys', labels },
+    config,
+    calibrator,
+    profiles: {},
+    guildMemory: {},
+    messages,
+    selfName: 'Nept',
+    loreEntries: [],
+  });
+
+  assert.ok(!llmMessages[1].content.includes('<existing_lore>'));
+});
+
+test('buildMemoryRequest: features.lore=false never renders <existing_lore>, even with stored entries', () => {
+  const config = makeConfig({ features: { lore: false } });
+  const calibrator = createCalibrator();
+  const messages = [slimMessage({ id: 'm1', ts: Date.UTC(2026, 0, 1, 12, 0, 0) })];
+  const loreEntries = [{ id: 'a', title: 'X', keys: ['x'], text: 'text', always: false, source: 'analyzer', weight: 3, updatedAt: 'now' }];
+
+  const { messages: llmMessages } = buildMemoryRequest({
+    prompts: { memory: 'sys', labels },
+    config,
+    calibrator,
+    profiles: {},
+    guildMemory: {},
+    messages,
+    selfName: 'Nept',
+    loreEntries,
+  });
+
+  assert.ok(!llmMessages[1].content.includes('<existing_lore>'));
+});
+
+// ---- analyze: timeoutMs ---------------------------------------------------------
+
+test('analyze: passes memory.timeoutMs (falling back to llm.timeoutMs) as options.timeoutMs', async () => {
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    const hot = {
+      config: makeConfig({ memory: { ...makeConfig().memory, timeoutMs: 300000 } }),
+      prompts: { memory: 'sys', labels },
+    };
+    const calibrator = createCalibrator();
+    let seenOptions = null;
+    const llm = { complete: async (messages, options) => { seenOptions = options; return { text: '{}' }; } };
+    const updater = createMemoryUpdater({ hot, store, llm, calibrator, getSelfName: () => 'Nept' });
+
+    await updater.analyze(guildId, [slimMessage({ id: 'm1' })]);
+    assert.equal(seenOptions.timeoutMs, 300000);
+  });
+});
+
+test('analyze: falls back to llm.timeoutMs when memory.timeoutMs is unset', async () => {
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    const hot = { config: makeConfig(), prompts: { memory: 'sys', labels } }; // makeConfig's memory has no timeoutMs
+    const calibrator = createCalibrator();
+    let seenOptions = null;
+    const llm = { complete: async (messages, options) => { seenOptions = options; return { text: '{}' }; } };
+    const updater = createMemoryUpdater({ hot, store, llm, calibrator, getSelfName: () => 'Nept' });
+
+    await updater.analyze(guildId, [slimMessage({ id: 'm1' })]);
+    assert.equal(seenOptions.timeoutMs, hot.config.llm.timeoutMs);
   });
 });
 

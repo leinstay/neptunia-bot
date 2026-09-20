@@ -13,6 +13,7 @@ import {
   createAdmin,
 } from '../src/admin.js';
 import { emptyAffinity, applyDelta } from '../src/memory/affinity.js';
+import { upsertLore } from '../src/memory/lore.js';
 
 // ---------------------------------------------------------------------------
 // listRules / appendRule / removeRule
@@ -181,12 +182,28 @@ function makeHot(rootDir) {
 function makeStore() {
   const profiles = new Map();
   const forgotten = [];
+  const lore = new Map(); // guildId -> entries[]
   return {
     profiles,
     forgotten,
+    lore,
     state: { data: { llmCount: 5, llmDay: '2026-09-20' } },
     getUser(guildId, userId) {
       return profiles.get(`${guildId}:${userId}`) ?? null;
+    },
+    getLore(guildId) {
+      return lore.get(guildId) ?? [];
+    },
+    setLore(guildId, incoming, opts) {
+      const { entries, upserted } = upsertLore(lore.get(guildId) ?? [], incoming, opts);
+      lore.set(guildId, entries);
+      return upserted;
+    },
+    removeLore(guildId, id) {
+      const current = lore.get(guildId) ?? [];
+      const next = current.filter((e) => e.id !== id);
+      lore.set(guildId, next);
+      return next.length !== current.length;
     },
     adjustAffinity(guildId, userId, delta, reason, opts) {
       const key = `${guildId}:${userId}`;
@@ -563,6 +580,127 @@ test('run: memory.show/memory.forget report an error before the guild has been r
   const { admin } = makeAdmin(rootDir, { getGuildId: () => null });
 
   await assert.rejects(() => admin.run('memory.show', { userId: '123' }, {}), /no guild resolved yet/);
+});
+
+test('run: memory.show also prints the stored episodes (date, weight, what, quote)', async () => {
+  const rootDir = makeRoot();
+  const { admin, store } = makeAdmin(rootDir);
+  store.profiles.set('g1:123', {
+    id: '123',
+    episodes: [{ date: '2026-01-01', what: 'promised to help', quote: 'I got you', feeling: 'touched', weight: 4, addedAt: 'x' }],
+  });
+
+  const result = await admin.run('memory.show', { userId: '123' }, { guildId: 'g1' });
+
+  assert.ok(result.includes('episodes:'));
+  assert.ok(result.includes('2026-01-01'));
+  assert.ok(result.includes('weight 4'));
+  assert.ok(result.includes('promised to help'));
+  assert.ok(result.includes('I got you'));
+});
+
+test('run: memory.show without stored episodes prints no episodes section', async () => {
+  const rootDir = makeRoot();
+  const { admin, store } = makeAdmin(rootDir);
+  store.profiles.set('g1:123', { id: '123', character: 'chatty' });
+
+  const result = await admin.run('memory.show', { userId: '123' }, { guildId: 'g1' });
+
+  assert.ok(!result.includes('episodes:'));
+});
+
+// ---------------------------------------------------------------------------
+// lore: add / list / show / remove
+// ---------------------------------------------------------------------------
+
+test('run: lore.add saves an owner entry, splitting comma-separated keys', async () => {
+  const rootDir = makeRoot();
+  const { admin, store } = makeAdmin(rootDir);
+
+  const result = await admin.run('lore.add', { title: 'Founders Day', keys: ' founders , founding day ', text: 'The server was founded then.' }, { guildId: 'g1' });
+
+  assert.ok(result.includes('Founders Day'));
+  const [entry] = store.getLore('g1');
+  assert.equal(entry.title, 'Founders Day');
+  assert.deepEqual(entry.keys, ['founders', 'founding day']);
+  assert.equal(entry.source, 'owner');
+});
+
+test('run: lore.add rejects an entry with no valid key or empty text', async () => {
+  const rootDir = makeRoot();
+  const { admin } = makeAdmin(rootDir);
+  await assert.rejects(() => admin.run('lore.add', { title: 'X', keys: 'a', text: 'text' }, { guildId: 'g1' }), /invalid lore entry/);
+});
+
+test('run: lore.add overwrites an existing analyzer entry and it becomes an owner entry', async () => {
+  const rootDir = makeRoot();
+  const { admin, store } = makeAdmin(rootDir);
+  store.setLore('g1', [{ title: 'Founders Day', keys: ['founders'], text: 'analyzer text' }], { source: 'analyzer', now: 1000 });
+
+  await admin.run('lore.add', { title: 'Founders Day', keys: 'founders', text: 'owner text', always: true }, { guildId: 'g1' });
+
+  const [entry] = store.getLore('g1');
+  assert.equal(entry.text, 'owner text');
+  assert.equal(entry.source, 'owner');
+  assert.equal(entry.always, true);
+});
+
+test('run: lore.list lists id, title, keys, source and always, filtered by a query', async () => {
+  const rootDir = makeRoot();
+  const { admin, store } = makeAdmin(rootDir);
+  store.setLore('g1', [
+    { title: 'The Flood', keys: ['flood'], text: 'It flooded.' },
+    { title: 'Founders Day', keys: ['founders'], text: 'Founded then.' },
+  ], { source: 'analyzer', now: 1000 });
+
+  const all = await admin.run('lore.list', {}, { guildId: 'g1' });
+  assert.ok(all.includes('The Flood'));
+  assert.ok(all.includes('Founders Day'));
+
+  const filtered = await admin.run('lore.list', { query: 'flood' }, { guildId: 'g1' });
+  assert.ok(filtered.includes('The Flood'));
+  assert.ok(!filtered.includes('Founders Day'));
+});
+
+test('run: lore.list reports when there is nothing stored', async () => {
+  const rootDir = makeRoot();
+  const { admin } = makeAdmin(rootDir);
+  const result = await admin.run('lore.list', {}, { guildId: 'g1' });
+  assert.ok(result.includes('No lore entries'));
+});
+
+test('run: lore.show returns the full entry by id', async () => {
+  const rootDir = makeRoot();
+  const { admin, store } = makeAdmin(rootDir);
+  store.setLore('g1', [{ title: 'The Flood', keys: ['flood'], text: 'It flooded.' }], { source: 'analyzer', now: 1000 });
+  const [{ id }] = store.getLore('g1');
+
+  const result = await admin.run('lore.show', { id }, { guildId: 'g1' });
+  assert.ok(result.includes('The Flood'));
+  assert.ok(result.includes('It flooded.'));
+});
+
+test('run: lore.show rejects an unknown id', async () => {
+  const rootDir = makeRoot();
+  const { admin } = makeAdmin(rootDir);
+  await assert.rejects(() => admin.run('lore.show', { id: 'nope' }, { guildId: 'g1' }), /no lore entry/);
+});
+
+test('run: lore.remove deletes an entry by id and reports its title', async () => {
+  const rootDir = makeRoot();
+  const { admin, store } = makeAdmin(rootDir);
+  store.setLore('g1', [{ title: 'The Flood', keys: ['flood'], text: 'It flooded.' }], { source: 'analyzer', now: 1000 });
+  const [{ id }] = store.getLore('g1');
+
+  const result = await admin.run('lore.remove', { id }, { guildId: 'g1' });
+  assert.ok(result.includes('The Flood'));
+  assert.deepEqual(store.getLore('g1'), []);
+});
+
+test('run: lore.remove rejects an unknown id', async () => {
+  const rootDir = makeRoot();
+  const { admin } = makeAdmin(rootDir);
+  await assert.rejects(() => admin.run('lore.remove', { id: 'nope' }, { guildId: 'g1' }), /no lore entry/);
 });
 
 // ---------------------------------------------------------------------------

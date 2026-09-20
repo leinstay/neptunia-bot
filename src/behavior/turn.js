@@ -253,6 +253,7 @@ export function createTurnRunner({ hot, store, llm, calibrator, client, rng = Ma
           ? pickOtherProfiles(store, guildId, history, trigger?.authorId, config.context.otherProfiles)
           : [],
         channels: memoryOn ? store.listChannels(guildId) : [],
+        loreEntries: memoryOn ? store.getLore(guildId) : [],
         currentChannelId: channel.id,
         descriptions,
       });

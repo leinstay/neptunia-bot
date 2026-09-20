@@ -62,7 +62,7 @@ test('buildCommandTree: one top-level command, hidden by default, named from the
 test('buildCommandTree: top-level leaves (status, reload, poke, set, unset)', () => {
   const [command] = buildCommandTree('nep');
   const names = command.options.map((o) => o.name);
-  assert.deepEqual(names, ['status', 'reload', 'poke', 'set', 'unset', 'rule', 'memory', 'model', 'warmup']);
+  assert.deepEqual(names, ['status', 'reload', 'poke', 'set', 'unset', 'rule', 'memory', 'lore', 'model', 'warmup']);
 
   const status = findOption(command.options, 'status');
   assert.equal(status.type, 1); // SUBCOMMAND
@@ -133,6 +133,33 @@ test('buildCommandTree: memory group (show/forget/affinity)', () => {
   assert.equal(score.max_value, 100);
   const reason = findOption(affinity.options, 'reason');
   assert.equal(reason.required, false);
+});
+
+test('buildCommandTree: lore group (add/list/show/remove)', () => {
+  const [command] = buildCommandTree('nep');
+  const lore = findOption(command.options, 'lore');
+  assert.equal(lore.type, 2); // SUBCOMMAND_GROUP
+  assert.deepEqual(
+    lore.options.map((o) => o.name),
+    ['add', 'list', 'show', 'remove'],
+  );
+
+  const add = findOption(lore.options, 'add');
+  assert.equal(findOption(add.options, 'title').required, true);
+  assert.equal(findOption(add.options, 'keys').required, true);
+  assert.equal(findOption(add.options, 'text').required, true);
+  const always = findOption(add.options, 'always');
+  assert.equal(always.type, 5); // BOOLEAN
+  assert.equal(always.required, false);
+
+  const list = findOption(lore.options, 'list');
+  assert.equal(findOption(list.options, 'query').required, false);
+
+  const show = findOption(lore.options, 'show');
+  assert.equal(findOption(show.options, 'id').required, true);
+
+  const remove = findOption(lore.options, 'remove');
+  assert.equal(findOption(remove.options, 'id').required, true);
 });
 
 test('buildCommandTree: warmup group, every sub-command and its bounds', () => {
@@ -432,6 +459,51 @@ test('interaction handler: memory.show maps the user option to userId', async ()
 
   assert.equal(admin.runCalls[0][0], 'memory.show');
   assert.deepEqual(admin.runCalls[0][1], { userId: 'target1' });
+});
+
+test('interaction handler: lore.add maps title/keys/text/always straight through', async () => {
+  const admin = fakeAdmin();
+  const handler = createInteractionHandler({ hot: baseHot(), admin, getGuildId: () => 'g1' });
+
+  const interaction = fakeInteraction({
+    group: 'lore',
+    subcommand: 'add',
+    optionValues: { title: 'Founders Day', keys: 'founders, founding day', text: 'The server was founded then.', always: true },
+  });
+  await handler(interaction);
+
+  assert.equal(admin.runCalls[0][0], 'lore.add');
+  assert.deepEqual(admin.runCalls[0][1], {
+    title: 'Founders Day',
+    keys: 'founders, founding day',
+    text: 'The server was founded then.',
+    always: true,
+  });
+});
+
+test('interaction handler: lore.add defaults always to false when omitted', async () => {
+  const admin = fakeAdmin();
+  const handler = createInteractionHandler({ hot: baseHot(), admin, getGuildId: () => 'g1' });
+
+  const interaction = fakeInteraction({
+    group: 'lore',
+    subcommand: 'add',
+    optionValues: { title: 'X', keys: 'x', text: 'text' },
+  });
+  await handler(interaction);
+
+  assert.equal(admin.runCalls[0][1].always, false);
+});
+
+test('interaction handler: lore.show/lore.remove map id straight through', async () => {
+  const admin = fakeAdmin();
+  const handler = createInteractionHandler({ hot: baseHot(), admin, getGuildId: () => 'g1' });
+
+  await handler(fakeInteraction({ group: 'lore', subcommand: 'show', optionValues: { id: 'abc123' } }));
+  assert.deepEqual(admin.runCalls[0][1], { id: 'abc123' });
+
+  await handler(fakeInteraction({ group: 'lore', subcommand: 'remove', optionValues: { id: 'abc123' } }));
+  assert.deepEqual(admin.runCalls[1][1], { id: 'abc123' });
 });
 
 test('interaction handler: warmup.channel maps the channel option to channelId and an integer depth', async () => {

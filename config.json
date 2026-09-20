@@ -8,6 +8,8 @@
     "eavesdrop": true,
     "memory": true,
     "relationships": true,
+    "episodes": true,
+    "lore": true,
     "reactions": true,
     "multiMessage": true,
     "vision": true,
@@ -44,7 +46,7 @@
     "gapMarkerMinutes": 20,
     "otherProfiles": 6,
     "tempo": { "liveMessages10min": 4, "deadSilenceMinutes": 45 },
-    "caps": { "interlocutor": 2500, "aboutChat": 2500, "people": 4000, "neighbors": 3000, "server": 2500 },
+    "caps": { "interlocutor": 3500, "aboutChat": 2500, "people": 4000, "neighbors": 3000, "server": 2500, "lore": 1500 },
     "channelActivity": { "liveMessagesPerDay": 20, "deadAfterDays": 7 },
     "vision": { "maxImages": 4, "tokensPerImage": 400, "imageSize": 512, "recentImages": 3, "recentImageMinutes": 30 }
   },
@@ -91,7 +93,15 @@
     "fieldChars": 400,
     "maxDetails": 15,
     "maxInjokes": 15,
-    "maxSelfFacts": 20
+    "maxSelfFacts": 20,
+    "maxEpisodes": 20,
+    "maxNewEpisodes": 3,
+    "timeoutMs": 300000
+  },
+  "lore": {
+    "maxEntries": 500,
+    "scanMessages": 30,
+    "maxMatches": 8
   },
   "relationships": {
     "maxDeltaPerUpdate": 15,

@@ -469,3 +469,138 @@ test('adjustAffinity: persists across store instances', () => {
   assert.equal(affinity.reason, 'nice chat');
   assert.equal(affinity.history.length, 1);
 });
+
+// --- episodes -----------------------------------------------------------------
+
+test('emptyProfile: a fresh profile starts with no episodes', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  const profile = store.touchUser('g1', 'u1', 'Alice', 1000);
+  assert.deepEqual(profile.episodes, []);
+});
+
+test('addEpisodes: appends via mergeEpisodes and marks the profile dirty', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  store.touchUser('g1', 'u1', 'Alice', 1000);
+
+  const added = store.addEpisodes('g1', 'u1', [{ what: 'promised to help' }], { maxEpisodes: 20, maxNew: 3, now: 1000 });
+
+  assert.equal(added, 1);
+  const profile = store.getUser('g1', 'u1');
+  assert.equal(profile.episodes.length, 1);
+  assert.equal(profile.episodes[0].what, 'promised to help');
+});
+
+test('addEpisodes: tolerates a profile written before this feature existed', () => {
+  const dir = tmpDataDir();
+  const guildDir = path.join(dir, 'guilds', 'g1', 'users');
+  fs.mkdirSync(guildDir, { recursive: true });
+  fs.writeFileSync(path.join(guildDir, 'u1.json'), JSON.stringify({ id: 'u1', names: ['Alice'], messageCount: 3 }));
+
+  const store = createStore({ dataDir: dir });
+  const added = store.addEpisodes('g1', 'u1', [{ what: 'first ever episode' }], { maxEpisodes: 20, maxNew: 3, now: 1000 });
+
+  assert.equal(added, 1);
+  assert.equal(store.getUser('g1', 'u1').episodes.length, 1);
+});
+
+test('addEpisodes: an empty/rejected batch changes nothing', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  store.touchUser('g1', 'u1', 'Alice', 1000);
+
+  const added = store.addEpisodes('g1', 'u1', [], { maxEpisodes: 20, maxNew: 3, now: 1000 });
+  assert.equal(added, 0);
+  assert.deepEqual(store.getUser('g1', 'u1').episodes, []);
+});
+
+test('addEpisodes: persists across store instances', () => {
+  const dir = tmpDataDir();
+  const storeA = createStore({ dataDir: dir });
+  storeA.touchUser('g1', 'u1', 'Alice', 1000);
+  storeA.addEpisodes('g1', 'u1', [{ what: 'shared a secret', quote: 'do not tell anyone' }], { maxEpisodes: 20, maxNew: 3, now: 1000 });
+  storeA.flush();
+
+  const storeB = createStore({ dataDir: dir });
+  const episodes = storeB.getUser('g1', 'u1').episodes;
+  assert.equal(episodes.length, 1);
+  assert.equal(episodes[0].quote, 'do not tell anyone');
+});
+
+test('updateUser: never overwrites episodes even if the field is present in fields', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  store.touchUser('g1', 'u1', 'Alice', 1000);
+  store.addEpisodes('g1', 'u1', [{ what: 'a real episode' }], { maxEpisodes: 20, maxNew: 3, now: 1000 });
+
+  store.updateUser('g1', 'u1', { character: 'nice', episodes: [{ what: 'sneaky overwrite attempt' }] });
+
+  const profile = store.getUser('g1', 'u1');
+  assert.equal(profile.character, 'nice');
+  assert.equal(profile.episodes.length, 1);
+  assert.equal(profile.episodes[0].what, 'a real episode');
+});
+
+// --- lore -----------------------------------------------------------------
+
+test('getLore: an empty array for a guild with no lorebook yet', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  assert.deepEqual(store.getLore('g1'), []);
+});
+
+test('setLore: inserts entries via upsertLore and marks the guild lorebook dirty', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+
+  const upserted = store.setLore('g1', [{ title: 'The Flood', keys: ['flood', 'the water'], text: 'It flooded once.' }], {
+    source: 'analyzer',
+    now: 1000,
+  });
+
+  assert.equal(upserted, 1);
+  const entries = store.getLore('g1');
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0].title, 'The Flood');
+  assert.equal(entries[0].source, 'analyzer');
+});
+
+test('setLore: an owner entry is never overwritten by a later analyzer update', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  store.setLore('g1', [{ title: 'Founders Day', keys: ['founders'], text: 'owner text', always: true }], { source: 'owner', now: 1000 });
+
+  store.setLore('g1', [{ title: 'Founders Day', keys: ['founders'], text: 'analyzer tries to change this' }], {
+    source: 'analyzer',
+    now: 2000,
+  });
+
+  const entries = store.getLore('g1');
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0].text, 'owner text');
+  assert.equal(entries[0].source, 'owner');
+});
+
+test('removeLore: deletes by id and reports whether anything was removed', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  store.setLore('g1', [{ title: 'The Flood', keys: ['flood'], text: 'It flooded once.' }], { source: 'analyzer', now: 1000 });
+  const [{ id }] = store.getLore('g1');
+
+  assert.equal(store.removeLore('g1', id), true);
+  assert.deepEqual(store.getLore('g1'), []);
+  assert.equal(store.removeLore('g1', id), false, 'already gone');
+});
+
+test('lore: persists across store instances', () => {
+  const dir = tmpDataDir();
+  const storeA = createStore({ dataDir: dir });
+  storeA.setLore('g1', [{ title: 'The Flood', keys: ['flood'], text: 'It flooded once.' }], { source: 'analyzer', now: 1000 });
+  storeA.flush();
+
+  const storeB = createStore({ dataDir: dir });
+  const entries = storeB.getLore('g1');
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0].title, 'The Flood');
+});

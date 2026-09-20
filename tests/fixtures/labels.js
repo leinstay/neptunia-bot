@@ -74,6 +74,12 @@ export const labels = {
     unknown: 'you barely know anything about this person yet',
     messageCount: 'messages you have seen from them: {count}',
     affinity: 'attitude: {score} ({band}) — {reason}',
+    episodes: 'moments you remember together:',
+    episode: '{date}: {what} — "{quote}" ({feeling})',
+    episodeNoQuote: '{date}: {what} ({feeling})',
+  },
+  lore: {
+    entry: '{title}: {text}',
   },
   affinity: {
     bands: {

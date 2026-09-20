@@ -28,13 +28,16 @@
     "linkText": "[link: {site} — {title} | {text}]",
     "filePreview": "[file: {name} | {text}]",
     "forwarded": "[forwarded: {text}]",
+    "forwardedFrom": "[forwarded from #{channel}: {text}]",
+    "frameAttached": "[still frame: attached image {n}]",
+    "unknownDuration": "?:??",
     "file": "[file: {name}]",
     "sticker": "[sticker: {name}]"
   },
   "senses": {
     "imageSee": "Pictures marked as attached you see yourself.",
     "imageDescribed": "Other pictures come with a short description from a helper — you did not see them yourself.",
-    "imageBlind": "Pictures appear in the transcript but you cannot see what is on them.",
+    "imageBlind": "Pictures not marked as attached appear as a label — you cannot see what is on them.",
     "gifDescribed": "GIFs come with a one-line description of a frame — you did not watch them.",
     "gifBlind": "GIFs appear in the transcript but you cannot see them.",
     "videoDescribed": "Videos show a name, a duration and a description of a single still frame — you have never watched or heard any video.",
@@ -66,7 +69,13 @@
     "relationship": "Your history: {text}",
     "unknown": "You don't know anything about this person yet.",
     "messageCount": "Messages seen: {count}",
-    "affinity": "Your attitude: {score} ({band}) — {reason}"
+    "affinity": "Your attitude: {score} ({band}) — {reason}",
+    "episodes": "Moments you remember with this person:",
+    "episode": "{date}: {what} — \"{quote}\" — felt: {feeling}",
+    "episodeNoQuote": "{date}: {what} — felt: {feeling}"
+  },
+  "lore": {
+    "entry": "{title} — {text}"
   },
   "affinity": {
     "bands": {

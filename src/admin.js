@@ -389,7 +389,16 @@ export function createAdmin({ hot, store, client, spontaneous, calibrator, getGu
 
     const profile = store.getUser(guildId, userId);
     if (!profile) throw new Error(`no profile for ${userId}`);
-    return JSON.stringify(profile, null, 2);
+
+    const lines = [JSON.stringify(profile, null, 2)];
+    if (profile.episodes?.length) {
+      lines.push('', 'episodes:');
+      for (const ep of profile.episodes) {
+        const quote = ep.quote ? ` "${ep.quote}"` : '';
+        lines.push(`  ${ep.date} [weight ${ep.weight}] ${ep.what}${quote}`);
+      }
+    }
+    return lines.join('\n');
   }
 
   function cmdMemoryForget(args, context) {
@@ -440,6 +449,75 @@ export function createAdmin({ hot, store, client, spontaneous, calibrator, getGu
       now: Date.now(),
     });
     return `Set affinity for ${userId} to ${affinity.score} (${affinityBand(affinity.score)}).`;
+  }
+
+  // ---------------------------------------------------------------------
+  // lore: the owner's side of the server lorebook (src/memory/lore.js)
+  // ---------------------------------------------------------------------
+
+  function loreLine(entry) {
+    return `${entry.id}  ${entry.title}  keys=${entry.keys.join(', ')}  source=${entry.source}${entry.always ? ' always' : ''}`;
+  }
+
+  function cmdLoreAdd(args, context) {
+    const guildId = resolvedGuildId(context);
+    if (!guildId) throw new Error('no guild resolved yet');
+
+    const title = String(args?.title ?? '').trim();
+    if (!title) throw new Error('a title is required');
+    const keys = String(args?.keys ?? '')
+      .split(',')
+      .map((k) => k.trim())
+      .filter(Boolean);
+    const text = String(args?.text ?? '').trim();
+    if (!text) throw new Error('text is required');
+
+    const maxEntries = hot.config?.lore?.maxEntries ?? Infinity;
+    const upserted = store.setLore(guildId, [{ title, keys, text, always: Boolean(args?.always) }], {
+      source: 'owner',
+      now: Date.now(),
+      maxEntries,
+    });
+    if (upserted === 0) {
+      throw new Error('invalid lore entry: needs a title, at least one 2-40 char key, and non-empty text');
+    }
+    return `Lore entry saved: ${title}`;
+  }
+
+  function cmdLoreList(args, context) {
+    const guildId = resolvedGuildId(context);
+    if (!guildId) throw new Error('no guild resolved yet');
+
+    const query = String(args?.query ?? '').trim().toLowerCase();
+    let entries = store.getLore(guildId);
+    if (query) {
+      entries = entries.filter(
+        (entry) => entry.title.toLowerCase().includes(query) || entry.keys.some((key) => key.includes(query)),
+      );
+    }
+    if (entries.length === 0) return 'No lore entries.';
+    return entries.map(loreLine).join('\n');
+  }
+
+  function cmdLoreShow(args, context) {
+    const guildId = resolvedGuildId(context);
+    if (!guildId) throw new Error('no guild resolved yet');
+
+    const id = String(args?.id ?? '').trim();
+    const entry = store.getLore(guildId).find((e) => e.id === id);
+    if (!entry) throw new Error(`no lore entry ${id}`);
+    return JSON.stringify(entry, null, 2);
+  }
+
+  function cmdLoreRemove(args, context) {
+    const guildId = resolvedGuildId(context);
+    if (!guildId) throw new Error('no guild resolved yet');
+
+    const id = String(args?.id ?? '').trim();
+    const entry = store.getLore(guildId).find((e) => e.id === id);
+    if (!entry) throw new Error(`no lore entry ${id}`);
+    store.removeLore(guildId, id);
+    return `Removed lore entry ${id}: ${entry.title}`;
   }
 
   const MODEL_ID_RE = /^[\w.:/-]{3,100}$/;
@@ -621,6 +699,10 @@ function warmupLocalConfigPath() {
     'memory.show': (args, context) => cmdMemoryShow(args, context),
     'memory.forget': (args, context) => cmdMemoryForget(args, context),
     'memory.affinity': (args, context) => cmdMemoryAffinity(args, context),
+    'lore.add': (args, context) => cmdLoreAdd(args, context),
+    'lore.list': (args, context) => cmdLoreList(args, context),
+    'lore.show': (args, context) => cmdLoreShow(args, context),
+    'lore.remove': (args, context) => cmdLoreRemove(args, context),
     'model.show': () => cmdModelShow(),
     'model.set': (args) => cmdModelSet(args),
     'warmup.status': withWarmup(() => cmdWarmupStatus()),

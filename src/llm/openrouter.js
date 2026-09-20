@@ -54,6 +54,9 @@ export function createLlm({ apiKey, getConfig, calibrator, state, fetchImpl = fe
    * callers use it to tell a cut-off completion (`'length'`) from a genuinely
    * bad answer.
    * `options.model` / `options.maxOutputTokens` override the config defaults.
+   * `options.timeoutMs` overrides `llm.timeoutMs` for the request's abort
+   * signal — the analyzer (a large batch, a long JSON answer) and the media
+   * describer need more room than a chat reply's default.
    * `options.countAgainstDailyCap` (default true) — see the header comment
    * for the one deliberate exception.
    */
@@ -88,7 +91,7 @@ export function createLlm({ apiKey, getConfig, calibrator, state, fetchImpl = fe
             'X-Title': 'neptunia-bot',
           },
           body: JSON.stringify(body),
-          signal: AbortSignal.timeout(cfg.timeoutMs),
+          signal: AbortSignal.timeout(options.timeoutMs ?? cfg.timeoutMs),
         });
 
         if (!response.ok) {

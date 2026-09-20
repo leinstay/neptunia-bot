@@ -283,6 +283,39 @@ test('complete: finishReason is undefined when the provider omits it', async () 
   assert.equal(result.finishReason, undefined);
 });
 
+test('complete: defaults to llm.timeoutMs for the request signal when options.timeoutMs is absent', async () => {
+  let seenSignal;
+  const llm = createLlm({
+    apiKey: 'k',
+    getConfig: () => baseConfig({ timeoutMs: 100000 }),
+    calibrator: fakeCalibrator(),
+    state: fakeState(),
+    fetchImpl: async (url, init) => {
+      seenSignal = init.signal;
+      return okResponse('hi');
+    },
+  });
+  await llm.complete([{ role: 'user', content: 'hi' }]);
+  assert.equal(seenSignal.aborted, false);
+});
+
+test('complete: options.timeoutMs overrides llm.timeoutMs for the request signal', async () => {
+  let seenSignal;
+  const llm = createLlm({
+    apiKey: 'k',
+    getConfig: () => baseConfig({ timeoutMs: 100000 }),
+    calibrator: fakeCalibrator(),
+    state: fakeState(),
+    fetchImpl: async (url, init) => {
+      seenSignal = init.signal;
+      return okResponse('hi');
+    },
+  });
+  await llm.complete([{ role: 'user', content: 'hi' }], { timeoutMs: 5 });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(seenSignal.aborted, true, 'a short options.timeoutMs must win over the much longer llm.timeoutMs');
+});
+
 // Only ONE test exercises the real retry backoff sleep (~1.5s at attempt 1).
 test('complete: retries once on a 503 then succeeds', async () => {
   let calls = 0;

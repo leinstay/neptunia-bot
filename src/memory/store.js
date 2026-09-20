@@ -15,6 +15,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { log } from '../log.js';
 import { emptyAffinity, applyDelta } from './affinity.js';
+import { mergeEpisodes } from './episodes.js';
+import { upsertLore } from './lore.js';
 
 function readJson(file, fallback) {
   try {
@@ -51,6 +53,7 @@ export function emptyProfile(id) {
     details: [],
     relationship: '',
     affinity: emptyAffinity(),
+    episodes: [],
     updatedAt: null,
   };
 }
@@ -100,6 +103,7 @@ export function createStore({ dataDir }) {
   const channelsDir = (guildId) => path.join(guildDir(guildId), 'channels');
   const channelFile = (guildId, channelId) => path.join(channelsDir(guildId), `${channelId}.json`);
   const mediaCacheFile = (guildId) => path.join(guildDir(guildId), 'media.json');
+  const loreFile = (guildId) => path.join(guildDir(guildId), 'lore.json');
   const stateFile = path.join(dataDir, 'state.json');
 
   const stateEntry = entry(stateFile, () => ({}));
@@ -137,14 +141,32 @@ export function createStore({ dataDir }) {
     /**
      * Merge LLM-extracted fields into a profile. `affinity` is never taken
      * from here — it only ever changes through `adjustAffinity`, which keeps
-     * its clamping and history bookkeeping in one place.
+     * its clamping and history bookkeeping in one place. `episodes` likewise
+     * only ever changes through `addEpisodes` (src/memory/episodes.js), which
+     * appends and evicts instead of overwriting.
      */
     updateUser(guildId, userId, fields) {
       const item = entry(userFile(guildId, userId), () => emptyProfile(String(userId)));
-      const { affinity, ...safeFields } = fields ?? {};
+      const { affinity, episodes, ...safeFields } = fields ?? {};
       Object.assign(item.value, safeFields, { updatedAt: new Date().toISOString() });
       item.dirty = true;
       return item.value;
+    },
+
+    /**
+     * Append freshly-extracted episodes to a member's profile via
+     * src/memory/episodes.js#mergeEpisodes: validated, deduplicated against
+     * what is already stored, then evicted back down to `opts.maxEpisodes`
+     * (lowest weight, oldest first) if needed. Returns how many were added.
+     */
+    addEpisodes(guildId, userId, incoming, opts) {
+      const item = entry(userFile(guildId, userId), () => emptyProfile(String(userId)));
+      const { episodes, added } = mergeEpisodes(item.value.episodes, incoming, opts);
+      if (added > 0) {
+        item.value.episodes = episodes;
+        item.dirty = true;
+      }
+      return added;
     },
 
     /** Fold one delta into a member's stored affinity (see src/memory/affinity.js). */
@@ -270,6 +292,37 @@ export function createStore({ dataDir }) {
     markMediaCacheDirty(guildId) {
       const item = entries.get(mediaCacheFile(guildId));
       if (item) item.dirty = true;
+    },
+
+    /** Every stored lorebook entry of a guild (data/guilds/<id>/lore.json). Never auto-created empty on disk. */
+    getLore(guildId) {
+      return entry(loreFile(guildId), () => []).value;
+    },
+
+    /**
+     * Merge `incoming` entries into the guild's lorebook via
+     * src/memory/lore.js#upsertLore: an analyzer update never touches an
+     * owner entry, an owner write always wins. Returns how many were
+     * inserted or updated.
+     */
+    setLore(guildId, incoming, opts) {
+      const item = entry(loreFile(guildId), () => []);
+      const { entries: nextEntries, upserted } = upsertLore(item.value, incoming, opts);
+      if (upserted > 0) {
+        item.value = nextEntries;
+        item.dirty = true;
+      }
+      return upserted;
+    },
+
+    /** Delete one lorebook entry by id. Returns whether anything was removed. */
+    removeLore(guildId, id) {
+      const item = entry(loreFile(guildId), () => []);
+      const before = item.value.length;
+      item.value = item.value.filter((lore) => lore.id !== id);
+      const removed = item.value.length !== before;
+      if (removed) item.dirty = true;
+      return removed;
     },
 
     getBuffer(guildId) {

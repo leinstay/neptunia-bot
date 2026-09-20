@@ -133,7 +133,9 @@ function mediaTags(message, labels, context = {}) {
     pushLabel(mediaLabelFor(link, { attachedIndex, description, unknownDuration }));
   }
   for (const sticker of message.stickers ?? []) tags.push(fill(labels.transcript.sticker, { name: sticker }));
-  return tags;
+  // A label key missing from an older labels.json (fill() returns '' for it)
+  // must not leave a stray double space where that tag would have sat.
+  return tags.filter(Boolean);
 }
 
 /**
@@ -147,7 +149,7 @@ function renderForwarded(snapshot, labels, context, maxChars, channelName) {
   const body = [];
   if (snapshot.content) body.push(truncate(snapshot.content, maxChars));
   body.push(...mediaTags(snapshot, labels, context));
-  const text = body.join(' ').trim();
+  const text = body.filter(Boolean).join(' ').trim();
   if (channelName && labels.transcript.forwardedFrom) {
     return fill(labels.transcript.forwardedFrom, { channel: channelName, text });
   }
@@ -230,7 +232,7 @@ export function formatTranscript(messages, options) {
     }
 
     const marker = mode === 'memory' && message.direct ? DIRECT_MARKER : '';
-    parts.push(`${marker}${head} ${who}: ${body.join(' ')}`.trimEnd());
+    parts.push(`${marker}${head} ${who}: ${body.filter(Boolean).join(' ')}`.trimEnd());
     items.push({ id: message.id, index, ts: message.ts, text: parts.join('\n') });
     previous = message;
     previousChannelId = message.channelId;

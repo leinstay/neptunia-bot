@@ -69,7 +69,14 @@ export function createDescriber({ hot, store, llm, now = Date.now }) {
           { role: 'system', content: promptText },
           { role: 'user', content: [{ type: 'image_url', image_url: { url: imageUrl } }] },
         ],
-        { model: mediaCfg.model, maxOutputTokens: mediaCfg.maxOutputTokens, countAgainstDailyCap },
+        {
+          model: mediaCfg.model,
+          maxOutputTokens: mediaCfg.maxOutputTokens,
+          countAgainstDailyCap,
+          // A vision request has its own (usually cheap/fast) model, but still
+          // deserves the same chat timeout, not the analyzer's much larger one.
+          timeoutMs: hot.config.llm?.timeoutMs,
+        },
       );
     } catch {
       touchKey(cache, item.itemId, { miss: true, ts: now() });

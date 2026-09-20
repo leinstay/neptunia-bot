@@ -15,6 +15,8 @@ import { fitSections } from '../llm/budget.js';
 import { estimateTokens } from '../llm/tokens.js';
 import { computeTempo, fill, formatNow, formatTranscript, renderTempo, renderTranscript } from '../discord/format.js';
 import { affinityBand } from '../memory/affinity.js';
+import { sortEpisodesForDisplay } from '../memory/episodes.js';
+import { matchLore } from '../memory/lore.js';
 import { channelActivity, renderChannel } from '../memory/channels.js';
 import { selectPictures, mediaProxyUrl } from '../discord/media.js';
 
@@ -25,37 +27,95 @@ function block(tag, body) {
 }
 
 /**
+ * The caller's remembered episodes as `[heading, ...oneLinePerEpisode]`,
+ * heaviest weight first then newest (see sortEpisodesForDisplay). `[]` when
+ * there is nothing to show, or when `labels.profile` lacks any of
+ * `episodes`/`episode`/`episodeNoQuote` — an older labels.json simply never
+ * renders this, see .claude/docs/prompt-contract.md.
+ */
+function episodeLines(episodes, labels) {
+  const p = labels.profile;
+  if (!Array.isArray(episodes) || episodes.length === 0) return [];
+  if (!p.episodes || !p.episode || !p.episodeNoQuote) return [];
+  const lines = sortEpisodesForDisplay(episodes).map((ep) =>
+    fill(ep.quote ? p.episode : p.episodeNoQuote, { date: ep.date, what: ep.what, quote: ep.quote, feeling: ep.feeling }),
+  );
+  return [p.episodes, ...lines];
+}
+
+/**
+ * Keep `lines[0]` (the episodes heading) plus as many of the following lines
+ * (already ordered heaviest-first) as fit `remaining` tokens on top of
+ * `restCost` (the rest of the profile) -- the lightest ones are dropped first
+ * simply because they sort last. `[]` when even the heading does not fit.
+ */
+function fitEpisodeLines(lines, remaining, cost) {
+  if (lines.length === 0) return [];
+  const [heading, ...rest] = lines;
+  const headingCost = cost(heading);
+  if (headingCost > remaining) return [];
+  const kept = [heading];
+  let used = headingCost;
+  for (const line of rest) {
+    const price = cost(line);
+    if (used + price > remaining) break;
+    kept.push(line);
+    used += price;
+  }
+  return kept;
+}
+
+/**
  * One person's memory as prompt text; '' when nothing has been learned yet.
  * When `relationships` is on and the profile carries a non-neutral (non-zero
  * score or non-empty reason) affinity, an attitude line is inserted right
  * after the heading — even when it ends up being the profile's only content,
  * since the persona's attitude toward someone is useful on its own.
+ *
+ * For the interlocutor (`interlocutor: true`), right after the attitude line
+ * (or right after the heading, if there is none), `opts.episodes.enabled`
+ * additionally renders the caller's remembered episodes -- see
+ * .claude/docs/prompt-contract.md, "<people>". `opts.episodes.cap`/`.cost`
+ * (when given) trim the episode list, heaviest-first, to fit that token
+ * budget on top of the rest of the profile; without them every episode
+ * renders.
  */
-export function renderProfile(profile, labels, { interlocutor = false, relationships = false } = {}) {
+export function renderProfile(profile, labels, { interlocutor = false, relationships = false, episodes } = {}) {
   if (!profile) return '';
   const p = labels.profile;
   const name = profile.names?.[0] ?? profile.id;
-  const lines = [];
 
+  const attitudeLines = [];
   const affinity = profile.affinity;
   const hasAffinity = relationships && affinity && (affinity.score !== 0 || Boolean(affinity.reason));
   if (hasAffinity) {
-    lines.push(
+    attitudeLines.push(
       fill(p.affinity, { score: affinity.score, band: labels.affinity?.bands?.[affinityBand(affinity.score)], reason: affinity.reason }),
     );
   }
 
-  if (profile.names?.length > 1) lines.push(fill(p.formerNames, { names: profile.names.slice(1).join(', ') }));
-  if (profile.character) lines.push(fill(p.character, { text: profile.character }));
-  if (profile.interests) lines.push(fill(p.interests, { text: profile.interests }));
-  if (profile.style) lines.push(fill(p.style, { text: profile.style }));
-  if (profile.details?.length) lines.push(fill(p.details, { text: profile.details.join('; ') }));
-  if (profile.relationship) lines.push(fill(p.relationship, { text: profile.relationship }));
-  if (lines.length === 0 && !interlocutor) return '';
-  if (lines.length === 0) lines.push(p.unknown);
-  if (profile.messageCount) lines.push(fill(p.messageCount, { count: profile.messageCount }));
+  const restLines = [];
+  if (profile.names?.length > 1) restLines.push(fill(p.formerNames, { names: profile.names.slice(1).join(', ') }));
+  if (profile.character) restLines.push(fill(p.character, { text: profile.character }));
+  if (profile.interests) restLines.push(fill(p.interests, { text: profile.interests }));
+  if (profile.style) restLines.push(fill(p.style, { text: profile.style }));
+  if (profile.details?.length) restLines.push(fill(p.details, { text: profile.details.join('; ') }));
+  if (profile.relationship) restLines.push(fill(p.relationship, { text: profile.relationship }));
+  const hasContent = attitudeLines.length > 0 || restLines.length > 0;
+  if (!hasContent && !interlocutor) return '';
+  if (!hasContent) restLines.push(p.unknown);
+  if (profile.messageCount) restLines.push(fill(p.messageCount, { count: profile.messageCount }));
+
   const mark = interlocutor ? p.interlocutorMark : '';
-  return `## ${name}${mark}\n${lines.join('\n')}`;
+  const heading = `## ${name}${mark}`;
+
+  let renderedEpisodes = interlocutor && episodes?.enabled ? episodeLines(profile.episodes, labels) : [];
+  if (renderedEpisodes.length && typeof episodes.cap === 'number' && typeof episodes.cost === 'function') {
+    const restText = [heading, ...attitudeLines, ...restLines].join('\n');
+    renderedEpisodes = fitEpisodeLines(renderedEpisodes, episodes.cap - episodes.cost(restText), episodes.cost);
+  }
+
+  return [heading, ...attitudeLines, ...renderedEpisodes, ...restLines].join('\n');
 }
 
 /**
@@ -88,6 +148,27 @@ function aboutChatItems(guildMemory, labels) {
 }
 
 /**
+ * Render the `<lore>` block's entries: whatever `matchLore` (src/memory/lore.js)
+ * surfaces from the last `lore.scanMessages` transcript messages plus the
+ * trigger, via `labels.lore.entry`. `[]` when there is no stored lore, no
+ * match, or `labels.lore.entry` is missing (an older labels.json never
+ * breaks -- the block is simply omitted).
+ */
+function loreItems(loreEntries, history, trigger, labels, loreCfg) {
+  const entry = labels.lore?.entry;
+  if (!entry) return [];
+  const entries = Array.isArray(loreEntries) ? loreEntries : [];
+  if (entries.length === 0) return [];
+
+  const scan = Math.max(0, loreCfg?.scanMessages ?? 30);
+  const recentTexts = history.slice(-scan).map((m) => m.content ?? '').filter(Boolean);
+  if (trigger?.content) recentTexts.push(trigger.content);
+
+  const matched = matchLore(entries, recentTexts, { maxMatches: loreCfg?.maxMatches ?? Infinity });
+  return matched.map((lore) => fill(entry, { title: lore.title, text: lore.text }));
+}
+
+/**
  * Assemble the `<now>…<task>` user-message text from already-rendered parts.
  * Factored out so a fallback rendering (see `textFallback` below) can reuse
  * every block untouched except `<chat>`, which is the only one that can ever
@@ -99,6 +180,7 @@ function assembleUser({ now, timezone, labels, sensesText, kept, tempoText, task
     block('senses', sensesText),
     block('about_chat', kept.aboutChat.join('\n')),
     block('server', kept.server.join('\n\n')),
+    block('lore', kept.lore.join('\n\n')),
     block('self_facts', kept.self.join('\n')),
     block('people', [...kept.interlocutor, ...kept.people].join('\n\n')),
     block('other_channels', kept.neighbors.join('\n\n')),
@@ -159,6 +241,7 @@ function renderSenses(config, labels) {
  * @param {object|null} input.interlocutor Profile of the trigger's author.
  * @param {object[]} input.otherProfiles   Profiles of other people in the transcript, most relevant first.
  * @param {object[]} [input.channels]      The server's channel map (store.listChannels), [] when memory is off.
+ * @param {object[]} [input.loreEntries]   The guild's stored lorebook (store.getLore), [] when memory is off.
  * @param {string|null} [input.currentChannelId]  Id of the channel this turn happens in.
  * @param {Map<string, string>} [input.descriptions]  Item id -> describer caption, for pictures
  *   NOT selected to be attached (see src/behavior/turn.js, src/memory/describe.js).
@@ -169,6 +252,8 @@ export function buildRequest(input) {
   const labels = requireLabels(prompts);
   const { timezone } = config.bot;
   const relationships = config.features?.relationships !== false;
+  const episodesOn = config.features?.episodes !== false;
+  const loreOn = config.features?.lore !== false;
   const visionCfg = config.context.vision ?? {};
   const visionOn = config.features?.vision !== false;
   const pictures = visionOn ? selectPictures({ trigger, history, visionCfg, now }) : [];
@@ -217,16 +302,23 @@ export function buildRequest(input) {
     pictures.length * (visionCfg.tokensPerImage ?? 0) -
     TAG_OVERHEAD;
 
+  const episodesOpt = { enabled: episodesOn, cap: caps.interlocutor, cost };
   const { kept, stats, used } = fitSections(
     [
       { name: 'fixed', required: true, items: [system, task, formatNow(now, timezone, labels.locale), sensesText, tempoText] },
       {
         name: 'interlocutor',
         cap: caps.interlocutor,
-        items: [renderProfile(input.interlocutor, labels, { interlocutor: true, relationships })].filter(Boolean),
+        items: [renderProfile(input.interlocutor, labels, { interlocutor: true, relationships, episodes: episodesOpt })].filter(Boolean),
       },
       { name: 'aboutChat', cap: caps.aboutChat, items: aboutChatItems(input.guildMemory, labels) },
       { name: 'self', cap: caps.aboutChat, items: (input.guildMemory?.self ?? []).map((fact) => `- ${fact}`) },
+      {
+        name: 'lore',
+        cap: caps.lore,
+        keep: 'first',
+        items: loreOn ? loreItems(input.loreEntries, history, trigger, labels, config.lore) : [],
+      },
       {
         name: 'server',
         cap: caps.server ?? 2500,

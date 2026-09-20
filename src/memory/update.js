@@ -14,6 +14,7 @@ import { TokenLimitError } from '../llm/openrouter.js';
 import { isDescribable } from '../discord/media.js';
 import { log } from '../log.js';
 import { emptyAffinity } from './affinity.js';
+import { keywordMatches } from './lore.js';
 
 const BACKOFF_MS = 15 * 60_000;
 const MIN_LIVE_BATCH = 20; // the live analyzer never shrinks below this many messages
@@ -96,6 +97,27 @@ function pickChannelFields(channel) {
 }
 
 /**
+ * The `<existing_lore>` input: ALL stored titles with their keys (titles+keys
+ * only, capped to the 200 most recently updated -- so the analyzer never
+ * creates a duplicate title it just cannot see), plus the full text of
+ * entries the batch's own messages touch (so those can be updated with
+ * context). '' when the lorebook is empty. See .claude/docs/prompt-contract.md,
+ * "The analyzer".
+ * @param {object[]} loreEntries   Every stored entry for the guild.
+ * @param {string[]} batchTexts    Plain message contents of this batch.
+ */
+function existingLoreBlock(loreEntries, batchTexts) {
+  const entries = Array.isArray(loreEntries) ? loreEntries : [];
+  if (entries.length === 0) return '';
+  const titles = [...entries]
+    .sort((a, b) => String(b.updatedAt ?? '').localeCompare(String(a.updatedAt ?? '')))
+    .slice(0, 200)
+    .map((entry) => ({ title: entry.title, keys: entry.keys }));
+  const matched = keywordMatches(entries, batchTexts).map((entry) => ({ title: entry.title, keys: entry.keys, text: entry.text }));
+  return block('existing_lore', JSON.stringify({ titles, matched }));
+}
+
+/**
  * Build one memory-update LLM request. Pure: no I/O, no clock reads besides
  * what is already baked into `messages`.
  *
@@ -108,14 +130,18 @@ function pickChannelFields(channel) {
  * @param {object} [input.channels]   Stored channel entries of the batch's distinct channels, keyed by channel id.
  * @param {object[]} input.messages   Slim buffered messages (oldest first) to summarize.
  * @param {string} input.selfName     The persona's display name in this guild.
+ * @param {object[]} [input.loreEntries]  Every stored lorebook entry of the guild (store.getLore),
+ *   for the `<existing_lore>` input; omitted or `features.lore: false` -> no block at all.
  * @param {Map<string, string>} [input.descriptions]  Item id -> describer caption
  *   (src/memory/describe.js), for pictures the analyzer cannot see itself.
  * @returns {{ messages: object[], consumed: number }}
  */
-export function buildMemoryRequest({ prompts, config, calibrator, profiles, guildMemory, channels, messages, selfName, descriptions }) {
+export function buildMemoryRequest({ prompts, config, calibrator, profiles, guildMemory, channels, messages, selfName, loreEntries, descriptions }) {
   const { timezone } = config.bot;
   const labels = requireLabels(prompts);
   const relationships = config.features?.relationships !== false;
+  const episodesOn = config.features?.episodes !== false;
+  const loreOn = config.features?.lore !== false;
   const system = fillTemplate(prompts.memory, { name: selfName });
   const characterBlock = relationships ? block('character', fillTemplate(prompts['character-card'], { name: selfName })) : '';
 
@@ -126,9 +152,13 @@ export function buildMemoryRequest({ prompts, config, calibrator, profiles, guil
       const affinity = profile?.affinity ?? emptyAffinity();
       fields.affinity = { score: affinity.score, reason: affinity.reason };
     }
+    if (episodesOn && Array.isArray(profile?.episodes) && profile.episodes.length > 0) {
+      fields.episodes = profile.episodes.map(({ date, what, quote, weight }) => ({ date, what, quote, weight }));
+    }
     existingProfiles[id] = fields;
   }
   const profilesBlock = block('existing_profiles', JSON.stringify(existingProfiles));
+  const loreBlock = loreOn ? existingLoreBlock(loreEntries, messages.map((m) => m.content).filter(Boolean)) : '';
   const guildBlock = block('existing_guild', JSON.stringify(pickGuildFields(guildMemory)));
 
   const existingChannels = {};
@@ -154,7 +184,11 @@ export function buildMemoryRequest({ prompts, config, calibrator, profiles, guil
 
   const { kept } = fitSections(
     [
-      { name: 'fixed', required: true, items: [system, characterBlock, profilesBlock, guildBlock, channelsBlock].filter(Boolean) },
+      {
+        name: 'fixed',
+        required: true,
+        items: [system, characterBlock, profilesBlock, loreBlock, guildBlock, channelsBlock].filter(Boolean),
+      },
       { name: 'transcript', keep: 'newest', items: transcriptTexts },
     ],
     limit,
@@ -164,7 +198,7 @@ export function buildMemoryRequest({ prompts, config, calibrator, profiles, guil
   const keptTranscriptItems = transcriptItems.slice(transcriptItems.length - kept.transcript.length);
   const newMessagesBlock = block('new_messages', renderTranscript(keptTranscriptItems, timezone, labels));
 
-  const user = [characterBlock, profilesBlock, guildBlock, channelsBlock, newMessagesBlock].filter(Boolean).join('\n\n');
+  const user = [characterBlock, profilesBlock, loreBlock, guildBlock, channelsBlock, newMessagesBlock].filter(Boolean).join('\n\n');
 
   return {
     messages: [
@@ -204,10 +238,16 @@ function clampStringArray(value, maxChars, maxItems) {
  * @param {{ enabled: boolean, maxDeltaPerUpdate: number, historySize: number, now?: number }} [relationships]
  *   Only when `enabled`, `raw.affinity` (a `{ delta, reason }` change) is folded into the
  *   stored score via `store.adjustAffinity`. Absent/disabled -> affinity is ignored entirely.
- * @returns {{ users: number, guild: boolean, self: boolean, affinity: number, channels: number }}
+ * @param {{ enabled: boolean, maxEpisodes: number, maxNew: number, now?: number }} [episodes]
+ *   Only when `enabled`, each user's `raw.episodes` (a new-moments array) is folded in via
+ *   `store.addEpisodes` (src/memory/episodes.js#mergeEpisodes). Absent/disabled -> ignored entirely.
+ * @param {{ enabled: boolean, maxEntries: number, now?: number }} [lore]
+ *   Only when `enabled`, `update.lore` (the server's lorebook) is folded in via `store.setLore`
+ *   (src/memory/lore.js#upsertLore, source: 'analyzer'). Absent/disabled -> ignored entirely.
+ * @returns {{ users: number, guild: boolean, self: boolean, affinity: number, channels: number, episodes: number, lore: number }}
  */
-export function applyMemoryUpdate(store, guildId, update, cfg, knownUserIds, knownChannelIds = new Set(), relationships) {
-  const result = { users: 0, guild: false, self: false, affinity: 0, channels: 0 };
+export function applyMemoryUpdate(store, guildId, update, cfg, knownUserIds, knownChannelIds = new Set(), relationships, episodes, lore) {
+  const result = { users: 0, guild: false, self: false, affinity: 0, channels: 0, episodes: 0, lore: 0 };
   if (!update || typeof update !== 'object' || Array.isArray(update)) return result;
 
   if (update.users && typeof update.users === 'object' && !Array.isArray(update.users)) {
@@ -236,7 +276,20 @@ export function applyMemoryUpdate(store, guildId, update, cfg, knownUserIds, kno
         });
         if (after.score !== before) result.affinity += 1;
       }
+
+      if (episodes?.enabled && Array.isArray(raw.episodes) && raw.episodes.length > 0) {
+        const added = store.addEpisodes(guildId, userId, raw.episodes, {
+          maxEpisodes: episodes.maxEpisodes,
+          maxNew: episodes.maxNew,
+          now: episodes.now,
+        });
+        result.episodes += added;
+      }
     }
+  }
+
+  if (lore?.enabled && Array.isArray(update.lore) && update.lore.length > 0) {
+    result.lore = store.setLore(guildId, update.lore, { source: 'analyzer', now: lore.now, maxEntries: lore.maxEntries });
   }
 
   if (update.channels && typeof update.channels === 'object' && !Array.isArray(update.channels)) {
@@ -445,6 +498,7 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
         channels,
         messages,
         selfName: getSelfName(guildId),
+        loreEntries: store.getLore(guildId),
         descriptions: effectiveDescriptions,
       });
 
@@ -453,6 +507,10 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
         maxOutputTokens: cfg.maxOutputTokens,
         temperature: 0.3,
         countAgainstDailyCap,
+        // A 150-message batch with an 8000-token answer on a large model can
+        // take longer than the chat timeout -- the analyzer gets its own,
+        // much larger budget (see .claude/docs/prompt-contract.md, "The analyzer").
+        timeoutMs: cfg.timeoutMs ?? hot.config.llm.timeoutMs,
       });
     } catch (err) {
       // Nothing was billed: the request never left this process, or the
@@ -469,7 +527,15 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
       const relationships = relationshipsOn
         ? { enabled: true, ...hot.config.relationships, now: now() }
         : undefined;
-      const result = applyMemoryUpdate(store, guildId, update, cfg, knownUserIds, knownChannelIds, relationships);
+      const episodesOn = hot.config.features?.episodes !== false;
+      const episodes = episodesOn
+        ? { enabled: true, maxEpisodes: cfg.maxEpisodes, maxNew: cfg.maxNewEpisodes, now: now() }
+        : undefined;
+      const loreOn = hot.config.features?.lore !== false;
+      const lore = loreOn
+        ? { enabled: true, maxEntries: hot.config.lore?.maxEntries ?? Infinity, now: now() }
+        : undefined;
+      const result = applyMemoryUpdate(store, guildId, update, cfg, knownUserIds, knownChannelIds, relationships, episodes, lore);
 
       return { ok: true, usage: completion.usage ?? null, estimated: completion.estimated ?? 0, result };
     } catch (err) {
@@ -516,6 +582,7 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
         channels,
         messages,
         selfName: getSelfName(guildId),
+        loreEntries: store.getLore(guildId),
       });
       return calibrator.apply(estimateMessages(llmMessages));
     } catch {

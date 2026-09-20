@@ -86,6 +86,8 @@ The system prompt handles sounding human, so the card is purely personality. Giv
 | `eavesdrop` | `true` | Random chance to jump into any message |
 | `memory` | `true` | Build profiles, track server patterns, record self-claims |
 | `relationships` | `true` | Per-member attitude scores (-100..100) |
+| `episodes` | `true` | Per-person long-term memories (moments, quotes, grudges) |
+| `lore` | `true` | Server-wide lorebook |
 | `reactions` | `true` | Emoji reactions |
 | `multiMessage` | `true` | Allow 2–3 messages in a row |
 | `vision` | `true` | Process attached images |
@@ -133,8 +135,9 @@ The system prompt handles sounding human, so the card is purely personality. Giv
 | `otherProfiles` | `6` | Max other profiles shown |
 | `tempo.liveMessages10min` | `4` | Messages in 10 min = "live" |
 | `tempo.deadSilenceMinutes` | `45` | Silence minutes = "dead" |
-| `caps.interlocutor` | `2500` | Token cap: caller's profile |
+| `caps.interlocutor` | `3500` | Token cap: caller's profile with episodes |
 | `caps.aboutChat` | `2500` | Token cap: server habits / self-facts |
+| `caps.lore` | `1500` | Token cap: lore entries |
 | `caps.people` | `4000` | Token cap: other profiles |
 | `caps.neighbors` | `3000` | Token cap: neighbour channels |
 | `caps.server` | `2500` | Token cap: channel map |
@@ -217,6 +220,9 @@ Settings for the media describer (`features.mediaDescriptions`). Describes pictu
 | `maxDetails` | `15` | Max detail items per profile |
 | `maxInjokes` | `15` | Max server in-jokes |
 | `maxSelfFacts` | `20` | Max self-claims |
+| `maxEpisodes` | `20` | Max episodes kept per person |
+| `maxNewEpisodes` | `3` | Max new episodes per person per batch |
+| `timeoutMs` | `300000` | Analyzer timeout (ms), separate from `llm.timeoutMs` |
 
 ### `relationships`
 
@@ -225,6 +231,14 @@ Settings for the media describer (`features.mediaDescriptions`). Describes pictu
 | `maxDeltaPerUpdate` | `15` | Max score change per update |
 | `historySize` | `10` | Attitude changes kept per member |
 | `directTriggerCount` | `6` | Direct interactions that force early update |
+
+### `lore`
+
+| Key | Default | Meaning |
+|---|---|---|
+| `maxEntries` | `500` | Max lorebook entries per server |
+| `scanMessages` | `30` | Messages scanned for key matches |
+| `maxMatches` | `8` | Max entries shown per request |
 
 ## Warm-up
 
@@ -273,9 +287,13 @@ One Discord slash command, `/nep` (the name comes from `bot.commandName`). Guild
 | `/nep rule remove <number>` | Remove a rule by number |
 | `/nep model show` | Show active models for each role (`talk`, `analyzer`, `media`) |
 | `/nep model set <role> <id>` | Set the model for a role (`talk`, `analyzer`, `media`) |
-| `/nep memory show <user>` | Show a stored profile |
+| `/nep memory show <user>` | Show a stored profile with episodes |
 | `/nep memory forget <user>` | Delete a stored profile |
 | `/nep memory affinity <user> [score] [reason]` | Show or set attitude (-100..100) |
+| `/nep lore add <title> <keys> <text> [always]` | Add a lorebook entry |
+| `/nep lore list [query]` | List lorebook entries |
+| `/nep lore show <id>` | Show a lorebook entry |
+| `/nep lore remove <id>` | Remove a lorebook entry |
 | `/nep warmup status` | Warm-up status |
 | `/nep warmup plan` | The ordered read plan |
 | `/nep warmup run` | Start or resume the warm-up now |
@@ -299,9 +317,19 @@ The model responds with `<think>` (hidden planning), `<msg>` (1–3 chat message
 
 The memory analyzer runs as a separate LLM call when enough messages accumulate. It receives the character card and judges each person through the character's eyes, returning small attitude deltas, updated profiles, channel observations, and server-level notes.
 
+## Episodes and lorebook
+
+The memory analyzer writes two kinds of long-term notes beyond profiles.
+
+Episodes are moments the persona remembers about individual people: an insult, a kindness, a promise, a bet, a shared joke, something someone asked the persona to do or never do. The analyzer appends them to the person's profile with a date, a short description, sometimes the person's own words, and a weight from 1 to 5. The heaviest survive longest; when a profile hits `memory.maxEpisodes`, the lightest are evicted first, then the oldest. Only the caller's episodes are shown, inside the `<people>` block.
+
+The lorebook stores server-wide knowledge that outlives any conversation: events, recurring characters, long-running stories, feuds, traditions. Each entry has a title, a set of keywords and a short text. The code scans the last `lore.scanMessages` messages for keyword matches and includes up to `lore.maxMatches` entries in a `<lore>` block; entries marked `always` appear every time. Hundreds of entries can exist at negligible cost because only the matching few are shown.
+
+The analyzer adds and updates lorebook entries on its own but never touches entries added by the owner through `/nep lore` commands. Lorebook data lives in `data/guilds/<id>/lore.json`.
+
 ## Vision and media
 
-Transcript lines carry media markers in brackets: pictures, GIFs, videos, voice messages, audio files, links, text file previews and forwarded messages. What the persona perceives depends on two features.
+Transcript lines carry media markers in brackets: pictures, GIFs, videos, voice messages, audio files, links, text file previews and forwarded messages. Forwarded messages from another channel of the same server name the source channel. What the persona perceives depends on two features.
 
 `features.vision` attaches pictures from the calling message, from the message it replies to, and the newest few in the channel to the LLM request as images, downscaled through Discord's media proxy. The persona sees these directly. Settings live under `context.vision`.
 
@@ -395,4 +423,5 @@ deploy/
 data/                      persistent state (gitignored, created at runtime)
   guilds/<id>/users/       per-member profiles and relationships
   guilds/<id>/channels/    channel observations from the analyzer
+  guilds/<id>/lore.json    lorebook entries
 ```

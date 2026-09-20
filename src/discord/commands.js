@@ -151,6 +151,42 @@ export function buildCommandTree(commandName) {
         },
         {
           type: SUBCOMMAND_GROUP,
+          name: 'lore',
+          description: "The server's lorebook (events, recurring characters, running jokes).",
+          options: [
+            {
+              type: SUBCOMMAND,
+              name: 'add',
+              description: 'Add or overwrite a lore entry (always an owner entry afterwards).',
+              options: [
+                { type: STRING, name: 'title', description: 'Entry title (its identity).', required: true },
+                { type: STRING, name: 'keys', description: 'Comma-separated keys/phrases people type.', required: true },
+                { type: STRING, name: 'text', description: 'The lore text, up to 400 chars.', required: true },
+                { type: BOOLEAN, name: 'always', description: 'Always show this entry, regardless of a match.', required: false },
+              ],
+            },
+            {
+              type: SUBCOMMAND,
+              name: 'list',
+              description: 'List lore entries, optionally filtered.',
+              options: [{ type: STRING, name: 'query', description: 'Filter by a substring of the title/keys.', required: false }],
+            },
+            {
+              type: SUBCOMMAND,
+              name: 'show',
+              description: 'Show one lore entry in full.',
+              options: [{ type: STRING, name: 'id', description: 'Entry id.', required: true }],
+            },
+            {
+              type: SUBCOMMAND,
+              name: 'remove',
+              description: 'Delete one lore entry.',
+              options: [{ type: STRING, name: 'id', description: 'Entry id.', required: true }],
+            },
+          ],
+        },
+        {
+          type: SUBCOMMAND_GROUP,
           name: 'model',
           description: 'Which model talks, analyzes memory, and describes pictures.',
           options: [
@@ -354,6 +390,15 @@ const OPTION_MAPPERS = {
     score: options.getInteger('score') ?? undefined,
     reason: options.getString('reason') ?? undefined,
   }),
+  'lore.add': (options) => ({
+    title: options.getString('title', true),
+    keys: options.getString('keys', true),
+    text: options.getString('text', true),
+    always: options.getBoolean('always') ?? false,
+  }),
+  'lore.list': (options) => ({ query: options.getString('query') ?? undefined }),
+  'lore.show': (options) => ({ id: options.getString('id', true) }),
+  'lore.remove': (options) => ({ id: options.getString('id', true) }),
   'model.show': () => ({}),
   'model.set': (options) => ({ role: options.getString('role', true), id: options.getString('id', true) }),
   'warmup.status': () => ({}),

@@ -188,11 +188,12 @@ function fakeLlm(responseText) {
   };
 }
 
-function fakeStore({ guildMemory = {}, userProfiles = {}, channels = [] } = {}) {
+function fakeStore({ guildMemory = {}, userProfiles = {}, channels = [], loreEntries = [] } = {}) {
   return {
     getGuild: () => guildMemory,
     getUser: (guildId, userId) => userProfiles[userId] ?? null,
     listChannels: () => channels,
+    getLore: () => loreEntries,
     state: { data: {}, markDirty() {} },
   };
 }
@@ -387,6 +388,37 @@ test('createTurnRunner: features.memory=false sends no <server> block, even with
 
   const userMessage = llm.calls[0][1].content;
   assert.ok(!userMessage.includes('<server>'));
+});
+
+test('createTurnRunner: features.memory=true (default) renders <lore> from the guild lorebook', async () => {
+  const raw = rawMessage({ id: 'm1' });
+  const channel = fakeTurnChannel({ id: 'c1', historyMessages: [raw] });
+  const llm = fakeLlm('<msg>ok</msg>');
+  const loreEntries = [{ id: 'l1', title: 'The Great Flood', keys: ['never-mentioned'], text: 'It flooded once.', always: true, source: 'analyzer', weight: 3 }];
+  const store = fakeStore({ loreEntries });
+  const hot = fakeHot({});
+  const turns = createTurnRunner({ hot, store, llm, calibrator: identityCalibrator(), client: fakeClient() });
+
+  await turns.runTurn({ channel, mode: 'reply', trigger: normalizedTrigger(raw), triggerKind: 'mention' });
+
+  const userMessage = llm.calls[0][1].content;
+  assert.ok(userMessage.includes('<lore>'));
+  assert.ok(userMessage.includes('The Great Flood'));
+});
+
+test('createTurnRunner: features.memory=false sends no <lore> block, even with lore on record', async () => {
+  const raw = rawMessage({ id: 'm1' });
+  const channel = fakeTurnChannel({ id: 'c1', historyMessages: [raw] });
+  const llm = fakeLlm('<msg>ok</msg>');
+  const loreEntries = [{ id: 'l1', title: 'The Great Flood', keys: ['never-mentioned'], text: 'It flooded once.', always: true, source: 'analyzer', weight: 3 }];
+  const store = fakeStore({ loreEntries });
+  const hot = fakeHot({ memory: false });
+  const turns = createTurnRunner({ hot, store, llm, calibrator: identityCalibrator(), client: fakeClient() });
+
+  await turns.runTurn({ channel, mode: 'reply', trigger: normalizedTrigger(raw), triggerKind: 'mention' });
+
+  const userMessage = llm.calls[0][1].content;
+  assert.ok(!userMessage.includes('<lore>'));
 });
 
 // ---------------------------------------------------------------------------
