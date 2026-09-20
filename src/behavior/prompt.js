@@ -115,6 +115,7 @@ export function buildRequest(input) {
   const chatItems = formatTranscript(history, formatOptions);
   const idByIndex = new Map(chatItems.map((item) => [item.index, item.id]));
   const tempo = computeTempo(history, now, trigger);
+  const tempoText = renderTempo(tempo, labels, config.context.tempo);
 
   const triggerItem = trigger ? chatItems.find((item) => item.id === trigger.id) : null;
   const task = fillTemplate(prompts[mode] ?? '', {
@@ -144,7 +145,7 @@ export function buildRequest(input) {
 
   const { kept, stats, used } = fitSections(
     [
-      { name: 'fixed', required: true, items: [system, task, formatNow(now, timezone, labels.locale), renderTempo(tempo, labels)] },
+      { name: 'fixed', required: true, items: [system, task, formatNow(now, timezone, labels.locale), tempoText] },
       {
         name: 'interlocutor',
         cap: caps.interlocutor,
@@ -172,7 +173,7 @@ export function buildRequest(input) {
     block('people', [...kept.interlocutor, ...kept.people].join('\n\n')),
     block('other_channels', kept.neighbors.join('\n\n')),
     block('chat', renderTranscript(keptChat, timezone, labels)),
-    block('tempo', renderTempo(tempo, labels)),
+    block('tempo', tempoText),
     block('task', task),
   ]
     .filter(Boolean)

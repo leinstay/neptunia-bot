@@ -415,19 +415,62 @@ function baseTempo(overrides = {}) {
   };
 }
 
-test('renderTempo: >=4 messages in the last 10 min -> the "live" verdict', () => {
-  const text = renderTempo(baseTempo({ last10min: 4 }), labels);
+// The verdict must look at silence, not only at message counts (a channel
+// with 2 messages 4 minutes ago is live, not dead -- see the dry-run case
+// below). Default thresholds: liveMessages10min: 4, deadSilenceMinutes: 45.
+
+test('renderTempo: 3 messages in the last 10 min is below the live threshold', () => {
+  const text = renderTempo(baseTempo({ last10min: 3, silenceMs: 10 * MIN }), labels);
+  assert.ok(!text.includes(labels.tempo.verdictLive));
+});
+
+test('renderTempo: 4 messages in the last 10 min -> the "live" verdict, even with long silence', () => {
+  const text = renderTempo(baseTempo({ last10min: 4, silenceMs: 50 * MIN }), labels);
   assert.ok(text.includes(labels.tempo.verdictLive));
 });
 
-test('renderTempo: <4 in 10min but >=3 in the last hour -> the "slow" verdict', () => {
-  const text = renderTempo(baseTempo({ last10min: 1, lastHour: 3 }), labels);
+test('renderTempo: silence just under 45 min -> the "slow" verdict, not dead', () => {
+  const text = renderTempo(baseTempo({ last10min: 0, silenceMs: 44 * MIN + 59_000 }), labels);
   assert.ok(text.includes(labels.tempo.verdictSlow));
 });
 
-test('renderTempo: below both thresholds -> the "dead" verdict', () => {
-  const text = renderTempo(baseTempo({ last10min: 0, lastHour: 1 }), labels);
+test('renderTempo: silence at exactly 45 min -> the "dead" verdict (inclusive)', () => {
+  const text = renderTempo(baseTempo({ last10min: 0, silenceMs: 45 * MIN }), labels);
   assert.ok(text.includes(labels.tempo.verdictDead));
+});
+
+test('renderTempo: an empty channel (silenceMs null) -> the "dead" verdict', () => {
+  const text = renderTempo(baseTempo({ last10min: 0, silenceMs: null }), labels);
+  assert.ok(text.includes(labels.tempo.verdictDead));
+});
+
+test('renderTempo: dry-run case -- 2 messages in the last 10 min, 4 min of silence -> "slow", not "dead"', () => {
+  const text = renderTempo(baseTempo({ last10min: 2, silenceMs: 4 * MIN }), labels);
+  assert.ok(text.includes(labels.tempo.verdictSlow));
+  assert.ok(!text.includes(labels.tempo.verdictDead));
+  assert.ok(!text.includes(labels.tempo.verdictLive));
+});
+
+test('renderTempo: custom thresholds are honoured', () => {
+  const thresholds = { liveMessages10min: 2, deadSilenceMinutes: 5 };
+  const live = renderTempo(baseTempo({ last10min: 2, silenceMs: 0 }), labels, thresholds);
+  assert.ok(live.includes(labels.tempo.verdictLive));
+  const dead = renderTempo(baseTempo({ last10min: 0, silenceMs: 5 * MIN }), labels, thresholds);
+  assert.ok(dead.includes(labels.tempo.verdictDead));
+  const slow = renderTempo(baseTempo({ last10min: 0, silenceMs: 4 * MIN }), labels, thresholds);
+  assert.ok(slow.includes(labels.tempo.verdictSlow));
+});
+
+test('renderTempo: a missing thresholds argument falls back to the defaults (4 / 45 min)', () => {
+  const notYetLive = renderTempo(baseTempo({ last10min: 3, silenceMs: 0 }), labels);
+  assert.ok(!notYetLive.includes(labels.tempo.verdictLive));
+  const notYetDead = renderTempo(baseTempo({ last10min: 0, silenceMs: 44 * MIN }), labels);
+  assert.ok(!notYetDead.includes(labels.tempo.verdictDead));
+});
+
+test('renderTempo: a thresholds object missing one key falls back to the default for that key only', () => {
+  const text = renderTempo(baseTempo({ last10min: 0, silenceMs: 45 * MIN }), labels, { liveMessages10min: 10 });
+  assert.ok(text.includes(labels.tempo.verdictDead)); // deadSilenceMinutes still defaults to 45
 });
 
 test('renderTempo: null silenceMs describes an empty channel', () => {

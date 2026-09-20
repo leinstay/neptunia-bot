@@ -202,7 +202,26 @@ export function computeTempo(messages, now, trigger = null) {
   };
 }
 
-export function renderTempo(tempo, labels) {
+// Defaults mirror config.json's context.tempo; used whenever the caller omits
+// `thresholds` or one of its two keys (e.g. an older config.local.json).
+const DEFAULT_TEMPO_THRESHOLDS = { liveMessages10min: 4, deadSilenceMinutes: 45 };
+
+/**
+ * Render the tempo block. The verdict looks at silence, not only at message
+ * counts: a channel can have few messages in the last 10 minutes and still be
+ * "live" if the silence right now is short (e.g. 2 messages 4-5 minutes ago).
+ * `silenceMs` already means "silence before the trigger" in reply mode and
+ * "time since the last message" in spontaneous mode (see computeTempo), so
+ * one rule serves both.
+ *
+ * @param {object} tempo       Output of computeTempo.
+ * @param {object} labels      Live prompts.labels.
+ * @param {{liveMessages10min: number, deadSilenceMinutes: number}} [thresholds]
+ *   Defaults to DEFAULT_TEMPO_THRESHOLDS when omitted or missing a key.
+ */
+export function renderTempo(tempo, labels, thresholds) {
+  const liveMessages10min = thresholds?.liveMessages10min ?? DEFAULT_TEMPO_THRESHOLDS.liveMessages10min;
+  const deadSilenceMinutes = thresholds?.deadSilenceMinutes ?? DEFAULT_TEMPO_THRESHOLDS.deadSilenceMinutes;
   const t = labels.tempo;
   const lines = [
     fill(t.counts, { last10min: tempo.last10min, lastHour: tempo.lastHour, lastDay: tempo.lastDay }),
@@ -220,9 +239,10 @@ export function renderTempo(tempo, labels) {
   }
   if (tempo.lastIsOwn && !tempo.hasTrigger) lines.push(t.ownUnanswered);
 
-  let verdict = t.verdictDead;
-  if (tempo.last10min >= 4) verdict = t.verdictLive;
-  else if (tempo.lastHour >= 3) verdict = t.verdictSlow;
+  let verdict;
+  if (tempo.last10min >= liveMessages10min) verdict = t.verdictLive;
+  else if (tempo.silenceMs === null || tempo.silenceMs >= deadSilenceMinutes * MINUTE) verdict = t.verdictDead;
+  else verdict = t.verdictSlow;
   lines.push(fill(t.verdict, { verdict }));
   return lines.join('\n');
 }

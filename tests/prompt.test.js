@@ -264,6 +264,25 @@ test('buildRequest: sanity check on estimateTokens used for the cost function st
   assert.equal(typeof estimateTokens('x'), 'number');
 });
 
+// --- tempo thresholds come from config, not hardcoded in the renderer -------
+
+test('buildRequest: config.context.tempo reaches the tempo verdict rendered in <tempo>', () => {
+  // 1 message 5 minutes ago: below the default live threshold (4) and well
+  // under the default dead silence (45 min), so it renders as "slow" by
+  // default but as "live" once config lowers liveMessages10min to 1.
+  const history = [makeMessage(1, NOW - 5 * MIN)];
+
+  const defaultRequest = buildRequest(baseInput({ history, trigger: null }));
+  const defaultUser = defaultRequest.messages[1].content;
+  assert.ok(defaultUser.includes(labels.tempo.verdictSlow));
+  assert.ok(!defaultUser.includes(labels.tempo.verdictLive));
+
+  const config = fakeConfig({ context: { tempo: { liveMessages10min: 1, deadSilenceMinutes: 45 } } });
+  const tunedRequest = buildRequest(baseInput({ history, trigger: null, config }));
+  const tunedUser = tunedRequest.messages[1].content;
+  assert.ok(tunedUser.includes(labels.tempo.verdictLive));
+});
+
 // --- language independence --------------------------------------------------
 
 // --- renderProfile: relationships / affinity ---------------------------------

@@ -40,6 +40,7 @@
     "maxMessageChars": 800,
     "gapMarkerMinutes": 20,
     "otherProfiles": 6,
+    "tempo": { "liveMessages10min": 4, "deadSilenceMinutes": 45 },
     "caps": { "interlocutor": 2500, "aboutChat": 2500, "people": 4000, "neighbors": 3000 },
     "vision": { "maxImages": 2, "tokensPerImage": 1600 }
   },
