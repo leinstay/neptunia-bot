@@ -212,6 +212,30 @@ function extractUserId(arg) {
   return null;
 }
 
+/** A `<#channelId>` channel mention or a raw id. */
+function extractChannelId(arg) {
+  const trimmed = String(arg ?? '').trim();
+  const mention = /^<#(\d+)>$/.exec(trimmed);
+  if (mention) return mention[1];
+  if (/^\d+$/.test(trimmed)) return trimmed;
+  return null;
+}
+
+/**
+ * A token amount: a plain integer, or an integer followed by `k` (x1,000) or
+ * `m` (x1,000,000) — e.g. `500k`, `10m`. Returns null for anything else.
+ */
+function parseTokenAmount(raw) {
+  const trimmed = String(raw ?? '').trim().toLowerCase();
+  const match = /^(\d+)([km]?)$/.exec(trimmed);
+  if (!match) return null;
+  const n = Number.parseInt(match[1], 10);
+  if (!Number.isFinite(n)) return null;
+  if (match[2] === 'k') return n * 1_000;
+  if (match[2] === 'm') return n * 1_000_000;
+  return n;
+}
+
 function readLocalConfig(localPath) {
   if (!fs.existsSync(localPath)) return {};
   const raw = fs.readFileSync(localPath, 'utf8').trim();
@@ -238,7 +262,15 @@ const HELP_TEXT = [
   '  affinity <@mention|userId> [score] [reason…]  show, or set (-100..100) an attitude',
   '  forget <@mention|userId>             delete a stored profile',
   '  warmup                               memory warm-up status',
-  '  warmup run                           start the warm-up now, regardless of warmup.enabled',
+  '  warmup plan                          the ordered read plan',
+  '  warmup channel <#chan|id> <depth|default>  set a channel\'s read depth',
+  '  warmup primary <#chan|id|none>       set the channel read first',
+  '  warmup only <on|off>                 read only channels with a set depth',
+  '  warmup depth <n>                     default read depth (1..1000000)',
+  '  warmup budget <tokens>                warm-up token budget (k/m ok, e.g. 500k)',
+  '  warmup output <tokens>                analyzer output limit (256..32000)',
+  '  warmup run                           start/resume the warm-up now',
+  '  warmup stop                          pause after the batch in flight',
   '  warmup reset                         clear warm-up progress (refused while running)',
 ].join('\n');
 
@@ -252,8 +284,8 @@ const HELP_TEXT = [
  * `spontaneous` — the spontaneous scheduler: `poke(channel, mode)` and `status()`.
  * `calibrator` — token calibrator (src/llm/tokens.js), read for `.ratio`.
  * `getGuildId` — the single guild this instance serves, or null before it resolves.
- * `warmup` — from createWarmup() (src/memory/warmup.js), optional: `run()`, `status()`, `reset()`. When absent,
- *   the `warmup` command reports it is not available.
+ * `warmup` — from createWarmup() (src/memory/warmup.js), optional: `run()`, `stop()`, `status()`, `plan()`,
+ *   `reset()`. When absent, the `warmup` command reports it is not available.
  */
 export function createAdmin({ hot, store, client, spontaneous, calibrator, getGuildId, warmup }) {
   function isOwner(userId) {
@@ -489,38 +521,165 @@ export function createAdmin({ hot, store, client, spontaneous, calibrator, getGu
     return `Set affinity for ${userId} to ${affinity.score} (${affinityBand(affinity.score)}).`;
   }
 
-  function cmdWarmup(args) {
+  function warmupLocalConfigPath() {
+    return path.join(hot.rootDir, 'config.local.json');
+  }
+
+  /** Read-modify-write one key of config.local.json, the same path `set` uses. */
+  function writeWarmupConfig(dottedPath, value) {
+    const localPath = warmupLocalConfigPath();
+    const next = setPath(readLocalConfig(localPath), dottedPath, value);
+    writeLocalConfig(localPath, next);
+    return hot.reloadConfig();
+  }
+
+  function unsetWarmupConfig(dottedPath) {
+    const localPath = warmupLocalConfigPath();
+    const next = unsetPath(readLocalConfig(localPath), dottedPath);
+    writeLocalConfig(localPath, next);
+    return hot.reloadConfig();
+  }
+
+  function cmdWarmupStatus() {
+    const s = warmup.status();
+    const lines = [
+      `enabled: ${s.enabled}`,
+      `done: ${s.done}`,
+      `paused: ${s.paused}`,
+      `aborted: ${s.aborted}`,
+      `running: ${s.running}`,
+      `tokens: ${s.tokensUsed} / ${s.maxTokens}`,
+      `requests: ${s.requests}`,
+      `channels: ${s.channelsDone} / ${s.channelsTotal}`,
+      `messages analyzed: ${s.messagesAnalyzed}`,
+      `skipped messages: ${s.skippedMessages}`,
+      `primary channel: ${s.primaryChannelId || '(none)'}`,
+      `only listed channels: ${s.onlyListed}`,
+    ];
+    for (const row of s.channels ?? []) {
+      const label = row.name ? `#${row.name} (${row.id})` : row.id;
+      lines.push(`  ${label}: ${row.messages}/${row.limit ?? '?'} msgs, ${row.batchesDone} batches, ${row.done ? 'done' : 'in progress'}`);
+    }
+    return lines.join('\n');
+  }
+
+  async function cmdWarmupPlan() {
+    const p = await warmup.plan();
+    const lines = p.plan.map((c, i) => `${i + 1}. #${c.name ?? c.id} (${c.id}) — ${c.depth}, ${c.role}`);
+    if (lines.length === 0) lines.push('(no readable channels)');
+    if (p.missing.length > 0) lines.push(`missing: ${p.missing.join(', ')}`);
+    lines.push(`budget: ${p.maxTokens} tokens, output limit: ${p.outputTokens}, batch size: ${p.batchMessages}`);
+    return lines.join('\n');
+  }
+
+  function cmdWarmupChannel(rest) {
+    const spaceIdx = rest.search(/\s/);
+    if (spaceIdx === -1) throw new Error('usage: warmup channel <#mention|id> <depth|default>');
+    const channelId = extractChannelId(rest.slice(0, spaceIdx).trim());
+    const valueArg = rest.slice(spaceIdx + 1).trim();
+    if (!channelId) throw new Error('usage: warmup channel <#mention|id> <depth|default>');
+
+    if (valueArg.toLowerCase() === 'default') {
+      const ok = unsetWarmupConfig(`warmup.channelDepths.${channelId}`);
+      return `Channel ${channelId}: depth reset to the default (reload ${ok ? 'ok' : 'FAILED'})`;
+    }
+
+    const depth = Number.parseInt(valueArg, 10);
+    if (!Number.isInteger(depth) || String(depth) !== valueArg || depth < 0 || depth > 1_000_000) {
+      throw new Error('usage: warmup channel <#mention|id> <depth 0..1000000|default>');
+    }
+    const ok = writeWarmupConfig(`warmup.channelDepths.${channelId}`, depth);
+    return `Channel ${channelId}: depth set to ${depth}${depth === 0 ? ' (will be skipped)' : ''} (reload ${ok ? 'ok' : 'FAILED'})`;
+  }
+
+  function cmdWarmupPrimary(rest) {
+    const arg = rest.trim();
+    if (!arg) throw new Error('usage: warmup primary <#mention|id|none>');
+
+    if (arg.toLowerCase() === 'none') {
+      const ok = writeWarmupConfig('warmup.primaryChannelId', '');
+      return `Primary channel cleared (reload ${ok ? 'ok' : 'FAILED'})`;
+    }
+    const channelId = extractChannelId(arg);
+    if (!channelId) throw new Error('usage: warmup primary <#mention|id|none>');
+    const ok = writeWarmupConfig('warmup.primaryChannelId', channelId);
+    return `Primary channel set to ${channelId} (reload ${ok ? 'ok' : 'FAILED'})`;
+  }
+
+  function cmdWarmupOnly(rest) {
+    const arg = rest.trim().toLowerCase();
+    if (arg !== 'on' && arg !== 'off') throw new Error('usage: warmup only <on|off>');
+    const ok = writeWarmupConfig('warmup.onlyListed', arg === 'on');
+    return `Only listed channels: ${arg === 'on'} (reload ${ok ? 'ok' : 'FAILED'})`;
+  }
+
+  function cmdWarmupDepth(rest) {
+    const trimmed = rest.trim();
+    const n = Number.parseInt(trimmed, 10);
+    if (!Number.isInteger(n) || String(n) !== trimmed || n < 1 || n > 1_000_000) {
+      throw new Error('usage: warmup depth <n> (1..1000000)');
+    }
+    const ok = writeWarmupConfig('warmup.messagesPerChannel', n);
+    return `Default read depth set to ${n} (reload ${ok ? 'ok' : 'FAILED'})`;
+  }
+
+  function cmdWarmupBudget(rest) {
+    const tokens = parseTokenAmount(rest.trim());
+    if (tokens == null || tokens < 1) throw new Error('usage: warmup budget <tokens> (k/m ok, e.g. 500k, 10m)');
+    const ok = writeWarmupConfig('warmup.maxTokens', tokens);
+    return `Warm-up token budget set to ${tokens} (reload ${ok ? 'ok' : 'FAILED'})`;
+  }
+
+  function cmdWarmupOutput(rest) {
+    const trimmed = rest.trim();
+    const n = Number.parseInt(trimmed, 10);
+    if (!Number.isInteger(n) || String(n) !== trimmed || n < 256 || n > 32000) {
+      throw new Error('usage: warmup output <tokens> (256..32000)');
+    }
+    const ok = writeWarmupConfig('memory.maxOutputTokens', n);
+    return `Analyzer output limit set to ${n} (reload ${ok ? 'ok' : 'FAILED'})`;
+  }
+
+  function cmdWarmupRun() {
+    const s = warmup.status();
+    if (s.running) return 'warm-up is already running.';
+    if (s.done) return 'warm-up has already finished.';
+    warmup.run().catch((err) => log.error('warmup: run failed', { error: err }));
+    return 'Warm-up started.';
+  }
+
+  function cmdWarmupStop() {
+    const s = warmup.status();
+    if (!s.running) return 'warm-up is not running.';
+    warmup.stop();
+    return 'Stop requested: warm-up will pause after the batch in flight.';
+  }
+
+  function cmdWarmupReset() {
+    warmup.reset();
+    return 'Warm-up progress reset.';
+  }
+
+  async function cmdWarmup(args) {
     if (!warmup) return 'warm-up is not available';
-    const sub = args.trim().split(/\s+/)[0] ?? '';
+    const trimmed = args.trim();
+    const spaceIdx = trimmed.search(/\s/);
+    const sub = spaceIdx === -1 ? trimmed : trimmed.slice(0, spaceIdx);
+    const rest = spaceIdx === -1 ? '' : trimmed.slice(spaceIdx + 1).trim();
 
-    if (!sub) {
-      const s = warmup.status();
-      return [
-        `enabled: ${s.enabled}`,
-        `done: ${s.done}`,
-        `aborted: ${s.aborted}`,
-        `running: ${s.running}`,
-        `tokens: ${s.tokensUsed} / ${s.maxTokens}`,
-        `requests: ${s.requests}`,
-        `channels: ${s.channelsDone} / ${s.channelsTotal}`,
-        `messages analyzed: ${s.messagesAnalyzed}`,
-      ].join('\n');
-    }
+    if (!sub) return cmdWarmupStatus();
+    if (sub === 'plan') return cmdWarmupPlan();
+    if (sub === 'channel') return cmdWarmupChannel(rest);
+    if (sub === 'primary') return cmdWarmupPrimary(rest);
+    if (sub === 'only') return cmdWarmupOnly(rest);
+    if (sub === 'depth') return cmdWarmupDepth(rest);
+    if (sub === 'budget') return cmdWarmupBudget(rest);
+    if (sub === 'output') return cmdWarmupOutput(rest);
+    if (sub === 'run') return cmdWarmupRun();
+    if (sub === 'stop') return cmdWarmupStop();
+    if (sub === 'reset') return cmdWarmupReset();
 
-    if (sub === 'run') {
-      const s = warmup.status();
-      if (s.running) return 'warm-up is already running.';
-      if (s.done) return 'warm-up has already finished.';
-      warmup.run().catch((err) => log.error('warmup: run failed', { error: err }));
-      return 'Warm-up started.';
-    }
-
-    if (sub === 'reset') {
-      warmup.reset();
-      return 'Warm-up progress reset.';
-    }
-
-    throw new Error('usage: warmup [run|reset]');
+    throw new Error('usage: warmup [plan|channel|primary|only|depth|budget|output|run|stop|reset]');
   }
 
   function cmdForget(args, message) {

@@ -103,6 +103,8 @@
     "messagesPerChannel": 2000,
     "batchMessages": 150,
     "maxAgeDays": 0,
-    "channels": []
+    "primaryChannelId": "",
+    "channelDepths": {},
+    "onlyListed": false
   }
 }

@@ -9,7 +9,7 @@ import path from 'node:path';
 import { SnowflakeUtil } from 'discord.js';
 
 import { createStore } from '../src/memory/store.js';
-import { createWarmup, planBatches, remainingBudget, spentTokens, orderChannels } from '../src/memory/warmup.js';
+import { createWarmup, planBatches, remainingBudget, spentTokens, orderChannels, planWarmup } from '../src/memory/warmup.js';
 
 function tempDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'nep-warmup-'));
@@ -107,6 +107,126 @@ test('orderChannels: does not mutate its input', () => {
 });
 
 // ---------------------------------------------------------------------------
+// planWarmup
+// ---------------------------------------------------------------------------
+
+function baseCfg(overrides = {}) {
+  return { messagesPerChannel: 100, channelDepths: {}, primaryChannelId: '', onlyListed: false, ...overrides };
+}
+
+test('planWarmup: defaults every channel to messagesPerChannel, most recently active first', () => {
+  const candidates = [
+    { id: 'a', name: 'alpha', lastActivity: 100 },
+    { id: 'b', name: 'beta', lastActivity: 300 },
+    { id: 'c', name: 'gamma', lastActivity: 200 },
+  ];
+  const { plan, missing } = planWarmup(candidates, baseCfg());
+  assert.deepEqual(missing, []);
+  assert.deepEqual(plan, [
+    { id: 'b', name: 'beta', depth: 100, role: 'default' },
+    { id: 'c', name: 'gamma', depth: 100, role: 'default' },
+    { id: 'a', name: 'alpha', depth: 100, role: 'default' },
+  ]);
+});
+
+test('planWarmup: a per-channel depth overrides the default and marks the channel "listed"', () => {
+  const candidates = [
+    { id: 'a', name: 'alpha', lastActivity: 100 },
+    { id: 'b', name: 'beta', lastActivity: 300 },
+    { id: 'c', name: 'gamma', lastActivity: 200 },
+  ];
+  const { plan } = planWarmup(candidates, baseCfg({ channelDepths: { a: 5 } }));
+  assert.deepEqual(plan, [
+    { id: 'a', name: 'alpha', depth: 5, role: 'listed' },
+    { id: 'b', name: 'beta', depth: 100, role: 'default' },
+    { id: 'c', name: 'gamma', depth: 100, role: 'default' },
+  ]);
+});
+
+test('planWarmup: a depth of 0 removes the channel from the plan entirely', () => {
+  const candidates = [
+    { id: 'a', name: 'alpha', lastActivity: 100 },
+    { id: 'b', name: 'beta', lastActivity: 300 },
+    { id: 'c', name: 'gamma', lastActivity: 200 },
+  ];
+  const { plan, missing } = planWarmup(candidates, baseCfg({ channelDepths: { b: 0 } }));
+  assert.deepEqual(plan.map((c) => c.id), ['c', 'a']);
+  assert.deepEqual(missing, [], 'a depth-0 channel is dropped, not reported as missing');
+});
+
+test('planWarmup: onlyListed keeps the primary (with an explicit depth) plus the listed channels only', () => {
+  const candidates = [
+    { id: 'a', name: 'alpha', lastActivity: 100 },
+    { id: 'b', name: 'beta', lastActivity: 300 },
+    { id: 'c', name: 'gamma', lastActivity: 200 },
+  ];
+  const { plan } = planWarmup(
+    candidates,
+    baseCfg({ onlyListed: true, primaryChannelId: 'b', channelDepths: { b: 10, c: 20 } }),
+  );
+  assert.deepEqual(plan, [
+    { id: 'b', name: 'beta', depth: 10, role: 'primary' },
+    { id: 'c', name: 'gamma', depth: 20, role: 'listed' },
+  ]);
+});
+
+test('planWarmup: onlyListed still keeps the primary, at messagesPerChannel, when it has no depths entry', () => {
+  const candidates = [
+    { id: 'a', name: 'alpha', lastActivity: 100 },
+    { id: 'b', name: 'beta', lastActivity: 300 },
+    { id: 'c', name: 'gamma', lastActivity: 200 },
+  ];
+  const { plan } = planWarmup(
+    candidates,
+    baseCfg({ onlyListed: true, primaryChannelId: 'b', channelDepths: { c: 20 } }),
+  );
+  assert.deepEqual(plan, [
+    { id: 'b', name: 'beta', depth: 100, role: 'primary' },
+    { id: 'c', name: 'gamma', depth: 20, role: 'listed' },
+  ]);
+});
+
+test('planWarmup: orders the primary first, then listed channels by depth (ties by recency), then the rest by recency', () => {
+  const candidates = [
+    { id: 'p', name: 'primary', lastActivity: 500 },
+    { id: 'l1', name: 'l1', lastActivity: 10 },
+    { id: 'l2', name: 'l2', lastActivity: 20 },
+    { id: 'l3', name: 'l3', lastActivity: 5 },
+    { id: 'r1', name: 'r1', lastActivity: 300 },
+    { id: 'r2', name: 'r2', lastActivity: 400 },
+  ];
+  const cfg = baseCfg({ primaryChannelId: 'p', channelDepths: { l1: 50, l2: 50, l3: 80 } });
+  const { plan } = planWarmup(candidates, cfg);
+  assert.deepEqual(plan.map((c) => c.id), ['p', 'l3', 'l2', 'l1', 'r2', 'r1']);
+  assert.deepEqual(plan.map((c) => c.role), ['primary', 'listed', 'listed', 'listed', 'default', 'default']);
+});
+
+test('planWarmup: ids with no matching candidate are reported as missing, never thrown', () => {
+  const candidates = [{ id: 'a', name: 'alpha', lastActivity: 100 }];
+  const cfg = baseCfg({ primaryChannelId: 'phantom', channelDepths: { a: 10, ghost: 5 } });
+  assert.doesNotThrow(() => planWarmup(candidates, cfg));
+  const { plan, missing } = planWarmup(candidates, cfg);
+  assert.deepEqual(plan, [{ id: 'a', name: 'alpha', depth: 10, role: 'listed' }]);
+  assert.deepEqual(missing, ['ghost', 'phantom']);
+});
+
+test('planWarmup: a garbage depth (non-integer or negative) is treated as absent, not as listed', () => {
+  const candidates = [
+    { id: 'a', name: 'alpha', lastActivity: 300 },
+    { id: 'b', name: 'beta', lastActivity: 200 },
+    { id: 'c', name: 'gamma', lastActivity: 100 },
+  ];
+  const cfg = baseCfg({ channelDepths: { a: -5, b: 1.5, c: 'abc' } });
+  const { plan, missing } = planWarmup(candidates, cfg);
+  assert.deepEqual(missing, []);
+  assert.deepEqual(plan, [
+    { id: 'a', name: 'alpha', depth: 100, role: 'default' },
+    { id: 'b', name: 'beta', depth: 100, role: 'default' },
+    { id: 'c', name: 'gamma', depth: 100, role: 'default' },
+  ]);
+});
+
+// ---------------------------------------------------------------------------
 // Factory fakes
 // ---------------------------------------------------------------------------
 
@@ -132,12 +252,13 @@ function makeHistory({ count, startTs, spacingMs, authorId, botEveryIndex = -1, 
 }
 
 /** A fake discord.js text channel backed by an oldest-first history array. */
-function fakeChannel(id, historyAsc) {
+function fakeChannel(id, historyAsc, name = id) {
   // normalizeMessage() reads channelId straight off the message, not off channel.id.
   for (const message of historyAsc) message.channelId = id;
   const desc = [...historyAsc].reverse(); // newest first, like a real fetch page
   return {
     id,
+    name,
     lastMessageId: historyAsc.length ? historyAsc[historyAsc.length - 1].id : null,
     guild: null,
     isTextBased: () => true,
@@ -179,7 +300,9 @@ function fakeHot(overrides = {}) {
         messagesPerChannel: 200,
         batchMessages: 2,
         maxAgeDays: 0,
-        channels: [],
+        primaryChannelId: '',
+        channelDepths: {},
+        onlyListed: false,
         ...overrides.warmup,
       },
     },
@@ -747,10 +870,10 @@ test('run: resume after a restart in the middle of a split batch re-does only th
 });
 
 // ---------------------------------------------------------------------------
-// channels allowlist / maxAgeDays
+// onlyListed / channelDepths / primaryChannelId / maxAgeDays
 // ---------------------------------------------------------------------------
 
-test('run: warmup.channels restricts which channels are read', async () => {
+test('run: onlyListed restricts which channels are read to the ones with a set depth', async () => {
   const dir = tempDir();
   try {
     const store = createStore({ dataDir: dir });
@@ -761,15 +884,112 @@ test('run: warmup.channels restricts which channels are read', async () => {
     const channelB = fakeChannel('chanB', historyB);
     const guild = fakeGuild('g1', [channelA, channelB]);
     const client = fakeClient(guild);
-    const hot = fakeHot({ warmup: { batchMessages: 10, channels: ['chanB'] } });
+    const hot = fakeHot({ warmup: { batchMessages: 10, onlyListed: true, channelDepths: { chanB: 50 } } });
     const memory = fakeMemory(alwaysOk());
 
     const warmup = createWarmup({ hot, store, client, memory, getGuildId: () => 'g1', sleep: fakeSleep() });
     await warmup.run();
 
-    assert.equal(store.getUser('g1', 'u1'), null, 'channel A is outside the allowlist');
+    assert.equal(store.getUser('g1', 'u1'), null, 'channel A is not listed and onlyListed is on');
     assert.equal(store.getUser('g1', 'u2').messageCount, 2);
     assert.equal(store.state.data.warmup.channels.chanA, undefined);
+    assert.equal(store.state.data.warmup.channels.chanB.limit, 50);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('run: a per-channel depth caps the fetch window below the default messagesPerChannel', async () => {
+  const dir = tempDir();
+  try {
+    const store = createStore({ dataDir: dir });
+    const now = Date.now();
+    const history = makeHistory({ count: 6, startTs: now - 60_000, spacingMs: 1000, authorId: 'u1' });
+    const channel = fakeChannel('c1', history);
+    const guild = fakeGuild('g1', [channel]);
+    const client = fakeClient(guild);
+    const hot = fakeHot({ warmup: { batchMessages: 10, messagesPerChannel: 200, channelDepths: { c1: 2 } } });
+    const memory = fakeMemory(alwaysOk());
+
+    const warmup = createWarmup({ hot, store, client, memory, getGuildId: () => 'g1', sleep: fakeSleep() });
+    await warmup.run();
+
+    assert.equal(memory.calls.length, 1);
+    // Only the 2 newest messages (the configured depth) are ever fetched,
+    // not all 6 that a default 200-message window would have collected.
+    assert.deepEqual(memory.calls[0].batch.map((m) => m.content), ['msg 4', 'msg 5']);
+    assert.equal(store.state.data.warmup.channels.c1.limit, 2);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('run: the primary channel is read first and depth-0 entries remove a channel from the plan', async () => {
+  const dir = tempDir();
+  try {
+    const store = createStore({ dataDir: dir });
+    const now = Date.now();
+    // chanA is the most recently active, but chanB is the primary and must go first.
+    const historyA = makeHistory({ count: 2, startTs: now - 60_000, spacingMs: 1000, authorId: 'u1' });
+    const historyB = makeHistory({ count: 2, startTs: now - 10 * 60_000, spacingMs: 1000, authorId: 'u2' });
+    const historyC = makeHistory({ count: 2, startTs: now - 5 * 60_000, spacingMs: 1000, authorId: 'u3' });
+    const channelA = fakeChannel('chanA', historyA);
+    const channelB = fakeChannel('chanB', historyB);
+    const channelC = fakeChannel('chanC', historyC);
+    const guild = fakeGuild('g1', [channelA, channelB, channelC]);
+    const client = fakeClient(guild);
+    const hot = fakeHot({ warmup: { batchMessages: 10, primaryChannelId: 'chanB', channelDepths: { chanC: 0 } } });
+    const memory = fakeMemory(alwaysOk());
+
+    const warmup = createWarmup({ hot, store, client, memory, getGuildId: () => 'g1', sleep: fakeSleep() });
+    await warmup.run();
+
+    assert.deepEqual(memory.calls.map((c) => c.guildId && c.batch[0]?.authorId), ['u2', 'u1']);
+    assert.equal(store.getUser('g1', 'u3'), null, 'chanC has depth 0, so it is skipped entirely');
+    assert.equal(store.state.data.warmup.channels.chanC, undefined);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('run: a channel\'s stored depth survives a later config change across a simulated restart', async () => {
+  const dir = tempDir();
+  try {
+    const store = createStore({ dataDir: dir });
+    const now = Date.now();
+    const history = makeHistory({ count: 6, startTs: now - 60_000, spacingMs: 1000, authorId: 'u1' });
+    const channel = fakeChannel('c1', history);
+    const guild = fakeGuild('g1', [channel]);
+    const client = fakeClient(guild);
+    const hot = fakeHot({ warmup: { batchMessages: 2, channelDepths: { c1: 4 } } });
+
+    // The first batch succeeds; the second fails forever, aborting the run
+    // after 3 cycles while the channel still has progress recorded.
+    let call = 0;
+    const memory1 = fakeMemory(() => {
+      call += 1;
+      if (call === 1) return { ok: true, usage: { prompt_tokens: 10, completion_tokens: 5 }, estimated: 15, result: {} };
+      return { ok: false, usage: null, estimated: 0, result: null };
+    });
+
+    const warmup1 = createWarmup({ hot, store, client, memory: memory1, getGuildId: () => 'g1', sleep: fakeSleep() });
+    const result1 = await warmup1.run();
+    assert.equal(result1.aborted, true);
+    assert.equal(store.state.data.warmup.channels.c1.limit, 4);
+
+    // "Restart": a brand-new factory, and the owner has since raised the
+    // configured depth for this channel to 6. The resume must still use the
+    // ORIGINAL stored limit (4), so batch indexes never shift.
+    const hot2 = fakeHot({ warmup: { batchMessages: 2, channelDepths: { c1: 6 } } });
+    const memory2 = fakeMemory(alwaysOk());
+    const warmup2 = createWarmup({ hot: hot2, store, client, memory: memory2, getGuildId: () => 'g1', sleep: fakeSleep() });
+    const result2 = await warmup2.run();
+
+    assert.equal(result2.done, true);
+    assert.equal(store.state.data.warmup.channels.c1.limit, 4, 'the stored limit never changes after the first fetch');
+    const analyzed = [...memory1.calls, ...memory2.calls].flatMap((c) => c.batch.map((m) => m.content));
+    assert.ok(!analyzed.includes('msg 0'), 'outside the original 4-message window');
+    assert.ok(!analyzed.includes('msg 1'), 'outside the original 4-message window');
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -916,6 +1136,146 @@ test('isBlocking: false once done, false once aborted', () => {
 
     store.state.data.warmup = { done: false, aborted: true, channels: {}, tokensUsed: 0, requests: 0 };
     assert.equal(warmup.isBlocking(), false);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('isBlocking: false when the stored state is paused, even though enabled is true and nothing is running', () => {
+  const dir = tempDir();
+  try {
+    const store = createStore({ dataDir: dir });
+    const hot = fakeHot({ warmup: { enabled: true } });
+    const warmup = createWarmup({ hot, store, client: {}, memory: {}, getGuildId: () => 'g1' });
+
+    store.state.data.warmup = { done: false, aborted: false, paused: true, channels: {}, tokensUsed: 0, requests: 0 };
+    assert.equal(warmup.isBlocking(), false, 'a paused warm-up does not auto-block at process start');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('isBlocking: true while an owner-started run is in progress, even with warmup.enabled: false', async () => {
+  const dir = tempDir();
+  try {
+    const store = createStore({ dataDir: dir });
+    const now = Date.now();
+    const history = makeHistory({ count: 1, startTs: now, spacingMs: 1000, authorId: 'u1' });
+    const channel = fakeChannel('c1', history);
+    const guild = fakeGuild('g1', [channel]);
+    const client = fakeClient(guild);
+    const hot = fakeHot({ warmup: { enabled: false } });
+    const memory = { analyze: () => new Promise(() => {}) }; // never resolves: the run stays "running"
+
+    const warmup = createWarmup({ hot, store, client, memory, getGuildId: () => 'g1', sleep: fakeSleep() });
+    assert.equal(warmup.isBlocking(), false, 'not due on its own, warmup.enabled is false');
+
+    warmup.run(); // owner-started, not awaited on purpose
+    await Promise.resolve(); // let the run reach the pending analyze() call
+
+    assert.equal(warmup.isBlocking(), true, 'a run in progress mutes the persona regardless of warmup.enabled');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// stop()
+// ---------------------------------------------------------------------------
+
+test('stop: pauses after the batch in flight, drops isBlocking(), and a later run resumes', async () => {
+  const dir = tempDir();
+  try {
+    const store = createStore({ dataDir: dir });
+    const now = Date.now();
+    const history = makeHistory({ count: 8, startTs: now - 60_000, spacingMs: 1000, authorId: 'u1' });
+    const channel = fakeChannel('c1', history);
+    const guild = fakeGuild('g1', [channel]);
+    const client = fakeClient(guild);
+    const hot = fakeHot({ warmup: { batchMessages: 2 } });
+
+    let warmup;
+    const memory = fakeMemory((callIndex) => {
+      // A stop() requested by "the owner" while the 2nd batch is in flight.
+      if (callIndex === 1) warmup.stop();
+      return { ok: true, usage: { prompt_tokens: 10, completion_tokens: 5 }, estimated: 15, result: {} };
+    });
+
+    warmup = createWarmup({ hot, store, client, memory, getGuildId: () => 'g1', sleep: fakeSleep() });
+    const result = await warmup.run();
+
+    assert.equal(result.paused, true);
+    assert.equal(result.done, false);
+    assert.equal(result.aborted, false);
+    assert.equal(memory.calls.length, 2, 'stops right after the batch that was already in flight');
+    assert.equal(store.state.data.warmup.channels.c1.batchesDone, 2);
+    assert.equal(store.state.data.warmup.channels.c1.done, false);
+    assert.equal(warmup.isBlocking(), false, 'a paused run must not keep the persona mute forever');
+
+    const memory2 = fakeMemory(alwaysOk());
+    const warmup2 = createWarmup({ hot, store, client, memory: memory2, getGuildId: () => 'g1', sleep: fakeSleep() });
+    const result2 = await warmup2.run();
+
+    assert.equal(result2.done, true);
+    assert.equal(result2.paused, false);
+    assert.equal(memory2.calls.length, 2, 'only the 2 remaining batches run');
+    assert.equal(store.state.data.warmup.channels.c1.done, true);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('stop: a no-op when nothing is running', () => {
+  const dir = tempDir();
+  try {
+    const store = createStore({ dataDir: dir });
+    const hot = fakeHot();
+    const warmup = createWarmup({ hot, store, client: {}, memory: {}, getGuildId: () => 'g1' });
+    assert.doesNotThrow(() => warmup.stop());
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// plan()
+// ---------------------------------------------------------------------------
+
+test('plan: an empty plan before the guild has resolved, never throws', async () => {
+  const dir = tempDir();
+  try {
+    const store = createStore({ dataDir: dir });
+    const hot = fakeHot({ warmup: { maxTokens: 12345, batchMessages: 7 } });
+    const warmup = createWarmup({ hot, store, client: {}, memory: {}, getGuildId: () => null });
+
+    const p = await warmup.plan();
+    assert.deepEqual(p, { plan: [], missing: [], maxTokens: 12345, outputTokens: 100, batchMessages: 7 });
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('plan: resolves the same ordered plan run() would use, without fetching any message', async () => {
+  const dir = tempDir();
+  try {
+    const store = createStore({ dataDir: dir });
+    const historyA = makeHistory({ count: 2, startTs: Date.now() - 60_000, spacingMs: 1000, authorId: 'u1' });
+    const historyB = makeHistory({ count: 2, startTs: Date.now() - 5 * 60_000, spacingMs: 1000, authorId: 'u2' });
+    const channelA = fakeChannel('chanA', historyA, 'general');
+    const channelB = fakeChannel('chanB', historyB, 'lore');
+    const guild = fakeGuild('g1', [channelA, channelB]);
+    const client = fakeClient(guild);
+    const hot = fakeHot({ warmup: { primaryChannelId: 'chanB', maxTokens: 999, batchMessages: 3 } });
+
+    const warmup = createWarmup({ hot, store, client, memory: {}, getGuildId: () => 'g1' });
+    const p = await warmup.plan();
+
+    assert.deepEqual(p.plan.map((c) => c.id), ['chanB', 'chanA']);
+    assert.equal(p.plan[0].role, 'primary');
+    assert.equal(p.plan[0].name, 'lore');
+    assert.equal(p.maxTokens, 999);
+    assert.equal(p.batchMessages, 3);
+    assert.equal(p.outputTokens, 100);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
