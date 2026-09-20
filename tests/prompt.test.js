@@ -258,6 +258,31 @@ test('buildRequest: an image attached to the request renders transcript.imageAtt
   assert.ok(user.includes(labels.transcript.imageAttached.replace('{n}', '1')));
 });
 
+test('buildRequest: textFallback re-renders the same chat with attachedIndex dropped -- blind/described, frameAttached gone', () => {
+  const trigger = makeMessage(1, NOW - MIN, {
+    attachments: [{ id: 'v1', kind: 'video', url: 'https://cdn.discordapp.com/attachments/1/2/clip.mp4', name: 'clip.mp4', durationSec: 34 }],
+  });
+  const config = fakeConfig({
+    features: { vision: true },
+    context: { vision: { maxImages: 4, tokensPerImage: 400, imageSize: 512, recentImages: 0, recentImageMinutes: 0 } },
+  });
+  const request = buildRequest(baseInput({ history: [trigger], trigger, triggerKind: 'mention', config }));
+
+  const primaryText = request.messages[1].content.find((part) => part.type === 'text').text;
+  assert.ok(primaryText.includes(labels.transcript.frameAttached.replace('{n}', '1')));
+  assert.ok(primaryText.includes('[video: clip.mp4, 0:34]'));
+
+  assert.equal(typeof request.textFallback, 'string');
+  assert.ok(request.textFallback.includes('[video: clip.mp4, 0:34]'));
+  assert.ok(!request.textFallback.includes('still frame'), 'frameAttached must be dropped in the fallback');
+  assert.ok(!request.textFallback.includes(labels.transcript.imageAttached.replace('{n}', '1')));
+});
+
+test('buildRequest: textFallback is null when nothing is attached (no pictures selected)', () => {
+  const request = buildRequest(baseInput());
+  assert.equal(request.textFallback, null);
+});
+
 test('buildRequest: the media proxy resizes a Discord CDN picture to context.vision.imageSize', () => {
   const trigger = makeMessage(1, NOW - MIN, {
     attachments: [{ id: 'i1', kind: 'image', url: 'https://cdn.discordapp.com/attachments/1/2/pic.png' }],

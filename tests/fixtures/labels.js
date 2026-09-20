@@ -32,8 +32,11 @@ export const labels = {
     linkText: '[link: {site} — {title}: {text}]',
     filePreview: '[file: {name}: {text}]',
     forwarded: '[forwarded: {text}]',
+    forwardedFrom: '[forwarded from #{channel}: {text}]',
     file: '[file: {name}]',
     sticker: '[sticker: {name}]',
+    frameAttached: '[its still frame is attached image {n}]',
+    unknownDuration: 'unknown length',
   },
   senses: {
     imageSee: 'you can see pictures attached to a request with your own eyes',

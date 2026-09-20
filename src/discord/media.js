@@ -117,10 +117,18 @@ export function formatDurationShort(seconds) {
 }
 
 /**
- * Rewrite a Discord CDN URL through the media proxy so it is served at a
- * given size/format. `cdn.discordapp.com` / `media.discordapp.net` URLs get
- * `width` / `height` / `format` query parameters appended (or replaced, when
- * already present); every other host is returned unchanged. Best-effort: an
+ * Rewrite a Discord attachment URL through the media proxy so it is served at
+ * a given size/format. Measured against real Discord payloads:
+ * `cdn.discordapp.com` silently IGNORES `width`/`height`/`format` and serves
+ * the original file (a full-size image, or for a video attachment the whole
+ * file -- never something safe to hand a model as an `image_url` part);
+ * `media.discordapp.net` is the host that actually resizes/reformats. So both
+ * `cdn.discordapp.com` and `media.discordapp.net` attachment URLs are
+ * rewritten to the `media.discordapp.net` host, with `width` / `height` /
+ * `format` set (or replaced, when already present) — every other existing
+ * query parameter survives untouched, crucially the signed `ex`/`is`/`hm`
+ * ones. Every other host is returned unchanged (its own thumbnail is already
+ * a plain image, not a video needing frame extraction). Best-effort: an
  * unparsable URL is returned as-is.
  * @param {string} url
  * @param {{ width?: number, height?: number, format?: string }} [options]
@@ -133,10 +141,21 @@ export function mediaProxyUrl(url, { width, height, format } = {}) {
     return url;
   }
   if (!DISCORD_CDN_HOSTS.has(parsed.hostname)) return url;
+  parsed.hostname = 'media.discordapp.net';
   if (width != null) parsed.searchParams.set('width', String(width));
   if (height != null) parsed.searchParams.set('height', String(height));
   if (format) parsed.searchParams.set('format', format);
   return parsed.toString();
+}
+
+/**
+ * `m:ss` for a known duration, or `unknownDuration` when `durationSec` is
+ * null/undefined -- Discord's own `duration_secs` is usually present on a
+ * video/voice/audio attachment but can be missing; this must never silently
+ * render as "0:00" for an unknown length.
+ */
+function durationOrUnknown(durationSec, unknownDuration) {
+  return durationSec == null ? unknownDuration : formatDurationShort(durationSec);
 }
 
 /**
@@ -145,13 +164,23 @@ export function mediaProxyUrl(url, { width, height, format } = {}) {
  * described > blind. `item` is a normalized attachment or link/embed item
  * (see src/discord/collect.js): `{ kind, name?, site?, title?, text?,
  * durationSec?, previewText? }`.
+ *
+ * A plain image/thumbnail attached to the request renders as a bare
+ * `imageAttached`. A video or gif whose still frame is attached keeps its
+ * normal form (`video`/`videoDescribed`/`gif`/`gifDescribed` -- so the
+ * persona still knows it WAS a video, its name, its duration) and carries a
+ * second tag in `extra`: `frameAttached`, numbered the same way.
  * @param {object} item
- * @param {{ attachedIndex?: number|null, description?: string|null }} [context]
- * @returns {{ key: string, values: object }}
+ * @param {{ attachedIndex?: number|null, description?: string|null, unknownDuration?: string }} [context]
+ * @returns {{ key: string, values: object, extra?: { key: string, values: object } }}
  */
-export function mediaLabelFor(item, { attachedIndex = null, description = null } = {}) {
+export function mediaLabelFor(item, { attachedIndex = null, description = null, unknownDuration = '?' } = {}) {
   const isPicture = PICTURE_ATTACHMENT_KINDS.has(item.kind) || (item.kind === 'link' && item.thumbnailUrl);
   if (attachedIndex != null && isPicture) {
+    if (item.kind === 'video' || item.kind === 'gif') {
+      const base = mediaLabelFor(item, { description, unknownDuration });
+      return { ...base, extra: { key: 'frameAttached', values: { n: attachedIndex } } };
+    }
     return { key: 'imageAttached', values: { n: attachedIndex } };
   }
 
@@ -162,17 +191,16 @@ export function mediaLabelFor(item, { attachedIndex = null, description = null }
       return description
         ? { key: 'gifDescribed', values: { text: description } }
         : { key: 'gif', values: { name: item.name || item.title || item.site || '' } };
-    case 'video':
+    case 'video': {
+      const duration = durationOrUnknown(item.durationSec, unknownDuration);
       return description
-        ? {
-            key: 'videoDescribed',
-            values: { name: item.name ?? '', duration: formatDurationShort(item.durationSec ?? 0), text: description },
-          }
-        : { key: 'video', values: { name: item.name ?? '', duration: formatDurationShort(item.durationSec ?? 0) } };
+        ? { key: 'videoDescribed', values: { name: item.name ?? '', duration, text: description } }
+        : { key: 'video', values: { name: item.name ?? '', duration } };
+    }
     case 'voice':
-      return { key: 'voice', values: { duration: formatDurationShort(item.durationSec ?? 0) } };
+      return { key: 'voice', values: { duration: durationOrUnknown(item.durationSec, unknownDuration) } };
     case 'audio':
-      return { key: 'audio', values: { name: item.name ?? '', duration: formatDurationShort(item.durationSec ?? 0) } };
+      return { key: 'audio', values: { name: item.name ?? '', duration: durationOrUnknown(item.durationSec, unknownDuration) } };
     case 'text':
       return item.previewText
         ? { key: 'filePreview', values: { name: item.name ?? '', text: item.previewText } }

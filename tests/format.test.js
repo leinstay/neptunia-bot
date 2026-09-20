@@ -490,7 +490,7 @@ test('formatTranscript: a link embed renders link/linkText depending on whether 
   assert.ok(items2[0].text.includes('[link: example.com — Cool page: a snippet]'));
 });
 
-test('formatTranscript: a tenor/giphy embed (kind gif) attached renders imageAttached, otherwise gif/gifDescribed', () => {
+test('formatTranscript: a tenor/giphy embed (kind gif) keeps its gif form and adds frameAttached when its frame is attached', () => {
   const t0 = Date.UTC(2026, 8, 20, 10, 0, 0);
   const gifLink = [msg('a', t0, { content: '', links: [{ id: 'a#e0', kind: 'gif', site: 'Tenor', title: 'cat', thumbnailUrl: 'https://x' }] })];
   const blind = formatTranscript(gifLink, { timezone: TZ, gapMinutes: 20, maxChars: 100, selfName: 'Nept', labels });
@@ -504,7 +504,8 @@ test('formatTranscript: a tenor/giphy embed (kind gif) attached renders imageAtt
     labels,
     attachedIndex: new Map([['a#e0', 1]]),
   });
-  assert.ok(attached[0].text.includes('[picture #1, attached]'));
+  assert.ok(attached[0].text.includes('[gif: cat] [its still frame is attached image 1]'));
+  assert.ok(!attached[0].text.includes('[picture #1, attached]'), 'the site/title must survive, not collapse into bare imageAttached');
 });
 
 test('formatTranscript: a forwarded message-snapshot wraps its content and media in labels.transcript.forwarded', () => {
@@ -517,6 +518,102 @@ test('formatTranscript: a forwarded message-snapshot wraps its content and media
   ];
   const items = formatTranscript(messages, { timezone: TZ, gapMinutes: 20, maxChars: 100, selfName: 'Nept', labels });
   assert.ok(items[0].text.includes('[forwarded: look at this [image]]'));
+});
+
+test('formatTranscript: a forward with a resolved source channel name uses labels.transcript.forwardedFrom', () => {
+  const t0 = Date.UTC(2026, 8, 20, 10, 0, 0);
+  const messages = [
+    msg('a', t0, {
+      content: '',
+      forwardedFrom: 'announcements',
+      forwarded: [{ content: 'big news', attachments: [], links: [], stickers: [] }],
+    }),
+  ];
+  const items = formatTranscript(messages, { timezone: TZ, gapMinutes: 20, maxChars: 100, selfName: 'Nept', labels });
+  assert.ok(items[0].text.includes('[forwarded from #announcements: big news]'));
+  assert.ok(!items[0].text.includes('[forwarded: big news]'));
+});
+
+test('formatTranscript: a forward whose source channel is unresolved (forwardedFrom null) falls back to plain forwarded', () => {
+  const t0 = Date.UTC(2026, 8, 20, 10, 0, 0);
+  const messages = [
+    msg('a', t0, {
+      content: '',
+      forwardedFrom: null,
+      forwarded: [{ content: 'big news', attachments: [], links: [], stickers: [] }],
+    }),
+  ];
+  const items = formatTranscript(messages, { timezone: TZ, gapMinutes: 20, maxChars: 100, selfName: 'Nept', labels });
+  assert.ok(items[0].text.includes('[forwarded: big news]'));
+});
+
+test('formatTranscript: an older labels.json with no forwardedFrom key falls back to plain forwarded, even with a resolved channel', () => {
+  const t0 = Date.UTC(2026, 8, 20, 10, 0, 0);
+  const oldLabels = { ...labels, transcript: { ...labels.transcript, forwardedFrom: undefined } };
+  const messages = [
+    msg('a', t0, {
+      content: '',
+      forwardedFrom: 'announcements',
+      forwarded: [{ content: 'big news', attachments: [], links: [], stickers: [] }],
+    }),
+  ];
+  const items = formatTranscript(messages, { timezone: TZ, gapMinutes: 20, maxChars: 100, selfName: 'Nept', labels: oldLabels });
+  assert.ok(items[0].text.includes('[forwarded: big news]'));
+});
+
+test('formatTranscript: a media-only forwarded snapshot (no text) still renders its media inside the wrapper', () => {
+  const t0 = Date.UTC(2026, 8, 20, 10, 0, 0);
+  const messages = [
+    msg('a', t0, {
+      content: '',
+      forwardedFrom: 'media-dump',
+      forwarded: [{ content: '', attachments: [{ id: 'f1', kind: 'image', name: 'x.png' }], links: [], stickers: [] }],
+    }),
+  ];
+  const items = formatTranscript(messages, { timezone: TZ, gapMinutes: 20, maxChars: 100, selfName: 'Nept', labels });
+  assert.ok(items[0].text.includes('[forwarded from #media-dump: [image]]'));
+});
+
+test('formatTranscript: an attached video frame keeps its blind/described form and adds frameAttached, numbered', () => {
+  const t0 = Date.UTC(2026, 8, 20, 10, 0, 0);
+  const messages = [msg('a', t0, { content: '', attachments: [{ id: 'v1', kind: 'video', name: 'clip.mp4', durationSec: 34 }] })];
+  const attachedIndex = new Map([['v1', 1]]);
+  const items = formatTranscript(messages, { timezone: TZ, gapMinutes: 20, maxChars: 100, selfName: 'Nept', labels, attachedIndex });
+  assert.ok(items[0].text.includes('[video: clip.mp4, 0:34] [its still frame is attached image 1]'));
+});
+
+test('formatTranscript: an attached gif frame keeps its blind/described form and adds frameAttached', () => {
+  const t0 = Date.UTC(2026, 8, 20, 10, 0, 0);
+  const messages = [msg('a', t0, { content: '', attachments: [{ id: 'g1', kind: 'gif', name: 'cat.gif' }] })];
+  const attachedIndex = new Map([['g1', 2]]);
+  const descriptions = new Map([['g1', 'a cat dances']]);
+  const items = formatTranscript(messages, {
+    timezone: TZ,
+    gapMinutes: 20,
+    maxChars: 100,
+    selfName: 'Nept',
+    labels,
+    attachedIndex,
+    descriptions,
+  });
+  assert.ok(items[0].text.includes('[gif: a cat dances] [its still frame is attached image 2]'));
+});
+
+test('formatTranscript: an attached plain image still renders the bare imageAttached form, unaffected by the frameAttached change', () => {
+  const t0 = Date.UTC(2026, 8, 20, 10, 0, 0);
+  const messages = [msg('a', t0, { content: '', attachments: [{ id: 'att1', kind: 'image', name: 'pic.png' }] })];
+  const attachedIndex = new Map([['att1', 1]]);
+  const items = formatTranscript(messages, { timezone: TZ, gapMinutes: 20, maxChars: 100, selfName: 'Nept', labels, attachedIndex });
+  assert.ok(items[0].text.includes('[picture #1, attached]'));
+  assert.ok(!items[0].text.includes('still frame'));
+});
+
+test('formatTranscript: a video with an unknown duration renders labels.transcript.unknownDuration, never "0:00"', () => {
+  const t0 = Date.UTC(2026, 8, 20, 10, 0, 0);
+  const messages = [msg('a', t0, { content: '', attachments: [{ id: 'v1', kind: 'video', name: 'clip.mp4', durationSec: null }] })];
+  const items = formatTranscript(messages, { timezone: TZ, gapMinutes: 20, maxChars: 100, selfName: 'Nept', labels });
+  assert.ok(items[0].text.includes('[video: clip.mp4, unknown length]'));
+  assert.ok(!items[0].text.includes('0:00'));
 });
 
 // --- renderTranscript -------------------------------------------------------

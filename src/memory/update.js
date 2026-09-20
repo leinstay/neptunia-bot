@@ -11,7 +11,7 @@ import { estimateTokens, estimateMessages } from '../llm/tokens.js';
 import { formatTranscript, renderTranscript } from '../discord/format.js';
 import { parseJsonObject } from '../llm/parse.js';
 import { TokenLimitError } from '../llm/openrouter.js';
-import { collectPictures, isDescribable } from '../discord/media.js';
+import { isDescribable } from '../discord/media.js';
 import { log } from '../log.js';
 import { emptyAffinity } from './affinity.js';
 
@@ -316,10 +316,8 @@ export function touchMemory(store, guildId, normalized) {
  * @param {object} deps.calibrator   From createCalibrator().
  * @param {(guildId: string) => string} deps.getSelfName
  * @param {() => number} [deps.now]
- * @param {object} [deps.describer]  From createDescriber() (src/memory/describe.js), optional:
- *   when absent, or features.mediaDescriptions is off, no description request is ever made.
  */
-export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, now = Date.now, describer }) {
+export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, now = Date.now }) {
   const running = new Set();
   const backoffUntil = new Map();
   // Per-guild in-memory factor on the live batch size (1 = normal). Halved on
@@ -348,7 +346,11 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
       content: normalized.content,
       ts: normalized.ts,
       replyToId: normalized.replyToId,
-      attachments: (normalized.attachments ?? []).map((a) => ({ kind: a.kind, name: a.name })),
+      // No URL ever survives into the buffer -- but the item `id` does, so
+      // the live analyzer can look up a describer caption already warmed
+      // into the cache by src/discord/events.js (see analyze() below).
+      attachments: (normalized.attachments ?? []).map((a) => ({ kind: a.kind, name: a.name, id: a.id, durationSec: a.durationSec ?? null })),
+      links: (normalized.links ?? []).map((l) => ({ kind: l.kind, name: l.title || l.site || '', id: l.id, durationSec: null })),
       stickers: normalized.stickers,
       direct: Boolean(direct),
     };
@@ -400,8 +402,8 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
    * @param {boolean} [opts.countAgainstDailyCap]  Forwarded to llm.complete(); the warm-up passes `false`
    *   because it has its own rail (a token budget), not the daily request cap.
    * @param {Map<string, string>} [opts.descriptions]  Pre-computed describer captions (see
-   *   src/memory/warmup.js, which budgets and charges these itself). When omitted and a
-   *   `describer` was configured, up to `media.maxPerBatch` NEW ones are described here.
+   *   src/memory/warmup.js, which budgets and charges these itself). When omitted, cached
+   *   captions are looked up by item id instead -- see below.
    * @returns {Promise<{ ok: boolean, usage: object|null, estimated: number, result: object|null, error?: Error }>}
    */
   async function analyze(guildId, messages, { countAgainstDailyCap = true, descriptions } = {}) {
@@ -414,19 +416,22 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
 
     const { authorIds, profiles, channelIds, channels } = collectContext(guildId, messages);
 
+    // The live analyzer never triggers a NEW description request itself --
+    // the buffered messages carry no URL to describe from anyway (see
+    // observe() above). It only reads whatever src/discord/events.js has
+    // already warmed into the cache for these item ids, fire-and-forget, as
+    // the messages came in; a cache miss just renders blind.
     let effectiveDescriptions = descriptions;
-    if (!effectiveDescriptions && describer && hot.config.features?.mediaDescriptions === true) {
-      const candidates = [];
+    if (!effectiveDescriptions && hot.config.features?.mediaDescriptions === true) {
+      const cache = store.getMediaCache(guildId);
+      effectiveDescriptions = new Map();
       for (const message of messages) {
-        for (const item of collectPictures(message)) {
-          if (isDescribable(item)) candidates.push(item);
+        for (const item of [...(message.attachments ?? []), ...(message.links ?? [])]) {
+          if (item.id == null || !isDescribable(item)) continue;
+          const cached = cache[item.id];
+          if (cached && !cached.miss) effectiveDescriptions.set(item.id, cached.text);
         }
       }
-      const described = await describer.describeMany(guildId, candidates, {
-        maxNew: hot.config.media?.maxPerBatch ?? Infinity,
-        countAgainstDailyCap,
-      });
-      effectiveDescriptions = described.descriptions;
     }
 
     let completion;

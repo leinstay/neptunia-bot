@@ -262,10 +262,12 @@ export function createTurnRunner({ hot, store, llm, calibrator, client, rng = Ma
         completion = await llm.complete(request.messages);
       } catch (err) {
         // A Discord CDN image the provider cannot fetch must not cost the persona the reply.
+        // request.textFallback is a full re-render of the same user message with
+        // every imageAttached/frameAttached tag dropped back to its blind/described
+        // form -- resending the ORIGINAL text (still claiming a picture is
+        // attached) alongside no actual image would be worse than the error itself.
         if (request.stats.images > 0 && err.statusCode >= 400 && err.statusCode < 500) {
-          const textOnly = request.messages.map((m) =>
-            Array.isArray(m.content) ? { ...m, content: m.content.find((part) => part.type === 'text').text } : m,
-          );
+          const textOnly = request.messages.map((m) => (Array.isArray(m.content) ? { ...m, content: request.textFallback } : m));
           completion = await llm.complete(textOnly);
         } else {
           throw err;

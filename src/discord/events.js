@@ -8,8 +8,13 @@
 // tests.
 
 import { normalizeMessage, channelAllowed, canSend } from './collect.js';
+import { collectPictures, isDescribable } from './media.js';
 import { detectTrigger, strippedLength, decideMention, repeatWindowMs } from '../behavior/mention.js';
 import { log } from '../log.js';
+
+// The most pictures one observed message warms the describer cache for --
+// this runs per real-time message, not per batch, so it stays cheap.
+const MAX_WARM_PICTURES_PER_MESSAGE = 2;
 
 /**
  * @param {object} deps
@@ -23,6 +28,13 @@ import { log } from '../log.js';
  * @param {() => string | null} deps.getGuildId  the single guild this instance serves, or null before it resolves
  * @param {() => boolean} [deps.isWarmingUp]  true while the memory warm-up (src/memory/warmup.js) is still due or
  *   running: messages are still observed, but no trigger, turn or eavesdrop happens.
+ * @param {object} [deps.describer]  From createDescriber() (src/memory/describe.js), optional: when
+ *   absent, or features.mediaDescriptions is off, no description request is ever made from this
+ *   pipeline. When present, every observed human message's pictures (up to
+ *   MAX_WARM_PICTURES_PER_MESSAGE) are handed to it fire-and-forget -- never awaited here, errors
+ *   swallowed -- so the cache is already warm by the time the live memory analyzer
+ *   (src/memory/update.js#analyze) wants a caption for one of them; the analyzer itself never
+ *   triggers a new request.
  * @param {() => number} [deps.rng]
  * @param {() => number} [deps.now]
  * @returns {(message: import('discord.js').Message) => Promise<void>}
@@ -37,6 +49,7 @@ export function createMessageHandler({
   tagHistory,
   getGuildId,
   isWarmingUp = () => false,
+  describer,
   rng = Math.random,
   now = Date.now,
 }) {
@@ -46,6 +59,18 @@ export function createMessageHandler({
     const cached = message.channel.messages.cache.get(refId);
     const ref = cached ?? (await message.channel.messages.fetch(refId).catch(() => null));
     return ref?.author?.id === selfId;
+  }
+
+  /**
+   * Fire-and-forget: never awaited from the message path (see the class
+   * doc). A no-op when the feature is off or no describer was wired in, so
+   * this pipeline makes zero describer calls in that case.
+   */
+  function warmMediaCache(guildId, normalized) {
+    if (!describer || hot.config.features?.mediaDescriptions !== true) return;
+    const candidates = collectPictures(normalized).filter(isDescribable).slice(0, MAX_WARM_PICTURES_PER_MESSAGE);
+    if (candidates.length === 0) return;
+    describer.describeMany(guildId, candidates).catch((err) => log.warn('events: media cache warm-up failed', { error: err }));
   }
 
   async function onMessage(message) {
@@ -93,6 +118,7 @@ export function createMessageHandler({
       // (no trigger, no turn, no eavesdrop), but the message still feeds the
       // memory buffer like any other observed message.
       if (isWarmingUp()) {
+        warmMediaCache(guildId, normalized);
         if (memoryOn) memory.observe(guildId, normalized, { direct: false });
         return;
       }
@@ -112,6 +138,7 @@ export function createMessageHandler({
 
       // 9. Everyone else feeds memory; a message addressed to the persona is
       // marked `direct` so the analyzer can weigh it separately.
+      warmMediaCache(guildId, normalized);
       if (memoryOn) memory.observe(guildId, normalized, { direct: Boolean(kind) });
 
       // 10. No trigger: let the spontaneous scheduler eavesdrop, nothing more.

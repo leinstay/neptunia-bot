@@ -91,7 +91,6 @@ const memory = createMemoryUpdater({
   llm,
   calibrator,
   getSelfName: (guildId) => client.guilds.cache.get(guildId)?.members.me?.displayName ?? client.user?.username ?? 'bot',
-  describer,
 });
 const warmup = createWarmup({ hot, store, client, memory, getGuildId, describer });
 const admin = createAdmin({ hot, store, client, spontaneous, calibrator, getGuildId, warmup });
@@ -107,6 +106,7 @@ const onMessage = createMessageHandler({
   tagHistory,
   getGuildId,
   isWarmingUp: () => warmup.isBlocking(),
+  describer,
 });
 
 const onInteraction = createInteractionHandler({ hot, admin, getGuildId });

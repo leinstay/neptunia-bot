@@ -110,7 +110,18 @@ function fakeStore(profiles = {}) {
   };
 }
 
-function makeHandler({ config, turns, spontaneous, memory, tagHistory, rng, client, store, getGuildId, isWarmingUp } = {}) {
+function fakeDescriber() {
+  const calls = [];
+  return {
+    calls,
+    describeMany: async (guildId, items) => {
+      calls.push({ guildId, items });
+      return { descriptions: new Map(), newCount: 0 };
+    },
+  };
+}
+
+function makeHandler({ config, turns, spontaneous, memory, tagHistory, rng, client, store, getGuildId, isWarmingUp, describer } = {}) {
   return createMessageHandler({
     hot: { config: config ?? baseConfig() },
     store: store ?? fakeStore(),
@@ -121,8 +132,18 @@ function makeHandler({ config, turns, spontaneous, memory, tagHistory, rng, clie
     tagHistory: tagHistory ?? createTagHistory(),
     getGuildId: getGuildId ?? (() => 'g1'),
     isWarmingUp,
+    describer,
     rng: rng ?? Math.random,
   });
+}
+
+/** A discord.js attachments Map with one classifiable image entry. */
+function pictureAttachments(count = 1) {
+  const entries = [];
+  for (let i = 1; i <= count; i += 1) {
+    entries.push([`a${i}`, { id: `a${i}`, contentType: 'image/png', name: `${i}.png`, url: `https://cdn.discordapp.com/x/${i}.png` }]);
+  }
+  return new Map(entries);
 }
 
 // ---------------------------------------------------------------------------
@@ -692,6 +713,105 @@ test('events: an empty bot.dryRunChannelId (default) does not affect any channel
 
   assert.equal(memory.observeCalls.length, 1);
   assert.equal(spontaneous.onMessageCalls.length, 1);
+});
+
+// ---------------------------------------------------------------------------
+// features.mediaDescriptions: fire-and-forget describer warm-up from the
+// message path (src/memory/describe.js's cache), so the live memory analyzer
+// (src/memory/update.js#analyze) finds a caption already cached.
+
+test('events: features.mediaDescriptions off makes zero describer calls from the message path', async () => {
+  const describer = fakeDescriber();
+  const config = baseConfig({ features: { mediaDescriptions: false } });
+  const handler = makeHandler({ config, describer });
+
+  const message = fakeMessage({ cleanContent: 'look at this', attachments: pictureAttachments(1) });
+  await handler(message);
+
+  assert.equal(describer.calls.length, 0);
+});
+
+test('events: features.mediaDescriptions on fires a fire-and-forget describer call for an observed human message\'s pictures', async () => {
+  const describer = fakeDescriber();
+  const config = baseConfig({ features: { mediaDescriptions: true } });
+  const handler = makeHandler({ config, describer });
+
+  const message = fakeMessage({ cleanContent: 'look at this', attachments: pictureAttachments(1) });
+  await handler(message);
+
+  assert.equal(describer.calls.length, 1);
+  assert.equal(describer.calls[0].items[0].itemId, 'a1');
+});
+
+test('events: at most 2 pictures per message are handed to the describer', async () => {
+  const describer = fakeDescriber();
+  const config = baseConfig({ features: { mediaDescriptions: true } });
+  const handler = makeHandler({ config, describer });
+
+  const message = fakeMessage({ cleanContent: 'lots of pics', attachments: pictureAttachments(3) });
+  await handler(message);
+
+  assert.equal(describer.calls.length, 1);
+  assert.equal(describer.calls[0].items.length, 2);
+});
+
+test('events: no describer wired in never throws, even with mediaDescriptions on and a picture', async () => {
+  const config = baseConfig({ features: { mediaDescriptions: true } });
+  const handler = makeHandler({ config });
+
+  const message = fakeMessage({ cleanContent: 'look', attachments: pictureAttachments(1) });
+  await assert.doesNotReject(() => handler(message));
+});
+
+test('events: the dry-run mirror channel never triggers a describer call, even with a picture', async () => {
+  const describer = fakeDescriber();
+  const config = baseConfig({ features: { mediaDescriptions: true }, bot: { dryRunChannelId: 'mirror1' } });
+  const channel = fakeChannel('mirror1', fakeGuild());
+  const handler = makeHandler({ config, describer });
+
+  const message = fakeMessage({ channel, channelId: 'mirror1', cleanContent: 'look', attachments: pictureAttachments(1) });
+  await handler(message);
+
+  assert.equal(describer.calls.length, 0);
+});
+
+test('events: while warming up, an observed human message with a picture still warms the describer cache', async () => {
+  const describer = fakeDescriber();
+  const config = baseConfig({ features: { mediaDescriptions: true } });
+  const handler = makeHandler({ config, describer, isWarmingUp: () => true });
+
+  const message = fakeMessage({ cleanContent: 'look', attachments: pictureAttachments(1) });
+  await handler(message);
+
+  assert.equal(describer.calls.length, 1);
+});
+
+test('events: the persona\'s own message never triggers a describer call', async () => {
+  const describer = fakeDescriber();
+  const config = baseConfig({ features: { mediaDescriptions: true } });
+  const handler = makeHandler({ config, describer });
+
+  const message = fakeMessage({
+    author: { id: 'self1', bot: true, globalName: 'Neptunia', username: 'neptunia' },
+    attachments: pictureAttachments(1),
+  });
+  await handler(message);
+
+  assert.equal(describer.calls.length, 0);
+});
+
+test('events: another bot\'s message never triggers a describer call', async () => {
+  const describer = fakeDescriber();
+  const config = baseConfig({ features: { mediaDescriptions: true } });
+  const handler = makeHandler({ config, describer });
+
+  const message = fakeMessage({
+    author: { id: 'otherbot', bot: true, globalName: 'Other', username: 'other' },
+    attachments: pictureAttachments(1),
+  });
+  await handler(message);
+
+  assert.equal(describer.calls.length, 0);
 });
 
 test('features.memory=false: affinityScore is never looked up even when relationships is on', async () => {

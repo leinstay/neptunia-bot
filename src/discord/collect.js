@@ -2,7 +2,7 @@
 // normalized objects and fetching the context of a turn — the last N messages
 // of the current channel plus a few fresh messages from neighbouring channels.
 
-import { PermissionFlagsBits, SnowflakeUtil } from 'discord.js';
+import { PermissionFlagsBits, SnowflakeUtil, MessageReferenceType } from 'discord.js';
 import { log } from '../log.js';
 import { classifyAttachment, classifyEmbed } from './media.js';
 
@@ -78,6 +78,14 @@ export function normalizeMessage(message, selfId, options = {}) {
   const rawContent = cleanEmoji(message.cleanContent ?? '').trim();
   const forwarded = [...(message.messageSnapshots?.values?.() ?? [])].map((snapshot) => normalizeSnapshot(snapshot, embedTextChars));
 
+  // A forward's `message.reference.messageId` is the ORIGINAL message, not
+  // something this message replies to -- treating it as `replyToId` would
+  // wrongly render a "replying to" marker. A reference with no `type` at all
+  // (an older/plain payload) is a normal reply, never a forward.
+  const isForward = message.reference?.type === MessageReferenceType.Forward;
+  const sourceChannelId = isForward ? message.reference?.channelId : null;
+  const sourceChannel = sourceChannelId ? message.guild?.channels?.cache?.get(sourceChannelId) : null;
+
   return {
     id: message.id,
     channelId: message.channelId,
@@ -90,7 +98,10 @@ export function normalizeMessage(message, selfId, options = {}) {
     bot: message.author.bot && message.author.id !== selfId,
     content: stripEmbedUrls(rawContent, links),
     ts: message.createdTimestamp,
-    replyToId: message.reference?.messageId ?? null,
+    replyToId: isForward ? null : (message.reference?.messageId ?? null),
+    // The forwarded snapshot's source channel name, when it resolves in the
+    // same guild -- see src/discord/format.js's `forwardedFrom` rendering.
+    forwardedFrom: sourceChannel?.name ?? null,
     attachments,
     links,
     forwarded,

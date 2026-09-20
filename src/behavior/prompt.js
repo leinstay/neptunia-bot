@@ -87,6 +87,29 @@ function aboutChatItems(guildMemory, labels) {
   return items;
 }
 
+/**
+ * Assemble the `<now>…<task>` user-message text from already-rendered parts.
+ * Factored out so a fallback rendering (see `textFallback` below) can reuse
+ * every block untouched except `<chat>`, which is the only one that can ever
+ * carry an `imageAttached`/`frameAttached` tag.
+ */
+function assembleUser({ now, timezone, labels, sensesText, kept, tempoText, task, chatItems }) {
+  return [
+    block('now', formatNow(now, timezone, labels.locale)),
+    block('senses', sensesText),
+    block('about_chat', kept.aboutChat.join('\n')),
+    block('server', kept.server.join('\n\n')),
+    block('self_facts', kept.self.join('\n')),
+    block('people', [...kept.interlocutor, ...kept.people].join('\n\n')),
+    block('other_channels', kept.neighbors.join('\n\n')),
+    block('chat', renderTranscript(chatItems, timezone, labels)),
+    block('tempo', tempoText),
+    block('task', task),
+  ]
+    .filter(Boolean)
+    .join('\n\n');
+}
+
 function fillTemplate(template, values) {
   return (template ?? '').replace(/\{\{(\w+)\}\}/g, (all, key) => values[key] ?? all);
 }
@@ -223,20 +246,21 @@ export function buildRequest(input) {
   );
 
   const keptChat = chatItems.slice(chatItems.length - kept.chat.length);
-  const user = [
-    block('now', formatNow(now, timezone, labels.locale)),
-    block('senses', sensesText),
-    block('about_chat', kept.aboutChat.join('\n')),
-    block('server', kept.server.join('\n\n')),
-    block('self_facts', kept.self.join('\n')),
-    block('people', [...kept.interlocutor, ...kept.people].join('\n\n')),
-    block('other_channels', kept.neighbors.join('\n\n')),
-    block('chat', renderTranscript(keptChat, timezone, labels)),
-    block('tempo', tempoText),
-    block('task', task),
-  ]
-    .filter(Boolean)
-    .join('\n\n');
+  const user = assembleUser({ now, timezone, labels, sensesText, kept, tempoText, task, chatItems: keptChat });
+
+  // A provider that rejects the images (see src/behavior/turn.js's 4xx
+  // retry) must never resend a <chat> claiming a picture is attached with
+  // nothing actually attached: `textFallback` re-renders the SAME kept
+  // messages with attachedIndex dropped, so imageAttached/frameAttached fall
+  // back to their blind/described forms. Every other block is identical
+  // (none of them ever depend on attachedIndex), so it is computed only when
+  // there is anything to fall back from.
+  let textFallback = null;
+  if (pictures.length) {
+    const chatItemsBlind = formatTranscript(history, { ...formatOptions, attachedIndex: undefined });
+    const keptChatBlind = chatItemsBlind.slice(chatItemsBlind.length - kept.chat.length);
+    textFallback = assembleUser({ now, timezone, labels, sensesText, kept, tempoText, task, chatItems: keptChatBlind });
+  }
 
   const content = pictures.length
     ? [
@@ -257,5 +281,6 @@ export function buildRequest(input) {
     idByIndex,
     tempo,
     pictures,
+    textFallback,
   };
 }

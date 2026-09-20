@@ -103,31 +103,58 @@ test('formatDurationShort: negative/garbage input never goes negative', () => {
 
 // --- mediaProxyUrl -------------------------------------------------------------
 
-test('mediaProxyUrl: appends width/height/format for cdn.discordapp.com', () => {
-  const url = mediaProxyUrl('https://cdn.discordapp.com/attachments/1/2/pic.png', { width: 512, height: 512, format: 'webp' });
-  const parsed = new URL(url);
-  assert.equal(parsed.hostname, 'cdn.discordapp.com');
-  assert.equal(parsed.searchParams.get('width'), '512');
-  assert.equal(parsed.searchParams.get('height'), '512');
-  assert.equal(parsed.searchParams.get('format'), 'webp');
-});
+// cdn.discordapp.com measurably ignores width/height/format and serves the
+// original file (a full-size image, or for a video the whole file) --
+// media.discordapp.net is the host that actually resizes/reformats. A
+// realistic signed URL (ex/is/hm) is used throughout so the fix is proven
+// against the real shape, not a simplified fixture.
+const SIGNED_QUERY = 'ex=671f1a00&is=671dc880&hm=abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890&';
 
-test('mediaProxyUrl: works for media.discordapp.net too', () => {
-  const url = mediaProxyUrl('https://media.discordapp.net/attachments/1/2/pic.png', { width: 256 });
-  assert.equal(new URL(url).searchParams.get('width'), '256');
-});
-
-test('mediaProxyUrl: replaces existing width/height/format instead of duplicating them', () => {
-  const url = mediaProxyUrl('https://cdn.discordapp.com/x/pic.png?width=100&height=100&format=jpeg&ex=abc', {
+test('mediaProxyUrl: a cdn.discordapp.com attachment URL is rewritten to media.discordapp.net, signed params survive', () => {
+  const url = mediaProxyUrl(`https://cdn.discordapp.com/attachments/111/222/pic.png?${SIGNED_QUERY}`, {
     width: 512,
     height: 512,
     format: 'webp',
   });
   const parsed = new URL(url);
+  assert.equal(parsed.hostname, 'media.discordapp.net');
+  assert.equal(parsed.pathname, '/attachments/111/222/pic.png');
   assert.equal(parsed.searchParams.get('width'), '512');
   assert.equal(parsed.searchParams.get('height'), '512');
   assert.equal(parsed.searchParams.get('format'), 'webp');
-  assert.equal(parsed.searchParams.get('ex'), 'abc', 'unrelated existing query params survive');
+  assert.equal(parsed.searchParams.get('ex'), '671f1a00');
+  assert.equal(parsed.searchParams.get('is'), '671dc880');
+  assert.equal(parsed.searchParams.get('hm'), 'abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890');
+});
+
+test('mediaProxyUrl: a video attachment URL also moves to media.discordapp.net -- never left on cdn.discordapp.com, which would return the whole file', () => {
+  const url = mediaProxyUrl(`https://cdn.discordapp.com/attachments/111/222/clip.mp4?${SIGNED_QUERY}`, { format: 'webp' });
+  const parsed = new URL(url);
+  assert.equal(parsed.hostname, 'media.discordapp.net');
+  assert.equal(parsed.searchParams.get('format'), 'webp');
+  assert.equal(parsed.searchParams.get('hm')?.length, 64, 'the signed hm survives the host swap');
+});
+
+test('mediaProxyUrl: an already-media.discordapp.net URL keeps that host, params still set', () => {
+  const url = mediaProxyUrl(`https://media.discordapp.net/attachments/1/2/pic.png?${SIGNED_QUERY}`, { width: 256 });
+  const parsed = new URL(url);
+  assert.equal(parsed.hostname, 'media.discordapp.net');
+  assert.equal(parsed.searchParams.get('width'), '256');
+  assert.equal(parsed.searchParams.get('ex'), '671f1a00');
+});
+
+test('mediaProxyUrl: replaces existing width/height/format instead of duplicating them, on either host', () => {
+  const url = mediaProxyUrl(`https://cdn.discordapp.com/x/pic.png?width=100&height=100&format=jpeg&${SIGNED_QUERY}`, {
+    width: 512,
+    height: 512,
+    format: 'webp',
+  });
+  const parsed = new URL(url);
+  assert.equal(parsed.hostname, 'media.discordapp.net');
+  assert.equal(parsed.searchParams.get('width'), '512');
+  assert.equal(parsed.searchParams.get('height'), '512');
+  assert.equal(parsed.searchParams.get('format'), 'webp');
+  assert.equal(parsed.searchParams.get('ex'), '671f1a00', 'unrelated existing query params survive');
   assert.equal([...parsed.searchParams.keys()].filter((k) => k === 'width').length, 1, 'no duplicate keys');
 });
 
@@ -142,10 +169,37 @@ test('mediaProxyUrl: an unparsable URL is returned as-is instead of throwing', (
 
 // --- mediaLabelFor -------------------------------------------------------------
 
-test('mediaLabelFor: an attached image/gif/video renders imageAttached with its 1-based index', () => {
+test('mediaLabelFor: an attached plain image renders imageAttached with its 1-based index', () => {
   assert.deepEqual(mediaLabelFor({ kind: 'image' }, { attachedIndex: 1 }), { key: 'imageAttached', values: { n: 1 } });
-  assert.deepEqual(mediaLabelFor({ kind: 'gif' }, { attachedIndex: 2 }), { key: 'imageAttached', values: { n: 2 } });
-  assert.deepEqual(mediaLabelFor({ kind: 'video' }, { attachedIndex: 3 }), { key: 'imageAttached', values: { n: 3 } });
+});
+
+test('mediaLabelFor: an attached video/gif still frame keeps its normal (blind) form, plus an extra frameAttached tag', () => {
+  assert.deepEqual(mediaLabelFor({ kind: 'gif', name: 'cat.gif' }, { attachedIndex: 2 }), {
+    key: 'gif',
+    values: { name: 'cat.gif' },
+    extra: { key: 'frameAttached', values: { n: 2 } },
+  });
+  assert.deepEqual(mediaLabelFor({ kind: 'video', name: 'clip.mp4', durationSec: 65 }, { attachedIndex: 3 }), {
+    key: 'video',
+    values: { name: 'clip.mp4', duration: '1:05' },
+    extra: { key: 'frameAttached', values: { n: 3 } },
+  });
+});
+
+test('mediaLabelFor: an attached video/gif still frame with a description uses the described form, plus frameAttached', () => {
+  assert.deepEqual(mediaLabelFor({ kind: 'gif' }, { attachedIndex: 1, description: 'a cat dances' }), {
+    key: 'gifDescribed',
+    values: { text: 'a cat dances' },
+    extra: { key: 'frameAttached', values: { n: 1 } },
+  });
+  assert.deepEqual(
+    mediaLabelFor({ kind: 'video', name: 'clip.mp4', durationSec: 65 }, { attachedIndex: 1, description: 'a dog runs' }),
+    {
+      key: 'videoDescribed',
+      values: { name: 'clip.mp4', duration: '1:05', text: 'a dog runs' },
+      extra: { key: 'frameAttached', values: { n: 1 } },
+    },
+  );
 });
 
 test('mediaLabelFor: an attached link-embed thumbnail also renders imageAttached', () => {
@@ -189,6 +243,23 @@ test('mediaLabelFor: voice/audio render their duration', () => {
     key: 'audio',
     values: { name: 'song.mp3', duration: '2:10' },
   });
+});
+
+test('mediaLabelFor: a missing duration never renders "0:00" -- falls back to unknownDuration (default "?")', () => {
+  assert.deepEqual(mediaLabelFor({ kind: 'video', name: 'clip.mp4' }), { key: 'video', values: { name: 'clip.mp4', duration: '?' } });
+  assert.deepEqual(mediaLabelFor({ kind: 'voice' }), { key: 'voice', values: { duration: '?' } });
+  assert.deepEqual(mediaLabelFor({ kind: 'audio', name: 'song.mp3' }), { key: 'audio', values: { name: 'song.mp3', duration: '?' } });
+});
+
+test('mediaLabelFor: a missing duration uses the caller-supplied unknownDuration text', () => {
+  assert.deepEqual(mediaLabelFor({ kind: 'video', name: 'clip.mp4' }, { unknownDuration: 'unknown length' }), {
+    key: 'video',
+    values: { name: 'clip.mp4', duration: 'unknown length' },
+  });
+});
+
+test('mediaLabelFor: a durationSec of 0 is a KNOWN zero-length duration, not "unknown"', () => {
+  assert.deepEqual(mediaLabelFor({ kind: 'voice', durationSec: 0 }), { key: 'voice', values: { duration: '0:00' } });
 });
 
 test('mediaLabelFor: a text attachment uses filePreview once fetched, else the plain file form', () => {

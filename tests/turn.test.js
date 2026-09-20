@@ -489,6 +489,64 @@ test('createTurnRunner: a text-attachment fetch failure falls back to the plain 
 });
 
 // ---------------------------------------------------------------------------
+// A provider that rejects the images (4xx) retries text-only -- the retry
+// must never resend text still claiming a picture is attached.
+
+function fakeLlmRejectingImagesOnce(statusCode, responseText) {
+  const calls = [];
+  let first = true;
+  return {
+    calls,
+    complete: async (messages) => {
+      calls.push(messages);
+      if (first) {
+        first = false;
+        const err = new Error('bad request');
+        err.statusCode = statusCode;
+        throw err;
+      }
+      return { text: responseText, usage: {}, estimated: 10 };
+    },
+  };
+}
+
+test('createTurnRunner: a 4xx image error retries text-only, rendering the video blind (frameAttached dropped)', async () => {
+  const raw = rawMessage({
+    id: 'm1',
+    attachments: new Map([
+      ['v1', { id: 'v1', contentType: 'video/mp4', name: 'clip.mp4', url: 'https://cdn.discordapp.com/attachments/1/2/clip.mp4', duration: 34 }],
+    ]),
+  });
+  const channel = fakeTurnChannel({ historyMessages: [raw] });
+  const llm = fakeLlmRejectingImagesOnce(400, '<msg>ok</msg>');
+  const store = fakeStore();
+  const hot = fakeHot({});
+  const turns = createTurnRunner({ hot, store, llm, calibrator: identityCalibrator(), client: fakeClient() });
+
+  const trigger = {
+    ...normalizedTrigger(raw),
+    attachments: [
+      { id: 'v1', kind: 'video', url: 'https://cdn.discordapp.com/attachments/1/2/clip.mp4', name: 'clip.mp4', durationSec: 34 },
+    ],
+  };
+
+  const result = await turns.runTurn({ channel, mode: 'reply', trigger, triggerKind: 'mention' });
+
+  assert.equal(result.outcome, 'spoke');
+  assert.equal(llm.calls.length, 2, 'the first (image) attempt and the text-only retry');
+
+  const firstUser = llm.calls[0][1].content;
+  assert.ok(Array.isArray(firstUser), 'the first attempt carries image_url parts');
+  const firstText = firstUser.find((p) => p.type === 'text').text;
+  assert.ok(firstText.includes(labels.transcript.frameAttached.replace('{n}', '1')));
+
+  const secondUser = llm.calls[1][1].content;
+  assert.equal(typeof secondUser, 'string', 'the retry sends plain text, no image_url parts');
+  assert.ok(secondUser.includes('[video: clip.mp4, 0:34]'), 'the video still renders in its blind form');
+  assert.ok(!secondUser.includes('still frame'), 'frameAttached must not survive into the text-only retry');
+});
+
+// ---------------------------------------------------------------------------
 // features.dryRun -- the persona thinks and decides for real, but never
 // touches the target channel; instead it logs, and optionally mirrors, what
 // it would have done.

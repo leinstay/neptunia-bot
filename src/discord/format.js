@@ -116,29 +116,42 @@ function truncate(text, maxChars) {
  * link's synthesized id — see normalizeMessage).
  */
 function mediaTags(message, labels, context = {}) {
+  const unknownDuration = labels.transcript.unknownDuration ?? '?';
   const tags = [];
+  const pushLabel = ({ key, values, extra }) => {
+    tags.push(fill(labels.transcript[key], values));
+    if (extra) tags.push(fill(labels.transcript[extra.key], extra.values));
+  };
   for (const attachment of message.attachments ?? []) {
     const attachedIndex = context.attachedIndex?.get(attachment.id) ?? null;
     const description = context.descriptions?.get(attachment.id) ?? null;
-    const { key, values } = mediaLabelFor(attachment, { attachedIndex, description });
-    tags.push(fill(labels.transcript[key], values));
+    pushLabel(mediaLabelFor(attachment, { attachedIndex, description, unknownDuration }));
   }
   for (const link of message.links ?? []) {
     const attachedIndex = context.attachedIndex?.get(link.id) ?? null;
     const description = context.descriptions?.get(link.id) ?? null;
-    const { key, values } = mediaLabelFor(link, { attachedIndex, description });
-    tags.push(fill(labels.transcript[key], values));
+    pushLabel(mediaLabelFor(link, { attachedIndex, description, unknownDuration }));
   }
   for (const sticker of message.stickers ?? []) tags.push(fill(labels.transcript.sticker, { name: sticker }));
   return tags;
 }
 
-/** One forwarded message-snapshot, wrapped in `labels.transcript.forwarded`. */
-function renderForwarded(snapshot, labels, context, maxChars) {
+/**
+ * One forwarded message-snapshot, wrapped in `labels.transcript.forwardedFrom`
+ * when the source channel's name is known AND the labels file has that key
+ * (an older labels.json falls back gracefully); otherwise the plain
+ * `labels.transcript.forwarded`. A media-only snapshot (no text) still
+ * renders its media tags inside the wrapper.
+ */
+function renderForwarded(snapshot, labels, context, maxChars, channelName) {
   const body = [];
   if (snapshot.content) body.push(truncate(snapshot.content, maxChars));
   body.push(...mediaTags(snapshot, labels, context));
-  return fill(labels.transcript.forwarded, { text: body.join(' ').trim() });
+  const text = body.join(' ').trim();
+  if (channelName && labels.transcript.forwardedFrom) {
+    return fill(labels.transcript.forwardedFrom, { channel: channelName, text });
+  }
+  return fill(labels.transcript.forwarded, { text });
 }
 
 /**
@@ -213,7 +226,7 @@ export function formatTranscript(messages, options) {
     }
     body.push(...mediaTags(message, labels, mediaContext));
     for (const snapshot of message.forwarded ?? []) {
-      body.push(renderForwarded(snapshot, labels, mediaContext, maxChars));
+      body.push(renderForwarded(snapshot, labels, mediaContext, maxChars, message.forwardedFrom));
     }
 
     const marker = mode === 'memory' && message.direct ? DIRECT_MARKER : '';

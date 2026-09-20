@@ -490,60 +490,56 @@ test('buildMemoryRequest: a described picture renders imageDescribed via the des
 });
 
 // ---- analyze: description wiring --------------------------------------------
+// The live analyzer never triggers a new describer request itself (there is
+// no describer dependency left on createMemoryUpdater at all): it only reads
+// whatever src/discord/events.js already warmed into the shared media cache,
+// keyed by item id -- see src/memory/describe.js's cache shape.
 
-function fakeDescriberFor(descriptionsById) {
-  const calls = [];
-  return {
-    calls,
-    describeMany: async (guildId, items, options) => {
-      calls.push({ guildId, items, options });
-      const descriptions = new Map();
-      for (const item of items) if (descriptionsById[item.itemId]) descriptions.set(item.itemId, descriptionsById[item.itemId]);
-      return { descriptions, newCount: descriptions.size };
-    },
-  };
-}
-
-test('analyze: features.mediaDescriptions off never calls the describer', async () => {
+test('analyze: features.mediaDescriptions off never renders a cached description, even when one exists', async () => {
   await withStoreAsync(async (store) => {
     const guildId = 'g1';
     const hot = { config: makeConfig(), prompts: { memory: 'sys', labels } };
     const calibrator = createCalibrator();
-    const llm = { complete: async () => ({ text: '{}' }) };
-    const describer = fakeDescriberFor({ a1: 'a cat' });
-    const updater = createMemoryUpdater({ hot, store, llm, calibrator, getSelfName: () => 'Nept', describer });
+    let seenUser = null;
+    const llm = { complete: async (messages) => { seenUser = messages[1].content; return { text: '{}' }; } };
+    const updater = createMemoryUpdater({ hot, store, llm, calibrator, getSelfName: () => 'Nept' });
+    store.getMediaCache(guildId).a1 = { text: 'a cat', ts: Date.now() };
 
-    const messages = [slimMessage({ id: 'm1', attachments: [{ id: 'a1', kind: 'image', name: 'pic.png' }] })];
+    const messages = [
+      slimMessage({ id: 'm1', content: '', attachments: [{ id: 'a1', kind: 'image', name: 'pic.png', durationSec: null }] }),
+    ];
     await updater.analyze(guildId, messages);
 
-    assert.equal(describer.calls.length, 0);
+    assert.ok(!seenUser.includes('a cat'));
+    assert.ok(seenUser.includes(labels.transcript.image));
   });
 });
 
-test('analyze: features.mediaDescriptions on describes candidate pictures and threads them into the request', async () => {
+test('analyze: features.mediaDescriptions on renders a cached description via imageDescribed, no separate request', async () => {
   await withStoreAsync(async (store) => {
     const guildId = 'g1';
     const hot = {
-      config: makeConfig({ features: { mediaDescriptions: true }, media: { maxPerBatch: 20 } }),
+      config: makeConfig({ features: { mediaDescriptions: true } }),
       prompts: { memory: 'sys', labels },
     };
     const calibrator = createCalibrator();
     let seenUser = null;
-    const llm = { complete: async (messages) => { seenUser = messages[1].content; return { text: '{}' }; } };
-    const describer = fakeDescriberFor({ a1: 'a grey cat' });
-    const updater = createMemoryUpdater({ hot, store, llm, calibrator, getSelfName: () => 'Nept', describer });
+    let llmCalls = 0;
+    const llm = { complete: async (messages) => { llmCalls += 1; seenUser = messages[1].content; return { text: '{}' }; } };
+    const updater = createMemoryUpdater({ hot, store, llm, calibrator, getSelfName: () => 'Nept' });
+    store.getMediaCache(guildId).a1 = { text: 'a grey cat', ts: Date.now() };
 
     const messages = [
-      slimMessage({ id: 'm1', content: '', attachments: [{ id: 'a1', kind: 'image', name: 'pic.png' }] }),
+      slimMessage({ id: 'm1', content: '', attachments: [{ id: 'a1', kind: 'image', name: 'pic.png', durationSec: null }] }),
     ];
     await updater.analyze(guildId, messages);
 
-    assert.equal(describer.calls.length, 1);
+    assert.equal(llmCalls, 1, 'only the one memory-update completion, no description request from analyze()');
     assert.ok(seenUser.includes(labels.transcript.imageDescribed.replace('{text}', 'a grey cat')));
   });
 });
 
-test('analyze: an explicitly-passed descriptions map (the warm-up path) is used as-is, describer never called', async () => {
+test('analyze: a cache miss (or nothing cached yet) renders the blind form, never a request', async () => {
   await withStoreAsync(async (store) => {
     const guildId = 'g1';
     const hot = {
@@ -553,16 +549,38 @@ test('analyze: an explicitly-passed descriptions map (the warm-up path) is used 
     const calibrator = createCalibrator();
     let seenUser = null;
     const llm = { complete: async (messages) => { seenUser = messages[1].content; return { text: '{}' }; } };
-    const describer = fakeDescriberFor({ a1: 'wrong, should not be called' });
-    const updater = createMemoryUpdater({ hot, store, llm, calibrator, getSelfName: () => 'Nept', describer });
+    const updater = createMemoryUpdater({ hot, store, llm, calibrator, getSelfName: () => 'Nept' });
+    store.getMediaCache(guildId).a1 = { miss: true, ts: Date.now() };
 
     const messages = [
-      slimMessage({ id: 'm1', content: '', attachments: [{ id: 'a1', kind: 'image', name: 'pic.png' }] }),
+      slimMessage({ id: 'm1', content: '', attachments: [{ id: 'a1', kind: 'image', name: 'pic.png', durationSec: null }] }),
+    ];
+    await updater.analyze(guildId, messages);
+
+    assert.ok(seenUser.includes(labels.transcript.image));
+  });
+});
+
+test('analyze: an explicitly-passed descriptions map (the warm-up path) is used as-is, the cache never consulted', async () => {
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    const hot = {
+      config: makeConfig({ features: { mediaDescriptions: true } }),
+      prompts: { memory: 'sys', labels },
+    };
+    const calibrator = createCalibrator();
+    let seenUser = null;
+    const llm = { complete: async (messages) => { seenUser = messages[1].content; return { text: '{}' }; } };
+    const updater = createMemoryUpdater({ hot, store, llm, calibrator, getSelfName: () => 'Nept' });
+    store.getMediaCache(guildId).a1 = { text: 'wrong, should not be used', ts: Date.now() };
+
+    const messages = [
+      slimMessage({ id: 'm1', content: '', attachments: [{ id: 'a1', kind: 'image', name: 'pic.png', durationSec: null }] }),
     ];
     await updater.analyze(guildId, messages, { descriptions: new Map([['a1', 'from the warm-up']]) });
 
-    assert.equal(describer.calls.length, 0);
     assert.ok(seenUser.includes(labels.transcript.imageDescribed.replace('{text}', 'from the warm-up')));
+    assert.ok(!seenUser.includes('wrong, should not be used'));
   });
 });
 
@@ -825,7 +843,7 @@ test('observe: ignores other bots entirely', () => {
   });
 });
 
-test('observe: strips attachment urls before buffering', () => {
+test('observe: strips attachment/link urls before buffering, keeps the item id for description-cache lookups', () => {
   withStore((store) => {
     const hot = { config: makeConfig() };
     const updater = createMemoryUpdater({ hot, store, llm: {}, calibrator: createCalibrator(), getSelfName: () => 'Nept' });
@@ -834,14 +852,18 @@ test('observe: strips attachment urls before buffering', () => {
       'g1',
       slimMessage({
         content: 'look',
-        attachments: [{ kind: 'image', name: 'a.png', url: 'https://cdn.example/secret' }],
+        attachments: [{ id: 'a1', kind: 'image', name: 'a.png', url: 'https://cdn.example/secret', durationSec: null }],
+        links: [{ id: 'm1#e0', kind: 'gif', site: 'Tenor', title: 'cat', thumbnailUrl: 'https://t.tenor.com/x.png' }],
         stickers: ['wow'],
       }),
     );
 
     const [buffered] = store.getBuffer('g1');
-    assert.deepEqual(buffered.attachments, [{ kind: 'image', name: 'a.png' }]);
+    assert.deepEqual(buffered.attachments, [{ kind: 'image', name: 'a.png', id: 'a1', durationSec: null }]);
     assert.equal('url' in buffered.attachments[0], false);
+    assert.deepEqual(buffered.links, [{ kind: 'gif', name: 'cat', id: 'm1#e0', durationSec: null }]);
+    assert.equal('url' in buffered.links[0], false);
+    assert.equal('thumbnailUrl' in buffered.links[0], false);
     assert.deepEqual(buffered.stickers, ['wow']);
   });
 });

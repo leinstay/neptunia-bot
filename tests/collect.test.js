@@ -5,6 +5,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { normalizeMessage, fetchTextPreview, withTextPreviews, fetchHistory } from '../src/discord/collect.js';
+import { MessageReferenceType } from 'discord.js';
 
 function flagsWith(names) {
   const set = new Set(names);
@@ -129,6 +130,76 @@ test('normalizeMessage: no messageSnapshots means an empty forwarded array', () 
   const raw = rawMessage();
   const m = normalizeMessage(raw, 'self');
   assert.deepEqual(m.forwarded, []);
+});
+
+// --- normalizeMessage: forward vs. plain reply -------------------------------
+// A real forwarded message's own content is empty; `message.reference` is
+// `{ type: MessageReferenceType.Forward, channel_id: <source>, guild_id,
+// message_id: <the ORIGINAL message> }`; `message.messageSnapshots` carries
+// the forwarded content/media/embeds and has no `author`.
+
+function guildWithChannel(id, name) {
+  return { channels: { cache: new Map(id ? [[id, { id, name }]] : []) } };
+}
+
+test('normalizeMessage: a plain reply keeps replyToId, forwardedFrom stays null', () => {
+  const raw = rawMessage({
+    guild: guildWithChannel('c1', 'general'),
+    reference: { messageId: 'm0', channelId: 'c1' }, // no `type`: an older/plain reply payload
+  });
+  const m = normalizeMessage(raw, 'self');
+  assert.equal(m.replyToId, 'm0');
+  assert.equal(m.forwardedFrom, null);
+});
+
+test('normalizeMessage: a reply explicitly typed Default behaves the same as an untyped one', () => {
+  const raw = rawMessage({
+    guild: guildWithChannel('c1', 'general'),
+    reference: { messageId: 'm0', channelId: 'c1', type: MessageReferenceType.Default },
+  });
+  const m = normalizeMessage(raw, 'self');
+  assert.equal(m.replyToId, 'm0');
+  assert.equal(m.forwardedFrom, null);
+});
+
+test('normalizeMessage: a forward\'s replyToId is null even though message_reference carries the original message id', () => {
+  const raw = rawMessage({
+    guild: guildWithChannel('c2', 'announcements'),
+    reference: { messageId: 'original-msg-id', channelId: 'c2', type: MessageReferenceType.Forward },
+    messageSnapshots: new Map([
+      ['snap1', { id: 'snap1', cleanContent: 'forwarded text', attachments: new Map(), embeds: [], stickers: new Map(), flags: flagsWith([]) }],
+    ]),
+  });
+  const m = normalizeMessage(raw, 'self');
+  assert.equal(m.replyToId, null);
+});
+
+test('normalizeMessage: a forward whose source channel resolves in the same guild sets forwardedFrom to its name', () => {
+  const raw = rawMessage({
+    guild: guildWithChannel('c2', 'announcements'),
+    reference: { messageId: 'original-msg-id', channelId: 'c2', type: MessageReferenceType.Forward },
+  });
+  const m = normalizeMessage(raw, 'self');
+  assert.equal(m.forwardedFrom, 'announcements');
+});
+
+test('normalizeMessage: a forward whose source channel does not resolve leaves forwardedFrom null', () => {
+  const raw = rawMessage({
+    guild: guildWithChannel(null, null),
+    reference: { messageId: 'original-msg-id', channelId: 'gone-channel', type: MessageReferenceType.Forward },
+  });
+  const m = normalizeMessage(raw, 'self');
+  assert.equal(m.forwardedFrom, null);
+});
+
+test('normalizeMessage: a forward with no guild on the message never throws, forwardedFrom stays null', () => {
+  const raw = rawMessage({
+    guild: undefined,
+    reference: { messageId: 'original-msg-id', channelId: 'c2', type: MessageReferenceType.Forward },
+  });
+  const m = normalizeMessage(raw, 'self');
+  assert.equal(m.forwardedFrom, null);
+  assert.equal(m.replyToId, null);
 });
 
 // --- fetchHistory: embedTextChars reaches normalizeMessage -------------------
