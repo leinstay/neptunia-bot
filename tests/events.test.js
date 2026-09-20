@@ -670,10 +670,12 @@ test('events: isWarmingUp defaults to false when not provided', async () => {
 });
 
 // ---------------------------------------------------------------------------
-// bot.dryRunChannelId: the dry-run mirror channel (src/behavior/turn.js) is
-// never conversation -- not even the persona's own mirrored messages there.
+// bot.dryRunChannelId: the dry-run mirror channel (src/behavior/turn.js)
+// carries the persona's own rehearsal output and is the owner's private test
+// room. Owner commands still work there; nothing else is ever conversation --
+// not even the persona's own mirrored messages there.
 
-test('events: the dry-run mirror channel is ignored entirely, before admin, memory or the scheduler', async () => {
+test('events: an owner command in the dry-run mirror channel reaches admin.handle exactly once and nothing else', async () => {
   const memory = fakeMemory();
   const spontaneous = fakeSpontaneous();
   const turns = fakeTurns();
@@ -682,7 +684,66 @@ test('events: the dry-run mirror channel is ignored entirely, before admin, memo
   const channel = fakeChannel('mirror1', fakeGuild());
   const handler = makeHandler({ config, memory, spontaneous, turns, admin });
 
-  const message = fakeMessage({ channel, channelId: 'mirror1', cleanContent: '!nep status' });
+  const message = fakeMessage({ channel, channelId: 'mirror1', cleanContent: '!nep warmup' });
+  await handler(message);
+
+  assert.equal(admin.handleCalls.length, 1);
+  assert.equal(admin.handleCalls[0], message);
+  assert.equal(memory.observeCalls.length, 0);
+  assert.equal(spontaneous.onMessageCalls.length, 0);
+  assert.equal(turns.notePostCalls.length, 0);
+});
+
+test('events: a non-command message in the dry-run mirror channel is not observed and triggers nothing', async () => {
+  const memory = fakeMemory();
+  const spontaneous = fakeSpontaneous();
+  const turns = fakeTurns();
+  const admin = fakeAdmin(() => false);
+  const config = baseConfig({ bot: { dryRunChannelId: 'mirror1' } });
+  const channel = fakeChannel('mirror1', fakeGuild());
+  const handler = makeHandler({ config, memory, spontaneous, turns, admin });
+
+  const message = fakeMessage({ channel, channelId: 'mirror1', cleanContent: 'just chatting, no command' });
+  await handler(message);
+
+  assert.equal(admin.handleCalls.length, 1);
+  assert.equal(memory.observeCalls.length, 0);
+  assert.equal(spontaneous.onMessageCalls.length, 0);
+  assert.equal(turns.notePostCalls.length, 0);
+});
+
+test("events: the persona's own message in the dry-run mirror channel never reaches admin.handle", async () => {
+  const memory = fakeMemory();
+  const spontaneous = fakeSpontaneous();
+  const turns = fakeTurns();
+  const admin = fakeAdmin(() => true);
+  const config = baseConfig({ bot: { dryRunChannelId: 'mirror1' } });
+  const channel = fakeChannel('mirror1', fakeGuild());
+  const handler = makeHandler({ config, memory, spontaneous, turns, admin });
+
+  const message = fakeMessage({
+    channel,
+    channelId: 'mirror1',
+    author: { id: 'self1', bot: true, globalName: 'Bot', username: 'bot' },
+  });
+  await handler(message);
+
+  assert.equal(admin.handleCalls.length, 0);
+  assert.equal(memory.observeCalls.length, 0);
+  assert.equal(spontaneous.onMessageCalls.length, 0);
+  assert.equal(turns.notePostCalls.length, 0);
+});
+
+test('features.adminCommands=false: nothing at all is called in the dry-run mirror channel', async () => {
+  const memory = fakeMemory();
+  const spontaneous = fakeSpontaneous();
+  const turns = fakeTurns();
+  const admin = fakeAdmin(() => true);
+  const config = baseConfig({ bot: { dryRunChannelId: 'mirror1' }, features: { adminCommands: false } });
+  const channel = fakeChannel('mirror1', fakeGuild());
+  const handler = makeHandler({ config, memory, spontaneous, turns, admin });
+
+  const message = fakeMessage({ channel, channelId: 'mirror1', cleanContent: '!nep warmup' });
   await handler(message);
 
   assert.equal(admin.handleCalls.length, 0);

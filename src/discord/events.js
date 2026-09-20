@@ -69,12 +69,17 @@ export function createMessageHandler({
       if (message.channel.isThread?.()) return;
       if (!channelAllowed(message.channel, config.bot)) return;
 
-      // 3b. The dry-run mirror channel carries the persona's own rehearsal
-      // output (src/behavior/turn.js), never real conversation: everything
-      // posted there is ignored entirely, so it can never feed back into
-      // memory, a trigger or the spontaneous scheduler.
+      // 3b. The dry-run mirror channel is the owner's private test room: it
+      // also carries the persona's own rehearsal output (src/behavior/turn.js),
+      // never real conversation. Owner commands still work here, same as
+      // everywhere else, but nothing else does -- nothing posted here is ever
+      // observed into memory, no trigger is detected, no turn runs, no
+      // eavesdrop.
       const dryRunChannelId = config.bot.dryRunChannelId;
-      if (dryRunChannelId && message.channel.id === dryRunChannelId) return;
+      if (dryRunChannelId && message.channel.id === dryRunChannelId) {
+        if (adminCommandsOn && !message.author.bot) await admin.handle(message);
+        return;
+      }
 
       // 4. Normalize.
       const selfId = client.user.id;
