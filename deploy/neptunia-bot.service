@@ -10,7 +10,7 @@
 # Adjust WorkingDirectory/User to match your deployment before installing.
 
 [Unit]
-Description=neptunia-bot — a generic Discord pseudo-user engine
+Description=neptunia-bot — Silly Tavern inspired Discord pseudo-user engine
 After=network-online.target
 Wants=network-online.target
 
