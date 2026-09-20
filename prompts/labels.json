@@ -1,0 +1,68 @@
+{
+  "locale": "en-US",
+  "self": "{name} (you)",
+  "units": {
+    "lessThanMinute": "less than a minute",
+    "minute": "min",
+    "hour": "h",
+    "day": "d"
+  },
+  "transcript": {
+    "gap": "--- {duration} passed ---",
+    "gapWithDate": "--- {duration} passed · {date} ---",
+    "date": "--- {date} ---",
+    "header": "=== {date} ===",
+    "empty": "(empty)",
+    "replyTo": "(replying to #{index})",
+    "replyToOld": "(replying to an older message)",
+    "image": "[image]",
+    "file": "[file: {name}]",
+    "sticker": "[sticker: {name}]"
+  },
+  "tempo": {
+    "counts": "Messages: {last10min} in 10 min · {lastHour} in 1 h · {lastDay} in 24 h",
+    "authors": "Active: {authors}",
+    "emptyChannel": "No messages in this channel yet.",
+    "silenceBeforeTrigger": "The channel was silent for {duration} before this.",
+    "lastMessageAgo": "Last message was {duration} ago.",
+    "sinceOwn": "Your last message was {duration} ago.",
+    "ownUnanswered": "Your last message went unanswered.",
+    "verdict": "Vibe: {verdict}",
+    "verdictLive": "active conversation",
+    "verdictSlow": "slow, occasional messages",
+    "verdictDead": "dead quiet"
+  },
+  "profile": {
+    "interlocutorMark": " ← talking to you",
+    "formerNames": "Previously known as: {names}",
+    "character": "Character: {text}",
+    "interests": "Interests: {text}",
+    "style": "Style: {text}",
+    "details": "Notes: {text}",
+    "relationship": "Your history: {text}",
+    "unknown": "You don't know anything about this person yet.",
+    "messageCount": "Messages seen: {count}",
+    "affinity": "Your attitude: {score} ({band}) — {reason}"
+  },
+  "affinity": {
+    "bands": {
+      "hostile": "hostile",
+      "dislike": "dislike",
+      "cool": "cool",
+      "neutral": "neutral",
+      "warm": "warm",
+      "fond": "fond",
+      "devoted": "devoted"
+    }
+  },
+  "aboutChat": {
+    "patterns": "How people talk here: {text}",
+    "starters": "How conversations start: {text}",
+    "injokes": "Running jokes: {text}"
+  },
+  "triggers": {
+    "mention": "mentioned you",
+    "reply": "replied to your message",
+    "name": "said your name"
+  }
+}
