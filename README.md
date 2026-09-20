@@ -8,7 +8,7 @@ A pseudo-user is a bot that lives in your Discord server as one more member. It 
 
 Discord shows an APP badge next to bot accounts -- the point is behaviour and voice, not deception of the platform. This is meant for a server whose members know, or will enjoy finding out.
 
-Node.js, one runtime dependency (discord.js), any OpenRouter-compatible endpoint. Ship it with the included example character or write your own -- no code changes needed.
+Node.js, one runtime dependency (discord.js), any OpenRouter-compatible endpoint. Ship it with the included example character or write your own -- no code changes needed. Each instance serves one server, one bot account, one personality. To run a second server or a second character, spin up a second copy with its own `.env`, `config.local.json`, `prompts.local/` and `data/`.
 
 ## What it does
 
@@ -16,7 +16,7 @@ Node.js, one runtime dependency (discord.js), any OpenRouter-compatible endpoint
 - **Context.** Reads the last 100 messages from the current channel and up to 5 fresh ones from each neighbouring channel. Time gaps are spelled out in the transcript so the model can tell a live conversation from a dead one that somebody poked.
 - **Reply length.** Mostly 1--5 words. Sometimes a sentence or two. Rarely up to about a hundred words. Can send 2--3 short messages in a row, drop a single emoji reaction with no text, or stay silent.
 - **Spontaneous messages.** A chaotic timer fires at random intervals within configurable active hours. When it fires, the bot either cuts into a live conversation or starts a topic in a dead channel. A separate eavesdrop chance lets it jump into any message at any time. It never responds to itself.
-- **Memory.** Per-member profiles (character, interests, communication style, relationship with the bot), server-level patterns (how people talk, conversation starters, running jokes), and a record of what it has claimed about itself. Updated in batches by a separate LLM call.
+- **Memory.** Per-member profiles (character, interests, communication style, relationship with the bot), a map of the server's channels (what each is for, what people write about, the tone -- by the analyzer; alive/slow/dead -- counted by code from real message statistics), server-level patterns (conversation starters, running jokes), and a record of what it has claimed about itself. Updated in batches by a separate LLM call.
 - **Relationships.** Each member carries an attitude score from -100 to 100, judged through the character's eyes by the memory analyzer. Changes are small and gradual. The score never appears in chat -- it shows only in how willing the bot is to engage and how warmly it lands. It also nudges the chance of ignoring a ping.
 - **Hard limits.** 50,000 tokens per request with a self-calibrating estimate that adjusts against real usage. A daily request cap covers all activity.
 - **Hot reload.** Edit a prompt file or config and save -- changes apply to the next message, no restart, memory untouched.
@@ -56,7 +56,7 @@ Edit `.env` and fill in your Discord token and API key. Then create `config.loca
 npm start
 ```
 
-It runs out of the box with the included example character.
+The bot locks to a single server. When `bot.guildId` is empty and the bot is in exactly one server, it adopts that server automatically. If the bot is in several servers, it refuses to start and lists them -- set `bot.guildId` in `config.local.json` to pick one. It runs out of the box with the included example character.
 
 ## Make it yours
 
@@ -128,7 +128,7 @@ Every feature is an independent toggle.
 | `owners` | `[]` | Discord user IDs that can use owner commands |
 | `commandPrefix` | `"!nep"` | Prefix for owner commands |
 | `nameTriggers` | `[]` | Extra strings that trigger a response besides @mention |
-| `guilds` | `[]` | Limit to these guild IDs (empty = all guilds the bot is in) |
+| `guildId` | `""` | The server this instance runs. When empty and the bot is in one server, adopts it; in several, refuses to start. Pin it in `config.local.json` |
 | `channels.allow` | `[]` | Limit to these channel IDs (empty = all visible) |
 | `channels.deny` | `[]` | Ignore these channel IDs |
 
@@ -157,10 +157,15 @@ Every feature is an independent toggle.
 | `maxMessageChars` | `800` | Truncate individual messages beyond this length |
 | `gapMarkerMinutes` | `20` | Insert a time-gap marker when messages are this far apart |
 | `otherProfiles` | `6` | Max profiles of other people present in the transcript |
+| `tempo.liveMessages10min` | `4` | Messages in 10 minutes for the channel to count as "live" in `<tempo>` |
+| `tempo.deadSilenceMinutes` | `45` | Minutes of silence for the channel to count as "dead" in `<tempo>` |
 | `caps.interlocutor` | `2500` | Token cap for the caller's profile |
 | `caps.aboutChat` | `2500` | Token cap for server habits and self-facts |
 | `caps.people` | `4000` | Token cap for other profiles |
 | `caps.neighbors` | `3000` | Token cap for neighbouring channels |
+| `caps.server` | `2500` | Token cap for the channel map |
+| `channelActivity.liveMessagesPerDay` | `20` | Daily message count for a channel to be "active" in `<server>` |
+| `channelActivity.deadAfterDays` | `7` | Days without a message before a channel is "dead" in `<server>` |
 | `vision.maxImages` | `2` | Images per request |
 | `vision.tokensPerImage` | `1600` | Token budget reserved per image |
 
@@ -229,6 +234,25 @@ Every feature is an independent toggle.
 | `historySize` | `10` | Recent attitude changes kept per member |
 | `directTriggerCount` | `6` | Direct interactions in the buffer that force an early memory update |
 
+## Warm-up
+
+With `warmup.enabled: true`, the bot reads channel history before it says a word. It feeds each channel's messages oldest-first through the memory analyzer in large batches, building profiles, attitudes, the channel map and in-jokes before it ever speaks. The bot stays mute until warm-up finishes -- it still observes incoming messages and owner commands still work.
+
+The token budget `warmup.maxTokens` is counted from the provider's reported usage. Warm-up is exempt from `llm.maxRequestsPerDay` (it has its own rail), but the per-request token cap still applies. Progress is saved after every batch, so a restart picks up where it left off and never re-reads the same messages. Three failed batches in a row abort the warm-up without leaving the bot mute forever.
+
+### `warmup`
+
+| Key | Default | Meaning |
+|---|---|---|
+| `enabled` | `false` | Run the warm-up before the bot starts talking |
+| `maxTokens` | `1000000` | Total token budget for the warm-up (input + output) |
+| `messagesPerChannel` | `2000` | Max messages to read per channel |
+| `batchMessages` | `150` | Messages per analyzer batch |
+| `maxAgeDays` | `0` | Ignore messages older than this (0 = no limit) |
+| `channels` | `[]` | Channel IDs to warm up (empty = all readable channels) |
+
+**Cost note.** The warm-up budget is real money at the analyzer model's price. `memory.model` can point the analyzer -- and therefore the warm-up -- at a cheaper model than the one that talks.
+
 ## Tuning it live
 
 Edit a prompt or config file and save. The change applies to the next message -- no restart, no lost memory.
@@ -251,6 +275,9 @@ Send these in a DM to the bot or in any channel. The answer always comes by DM. 
 | `memory <@user\|id>` | Show a stored profile |
 | `affinity <@user\|id> [score] [reason]` | Show a member's standing, or set it exactly (-100..100) |
 | `forget <@user\|id>` | Delete a stored profile |
+| `warmup` | Show warm-up status |
+| `warmup run` | Start the warm-up now |
+| `warmup reset` | Clear the progress marker (memory untouched) |
 
 `rule` is the fastest way to correct behaviour on the fly -- the note lands in `prompts.local/rules.md` and is picked up immediately.
 
@@ -262,7 +289,7 @@ Only changes to code under `src/`. A restart loses nothing -- all state lives in
 
 A message arrives and passes through guild and channel filters, then bot and self-message filtering. If the persona was called -- by @mention, reply, or name trigger -- an ignore heuristic rolls against a base chance adjusted for bare pings, repeated tags, spam, and the caller's relationship score. Spontaneous turns fire from a chaotic timer or the per-message eavesdrop chance instead.
 
-The turn collects the channel transcript and neighbouring channels, then builds one LLM request inside the token budget. Sections are fitted in priority order: system prompt (character card + rules + output format), the task, clock and tempo are never cut; then the caller's profile, server habits, self-facts, the channel transcript newest-first, other profiles, and neighbouring channels. In the rendered prompt, reference material comes first and the live chat with the task come last, where the model attends best.
+The turn collects the channel transcript and neighbouring channels, then builds one LLM request inside the token budget. The model sees a map of the server's channels -- what each is for, what people write there, the tone, how alive each one is -- with the current channel marked. Sections are fitted in priority order: system prompt (character card + rules + output format), the task, clock and tempo are never cut; then the caller's profile, server habits and self-facts, the channel map, the channel transcript newest-first, other profiles, and neighbouring channels. In the rendered prompt, reference material comes first and the live chat with the task come last, where the model attends best.
 
 The model responds with these tags:
 
@@ -273,13 +300,13 @@ The model responds with these tags:
 
 After parsing, the code simulates typing at human speed and sends. `@nick` in the output is resolved to a real Discord mention.
 
-The memory analyzer runs as a separate LLM call when enough messages have accumulated or when enough direct interactions have happened. It receives the character card, judges each person through the character's eyes, and returns small attitude deltas, updated profiles, server-level notes, and any new self-facts.
+The memory analyzer runs as a separate LLM call when enough messages have accumulated or when enough direct interactions have happened. It receives the character card, judges each person through the character's eyes, and returns small attitude deltas, updated profiles, channel observations (what each is for, what people write about, the tone), server-level notes, and any new self-facts.
 
 ## Cost and safety
 
 Each turn is one LLM request. A memory update, when triggered, adds a second. Typical chat context stays well below the 50k token cap. Cost per request depends on the model -- `llm.model` accepts any model ID on your endpoint, and `llm.baseUrl` can point to any OpenRouter-compatible API. The daily cap (`llm.maxRequestsPerDay`) prevents runaway spending.
 
-**Privacy.** `data/` holds notes about real people -- profiles, relationship scores, server patterns. It stays on your machine, is gitignored, and is never sent anywhere except to the LLM as context for the next reply. The analyzer is instructed not to store sensitive details (addresses, documents, health, finances). `!nep forget <@user>` deletes a profile entirely.
+**Privacy.** `data/` holds notes about real people and channels -- profiles, relationship scores, channel observations, server patterns (`data/guilds/<id>/users/`, `data/guilds/<id>/channels/`). It stays on your machine, is gitignored, and is never sent anywhere except to the LLM as context for the next reply. The analyzer is instructed not to store sensitive details (addresses, documents, health, finances). `!nep forget <@user>` deletes a profile entirely.
 
 Tell your server members. They should know their messages are processed by an LLM and that the bot keeps notes about them.
 
@@ -347,6 +374,7 @@ src/
     openrouter.js          chat completions, safety rails
     parse.js               output tags to actions
   discord/
+    guild.js               single-guild resolution
     events.js              message pipeline
     collect.js             channel history, neighbours, permissions
     format.js              transcript lines, time gaps, tempo
@@ -359,10 +387,14 @@ src/
     store.js               JSON file persistence, atomic writes
     update.js              batch memory updates
     affinity.js            relationship score logic
+    channels.js            channel map rendering, activity verdicts
+    warmup.js              pre-talk channel history ingestion
 tests/                     node --test, pure-function unit tests
 deploy/
   neptunia-bot.service     example systemd unit
 data/                      persistent state (gitignored, created at runtime)
+  guilds/<id>/users/       per-member profiles and relationships
+  guilds/<id>/channels/    channel observations from the analyzer
 ```
 
 ## License

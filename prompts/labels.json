@@ -60,6 +60,18 @@
     "starters": "How conversations start: {text}",
     "injokes": "Running jokes: {text}"
   },
+  "server": {
+    "currentMark": " ← you are here",
+    "category": "Category: {text}",
+    "topic": "Topic: {text}",
+    "purpose": "What it's for: {text}",
+    "topics": "People talk about: {text}",
+    "tone": "Tone: {text}",
+    "activity": "Activity: {activity}",
+    "activityLive": "active",
+    "activitySlow": "slow",
+    "activityDead": "dead"
+  },
   "triggers": {
     "mention": "mentioned you",
     "reply": "replied to your message",
