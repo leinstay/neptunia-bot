@@ -1,0 +1,37 @@
+# Example systemd unit for neptunia-bot.
+#
+# Install:   sudo cp deploy/neptunia-bot.service /etc/systemd/system/
+#            sudo systemctl daemon-reload
+# Enable:    sudo systemctl enable --now neptunia-bot
+# Logs:      journalctl -u neptunia-bot -f
+# Restart:   sudo systemctl restart neptunia-bot   (after `git pull` or an edit under src/)
+# Stop:      sudo systemctl stop neptunia-bot
+#
+# Adjust WorkingDirectory/User to match your deployment before installing.
+
+[Unit]
+Description=neptunia-bot — a generic Discord pseudo-user engine
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/neptunia-bot
+ExecStart=/usr/bin/node src/index.js
+User=neptunia-bot
+Restart=on-failure
+RestartSec=5
+EnvironmentFile=-/opt/neptunia-bot/.env
+
+# Hardening: the process needs write access only to its own data and
+# per-deployment overrides; everything else stays read-only.
+NoNewPrivileges=true
+ProtectSystem=full
+ReadWritePaths=/opt/neptunia-bot/data /opt/neptunia-bot/prompts.local /opt/neptunia-bot/config.local.json
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=neptunia-bot
+
+[Install]
+WantedBy=multi-user.target

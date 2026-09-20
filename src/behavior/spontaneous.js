@@ -1,8 +1,8 @@
-// She does not only answer when called: at chaotic, unpredictable intervals
-// she either cuts into a conversation that is clearly alive right now
-// ('interject') or starts a topic herself in a channel that has gone quiet
-// ('initiate'). She can also eavesdrop on a single fresh message and jump in
-// a few seconds/minutes later, as if she had just noticed it.
+// The persona does not only answer when called: at chaotic, unpredictable
+// intervals it either cuts into a conversation that is clearly alive right
+// now ('interject') or starts a topic itself in a channel that has gone
+// quiet ('initiate'). It can also eavesdrop on a single fresh message and
+// jump in a few seconds/minutes later, as if it had just noticed it.
 //
 // Pure decision functions (delay, active hours, mode, channel pick) take an
 // injected `rng`/`now` and are unit-tested directly. The factory below is the
@@ -21,7 +21,7 @@ const REWAKE_MINUTES = [10, 40]; // how soon to try again after a turn found "no
 /**
  * Time until the next spontaneous check, in ms. Usually a long, log-uniform
  * gap (so short waits are common and very long ones still happen); sometimes
- * a short "burst" gap, as if she got caught up in something.
+ * a short "burst" gap, as if the persona got caught up in something.
  * @param {object} cfg  config.spontaneous
  * @param {() => number} rng
  */
@@ -51,8 +51,8 @@ export function isActiveHour(hour, activeHours) {
 /**
  * 0 when `now` already falls in an active hour; otherwise the ms until the
  * next `from` hour (found by stepping minute by minute through `localHour`,
- * which is simple and cheap since this only runs when she is asleep), plus a
- * random 0-90 minutes so she does not wake up on the dot.
+ * which is simple and cheap since this only runs when the persona is
+ * asleep), plus a random 0-90 minutes so it does not wake up on the dot.
  */
 export function msUntilActive(now, timezone, activeHours, rng) {
   const hour = localHour(now, timezone);
@@ -83,7 +83,7 @@ export function chooseMode(history, now, cfg, rng) {
   }
 
   const last = history[history.length - 1];
-  if (last.self) return null; // she never talks to herself
+  if (last.self) return null; // the persona never talks to itself
 
   const windowStart = now - cfg.liveWindowMinutes * MINUTE;
   const liveCount = history.filter((m) => m.ts >= windowStart && !m.self && !m.bot).length;
@@ -158,7 +158,7 @@ export function createSpontaneous({ hot, store, client, turns, rng = Math.random
   async function tick() {
     const config = hot.config;
     const cfg = config.spontaneous;
-    if (!cfg?.enabled) return;
+    if (config.features?.spontaneous === false) return;
 
     const schedule = (store.state.data.spontaneous ??= {});
     const t = now();
@@ -217,7 +217,9 @@ export function createSpontaneous({ hot, store, client, turns, rng = Math.random
   function onMessage(channel, normalized) {
     const config = hot.config;
     const cfg = config.spontaneous;
-    if (!cfg?.enabled) return;
+    const features = config.features ?? {};
+    // Eavesdropping is a form of spontaneous speech: it needs both switches on.
+    if (features.spontaneous === false || features.eavesdrop === false) return;
     if (normalized.self || normalized.bot) return;
     if (!guildAllowed(channel.guild.id, config.bot)) return;
 

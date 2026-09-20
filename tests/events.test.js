@@ -144,7 +144,7 @@ test('events: a DM is handed only to admin, never to the chat pipeline', async (
   assert.equal(spontaneous.onMessageCalls.length, 0);
 });
 
-test('events: her own message notes the post and is observed, never turned into a turn', async () => {
+test('events: its own message notes the post and is observed, never turned into a turn', async () => {
   const turns = fakeTurns();
   const memory = fakeMemory();
   const spontaneous = fakeSpontaneous();
@@ -254,7 +254,7 @@ test('events: a mention with rng below ignoreChance is observed but not answered
   assert.equal(memory.observeCalls.length, 1);
 });
 
-test('events: a reply to her own message is detected as kind "reply"', async () => {
+test('events: a reply to its own message is detected as kind "reply"', async () => {
   let seenArgs = null;
   const turns = fakeTurns({
     runTurn: async (args) => {
@@ -284,15 +284,16 @@ test('events: a reply to her own message is detected as kind "reply"', async () 
 
 test('events: a name trigger respects config.mention.nameTriggerChance', async () => {
   let calls = 0;
+  const config = baseConfig({ bot: { nameTriggers: ['непка'] } });
   const turnsRespond = fakeTurns({ runTurn: async () => { calls += 1; return { outcome: 'spoke' }; } });
-  const handlerRespond = makeHandler({ turns: turnsRespond, rng: scripted([0.1]) });
+  const handlerRespond = makeHandler({ config, turns: turnsRespond, rng: scripted([0.1]) });
   const message1 = fakeMessage({ cleanContent: 'эй непка красотка' });
   await handlerRespond(message1);
   await Promise.resolve();
   assert.equal(calls, 1, 'rng below nameTriggerChance should respond');
 
   const turnsIgnore = fakeTurns({ runTurn: async () => { calls += 1; return { outcome: 'spoke' }; } });
-  const handlerIgnore = makeHandler({ turns: turnsIgnore, rng: scripted([0.99]) });
+  const handlerIgnore = makeHandler({ config, turns: turnsIgnore, rng: scripted([0.99]) });
   const message2 = fakeMessage({ cleanContent: 'эй непка красотка' });
   await handlerIgnore(message2);
   await Promise.resolve();
@@ -337,4 +338,174 @@ test('events: a throwing dependency does not escape the handler', async () => {
 
   const message = fakeMessage({ cleanContent: 'что угодно' });
   await assert.doesNotReject(() => handler(message));
+});
+
+// ---------------------------------------------------------------------------
+// features.* switches — each masks one input of detectTrigger, or short-
+// circuits a whole side effect, without detectTrigger itself changing.
+
+test('features.mentions=false: a plain @mention is no longer a trigger', async () => {
+  let called = false;
+  const spontaneous = fakeSpontaneous();
+  const turns = fakeTurns({ runTurn: async () => { called = true; return { outcome: 'spoke' }; } });
+  const config = baseConfig({ features: { mentions: false } });
+  const handler = makeHandler({ config, turns, spontaneous, rng: scripted([0.99]) });
+
+  const message = fakeMessage({
+    cleanContent: 'привет',
+    mentions: { users: new Map([['self1', { id: 'self1' }]]) },
+  });
+  await handler(message);
+  await Promise.resolve();
+
+  assert.equal(called, false);
+  assert.equal(spontaneous.onMessageCalls.length, 1);
+});
+
+test('features.mentions=true (default): a plain @mention still triggers', async () => {
+  let called = false;
+  const turns = fakeTurns({ runTurn: async () => { called = true; return { outcome: 'spoke' }; } });
+  const handler = makeHandler({ turns, rng: scripted([0.99]) });
+
+  const message = fakeMessage({
+    cleanContent: 'привет',
+    mentions: { users: new Map([['self1', { id: 'self1' }]]) },
+  });
+  await handler(message);
+  await Promise.resolve();
+
+  assert.equal(called, true);
+});
+
+test('features.replies=false: a reply to its own message is no longer a trigger by itself', async () => {
+  let called = false;
+  const spontaneous = fakeSpontaneous();
+  const turns = fakeTurns({ runTurn: async () => { called = true; return { outcome: 'spoke' }; } });
+  const guild = fakeGuild();
+  const channel = fakeChannel('c1', guild, {
+    messages: { cache: new Map([['m100', { author: { id: 'self1' } }]]), fetch: async () => null },
+  });
+  const config = baseConfig({ features: { replies: false } });
+  const handler = makeHandler({ config, turns, spontaneous, rng: scripted([0.99]) });
+
+  const message = fakeMessage({ guild, channel, channelId: 'c1', cleanContent: 'ты права', reference: { messageId: 'm100' } });
+  await handler(message);
+  await Promise.resolve();
+
+  assert.equal(called, false);
+  assert.equal(spontaneous.onMessageCalls.length, 1);
+});
+
+test('features.replies=false: a reply that also pings still counts as a mention', async () => {
+  let seenArgs = null;
+  const turns = fakeTurns({
+    runTurn: async (args) => {
+      seenArgs = args;
+      return { outcome: 'spoke' };
+    },
+  });
+  const guild = fakeGuild();
+  const channel = fakeChannel('c1', guild, {
+    messages: { cache: new Map([['m100', { author: { id: 'self1' } }]]), fetch: async () => null },
+  });
+  const config = baseConfig({ features: { replies: false } });
+  const handler = makeHandler({ config, turns, rng: scripted([0.99]) });
+
+  const message = fakeMessage({
+    guild,
+    channel,
+    channelId: 'c1',
+    cleanContent: 'ты права',
+    reference: { messageId: 'm100' },
+    mentions: { users: new Map([['self1', { id: 'self1' }]]) },
+  });
+  await handler(message);
+  await Promise.resolve();
+
+  assert.ok(seenArgs, 'expected runTurn to be called');
+  assert.equal(seenArgs.triggerKind, 'mention');
+});
+
+test('features.nameTriggers=false: a name is never a trigger, even when configured', async () => {
+  let called = false;
+  const spontaneous = fakeSpontaneous();
+  const turns = fakeTurns({ runTurn: async () => { called = true; return { outcome: 'spoke' }; } });
+  const config = baseConfig({ bot: { nameTriggers: ['непка'] }, features: { nameTriggers: false } });
+  const handler = makeHandler({ config, turns, spontaneous, rng: scripted([0.1]) });
+
+  const message = fakeMessage({ cleanContent: 'эй непка красотка' });
+  await handler(message);
+  await Promise.resolve();
+
+  assert.equal(called, false);
+  assert.equal(spontaneous.onMessageCalls.length, 1);
+});
+
+test('features.adminCommands=false: a DM is ignored entirely, admin.handle is never called', async () => {
+  const admin = fakeAdmin(() => true);
+  const config = baseConfig({ features: { adminCommands: false } });
+  const handler = makeHandler({ config, admin });
+
+  const message = fakeMessage({ guild: null, channel: null, channelId: undefined });
+  await handler(message);
+
+  assert.equal(admin.handleCalls.length, 0);
+});
+
+test('features.adminCommands=false: an owner command in a guild channel is never handed to admin', async () => {
+  const admin = fakeAdmin(() => true);
+  const memory = fakeMemory();
+  const spontaneous = fakeSpontaneous();
+  const config = baseConfig({ features: { adminCommands: false } });
+  const handler = makeHandler({ config, admin, memory, spontaneous });
+
+  const message = fakeMessage({ cleanContent: '!nep status' });
+  await handler(message);
+
+  assert.equal(admin.handleCalls.length, 0);
+  // Without admin short-circuiting it, the message falls through to the regular pipeline.
+  assert.equal(memory.observeCalls.length, 1);
+});
+
+test('features.memory=false: a regular message is never observed', async () => {
+  const memory = fakeMemory();
+  const spontaneous = fakeSpontaneous();
+  const config = baseConfig({ features: { memory: false } });
+  const handler = makeHandler({ config, memory, spontaneous });
+
+  const message = fakeMessage({ cleanContent: 'просто сообщение' });
+  await handler(message);
+
+  assert.equal(memory.observeCalls.length, 0);
+  assert.equal(spontaneous.onMessageCalls.length, 1);
+});
+
+test('features.memory=false: its own message still notes the post, but is never observed', async () => {
+  const turns = fakeTurns();
+  const memory = fakeMemory();
+  const config = baseConfig({ features: { memory: false } });
+  const handler = makeHandler({ config, turns, memory });
+
+  const message = fakeMessage({ author: { id: 'self1', bot: true, globalName: 'Bot', username: 'bot' } });
+  await handler(message);
+
+  assert.equal(turns.notePostCalls.length, 1);
+  assert.equal(memory.observeCalls.length, 0);
+});
+
+test('a config with no "features" key at all behaves as if every switch were on', async () => {
+  let called = false;
+  const config = baseConfig();
+  delete config.features;
+  const turns = fakeTurns({ runTurn: async () => { called = true; return { outcome: 'spoke' }; } });
+  const handler = makeHandler({ config, turns, rng: scripted([0.99]) });
+
+  const message = fakeMessage({
+    cleanContent: 'привет',
+    mentions: { users: new Map([['self1', { id: 'self1' }]]) },
+  });
+  await handler(message);
+  await Promise.resolve();
+
+  assert.equal(called, true);
 });

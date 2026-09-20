@@ -9,6 +9,7 @@ import { createLlm, TokenLimitError, DailyCapError } from '../src/llm/openrouter
 function baseConfig(overrides = {}) {
   return {
     llm: {
+      baseUrl: 'https://openrouter.ai/api/v1',
       model: 'test-model',
       temperature: 1,
       maxOutputTokens: 100,
@@ -167,6 +168,54 @@ test('complete: an empty/non-string model content falls back to an empty string'
   });
   const result = await llm.complete([{ role: 'user', content: 'hi' }]);
   assert.equal(result.text, '');
+});
+
+test('complete: posts to `${baseUrl}/chat/completions` when baseUrl has no trailing slash', async () => {
+  let seenUrl = null;
+  const llm = createLlm({
+    apiKey: 'k',
+    getConfig: () => baseConfig({ baseUrl: 'https://example.com/v1' }),
+    calibrator: fakeCalibrator(),
+    state: fakeState(),
+    fetchImpl: async (url) => {
+      seenUrl = url;
+      return okResponse('hi');
+    },
+  });
+  await llm.complete([{ role: 'user', content: 'hi' }]);
+  assert.equal(seenUrl, 'https://example.com/v1/chat/completions');
+});
+
+test('complete: a trailing slash on baseUrl is tolerated, no double slash in the URL', async () => {
+  let seenUrl = null;
+  const llm = createLlm({
+    apiKey: 'k',
+    getConfig: () => baseConfig({ baseUrl: 'https://example.com/v1/' }),
+    calibrator: fakeCalibrator(),
+    state: fakeState(),
+    fetchImpl: async (url) => {
+      seenUrl = url;
+      return okResponse('hi');
+    },
+  });
+  await llm.complete([{ role: 'user', content: 'hi' }]);
+  assert.equal(seenUrl, 'https://example.com/v1/chat/completions');
+});
+
+test('complete: sends the neutral X-Title header, not a character name', async () => {
+  let seenHeaders = null;
+  const llm = createLlm({
+    apiKey: 'k',
+    getConfig: () => baseConfig(),
+    calibrator: fakeCalibrator(),
+    state: fakeState(),
+    fetchImpl: async (url, init) => {
+      seenHeaders = init.headers;
+      return okResponse('hi');
+    },
+  });
+  await llm.complete([{ role: 'user', content: 'hi' }]);
+  assert.equal(seenHeaders['X-Title'], 'neptunia-bot');
 });
 
 // Only ONE test exercises the real retry backoff sleep (~1.5s at attempt 1).

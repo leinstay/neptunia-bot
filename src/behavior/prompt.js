@@ -107,7 +107,7 @@ export function buildRequest(input) {
     target: triggerItem ? `#${triggerItem.index}` : '',
   });
 
-  const images = config.features?.vision && trigger
+  const images = config.features?.vision !== false && trigger
     ? trigger.attachments.filter((a) => a.kind === 'image').slice(0, config.context.vision.maxImages)
     : [];
 

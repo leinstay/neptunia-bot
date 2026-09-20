@@ -1,13 +1,27 @@
 {
+  "features": {
+    "mentions": true,
+    "replies": true,
+    "nameTriggers": true,
+    "spontaneous": true,
+    "eavesdrop": true,
+    "memory": true,
+    "reactions": true,
+    "multiMessage": true,
+    "vision": true,
+    "typingSimulation": true,
+    "adminCommands": true
+  },
   "bot": {
-    "timezone": "Europe/Moscow",
+    "timezone": "UTC",
     "owners": [],
     "commandPrefix": "!nep",
-    "nameTriggers": ["нептуния", "нептунию", "нептунии", "нептунией", "непка", "непту"],
+    "nameTriggers": [],
     "guilds": [],
     "channels": { "allow": [], "deny": [] }
   },
   "llm": {
+    "baseUrl": "https://openrouter.ai/api/v1",
     "model": "anthropic/claude-opus-4.6",
     "temperature": 1,
     "maxOutputTokens": 700,
@@ -26,7 +40,7 @@
     "gapMarkerMinutes": 20,
     "otherProfiles": 6,
     "caps": { "interlocutor": 2500, "aboutChat": 2500, "people": 4000, "neighbors": 3000 },
-    "vision": { "enabled": true, "maxImages": 2, "tokensPerImage": 1600 }
+    "vision": { "maxImages": 2, "tokensPerImage": 1600 }
   },
   "mention": {
     "ignoreChance": 0.12,
@@ -35,14 +49,8 @@
     "repeatPenalty": 0.25,
     "spamThreshold": 4,
     "spamIgnoreChance": 0.9,
-    "replyToBotCounts": true,
     "nameTriggerChance": 0.5,
-    "neverIgnore": [],
-    "triggerPhrases": {
-      "mention": "тегнул(а) тебя",
-      "reply": "ответил(а) на твоё сообщение",
-      "name": "упомянул(а) тебя по имени, без тега"
-    }
+    "neverIgnore": []
   },
   "typing": {
     "reactionDelayMs": [800, 4000],
@@ -52,7 +60,6 @@
     "betweenMessagesMs": [700, 3500]
   },
   "spontaneous": {
-    "enabled": true,
     "channels": [],
     "minIntervalMinutes": 25,
     "maxIntervalMinutes": 420,

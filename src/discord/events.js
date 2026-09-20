@@ -35,9 +35,9 @@ export function createMessageHandler({
   rng = Math.random,
   now = Date.now,
 }) {
-  async function resolveReference(message, selfId, replyToBotCounts) {
+  async function resolveReference(message, selfId) {
     const refId = message.reference?.messageId;
-    if (!refId || !replyToBotCounts) return false;
+    if (!refId) return false;
     const cached = message.channel.messages.cache.get(refId);
     const ref = cached ?? (await message.channel.messages.fetch(refId).catch(() => null));
     return ref?.author?.id === selfId;
@@ -48,13 +48,16 @@ export function createMessageHandler({
       // 1. System / webhook messages are not conversation.
       if (message.system || message.webhookId) return;
 
-      // 2. DMs: only the owner admin console lives there, she never chats in DMs.
+      const config = hot.config;
+      const features = config.features ?? {};
+      const adminCommandsOn = features.adminCommands !== false;
+      const memoryOn = features.memory !== false;
+
+      // 2. DMs: only the owner admin console lives there, the persona never chats in DMs.
       if (!message.guild) {
-        await admin.handle(message);
+        if (adminCommandsOn) await admin.handle(message);
         return;
       }
-
-      const config = hot.config;
 
       // 3. Guild allowlist, channel allowlist/denylist, no threads.
       const allowedGuilds = config.bot.guilds ?? [];
@@ -67,10 +70,10 @@ export function createMessageHandler({
       const normalized = normalizeMessage(message, selfId);
       const guildId = message.guild.id;
 
-      // 5. Her own message: only bookkeeping.
+      // 5. Its own message: only bookkeeping.
       if (normalized.self) {
         turns.notePost(normalized.channelId, normalized.ts);
-        memory.observe(guildId, normalized);
+        if (memoryOn) memory.observe(guildId, normalized);
         return;
       }
 
@@ -78,19 +81,21 @@ export function createMessageHandler({
       if (message.author.bot) return;
 
       // 7. Owner commands short-circuit before anything is observed.
-      if (await admin.handle(message)) return;
+      if (adminCommandsOn && (await admin.handle(message))) return;
 
       // 8. Everyone else feeds memory.
-      memory.observe(guildId, normalized);
+      if (memoryOn) memory.observe(guildId, normalized);
 
-      // 9. Detect how (if at all) she was called.
-      const mentionsSelf = message.mentions.users.has(selfId);
-      const repliesToSelf = await resolveReference(message, selfId, config.mention.replyToBotCounts);
+      // 9. Detect how (if at all) the persona was called, masking each input
+      // by its own feature switch so detectTrigger itself stays pure.
+      const mentionsSelf = features.mentions !== false && message.mentions.users.has(selfId);
+      const repliesToSelf = features.replies !== false && (await resolveReference(message, selfId));
+      const nameTriggers = features.nameTriggers !== false ? config.bot.nameTriggers : [];
       const kind = detectTrigger({
         mentionsSelf,
         repliesToSelf,
         content: normalized.content,
-        nameTriggers: config.bot.nameTriggers,
+        nameTriggers,
       });
 
       // 10. No trigger: let the spontaneous scheduler eavesdrop, nothing more.
@@ -99,7 +104,7 @@ export function createMessageHandler({
         return;
       }
 
-      // 11. She was called: decide whether to actually answer.
+      // 11. The persona was called: decide whether to actually answer.
       if (!canSend(message.channel)) return;
 
       const recentCalls = tagHistory.hit(normalized.authorId, now(), repeatWindowMs(config.mention));

@@ -1,12 +1,12 @@
-// Decides whether she reacts to being called at all — before any LLM money is
-// spent. People do not answer every ping: she sometimes ignores one for no
-// reason, ignores more when the same person keeps tagging her, and almost
-// always ignores tag spam. The model gets a second veto later (<skip/>) for
-// calls that are simply not interesting.
+// Decides whether the persona reacts to being called at all — before any LLM
+// money is spent. People do not answer every ping: the persona sometimes
+// ignores one for no reason, ignores more when the same person keeps tagging
+// it, and almost always ignores tag spam. The model gets a second veto later
+// (<skip/>) for calls that are simply not interesting.
 
 const MINUTE = 60_000;
 
-/** How she was called. Order matters: a pinged reply is a 'reply', not a 'mention'. */
+/** How the persona was called. Order matters: a pinged reply is a 'reply', not a 'mention'. */
 export function detectTrigger({ mentionsSelf, repliesToSelf, content, nameTriggers }) {
   if (repliesToSelf) return 'reply';
   if (mentionsSelf) return 'mention';
@@ -14,7 +14,7 @@ export function detectTrigger({ mentionsSelf, repliesToSelf, content, nameTrigge
   const named = nameTriggers.some((name) => {
     const at = lowered.indexOf(name.toLowerCase());
     if (at === -1) return false;
-    // Whole word only, so "нептуния" inside a longer word or URL does not count.
+    // Whole word only, so a name trigger inside a longer word or URL does not count.
     const before = lowered[at - 1];
     const after = lowered[at + name.length];
     const isLetter = (ch) => ch !== undefined && /[\p{L}\p{N}_]/u.test(ch);
@@ -29,7 +29,7 @@ export function strippedLength(content, selfName) {
 }
 
 /**
- * Remembers when each user called her, to spot repeated tags and spam.
+ * Remembers when each user called the persona, to spot repeated tags and spam.
  * Deliberately in-memory only: a restart forgiving everyone is fine.
  */
 export function createTagHistory() {

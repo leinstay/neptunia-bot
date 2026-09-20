@@ -5,7 +5,7 @@
 // src/behavior, src/memory, src/llm and src/discord.
 
 import path from 'node:path';
-import { Client, GatewayIntentBits, Partials } from 'discord.js';
+import { Client, Events, GatewayIntentBits, Partials } from 'discord.js';
 
 import { ROOT_DIR, loadDotEnv, need } from './config.js';
 import { createHot } from './hot.js';
@@ -20,7 +20,7 @@ import { createAdmin } from './admin.js';
 import { createTagHistory } from './behavior/mention.js';
 import { createMessageHandler } from './discord/events.js';
 
-const REQUIRED_PROMPTS = ['persona', 'format', 'reply', 'interject', 'initiate', 'memory'];
+const REQUIRED_PROMPTS = ['system-prompt', 'character-card', 'format', 'reply', 'interject', 'initiate', 'memory'];
 
 /** Print a one-line, secret-free error and terminate with a non-zero exit code. */
 function fail(message) {
@@ -43,9 +43,17 @@ const openrouterKey = needOrFail('OPENROUTER_API_KEY');
 
 const hot = createHot({ rootDir: ROOT_DIR }).watch();
 
-const missingPrompts = REQUIRED_PROMPTS.filter((name) => !hot.prompts[name]);
+const missingPrompts = REQUIRED_PROMPTS.filter((name) => typeof hot.prompts[name] !== 'string' || !hot.prompts[name]);
+const labels = hot.prompts.labels;
+const labelsOk = Boolean(labels) && typeof labels === 'object' && Boolean(labels.transcript);
+if (!labelsOk) missingPrompts.push('labels');
+
 if (missingPrompts.length > 0) {
-  fail(`Missing required prompt file(s): ${missingPrompts.map((name) => `prompts/${name}.md`).join(', ')}`);
+  const files = missingPrompts.map((name) => (name === 'labels' ? 'prompts/labels.json' : `prompts/${name}.md`));
+  fail(
+    `Missing required prompt file(s): ${files.join(', ')} ` +
+      '(prompts.local/ may override any of these, file by file).',
+  );
 }
 
 const store = createStore({ dataDir: path.join(ROOT_DIR, 'data') });
@@ -69,7 +77,7 @@ const memory = createMemoryUpdater({
   store,
   llm,
   calibrator,
-  getSelfName: () => client.user?.username ?? 'Нептуния',
+  getSelfName: (guildId) => client.guilds.cache.get(guildId)?.members.me?.displayName ?? client.user?.username ?? 'bot',
 });
 const admin = createAdmin({ hot, store, client, spontaneous, calibrator });
 const tagHistory = createTagHistory();
@@ -89,10 +97,12 @@ function every(ms, fn, label) {
   timers.push(id);
 }
 
-client.once('ready', () => {
+client.once(Events.ClientReady, () => {
   log.info('index: ready', { guilds: client.guilds.cache.size, tag: client.user.tag });
   every(30_000, () => spontaneous.tick(), 'spontaneous.tick');
-  every(60_000, () => memory.tick(), 'memory.tick');
+  // The tick still runs on schedule even with the switch off, so flipping it
+  // back on later needs no restart; it is the wrapper here that no-ops.
+  every(60_000, () => (hot.config.features?.memory !== false ? memory.tick() : undefined), 'memory.tick');
   every(30_000, () => store.flush(), 'store.flush');
 });
 
@@ -116,4 +126,4 @@ process.on('SIGINT', () => shutdown('SIGINT'));
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('unhandledRejection', (err) => log.error('index: unhandled rejection', { error: err }));
 
-client.login(discordToken);
+client.login(discordToken).catch((err) => fail(`Discord login failed: ${err.message}`));

@@ -2,7 +2,7 @@
 // reloads and prompt edits; nothing in the codebase ever wipes it implicitly.
 //
 //   data/state.json                          scheduler times, token calibration, daily LLM counter
-//   data/guilds/<guildId>/guild.json         how this server talks, in-jokes, what she said about herself
+//   data/guilds/<guildId>/guild.json         how this server talks, in-jokes, what the persona said about itself
 //   data/guilds/<guildId>/buffer.json        messages observed since the last memory update
 //   data/guilds/<guildId>/users/<userId>.json  one profile per active member
 //
@@ -86,7 +86,7 @@ export function createStore({ dataDir }) {
       },
     },
 
-    /** Profile of a member, or null when she has never seen them. */
+    /** Profile of a member, or null when the persona has never seen them. */
     getUser(guildId, userId) {
       const file = userFile(guildId, userId);
       if (!entries.has(file) && !fs.existsSync(file)) return null;

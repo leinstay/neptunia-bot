@@ -1,5 +1,5 @@
-// Tests for src/behavior/mention.js: whether/how she was called, and whether
-// she reacts to it at all.
+// Tests for src/behavior/mention.js: whether/how the persona was called, and
+// whether it reacts to it at all.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { detectTrigger, strippedLength, createTagHistory, decideMention, repeatWindowMs } from '../src/behavior/mention.js';
@@ -179,7 +179,7 @@ test('decideMention: repeat calls accumulate a penalty on top of the base ignore
   assert.equal(result.reason, 'ignored:repeat'); // rng 0 < ignoreChance -> ignored
 });
 
-test('decideMention: repeat penalty accumulation can still let her respond when rng is high enough', () => {
+test('decideMention: repeat penalty accumulation can still let it respond when rng is high enough', () => {
   const result = decideMention({ kind: 'reply', textLength: 5, recentCalls: 3, neverIgnore: false, cfg: CFG, rng: rngReturning(1) });
   assert.equal(result.reason, 'respond');
   assert.equal(result.respond, true);

@@ -33,7 +33,7 @@ export function normalizeMessage(message, selfId) {
   };
 }
 
-/** Whether the config lets her read/act in this channel at all. */
+/** Whether the config lets the persona read/act in this channel at all. */
 export function channelAllowed(channel, botConfig) {
   const { allow = [], deny = [] } = botConfig.channels ?? {};
   if (deny.includes(channel.id)) return false;
@@ -60,7 +60,7 @@ export async function fetchHistory(channel, limit, selfId) {
     .map((message) => normalizeMessage(message, selfId));
 }
 
-/** Plain text channels of a guild she may read, excluding threads and `exceptId`. */
+/** Plain text channels of a guild the persona may read, excluding threads and `exceptId`. */
 export function readableChannels(guild, botConfig, exceptId = null) {
   return [...guild.channels.cache.values()].filter(
     (channel) =>

@@ -58,15 +58,16 @@ function pickOtherProfiles(store, guildId, history, exceptId, count) {
 
 export function createTurnRunner({ hot, store, llm, calibrator, client, rng = Math.random }) {
   const busy = new Set();
-  const lastPostAt = new Map(); // channelId -> ts of her last message
+  const lastPostAt = new Map(); // channelId -> ts of the persona's last message
 
   async function act(channel, parsed, idByIndex, history) {
     const cfg = hot.config.typing;
+    const typingOn = hot.config.features?.typingSimulation !== false;
 
     for (const reaction of parsed.reactions) {
       const targetId = idByIndex.get(reaction.to);
       if (!targetId) continue;
-      await sleep(between(cfg.reactionDelayMs, rng));
+      if (typingOn) await sleep(between(cfg.reactionDelayMs, rng));
       try {
         const target = await channel.messages.fetch(targetId);
         await target.react(reaction.emoji);
@@ -77,12 +78,14 @@ export function createTurnRunner({ hot, store, llm, calibrator, client, rng = Ma
 
     let first = true;
     for (const message of parsed.messages) {
-      if (!first) await sleep(between(cfg.betweenMessagesMs, rng));
+      if (!first && typingOn) await sleep(between(cfg.betweenMessagesMs, rng));
       first = false;
 
       const { text, userIds } = resolveMentions(message.text, history);
-      await channel.sendTyping().catch(() => {});
-      await sleep(typingMs(text, cfg, rng));
+      if (typingOn) {
+        await channel.sendTyping().catch(() => {});
+        await sleep(typingMs(text, cfg, rng));
+      }
 
       const replyId = message.replyTo !== null ? idByIndex.get(message.replyTo) : null;
       await channel.send({
@@ -99,7 +102,7 @@ export function createTurnRunner({ hot, store, llm, calibrator, client, rng = Ma
    * @param {import('discord.js').TextBasedChannel} params.channel
    * @param {'reply'|'interject'|'initiate'|'auto'} params.mode  'auto' lets `chooseMode` pick
    *   between interject/initiate/nothing once the history is known (spontaneous turns).
-   * @param {object} [params.trigger]      Normalized message that called her.
+   * @param {object} [params.trigger]      Normalized message that called the persona.
    * @param {string} [params.triggerKind]
    * @param {(history: object[], now: number) => string|null} [params.chooseMode]
    * @returns {Promise<{ outcome: string, mode?: string }>}
@@ -109,6 +112,8 @@ export function createTurnRunner({ hot, store, llm, calibrator, client, rng = Ma
     busy.add(channel.id);
     try {
       const config = hot.config;
+      const features = config.features ?? {};
+      const memoryOn = features.memory !== false;
       const selfId = client.user.id;
       const guildId = channel.guild.id;
       const now = Date.now();
@@ -133,16 +138,18 @@ export function createTurnRunner({ hot, store, llm, calibrator, client, rng = Ma
         neighbors,
         trigger,
         triggerKind,
-        guildMemory: store.getGuild(guildId),
-        interlocutor: trigger ? store.getUser(guildId, trigger.authorId) : null,
-        otherProfiles: pickOtherProfiles(store, guildId, history, trigger?.authorId, config.context.otherProfiles),
+        guildMemory: memoryOn ? store.getGuild(guildId) : {},
+        interlocutor: memoryOn && trigger ? store.getUser(guildId, trigger.authorId) : null,
+        otherProfiles: memoryOn
+          ? pickOtherProfiles(store, guildId, history, trigger?.authorId, config.context.otherProfiles)
+          : [],
       });
 
       let completion;
       try {
         completion = await llm.complete(request.messages);
       } catch (err) {
-        // A Discord CDN image the provider cannot fetch must not cost her the reply.
+        // A Discord CDN image the provider cannot fetch must not cost the persona the reply.
         if (request.stats.images > 0 && err.statusCode >= 400 && err.statusCode < 500) {
           const textOnly = request.messages.map((m) =>
             Array.isArray(m.content) ? { ...m, content: m.content.find((part) => part.type === 'text').text } : m,
@@ -154,6 +161,11 @@ export function createTurnRunner({ hot, store, llm, calibrator, client, rng = Ma
       }
 
       const parsed = parseOutput(completion.text);
+      // Feature switches drop parts of the model's output before it is acted on.
+      if (features.reactions === false) parsed.reactions = [];
+      if (features.multiMessage === false) parsed.messages = parsed.messages.slice(0, 1);
+      const nothingToDo = parsed.messages.length === 0 && parsed.reactions.length === 0;
+
       log.info('turn: model answered', {
         mode: finalMode,
         channel: channel.id,
@@ -162,14 +174,14 @@ export function createTurnRunner({ hot, store, llm, calibrator, client, rng = Ma
         calibration: Number(calibrator.ratio.toFixed(3)),
         budget: request.stats,
         think: parsed.think,
-        skip: parsed.skip,
+        skip: parsed.skip || nothingToDo,
         messages: parsed.messages.length,
         reactions: parsed.reactions.length,
       });
       store.state.data.calibration = calibrator.ratio;
       store.state.markDirty();
 
-      if (parsed.skip) return { outcome: 'skip', mode: finalMode };
+      if (parsed.skip || nothingToDo) return { outcome: 'skip', mode: finalMode };
       await act(channel, parsed, request.idByIndex, history);
       return { outcome: 'spoke', mode: finalMode };
     } catch (err) {

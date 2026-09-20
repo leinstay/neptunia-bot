@@ -6,11 +6,15 @@
 import { estimateMessages } from './tokens.js';
 import { log } from '../log.js';
 
-const ENDPOINT = 'https://openrouter.ai/api/v1/chat/completions';
 const RETRY_STATUS = new Set([408, 429, 500, 502, 503, 504]);
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** `${baseUrl}/chat/completions`, tolerating a trailing slash on `baseUrl`. */
+function chatCompletionsUrl(baseUrl) {
+  return `${String(baseUrl).replace(/\/+$/, '')}/chat/completions`;
 }
 
 export class TokenLimitError extends Error {}
@@ -61,12 +65,12 @@ export function createLlm({ apiKey, getConfig, calibrator, state, fetchImpl = fe
     for (let attempt = 0; attempt <= cfg.retries; attempt += 1) {
       if (attempt > 0) await sleep(1500 * 2 ** (attempt - 1));
       try {
-        const response = await fetchImpl(ENDPOINT, {
+        const response = await fetchImpl(chatCompletionsUrl(cfg.baseUrl), {
           method: 'POST',
           headers: {
             Authorization: `Bearer ${apiKey}`,
             'Content-Type': 'application/json',
-            'X-Title': 'Neptunia',
+            'X-Title': 'neptunia-bot',
           },
           body: JSON.stringify(body),
           signal: AbortSignal.timeout(cfg.timeoutMs),
