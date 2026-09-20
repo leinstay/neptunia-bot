@@ -99,6 +99,7 @@ export function createStore({ dataDir }) {
   const bufferFile = (guildId) => path.join(guildDir(guildId), 'buffer.json');
   const channelsDir = (guildId) => path.join(guildDir(guildId), 'channels');
   const channelFile = (guildId, channelId) => path.join(channelsDir(guildId), `${channelId}.json`);
+  const mediaCacheFile = (guildId) => path.join(guildDir(guildId), 'media.json');
   const stateFile = path.join(dataDir, 'state.json');
 
   const stateEntry = entry(stateFile, () => ({}));
@@ -254,6 +255,21 @@ export function createStore({ dataDir }) {
       Object.assign(item.value, patch, { updatedAt: new Date().toISOString() });
       item.dirty = true;
       return item.value;
+    },
+
+    /**
+     * The describer's cache for one guild (src/memory/describe.js): a plain
+     * object map keyed by attachment/embed id, insertion order doubling as
+     * LRU recency order. Callers mutate the returned object directly (same
+     * pattern as `state.data`) and call `markMediaCacheDirty` afterwards.
+     */
+    getMediaCache(guildId) {
+      return entry(mediaCacheFile(guildId), () => ({})).value;
+    },
+
+    markMediaCacheDirty(guildId) {
+      const item = entries.get(mediaCacheFile(guildId));
+      if (item) item.dirty = true;
     },
 
     getBuffer(guildId) {

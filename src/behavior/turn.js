@@ -4,10 +4,11 @@
 // Used for answering a call ('reply') and for spontaneous turns
 // ('interject' / 'initiate').
 
-import { fetchHistory, fetchNeighbors } from '../discord/collect.js';
+import { fetchHistory, fetchNeighbors, withTextPreviews } from '../discord/collect.js';
 import { buildRequest } from './prompt.js';
 import { parseOutput } from '../llm/parse.js';
 import { DailyCapError, TokenLimitError } from '../llm/openrouter.js';
+import { collectPictures, isDescribable, selectPictures } from '../discord/media.js';
 import { log } from '../log.js';
 
 function sleep(ms) {
@@ -62,7 +63,29 @@ function authorNameFor(history, messageId) {
   return message?.authorName ?? null;
 }
 
-export function createTurnRunner({ hot, store, llm, calibrator, client, rng = Math.random }) {
+/**
+ * Describable pictures (image/gif/video, never a link embed — see
+ * src/discord/media.js#isDescribable) of `history` that are NOT among
+ * `pickedIds` (the ones already attached as image_url parts), newest message
+ * first — so a per-turn cap spends its budget on what the persona just saw.
+ */
+function describableCandidates(history, pickedIds) {
+  const out = [];
+  for (let i = history.length - 1; i >= 0; i -= 1) {
+    for (const item of collectPictures(history[i])) {
+      if (pickedIds.has(item.itemId) || !isDescribable(item)) continue;
+      out.push(item);
+    }
+  }
+  return out;
+}
+
+/**
+ * `describer` (src/memory/describe.js#createDescriber) is optional: when
+ * absent, or `features.mediaDescriptions` is off, no description request is
+ * ever made — buildRequest simply renders every un-attached picture blind.
+ */
+export function createTurnRunner({ hot, store, llm, calibrator, client, rng = Math.random, describer, fetchImpl = fetch }) {
   const busy = new Set();
   const lastPostAt = new Map(); // channelId -> ts of the persona's last message
 
@@ -184,12 +207,32 @@ export function createTurnRunner({ hot, store, llm, calibrator, client, rng = Ma
       const guildId = channel.guild.id;
       const now = Date.now();
 
-      const history = await fetchHistory(channel, config.context.channelMessages, selfId);
+      let history = await fetchHistory(channel, config.context.channelMessages, selfId, config.media?.embedTextChars);
 
       let finalMode = mode;
       if (mode === 'auto') {
         finalMode = chooseMode(history, now);
         if (!finalMode) return { outcome: 'not-now' };
+      }
+
+      // Lazy, request-time only (see fetchTextPreview's header comment):
+      // never fetched during plain normalization or while just buffered.
+      history = await withTextPreviews(history, config.media?.filePreviewChars ?? 500, fetchImpl);
+
+      // Pictures NOT selected to be attached as image_url may still get a
+      // helper's caption, newest first, capped at media.maxPerTurn; cached
+      // captions are free (see src/memory/describe.js).
+      let descriptions;
+      if (hot.config.features?.mediaDescriptions === true && describer) {
+        const visionCfg = config.context.vision ?? {};
+        const picked = features.vision !== false ? selectPictures({ trigger, history, visionCfg, now }) : [];
+        const pickedIds = new Set(picked.map((p) => p.itemId));
+        const candidates = describableCandidates(history, pickedIds);
+        const described = await describer.describeMany(guildId, candidates, {
+          maxNew: config.media?.maxPerTurn ?? Infinity,
+          countAgainstDailyCap: true,
+        });
+        descriptions = described.descriptions;
       }
 
       const neighbors = await fetchNeighbors(channel, config, selfId, now);
@@ -211,6 +254,7 @@ export function createTurnRunner({ hot, store, llm, calibrator, client, rng = Ma
           : [],
         channels: memoryOn ? store.listChannels(guildId) : [],
         currentChannelId: channel.id,
+        descriptions,
       });
 
       let completion;

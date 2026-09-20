@@ -11,6 +11,7 @@ import { estimateTokens, estimateMessages } from '../llm/tokens.js';
 import { formatTranscript, renderTranscript } from '../discord/format.js';
 import { parseJsonObject } from '../llm/parse.js';
 import { TokenLimitError } from '../llm/openrouter.js';
+import { collectPictures, isDescribable } from '../discord/media.js';
 import { log } from '../log.js';
 import { emptyAffinity } from './affinity.js';
 
@@ -107,9 +108,11 @@ function pickChannelFields(channel) {
  * @param {object} [input.channels]   Stored channel entries of the batch's distinct channels, keyed by channel id.
  * @param {object[]} input.messages   Slim buffered messages (oldest first) to summarize.
  * @param {string} input.selfName     The persona's display name in this guild.
+ * @param {Map<string, string>} [input.descriptions]  Item id -> describer caption
+ *   (src/memory/describe.js), for pictures the analyzer cannot see itself.
  * @returns {{ messages: object[], consumed: number }}
  */
-export function buildMemoryRequest({ prompts, config, calibrator, profiles, guildMemory, channels, messages, selfName }) {
+export function buildMemoryRequest({ prompts, config, calibrator, profiles, guildMemory, channels, messages, selfName, descriptions }) {
   const { timezone } = config.bot;
   const labels = requireLabels(prompts);
   const relationships = config.features?.relationships !== false;
@@ -141,6 +144,7 @@ export function buildMemoryRequest({ prompts, config, calibrator, profiles, guil
     selfName,
     mode: 'memory',
     labels,
+    descriptions,
   };
   const transcriptItems = formatTranscript(messages, formatOptions);
   const transcriptTexts = transcriptItems.map((item) => item.text);
@@ -312,8 +316,10 @@ export function touchMemory(store, guildId, normalized) {
  * @param {object} deps.calibrator   From createCalibrator().
  * @param {(guildId: string) => string} deps.getSelfName
  * @param {() => number} [deps.now]
+ * @param {object} [deps.describer]  From createDescriber() (src/memory/describe.js), optional:
+ *   when absent, or features.mediaDescriptions is off, no description request is ever made.
  */
-export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, now = Date.now }) {
+export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, now = Date.now, describer }) {
   const running = new Set();
   const backoffUntil = new Map();
   // Per-guild in-memory factor on the live batch size (1 = normal). Halved on
@@ -393,9 +399,12 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
    * @param {object} [opts]
    * @param {boolean} [opts.countAgainstDailyCap]  Forwarded to llm.complete(); the warm-up passes `false`
    *   because it has its own rail (a token budget), not the daily request cap.
+   * @param {Map<string, string>} [opts.descriptions]  Pre-computed describer captions (see
+   *   src/memory/warmup.js, which budgets and charges these itself). When omitted and a
+   *   `describer` was configured, up to `media.maxPerBatch` NEW ones are described here.
    * @returns {Promise<{ ok: boolean, usage: object|null, estimated: number, result: object|null, error?: Error }>}
    */
-  async function analyze(guildId, messages, { countAgainstDailyCap = true } = {}) {
+  async function analyze(guildId, messages, { countAgainstDailyCap = true, descriptions } = {}) {
     const cfg = hot.config.memory;
     const promptText = hot.prompts.memory;
     if (!promptText) {
@@ -404,6 +413,21 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
     }
 
     const { authorIds, profiles, channelIds, channels } = collectContext(guildId, messages);
+
+    let effectiveDescriptions = descriptions;
+    if (!effectiveDescriptions && describer && hot.config.features?.mediaDescriptions === true) {
+      const candidates = [];
+      for (const message of messages) {
+        for (const item of collectPictures(message)) {
+          if (isDescribable(item)) candidates.push(item);
+        }
+      }
+      const described = await describer.describeMany(guildId, candidates, {
+        maxNew: hot.config.media?.maxPerBatch ?? Infinity,
+        countAgainstDailyCap,
+      });
+      effectiveDescriptions = described.descriptions;
+    }
 
     let completion;
     try {
@@ -416,6 +440,7 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
         channels,
         messages,
         selfName: getSelfName(guildId),
+        descriptions: effectiveDescriptions,
       });
 
       completion = await llm.complete(llmMessages, {

@@ -410,6 +410,52 @@ test('flush + a new store instance: channels survive a "restart"', () => {
   assert.deepEqual(channel.days, { '1970-01-01': 1 });
 });
 
+// --- media cache (src/memory/describe.js's storage) --------------------------
+
+test('getMediaCache: starts empty for a guild never seen', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  assert.deepEqual(store.getMediaCache('g1'), {});
+});
+
+test('getMediaCache: the same live object is returned on every call, mutation-friendly', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  const cache = store.getMediaCache('g1');
+  cache.a1 = { text: 'a cat', ts: 1000 };
+  assert.deepEqual(store.getMediaCache('g1'), { a1: { text: 'a cat', ts: 1000 } });
+});
+
+test('markMediaCacheDirty + flush: persists the media cache to guilds/<id>/media.json', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  const cache = store.getMediaCache('g1');
+  cache.a1 = { text: 'a cat', ts: 1000 };
+  store.markMediaCacheDirty('g1');
+  store.flush();
+
+  const onDisk = JSON.parse(fs.readFileSync(path.join(dir, 'guilds', 'g1', 'media.json'), 'utf8'));
+  assert.deepEqual(onDisk, { a1: { text: 'a cat', ts: 1000 } });
+});
+
+test('markMediaCacheDirty: a no-op before getMediaCache has ever been called for that guild', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  assert.doesNotThrow(() => store.markMediaCacheDirty('never-touched'));
+});
+
+test('media cache: persists across store instances', () => {
+  const dir = tmpDataDir();
+  const storeA = createStore({ dataDir: dir });
+  const cache = storeA.getMediaCache('g1');
+  cache.a1 = { text: 'a dog', ts: 2000 };
+  storeA.markMediaCacheDirty('g1');
+  storeA.flush();
+
+  const storeB = createStore({ dataDir: dir });
+  assert.deepEqual(storeB.getMediaCache('g1'), { a1: { text: 'a dog', ts: 2000 } });
+});
+
 test('adjustAffinity: persists across store instances', () => {
   const dir = tmpDataDir();
   const storeA = createStore({ dataDir: dir });

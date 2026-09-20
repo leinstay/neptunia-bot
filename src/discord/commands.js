@@ -151,6 +151,33 @@ export function buildCommandTree(commandName) {
         },
         {
           type: SUBCOMMAND_GROUP,
+          name: 'model',
+          description: 'Which model talks, analyzes memory, and describes pictures.',
+          options: [
+            { type: SUBCOMMAND, name: 'show', description: 'Show the model configured for each role.' },
+            {
+              type: SUBCOMMAND,
+              name: 'set',
+              description: 'Set the model for one role (config.local.json).',
+              options: [
+                {
+                  type: STRING,
+                  name: 'role',
+                  description: 'Which role to change.',
+                  required: true,
+                  choices: [
+                    { name: 'talk', value: 'talk' },
+                    { name: 'analyzer', value: 'analyzer' },
+                    { name: 'media', value: 'media' },
+                  ],
+                },
+                { type: STRING, name: 'id', description: 'OpenRouter model id.', required: true },
+              ],
+            },
+          ],
+        },
+        {
+          type: SUBCOMMAND_GROUP,
           name: 'warmup',
           description: 'Memory warm-up controls.',
           options: [
@@ -327,6 +354,8 @@ const OPTION_MAPPERS = {
     score: options.getInteger('score') ?? undefined,
     reason: options.getString('reason') ?? undefined,
   }),
+  'model.show': () => ({}),
+  'model.set': (options) => ({ role: options.getString('role', true), id: options.getString('id', true) }),
   'warmup.status': () => ({}),
   'warmup.plan': () => ({}),
   'warmup.run': () => ({}),

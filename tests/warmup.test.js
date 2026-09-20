@@ -1352,3 +1352,186 @@ test('run: concurrent calls share one run', async () => {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// ---------------------------------------------------------------------------
+// The media describer (features.mediaDescriptions): warm-up charges its own
+// budget for description requests, separate from the memory analyzer's.
+// ---------------------------------------------------------------------------
+
+function fakeDescriber(script) {
+  const calls = [];
+  return {
+    calls,
+    describe: async (guildId, item, opts) => {
+      const result = script(calls.length, item, opts);
+      calls.push({ guildId, item, opts });
+      return result;
+    },
+  };
+}
+
+/** Attaches one image attachment (Discord-shaped, contentType-classified) to a raw fixture message. */
+function withImage(message, itemId) {
+  message.attachments = new Map([[itemId, { id: itemId, contentType: 'image/png', name: 'pic.png', url: 'https://cdn/pic.png' }]]);
+  return message;
+}
+
+function fakeHotWithMedia(overrides = {}) {
+  const hot = fakeHot(overrides);
+  hot.config.features = { mediaDescriptions: true, ...overrides.features };
+  hot.config.media = { maxPerBatch: 20, maxOutputTokens: 50, imageSize: 512, ...overrides.media };
+  hot.prompts = { describe: 'Describe this picture in one plain line.' };
+  return hot;
+}
+
+test('warm-up: describes a batch\'s pictures and charges its own budget, threading them into analyze', async () => {
+  const dir = tempDir();
+  try {
+    const store = createStore({ dataDir: dir });
+    const now = Date.now();
+    const history = makeHistory({ count: 2, startTs: now, spacingMs: 1000, authorId: 'u1' });
+    withImage(history[0], 'img1');
+    const channel = fakeChannel('c1', history);
+    const guild = fakeGuild('g1', [channel]);
+    const client = fakeClient(guild);
+    const hot = fakeHotWithMedia({ warmup: { batchMessages: 10 } });
+    const memory = fakeMemory(alwaysOk());
+    const describer = fakeDescriber(() => ({ text: 'a cat', usage: { prompt_tokens: 100, completion_tokens: 20 }, estimated: 120 }));
+
+    const warmup = createWarmup({ hot, store, client, memory, describer, getGuildId: () => 'g1', sleep: fakeSleep() });
+    await warmup.run();
+
+    assert.equal(describer.calls.length, 1);
+    assert.equal(describer.calls[0].item.itemId, 'img1');
+    assert.equal(describer.calls[0].opts.countAgainstDailyCap, false);
+    assert.equal(memory.calls[0].opts.descriptions.get('img1'), 'a cat');
+
+    const st = store.state.data.warmup;
+    assert.equal(st.tokensUsed, 120 + 15, 'describe (120) + analyze (10+5, from alwaysOk)');
+    assert.equal(st.requests, 2, 'one describe request + one analyze request');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('warm-up: a cached description costs nothing against the budget', async () => {
+  const dir = tempDir();
+  try {
+    const store = createStore({ dataDir: dir });
+    const now = Date.now();
+    const history = makeHistory({ count: 1, startTs: now, spacingMs: 1000, authorId: 'u1' });
+    withImage(history[0], 'img1');
+    const channel = fakeChannel('c1', history);
+    const guild = fakeGuild('g1', [channel]);
+    const client = fakeClient(guild);
+    const hot = fakeHotWithMedia({ warmup: { batchMessages: 10 } });
+    const memory = fakeMemory(alwaysOk());
+    const describer = fakeDescriber(() => ({ text: 'a cat', cached: true }));
+
+    const warmup = createWarmup({ hot, store, client, memory, describer, getGuildId: () => 'g1', sleep: fakeSleep() });
+    await warmup.run();
+
+    const st = store.state.data.warmup;
+    assert.equal(st.tokensUsed, 15, 'only the analyze call is billed, the cached description is free');
+    assert.equal(st.requests, 1);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('warm-up: stops describing (but still analyzes) once the budget cannot afford one more description', async () => {
+  const dir = tempDir();
+  try {
+    const store = createStore({ dataDir: dir });
+    const now = Date.now();
+    const history = makeHistory({ count: 1, startTs: now, spacingMs: 1000, authorId: 'u1' });
+    withImage(history[0], 'img1');
+    const channel = fakeChannel('c1', history);
+    const guild = fakeGuild('g1', [channel]);
+    const client = fakeClient(guild);
+    // maxTokens is far smaller than any describe request could ever cost
+    // (describe prompt + media.maxOutputTokens(50) + 300), but comfortably
+    // covers the memory analyzer's own estimate (10 + memory.maxOutputTokens(100)).
+    const hot = fakeHotWithMedia({ warmup: { batchMessages: 10, maxTokens: 200 } });
+    const memory = fakeMemory(alwaysOk());
+    const describer = fakeDescriber(() => ({ text: 'a cat' }));
+
+    const warmup = createWarmup({ hot, store, client, memory, describer, getGuildId: () => 'g1', sleep: fakeSleep() });
+    await warmup.run();
+
+    assert.equal(describer.calls.length, 0, 'never affordable, never called');
+    assert.equal(memory.calls[0].opts.descriptions.size, 0);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('warm-up: caps NEW descriptions per batch at media.maxPerBatch', async () => {
+  const dir = tempDir();
+  try {
+    const store = createStore({ dataDir: dir });
+    const now = Date.now();
+    const history = makeHistory({ count: 2, startTs: now, spacingMs: 1000, authorId: 'u1' });
+    withImage(history[0], 'img1');
+    withImage(history[1], 'img2');
+    const channel = fakeChannel('c1', history);
+    const guild = fakeGuild('g1', [channel]);
+    const client = fakeClient(guild);
+    const hot = fakeHotWithMedia({ warmup: { batchMessages: 10 }, media: { maxPerBatch: 1 } });
+    const memory = fakeMemory(alwaysOk());
+    const describer = fakeDescriber(() => ({ text: 'a picture' }));
+
+    const warmup = createWarmup({ hot, store, client, memory, describer, getGuildId: () => 'g1', sleep: fakeSleep() });
+    await warmup.run();
+
+    assert.equal(describer.calls.length, 1, 'maxPerBatch caps NEW descriptions at 1');
+    assert.equal(memory.calls[0].opts.descriptions.size, 1);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('warm-up: features.mediaDescriptions off never calls the describer, even when one is configured', async () => {
+  const dir = tempDir();
+  try {
+    const store = createStore({ dataDir: dir });
+    const now = Date.now();
+    const history = makeHistory({ count: 1, startTs: now, spacingMs: 1000, authorId: 'u1' });
+    withImage(history[0], 'img1');
+    const channel = fakeChannel('c1', history);
+    const guild = fakeGuild('g1', [channel]);
+    const client = fakeClient(guild);
+    const hot = fakeHotWithMedia({ warmup: { batchMessages: 10 }, features: { mediaDescriptions: false } });
+    const memory = fakeMemory(alwaysOk());
+    const describer = fakeDescriber(() => ({ text: 'a cat' }));
+
+    const warmup = createWarmup({ hot, store, client, memory, describer, getGuildId: () => 'g1', sleep: fakeSleep() });
+    await warmup.run();
+
+    assert.equal(describer.calls.length, 0);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('warm-up: no describer configured is a plain no-op, never throws', async () => {
+  const dir = tempDir();
+  try {
+    const store = createStore({ dataDir: dir });
+    const now = Date.now();
+    const history = makeHistory({ count: 1, startTs: now, spacingMs: 1000, authorId: 'u1' });
+    withImage(history[0], 'img1');
+    const channel = fakeChannel('c1', history);
+    const guild = fakeGuild('g1', [channel]);
+    const client = fakeClient(guild);
+    const hot = fakeHotWithMedia({ warmup: { batchMessages: 10 } });
+    const memory = fakeMemory(alwaysOk());
+
+    const warmup = createWarmup({ hot, store, client, memory, getGuildId: () => 'g1', sleep: fakeSleep() });
+    const result = await warmup.run();
+
+    assert.equal(result.done, true);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

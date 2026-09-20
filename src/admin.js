@@ -442,7 +442,36 @@ export function createAdmin({ hot, store, client, spontaneous, calibrator, getGu
     return `Set affinity for ${userId} to ${affinity.score} (${affinityBand(affinity.score)}).`;
   }
 
-  function warmupLocalConfigPath() {
+  const MODEL_ID_RE = /^[\w.:/-]{3,100}$/;
+const MODEL_ROLE_PATHS = { talk: 'llm.model', analyzer: 'memory.model', media: 'media.model' };
+
+function cmdModelShow() {
+  const cfg = hot.config;
+  const lines = [
+    `talk: ${cfg?.llm?.model ?? '-'}`,
+    `analyzer: ${cfg?.memory?.model ?? cfg?.llm?.model ?? '-'}`,
+    `media: ${cfg?.media?.model ?? '-'}`,
+    `mediaDescriptions: ${cfg?.features?.mediaDescriptions === true ? 'on' : 'off'}`,
+  ];
+  return lines.join('\n');
+}
+
+function cmdModelSet(args) {
+  const role = String(args?.role ?? '');
+  const dottedPath = MODEL_ROLE_PATHS[role];
+  if (!dottedPath) throw new Error(`unknown role: ${role} (talk, analyzer, media)`);
+
+  const id = String(args?.id ?? '').trim();
+  if (!MODEL_ID_RE.test(id)) throw new Error('id must look like a model id, e.g. anthropic/claude-haiku-4.5 (3-100 chars)');
+
+  const localPath = path.join(hot.rootDir, 'config.local.json');
+  const next = setPath(readLocalConfig(localPath), dottedPath, id);
+  writeLocalConfig(localPath, next);
+  const ok = hot.reloadConfig();
+  return `Set ${role} model to ${id} (reload ${ok ? 'ok' : 'FAILED'})`;
+}
+
+function warmupLocalConfigPath() {
     return path.join(hot.rootDir, 'config.local.json');
   }
 
@@ -592,6 +621,8 @@ export function createAdmin({ hot, store, client, spontaneous, calibrator, getGu
     'memory.show': (args, context) => cmdMemoryShow(args, context),
     'memory.forget': (args, context) => cmdMemoryForget(args, context),
     'memory.affinity': (args, context) => cmdMemoryAffinity(args, context),
+    'model.show': () => cmdModelShow(),
+    'model.set': (args) => cmdModelSet(args),
     'warmup.status': withWarmup(() => cmdWarmupStatus()),
     'warmup.plan': withWarmup(() => cmdWarmupPlan()),
     'warmup.run': withWarmup(() => cmdWarmupRun()),

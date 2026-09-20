@@ -8,6 +8,8 @@
 // Time gaps and date changes are spelled out because the model must tell a
 // live conversation from a dead chat that somebody has just poked.
 
+import { mediaLabelFor } from './media.js';
+
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
 const DAY = 24 * HOUR;
@@ -105,13 +107,38 @@ function truncate(text, maxChars) {
   return text.length > maxChars ? `${text.slice(0, maxChars)}…` : text;
 }
 
-function attachmentTags(message, labels) {
+/**
+ * One rendered tag per attachment/embed of `message`, most informative form
+ * available (see .claude/docs/prompt-contract.md, "Media in a transcript
+ * line" and src/discord/media.js#mediaLabelFor): attached to this request >
+ * described > blind. `context.attachedIndex`/`context.descriptions` are
+ * optional `Map`s keyed by the item's id (an attachment's Discord id, or a
+ * link's synthesized id — see normalizeMessage).
+ */
+function mediaTags(message, labels, context = {}) {
   const tags = [];
   for (const attachment of message.attachments ?? []) {
-    tags.push(attachment.kind === 'image' ? labels.transcript.image : fill(labels.transcript.file, { name: attachment.name }));
+    const attachedIndex = context.attachedIndex?.get(attachment.id) ?? null;
+    const description = context.descriptions?.get(attachment.id) ?? null;
+    const { key, values } = mediaLabelFor(attachment, { attachedIndex, description });
+    tags.push(fill(labels.transcript[key], values));
+  }
+  for (const link of message.links ?? []) {
+    const attachedIndex = context.attachedIndex?.get(link.id) ?? null;
+    const description = context.descriptions?.get(link.id) ?? null;
+    const { key, values } = mediaLabelFor(link, { attachedIndex, description });
+    tags.push(fill(labels.transcript[key], values));
   }
   for (const sticker of message.stickers ?? []) tags.push(fill(labels.transcript.sticker, { name: sticker }));
   return tags;
+}
+
+/** One forwarded message-snapshot, wrapped in `labels.transcript.forwarded`. */
+function renderForwarded(snapshot, labels, context, maxChars) {
+  const body = [];
+  if (snapshot.content) body.push(truncate(snapshot.content, maxChars));
+  body.push(...mediaTags(snapshot, labels, context));
+  return fill(labels.transcript.forwarded, { text: body.join(' ').trim() });
 }
 
 /**
@@ -128,6 +155,11 @@ function attachmentTags(message, labels) {
  * @param {object} options.labels       Live `prompts.labels` (locale, self, units, transcript.*).
  * @param {'chat'|'memory'} [options.mode]  'memory' drops #indexes and adds user ids;
  *   it also groups by channel (see below).
+ * @param {Map<string, number>} [options.attachedIndex]  Item id -> its 1-based
+ *   position among this request's `image_url` parts (see
+ *   src/behavior/prompt.js#selectPictures); renders `transcript.imageAttached`.
+ * @param {Map<string, string>} [options.descriptions]  Item id -> a describer
+ *   caption (src/memory/describe.js); renders the `*Described` label forms.
  * @returns {{ id: string, index: number, ts: number, text: string }[]}
  *
  * In `mode: 'memory'`, messages come from possibly several channels (see
@@ -138,7 +170,8 @@ function attachmentTags(message, labels) {
  * channel run, never across a channel switch.
  */
 export function formatTranscript(messages, options) {
-  const { timezone, gapMinutes, maxChars, selfName, labels, mode = 'chat' } = options;
+  const { timezone, gapMinutes, maxChars, selfName, labels, mode = 'chat', attachedIndex, descriptions } = options;
+  const mediaContext = { attachedIndex, descriptions };
   const locale = labels.locale;
   const selfLabel = fill(labels.self, { name: selfName });
   const indexById = new Map(messages.map((message, i) => [message.id, i + 1]));
@@ -178,7 +211,10 @@ export function formatTranscript(messages, options) {
       const target = indexById.get(message.replyToId);
       body.push(target ? fill(labels.transcript.replyTo, { index: target }) : labels.transcript.replyToOld);
     }
-    body.push(...attachmentTags(message, labels));
+    body.push(...mediaTags(message, labels, mediaContext));
+    for (const snapshot of message.forwarded ?? []) {
+      body.push(renderForwarded(snapshot, labels, mediaContext, maxChars));
+    }
 
     const marker = mode === 'memory' && message.direct ? DIRECT_MARKER : '';
     parts.push(`${marker}${head} ${who}: ${body.join(' ')}`.trimEnd());

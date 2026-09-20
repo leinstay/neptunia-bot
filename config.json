@@ -11,6 +11,7 @@
     "reactions": true,
     "multiMessage": true,
     "vision": true,
+    "mediaDescriptions": false,
     "typingSimulation": true,
     "adminCommands": true
   },
@@ -45,7 +46,7 @@
     "tempo": { "liveMessages10min": 4, "deadSilenceMinutes": 45 },
     "caps": { "interlocutor": 2500, "aboutChat": 2500, "people": 4000, "neighbors": 3000, "server": 2500 },
     "channelActivity": { "liveMessagesPerDay": 20, "deadAfterDays": 7 },
-    "vision": { "maxImages": 2, "tokensPerImage": 1600 }
+    "vision": { "maxImages": 4, "tokensPerImage": 400, "imageSize": 512, "recentImages": 3, "recentImageMinutes": 30 }
   },
   "mention": {
     "ignoreChance": 0.12,
@@ -96,6 +97,16 @@
     "maxDeltaPerUpdate": 15,
     "historySize": 10,
     "directTriggerCount": 6
+  },
+  "media": {
+    "model": "anthropic/claude-haiku-4.5",
+    "maxOutputTokens": 120,
+    "imageSize": 512,
+    "maxPerTurn": 6,
+    "maxPerBatch": 20,
+    "cacheEntries": 5000,
+    "filePreviewChars": 500,
+    "embedTextChars": 200
   },
   "warmup": {
     "enabled": false,

@@ -16,6 +16,7 @@ import { estimateTokens } from '../llm/tokens.js';
 import { computeTempo, fill, formatNow, formatTranscript, renderTempo, renderTranscript } from '../discord/format.js';
 import { affinityBand } from '../memory/affinity.js';
 import { channelActivity, renderChannel } from '../memory/channels.js';
+import { selectPictures, mediaProxyUrl } from '../discord/media.js';
 
 const TAG_OVERHEAD = 60;
 
@@ -100,6 +101,26 @@ function requireLabels(prompts) {
 }
 
 /**
+ * Render the `<senses>` block from `labels.senses`: which lines are true
+ * under the live config (see .claude/docs/prompt-contract.md, "`<senses>`").
+ * Returns '' when `labels.senses` is missing entirely, so an older
+ * deployment's labels.json never breaks — the block is simply omitted.
+ */
+function renderSenses(config, labels) {
+  const senses = labels.senses;
+  if (!senses) return '';
+  const visionOn = config.features?.vision !== false;
+  const describedOn = config.features?.mediaDescriptions === true;
+  const lines = [];
+  if (visionOn) lines.push(senses.imageSee);
+  lines.push(describedOn ? senses.imageDescribed : senses.imageBlind);
+  lines.push(describedOn ? senses.gifDescribed : senses.gifBlind);
+  lines.push(describedOn ? senses.videoDescribed : senses.videoBlind);
+  lines.push(senses.voice, senses.links, senses.files);
+  return lines.filter(Boolean).join('\n');
+}
+
+/**
  * @param {object} input
  * @param {object} input.config            Live config.
  * @param {object} input.prompts           Live prompts keyed by file name.
@@ -116,19 +137,27 @@ function requireLabels(prompts) {
  * @param {object[]} input.otherProfiles   Profiles of other people in the transcript, most relevant first.
  * @param {object[]} [input.channels]      The server's channel map (store.listChannels), [] when memory is off.
  * @param {string|null} [input.currentChannelId]  Id of the channel this turn happens in.
+ * @param {Map<string, string>} [input.descriptions]  Item id -> describer caption, for pictures
+ *   NOT selected to be attached (see src/behavior/turn.js, src/memory/describe.js).
  * @returns {{ messages: object[], stats: object, idByIndex: Map<number, string>, tempo: object }}
  */
 export function buildRequest(input) {
-  const { config, prompts, calibrator, mode, now, selfName, history, neighbors, trigger, triggerKind, channels = [], currentChannelId = null } = input;
+  const { config, prompts, calibrator, mode, now, selfName, history, neighbors, trigger, triggerKind, channels = [], currentChannelId = null, descriptions } = input;
   const labels = requireLabels(prompts);
   const { timezone } = config.bot;
   const relationships = config.features?.relationships !== false;
+  const visionCfg = config.context.vision ?? {};
+  const visionOn = config.features?.vision !== false;
+  const pictures = visionOn ? selectPictures({ trigger, history, visionCfg, now }) : [];
+  const attachedIndex = new Map(pictures.map((picture, i) => [picture.itemId, i + 1]));
   const formatOptions = {
     timezone,
     gapMinutes: config.context.gapMarkerMinutes,
     maxChars: config.context.maxMessageChars,
     selfName,
     labels,
+    attachedIndex,
+    descriptions,
   };
 
   const nameFill = (text) => fillTemplate(text, { name: selfName });
@@ -149,9 +178,7 @@ export function buildRequest(input) {
     target: triggerItem ? `#${triggerItem.index}` : '',
   });
 
-  const images = config.features?.vision !== false && trigger
-    ? trigger.attachments.filter((a) => a.kind === 'image').slice(0, config.context.vision.maxImages)
-    : [];
+  const sensesText = renderSenses(config, labels);
 
   const neighborItems = neighbors.map(
     ({ channelName, messages }) =>
@@ -164,12 +191,12 @@ export function buildRequest(input) {
   const cost = (text) => calibrator.apply(estimateTokens(text)) + 2;
   const limit =
     Math.floor(config.llm.maxRequestTokens * config.llm.safetyMargin) -
-    images.length * config.context.vision.tokensPerImage -
+    pictures.length * (visionCfg.tokensPerImage ?? 0) -
     TAG_OVERHEAD;
 
   const { kept, stats, used } = fitSections(
     [
-      { name: 'fixed', required: true, items: [system, task, formatNow(now, timezone, labels.locale), tempoText] },
+      { name: 'fixed', required: true, items: [system, task, formatNow(now, timezone, labels.locale), sensesText, tempoText] },
       {
         name: 'interlocutor',
         cap: caps.interlocutor,
@@ -198,6 +225,7 @@ export function buildRequest(input) {
   const keptChat = chatItems.slice(chatItems.length - kept.chat.length);
   const user = [
     block('now', formatNow(now, timezone, labels.locale)),
+    block('senses', sensesText),
     block('about_chat', kept.aboutChat.join('\n')),
     block('server', kept.server.join('\n\n')),
     block('self_facts', kept.self.join('\n')),
@@ -210,8 +238,14 @@ export function buildRequest(input) {
     .filter(Boolean)
     .join('\n\n');
 
-  const content = images.length
-    ? [{ type: 'text', text: user }, ...images.map((image) => ({ type: 'image_url', image_url: { url: image.url } }))]
+  const content = pictures.length
+    ? [
+        { type: 'text', text: user },
+        ...pictures.map((picture) => ({
+          type: 'image_url',
+          image_url: { url: mediaProxyUrl(picture.url, { width: visionCfg.imageSize, height: visionCfg.imageSize, format: 'webp' }) },
+        })),
+      ]
     : user;
 
   return {
@@ -219,8 +253,9 @@ export function buildRequest(input) {
       { role: 'system', content: system },
       { role: 'user', content },
     ],
-    stats: { ...stats, used, limit, images: images.length },
+    stats: { ...stats, used, limit, images: pictures.length },
     idByIndex,
     tempo,
+    pictures,
   };
 }

@@ -37,7 +37,7 @@ function fakeConfig(overrides = {}) {
       gapMarkerMinutes: 20,
       maxMessageChars: 800,
       caps: { interlocutor: 2500, aboutChat: 2500, people: 4000, neighbors: 3000, server: 2500 },
-      vision: { maxImages: 2, tokensPerImage: 1600 },
+      vision: { maxImages: 2, tokensPerImage: 400, imageSize: 512, recentImages: 0, recentImageMinutes: 0 },
       ...overrides.context,
     },
     features: { vision: true, ...overrides.features },
@@ -194,7 +194,7 @@ test('buildRequest: under a tiny token budget, neighbours and other profiles are
       history,
       neighbors,
       otherProfiles,
-      config: fakeConfig({ llm: { maxRequestTokens: 220, safetyMargin: 1 } }),
+      config: fakeConfig({ llm: { maxRequestTokens: 340, safetyMargin: 1 } }),
     }),
   );
 
@@ -219,13 +219,16 @@ test('buildRequest: total token usage never exceeds maxRequestTokens * safetyMar
 test('buildRequest: images are attached only when features.vision is enabled, capped by maxImages', () => {
   const trigger = makeMessage(1, NOW - MIN, {
     attachments: [
-      { kind: 'image', url: 'img1' },
-      { kind: 'image', url: 'img2' },
-      { kind: 'image', url: 'img3' },
-      { kind: 'file', url: 'file1' },
+      { id: 'i1', kind: 'image', url: 'img1' },
+      { id: 'i2', kind: 'image', url: 'img2' },
+      { id: 'i3', kind: 'image', url: 'img3' },
+      { id: 'i4', kind: 'file', url: 'file1' },
     ],
   });
-  const config = fakeConfig({ features: { vision: true }, context: { vision: { maxImages: 2, tokensPerImage: 1600 } } });
+  const config = fakeConfig({
+    features: { vision: true },
+    context: { vision: { maxImages: 2, tokensPerImage: 400, imageSize: 512, recentImages: 0, recentImageMinutes: 0 } },
+  });
   const request = buildRequest(baseInput({ history: [trigger], trigger, triggerKind: 'mention', config }));
   const content = request.messages[1].content;
   assert.ok(Array.isArray(content));
@@ -235,10 +238,39 @@ test('buildRequest: images are attached only when features.vision is enabled, ca
 });
 
 test('buildRequest: vision disabled means plain string content, even with image attachments', () => {
-  const trigger = makeMessage(1, NOW - MIN, { attachments: [{ kind: 'image', url: 'img1' }] });
-  const config = fakeConfig({ features: { vision: false }, context: { vision: { maxImages: 2, tokensPerImage: 1600 } } });
+  const trigger = makeMessage(1, NOW - MIN, { attachments: [{ id: 'i1', kind: 'image', url: 'img1' }] });
+  const config = fakeConfig({
+    features: { vision: false },
+    context: { vision: { maxImages: 2, tokensPerImage: 400, imageSize: 512, recentImages: 0, recentImageMinutes: 0 } },
+  });
   const request = buildRequest(baseInput({ history: [trigger], trigger, triggerKind: 'mention', config }));
   assert.equal(typeof request.messages[1].content, 'string');
+});
+
+test('buildRequest: an image attached to the request renders transcript.imageAttached numbered in transcript order', () => {
+  const trigger = makeMessage(1, NOW - MIN, { attachments: [{ id: 'i1', kind: 'image', url: 'img1' }] });
+  const config = fakeConfig({
+    features: { vision: true },
+    context: { vision: { maxImages: 4, tokensPerImage: 400, imageSize: 512, recentImages: 0, recentImageMinutes: 0 } },
+  });
+  const request = buildRequest(baseInput({ history: [trigger], trigger, triggerKind: 'mention', config }));
+  const user = request.messages[1].content.find((part) => part.type === 'text').text;
+  assert.ok(user.includes(labels.transcript.imageAttached.replace('{n}', '1')));
+});
+
+test('buildRequest: the media proxy resizes a Discord CDN picture to context.vision.imageSize', () => {
+  const trigger = makeMessage(1, NOW - MIN, {
+    attachments: [{ id: 'i1', kind: 'image', url: 'https://cdn.discordapp.com/attachments/1/2/pic.png' }],
+  });
+  const config = fakeConfig({
+    features: { vision: true },
+    context: { vision: { maxImages: 4, tokensPerImage: 400, imageSize: 256, recentImages: 0, recentImageMinutes: 0 } },
+  });
+  const request = buildRequest(baseInput({ history: [trigger], trigger, triggerKind: 'mention', config }));
+  const imagePart = request.messages[1].content.find((part) => part.type === 'image_url');
+  const url = new URL(imagePart.image_url.url);
+  assert.equal(url.searchParams.get('width'), '256');
+  assert.equal(url.searchParams.get('format'), 'webp');
 });
 
 test('buildRequest: idByIndex maps every transcript index to its message id', () => {
@@ -254,7 +286,7 @@ test('buildRequest: idByIndex still covers messages later trimmed out of the ren
   for (let i = 1; i <= 10; i += 1) {
     history.push(makeMessage(i, NOW - (11 - i) * MIN, { content: 'word '.repeat(20) }));
   }
-  const config = fakeConfig({ llm: { maxRequestTokens: 220, safetyMargin: 1 } });
+  const config = fakeConfig({ llm: { maxRequestTokens: 340, safetyMargin: 1 } });
   const request = buildRequest(baseInput({ history, config }));
   // idByIndex is built from the FULL transcript, before trimming.
   assert.equal(request.idByIndex.size, 10);
@@ -343,7 +375,7 @@ test('buildRequest: under a tiny server cap, the map is trimmed but <chat> still
     fakeChannel('c1', { name: 'general', purpose: 'x'.repeat(200), lastMessageAt: NOW }),
     fakeChannel('c2', { name: 'random', purpose: 'y'.repeat(200), lastMessageAt: NOW - MIN }),
   ];
-  const config = fakeConfig({ llm: { maxRequestTokens: 220, safetyMargin: 1 } });
+  const config = fakeConfig({ llm: { maxRequestTokens: 340, safetyMargin: 1 } });
   const request = buildRequest(baseInput({ history, channels, currentChannelId: 'c1', config }));
 
   assert.equal(request.stats.server.kept, 0);
@@ -450,4 +482,63 @@ test('buildRequest: a non-English labels object drives the same blocks, proving 
   assert.ok(user.includes('σε ετικέτησε'));
   assert.ok(user.includes('<now>'));
   assert.ok(user.includes('<task>'));
+});
+
+// --- <senses> ------------------------------------------------------------
+
+function sensesOf(request) {
+  const user = request.messages[1].content;
+  const text = Array.isArray(user) ? user.find((part) => part.type === 'text').text : user;
+  const match = /<senses>\n([\s\S]*?)\n<\/senses>/.exec(text);
+  return match ? match[1] : null;
+}
+
+test('buildRequest: <senses> sits right after <now>', () => {
+  const request = buildRequest(baseInput());
+  const user = request.messages[1].content;
+  const nowIdx = user.indexOf('<now>');
+  const sensesIdx = user.indexOf('<senses>');
+  assert.ok(sensesIdx !== -1 && sensesIdx > nowIdx);
+  assert.ok(sensesIdx < user.indexOf('</now>') + 20); // right after, not somewhere far down
+});
+
+test('buildRequest: vision on, mediaDescriptions off -> imageSee + blind forms', () => {
+  const config = fakeConfig({ features: { vision: true, mediaDescriptions: false } });
+  const request = buildRequest(baseInput({ config }));
+  const senses = sensesOf(request);
+  assert.ok(senses.includes(labels.senses.imageSee));
+  assert.ok(senses.includes(labels.senses.imageBlind));
+  assert.ok(!senses.includes(labels.senses.imageDescribed));
+  assert.ok(senses.includes(labels.senses.gifBlind));
+  assert.ok(senses.includes(labels.senses.videoBlind));
+  assert.ok(senses.includes(labels.senses.voice));
+  assert.ok(senses.includes(labels.senses.links));
+  assert.ok(senses.includes(labels.senses.files));
+});
+
+test('buildRequest: vision off -> no imageSee line, blind forms still shown', () => {
+  const config = fakeConfig({ features: { vision: false } });
+  const request = buildRequest(baseInput({ config }));
+  const senses = sensesOf(request);
+  assert.ok(!senses.includes(labels.senses.imageSee));
+  assert.ok(senses.includes(labels.senses.imageBlind));
+});
+
+test('buildRequest: mediaDescriptions on -> described forms replace the blind ones', () => {
+  const config = fakeConfig({ features: { vision: true, mediaDescriptions: true } });
+  const request = buildRequest(baseInput({ config }));
+  const senses = sensesOf(request);
+  assert.ok(senses.includes(labels.senses.imageDescribed));
+  assert.ok(senses.includes(labels.senses.gifDescribed));
+  assert.ok(senses.includes(labels.senses.videoDescribed));
+  assert.ok(!senses.includes(labels.senses.imageBlind));
+  assert.ok(!senses.includes(labels.senses.gifBlind));
+  assert.ok(!senses.includes(labels.senses.videoBlind));
+});
+
+test('buildRequest: <senses> is omitted entirely when labels has no senses section', () => {
+  const brokenLabels = { ...labels, senses: undefined };
+  const request = buildRequest(baseInput({ prompts: fakePrompts({ labels: brokenLabels }) }));
+  const user = request.messages[1].content;
+  assert.ok(!user.includes('<senses>'));
 });

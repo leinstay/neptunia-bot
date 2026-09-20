@@ -371,6 +371,94 @@ test('run: unset removes a previously set override', async () => {
 });
 
 // ---------------------------------------------------------------------------
+// model.show / model.set
+// ---------------------------------------------------------------------------
+
+function makeHotWithMedia(rootDir) {
+  const hot = makeHot(rootDir);
+  hot.config.memory = { model: null };
+  hot.config.media = { model: 'anthropic/claude-haiku-4.5' };
+  hot.config.features = { mediaDescriptions: false };
+  return hot;
+}
+
+test('run: model.show reports talk/analyzer/media models and whether mediaDescriptions is on', async () => {
+  const rootDir = makeRoot();
+  const hot = makeHotWithMedia(rootDir);
+  const { admin } = makeAdmin(rootDir, { hot });
+
+  const result = await admin.run('model.show', {}, {});
+
+  assert.ok(result.includes('talk: anthropic/claude-opus-4.6'));
+  assert.ok(result.includes('media: anthropic/claude-haiku-4.5'));
+  assert.ok(result.includes('mediaDescriptions: off'));
+});
+
+test('run: model.show falls back to the talk model for the analyzer when memory.model is unset', async () => {
+  const rootDir = makeRoot();
+  const hot = makeHotWithMedia(rootDir);
+  const { admin } = makeAdmin(rootDir, { hot });
+
+  const result = await admin.run('model.show', {}, {});
+  assert.ok(result.includes('analyzer: anthropic/claude-opus-4.6'));
+});
+
+test('run: model.show reports memory.model when it is explicitly set, and mediaDescriptions on', async () => {
+  const rootDir = makeRoot();
+  const hot = makeHotWithMedia(rootDir);
+  hot.config.memory.model = 'openrouter/analyzer-model';
+  hot.config.features.mediaDescriptions = true;
+  const { admin } = makeAdmin(rootDir, { hot });
+
+  const result = await admin.run('model.show', {}, {});
+  assert.ok(result.includes('analyzer: openrouter/analyzer-model'));
+  assert.ok(result.includes('mediaDescriptions: on'));
+});
+
+test('run: model.set writes the right config path for each role', async () => {
+  const rootDir = makeRoot();
+  const hot = makeHotWithMedia(rootDir);
+  const { admin } = makeAdmin(rootDir, { hot });
+
+  await admin.run('model.set', { role: 'talk', id: 'anthropic/claude-opus-4.6' }, {});
+  assert.deepEqual(readLocal(rootDir), { llm: { model: 'anthropic/claude-opus-4.6' } });
+
+  await admin.run('model.set', { role: 'analyzer', id: 'openrouter/cheap-model' }, {});
+  await admin.run('model.set', { role: 'media', id: 'anthropic/claude-haiku-4.5' }, {});
+  assert.deepEqual(readLocal(rootDir), {
+    llm: { model: 'anthropic/claude-opus-4.6' },
+    memory: { model: 'openrouter/cheap-model' },
+    media: { model: 'anthropic/claude-haiku-4.5' },
+  });
+  assert.equal(hot.reloadConfigCalls, 3);
+});
+
+test('run: model.set rejects an unknown role and writes nothing', async () => {
+  const rootDir = makeRoot();
+  const { admin } = makeAdmin(rootDir, { hot: makeHotWithMedia(rootDir) });
+
+  await assert.rejects(() => admin.run('model.set', { role: 'bogus', id: 'x/y' }, {}), /unknown role/);
+  assert.equal(fs.existsSync(path.join(rootDir, 'config.local.json')), false);
+});
+
+test('run: model.set rejects an id that does not look like a model id', async () => {
+  const rootDir = makeRoot();
+  const { admin } = makeAdmin(rootDir, { hot: makeHotWithMedia(rootDir) });
+
+  await assert.rejects(() => admin.run('model.set', { role: 'talk', id: 'x' }, {}), /model id/);
+  await assert.rejects(() => admin.run('model.set', { role: 'talk', id: 'has spaces here' }, {}), /model id/);
+  assert.equal(fs.existsSync(path.join(rootDir, 'config.local.json')), false);
+});
+
+test('run: model.set accepts a loosely-valid id (letters, digits, dot, colon, slash, dash, underscore)', async () => {
+  const rootDir = makeRoot();
+  const { admin } = makeAdmin(rootDir, { hot: makeHotWithMedia(rootDir) });
+
+  await admin.run('model.set', { role: 'media', id: 'anthropic/claude-haiku-4.5:beta' }, {});
+  assert.deepEqual(readLocal(rootDir), { media: { model: 'anthropic/claude-haiku-4.5:beta' } });
+});
+
+// ---------------------------------------------------------------------------
 // memory.forget / memory.show / memory.affinity
 // ---------------------------------------------------------------------------
 

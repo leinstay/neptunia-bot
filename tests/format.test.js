@@ -392,6 +392,133 @@ test('formatTranscript: chat mode never adds a channel heading, even across a ch
   assert.ok(!items[1].text.includes('##'));
 });
 
+// --- formatTranscript: new media forms (images, gifs, video, voice, audio,
+// links, forwarded, imageAttached) ------------------------------------------
+
+test('formatTranscript: an image attached to this request renders imageAttached with its index', () => {
+  const t0 = Date.UTC(2026, 8, 20, 10, 0, 0);
+  const messages = [msg('a', t0, { content: '', attachments: [{ id: 'att1', kind: 'image', name: 'pic.png' }] })];
+  const attachedIndex = new Map([['att1', 2]]);
+  const items = formatTranscript(messages, { timezone: TZ, gapMinutes: 20, maxChars: 100, selfName: 'Nept', labels, attachedIndex });
+  assert.ok(items[0].text.includes('[picture #2, attached]'));
+});
+
+test('formatTranscript: a described image (not attached) renders imageDescribed', () => {
+  const t0 = Date.UTC(2026, 8, 20, 10, 0, 0);
+  const messages = [msg('a', t0, { content: '', attachments: [{ id: 'att1', kind: 'image', name: 'pic.png' }] })];
+  const descriptions = new Map([['att1', 'a grey cat sleeping']]);
+  const items = formatTranscript(messages, { timezone: TZ, gapMinutes: 20, maxChars: 100, selfName: 'Nept', labels, descriptions });
+  assert.ok(items[0].text.includes('[image: a grey cat sleeping]'));
+});
+
+test('formatTranscript: a plain image with neither attachment nor description renders the blind form', () => {
+  const t0 = Date.UTC(2026, 8, 20, 10, 0, 0);
+  const messages = [msg('a', t0, { content: '', attachments: [{ id: 'att1', kind: 'image', name: 'pic.png' }] })];
+  const items = formatTranscript(messages, { timezone: TZ, gapMinutes: 20, maxChars: 100, selfName: 'Nept', labels });
+  assert.ok(items[0].text.includes('[image]'));
+});
+
+test('formatTranscript: a gif attachment renders blind by name, described by caption', () => {
+  const t0 = Date.UTC(2026, 8, 20, 10, 0, 0);
+  const blindMessages = [msg('a', t0, { content: '', attachments: [{ id: 'g1', kind: 'gif', name: 'cat.gif' }] })];
+  const blind = formatTranscript(blindMessages, { timezone: TZ, gapMinutes: 20, maxChars: 100, selfName: 'Nept', labels });
+  assert.ok(blind[0].text.includes('[gif: cat.gif]'));
+
+  const described = formatTranscript(blindMessages, {
+    timezone: TZ,
+    gapMinutes: 20,
+    maxChars: 100,
+    selfName: 'Nept',
+    labels,
+    descriptions: new Map([['g1', 'a cat dances']]),
+  });
+  assert.ok(described[0].text.includes('[gif: a cat dances]'));
+});
+
+test('formatTranscript: a video attachment renders name+duration blind, adds a caption when described', () => {
+  const t0 = Date.UTC(2026, 8, 20, 10, 0, 0);
+  const messages = [msg('a', t0, { content: '', attachments: [{ id: 'v1', kind: 'video', name: 'clip.mp4', durationSec: 65 }] })];
+  const blind = formatTranscript(messages, { timezone: TZ, gapMinutes: 20, maxChars: 100, selfName: 'Nept', labels });
+  assert.ok(blind[0].text.includes('[video: clip.mp4, 1:05]'));
+
+  const described = formatTranscript(messages, {
+    timezone: TZ,
+    gapMinutes: 20,
+    maxChars: 100,
+    selfName: 'Nept',
+    labels,
+    descriptions: new Map([['v1', 'a dog runs across a field']]),
+  });
+  assert.ok(described[0].text.includes('[video: clip.mp4, 1:05: a dog runs across a field]'));
+});
+
+test('formatTranscript: a voice message renders only its duration', () => {
+  const t0 = Date.UTC(2026, 8, 20, 10, 0, 0);
+  const messages = [msg('a', t0, { content: '', attachments: [{ id: 'voice1', kind: 'voice', durationSec: 42 }] })];
+  const items = formatTranscript(messages, { timezone: TZ, gapMinutes: 20, maxChars: 100, selfName: 'Nept', labels });
+  assert.ok(items[0].text.includes('[voice message, 0:42]'));
+});
+
+test('formatTranscript: an audio attachment renders name+duration', () => {
+  const t0 = Date.UTC(2026, 8, 20, 10, 0, 0);
+  const messages = [msg('a', t0, { content: '', attachments: [{ id: 'a1', kind: 'audio', name: 'song.mp3', durationSec: 130 }] })];
+  const items = formatTranscript(messages, { timezone: TZ, gapMinutes: 20, maxChars: 100, selfName: 'Nept', labels });
+  assert.ok(items[0].text.includes('[audio: song.mp3, 2:10]'));
+});
+
+test('formatTranscript: a text attachment with a fetched preview renders filePreview, else the plain file form', () => {
+  const t0 = Date.UTC(2026, 8, 20, 10, 0, 0);
+  const noPreview = [msg('a', t0, { content: '', attachments: [{ id: 't1', kind: 'text', name: 'notes.txt' }] })];
+  const blind = formatTranscript(noPreview, { timezone: TZ, gapMinutes: 20, maxChars: 100, selfName: 'Nept', labels });
+  assert.ok(blind[0].text.includes('[file: notes.txt]'));
+
+  const withPreview = [msg('a', t0, { content: '', attachments: [{ id: 't1', kind: 'text', name: 'notes.txt', previewText: 'line one' }] })];
+  const previewed = formatTranscript(withPreview, { timezone: TZ, gapMinutes: 20, maxChars: 100, selfName: 'Nept', labels });
+  assert.ok(previewed[0].text.includes('[file: notes.txt: line one]'));
+});
+
+test('formatTranscript: a link embed renders link/linkText depending on whether it has description text', () => {
+  const t0 = Date.UTC(2026, 8, 20, 10, 0, 0);
+  const noText = [msg('a', t0, { content: '', links: [{ id: 'a#e0', kind: 'link', site: 'example.com', title: 'Cool page' }] })];
+  const items1 = formatTranscript(noText, { timezone: TZ, gapMinutes: 20, maxChars: 100, selfName: 'Nept', labels });
+  assert.ok(items1[0].text.includes('[link: example.com — Cool page]'));
+
+  const withText = [
+    msg('a', t0, { content: '', links: [{ id: 'a#e0', kind: 'link', site: 'example.com', title: 'Cool page', text: 'a snippet' }] }),
+  ];
+  const items2 = formatTranscript(withText, { timezone: TZ, gapMinutes: 20, maxChars: 100, selfName: 'Nept', labels });
+  assert.ok(items2[0].text.includes('[link: example.com — Cool page: a snippet]'));
+});
+
+test('formatTranscript: a tenor/giphy embed (kind gif) attached renders imageAttached, otherwise gif/gifDescribed', () => {
+  const t0 = Date.UTC(2026, 8, 20, 10, 0, 0);
+  const gifLink = [msg('a', t0, { content: '', links: [{ id: 'a#e0', kind: 'gif', site: 'Tenor', title: 'cat', thumbnailUrl: 'https://x' }] })];
+  const blind = formatTranscript(gifLink, { timezone: TZ, gapMinutes: 20, maxChars: 100, selfName: 'Nept', labels });
+  assert.ok(blind[0].text.includes('[gif: cat]'));
+
+  const attached = formatTranscript(gifLink, {
+    timezone: TZ,
+    gapMinutes: 20,
+    maxChars: 100,
+    selfName: 'Nept',
+    labels,
+    attachedIndex: new Map([['a#e0', 1]]),
+  });
+  assert.ok(attached[0].text.includes('[picture #1, attached]'));
+});
+
+test('formatTranscript: a forwarded message-snapshot wraps its content and media in labels.transcript.forwarded', () => {
+  const t0 = Date.UTC(2026, 8, 20, 10, 0, 0);
+  const messages = [
+    msg('a', t0, {
+      content: '',
+      forwarded: [{ content: 'look at this', attachments: [{ id: 'f1', kind: 'image', name: 'x.png' }], links: [], stickers: [] }],
+    }),
+  ];
+  const items = formatTranscript(messages, { timezone: TZ, gapMinutes: 20, maxChars: 100, selfName: 'Nept', labels });
+  assert.ok(items[0].text.includes('[forwarded: look at this [image]]'));
+});
+
 // --- renderTranscript -------------------------------------------------------
 
 test('renderTranscript: empty items render as labels.transcript.empty', () => {

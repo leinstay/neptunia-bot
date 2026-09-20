@@ -62,7 +62,7 @@ test('buildCommandTree: one top-level command, hidden by default, named from the
 test('buildCommandTree: top-level leaves (status, reload, poke, set, unset)', () => {
   const [command] = buildCommandTree('nep');
   const names = command.options.map((o) => o.name);
-  assert.deepEqual(names, ['status', 'reload', 'poke', 'set', 'unset', 'rule', 'memory', 'warmup']);
+  assert.deepEqual(names, ['status', 'reload', 'poke', 'set', 'unset', 'rule', 'memory', 'model', 'warmup']);
 
   const status = findOption(command.options, 'status');
   assert.equal(status.type, 1); // SUBCOMMAND

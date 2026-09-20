@@ -17,6 +17,7 @@ import { createTurnRunner } from './behavior/turn.js';
 import { createSpontaneous } from './behavior/spontaneous.js';
 import { createMemoryUpdater } from './memory/update.js';
 import { createWarmup } from './memory/warmup.js';
+import { createDescriber } from './memory/describe.js';
 import { createAdmin } from './admin.js';
 import { createTagHistory } from './behavior/mention.js';
 import { createMessageHandler } from './discord/events.js';
@@ -81,7 +82,8 @@ const client = new Client({
 const instance = { guildId: null };
 const getGuildId = () => instance.guildId;
 
-const turns = createTurnRunner({ hot, store, llm, calibrator, client });
+const describer = createDescriber({ hot, store, llm });
+const turns = createTurnRunner({ hot, store, llm, calibrator, client, describer });
 const spontaneous = createSpontaneous({ hot, store, client, turns, getGuildId });
 const memory = createMemoryUpdater({
   hot,
@@ -89,8 +91,9 @@ const memory = createMemoryUpdater({
   llm,
   calibrator,
   getSelfName: (guildId) => client.guilds.cache.get(guildId)?.members.me?.displayName ?? client.user?.username ?? 'bot',
+  describer,
 });
-const warmup = createWarmup({ hot, store, client, memory, getGuildId });
+const warmup = createWarmup({ hot, store, client, memory, getGuildId, describer });
 const admin = createAdmin({ hot, store, client, spontaneous, calibrator, getGuildId, warmup });
 const tagHistory = createTagHistory();
 

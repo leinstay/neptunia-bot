@@ -112,7 +112,7 @@ test('resolveMentions: text with no mentions is returned unchanged with empty us
 const NOW = Date.UTC(2026, 8, 20, 12, 0, 0);
 
 /** A discord.js-shaped raw message, just enough for normalizeMessage. */
-function rawMessage({ id, authorId = 'u1', authorName = 'Alice', ts = NOW - 1000, content = 'hey bot' }) {
+function rawMessage({ id, authorId = 'u1', authorName = 'Alice', ts = NOW - 1000, content = 'hey bot', attachments = new Map() }) {
   return {
     id,
     channelId: 'c1',
@@ -121,7 +121,7 @@ function rawMessage({ id, authorId = 'u1', authorName = 'Alice', ts = NOW - 1000
     cleanContent: content,
     createdTimestamp: ts,
     reference: null,
-    attachments: new Map(),
+    attachments,
     stickers: new Map(),
   };
 }
@@ -201,7 +201,7 @@ function identityCalibrator() {
   return { ratio: 1, apply: (n) => n, observe: () => {} };
 }
 
-function fakeHot(featureOverrides = {}, botOverrides = {}) {
+function fakeHot(featureOverrides = {}, botOverrides = {}, configOverrides = {}) {
   return {
     config: {
       bot: { timezone: 'UTC', dryRunChannelId: '', ...botOverrides },
@@ -214,11 +214,13 @@ function fakeHot(featureOverrides = {}, botOverrides = {}) {
         gapMarkerMinutes: 20,
         otherProfiles: 6,
         caps: { interlocutor: 2500, aboutChat: 2500, people: 4000, neighbors: 3000 },
-        vision: { maxImages: 2, tokensPerImage: 1600 },
+        vision: { maxImages: 2, tokensPerImage: 400, imageSize: 512, recentImages: 0, recentImageMinutes: 0 },
       },
       llm: { maxRequestTokens: 50000, safetyMargin: 0.9 },
       typing: { reactionDelayMs: [0, 0], msPerChar: [1, 1], minMs: 0, maxMs: 100, betweenMessagesMs: [0, 0] },
       features: featureOverrides,
+      media: { maxPerTurn: 6, filePreviewChars: 500 },
+      ...configOverrides,
     },
     prompts: {
       'system-prompt': 'You are a regular member of this chat, not an assistant.',
@@ -385,6 +387,105 @@ test('createTurnRunner: features.memory=false sends no <server> block, even with
 
   const userMessage = llm.calls[0][1].content;
   assert.ok(!userMessage.includes('<server>'));
+});
+
+// ---------------------------------------------------------------------------
+// features.mediaDescriptions -- describing pictures that are not attached.
+
+function fakeDescriber(descriptionsById) {
+  const calls = [];
+  return {
+    calls,
+    describeMany: async (guildId, items, options) => {
+      calls.push({ guildId, items, options });
+      const descriptions = new Map();
+      for (const item of items) {
+        if (descriptionsById[item.itemId]) descriptions.set(item.itemId, descriptionsById[item.itemId]);
+      }
+      return { descriptions, newCount: descriptions.size };
+    },
+  };
+}
+
+test('createTurnRunner: features.mediaDescriptions off (default) never calls the describer', async () => {
+  const raw = rawMessage({
+    id: 'm1',
+    attachments: new Map([['img1', { id: 'img1', contentType: 'image/png', name: 'pic.png', url: 'https://cdn/pic.png' }]]),
+  });
+  const channel = fakeTurnChannel({ historyMessages: [raw] });
+  const llm = fakeLlm('<msg>ok</msg>');
+  const store = fakeStore();
+  const hot = fakeHot({});
+  const describer = fakeDescriber({ img1: 'a cat' });
+  const turns = createTurnRunner({ hot, store, llm, calibrator: identityCalibrator(), client: fakeClient(), describer });
+
+  await turns.runTurn({ channel, mode: 'reply', trigger: normalizedTrigger(raw), triggerKind: 'mention' });
+
+  assert.equal(describer.calls.length, 0);
+});
+
+test('createTurnRunner: features.mediaDescriptions on describes an un-attached picture and it renders imageDescribed', async () => {
+  const raw = rawMessage({
+    id: 'm1',
+    attachments: new Map([['img1', { id: 'img1', contentType: 'image/png', name: 'pic.png', url: 'https://cdn/pic.png' }]]),
+  });
+  const channel = fakeTurnChannel({ historyMessages: [raw] });
+  const llm = fakeLlm('<msg>ok</msg>');
+  const store = fakeStore();
+  const hot = fakeHot({ mediaDescriptions: true });
+  const describer = fakeDescriber({ img1: 'a grey cat' });
+  const turns = createTurnRunner({ hot, store, llm, calibrator: identityCalibrator(), client: fakeClient(), describer });
+
+  await turns.runTurn({ channel, mode: 'reply', trigger: normalizedTrigger(raw), triggerKind: 'mention' });
+
+  assert.equal(describer.calls.length, 1);
+  assert.equal(describer.calls[0].items[0].itemId, 'img1');
+  assert.equal(describer.calls[0].options.maxNew, 6);
+  const userMessage = llm.calls[0][1].content;
+  assert.ok(userMessage.includes(labels.transcript.imageDescribed.replace('{text}', 'a grey cat')));
+});
+
+test('createTurnRunner: a text attachment is fetched lazily and rendered via filePreview', async () => {
+  const raw = rawMessage({
+    id: 'm1',
+    attachments: new Map([['t1', { id: 't1', contentType: 'text/plain', name: 'notes.txt', url: 'https://cdn/notes.txt' }]]),
+  });
+  const channel = fakeTurnChannel({ historyMessages: [raw] });
+  const llm = fakeLlm('<msg>ok</msg>');
+  const store = fakeStore();
+  const hot = fakeHot({});
+  let fetchedUrl = null;
+  const fetchImpl = async (url) => {
+    fetchedUrl = url;
+    return { ok: true, headers: { get: () => null }, text: async () => 'the file says hello' };
+  };
+  const turns = createTurnRunner({ hot, store, llm, calibrator: identityCalibrator(), client: fakeClient(), fetchImpl });
+
+  await turns.runTurn({ channel, mode: 'reply', trigger: normalizedTrigger(raw), triggerKind: 'mention' });
+
+  assert.equal(fetchedUrl, 'https://cdn/notes.txt');
+  const userMessage = llm.calls[0][1].content;
+  assert.ok(userMessage.includes(labels.transcript.filePreview.replace('{name}', 'notes.txt').replace('{text}', 'the file says hello')));
+});
+
+test('createTurnRunner: a text-attachment fetch failure falls back to the plain file form', async () => {
+  const raw = rawMessage({
+    id: 'm1',
+    attachments: new Map([['t1', { id: 't1', contentType: 'text/plain', name: 'notes.txt', url: 'https://cdn/notes.txt' }]]),
+  });
+  const channel = fakeTurnChannel({ historyMessages: [raw] });
+  const llm = fakeLlm('<msg>ok</msg>');
+  const store = fakeStore();
+  const hot = fakeHot({});
+  const fetchImpl = async () => {
+    throw new Error('network down');
+  };
+  const turns = createTurnRunner({ hot, store, llm, calibrator: identityCalibrator(), client: fakeClient(), fetchImpl });
+
+  await turns.runTurn({ channel, mode: 'reply', trigger: normalizedTrigger(raw), triggerKind: 'mention' });
+
+  const userMessage = llm.calls[0][1].content;
+  assert.ok(userMessage.includes(labels.transcript.file.replace('{name}', 'notes.txt')));
 });
 
 // ---------------------------------------------------------------------------

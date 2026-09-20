@@ -30,6 +30,7 @@
 import { readableChannels, lastActivity, fetchHistoryWindow } from '../discord/collect.js';
 import { touchMemory } from './update.js';
 import { estimateTokens } from '../llm/tokens.js';
+import { collectPictures, isDescribable } from '../discord/media.js';
 import { log } from '../log.js';
 
 const MAX_CONSECUTIVE_FAILURES = 3;
@@ -250,8 +251,13 @@ function freshState() {
  * @param {() => string | null} deps.getGuildId
  * @param {() => number} [deps.now]
  * @param {(ms: number) => Promise<void>} [deps.sleep]
+ * @param {object} [deps.describer]  From createDescriber() (src/memory/describe.js), optional:
+ *   when absent, or features.mediaDescriptions is off, no description request is ever made.
+ *   Unlike the memory analyzer, these requests are charged directly against the warm-up's own
+ *   token budget (`st.tokensUsed`), the budget is checked before each one, and they always pass
+ *   `countAgainstDailyCap: false` — same rationale as the analyzer calls (see the header comment).
  */
-export function createWarmup({ hot, store, client, memory, getGuildId, now = Date.now, sleep = realSleep }) {
+export function createWarmup({ hot, store, client, memory, getGuildId, now = Date.now, sleep = realSleep, describer }) {
   let runningPromise = null;
   // The in-progress run's stop flag, if any. Set fresh at the start of every
   // doRun() call and cleared once it settles, so stop() called with no run in
@@ -297,6 +303,50 @@ export function createWarmup({ hot, store, client, memory, getGuildId, now = Dat
     return { plan, missing, byId };
   }
 
+  /** A conservative flat estimate of what ONE describer request will cost: its system prompt plus the output cap. */
+  function estimateDescribeCost() {
+    const mediaCfg = hot.config.media ?? {};
+    return estimateTokens(hot.prompts?.describe ?? '') + (mediaCfg.maxOutputTokens ?? 0) + 300;
+  }
+
+  /**
+   * Describe up to `media.maxPerBatch` NEW pictures of `batch`, charging each
+   * one directly against the warm-up's own token budget (checked before
+   * every request, same accounting as `chargeAttempt`) — never the memory
+   * analyzer's own request. Returns the resulting descriptions map, computed
+   * ONCE per original batch and reused unchanged across any later split (see
+   * analyzePiece): a picture only ever costs the budget once per batch.
+   */
+  async function describeBatchForWarmup(guildId, batch, cfg, st) {
+    const descriptions = new Map();
+    if (!describer || hot.config.features?.mediaDescriptions !== true) return descriptions;
+
+    const candidates = [];
+    for (const message of batch) {
+      for (const item of collectPictures(message)) {
+        if (isDescribable(item)) candidates.push(item);
+      }
+    }
+    const maxPerBatch = hot.config.media?.maxPerBatch ?? Infinity;
+    let newCount = 0;
+    for (const item of candidates) {
+      if (newCount >= maxPerBatch) break;
+      const estimate = estimateDescribeCost();
+      if (remainingBudget(st, cfg.maxTokens) < estimate) break;
+
+      const result = await describer.describe(guildId, item, { countAgainstDailyCap: false });
+      if (!result) continue;
+      if (!result.cached) {
+        newCount += 1;
+        st.tokensUsed += spentTokens(result.usage, result.estimated || estimate);
+        st.requests += 1;
+        persist();
+      }
+      descriptions.set(item.itemId, result.text);
+    }
+    return descriptions;
+  }
+
   /**
    * Analyze one piece of a batch (the whole batch on the first call, a half
    * of it once split). Never retries a 'truncated'/'bad-json' failure on the
@@ -307,11 +357,13 @@ export function createWarmup({ hot, store, client, memory, getGuildId, now = Dat
    * failure reason keeps the existing retry-once + 3-consecutive-cycles
    * abort behaviour, unchanged.
    *
+   * @param {Map<string, string>} [descriptions]  Pre-computed describer captions for this batch
+   *   (see describeBatchForWarmup), reused unchanged across a split.
    * @returns {Promise<{ consecutiveFailures: number, stop: boolean }>}
    *   `stop: true` means the budget ran out or the run aborted — the caller
    *   must not advance `batchesDone` and must stop processing this channel.
    */
-  async function analyzePiece(guildId, channelId, batchIndex, cfg, st, piece, consecutiveFailures) {
+  async function analyzePiece(guildId, channelId, batchIndex, cfg, st, piece, consecutiveFailures, descriptions) {
     for (;;) {
       const estimate = estimateBatch(guildId, piece, hot, memory);
       if (remainingBudget(st, cfg.maxTokens) < estimate) {
@@ -325,7 +377,7 @@ export function createWarmup({ hot, store, client, memory, getGuildId, now = Dat
       // Every attempt that reached the provider is charged against the
       // budget as soon as it comes back, first try or retry, successful or
       // not — a failure after a completion was received is still billed.
-      let outcome = await memory.analyze(guildId, piece, { countAgainstDailyCap: false });
+      let outcome = await memory.analyze(guildId, piece, { countAgainstDailyCap: false, descriptions });
       chargeAttempt(st, outcome);
       persist();
 
@@ -334,7 +386,7 @@ export function createWarmup({ hot, store, client, memory, getGuildId, now = Dat
       // original retry-once behaviour below.
       if (!outcome.ok && !isUnrecoverableSize(outcome.reason) && remainingBudget(st, cfg.maxTokens) >= estimate) {
         await sleep(RETRY_DELAY_MS);
-        outcome = await memory.analyze(guildId, piece, { countAgainstDailyCap: false });
+        outcome = await memory.analyze(guildId, piece, { countAgainstDailyCap: false, descriptions });
         chargeAttempt(st, outcome);
         persist();
       }
@@ -359,9 +411,9 @@ export function createWarmup({ hot, store, client, memory, getGuildId, now = Dat
             reason: outcome.reason,
             detail: outcome.detail,
           });
-          const first = await analyzePiece(guildId, channelId, batchIndex, cfg, st, piece.slice(0, mid), consecutiveFailures);
+          const first = await analyzePiece(guildId, channelId, batchIndex, cfg, st, piece.slice(0, mid), consecutiveFailures, descriptions);
           if (first.stop) return first;
-          return analyzePiece(guildId, channelId, batchIndex, cfg, st, piece.slice(mid), first.consecutiveFailures);
+          return analyzePiece(guildId, channelId, batchIndex, cfg, st, piece.slice(mid), first.consecutiveFailures, descriptions);
         }
 
         st.skippedMessages = (st.skippedMessages ?? 0) + piece.length;
@@ -443,6 +495,7 @@ export function createWarmup({ hot, store, client, memory, getGuildId, now = Dat
       limit: channelState.limit,
       minTs,
       selfId: client.user.id,
+      embedTextChars: hot.config.media?.embedTextChars,
     });
 
     const batches = planBatches(window, cfg.batchMessages);
@@ -453,7 +506,8 @@ export function createWarmup({ hot, store, client, memory, getGuildId, now = Dat
 
     for (let i = channelState.batchesDone; i < batches.length; i += 1) {
       const batch = batches[i];
-      const result = await analyzePiece(guildId, channel.id, i, cfg, st, batch, consecutiveFailures);
+      const descriptions = await describeBatchForWarmup(guildId, batch, cfg, st);
+      const result = await analyzePiece(guildId, channel.id, i, cfg, st, batch, consecutiveFailures, descriptions);
       consecutiveFailures = result.consecutiveFailures;
       if (result.stop) return consecutiveFailures;
 

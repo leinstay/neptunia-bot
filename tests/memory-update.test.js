@@ -463,6 +463,109 @@ test('buildMemoryRequest: <new_messages> groups messages by channel with a headi
   assert.ok(generalIdx !== -1 && randomIdx !== -1 && generalIdx < randomIdx);
 });
 
+test('buildMemoryRequest: a described picture renders imageDescribed via the descriptions map', () => {
+  const config = makeConfig();
+  const calibrator = createCalibrator();
+  const messages = [
+    slimMessage({
+      id: 'm1',
+      content: '',
+      attachments: [{ id: 'a1', kind: 'image', name: 'pic.png' }],
+      ts: Date.UTC(2026, 0, 1, 12, 0, 0),
+    }),
+  ];
+
+  const { messages: llmMessages } = buildMemoryRequest({
+    prompts: { memory: 'sys', labels },
+    config,
+    calibrator,
+    profiles: {},
+    guildMemory: {},
+    messages,
+    selfName: 'Nept',
+    descriptions: new Map([['a1', 'a grey cat']]),
+  });
+
+  assert.ok(llmMessages[1].content.includes(labels.transcript.imageDescribed.replace('{text}', 'a grey cat')));
+});
+
+// ---- analyze: description wiring --------------------------------------------
+
+function fakeDescriberFor(descriptionsById) {
+  const calls = [];
+  return {
+    calls,
+    describeMany: async (guildId, items, options) => {
+      calls.push({ guildId, items, options });
+      const descriptions = new Map();
+      for (const item of items) if (descriptionsById[item.itemId]) descriptions.set(item.itemId, descriptionsById[item.itemId]);
+      return { descriptions, newCount: descriptions.size };
+    },
+  };
+}
+
+test('analyze: features.mediaDescriptions off never calls the describer', async () => {
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    const hot = { config: makeConfig(), prompts: { memory: 'sys', labels } };
+    const calibrator = createCalibrator();
+    const llm = { complete: async () => ({ text: '{}' }) };
+    const describer = fakeDescriberFor({ a1: 'a cat' });
+    const updater = createMemoryUpdater({ hot, store, llm, calibrator, getSelfName: () => 'Nept', describer });
+
+    const messages = [slimMessage({ id: 'm1', attachments: [{ id: 'a1', kind: 'image', name: 'pic.png' }] })];
+    await updater.analyze(guildId, messages);
+
+    assert.equal(describer.calls.length, 0);
+  });
+});
+
+test('analyze: features.mediaDescriptions on describes candidate pictures and threads them into the request', async () => {
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    const hot = {
+      config: makeConfig({ features: { mediaDescriptions: true }, media: { maxPerBatch: 20 } }),
+      prompts: { memory: 'sys', labels },
+    };
+    const calibrator = createCalibrator();
+    let seenUser = null;
+    const llm = { complete: async (messages) => { seenUser = messages[1].content; return { text: '{}' }; } };
+    const describer = fakeDescriberFor({ a1: 'a grey cat' });
+    const updater = createMemoryUpdater({ hot, store, llm, calibrator, getSelfName: () => 'Nept', describer });
+
+    const messages = [
+      slimMessage({ id: 'm1', content: '', attachments: [{ id: 'a1', kind: 'image', name: 'pic.png' }] }),
+    ];
+    await updater.analyze(guildId, messages);
+
+    assert.equal(describer.calls.length, 1);
+    assert.ok(seenUser.includes(labels.transcript.imageDescribed.replace('{text}', 'a grey cat')));
+  });
+});
+
+test('analyze: an explicitly-passed descriptions map (the warm-up path) is used as-is, describer never called', async () => {
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    const hot = {
+      config: makeConfig({ features: { mediaDescriptions: true } }),
+      prompts: { memory: 'sys', labels },
+    };
+    const calibrator = createCalibrator();
+    let seenUser = null;
+    const llm = { complete: async (messages) => { seenUser = messages[1].content; return { text: '{}' }; } };
+    const describer = fakeDescriberFor({ a1: 'wrong, should not be called' });
+    const updater = createMemoryUpdater({ hot, store, llm, calibrator, getSelfName: () => 'Nept', describer });
+
+    const messages = [
+      slimMessage({ id: 'm1', content: '', attachments: [{ id: 'a1', kind: 'image', name: 'pic.png' }] }),
+    ];
+    await updater.analyze(guildId, messages, { descriptions: new Map([['a1', 'from the warm-up']]) });
+
+    assert.equal(describer.calls.length, 0);
+    assert.ok(seenUser.includes(labels.transcript.imageDescribed.replace('{text}', 'from the warm-up')));
+  });
+});
+
 // ---- applyMemoryUpdate: channels --------------------------------------------
 
 test('applyMemoryUpdate: merges purpose/topics/tone for a known channel id, clamped to fieldChars', () => {
