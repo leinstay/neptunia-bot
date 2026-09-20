@@ -20,6 +20,8 @@ import { log } from '../log.js';
  * @param {ReturnType<import('../admin.js').createAdmin>} deps.admin
  * @param {ReturnType<import('../behavior/mention.js').createTagHistory>} deps.tagHistory
  * @param {() => string | null} deps.getGuildId  the single guild this instance serves, or null before it resolves
+ * @param {() => boolean} [deps.isWarmingUp]  true while the memory warm-up (src/memory/warmup.js) is still due or
+ *   running: messages are still observed and owner commands still work, but no trigger, turn or eavesdrop happens.
  * @param {() => number} [deps.rng]
  * @param {() => number} [deps.now]
  * @returns {(message: import('discord.js').Message) => Promise<void>}
@@ -34,6 +36,7 @@ export function createMessageHandler({
   admin,
   tagHistory,
   getGuildId,
+  isWarmingUp = () => false,
   rng = Math.random,
   now = Date.now,
 }) {
@@ -83,6 +86,14 @@ export function createMessageHandler({
 
       // 7. Owner commands short-circuit before anything is observed.
       if (adminCommandsOn && (await admin.handle(message))) return;
+
+      // 7b. The memory warm-up is still running/due: the persona stays mute
+      // (no trigger, no turn, no eavesdrop), but the message still feeds the
+      // memory buffer like any other observed message.
+      if (isWarmingUp()) {
+        if (memoryOn) memory.observe(guildId, normalized, { direct: false });
+        return;
+      }
 
       // 8. Detect how (if at all) the persona was called, masking each input
       // by its own feature switch so detectTrigger itself stays pure. Done

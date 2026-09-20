@@ -218,6 +218,43 @@ test('complete: sends the neutral X-Title header, not a character name', async (
   assert.equal(seenHeaders['X-Title'], 'neptunia-bot');
 });
 
+test('complete: countAgainstDailyCap: false neither counts against nor is refused by the daily cap', async () => {
+  const state = fakeState();
+  const today = new Date().toISOString().slice(0, 10);
+  state.data.llmDay = today;
+  state.data.llmCount = 1;
+  let calls = 0;
+  const llm = createLlm({
+    apiKey: 'k',
+    getConfig: () => baseConfig({ maxRequestsPerDay: 1 }), // already at/over cap
+    calibrator: fakeCalibrator(),
+    state,
+    fetchImpl: async () => { calls += 1; return okResponse('hi'); },
+  });
+
+  const result = await llm.complete([{ role: 'user', content: 'hi' }], { countAgainstDailyCap: false });
+
+  assert.equal(result.text, 'hi');
+  assert.equal(calls, 1);
+  assert.equal(state.data.llmCount, 1, 'the counter is untouched by a call that opts out of the daily cap');
+});
+
+test('complete: countAgainstDailyCap: false still enforces the per-request token cap', async () => {
+  let called = false;
+  const llm = createLlm({
+    apiKey: 'k',
+    getConfig: () => baseConfig({ maxRequestTokens: 50 }),
+    calibrator: fakeCalibrator(),
+    state: fakeState(),
+    fetchImpl: async () => { called = true; return okResponse('x'); },
+  });
+  await assert.rejects(
+    llm.complete([{ role: 'user', content: 'a'.repeat(2000) }], { countAgainstDailyCap: false }),
+    (err) => err instanceof TokenLimitError,
+  );
+  assert.equal(called, false);
+});
+
 // Only ONE test exercises the real retry backoff sleep (~1.5s at attempt 1).
 test('complete: retries once on a 503 then succeeds', async () => {
   let calls = 0;

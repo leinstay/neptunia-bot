@@ -8,7 +8,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { createStore } from '../src/memory/store.js';
-import { isDue, buildMemoryRequest, applyMemoryUpdate, createMemoryUpdater } from '../src/memory/update.js';
+import { isDue, buildMemoryRequest, applyMemoryUpdate, createMemoryUpdater, touchMemory } from '../src/memory/update.js';
 import { createCalibrator, estimateTokens } from '../src/llm/tokens.js';
 import { formatTranscript } from '../src/discord/format.js';
 import { labels } from './fixtures/labels.js';
@@ -870,6 +870,117 @@ test('run: a failure keeps the buffer untouched and backs the guild off for 15 m
     nowValue += 16 * 60_000;
     await updater.tick();
     assert.equal(calls, 2, 'backoff expired: tick retries');
+  });
+});
+
+// ---- touchMemory -----------------------------------------------------------
+
+test('touchMemory: touches the user profile and the channel for a human message', () => {
+  withStore((store) => {
+    touchMemory(store, 'g1', slimMessage({ channelId: 'c1', channelName: 'general', authorId: '1', authorName: 'nick', self: false }));
+
+    const profile = store.getUser('g1', '1');
+    assert.ok(profile);
+    assert.equal(profile.messageCount, 1);
+    const channel = store.getChannel('g1', 'c1');
+    assert.ok(channel);
+    assert.equal(channel.messageCount, 1);
+  });
+});
+
+test('touchMemory: never touches the user profile for the persona\'s own message, still touches the channel', () => {
+  withStore((store) => {
+    touchMemory(store, 'g1', slimMessage({ channelId: 'c1', channelName: 'general', authorId: 'self1', self: true }));
+
+    assert.equal(store.getUser('g1', 'self1'), null);
+    const channel = store.getChannel('g1', 'c1');
+    assert.ok(channel);
+    assert.equal(channel.messageCount, 1);
+  });
+});
+
+// ---- analyze -----------------------------------------------------------------
+
+test('analyze: never touches the buffer, returns usage/estimated/result on success', async () => {
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    store.pushBuffer(guildId, slimMessage({ id: 'm1' }), 100);
+    store.touchUser(guildId, '1', 'nick', Date.now());
+
+    const hot = {
+      config: makeConfig(),
+      prompts: { memory: 'memory system prompt', labels },
+    };
+    const calibrator = createCalibrator();
+    const llm = {
+      complete: async () => ({
+        text: JSON.stringify({ users: { 1: { interests: 'anime' } } }),
+        usage: { prompt_tokens: 111, completion_tokens: 22 },
+        estimated: 130,
+      }),
+    };
+    const updater = createMemoryUpdater({ hot, store, llm, calibrator, getSelfName: () => 'Nept' });
+
+    const messages = [slimMessage({ id: 'mA', authorId: '1', content: 'hi' })];
+    const outcome = await updater.analyze(guildId, messages);
+
+    assert.equal(outcome.ok, true);
+    assert.deepEqual(outcome.usage, { prompt_tokens: 111, completion_tokens: 22 });
+    assert.equal(outcome.estimated, 130);
+    assert.equal(outcome.result.users, 1);
+    assert.equal(store.getUser(guildId, '1').interests, 'anime');
+    // The buffer, which analyze() never received, is untouched.
+    assert.equal(store.getBuffer(guildId).length, 1);
+  });
+});
+
+test('analyze: swallows a thrown error and returns { ok: false, error }', async () => {
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    const hot = { config: makeConfig(), prompts: { memory: 'sys', labels } };
+    const calibrator = createCalibrator();
+    const llm = { complete: async () => { throw new Error('boom'); } };
+    const updater = createMemoryUpdater({ hot, store, llm, calibrator, getSelfName: () => 'Nept' });
+
+    const outcome = await updater.analyze(guildId, [slimMessage({ id: 'm1' })]);
+
+    assert.equal(outcome.ok, false);
+    assert.equal(outcome.usage, null);
+    assert.ok(outcome.error instanceof Error);
+    assert.equal(outcome.error.message, 'boom');
+  });
+});
+
+test('analyze: forwards countAgainstDailyCap to llm.complete, default true', async () => {
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    const hot = { config: makeConfig(), prompts: { memory: 'sys', labels } };
+    const calibrator = createCalibrator();
+    let seenOptions = null;
+    const llm = { complete: async (messages, options) => { seenOptions = options; return { text: '{}' }; } };
+    const updater = createMemoryUpdater({ hot, store, llm, calibrator, getSelfName: () => 'Nept' });
+
+    await updater.analyze(guildId, [slimMessage({ id: 'm1' })]);
+    assert.equal(seenOptions.countAgainstDailyCap, true);
+
+    await updater.analyze(guildId, [slimMessage({ id: 'm2' })], { countAgainstDailyCap: false });
+    assert.equal(seenOptions.countAgainstDailyCap, false);
+  });
+});
+
+test('analyze: no memory prompt configured returns { ok: false } without calling the LLM', async () => {
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    const hot = { config: makeConfig(), prompts: {} };
+    const calibrator = createCalibrator();
+    let calls = 0;
+    const llm = { complete: async () => { calls += 1; return { text: '{}' }; } };
+    const updater = createMemoryUpdater({ hot, store, llm, calibrator, getSelfName: () => 'Nept' });
+
+    const outcome = await updater.analyze(guildId, [slimMessage({ id: 'm1' })]);
+
+    assert.equal(outcome.ok, false);
+    assert.equal(calls, 0);
   });
 });
 

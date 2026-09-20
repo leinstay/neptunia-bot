@@ -15,6 +15,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { emptyAffinity, affinityBand } from './memory/affinity.js';
+import { log } from './log.js';
 
 const FORBIDDEN_SEGMENTS = new Set(['__proto__', 'constructor', 'prototype']);
 const REPLY_CHUNK_CHARS = 1900;
@@ -236,6 +237,9 @@ const HELP_TEXT = [
   '  memory <@mention|userId>             show a stored profile',
   '  affinity <@mention|userId> [score] [reason…]  show, or set (-100..100) an attitude',
   '  forget <@mention|userId>             delete a stored profile',
+  '  warmup                               memory warm-up status',
+  '  warmup run                           start the warm-up now, regardless of warmup.enabled',
+  '  warmup reset                         clear warm-up progress (refused while running)',
 ].join('\n');
 
 // ---------------------------------------------------------------------------
@@ -248,8 +252,10 @@ const HELP_TEXT = [
  * `spontaneous` — the spontaneous scheduler: `poke(channel, mode)` and `status()`.
  * `calibrator` — token calibrator (src/llm/tokens.js), read for `.ratio`.
  * `getGuildId` — the single guild this instance serves, or null before it resolves.
+ * `warmup` — from createWarmup() (src/memory/warmup.js), optional: `run()`, `status()`, `reset()`. When absent,
+ *   the `warmup` command reports it is not available.
  */
-export function createAdmin({ hot, store, client, spontaneous, calibrator, getGuildId }) {
+export function createAdmin({ hot, store, client, spontaneous, calibrator, getGuildId, warmup }) {
   function isOwner(userId) {
     const owners = hot.config?.bot?.owners ?? [];
     return owners.map(String).includes(String(userId));
@@ -479,6 +485,40 @@ export function createAdmin({ hot, store, client, spontaneous, calibrator, getGu
     return `Set affinity for ${userId} to ${affinity.score} (${affinityBand(affinity.score)}).`;
   }
 
+  function cmdWarmup(args) {
+    if (!warmup) return 'warm-up is not available';
+    const sub = args.trim().split(/\s+/)[0] ?? '';
+
+    if (!sub) {
+      const s = warmup.status();
+      return [
+        `enabled: ${s.enabled}`,
+        `done: ${s.done}`,
+        `aborted: ${s.aborted}`,
+        `running: ${s.running}`,
+        `tokens: ${s.tokensUsed} / ${s.maxTokens}`,
+        `requests: ${s.requests}`,
+        `channels: ${s.channelsDone} / ${s.channelsTotal}`,
+        `messages analyzed: ${s.messagesAnalyzed}`,
+      ].join('\n');
+    }
+
+    if (sub === 'run') {
+      const s = warmup.status();
+      if (s.running) return 'warm-up is already running.';
+      if (s.done) return 'warm-up has already finished.';
+      warmup.run().catch((err) => log.error('warmup: run failed', { error: err }));
+      return 'Warm-up started.';
+    }
+
+    if (sub === 'reset') {
+      warmup.reset();
+      return 'Warm-up progress reset.';
+    }
+
+    throw new Error('usage: warmup [run|reset]');
+  }
+
   function cmdForget(args, message) {
     const userId = extractUserId(args);
     if (!userId) throw new Error('usage: forget <@mention|userId>');
@@ -503,6 +543,7 @@ export function createAdmin({ hot, store, client, spontaneous, calibrator, getGu
     memory: (args, message) => cmdMemory(args, message),
     affinity: (args, message) => cmdAffinity(args, message),
     forget: (args, message) => cmdForget(args, message),
+    warmup: (args) => cmdWarmup(args),
   };
 
   async function sendReply(message, text) {

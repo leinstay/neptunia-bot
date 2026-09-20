@@ -2,6 +2,13 @@
 // safety rails of the project: no request above the token cap ever leaves the
 // process, and no more than `llm.maxRequestsPerDay` requests are made per day
 // (a spammed mention must not burn the owner's balance).
+//
+// Deliberate exception: `complete(messages, { countAgainstDailyCap: false })`
+// skips the daily-request counter and is never refused by it. This exists
+// ONLY for the memory warm-up (src/memory/warmup.js), which has its own rail
+// — a token budget (`config.warmup.maxTokens`) — and would otherwise burn
+// through the whole day's request cap while seeding memory. The per-request
+// token cap (`TokenLimitError`) always applies, with no exception.
 
 import { estimateMessages } from './tokens.js';
 import { log } from '../log.js';
@@ -43,6 +50,8 @@ export function createLlm({ apiKey, getConfig, calibrator, state, fetchImpl = fe
   /**
    * Send one chat completion. Returns `{ text, usage, estimated }`.
    * `options.model` / `options.maxOutputTokens` override the config defaults.
+   * `options.countAgainstDailyCap` (default true) — see the header comment
+   * for the one deliberate exception.
    */
   async function complete(messages, options = {}) {
     const cfg = getConfig().llm;
@@ -52,7 +61,9 @@ export function createLlm({ apiKey, getConfig, calibrator, state, fetchImpl = fe
     if (estimated > cfg.maxRequestTokens) {
       throw new TokenLimitError(`request estimated at ${estimated} tokens, cap is ${cfg.maxRequestTokens}`);
     }
-    countRequest(cfg.maxRequestsPerDay);
+    if (options.countAgainstDailyCap !== false) {
+      countRequest(cfg.maxRequestsPerDay);
+    }
 
     const body = {
       model: options.model ?? cfg.model,

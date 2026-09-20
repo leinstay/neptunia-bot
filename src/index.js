@@ -16,6 +16,7 @@ import { createLlm } from './llm/openrouter.js';
 import { createTurnRunner } from './behavior/turn.js';
 import { createSpontaneous } from './behavior/spontaneous.js';
 import { createMemoryUpdater } from './memory/update.js';
+import { createWarmup } from './memory/warmup.js';
 import { createAdmin } from './admin.js';
 import { createTagHistory } from './behavior/mention.js';
 import { createMessageHandler } from './discord/events.js';
@@ -87,10 +88,22 @@ const memory = createMemoryUpdater({
   calibrator,
   getSelfName: (guildId) => client.guilds.cache.get(guildId)?.members.me?.displayName ?? client.user?.username ?? 'bot',
 });
-const admin = createAdmin({ hot, store, client, spontaneous, calibrator, getGuildId });
+const warmup = createWarmup({ hot, store, client, memory, getGuildId });
+const admin = createAdmin({ hot, store, client, spontaneous, calibrator, getGuildId, warmup });
 const tagHistory = createTagHistory();
 
-const onMessage = createMessageHandler({ hot, store, client, turns, spontaneous, memory, admin, tagHistory, getGuildId });
+const onMessage = createMessageHandler({
+  hot,
+  store,
+  client,
+  turns,
+  spontaneous,
+  memory,
+  admin,
+  tagHistory,
+  getGuildId,
+  isWarmingUp: () => warmup.isBlocking(),
+});
 
 const timers = [];
 
@@ -118,10 +131,35 @@ client.once(Events.ClientReady, () => {
   }
 
   log.info('index: ready', { guild: instance.guildId, tag: client.user.tag });
-  every(30_000, () => spontaneous.tick(), 'spontaneous.tick');
+
+  // Before the persona is allowed to speak: run the memory warm-up if one is
+  // due (config.warmup.enabled and not already done/aborted). Not awaited —
+  // events.js mutes the persona for the duration via isWarmingUp().
+  if (warmup.isBlocking()) {
+    warmup
+      .run()
+      .then((result) => {
+        log.info('index: warm-up run ended', {
+          done: result?.done ?? false,
+          aborted: result?.aborted ?? false,
+          tokensUsed: result?.tokensUsed ?? 0,
+          requests: result?.requests ?? 0,
+        });
+      })
+      .catch((err) => log.error('index: warm-up run failed', { error: err }));
+  }
+
+  // The live analyzer must never run concurrently with the warm-up, and
+  // spontaneous speech makes no sense while the persona is still mute — both
+  // wrappers just no-op while a warm-up is due or running.
+  every(30_000, () => (warmup.isBlocking() ? undefined : spontaneous.tick()), 'spontaneous.tick');
   // The tick still runs on schedule even with the switch off, so flipping it
   // back on later needs no restart; it is the wrapper here that no-ops.
-  every(60_000, () => (hot.config.features?.memory !== false ? memory.tick() : undefined), 'memory.tick');
+  every(
+    60_000,
+    () => (warmup.isBlocking() ? undefined : hot.config.features?.memory !== false ? memory.tick() : undefined),
+    'memory.tick',
+  );
   every(30_000, () => store.flush(), 'store.flush');
 });
 

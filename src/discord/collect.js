@@ -63,6 +63,55 @@ export async function fetchHistory(channel, limit, selfId) {
     .map((message) => normalizeMessage(message, selfId));
 }
 
+/** A Discord snowflake string one greater than `id`, so `before: bump(id)` includes `id` itself. */
+function bumpSnowflake(id) {
+  return (BigInt(id) + 1n).toString();
+}
+
+/**
+ * Fetch a window of a channel's history, OLDEST first, for the memory
+ * warm-up. Pages backwards 100 messages at a time, starting at `anchorId`
+ * inclusive (or the channel's most recent message when `anchorId` is
+ * absent), until `limit` messages are collected, the channel start is
+ * reached (a page comes back short), or a message older than `minTs` is met
+ * (only when `minTs > 0`). A page fetch error ends the window with whatever
+ * was collected so far; it is logged, never thrown.
+ * @param {import('discord.js').TextBasedChannel} channel
+ * @param {{ anchorId?: string|null, limit: number, minTs?: number, selfId: string }} options
+ * @returns {Promise<object[]>}
+ */
+export async function fetchHistoryWindow(channel, { anchorId, limit, minTs = 0, selfId }) {
+  const collected = []; // newest first while accumulating; reversed at the end
+  let before = anchorId ? bumpSnowflake(anchorId) : undefined;
+
+  while (collected.length < limit) {
+    let page;
+    try {
+      page = await channel.messages.fetch(before ? { limit: 100, before } : { limit: 100 });
+    } catch (err) {
+      log.warn('collect: history window fetch failed', { channel: channel.id, error: err });
+      break;
+    }
+    const batch = [...page.values()].sort((a, b) => b.createdTimestamp - a.createdTimestamp);
+    if (batch.length === 0) break;
+
+    let hitFloor = false;
+    for (const message of batch) {
+      if (minTs > 0 && message.createdTimestamp < minTs) {
+        hitFloor = true;
+        break;
+      }
+      collected.push(normalizeMessage(message, selfId));
+      if (collected.length >= limit) break;
+    }
+
+    before = batch[batch.length - 1].id;
+    if (hitFloor || batch.length < 100 || collected.length >= limit) break;
+  }
+
+  return collected.reverse();
+}
+
 /** Plain text channels of a guild the persona may read, excluding threads and `exceptId`. */
 export function readableChannels(guild, botConfig, exceptId = null) {
   return [...guild.channels.cache.values()].filter(

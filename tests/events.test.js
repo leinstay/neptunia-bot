@@ -121,7 +121,7 @@ function fakeStore(profiles = {}) {
   };
 }
 
-function makeHandler({ config, turns, spontaneous, memory, admin, tagHistory, rng, client, store, getGuildId } = {}) {
+function makeHandler({ config, turns, spontaneous, memory, admin, tagHistory, rng, client, store, getGuildId, isWarmingUp } = {}) {
   return createMessageHandler({
     hot: { config: config ?? baseConfig() },
     store: store ?? fakeStore(),
@@ -132,6 +132,7 @@ function makeHandler({ config, turns, spontaneous, memory, admin, tagHistory, rn
     admin: admin ?? fakeAdmin(),
     tagHistory: tagHistory ?? createTagHistory(),
     getGuildId: getGuildId ?? (() => 'g1'),
+    isWarmingUp,
     rng: rng ?? Math.random,
   });
 }
@@ -602,6 +603,70 @@ test('features.relationships=false: affinityScore is never looked up or passed',
   await Promise.resolve();
 
   assert.equal(store.getUserCalls.length, 0, 'store.getUser must not be called when relationships is off');
+});
+
+// ---------------------------------------------------------------------------
+// isWarmingUp: the persona is mute while the memory warm-up is due/running
+
+test('events: while warming up a plain message is observed but no turn or eavesdrop happens', async () => {
+  const memory = fakeMemory();
+  const spontaneous = fakeSpontaneous();
+  const turns = fakeTurns();
+  const handler = makeHandler({ memory, spontaneous, turns, isWarmingUp: () => true });
+
+  const message = fakeMessage({ cleanContent: 'просто сообщение' });
+  await handler(message);
+
+  assert.equal(memory.observeCalls.length, 1);
+  assert.deepEqual(memory.observeCalls[0][2], { direct: false });
+  assert.equal(spontaneous.onMessageCalls.length, 0);
+});
+
+test('events: while warming up a mention never runs a turn, even though it would normally trigger', async () => {
+  let called = false;
+  const turns = fakeTurns({ runTurn: async () => { called = true; return { outcome: 'spoke' }; } });
+  const memory = fakeMemory();
+  const spontaneous = fakeSpontaneous();
+  const handler = makeHandler({ turns, memory, spontaneous, isWarmingUp: () => true, rng: scripted([0.99]) });
+
+  const message = fakeMessage({
+    cleanContent: 'привет',
+    mentions: { users: new Map([['self1', { id: 'self1' }]]) },
+  });
+  await handler(message);
+  await Promise.resolve();
+
+  assert.equal(called, false);
+  assert.equal(spontaneous.onMessageCalls.length, 0);
+  assert.equal(memory.observeCalls.length, 1);
+  assert.deepEqual(memory.observeCalls[0][2], { direct: false });
+});
+
+test('events: while warming up an owner command still works', async () => {
+  const admin = fakeAdmin(() => true);
+  const memory = fakeMemory();
+  const handler = makeHandler({ admin, memory, isWarmingUp: () => true });
+
+  const message = fakeMessage({ cleanContent: '!nep status' });
+  await handler(message);
+
+  assert.equal(admin.handleCalls.length, 1);
+  assert.equal(memory.observeCalls.length, 0, 'the owner command short-circuits before the warm-up gate, as usual');
+});
+
+test('events: isWarmingUp defaults to false when not provided', async () => {
+  let called = false;
+  const turns = fakeTurns({ runTurn: async () => { called = true; return { outcome: 'spoke' }; } });
+  const handler = makeHandler({ turns, rng: scripted([0.99]) });
+
+  const message = fakeMessage({
+    cleanContent: 'привет',
+    mentions: { users: new Map([['self1', { id: 'self1' }]]) },
+  });
+  await handler(message);
+  await Promise.resolve();
+
+  assert.equal(called, true);
 });
 
 test('features.memory=false: affinityScore is never looked up even when relationships is on', async () => {

@@ -598,3 +598,124 @@ test('handle: status reports the guild as not resolved yet before startup finish
 
   assert.match(message.sent[0], /guild: not resolved yet/);
 });
+
+// ---------------------------------------------------------------------------
+// warmup
+// ---------------------------------------------------------------------------
+
+function fakeWarmup(overrides = {}) {
+  const calls = { run: 0, reset: 0 };
+  return {
+    calls,
+    status: () =>
+      overrides.status ?? {
+        enabled: true,
+        done: false,
+        aborted: false,
+        running: false,
+        tokensUsed: 100,
+        maxTokens: 1000,
+        requests: 2,
+        channelsDone: 1,
+        channelsTotal: 3,
+        messagesAnalyzed: 42,
+      },
+    run: async () => {
+      calls.run += 1;
+      if (overrides.runThrows) throw overrides.runThrows;
+      return {};
+    },
+    reset: () => {
+      calls.reset += 1;
+      if (overrides.resetThrows) throw overrides.resetThrows;
+    },
+  };
+}
+
+test('handle: warmup with no subcommand reports the status', async () => {
+  const rootDir = makeRoot();
+  const hot = makeHot(rootDir);
+  const store = makeStore();
+  const warmup = fakeWarmup();
+  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 }, getGuildId: () => 'g1', warmup });
+
+  const message = makeMessage({ content: '!nep warmup', guild: { id: 'g1' } });
+  const handled = await admin.handle(message);
+
+  assert.equal(handled, true);
+  assert.ok(message.sent[0].includes('tokens: 100 / 1000'));
+  assert.ok(message.sent[0].includes('channels: 1 / 3'));
+  assert.deepEqual(message.reactions, ['✅']);
+});
+
+test('handle: warmup run starts the warm-up when it is neither running nor done', async () => {
+  const rootDir = makeRoot();
+  const hot = makeHot(rootDir);
+  const store = makeStore();
+  const warmup = fakeWarmup();
+  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 }, getGuildId: () => 'g1', warmup });
+
+  const message = makeMessage({ content: '!nep warmup run' });
+  const handled = await admin.handle(message);
+
+  assert.equal(handled, true);
+  assert.equal(warmup.calls.run, 1);
+  assert.ok(message.sent[0].includes('started'));
+});
+
+test('handle: warmup run reports it is already running instead of starting a second one', async () => {
+  const rootDir = makeRoot();
+  const hot = makeHot(rootDir);
+  const store = makeStore();
+  const warmup = fakeWarmup({ status: { enabled: true, done: false, aborted: false, running: true, tokensUsed: 0, maxTokens: 1000, requests: 0, channelsDone: 0, channelsTotal: 1, messagesAnalyzed: 0 } });
+  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 }, getGuildId: () => 'g1', warmup });
+
+  const message = makeMessage({ content: '!nep warmup run' });
+  await admin.handle(message);
+
+  assert.equal(warmup.calls.run, 0);
+  assert.ok(message.sent[0].includes('already running'));
+});
+
+test('handle: warmup reset clears progress and reports success', async () => {
+  const rootDir = makeRoot();
+  const hot = makeHot(rootDir);
+  const store = makeStore();
+  const warmup = fakeWarmup();
+  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 }, getGuildId: () => 'g1', warmup });
+
+  const message = makeMessage({ content: '!nep warmup reset', guild: { id: 'g1' } });
+  const handled = await admin.handle(message);
+
+  assert.equal(handled, true);
+  assert.equal(warmup.calls.reset, 1);
+  assert.ok(message.sent[0].includes('reset'));
+  assert.deepEqual(message.reactions, ['✅']);
+});
+
+test('handle: warmup reset while running surfaces the error and reacts with the cross mark', async () => {
+  const rootDir = makeRoot();
+  const hot = makeHot(rootDir);
+  const store = makeStore();
+  const warmup = fakeWarmup({ resetThrows: new Error('warmup: cannot reset while running') });
+  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 }, getGuildId: () => 'g1', warmup });
+
+  const message = makeMessage({ content: '!nep warmup reset', guild: { id: 'g1' } });
+  await admin.handle(message);
+
+  assert.ok(message.sent[0].includes('Error'));
+  assert.deepEqual(message.reactions, ['❌']);
+});
+
+test('handle: warmup reports unavailable when no warmup dependency was injected', async () => {
+  const rootDir = makeRoot();
+  const hot = makeHot(rootDir);
+  const store = makeStore();
+  const admin = createAdmin({ hot, store, client: {}, spontaneous: {}, calibrator: { ratio: 1 }, getGuildId: () => 'g1' });
+
+  const message = makeMessage({ content: '!nep warmup' });
+  const handled = await admin.handle(message);
+
+  assert.equal(handled, true);
+  assert.ok(message.sent[0].includes('not available'));
+});

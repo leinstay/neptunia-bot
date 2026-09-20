@@ -259,6 +259,30 @@ export function applyMemoryUpdate(store, guildId, update, cfg, knownUserIds, kno
 }
 
 /**
+ * Record that a normalized message happened, for the counters kept on a
+ * user's profile and a channel's map entry: `touchUser` (skipped for the
+ * persona's own messages) and `touchChannel`. Shared by `observe()` (the live
+ * pipeline) and the memory warm-up (src/memory/warmup.js), which walks
+ * history instead of the live stream — both must compute the same counters
+ * the same way, so this is the one place that does it.
+ * @param {object} store
+ * @param {string} guildId
+ * @param {object} normalized  A normalized message (see src/discord/collect.js);
+ *   callers are expected to have already dropped other bots' messages.
+ */
+export function touchMemory(store, guildId, normalized) {
+  if (!normalized.self) {
+    store.touchUser(guildId, normalized.authorId, normalized.authorName, normalized.ts);
+  }
+  store.touchChannel(
+    guildId,
+    normalized.channelId,
+    { name: normalized.channelName, category: normalized.channelCategory, topic: normalized.channelTopic },
+    normalized.ts,
+  );
+}
+
+/**
  * @param {object} deps
  * @param {object} deps.hot          Live config + prompts; read at the moment of use.
  * @param {object} deps.store
@@ -278,15 +302,7 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
    */
   function observe(guildId, normalized, { direct = false } = {}) {
     if (normalized.bot) return;
-    if (!normalized.self) {
-      store.touchUser(guildId, normalized.authorId, normalized.authorName, normalized.ts);
-    }
-    store.touchChannel(
-      guildId,
-      normalized.channelId,
-      { name: normalized.channelName, category: normalized.channelCategory, topic: normalized.channelTopic },
-      normalized.ts,
-    );
+    touchMemory(store, guildId, normalized);
 
     const slim = {
       id: normalized.id,
@@ -307,20 +323,29 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
     store.pushBuffer(guildId, slim, cfg.batchMessages * 3);
   }
 
-  /** Run a memory update for one guild if its buffer is due and it is not busy/backed off. */
-  async function run(guildId) {
-    running.add(guildId);
+  /**
+   * The one analyzer code path: build the memory-update request from
+   * `messages`, send it to the LLM, parse the reply and apply it to the
+   * store. Used both by `run()` (a batch shifted off the live buffer) and by
+   * the memory warm-up (history batches, see src/memory/warmup.js). Never
+   * touches the live buffer and never throws — a failure is reported in the
+   * returned `error`, not raised.
+   *
+   * @param {string} guildId
+   * @param {object[]} messages  Slim messages (oldest first) to summarize; NOT read from or removed off any buffer.
+   * @param {object} [opts]
+   * @param {boolean} [opts.countAgainstDailyCap]  Forwarded to llm.complete(); the warm-up passes `false`
+   *   because it has its own rail (a token budget), not the daily request cap.
+   * @returns {Promise<{ ok: boolean, usage: object|null, estimated: number, result: object|null, error?: Error }>}
+   */
+  async function analyze(guildId, messages, { countAgainstDailyCap = true } = {}) {
     try {
       const cfg = hot.config.memory;
       const promptText = hot.prompts.memory;
       if (!promptText) {
         log.warn('memory: no memory prompt configured, skipping', { guildId });
-        return;
+        return { ok: false, usage: null, estimated: 0, result: null };
       }
-
-      const buffer = store.getBuffer(guildId);
-      const take = Math.min(buffer.length, cfg.batchMessages * 2);
-      const messages = buffer.slice(0, take);
 
       const authorIds = [...new Set(messages.filter((m) => !m.self).map((m) => m.authorId))];
       const profiles = {};
@@ -336,7 +361,7 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
         if (channel) channels[id] = channel;
       }
 
-      const { messages: llmMessages, consumed } = buildMemoryRequest({
+      const { messages: llmMessages } = buildMemoryRequest({
         prompts: hot.prompts,
         config: hot.config,
         calibrator,
@@ -351,6 +376,7 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
         model: cfg.model ?? undefined,
         maxOutputTokens: cfg.maxOutputTokens,
         temperature: 0.3,
+        countAgainstDailyCap,
       });
       const update = parseJsonObject(completion.text);
       const knownUserIds = new Set(authorIds.map(String));
@@ -361,12 +387,33 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
         : undefined;
       const result = applyMemoryUpdate(store, guildId, update, cfg, knownUserIds, knownChannelIds, relationships);
 
-      store.shiftBuffer(guildId, consumed);
-      store.flush();
-      log.info('memory: update applied', { guildId, consumed, ...result });
+      return { ok: true, usage: completion.usage ?? null, estimated: completion.estimated ?? 0, result };
     } catch (err) {
+      return { ok: false, usage: null, estimated: 0, result: null, error: err };
+    }
+  }
+
+  /** Run a memory update for one guild if its buffer is due and it is not busy/backed off. */
+  async function run(guildId) {
+    running.add(guildId);
+    try {
+      const cfg = hot.config.memory;
+      const buffer = store.getBuffer(guildId);
+      const take = Math.min(buffer.length, cfg.batchMessages * 2);
+      const messages = buffer.slice(0, take);
+
+      const outcome = await analyze(guildId, messages);
+      if (outcome.ok) {
+        store.shiftBuffer(guildId, messages.length);
+        store.flush();
+        log.info('memory: update applied', { guildId, consumed: messages.length, ...outcome.result });
+        return;
+      }
+
       backoffUntil.set(guildId, now() + BACKOFF_MS);
-      log.warn('memory: update failed, backing off', { guildId, error: err });
+      if (outcome.error) {
+        log.warn('memory: update failed, backing off', { guildId, error: outcome.error });
+      }
     } finally {
       running.delete(guildId);
     }
@@ -387,5 +434,5 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
     await Promise.all(jobs);
   }
 
-  return { observe, tick, run };
+  return { observe, tick, run, analyze };
 }
