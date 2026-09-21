@@ -174,13 +174,8 @@ test('buildCommandTree: warmup group, every sub-command and its bounds', () => {
   assert.equal(warmup.type, 2);
   assert.deepEqual(
     warmup.options.map((o) => o.name),
-    ['status', 'plan', 'run', 'stop', 'reset', 'primary', 'channel', 'channel-default', 'only', 'depth', 'budget', 'output'],
+    ['status', 'plan', 'run', 'stop', 'reset', 'channel', 'channel-default', 'only', 'depth', 'budget', 'output'],
   );
-
-  const primary = findOption(warmup.options, 'primary');
-  const primaryChannel = findOption(primary.options, 'channel');
-  assert.equal(primaryChannel.required, false);
-  assert.deepEqual(primaryChannel.channel_types, [0]);
 
   const channel = findOption(warmup.options, 'channel');
   assert.equal(findOption(channel.options, 'channel').required, true);
@@ -550,16 +545,6 @@ test('interaction handler: warmup.only maps the boolean option', async () => {
   await handler(interaction);
 
   assert.deepEqual(admin.runCalls[0][1], { enabled: true });
-});
-
-test('interaction handler: warmup.primary omits channelId when the channel option is not given', async () => {
-  const admin = fakeAdmin();
-  const handler = createInteractionHandler({ hot: baseHot(), admin, getGuildId: () => 'g1' });
-
-  const interaction = fakeInteraction({ group: 'warmup', subcommand: 'primary', optionValues: {} });
-  await handler(interaction);
-
-  assert.deepEqual(admin.runCalls[0][1], { channelId: undefined });
 });
 
 test('interaction handler: poke maps the optional mode (default) and channel', async () => {

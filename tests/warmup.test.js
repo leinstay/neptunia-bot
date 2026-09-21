@@ -9,7 +9,17 @@ import path from 'node:path';
 import { SnowflakeUtil } from 'discord.js';
 
 import { createStore } from '../src/memory/store.js';
-import { createWarmup, planBatches, remainingBudget, spentTokens, orderChannels, planWarmup } from '../src/memory/warmup.js';
+import {
+  createWarmup,
+  planBatches,
+  remainingBudget,
+  spentTokens,
+  orderChannels,
+  planWarmup,
+  mergeTimeline,
+  cutWindow,
+  packWindow,
+} from '../src/memory/warmup.js';
 
 function tempDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'nep-warmup-'));
@@ -50,7 +60,7 @@ async function withCapturedLogs(fn) {
 }
 
 // ---------------------------------------------------------------------------
-// Pure helpers
+// Pure helpers: planBatches, remainingBudget, spentTokens, orderChannels
 // ---------------------------------------------------------------------------
 
 test('planBatches: drops other bots before chunking, keeps the persona\'s own messages, oldest-first chunks', () => {
@@ -107,11 +117,12 @@ test('orderChannels: does not mutate its input', () => {
 });
 
 // ---------------------------------------------------------------------------
-// planWarmup
+// planWarmup: three modes only (defaults / channelDepths / onlyListed), no
+// primary channel concept -- a stale `primaryChannelId` is simply ignored.
 // ---------------------------------------------------------------------------
 
 function baseCfg(overrides = {}) {
-  return { messagesPerChannel: 100, channelDepths: {}, primaryChannelId: '', onlyListed: false, ...overrides };
+  return { messagesPerChannel: 100, channelDepths: {}, onlyListed: false, ...overrides };
 }
 
 test('planWarmup: defaults every channel to messagesPerChannel, most recently active first', () => {
@@ -137,9 +148,9 @@ test('planWarmup: a per-channel depth overrides the default and marks the channe
   ];
   const { plan } = planWarmup(candidates, baseCfg({ channelDepths: { a: 5 } }));
   assert.deepEqual(plan, [
-    { id: 'a', name: 'alpha', depth: 5, role: 'listed' },
     { id: 'b', name: 'beta', depth: 100, role: 'default' },
     { id: 'c', name: 'gamma', depth: 100, role: 'default' },
+    { id: 'a', name: 'alpha', depth: 5, role: 'listed' },
   ]);
 });
 
@@ -154,60 +165,43 @@ test('planWarmup: a depth of 0 removes the channel from the plan entirely', () =
   assert.deepEqual(missing, [], 'a depth-0 channel is dropped, not reported as missing');
 });
 
-test('planWarmup: onlyListed keeps the primary (with an explicit depth) plus the listed channels only', () => {
+test('planWarmup: onlyListed keeps just the channels with a valid depths entry', () => {
   const candidates = [
     { id: 'a', name: 'alpha', lastActivity: 100 },
     { id: 'b', name: 'beta', lastActivity: 300 },
     { id: 'c', name: 'gamma', lastActivity: 200 },
   ];
-  const { plan } = planWarmup(
-    candidates,
-    baseCfg({ onlyListed: true, primaryChannelId: 'b', channelDepths: { b: 10, c: 20 } }),
-  );
+  const { plan } = planWarmup(candidates, baseCfg({ onlyListed: true, channelDepths: { b: 10, c: 20 } }));
   assert.deepEqual(plan, [
-    { id: 'b', name: 'beta', depth: 10, role: 'primary' },
     { id: 'c', name: 'gamma', depth: 20, role: 'listed' },
+    { id: 'b', name: 'beta', depth: 10, role: 'listed' },
   ]);
 });
 
-test('planWarmup: onlyListed still keeps the primary, at messagesPerChannel, when it has no depths entry', () => {
+test('planWarmup: orders by depth descending, ties broken by most recently active first', () => {
   const candidates = [
-    { id: 'a', name: 'alpha', lastActivity: 100 },
-    { id: 'b', name: 'beta', lastActivity: 300 },
-    { id: 'c', name: 'gamma', lastActivity: 200 },
-  ];
-  const { plan } = planWarmup(
-    candidates,
-    baseCfg({ onlyListed: true, primaryChannelId: 'b', channelDepths: { c: 20 } }),
-  );
-  assert.deepEqual(plan, [
-    { id: 'b', name: 'beta', depth: 100, role: 'primary' },
-    { id: 'c', name: 'gamma', depth: 20, role: 'listed' },
-  ]);
-});
-
-test('planWarmup: orders the primary first, then listed channels by depth (ties by recency), then the rest by recency', () => {
-  const candidates = [
-    { id: 'p', name: 'primary', lastActivity: 500 },
+    { id: 'p', name: 'p', lastActivity: 500 },
     { id: 'l1', name: 'l1', lastActivity: 10 },
     { id: 'l2', name: 'l2', lastActivity: 20 },
     { id: 'l3', name: 'l3', lastActivity: 5 },
     { id: 'r1', name: 'r1', lastActivity: 300 },
     { id: 'r2', name: 'r2', lastActivity: 400 },
   ];
-  const cfg = baseCfg({ primaryChannelId: 'p', channelDepths: { l1: 50, l2: 50, l3: 80 } });
+  const cfg = baseCfg({ channelDepths: { l1: 50, l2: 50, l3: 80 } });
   const { plan } = planWarmup(candidates, cfg);
-  assert.deepEqual(plan.map((c) => c.id), ['p', 'l3', 'l2', 'l1', 'r2', 'r1']);
-  assert.deepEqual(plan.map((c) => c.role), ['primary', 'listed', 'listed', 'listed', 'default', 'default']);
+  // Depth 100 (the default): p, r2, r1 -- most recently active first.
+  // Depth 80: l3. Depth 50: l2 before l1 (both tied, l2 more recently active).
+  assert.deepEqual(plan.map((c) => c.id), ['p', 'r2', 'r1', 'l3', 'l2', 'l1']);
+  assert.deepEqual(plan.map((c) => c.role), ['default', 'default', 'default', 'listed', 'listed', 'listed']);
 });
 
 test('planWarmup: ids with no matching candidate are reported as missing, never thrown', () => {
   const candidates = [{ id: 'a', name: 'alpha', lastActivity: 100 }];
-  const cfg = baseCfg({ primaryChannelId: 'phantom', channelDepths: { a: 10, ghost: 5 } });
+  const cfg = baseCfg({ channelDepths: { a: 10, ghost: 5 } });
   assert.doesNotThrow(() => planWarmup(candidates, cfg));
   const { plan, missing } = planWarmup(candidates, cfg);
   assert.deepEqual(plan, [{ id: 'a', name: 'alpha', depth: 10, role: 'listed' }]);
-  assert.deepEqual(missing, ['ghost', 'phantom']);
+  assert.deepEqual(missing, ['ghost']);
 });
 
 test('planWarmup: a garbage depth (non-integer or negative) is treated as absent, not as listed', () => {
@@ -224,6 +218,146 @@ test('planWarmup: a garbage depth (non-integer or negative) is treated as absent
     { id: 'b', name: 'beta', depth: 100, role: 'default' },
     { id: 'c', name: 'gamma', depth: 100, role: 'default' },
   ]);
+});
+
+test('planWarmup: a stale primaryChannelId is ignored entirely, never given special treatment', () => {
+  const candidates = [
+    { id: 'a', name: 'alpha', lastActivity: 100 },
+    { id: 'b', name: 'beta', lastActivity: 300 },
+  ];
+  const withPrimary = planWarmup(candidates, { ...baseCfg(), primaryChannelId: 'a' });
+  const withoutPrimary = planWarmup(candidates, baseCfg());
+  assert.deepEqual(withPrimary, withoutPrimary);
+  assert.ok(withPrimary.plan.every((c) => c.role !== 'primary'));
+});
+
+// ---------------------------------------------------------------------------
+// mergeTimeline: one chronological timeline across every fetched channel
+// ---------------------------------------------------------------------------
+
+test('mergeTimeline: sorts messages from every channel by snowflake id, not by channel', () => {
+  const now = Date.now();
+  const a0 = { id: snowflake(now), ts: now };
+  const a1 = { id: snowflake(now + 2000), ts: now + 2000 };
+  const b0 = { id: snowflake(now + 1000), ts: now + 1000 };
+  const merged = mergeTimeline([[b0], [a0, a1]]);
+  assert.deepEqual(merged.map((m) => m.id), [a0.id, b0.id, a1.id]);
+});
+
+test('mergeTimeline: drops everything at or before cursorId', () => {
+  const now = Date.now();
+  const m1 = { id: snowflake(now), ts: now };
+  const m2 = { id: snowflake(now + 1000), ts: now + 1000 };
+  const m3 = { id: snowflake(now + 2000), ts: now + 2000 };
+  const merged = mergeTimeline([[m1, m2, m3]], m2.id);
+  assert.deepEqual(merged.map((m) => m.id), [m3.id]);
+});
+
+test('mergeTimeline: returns everything, in order, when there is no cursor yet', () => {
+  const now = Date.now();
+  const m1 = { id: snowflake(now), ts: now };
+  const m2 = { id: snowflake(now + 1000), ts: now + 1000 };
+  const merged = mergeTimeline([[m2], [m1]], null);
+  assert.deepEqual(merged.map((m) => m.id), [m1.id, m2.id]);
+});
+
+// ---------------------------------------------------------------------------
+// cutWindow: cut at a pause when one exists in the last third of the target
+// span, otherwise cut exactly at the target; the final window is whatever
+// is left over.
+// ---------------------------------------------------------------------------
+
+function buildTimeline(n, { spacingMs = 60_000, gapAtIndex = -1, gapMs = 0, startTs = Date.now() } = {}) {
+  const list = [];
+  let ts = startTs;
+  for (let i = 0; i < n; i += 1) {
+    if (i > 0) ts += i === gapAtIndex ? gapMs : spacingMs;
+    list.push({ id: snowflake(ts), ts, channelId: 'c' });
+  }
+  return list;
+}
+
+test('cutWindow: the whole timeline is the final window once it already fits the target', () => {
+  const timeline = buildTimeline(5);
+  const { window, rest } = cutWindow(timeline, 10, 30);
+  assert.equal(window.length, 5);
+  assert.deepEqual(rest, []);
+});
+
+test('cutWindow: cuts exactly at the target when no gap in the last third qualifies', () => {
+  const timeline = buildTimeline(15); // uniform 1-minute spacing, no gap
+  const { window, rest } = cutWindow(timeline, 9, 30);
+  assert.equal(window.length, 9);
+  assert.equal(rest.length, 6);
+  assert.equal(rest[0].id, timeline[9].id);
+});
+
+test('cutWindow: cuts at the largest qualifying gap within the last third of the target span', () => {
+  const timeline = buildTimeline(15, { gapAtIndex: 7, gapMs: 40 * 60_000 });
+  const { window, rest } = cutWindow(timeline, 9, 30);
+  assert.equal(window.length, 7);
+  assert.equal(window[window.length - 1].id, timeline[6].id);
+  assert.equal(rest[0].id, timeline[7].id);
+});
+
+test('cutWindow: a qualifying gap outside the last third of the target span is ignored', () => {
+  const timeline = buildTimeline(15, { gapAtIndex: 3, gapMs: 40 * 60_000 });
+  const { window } = cutWindow(timeline, 9, 30);
+  assert.equal(window.length, 9, 'falls back to the plain target cut, the early gap does not count');
+});
+
+// ---------------------------------------------------------------------------
+// packWindow: group by channel into contiguous slices, pack greedily, chunk
+// an oversize slice, never interleave channels inside one batch.
+// ---------------------------------------------------------------------------
+
+function m(channelId, id, bot = false) {
+  return { id: String(id), channelId, bot, content: `msg${id}` };
+}
+
+test('packWindow: a busy channel that fits whole stays in a single batch', () => {
+  const window = [m('a', 1), m('a', 2), m('a', 3), m('a', 4), m('a', 5)];
+  const batches = packWindow(window, 10);
+  assert.deepEqual(batches, [window]);
+});
+
+test('packWindow: small scraps of quiet channels are packed together, grouped, not interleaved', () => {
+  const window = [m('a', 1), m('a', 2), m('b', 3), m('b', 4), m('c', 5), m('c', 6)];
+  const batches = packWindow(window, 6);
+  assert.equal(batches.length, 1, 'all three small slices fit in one batch');
+  assert.deepEqual(batches[0].map((msg) => msg.id), ['1', '2', '3', '4', '5', '6'], 'grouped slice after slice, never interleaved');
+});
+
+test('packWindow: a slice that would overflow the current batch flushes it first', () => {
+  const window = [m('a', 1), m('a', 2), m('a', 3), m('b', 4), m('b', 5), m('b', 6)];
+  const batches = packWindow(window, 4);
+  assert.deepEqual(
+    batches.map((b) => b.map((msg) => msg.id)),
+    [['1', '2', '3'], ['4', '5', '6']],
+  );
+});
+
+test('packWindow: an oversize slice is cut into batchMessages-sized chunks, the last partial chunk left open', () => {
+  const window = [m('a', 1), m('a', 2), m('a', 3), m('a', 4), m('a', 5), m('a', 6), m('a', 7), m('b', 8), m('b', 9)];
+  const batches = packWindow(window, 3);
+  assert.deepEqual(
+    batches.map((b) => b.map((msg) => msg.id)),
+    [
+      ['1', '2', '3'],
+      ['4', '5', '6'],
+      ['7', '8', '9'], // the open partial chunk (msg 7) plus the following small slice
+    ],
+  );
+});
+
+test('packWindow: drops other bots before grouping into slices', () => {
+  const window = [m('a', 1), m('a', 2, true), m('a', 3)];
+  const batches = packWindow(window, 10);
+  assert.deepEqual(batches, [[m('a', 1), m('a', 3)]]);
+});
+
+test('packWindow: an all-bot window yields no batches', () => {
+  assert.deepEqual(packWindow([m('a', 1, true), m('a', 2, true)], 10), []);
 });
 
 // ---------------------------------------------------------------------------
@@ -252,7 +386,7 @@ function makeHistory({ count, startTs, spacingMs, authorId, botEveryIndex = -1, 
 }
 
 /** A fake discord.js text channel backed by an oldest-first history array. */
-function fakeChannel(id, historyAsc, name = id) {
+function fakeChannel(id, historyAsc, name = id, { failFetch = false } = {}) {
   // normalizeMessage() reads channelId straight off the message, not off channel.id.
   for (const message of historyAsc) message.channelId = id;
   const desc = [...historyAsc].reverse(); // newest first, like a real fetch page
@@ -267,13 +401,14 @@ function fakeChannel(id, historyAsc, name = id) {
     permissionsFor: () => ({ has: () => true }),
     messages: {
       fetch: async (opts = {}) => {
+        if (failFetch) throw new Error('channel unavailable');
         const limit = opts.limit ?? 50;
         let pool = desc;
         if (opts.before) {
           const beforeNum = BigInt(opts.before);
-          pool = pool.filter((m) => BigInt(m.id) < beforeNum);
+          pool = pool.filter((mm) => BigInt(mm.id) < beforeNum);
         }
-        return new Map(pool.slice(0, limit).map((m) => [m.id, m]));
+        return new Map(pool.slice(0, limit).map((mm) => [mm.id, mm]));
       },
     },
   };
@@ -299,8 +434,11 @@ function fakeHot(overrides = {}) {
         maxTokens: 1_000_000,
         messagesPerChannel: 200,
         batchMessages: 2,
+        // Large enough by default that every test's timeline fits in a
+        // single window unless a test overrides these to exercise cutting.
+        windowBatches: 1000,
+        cutAtGapMinutes: 30,
         maxAgeDays: 0,
-        primaryChannelId: '',
         channelDepths: {},
         onlyListed: false,
         ...overrides.warmup,
@@ -347,23 +485,26 @@ function fakeSleep() {
 }
 
 // ---------------------------------------------------------------------------
-// run(): happy path, ordering, bots dropped
+// run(): one chronological timeline across every channel, bots dropped
 // ---------------------------------------------------------------------------
 
-test('run: analyzes every batch oldest-first, most recently active channel first, drops other bots', async () => {
+test('run: merges channels into one chronological timeline instead of channel after channel', async () => {
   const dir = tempDir();
   try {
     const store = createStore({ dataDir: dir });
     const now = Date.now();
 
-    // channel B is older activity, channel A is the most recent -> A goes first.
-    const historyB = makeHistory({ count: 4, startTs: now - 10 * 60_000, spacingMs: 1000, authorId: 'u2' });
+    // channel B has an OLDER burst of activity; channel A (more recently
+    // active overall) has a NEWER burst. Ranking channels by recency (the
+    // old scheme) would read A before B; the merged timeline must still
+    // read B's older messages first.
+    const historyB = makeHistory({ count: 3, startTs: now - 60 * 60_000, spacingMs: 1000, authorId: 'u2' });
     const historyA = makeHistory({ count: 4, startTs: now - 1 * 60_000, spacingMs: 1000, authorId: 'u1', botEveryIndex: 1 });
     const channelA = fakeChannel('chanA', historyA);
     const channelB = fakeChannel('chanB', historyB);
     const guild = fakeGuild('g1', [channelA, channelB]);
     const client = fakeClient(guild);
-    const hot = fakeHot();
+    const hot = fakeHot({ warmup: { batchMessages: 3 } });
     const memory = fakeMemory(alwaysOk());
 
     const warmup = createWarmup({ hot, store, client, memory, getGuildId: () => 'g1', sleep: fakeSleep() });
@@ -372,24 +513,21 @@ test('run: analyzes every batch oldest-first, most recently active channel first
     assert.equal(result.done, true);
     assert.equal(result.aborted, false);
 
-    // channel A (3 non-bot messages after dropping the bot one) is processed
-    // before channel B, and every batch is oldest-first.
-    const contents = memory.calls.map((c) => c.batch.map((m) => m.content));
-    assert.deepEqual(contents, [['msg 0', 'msg 2'], ['msg 3'], ['msg 0', 'msg 1'], ['msg 2', 'msg 3']]);
-    for (const call of memory.calls) assert.equal(call.opts.countAgainstDailyCap, false);
+    // channel B's whole burst is analyzed before channel A's (chronological
+    // order), and the other bot's message inside A's burst is dropped.
+    const contents = memory.calls.map((c) => c.batch.map((mm) => mm.content));
+    assert.deepEqual(contents, [['msg 0', 'msg 1', 'msg 2'], ['msg 0', 'msg 2', 'msg 3']]);
 
     assert.equal(store.getUser('g1', 'otherBot'), null, 'the other bot is never profiled');
     assert.equal(store.getUser('g1', 'u1').messageCount, 3);
-    assert.equal(store.getUser('g1', 'u2').messageCount, 4);
+    assert.equal(store.getUser('g1', 'u2').messageCount, 3);
     assert.equal(store.getChannel('g1', 'chanA').messageCount, 3);
-    assert.equal(store.getChannel('g1', 'chanB').messageCount, 4);
+    assert.equal(store.getChannel('g1', 'chanB').messageCount, 3);
 
     const st = store.state.data.warmup;
-    assert.equal(st.channels.chanA.done, true);
-    assert.equal(st.channels.chanB.done, true);
-    assert.equal(st.channels.chanA.batchesDone, 2);
-    assert.equal(st.tokensUsed, 4 * 15); // 4 batches total, 15 tokens each
-    assert.equal(st.requests, 4);
+    assert.equal(st.channels.chanA.messages, 3);
+    assert.equal(st.channels.chanB.messages, 3);
+    assert.equal(st.cursorId, historyA[3].id, 'the cursor lands on the newest message overall');
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -444,8 +582,8 @@ test('run: stops once the budget is spent, never starting a batch it cannot affo
     assert.equal(memory.calls.length, 1, 'only the affordable batch runs');
     assert.equal(result.done, true);
     assert.equal(result.tokensUsed, 5000);
-    assert.equal(store.state.data.warmup.channels.c1.batchesDone, 1);
-    assert.equal(store.state.data.warmup.channels.c1.done, false, 'the channel itself is not finished, just the budget');
+    assert.equal(store.state.data.warmup.windowBatchesDone, 1);
+    assert.equal(store.state.data.warmup.cursorId, null, 'the window itself is not finished, just the budget');
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -508,7 +646,7 @@ test('run: a failed-but-billed attempt still charges the budget and counts as a 
     assert.equal(memory.calls.length, 2, 'try + retry, both billed');
     assert.equal(result.tokensUsed, 240, 'both billed attempts are charged, even though neither succeeded');
     assert.equal(store.state.data.warmup.requests, 2);
-    assert.equal(store.state.data.warmup.channels.c1.batchesDone, 0, 'the batch itself never succeeded');
+    assert.equal(store.state.data.warmup.windowBatchesDone, 0, 'the batch itself never succeeded');
     assert.equal(result.done, true, 'stopped for lack of budget, not aborted');
     assert.equal(result.aborted, false);
   } finally {
@@ -605,7 +743,7 @@ test('run: a batch that fails once is retried after sleep(5000) and then succeed
     assert.equal(memory.calls.length, 2);
     assert.equal(result.done, true);
     assert.equal(result.aborted, false);
-    assert.equal(store.state.data.warmup.channels.c1.batchesDone, 1);
+    assert.equal(store.state.data.warmup.channels.c1.messages, 2);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -631,7 +769,7 @@ test('run: three consecutive failed batches abort the run; isBlocking() drops, r
     assert.equal(memory.calls.length, 6); // 3 cycles * (try + retry)
     assert.equal(sleep.calls.length, 3);
     assert.equal(warmup.isBlocking(), false, 'aborting must not mute the persona forever');
-    assert.equal(store.state.data.warmup.channels.c1.batchesDone, 0, 'nothing succeeded, so nothing is skipped later');
+    assert.equal(store.state.data.warmup.windowBatchesDone, 0, 'nothing succeeded, so nothing is skipped later');
 
     // Resumable: a fresh factory over the same store, now with a working analyzer.
     const memory2 = fakeMemory(alwaysOk());
@@ -675,14 +813,14 @@ test('run: splits a batch that fails "truncated", oldest half first, and succeed
     const { result, logs } = await withCapturedLogs(() => warmup.run());
 
     assert.equal(memory.calls.length, 3, 'the whole batch, then its two halves');
-    assert.deepEqual(memory.calls[0].batch.map((m) => m.content), Array.from({ length: 40 }, (_, i) => `msg ${i}`));
-    assert.deepEqual(memory.calls[1].batch.map((m) => m.content), Array.from({ length: 20 }, (_, i) => `msg ${i}`), 'oldest half first');
-    assert.deepEqual(memory.calls[2].batch.map((m) => m.content), Array.from({ length: 20 }, (_, i) => `msg ${20 + i}`));
+    assert.deepEqual(memory.calls[0].batch.map((mm) => mm.content), Array.from({ length: 40 }, (_, i) => `msg ${i}`));
+    assert.deepEqual(memory.calls[1].batch.map((mm) => mm.content), Array.from({ length: 20 }, (_, i) => `msg ${i}`), 'oldest half first');
+    assert.deepEqual(memory.calls[2].batch.map((mm) => mm.content), Array.from({ length: 20 }, (_, i) => `msg ${20 + i}`));
     for (const call of memory.calls) assert.equal(call.opts.countAgainstDailyCap, false);
     assert.equal(sleep.calls.length, 0, 'a truncated failure is never retried on the same input, only split');
 
     assert.equal(store.getUser('g1', 'u1').messageCount, 40, 'bookkeeping happens once per message, not once per attempt');
-    assert.equal(store.state.data.warmup.channels.c1.batchesDone, 1, 'the index advances once, after every piece is done');
+    assert.equal(store.state.data.warmup.cursorId, history[39].id, 'the whole batch counts as one unit: the window (and run) completed');
     assert.equal(store.state.data.warmup.requests, 3, 'every attempt, including the failed whole-batch one, is charged');
     assert.equal(store.state.data.warmup.tokensUsed, 600 + 70 + 70);
     assert.equal(store.state.data.warmup.skippedMessages, 0);
@@ -693,6 +831,7 @@ test('run: splits a batch that fails "truncated", oldest half first, and succeed
     assert.ok(splitLog);
     assert.equal(splitLog.reason, 'truncated');
     assert.equal(splitLog.messages, 40);
+    assert.deepEqual(splitLog.channels, ['c1']);
     const dump = JSON.stringify(logs);
     for (let i = 0; i < 40; i += 1) assert.ok(!dump.includes(`"msg ${i}"`), 'no message contents in any log line');
   } finally {
@@ -739,7 +878,7 @@ test('run: recurses down to the floor, then skips a piece that still fails, and 
 
     assert.equal(store.state.data.warmup.skippedMessages, 11);
     assert.equal(store.getUser('g1', 'u1').messageCount, 31, '10 (second half) + 21 (batch 2), the skipped 11 are not counted');
-    assert.equal(store.state.data.warmup.channels.c1.batchesDone, 2, 'both top-level batches finished (one via split+skip)');
+    assert.equal(store.state.data.warmup.cursorId, history[41].id, 'both top-level batches finished (one via split+skip)');
     assert.equal(result.aborted, false);
     assert.equal(result.done, true);
 
@@ -800,7 +939,7 @@ test('run: after a truncated split, the very next batch is sent in pieces up fro
     );
     assert.equal(sleep.calls.length, 0);
 
-    assert.equal(store.state.data.warmup.channels.c1.batchesDone, 2);
+    assert.equal(store.state.data.warmup.cursorId, history[99].id, 'both top-level batches finished, the window (and run) completed');
     assert.equal(result.aborted, false);
     assert.equal(result.done, true);
 
@@ -879,7 +1018,7 @@ test('run: the adaptive size doubles back up after 5 clean batches in a row, cap
     // full batch), so batch 7 is attempted whole again.
     assert.equal(memory.calls.length, 14, '3 (batch1) + 5*2 (batches 2-6, cut to 20+20) + 1 (batch7, whole again)');
     assert.equal(memory.calls[13].batch.length, 40, 'recovered to the full batch size');
-    assert.equal(store.state.data.warmup.channels.c1.batchesDone, 7);
+    assert.equal(store.state.data.warmup.cursorId, history[279].id, 'all 7 top-level batches finished, the window (and run) completed');
     assert.equal(result.aborted, false);
     assert.equal(result.done, true);
 
@@ -924,7 +1063,7 @@ test('run: the adaptive shrink is in memory only — a restart tries the next un
     const result1 = await warmup1.run();
 
     assert.equal(result1.aborted, true);
-    assert.equal(store.state.data.warmup.channels.c1.batchesDone, 1, 'batch 1 finished; batch 2 is still in flight');
+    assert.equal(store.state.data.warmup.windowBatchesDone, 1, 'batch 1 finished; batch 2 is still in flight');
 
     // Restart: a brand-new factory over the same store — the in-memory
     // adaptive size is gone, so the still-unfinished batch 2 is retried
@@ -936,7 +1075,7 @@ test('run: the adaptive shrink is in memory only — a restart tries the next un
     assert.equal(result2.done, true);
     assert.equal(memory2.calls.length, 1, 'batch 2 is re-analyzed in one whole piece, the shrink did not survive the restart');
     assert.equal(memory2.calls[0].batch.length, 40);
-    assert.equal(store.state.data.warmup.channels.c1.batchesDone, 2);
+    assert.equal(store.state.data.warmup.cursorId, history[79].id, 'both top-level batches finished, the window (and run) completed');
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -1237,26 +1376,28 @@ test('run: a non-429, non-rate-limit-worded failure still counts toward the thre
 // Resume after a restart
 // ---------------------------------------------------------------------------
 
-test('run: resume after a restart skips finished batches and channels, no double bookkeeping', async () => {
+test('run: resume mid-window skips only the batches already done, never re-analyzes, never skips one', async () => {
   const dir = tempDir();
   try {
     const store = createStore({ dataDir: dir });
     const now = Date.now();
-    // channel A more recent, processed first; each has 2 batches of 2.
-    const historyA = makeHistory({ count: 4, startTs: now - 1 * 60_000, spacingMs: 1000, authorId: 'u1' });
-    const historyB = makeHistory({ count: 4, startTs: now - 10 * 60_000, spacingMs: 1000, authorId: 'u2' });
+    // Channel A has the OLDER burst, channel B the newer one; both are 2
+    // messages, exactly one packWindow batch each with batchMessages: 2.
+    const historyA = makeHistory({ count: 2, startTs: now - 60 * 60_000, spacingMs: 1000, authorId: 'u1' });
+    const historyB = makeHistory({ count: 2, startTs: now - 60_000, spacingMs: 1000, authorId: 'u2' });
     const channelA = fakeChannel('chanA', historyA);
     const channelB = fakeChannel('chanB', historyB);
     const guild = fakeGuild('g1', [channelA, channelB]);
     const client = fakeClient(guild);
-    const hot = fakeHot();
+    const hot = fakeHot({ warmup: { batchMessages: 2 } });
 
-    // Channel A's two batches succeed; channel B's first batch then fails
-    // forever, aborting the run after 3 cycles.
+    // Channel A's batch succeeds; channel B's batch then fails forever,
+    // aborting the run mid-window (windowBatchesDone stays at 1, cursorId
+    // never advances because the window itself never fully completes).
     let call = 0;
     const memory1 = fakeMemory(() => {
       call += 1;
-      if (call <= 2) return { ok: true, usage: { prompt_tokens: 10, completion_tokens: 5 }, estimated: 15, result: {} };
+      if (call === 1) return { ok: true, usage: { prompt_tokens: 10, completion_tokens: 5 }, estimated: 15, result: {} };
       return { ok: false, usage: null, estimated: 0, result: null };
     });
 
@@ -1264,22 +1405,20 @@ test('run: resume after a restart skips finished batches and channels, no double
     const result1 = await warmup1.run();
 
     assert.equal(result1.aborted, true);
-    assert.equal(store.getUser('g1', 'u1').messageCount, 4);
-    assert.equal(store.getChannel('g1', 'chanA').messageCount, 4);
-    assert.equal(store.state.data.warmup.channels.chanA.done, true);
-    assert.equal(store.state.data.warmup.channels.chanB.batchesDone, 0);
+    assert.equal(store.state.data.warmup.windowBatchesDone, 1);
+    assert.equal(store.state.data.warmup.cursorId, null, 'the window is still unfinished');
+    assert.equal(store.getUser('g1', 'u1').messageCount, 2);
 
-    // Simulate a process restart: a brand-new factory over the same store/dir.
+    // Restart: a brand-new factory over the same store/dir, with a working analyzer.
     const memory2 = fakeMemory(alwaysOk());
     const warmup2 = createWarmup({ hot, store, client, memory: memory2, getGuildId: () => 'g1', sleep: fakeSleep() });
     const result2 = await warmup2.run();
 
     assert.equal(result2.done, true);
-    assert.equal(memory2.calls.length, 2, 'only channel B\'s two batches run, channel A is skipped entirely');
-    assert.equal(store.getUser('g1', 'u1').messageCount, 4, 'channel A\'s messages were never re-counted');
-    assert.equal(store.getChannel('g1', 'chanA').messageCount, 4);
-    assert.equal(store.getUser('g1', 'u2').messageCount, 4);
-    assert.equal(store.getChannel('g1', 'chanB').messageCount, 4);
+    assert.equal(memory2.calls.length, 1, 'only channel B\'s batch runs, channel A\'s is skipped, never re-analyzed');
+    assert.equal(memory2.calls[0].batch[0].authorId, 'u2');
+    assert.equal(store.getUser('g1', 'u1').messageCount, 2, 'channel A\'s messages were never re-counted');
+    assert.equal(store.getUser('g1', 'u2').messageCount, 2);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -1299,7 +1438,7 @@ test('run: resume after a restart in the middle of a split batch re-does only th
     // The whole 40-message batch fails 'truncated' and splits in half. The
     // first half (20) succeeds; the second half (20) fails with a plain
     // 'llm-error' on every attempt, aborting the run after 3 cycles — the
-    // top-level batch never finishes, so batchesDone stays at 0.
+    // top-level batch never finishes, so windowBatchesDone stays at 0.
     let n = 0;
     const memory1 = fakeMemory(() => {
       n += 1;
@@ -1312,7 +1451,7 @@ test('run: resume after a restart in the middle of a split batch re-does only th
     const result1 = await warmup1.run();
 
     assert.equal(result1.aborted, true);
-    assert.equal(store.state.data.warmup.channels.c1.batchesDone, 0, 'the whole top-level batch is still unfinished');
+    assert.equal(store.state.data.warmup.windowBatchesDone, 0, 'the whole top-level batch is still unfinished');
 
     // Simulate a process restart: a brand-new factory over the same store/dir.
     const memory2 = fakeMemory(alwaysOk());
@@ -1322,14 +1461,59 @@ test('run: resume after a restart in the middle of a split batch re-does only th
     assert.equal(result2.done, true);
     assert.equal(memory2.calls.length, 1, 'the whole 40-message batch is re-analyzed in one piece, resume is index-based');
     assert.equal(memory2.calls[0].batch.length, 40);
-    assert.equal(store.state.data.warmup.channels.c1.batchesDone, 1);
+    assert.equal(store.state.data.warmup.cursorId, history[39].id, 'the single batch finished, the window (and run) completed');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('run: frozen batching parameters survive a config change across a resume', async () => {
+  const dir = tempDir();
+  try {
+    const store = createStore({ dataDir: dir });
+    const now = Date.now();
+    const history = makeHistory({ count: 8, startTs: now - 60_000, spacingMs: 1000, authorId: 'u1' });
+    const channel = fakeChannel('c1', history);
+    const guild = fakeGuild('g1', [channel]);
+    const client = fakeClient(guild);
+    // batchMessages: 2, windowBatches: 1 -> target window size 2. The first
+    // window (msg 0-1) succeeds and completes; the second window's batch
+    // (msg 2-3) fails forever, aborting mid-window.
+    const hot = fakeHot({ warmup: { batchMessages: 2, windowBatches: 1 } });
+
+    let call = 0;
+    const memory1 = fakeMemory(() => {
+      call += 1;
+      if (call === 1) return { ok: true, usage: { prompt_tokens: 10, completion_tokens: 5 }, estimated: 15, result: {} };
+      return { ok: false, usage: null, estimated: 0, result: null };
+    });
+
+    const warmup1 = createWarmup({ hot, store, client, memory: memory1, getGuildId: () => 'g1', sleep: fakeSleep() });
+    const result1 = await warmup1.run();
+    assert.equal(result1.aborted, true);
+    assert.equal(store.state.data.warmup.cursorId, history[1].id, 'the first 2-message window completed');
+    assert.equal(store.state.data.warmup.batchMessages, 2);
+    assert.equal(store.state.data.warmup.windowBatches, 1);
+
+    // "Restart" with a much bigger batchMessages/windowBatches — if these
+    // were re-read live, the remaining 6 messages would land in one single
+    // 6-message batch. The frozen values must keep cutting them into
+    // 2-message windows/batches instead.
+    const hot2 = fakeHot({ warmup: { batchMessages: 6, windowBatches: 2 } });
+    const memory2 = fakeMemory(alwaysOk());
+    const warmup2 = createWarmup({ hot: hot2, store, client, memory: memory2, getGuildId: () => 'g1', sleep: fakeSleep() });
+    const result2 = await warmup2.run();
+
+    assert.equal(result2.done, true);
+    assert.equal(memory2.calls.length, 3, 'still 2-message batches, not one 6-message batch');
+    for (const call2 of memory2.calls) assert.equal(call2.batch.length, 2);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
 
 // ---------------------------------------------------------------------------
-// onlyListed / channelDepths / primaryChannelId / maxAgeDays
+// channelDepths / onlyListed / maxAgeDays
 // ---------------------------------------------------------------------------
 
 test('run: onlyListed restricts which channels are read to the ones with a set depth', async () => {
@@ -1376,36 +1560,33 @@ test('run: a per-channel depth caps the fetch window below the default messagesP
     assert.equal(memory.calls.length, 1);
     // Only the 2 newest messages (the configured depth) are ever fetched,
     // not all 6 that a default 200-message window would have collected.
-    assert.deepEqual(memory.calls[0].batch.map((m) => m.content), ['msg 4', 'msg 5']);
+    assert.deepEqual(memory.calls[0].batch.map((mm) => mm.content), ['msg 4', 'msg 5']);
     assert.equal(store.state.data.warmup.channels.c1.limit, 2);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test('run: the primary channel is read first and depth-0 entries remove a channel from the plan', async () => {
+test('run: a depth of 0 removes a channel from the plan, its history is never touched', async () => {
   const dir = tempDir();
   try {
     const store = createStore({ dataDir: dir });
     const now = Date.now();
-    // chanA is the most recently active, but chanB is the primary and must go first.
     const historyA = makeHistory({ count: 2, startTs: now - 60_000, spacingMs: 1000, authorId: 'u1' });
-    const historyB = makeHistory({ count: 2, startTs: now - 10 * 60_000, spacingMs: 1000, authorId: 'u2' });
     const historyC = makeHistory({ count: 2, startTs: now - 5 * 60_000, spacingMs: 1000, authorId: 'u3' });
     const channelA = fakeChannel('chanA', historyA);
-    const channelB = fakeChannel('chanB', historyB);
     const channelC = fakeChannel('chanC', historyC);
-    const guild = fakeGuild('g1', [channelA, channelB, channelC]);
+    const guild = fakeGuild('g1', [channelA, channelC]);
     const client = fakeClient(guild);
-    const hot = fakeHot({ warmup: { batchMessages: 10, primaryChannelId: 'chanB', channelDepths: { chanC: 0 } } });
+    const hot = fakeHot({ warmup: { batchMessages: 10, channelDepths: { chanC: 0 } } });
     const memory = fakeMemory(alwaysOk());
 
     const warmup = createWarmup({ hot, store, client, memory, getGuildId: () => 'g1', sleep: fakeSleep() });
     await warmup.run();
 
-    assert.deepEqual(memory.calls.map((c) => c.guildId && c.batch[0]?.authorId), ['u2', 'u1']);
     assert.equal(store.getUser('g1', 'u3'), null, 'chanC has depth 0, so it is skipped entirely');
     assert.equal(store.state.data.warmup.channels.chanC, undefined);
+    assert.equal(store.getUser('g1', 'u1').messageCount, 2);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -1446,7 +1627,7 @@ test('run: a channel\'s stored depth survives a later config change across a sim
 
     assert.equal(result2.done, true);
     assert.equal(store.state.data.warmup.channels.c1.limit, 4, 'the stored limit never changes after the first fetch');
-    const analyzed = [...memory1.calls, ...memory2.calls].flatMap((c) => c.batch.map((m) => m.content));
+    const analyzed = [...memory1.calls, ...memory2.calls].flatMap((c) => c.batch.map((mm) => mm.content));
     assert.ok(!analyzed.includes('msg 0'), 'outside the original 4-message window');
     assert.ok(!analyzed.includes('msg 1'), 'outside the original 4-message window');
   } finally {
@@ -1493,11 +1674,122 @@ test('run: maxAgeDays drops messages older than the cutoff', async () => {
   }
 });
 
+test('run: a channel that fails to fetch is logged and skipped for the round, never fatal', async () => {
+  const dir = tempDir();
+  try {
+    const store = createStore({ dataDir: dir });
+    const now = Date.now();
+    const historyA = makeHistory({ count: 2, startTs: now - 60_000, spacingMs: 1000, authorId: 'u1' });
+    // A malformed message (no author) makes normalizeMessage() throw while
+    // fetchHistoryWindow walks the page -- a realistic "this channel is
+    // broken" failure that reaches the caller uncaught (a plain page-fetch
+    // error is already swallowed inside fetchHistoryWindow itself).
+    const brokenTs = now - 30_000;
+    const historyB = [
+      { id: snowflake(brokenTs), author: null, cleanContent: 'broken', createdTimestamp: brokenTs, reference: null, attachments: new Map(), stickers: new Map() },
+    ];
+    const channelA = fakeChannel('chanA', historyA);
+    const channelB = fakeChannel('chanB', historyB);
+    const guild = fakeGuild('g1', [channelA, channelB]);
+    const client = fakeClient(guild);
+    const hot = fakeHot({ warmup: { batchMessages: 10 } });
+    const memory = fakeMemory(alwaysOk());
+
+    const warmup = createWarmup({ hot, store, client, memory, getGuildId: () => 'g1', sleep: fakeSleep() });
+    const { result, logs } = await withCapturedLogs(() => warmup.run());
+
+    assert.equal(result.aborted, false);
+    assert.equal(result.done, true);
+    assert.equal(store.getUser('g1', 'u1').messageCount, 2, 'channel A is still fully analyzed');
+    assert.equal(store.getChannel('g1', 'chanB'), null, 'channel B never contributed any message this round');
+
+    const warnLog = logs.find((l) => l.msg === 'warmup: channel fetch failed, skipping it for this round');
+    assert.ok(warnLog);
+    assert.equal(warnLog.channel, 'chanB');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Old-scheme progress: a finished run stays finished; an unfinished one is
+// discarded (memory untouched) and the timeline starts over.
+// ---------------------------------------------------------------------------
+
+test('run: old-scheme progress marked done is kept done, never re-run', async () => {
+  const dir = tempDir();
+  try {
+    const store = createStore({ dataDir: dir });
+    const now = Date.now();
+    const history = makeHistory({ count: 2, startTs: now - 60_000, spacingMs: 1000, authorId: 'u1' });
+    const channel = fakeChannel('c1', history);
+    const guild = fakeGuild('g1', [channel]);
+    const client = fakeClient(guild);
+    const hot = fakeHot();
+    const memory = fakeMemory(alwaysOk());
+
+    store.state.data.warmup = {
+      done: true,
+      aborted: false,
+      channels: { c1: { anchorId: 'x', limit: 100, messages: 12, batchesDone: 3, done: true } },
+      tokensUsed: 500,
+      requests: 3,
+    };
+
+    const warmup = createWarmup({ hot, store, client, memory, getGuildId: () => 'g1', sleep: fakeSleep() });
+    const result = await warmup.run();
+
+    assert.equal(result.done, true);
+    assert.equal(memory.calls.length, 0, 'a done run is never re-run');
+    assert.equal(store.state.data.warmup.tokensUsed, 500, 'the old record is left exactly as it was');
+    assert.equal(warmup.isBlocking(), false);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('run: old-scheme progress not yet done is discarded (never any memory), and the timeline starts over', async () => {
+  const dir = tempDir();
+  try {
+    const store = createStore({ dataDir: dir });
+    store.touchUser('g1', 'preexisting', 'Someone', Date.now());
+    const now = Date.now();
+    const history = makeHistory({ count: 2, startTs: now - 60_000, spacingMs: 1000, authorId: 'u1' });
+    const channel = fakeChannel('c1', history);
+    const guild = fakeGuild('g1', [channel]);
+    const client = fakeClient(guild);
+    const hot = fakeHot({ warmup: { batchMessages: 10 } });
+    const memory = fakeMemory(alwaysOk());
+
+    store.state.data.warmup = {
+      done: false,
+      aborted: false,
+      channels: { c1: { anchorId: 'old-anchor', limit: 50, messages: 5, batchesDone: 1, done: false } },
+      tokensUsed: 999,
+      requests: 9,
+    };
+
+    const warmup = createWarmup({ hot, store, client, memory, getGuildId: () => 'g1', sleep: fakeSleep() });
+    const { result, logs } = await withCapturedLogs(() => warmup.run());
+
+    assert.equal(result.done, true);
+    assert.equal(result.tokensUsed, 15, 'the old bookkeeping (999 tokens) is gone, this run starts from zero');
+    assert.equal(memory.calls.length, 1);
+    assert.ok(store.getUser('g1', 'preexisting'), 'memory itself is never touched by discarding progress');
+    assert.equal(store.getUser('g1', 'u1').messageCount, 2);
+
+    const warnLog = logs.find((l) => l.msg === 'warmup: discarding progress written by an older version, memory is untouched');
+    assert.ok(warnLog);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // ---------------------------------------------------------------------------
 // Progress logs
 // ---------------------------------------------------------------------------
 
-test('run: emits "warmup: batch done" and "warmup: channel done" with counts only, no message text', async () => {
+test('run: emits "warmup: channel fetched", "warmup: batch done" and "warmup: window done" with counts only', async () => {
   const dir = tempDir();
   try {
     const store = createStore({ dataDir: dir });
@@ -1512,9 +1804,14 @@ test('run: emits "warmup: batch done" and "warmup: channel done" with counts onl
     const warmup = createWarmup({ hot, store, client, memory, getGuildId: () => 'g1', sleep: fakeSleep() });
     const { logs } = await withCapturedLogs(() => warmup.run());
 
+    const fetched = logs.find((l) => l.msg === 'warmup: channel fetched');
+    assert.ok(fetched);
+    assert.equal(fetched.channel, 'c1');
+    assert.equal(fetched.messages, 4);
+
     const batchDone = logs.find((l) => l.msg === 'warmup: batch done');
     assert.ok(batchDone);
-    assert.equal(batchDone.channel, 'c1');
+    assert.deepEqual(batchDone.channels, ['c1']);
     assert.equal(batchDone.batchIndex, 0);
     assert.equal(batchDone.batches, 1);
     assert.equal(batchDone.messages, 4);
@@ -1522,11 +1819,10 @@ test('run: emits "warmup: batch done" and "warmup: channel done" with counts onl
     assert.equal(typeof batchDone.maxTokens, 'number');
     assert.equal(typeof batchDone.requests, 'number');
 
-    const channelDone = logs.find((l) => l.msg === 'warmup: channel done');
-    assert.ok(channelDone);
-    assert.equal(channelDone.channel, 'c1');
-    assert.equal(channelDone.channelsDone, 1);
-    assert.equal(channelDone.channelsTotal, 1);
+    const windowDone = logs.find((l) => l.msg === 'warmup: window done');
+    assert.ok(windowDone);
+    assert.equal(windowDone.messages, 4);
+    assert.equal(typeof windowDone.reachedTs, 'number');
 
     const dump = JSON.stringify(logs);
     for (let i = 0; i < 4; i += 1) assert.ok(!dump.includes(`"msg ${i}"`), 'no message contents in any log line');
@@ -1550,6 +1846,34 @@ test('status: reports skippedMessages, 0 by default', () => {
 
     store.state.data.warmup = { done: false, aborted: false, channels: {}, tokensUsed: 0, requests: 0, skippedMessages: 7 };
     assert.equal(warmup.status().skippedMessages, 7);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('status: shape after a run — messagesAnalyzed, messagesTotal, reachedTs, no primaryChannelId or channelsDone/Total', async () => {
+  const dir = tempDir();
+  try {
+    const store = createStore({ dataDir: dir });
+    const now = Date.now();
+    const history = makeHistory({ count: 3, startTs: now - 60_000, spacingMs: 1000, authorId: 'u1' });
+    const channel = fakeChannel('c1', history, 'general');
+    const guild = fakeGuild('g1', [channel]);
+    const client = fakeClient(guild);
+    const hot = fakeHot({ warmup: { batchMessages: 10 } });
+    const memory = fakeMemory(alwaysOk());
+
+    const warmup = createWarmup({ hot, store, client, memory, getGuildId: () => 'g1', sleep: fakeSleep() });
+    await warmup.run();
+    const s = warmup.status();
+
+    assert.equal(s.messagesAnalyzed, 3);
+    assert.equal(s.messagesTotal, 3);
+    assert.ok(s.reachedTs > 0);
+    assert.equal('primaryChannelId' in s, false);
+    assert.equal('channelsDone' in s, false);
+    assert.equal('channelsTotal' in s, false);
+    assert.deepEqual(s.channels, [{ id: 'c1', name: 'general', limit: 200, messages: 3 }]);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -1697,8 +2021,8 @@ test('stop: pauses after the batch in flight, drops isBlocking(), and a later ru
     assert.equal(result.done, false);
     assert.equal(result.aborted, false);
     assert.equal(memory.calls.length, 2, 'stops right after the batch that was already in flight');
-    assert.equal(store.state.data.warmup.channels.c1.batchesDone, 2);
-    assert.equal(store.state.data.warmup.channels.c1.done, false);
+    assert.equal(store.state.data.warmup.windowBatchesDone, 2);
+    assert.equal(store.state.data.warmup.cursorId, null);
     assert.equal(warmup.isBlocking(), false, 'a paused run must not keep the persona mute forever');
 
     const memory2 = fakeMemory(alwaysOk());
@@ -1708,7 +2032,7 @@ test('stop: pauses after the batch in flight, drops isBlocking(), and a later ru
     assert.equal(result2.done, true);
     assert.equal(result2.paused, false);
     assert.equal(memory2.calls.length, 2, 'only the 2 remaining batches run');
-    assert.equal(store.state.data.warmup.channels.c1.done, true);
+    assert.ok(store.state.data.warmup.cursorId, 'the window finished this time');
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -1754,13 +2078,13 @@ test('plan: resolves the same ordered plan run() would use, without fetching any
     const channelB = fakeChannel('chanB', historyB, 'lore');
     const guild = fakeGuild('g1', [channelA, channelB]);
     const client = fakeClient(guild);
-    const hot = fakeHot({ warmup: { primaryChannelId: 'chanB', maxTokens: 999, batchMessages: 3 } });
+    const hot = fakeHot({ warmup: { channelDepths: { chanB: 999 }, maxTokens: 999, batchMessages: 3 } });
 
     const warmup = createWarmup({ hot, store, client, memory: {}, getGuildId: () => 'g1' });
     const p = await warmup.plan();
 
     assert.deepEqual(p.plan.map((c) => c.id), ['chanB', 'chanA']);
-    assert.equal(p.plan[0].role, 'primary');
+    assert.equal(p.plan[0].role, 'listed');
     assert.equal(p.plan[0].name, 'lore');
     assert.equal(p.maxTokens, 999);
     assert.equal(p.batchMessages, 3);

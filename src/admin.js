@@ -633,6 +633,7 @@ function warmupLocalConfigPath() {
 
   function cmdWarmupStatus() {
     const s = warmup.status();
+    const reached = s.reachedTs ? new Date(s.reachedTs).toISOString() : '(not started)';
     const lines = [
       `enabled: ${s.enabled}`,
       `done: ${s.done}`,
@@ -641,15 +642,14 @@ function warmupLocalConfigPath() {
       `running: ${s.running}`,
       `tokens: ${s.tokensUsed} / ${s.maxTokens}`,
       `requests: ${s.requests}`,
-      `channels: ${s.channelsDone} / ${s.channelsTotal}`,
-      `messages analyzed: ${s.messagesAnalyzed}`,
+      `analysed ${s.messagesAnalyzed} of ${s.messagesTotal} messages`,
+      `timeline reached: ${reached}`,
       `skipped messages: ${s.skippedMessages}`,
-      `primary channel: ${s.primaryChannelId || '(none)'}`,
       `only listed channels: ${s.onlyListed}`,
     ];
     for (const row of s.channels ?? []) {
       const label = row.name ? `#${row.name} (${row.id})` : row.id;
-      lines.push(`  ${label}: ${row.messages}/${row.limit ?? '?'} msgs, ${row.batchesDone} batches, ${row.done ? 'done' : 'in progress'}`);
+      lines.push(`  ${label}: ${row.messages}/${row.limit ?? '?'} msgs`);
     }
     return lines.join('\n');
   }
@@ -679,16 +679,6 @@ function warmupLocalConfigPath() {
     if (!channelId) throw new Error('a channel is required');
     const ok = unsetWarmupConfig(`warmup.channelDepths.${channelId}`);
     return `Channel ${channelId}: depth reset to the default (reload ${ok ? 'ok' : 'FAILED'})`;
-  }
-
-  function cmdWarmupPrimary(args) {
-    const channelId = args?.channelId;
-    if (!channelId) {
-      const ok = writeWarmupConfig('warmup.primaryChannelId', '');
-      return `Primary channel cleared (reload ${ok ? 'ok' : 'FAILED'})`;
-    }
-    const ok = writeWarmupConfig('warmup.primaryChannelId', channelId);
-    return `Primary channel set to ${channelId} (reload ${ok ? 'ok' : 'FAILED'})`;
   }
 
   function cmdWarmupOnly(args) {
@@ -774,7 +764,6 @@ function warmupLocalConfigPath() {
     'warmup.run': withWarmup(() => cmdWarmupRun()),
     'warmup.stop': withWarmup(() => cmdWarmupStop()),
     'warmup.reset': withWarmup(() => cmdWarmupReset()),
-    'warmup.primary': withWarmup((args) => cmdWarmupPrimary(args)),
     'warmup.channel': withWarmup((args) => cmdWarmupChannel(args)),
     'warmup.channel-default': withWarmup((args) => cmdWarmupChannelDefault(args)),
     'warmup.only': withWarmup((args) => cmdWarmupOnly(args)),

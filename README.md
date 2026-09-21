@@ -268,15 +268,15 @@ Running cost grows with chat volume, not with member count: the analyzer spends 
 
 ## Warm-up
 
-With `warmup.enabled: true`, the bot reads channel history before speaking. It feeds messages oldest-first through the memory analyzer in large batches, building profiles, attitudes, the channel map and in-jokes. The bot stays mute until warm-up finishes (including runs started by command); incoming messages are still observed and owner commands work.
+With `warmup.enabled: true`, the bot reads channel history before speaking. It fetches each channel's history to the planned depth, merges all messages into one timeline ordered by time, and walks it oldest first through the memory analyzer, building profiles, attitudes, the channel map and in-jokes. What the persona learns later really happened later, and one evening's talk spread over several channels is analysed together. The bot stays mute until the warm-up finishes (including runs started by command); incoming messages are still observed and owner commands work.
 
-The budget `warmup.maxTokens` is counted from the provider's reported usage. Warm-up is exempt from `llm.maxRequestsPerDay` but the per-request cap applies. Progress persists across restarts. A batch whose analysis is truncated at `memory.maxOutputTokens` is split in half and the halves analyzed separately; splitting recurses down to 20 messages, then the piece is skipped and counted. Other failures log their reason; three in a row abort without leaving the bot mute. Progress is logged per batch (`warmup: batch done`) and per channel (`warmup: channel done`).
+The budget `warmup.maxTokens` is counted from the provider's reported usage. Warm-up is exempt from `llm.maxRequestsPerDay` but the per-request cap applies. Progress survives restarts: the run resumes from the last analysed point of the timeline; on a restart the history windows are fetched from Discord again, which costs a few minutes and no LLM tokens. A batch whose analysis is truncated at `memory.maxOutputTokens` is split in half and the halves analyzed separately; splitting recurses down to 20 messages, then the piece is skipped and counted. Other failures log their reason; three in a row abort without leaving the bot mute.
 
 A provider rate limit (HTTP 429, an exhausted daily token quota) is not a failure; the run waits `warmup.rateLimitWaitMinutes` and retries the same batch, up to `warmup.rateLimitMaxWaits` consecutive waits, and refused requests cost nothing. A warm-up aborted by rate limits or repeated failures resumes by itself on the next start when `warmup.enabled` is true.
 
 `/nep warmup stop` pauses after the batch in flight and interrupts a rate-limit wait; `/nep warmup run` resumes from the saved progress. Suggested flow for a first run: leave `warmup.enabled` off, plan the channels with `/nep warmup` commands, check `/nep warmup plan`, then `/nep warmup run`.
 
-`/nep warmup reset` clears only the progress marker, so running a warm-up again over existing memory counts the same messages twice. For a truly fresh start, use `/nep memory wipe` first: it clears member profiles with their attitudes and moments, server habits, the channel map, the analyzer's lore entries, the message buffer and the warm-up progress, after the owner types the server's exact name. It keeps the owner's own lore entries, the media description cache, token calibration and the spontaneous schedule. The command is refused while a warm-up is running.
+`/nep warmup reset` clears only the progress marker, so running a warm-up again over existing memory counts the same messages twice. Channel depths and batching settings are frozen when a run starts; a reset is needed for new values to take effect. For a truly fresh start, use `/nep memory wipe` first: it clears member profiles with their attitudes and moments, server habits, the channel map, the analyzer's lore entries, the message buffer and the warm-up progress, after the owner types the server's exact name. It keeps the owner's own lore entries, the media description cache, token calibration and the spontaneous schedule. The command is refused while a warm-up is running.
 
 The warm-up budget is real money. Set `memory.model` to a cheaper model for the analyzer and warm-up.
 
@@ -288,14 +288,15 @@ The warm-up budget is real money. Set `memory.model` to a cheaper model for the 
 | `maxTokens` | `1000000` | Token budget (input + output); caps the run regardless of the plan |
 | `messagesPerChannel` | `2000` | Default depth: messages read per channel, counting back from the newest |
 | `batchMessages` | `150` | Messages per analyzer batch |
+| `windowBatches` | `3` | Batches per analysis window |
+| `cutAtGapMinutes` | `30` | Preferred minimum gap between analysis windows (min) |
 | `maxAgeDays` | `0` | Max message age in days (0 = unlimited) |
-| `primaryChannelId` | `""` | Channel read first, so the first picture of the server comes from it |
 | `channelDepths` | `{}` | Per-channel depth override by channel id (`0` skips a channel); `messagesPerChannel` is the fallback |
-| `onlyListed` | `false` | Read only channels in `channelDepths` plus the primary; skip everything else |
+| `onlyListed` | `false` | Read only channels listed in `channelDepths`; skip everything else |
 | `rateLimitWaitMinutes` | `10` | Minutes to wait when the provider returns a rate limit |
 | `rateLimitMaxWaits` | `36` | Consecutive waits before the run aborts |
 
-Read order: the primary channel, then listed channels sorted by depth (ties broken by recent activity), then the rest by recent activity. A channel's history window is frozen when it is first read; changing its depth afterwards needs `warmup reset`.
+By default every readable channel is fetched at `messagesPerChannel` depth. `channelDepths` sets a depth for particular channels while the rest keep the default; `onlyListed: true` reads strictly the listed channels at their depths. Give a more important channel a larger depth. The merged timeline is cut into analysis windows of about `batchMessages` x `windowBatches` messages; each window prefers to end on a pause of at least `cutAtGapMinutes`. Inside a window each channel's messages stay together: a busy channel fills whole batches of its own, small scraps of quiet channels share one analyzer call.
 
 ## Dry run
 
@@ -327,12 +328,11 @@ One Discord slash command, `/nep` (the name comes from `bot.commandName`). Guild
 | `/nep lore list [query]` | List lorebook entries |
 | `/nep lore show <id>` | Show a lorebook entry |
 | `/nep lore remove <id>` | Remove a lorebook entry |
-| `/nep warmup status` | Warm-up status |
+| `/nep warmup status` | Timeline progress: date reached, messages analysed, per-channel counts |
 | `/nep warmup plan` | The ordered read plan |
 | `/nep warmup run` | Start or resume the warm-up now |
 | `/nep warmup stop` | Pause after the batch in flight |
 | `/nep warmup reset` | Clear warm-up progress (refused while running) |
-| `/nep warmup primary [channel]` | Set the channel read first; omit to clear |
 | `/nep warmup channel <channel> <depth>` | Set a channel's read depth (0 skips it) |
 | `/nep warmup channel-default <channel>` | Remove a channel's depth override |
 | `/nep warmup only <enabled>` | Read only channels with a set depth |
@@ -438,6 +438,7 @@ src/
     parse.js               output tags to actions
   discord/
     guild.js               single-guild resolution
+    commands.js            slash commands, registration, interaction adapter
     events.js              message pipeline
     collect.js             channel history, neighbours, permissions
     format.js              transcript lines, time gaps, tempo
@@ -450,6 +451,8 @@ src/
     store.js               JSON file persistence, atomic writes
     update.js              batch memory updates
     affinity.js            relationship score logic
+    interests.js           remembered interests: sightings, confirmation, eviction
+    details.js             remembered details: sightings, confirmation, eviction
     channels.js            channel map rendering, activity verdicts
     warmup.js              pre-talk channel history ingestion
 tests/                     node --test, pure-function unit tests

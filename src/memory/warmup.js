@@ -1,31 +1,57 @@
 // The memory warm-up: before the persona is allowed to speak, read the
-// server's history backwards and feed it, oldest first, through the same
-// analyzer as the live memory updater (src/memory/update.js#analyze) —
-// building member profiles, attitudes, the channel map and in-jokes in
-// advance. Gated by `config.warmup.enabled`; spends its own token budget
-// (`config.warmup.maxTokens`), never the daily LLM request cap (analyze is
-// called with `countAgainstDailyCap: false`).
+// server's history and feed it through the same analyzer as the live memory
+// updater (src/memory/update.js#analyze) — building member profiles,
+// attitudes, the channel map and in-jokes in advance. Gated by
+// `config.warmup.enabled`; spends its own token budget (`config.warmup.maxTokens`),
+// never the daily LLM request cap (analyze is called with `countAgainstDailyCap: false`).
 //
-// The owner can shape which channels are read and how deep, from Discord
-// (see src/admin.js `warmup …` sub-commands): `warmup.channelDepths` sets a
-// per-channel depth in messages counted from the newest backwards,
-// `warmup.onlyListed` restricts the run to just those channels (plus the
-// primary one), and `warmup.primaryChannelId` is read first so the very
-// first picture of the server comes from it. `planWarmup` turns that
-// configuration plus the readable channels into the ordered plan; it never
+// Unlike the live updater, which sees one channel's messages at a time, the
+// warm-up reads ONE chronological timeline stitched together across every
+// planned channel: the analyzer's "a later batch refines an earlier one" rule
+// only holds when batches move forward in time, and a channel read start-to
+// -finish before the next one began would mix a 2024 conversation processed
+// after a 2026 one, overwriting fresh prose with stale prose. The owner can
+// shape which channels are read and how deep, from Discord (see src/admin.js
+// `warmup …` sub-commands): `warmup.channelDepths` sets a per-channel depth in
+// messages counted from the newest backwards, and `warmup.onlyListed`
+// restricts the run to just those channels. `planWarmup` turns that
+// configuration plus the readable channels into the ordered plan (for display
+// only — the actual run order is chronological, not plan order); it never
 // throws on a stale id (deleted channel, lost access) — those come back
 // separately as `missing`.
 //
+// The run:
+//  1. Every planned channel's window is (re-)fetched with fetchHistoryWindow,
+//     from a frozen `{ anchorId, limit }` recorded the first time that
+//     channel is touched (so a later config change never shifts an
+//     in-progress channel's window) — a channel whose fetch fails is logged
+//     and skipped for this round, never fatal.
+//  2. All the fetched windows are merged into one timeline (mergeTimeline),
+//     sorted by message id as BigInt (Discord snowflakes are globally
+//     chronological), with everything already covered by `cursorId` dropped.
+//  3. The timeline is cut into windows sized `batchMessages * windowBatches`
+//     (cutWindow), preferring to cut at a pause in the conversation over a
+//     hard cut mid-scene.
+//  4. Each window is packed into batches (packWindow): messages are grouped
+//     by channel into contiguous slices, and slices are greedily packed
+//     together (small scraps of quiet channels share one call) or chunked
+//     (a slice bigger than one batch) — but never interleaved within a batch.
+//  5. Batches are analyzed in order, exactly like the live updater's calls,
+//     just batched together. Progress persists `cursorId` (the last message
+//     id of the last fully completed window) and `windowBatchesDone` (batches
+//     done inside the CURRENT window), so a restart rebuilds the same window
+//     after `cursorId` and skips only the batches already done in it.
+//
 // Pure helpers (planBatches, remainingBudget, spentTokens, orderChannels,
-// planWarmup) are unit-tested directly. The factory below is the only place
-// that touches discord.js and the persisted store; progress lives in
-// `store.state.data.warmup` and is flushed after every batch, so a restart
-// resumes exactly where it stopped and never re-analyzes a finished batch.
-// The depth used for a channel is frozen into its progress entry
-// (`channels[id].limit`, alongside `anchorId`) the first time that channel is
-// fetched, so a later config change never shifts an in-progress channel's
-// window or its batch indexes; `warmup reset` is the only way to pick up a
-// new depth for a channel that already has progress.
+// planWarmup, mergeTimeline, cutWindow, packWindow) are unit-tested directly.
+// The factory below is the only place that touches discord.js and the
+// persisted store; progress lives in `store.state.data.warmup` and is flushed
+// after every batch, so a restart resumes exactly where it stopped and never
+// re-analyzes a finished batch. The depth used for a channel, and the
+// batching parameters (`batchMessages`, `windowBatches`, `cutAtGapMinutes`)
+// themselves, are frozen into progress the first time a run actually starts,
+// so a later config change never shifts an in-progress run's batch indexes;
+// `warmup reset` is the only way to pick up new values.
 //
 // Adaptive piece size: once a dense stretch of chat makes a full-size batch
 // come back 'truncated'/'bad-json' (see isUnrecoverableSize) and a split
@@ -36,8 +62,8 @@
 // climbs back up (doubling, capped at the configured batch size) after
 // CLEAN_STREAK_TARGET batches in a row needed no split at all. This lives in
 // a plain closure variable — in memory only, never persisted — so a restart
-// always tries the next batch at full size again; the index-based resume
-// bookkeeping below (`batchesDone`, per-channel `limit`/`anchorId`) is
+// always tries the next batch at full size again; the persisted resume
+// bookkeeping below (`windowBatchesDone`, per-channel `limit`/`anchorId`) is
 // completely unaffected by it.
 
 import { readableChannels, lastActivity, fetchHistoryWindow } from '../discord/collect.js';
@@ -107,9 +133,9 @@ export function planBatches(messages, batchSize) {
 
 /**
  * Cut an already-filtered batch (oldest first) into consecutive chunks of at
- * most `size` messages, no bot-filtering (that already happened in
- * planBatches). Used to pre-split a batch to the adaptive piece size before
- * ever attempting it whole — see the module header comment.
+ * most `size` messages, no bot-filtering (that already happened upstream).
+ * Used to pre-split a batch to the adaptive piece size before ever attempting
+ * it whole — see the module header comment.
  * @param {object[]} messages
  * @param {number} size
  * @returns {object[][]}
@@ -150,34 +176,35 @@ export function orderChannels(candidates) {
 
 /**
  * Build the ordered warm-up plan for one guild's readable channels, from the
- * owner's custom warm-up configuration. Never throws on a stale id.
+ * owner's custom warm-up configuration. Never throws on a stale id. This
+ * plan is used for display (`warmup plan`) and to decide WHICH channels and
+ * how deep each is read; the run itself then reads them as one merged
+ * chronological timeline, not in this plan's order — see the module header
+ * comment.
  *
  * - a channel's depth is `cfg.channelDepths[id]` when that is an integer
  *   >= 0, else `cfg.messagesPerChannel`; a depth of 0 drops the channel from
  *   the plan entirely; a non-integer/negative entry is treated as absent
  *   (falls back to `cfg.messagesPerChannel`, same as no entry at all);
- * - `cfg.onlyListed: true` keeps only the primary channel plus channels with
- *   a valid `channelDepths` entry — everything else is dropped;
- * - order: the primary channel first (when readable and its depth is not
- *   0), then the listed channels by depth descending (ties: most recently
- *   active first), then the rest by most recently active first.
+ * - `cfg.onlyListed: true` keeps only channels with a valid `channelDepths`
+ *   entry — everything else is dropped;
+ * - display order: depth descending, ties broken by most recently active
+ *   first.
  *
  * @param {{ id: string, name: string, lastActivity: number }[]} candidates  The readable channels.
  * @param {{
  *   channelDepths?: Record<string, number>,
- *   primaryChannelId?: string,
  *   onlyListed?: boolean,
  *   messagesPerChannel: number,
  * }} cfg
  * @returns {{
- *   plan: { id: string, name: string, depth: number, role: 'primary'|'listed'|'default' }[],
+ *   plan: { id: string, name: string, depth: number, role: 'listed'|'default' }[],
  *   missing: string[],
  * }}
  */
 export function planWarmup(candidates, cfg) {
   const byId = new Map(candidates.map((c) => [c.id, c]));
   const channelDepths = cfg?.channelDepths && typeof cfg.channelDepths === 'object' ? cfg.channelDepths : {};
-  const primaryId = cfg?.primaryChannelId || null;
   const onlyListed = Boolean(cfg?.onlyListed);
   const defaultDepth =
     Number.isInteger(cfg?.messagesPerChannel) && cfg.messagesPerChannel >= 0 ? cfg.messagesPerChannel : 0;
@@ -189,56 +216,143 @@ export function planWarmup(candidates, cfg) {
   };
 
   const missing = [];
-  const seenMissing = new Set();
-  const addMissing = (id) => {
-    if (seenMissing.has(id)) return;
-    seenMissing.add(id);
-    missing.push(id);
-  };
   for (const id of Object.keys(channelDepths)) {
-    if (!byId.has(id)) addMissing(id);
+    if (!byId.has(id)) missing.push(id);
   }
-  if (primaryId && !byId.has(primaryId)) addMissing(primaryId);
 
   // A channel counts as "listed" only with a genuinely valid depth entry;
   // a garbage value (non-integer, negative) is treated as no entry at all.
   const listedIds = new Set();
   for (const id of Object.keys(channelDepths)) {
-    if (id === primaryId) continue;
     if (!byId.has(id)) continue;
     if (validDepth(channelDepths[id]) === null) continue;
     listedIds.add(id);
   }
 
-  const plan = [];
+  const included = onlyListed ? candidates.filter((c) => listedIds.has(c.id)) : candidates;
 
-  if (primaryId && byId.has(primaryId)) {
-    const depth = depthFor(primaryId);
-    if (depth > 0) {
-      const c = byId.get(primaryId);
-      plan.push({ id: primaryId, name: c.name, depth, role: 'primary' });
-    }
-  }
-
-  const listed = [...listedIds]
-    .map((id) => {
-      const c = byId.get(id);
-      return { id, name: c.name, depth: depthFor(id), lastActivity: c.lastActivity };
-    })
+  const plan = included
+    .map((c) => ({
+      id: c.id,
+      name: c.name,
+      depth: depthFor(c.id),
+      lastActivity: c.lastActivity,
+      role: listedIds.has(c.id) ? 'listed' : 'default',
+    }))
     .filter((c) => c.depth > 0)
-    .sort((a, b) => b.depth - a.depth || b.lastActivity - a.lastActivity);
-  for (const c of listed) plan.push({ id: c.id, name: c.name, depth: c.depth, role: 'listed' });
-
-  if (!onlyListed) {
-    const rest = candidates
-      .filter((c) => c.id !== primaryId && !listedIds.has(c.id))
-      .map((c) => ({ id: c.id, name: c.name, depth: depthFor(c.id), lastActivity: c.lastActivity }))
-      .filter((c) => c.depth > 0)
-      .sort((a, b) => b.lastActivity - a.lastActivity);
-    for (const c of rest) plan.push({ id: c.id, name: c.name, depth: c.depth, role: 'default' });
-  }
+    .sort((a, b) => b.depth - a.depth || b.lastActivity - a.lastActivity)
+    .map(({ lastActivity: _lastActivity, ...rest }) => rest);
 
   return { plan, missing };
+}
+
+/**
+ * Merge already-fetched, per-channel windows (each oldest first) into one
+ * globally chronological timeline: Discord message ids (snowflakes) are
+ * compared as BigInt, which sorts them exactly the same as their creation
+ * time. Everything with an id <= `cursorId` (already fully analyzed by an
+ * earlier window) is dropped.
+ * @param {object[][]} windows
+ * @param {string|null} [cursorId]
+ * @returns {object[]}
+ */
+export function mergeTimeline(windows, cursorId = null) {
+  const merged = windows.flat();
+  merged.sort((a, b) => {
+    const ai = BigInt(a.id);
+    const bi = BigInt(b.id);
+    if (ai < bi) return -1;
+    if (ai > bi) return 1;
+    return 0;
+  });
+  if (cursorId == null) return merged;
+  const cursor = BigInt(cursorId);
+  return merged.filter((m) => BigInt(m.id) > cursor);
+}
+
+/**
+ * Cut the front of `timeline` into one window of roughly `targetSize`
+ * messages, preferring to cut at a pause in the conversation: within the
+ * last third of the target span, the largest gap between two consecutive
+ * timeline messages that is at least `cutAtGapMinutes` long is cut right
+ * before the message after it. With no such gap, the window is cut exactly
+ * at `targetSize`. When the whole timeline already fits in `targetSize`, the
+ * window is everything that is left (the run's final window).
+ * @param {object[]} timeline  Chronological, as from mergeTimeline.
+ * @param {number} targetSize
+ * @param {number} cutAtGapMinutes
+ * @returns {{ window: object[], rest: object[] }}
+ */
+export function cutWindow(timeline, targetSize, cutAtGapMinutes) {
+  if (timeline.length <= targetSize) {
+    return { window: timeline, rest: [] };
+  }
+
+  const gapMs = cutAtGapMinutes * 60_000;
+  const searchStart = Math.max(1, Math.ceil((targetSize * 2) / 3));
+  let bestGap = -1;
+  let bestIndex = -1;
+  for (let i = searchStart; i <= targetSize; i += 1) {
+    const gap = timeline[i].ts - timeline[i - 1].ts;
+    if (gap >= gapMs && gap > bestGap) {
+      bestGap = gap;
+      bestIndex = i;
+    }
+  }
+  const cutIndex = bestIndex !== -1 ? bestIndex : targetSize;
+  return { window: timeline.slice(0, cutIndex), rest: timeline.slice(cutIndex) };
+}
+
+/**
+ * Pack one timeline window into analyzer batches of at most `batchMessages`
+ * each, grouped by channel: the window's messages are split into contiguous
+ * per-channel slices (ordered by each slice's first message, i.e.
+ * chronologically), then walked greedily — a slice that fits in the room
+ * left in the current batch joins it, one that does not fit flushes the
+ * current batch first, and a slice bigger than `batchMessages` is cut into
+ * `batchMessages`-sized chunks (via planBatches) whose last, partial chunk
+ * stays open so the next small slice can still share it. Messages never
+ * interleave across channels within one batch. Other bots' messages are
+ * dropped up front, same as planBatches.
+ * @param {object[]} window  Chronological, as from cutWindow.
+ * @param {number} batchMessages
+ * @returns {object[][]}
+ */
+export function packWindow(window, batchMessages) {
+  const filtered = window.filter((m) => !m.bot);
+  if (filtered.length === 0) return [];
+
+  const slicesByChannel = new Map();
+  for (const message of filtered) {
+    if (!slicesByChannel.has(message.channelId)) slicesByChannel.set(message.channelId, []);
+    slicesByChannel.get(message.channelId).push(message);
+  }
+  // Map insertion order already matches "first appearance" order, since
+  // `filtered` is chronological -- no separate sort needed.
+  const slices = [...slicesByChannel.values()];
+
+  const batches = [];
+  let current = [];
+  for (const slice of slices) {
+    const room = batchMessages - current.length;
+    if (slice.length <= room) {
+      current = current.concat(slice);
+      continue;
+    }
+    if (current.length > 0) {
+      batches.push(current);
+      current = [];
+    }
+    if (slice.length <= batchMessages) {
+      current = slice.slice();
+    } else {
+      const chunks = planBatches(slice, batchMessages);
+      for (let i = 0; i < chunks.length - 1; i += 1) batches.push(chunks[i]);
+      current = chunks[chunks.length - 1] ?? [];
+    }
+  }
+  if (current.length > 0) batches.push(current);
+  return batches;
 }
 
 /**
@@ -283,9 +397,9 @@ function chargeAttempt(st, outcome) {
 
 /**
  * One run's stop signal: a plain `stopRequested` flag for the post-batch
- * check (see runChannel), plus a `stopped` promise a rate-limit wait can
- * race against so `stop()` interrupts it immediately instead of only taking
- * effect after the wait finishes on its own.
+ * check, plus a `stopped` promise a rate-limit wait can race against so
+ * `stop()` interrupts it immediately instead of only taking effect after the
+ * wait finishes on its own.
  */
 function makeControl() {
   let resolveStopped;
@@ -305,6 +419,7 @@ function makeControl() {
 
 function freshState() {
   return {
+    version: 2,
     done: false,
     aborted: false,
     paused: false,
@@ -313,6 +428,13 @@ function freshState() {
     tokensUsed: 0,
     requests: 0,
     skippedMessages: 0,
+    cursorId: null,
+    windowBatchesDone: 0,
+    reachedTs: 0,
+    messagesTotal: 0,
+    batchMessages: null,
+    windowBatches: null,
+    cutAtGapMinutes: null,
     channels: {},
   };
 }
@@ -533,6 +655,7 @@ export function createWarmup({ hot, store, client, memory, getGuildId, now = Dat
    * touching `consecutiveFailures`. Every other failure reason keeps the
    * existing retry-once + 3-consecutive-cycles abort behaviour, unchanged.
    *
+   * @param {string[]} channelIds  Every channel this piece's messages belong to (log field only).
    * @param {Map<string, string>} [descriptions]  Pre-computed describer captions for this batch
    *   (see describeBatchForWarmup), reused unchanged across a split.
    * @param {{ stopRequested: boolean, stopped: Promise<void> }} [control]
@@ -543,15 +666,15 @@ export function createWarmup({ hot, store, client, memory, getGuildId, now = Dat
    *   proof that this smaller size was actually necessary, not just a piece
    *   that happened to already fit.
    * @param {{ truncated: boolean, shrinkTo: number|null }} [sizeTracker]  Shared across every
-   *   piece of one top-level batch (see runChannel): set truncated=true on any
+   *   piece of one top-level batch (see runWindow): set truncated=true on any
    *   'truncated'/'bad-json' failure, and shrinkTo to the smallest successful
    *   fromSplit piece size seen. Read once the whole top-level batch settles.
    * @returns {Promise<{ consecutiveFailures: number, stop: boolean }>}
    *   `stop: true` means the budget ran out, the run aborted, or a rate-limit
    *   wait was interrupted by stop() — the caller must not advance
-   *   `batchesDone` and must stop processing this channel.
+   *   `windowBatchesDone` and must stop processing this window.
    */
-  async function analyzePiece(guildId, channelId, batchIndex, cfg, st, piece, consecutiveFailures, descriptions, control, fromSplit = false, sizeTracker = null) {
+  async function analyzePiece(guildId, channelIds, batchIndex, cfg, st, piece, consecutiveFailures, descriptions, control, fromSplit = false, sizeTracker = null) {
     let rateLimitWaits = 0;
 
     /** Handles a rate-limited `outcome`: waits, then either signals `continue` or returns the piece's final result. */
@@ -635,22 +758,22 @@ export function createWarmup({ hot, store, client, memory, getGuildId, now = Dat
           const mid = Math.ceil(piece.length / 2);
           log.warn('warmup: batch failed, splitting', {
             guildId,
-            channel: channelId,
+            channels: channelIds,
             batchIndex,
             messages: piece.length,
             reason: outcome.reason,
             detail: outcome.detail,
           });
-          const first = await analyzePiece(guildId, channelId, batchIndex, cfg, st, piece.slice(0, mid), consecutiveFailures, descriptions, control, true, sizeTracker);
+          const first = await analyzePiece(guildId, channelIds, batchIndex, cfg, st, piece.slice(0, mid), consecutiveFailures, descriptions, control, true, sizeTracker);
           if (first.stop) return first;
-          return analyzePiece(guildId, channelId, batchIndex, cfg, st, piece.slice(mid), first.consecutiveFailures, descriptions, control, true, sizeTracker);
+          return analyzePiece(guildId, channelIds, batchIndex, cfg, st, piece.slice(mid), first.consecutiveFailures, descriptions, control, true, sizeTracker);
         }
 
         st.skippedMessages = (st.skippedMessages ?? 0) + piece.length;
         persist();
         log.warn('warmup: batch failed at the floor, skipping', {
           guildId,
-          channel: channelId,
+          channels: channelIds,
           batchIndex,
           messages: piece.length,
           reason: outcome.reason,
@@ -662,7 +785,7 @@ export function createWarmup({ hot, store, client, memory, getGuildId, now = Dat
       consecutiveFailures += 1;
       log.warn('warmup: batch failed, giving up on this attempt', {
         guildId,
-        channel: channelId,
+        channels: channelIds,
         batchIndex,
         messages: piece.length,
         reason: outcome.reason,
@@ -686,84 +809,82 @@ export function createWarmup({ hot, store, client, memory, getGuildId, now = Dat
     }
   }
 
-  function countChannelsDone(st) {
-    return Object.values(st.channels).filter((c) => c.done).length;
+  /**
+   * (Re-)fetch every planned channel's window, freezing `{ anchorId, limit }`
+   * into `st.channels[id]` the first time a channel is touched (so a later
+   * config change never shifts its window). A channel with nothing to read
+   * yet (no `lastMessageId`) or whose fetch throws is logged and skipped for
+   * this round — never fatal to the run.
+   * @returns {Promise<object[][]>}  One array per successfully fetched channel.
+   */
+  async function fetchAllWindows(guildId, cfg, plan, byId, st) {
+    const minTs = cfg.maxAgeDays > 0 ? now() - cfg.maxAgeDays * 24 * 60 * 60_000 : 0;
+    const windows = [];
+    for (const item of plan) {
+      const channel = byId.get(item.id);
+      if (!channel) continue; // vanished between planning and fetching — extremely unlikely, never fatal
+
+      const channelState = (st.channels[item.id] ??= { anchorId: null, limit: null, messages: 0 });
+      if (!channelState.anchorId) {
+        channelState.anchorId = channel.lastMessageId ?? null;
+        if (channelState.anchorId) channelState.limit = item.depth;
+        persist();
+      }
+      // A resume always re-fetches the SAME window it started with, even if
+      // the configured depth for this channel changed meanwhile.
+      if (channelState.limit == null && channelState.anchorId) channelState.limit = item.depth;
+      if (!channelState.anchorId) continue; // an empty channel: nothing to fetch, ever
+
+      try {
+        const window = await fetchHistoryWindow(channel, {
+          anchorId: channelState.anchorId,
+          limit: channelState.limit,
+          minTs,
+          selfId: client.user.id,
+          embedTextChars: hot.config.media?.embedTextChars,
+        });
+        log.info('warmup: channel fetched', { channel: item.id, messages: window.length });
+        if (window.length > 0) windows.push(window);
+      } catch (err) {
+        log.warn('warmup: channel fetch failed, skipping it for this round', { channel: item.id, error: err });
+      }
+    }
+    return windows;
   }
 
-  async function runChannel(guildId, cfg, channel, depth, st, consecutiveFailures, channelsTotal, control) {
-    const channelState = (st.channels[channel.id] ??= { anchorId: null, limit: null, messages: 0, batchesDone: 0, done: false });
-    if (channelState.done) return consecutiveFailures;
+  /** Run every batch of one timeline window, resuming at `st.windowBatchesDone`. Returns `true` if the whole window finished. */
+  async function runWindow(guildId, cfg, window, st, consecutiveFailuresRef) {
+    const batches = packWindow(window, st.batchMessages);
 
-    function finishChannel() {
-      channelState.done = true;
-      persist();
-      log.info('warmup: channel done', {
-        channel: channel.id,
-        channelsDone: countChannelsDone(st),
-        channelsTotal,
-      });
-    }
-
-    if (!channelState.anchorId) {
-      channelState.anchorId = channel.lastMessageId ?? null;
-      if (channelState.anchorId) channelState.limit = depth;
-      persist();
-    }
-    if (!channelState.anchorId) {
-      finishChannel();
-      return consecutiveFailures;
-    }
-    // A resume always re-fetches the SAME window it started with, even if
-    // the configured depth for this channel changed meanwhile — otherwise
-    // the already-recorded batch indexes could shift under it. `limit` is
-    // only ever missing here for progress written before this field existed;
-    // in that case the current plan's depth is the best available guess.
-    if (channelState.limit == null) channelState.limit = depth;
-
-    const minTs = cfg.maxAgeDays > 0 ? now() - cfg.maxAgeDays * 24 * 60 * 60_000 : 0;
-    const window = await fetchHistoryWindow(channel, {
-      anchorId: channelState.anchorId,
-      limit: channelState.limit,
-      minTs,
-      selfId: client.user.id,
-      embedTextChars: hot.config.media?.embedTextChars,
-    });
-
-    const batches = planBatches(window, cfg.batchMessages);
-    if (batches.length === 0) {
-      finishChannel();
-      return consecutiveFailures;
-    }
-
-    for (let i = channelState.batchesDone; i < batches.length; i += 1) {
+    for (let i = st.windowBatchesDone; i < batches.length; i += 1) {
       const batch = batches[i];
       const descriptions = await describeBatchForWarmup(guildId, batch, cfg, st);
+      const channelIds = [...new Set(batch.map((m) => m.channelId))];
 
-      // Cut the batch to the current adaptive piece size up front (oldest
-      // first) instead of always paying for one doomed full-size attempt —
-      // see the module header comment. A cap that is already >= this batch
-      // is a no-op: the batch runs whole, exactly as before.
       const pieces = pieceCap !== null && pieceCap < batch.length ? chunkPieces(batch, pieceCap) : [batch];
       const sizeTracker = { truncated: false, shrinkTo: null };
       let stoppedMidBatch = false;
       for (const piece of pieces) {
-        const result = await analyzePiece(guildId, channel.id, i, cfg, st, piece, consecutiveFailures, descriptions, control, false, sizeTracker);
-        consecutiveFailures = result.consecutiveFailures;
+        const result = await analyzePiece(guildId, channelIds, i, cfg, st, piece, consecutiveFailuresRef.value, descriptions, currentControl, false, sizeTracker);
+        consecutiveFailuresRef.value = result.consecutiveFailures;
         if (result.stop) {
           stoppedMidBatch = true;
           break;
         }
       }
-      if (stoppedMidBatch) return consecutiveFailures;
+      if (stoppedMidBatch) return false;
       noteBatchOutcome(cfg, sizeTracker);
 
       // The batch's index-based progress advances only once every piece of
       // it (however it was split) has been analyzed or skipped.
-      channelState.batchesDone = i + 1;
-      channelState.messages += batch.length;
+      st.windowBatchesDone = i + 1;
+      for (const message of batch) {
+        const channelState = st.channels[message.channelId];
+        if (channelState) channelState.messages = (channelState.messages ?? 0) + 1;
+      }
       persist();
       log.info('warmup: batch done', {
-        channel: channel.id,
+        channels: channelIds,
         batchIndex: i,
         batches: batches.length,
         messages: batch.length,
@@ -774,24 +895,40 @@ export function createWarmup({ hot, store, client, memory, getGuildId, now = Dat
 
       // A stop() requested while this batch was in flight takes effect now,
       // right after it: the run pauses instead of starting the next one.
-      if (control?.stopRequested) {
+      if (currentControl?.stopRequested) {
         st.paused = true;
         persist();
-        return consecutiveFailures;
+        return false;
       }
     }
 
-    finishChannel();
-    return consecutiveFailures;
+    return true;
   }
 
   async function doRun() {
     const cfg = hot.config.warmup ?? {};
+
+    // Progress written by the old, channel-after-channel scheme: a finished
+    // run stays finished (nothing else to do); an unfinished one is
+    // discarded — never any memory, only this progress record — and the
+    // timeline starts from the beginning.
+    const existing = store.state.data.warmup;
+    if (existing && existing.version !== 2 && !existing.done) {
+      log.warn('warmup: discarding progress written by an older version, memory is untouched');
+      delete store.state.data.warmup;
+    }
+
     const st = state();
     if (st.done) return st;
     st.aborted = false; // an explicit run() call retries after an abort
     st.paused = false; // …and resumes after a stop()
     if (!st.startedAt) st.startedAt = now();
+    // The batching parameters are frozen the first time a run actually
+    // starts, so a config change mid-run never shifts batch indexes —
+    // `warmup reset` is what picks up new values.
+    if (st.batchMessages == null) st.batchMessages = cfg.batchMessages;
+    if (st.windowBatches == null) st.windowBatches = cfg.windowBatches;
+    if (st.cutAtGapMinutes == null) st.cutAtGapMinutes = cfg.cutAtGapMinutes;
     persist();
 
     const guildId = getGuildId();
@@ -805,14 +942,32 @@ export function createWarmup({ hot, store, client, memory, getGuildId, now = Dat
     currentControl = control;
 
     const { plan, byId } = resolveChannels(guild);
+    const windows = await fetchAllWindows(guildId, cfg, plan, byId, st);
 
-    let consecutiveFailures = 0;
-    for (const item of plan) {
+    let timeline = mergeTimeline(windows, st.cursorId);
+    if (st.cursorId == null && !st.messagesTotal) {
+      st.messagesTotal = timeline.length;
+      persist();
+    }
+
+    const targetSize = st.batchMessages * st.windowBatches;
+    const consecutiveFailuresRef = { value: 0 };
+
+    while (timeline.length > 0) {
       if (st.done || st.aborted || st.paused) break;
-      const channel = byId.get(item.id);
-      if (!channel) continue; // vanished between planning and fetching — extremely unlikely, never fatal
-      consecutiveFailures = await runChannel(guildId, cfg, channel, item.depth, st, consecutiveFailures, plan.length, control);
-      if (st.aborted || st.paused) break;
+
+      const { window, rest } = cutWindow(timeline, targetSize, st.cutAtGapMinutes);
+      const finished = await runWindow(guildId, cfg, window, st, consecutiveFailuresRef);
+      if (!finished) return st;
+
+      const last = window[window.length - 1];
+      st.cursorId = last.id;
+      st.windowBatchesDone = 0;
+      st.reachedTs = last.ts;
+      persist();
+      log.info('warmup: window done', { messages: window.length, reachedTs: st.reachedTs });
+
+      timeline = rest;
     }
 
     if (!st.done && !st.aborted && !st.paused) {
@@ -853,23 +1008,14 @@ export function createWarmup({ hot, store, client, memory, getGuildId, now = Dat
     const st = store.state.data.warmup ?? {};
     const stChannels = st.channels ?? {};
     const channelIds = Object.keys(stChannels);
-    const channelsDone = channelIds.filter((id) => stChannels[id].done).length;
     const messages = channelIds.reduce((sum, id) => sum + (stChannels[id].messages ?? 0), 0);
 
-    // Best-effort total: the live plan when the guild is resolved (accurate
-    // even before any channel has been touched yet), else however many
-    // channel entries progress has recorded so far.
-    let channelsTotal = channelIds.length;
     const guildId = getGuildId?.();
     const guild = guildId ? client.guilds?.cache?.get(guildId) : null;
-    if (guild) {
-      const { plan } = resolveChannels(guild);
-      channelsTotal = plan.length;
-    }
 
     const channels = channelIds.map((id) => {
       const c = stChannels[id];
-      const row = { id, limit: c.limit ?? null, messages: c.messages ?? 0, batchesDone: c.batchesDone ?? 0, done: Boolean(c.done) };
+      const row = { id, limit: c.limit ?? null, messages: c.messages ?? 0 };
       const name = guild?.channels?.cache?.get(id)?.name;
       if (name) row.name = name;
       return row;
@@ -884,11 +1030,10 @@ export function createWarmup({ hot, store, client, memory, getGuildId, now = Dat
       tokensUsed: st.tokensUsed ?? 0,
       maxTokens: cfg.maxTokens ?? 0,
       requests: st.requests ?? 0,
-      channelsDone,
-      channelsTotal,
       messagesAnalyzed: messages,
+      messagesTotal: st.messagesTotal ?? 0,
+      reachedTs: st.reachedTs ?? 0,
       skippedMessages: st.skippedMessages ?? 0,
-      primaryChannelId: cfg.primaryChannelId || '',
       onlyListed: Boolean(cfg.onlyListed),
       channels,
     };

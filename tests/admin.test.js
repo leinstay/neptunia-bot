@@ -623,7 +623,7 @@ test('run: memory.wipe is refused while a warm-up is running', async () => {
   const warmup = fakeWarmup({
     status: {
       enabled: true, done: false, paused: false, aborted: false, running: true, tokensUsed: 0, maxTokens: 1000,
-      requests: 0, channelsDone: 0, channelsTotal: 1, messagesAnalyzed: 0, skippedMessages: 0, primaryChannelId: '',
+      requests: 0, messagesAnalyzed: 0, messagesTotal: 0, reachedTs: 0, skippedMessages: 0,
       onlyListed: false, channels: [],
     },
   });
@@ -969,21 +969,20 @@ function fakeWarmup(overrides = {}) {
         tokensUsed: 100,
         maxTokens: 1000,
         requests: 2,
-        channelsDone: 1,
-        channelsTotal: 3,
         messagesAnalyzed: 42,
+        messagesTotal: 500,
+        reachedTs: 1700000000000,
         skippedMessages: 3,
-        primaryChannelId: '55555',
         onlyListed: true,
-        channels: [{ id: '111', name: 'general', limit: 500, messages: 120, batchesDone: 2, done: false }],
+        channels: [{ id: '111', name: 'general', limit: 500, messages: 120 }],
       },
     plan: async () => {
       calls.plan += 1;
       return (
         overrides.plan ?? {
           plan: [
-            { id: '55555', name: 'general', depth: 500, role: 'primary' },
-            { id: '222', name: 'lore', depth: 1000, role: 'listed' },
+            { id: '55555', name: 'general', depth: 1000, role: 'listed' },
+            { id: '222', name: 'lore', depth: 500, role: 'default' },
           ],
           missing: ['999999'],
           maxTokens: 1_000_000,
@@ -1016,10 +1015,10 @@ test('run: warmup.status reports the extended status', async () => {
   const body = await admin.run('warmup.status', {}, {});
 
   assert.ok(body.includes('tokens: 100 / 1000'));
-  assert.ok(body.includes('channels: 1 / 3'));
   assert.ok(body.includes('paused: false'));
+  assert.ok(body.includes('analysed 42 of 500 messages'));
+  assert.ok(body.includes('timeline reached:'));
   assert.ok(body.includes('skipped messages: 3'));
-  assert.ok(body.includes('primary channel: 55555'));
   assert.ok(body.includes('only listed channels: true'));
   assert.ok(body.includes('#general (111)'));
 });
@@ -1031,8 +1030,8 @@ test('run: warmup.plan reports the ordered plan, missing ids and budget line', a
 
   const body = await admin.run('warmup.plan', {}, {});
   const lines = body.split('\n');
-  assert.ok(lines.some((l) => l.includes('1. #general (55555) — 500, primary')));
-  assert.ok(lines.some((l) => l.includes('2. #lore (222) — 1000, listed')));
+  assert.ok(lines.some((l) => l.includes('1. #general (55555) — 1000, listed')));
+  assert.ok(lines.some((l) => l.includes('2. #lore (222) — 500, default')));
   assert.ok(lines.some((l) => l.includes('missing: 999999')));
   assert.ok(lines.some((l) => l.includes('budget: 1000000 tokens') && l.includes('output limit: 8000') && l.includes('batch size: 150')));
 });
@@ -1080,24 +1079,6 @@ test('run: warmup.channel requires a channel', async () => {
   const rootDir = makeRoot();
   const { admin } = makeAdmin(rootDir, { warmup: fakeWarmup() });
   await assert.rejects(() => admin.run('warmup.channel', { depth: 500 }, {}));
-});
-
-test('run: warmup.primary sets the primary channel', async () => {
-  const rootDir = makeRoot();
-  const { admin } = makeAdmin(rootDir, { warmup: fakeWarmup() });
-
-  await admin.run('warmup.primary', { channelId: '777888' }, {});
-  assert.deepEqual(readLocal(rootDir), { warmup: { primaryChannelId: '777888' } });
-});
-
-test('run: warmup.primary with no channel clears the primary channel', async () => {
-  const rootDir = makeRoot();
-  const { admin } = makeAdmin(rootDir, { warmup: fakeWarmup() });
-
-  await admin.run('warmup.primary', { channelId: '777888' }, {});
-  await admin.run('warmup.primary', {}, {});
-
-  assert.deepEqual(readLocal(rootDir), { warmup: { primaryChannelId: '' } });
 });
 
 test('run: warmup.only toggles onlyListed', async () => {
@@ -1183,7 +1164,7 @@ test('run: warmup.run reports it is already running instead of starting a second
   const warmup = fakeWarmup({
     status: {
       enabled: true, done: false, paused: false, aborted: false, running: true, tokensUsed: 0, maxTokens: 1000,
-      requests: 0, channelsDone: 0, channelsTotal: 1, messagesAnalyzed: 0, skippedMessages: 0, primaryChannelId: '',
+      requests: 0, messagesAnalyzed: 0, messagesTotal: 0, reachedTs: 0, skippedMessages: 0,
       onlyListed: false, channels: [],
     },
   });
@@ -1199,7 +1180,7 @@ test('run: warmup.stop requests a pause while running', async () => {
   const warmup = fakeWarmup({
     status: {
       enabled: true, done: false, paused: false, aborted: false, running: true, tokensUsed: 0, maxTokens: 1000,
-      requests: 0, channelsDone: 0, channelsTotal: 1, messagesAnalyzed: 0, skippedMessages: 0, primaryChannelId: '',
+      requests: 0, messagesAnalyzed: 0, messagesTotal: 0, reachedTs: 0, skippedMessages: 0,
       onlyListed: false, channels: [],
     },
   });

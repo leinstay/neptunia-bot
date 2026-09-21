@@ -237,20 +237,6 @@ export function buildCommandTree(commandName) {
             { type: SUBCOMMAND, name: 'reset', description: 'Clear warm-up progress.' },
             {
               type: SUBCOMMAND,
-              name: 'primary',
-              description: 'Set the channel read first.',
-              options: [
-                {
-                  type: CHANNEL,
-                  name: 'channel',
-                  description: 'Channel to read first; omit to clear.',
-                  required: false,
-                  channel_types: [GUILD_TEXT],
-                },
-              ],
-            },
-            {
-              type: SUBCOMMAND,
               name: 'channel',
               description: "Set a channel's read depth.",
               options: [
@@ -420,7 +406,6 @@ const OPTION_MAPPERS = {
   'warmup.run': () => ({}),
   'warmup.stop': () => ({}),
   'warmup.reset': () => ({}),
-  'warmup.primary': (options) => ({ channelId: options.getChannel('channel')?.id }),
   'warmup.channel': (options) => ({
     channelId: options.getChannel('channel', true).id,
     depth: options.getInteger('depth', true),
