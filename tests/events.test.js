@@ -63,12 +63,13 @@ function recorder() {
   return fn;
 }
 
-function fakeTurns({ runTurn } = {}) {
+function fakeTurns({ runTurn, isBusy, isAnyBusy } = {}) {
   const notePost = recorder();
   return {
     notePost,
     runTurn: runTurn ?? (async () => ({ outcome: 'spoke' })),
-    isBusy: () => false,
+    isBusy: isBusy ?? (() => false),
+    isAnyBusy: isAnyBusy ?? (() => false),
     lastPostAt: () => 0,
     notePostCalls: notePost.calls,
   };
@@ -99,6 +100,24 @@ function scripted(values) {
   };
 }
 
+/** An injectable `now()` whose value can be moved forward with `.set(ms)`. */
+function mutableNow(start) {
+  let t = start;
+  const fn = () => t;
+  fn.set = (v) => {
+    t = v;
+  };
+  return fn;
+}
+
+/** A fakeChannel whose message `messageId` is already cached -- messageStillExists finds it without a fetch. */
+function fakeChannelWithMessage(id, guild, messageId, overrides = {}) {
+  return fakeChannel(id, guild, {
+    messages: { cache: new Map([[messageId, {}]]), fetch: async () => ({}) },
+    ...overrides,
+  });
+}
+
 function fakeStore(profiles = {}) {
   const calls = [];
   return {
@@ -121,7 +140,7 @@ function fakeDescriber() {
   };
 }
 
-function makeHandler({ config, turns, spontaneous, memory, tagHistory, rng, client, store, getGuildId, isWarmingUp, describer } = {}) {
+function makeHandler({ config, turns, spontaneous, memory, tagHistory, rng, now, sleep, client, store, getGuildId, isWarmingUp, describer } = {}) {
   return createMessageHandler({
     hot: { config: config ?? baseConfig() },
     store: store ?? fakeStore(),
@@ -134,6 +153,8 @@ function makeHandler({ config, turns, spontaneous, memory, tagHistory, rng, clie
     isWarmingUp,
     describer,
     rng: rng ?? Math.random,
+    now,
+    sleep,
   });
 }
 
@@ -871,4 +892,357 @@ test('features.memory=false: affinityScore is never looked up even when relation
   await Promise.resolve();
 
   assert.equal(store.getUserCalls.length, 0);
+});
+
+// ---------------------------------------------------------------------------
+// F28: one attention (mention.oneAtATime) -- a direct ping (mention/reply)
+// that arrives while a turn is running elsewhere is remembered as pending
+// instead of dropped; drainPending() (called in production once a turn
+// frees its channel, see src/behavior/turn.js's setOnIdle) answers the
+// oldest one through the normal reply path after a human switch pause.
+
+function directPingMessage(overrides = {}) {
+  return fakeMessage({
+    id: 'm1',
+    cleanContent: 'γεια',
+    mentions: { users: new Map([['self1', { id: 'self1' }]]) },
+    ...overrides,
+  });
+}
+
+test('events: a direct ping elsewhere becomes pending and is answered after the running turn plus the switch pause', async () => {
+  let seenArgs = null;
+  const turns = fakeTurns({
+    isBusy: () => false,
+    isAnyBusy: () => true,
+    runTurn: async (args) => {
+      seenArgs = args;
+      return { outcome: 'spoke' };
+    },
+  });
+  const sleepCalls = [];
+  const sleep = async (ms) => {
+    sleepCalls.push(ms);
+  };
+  const handler = makeHandler({ turns, sleep, rng: scripted([0.5, 0.99]) });
+
+  const guild = fakeGuild();
+  const channel = fakeChannelWithMessage('c1', guild, 'm1');
+  const message = directPingMessage({ guild, channel, channelId: 'c1' });
+  await handler(message);
+
+  assert.equal(seenArgs, null, 'must not run immediately while busy elsewhere');
+
+  await handler.drainPending();
+
+  assert.ok(seenArgs, 'expected the deferred turn to run once drained');
+  assert.equal(seenArgs.channel, channel);
+  assert.equal(seenArgs.mode, 'reply');
+  assert.equal(seenArgs.triggerKind, 'mention');
+  assert.equal(seenArgs.trigger.content, 'γεια');
+  assert.deepEqual(sleepCalls, [5500], 'between(switchDelayMs=[2000,9000], rng=0.5) -- the human switch pause');
+});
+
+test('events: a name trigger elsewhere while busy is dropped, not deferred', async () => {
+  let called = false;
+  const turns = fakeTurns({
+    isBusy: () => false,
+    isAnyBusy: () => true,
+    runTurn: async () => {
+      called = true;
+      return { outcome: 'spoke' };
+    },
+  });
+  const config = baseConfig({ bot: { nameTriggers: ['νεπτούνια'] } });
+  // No rng value queued: a name trigger must never reach decideMention while busy elsewhere.
+  const handler = makeHandler({ config, turns, rng: scripted([]) });
+
+  const message = fakeMessage({ id: 'm1', cleanContent: 'γεια νεπτούνια όμορφη' });
+  await handler(message);
+  assert.equal(called, false);
+
+  await handler.drainPending();
+  assert.equal(called, false, 'nothing was queued for a name trigger');
+});
+
+test('events: a newer direct ping in the same channel replaces the older pending one', async () => {
+  let seenArgs = null;
+  const turns = fakeTurns({
+    isBusy: () => false,
+    isAnyBusy: () => true,
+    runTurn: async (args) => {
+      seenArgs = args;
+      return { outcome: 'spoke' };
+    },
+  });
+  const handler = makeHandler({ turns, sleep: async () => {}, rng: scripted([0.5, 0.99]) });
+
+  const guild = fakeGuild();
+  const channel = fakeChannelWithMessage('c1', guild, 'm2');
+  channel.messages.cache.set('m1', {});
+
+  await handler(directPingMessage({ id: 'm1', guild, channel, channelId: 'c1', cleanContent: 'first' }));
+  await handler(directPingMessage({ id: 'm2', guild, channel, channelId: 'c1', cleanContent: 'second' }));
+
+  await handler.drainPending();
+
+  assert.ok(seenArgs);
+  assert.equal(seenArgs.trigger.id, 'm2', 'the newer ping replaces the older one in the same channel');
+  assert.equal(seenArgs.trigger.content, 'second');
+});
+
+test('events: mention.maxPending caps distinct pending channels, dropping the oldest', async () => {
+  const config = baseConfig({ mention: { maxPending: 2 } });
+  const answeredChannels = [];
+  const turns = fakeTurns({
+    isBusy: () => false,
+    isAnyBusy: () => true,
+    runTurn: async (args) => {
+      answeredChannels.push(args.channel.id);
+      return { outcome: 'spoke' };
+    },
+  });
+  const handler = makeHandler({ config, turns, sleep: async () => {}, rng: scripted([0.5, 0.99, 0.5, 0.99]) });
+
+  const guild = fakeGuild();
+  for (const id of ['c1', 'c2', 'c3']) {
+    const channel = fakeChannelWithMessage(id, guild, `m-${id}`);
+    await handler(directPingMessage({ id: `m-${id}`, guild, channel, channelId: id, cleanContent: id }));
+  }
+
+  await handler.drainPending();
+
+  assert.deepEqual(answeredChannels.sort(), ['c2', 'c3'], 'c1 (the oldest) was evicted once maxPending=2 was exceeded');
+});
+
+test('events: a pending ping past mention.pendingMinutes is discarded, not answered', async () => {
+  let called = false;
+  const turns = fakeTurns({
+    isBusy: () => false,
+    isAnyBusy: () => true,
+    runTurn: async () => {
+      called = true;
+      return { outcome: 'spoke' };
+    },
+  });
+  const clock = mutableNow(0);
+  // No rng queued: an expired ping must be discarded before ever reaching between()/decideMention.
+  const handler = makeHandler({ turns, sleep: async () => {}, now: clock, rng: scripted([]) });
+
+  const guild = fakeGuild();
+  const channel = fakeChannelWithMessage('c1', guild, 'm1');
+  await handler(directPingMessage({ guild, channel, channelId: 'c1' }));
+
+  clock.set(11 * 60_000); // past the default 10-minute mention.pendingMinutes
+  await handler.drainPending();
+
+  assert.equal(called, false);
+});
+
+test('events: the ignore decision is rolled at pick-up time, not when the ping arrived', async () => {
+  let respondedArgs = null;
+  const turns = fakeTurns({
+    isBusy: () => false,
+    isAnyBusy: () => true,
+    runTurn: async (args) => {
+      respondedArgs = args;
+      return { outcome: 'spoke' };
+    },
+  });
+  // Exactly one value for the switch-delay sample, one for decideMention -- if
+  // arrival wrongly rolled decideMention too, this queue would run out and throw.
+  const handler = makeHandler({ turns, sleep: async () => {}, rng: scripted([0.5, 0]) });
+
+  const guild = fakeGuild();
+  const channel = fakeChannelWithMessage('c1', guild, 'm1');
+  await assert.doesNotReject(() => handler(directPingMessage({ guild, channel, channelId: 'c1' })));
+
+  await handler.drainPending();
+
+  assert.equal(respondedArgs, null, 'rng=0 at pick-up time is below the default ignoreChance (0.12): ignored');
+});
+
+test('events: a pending ping whose message no longer exists is dropped silently', async () => {
+  let called = false;
+  const turns = fakeTurns({
+    isBusy: () => false,
+    isAnyBusy: () => true,
+    runTurn: async () => {
+      called = true;
+      return { outcome: 'spoke' };
+    },
+  });
+  const handler = makeHandler({ turns, sleep: async () => {}, rng: scripted([0.5]) });
+
+  const guild = fakeGuild();
+  // Default fakeChannel: empty cache, fetch resolves null -- the message is gone.
+  const channel = fakeChannel('c1', guild);
+  await handler(directPingMessage({ guild, channel, channelId: 'c1' }));
+
+  await handler.drainPending();
+
+  assert.equal(called, false);
+});
+
+test('events: a pending ping whose channel lost send permission is dropped silently', async () => {
+  let called = false;
+  let canSendNow = true;
+  const turns = fakeTurns({
+    isBusy: () => false,
+    isAnyBusy: () => true,
+    runTurn: async () => {
+      called = true;
+      return { outcome: 'spoke' };
+    },
+  });
+  const handler = makeHandler({ turns, sleep: async () => {}, rng: scripted([0.5]) });
+
+  const guild = fakeGuild();
+  const channel = fakeChannelWithMessage('c1', guild, 'm1', { permissionsFor: () => ({ has: () => canSendNow }) });
+  await handler(directPingMessage({ guild, channel, channelId: 'c1' }));
+
+  canSendNow = false; // permission lost while the ping was pending
+  await handler.drainPending();
+
+  assert.equal(called, false);
+});
+
+test('events: several pending pings drain oldest first, one at a time (never concurrently)', async () => {
+  const order = [];
+  let concurrent = 0;
+  let sawConcurrency = false;
+  const turns = fakeTurns({
+    isBusy: () => false,
+    isAnyBusy: () => true,
+    runTurn: async (args) => {
+      concurrent += 1;
+      if (concurrent > 1) sawConcurrency = true;
+      order.push(args.channel.id);
+      await Promise.resolve();
+      concurrent -= 1;
+      return { outcome: 'spoke' };
+    },
+  });
+  let t = 1_000_000;
+  const now = () => (t += 1);
+  const handler = makeHandler({ turns, sleep: async () => {}, now, rng: scripted([0.5, 0.99, 0.5, 0.99, 0.5, 0.99]) });
+
+  const guild = fakeGuild();
+  for (const id of ['c1', 'c2', 'c3']) {
+    const channel = fakeChannelWithMessage(id, guild, `m-${id}`);
+    await handler(directPingMessage({ id: `m-${id}`, guild, channel, channelId: id, cleanContent: id }));
+  }
+
+  await handler.drainPending();
+
+  assert.deepEqual(order, ['c1', 'c2', 'c3'], 'oldest arrival first');
+  assert.equal(sawConcurrency, false, 'never more than one deferred turn in flight at once');
+});
+
+test('events: mention.oneAtATime=false runs the turn immediately even while busy elsewhere (today\'s behaviour)', async () => {
+  let called = false;
+  const config = baseConfig({ mention: { oneAtATime: false } });
+  const turns = fakeTurns({
+    isBusy: () => false,
+    isAnyBusy: () => true,
+    runTurn: async () => {
+      called = true;
+      return { outcome: 'spoke' };
+    },
+  });
+  const handler = makeHandler({ config, turns, rng: scripted([0.99]) });
+
+  await handler(directPingMessage());
+  await Promise.resolve();
+
+  assert.equal(called, true, 'oneAtATime=false: nothing is ever deferred, exactly like before F28');
+});
+
+test('events: a hot change to mention.oneAtATime is picked up without recreating the handler', async () => {
+  const config = baseConfig();
+  const answeredChannels = [];
+  const turns = fakeTurns({
+    isBusy: () => false,
+    isAnyBusy: () => true,
+    runTurn: async (args) => {
+      answeredChannels.push(args.channel.id);
+      return { outcome: 'spoke' };
+    },
+  });
+  const sleepCalls = [];
+  const sleep = async (ms) => {
+    sleepCalls.push(ms);
+  };
+  // 1st value: channel "b"'s IMMEDIATE decideMention (oneAtATime off, no delay involved).
+  // 2nd value: the switch-delay sample for "a" at drain time (irrelevant here, switchDelayMs is fixed).
+  // 3rd value: "a"'s decideMention at drain time.
+  const handler = makeHandler({ config, turns, sleep, rng: scripted([0.5, 0.5, 0.99]) });
+
+  const guild = fakeGuild();
+  const channelA = fakeChannelWithMessage('a', guild, 'm-a');
+  await handler(directPingMessage({ id: 'm-a', guild, channel: channelA, channelId: 'a', cleanContent: 'a' }));
+  assert.equal(answeredChannels.length, 0, 'oneAtATime true (default): deferred, not run immediately');
+
+  config.mention.oneAtATime = false;
+  const channelB = fakeChannelWithMessage('b', guild, 'm-b');
+  await handler(directPingMessage({ id: 'm-b', guild, channel: channelB, channelId: 'b', cleanContent: 'b' }));
+  await Promise.resolve();
+  assert.deepEqual(answeredChannels, ['b'], 'oneAtATime=false: runs immediately, ignoring busy elsewhere');
+
+  config.mention.oneAtATime = true;
+  config.mention.switchDelayMs = [1234, 1234];
+  await handler.drainPending();
+  assert.deepEqual(sleepCalls, [1234], 'the new switchDelayMs is read fresh at drain time');
+  assert.deepEqual(answeredChannels.sort(), ['a', 'b'], 'the earlier pending ping for "a" is still answered once re-enabled');
+});
+
+test('events: a hot change to mention.pendingMinutes is picked up (a shorter window expires sooner)', async () => {
+  let called = false;
+  const config = baseConfig();
+  const turns = fakeTurns({
+    isBusy: () => false,
+    isAnyBusy: () => true,
+    runTurn: async () => {
+      called = true;
+      return { outcome: 'spoke' };
+    },
+  });
+  const clock = mutableNow(0);
+  const handler = makeHandler({ config, turns, sleep: async () => {}, now: clock, rng: scripted([]) });
+
+  const guild = fakeGuild();
+  const channel = fakeChannelWithMessage('c1', guild, 'm1');
+  await handler(directPingMessage({ guild, channel, channelId: 'c1' }));
+
+  config.mention.pendingMinutes = 1; // was 10
+  clock.set(90_000); // 1.5 minutes later -- expired only under the new, shorter window
+  await handler.drainPending();
+
+  assert.equal(called, false);
+});
+
+test('events: a hot change to mention.maxPending is picked up', async () => {
+  const config = baseConfig({ mention: { maxPending: 1 } });
+  const answeredChannels = [];
+  const turns = fakeTurns({
+    isBusy: () => false,
+    isAnyBusy: () => true,
+    runTurn: async (args) => {
+      answeredChannels.push(args.channel.id);
+      return { outcome: 'spoke' };
+    },
+  });
+  const handler = makeHandler({ config, turns, sleep: async () => {}, rng: scripted([0.5, 0.99, 0.5, 0.99]) });
+
+  const guild = fakeGuild();
+  const channelA = fakeChannelWithMessage('a', guild, 'm-a');
+  await handler(directPingMessage({ id: 'm-a', guild, channel: channelA, channelId: 'a', cleanContent: 'a' }));
+
+  config.mention.maxPending = 2; // raise the cap live, before "b" arrives
+  const channelB = fakeChannelWithMessage('b', guild, 'm-b');
+  await handler(directPingMessage({ id: 'm-b', guild, channel: channelB, channelId: 'b', cleanContent: 'b' }));
+
+  await handler.drainPending();
+
+  assert.deepEqual(answeredChannels.sort(), ['a', 'b'], 'both fit once the cap was raised live, so "a" was never evicted');
 });

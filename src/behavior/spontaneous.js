@@ -15,6 +15,7 @@ import { between } from './turn.js';
 import { log } from '../log.js';
 
 const MINUTE = 60_000;
+const HOUR = 60 * MINUTE;
 const DAY = 24 * 60 * MINUTE;
 const REWAKE_MINUTES = [10, 40]; // how soon to try again after a turn found "nothing to say" / no channel
 
@@ -98,6 +99,20 @@ export function chooseMode(history, now, cfg, rng) {
 }
 
 /**
+ * Whether `channel`'s last message is older than `cfg.maxChannelSilenceHours`
+ * -- such a channel is never a candidate for a spontaneous turn (interject or
+ * initiate) started on the persona's own initiative. A `maxChannelSilenceHours`
+ * that is not a positive number means no limit (today's behaviour): a direct
+ * ping in a dead channel is still answered elsewhere, this only concerns
+ * starting on her own.
+ */
+export function isChannelDead(channel, cfg, now) {
+  const maxHours = cfg.maxChannelSilenceHours;
+  if (!(typeof maxHours === 'number' && maxHours > 0)) return false;
+  return now - lastActivity(channel) > maxHours * HOUR;
+}
+
+/**
  * Pick a channel to speak in, favouring recent activity without always
  * picking the same one. `candidates = [{ channel, lastActivity }]`.
  */
@@ -132,18 +147,24 @@ export function createSpontaneous({ hot, store, client, turns, getGuildId, rng =
   const eavesdropTimers = new Set();
 
   function passesFilters(channel, config, cfg, t) {
+    // One attention (mention.oneAtATime, default on): while a turn is
+    // running anywhere, a spontaneous tick or an eavesdrop must treat every
+    // channel as unavailable, not just the one already busy -- runTurn
+    // enforces the same rail itself, this just avoids attempting it.
+    const oneAtATime = config.mention?.oneAtATime !== false;
     return (
       channelAllowed(channel, config.bot) &&
       canSend(channel) &&
       (cfg.channels.length === 0 || cfg.channels.includes(channel.id)) &&
       t - turns.lastPostAt(channel.id) >= cfg.minGapMinutes * MINUTE &&
-      !turns.isBusy(channel.id)
+      !turns.isBusy(channel.id) &&
+      !(oneAtATime && turns.isAnyBusy())
     );
   }
 
   function channelCandidates(guild, config, cfg, t) {
     return readableChannels(guild, config.bot)
-      .filter((channel) => passesFilters(channel, config, cfg, t))
+      .filter((channel) => passesFilters(channel, config, cfg, t) && !isChannelDead(channel, cfg, t))
       .map((channel) => ({ channel, lastActivity: lastActivity(channel) }));
   }
 

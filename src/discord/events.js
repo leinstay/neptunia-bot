@@ -10,6 +10,8 @@
 import { normalizeMessage, channelAllowed, canSend } from './collect.js';
 import { collectPictures, collectEmojiItems, isDescribable } from './media.js';
 import { detectTrigger, strippedLength, decideMention, repeatWindowMs } from '../behavior/mention.js';
+import { addPending, isExpired, popOldest } from '../behavior/pending.js';
+import { between } from '../behavior/turn.js';
 import { log } from '../log.js';
 
 // The most pictures one observed message warms the describer cache for --
@@ -37,7 +39,12 @@ const MAX_WARM_PICTURES_PER_MESSAGE = 2;
  *   triggers a new request.
  * @param {() => number} [deps.rng]
  * @param {() => number} [deps.now]
- * @returns {(message: import('discord.js').Message) => Promise<void>}
+ * @param {(ms: number) => Promise<void>} [deps.sleep]  Used only for the "human switch pause"
+ *   before answering a deferred pending ping (mention.switchDelayMs) -- see drainPending below.
+ * @returns {(message: import('discord.js').Message) => Promise<void>} Also carries a
+ *   `.drainPending()` method: called once a turn finishes anywhere (src/index.js wires it to
+ *   src/behavior/turn.js's `setOnIdle`, in the same `finally` that frees the channel) to answer
+ *   the oldest non-expired pending direct ping, one at a time, after a human switch pause.
  */
 export function createMessageHandler({
   hot,
@@ -52,6 +59,7 @@ export function createMessageHandler({
   describer,
   rng = Math.random,
   now = Date.now,
+  sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 }) {
   async function resolveReference(message, selfId) {
     const refId = message.reference?.messageId;
@@ -75,6 +83,109 @@ export function createMessageHandler({
       .slice(0, MAX_WARM_PICTURES_PER_MESSAGE);
     if (candidates.length === 0) return;
     describer.describeMany(guildId, candidates).catch((err) => log.warn('events: media cache warm-up failed', { error: err }));
+  }
+
+  // --- One attention (mention.oneAtATime): pending direct pings ------------
+  // A @mention or a reply to the persona that arrives while a turn is
+  // running in another channel is remembered here instead of dropped; see
+  // src/behavior/pending.js for the plain queue operations. Never persisted.
+  let pendingList = [];
+  let draining = false; // guards against a re-entrant drainPending() call (see below)
+
+  /** Same cached-then-fetch existence check `resolveReference` uses, generalised to any message id. */
+  async function messageStillExists(channel, messageId) {
+    const cached = channel.messages.cache.get(messageId);
+    if (cached) return true;
+    const fetched = await channel.messages.fetch(messageId).catch(() => null);
+    return Boolean(fetched);
+  }
+
+  /**
+   * Remember a direct ping (mention/reply) that arrived while the persona's
+   * one attention is busy elsewhere. At most one per channel -- a newer ping
+   * replaces an older one already queued for the same channel -- and at most
+   * mention.maxPending channels; the oldest is evicted when full.
+   */
+  function enqueuePending(channel, trigger, kind) {
+    const maxPending = hot.config.mention.maxPending ?? 3;
+    const ping = { channelId: channel.id, channel, trigger, kind, arrivedAt: now() };
+    const { list, evicted } = addPending(pendingList, ping, maxPending);
+    pendingList = list;
+    log.info('mention: deferred', { channel: channel.id, kind, pending: pendingList.length });
+    if (evicted) log.info('mention: dropped (full)', { channel: evicted.channelId, kind: evicted.kind });
+  }
+
+  /**
+   * Answers pending direct pings, oldest first, one at a time, each after a
+   * human "switch" pause (mention.switchDelayMs) -- called once a turn
+   * finishes anywhere (src/index.js wires this to src/behavior/turn.js's
+   * `setOnIdle`, in the same `finally` that frees the channel). The ignore
+   * decision (decideMention) is rolled HERE, not when the ping arrived. A
+   * message deleted meanwhile, or a channel that lost send permission, is
+   * dropped silently. Guarded against re-entrancy: the turn this function
+   * itself starts also frees the channel through the very same `onIdle`,
+   * which would otherwise start a second overlapping drain.
+   */
+  async function drainPending() {
+    if (draining) return;
+    draining = true;
+    try {
+      while (pendingList.length > 0) {
+        const { ping, list } = popOldest(pendingList);
+        pendingList = list;
+        if (!ping) break;
+
+        const mentionCfg = hot.config.mention;
+        if (isExpired(ping, now(), mentionCfg.pendingMinutes ?? 10)) {
+          log.info('mention: expired', { channel: ping.channelId, kind: ping.kind });
+          continue;
+        }
+
+        log.info('mention: picked up', { channel: ping.channelId, kind: ping.kind });
+        await sleep(between(mentionCfg.switchDelayMs ?? [2000, 9000], rng));
+
+        if (!canSend(ping.channel)) continue;
+        if (!(await messageStillExists(ping.channel, ping.trigger.id))) continue;
+
+        const config = hot.config;
+        const features = config.features ?? {};
+        const memoryOn = features.memory !== false;
+        const relationshipsOn = features.relationships !== false;
+        const guildId = ping.channel.guild.id;
+        const recentCalls = tagHistory.hit(ping.trigger.authorId, now(), repeatWindowMs(config.mention));
+        const selfName = ping.channel.guild.members.me?.displayName ?? client.user.username;
+        const affinityScore =
+          memoryOn && relationshipsOn ? store?.getUser?.(guildId, ping.trigger.authorId)?.affinity?.score : undefined;
+        const decision = decideMention({
+          kind: ping.kind,
+          textLength: strippedLength(ping.trigger.content, selfName),
+          recentCalls,
+          neverIgnore: config.mention.neverIgnore.includes(ping.trigger.authorId),
+          affinityScore,
+          cfg: config.mention,
+          rng,
+        });
+
+        log.info('mention: decided', {
+          kind: ping.kind,
+          reason: decision.reason,
+          ignoreChance: decision.ignoreChance,
+          author: ping.trigger.authorId,
+          channel: ping.channelId,
+          deferred: true,
+        });
+
+        if (decision.respond) {
+          try {
+            await turns.runTurn({ channel: ping.channel, mode: 'reply', trigger: ping.trigger, triggerKind: ping.kind });
+          } catch (err) {
+            log.error('events: deferred reply turn failed', { channel: ping.channelId, error: err });
+          }
+        }
+      }
+    } finally {
+      draining = false;
+    }
   }
 
   async function onMessage(message) {
@@ -154,6 +265,23 @@ export function createMessageHandler({
       // 11. The persona was called: decide whether to actually answer.
       if (!canSend(message.channel)) return;
 
+      // 11b. One attention (mention.oneAtATime, default on): while a turn is
+      // running in ANOTHER channel, a direct call (mention/reply) is worth
+      // remembering as pending instead of dropping -- everything else (a
+      // name trigger) is simply skipped, same as the same-channel busy drop
+      // further below (unchanged: runTurn itself returns 'busy' for it).
+      const oneAtATime = config.mention.oneAtATime !== false;
+      const sameChannelBusy = turns.isBusy(message.channel.id);
+      const busyElsewhere = oneAtATime && !sameChannelBusy && turns.isAnyBusy();
+      if (busyElsewhere) {
+        if (kind === 'mention' || kind === 'reply') {
+          enqueuePending(message.channel, normalized, kind);
+        } else {
+          log.info('mention: dropped (busy)', { channel: message.channel.id, kind });
+        }
+        return;
+      }
+
       const recentCalls = tagHistory.hit(normalized.authorId, now(), repeatWindowMs(config.mention));
       const selfName = message.guild.members.me?.displayName ?? client.user.username;
       const relationshipsOn = features.relationships !== false;
@@ -187,5 +315,6 @@ export function createMessageHandler({
     }
   }
 
+  onMessage.drainPending = drainPending;
   return onMessage;
 }

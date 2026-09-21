@@ -61,7 +61,11 @@
     "nameTriggerChance": 0.5,
     "neverIgnore": [],
     "affinityIgnoreBonus": 0.3,
-    "affinityLikeBonus": 0.08
+    "affinityLikeBonus": 0.08,
+    "oneAtATime": true,
+    "pendingMinutes": 10,
+    "maxPending": 3,
+    "switchDelayMs": [2000, 9000]
   },
   "typing": {
     "reactionDelayMs": [800, 4000],
@@ -83,7 +87,8 @@
     "initiateChance": 0.35,
     "eavesdropChance": 0.02,
     "eavesdropDelayMs": [5000, 40000],
-    "minGapMinutes": 12
+    "minGapMinutes": 12,
+    "maxChannelSilenceHours": 72
   },
   "memory": {
     "model": null,

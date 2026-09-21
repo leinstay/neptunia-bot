@@ -113,6 +113,10 @@ const onMessage = createMessageHandler({
   describer,
 });
 
+// One attention (mention.oneAtATime): once a turn frees its channel, answer
+// the oldest pending direct ping it may have collected while busy elsewhere.
+turns.setOnIdle(() => onMessage.drainPending());
+
 const onInteraction = createInteractionHandler({ hot, admin, getGuildId });
 
 const timers = [];

@@ -183,6 +183,10 @@ Settings for the media describer (`features.mediaDescriptions`).
 | `neverIgnore` | `[]` | User IDs never ignored |
 | `affinityIgnoreBonus` | `0.3` | Max added ignore at affinity -100 |
 | `affinityLikeBonus` | `0.08` | Max reduced ignore at affinity +100 |
+| `oneAtATime` | `true` | One reply at a time across the server |
+| `maxPending` | `3` | Channels that can hold a direct ping while busy |
+| `pendingMinutes` | `10` | Minutes before a held ping expires |
+| `switchDelayMs` | `[2000, 9000]` | Pause before answering in the next channel (ms) |
 
 ### `typing`
 
@@ -199,6 +203,7 @@ Settings for the media describer (`features.mediaDescriptions`).
 | Key | Default | Meaning |
 |---|---|---|
 | `channels` | `[]` | Allowed channels |
+| `maxChannelSilenceHours` | `72` | Channel silence that blocks spontaneous messages (hours); 0 = no limit |
 | `minIntervalMinutes` | `25` | Min check interval (min) |
 | `maxIntervalMinutes` | `420` | Max check interval (min) |
 | `burstChance` | `0.15` | Burst follow-up chance |
@@ -347,7 +352,9 @@ One Discord slash command, `/nep` (the name comes from `bot.commandName`). Guild
 
 ## How a turn works
 
-A message passes through guild, channel and self-message filters. If the persona was called (@mention, reply, or name trigger), an ignore heuristic rolls against a base chance adjusted for bare pings, repeated tags, spam, and the caller's relationship score. Spontaneous turns fire from a chaotic timer or the per-message eavesdrop chance.
+A message passes through guild, channel and self-message filters. If the persona was called (@mention, reply, or name trigger), an ignore heuristic rolls against a base chance adjusted for bare pings, repeated tags, spam, and the caller's relationship score. Spontaneous turns fire from a chaotic timer or the per-message eavesdrop chance. The persona will not speak unprompted in a channel silent for more than `spontaneous.maxChannelSilenceHours` hours; a direct ping there is still answered.
+
+The persona writes one reply at a time across the server. A ping in the same channel while it is already answering is missed; the missed messages are in the transcript when the next reply is built. A direct ping in another channel (an @mention or reply to its message, not a name trigger) is held, one per channel, in up to `mention.maxPending` channels for `mention.pendingMinutes` minutes; a newer ping in the same pending channel replaces the older one. When the current reply finishes, the persona switches channel after a short pause (`mention.switchDelayMs`) and answers from the conversation as it stands; the usual ignore chance applies. Name triggers and eavesdrop hits that arrive while busy are skipped. With `mention.oneAtATime: false` every channel is handled independently. The persona never writes or reacts where it lacks Send Messages, checking before it spends an LLM request; such channels are still read and remembered.
 
 The turn collects the channel transcript and neighbouring channels, then builds one LLM request inside the token budget. Sections fill in priority order: system prompt and task are never cut; then the caller's profile, server habits and self-facts, the channel map, the transcript (newest first), other profiles, and neighbouring channels. The model sees a map of the server's channels (purpose, topics, tone, activity level), with the current channel marked.
 

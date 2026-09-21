@@ -1,13 +1,19 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { SnowflakeUtil } from 'discord.js';
 import {
   nextDelayMs,
   isActiveHour,
   msUntilActive,
   chooseMode,
   pickChannel,
+  isChannelDead,
   createSpontaneous,
 } from '../src/behavior/spontaneous.js';
+
+function snowflake(ts) {
+  return SnowflakeUtil.generate({ timestamp: ts }).toString();
+}
 
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
@@ -236,11 +242,12 @@ function fakeGuild(id) {
   return guild;
 }
 
-function baseConfig(spontaneousOverrides = {}, features = {}) {
+function baseConfig(spontaneousOverrides = {}, features = {}, mention) {
   return {
     bot: { timezone: 'UTC', channels: { allow: [], deny: [] } },
     features,
     spontaneous: { ...SPONTANEOUS_CFG, ...spontaneousOverrides },
+    ...(mention ? { mention } : {}),
   };
 }
 
@@ -259,11 +266,12 @@ function fakeStore(initialData = {}) {
   };
 }
 
-function fakeTurns({ runTurn } = {}) {
+function fakeTurns({ runTurn, isBusy, isAnyBusy, lastPostAt } = {}) {
   return {
     runTurn: runTurn ?? (async () => ({ outcome: 'spoke' })),
-    isBusy: () => false,
-    lastPostAt: () => 0,
+    isBusy: isBusy ?? (() => false),
+    isAnyBusy: isAnyBusy ?? (() => false),
+    lastPostAt: lastPostAt ?? (() => 0),
   };
 }
 
@@ -610,4 +618,205 @@ test('stop: clears pending eavesdrop timers without throwing', () => {
     turns: fakeTurns(),
   });
   assert.doesNotThrow(() => spontaneous.stop());
+});
+
+// ---------------------------------------------------------------------------
+// F28: dead channels (spontaneous.maxChannelSilenceHours) never start a
+// spontaneous turn on their own -- a direct ping there is unaffected (that
+// path never goes through channelCandidates at all).
+
+test('isChannelDead: silent longer than maxChannelSilenceHours is dead', () => {
+  const now = 1_000_000_000;
+  const channel = { lastMessageId: snowflake(now - 100 * HOUR) };
+  assert.equal(isChannelDead(channel, { maxChannelSilenceHours: 72 }, now), true);
+});
+
+test('isChannelDead: within the window is not dead', () => {
+  const now = 1_000_000_000;
+  const channel = { lastMessageId: snowflake(now - 10 * HOUR) };
+  assert.equal(isChannelDead(channel, { maxChannelSilenceHours: 72 }, now), false);
+});
+
+test('isChannelDead: a non-positive or missing value means no limit', () => {
+  const now = 1_000_000_000;
+  const ancientChannel = { lastMessageId: snowflake(now - 5000 * HOUR) };
+  assert.equal(isChannelDead(ancientChannel, { maxChannelSilenceHours: 0 }, now), false);
+  assert.equal(isChannelDead(ancientChannel, { maxChannelSilenceHours: -5 }, now), false);
+  assert.equal(isChannelDead(ancientChannel, {}, now), false);
+});
+
+test('tick: a dead channel is never a candidate, a fresh one still is', async () => {
+  const guild = fakeGuild('g1');
+  const t = Date.UTC(2026, 0, 5, 12, 0, 0);
+  const dead = fakeChannel('dead', guild, { lastMessageId: snowflake(t - 100 * HOUR) });
+  const fresh = fakeChannel('fresh', guild, { lastMessageId: snowflake(t - HOUR) });
+  guild.channels.cache.set(dead.id, dead);
+  guild.channels.cache.set(fresh.id, fresh);
+  const client = { guilds: { cache: new Map([[guild.id, guild]]) } };
+  const store = fakeStore({ spontaneous: { g1: t } });
+  let seenChannel = null;
+  const turns = fakeTurns({ runTurn: async ({ channel }) => { seenChannel = channel; return { outcome: 'spoke' }; } });
+
+  const spontaneous = createSpontaneous({
+    hot: { config: baseConfig({ maxChannelSilenceHours: 72 }) },
+    store,
+    client,
+    turns,
+    getGuildId: () => 'g1',
+    rng: () => 0.1,
+    now: () => t,
+  });
+  await spontaneous.tick();
+
+  assert.equal(seenChannel, fresh, 'the dead channel must never be picked');
+});
+
+test('tick: every channel dead means no candidates -- "not now" without breaking the schedule', async () => {
+  const guild = fakeGuild('g1');
+  const t = Date.UTC(2026, 0, 5, 12, 0, 0);
+  const dead = fakeChannel('dead', guild, { lastMessageId: snowflake(t - 200 * HOUR) });
+  guild.channels.cache.set(dead.id, dead);
+  const client = { guilds: { cache: new Map([[guild.id, guild]]) } };
+  const store = fakeStore({ spontaneous: { g1: t } });
+  let calls = 0;
+  const turns = fakeTurns({ runTurn: async () => { calls += 1; return { outcome: 'spoke' }; } });
+
+  const spontaneous = createSpontaneous({
+    hot: { config: baseConfig({ maxChannelSilenceHours: 72 }) },
+    store,
+    client,
+    turns,
+    getGuildId: () => 'g1',
+    rng: () => 0.5,
+    now: () => t,
+  });
+  await spontaneous.tick();
+
+  assert.equal(calls, 0);
+  assert.ok(store.state.data.spontaneous.g1 > t, 'rescheduled (the pull-in path), the periodic schedule is not broken');
+});
+
+test('tick: a non-positive maxChannelSilenceHours keeps today\'s behaviour (an old channel is still a candidate)', async () => {
+  const guild = fakeGuild('g1');
+  const t = Date.UTC(2026, 0, 5, 12, 0, 0);
+  const old = fakeChannel('old', guild, { lastMessageId: snowflake(t - 5000 * HOUR) });
+  guild.channels.cache.set(old.id, old);
+  const client = { guilds: { cache: new Map([[guild.id, guild]]) } };
+  const store = fakeStore({ spontaneous: { g1: t } });
+  let seenChannel = null;
+  const turns = fakeTurns({ runTurn: async ({ channel }) => { seenChannel = channel; return { outcome: 'spoke' }; } });
+
+  const spontaneous = createSpontaneous({
+    hot: { config: baseConfig({ maxChannelSilenceHours: 0 }) },
+    store,
+    client,
+    turns,
+    getGuildId: () => 'g1',
+    rng: () => 0.1,
+    now: () => t,
+  });
+  await spontaneous.tick();
+
+  assert.equal(seenChannel, old);
+});
+
+test('tick: a hot change to maxChannelSilenceHours is picked up without recreating the scheduler', async () => {
+  const guild = fakeGuild('g1');
+  const t0 = Date.UTC(2026, 0, 5, 12, 0, 0);
+  const old = fakeChannel('old', guild, { lastMessageId: snowflake(t0 - 100 * HOUR) });
+  guild.channels.cache.set(old.id, old);
+  const client = { guilds: { cache: new Map([[guild.id, guild]]) } };
+  const store = fakeStore({ spontaneous: { g1: t0 } });
+  const turns = fakeTurns();
+  const hot = { config: baseConfig({ maxChannelSilenceHours: 0 }) };
+  let now = t0;
+
+  const spontaneous = createSpontaneous({ hot, store, client, turns, getGuildId: () => 'g1', rng: () => 0.1, now: () => now });
+
+  let seenChannel = null;
+  turns.runTurn = async ({ channel }) => {
+    seenChannel = channel;
+    return { outcome: 'spoke' };
+  };
+  await spontaneous.tick();
+  assert.equal(seenChannel, old, 'no limit yet: the old channel is a candidate');
+
+  hot.config = baseConfig({ maxChannelSilenceHours: 72 });
+  store.state.data.spontaneous.g1 = now; // due again
+  seenChannel = null;
+  await spontaneous.tick();
+  assert.equal(seenChannel, null, 'now limited: the same old channel is no longer a candidate');
+});
+
+// ---------------------------------------------------------------------------
+// F28: one attention (mention.oneAtATime) -- while a turn is running
+// anywhere, the spontaneous scheduler treats every channel as unavailable.
+
+test('tick: turns.isAnyBusy() true blocks every channel when oneAtATime is on (default) -- "not now"', async () => {
+  const guild = fakeGuild('g1');
+  const t = Date.UTC(2026, 0, 5, 12, 0, 0);
+  const channel = fakeChannel('c1', guild, { lastMessageId: snowflake(t - MINUTE) });
+  guild.channels.cache.set(channel.id, channel);
+  const client = { guilds: { cache: new Map([[guild.id, guild]]) } };
+  const store = fakeStore({ spontaneous: { g1: t } });
+  let calls = 0;
+  const turns = fakeTurns({
+    isAnyBusy: () => true,
+    runTurn: async () => { calls += 1; return { outcome: 'spoke' }; },
+  });
+
+  const spontaneous = createSpontaneous({ hot: { config: baseConfig() }, store, client, turns, getGuildId: () => 'g1', rng: () => 0.5, now: () => t });
+  await spontaneous.tick();
+
+  assert.equal(calls, 0);
+  assert.ok(store.state.data.spontaneous.g1 > t, 'the periodic schedule keeps advancing');
+});
+
+test('tick: mention.oneAtATime=false lets a spontaneous tick proceed even while busy elsewhere', async () => {
+  const guild = fakeGuild('g1');
+  const t = Date.UTC(2026, 0, 5, 12, 0, 0);
+  const channel = fakeChannel('c1', guild, { lastMessageId: snowflake(t - MINUTE) });
+  guild.channels.cache.set(channel.id, channel);
+  const client = { guilds: { cache: new Map([[guild.id, guild]]) } };
+  const store = fakeStore({ spontaneous: { g1: t } });
+  let seenChannel = null;
+  const turns = fakeTurns({
+    isAnyBusy: () => true,
+    runTurn: async ({ channel: ch }) => { seenChannel = ch; return { outcome: 'spoke' }; },
+  });
+
+  const spontaneous = createSpontaneous({
+    hot: { config: baseConfig({}, {}, { oneAtATime: false }) },
+    store,
+    client,
+    turns,
+    getGuildId: () => 'g1',
+    rng: () => 0.5,
+    now: () => t,
+  });
+  await spontaneous.tick();
+
+  assert.equal(seenChannel, channel);
+});
+
+test('onMessage (eavesdrop): does not schedule while busy elsewhere and oneAtATime is on', async () => {
+  const guild = fakeGuild('g1');
+  const channel = fakeChannel('c1', guild);
+  let calls = 0;
+  const turns = fakeTurns({ isAnyBusy: () => true, runTurn: async () => { calls += 1; return { outcome: 'spoke' }; } });
+  const now = () => Date.UTC(2026, 0, 5, 12, 0, 0);
+
+  const spontaneous = createSpontaneous({
+    hot: { config: eagerEavesdropConfig() },
+    store: fakeStore(),
+    client: {},
+    turns,
+    getGuildId: () => 'g1',
+    rng: () => 0,
+    now,
+  });
+  spontaneous.onMessage(channel, { self: false, bot: false });
+  await flushTimers();
+
+  assert.equal(calls, 0);
 });

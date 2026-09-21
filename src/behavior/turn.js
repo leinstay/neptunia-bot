@@ -100,6 +100,7 @@ export function createTurnRunner({
 }) {
   const busy = new Set();
   const lastPostAt = new Map(); // channelId -> ts of the persona's last message
+  let onIdle = null; // set via setOnIdle(); see the finally block of runTurn below
 
   /**
    * Post one readable mirror of a would-be action into `dryRunChannelId`, when
@@ -210,6 +211,13 @@ export function createTurnRunner({
    */
   async function runTurn({ channel, mode, trigger = null, triggerKind = null, chooseMode = null }) {
     if (busy.has(channel.id)) return { outcome: 'busy' };
+    // One attention (config.mention.oneAtATime, default on): while a turn is
+    // running anywhere else, nothing else may start. src/discord/events.js
+    // is the only caller that turns a direct ping caught by this into a
+    // pending one instead of just dropping it -- this rail applies to every
+    // caller (a reply, an interject, an initiate, an eavesdrop) alike.
+    const oneAtATime = hot.config.mention?.oneAtATime !== false;
+    if (oneAtATime && busy.size > 0) return { outcome: 'busy' };
     busy.add(channel.id);
     try {
       const config = hot.config;
@@ -360,13 +368,27 @@ export function createTurnRunner({
       return { outcome: 'error' };
     } finally {
       busy.delete(channel.id);
+      // Fire-and-forget, same as the caller of runTurn itself: whatever
+      // wants to run next (src/discord/events.js's pending-ping drain, wired
+      // in src/index.js) must never hold up -- or throw into -- the turn
+      // that just freed the channel.
+      if (onIdle) {
+        Promise.resolve()
+          .then(() => onIdle())
+          .catch((err) => log.warn('turn: onIdle failed', { error: err }));
+      }
     }
   }
 
   return {
     runTurn,
     isBusy: (channelId) => busy.has(channelId),
+    isAnyBusy: () => busy.size > 0,
     lastPostAt: (channelId) => lastPostAt.get(channelId) ?? 0,
     notePost: (channelId, ts) => lastPostAt.set(channelId, ts),
+    /** Called (never awaited by runTurn) every time a turn finishes anywhere, once the channel is freed. */
+    setOnIdle: (fn) => {
+      onIdle = fn;
+    },
   };
 }
