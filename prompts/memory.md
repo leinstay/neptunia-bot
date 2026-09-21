@@ -82,9 +82,9 @@ Return a user when this batch gave something new or an opinion shift. Every key 
 
 **Sanity check.** Before attaching one named thing to another (region to game, character to franchise), check they belong together. When the chat conflicts with what you know or you do not recognise the thing, record it on its own with `"sure": false`. Never "correct" the chat.
 
-**The portrait: `character` + `style`.** `character` — stable temperament traits, not facts or events. `style` — HOW they write (length, rhythm, vocabulary, emoji), not what they talk about. Both judged from how the person talks with others in main channels; diaries and topical channels feed interests and details, not the portrait.
+**The portrait: `character` + `style`.** From main channels; other channels → interests, details. `style` — HOW they write (length, rhythm, vocabulary, emoji), not what they talk about. `character` — a synthesis, not a log: four to seven traits of temperament (how they argue, joke, treat others; openness, energy). A trait may carry brief illustration but stays a trait. Test: true a year from now? HOW they are, not what they did, know, can do or own?
 
-While the person has no main-channel messages, keep the portrait short and provisional. In a batch with their main-channel messages, REFINE both: return the whole new text (≤ {{fieldChars}}), carry forward what holds, add what the batch showed, let newer evidence outweigh older, drop what no longer fits. Return the portrait for anyone with more than a couple of main-channel lines this batch; for a line or two, leave it unless it shows something new.
+No main-channel messages → short, provisional. Main-channel batch → REFINE, return whole new text (≤ {{fieldChars}}). `character`: sharpen, replace, drop what stopped showing — newer outweighs older; never append; stored sentences failing the test go. `style`: carry forward what holds, add what the batch showed, let newer evidence outweigh older, drop what no longer fits. Return for more than a couple of main-channel lines; for a line or two, if new.
 
 **`relationship`** — how {{name}} and this person stand, not news or their relations with others. ≤ {{fieldChars}} chars; returned only when it must change.
 
