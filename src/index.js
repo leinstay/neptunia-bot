@@ -17,6 +17,7 @@ import { createTurnRunner } from './behavior/turn.js';
 import { createSpontaneous } from './behavior/spontaneous.js';
 import { createMemoryUpdater } from './memory/update.js';
 import { createWarmup } from './memory/warmup.js';
+import { createBootstrap } from './memory/bootstrap.js';
 import { createDescriber } from './memory/describe.js';
 import { createImageFetcher } from './discord/fetch-image.js';
 import { createAdmin } from './admin.js';
@@ -89,14 +90,11 @@ const imageFetcher = createImageFetcher();
 const describer = createDescriber({ hot, store, llm, imageFetcher });
 const turns = createTurnRunner({ hot, store, llm, calibrator, client, describer, imageFetcher });
 const spontaneous = createSpontaneous({ hot, store, client, turns, getGuildId });
-const memory = createMemoryUpdater({
-  hot,
-  store,
-  llm,
-  calibrator,
-  getSelfName: (guildId) => client.guilds.cache.get(guildId)?.members.me?.displayName ?? client.user?.username ?? 'bot',
-});
+const getSelfName = (guildId) => client.guilds.cache.get(guildId)?.members.me?.displayName ?? client.user?.username ?? 'bot';
+const memory = createMemoryUpdater({ hot, store, llm, calibrator, getSelfName });
 const warmup = createWarmup({ hot, store, client, memory, getGuildId, describer });
+// F36 phase A: a read-only, sample-based memory preview -- writes nothing under data/.
+const bootstrap = createBootstrap({ hot, client, llm, calibrator, getSelfName });
 const tagHistory = createTagHistory();
 
 const onMessage = createMessageHandler({
@@ -130,6 +128,8 @@ const admin = createAdmin({
   pending: { clear: () => onMessage.clearPending() },
   // F35 (/nep ping): reaches each role's model directly through the same rails.
   llm,
+  // F36 phase A: the sample-based bootstrap preview.
+  bootstrap,
 });
 const onInteraction = createInteractionHandler({ hot, admin, getGuildId });
 

@@ -321,6 +321,7 @@ function makeAdmin(rootDir, extra = {}) {
     memory: extra.memory,
     pending: extra.pending,
     llm: extra.llm,
+    bootstrap: extra.bootstrap,
   });
   return { admin, hot, store };
 }
@@ -2564,4 +2565,139 @@ test('run: memory.show/lore.list/lore.show drop caches first while paused, so a 
 
   await admin.run('memory.affinity', { userId: '123' }, { guildId: 'g1' });
   assert.equal(store.dropCachesCalls, dropsAfterPause + 4);
+});
+
+// ---------------------------------------------------------------------------
+// bootstrap (F36 phase A) -- a read-only preview, never guarded by assertNotPaused()
+// ---------------------------------------------------------------------------
+
+function fakeBootstrap(overrides = {}) {
+  const calls = { peopleReport: 0, previewUser: 0, previewChannel: 0 };
+  return {
+    calls,
+    peopleReport: async () => {
+      calls.peopleReport += 1;
+      return (
+        overrides.peopleReport ?? {
+          ok: true,
+          people: [{ id: '1', name: 'Alice', messages: 40, firstTs: 1000, lastTs: 5000, byChannel: { c1: 40 } }],
+          totals: { channelsRead: 3, messagesRead: 500, belowThreshold: 2 },
+        }
+      );
+    },
+    previewUser: async (guildId, userId) => {
+      calls.previewUser += 1;
+      calls.lastUserId = userId;
+      return (
+        overrides.previewUser ?? {
+          ok: true,
+          member: { id: userId, name: 'Alice', messages: 40, firstTs: 1000, lastTs: 5000 },
+          sample: { ownCount: 10, contextCount: 5, channels: ['c1'] },
+          estimatedTokens: 1234,
+          usage: { prompt_tokens: 1000, completion_tokens: 200 },
+          result: {
+            character: 'friendly',
+            style: 'short',
+            interests: [{ topic: 'games', note: 'plays a lot', times: 3 }],
+            details: [],
+            episodes: [],
+            aliases: ['Al'],
+          },
+        }
+      );
+    },
+    previewChannel: async (guildId, channelId) => {
+      calls.previewChannel += 1;
+      calls.lastChannelId = channelId;
+      return (
+        overrides.previewChannel ?? {
+          ok: true,
+          channel: { id: channelId, name: 'general', category: 'Chat', topic: 'chit chat', isMain: false },
+          sample: { kept: 100, dropped: 0, total: 100 },
+          estimatedTokens: 500,
+          usage: { prompt_tokens: 400, completion_tokens: 50 },
+          result: { purpose: 'general chat', topics: 'everything', tone: 'casual' },
+        }
+      );
+    },
+  };
+}
+
+test('run: bootstrap.people/preview report "not available" when the dependency is absent', async () => {
+  const rootDir = makeRoot();
+  const { admin } = makeAdmin(rootDir);
+  assert.equal(await admin.run('bootstrap.people', {}, { guildId: 'g1' }), 'bootstrap is not available');
+  assert.equal(await admin.run('bootstrap.preview', { userId: '1' }, { guildId: 'g1' }), 'bootstrap is not available');
+});
+
+test('run: bootstrap.people formats the people list and totals', async () => {
+  const rootDir = makeRoot();
+  const bootstrap = fakeBootstrap();
+  const { admin } = makeAdmin(rootDir, { bootstrap });
+
+  const body = await admin.run('bootstrap.people', {}, { guildId: 'g1' });
+  assert.equal(bootstrap.calls.peopleReport, 1);
+  assert.ok(body.includes('Alice (id:1)'));
+  assert.ok(body.includes('channels read: 3'));
+  assert.ok(body.includes('messages read: 500'));
+  assert.ok(body.includes('people below the threshold: 2'));
+});
+
+test('run: bootstrap.preview requires exactly one of user/channel', async () => {
+  const rootDir = makeRoot();
+  const bootstrap = fakeBootstrap();
+  const { admin } = makeAdmin(rootDir, { bootstrap });
+
+  await assert.rejects(() => admin.run('bootstrap.preview', {}, { guildId: 'g1' }), /exactly one/);
+  await assert.rejects(() => admin.run('bootstrap.preview', { userId: '1', channelId: 'c1' }, { guildId: 'g1' }), /exactly one/);
+  assert.equal(bootstrap.calls.previewUser, 0);
+  assert.equal(bootstrap.calls.previewChannel, 0);
+});
+
+test('run: bootstrap.preview user: calls previewUser and formats the profile result', async () => {
+  const rootDir = makeRoot();
+  const bootstrap = fakeBootstrap();
+  const { admin } = makeAdmin(rootDir, { bootstrap });
+
+  const body = await admin.run('bootstrap.preview', { userId: '1' }, { guildId: 'g1' });
+  assert.equal(bootstrap.calls.previewUser, 1);
+  assert.equal(bootstrap.calls.lastUserId, '1');
+  assert.ok(body.includes('character: friendly'));
+  assert.ok(body.includes('games'));
+  assert.ok(body.includes('Al'));
+});
+
+test('run: bootstrap.preview channel: calls previewChannel and formats the channel result', async () => {
+  const rootDir = makeRoot();
+  const bootstrap = fakeBootstrap();
+  const { admin } = makeAdmin(rootDir, { bootstrap });
+
+  const body = await admin.run('bootstrap.preview', { channelId: 'c1' }, { guildId: 'g1' });
+  assert.equal(bootstrap.calls.previewChannel, 1);
+  assert.equal(bootstrap.calls.lastChannelId, 'c1');
+  assert.ok(body.includes('purpose: general chat'));
+});
+
+test('run: bootstrap.preview passes through a missing-prompt-file message unchanged', async () => {
+  const rootDir = makeRoot();
+  const bootstrap = fakeBootstrap({
+    previewUser: { ok: false, message: 'prompt file missing: prompts/profile.md is not configured yet' },
+  });
+  const { admin } = makeAdmin(rootDir, { bootstrap });
+
+  const body = await admin.run('bootstrap.preview', { userId: '1' }, { guildId: 'g1' });
+  assert.equal(body, 'prompt file missing: prompts/profile.md is not configured yet');
+});
+
+test('run: bootstrap.people/preview keep working while paused -- a read-only preview writes nothing under data/', async () => {
+  const rootDir = makeRoot();
+  const bootstrap = fakeBootstrap();
+  const { admin } = makeAdmin(rootDir, { bootstrap });
+
+  await admin.run('pause', {}, {});
+
+  await assert.doesNotReject(() => admin.run('bootstrap.people', {}, { guildId: 'g1' }));
+  await assert.doesNotReject(() => admin.run('bootstrap.preview', { userId: '1' }, { guildId: 'g1' }));
+  assert.equal(bootstrap.calls.peopleReport, 1);
+  assert.equal(bootstrap.calls.previewUser, 1);
 });

@@ -28,7 +28,17 @@ const REPLY_CHUNK_CHARS = 1900;
 const MAX_AUTOCOMPLETE_CHOICES = 25;
 
 /** Commands that may take long enough to need `deferReply` before `editReply`. */
-const SLOW_COMMANDS = new Set(['poke', 'warmup.plan', 'warmup.run', 'reload', 'pause', 'resume', 'ping']);
+const SLOW_COMMANDS = new Set([
+  'poke',
+  'warmup.plan',
+  'warmup.run',
+  'reload',
+  'pause',
+  'resume',
+  'ping',
+  'bootstrap.people',
+  'bootstrap.preview',
+]);
 
 const DISABLED_MESSAGE = 'Owner commands are disabled (features.adminCommands is off).';
 const NOT_ALLOWED_MESSAGE = 'Not allowed.';
@@ -387,6 +397,29 @@ export function buildCommandTree(commandName) {
             },
           ],
         },
+        {
+          type: SUBCOMMAND_GROUP,
+          name: 'bootstrap',
+          description: 'Sample-based memory bootstrap preview -- writes nothing under data/.',
+          options: [
+            { type: SUBCOMMAND, name: 'people', description: 'Who currently qualifies for the bootstrap sample.' },
+            {
+              type: SUBCOMMAND,
+              name: 'preview',
+              description: 'Preview a bootstrap profile/channel analysis (give exactly one of user/channel).',
+              options: [
+                { type: USER, name: 'user', description: 'Member to preview.', required: false },
+                {
+                  type: CHANNEL,
+                  name: 'channel',
+                  description: 'Channel to preview.',
+                  required: false,
+                  channel_types: [GUILD_TEXT],
+                },
+              ],
+            },
+          ],
+        },
       ],
     },
   ];
@@ -509,6 +542,11 @@ const OPTION_MAPPERS = {
   'warmup.depth': (options) => ({ messages: options.getInteger('messages', true) }),
   'warmup.budget': (options) => ({ tokens: options.getString('tokens', true) }),
   'warmup.output': (options) => ({ tokens: options.getInteger('tokens', true) }),
+  'bootstrap.people': () => ({}),
+  'bootstrap.preview': (options) => ({
+    userId: options.getUser('user')?.id,
+    channelId: options.getChannel('channel')?.id,
+  }),
 };
 
 function buildArgs(commandKey, interaction) {

@@ -124,5 +124,9 @@
   },
   "ping": {
     "prompt": "Reply with the single word pong."
+  },
+  "bootstrap": {
+    "ownMark": ">> ",
+    "contextMark": "(ctx) "
   }
 }

@@ -445,11 +445,15 @@ function writeLocalConfig(localPath, value) {
  *   (F30). Absent -> nothing to clear.
  * `llm` — from createLlm() (src/llm/openrouter.js), optional: `complete()`, used by `/nep ping`
  *   (F35) to reach each role's model directly. Absent -> `/nep ping` reports it is not available.
+ * `bootstrap` — from createBootstrap() (src/memory/bootstrap.js), optional: `peopleReport(guildId)`,
+ *   `previewUser(guildId, userId)`, `previewChannel(guildId, channelId)` — the sample-based
+ *   bootstrap PREVIEW (F36 phase A), writes nothing under data/. Absent -> every `bootstrap.*`
+ *   command reports it is not available.
  *
  * `run(commandKey, args, context)` throws a plain `Error` (operator-facing
  * message) on bad input; it never touches discord.js.
  */
-export function createAdmin({ hot, store, client, spontaneous, calibrator, getGuildId, warmup, turns, memory, pending, llm }) {
+export function createAdmin({ hot, store, client, spontaneous, calibrator, getGuildId, warmup, turns, memory, pending, llm, bootstrap }) {
   function isOwner(userId) {
     const owners = hot.config?.bot?.owners ?? [];
     return owners.map(String).includes(String(userId));
@@ -1457,6 +1461,104 @@ function warmupLocalConfigPath() {
     };
   }
 
+  // ---------------------------------------------------------------------
+  // bootstrap (F36 phase A): a read-only sample-based preview -- see the
+  // module header of src/memory/bootstrap.js. Never writes under data/, so
+  // unlike most commands here it is never guarded by assertNotPaused().
+  // ---------------------------------------------------------------------
+
+  /** `YYYY-MM-DD`, or `-` when `ts` is not a finite timestamp. */
+  function bootstrapDate(ts) {
+    return Number.isFinite(ts) ? new Date(ts).toISOString().slice(0, 10) : '-';
+  }
+
+  function formatBootstrapPeople(report) {
+    if (!report.ok) return report.message;
+    const lines = report.people.map((p, i) => {
+      const topChannels = Object.entries(p.byChannel)
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 3)
+        .map(([cid, count]) => `${cid}:${count}`)
+        .join(', ');
+      return `${i + 1}. ${p.name} (id:${p.id}) — ${p.messages} messages, ${bootstrapDate(p.firstTs)}..${bootstrapDate(p.lastTs)}, top channels: ${topChannels || '-'}`;
+    });
+    if (lines.length === 0) lines.push('(nobody currently qualifies)');
+    lines.push('');
+    lines.push(`channels read: ${report.totals.channelsRead}`);
+    lines.push(`messages read: ${report.totals.messagesRead}`);
+    lines.push(`people below the threshold: ${report.totals.belowThreshold}`);
+    return lines.join('\n');
+  }
+
+  function formatBootstrapProfilePreview(preview) {
+    if (!preview.ok) return preview.message;
+    const { member, sample, estimatedTokens, usage, result } = preview;
+    const usageLine = usage ? `${usage.prompt_tokens ?? '?'}/${usage.completion_tokens ?? '?'}` : '-';
+    return [
+      `member: ${member.name} (id:${member.id})`,
+      `messages in window: ${member.messages}, ${bootstrapDate(member.firstTs)}..${bootstrapDate(member.lastTs)}`,
+      `sample: ${sample.ownCount} own / ${sample.contextCount} context lines, channels: ${sample.channels.join(', ') || '-'}`,
+      `estimated input tokens: ${estimatedTokens}, real usage: ${usageLine}`,
+      '',
+      `character: ${result?.character || '(empty)'}`,
+      `style: ${result?.style || '(empty)'}`,
+      'interests:',
+      ...(result?.interests?.length
+        ? result.interests.map((it) => `  ${it.topic}${it.note ? ` — ${it.note}` : ''} (times: ${it.times})`)
+        : ['  (none)']),
+      'details:',
+      ...(result?.details?.length ? result.details.map((d) => `  ${d.text} (times: ${d.times})`) : ['  (none)']),
+      'episodes:',
+      ...(result?.episodes?.length
+        ? result.episodes.map((ep) => `  ${ep.date} [weight ${ep.weight}] ${ep.what}${ep.quote ? ` "${ep.quote}"` : ''} (${ep.feeling})`)
+        : ['  (none)']),
+      `aliases: ${result?.aliases?.join(', ') || '(none)'}`,
+    ].join('\n');
+  }
+
+  function formatBootstrapChannelPreview(preview) {
+    if (!preview.ok) return preview.message;
+    const { channel, sample, estimatedTokens, usage, result } = preview;
+    const usageLine = usage ? `${usage.prompt_tokens ?? '?'}/${usage.completion_tokens ?? '?'}` : '-';
+    return [
+      `channel: #${channel.name} (id:${channel.id})${channel.isMain ? ' [main]' : ''}`,
+      channel.category ? `category: ${channel.category}` : null,
+      channel.topic ? `topic: ${channel.topic}` : null,
+      `sample: ${sample.kept} of ${sample.total} messages kept (${sample.dropped} dropped to fit)`,
+      `estimated input tokens: ${estimatedTokens}, real usage: ${usageLine}`,
+      '',
+      `purpose: ${result?.purpose || '(empty)'}`,
+      `topics: ${result?.topics || '(empty)'}`,
+      `tone: ${result?.tone || '(empty)'}`,
+    ]
+      .filter((line) => line !== null)
+      .join('\n');
+  }
+
+  async function cmdBootstrapPeople(_args, context) {
+    const guildId = resolvedGuildId(context);
+    if (!guildId) throw new Error('no guild resolved yet');
+    return formatBootstrapPeople(await bootstrap.peopleReport(guildId));
+  }
+
+  async function cmdBootstrapPreview(args, context) {
+    const guildId = resolvedGuildId(context);
+    if (!guildId) throw new Error('no guild resolved yet');
+    const hasUser = Boolean(args?.userId);
+    const hasChannel = Boolean(args?.channelId);
+    if (hasUser === hasChannel) throw new Error('give exactly one of user or channel');
+    if (hasUser) return formatBootstrapProfilePreview(await bootstrap.previewUser(guildId, args.userId));
+    return formatBootstrapChannelPreview(await bootstrap.previewChannel(guildId, args.channelId));
+  }
+
+  /** Wraps a `bootstrap.*` handler so both report the same thing when the dependency is absent. */
+  function withBootstrap(fn) {
+    return (args, context) => {
+      if (!bootstrap) return 'bootstrap is not available';
+      return fn(args, context);
+    };
+  }
+
   const commands = {
     status: () => cmdStatus(),
     ping: (args) => cmdPing(args),
@@ -1492,6 +1594,8 @@ function warmupLocalConfigPath() {
     'warmup.depth': withWarmup((args) => cmdWarmupDepth(args)),
     'warmup.budget': withWarmup((args) => cmdWarmupBudget(args)),
     'warmup.output': withWarmup((args) => cmdWarmupOutput(args)),
+    'bootstrap.people': withBootstrap((args, context) => cmdBootstrapPeople(args, context)),
+    'bootstrap.preview': withBootstrap((args, context) => cmdBootstrapPreview(args, context)),
   };
 
   /**

@@ -155,5 +155,16 @@
     "onlyListed": false,
     "rateLimitWaitMinutes": 10,
     "rateLimitMaxWaits": 36
+  },
+  "bootstrap": {
+    "lookbackDays": 60,
+    "minMessages": 30,
+    "maxPeople": 40,
+    "messagesPerPerson": 300,
+    "contextBefore": 2,
+    "maxChannelShare": 0.5,
+    "messagesPerChannel": 200,
+    "fetchLimitPerChannel": 15000,
+    "maxOutputTokens": 6000
   }
 }

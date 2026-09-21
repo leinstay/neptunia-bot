@@ -62,7 +62,7 @@ test('buildCommandTree: one top-level command, hidden by default, named from the
 test('buildCommandTree: top-level leaves (status, ping, reload, pause, resume, poke, set, unset)', () => {
   const [command] = buildCommandTree('nep');
   const names = command.options.map((o) => o.name);
-  assert.deepEqual(names, ['status', 'ping', 'reload', 'pause', 'resume', 'poke', 'set', 'unset', 'rule', 'memory', 'lore', 'model', 'warmup']);
+  assert.deepEqual(names, ['status', 'ping', 'reload', 'pause', 'resume', 'poke', 'set', 'unset', 'rule', 'memory', 'lore', 'model', 'warmup', 'bootstrap']);
 
   const status = findOption(command.options, 'status');
   assert.equal(status.type, 1); // SUBCOMMAND
@@ -250,6 +250,26 @@ test('buildCommandTree: warmup group, every sub-command and its bounds', () => {
   assert.equal(tokens.type, 4);
   assert.equal(tokens.min_value, 256);
   assert.equal(tokens.max_value, 32000);
+});
+
+test('buildCommandTree: bootstrap group (people, preview with optional user/channel)', () => {
+  const [command] = buildCommandTree('nep');
+  const bootstrap = findOption(command.options, 'bootstrap');
+  assert.equal(bootstrap.type, 2); // SUBCOMMAND_GROUP
+  assert.deepEqual(bootstrap.options.map((o) => o.name), ['people', 'preview']);
+
+  const people = findOption(bootstrap.options, 'people');
+  assert.equal(people.type, 1); // SUBCOMMAND
+  assert.equal(people.options, undefined);
+
+  const preview = findOption(bootstrap.options, 'preview');
+  const user = findOption(preview.options, 'user');
+  assert.equal(user.type, 6); // USER
+  assert.equal(user.required, false);
+  const channel = findOption(preview.options, 'channel');
+  assert.equal(channel.type, 7); // CHANNEL
+  assert.equal(channel.required, false);
+  assert.deepEqual(channel.channel_types, [0]); // GUILD_TEXT
 });
 
 // ---------------------------------------------------------------------------
@@ -625,6 +645,43 @@ test('interaction handler: warmup.only maps the boolean option', async () => {
   await handler(interaction);
 
   assert.deepEqual(admin.runCalls[0][1], { enabled: true });
+});
+
+test('interaction handler: bootstrap.people maps to empty args', async () => {
+  const admin = fakeAdmin();
+  const handler = createInteractionHandler({ hot: baseHot(), admin, getGuildId: () => 'g1' });
+
+  await handler(fakeInteraction({ group: 'bootstrap', subcommand: 'people' }));
+
+  assert.equal(admin.runCalls[0][0], 'bootstrap.people');
+  assert.deepEqual(admin.runCalls[0][1], {});
+});
+
+test('interaction handler: bootstrap.preview maps user/channel, undefined when omitted', async () => {
+  const admin = fakeAdmin();
+  const handler = createInteractionHandler({ hot: baseHot(), admin, getGuildId: () => 'g1' });
+
+  await handler(fakeInteraction({ group: 'bootstrap', subcommand: 'preview', optionValues: { user: { id: 'target1' } } }));
+  assert.equal(admin.runCalls[0][0], 'bootstrap.preview');
+  assert.deepEqual(admin.runCalls[0][1], { userId: 'target1', channelId: undefined });
+
+  await handler(fakeInteraction({ group: 'bootstrap', subcommand: 'preview', optionValues: { channel: { id: 'chan1' } } }));
+  assert.deepEqual(admin.runCalls[1][1], { userId: undefined, channelId: 'chan1' });
+});
+
+test('interaction handler: defers then edits for bootstrap.people and bootstrap.preview (slow commands)', async () => {
+  const admin = fakeAdmin({ runImpl: () => 'bootstrap result' });
+  const handler = createInteractionHandler({ hot: baseHot(), admin, getGuildId: () => 'g1' });
+
+  const peopleInteraction = fakeInteraction({ group: 'bootstrap', subcommand: 'people' });
+  await handler(peopleInteraction);
+  assert.equal(peopleInteraction.deferred, true);
+  assert.equal(peopleInteraction.edits[0].content, 'bootstrap result');
+
+  const previewInteraction = fakeInteraction({ group: 'bootstrap', subcommand: 'preview', optionValues: { user: { id: 'target1' } } });
+  await handler(previewInteraction);
+  assert.equal(previewInteraction.deferred, true);
+  assert.equal(previewInteraction.edits[0].content, 'bootstrap result');
 });
 
 test('interaction handler: poke maps the optional mode (default) and channel', async () => {

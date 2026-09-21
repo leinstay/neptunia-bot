@@ -129,4 +129,8 @@ export const labels = {
   ping: {
     prompt: 'Reply with one word: pong',
   },
+  bootstrap: {
+    ownMark: '[own] ',
+    contextMark: '[ctx] ',
+  },
 };

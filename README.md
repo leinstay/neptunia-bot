@@ -58,6 +58,8 @@ Both are hot-reloaded.
 | `initiate.md` | yes | Task: break a silence, start a topic |
 | `memory.md` | yes | Technical prompt for the memory/relationship analyzer |
 | `describe.md` | yes | One-line media descriptions for the helper model |
+| `profile.md` | yes | Bootstrap: one member's profile from a message sample |
+| `channel.md` | yes | Bootstrap: channel notes from a message sample |
 | `labels.json` | yes | Every string the code inserts into prompts (deep-merged between layers) |
 
 **The only file you must rewrite is `character-card.md`.** Copy it to `prompts.local/` and write your persona. Everything else works as-is, or override individual files as needed.
@@ -318,6 +320,24 @@ The warm-up budget is real money. Set `memory.model` to a cheaper model for the 
 
 By default every readable channel is fetched at `messagesPerChannel` depth. `channelDepths` sets a depth for particular channels while the rest keep the default; `onlyListed: true` reads strictly the listed channels at their depths. Give a more important channel a larger depth. The merged timeline is cut into analysis windows of about `batchMessages` x `windowBatches` messages; each window prefers to end on a pause of at least `cutAtGapMinutes`. Inside a window each channel's messages stay together: a busy channel fills whole batches of its own, small scraps of quiet channels share one analyzer call.
 
+## Bootstrap
+
+The engine can build member profiles and channel notes from a sample of recent messages instead of reading the whole history through the warm-up. For each qualifying member, the engine samples up to `messagesPerPerson` of their messages from the last `lookbackDays` days, spreads them across channels, and asks the analyzer about that one person in a single request. Channel notes work the same way: one sample, one request. The feature is currently available as a preview; both commands are read-only and write nothing under `data/`.
+
+### `bootstrap`
+
+| Key | Default | Meaning |
+|---|---|---|
+| `lookbackDays` | `60` | How far back to sample (days) |
+| `minMessages` | `30` | Own messages for a member to qualify |
+| `maxPeople` | `40` | Members processed, most active first |
+| `messagesPerPerson` | `300` | Own messages sampled per member |
+| `contextBefore` | `2` | Context lines before each sampled message |
+| `maxChannelShare` | `0.5` | Max share of samples from one channel |
+| `messagesPerChannel` | `200` | Messages sampled per channel |
+| `fetchLimitPerChannel` | `15000` | Messages fetched per channel for the sample pool |
+| `maxOutputTokens` | `6000` | Max output tokens per bootstrap request |
+
 ## Dry run
 
 With `features.dryRun: true` the bot runs the full pipeline (warm-up, memory, triggers, LLM calls) but never sends a message or reaction. Output goes to the log (`dry-run: would send` / `dry-run: would react`). Set `bot.dryRunChannelId` to a private channel for a readable mirror; everything posted in that channel is ignored by the bot. Slash commands work in any channel, the mirror included, because they are not messages.
@@ -364,6 +384,8 @@ One Discord slash command, `/nep` (the name comes from `bot.commandName`). Guild
 | `/nep warmup depth <messages>` | Default read depth (1..1000000) |
 | `/nep warmup budget <tokens>` | Warm-up token budget (`500k` / `10m` accepted) |
 | `/nep warmup output <tokens>` | Analyzer output limit (256..32000) |
+| `/nep bootstrap people` | List members who qualify for profile bootstrap |
+| `/nep bootstrap preview <user\|channel>` | Preview what would be written for a member or channel without writing anything |
 
 ## How a turn works
 
@@ -452,6 +474,8 @@ prompts/
   initiate.md              task: start a topic
   memory.md                prompt for the memory analyzer
   describe.md              prompt for the media describer
+  profile.md               bootstrap: one member's profile from a message sample
+  channel.md               bootstrap: channel notes from a message sample
   labels.json              every code-inserted string in prompts
 prompts.local/             your personality (gitignored)
 src/
