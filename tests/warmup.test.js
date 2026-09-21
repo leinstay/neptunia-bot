@@ -725,13 +725,16 @@ test('run: recurses down to the floor, then skips a piece that still fails, and 
 
     // Batch 1 (21 msgs) fails truncated -> splits into 11 + 10 (both at/under
     // the floor of 20). The first half (11) fails bad-json at the floor and
-    // is skipped; the second half (10) succeeds. Batch 2 (21 msgs) then
-    // succeeds outright: the run is not stalled or aborted by the skip.
-    assert.equal(memory.calls.length, 4);
+    // is skipped; the second half (10) succeeds, proving 20 (the floor,
+    // 10 clamped up) as the adaptive piece size. Batch 2 (21 msgs) is then
+    // cut to that size up front -> 20 + 1, both succeeding outright: the run
+    // is not stalled or aborted by the earlier skip.
+    assert.equal(memory.calls.length, 5);
     assert.equal(memory.calls[0].batch.length, 21);
     assert.equal(memory.calls[1].batch.length, 11);
     assert.equal(memory.calls[2].batch.length, 10);
-    assert.equal(memory.calls[3].batch.length, 21);
+    assert.equal(memory.calls[3].batch.length, 20);
+    assert.equal(memory.calls[4].batch.length, 1);
     assert.equal(sleep.calls.length, 0);
 
     assert.equal(store.state.data.warmup.skippedMessages, 11);
@@ -744,6 +747,196 @@ test('run: recurses down to the floor, then skips a piece that still fails, and 
     assert.ok(skipLog);
     assert.equal(skipLog.reason, 'bad-json');
     assert.equal(skipLog.messages, 11);
+
+    const sizeLog = logs.find((l) => l.msg === 'warmup: piece size changed');
+    assert.ok(sizeLog);
+    assert.equal(sizeLog.from, 21);
+    assert.equal(sizeLog.to, 20);
+    assert.equal(sizeLog.reason, 'truncated');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Adaptive piece size (in memory only, per process): once a split proves a
+// smaller size is needed, later batches are cut to that size up front.
+// ---------------------------------------------------------------------------
+
+test('run: after a truncated split, the very next batch is sent in pieces up front, never attempted whole', async () => {
+  const dir = tempDir();
+  try {
+    const store = createStore({ dataDir: dir });
+    const now = Date.now();
+    const history = makeHistory({ count: 100, startTs: now - 60_000, spacingMs: 1000, authorId: 'u1' });
+    const channel = fakeChannel('c1', history);
+    const guild = fakeGuild('g1', [channel]);
+    const client = fakeClient(guild);
+    const hot = fakeHot({ warmup: { batchMessages: 50, messagesPerChannel: 200 } });
+
+    let n = 0;
+    const memory = fakeMemory(() => {
+      n += 1;
+      if (n === 1) return { ok: false, usage: { prompt_tokens: 10, completion_tokens: 5 }, estimated: 15, result: null, reason: 'truncated' };
+      return { ok: true, usage: { prompt_tokens: 10, completion_tokens: 5 }, estimated: 15, result: {} };
+    });
+    const sleep = fakeSleep();
+
+    const warmup = createWarmup({ hot, store, client, memory, getGuildId: () => 'g1', sleep });
+    const { result, logs } = await withCapturedLogs(() => warmup.run());
+
+    // Batch 1 (50) fails truncated -> splits into 25 + 25, both succeeding,
+    // proving 25 as the adaptive piece size. Batch 2 (50) is cut to 25 + 25
+    // up front: no third call of length 50 is ever made for it.
+    assert.equal(memory.calls.length, 5);
+    assert.equal(memory.calls[0].batch.length, 50, 'batch 1 is still tried whole the first time');
+    assert.equal(memory.calls[1].batch.length, 25);
+    assert.equal(memory.calls[2].batch.length, 25);
+    assert.equal(memory.calls[3].batch.length, 25, 'batch 2 goes straight to pieces');
+    assert.equal(memory.calls[4].batch.length, 25);
+    assert.ok(
+      memory.calls.slice(1).every((c) => c.batch.length !== 50),
+      'no full-size attempt after the first truncation',
+    );
+    assert.equal(sleep.calls.length, 0);
+
+    assert.equal(store.state.data.warmup.channels.c1.batchesDone, 2);
+    assert.equal(result.aborted, false);
+    assert.equal(result.done, true);
+
+    const sizeLog = logs.find((l) => l.msg === 'warmup: piece size changed');
+    assert.ok(sizeLog);
+    assert.equal(sizeLog.from, 50);
+    assert.equal(sizeLog.to, 25);
+    assert.equal(sizeLog.reason, 'truncated');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('run: a split success below SPLIT_FLOOR clamps the adaptive size at the floor, never lower', async () => {
+  const dir = tempDir();
+  try {
+    const store = createStore({ dataDir: dir });
+    const now = Date.now();
+    const history = makeHistory({ count: 60, startTs: now - 60_000, spacingMs: 1000, authorId: 'u1' });
+    const channel = fakeChannel('c1', history);
+    const guild = fakeGuild('g1', [channel]);
+    const client = fakeClient(guild);
+    const hot = fakeHot({ warmup: { batchMessages: 30, messagesPerChannel: 200 } });
+
+    let n = 0;
+    const memory = fakeMemory(() => {
+      n += 1;
+      if (n === 1) return { ok: false, usage: { prompt_tokens: 10, completion_tokens: 5 }, estimated: 15, result: null, reason: 'truncated' };
+      return { ok: true, usage: { prompt_tokens: 10, completion_tokens: 5 }, estimated: 15, result: {} };
+    });
+
+    const warmup = createWarmup({ hot, store, client, memory, getGuildId: () => 'g1', sleep: fakeSleep() });
+    const { logs } = await withCapturedLogs(() => warmup.run());
+
+    // Batch 1 (30) fails truncated -> splits into 15 + 15, both below the
+    // floor of 20, both succeeding. The adaptive size is clamped to 20, not
+    // 15: batch 2 (30) is cut into 20 + 10, not 15 + 15.
+    assert.equal(memory.calls.length, 5);
+    assert.equal(memory.calls[1].batch.length, 15);
+    assert.equal(memory.calls[2].batch.length, 15);
+    assert.equal(memory.calls[3].batch.length, 20, 'clamped to the floor, not the raw 15 that succeeded');
+    assert.equal(memory.calls[4].batch.length, 10);
+
+    const sizeLog = logs.find((l) => l.msg === 'warmup: piece size changed');
+    assert.ok(sizeLog);
+    assert.equal(sizeLog.to, 20);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('run: the adaptive size doubles back up after 5 clean batches in a row, capped at the full batch', async () => {
+  const dir = tempDir();
+  try {
+    const store = createStore({ dataDir: dir });
+    const now = Date.now();
+    const history = makeHistory({ count: 280, startTs: now - 60_000, spacingMs: 1000, authorId: 'u1' });
+    const channel = fakeChannel('c1', history);
+    const guild = fakeGuild('g1', [channel]);
+    const client = fakeClient(guild);
+    const hot = fakeHot({ warmup: { batchMessages: 40, messagesPerChannel: 400 } });
+
+    let n = 0;
+    const memory = fakeMemory(() => {
+      n += 1;
+      if (n === 1) return { ok: false, usage: { prompt_tokens: 10, completion_tokens: 5 }, estimated: 15, result: null, reason: 'truncated' };
+      return { ok: true, usage: { prompt_tokens: 10, completion_tokens: 5 }, estimated: 15, result: {} };
+    });
+
+    const warmup = createWarmup({ hot, store, client, memory, getGuildId: () => 'g1', sleep: fakeSleep() });
+    const { result, logs } = await withCapturedLogs(() => warmup.run());
+
+    // Batch 1 (40) fails truncated -> splits into 20 + 20, proving 20 as the
+    // adaptive size. Batches 2-6 (5 in a row) then each run cleanly as 20 +
+    // 20 pieces; after the 5th clean batch the size doubles back to 40 (the
+    // full batch), so batch 7 is attempted whole again.
+    assert.equal(memory.calls.length, 14, '3 (batch1) + 5*2 (batches 2-6, cut to 20+20) + 1 (batch7, whole again)');
+    assert.equal(memory.calls[13].batch.length, 40, 'recovered to the full batch size');
+    assert.equal(store.state.data.warmup.channels.c1.batchesDone, 7);
+    assert.equal(result.aborted, false);
+    assert.equal(result.done, true);
+
+    const sizeLogs = logs.filter((l) => l.msg === 'warmup: piece size changed');
+    assert.equal(sizeLogs.length, 2);
+    assert.equal(sizeLogs[0].reason, 'truncated');
+    assert.equal(sizeLogs[0].from, 40);
+    assert.equal(sizeLogs[0].to, 20);
+    assert.equal(sizeLogs[1].reason, 'recovered');
+    assert.equal(sizeLogs[1].from, 20);
+    assert.equal(sizeLogs[1].to, 40);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('run: the adaptive shrink is in memory only — a restart tries the next unfinished batch whole again', async () => {
+  const dir = tempDir();
+  try {
+    const store = createStore({ dataDir: dir });
+    const now = Date.now();
+    const history = makeHistory({ count: 80, startTs: now - 60_000, spacingMs: 1000, authorId: 'u1' });
+    const channel = fakeChannel('c1', history);
+    const guild = fakeGuild('g1', [channel]);
+    const client = fakeClient(guild);
+    const hot = fakeHot({ warmup: { batchMessages: 40, messagesPerChannel: 200 } });
+
+    // Batch 1 (40) fails truncated, splits into 20 + 20 (both succeed): the
+    // adaptive size shrinks to 20. Batch 2 (40) is then cut to 20 + 20; its
+    // first piece succeeds, but the second keeps failing a plain
+    // 'llm-error' forever, aborting the run after 3 cycles with batch 2
+    // still unfinished.
+    let n = 0;
+    const memory1 = fakeMemory(() => {
+      n += 1;
+      if (n === 1) return { ok: false, usage: { prompt_tokens: 10, completion_tokens: 5 }, estimated: 15, result: null, reason: 'truncated' };
+      if (n === 2 || n === 3 || n === 4) return { ok: true, usage: { prompt_tokens: 10, completion_tokens: 5 }, estimated: 15, result: {} };
+      return { ok: false, usage: null, estimated: 0, result: null, reason: 'llm-error' };
+    });
+
+    const warmup1 = createWarmup({ hot, store, client, memory: memory1, getGuildId: () => 'g1', sleep: fakeSleep() });
+    const result1 = await warmup1.run();
+
+    assert.equal(result1.aborted, true);
+    assert.equal(store.state.data.warmup.channels.c1.batchesDone, 1, 'batch 1 finished; batch 2 is still in flight');
+
+    // Restart: a brand-new factory over the same store — the in-memory
+    // adaptive size is gone, so the still-unfinished batch 2 is retried
+    // WHOLE (40), not pre-split to 20 + 20.
+    const memory2 = fakeMemory(alwaysOk());
+    const warmup2 = createWarmup({ hot, store, client, memory: memory2, getGuildId: () => 'g1', sleep: fakeSleep() });
+    const result2 = await warmup2.run();
+
+    assert.equal(result2.done, true);
+    assert.equal(memory2.calls.length, 1, 'batch 2 is re-analyzed in one whole piece, the shrink did not survive the restart');
+    assert.equal(memory2.calls[0].batch.length, 40);
+    assert.equal(store.state.data.warmup.channels.c1.batchesDone, 2);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

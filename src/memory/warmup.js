@@ -26,6 +26,19 @@
 // fetched, so a later config change never shifts an in-progress channel's
 // window or its batch indexes; `warmup reset` is the only way to pick up a
 // new depth for a channel that already has progress.
+//
+// Adaptive piece size: once a dense stretch of chat makes a full-size batch
+// come back 'truncated'/'bad-json' (see isUnrecoverableSize) and a split
+// succeeds, this run remembers the size that worked and cuts every following
+// batch to at most that size up front, instead of always paying for one
+// doomed full-size attempt before splitting again. It only ever shrinks to
+// the size an actual split proved necessary (never below SPLIT_FLOOR), and
+// climbs back up (doubling, capped at the configured batch size) after
+// CLEAN_STREAK_TARGET batches in a row needed no split at all. This lives in
+// a plain closure variable — in memory only, never persisted — so a restart
+// always tries the next batch at full size again; the index-based resume
+// bookkeeping below (`batchesDone`, per-channel `limit`/`anchorId`) is
+// completely unaffected by it.
 
 import { readableChannels, lastActivity, fetchHistoryWindow } from '../discord/collect.js';
 import { touchMemory } from './update.js';
@@ -37,6 +50,7 @@ const MAX_CONSECUTIVE_FAILURES = 3;
 const RETRY_DELAY_MS = 5000;
 const BATCH_OVERHEAD_TOKENS = 500; // a rough allowance for the prompt scaffolding around the transcript
 const SPLIT_FLOOR = 20; // a piece this small or smaller that still fails a 'truncated'/'bad-json' analysis is skipped, not split further
+const CLEAN_STREAK_TARGET = 5; // consecutive split-free batches before the adaptive piece size is allowed to grow again
 const DEFAULT_RATE_LIMIT_WAIT_MINUTES = 10;
 const DEFAULT_RATE_LIMIT_MAX_WAITS = 36;
 const RATE_LIMIT_DETAIL_RE = /rate.?limit|too many (tokens|requests)/i;
@@ -89,6 +103,23 @@ export function planBatches(messages, batchSize) {
     batches.push(filtered.slice(i, i + batchSize));
   }
   return batches;
+}
+
+/**
+ * Cut an already-filtered batch (oldest first) into consecutive chunks of at
+ * most `size` messages, no bot-filtering (that already happened in
+ * planBatches). Used to pre-split a batch to the adaptive piece size before
+ * ever attempting it whole — see the module header comment.
+ * @param {object[]} messages
+ * @param {number} size
+ * @returns {object[][]}
+ */
+function chunkPieces(messages, size) {
+  const chunks = [];
+  for (let i = 0; i < messages.length; i += size) {
+    chunks.push(messages.slice(i, i + size));
+  }
+  return chunks;
 }
 
 /** How many tokens of `maxTokens` are left, given the warm-up state's `tokensUsed` so far. */
@@ -317,6 +348,50 @@ export function createWarmup({ hot, store, client, memory, getGuildId, now = Dat
   // persona would spin on the same failing provider indefinitely).
   let hasAbortedInProcess = false;
 
+  // Adaptive piece size for this run: `null` means uncapped (attempt a batch
+  // whole, at cfg.batchMessages, as before). In memory only — see the module
+  // header comment — so a fresh process/factory always starts here again.
+  let pieceCap = null;
+  // Consecutive top-level batches, at the current pieceCap, that needed no
+  // truncated/bad-json split at all. Reaching CLEAN_STREAK_TARGET doubles
+  // pieceCap (capped at cfg.batchMessages) and resets to 0; any split resets
+  // it to 0 immediately, regardless of how many batches it had reached.
+  let cleanStreak = 0;
+
+  /**
+   * Called once a top-level batch has fully resolved (every one of its
+   * pieces analyzed or skipped, none of them still in flight): applies
+   * whatever `sizeTracker` observed to the adaptive piece size and logs the
+   * change, if any. `sizeTracker` is `{ truncated, shrinkTo }`, mutated by
+   * analyzePiece while processing that one top-level batch's pieces (see
+   * below).
+   */
+  function noteBatchOutcome(cfg, sizeTracker) {
+    const fullSize = cfg.batchMessages;
+    if (sizeTracker.truncated) {
+      cleanStreak = 0;
+      if (sizeTracker.shrinkTo !== null) {
+        const from = pieceCap ?? fullSize;
+        const to = sizeTracker.shrinkTo;
+        pieceCap = to;
+        if (to !== from) {
+          log.info('warmup: piece size changed', { from, to, reason: 'truncated' });
+        }
+      }
+      return;
+    }
+    if (pieceCap === null) return; // already uncapped, nothing to grow back to
+    cleanStreak += 1;
+    if (cleanStreak < CLEAN_STREAK_TARGET) return;
+    cleanStreak = 0;
+    const from = pieceCap;
+    const doubled = pieceCap * 2;
+    const recovered = Number.isFinite(fullSize) && doubled >= fullSize;
+    const to = recovered ? fullSize : doubled;
+    pieceCap = recovered ? null : doubled;
+    log.info('warmup: piece size changed', { from, to, reason: 'recovered' });
+  }
+
   function state() {
     if (!store.state.data.warmup) {
       store.state.data.warmup = freshState();
@@ -461,12 +536,22 @@ export function createWarmup({ hot, store, client, memory, getGuildId, now = Dat
    * @param {Map<string, string>} [descriptions]  Pre-computed describer captions for this batch
    *   (see describeBatchForWarmup), reused unchanged across a split.
    * @param {{ stopRequested: boolean, stopped: Promise<void> }} [control]
+   * @param {boolean} [fromSplit]  True for a piece produced by splitting a
+   *   'truncated'/'bad-json' failure (at any recursion depth) — as opposed to
+   *   a piece the caller pre-cut to the current adaptive size. Only a piece
+   *   that succeeds AND carries this flag can shrink the adaptive size: it is
+   *   proof that this smaller size was actually necessary, not just a piece
+   *   that happened to already fit.
+   * @param {{ truncated: boolean, shrinkTo: number|null }} [sizeTracker]  Shared across every
+   *   piece of one top-level batch (see runChannel): set truncated=true on any
+   *   'truncated'/'bad-json' failure, and shrinkTo to the smallest successful
+   *   fromSplit piece size seen. Read once the whole top-level batch settles.
    * @returns {Promise<{ consecutiveFailures: number, stop: boolean }>}
    *   `stop: true` means the budget ran out, the run aborted, or a rate-limit
    *   wait was interrupted by stop() — the caller must not advance
    *   `batchesDone` and must stop processing this channel.
    */
-  async function analyzePiece(guildId, channelId, batchIndex, cfg, st, piece, consecutiveFailures, descriptions, control) {
+  async function analyzePiece(guildId, channelId, batchIndex, cfg, st, piece, consecutiveFailures, descriptions, control, fromSplit = false, sizeTracker = null) {
     let rateLimitWaits = 0;
 
     /** Handles a rate-limited `outcome`: waits, then either signals `continue` or returns the piece's final result. */
@@ -537,10 +622,15 @@ export function createWarmup({ hot, store, client, memory, getGuildId, now = Dat
         // the shared helper, so a resume never re-touches an already-counted
         // message and a mid-cycle retry never double-counts one either.
         for (const message of piece) touchMemory(store, guildId, message);
+        if (fromSplit && sizeTracker) {
+          const provenSize = Math.max(SPLIT_FLOOR, piece.length);
+          if (sizeTracker.shrinkTo === null || provenSize < sizeTracker.shrinkTo) sizeTracker.shrinkTo = provenSize;
+        }
         return { consecutiveFailures: 0, stop: false };
       }
 
       if (isUnrecoverableSize(outcome.reason)) {
+        if (sizeTracker) sizeTracker.truncated = true;
         if (piece.length > SPLIT_FLOOR) {
           const mid = Math.ceil(piece.length / 2);
           log.warn('warmup: batch failed, splitting', {
@@ -551,9 +641,9 @@ export function createWarmup({ hot, store, client, memory, getGuildId, now = Dat
             reason: outcome.reason,
             detail: outcome.detail,
           });
-          const first = await analyzePiece(guildId, channelId, batchIndex, cfg, st, piece.slice(0, mid), consecutiveFailures, descriptions, control);
+          const first = await analyzePiece(guildId, channelId, batchIndex, cfg, st, piece.slice(0, mid), consecutiveFailures, descriptions, control, true, sizeTracker);
           if (first.stop) return first;
-          return analyzePiece(guildId, channelId, batchIndex, cfg, st, piece.slice(mid), first.consecutiveFailures, descriptions, control);
+          return analyzePiece(guildId, channelId, batchIndex, cfg, st, piece.slice(mid), first.consecutiveFailures, descriptions, control, true, sizeTracker);
         }
 
         st.skippedMessages = (st.skippedMessages ?? 0) + piece.length;
@@ -648,9 +738,24 @@ export function createWarmup({ hot, store, client, memory, getGuildId, now = Dat
     for (let i = channelState.batchesDone; i < batches.length; i += 1) {
       const batch = batches[i];
       const descriptions = await describeBatchForWarmup(guildId, batch, cfg, st);
-      const result = await analyzePiece(guildId, channel.id, i, cfg, st, batch, consecutiveFailures, descriptions, control);
-      consecutiveFailures = result.consecutiveFailures;
-      if (result.stop) return consecutiveFailures;
+
+      // Cut the batch to the current adaptive piece size up front (oldest
+      // first) instead of always paying for one doomed full-size attempt —
+      // see the module header comment. A cap that is already >= this batch
+      // is a no-op: the batch runs whole, exactly as before.
+      const pieces = pieceCap !== null && pieceCap < batch.length ? chunkPieces(batch, pieceCap) : [batch];
+      const sizeTracker = { truncated: false, shrinkTo: null };
+      let stoppedMidBatch = false;
+      for (const piece of pieces) {
+        const result = await analyzePiece(guildId, channel.id, i, cfg, st, piece, consecutiveFailures, descriptions, control, false, sizeTracker);
+        consecutiveFailures = result.consecutiveFailures;
+        if (result.stop) {
+          stoppedMidBatch = true;
+          break;
+        }
+      }
+      if (stoppedMidBatch) return consecutiveFailures;
+      noteBatchOutcome(cfg, sizeTracker);
 
       // The batch's index-based progress advances only once every piece of
       // it (however it was split) has been analyzed or skipped.
