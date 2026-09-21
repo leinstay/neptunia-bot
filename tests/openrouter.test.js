@@ -145,6 +145,62 @@ test('complete: feeds the calibrator from usage.prompt_tokens on success', async
   assert.equal(calibrator.observed[0][1], 777);
 });
 
+test('complete: options.skipCalibration true never feeds the calibrator, even with usage.prompt_tokens present', async () => {
+  const calibrator = fakeCalibrator();
+  const llm = createLlm({
+    apiKey: 'k',
+    getConfig: () => baseConfig(),
+    calibrator,
+    state: fakeState(),
+    fetchImpl: async () => okResponse('pong', { prompt_tokens: 777 }),
+  });
+  await llm.complete([{ role: 'user', content: 'hi' }], { skipCalibration: true });
+  assert.equal(calibrator.observed.length, 0);
+});
+
+test('complete: returns the provider named in the response json', async () => {
+  const llm = createLlm({
+    apiKey: 'k',
+    getConfig: () => baseConfig(),
+    calibrator: fakeCalibrator(),
+    state: fakeState(),
+    fetchImpl: async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ choices: [{ message: { content: 'hi' } }], usage: {}, provider: 'Anthropic' }),
+    }),
+  });
+  const result = await llm.complete([{ role: 'user', content: 'hi' }]);
+  assert.equal(result.provider, 'Anthropic');
+});
+
+test('complete: provider is undefined when the response omits it', async () => {
+  const llm = createLlm({
+    apiKey: 'k',
+    getConfig: () => baseConfig(),
+    calibrator: fakeCalibrator(),
+    state: fakeState(),
+    fetchImpl: async () => okResponse('hi'),
+  });
+  const result = await llm.complete([{ role: 'user', content: 'hi' }]);
+  assert.equal(result.provider, undefined);
+});
+
+test('complete: a non-retryable HTTP error carries the untrimmed body as .body, for a caller that needs more than the trimmed message', async () => {
+  const longBody = JSON.stringify({ error: { message: 'No endpoints found' }, routing_funnel: [{ step: 'BYOK endpoints', endpoints: 0 }] });
+  const llm = createLlm({
+    apiKey: 'k',
+    getConfig: () => baseConfig(),
+    calibrator: fakeCalibrator(),
+    state: fakeState(),
+    fetchImpl: async () => errorResponse(404, longBody),
+  });
+  await assert.rejects(
+    llm.complete([{ role: 'user', content: 'hi' }]),
+    (err) => err.statusCode === 404 && err.body === longBody,
+  );
+});
+
 test('complete: does not call calibrator.observe when usage.prompt_tokens is absent', async () => {
   const calibrator = fakeCalibrator();
   const llm = createLlm({

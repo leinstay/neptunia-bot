@@ -59,13 +59,20 @@ test('buildCommandTree: one top-level command, hidden by default, named from the
   assert.equal(command.default_member_permissions, '0');
 });
 
-test('buildCommandTree: top-level leaves (status, reload, pause, resume, poke, set, unset)', () => {
+test('buildCommandTree: top-level leaves (status, ping, reload, pause, resume, poke, set, unset)', () => {
   const [command] = buildCommandTree('nep');
   const names = command.options.map((o) => o.name);
-  assert.deepEqual(names, ['status', 'reload', 'pause', 'resume', 'poke', 'set', 'unset', 'rule', 'memory', 'lore', 'model', 'warmup']);
+  assert.deepEqual(names, ['status', 'ping', 'reload', 'pause', 'resume', 'poke', 'set', 'unset', 'rule', 'memory', 'lore', 'model', 'warmup']);
 
   const status = findOption(command.options, 'status');
   assert.equal(status.type, 1); // SUBCOMMAND
+
+  const ping = findOption(command.options, 'ping');
+  assert.equal(ping.type, 1); // SUBCOMMAND
+  const pingRole = findOption(ping.options, 'role');
+  assert.equal(pingRole.type, 3); // STRING
+  assert.equal(pingRole.required, false);
+  assert.deepEqual(pingRole.choices.map((c) => c.value), ['talk', 'analyzer', 'media']);
 
   const pause = findOption(command.options, 'pause');
   assert.equal(pause.type, 1); // SUBCOMMAND
@@ -628,6 +635,39 @@ test('interaction handler: poke maps the optional mode (default) and channel', a
   await handler(interaction);
 
   assert.deepEqual(admin.runCalls[0][1], { mode: 'interject', channelId: undefined });
+});
+
+test('interaction handler: ping maps the optional role (undefined when omitted)', async () => {
+  const admin = fakeAdmin();
+  const handler = createInteractionHandler({ hot: baseHot(), admin, getGuildId: () => 'g1' });
+
+  const interaction = fakeInteraction({ subcommand: 'ping', optionValues: {} });
+  await handler(interaction);
+
+  assert.equal(admin.runCalls[0][0], 'ping');
+  assert.deepEqual(admin.runCalls[0][1], { role: undefined });
+});
+
+test('interaction handler: ping maps a given role straight through', async () => {
+  const admin = fakeAdmin();
+  const handler = createInteractionHandler({ hot: baseHot(), admin, getGuildId: () => 'g1' });
+
+  const interaction = fakeInteraction({ subcommand: 'ping', optionValues: { role: 'media' } });
+  await handler(interaction);
+
+  assert.deepEqual(admin.runCalls[0][1], { role: 'media' });
+});
+
+test('interaction handler: defers then edits for a slow command (ping)', async () => {
+  const admin = fakeAdmin({ runImpl: () => 'talk: x — ok, 100ms' });
+  const handler = createInteractionHandler({ hot: baseHot(), admin, getGuildId: () => 'g1' });
+
+  const interaction = fakeInteraction({ subcommand: 'ping', optionValues: {} });
+  await handler(interaction);
+
+  assert.equal(interaction.deferred, true);
+  assert.equal(interaction.edits.length, 1);
+  assert.equal(interaction.edits[0].content, 'talk: x — ok, 100ms');
 });
 
 test('interaction handler: defers then edits for a slow command (poke)', async () => {

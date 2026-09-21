@@ -121,5 +121,8 @@
     "mention": "mentioned you",
     "reply": "replied to your message",
     "name": "said your name"
+  },
+  "ping": {
+    "prompt": "Reply with the single word pong."
   }
 }

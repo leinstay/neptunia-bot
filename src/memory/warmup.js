@@ -476,6 +476,28 @@ export function createWarmup({ hot, store, client, memory, getGuildId, now = Dat
   // persona would spin on the same failing provider indefinitely).
   let hasAbortedInProcess = false;
 
+  // In-memory-only run activity (F35 addendum): exposed via status() as
+  // `activity` so `/nep warmup status` can show WHICH phase a run is
+  // actually in right now (fetching history, analysing/describing a batch,
+  // waiting out a provider rate limit, paused, aborted, done) instead of
+  // just `running: true` for up to several minutes at a time. Never
+  // persisted, never read back, never affects the run itself — a fresh
+  // process/factory always starts at `idle`, same as pieceCap below.
+  function freshActivity() {
+    return { phase: 'idle', lastActivityAt: null };
+  }
+  let activity = freshActivity();
+
+  /** Replace the activity snapshot with `patch` plus a fresh `lastActivityAt`. */
+  function touchActivity(patch) {
+    activity = { ...patch, lastActivityAt: now() };
+  }
+
+  /** Bump `lastActivityAt` without changing the rest of the current snapshot (a finished piece/batch). */
+  function bumpActivity() {
+    touchActivity(activity);
+  }
+
   // Adaptive piece size for this run: `null` means uncapped (attempt a batch
   // whole, at cfg.batchMessages, as before). In memory only — see the module
   // header comment — so a fresh process/factory always starts here again.
@@ -637,6 +659,7 @@ export function createWarmup({ hot, store, client, memory, getGuildId, now = Dat
     log.warn('warmup: rate limited, waiting', fields);
 
     const ms = waitMinutes * 60_000;
+    touchActivity({ phase: 'waiting-rate-limit', until: now() + ms, waits: waitsSoFar });
     let interrupted = false;
     if (control) {
       // control.stopped listed FIRST: when stop() already resolved it before
@@ -699,6 +722,7 @@ export function createWarmup({ hot, store, client, memory, getGuildId, now = Dat
         st.aborted = true;
         hasAbortedInProcess = true;
         persist();
+        touchActivity({ phase: 'aborted', reason: 'rate-limit', detail: outcome?.detail });
         log.error('warmup: aborting after repeated rate limits', {
           guildId,
           tokensUsed: st.tokensUsed,
@@ -709,6 +733,7 @@ export function createWarmup({ hot, store, client, memory, getGuildId, now = Dat
       if (wait.giveUp === 'pause') {
         st.paused = true;
         persist();
+        touchActivity({ phase: 'paused' });
         return { consecutiveFailures, stop: true };
       }
       return null; // keep going: retry the same piece
@@ -720,6 +745,7 @@ export function createWarmup({ hot, store, client, memory, getGuildId, now = Dat
         st.done = true;
         st.finishedAt = now();
         persist();
+        touchActivity({ phase: 'done' });
         log.info('warmup: budget spent, stopping', { tokensUsed: st.tokensUsed, maxTokens: cfg.maxTokens });
         return { consecutiveFailures, stop: true };
       }
@@ -763,6 +789,7 @@ export function createWarmup({ hot, store, client, memory, getGuildId, now = Dat
           const provenSize = Math.max(SPLIT_FLOOR, piece.length);
           if (sizeTracker.shrinkTo === null || provenSize < sizeTracker.shrinkTo) sizeTracker.shrinkTo = provenSize;
         }
+        bumpActivity();
         return { consecutiveFailures: 0, stop: false };
       }
 
@@ -785,6 +812,7 @@ export function createWarmup({ hot, store, client, memory, getGuildId, now = Dat
 
         st.skippedMessages = (st.skippedMessages ?? 0) + piece.length;
         persist();
+        bumpActivity();
         log.warn('warmup: batch failed at the floor, skipping', {
           guildId,
           channels: channelIds,
@@ -810,6 +838,7 @@ export function createWarmup({ hot, store, client, memory, getGuildId, now = Dat
         st.aborted = true;
         hasAbortedInProcess = true;
         persist();
+        touchActivity({ phase: 'aborted', reason: outcome.reason ?? 'unknown', detail: outcome.detail });
         log.error('warmup: aborting after repeated failures', {
           guildId,
           tokensUsed: st.tokensUsed,
@@ -834,34 +863,41 @@ export function createWarmup({ hot, store, client, memory, getGuildId, now = Dat
   async function fetchAllWindows(guildId, cfg, plan, byId, st) {
     const minTs = cfg.maxAgeDays > 0 ? now() - cfg.maxAgeDays * 24 * 60 * 60_000 : 0;
     const windows = [];
-    for (const item of plan) {
+    touchActivity({ phase: 'fetching', channelsFetched: 0, channelsTotal: plan.length });
+
+    for (let i = 0; i < plan.length; i += 1) {
+      const item = plan[i];
       const channel = byId.get(item.id);
-      if (!channel) continue; // vanished between planning and fetching — extremely unlikely, never fatal
+      if (channel) {
+        const channelState = (st.channels[item.id] ??= { anchorId: null, limit: null, messages: 0 });
+        if (!channelState.anchorId) {
+          channelState.anchorId = channel.lastMessageId ?? null;
+          if (channelState.anchorId) channelState.limit = item.depth;
+          persist();
+        }
+        // A resume always re-fetches the SAME window it started with, even if
+        // the configured depth for this channel changed meanwhile.
+        if (channelState.limit == null && channelState.anchorId) channelState.limit = item.depth;
 
-      const channelState = (st.channels[item.id] ??= { anchorId: null, limit: null, messages: 0 });
-      if (!channelState.anchorId) {
-        channelState.anchorId = channel.lastMessageId ?? null;
-        if (channelState.anchorId) channelState.limit = item.depth;
-        persist();
+        if (channelState.anchorId) {
+          try {
+            const window = await fetchHistoryWindow(channel, {
+              anchorId: channelState.anchorId,
+              limit: channelState.limit,
+              minTs,
+              selfId: client.user.id,
+              embedTextChars: hot.config.media?.embedTextChars,
+            });
+            log.info('warmup: channel fetched', { channel: item.id, messages: window.length });
+            if (window.length > 0) windows.push(window);
+          } catch (err) {
+            log.warn('warmup: channel fetch failed, skipping it for this round', { channel: item.id, error: err });
+          }
+        }
+        // else: an empty channel, nothing to fetch, ever.
       }
-      // A resume always re-fetches the SAME window it started with, even if
-      // the configured depth for this channel changed meanwhile.
-      if (channelState.limit == null && channelState.anchorId) channelState.limit = item.depth;
-      if (!channelState.anchorId) continue; // an empty channel: nothing to fetch, ever
-
-      try {
-        const window = await fetchHistoryWindow(channel, {
-          anchorId: channelState.anchorId,
-          limit: channelState.limit,
-          minTs,
-          selfId: client.user.id,
-          embedTextChars: hot.config.media?.embedTextChars,
-        });
-        log.info('warmup: channel fetched', { channel: item.id, messages: window.length });
-        if (window.length > 0) windows.push(window);
-      } catch (err) {
-        log.warn('warmup: channel fetch failed, skipping it for this round', { channel: item.id, error: err });
-      }
+      // else: vanished between planning and fetching — extremely unlikely, never fatal.
+      touchActivity({ phase: 'fetching', channelsFetched: i + 1, channelsTotal: plan.length });
     }
     return windows;
   }
@@ -872,7 +908,12 @@ export function createWarmup({ hot, store, client, memory, getGuildId, now = Dat
 
     for (let i = st.windowBatchesDone; i < batches.length; i += 1) {
       const batch = batches[i];
+      const describingNow = Boolean(describer) && hot.config.features?.mediaDescriptions === true;
+      if (describingNow) {
+        touchActivity({ phase: 'describing', windowBatch: i + 1, windowBatches: batches.length, messages: batch.length });
+      }
       const descriptions = await describeBatchForWarmup(guildId, batch, cfg, st);
+      touchActivity({ phase: 'analysing', windowBatch: i + 1, windowBatches: batches.length, messages: batch.length });
       const channelIds = [...new Set(batch.map((m) => m.channelId))];
 
       const pieces = pieceCap !== null && pieceCap < batch.length ? chunkPieces(batch, pieceCap) : [batch];
@@ -912,6 +953,7 @@ export function createWarmup({ hot, store, client, memory, getGuildId, now = Dat
       if (currentControl?.stopRequested) {
         st.paused = true;
         persist();
+        touchActivity({ phase: 'paused' });
         return false;
       }
     }
@@ -988,6 +1030,7 @@ export function createWarmup({ hot, store, client, memory, getGuildId, now = Dat
       st.done = true;
       st.finishedAt = now();
       persist();
+      touchActivity({ phase: 'done' });
       log.info('warmup: finished, history exhausted', { tokensUsed: st.tokensUsed, requests: st.requests });
     }
 
@@ -1050,6 +1093,7 @@ export function createWarmup({ hot, store, client, memory, getGuildId, now = Dat
       skippedMessages: st.skippedMessages ?? 0,
       onlyListed: Boolean(cfg.onlyListed),
       channels,
+      activity: { ...activity },
     };
   }
 
@@ -1077,6 +1121,7 @@ export function createWarmup({ hot, store, client, memory, getGuildId, now = Dat
     if (runningPromise) throw new Error('warmup: cannot reset while running');
     delete store.state.data.warmup;
     persist();
+    activity = freshActivity();
   }
 
   return { run, stop, isBlocking, status, plan, reset };

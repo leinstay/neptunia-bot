@@ -320,6 +320,7 @@ function makeAdmin(rootDir, extra = {}) {
     turns: extra.turns,
     memory: extra.memory,
     pending: extra.pending,
+    llm: extra.llm,
   });
   return { admin, hot, store };
 }
@@ -554,6 +555,232 @@ test('run: model.set accepts a loosely-valid id (letters, digits, dot, colon, sl
 
   await admin.run('model.set', { role: 'media', id: 'anthropic/claude-haiku-4.5:beta' }, {});
   assert.deepEqual(readLocal(rootDir), { media: { model: 'anthropic/claude-haiku-4.5:beta' } });
+});
+
+// ---------------------------------------------------------------------------
+// ping (F35): reach each role's model directly, in parallel
+// ---------------------------------------------------------------------------
+
+function fakeLlm(script) {
+  const calls = [];
+  return {
+    calls,
+    complete: async (messages, options) => {
+      calls.push({ messages, options });
+      return script(options, calls.length - 1);
+    },
+  };
+}
+
+function hotForPing(rootDir, { label = true } = {}) {
+  const hot = makeHotWithMedia(rootDir);
+  hot.prompts = {
+    ...hot.prompts,
+    labels: { ...hot.prompts.labels, ...(label ? { ping: { prompt: 'Reply with one word: pong' } } : {}) },
+  };
+  return hot;
+}
+
+test('run: ping pings talk/analyzer/media in parallel and reports latency, provider and tokens', async () => {
+  const rootDir = makeRoot();
+  const hot = hotForPing(rootDir);
+  hot.config.memory.model = 'openrouter/analyzer-model'; // distinct from talk, so every role gets its own call
+  const llm = fakeLlm((options) => ({
+    text: 'pong',
+    usage: { prompt_tokens: 5, completion_tokens: 1 },
+    estimated: 6,
+    finishReason: 'stop',
+    provider: `provider-for-${options.model}`,
+  }));
+  const { admin } = makeAdmin(rootDir, { hot, llm });
+
+  const body = await admin.run('ping', {}, {});
+  const lines = body.split('\n');
+
+  assert.equal(llm.calls.length, 3, 'talk, analyzer and media are three distinct models here');
+  assert.ok(lines.some((l) => l.startsWith('talk: anthropic/claude-opus-4.6 — ok,') && l.includes('provider=provider-for-anthropic/claude-opus-4.6') && l.includes('tokens 5/1')));
+  assert.ok(lines.some((l) => l.startsWith('analyzer: openrouter/analyzer-model — ok,')));
+  assert.ok(lines.some((l) => l.startsWith('media: anthropic/claude-haiku-4.5 — ok,')));
+});
+
+test('run: ping calls llm.complete with the ping prompt, 16 max tokens, no daily cap and no calibration', async () => {
+  const rootDir = makeRoot();
+  const hot = hotForPing(rootDir);
+  hot.config.llm.pingTimeoutMs = 12345;
+  const llm = fakeLlm(() => ({ text: 'pong', usage: {}, estimated: 1 }));
+  const { admin } = makeAdmin(rootDir, { hot, llm });
+
+  await admin.run('ping', { role: 'talk' }, {});
+
+  assert.equal(llm.calls.length, 1);
+  const [{ messages, options }] = llm.calls;
+  assert.deepEqual(messages, [{ role: 'user', content: 'Reply with one word: pong' }]);
+  assert.equal(options.model, 'anthropic/claude-opus-4.6');
+  assert.equal(options.maxOutputTokens, 16);
+  assert.equal(options.countAgainstDailyCap, false);
+  assert.equal(options.skipCalibration, true);
+  assert.equal(options.timeoutMs, 12345);
+});
+
+test('run: ping falls back to the default pingTimeoutMs when unset', async () => {
+  const rootDir = makeRoot();
+  const hot = hotForPing(rootDir);
+  const llm = fakeLlm(() => ({ text: 'pong', usage: {}, estimated: 1 }));
+  const { admin } = makeAdmin(rootDir, { hot, llm });
+
+  await admin.run('ping', { role: 'talk' }, {});
+  assert.equal(llm.calls[0].options.timeoutMs, 30000);
+});
+
+test('run: ping single-role form only pings that one role', async () => {
+  const rootDir = makeRoot();
+  const hot = hotForPing(rootDir);
+  const llm = fakeLlm(() => ({ text: 'pong', usage: {}, estimated: 1 }));
+  const { admin } = makeAdmin(rootDir, { hot, llm });
+
+  const body = await admin.run('ping', { role: 'media' }, {});
+
+  assert.equal(llm.calls.length, 1);
+  assert.equal(body.split('\n').length, 1);
+  assert.ok(body.startsWith('media: anthropic/claude-haiku-4.5 — ok,'));
+});
+
+test('run: ping de-duplicates identical models: one call, reported for every role that uses it', async () => {
+  const rootDir = makeRoot();
+  const hot = hotForPing(rootDir);
+  // memory.model is null in makeHotWithMedia -> analyzer falls back to the same model as talk.
+  const llm = fakeLlm(() => ({ text: 'pong', usage: {}, estimated: 1 }));
+  const { admin } = makeAdmin(rootDir, { hot, llm });
+
+  const body = await admin.run('ping', {}, {});
+  const lines = body.split('\n');
+
+  assert.equal(llm.calls.length, 2, 'talk+analyzer share one model, media is distinct: two calls');
+  assert.equal(lines.length, 3, 'still one line per requested role');
+  assert.ok(lines.some((l) => l.startsWith('talk: anthropic/claude-opus-4.6 — ok,')));
+  assert.ok(lines.some((l) => l.startsWith('analyzer: anthropic/claude-opus-4.6 — ok,')));
+});
+
+// A real "wrong provider keys" 404 body captured from OpenRouter, verbatim -- see the
+// module header's WHY. `error.metadata.routing_funnel` is the real location; `step` is the
+// real step-name key; `endpoint_count` (snake_case) is the real count key.
+const REAL_NO_ENDPOINTS_BODY =
+  '{"error":{"message":"No endpoints found for anthropic/claude-opus-4.6.","code":404,"metadata":{"routing_funnel":[' +
+  '{"step":"Initial Endpoints","endpoint_count":6},' +
+  '{"step":"Filter by Regional Surcharge","endpoint_count":5},' +
+  '{"step":"Filter by Allowed Providers","endpoint_count":2},' +
+  '{"step":"Apply Manual Order","endpoint_count":2},' +
+  '{"step":"Add BYOK Endpoints","endpoint_count":0}]}}}';
+
+function throwHttpError(statusCode, bodyText) {
+  const err = new Error(`OpenRouter HTTP ${statusCode}: ${bodyText}`);
+  err.statusCode = statusCode;
+  err.body = bodyText;
+  throw err;
+}
+
+test('run: ping reports a role that returns an HTTP error with its status, a trimmed message and the real routing funnel shape', async () => {
+  const rootDir = makeRoot();
+  const hot = hotForPing(rootDir);
+  hot.config.memory.model = 'openrouter/analyzer-model';
+  const llm = fakeLlm((options) => {
+    if (options.model === 'anthropic/claude-opus-4.6') throwHttpError(404, REAL_NO_ENDPOINTS_BODY);
+    return { text: 'pong', usage: {}, estimated: 1 };
+  });
+  const { admin } = makeAdmin(rootDir, { hot, llm });
+
+  const body = await admin.run('ping', {}, {});
+  const lines = body.split('\n');
+
+  const talkLine = lines.find((l) => l.startsWith('talk:'));
+  assert.ok(talkLine.includes('FAIL'));
+  assert.ok(talkLine.includes('404'));
+  // The last step is also the first one that hit 0 here, so only one is shown.
+  assert.ok(talkLine.includes('funnel: Add BYOK Endpoints -> 0 endpoints'));
+  assert.ok(!talkLine.includes('first hit 0 at'));
+  assert.ok(lines.some((l) => l.startsWith('analyzer: openrouter/analyzer-model — ok,')));
+  assert.ok(lines.some((l) => l.startsWith('media: anthropic/claude-haiku-4.5 — ok,')));
+});
+
+test('run: ping shows both the last step and the first step that hit 0 endpoints, when they differ', async () => {
+  const rootDir = makeRoot();
+  const hot = hotForPing(rootDir);
+  const bodyText = JSON.stringify({
+    error: {
+      message: 'No endpoints found.',
+      code: 404,
+      metadata: {
+        routing_funnel: [
+          { step: 'Initial Endpoints', endpoint_count: 6 },
+          { step: 'Filter by Regional Surcharge', endpoint_count: 0 },
+          { step: 'Filter by Allowed Providers', endpoint_count: 0 },
+          { step: 'Add BYOK Endpoints', endpoint_count: 0 },
+        ],
+      },
+    },
+  });
+  const llm = fakeLlm(() => throwHttpError(404, bodyText));
+  const { admin } = makeAdmin(rootDir, { hot, llm });
+
+  const body = await admin.run('ping', { role: 'talk' }, {});
+
+  assert.ok(body.includes('funnel: Add BYOK Endpoints -> 0 endpoints'));
+  assert.ok(body.includes('(first hit 0 at Filter by Regional Surcharge -> 0 endpoints)'));
+});
+
+test('run: ping reports a timeout distinctly, without an HTTP status', async () => {
+  const rootDir = makeRoot();
+  const hot = hotForPing(rootDir);
+  const llm = fakeLlm(() => {
+    throw new DOMException('This operation was aborted due to timeout', 'TimeoutError');
+  });
+  const { admin } = makeAdmin(rootDir, { hot, llm });
+
+  const body = await admin.run('ping', { role: 'talk' }, {});
+  assert.ok(body.includes('FAIL'));
+  assert.match(body, /timeout/i);
+});
+
+test('run: ping reports every role skipped when labels.ping.prompt is missing, without calling llm.complete', async () => {
+  const rootDir = makeRoot();
+  const hot = hotForPing(rootDir, { label: false });
+  const llm = fakeLlm(() => ({ text: 'pong', usage: {}, estimated: 1 }));
+  const { admin } = makeAdmin(rootDir, { hot, llm });
+
+  const body = await admin.run('ping', {}, {});
+
+  assert.equal(llm.calls.length, 0);
+  const lines = body.split('\n');
+  assert.equal(lines.length, 3);
+  assert.ok(lines.every((l) => l.includes('skipped: label missing')));
+});
+
+test('run: ping reports it is not available when no llm dependency was injected', async () => {
+  const rootDir = makeRoot();
+  const { admin } = makeAdmin(rootDir, { hot: hotForPing(rootDir) });
+
+  await assert.rejects(() => admin.run('ping', {}, {}), /not available/);
+});
+
+test('run: ping never leaks a secret (e.g. an API key) into its output', async () => {
+  const rootDir = makeRoot();
+  const hot = hotForPing(rootDir);
+  const llm = fakeLlm(() => ({ text: 'pong', usage: {}, estimated: 1 }));
+  const { admin } = makeAdmin(rootDir, { hot, llm });
+
+  const body = await admin.run('ping', {}, {});
+  assert.ok(!body.includes('Bearer'));
+  assert.ok(!/sk-or-[a-z0-9]/i.test(body));
+});
+
+test('run: ping works while paused', async () => {
+  const rootDir = makeRoot();
+  const hot = hotForPing(rootDir);
+  const llm = fakeLlm(() => ({ text: 'pong', usage: {}, estimated: 1 }));
+  const { admin, store } = makeAdmin(rootDir, { hot, llm });
+  store.state.data.paused = true;
+
+  await assert.doesNotReject(() => admin.run('ping', {}, {}));
 });
 
 // ---------------------------------------------------------------------------
@@ -1619,6 +1846,86 @@ test('run: warmup.status reports the extended status', async () => {
   assert.ok(body.includes('skipped messages: 3'));
   assert.ok(body.includes('only listed channels: true'));
   assert.ok(body.includes('#general (111)'));
+});
+
+// ---------------------------------------------------------------------------
+// warmup.status: phase / last activity / analyzer model (F35 addendum)
+// ---------------------------------------------------------------------------
+
+test('run: warmup.status shows phase: idle, last activity: never and the analyzer model when no activity is reported', async () => {
+  const rootDir = makeRoot();
+  const warmup = fakeWarmup(); // the default status() carries no `activity` field at all
+  const { admin } = makeAdmin(rootDir, { warmup });
+
+  const body = await admin.run('warmup.status', {}, {});
+
+  assert.ok(body.includes('phase: idle'));
+  assert.ok(body.includes('last activity: never'));
+  assert.ok(body.includes('analyzer model: anthropic/claude-opus-4.6'));
+});
+
+test('run: warmup.status prefers memory.model for the analyzer model line, falling back to llm.model', async () => {
+  const rootDir = makeRoot();
+  const hot = makeHot(rootDir);
+  hot.config.memory = { model: 'anthropic/claude-haiku-4.5' };
+  const warmup = fakeWarmup();
+  const { admin } = makeAdmin(rootDir, { hot, warmup });
+
+  const body = await admin.run('warmup.status', {}, {});
+  assert.ok(body.includes('analyzer model: anthropic/claude-haiku-4.5'));
+});
+
+test('run: warmup.status renders each phase from the reported activity', async () => {
+  const rootDir = makeRoot();
+  const cases = [
+    [{ phase: 'fetching', channelsFetched: 3, channelsTotal: 10 }, 'phase: fetching history, 3/10 channels'],
+    [{ phase: 'analysing', windowBatch: 2, windowBatches: 4, messages: 150 }, 'phase: analysing, batch 2 of 4 in the window (150 messages)'],
+    [{ phase: 'describing', windowBatch: 1, windowBatches: 2, messages: 10 }, 'phase: describing media, batch 1 of 2 in the window (10 messages)'],
+    [{ phase: 'paused' }, 'phase: paused'],
+    [{ phase: 'done' }, 'phase: done'],
+  ];
+
+  for (const [activity, expectedLine] of cases) {
+    const base = fakeWarmup().status();
+    const warmup = fakeWarmup({ status: { ...base, activity: { ...activity, lastActivityAt: Date.now() } } });
+    const { admin } = makeAdmin(rootDir, { warmup });
+    const body = await admin.run('warmup.status', {}, {});
+    assert.ok(body.includes(expectedLine), `expected "${expectedLine}" in:\n${body}`);
+  }
+});
+
+test('run: warmup.status renders the waiting-rate-limit phase with a UTC time and the wait count', async () => {
+  const rootDir = makeRoot();
+  const until = Date.UTC(2026, 0, 1, 20, 24, 0);
+  const base = fakeWarmup().status();
+  const warmup = fakeWarmup({ status: { ...base, activity: { phase: 'waiting-rate-limit', until, waits: 2, lastActivityAt: Date.now() } } });
+  const { admin } = makeAdmin(rootDir, { warmup });
+
+  const body = await admin.run('warmup.status', {}, {});
+  assert.ok(body.includes('phase: waiting for the provider rate limit until 20:24 UTC (wait 2)'));
+});
+
+test('run: warmup.status renders the aborted phase with its reason and detail', async () => {
+  const rootDir = makeRoot();
+  const base = fakeWarmup().status();
+  const warmup = fakeWarmup({
+    status: { ...base, activity: { phase: 'aborted', reason: 'token-limit', detail: 'request too large', lastActivityAt: Date.now() } },
+  });
+  const { admin } = makeAdmin(rootDir, { warmup });
+
+  const body = await admin.run('warmup.status', {}, {});
+  assert.ok(body.includes('phase: aborted (token-limit: request too large)'));
+});
+
+test('run: warmup.status shows a humanised "last activity" line', async () => {
+  const rootDir = makeRoot();
+  const thirtySecondsAgo = Date.now() - 30_000;
+  const base = fakeWarmup().status();
+  const warmup = fakeWarmup({ status: { ...base, activity: { phase: 'done', lastActivityAt: thirtySecondsAgo } } });
+  const { admin } = makeAdmin(rootDir, { warmup });
+
+  const body = await admin.run('warmup.status', {}, {});
+  assert.match(body, /last activity: 3\d s ago/);
 });
 
 test('run: warmup.plan reports the ordered plan, missing ids and budget line', async () => {

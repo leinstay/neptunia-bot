@@ -28,7 +28,7 @@ const REPLY_CHUNK_CHARS = 1900;
 const MAX_AUTOCOMPLETE_CHOICES = 25;
 
 /** Commands that may take long enough to need `deferReply` before `editReply`. */
-const SLOW_COMMANDS = new Set(['poke', 'warmup.plan', 'warmup.run', 'reload', 'pause', 'resume']);
+const SLOW_COMMANDS = new Set(['poke', 'warmup.plan', 'warmup.run', 'reload', 'pause', 'resume', 'ping']);
 
 const DISABLED_MESSAGE = 'Owner commands are disabled (features.adminCommands is off).';
 const NOT_ALLOWED_MESSAGE = 'Not allowed.';
@@ -51,6 +51,24 @@ export function buildCommandTree(commandName) {
       default_member_permissions: '0',
       options: [
         { type: SUBCOMMAND, name: 'status', description: 'Model, calibration, quotas and per-guild memory status.' },
+        {
+          type: SUBCOMMAND,
+          name: 'ping',
+          description: 'Check that each role\'s model is reachable right now (latency, provider, errors).',
+          options: [
+            {
+              type: STRING,
+              name: 'role',
+              description: 'Which role to ping (default: all three).',
+              required: false,
+              choices: [
+                { name: 'talk', value: 'talk' },
+                { name: 'analyzer', value: 'analyzer' },
+                { name: 'media', value: 'media' },
+              ],
+            },
+          ],
+        },
         { type: SUBCOMMAND, name: 'reload', description: 'Reload config and prompts now.' },
         {
           type: SUBCOMMAND,
@@ -438,6 +456,7 @@ function commandKeyFor(interaction) {
 
 const OPTION_MAPPERS = {
   status: () => ({}),
+  ping: (options) => ({ role: options.getString('role') ?? undefined }),
   reload: () => ({}),
   pause: () => ({}),
   resume: () => ({}),

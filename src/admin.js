@@ -443,11 +443,13 @@ function writeLocalConfig(localPath, value) {
  *   30-90s) before the pause flushes and drops the store's caches. Absent -> the wait is skipped.
  * `pending` — `{ clear() }`, optional: clears src/discord/events.js's pending-ping queue on pause
  *   (F30). Absent -> nothing to clear.
+ * `llm` — from createLlm() (src/llm/openrouter.js), optional: `complete()`, used by `/nep ping`
+ *   (F35) to reach each role's model directly. Absent -> `/nep ping` reports it is not available.
  *
  * `run(commandKey, args, context)` throws a plain `Error` (operator-facing
  * message) on bad input; it never touches discord.js.
  */
-export function createAdmin({ hot, store, client, spontaneous, calibrator, getGuildId, warmup, turns, memory, pending }) {
+export function createAdmin({ hot, store, client, spontaneous, calibrator, getGuildId, warmup, turns, memory, pending, llm }) {
   function isOwner(userId) {
     const owners = hot.config?.bot?.owners ?? [];
     return owners.map(String).includes(String(userId));
@@ -1156,6 +1158,136 @@ function cmdModelSet(args) {
   return `Set ${role} model to ${id} (reload ${ok ? 'ok' : 'FAILED'})`;
 }
 
+// ---------------------------------------------------------------------
+// ping (F35): one minimal chat completion per role's model, in parallel,
+// to tell the owner in seconds whether each one is actually reachable --
+// see the module header's DO list. Never touches the daily request cap or
+// token calibration (src/llm/openrouter.js#complete's `countAgainstDailyCap`
+// / `skipCalibration` options), never writes under data/.
+// ---------------------------------------------------------------------
+
+const PING_ROLES = ['talk', 'analyzer', 'media'];
+
+/** The model id one role resolves to right now — mirrors cmdModelShow/MODEL_ROLE_PATHS. */
+function pingModelFor(role, cfg) {
+  if (role === 'talk') return cfg?.llm?.model || undefined;
+  if (role === 'analyzer') return cfg?.memory?.model || cfg?.llm?.model || undefined;
+  if (role === 'media') return cfg?.media?.model || undefined;
+  return undefined;
+}
+
+/** `entry.step`/`.name`/`.stage`, or `'step'` when a routing-funnel entry names itself none of those. */
+function funnelStepName(entry) {
+  return entry?.step ?? entry?.name ?? entry?.stage ?? 'step';
+}
+
+/** `entry.endpoint_count` (OpenRouter's real key, verbatim from a captured 404 body) first, then a
+ * few other plausible spellings, so a future rename does not silently go blank. */
+function funnelEndpointCount(entry) {
+  return entry?.endpoint_count ?? entry?.endpoints ?? entry?.count ?? entry?.remaining ?? entry?.endpointCount;
+}
+
+function describeFunnelStep(entry) {
+  const count = funnelEndpointCount(entry);
+  return count == null ? funnelStepName(entry) : `${funnelStepName(entry)} -> ${count} endpoints`;
+}
+
+/**
+ * The last `routing_funnel` step out of an OpenRouter error body, when present -- the diagnostic
+ * that actually tells "wrong provider keys" apart from a genuine outage (see the module header's
+ * WHY). A real captured 404 body carries it at `error.metadata.routing_funnel` (checked first); a
+ * couple of other plausible locations are tried too, and it never throws on a body that is not
+ * JSON or carries no such field. When the step that first hit 0 endpoints is not the last step
+ * (the funnel kept going after already emptying out), both are shown -- the first zero is usually
+ * the actually useful one to fix, the last is what the request ultimately failed at.
+ */
+function extractRoutingFunnel(rawBody) {
+  if (!rawBody) return null;
+  let parsed;
+  try {
+    parsed = JSON.parse(rawBody);
+  } catch {
+    return null;
+  }
+  const funnel = parsed?.error?.metadata?.routing_funnel ?? parsed?.routing_funnel ?? parsed?.error?.routing_funnel;
+  if (!Array.isArray(funnel) || funnel.length === 0) return null;
+  const last = funnel[funnel.length - 1];
+  if (!last || typeof last !== 'object') return null;
+
+  const firstZero = funnel.find((entry) => funnelEndpointCount(entry) === 0);
+  const lastLine = `funnel: ${describeFunnelStep(last)}`;
+  if (firstZero && firstZero !== last) {
+    return `${lastLine} (first hit 0 at ${describeFunnelStep(firstZero)})`;
+  }
+  return lastLine;
+}
+
+/** One role's line on a successful ping. */
+function formatPingSuccess(role, model, result, ms) {
+  const parts = [`${role}: ${model} — ok, ${ms}ms`];
+  if (result.provider) parts.push(`provider=${result.provider}`);
+  const usage = result.usage ?? {};
+  if (usage.prompt_tokens != null || usage.completion_tokens != null) {
+    parts.push(`tokens ${usage.prompt_tokens ?? '?'}/${usage.completion_tokens ?? '?'}`);
+  }
+  return parts.join(', ');
+}
+
+/** One role's line on a failed ping: the HTTP status is already folded into `err.message` by
+ * src/llm/openrouter.js, so this only trims it and appends the routing-funnel diagnostic, if any. */
+function formatPingFailure(role, model, err, ms) {
+  const message = String(err?.message ?? err ?? 'error').slice(0, 200);
+  const parts = [`${role}: ${model} — FAIL, ${ms}ms, ${message}`];
+  const funnel = extractRoutingFunnel(err?.body);
+  if (funnel) parts.push(funnel);
+  return parts.join(' | ');
+}
+
+async function cmdPing(args) {
+  if (!llm) throw new Error('ping is not available (no llm client configured)');
+
+  const requested = PING_ROLES.includes(args?.role) ? [args.role] : PING_ROLES;
+  const cfg = hot.config;
+  const roleModel = new Map(requested.map((role) => [role, pingModelFor(role, cfg)]));
+
+  const promptText = hot.prompts?.labels?.ping?.prompt;
+  if (!promptText) {
+    return requested.map((role) => `${role}: ${roleModel.get(role) ?? '(no model configured)'} — skipped: label missing`).join('\n');
+  }
+
+  const uniqueModels = [...new Set([...roleModel.values()].filter(Boolean))];
+  const results = new Map();
+
+  await Promise.all(
+    uniqueModels.map(async (model) => {
+      const start = Date.now();
+      try {
+        const result = await llm.complete([{ role: 'user', content: promptText }], {
+          model,
+          maxOutputTokens: 16,
+          countAgainstDailyCap: false,
+          skipCalibration: true,
+          timeoutMs: cfg?.llm?.pingTimeoutMs ?? 30000,
+        });
+        results.set(model, { ok: true, ms: Date.now() - start, result });
+      } catch (err) {
+        results.set(model, { ok: false, ms: Date.now() - start, err });
+      }
+    }),
+  );
+
+  return requested
+    .map((role) => {
+      const model = roleModel.get(role);
+      if (!model) return `${role}: (no model configured)`;
+      const outcome = results.get(model);
+      return outcome.ok
+        ? formatPingSuccess(role, model, outcome.result, outcome.ms)
+        : formatPingFailure(role, model, outcome.err, outcome.ms);
+    })
+    .join('\n');
+}
+
 function warmupLocalConfigPath() {
     return path.join(hot.rootDir, 'config.local.json');
   }
@@ -1175,10 +1307,49 @@ function warmupLocalConfigPath() {
     return hot.reloadConfig();
   }
 
+  /** `N s ago` / `N min ago`, or `never` when `lastActivityAt` is unknown (F35 addendum). */
+  function humanizeAgo(lastActivityAt) {
+    if (!Number.isFinite(lastActivityAt)) return 'never';
+    const deltaMs = Math.max(0, Date.now() - lastActivityAt);
+    const seconds = Math.round(deltaMs / 1000);
+    if (seconds < 60) return `${seconds} s ago`;
+    return `${Math.round(seconds / 60)} min ago`;
+  }
+
+  /** One terse `phase: …` line from a warm-up's in-memory `activity` snapshot (F35 addendum, see
+   * src/memory/warmup.js's `touchActivity`) — never throws on a missing/partial snapshot. */
+  function formatWarmupPhase(activity) {
+    const a = activity ?? {};
+    const phase = a.phase ?? 'idle';
+    if (phase === 'fetching') {
+      return `phase: fetching history, ${a.channelsFetched ?? 0}/${a.channelsTotal ?? 0} channels`;
+    }
+    if (phase === 'analysing' || phase === 'describing') {
+      const verb = phase === 'describing' ? 'describing media' : 'analysing';
+      return `phase: ${verb}, batch ${a.windowBatch ?? 0} of ${a.windowBatches ?? 0} in the window (${a.messages ?? 0} messages)`;
+    }
+    if (phase === 'waiting-rate-limit') {
+      const until = Number.isFinite(a.until) ? `${new Date(a.until).toISOString().slice(11, 16)} UTC` : '?';
+      return `phase: waiting for the provider rate limit until ${until} (wait ${a.waits ?? 1})`;
+    }
+    if (phase === 'paused') return 'phase: paused';
+    if (phase === 'aborted') {
+      const reason = a.reason ?? 'unknown';
+      const detail = a.detail ? `: ${String(a.detail).slice(0, 160)}` : '';
+      return `phase: aborted (${reason}${detail})`;
+    }
+    if (phase === 'done') return 'phase: done';
+    return 'phase: idle';
+  }
+
   function cmdWarmupStatus() {
     const s = warmup.status();
     const reached = s.reachedTs ? new Date(s.reachedTs).toISOString() : '(not started)';
+    const analyzerModel = hot.config?.memory?.model ?? hot.config?.llm?.model ?? '-';
     const lines = [
+      formatWarmupPhase(s.activity),
+      `last activity: ${humanizeAgo(s.activity?.lastActivityAt)}`,
+      `analyzer model: ${analyzerModel}`,
       `enabled: ${s.enabled}`,
       `done: ${s.done}`,
       `paused: ${s.paused}`,
@@ -1288,6 +1459,7 @@ function warmupLocalConfigPath() {
 
   const commands = {
     status: () => cmdStatus(),
+    ping: (args) => cmdPing(args),
     reload: () => cmdReload(),
     pause: () => cmdPause(),
     resume: () => cmdResume(),

@@ -128,6 +128,8 @@ const admin = createAdmin({
   memory,
   // F30 (/nep pause): clears the pending-ping queue on pause.
   pending: { clear: () => onMessage.clearPending() },
+  // F35 (/nep ping): reaches each role's model directly through the same rails.
+  llm,
 });
 const onInteraction = createInteractionHandler({ hot, admin, getGuildId });
 

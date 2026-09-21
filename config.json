@@ -34,6 +34,7 @@
     "maxRequestTokens": 50000,
     "safetyMargin": 0.9,
     "timeoutMs": 90000,
+    "pingTimeoutMs": 30000,
     "retries": 2,
     "maxRequestsPerDay": 300,
     "provider": null

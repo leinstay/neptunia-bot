@@ -2574,3 +2574,318 @@ test('warm-up: no describer configured is a plain no-op, never throws', async ()
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// ---------------------------------------------------------------------------
+// status().activity — in-memory run phase (F35 addendum), never persisted
+// ---------------------------------------------------------------------------
+
+test('activity: idle by default, before any run', () => {
+  const dir = tempDir();
+  try {
+    const store = createStore({ dataDir: dir });
+    const hot = fakeHot();
+    const warmup = createWarmup({ hot, store, client: fakeClient(fakeGuild('g1', [])), memory: {}, getGuildId: () => 'g1' });
+
+    assert.deepEqual(warmup.status().activity, { phase: 'idle', lastActivityAt: null });
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('activity: reports fetching progress with channel counts while fetching history', async () => {
+  const dir = tempDir();
+  try {
+    const store = createStore({ dataDir: dir });
+    const now = Date.now();
+    const historyA = makeHistory({ count: 1, startTs: now - 5000, spacingMs: 1000, authorId: 'u1' });
+    const historyB = makeHistory({ count: 1, startTs: now - 1000, spacingMs: 1000, authorId: 'u2' });
+    const channelA = fakeChannel('chanA', historyA);
+    const channelB = fakeChannel('chanB', historyB);
+    const guild = fakeGuild('g1', [channelA, channelB]);
+    const client = fakeClient(guild);
+    const hot = fakeHot({ warmup: { batchMessages: 10 } });
+    const memory = fakeMemory(alwaysOk());
+
+    let warmup;
+    const seen = [];
+    for (const channel of [channelA, channelB]) {
+      const originalFetch = channel.messages.fetch;
+      channel.messages.fetch = async (opts) => {
+        seen.push(warmup.status().activity);
+        return originalFetch(opts);
+      };
+    }
+
+    warmup = createWarmup({ hot, store, client, memory, getGuildId: () => 'g1', sleep: fakeSleep() });
+    await warmup.run();
+
+    assert.ok(seen.length >= 1);
+    assert.equal(seen[0].phase, 'fetching');
+    assert.equal(seen[0].channelsFetched, 0, 'no channel has finished fetching yet at the very first call');
+    assert.equal(seen[0].channelsTotal, 2);
+
+    assert.equal(warmup.status().activity.phase, 'done', 'the run finishes (history exhausted) once fetching/analysing are done');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('activity: reports the analysing phase with the window batch index and message count', async () => {
+  const dir = tempDir();
+  try {
+    const store = createStore({ dataDir: dir });
+    const now = Date.now();
+    // One channel, 4 messages, batchMessages: 2 -> packWindow yields exactly 2 batches of 2.
+    const history = makeHistory({ count: 4, startTs: now - 60_000, spacingMs: 1000, authorId: 'u1' });
+    const channel = fakeChannel('c1', history);
+    const guild = fakeGuild('g1', [channel]);
+    const client = fakeClient(guild);
+    const hot = fakeHot({ warmup: { batchMessages: 2 } });
+
+    let warmup;
+    const seen = [];
+    const memory = fakeMemory((callIndex, batch) => {
+      seen.push({ activity: warmup.status().activity, batchLen: batch.length });
+      return { ok: true, usage: { prompt_tokens: 10, completion_tokens: 5 }, estimated: 15, result: {} };
+    });
+
+    warmup = createWarmup({ hot, store, client, memory, getGuildId: () => 'g1', sleep: fakeSleep() });
+    await warmup.run();
+
+    assert.equal(seen.length, 2, 'two batches of 2 messages each');
+    assert.equal(seen[0].activity.phase, 'analysing');
+    assert.equal(seen[0].activity.windowBatch, 1);
+    assert.equal(seen[0].activity.windowBatches, 2);
+    assert.equal(seen[0].activity.messages, 2);
+    assert.equal(seen[1].activity.windowBatch, 2);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('activity: reports a distinct describing phase before analysing, when media descriptions are on', async () => {
+  const dir = tempDir();
+  try {
+    const store = createStore({ dataDir: dir });
+    const now = Date.now();
+    const history = makeHistory({ count: 1, startTs: now, spacingMs: 1000, authorId: 'u1' });
+    withImage(history[0], 'img1');
+    const channel = fakeChannel('c1', history);
+    const guild = fakeGuild('g1', [channel]);
+    const client = fakeClient(guild);
+    const hot = fakeHotWithMedia({ warmup: { batchMessages: 10 } });
+    const memory = fakeMemory(alwaysOk());
+
+    let warmup;
+    let seenDuringDescribe;
+    const describer = fakeDescriber(() => {
+      seenDuringDescribe = warmup.status().activity;
+      return { text: 'a cat', usage: { prompt_tokens: 10, completion_tokens: 5 }, estimated: 15 };
+    });
+
+    warmup = createWarmup({ hot, store, client, memory, describer, getGuildId: () => 'g1', sleep: fakeSleep() });
+    await warmup.run();
+
+    assert.ok(seenDuringDescribe);
+    assert.equal(seenDuringDescribe.phase, 'describing');
+    assert.equal(seenDuringDescribe.windowBatch, 1);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('activity: waiting-rate-limit phase carries "until" and the wait count', async () => {
+  const dir = tempDir();
+  try {
+    const store = createStore({ dataDir: dir });
+    const now = Date.now();
+    const history = makeHistory({ count: 2, startTs: now - 60_000, spacingMs: 1000, authorId: 'u1' });
+    const channel = fakeChannel('c1', history);
+    const guild = fakeGuild('g1', [channel]);
+    const client = fakeClient(guild);
+    const hot = fakeHot({ warmup: { batchMessages: 10 } });
+    let call = 0;
+    const memory = fakeMemory(() => {
+      call += 1;
+      if (call === 1) return rateLimited429();
+      return { ok: true, usage: { prompt_tokens: 10, completion_tokens: 5 }, estimated: 15, result: {} };
+    });
+
+    let warmup;
+    let seenDuringWait;
+    const beforeWait = Date.now();
+    const sleep = async () => {
+      seenDuringWait = warmup.status().activity;
+    };
+
+    warmup = createWarmup({ hot, store, client, memory, getGuildId: () => 'g1', sleep });
+    await warmup.run();
+
+    assert.ok(seenDuringWait);
+    assert.equal(seenDuringWait.phase, 'waiting-rate-limit');
+    assert.equal(seenDuringWait.waits, 1);
+    assert.ok(Number.isFinite(seenDuringWait.until));
+    assert.ok(seenDuringWait.until >= beforeWait, 'until must be roughly "now + the wait", not stale');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('activity: paused phase after stop() interrupts a rate-limit wait', async () => {
+  const dir = tempDir();
+  try {
+    const store = createStore({ dataDir: dir });
+    const now = Date.now();
+    const history = makeHistory({ count: 2, startTs: now - 60_000, spacingMs: 1000, authorId: 'u1' });
+    const channel = fakeChannel('c1', history);
+    const guild = fakeGuild('g1', [channel]);
+    const client = fakeClient(guild);
+    const hot = fakeHot({ warmup: { batchMessages: 10 } });
+
+    let warmup;
+    const memory = fakeMemory((callIndex) => {
+      if (callIndex === 0) {
+        warmup.stop();
+        return rateLimited429();
+      }
+      return { ok: true, usage: { prompt_tokens: 10, completion_tokens: 5 }, estimated: 15, result: {} };
+    });
+
+    warmup = createWarmup({ hot, store, client, memory, getGuildId: () => 'g1', sleep: fakeSleep() });
+    await warmup.run();
+
+    assert.equal(warmup.status().activity.phase, 'paused');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('activity: aborted phase carries "rate-limit" as the reason after repeated rate limits', async () => {
+  const dir = tempDir();
+  try {
+    const store = createStore({ dataDir: dir });
+    const now = Date.now();
+    const history = makeHistory({ count: 2, startTs: now - 60_000, spacingMs: 1000, authorId: 'u1' });
+    const channel = fakeChannel('c1', history);
+    const guild = fakeGuild('g1', [channel]);
+    const client = fakeClient(guild);
+    const hot = fakeHot({ warmup: { batchMessages: 10, rateLimitMaxWaits: 2 } });
+    const memory = fakeMemory(() => rateLimited429());
+
+    const warmup = createWarmup({ hot, store, client, memory, getGuildId: () => 'g1', sleep: fakeSleep() });
+    const result = await warmup.run();
+
+    assert.equal(result.aborted, true);
+    const activity = warmup.status().activity;
+    assert.equal(activity.phase, 'aborted');
+    assert.equal(activity.reason, 'rate-limit');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('activity: aborted phase carries the analyzer\'s own reason after three strikes', async () => {
+  const dir = tempDir();
+  try {
+    const store = createStore({ dataDir: dir });
+    const now = Date.now();
+    const history = makeHistory({ count: 2, startTs: now - 60_000, spacingMs: 1000, authorId: 'u1' });
+    const channel = fakeChannel('c1', history);
+    const guild = fakeGuild('g1', [channel]);
+    const client = fakeClient(guild);
+    const hot = fakeHot({ warmup: { batchMessages: 10 } });
+    const memory = fakeMemory(() => ({ ok: false, usage: null, estimated: 0, result: null, reason: 'llm-error', status: 500, detail: 'internal server error' }));
+
+    const warmup = createWarmup({ hot, store, client, memory, getGuildId: () => 'g1', sleep: fakeSleep() });
+    const result = await warmup.run();
+
+    assert.equal(result.aborted, true);
+    const activity = warmup.status().activity;
+    assert.equal(activity.phase, 'aborted');
+    assert.equal(activity.reason, 'llm-error');
+    assert.equal(activity.detail, 'internal server error');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('activity: lastActivityAt strictly advances as the run moves from fetching to analysing', async () => {
+  const dir = tempDir();
+  try {
+    const store = createStore({ dataDir: dir });
+    const now0 = Date.now();
+    const history = makeHistory({ count: 2, startTs: now0 - 60_000, spacingMs: 1000, authorId: 'u1' });
+    const channel = fakeChannel('c1', history);
+    const guild = fakeGuild('g1', [channel]);
+    const client = fakeClient(guild);
+    const hot = fakeHot({ warmup: { batchMessages: 10 } });
+
+    let warmup;
+    let duringFetch;
+    const originalFetch = channel.messages.fetch;
+    channel.messages.fetch = async (opts) => {
+      duringFetch = warmup.status().activity.lastActivityAt;
+      return originalFetch(opts);
+    };
+
+    let duringAnalyse;
+    const memory = fakeMemory(() => {
+      duringAnalyse = warmup.status().activity.lastActivityAt;
+      return { ok: true, usage: { prompt_tokens: 10, completion_tokens: 5 }, estimated: 15, result: {} };
+    });
+
+    let t = 1000;
+    const now = () => {
+      t += 1;
+      return t;
+    };
+
+    warmup = createWarmup({ hot, store, client, memory, getGuildId: () => 'g1', sleep: fakeSleep(), now });
+    await warmup.run();
+
+    assert.ok(Number.isFinite(duringFetch));
+    assert.ok(Number.isFinite(duringAnalyse));
+    assert.ok(duringAnalyse > duringFetch, 'lastActivityAt must move forward as the run progresses');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('activity: never written to state.json (in-memory only)', async () => {
+  const dir = tempDir();
+  try {
+    const store = createStore({ dataDir: dir });
+    const now = Date.now();
+    const history = makeHistory({ count: 2, startTs: now - 60_000, spacingMs: 1000, authorId: 'u1' });
+    const channel = fakeChannel('c1', history);
+    const guild = fakeGuild('g1', [channel]);
+    const client = fakeClient(guild);
+    const hot = fakeHot({ warmup: { batchMessages: 10 } });
+    const memory = fakeMemory(alwaysOk());
+
+    const warmup = createWarmup({ hot, store, client, memory, getGuildId: () => 'g1', sleep: fakeSleep() });
+    await warmup.run();
+    store.flush();
+
+    const raw = fs.readFileSync(path.join(dir, 'state.json'), 'utf8');
+    assert.ok(!raw.includes('"activity"'), 'the run activity must never be persisted');
+    assert.ok(!raw.includes('lastActivityAt'), 'the run activity must never be persisted');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('activity: status() stays cheap and side-effect free (repeated calls never change progress)', () => {
+  const dir = tempDir();
+  try {
+    const store = createStore({ dataDir: dir });
+    const hot = fakeHot();
+    const warmup = createWarmup({ hot, store, client: fakeClient(fakeGuild('g1', [])), memory: {}, getGuildId: () => 'g1' });
+
+    const first = warmup.status();
+    const second = warmup.status();
+    assert.deepEqual(first, second);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

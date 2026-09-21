@@ -59,6 +59,10 @@ export function createLlm({ apiKey, getConfig, calibrator, state, fetchImpl = fe
    * describer need more room than a chat reply's default.
    * `options.countAgainstDailyCap` (default true) — see the header comment
    * for the one deliberate exception.
+   * `options.skipCalibration` (default false) — never feeds `usage.prompt_tokens`
+   * into the calibrator. For `/nep ping` (F35): a 16-token ping reply is
+   * nothing like a real turn's request/response shape, and would only skew
+   * the ratio every other request is checked against.
    */
   async function complete(messages, options = {}) {
     const cfg = getConfig().llm;
@@ -101,9 +105,14 @@ export function createLlm({ apiKey, getConfig, calibrator, state, fetchImpl = fe
         });
 
         if (!response.ok) {
-          const detail = (await response.text()).slice(0, 500);
+          // Full (untrimmed) body kept on `.body` for a caller that needs more than the
+          // 500-char message allows -- e.g. `/nep ping` (F35) picking OpenRouter's
+          // `routing_funnel` diagnostic out of a "No endpoints found" error.
+          const rawBody = await response.text();
+          const detail = rawBody.slice(0, 500);
           const error = new Error(`OpenRouter HTTP ${response.status}: ${detail}`);
           error.statusCode = response.status;
+          error.body = rawBody;
           if (RETRY_STATUS.has(response.status)) {
             lastError = error;
             continue;
@@ -116,11 +125,14 @@ export function createLlm({ apiKey, getConfig, calibrator, state, fetchImpl = fe
         const text = json.choices?.[0]?.message?.content ?? '';
         const usage = json.usage ?? {};
         const finishReason = json.choices?.[0]?.finish_reason ?? undefined;
-        if (usage.prompt_tokens) calibrator.observe(raw, usage.prompt_tokens);
+        if (options.skipCalibration !== true && usage.prompt_tokens) calibrator.observe(raw, usage.prompt_tokens);
         if (usage.prompt_tokens > cfg.maxRequestTokens) {
           log.warn('llm: provider counted more prompt tokens than the cap', { usage, estimated });
         }
-        return { text: typeof text === 'string' ? text : '', usage, estimated, finishReason };
+        // `json.provider` is OpenRouter's own name for whichever upstream provider
+        // actually served the request (undefined when the response omits it) --
+        // surfaced so `/nep ping` (F35) can report it without a second request shape.
+        return { text: typeof text === 'string' ? text : '', usage, estimated, finishReason, provider: json.provider };
       } catch (err) {
         if (err.statusCode && !RETRY_STATUS.has(err.statusCode)) throw err;
         lastError = err;

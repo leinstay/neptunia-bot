@@ -119,11 +119,12 @@ The system prompt handles sounding human, so the card is purely personality. Giv
 | `maxRequestTokens` | `50000` | Hard token cap per request |
 | `safetyMargin` | `0.9` | Budgeting fraction of maxRequestTokens |
 | `timeoutMs` | `90000` | Request timeout (ms) |
+| `pingTimeoutMs` | `30000` | Timeout for `/nep ping` requests (ms) |
 | `retries` | `2` | Retries on transient failures |
 | `maxRequestsPerDay` | `300` | Daily request cap |
 | `provider` | `null` | OpenRouter `provider` routing object, passed verbatim; `null` sends nothing |
 
-`llm.provider` sets OpenRouter's provider routing field on every request, for example `{ "ignore": ["some-provider"] }` or `{ "order": ["anthropic"], "allow_fallbacks": true }`. If the OpenRouter account itself restricts allowed providers, ignoring the only one left makes every request fail with "No endpoints found".
+`llm.provider` sets OpenRouter's provider routing field on every request, for example `{ "ignore": ["some-provider"] }` or `{ "order": ["anthropic"], "allow_fallbacks": true }`. If the OpenRouter account itself restricts allowed providers, ignoring the only one left makes every request fail with "No endpoints found". After changing provider settings, run `/nep ping` to verify that every model role is reachable.
 
 ### `context`
 
@@ -331,6 +332,7 @@ One Discord slash command, `/nep` (the name comes from `bot.commandName`). Guild
 |---|---|
 | `/nep status` | Model, calibration, quotas and per-guild memory status |
 | `/nep reload` | Reload config and prompts now |
+| `/nep ping [role]` | Send a minimal request to one or all model roles (`talk`, `analyzer`, `media`) and report model, latency, provider, tokens or the error; does not count against `llm.maxRequestsPerDay` and works while paused or warming up |
 | `/nep pause` | Stop all activity, flush memory to disk and unload it; `data/` is safe to edit while paused |
 | `/nep resume` | Reload memory from `data/` and continue; refuses if any JSON file does not parse, naming the broken ones |
 | `/nep poke [mode] [channel]` | Force a spontaneous action |

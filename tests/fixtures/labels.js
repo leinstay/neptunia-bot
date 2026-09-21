@@ -126,4 +126,7 @@ export const labels = {
     reply: 'replied to your message',
     name: 'mentioned you by name, without a tag',
   },
+  ping: {
+    prompt: 'Reply with one word: pong',
+  },
 };
