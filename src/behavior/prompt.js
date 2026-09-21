@@ -16,6 +16,7 @@ import { estimateTokens } from '../llm/tokens.js';
 import { computeTempo, fill, formatNow, formatTranscript, renderTempo, renderTranscript } from '../discord/format.js';
 import { affinityBand } from '../memory/affinity.js';
 import { isConfirmed, isStale } from '../memory/interests.js';
+import { topByRank } from '../memory/ranking.js';
 import { sortEpisodesForDisplay } from '../memory/episodes.js';
 import { matchLore } from '../memory/lore.js';
 import { channelActivity, renderChannel } from '../memory/channels.js';
@@ -112,42 +113,40 @@ function renderInterestItem(item, p, marks) {
 }
 
 /**
- * The `labels.profile.interests` line's `{text}`: every stored interest
- * (topic/note atomic items, see src/memory/interests.js), sorted FRESH first
- * (see `isStale`) then by weight descending, capped at `maxInterests` (the
- * live `memory.maxInterests`, since a stored profile can briefly hold more
- * than a lowered live cap until the next analyzer update evicts). `''` when
- * there is nothing to show. `marks` (see `markConfirmation`) controls the
- * unsure/stale marks; without `marks.staleDays` every item sorts as fresh
- * (weight descending only), matching the behaviour before this feature.
+ * The `labels.profile.interests` line's `{text}`: the top `maxInterests`
+ * stored interests (topic/note atomic items, see src/memory/interests.js) by
+ * RANK (src/memory/ranking.js#topByRank, decayed with `marks.interestHalfLifeDays`),
+ * in rank order -- see .claude/docs/prompt-contract.md, "More is stored than
+ * shown, and rank decays with age". `''` when there is nothing to show.
+ * `maxInterests` not an integer -> every stored interest renders (a stored
+ * profile can hold more than a lowered live cap until the next analyzer
+ * update evicts). `marks` (see `markConfirmation`) controls the unsure/stale
+ * marks on each item; without `marks.interestHalfLifeDays` the rank is pure
+ * weight (no decay), matching the behaviour before this feature.
  */
 function interestsText(interests, labels, maxInterests, marks) {
   if (!Array.isArray(interests) || interests.length === 0) return '';
-  const cap = Number.isInteger(maxInterests) ? maxInterests : Infinity;
-  const nowMs = marks?.now ?? Date.now();
-  const staleDays = marks?.staleDays;
-  const ordered = [...interests]
-    .sort((a, b) => {
-      const staleDiff = (isStale(a, nowMs, staleDays) ? 1 : 0) - (isStale(b, nowMs, staleDays) ? 1 : 0);
-      return staleDiff || (b.weight ?? 0) - (a.weight ?? 0);
-    })
-    .slice(0, cap);
+  const ordered = topByRank(interests, maxInterests, marks?.interestHalfLifeDays);
   return ordered.map((item) => renderInterestItem(item, labels.profile, marks)).join('; ');
 }
 
 /**
- * The `labels.profile.details` line's `{text}`: every stored detail item
- * (`{ id, text, weight, firstSeen, lastSeen }`, see src/memory/details.js) in
- * stored order, each with the unsure mark appended when unconfirmed -- never
+ * The `labels.profile.details` line's `{text}`: the top `maxDetails` stored
+ * detail items (`{ id, text, weight, firstSeen, lastSeen }`, see
+ * src/memory/details.js) by RANK (decayed with `marks.detailHalfLifeDays`),
+ * in rank order, each with the unsure mark appended when unconfirmed -- never
  * the stale mark, details do not go stale (see
  * .claude/docs/prompt-contract.md, "Dates come from the messages"). `''` when
- * there is nothing to show. A legacy bare-string item (should not occur past
- * store.getUser's migration, kept defensive) renders as-is, never marked.
+ * there is nothing to show. `maxDetails` not an integer -> every stored
+ * detail renders. A legacy bare-string item (should not occur past
+ * store.getUser's migration, kept defensive) renders as-is, never marked or
+ * ranked.
  */
-function detailsText(details, labels, marks) {
+function detailsText(details, labels, maxDetails, marks) {
   if (!Array.isArray(details) || details.length === 0) return '';
   const p = labels.profile;
-  return details
+  const ordered = topByRank(details, maxDetails, marks?.detailHalfLifeDays);
+  return ordered
     .map((item) => (item && typeof item === 'object' ? markConfirmation(item.text ?? '', item, p, { ...marks, stale: false }) : String(item ?? '')))
     .join('; ');
 }
@@ -165,18 +164,26 @@ function detailsText(details, labels, marks) {
  * .claude/docs/prompt-contract.md, "<people>". `opts.episodes.cap`/`.cost`
  * (when given) trim the episode list, heaviest-first, to fit that token
  * budget on top of the rest of the profile; without them every episode
- * renders. `opts.maxInterests` caps how many interests render (see
- * `interestsText` above); omitted -> every stored interest renders.
- * `opts.confirmAfter`/`opts.staleDays`/`opts.now` (from `memory.confirmAfter`/
- * `memory.interestStaleDays`, read by the caller at the moment of use, and
- * the injectable clock) drive the unsure/stale marks on interests and details
- * -- see `markConfirmation`; omitted, nothing is ever marked.
+ * renders. `opts.maxInterests`/`opts.maxDetails` cap how many interests/details
+ * render, keeping the top-ranked ones (see `interestsText`/`detailsText`
+ * above); omitted -> every stored item renders. `opts.interestHalfLifeDays`/
+ * `opts.detailHalfLifeDays` (from `memory.interestHalfLifeDays`/
+ * `memory.detailHalfLifeDays`) drive that rank's decay; omitted -> no decay,
+ * ranked by weight alone. `opts.confirmAfter`/`opts.staleDays`/`opts.now`
+ * (from `memory.confirmAfter`/`memory.interestStaleDays`, read by the caller
+ * at the moment of use, and the injectable clock) drive the unsure/stale
+ * marks on interests and details -- see `markConfirmation`; omitted, nothing
+ * is ever marked.
  */
-export function renderProfile(profile, labels, { interlocutor = false, relationships = false, episodes, maxInterests, confirmAfter, staleDays, now } = {}) {
+export function renderProfile(
+  profile,
+  labels,
+  { interlocutor = false, relationships = false, episodes, maxInterests, maxDetails, interestHalfLifeDays, detailHalfLifeDays, confirmAfter, staleDays, now } = {},
+) {
   if (!profile) return '';
   const p = labels.profile;
   const name = profile.names?.[0] ?? profile.id;
-  const marks = { confirmAfter, staleDays, now };
+  const marks = { confirmAfter, staleDays, now, interestHalfLifeDays, detailHalfLifeDays };
 
   const attitudeLines = [];
   const affinity = profile.affinity;
@@ -193,7 +200,7 @@ export function renderProfile(profile, labels, { interlocutor = false, relations
   const interestsLine = interestsText(profile.interests, labels, maxInterests, marks);
   if (interestsLine) restLines.push(fill(p.interests, { text: interestsLine }));
   if (profile.style) restLines.push(fill(p.style, { text: profile.style }));
-  const detailsLine = detailsText(profile.details, labels, marks);
+  const detailsLine = detailsText(profile.details, labels, maxDetails, marks);
   if (detailsLine) restLines.push(fill(p.details, { text: detailsLine }));
   if (profile.relationship) restLines.push(fill(p.relationship, { text: profile.relationship }));
   const hasContent = attitudeLines.length > 0 || restLines.length > 0;
@@ -422,6 +429,9 @@ export function buildRequest(input) {
             relationships,
             episodes: episodesOpt,
             maxInterests: config.memory?.maxInterests,
+            maxDetails: config.memory?.maxDetails,
+            interestHalfLifeDays: config.memory?.interestHalfLifeDays,
+            detailHalfLifeDays: config.memory?.detailHalfLifeDays,
             confirmAfter: config.memory?.confirmAfter,
             staleDays: config.memory?.interestStaleDays,
             now,
@@ -451,6 +461,9 @@ export function buildRequest(input) {
             renderProfile(profile, labels, {
               relationships,
               maxInterests: config.memory?.maxInterests,
+              maxDetails: config.memory?.maxDetails,
+              interestHalfLifeDays: config.memory?.interestHalfLifeDays,
+              detailHalfLifeDays: config.memory?.detailHalfLifeDays,
               confirmAfter: config.memory?.confirmAfter,
               staleDays: config.memory?.interestStaleDays,
               now,

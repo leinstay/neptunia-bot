@@ -160,6 +160,42 @@ test('applyDetailOps: among equal weights, evicts the oldest lastSeen first', ()
   assert.deepEqual(items.map((i) => i.text).sort(), ['b', 'c']);
 });
 
+// ---- storage cap vs shown cap, and rank-driven eviction (the F27 defect) -----
+
+test('applyDetailOps: the storage cap is max(maxDetailsStored, maxDetails) -- a smaller stored cap never wins', () => {
+  const existing = [
+    { id: 1, text: 'a', weight: 1, firstSeen: 'x', lastSeen: null },
+    { id: 2, text: 'b', weight: 1, firstSeen: 'x', lastSeen: null },
+  ];
+  const { items } = applyDetailOps(existing, {}, opts({ maxDetails: 15, maxDetailsStored: 1, nextId: 3 }));
+  assert.equal(items.length, 2, 'stored cap floored at the shown cap (15), so 2 items are never touched');
+});
+
+test('applyDetailOps: with halfLifeDays, eviction drops the lowest RANK -- an ancient heavy detail can be evicted before a light recent one', () => {
+  const existing = [
+    { id: 1, text: 'Ancient favorite fact', weight: 10, firstSeen: 'x', lastSeen: '2021-01-01T00:00:00.000Z' },
+    { id: 2, text: 'b', weight: 2, firstSeen: 'x', lastSeen: '2026-09-01T00:00:00.000Z' },
+    { id: 3, text: 'c', weight: 2, firstSeen: 'x', lastSeen: '2026-09-05T00:00:00.000Z' },
+  ];
+  const { items } = applyDetailOps(existing, { add: ['New detail'] }, opts({ maxDetails: 3, seenAt: Date.parse('2026-09-20T00:00:00.000Z'), nextId: 4, halfLifeDays: 720 }));
+  assert.deepEqual(items.map((i) => i.text).sort(), ['New detail', 'b', 'c'], 'the ancient heavy detail sinks below the recent ones and is evicted');
+});
+
+test('applyDetailOps: a shorter detailHalfLifeDays makes recency dominate sooner than a longer one', () => {
+  const olderHeavier = [
+    { id: 1, text: 'a', weight: 5, firstSeen: 'x', lastSeen: '2026-08-01T00:00:00.000Z' },
+    { id: 2, text: 'b', weight: 1, firstSeen: 'x', lastSeen: '2026-09-20T00:00:00.000Z' },
+  ];
+  // A very short half-life (7 days) makes the ~50-day recency gap dwarf the
+  // weight gap, evicting the older-heavier item first; the config.json
+  // default (720 days) does not -- weight still wins.
+  const shortHalfLife = applyDetailOps(olderHeavier, {}, opts({ maxDetails: 1, halfLifeDays: 7, nextId: 3 }));
+  assert.deepEqual(shortHalfLife.items.map((i) => i.text), ['b']);
+
+  const longHalfLife = applyDetailOps(olderHeavier, {}, opts({ maxDetails: 1, halfLifeDays: 720, nextId: 3 }));
+  assert.deepEqual(longHalfLife.items.map((i) => i.text), ['a']);
+});
+
 // ---- garbage tolerance ----------------------------------------------------------
 
 test('applyDetailOps: garbage ops never throw and change nothing', () => {

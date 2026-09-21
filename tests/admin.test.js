@@ -752,6 +752,64 @@ test('run: memory.show without stored details prints no details section', async 
   assert.ok(!result.includes('details:'));
 });
 
+test('run: memory.show lists every stored interest in rank order and marks the divider between shown and hidden', async () => {
+  const rootDir = makeRoot();
+  const hot = makeHot(rootDir);
+  hot.config.memory = { maxInterests: 1, interestHalfLifeDays: 180 };
+  const { admin, store } = makeAdmin(rootDir, { hot });
+  store.profiles.set('g1:123', {
+    id: '123',
+    interests: [
+      { topic: 'Ancient favorite', note: '', weight: 10, firstSeen: 'a', lastSeen: '2021-01-01T00:00:00.000Z' },
+      { topic: 'Fresh interest', note: '', weight: 1, firstSeen: 'a', lastSeen: '2026-09-20T00:00:00.000Z' },
+    ],
+  });
+
+  const result = await admin.run('memory.show', { userId: '123' }, { guildId: 'g1' });
+
+  assert.ok(result.includes('Fresh interest'), 'both stored interests are listed');
+  assert.ok(result.includes('Ancient favorite'));
+  const lines = result.split('\n');
+  const freshLine = lines.findIndex((l) => l.trim().startsWith('[weight') && l.includes('Fresh interest'));
+  const dividerLine = lines.findIndex((l) => l.includes('not shown'));
+  const ancientLine = lines.findIndex((l) => l.trim().startsWith('[weight') && l.includes('Ancient favorite'));
+  assert.ok(freshLine >= 0 && dividerLine > freshLine && ancientLine > dividerLine, 'the freshest ranks first, above the divider; the ancient heavy one sits below it');
+});
+
+test('run: memory.show lists every stored detail in rank order and marks the divider between shown and hidden', async () => {
+  const rootDir = makeRoot();
+  const hot = makeHot(rootDir);
+  hot.config.memory = { maxDetails: 1, detailHalfLifeDays: 30 };
+  const { admin, store } = makeAdmin(rootDir, { hot });
+  store.profiles.set('g1:123', {
+    id: '123',
+    details: [
+      { id: 1, text: 'Ancient favorite fact', weight: 10, firstSeen: 'a', lastSeen: '2021-01-01T00:00:00.000Z' },
+      { id: 2, text: 'Fresh detail', weight: 1, firstSeen: 'a', lastSeen: '2026-09-20T00:00:00.000Z' },
+    ],
+  });
+
+  const result = await admin.run('memory.show', { userId: '123' }, { guildId: 'g1' });
+
+  const lines = result.split('\n');
+  const freshLine = lines.findIndex((l) => l.trim().startsWith('#') && l.includes('Fresh detail'));
+  const dividerLine = lines.findIndex((l) => l.includes('not shown'));
+  const ancientLine = lines.findIndex((l) => l.trim().startsWith('#') && l.includes('Ancient favorite fact'));
+  assert.ok(freshLine >= 0 && dividerLine > freshLine && ancientLine > dividerLine, 'the freshest ranks first, above the divider; the ancient heavy one sits below it');
+});
+
+test('run: memory.show with no more stored items than the shown cap prints no divider', async () => {
+  const rootDir = makeRoot();
+  const hot = makeHot(rootDir);
+  hot.config.memory = { maxInterests: 5 };
+  const { admin, store } = makeAdmin(rootDir, { hot });
+  store.profiles.set('g1:123', { id: '123', interests: [{ topic: 'Chess', note: '', weight: 1, firstSeen: 'a', lastSeen: 'a' }] });
+
+  const result = await admin.run('memory.show', { userId: '123' }, { guildId: 'g1' });
+
+  assert.ok(!result.includes('not shown'));
+});
+
 // ---------------------------------------------------------------------------
 // lore: add / list / show / remove
 // ---------------------------------------------------------------------------

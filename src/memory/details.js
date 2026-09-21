@@ -11,6 +11,7 @@
 // bare array of strings.
 
 import { normalizeTopic } from './interests.js';
+import { topByRank } from './ranking.js';
 
 const DEFAULT_CONFIRM_GAP_HOURS = 12;
 const HOUR_MS = 3_600_000;
@@ -42,13 +43,35 @@ function isFarEnough(seenAt, priorLastSeenIso, gapMs) {
   return Math.abs(seenAt - priorMs) >= gapMs;
 }
 
-/** Ascending sort key for eviction: lowest weight first, then oldest `lastSeen` first among equals. */
-function evictionOrder(a, b) {
-  return (
-    a.item.weight - b.item.weight ||
-    String(a.item.lastSeen ?? '').localeCompare(String(b.item.lastSeen ?? '')) ||
-    a.index - b.index
-  );
+/**
+ * The storage cap actually enforced: `max(maxDetailsStored, maxDetails)` --
+ * see .claude/docs/prompt-contract.md, "More is stored than shown, and rank
+ * decays with age". A deployment can show fewer than it stores, but never
+ * store fewer than it shows, even when misconfigured. Neither value given ->
+ * no cap (`Infinity`), same as before this feature existed.
+ * @param {number} [maxDetailsStored]
+ * @param {number} [maxDetails]
+ */
+function effectiveStorageCap(maxDetailsStored, maxDetails) {
+  const stored = Number.isInteger(maxDetailsStored) ? maxDetailsStored : -Infinity;
+  const shown = Number.isInteger(maxDetails) ? maxDetails : -Infinity;
+  const cap = Math.max(stored, shown);
+  return Number.isFinite(cap) ? cap : Infinity;
+}
+
+/**
+ * Drop items over `cap`, keeping the highest-ranked ones (see
+ * src/memory/ranking.js#topByRank) while preserving `items`' own relative
+ * order among the survivors -- eviction never reshuffles storage order, it
+ * only decides who stays.
+ * @param {object[]} items
+ * @param {number} cap
+ * @param {number} [halfLifeDays]
+ */
+function evictToCapacity(items, cap, halfLifeDays) {
+  if (!Number.isFinite(cap) || items.length <= cap) return items;
+  const keep = new Set(topByRank(items, cap, halfLifeDays));
+  return items.filter((item) => keep.has(item));
 }
 
 function normalizedNextId(startId) {
@@ -69,16 +92,22 @@ function normalizedNextId(startId) {
  * - `remove` (by id or by exact stored text) deletes the matching item.
  * - `text` is clamped to `fieldChars`; an item whose text is empty after
  *   trimming is rejected outright.
- * - Once over `maxDetails`, the lowest-weight items are evicted first, then
- *   the ones with the oldest `lastSeen` among equal weights.
+ * - Once over the storage cap (`max(maxDetailsStored, maxDetails)` -- see
+ *   .claude/docs/prompt-contract.md, "More is stored than shown, and rank
+ *   decays with age"), the lowest-RANKED items are evicted first (see
+ *   src/memory/ranking.js#rank, driven by `halfLifeDays`).
  *
  * @param {object[]|undefined} existing  Stored details.
  * @param {{ add?: unknown, seen?: unknown, remove?: unknown }} ops  Untrusted, model-extracted.
- * @param {{ maxDetails?: number, fieldChars?: number, confirmGapHours?: number,
- *   seenAt?: number, nextId?: number }} [opts]
+ * @param {{ maxDetails?: number, maxDetailsStored?: number, fieldChars?: number, confirmGapHours?: number,
+ *   seenAt?: number, nextId?: number, halfLifeDays?: number }} [opts]
  * @returns {{ items: object[], nextId: number }}
  */
-export function applyDetailOps(existing, ops, { maxDetails, fieldChars, confirmGapHours, seenAt = Date.now(), nextId } = {}) {
+export function applyDetailOps(
+  existing,
+  ops,
+  { maxDetails, maxDetailsStored, fieldChars, confirmGapHours, seenAt = Date.now(), nextId, halfLifeDays } = {},
+) {
   let items = Array.isArray(existing) ? existing.map((item) => ({ ...item })) : [];
   const priorLastSeen = items.map((item) => item.lastSeen ?? null);
   const seenAtIso = new Date(seenAt).toISOString();
@@ -145,13 +174,8 @@ export function applyDetailOps(existing, ops, { maxDetails, fieldChars, confirmG
     for (const raw of Array.isArray(ops.remove) ? ops.remove : []) remove(raw);
   }
 
-  const cap = Number.isInteger(maxDetails) ? maxDetails : Infinity;
-  if (Number.isFinite(cap) && items.length > cap) {
-    const dropCount = items.length - cap;
-    const order = items.map((item, index) => ({ item, index })).sort(evictionOrder);
-    const dropIndices = new Set(order.slice(0, dropCount).map((o) => o.index));
-    items = items.filter((_, index) => !dropIndices.has(index));
-  }
+  const cap = effectiveStorageCap(maxDetailsStored, maxDetails);
+  items = evictToCapacity(items, cap, halfLifeDays);
 
   return { items, nextId: id };
 }

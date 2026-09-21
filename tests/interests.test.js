@@ -5,6 +5,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { applyInterestOps, migrateInterests, normalizeTopic, isConfirmed, isStale } from '../src/memory/interests.js';
+import { topByRank } from '../src/memory/ranking.js';
 
 const NOW = Date.UTC(2026, 8, 21, 12, 0, 0); // 2026-09-21T12:00:00Z
 const HOUR = 3_600_000;
@@ -245,6 +246,68 @@ test('applyInterestOps: eviction runs even with no ops, self-healing an over-stu
   ]);
   const items = applyInterestOps(existing, undefined, opts({ maxInterests: 2 }));
   assert.equal(items.length, 2);
+});
+
+// ---- storage cap vs shown cap, and rank-driven eviction (the F27 defect) -----
+
+test('applyInterestOps: the storage cap is max(maxInterestsStored, maxInterests) -- a smaller stored cap never wins', () => {
+  const existing = stored([['a', 1, '2026-01-01T00:00:00.000Z'], ['b', 1, '2026-01-02T00:00:00.000Z']]);
+  const items = applyInterestOps(existing, {}, opts({ maxInterests: 12, maxInterestsStored: 2 }));
+  assert.equal(items.length, 2, 'stored cap floored at the shown cap (12), so 2 items are never touched');
+});
+
+test('applyInterestOps: with halfLifeDays, eviction drops the lowest RANK, not the lowest weight -- an ancient heavy item can be evicted before a light recent one', () => {
+  const oldDate = '2021-01-01T00:00:00.000Z';
+  const existing = stored([
+    ['Ancient favorite', 10, oldDate], // heavy, but 5+ years cold
+    ['b', 2, '2026-09-01T00:00:00.000Z'],
+    ['c', 2, '2026-09-05T00:00:00.000Z'],
+  ]);
+  const items = applyInterestOps(
+    existing,
+    { add: [{ topic: 'New game', note: '' }] },
+    opts({ maxInterests: 3, seenAt: Date.parse('2026-09-20T00:00:00.000Z'), halfLifeDays: 180 }),
+  );
+  assert.deepEqual(items.map((i) => i.topic).sort(), ['New game', 'b', 'c'], 'the ancient heavy item sinks below the recent ones and is evicted');
+});
+
+test('applyInterestOps: a newcomer survives in the unseen (stored-but-not-shown) tail instead of being evicted the moment it arrives', () => {
+  // Twelve old, heavily confirmed interests -- exactly the shape of the reported
+  // defect: with the OLD single-cap behaviour (maxInterests as the only, storage
+  // cap) a 13th brand-new item at weight 1 would be the lightest item and would
+  // be evicted in the very same call that added it, every time.
+  const oldDate = '2021-01-01T00:00:00.000Z';
+  const twelveOld = stored(Array.from({ length: 12 }, (_, i) => [`old-${i}`, 10, oldDate]));
+  const items = applyInterestOps(
+    twelveOld,
+    { add: [{ topic: 'Brand new game', note: '' }] },
+    opts({ maxInterests: 12, maxInterestsStored: 40, seenAt: Date.parse('2026-09-20T00:00:00.000Z'), halfLifeDays: 180 }),
+  );
+  assert.equal(items.length, 13, 'nothing is evicted: the storage cap (40) is far from full');
+  const newcomer = items.find((i) => i.topic === 'Brand new game');
+  assert.ok(newcomer, 'the newcomer survives even though it would be last by rank right now');
+  assert.equal(newcomer.weight, 1);
+});
+
+test('applyInterestOps: repeated sightings let a stored-but-unseen item gather weight until it enters the shown top 12', () => {
+  const oldDate = '2021-01-01T00:00:00.000Z';
+  const twelveOld = stored(Array.from({ length: 12 }, (_, i) => [`old-${i}`, 10, oldDate]));
+  const day1 = Date.parse('2026-09-01T00:00:00.000Z');
+  const day2 = Date.parse('2026-09-06T00:00:00.000Z'); // past the 12h confirm gap
+  const day3 = Date.parse('2026-09-11T00:00:00.000Z');
+
+  let items = applyInterestOps(twelveOld, { add: [{ topic: 'Brand new game', note: '' }] }, opts({ maxInterests: 12, maxInterestsStored: 40, seenAt: day1, halfLifeDays: 180 }));
+  items = applyInterestOps(items, { seen: ['Brand new game'] }, opts({ maxInterests: 12, maxInterestsStored: 40, seenAt: day2, halfLifeDays: 180 }));
+  items = applyInterestOps(items, { seen: ['Brand new game'] }, opts({ maxInterests: 12, maxInterestsStored: 40, seenAt: day3, halfLifeDays: 180 }));
+
+  const newcomer = items.find((i) => i.topic === 'Brand new game');
+  assert.equal(newcomer.weight, 3, 'confirmed after enough well-spaced sightings');
+
+  const shown = topByRank(items, 12, 180);
+  assert.ok(
+    shown.includes(newcomer),
+    'a frequently and recently confirmed newcomer outranks the five-year-old heavy items and makes the shown top 12',
+  );
 });
 
 test('applyInterestOps: no cap when maxInterests is not an integer', () => {

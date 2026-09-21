@@ -259,9 +259,12 @@ export function createStore({ dataDir }) {
      * @param {{ character?: string, style?: string, relationship?: string,
      *   interests?: { add?: object[], update?: object[], seen?: string[], remove?: string[] },
      *   details?: { add?: unknown[], seen?: unknown[], remove?: unknown[] } }} ops
-     * @param {{ fieldChars?: number, maxInterests?: number, topicChars?: number,
-     *   noteChars?: number, maxDetails?: number, confirmGapHours?: number,
-     *   seenAt?: number, now?: number }} [opts]
+     * @param {{ fieldChars?: number, maxInterests?: number, maxInterestsStored?: number, topicChars?: number,
+     *   noteChars?: number, interestHalfLifeDays?: number, maxDetails?: number, maxDetailsStored?: number,
+     *   detailHalfLifeDays?: number, confirmGapHours?: number, seenAt?: number, now?: number }} [opts]
+     *   `maxInterestsStored`/`maxDetailsStored`/`interestHalfLifeDays`/`detailHalfLifeDays` drive the
+     *   storage-cap-vs-shown-cap split and the rank decay -- see
+     *   .claude/docs/prompt-contract.md, "More is stored than shown, and rank decays with age".
      * @returns {object} The updated profile.
      */
     applyProfileOps(guildId, userId, ops, opts = {}) {
@@ -282,9 +285,11 @@ export function createStore({ dataDir }) {
       if (ops?.interests && typeof ops.interests === 'object' && !Array.isArray(ops.interests)) {
         profile.interests = applyInterestOps(profile.interests, ops.interests, {
           maxInterests: opts.maxInterests,
+          maxInterestsStored: opts.maxInterestsStored,
           topicChars: opts.topicChars,
           noteChars: opts.noteChars,
           confirmGapHours: opts.confirmGapHours,
+          halfLifeDays: opts.interestHalfLifeDays,
           seenAt,
         });
       }
@@ -292,8 +297,10 @@ export function createStore({ dataDir }) {
       if (ops?.details && typeof ops.details === 'object' && !Array.isArray(ops.details)) {
         const { items, nextId } = applyDetailOps(profile.details, ops.details, {
           maxDetails: opts.maxDetails,
+          maxDetailsStored: opts.maxDetailsStored,
           fieldChars: opts.fieldChars,
           confirmGapHours: opts.confirmGapHours,
+          halfLifeDays: opts.detailHalfLifeDays,
           seenAt,
           nextId: profile.detailsSeq,
         });

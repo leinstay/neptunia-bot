@@ -17,6 +17,7 @@ import { emptyAffinity } from './affinity.js';
 import { keywordMatches } from './lore.js';
 import { migrateInterests } from './interests.js';
 import { migrateDetails } from './details.js';
+import { topByRank } from './ranking.js';
 
 const BACKOFF_MS = 15 * 60_000;
 const MIN_LIVE_BATCH = 20; // the live analyzer never shrinks below this many messages
@@ -144,21 +145,31 @@ function dateOnly(iso) {
   return typeof iso === 'string' && iso ? iso.slice(0, 10) : undefined;
 }
 
-/** The `<existing_profiles>` view of one person's interests: `{ topic, note,
- * seen, last }` (`seen` = weight, `last` = the date-only lastSeen, omitted
- * when unknown), heaviest weight first -- see
- * .claude/docs/prompt-contract.md, "The analyzer". */
-function existingInterestsView(interests) {
-  return [...(Array.isArray(interests) ? interests : [])]
-    .sort((a, b) => (b.weight ?? 0) - (a.weight ?? 0))
-    .map(({ topic, note, weight, lastSeen }) => ({ topic, note, seen: weight, last: dateOnly(lastSeen) }));
+/** The `<existing_profiles>` view of one person's interests: only the top
+ * `maxInterests` by rank (src/memory/ranking.js#topByRank, decayed with
+ * `halfLifeDays`), in rank order -- `{ topic, note, seen, last }` (`seen` =
+ * weight, `last` = the date-only lastSeen, omitted when unknown). `maxInterests`
+ * not an integer -> every stored interest (unlimited, matching the behaviour
+ * before this feature); `halfLifeDays` not a positive number -> no decay,
+ * ranked by weight alone. See .claude/docs/prompt-contract.md, "The analyzer"
+ * and "More is stored than shown, and rank decays with age". */
+function existingInterestsView(interests, maxInterests, halfLifeDays) {
+  const list = Array.isArray(interests) ? interests : [];
+  return topByRank(list, maxInterests, halfLifeDays).map(({ topic, note, weight, lastSeen }) => ({
+    topic,
+    note,
+    seen: weight,
+    last: dateOnly(lastSeen),
+  }));
 }
 
-/** The `<existing_profiles>` view of one person's details: `{ id, text, seen,
- * last }` (`seen` = weight, `last` = the date-only lastSeen, omitted when
- * unknown) -- see .claude/docs/prompt-contract.md, "The analyzer". */
-function existingDetailsView(details) {
-  return (Array.isArray(details) ? details : []).map(({ id, text, weight, lastSeen }) => ({
+/** The `<existing_profiles>` view of one person's details: only the top
+ * `maxDetails` by rank, in rank order -- `{ id, text, seen, last }` (`seen` =
+ * weight, `last` = the date-only lastSeen, omitted when unknown). Same
+ * fallbacks as `existingInterestsView` above. */
+function existingDetailsView(details, maxDetails, halfLifeDays) {
+  const list = Array.isArray(details) ? details : [];
+  return topByRank(list, maxDetails, halfLifeDays).map(({ id, text, weight, lastSeen }) => ({
     id,
     text,
     seen: weight,
@@ -176,6 +187,18 @@ function pickGuildFields(guildMemory) {
 function pickChannelFields(channel) {
   const { name = '', category = null, topic = null, purpose = '', topics = '', tone = '' } = channel ?? {};
   return { name, category, topic, purpose, topics, tone };
+}
+
+/**
+ * Normalized set of `config.memory.mainChannelIds`, compared as strings --
+ * see .claude/docs/prompt-contract.md, "Main channels are the source of the
+ * portrait". Garbage config (not an array, non-string entries) never throws:
+ * a non-array collapses to an empty set, every entry is coerced with String().
+ * @param {unknown} mainChannelIds
+ * @returns {Set<string>}
+ */
+function mainChannelSet(mainChannelIds) {
+  return new Set((Array.isArray(mainChannelIds) ? mainChannelIds : []).map((id) => String(id)));
 }
 
 /**
@@ -230,8 +253,8 @@ export function buildMemoryRequest({ prompts, config, calibrator, profiles, guil
   const existingProfiles = {};
   for (const [id, profile] of Object.entries(profiles ?? {})) {
     const fields = pickProfileFields(profile);
-    fields.interests = existingInterestsView(fields.interests);
-    fields.details = existingDetailsView(fields.details);
+    fields.interests = existingInterestsView(fields.interests, config.memory?.maxInterests, config.memory?.interestHalfLifeDays);
+    fields.details = existingDetailsView(fields.details, config.memory?.maxDetails, config.memory?.detailHalfLifeDays);
     if (relationships) {
       const affinity = profile?.affinity ?? emptyAffinity();
       fields.affinity = { score: affinity.score, reason: affinity.reason };
@@ -245,9 +268,12 @@ export function buildMemoryRequest({ prompts, config, calibrator, profiles, guil
   const loreBlock = loreOn ? existingLoreBlock(loreEntries, messages.map((m) => m.content).filter(Boolean)) : '';
   const guildBlock = block('existing_guild', JSON.stringify(pickGuildFields(guildMemory)));
 
+  const mainChannels = mainChannelSet(config.memory?.mainChannelIds);
   const existingChannels = {};
   for (const [id, channel] of Object.entries(channels ?? {})) {
-    existingChannels[id] = pickChannelFields(channel);
+    const fields = pickChannelFields(channel);
+    if (mainChannels.has(String(id))) fields.main = true;
+    existingChannels[id] = fields;
   }
   const channelsBlock = block('existing_channels', JSON.stringify(existingChannels));
 
@@ -400,9 +426,13 @@ export function applyMemoryUpdate(store, guildId, update, cfg, knownUserIds, kno
       store.applyProfileOps(guildId, userId, ops, {
         fieldChars: cfg.fieldChars,
         maxInterests: cfg.maxInterests,
+        maxInterestsStored: cfg.maxInterestsStored,
         topicChars: cfg.interestTopicChars,
         noteChars: cfg.interestNoteChars,
+        interestHalfLifeDays: cfg.interestHalfLifeDays,
         maxDetails: cfg.maxDetails,
+        maxDetailsStored: cfg.maxDetailsStored,
+        detailHalfLifeDays: cfg.detailHalfLifeDays,
         confirmGapHours: cfg.confirmGapHours,
         now: profileOpsNow,
         seenAt,

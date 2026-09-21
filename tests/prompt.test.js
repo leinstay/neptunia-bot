@@ -629,14 +629,22 @@ test('renderProfile: falls back to the built-in "topic (note)" / bare topic form
   const brokenLabels = { ...labels, profile: { ...labels.profile } };
   delete brokenLabels.profile.interestItem;
   delete brokenLabels.profile.interestItemNoNote;
-  const profile = { id: 'p1', names: ['Carl'], interests: [interestFixture({ topic: 'Chess', note: 'weekly club' }), interestFixture({ topic: 'Anime', note: '' })] };
+  const profile = {
+    id: 'p1',
+    names: ['Carl'],
+    interests: [interestFixture({ topic: 'Chess', note: 'weekly club', weight: 2 }), interestFixture({ topic: 'Anime', note: '', weight: 1 })],
+  };
   const text = renderProfile(profile, brokenLabels);
   assert.ok(text.includes('interests: Chess (weekly club); Anime'));
 });
 
 test('renderProfile: uses labels.profile.interestItem/interestItemNoNote when present', () => {
   const customLabels = { ...labels, profile: { ...labels.profile, interestItem: '[{topic}: {note}]', interestItemNoNote: '<{topic}>' } };
-  const profile = { id: 'p1', names: ['Carl'], interests: [interestFixture({ topic: 'Chess', note: 'weekly club' }), interestFixture({ topic: 'Anime', note: '' })] };
+  const profile = {
+    id: 'p1',
+    names: ['Carl'],
+    interests: [interestFixture({ topic: 'Chess', note: 'weekly club', weight: 2 }), interestFixture({ topic: 'Anime', note: '', weight: 1 })],
+  };
   const text = renderProfile(profile, customLabels);
   assert.ok(text.includes('interests: [Chess: weekly club]; <Anime>'));
 });
@@ -687,14 +695,19 @@ test('renderProfile: an interest below confirmAfter renders with unsureMark, at/
   assert.ok(!text.includes(`Anime${labels.profile.unsureMark}`));
 });
 
-test('renderProfile: an interest older than interestStaleDays renders with staleMark, sorted after fresh ones', () => {
+test('renderProfile: with interestHalfLifeDays, a much fresher interest outranks an older heavier one and sorts first; the older one still carries staleMark', () => {
   const now = Date.UTC(2026, 8, 21);
   const stale = interestFixture({ topic: 'Old', weight: 5, lastSeen: new Date(now - 200 * 24 * 3_600_000).toISOString() });
   const fresh = interestFixture({ topic: 'New', weight: 1, lastSeen: new Date(now - 1 * 24 * 3_600_000).toISOString() });
   const profile = { id: 'p1', names: ['Carl'], interests: [stale, fresh] };
-  const text = renderProfile(profile, labels, { staleDays: 90, now });
+  // A 90-day half-life makes the ~199-day recency gap (about 2.2 half-lives, +2.2
+  // rank) outweigh the weight gap (log2(5.5) - log2(1.5) =~ 1.88 rank) between
+  // the two -- see .claude/docs/prompt-contract.md, "More is stored than shown,
+  // and rank decays with age". This REPLACES the old "fresh first, then weight
+  // desc" sort with pure rank order.
+  const text = renderProfile(profile, labels, { staleDays: 90, interestHalfLifeDays: 90, now });
   const interestsLine = text.split('\n').find((l) => l.startsWith('interests:'));
-  assert.ok(interestsLine.includes(`New; Old${labels.profile.staleMark}`), `fresh sorts first, stale is marked: ${interestsLine}`);
+  assert.ok(interestsLine.includes(`New; Old${labels.profile.staleMark}`), `decay ranks the fresher one first, the older one still gets staleMark: ${interestsLine}`);
 });
 
 test('renderProfile: an interest can be both unsure and stale, unsureMark before staleMark', () => {
@@ -724,7 +737,11 @@ function detailFixture(overrides = {}) {
 }
 
 test('renderProfile: renders detail items joined by "; "', () => {
-  const profile = { id: 'p1', names: ['Carl'], details: [detailFixture({ text: 'Owns a cat' }), detailFixture({ id: 2, text: 'Plays guitar' })] };
+  const profile = {
+    id: 'p1',
+    names: ['Carl'],
+    details: [detailFixture({ text: 'Owns a cat', weight: 3 }), detailFixture({ id: 2, text: 'Plays guitar', weight: 1 })],
+  };
   const text = renderProfile(profile, labels);
   assert.ok(text.includes('details: Owns a cat; Plays guitar'));
 });
@@ -733,6 +750,43 @@ test('renderProfile: a profile with no details omits the line entirely', () => {
   const profile = { id: 'p1', names: ['Carl'], character: 'calm', details: [] };
   const text = renderProfile(profile, labels);
   assert.ok(!text.includes('details:'));
+});
+
+test('renderProfile: details render capped at maxDetails, the top-ranked kept', () => {
+  const profile = {
+    id: 'p1',
+    names: ['Carl'],
+    details: [detailFixture({ id: 1, text: 'A', weight: 1 }), detailFixture({ id: 2, text: 'B', weight: 3 }), detailFixture({ id: 3, text: 'C', weight: 2 })],
+  };
+  const text = renderProfile(profile, labels, { maxDetails: 2 });
+  assert.ok(text.includes('details: B; C'));
+  assert.ok(!text.includes('details: B; C; A'));
+});
+
+test('renderProfile: with detailHalfLifeDays, a fresher detail outranks an older heavier one', () => {
+  const now = Date.UTC(2026, 8, 21);
+  const heavyOld = detailFixture({ id: 1, text: 'Ancient favorite fact', weight: 10, lastSeen: new Date(now - 5 * 365 * 24 * 3_600_000).toISOString() });
+  const lightFresh = detailFixture({ id: 2, text: 'Fresh detail', weight: 1, lastSeen: new Date(now).toISOString() });
+  const profile = { id: 'p1', names: ['Carl'], details: [heavyOld, lightFresh] };
+  const text = renderProfile(profile, labels, { maxDetails: 1, detailHalfLifeDays: 180 });
+  assert.ok(text.includes('details: Fresh detail'));
+  assert.ok(!text.includes('Ancient favorite fact'));
+});
+
+test('buildRequest: config.memory.maxDetails caps how many details render', () => {
+  const trigger = makeMessage(1, NOW - MIN, { authorName: 'Alice' });
+  const interlocutor = {
+    id: 'author-1',
+    names: ['Alice'],
+    details: [detailFixture({ id: 1, text: 'A', weight: 1 }), detailFixture({ id: 2, text: 'B', weight: 2 })],
+  };
+  const config = fakeConfig({ memory: { maxDetails: 1 } });
+  const request = buildRequest(
+    baseInput({ config, history: [trigger], trigger, triggerKind: 'mention', interlocutor, otherProfiles: [] }),
+  );
+  const user = request.messages[1].content;
+  assert.ok(user.includes('details: B'));
+  assert.ok(!user.includes('details: B; A'));
 });
 
 test('renderProfile: an unconfirmed detail renders with unsureMark, details never get the stale mark', () => {

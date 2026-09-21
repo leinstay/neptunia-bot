@@ -731,6 +731,83 @@ test('applyProfileOps: details are capped at maxDetails, evicting the lowest wei
   assert.deepEqual(profile.details.map((d) => d.text), ['b', 'c']);
 });
 
+test('applyProfileOps: threads maxInterestsStored into applyInterestOps -- a smaller stored cap never evicts below the shown cap', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  store.touchUser('g1', 'u1', 'Alice', 1000);
+  store.applyProfileOps('g1', 'u1', { interests: { add: [{ topic: 'a' }, { topic: 'b' }] } }, {
+    maxInterests: 12,
+    maxInterestsStored: 12,
+    topicChars: 40,
+    noteChars: 120,
+    now: 1000,
+  });
+  const profile = store.applyProfileOps('g1', 'u1', { interests: { add: [{ topic: 'c' }] } }, {
+    maxInterests: 12,
+    maxInterestsStored: 1, // deliberately smaller than the shown cap
+    topicChars: 40,
+    noteChars: 120,
+    now: 2000,
+  });
+  assert.equal(profile.interests.length, 3, 'the stored cap is floored at maxInterests (12), so nothing is evicted yet');
+});
+
+test('applyProfileOps: threads interestHalfLifeDays into applyInterestOps -- decay lets a recent light interest survive eviction over an ancient heavier one', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  store.touchUser('g1', 'u1', 'Alice', 1000);
+  const ancientMs = Date.parse('2021-01-01T00:00:00.000Z');
+  store.applyProfileOps('g1', 'u1', { interests: { add: [{ topic: 'Ancient favorite' }] } }, {
+    maxInterests: 5,
+    maxInterestsStored: 5,
+    topicChars: 40,
+    noteChars: 120,
+    seenAt: ancientMs,
+    now: ancientMs,
+  });
+  store.applyProfileOps('g1', 'u1', { interests: { seen: ['Ancient favorite'] } }, {
+    maxInterests: 5,
+    maxInterestsStored: 5,
+    topicChars: 40,
+    noteChars: 120,
+    seenAt: ancientMs + 13 * 3_600_000,
+    now: ancientMs,
+  });
+
+  const recentMs = Date.parse('2026-09-20T00:00:00.000Z');
+  const profile = store.applyProfileOps('g1', 'u1', { interests: { add: [{ topic: 'Fresh interest' }] } }, {
+    maxInterests: 1,
+    maxInterestsStored: 1, // force an eviction down to a single stored interest
+    topicChars: 40,
+    noteChars: 120,
+    interestHalfLifeDays: 30,
+    seenAt: recentMs,
+    now: recentMs,
+  });
+  assert.deepEqual(profile.interests.map((i) => i.topic), ['Fresh interest'], 'years of silence outrank the ancient item, higher weight or not');
+});
+
+test('applyProfileOps: threads detailHalfLifeDays into applyDetailOps -- decay lets a recent light detail survive eviction over an ancient heavier one', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  store.touchUser('g1', 'u1', 'Alice', 1000);
+  const ancientMs = Date.parse('2021-01-01T00:00:00.000Z');
+  store.applyProfileOps('g1', 'u1', { details: { add: [{ text: 'Ancient favorite fact' }] } }, { maxDetails: 5, maxDetailsStored: 5, seenAt: ancientMs, now: ancientMs });
+  // Bump the ancient detail's weight a bit, well past confirmGapHours, so it
+  // starts heavier than the newcomer added below.
+  store.applyProfileOps('g1', 'u1', { details: { seen: ['Ancient favorite fact'] } }, { maxDetails: 5, maxDetailsStored: 5, seenAt: ancientMs + 13 * 3_600_000, now: ancientMs });
+
+  const recentMs = Date.parse('2026-09-20T00:00:00.000Z');
+  const profile = store.applyProfileOps('g1', 'u1', { details: { add: [{ text: 'Fresh detail' }] } }, {
+    maxDetails: 1,
+    maxDetailsStored: 1, // force an eviction down to a single stored detail
+    detailHalfLifeDays: 30,
+    seenAt: recentMs,
+    now: recentMs,
+  });
+  assert.deepEqual(profile.details.map((d) => d.text), ['Fresh detail'], 'years of silence outrank the ancient item, higher weight or not');
+});
+
 test('applyProfileOps: tolerates garbage ops without throwing, leaves the profile unchanged', () => {
   const dir = tmpDataDir();
   const store = createStore({ dataDir: dir });

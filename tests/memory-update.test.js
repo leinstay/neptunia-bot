@@ -572,6 +572,137 @@ test('buildMemoryRequest: an empty/absent channels map still renders an empty <e
   assert.match(llmMessages[1].content, /<existing_channels>\n\{\}\n<\/existing_channels>/);
 });
 
+// ---- buildMemoryRequest: <existing_channels> "main" flag -------------------
+
+test('buildMemoryRequest: a channel listed in memory.mainChannelIds carries "main": true, others omit the key', () => {
+  const config = makeConfig({ memory: { ...makeConfig().memory, mainChannelIds: ['c1'] } });
+  const calibrator = createCalibrator();
+  const messages = [slimMessage({ id: 'm1', channelId: 'c1', channelName: 'general', ts: Date.UTC(2026, 0, 1, 12, 0, 0) })];
+
+  const { messages: llmMessages } = buildMemoryRequest({
+    prompts: { memory: 'sys', labels },
+    config,
+    calibrator,
+    profiles: {},
+    guildMemory: {},
+    channels: {
+      c1: { name: 'general', category: null, topic: null, purpose: '', topics: '', tone: '' },
+      c2: { name: 'diary', category: null, topic: null, purpose: '', topics: '', tone: '' },
+    },
+    messages,
+    selfName: 'Nept',
+  });
+
+  const user = llmMessages[1].content;
+  const channels = JSON.parse(/<existing_channels>\n([\s\S]*?)\n<\/existing_channels>/.exec(user)[1]);
+  assert.equal(channels.c1.main, true);
+  assert.equal('main' in channels.c2, false);
+});
+
+test('buildMemoryRequest: memory.mainChannelIds compares ids as strings, numbers-in-strings included', () => {
+  const config = makeConfig({ memory: { ...makeConfig().memory, mainChannelIds: [123] } });
+  const calibrator = createCalibrator();
+  const messages = [slimMessage({ id: 'm1', channelId: '123', channelName: 'general', ts: Date.UTC(2026, 0, 1, 12, 0, 0) })];
+
+  const { messages: llmMessages } = buildMemoryRequest({
+    prompts: { memory: 'sys', labels },
+    config,
+    calibrator,
+    profiles: {},
+    guildMemory: {},
+    channels: { 123: { name: 'general', category: null, topic: null, purpose: '', topics: '', tone: '' } },
+    messages,
+    selfName: 'Nept',
+  });
+
+  const user = llmMessages[1].content;
+  const channels = JSON.parse(/<existing_channels>\n([\s\S]*?)\n<\/existing_channels>/.exec(user)[1]);
+  assert.equal(channels['123'].main, true);
+});
+
+test('buildMemoryRequest: a non-array memory.mainChannelIds is treated as empty, never throws', () => {
+  const config = makeConfig({ memory: { ...makeConfig().memory, mainChannelIds: 'c1' } });
+  const calibrator = createCalibrator();
+  const messages = [slimMessage({ id: 'm1', channelId: 'c1', channelName: 'general', ts: Date.UTC(2026, 0, 1, 12, 0, 0) })];
+
+  const { messages: llmMessages } = buildMemoryRequest({
+    prompts: { memory: 'sys', labels },
+    config,
+    calibrator,
+    profiles: {},
+    guildMemory: {},
+    channels: { c1: { name: 'general', category: null, topic: null, purpose: '', topics: '', tone: '' } },
+    messages,
+    selfName: 'Nept',
+  });
+
+  const user = llmMessages[1].content;
+  const channels = JSON.parse(/<existing_channels>\n([\s\S]*?)\n<\/existing_channels>/.exec(user)[1]);
+  assert.equal('main' in channels.c1, false);
+});
+
+test('buildMemoryRequest: non-string/garbage entries in memory.mainChannelIds are coerced, never throw', () => {
+  const config = makeConfig({ memory: { ...makeConfig().memory, mainChannelIds: [null, {}, ['x'], 'c1'] } });
+  const calibrator = createCalibrator();
+  const messages = [slimMessage({ id: 'm1', channelId: 'c1', channelName: 'general', ts: Date.UTC(2026, 0, 1, 12, 0, 0) })];
+
+  const { messages: llmMessages } = buildMemoryRequest({
+    prompts: { memory: 'sys', labels },
+    config,
+    calibrator,
+    profiles: {},
+    guildMemory: {},
+    channels: { c1: { name: 'general', category: null, topic: null, purpose: '', topics: '', tone: '' } },
+    messages,
+    selfName: 'Nept',
+  });
+
+  const user = llmMessages[1].content;
+  const channels = JSON.parse(/<existing_channels>\n([\s\S]*?)\n<\/existing_channels>/.exec(user)[1]);
+  assert.equal(channels.c1.main, true);
+});
+
+test('buildMemoryRequest: an absent memory.mainChannelIds omits "main" from every channel', () => {
+  const config = makeConfig();
+  const calibrator = createCalibrator();
+  const messages = [slimMessage({ id: 'm1', channelId: 'c1', channelName: 'general', ts: Date.UTC(2026, 0, 1, 12, 0, 0) })];
+
+  const { messages: llmMessages } = buildMemoryRequest({
+    prompts: { memory: 'sys', labels },
+    config,
+    calibrator,
+    profiles: {},
+    guildMemory: {},
+    channels: { c1: { name: 'general', category: null, topic: null, purpose: '', topics: '', tone: '' } },
+    messages,
+    selfName: 'Nept',
+  });
+
+  const user = llmMessages[1].content;
+  const channels = JSON.parse(/<existing_channels>\n([\s\S]*?)\n<\/existing_channels>/.exec(user)[1]);
+  assert.equal('main' in channels.c1, false);
+});
+
+test('analyze: a hot change to memory.mainChannelIds between two requests is picked up', async () => {
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    store.touchChannel(guildId, 'c1', { name: 'general' }, Date.now());
+    const hot = { config: makeConfig({ memory: { ...makeConfig().memory, mainChannelIds: [] } }), prompts: { memory: 'sys', labels } };
+    const seenUsers = [];
+    const llm = { complete: async (messages) => { seenUsers.push(messages[1].content); return { text: '{}' }; } };
+    const updater = createMemoryUpdater({ hot, store, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept' });
+
+    await updater.analyze(guildId, [slimMessage({ id: 'm1', channelId: 'c1', channelName: 'general' })]);
+    hot.config.memory.mainChannelIds = ['c1'];
+    await updater.analyze(guildId, [slimMessage({ id: 'm2', channelId: 'c1', channelName: 'general' })]);
+
+    const firstChannels = JSON.parse(/<existing_channels>\n([\s\S]*?)\n<\/existing_channels>/.exec(seenUsers[0])[1]);
+    const secondChannels = JSON.parse(/<existing_channels>\n([\s\S]*?)\n<\/existing_channels>/.exec(seenUsers[1])[1]);
+    assert.equal('main' in firstChannels.c1, false);
+    assert.equal(secondChannels.c1.main, true);
+  });
+});
+
 test('buildMemoryRequest: <new_messages> groups messages by channel with a heading on every switch', () => {
   const config = makeConfig();
   const calibrator = createCalibrator();
@@ -1472,6 +1603,112 @@ test('buildMemoryRequest: a legacy string-array details field is migrated for th
   assert.deepEqual(profiles['1'].details, [{ id: 1, text: 'Owns a cat', seen: 1 }]);
 });
 
+// ---- buildMemoryRequest: existing_profiles interests/details, top N by rank ---
+
+test('buildMemoryRequest: existing_profiles interests show only the top memory.maxInterests by rank, in rank order', () => {
+  const config = makeConfig({ memory: { ...makeConfig().memory, maxInterests: 2, interestHalfLifeDays: 180 } });
+  const calibrator = createCalibrator();
+  const messages = [slimMessage({ id: 'm1', ts: Date.UTC(2026, 0, 1, 12, 0, 0) })];
+
+  const { messages: llmMessages } = buildMemoryRequest({
+    prompts: { memory: 'sys', labels },
+    config,
+    calibrator,
+    profiles: {
+      1: {
+        names: ['nick'],
+        character: '',
+        style: '',
+        details: [],
+        relationship: '',
+        interests: [
+          { topic: 'Ancient favorite', note: '', weight: 10, firstSeen: 'a', lastSeen: '2021-01-01T00:00:00.000Z' },
+          { topic: 'Recent A', note: '', weight: 2, firstSeen: 'a', lastSeen: '2026-09-01T00:00:00.000Z' },
+          { topic: 'Recent B', note: '', weight: 2, firstSeen: 'a', lastSeen: '2026-09-05T00:00:00.000Z' },
+        ],
+      },
+    },
+    guildMemory: {},
+    messages,
+    selfName: 'Nept',
+  });
+
+  const user = llmMessages[1].content;
+  const profiles = JSON.parse(/<existing_profiles>\n([\s\S]*?)\n<\/existing_profiles>/.exec(user)[1]);
+  assert.deepEqual(
+    profiles['1'].interests.map((i) => i.topic),
+    ['Recent B', 'Recent A'],
+    'the two most recent outrank the ancient heavy one and appear in rank order',
+  );
+});
+
+test('buildMemoryRequest: existing_profiles details show only the top memory.maxDetails by rank, in rank order', () => {
+  const config = makeConfig({ memory: { ...makeConfig().memory, maxDetails: 1, detailHalfLifeDays: 30 } });
+  const calibrator = createCalibrator();
+  const messages = [slimMessage({ id: 'm1', ts: Date.UTC(2026, 0, 1, 12, 0, 0) })];
+
+  const { messages: llmMessages } = buildMemoryRequest({
+    prompts: { memory: 'sys', labels },
+    config,
+    calibrator,
+    profiles: {
+      1: {
+        names: ['nick'],
+        character: '',
+        style: '',
+        relationship: '',
+        interests: [],
+        details: [
+          { id: 1, text: 'Ancient favorite fact', weight: 10, firstSeen: 'a', lastSeen: '2021-01-01T00:00:00.000Z' },
+          { id: 2, text: 'Fresh detail', weight: 1, firstSeen: 'a', lastSeen: '2026-09-20T00:00:00.000Z' },
+        ],
+      },
+    },
+    guildMemory: {},
+    messages,
+    selfName: 'Nept',
+  });
+
+  const user = llmMessages[1].content;
+  const profiles = JSON.parse(/<existing_profiles>\n([\s\S]*?)\n<\/existing_profiles>/.exec(user)[1]);
+  assert.deepEqual(profiles['1'].details.map((d) => d.id), [2], 'a short half-life lets the fresh detail outrank the ancient heavier one');
+});
+
+test('buildMemoryRequest: without memory.maxInterests/interestHalfLifeDays, the existing_profiles view is unlimited and unchanged from before (weight order)', () => {
+  const config = makeConfig();
+  const calibrator = createCalibrator();
+  const messages = [slimMessage({ id: 'm1', ts: Date.UTC(2026, 0, 1, 12, 0, 0) })];
+
+  const { messages: llmMessages } = buildMemoryRequest({
+    prompts: { memory: 'sys', labels },
+    config,
+    calibrator,
+    profiles: {
+      1: {
+        names: ['nick'],
+        character: '',
+        style: '',
+        details: [],
+        relationship: '',
+        interests: [
+          { topic: 'Anime', note: 'watches shonen', weight: 2, firstSeen: 'a', lastSeen: '2026-01-05T00:00:00.000Z' },
+          { topic: 'Chess', note: '', weight: 5, firstSeen: 'a', lastSeen: null },
+        ],
+      },
+    },
+    guildMemory: {},
+    messages,
+    selfName: 'Nept',
+  });
+
+  const user = llmMessages[1].content;
+  const profiles = JSON.parse(/<existing_profiles>\n([\s\S]*?)\n<\/existing_profiles>/.exec(user)[1]);
+  assert.deepEqual(profiles['1'].interests, [
+    { topic: 'Chess', note: '', seen: 5 },
+    { topic: 'Anime', note: 'watches shonen', seen: 2, last: '2026-01-05' },
+  ]);
+});
+
 // ---- applyMemoryUpdate: interests / details, incremental shape --------------
 
 test('applyMemoryUpdate: routes users.<id>.interests {add, update, remove} through store.applyProfileOps', () => {
@@ -1488,6 +1725,55 @@ test('applyMemoryUpdate: routes users.<id>.interests {add, update, remove} throu
     assert.equal(profile.interests.length, 1);
     assert.equal(profile.interests[0].topic, 'Chess');
     assert.equal(profile.interests[0].note, 'plays weekly');
+  });
+});
+
+test('applyMemoryUpdate: threads maxInterestsStored/interestHalfLifeDays/maxDetailsStored/detailHalfLifeDays through to store.applyProfileOps', () => {
+  withStore((store) => {
+    const guildId = 'g1';
+    store.touchUser(guildId, '1', 'nick', Date.now());
+
+    const ancientMs = Date.parse('2021-01-01T00:00:00.000Z');
+    const cfgAncient = { ...MEMORY_CFG, maxInterests: 1, maxInterestsStored: 1, maxDetails: 1, maxDetailsStored: 1 };
+    applyMemoryUpdate(
+      store,
+      guildId,
+      { users: { 1: { interests: { add: [{ topic: 'Ancient favorite' }] }, details: { add: ['Ancient favorite fact'] } } } },
+      cfgAncient,
+      new Set(['1']),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { seenAt: ancientMs },
+    );
+
+    const recentMs = Date.parse('2026-09-20T00:00:00.000Z');
+    const cfgDecay = {
+      ...MEMORY_CFG,
+      maxInterests: 1,
+      maxInterestsStored: 1,
+      interestHalfLifeDays: 30,
+      maxDetails: 1,
+      maxDetailsStored: 1,
+      detailHalfLifeDays: 30,
+    };
+    applyMemoryUpdate(
+      store,
+      guildId,
+      { users: { 1: { interests: { add: [{ topic: 'Fresh interest' }] }, details: { add: ['Fresh detail'] } } } },
+      cfgDecay,
+      new Set(['1']),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { seenAt: recentMs },
+    );
+
+    const profile = store.getUser(guildId, '1');
+    assert.deepEqual(profile.interests.map((i) => i.topic), ['Fresh interest'], 'the storage cap (1) evicted the ancient interest by rank, not raw weight');
+    assert.deepEqual(profile.details.map((d) => d.text), ['Fresh detail'], 'the storage cap (1) evicted the ancient detail by rank, not raw weight');
   });
 });
 

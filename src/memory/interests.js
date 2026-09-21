@@ -23,6 +23,8 @@
 // person's message, not the wall clock the analyzer happened to run at), so
 // history fed out of order (the warm-up) still ends up with correct dates.
 
+import { topByRank } from './ranking.js';
+
 const DEFAULT_CONFIRM_GAP_HOURS = 12;
 const HOUR_MS = 3_600_000;
 
@@ -47,13 +49,35 @@ export function normalizeTopic(topic) {
     .toLowerCase();
 }
 
-/** Ascending sort key for eviction: lowest weight first, then oldest `lastSeen` first among equals. */
-function evictionOrder(a, b) {
-  return (
-    a.item.weight - b.item.weight ||
-    String(a.item.lastSeen ?? '').localeCompare(String(b.item.lastSeen ?? '')) ||
-    a.index - b.index
-  );
+/**
+ * The storage cap actually enforced: `max(maxInterestsStored, maxInterests)`
+ * -- see .claude/docs/prompt-contract.md, "More is stored than shown, and
+ * rank decays with age". A deployment can show fewer than it stores, but
+ * never store fewer than it shows, even when misconfigured. Neither value
+ * given -> no cap (`Infinity`), same as before this feature existed.
+ * @param {number} [maxInterestsStored]
+ * @param {number} [maxInterests]
+ */
+function effectiveStorageCap(maxInterestsStored, maxInterests) {
+  const stored = Number.isInteger(maxInterestsStored) ? maxInterestsStored : -Infinity;
+  const shown = Number.isInteger(maxInterests) ? maxInterests : -Infinity;
+  const cap = Math.max(stored, shown);
+  return Number.isFinite(cap) ? cap : Infinity;
+}
+
+/**
+ * Drop items over `cap`, keeping the highest-ranked ones (see
+ * src/memory/ranking.js#topByRank) while preserving `items`' own relative
+ * order among the survivors -- eviction never reshuffles storage order, it
+ * only decides who stays.
+ * @param {object[]} items
+ * @param {number} cap
+ * @param {number} [halfLifeDays]
+ */
+function evictToCapacity(items, cap, halfLifeDays) {
+  if (!Number.isFinite(cap) || items.length <= cap) return items;
+  const keep = new Set(topByRank(items, cap, halfLifeDays));
+  return items.filter((item) => keep.has(item));
 }
 
 /** Earlier of two ISO date strings; a missing one never wins. */
@@ -132,18 +156,24 @@ export function isStale(item, nowMs, staleDays) {
  * - `remove` deletes the item matching that topic, if any.
  * - `topic` is clamped to `topicChars`, `note` to `noteChars`; an item whose
  *   topic is empty after trimming is rejected outright.
- * - Once over `maxInterests`, the lowest-weight items are evicted first,
- *   then the ones with the oldest `lastSeen` among equal weights -- this
- *   runs on every call, even one with no ops, so an over-stuffed legacy
- *   profile self-heals on its first update.
+ * - Once over the storage cap (`max(maxInterestsStored, maxInterests)` --
+ *   see .claude/docs/prompt-contract.md, "More is stored than shown, and rank
+ *   decays with age"), the lowest-RANKED items are evicted first (see
+ *   src/memory/ranking.js#rank, driven by `halfLifeDays`) -- this runs on
+ *   every call, even one with no ops, so an over-stuffed legacy profile
+ *   self-heals on its first update.
  *
  * @param {object[]|undefined} existing  Stored interests.
  * @param {{ add?: unknown, update?: unknown, seen?: unknown, remove?: unknown }} ops  Untrusted, model-extracted.
- * @param {{ maxInterests?: number, topicChars?: number, noteChars?: number,
- *   confirmGapHours?: number, seenAt?: number }} [opts]
+ * @param {{ maxInterests?: number, maxInterestsStored?: number, topicChars?: number, noteChars?: number,
+ *   confirmGapHours?: number, seenAt?: number, halfLifeDays?: number }} [opts]
  * @returns {object[]}
  */
-export function applyInterestOps(existing, ops, { maxInterests, topicChars, noteChars, confirmGapHours, seenAt = Date.now() } = {}) {
+export function applyInterestOps(
+  existing,
+  ops,
+  { maxInterests, maxInterestsStored, topicChars, noteChars, confirmGapHours, seenAt = Date.now(), halfLifeDays } = {},
+) {
   let items = Array.isArray(existing) ? existing.map((item) => ({ ...item })) : [];
   const priorLastSeen = items.map((item) => item.lastSeen ?? null);
   const seenAtIso = new Date(seenAt).toISOString();
@@ -194,13 +224,8 @@ export function applyInterestOps(existing, ops, { maxInterests, topicChars, note
     }
   }
 
-  const cap = Number.isInteger(maxInterests) ? maxInterests : Infinity;
-  if (Number.isFinite(cap) && items.length > cap) {
-    const dropCount = items.length - cap;
-    const order = items.map((item, index) => ({ item, index })).sort(evictionOrder);
-    const dropIndices = new Set(order.slice(0, dropCount).map((o) => o.index));
-    items = items.filter((_, index) => !dropIndices.has(index));
-  }
+  const cap = effectiveStorageCap(maxInterestsStored, maxInterests);
+  items = evictToCapacity(items, cap, halfLifeDays);
 
   return items;
 }

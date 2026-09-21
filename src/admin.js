@@ -23,6 +23,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { emptyAffinity, affinityBand } from './memory/affinity.js';
+import { topByRank } from './memory/ranking.js';
 import { log } from './log.js';
 
 const FORBIDDEN_SEGMENTS = new Set(['__proto__', 'constructor', 'prototype']);
@@ -169,6 +170,31 @@ export function unsetPath(object, dottedPath) {
 /** `, last YYYY-MM-DD` for `/nep memory show`, or '' when `lastSeen` is unknown. */
 function lastDateSuffix(lastSeen) {
   return typeof lastSeen === 'string' && lastSeen ? `, last ${lastSeen.slice(0, 10)}` : '';
+}
+
+/**
+ * Every stored `items`, in RANK order (src/memory/ranking.js#topByRank,
+ * decayed with `halfLifeDays`), formatted one per line via `formatLine`, with
+ * a divider line inserted right after the top `maxShown` -- the ones the
+ * persona actually sees (see .claude/docs/prompt-contract.md, "More is stored
+ * than shown, and rank decays with age") -- so `/nep memory show` makes the
+ * gap between "stored" and "shown" visible. `maxShown` not an integer ->
+ * every item is shown, no divider. Never throws on an empty `items`.
+ * @param {object[]} items
+ * @param {number} [maxShown]
+ * @param {number} [halfLifeDays]
+ * @param {(item: object) => string} formatLine
+ * @returns {string[]}
+ */
+function rankedLines(items, maxShown, halfLifeDays, formatLine) {
+  const ordered = topByRank(items, undefined, halfLifeDays);
+  const cap = Number.isInteger(maxShown) ? maxShown : ordered.length;
+  const lines = [];
+  ordered.forEach((item, index) => {
+    if (index === cap) lines.push('  -- not shown to the persona (below the shown cap) --');
+    lines.push(`  ${formatLine(item)}`);
+  });
+  return lines;
 }
 
 function pathExists(object, dottedPath) {
@@ -398,19 +424,23 @@ export function createAdmin({ hot, store, client, spontaneous, calibrator, getGu
     const profile = store.getUser(guildId, userId);
     if (!profile) throw new Error(`no profile for ${userId}`);
 
+    const memoryCfg = hot.config?.memory;
+
     const lines = [JSON.stringify(profile, null, 2)];
     if (profile.interests?.length) {
-      lines.push('', 'interests:');
-      for (const it of profile.interests) {
-        const note = it.note ? `: ${it.note}` : '';
-        lines.push(`  [weight ${it.weight}${lastDateSuffix(it.lastSeen)}] ${it.topic}${note}`);
-      }
+      lines.push('', 'interests: (rank order, everything stored -- see the divider for what the persona is shown)');
+      lines.push(
+        ...rankedLines(profile.interests, memoryCfg?.maxInterests, memoryCfg?.interestHalfLifeDays, (it) => {
+          const note = it.note ? `: ${it.note}` : '';
+          return `[weight ${it.weight}${lastDateSuffix(it.lastSeen)}] ${it.topic}${note}`;
+        }),
+      );
     }
     if (profile.details?.length) {
-      lines.push('', 'details:');
-      for (const d of profile.details) {
-        lines.push(`  #${d.id} [weight ${d.weight}${lastDateSuffix(d.lastSeen)}] ${d.text}`);
-      }
+      lines.push('', 'details: (rank order, everything stored -- see the divider for what the persona is shown)');
+      lines.push(
+        ...rankedLines(profile.details, memoryCfg?.maxDetails, memoryCfg?.detailHalfLifeDays, (d) => `#${d.id} [weight ${d.weight}${lastDateSuffix(d.lastSeen)}] ${d.text}`),
+      );
     }
     if (profile.episodes?.length) {
       lines.push('', 'episodes:');

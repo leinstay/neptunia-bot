@@ -98,12 +98,17 @@
     "maxEpisodes": 20,
     "maxNewEpisodes": 3,
     "maxInterests": 12,
+    "maxInterestsStored": 40,
+    "interestHalfLifeDays": 180,
     "interestTopicChars": 40,
     "interestNoteChars": 120,
+    "maxDetailsStored": 40,
+    "detailHalfLifeDays": 720,
     "confirmAfter": 2,
     "confirmGapHours": 12,
     "interestStaleDays": 90,
-    "timeoutMs": 300000
+    "timeoutMs": 300000,
+    "mainChannelIds": []
   },
   "lore": {
     "maxEntries": 500,
