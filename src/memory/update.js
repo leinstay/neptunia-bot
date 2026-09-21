@@ -569,9 +569,11 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
       });
     } catch (err) {
       // Nothing was billed: the request never left this process, or the
-      // provider never returned a completion.
+      // provider never returned a completion. `status` (the HTTP status when
+      // the error carries one, e.g. 429) lets a caller -- the warm-up -- tell
+      // a rate limit apart from a genuine failure without parsing `detail`.
       const reason = err instanceof TokenLimitError ? 'token-limit' : 'llm-error';
-      return { ok: false, usage: null, estimated: 0, result: null, error: err, reason, detail: detailOf(err) };
+      return { ok: false, usage: null, estimated: 0, result: null, error: err, reason, detail: detailOf(err), status: err?.statusCode };
     }
 
     try {

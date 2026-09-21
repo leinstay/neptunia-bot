@@ -35,7 +35,8 @@
     "safetyMargin": 0.9,
     "timeoutMs": 90000,
     "retries": 2,
-    "maxRequestsPerDay": 300
+    "maxRequestsPerDay": 300,
+    "provider": null
   },
   "context": {
     "channelMessages": 100,
@@ -126,6 +127,8 @@
     "maxAgeDays": 0,
     "primaryChannelId": "",
     "channelDepths": {},
-    "onlyListed": false
+    "onlyListed": false,
+    "rateLimitWaitMinutes": 10,
+    "rateLimitMaxWaits": 36
   }
 }

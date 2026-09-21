@@ -78,6 +78,12 @@ export function createLlm({ apiKey, getConfig, calibrator, state, fetchImpl = fe
       temperature: options.temperature ?? cfg.temperature,
       max_tokens: options.maxOutputTokens ?? cfg.maxOutputTokens,
     };
+    // OpenRouter's provider routing (e.g. `{ ignore: [...] }`, `{ order: [...] }`), sent
+    // verbatim and read fresh on every call so it is hot-reloadable. A non-object (including
+    // the default null) omits the field entirely -- OpenRouter then picks providers itself.
+    if (cfg.provider && typeof cfg.provider === 'object' && !Array.isArray(cfg.provider)) {
+      body.provider = cfg.provider;
+    }
 
     let lastError;
     for (let attempt = 0; attempt <= cfg.retries; attempt += 1) {

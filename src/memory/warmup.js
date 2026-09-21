@@ -37,9 +37,31 @@ const MAX_CONSECUTIVE_FAILURES = 3;
 const RETRY_DELAY_MS = 5000;
 const BATCH_OVERHEAD_TOKENS = 500; // a rough allowance for the prompt scaffolding around the transcript
 const SPLIT_FLOOR = 20; // a piece this small or smaller that still fails a 'truncated'/'bad-json' analysis is skipped, not split further
+const DEFAULT_RATE_LIMIT_WAIT_MINUTES = 10;
+const DEFAULT_RATE_LIMIT_MAX_WAITS = 36;
+const RATE_LIMIT_DETAIL_RE = /rate.?limit|too many (tokens|requests)/i;
 
 function realSleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Whether a failed analyzer outcome is a provider rate limit rather than a
+ * genuine failure: an HTTP 429, or a detail message that reads like one
+ * (some providers report it inside a 200/500 wrapper instead of a plain
+ * 429 -- see the header comment of src/llm/openrouter.js's callers).
+ * @param {{ ok: boolean, status?: number, detail?: string }|null|undefined} outcome
+ */
+function isRateLimited(outcome) {
+  if (!outcome || outcome.ok) return false;
+  if (outcome.status === 429) return true;
+  return RATE_LIMIT_DETAIL_RE.test(outcome.detail ?? '');
+}
+
+/** Best-effort provider name out of an OpenRouter error detail, for the rate-limit wait log only. */
+function extractProvider(detail) {
+  const match = /"provider_name"\s*:\s*"([^"]+)"/.exec(detail ?? '');
+  return match ? match[1] : undefined;
 }
 
 /**
@@ -228,6 +250,28 @@ function chargeAttempt(st, outcome) {
   st.requests += 1;
 }
 
+/**
+ * One run's stop signal: a plain `stopRequested` flag for the post-batch
+ * check (see runChannel), plus a `stopped` promise a rate-limit wait can
+ * race against so `stop()` interrupts it immediately instead of only taking
+ * effect after the wait finishes on its own.
+ */
+function makeControl() {
+  let resolveStopped;
+  const stopped = new Promise((resolve) => {
+    resolveStopped = resolve;
+  });
+  return {
+    stopRequested: false,
+    stopped,
+    requestStop() {
+      if (this.stopRequested) return;
+      this.stopRequested = true;
+      resolveStopped();
+    },
+  };
+}
+
 function freshState() {
   return {
     done: false,
@@ -263,6 +307,15 @@ export function createWarmup({ hot, store, client, memory, getGuildId, now = Dat
   // doRun() call and cleared once it settles, so stop() called with no run in
   // flight is simply a no-op.
   let currentControl = null;
+  // Whether THIS process instance has itself aborted a run (three strikes, or
+  // too many consecutive rate-limit waits) — as opposed to an `aborted: true`
+  // found already persisted at process start, e.g. from a run the previous
+  // process gave up on. Distinguishing the two is the whole point of the
+  // start-up resume fix below: an abort inherited from disk must still let
+  // the next process try again once, but an abort THIS process produced
+  // itself must not be retried forever within its own lifetime (or the
+  // persona would spin on the same failing provider indefinitely).
+  let hasAbortedInProcess = false;
 
   function state() {
     if (!store.state.data.warmup) {
@@ -278,9 +331,12 @@ export function createWarmup({ hot, store, client, memory, getGuildId, now = Dat
 
   /**
    * True from process start while a warm-up is due or running: either the
-   * config says one is due (enabled, not done/aborted/paused) or a run is
-   * actually in flight right now — including one the owner started by hand
-   * with `warmup.enabled: false`, or one resuming after `stop()`.
+   * config says one is due (enabled, not done/paused, and either never
+   * aborted or aborted only in a PREVIOUS process — see `hasAbortedInProcess`
+   * above, which makes a fresh abort within this process's own run() stop
+   * blocking for the rest of this process's lifetime) or a run is actually in
+   * flight right now — including one the owner started by hand with
+   * `warmup.enabled: false`, or one resuming after `stop()`.
    */
   function isBlocking() {
     if (runningPromise) return true;
@@ -288,8 +344,8 @@ export function createWarmup({ hot, store, client, memory, getGuildId, now = Dat
     if (!cfg.enabled) return false;
     const st = store.state.data.warmup;
     if (st?.done) return false;
-    if (st?.aborted) return false;
     if (st?.paused) return false;
+    if (st?.aborted) return !hasAbortedInProcess;
     return true;
   }
 
@@ -348,22 +404,94 @@ export function createWarmup({ hot, store, client, memory, getGuildId, now = Dat
   }
 
   /**
+   * Wait out one rate-limited attempt: sleeps `warmup.rateLimitWaitMinutes`
+   * (default 10) and reports whether the run should keep going. Interrupted
+   * promptly by `stop()` — the wait races the injected `sleep` against
+   * `control.stopped`, which `stop()` resolves immediately — in which case
+   * the caller pauses instead of retrying. After
+   * `warmup.rateLimitMaxWaits` (default 36, i.e. six hours at the default
+   * wait) consecutive waits for the SAME piece, the caller aborts instead of
+   * waiting again.
+   * @param {object} cfg  `hot.config.warmup`.
+   * @param {number} waits  Waits already spent on this piece before this call.
+   * @param {{ detail?: string }} outcome  The rate-limited outcome, for the provider name in the log line.
+   * @param {{ stopped: Promise<void> }|null} control
+   * @returns {Promise<{ waits: number, giveUp: 'abort'|'pause'|null }>}
+   */
+  async function waitOutRateLimit(cfg, waits, outcome, control) {
+    const waitMinutes = cfg.rateLimitWaitMinutes ?? DEFAULT_RATE_LIMIT_WAIT_MINUTES;
+    const maxWaits = cfg.rateLimitMaxWaits ?? DEFAULT_RATE_LIMIT_MAX_WAITS;
+    const waitsSoFar = waits + 1;
+    if (waitsSoFar > maxWaits) return { waits: waitsSoFar, giveUp: 'abort' };
+
+    const fields = { waitMinutes, waits: waitsSoFar };
+    const provider = extractProvider(outcome?.detail);
+    if (provider) fields.provider = provider;
+    log.warn('warmup: rate limited, waiting', fields);
+
+    const ms = waitMinutes * 60_000;
+    let interrupted = false;
+    if (control) {
+      // control.stopped listed FIRST: when stop() already resolved it before
+      // this wait even started (as in an owner-triggered pause caught mid-attempt),
+      // both promises settle within the same microtask flush against a fake/instant
+      // `sleep` in tests -- listing the already-settled one first makes Promise.race
+      // resolve to it deterministically, matching a real, much-later `sleep` where
+      // `stopped` would win on actual timing regardless of list order.
+      const winner = await Promise.race([control.stopped.then(() => 'stopped'), sleep(ms).then(() => 'slept')]);
+      interrupted = winner === 'stopped';
+    } else {
+      await sleep(ms);
+    }
+    return { waits: waitsSoFar, giveUp: interrupted ? 'pause' : null };
+  }
+
+  /**
    * Analyze one piece of a batch (the whole batch on the first call, a half
    * of it once split). Never retries a 'truncated'/'bad-json' failure on the
    * same input: it halves the piece instead (oldest half first), recursing
    * down to `SPLIT_FLOOR` messages; a piece that size or smaller that still
    * fails that way is SKIPPED (counted in `st.skippedMessages`) so a single
-   * poisonous piece can never stall or abort the whole warm-up. Every other
-   * failure reason keeps the existing retry-once + 3-consecutive-cycles
-   * abort behaviour, unchanged.
+   * poisonous piece can never stall or abort the whole warm-up. A rate-limited
+   * failure (see isRateLimited) is neither a strike nor a plain retry: it
+   * waits out via waitOutRateLimit and then retries the SAME piece, without
+   * touching `consecutiveFailures`. Every other failure reason keeps the
+   * existing retry-once + 3-consecutive-cycles abort behaviour, unchanged.
    *
    * @param {Map<string, string>} [descriptions]  Pre-computed describer captions for this batch
    *   (see describeBatchForWarmup), reused unchanged across a split.
+   * @param {{ stopRequested: boolean, stopped: Promise<void> }} [control]
    * @returns {Promise<{ consecutiveFailures: number, stop: boolean }>}
-   *   `stop: true` means the budget ran out or the run aborted — the caller
-   *   must not advance `batchesDone` and must stop processing this channel.
+   *   `stop: true` means the budget ran out, the run aborted, or a rate-limit
+   *   wait was interrupted by stop() — the caller must not advance
+   *   `batchesDone` and must stop processing this channel.
    */
-  async function analyzePiece(guildId, channelId, batchIndex, cfg, st, piece, consecutiveFailures, descriptions) {
+  async function analyzePiece(guildId, channelId, batchIndex, cfg, st, piece, consecutiveFailures, descriptions, control) {
+    let rateLimitWaits = 0;
+
+    /** Handles a rate-limited `outcome`: waits, then either signals `continue` or returns the piece's final result. */
+    async function handleRateLimit(outcome) {
+      const wait = await waitOutRateLimit(cfg, rateLimitWaits, outcome, control);
+      rateLimitWaits = wait.waits;
+      if (wait.giveUp === 'abort') {
+        st.aborted = true;
+        hasAbortedInProcess = true;
+        persist();
+        log.error('warmup: aborting after repeated rate limits', {
+          guildId,
+          tokensUsed: st.tokensUsed,
+          requests: st.requests,
+        });
+        return { consecutiveFailures, stop: true };
+      }
+      if (wait.giveUp === 'pause') {
+        st.paused = true;
+        persist();
+        return { consecutiveFailures, stop: true };
+      }
+      return null; // keep going: retry the same piece
+    }
+
     for (;;) {
       const estimate = estimateBatch(guildId, piece, hot, memory);
       if (remainingBudget(st, cfg.maxTokens) < estimate) {
@@ -381,6 +509,12 @@ export function createWarmup({ hot, store, client, memory, getGuildId, now = Dat
       chargeAttempt(st, outcome);
       persist();
 
+      if (isRateLimited(outcome)) {
+        const settled = await handleRateLimit(outcome);
+        if (settled) return settled;
+        continue;
+      }
+
       // A 'truncated'/'bad-json' failure is never retried on the same
       // input — see isUnrecoverableSize. Every other reason keeps the
       // original retry-once behaviour below.
@@ -389,6 +523,12 @@ export function createWarmup({ hot, store, client, memory, getGuildId, now = Dat
         outcome = await memory.analyze(guildId, piece, { countAgainstDailyCap: false, descriptions });
         chargeAttempt(st, outcome);
         persist();
+
+        if (isRateLimited(outcome)) {
+          const settled = await handleRateLimit(outcome);
+          if (settled) return settled;
+          continue;
+        }
       }
 
       if (outcome.ok) {
@@ -411,9 +551,9 @@ export function createWarmup({ hot, store, client, memory, getGuildId, now = Dat
             reason: outcome.reason,
             detail: outcome.detail,
           });
-          const first = await analyzePiece(guildId, channelId, batchIndex, cfg, st, piece.slice(0, mid), consecutiveFailures, descriptions);
+          const first = await analyzePiece(guildId, channelId, batchIndex, cfg, st, piece.slice(0, mid), consecutiveFailures, descriptions, control);
           if (first.stop) return first;
-          return analyzePiece(guildId, channelId, batchIndex, cfg, st, piece.slice(mid), first.consecutiveFailures, descriptions);
+          return analyzePiece(guildId, channelId, batchIndex, cfg, st, piece.slice(mid), first.consecutiveFailures, descriptions, control);
         }
 
         st.skippedMessages = (st.skippedMessages ?? 0) + piece.length;
@@ -441,6 +581,7 @@ export function createWarmup({ hot, store, client, memory, getGuildId, now = Dat
       });
       if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
         st.aborted = true;
+        hasAbortedInProcess = true;
         persist();
         log.error('warmup: aborting after repeated failures', {
           guildId,
@@ -507,7 +648,7 @@ export function createWarmup({ hot, store, client, memory, getGuildId, now = Dat
     for (let i = channelState.batchesDone; i < batches.length; i += 1) {
       const batch = batches[i];
       const descriptions = await describeBatchForWarmup(guildId, batch, cfg, st);
-      const result = await analyzePiece(guildId, channel.id, i, cfg, st, batch, consecutiveFailures, descriptions);
+      const result = await analyzePiece(guildId, channel.id, i, cfg, st, batch, consecutiveFailures, descriptions, control);
       consecutiveFailures = result.consecutiveFailures;
       if (result.stop) return consecutiveFailures;
 
@@ -555,7 +696,7 @@ export function createWarmup({ hot, store, client, memory, getGuildId, now = Dat
       return st;
     }
 
-    const control = { stopRequested: false };
+    const control = makeControl();
     currentControl = control;
 
     const { plan, byId } = resolveChannels(guild);
@@ -593,10 +734,12 @@ export function createWarmup({ hot, store, client, memory, getGuildId, now = Dat
    * Ask the in-progress run to pause after the batch currently in flight —
    * a no-op when nothing is running. The paused state is persisted
    * (`paused: true`, neither `done` nor `aborted`); `isBlocking()` drops
-   * immediately, and the next `run()` resumes from the saved progress.
+   * immediately, and the next `run()` resumes from the saved progress. Also
+   * interrupts a rate-limit wait in progress (see waitOutRateLimit) promptly,
+   * rather than waiting out the full `warmup.rateLimitWaitMinutes`.
    */
   function stop() {
-    if (currentControl) currentControl.stopRequested = true;
+    currentControl?.requestStop();
   }
 
   /** A plain status object for the admin `warmup` command. */

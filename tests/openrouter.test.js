@@ -316,6 +316,75 @@ test('complete: options.timeoutMs overrides llm.timeoutMs for the request signal
   assert.equal(seenSignal.aborted, true, 'a short options.timeoutMs must win over the much longer llm.timeoutMs');
 });
 
+test('complete: omits the provider field when llm.provider is null (the default)', async () => {
+  let seenBody = null;
+  const llm = createLlm({
+    apiKey: 'k',
+    getConfig: () => baseConfig({ provider: null }),
+    calibrator: fakeCalibrator(),
+    state: fakeState(),
+    fetchImpl: async (url, init) => {
+      seenBody = JSON.parse(init.body);
+      return okResponse('hi');
+    },
+  });
+  await llm.complete([{ role: 'user', content: 'hi' }]);
+  assert.equal('provider' in seenBody, false);
+});
+
+test('complete: omits the provider field when llm.provider is a non-object (e.g. a stray string)', async () => {
+  let seenBody = null;
+  const llm = createLlm({
+    apiKey: 'k',
+    getConfig: () => baseConfig({ provider: 'anthropic' }),
+    calibrator: fakeCalibrator(),
+    state: fakeState(),
+    fetchImpl: async (url, init) => {
+      seenBody = JSON.parse(init.body);
+      return okResponse('hi');
+    },
+  });
+  await llm.complete([{ role: 'user', content: 'hi' }]);
+  assert.equal('provider' in seenBody, false);
+});
+
+test('complete: sends llm.provider verbatim as the request\'s provider field when it is an object', async () => {
+  let seenBody = null;
+  const provider = { order: ['anthropic'], allow_fallbacks: true };
+  const llm = createLlm({
+    apiKey: 'k',
+    getConfig: () => baseConfig({ provider }),
+    calibrator: fakeCalibrator(),
+    state: fakeState(),
+    fetchImpl: async (url, init) => {
+      seenBody = JSON.parse(init.body);
+      return okResponse('hi');
+    },
+  });
+  await llm.complete([{ role: 'user', content: 'hi' }]);
+  assert.deepEqual(seenBody.provider, provider);
+});
+
+test('complete: llm.provider is read fresh on every call (hot-reloadable), not cached from the first request', async () => {
+  const bodies = [];
+  let provider = { ignore: ['amazon-bedrock'] };
+  const llm = createLlm({
+    apiKey: 'k',
+    getConfig: () => baseConfig({ provider }),
+    calibrator: fakeCalibrator(),
+    state: fakeState(),
+    fetchImpl: async (url, init) => {
+      bodies.push(JSON.parse(init.body));
+      return okResponse('hi');
+    },
+  });
+  await llm.complete([{ role: 'user', content: 'hi' }]);
+  provider = null;
+  await llm.complete([{ role: 'user', content: 'hi' }]);
+  assert.deepEqual(bodies[0].provider, { ignore: ['amazon-bedrock'] });
+  assert.equal('provider' in bodies[1], false);
+});
+
 // Only ONE test exercises the real retry backoff sleep (~1.5s at attempt 1).
 test('complete: retries once on a 503 then succeeds', async () => {
   let calls = 0;

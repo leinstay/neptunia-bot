@@ -775,6 +775,272 @@ test('run: an "llm-error" failure keeps the retry-once + abort-after-three behav
 });
 
 // ---------------------------------------------------------------------------
+// Rate limits: waited out, not counted as three strikes
+// ---------------------------------------------------------------------------
+
+function rateLimited429(overrides = {}) {
+  return {
+    ok: false,
+    usage: null,
+    estimated: 0,
+    result: null,
+    reason: 'llm-error',
+    status: 429,
+    detail: 'OpenRouter HTTP 429: too many tokens per day',
+    ...overrides,
+  };
+}
+
+test('run: a 429 waits instead of striking, then retries the same batch and succeeds', async () => {
+  const dir = tempDir();
+  try {
+    const store = createStore({ dataDir: dir });
+    const now = Date.now();
+    const history = makeHistory({ count: 2, startTs: now - 60_000, spacingMs: 1000, authorId: 'u1' });
+    const channel = fakeChannel('c1', history);
+    const guild = fakeGuild('g1', [channel]);
+    const client = fakeClient(guild);
+    const hot = fakeHot({ warmup: { batchMessages: 10 } });
+    let call = 0;
+    const memory = fakeMemory(() => {
+      call += 1;
+      if (call === 1) return rateLimited429();
+      return { ok: true, usage: { prompt_tokens: 10, completion_tokens: 5 }, estimated: 15, result: {} };
+    });
+    const sleep = fakeSleep();
+
+    const warmup = createWarmup({ hot, store, client, memory, getGuildId: () => 'g1', sleep });
+    const { result, logs } = await withCapturedLogs(() => warmup.run());
+
+    assert.equal(memory.calls.length, 2, 'the batch is retried, not split or given up on');
+    assert.equal(result.done, true);
+    assert.equal(result.aborted, false);
+    assert.deepEqual(sleep.calls, [10 * 60_000], 'waits warmup.rateLimitWaitMinutes (default 10), never the 5s retry delay');
+
+    const waitLog = logs.find((l) => l.msg === 'warmup: rate limited, waiting');
+    assert.ok(waitLog);
+    assert.equal(waitLog.waitMinutes, 10);
+    assert.equal(waitLog.waits, 1);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('run: a rate limit reported via the detail text (no status field) is recognised the same way', async () => {
+  const dir = tempDir();
+  try {
+    const store = createStore({ dataDir: dir });
+    const now = Date.now();
+    const history = makeHistory({ count: 2, startTs: now - 60_000, spacingMs: 1000, authorId: 'u1' });
+    const channel = fakeChannel('c1', history);
+    const guild = fakeGuild('g1', [channel]);
+    const client = fakeClient(guild);
+    const hot = fakeHot({ warmup: { batchMessages: 10 } });
+    let call = 0;
+    const memory = fakeMemory(() => {
+      call += 1;
+      if (call === 1) {
+        return { ok: false, usage: null, estimated: 0, result: null, reason: 'llm-error', detail: 'Too many requests, please slow down' };
+      }
+      return { ok: true, usage: { prompt_tokens: 10, completion_tokens: 5 }, estimated: 15, result: {} };
+    });
+    const sleep = fakeSleep();
+
+    const warmup = createWarmup({ hot, store, client, memory, getGuildId: () => 'g1', sleep });
+    const result = await warmup.run();
+
+    assert.equal(memory.calls.length, 2);
+    assert.equal(result.done, true);
+    assert.deepEqual(sleep.calls, [10 * 60_000]);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('run: logs the provider name on a rate-limit wait when the detail carries one, never message contents', async () => {
+  const dir = tempDir();
+  try {
+    const store = createStore({ dataDir: dir });
+    const now = Date.now();
+    const history = makeHistory({ count: 2, startTs: now - 60_000, spacingMs: 1000, authorId: 'u1' });
+    const channel = fakeChannel('c1', history);
+    const guild = fakeGuild('g1', [channel]);
+    const client = fakeClient(guild);
+    const hot = fakeHot({ warmup: { batchMessages: 10 } });
+    let call = 0;
+    const memory = fakeMemory(() => {
+      call += 1;
+      if (call === 1) {
+        return rateLimited429({
+          detail: 'OpenRouter HTTP 429: {"error":{"metadata":{"raw":"{\\"message\\":\\"Too many tokens per day\\"}","provider_name":"Amazon Bedrock"}}}',
+        });
+      }
+      return { ok: true, usage: { prompt_tokens: 10, completion_tokens: 5 }, estimated: 15, result: {} };
+    });
+    const sleep = fakeSleep();
+
+    const warmup = createWarmup({ hot, store, client, memory, getGuildId: () => 'g1', sleep });
+    const { logs } = await withCapturedLogs(() => warmup.run());
+
+    const waitLog = logs.find((l) => l.msg === 'warmup: rate limited, waiting');
+    assert.ok(waitLog);
+    assert.equal(waitLog.provider, 'Amazon Bedrock');
+    const dump = JSON.stringify(logs);
+    assert.ok(!dump.includes('msg 0'), 'no message contents in any log line');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('run: a custom rateLimitWaitMinutes is honoured', async () => {
+  const dir = tempDir();
+  try {
+    const store = createStore({ dataDir: dir });
+    const now = Date.now();
+    const history = makeHistory({ count: 2, startTs: now - 60_000, spacingMs: 1000, authorId: 'u1' });
+    const channel = fakeChannel('c1', history);
+    const guild = fakeGuild('g1', [channel]);
+    const client = fakeClient(guild);
+    const hot = fakeHot({ warmup: { batchMessages: 10, rateLimitWaitMinutes: 1 } });
+    let call = 0;
+    const memory = fakeMemory(() => {
+      call += 1;
+      if (call === 1) return rateLimited429();
+      return { ok: true, usage: { prompt_tokens: 10, completion_tokens: 5 }, estimated: 15, result: {} };
+    });
+    const sleep = fakeSleep();
+
+    const warmup = createWarmup({ hot, store, client, memory, getGuildId: () => 'g1', sleep });
+    await warmup.run();
+
+    assert.deepEqual(sleep.calls, [1 * 60_000]);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('run: aborts after rateLimitMaxWaits consecutive rate-limited waits on the same batch', async () => {
+  const dir = tempDir();
+  try {
+    const store = createStore({ dataDir: dir });
+    const now = Date.now();
+    const history = makeHistory({ count: 2, startTs: now - 60_000, spacingMs: 1000, authorId: 'u1' });
+    const channel = fakeChannel('c1', history);
+    const guild = fakeGuild('g1', [channel]);
+    const client = fakeClient(guild);
+    const hot = fakeHot({ warmup: { batchMessages: 10, rateLimitMaxWaits: 2 } });
+    const memory = fakeMemory(() => rateLimited429());
+    const sleep = fakeSleep();
+
+    const warmup = createWarmup({ hot, store, client, memory, getGuildId: () => 'g1', sleep });
+    const { result, logs } = await withCapturedLogs(() => warmup.run());
+
+    assert.equal(result.aborted, true);
+    assert.equal(memory.calls.length, 3, '2 waited retries, then a 3rd rate-limited attempt gives up without waiting again');
+    assert.equal(sleep.calls.length, 2, 'never sleeps for the attempt that finally aborts');
+    assert.equal(warmup.isBlocking(), false, 'aborting must not mute the persona forever within this process');
+
+    const abortLog = logs.find((l) => l.msg === 'warmup: aborting after repeated rate limits');
+    assert.ok(abortLog);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('run: a rate-limited abort is still resumable on the next process, like a plain 3-strikes abort', async () => {
+  const dir = tempDir();
+  try {
+    const store = createStore({ dataDir: dir });
+    const now = Date.now();
+    const history = makeHistory({ count: 2, startTs: now - 60_000, spacingMs: 1000, authorId: 'u1' });
+    const channel = fakeChannel('c1', history);
+    const guild = fakeGuild('g1', [channel]);
+    const client = fakeClient(guild);
+    const hot = fakeHot({ warmup: { batchMessages: 10, rateLimitMaxWaits: 1 } });
+    const memory1 = fakeMemory(() => rateLimited429());
+
+    const warmup1 = createWarmup({ hot, store, client, memory: memory1, getGuildId: () => 'g1', sleep: fakeSleep() });
+    const result1 = await warmup1.run();
+    assert.equal(result1.aborted, true);
+
+    // A fresh process, resolving isBlocking() the way src/index.js's start-up path does.
+    const memory2 = fakeMemory(alwaysOk());
+    const warmup2 = createWarmup({ hot, store, client, memory: memory2, getGuildId: () => 'g1', sleep: fakeSleep() });
+    assert.equal(warmup2.isBlocking(), true, 'a fresh process must resume an aborted warm-up');
+    const result2 = await warmup2.run();
+
+    assert.equal(result2.done, true);
+    assert.equal(result2.aborted, false);
+    assert.equal(memory2.calls.length, 1);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('run: stop() interrupts a rate-limit wait promptly, pausing instead of retrying', async () => {
+  const dir = tempDir();
+  try {
+    const store = createStore({ dataDir: dir });
+    const now = Date.now();
+    const history = makeHistory({ count: 2, startTs: now - 60_000, spacingMs: 1000, authorId: 'u1' });
+    const channel = fakeChannel('c1', history);
+    const guild = fakeGuild('g1', [channel]);
+    const client = fakeClient(guild);
+    const hot = fakeHot({ warmup: { batchMessages: 10 } });
+
+    let warmup;
+    const memory = fakeMemory((callIndex) => {
+      if (callIndex === 0) {
+        warmup.stop(); // the owner pauses the run right as the rate-limit wait would begin
+        return rateLimited429();
+      }
+      return { ok: true, usage: { prompt_tokens: 10, completion_tokens: 5 }, estimated: 15, result: {} };
+    });
+    const sleep = fakeSleep();
+
+    warmup = createWarmup({ hot, store, client, memory, getGuildId: () => 'g1', sleep });
+    const result = await warmup.run();
+
+    assert.equal(result.paused, true);
+    assert.equal(result.aborted, false);
+    assert.equal(result.done, false);
+    assert.equal(memory.calls.length, 1, 'the wait is interrupted before ever retrying the batch');
+    assert.equal(warmup.isBlocking(), false, 'a paused run must not keep the persona mute forever');
+
+    const memory2 = fakeMemory(alwaysOk());
+    const warmup2 = createWarmup({ hot, store, client, memory: memory2, getGuildId: () => 'g1', sleep: fakeSleep() });
+    const result2 = await warmup2.run();
+    assert.equal(result2.done, true);
+    assert.equal(memory2.calls.length, 1, 'resumes the same, still-unfinished batch');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('run: a non-429, non-rate-limit-worded failure still counts toward the three-strikes abort', async () => {
+  const dir = tempDir();
+  try {
+    const store = createStore({ dataDir: dir });
+    const now = Date.now();
+    const history = makeHistory({ count: 2, startTs: now - 60_000, spacingMs: 1000, authorId: 'u1' });
+    const channel = fakeChannel('c1', history);
+    const guild = fakeGuild('g1', [channel]);
+    const client = fakeClient(guild);
+    const hot = fakeHot({ warmup: { batchMessages: 10 } });
+    const memory = fakeMemory(() => ({ ok: false, usage: null, estimated: 0, result: null, reason: 'llm-error', status: 500, detail: 'internal server error' }));
+    const sleep = fakeSleep();
+
+    const warmup = createWarmup({ hot, store, client, memory, getGuildId: () => 'g1', sleep });
+    const result = await warmup.run();
+
+    assert.equal(result.aborted, true);
+    assert.equal(memory.calls.length, 6, '3 cycles * (try + retry), the old three-strikes behaviour');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
 // Resume after a restart
 // ---------------------------------------------------------------------------
 
@@ -1124,7 +1390,7 @@ test('isBlocking: false when warmup.enabled is false, regardless of state', () =
   }
 });
 
-test('isBlocking: false once done, false once aborted', () => {
+test('isBlocking: false once done', () => {
   const dir = tempDir();
   try {
     const store = createStore({ dataDir: dir });
@@ -1133,8 +1399,38 @@ test('isBlocking: false once done, false once aborted', () => {
 
     store.state.data.warmup = { done: true, aborted: false, channels: {}, tokensUsed: 0, requests: 0 };
     assert.equal(warmup.isBlocking(), false);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
 
-    store.state.data.warmup = { done: false, aborted: true, channels: {}, tokensUsed: 0, requests: 0 };
+// A restart must resume an aborted warm-up (the whole point of this fix): a
+// state found aborted at process start — before this factory's own run() has
+// ever attempted (and possibly re-aborted) anything — counts as due, so
+// src/index.js's existing start-up path (`if (warmup.isBlocking()) warmup.run()`)
+// picks it back up instead of leaving the persona muted forever.
+test('isBlocking: true for a persisted aborted state found at start-up, enabled and not done/paused', () => {
+  const dir = tempDir();
+  try {
+    const store = createStore({ dataDir: dir });
+    const hot = fakeHot();
+    const warmup = createWarmup({ hot, store, client: {}, memory: {}, getGuildId: () => 'g1' });
+
+    store.state.data.warmup = { done: false, aborted: true, paused: false, channels: {}, tokensUsed: 0, requests: 0 };
+    assert.equal(warmup.isBlocking(), true, 'a restart must resume an aborted warm-up, not leave it stuck forever');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('isBlocking: false for a persisted aborted state when warmup.enabled is false', () => {
+  const dir = tempDir();
+  try {
+    const store = createStore({ dataDir: dir });
+    const hot = fakeHot({ warmup: { enabled: false } });
+    const warmup = createWarmup({ hot, store, client: {}, memory: {}, getGuildId: () => 'g1' });
+
+    store.state.data.warmup = { done: false, aborted: true, paused: false, channels: {}, tokensUsed: 0, requests: 0 };
     assert.equal(warmup.isBlocking(), false);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });

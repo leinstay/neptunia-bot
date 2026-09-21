@@ -1646,6 +1646,42 @@ test('analyze: a network/provider error message is trimmed to 200 chars in detai
   });
 });
 
+test('analyze: an error with an HTTP status (e.g. a 429 from the provider) surfaces it as outcome.status', async () => {
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    const hot = { config: makeConfig(), prompts: { memory: 'sys', labels } };
+    const calibrator = createCalibrator();
+    const llm = {
+      complete: async () => {
+        const err = new Error('OpenRouter HTTP 429: too many tokens per day');
+        err.statusCode = 429;
+        throw err;
+      },
+    };
+    const updater = createMemoryUpdater({ hot, store, llm, calibrator, getSelfName: () => 'Nept' });
+
+    const outcome = await updater.analyze(guildId, [slimMessage({ id: 'm1' })]);
+
+    assert.equal(outcome.ok, false);
+    assert.equal(outcome.reason, 'llm-error');
+    assert.equal(outcome.status, 429);
+  });
+});
+
+test('analyze: an error with no HTTP status leaves outcome.status undefined', async () => {
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    const hot = { config: makeConfig(), prompts: { memory: 'sys', labels } };
+    const calibrator = createCalibrator();
+    const llm = { complete: async () => { throw new Error('network blip'); } };
+    const updater = createMemoryUpdater({ hot, store, llm, calibrator, getSelfName: () => 'Nept' });
+
+    const outcome = await updater.analyze(guildId, [slimMessage({ id: 'm1' })]);
+
+    assert.equal(outcome.status, undefined);
+  });
+});
+
 test('analyze: a completion that fails to parse still reports the real usage/estimated — it was billed', async () => {
   await withStoreAsync(async (store) => {
     const guildId = 'g1';
