@@ -1032,3 +1032,117 @@ test('wipeGuild: does not touch another guild\'s memory', () => {
   const storeB = createStore({ dataDir: dir });
   assert.ok(storeB.getUser('g2', 'u9'));
 });
+
+// --- aliases (applyProfileOps) — F29 -----------------------------------------
+
+test('emptyProfile: a fresh profile starts with no aliases', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  const profile = store.touchUser('g1', 'u1', 'Alice', 1000);
+  assert.deepEqual(profile.aliases, []);
+});
+
+test('getUser: a legacy profile with no aliases key at all is tolerated, gets []', () => {
+  const dir = tmpDataDir();
+  const guildDir = path.join(dir, 'guilds', 'g1', 'users');
+  fs.mkdirSync(guildDir, { recursive: true });
+  fs.writeFileSync(path.join(guildDir, 'u1.json'), JSON.stringify({ id: 'u1', names: ['Alice'] }));
+
+  const store = createStore({ dataDir: dir });
+  const profile = store.getUser('g1', 'u1');
+  assert.deepEqual(profile.aliases, []);
+});
+
+test('applyProfileOps: routes users.aliases ops through applyAliasOps, threading maxAliases/maxAliasesStored/aliasHalfLifeDays', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  store.touchUser('g1', 'u1', 'Alice', 1000);
+
+  const profile = store.applyProfileOps(
+    'g1',
+    'u1',
+    { aliases: { add: ['Ali'] } },
+    { maxAliases: 5, maxAliasesStored: 15, aliasHalfLifeDays: 365, now: 1000 },
+  );
+  assert.equal(profile.aliases.length, 1);
+  assert.equal(profile.aliases[0].name, 'Ali');
+  assert.equal(profile.aliases[0].weight, 1);
+});
+
+test('applyProfileOps: an alias equal (case-insensitively) to the member\'s OWN stored display name is never added', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  store.touchUser('g1', 'u1', 'Alice', 1000);
+
+  const profile = store.applyProfileOps('g1', 'u1', { aliases: { add: ['alice'] } }, { now: 1000 });
+  assert.deepEqual(profile.aliases, []);
+});
+
+test('applyProfileOps: a repeated alias add is a sighting (weight bump, subject to confirmGapHours)', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  store.touchUser('g1', 'u1', 'Alice', 1000);
+
+  store.applyProfileOps('g1', 'u1', { aliases: { add: ['Ali'] } }, { confirmGapHours: 12, now: 0, seenAt: 0 });
+  const profile = store.applyProfileOps(
+    'g1',
+    'u1',
+    { aliases: { add: ['ali'] } },
+    { confirmGapHours: 12, now: 13 * 3_600_000, seenAt: 13 * 3_600_000 },
+  );
+  assert.equal(profile.aliases[0].weight, 2);
+  assert.equal(profile.aliases[0].name, 'Ali', 'original casing kept');
+});
+
+test('applyProfileOps: aliases.remove deletes the alias', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  store.touchUser('g1', 'u1', 'Alice', 1000);
+
+  store.applyProfileOps('g1', 'u1', { aliases: { add: ['Ali'] } }, { now: 1000 });
+  const profile = store.applyProfileOps('g1', 'u1', { aliases: { remove: ['Ali'] } }, { now: 2000 });
+  assert.deepEqual(profile.aliases, []);
+});
+
+test('applyProfileOps: aliases are capped at max(maxAliasesStored, maxAliases)', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  store.touchUser('g1', 'u1', 'Alice', 1000);
+
+  store.applyProfileOps('g1', 'u1', { aliases: { add: ['One'] } }, { maxAliases: 1, maxAliasesStored: 1, now: 1000 });
+  const profile = store.applyProfileOps('g1', 'u1', { aliases: { add: ['Two'] } }, { maxAliases: 1, maxAliasesStored: 1, now: 2000 });
+  assert.equal(profile.aliases.length, 1);
+});
+
+test('applyProfileOps: garbage aliases ops never throw and change nothing', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  store.touchUser('g1', 'u1', 'Alice', 1000);
+
+  for (const garbage of [null, 'nope', 42, [1, 2], { add: 'nope' }]) {
+    const profile = store.applyProfileOps('g1', 'u1', { aliases: garbage }, { now: 1000 });
+    assert.deepEqual(profile.aliases, []);
+  }
+});
+
+// --- listUserProfiles — F29 ---------------------------------------------------
+
+test('listUserProfiles: every stored profile of a guild, cached or on disk', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  store.touchUser('g1', 'u1', 'Alice', 1000);
+  store.touchUser('g1', 'u2', 'Bob', 1000);
+  store.flush();
+
+  const storeB = createStore({ dataDir: dir });
+  storeB.touchUser('g1', 'u3', 'Carl', 1000); // cached only, not yet flushed
+
+  const profiles = storeB.listUserProfiles('g1');
+  assert.deepEqual(profiles.map((p) => p.id).sort(), ['u1', 'u2', 'u3']);
+});
+
+test('listUserProfiles: an empty/never-seen guild returns []', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  assert.deepEqual(store.listUserProfiles('g1'), []);
+});

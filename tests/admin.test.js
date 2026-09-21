@@ -752,6 +752,34 @@ test('run: memory.show without stored details prints no details section', async 
   assert.ok(!result.includes('details:'));
 });
 
+test('run: memory.show also prints aliases one per line with weight and last-seen date', async () => {
+  const rootDir = makeRoot();
+  const { admin, store } = makeAdmin(rootDir);
+  store.profiles.set('g1:123', {
+    id: '123',
+    aliases: [
+      { name: 'Ari', weight: 3, firstSeen: 'a', lastSeen: '2026-01-05T00:00:00.000Z' },
+      { name: 'A', weight: 1, firstSeen: 'a', lastSeen: null },
+    ],
+  });
+
+  const result = await admin.run('memory.show', { userId: '123' }, { guildId: 'g1' });
+
+  assert.ok(result.includes('aliases:'));
+  assert.ok(result.includes('[weight 3, last 2026-01-05] Ari'));
+  assert.ok(result.includes('[weight 1] A'), 'a null lastSeen omits the last-date suffix');
+});
+
+test('run: memory.show without stored aliases prints no aliases section', async () => {
+  const rootDir = makeRoot();
+  const { admin, store } = makeAdmin(rootDir);
+  store.profiles.set('g1:123', { id: '123', character: 'chatty', aliases: [] });
+
+  const result = await admin.run('memory.show', { userId: '123' }, { guildId: 'g1' });
+
+  assert.ok(!result.includes('aliases:'));
+});
+
 test('run: memory.show lists every stored interest in rank order and marks the divider between shown and hidden', async () => {
   const rootDir = makeRoot();
   const hot = makeHot(rootDir);

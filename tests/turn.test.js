@@ -201,6 +201,7 @@ function fakeStore({ guildMemory = {}, userProfiles = {}, channels = [], loreEnt
     getGuild: () => guildMemory,
     getUser: (guildId, userId) => userProfiles[userId] ?? null,
     listChannels: () => channels,
+    listUserProfiles: () => Object.values(userProfiles),
     getLore: () => loreEntries,
     state: { data: {}, markDirty() {} },
   };

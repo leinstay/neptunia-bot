@@ -272,6 +272,8 @@ export function createTurnRunner({
         otherProfiles: memoryOn
           ? pickOtherProfiles(store, guildId, history, trigger?.authorId, config.context.otherProfiles)
           : [],
+        candidateProfiles: memoryOn ? store.listUserProfiles(guildId) : [],
+        nameOf: memoryOn ? (id) => store.getUser(guildId, id)?.names?.[0] ?? null : undefined,
         channels: memoryOn ? store.listChannels(guildId) : [],
         loreEntries: memoryOn ? store.getLore(guildId) : [],
         currentChannelId: channel.id,

@@ -442,6 +442,12 @@ export function createAdmin({ hot, store, client, spontaneous, calibrator, getGu
         ...rankedLines(profile.details, memoryCfg?.maxDetails, memoryCfg?.detailHalfLifeDays, (d) => `#${d.id} [weight ${d.weight}${lastDateSuffix(d.lastSeen)}] ${d.text}`),
       );
     }
+    if (profile.aliases?.length) {
+      lines.push('', 'aliases: (rank order, everything stored -- see the divider for what the persona is shown)');
+      lines.push(
+        ...rankedLines(profile.aliases, memoryCfg?.maxAliases, memoryCfg?.aliasHalfLifeDays, (a) => `[weight ${a.weight}${lastDateSuffix(a.lastSeen)}] ${a.name}`),
+      );
+    }
     if (profile.episodes?.length) {
       lines.push('', 'episodes:');
       for (const ep of profile.episodes) {

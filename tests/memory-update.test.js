@@ -8,7 +8,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { createStore } from '../src/memory/store.js';
-import { isDue, buildMemoryRequest, applyMemoryUpdate, createMemoryUpdater, touchMemory, computeSeenAt } from '../src/memory/update.js';
+import { isDue, buildMemoryRequest, applyMemoryUpdate, createMemoryUpdater, touchMemory, computeSeenAt, batchAuthorNamesMap } from '../src/memory/update.js';
 import { createCalibrator, estimateTokens, estimateMessages } from '../src/llm/tokens.js';
 import { formatTranscript } from '../src/discord/format.js';
 import { TokenLimitError } from '../src/llm/openrouter.js';
@@ -2581,4 +2581,584 @@ test('buildMemoryRequest: {{interestTopicChars}}/{{interestNoteChars}} fall back
   });
 
   assert.equal(llmMessages[0].content, '40 120');
+});
+
+// ---- applyMemoryUpdate: id tokens on the way IN (F29) --------------------------
+// See .claude/docs/prompt-contract.md, "Members are referred to by id, never
+// by nickname" -- a `Name (id:123...)` the model writes in a free-text field
+// becomes `<@id>` when the id is known (an author of the batch, or an
+// existing stored profile); an unknown id is left exactly as written.
+
+test('applyMemoryUpdate: character/style/relationship "Name (id:...)" becomes a token for a known id', () => {
+  withStore((store) => {
+    const guildId = 'g1';
+    store.touchUser(guildId, '1', 'Aria', Date.now());
+    store.touchUser(guildId, '223456789012345678', 'Bran', Date.now());
+
+    const update = {
+      users: {
+        1: {
+          character: 'gets along with Bran (id:223456789012345678)',
+          style: 'quotes Bran (id:223456789012345678) a lot',
+          relationship: 'trusts Bran (id:223456789012345678)',
+        },
+      },
+    };
+    applyMemoryUpdate(store, guildId, update, MEMORY_CFG, new Set(['1']));
+
+    const profile = store.getUser(guildId, '1');
+    assert.equal(profile.character, 'gets along with <@223456789012345678>');
+    assert.equal(profile.style, 'quotes <@223456789012345678> a lot');
+    assert.equal(profile.relationship, 'trusts <@223456789012345678>');
+  });
+});
+
+test('applyMemoryUpdate: an unknown id in "Name (id:...)" is left exactly as written', () => {
+  withStore((store) => {
+    const guildId = 'g1';
+    store.touchUser(guildId, '1', 'Aria', Date.now());
+
+    const update = { users: { 1: { character: 'mentions Ghost (id:99999999999999999)' } } };
+    applyMemoryUpdate(store, guildId, update, MEMORY_CFG, new Set(['1']));
+
+    assert.equal(store.getUser(guildId, '1').character, 'mentions Ghost (id:99999999999999999)');
+  });
+});
+
+test('applyMemoryUpdate: an interest note "Name (id:...)" is tokenized, the topic is not touched', () => {
+  withStore((store) => {
+    const guildId = 'g1';
+    store.touchUser(guildId, '1', 'Aria', Date.now());
+    store.touchUser(guildId, '223456789012345678', 'Bran', Date.now());
+
+    const update = { users: { 1: { interests: { add: [{ topic: 'Chess', note: 'plays with Bran (id:223456789012345678)' }] } } } };
+    applyMemoryUpdate(store, guildId, update, MEMORY_CFG, new Set(['1']));
+
+    const [item] = store.getUser(guildId, '1').interests;
+    assert.equal(item.topic, 'Chess');
+    assert.equal(item.note, 'plays with <@223456789012345678>');
+  });
+});
+
+test('applyMemoryUpdate: a detail text "Name (id:...)" is tokenized (both the array-add and ops shapes)', () => {
+  withStore((store) => {
+    const guildId = 'g1';
+    store.touchUser(guildId, '1', 'Aria', Date.now());
+    store.touchUser(guildId, '223456789012345678', 'Bran', Date.now());
+
+    applyMemoryUpdate(store, guildId, { users: { 1: { details: ['a gift from Bran (id:223456789012345678)'] } } }, MEMORY_CFG, new Set(['1']));
+    assert.equal(store.getUser(guildId, '1').details[0].text, 'a gift from <@223456789012345678>');
+
+    applyMemoryUpdate(
+      store,
+      guildId,
+      { users: { 1: { details: { add: [{ text: 'borrowed from Bran (id:223456789012345678) too' }] } } } },
+      MEMORY_CFG,
+      new Set(['1']),
+    );
+    const texts = store.getUser(guildId, '1').details.map((d) => d.text);
+    assert.ok(texts.includes('borrowed from <@223456789012345678> too'));
+  });
+});
+
+test('applyMemoryUpdate: episode what/feeling are tokenized, quote is left verbatim', () => {
+  withStore((store) => {
+    const guildId = 'g1';
+    store.touchUser(guildId, '1', 'Aria', Date.now());
+    store.touchUser(guildId, '223456789012345678', 'Bran', Date.now());
+
+    const update = {
+      users: {
+        1: {
+          episodes: [
+            {
+              date: '2026-01-01',
+              what: 'argued with Bran (id:223456789012345678)',
+              quote: 'Bran (id:223456789012345678) is wrong',
+              feeling: 'annoyed at Bran (id:223456789012345678)',
+              weight: 3,
+            },
+          ],
+        },
+      },
+    };
+    applyMemoryUpdate(store, guildId, update, MEMORY_CFG, new Set(['1']), new Set(), undefined, EPISODES_CFG);
+
+    const [episode] = store.getUser(guildId, '1').episodes;
+    assert.equal(episode.what, 'argued with <@223456789012345678>');
+    assert.equal(episode.feeling, 'annoyed at <@223456789012345678>');
+    assert.equal(episode.quote, 'Bran (id:223456789012345678) is wrong', 'quote is verbatim, never tokenized');
+  });
+});
+
+test('applyMemoryUpdate: an affinity reason "Name (id:...)" is tokenized', () => {
+  withStore((store) => {
+    const guildId = 'g1';
+    store.touchUser(guildId, '1', 'Aria', Date.now());
+    store.touchUser(guildId, '223456789012345678', 'Bran', Date.now());
+
+    const update = { users: { 1: { affinity: { delta: 5, reason: 'stood up for Bran (id:223456789012345678)' } } } };
+    applyMemoryUpdate(store, guildId, update, MEMORY_CFG, new Set(['1']), new Set(), RELATIONSHIPS_CFG);
+
+    assert.equal(store.getUser(guildId, '1').affinity.reason, 'stood up for <@223456789012345678>');
+  });
+});
+
+test('applyMemoryUpdate: guild patterns/starters/injokes are tokenized', () => {
+  withStore((store) => {
+    const guildId = 'g1';
+    store.touchUser(guildId, '223456789012345678', 'Bran', Date.now());
+
+    const update = {
+      guild: {
+        patterns: 'people quote Bran (id:223456789012345678) constantly',
+        starters: 'usually Bran (id:223456789012345678) starts it',
+        injokes: ['"Bran (id:223456789012345678) did it again"'],
+      },
+    };
+    applyMemoryUpdate(store, guildId, update, MEMORY_CFG, new Set());
+
+    const guild = store.getGuild(guildId);
+    assert.equal(guild.patterns, 'people quote <@223456789012345678> constantly');
+    assert.equal(guild.starters, 'usually <@223456789012345678> starts it');
+    assert.equal(guild.injokes[0], '"<@223456789012345678> did it again"');
+  });
+});
+
+test('applyMemoryUpdate: channel purpose/topics/tone are tokenized', () => {
+  withStore((store) => {
+    const guildId = 'g1';
+    store.touchUser(guildId, '223456789012345678', 'Bran', Date.now());
+
+    const update = { channels: { c1: { purpose: 'Bran (id:223456789012345678) posts art here', topics: 'art by Bran (id:223456789012345678)', tone: 'calm, thanks to Bran (id:223456789012345678)' } } };
+    applyMemoryUpdate(store, guildId, update, MEMORY_CFG, new Set(), new Set(['c1']));
+
+    const channel = store.getChannel(guildId, 'c1');
+    assert.equal(channel.purpose, '<@223456789012345678> posts art here');
+    assert.equal(channel.topics, 'art by <@223456789012345678>');
+    assert.equal(channel.tone, 'calm, thanks to <@223456789012345678>');
+  });
+});
+
+test('applyMemoryUpdate: lore text is tokenized, title and keys are never touched', () => {
+  withStore((store) => {
+    const guildId = 'g1';
+    store.touchUser(guildId, '223456789012345678', 'Bran', Date.now());
+
+    const update = {
+      lore: [{ title: 'The Bran (id:223456789012345678) Incident', keys: ['bran (id:223456789012345678)'], text: 'Bran (id:223456789012345678) broke the server once' }],
+    };
+    applyMemoryUpdate(store, guildId, update, MEMORY_CFG, new Set(), new Set(), undefined, undefined, LORE_CFG);
+
+    const [entry] = store.getLore(guildId);
+    assert.equal(entry.title, 'The Bran (id:223456789012345678) Incident', 'title is the identity, never tokenized');
+    assert.deepEqual(entry.keys, ['bran (id:223456789012345678)'], 'keys are what people literally type, never tokenized');
+    assert.equal(entry.text, '<@223456789012345678> broke the server once');
+  });
+});
+
+test('applyMemoryUpdate: self facts are tokenized', () => {
+  withStore((store) => {
+    const guildId = 'g1';
+    store.touchUser(guildId, '223456789012345678', 'Bran', Date.now());
+
+    applyMemoryUpdate(store, guildId, { self: ['once argued with Bran (id:223456789012345678)'] }, MEMORY_CFG, new Set());
+    assert.equal(store.getGuild(guildId).self[0], 'once argued with <@223456789012345678>');
+  });
+});
+
+// ---- applyMemoryUpdate: aliases -------------------------------------------------
+
+test('applyMemoryUpdate: routes users.<id>.aliases {add, remove} through store.applyProfileOps', () => {
+  withStore((store) => {
+    const guildId = 'g1';
+    store.touchUser(guildId, '1', 'Aria', Date.now());
+
+    applyMemoryUpdate(store, guildId, { users: { 1: { aliases: { add: ['Ari'] } } } }, MEMORY_CFG, new Set(['1']));
+    let profile = store.getUser(guildId, '1');
+    assert.deepEqual(profile.aliases.map((a) => a.name), ['Ari']);
+
+    applyMemoryUpdate(store, guildId, { users: { 1: { aliases: { remove: ['Ari'] } } } }, MEMORY_CFG, new Set(['1']));
+    profile = store.getUser(guildId, '1');
+    assert.deepEqual(profile.aliases, []);
+  });
+});
+
+test('applyMemoryUpdate: an alias equal to the member\'s own display name is never stored', () => {
+  withStore((store) => {
+    const guildId = 'g1';
+    store.touchUser(guildId, '1', 'Aria', Date.now());
+
+    applyMemoryUpdate(store, guildId, { users: { 1: { aliases: { add: ['aria'] } } } }, MEMORY_CFG, new Set(['1']));
+    assert.deepEqual(store.getUser(guildId, '1').aliases, []);
+  });
+});
+
+test('applyMemoryUpdate: threads maxAliases/maxAliasesStored/aliasHalfLifeDays into store.applyProfileOps', () => {
+  withStore((store) => {
+    const guildId = 'g1';
+    store.touchUser(guildId, '1', 'Aria', Date.now());
+    const cfg = { ...MEMORY_CFG, maxAliases: 1, maxAliasesStored: 1 };
+
+    applyMemoryUpdate(store, guildId, { users: { 1: { aliases: { add: ['Ari'] } } } }, cfg, new Set(['1']));
+    applyMemoryUpdate(store, guildId, { users: { 1: { aliases: { add: ['Ary'] } } } }, cfg, new Set(['1']));
+
+    assert.equal(store.getUser(guildId, '1').aliases.length, 1, 'the storage cap (1) was applied');
+  });
+});
+
+// ---- buildMemoryRequest: id tokens resolved on the way OUT (analyzer mode, F29) --
+
+function baseNameOf(names) {
+  return (id) => names[id] ?? null;
+}
+
+test('buildMemoryRequest: existing_profiles character/style/relationship resolve <@id> to "name (id:...)"', () => {
+  const config = makeConfig();
+  const calibrator = createCalibrator();
+  const messages = [slimMessage({ id: 'm1', ts: Date.UTC(2026, 0, 1, 12, 0, 0) })];
+
+  const { messages: llmMessages } = buildMemoryRequest({
+    prompts: { memory: 'x', labels },
+    config,
+    calibrator,
+    profiles: {
+      1: {
+        names: ['Aria'],
+        character: 'gets along with <@223456789012345678>',
+        style: 'quotes <@223456789012345678> a lot',
+        relationship: 'trusts <@223456789012345678>',
+        interests: [],
+        details: [],
+      },
+    },
+    guildMemory: {},
+    messages,
+    selfName: 'Nept',
+    nameOf: baseNameOf({ '223456789012345678': 'Bran' }),
+  });
+
+  const profiles = JSON.parse(/<existing_profiles>\n([\s\S]*?)\n<\/existing_profiles>/.exec(llmMessages[1].content)[1]);
+  assert.equal(profiles['1'].character, 'gets along with Bran (id:223456789012345678)');
+  assert.equal(profiles['1'].style, 'quotes Bran (id:223456789012345678) a lot');
+  assert.equal(profiles['1'].relationship, 'trusts Bran (id:223456789012345678)');
+});
+
+test('buildMemoryRequest: an id nameOf cannot resolve is left as the bare token', () => {
+  const config = makeConfig();
+  const calibrator = createCalibrator();
+  const messages = [slimMessage({ id: 'm1', ts: Date.UTC(2026, 0, 1, 12, 0, 0) })];
+
+  const { messages: llmMessages } = buildMemoryRequest({
+    prompts: { memory: 'x', labels },
+    config,
+    calibrator,
+    profiles: { 1: { names: ['Aria'], character: 'knows <@223456789012345678>', interests: [], details: [] } },
+    guildMemory: {},
+    messages,
+    selfName: 'Nept',
+    nameOf: () => null,
+  });
+
+  const profiles = JSON.parse(/<existing_profiles>\n([\s\S]*?)\n<\/existing_profiles>/.exec(llmMessages[1].content)[1]);
+  assert.equal(profiles['1'].character, 'knows <@223456789012345678>');
+});
+
+test('buildMemoryRequest: a member renamed between write and read shows the NEW name in existing_profiles', () => {
+  const config = makeConfig();
+  const calibrator = createCalibrator();
+  const messages = [slimMessage({ id: 'm1', ts: Date.UTC(2026, 0, 1, 12, 0, 0) })];
+
+  const requestFor = (name) =>
+    buildMemoryRequest({
+      prompts: { memory: 'x', labels },
+      config,
+      calibrator,
+      profiles: { 1: { names: ['Aria'], character: 'knows <@223456789012345678>', interests: [], details: [] } },
+      guildMemory: {},
+      messages,
+      selfName: 'Nept',
+      nameOf: baseNameOf({ '223456789012345678': name }),
+    });
+
+  const before = JSON.parse(/<existing_profiles>\n([\s\S]*?)\n<\/existing_profiles>/.exec(requestFor('OldName').messages[1].content)[1]);
+  assert.equal(before['1'].character, 'knows OldName (id:223456789012345678)');
+
+  const after = JSON.parse(/<existing_profiles>\n([\s\S]*?)\n<\/existing_profiles>/.exec(requestFor('NewName').messages[1].content)[1]);
+  assert.equal(after['1'].character, 'knows NewName (id:223456789012345678)');
+});
+
+test('buildMemoryRequest: existing_profiles interest note / detail text resolve <@id> tokens', () => {
+  const config = makeConfig();
+  const calibrator = createCalibrator();
+  const messages = [slimMessage({ id: 'm1', ts: Date.UTC(2026, 0, 1, 12, 0, 0) })];
+
+  const { messages: llmMessages } = buildMemoryRequest({
+    prompts: { memory: 'x', labels },
+    config,
+    calibrator,
+    profiles: {
+      1: {
+        names: ['Aria'],
+        interests: [{ topic: 'Chess', note: 'plays with <@223456789012345678>', weight: 2, firstSeen: 'a', lastSeen: 'a' }],
+        details: [{ id: 1, text: 'gift from <@223456789012345678>', weight: 1, firstSeen: 'a', lastSeen: 'a' }],
+      },
+    },
+    guildMemory: {},
+    messages,
+    selfName: 'Nept',
+    nameOf: baseNameOf({ '223456789012345678': 'Bran' }),
+  });
+
+  const profiles = JSON.parse(/<existing_profiles>\n([\s\S]*?)\n<\/existing_profiles>/.exec(llmMessages[1].content)[1]);
+  assert.equal(profiles['1'].interests[0].note, 'plays with Bran (id:223456789012345678)');
+  assert.equal(profiles['1'].details[0].text, 'gift from Bran (id:223456789012345678)');
+});
+
+test('buildMemoryRequest: existing_profiles episode "what" resolves <@id> tokens, affinity reason too', () => {
+  const config = makeConfig({ features: { relationships: true, episodes: true } });
+  const calibrator = createCalibrator();
+  const messages = [slimMessage({ id: 'm1', ts: Date.UTC(2026, 0, 1, 12, 0, 0) })];
+
+  const { messages: llmMessages } = buildMemoryRequest({
+    prompts: { memory: 'x', labels },
+    config,
+    calibrator,
+    profiles: {
+      1: {
+        names: ['Aria'],
+        interests: [],
+        details: [],
+        affinity: { score: 5, reason: 'stood up for <@223456789012345678>' },
+        episodes: [{ date: '2026-01-01', what: 'argued with <@223456789012345678>', quote: 'q', weight: 3 }],
+      },
+    },
+    guildMemory: {},
+    messages,
+    selfName: 'Nept',
+    nameOf: baseNameOf({ '223456789012345678': 'Bran' }),
+  });
+
+  const profiles = JSON.parse(/<existing_profiles>\n([\s\S]*?)\n<\/existing_profiles>/.exec(llmMessages[1].content)[1]);
+  assert.equal(profiles['1'].affinity.reason, 'stood up for Bran (id:223456789012345678)');
+  assert.equal(profiles['1'].episodes[0].what, 'argued with Bran (id:223456789012345678)');
+});
+
+test('buildMemoryRequest: existing_guild/existing_channels/existing_lore resolve <@id> tokens, lore titles/keys untouched', () => {
+  const config = makeConfig();
+  const calibrator = createCalibrator();
+  const messages = [slimMessage({ id: 'm1', ts: Date.UTC(2026, 0, 1, 12, 0, 0), content: 'bran incident' })];
+
+  const { messages: llmMessages } = buildMemoryRequest({
+    prompts: { memory: 'x', labels },
+    config,
+    calibrator,
+    profiles: {},
+    guildMemory: { patterns: 'people quote <@223456789012345678>', starters: '<@223456789012345678> usually starts it', injokes: ['<@223456789012345678> did it again'], self: ['met <@223456789012345678> once'] },
+    channels: { c1: { name: 'general', purpose: '<@223456789012345678> posts here', topics: 'stuff by <@223456789012345678>', tone: 'chill, <@223456789012345678> keeps it light' } },
+    loreEntries: [{ id: 'l1', title: 'bran incident', keys: ['bran incident'], text: '<@223456789012345678> broke the server', updatedAt: 'x' }],
+    messages,
+    selfName: 'Nept',
+    nameOf: baseNameOf({ '223456789012345678': 'Bran' }),
+  });
+
+  const user = llmMessages[1].content;
+  const guildJson = JSON.parse(/<existing_guild>\n([\s\S]*?)\n<\/existing_guild>/.exec(user)[1]);
+  assert.equal(guildJson.patterns, 'people quote Bran (id:223456789012345678)');
+  assert.equal(guildJson.starters, 'Bran (id:223456789012345678) usually starts it');
+  assert.equal(guildJson.injokes[0], 'Bran (id:223456789012345678) did it again');
+  assert.equal(guildJson.self[0], 'met Bran (id:223456789012345678) once');
+
+  const channelsJson = JSON.parse(/<existing_channels>\n([\s\S]*?)\n<\/existing_channels>/.exec(user)[1]);
+  assert.equal(channelsJson.c1.purpose, 'Bran (id:223456789012345678) posts here');
+  assert.equal(channelsJson.c1.topics, 'stuff by Bran (id:223456789012345678)');
+  assert.equal(channelsJson.c1.tone, 'chill, Bran (id:223456789012345678) keeps it light');
+
+  const loreJson = JSON.parse(/<existing_lore>\n([\s\S]*?)\n<\/existing_lore>/.exec(user)[1]);
+  assert.equal(loreJson.matched[0].text, 'Bran (id:223456789012345678) broke the server');
+  assert.equal(loreJson.matched[0].title, 'bran incident', 'title is never tokenized');
+  assert.deepEqual(loreJson.matched[0].keys, ['bran incident'], 'keys are never tokenized');
+});
+
+test('buildMemoryRequest: existing_profiles shows aliases as a plain top-ranked list', () => {
+  const config = makeConfig({ memory: { maxAliases: 1 } });
+  const calibrator = createCalibrator();
+  const messages = [slimMessage({ id: 'm1', ts: Date.UTC(2026, 0, 1, 12, 0, 0) })];
+
+  const { messages: llmMessages } = buildMemoryRequest({
+    prompts: { memory: 'x', labels },
+    config,
+    calibrator,
+    profiles: {
+      1: {
+        names: ['Aria'],
+        interests: [],
+        details: [],
+        aliases: [
+          { name: 'Ar', weight: 5, firstSeen: 'a', lastSeen: '2026-01-01T00:00:00.000Z' },
+          { name: 'Ari', weight: 1, firstSeen: 'a', lastSeen: '2020-01-01T00:00:00.000Z' },
+        ],
+      },
+    },
+    guildMemory: {},
+    messages,
+    selfName: 'Nept',
+  });
+
+  const profiles = JSON.parse(/<existing_profiles>\n([\s\S]*?)\n<\/existing_profiles>/.exec(llmMessages[1].content)[1]);
+  assert.deepEqual(profiles['1'].aliases, ['Ar'], 'only the top maxAliases (1) by rank');
+});
+
+test('buildMemoryRequest: no aliases field in existing_profiles when the profile has none', () => {
+  const config = makeConfig();
+  const calibrator = createCalibrator();
+  const messages = [slimMessage({ id: 'm1', ts: Date.UTC(2026, 0, 1, 12, 0, 0) })];
+
+  const { messages: llmMessages } = buildMemoryRequest({
+    prompts: { memory: 'x', labels },
+    config,
+    calibrator,
+    profiles: { 1: { names: ['Aria'], interests: [], details: [] } },
+    guildMemory: {},
+    messages,
+    selfName: 'Nept',
+  });
+
+  const profiles = JSON.parse(/<existing_profiles>\n([\s\S]*?)\n<\/existing_profiles>/.exec(llmMessages[1].content)[1]);
+  assert.ok(!('aliases' in profiles['1']));
+});
+
+// ---- toTokens name-aware round trip through the real pipeline (F29 defect) ----
+// Reproduces the reported defect: a multi-word display name in the model's
+// "Name (id:...)" fallback form must round-trip through
+// applyMemoryUpdate -> buildMemoryRequest's analyzer view -> the model
+// echoing that exact form back -> applyMemoryUpdate again, without growing
+// or duplicating the name across several cycles.
+
+test('applyMemoryUpdate + buildMemoryRequest: a multi-word display name round-trips stably across several analyzer cycles', () => {
+  withStore((store) => {
+    const guildId = 'g1';
+    const authorId = '1';
+    const otherId = '223456789012345678'; // "Al Sus"
+    store.touchUser(guildId, authorId, 'Aria', Date.now());
+    store.touchUser(guildId, otherId, 'Al Sus', Date.now());
+
+    const batchAuthorNames = new Map([[otherId, 'Al Sus']]);
+    const knownUserIds = new Set([authorId]);
+
+    // Round 1: the model writes the fallback "Name (id:...)" form directly.
+    applyMemoryUpdate(
+      store,
+      guildId,
+      { users: { [authorId]: { character: `Al Sus (id:${otherId}) plays it` } } },
+      MEMORY_CFG,
+      knownUserIds,
+      new Set(),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      batchAuthorNames,
+    );
+    assert.equal(store.getUser(guildId, authorId).character, `<@${otherId}> plays it`);
+
+    const config = makeConfig();
+    const calibrator = createCalibrator();
+    const messages = [slimMessage({ id: 'm1', ts: Date.UTC(2026, 0, 1, 12, 0, 0) })];
+    const nameOf = (id) => store.getUser(guildId, id)?.names?.[0] ?? null;
+
+    function analyzerView() {
+      const { messages: llmMessages } = buildMemoryRequest({
+        prompts: { memory: 'x', labels },
+        config,
+        calibrator,
+        profiles: { [authorId]: store.getUser(guildId, authorId) },
+        guildMemory: {},
+        messages,
+        selfName: 'Nept',
+        nameOf,
+      });
+      const profiles = JSON.parse(/<existing_profiles>\n([\s\S]*?)\n<\/existing_profiles>/.exec(llmMessages[1].content)[1]);
+      return profiles[authorId].character;
+    }
+
+    const view1 = analyzerView();
+    assert.equal(view1, `Al Sus (id:${otherId}) plays it`, 'the analyzer sees the full two-word name back, not "Al <@id> plays it"');
+
+    // Round 2: the model echoes back EXACTLY what it was shown.
+    applyMemoryUpdate(
+      store,
+      guildId,
+      { users: { [authorId]: { character: view1 } } },
+      MEMORY_CFG,
+      knownUserIds,
+      new Set(),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      batchAuthorNames,
+    );
+    assert.equal(store.getUser(guildId, authorId).character, `<@${otherId}> plays it`, 'no growth, no duplication after round 2');
+
+    const view2 = analyzerView();
+    assert.equal(view2, view1, 'the analyzer view is stable across cycles');
+
+    // Round 3, for good measure.
+    applyMemoryUpdate(
+      store,
+      guildId,
+      { users: { [authorId]: { character: view2 } } },
+      MEMORY_CFG,
+      knownUserIds,
+      new Set(),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      batchAuthorNames,
+    );
+    assert.equal(store.getUser(guildId, authorId).character, `<@${otherId}> plays it`, 'still stable after round 3');
+    assert.equal(analyzerView(), view1);
+  });
+});
+
+test('applyMemoryUpdate: namesOf recognises a batch author\'s current nick even before their stored profile has caught up', () => {
+  withStore((store) => {
+    const guildId = 'g1';
+    const authorId = '1';
+    const otherId = '223456789012345678';
+    store.touchUser(guildId, authorId, 'Aria', Date.now());
+    // The referenced member exists (known id) but their STORED name is still
+    // the old one -- only the batch transcript saw the new nick.
+    store.touchUser(guildId, otherId, 'OldNick', Date.now());
+
+    const batchAuthorNames = new Map([[otherId, 'Al Sus']]);
+    applyMemoryUpdate(
+      store,
+      guildId,
+      { users: { [authorId]: { character: `Al Sus (id:${otherId}) plays it` } } },
+      MEMORY_CFG,
+      new Set([authorId]),
+      new Set(),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      batchAuthorNames,
+    );
+
+    assert.equal(store.getUser(guildId, authorId).character, `<@${otherId}> plays it`, 'the batch nick, not just the stale stored name, is recognised');
+  });
+});
+
+test('batchAuthorNamesMap: the author\'s latest message in the batch wins when their nick changed mid-batch', () => {
+  const messages = [
+    slimMessage({ id: 'm1', authorId: '1', authorName: 'OldNick', ts: 1000 }),
+    slimMessage({ id: 'm2', authorId: '1', authorName: 'NewNick', ts: 2000 }),
+    slimMessage({ id: 'm3', authorId: '2', authorName: 'Other', self: true, ts: 3000 }),
+  ];
+  const names = batchAuthorNamesMap(messages);
+  assert.equal(names.get('1'), 'NewNick');
+  assert.ok(!names.has('2'), 'the persona\'s own line never contributes a name');
 });

@@ -69,6 +69,7 @@
   "profile": {
     "interlocutorMark": " ← talking to you",
     "formerNames": "Previously known as: {names}",
+    "aliases": "Also called: {text}",
     "character": "Character: {text}",
     "interests": "Interests: {text}",
     "interestItem": "{topic} ({note})",

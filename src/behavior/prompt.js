@@ -21,11 +21,21 @@ import { sortEpisodesForDisplay } from '../memory/episodes.js';
 import { matchLore } from '../memory/lore.js';
 import { channelActivity, renderChannel } from '../memory/channels.js';
 import { selectPictures, mediaProxyUrl } from '../discord/media.js';
+import { fromTokens, occursAsWholeWord } from '../memory/mentions.js';
 
 const TAG_OVERHEAD = 60;
 
 function block(tag, body) {
   return body ? `<${tag}>\n${body}\n</${tag}>` : '';
+}
+
+/** `fromTokens(text, nameOf, 'chat')`, tolerating a non-string `text` and a
+ * missing `nameOf` (an unresolved `<@id>` token is then left exactly as
+ * stored) -- see .claude/docs/prompt-contract.md, "Members are referred to
+ * by id, never by nickname". */
+function resolveChatText(text, nameOf) {
+  if (typeof text !== 'string') return text;
+  return fromTokens(text, typeof nameOf === 'function' ? nameOf : () => null, 'chat');
 }
 
 /**
@@ -35,12 +45,17 @@ function block(tag, body) {
  * `episodes`/`episode`/`episodeNoQuote` — an older labels.json simply never
  * renders this, see .claude/docs/prompt-contract.md.
  */
-function episodeLines(episodes, labels) {
+function episodeLines(episodes, labels, nameOf) {
   const p = labels.profile;
   if (!Array.isArray(episodes) || episodes.length === 0) return [];
   if (!p.episodes || !p.episode || !p.episodeNoQuote) return [];
   const lines = sortEpisodesForDisplay(episodes).map((ep) =>
-    fill(ep.quote ? p.episode : p.episodeNoQuote, { date: ep.date, what: ep.what, quote: ep.quote, feeling: ep.feeling }),
+    fill(ep.quote ? p.episode : p.episodeNoQuote, {
+      date: ep.date,
+      what: resolveChatText(ep.what, nameOf),
+      quote: ep.quote,
+      feeling: resolveChatText(ep.feeling, nameOf),
+    }),
   );
   return [p.episodes, ...lines];
 }
@@ -102,10 +117,11 @@ function markConfirmation(text, item, p, marks) {
  * `markConfirmation` appends the unsure/stale marks, see above.
  */
 function renderInterestItem(item, p, marks) {
-  const text = item.note
+  const note = resolveChatText(item.note, marks?.nameOf);
+  const text = note
     ? p.interestItem
-      ? fill(p.interestItem, { topic: item.topic, note: item.note })
-      : `${item.topic} (${item.note})`
+      ? fill(p.interestItem, { topic: item.topic, note })
+      : `${item.topic} (${note})`
     : p.interestItemNoNote
       ? fill(p.interestItemNoNote, { topic: item.topic })
       : item.topic;
@@ -147,8 +163,29 @@ function detailsText(details, labels, maxDetails, marks) {
   const p = labels.profile;
   const ordered = topByRank(details, maxDetails, marks?.detailHalfLifeDays);
   return ordered
-    .map((item) => (item && typeof item === 'object' ? markConfirmation(item.text ?? '', item, p, { ...marks, stale: false }) : String(item ?? '')))
+    .map((item) =>
+      item && typeof item === 'object'
+        ? markConfirmation(resolveChatText(item.text, marks?.nameOf) ?? '', item, p, { ...marks, stale: false })
+        : String(item ?? ''),
+    )
     .join('; ');
+}
+
+/**
+ * The `labels.profile.aliases` line's `{text}`: the top `maxAliases` stored
+ * alias names (see src/memory/aliases.js) by RANK (decayed with
+ * `aliasHalfLifeDays`), comma-separated -- see .claude/docs/prompt-contract.md,
+ * "Aliases". `''` when there is nothing to show, or when
+ * `labels.profile.aliases` is missing (an older labels.json never renders
+ * this line). Alias names are never token-resolved -- they are literal
+ * nicknames, not a reference to someone else.
+ */
+function aliasesText(aliases, labels, maxAliases, aliasHalfLifeDays) {
+  if (!labels.profile?.aliases) return '';
+  if (!Array.isArray(aliases) || aliases.length === 0) return '';
+  return topByRank(aliases, maxAliases, aliasHalfLifeDays)
+    .map((item) => item.name)
+    .join(', ');
 }
 
 /**
@@ -178,31 +215,51 @@ function detailsText(details, labels, maxDetails, marks) {
 export function renderProfile(
   profile,
   labels,
-  { interlocutor = false, relationships = false, episodes, maxInterests, maxDetails, interestHalfLifeDays, detailHalfLifeDays, confirmAfter, staleDays, now } = {},
+  {
+    interlocutor = false,
+    relationships = false,
+    episodes,
+    maxInterests,
+    maxDetails,
+    maxAliases,
+    aliasHalfLifeDays,
+    interestHalfLifeDays,
+    detailHalfLifeDays,
+    confirmAfter,
+    staleDays,
+    now,
+    nameOf,
+  } = {},
 ) {
   if (!profile) return '';
   const p = labels.profile;
   const name = profile.names?.[0] ?? profile.id;
-  const marks = { confirmAfter, staleDays, now, interestHalfLifeDays, detailHalfLifeDays };
+  const marks = { confirmAfter, staleDays, now, interestHalfLifeDays, detailHalfLifeDays, nameOf };
 
   const attitudeLines = [];
   const affinity = profile.affinity;
   const hasAffinity = relationships && affinity && (affinity.score !== 0 || Boolean(affinity.reason));
   if (hasAffinity) {
     attitudeLines.push(
-      fill(p.affinity, { score: affinity.score, band: labels.affinity?.bands?.[affinityBand(affinity.score)], reason: affinity.reason }),
+      fill(p.affinity, {
+        score: affinity.score,
+        band: labels.affinity?.bands?.[affinityBand(affinity.score)],
+        reason: resolveChatText(affinity.reason, nameOf),
+      }),
     );
   }
 
   const restLines = [];
   if (profile.names?.length > 1) restLines.push(fill(p.formerNames, { names: profile.names.slice(1).join(', ') }));
-  if (profile.character) restLines.push(fill(p.character, { text: profile.character }));
+  const aliasesLine = aliasesText(profile.aliases, labels, maxAliases, aliasHalfLifeDays);
+  if (aliasesLine) restLines.push(fill(p.aliases, { text: aliasesLine }));
+  if (profile.character) restLines.push(fill(p.character, { text: resolveChatText(profile.character, nameOf) }));
   const interestsLine = interestsText(profile.interests, labels, maxInterests, marks);
   if (interestsLine) restLines.push(fill(p.interests, { text: interestsLine }));
-  if (profile.style) restLines.push(fill(p.style, { text: profile.style }));
+  if (profile.style) restLines.push(fill(p.style, { text: resolveChatText(profile.style, nameOf) }));
   const detailsLine = detailsText(profile.details, labels, maxDetails, marks);
   if (detailsLine) restLines.push(fill(p.details, { text: detailsLine }));
-  if (profile.relationship) restLines.push(fill(p.relationship, { text: profile.relationship }));
+  if (profile.relationship) restLines.push(fill(p.relationship, { text: resolveChatText(profile.relationship, nameOf) }));
   const hasContent = attitudeLines.length > 0 || restLines.length > 0;
   if (!hasContent && !interlocutor) return '';
   if (!hasContent) restLines.push(p.unknown);
@@ -211,7 +268,7 @@ export function renderProfile(
   const mark = interlocutor ? p.interlocutorMark : '';
   const heading = `## ${name}${mark}`;
 
-  let renderedEpisodes = interlocutor && episodes?.enabled ? episodeLines(profile.episodes, labels) : [];
+  let renderedEpisodes = interlocutor && episodes?.enabled ? episodeLines(profile.episodes, labels, nameOf) : [];
   if (renderedEpisodes.length && typeof episodes.cap === 'number' && typeof episodes.cost === 'function') {
     const restText = [heading, ...attitudeLines, ...restLines].join('\n');
     renderedEpisodes = fitEpisodeLines(renderedEpisodes, episodes.cap - episodes.cost(restText), episodes.cost);
@@ -226,26 +283,37 @@ export function renderProfile(
  * a channel never seen yet sorts last. See .claude/docs/prompt-contract.md,
  * "Server memory (the channel map)".
  */
-function serverItems(channels, currentChannelId, now, activityCfg, labels) {
+function serverItems(channels, currentChannelId, now, activityCfg, labels, nameOf) {
   const current = channels.find((channel) => channel.id === currentChannelId);
   const rest = channels
     .filter((channel) => channel.id !== currentChannelId)
     .sort((a, b) => (b.lastMessageAt ?? 0) - (a.lastMessageAt ?? 0));
   const ordered = current ? [current, ...rest] : rest;
   return ordered.map((channel) =>
-    renderChannel(channel, labels, {
-      current: channel.id === currentChannelId,
-      activity: channelActivity(channel, now, activityCfg),
-    }),
+    renderChannel(
+      {
+        ...channel,
+        purpose: resolveChatText(channel.purpose, nameOf),
+        topics: resolveChatText(channel.topics, nameOf),
+        tone: resolveChatText(channel.tone, nameOf),
+      },
+      labels,
+      {
+        current: channel.id === currentChannelId,
+        activity: channelActivity(channel, now, activityCfg),
+      },
+    ),
   );
 }
 
-function aboutChatItems(guildMemory, labels) {
+function aboutChatItems(guildMemory, labels, nameOf) {
   const a = labels.aboutChat;
   const items = [];
-  if (guildMemory?.patterns) items.push(fill(a.patterns, { text: guildMemory.patterns }));
-  if (guildMemory?.starters) items.push(fill(a.starters, { text: guildMemory.starters }));
-  if (guildMemory?.injokes?.length) items.push(fill(a.injokes, { text: guildMemory.injokes.join('; ') }));
+  if (guildMemory?.patterns) items.push(fill(a.patterns, { text: resolveChatText(guildMemory.patterns, nameOf) }));
+  if (guildMemory?.starters) items.push(fill(a.starters, { text: resolveChatText(guildMemory.starters, nameOf) }));
+  if (guildMemory?.injokes?.length) {
+    items.push(fill(a.injokes, { text: guildMemory.injokes.map((text) => resolveChatText(text, nameOf)).join('; ') }));
+  }
   return items;
 }
 
@@ -254,9 +322,10 @@ function aboutChatItems(guildMemory, labels) {
  * surfaces from the last `lore.scanMessages` transcript messages plus the
  * trigger, via `labels.lore.entry`. `[]` when there is no stored lore, no
  * match, or `labels.lore.entry` is missing (an older labels.json never
- * breaks -- the block is simply omitted).
+ * breaks -- the block is simply omitted). `text` is token-resolved via
+ * `nameOf`; `title` never is (it is the lorebook's identity, not a mention).
  */
-function loreItems(loreEntries, history, trigger, labels, loreCfg) {
+function loreItems(loreEntries, history, trigger, labels, loreCfg, nameOf) {
   const entry = labels.lore?.entry;
   if (!entry) return [];
   const entries = Array.isArray(loreEntries) ? loreEntries : [];
@@ -267,7 +336,7 @@ function loreItems(loreEntries, history, trigger, labels, loreCfg) {
   if (trigger?.content) recentTexts.push(trigger.content);
 
   const matched = matchLore(entries, recentTexts, { maxMatches: loreCfg?.maxMatches ?? Infinity });
-  return matched.map((lore) => fill(entry, { title: lore.title, text: lore.text }));
+  return matched.map((lore) => fill(entry, { title: lore.title, text: resolveChatText(lore.text, nameOf) }));
 }
 
 /**
@@ -340,6 +409,39 @@ function renderSenses(config, labels) {
 }
 
 /**
+ * Silent members pulled into `<people>` by name/alias -- see
+ * .claude/docs/prompt-contract.md, "Aliases": a member whose current name OR
+ * a shown alias occurs as a whole word (case-insensitive) in `scanText` is
+ * added even though they have not spoken. Names/aliases shorter than 3
+ * characters never trigger. `excludeIds` skips whoever is already covered
+ * (the interlocutor, the actual participants). One pass over the lower-cased
+ * text per candidate name -- pure, cheap, no I/O.
+ * @param {string} scanText
+ * @param {object[]} candidates          Every known profile to consider (store.listUserProfiles).
+ * @param {Set<string>} excludeIds
+ * @param {number} [maxAliases]
+ * @param {number} [aliasHalfLifeDays]
+ * @returns {object[]}
+ */
+function pullInByName(scanText, candidates, excludeIds, maxAliases, aliasHalfLifeDays) {
+  if (!scanText || !Array.isArray(candidates) || candidates.length === 0) return [];
+  const lower = scanText.toLowerCase();
+  const pulled = [];
+  for (const profile of candidates) {
+    const id = profile?.id === undefined || profile?.id === null ? '' : String(profile.id);
+    if (!id || excludeIds.has(id)) continue;
+    const names = [];
+    if (typeof profile.names?.[0] === 'string') names.push(profile.names[0]);
+    for (const alias of topByRank(Array.isArray(profile.aliases) ? profile.aliases : [], maxAliases, aliasHalfLifeDays)) {
+      if (typeof alias?.name === 'string') names.push(alias.name);
+    }
+    const hit = names.some((name) => name.length >= 3 && occursAsWholeWord(lower, name.toLowerCase()));
+    if (hit) pulled.push(profile);
+  }
+  return pulled;
+}
+
+/**
  * @param {object} input
  * @param {object} input.config            Live config.
  * @param {object} input.prompts           Live prompts keyed by file name.
@@ -354,6 +456,13 @@ function renderSenses(config, labels) {
  * @param {object} input.guildMemory
  * @param {object|null} input.interlocutor Profile of the trigger's author.
  * @param {object[]} input.otherProfiles   Profiles of other people in the transcript, most relevant first.
+ * @param {object[]} [input.candidateProfiles]  Every member profile known in the guild
+ *   (store.listUserProfiles), scanned to pull a silent member into `<people>` by
+ *   name/alias (see `pullInByName` above); [] or omitted -> nobody is pulled in.
+ * @param {(id: string) => (string|null)} [input.nameOf]  Resolves a member id to their
+ *   current stored name, for turning every `<@id>` token this request renders into
+ *   display text -- see .claude/docs/prompt-contract.md, "Members are referred to by
+ *   id, never by nickname". Omitted -> tokens render exactly as stored.
  * @param {object[]} [input.channels]      The server's channel map (store.listChannels), [] when memory is off.
  * @param {object[]} [input.loreEntries]   The guild's stored lorebook (store.getLore), [] when memory is off.
  * @param {string|null} [input.currentChannelId]  Id of the channel this turn happens in.
@@ -364,6 +473,7 @@ function renderSenses(config, labels) {
 export function buildRequest(input) {
   const { config, prompts, calibrator, mode, now, selfName, history, neighbors, trigger, triggerKind, channels = [], currentChannelId = null, descriptions } = input;
   const labels = requireLabels(prompts);
+  const nameOf = typeof input.nameOf === 'function' ? input.nameOf : () => null;
   const { timezone } = config.bot;
   const relationships = config.features?.relationships !== false;
   const episodesOn = config.features?.episodes !== false;
@@ -416,6 +526,17 @@ export function buildRequest(input) {
     pictures.length * (visionCfg.tokensPerImage ?? 0) -
     TAG_OVERHEAD;
 
+  // Silent members pulled into <people> by name/alias, after the actual
+  // participants (input.otherProfiles) and inside the same token budget --
+  // see .claude/docs/prompt-contract.md, "Aliases".
+  const alreadyCovered = new Set(
+    [input.interlocutor?.id, ...input.otherProfiles.map((profile) => profile?.id)]
+      .filter((id) => id !== undefined && id !== null)
+      .map(String),
+  );
+  const scanText = history.map((m) => m.content ?? '').join('\n');
+  const pulledByName = pullInByName(scanText, input.candidateProfiles, alreadyCovered, config.memory?.maxAliases, config.memory?.aliasHalfLifeDays);
+
   const episodesOpt = { enabled: episodesOn, cap: caps.interlocutor, cost };
   const { kept, stats, used } = fitSections(
     [
@@ -430,43 +551,53 @@ export function buildRequest(input) {
             episodes: episodesOpt,
             maxInterests: config.memory?.maxInterests,
             maxDetails: config.memory?.maxDetails,
+            maxAliases: config.memory?.maxAliases,
+            aliasHalfLifeDays: config.memory?.aliasHalfLifeDays,
             interestHalfLifeDays: config.memory?.interestHalfLifeDays,
             detailHalfLifeDays: config.memory?.detailHalfLifeDays,
             confirmAfter: config.memory?.confirmAfter,
             staleDays: config.memory?.interestStaleDays,
             now,
+            nameOf,
           }),
         ].filter(Boolean),
       },
-      { name: 'aboutChat', cap: caps.aboutChat, items: aboutChatItems(input.guildMemory, labels) },
-      { name: 'self', cap: caps.aboutChat, items: (input.guildMemory?.self ?? []).map((fact) => `- ${fact}`) },
+      { name: 'aboutChat', cap: caps.aboutChat, items: aboutChatItems(input.guildMemory, labels, nameOf) },
+      {
+        name: 'self',
+        cap: caps.aboutChat,
+        items: (input.guildMemory?.self ?? []).map((fact) => `- ${resolveChatText(fact, nameOf)}`),
+      },
       {
         name: 'lore',
         cap: caps.lore,
         keep: 'first',
-        items: loreOn ? loreItems(input.loreEntries, history, trigger, labels, config.lore) : [],
+        items: loreOn ? loreItems(input.loreEntries, history, trigger, labels, config.lore, nameOf) : [],
       },
       {
         name: 'server',
         cap: caps.server ?? 2500,
         keep: 'first',
-        items: serverItems(channels, currentChannelId, now, config.context.channelActivity, labels),
+        items: serverItems(channels, currentChannelId, now, config.context.channelActivity, labels, nameOf),
       },
       { name: 'chat', keep: 'newest', items: chatItems.map((item) => item.text) },
       {
         name: 'people',
         cap: caps.people,
-        items: input.otherProfiles
+        items: [...input.otherProfiles, ...pulledByName]
           .map((profile) =>
             renderProfile(profile, labels, {
               relationships,
               maxInterests: config.memory?.maxInterests,
               maxDetails: config.memory?.maxDetails,
+              maxAliases: config.memory?.maxAliases,
+              aliasHalfLifeDays: config.memory?.aliasHalfLifeDays,
               interestHalfLifeDays: config.memory?.interestHalfLifeDays,
               detailHalfLifeDays: config.memory?.detailHalfLifeDays,
               confirmAfter: config.memory?.confirmAfter,
               staleDays: config.memory?.interestStaleDays,
               now,
+              nameOf,
             }),
           )
           .filter(Boolean),

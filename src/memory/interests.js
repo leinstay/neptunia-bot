@@ -50,17 +50,19 @@ export function normalizeTopic(topic) {
 }
 
 /**
- * The storage cap actually enforced: `max(maxInterestsStored, maxInterests)`
- * -- see .claude/docs/prompt-contract.md, "More is stored than shown, and
- * rank decays with age". A deployment can show fewer than it stores, but
- * never store fewer than it shows, even when misconfigured. Neither value
- * given -> no cap (`Infinity`), same as before this feature existed.
- * @param {number} [maxInterestsStored]
- * @param {number} [maxInterests]
+ * The storage cap actually enforced: `max(storedMax, shownMax)` -- see
+ * .claude/docs/prompt-contract.md, "More is stored than shown, and rank
+ * decays with age". A deployment can show fewer than it stores, but never
+ * store fewer than it shows, even when misconfigured. Neither value given ->
+ * no cap (`Infinity`), same as before this feature existed. Shared by
+ * interests, details (src/memory/details.js) and aliases
+ * (src/memory/aliases.js) -- same trade-off, three item kinds.
+ * @param {number} [storedMax]
+ * @param {number} [shownMax]
  */
-function effectiveStorageCap(maxInterestsStored, maxInterests) {
-  const stored = Number.isInteger(maxInterestsStored) ? maxInterestsStored : -Infinity;
-  const shown = Number.isInteger(maxInterests) ? maxInterests : -Infinity;
+export function effectiveStorageCap(storedMax, shownMax) {
+  const stored = Number.isInteger(storedMax) ? storedMax : -Infinity;
+  const shown = Number.isInteger(shownMax) ? shownMax : -Infinity;
   const cap = Math.max(stored, shown);
   return Number.isFinite(cap) ? cap : Infinity;
 }
@@ -137,42 +139,45 @@ export function isStale(item, nowMs, staleDays) {
 }
 
 /**
- * Merge one analyzer batch's interest ops into a member's stored list. Pure:
- * `existing` is never mutated. Garbage in `ops` (wrong types, malformed
- * items) is silently skipped, never thrown on.
+ * Generic sighting-merge core shared by interests (`topic`/`note`) and
+ * aliases (src/memory/aliases.js -- a bare `name`, no note): same
+ * confirmation/gap/date/eviction bookkeeping either way, only the field
+ * names and whether there is a "note" differ. `identityField` names the
+ * item's identity string; `noteField`, when given, is an optional extra text
+ * field copied onto a sighted item (omit it for an item kind that has none,
+ * like an alias). Pure: `existing` is never mutated. Garbage in `ops` (wrong
+ * types, malformed items) is silently skipped, never thrown on.
  *
- * - `add` of an unknown topic inserts it with weight 1, or 0 when the op
- *   carries `sure: false`.
- * - `add`/`update` of a known topic (case-insensitive identity via
- *   `normalizeTopic`), and `seen` of a known topic, are each a sighting: see
- *   the module header comment for the weight-bump/gap rule. The note is
- *   replaced whenever the incoming one is non-empty, regardless of the gap (a
- *   re-mention with nothing new to say never erases what was already known).
- * - `update` of an unknown topic behaves exactly like `add`.
- * - `seen` never creates a new item -- a bare topic string with no note
- *   cannot introduce one.
+ * - `add` of an unknown identity inserts it with weight 1, or 0 when the op
+ *   carries `sure: false` (only meaningful when `noteField` is set -- a bare
+ *   string op, as aliases use, is always sure).
+ * - `add`/`update` of a known identity (case-insensitive via
+ *   `normalizeTopic`), and `seen`, are each a sighting: see the module header
+ *   comment for the weight-bump/gap rule. The note (when `noteField` is set)
+ *   is replaced whenever the incoming one is non-empty, regardless of the gap.
+ * - `update` of an unknown identity behaves exactly like `add`.
+ * - `seen` never creates a new item.
  * - An op (`add`/`update`) with `sure: false` on an EXISTING item changes
  *   nothing at all, not even the note or the dates.
- * - `remove` deletes the item matching that topic, if any.
- * - `topic` is clamped to `topicChars`, `note` to `noteChars`; an item whose
- *   topic is empty after trimming is rejected outright.
- * - Once over the storage cap (`max(maxInterestsStored, maxInterests)` --
- *   see .claude/docs/prompt-contract.md, "More is stored than shown, and rank
- *   decays with age"), the lowest-RANKED items are evicted first (see
+ * - `remove` deletes the item matching that identity, if any.
+ * - The identity is clamped to `identityChars`, the note (if any) to
+ *   `noteChars`; an item whose identity is empty after trimming is rejected
+ *   outright.
+ * - Once over `opts.cap`, the lowest-RANKED items are evicted first (see
  *   src/memory/ranking.js#rank, driven by `halfLifeDays`) -- this runs on
  *   every call, even one with no ops, so an over-stuffed legacy profile
  *   self-heals on its first update.
  *
- * @param {object[]|undefined} existing  Stored interests.
+ * @param {object[]|undefined} existing
  * @param {{ add?: unknown, update?: unknown, seen?: unknown, remove?: unknown }} ops  Untrusted, model-extracted.
- * @param {{ maxInterests?: number, maxInterestsStored?: number, topicChars?: number, noteChars?: number,
- *   confirmGapHours?: number, seenAt?: number, halfLifeDays?: number }} [opts]
+ * @param {{ identityField: string, noteField?: string, identityChars?: number, noteChars?: number,
+ *   confirmGapHours?: number, seenAt?: number, halfLifeDays?: number, cap?: number }} opts
  * @returns {object[]}
  */
-export function applyInterestOps(
+export function applyRankedOps(
   existing,
   ops,
-  { maxInterests, maxInterestsStored, topicChars, noteChars, confirmGapHours, seenAt = Date.now(), halfLifeDays } = {},
+  { identityField, noteField, identityChars, noteChars, confirmGapHours, seenAt = Date.now(), halfLifeDays, cap } = {},
 ) {
   let items = Array.isArray(existing) ? existing.map((item) => ({ ...item })) : [];
   const priorLastSeen = items.map((item) => item.lastSeen ?? null);
@@ -180,29 +185,39 @@ export function applyInterestOps(
   const gapMs = (Number.isFinite(confirmGapHours) ? confirmGapHours : DEFAULT_CONFIRM_GAP_HOURS) * HOUR_MS;
   const bumped = new Set();
 
-  function findIndex(topic) {
-    const norm = normalizeTopic(topic);
-    return items.findIndex((item) => normalizeTopic(item.topic) === norm);
+  function findIndex(identity) {
+    const norm = normalizeTopic(identity);
+    return items.findIndex((item) => normalizeTopic(item[identityField]) === norm);
   }
 
   function sight(raw, { allowCreate }) {
-    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return;
-    const topic = typeof raw.topic === 'string' ? clampString(raw.topic, topicChars) : '';
-    if (!topic) return;
-    const note = typeof raw.note === 'string' ? clampString(raw.note, noteChars) : '';
-    const sure = raw.sure !== false;
-    const index = findIndex(topic);
+    let identity;
+    let note;
+    let sure = true;
+    if (noteField) {
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return;
+      identity = typeof raw[identityField] === 'string' ? clampString(raw[identityField], identityChars) : '';
+      note = typeof raw[noteField] === 'string' ? clampString(raw[noteField], noteChars) : '';
+      sure = raw.sure !== false;
+    } else {
+      const value = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw[identityField] : raw;
+      identity = typeof value === 'string' ? clampString(value, identityChars) : '';
+    }
+    if (!identity) return;
+    const index = findIndex(identity);
 
     if (index === -1) {
       if (!allowCreate) return;
-      items.push({ topic, note, weight: sure ? 1 : 0, firstSeen: seenAtIso, lastSeen: seenAtIso });
+      const item = { [identityField]: identity, weight: sure ? 1 : 0, firstSeen: seenAtIso, lastSeen: seenAtIso };
+      if (noteField) item[noteField] = note;
+      items.push(item);
       return;
     }
 
     if (!sure) return; // sure: false on an existing item changes nothing at all
 
     const item = items[index];
-    if (note) item.note = note;
+    if (noteField && note) item[noteField] = note;
     item.firstSeen = minIso(item.firstSeen, seenAtIso);
     item.lastSeen = maxIso(item.lastSeen, seenAtIso);
     if (!bumped.has(index)) {
@@ -215,7 +230,7 @@ export function applyInterestOps(
     for (const raw of Array.isArray(ops.add) ? ops.add : []) sight(raw, { allowCreate: true });
     for (const raw of Array.isArray(ops.update) ? ops.update : []) sight(raw, { allowCreate: true });
     for (const raw of Array.isArray(ops.seen) ? ops.seen : []) {
-      if (typeof raw === 'string') sight({ topic: raw }, { allowCreate: false });
+      if (typeof raw === 'string') sight(noteField ? { [identityField]: raw } : raw, { allowCreate: false });
     }
     for (const raw of Array.isArray(ops.remove) ? ops.remove : []) {
       if (typeof raw !== 'string') continue;
@@ -224,10 +239,39 @@ export function applyInterestOps(
     }
   }
 
-  const cap = effectiveStorageCap(maxInterestsStored, maxInterests);
-  items = evictToCapacity(items, cap, halfLifeDays);
+  items = evictToCapacity(items, Number.isFinite(cap) ? cap : Infinity, halfLifeDays);
 
   return items;
+}
+
+/**
+ * Merge one analyzer batch's interest ops into a member's stored list -- see
+ * `applyRankedOps` above for the full sighting/eviction rules; this is a
+ * thin wrapper fixing `identityField: 'topic'`, `noteField: 'note'` and the
+ * storage cap (`max(maxInterestsStored, maxInterests)`, see
+ * .claude/docs/prompt-contract.md, "More is stored than shown, and rank
+ * decays with age").
+ * @param {object[]|undefined} existing  Stored interests.
+ * @param {{ add?: unknown, update?: unknown, seen?: unknown, remove?: unknown }} ops  Untrusted, model-extracted.
+ * @param {{ maxInterests?: number, maxInterestsStored?: number, topicChars?: number, noteChars?: number,
+ *   confirmGapHours?: number, seenAt?: number, halfLifeDays?: number }} [opts]
+ * @returns {object[]}
+ */
+export function applyInterestOps(
+  existing,
+  ops,
+  { maxInterests, maxInterestsStored, topicChars, noteChars, confirmGapHours, seenAt = Date.now(), halfLifeDays } = {},
+) {
+  return applyRankedOps(existing, ops, {
+    identityField: 'topic',
+    noteField: 'note',
+    identityChars: topicChars,
+    noteChars,
+    confirmGapHours,
+    seenAt,
+    halfLifeDays,
+    cap: effectiveStorageCap(maxInterestsStored, maxInterests),
+  });
 }
 
 /** One legacy comma-separated segment split into `{ topic, note }`. `note` is

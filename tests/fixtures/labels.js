@@ -73,6 +73,7 @@ export const labels = {
   profile: {
     interlocutorMark: ' -- INTERLOCUTOR, they are the one who called you',
     formerNames: 'formerly known as: {names}',
+    aliases: 'Called: {text}',
     character: 'character: {text}',
     interests: 'interests: {text}',
     interestItem: '{topic} ({note})',

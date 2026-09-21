@@ -71,7 +71,14 @@ function fakeTurnChannel({ id = 'c1', name = 'general', guildId = 'g1', historyM
 }
 
 function fakeStore() {
-  return { getGuild: () => ({}), getUser: () => null, listChannels: () => [], getLore: () => [], state: { data: {}, markDirty() {} } };
+  return {
+    getGuild: () => ({}),
+    getUser: () => null,
+    listChannels: () => [],
+    listUserProfiles: () => [],
+    getLore: () => [],
+    state: { data: {}, markDirty() {} },
+  };
 }
 
 function identityCalibrator() {

@@ -23,6 +23,7 @@ import { mergeEpisodes } from './episodes.js';
 import { upsertLore } from './lore.js';
 import { applyInterestOps, migrateInterests } from './interests.js';
 import { applyDetailOps, migrateDetails } from './details.js';
+import { applyAliasOps } from './aliases.js';
 
 function readJson(file, fallback) {
   try {
@@ -58,6 +59,7 @@ export function emptyProfile(id) {
     style: '',
     details: [],
     detailsSeq: 1, // the next id an atomic detail item gets -- never reused, even after a remove
+    aliases: [], // ranked items { name, weight, firstSeen, lastSeen } -- see src/memory/aliases.js
     relationship: '',
     affinity: emptyAffinity(),
     episodes: [],
@@ -115,6 +117,14 @@ function migrateProfileDetails(profile) {
     profile.details = items;
     profile.detailsSeq = nextId;
   }
+}
+
+/** Upgrade a profile's `aliases` field in place: a profile written before
+ * this feature existed has no `aliases` key at all -- anything not already
+ * an array becomes `[]`. Never marks anything dirty -- the caller
+ * (`getUser`/`applyProfileOps`) decides whether this is persisted. */
+function migrateProfileAliases(profile) {
+  if (!Array.isArray(profile.aliases)) profile.aliases = [];
 }
 
 function clampString(value, maxChars) {
@@ -206,6 +216,7 @@ export function createStore({ dataDir }) {
       const item = entry(file, () => emptyProfile(String(userId)));
       migrateProfileInterests(item.value);
       migrateProfileDetails(item.value);
+      migrateProfileAliases(item.value);
       return item.value;
     },
 
@@ -258,10 +269,12 @@ export function createStore({ dataDir }) {
      * @param {string} userId
      * @param {{ character?: string, style?: string, relationship?: string,
      *   interests?: { add?: object[], update?: object[], seen?: string[], remove?: string[] },
-     *   details?: { add?: unknown[], seen?: unknown[], remove?: unknown[] } }} ops
+     *   details?: { add?: unknown[], seen?: unknown[], remove?: unknown[] },
+     *   aliases?: { add?: string[], remove?: string[] } }} ops
      * @param {{ fieldChars?: number, maxInterests?: number, maxInterestsStored?: number, topicChars?: number,
      *   noteChars?: number, interestHalfLifeDays?: number, maxDetails?: number, maxDetailsStored?: number,
-     *   detailHalfLifeDays?: number, confirmGapHours?: number, seenAt?: number, now?: number }} [opts]
+     *   detailHalfLifeDays?: number, maxAliases?: number, maxAliasesStored?: number, aliasHalfLifeDays?: number,
+     *   confirmGapHours?: number, seenAt?: number, now?: number }} [opts]
      *   `maxInterestsStored`/`maxDetailsStored`/`interestHalfLifeDays`/`detailHalfLifeDays` drive the
      *   storage-cap-vs-shown-cap split and the rank decay -- see
      *   .claude/docs/prompt-contract.md, "More is stored than shown, and rank decays with age".
@@ -272,6 +285,7 @@ export function createStore({ dataDir }) {
       const profile = item.value;
       migrateProfileInterests(profile);
       migrateProfileDetails(profile);
+      migrateProfileAliases(profile);
 
       const seenAt = Number.isFinite(opts.seenAt) ? opts.seenAt : Number.isFinite(opts.now) ? opts.now : Date.now();
 
@@ -306,6 +320,16 @@ export function createStore({ dataDir }) {
         });
         profile.details = items;
         profile.detailsSeq = nextId;
+      }
+
+      if (ops?.aliases && typeof ops.aliases === 'object' && !Array.isArray(ops.aliases)) {
+        profile.aliases = applyAliasOps(profile.aliases, ops.aliases, profile.names, {
+          maxAliases: opts.maxAliases,
+          maxAliasesStored: opts.maxAliasesStored,
+          confirmGapHours: opts.confirmGapHours,
+          halfLifeDays: opts.aliasHalfLifeDays,
+          seenAt,
+        });
       }
 
       profile.updatedAt = new Date(opts.now ?? Date.now()).toISOString();
@@ -352,6 +376,16 @@ export function createStore({ dataDir }) {
       } catch {
         return 0;
       }
+    },
+
+    /**
+     * Every member profile stored for a guild, cached or on disk -- the pool
+     * a turn scans to pull a silent member into `<people>` by name/alias (see
+     * src/behavior/prompt.js and .claude/docs/prompt-contract.md, "Aliases").
+     * Same migrate-on-read guarantee as `getUser`.
+     */
+    listUserProfiles(guildId) {
+      return idsUnder(path.join(guildDir(guildId), 'users')).map((id) => store.getUser(guildId, id)).filter(Boolean);
     },
 
     /** Ids of every guild that has anything stored on disk or in the cache. */

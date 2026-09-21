@@ -1026,3 +1026,184 @@ test('buildRequest: under a tiny lore cap, only the entries that fit survive', (
   );
   assert.equal(request.stats.lore.kept, 0);
 });
+
+// --- renderProfile: aliases (F29) ----------------------------------------------
+
+function aliasFixture(overrides = {}) {
+  return { name: 'Ari', weight: 2, firstSeen: 'a', lastSeen: 'a', ...overrides };
+}
+
+test('renderProfile: renders aliases through labels.profile.aliases, comma-separated, top-ranked first', () => {
+  const profile = {
+    id: 'p1',
+    names: ['Aria'],
+    aliases: [aliasFixture({ name: 'Ar', weight: 1 }), aliasFixture({ name: 'Ari', weight: 5 })],
+  };
+  const text = renderProfile(profile, labels);
+  assert.ok(text.includes('Called: Ari, Ar'));
+});
+
+test('renderProfile: an unranked-cap maxAliases shows only the top N', () => {
+  const profile = {
+    id: 'p1',
+    names: ['Aria'],
+    aliases: [aliasFixture({ name: 'Ar', weight: 1 }), aliasFixture({ name: 'Ari', weight: 5 })],
+  };
+  const text = renderProfile(profile, labels, { maxAliases: 1 });
+  assert.ok(text.includes('Called: Ari'));
+  assert.ok(!text.includes('Called: Ari, Ar'));
+});
+
+test('renderProfile: no aliases line when the profile has none, or when labels.profile.aliases is missing', () => {
+  const profile = { id: 'p1', names: ['Aria'], character: 'calm' };
+  assert.ok(!renderProfile(profile, labels).includes('Called:'));
+
+  const withAliases = { id: 'p1', names: ['Aria'], aliases: [aliasFixture()] };
+  const brokenLabels = { ...labels, profile: { ...labels.profile, aliases: undefined } };
+  assert.ok(!renderProfile(withAliases, brokenLabels).includes('Called:'));
+});
+
+// --- renderProfile: <@id> tokens resolved for the chat model (F29) -------------
+
+test('renderProfile: character/style/relationship resolve <@id> tokens via nameOf', () => {
+  const profile = {
+    id: 'p1',
+    names: ['Carl'],
+    character: 'gets along with <@223456789012345678>',
+    style: 'quotes <@223456789012345678> a lot',
+    relationship: 'trusts <@223456789012345678>',
+  };
+  const text = renderProfile(profile, labels, { nameOf: (id) => (id === '223456789012345678' ? 'Dana' : null) });
+  assert.ok(text.includes('character: gets along with Dana'));
+  assert.ok(text.includes('style: quotes Dana a lot'));
+  assert.ok(text.includes('relationship with you: trusts Dana'));
+});
+
+test('renderProfile: an id nameOf cannot resolve renders the bare token', () => {
+  const profile = { id: 'p1', names: ['Carl'], character: 'knows <@223456789012345678>' };
+  const text = renderProfile(profile, labels, { nameOf: () => null });
+  assert.ok(text.includes('character: knows <@223456789012345678>'));
+});
+
+test('renderProfile: without nameOf, a stored token renders exactly as-is (no crash)', () => {
+  const profile = { id: 'p1', names: ['Carl'], character: 'knows <@223456789012345678>' };
+  const text = renderProfile(profile, labels);
+  assert.ok(text.includes('character: knows <@223456789012345678>'));
+});
+
+test('renderProfile: interest note and detail text resolve <@id> tokens via nameOf', () => {
+  const profile = {
+    id: 'p1',
+    names: ['Carl'],
+    interests: [interestFixture({ topic: 'Chess', note: 'plays with <@223456789012345678>' })],
+    details: [detailFixture({ text: 'a gift from <@223456789012345678>' })],
+  };
+  const text = renderProfile(profile, labels, { nameOf: (id) => (id === '223456789012345678' ? 'Dana' : null) });
+  assert.ok(text.includes('Chess (plays with Dana)'));
+  assert.ok(text.includes('a gift from Dana'));
+});
+
+test('renderProfile: episode "what"/"feeling" resolve <@id> tokens via nameOf', () => {
+  const profile = {
+    id: 'p1',
+    names: ['Carl'],
+    episodes: [episodeFixture({ what: 'argued with <@223456789012345678>', feeling: 'annoyed at <@223456789012345678>', quote: '' })],
+  };
+  const text = renderProfile(profile, labels, { interlocutor: true, episodes: { enabled: true }, nameOf: (id) => (id === '223456789012345678' ? 'Dana' : null) });
+  assert.ok(text.includes('argued with Dana'));
+  assert.ok(text.includes('annoyed at Dana'));
+});
+
+test('renderProfile: the affinity reason resolves <@id> tokens via nameOf', () => {
+  const profile = { id: 'p1', names: ['Carl'], affinity: { score: 10, reason: 'stood up for <@223456789012345678>', history: [] } };
+  const text = renderProfile(profile, labels, { relationships: true, nameOf: (id) => (id === '223456789012345678' ? 'Dana' : null) });
+  assert.ok(text.includes('stood up for Dana'));
+});
+
+// --- buildRequest: <@id> tokens resolved for the chat model, wired through (F29) --
+
+test('buildRequest: about_chat/self_facts/lore/server resolve <@id> tokens via input.nameOf', () => {
+  const history = [makeMessage(1, NOW - MIN, { content: 'the incident again' })];
+  const guildMemory = { patterns: 'people quote <@223456789012345678>', starters: '<@223456789012345678> starts it', injokes: ['<@223456789012345678> did it'], self: ['met <@223456789012345678> once'] };
+  const channels = [{ id: 'c1', name: 'general', purpose: '<@223456789012345678> posts here', topics: 'stuff', tone: 'calm' }];
+  const request = buildRequest(
+    baseInput({
+      history,
+      guildMemory,
+      channels,
+      currentChannelId: 'c1',
+      loreEntries: [loreEntry({ id: 'l1', title: 'incident', keys: ['incident'], text: '<@223456789012345678> caused it' })],
+      nameOf: (id) => (id === '223456789012345678' ? 'Dana' : null),
+    }),
+  );
+  const user = request.messages[1].content;
+  assert.ok(user.includes('people quote Dana'));
+  assert.ok(user.includes('Dana starts it'));
+  assert.ok(user.includes('Dana did it'));
+  assert.ok(user.includes('met Dana once'));
+  assert.ok(user.includes('Dana posts here'));
+  assert.ok(user.includes('Dana caused it'));
+});
+
+// --- buildRequest: silent members pulled into <people> by name/alias (F29) -----
+
+test('buildRequest: a silent member whose current name occurs in the transcript is pulled into <people>', () => {
+  const history = [makeMessage(1, NOW - MIN, { content: 'Dana would love this joke' })];
+  const candidateProfiles = [{ id: 'p9', names: ['Dana'], character: 'sarcastic' }];
+  const request = buildRequest(baseInput({ history, candidateProfiles }));
+  const user = request.messages[1].content;
+  assert.ok(user.includes('## Dana'));
+  assert.ok(user.includes('character: sarcastic'));
+});
+
+test('buildRequest: a silent member is pulled in by a shown alias, not just their display name', () => {
+  const history = [makeMessage(1, NOW - MIN, { content: 'ask Vertex about it' })];
+  const candidateProfiles = [
+    { id: 'p9', names: ['LongOfficialName'], character: 'helpful', aliases: [aliasFixture({ name: 'Vertex', weight: 5 })] },
+  ];
+  const request = buildRequest(baseInput({ history, candidateProfiles }));
+  const user = request.messages[1].content;
+  assert.ok(user.includes('## LongOfficialName'));
+  assert.ok(user.includes('character: helpful'));
+});
+
+test('buildRequest: names/aliases shorter than 3 characters never trigger a pull-in', () => {
+  const history = [makeMessage(1, NOW - MIN, { content: 'oh no, an ox ran off' })];
+  const candidateProfiles = [{ id: 'p9', names: ['Ox'], character: 'stubborn' }];
+  const request = buildRequest(baseInput({ history, candidateProfiles }));
+  assert.ok(!request.messages[1].content.includes('character: stubborn'));
+});
+
+test('buildRequest: a candidate never mentioned in the transcript is not pulled in', () => {
+  const history = [makeMessage(1, NOW - MIN, { content: 'nothing about anyone else here' })];
+  const candidateProfiles = [{ id: 'p9', names: ['Dana'], character: 'sarcastic' }];
+  const request = buildRequest(baseInput({ history, candidateProfiles }));
+  assert.ok(!request.messages[1].content.includes('## Dana'));
+});
+
+test('buildRequest: a candidate already covered as the interlocutor or an active participant is not duplicated', () => {
+  const trigger = makeMessage(2, NOW - MIN, { authorId: 'p9', authorName: 'Dana', content: 'Dana here, hi' });
+  const history = [trigger];
+  const interlocutor = { id: 'p9', names: ['Dana'], character: 'sarcastic' };
+  const candidateProfiles = [interlocutor];
+  const request = buildRequest(baseInput({ history, trigger, triggerKind: 'mention', interlocutor, candidateProfiles }));
+  const user = request.messages[1].content;
+  assert.equal((user.match(/## Dana/g) ?? []).length, 1, 'Dana appears once, as the interlocutor, not twice');
+});
+
+test('buildRequest: silent members pulled in by name are rendered AFTER the actual participants', () => {
+  const history = [makeMessage(1, NOW - MIN, { authorName: 'Carl', content: 'Dana would find this funny' })];
+  const otherProfiles = [{ id: 'p2', names: ['Carl'], character: 'talkative' }];
+  const candidateProfiles = [{ id: 'p9', names: ['Dana'], character: 'sarcastic' }];
+  const request = buildRequest(baseInput({ history, otherProfiles, candidateProfiles }));
+  const user = request.messages[1].content;
+  const carlIdx = user.indexOf('## Carl');
+  const danaIdx = user.indexOf('## Dana');
+  assert.ok(carlIdx !== -1 && danaIdx !== -1 && carlIdx < danaIdx);
+});
+
+test('buildRequest: no candidateProfiles at all pulls nobody in and never throws', () => {
+  const history = [makeMessage(1, NOW - MIN, { content: 'Dana would love this joke' })];
+  const request = buildRequest(baseInput({ history }));
+  assert.ok(!request.messages[1].content.includes('## Dana'));
+});

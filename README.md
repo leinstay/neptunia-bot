@@ -239,6 +239,9 @@ Settings for the media describer (`features.mediaDescriptions`).
 | `interestStaleDays` | `90` | Days without sighting before an interest is marked old |
 | `interestHalfLifeDays` | `180` | Weight half-life for interests (days); an unseen item's weight halves each period, so a new pastime can overtake an old one |
 | `detailHalfLifeDays` | `720` | Weight half-life for details (days) |
+| `maxAliases` | `5` | Aliases shown to the persona and analyzer per profile |
+| `maxAliasesStored` | `15` | Aliases kept per profile; the top by frequency and recency are shown |
+| `aliasHalfLifeDays` | `365` | Weight half-life for aliases (days) |
 | `maxInjokes` | `15` | Max server in-jokes |
 | `maxSelfFacts` | `20` | Max self-claims |
 | `maxEpisodes` | `20` | Max episodes kept per person |
@@ -360,7 +363,7 @@ The turn collects the channel transcript and neighbouring channels, then builds 
 
 The model responds with `<think>` (hidden planning), `<msg>` (1–3 chat messages; `reply="#87"` replies to a transcript line), `<react>` (one emoji reaction), or `<skip/>` (silence). After parsing, typing is simulated at human speed and `@nick` in the output becomes a real mention.
 
-The memory analyzer runs as a separate LLM call when enough messages accumulate. It receives the character card and judges each person through the character's eyes, returning attitude deltas, profile changes, channel observations, and server-level notes. The portrait of a member's character and manner of speech is drawn from the channels in `memory.mainChannelIds`; when the list is empty, every channel counts. Profiles are updated incrementally: the analyzer returns only what changed, and stored facts are never re-summarised. Interests and details are separate items that become confirmed when they come up again on a separate occasion; more items are kept per person than shown, ranked by frequency and recency with a weight that decays over time. Dates come from the messages, so a warm-up over old history dates things correctly. Interests not seen for a long time are shown to the persona as old.
+The memory analyzer runs as a separate LLM call when enough messages accumulate. It receives the character card and judges each person through the character's eyes, returning attitude deltas, profile changes, channel observations, and server-level notes. The portrait of a member's character and manner of speech is drawn from the channels in `memory.mainChannelIds`; when the list is empty, every channel counts. Profiles are updated incrementally: the analyzer returns only what changed, and stored facts are never re-summarised. Interests and details are separate items that become confirmed when they come up again on a separate occasion; more items are kept per person than shown, ranked by frequency and recency with a weight that decays over time. Dates come from the messages, so a warm-up over old history dates things correctly. Interests not seen for a long time are shown to the persona as old. Stored memory refers to members by id and the current name is substituted when the memory is used, so renames never break stored notes. The persona also learns what people in chat call each other and recognises a member mentioned by name or alias even when they are not in the conversation.
 
 ## Episodes and lorebook
 

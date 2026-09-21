@@ -18,6 +18,7 @@ import { keywordMatches } from './lore.js';
 import { migrateInterests } from './interests.js';
 import { migrateDetails } from './details.js';
 import { topByRank } from './ranking.js';
+import { toTokens, fromTokens } from './mentions.js';
 
 const BACKOFF_MS = 15 * 60_000;
 const MIN_LIVE_BATCH = 20; // the live analyzer never shrinks below this many messages
@@ -145,19 +146,32 @@ function dateOnly(iso) {
   return typeof iso === 'string' && iso ? iso.slice(0, 10) : undefined;
 }
 
+/** `fromTokens(text, nameOf, 'analyzer')`, tolerating a non-string `text` (returned as-is). */
+function resolveText(text, nameOf) {
+  return typeof text === 'string' ? fromTokens(text, nameOf, 'analyzer') : text;
+}
+
+/** `resolveText` mapped over an array; non-arrays pass through untouched. */
+function resolveTextArray(values, nameOf) {
+  return Array.isArray(values) ? values.map((value) => resolveText(value, nameOf)) : values;
+}
+
 /** The `<existing_profiles>` view of one person's interests: only the top
  * `maxInterests` by rank (src/memory/ranking.js#topByRank, decayed with
  * `halfLifeDays`), in rank order -- `{ topic, note, seen, last }` (`seen` =
- * weight, `last` = the date-only lastSeen, omitted when unknown). `maxInterests`
- * not an integer -> every stored interest (unlimited, matching the behaviour
- * before this feature); `halfLifeDays` not a positive number -> no decay,
- * ranked by weight alone. See .claude/docs/prompt-contract.md, "The analyzer"
- * and "More is stored than shown, and rank decays with age". */
-function existingInterestsView(interests, maxInterests, halfLifeDays) {
+ * weight, `last` = the date-only lastSeen, omitted when unknown). `note` is
+ * resolved (`<@id>` tokens -> `name (id:...)`) via `nameOf` -- see
+ * .claude/docs/prompt-contract.md, "Members are referred to by id, never by
+ * nickname". `maxInterests` not an integer -> every stored interest
+ * (unlimited, matching the behaviour before this feature); `halfLifeDays` not
+ * a positive number -> no decay, ranked by weight alone. See
+ * .claude/docs/prompt-contract.md, "The analyzer" and "More is stored than
+ * shown, and rank decays with age". */
+function existingInterestsView(interests, maxInterests, halfLifeDays, nameOf) {
   const list = Array.isArray(interests) ? interests : [];
   return topByRank(list, maxInterests, halfLifeDays).map(({ topic, note, weight, lastSeen }) => ({
     topic,
-    note,
+    note: resolveText(note, nameOf),
     seen: weight,
     last: dateOnly(lastSeen),
   }));
@@ -165,28 +179,52 @@ function existingInterestsView(interests, maxInterests, halfLifeDays) {
 
 /** The `<existing_profiles>` view of one person's details: only the top
  * `maxDetails` by rank, in rank order -- `{ id, text, seen, last }` (`seen` =
- * weight, `last` = the date-only lastSeen, omitted when unknown). Same
- * fallbacks as `existingInterestsView` above. */
-function existingDetailsView(details, maxDetails, halfLifeDays) {
+ * weight, `last` = the date-only lastSeen, omitted when unknown). `text` is
+ * resolved via `nameOf`, same as `existingInterestsView` above. */
+function existingDetailsView(details, maxDetails, halfLifeDays, nameOf) {
   const list = Array.isArray(details) ? details : [];
   return topByRank(list, maxDetails, halfLifeDays).map(({ id, text, weight, lastSeen }) => ({
     id,
-    text,
+    text: resolveText(text, nameOf),
     seen: weight,
     last: dateOnly(lastSeen),
   }));
 }
 
-/** Only the fields the memory prompt is allowed to see/update for guild memory. */
-function pickGuildFields(guildMemory) {
-  const { patterns = '', starters = '', injokes = [], self = [] } = guildMemory ?? {};
-  return { patterns, starters, injokes, self };
+/** The `<existing_profiles>` view of one person's aliases: a plain list of
+ * names, top `maxAliases` by rank -- see .claude/docs/prompt-contract.md,
+ * "Aliases". Alias names are never token-resolved: they are literal
+ * nicknames, not free text that could name a member by id. */
+function existingAliasesView(aliases, maxAliases, halfLifeDays) {
+  const list = Array.isArray(aliases) ? aliases : [];
+  return topByRank(list, maxAliases, halfLifeDays).map((item) => item.name);
 }
 
-/** Only the fields the memory prompt is allowed to see/update for a channel entry. */
-function pickChannelFields(channel) {
+/** Only the fields the memory prompt is allowed to see/update for guild
+ * memory, with every free-text field resolved (`<@id>` -> `name (id:...)`)
+ * via `nameOf`. */
+function pickGuildFields(guildMemory, nameOf) {
+  const { patterns = '', starters = '', injokes = [], self = [] } = guildMemory ?? {};
+  return {
+    patterns: resolveText(patterns, nameOf),
+    starters: resolveText(starters, nameOf),
+    injokes: resolveTextArray(injokes, nameOf),
+    self: resolveTextArray(self, nameOf),
+  };
+}
+
+/** Only the fields the memory prompt is allowed to see/update for a channel
+ * entry, with `purpose`/`topics`/`tone` resolved via `nameOf`. */
+function pickChannelFields(channel, nameOf) {
   const { name = '', category = null, topic = null, purpose = '', topics = '', tone = '' } = channel ?? {};
-  return { name, category, topic, purpose, topics, tone };
+  return {
+    name,
+    category,
+    topic,
+    purpose: resolveText(purpose, nameOf),
+    topics: resolveText(topics, nameOf),
+    tone: resolveText(tone, nameOf),
+  };
 }
 
 /**
@@ -210,15 +248,21 @@ function mainChannelSet(mainChannelIds) {
  * "The analyzer".
  * @param {object[]} loreEntries   Every stored entry for the guild.
  * @param {string[]} batchTexts    Plain message contents of this batch.
+ * @param {(id: string) => (string|null)} nameOf  Resolves `text`'s `<@id>` tokens
+ *   to `name (id:...)`; `title`/`keys` are never token content, left untouched.
  */
-function existingLoreBlock(loreEntries, batchTexts) {
+function existingLoreBlock(loreEntries, batchTexts, nameOf) {
   const entries = Array.isArray(loreEntries) ? loreEntries : [];
   if (entries.length === 0) return '';
   const titles = [...entries]
     .sort((a, b) => String(b.updatedAt ?? '').localeCompare(String(a.updatedAt ?? '')))
     .slice(0, 200)
     .map((entry) => ({ title: entry.title, keys: entry.keys }));
-  const matched = keywordMatches(entries, batchTexts).map((entry) => ({ title: entry.title, keys: entry.keys, text: entry.text }));
+  const matched = keywordMatches(entries, batchTexts).map((entry) => ({
+    title: entry.title,
+    keys: entry.keys,
+    text: resolveText(entry.text, nameOf),
+  }));
   return block('existing_lore', JSON.stringify({ titles, matched }));
 }
 
@@ -239,39 +283,53 @@ function existingLoreBlock(loreEntries, batchTexts) {
  *   for the `<existing_lore>` input; omitted or `features.lore: false` -> no block at all.
  * @param {Map<string, string>} [input.descriptions]  Item id -> describer caption
  *   (src/memory/describe.js), for pictures the analyzer cannot see itself.
+ * @param {(id: string) => (string|null)} [input.nameOf]  Resolves a member id to their
+ *   current stored name (`profile.names[0]`), for turning every `<@id>` token this
+ *   request's views carry into `name (id:...)` -- see
+ *   .claude/docs/prompt-contract.md, "Members are referred to by id, never by
+ *   nickname". Omitted -> every token is left exactly as stored (no I/O of its own;
+ *   the caller, src/memory/update.js#analyze, injects a store-backed lookup).
  * @returns {{ messages: object[], consumed: number }}
  */
-export function buildMemoryRequest({ prompts, config, calibrator, profiles, guildMemory, channels, messages, selfName, loreEntries, descriptions }) {
+export function buildMemoryRequest({ prompts, config, calibrator, profiles, guildMemory, channels, messages, selfName, loreEntries, descriptions, nameOf }) {
   const { timezone } = config.bot;
   const labels = requireLabels(prompts);
   const relationships = config.features?.relationships !== false;
   const episodesOn = config.features?.episodes !== false;
   const loreOn = config.features?.lore !== false;
+  const resolveName = typeof nameOf === 'function' ? nameOf : () => null;
   const system = fillTemplate(prompts.memory, memoryTemplateValues(config, selfName));
   const characterBlock = relationships ? block('character', fillTemplate(prompts['character-card'], { name: selfName })) : '';
 
   const existingProfiles = {};
   for (const [id, profile] of Object.entries(profiles ?? {})) {
     const fields = pickProfileFields(profile);
-    fields.interests = existingInterestsView(fields.interests, config.memory?.maxInterests, config.memory?.interestHalfLifeDays);
-    fields.details = existingDetailsView(fields.details, config.memory?.maxDetails, config.memory?.detailHalfLifeDays);
+    fields.character = resolveText(fields.character, resolveName);
+    fields.style = resolveText(fields.style, resolveName);
+    fields.relationship = resolveText(fields.relationship, resolveName);
+    fields.interests = existingInterestsView(fields.interests, config.memory?.maxInterests, config.memory?.interestHalfLifeDays, resolveName);
+    fields.details = existingDetailsView(fields.details, config.memory?.maxDetails, config.memory?.detailHalfLifeDays, resolveName);
+    if (Array.isArray(profile?.aliases) && profile.aliases.length > 0) {
+      const aliases = existingAliasesView(profile.aliases, config.memory?.maxAliases, config.memory?.aliasHalfLifeDays);
+      if (aliases.length > 0) fields.aliases = aliases;
+    }
     if (relationships) {
       const affinity = profile?.affinity ?? emptyAffinity();
-      fields.affinity = { score: affinity.score, reason: affinity.reason };
+      fields.affinity = { score: affinity.score, reason: resolveText(affinity.reason, resolveName) };
     }
     if (episodesOn && Array.isArray(profile?.episodes) && profile.episodes.length > 0) {
-      fields.episodes = profile.episodes.map(({ date, what, quote, weight }) => ({ date, what, quote, weight }));
+      fields.episodes = profile.episodes.map(({ date, what, quote, weight }) => ({ date, what: resolveText(what, resolveName), quote, weight }));
     }
     existingProfiles[id] = fields;
   }
   const profilesBlock = block('existing_profiles', JSON.stringify(existingProfiles));
-  const loreBlock = loreOn ? existingLoreBlock(loreEntries, messages.map((m) => m.content).filter(Boolean)) : '';
-  const guildBlock = block('existing_guild', JSON.stringify(pickGuildFields(guildMemory)));
+  const loreBlock = loreOn ? existingLoreBlock(loreEntries, messages.map((m) => m.content).filter(Boolean), resolveName) : '';
+  const guildBlock = block('existing_guild', JSON.stringify(pickGuildFields(guildMemory, resolveName)));
 
   const mainChannels = mainChannelSet(config.memory?.mainChannelIds);
   const existingChannels = {};
   for (const [id, channel] of Object.entries(channels ?? {})) {
-    const fields = pickChannelFields(channel);
+    const fields = pickChannelFields(channel, resolveName);
     if (mainChannels.has(String(id))) fields.main = true;
     existingChannels[id] = fields;
   }
@@ -362,6 +420,24 @@ export function computeSeenAt(messages) {
 }
 
 /**
+ * Author id -> the nick THIS batch's transcript used for them (their latest
+ * message wins when it changed mid-batch) -- feeds `applyMemoryUpdate`'s
+ * name-aware `Name (id:...)` normalization (see src/memory/mentions.js#toTokens)
+ * so a member is recognised even before their stored profile has caught up
+ * to a brand-new display name.
+ * @param {object[]} messages  Slim buffered messages (oldest first); `authorId`/`authorName`/`self` read.
+ * @returns {Map<string, string>}
+ */
+export function batchAuthorNamesMap(messages) {
+  const names = new Map();
+  for (const m of messages ?? []) {
+    if (m?.self || !m?.authorName) continue;
+    names.set(String(m.authorId), m.authorName);
+  }
+  return names;
+}
+
+/**
  * Validate and store the model's memory-update JSON. Never throws on garbage
  * input, never accepts a user id outside `knownUserIds`, never drops a field
  * that was not part of the update.
@@ -385,11 +461,49 @@ export function computeSeenAt(messages) {
  * @param {{ seenAtByUser?: Map<string, number>, seenAt?: number }} [timing]  From `computeSeenAt`
  *   above; missing/absent falls back to `relationships.now`/`episodes.now`/the wall clock, same
  *   as before this option existed.
+ * @param {Map<string, string>} [batchAuthorNames]  Author id -> the nick this batch's transcript
+ *   used for them (see `batchAuthorNamesMap` below), so the `Name (id:...)` normalization below
+ *   recognises a name even for someone whose stored profile has not caught up yet. Omitted ->
+ *   only the stored profile's own `names` are known.
  * @returns {{ users: number, guild: boolean, self: boolean, affinity: number, channels: number, episodes: number, lore: number, interestsChanged: number }}
  */
-export function applyMemoryUpdate(store, guildId, update, cfg, knownUserIds, knownChannelIds = new Set(), relationships, episodes, lore, timing) {
+export function applyMemoryUpdate(store, guildId, update, cfg, knownUserIds, knownChannelIds = new Set(), relationships, episodes, lore, timing, batchAuthorNames) {
   const result = { users: 0, guild: false, self: false, affinity: 0, channels: 0, episodes: 0, lore: 0, interestsChanged: 0 };
   if (!update || typeof update !== 'object' || Array.isArray(update)) return result;
+
+  // A member is written as `<@id>` in every free-text field the analyzer
+  // returns (see .claude/docs/prompt-contract.md, "Members are referred to
+  // by id, never by nickname"); this normalizes the fallback shape the model
+  // sometimes writes instead, `Name (id:123...)`, into the token -- but only
+  // for an id this guild actually knows (an author of the batch, or an
+  // existing stored profile), an unrecognised id is left exactly as written.
+  const isKnownId = (id) => {
+    const key = String(id);
+    return knownUserIds.has(key) || store.getUser(guildId, key) != null;
+  };
+  // The known names for one id, stored profile names first, the batch's own
+  // nick for them appended -- see toTokens' name-aware matching, which needs
+  // the FULL name (however many words) to convert e.g. "Al Sus (id:...)"
+  // correctly instead of guessing a word count.
+  const namesOf = (id) => {
+    const key = String(id);
+    const stored = store.getUser(guildId, key)?.names ?? [];
+    const batchNick = batchAuthorNames?.get?.(key);
+    return batchNick ? [...stored, batchNick] : stored;
+  };
+  const tokenize = (text) => (typeof text === 'string' ? toTokens(text, isKnownId, namesOf) : text);
+  const tokenizeArray = (values) => (Array.isArray(values) ? values.map(tokenize) : values);
+  /** `ops.add`/`ops.update` items' `note` field, tokenized in place. */
+  const tokenizeNoted = (items) =>
+    Array.isArray(items)
+      ? items.map((item) => (item && typeof item === 'object' && !Array.isArray(item) ? { ...item, note: tokenize(item.note) } : item))
+      : items;
+  /** A `details.add` entry, a bare string or `{ text, sure? }`, `text` tokenized. */
+  const tokenizeDetail = (item) => {
+    if (typeof item === 'string') return tokenize(item);
+    if (item && typeof item === 'object' && !Array.isArray(item)) return { ...item, text: tokenize(item.text) };
+    return item;
+  };
 
   if (update.users && typeof update.users === 'object' && !Array.isArray(update.users)) {
     for (const [userId, raw] of Object.entries(update.users)) {
@@ -403,20 +517,31 @@ export function applyMemoryUpdate(store, guildId, update, cfg, knownUserIds, kno
       // the OLD shapes too (a string interests blob, an array of details).
       const ops = {};
       for (const key of ['character', 'style', 'relationship']) {
-        if (typeof raw[key] === 'string') ops[key] = raw[key];
+        if (typeof raw[key] === 'string') ops[key] = tokenize(raw[key]);
       }
 
       if (typeof raw.interests === 'string') {
         const migrated = migrateInterests(raw.interests);
-        if (migrated.length > 0) ops.interests = { add: migrated.map(({ topic, note }) => ({ topic, note })) };
+        if (migrated.length > 0) ops.interests = { add: migrated.map(({ topic, note }) => ({ topic, note: tokenize(note) })) };
       } else if (raw.interests && typeof raw.interests === 'object' && !Array.isArray(raw.interests)) {
-        ops.interests = raw.interests;
+        ops.interests = {
+          ...raw.interests,
+          add: tokenizeNoted(raw.interests.add),
+          update: tokenizeNoted(raw.interests.update),
+        };
       }
 
       if (Array.isArray(raw.details)) {
-        ops.details = { add: raw.details };
+        ops.details = { add: raw.details.map(tokenizeDetail) };
       } else if (raw.details && typeof raw.details === 'object' && !Array.isArray(raw.details)) {
-        ops.details = raw.details;
+        ops.details = { ...raw.details, add: Array.isArray(raw.details.add) ? raw.details.add.map(tokenizeDetail) : raw.details.add };
+      }
+
+      // Aliases are literal nicknames, never a `<@id>` reference to someone
+      // else -- passed through untouched, see .claude/docs/prompt-contract.md,
+      // "Aliases".
+      if (raw.aliases && typeof raw.aliases === 'object' && !Array.isArray(raw.aliases)) {
+        ops.aliases = raw.aliases;
       }
 
       const profileOpsNow = relationships?.now ?? episodes?.now ?? Date.now();
@@ -433,6 +558,9 @@ export function applyMemoryUpdate(store, guildId, update, cfg, knownUserIds, kno
         maxDetails: cfg.maxDetails,
         maxDetailsStored: cfg.maxDetailsStored,
         detailHalfLifeDays: cfg.detailHalfLifeDays,
+        maxAliases: cfg.maxAliases,
+        maxAliasesStored: cfg.maxAliasesStored,
+        aliasHalfLifeDays: cfg.aliasHalfLifeDays,
         confirmGapHours: cfg.confirmGapHours,
         now: profileOpsNow,
         seenAt,
@@ -444,7 +572,7 @@ export function applyMemoryUpdate(store, guildId, update, cfg, knownUserIds, kno
 
       if (relationships?.enabled && raw.affinity && typeof raw.affinity === 'object' && !Array.isArray(raw.affinity)) {
         const before = store.getUser(guildId, userId)?.affinity?.score ?? 0;
-        const after = store.adjustAffinity(guildId, userId, raw.affinity.delta, raw.affinity.reason, {
+        const after = store.adjustAffinity(guildId, userId, raw.affinity.delta, tokenize(raw.affinity.reason), {
           // The model's verdict is never applied unclamped, even if the config block is missing.
           maxDelta: relationships.maxDeltaPerUpdate ?? 15,
           historySize: relationships.historySize ?? 10,
@@ -454,7 +582,11 @@ export function applyMemoryUpdate(store, guildId, update, cfg, knownUserIds, kno
       }
 
       if (episodes?.enabled && Array.isArray(raw.episodes) && raw.episodes.length > 0) {
-        const added = store.addEpisodes(guildId, userId, raw.episodes, {
+        // `quote` is the person's own words verbatim -- never tokenized.
+        const tokenizedEpisodes = raw.episodes.map((ep) =>
+          ep && typeof ep === 'object' && !Array.isArray(ep) ? { ...ep, what: tokenize(ep.what), feeling: tokenize(ep.feeling) } : ep,
+        );
+        const added = store.addEpisodes(guildId, userId, tokenizedEpisodes, {
           maxEpisodes: episodes.maxEpisodes,
           maxNew: episodes.maxNew,
           now: episodes.now,
@@ -465,7 +597,11 @@ export function applyMemoryUpdate(store, guildId, update, cfg, knownUserIds, kno
   }
 
   if (lore?.enabled && Array.isArray(update.lore) && update.lore.length > 0) {
-    result.lore = store.setLore(guildId, update.lore, { source: 'analyzer', now: lore.now, maxEntries: lore.maxEntries });
+    // `title`/`keys` are the identity a person actually types, never tokenized.
+    const tokenizedLore = update.lore.map((entry) =>
+      entry && typeof entry === 'object' && !Array.isArray(entry) ? { ...entry, text: tokenize(entry.text) } : entry,
+    );
+    result.lore = store.setLore(guildId, tokenizedLore, { source: 'analyzer', now: lore.now, maxEntries: lore.maxEntries });
   }
 
   if (update.channels && typeof update.channels === 'object' && !Array.isArray(update.channels)) {
@@ -475,7 +611,7 @@ export function applyMemoryUpdate(store, guildId, update, cfg, knownUserIds, kno
 
       const fields = {};
       for (const key of ['purpose', 'topics', 'tone']) {
-        if (typeof raw[key] === 'string') fields[key] = clampString(raw[key], cfg.fieldChars);
+        if (typeof raw[key] === 'string') fields[key] = clampString(tokenize(raw[key]), cfg.fieldChars);
       }
 
       store.updateChannel(guildId, channelId, fields);
@@ -487,13 +623,13 @@ export function applyMemoryUpdate(store, guildId, update, cfg, knownUserIds, kno
   if (update.guild && typeof update.guild === 'object' && !Array.isArray(update.guild)) {
     const g = update.guild;
     if (typeof g.patterns === 'string' && g.patterns.trim()) {
-      guildFields.patterns = clampString(g.patterns, cfg.fieldChars * 2);
+      guildFields.patterns = clampString(tokenize(g.patterns), cfg.fieldChars * 2);
     }
     if (typeof g.starters === 'string' && g.starters.trim()) {
-      guildFields.starters = clampString(g.starters, cfg.fieldChars * 2);
+      guildFields.starters = clampString(tokenize(g.starters), cfg.fieldChars * 2);
     }
     if (Array.isArray(g.injokes) && g.injokes.length) {
-      const injokes = clampStringArray(g.injokes, 200, cfg.maxInjokes);
+      const injokes = clampStringArray(tokenizeArray(g.injokes), 200, cfg.maxInjokes);
       if (injokes.length) guildFields.injokes = injokes;
     }
   }
@@ -503,7 +639,7 @@ export function applyMemoryUpdate(store, guildId, update, cfg, knownUserIds, kno
   }
 
   if (Array.isArray(update.self) && update.self.length > 0) {
-    const self = clampStringArray(update.self, 200, cfg.maxSelfFacts);
+    const self = clampStringArray(tokenizeArray(update.self), 200, cfg.maxSelfFacts);
     if (self.length > 0) {
       store.updateGuild(guildId, { self });
       result.self = true;
@@ -546,6 +682,14 @@ export function touchMemory(store, guildId, normalized) {
  * @param {(guildId: string) => string} deps.getSelfName
  * @param {() => number} [deps.now]
  */
+/** `nameOf` for buildMemoryRequest's token resolution: a member's current
+ * stored name, or null when the guild has no profile for that id -- see
+ * .claude/docs/prompt-contract.md, "Members are referred to by id, never by
+ * nickname". The one place `analyze()`/`estimate()` touch the store for this. */
+function storeNameOf(store, guildId) {
+  return (id) => store.getUser(guildId, id)?.names?.[0] ?? null;
+}
+
 export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, now = Date.now }) {
   const running = new Set();
   const backoffUntil = new Map();
@@ -695,6 +839,7 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
         selfName: getSelfName(guildId),
         loreEntries: store.getLore(guildId),
         descriptions: effectiveDescriptions,
+        nameOf: storeNameOf(store, guildId),
       });
 
       completion = await llm.complete(llmMessages, {
@@ -733,7 +878,19 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
         ? { enabled: true, maxEntries: hot.config.lore?.maxEntries ?? Infinity, now: now() }
         : undefined;
       const timing = computeSeenAt(messages);
-      const result = applyMemoryUpdate(store, guildId, update, cfg, knownUserIds, knownChannelIds, relationships, episodes, lore, timing);
+      const result = applyMemoryUpdate(
+        store,
+        guildId,
+        update,
+        cfg,
+        knownUserIds,
+        knownChannelIds,
+        relationships,
+        episodes,
+        lore,
+        timing,
+        batchAuthorNamesMap(messages),
+      );
 
       return { ok: true, usage: completion.usage ?? null, estimated: completion.estimated ?? 0, result };
     } catch (err) {
@@ -781,6 +938,7 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
         messages,
         selfName: getSelfName(guildId),
         loreEntries: store.getLore(guildId),
+        nameOf: storeNameOf(store, guildId),
       });
       return calibrator.apply(estimateMessages(llmMessages));
     } catch {
