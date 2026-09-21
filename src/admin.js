@@ -24,6 +24,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { emptyAffinity, affinityBand } from './memory/affinity.js';
 import { topByRank } from './memory/ranking.js';
+import { fromTokens } from './memory/mentions.js';
+import { sortEpisodesForDisplay } from './memory/episodes.js';
 import { log } from './log.js';
 
 const FORBIDDEN_SEGMENTS = new Set(['__proto__', 'constructor', 'prototype']);
@@ -195,6 +197,195 @@ function rankedLines(items, maxShown, halfLifeDays, formatLine) {
     lines.push(`  ${formatLine(item)}`);
   });
   return lines;
+}
+
+// ---------------------------------------------------------------------------
+// `/nep memory show` — sectioned view (F32)
+// ---------------------------------------------------------------------------
+
+/** The `section` choices `/nep memory show` accepts; anything else falls back to `'summary'`. */
+const MEMORY_SHOW_SECTIONS = new Set([
+  'summary',
+  'character',
+  'style',
+  'relationship',
+  'affinity',
+  'aliases',
+  'interests',
+  'details',
+  'episodes',
+  'raw',
+]);
+
+/** Owner-configurable list length for `/nep memory show`'s per-section views (F32). */
+const MEMORY_SHOW_DEFAULT_LIMIT = 25;
+const MEMORY_SHOW_MAX_LIMIT = 100;
+
+/** Hard ceiling for the `summary` section: the whole reply must fit a single
+ * Discord message (2000 chars) — comfortably under that even after the
+ * code-fence wrapping src/discord/commands.js#respond adds. */
+const SUMMARY_MAX_CHARS = 1800;
+
+const DIVIDER_LINE = '-- not shown to the persona (below the shown cap) --';
+
+/** `iso` parsed to epoch ms, or 0 when missing/unparsable — never NaN, so callers can sort safely. */
+function dateMs(iso) {
+  const ms = typeof iso === 'string' && iso ? Date.parse(iso) : NaN;
+  return Number.isFinite(ms) ? ms : 0;
+}
+
+/**
+ * `value` clamped to `maxChars`, with an ellipsis and (when `sectionName` is
+ * given) a pointer to the section that shows it in full, appended once it had
+ * to be cut. A short-enough value passes through unchanged, with no pointer.
+ */
+function truncateForSummary(value, maxChars, sectionName) {
+  const text = String(value ?? '');
+  if (text.length <= maxChars) return text;
+  const cut = text.slice(0, Math.max(0, maxChars - 1)).trimEnd();
+  return sectionName ? `${cut}… (full text: section ${sectionName})` : `${cut}…`;
+}
+
+/**
+ * `/nep memory show`'s default view: a compact, human-readable digest of one
+ * profile GUARANTEED to fit a single Discord message (see `SUMMARY_MAX_CHARS`)
+ * — long fields are truncated with an ellipsis and, when the full text lives
+ * under its own section, a pointer to it. `<@id>` tokens in free-text fields
+ * are resolved via `nameOf` the same way every other analyzer-facing text is
+ * (src/memory/mentions.js#fromTokens, mode `'analyzer'`). Pure: no I/O.
+ * @param {object} profile
+ * @param {object} [memoryCfg]  hot.config.memory
+ * @param {(id: string) => (string|null)} [nameOf]
+ * @returns {string}
+ */
+export function buildProfileSummary(profile, memoryCfg = {}, nameOf = () => null) {
+  const resolve = (text) => fromTokens(typeof text === 'string' ? text : '', nameOf, 'analyzer');
+
+  const names = Array.isArray(profile?.names) ? profile.names : [];
+  const currentName = names[0] || `id ${profile?.id}`;
+  const formerNames = names.slice(1).join(', ');
+
+  const aliasNames = topByRank(profile?.aliases ?? [], undefined, memoryCfg.aliasHalfLifeDays).map((a) => a.name);
+
+  const affinity = profile?.affinity ?? emptyAffinity();
+  const reason = resolve(affinity.reason);
+
+  const topInterests = topByRank(profile?.interests ?? [], 5, memoryCfg.interestHalfLifeDays).map((it) => it.topic);
+
+  const lines = [
+    `name: ${currentName}`,
+    `former names: ${truncateForSummary(formerNames || 'none', 150)}`,
+    `aliases: ${truncateForSummary(aliasNames.join(', ') || 'none', 150, 'aliases')}`,
+    `messages: ${profile?.messageCount ?? 0}`,
+    `first seen: ${profile?.firstSeen ? profile.firstSeen.slice(0, 10) : '-'}`,
+    `last seen: ${profile?.lastSeen ? profile.lastSeen.slice(0, 10) : '-'}`,
+    `attitude: ${affinity.score ?? 0} (${affinityBand(affinity.score ?? 0)})${reason ? ` — ${truncateForSummary(reason, 150)}` : ''}`,
+    `character: ${truncateForSummary(resolve(profile?.character) || '(empty)', 240, 'character')}`,
+    `style: ${truncateForSummary(resolve(profile?.style) || '(empty)', 240, 'style')}`,
+    `relationship: ${truncateForSummary(resolve(profile?.relationship) || '(empty)', 240, 'relationship')}`,
+    `interests: ${profile?.interests?.length ?? 0} stored, top: ${truncateForSummary(topInterests.join(', ') || 'none', 200, 'interests')}`,
+    `details: ${profile?.details?.length ?? 0} stored`,
+    `episodes: ${profile?.episodes?.length ?? 0} stored`,
+  ];
+
+  let text = lines.join('\n');
+  if (text.length > SUMMARY_MAX_CHARS) text = `${text.slice(0, SUMMARY_MAX_CHARS - 1).trimEnd()}…`;
+  return text;
+}
+
+/**
+ * Order + cap one list-shaped section of `/nep memory show` (aliases,
+ * interests, details): `order: 'recent'` sorts by `dateOf` descending, no
+ * divider; the default `'rank'` order reuses the persona's own rank
+ * (src/memory/ranking.js#topByRank) and inserts `DIVIDER_LINE` right after
+ * `maxShown` items — the ones the persona is actually shown (see
+ * .claude/docs/prompt-contract.md, "More is stored than shown, and rank
+ * decays with age") — before either is capped to `limit` lines. Never throws
+ * on an empty/missing `items`.
+ * @param {object[]} items
+ * @param {{ order: 'rank'|'recent', limit: number, halfLifeDays?: number,
+ *   maxShown?: number, formatLine: (item: object) => string, dateOf: (item: object) => number }} opts
+ * @returns {string[]}
+ */
+function orderedSectionLines(items, { order, limit, halfLifeDays, maxShown, formatLine, dateOf }) {
+  if (!Array.isArray(items) || items.length === 0) return [];
+
+  if (order === 'recent') {
+    return [...items]
+      .sort((a, b) => dateOf(b) - dateOf(a))
+      .slice(0, limit)
+      .map(formatLine);
+  }
+
+  const ranked = topByRank(items, undefined, halfLifeDays).slice(0, limit);
+  const lines = [];
+  ranked.forEach((item, index) => {
+    if (Number.isInteger(maxShown) && index === maxShown) lines.push(DIVIDER_LINE);
+    lines.push(formatLine(item));
+  });
+  return lines;
+}
+
+/**
+ * The exact output `/nep memory show` produced before F32 (section `'raw'`):
+ * the whole profile as JSON, followed by every stored interest/detail/alias
+ * in rank order (divider included) and every episode — `<@id>` tokens are
+ * deliberately left unresolved here, unlike every other section.
+ */
+function legacyMemoryShowView(profile, memoryCfg) {
+  const lines = [JSON.stringify(profile, null, 2)];
+  if (profile.interests?.length) {
+    lines.push('', 'interests: (rank order, everything stored -- see the divider for what the persona is shown)');
+    lines.push(
+      ...rankedLines(profile.interests, memoryCfg?.maxInterests, memoryCfg?.interestHalfLifeDays, (it) => {
+        const note = it.note ? `: ${it.note}` : '';
+        return `[weight ${it.weight}${lastDateSuffix(it.lastSeen)}] ${it.topic}${note}`;
+      }),
+    );
+  }
+  if (profile.details?.length) {
+    lines.push('', 'details: (rank order, everything stored -- see the divider for what the persona is shown)');
+    lines.push(
+      ...rankedLines(profile.details, memoryCfg?.maxDetails, memoryCfg?.detailHalfLifeDays, (d) => `#${d.id} [weight ${d.weight}${lastDateSuffix(d.lastSeen)}] ${d.text}`),
+    );
+  }
+  if (profile.aliases?.length) {
+    lines.push('', 'aliases: (rank order, everything stored -- see the divider for what the persona is shown)');
+    lines.push(
+      ...rankedLines(profile.aliases, memoryCfg?.maxAliases, memoryCfg?.aliasHalfLifeDays, (a) => `[weight ${a.weight}${lastDateSuffix(a.lastSeen)}] ${a.name}`),
+    );
+  }
+  if (profile.episodes?.length) {
+    lines.push('', 'episodes:');
+    for (const ep of profile.episodes) {
+      const quote = ep.quote ? ` "${ep.quote}"` : '';
+      lines.push(`  ${ep.date} [weight ${ep.weight}] ${ep.what}${quote}`);
+    }
+  }
+  return lines.join('\n');
+}
+
+/** `[weight N, last DATE] name`, or just `[weight N] name` — unchanged since before F32, used by
+ * both the `raw` view (via `legacyMemoryShowView`) and the `aliases` section, and by `/nep memory
+ * alias add`/`remove`'s "resulting alias list" reply. */
+function aliasLine(alias) {
+  return `[weight ${alias.weight}${lastDateSuffix(alias.lastSeen)}] ${alias.name}`;
+}
+
+/** The member's stored aliases, rank-ordered, one per line — the reply `/nep memory alias
+ * add`/`remove` gives after writing (see the module header's DO §2). */
+function formatAliasList(profile, memoryCfg) {
+  const aliases = profile?.aliases ?? [];
+  if (!aliases.length) return 'No aliases stored.';
+  return topByRank(aliases, undefined, memoryCfg?.aliasHalfLifeDays).map(aliasLine).join('\n');
+}
+
+/** Case-insensitive, whitespace-collapsed identity key for one alias name — mirrors
+ * src/memory/interests.js#normalizeTopic (also used, via src/memory/aliases.js, as the alias
+ * identity store.applyProfileOps merges by) without importing that module, so this file never
+ * depends on the exact shape of the parallel interests/aliases work in flight. */
+function normalizeAliasKey(name) {
+  return String(name ?? '').trim().replace(/\s+/g, ' ').toLowerCase();
 }
 
 function pathExists(object, dottedPath) {
@@ -571,6 +762,17 @@ export function createAdmin({ hot, store, client, spontaneous, calibrator, getGu
     return context?.guildId ?? getGuildId?.() ?? null;
   }
 
+  /**
+   * F32: sectioned, human-readable view of one member's profile — see the
+   * module-level `MEMORY_SHOW_SECTIONS` for the choices and the header
+   * comments of `buildProfileSummary`/`orderedSectionLines`/
+   * `legacyMemoryShowView` for what each section does. `section` defaults to
+   * `'summary'`; `order` to `'rank'`; `limit` to 25 (1..100) — anything else
+   * given falls back to these defaults rather than throwing, since this is a
+   * read-only command. Every section except `'raw'` resolves `<@id>` tokens
+   * in free text via `fromTokens(..., 'analyzer')`, the same as the analyzer's
+   * own input view.
+   */
   function cmdMemoryShow(args, context) {
     freshenIfPaused();
     const userId = args?.userId;
@@ -582,38 +784,174 @@ export function createAdmin({ hot, store, client, spontaneous, calibrator, getGu
     const profile = store.getUser(guildId, userId);
     if (!profile) throw new Error(`no profile for ${userId}`);
 
-    const memoryCfg = hot.config?.memory;
+    const memoryCfg = hot.config?.memory ?? {};
+    const section = MEMORY_SHOW_SECTIONS.has(args?.section) ? args.section : 'summary';
+    const order = args?.order === 'recent' ? 'recent' : 'rank';
+    const limit =
+      Number.isInteger(args?.limit) && args.limit >= 1 && args.limit <= MEMORY_SHOW_MAX_LIMIT
+        ? args.limit
+        : MEMORY_SHOW_DEFAULT_LIMIT;
+    const nameOf = (id) => store.getUser(guildId, id)?.names?.[0] ?? null;
+    const resolve = (text) => fromTokens(typeof text === 'string' ? text : '', nameOf, 'analyzer');
 
-    const lines = [JSON.stringify(profile, null, 2)];
-    if (profile.interests?.length) {
-      lines.push('', 'interests: (rank order, everything stored -- see the divider for what the persona is shown)');
-      lines.push(
-        ...rankedLines(profile.interests, memoryCfg?.maxInterests, memoryCfg?.interestHalfLifeDays, (it) => {
-          const note = it.note ? `: ${it.note}` : '';
-          return `[weight ${it.weight}${lastDateSuffix(it.lastSeen)}] ${it.topic}${note}`;
-        }),
+    if (section === 'raw') return legacyMemoryShowView(profile, memoryCfg);
+
+    if (section === 'character') return resolve(profile.character) || '(empty)';
+    if (section === 'style') return resolve(profile.style) || '(empty)';
+    if (section === 'relationship') return resolve(profile.relationship) || '(empty)';
+
+    if (section === 'affinity') {
+      const affinity = profile.affinity ?? emptyAffinity();
+      const history = (affinity.history ?? [])
+        .slice(-5)
+        .map((h) => `${h.ts} ${h.delta >= 0 ? '+' : ''}${h.delta} -> ${h.score}${h.reason ? `: ${resolve(h.reason)}` : ''}`)
+        .join('\n');
+      return [
+        `score: ${affinity.score}`,
+        `band: ${affinityBand(affinity.score)}`,
+        `reason: ${resolve(affinity.reason) || '-'}`,
+        history ? `history:\n${history}` : 'history: (empty)',
+      ].join('\n');
+    }
+
+    if (section === 'aliases') {
+      const lines = orderedSectionLines(profile.aliases ?? [], {
+        order,
+        limit,
+        halfLifeDays: memoryCfg.aliasHalfLifeDays,
+        maxShown: memoryCfg.maxAliases,
+        formatLine: aliasLine,
+        dateOf: (a) => dateMs(a.lastSeen ?? a.firstSeen),
+      });
+      return lines.length ? lines.join('\n') : 'No aliases stored.';
+    }
+
+    if (section === 'interests') {
+      const lines = orderedSectionLines(profile.interests ?? [], {
+        order,
+        limit,
+        halfLifeDays: memoryCfg.interestHalfLifeDays,
+        maxShown: memoryCfg.maxInterests,
+        formatLine: (it) => {
+          const note = resolve(it.note);
+          const suffix = `[seen ${it.weight}${lastDateSuffix(it.lastSeen)}]`;
+          return note ? `${it.topic} — ${note} ${suffix}` : `${it.topic} ${suffix}`;
+        },
+        dateOf: (it) => dateMs(it.lastSeen ?? it.firstSeen),
+      });
+      return lines.length ? lines.join('\n') : 'No interests stored.';
+    }
+
+    if (section === 'details') {
+      const lines = orderedSectionLines(profile.details ?? [], {
+        order,
+        limit,
+        halfLifeDays: memoryCfg.detailHalfLifeDays,
+        maxShown: memoryCfg.maxDetails,
+        formatLine: (d) => `#${d.id} ${resolve(d.text)} [seen ${d.weight}${lastDateSuffix(d.lastSeen)}]`,
+        dateOf: (d) => dateMs(d.lastSeen ?? d.firstSeen),
+      });
+      return lines.length ? lines.join('\n') : 'No details stored.';
+    }
+
+    if (section === 'episodes') {
+      const episodes = profile.episodes ?? [];
+      if (!episodes.length) return 'No episodes stored.';
+      const ordered =
+        order === 'recent'
+          ? [...episodes].sort((a, b) => dateMs(b.addedAt ?? b.date) - dateMs(a.addedAt ?? a.date))
+          : sortEpisodesForDisplay(episodes);
+      return ordered
+        .slice(0, limit)
+        .map((ep) => {
+          const quote = ep.quote ? ` "${ep.quote}"` : '';
+          return `${ep.date} [weight ${ep.weight}] ${resolve(ep.what)}${quote}`;
+        })
+        .join('\n');
+    }
+
+    return buildProfileSummary(profile, memoryCfg, nameOf);
+  }
+
+  /**
+   * F32 (`/nep memory alias add`): confirms the alias at once instead of
+   * waiting for it to be sighted `memory.confirmAfter` times naturally —
+   * store.applyProfileOps/src/memory/aliases.js has no option to set a
+   * weight directly, so this calls it repeatedly with `confirmGapHours: 0`
+   * (every call then counts as a fresh sighting regardless of the gap, see
+   * src/memory/interests.js#applyRankedOps's `isFarEnough`) and the SAME
+   * `seenAt`/`now` for every call, so the resulting item's `firstSeen` and
+   * `lastSeen` both land on that one instant. Idempotent: already at or past
+   * the target weight -> no call at all, nothing changes. Clamping to 40
+   * chars and dropping a name equal to one of the member's display names are
+   * both store.js's own applyAliasOps behaviour, untouched here.
+   */
+  function cmdMemoryAliasAdd(args, context) {
+    assertNotPaused();
+    const userId = args?.userId;
+    if (!userId) throw new Error('a user is required');
+    const guildId = resolvedGuildId(context);
+    if (!guildId) throw new Error('no guild resolved yet');
+
+    const name = String(args?.name ?? '').trim().slice(0, 40);
+    if (!name) throw new Error('a name is required');
+
+    const memoryCfg = hot.config?.memory ?? {};
+    const confirmAfter = Number.isFinite(memoryCfg.confirmAfter) && memoryCfg.confirmAfter > 0 ? Math.ceil(memoryCfg.confirmAfter) : 2;
+    const target = Math.max(1, confirmAfter);
+
+    const key = normalizeAliasKey(name);
+    const before = store.getUser(guildId, userId);
+    const currentWeight = before?.aliases?.find((a) => normalizeAliasKey(a.name) === key)?.weight ?? 0;
+    const needed = Math.max(0, target - currentWeight);
+
+    const now = Date.now();
+    for (let i = 0; i < needed; i += 1) {
+      store.applyProfileOps(
+        guildId,
+        userId,
+        { aliases: { add: [name] } },
+        {
+          confirmGapHours: 0,
+          seenAt: now,
+          now,
+          maxAliases: memoryCfg.maxAliases,
+          maxAliasesStored: memoryCfg.maxAliasesStored,
+          aliasHalfLifeDays: memoryCfg.aliasHalfLifeDays,
+        },
       );
     }
-    if (profile.details?.length) {
-      lines.push('', 'details: (rank order, everything stored -- see the divider for what the persona is shown)');
-      lines.push(
-        ...rankedLines(profile.details, memoryCfg?.maxDetails, memoryCfg?.detailHalfLifeDays, (d) => `#${d.id} [weight ${d.weight}${lastDateSuffix(d.lastSeen)}] ${d.text}`),
-      );
-    }
-    if (profile.aliases?.length) {
-      lines.push('', 'aliases: (rank order, everything stored -- see the divider for what the persona is shown)');
-      lines.push(
-        ...rankedLines(profile.aliases, memoryCfg?.maxAliases, memoryCfg?.aliasHalfLifeDays, (a) => `[weight ${a.weight}${lastDateSuffix(a.lastSeen)}] ${a.name}`),
-      );
-    }
-    if (profile.episodes?.length) {
-      lines.push('', 'episodes:');
-      for (const ep of profile.episodes) {
-        const quote = ep.quote ? ` "${ep.quote}"` : '';
-        lines.push(`  ${ep.date} [weight ${ep.weight}] ${ep.what}${quote}`);
-      }
-    }
-    return lines.join('\n');
+
+    const after = store.getUser(guildId, userId);
+    return formatAliasList(after, memoryCfg);
+  }
+
+  /** F32 (`/nep memory alias remove`): removes by name, case-insensitively (store.applyProfileOps
+   * matches an alias's identity the same way, see src/memory/interests.js#normalizeTopic). */
+  function cmdMemoryAliasRemove(args, context) {
+    assertNotPaused();
+    const userId = args?.userId;
+    if (!userId) throw new Error('a user is required');
+    const guildId = resolvedGuildId(context);
+    if (!guildId) throw new Error('no guild resolved yet');
+
+    const name = String(args?.name ?? '').trim();
+    if (!name) throw new Error('a name is required');
+
+    const memoryCfg = hot.config?.memory ?? {};
+    store.applyProfileOps(
+      guildId,
+      userId,
+      { aliases: { remove: [name] } },
+      {
+        maxAliases: memoryCfg.maxAliases,
+        maxAliasesStored: memoryCfg.maxAliasesStored,
+        aliasHalfLifeDays: memoryCfg.aliasHalfLifeDays,
+      },
+    );
+
+    const after = store.getUser(guildId, userId);
+    return formatAliasList(after, memoryCfg);
   }
 
   function cmdMemoryForget(args, context) {
@@ -739,6 +1077,8 @@ export function createAdmin({ hot, store, client, spontaneous, calibrator, getGu
       source: 'owner',
       now: Date.now(),
       maxEntries,
+      textChars: hot.config?.lore?.textChars,
+      clampTolerance: hot.config?.memory?.clampTolerance,
     });
     if (upserted === 0) {
       throw new Error('invalid lore entry: needs a title, at least one 2-40 char key, and non-empty text');
@@ -957,6 +1297,8 @@ function warmupLocalConfigPath() {
     'rule.remove': (args) => cmdRuleRemove(args),
     'memory.show': (args, context) => cmdMemoryShow(args, context),
     'memory.forget': (args, context) => cmdMemoryForget(args, context),
+    'memory.alias-add': (args, context) => cmdMemoryAliasAdd(args, context),
+    'memory.alias-remove': (args, context) => cmdMemoryAliasRemove(args, context),
     'memory.wipe': (args, context) => cmdMemoryWipe(args, context),
     'memory.affinity': (args, context) => cmdMemoryAffinity(args, context),
     'lore.add': (args, context) => cmdLoreAdd(args, context),

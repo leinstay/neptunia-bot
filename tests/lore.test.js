@@ -104,12 +104,12 @@ test('upsertLore: keys are lowercased, trimmed, de-duplicated, kept 1-8', () => 
   assert.deepEqual(result.entries[0].keys, ['foo', 'bar', 'k1', 'k2', 'k3', 'k4', 'k5', 'k6']);
 });
 
-test('upsertLore: a key outside 2-40 chars is dropped', () => {
+test('upsertLore: a too-short key is dropped; a too-long one is clamped to 40 chars, not dropped', () => {
   const result = upsertLore([], [{ title: 'X', keys: ['a', 'ok', 'x'.repeat(41)], text: 'text' }], {
     source: 'analyzer',
     now: NOW,
   });
-  assert.deepEqual(result.entries[0].keys, ['ok']);
+  assert.deepEqual(result.entries[0].keys, ['ok', 'x'.repeat(40)]);
 });
 
 test('upsertLore: rejects an entry with no valid key', () => {
@@ -128,13 +128,40 @@ test('upsertLore: rejects an entry with no title', () => {
   assert.equal(result.upserted, 0);
 });
 
-test('upsertLore: title and text are clamped to 80/400 chars', () => {
-  const result = upsertLore([], [{ title: 'T'.repeat(200), keys: ['valid'], text: 'x'.repeat(500) }], {
+test('upsertLore: title is a hard identity clamp at 80 chars; text is tolerant around the default 400 (400*1.25 when it has to cut)', () => {
+  const result = upsertLore([], [{ title: 'T'.repeat(200), keys: ['valid'], text: 'x'.repeat(1000) }], {
     source: 'analyzer',
     now: NOW,
   });
   assert.equal(result.entries[0].title.length, 80);
-  assert.equal(result.entries[0].text.length, 400);
+  assert.equal(result.entries[0].text.length, 500, 'no boundary in a single long word -- hard-cut at 400*1.25');
+});
+
+test('upsertLore: text within the default tolerance of 400 is kept whole', () => {
+  const result = upsertLore([], [{ title: 'X', keys: ['valid'], text: 'x'.repeat(450) }], {
+    source: 'analyzer',
+    now: NOW,
+  });
+  assert.equal(result.entries[0].text.length, 450);
+});
+
+test('upsertLore: textChars is configurable and read at the moment of use', () => {
+  const result = upsertLore([], [{ title: 'X', keys: ['valid'], text: 'x'.repeat(1000) }], {
+    source: 'analyzer',
+    now: NOW,
+    textChars: 600,
+  });
+  assert.equal(result.entries[0].text.length, 750, '600 * the default tolerance 1.25');
+});
+
+test('upsertLore: clampTolerance is configurable', () => {
+  const result = upsertLore([], [{ title: 'X', keys: ['valid'], text: 'x'.repeat(1000) }], {
+    source: 'analyzer',
+    now: NOW,
+    textChars: 100,
+    clampTolerance: 2,
+  });
+  assert.equal(result.entries[0].text.length, 200);
 });
 
 test('upsertLore: garbage incoming entries are skipped, never throw', () => {

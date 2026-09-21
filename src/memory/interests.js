@@ -24,15 +24,10 @@
 // history fed out of order (the warm-up) still ends up with correct dates.
 
 import { topByRank } from './ranking.js';
+import { clampText } from './clamp.js';
 
 const DEFAULT_CONFIRM_GAP_HOURS = 12;
 const HOUR_MS = 3_600_000;
-
-/** Trim, collapse internal whitespace, and clamp to `maxChars`. */
-function clampString(value, maxChars) {
-  const cap = Number.isInteger(maxChars) ? maxChars : Infinity;
-  return String(value ?? '').trim().slice(0, cap);
-}
 
 /**
  * The identity a topic is compared by: trimmed, whitespace-collapsed,
@@ -171,13 +166,16 @@ export function isStale(item, nowMs, staleDays) {
  * @param {object[]|undefined} existing
  * @param {{ add?: unknown, update?: unknown, seen?: unknown, remove?: unknown }} ops  Untrusted, model-extracted.
  * @param {{ identityField: string, noteField?: string, identityChars?: number, noteChars?: number,
- *   confirmGapHours?: number, seenAt?: number, halfLifeDays?: number, cap?: number }} opts
+ *   confirmGapHours?: number, seenAt?: number, halfLifeDays?: number, cap?: number, clampTolerance?: number }} opts
+ *   The identity (`topic`/`name`) is a HARD clamp (no tolerance, still boundary-safe -- see
+ *   src/memory/clamp.js); the note, when there is one, is clamped with `clampTolerance`
+ *   (soft by default) since it is free text, not an identity.
  * @returns {object[]}
  */
 export function applyRankedOps(
   existing,
   ops,
-  { identityField, noteField, identityChars, noteChars, confirmGapHours, seenAt = Date.now(), halfLifeDays, cap } = {},
+  { identityField, noteField, identityChars, noteChars, confirmGapHours, seenAt = Date.now(), halfLifeDays, cap, clampTolerance } = {},
 ) {
   let items = Array.isArray(existing) ? existing.map((item) => ({ ...item })) : [];
   const priorLastSeen = items.map((item) => item.lastSeen ?? null);
@@ -196,12 +194,12 @@ export function applyRankedOps(
     let sure = true;
     if (noteField) {
       if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return;
-      identity = typeof raw[identityField] === 'string' ? clampString(raw[identityField], identityChars) : '';
-      note = typeof raw[noteField] === 'string' ? clampString(raw[noteField], noteChars) : '';
+      identity = typeof raw[identityField] === 'string' ? clampText(raw[identityField], identityChars, { tolerance: 1 }) : '';
+      note = typeof raw[noteField] === 'string' ? clampText(raw[noteField], noteChars, { tolerance: clampTolerance }) : '';
       sure = raw.sure !== false;
     } else {
       const value = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw[identityField] : raw;
-      identity = typeof value === 'string' ? clampString(value, identityChars) : '';
+      identity = typeof value === 'string' ? clampText(value, identityChars, { tolerance: 1 }) : '';
     }
     if (!identity) return;
     const index = findIndex(identity);
@@ -245,24 +243,226 @@ export function applyRankedOps(
 }
 
 /**
+ * Strip ONE trailing parenthetical qualifier off a topic: `Name (qualifier)`
+ * -> `{ topic: 'Name', qualifier: 'qualifier' }` (both trimmed) -- fixes the
+ * near-duplicate topics the analyzer tends to write (`anime` / `anime
+ * (bleak/hopeless)`), see the F31 addendum. Left alone (`qualifier: ''`,
+ * `topic` returned as trimmed but otherwise untouched) when: the text does
+ * not end in `)`; the parenthesis is unbalanced (no matching `(`); the topic
+ * would be empty once stripped (the text is ONLY a parenthetical); or the
+ * parenthetical itself is empty. One level of nesting inside the qualifier is
+ * handled (the OUTERMOST trailing group is the one stripped).
+ * @param {string} raw
+ * @returns {{ topic: string, qualifier: string }}
+ */
+export function stripTrailingParenthetical(raw) {
+  const trimmed = String(raw ?? '').trim();
+  if (!trimmed.endsWith(')')) return { topic: trimmed, qualifier: '' };
+
+  let depth = 0;
+  let openIndex = -1;
+  for (let i = trimmed.length - 1; i >= 0; i -= 1) {
+    const ch = trimmed[i];
+    if (ch === ')') depth += 1;
+    else if (ch === '(') {
+      depth -= 1;
+      if (depth === 0) {
+        openIndex = i;
+        break;
+      }
+    }
+  }
+  if (openIndex === -1) return { topic: trimmed, qualifier: '' }; // unbalanced -- leave alone
+
+  const before = trimmed.slice(0, openIndex).trim();
+  const qualifier = trimmed.slice(openIndex + 1, trimmed.length - 1).trim();
+  if (!before || !qualifier) return { topic: trimmed, qualifier: '' }; // only a parenthetical, or an empty one
+
+  return { topic: before, qualifier };
+}
+
+/** An `add`/`update` item: its `topic` gets a trailing parenthetical stripped
+ * off; the qualifier itself is stashed on `_qualifier` rather than applied to
+ * `note` right away -- whether it may fill the note depends on whether the
+ * TARGET item (found only once `existing` has been resolved/collapsed) would
+ * otherwise have no note at all, so that decision is made later by
+ * `fillQualifierNotes`. Non-objects/missing `topic` pass through untouched. */
+function stripParentheticalFromNotedItem(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw) || typeof raw.topic !== 'string') return raw;
+  const { topic, qualifier } = stripTrailingParenthetical(raw.topic);
+  if (!qualifier) return raw;
+  return { ...raw, topic, _qualifier: qualifier };
+}
+
+/** A `seen`/`remove` plain-string topic, with a trailing parenthetical stripped off, if any. */
+function stripParentheticalFromPlainTopic(raw) {
+  if (typeof raw !== 'string') return raw;
+  const { topic, qualifier } = stripTrailingParenthetical(raw);
+  return qualifier ? topic : raw;
+}
+
+/** `ops`, with every topic in `add`/`update`/`seen`/`remove` stripped of a
+ * trailing parenthetical (see `stripTrailingParenthetical`) -- so a sighting
+ * of `anime (bleak/hopeless)` becomes a sighting of the plain, already-stored
+ * `anime` instead of a near-duplicate. */
+function stripParentheticalTopics(ops) {
+  if (!ops || typeof ops !== 'object' || Array.isArray(ops)) return ops;
+  return {
+    ...ops,
+    add: Array.isArray(ops.add) ? ops.add.map(stripParentheticalFromNotedItem) : ops.add,
+    update: Array.isArray(ops.update) ? ops.update.map(stripParentheticalFromNotedItem) : ops.update,
+    seen: Array.isArray(ops.seen) ? ops.seen.map(stripParentheticalFromPlainTopic) : ops.seen,
+    remove: Array.isArray(ops.remove) ? ops.remove.map(stripParentheticalFromPlainTopic) : ops.remove,
+  };
+}
+
+/** Every plain-form topic (already parenthetical-stripped, `normalizeTopic`'d)
+ * that `ops`' add/update/seen/remove target. */
+function targetTopics(ops) {
+  const targets = new Set();
+  const collect = (list, field) => {
+    for (const raw of Array.isArray(list) ? list : []) {
+      const topic = field ? raw?.[field] : raw;
+      if (typeof topic === 'string' && topic.trim()) targets.add(normalizeTopic(topic));
+    }
+  };
+  collect(ops?.add, 'topic');
+  collect(ops?.update, 'topic');
+  collect(ops?.seen);
+  collect(ops?.remove);
+  return targets;
+}
+
+/** Which of two stored items' notes survives a collapse: the heavier item's;
+ * a tie in weight goes to the one with the newer `lastSeen`; either way, an
+ * empty winning note falls back to the other item's note. */
+function pickSurvivingNote(a, b) {
+  const aWeight = a.weight ?? 0;
+  const bWeight = b.weight ?? 0;
+  let winner;
+  if (aWeight !== bWeight) {
+    winner = aWeight > bWeight ? a : b;
+  } else {
+    winner = (a.lastSeen ?? '') >= (b.lastSeen ?? '') ? a : b;
+  }
+  const loser = winner === a ? b : a;
+  return winner.note || loser.note || '';
+}
+
+/** Merge two stored interest items that turned out to be the same topic
+ * (a legacy parenthetical variant and its plain form): the heavier weight,
+ * the earliest firstSeen, the latest lastSeen, and the note of the heavier
+ * item (ties: the newer lastSeen), falling back to the other's note if that
+ * one is empty -- see `pickSurvivingNote`. */
+function mergeInterestItems(primary, other) {
+  return {
+    ...primary,
+    weight: Math.max(primary.weight, other.weight),
+    firstSeen: minIso(primary.firstSeen, other.firstSeen),
+    lastSeen: maxIso(primary.lastSeen, other.lastSeen),
+    note: pickSurvivingNote(primary, other),
+  };
+}
+
+/**
+ * Resolve legacy topics that still carry a trailing parenthetical baked into
+ * their stored `topic` (from before this feature): a stored item whose plain
+ * form is targeted by an incoming op (see `targetTopics`) is rewritten to the
+ * plain form; any items that now -- or already did -- share the same plain
+ * form (case-insensitively) are merged into one via `mergeInterestItems`. See
+ * the F31 addendum ("Interest topics with a qualifier in parentheses").
+ * @param {object[]|undefined} existing
+ * @param {object} strippedOps  Already run through `stripParentheticalTopics`.
+ * @returns {object[]|undefined}
+ */
+function resolveParentheticalVariants(existing, strippedOps) {
+  if (!Array.isArray(existing) || existing.length === 0) return existing;
+
+  const targets = targetTopics(strippedOps);
+  let items = existing;
+  if (targets.size > 0) {
+    items = items.map((item) => {
+      if (typeof item.topic !== 'string') return item;
+      const { topic: plain, qualifier } = stripTrailingParenthetical(item.topic);
+      return qualifier && targets.has(normalizeTopic(plain)) ? { ...item, topic: plain } : item;
+    });
+  }
+
+  const order = [];
+  const indexByKey = new Map();
+  for (const item of items) {
+    const key = normalizeTopic(item.topic);
+    const existingIndex = indexByKey.get(key);
+    if (existingIndex === undefined) {
+      indexByKey.set(key, order.length);
+      order.push(item);
+    } else {
+      order[existingIndex] = mergeInterestItems(order[existingIndex], item);
+    }
+  }
+  return order;
+}
+
+/**
+ * Decide, for every `add`/`update` item carrying a stashed `_qualifier` (see
+ * `stripParentheticalFromNotedItem`), whether that qualifier may fill `note`:
+ * only when the item would otherwise end up with NO note at all -- a
+ * non-empty incoming `note` always wins outright (the qualifier is simply
+ * dropped), and an existing stored item's non-empty note is never overwritten
+ * by a qualifier either (only a genuinely non-empty incoming note may replace
+ * it, same as any other note). `resolvedExisting` must already be the
+ * collapsed/rewritten array from `resolveParentheticalVariants`, so the
+ * lookup sees the one note that will actually be sighted.
+ * @param {object} strippedOps
+ * @param {object[]|undefined} resolvedExisting
+ * @returns {object}
+ */
+function fillQualifierNotes(strippedOps, resolvedExisting) {
+  if (!strippedOps || typeof strippedOps !== 'object' || Array.isArray(strippedOps)) return strippedOps;
+  const byTopic = new Map((Array.isArray(resolvedExisting) ? resolvedExisting : []).map((item) => [normalizeTopic(item.topic), item]));
+
+  const fillItem = (raw) => {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw) || !raw._qualifier) return raw;
+    const { _qualifier: qualifier, ...rest } = raw;
+    if (typeof rest.note === 'string' && rest.note.trim()) return rest; // a genuine incoming note always wins
+    const existingItem = byTopic.get(normalizeTopic(rest.topic));
+    if (existingItem && existingItem.note) return rest; // the stored note stays untouched
+    return { ...rest, note: qualifier }; // a brand new item, or one with no note yet
+  };
+
+  return {
+    ...strippedOps,
+    add: Array.isArray(strippedOps.add) ? strippedOps.add.map(fillItem) : strippedOps.add,
+    update: Array.isArray(strippedOps.update) ? strippedOps.update.map(fillItem) : strippedOps.update,
+  };
+}
+
+/**
  * Merge one analyzer batch's interest ops into a member's stored list -- see
  * `applyRankedOps` above for the full sighting/eviction rules; this is a
  * thin wrapper fixing `identityField: 'topic'`, `noteField: 'note'` and the
  * storage cap (`max(maxInterestsStored, maxInterests)`, see
  * .claude/docs/prompt-contract.md, "More is stored than shown, and rank
- * decays with age").
+ * decays with age"). Before that, it strips a trailing `(qualifier)` off
+ * every incoming topic (see `stripTrailingParenthetical`), resolves any
+ * stored legacy topic that still carries one (see `resolveParentheticalVariants`),
+ * then decides whether the stripped qualifier may fill an item's note (see
+ * `fillQualifierNotes`).
  * @param {object[]|undefined} existing  Stored interests.
  * @param {{ add?: unknown, update?: unknown, seen?: unknown, remove?: unknown }} ops  Untrusted, model-extracted.
  * @param {{ maxInterests?: number, maxInterestsStored?: number, topicChars?: number, noteChars?: number,
- *   confirmGapHours?: number, seenAt?: number, halfLifeDays?: number }} [opts]
+ *   confirmGapHours?: number, seenAt?: number, halfLifeDays?: number, clampTolerance?: number }} [opts]
  * @returns {object[]}
  */
 export function applyInterestOps(
   existing,
   ops,
-  { maxInterests, maxInterestsStored, topicChars, noteChars, confirmGapHours, seenAt = Date.now(), halfLifeDays } = {},
+  { maxInterests, maxInterestsStored, topicChars, noteChars, confirmGapHours, seenAt = Date.now(), halfLifeDays, clampTolerance } = {},
 ) {
-  return applyRankedOps(existing, ops, {
+  const strippedOps = stripParentheticalTopics(ops);
+  const resolvedExisting = resolveParentheticalVariants(existing, strippedOps);
+  const finalOps = fillQualifierNotes(strippedOps, resolvedExisting);
+  return applyRankedOps(resolvedExisting, finalOps, {
     identityField: 'topic',
     noteField: 'note',
     identityChars: topicChars,
@@ -270,6 +470,7 @@ export function applyInterestOps(
     confirmGapHours,
     seenAt,
     halfLifeDays,
+    clampTolerance,
     cap: effectiveStorageCap(maxInterestsStored, maxInterests),
   });
 }

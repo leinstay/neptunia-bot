@@ -24,6 +24,7 @@ import { upsertLore } from './lore.js';
 import { applyInterestOps, migrateInterests } from './interests.js';
 import { applyDetailOps, migrateDetails } from './details.js';
 import { applyAliasOps } from './aliases.js';
+import { clampText } from './clamp.js';
 
 function readJson(file, fallback) {
   try {
@@ -168,11 +169,6 @@ function migrateProfileAliases(profile) {
   if (!Array.isArray(profile.aliases)) profile.aliases = [];
 }
 
-function clampString(value, maxChars) {
-  const cap = Number.isInteger(maxChars) ? maxChars : Infinity;
-  return String(value ?? '').trim().slice(0, cap);
-}
-
 /** Keep only the newest `max` UTC-date keys of a `days` counter map. */
 function trimDays(days, max) {
   const keys = Object.keys(days).sort();
@@ -261,14 +257,41 @@ export function createStore({ dataDir }) {
       return item.value;
     },
 
-    /** Record that a member spoke: names, counters, timestamps. Creates the profile. */
+    /**
+     * Record that a member spoke: names, counters, timestamps. Creates the
+     * profile. Messages do not always arrive in chronological order (the
+     * warm-up can feed years of history after the live pipeline already
+     * touched a profile today) -- `firstSeen`/`lastSeen` are therefore
+     * min/max'd against `at`, never just overwritten, so a late/backdated
+     * touch can only widen the known range, never regress `lastSeen` to an
+     * older message. `names`' order is meant to read "most recent display
+     * name first": a name is moved to the front only when `at` is at least as
+     * new as the CURRENT `lastSeen` (before this touch updates it) -- an
+     * older/backdated touch never displaces the current name from index 0; an
+     * unseen name from such a touch is appended at the end instead.
+     */
     touchUser(guildId, userId, name, at = Date.now()) {
       const item = entry(userFile(guildId, userId), () => emptyProfile(String(userId)));
       const profile = item.value;
-      // Current display name first, a few previous ones after it.
-      if (name) profile.names = [name, ...profile.names.filter((n) => n !== name)].slice(0, 5);
-      profile.firstSeen ??= new Date(at).toISOString();
-      profile.lastSeen = new Date(at).toISOString();
+
+      const priorFirstSeenMs = profile.firstSeen ? Date.parse(profile.firstSeen) : NaN;
+      const priorLastSeenMs = profile.lastSeen ? Date.parse(profile.lastSeen) : NaN;
+      const isNewest = !Number.isFinite(priorLastSeenMs) || at >= priorLastSeenMs;
+
+      if (name) {
+        if (isNewest) {
+          profile.names = [name, ...profile.names.filter((n) => n !== name)].slice(0, 5);
+        } else if (!profile.names.includes(name)) {
+          profile.names = [...profile.names, name].slice(0, 5);
+        }
+      }
+
+      if (!Number.isFinite(priorFirstSeenMs) || at < priorFirstSeenMs) {
+        profile.firstSeen = new Date(at).toISOString();
+      }
+      if (!Number.isFinite(priorLastSeenMs) || at > priorLastSeenMs) {
+        profile.lastSeen = new Date(at).toISOString();
+      }
       profile.messageCount += 1;
       item.dirty = true;
       return profile;
@@ -315,10 +338,12 @@ export function createStore({ dataDir }) {
      * @param {{ fieldChars?: number, maxInterests?: number, maxInterestsStored?: number, topicChars?: number,
      *   noteChars?: number, interestHalfLifeDays?: number, maxDetails?: number, maxDetailsStored?: number,
      *   detailHalfLifeDays?: number, maxAliases?: number, maxAliasesStored?: number, aliasHalfLifeDays?: number,
-     *   confirmGapHours?: number, seenAt?: number, now?: number }} [opts]
+     *   confirmGapHours?: number, seenAt?: number, now?: number, clampTolerance?: number }} [opts]
      *   `maxInterestsStored`/`maxDetailsStored`/`interestHalfLifeDays`/`detailHalfLifeDays` drive the
      *   storage-cap-vs-shown-cap split and the rank decay -- see
      *   .claude/docs/prompt-contract.md, "More is stored than shown, and rank decays with age".
+     *   `clampTolerance` (see src/memory/clamp.js) governs how far prose text may run over
+     *   `fieldChars`/`noteChars`/etc. before it is cut, at a clean boundary, never mid-token.
      * @returns {object} The updated profile.
      */
     applyProfileOps(guildId, userId, ops, opts = {}) {
@@ -333,7 +358,7 @@ export function createStore({ dataDir }) {
       for (const key of ['character', 'style', 'relationship']) {
         const value = ops?.[key];
         if (typeof value === 'string' && value.trim()) {
-          profile[key] = clampString(value, opts.fieldChars);
+          profile[key] = clampText(value, opts.fieldChars, { tolerance: opts.clampTolerance });
         }
       }
 
@@ -345,6 +370,7 @@ export function createStore({ dataDir }) {
           noteChars: opts.noteChars,
           confirmGapHours: opts.confirmGapHours,
           halfLifeDays: opts.interestHalfLifeDays,
+          clampTolerance: opts.clampTolerance,
           seenAt,
         });
       }
@@ -356,6 +382,7 @@ export function createStore({ dataDir }) {
           fieldChars: opts.fieldChars,
           confirmGapHours: opts.confirmGapHours,
           halfLifeDays: opts.detailHalfLifeDays,
+          clampTolerance: opts.clampTolerance,
           seenAt,
           nextId: profile.detailsSeq,
         });

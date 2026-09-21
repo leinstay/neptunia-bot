@@ -233,6 +233,42 @@ test('buildMemoryRequest: absent config keys fall back to the config.json defaul
   assert.equal(llmMessages[0].content, '400 800 15 15 20 3 20 15 12');
 });
 
+test('buildMemoryRequest: fills {{loreTextChars}} from config.lore.textChars', () => {
+  const config = makeConfig({ lore: { textChars: 600 } });
+  const calibrator = createCalibrator();
+  const messages = [slimMessage({ id: 'm1', ts: Date.UTC(2026, 0, 1, 12, 0, 0) })];
+
+  const { messages: llmMessages } = buildMemoryRequest({
+    prompts: { memory: 'Lore text stays under {{loreTextChars}} chars.', labels },
+    config,
+    calibrator,
+    profiles: {},
+    guildMemory: {},
+    messages,
+    selfName: 'Nept',
+  });
+
+  assert.equal(llmMessages[0].content, 'Lore text stays under 600 chars.');
+});
+
+test('buildMemoryRequest: {{loreTextChars}} falls back to 400 when config.lore is absent', () => {
+  const config = makeConfig(); // no lore block at all
+  const calibrator = createCalibrator();
+  const messages = [slimMessage({ id: 'm1', ts: Date.UTC(2026, 0, 1, 12, 0, 0) })];
+
+  const { messages: llmMessages } = buildMemoryRequest({
+    prompts: { memory: 'Lore text stays under {{loreTextChars}} chars.', labels },
+    config,
+    calibrator,
+    profiles: {},
+    guildMemory: {},
+    messages,
+    selfName: 'Nept',
+  });
+
+  assert.equal(llmMessages[0].content, 'Lore text stays under 400 chars.');
+});
+
 test('buildMemoryRequest: an unknown {{placeholder}} is left untouched', () => {
   const config = makeConfig();
   const calibrator = createCalibrator();
@@ -703,6 +739,43 @@ test('analyze: a hot change to memory.mainChannelIds between two requests is pic
   });
 });
 
+test('analyze: a hot change to lore.textChars between two updates is picked up', async () => {
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    const longText = 'x'.repeat(200);
+    const hot = { config: makeConfig({ lore: { textChars: 50 } }), prompts: { memory: 'sys', labels } };
+    const llm = { complete: async () => ({ text: JSON.stringify({ lore: [{ title: 'Event', keys: ['event'], text: longText }] }) }) };
+    const updater = createMemoryUpdater({ hot, store, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept' });
+
+    await updater.analyze(guildId, [slimMessage({ id: 'm1' })]);
+    assert.equal(store.getLore(guildId)[0].text.length, Math.floor(50 * 1.25));
+
+    hot.config.lore.textChars = 150;
+    await updater.analyze(guildId, [slimMessage({ id: 'm2' })]);
+    assert.equal(store.getLore(guildId)[0].text.length, Math.floor(150 * 1.25));
+  });
+});
+
+test('analyze: a hot change to memory.clampTolerance between two updates is picked up', async () => {
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    const longText = 'x'.repeat(600);
+    const hot = {
+      config: makeConfig({ memory: { ...makeConfig().memory, fieldChars: 100, clampTolerance: 1 } }),
+      prompts: { memory: 'sys', labels },
+    };
+    const llm = { complete: async () => ({ text: JSON.stringify({ users: { 1: { character: longText } } }) }) };
+    const updater = createMemoryUpdater({ hot, store, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept' });
+
+    await updater.analyze(guildId, [slimMessage({ id: 'm1', authorId: '1', authorName: 'nick' })]);
+    assert.equal(store.getUser(guildId, '1').character.length, 100, 'tolerance 1 -- a hard limit');
+
+    hot.config.memory.clampTolerance = 2;
+    await updater.analyze(guildId, [slimMessage({ id: 'm2', authorId: '1', authorName: 'nick' })]);
+    assert.equal(store.getUser(guildId, '1').character.length, 200, 'tolerance 2, read fresh on this call');
+  });
+});
+
 test('buildMemoryRequest: <new_messages> groups messages by channel with a heading on every switch', () => {
   const config = makeConfig();
   const calibrator = createCalibrator();
@@ -927,7 +1000,7 @@ test('analyze: an explicitly-passed descriptions map (the warm-up path) is used 
 
 // ---- applyMemoryUpdate: channels --------------------------------------------
 
-test('applyMemoryUpdate: merges purpose/topics/tone for a known channel id, clamped to fieldChars', () => {
+test('applyMemoryUpdate: merges purpose/topics/tone for a known channel id, clamped tolerantly to fieldChars', () => {
   withStore((store) => {
     const guildId = 'g1';
     store.touchChannel(guildId, 'c1', { name: 'general', category: null, topic: null }, Date.now());
@@ -938,7 +1011,9 @@ test('applyMemoryUpdate: merges purpose/topics/tone for a known channel id, clam
 
     assert.equal(result.channels, 1);
     const channel = store.getChannel(guildId, 'c1');
-    assert.equal(channel.purpose, 'a lon');
+    // fieldChars 5 * the default tolerance 1.25 = 6, which lands exactly on the word
+    // boundary right after "long" -- so the whole word is kept, not cut mid-word.
+    assert.equal(channel.purpose, 'a long');
     assert.equal(channel.topics, 'games');
     assert.equal(channel.tone, 'chill');
   });
@@ -988,7 +1063,8 @@ test('applyMemoryUpdate: clamps string and detail fields to the configured limit
 
     assert.equal(result.users, 1);
     const profile = store.getUser(guildId, '1');
-    assert.equal(profile.character, '01234');
+    // fieldChars 5 * the default tolerance 1.25 = 6, hard-cut (a single long word, no boundary).
+    assert.equal(profile.character, '012345');
     assert.deepEqual(
       profile.details.map((d) => d.text),
       ['b', 'c'],

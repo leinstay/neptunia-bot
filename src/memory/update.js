@@ -19,6 +19,7 @@ import { migrateInterests } from './interests.js';
 import { migrateDetails } from './details.js';
 import { topByRank } from './ranking.js';
 import { toTokens, fromTokens } from './mentions.js';
+import { clampText } from './clamp.js';
 
 const BACKOFF_MS = 15 * 60_000;
 const MIN_LIVE_BATCH = 20; // the live analyzer never shrinks below this many messages
@@ -36,6 +37,7 @@ const MEMORY_LIMIT_DEFAULTS = {
   maxInterests: 12,
   interestTopicChars: 40,
   interestNoteChars: 120,
+  loreTextChars: 400,
 };
 
 /** `error?.message`, trimmed to 200 chars — never message contents. */
@@ -93,7 +95,7 @@ function fillTemplate(template, values) {
  * the live config so a prompt states the same limits the code actually clamps to. Missing config
  * keys fall back to MEMORY_LIMIT_DEFAULTS (config.json's own defaults); an unknown placeholder in
  * the prompt is left untouched by fillTemplate regardless.
- * @param {object} config  Live config (`config.memory`, `config.relationships`).
+ * @param {object} config  Live config (`config.memory`, `config.relationships`, `config.lore`).
  * @param {string} selfName
  */
 function memoryTemplateValues(config, selfName) {
@@ -112,6 +114,7 @@ function memoryTemplateValues(config, selfName) {
     maxInterests: memoryCfg.maxInterests ?? MEMORY_LIMIT_DEFAULTS.maxInterests,
     interestTopicChars: memoryCfg.interestTopicChars ?? MEMORY_LIMIT_DEFAULTS.interestTopicChars,
     interestNoteChars: memoryCfg.interestNoteChars ?? MEMORY_LIMIT_DEFAULTS.interestNoteChars,
+    loreTextChars: config.lore?.textChars ?? MEMORY_LIMIT_DEFAULTS.loreTextChars,
   };
 }
 
@@ -380,14 +383,12 @@ export function buildMemoryRequest({ prompts, config, calibrator, profiles, guil
   };
 }
 
-function clampString(value, maxChars) {
-  return value.trim().slice(0, maxChars);
-}
-
-function clampStringArray(value, maxChars, maxItems) {
+/** `clampText` mapped over an array of analyzer-written strings (guild `injokes`/`self`):
+ * non-strings and results left empty by clamping (e.g. a lone token dropped whole) are filtered out. */
+function clampStringArray(value, maxChars, maxItems, tolerance) {
   return value
-    .filter((item) => typeof item === 'string' && item.trim())
-    .map((item) => clampString(item, maxChars))
+    .map((item) => (typeof item === 'string' ? clampText(item, maxChars, { tolerance }) : ''))
+    .filter(Boolean)
     .slice(0, maxItems);
 }
 
@@ -562,6 +563,7 @@ export function applyMemoryUpdate(store, guildId, update, cfg, knownUserIds, kno
         maxAliasesStored: cfg.maxAliasesStored,
         aliasHalfLifeDays: cfg.aliasHalfLifeDays,
         confirmGapHours: cfg.confirmGapHours,
+        clampTolerance: cfg.clampTolerance,
         now: profileOpsNow,
         seenAt,
       });
@@ -577,6 +579,7 @@ export function applyMemoryUpdate(store, guildId, update, cfg, knownUserIds, kno
           maxDelta: relationships.maxDeltaPerUpdate ?? 15,
           historySize: relationships.historySize ?? 10,
           now: relationships.now,
+          clampTolerance: cfg.clampTolerance,
         });
         if (after.score !== before) result.affinity += 1;
       }
@@ -590,6 +593,7 @@ export function applyMemoryUpdate(store, guildId, update, cfg, knownUserIds, kno
           maxEpisodes: episodes.maxEpisodes,
           maxNew: episodes.maxNew,
           now: episodes.now,
+          clampTolerance: cfg.clampTolerance,
         });
         result.episodes += added;
       }
@@ -601,7 +605,13 @@ export function applyMemoryUpdate(store, guildId, update, cfg, knownUserIds, kno
     const tokenizedLore = update.lore.map((entry) =>
       entry && typeof entry === 'object' && !Array.isArray(entry) ? { ...entry, text: tokenize(entry.text) } : entry,
     );
-    result.lore = store.setLore(guildId, tokenizedLore, { source: 'analyzer', now: lore.now, maxEntries: lore.maxEntries });
+    result.lore = store.setLore(guildId, tokenizedLore, {
+      source: 'analyzer',
+      now: lore.now,
+      maxEntries: lore.maxEntries,
+      textChars: lore.textChars,
+      clampTolerance: cfg.clampTolerance,
+    });
   }
 
   if (update.channels && typeof update.channels === 'object' && !Array.isArray(update.channels)) {
@@ -611,7 +621,7 @@ export function applyMemoryUpdate(store, guildId, update, cfg, knownUserIds, kno
 
       const fields = {};
       for (const key of ['purpose', 'topics', 'tone']) {
-        if (typeof raw[key] === 'string') fields[key] = clampString(tokenize(raw[key]), cfg.fieldChars);
+        if (typeof raw[key] === 'string') fields[key] = clampText(tokenize(raw[key]), cfg.fieldChars, { tolerance: cfg.clampTolerance });
       }
 
       store.updateChannel(guildId, channelId, fields);
@@ -623,13 +633,13 @@ export function applyMemoryUpdate(store, guildId, update, cfg, knownUserIds, kno
   if (update.guild && typeof update.guild === 'object' && !Array.isArray(update.guild)) {
     const g = update.guild;
     if (typeof g.patterns === 'string' && g.patterns.trim()) {
-      guildFields.patterns = clampString(tokenize(g.patterns), cfg.fieldChars * 2);
+      guildFields.patterns = clampText(tokenize(g.patterns), cfg.fieldChars * 2, { tolerance: cfg.clampTolerance });
     }
     if (typeof g.starters === 'string' && g.starters.trim()) {
-      guildFields.starters = clampString(tokenize(g.starters), cfg.fieldChars * 2);
+      guildFields.starters = clampText(tokenize(g.starters), cfg.fieldChars * 2, { tolerance: cfg.clampTolerance });
     }
     if (Array.isArray(g.injokes) && g.injokes.length) {
-      const injokes = clampStringArray(tokenizeArray(g.injokes), 200, cfg.maxInjokes);
+      const injokes = clampStringArray(tokenizeArray(g.injokes), 200, cfg.maxInjokes, cfg.clampTolerance);
       if (injokes.length) guildFields.injokes = injokes;
     }
   }
@@ -639,7 +649,7 @@ export function applyMemoryUpdate(store, guildId, update, cfg, knownUserIds, kno
   }
 
   if (Array.isArray(update.self) && update.self.length > 0) {
-    const self = clampStringArray(tokenizeArray(update.self), 200, cfg.maxSelfFacts);
+    const self = clampStringArray(tokenizeArray(update.self), 200, cfg.maxSelfFacts, cfg.clampTolerance);
     if (self.length > 0) {
       store.updateGuild(guildId, { self });
       result.self = true;
@@ -878,7 +888,7 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
         : undefined;
       const loreOn = hot.config.features?.lore !== false;
       const lore = loreOn
-        ? { enabled: true, maxEntries: hot.config.lore?.maxEntries ?? Infinity, now: now() }
+        ? { enabled: true, maxEntries: hot.config.lore?.maxEntries ?? Infinity, textChars: hot.config.lore?.textChars, now: now() }
         : undefined;
       const timing = computeSeenAt(messages);
       const result = applyMemoryUpdate(

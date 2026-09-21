@@ -128,9 +128,14 @@ test('applyDetailOps: nextId defaults to 1 when omitted or invalid', () => {
 
 // ---- clamping / rejection -----------------------------------------------------
 
-test('applyDetailOps: text is clamped to fieldChars', () => {
+test('applyDetailOps: text is clamped tolerantly to fieldChars (a single long word hard-cuts at the default tolerance ceiling)', () => {
   const { items } = applyDetailOps([], { add: ['x'.repeat(60)] }, opts({ fieldChars: 5 }));
-  assert.equal(items[0].text.length, 5);
+  assert.equal(items[0].text.length, 6, '5 * the default tolerance 1.25, floored');
+});
+
+test('applyDetailOps: text within the default tolerance is kept whole', () => {
+  const { items } = applyDetailOps([], { add: ['x'.repeat(6)] }, opts({ fieldChars: 5 }));
+  assert.equal(items[0].text.length, 6);
 });
 
 test('applyDetailOps: an empty/whitespace-only text is rejected', () => {

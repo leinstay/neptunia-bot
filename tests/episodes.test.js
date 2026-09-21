@@ -18,11 +18,11 @@ test('mergeEpisodes: rejects an episode with no usable "what"', () => {
   assert.deepEqual(result.episodes, []);
 });
 
-test('mergeEpisodes: trims and clamps what/quote/feeling to their max lengths', () => {
+test('mergeEpisodes: trims and clamps what/feeling tolerantly, quote as a hard verbatim cut', () => {
   const result = mergeEpisodes([], [{ what: 'x'.repeat(300), quote: 'y'.repeat(200), feeling: 'z'.repeat(200) }], opts());
-  assert.equal(result.episodes[0].what.length, 200);
-  assert.equal(result.episodes[0].quote.length, 120);
-  assert.equal(result.episodes[0].feeling.length, 120);
+  assert.equal(result.episodes[0].what.length, 250, '200 * the default tolerance 1.25');
+  assert.equal(result.episodes[0].quote.length, 120, 'quote is always a hard cut, tolerance or not');
+  assert.equal(result.episodes[0].feeling.length, 150, '120 * the default tolerance 1.25');
 });
 
 test('mergeEpisodes: quote may be empty', () => {

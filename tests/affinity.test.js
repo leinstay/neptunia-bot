@@ -95,10 +95,15 @@ test('applyDelta: a delta that clamps to zero net change at the score boundary i
   assert.deepEqual(result, atCap);
 });
 
-test('applyDelta: reason is trimmed and capped at 200 chars', () => {
+test('applyDelta: reason within the default tolerance (200*1.25) is kept whole', () => {
   const result = applyDelta(emptyAffinity(), 1, `  ${'x'.repeat(250)}  `, OPTS);
-  assert.equal(result.reason.length, 200);
-  assert.equal(result.reason, 'x'.repeat(200));
+  assert.equal(result.reason.length, 250);
+  assert.equal(result.reason, 'x'.repeat(250));
+});
+
+test('applyDelta: reason past the tolerance is hard-cut at the tolerance ceiling (a single long word)', () => {
+  const result = applyDelta(emptyAffinity(), 1, 'x'.repeat(400), OPTS);
+  assert.equal(result.reason.length, 250);
 });
 
 test('applyDelta: an empty/whitespace reason keeps the previous reason', () => {

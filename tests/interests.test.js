@@ -4,7 +4,14 @@
 // helpers. Pure, no I/O.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { applyInterestOps, migrateInterests, normalizeTopic, isConfirmed, isStale } from '../src/memory/interests.js';
+import {
+  applyInterestOps,
+  migrateInterests,
+  normalizeTopic,
+  isConfirmed,
+  isStale,
+  stripTrailingParenthetical,
+} from '../src/memory/interests.js';
 import { topByRank } from '../src/memory/ranking.js';
 
 const NOW = Date.UTC(2026, 8, 21, 12, 0, 0); // 2026-09-21T12:00:00Z
@@ -198,10 +205,10 @@ test('applyInterestOps: remove of a topic not present is a no-op', () => {
 
 // ---- clamping / rejection ----------------------------------------------------
 
-test('applyInterestOps: topic and note are clamped to topicChars/noteChars', () => {
+test('applyInterestOps: topic is a hard identity clamp; note is clamped tolerantly (both hard-cut here, a single long word)', () => {
   const items = applyInterestOps([], { add: [{ topic: 'x'.repeat(60), note: 'y'.repeat(200) }] }, opts({ topicChars: 5, noteChars: 8 }));
-  assert.equal(items[0].topic.length, 5);
-  assert.equal(items[0].note.length, 8);
+  assert.equal(items[0].topic.length, 5, 'identity fields never exceed their limit, tolerance or not');
+  assert.equal(items[0].note.length, 10, '8 * the default tolerance 1.25');
 });
 
 test('applyInterestOps: an item with an empty topic (or whitespace-only) is rejected', () => {
@@ -453,4 +460,169 @@ test('migrateInterests: null/undefined/number/object all yield []', () => {
   assert.deepEqual(migrateInterests(undefined), []);
   assert.deepEqual(migrateInterests(42), []);
   assert.deepEqual(migrateInterests({ not: 'an array or string' }), []);
+});
+
+// ---- F31 addendum: a trailing "(qualifier)" is stripped off the topic ---------
+
+test('stripTrailingParenthetical: strips one trailing parenthetical, trimmed', () => {
+  assert.deepEqual(stripTrailingParenthetical('anime (bleak/hopeless)'), { topic: 'anime', qualifier: 'bleak/hopeless' });
+  assert.deepEqual(stripTrailingParenthetical('  anime   ( bleak )  '), { topic: 'anime', qualifier: 'bleak' });
+});
+
+test('stripTrailingParenthetical: a topic that is ONLY a parenthetical is left alone', () => {
+  assert.deepEqual(stripTrailingParenthetical('(just this)'), { topic: '(just this)', qualifier: '' });
+});
+
+test('stripTrailingParenthetical: a non-trailing parenthesis (text follows the closing bracket) is left alone', () => {
+  assert.deepEqual(stripTrailingParenthetical('anime (shonen) fan'), { topic: 'anime (shonen) fan', qualifier: '' });
+});
+
+test('stripTrailingParenthetical: unbalanced parentheses are left alone', () => {
+  assert.deepEqual(stripTrailingParenthetical('anime (bleak'), { topic: 'anime (bleak', qualifier: '' });
+  assert.deepEqual(stripTrailingParenthetical('anime bleak)'), { topic: 'anime bleak)', qualifier: '' });
+});
+
+test('stripTrailingParenthetical: an empty parenthetical is left alone', () => {
+  assert.deepEqual(stripTrailingParenthetical('anime ()'), { topic: 'anime ()', qualifier: '' });
+});
+
+test('stripTrailingParenthetical: nested parentheses -- the outermost trailing group is stripped', () => {
+  assert.deepEqual(stripTrailingParenthetical('anime (bleak (very))'), { topic: 'anime', qualifier: 'bleak (very)' });
+});
+
+test('stripTrailingParenthetical: text with no parenthesis at all is untouched', () => {
+  assert.deepEqual(stripTrailingParenthetical('anime'), { topic: 'anime', qualifier: '' });
+});
+
+test('applyInterestOps: add strips a trailing parenthetical off the topic, moving it into an empty note', () => {
+  const items = applyInterestOps([], { add: [{ topic: 'anime (bleak/hopeless)', note: '' }] }, opts());
+  assert.equal(items.length, 1);
+  assert.equal(items[0].topic, 'anime');
+  assert.equal(items[0].note, 'bleak/hopeless');
+});
+
+test('applyInterestOps: add does not overwrite a non-empty incoming note with the stripped qualifier', () => {
+  const items = applyInterestOps([], { add: [{ topic: 'anime (bleak/hopeless)', note: 'watches subbed only' }] }, opts());
+  assert.equal(items[0].topic, 'anime');
+  assert.equal(items[0].note, 'watches subbed only');
+});
+
+test('applyInterestOps: add leaves the topic whole when the parenthesis is not trailing or the topic is only a parenthetical', () => {
+  const a = applyInterestOps([], { add: [{ topic: 'anime (shonen) fan', note: '' }] }, opts());
+  assert.equal(a[0].topic, 'anime (shonen) fan');
+  const b = applyInterestOps([], { add: [{ topic: '(just this)', note: '' }] }, opts());
+  assert.equal(b[0].topic, '(just this)');
+});
+
+test('applyInterestOps: a sighting of "topic (qualifier)" is a sighting of the already-stored plain topic; the stripped qualifier never overwrites a real stored note', () => {
+  const existing = [{ topic: 'anime', note: 'watches a lot', weight: 1, firstSeen: 'a', lastSeen: null }];
+  const items = applyInterestOps(existing, { add: [{ topic: 'anime (bleak/hopeless)', note: '' }] }, opts());
+  assert.equal(items.length, 1, 'no near-duplicate topic created');
+  assert.equal(items[0].topic, 'anime');
+  assert.equal(items[0].weight, 2);
+  // the incoming note was empty, but the stored item already had a real note -- the qualifier
+  // ("bleak/hopeless") is discarded, not written over it (lead review fix).
+  assert.equal(items[0].note, 'watches a lot');
+});
+
+test('applyInterestOps: the stripped qualifier fills the note only when the stored item has none yet', () => {
+  const existing = [{ topic: 'anime', note: '', weight: 1, firstSeen: 'a', lastSeen: null }];
+  const items = applyInterestOps(existing, { add: [{ topic: 'anime (bleak/hopeless)', note: '' }] }, opts());
+  assert.equal(items[0].note, 'bleak/hopeless');
+});
+
+test('applyInterestOps: a genuinely non-empty incoming note still replaces the stored one, qualifier or not', () => {
+  const existing = [{ topic: 'anime', note: 'watches a lot', weight: 1, firstSeen: 'a', lastSeen: null }];
+  const items = applyInterestOps(existing, { add: [{ topic: 'anime (bleak/hopeless)', note: 'now watches only dark shows' }] }, opts());
+  assert.equal(items[0].note, 'now watches only dark shows');
+});
+
+test('applyInterestOps: seen strips the qualifier before matching', () => {
+  const existing = [{ topic: 'anime', note: '', weight: 1, firstSeen: 'a', lastSeen: null }];
+  const items = applyInterestOps(existing, { seen: ['anime (bleak/hopeless)'] }, opts());
+  assert.equal(items.length, 1);
+  assert.equal(items[0].weight, 2);
+});
+
+test('applyInterestOps: remove matches by the stripped plain topic', () => {
+  const existing = [
+    { topic: 'Anime', note: '', weight: 3, firstSeen: 'a', lastSeen: 'a' },
+    { topic: 'Chess', note: '', weight: 1, firstSeen: 'a', lastSeen: 'a' },
+  ];
+  const items = applyInterestOps(existing, { remove: ['anime (bleak/hopeless)'] }, opts());
+  assert.deepEqual(items.map((i) => i.topic), ['Chess']);
+});
+
+test('applyInterestOps: a legacy stored topic that still carries the qualifier is rewritten to plain when a matching op arrives, and sighted as the same item', () => {
+  const existing = [{ topic: 'Anime (bleak/hopeless)', note: 'watches subbed', weight: 1, firstSeen: 'a', lastSeen: null }];
+  const items = applyInterestOps(existing, { seen: ['anime'] }, opts());
+  assert.equal(items.length, 1, 'still one item, not two');
+  assert.equal(items[0].topic, 'Anime', 'rewritten to the plain form');
+  assert.equal(items[0].weight, 2, 'treated as a sighting of the same item');
+  assert.equal(items[0].note, 'watches subbed', 'the note carries over untouched');
+});
+
+test('applyInterestOps: an untargeted legacy parenthetical topic is left as stored', () => {
+  const existing = [{ topic: 'Anime (bleak/hopeless)', note: '', weight: 1, firstSeen: 'a', lastSeen: null }];
+  const items = applyInterestOps(existing, { add: [{ topic: 'Chess', note: '' }] }, opts());
+  assert.ok(items.some((i) => i.topic === 'Anime (bleak/hopeless)'), 'no op targeted it, so it is left alone');
+});
+
+test('applyInterestOps: two stored variants (plain + parenthetical) collapse into one when an op targets the plain form', () => {
+  const existing = [
+    { topic: 'Anime', note: '', weight: 3, firstSeen: '2025-01-01T00:00:00.000Z', lastSeen: '2025-06-01T00:00:00.000Z' },
+    { topic: 'Anime (bleak/hopeless)', note: 'likes dark stories', weight: 5, firstSeen: '2024-01-01T00:00:00.000Z', lastSeen: '2025-08-01T00:00:00.000Z' },
+  ];
+  const items = applyInterestOps(existing, { seen: ['anime'] }, opts({ seenAt: Date.parse('2026-01-01T00:00:00.000Z') }));
+  assert.equal(items.length, 1, 'the two variants collapse into one');
+  assert.equal(items[0].topic, 'Anime');
+  assert.equal(items[0].weight, 6, 'the heavier stored weight (5), bumped once by this sighting');
+  assert.equal(items[0].firstSeen, '2024-01-01T00:00:00.000Z', 'the earliest firstSeen of the two');
+  assert.equal(items[0].note, 'likes dark stories', 'the note of the heavier stored variant survives the merge');
+});
+
+// ---- lead review fix: the stripped qualifier must never clobber a real stored note ----
+
+test('F31 review fix: reproduced case -- collapsing two stored variants then adding "Topic (qualifier)" keeps the real note, drops the qualifier', () => {
+  const existing = [
+    { topic: 'anime', note: 'watches', weight: 2, firstSeen: 'a', lastSeen: '2025-01-01T00:00:00.000Z' },
+    { topic: 'anime (bleak/hopeless)', note: 'looks for heavy shows', weight: 3, firstSeen: 'a', lastSeen: '2025-06-01T00:00:00.000Z' },
+  ];
+  const items = applyInterestOps(
+    existing,
+    { add: [{ topic: 'Anime (shonen)', note: '' }] },
+    opts({ seenAt: Date.parse('2026-01-01T00:00:00.000Z') }),
+  );
+  assert.equal(items.length, 1);
+  assert.equal(items[0].topic, 'anime');
+  assert.equal(items[0].note, 'looks for heavy shows', 'the heavier variant\'s note (from the collapse) is kept -- "shonen" is discarded');
+});
+
+test('applyInterestOps: collapsing two variants keeps the note of the HEAVIER one, regardless of storage order', () => {
+  // the lighter item ('anime', weight 2) is stored first, has its own note -- the heavier one
+  // ('anime (x)', weight 5) must still win, unlike a plain first-wins/order-based pick.
+  const existing = [
+    { topic: 'anime', note: 'a lighter note', weight: 2, firstSeen: 'a', lastSeen: '2025-01-01T00:00:00.000Z' },
+    { topic: 'anime (x)', note: 'a heavier note', weight: 5, firstSeen: 'a', lastSeen: '2025-02-01T00:00:00.000Z' },
+  ];
+  const items = applyInterestOps(existing, { seen: ['anime'] }, opts());
+  assert.equal(items[0].note, 'a heavier note');
+});
+
+test('applyInterestOps: collapsing two EQUAL-weight variants keeps the note of the one with the newer lastSeen', () => {
+  const existing = [
+    { topic: 'anime', note: 'older note', weight: 3, firstSeen: 'a', lastSeen: '2025-01-01T00:00:00.000Z' },
+    { topic: 'anime (x)', note: 'newer note', weight: 3, firstSeen: 'a', lastSeen: '2025-06-01T00:00:00.000Z' },
+  ];
+  const items = applyInterestOps(existing, { seen: ['anime'] }, opts());
+  assert.equal(items[0].note, 'newer note');
+});
+
+test('applyInterestOps: collapsing falls back to the other note when the heavier/newer variant has none', () => {
+  const existing = [
+    { topic: 'anime', note: 'the only note here', weight: 2, firstSeen: 'a', lastSeen: '2025-01-01T00:00:00.000Z' },
+    { topic: 'anime (x)', note: '', weight: 5, firstSeen: 'a', lastSeen: '2025-06-01T00:00:00.000Z' },
+  ];
+  const items = applyInterestOps(existing, { seen: ['anime'] }, opts());
+  assert.equal(items[0].note, 'the only note here', 'the heavier variant had no note, so the lighter one\'s note is kept');
 });

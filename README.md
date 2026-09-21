@@ -228,6 +228,7 @@ Settings for the media describer (`features.mediaDescriptions`).
 | `maxBatchAgeMinutes` | `180` | Force update after (min) |
 | `maxOutputTokens` | `8000` | Max analyzer output tokens |
 | `fieldChars` | `400` | Profile field limit (chars) |
+| `clampTolerance` | `1.25` | Text from the analyzer may exceed a limit by this factor before it is cut; cuts land on a sentence or word boundary and never inside a member reference |
 | `maxDetails` | `15` | Detail items shown to the persona and analyzer per profile |
 | `maxDetailsStored` | `40` | Detail items kept per profile; the top by frequency and recency are shown |
 | `maxInterests` | `12` | Interest items shown to the persona and analyzer per profile |
@@ -265,6 +266,7 @@ The analyzer prompt reads these limits as placeholders, so raising a value takes
 | `maxEntries` | `500` | Max lorebook entries per server |
 | `scanMessages` | `30` | Messages scanned for key matches |
 | `maxMatches` | `8` | Max entries shown per request |
+| `textChars` | `600` | Lore entry text limit (chars) |
 
 ## Large servers
 
@@ -335,9 +337,11 @@ One Discord slash command, `/nep` (the name comes from `bot.commandName`). Guild
 | `/nep rule remove <number>` | Remove a rule by number |
 | `/nep model show` | Show active models for each role (`talk`, `analyzer`, `media`) |
 | `/nep model set <role> <id>` | Set the model for a role (`talk`, `analyzer`, `media`) |
-| `/nep memory show <user>` | Show a stored profile with episodes |
+| `/nep memory show <user> [section] [limit] [order]` | Without a section: compact summary. Sections: `character`, `style`, `relationship`, `affinity`, `aliases`, `interests`, `details`, `episodes`, `raw` (stored JSON). List sections take `limit` 1..100 (default 25) and `order`: `rank` (default, divider at the visibility cutoff) or `recent`. Stored member references resolve to the current name, except in `raw` |
 | `/nep memory forget <user>` | Delete a stored profile |
 | `/nep memory affinity <user> [score] [reason]` | Show or set attitude (-100..100) |
+| `/nep memory alias-add <user> <name>` | Add a chat alias; confirmed at once |
+| `/nep memory alias-remove <user> <name>` | Remove a chat alias |
 | `/nep memory wipe <confirm>` | Wipe all analyzer memory for this server; type the exact server name to confirm |
 | `/nep lore add <title> <keys> <text> [always]` | Add a lorebook entry |
 | `/nep lore list [query]` | List lorebook entries |

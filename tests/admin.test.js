@@ -11,6 +11,7 @@ import {
   setPath,
   unsetPath,
   createAdmin,
+  buildProfileSummary,
 } from '../src/admin.js';
 import { emptyAffinity, applyDelta } from '../src/memory/affinity.js';
 import { upsertLore } from '../src/memory/lore.js';
@@ -146,6 +147,56 @@ test('unsetPath: does not mutate its input and is a no-op for a missing path', (
 
 test('unsetPath: rejects prototype-pollution paths', () => {
   assert.throws(() => unsetPath({}, '__proto__.polluted'));
+});
+
+// ---------------------------------------------------------------------------
+// buildProfileSummary (F32, pure)
+// ---------------------------------------------------------------------------
+
+test('buildProfileSummary: a minimal profile renders the expected fields', () => {
+  const profile = { id: '123', names: ['Bob'], messageCount: 3 };
+  const text = buildProfileSummary(profile, {});
+  assert.ok(text.includes('name: Bob'));
+  assert.ok(text.includes('former names: none'));
+  assert.ok(text.includes('aliases: none'));
+  assert.ok(text.includes('messages: 3'));
+  assert.ok(text.includes('character: (empty)'));
+});
+
+test('buildProfileSummary: never exceeds 2000 chars, even for a huge profile, and points to the full sections', () => {
+  const profile = {
+    id: '123',
+    names: Array.from({ length: 10 }, (_, i) => `VeryLongDisplayNameNumber${i}`),
+    messageCount: 999999,
+    firstSeen: '2020-01-01T00:00:00.000Z',
+    lastSeen: '2026-09-20T00:00:00.000Z',
+    affinity: { score: 99, reason: 'x'.repeat(500) },
+    character: 'c'.repeat(5000),
+    style: 's'.repeat(5000),
+    relationship: 'r'.repeat(5000),
+    interests: Array.from({ length: 40 }, (_, i) => ({ topic: `Topic number ${i} is quite long`, weight: i })),
+    details: Array.from({ length: 40 }, (_, i) => ({ id: i, text: 'd'.repeat(200), weight: i })),
+    episodes: Array.from({ length: 20 }, () => ({})),
+    aliases: Array.from({ length: 15 }, (_, i) => ({ name: `AliasNumber${i}longenough`, weight: i })),
+  };
+
+  const text = buildProfileSummary(profile, {});
+
+  assert.ok(text.length <= 2000, `expected <= 2000 chars, got ${text.length}`);
+  assert.ok(text.includes('(full text: section character)'));
+  assert.ok(text.includes('(full text: section style)'));
+  assert.ok(text.includes('(full text: section relationship)'));
+  assert.ok(text.includes('(full text: section aliases)'));
+  assert.ok(text.includes('interests: 40 stored'), 'the top-5 interest topics stay short by construction, so this is not truncated');
+});
+
+test('buildProfileSummary: resolves <@id> tokens in free-text fields via nameOf', () => {
+  const otherId = '999999999999999999';
+  const profile = { id: '123', names: ['Bob'], character: `trusts <@${otherId}>` };
+  const nameOf = (id) => (id === otherId ? 'Zoe' : null);
+
+  const text = buildProfileSummary(profile, {}, nameOf);
+  assert.ok(text.includes(`character: trusts Zoe (id:${otherId})`));
 });
 
 // ---------------------------------------------------------------------------
@@ -694,7 +745,12 @@ test('run: memory.wipe requires a resolved guild', async () => {
   await assert.rejects(() => admin.run('memory.wipe', { confirm: 'anything' }, {}), /no guild resolved yet/);
 });
 
-test('run: memory.show also prints the stored episodes (date, weight, what, quote)', async () => {
+// The following memory.show tests exercise `section: 'raw'` -- the exact
+// output the command produced before F32 added the sectioned view (see
+// src/admin.js#legacyMemoryShowView). F32's own sections are covered further
+// below.
+
+test('run: memory.show section:raw also prints the stored episodes (date, weight, what, quote)', async () => {
   const rootDir = makeRoot();
   const { admin, store } = makeAdmin(rootDir);
   store.profiles.set('g1:123', {
@@ -702,7 +758,7 @@ test('run: memory.show also prints the stored episodes (date, weight, what, quot
     episodes: [{ date: '2026-01-01', what: 'promised to help', quote: 'I got you', feeling: 'touched', weight: 4, addedAt: 'x' }],
   });
 
-  const result = await admin.run('memory.show', { userId: '123' }, { guildId: 'g1' });
+  const result = await admin.run('memory.show', { userId: '123', section: 'raw' }, { guildId: 'g1' });
 
   assert.ok(result.includes('episodes:'));
   assert.ok(result.includes('2026-01-01'));
@@ -711,17 +767,17 @@ test('run: memory.show also prints the stored episodes (date, weight, what, quot
   assert.ok(result.includes('I got you'));
 });
 
-test('run: memory.show without stored episodes prints no episodes section', async () => {
+test('run: memory.show section:raw without stored episodes prints no episodes section', async () => {
   const rootDir = makeRoot();
   const { admin, store } = makeAdmin(rootDir);
   store.profiles.set('g1:123', { id: '123', character: 'chatty' });
 
-  const result = await admin.run('memory.show', { userId: '123' }, { guildId: 'g1' });
+  const result = await admin.run('memory.show', { userId: '123', section: 'raw' }, { guildId: 'g1' });
 
   assert.ok(!result.includes('episodes:'));
 });
 
-test('run: memory.show also prints interests one per line with weight and last-seen date', async () => {
+test('run: memory.show section:raw also prints interests one per line with weight and last-seen date', async () => {
   const rootDir = makeRoot();
   const { admin, store } = makeAdmin(rootDir);
   store.profiles.set('g1:123', {
@@ -732,24 +788,24 @@ test('run: memory.show also prints interests one per line with weight and last-s
     ],
   });
 
-  const result = await admin.run('memory.show', { userId: '123' }, { guildId: 'g1' });
+  const result = await admin.run('memory.show', { userId: '123', section: 'raw' }, { guildId: 'g1' });
 
   assert.ok(result.includes('interests:'));
   assert.ok(result.includes('[weight 3, last 2026-01-05] Chess: plays weekly'));
   assert.ok(result.includes('[weight 1] Anime'), 'a null lastSeen omits the last-date suffix');
 });
 
-test('run: memory.show without stored interests prints no interests section', async () => {
+test('run: memory.show section:raw without stored interests prints no interests section', async () => {
   const rootDir = makeRoot();
   const { admin, store } = makeAdmin(rootDir);
   store.profiles.set('g1:123', { id: '123', character: 'chatty', interests: [] });
 
-  const result = await admin.run('memory.show', { userId: '123' }, { guildId: 'g1' });
+  const result = await admin.run('memory.show', { userId: '123', section: 'raw' }, { guildId: 'g1' });
 
   assert.ok(!result.includes('interests:'));
 });
 
-test('run: memory.show also prints details one per line with id, weight and last-seen date', async () => {
+test('run: memory.show section:raw also prints details one per line with id, weight and last-seen date', async () => {
   const rootDir = makeRoot();
   const { admin, store } = makeAdmin(rootDir);
   store.profiles.set('g1:123', {
@@ -760,24 +816,24 @@ test('run: memory.show also prints details one per line with id, weight and last
     ],
   });
 
-  const result = await admin.run('memory.show', { userId: '123' }, { guildId: 'g1' });
+  const result = await admin.run('memory.show', { userId: '123', section: 'raw' }, { guildId: 'g1' });
 
   assert.ok(result.includes('details:'));
   assert.ok(result.includes('#3 [weight 2, last 2026-01-05] Owns a cat'));
   assert.ok(result.includes('#4 [weight 1] Plays guitar'));
 });
 
-test('run: memory.show without stored details prints no details section', async () => {
+test('run: memory.show section:raw without stored details prints no details section', async () => {
   const rootDir = makeRoot();
   const { admin, store } = makeAdmin(rootDir);
   store.profiles.set('g1:123', { id: '123', character: 'chatty', details: [] });
 
-  const result = await admin.run('memory.show', { userId: '123' }, { guildId: 'g1' });
+  const result = await admin.run('memory.show', { userId: '123', section: 'raw' }, { guildId: 'g1' });
 
   assert.ok(!result.includes('details:'));
 });
 
-test('run: memory.show also prints aliases one per line with weight and last-seen date', async () => {
+test('run: memory.show section:raw also prints aliases one per line with weight and last-seen date', async () => {
   const rootDir = makeRoot();
   const { admin, store } = makeAdmin(rootDir);
   store.profiles.set('g1:123', {
@@ -788,24 +844,24 @@ test('run: memory.show also prints aliases one per line with weight and last-see
     ],
   });
 
-  const result = await admin.run('memory.show', { userId: '123' }, { guildId: 'g1' });
+  const result = await admin.run('memory.show', { userId: '123', section: 'raw' }, { guildId: 'g1' });
 
   assert.ok(result.includes('aliases:'));
   assert.ok(result.includes('[weight 3, last 2026-01-05] Ari'));
   assert.ok(result.includes('[weight 1] A'), 'a null lastSeen omits the last-date suffix');
 });
 
-test('run: memory.show without stored aliases prints no aliases section', async () => {
+test('run: memory.show section:raw without stored aliases prints no aliases section', async () => {
   const rootDir = makeRoot();
   const { admin, store } = makeAdmin(rootDir);
   store.profiles.set('g1:123', { id: '123', character: 'chatty', aliases: [] });
 
-  const result = await admin.run('memory.show', { userId: '123' }, { guildId: 'g1' });
+  const result = await admin.run('memory.show', { userId: '123', section: 'raw' }, { guildId: 'g1' });
 
   assert.ok(!result.includes('aliases:'));
 });
 
-test('run: memory.show lists every stored interest in rank order and marks the divider between shown and hidden', async () => {
+test('run: memory.show section:raw lists every stored interest in rank order and marks the divider between shown and hidden', async () => {
   const rootDir = makeRoot();
   const hot = makeHot(rootDir);
   hot.config.memory = { maxInterests: 1, interestHalfLifeDays: 180 };
@@ -818,7 +874,7 @@ test('run: memory.show lists every stored interest in rank order and marks the d
     ],
   });
 
-  const result = await admin.run('memory.show', { userId: '123' }, { guildId: 'g1' });
+  const result = await admin.run('memory.show', { userId: '123', section: 'raw' }, { guildId: 'g1' });
 
   assert.ok(result.includes('Fresh interest'), 'both stored interests are listed');
   assert.ok(result.includes('Ancient favorite'));
@@ -829,7 +885,7 @@ test('run: memory.show lists every stored interest in rank order and marks the d
   assert.ok(freshLine >= 0 && dividerLine > freshLine && ancientLine > dividerLine, 'the freshest ranks first, above the divider; the ancient heavy one sits below it');
 });
 
-test('run: memory.show lists every stored detail in rank order and marks the divider between shown and hidden', async () => {
+test('run: memory.show section:raw lists every stored detail in rank order and marks the divider between shown and hidden', async () => {
   const rootDir = makeRoot();
   const hot = makeHot(rootDir);
   hot.config.memory = { maxDetails: 1, detailHalfLifeDays: 30 };
@@ -842,7 +898,7 @@ test('run: memory.show lists every stored detail in rank order and marks the div
     ],
   });
 
-  const result = await admin.run('memory.show', { userId: '123' }, { guildId: 'g1' });
+  const result = await admin.run('memory.show', { userId: '123', section: 'raw' }, { guildId: 'g1' });
 
   const lines = result.split('\n');
   const freshLine = lines.findIndex((l) => l.trim().startsWith('#') && l.includes('Fresh detail'));
@@ -851,16 +907,401 @@ test('run: memory.show lists every stored detail in rank order and marks the div
   assert.ok(freshLine >= 0 && dividerLine > freshLine && ancientLine > dividerLine, 'the freshest ranks first, above the divider; the ancient heavy one sits below it');
 });
 
-test('run: memory.show with no more stored items than the shown cap prints no divider', async () => {
+test('run: memory.show section:raw with no more stored items than the shown cap prints no divider', async () => {
   const rootDir = makeRoot();
   const hot = makeHot(rootDir);
   hot.config.memory = { maxInterests: 5 };
   const { admin, store } = makeAdmin(rootDir, { hot });
   store.profiles.set('g1:123', { id: '123', interests: [{ topic: 'Chess', note: '', weight: 1, firstSeen: 'a', lastSeen: 'a' }] });
 
-  const result = await admin.run('memory.show', { userId: '123' }, { guildId: 'g1' });
+  const result = await admin.run('memory.show', { userId: '123', section: 'raw' }, { guildId: 'g1' });
 
   assert.ok(!result.includes('not shown'));
+});
+
+// ---------------------------------------------------------------------------
+// memory.show (F32) -- sectioned view: summary (default), character/style/
+// relationship, affinity, aliases/interests/details/episodes with order/limit
+// ---------------------------------------------------------------------------
+
+test('run: memory.show defaults to the summary section', async () => {
+  const rootDir = makeRoot();
+  const { admin, store } = makeAdmin(rootDir);
+  store.profiles.set('g1:123', {
+    id: '123',
+    names: ['Bob', 'Bobby'],
+    messageCount: 12,
+    firstSeen: '2026-01-01T00:00:00.000Z',
+    lastSeen: '2026-09-20T00:00:00.000Z',
+    affinity: { score: 30, reason: 'helped once', history: [] },
+    character: 'chatty',
+    style: 'short messages',
+    relationship: 'friendly',
+    interests: [{ topic: 'Chess', note: '', weight: 3, firstSeen: 'a', lastSeen: 'a' }],
+    details: [{ id: 1, text: 'owns a cat', weight: 1, firstSeen: 'a', lastSeen: 'a' }],
+    episodes: [],
+    aliases: [{ name: 'Ari', weight: 3, firstSeen: 'a', lastSeen: 'a' }],
+  });
+
+  const result = await admin.run('memory.show', { userId: '123' }, { guildId: 'g1' });
+
+  assert.ok(result.includes('name: Bob'));
+  assert.ok(result.includes('former names: Bobby'));
+  assert.ok(result.includes('aliases: Ari'));
+  assert.ok(result.includes('messages: 12'));
+  assert.ok(result.includes('first seen: 2026-01-01'));
+  assert.ok(result.includes('last seen: 2026-09-20'));
+  assert.ok(result.includes('attitude: 30'));
+  assert.ok(result.includes('helped once'));
+  assert.ok(result.includes('character: chatty'));
+  assert.ok(result.includes('style: short messages'));
+  assert.ok(result.includes('relationship: friendly'));
+  assert.ok(result.includes('interests: 1 stored'));
+  assert.ok(result.includes('Chess'));
+  assert.ok(result.includes('details: 1 stored'));
+  assert.ok(result.includes('episodes: 0 stored'));
+  assert.ok(result.length <= 2000);
+  // never the raw JSON dump
+  assert.ok(!result.trim().startsWith('{'));
+});
+
+test('run: memory.show section:summary always fits one Discord message, even for a huge profile', async () => {
+  const rootDir = makeRoot();
+  const { admin, store } = makeAdmin(rootDir);
+  store.profiles.set('g1:123', {
+    id: '123',
+    names: Array.from({ length: 5 }, (_, i) => `VeryLongDisplayNameNumber${i}`),
+    messageCount: 999999,
+    firstSeen: '2020-01-01T00:00:00.000Z',
+    lastSeen: '2026-09-20T00:00:00.000Z',
+    affinity: { score: 99, reason: 'x'.repeat(400), history: [] },
+    character: 'c'.repeat(4000),
+    style: 's'.repeat(4000),
+    relationship: 'r'.repeat(4000),
+    interests: Array.from({ length: 40 }, (_, i) => ({ topic: `Topic number ${i} is quite long indeed`, note: 'n'.repeat(200), weight: i, firstSeen: 'a', lastSeen: 'a' })),
+    details: Array.from({ length: 40 }, (_, i) => ({ id: i, text: 'd'.repeat(200), weight: i, firstSeen: 'a', lastSeen: 'a' })),
+    episodes: Array.from({ length: 20 }, (_, i) => ({ date: '2026-01-01', what: 'e'.repeat(200), weight: 3 })),
+    aliases: Array.from({ length: 15 }, (_, i) => ({ name: `AliasNumber${i}longenough`, weight: i, firstSeen: 'a', lastSeen: 'a' })),
+  });
+
+  const result = await admin.run('memory.show', { userId: '123', section: 'summary' }, { guildId: 'g1' });
+
+  assert.ok(result.length <= 2000, `expected <= 2000 chars, got ${result.length}`);
+  assert.ok(result.includes('character:'));
+});
+
+test('run: memory.show section:character/style/relationship show the full field alone', async () => {
+  const rootDir = makeRoot();
+  const { admin, store } = makeAdmin(rootDir);
+  store.profiles.set('g1:123', { id: '123', character: 'chatty and warm', style: 'short bursts', relationship: 'close friends' });
+
+  assert.equal(await admin.run('memory.show', { userId: '123', section: 'character' }, { guildId: 'g1' }), 'chatty and warm');
+  assert.equal(await admin.run('memory.show', { userId: '123', section: 'style' }, { guildId: 'g1' }), 'short bursts');
+  assert.equal(await admin.run('memory.show', { userId: '123', section: 'relationship' }, { guildId: 'g1' }), 'close friends');
+});
+
+test('run: memory.show section:character reports "(empty)" when nothing is stored', async () => {
+  const rootDir = makeRoot();
+  const { admin, store } = makeAdmin(rootDir);
+  store.profiles.set('g1:123', { id: '123' });
+
+  const result = await admin.run('memory.show', { userId: '123', section: 'character' }, { guildId: 'g1' });
+  assert.equal(result, '(empty)');
+});
+
+test('run: memory.show section:character/relationship/interests/details/episodes resolve <@id> tokens to "name (id:...)"', async () => {
+  const rootDir = makeRoot();
+  const { admin, store } = makeAdmin(rootDir);
+  const otherId = '999999999999999999'; // 18-digit snowflake, matches src/memory/mentions.js#TOKEN_RE
+  store.profiles.set(`g1:${otherId}`, { id: otherId, names: ['Zoe'] });
+  store.profiles.set('g1:123', {
+    id: '123',
+    character: `trusts <@${otherId}> a lot`,
+    interests: [{ topic: 'Chess', note: `plays with <@${otherId}>`, weight: 2, firstSeen: 'a', lastSeen: 'a' }],
+    details: [{ id: 1, text: `lives near <@${otherId}>`, weight: 1, firstSeen: 'a', lastSeen: 'a' }],
+    episodes: [{ date: '2026-01-01', what: `helped <@${otherId}> move`, weight: 3 }],
+  });
+
+  assert.equal(await admin.run('memory.show', { userId: '123', section: 'character' }, { guildId: 'g1' }), `trusts Zoe (id:${otherId}) a lot`);
+  assert.ok((await admin.run('memory.show', { userId: '123', section: 'interests' }, { guildId: 'g1' })).includes(`plays with Zoe (id:${otherId})`));
+  assert.ok((await admin.run('memory.show', { userId: '123', section: 'details' }, { guildId: 'g1' })).includes(`lives near Zoe (id:${otherId})`));
+  assert.ok((await admin.run('memory.show', { userId: '123', section: 'episodes' }, { guildId: 'g1' })).includes(`helped Zoe (id:${otherId}) move`));
+});
+
+test('run: memory.show section:raw leaves <@id> tokens unresolved', async () => {
+  const rootDir = makeRoot();
+  const { admin, store } = makeAdmin(rootDir);
+  const otherId = '999999999999999999';
+  store.profiles.set('g1:123', { id: '123', character: `trusts <@${otherId}> a lot` });
+
+  const result = await admin.run('memory.show', { userId: '123', section: 'raw' }, { guildId: 'g1' });
+  assert.ok(result.includes(`trusts <@${otherId}> a lot`));
+});
+
+test('run: memory.show section:affinity shows score, band, reason and recent history', async () => {
+  const rootDir = makeRoot();
+  const { admin, store } = makeAdmin(rootDir);
+  store.profiles.set('g1:123', {
+    id: '123',
+    affinity: { score: 42, reason: 'helped once', history: [{ ts: 't1', delta: 42, score: 42, reason: 'helped once' }] },
+  });
+
+  const result = await admin.run('memory.show', { userId: '123', section: 'affinity' }, { guildId: 'g1' });
+  assert.ok(result.includes('score: 42'));
+  assert.ok(result.includes('band: fond'));
+  assert.ok(result.includes('reason: helped once'));
+});
+
+test('run: memory.show section:interests renders "topic — note [seen N, last DATE]"', async () => {
+  const rootDir = makeRoot();
+  const { admin, store } = makeAdmin(rootDir);
+  store.profiles.set('g1:123', {
+    id: '123',
+    interests: [
+      { topic: 'Chess', note: 'plays weekly', weight: 3, firstSeen: 'a', lastSeen: '2026-01-05T00:00:00.000Z' },
+      { topic: 'Anime', note: '', weight: 1, firstSeen: 'a', lastSeen: null },
+    ],
+  });
+
+  const result = await admin.run('memory.show', { userId: '123', section: 'interests' }, { guildId: 'g1' });
+  assert.ok(result.includes('Chess — plays weekly [seen 3, last 2026-01-05]'));
+  assert.ok(result.includes('Anime [seen 1]'));
+});
+
+test('run: memory.show section:interests reports "No interests stored." when empty', async () => {
+  const rootDir = makeRoot();
+  const { admin, store } = makeAdmin(rootDir);
+  store.profiles.set('g1:123', { id: '123', interests: [] });
+
+  assert.equal(await admin.run('memory.show', { userId: '123', section: 'interests' }, { guildId: 'g1' }), 'No interests stored.');
+});
+
+test('run: memory.show section:details renders "#id text [seen N, last DATE]"', async () => {
+  const rootDir = makeRoot();
+  const { admin, store } = makeAdmin(rootDir);
+  store.profiles.set('g1:123', {
+    id: '123',
+    details: [{ id: 7, text: 'owns a cat', weight: 2, firstSeen: 'a', lastSeen: '2026-01-05T00:00:00.000Z' }],
+  });
+
+  const result = await admin.run('memory.show', { userId: '123', section: 'details' }, { guildId: 'g1' });
+  assert.equal(result, '#7 owns a cat [seen 2, last 2026-01-05]');
+});
+
+test('run: memory.show section:episodes keeps the existing date/weight/what/quote line format', async () => {
+  const rootDir = makeRoot();
+  const { admin, store } = makeAdmin(rootDir);
+  store.profiles.set('g1:123', {
+    id: '123',
+    episodes: [{ date: '2026-01-01', what: 'promised to help', quote: 'I got you', weight: 4 }],
+  });
+
+  const result = await admin.run('memory.show', { userId: '123', section: 'episodes' }, { guildId: 'g1' });
+  assert.equal(result, '2026-01-01 [weight 4] promised to help "I got you"');
+});
+
+test('run: memory.show section:aliases keeps the existing "[weight N, last DATE] name" line format', async () => {
+  const rootDir = makeRoot();
+  const { admin, store } = makeAdmin(rootDir);
+  store.profiles.set('g1:123', { id: '123', aliases: [{ name: 'Ari', weight: 3, firstSeen: 'a', lastSeen: '2026-01-05T00:00:00.000Z' }] });
+
+  const result = await admin.run('memory.show', { userId: '123', section: 'aliases' }, { guildId: 'g1' });
+  assert.equal(result, '[weight 3, last 2026-01-05] Ari');
+});
+
+test('run: memory.show order:recent sorts a list section newest lastSeen first, no divider', async () => {
+  const rootDir = makeRoot();
+  const { admin, store } = makeAdmin(rootDir);
+  store.profiles.set('g1:123', {
+    id: '123',
+    interests: [
+      { topic: 'Old', note: '', weight: 5, firstSeen: 'a', lastSeen: '2020-01-01T00:00:00.000Z' },
+      { topic: 'New', note: '', weight: 1, firstSeen: 'a', lastSeen: '2026-09-01T00:00:00.000Z' },
+    ],
+  });
+
+  const result = await admin.run('memory.show', { userId: '123', section: 'interests', order: 'recent' }, { guildId: 'g1' });
+  const lines = result.split('\n');
+  assert.ok(lines[0].startsWith('New'), 'the newer lastSeen sorts first under order:recent');
+  assert.ok(lines[1].startsWith('Old'));
+  assert.ok(!result.includes('not shown'), 'order:recent never shows the shown/stored divider');
+});
+
+test('run: memory.show respects a custom limit, capping a list section', async () => {
+  const rootDir = makeRoot();
+  const { admin, store } = makeAdmin(rootDir);
+  store.profiles.set('g1:123', {
+    id: '123',
+    interests: Array.from({ length: 5 }, (_, i) => ({ topic: `T${i}`, note: '', weight: 1, firstSeen: 'a', lastSeen: 'a' })),
+  });
+
+  const result = await admin.run('memory.show', { userId: '123', section: 'interests', limit: 2 }, { guildId: 'g1' });
+  assert.equal(result.split('\n').length, 2);
+});
+
+test('run: memory.show falls back to the default limit (25) for an out-of-range value', async () => {
+  const rootDir = makeRoot();
+  const { admin, store } = makeAdmin(rootDir);
+  store.profiles.set('g1:123', {
+    id: '123',
+    interests: Array.from({ length: 30 }, (_, i) => ({ topic: `T${i}`, note: '', weight: 1, firstSeen: 'a', lastSeen: 'a' })),
+  });
+
+  const tooBig = await admin.run('memory.show', { userId: '123', section: 'interests', limit: 500 }, { guildId: 'g1' });
+  assert.equal(tooBig.split('\n').length, 25);
+
+  const tooSmall = await admin.run('memory.show', { userId: '123', section: 'interests', limit: 0 }, { guildId: 'g1' });
+  assert.equal(tooSmall.split('\n').length, 25);
+});
+
+test('run: memory.show section:interests order:rank (default) marks the divider between shown and hidden', async () => {
+  const rootDir = makeRoot();
+  const hot = makeHot(rootDir);
+  hot.config.memory = { maxInterests: 1, interestHalfLifeDays: 180 };
+  const { admin, store } = makeAdmin(rootDir, { hot });
+  store.profiles.set('g1:123', {
+    id: '123',
+    interests: [
+      { topic: 'Ancient favorite', note: '', weight: 10, firstSeen: 'a', lastSeen: '2021-01-01T00:00:00.000Z' },
+      { topic: 'Fresh interest', note: '', weight: 1, firstSeen: 'a', lastSeen: '2026-09-20T00:00:00.000Z' },
+    ],
+  });
+
+  const result = await admin.run('memory.show', { userId: '123', section: 'interests' }, { guildId: 'g1' });
+  const lines = result.split('\n');
+  assert.ok(lines[0].startsWith('Fresh interest'));
+  assert.ok(lines[1].includes('not shown'));
+  assert.ok(lines[2].startsWith('Ancient favorite'));
+});
+
+// ---------------------------------------------------------------------------
+// memory.alias-add / memory.alias-remove (F32) -- real store.js/aliases.js,
+// so these prove the actual store integration, not a re-implementation.
+// ---------------------------------------------------------------------------
+
+function makeRealStoreAdmin(rootDir, extra = {}) {
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'nep-admin-alias-'));
+  const realStore = createStore({ dataDir });
+  const hot = extra.hot ?? makeHot(rootDir);
+  const { admin } = makeAdmin(rootDir, { ...extra, hot, store: realStore });
+  return { admin, store: realStore, hot, dataDir };
+}
+
+test('run: memory.alias-add creates a new alias already confirmed, firstSeen == lastSeen == now', async () => {
+  const rootDir = makeRoot();
+  const { admin, store, dataDir } = makeRealStoreAdmin(rootDir);
+  try {
+    const before = Date.now();
+    const result = await admin.run('memory.alias-add', { userId: '123', name: 'Ari' }, { guildId: 'g1' });
+    const after = Date.now();
+
+    const alias = store.getUser('g1', '123').aliases.find((a) => a.name === 'Ari');
+    assert.ok(alias, 'the alias was stored');
+    assert.ok(alias.weight >= 2, 'confirmed at once (default memory.confirmAfter is 2)');
+    assert.equal(alias.firstSeen, alias.lastSeen, 'firstSeen and lastSeen land on the same instant');
+    const seenMs = Date.parse(alias.lastSeen);
+    assert.ok(seenMs >= before && seenMs <= after, 'that instant is "now"');
+    assert.ok(result.includes('Ari'));
+  } finally {
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test('run: memory.alias-add reads memory.confirmAfter and gives at least that weight', async () => {
+  const rootDir = makeRoot();
+  const hot = makeHot(rootDir);
+  hot.config.memory = { confirmAfter: 4 };
+  const { admin, store, dataDir } = makeRealStoreAdmin(rootDir, { hot });
+  try {
+    await admin.run('memory.alias-add', { userId: '123', name: 'Ari' }, { guildId: 'g1' });
+    const alias = store.getUser('g1', '123').aliases.find((a) => a.name === 'Ari');
+    assert.ok(alias.weight >= 4);
+  } finally {
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test('run: memory.alias-add is idempotent -- a second call does not keep bumping the weight', async () => {
+  const rootDir = makeRoot();
+  const { admin, store, dataDir } = makeRealStoreAdmin(rootDir);
+  try {
+    await admin.run('memory.alias-add', { userId: '123', name: 'Ari' }, { guildId: 'g1' });
+    const weightAfterFirst = store.getUser('g1', '123').aliases.find((a) => a.name === 'Ari').weight;
+
+    await admin.run('memory.alias-add', { userId: '123', name: 'Ari' }, { guildId: 'g1' });
+    const weightAfterSecond = store.getUser('g1', '123').aliases.find((a) => a.name === 'Ari').weight;
+
+    assert.equal(weightAfterSecond, weightAfterFirst, 'already-confirmed alias is left alone by a repeat add');
+  } finally {
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test('run: memory.alias-add clamps to 40 characters', async () => {
+  const rootDir = makeRoot();
+  const { admin, store, dataDir } = makeRealStoreAdmin(rootDir);
+  try {
+    const longName = 'x'.repeat(60);
+    await admin.run('memory.alias-add', { userId: '123', name: longName }, { guildId: 'g1' });
+    const [alias] = store.getUser('g1', '123').aliases;
+    assert.equal(alias.name.length, 40);
+    assert.equal(alias.name, 'x'.repeat(40));
+  } finally {
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test('run: memory.alias-add ignores a name equal, case-insensitively, to one of the member\'s display names', async () => {
+  const rootDir = makeRoot();
+  const { admin, store, dataDir } = makeRealStoreAdmin(rootDir);
+  try {
+    store.touchUser('g1', '123', 'Bob', Date.now());
+    const result = await admin.run('memory.alias-add', { userId: '123', name: 'bob' }, { guildId: 'g1' });
+    assert.deepEqual(store.getUser('g1', '123').aliases, []);
+    assert.equal(result, 'No aliases stored.');
+  } finally {
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test('run: memory.alias-add rejects an empty name', async () => {
+  const rootDir = makeRoot();
+  const { admin, dataDir } = makeRealStoreAdmin(rootDir);
+  try {
+    await assert.rejects(() => admin.run('memory.alias-add', { userId: '123', name: '   ' }, { guildId: 'g1' }));
+  } finally {
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test('run: memory.alias-remove removes an alias case-insensitively and reports the resulting list', async () => {
+  const rootDir = makeRoot();
+  const { admin, store, dataDir } = makeRealStoreAdmin(rootDir);
+  try {
+    await admin.run('memory.alias-add', { userId: '123', name: 'Ari' }, { guildId: 'g1' });
+    const result = await admin.run('memory.alias-remove', { userId: '123', name: 'ARI' }, { guildId: 'g1' });
+
+    assert.deepEqual(store.getUser('g1', '123').aliases, []);
+    assert.equal(result, 'No aliases stored.');
+  } finally {
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test('run: memory.alias-add/memory.alias-remove are refused while paused', async () => {
+  const rootDir = makeRoot();
+  const { admin } = makeAdmin(rootDir);
+
+  await admin.run('pause', {}, {});
+
+  await assert.rejects(
+    () => admin.run('memory.alias-add', { userId: '123', name: 'Ari' }, { guildId: 'g1' }),
+    /paused.*resume/i,
+  );
+  await assert.rejects(
+    () => admin.run('memory.alias-remove', { userId: '123', name: 'Ari' }, { guildId: 'g1' }),
+    /paused.*resume/i,
+  );
 });
 
 // ---------------------------------------------------------------------------

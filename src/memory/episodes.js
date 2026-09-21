@@ -5,6 +5,8 @@
 // src/memory/update.js#applyMemoryUpdate, which routes the model's
 // `users.<id>.episodes` through this module via src/memory/store.js#addEpisodes.
 
+import { clampText } from './clamp.js';
+
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 /** Today's date in UTC, `YYYY-MM-DD` -- the fallback for an invalid/missing `date`. */
@@ -24,14 +26,18 @@ function normalizeWhat(what) {
 
 /**
  * Validate and clamp one raw episode from the model. Returns null when it has
- * no usable `what` (the one required field).
+ * no usable `what` (the one required field). `what`/`feeling` are free prose,
+ * clamped tolerantly via src/memory/clamp.js; `quote` is the person's own
+ * words verbatim, so it gets a hard cut (`tolerance: 1`) at a clean boundary
+ * instead -- see .claude/docs/prompt-contract.md, "Limits are soft for the
+ * model, clean in code".
  */
-function sanitizeEpisode(raw, now) {
+function sanitizeEpisode(raw, now, clampTolerance) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
-  const what = typeof raw.what === 'string' ? raw.what.trim().slice(0, 200) : '';
+  const what = typeof raw.what === 'string' ? clampText(raw.what, 200, { tolerance: clampTolerance }) : '';
   if (!what) return null;
-  const quote = typeof raw.quote === 'string' ? raw.quote.trim().slice(0, 120) : '';
-  const feeling = typeof raw.feeling === 'string' ? raw.feeling.trim().slice(0, 120) : '';
+  const quote = typeof raw.quote === 'string' ? clampText(raw.quote, 120, { tolerance: 1 }) : '';
+  const feeling = typeof raw.feeling === 'string' ? clampText(raw.feeling, 120, { tolerance: clampTolerance }) : '';
   const weight = clampWeight(raw.weight);
   const date = typeof raw.date === 'string' && DATE_RE.test(raw.date) ? raw.date : todayUtc(now);
   return { date, what, quote, feeling, weight };
@@ -69,15 +75,15 @@ function evictionOrder(a, b) {
  *
  * @param {object[]|undefined} existing  Stored episodes, oldest-appended order.
  * @param {unknown} incoming             Untrusted, model-extracted episodes.
- * @param {{ maxEpisodes: number, maxNew: number, now?: number }} opts
+ * @param {{ maxEpisodes: number, maxNew: number, now?: number, clampTolerance?: number }} opts
  * @returns {{ episodes: object[], added: number }}
  */
-export function mergeEpisodes(existing, incoming, { maxEpisodes, maxNew = Infinity, now = Date.now() } = {}) {
+export function mergeEpisodes(existing, incoming, { maxEpisodes, maxNew = Infinity, now = Date.now(), clampTolerance } = {}) {
   const stored = Array.isArray(existing) ? existing : [];
   if (!Array.isArray(incoming) || incoming.length === 0) return { episodes: stored, added: 0 };
 
   const sanitized = incoming
-    .map((raw) => sanitizeEpisode(raw, now))
+    .map((raw) => sanitizeEpisode(raw, now, clampTolerance))
     .filter(Boolean)
     .slice(0, maxNew);
 

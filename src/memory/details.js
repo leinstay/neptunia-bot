@@ -12,14 +12,10 @@
 
 import { normalizeTopic } from './interests.js';
 import { topByRank } from './ranking.js';
+import { clampText } from './clamp.js';
 
 const DEFAULT_CONFIRM_GAP_HOURS = 12;
 const HOUR_MS = 3_600_000;
-
-function clampString(value, maxChars) {
-  const cap = Number.isInteger(maxChars) ? maxChars : Infinity;
-  return String(value ?? '').trim().slice(0, cap);
-}
 
 /** Earlier of two ISO date strings; a missing one never wins. */
 function minIso(a, b) {
@@ -100,13 +96,14 @@ function normalizedNextId(startId) {
  * @param {object[]|undefined} existing  Stored details.
  * @param {{ add?: unknown, seen?: unknown, remove?: unknown }} ops  Untrusted, model-extracted.
  * @param {{ maxDetails?: number, maxDetailsStored?: number, fieldChars?: number, confirmGapHours?: number,
- *   seenAt?: number, nextId?: number, halfLifeDays?: number }} [opts]
+ *   seenAt?: number, nextId?: number, halfLifeDays?: number, clampTolerance?: number }} [opts]
+ *   `text` is free prose, clamped tolerantly (see src/memory/clamp.js) with `clampTolerance`.
  * @returns {{ items: object[], nextId: number }}
  */
 export function applyDetailOps(
   existing,
   ops,
-  { maxDetails, maxDetailsStored, fieldChars, confirmGapHours, seenAt = Date.now(), nextId, halfLifeDays } = {},
+  { maxDetails, maxDetailsStored, fieldChars, confirmGapHours, seenAt = Date.now(), nextId, halfLifeDays, clampTolerance } = {},
 ) {
   let items = Array.isArray(existing) ? existing.map((item) => ({ ...item })) : [];
   const priorLastSeen = items.map((item) => item.lastSeen ?? null);
@@ -137,7 +134,7 @@ export function applyDetailOps(
   function add(raw) {
     const isObj = raw && typeof raw === 'object' && !Array.isArray(raw);
     if (!isObj && typeof raw !== 'string') return;
-    const text = clampString(isObj ? raw.text : raw, fieldChars);
+    const text = clampText(isObj ? raw.text : raw, fieldChars, { tolerance: clampTolerance });
     if (!text) return;
     const sure = isObj ? raw.sure !== false : true;
     const index = findIndex(text);

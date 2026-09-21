@@ -118,19 +118,49 @@ test('buildCommandTree: rule group (add/list/remove)', () => {
   assert.equal(number.min_value, 1);
 });
 
-test('buildCommandTree: memory group (show/forget/affinity)', () => {
+test('buildCommandTree: memory group (show/forget/affinity/wipe/alias-add/alias-remove)', () => {
   const [command] = buildCommandTree('nep');
   const memory = findOption(command.options, 'memory');
   assert.equal(memory.type, 2);
   assert.deepEqual(
     memory.options.map((o) => o.name),
-    ['show', 'forget', 'affinity', 'wipe'],
+    ['show', 'forget', 'alias-add', 'alias-remove', 'affinity', 'wipe'],
   );
 
   const show = findOption(memory.options, 'show');
   const user = findOption(show.options, 'user');
   assert.equal(user.type, 6); // USER
   assert.equal(user.required, true);
+
+  const section = findOption(show.options, 'section');
+  assert.equal(section.type, 3); // STRING
+  assert.equal(section.required, false);
+  assert.deepEqual(
+    section.choices.map((c) => c.value),
+    ['summary', 'character', 'style', 'relationship', 'affinity', 'aliases', 'interests', 'details', 'episodes', 'raw'],
+  );
+
+  const limit = findOption(show.options, 'limit');
+  assert.equal(limit.type, 4); // INTEGER
+  assert.equal(limit.required, false);
+  assert.equal(limit.min_value, 1);
+  assert.equal(limit.max_value, 100);
+
+  const order = findOption(show.options, 'order');
+  assert.equal(order.type, 3);
+  assert.equal(order.required, false);
+  assert.deepEqual(
+    order.choices.map((c) => c.value),
+    ['rank', 'recent'],
+  );
+
+  const aliasAdd = findOption(memory.options, 'alias-add');
+  assert.equal(findOption(aliasAdd.options, 'user').required, true);
+  assert.equal(findOption(aliasAdd.options, 'name').required, true);
+
+  const aliasRemove = findOption(memory.options, 'alias-remove');
+  assert.equal(findOption(aliasRemove.options, 'user').required, true);
+  assert.equal(findOption(aliasRemove.options, 'name').required, true);
 
   const affinity = findOption(memory.options, 'affinity');
   assert.equal(findOption(affinity.options, 'user').required, true);
@@ -455,7 +485,7 @@ test('interaction handler: a top-level subcommand maps to its bare command key',
   assert.equal(interaction.replies[0].content, 'ok: status');
 });
 
-test('interaction handler: memory.show maps the user option to userId', async () => {
+test('interaction handler: memory.show maps the user option to userId, section/limit/order undefined when omitted', async () => {
   const admin = fakeAdmin();
   const handler = createInteractionHandler({ hot: baseHot(), admin, getGuildId: () => 'g1' });
 
@@ -467,7 +497,42 @@ test('interaction handler: memory.show maps the user option to userId', async ()
   await handler(interaction);
 
   assert.equal(admin.runCalls[0][0], 'memory.show');
-  assert.deepEqual(admin.runCalls[0][1], { userId: 'target1' });
+  assert.deepEqual(admin.runCalls[0][1], { userId: 'target1', section: undefined, limit: undefined, order: undefined });
+});
+
+test('interaction handler: memory.show maps section/limit/order straight through when given', async () => {
+  const admin = fakeAdmin();
+  const handler = createInteractionHandler({ hot: baseHot(), admin, getGuildId: () => 'g1' });
+
+  const interaction = fakeInteraction({
+    group: 'memory',
+    subcommand: 'show',
+    optionValues: { user: { id: 'target1' }, section: 'interests', limit: 10, order: 'recent' },
+  });
+  await handler(interaction);
+
+  assert.deepEqual(admin.runCalls[0][1], { userId: 'target1', section: 'interests', limit: 10, order: 'recent' });
+});
+
+test('interaction handler: memory.alias-add/alias-remove map user/name straight through', async () => {
+  const admin = fakeAdmin();
+  const handler = createInteractionHandler({ hot: baseHot(), admin, getGuildId: () => 'g1' });
+
+  await handler(fakeInteraction({
+    group: 'memory',
+    subcommand: 'alias-add',
+    optionValues: { user: { id: 'target1' }, name: 'Ari' },
+  }));
+  assert.equal(admin.runCalls[0][0], 'memory.alias-add');
+  assert.deepEqual(admin.runCalls[0][1], { userId: 'target1', name: 'Ari' });
+
+  await handler(fakeInteraction({
+    group: 'memory',
+    subcommand: 'alias-remove',
+    optionValues: { user: { id: 'target1' }, name: 'Ari' },
+  }));
+  assert.equal(admin.runCalls[1][0], 'memory.alias-remove');
+  assert.deepEqual(admin.runCalls[1][1], { userId: 'target1', name: 'Ari' });
 });
 
 test('interaction handler: memory.wipe maps the confirm string option straight through', async () => {

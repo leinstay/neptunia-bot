@@ -116,12 +116,14 @@
     "confirmGapHours": 12,
     "interestStaleDays": 90,
     "timeoutMs": 300000,
-    "mainChannelIds": []
+    "mainChannelIds": [],
+    "clampTolerance": 1.25
   },
   "lore": {
     "maxEntries": 500,
     "scanMessages": 30,
-    "maxMatches": 8
+    "maxMatches": 8,
+    "textChars": 600
   },
   "relationships": {
     "maxDeltaPerUpdate": 15,

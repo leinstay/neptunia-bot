@@ -6,8 +6,10 @@
 // disk. See .claude/docs/prompt-contract.md ("<lore>" and "lore" in "The
 // analyzer").
 
+import { clampText } from './clamp.js';
+
 const MAX_TITLE = 80;
-const MAX_TEXT = 400;
+const DEFAULT_MAX_TEXT = 400; // fallback only -- a deployment sets its own via config.lore.textChars
 const MIN_KEY = 2;
 const MAX_KEY = 40;
 const MAX_KEYS = 8;
@@ -19,15 +21,17 @@ function normalizeTitle(title) {
   return String(title ?? '').trim().toLowerCase();
 }
 
-/** Lowercase, trim, drop out-of-range/duplicate keys, keep at most MAX_KEYS. */
+/** Lowercase, trim, drop too-short/duplicate keys, clamp an over-long one to
+ * MAX_KEY at a word boundary (never dropped for being too long -- see the
+ * F31 addendum), keep at most MAX_KEYS. */
 function normalizeKeys(rawKeys) {
   if (!Array.isArray(rawKeys)) return [];
   const seen = new Set();
   const out = [];
   for (const raw of rawKeys) {
     if (typeof raw !== 'string') continue;
-    const key = raw.trim().toLowerCase();
-    if (key.length < MIN_KEY || key.length > MAX_KEY) continue;
+    const key = clampText(raw.trim().toLowerCase(), MAX_KEY, { tolerance: 1 });
+    if (key.length < MIN_KEY) continue;
     if (seen.has(key)) continue;
     seen.add(key);
     out.push(key);
@@ -77,23 +81,27 @@ function evictOverflow(entries, maxEntries) {
  *
  * @param {object[]|undefined} entries  Stored entries.
  * @param {unknown} incoming            Untrusted `{ title, keys, text, always? }[]`.
- * @param {{ source: 'analyzer'|'owner', now?: number, maxEntries?: number }} opts
+ * @param {{ source: 'analyzer'|'owner', now?: number, maxEntries?: number, textChars?: number,
+ *   clampTolerance?: number }} opts
+ *   `title` is a hard identity clamp at MAX_TITLE; `text` is free prose, clamped tolerantly (see
+ *   src/memory/clamp.js) to `textChars` (config.lore.textChars; DEFAULT_MAX_TEXT when absent).
  * @returns {{ entries: object[], upserted: number }}
  */
-export function upsertLore(entries, incoming, { source, now = Date.now(), maxEntries = Infinity } = {}) {
+export function upsertLore(entries, incoming, { source, now = Date.now(), maxEntries = Infinity, textChars, clampTolerance } = {}) {
   const stored = Array.isArray(entries) ? [...entries] : [];
   if (!Array.isArray(incoming) || incoming.length === 0) return { entries: stored, upserted: 0 };
 
   const byTitle = new Map(stored.map((entry, index) => [normalizeTitle(entry.title), index]));
   const nowIso = new Date(now).toISOString();
+  const effectiveTextChars = Number.isFinite(textChars) && textChars > 0 ? textChars : DEFAULT_MAX_TEXT;
   let upserted = 0;
   let salt = 0;
 
   for (const raw of incoming) {
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) continue;
-    const title = typeof raw.title === 'string' ? raw.title.trim().slice(0, MAX_TITLE) : '';
+    const title = typeof raw.title === 'string' ? clampText(raw.title, MAX_TITLE, { tolerance: 1 }) : '';
     const keys = normalizeKeys(raw.keys);
-    const text = typeof raw.text === 'string' ? raw.text.trim().slice(0, MAX_TEXT) : '';
+    const text = typeof raw.text === 'string' ? clampText(raw.text, effectiveTextChars, { tolerance: clampTolerance }) : '';
     if (!title || keys.length === 0 || !text) continue;
 
     const normalized = normalizeTitle(title);

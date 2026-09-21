@@ -66,6 +66,55 @@ test('touchUser: an empty/falsy name does not touch the names list', () => {
   assert.deepEqual(profile.names, ['Alice']);
 });
 
+// ---- out-of-order touches (the warm-up feeding old history after a live touch today) ----
+
+test('touchUser: firstSeen is min(existing, at) and lastSeen is max(existing, at), regardless of arrival order', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  // Live touch today...
+  store.touchUser('g1', 'u1', 'Alice', 5_000_000);
+  // ...then the warm-up feeds four years of older history.
+  const profile = store.touchUser('g1', 'u1', 'Alice', 1000);
+  assert.equal(profile.firstSeen, new Date(1000).toISOString(), 'firstSeen widens to the older message');
+  assert.equal(profile.lastSeen, new Date(5_000_000).toISOString(), 'lastSeen does NOT regress to the older message');
+  assert.equal(profile.messageCount, 2);
+});
+
+test('touchUser: an older/backdated touch never moves a name to the front', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  store.touchUser('g1', 'u1', 'Alice', 5_000_000); // live, current display name
+  const profile = store.touchUser('g1', 'u1', 'OldNick', 1000); // backdated history, an older name
+  assert.deepEqual(profile.names, ['Alice', 'OldNick'], 'the current name stays first; the old one is appended');
+});
+
+test('touchUser: a backdated touch of an already-known name leaves the names order untouched', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  store.touchUser('g1', 'u1', 'Alice', 5_000_000);
+  store.touchUser('g1', 'u1', 'Bob', 6_000_000); // renamed, now current
+  const profile = store.touchUser('g1', 'u1', 'Alice', 1000); // backdated history mentioning the old name
+  assert.deepEqual(profile.names, ['Bob', 'Alice'], 'Alice is not moved back to the front by an older touch');
+});
+
+test('touchUser: a touch at exactly the stored lastSeen still counts as newest (moves the name to the front)', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  store.touchUser('g1', 'u1', 'Alice', 1000);
+  const profile = store.touchUser('g1', 'u1', 'Bob', 1000);
+  assert.deepEqual(profile.names, ['Bob', 'Alice']);
+});
+
+test('touchUser: in-order touches behave exactly as before (regression check)', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  store.touchUser('g1', 'u1', 'Alice', 1000);
+  const profile = store.touchUser('g1', 'u1', 'Bob', 2000);
+  assert.deepEqual(profile.names, ['Bob', 'Alice']);
+  assert.equal(profile.firstSeen, new Date(1000).toISOString());
+  assert.equal(profile.lastSeen, new Date(2000).toISOString());
+});
+
 test('getUser: returns the same profile touchUser created', () => {
   const dir = tmpDataDir();
   const store = createStore({ dataDir: dir });
@@ -664,11 +713,19 @@ test('applyProfileOps: sets character/style/relationship only when given as non-
   assert.equal(profile.relationship, 'trusts you');
 });
 
-test('applyProfileOps: prose fields are clamped to opts.fieldChars', () => {
+test('applyProfileOps: prose fields are clamped tolerantly to opts.fieldChars (a single long word hard-cuts at the tolerance ceiling)', () => {
   const dir = tmpDataDir();
   const store = createStore({ dataDir: dir });
   store.touchUser('g1', 'u1', 'Alice', 1000);
   const profile = store.applyProfileOps('g1', 'u1', { character: '0123456789' }, { fieldChars: 5, now: 1000 });
+  assert.equal(profile.character, '012345', '5 * the default tolerance 1.25, floored');
+});
+
+test('applyProfileOps: prose fields respect an explicit clampTolerance', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  store.touchUser('g1', 'u1', 'Alice', 1000);
+  const profile = store.applyProfileOps('g1', 'u1', { character: '0123456789' }, { fieldChars: 5, clampTolerance: 1, now: 1000 });
   assert.equal(profile.character, '01234');
 });
 
