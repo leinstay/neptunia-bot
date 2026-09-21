@@ -6,7 +6,7 @@
 // + `applyMemoryUpdate`). Memory is persistent: nothing here ever wipes it —
 // a failed update just leaves the buffer alone and backs off for a while.
 
-import { fitSections } from '../llm/budget.js';
+import { fitSections, SectionsTooLargeError } from '../llm/budget.js';
 import { estimateTokens, estimateMessages } from '../llm/tokens.js';
 import { formatTranscript, renderTranscript } from '../discord/format.js';
 import { parseJsonObject } from '../llm/parse.js';
@@ -878,7 +878,13 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
       // provider never returned a completion. `status` (the HTTP status when
       // the error carries one, e.g. 429) lets a caller -- the warm-up -- tell
       // a rate limit apart from a genuine failure without parsing `detail`.
-      const reason = err instanceof TokenLimitError ? 'token-limit' : 'llm-error';
+      // A `SectionsTooLargeError` (buildMemoryRequest's fitSections could not
+      // even fit the required sections -- profiles alone over the cap, no
+      // room left to trim) is the same kind of failure as a `TokenLimitError`
+      // from the provider call itself: the request does not fit the per-request
+      // token cap, full stop. Both surface as 'token-limit' so a caller (the
+      // warm-up) can split the batch instead of retrying it unchanged.
+      const reason = err instanceof TokenLimitError || err instanceof SectionsTooLargeError ? 'token-limit' : 'llm-error';
       return { ok: false, usage: null, estimated: 0, result: null, error: err, reason, detail: detailOf(err), status: err?.statusCode };
     }
 
@@ -990,10 +996,15 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
         return;
       }
 
-      if (outcome.reason === 'truncated' || outcome.reason === 'bad-json') {
-        // Retrying the same-size batch can never succeed: the completion is
-        // being cut by the output token cap, not by transient bad luck.
-        // Halve the batch size for next time instead of the usual back-off.
+      if (outcome.reason === 'truncated' || outcome.reason === 'bad-json' || outcome.reason === 'token-limit') {
+        // Retrying the same-size batch can never succeed: 'truncated'/'bad-json'
+        // means the completion is being cut by the output cap, and 'token-limit'
+        // means the request itself (stored profiles included) does not fit the
+        // per-request cap -- neither is transient bad luck. A plain back-off
+        // would just retry the exact same buffer forever (see F34): halve the
+        // batch size for next time instead, same as the output-cap case, so
+        // the following attempt asks for fewer messages and pulls in fewer
+        // distinct authors' profiles.
         sizeFactors.set(guildId, factor / 2);
         log.warn('memory: update failed, halving the batch size for next time', {
           guildId,

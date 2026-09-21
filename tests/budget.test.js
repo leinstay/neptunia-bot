@@ -1,7 +1,7 @@
 // Tests for src/llm/budget.js: fitSections, the priority-ordered token trimmer.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { fitSections } from '../src/llm/budget.js';
+import { fitSections, SectionsTooLargeError } from '../src/llm/budget.js';
 
 // Every item costs its own string length in "tokens" -- makes the arithmetic
 // in assertions trivial and readable.
@@ -22,6 +22,11 @@ test('fitSections: required sections are kept in full even when it leaves nothin
 test('fitSections: throws when required sections alone exceed the limit', () => {
   const sections = [{ name: 'fixed', required: true, items: ['aaaaaaaaaa'] }]; // 10 tokens
   assert.throws(() => fitSections(sections, 5, cost), /required prompt sections exceed the token limit by 5/);
+});
+
+test('fitSections: the too-large error is a dedicated class, not just a matching message', () => {
+  const sections = [{ name: 'fixed', required: true, items: ['aaaaaaaaaa'] }]; // 10 tokens
+  assert.throws(() => fitSections(sections, 5, cost), SectionsTooLargeError);
 });
 
 test('fitSections: priority order -- earlier sections get first claim on the remaining budget', () => {

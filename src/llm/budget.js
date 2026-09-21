@@ -17,6 +17,16 @@
  */
 
 /**
+ * Thrown by `fitSections` when the sections marked `required` alone already
+ * exceed `limit` — i.e. the request cannot be built at all, not even by
+ * trimming. A dedicated class (rather than matching the message text) lets a
+ * caller — src/memory/update.js#analyze — reliably tell this apart from a
+ * generic build/provider error and classify it as the same 'token-limit'
+ * reason as a `TokenLimitError` from src/llm/openrouter.js.
+ */
+export class SectionsTooLargeError extends Error {}
+
+/**
  * Fit `sections` into `limit` tokens. `cost(text)` returns the token price of
  * one item. Returns `{ kept, stats, used }` where `kept[name]` is the surviving
  * items in their original order.
@@ -34,7 +44,7 @@ export function fitSections(sections, limit, cost) {
     stats[section.name] = { used, kept: section.items.length, dropped: 0 };
   }
   if (remaining < 0) {
-    throw new Error(`required prompt sections exceed the token limit by ${-remaining}`);
+    throw new SectionsTooLargeError(`required prompt sections exceed the token limit by ${-remaining}`);
   }
 
   for (const section of sections) {

@@ -2327,6 +2327,44 @@ test('run: a truncated failure halves the next batch size for that guild; a succ
   });
 });
 
+test('run: a "token-limit" failure halves the next batch size too, instead of looping on the same buffer forever (F34)', async () => {
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    const base = Date.now();
+    for (let i = 0; i < 90; i += 1) {
+      store.pushBuffer(guildId, slimMessage({ id: `m${i}`, content: `hi ${i}`, ts: base + i * 1000 }), 200);
+    }
+
+    const hot = {
+      config: makeConfig({ memory: { ...makeConfig().memory, batchMessages: 15, minBatchMessages: 1 } }),
+      prompts: { memory: 'memory system prompt', labels },
+    };
+    const calibrator = createCalibrator();
+    let call = 0;
+    const llm = {
+      complete: async () => {
+        call += 1;
+        // Stored profiles pushed the request over the per-request cap: with the
+        // buffer untouched, a plain back-off would retry this exact same batch
+        // forever. Halving the batch size (same as 'truncated'/'bad-json')
+        // actually makes progress instead.
+        if (call === 1) throw new TokenLimitError('request estimated at 90000 tokens, cap is 50000');
+        return { text: JSON.stringify({ guild: { patterns: 'ok' } }) };
+      },
+    };
+    const updater = createMemoryUpdater({ hot, store, llm, calibrator, getSelfName: () => 'Nept' });
+
+    await updater.run(guildId); // fails 'token-limit': halves the factor for next time
+    assert.equal(store.getBuffer(guildId).length, 90, 'a failed run never shifts the buffer');
+
+    await updater.run(guildId); // succeeds, but only at the halved size
+    assert.equal(store.getBuffer(guildId).length, 70, 'only 20 (half of 30, floored at 20) were consumed, not 30');
+
+    await updater.run(guildId); // succeeds again, size restored to normal
+    assert.equal(store.getBuffer(guildId).length, 40, 'back to normal: 30 consumed this time, not another 20');
+  });
+});
+
 // ---- touchMemory -----------------------------------------------------------
 
 test('touchMemory: touches the user profile and the channel for a human message', () => {
@@ -2421,6 +2459,34 @@ test('analyze: a TokenLimitError from llm.complete reports reason "token-limit"'
     assert.equal(outcome.usage, null);
     assert.equal(outcome.reason, 'token-limit');
     assert.equal(outcome.detail, 'request estimated at 90000 tokens, cap is 50000');
+  });
+});
+
+test('analyze: a SectionsTooLargeError from buildMemoryRequest (required sections do not fit) also reports "token-limit", and never reaches the provider', async () => {
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    // A huge memory prompt against a tiny per-request cap: buildMemoryRequest's
+    // fitSections cannot fit even the required sections, and throws a
+    // SectionsTooLargeError before llm.complete is ever called (F34: this used
+    // to surface as a plain 'llm-error', which the warm-up could not tell apart
+    // from a genuine, retryable failure).
+    const hot = {
+      config: makeConfig({ llm: { ...makeConfig().llm, maxRequestTokens: 50, safetyMargin: 1 } }),
+      prompts: { memory: 'x'.repeat(2000), labels },
+    };
+    const calibrator = createCalibrator();
+    let completeCalls = 0;
+    const llm = { complete: async () => { completeCalls += 1; return { text: '{}' }; } };
+    const updater = createMemoryUpdater({ hot, store, llm, calibrator, getSelfName: () => 'Nept' });
+
+    const outcome = await updater.analyze(guildId, [slimMessage({ id: 'm1' })]);
+
+    assert.equal(outcome.ok, false);
+    assert.equal(outcome.usage, null);
+    assert.equal(outcome.estimated, 0);
+    assert.equal(outcome.reason, 'token-limit');
+    assert.match(outcome.detail, /required prompt sections exceed the token limit by \d+/);
+    assert.equal(completeCalls, 0, 'the oversized request never reaches the provider — nothing was billed');
   });
 });
 

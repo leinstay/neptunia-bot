@@ -53,9 +53,10 @@
 // so a later config change never shifts an in-progress run's batch indexes;
 // `warmup reset` is the only way to pick up new values.
 //
-// Adaptive piece size: once a dense stretch of chat makes a full-size batch
-// come back 'truncated'/'bad-json' (see isUnrecoverableSize) and a split
-// succeeds, this run remembers the size that worked and cuts every following
+// Adaptive piece size: once a dense stretch of chat (or a heavy set of stored
+// profiles) makes a full-size batch come back 'truncated'/'bad-json'/
+// 'token-limit' (see isUnrecoverableSize) and a split succeeds, this run
+// remembers the size that worked and cuts every following
 // batch to at most that size up front, instead of always paying for one
 // doomed full-size attempt before splitting again. It only ever shrinks to
 // the size an actual split proved necessary (never below SPLIT_FLOOR), and
@@ -105,13 +106,18 @@ function extractProvider(detail) {
 }
 
 /**
- * A batch this size produces an analyzer JSON longer than the model can
- * finish in one completion: retrying the exact same input can never
- * succeed. Splitting it (instead of the plain retry/abort path) is the only
- * way forward.
+ * A batch this size can never be sent as-is: 'truncated'/'bad-json' means it
+ * produces an analyzer JSON longer than the model can finish in one
+ * completion; 'token-limit' means the request itself (stored profiles/channels
+ * included) does not fit the per-request token cap (`fitSections` could not
+ * even fit its required sections, or the built request tripped `TokenLimitError`
+ * -- see src/memory/update.js#analyze's error classification). Either way,
+ * retrying the exact same input can never succeed -- splitting it (instead of
+ * the plain retry/abort path) is the only way forward: fewer messages means
+ * fewer distinct authors, which means less stored-profile JSON to fit.
  */
 function isUnrecoverableSize(reason) {
-  return reason === 'truncated' || reason === 'bad-json';
+  return reason === 'truncated' || reason === 'bad-json' || reason === 'token-limit';
 }
 
 /**
@@ -649,29 +655,33 @@ export function createWarmup({ hot, store, client, memory, getGuildId, now = Dat
 
   /**
    * Analyze one piece of a batch (the whole batch on the first call, a half
-   * of it once split). Never retries a 'truncated'/'bad-json' failure on the
+   * of it once split). Never retries an unrecoverable-size failure
+   * ('truncated'/'bad-json'/'token-limit', see isUnrecoverableSize) on the
    * same input: it halves the piece instead (oldest half first), recursing
    * down to `SPLIT_FLOOR` messages; a piece that size or smaller that still
    * fails that way is SKIPPED (counted in `st.skippedMessages`) so a single
-   * poisonous piece can never stall or abort the whole warm-up. A rate-limited
-   * failure (see isRateLimited) is neither a strike nor a plain retry: it
-   * waits out via waitOutRateLimit and then retries the SAME piece, without
-   * touching `consecutiveFailures`. Every other failure reason keeps the
-   * existing retry-once + 3-consecutive-cycles abort behaviour, unchanged.
+   * poisonous piece can never stall or abort the whole warm-up -- this
+   * includes a 'token-limit' piece, whose oversized request never even
+   * reached the provider (nothing billed, see chargeAttempt), so a skip at
+   * the floor costs nothing either. A rate-limited failure (see isRateLimited)
+   * is neither a strike nor a plain retry: it waits out via waitOutRateLimit
+   * and then retries the SAME piece, without touching `consecutiveFailures`.
+   * Every other failure reason keeps the existing retry-once +
+   * 3-consecutive-cycles abort behaviour, unchanged.
    *
    * @param {string[]} channelIds  Every channel this piece's messages belong to (log field only).
    * @param {Map<string, string>} [descriptions]  Pre-computed describer captions for this batch
    *   (see describeBatchForWarmup), reused unchanged across a split.
    * @param {{ stopRequested: boolean, stopped: Promise<void> }} [control]
-   * @param {boolean} [fromSplit]  True for a piece produced by splitting a
-   *   'truncated'/'bad-json' failure (at any recursion depth) — as opposed to
+   * @param {boolean} [fromSplit]  True for a piece produced by splitting an
+   *   unrecoverable-size failure (at any recursion depth) — as opposed to
    *   a piece the caller pre-cut to the current adaptive size. Only a piece
    *   that succeeds AND carries this flag can shrink the adaptive size: it is
    *   proof that this smaller size was actually necessary, not just a piece
    *   that happened to already fit.
    * @param {{ truncated: boolean, shrinkTo: number|null }} [sizeTracker]  Shared across every
    *   piece of one top-level batch (see runWindow): set truncated=true on any
-   *   'truncated'/'bad-json' failure, and shrinkTo to the smallest successful
+   *   unrecoverable-size failure, and shrinkTo to the smallest successful
    *   fromSplit piece size seen. Read once the whole top-level batch settles.
    * @returns {Promise<{ consecutiveFailures: number, stop: boolean }>}
    *   `stop: true` means the budget ran out, the run aborted, or a rate-limit
@@ -727,9 +737,9 @@ export function createWarmup({ hot, store, client, memory, getGuildId, now = Dat
         continue;
       }
 
-      // A 'truncated'/'bad-json' failure is never retried on the same
-      // input — see isUnrecoverableSize. Every other reason keeps the
-      // original retry-once behaviour below.
+      // An unrecoverable-size failure ('truncated'/'bad-json'/'token-limit')
+      // is never retried on the same input — see isUnrecoverableSize. Every
+      // other reason keeps the original retry-once behaviour below.
       if (!outcome.ok && !isUnrecoverableSize(outcome.reason) && remainingBudget(st, cfg.maxTokens) >= estimate) {
         await sleep(RETRY_DELAY_MS);
         outcome = await memory.analyze(guildId, piece, { countAgainstDailyCap: false, descriptions });

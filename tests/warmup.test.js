@@ -898,6 +898,150 @@ test('run: recurses down to the floor, then skips a piece that still fails, and 
 });
 
 // ---------------------------------------------------------------------------
+// Split on a 'token-limit' failure (F34): the required prompt sections do not
+// fit the per-request cap (e.g. the batch's authors carry huge stored
+// profiles) — treated exactly like 'truncated'/'bad-json', never as a plain
+// abort-after-three failure.
+// ---------------------------------------------------------------------------
+
+test('run: splits a batch that fails "token-limit", oldest half first, and succeeds on both halves', async () => {
+  const dir = tempDir();
+  try {
+    const store = createStore({ dataDir: dir });
+    const now = Date.now();
+    const history = makeHistory({ count: 40, startTs: now - 60_000, spacingMs: 1000, authorId: 'u1' });
+    const channel = fakeChannel('c1', history);
+    const guild = fakeGuild('g1', [channel]);
+    const client = fakeClient(guild);
+    const hot = fakeHot({ warmup: { batchMessages: 40 } });
+
+    let n = 0;
+    const memory = fakeMemory(() => {
+      n += 1;
+      if (n === 1) {
+        // A 'token-limit' failure never reaches the provider -- nothing is
+        // ever billed for it (see src/memory/update.js#analyze).
+        return { ok: false, usage: null, estimated: 0, result: null, reason: 'token-limit', detail: 'required prompt sections exceed the token limit by 4792' };
+      }
+      return { ok: true, usage: { prompt_tokens: 50, completion_tokens: 20 }, estimated: 70, result: {} };
+    });
+    const sleep = fakeSleep();
+
+    const warmup = createWarmup({ hot, store, client, memory, getGuildId: () => 'g1', sleep });
+    const { result, logs } = await withCapturedLogs(() => warmup.run());
+
+    assert.equal(memory.calls.length, 3, 'the whole batch, then its two halves');
+    assert.equal(memory.calls[0].batch.length, 40);
+    assert.deepEqual(memory.calls[1].batch.map((mm) => mm.content), Array.from({ length: 20 }, (_, i) => `msg ${i}`), 'oldest half first');
+    assert.deepEqual(memory.calls[2].batch.map((mm) => mm.content), Array.from({ length: 20 }, (_, i) => `msg ${20 + i}`));
+    for (const call of memory.calls) assert.equal(call.opts.countAgainstDailyCap, false);
+    assert.equal(sleep.calls.length, 0, 'a token-limit failure is never retried on the same input, only split');
+
+    assert.equal(store.getUser('g1', 'u1').messageCount, 40, 'bookkeeping happens once per message, not once per attempt');
+    assert.equal(store.state.data.warmup.cursorId, history[39].id, 'the whole batch counts as one unit: the window (and run) completed');
+    assert.equal(store.state.data.warmup.requests, 2, 'the failed, oversized whole-batch attempt never reached the provider, so it is never counted');
+    assert.equal(store.state.data.warmup.tokensUsed, 70 + 70, 'nothing was charged for the failed attempt: nothing was ever sent');
+    assert.equal(store.state.data.warmup.skippedMessages, 0);
+    assert.equal(result.done, true);
+    assert.equal(result.aborted, false);
+
+    const splitLog = logs.find((l) => l.msg === 'warmup: batch failed, splitting');
+    assert.ok(splitLog);
+    assert.equal(splitLog.reason, 'token-limit');
+    assert.equal(splitLog.messages, 40);
+
+    const sizeLog = logs.find((l) => l.msg === 'warmup: piece size changed');
+    assert.ok(sizeLog, 'a token-limit split feeds the adaptive piece size exactly like a truncation');
+    assert.equal(sizeLog.to, 20);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('run: "token-limit" recurses down to the floor then skips a piece that still fails, and the run continues', async () => {
+  const dir = tempDir();
+  try {
+    const store = createStore({ dataDir: dir });
+    const now = Date.now();
+    const history = makeHistory({ count: 42, startTs: now - 60_000, spacingMs: 1000, authorId: 'u1' });
+    const channel = fakeChannel('c1', history);
+    const guild = fakeGuild('g1', [channel]);
+    const client = fakeClient(guild);
+    const hot = fakeHot({ warmup: { batchMessages: 21 } });
+
+    let n = 0;
+    const memory = fakeMemory(() => {
+      n += 1;
+      if (n === 1) return { ok: false, usage: null, estimated: 0, result: null, reason: 'token-limit', detail: 'required prompt sections exceed the token limit by 500' };
+      if (n === 2) return { ok: false, usage: null, estimated: 0, result: null, reason: 'token-limit', detail: 'required prompt sections exceed the token limit by 300' };
+      return { ok: true, usage: { prompt_tokens: 10, completion_tokens: 10 }, estimated: 20, result: {} };
+    });
+    const sleep = fakeSleep();
+
+    const warmup = createWarmup({ hot, store, client, memory, getGuildId: () => 'g1', sleep });
+    const { result, logs } = await withCapturedLogs(() => warmup.run());
+
+    // Batch 1 (21 msgs) fails token-limit -> splits into 11 + 10 (both
+    // at/under the floor of 20). The first half (11) fails token-limit again
+    // at the floor and is skipped, never split further; the second half (10)
+    // succeeds, proving 20 (the floor) as the adaptive piece size. Batch 2
+    // (21 msgs) is then cut to that size up front.
+    assert.equal(memory.calls.length, 5);
+    assert.equal(memory.calls[0].batch.length, 21);
+    assert.equal(memory.calls[1].batch.length, 11);
+    assert.equal(memory.calls[2].batch.length, 10);
+    assert.equal(memory.calls[3].batch.length, 20);
+    assert.equal(memory.calls[4].batch.length, 1);
+    assert.equal(sleep.calls.length, 0, 'never retried at the same size');
+
+    assert.equal(store.state.data.warmup.skippedMessages, 11);
+    assert.equal(store.state.data.warmup.requests, 3, 'only the three successful, billed attempts are ever counted');
+    assert.equal(store.getUser('g1', 'u1').messageCount, 31, '10 (second half) + 21 (batch 2); the skipped 11 are not counted');
+    assert.equal(store.state.data.warmup.cursorId, history[41].id, 'both top-level batches finished (one via split+skip)');
+    assert.equal(result.aborted, false, 'a token-limit skip never counts toward the consecutive-failure abort');
+    assert.equal(result.done, true);
+
+    const skipLog = logs.find((l) => l.msg === 'warmup: batch failed at the floor, skipping');
+    assert.ok(skipLog);
+    assert.equal(skipLog.reason, 'token-limit');
+    assert.equal(skipLog.messages, 11);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('run: many consecutive "token-limit" batches are all skipped outright, never aborting like a plain failure would', async () => {
+  const dir = tempDir();
+  try {
+    const store = createStore({ dataDir: dir });
+    const now = Date.now();
+    const history = makeHistory({ count: 80, startTs: now - 60_000, spacingMs: 1000, authorId: 'u1' });
+    const channel = fakeChannel('c1', history);
+    const guild = fakeGuild('g1', [channel]);
+    const client = fakeClient(guild);
+    // batchMessages == SPLIT_FLOOR: an unrecoverable-size failure at this size
+    // is skipped outright, never split further -- four top-level batches, all
+    // failing 'token-limit', would abort after 3 under the old classification.
+    const hot = fakeHot({ warmup: { batchMessages: 20 } });
+    const memory = fakeMemory(() => ({ ok: false, usage: null, estimated: 0, result: null, reason: 'token-limit', detail: 'required prompt sections exceed the token limit by 4792' }));
+    const sleep = fakeSleep();
+
+    const warmup = createWarmup({ hot, store, client, memory, getGuildId: () => 'g1', sleep });
+    const result = await warmup.run();
+
+    assert.equal(memory.calls.length, 4, 'one attempt per top-level batch (80 / 20), each skipped outright, never retried');
+    assert.equal(sleep.calls.length, 0);
+    assert.equal(result.aborted, false, 'repeated token-limit outcomes never trip the 3-strikes abort');
+    assert.equal(result.done, true);
+    assert.equal(store.state.data.warmup.skippedMessages, 80);
+    assert.equal(store.state.data.warmup.tokensUsed, 0, 'nothing was ever billed');
+    assert.equal(store.state.data.warmup.requests, 0, 'nothing ever reached the provider');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
 // Adaptive piece size (in memory only, per process): once a split proves a
 // smaller size is needed, later batches are cut to that size up front.
 // ---------------------------------------------------------------------------
