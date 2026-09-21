@@ -244,6 +244,19 @@ The analyzer prompt reads these limits as placeholders, so raising a value takes
 | `scanMessages` | `30` | Messages scanned for key matches |
 | `maxMatches` | `8` | Max entries shown per request |
 
+## Large servers
+
+Storage does not limit the number of people: each member is one small JSON file, a couple of kilobytes. The cost and size of one reply do not grow with the server either, because a turn carries only the caller's profile with their moments, the profiles of the last few people in the transcript (`context.otherProfiles`, default 6, inside `context.caps.people`), and the few lore entries whose keys came up. The defaults suit a server of a few dozen active people as they are.
+
+For a server of a couple of hundred active members, four settings are worth raising:
+
+- `context.caps.server` to about 5000. The channel map fits roughly 25 channels in the default 2500; the current channel is always kept and the quietest ones are dropped first.
+- `llm.maxRequestsPerDay` to about 1000. The analyzer runs every `memory.batchMessages` messages and the describer adds requests; when the cap is hit the bot goes quiet until the next UTC day, nothing breaks. The warm-up is exempt.
+- `memory.maxOutputTokens` to about 12000. A busy batch has many authors; a truncated answer is split automatically but costs more.
+- Optionally, `context.otherProfiles` to 12 with `context.caps.people` 8000 if the persona should keep more people in mind per turn.
+
+Running cost grows with chat volume, not with member count: the analyzer spends roughly 12–18k tokens per 60 messages of chat. On a busy server, point `memory.model` at a cheaper model than the one that talks (`/nep model set analyzer <id>`).
+
 ## Warm-up
 
 With `warmup.enabled: true`, the bot reads channel history before speaking. It feeds messages oldest-first through the memory analyzer in large batches, building profiles, attitudes, the channel map and in-jokes. The bot stays mute until warm-up finishes (including runs started by command); incoming messages are still observed and owner commands work.
