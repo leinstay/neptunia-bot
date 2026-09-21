@@ -14,7 +14,7 @@
 import { fitSections } from '../llm/budget.js';
 import { estimateTokens } from '../llm/tokens.js';
 import { computeTempo, fill, formatNow, formatTranscript, renderTempo, renderTranscript } from '../discord/format.js';
-import { affinityBand } from '../memory/affinity.js';
+import { affinityBand, roundScore } from '../memory/affinity.js';
 import { isConfirmed, isStale } from '../memory/interests.js';
 import { topByRank } from '../memory/ranking.js';
 import { sortEpisodesForDisplay } from '../memory/episodes.js';
@@ -242,7 +242,7 @@ export function renderProfile(
   if (hasAffinity) {
     attitudeLines.push(
       fill(p.affinity, {
-        score: affinity.score,
+        score: roundScore(affinity.score),
         band: labels.affinity?.bands?.[affinityBand(affinity.score)],
         reason: resolveChatText(affinity.reason, nameOf),
       }),

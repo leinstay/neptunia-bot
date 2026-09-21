@@ -495,6 +495,14 @@ test('renderProfile: a profile whose only content is the attitude line is still 
   assert.ok(!text.includes(labels.profile.unknown));
 });
 
+test('renderProfile: a damped (fractional) score is rounded to an integer, the band still uses the precise value', () => {
+  // 24.6 rounds to 25 for display, while the band itself is computed on the precise 24.6, which
+  // is still "warm" (the "fond" threshold is 25 and up) -- see src/memory/affinity.js#affinityBand.
+  const profile = { id: 'p1', names: ['Carl'], affinity: { score: 24.6, reason: 'saved my day', history: [] } };
+  const text = renderProfile(profile, labels, { relationships: true });
+  assert.ok(text.includes('attitude: 25 (warm) — saved my day'));
+});
+
 test('renderProfile: a profile with no affinity at all (pre-relationships data) renders as before', () => {
   const profile = { id: 'p1', names: ['Carl'], character: 'calm' };
   const text = renderProfile(profile, labels, { relationships: true });

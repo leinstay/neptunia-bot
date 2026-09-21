@@ -527,6 +527,26 @@ test('buildMemoryRequest: relationships on adds affinity: { score, reason } to e
   assert.deepEqual(profiles['1'].affinity, { score: 42, reason: 'helped once' });
 });
 
+test('buildMemoryRequest: a damped (fractional) stored score is rounded to an integer for the analyzer', () => {
+  const config = makeConfig({ features: { relationships: true } });
+  const calibrator = createCalibrator();
+  const messages = [slimMessage({ id: 'm1', ts: Date.UTC(2026, 0, 1, 12, 0, 0) })];
+
+  const { messages: llmMessages } = buildMemoryRequest({
+    prompts: { memory: 'sys', labels },
+    config,
+    calibrator,
+    profiles: { 1: { names: ['nick'], character: '', interests: [], style: '', details: [], relationship: '', affinity: { score: 60.4, reason: 'helped once', history: [] } } },
+    guildMemory: {},
+    messages,
+    selfName: 'Nept',
+  });
+
+  const user = llmMessages[1].content;
+  const profiles = JSON.parse(/<existing_profiles>\n([\s\S]*?)\n<\/existing_profiles>/.exec(user)[1]);
+  assert.deepEqual(profiles['1'].affinity, { score: 60, reason: 'helped once' });
+});
+
 test('buildMemoryRequest: relationships off never adds affinity to existing profiles', () => {
   const config = makeConfig({ features: { relationships: false } });
   const calibrator = createCalibrator();
@@ -1173,6 +1193,60 @@ test('applyMemoryUpdate: relationships enabled applies and clamps the affinity d
     const profile = store.getUser(guildId, '1');
     assert.equal(profile.affinity.score, 15, 'delta is clamped to maxDeltaPerUpdate');
     assert.equal(profile.affinity.reason, 'was really kind');
+  });
+});
+
+test('applyMemoryUpdate: relationships.damping missing counts as on, damping an already one-sided score', () => {
+  withStore((store) => {
+    const guildId = 'g1';
+    store.touchUser(guildId, '1', 'nick', Date.now());
+    store.adjustAffinity(guildId, '1', 50, 'a good start', { maxDelta: Infinity, historySize: 10, now: Date.now() });
+
+    const update = { users: { 1: { affinity: { delta: 10, reason: 'kind again' } } } };
+    applyMemoryUpdate(store, guildId, update, MEMORY_CFG, new Set(['1']), new Set(), RELATIONSHIPS_CFG);
+
+    // factor = 1 - 50/100 = 0.5 -> applied delta = 5, not the full 10.
+    assert.equal(store.getUser(guildId, '1').affinity.score, 55);
+  });
+});
+
+test('applyMemoryUpdate: relationships.dampingPower steepens/flattens the damping curve', () => {
+  withStore((store) => {
+    const guildId = 'g1';
+    store.touchUser(guildId, '1', 'nick', Date.now());
+    store.adjustAffinity(guildId, '1', 60, 'a good start', { maxDelta: Infinity, historySize: 10, now: Date.now() });
+
+    const update = { users: { 1: { affinity: { delta: 1, reason: 'kind again' } } } };
+    applyMemoryUpdate(store, guildId, update, MEMORY_CFG, new Set(['1']), new Set(), { ...RELATIONSHIPS_CFG, dampingPower: 2 });
+
+    // factor = (1 - 60/100) ** 2 = 0.16, not the plain power-1 factor of 0.4.
+    assert.equal(store.getUser(guildId, '1').affinity.score, 60.16);
+  });
+});
+
+test('applyMemoryUpdate: relationships.dampingPower garbage falls back to 1', () => {
+  withStore((store) => {
+    const guildId = 'g1';
+    store.touchUser(guildId, '1', 'nick', Date.now());
+    store.adjustAffinity(guildId, '1', 60, 'a good start', { maxDelta: Infinity, historySize: 10, now: Date.now() });
+
+    const update = { users: { 1: { affinity: { delta: 1, reason: 'kind again' } } } };
+    applyMemoryUpdate(store, guildId, update, MEMORY_CFG, new Set(['1']), new Set(), { ...RELATIONSHIPS_CFG, dampingPower: 'not a number' });
+
+    assert.equal(store.getUser(guildId, '1').affinity.score, 60.4);
+  });
+});
+
+test('applyMemoryUpdate: relationships.damping: false applies the delta undamped', () => {
+  withStore((store) => {
+    const guildId = 'g1';
+    store.touchUser(guildId, '1', 'nick', Date.now());
+    store.adjustAffinity(guildId, '1', 50, 'a good start', { maxDelta: Infinity, historySize: 10, now: Date.now() });
+
+    const update = { users: { 1: { affinity: { delta: 10, reason: 'kind again' } } } };
+    applyMemoryUpdate(store, guildId, update, MEMORY_CFG, new Set(['1']), new Set(), { ...RELATIONSHIPS_CFG, damping: false });
+
+    assert.equal(store.getUser(guildId, '1').affinity.score, 60);
   });
 });
 

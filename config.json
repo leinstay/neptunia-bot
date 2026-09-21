@@ -128,7 +128,9 @@
   "relationships": {
     "maxDeltaPerUpdate": 15,
     "historySize": 10,
-    "directTriggerCount": 6
+    "directTriggerCount": 6,
+    "damping": true,
+    "dampingPower": 1
   },
   "media": {
     "model": "anthropic/claude-haiku-4.5",

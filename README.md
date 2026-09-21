@@ -255,9 +255,13 @@ The analyzer prompt reads these limits as placeholders, so raising a value takes
 
 | Key | Default | Meaning |
 |---|---|---|
+| `damping` | `true` | Damp score changes that push further from zero; changes toward zero apply in full |
+| `dampingPower` | `1` | Exponent of the damping factor; higher values make the ends of the scale harder to reach |
 | `maxDeltaPerUpdate` | `15` | Max score change per update |
 | `historySize` | `10` | Attitude changes kept per member |
 | `directTriggerCount` | `6` | Direct interactions that force early update |
+
+With `damping` on, a change that pushes the score further from zero is scaled by `(1 - |score| / 100) ^ dampingPower`, so extremes take sustained effort; a change back toward zero applies at full strength. The score is stored with fractional precision and shown as a whole number; `/nep memory affinity` sets it directly without damping.
 
 ### `lore`
 

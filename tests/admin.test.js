@@ -618,6 +618,29 @@ test('run: memory.affinity with a score sets it exactly, bypassing maxDeltaPerUp
   assert.ok(result.includes('77'));
 });
 
+test('run: memory.affinity shows a damped (fractional) score rounded to an integer', async () => {
+  const rootDir = makeRoot();
+  const { admin, store } = makeAdmin(rootDir);
+  store.profiles.set('g1:123', { id: '123', affinity: { score: 60.4, reason: 'helped once', history: [] } });
+
+  const result = await admin.run('memory.affinity', { userId: '123' }, { guildId: 'g1' });
+  assert.ok(result.includes('score: 60'));
+  assert.ok(!result.includes('60.4'));
+});
+
+test('run: memory.affinity with a score sets it exactly even from a fractional (damped) current score, with no damping', async () => {
+  const rootDir = makeRoot();
+  const { admin, store } = makeAdmin(rootDir);
+  store.profiles.set('g1:123', { id: '123', affinity: { score: 60.4, reason: 'was doing fine', history: [] } });
+
+  const result = await admin.run('memory.affinity', { userId: '123', score: 70, reason: 'owner override' }, { guildId: 'g1' });
+
+  const affinity = store.getUser('g1', '123').affinity;
+  assert.equal(affinity.score, 70, 'truncating the gap to 70 - 60.4 = 9.6 -> 9 would have stranded this at 69.4');
+  assert.equal(affinity.reason, 'owner override');
+  assert.ok(result.includes('70'));
+});
+
 test('run: memory.affinity with a score but no reason defaults to "set by owner"', async () => {
   const rootDir = makeRoot();
   const { admin, store } = makeAdmin(rootDir);
@@ -965,6 +988,16 @@ test('run: memory.show defaults to the summary section', async () => {
   assert.ok(!result.trim().startsWith('{'));
 });
 
+test('run: memory.show summary rounds a damped (fractional) score for display', async () => {
+  const rootDir = makeRoot();
+  const { admin, store } = makeAdmin(rootDir);
+  store.profiles.set('g1:123', { id: '123', names: ['Bob'], affinity: { score: 60.4, reason: 'helped once', history: [] } });
+
+  const result = await admin.run('memory.show', { userId: '123' }, { guildId: 'g1' });
+  assert.ok(result.includes('attitude: 60'));
+  assert.ok(!result.includes('60.4'));
+});
+
 test('run: memory.show section:summary always fits one Discord message, even for a huge profile', async () => {
   const rootDir = makeRoot();
   const { admin, store } = makeAdmin(rootDir);
@@ -1050,6 +1083,19 @@ test('run: memory.show section:affinity shows score, band, reason and recent his
   assert.ok(result.includes('score: 42'));
   assert.ok(result.includes('band: fond'));
   assert.ok(result.includes('reason: helped once'));
+});
+
+test('run: memory.show section:affinity rounds a damped (fractional) score for display', async () => {
+  const rootDir = makeRoot();
+  const { admin, store } = makeAdmin(rootDir);
+  store.profiles.set('g1:123', {
+    id: '123',
+    affinity: { score: 60.4, reason: 'helped once', history: [{ ts: 't1', delta: 1, appliedDelta: 0.4, score: 60.4, reason: 'helped once' }] },
+  });
+
+  const result = await admin.run('memory.show', { userId: '123', section: 'affinity' }, { guildId: 'g1' });
+  assert.ok(result.includes('score: 60'));
+  assert.ok(!result.includes('60.4'));
 });
 
 test('run: memory.show section:interests renders "topic — note [seen N, last DATE]"', async () => {

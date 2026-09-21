@@ -22,7 +22,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { emptyAffinity, affinityBand } from './memory/affinity.js';
+import { emptyAffinity, affinityBand, roundScore } from './memory/affinity.js';
 import { topByRank } from './memory/ranking.js';
 import { fromTokens } from './memory/mentions.js';
 import { sortEpisodesForDisplay } from './memory/episodes.js';
@@ -279,7 +279,7 @@ export function buildProfileSummary(profile, memoryCfg = {}, nameOf = () => null
     `messages: ${profile?.messageCount ?? 0}`,
     `first seen: ${profile?.firstSeen ? profile.firstSeen.slice(0, 10) : '-'}`,
     `last seen: ${profile?.lastSeen ? profile.lastSeen.slice(0, 10) : '-'}`,
-    `attitude: ${affinity.score ?? 0} (${affinityBand(affinity.score ?? 0)})${reason ? ` — ${truncateForSummary(reason, 150)}` : ''}`,
+    `attitude: ${roundScore(affinity.score ?? 0)} (${affinityBand(affinity.score ?? 0)})${reason ? ` — ${truncateForSummary(reason, 150)}` : ''}`,
     `character: ${truncateForSummary(resolve(profile?.character) || '(empty)', 240, 'character')}`,
     `style: ${truncateForSummary(resolve(profile?.style) || '(empty)', 240, 'style')}`,
     `relationship: ${truncateForSummary(resolve(profile?.relationship) || '(empty)', 240, 'relationship')}`,
@@ -804,10 +804,10 @@ export function createAdmin({ hot, store, client, spontaneous, calibrator, getGu
       const affinity = profile.affinity ?? emptyAffinity();
       const history = (affinity.history ?? [])
         .slice(-5)
-        .map((h) => `${h.ts} ${h.delta >= 0 ? '+' : ''}${h.delta} -> ${h.score}${h.reason ? `: ${resolve(h.reason)}` : ''}`)
+        .map((h) => `${h.ts} ${h.delta >= 0 ? '+' : ''}${h.delta} -> ${roundScore(h.score)}${h.reason ? `: ${resolve(h.reason)}` : ''}`)
         .join('\n');
       return [
-        `score: ${affinity.score}`,
+        `score: ${roundScore(affinity.score)}`,
         `band: ${affinityBand(affinity.score)}`,
         `reason: ${resolve(affinity.reason) || '-'}`,
         history ? `history:\n${history}` : 'history: (empty)',
@@ -1024,10 +1024,10 @@ export function createAdmin({ hot, store, client, spontaneous, calibrator, getGu
       const affinity = profile.affinity ?? emptyAffinity();
       const history = (affinity.history ?? [])
         .slice(-5)
-        .map((h) => `${h.ts} ${h.delta >= 0 ? '+' : ''}${h.delta} -> ${h.score}${h.reason ? `: ${h.reason}` : ''}`)
+        .map((h) => `${h.ts} ${h.delta >= 0 ? '+' : ''}${h.delta} -> ${roundScore(h.score)}${h.reason ? `: ${h.reason}` : ''}`)
         .join('\n');
       return [
-        `score: ${affinity.score}`,
+        `score: ${roundScore(affinity.score)}`,
         `band: ${affinityBand(affinity.score)}`,
         `reason: ${affinity.reason || '-'}`,
         history ? `history:\n${history}` : 'history: (empty)',
@@ -1046,8 +1046,10 @@ export function createAdmin({ hot, store, client, spontaneous, calibrator, getGu
       maxDelta: Infinity, // the owner's explicit override bypasses maxDeltaPerUpdate
       historySize: relCfg.historySize ?? 10,
       now: Date.now(),
+      damping: false, // an absolute set is never damped
+      truncate: false, // `current` may carry two decimals (a damped score); land on `score` exactly
     });
-    return `Set affinity for ${userId} to ${affinity.score} (${affinityBand(affinity.score)}).`;
+    return `Set affinity for ${userId} to ${roundScore(affinity.score)} (${affinityBand(affinity.score)}).`;
   }
 
   // ---------------------------------------------------------------------

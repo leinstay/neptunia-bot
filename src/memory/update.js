@@ -13,7 +13,7 @@ import { parseJsonObject } from '../llm/parse.js';
 import { TokenLimitError } from '../llm/openrouter.js';
 import { isDescribable, stickerUrl } from '../discord/media.js';
 import { log } from '../log.js';
-import { emptyAffinity } from './affinity.js';
+import { emptyAffinity, roundScore } from './affinity.js';
 import { keywordMatches } from './lore.js';
 import { migrateInterests } from './interests.js';
 import { migrateDetails } from './details.js';
@@ -318,7 +318,9 @@ export function buildMemoryRequest({ prompts, config, calibrator, profiles, guil
     }
     if (relationships) {
       const affinity = profile?.affinity ?? emptyAffinity();
-      fields.affinity = { score: affinity.score, reason: resolveText(affinity.reason, resolveName) };
+      // The analyzer sees the integer score, same as the owner (see roundScore); band thresholds
+      // and the ignore-chance maths, not the analyzer, are what need the precise value.
+      fields.affinity = { score: roundScore(affinity.score), reason: resolveText(affinity.reason, resolveName) };
     }
     if (episodesOn && Array.isArray(profile?.episodes) && profile.episodes.length > 0) {
       fields.episodes = profile.episodes.map(({ date, what, quote, weight }) => ({ date, what: resolveText(what, resolveName), quote, weight }));
@@ -450,9 +452,11 @@ export function batchAuthorNamesMap(messages) {
  * @param {Set<string>} knownUserIds
  * @param {Set<string>} [knownChannelIds]  Channel ids present in the batch; a channel outside
  *   this set is rejected, mirroring `knownUserIds`.
- * @param {{ enabled: boolean, maxDeltaPerUpdate: number, historySize: number, now?: number }} [relationships]
+ * @param {{ enabled: boolean, maxDeltaPerUpdate: number, historySize: number, damping?: boolean, dampingPower?: number, now?: number }} [relationships]
  *   Only when `enabled`, `raw.affinity` (a `{ delta, reason }` change) is folded into the
  *   stored score via `store.adjustAffinity`. Absent/disabled -> affinity is ignored entirely.
+ *   `damping` missing counts as on, `dampingPower` missing/garbage falls back to `1` (see
+ *   src/memory/affinity.js#applyDelta).
  * @param {{ enabled: boolean, maxEpisodes: number, maxNew: number, now?: number }} [episodes]
  *   Only when `enabled`, each user's `raw.episodes` (a new-moments array) is folded in via
  *   `store.addEpisodes` (src/memory/episodes.js#mergeEpisodes). Absent/disabled -> ignored entirely.
@@ -580,6 +584,10 @@ export function applyMemoryUpdate(store, guildId, update, cfg, knownUserIds, kno
           historySize: relationships.historySize ?? 10,
           now: relationships.now,
           clampTolerance: cfg.clampTolerance,
+          // relationships.damping: a missing key counts as on, like features.*.
+          damping: relationships.damping !== false,
+          // relationships.dampingPower: garbage/absent falls back to 1 inside applyDelta itself.
+          dampingPower: relationships.dampingPower,
         });
         if (after.score !== before) result.affinity += 1;
       }
