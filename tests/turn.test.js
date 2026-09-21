@@ -293,6 +293,60 @@ async function withCapturedLogs(fn) {
   return { result, logs };
 }
 
+// F30 (/nep pause): no new turn may start while paused -- a reply, an
+// interject, an initiate, an eavesdrop or a poke alike, whatever the mode.
+test('runTurn: refuses with outcome "paused" while store.state.data.paused is true, before touching the LLM or busy', async () => {
+  const raw = rawMessage({ id: 'm1' });
+  const channel = fakeTurnChannel({ historyMessages: [raw] });
+  const llm = fakeLlm('<msg>hi</msg>');
+  const store = fakeStore();
+  store.state.data.paused = true;
+  const hot = fakeHot();
+  const turns = createTurnRunner({ hot, store, llm, calibrator: identityCalibrator(), client: fakeClient() });
+
+  const result = await turns.runTurn({ channel, mode: 'reply', trigger: normalizedTrigger(raw), triggerKind: 'mention' });
+
+  assert.equal(result.outcome, 'paused');
+  assert.equal(llm.calls.length, 0, 'the LLM must never be called while paused');
+  assert.equal(turns.isBusy(channel.id), false, 'the channel is never marked busy for a refused turn');
+});
+
+test('waitIdle: resolves immediately when no turn is in flight', async () => {
+  const store = fakeStore();
+  const hot = fakeHot();
+  const turns = createTurnRunner({ hot, store, llm: fakeLlm('<msg>hi</msg>'), calibrator: identityCalibrator(), client: fakeClient() });
+
+  let resolved = false;
+  turns.waitIdle().then(() => { resolved = true; });
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(resolved, true);
+});
+
+test('waitIdle: resolves only once every in-flight turn has finished', async () => {
+  const raw = rawMessage({ id: 'm1' });
+  const channel = fakeTurnChannel({ historyMessages: [raw] });
+  const store = fakeStore();
+  const hot = fakeHot();
+  let releaseLlm;
+  const llm = { complete: () => new Promise((resolve) => { releaseLlm = () => resolve({ text: '<msg>hi</msg>', usage: {}, estimated: 1 }); }) };
+  const turns = createTurnRunner({ hot, store, llm, calibrator: identityCalibrator(), client: fakeClient() });
+
+  const turnPromise = turns.runTurn({ channel, mode: 'reply', trigger: normalizedTrigger(raw), triggerKind: 'mention' });
+  // Let runTurn's own awaits (fetchHistory, withTextPreviews, fetchNeighbors,
+  // buildRequest...) settle before it reaches the still-pending LLM call.
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  let idleResolved = false;
+  const idlePromise = turns.waitIdle().then(() => { idleResolved = true; });
+  assert.equal(idleResolved, false, 'must not resolve while the turn is still in flight');
+
+  releaseLlm();
+  await turnPromise;
+  await idlePromise;
+  assert.equal(idleResolved, true);
+});
+
 test('createTurnRunner: features.reactions=false drops reactions; nothing else to do means outcome "skip"', async () => {
   const raw = rawMessage({ id: 'm1' });
   const channel = fakeTurnChannel({ historyMessages: [raw] });

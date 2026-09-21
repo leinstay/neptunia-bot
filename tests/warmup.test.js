@@ -1968,6 +1968,49 @@ test('isBlocking: false when the stored state is paused, even though enabled is 
   }
 });
 
+// F30: /nep pause's bot-wide `store.state.data.paused` flag is a different
+// thing entirely from the warm-up's OWN nested `store.state.data.warmup.paused`
+// (set when stop() interrupts a run) -- either one must stop isBlocking() from
+// auto-starting/counting the warm-up as due, but this one takes effect
+// immediately at process start, even with a warm-up otherwise clearly due.
+test('isBlocking: false when the bot-wide pause flag is set (F30), even though the warm-up itself would otherwise be due', () => {
+  const dir = tempDir();
+  try {
+    const store = createStore({ dataDir: dir });
+    const hot = fakeHot({ warmup: { enabled: true } });
+    const warmup = createWarmup({ hot, store, client: {}, memory: {}, getGuildId: () => 'g1' });
+
+    store.state.data.paused = true;
+    assert.equal(warmup.isBlocking(), false);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// F30: a pause persisted before a restart must come back paused, and the
+// warm-up must stay quiet across that restart too -- exactly the check
+// src/index.js's own start-up path (`if (warmup.isBlocking()) warmup.run()`) relies on.
+test('isBlocking: a pause survives a simulated restart (flush + a fresh store instance), the warm-up does not auto-start', () => {
+  const dir = tempDir();
+  try {
+    const storeA = createStore({ dataDir: dir });
+    storeA.state.data.paused = true;
+    storeA.state.data.pausedAt = '2026-01-01T00:00:00.000Z';
+    storeA.state.markDirty();
+    storeA.flush();
+
+    // A fresh process reading the same data/ -- otherwise clearly due (enabled, nothing done/aborted).
+    const storeB = createStore({ dataDir: dir });
+    const hot = fakeHot({ warmup: { enabled: true } });
+    const warmup = createWarmup({ hot, store: storeB, client: {}, memory: {}, getGuildId: () => 'g1' });
+
+    assert.equal(storeB.state.data.paused, true, 'the pause itself survives the restart');
+    assert.equal(warmup.isBlocking(), false, 'the warm-up must not auto-start while the restart comes back paused');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('isBlocking: true while an owner-started run is in progress, even with warmup.enabled: false', async () => {
   const dir = tempDir();
   try {

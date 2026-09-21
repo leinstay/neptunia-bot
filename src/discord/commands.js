@@ -28,7 +28,7 @@ const REPLY_CHUNK_CHARS = 1900;
 const MAX_AUTOCOMPLETE_CHOICES = 25;
 
 /** Commands that may take long enough to need `deferReply` before `editReply`. */
-const SLOW_COMMANDS = new Set(['poke', 'warmup.plan', 'warmup.run', 'reload']);
+const SLOW_COMMANDS = new Set(['poke', 'warmup.plan', 'warmup.run', 'reload', 'pause', 'resume']);
 
 const DISABLED_MESSAGE = 'Owner commands are disabled (features.adminCommands is off).';
 const NOT_ALLOWED_MESSAGE = 'Not allowed.';
@@ -52,6 +52,16 @@ export function buildCommandTree(commandName) {
       options: [
         { type: SUBCOMMAND, name: 'status', description: 'Model, calibration, quotas and per-guild memory status.' },
         { type: SUBCOMMAND, name: 'reload', description: 'Reload config and prompts now.' },
+        {
+          type: SUBCOMMAND,
+          name: 'pause',
+          description: 'Pause the persona and flush memory so data/ can be edited safely by hand.',
+        },
+        {
+          type: SUBCOMMAND,
+          name: 'resume',
+          description: 'Resume after a pause, refusing if data/ has an invalid file.',
+        },
         {
           type: SUBCOMMAND,
           name: 'poke',
@@ -373,6 +383,8 @@ function commandKeyFor(interaction) {
 const OPTION_MAPPERS = {
   status: () => ({}),
   reload: () => ({}),
+  pause: () => ({}),
+  resume: () => ({}),
   poke: (options) => ({
     mode: options.getString('mode') ?? 'interject',
     channelId: options.getChannel('channel')?.id,

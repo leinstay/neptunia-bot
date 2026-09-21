@@ -245,14 +245,45 @@ function writeLocalConfig(localPath, value) {
  * `getGuildId` — the single guild this instance serves, or null before it resolves.
  * `warmup` — from createWarmup() (src/memory/warmup.js), optional: `run()`, `stop()`, `status()`, `plan()`,
  *   `reset()`. When absent, every `warmup.*` command reports it is not available.
+ * `turns` — from createTurnRunner() (src/behavior/turn.js), optional: `waitIdle()`, used by
+ *   `/nep pause` (F30) to wait out a turn already in flight. Absent -> the wait is simply skipped.
+ * `memory` — from createMemoryUpdater() (src/memory/update.js), optional: `waitIdle()`, used by
+ *   `/nep pause` (F30) to wait out a live-analyzer `run()` already in flight (an LLM call can take
+ *   30-90s) before the pause flushes and drops the store's caches. Absent -> the wait is skipped.
+ * `pending` — `{ clear() }`, optional: clears src/discord/events.js's pending-ping queue on pause
+ *   (F30). Absent -> nothing to clear.
  *
  * `run(commandKey, args, context)` throws a plain `Error` (operator-facing
  * message) on bad input; it never touches discord.js.
  */
-export function createAdmin({ hot, store, client, spontaneous, calibrator, getGuildId, warmup }) {
+export function createAdmin({ hot, store, client, spontaneous, calibrator, getGuildId, warmup, turns, memory, pending }) {
   function isOwner(userId) {
     const owners = hot.config?.bot?.owners ?? [];
     return owners.map(String).includes(String(userId));
+  }
+
+  /**
+   * F30 (`/nep pause`): refuse a command that would write under `data/` while
+   * paused, with a hint to resume first -- see the module header comment's
+   * "MUST NOT touch" list in the task and the DESIGN section 3 list of
+   * refused commands (memory.forget, memory.affinity with a score,
+   * memory.wipe, lore.add, lore.remove, warmup.run, warmup.reset, poke).
+   */
+  function assertNotPaused() {
+    if (store.state.data.paused) {
+      throw new Error('paused -- run /nep resume first');
+    }
+  }
+
+  /**
+   * F30: a read-only command must see a hand-edit made while paused, even a
+   * second one made between two calls of the same command -- `dropCaches`
+   * only drops what a WRITE would otherwise dirty (users/guild/channels/lore
+   * /media/buffer), so this is safe to call before every read while paused.
+   * A no-op when not paused, so callers can call it unconditionally.
+   */
+  function freshenIfPaused() {
+    if (store.state.data.paused && typeof store.dropCaches === 'function') store.dropCaches();
   }
 
   function localRulesFile() {
@@ -339,6 +370,129 @@ export function createAdmin({ hot, store, client, spontaneous, calibrator, getGu
     return `config reload: ${configOk ? 'ok' : 'FAILED'}\nprompts reload: ${promptsOk ? 'ok' : 'FAILED'}`;
   }
 
+  // ---------------------------------------------------------------------
+  // pause / resume — F30: a maintenance mode so the owner can edit files
+  // under data/ by hand while the process stays up. See src/memory/store.js
+  // (dropCaches/reloadState/validate) and the module header comments of
+  // src/behavior/turn.js (waitIdle), src/behavior/spontaneous.js and
+  // src/memory/update.js (both no-op while paused).
+  // ---------------------------------------------------------------------
+
+  /**
+   * Sets `paused`/`pausedAt` in state.json FIRST (so a crash or restart
+   * mid-pause comes back paused), then waits out a warm-up in flight (via
+   * its own `stop()`, remembering `resumeWarmup` for `/nep resume`), a turn
+   * already running, AND a live-analyzer `run()` already in flight (its LLM
+   * call can take 30-90s; `tick()`/`observe()` are already no-ops from the
+   * moment `paused` is set, so no NEW run can start -- this only waits out
+   * one that started before the pause). Only once all three are idle does it
+   * clear the pending-ping queue, flush everything and drop every cache
+   * except state.json itself, so nothing stale (or a late in-flight write)
+   * can land in data/ after the owner starts editing it. Idempotent: a
+   * second call just reports the state.
+   */
+  async function cmdPause() {
+    const state = store.state.data;
+    if (state.paused) {
+      return [
+        `Already paused (since ${state.pausedAt ?? '?'}).`,
+        'Files under data/ can be edited freely. Run /nep resume when done.',
+      ].join('\n');
+    }
+
+    state.paused = true;
+    state.pausedAt = new Date().toISOString();
+    store.state.markDirty();
+    store.flush();
+
+    let warmupInterrupted = false;
+    if (warmup && typeof warmup.status === 'function' && typeof warmup.stop === 'function' && typeof warmup.run === 'function') {
+      let running = false;
+      try {
+        running = Boolean(warmup.status()?.running);
+      } catch {
+        running = false;
+      }
+      if (running) {
+        warmupInterrupted = true;
+        warmup.stop();
+        try {
+          await warmup.run(); // the SAME in-flight run (warmup.run() is idempotent while running) -- resolves once it pauses
+        } catch (err) {
+          log.warn('admin: the interrupted warm-up run rejected while pausing', { error: err });
+        }
+      }
+    }
+
+    if (warmupInterrupted) {
+      store.state.data.resumeWarmup = true;
+      store.state.markDirty();
+    }
+
+    if (turns && typeof turns.waitIdle === 'function') {
+      await turns.waitIdle();
+    }
+
+    // The live analyzer's own in-flight run (if any) must land on disk
+    // BEFORE the flush + dropCaches below -- see the header comment above.
+    if (memory && typeof memory.waitIdle === 'function') {
+      await memory.waitIdle();
+    }
+
+    if (pending && typeof pending.clear === 'function') {
+      pending.clear();
+    }
+
+    store.flush();
+    const dropped = typeof store.dropCaches === 'function' ? store.dropCaches() : 0;
+
+    log.info('admin: paused', { warmupInterrupted, dropped });
+
+    return [
+      'Paused. Memory is flushed to disk -- files under data/ can be edited safely now.',
+      'Run /nep resume when done.',
+    ].join('\n');
+  }
+
+  /**
+   * Refuses (staying paused) if any `*.json` under data/ fails to parse,
+   * naming the offending paths. Otherwise re-reads state.json (the owner may
+   * have hand-edited warm-up progress while paused), clears the pause flags
+   * and lets every other cache lazily re-populate from disk. Restarts the
+   * warm-up (not awaited) if it was the one interrupted by this pause.
+   * Idempotent: reports "not paused" when called while not paused.
+   */
+  function cmdResume() {
+    const badFiles = typeof store.validate === 'function' ? store.validate() : [];
+    if (badFiles.length > 0) {
+      return [
+        'Still paused: found invalid JSON under data/, fix or restore these files and try again:',
+        ...badFiles.map((file) => `  ${file}`),
+      ].join('\n');
+    }
+
+    if (typeof store.reloadState === 'function') store.reloadState();
+    const state = store.state.data;
+    if (!state.paused) {
+      return 'Not paused.';
+    }
+
+    const resumeWarmup = Boolean(state.resumeWarmup);
+    delete state.paused;
+    delete state.pausedAt;
+    delete state.resumeWarmup;
+    store.state.markDirty();
+    store.flush();
+
+    if (resumeWarmup && warmup && typeof warmup.run === 'function') {
+      warmup.run().catch((err) => log.error('admin: resumed warm-up run failed', { error: err }));
+    }
+
+    log.info('admin: resumed', { resumeWarmup });
+
+    return resumeWarmup ? 'Resumed. The warm-up will continue where it left off.' : 'Resumed.';
+  }
+
   function nextSpontaneousFor(guildId) {
     if (typeof spontaneous?.status !== 'function') return null;
     let value;
@@ -361,6 +515,7 @@ export function createAdmin({ hot, store, client, spontaneous, calibrator, getGu
   }
 
   function cmdStatus() {
+    freshenIfPaused(); // F30: read the freshest data/ even mid-pause
     const cfg = hot.config;
     const data = store.state.data ?? {};
     const dryRunOn = cfg?.features?.dryRun === true;
@@ -371,6 +526,7 @@ export function createAdmin({ hot, store, client, spontaneous, calibrator, getGu
       `model: ${cfg?.llm?.model ?? '-'}`,
       `calibration ratio: ${calibrator ? calibrator.ratio.toFixed(3) : '-'}`,
       `llm requests today: ${data.llmCount ?? 0} / ${cfg?.llm?.maxRequestsPerDay ?? '-'} (day: ${data.llmDay ?? '-'})`,
+      data.paused ? `paused: true (since ${data.pausedAt ?? '?'})` : 'paused: false',
     ];
 
     const guildId = getGuildId?.() ?? null;
@@ -399,6 +555,7 @@ export function createAdmin({ hot, store, client, spontaneous, calibrator, getGu
   }
 
   async function cmdPoke(args, context) {
+    assertNotPaused();
     const mode = args?.mode === 'initiate' ? 'initiate' : 'interject';
     const channelId = args?.channelId || context?.channelId;
     if (!channelId) throw new Error('a channel is required');
@@ -415,6 +572,7 @@ export function createAdmin({ hot, store, client, spontaneous, calibrator, getGu
   }
 
   function cmdMemoryShow(args, context) {
+    freshenIfPaused();
     const userId = args?.userId;
     if (!userId) throw new Error('a user is required');
 
@@ -459,6 +617,7 @@ export function createAdmin({ hot, store, client, spontaneous, calibrator, getGu
   }
 
   function cmdMemoryForget(args, context) {
+    assertNotPaused();
     const userId = args?.userId;
     if (!userId) throw new Error('a user is required');
 
@@ -478,6 +637,7 @@ export function createAdmin({ hot, store, client, spontaneous, calibrator, getGu
    * outright while a warm-up is running.
    */
   function cmdMemoryWipe(args, context) {
+    assertNotPaused();
     const guildId = resolvedGuildId(context);
     if (!guildId) throw new Error('no guild resolved yet');
 
@@ -520,6 +680,7 @@ export function createAdmin({ hot, store, client, spontaneous, calibrator, getGu
 
     const score = args?.score;
     if (score === undefined || score === null) {
+      freshenIfPaused();
       const profile = store.getUser(guildId, userId);
       if (!profile) throw new Error(`no profile for ${userId}`);
       const affinity = profile.affinity ?? emptyAffinity();
@@ -535,6 +696,7 @@ export function createAdmin({ hot, store, client, spontaneous, calibrator, getGu
       ].join('\n');
     }
 
+    assertNotPaused();
     if (!Number.isInteger(score) || score < -100 || score > 100) {
       throw new Error('score must be an integer between -100 and 100');
     }
@@ -559,6 +721,7 @@ export function createAdmin({ hot, store, client, spontaneous, calibrator, getGu
   }
 
   function cmdLoreAdd(args, context) {
+    assertNotPaused();
     const guildId = resolvedGuildId(context);
     if (!guildId) throw new Error('no guild resolved yet');
 
@@ -584,6 +747,7 @@ export function createAdmin({ hot, store, client, spontaneous, calibrator, getGu
   }
 
   function cmdLoreList(args, context) {
+    freshenIfPaused();
     const guildId = resolvedGuildId(context);
     if (!guildId) throw new Error('no guild resolved yet');
 
@@ -599,6 +763,7 @@ export function createAdmin({ hot, store, client, spontaneous, calibrator, getGu
   }
 
   function cmdLoreShow(args, context) {
+    freshenIfPaused();
     const guildId = resolvedGuildId(context);
     if (!guildId) throw new Error('no guild resolved yet');
 
@@ -609,6 +774,7 @@ export function createAdmin({ hot, store, client, spontaneous, calibrator, getGu
   }
 
   function cmdLoreRemove(args, context) {
+    assertNotPaused();
     const guildId = resolvedGuildId(context);
     if (!guildId) throw new Error('no guild resolved yet');
 
@@ -749,6 +915,7 @@ function warmupLocalConfigPath() {
   }
 
   function cmdWarmupRun() {
+    assertNotPaused();
     const s = warmup.status();
     if (s.running) return 'warm-up is already running.';
     if (s.done) return 'warm-up has already finished.';
@@ -764,6 +931,7 @@ function warmupLocalConfigPath() {
   }
 
   function cmdWarmupReset() {
+    assertNotPaused();
     warmup.reset();
     return 'Warm-up progress reset.';
   }
@@ -779,6 +947,8 @@ function warmupLocalConfigPath() {
   const commands = {
     status: () => cmdStatus(),
     reload: () => cmdReload(),
+    pause: () => cmdPause(),
+    resume: () => cmdResume(),
     poke: (args, context) => cmdPoke(args, context),
     set: (args) => cmdSet(args),
     unset: (args) => cmdUnset(args),

@@ -14,6 +14,10 @@ import {
 } from '../src/admin.js';
 import { emptyAffinity, applyDelta } from '../src/memory/affinity.js';
 import { upsertLore } from '../src/memory/lore.js';
+import { createStore } from '../src/memory/store.js';
+import { createMemoryUpdater } from '../src/memory/update.js';
+import { createSpontaneous } from '../src/behavior/spontaneous.js';
+import { labels } from './fixtures/labels.js';
 
 // ---------------------------------------------------------------------------
 // listRules / appendRule / removeRule
@@ -183,11 +187,28 @@ function makeStore() {
   const profiles = new Map();
   const forgotten = [];
   const lore = new Map(); // guildId -> entries[]
-  return {
+  const store = {
     profiles,
     forgotten,
     lore,
-    state: { data: { llmCount: 5, llmDay: '2026-09-20' } },
+    state: { data: { llmCount: 5, llmDay: '2026-09-20' }, markDirty() {} },
+    flushCalls: 0,
+    flush() {
+      this.flushCalls += 1;
+    },
+    dropCachesCalls: 0,
+    dropCaches() {
+      this.dropCachesCalls += 1;
+      return 0;
+    },
+    reloadStateCalls: 0,
+    reloadState() {
+      this.reloadStateCalls += 1;
+    },
+    validateResult: [],
+    validate() {
+      return this.validateResult;
+    },
     getUser(guildId, userId) {
       return profiles.get(`${guildId}:${userId}`) ?? null;
     },
@@ -231,6 +252,7 @@ function makeStore() {
       return { users: 2, channels: 1, loreRemoved: 3, loreKept: 1, bufferMessages: 5 };
     },
   };
+  return store;
 }
 
 function makeAdmin(rootDir, extra = {}) {
@@ -244,6 +266,9 @@ function makeAdmin(rootDir, extra = {}) {
     calibrator: extra.calibrator ?? { ratio: 1 },
     getGuildId: extra.getGuildId ?? (() => 'g1'),
     warmup: extra.warmup,
+    turns: extra.turns,
+    memory: extra.memory,
+    pending: extra.pending,
   });
   return { admin, hot, store };
 }
@@ -1314,4 +1339,435 @@ test('run: every warmup.* command reports unavailable when no warmup dependency 
 
   const result2 = await admin.run('warmup.run', {}, {});
   assert.ok(result2.includes('not available'));
+});
+
+// ---------------------------------------------------------------------------
+// pause / resume — F30
+// ---------------------------------------------------------------------------
+
+/** A warm-up whose status().running flips false once stop() is called, and whose
+ * run() resolves that SAME in-flight promise when called again while running --
+ * mirrors createWarmup()'s real idempotent-while-running contract closely enough
+ * for admin.js's pause handler to be tested without the real warm-up module. */
+function fakeInterruptibleWarmup() {
+  let running = true;
+  const calls = { stop: 0, run: 0 };
+  let resolveRun;
+  const runPromise = new Promise((resolve) => {
+    resolveRun = resolve;
+  });
+  return {
+    calls,
+    status: () => ({
+      running,
+      done: false,
+      paused: false,
+      aborted: false,
+      enabled: true,
+      tokensUsed: 0,
+      maxTokens: 0,
+      requests: 0,
+      messagesAnalyzed: 0,
+      messagesTotal: 0,
+      reachedTs: 0,
+      skippedMessages: 0,
+      onlyListed: false,
+      channels: [],
+    }),
+    stop: () => {
+      calls.stop += 1;
+      running = false;
+      resolveRun({ paused: true });
+    },
+    run: () => {
+      calls.run += 1;
+      return runPromise;
+    },
+  };
+}
+
+test('run: pause sets paused/pausedAt first, flushes, and drops caches', async () => {
+  const rootDir = makeRoot();
+  const { admin, store } = makeAdmin(rootDir);
+
+  const result = await admin.run('pause', {}, {});
+
+  assert.equal(store.state.data.paused, true);
+  assert.ok(store.state.data.pausedAt);
+  assert.ok(store.flushCalls >= 1);
+  assert.equal(store.dropCachesCalls, 1);
+  assert.match(result, /paused/i);
+  assert.match(result, /resume/i);
+});
+
+test('run: pause is idempotent -- a second call just reports the state without dropping caches again', async () => {
+  const rootDir = makeRoot();
+  const { admin, store } = makeAdmin(rootDir);
+
+  await admin.run('pause', {}, {});
+  const pausedAt = store.state.data.pausedAt;
+  const dropsAfterFirst = store.dropCachesCalls;
+
+  const result = await admin.run('pause', {}, {});
+
+  assert.equal(store.state.data.pausedAt, pausedAt, 'pausedAt is not bumped by a repeat pause');
+  assert.equal(store.dropCachesCalls, dropsAfterFirst, 'nothing is dropped again');
+  assert.match(result, /already paused/i);
+});
+
+test('run: pause clears the pending-ping queue', async () => {
+  const rootDir = makeRoot();
+  let clearCalls = 0;
+  const pending = { clear: () => { clearCalls += 1; } };
+  const { admin } = makeAdmin(rootDir, { pending });
+
+  await admin.run('pause', {}, {});
+
+  assert.equal(clearCalls, 1);
+});
+
+test('run: pause waits for a turn already in flight before dropping caches', async () => {
+  const rootDir = makeRoot();
+  let resolveIdle;
+  const idlePromise = new Promise((resolve) => {
+    resolveIdle = resolve;
+  });
+  const turns = { waitIdle: () => idlePromise };
+  const { admin, store } = makeAdmin(rootDir, { turns });
+
+  const pausePromise = admin.run('pause', {}, {});
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(store.dropCachesCalls, 0, 'must not drop caches before the in-flight turn finished');
+
+  resolveIdle();
+  await pausePromise;
+  assert.equal(store.dropCachesCalls, 1);
+});
+
+test('run: pause waits for an in-flight live-analyzer run before dropping caches', async () => {
+  const rootDir = makeRoot();
+  let resolveIdle;
+  const idlePromise = new Promise((resolve) => {
+    resolveIdle = resolve;
+  });
+  const memory = { waitIdle: () => idlePromise };
+  const { admin, store } = makeAdmin(rootDir, { memory });
+
+  const pausePromise = admin.run('pause', {}, {});
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(store.dropCachesCalls, 0, 'must not drop caches before the in-flight analyzer run finished');
+
+  resolveIdle();
+  await pausePromise;
+  assert.equal(store.dropCachesCalls, 1);
+});
+
+// F30 review fix: a live-analyzer run() already in flight when /nep pause
+// arrives (an LLM call can take 30-90s) must be allowed to finish and apply
+// normally -- its result must land on disk BEFORE the flush + dropCaches, or
+// the eventual applyMemoryUpdate would re-read a profile from disk, mutate it
+// and mark it dirty AFTER the owner started editing files under data/ --
+// exactly the overwrite this feature exists to prevent. Real store + real
+// createMemoryUpdater, only the LLM is faked, so this exercises the actual
+// buffer-shift + flush + running.delete() sequence run() performs internally.
+function minimalMemoryHot() {
+  return {
+    config: {
+      bot: { timezone: 'UTC' },
+      context: { gapMarkerMinutes: 20, maxMessageChars: 800 },
+      llm: { maxRequestTokens: 50000, safetyMargin: 0.9 },
+      memory: { batchMessages: 10, minBatchMessages: 1, maxBatchAgeMinutes: 180, maxOutputTokens: 700, fieldChars: 400 },
+      features: {},
+    },
+    prompts: { memory: 'memory system prompt', labels },
+  };
+}
+
+function slimBufferMessage(overrides = {}) {
+  return {
+    id: 'm1',
+    channelId: 'c1',
+    channelName: 'general',
+    authorId: 'u2',
+    authorName: 'Bob',
+    self: false,
+    bot: false,
+    content: 'hi',
+    ts: Date.now(),
+    replyToId: null,
+    attachments: [],
+    links: [],
+    stickers: [],
+    emojis: [],
+    direct: false,
+    ...overrides,
+  };
+}
+
+test('run: pause waits for an in-flight live-analyzer run to finish -- its result is on disk before pause completes, nothing is written after', async () => {
+  const rootDir = makeRoot();
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'nep-admin-data-'));
+  try {
+    const realStore = createStore({ dataDir });
+    const guildId = 'g1';
+    realStore.pushBuffer(guildId, slimBufferMessage(), 100);
+
+    let resolveLlm;
+    const llm = {
+      complete: () =>
+        new Promise((resolve) => {
+          resolveLlm = () => resolve({ text: JSON.stringify({ guild: { patterns: 'set by the in-flight run' } }), usage: {}, estimated: 1 });
+        }),
+    };
+    const calibrator = { ratio: 1, apply: (n) => n, observe: () => {} };
+    const memory = createMemoryUpdater({ hot: minimalMemoryHot(), store: realStore, llm, calibrator, getSelfName: () => 'Nept' });
+
+    const runPromise = memory.run(guildId); // in flight: the fake LLM has not resolved yet
+    await new Promise((resolve) => setTimeout(resolve, 0)); // let run() reach the pending llm.complete() call
+
+    const { admin } = makeAdmin(rootDir, { store: realStore, memory });
+    let pauseResolved = false;
+    const pausePromise = admin.run('pause', {}, {}).then((r) => {
+      pauseResolved = true;
+      return r;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(pauseResolved, false, 'pause must wait for the in-flight analyzer run, not race ahead of it');
+
+    resolveLlm(); // the LLM resolves late, after pause was already requested
+    await runPromise;
+    await pausePromise;
+
+    assert.equal(pauseResolved, true);
+    assert.equal(realStore.getGuild(guildId).patterns, 'set by the in-flight run', 'the analyzer result was applied');
+    const onDisk = JSON.parse(fs.readFileSync(path.join(dataDir, 'guilds', guildId, 'guild.json'), 'utf8'));
+    assert.equal(onDisk.patterns, 'set by the in-flight run', 'and flushed to disk before pause completed');
+    assert.deepEqual(realStore.getBuffer(guildId), [], 'the buffer was shifted by the completed run, not left for a later write');
+  } finally {
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test('F30: no timer-driven writer (spontaneous.tick, memory.tick, store.flush) touches data/ while paused', async () => {
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'nep-admin-timers-'));
+  try {
+    const realStore = createStore({ dataDir });
+    const guildId = 'g1';
+    realStore.touchUser(guildId, 'u1', 'Alice', 1000);
+    realStore.updateGuild(guildId, { patterns: 'x' });
+    realStore.pushBuffer(guildId, slimBufferMessage(), 100);
+    realStore.flush();
+
+    const userFile = path.join(dataDir, 'guilds', guildId, 'users', 'u1.json');
+    const guildFile = path.join(dataDir, 'guilds', guildId, 'guild.json');
+    const bufferFile = path.join(dataDir, 'guilds', guildId, 'buffer.json');
+    const before = {
+      user: fs.statSync(userFile).mtimeMs,
+      guild: fs.statSync(guildFile).mtimeMs,
+      buffer: fs.statSync(bufferFile).mtimeMs,
+    };
+
+    realStore.state.data.paused = true;
+
+    const spontaneous = createSpontaneous({
+      hot: { config: {} },
+      store: realStore,
+      client: { guilds: { cache: new Map() } },
+      turns: { runTurn: async () => ({ outcome: 'spoke' }), isBusy: () => false, isAnyBusy: () => false, lastPostAt: () => 0 },
+      getGuildId: () => guildId,
+    });
+    const memory = createMemoryUpdater({
+      hot: { config: {} },
+      store: realStore,
+      llm: { complete: async () => { throw new Error('the analyzer must never be called while paused'); } },
+      calibrator: { ratio: 1, apply: (n) => n, observe: () => {} },
+      getSelfName: () => 'Nept',
+    });
+
+    // Mirrors index.js's three periodic timers firing once, back to back.
+    await spontaneous.tick();
+    await memory.tick();
+    realStore.flush();
+
+    assert.equal(fs.statSync(userFile).mtimeMs, before.user);
+    assert.equal(fs.statSync(guildFile).mtimeMs, before.guild);
+    assert.equal(fs.statSync(bufferFile).mtimeMs, before.buffer);
+    assert.equal(JSON.parse(fs.readFileSync(bufferFile, 'utf8')).length, 1, 'the buffered message is left exactly as it was');
+  } finally {
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test('run: pause interrupts a running warm-up, waits for it, and remembers resumeWarmup', async () => {
+  const rootDir = makeRoot();
+  const warmup = fakeInterruptibleWarmup();
+  const { admin, store } = makeAdmin(rootDir, { warmup });
+
+  await admin.run('pause', {}, {});
+
+  assert.equal(warmup.calls.stop, 1);
+  assert.equal(warmup.calls.run, 1, 'joins the same in-flight run instead of starting a new one');
+  assert.equal(store.state.data.resumeWarmup, true);
+});
+
+test('run: pause does not touch resumeWarmup when no warm-up is running', async () => {
+  const rootDir = makeRoot();
+  const warmup = fakeWarmup(); // status().running === false by default
+  const { admin, store } = makeAdmin(rootDir, { warmup });
+
+  await admin.run('pause', {}, {});
+
+  assert.equal(warmup.calls.run, 0);
+  assert.equal(store.state.data.resumeWarmup, undefined);
+});
+
+test('run: resume refuses when data/ has an invalid file, naming the path, and leaves paused untouched', async () => {
+  const rootDir = makeRoot();
+  const { admin, store } = makeAdmin(rootDir);
+  await admin.run('pause', {}, {});
+  store.validateResult = ['guilds/g1/users/u1.json'];
+
+  const result = await admin.run('resume', {}, {});
+
+  assert.match(result, /invalid json/i);
+  assert.ok(result.includes('guilds/g1/users/u1.json'));
+  assert.equal(store.state.data.paused, true, 'stays paused');
+});
+
+test('run: resume clears the flags and reports plain confirmation when no warm-up needs resuming', async () => {
+  const rootDir = makeRoot();
+  const warmup = fakeWarmup();
+  const { admin, store } = makeAdmin(rootDir, { warmup });
+  await admin.run('pause', {}, {});
+
+  const result = await admin.run('resume', {}, {});
+
+  assert.equal(store.state.data.paused, undefined);
+  assert.equal(store.state.data.pausedAt, undefined);
+  assert.equal(store.state.data.resumeWarmup, undefined);
+  assert.equal(store.reloadStateCalls, 1);
+  assert.equal(warmup.calls.run, 0);
+  assert.equal(result, 'Resumed.');
+});
+
+test('run: resume restarts the warm-up (not awaited) when resumeWarmup was set', async () => {
+  const rootDir = makeRoot();
+  const warmup = fakeInterruptibleWarmup();
+  const { admin, store } = makeAdmin(rootDir, { warmup });
+  await admin.run('pause', {}, {});
+  assert.equal(store.state.data.resumeWarmup, true);
+
+  const result = await admin.run('resume', {}, {});
+
+  assert.equal(warmup.calls.run, 2, 'once to join the interrupted run during pause, once more to resume it');
+  assert.match(result, /continue/i);
+});
+
+test('run: resume is idempotent -- reports "Not paused." when not paused', async () => {
+  const rootDir = makeRoot();
+  const warmup = fakeWarmup();
+  const { admin } = makeAdmin(rootDir, { warmup });
+
+  const result = await admin.run('resume', {}, {});
+
+  assert.equal(result, 'Not paused.');
+  assert.equal(warmup.calls.run, 0);
+});
+
+test('run: status reports "paused: false" by default and "paused: true (since ...)" once paused', async () => {
+  const rootDir = makeRoot();
+  const { admin, store } = makeAdmin(rootDir);
+
+  const before = await admin.run('status', {}, {});
+  assert.ok(before.includes('paused: false'));
+
+  await admin.run('pause', {}, {});
+  const after = await admin.run('status', {}, {});
+  assert.ok(after.includes(`paused: true (since ${store.state.data.pausedAt})`));
+});
+
+test('run: every command that writes data/ is refused while paused, with a hint to resume', async () => {
+  const rootDir = makeRoot();
+  const client = clientWithGuild('g1', 'The Server');
+  const warmup = fakeWarmup();
+  const { admin, store } = makeAdmin(rootDir, { client, warmup });
+  store.profiles.set('g1:123', { id: '123', character: 'chatty' });
+  store.setLore('g1', [{ title: 'X', keys: ['xx'], text: 'y' }], { source: 'owner', now: 1 });
+  const [{ id: loreId }] = store.getLore('g1');
+
+  await admin.run('pause', {}, {});
+
+  const attempts = [
+    ['memory.forget', { userId: '123' }],
+    ['memory.affinity', { userId: '123', score: 5 }],
+    ['memory.wipe', { confirm: 'The Server' }],
+    ['lore.add', { title: 'Y', keys: 'y', text: 'z' }],
+    ['lore.remove', { id: loreId }],
+    ['warmup.run', {}],
+    ['warmup.reset', {}],
+    ['poke', {}],
+  ];
+  for (const [key, args] of attempts) {
+    await assert.rejects(
+      () => admin.run(key, args, { guildId: 'g1', channelId: 'c1' }),
+      /paused.*resume/i,
+      `${key} must be refused while paused`,
+    );
+  }
+
+  assert.equal(store.forgotten.length, 0);
+  assert.equal(store.wipeCalls.length, 0);
+});
+
+test('run: read-only and config commands keep working while paused', async () => {
+  const rootDir = makeRoot();
+  const client = clientWithGuild('g1', 'The Server');
+  const warmup = fakeWarmup();
+  const { admin, store } = makeAdmin(rootDir, { client, warmup });
+  store.profiles.set('g1:123', { id: '123', character: 'chatty' });
+  store.setLore('g1', [{ title: 'X', keys: ['xx'], text: 'y' }], { source: 'owner', now: 1 });
+
+  await admin.run('pause', {}, {});
+
+  await assert.doesNotReject(() => admin.run('status', {}, {}));
+  await assert.doesNotReject(() => admin.run('memory.show', { userId: '123' }, { guildId: 'g1' }));
+  await assert.doesNotReject(() => admin.run('memory.affinity', { userId: '123' }, { guildId: 'g1' }));
+  await assert.doesNotReject(() => admin.run('lore.list', {}, { guildId: 'g1' }));
+  await assert.doesNotReject(() => admin.run('warmup.status', {}, {}));
+  await assert.doesNotReject(() => admin.run('warmup.plan', {}, {}));
+  await assert.doesNotReject(() => admin.run('model.show', {}, {}));
+  await assert.doesNotReject(() => admin.run('rule.list', {}, {}));
+  await assert.doesNotReject(() => admin.run('reload', {}, {}));
+  await assert.doesNotReject(() => admin.run('set', { path: 'llm.model', value: '"x/y"' }, {}));
+  await assert.doesNotReject(() => admin.run('unset', { path: 'llm.model' }, {}));
+  await assert.doesNotReject(() => admin.run('model.set', { role: 'talk', id: 'x/y' }, {}));
+  await assert.doesNotReject(() => admin.run('warmup.only', { enabled: true }, {}));
+  await assert.doesNotReject(() => admin.run('warmup.depth', { messages: 100 }, {}));
+  await assert.doesNotReject(() => admin.run('warmup.budget', { tokens: '1k' }, {}));
+  await assert.doesNotReject(() => admin.run('warmup.output', { tokens: 1000 }, {}));
+});
+
+test('run: memory.show/lore.list/lore.show drop caches first while paused, so a hand-edit is always seen', async () => {
+  const rootDir = makeRoot();
+  const { admin, store } = makeAdmin(rootDir);
+  store.profiles.set('g1:123', { id: '123', character: 'chatty' });
+  store.setLore('g1', [{ title: 'X', keys: ['xx'], text: 'y' }], { source: 'owner', now: 1 });
+  const [{ id: loreId }] = store.getLore('g1');
+
+  await admin.run('pause', {}, {});
+  const dropsAfterPause = store.dropCachesCalls;
+
+  await admin.run('memory.show', { userId: '123' }, { guildId: 'g1' });
+  assert.equal(store.dropCachesCalls, dropsAfterPause + 1);
+
+  await admin.run('lore.list', {}, { guildId: 'g1' });
+  assert.equal(store.dropCachesCalls, dropsAfterPause + 2);
+
+  await admin.run('lore.show', { id: loreId }, { guildId: 'g1' });
+  assert.equal(store.dropCachesCalls, dropsAfterPause + 3);
+
+  await admin.run('memory.affinity', { userId: '123' }, { guildId: 'g1' });
+  assert.equal(store.dropCachesCalls, dropsAfterPause + 4);
 });

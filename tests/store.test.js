@@ -1146,3 +1146,90 @@ test('listUserProfiles: an empty/never-seen guild returns []', () => {
   const store = createStore({ dataDir: dir });
   assert.deepEqual(store.listUserProfiles('g1'), []);
 });
+
+// --- dropCaches / reloadState / validate — F30 (/nep pause, /nep resume) ----
+
+test('dropCaches: forgets every cached file except state.json, so the next read is a fresh disk read', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  store.touchUser('g1', 'u1', 'Alice', 1000);
+  store.updateGuild('g1', { patterns: 'x' });
+  store.state.data.llmCount = 3;
+  store.state.markDirty();
+  store.flush();
+
+  const dropped = store.dropCaches();
+  assert.ok(dropped >= 2, 'dropped the user profile and the guild memory, at least');
+
+  // A hand-edit made right after the drop is picked up on the very next read.
+  fs.writeFileSync(
+    path.join(dir, 'guilds', 'g1', 'users', 'u1.json'),
+    JSON.stringify({ id: 'u1', names: ['Edited'], firstSeen: null, lastSeen: null, messageCount: 0 }),
+  );
+  const profile = store.getUser('g1', 'u1');
+  assert.equal(profile.names[0], 'Edited');
+
+  // state.json itself was NOT dropped -- still the in-memory value.
+  assert.equal(store.state.data.llmCount, 3);
+});
+
+test('dropCaches: a no-op on an empty store, returns 0', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  assert.equal(store.dropCaches(), 0);
+});
+
+test('reloadState: re-reads state.json from disk, discarding the cached in-memory value', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  store.state.data.llmCount = 1;
+  store.state.markDirty();
+  store.flush();
+
+  // A hand-edit to state.json itself, e.g. warm-up progress, made while paused.
+  fs.writeFileSync(path.join(dir, 'state.json'), JSON.stringify({ llmCount: 99, warmup: { done: false } }));
+
+  assert.equal(store.state.data.llmCount, 1, 'still the stale cached value before reloadState');
+  store.reloadState();
+  assert.equal(store.state.data.llmCount, 99);
+  assert.deepEqual(store.state.data.warmup, { done: false });
+});
+
+test('reloadState: falls back to {} when state.json does not exist', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  store.reloadState();
+  assert.deepEqual(store.state.data, {});
+});
+
+test('validate: an empty array when every *.json file under dataDir parses (including when nothing exists yet)', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  assert.deepEqual(store.validate(), []);
+
+  store.touchUser('g1', 'u1', 'Alice', 1000);
+  store.flush();
+  assert.deepEqual(store.validate(), []);
+});
+
+test('validate: names every unparsable *.json file, path relative to dataDir and forward-slash separated', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  store.touchUser('g1', 'u1', 'Alice', 1000);
+  store.touchUser('g1', 'u2', 'Bob', 1000);
+  store.flush();
+
+  fs.writeFileSync(path.join(dir, 'guilds', 'g1', 'users', 'u1.json'), '{ not json');
+  fs.writeFileSync(path.join(dir, 'state.json'), '{ also not json');
+
+  const bad = store.validate();
+  assert.deepEqual(bad.sort(), ['guilds/g1/users/u1.json', 'state.json'].sort());
+});
+
+test('validate: a non-json file under dataDir is never checked', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'notes.txt'), 'not json at all, but not a .json file either');
+  assert.deepEqual(store.validate(), []);
+});

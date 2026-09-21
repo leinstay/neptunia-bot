@@ -799,6 +799,73 @@ test('tick: mention.oneAtATime=false lets a spontaneous tick proceed even while 
   assert.equal(seenChannel, channel);
 });
 
+// ---------------------------------------------------------------------------
+// F30: /nep pause -- no spontaneous activity, nothing may go dirty
+
+test('tick: does nothing while store.state.data.paused is true, not even the first-schedule write', async () => {
+  const guild = fakeGuild('g1');
+  const channel = fakeChannel('c1', guild);
+  guild.channels.cache.set(channel.id, channel);
+  const client = { guilds: { cache: new Map([[guild.id, guild]]) } };
+  const store = fakeStore({ paused: true });
+  let calls = 0;
+  const turns = fakeTurns({ runTurn: async () => { calls += 1; return { outcome: 'spoke' }; } });
+
+  const spontaneous = createSpontaneous({
+    hot: { config: baseConfig() },
+    store,
+    client,
+    turns,
+    getGuildId: () => 'g1',
+    rng: () => 0.1,
+    now: () => Date.UTC(2026, 0, 5, 12, 0, 0),
+  });
+  await spontaneous.tick();
+
+  assert.equal(calls, 0);
+  assert.equal(store.state.data.spontaneous, undefined, 'must not even set up the schedule while paused');
+  assert.equal(store.dirtyCalls, 0);
+});
+
+test('tick: does nothing while a run was already due, when store.state.data.paused flips true', async () => {
+  const guild = fakeGuild('g1');
+  const channel = fakeChannel('c1', guild);
+  guild.channels.cache.set(channel.id, channel);
+  const client = { guilds: { cache: new Map([[guild.id, guild]]) } };
+  const t = Date.UTC(2026, 0, 5, 12, 0, 0);
+  const store = fakeStore({ paused: true, spontaneous: { g1: t } }); // already due
+  let calls = 0;
+  const turns = fakeTurns({ runTurn: async () => { calls += 1; return { outcome: 'spoke' }; } });
+
+  const spontaneous = createSpontaneous({ hot: { config: baseConfig() }, store, client, turns, getGuildId: () => 'g1', rng: () => 0.1, now: () => t });
+  await spontaneous.tick();
+
+  assert.equal(calls, 0);
+  assert.equal(store.state.data.spontaneous.g1, t, 'the schedule is left exactly as it was');
+});
+
+test('onMessage: does not schedule an eavesdrop while store.state.data.paused is true', async () => {
+  const guild = fakeGuild('g1');
+  const channel = fakeChannel('c1', guild);
+  let calls = 0;
+  const turns = fakeTurns({ runTurn: async () => { calls += 1; return { outcome: 'spoke' }; } });
+  const now = () => Date.UTC(2026, 0, 5, 12, 0, 0);
+
+  const spontaneous = createSpontaneous({
+    hot: { config: eagerEavesdropConfig() },
+    store: fakeStore({ paused: true }),
+    client: {},
+    turns,
+    getGuildId: () => 'g1',
+    rng: () => 0,
+    now,
+  });
+  spontaneous.onMessage(channel, { self: false, bot: false });
+  await flushTimers();
+
+  assert.equal(calls, 0);
+});
+
 test('onMessage (eavesdrop): does not schedule while busy elsewhere and oneAtATime is on', async () => {
   const guild = fakeGuild('g1');
   const channel = fakeChannel('c1', guild);

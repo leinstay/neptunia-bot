@@ -101,6 +101,7 @@ export function createTurnRunner({
   const busy = new Set();
   const lastPostAt = new Map(); // channelId -> ts of the persona's last message
   let onIdle = null; // set via setOnIdle(); see the finally block of runTurn below
+  let idleWaiters = []; // resolvers for waitIdle() (F30, /nep pause), notified once busy.size hits 0
 
   /**
    * Post one readable mirror of a would-be action into `dryRunChannelId`, when
@@ -210,6 +211,12 @@ export function createTurnRunner({
    * @returns {Promise<{ outcome: string, mode?: string }>}
    */
   async function runTurn({ channel, mode, trigger = null, triggerKind = null, chooseMode = null }) {
+    // F30 (/nep pause): the owner is editing data/ by hand -- no new turn may
+    // start (a reply, an interject, an initiate, an eavesdrop, or a poke)
+    // until /nep resume. A turn already in flight when the pause is
+    // requested is left to finish naturally; admin.js's pause handler waits
+    // for it via waitIdle() below instead of aborting it here.
+    if (store.state.data.paused) return { outcome: 'paused' };
     if (busy.has(channel.id)) return { outcome: 'busy' };
     // One attention (config.mention.oneAtATime, default on): while a turn is
     // running anywhere else, nothing else may start. src/discord/events.js
@@ -379,6 +386,11 @@ export function createTurnRunner({
           .then(() => onIdle())
           .catch((err) => log.warn('turn: onIdle failed', { error: err }));
       }
+      if (busy.size === 0 && idleWaiters.length > 0) {
+        const waiters = idleWaiters;
+        idleWaiters = [];
+        for (const resolve of waiters) resolve();
+      }
     }
   }
 
@@ -388,6 +400,14 @@ export function createTurnRunner({
     isAnyBusy: () => busy.size > 0,
     lastPostAt: (channelId) => lastPostAt.get(channelId) ?? 0,
     notePost: (channelId, ts) => lastPostAt.set(channelId, ts),
+    /**
+     * Resolves once no turn is in flight anywhere -- immediately if that is
+     * already true. Used by admin.js's `/nep pause` (F30) to wait out a turn
+     * that was already running when the pause was requested, instead of
+     * aborting it.
+     * @returns {Promise<void>}
+     */
+    waitIdle: () => (busy.size === 0 ? Promise.resolve() : new Promise((resolve) => idleWaiters.push(resolve))),
     /** Called (never awaited by runTurn) every time a turn finishes anywhere, once the channel is freed. */
     setOnIdle: (fn) => {
       onIdle = fn;

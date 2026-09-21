@@ -325,6 +325,8 @@ One Discord slash command, `/nep` (the name comes from `bot.commandName`). Guild
 |---|---|
 | `/nep status` | Model, calibration, quotas and per-guild memory status |
 | `/nep reload` | Reload config and prompts now |
+| `/nep pause` | Stop all activity, flush memory to disk and unload it; `data/` is safe to edit while paused |
+| `/nep resume` | Reload memory from `data/` and continue; refuses if any JSON file does not parse, naming the broken ones |
 | `/nep poke [mode] [channel]` | Force a spontaneous action |
 | `/nep set <path> <value>` | Override a config value (writes to `config.local.json`) |
 | `/nep unset <path>` | Remove a config override |
@@ -414,6 +416,8 @@ git pull && sudo systemctl restart neptunia-bot
 ```
 
 A restart loses nothing; all state is on disk. Restarts are only needed after code changes under `src/`. Prompt and config edits apply live.
+
+Memory lives in the process and is written to `data/`; editing those files under a running bot is unsafe because the next write overwrites the change. To edit memory by hand: `/nep pause`, edit the files, `/nep resume`. The pause stops all activity, flushes memory to disk and unloads it; a running warm-up pauses after the current batch. The state is persisted: a restart comes back paused, and the warm-up does not auto-start until resume. `/nep resume` validates every JSON file under `data/` and refuses if any do not parse, naming the broken ones; otherwise it reloads memory and continues, including a warm-up from where it left off. Read-only and config commands work while paused; commands that write memory are refused. `/nep status` shows the paused state.
 
 ## Tests
 

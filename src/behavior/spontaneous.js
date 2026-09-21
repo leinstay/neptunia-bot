@@ -173,6 +173,10 @@ export function createSpontaneous({ hot, store, client, turns, getGuildId, rng =
   }
 
   async function tick() {
+    // F30 (/nep pause): the owner is editing data/ by hand -- no spontaneous
+    // activity, and nothing here (not even the schedule) may become dirty.
+    if (store.state.data.paused) return;
+
     const config = hot.config;
     const cfg = config.spontaneous;
     if (config.features?.spontaneous === false) return;
@@ -232,6 +236,9 @@ export function createSpontaneous({ hot, store, client, turns, getGuildId, rng =
 
   /** Eavesdrop on a freshly observed message and maybe jump in after a delay. */
   function onMessage(channel, normalized) {
+    // F30 (/nep pause): no eavesdrop scheduling while paused.
+    if (store.state.data.paused) return;
+
     const config = hot.config;
     const cfg = config.spontaneous;
     const features = config.features ?? {};

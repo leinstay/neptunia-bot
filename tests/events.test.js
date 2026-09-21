@@ -189,6 +189,35 @@ test('events: a DM is ignored entirely, never reaches memory or the spontaneous 
   assert.equal(turns.notePostCalls.length, 0);
 });
 
+// F30 (/nep pause): while paused, nothing here may observe, trigger, run a
+// turn or eavesdrop -- a burst of otherwise-triggering messages is a no-op.
+test('events: while paused, a burst of messages triggers no observe, no trigger, no turn, no eavesdrop', async () => {
+  let runTurnCalls = 0;
+  const turns = fakeTurns({ runTurn: async () => { runTurnCalls += 1; return { outcome: 'spoke' }; } });
+  const spontaneous = fakeSpontaneous();
+  const memory = fakeMemory();
+  const store = { state: { data: { paused: true } }, getUser: () => null };
+  const handler = makeHandler({ turns, spontaneous, memory, store });
+
+  const guild = fakeGuild();
+  const channel = fakeChannel('c1', guild);
+  await handler(fakeMessage({ id: 'm1', guild, channel, channelId: 'c1', cleanContent: 'plain chat' }));
+  await handler(fakeMessage({
+    id: 'm2',
+    guild,
+    channel,
+    channelId: 'c1',
+    cleanContent: 'γεια',
+    mentions: { users: new Map([['self1', { id: 'self1' }]]) },
+  }));
+  await handler(fakeMessage({ id: 'm3', guild, channel, channelId: 'c1', author: { id: 'self1', bot: true, globalName: 'Neptunia', username: 'neptunia' } }));
+
+  assert.equal(memory.observeCalls.length, 0);
+  assert.equal(spontaneous.onMessageCalls.length, 0);
+  assert.equal(turns.notePostCalls.length, 0);
+  assert.equal(runTurnCalls, 0);
+});
+
 test('events: a DM whose content looks like an old-style owner command is still just ignored', async () => {
   const memory = fakeMemory();
   const spontaneous = fakeSpontaneous();
@@ -1013,6 +1042,29 @@ test('events: mention.maxPending caps distinct pending channels, dropping the ol
   await handler.drainPending();
 
   assert.deepEqual(answeredChannels.sort(), ['c2', 'c3'], 'c1 (the oldest) was evicted once maxPending=2 was exceeded');
+});
+
+// F30 (/nep pause): clearPending() drops every queued ping without answering any of them.
+test('events: clearPending empties the pending queue -- drainPending afterwards answers nothing', async () => {
+  let called = false;
+  const turns = fakeTurns({
+    isBusy: () => false,
+    isAnyBusy: () => true,
+    runTurn: async () => {
+      called = true;
+      return { outcome: 'spoke' };
+    },
+  });
+  const handler = makeHandler({ turns, sleep: async () => {}, rng: scripted([]) });
+
+  const guild = fakeGuild();
+  const channel = fakeChannelWithMessage('c1', guild, 'm1');
+  await handler(directPingMessage({ id: 'm1', guild, channel, channelId: 'c1' }));
+
+  handler.clearPending();
+  await handler.drainPending();
+
+  assert.equal(called, false, 'the cleared ping must never be answered');
 });
 
 test('events: a pending ping past mention.pendingMinutes is discarded, not answered', async () => {

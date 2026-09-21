@@ -1974,6 +1974,21 @@ test('observe: marks a message as direct only when told to', () => {
   });
 });
 
+// F30 (/nep pause): observe() must make the store dirty in NO way while paused.
+test('observe: does nothing while store.state.data.paused is true -- no buffer, no user, no channel', () => {
+  withStore((store) => {
+    store.state.data.paused = true;
+    const hot = { config: makeConfig() };
+    const updater = createMemoryUpdater({ hot, store, llm: {}, calibrator: createCalibrator(), getSelfName: () => 'Nept' });
+
+    updater.observe('g1', slimMessage({ id: 'm1', channelId: 'c1', channelName: 'general', authorId: '1', authorName: 'nick' }));
+
+    assert.deepEqual(store.getBuffer('g1'), []);
+    assert.equal(store.getUser('g1', '1'), null);
+    assert.equal(store.getChannel('g1', 'c1'), null);
+  });
+});
+
 // ---- run -----------------------------------------------------------------
 
 test('run: happy path applies the update, shifts the buffer and flushes to disk', async () => {
@@ -2009,6 +2024,78 @@ test('run: happy path applies the update, shifts the buffer and flushes to disk'
 
     const onDisk = JSON.parse(fs.readFileSync(path.join(dir, 'guilds', guildId, 'users', '1.json'), 'utf8'));
     assert.equal(onDisk.interests[0].topic, 'anime');
+  });
+});
+
+// F30 (/nep pause): waitIdle() lets /nep pause wait out a live-analyzer run()
+// already in flight (an LLM call can take 30-90s) before it flushes and
+// drops the store's caches -- see src/admin.js#cmdPause.
+test('waitIdle: resolves immediately when no run() is in flight', async () => {
+  await withStoreAsync(async (store) => {
+    const hot = { config: makeConfig() };
+    const updater = createMemoryUpdater({ hot, store, llm: {}, calibrator: createCalibrator(), getSelfName: () => 'Nept' });
+
+    let resolved = false;
+    updater.waitIdle().then(() => {
+      resolved = true;
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.equal(resolved, true);
+  });
+});
+
+test('waitIdle: resolves only once the in-flight run() has finished, never starting a new one itself', async () => {
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    store.pushBuffer(guildId, slimMessage({ id: 'm1' }), 100);
+
+    let resolveLlm;
+    const llm = {
+      complete: () =>
+        new Promise((resolve) => {
+          resolveLlm = () => resolve({ text: JSON.stringify({ guild: { patterns: 'ok' } }) });
+        }),
+    };
+    const hot = { config: makeConfig(), prompts: { memory: 'memory system prompt', labels } };
+    const updater = createMemoryUpdater({ hot, store, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept' });
+
+    const runPromise = updater.run(guildId);
+    await new Promise((resolve) => setTimeout(resolve, 0)); // let run() reach the pending llm.complete() call
+
+    let idleResolved = false;
+    const idlePromise = updater.waitIdle().then(() => {
+      idleResolved = true;
+    });
+    assert.equal(idleResolved, false, 'must not resolve while the run is still in flight');
+
+    resolveLlm();
+    await runPromise;
+    await idlePromise;
+    assert.equal(idleResolved, true);
+    assert.equal(store.getGuild(guildId).patterns, 'ok', 'the in-flight run applied its result before waitIdle resolved');
+  });
+});
+
+// F30 (/nep pause): the live analyzer must never run while paused, even with a fully due buffer.
+test('tick: does nothing while store.state.data.paused is true, even with a due buffer', async () => {
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    store.state.data.paused = true;
+    const base = Date.now();
+    for (let i = 0; i < 4; i += 1) {
+      store.pushBuffer(guildId, slimMessage({ id: `m${i}`, content: `hi ${i}`, ts: base + i * 1000 }), 100);
+    }
+
+    const hot = { config: makeConfig({ memory: { ...makeConfig().memory, batchMessages: 4, minBatchMessages: 1 } }) };
+    let calls = 0;
+    const llm = { complete: async () => { calls += 1; return { text: '{}' }; } };
+    const updater = createMemoryUpdater({ hot, store, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept' });
+
+    await updater.tick();
+
+    assert.equal(calls, 0, 'the analyzer must never be called while paused');
+    assert.equal(store.getBuffer(guildId).length, 4, 'the buffer is left exactly as it was');
   });
 });
 

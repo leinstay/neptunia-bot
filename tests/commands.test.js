@@ -59,13 +59,21 @@ test('buildCommandTree: one top-level command, hidden by default, named from the
   assert.equal(command.default_member_permissions, '0');
 });
 
-test('buildCommandTree: top-level leaves (status, reload, poke, set, unset)', () => {
+test('buildCommandTree: top-level leaves (status, reload, pause, resume, poke, set, unset)', () => {
   const [command] = buildCommandTree('nep');
   const names = command.options.map((o) => o.name);
-  assert.deepEqual(names, ['status', 'reload', 'poke', 'set', 'unset', 'rule', 'memory', 'lore', 'model', 'warmup']);
+  assert.deepEqual(names, ['status', 'reload', 'pause', 'resume', 'poke', 'set', 'unset', 'rule', 'memory', 'lore', 'model', 'warmup']);
 
   const status = findOption(command.options, 'status');
   assert.equal(status.type, 1); // SUBCOMMAND
+
+  const pause = findOption(command.options, 'pause');
+  assert.equal(pause.type, 1); // SUBCOMMAND
+  assert.equal(pause.options, undefined);
+
+  const resume = findOption(command.options, 'resume');
+  assert.equal(resume.type, 1); // SUBCOMMAND
+  assert.equal(resume.options, undefined);
 
   const poke = findOption(command.options, 'poke');
   assert.equal(poke.type, 1);
@@ -568,6 +576,47 @@ test('interaction handler: defers then edits for a slow command (poke)', async (
   assert.equal(interaction.replies.some((r) => r.deferred), true);
   assert.equal(interaction.edits.length, 1);
   assert.equal(interaction.edits[0].content, 'poked');
+});
+
+// ---------------------------------------------------------------------------
+// pause / resume — F30
+// ---------------------------------------------------------------------------
+
+test('interaction handler: pause/resume take no options and map to empty args', async () => {
+  const admin = fakeAdmin();
+  const handler = createInteractionHandler({ hot: baseHot(), admin, getGuildId: () => 'g1' });
+
+  await handler(fakeInteraction({ subcommand: 'pause' }));
+  assert.equal(admin.runCalls[0][0], 'pause');
+  assert.deepEqual(admin.runCalls[0][1], {});
+
+  await handler(fakeInteraction({ subcommand: 'resume' }));
+  assert.equal(admin.runCalls[1][0], 'resume');
+  assert.deepEqual(admin.runCalls[1][1], {});
+});
+
+test('interaction handler: pause defers then edits, like the other slow commands', async () => {
+  const admin = fakeAdmin({ runImpl: () => 'Paused.' });
+  const handler = createInteractionHandler({ hot: baseHot(), admin, getGuildId: () => 'g1' });
+
+  const interaction = fakeInteraction({ subcommand: 'pause' });
+  await handler(interaction);
+
+  assert.equal(interaction.deferred, true);
+  assert.equal(interaction.edits.length, 1);
+  assert.equal(interaction.edits[0].content, 'Paused.');
+});
+
+test('interaction handler: resume defers then edits, like the other slow commands', async () => {
+  const admin = fakeAdmin({ runImpl: () => 'Resumed.' });
+  const handler = createInteractionHandler({ hot: baseHot(), admin, getGuildId: () => 'g1' });
+
+  const interaction = fakeInteraction({ subcommand: 'resume' });
+  await handler(interaction);
+
+  assert.equal(interaction.deferred, true);
+  assert.equal(interaction.edits.length, 1);
+  assert.equal(interaction.edits[0].content, 'Resumed.');
 });
 
 test('interaction handler: a fast command replies directly, no defer', async () => {

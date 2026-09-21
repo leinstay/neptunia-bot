@@ -97,7 +97,6 @@ const memory = createMemoryUpdater({
   getSelfName: (guildId) => client.guilds.cache.get(guildId)?.members.me?.displayName ?? client.user?.username ?? 'bot',
 });
 const warmup = createWarmup({ hot, store, client, memory, getGuildId, describer });
-const admin = createAdmin({ hot, store, client, spontaneous, calibrator, getGuildId, warmup });
 const tagHistory = createTagHistory();
 
 const onMessage = createMessageHandler({
@@ -117,6 +116,19 @@ const onMessage = createMessageHandler({
 // the oldest pending direct ping it may have collected while busy elsewhere.
 turns.setOnIdle(() => onMessage.drainPending());
 
+const admin = createAdmin({
+  hot,
+  store,
+  client,
+  spontaneous,
+  calibrator,
+  getGuildId,
+  warmup,
+  turns,
+  memory,
+  // F30 (/nep pause): clears the pending-ping queue on pause.
+  pending: { clear: () => onMessage.clearPending() },
+});
 const onInteraction = createInteractionHandler({ hot, admin, getGuildId });
 
 const timers = [];
@@ -148,6 +160,16 @@ client.once(Events.ClientReady, async () => {
   }
 
   log.info('index: ready', { guild: instance.guildId, tag: client.user.tag });
+
+  // F30 (/nep pause): a pause persisted before this restart comes back
+  // paused -- the warm-up must not auto-start (warmup.isBlocking() already
+  // accounts for this), and every spontaneous/analyzer tick keeps no-op'ing
+  // until /nep resume.
+  if (store.state.data.paused) {
+    log.info('index: starting up paused, run /nep resume when data/ is ready', {
+      pausedAt: store.state.data.pausedAt ?? null,
+    });
+  }
 
   const guild = client.guilds.cache.get(instance.guildId);
   await registerCommands(guild, hot.config);

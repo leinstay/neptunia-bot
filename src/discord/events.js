@@ -44,7 +44,9 @@ const MAX_WARM_PICTURES_PER_MESSAGE = 2;
  * @returns {(message: import('discord.js').Message) => Promise<void>} Also carries a
  *   `.drainPending()` method: called once a turn finishes anywhere (src/index.js wires it to
  *   src/behavior/turn.js's `setOnIdle`, in the same `finally` that frees the channel) to answer
- *   the oldest non-expired pending direct ping, one at a time, after a human switch pause.
+ *   the oldest non-expired pending direct ping, one at a time, after a human switch pause. And a
+ *   `.clearPending()` method (F30, `/nep pause`, wired from src/admin.js via src/index.js) that
+ *   drops every queued ping without answering any of them.
  */
 export function createMessageHandler({
   hot,
@@ -193,6 +195,11 @@ export function createMessageHandler({
       // 1. System / webhook messages are not conversation.
       if (message.system || message.webhookId) return;
 
+      // 1b. Paused (owner editing data/ by hand, /nep pause, F30): the
+      // persona does nothing at all -- no observe, no trigger, no turn, no
+      // eavesdrop -- and nothing below may mark the store dirty.
+      if (store?.state?.data?.paused) return;
+
       const config = hot.config;
       const features = config.features ?? {};
       const memoryOn = features.memory !== false;
@@ -316,5 +323,9 @@ export function createMessageHandler({
   }
 
   onMessage.drainPending = drainPending;
+  /** Drop every pending direct ping without answering any of them (F30, `/nep pause`). */
+  onMessage.clearPending = () => {
+    pendingList = [];
+  };
   return onMessage;
 }

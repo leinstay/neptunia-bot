@@ -34,6 +34,47 @@ function readJson(file, fallback) {
   }
 }
 
+/** Every `.json` file under `dir`, recursively; never throws on a missing directory. */
+function walkJsonFiles(dir) {
+  let out = [];
+  let dirEntries;
+  try {
+    dirEntries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return out;
+  }
+  for (const dirEntry of dirEntries) {
+    const full = path.join(dir, dirEntry.name);
+    if (dirEntry.isDirectory()) {
+      out = out.concat(walkJsonFiles(full));
+    } else if (dirEntry.isFile() && dirEntry.name.endsWith('.json')) {
+      out.push(full);
+    }
+  }
+  return out;
+}
+
+/**
+ * Every `*.json` file under `dataDir` that fails to parse as JSON -- used by
+ * `/nep resume` (F30, see src/admin.js) to refuse coming back from a pause if
+ * a hand-edit broke a file, without touching any cache. Paths are relative to
+ * `dataDir`, forward-slash separated (stable across platforms), never file
+ * contents.
+ * @param {string} dataDir
+ * @returns {string[]}
+ */
+export function findInvalidJsonFiles(dataDir) {
+  const bad = [];
+  for (const file of walkJsonFiles(dataDir)) {
+    try {
+      JSON.parse(fs.readFileSync(file, 'utf8'));
+    } catch {
+      bad.push(path.relative(dataDir, file).split(path.sep).join('/'));
+    }
+  }
+  return bad;
+}
+
 function writeJsonAtomic(file, value) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const tmp = `${file}.${process.pid}.tmp`;
@@ -611,6 +652,51 @@ export function createStore({ dataDir }) {
 
     flush() {
       flushAll();
+    },
+
+    /**
+     * Drop every cached file EXCEPT `state.json` (F30, `/nep pause`): called
+     * right after a flush, so nothing stale can be written from memory while
+     * the owner hand-edits files under `data/` -- the next read of any
+     * profile/guild/channel/lore/media/buffer lazily re-populates from disk,
+     * exactly like a fresh process. `state.json` itself is left cached (it
+     * carries the `paused` flag this feature relies on); see `reloadState`
+     * below for forcing a fresh read of it too, used by `/nep resume`.
+     * @returns {number} how many cache entries were dropped
+     */
+    dropCaches() {
+      let dropped = 0;
+      for (const [file, item] of entries) {
+        if (file === stateFile) continue;
+        if (item.dirty) log.warn('store: dropping a cache entry with unflushed changes', { file });
+      }
+      for (const file of [...entries.keys()]) {
+        if (file === stateFile) continue;
+        entries.delete(file);
+        dropped += 1;
+      }
+      return dropped;
+    },
+
+    /**
+     * Force `state.json` to be re-read from disk right now, discarding
+     * whatever was cached (F30, `/nep resume`): the owner may have
+     * hand-edited it (e.g. warm-up progress) while paused. Any unflushed
+     * in-memory change is lost, the same guarantee every other cached file
+     * already has once dropped.
+     */
+    reloadState() {
+      stateEntry.value = readJson(stateFile, {});
+      stateEntry.dirty = false;
+    },
+
+    /**
+     * Every `*.json` file under this store's `dataDir` that fails to parse
+     * (F30, `/nep resume`) -- see `findInvalidJsonFiles` above.
+     * @returns {string[]}
+     */
+    validate() {
+      return findInvalidJsonFiles(dataDir);
     },
   };
 

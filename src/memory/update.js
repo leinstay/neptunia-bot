@@ -692,6 +692,7 @@ function storeNameOf(store, guildId) {
 
 export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, now = Date.now }) {
   const running = new Set();
+  let idleWaiters = []; // resolvers for waitIdle() (F30, /nep pause), notified once running.size hits 0
   const backoffUntil = new Map();
   // Per-guild in-memory factor on the live batch size (1 = normal). Halved on
   // a 'truncated'/'bad-json' failure so the next attempt for that guild asks
@@ -705,6 +706,8 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
    * analyzer can tell how people talk TO it apart from general chatter.
    */
   function observe(guildId, normalized, { direct = false } = {}) {
+    // F30 (/nep pause): nothing may make the store dirty while paused.
+    if (store.state.data.paused) return;
     if (normalized.bot) return;
     touchMemory(store, guildId, normalized);
 
@@ -990,11 +993,18 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
       }
     } finally {
       running.delete(guildId);
+      if (running.size === 0 && idleWaiters.length > 0) {
+        const waiters = idleWaiters;
+        idleWaiters = [];
+        for (const resolve of waiters) resolve();
+      }
     }
   }
 
   /** Check every guild and kick off a memory update for the ones that are due. */
   async function tick() {
+    // F30 (/nep pause): the live analyzer never runs while paused.
+    if (store.state.data.paused) return;
     const nowMs = now();
     const cfg = hot.config.memory;
     const relationshipsCfg = hot.config.features?.relationships !== false ? hot.config.relationships : undefined;
@@ -1008,5 +1018,20 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
     await Promise.all(jobs);
   }
 
-  return { observe, tick, run, analyze, estimate };
+  /**
+   * Resolves once no `run()` is in flight for any guild -- immediately if
+   * that is already true. Never starts a new run itself. Used by admin.js's
+   * `/nep pause` (F30) to wait out a live-analyzer run that was already in
+   * flight when the pause was requested (an LLM call can take 30-90s): its
+   * result must land on disk BEFORE the pause flushes and drops the store's
+   * caches, or the eventual `applyMemoryUpdate` would re-read a profile from
+   * disk, mutate it and mark it dirty after the owner started editing files
+   * under data/ -- exactly the overwrite this feature exists to prevent.
+   * @returns {Promise<void>}
+   */
+  function waitIdle() {
+    return running.size === 0 ? Promise.resolve() : new Promise((resolve) => idleWaiters.push(resolve));
+  }
+
+  return { observe, tick, run, analyze, estimate, waitIdle };
 }

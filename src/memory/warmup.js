@@ -537,6 +537,10 @@ export function createWarmup({ hot, store, client, memory, getGuildId, now = Dat
    */
   function isBlocking() {
     if (runningPromise) return true;
+    // F30 (/nep pause): the owner is editing data/ by hand -- the warm-up
+    // must not auto-start (or count as due) until /nep resume, even if it
+    // would otherwise be enabled and not yet done.
+    if (store.state.data.paused) return false;
     const cfg = hot.config.warmup ?? {};
     if (!cfg.enabled) return false;
     const st = store.state.data.warmup;
