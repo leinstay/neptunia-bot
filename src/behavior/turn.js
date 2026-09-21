@@ -9,6 +9,7 @@ import { buildRequest } from './prompt.js';
 import { parseOutput } from '../llm/parse.js';
 import { DailyCapError, TokenLimitError } from '../llm/openrouter.js';
 import { collectPictures, collectEmojiItems, isDescribable, selectPictures } from '../discord/media.js';
+import { createImageFetcher } from '../discord/fetch-image.js';
 import { log } from '../log.js';
 
 function sleep(ms) {
@@ -86,7 +87,17 @@ function describableCandidates(history, pickedIds) {
  * absent, or `features.mediaDescriptions` is off, no description request is
  * ever made — buildRequest simply renders every un-attached picture blind.
  */
-export function createTurnRunner({ hot, store, llm, calibrator, client, rng = Math.random, describer, fetchImpl = fetch }) {
+export function createTurnRunner({
+  hot,
+  store,
+  llm,
+  calibrator,
+  client,
+  rng = Math.random,
+  describer,
+  fetchImpl = fetch,
+  imageFetcher = createImageFetcher(),
+}) {
   const busy = new Set();
   const lastPostAt = new Map(); // channelId -> ts of the persona's last message
 
@@ -259,17 +270,49 @@ export function createTurnRunner({ hot, store, llm, calibrator, client, rng = Ma
         descriptions,
       });
 
+      // A Discord CDN image the provider cannot fetch must not cost the
+      // persona the reply -- the provider's own fetcher gets a 403 from
+      // Discord on some CDN hosts, so every image_url part is downloaded HERE
+      // and replaced by its data: URL before the model ever sees a Discord
+      // URL. Because the transcript text refers to attached pictures by
+      // number, a turn where ANY download failed is sent with
+      // request.textFallback and NO pictures at all -- simple and always
+      // consistent, rather than renumbering around a gap.
+      let messages = request.messages;
+      const userMessage = messages[1];
+      if (Array.isArray(userMessage?.content)) {
+        const visionCfg = config.context.vision ?? {};
+        let allDownloaded = true;
+        const resolvedContent = await Promise.all(
+          userMessage.content.map(async (part) => {
+            if (part.type !== 'image_url') return part;
+            const downloaded = await imageFetcher.fetchAsDataUrl(part.image_url.url, {
+              maxBytes: visionCfg.maxBytes,
+              timeoutMs: visionCfg.fetchTimeoutMs,
+            });
+            if (!downloaded) {
+              allDownloaded = false;
+              return part;
+            }
+            return { type: 'image_url', image_url: { url: downloaded.dataUrl } };
+          }),
+        );
+        messages = [messages[0], { ...userMessage, content: allDownloaded ? resolvedContent : request.textFallback }];
+      }
+
       let completion;
       try {
-        completion = await llm.complete(request.messages);
+        completion = await llm.complete(messages);
       } catch (err) {
-        // A Discord CDN image the provider cannot fetch must not cost the persona the reply.
-        // request.textFallback is a full re-render of the same user message with
-        // every imageAttached/frameAttached tag dropped back to its blind/described
-        // form -- resending the ORIGINAL text (still claiming a picture is
-        // attached) alongside no actual image would be worse than the error itself.
-        if (request.stats.images > 0 && err.statusCode >= 400 && err.statusCode < 500) {
-          const textOnly = request.messages.map((m) => (Array.isArray(m.content) ? { ...m, content: request.textFallback } : m));
+        // Second line of defence: the picture downloaded fine on our end but
+        // the provider still rejects the request for some 4xx reason.
+        // request.textFallback is a full re-render of the same user message
+        // with every imageAttached/frameAttached tag dropped back to its
+        // blind/described form -- resending the ORIGINAL text (still
+        // claiming a picture is attached) alongside no actual image would be
+        // worse than the error itself.
+        if (Array.isArray(messages[1]?.content) && err.statusCode >= 400 && err.statusCode < 500) {
+          const textOnly = messages.map((m) => (Array.isArray(m.content) ? { ...m, content: request.textFallback } : m));
           completion = await llm.complete(textOnly);
         } else {
           throw err;

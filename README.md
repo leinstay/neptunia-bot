@@ -151,7 +151,7 @@ The system prompt handles sounding human, so the card is purely personality. Giv
 
 ### `media`
 
-Settings for the media describer (`features.mediaDescriptions`). Describes pictures, GIF frames, video posters and link thumbnails once per attachment, caches results. Feeds the chat transcript, the memory analyzer and the warm-up, whose budget pays for warm-up descriptions.
+Settings for the media describer (`features.mediaDescriptions`).
 
 | Key | Default | Meaning |
 |---|---|---|
@@ -333,11 +333,9 @@ Transcript lines carry media markers in brackets: pictures, GIFs, videos, sticke
 
 `features.vision` attaches pictures from the calling message, from the message it replies to, and the newest few in the channel to the LLM request as images, downscaled through Discord's media proxy. The persona sees these directly. Settings live under `context.vision`.
 
-`features.mediaDescriptions` (off by default) runs a helper model (`media.model`) that writes a one-line description for pictures, GIF frames, video posters and link thumbnails. Each attachment is described once and cached. Descriptions feed the chat transcript, the memory analyzer and the warm-up, whose token budget pays for warm-up descriptions. The describer's prompt is `prompts/describe.md`. Settings live under `media`.
+`features.mediaDescriptions` (off by default) runs a helper model (`media.model`) that writes a one-line description for pictures, GIF frames, video posters, stickers, custom emoji and link thumbnails. Each attachment is described once and cached. Descriptions feed the chat transcript, the memory analyzer and the warm-up, whose token budget pays for warm-up descriptions. The describer's prompt is `prompts/describe.md`. Settings live under `media`.
 
-Stickers and custom emoji work the same way. Picture stickers (PNG, APNG, GIF) and custom emoji are described once and cached by id when `features.mediaDescriptions` is on — the same ones recur constantly, so the cost is nearly zero after the first use. With `features.vision`, the sticker of the calling message is attached as a picture. Discord's built-in animated stickers are Lottie animations, not images, so they are never more than a name.
-
-Link previews have their thumbnail described too when `features.mediaDescriptions` is on, cached by the picture's address; the page behind a link is never fetched.
+Stickers and custom emoji recur constantly, so they are cached by id and cost nearly nothing after the first description. With `features.vision`, the sticker of the calling message is attached as a picture. Discord's built-in animated stickers are Lottie animations, not images, so they are never more than a name.
 
 A `<senses>` block in the user message tells the persona what it can and cannot perceive under the current config. The persona trusts this block and never claims to have seen, heard or opened anything beyond it.
 

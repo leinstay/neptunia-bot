@@ -223,7 +223,7 @@ function fakeHot(featureOverrides = {}, botOverrides = {}, configOverrides = {})
         gapMarkerMinutes: 20,
         otherProfiles: 6,
         caps: { interlocutor: 2500, aboutChat: 2500, people: 4000, neighbors: 3000 },
-        vision: { maxImages: 2, tokensPerImage: 400, imageSize: 512, recentImages: 0, recentImageMinutes: 0 },
+        vision: { maxImages: 2, tokensPerImage: 400, imageSize: 512, recentImages: 0, recentImageMinutes: 0, maxBytes: 1_500_000, fetchTimeoutMs: 10_000 },
       },
       llm: { maxRequestTokens: 50000, safetyMargin: 0.9 },
       typing: { reactionDelayMs: [0, 0], msPerChar: [1, 1], minMs: 0, maxMs: 100, betweenMessagesMs: [0, 0] },
@@ -246,6 +246,19 @@ function fakeHot(featureOverrides = {}, botOverrides = {}, configOverrides = {})
 
 function fakeClient(overrides = {}) {
   return { user: { id: 'self-id', username: 'Bot' }, ...overrides };
+}
+
+/** A fake createImageFetcher()-shaped dependency (see src/discord/fetch-image.js). `result` may be
+ * `null` (every download fails), a fixed success object, or `(url, options) => result|null`. */
+function fakeImageFetcher(result = { dataUrl: 'data:image/webp;base64,ZmFrZQ==', bytes: 4, contentType: 'image/webp' }) {
+  const calls = [];
+  return {
+    calls,
+    fetchAsDataUrl: async (url, options) => {
+      calls.push({ url, options });
+      return typeof result === 'function' ? result(url, options) : result;
+    },
+  };
 }
 
 /** Runs `fn`, capturing every `process.stdout.write` call (the log module's only sink) and
@@ -590,7 +603,16 @@ function fakeLlmRejectingImagesOnce(statusCode, responseText) {
   };
 }
 
-test('createTurnRunner: a 4xx image error retries text-only, rendering the video blind (frameAttached dropped)', async () => {
+function videoTrigger(raw) {
+  return {
+    ...normalizedTrigger(raw),
+    attachments: [
+      { id: 'v1', kind: 'video', url: 'https://cdn.discordapp.com/attachments/1/2/clip.mp4', name: 'clip.mp4', durationSec: 34 },
+    ],
+  };
+}
+
+test('createTurnRunner: a 4xx image error (download succeeded, the provider itself still rejects) retries text-only, rendering the video blind (frameAttached dropped)', async () => {
   const raw = rawMessage({
     id: 'm1',
     attachments: new Map([
@@ -601,14 +623,10 @@ test('createTurnRunner: a 4xx image error retries text-only, rendering the video
   const llm = fakeLlmRejectingImagesOnce(400, '<msg>ok</msg>');
   const store = fakeStore();
   const hot = fakeHot({});
-  const turns = createTurnRunner({ hot, store, llm, calibrator: identityCalibrator(), client: fakeClient() });
+  const imageFetcher = fakeImageFetcher();
+  const turns = createTurnRunner({ hot, store, llm, calibrator: identityCalibrator(), client: fakeClient(), imageFetcher });
 
-  const trigger = {
-    ...normalizedTrigger(raw),
-    attachments: [
-      { id: 'v1', kind: 'video', url: 'https://cdn.discordapp.com/attachments/1/2/clip.mp4', name: 'clip.mp4', durationSec: 34 },
-    ],
-  };
+  const trigger = videoTrigger(raw);
 
   const result = await turns.runTurn({ channel, mode: 'reply', trigger, triggerKind: 'mention' });
 
@@ -619,11 +637,146 @@ test('createTurnRunner: a 4xx image error retries text-only, rendering the video
   assert.ok(Array.isArray(firstUser), 'the first attempt carries image_url parts');
   const firstText = firstUser.find((p) => p.type === 'text').text;
   assert.ok(firstText.includes(labels.transcript.frameAttached.replace('{n}', '1')));
+  const firstImage = firstUser.find((p) => p.type === 'image_url');
+  assert.ok(firstImage.image_url.url.startsWith('data:'), 'the downloaded picture is sent as a data: URL, never the bare CDN URL');
 
   const secondUser = llm.calls[1][1].content;
   assert.equal(typeof secondUser, 'string', 'the retry sends plain text, no image_url parts');
   assert.ok(secondUser.includes('[video: clip.mp4, 0:34]'), 'the video still renders in its blind form');
   assert.ok(!secondUser.includes('still frame'), 'frameAttached must not survive into the text-only retry');
+});
+
+// ---------------------------------------------------------------------------
+// F19: the picture is downloaded and inlined as a data: URL BEFORE the model
+// ever sees the request -- the provider's own fetcher gets a 403 from
+// Discord on some CDN hosts even though our server fetches the same URL
+// fine. A failed download drops EVERY picture of the turn (never a partial,
+// mis-numbered set) and falls back to plain text.
+
+function videoRaw(id = 'm1') {
+  return rawMessage({
+    id,
+    attachments: new Map([
+      ['v1', { id: 'v1', contentType: 'video/mp4', name: 'clip.mp4', url: 'https://cdn.discordapp.com/attachments/1/2/clip.mp4', duration: 34 }],
+    ]),
+  });
+}
+
+test('createTurnRunner: a picture is downloaded and sent as a data: URL, never the bare Discord CDN URL', async () => {
+  const raw = videoRaw();
+  const channel = fakeTurnChannel({ historyMessages: [raw] });
+  const llm = fakeLlm('<msg>ok</msg>');
+  const store = fakeStore();
+  const hot = fakeHot({});
+  const imageFetcher = fakeImageFetcher();
+  const turns = createTurnRunner({ hot, store, llm, calibrator: identityCalibrator(), client: fakeClient(), imageFetcher });
+
+  const result = await turns.runTurn({ channel, mode: 'reply', trigger: videoTrigger(raw), triggerKind: 'mention' });
+
+  assert.equal(result.outcome, 'spoke');
+  assert.equal(imageFetcher.calls.length, 1);
+  assert.equal(imageFetcher.calls[0].url.includes('clip.mp4'), true);
+  assert.deepEqual(imageFetcher.calls[0].options, { maxBytes: 1_500_000, timeoutMs: 10_000 });
+  const userContent = llm.calls[0][1].content;
+  const imagePart = userContent.find((p) => p.type === 'image_url');
+  assert.equal(imagePart.image_url.url, 'data:image/webp;base64,ZmFrZQ==');
+});
+
+test('createTurnRunner: a failed download drops EVERY picture of the turn -- sent as plain text, rendering blind, not attached', async () => {
+  const raw = videoRaw();
+  const channel = fakeTurnChannel({ historyMessages: [raw] });
+  const llm = fakeLlm('<msg>ok</msg>');
+  const store = fakeStore();
+  const hot = fakeHot({});
+  const imageFetcher = fakeImageFetcher(null); // every download fails
+  const turns = createTurnRunner({ hot, store, llm, calibrator: identityCalibrator(), client: fakeClient(), imageFetcher });
+
+  const result = await turns.runTurn({ channel, mode: 'reply', trigger: videoTrigger(raw), triggerKind: 'mention' });
+
+  assert.equal(result.outcome, 'spoke');
+  const userContent = llm.calls[0][1].content;
+  assert.equal(typeof userContent, 'string', 'no image_url parts must be sent once any download failed');
+  assert.ok(userContent.includes('[video: clip.mp4, 0:34]'), 'the video renders in its blind form');
+  assert.ok(!userContent.includes('still frame'), 'frameAttached must not survive a dropped picture');
+});
+
+test('createTurnRunner: with two pictures, one failed download drops BOTH -- never a partial, mis-numbered set', async () => {
+  const raw = rawMessage({
+    id: 'm1',
+    attachments: new Map([
+      ['i1', { id: 'i1', contentType: 'image/png', name: 'one.png', url: 'https://cdn.discordapp.com/x/one.png' }],
+      ['i2', { id: 'i2', contentType: 'image/png', name: 'two.png', url: 'https://cdn.discordapp.com/x/two.png' }],
+    ]),
+  });
+  const channel = fakeTurnChannel({ historyMessages: [raw] });
+  const llm = fakeLlm('<msg>ok</msg>');
+  const store = fakeStore();
+  const hot = fakeHot({});
+  // one.png succeeds, two.png fails.
+  const imageFetcher = fakeImageFetcher((url) =>
+    url.includes('one.png') ? { dataUrl: 'data:image/png;base64,b25l', bytes: 3, contentType: 'image/png' } : null,
+  );
+  const turns = createTurnRunner({ hot, store, llm, calibrator: identityCalibrator(), client: fakeClient(), imageFetcher });
+
+  const trigger = {
+    ...normalizedTrigger(raw),
+    attachments: [
+      { id: 'i1', kind: 'image', url: 'https://cdn.discordapp.com/x/one.png', name: 'one.png' },
+      { id: 'i2', kind: 'image', url: 'https://cdn.discordapp.com/x/two.png', name: 'two.png' },
+    ],
+  };
+
+  const result = await turns.runTurn({ channel, mode: 'reply', trigger, triggerKind: 'mention' });
+
+  assert.equal(result.outcome, 'spoke');
+  const userContent = llm.calls[0][1].content;
+  assert.equal(typeof userContent, 'string', 'both pictures must be dropped, not just the failed one');
+  assert.ok(
+    !userContent.includes(labels.transcript.imageAttached.replace('{n}', '1')) &&
+      !userContent.includes(labels.transcript.imageAttached.replace('{n}', '2')),
+    'neither picture is claimed as attached once one download failed',
+  );
+  assert.ok(userContent.includes(labels.transcript.image), 'both pictures render in their plain blind form');
+});
+
+test('createTurnRunner: when every picture downloads fine, all are kept as data: URLs in transcript order', async () => {
+  const raw = rawMessage({
+    id: 'm1',
+    attachments: new Map([
+      ['i1', { id: 'i1', contentType: 'image/png', name: 'one.png', url: 'https://cdn.discordapp.com/x/one.png' }],
+      ['i2', { id: 'i2', contentType: 'image/png', name: 'two.png', url: 'https://cdn.discordapp.com/x/two.png' }],
+    ]),
+  });
+  const channel = fakeTurnChannel({ historyMessages: [raw] });
+  const llm = fakeLlm('<msg>ok</msg>');
+  const store = fakeStore();
+  const hot = fakeHot({});
+  const imageFetcher = fakeImageFetcher((url) => ({
+    dataUrl: url.includes('one.png') ? 'data:image/png;base64,ONE' : 'data:image/png;base64,TWO',
+    bytes: 3,
+    contentType: 'image/png',
+  }));
+  const turns = createTurnRunner({ hot, store, llm, calibrator: identityCalibrator(), client: fakeClient(), imageFetcher });
+
+  const trigger = {
+    ...normalizedTrigger(raw),
+    attachments: [
+      { id: 'i1', kind: 'image', url: 'https://cdn.discordapp.com/x/one.png', name: 'one.png' },
+      { id: 'i2', kind: 'image', url: 'https://cdn.discordapp.com/x/two.png', name: 'two.png' },
+    ],
+  };
+
+  const result = await turns.runTurn({ channel, mode: 'reply', trigger, triggerKind: 'mention' });
+
+  assert.equal(result.outcome, 'spoke');
+  const userContent = llm.calls[0][1].content;
+  const imageParts = userContent.filter((p) => p.type === 'image_url');
+  assert.equal(imageParts.length, 2);
+  assert.deepEqual(
+    imageParts.map((p) => p.image_url.url),
+    ['data:image/png;base64,ONE', 'data:image/png;base64,TWO'],
+    'pictures are kept in the order they appear in the transcript',
+  );
 });
 
 // ---------------------------------------------------------------------------

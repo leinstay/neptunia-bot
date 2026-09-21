@@ -18,6 +18,7 @@ import { createSpontaneous } from './behavior/spontaneous.js';
 import { createMemoryUpdater } from './memory/update.js';
 import { createWarmup } from './memory/warmup.js';
 import { createDescriber } from './memory/describe.js';
+import { createImageFetcher } from './discord/fetch-image.js';
 import { createAdmin } from './admin.js';
 import { createTagHistory } from './behavior/mention.js';
 import { createMessageHandler } from './discord/events.js';
@@ -82,8 +83,11 @@ const client = new Client({
 const instance = { guildId: null };
 const getGuildId = () => instance.guildId;
 
-const describer = createDescriber({ hot, store, llm });
-const turns = createTurnRunner({ hot, store, llm, calibrator, client, describer });
+// Shared so a picture attached on consecutive turns, or described more than
+// once, is only ever downloaded once within the fetcher's LRU window.
+const imageFetcher = createImageFetcher();
+const describer = createDescriber({ hot, store, llm, imageFetcher });
+const turns = createTurnRunner({ hot, store, llm, calibrator, client, describer, imageFetcher });
 const spontaneous = createSpontaneous({ hot, store, client, turns, getGuildId });
 const memory = createMemoryUpdater({
   hot,

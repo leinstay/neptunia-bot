@@ -7,10 +7,26 @@
 // LRU-trimmed to `media.cacheEntries`. A failure is cached as a miss for an
 // hour, so a broken picture is not retried on every turn/batch. Descriptions
 // are data: never logged.
+//
+// The picture is downloaded first (src/discord/fetch-image.js) and sent to
+// the model as a data: URL, never as a bare Discord URL -- the provider's own
+// fetcher gets a 403 from Discord on some CDN hosts even though our server
+// fetches the same URL fine (see src/behavior/turn.js for the live-vision
+// side of the same fix). A failed download costs nothing and is cached as a
+// miss exactly like a failed LLM request.
 
 import { mediaProxyUrl } from '../discord/media.js';
+import { createImageFetcher } from '../discord/fetch-image.js';
+import { log } from '../log.js';
 
 const MISS_TTL_MS = 60 * 60_000;
+
+/** ≤200 chars, with any query string stripped -- an error message must never leak a signed URL. */
+function safeDetail(message) {
+  return String(message ?? '')
+    .replace(/\?[^\s'")]*/g, '')
+    .slice(0, 200);
+}
 
 /** Move `key` to the end of `cache` (most-recently-used), inserting it if new. */
 function touchKey(cache, key, value) {
@@ -31,8 +47,9 @@ function trimCache(cache, maxEntries) {
  * @param {object} deps.store
  * @param {object} deps.llm     From createLlm().
  * @param {() => number} [deps.now]
+ * @param {object} [deps.imageFetcher]  From createImageFetcher() (src/discord/fetch-image.js).
  */
-export function createDescriber({ hot, store, llm, now = Date.now }) {
+export function createDescriber({ hot, store, llm, now = Date.now, imageFetcher = createImageFetcher() }) {
   /**
    * @param {string} guildId
    * @param {{ itemId: string, kind: string, url: string }} item  See
@@ -73,12 +90,29 @@ export function createDescriber({ hot, store, llm, now = Date.now }) {
       imageUrl = mediaProxyUrl(item.url, proxyOptions);
     }
 
+    const recordMiss = () => {
+      touchKey(cache, item.itemId, { miss: true, ts: now() });
+      trimCache(cache, mediaCfg.cacheEntries ?? Infinity);
+      store.markMediaCacheDirty(guildId);
+    };
+
+    const visionCfg = hot.config.context?.vision ?? {};
+    const downloaded = await imageFetcher.fetchAsDataUrl(imageUrl, {
+      maxBytes: visionCfg.maxBytes,
+      timeoutMs: visionCfg.fetchTimeoutMs,
+    });
+    if (!downloaded) {
+      log.warn('describe: failed', { kind: item.kind, reason: 'download' });
+      recordMiss();
+      return null;
+    }
+
     let completion;
     try {
       completion = await llm.complete(
         [
           { role: 'system', content: promptText },
-          { role: 'user', content: [{ type: 'image_url', image_url: { url: imageUrl } }] },
+          { role: 'user', content: [{ type: 'image_url', image_url: { url: downloaded.dataUrl } }] },
         ],
         {
           model: mediaCfg.model,
@@ -89,10 +123,9 @@ export function createDescriber({ hot, store, llm, now = Date.now }) {
           timeoutMs: hot.config.llm?.timeoutMs,
         },
       );
-    } catch {
-      touchKey(cache, item.itemId, { miss: true, ts: now() });
-      trimCache(cache, mediaCfg.cacheEntries ?? Infinity);
-      store.markMediaCacheDirty(guildId);
+    } catch (err) {
+      log.warn('describe: failed', { kind: item.kind, reason: 'llm', status: err.statusCode, detail: safeDetail(err.message) });
+      recordMiss();
       return null;
     }
 
@@ -102,9 +135,8 @@ export function createDescriber({ hot, store, llm, now = Date.now }) {
       .slice(0, 200);
 
     if (!text) {
-      touchKey(cache, item.itemId, { miss: true, ts: now() });
-      trimCache(cache, mediaCfg.cacheEntries ?? Infinity);
-      store.markMediaCacheDirty(guildId);
+      log.warn('describe: failed', { kind: item.kind, reason: 'empty' });
+      recordMiss();
       return null;
     }
 

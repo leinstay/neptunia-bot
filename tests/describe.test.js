@@ -1,5 +1,9 @@
 // Tests for src/memory/describe.js: the media describer — caching, LRU
-// trimming, persistence, per-batch caps and the feature switch.
+// trimming, persistence, per-batch caps, the feature switch, and the
+// download-first flow (F19): a picture is downloaded and sent to the model
+// as a data: URL, never as a bare Discord URL a provider might refuse to
+// fetch itself; a failed download is cached as a miss exactly like a failed
+// LLM request, and every failure path logs one `describe: failed` line.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -17,6 +21,7 @@ function fakeHot(overrides = {}) {
     config: {
       features: { mediaDescriptions: true },
       media: { model: 'x/haiku', maxOutputTokens: 120, imageSize: 512, cacheEntries: 5000, maxPerTurn: 6, maxPerBatch: 20 },
+      context: { vision: { maxBytes: 1_500_000, fetchTimeoutMs: 10_000 } },
       ...overrides.config,
     },
     prompts: { describe: 'Describe this picture in one plain line.', ...overrides.prompts },
@@ -42,16 +47,61 @@ function fakeLlm(responses) {
   };
 }
 
+const SUCCESSFUL_DOWNLOAD = { dataUrl: 'data:image/webp;base64,ZmFrZQ==', bytes: 4, contentType: 'image/webp' };
+
+/** A fake createImageFetcher()-shaped dependency. `result` may be `null` (every download fails), a fixed
+ * success object, or a function `(url, options) => result|null` for per-call behaviour. */
+function fakeImageFetcher(result = SUCCESSFUL_DOWNLOAD) {
+  const calls = [];
+  return {
+    calls,
+    fetchAsDataUrl: async (url, options) => {
+      calls.push({ url, options });
+      return typeof result === 'function' ? result(url, options) : result;
+    },
+  };
+}
+
+/** Captures process.stdout.write calls (the log module's only sink) around `fn`. */
+async function withCapturedLogs(fn) {
+  const original = process.stdout.write.bind(process.stdout);
+  const chunks = [];
+  process.stdout.write = (chunk) => {
+    chunks.push(String(chunk));
+    return true;
+  };
+  let result;
+  try {
+    result = await fn();
+  } finally {
+    process.stdout.write = original;
+  }
+  const logs = [];
+  for (const chunk of chunks) {
+    for (const line of chunk.split('\n')) {
+      if (!line.trim()) continue;
+      try {
+        logs.push(JSON.parse(line));
+      } catch {
+        // not one of our JSON log lines -- ignore
+      }
+    }
+  }
+  return { result, logs };
+}
+
 test('describe: feature off returns null without any request', async () => {
   const dir = tmpDataDir();
   const store = createStore({ dataDir: dir });
   const hot = fakeHot({ config: { features: { mediaDescriptions: false } } });
   const llm = fakeLlm({ text: 'a cat' });
-  const describer = createDescriber({ hot, store, llm });
+  const imageFetcher = fakeImageFetcher();
+  const describer = createDescriber({ hot, store, llm, imageFetcher });
 
   const result = await describer.describe('g1', pictureItem('a1'));
   assert.equal(result, null);
   assert.equal(llm.calls.length, 0);
+  assert.equal(imageFetcher.calls.length, 0, 'the feature switch must short-circuit before any download');
 });
 
 test('describe: missing prompts.describe returns null without any request', async () => {
@@ -59,24 +109,30 @@ test('describe: missing prompts.describe returns null without any request', asyn
   const store = createStore({ dataDir: dir });
   const hot = fakeHot({ prompts: { describe: undefined } });
   const llm = fakeLlm({ text: 'a cat' });
-  const describer = createDescriber({ hot, store, llm });
+  const imageFetcher = fakeImageFetcher();
+  const describer = createDescriber({ hot, store, llm, imageFetcher });
 
   const result = await describer.describe('g1', pictureItem('a1'));
   assert.equal(result, null);
   assert.equal(llm.calls.length, 0);
+  assert.equal(imageFetcher.calls.length, 0);
 });
 
-test('describe: a successful call returns the trimmed one-line text and caches it', async () => {
+test('describe: a successful call downloads the picture, sends it as a data: URL, returns the trimmed text and caches it', async () => {
   const dir = tmpDataDir();
   const store = createStore({ dataDir: dir });
   const hot = fakeHot();
   const llm = fakeLlm({ text: '  A grey cat sleeping on a couch.\nsome extra line ignored  ', usage: { prompt_tokens: 200 }, estimated: 210 });
-  const describer = createDescriber({ hot, store, llm });
+  const imageFetcher = fakeImageFetcher();
+  const describer = createDescriber({ hot, store, llm, imageFetcher });
 
   const result = await describer.describe('g1', pictureItem('a1'));
   assert.equal(result.text, 'A grey cat sleeping on a couch.');
   assert.equal(result.cached, undefined);
   assert.deepEqual(result.usage, { prompt_tokens: 200 });
+
+  const sentUrl = llm.calls[0].messages[1].content[0].image_url.url;
+  assert.equal(sentUrl, SUCCESSFUL_DOWNLOAD.dataUrl, 'the model must receive the downloaded data: URL, never the bare Discord URL');
 
   const cache = store.getMediaCache('g1');
   assert.equal(cache.a1.text, 'A grey cat sleeping on a couch.');
@@ -87,34 +143,114 @@ test('describe: the caption is trimmed to at most 200 characters', async () => {
   const store = createStore({ dataDir: dir });
   const hot = fakeHot();
   const llm = fakeLlm({ text: 'x'.repeat(500) });
-  const describer = createDescriber({ hot, store, llm });
+  const describer = createDescriber({ hot, store, llm, imageFetcher: fakeImageFetcher() });
 
   const result = await describer.describe('g1', pictureItem('a1'));
   assert.equal(result.text.length, 200);
 });
 
-test('describe: a cache hit is free -- no LLM request, marked cached', async () => {
+test('describe: a cache hit is free -- no download, no LLM request, marked cached', async () => {
   const dir = tmpDataDir();
   const store = createStore({ dataDir: dir });
   const hot = fakeHot();
   const llm = fakeLlm({ text: 'a cat' });
-  const describer = createDescriber({ hot, store, llm });
+  const imageFetcher = fakeImageFetcher();
+  const describer = createDescriber({ hot, store, llm, imageFetcher });
 
   await describer.describe('g1', pictureItem('a1'));
   const second = await describer.describe('g1', pictureItem('a1'));
 
   assert.equal(llm.calls.length, 1, 'only the first call reached the LLM');
+  assert.equal(imageFetcher.calls.length, 1, 'only the first call downloaded anything');
   assert.equal(second.cached, true);
   assert.equal(second.text, 'a cat');
 });
 
-test('describe: a failure is cached as a miss and not retried within the hour', async () => {
+// --- F19: download-first, download failure, LLM failure --------------------
+
+test('describe: a failed download is cached as a miss, costs no LLM request, and logs reason "download"', async () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  const hot = fakeHot();
+  const llm = fakeLlm({ text: 'should never be reached' });
+  const imageFetcher = fakeImageFetcher(null); // every download fails
+  const describer = createDescriber({ hot, store, llm, imageFetcher });
+
+  const { result, logs } = await withCapturedLogs(() => describer.describe('g1', pictureItem('a1', { kind: 'gif' })));
+
+  assert.equal(result, null);
+  assert.equal(llm.calls.length, 0, 'a failed download must cost nothing');
+  assert.equal(store.getMediaCache('g1').a1.miss, true);
+
+  const line = logs.find((l) => l.msg === 'describe: failed');
+  assert.ok(line, 'expected a "describe: failed" log line');
+  assert.equal(line.kind, 'gif');
+  assert.equal(line.reason, 'download');
+});
+
+test('describe: passes context.vision.maxBytes/fetchTimeoutMs to the image fetcher', async () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  const hot = fakeHot({ config: { context: { vision: { maxBytes: 999, fetchTimeoutMs: 4321 } } } });
+  const llm = fakeLlm({ text: 'a cat' });
+  const imageFetcher = fakeImageFetcher();
+  const describer = createDescriber({ hot, store, llm, imageFetcher });
+
+  await describer.describe('g1', pictureItem('a1'));
+
+  assert.deepEqual(imageFetcher.calls[0].options, { maxBytes: 999, timeoutMs: 4321 });
+});
+
+test('describe: a downloaded-but-failed-LLM-request is cached as a miss and logs reason "llm" with the status', async () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  const hot = fakeHot();
+  const err = new Error('OpenRouter HTTP 400: bad request');
+  err.statusCode = 400;
+  const llm = fakeLlm(err);
+  const imageFetcher = fakeImageFetcher();
+  const describer = createDescriber({ hot, store, llm, imageFetcher });
+
+  const { result, logs } = await withCapturedLogs(() => describer.describe('g1', pictureItem('a1', { kind: 'video' })));
+
+  assert.equal(result, null);
+  assert.equal(store.getMediaCache('g1').a1.miss, true);
+
+  const line = logs.find((l) => l.msg === 'describe: failed');
+  assert.ok(line);
+  assert.equal(line.kind, 'video');
+  assert.equal(line.reason, 'llm');
+  assert.equal(line.status, 400);
+  assert.ok(!JSON.stringify(line).includes('description'), 'never logs the description text');
+});
+
+test('describe: a failure log never leaks the description text or a signed URL', async () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  const hot = fakeHot();
+  const err = new Error('failed fetching https://media.discordapp.net/x.png?ex=deadbeef&is=cafef00d something secret text');
+  const llm = fakeLlm(err);
+  const imageFetcher = fakeImageFetcher();
+  const describer = createDescriber({ hot, store, llm, imageFetcher });
+
+  const { logs } = await withCapturedLogs(() => describer.describe('g1', pictureItem('a1')));
+
+  const line = logs.find((l) => l.msg === 'describe: failed');
+  assert.ok(line);
+  const serialized = JSON.stringify(line);
+  assert.ok(!serialized.includes('ex=deadbeef'));
+  assert.ok(!serialized.includes('cafef00d'));
+  assert.ok(line.detail.length <= 200);
+});
+
+test('describe: a failure is cached as a miss and not retried within the hour (download succeeds, LLM fails)', async () => {
   const dir = tmpDataDir();
   const store = createStore({ dataDir: dir });
   const hot = fakeHot();
   let nowValue = 1_000_000;
   const llm = fakeLlm(new Error('provider down'));
-  const describer = createDescriber({ hot, store, llm, now: () => nowValue });
+  const imageFetcher = fakeImageFetcher();
+  const describer = createDescriber({ hot, store, llm, imageFetcher, now: () => nowValue });
 
   const first = await describer.describe('g1', pictureItem('a1'));
   assert.equal(first, null);
@@ -126,21 +262,25 @@ test('describe: a failure is cached as a miss and not retried within the hour', 
 
   nowValue += 61 * 60_000; // past the 1-hour miss TTL
   const llm2 = fakeLlm({ text: 'a cat now visible' });
-  const describer2 = createDescriber({ hot, store, llm: llm2, now: () => nowValue });
+  const describer2 = createDescriber({ hot, store, llm: llm2, imageFetcher: fakeImageFetcher(), now: () => nowValue });
   const third = await describer2.describe('g1', pictureItem('a1'));
   assert.equal(third.text, 'a cat now visible', 'the miss expired: retried and succeeded');
 });
 
-test('describe: an empty caption is treated as a miss, not cached as a success', async () => {
+test('describe: an empty caption is treated as a miss, not cached as a success, and logs reason "empty"', async () => {
   const dir = tmpDataDir();
   const store = createStore({ dataDir: dir });
   const hot = fakeHot();
   const llm = fakeLlm({ text: '   ' });
-  const describer = createDescriber({ hot, store, llm });
+  const imageFetcher = fakeImageFetcher();
+  const describer = createDescriber({ hot, store, llm, imageFetcher });
 
-  const result = await describer.describe('g1', pictureItem('a1'));
+  const { result, logs } = await withCapturedLogs(() => describer.describe('g1', pictureItem('a1')));
   assert.equal(result, null);
   assert.equal(store.getMediaCache('g1').a1.miss, true);
+  const line = logs.find((l) => l.msg === 'describe: failed');
+  assert.ok(line);
+  assert.equal(line.reason, 'empty');
 });
 
 test('describe: LRU-trims the cache to media.cacheEntries, evicting the least recently used', async () => {
@@ -148,7 +288,7 @@ test('describe: LRU-trims the cache to media.cacheEntries, evicting the least re
   const store = createStore({ dataDir: dir });
   const hot = fakeHot({ config: { features: { mediaDescriptions: true }, media: { cacheEntries: 2 } } });
   const llm = fakeLlm([{ text: 'one' }, { text: 'two' }, { text: 'three' }]);
-  const describer = createDescriber({ hot, store, llm });
+  const describer = createDescriber({ hot, store, llm, imageFetcher: fakeImageFetcher() });
 
   await describer.describe('g1', pictureItem('a1'));
   await describer.describe('g1', pictureItem('a2'));
@@ -163,7 +303,7 @@ test('describe: LRU access order -- re-describing (cache hit) bumps recency, pro
   const store = createStore({ dataDir: dir });
   const hot = fakeHot({ config: { features: { mediaDescriptions: true }, media: { cacheEntries: 2 } } });
   const llm = fakeLlm([{ text: 'one' }, { text: 'two' }, { text: 'three' }]);
-  const describer = createDescriber({ hot, store, llm });
+  const describer = createDescriber({ hot, store, llm, imageFetcher: fakeImageFetcher() });
 
   await describer.describe('g1', pictureItem('a1'));
   await describer.describe('g1', pictureItem('a2'));
@@ -179,7 +319,7 @@ test('describe: the media cache is persisted across store instances', async () =
   const storeA = createStore({ dataDir: dir });
   const hot = fakeHot();
   const llm = fakeLlm({ text: 'a cat' });
-  const describerA = createDescriber({ hot, store: storeA, llm });
+  const describerA = createDescriber({ hot, store: storeA, llm, imageFetcher: fakeImageFetcher() });
   await describerA.describe('g1', pictureItem('a1'));
   storeA.flush();
 
@@ -192,13 +332,16 @@ test('describe: video items request a webp poster frame via the media proxy, wit
   const store = createStore({ dataDir: dir });
   const hot = fakeHot();
   const llm = fakeLlm({ text: 'a dog runs' });
-  const describer = createDescriber({ hot, store, llm });
+  const imageFetcher = fakeImageFetcher();
+  const describer = createDescriber({ hot, store, llm, imageFetcher });
 
   await describer.describe('g1', pictureItem('v1', { kind: 'video', url: 'https://cdn.discordapp.com/x/clip.mp4' }));
-  const sentUrl = llm.calls[0].messages[1].content[0].image_url.url;
-  const parsed = new URL(sentUrl);
+  const fetchedUrl = imageFetcher.calls[0].url;
+  const parsed = new URL(fetchedUrl);
   assert.equal(parsed.searchParams.get('format'), 'webp');
   assert.equal(parsed.searchParams.get('width'), null);
+  // The model only ever sees the downloaded data: URL, never the CDN one.
+  assert.equal(llm.calls[0].messages[1].content[0].image_url.url, SUCCESSFUL_DOWNLOAD.dataUrl);
 });
 
 test('describe: an image request resizes through the media proxy at media.imageSize', async () => {
@@ -206,39 +349,40 @@ test('describe: an image request resizes through the media proxy at media.imageS
   const store = createStore({ dataDir: dir });
   const hot = fakeHot({ config: { features: { mediaDescriptions: true }, media: { imageSize: 256 } } });
   const llm = fakeLlm({ text: 'a cat' });
-  const describer = createDescriber({ hot, store, llm });
+  const imageFetcher = fakeImageFetcher();
+  const describer = createDescriber({ hot, store, llm, imageFetcher });
 
   await describer.describe('g1', pictureItem('a1'));
-  const sentUrl = llm.calls[0].messages[1].content[0].image_url.url;
-  assert.equal(new URL(sentUrl).searchParams.get('width'), '256');
+  const fetchedUrl = imageFetcher.calls[0].url;
+  assert.equal(new URL(fetchedUrl).searchParams.get('width'), '256');
 });
 
 // --- F17: stickers, custom emoji, link thumbnails -------------------------
 
-test('describe: a sticker item is sent as-is, never through the media proxy (already sized via ?size=)', async () => {
+test('describe: a sticker item is downloaded as-is, never through the media proxy (already sized via ?size=)', async () => {
   const dir = tmpDataDir();
   const store = createStore({ dataDir: dir });
   const hot = fakeHot();
   const llm = fakeLlm({ text: 'a frog gives a thumbs up' });
-  const describer = createDescriber({ hot, store, llm });
+  const imageFetcher = fakeImageFetcher();
+  const describer = createDescriber({ hot, store, llm, imageFetcher });
 
   const stickerPicture = pictureItem('sticker:s1', { kind: 'sticker', url: 'https://media.discordapp.net/stickers/s1.png?size=160' });
   await describer.describe('g1', stickerPicture);
-  const sentUrl = llm.calls[0].messages[1].content[0].image_url.url;
-  assert.equal(sentUrl, 'https://media.discordapp.net/stickers/s1.png?size=160');
+  assert.equal(imageFetcher.calls[0].url, 'https://media.discordapp.net/stickers/s1.png?size=160');
 });
 
-test('describe: an emoji item is sent as-is, never through the media proxy (cdn.discordapp.com host must survive)', async () => {
+test('describe: an emoji item is downloaded as-is, never through the media proxy (cdn.discordapp.com host must survive)', async () => {
   const dir = tmpDataDir();
   const store = createStore({ dataDir: dir });
   const hot = fakeHot();
   const llm = fakeLlm({ text: 'a surprised cat face' });
-  const describer = createDescriber({ hot, store, llm });
+  const imageFetcher = fakeImageFetcher();
+  const describer = createDescriber({ hot, store, llm, imageFetcher });
 
   const emojiPicture = pictureItem('emoji:e1', { kind: 'emoji', url: 'https://cdn.discordapp.com/emojis/e1.webp?size=96' });
   await describer.describe('g1', emojiPicture);
-  const sentUrl = llm.calls[0].messages[1].content[0].image_url.url;
-  assert.equal(sentUrl, 'https://cdn.discordapp.com/emojis/e1.webp?size=96');
+  assert.equal(imageFetcher.calls[0].url, 'https://cdn.discordapp.com/emojis/e1.webp?size=96');
 });
 
 test('describe: a link-thumbnail item resizes through the media proxy exactly like an image', async () => {
@@ -246,12 +390,13 @@ test('describe: a link-thumbnail item resizes through the media proxy exactly li
   const store = createStore({ dataDir: dir });
   const hot = fakeHot({ config: { features: { mediaDescriptions: true }, media: { imageSize: 256 } } });
   const llm = fakeLlm({ text: 'a cat plays piano' });
-  const describer = createDescriber({ hot, store, llm });
+  const imageFetcher = fakeImageFetcher();
+  const describer = createDescriber({ hot, store, llm, imageFetcher });
 
   const linkPicture = pictureItem('link:abcd1234', { kind: 'link', url: 'https://cdn.discordapp.com/x/thumb.jpg' });
   await describer.describe('g1', linkPicture);
-  const sentUrl = llm.calls[0].messages[1].content[0].image_url.url;
-  assert.equal(new URL(sentUrl).searchParams.get('width'), '256');
+  const fetchedUrl = imageFetcher.calls[0].url;
+  assert.equal(new URL(fetchedUrl).searchParams.get('width'), '256');
 });
 
 test('describe: a link-thumbnail item on a non-Discord host (e.g. i.ytimg.com) is passed through untouched', async () => {
@@ -259,12 +404,12 @@ test('describe: a link-thumbnail item on a non-Discord host (e.g. i.ytimg.com) i
   const store = createStore({ dataDir: dir });
   const hot = fakeHot();
   const llm = fakeLlm({ text: 'a cat plays piano' });
-  const describer = createDescriber({ hot, store, llm });
+  const imageFetcher = fakeImageFetcher();
+  const describer = createDescriber({ hot, store, llm, imageFetcher });
 
   const linkPicture = pictureItem('link:abcd1234', { kind: 'link', url: 'https://i.ytimg.com/vi/xyz/hq.jpg' });
   await describer.describe('g1', linkPicture);
-  const sentUrl = llm.calls[0].messages[1].content[0].image_url.url;
-  assert.equal(sentUrl, 'https://i.ytimg.com/vi/xyz/hq.jpg');
+  assert.equal(imageFetcher.calls[0].url, 'https://i.ytimg.com/vi/xyz/hq.jpg');
 });
 
 test('describe: a cache HIT refreshes the entry\'s recency (sticker/emoji/link keys are ordinary LRU entries)', async () => {
@@ -272,7 +417,7 @@ test('describe: a cache HIT refreshes the entry\'s recency (sticker/emoji/link k
   const store = createStore({ dataDir: dir });
   const hot = fakeHot({ config: { features: { mediaDescriptions: true }, media: { cacheEntries: 2 } } });
   const llm = fakeLlm([{ text: 'one' }, { text: 'two' }, { text: 'three' }]);
-  const describer = createDescriber({ hot, store, llm });
+  const describer = createDescriber({ hot, store, llm, imageFetcher: fakeImageFetcher() });
 
   await describer.describe('g1', pictureItem('sticker:s1', { kind: 'sticker', url: 'https://media.discordapp.net/stickers/s1.png?size=160' }));
   await describer.describe('g1', pictureItem('emoji:e1', { kind: 'emoji', url: 'https://cdn.discordapp.com/emojis/e1.webp?size=96' }));
@@ -292,7 +437,7 @@ test('describe: forwards countAgainstDailyCap to llm.complete', async () => {
   const store = createStore({ dataDir: dir });
   const hot = fakeHot();
   const llm = fakeLlm({ text: 'a cat' });
-  const describer = createDescriber({ hot, store, llm });
+  const describer = createDescriber({ hot, store, llm, imageFetcher: fakeImageFetcher() });
 
   await describer.describe('g1', pictureItem('a1'), { countAgainstDailyCap: false });
   assert.equal(llm.calls[0].options.countAgainstDailyCap, false);
@@ -303,7 +448,7 @@ test('describe: passes llm.timeoutMs (the chat timeout, not the analyzer\'s) as 
   const store = createStore({ dataDir: dir });
   const hot = fakeHot({ config: { llm: { timeoutMs: 90000 } } });
   const llm = fakeLlm({ text: 'a cat' });
-  const describer = createDescriber({ hot, store, llm });
+  const describer = createDescriber({ hot, store, llm, imageFetcher: fakeImageFetcher() });
 
   await describer.describe('g1', pictureItem('a1'));
   assert.equal(llm.calls[0].options.timeoutMs, 90000);
@@ -316,7 +461,7 @@ test('describeMany: caps NEW descriptions at maxNew, cache hits are free', async
   const store = createStore({ dataDir: dir });
   const hot = fakeHot();
   const llm = fakeLlm([{ text: 'one' }, { text: 'two' }, { text: 'three' }]);
-  const describer = createDescriber({ hot, store, llm });
+  const describer = createDescriber({ hot, store, llm, imageFetcher: fakeImageFetcher() });
 
   // Pre-cache "a1" so its lookup is free and does not count toward maxNew.
   await describer.describe('g1', pictureItem('a1'));
@@ -337,7 +482,7 @@ test('describeMany: calls onCharge once per NEW request, never for a cache hit',
   const store = createStore({ dataDir: dir });
   const hot = fakeHot();
   const llm = fakeLlm([{ text: 'one', usage: { prompt_tokens: 10 } }, { text: 'two', usage: { prompt_tokens: 20 } }]);
-  const describer = createDescriber({ hot, store, llm });
+  const describer = createDescriber({ hot, store, llm, imageFetcher: fakeImageFetcher() });
   await describer.describe('g1', pictureItem('a1'));
 
   const charges = [];
@@ -352,10 +497,12 @@ test('describeMany: feature off -- every describe() call is a no-op, empty resul
   const store = createStore({ dataDir: dir });
   const hot = fakeHot({ config: { features: { mediaDescriptions: false } } });
   const llm = fakeLlm({ text: 'x' });
-  const describer = createDescriber({ hot, store, llm });
+  const imageFetcher = fakeImageFetcher();
+  const describer = createDescriber({ hot, store, llm, imageFetcher });
 
   const { descriptions, newCount } = await describer.describeMany('g1', [pictureItem('a1')]);
   assert.equal(newCount, 0);
   assert.equal(descriptions.size, 0);
   assert.equal(llm.calls.length, 0);
+  assert.equal(imageFetcher.calls.length, 0);
 });

@@ -30,7 +30,7 @@
     "filePreview": "[file: {name} | {text}]",
     "forwarded": "[forwarded: {text}]",
     "forwardedFrom": "[forwarded from #{channel}: {text}]",
-    "frameAttached": "[still frame: attached image {n}]",
+    "frameAttached": "[see attached image {n}]",
     "unknownDuration": "?:??",
     "file": "[file: {name}]",
     "sticker": "[sticker: {name}]",

@@ -48,6 +48,17 @@ test('estimateMessages: array content charges text parts by length and image par
   assert.equal(total, 6 + 2 + 1600);
 });
 
+test('estimateMessages: an image_url part is charged the flat tokensPerImage regardless of the URL length (F19: a data: URL must not be counted as text)', () => {
+  const longDataUrl = `data:image/webp;base64,${'A'.repeat(500_000)}`;
+  const total = estimateMessages(
+    [{ role: 'user', content: [{ type: 'image_url', image_url: { url: longDataUrl } }] }],
+    400,
+  );
+  // overhead 6 + flat 400, NOT proportional to the ~500,000-character data URL --
+  // otherwise the 50k request cap would refuse every request with a picture.
+  assert.equal(total, 6 + 400);
+});
+
 test('estimateMessages: custom tokensPerImage is honoured', () => {
   const total = estimateMessages(
     [{ role: 'user', content: [{ type: 'image_url', image_url: { url: 'x' } }] }],
