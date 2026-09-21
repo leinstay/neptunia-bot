@@ -121,6 +121,9 @@ The system prompt handles sounding human, so the card is purely personality. Giv
 | `timeoutMs` | `90000` | Request timeout (ms) |
 | `retries` | `2` | Retries on transient failures |
 | `maxRequestsPerDay` | `300` | Daily request cap |
+| `provider` | `null` | OpenRouter `provider` routing object, passed verbatim; `null` sends nothing |
+
+`llm.provider` sets OpenRouter's provider routing field on every request, for example `{ "ignore": ["some-provider"] }` or `{ "order": ["anthropic"], "allow_fallbacks": true }`. If the OpenRouter account itself restricts allowed providers, ignoring the only one left makes every request fail with "No endpoints found".
 
 ### `context`
 
@@ -263,7 +266,9 @@ With `warmup.enabled: true`, the bot reads channel history before speaking. It f
 
 The budget `warmup.maxTokens` is counted from the provider's reported usage. Warm-up is exempt from `llm.maxRequestsPerDay` but the per-request cap applies. Progress persists across restarts. A batch whose analysis is truncated at `memory.maxOutputTokens` is split in half and the halves analyzed separately; splitting recurses down to 20 messages, then the piece is skipped and counted. Other failures log their reason; three in a row abort without leaving the bot mute. Progress is logged per batch (`warmup: batch done`) and per channel (`warmup: channel done`).
 
-`/nep warmup stop` pauses after the batch in flight; `/nep warmup run` resumes from the saved progress. Suggested flow for a first run: leave `warmup.enabled` off, plan the channels with `/nep warmup` commands, check `/nep warmup plan`, then `/nep warmup run`.
+A provider rate limit (HTTP 429, an exhausted daily token quota) is not a failure; the run waits `warmup.rateLimitWaitMinutes` and retries the same batch, up to `warmup.rateLimitMaxWaits` consecutive waits, and refused requests cost nothing. A warm-up aborted by rate limits or repeated failures resumes by itself on the next start when `warmup.enabled` is true.
+
+`/nep warmup stop` pauses after the batch in flight and interrupts a rate-limit wait; `/nep warmup run` resumes from the saved progress. Suggested flow for a first run: leave `warmup.enabled` off, plan the channels with `/nep warmup` commands, check `/nep warmup plan`, then `/nep warmup run`.
 
 `/nep warmup reset` clears only the progress marker, so running a warm-up again over existing memory counts the same messages twice. For a truly fresh start, use `/nep memory wipe` first: it clears member profiles with their attitudes and moments, server habits, the channel map, the analyzer's lore entries, the message buffer and the warm-up progress, after the owner types the server's exact name. It keeps the owner's own lore entries, the media description cache, token calibration and the spontaneous schedule. The command is refused while a warm-up is running.
 
@@ -281,6 +286,8 @@ The warm-up budget is real money. Set `memory.model` to a cheaper model for the 
 | `primaryChannelId` | `""` | Channel read first, so the first picture of the server comes from it |
 | `channelDepths` | `{}` | Per-channel depth override by channel id (`0` skips a channel); `messagesPerChannel` is the fallback |
 | `onlyListed` | `false` | Read only channels in `channelDepths` plus the primary; skip everything else |
+| `rateLimitWaitMinutes` | `10` | Minutes to wait when the provider returns a rate limit |
+| `rateLimitMaxWaits` | `36` | Consecutive waits before the run aborts |
 
 Read order: the primary channel, then listed channels sorted by depth (ties broken by recent activity), then the rest by recent activity. A channel's history window is frozen when it is first read; changing its depth afterwards needs `warmup reset`.
 
