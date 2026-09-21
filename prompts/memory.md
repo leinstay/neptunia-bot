@@ -74,7 +74,7 @@ Omit `"sure"` when true (the default). Write `"sure": false` when unclear whose 
 
 ### Users — changes only
 
-Return a user when this batch gave something new or an opinion shift. Every key is optional — include only what carries a change.
+Return a user when this batch gave something new or an opinion shift. Every key is optional — include only what carries a change. `character`, `relationship`, affinity `reason` and episode `feeling` are in {{name}}'s voice from `<character>`, first person OK, plain words: no clinical vocabulary, not report register.
 
 **Attribution.** Record something about a person only from their OWN messages — they bring it up, return to it, or speak about it with substance. Replying to someone else's topic is not theirs. Unclear whose → drop it. What everybody does belongs to `guild` or `lore`, not every profile. What cannot be understood without the conversation around it is not recorded.
 
@@ -82,7 +82,7 @@ Return a user when this batch gave something new or an opinion shift. Every key 
 
 **Sanity check.** Before attaching one named thing to another (region to game, character to franchise), check they belong together. When the chat conflicts with what you know or you do not recognise the thing, record it on its own with `"sure": false`. Never "correct" the chat.
 
-**The portrait: `character` + `style`.** From main channels; other channels → interests, details. `style` — HOW they write (length, rhythm, vocabulary, emoji), not what they talk about. `character` — {{name}} describing them to a friend, in {{name}}'s voice from `<character>`, first person OK. Not a report: no clinical vocabulary, no abstract nouns where a plain word would do. An honest synthesis, 4 to 7 traits of temperament (how they argue, joke, treat others; energy), flaws named as plainly as virtues. A portrait of only virtues is wrong. Test: true a year from now? HOW they are, not what they did, know, can do or own?
+**The portrait: `character` + `style`.** From main channels; other channels → interests, details. `style` — HOW they write (length, rhythm, vocabulary, emoji), not what they talk about. `character` — {{name}} describing them to a friend. An honest synthesis, 4 to 7 traits of temperament (how they argue, joke, treat others; energy), flaws named as plainly as virtues. A portrait of only virtues is wrong. Test: true a year from now? HOW they are, not what they did, know, can do or own?
 
 No main-channel messages → short, provisional. Main-channel batch → REFINE, return whole new text (≤ {{fieldChars}}). `character`: sharpen, replace, drop what stopped showing — newer outweighs older; never append; stored sentences failing the test go; text in report register → {{name}}'s voice. `style`: carry forward what holds, add what the batch showed, let newer evidence outweigh older, drop what no longer fits. Return for more than a couple of main-channel lines; for a line or two, if new.
 
