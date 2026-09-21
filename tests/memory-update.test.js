@@ -8,7 +8,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { createStore } from '../src/memory/store.js';
-import { isDue, buildMemoryRequest, applyMemoryUpdate, createMemoryUpdater, touchMemory } from '../src/memory/update.js';
+import { isDue, buildMemoryRequest, applyMemoryUpdate, createMemoryUpdater, touchMemory, computeSeenAt } from '../src/memory/update.js';
 import { createCalibrator, estimateTokens, estimateMessages } from '../src/llm/tokens.js';
 import { formatTranscript } from '../src/discord/format.js';
 import { TokenLimitError } from '../src/llm/openrouter.js';
@@ -141,7 +141,7 @@ test('buildMemoryRequest: carries the memory prompt and both JSON blocks', () =>
     prompts: { memory: 'memory system prompt', labels },
     config,
     calibrator,
-    profiles: { 1: { names: ['nick'], character: 'cheerful', interests: '', style: '', details: [], relationship: '' } },
+    profiles: { 1: { names: ['nick'], character: 'cheerful', interests: [], style: '', details: [], relationship: '' } },
     guildMemory: { patterns: 'chats all day', starters: '', injokes: [], self: [] },
     messages,
     selfName: 'Nept',
@@ -191,13 +191,14 @@ test('buildMemoryRequest: fills every limit placeholder from config.memory / con
       maxSelfFacts: 9,
       maxNewEpisodes: 2,
       maxEpisodes: 30,
+      maxInterests: 20,
     },
     relationships: { maxDeltaPerUpdate: 25 },
   });
   const calibrator = createCalibrator();
   const messages = [slimMessage({ id: 'm1', ts: Date.UTC(2026, 0, 1, 12, 0, 0) })];
   const template =
-    '{{fieldChars}} {{guildFieldChars}} {{maxDetails}} {{maxInjokes}} {{maxSelfFacts}} {{maxNewEpisodes}} {{maxEpisodes}} {{maxDeltaPerUpdate}}';
+    '{{fieldChars}} {{guildFieldChars}} {{maxDetails}} {{maxInjokes}} {{maxSelfFacts}} {{maxNewEpisodes}} {{maxEpisodes}} {{maxDeltaPerUpdate}} {{maxInterests}}';
 
   const { messages: llmMessages } = buildMemoryRequest({
     prompts: { memory: template, labels },
@@ -209,7 +210,7 @@ test('buildMemoryRequest: fills every limit placeholder from config.memory / con
     selfName: 'Nept',
   });
 
-  assert.equal(llmMessages[0].content, '1000 2000 7 8 9 2 30 25');
+  assert.equal(llmMessages[0].content, '1000 2000 7 8 9 2 30 25 20');
 });
 
 test('buildMemoryRequest: absent config keys fall back to the config.json defaults', () => {
@@ -217,7 +218,7 @@ test('buildMemoryRequest: absent config keys fall back to the config.json defaul
   const calibrator = createCalibrator();
   const messages = [slimMessage({ id: 'm1', ts: Date.UTC(2026, 0, 1, 12, 0, 0) })];
   const template =
-    '{{fieldChars}} {{guildFieldChars}} {{maxDetails}} {{maxInjokes}} {{maxSelfFacts}} {{maxNewEpisodes}} {{maxEpisodes}} {{maxDeltaPerUpdate}}';
+    '{{fieldChars}} {{guildFieldChars}} {{maxDetails}} {{maxInjokes}} {{maxSelfFacts}} {{maxNewEpisodes}} {{maxEpisodes}} {{maxDeltaPerUpdate}} {{maxInterests}}';
 
   const { messages: llmMessages } = buildMemoryRequest({
     prompts: { memory: template, labels },
@@ -229,7 +230,7 @@ test('buildMemoryRequest: absent config keys fall back to the config.json defaul
     selfName: 'Nept',
   });
 
-  assert.equal(llmMessages[0].content, '400 800 15 15 20 3 20 15');
+  assert.equal(llmMessages[0].content, '400 800 15 15 20 3 20 15 12');
 });
 
 test('buildMemoryRequest: an unknown {{placeholder}} is left untouched', () => {
@@ -479,7 +480,7 @@ test('buildMemoryRequest: relationships on adds affinity: { score, reason } to e
     prompts: { memory: 'sys', labels },
     config,
     calibrator,
-    profiles: { 1: { names: ['nick'], character: '', interests: '', style: '', details: [], relationship: '', affinity: { score: 42, reason: 'helped once', history: [] } } },
+    profiles: { 1: { names: ['nick'], character: '', interests: [], style: '', details: [], relationship: '', affinity: { score: 42, reason: 'helped once', history: [] } } },
     guildMemory: {},
     messages,
     selfName: 'Nept',
@@ -499,7 +500,7 @@ test('buildMemoryRequest: relationships off never adds affinity to existing prof
     prompts: { memory: 'sys', labels },
     config,
     calibrator,
-    profiles: { 1: { names: ['nick'], character: '', interests: '', style: '', details: [], relationship: '', affinity: { score: 42, reason: 'helped once', history: [] } } },
+    profiles: { 1: { names: ['nick'], character: '', interests: [], style: '', details: [], relationship: '', affinity: { score: 42, reason: 'helped once', history: [] } } },
     guildMemory: {},
     messages,
     selfName: 'Nept',
@@ -857,7 +858,11 @@ test('applyMemoryUpdate: clamps string and detail fields to the configured limit
     assert.equal(result.users, 1);
     const profile = store.getUser(guildId, '1');
     assert.equal(profile.character, '01234');
-    assert.deepEqual(profile.details, [longDetail.slice(0, 200), 'b']);
+    assert.deepEqual(
+      profile.details.map((d) => d.text),
+      ['b', 'c'],
+      'over maxDetails: same weight/lastSeen, so the earliest-added (the long one) is evicted first',
+    );
   });
 });
 
@@ -878,15 +883,26 @@ test('applyMemoryUpdate: a field absent from the update leaves the stored value 
   withStore((store) => {
     const guildId = 'g1';
     store.touchUser(guildId, '1', 'nick', Date.now());
-    store.updateUser(guildId, '1', { interests: 'old', style: 'calm' });
-    const cfg = { fieldChars: 400, maxDetails: 15, maxInjokes: 15, maxSelfFacts: 20 };
+    applyMemoryUpdate(store, guildId, { users: { 1: { relationship: 'old', style: 'calm' } } }, MEMORY_CFG, new Set(['1']));
 
-    const result = applyMemoryUpdate(store, guildId, { users: { 1: { style: 'new' } } }, cfg, new Set(['1']));
+    const result = applyMemoryUpdate(store, guildId, { users: { 1: { style: 'new' } } }, MEMORY_CFG, new Set(['1']));
 
     assert.equal(result.users, 1);
     const profile = store.getUser(guildId, '1');
     assert.equal(profile.style, 'new');
-    assert.equal(profile.interests, 'old');
+    assert.equal(profile.relationship, 'old');
+  });
+});
+
+test('applyMemoryUpdate: an empty-string prose field never blanks the stored value', () => {
+  withStore((store) => {
+    const guildId = 'g1';
+    store.touchUser(guildId, '1', 'nick', Date.now());
+    applyMemoryUpdate(store, guildId, { users: { 1: { character: 'chatty' } } }, MEMORY_CFG, new Set(['1']));
+
+    applyMemoryUpdate(store, guildId, { users: { 1: { character: '' } } }, MEMORY_CFG, new Set(['1']));
+
+    assert.equal(store.getUser(guildId, '1').character, 'chatty');
   });
 });
 
@@ -918,7 +934,7 @@ test('applyMemoryUpdate: garbage input changes nothing and never throws', () => 
 
     for (const garbage of [null, undefined, 'not an object', 42, [1, 2, 3]]) {
       const result = applyMemoryUpdate(store, guildId, garbage, cfg, new Set(['1']));
-      assert.deepEqual(result, { users: 0, guild: false, self: false, affinity: 0, channels: 0, episodes: 0, lore: 0 });
+      assert.deepEqual(result, { users: 0, guild: false, self: false, affinity: 0, channels: 0, episodes: 0, lore: 0, interestsChanged: 0 });
     }
     assert.deepEqual(store.getGuild(guildId), before);
   });
@@ -927,7 +943,15 @@ test('applyMemoryUpdate: garbage input changes nothing and never throws', () => 
 // ---- applyMemoryUpdate: relationships -------------------------------------
 
 const RELATIONSHIPS_CFG = { enabled: true, maxDeltaPerUpdate: 15, historySize: 10, now: Date.UTC(2026, 0, 1) };
-const MEMORY_CFG = { fieldChars: 400, maxDetails: 15, maxInjokes: 15, maxSelfFacts: 20 };
+const MEMORY_CFG = {
+  fieldChars: 400,
+  maxDetails: 15,
+  maxInjokes: 15,
+  maxSelfFacts: 20,
+  maxInterests: 12,
+  interestTopicChars: 40,
+  interestNoteChars: 120,
+};
 
 test('applyMemoryUpdate: relationships enabled applies and clamps the affinity delta, counts changed scores', () => {
   withStore((store) => {
@@ -1021,7 +1045,7 @@ test('applyMemoryUpdate: a malformed affinity value is ignored, other fields sti
 
     assert.equal(result.users, 1);
     assert.equal(result.affinity, 0);
-    assert.equal(store.getUser(guildId, '1').interests, 'games');
+    assert.equal(store.getUser(guildId, '1').interests[0].topic, 'games');
   });
 });
 
@@ -1143,7 +1167,7 @@ test('buildMemoryRequest: relationships/episodes on adds episodes {date, what, q
       1: {
         names: ['nick'],
         character: '',
-        interests: '',
+        interests: [],
         style: '',
         details: [],
         relationship: '',
@@ -1169,7 +1193,7 @@ test('buildMemoryRequest: features.episodes=false never adds episodes to existin
     prompts: { memory: 'sys', labels },
     config,
     calibrator,
-    profiles: { 1: { names: ['nick'], character: '', interests: '', style: '', details: [], relationship: '', episodes: [{ date: '2026-01-01', what: 'x' }] } },
+    profiles: { 1: { names: ['nick'], character: '', interests: [], style: '', details: [], relationship: '', episodes: [{ date: '2026-01-01', what: 'x' }] } },
     guildMemory: {},
     messages,
     selfName: 'Nept',
@@ -1316,6 +1340,254 @@ test('analyze: falls back to llm.timeoutMs when memory.timeoutMs is unset', asyn
   });
 });
 
+// ---- buildMemoryRequest: existing_profiles interests shape -----------------
+
+test('buildMemoryRequest: existing_profiles interests are [{topic, note, seen, last}] ordered by weight, heaviest first', () => {
+  const config = makeConfig();
+  const calibrator = createCalibrator();
+  const messages = [slimMessage({ id: 'm1', ts: Date.UTC(2026, 0, 1, 12, 0, 0) })];
+
+  const { messages: llmMessages } = buildMemoryRequest({
+    prompts: { memory: 'sys', labels },
+    config,
+    calibrator,
+    profiles: {
+      1: {
+        names: ['nick'],
+        character: '',
+        style: '',
+        details: [],
+        relationship: '',
+        interests: [
+          { topic: 'Anime', note: 'watches shonen', weight: 2, firstSeen: 'a', lastSeen: '2026-01-05T00:00:00.000Z' },
+          { topic: 'Chess', note: '', weight: 5, firstSeen: 'a', lastSeen: null },
+        ],
+      },
+    },
+    guildMemory: {},
+    messages,
+    selfName: 'Nept',
+  });
+
+  const user = llmMessages[1].content;
+  const profiles = JSON.parse(/<existing_profiles>\n([\s\S]*?)\n<\/existing_profiles>/.exec(user)[1]);
+  assert.deepEqual(profiles['1'].interests, [
+    { topic: 'Chess', note: '', seen: 5 },
+    { topic: 'Anime', note: 'watches shonen', seen: 2, last: '2026-01-05' },
+  ]);
+});
+
+test('buildMemoryRequest: a profile with no interests yet renders an empty interests array', () => {
+  const config = makeConfig();
+  const calibrator = createCalibrator();
+  const messages = [slimMessage({ id: 'm1', ts: Date.UTC(2026, 0, 1, 12, 0, 0) })];
+
+  const { messages: llmMessages } = buildMemoryRequest({
+    prompts: { memory: 'sys', labels },
+    config,
+    calibrator,
+    profiles: { 1: { names: ['nick'], character: '', style: '', details: [], relationship: '' } },
+    guildMemory: {},
+    messages,
+    selfName: 'Nept',
+  });
+
+  const user = llmMessages[1].content;
+  const profiles = JSON.parse(/<existing_profiles>\n([\s\S]*?)\n<\/existing_profiles>/.exec(user)[1]);
+  assert.deepEqual(profiles['1'].interests, []);
+});
+
+test('buildMemoryRequest: a legacy string interests field is migrated for the existing_profiles view', () => {
+  const config = makeConfig();
+  const calibrator = createCalibrator();
+  const messages = [slimMessage({ id: 'm1', ts: Date.UTC(2026, 0, 1, 12, 0, 0) })];
+
+  const { messages: llmMessages } = buildMemoryRequest({
+    prompts: { memory: 'sys', labels },
+    config,
+    calibrator,
+    profiles: { 1: { names: ['nick'], character: '', style: '', details: [], relationship: '', interests: 'Chess (weekly club)' } },
+    guildMemory: {},
+    messages,
+    selfName: 'Nept',
+  });
+
+  const user = llmMessages[1].content;
+  const profiles = JSON.parse(/<existing_profiles>\n([\s\S]*?)\n<\/existing_profiles>/.exec(user)[1]);
+  assert.deepEqual(profiles['1'].interests, [{ topic: 'Chess', note: 'weekly club', seen: 1 }]);
+});
+
+test('buildMemoryRequest: existing_profiles details are [{id, text, seen, last}]', () => {
+  const config = makeConfig();
+  const calibrator = createCalibrator();
+  const messages = [slimMessage({ id: 'm1', ts: Date.UTC(2026, 0, 1, 12, 0, 0) })];
+
+  const { messages: llmMessages } = buildMemoryRequest({
+    prompts: { memory: 'sys', labels },
+    config,
+    calibrator,
+    profiles: {
+      1: {
+        names: ['nick'],
+        character: '',
+        style: '',
+        relationship: '',
+        interests: [],
+        details: [
+          { id: 3, text: 'Owns a cat', weight: 2, firstSeen: 'a', lastSeen: '2026-01-05T00:00:00.000Z' },
+          { id: 4, text: 'Plays guitar', weight: 1, firstSeen: 'a', lastSeen: null },
+        ],
+      },
+    },
+    guildMemory: {},
+    messages,
+    selfName: 'Nept',
+  });
+
+  const user = llmMessages[1].content;
+  const profiles = JSON.parse(/<existing_profiles>\n([\s\S]*?)\n<\/existing_profiles>/.exec(user)[1]);
+  assert.deepEqual(profiles['1'].details, [
+    { id: 3, text: 'Owns a cat', seen: 2, last: '2026-01-05' },
+    { id: 4, text: 'Plays guitar', seen: 1 },
+  ]);
+});
+
+test('buildMemoryRequest: a legacy string-array details field is migrated for the existing_profiles view', () => {
+  const config = makeConfig();
+  const calibrator = createCalibrator();
+  const messages = [slimMessage({ id: 'm1', ts: Date.UTC(2026, 0, 1, 12, 0, 0) })];
+
+  const { messages: llmMessages } = buildMemoryRequest({
+    prompts: { memory: 'sys', labels },
+    config,
+    calibrator,
+    profiles: { 1: { names: ['nick'], character: '', style: '', relationship: '', interests: [], details: ['Owns a cat'] } },
+    guildMemory: {},
+    messages,
+    selfName: 'Nept',
+  });
+
+  const user = llmMessages[1].content;
+  const profiles = JSON.parse(/<existing_profiles>\n([\s\S]*?)\n<\/existing_profiles>/.exec(user)[1]);
+  assert.deepEqual(profiles['1'].details, [{ id: 1, text: 'Owns a cat', seen: 1 }]);
+});
+
+// ---- applyMemoryUpdate: interests / details, incremental shape --------------
+
+test('applyMemoryUpdate: routes users.<id>.interests {add, update, remove} through store.applyProfileOps', () => {
+  withStore((store) => {
+    const guildId = 'g1';
+    store.touchUser(guildId, '1', 'nick', Date.now());
+
+    const update = { users: { 1: { interests: { add: [{ topic: 'Chess', note: 'plays weekly' }] } } } };
+    const result = applyMemoryUpdate(store, guildId, update, MEMORY_CFG, new Set(['1']));
+
+    assert.equal(result.users, 1);
+    assert.equal(result.interestsChanged, 1);
+    const profile = store.getUser(guildId, '1');
+    assert.equal(profile.interests.length, 1);
+    assert.equal(profile.interests[0].topic, 'Chess');
+    assert.equal(profile.interests[0].note, 'plays weekly');
+  });
+});
+
+test('applyMemoryUpdate: interestsChanged only counts users whose interests actually changed', () => {
+  withStore((store) => {
+    const guildId = 'g1';
+    store.touchUser(guildId, '1', 'nick', Date.now());
+    store.touchUser(guildId, '2', 'other', Date.now());
+
+    const update = {
+      users: {
+        1: { interests: { add: [{ topic: 'chess', note: '' }] } },
+        2: { character: 'friendly' },
+      },
+    };
+    const result = applyMemoryUpdate(store, guildId, update, MEMORY_CFG, new Set(['1', '2']));
+
+    assert.equal(result.users, 2);
+    assert.equal(result.interestsChanged, 1);
+  });
+});
+
+test('applyMemoryUpdate: a no-op interests update (garbage ops, nothing to change) does not count as changed', () => {
+  withStore((store) => {
+    const guildId = 'g1';
+    store.touchUser(guildId, '1', 'nick', Date.now());
+
+    const update = { users: { 1: { interests: { add: [{ topic: '   ' }] } } } };
+    const result = applyMemoryUpdate(store, guildId, update, MEMORY_CFG, new Set(['1']));
+
+    assert.equal(result.interestsChanged, 0);
+  });
+});
+
+test('applyMemoryUpdate: raw.interests as a legacy STRING is migrated and applied as add ops', () => {
+  withStore((store) => {
+    const guildId = 'g1';
+    store.touchUser(guildId, '1', 'nick', Date.now());
+
+    const update = { users: { 1: { interests: 'Chess (weekly club), Anime' } } };
+    const result = applyMemoryUpdate(store, guildId, update, MEMORY_CFG, new Set(['1']));
+
+    assert.equal(result.interestsChanged, 1);
+    const profile = store.getUser(guildId, '1');
+    assert.deepEqual(profile.interests.map((i) => i.topic), ['Chess', 'Anime']);
+    assert.equal(profile.interests[0].note, 'weekly club');
+  });
+});
+
+test('applyMemoryUpdate: raw.details as a legacy ARRAY is treated as {add: [...]}', () => {
+  withStore((store) => {
+    const guildId = 'g1';
+    store.touchUser(guildId, '1', 'nick', Date.now());
+
+    const result = applyMemoryUpdate(
+      store,
+      guildId,
+      { users: { 1: { details: ['owns a cat', 'plays guitar'] } } },
+      MEMORY_CFG,
+      new Set(['1']),
+    );
+
+    assert.equal(result.users, 1);
+    assert.deepEqual(store.getUser(guildId, '1').details.map((d) => d.text), ['owns a cat', 'plays guitar']);
+  });
+});
+
+test('applyMemoryUpdate: raw.details as {add, remove} is applied directly', () => {
+  withStore((store) => {
+    const guildId = 'g1';
+    store.touchUser(guildId, '1', 'nick', Date.now());
+    applyMemoryUpdate(store, guildId, { users: { 1: { details: ['old fact'] } } }, MEMORY_CFG, new Set(['1']));
+
+    const result = applyMemoryUpdate(
+      store,
+      guildId,
+      { users: { 1: { details: { add: ['new fact'], remove: ['old fact'] } } } },
+      MEMORY_CFG,
+      new Set(['1']),
+    );
+
+    assert.equal(result.users, 1);
+    assert.deepEqual(store.getUser(guildId, '1').details.map((d) => d.text), ['new fact']);
+  });
+});
+
+test('applyMemoryUpdate: an absent prose field never blanks the stored value', () => {
+  withStore((store) => {
+    const guildId = 'g1';
+    store.touchUser(guildId, '1', 'nick', Date.now());
+    applyMemoryUpdate(store, guildId, { users: { 1: { character: 'chatty', relationship: 'trusts you' } } }, MEMORY_CFG, new Set(['1']));
+
+    applyMemoryUpdate(store, guildId, { users: { 1: { character: 'still chatty' } } }, MEMORY_CFG, new Set(['1']));
+
+    const profile = store.getUser(guildId, '1');
+    assert.equal(profile.character, 'still chatty');
+    assert.equal(profile.relationship, 'trusts you');
+  });
+});
+
 // ---- observe -----------------------------------------------------------------
 
 test('observe: ignores other bots entirely', () => {
@@ -1444,13 +1716,13 @@ test('run: happy path applies the update, shifts the buffer and flushes to disk'
     await updater.run(guildId);
 
     assert.equal(store.getBuffer(guildId).length, 0);
-    assert.equal(store.getUser(guildId, '1').interests, 'anime');
+    assert.equal(store.getUser(guildId, '1').interests[0].topic, 'anime');
     assert.equal(store.getGuild(guildId).patterns, 'friendly');
     assert.equal(seenOptions.maxOutputTokens, hot.config.memory.maxOutputTokens);
     assert.equal(seenOptions.temperature, 0.3);
 
     const onDisk = JSON.parse(fs.readFileSync(path.join(dir, 'guilds', guildId, 'users', '1.json'), 'utf8'));
-    assert.equal(onDisk.interests, 'anime');
+    assert.equal(onDisk.interests[0].topic, 'anime');
   });
 });
 
@@ -1587,7 +1859,7 @@ test('analyze: never touches the buffer, returns usage/estimated/result on succe
     assert.deepEqual(outcome.usage, { prompt_tokens: 111, completion_tokens: 22 });
     assert.equal(outcome.estimated, 130);
     assert.equal(outcome.result.users, 1);
-    assert.equal(store.getUser(guildId, '1').interests, 'anime');
+    assert.equal(store.getUser(guildId, '1').interests[0].topic, 'anime');
     // The buffer, which analyze() never received, is untouched.
     assert.equal(store.getBuffer(guildId).length, 1);
   });
@@ -1885,4 +2157,142 @@ test('estimate: falls back to a content-only heuristic when the request cannot b
     const expected = estimateTokens('hello world') + estimateTokens('second one');
     assert.equal(got, expected);
   });
+});
+
+// ---- computeSeenAt -----------------------------------------------------------
+
+test('computeSeenAt: per user, the newest timestamp of THAT user\'s own messages in the batch', () => {
+  const messages = [
+    slimMessage({ id: 'm1', authorId: '1', ts: 1000 }),
+    slimMessage({ id: 'm2', authorId: '1', ts: 3000 }),
+    slimMessage({ id: 'm3', authorId: '2', ts: 2000 }),
+  ];
+  const { seenAtByUser, seenAt } = computeSeenAt(messages);
+  assert.equal(seenAtByUser.get('1'), 3000);
+  assert.equal(seenAtByUser.get('2'), 2000);
+  assert.equal(seenAt, 3000, 'the batch-wide fallback is the overall newest message');
+});
+
+test('computeSeenAt: the persona\'s own messages never contribute a per-user entry, but do count for the batch fallback', () => {
+  const messages = [
+    slimMessage({ id: 'm1', authorId: '1', ts: 1000 }),
+    slimMessage({ id: 'm2', authorId: 'self1', self: true, ts: 9000 }),
+  ];
+  const { seenAtByUser, seenAt } = computeSeenAt(messages);
+  assert.equal(seenAtByUser.has('self1'), false);
+  assert.equal(seenAt, 9000);
+});
+
+test('computeSeenAt: an empty/garbage-ts batch falls back to the wall clock', () => {
+  const before = Date.now();
+  const { seenAtByUser, seenAt } = computeSeenAt([]);
+  assert.equal(seenAtByUser.size, 0);
+  assert.ok(seenAt >= before);
+});
+
+// ---- applyMemoryUpdate: per-user seenAt (timing) -----------------------------
+
+test('applyMemoryUpdate: timing.seenAtByUser dates a user\'s interest by their own message, not the wall clock', () => {
+  withStore((store) => {
+    const guildId = 'g1';
+    store.touchUser(guildId, '1', 'nick', Date.now());
+
+    const oldTs = Date.UTC(2020, 0, 1);
+    const timing = { seenAtByUser: new Map([['1', oldTs]]), seenAt: oldTs };
+    const update = { users: { 1: { interests: { add: [{ topic: 'Chess', note: '' }] } } } };
+    const result = applyMemoryUpdate(store, guildId, update, MEMORY_CFG, new Set(['1']), new Set(), undefined, undefined, undefined, timing);
+
+    assert.equal(result.users, 1);
+    const profile = store.getUser(guildId, '1');
+    assert.equal(profile.interests[0].firstSeen, new Date(oldTs).toISOString());
+    assert.equal(profile.interests[0].lastSeen, new Date(oldTs).toISOString());
+  });
+});
+
+test('applyMemoryUpdate: without timing, seenAt falls back to relationships.now/episodes.now/the wall clock, unchanged from before', () => {
+  withStore((store) => {
+    const guildId = 'g1';
+    store.touchUser(guildId, '1', 'nick', Date.now());
+
+    const update = { users: { 1: { interests: { add: [{ topic: 'Chess', note: '' }] } } } };
+    applyMemoryUpdate(store, guildId, update, MEMORY_CFG, new Set(['1']), new Set(), RELATIONSHIPS_CFG);
+
+    const profile = store.getUser(guildId, '1');
+    assert.equal(profile.interests[0].firstSeen, new Date(RELATIONSHIPS_CFG.now).toISOString());
+  });
+});
+
+// ---- analyze: dates interests/details by the message, not the wall clock ----
+// The warm-up (src/memory/warmup.js) feeds old history through this exact
+// same analyze() path -- proving this here proves the warm-up gets old dates
+// too, without needing to script a full channel fetch.
+
+test('analyze: dates a new interest/detail by the message\'s own (old) timestamp, not the wall clock "now" (the warm-up path)', async () => {
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    const hot = { config: makeConfig({ memory: { ...makeConfig().memory, confirmGapHours: 12 } }), prompts: { memory: 'sys', labels } };
+    const calibrator = createCalibrator();
+    const llm = {
+      complete: async () => ({
+        text: JSON.stringify({
+          users: { 1: { interests: { add: [{ topic: 'Chess', note: '' }] }, details: { add: ['Owns a cat'] } } },
+        }),
+      }),
+    };
+    // The wall clock this run happens to execute at is far in the future of the history being warmed up.
+    const wallClockNow = Date.UTC(2026, 8, 21);
+    const updater = createMemoryUpdater({ hot, store, llm, calibrator, getSelfName: () => 'Nept', now: () => wallClockNow });
+
+    const oldTs = Date.UTC(2020, 0, 1, 12, 0, 0); // years-old history, as the warm-up would feed it
+    const messages = [slimMessage({ id: 'old1', authorId: '1', authorName: 'nick', content: 'i love chess', ts: oldTs })];
+
+    const outcome = await updater.analyze(guildId, messages, { countAgainstDailyCap: false });
+    assert.equal(outcome.ok, true);
+
+    const profile = store.getUser(guildId, '1');
+    assert.equal(profile.interests[0].firstSeen, new Date(oldTs).toISOString(), 'dated by the message, not wallClockNow');
+    assert.equal(profile.interests[0].lastSeen, new Date(oldTs).toISOString());
+    assert.equal(profile.details[0].firstSeen, new Date(oldTs).toISOString());
+    assert.notEqual(profile.interests[0].firstSeen, new Date(wallClockNow).toISOString());
+  });
+});
+
+// ---- buildMemoryRequest: {{interestTopicChars}} / {{interestNoteChars}} -----
+// Addendum: two more analyzer prompt placeholders, filled the same way as the
+// other memory.* limits (see memoryTemplateValues/MEMORY_LIMIT_DEFAULTS).
+
+test('buildMemoryRequest: fills {{interestTopicChars}} and {{interestNoteChars}} from config.memory', () => {
+  const config = makeConfig({ memory: { ...makeConfig().memory, interestTopicChars: 25, interestNoteChars: 90 } });
+  const calibrator = createCalibrator();
+  const messages = [slimMessage({ id: 'm1', ts: Date.UTC(2026, 0, 1, 12, 0, 0) })];
+
+  const { messages: llmMessages } = buildMemoryRequest({
+    prompts: { memory: '{{interestTopicChars}} {{interestNoteChars}}', labels },
+    config,
+    calibrator,
+    profiles: {},
+    guildMemory: {},
+    messages,
+    selfName: 'Nept',
+  });
+
+  assert.equal(llmMessages[0].content, '25 90');
+});
+
+test('buildMemoryRequest: {{interestTopicChars}}/{{interestNoteChars}} fall back to the config.json defaults (40/120) when unset', () => {
+  const config = makeConfig({ memory: {} });
+  const calibrator = createCalibrator();
+  const messages = [slimMessage({ id: 'm1', ts: Date.UTC(2026, 0, 1, 12, 0, 0) })];
+
+  const { messages: llmMessages } = buildMemoryRequest({
+    prompts: { memory: '{{interestTopicChars}} {{interestNoteChars}}', labels },
+    config,
+    calibrator,
+    profiles: {},
+    guildMemory: {},
+    messages,
+    selfName: 'Nept',
+  });
+
+  assert.equal(llmMessages[0].content, '40 120');
 });

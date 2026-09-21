@@ -97,6 +97,12 @@
     "maxSelfFacts": 20,
     "maxEpisodes": 20,
     "maxNewEpisodes": 3,
+    "maxInterests": 12,
+    "interestTopicChars": 40,
+    "interestNoteChars": 120,
+    "confirmAfter": 2,
+    "confirmGapHours": 12,
+    "interestStaleDays": 90,
     "timeoutMs": 300000
   },
   "lore": {

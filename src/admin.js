@@ -166,6 +166,11 @@ export function unsetPath(object, dottedPath) {
   return root;
 }
 
+/** `, last YYYY-MM-DD` for `/nep memory show`, or '' when `lastSeen` is unknown. */
+function lastDateSuffix(lastSeen) {
+  return typeof lastSeen === 'string' && lastSeen ? `, last ${lastSeen.slice(0, 10)}` : '';
+}
+
 function pathExists(object, dottedPath) {
   const parts = String(dottedPath).split('.').filter((part) => part.length > 0);
   let node = object;
@@ -394,6 +399,19 @@ export function createAdmin({ hot, store, client, spontaneous, calibrator, getGu
     if (!profile) throw new Error(`no profile for ${userId}`);
 
     const lines = [JSON.stringify(profile, null, 2)];
+    if (profile.interests?.length) {
+      lines.push('', 'interests:');
+      for (const it of profile.interests) {
+        const note = it.note ? `: ${it.note}` : '';
+        lines.push(`  [weight ${it.weight}${lastDateSuffix(it.lastSeen)}] ${it.topic}${note}`);
+      }
+    }
+    if (profile.details?.length) {
+      lines.push('', 'details:');
+      for (const d of profile.details) {
+        lines.push(`  #${d.id} [weight ${d.weight}${lastDateSuffix(d.lastSeen)}] ${d.text}`);
+      }
+    }
     if (profile.episodes?.length) {
       lines.push('', 'episodes:');
       for (const ep of profile.episodes) {

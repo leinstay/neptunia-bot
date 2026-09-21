@@ -21,6 +21,8 @@ import { log } from '../log.js';
 import { emptyAffinity, applyDelta } from './affinity.js';
 import { mergeEpisodes } from './episodes.js';
 import { upsertLore } from './lore.js';
+import { applyInterestOps, migrateInterests } from './interests.js';
+import { applyDetailOps, migrateDetails } from './details.js';
 
 function readJson(file, fallback) {
   try {
@@ -52,9 +54,10 @@ export function emptyProfile(id) {
     lastSeen: null,
     messageCount: 0,
     character: '',
-    interests: '',
+    interests: [],
     style: '',
     details: [],
+    detailsSeq: 1, // the next id an atomic detail item gets -- never reused, even after a remove
     relationship: '',
     affinity: emptyAffinity(),
     episodes: [],
@@ -80,6 +83,43 @@ export function emptyChannel(id) {
     lastMessageAt: null,
     updatedAt: null,
   };
+}
+
+/** Upgrade a profile's `interests` field in place: a legacy prose string
+ * becomes the atomic-item array (see src/memory/interests.js#migrateInterests);
+ * anything not already an array becomes `[]`. Never marks anything dirty --
+ * the caller (`getUser`/`applyProfileOps`) decides whether this is persisted. */
+function migrateProfileInterests(profile) {
+  if (typeof profile.interests === 'string') {
+    profile.interests = migrateInterests(profile.interests);
+  } else if (!Array.isArray(profile.interests)) {
+    profile.interests = [];
+  }
+}
+
+/** Upgrade a profile's `details` field in place: a legacy array of bare
+ * strings becomes the atomic-item array (see
+ * src/memory/details.js#migrateDetails), assigning fresh ids off the
+ * profile's own `detailsSeq` counter; anything not already an array becomes
+ * `[]`. A no-op once `details` is already item-shaped. Never marks anything
+ * dirty -- the caller (`getUser`/`applyProfileOps`) decides whether this is
+ * persisted. */
+function migrateProfileDetails(profile) {
+  if (!Number.isInteger(profile.detailsSeq) || profile.detailsSeq < 1) profile.detailsSeq = 1;
+  if (!Array.isArray(profile.details)) {
+    profile.details = [];
+    return;
+  }
+  if (profile.details.some((d) => typeof d === 'string')) {
+    const { items, nextId } = migrateDetails(profile.details, profile.detailsSeq);
+    profile.details = items;
+    profile.detailsSeq = nextId;
+  }
+}
+
+function clampString(value, maxChars) {
+  const cap = Number.isInteger(maxChars) ? maxChars : Infinity;
+  return String(value ?? '').trim().slice(0, cap);
 }
 
 /** Keep only the newest `max` UTC-date keys of a `days` counter map. */
@@ -151,11 +191,22 @@ export function createStore({ dataDir }) {
       },
     },
 
-    /** Profile of a member, or null when the persona has never seen them. */
+    /**
+     * Profile of a member, or null when the persona has never seen them. A
+     * legacy profile whose `interests` is still the old prose string, or
+     * whose `details` is still a bare array of strings, is migrated to the
+     * atomic-item array in memory here (see
+     * src/memory/interests.js#migrateInterests and
+     * src/memory/details.js#migrateDetails) -- persisted the next time
+     * anything writes this profile, never wiped implicitly.
+     */
     getUser(guildId, userId) {
       const file = userFile(guildId, userId);
       if (!entries.has(file) && !fs.existsSync(file)) return null;
-      return entry(file, () => emptyProfile(String(userId))).value;
+      const item = entry(file, () => emptyProfile(String(userId)));
+      migrateProfileInterests(item.value);
+      migrateProfileDetails(item.value);
+      return item.value;
     },
 
     /** Record that a member spoke: names, counters, timestamps. Creates the profile. */
@@ -176,14 +227,83 @@ export function createStore({ dataDir }) {
      * from here — it only ever changes through `adjustAffinity`, which keeps
      * its clamping and history bookkeeping in one place. `episodes` likewise
      * only ever changes through `addEpisodes` (src/memory/episodes.js), which
-     * appends and evicts instead of overwriting.
+     * appends and evicts instead of overwriting. `interests`/`details`
+     * likewise only ever change through `applyProfileOps` below, which merges
+     * incrementally instead of overwriting wholesale.
      */
     updateUser(guildId, userId, fields) {
       const item = entry(userFile(guildId, userId), () => emptyProfile(String(userId)));
-      const { affinity, episodes, ...safeFields } = fields ?? {};
+      const { affinity, episodes, interests, details, detailsSeq, ...safeFields } = fields ?? {};
       Object.assign(item.value, safeFields, { updatedAt: new Date().toISOString() });
       item.dirty = true;
       return item.value;
+    },
+
+    /**
+     * Apply one analyzer batch's INCREMENTAL profile update (see
+     * .claude/docs/prompt-contract.md, "The analyzer"): `character`/`style`/
+     * `relationship` replace the stored text only when given as a non-empty
+     * string, clamped to `opts.fieldChars` -- an absent or empty field never
+     * blanks what is already stored. `ops.interests` (`{ add, update, seen,
+     * remove }`) merges via src/memory/interests.js#applyInterestOps;
+     * `ops.details` (`{ add, seen, remove }`) merges via
+     * src/memory/details.js#applyDetailOps, which also advances the
+     * profile's own `detailsSeq` id counter. `opts.seenAt` is the time of the
+     * PERSON'S message that produced this sighting (falls back to `opts.now`,
+     * then the wall clock) -- see the two modules' header comments for the
+     * confirmation/date rules `opts.confirmGapHours` feeds. A legacy profile
+     * whose `interests`/`details` is still the old shape is migrated first.
+     * Tolerates garbage `ops`, never throws.
+     * @param {string} guildId
+     * @param {string} userId
+     * @param {{ character?: string, style?: string, relationship?: string,
+     *   interests?: { add?: object[], update?: object[], seen?: string[], remove?: string[] },
+     *   details?: { add?: unknown[], seen?: unknown[], remove?: unknown[] } }} ops
+     * @param {{ fieldChars?: number, maxInterests?: number, topicChars?: number,
+     *   noteChars?: number, maxDetails?: number, confirmGapHours?: number,
+     *   seenAt?: number, now?: number }} [opts]
+     * @returns {object} The updated profile.
+     */
+    applyProfileOps(guildId, userId, ops, opts = {}) {
+      const item = entry(userFile(guildId, userId), () => emptyProfile(String(userId)));
+      const profile = item.value;
+      migrateProfileInterests(profile);
+      migrateProfileDetails(profile);
+
+      const seenAt = Number.isFinite(opts.seenAt) ? opts.seenAt : Number.isFinite(opts.now) ? opts.now : Date.now();
+
+      for (const key of ['character', 'style', 'relationship']) {
+        const value = ops?.[key];
+        if (typeof value === 'string' && value.trim()) {
+          profile[key] = clampString(value, opts.fieldChars);
+        }
+      }
+
+      if (ops?.interests && typeof ops.interests === 'object' && !Array.isArray(ops.interests)) {
+        profile.interests = applyInterestOps(profile.interests, ops.interests, {
+          maxInterests: opts.maxInterests,
+          topicChars: opts.topicChars,
+          noteChars: opts.noteChars,
+          confirmGapHours: opts.confirmGapHours,
+          seenAt,
+        });
+      }
+
+      if (ops?.details && typeof ops.details === 'object' && !Array.isArray(ops.details)) {
+        const { items, nextId } = applyDetailOps(profile.details, ops.details, {
+          maxDetails: opts.maxDetails,
+          fieldChars: opts.fieldChars,
+          confirmGapHours: opts.confirmGapHours,
+          seenAt,
+          nextId: profile.detailsSeq,
+        });
+        profile.details = items;
+        profile.detailsSeq = nextId;
+      }
+
+      profile.updatedAt = new Date(opts.now ?? Date.now()).toISOString();
+      item.dirty = true;
+      return profile;
     },
 
     /**

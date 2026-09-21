@@ -15,6 +15,8 @@ import { isDescribable, stickerUrl } from '../discord/media.js';
 import { log } from '../log.js';
 import { emptyAffinity } from './affinity.js';
 import { keywordMatches } from './lore.js';
+import { migrateInterests } from './interests.js';
+import { migrateDetails } from './details.js';
 
 const BACKOFF_MS = 15 * 60_000;
 const MIN_LIVE_BATCH = 20; // the live analyzer never shrinks below this many messages
@@ -29,6 +31,9 @@ const MEMORY_LIMIT_DEFAULTS = {
   maxNewEpisodes: 3,
   maxEpisodes: 20,
   maxDeltaPerUpdate: 15,
+  maxInterests: 12,
+  interestTopicChars: 40,
+  interestNoteChars: 120,
 };
 
 /** `error?.message`, trimmed to 200 chars — never message contents. */
@@ -102,6 +107,9 @@ function memoryTemplateValues(config, selfName) {
     maxNewEpisodes: memoryCfg.maxNewEpisodes ?? MEMORY_LIMIT_DEFAULTS.maxNewEpisodes,
     maxEpisodes: memoryCfg.maxEpisodes ?? MEMORY_LIMIT_DEFAULTS.maxEpisodes,
     maxDeltaPerUpdate: config.relationships?.maxDeltaPerUpdate ?? MEMORY_LIMIT_DEFAULTS.maxDeltaPerUpdate,
+    maxInterests: memoryCfg.maxInterests ?? MEMORY_LIMIT_DEFAULTS.maxInterests,
+    interestTopicChars: memoryCfg.interestTopicChars ?? MEMORY_LIMIT_DEFAULTS.interestTopicChars,
+    interestNoteChars: memoryCfg.interestNoteChars ?? MEMORY_LIMIT_DEFAULTS.interestNoteChars,
   };
 }
 
@@ -114,10 +122,48 @@ function requireLabels(prompts) {
   return labels;
 }
 
-/** Only the fields the memory prompt is allowed to see/update for a user profile. */
+/** Only the fields the memory prompt is allowed to see/update for a user profile.
+ * `interests`/`details` are upgraded via migrateInterests/migrateDetails when
+ * the profile still carries the old shape (defensive; store.getUser already
+ * migrates on read). */
 function pickProfileFields(profile) {
-  const { names = [], character = '', interests = '', style = '', details = [], relationship = '' } = profile ?? {};
+  const { names = [], character = '', style = '', relationship = '' } = profile ?? {};
+  const interests = Array.isArray(profile?.interests) ? profile.interests : migrateInterests(profile?.interests);
+  const detailsRaw = profile?.details;
+  const details =
+    Array.isArray(detailsRaw) && detailsRaw.every((d) => d && typeof d === 'object')
+      ? detailsRaw
+      : migrateDetails(detailsRaw).items;
   return { names, character, interests, style, details, relationship };
+}
+
+/** `YYYY-MM-DD` of an ISO timestamp, or `undefined` (so JSON.stringify omits
+ * the key entirely) when the date is unknown -- see
+ * .claude/docs/prompt-contract.md, "The input view of a stored item". */
+function dateOnly(iso) {
+  return typeof iso === 'string' && iso ? iso.slice(0, 10) : undefined;
+}
+
+/** The `<existing_profiles>` view of one person's interests: `{ topic, note,
+ * seen, last }` (`seen` = weight, `last` = the date-only lastSeen, omitted
+ * when unknown), heaviest weight first -- see
+ * .claude/docs/prompt-contract.md, "The analyzer". */
+function existingInterestsView(interests) {
+  return [...(Array.isArray(interests) ? interests : [])]
+    .sort((a, b) => (b.weight ?? 0) - (a.weight ?? 0))
+    .map(({ topic, note, weight, lastSeen }) => ({ topic, note, seen: weight, last: dateOnly(lastSeen) }));
+}
+
+/** The `<existing_profiles>` view of one person's details: `{ id, text, seen,
+ * last }` (`seen` = weight, `last` = the date-only lastSeen, omitted when
+ * unknown) -- see .claude/docs/prompt-contract.md, "The analyzer". */
+function existingDetailsView(details) {
+  return (Array.isArray(details) ? details : []).map(({ id, text, weight, lastSeen }) => ({
+    id,
+    text,
+    seen: weight,
+    last: dateOnly(lastSeen),
+  }));
 }
 
 /** Only the fields the memory prompt is allowed to see/update for guild memory. */
@@ -184,6 +230,8 @@ export function buildMemoryRequest({ prompts, config, calibrator, profiles, guil
   const existingProfiles = {};
   for (const [id, profile] of Object.entries(profiles ?? {})) {
     const fields = pickProfileFields(profile);
+    fields.interests = existingInterestsView(fields.interests);
+    fields.details = existingDetailsView(fields.details);
     if (relationships) {
       const affinity = profile?.affinity ?? emptyAffinity();
       fields.affinity = { score: affinity.score, reason: affinity.reason };
@@ -260,6 +308,34 @@ function clampStringArray(value, maxChars, maxItems) {
 }
 
 /**
+ * Per-user sighting time for one analyzer batch, for dating `interests`/
+ * `details` by the MESSAGE, not the wall clock the analyzer happens to run
+ * at (see .claude/docs/prompt-contract.md, "Dates come from the messages").
+ * `seenAtByUser` holds, for each non-self author, the timestamp of THAT
+ * user's newest message in the batch; `seenAt` is the batch's own newest
+ * message overall, the fallback used when a particular user is somehow
+ * missing from the map. Shared by the live analyzer and the warm-up, which
+ * feeds old history through the exact same `analyze()` path -- so an
+ * old-history batch dates its sightings with the old timestamps, not
+ * whenever the warm-up happened to process it.
+ * @param {object[]} messages  Slim buffered messages (any order); `ts`/`authorId`/`self` read.
+ * @returns {{ seenAtByUser: Map<string, number>, seenAt: number }}
+ */
+export function computeSeenAt(messages) {
+  const seenAtByUser = new Map();
+  let batchNewest = 0;
+  for (const m of messages ?? []) {
+    if (!Number.isFinite(m?.ts)) continue;
+    batchNewest = Math.max(batchNewest, m.ts);
+    if (m.self) continue; // the persona's own line is never a profile
+    const id = String(m.authorId);
+    const current = seenAtByUser.get(id);
+    if (current === undefined || m.ts > current) seenAtByUser.set(id, m.ts);
+  }
+  return { seenAtByUser, seenAt: batchNewest || Date.now() };
+}
+
+/**
  * Validate and store the model's memory-update JSON. Never throws on garbage
  * input, never accepts a user id outside `knownUserIds`, never drops a field
  * that was not part of the update.
@@ -280,10 +356,13 @@ function clampStringArray(value, maxChars, maxItems) {
  * @param {{ enabled: boolean, maxEntries: number, now?: number }} [lore]
  *   Only when `enabled`, `update.lore` (the server's lorebook) is folded in via `store.setLore`
  *   (src/memory/lore.js#upsertLore, source: 'analyzer'). Absent/disabled -> ignored entirely.
- * @returns {{ users: number, guild: boolean, self: boolean, affinity: number, channels: number, episodes: number, lore: number }}
+ * @param {{ seenAtByUser?: Map<string, number>, seenAt?: number }} [timing]  From `computeSeenAt`
+ *   above; missing/absent falls back to `relationships.now`/`episodes.now`/the wall clock, same
+ *   as before this option existed.
+ * @returns {{ users: number, guild: boolean, self: boolean, affinity: number, channels: number, episodes: number, lore: number, interestsChanged: number }}
  */
-export function applyMemoryUpdate(store, guildId, update, cfg, knownUserIds, knownChannelIds = new Set(), relationships, episodes, lore) {
-  const result = { users: 0, guild: false, self: false, affinity: 0, channels: 0, episodes: 0, lore: 0 };
+export function applyMemoryUpdate(store, guildId, update, cfg, knownUserIds, knownChannelIds = new Set(), relationships, episodes, lore, timing) {
+  const result = { users: 0, guild: false, self: false, affinity: 0, channels: 0, episodes: 0, lore: 0, interestsChanged: 0 };
   if (!update || typeof update !== 'object' || Array.isArray(update)) return result;
 
   if (update.users && typeof update.users === 'object' && !Array.isArray(update.users)) {
@@ -291,16 +370,47 @@ export function applyMemoryUpdate(store, guildId, update, cfg, knownUserIds, kno
       if (!knownUserIds.has(String(userId))) continue;
       if (!raw || typeof raw !== 'object' || Array.isArray(raw)) continue;
 
-      const fields = {};
-      for (const key of ['character', 'interests', 'style', 'relationship']) {
-        if (typeof raw[key] === 'string') fields[key] = clampString(raw[key], cfg.fieldChars);
-      }
-      if (Array.isArray(raw.details)) {
-        fields.details = clampStringArray(raw.details, 200, cfg.maxDetails);
+      // Incremental profile ops (see .claude/docs/prompt-contract.md, "The
+      // analyzer"): prose fields pass through as-is, store.applyProfileOps
+      // decides whether they are non-empty and clamps them. `interests`/
+      // `details` are ops objects; one release of backward tolerance accepts
+      // the OLD shapes too (a string interests blob, an array of details).
+      const ops = {};
+      for (const key of ['character', 'style', 'relationship']) {
+        if (typeof raw[key] === 'string') ops[key] = raw[key];
       }
 
-      store.updateUser(guildId, userId, fields);
+      if (typeof raw.interests === 'string') {
+        const migrated = migrateInterests(raw.interests);
+        if (migrated.length > 0) ops.interests = { add: migrated.map(({ topic, note }) => ({ topic, note })) };
+      } else if (raw.interests && typeof raw.interests === 'object' && !Array.isArray(raw.interests)) {
+        ops.interests = raw.interests;
+      }
+
+      if (Array.isArray(raw.details)) {
+        ops.details = { add: raw.details };
+      } else if (raw.details && typeof raw.details === 'object' && !Array.isArray(raw.details)) {
+        ops.details = raw.details;
+      }
+
+      const profileOpsNow = relationships?.now ?? episodes?.now ?? Date.now();
+      const seenAt = timing?.seenAtByUser?.get(String(userId)) ?? timing?.seenAt ?? profileOpsNow;
+      const beforeInterests = JSON.stringify(store.getUser(guildId, userId)?.interests ?? []);
+
+      store.applyProfileOps(guildId, userId, ops, {
+        fieldChars: cfg.fieldChars,
+        maxInterests: cfg.maxInterests,
+        topicChars: cfg.interestTopicChars,
+        noteChars: cfg.interestNoteChars,
+        maxDetails: cfg.maxDetails,
+        confirmGapHours: cfg.confirmGapHours,
+        now: profileOpsNow,
+        seenAt,
+      });
       result.users += 1;
+
+      const afterInterests = JSON.stringify(store.getUser(guildId, userId)?.interests ?? []);
+      if (afterInterests !== beforeInterests) result.interestsChanged += 1;
 
       if (relationships?.enabled && raw.affinity && typeof raw.affinity === 'object' && !Array.isArray(raw.affinity)) {
         const before = store.getUser(guildId, userId)?.affinity?.score ?? 0;
@@ -592,7 +702,8 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
       const lore = loreOn
         ? { enabled: true, maxEntries: hot.config.lore?.maxEntries ?? Infinity, now: now() }
         : undefined;
-      const result = applyMemoryUpdate(store, guildId, update, cfg, knownUserIds, knownChannelIds, relationships, episodes, lore);
+      const timing = computeSeenAt(messages);
+      const result = applyMemoryUpdate(store, guildId, update, cfg, knownUserIds, knownChannelIds, relationships, episodes, lore, timing);
 
       return { ok: true, usage: completion.usage ?? null, estimated: completion.estimated ?? 0, result };
     } catch (err) {

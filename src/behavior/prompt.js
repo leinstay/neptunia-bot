@@ -15,6 +15,7 @@ import { fitSections } from '../llm/budget.js';
 import { estimateTokens } from '../llm/tokens.js';
 import { computeTempo, fill, formatNow, formatTranscript, renderTempo, renderTranscript } from '../discord/format.js';
 import { affinityBand } from '../memory/affinity.js';
+import { isConfirmed, isStale } from '../memory/interests.js';
 import { sortEpisodesForDisplay } from '../memory/episodes.js';
 import { matchLore } from '../memory/lore.js';
 import { channelActivity, renderChannel } from '../memory/channels.js';
@@ -66,6 +67,92 @@ function fitEpisodeLines(lines, remaining, cost) {
 }
 
 /**
+ * Append `labels.profile.unsureMark`/`staleMark` to `text` per
+ * .claude/docs/prompt-contract.md, "Confirmation"/"Dates come from the
+ * messages": the unsure mark when `item` is below `marks.confirmAfter`, then
+ * the stale mark when `item` is older than `marks.staleDays` (skipped
+ * entirely for `marks.stale === false`, since details never go stale). Both
+ * marks are OPT IN: `marks.confirmAfter`/`marks.staleDays` being anything
+ * other than a plain number (i.e. omitted -- the direct-call/older-caller
+ * case) never marks anything, so a caller that does not know about this
+ * feature renders exactly as before. A missing label appends nothing.
+ * @param {string} text
+ * @param {{ weight?: number, lastSeen?: string|null }} item
+ * @param {object} p  `labels.profile`.
+ * @param {{ confirmAfter?: number, staleDays?: number, now?: number, stale?: boolean }} [marks]
+ */
+function markConfirmation(text, item, p, marks) {
+  let out = text;
+  if (typeof marks?.confirmAfter === 'number' && !isConfirmed(item, marks.confirmAfter) && p.unsureMark) {
+    out += p.unsureMark;
+  }
+  if (marks?.stale !== false && typeof marks?.staleDays === 'number' && isStale(item, marks.now ?? Date.now(), marks.staleDays) && p.staleMark) {
+    out += p.staleMark;
+  }
+  return out;
+}
+
+/**
+ * One remembered interest as prompt text: `labels.profile.interestItem`
+ * (`{topic}`/`{note}`) when the note is non-empty and the label exists,
+ * `interestItemNoNote` (`{topic}`) when there is no note and that label
+ * exists; otherwise the built-in `topic (note)` / bare `topic` form -- so an
+ * older labels.json without these optional keys never breaks. Then
+ * `markConfirmation` appends the unsure/stale marks, see above.
+ */
+function renderInterestItem(item, p, marks) {
+  const text = item.note
+    ? p.interestItem
+      ? fill(p.interestItem, { topic: item.topic, note: item.note })
+      : `${item.topic} (${item.note})`
+    : p.interestItemNoNote
+      ? fill(p.interestItemNoNote, { topic: item.topic })
+      : item.topic;
+  return markConfirmation(text, item, p, marks);
+}
+
+/**
+ * The `labels.profile.interests` line's `{text}`: every stored interest
+ * (topic/note atomic items, see src/memory/interests.js), sorted FRESH first
+ * (see `isStale`) then by weight descending, capped at `maxInterests` (the
+ * live `memory.maxInterests`, since a stored profile can briefly hold more
+ * than a lowered live cap until the next analyzer update evicts). `''` when
+ * there is nothing to show. `marks` (see `markConfirmation`) controls the
+ * unsure/stale marks; without `marks.staleDays` every item sorts as fresh
+ * (weight descending only), matching the behaviour before this feature.
+ */
+function interestsText(interests, labels, maxInterests, marks) {
+  if (!Array.isArray(interests) || interests.length === 0) return '';
+  const cap = Number.isInteger(maxInterests) ? maxInterests : Infinity;
+  const nowMs = marks?.now ?? Date.now();
+  const staleDays = marks?.staleDays;
+  const ordered = [...interests]
+    .sort((a, b) => {
+      const staleDiff = (isStale(a, nowMs, staleDays) ? 1 : 0) - (isStale(b, nowMs, staleDays) ? 1 : 0);
+      return staleDiff || (b.weight ?? 0) - (a.weight ?? 0);
+    })
+    .slice(0, cap);
+  return ordered.map((item) => renderInterestItem(item, labels.profile, marks)).join('; ');
+}
+
+/**
+ * The `labels.profile.details` line's `{text}`: every stored detail item
+ * (`{ id, text, weight, firstSeen, lastSeen }`, see src/memory/details.js) in
+ * stored order, each with the unsure mark appended when unconfirmed -- never
+ * the stale mark, details do not go stale (see
+ * .claude/docs/prompt-contract.md, "Dates come from the messages"). `''` when
+ * there is nothing to show. A legacy bare-string item (should not occur past
+ * store.getUser's migration, kept defensive) renders as-is, never marked.
+ */
+function detailsText(details, labels, marks) {
+  if (!Array.isArray(details) || details.length === 0) return '';
+  const p = labels.profile;
+  return details
+    .map((item) => (item && typeof item === 'object' ? markConfirmation(item.text ?? '', item, p, { ...marks, stale: false }) : String(item ?? '')))
+    .join('; ');
+}
+
+/**
  * One person's memory as prompt text; '' when nothing has been learned yet.
  * When `relationships` is on and the profile carries a non-neutral (non-zero
  * score or non-empty reason) affinity, an attitude line is inserted right
@@ -78,12 +165,18 @@ function fitEpisodeLines(lines, remaining, cost) {
  * .claude/docs/prompt-contract.md, "<people>". `opts.episodes.cap`/`.cost`
  * (when given) trim the episode list, heaviest-first, to fit that token
  * budget on top of the rest of the profile; without them every episode
- * renders.
+ * renders. `opts.maxInterests` caps how many interests render (see
+ * `interestsText` above); omitted -> every stored interest renders.
+ * `opts.confirmAfter`/`opts.staleDays`/`opts.now` (from `memory.confirmAfter`/
+ * `memory.interestStaleDays`, read by the caller at the moment of use, and
+ * the injectable clock) drive the unsure/stale marks on interests and details
+ * -- see `markConfirmation`; omitted, nothing is ever marked.
  */
-export function renderProfile(profile, labels, { interlocutor = false, relationships = false, episodes } = {}) {
+export function renderProfile(profile, labels, { interlocutor = false, relationships = false, episodes, maxInterests, confirmAfter, staleDays, now } = {}) {
   if (!profile) return '';
   const p = labels.profile;
   const name = profile.names?.[0] ?? profile.id;
+  const marks = { confirmAfter, staleDays, now };
 
   const attitudeLines = [];
   const affinity = profile.affinity;
@@ -97,9 +190,11 @@ export function renderProfile(profile, labels, { interlocutor = false, relations
   const restLines = [];
   if (profile.names?.length > 1) restLines.push(fill(p.formerNames, { names: profile.names.slice(1).join(', ') }));
   if (profile.character) restLines.push(fill(p.character, { text: profile.character }));
-  if (profile.interests) restLines.push(fill(p.interests, { text: profile.interests }));
+  const interestsLine = interestsText(profile.interests, labels, maxInterests, marks);
+  if (interestsLine) restLines.push(fill(p.interests, { text: interestsLine }));
   if (profile.style) restLines.push(fill(p.style, { text: profile.style }));
-  if (profile.details?.length) restLines.push(fill(p.details, { text: profile.details.join('; ') }));
+  const detailsLine = detailsText(profile.details, labels, marks);
+  if (detailsLine) restLines.push(fill(p.details, { text: detailsLine }));
   if (profile.relationship) restLines.push(fill(p.relationship, { text: profile.relationship }));
   const hasContent = attitudeLines.length > 0 || restLines.length > 0;
   if (!hasContent && !interlocutor) return '';
@@ -321,7 +416,17 @@ export function buildRequest(input) {
       {
         name: 'interlocutor',
         cap: caps.interlocutor,
-        items: [renderProfile(input.interlocutor, labels, { interlocutor: true, relationships, episodes: episodesOpt })].filter(Boolean),
+        items: [
+          renderProfile(input.interlocutor, labels, {
+            interlocutor: true,
+            relationships,
+            episodes: episodesOpt,
+            maxInterests: config.memory?.maxInterests,
+            confirmAfter: config.memory?.confirmAfter,
+            staleDays: config.memory?.interestStaleDays,
+            now,
+          }),
+        ].filter(Boolean),
       },
       { name: 'aboutChat', cap: caps.aboutChat, items: aboutChatItems(input.guildMemory, labels) },
       { name: 'self', cap: caps.aboutChat, items: (input.guildMemory?.self ?? []).map((fact) => `- ${fact}`) },
@@ -341,7 +446,17 @@ export function buildRequest(input) {
       {
         name: 'people',
         cap: caps.people,
-        items: input.otherProfiles.map((profile) => renderProfile(profile, labels, { relationships })).filter(Boolean),
+        items: input.otherProfiles
+          .map((profile) =>
+            renderProfile(profile, labels, {
+              relationships,
+              maxInterests: config.memory?.maxInterests,
+              confirmAfter: config.memory?.confirmAfter,
+              staleDays: config.memory?.interestStaleDays,
+              now,
+            }),
+          )
+          .filter(Boolean),
       },
       { name: 'neighbors', cap: caps.neighbors, items: neighborItems },
     ],

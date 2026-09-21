@@ -223,6 +223,12 @@ Settings for the media describer (`features.mediaDescriptions`).
 | `maxOutputTokens` | `8000` | Max analyzer output tokens |
 | `fieldChars` | `400` | Profile field limit (chars) |
 | `maxDetails` | `15` | Max detail items per profile |
+| `maxInterests` | `12` | Max interest items per profile |
+| `interestTopicChars` | `40` | Max chars for an interest topic |
+| `interestNoteChars` | `120` | Max chars for an interest note |
+| `confirmAfter` | `2` | Sightings before an interest or detail is confirmed |
+| `confirmGapHours` | `12` | Hours between sightings to count as a new occasion |
+| `interestStaleDays` | `90` | Days without sighting before an interest is marked old |
 | `maxInjokes` | `15` | Max server in-jokes |
 | `maxSelfFacts` | `20` | Max self-claims |
 | `maxEpisodes` | `20` | Max episodes kept per person |
@@ -342,7 +348,7 @@ The turn collects the channel transcript and neighbouring channels, then builds 
 
 The model responds with `<think>` (hidden planning), `<msg>` (1–3 chat messages; `reply="#87"` replies to a transcript line), `<react>` (one emoji reaction), or `<skip/>` (silence). After parsing, typing is simulated at human speed and `@nick` in the output becomes a real mention.
 
-The memory analyzer runs as a separate LLM call when enough messages accumulate. It receives the character card and judges each person through the character's eyes, returning small attitude deltas, updated profiles, channel observations, and server-level notes.
+The memory analyzer runs as a separate LLM call when enough messages accumulate. It receives the character card and judges each person through the character's eyes, returning attitude deltas, profile changes, channel observations, and server-level notes. Profiles are updated incrementally: the analyzer returns only what changed, and stored facts are never re-summarised. Interests and details are separate items that become confirmed when they come up again on a separate occasion; dates come from the messages, so a warm-up over old history dates things correctly. Interests not seen for a long time are shown to the persona as old.
 
 ## Episodes and lorebook
 

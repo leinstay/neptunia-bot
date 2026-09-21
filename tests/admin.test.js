@@ -696,6 +696,62 @@ test('run: memory.show without stored episodes prints no episodes section', asyn
   assert.ok(!result.includes('episodes:'));
 });
 
+test('run: memory.show also prints interests one per line with weight and last-seen date', async () => {
+  const rootDir = makeRoot();
+  const { admin, store } = makeAdmin(rootDir);
+  store.profiles.set('g1:123', {
+    id: '123',
+    interests: [
+      { topic: 'Chess', note: 'plays weekly', weight: 3, firstSeen: 'a', lastSeen: '2026-01-05T00:00:00.000Z' },
+      { topic: 'Anime', note: '', weight: 1, firstSeen: 'a', lastSeen: null },
+    ],
+  });
+
+  const result = await admin.run('memory.show', { userId: '123' }, { guildId: 'g1' });
+
+  assert.ok(result.includes('interests:'));
+  assert.ok(result.includes('[weight 3, last 2026-01-05] Chess: plays weekly'));
+  assert.ok(result.includes('[weight 1] Anime'), 'a null lastSeen omits the last-date suffix');
+});
+
+test('run: memory.show without stored interests prints no interests section', async () => {
+  const rootDir = makeRoot();
+  const { admin, store } = makeAdmin(rootDir);
+  store.profiles.set('g1:123', { id: '123', character: 'chatty', interests: [] });
+
+  const result = await admin.run('memory.show', { userId: '123' }, { guildId: 'g1' });
+
+  assert.ok(!result.includes('interests:'));
+});
+
+test('run: memory.show also prints details one per line with id, weight and last-seen date', async () => {
+  const rootDir = makeRoot();
+  const { admin, store } = makeAdmin(rootDir);
+  store.profiles.set('g1:123', {
+    id: '123',
+    details: [
+      { id: 3, text: 'Owns a cat', weight: 2, firstSeen: 'a', lastSeen: '2026-01-05T00:00:00.000Z' },
+      { id: 4, text: 'Plays guitar', weight: 1, firstSeen: 'a', lastSeen: null },
+    ],
+  });
+
+  const result = await admin.run('memory.show', { userId: '123' }, { guildId: 'g1' });
+
+  assert.ok(result.includes('details:'));
+  assert.ok(result.includes('#3 [weight 2, last 2026-01-05] Owns a cat'));
+  assert.ok(result.includes('#4 [weight 1] Plays guitar'));
+});
+
+test('run: memory.show without stored details prints no details section', async () => {
+  const rootDir = makeRoot();
+  const { admin, store } = makeAdmin(rootDir);
+  store.profiles.set('g1:123', { id: '123', character: 'chatty', details: [] });
+
+  const result = await admin.run('memory.show', { userId: '123' }, { guildId: 'g1' });
+
+  assert.ok(!result.includes('details:'));
+});
+
 // ---------------------------------------------------------------------------
 // lore: add / list / show / remove
 // ---------------------------------------------------------------------------

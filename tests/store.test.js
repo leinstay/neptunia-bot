@@ -78,10 +78,36 @@ test('updateUser: merges fields and stamps updatedAt', () => {
   const dir = tmpDataDir();
   const store = createStore({ dataDir: dir });
   store.touchUser('g1', 'u1', 'Alice', 1000);
-  const profile = store.updateUser('g1', 'u1', { character: 'τολμηρή', interests: 'παιχνίδια' });
+  const profile = store.updateUser('g1', 'u1', { character: 'τολμηρή', style: 'παιχνίδια' });
   assert.equal(profile.character, 'τολμηρή');
-  assert.equal(profile.interests, 'παιχνίδια');
+  assert.equal(profile.style, 'παιχνίδια');
   assert.ok(profile.updatedAt);
+});
+
+test('updateUser: cannot set interests or details via raw LLM fields', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  store.touchUser('g1', 'u1', 'Alice', 1000);
+  store.applyProfileOps('g1', 'u1', { interests: { add: [{ topic: 'chess', note: '' }] }, details: { add: ['likes tea'] } }, {
+    maxInterests: 12,
+    topicChars: 40,
+    noteChars: 120,
+    maxDetails: 15,
+    now: 1000,
+  });
+
+  store.updateUser('g1', 'u1', {
+    character: 'chatty',
+    interests: [{ topic: 'sneaky', note: '', weight: 99, firstSeen: 'x', lastSeen: 'x' }],
+    details: ['sneaky overwrite'],
+  });
+
+  const profile = store.getUser('g1', 'u1');
+  assert.equal(profile.character, 'chatty');
+  assert.equal(profile.interests.length, 1);
+  assert.equal(profile.interests[0].topic, 'chess');
+  assert.equal(profile.details.length, 1);
+  assert.equal(profile.details[0].text, 'likes tea');
 });
 
 test('updateUser: creates the profile if it did not already exist', () => {
@@ -540,6 +566,203 @@ test('updateUser: never overwrites episodes even if the field is present in fiel
   assert.equal(profile.character, 'nice');
   assert.equal(profile.episodes.length, 1);
   assert.equal(profile.episodes[0].what, 'a real episode');
+});
+
+// --- interests / details (applyProfileOps) ----------------------------------
+
+test('emptyProfile: a fresh profile starts with no interests', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  const profile = store.touchUser('g1', 'u1', 'Alice', 1000);
+  assert.deepEqual(profile.interests, []);
+});
+
+test('getUser: migrates a legacy prose interests string to atomic items, in memory', () => {
+  const dir = tmpDataDir();
+  const guildDir = path.join(dir, 'guilds', 'g1', 'users');
+  fs.mkdirSync(guildDir, { recursive: true });
+  fs.writeFileSync(path.join(guildDir, 'u1.json'), JSON.stringify({ id: 'u1', names: ['Alice'], interests: 'Chess (weekly club), Anime' }));
+
+  const store = createStore({ dataDir: dir });
+  const profile = store.getUser('g1', 'u1');
+  assert.deepEqual(profile.interests.map((i) => i.topic), ['Chess', 'Anime']);
+  assert.equal(profile.interests[0].note, 'weekly club');
+});
+
+test('getUser: migrates a legacy array-of-strings details field to atomic items, assigning fresh ids', () => {
+  const dir = tmpDataDir();
+  const guildDir = path.join(dir, 'guilds', 'g1', 'users');
+  fs.mkdirSync(guildDir, { recursive: true });
+  fs.writeFileSync(path.join(guildDir, 'u1.json'), JSON.stringify({ id: 'u1', names: ['Alice'], details: ['Owns a cat', 'Plays guitar'] }));
+
+  const store = createStore({ dataDir: dir });
+  const profile = store.getUser('g1', 'u1');
+  assert.deepEqual(profile.details, [
+    { id: 1, text: 'Owns a cat', weight: 1, firstSeen: null, lastSeen: null },
+    { id: 2, text: 'Plays guitar', weight: 1, firstSeen: null, lastSeen: null },
+  ]);
+  assert.equal(profile.detailsSeq, 3);
+});
+
+test('applyProfileOps: a fresh detail is assigned a per-profile id that keeps incrementing across calls', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  store.touchUser('g1', 'u1', 'Alice', 1000);
+  store.applyProfileOps('g1', 'u1', { details: { add: ['Owns a cat'] } }, { maxDetails: 15, now: 1000 });
+  const profile = store.applyProfileOps('g1', 'u1', { details: { add: ['Plays guitar'] } }, { maxDetails: 15, now: 2000 });
+  assert.deepEqual(profile.details.map((d) => d.id), [1, 2]);
+});
+
+test('applyProfileOps: a detail id is never reused after a remove', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  store.touchUser('g1', 'u1', 'Alice', 1000);
+  store.applyProfileOps('g1', 'u1', { details: { add: ['a', 'b'] } }, { maxDetails: 15, now: 1000 });
+  store.applyProfileOps('g1', 'u1', { details: { remove: [1] } }, { maxDetails: 15, now: 2000 });
+  const profile = store.applyProfileOps('g1', 'u1', { details: { add: ['c'] } }, { maxDetails: 15, now: 3000 });
+  assert.deepEqual(profile.details.map((d) => d.id), [2, 3]);
+});
+
+test('applyProfileOps: opts.seenAt (not opts.now) dates interests/details, and drives the confirmGapHours bump', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  store.touchUser('g1', 'u1', 'Alice', 1000);
+  const seenAt1 = Date.UTC(2020, 0, 1);
+  store.applyProfileOps('g1', 'u1', { interests: { add: [{ topic: 'Chess', note: '' }] } }, {
+    maxInterests: 12,
+    topicChars: 40,
+    noteChars: 120,
+    confirmGapHours: 12,
+    now: 999_999_999_999, // a very different wall-clock "now"
+    seenAt: seenAt1,
+  });
+  let profile = store.getUser('g1', 'u1');
+  assert.equal(profile.interests[0].firstSeen, new Date(seenAt1).toISOString(), 'dated by seenAt, not now');
+
+  const seenAt2 = seenAt1 + 13 * 3_600_000; // past the 12h gap
+  profile = store.applyProfileOps('g1', 'u1', { interests: { seen: ['Chess'] } }, {
+    maxInterests: 12,
+    topicChars: 40,
+    noteChars: 120,
+    confirmGapHours: 12,
+    now: 1,
+    seenAt: seenAt2,
+  });
+  assert.equal(profile.interests[0].weight, 2);
+  assert.equal(profile.interests[0].lastSeen, new Date(seenAt2).toISOString());
+});
+
+test('applyProfileOps: sets character/style/relationship only when given as non-empty strings', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  store.touchUser('g1', 'u1', 'Alice', 1000);
+  store.applyProfileOps('g1', 'u1', { character: 'chatty', style: 'blunt' }, { fieldChars: 400, now: 1000 });
+
+  const profile = store.applyProfileOps('g1', 'u1', { style: '', relationship: 'trusts you' }, { fieldChars: 400, now: 2000 });
+  assert.equal(profile.character, 'chatty', 'untouched: absent from this call');
+  assert.equal(profile.style, 'blunt', 'untouched: empty string never blanks it');
+  assert.equal(profile.relationship, 'trusts you');
+});
+
+test('applyProfileOps: prose fields are clamped to opts.fieldChars', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  store.touchUser('g1', 'u1', 'Alice', 1000);
+  const profile = store.applyProfileOps('g1', 'u1', { character: '0123456789' }, { fieldChars: 5, now: 1000 });
+  assert.equal(profile.character, '01234');
+});
+
+test('applyProfileOps: routes interests ops through applyInterestOps', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  store.touchUser('g1', 'u1', 'Alice', 1000);
+  store.applyProfileOps('g1', 'u1', { interests: { add: [{ topic: 'Chess', note: 'plays weekly' }] } }, {
+    maxInterests: 12,
+    topicChars: 40,
+    noteChars: 120,
+    now: 1000,
+  });
+  const muchLater = 1000 + 13 * 3_600_000; // past the default 12h confirmGapHours
+  const profile = store.applyProfileOps('g1', 'u1', { interests: { add: [{ topic: 'chess', note: '' }] } }, {
+    maxInterests: 12,
+    topicChars: 40,
+    noteChars: 120,
+    now: muchLater,
+  });
+  assert.equal(profile.interests.length, 1);
+  assert.equal(profile.interests[0].weight, 2, 're-mentioning the same topic, well past the gap, bumps its weight');
+  assert.equal(profile.interests[0].note, 'plays weekly');
+});
+
+test('applyProfileOps: migrates a legacy prose interests string before applying ops', () => {
+  const dir = tmpDataDir();
+  const guildDir = path.join(dir, 'guilds', 'g1', 'users');
+  fs.mkdirSync(guildDir, { recursive: true });
+  fs.writeFileSync(path.join(guildDir, 'u1.json'), JSON.stringify({ id: 'u1', names: ['Alice'], interests: 'Chess, Anime' }));
+
+  const store = createStore({ dataDir: dir });
+  const profile = store.applyProfileOps('g1', 'u1', { interests: { add: [{ topic: 'Cooking', note: '' }] } }, {
+    maxInterests: 12,
+    topicChars: 40,
+    noteChars: 120,
+    now: 1000,
+  });
+  assert.deepEqual(profile.interests.map((i) => i.topic), ['Chess', 'Anime', 'Cooking']);
+});
+
+test('applyProfileOps: details add is de-duplicated case-insensitively (a sighting on the existing item), remove is exact-text', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  store.touchUser('g1', 'u1', 'Alice', 1000);
+  store.applyProfileOps('g1', 'u1', { details: { add: ['Owns a cat', 'Plays guitar'] } }, { maxDetails: 15, now: 1000 });
+  const profile = store.applyProfileOps('g1', 'u1', { details: { add: ['owns a cat', 'Reads sci-fi'], remove: ['Plays guitar'] } }, {
+    maxDetails: 15,
+    now: 2000,
+  });
+  assert.deepEqual(profile.details.map((d) => d.text), ['Owns a cat', 'Reads sci-fi']);
+  assert.equal(profile.details[0].weight, 1, 'the re-add landed inside the default confirmGapHours, no bump');
+});
+
+test('applyProfileOps: details are capped at maxDetails, evicting the lowest weight (then oldest) first', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  store.touchUser('g1', 'u1', 'Alice', 1000);
+  const profile = store.applyProfileOps('g1', 'u1', { details: { add: ['a', 'b', 'c'] } }, { maxDetails: 2, now: 1000 });
+  assert.deepEqual(profile.details.map((d) => d.text), ['b', 'c']);
+});
+
+test('applyProfileOps: tolerates garbage ops without throwing, leaves the profile unchanged', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  store.touchUser('g1', 'u1', 'Alice', 1000);
+  for (const garbage of [null, undefined, 'not an object', 42, { interests: 'nope', details: 5 }]) {
+    assert.doesNotThrow(() => store.applyProfileOps('g1', 'u1', garbage, { now: 1000 }));
+  }
+  const profile = store.getUser('g1', 'u1');
+  assert.deepEqual(profile.interests, []);
+  assert.deepEqual(profile.details, []);
+});
+
+test('applyProfileOps: persists across store instances, including a migrated legacy profile', () => {
+  const dir = tmpDataDir();
+  const guildDir = path.join(dir, 'guilds', 'g1', 'users');
+  fs.mkdirSync(guildDir, { recursive: true });
+  fs.writeFileSync(path.join(guildDir, 'u1.json'), JSON.stringify({ id: 'u1', names: ['Alice'], interests: 'Chess (weekly club)' }));
+
+  const storeA = createStore({ dataDir: dir });
+  storeA.applyProfileOps('g1', 'u1', { interests: { add: [{ topic: 'Anime', note: '' }] }, details: { add: ['owns a cat'] } }, {
+    maxInterests: 12,
+    topicChars: 40,
+    noteChars: 120,
+    maxDetails: 15,
+    now: 1000,
+  });
+  storeA.flush();
+
+  const storeB = createStore({ dataDir: dir });
+  const profile = storeB.getUser('g1', 'u1');
+  assert.deepEqual(profile.interests.map((i) => i.topic), ['Chess', 'Anime']);
+  assert.deepEqual(profile.details.map((d) => d.text), ['owns a cat']);
 });
 
 // --- lore -----------------------------------------------------------------

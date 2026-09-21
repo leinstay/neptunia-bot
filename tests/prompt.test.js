@@ -44,6 +44,7 @@ function fakeConfig(overrides = {}) {
     features: { vision: true, ...overrides.features },
     llm: { maxRequestTokens: 50000, safetyMargin: 0.9, ...overrides.llm },
     lore: { scanMessages: 30, maxMatches: 8, ...overrides.lore },
+    memory: { ...overrides.memory },
   };
 }
 
@@ -589,6 +590,170 @@ test('renderProfile: an episodes cap too small even for the heading renders no e
   const cost = (text) => text.length;
   const text = renderProfile(profile, labels, { interlocutor: true, episodes: { enabled: true, cap: 1, cost } });
   assert.ok(!text.includes(labels.profile.episodes));
+});
+
+// --- renderProfile: interests --------------------------------------------------
+
+function interestFixture(overrides = {}) {
+  return { topic: 'Chess', note: '', weight: 1, firstSeen: 'a', lastSeen: 'a', ...overrides };
+}
+
+test('renderProfile: renders interests as "topic (note); topic", heaviest weight first', () => {
+  const profile = {
+    id: 'p1',
+    names: ['Carl'],
+    interests: [interestFixture({ topic: 'Anime', note: 'watches shonen', weight: 2 }), interestFixture({ topic: 'Chess', note: '', weight: 5 })],
+  };
+  const text = renderProfile(profile, labels);
+  assert.ok(text.includes('interests: Chess; Anime (watches shonen)'));
+});
+
+test('renderProfile: a profile with no interests omits the line entirely', () => {
+  const profile = { id: 'p1', names: ['Carl'], character: 'calm', interests: [] };
+  const text = renderProfile(profile, labels);
+  assert.ok(!text.includes('interests:'));
+});
+
+test('renderProfile: interests render capped at maxInterests, the heaviest kept', () => {
+  const profile = {
+    id: 'p1',
+    names: ['Carl'],
+    interests: [interestFixture({ topic: 'A', weight: 1 }), interestFixture({ topic: 'B', weight: 3 }), interestFixture({ topic: 'C', weight: 2 })],
+  };
+  const text = renderProfile(profile, labels, { maxInterests: 2 });
+  assert.ok(text.includes('interests: B; C'));
+  assert.ok(!text.includes('interests: B; C; A'));
+});
+
+test('renderProfile: falls back to the built-in "topic (note)" / bare topic form when the item labels are missing', () => {
+  const brokenLabels = { ...labels, profile: { ...labels.profile } };
+  delete brokenLabels.profile.interestItem;
+  delete brokenLabels.profile.interestItemNoNote;
+  const profile = { id: 'p1', names: ['Carl'], interests: [interestFixture({ topic: 'Chess', note: 'weekly club' }), interestFixture({ topic: 'Anime', note: '' })] };
+  const text = renderProfile(profile, brokenLabels);
+  assert.ok(text.includes('interests: Chess (weekly club); Anime'));
+});
+
+test('renderProfile: uses labels.profile.interestItem/interestItemNoNote when present', () => {
+  const customLabels = { ...labels, profile: { ...labels.profile, interestItem: '[{topic}: {note}]', interestItemNoNote: '<{topic}>' } };
+  const profile = { id: 'p1', names: ['Carl'], interests: [interestFixture({ topic: 'Chess', note: 'weekly club' }), interestFixture({ topic: 'Anime', note: '' })] };
+  const text = renderProfile(profile, customLabels);
+  assert.ok(text.includes('interests: [Chess: weekly club]; <Anime>'));
+});
+
+test('buildRequest: interests render through renderProfile for both the interlocutor and other profiles', () => {
+  const trigger = makeMessage(1, NOW - MIN, { authorName: 'Alice' });
+  const interlocutor = { id: 'author-1', names: ['Alice'], interests: [interestFixture({ topic: 'Chess', note: 'weekly club' })] };
+  const request = buildRequest(
+    baseInput({ history: [trigger], trigger, triggerKind: 'mention', interlocutor, otherProfiles: [] }),
+  );
+  const user = request.messages[1].content;
+  assert.ok(user.includes('interests: Chess (weekly club)'));
+});
+
+test('buildRequest: config.memory.maxInterests caps how many interests render', () => {
+  const trigger = makeMessage(1, NOW - MIN, { authorName: 'Alice' });
+  const interlocutor = {
+    id: 'author-1',
+    names: ['Alice'],
+    interests: [interestFixture({ topic: 'A', weight: 1 }), interestFixture({ topic: 'B', weight: 2 })],
+  };
+  const config = fakeConfig({ memory: { maxInterests: 1 } });
+  const request = buildRequest(
+    baseInput({ config, history: [trigger], trigger, triggerKind: 'mention', interlocutor, otherProfiles: [] }),
+  );
+  const user = request.messages[1].content;
+  assert.ok(user.includes('interests: B'));
+  assert.ok(!user.includes('interests: B; A'));
+});
+
+// --- renderProfile: unsure/stale marks (opt-in via confirmAfter/staleDays) ----
+
+test('renderProfile: without confirmAfter/staleDays, nothing is ever marked (back-compat)', () => {
+  const profile = { id: 'p1', names: ['Carl'], interests: [interestFixture({ topic: 'Chess', weight: 1 })] };
+  const text = renderProfile(profile, labels);
+  assert.ok(!text.includes(labels.profile.unsureMark));
+  assert.ok(!text.includes(labels.profile.staleMark));
+});
+
+test('renderProfile: an interest below confirmAfter renders with unsureMark, at/above it does not', () => {
+  const profile = {
+    id: 'p1',
+    names: ['Carl'],
+    interests: [interestFixture({ topic: 'Chess', weight: 1 }), interestFixture({ topic: 'Anime', weight: 2 })],
+  };
+  const text = renderProfile(profile, labels, { confirmAfter: 2 });
+  assert.ok(text.includes(`Chess${labels.profile.unsureMark}`));
+  assert.ok(!text.includes(`Anime${labels.profile.unsureMark}`));
+});
+
+test('renderProfile: an interest older than interestStaleDays renders with staleMark, sorted after fresh ones', () => {
+  const now = Date.UTC(2026, 8, 21);
+  const stale = interestFixture({ topic: 'Old', weight: 5, lastSeen: new Date(now - 200 * 24 * 3_600_000).toISOString() });
+  const fresh = interestFixture({ topic: 'New', weight: 1, lastSeen: new Date(now - 1 * 24 * 3_600_000).toISOString() });
+  const profile = { id: 'p1', names: ['Carl'], interests: [stale, fresh] };
+  const text = renderProfile(profile, labels, { staleDays: 90, now });
+  const interestsLine = text.split('\n').find((l) => l.startsWith('interests:'));
+  assert.ok(interestsLine.includes(`New; Old${labels.profile.staleMark}`), `fresh sorts first, stale is marked: ${interestsLine}`);
+});
+
+test('renderProfile: an interest can be both unsure and stale, unsureMark before staleMark', () => {
+  const now = Date.UTC(2026, 8, 21);
+  const item = interestFixture({ topic: 'Chess', weight: 1, lastSeen: new Date(now - 200 * 24 * 3_600_000).toISOString() });
+  const profile = { id: 'p1', names: ['Carl'], interests: [item] };
+  const text = renderProfile(profile, labels, { confirmAfter: 2, staleDays: 90, now });
+  assert.ok(text.includes(`Chess${labels.profile.unsureMark}${labels.profile.staleMark}`));
+});
+
+test('renderProfile: a missing unsureMark/staleMark label appends nothing, never throws', () => {
+  const now = Date.UTC(2026, 8, 21);
+  const brokenLabels = { ...labels, profile: { ...labels.profile } };
+  delete brokenLabels.profile.unsureMark;
+  delete brokenLabels.profile.staleMark;
+  const item = interestFixture({ topic: 'Chess', weight: 1, lastSeen: new Date(now - 200 * 24 * 3_600_000).toISOString() });
+  const profile = { id: 'p1', names: ['Carl'], interests: [item] };
+  const text = renderProfile(profile, brokenLabels, { confirmAfter: 2, staleDays: 90, now });
+  assert.ok(text.includes('interests: Chess'));
+  assert.ok(!text.includes('undefined'));
+});
+
+// --- renderProfile: details ----------------------------------------------------
+
+function detailFixture(overrides = {}) {
+  return { id: 1, text: 'Owns a cat', weight: 2, firstSeen: 'a', lastSeen: 'a', ...overrides };
+}
+
+test('renderProfile: renders detail items joined by "; "', () => {
+  const profile = { id: 'p1', names: ['Carl'], details: [detailFixture({ text: 'Owns a cat' }), detailFixture({ id: 2, text: 'Plays guitar' })] };
+  const text = renderProfile(profile, labels);
+  assert.ok(text.includes('details: Owns a cat; Plays guitar'));
+});
+
+test('renderProfile: a profile with no details omits the line entirely', () => {
+  const profile = { id: 'p1', names: ['Carl'], character: 'calm', details: [] };
+  const text = renderProfile(profile, labels);
+  assert.ok(!text.includes('details:'));
+});
+
+test('renderProfile: an unconfirmed detail renders with unsureMark, details never get the stale mark', () => {
+  const now = Date.UTC(2026, 8, 21);
+  const unsure = detailFixture({ id: 1, text: 'Owns a cat', weight: 1, lastSeen: new Date(now - 200 * 24 * 3_600_000).toISOString() });
+  const confirmed = detailFixture({ id: 2, text: 'Plays guitar', weight: 2 });
+  const profile = { id: 'p1', names: ['Carl'], details: [unsure, confirmed] };
+  const text = renderProfile(profile, labels, { confirmAfter: 2, staleDays: 90, now });
+  assert.ok(text.includes(`Owns a cat${labels.profile.unsureMark}`));
+  assert.ok(!text.includes(`Owns a cat${labels.profile.unsureMark}${labels.profile.staleMark}`), 'no stale mark for details');
+  assert.ok(text.includes('Plays guitar'));
+  assert.ok(!text.includes(`Plays guitar${labels.profile.unsureMark}`));
+});
+
+test('buildRequest: interlocutor/other-profile marks read memory.confirmAfter/interestStaleDays from the live config', () => {
+  const trigger = makeMessage(1, NOW - MIN, { authorName: 'Alice' });
+  const interlocutor = { id: 'author-1', names: ['Alice'], interests: [interestFixture({ topic: 'Chess', weight: 1 })] };
+  const config = fakeConfig({ memory: { confirmAfter: 2 } });
+  const request = buildRequest(baseInput({ config, history: [trigger], trigger, triggerKind: 'mention', interlocutor, otherProfiles: [] }));
+  const user = request.messages[1].content;
+  assert.ok(user.includes(`Chess${labels.profile.unsureMark}`));
 });
 
 test('buildRequest: relationships default to on (features.relationships missing counts as on)', () => {
