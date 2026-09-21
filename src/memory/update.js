@@ -19,6 +19,18 @@ import { keywordMatches } from './lore.js';
 const BACKOFF_MS = 15 * 60_000;
 const MIN_LIVE_BATCH = 20; // the live analyzer never shrinks below this many messages
 
+// Fallbacks for the memory-prompt placeholders below, equal to config.json's
+// own defaults -- used only when a deployment's config is missing the key.
+const MEMORY_LIMIT_DEFAULTS = {
+  fieldChars: 400,
+  maxDetails: 15,
+  maxInjokes: 15,
+  maxSelfFacts: 20,
+  maxNewEpisodes: 3,
+  maxEpisodes: 20,
+  maxDeltaPerUpdate: 15,
+};
+
 /** `error?.message`, trimmed to 200 chars — never message contents. */
 function detailOf(err) {
   return err?.message ? String(err.message).slice(0, 200) : undefined;
@@ -67,6 +79,30 @@ function block(tag, body) {
 
 function fillTemplate(template, values) {
   return (template ?? '').replace(/\{\{(\w+)\}\}/g, (all, key) => values[key] ?? all);
+}
+
+/**
+ * The `{{fieldChars}}`/`{{maxDetails}}`/... placeholders `prompts.memory` may use, filled from
+ * the live config so a prompt states the same limits the code actually clamps to. Missing config
+ * keys fall back to MEMORY_LIMIT_DEFAULTS (config.json's own defaults); an unknown placeholder in
+ * the prompt is left untouched by fillTemplate regardless.
+ * @param {object} config  Live config (`config.memory`, `config.relationships`).
+ * @param {string} selfName
+ */
+function memoryTemplateValues(config, selfName) {
+  const memoryCfg = config.memory ?? {};
+  const fieldChars = memoryCfg.fieldChars ?? MEMORY_LIMIT_DEFAULTS.fieldChars;
+  return {
+    name: selfName,
+    fieldChars,
+    guildFieldChars: fieldChars * 2,
+    maxDetails: memoryCfg.maxDetails ?? MEMORY_LIMIT_DEFAULTS.maxDetails,
+    maxInjokes: memoryCfg.maxInjokes ?? MEMORY_LIMIT_DEFAULTS.maxInjokes,
+    maxSelfFacts: memoryCfg.maxSelfFacts ?? MEMORY_LIMIT_DEFAULTS.maxSelfFacts,
+    maxNewEpisodes: memoryCfg.maxNewEpisodes ?? MEMORY_LIMIT_DEFAULTS.maxNewEpisodes,
+    maxEpisodes: memoryCfg.maxEpisodes ?? MEMORY_LIMIT_DEFAULTS.maxEpisodes,
+    maxDeltaPerUpdate: config.relationships?.maxDeltaPerUpdate ?? MEMORY_LIMIT_DEFAULTS.maxDeltaPerUpdate,
+  };
 }
 
 /** A deployment with no/broken labels.json must fail loudly, not send a broken prompt. */
@@ -142,7 +178,7 @@ export function buildMemoryRequest({ prompts, config, calibrator, profiles, guil
   const relationships = config.features?.relationships !== false;
   const episodesOn = config.features?.episodes !== false;
   const loreOn = config.features?.lore !== false;
-  const system = fillTemplate(prompts.memory, { name: selfName });
+  const system = fillTemplate(prompts.memory, memoryTemplateValues(config, selfName));
   const characterBlock = relationships ? block('character', fillTemplate(prompts['character-card'], { name: selfName })) : '';
 
   const existingProfiles = {};

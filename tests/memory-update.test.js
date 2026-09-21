@@ -179,6 +179,139 @@ test('buildMemoryRequest: fills {{name}} in the memory system prompt', () => {
   assert.equal(llmMessages[0].content, 'You are Nept, summarize the chat.');
 });
 
+// ---- buildMemoryRequest: limit placeholders --------------------------------
+
+test('buildMemoryRequest: fills every limit placeholder from config.memory / config.relationships', () => {
+  const config = makeConfig({
+    memory: {
+      ...makeConfig().memory,
+      fieldChars: 1000,
+      maxDetails: 7,
+      maxInjokes: 8,
+      maxSelfFacts: 9,
+      maxNewEpisodes: 2,
+      maxEpisodes: 30,
+    },
+    relationships: { maxDeltaPerUpdate: 25 },
+  });
+  const calibrator = createCalibrator();
+  const messages = [slimMessage({ id: 'm1', ts: Date.UTC(2026, 0, 1, 12, 0, 0) })];
+  const template =
+    '{{fieldChars}} {{guildFieldChars}} {{maxDetails}} {{maxInjokes}} {{maxSelfFacts}} {{maxNewEpisodes}} {{maxEpisodes}} {{maxDeltaPerUpdate}}';
+
+  const { messages: llmMessages } = buildMemoryRequest({
+    prompts: { memory: template, labels },
+    config,
+    calibrator,
+    profiles: {},
+    guildMemory: {},
+    messages,
+    selfName: 'Nept',
+  });
+
+  assert.equal(llmMessages[0].content, '1000 2000 7 8 9 2 30 25');
+});
+
+test('buildMemoryRequest: absent config keys fall back to the config.json defaults', () => {
+  const config = makeConfig({ memory: {} }); // no relationships block either
+  const calibrator = createCalibrator();
+  const messages = [slimMessage({ id: 'm1', ts: Date.UTC(2026, 0, 1, 12, 0, 0) })];
+  const template =
+    '{{fieldChars}} {{guildFieldChars}} {{maxDetails}} {{maxInjokes}} {{maxSelfFacts}} {{maxNewEpisodes}} {{maxEpisodes}} {{maxDeltaPerUpdate}}';
+
+  const { messages: llmMessages } = buildMemoryRequest({
+    prompts: { memory: template, labels },
+    config,
+    calibrator,
+    profiles: {},
+    guildMemory: {},
+    messages,
+    selfName: 'Nept',
+  });
+
+  assert.equal(llmMessages[0].content, '400 800 15 15 20 3 20 15');
+});
+
+test('buildMemoryRequest: an unknown {{placeholder}} is left untouched', () => {
+  const config = makeConfig();
+  const calibrator = createCalibrator();
+  const messages = [slimMessage({ id: 'm1', ts: Date.UTC(2026, 0, 1, 12, 0, 0) })];
+
+  const { messages: llmMessages } = buildMemoryRequest({
+    prompts: { memory: 'Hello {{name}}, the {{unknownThing}} stays as-is.', labels },
+    config,
+    calibrator,
+    profiles: {},
+    guildMemory: {},
+    messages,
+    selfName: 'Nept',
+  });
+
+  assert.equal(llmMessages[0].content, 'Hello Nept, the {{unknownThing}} stays as-is.');
+});
+
+test('buildMemoryRequest: a prompt with no placeholders at all is left unchanged', () => {
+  const config = makeConfig();
+  const calibrator = createCalibrator();
+  const messages = [slimMessage({ id: 'm1', ts: Date.UTC(2026, 0, 1, 12, 0, 0) })];
+
+  const { messages: llmMessages } = buildMemoryRequest({
+    prompts: { memory: 'Plain memory prompt, no placeholders at all.', labels },
+    config,
+    calibrator,
+    profiles: {},
+    guildMemory: {},
+    messages,
+    selfName: 'Nept',
+  });
+
+  assert.equal(llmMessages[0].content, 'Plain memory prompt, no placeholders at all.');
+});
+
+test('analyze: the completion sent to the LLM carries the filled number, not the braces', async () => {
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    const hot = {
+      config: makeConfig({ memory: { ...makeConfig().memory, fieldChars: 1000 } }),
+      prompts: { memory: 'Keep every field under {{fieldChars}} characters.', labels },
+    };
+    const calibrator = createCalibrator();
+    let seenSystem = null;
+    const llm = { complete: async (messages) => { seenSystem = messages[0].content; return { text: '{}' }; } };
+    const updater = createMemoryUpdater({ hot, store, llm, calibrator, getSelfName: () => 'Nept' });
+
+    await updater.analyze(guildId, [slimMessage({ id: 'm1' })]);
+
+    assert.equal(seenSystem, 'Keep every field under 1000 characters.');
+  });
+});
+
+test('estimate: costs the same filled memory prompt the LLM would actually receive', () => {
+  withStore((store) => {
+    const guildId = 'g1';
+    const config = makeConfig({ memory: { ...makeConfig().memory, fieldChars: 1000 } });
+    const hot = { config, prompts: { memory: 'Keep every field under {{fieldChars}} characters.', labels } };
+    const calibrator = createCalibrator();
+    const updater = createMemoryUpdater({ hot, store, llm: {}, calibrator, getSelfName: () => 'Nept' });
+    const messages = [slimMessage({ id: 'm1' })];
+
+    const { messages: llmMessages } = buildMemoryRequest({
+      prompts: hot.prompts,
+      config,
+      calibrator,
+      profiles: {},
+      guildMemory: store.getGuild(guildId),
+      channels: {},
+      messages,
+      selfName: 'Nept',
+      loreEntries: store.getLore(guildId),
+    });
+
+    assert.equal(llmMessages[0].content, 'Keep every field under 1000 characters.');
+    assert.equal(updater.estimate(guildId, messages), calibrator.apply(estimateMessages(llmMessages)));
+  });
+});
+
 test('buildMemoryRequest: throws a clear error when prompts.labels is missing', () => {
   const config = makeConfig();
   const calibrator = createCalibrator();

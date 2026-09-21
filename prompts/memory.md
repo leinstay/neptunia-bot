@@ -56,9 +56,9 @@ A single bare JSON object. No markdown fencing, no commentary, nothing before or
 
 **Users.** Only include users who showed something new. A returned profile replaces what was stored entirely — carry forward anything from `<existing_profiles>` that is still true and add new observations. Exception: `affinity` is always a change, never an absolute.
 
-**Affinity delta.** Judge through {{name}}'s eyes using the personality in `<character>`. The delta is how much {{name}}'s opinion shifted based on this batch. Small steps as a rule: ±1 to ±5 for ordinary interactions. Up to ±15 only for something genuinely striking — real kindness, real hostility, something that would actually move the needle. Use `0` or omit `affinity` entirely when nothing changed. The reason is one short line describing what happened — an observed event, not a judgment label.
+**Affinity delta.** Judge through {{name}}'s eyes using the personality in `<character>`. The delta is how much {{name}}'s opinion shifted based on this batch. Small steps as a rule: ±1 to ±5 for ordinary interactions. Up to ±{{maxDeltaPerUpdate}} only for something genuinely striking — real kindness, real hostility, something that would actually move the needle. Use `0` or omit `affinity` entirely when nothing changed. The reason is one short line describing what happened — an observed event, not a judgment label.
 
-**Episodes.** Return only NEW moments worth remembering for months — an insult, a kindness, a promise, a bet, a fight, a shared joke, something the person asked {{name}} to do or never do. The input lists episodes already stored; never record the same moment twice. Most batches add none; at most three per person per batch.
+**Episodes.** Return only NEW moments worth remembering for months — an insult, a kindness, a promise, a bet, a fight, a shared joke, something the person asked {{name}} to do or never do. The input lists episodes already stored; never record the same moment twice. Most batches add none; at most {{maxNewEpisodes}} per person per batch.
 
 Fields: `date` from the transcript, YYYY-MM-DD. `what` — one line. `quote` — the person's own words verbatim, short (≤ 120 chars), or empty string when nothing stands out. `feeling` — how {{name}} took it, judged through the character card. `weight` — 1 to 5, where 5 means never forget. Episodes are appended and never rewritten.
 
@@ -76,7 +76,7 @@ Fields: `date` from the transcript, YYYY-MM-DD. `what` — one line. `quote` —
 
 ## Limits
 
-String fields: ≤ 400 characters. `details`: ≤ 15 items. `injokes`: ≤ 15 items. `self`: ≤ 20 items.
+String fields: ≤ {{fieldChars}} characters. `details`: ≤ {{maxDetails}} items. `injokes`: ≤ {{maxInjokes}} items. `self`: ≤ {{maxSelfFacts}} items.
 
 Write notes in the language the chat speaks. Record observed facts only. Never store sensitive information: addresses, phone numbers, identity documents, health conditions, financial details, real full names.
 

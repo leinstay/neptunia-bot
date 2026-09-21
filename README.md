@@ -148,6 +148,8 @@ The system prompt handles sounding human, so the card is purely personality. Giv
 | `vision.imageSize` | `512` | Downscale target in px, via Discord's media proxy |
 | `vision.recentImages` | `3` | Recent channel images to include |
 | `vision.recentImageMinutes` | `30` | Max age for recent images (min) |
+| `vision.maxBytes` | `1500000` | Max image file size (bytes); larger pictures are skipped |
+| `vision.fetchTimeoutMs` | `10000` | Download timeout per image (ms) |
 
 ### `media`
 
@@ -224,6 +226,8 @@ Settings for the media describer (`features.mediaDescriptions`).
 | `maxNewEpisodes` | `3` | Max new episodes per person per batch |
 | `timeoutMs` | `300000` | Analyzer timeout (ms), separate from `llm.timeoutMs` |
 
+The analyzer prompt reads these limits as placeholders, so raising a value takes effect on the next batch. Bigger profiles cost context tokens (`context.caps.people`, `context.caps.interlocutor`) and analyzer output (`memory.maxOutputTokens`).
+
 ### `relationships`
 
 | Key | Default | Meaning |
@@ -247,6 +251,8 @@ With `warmup.enabled: true`, the bot reads channel history before speaking. It f
 The budget `warmup.maxTokens` is counted from the provider's reported usage. Warm-up is exempt from `llm.maxRequestsPerDay` but the per-request cap applies. Progress persists across restarts. A batch whose analysis is truncated at `memory.maxOutputTokens` is split in half and the halves analyzed separately; splitting recurses down to 20 messages, then the piece is skipped and counted. Other failures log their reason; three in a row abort without leaving the bot mute. Progress is logged per batch (`warmup: batch done`) and per channel (`warmup: channel done`).
 
 `/nep warmup stop` pauses after the batch in flight; `/nep warmup run` resumes from the saved progress. Suggested flow for a first run: leave `warmup.enabled` off, plan the channels with `/nep warmup` commands, check `/nep warmup plan`, then `/nep warmup run`.
+
+`/nep warmup reset` clears only the progress marker, so running a warm-up again over existing memory counts the same messages twice. For a truly fresh start, use `/nep memory wipe` first: it clears member profiles with their attitudes and moments, server habits, the channel map, the analyzer's lore entries, the message buffer and the warm-up progress, after the owner types the server's exact name. It keeps the owner's own lore entries, the media description cache, token calibration and the spontaneous schedule. The command is refused while a warm-up is running.
 
 The warm-up budget is real money. Set `memory.model` to a cheaper model for the analyzer and warm-up.
 
@@ -290,6 +296,7 @@ One Discord slash command, `/nep` (the name comes from `bot.commandName`). Guild
 | `/nep memory show <user>` | Show a stored profile with episodes |
 | `/nep memory forget <user>` | Delete a stored profile |
 | `/nep memory affinity <user> [score] [reason]` | Show or set attitude (-100..100) |
+| `/nep memory wipe <confirm>` | Wipe all analyzer memory for this server; type the exact server name to confirm |
 | `/nep lore add <title> <keys> <text> [always]` | Add a lorebook entry |
 | `/nep lore list [query]` | List lorebook entries |
 | `/nep lore show <id>` | Show a lorebook entry |
@@ -331,7 +338,7 @@ The analyzer adds and updates lorebook entries on its own but never touches entr
 
 Transcript lines carry media markers in brackets: pictures, GIFs, videos, stickers, custom emoji, voice messages, audio files, links, text file previews and forwarded messages. Forwarded messages from another channel of the same server name the source channel. What the persona perceives depends on two features.
 
-`features.vision` attaches pictures from the calling message, from the message it replies to, and the newest few in the channel to the LLM request as images, downscaled through Discord's media proxy. The persona sees these directly. Settings live under `context.vision`.
+`features.vision` attaches pictures from the calling message, from the message it replies to, and the newest few in the channel to the LLM request as images, downscaled through Discord's media proxy. The bot downloads every picture itself and sends it inline as data, because Discord refuses downloads coming from the model provider; pictures larger than `context.vision.maxBytes` or slower than `context.vision.fetchTimeoutMs` are skipped. The persona sees these directly. Settings live under `context.vision`.
 
 `features.mediaDescriptions` (off by default) runs a helper model (`media.model`) that writes a one-line description for pictures, GIF frames, video posters, stickers, custom emoji and link thumbnails. Each attachment is described once and cached. Descriptions feed the chat transcript, the memory analyzer and the warm-up, whose token budget pays for warm-up descriptions. The describer's prompt is `prompts/describe.md`. Settings live under `media`.
 
