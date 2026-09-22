@@ -1,4 +1,4 @@
-# Owner commands
+# Commands
 
 Channels, roles and users are picked from Discord's own pickers; `set`/`unset` and `access grant`/`access revoke` autocomplete their `path`/`command` options. The bot does not read direct messages.
 

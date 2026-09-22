@@ -2,7 +2,7 @@
 
 预热从近期消息样本中构建角色对服务器的记忆。首次启动时，当 `warmup.enabled` 为 true 且尚不存在任何档案时，预热会自动运行。预热运行期间角色保持静默。
 
-`/nep warmup run` 可随时启动或恢复完整运行；完整命令列表见[所有者命令](owner-commands.md)。
+`/nep warmup run` 可随时启动或恢复完整运行；完整命令列表见[命令](owner-commands.md)。
 
 ## 三个阶段
 
@@ -46,9 +46,9 @@
 
 每个成员的画像最多每 `memory.portraitRefreshHours`（默认 24）小时刷新一次，整个服务器每天最多 `memory.portraitRefreshPerDay`（默认 20）次。每次刷新计入每日请求上限。`/nep memory refresh <user>` 无视计时器强制刷新。
 
-## 所有者命令
+## 命令
 
-所有预热命令位于 `/nep warmup` 下。完整参考见[所有者命令](owner-commands.md)。
+所有预热命令位于 `/nep warmup` 下。完整参考见[命令](owner-commands.md)。
 
 | 命令 | 说明 |
 |---|---|

@@ -2,7 +2,7 @@
 
 The warmup builds the persona's memory of a server from a sample of recent messages. On first start, when `warmup.enabled` is true and no profile exists yet, it runs automatically. The persona stays mute while a warmup run is in flight.
 
-`/nep warmup run` starts or resumes a full run at any time; see [Owner commands](owner-commands.md) for the complete list.
+`/nep warmup run` starts or resumes a full run at any time; see [Commands](owner-commands.md) for the complete list.
 
 ## The three stages
 
@@ -46,9 +46,9 @@ After the warmup finishes, the stream analyzer keeps memory current from live ba
 
 A portrait can be refreshed at most once every `memory.portraitRefreshHours` (default 24) hours per member, up to `memory.portraitRefreshPerDay` (default 20) per day across the server. Each refresh counts against the daily request cap. `/nep memory refresh <user>` forces one regardless of the timer.
 
-## Owner commands
+## Commands
 
-All warmup commands live under `/nep warmup`. See [Owner commands](owner-commands.md) for the full reference.
+All warmup commands live under `/nep warmup`. See [Commands](owner-commands.md) for the full reference.
 
 | Command | What it does |
 |---|---|

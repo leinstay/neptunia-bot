@@ -102,7 +102,7 @@ With `features.dryRun: true` the bot runs the full pipeline (memory, triggers, L
 
 First run on a new server: enable `features.dryRun`, watch the mirror or `journalctl -u neptunia-bot -f`, tune live, then `/nep set features.dryRun false`.
 
-## Owner commands
+## Commands
 
 One Discord slash command, `/nep` (the name comes from `bot.commandName`). They are registered as guild commands on start, for the served server only. Every answer is ephemeral; only the caller sees it, in whatever channel it was typed. See [`docs/en/owner-commands.md`](docs/en/owner-commands.md) for every subcommand and the access grants.
 

@@ -102,7 +102,7 @@ npm start
 
 在新服务器上首次运行：启用 `features.dryRun`，观察镜像频道或 `journalctl -u neptunia-bot -f`，实时调整，然后执行 `/nep set features.dryRun false`。
 
-## 所有者命令
+## 命令
 
 一个 Discord 斜杠命令 `/nep`（名称来自 `bot.commandName`）。以服务器（guild）命令的形式在启动时注册到所服务的服务器。所有回复仅调用者可见（ephemeral），不论在哪个频道输入。所有子命令和访问授权请参阅 [`owner-commands.md`](owner-commands.md)。
 

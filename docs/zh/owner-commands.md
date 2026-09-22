@@ -1,4 +1,4 @@
-# 所有者命令
+# 命令
 
 频道、身份组和用户从 Discord 自带的选择器中选取；`set`/`unset` 和 `access grant`/`access revoke` 会自动补全其 `path`/`command` 选项。机器人不读取私信。
 
