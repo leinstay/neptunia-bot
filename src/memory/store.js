@@ -733,9 +733,11 @@ export function createStore({ dataDir }) {
         fs.rmSync(file, { force: true });
       }
 
-      if (stateEntry.value.warmup !== undefined) {
-        delete stateEntry.value.warmup;
-        stateEntry.dirty = true;
+      for (const key of ['warmup', 'bootstrap']) {
+        if (stateEntry.value[key] !== undefined) {
+          delete stateEntry.value[key];
+          stateEntry.dirty = true;
+        }
       }
 
       flushAll();

@@ -1427,9 +1427,12 @@ async function cmdPing(args) {
     const guildId = resolvedGuildId(context);
     if (!guildId) throw new Error('no guild resolved yet');
     assertNotPaused();
+    if (typeof bootstrap.isBootstrapping === 'function' && bootstrap.isBootstrapping()) return 'a warmup is already in flight: see /nep warmup status';
 
-    const result = await bootstrap.run(guildId);
-    return result.ok ? 'Bootstrap run finished (or already fully done).' : `Bootstrap run stopped: ${result.message ?? 'unknown reason'} (resumable -- run again to continue).`;
+    // Fire and forget: a full run takes many minutes, far beyond an interaction's lifetime.
+    // Progress is persisted after every request; /nep warmup status follows it.
+    bootstrap.run(guildId).catch((err) => log.warn('admin: warmup run failed', { error: err }));
+    return 'warmup started: channels, then people, then the server. Follow it with /nep warmup status.';
   }
 
   /** `/nep warmup stop` (F43/F44): ends any warmup work in flight for good -- the full run, a
