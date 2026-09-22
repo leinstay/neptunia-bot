@@ -74,12 +74,13 @@ export function buildCommandTree(commandName) {
             {
               type: STRING,
               name: 'role',
-              description: 'Which role to ping (default: all three).',
+              description: 'Which role to ping (default: all four).',
               required: false,
               choices: [
                 { name: 'talk', value: 'talk' },
                 { name: 'analyzer', value: 'analyzer' },
                 { name: 'media', value: 'media' },
+                { name: 'followup', value: 'followup' },
               ],
             },
           ],
@@ -325,7 +326,7 @@ export function buildCommandTree(commandName) {
         {
           type: SUBCOMMAND_GROUP,
           name: 'model',
-          description: 'Which model talks, analyzes memory, and describes pictures.',
+          description: 'Which model talks, analyzes memory, describes pictures, and classifies follow-ups.',
           options: [
             { type: SUBCOMMAND, name: 'show', description: 'Show the model configured for each role.' },
             {
@@ -342,6 +343,7 @@ export function buildCommandTree(commandName) {
                     { name: 'talk', value: 'talk' },
                     { name: 'analyzer', value: 'analyzer' },
                     { name: 'media', value: 'media' },
+                    { name: 'followup', value: 'followup' },
                   ],
                 },
                 { type: STRING, name: 'id', description: 'OpenRouter model id.', required: true },

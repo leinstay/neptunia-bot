@@ -1231,7 +1231,7 @@ export function createAdmin({
   }
 
   const MODEL_ID_RE = /^[\w.:/-]{3,100}$/;
-const MODEL_ROLE_PATHS = { talk: 'llm.model', analyzer: 'memory.model', media: 'media.model' };
+const MODEL_ROLE_PATHS = { talk: 'llm.model', analyzer: 'memory.model', media: 'media.model', followup: 'mention.followUpModel' };
 
 function cmdModelShow() {
   const cfg = hot.config;
@@ -1239,6 +1239,7 @@ function cmdModelShow() {
     `talk: ${cfg?.llm?.model ?? '-'}`,
     `analyzer: ${cfg?.memory?.model ?? cfg?.llm?.model ?? '-'}`,
     `media: ${cfg?.media?.model ?? '-'}`,
+    `followup: ${cfg?.mention?.followUpModel ?? cfg?.media?.model ?? '-'}`,
     `mediaDescriptions: ${cfg?.features?.mediaDescriptions === true ? 'on' : 'off'}`,
   ];
   return lines.join('\n');
@@ -1247,7 +1248,7 @@ function cmdModelShow() {
 function cmdModelSet(args) {
   const role = String(args?.role ?? '');
   const dottedPath = MODEL_ROLE_PATHS[role];
-  if (!dottedPath) throw new Error(`unknown role: ${role} (talk, analyzer, media)`);
+  if (!dottedPath) throw new Error(`unknown role: ${role} (talk, analyzer, media, followup)`);
 
   const id = String(args?.id ?? '').trim();
   if (!MODEL_ID_RE.test(id)) throw new Error('id must look like a model id, e.g. anthropic/claude-haiku-4.5 (3-100 chars)');
@@ -1267,13 +1268,14 @@ function cmdModelSet(args) {
 // / `skipCalibration` options), never writes under data/.
 // ---------------------------------------------------------------------
 
-const PING_ROLES = ['talk', 'analyzer', 'media'];
+const PING_ROLES = ['talk', 'analyzer', 'media', 'followup'];
 
 /** The model id one role resolves to right now — mirrors cmdModelShow/MODEL_ROLE_PATHS. */
 function pingModelFor(role, cfg) {
   if (role === 'talk') return cfg?.llm?.model || undefined;
   if (role === 'analyzer') return cfg?.memory?.model || cfg?.llm?.model || undefined;
   if (role === 'media') return cfg?.media?.model || undefined;
+  if (role === 'followup') return cfg?.mention?.followUpModel || cfg?.media?.model || undefined;
   return undefined;
 }
 

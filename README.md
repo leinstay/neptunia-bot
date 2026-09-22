@@ -339,7 +339,7 @@ One Discord slash command, `/nep` (the name comes from `bot.commandName`). Guild
 |---|---|
 | `/nep status` | Model, calibration, quotas and per-guild memory status |
 | `/nep reload` | Reload config and prompts now |
-| `/nep ping [role]` | Send a minimal request to one or all model roles (`talk`, `analyzer`, `media`) and report model, latency, provider, tokens or the error; does not count against `llm.maxRequestsPerDay` and works while paused or warming up |
+| `/nep ping [role]` | Send a minimal request to one or all model roles (`talk`, `analyzer`, `media`, `followup`) and report model, latency, provider, tokens or the error; does not count against `llm.maxRequestsPerDay` and works while paused or warming up |
 | `/nep pause` | Stop all activity, flush memory to disk and unload it; `data/` is safe to edit while paused |
 | `/nep resume` | Reload memory from `data/` and continue; refuses if any JSON file does not parse, naming the broken ones |
 | `/nep poke [mode] [channel]` | Force a spontaneous action |
@@ -348,8 +348,8 @@ One Discord slash command, `/nep` (the name comes from `bot.commandName`). Guild
 | `/nep rule add <text>` | Append a rule to `prompts.local/rules.md` |
 | `/nep rule list` | List the rules, numbered |
 | `/nep rule remove <number>` | Remove a rule by number |
-| `/nep model show` | Show active models for each role (`talk`, `analyzer`, `media`) |
-| `/nep model set <role> <id>` | Set the model for a role (`talk`, `analyzer`, `media`) |
+| `/nep model show` | Show active models for each role (`talk`, `analyzer`, `media`, `followup`) |
+| `/nep model set <role> <id>` | Set the model for a role (`talk`, `analyzer`, `media`, `followup`) |
 | `/nep memory show <user> [section] [limit] [order]` | Without a section: compact summary. Sections: `character`, `style`, `relationship`, `affinity`, `aliases`, `interests`, `details`, `episodes`, `raw` (stored JSON). List sections take `limit` 1..100 (default 25) and `order`: `rank` (default, divider at the visibility cutoff) or `recent`. Stored member references resolve to the current name, except in `raw` |
 | `/nep memory refresh <user>` | Force a portrait refresh for a member |
 | `/nep memory forget <user>` | Delete a stored profile |

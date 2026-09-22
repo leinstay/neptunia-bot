@@ -496,7 +496,7 @@ function makeHotWithMedia(rootDir) {
   return hot;
 }
 
-test('run: model.show reports talk/analyzer/media models and whether mediaDescriptions is on', async () => {
+test('run: model.show reports talk/analyzer/media/followup models and whether mediaDescriptions is on', async () => {
   const rootDir = makeRoot();
   const hot = makeHotWithMedia(rootDir);
   const { admin } = makeAdmin(rootDir, { hot });
@@ -505,7 +505,18 @@ test('run: model.show reports talk/analyzer/media models and whether mediaDescri
 
   assert.ok(result.includes('talk: anthropic/claude-opus-4.6'));
   assert.ok(result.includes('media: anthropic/claude-haiku-4.5'));
+  assert.ok(result.includes('followup: anthropic/claude-haiku-4.5'));
   assert.ok(result.includes('mediaDescriptions: off'));
+});
+
+test('run: model.show reports the configured followup model, when set, instead of falling back to media', async () => {
+  const rootDir = makeRoot();
+  const hot = makeHotWithMedia(rootDir);
+  hot.config.mention = { followUpModel: 'openrouter/followup-model' };
+  const { admin } = makeAdmin(rootDir, { hot });
+
+  const result = await admin.run('model.show', {}, {});
+  assert.ok(result.includes('followup: openrouter/followup-model'));
 });
 
 test('run: model.show falls back to the talk model for the analyzer when memory.model is unset', async () => {
@@ -539,19 +550,21 @@ test('run: model.set writes the right config path for each role', async () => {
 
   await admin.run('model.set', { role: 'analyzer', id: 'openrouter/cheap-model' }, {});
   await admin.run('model.set', { role: 'media', id: 'anthropic/claude-haiku-4.5' }, {});
+  await admin.run('model.set', { role: 'followup', id: 'openrouter/followup-model' }, {});
   assert.deepEqual(readLocal(rootDir), {
     llm: { model: 'anthropic/claude-opus-4.6' },
     memory: { model: 'openrouter/cheap-model' },
     media: { model: 'anthropic/claude-haiku-4.5' },
+    mention: { followUpModel: 'openrouter/followup-model' },
   });
-  assert.equal(hot.reloadConfigCalls, 3);
+  assert.equal(hot.reloadConfigCalls, 4);
 });
 
 test('run: model.set rejects an unknown role and writes nothing', async () => {
   const rootDir = makeRoot();
   const { admin } = makeAdmin(rootDir, { hot: makeHotWithMedia(rootDir) });
 
-  await assert.rejects(() => admin.run('model.set', { role: 'bogus', id: 'x/y' }, {}), /unknown role/);
+  await assert.rejects(() => admin.run('model.set', { role: 'bogus', id: 'x/y' }, {}), /unknown role: bogus \(talk, analyzer, media, followup\)/);
   assert.equal(fs.existsSync(path.join(rootDir, 'config.local.json')), false);
 });
 
@@ -596,7 +609,7 @@ function hotForPing(rootDir, { label = true } = {}) {
   return hot;
 }
 
-test('run: ping pings talk/analyzer/media in parallel and reports latency, provider and tokens', async () => {
+test('run: ping pings talk/analyzer/media/followup in parallel and reports latency, provider and tokens', async () => {
   const rootDir = makeRoot();
   const hot = hotForPing(rootDir);
   hot.config.memory.model = 'openrouter/analyzer-model'; // distinct from talk, so every role gets its own call
@@ -612,10 +625,29 @@ test('run: ping pings talk/analyzer/media in parallel and reports latency, provi
   const body = await admin.run('ping', {}, {});
   const lines = body.split('\n');
 
-  assert.equal(llm.calls.length, 3, 'talk, analyzer and media are three distinct models here');
+  assert.equal(llm.calls.length, 3, 'talk, analyzer and media are three distinct models here; followup falls back to media');
   assert.ok(lines.some((l) => l.startsWith('talk: anthropic/claude-opus-4.6 — ok,') && l.includes('provider=provider-for-anthropic/claude-opus-4.6') && l.includes('tokens 5/1')));
   assert.ok(lines.some((l) => l.startsWith('analyzer: openrouter/analyzer-model — ok,')));
   assert.ok(lines.some((l) => l.startsWith('media: anthropic/claude-haiku-4.5 — ok,')));
+  assert.ok(lines.some((l) => l.startsWith('followup: anthropic/claude-haiku-4.5 — ok,')));
+});
+
+test('run: ping resolves the followup role to mention.followUpModel when set, media.model when not', async () => {
+  const rootDir = makeRoot();
+  const hot = hotForPing(rootDir);
+  const llm = fakeLlm(() => ({ text: 'pong', usage: {}, estimated: 1 }));
+  const { admin: adminFallback } = makeAdmin(rootDir, { hot, llm });
+
+  const fallbackBody = await adminFallback.run('ping', { role: 'followup' }, {});
+  assert.ok(fallbackBody.startsWith('followup: anthropic/claude-haiku-4.5 — ok,'));
+
+  const hotWithFollowUp = hotForPing(rootDir);
+  hotWithFollowUp.config.mention = { followUpModel: 'openrouter/followup-model' };
+  const llm2 = fakeLlm(() => ({ text: 'pong', usage: {}, estimated: 1 }));
+  const { admin: adminSet } = makeAdmin(rootDir, { hot: hotWithFollowUp, llm: llm2 });
+
+  const setBody = await adminSet.run('ping', { role: 'followup' }, {});
+  assert.ok(setBody.startsWith('followup: openrouter/followup-model — ok,'));
 });
 
 test('run: ping calls llm.complete with the ping prompt, 16 max tokens, no daily cap and no calibration', async () => {
@@ -670,10 +702,11 @@ test('run: ping de-duplicates identical models: one call, reported for every rol
   const body = await admin.run('ping', {}, {});
   const lines = body.split('\n');
 
-  assert.equal(llm.calls.length, 2, 'talk+analyzer share one model, media is distinct: two calls');
-  assert.equal(lines.length, 3, 'still one line per requested role');
+  assert.equal(llm.calls.length, 2, 'talk+analyzer share one model, media (and followup, which falls back to it) share another: two calls');
+  assert.equal(lines.length, 4, 'still one line per requested role');
   assert.ok(lines.some((l) => l.startsWith('talk: anthropic/claude-opus-4.6 — ok,')));
   assert.ok(lines.some((l) => l.startsWith('analyzer: anthropic/claude-opus-4.6 — ok,')));
+  assert.ok(lines.some((l) => l.startsWith('followup: anthropic/claude-haiku-4.5 — ok,')));
 });
 
 // A real "wrong provider keys" 404 body captured from OpenRouter, verbatim -- see the
@@ -766,7 +799,7 @@ test('run: ping reports every role skipped when labels.ping.prompt is missing, w
 
   assert.equal(llm.calls.length, 0);
   const lines = body.split('\n');
-  assert.equal(lines.length, 3);
+  assert.equal(lines.length, 4);
   assert.ok(lines.every((l) => l.includes('skipped: label missing')));
 });
 

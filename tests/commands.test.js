@@ -72,7 +72,7 @@ test('buildCommandTree: top-level leaves (status, ping, reload, pause, resume, p
   const pingRole = findOption(ping.options, 'role');
   assert.equal(pingRole.type, 3); // STRING
   assert.equal(pingRole.required, false);
-  assert.deepEqual(pingRole.choices.map((c) => c.value), ['talk', 'analyzer', 'media']);
+  assert.deepEqual(pingRole.choices.map((c) => c.value), ['talk', 'analyzer', 'media', 'followup']);
 
   const pause = findOption(command.options, 'pause');
   assert.equal(pause.type, 1); // SUBCOMMAND
@@ -227,6 +227,22 @@ test('buildCommandTree: lore group (add/list/show/remove)', () => {
 
   const remove = findOption(lore.options, 'remove');
   assert.equal(findOption(remove.options, 'id').required, true);
+});
+
+test('buildCommandTree: model group (show/set) role choices include talk/analyzer/media/followup', () => {
+  const [command] = buildCommandTree('nep');
+  const model = findOption(command.options, 'model');
+  assert.equal(model.type, 2); // SUBCOMMAND_GROUP
+  assert.deepEqual(
+    model.options.map((o) => o.name),
+    ['show', 'set'],
+  );
+
+  const set = findOption(model.options, 'set');
+  const role = findOption(set.options, 'role');
+  assert.equal(role.type, 3); // STRING
+  assert.equal(role.required, true);
+  assert.deepEqual(role.choices.map((c) => c.value), ['talk', 'analyzer', 'media', 'followup']);
 });
 
 test('buildCommandTree: warmup group (people, run, stop, users, channels, server, status, reset)', () => {
