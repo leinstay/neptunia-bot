@@ -172,6 +172,21 @@ function detailsText(details, labels, maxDetails, marks) {
 }
 
 /**
+ * The compact `<people>` interests line's `{text}` (F47): just the top 5
+ * stored interests BY RANK (see `interestsText` above), bare topics only --
+ * no note, no unsure/stale marks. `''` when there is nothing to show. The 5
+ * cap is fixed in code, not `maxInterests` -- a compact profile is meant to
+ * cost a fraction of a full one regardless of how many interests are
+ * configured to show for the interlocutor.
+ */
+function compactInterestsText(interests, labels, halfLifeDays) {
+  if (!Array.isArray(interests) || interests.length === 0) return '';
+  return topByRank(interests, 5, halfLifeDays)
+    .map((item) => item.topic)
+    .join('; ');
+}
+
+/**
  * The `labels.profile.aliases` line's `{text}`: the top `maxAliases` stored
  * alias names (see src/memory/aliases.js) by RANK (decayed with
  * `aliasHalfLifeDays`), comma-separated -- see .claude/docs/prompt-contract.md,
@@ -211,12 +226,22 @@ function aliasesText(aliases, labels, maxAliases, aliasHalfLifeDays) {
  * at the moment of use, and the injectable clock) drive the unsure/stale
  * marks on interests and details -- see `markConfirmation`; omitted, nothing
  * is ever marked.
+ *
+ * `opts.compact` (F47) renders the SHORT form used for `<people>` priority
+ * (c), the other recent participants: current name, aliases, `character`
+ * (as stored), the attitude line, and the top 5 interests (bare topics, no
+ * note) -- no former names, no `style`, no `details`, no `relationship`, no
+ * message count, no episodes even for the interlocutor. Never passed
+ * alongside `interlocutor: true` in practice (the interlocutor is always
+ * rendered in full), but `compact` wins over `interlocutor` for episodes
+ * either way.
  */
 export function renderProfile(
   profile,
   labels,
   {
     interlocutor = false,
+    compact = false,
     relationships = false,
     episodes,
     maxInterests,
@@ -250,25 +275,27 @@ export function renderProfile(
   }
 
   const restLines = [];
-  if (profile.names?.length > 1) restLines.push(fill(p.formerNames, { names: profile.names.slice(1).join(', ') }));
+  if (!compact && profile.names?.length > 1) restLines.push(fill(p.formerNames, { names: profile.names.slice(1).join(', ') }));
   const aliasesLine = aliasesText(profile.aliases, labels, maxAliases, aliasHalfLifeDays);
   if (aliasesLine) restLines.push(fill(p.aliases, { text: aliasesLine }));
   if (profile.character) restLines.push(fill(p.character, { text: resolveChatText(profile.character, nameOf) }));
-  const interestsLine = interestsText(profile.interests, labels, maxInterests, marks);
+  const interestsLine = compact
+    ? compactInterestsText(profile.interests, labels, interestHalfLifeDays)
+    : interestsText(profile.interests, labels, maxInterests, marks);
   if (interestsLine) restLines.push(fill(p.interests, { text: interestsLine }));
-  if (profile.style) restLines.push(fill(p.style, { text: resolveChatText(profile.style, nameOf) }));
-  const detailsLine = detailsText(profile.details, labels, maxDetails, marks);
+  if (!compact && profile.style) restLines.push(fill(p.style, { text: resolveChatText(profile.style, nameOf) }));
+  const detailsLine = compact ? '' : detailsText(profile.details, labels, maxDetails, marks);
   if (detailsLine) restLines.push(fill(p.details, { text: detailsLine }));
-  if (profile.relationship) restLines.push(fill(p.relationship, { text: resolveChatText(profile.relationship, nameOf) }));
+  if (!compact && profile.relationship) restLines.push(fill(p.relationship, { text: resolveChatText(profile.relationship, nameOf) }));
   const hasContent = attitudeLines.length > 0 || restLines.length > 0;
   if (!hasContent && !interlocutor) return '';
   if (!hasContent) restLines.push(p.unknown);
-  if (profile.messageCount) restLines.push(fill(p.messageCount, { count: profile.messageCount }));
+  if (!compact && profile.messageCount) restLines.push(fill(p.messageCount, { count: profile.messageCount }));
 
   const mark = interlocutor ? p.interlocutorMark : '';
   const heading = `## ${name}${mark}`;
 
-  let renderedEpisodes = interlocutor && episodes?.enabled ? episodeLines(profile.episodes, labels, nameOf) : [];
+  let renderedEpisodes = interlocutor && !compact && episodes?.enabled ? episodeLines(profile.episodes, labels, nameOf) : [];
   if (renderedEpisodes.length && typeof episodes.cap === 'number' && typeof episodes.cost === 'function') {
     const restText = [heading, ...attitudeLines, ...restLines].join('\n');
     renderedEpisodes = fitEpisodeLines(renderedEpisodes, episodes.cap - episodes.cost(restText), episodes.cost);
@@ -449,37 +476,134 @@ function renderSenses(config, labels) {
   return lines.filter(Boolean).join('\n');
 }
 
+const ASKED_ABOUT_SCAN_MESSAGES = 5;
+
+/** Whether `ch` is a letter/digit/underscore (Unicode-aware) -- same word-char
+ * notion as `occursAsWholeWord` (src/memory/mentions.js), duplicated locally
+ * so `nameOccurs` below stays a pure, single-purpose function. */
+function isWordChar(ch) {
+  return ch !== undefined && /[\p{L}\p{N}_]/u.test(ch);
+}
+
 /**
- * Silent members pulled into `<people>` by name/alias -- see
- * .claude/docs/prompt-contract.md, "Aliases": a member whose current name OR
- * a shown alias occurs as a whole word (case-insensitive) in `scanText` is
- * added even though they have not spoken. Names/aliases shorter than 3
- * characters never trigger. `excludeIds` skips whoever is already covered
- * (the interlocutor, the actual participants). One pass over the lower-cased
- * text per candidate name -- pure, cheap, no I/O.
- * @param {string} scanText
- * @param {object[]} candidates          Every known profile to consider (store.listUserProfiles).
- * @param {Set<string>} excludeIds
+ * Whether `nameLower` (already lower-cased) is "named" inside `haystackLower`
+ * for the purpose of pulling someone into `<people>` -- see
+ * .claude/docs/prompt-contract.md, "Aliases". A name of 4+ characters also
+ * matches at the START of a longer word (a declined/compound form of a short
+ * nickname, e.g. `vert` inside `vertexia`, still counts); a name of exactly
+ * 3 characters (the caller's minimum, see `isAskedAbout` below) must match a
+ * WHOLE word, so a short unrelated word is never swallowed as a false-positive
+ * prefix (`max` must not match `maximum`).
+ */
+function nameOccurs(haystackLower, nameLower) {
+  if (nameLower.length < 4) return occursAsWholeWord(haystackLower, nameLower);
+  let from = 0;
+  for (;;) {
+    const at = haystackLower.indexOf(nameLower, from);
+    if (at === -1) return false;
+    if (!isWordChar(haystackLower[at - 1])) return true;
+    from = at + 1;
+  }
+}
+
+/** A profile's current name plus its top-ranked shown aliases -- everything it can be recognised by. */
+function profileNames(profile, maxAliases, aliasHalfLifeDays) {
+  const names = [];
+  if (typeof profile?.names?.[0] === 'string') names.push(profile.names[0]);
+  for (const alias of topByRank(Array.isArray(profile?.aliases) ? profile.aliases : [], maxAliases, aliasHalfLifeDays)) {
+    if (typeof alias?.name === 'string') names.push(alias.name);
+  }
+  return names;
+}
+
+/**
+ * The window that decides who the persona is being asked about (`<people>`
+ * priority (b), F47): the trigger message plus the last `ASKED_ABOUT_SCAN_MESSAGES`
+ * messages of `history` (trigger is usually already the newest of those, but
+ * is added explicitly in case it is not). Real mention ids
+ * (`normalizeMessage`'s `mentionedUserIds`, see src/discord/collect.js) are the
+ * strongest signal; the plain lower-cased text is the fallback for a name/alias
+ * match (`nameOccurs` above).
+ * @param {object[]} history
+ * @param {object|null} trigger
+ * @returns {{ mentionedIds: Set<string>, scanTextLower: string }}
+ */
+function askedAboutWindow(history, trigger) {
+  const recent = history.slice(-ASKED_ABOUT_SCAN_MESSAGES);
+  const messages = trigger && !recent.some((m) => m.id === trigger.id) ? [...recent, trigger] : recent;
+  const mentionedIds = new Set();
+  const texts = [];
+  for (const message of messages) {
+    for (const id of Array.isArray(message?.mentionedUserIds) ? message.mentionedUserIds : []) mentionedIds.add(String(id));
+    if (typeof message?.content === 'string' && message.content) texts.push(message.content);
+  }
+  return { mentionedIds, scanTextLower: texts.join('\n').toLowerCase() };
+}
+
+/** Whether `profile` is named/@mentioned in the asked-about window (see `askedAboutWindow`). */
+function isAskedAbout(profile, mentionedIds, scanTextLower, maxAliases, aliasHalfLifeDays) {
+  const id = profile?.id === undefined || profile?.id === null ? '' : String(profile.id);
+  if (id && mentionedIds.has(id)) return true;
+  return profileNames(profile, maxAliases, aliasHalfLifeDays).some(
+    (name) => name.length >= 3 && nameOccurs(scanTextLower, name.toLowerCase()),
+  );
+}
+
+/**
+ * Split the people who may appear in `<people>` into `askedAbout` (priority
+ * (b): rendered FULL, ahead of everyone else) and `participants` (priority
+ * (c): the other active participants, rendered COMPACT) -- see F47 /
+ * .claude/docs/prompt-contract.md, "<people>"/"Aliases".
+ *
+ * `otherProfiles` (the active participants, most relevant first) are checked
+ * against the asked-about window first, in order; a match is promoted into
+ * `askedAbout` (up to `maxAskedAbout`), everyone else lands in `participants`.
+ * `candidateProfiles` (every known profile in the guild) are then checked for
+ * a SILENT member who is named/@mentioned but never spoke -- only ever added
+ * to `askedAbout`, never to `participants` (a candidate who neither spoke nor
+ * was asked about has no place in this request at all). `excludeId` (the
+ * interlocutor, already rendered separately in full) is skipped in both.
+ * @param {object[]} otherProfiles
+ * @param {object[]} candidateProfiles
+ * @param {object[]} history
+ * @param {object|null} trigger
+ * @param {string|number|null|undefined} excludeId
+ * @param {number} [maxAskedAbout]        Not a non-negative integer -> no cap.
  * @param {number} [maxAliases]
  * @param {number} [aliasHalfLifeDays]
- * @returns {object[]}
+ * @returns {{ askedAbout: object[], participants: object[] }}
  */
-function pullInByName(scanText, candidates, excludeIds, maxAliases, aliasHalfLifeDays) {
-  if (!scanText || !Array.isArray(candidates) || candidates.length === 0) return [];
-  const lower = scanText.toLowerCase();
-  const pulled = [];
-  for (const profile of candidates) {
+function splitPeople(otherProfiles, candidateProfiles, history, trigger, excludeId, maxAskedAbout, maxAliases, aliasHalfLifeDays) {
+  const { mentionedIds, scanTextLower } = askedAboutWindow(history, trigger);
+  const cap = Number.isInteger(maxAskedAbout) && maxAskedAbout >= 0 ? maxAskedAbout : Infinity;
+  const covered = new Set();
+  if (excludeId !== undefined && excludeId !== null) covered.add(String(excludeId));
+
+  const askedAbout = [];
+  const participants = [];
+
+  for (const profile of Array.isArray(otherProfiles) ? otherProfiles : []) {
     const id = profile?.id === undefined || profile?.id === null ? '' : String(profile.id);
-    if (!id || excludeIds.has(id)) continue;
-    const names = [];
-    if (typeof profile.names?.[0] === 'string') names.push(profile.names[0]);
-    for (const alias of topByRank(Array.isArray(profile.aliases) ? profile.aliases : [], maxAliases, aliasHalfLifeDays)) {
-      if (typeof alias?.name === 'string') names.push(alias.name);
+    if (!id || covered.has(id)) continue;
+    covered.add(id);
+    if (askedAbout.length < cap && isAskedAbout(profile, mentionedIds, scanTextLower, maxAliases, aliasHalfLifeDays)) {
+      askedAbout.push(profile);
+    } else {
+      participants.push(profile);
     }
-    const hit = names.some((name) => name.length >= 3 && occursAsWholeWord(lower, name.toLowerCase()));
-    if (hit) pulled.push(profile);
   }
-  return pulled;
+
+  for (const profile of Array.isArray(candidateProfiles) ? candidateProfiles : []) {
+    if (askedAbout.length >= cap) break;
+    const id = profile?.id === undefined || profile?.id === null ? '' : String(profile.id);
+    if (!id || covered.has(id)) continue;
+    if (isAskedAbout(profile, mentionedIds, scanTextLower, maxAliases, aliasHalfLifeDays)) {
+      covered.add(id);
+      askedAbout.push(profile);
+    }
+  }
+
+  return { askedAbout, participants };
 }
 
 /**
@@ -501,8 +625,9 @@ function pullInByName(scanText, candidates, excludeIds, maxAliases, aliasHalfLif
  * @param {object|null} input.interlocutor Profile of the trigger's author.
  * @param {object[]} input.otherProfiles   Profiles of other people in the transcript, most relevant first.
  * @param {object[]} [input.candidateProfiles]  Every member profile known in the guild
- *   (store.listUserProfiles), scanned to pull a silent member into `<people>` by
- *   name/alias (see `pullInByName` above); [] or omitted -> nobody is pulled in.
+ *   (store.listUserProfiles), scanned to pull a silent member into `<people>` by a
+ *   real mention/name/alias in the trigger or the last few messages (see `splitPeople`
+ *   above); [] or omitted -> nobody is pulled in.
  * @param {(id: string) => (string|null)} [input.nameOf]  Resolves a member id to their
  *   current stored name, for turning every `<@id>` token this request renders into
  *   display text -- see .claude/docs/prompt-contract.md, "Members are referred to by
@@ -570,16 +695,20 @@ export function buildRequest(input) {
     pictures.length * (visionCfg.tokensPerImage ?? 0) -
     TAG_OVERHEAD;
 
-  // Silent members pulled into <people> by name/alias, after the actual
-  // participants (input.otherProfiles) and inside the same token budget --
-  // see .claude/docs/prompt-contract.md, "Aliases".
-  const alreadyCovered = new Set(
-    [input.interlocutor?.id, ...input.otherProfiles.map((profile) => profile?.id)]
-      .filter((id) => id !== undefined && id !== null)
-      .map(String),
+  // <people> priority (b)/(c) (F47): who the trigger message / the last few
+  // messages name or @mention (askedAbout, rendered FULL, no episodes) vs. the
+  // other active participants (participants, rendered COMPACT) -- see
+  // .claude/docs/prompt-contract.md, "Aliases".
+  const { askedAbout, participants } = splitPeople(
+    input.otherProfiles,
+    input.candidateProfiles,
+    history,
+    trigger,
+    input.interlocutor?.id,
+    config.context.askedAboutProfiles,
+    config.memory?.maxAliases,
+    config.memory?.aliasHalfLifeDays,
   );
-  const scanText = history.map((m) => m.content ?? '').join('\n');
-  const pulledByName = pullInByName(scanText, input.candidateProfiles, alreadyCovered, config.memory?.maxAliases, config.memory?.aliasHalfLifeDays);
 
   const episodesOpt = { enabled: episodesOn, cap: caps.interlocutor, cost };
   const { kept, stats, used } = fitSections(
@@ -637,8 +766,8 @@ export function buildRequest(input) {
       {
         name: 'people',
         cap: caps.people,
-        items: [...input.otherProfiles, ...pulledByName]
-          .map((profile) =>
+        items: [
+          ...askedAbout.map((profile) =>
             renderProfile(profile, labels, {
               relationships,
               maxInterests: config.memory?.maxInterests,
@@ -652,8 +781,21 @@ export function buildRequest(input) {
               now,
               nameOf,
             }),
-          )
-          .filter(Boolean),
+          ),
+          ...participants.map((profile) =>
+            renderProfile(profile, labels, {
+              compact: true,
+              relationships,
+              maxAliases: config.memory?.maxAliases,
+              aliasHalfLifeDays: config.memory?.aliasHalfLifeDays,
+              interestHalfLifeDays: config.memory?.interestHalfLifeDays,
+              confirmAfter: config.memory?.confirmAfter,
+              staleDays: config.memory?.interestStaleDays,
+              now,
+              nameOf,
+            }),
+          ),
+        ].filter(Boolean),
       },
       { name: 'neighbors', cap: caps.neighbors, items: neighborItems },
     ],

@@ -47,6 +47,7 @@
     "maxMessageChars": 800,
     "gapMarkerMinutes": 20,
     "otherProfiles": 6,
+    "askedAboutProfiles": 3,
     "tempo": { "liveMessages10min": 4, "deadSilenceMinutes": 45 },
     "caps": { "interlocutor": 3500, "aboutChat": 2500, "people": 4000, "neighbors": 3000, "server": 1500, "lore": 1500 },
     "channelActivity": { "liveMessagesPerDay": 20, "deadAfterDays": 7 },

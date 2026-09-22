@@ -140,6 +140,7 @@ The system prompt handles sounding human, so the card is purely personality. Giv
 | `maxMessageChars` | `800` | Truncate messages beyond this (chars) |
 | `gapMarkerMinutes` | `20` | Time-gap marker threshold (min) |
 | `otherProfiles` | `6` | Max other profiles shown |
+| `askedAboutProfiles` | `3` | Members referred to in the recent messages shown in full, ahead of the other participants |
 | `tempo.liveMessages10min` | `4` | Messages in 10 min = "live" |
 | `tempo.deadSilenceMinutes` | `45` | Silence minutes = "dead" |
 | `caps.interlocutor` | `3500` | Token cap: caller's profile with episodes |

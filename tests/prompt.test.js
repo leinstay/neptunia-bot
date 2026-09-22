@@ -1255,7 +1255,7 @@ test('buildRequest: a candidate already covered as the interlocutor or an active
   assert.equal((user.match(/## Dana/g) ?? []).length, 1, 'Dana appears once, as the interlocutor, not twice');
 });
 
-test('buildRequest: silent members pulled in by name are rendered AFTER the actual participants', () => {
+test('buildRequest: a silent member named in the trigger/recent messages (asked-about) is rendered BEFORE a plain active participant (F47)', () => {
   const history = [makeMessage(1, NOW - MIN, { authorName: 'Carl', content: 'Dana would find this funny' })];
   const otherProfiles = [{ id: 'p2', names: ['Carl'], character: 'talkative' }];
   const candidateProfiles = [{ id: 'p9', names: ['Dana'], character: 'sarcastic' }];
@@ -1263,11 +1263,177 @@ test('buildRequest: silent members pulled in by name are rendered AFTER the actu
   const user = request.messages[1].content;
   const carlIdx = user.indexOf('## Carl');
   const danaIdx = user.indexOf('## Dana');
-  assert.ok(carlIdx !== -1 && danaIdx !== -1 && carlIdx < danaIdx);
+  // Dana is named in the trigger/recent-messages window -- priority (b), rendered FULL and first.
+  // Carl only spoke -- priority (c), rendered COMPACT and after: the budget trims (c) before (b).
+  assert.ok(danaIdx !== -1 && carlIdx !== -1 && danaIdx < carlIdx);
+  assert.ok(user.includes('character: sarcastic'), 'Dana (asked-about) is rendered in full');
 });
 
 test('buildRequest: no candidateProfiles at all pulls nobody in and never throws', () => {
   const history = [makeMessage(1, NOW - MIN, { content: 'Dana would love this joke' })];
   const request = buildRequest(baseInput({ history }));
   assert.ok(!request.messages[1].content.includes('## Dana'));
+});
+
+// --- renderProfile: compact (F47) -----------------------------------------------
+
+test('renderProfile: compact renders current name, aliases, character, attitude and up to 5 bare-topic interests -- nothing else', () => {
+  const profile = {
+    id: 'p1',
+    names: ['Carl', 'OldCarl'],
+    aliases: [aliasFixture({ name: 'Carlito', weight: 5 })],
+    character: 'calm',
+    style: 'terse',
+    relationship: 'friendly rival',
+    messageCount: 42,
+    affinity: { score: 10, reason: 'helped once', history: [] },
+    interests: [
+      interestFixture({ topic: 'Chess', note: 'weekly club', weight: 6 }),
+      interestFixture({ topic: 'Anime', note: '', weight: 5 }),
+      interestFixture({ topic: 'Coffee', note: '', weight: 4 }),
+      interestFixture({ topic: 'Hiking', note: '', weight: 3 }),
+      interestFixture({ topic: 'Chess variants', note: '', weight: 2 }),
+      interestFixture({ topic: 'Bonsai', note: '', weight: 1 }),
+    ],
+    details: [{ id: 'd1', text: 'lives nearby', weight: 3 }],
+    episodes: [episodeFixture()],
+  };
+  const text = renderProfile(profile, labels, { compact: true, relationships: true });
+  assert.equal(
+    text,
+    [
+      '## Carl',
+      'attitude: 10 (warm) — helped once',
+      'Called: Carlito',
+      'character: calm',
+      'interests: Chess; Anime; Coffee; Hiking; Chess variants',
+    ].join('\n'),
+  );
+});
+
+test('renderProfile: compact omits former names, style, details, relationship, message count and episodes', () => {
+  const profile = {
+    id: 'p1',
+    names: ['Carl', 'OldCarl'],
+    character: 'calm',
+    style: 'terse',
+    relationship: 'friendly rival',
+    messageCount: 42,
+    interests: [interestFixture({ topic: 'Chess', note: 'weekly club', weight: 6 })],
+    details: [{ id: 'd1', text: 'lives nearby', weight: 3 }],
+    episodes: [episodeFixture()],
+  };
+  const text = renderProfile(profile, labels, { compact: true, interlocutor: true, episodes: { enabled: true } });
+  assert.ok(!text.includes('formerly known as'));
+  assert.ok(!text.includes('style:'));
+  assert.ok(!text.includes('details:'));
+  assert.ok(!text.includes('relationship with you:'));
+  assert.ok(!text.includes('messages you have seen'));
+  assert.ok(!text.includes(labels.profile.episodes));
+  assert.ok(!text.includes('(weekly club)'), 'compact interests drop the note');
+});
+
+test('renderProfile: compact interests cap at 5 regardless of maxInterests', () => {
+  const profile = {
+    id: 'p1',
+    names: ['Carl'],
+    interests: [
+      interestFixture({ topic: 'A', weight: 6 }),
+      interestFixture({ topic: 'B', weight: 5 }),
+      interestFixture({ topic: 'C', weight: 4 }),
+      interestFixture({ topic: 'D', weight: 3 }),
+      interestFixture({ topic: 'E', weight: 2 }),
+      interestFixture({ topic: 'F', weight: 1 }),
+    ],
+  };
+  const text = renderProfile(profile, labels, { compact: true, maxInterests: 100 });
+  assert.ok(text.includes('interests: A; B; C; D; E'));
+  assert.ok(!text.includes('F'));
+});
+
+// --- buildRequest: <people> priority (a)/(b)/(c) (F47) --------------------------
+
+test('buildRequest: a name of 4+ characters also matches as the START of a longer word in the transcript', () => {
+  const history = [makeMessage(1, NOW - MIN, { content: 'ask Vertexia about it' })];
+  const candidateProfiles = [{ id: 'p9', names: ['Vertex'], character: 'helpful' }];
+  const request = buildRequest(baseInput({ history, candidateProfiles }));
+  const user = request.messages[1].content;
+  assert.ok(user.includes('## Vertex'));
+});
+
+test('buildRequest: a name of exactly 3 characters must match a WHOLE word, never as a prefix', () => {
+  const history = [makeMessage(1, NOW - MIN, { content: 'the maximum output is high' })];
+  const candidateProfiles = [{ id: 'p9', names: ['Max'], character: 'brief' }];
+  const request = buildRequest(baseInput({ history, candidateProfiles }));
+  const user = request.messages[1].content;
+  assert.ok(!user.includes('## Max'), '"maximum" must not match the 3-character name "Max" as a prefix');
+});
+
+test('buildRequest: a name of exactly 3 characters still matches a whole word', () => {
+  const history = [makeMessage(1, NOW - MIN, { content: 'ask Max about it' })];
+  const candidateProfiles = [{ id: 'p9', names: ['Max'], character: 'brief' }];
+  const request = buildRequest(baseInput({ history, candidateProfiles }));
+  const user = request.messages[1].content;
+  assert.ok(user.includes('## Max'));
+});
+
+test('buildRequest: a real @mention (mentionedUserIds) pulls a silent member in even when their name is never written out', () => {
+  const history = [makeMessage(1, NOW - MIN, { content: 'hey what do you think of them', mentionedUserIds: ['p9'] })];
+  const candidateProfiles = [{ id: 'p9', names: ['Quinn'], character: 'quiet' }];
+  const request = buildRequest(baseInput({ history, candidateProfiles }));
+  const user = request.messages[1].content;
+  assert.ok(user.includes('## Quinn'));
+});
+
+test('buildRequest: an active participant explicitly @mentioned in the trigger is promoted to FULL, ahead of plain compact participants', () => {
+  const trigger = makeMessage(2, NOW - MIN, { authorName: 'Asker', content: 'what does Carl think', mentionedUserIds: ['p2'] });
+  const history = [makeMessage(1, NOW - 2 * MIN, { authorName: 'Dana', content: 'nothing interesting' }), trigger];
+  const otherProfiles = [
+    { id: 'p3', names: ['Dana'], character: 'x'.repeat(50) },
+    { id: 'p2', names: ['Carl'], character: 'talkative', style: 'blunt', relationship: 'ally' },
+  ];
+  const request = buildRequest(baseInput({ history, trigger, triggerKind: 'mention', otherProfiles }));
+  const user = request.messages[1].content;
+  const carlIdx = user.indexOf('## Carl');
+  const danaIdx = user.indexOf('## Dana');
+  assert.ok(carlIdx !== -1 && danaIdx !== -1 && carlIdx < danaIdx, 'Carl (asked-about) is rendered before Dana (plain participant)');
+  assert.ok(user.includes('style: blunt'), 'Carl is rendered in full, not compact');
+});
+
+test('context.askedAboutProfiles caps how many members priority (b) may hold; the rest fall back to compact participants', () => {
+  const trigger = makeMessage(3, NOW - MIN, { authorName: 'Asker', content: 'Ann, Bob and Cid, what do you all think' });
+  const otherProfiles = [
+    { id: 'p1', names: ['Ann'], character: 'a' },
+    { id: 'p2', names: ['Bob'], character: 'b' },
+    { id: 'p3', names: ['Cid'], character: 'c' },
+  ];
+  const config = fakeConfig({ context: { caps: { interlocutor: 2500, aboutChat: 2500, people: 4000, neighbors: 3000, server: 2500, lore: 1500 }, askedAboutProfiles: 2 } });
+  const request = buildRequest(baseInput({ config, history: [trigger], trigger, triggerKind: 'mention', otherProfiles }));
+  const user = request.messages[1].content;
+  // Ann and Bob (the first two participants checked, in order) are promoted to priority (b);
+  // Cid, matched too but past the cap, stays a plain compact participant (priority (c)).
+  const annIdx = user.indexOf('## Ann');
+  const bobIdx = user.indexOf('## Bob');
+  const cidIdx = user.indexOf('## Cid');
+  assert.ok(annIdx !== -1 && bobIdx !== -1 && cidIdx !== -1);
+  assert.ok(cidIdx > annIdx && cidIdx > bobIdx, 'the member past the cap renders after the promoted ones');
+});
+
+test('buildRequest: under a tight caps.people, the member asked about survives while active participants are trimmed', () => {
+  // Reproduces the measured regression: six active participants blowing a 4k
+  // cap dropped the one member the caller was actually asking about.
+  const trigger = makeMessage(7, NOW - MIN, { authorName: 'Asker', content: 'what is Wanda up to lately' });
+  const otherProfiles = Array.from({ length: 6 }, (_, i) => ({
+    id: `p${i}`,
+    names: [`Member${i}`],
+    character: 'x'.repeat(1000),
+  }));
+  const candidateProfiles = [{ id: 'target', names: ['Wanda'], character: 'brief and sharp' }];
+  const config = fakeConfig({ context: { caps: { interlocutor: 2500, aboutChat: 2500, people: 900, neighbors: 3000, server: 2500, lore: 1500 } } });
+  const request = buildRequest(
+    baseInput({ config, history: [trigger], trigger, triggerKind: 'mention', otherProfiles, candidateProfiles }),
+  );
+  const user = request.messages[1].content;
+  assert.ok(user.includes('## Wanda'), 'the member asked about must survive the tight cap');
+  assert.ok(request.stats.people.dropped > 0, 'at least one active participant is trimmed under the tight cap');
 });

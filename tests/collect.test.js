@@ -337,6 +337,19 @@ test('normalizeMessage: a forward with no guild on the message never throws, for
   assert.equal(m.replyToId, null);
 });
 
+// --- normalizeMessage: mentionedUserIds (F47) ---------------------------------
+
+test('normalizeMessage: mentionedUserIds carries the real mention ids, in order', () => {
+  const raw = rawMessage({ mentions: { users: new Map([['u2', {}], ['u3', {}]]) } });
+  const m = normalizeMessage(raw, 'self');
+  assert.deepEqual(m.mentionedUserIds, ['u2', 'u3']);
+});
+
+test('normalizeMessage: no mentions at all means an empty mentionedUserIds array', () => {
+  const m = normalizeMessage(rawMessage(), 'self');
+  assert.deepEqual(m.mentionedUserIds, []);
+});
+
 // --- fetchHistory: embedTextChars reaches normalizeMessage -------------------
 
 test('fetchHistory: threads embedTextChars through to the embed classification', async () => {
