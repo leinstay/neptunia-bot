@@ -83,7 +83,7 @@ Return a user when this batch gave something new or an opinion shift. Every key 
 
 **`portrait`** — an optional one-line cue about what the stored `character` or `style` misses or gets wrong. Return it ONLY when this batch showed a recurring habit in a main channel or a change in how the person writes that the stored text does not capture or contradicts. Code refreshes the portrait separately; most batches have no `portrait` for anyone.
 
-What counts as a character habit worth flagging: how the person acts with others — not skills, knowledge, jobs, hobbies or one-offs. Habits beat labels: "stubborn" is a label; "argues one wrong point for a week" is the habit. Flaws as readily as virtues. What counts as a style observation: how they write (length, rhythm, vocabulary, emoji), not what they talk about.
+What counts as a character habit worth flagging: how the person acts with others — not skills, knowledge, jobs, hobbies or one-offs. Habits beat labels: "stubborn" is a label; "argues one wrong point for a week" is the habit, never a compressed reference to one moment that only makes sense with the conversation. Flaws as readily as virtues. What counts as a style observation: how they write (length, rhythm, vocabulary, emoji), not what they talk about.
 
 **`relationship`** — how {{name}} and this person stand, not news or their relations with others. ≤ {{fieldChars}} chars; returned only when it must change.
 

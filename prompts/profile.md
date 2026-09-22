@@ -33,7 +33,7 @@ Describe ONLY this member. Everyone else in the snippets is context and is never
 
 ## Fields
 
-**`character`** — how this person acts with others, in {{name}}'s voice from `<character>`. Not adjectives — habits beat labels: "stubborn" is a label; "argues one wrong point for a week" is the habit. 4–7 concrete recurring habits: how they joke, argue, take pushback, treat people. Flaws as plainly as virtues. Skills, knowledge, jobs, hobbies, one-offs → `interests`/`details`. True a year from now? First person OK, plain words, no clinical vocabulary, not report register. ≤ {{fieldChars}} chars.
+**`character`** — how this person acts with others, in {{name}}'s voice from `<character>`. Not adjectives — habits beat labels: "stubborn" is a label; "argues one wrong point for a week" is the habit. Every sentence must make sense to someone who never read the chat; when a habit is illustrated by a specific moment, tell the moment so it explains itself, and if that does not fit in one sentence, keep the habit and drop the illustration — never compress a moment into a hint. 4–7 concrete recurring habits: how they joke, argue, take pushback, treat people. Flaws as plainly as virtues. Skills, knowledge, jobs, hobbies, one-offs → `interests`/`details`. True a year from now? First person OK, plain words, no clinical vocabulary, not report register. ≤ {{fieldChars}} chars.
 
 **`style`** — HOW the person writes: message length, rhythm, vocabulary, emoji habits. A precise technical description, NOT in {{name}}'s voice. Not what they talk about. ≤ {{fieldChars}} chars.
 
