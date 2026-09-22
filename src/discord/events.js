@@ -175,6 +175,7 @@ export function createMessageHandler({
           kind: ping.kind,
           reason: decision.reason,
           ignoreChance: decision.ignoreChance,
+          roll: decision.roll === undefined ? undefined : Math.round(decision.roll * 100) / 100,
           author: ping.trigger.authorId,
           channel: ping.channelId,
           deferred: true,
@@ -311,6 +312,7 @@ export function createMessageHandler({
         kind,
         reason: decision.reason,
         ignoreChance: decision.ignoreChance,
+        roll: decision.roll === undefined ? undefined : Math.round(decision.roll * 100) / 100,
         author: normalized.authorId,
         channel: message.channel.id,
       });

@@ -64,8 +64,9 @@ export function decideMention({ kind, textLength, recentCalls, neverIgnore, affi
   if (neverIgnore) return { respond: true, reason: 'never-ignore', ignoreChance: 0 };
 
   if (kind === 'name') {
-    const respond = rng() < cfg.nameTriggerChance;
-    return { respond, reason: respond ? 'name' : 'name-unnoticed', ignoreChance: 1 - cfg.nameTriggerChance };
+    const roll = rng();
+    const respond = roll < cfg.nameTriggerChance;
+    return { respond, reason: respond ? 'name' : 'name-unnoticed', ignoreChance: 1 - cfg.nameTriggerChance, roll };
   }
 
   let ignoreChance = cfg.ignoreChance;
@@ -86,8 +87,9 @@ export function decideMention({ kind, textLength, recentCalls, neverIgnore, affi
   }
   ignoreChance = Math.min(0.97, Math.max(0, ignoreChance));
 
-  const respond = rng() >= ignoreChance;
-  return { respond, reason: respond ? 'respond' : `ignored:${reason}`, ignoreChance };
+  const roll = rng();
+  const respond = roll >= ignoreChance;
+  return { respond, reason: respond ? 'respond' : `ignored:${reason}`, ignoreChance, roll };
 }
 
 export const repeatWindowMs = (cfg) => cfg.repeatWindowMinutes * MINUTE;

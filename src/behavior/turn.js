@@ -163,7 +163,7 @@ export function createTurnRunner({
     }
   }
 
-  async function act(channel, parsed, idByIndex, history) {
+  async function act(channel, parsed, idByIndex, history, startedAt = Date.now()) {
     const cfg = hot.config.typing;
     const typingOn = hot.config.features?.typingSimulation !== false;
 
@@ -197,6 +197,7 @@ export function createTurnRunner({
         allowedMentions: { parse: [], users: userIds, repliedUser: true },
       });
       lastPostAt.set(channel.id, Date.now());
+      log.info('turn: sent', { channel: channel.id, chars: text.length, secondsSinceTrigger: Math.round((Date.now() - startedAt) / 100) / 10 });
     }
   }
 
@@ -233,6 +234,7 @@ export function createTurnRunner({
       const selfId = client.user.id;
       const guildId = channel.guild.id;
       const now = Date.now();
+      const startedAt = now;
 
       let history = await fetchHistory(channel, config.context.channelMessages, selfId, config.media?.embedTextChars);
 
@@ -344,6 +346,7 @@ export function createTurnRunner({
 
       log.info('turn: model answered', {
         mode: finalMode,
+        secondsToAnswer: Math.round((Date.now() - startedAt) / 100) / 10,
         channel: channel.id,
         estimated: completion.estimated,
         usage: completion.usage,
@@ -366,7 +369,7 @@ export function createTurnRunner({
         await dryAct(channel, parsed, request.idByIndex, history, finalMode);
         return { outcome: 'spoke', mode: finalMode, dryRun: true };
       }
-      await act(channel, parsed, request.idByIndex, history);
+      await act(channel, parsed, request.idByIndex, history, startedAt);
       return { outcome: 'spoke', mode: finalMode };
     } catch (err) {
       if (err instanceof DailyCapError || err instanceof TokenLimitError) {
