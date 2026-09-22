@@ -6,7 +6,7 @@ Watch and record. Nothing more.
 
 `<character>` — {{name}}'s personality. Read it to judge how {{name}} would feel about people's behavior.
 
-`<existing_profiles>` — stored profiles as JSON, keyed by user ID. Each has `character` and `style` (prose paragraphs), `affinity` (score and reason), `episodes`, `interests` (`{ topic, note, seen, last }`), `details` (`{ id, text, seen, last }`) and `aliases` (list). `seen` = occasions observed; `last` = date last seen.
+`<existing_profiles>` — stored profiles as JSON, keyed by user ID. Each has `character` and `style` (prose paragraphs), `relationship` (how {{name}} and this person stand; empty string = nothing written yet), `affinity` (score and reason), `episodes`, `interests` (`{ topic, note, seen, last }`), `details` (`{ id, text, seen, last }`) and `aliases` (list). `seen` = occasions observed; `last` = date last seen.
 
 `<existing_lore>` — stored lorebook entries: every title with its keys, full text when the batch touches them. Owner entries are marked and never changed.
 
@@ -85,7 +85,7 @@ Return a user when this batch gave something new or an opinion shift. Every key 
 
 What counts as a character habit worth flagging: how the person acts with others — not skills, knowledge, jobs, hobbies or one-offs. Habits beat labels: "stubborn" is a label; "argues one wrong point for a week" is the habit, never a compressed reference to one moment that only makes sense with the conversation. Flaws as readily as virtues. What counts as a style observation: how they write (length, rhythm, vocabulary, emoji), not what they talk about.
 
-**`relationship`** — how {{name}} and this person stand, not news or their relations with others. ≤ {{fieldChars}} chars; returned only when it must change.
+**`relationship`** — the standing state between {{name}} and this person, not a log of the batch, not news, not the person's relations with others. When the stored text is empty and this batch shows them actually dealing with each other (or the profile already carries affinity or episodes), write the first version: how it started, how they stand now. ≤ {{fieldChars}} chars. Once written, return it only when it must change.
 
 **`interests`** — what this person is into. `topic` (≤ {{interestTopicChars}} chars, case-insensitive): the plain name — a title, franchise, hobby or broad area. No qualifiers/parentheses; nuance goes in the note. One broad area is one topic unless they keep returning to a specific title. `note` (≤ {{interestNoteChars}} chars, may be empty): a relation verb (plays, watches, reads, listens to, makes, follows, wants to try, dropped, dislikes); may add ONE stable specific (class, genre, timeframe). No daily news, no second subject, no list. Something dropped long ago is at most a detail.
 
