@@ -335,7 +335,7 @@ export function buildCommandTree(commandName) {
             {
               type: SUBCOMMAND,
               name: 'preview',
-              description: 'Preview a bootstrap profile/channel analysis, without writing anything (give exactly one of user/channel).',
+              description: 'Preview what the bootstrap would write for one member or channel; writes nothing.',
               options: [
                 { type: USER, name: 'user', description: 'Member to preview.', required: false },
                 {
@@ -350,7 +350,7 @@ export function buildCommandTree(commandName) {
             {
               type: SUBCOMMAND,
               name: 'run',
-              description: 'Start/resume the whole run, or (re)do exactly one target now (give at most one of user/channel/server).',
+              description: 'Start or resume the whole run, or redo one member, channel or the server now.',
               options: [
                 { type: USER, name: 'user', description: 'Do this member now.', required: false },
                 {

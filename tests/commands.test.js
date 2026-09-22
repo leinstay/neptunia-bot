@@ -841,3 +841,15 @@ test('autocomplete: a foreign guild is ignored', async () => {
 
   assert.equal(interaction.respondCalls.length, 0);
 });
+
+test('buildCommandTree: every description fits Discord\'s 1..100 character limit', () => {
+  const tree = buildCommandTree('nep');
+  const top = Array.isArray(tree) ? tree[0] : tree;
+  const walk = (o, path) => {
+    if (o.description !== undefined) {
+      assert.ok(o.description.length >= 1 && o.description.length <= 100, `${path}: ${o.description.length} chars`);
+    }
+    for (const x of o.options || []) walk(x, `${path}/${x.name}`);
+  };
+  walk(top, top.name);
+});
