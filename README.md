@@ -82,7 +82,7 @@ Both are hot-reloaded.
 
 The memory analyzer judges how the character feels about people. Both it and the warmup receive your character card and `rules.md`, so include what your character likes and dislikes.
 
-The placeholders, `labels.json` keys, context blocks and output tags every prompt file may use are specified in [`docs/prompt-contract.md`](docs/prompt-contract.md); a change on one side requires the matching change on the other.
+The placeholders, `labels.json` keys, context blocks and output tags every prompt file may use are specified in [`docs/en/prompt-contract.md`](docs/en/prompt-contract.md); a change on one side requires the matching change on the other.
 
 ## Configuration
 
@@ -168,7 +168,7 @@ Memory lives in the process and is written to `data/`; editing those files under
 
 ## Contributing
 
-Issues and pull requests are welcome; read `CONTRIBUTING.md` first. Target branch is `main`, one change per pull request, tests pass with `npm test`, English only. The contract between the prompt files and the code is in `docs/prompt-contract.md`. A change on one side requires the matching change on the other, in the same pull request. The engine stays character-neutral; behaviour of one character belongs in that deployment's `prompts.local/`. Security reports go through `SECURITY.md`, not public issues.
+Issues and pull requests are welcome; read `CONTRIBUTING.md` first. Target branch is `main`, one change per pull request, tests pass with `npm test`, English only. The contract between the prompt files and the code is in `docs/en/prompt-contract.md`. A change on one side requires the matching change on the other, in the same pull request. The engine stays character-neutral; behaviour of one character belongs in that deployment's `prompts.local/`. Security reports go through `SECURITY.md`, not public issues.
 
 ## Tests
 
@@ -200,23 +200,26 @@ prompts/
   labels.json              every code-inserted string in prompts
 prompts.local/             your personality (gitignored)
 docs/
-  prompt-contract.md       the contract between prompt files and code
   en/
+    prompt-contract.md   the contract between prompt files and code
     configuration.md       full reference for every config key
     owner-commands.md      every subcommand and the access grants
     warmup.md              the warmup: stages, progress, rails, commands
   zh/                      Chinese
     README.md
+    prompt-contract.md
     configuration.md
     owner-commands.md
     warmup.md
   ja/                      Japanese
     README.md
+    prompt-contract.md
     configuration.md
     owner-commands.md
     warmup.md
   ru/                      Russian
     README.md
+    prompt-contract.md
     configuration.md
     owner-commands.md
     warmup.md

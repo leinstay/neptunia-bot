@@ -19,9 +19,8 @@ Thumbs.db
 .vscode/
 .idea/
 
-# Local specs and plans; only the contract and the per-language documentation are allowed through
+# Local specs and plans; only the per-language documentation is allowed through
 /docs/*
-!/docs/prompt-contract.md
 !/docs/en/
 !/docs/zh/
 !/docs/ja/

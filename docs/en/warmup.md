@@ -28,7 +28,7 @@ The warmup writes: channel notes (purpose, topics, tone), member profiles (chara
 
 Attitude and relationship are never warmed up. They grow only from live conversation through the stream analyzer.
 
-`character` and `style` are prose fields written exclusively by the profile prompt (`profile.md`), both during the warmup and during a portrait refresh. The stream analyzer never edits them directly. See the [prompt contract](../prompt-contract.md) for the data model and the output schema.
+`character` and `style` are prose fields written exclusively by the profile prompt (`profile.md`), both during the warmup and during a portrait refresh. The stream analyzer never edits them directly. See the [prompt contract](prompt-contract.md) for the data model and the output schema.
 
 ## Progress and resume
 

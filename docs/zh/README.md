@@ -82,7 +82,7 @@ npm start
 
 记忆分析器会判断角色对人们的感受。分析器和预热都会接收你的角色卡和 `rules.md`，因此请包含角色的好恶。
 
-每个提示文件可使用的占位符、`labels.json` 键、上下文块和输出标签均在 [`docs/prompt-contract.md`](../prompt-contract.md) 中定义；一方变更时另一方也需同步修改。
+每个提示文件可使用的占位符、`labels.json` 键、上下文块和输出标签均在 [`docs/zh/prompt-contract.md`](prompt-contract.md) 中定义；一方变更时另一方也需同步修改。
 
 ## 配置
 
@@ -168,7 +168,7 @@ git pull && sudo systemctl restart neptunia-bot
 
 ## 参与贡献
 
-欢迎提交 issue 和 pull request；请先阅读 `CONTRIBUTING.md`。目标分支为 `main`，每个 pull request 只包含一项变更，`npm test` 测试通过，仅限英语。提示文件与代码之间的契约在 `docs/prompt-contract.md` 中。一方的变更需要在同一个 pull request 中同步另一方。引擎保持角色中立；特定角色的行为属于该部署的 `prompts.local/`。安全报告通过 `SECURITY.md` 提交，不使用公开 issue。
+欢迎提交 issue 和 pull request；请先阅读 `CONTRIBUTING.md`。目标分支为 `main`，每个 pull request 只包含一项变更，`npm test` 测试通过，仅限英语。提示文件与代码之间的契约在 `docs/zh/prompt-contract.md` 中。一方的变更需要在同一个 pull request 中同步另一方。引擎保持角色中立；特定角色的行为属于该部署的 `prompts.local/`。安全报告通过 `SECURITY.md` 提交，不使用公开 issue。
 
 ## 测试
 
@@ -200,23 +200,26 @@ prompts/
   labels.json              代码插入提示中的所有字符串
 prompts.local/             你的角色定义（已加入 gitignore）
 docs/
-  prompt-contract.md       提示文件与代码之间的契约
   en/
+    prompt-contract.md   提示文件与代码之间的契约
     configuration.md       所有配置键的完整参考
     owner-commands.md      所有子命令和访问授权
     warmup.md              预热：阶段、进度、限制、命令
   zh/                      中文
     README.md
+    prompt-contract.md
     configuration.md
     owner-commands.md
     warmup.md
   ja/                      日文
     README.md
+    prompt-contract.md
     configuration.md
     owner-commands.md
     warmup.md
   ru/                      俄文
     README.md
+    prompt-contract.md
     configuration.md
     owner-commands.md
     warmup.md

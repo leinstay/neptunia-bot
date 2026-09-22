@@ -331,7 +331,7 @@ the Discord facts of the messages in the transcript, so the persona still knows 
 Each warmup request handles one unit of work (one channel, one person or the server), so attribution stays clean.
 `channel.md` produces channel notes (purpose, topics, tone). `profile.md` produces a member's character, style,
 interests, details, episodes and aliases. `server.md` produces server-wide patterns, conversation starters, in-jokes and
-lore. For the run order, sampling, progress, rails and subcommands see [Warmup](en/warmup.md).
+lore. For the run order, sampling, progress, rails and subcommands see [Warmup](warmup.md).
 
 ### Data model
 

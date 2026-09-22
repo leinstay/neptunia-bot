@@ -82,7 +82,7 @@ npm start
 
 メモリアナライザーはキャラクターが人々に対してどう感じるかを判断します。アナライザーとウォームアップの両方がキャラクターカードと `rules.md` を受け取るため、キャラクターの好き嫌いを記述してください。
 
-各プロンプトファイルが使用できるプレースホルダー、`labels.json` キー、コンテキストブロック、出力タグは [`docs/prompt-contract.md`](../prompt-contract.md) で定義されています。一方を変更すると他方も変更が必要です。
+各プロンプトファイルが使用できるプレースホルダー、`labels.json` キー、コンテキストブロック、出力タグは [`docs/ja/prompt-contract.md`](prompt-contract.md) で定義されています。一方を変更すると他方も変更が必要です。
 
 ## 設定
 
@@ -168,7 +168,7 @@ git pull && sudo systemctl restart neptunia-bot
 
 ## コントリビューション
 
-イシューとプルリクエストを歓迎します。まず `CONTRIBUTING.md` をお読みください。ターゲットブランチは `main`、プルリクエストは一つの変更のみ、テストは `npm test` で合格、英語のみです。プロンプトファイルとコードの間のコントラクトは `docs/prompt-contract.md` にあります。一方を変更する場合、同じプルリクエストでもう一方も変更してください。エンジンはキャラクター中立です。特定のキャラクターの挙動はそのデプロイの `prompts.local/` に属します。セキュリティレポートは `SECURITY.md` を通じて行い、公開イシューには書かないでください。
+イシューとプルリクエストを歓迎します。まず `CONTRIBUTING.md` をお読みください。ターゲットブランチは `main`、プルリクエストは一つの変更のみ、テストは `npm test` で合格、英語のみです。プロンプトファイルとコードの間のコントラクトは `docs/ja/prompt-contract.md` にあります。一方を変更する場合、同じプルリクエストでもう一方も変更してください。エンジンはキャラクター中立です。特定のキャラクターの挙動はそのデプロイの `prompts.local/` に属します。セキュリティレポートは `SECURITY.md` を通じて行い、公開イシューには書かないでください。
 
 ## テスト
 
@@ -200,23 +200,26 @@ prompts/
   labels.json              コードがプロンプトに挿入するすべての文字列
 prompts.local/             デプロイ先のパーソナリティ（gitignore 対象）
 docs/
-  prompt-contract.md       プロンプトファイルとコードの間のコントラクト
   en/
+    prompt-contract.md   プロンプトファイルとコードの間のコントラクト
     configuration.md       全設定キーのリファレンス
     owner-commands.md      全サブコマンドとアクセスグラント
     warmup.md              ウォームアップ: ステージ、進捗、制限、コマンド
   zh/                      中国語
     README.md
+    prompt-contract.md
     configuration.md
     owner-commands.md
     warmup.md
   ja/                      日本語
     README.md
+    prompt-contract.md
     configuration.md
     owner-commands.md
     warmup.md
   ru/                      ロシア語
     README.md
+    prompt-contract.md
     configuration.md
     owner-commands.md
     warmup.md

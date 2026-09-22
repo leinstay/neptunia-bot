@@ -82,7 +82,7 @@ npm start
 
 Анализатор памяти оценивает, как персонаж относится к людям. И анализатор, и прогрев получают вашу карточку персонажа и `rules.md`, поэтому укажите, что ваш персонаж любит и не любит.
 
-Плейсхолдеры, ключи `labels.json`, контекстные блоки и теги вывода, которые может использовать каждый файл промпта, описаны в [`docs/prompt-contract.md`](../prompt-contract.md); изменение одной стороны требует изменения другой.
+Плейсхолдеры, ключи `labels.json`, контекстные блоки и теги вывода, которые может использовать каждый файл промпта, описаны в [`docs/ru/prompt-contract.md`](prompt-contract.md); изменение одной стороны требует изменения другой.
 
 ## Конфигурация
 
@@ -168,7 +168,7 @@ git pull && sudo systemctl restart neptunia-bot
 
 ## Участие в разработке
 
-Приветствуются issues и pull requests; сначала прочитайте `CONTRIBUTING.md`. Целевая ветка `main`, одно изменение на pull request, тесты проходят (`npm test`), всё на английском. Контракт между файлами промптов и кодом описан в `docs/prompt-contract.md`. Изменение одной стороны требует изменения другой в том же pull request. Движок остаётся нейтральным к персонажу; поведение конкретного персонажа живёт в `prompts.local/` конкретного развёртывания. Об уязвимостях сообщайте по `SECURITY.md`, а не в публичных issues.
+Приветствуются issues и pull requests; сначала прочитайте `CONTRIBUTING.md`. Целевая ветка `main`, одно изменение на pull request, тесты проходят (`npm test`), всё на английском. Контракт между файлами промптов и кодом описан в `docs/ru/prompt-contract.md`. Изменение одной стороны требует изменения другой в том же pull request. Движок остаётся нейтральным к персонажу; поведение конкретного персонажа живёт в `prompts.local/` конкретного развёртывания. Об уязвимостях сообщайте по `SECURITY.md`, а не в публичных issues.
 
 ## Тесты
 
@@ -200,23 +200,26 @@ prompts/
   labels.json              все строки, которые код вставляет в промпты
 prompts.local/             ваш персонаж (в gitignore)
 docs/
-  prompt-contract.md       контракт между файлами промптов и кодом
   en/
+    prompt-contract.md   контракт между файлами промптов и кодом
     configuration.md       полный справочник по всем ключам конфигурации
     owner-commands.md      все подкоманды и разрешения доступа
     warmup.md              прогрев: этапы, прогресс, ограничения, команды
   zh/                      китайский
     README.md
+    prompt-contract.md
     configuration.md
     owner-commands.md
     warmup.md
   ja/                      японский
     README.md
+    prompt-contract.md
     configuration.md
     owner-commands.md
     warmup.md
   ru/                      русский
     README.md
+    prompt-contract.md
     configuration.md
     owner-commands.md
     warmup.md
