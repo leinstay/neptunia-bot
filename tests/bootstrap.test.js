@@ -632,7 +632,7 @@ function fakeHot(overrides = {}) {
         messagesPerPerson: 10,
         contextBefore: 1,
         maxChannelShare: 1,
-        minChannelMessages: 2,
+
         messagesPerChannel: 50,
         serverSampleMessages: 50,
         fetchLimitPerChannel: 1000,

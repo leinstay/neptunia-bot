@@ -153,7 +153,6 @@
     "messagesPerPerson": 2000,
     "contextBefore": 1,
     "maxChannelShare": 0.5,
-    "minChannelMessages": 30,
     "messagesPerChannel": 200,
     "serverSampleMessages": 600,
     "fetchLimitPerChannel": 15000,

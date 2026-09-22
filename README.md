@@ -284,7 +284,7 @@ The engine builds its memory of people and channels from a sample of recent mess
 
 **Order of operations:**
 
-1. **Channels**: every readable channel with at least `bootstrap.minChannelMessages` messages in the last `bootstrap.lookbackDays` days gets one request. The result is a set of channel notes: purpose, topics, tone.
+1. **Channels**: every readable channel gets one request. The result is a set of channel notes: purpose, topics, tone.
 2. **People**: the most active members (at least `bootstrap.minMessages` own messages in the window, up to `bootstrap.maxPeople`) each get a profile. The engine samples up to `bootstrap.messagesPerPerson` of their messages with `bootstrap.contextBefore` lines of surrounding context. Large samples are split into chunks that fit `bootstrap.maxRequestTokens`; each later chunk receives the previous answer as a draft to keep, correct and extend. The final answer stores character, style, interests, details, episodes and aliases.
 3. **Server**: one request takes the channel notes, a summary line per profiled member and the newest `bootstrap.serverSampleMessages` lines of the main channels, and produces server-wide patterns, conversation starters, in-jokes and lore.
 
@@ -307,7 +307,6 @@ After the bootstrap finishes, the live stream analyzer keeps memory current. It 
 | `messagesPerPerson` | `2000` | Own messages sampled per member |
 | `contextBefore` | `1` | Context lines before each sampled message |
 | `maxChannelShare` | `0.5` | Max share of samples from one channel |
-| `minChannelMessages` | `30` | Min messages for a channel to be bootstrapped |
 | `messagesPerChannel` | `200` | Messages sampled per channel |
 | `serverSampleMessages` | `600` | Recent main-channel messages for the server request |
 | `refreshMessages` | `400` | Messages sampled for a portrait refresh |

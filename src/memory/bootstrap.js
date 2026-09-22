@@ -866,7 +866,7 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
         log.warn('bootstrap: channel fetch failed, skipping it for this round', { channel: channel.id, error: err });
       }
       log.info('bootstrap: channel fetched', { channel: channel.id, messages: messages.length });
-      windows.push({ id: channel.id, name: channel.name, category: channel.parent?.name ?? null, topic: channel.topic ?? null, messages });
+      windows.push({ id: channel.id, name: channel.name, category: channel.parent?.name ?? null, topic: channel.topic ?? null, messages, channel });
       touchActivity('fetching', { channelsFetched: i + 1, channelsTotal: channels.length });
     }
     return windows;
@@ -1203,7 +1203,20 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
       return { ok: false, stop: true, reason: 'missing-prompt', message: 'prompt file missing: prompts/channel.md (or prompts.local/channel.md) is not configured yet' };
     }
     const isMain = mainChannelIds.has(String(window.id));
-    const selected = selectChannelMessages(window.messages, cfg.messagesPerChannel);
+    // A channel quiet in the lookback window is described from its newest messages regardless of
+    // age (a diary or a topical channel must be on the map before it wakes up); a channel with no
+    // history at all is described from its name, category and topic alone.
+    let source = window.messages;
+    const wanted = cfg.messagesPerChannel ?? 200;
+    if (source.length < wanted && window.channel) {
+      try {
+        source = await fetchHistoryWindow(window.channel, { limit: wanted, minTs: 0, selfId: client.user?.id, embedTextChars: hot.config.media?.embedTextChars });
+        log.info('bootstrap: quiet channel fetched deeper', { channel: window.id, messages: source.length });
+      } catch (err) {
+        log.warn('bootstrap: deeper fetch failed, describing from the window', { channel: window.id, error: err });
+      }
+    }
+    const selected = selectChannelMessages(source, cfg.messagesPerChannel);
     const selfName = getSelfName(guildId);
 
     let built;
@@ -1452,7 +1465,7 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
       const windows = await getWindows(guildId, guild, cfg);
       const mainChannelIds = new Set((hot.config.memory?.mainChannelIds ?? []).map(String));
 
-      const eligibleChannels = windows.filter((window) => window.messages.length >= (cfg.minChannelMessages ?? 0));
+      const eligibleChannels = windows; // every readable channel gets a note: the map must cover channels that may wake up later
       for (let i = 0; i < eligibleChannels.length; i += 1) {
         const window = eligibleChannels[i];
         if (store.state.data.paused) {
@@ -1589,7 +1602,7 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
     if (cached && now() - cached.fetchedAt < CACHE_TTL_MS) {
       const cfg = hot.config.bootstrap ?? {};
       const windows = cached.windows;
-      const eligibleChannels = windows.filter((window) => window.messages.length >= (cfg.minChannelMessages ?? 0));
+      const eligibleChannels = windows; // every readable channel gets a note: the map must cover channels that may wake up later
       const people = pickPeople(windows, cfg);
       channelsEligible = eligibleChannels.length;
       peopleEligible = people.length;
