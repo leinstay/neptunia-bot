@@ -2405,6 +2405,108 @@ test('run: bootstrap.status formats phase, progress, tokens and the next target'
   assert.match(body, /next target: person: Bob \(id:2\)/);
 });
 
+test('run: bootstrap.status falls back to the coarse phase and "never" when activity is absent', async () => {
+  const rootDir = makeRoot();
+  const bootstrap = fakeBootstrap();
+  const { admin } = makeAdmin(rootDir, { bootstrap });
+
+  const body = await admin.run('bootstrap.status', {}, { guildId: 'g1' });
+  assert.match(body, /phase: running/);
+  assert.match(body, /last activity: never/);
+});
+
+// ---------------------------------------------------------------------------
+// bootstrap.status: the F40 activity-driven phase line and "last activity: …ago"
+// ---------------------------------------------------------------------------
+
+function withActivity(activity, overrides = {}) {
+  return fakeBootstrap({
+    status: {
+      phase: 'running',
+      doneChannels: 0,
+      channelsEligible: null,
+      donePeople: 0,
+      peopleEligible: null,
+      doneServer: false,
+      tokensUsed: 0,
+      requests: 0,
+      startedAt: '2026-01-01T00:00:00.000Z',
+      finishedAt: null,
+      aborted: null,
+      nextTarget: null,
+      activity,
+      ...overrides,
+    },
+  });
+}
+
+test('run: bootstrap.status shows the fetching phase with channel counts', async () => {
+  const rootDir = makeRoot();
+  const bootstrap = withActivity({ phase: 'fetching', detail: { channelsFetched: 12, channelsTotal: 29 }, lastActivityAt: Date.now() - 3000 });
+  const { admin } = makeAdmin(rootDir, { bootstrap });
+
+  const body = await admin.run('bootstrap.status', {}, { guildId: 'g1' });
+  assert.match(body, /phase: fetching history, 12\/29 channels/);
+  assert.match(body, /last activity: 3 s ago/);
+});
+
+test('run: bootstrap.status shows the channel phase with its name and position', async () => {
+  const rootDir = makeRoot();
+  const bootstrap = withActivity({ phase: 'channel', detail: { id: 'c1', name: 'general', index: 3, total: 21 }, lastActivityAt: Date.now() });
+  const { admin } = makeAdmin(rootDir, { bootstrap });
+
+  const body = await admin.run('bootstrap.status', {}, { guildId: 'g1' });
+  assert.match(body, /phase: describing channel #general \(3 of 21\)/);
+});
+
+test('run: bootstrap.status shows the person phase with its name, position and chunk count', async () => {
+  const rootDir = makeRoot();
+  const bootstrap = withActivity({
+    phase: 'person',
+    detail: { id: '42', name: 'Alice', index: 7, total: 38, chunk: { k: 2, n: 3 } },
+    lastActivityAt: Date.now(),
+  });
+  const { admin } = makeAdmin(rootDir, { bootstrap });
+
+  const body = await admin.run('bootstrap.status', {}, { guildId: 'g1' });
+  assert.match(body, /phase: profiling Alice \(id:42\) \(7 of 38\), chunk 2\/3/);
+});
+
+test('run: bootstrap.status shows the server phase', async () => {
+  const rootDir = makeRoot();
+  const bootstrap = withActivity({ phase: 'server', detail: null, lastActivityAt: Date.now() });
+  const { admin } = makeAdmin(rootDir, { bootstrap });
+
+  const body = await admin.run('bootstrap.status', {}, { guildId: 'g1' });
+  assert.match(body, /phase: building the server notes/);
+});
+
+test('run: bootstrap.status shows the waiting-rate-limit phase with "until" and the wait count', async () => {
+  const rootDir = makeRoot();
+  const until = Date.UTC(2026, 0, 1, 14, 30);
+  const bootstrap = withActivity({ phase: 'waiting-rate-limit', detail: { until, waits: 2 }, lastActivityAt: Date.now() });
+  const { admin } = makeAdmin(rootDir, { bootstrap });
+
+  const body = await admin.run('bootstrap.status', {}, { guildId: 'g1' });
+  assert.match(body, /phase: waiting for the provider rate limit until 14:30 UTC \(wait 2\)/);
+});
+
+test('run: bootstrap.status shows the paused/finished/aborted phases', async () => {
+  const rootDir = makeRoot();
+
+  const paused = withActivity({ phase: 'paused', detail: null, lastActivityAt: Date.now() });
+  const { admin: adminPaused } = makeAdmin(rootDir, { bootstrap: paused });
+  assert.match(await adminPaused.run('bootstrap.status', {}, { guildId: 'g1' }), /phase: paused/);
+
+  const finished = withActivity({ phase: 'finished', detail: null, lastActivityAt: Date.now() });
+  const { admin: adminFinished } = makeAdmin(rootDir, { bootstrap: finished });
+  assert.match(await adminFinished.run('bootstrap.status', {}, { guildId: 'g1' }), /phase: finished/);
+
+  const aborted = withActivity({ phase: 'aborted', detail: { reason: 'rate-limit' }, lastActivityAt: Date.now() });
+  const { admin: adminAborted } = makeAdmin(rootDir, { bootstrap: aborted });
+  assert.match(await adminAborted.run('bootstrap.status', {}, { guildId: 'g1' }), /phase: aborted \(rate-limit\)/);
+});
+
 test('run: bootstrap.reset clears progress and is not guarded by assertNotPaused (the factory itself refuses while running)', async () => {
   const rootDir = makeRoot();
   const bootstrap = fakeBootstrap();

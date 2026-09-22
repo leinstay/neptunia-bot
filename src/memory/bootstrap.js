@@ -21,7 +21,12 @@
 // something" cue (src/memory/update.js's `onPortraitRequest`), rewriting only
 // `character`/`style` from a fresh sample. A missing `prompts.profile` /
 // `prompts.channel` / `prompts.server` is reported (and logged), never thrown
-// through to discord.js.
+// through to discord.js. An in-memory-only `activity` snapshot (`{ phase,
+// detail, lastActivityAt }`, never persisted) tracks what a run is doing
+// right now -- fetching history, describing a channel, profiling a person
+// (with a chunk count when its sample does not fit one request), building
+// the server notes, waiting out a provider rate limit, paused, finished or
+// aborted -- exposed through `status()` for `/nep bootstrap status`.
 
 import { readableChannels, fetchHistoryWindow } from '../discord/collect.js';
 import { formatTranscript, renderTranscript } from '../discord/format.js';
@@ -705,6 +710,20 @@ export function takeFittingPrefix(items, budget, cost) {
   return { taken: items.slice(0, count), rest: items.slice(count) };
 }
 
+/** How many `takeFittingPrefix` calls it takes to exhaust `items` under `budget` -- a display-only
+ * estimate for the bootstrap's own progress reporting (a person's `activity.detail.chunk`), using
+ * the SAME budget for every future chunk even though a later chunk's fixed blocks (the `<draft>`)
+ * may shrink it slightly; harmless since it is recomputed fresh on every chunk. Pure. */
+function countChunks(items, budget, cost) {
+  let rest = items;
+  let count = 0;
+  while (rest.length > 0) {
+    ({ rest } = takeFittingPrefix(rest, budget, cost));
+    count += 1;
+  }
+  return count;
+}
+
 /**
  * The per-iteration `users.<id>` op payloads that write one `profile.md` answer through
  * src/memory/update.js#applyMemoryUpdate -- reused so every existing clamp/token/eviction/
@@ -803,6 +822,28 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
   let idleWaiters = []; // resolvers for waitIdle(), notified once running goes back to false
   let consecutiveFailures = 0; // resets on any successful request; 3 in a row aborts the run (resumable)
 
+  // In-memory-only run activity (F40): exposed via status() as `activity` so `/nep bootstrap
+  // status` can show WHICH phase a run is actually in right now (fetching history, describing a
+  // channel, profiling a person, building the server notes, waiting out a provider rate limit,
+  // paused, finished, aborted) instead of just "running" for minutes at a time, and progress
+  // fields staying "?"/"-" while the windows cache is still being filled. Never persisted, never
+  // read back, never affects the run itself -- a fresh factory always starts at `idle`. Mirrors
+  // src/memory/warmup.js's own `activity` (git history, since removed with the long warm-up).
+  function freshActivity() {
+    return { phase: 'idle', detail: null, lastActivityAt: null };
+  }
+  let activity = freshActivity();
+
+  /** Replace the activity snapshot with `phase`/`detail` plus a fresh `lastActivityAt`. */
+  function touchActivity(phase, detail = null) {
+    activity = { phase, detail, lastActivityAt: now() };
+  }
+
+  /** Bump `lastActivityAt` without changing the current phase/detail (a completed request). */
+  function bumpActivity() {
+    activity = { ...activity, lastActivityAt: now() };
+  }
+
   /** (Re-)fetch every readable channel's window, sequentially -- see the module header;
    * `bootstrap.lookbackDays`/`fetchLimitPerChannel` are read fresh, never cached. */
   async function fetchGuildWindows(guild, cfg) {
@@ -810,7 +851,9 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
     const minTs = now() - (cfg.lookbackDays ?? 60) * 24 * 60 * 60_000;
     const selfId = client.user?.id;
     const windows = [];
-    for (const channel of channels) {
+    touchActivity('fetching', { channelsFetched: 0, channelsTotal: channels.length });
+    for (let i = 0; i < channels.length; i += 1) {
+      const channel = channels[i];
       let messages = [];
       try {
         messages = await fetchHistoryWindow(channel, {
@@ -824,6 +867,7 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
       }
       log.info('bootstrap: channel fetched', { channel: channel.id, messages: messages.length });
       windows.push({ id: channel.id, name: channel.name, category: channel.parent?.name ?? null, topic: channel.topic ?? null, messages });
+      touchActivity('fetching', { channelsFetched: i + 1, channelsTotal: channels.length });
     }
     return windows;
   }
@@ -1041,6 +1085,7 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
       bs.aborted = 'budget';
       store.state.markDirty();
       store.flush();
+      touchActivity('aborted', { reason: 'budget' });
       return { ok: false, stop: true, reason: 'budget' };
     }
 
@@ -1064,10 +1109,13 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
             bs.aborted = 'rate-limit';
             store.state.markDirty();
             store.flush();
+            touchActivity('aborted', { reason: 'rate-limit' });
             return { ok: false, stop: true, reason: 'rate-limit' };
           }
           log.warn('bootstrap: rate limited, waiting before retrying', { attempt: waits, waitMinutes: cfg.rateLimitWaitMinutes ?? 10 });
-          await sleep((cfg.rateLimitWaitMinutes ?? 10) * 60_000);
+          const waitMs = (cfg.rateLimitWaitMinutes ?? 10) * 60_000;
+          touchActivity('waiting-rate-limit', { until: now() + waitMs, waits });
+          await sleep(waitMs);
           continue;
         }
 
@@ -1078,6 +1126,7 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
           bs.aborted = 'failures';
           store.state.markDirty();
           store.flush();
+          touchActivity('aborted', { reason: 'failures' });
           return { ok: false, stop: true, reason: 'failures', error: err };
         }
         return { ok: false, stop: false, reason: 'llm-error', error: err };
@@ -1088,6 +1137,7 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
       bs.requests += 1;
       store.state.markDirty();
       store.flush();
+      bumpActivity();
       return { ok: true, completion };
     }
   }
@@ -1143,8 +1193,12 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
   }
 
   /** One channel → `channel.md` → `store.updateChannel`. See `callWithRails` for the stop/failure
-   * contract; `{ ok: true }` on a clean write, marks the channel done either way it succeeds. */
-  async function processChannel(guildId, window, cfg, mainChannelIds) {
+   * contract; `{ ok: true }` on a clean write, marks the channel done either way it succeeds.
+   * `progress` (`{ index, total }`, both 1-based/count, optional) is this channel's position among
+   * the run's eligible channels -- purely for `activity.detail`, a one-off `/nep bootstrap run
+   * channel:` call omits it. */
+  async function processChannel(guildId, window, cfg, mainChannelIds, progress) {
+    touchActivity('channel', { id: window.id, name: window.name, index: progress?.index ?? null, total: progress?.total ?? null });
     if (!hot.prompts?.channel) {
       return { ok: false, stop: true, reason: 'missing-prompt', message: 'prompt file missing: prompts/channel.md (or prompts.local/channel.md) is not configured yet' };
     }
@@ -1184,8 +1238,11 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
    * (each chunk after the first carries the previous answer as `<draft>`) → the store, via
    * `writePersonAnswer`. See `callWithRails` for the stop/failure contract. A bad-json/truncated
    * answer is retried once with half the sample; a second failure skips (and marks done) this
-   * person. */
-  async function processPerson(guildId, windows, member, cfg, mainChannelIds, sampleCfgOverride) {
+   * person. `progress` (`{ index, total }`, optional) is this person's position among the run's
+   * eligible people, carried through the half-sample retry -- purely for `activity.detail`, a
+   * one-off `/nep bootstrap run user:` call omits it. */
+  async function processPerson(guildId, windows, member, cfg, mainChannelIds, sampleCfgOverride, progress) {
+    touchActivity('person', { id: member.id, name: member.name, index: progress?.index ?? null, total: progress?.total ?? null, chunk: null });
     if (!hot.prompts?.profile) {
       return { ok: false, stop: true, reason: 'missing-prompt', message: 'prompt file missing: prompts/profile.md (or prompts.local/profile.md) is not configured yet' };
     }
@@ -1220,9 +1277,13 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
     let remaining = items;
     let draft = null;
     let answer = null;
+    let chunksDone = 0; // completed chunks so far -- feeds the "chunk k/n" detail below
 
     while (remaining.length > 0) {
-      if (store.state.data.paused) return { ok: false, stop: true, reason: 'paused' };
+      if (store.state.data.paused) {
+        touchActivity('paused');
+        return { ok: false, stop: true, reason: 'paused' };
+      }
 
       const draftBlock = draft ? block('draft', JSON.stringify(draft)) : '';
       const fixedTexts = [system, characterBlock, memberBlock, draftBlock].filter(Boolean);
@@ -1233,8 +1294,16 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
         return { ok: false, skipped: true };
       }
 
-      const { taken, rest } = takeFittingPrefix(remaining, budget, (item) => cost(item.text));
+      const itemCost = (item) => cost(item.text);
+      // Display-only: how many chunks THIS person's sample takes in total, estimated fresh on every
+      // chunk (see countChunks) -- only shown once it is actually more than one.
+      const chunksEstimate = chunksDone + countChunks(remaining, budget, itemCost);
+      const chunk = chunksEstimate > 1 ? { k: chunksDone + 1, n: chunksEstimate } : null;
+      touchActivity('person', { id: member.id, name: member.name, index: progress?.index ?? null, total: progress?.total ?? null, chunk });
+
+      const { taken, rest } = takeFittingPrefix(remaining, budget, itemCost);
       remaining = rest;
+      chunksDone += 1;
       const snippetsBlock = block('snippets', renderTranscript(taken, timezone, labels));
       const user = [characterBlock, memberBlock, draftBlock, snippetsBlock].filter(Boolean).join('\n\n');
       const messages = [
@@ -1256,7 +1325,7 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
           const truncated = looksTruncated(result.completion.text, result.completion.finishReason);
           const halved = { ...cfg, messagesPerPerson: Math.max(1, Math.floor((sampleCfg.messagesPerPerson ?? sample.messages.length) / 2)) };
           log.warn('bootstrap: person answer could not be parsed, retrying with half the sample', { member: member.id, truncated, detail: detailOf(err) });
-          return processPerson(guildId, windows, member, halved, mainChannelIds, halved);
+          return processPerson(guildId, windows, member, halved, mainChannelIds, halved, progress);
         }
         log.warn('bootstrap: person answer still bad after a retry, skipping this person', { member: member.id, detail: detailOf(err) });
         markDone('people', member.id);
@@ -1277,6 +1346,7 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
    * line per profiled member, `<messages>` = newest `serverSampleMessages` of the main channels (or
    * the single busiest channel when none is marked main) → `store.updateGuild`/`store.setLore`. */
   async function processServer(guildId, windows, cfg, mainChannelIds, people) {
+    touchActivity('server');
     if (!hot.prompts?.server) {
       return { ok: false, stop: true, reason: 'missing-prompt', message: 'prompt file missing: prompts/server.md (or prompts.local/server.md) is not configured yet' };
     }
@@ -1383,23 +1453,34 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
       const mainChannelIds = new Set((hot.config.memory?.mainChannelIds ?? []).map(String));
 
       const eligibleChannels = windows.filter((window) => window.messages.length >= (cfg.minChannelMessages ?? 0));
-      for (const window of eligibleChannels) {
-        if (store.state.data.paused) return { ok: false, message: 'paused' };
+      for (let i = 0; i < eligibleChannels.length; i += 1) {
+        const window = eligibleChannels[i];
+        if (store.state.data.paused) {
+          touchActivity('paused');
+          return { ok: false, message: 'paused' };
+        }
         if (bs.done.channels.includes(window.id)) continue;
-        const outcome = await processChannel(guildId, window, cfg, mainChannelIds);
+        const outcome = await processChannel(guildId, window, cfg, mainChannelIds, { index: i + 1, total: eligibleChannels.length });
         if (outcome.stop) return { ok: false, message: outcome.message ?? outcome.reason };
       }
 
       const people = pickPeople(windows, cfg);
-      for (const person of people) {
-        if (store.state.data.paused) return { ok: false, message: 'paused' };
+      for (let i = 0; i < people.length; i += 1) {
+        const person = people[i];
+        if (store.state.data.paused) {
+          touchActivity('paused');
+          return { ok: false, message: 'paused' };
+        }
         if (bs.done.people.includes(person.id)) continue;
-        const outcome = await processPerson(guildId, windows, person, cfg, mainChannelIds);
+        const outcome = await processPerson(guildId, windows, person, cfg, mainChannelIds, undefined, { index: i + 1, total: people.length });
         if (outcome.stop) return { ok: false, message: outcome.message ?? outcome.reason };
       }
 
       if (!bs.done.server) {
-        if (store.state.data.paused) return { ok: false, message: 'paused' };
+        if (store.state.data.paused) {
+          touchActivity('paused');
+          return { ok: false, message: 'paused' };
+        }
         const outcome = await processServer(guildId, windows, cfg, mainChannelIds, people);
         if (outcome.stop) return { ok: false, message: outcome.message ?? outcome.reason };
       }
@@ -1407,6 +1488,7 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
       bs.finishedAt = new Date(now()).toISOString();
       store.state.markDirty();
       store.flush();
+      touchActivity('finished');
       log.info('bootstrap: run finished', { guildId, tokensUsed: bs.tokensUsed, requests: bs.requests });
       return { ok: true };
     } finally {
@@ -1490,9 +1572,12 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
     };
   }
 
-  /** `/nep bootstrap status`: `summary()` plus totals and the next target. Never fetches: the
-   * totals come from the windows cache when a run or a recent command filled it, otherwise they
-   * are reported as unknown (null), so the command answers at once even while a run is fetching. */
+  /** `/nep bootstrap status`: `summary()` plus totals, the next target and `activity` (F40, this
+   * module's own in-memory "what is it doing right now" snapshot -- see `touchActivity` above).
+   * Synchronous, side-effect free, never fetches: the totals come from the windows cache when a
+   * run or a recent command filled it, otherwise they are reported as unknown (null) -- `activity`
+   * explains what is happening meanwhile (fetching history, and so on) so the command still answers
+   * at once and still means something while the cache is still empty. */
   function status(guildId) {
     const bs = bootstrapState(store);
     const base = summary();
@@ -1516,7 +1601,7 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
     }
 
     const phase = running ? 'running' : !base.startedAt ? 'not started' : base.finishedAt ? 'finished' : base.aborted ? `aborted (${base.aborted})` : 'idle';
-    return { ...base, phase, channelsEligible, peopleEligible, nextTarget };
+    return { ...base, phase, channelsEligible, peopleEligible, nextTarget, activity: { ...activity } };
   }
 
   /** `/nep bootstrap reset`: clears `state.bootstrap` (progress only, never any profile/channel/
@@ -1526,6 +1611,7 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
     delete store.state.data.bootstrap;
     store.state.markDirty();
     store.flush();
+    activity = freshActivity();
     return { ok: true };
   }
 

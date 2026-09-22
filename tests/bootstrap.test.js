@@ -1242,6 +1242,295 @@ test('createBootstrap: status() reports phase, progress and the next target', as
 });
 
 // ---------------------------------------------------------------------------
+// status().activity -- in-memory run phase (F40), never persisted
+// ---------------------------------------------------------------------------
+
+test('activity: idle by default, before any run', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  const guild = fakeGuild('g1', []);
+  const client = fakeClient(guild);
+  const hot = fakeHot();
+  const bootstrap = createBootstrap({ hot, store, client, llm: fakeLlm(() => ({})), calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => 10_000_000 });
+
+  assert.deepEqual(bootstrap.status('g1').activity, { phase: 'idle', detail: null, lastActivityAt: null });
+});
+
+test('activity: reports the fetching phase with channel counts, mid-fetch', async () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  const c1 = fakeChannel('c1', [rawMessage(1000, { authorId: 'a' })]);
+  const c2 = fakeChannel('c2', [rawMessage(1000, { authorId: 'b' })]);
+  const guild = fakeGuild('g1', [c1, c2]);
+  const client = fakeClient(guild);
+  const hot = fakeHot();
+
+  let bootstrap;
+  let seenDuringFirst;
+  let seenDuringSecond;
+  const wrap = (channel, onFetch) => {
+    const original = channel.messages.fetch.bind(channel.messages);
+    channel.messages.fetch = async (opts) => {
+      onFetch();
+      return original(opts);
+    };
+  };
+  wrap(c1, () => { if (!seenDuringFirst) seenDuringFirst = bootstrap.status('g1').activity; });
+  wrap(c2, () => { if (!seenDuringSecond) seenDuringSecond = bootstrap.status('g1').activity; });
+
+  bootstrap = createBootstrap({ hot, store, client, llm: fakeLlm(() => ({})), calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => 10_000_000 });
+  await bootstrap.peopleReport('g1');
+
+  assert.equal(seenDuringFirst.phase, 'fetching');
+  assert.equal(seenDuringFirst.detail.channelsFetched, 0, 'no channel finished yet at the very first fetch call');
+  assert.equal(seenDuringFirst.detail.channelsTotal, 2);
+  assert.ok(Number.isFinite(seenDuringFirst.lastActivityAt));
+
+  assert.equal(seenDuringSecond.detail.channelsFetched, 1, 'the first channel is done by the time the second is fetched');
+});
+
+test('activity: reports the channel phase with its position among the run\'s eligible channels', async () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  const c1 = fakeChannel('c1', [rawMessage(1000, { authorId: 'a' }), rawMessage(2000, { authorId: 'a' })], { name: 'general' });
+  const c2 = fakeChannel('c2', [rawMessage(1000, { authorId: 'b' }), rawMessage(2000, { authorId: 'b' })], { name: 'random' });
+  const guild = fakeGuild('g1', [c1, c2]);
+  const client = fakeClient(guild);
+  const hot = fakeHot();
+  hot.config.bootstrap.minMessages = 100; // nobody qualifies as a person -- channels then straight to the server
+
+  let bootstrap;
+  const seen = [];
+  const results = [{ purpose: 'p1' }, { purpose: 'p2' }, { patterns: '', starters: '', injokes: [], lore: [] }];
+  let i = 0;
+  const llm = {
+    complete: async () => {
+      seen.push(bootstrap.status('g1').activity);
+      const payload = results[Math.min(i, results.length - 1)];
+      i += 1;
+      return { text: JSON.stringify(payload), usage: { prompt_tokens: 10, completion_tokens: 5 }, estimated: 15, finishReason: 'stop' };
+    },
+  };
+  bootstrap = createBootstrap({ hot, store, client, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => 10_000_000 });
+
+  const result = await bootstrap.run('g1');
+  assert.equal(result.ok, true);
+  assert.equal(seen.length, 3);
+
+  assert.equal(seen[0].phase, 'channel');
+  assert.equal(seen[0].detail.id, 'c1');
+  assert.equal(seen[0].detail.name, 'general');
+  assert.equal(seen[0].detail.index, 1);
+  assert.equal(seen[0].detail.total, 2);
+
+  assert.equal(seen[1].detail.id, 'c2');
+  assert.equal(seen[1].detail.index, 2);
+  assert.equal(seen[1].detail.total, 2);
+
+  assert.equal(seen[2].phase, 'server');
+  assert.equal(seen[2].detail, null);
+});
+
+test('activity: reports the person phase with its position and a chunk count while a sample is chunked', async () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  const history = Array.from({ length: 12 }, (_, i) => rawMessage(1000 + i * 1000, { authorId: 'a', content: `padded message content number ${i} with extra words to make it long` }));
+  const c1 = fakeChannel('c1', history);
+  const guild = fakeGuild('g1', [c1]);
+  const client = fakeClient(guild);
+  const hot = fakeHot();
+  hot.config.bootstrap.minMessages = 1;
+  hot.config.bootstrap.messagesPerPerson = 12;
+  hot.config.bootstrap.contextBefore = 0;
+  hot.config.bootstrap.maxRequestTokens = 90;
+  hot.config.llm.safetyMargin = 1;
+
+  let bootstrap;
+  const seen = [];
+  let i = 0;
+  const llm = {
+    complete: async () => {
+      seen.push(bootstrap.status('g1').activity);
+      const payload = { character: `chunk-${i}`, style: 's', interests: [], details: [], episodes: [], aliases: [] };
+      i += 1;
+      return { text: JSON.stringify(payload), usage: { prompt_tokens: 10, completion_tokens: 5 }, estimated: 15, finishReason: 'stop' };
+    },
+  };
+  bootstrap = createBootstrap({ hot, store, client, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => 10_000_000 });
+
+  const outcome = await bootstrap.runPerson('g1', 'a');
+  assert.equal(outcome.ok, true);
+  assert.ok(seen.length > 1, 'expected the sample to be split into more than one chunk');
+
+  assert.equal(seen[0].phase, 'person');
+  assert.equal(seen[0].detail.id, 'a');
+  assert.equal(seen[0].detail.chunk.k, 1);
+  assert.ok(seen[0].detail.chunk.n >= 2);
+
+  assert.equal(seen[1].detail.chunk.k, 2);
+});
+
+test('activity: waiting-rate-limit phase carries "until" and the wait count', async () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  const c1 = fakeChannel('c1', [rawMessage(1000, { authorId: 'a' }), rawMessage(2000, { authorId: 'a' })]);
+  const guild = fakeGuild('g1', [c1]);
+  const client = fakeClient(guild);
+  const hot = fakeHot();
+  hot.config.bootstrap.rateLimitMaxWaits = 2;
+
+  const rateLimitError = new Error('rate limited');
+  rateLimitError.statusCode = 429;
+  const llm = { complete: async () => { throw rateLimitError; } };
+
+  let bootstrap;
+  let seenDuringWait;
+  const nowMs = 10_000_000;
+  const sleep = async () => {
+    if (!seenDuringWait) seenDuringWait = bootstrap.status('g1').activity;
+  };
+  bootstrap = createBootstrap({ hot, store, client, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => nowMs, sleep });
+
+  await bootstrap.run('g1');
+
+  assert.ok(seenDuringWait);
+  assert.equal(seenDuringWait.phase, 'waiting-rate-limit');
+  assert.equal(seenDuringWait.detail.waits, 1);
+  assert.equal(seenDuringWait.detail.until, nowMs + (hot.config.bootstrap.rateLimitWaitMinutes ?? 10) * 60_000);
+});
+
+test('activity: paused phase after a pause is noticed mid-run', async () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  const c1 = fakeChannel('c1', [rawMessage(1000, { authorId: 'a' }), rawMessage(2000, { authorId: 'a' })]);
+  const c2 = fakeChannel('c2', [rawMessage(1000, { authorId: 'b' }), rawMessage(2000, { authorId: 'b' })]);
+  const guild = fakeGuild('g1', [c1, c2]);
+  const client = fakeClient(guild);
+  const hot = fakeHot();
+
+  const llm = scriptedLlm([
+    () => {
+      store.state.data.paused = true; // simulate /nep pause landing while call #1 was in flight
+      return { purpose: 'p1' };
+    },
+    { purpose: 'p2' }, // must never be reached
+  ]);
+  const bootstrap = createBootstrap({ hot, store, client, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => 10_000_000 });
+
+  await bootstrap.run('g1');
+  assert.equal(bootstrap.status('g1').activity.phase, 'paused');
+});
+
+test('activity: aborted phase carries the reason', async () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  const c1 = fakeChannel('c1', [rawMessage(1000, { authorId: 'a' }), rawMessage(2000, { authorId: 'a' })]);
+  const guild = fakeGuild('g1', [c1]);
+  const client = fakeClient(guild);
+  const hot = fakeHot();
+  hot.config.bootstrap.maxTokens = 1; // stop immediately, before the first request
+
+  const bootstrap = createBootstrap({ hot, store, client, llm: scriptedLlm([{}]), calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => 10_000_000 });
+
+  await bootstrap.run('g1');
+  const activity = bootstrap.status('g1').activity;
+  assert.equal(activity.phase, 'aborted');
+  assert.equal(activity.detail.reason, 'budget');
+});
+
+test('activity: reports the finished phase once the whole run completes', async () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  const c1 = fakeChannel('c1', [rawMessage(1000, { authorId: 'a' }), rawMessage(2000, { authorId: 'a' })]);
+  const guild = fakeGuild('g1', [c1]);
+  const client = fakeClient(guild);
+  const hot = fakeHot();
+  const llm = scriptedLlm([{ purpose: 'p' }, { character: 'c', style: 's', interests: [], details: [], episodes: [], aliases: [] }, { patterns: '', starters: '', injokes: [], lore: [] }]);
+  const bootstrap = createBootstrap({ hot, store, client, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => 10_000_000 });
+
+  const result = await bootstrap.run('g1');
+  assert.equal(result.ok, true);
+  assert.equal(bootstrap.status('g1').activity.phase, 'finished');
+});
+
+test('activity: lastActivityAt strictly advances as a run moves from fetching to later phases', async () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  const c1 = fakeChannel('c1', [rawMessage(1000, { authorId: 'a' }), rawMessage(2000, { authorId: 'a' })]);
+  const guild = fakeGuild('g1', [c1]);
+  const client = fakeClient(guild);
+  const hot = fakeHot();
+  hot.config.bootstrap.minMessages = 100; // nobody qualifies -- keep the script to channel + server
+  let t = 1000;
+  const stepNow = () => { t += 1; return t; };
+  const llm = scriptedLlm([{ purpose: 'p' }, { patterns: '', starters: '', injokes: [], lore: [] }]);
+
+  let bootstrap;
+  let seenDuringFetch;
+  const originalFetch = c1.messages.fetch.bind(c1.messages);
+  c1.messages.fetch = async (opts) => {
+    if (!seenDuringFetch) seenDuringFetch = bootstrap.status('g1').activity.lastActivityAt;
+    return originalFetch(opts);
+  };
+
+  bootstrap = createBootstrap({ hot, store, client, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: stepNow });
+  const result = await bootstrap.run('g1');
+  assert.equal(result.ok, true);
+
+  assert.ok(Number.isFinite(seenDuringFetch));
+  const finalActivity = bootstrap.status('g1').activity;
+  assert.ok(finalActivity.lastActivityAt > seenDuringFetch, 'lastActivityAt must move forward as the run progresses');
+});
+
+test('activity: never written to state.json (in-memory only)', async () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  const c1 = fakeChannel('c1', [rawMessage(1000, { authorId: 'a' }), rawMessage(2000, { authorId: 'a' })]);
+  const guild = fakeGuild('g1', [c1]);
+  const client = fakeClient(guild);
+  const hot = fakeHot();
+  const llm = scriptedLlm([{ purpose: 'p' }, { character: 'c', style: 's', interests: [], details: [], episodes: [], aliases: [] }, { patterns: '', starters: '', injokes: [], lore: [] }]);
+  const bootstrap = createBootstrap({ hot, store, client, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => 10_000_000 });
+
+  await bootstrap.run('g1');
+  store.flush();
+
+  const raw = fs.readFileSync(path.join(dir, 'state.json'), 'utf8');
+  assert.ok(!raw.includes('"activity"'), 'the run activity must never be persisted');
+  assert.ok(!raw.includes('lastActivityAt'), 'the run activity must never be persisted');
+});
+
+test('activity: status() stays cheap and side-effect free (repeated calls never change progress)', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  const guild = fakeGuild('g1', []);
+  const client = fakeClient(guild);
+  const hot = fakeHot();
+  const bootstrap = createBootstrap({ hot, store, client, llm: fakeLlm(() => ({})), calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => 10_000_000 });
+
+  const first = bootstrap.status('g1');
+  const second = bootstrap.status('g1');
+  assert.deepEqual(first, second);
+});
+
+test('activity: reset() also clears the in-memory activity back to idle', async () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  const c1 = fakeChannel('c1', [rawMessage(1000, { authorId: 'a' }), rawMessage(2000, { authorId: 'a' })]);
+  const guild = fakeGuild('g1', [c1]);
+  const client = fakeClient(guild);
+  const hot = fakeHot();
+  const llm = scriptedLlm([{ purpose: 'p' }, { character: 'c', style: 's', interests: [], details: [], episodes: [], aliases: [] }, { patterns: '', starters: '', injokes: [], lore: [] }]);
+  const bootstrap = createBootstrap({ hot, store, client, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => 10_000_000 });
+
+  await bootstrap.run('g1');
+  assert.equal(bootstrap.status('g1').activity.phase, 'finished');
+
+  bootstrap.reset();
+  assert.deepEqual(bootstrap.status('g1').activity, { phase: 'idle', detail: null, lastActivityAt: null });
+});
+
+// ---------------------------------------------------------------------------
 // Factory write path: refreshPortrait()
 // ---------------------------------------------------------------------------
 

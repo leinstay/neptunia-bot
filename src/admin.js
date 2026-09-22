@@ -1373,12 +1373,63 @@ async function cmdPing(args) {
     return result.ok ? 'Bootstrap run finished (or already fully done).' : `Bootstrap run stopped: ${result.message ?? 'unknown reason'} (resumable -- run again to continue).`;
   }
 
+  /** `N s ago` / `N min ago` / `N h ago`, or `never` when `lastActivityAt` is unknown (F40). */
+  function humanizeAgo(lastActivityAt) {
+    if (!Number.isFinite(lastActivityAt)) return 'never';
+    const deltaMs = Math.max(0, Date.now() - lastActivityAt);
+    const seconds = Math.round(deltaMs / 1000);
+    if (seconds < 60) return `${seconds} s ago`;
+    const minutes = Math.round(seconds / 60);
+    if (minutes < 60) return `${minutes} min ago`;
+    return `${Math.round(minutes / 60)} h ago`;
+  }
+
+  /** One `phase: …` line's TEXT from a bootstrap status's in-memory `activity` snapshot (F40, see
+   * src/memory/bootstrap.js's `touchActivity`) -- falls back to `s.phase` (the coarser "running" /
+   * "not started" / "finished" / "aborted (reason)" / "idle" summary) whenever `activity` carries
+   * nothing more specific yet (e.g. right after a restart, before the first channel is fetched).
+   * Never throws on a missing/partial snapshot. */
+  function formatBootstrapPhase(s) {
+    const a = s?.activity;
+    const d = a?.detail ?? {};
+    switch (a?.phase) {
+      case 'fetching':
+        return `fetching history, ${d.channelsFetched ?? 0}/${d.channelsTotal ?? 0} channels`;
+      case 'channel': {
+        const label = d.name ? `#${d.name}` : d.id ? `id:${d.id}` : 'a channel';
+        const count = d.total ? ` (${d.index ?? '?'} of ${d.total})` : '';
+        return `describing channel ${label}${count}`;
+      }
+      case 'person': {
+        const who = `${d.name ?? '?'} (id:${d.id ?? '?'})`;
+        const count = d.total ? ` (${d.index ?? '?'} of ${d.total})` : '';
+        const chunk = d.chunk ? `, chunk ${d.chunk.k}/${d.chunk.n}` : '';
+        return `profiling ${who}${count}${chunk}`;
+      }
+      case 'server':
+        return 'building the server notes';
+      case 'waiting-rate-limit': {
+        const until = Number.isFinite(d.until) ? `${new Date(d.until).toISOString().slice(11, 16)} UTC` : '?';
+        return `waiting for the provider rate limit until ${until} (wait ${d.waits ?? 1})`;
+      }
+      case 'paused':
+        return 'paused';
+      case 'finished':
+        return 'finished';
+      case 'aborted':
+        return `aborted (${d.reason ?? s?.aborted ?? 'unknown'})`;
+      default:
+        return s?.phase ?? 'idle';
+    }
+  }
+
   async function cmdBootstrapStatus(_args, context) {
     const guildId = resolvedGuildId(context);
     if (!guildId) throw new Error('no guild resolved yet');
     const s = await bootstrap.status(guildId); // synchronous in the real runner; awaiting a plain value is harmless
     return [
-      `phase: ${s.phase}`,
+      `phase: ${formatBootstrapPhase(s)}`,
+      `last activity: ${humanizeAgo(s.activity?.lastActivityAt)}`,
       `channels: ${s.doneChannels}/${s.channelsEligible ?? "?"}`,
       `people: ${s.donePeople}/${s.peopleEligible ?? "?"}`,
       `server: ${s.doneServer ? 'done' : 'pending'}`,
