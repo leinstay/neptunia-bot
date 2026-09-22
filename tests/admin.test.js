@@ -2143,47 +2143,76 @@ test('run: reload reports both config and prompts reload outcomes', async () => 
 });
 
 // ---------------------------------------------------------------------------
-// poke
+// interject / initiate
 // ---------------------------------------------------------------------------
 
-function fakeSpontaneous(pokeResult) {
+function fakeSpontaneous(forceResult) {
   const calls = [];
   return {
     calls,
-    poke: async (channel, mode) => {
+    force: async (channel, mode) => {
       calls.push([channel.id, mode]);
-      return pokeResult ?? { ok: true };
+      return forceResult ?? { ok: true };
     },
   };
 }
 
-test('run: poke uses the context channel when no channel argument is given', async () => {
+test('run: interject uses the context channel when no channel argument is given', async () => {
   const rootDir = makeRoot();
   const spontaneous = fakeSpontaneous();
   const client = { channels: { fetch: async (id) => ({ id }) } };
   const { admin } = makeAdmin(rootDir, { spontaneous, client });
 
-  const result = await admin.run('poke', {}, { channelId: 'c1' });
+  const result = await admin.run('interject', {}, { channelId: 'c1' });
 
   assert.deepEqual(spontaneous.calls, [['c1', 'interject']]);
-  assert.ok(result.includes('poke interject on c1'));
+  assert.ok(result.includes('interject on c1'));
 });
 
-test('run: poke uses the mode and channel arguments when given', async () => {
+test('run: initiate uses the context channel when no channel argument is given', async () => {
   const rootDir = makeRoot();
   const spontaneous = fakeSpontaneous();
   const client = { channels: { fetch: async (id) => ({ id }) } };
   const { admin } = makeAdmin(rootDir, { spontaneous, client });
 
-  await admin.run('poke', { mode: 'initiate', channelId: 'other' }, { channelId: 'c1' });
+  const result = await admin.run('initiate', {}, { channelId: 'c1' });
 
-  assert.deepEqual(spontaneous.calls, [['other', 'initiate']]);
+  assert.deepEqual(spontaneous.calls, [['c1', 'initiate']]);
+  assert.ok(result.includes('initiate on c1'));
 });
 
-test('run: poke throws when no channel is available at all', async () => {
+test('run: interject uses the channel argument when given, overriding the context channel', async () => {
+  const rootDir = makeRoot();
+  const spontaneous = fakeSpontaneous();
+  const client = { channels: { fetch: async (id) => ({ id }) } };
+  const { admin } = makeAdmin(rootDir, { spontaneous, client });
+
+  await admin.run('interject', { channelId: 'other' }, { channelId: 'c1' });
+
+  assert.deepEqual(spontaneous.calls, [['other', 'interject']]);
+});
+
+test('run: interject reports dryRun in the result when the forced turn was a dry run', async () => {
+  const rootDir = makeRoot();
+  const spontaneous = fakeSpontaneous({ outcome: 'spoke', mode: 'interject', dryRun: true });
+  const client = { channels: { fetch: async (id) => ({ id }) } };
+  const { admin } = makeAdmin(rootDir, { spontaneous, client });
+
+  const result = await admin.run('interject', {}, { channelId: 'c1' });
+
+  assert.match(result, /dryRun.*true/);
+});
+
+test('run: interject throws when no channel is available at all', async () => {
   const rootDir = makeRoot();
   const { admin } = makeAdmin(rootDir, { spontaneous: fakeSpontaneous() });
-  await assert.rejects(() => admin.run('poke', {}, {}), /channel/);
+  await assert.rejects(() => admin.run('interject', {}, {}), /channel/);
+});
+
+test('run: initiate throws when no channel is available at all', async () => {
+  const rootDir = makeRoot();
+  const { admin } = makeAdmin(rootDir, { spontaneous: fakeSpontaneous() });
+  await assert.rejects(() => admin.run('initiate', {}, {}), /channel/);
 });
 
 // ---------------------------------------------------------------------------
@@ -2486,7 +2515,8 @@ test('run: every command that writes data/ is refused while paused, with a hint 
     ['memory.wipe', { confirm: 'The Server' }],
     ['lore.add', { title: 'Y', keys: 'y', text: 'z' }],
     ['lore.remove', { id: loreId }],
-    ['poke', {}],
+    ['interject', {}],
+    ['initiate', {}],
   ];
   for (const [key, args] of attempts) {
     await assert.rejects(

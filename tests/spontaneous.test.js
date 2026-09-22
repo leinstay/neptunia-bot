@@ -562,7 +562,7 @@ test('onMessage: does nothing when features.spontaneous is false, even with eave
 });
 
 // ---------------------------------------------------------------------------
-// status / stop / poke
+// status / stop / force
 
 test('status: returns a copy of the persisted schedule', () => {
   const store = fakeStore({ spontaneous: { g1: 123 } });
@@ -578,7 +578,7 @@ test('status: returns a copy of the persisted schedule', () => {
   assert.equal(store.state.data.spontaneous.g1, 123, 'status() must not expose the live object');
 });
 
-test('poke: fires even when every feature switch is off (the owner\'s explicit command bypasses them)', async () => {
+test('force: fires even when every feature switch is off (the owner\'s explicit command bypasses them)', async () => {
   let seen = null;
   const turns = fakeTurns({ runTurn: async (args) => { seen = args; return { outcome: 'spoke' }; } });
   const config = baseConfig({}, { spontaneous: false, eavesdrop: false });
@@ -589,12 +589,12 @@ test('poke: fires even when every feature switch is off (the owner\'s explicit c
     turns,
   });
   const channel = { id: 'c1' };
-  const result = await spontaneous.poke(channel, 'initiate');
+  const result = await spontaneous.force(channel, 'initiate');
   assert.equal(result.outcome, 'spoke');
   assert.equal(seen.channel, channel);
 });
 
-test('poke: forwards mode straight to turns.runTurn', async () => {
+test('force: forwards mode straight to turns.runTurn, with forced: true', async () => {
   let seen = null;
   const turns = fakeTurns({ runTurn: async (args) => { seen = args; return { outcome: 'spoke' }; } });
   const spontaneous = createSpontaneous({
@@ -604,10 +604,11 @@ test('poke: forwards mode straight to turns.runTurn', async () => {
     turns,
   });
   const channel = { id: 'c1' };
-  const result = await spontaneous.poke(channel, 'interject');
+  const result = await spontaneous.force(channel, 'interject');
   assert.equal(result.outcome, 'spoke');
   assert.equal(seen.channel, channel);
   assert.equal(seen.mode, 'interject');
+  assert.equal(seen.forced, true);
 });
 
 test('stop: clears pending eavesdrop timers without throwing', () => {

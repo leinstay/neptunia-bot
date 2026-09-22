@@ -30,7 +30,8 @@ const MAX_AUTOCOMPLETE_CHOICES = 25;
 
 /** Commands that may take long enough to need `deferReply` before `editReply`. */
 const SLOW_COMMANDS = new Set([
-  'poke',
+  'interject',
+  'initiate',
   'reload',
   'pause',
   'resume',
@@ -103,23 +104,27 @@ export function buildCommandTree(commandName) {
         },
         {
           type: SUBCOMMAND,
-          name: 'poke',
-          description: 'Force a spontaneous action.',
+          name: 'interject',
+          description: 'Make the persona jump into the conversation now.',
           options: [
-            {
-              type: STRING,
-              name: 'mode',
-              description: 'Which kind of spontaneous action to force.',
-              required: false,
-              choices: [
-                { name: 'interject', value: 'interject' },
-                { name: 'initiate', value: 'initiate' },
-              ],
-            },
             {
               type: CHANNEL,
               name: 'channel',
-              description: 'Channel to poke (defaults to the current one).',
+              description: 'Channel to interject in (defaults to the current one).',
+              required: false,
+              channel_types: [GUILD_TEXT],
+            },
+          ],
+        },
+        {
+          type: SUBCOMMAND,
+          name: 'initiate',
+          description: 'Make the persona start a topic now.',
+          options: [
+            {
+              type: CHANNEL,
+              name: 'channel',
+              description: 'Channel to initiate in (defaults to the current one).',
               required: false,
               channel_types: [GUILD_TEXT],
             },
@@ -521,10 +526,8 @@ const OPTION_MAPPERS = {
   reload: () => ({}),
   pause: () => ({}),
   resume: () => ({}),
-  poke: (options) => ({
-    mode: options.getString('mode') ?? 'interject',
-    channelId: options.getChannel('channel')?.id,
-  }),
+  interject: (options) => ({ channelId: options.getChannel('channel')?.id }),
+  initiate: (options) => ({ channelId: options.getChannel('channel')?.id }),
   set: (options) => ({ path: options.getString('path', true), value: options.getString('value', true) }),
   unset: (options) => ({ path: options.getString('path', true) }),
   'rule.add': (options) => ({ text: options.getString('text', true) }),

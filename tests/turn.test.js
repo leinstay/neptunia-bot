@@ -294,7 +294,7 @@ async function withCapturedLogs(fn) {
 }
 
 // /nep pause: no new turn may start while paused -- a reply, an
-// interject, an initiate, an eavesdrop or a poke alike, whatever the mode.
+// interject, an initiate, an eavesdrop or a forced turn alike, whatever the mode.
 test('runTurn: refuses with outcome "paused" while store.state.data.paused is true, before touching the LLM or busy', async () => {
   const raw = rawMessage({ id: 'm1' });
   const channel = fakeTurnChannel({ historyMessages: [raw] });
@@ -309,6 +309,40 @@ test('runTurn: refuses with outcome "paused" while store.state.data.paused is tr
   assert.equal(result.outcome, 'paused');
   assert.equal(llm.calls.length, 0, 'the LLM must never be called while paused');
   assert.equal(turns.isBusy(channel.id), false, 'the channel is never marked busy for a refused turn');
+});
+
+// /nep interject, /nep initiate: forced is passed straight through to
+// buildRequest, which appends prompts.forced (when present) to the task text.
+test('runTurn: forced=true appends prompts.forced to the task text sent to the LLM', async () => {
+  const raw = rawMessage({ id: 'm1' });
+  const channel = fakeTurnChannel({ historyMessages: [raw] });
+  const llm = fakeLlm('<skip/>');
+  const store = fakeStore();
+  const hot = fakeHot();
+  hot.prompts.forced = 'FORCED_TASK_TEXT';
+  const turns = createTurnRunner({ hot, store, llm, calibrator: identityCalibrator(), client: fakeClient() });
+
+  await turns.runTurn({ channel, mode: 'interject', forced: true });
+
+  assert.equal(llm.calls.length, 1);
+  const userText = llm.calls[0][1].content;
+  assert.ok(userText.includes('FORCED_TASK_TEXT'));
+});
+
+test('runTurn: forced defaults to false -- prompts.forced is never appended for an ordinary spontaneous turn', async () => {
+  const raw = rawMessage({ id: 'm1' });
+  const channel = fakeTurnChannel({ historyMessages: [raw] });
+  const llm = fakeLlm('<skip/>');
+  const store = fakeStore();
+  const hot = fakeHot();
+  hot.prompts.forced = 'FORCED_TASK_TEXT';
+  const turns = createTurnRunner({ hot, store, llm, calibrator: identityCalibrator(), client: fakeClient() });
+
+  await turns.runTurn({ channel, mode: 'interject' });
+
+  assert.equal(llm.calls.length, 1);
+  const userText = llm.calls[0][1].content;
+  assert.ok(!userText.includes('FORCED_TASK_TEXT'));
 });
 
 test('waitIdle: resolves immediately when no turn is in flight', async () => {

@@ -221,11 +221,14 @@ export function createTurnRunner({
    * @param {object} [params.trigger]      Normalized message that called the persona.
    * @param {string} [params.triggerKind]
    * @param {(history: object[], now: number) => string|null} [params.chooseMode]
+   * @param {boolean} [params.forced]  True for an owner-forced turn (`/nep interject`, `/nep
+   *   initiate`) -- passed straight through to buildRequest, which appends prompts.forced (when
+   *   present) to the task text so the model knows `<skip/>` is not the expected outcome this time.
    * @returns {Promise<{ outcome: string, mode?: string }>}
    */
-  async function runTurn({ channel, mode, trigger = null, triggerKind = null, chooseMode = null }) {
+  async function runTurn({ channel, mode, trigger = null, triggerKind = null, chooseMode = null, forced = false }) {
     // /nep pause: the owner is editing data/ by hand -- no new turn may
-    // start (a reply, an interject, an initiate, an eavesdrop, or a poke)
+    // start (a reply, an interject, an initiate, an eavesdrop, or a forced turn)
     // until /nep resume. A turn already in flight when the pause is
     // requested is left to finish naturally; admin.js's pause handler waits
     // for it via waitIdle() below instead of aborting it here.
@@ -282,6 +285,7 @@ export function createTurnRunner({
         prompts: hot.prompts,
         calibrator,
         mode: finalMode,
+        forced,
         now,
         selfName: channel.guild.members.me?.displayName ?? client.user.username,
         history,

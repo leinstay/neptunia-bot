@@ -2,8 +2,8 @@
 // so the owner can tune the running bot from Discord without a restart and
 // without ever touching data/: live rules (prompts.local/rules.md, seeded
 // from prompts/rules.md), config overrides (config.local.json, hot-reloaded),
-// status, a manual poke of the spontaneous scheduler, and profile
-// inspection/deletion. This is the ONLY place in the project that ever
+// status, a manual interject/initiate of the spontaneous scheduler, and
+// profile inspection/deletion. This is the ONLY place in the project that ever
 // deletes stored memory, through the two functions store.js allows for it:
 // store.forgetUser (one profile) and store.wipeGuild (a whole guild's memory,
 // `/nep memory wipe`, gated by the served guild's exact name). The tracked
@@ -437,7 +437,7 @@ function writeLocalConfig(localPath, value) {
 /**
  * `hot`, `store` — see src/hot.js, src/memory/store.js.
  * `client` — a discord.js Client (used for channels.fetch and guilds.cache).
- * `spontaneous` — the spontaneous scheduler: `poke(channel, mode)` and `status()`.
+ * `spontaneous` — the spontaneous scheduler: `force(channel, mode)` and `status()`.
  * `calibrator` — token calibrator (src/llm/tokens.js), read for `.ratio`.
  * `getGuildId` — the single guild this instance serves, or null before it resolves.
  * `isWarmingUp` — `() => boolean`, optional: true while the memory warmup runner
@@ -495,8 +495,8 @@ export function createAdmin({
 
   /**
    * `/nep pause`: refuse a command that would write under `data/` while
-   * paused, with a hint to resume first. Guards poke, memory.alias-add,
-   * memory.alias-remove, memory.forget, memory.wipe, memory.affinity (when
+   * paused, with a hint to resume first. Guards interject, initiate,
+   * memory.alias-add, memory.alias-remove, memory.forget, memory.wipe, memory.affinity (when
    * setting a score), memory.refresh, lore.add, lore.remove, warmup.run,
    * warmup.users, warmup.channels, warmup.server and warmup.reset.
    */
@@ -768,17 +768,21 @@ export function createAdmin({
     return lines.join('\n');
   }
 
-  async function cmdPoke(args, context) {
+  /**
+   * Shared handler for `/nep interject` and `/nep initiate`: force a
+   * spontaneous turn right now, in `context.channelId` unless a channel
+   * argument overrides it, bypassing the schedule.
+   */
+  async function cmdForce(mode, args, context) {
     assertNotPaused();
-    const mode = args?.mode === 'initiate' ? 'initiate' : 'interject';
     const channelId = args?.channelId || context?.channelId;
     if (!channelId) throw new Error('a channel is required');
 
     const channel = await client.channels.fetch(channelId);
     if (!channel) throw new Error(`channel not found: ${channelId}`);
 
-    const result = await spontaneous.poke(channel, mode);
-    return `poke ${mode} on ${channel.id}: ${JSON.stringify(result) ?? 'ok'}`;
+    const result = await spontaneous.force(channel, mode);
+    return `${mode} on ${channel.id}: ${JSON.stringify(result) ?? 'ok'}`;
   }
 
   function resolvedGuildId(context) {
@@ -1798,7 +1802,8 @@ async function cmdPing(args) {
     reload: () => cmdReload(),
     pause: () => cmdPause(),
     resume: () => cmdResume(),
-    poke: (args, context) => cmdPoke(args, context),
+    interject: (args, context) => cmdForce('interject', args, context),
+    initiate: (args, context) => cmdForce('initiate', args, context),
     set: (args) => cmdSet(args),
     unset: (args) => cmdUnset(args),
     'rule.add': (args) => cmdRuleAdd(args),

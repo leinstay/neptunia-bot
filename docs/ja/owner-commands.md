@@ -11,7 +11,8 @@
 | `/nep ping [role]` | 一つまたはすべてのモデルロール（`talk`、`analyzer`、`media`、`followup`）にミニマルリクエストを送信し、モデル、レイテンシ、プロバイダー、トークン数またはエラーを報告。`llm.maxRequestsPerDay` にカウントされず、一時停止中やウォームアップ中でも動作 |
 | `/nep pause` | すべてのアクティビティを停止し、メモリをディスクにフラッシュしてアンロード。一時停止中は `data/` を安全に編集可能 |
 | `/nep resume` | `data/` からメモリをリロードして再開。JSON ファイルがパースできない場合は拒否し、壊れたファイル名を表示 |
-| `/nep poke [mode] [channel]` | 自発的なアクションを強制実行 |
+| `/nep interject [channel]` | そのチャンネルの会話に今すぐ割り込む |
+| `/nep initiate [channel]` | そのチャンネルで今すぐ話題を切り出す |
 | `/nep set <path> <value>` | 設定値をオーバーライド（`config.local.json` に書き込み） |
 | `/nep unset <path>` | 設定のオーバーライドを削除 |
 | `/nep rule add <text>` | `prompts.local/rules.md` にルールを追記 |

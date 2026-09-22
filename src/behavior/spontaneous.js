@@ -279,9 +279,9 @@ export function createSpontaneous({
     eavesdropTimers.add(timer);
   }
 
-  /** Force a turn right now, bypassing the schedule (owner command). */
-  function poke(channel, mode) {
-    return turns.runTurn({ channel, mode });
+  /** Force a turn right now, bypassing the schedule (owner command: `/nep interject`, `/nep initiate`). */
+  function force(channel, mode) {
+    return turns.runTurn({ channel, mode, forced: true });
   }
 
   function status() {
@@ -293,5 +293,5 @@ export function createSpontaneous({
     eavesdropTimers.clear();
   }
 
-  return { tick, onMessage, poke, status, stop };
+  return { tick, onMessage, force, status, stop };
 }

@@ -65,10 +65,10 @@ test('buildCommandTree: never emits default_member_permissions -- always visible
   assert.equal('default_member_permissions' in command, false);
 });
 
-test('buildCommandTree: top-level leaves (status, ping, reload, pause, resume, poke, set, unset)', () => {
+test('buildCommandTree: top-level leaves (status, ping, reload, pause, resume, interject, initiate, set, unset)', () => {
   const [command] = buildCommandTree('nep');
   const names = command.options.map((o) => o.name);
-  assert.deepEqual(names, ['status', 'ping', 'reload', 'pause', 'resume', 'poke', 'set', 'unset', 'rule', 'memory', 'lore', 'model', 'warmup', 'access']);
+  assert.deepEqual(names, ['status', 'ping', 'reload', 'pause', 'resume', 'interject', 'initiate', 'set', 'unset', 'rule', 'memory', 'lore', 'model', 'warmup', 'access']);
 
   const status = findOption(command.options, 'status');
   assert.equal(status.type, 1); // SUBCOMMAND
@@ -88,19 +88,21 @@ test('buildCommandTree: top-level leaves (status, ping, reload, pause, resume, p
   assert.equal(resume.type, 1); // SUBCOMMAND
   assert.equal(resume.options, undefined);
 
-  const poke = findOption(command.options, 'poke');
-  assert.equal(poke.type, 1);
-  const mode = findOption(poke.options, 'mode');
-  assert.equal(mode.type, 3); // STRING
-  assert.equal(mode.required, false);
-  assert.deepEqual(
-    mode.choices.map((c) => c.value),
-    ['interject', 'initiate'],
-  );
-  const pokeChannel = findOption(poke.options, 'channel');
-  assert.equal(pokeChannel.type, 7); // CHANNEL
-  assert.equal(pokeChannel.required, false);
-  assert.deepEqual(pokeChannel.channel_types, [0]); // GUILD_TEXT
+  const interject = findOption(command.options, 'interject');
+  assert.equal(interject.type, 1);
+  const interjectChannel = findOption(interject.options, 'channel');
+  assert.equal(interjectChannel.type, 7); // CHANNEL
+  assert.equal(interjectChannel.required, false);
+  assert.deepEqual(interjectChannel.channel_types, [0]); // GUILD_TEXT
+
+  const initiate = findOption(command.options, 'initiate');
+  assert.equal(initiate.type, 1);
+  const initiateChannel = findOption(initiate.options, 'channel');
+  assert.equal(initiateChannel.type, 7); // CHANNEL
+  assert.equal(initiateChannel.required, false);
+  assert.deepEqual(initiateChannel.channel_types, [0]); // GUILD_TEXT
+
+  assert.equal(findOption(command.options, 'poke'), undefined);
 
   const set = findOption(command.options, 'set');
   const setPath = findOption(set.options, 'path');
@@ -933,14 +935,26 @@ test('interaction handler: defers then edits for every warmup subcommand (slow c
   assert.equal(stopInteraction.edits[0].content, 'warmup result');
 });
 
-test('interaction handler: poke maps the optional mode (default) and channel', async () => {
+test('interaction handler: interject maps the optional channel', async () => {
   const admin = fakeAdmin();
   const handler = createInteractionHandler({ hot: baseHot(), admin, getGuildId: () => 'g1' });
 
-  const interaction = fakeInteraction({ subcommand: 'poke', optionValues: {} });
+  const interaction = fakeInteraction({ subcommand: 'interject', optionValues: {} });
   await handler(interaction);
 
-  assert.deepEqual(admin.runCalls[0][1], { mode: 'interject', channelId: undefined });
+  assert.equal(admin.runCalls[0][0], 'interject');
+  assert.deepEqual(admin.runCalls[0][1], { channelId: undefined });
+});
+
+test('interaction handler: initiate maps the optional channel', async () => {
+  const admin = fakeAdmin();
+  const handler = createInteractionHandler({ hot: baseHot(), admin, getGuildId: () => 'g1' });
+
+  const interaction = fakeInteraction({ subcommand: 'initiate', optionValues: { channel: { id: 'c9' } } });
+  await handler(interaction);
+
+  assert.equal(admin.runCalls[0][0], 'initiate');
+  assert.deepEqual(admin.runCalls[0][1], { channelId: 'c9' });
 });
 
 test('interaction handler: ping maps the optional role (undefined when omitted)', async () => {
@@ -976,17 +990,17 @@ test('interaction handler: defers then edits for a slow command (ping)', async (
   assert.equal(interaction.edits[0].content, 'talk: x — ok, 100ms');
 });
 
-test('interaction handler: defers then edits for a slow command (poke)', async () => {
-  const admin = fakeAdmin({ runImpl: () => 'poked' });
+test('interaction handler: defers then edits for a slow command (interject)', async () => {
+  const admin = fakeAdmin({ runImpl: () => 'interjected' });
   const handler = createInteractionHandler({ hot: baseHot(), admin, getGuildId: () => 'g1' });
 
-  const interaction = fakeInteraction({ subcommand: 'poke', optionValues: {} });
+  const interaction = fakeInteraction({ subcommand: 'interject', optionValues: {} });
   await handler(interaction);
 
   assert.equal(interaction.deferred, true);
   assert.equal(interaction.replies.some((r) => r.deferred), true);
   assert.equal(interaction.edits.length, 1);
-  assert.equal(interaction.edits[0].content, 'poked');
+  assert.equal(interaction.edits[0].content, 'interjected');
 });
 
 // ---------------------------------------------------------------------------

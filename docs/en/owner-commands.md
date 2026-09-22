@@ -11,7 +11,8 @@ Channels, roles and users are picked from Discord's own pickers; `set`/`unset` a
 | `/nep ping [role]` | Send a minimal request to one or all model roles (`talk`, `analyzer`, `media`, `followup`) and report model, latency, provider, tokens or the error; does not count against `llm.maxRequestsPerDay` and works while paused or warming up |
 | `/nep pause` | Stop all activity, flush memory to disk and unload it; `data/` is safe to edit while paused |
 | `/nep resume` | Reload memory from `data/` and continue; refuses if any JSON file does not parse, naming the broken ones |
-| `/nep poke [mode] [channel]` | Force a spontaneous action |
+| `/nep interject [channel]` | Jump into the current conversation in this channel now |
+| `/nep initiate [channel]` | Start a topic in this channel now |
 | `/nep set <path> <value>` | Override a config value (writes to `config.local.json`) |
 | `/nep unset <path>` | Remove a config override |
 | `/nep rule add <text>` | Append a rule to `prompts.local/rules.md` |

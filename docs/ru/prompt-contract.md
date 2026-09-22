@@ -24,6 +24,7 @@
 | `format.md` | да | Протокол вывода | нет |
 | `reply.md` | да | Задача: кто-то позвал персонажа | `{{name}}` `{{author}}` `{{trigger}}` `{{target}}` |
 | `interject.md` / `initiate.md` | да | Задачи: вклиниться в живой разговор / начать тему в молчащем канале | `{{name}}` |
+| `forced.md` | нет | Добавляется после промпта режима при принудительном ходе (`/nep interject`, `/nep initiate`). Отменяет вариант `<skip/>` по умолчанию | `{{name}}` |
 | `memory.md` | да | Внеролевой промпт потокового анализатора: точечные правки памяти по живым батчам | `{{name}}` `{{fieldChars}}` `{{guildFieldChars}}` `{{maxDetails}}` `{{maxInjokes}}` `{{maxSelfFacts}}` `{{maxNewEpisodes}}` `{{maxEpisodes}}` `{{maxDeltaPerUpdate}}` `{{maxInterests}}` `{{interestTopicChars}}` `{{interestNoteChars}}` `{{loreTextChars}}` |
 | `profile.md` | да | Прогрев / обновление портрета: профиль одного участника из выборки сообщений | `{{name}}` `{{fieldChars}}` `{{maxInterests}}` `{{maxDetails}}` `{{interestTopicChars}}` `{{interestNoteChars}}` `{{maxNewEpisodes}}` |
 | `channel.md` | да | Прогрев: заметки о канале из выборки сообщений | `{{fieldChars}}` |
@@ -35,6 +36,7 @@
 `{{name}}` отображаемое имя бота · `{{author}}` отображаемое имя вызвавшего · `{{trigger}}` одно из значений `labels.triggers.*` ·
 `{{target}}` индекс вызвавшего сообщения (`#87`).
 Системное сообщение = `system-prompt` + `character-card` + `rules` + `format`. Для анализатора: только `memory.md`.
+При принудительном ходе (`/nep interject`, `/nep initiate`) `forced.md` добавляется после промпта режима, если файл существует.
 Анализатор и промпты прогрева `profile.md` и `server.md` получают карточку персонажа и `rules.md` как блок
 `<character>` в пользовательском сообщении. `channel.md`, `describe.md` и `address.md` карточку не получают.
 

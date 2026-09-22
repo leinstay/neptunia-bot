@@ -606,6 +606,10 @@ function splitPeople(otherProfiles, candidateProfiles, history, trigger, exclude
  * @param {object} input.prompts           Live prompts keyed by file name.
  * @param {object} input.calibrator
  * @param {'reply'|'interject'|'initiate'} input.mode
+ * @param {boolean} [input.forced]  True for an owner-forced turn (`/nep interject`, `/nep
+ *   initiate`): when `prompts.forced` is a non-empty string, its filled text is appended to the
+ *   task text (same placeholders as `prompts[mode]`) so the model knows `<skip/>` is not the
+ *   expected outcome this time. Missing `prompts.forced` -> no change, same as before this existed.
  * @param {number} input.now
  * @param {string} input.selfName
  * @param {object[]} input.history         Normalized channel messages, oldest first.
@@ -634,7 +638,7 @@ function splitPeople(otherProfiles, candidateProfiles, history, trigger, exclude
  * @returns {{ messages: object[], stats: object, idByIndex: Map<number, string>, tempo: object }}
  */
 export function buildRequest(input) {
-  const { config, prompts, calibrator, mode, now, selfName, history, neighbors, trigger, triggerKind, channels = [], currentChannelId = null, descriptions } = input;
+  const { config, prompts, calibrator, mode, forced = false, now, selfName, history, neighbors, trigger, triggerKind, channels = [], currentChannelId = null, descriptions } = input;
   const labels = requireLabels(prompts);
   const nameOf = typeof input.nameOf === 'function' ? input.nameOf : () => null;
   const { timezone } = config.bot;
@@ -670,12 +674,18 @@ export function buildRequest(input) {
   // when an older labels.json has no dedicated label yet -- see prompt-contract.md.
   const triggerLabel =
     triggerKind === 'followUp' ? (labels.triggers?.followUp ?? labels.triggers?.reply ?? '') : (labels.triggers?.[triggerKind] ?? '');
-  const task = fillTemplate(prompts[mode] ?? '', {
+  const taskValues = {
     name: selfName,
     author: trigger?.authorName ?? '',
     trigger: triggerLabel,
     target: triggerItem ? `#${triggerItem.index}` : '',
-  });
+  };
+  const baseTask = fillTemplate(prompts[mode] ?? '', taskValues);
+  // Owner-forced turn (`/nep interject`/`/nep initiate`): tell the model
+  // `<skip/>` is not the expected outcome this time -- optional, missing
+  // prompts.forced (an older/undeployed labels layer) leaves the task as-is.
+  const forcedText = forced && typeof prompts.forced === 'string' && prompts.forced.trim() ? fillTemplate(prompts.forced, taskValues) : '';
+  const task = forcedText ? `${baseTask}\n\n${forcedText}` : baseTask;
 
   const sensesText = renderSenses(config, labels);
 
