@@ -42,9 +42,9 @@ const MAX_WARM_PICTURES_PER_MESSAGE = 2;
  *   ever running a turn. Absent -- an older/direct caller, or a test that never opens a window --
  *   simply means `features.followUp` cannot ever fire (nothing reaches this dependency otherwise).
  * @param {() => string | null} deps.getGuildId  the single guild this instance serves, or null before it resolves
- * @param {() => boolean} [deps.isBootstrapping]  true while the memory bootstrap runner
- *   (src/memory/bootstrap.js) is in flight: messages are still observed, but no
- *   trigger, turn, eavesdrop or pending-ping drain happens. Default: never bootstrapping.
+ * @param {() => boolean} [deps.isWarmingUp]  true while the memory warmup runner
+ *   (src/memory/warmup.js) is in flight: messages are still observed, but no
+ *   trigger, turn, eavesdrop or pending-ping drain happens. Default: never warming up.
  * @param {object} [deps.describer]  From createDescriber() (src/memory/describe.js), optional: when
  *   absent, or features.mediaDescriptions is off, no description request is ever made from this
  *   pipeline. When present, every observed human message's pictures (up to
@@ -72,7 +72,7 @@ export function createMessageHandler({
   memory,
   tagHistory,
   getGuildId,
-  isBootstrapping = () => false,
+  isWarmingUp = () => false,
   describer,
   llm,
   rng = Math.random,
@@ -291,11 +291,11 @@ export function createMessageHandler({
    * dropped silently. Guarded against re-entrancy: the turn this function
    * itself starts also frees the channel through the very same `onIdle`,
    * which would otherwise start a second overlapping drain. A no-op while
-   * `isBootstrapping()` is true -- the queue is left untouched for a later
-   * call once the bootstrap run ends.
+   * `isWarmingUp()` is true -- the queue is left untouched for a later
+   * call once the warmup run ends.
    */
   async function drainPending() {
-    if (draining || isBootstrapping()) return;
+    if (draining || isWarmingUp()) return;
     draining = true;
     try {
       while (pendingList.length > 0) {
@@ -405,10 +405,10 @@ export function createMessageHandler({
       // 6. Other bots are never answered, never memorised.
       if (message.author.bot) return;
 
-      // 7. A memory bootstrap run is in flight: the persona stays mute (no
+      // 7. A memory warmup run is in flight: the persona stays mute (no
       // trigger, no turn, no eavesdrop), but the message still feeds the
       // memory buffer like any other observed message.
-      if (isBootstrapping()) {
+      if (isWarmingUp()) {
         warmMediaCache(guildId, normalized);
         if (memoryOn) memory.observe(guildId, normalized, { direct: false });
         return;

@@ -61,8 +61,8 @@ export function createLlm({ apiKey, getConfig, calibrator, state, fetchImpl = fe
    * for the one deliberate exception.
    * `options.maxRequestTokens` — overrides `cfg.maxRequestTokens` for this one call's pre-flight
    * cap check only (the global rail stays in force for every caller that omits it). Exists for
-   * the memory bootstrap (src/memory/bootstrap.js), whose requests are fitted under a much larger,
-   * separately-budgeted cap (`bootstrap.maxRequestTokens`) than a live chat/analyzer request.
+   * the memory warmup (src/memory/warmup.js), whose requests are fitted under a much larger,
+   * separately-budgeted cap (`warmup.maxRequestTokens`) than a live chat/analyzer request.
    * `options.skipCalibration` (default false) — never feeds `usage.prompt_tokens`
    * into the calibrator. For `/nep ping`: a 16-token ping reply is
    * nothing like a real turn's request/response shape, and would only skew
@@ -73,7 +73,7 @@ export function createLlm({ apiKey, getConfig, calibrator, state, fetchImpl = fe
    * both combined with `AbortSignal.any`. Once `options.signal` is aborted,
    * a caught error is rethrown immediately with NO retry (an external abort
    * is deliberate, not a transient failure worth retrying). Exists for the
-   * memory bootstrap's `/nep warmup stop` (src/memory/bootstrap.js): the
+   * memory warmup's `/nep warmup stop` (src/memory/warmup.js): the
    * request already counted by the provider cannot be un-billed, but no
    * further retry/tokens are spent past the moment of the abort.
    */

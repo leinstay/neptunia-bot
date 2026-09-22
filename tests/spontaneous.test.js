@@ -889,10 +889,10 @@ test('onMessage (eavesdrop): does not schedule while busy elsewhere and oneAtATi
 });
 
 // ---------------------------------------------------------------------------
-// isBootstrapping -- the mute hook the memory bootstrap runner
-// (src/memory/bootstrap.js) uses. Same shape as the paused tests above.
+// isWarmingUp -- the mute hook the memory warmup runner
+// (src/memory/warmup.js) uses. Same shape as the paused tests above.
 
-test('tick: does nothing while isBootstrapping() is true, not even the first-schedule write', async () => {
+test('tick: does nothing while isWarmingUp() is true, not even the first-schedule write', async () => {
   const guild = fakeGuild('g1');
   const channel = fakeChannel('c1', guild);
   guild.channels.cache.set(channel.id, channel);
@@ -907,18 +907,18 @@ test('tick: does nothing while isBootstrapping() is true, not even the first-sch
     client,
     turns,
     getGuildId: () => 'g1',
-    isBootstrapping: () => true,
+    isWarmingUp: () => true,
     rng: () => 0.1,
     now: () => Date.UTC(2026, 0, 5, 12, 0, 0),
   });
   await spontaneous.tick();
 
   assert.equal(calls, 0);
-  assert.equal(store.state.data.spontaneous, undefined, 'must not even set up the schedule while bootstrapping');
+  assert.equal(store.state.data.spontaneous, undefined, 'must not even set up the schedule while warming up');
   assert.equal(store.dirtyCalls, 0);
 });
 
-test('tick: does nothing while a run was already due, when isBootstrapping() is true', async () => {
+test('tick: does nothing while a run was already due, when isWarmingUp() is true', async () => {
   const guild = fakeGuild('g1');
   const channel = fakeChannel('c1', guild);
   guild.channels.cache.set(channel.id, channel);
@@ -934,7 +934,7 @@ test('tick: does nothing while a run was already due, when isBootstrapping() is 
     client,
     turns,
     getGuildId: () => 'g1',
-    isBootstrapping: () => true,
+    isWarmingUp: () => true,
     rng: () => 0.1,
     now: () => t,
   });
@@ -944,7 +944,7 @@ test('tick: does nothing while a run was already due, when isBootstrapping() is 
   assert.equal(store.state.data.spontaneous.g1, t, 'the schedule is left exactly as it was');
 });
 
-test('onMessage: does not schedule an eavesdrop while isBootstrapping() is true', async () => {
+test('onMessage: does not schedule an eavesdrop while isWarmingUp() is true', async () => {
   const guild = fakeGuild('g1');
   const channel = fakeChannel('c1', guild);
   let calls = 0;
@@ -957,7 +957,7 @@ test('onMessage: does not schedule an eavesdrop while isBootstrapping() is true'
     client: {},
     turns,
     getGuildId: () => 'g1',
-    isBootstrapping: () => true,
+    isWarmingUp: () => true,
     rng: () => 0,
     now,
   });
@@ -967,7 +967,7 @@ test('onMessage: does not schedule an eavesdrop while isBootstrapping() is true'
   assert.equal(calls, 0);
 });
 
-test('tick / onMessage: isBootstrapping defaults to false when not provided (unmuted: normal)', async () => {
+test('tick / onMessage: isWarmingUp defaults to false when not provided (unmuted: normal)', async () => {
   const guild = fakeGuild('g1');
   const channel = fakeChannel('c1', guild);
   guild.channels.cache.set(channel.id, channel);

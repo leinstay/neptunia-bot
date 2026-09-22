@@ -356,7 +356,7 @@ export function buildCommandTree(commandName) {
           name: 'warmup',
           description: 'Memory warmup from a recent sample: channels, people, server.',
           options: [
-            { type: SUBCOMMAND, name: 'people', description: 'Who currently qualifies for the bootstrap sample.' },
+            { type: SUBCOMMAND, name: 'people', description: 'Who currently qualifies for the warmup sample.' },
             { type: SUBCOMMAND, name: 'run', description: 'Start or resume the whole run: channels, then people, then the server.' },
             { type: SUBCOMMAND, name: 'stop', description: 'Cancel any warmup work in flight now, including the model call in progress.' },
             {
@@ -388,7 +388,7 @@ export function buildCommandTree(commandName) {
             },
             { type: SUBCOMMAND, name: 'server', description: '(Re)build the server-wide notes and lore now.' },
             { type: SUBCOMMAND, name: 'status', description: 'Phase, progress, tokens used and the next target.' },
-            { type: SUBCOMMAND, name: 'reset', description: 'Clear bootstrap progress only (never the memory already written); refused while running.' },
+            { type: SUBCOMMAND, name: 'reset', description: 'Clear warmup progress only (never the memory already written); refused while running.' },
           ],
         },
       ],

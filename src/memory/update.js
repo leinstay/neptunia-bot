@@ -268,7 +268,7 @@ function existingLoreBlock(loreEntries, batchTexts, nameOf) {
  * The character card followed by the owner's live rules (`prompts.rules`) -- exactly how the chat
  * system prompt composes the same two files (src/behavior/prompt.js#buildRequest): both
  * placeholders filled the same way, joined by a blank line; rules absent/empty -> the card alone.
- * Shared by this module's own `<character>` block and every request src/memory/bootstrap.js sends
+ * Shared by this module's own `<character>` block and every request src/memory/warmup.js sends
  * that carries one, so a `/nep rule add` reaches memory work the same turn it reaches the chat
  * prompt, not just the live persona.
  * @param {object} prompts  Live prompts (`hot.prompts`, or a fixture with the same shape).
@@ -540,7 +540,7 @@ export function applyMemoryUpdate(store, guildId, update, cfg, knownUserIds, kno
       // `details` are ops objects, the only shape accepted.
       // `character`/`style` stay plain prose (see docs/prompt-contract.md,
       // "Data model"): the stream analyzer never edits them directly -- they
-      // are written only by profile.md (the bootstrap and a portrait refresh,
+      // are written only by profile.md (the warmup and a portrait refresh,
       // see `raw.portrait` below). The whole-string form is kept here for
       // that writer, not for the stream analyzer's own JSON.
       const ops = {};
@@ -700,7 +700,7 @@ export function applyMemoryUpdate(store, guildId, update, cfg, knownUserIds, kno
  * user's profile and a channel's map entry: `touchUser` (skipped for the
  * persona's own messages) and `touchChannel`, whose `topWriters` tally also
  * skips the persona's own messages and other bots. Used by `observe()`, the
- * live pipeline; the memory bootstrap (src/memory/bootstrap.js) computes a
+ * live pipeline; the memory warmup (src/memory/warmup.js) computes a
  * profiled member's counters, and a channel's own counters/top writers, the
  * same way but from the fetched history window directly (via
  * `store.setChannelFacts`), rather than through this shared helper.
@@ -736,7 +736,7 @@ export function touchMemory(store, guildId, normalized) {
  * @param {(guildId: string, userId: string, reason: string) => void} [deps.onPortraitRequest]
  *   Called once per user for every `raw.portrait` cue a successful `analyze()` collected (see
  *   docs/prompt-contract.md, "Data model") -- src/index.js wires this to
- *   src/memory/bootstrap.js#createBootstrap's `refreshPortrait`, which does the actual rewrite
+ *   src/memory/warmup.js#createWarmup's `refreshPortrait`, which does the actual rewrite
  *   (`profile.md`, `<draft>`/`<hint>`); this module only reports the cue, never awaits the result.
  *   Omitted -> no-op.
  */
@@ -823,7 +823,7 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
    * The one analyzer code path: build the memory-update request from
    * `messages`, send it to the LLM, parse the reply and apply it to the
    * store. Used by `run()` (a batch shifted off the live buffer); the memory
-   * bootstrap (src/memory/bootstrap.js) does not go through this path at all
+   * warmup (src/memory/warmup.js) does not go through this path at all
    * — it calls `profile.md`/`channel.md`/`server.md` and applyMemoryUpdate
    * directly. Never touches the live buffer and never throws — a failure is
    * reported in the returned `error`, not raised.

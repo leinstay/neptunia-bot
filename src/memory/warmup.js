@@ -1,28 +1,28 @@
-// THE way memory starts (docs/prompt-contract.md, "The bootstrap").
-// Sampling: up to `bootstrap.messagesPerPerson` of a member's own messages
-// (newest-heavy but spread over `bootstrap.lookbackDays`, one channel capped
-// at `bootstrap.maxChannelShare` unless it is a main channel), a little
+// THE way memory starts (docs/prompt-contract.md, "The warmup").
+// Sampling: up to `warmup.messagesPerPerson` of a member's own messages
+// (newest-heavy but spread over `warmup.lookbackDays`, one channel capped
+// at `warmup.maxChannelShare` unless it is a main channel), a little
 // conversational context around each, asked of `prompts/profile.md` one
 // person at a time; `prompts/channel.md` does the same for a channel's newest
-// `bootstrap.messagesPerChannel` messages; `prompts/server.md` closes a run
+// `warmup.messagesPerChannel` messages; `prompts/server.md` closes a run
 // with one request over every channel's notes, a line per profiled member and
-// the newest `bootstrap.serverSampleMessages` messages of the main channels.
+// the newest `warmup.serverSampleMessages` messages of the main channels.
 // All three are read the same way the stream analyzer's `memory.md` is
 // (formatTranscript's 'memory' mode, the same character card, the same
 // clampText/toTokens/fromTokens helpers).
 //
 // `peopleReport` stays read-only (never touches the store) for `/nep
-// warmup people`. `createBootstrap().run()` is the write path: channels →
-// people → server, in order, resumable (progress in `state.bootstrap`,
+// warmup people`. `createWarmup().run()` is the write path: channels →
+// people → server, in order, resumable (progress in `state.warmup`,
 // flushed after every request), muting the persona for as long as it is in
-// flight (`isBootstrapping()`, wired into src/discord/events.js,
+// flight (`isWarmingUp()`, wired into src/discord/events.js,
 // src/behavior/spontaneous.js and src/admin.js). `runPerson`/`runChannel`/
 // `runServer` (re)do exactly one target now, synchronously, for `/nep
 // warmup users user:<member>` / `channels channel:<channel>` / `server`;
 // `runUsers`/`runChannels` (re)do EVERY qualifying member/every readable
 // channel now, sharing `running` and every rail with `run()`, for `/nep
 // warmup users`/`channels` given with no member/channel -- a redo always
-// re-processes its targets regardless of `state.bootstrap.done`, then marks
+// re-processes its targets regardless of `state.warmup.done`, then marks
 // them done, so `/nep warmup status` reports the same progress either way.
 // `refreshPortrait()` is the stream analyzer's "the stored portrait misses
 // something" cue (src/memory/update.js's `onPortraitRequest`), rewriting only
@@ -48,6 +48,12 @@ import { toTokens, fromTokens } from './mentions.js';
 import { log } from '../log.js';
 
 const CACHE_TTL_MS = 15 * 60_000;
+
+// Bumped whenever `state.warmup`'s shape changes incompatibly -- a stored
+// object whose `version` does not match this is foreign (written by an older
+// version of this project) and is discarded wholesale by `warmupState()`
+// below, never healed field by field.
+const WARMUP_STATE_VERSION = 3;
 
 /** `err?.statusCode === 429` — the one rate-limit signal src/llm/openrouter.js#complete surfaces
  * (it already retries a 429 a couple of times itself; this is for the SUSTAINED case where the
@@ -80,7 +86,7 @@ function looksTruncated(text, finishReason) {
 // defaults -- used only when a deployment's config is missing the key. Kept
 // separate from src/memory/update.js's own MEMORY_LIMIT_DEFAULTS so this
 // module never has to import from it (its shape is not otherwise shared).
-const BOOTSTRAP_LIMIT_DEFAULTS = {
+const WARMUP_LIMIT_DEFAULTS = {
   fieldChars: 400,
   maxInterests: 12,
   maxDetails: 15,
@@ -113,12 +119,12 @@ function profileTemplateValues(config, selfName) {
   const memoryCfg = config?.memory ?? {};
   return {
     name: selfName,
-    fieldChars: memoryCfg.fieldChars ?? BOOTSTRAP_LIMIT_DEFAULTS.fieldChars,
-    maxInterests: memoryCfg.maxInterests ?? BOOTSTRAP_LIMIT_DEFAULTS.maxInterests,
-    maxDetails: memoryCfg.maxDetails ?? BOOTSTRAP_LIMIT_DEFAULTS.maxDetails,
-    interestTopicChars: memoryCfg.interestTopicChars ?? BOOTSTRAP_LIMIT_DEFAULTS.interestTopicChars,
-    interestNoteChars: memoryCfg.interestNoteChars ?? BOOTSTRAP_LIMIT_DEFAULTS.interestNoteChars,
-    maxNewEpisodes: memoryCfg.maxNewEpisodes ?? BOOTSTRAP_LIMIT_DEFAULTS.maxNewEpisodes,
+    fieldChars: memoryCfg.fieldChars ?? WARMUP_LIMIT_DEFAULTS.fieldChars,
+    maxInterests: memoryCfg.maxInterests ?? WARMUP_LIMIT_DEFAULTS.maxInterests,
+    maxDetails: memoryCfg.maxDetails ?? WARMUP_LIMIT_DEFAULTS.maxDetails,
+    interestTopicChars: memoryCfg.interestTopicChars ?? WARMUP_LIMIT_DEFAULTS.interestTopicChars,
+    interestNoteChars: memoryCfg.interestNoteChars ?? WARMUP_LIMIT_DEFAULTS.interestNoteChars,
+    maxNewEpisodes: memoryCfg.maxNewEpisodes ?? WARMUP_LIMIT_DEFAULTS.maxNewEpisodes,
   };
 }
 
@@ -158,7 +164,7 @@ function collectAuthorStats(windows) {
 }
 
 /**
- * Members who qualify for the bootstrap sample right now: at least
+ * Members who qualify for the warmup sample right now: at least
  * `cfg.minMessages` own messages across `windows`, most active first, top
  * `cfg.maxPeople`. Bots and the persona's own messages are excluded (see
  * collectAuthorStats). Pure.
@@ -179,7 +185,7 @@ export function pickPeople(windows, cfg = {}) {
 
 /** One member's stats (see pickPeople), with no threshold/cap applied -- `null` when they wrote
  * nothing in `windows` at all. Used by `/nep warmup users user:<member>` to report on exactly the
- * member asked for, regardless of `bootstrap.minMessages`. */
+ * member asked for, regardless of `warmup.minMessages`. */
 export function memberStats(windows, memberId) {
   const entry = collectAuthorStats(windows).get(String(memberId));
   if (!entry) return null;
@@ -350,14 +356,14 @@ export function selectChannelMessages(messages, messagesPerChannel) {
 }
 
 // ---------------------------------------------------------------------------
-// Transcript marking -- own vs context lines (labels.bootstrap.ownMark / .contextMark)
+// Transcript marking -- own vs context lines (labels.warmup.ownMark / .contextMark)
 // ---------------------------------------------------------------------------
 
 /**
  * Prefix each formatTranscript item's last line (the actual `[hh:mm] nick:
  * text` line, as opposed to a `## #channel` heading or a gap/date marker
- * pushed before it) with `labels.bootstrap.ownMark` when its message id is in
- * `ownIds`, else `labels.bootstrap.contextMark`. Either label missing ->
+ * pushed before it) with `labels.warmup.ownMark` when its message id is in
+ * `ownIds`, else `labels.warmup.contextMark`. Either label missing ->
  * `''`, i.e. no prefix at all for that side -- every item is still returned
  * (nothing is ever skipped for lack of a marker). Pure.
  * @param {{ id: string, text: string }[]} items  formatTranscript's output.
@@ -365,8 +371,8 @@ export function selectChannelMessages(messages, messagesPerChannel) {
  * @param {object} labels
  */
 export function markOwnContext(items, ownIds, labels) {
-  const ownMark = labels?.bootstrap?.ownMark ?? '';
-  const contextMark = labels?.bootstrap?.contextMark ?? '';
+  const ownMark = labels?.warmup?.ownMark ?? '';
+  const contextMark = labels?.warmup?.contextMark ?? '';
   if (!ownMark && !contextMark) return items;
   return items.map((item) => {
     const mark = ownIds.has(item.id) ? ownMark : contextMark;
@@ -413,7 +419,7 @@ export function buildChannelRequest({ prompts, config, calibrator, channel, mess
   const labels = prompts?.labels ?? {};
   const timezone = config?.bot?.timezone ?? 'UTC';
   const memoryCfg = config?.memory ?? {};
-  const system = fillTemplate(prompts?.channel, { fieldChars: memoryCfg.fieldChars ?? BOOTSTRAP_LIMIT_DEFAULTS.fieldChars });
+  const system = fillTemplate(prompts?.channel, { fieldChars: memoryCfg.fieldChars ?? WARMUP_LIMIT_DEFAULTS.fieldChars });
   const channelLine = [
     `${channel.name} (id:${channel.id})`,
     channel.category ? `category: ${channel.category}` : null,
@@ -513,10 +519,10 @@ export function clampProfileResult(raw, config, nameOf = () => null) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
   const memoryCfg = config?.memory ?? {};
   const tolerance = memoryCfg.clampTolerance;
-  const fieldChars = memoryCfg.fieldChars ?? BOOTSTRAP_LIMIT_DEFAULTS.fieldChars;
-  const topicChars = memoryCfg.interestTopicChars ?? BOOTSTRAP_LIMIT_DEFAULTS.interestTopicChars;
-  const noteChars = memoryCfg.interestNoteChars ?? BOOTSTRAP_LIMIT_DEFAULTS.interestNoteChars;
-  const maxNewEpisodes = memoryCfg.maxNewEpisodes ?? BOOTSTRAP_LIMIT_DEFAULTS.maxNewEpisodes;
+  const fieldChars = memoryCfg.fieldChars ?? WARMUP_LIMIT_DEFAULTS.fieldChars;
+  const topicChars = memoryCfg.interestTopicChars ?? WARMUP_LIMIT_DEFAULTS.interestTopicChars;
+  const noteChars = memoryCfg.interestNoteChars ?? WARMUP_LIMIT_DEFAULTS.interestNoteChars;
+  const maxNewEpisodes = memoryCfg.maxNewEpisodes ?? WARMUP_LIMIT_DEFAULTS.maxNewEpisodes;
   const tokenize = makeTokenizer(nameOf);
   const resolve = (text, limit) => clampResolvedField(text, limit, tolerance, tokenize, nameOf);
 
@@ -573,7 +579,7 @@ export function clampChannelResult(raw, config) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
   const memoryCfg = config?.memory ?? {};
   const tolerance = memoryCfg.clampTolerance;
-  const fieldChars = memoryCfg.fieldChars ?? BOOTSTRAP_LIMIT_DEFAULTS.fieldChars;
+  const fieldChars = memoryCfg.fieldChars ?? WARMUP_LIMIT_DEFAULTS.fieldChars;
   return {
     purpose: typeof raw.purpose === 'string' ? clampText(raw.purpose, fieldChars, { tolerance }) : '',
     topics: typeof raw.topics === 'string' ? clampText(raw.topics, fieldChars, { tolerance }) : '',
@@ -590,7 +596,7 @@ function serverTemplateValues(config, selfName) {
   const memoryCfg = config?.memory ?? {};
   return {
     name: selfName,
-    fieldChars: memoryCfg.fieldChars ?? BOOTSTRAP_LIMIT_DEFAULTS.fieldChars,
+    fieldChars: memoryCfg.fieldChars ?? WARMUP_LIMIT_DEFAULTS.fieldChars,
     maxInjokes: memoryCfg.maxInjokes ?? 15,
     loreTextChars: config?.lore?.textChars ?? 400,
   };
@@ -602,7 +608,7 @@ function serverTemplateValues(config, selfName) {
 export function clampServerResult(raw, config, nameOf = () => null) {
   const memoryCfg = config?.memory ?? {};
   const tolerance = memoryCfg.clampTolerance;
-  const fieldChars = memoryCfg.fieldChars ?? BOOTSTRAP_LIMIT_DEFAULTS.fieldChars;
+  const fieldChars = memoryCfg.fieldChars ?? WARMUP_LIMIT_DEFAULTS.fieldChars;
   const maxInjokes = memoryCfg.maxInjokes ?? 15;
   const loreTextChars = config?.lore?.textChars ?? 400;
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { patterns: '', starters: '', injokes: [], lore: [] };
@@ -636,7 +642,7 @@ export function clampServerResult(raw, config, nameOf = () => null) {
  * chronological) whose costs sum to at most `budget` -- the opposite of `fitNewest` above, which
  * drops the oldest to fit ONE request; this instead leaves the rest for a FOLLOWING request, so a
  * member's sample that does not fit in one request is cut into the fewest chronological chunks
- * that do (docs/prompt-contract.md, "The bootstrap"). Always takes at least one item when
+ * that do (docs/prompt-contract.md, "The warmup"). Always takes at least one item when
  * `items` is non-empty, even if that single item alone exceeds `budget` -- progress must be made;
  * the resulting request may then exceed the cap for that one oversized item, an edge case rather
  * than the common path. Pure.
@@ -659,7 +665,7 @@ export function takeFittingPrefix(items, budget, cost) {
 }
 
 /** How many `takeFittingPrefix` calls it takes to exhaust `items` under `budget` -- a display-only
- * estimate for the bootstrap's own progress reporting (a person's `activity.detail.chunk`), using
+ * estimate for the warmup's own progress reporting (a person's `activity.detail.chunk`), using
  * the SAME budget for every future chunk even though a later chunk's fixed blocks (the `<draft>`)
  * may shrink it slightly; harmless since it is recomputed fresh on every chunk. Pure. */
 function countChunks(items, budget, cost) {
@@ -675,7 +681,7 @@ function countChunks(items, budget, cost) {
 /**
  * The per-iteration `users.<id>` op payloads that write one `profile.md` answer through
  * src/memory/update.js#applyMemoryUpdate -- reused so every existing clamp/token/eviction/
- * confirmation rule applies for free (docs/prompt-contract.md, "The bootstrap").
+ * confirmation rule applies for free (docs/prompt-contract.md, "The warmup").
  *
  * `character`/`style`/`aliases`/`episodes` are written once, on the first iteration. `interests`/
  * `details` need their stored WEIGHT to land exactly on the answer's `times` (1..5) -- since one
@@ -730,14 +736,23 @@ function buildNameIndex(windows) {
   return (id) => latest.get(String(id))?.name ?? null;
 }
 
-/** The state.json shape this module owns (see docs/prompt-contract.md, "The bootstrap"),
- * created and self-healed in place -- garbage left by an old shape never crashes a read. */
-function bootstrapState(store) {
+/** The state.json shape this module owns (see docs/prompt-contract.md, "The warmup"),
+ * created and self-healed in place -- garbage left by an old shape never crashes a read. A stored
+ * object whose `version` is not `WARMUP_STATE_VERSION` was written by an older, differently-shaped
+ * version of this project: it is foreign, replaced wholesale (nothing carried over) rather than
+ * healed field by field, logged once, and the store marked dirty so the fresh object is flushed.
+ * An object already at the current version is healed field by field, same as before. */
+function warmupState(store) {
   const data = store.state.data;
-  if (!data.bootstrap || typeof data.bootstrap !== 'object' || Array.isArray(data.bootstrap)) {
-    data.bootstrap = {};
+  const isForeign = !data.warmup || typeof data.warmup !== 'object' || Array.isArray(data.warmup) || data.warmup.version !== WARMUP_STATE_VERSION;
+  if (isForeign) {
+    if (data.warmup !== undefined) {
+      log.info('warmup: discarded progress written by an older version, memory is untouched', {});
+    }
+    data.warmup = { version: WARMUP_STATE_VERSION };
+    store.state.markDirty();
   }
-  const bs = data.bootstrap;
+  const bs = data.warmup;
   if (typeof bs.startedAt !== 'string') bs.startedAt = null;
   if (typeof bs.finishedAt !== 'string') bs.finishedAt = null;
   if (!Number.isFinite(bs.tokensUsed)) bs.tokensUsed = 0;
@@ -762,11 +777,11 @@ function bootstrapState(store) {
  * @param {(guildId: string) => string} deps.getSelfName
  * @param {() => number} [deps.now]
  * @param {(ms: number) => Promise<void>} [deps.sleep]  Used only for a sustained-rate-limit wait
- *   (`bootstrap.rateLimitWaitMinutes`) -- injectable so tests never actually sleep.
+ *   (`warmup.rateLimitWaitMinutes`) -- injectable so tests never actually sleep.
  */
-export function createBootstrap({ hot, store, client, llm, calibrator, getSelfName, now = Date.now, sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)) }) {
+export function createWarmup({ hot, store, client, llm, calibrator, getSelfName, now = Date.now, sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)) }) {
   const cache = new Map(); // guildId -> { fetchedAt, windows }
-  let running = false; // a full run() or one-off runXxx() in flight -- see isBootstrapping()
+  let running = false; // a full run() or one-off runXxx() in flight -- see isWarmingUp()
   let idleWaiters = []; // resolvers for waitIdle(), notified once running goes back to false
   let consecutiveFailures = 0; // resets on any successful request; 3 in a row aborts the run (resumable)
   let stopRequested = false; // /nep warmup stop -- see `stop()` and run()'s own checkpoints
@@ -796,7 +811,7 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
   }
 
   /** (Re-)fetch every readable channel's window, sequentially -- see the module header;
-   * `bootstrap.lookbackDays`/`fetchLimitPerChannel` are read fresh, never cached. */
+   * `warmup.lookbackDays`/`fetchLimitPerChannel` are read fresh, never cached. */
   async function fetchGuildWindows(guild, cfg) {
     const channels = readableChannels(guild, hot.config.bot);
     const minTs = now() - (cfg.lookbackDays ?? 60) * 24 * 60 * 60_000;
@@ -814,9 +829,9 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
           embedTextChars: hot.config.media?.embedTextChars,
         });
       } catch (err) {
-        log.warn('bootstrap: channel fetch failed, skipping it for this round', { channel: channel.id, error: err });
+        log.warn('warmup: channel fetch failed, skipping it for this round', { channel: channel.id, error: err });
       }
-      log.info('bootstrap: channel fetched', { channel: channel.id, messages: messages.length });
+      log.info('warmup: channel fetched', { channel: channel.id, messages: messages.length });
       windows.push({ id: channel.id, name: channel.name, category: channel.parent?.name ?? null, topic: channel.topic ?? null, messages, channel });
       touchActivity('fetching', { channelsFetched: i + 1, channelsTotal: channels.length });
     }
@@ -841,7 +856,7 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
     const guild = resolvedGuild(guildId);
     if (!guild) return { ok: false, message: 'no guild resolved yet' };
 
-    const cfg = hot.config.bootstrap ?? {};
+    const cfg = hot.config.warmup ?? {};
     const windows = await getWindows(guildId, guild, cfg);
     const everyone = pickPeople(windows, { minMessages: 0, maxPeople: Infinity });
     const qualifyingUncapped = pickPeople(windows, { minMessages: cfg.minMessages, maxPeople: Infinity });
@@ -876,7 +891,7 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
     return running ? new Promise((resolve) => idleWaiters.push(resolve)) : Promise.resolve();
   }
 
-  function isBootstrapping() {
+  function isWarmingUp() {
     return running;
   }
 
@@ -886,7 +901,7 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
    * the model call for the target actually in flight right now (`currentAbort`, see
    * `callWithRails`), so no further tokens are spent past this moment and nothing partial is
    * written for that target (activity ends up `stopped`, progress kept, nothing marks
-   * `state.bootstrap` aborted). Every entry point (`run()`, `runOneTarget()`, `startBulk()`) clears
+   * `state.warmup` aborted). Every entry point (`run()`, `runOneTarget()`, `startBulk()`) clears
    * the flag again on its own next start. A no-op, reported as such, when no run is in flight. */
   function stop() {
     if (!running) return { ok: false };
@@ -896,7 +911,7 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
   }
 
   function markDone(kind, id) {
-    const bs = bootstrapState(store);
+    const bs = warmupState(store);
     if (kind === 'server') {
       bs.done.server = true;
     } else if (!bs.done[kind].includes(id)) {
@@ -906,31 +921,31 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
     store.flush();
   }
 
-  /** `config` with `llm.maxRequestTokens` overridden to `cfg.maxRequestTokens` (the bootstrap's own,
+  /** `config` with `llm.maxRequestTokens` overridden to `cfg.maxRequestTokens` (the warmup's own,
    * much larger, cap) -- so buildChannelRequest fits under IT, not the global
-   * per-request rail (docs/prompt-contract.md, "The bootstrap"). */
+   * per-request rail (docs/prompt-contract.md, "The warmup"). */
   function requestConfigFor(cfg) {
     return { ...hot.config, llm: { ...hot.config.llm, maxRequestTokens: cfg.maxRequestTokens ?? hot.config.llm?.maxRequestTokens } };
   }
 
-  function bootstrapRequestCap(cfg) {
+  function warmupRequestCap(cfg) {
     return Math.floor((cfg.maxRequestTokens ?? 120000) * (hot.config.llm?.safetyMargin ?? 0.9));
   }
 
   /**
-   * One analyzer-role call, with every bootstrap rail applied: the token budget
-   * (`bootstrap.maxTokens`, a "stop here, resumable" outcome, never a throw), the per-request cap
+   * One analyzer-role call, with every warmup rail applied: the token budget
+   * (`warmup.maxTokens`, a "stop here, resumable" outcome, never a throw), the per-request cap
    * override, a sustained-429 wait (`rateLimitWaitMinutes` × up to `rateLimitMaxWaits`, then abort,
    * resumable), and the 3-consecutive-other-failures abort. Progress (`tokensUsed`/`requests`) is
    * persisted after every completed request. Never throws: every outcome is reported.
    * @returns {Promise<{ ok: true, completion: object } | { ok: false, stop?: boolean, reason: string, error?: Error }>}
    */
   async function callWithRails(messages, cfg) {
-    const bs = bootstrapState(store);
+    const bs = warmupState(store);
     const estimate = calibrator.apply(estimateMessages(messages));
     const maxTokens = Number.isFinite(cfg.maxTokens) ? cfg.maxTokens : Infinity;
     if (bs.tokensUsed + estimate > maxTokens) {
-      log.info('bootstrap: token budget reached, stopping the run (resumable)', { tokensUsed: bs.tokensUsed, estimate, maxTokens });
+      log.info('warmup: token budget reached, stopping the run (resumable)', { tokensUsed: bs.tokensUsed, estimate, maxTokens });
       bs.aborted = 'budget';
       store.state.markDirty();
       store.flush();
@@ -954,7 +969,7 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
         completion = await llm.complete(messages, {
           model: hot.config.memory?.model ?? hot.config.llm?.model,
           maxOutputTokens: cfg.maxOutputTokens ?? 6000,
-          maxRequestTokens: bootstrapRequestCap(cfg),
+          maxRequestTokens: warmupRequestCap(cfg),
           countAgainstDailyCap: false,
           timeoutMs: hot.config.memory?.timeoutMs ?? hot.config.llm?.timeoutMs,
           signal: controller.signal,
@@ -964,7 +979,7 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
         // /nep warmup stop aborted THIS call -- report it as a clean stop, never a failure
         // (never retried, never counted towards the 3-consecutive-failures abort).
         if (stopRequested) {
-          log.info('bootstrap: the in-flight request was cancelled by /nep warmup stop', {});
+          log.info('warmup: the in-flight request was cancelled by /nep warmup stop', {});
           touchActivity('stopped');
           return { ok: false, stop: true, reason: 'stopped' };
         }
@@ -972,14 +987,14 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
           waits += 1;
           const maxWaits = Number.isFinite(cfg.rateLimitMaxWaits) ? cfg.rateLimitMaxWaits : 36;
           if (waits > maxWaits) {
-            log.warn('bootstrap: rate limit outlasted the wait budget, aborting the run (resumable)', { waits });
+            log.warn('warmup: rate limit outlasted the wait budget, aborting the run (resumable)', { waits });
             bs.aborted = 'rate-limit';
             store.state.markDirty();
             store.flush();
             touchActivity('aborted', { reason: 'rate-limit' });
             return { ok: false, stop: true, reason: 'rate-limit' };
           }
-          log.warn('bootstrap: rate limited, waiting before retrying', { attempt: waits, waitMinutes: cfg.rateLimitWaitMinutes ?? 10 });
+          log.warn('warmup: rate limited, waiting before retrying', { attempt: waits, waitMinutes: cfg.rateLimitWaitMinutes ?? 10 });
           const waitMs = (cfg.rateLimitWaitMinutes ?? 10) * 60_000;
           touchActivity('waiting-rate-limit', { until: now() + waitMs, waits });
           await sleep(waitMs);
@@ -987,9 +1002,9 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
         }
 
         consecutiveFailures += 1;
-        log.warn('bootstrap: request failed', { detail: detailOf(err), consecutiveFailures });
+        log.warn('warmup: request failed', { detail: detailOf(err), consecutiveFailures });
         if (consecutiveFailures >= 3) {
-          log.warn('bootstrap: three consecutive failures, aborting the run (resumable)');
+          log.warn('warmup: three consecutive failures, aborting the run (resumable)');
           bs.aborted = 'failures';
           store.state.markDirty();
           store.flush();
@@ -1101,7 +1116,7 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
         cfgForOps,
         knownUserIds,
         new Set(),
-        undefined, // relationships/affinity: untouched by the bootstrap
+        undefined, // relationships/affinity: untouched by the warmup
         episodesCfg,
         undefined, // lore: not a per-person field
         timing,
@@ -1131,9 +1146,9 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
     if (source.length < wanted && window.channel) {
       try {
         source = await fetchHistoryWindow(window.channel, { limit: wanted, minTs: 0, selfId: client.user?.id, embedTextChars: hot.config.media?.embedTextChars });
-        log.info('bootstrap: quiet channel fetched deeper', { channel: window.id, messages: source.length });
+        log.info('warmup: quiet channel fetched deeper', { channel: window.id, messages: source.length });
       } catch (err) {
-        log.warn('bootstrap: deeper fetch failed, describing from the window', { channel: window.id, error: err });
+        log.warn('warmup: deeper fetch failed, describing from the window', { channel: window.id, error: err });
       }
     }
     const selected = selectChannelMessages(source, cfg.messagesPerChannel);
@@ -1144,7 +1159,7 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
       built = buildChannelRequest({ prompts: hot.prompts, config: requestConfigFor(cfg), calibrator, channel: window, messages: selected, isMain, selfName });
     } catch (err) {
       if (err instanceof SectionsTooLargeError) {
-        log.warn('bootstrap: channel request does not fit even the minimum, skipping this round', { channel: window.id });
+        log.warn('warmup: channel request does not fit even the minimum, skipping this round', { channel: window.id });
         return { ok: false };
       }
       throw err;
@@ -1157,7 +1172,7 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
     try {
       parsed = parseJsonObject(result.completion.text);
     } catch (err) {
-      log.warn('bootstrap: channel answer could not be parsed, will retry next run', { channel: window.id, detail: detailOf(err) });
+      log.warn('warmup: channel answer could not be parsed, will retry next run', { channel: window.id, detail: detailOf(err) });
       return { ok: false };
     }
 
@@ -1205,7 +1220,7 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
     };
     const items = markOwnContext(formatTranscript(sample.messages, formatOptions), sample.ownIds, labels);
 
-    const limit = bootstrapRequestCap(cfg);
+    const limit = warmupRequestCap(cfg);
     const cost = (text) => calibrator.apply(estimateTokens(text)) + 2;
     const system = fillTemplate(hot.prompts.profile, profileTemplateValues(hot.config, selfName));
     const characterBlock = block('character', characterText(hot.prompts, selfName));
@@ -1230,7 +1245,7 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
       const fixedCost = fixedTexts.reduce((sum, text) => sum + cost(text), 0);
       const budget = limit - fixedCost;
       if (budget <= 0) {
-        log.warn('bootstrap: the fixed profile blocks alone exceed the request cap, skipping this person', { member: member.id });
+        log.warn('warmup: the fixed profile blocks alone exceed the request cap, skipping this person', { member: member.id });
         return { ok: false, skipped: true };
       }
 
@@ -1265,10 +1280,10 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
         if (!sampleCfgOverride) {
           const truncated = looksTruncated(result.completion.text, result.completion.finishReason);
           const halved = { ...cfg, messagesPerPerson: Math.max(1, Math.floor((sampleCfg.messagesPerPerson ?? sample.messages.length) / 2)) };
-          log.warn('bootstrap: person answer could not be parsed, retrying with half the sample', { member: member.id, truncated, detail: detailOf(err) });
+          log.warn('warmup: person answer could not be parsed, retrying with half the sample', { member: member.id, truncated, detail: detailOf(err) });
           return processPerson(guildId, windows, member, halved, mainChannelIds, halved, progress);
         }
-        log.warn('bootstrap: person answer still bad after a retry, skipping this person', { member: member.id, detail: detailOf(err) });
+        log.warn('warmup: person answer still bad after a retry, skipping this person', { member: member.id, detail: detailOf(err) });
         markDone('people', member.id);
         return { ok: false, skipped: true };
       }
@@ -1356,7 +1371,7 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
     try {
       parsed = parseJsonObject(result.completion.text);
     } catch (err) {
-      log.warn('bootstrap: server answer could not be parsed, will retry next run', { detail: detailOf(err) });
+      log.warn('warmup: server answer could not be parsed, will retry next run', { detail: detailOf(err) });
       return { ok: false };
     }
 
@@ -1384,28 +1399,28 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
     };
   }
 
-  /** The whole run, in order (channels → people → server), resuming whatever `state.bootstrap.done`
+  /** The whole run, in order (channels → people → server), resuming whatever `state.warmup.done`
    * already covers. Stops (never throws) on: pause, a missing prompt file, the token budget, a
    * sustained rate limit, or three consecutive other failures -- all resumable by calling `run`
    * again. Refuses while another run/one-off target is already in flight. */
   async function run(guildId) {
-    if (running) return { ok: false, message: 'a bootstrap run is already in flight' };
+    if (running) return { ok: false, message: 'a warmup run is already in flight' };
     const guild = resolvedGuild(guildId);
     if (!guild) return { ok: false, message: 'no guild resolved yet' };
 
     running = true;
     consecutiveFailures = 0;
     stopRequested = false;
-    const bs = bootstrapState(store);
+    const bs = warmupState(store);
     if (!bs.startedAt) bs.startedAt = new Date(now()).toISOString();
     bs.finishedAt = null;
     bs.aborted = null;
     store.state.markDirty();
     store.flush();
-    log.info('bootstrap: run starting', { guildId });
+    log.info('warmup: run starting', { guildId });
 
     try {
-      const cfg = hot.config.bootstrap ?? {};
+      const cfg = hot.config.warmup ?? {};
       const windows = await getWindows(guildId, guild, cfg);
       const mainChannelIds = new Set((hot.config.memory?.mainChannelIds ?? []).map(String));
 
@@ -1458,7 +1473,7 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
       store.state.markDirty();
       store.flush();
       touchActivity('finished');
-      log.info('bootstrap: run finished', { guildId, tokensUsed: bs.tokensUsed, requests: bs.requests });
+      log.info('warmup: run finished', { guildId, tokensUsed: bs.tokensUsed, requests: bs.requests });
       return { ok: true };
     } finally {
       running = false;
@@ -1471,7 +1486,7 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
    * Refused while a run (full, another one-off, or a `users`/`channels` bulk redo) is already in
    * flight, or while paused. */
   async function runOneTarget(guildId, kind, id) {
-    if (running) return { ok: false, message: 'a bootstrap run is already in flight' };
+    if (running) return { ok: false, message: 'a warmup run is already in flight' };
     if (store.state.data.paused) return { ok: false, message: 'paused -- run /nep resume first' };
     const guild = resolvedGuild(guildId);
     if (!guild) return { ok: false, message: 'no guild resolved yet' };
@@ -1480,7 +1495,7 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
     consecutiveFailures = 0;
     stopRequested = false;
     try {
-      const cfg = hot.config.bootstrap ?? {};
+      const cfg = hot.config.warmup ?? {};
       const windows = await getWindows(guildId, guild, cfg);
       const mainChannelIds = new Set((hot.config.memory?.mainChannelIds ?? []).map(String));
 
@@ -1511,7 +1526,7 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
   /**
    * `/nep warmup users`/`/nep warmup channels`: (re)do EVERY qualifying member (`pickPeople`)
    * or every readable channel now, sharing `running` (and so every rail: mute, pause/resume,
-   * `state.bootstrap.done`) with `run()` -- a redo re-processes every target regardless of `done`,
+   * `state.warmup.done`) with `run()` -- a redo re-processes every target regardless of `done`,
    * then marks it done either way (processChannel/processPerson already do, idempotently). Resolves
    * once the target COUNT is known and the background loop has been started, NOT once the loop
    * itself finishes, so the caller can report "started N …" at once; progress from then on is
@@ -1521,12 +1536,12 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
    * @param {'people'|'channels'} kind
    */
   async function startBulk(guildId, kind) {
-    if (running) return { ok: false, message: 'a bootstrap run is already in flight' };
+    if (running) return { ok: false, message: 'a warmup run is already in flight' };
     if (store.state.data.paused) return { ok: false, message: 'paused -- run /nep resume first' };
     const guild = resolvedGuild(guildId);
     if (!guild) return { ok: false, message: 'no guild resolved yet' };
 
-    const cfg = hot.config.bootstrap ?? {};
+    const cfg = hot.config.warmup ?? {};
     const windows = await getWindows(guildId, guild, cfg);
     const mainChannelIds = new Set((hot.config.memory?.mainChannelIds ?? []).map(String));
     const targets = kind === 'channels' ? windows : pickPeople(windows, cfg);
@@ -1555,7 +1570,7 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
         }
         touchActivity('finished');
       } catch (err) {
-        log.error(`bootstrap: ${kind} redo failed`, { error: err });
+        log.error(`warmup: ${kind} redo failed`, { error: err });
       } finally {
         running = false;
         notifyIdle();
@@ -1572,22 +1587,22 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
    * @returns {boolean} true when a run was (re)started
    */
   function resumeIfNeeded(guildId) {
-    if (hot.config.bootstrap?.enabled === false) return false;
+    if (hot.config.warmup?.enabled === false) return false;
     if (running || store.state.data.paused) return false;
-    const bs = bootstrapState(store);
+    const bs = warmupState(store);
     const hasProgress = bs.done.channels.length > 0 || bs.done.people.length > 0 || bs.done.server;
     const unfinished = !bs.finishedAt && (Boolean(bs.startedAt) || hasProgress);
     const neverStarted = !bs.startedAt && store.listUserProfiles(guildId).length === 0;
     if (!unfinished && !neverStarted) return false;
 
-    log.info('bootstrap: starting/resuming a run automatically', { guildId, unfinished, neverStarted });
-    run(guildId).catch((err) => log.error('bootstrap: automatic run failed', { error: err }));
+    log.info('warmup: starting/resuming a run automatically', { guildId, unfinished, neverStarted });
+    run(guildId).catch((err) => log.error('warmup: automatic run failed', { error: err }));
     return true;
   }
 
   /** Cheap, synchronous summary for `/nep status` -- never fetches Discord history. */
   function summary() {
-    const bs = bootstrapState(store);
+    const bs = warmupState(store);
     return {
       running,
       startedAt: bs.startedAt,
@@ -1608,7 +1623,7 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
    * explains what is happening meanwhile (fetching history, and so on) so the command still answers
    * at once and still means something while the cache is still empty. */
   function status(guildId) {
-    const bs = bootstrapState(store);
+    const bs = warmupState(store);
     const base = summary();
     let channelsEligible = null;
     let peopleEligible = null;
@@ -1618,7 +1633,7 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
     // them long after the 15-minute refetch window, and a stale count beats a "?".
     const cached = cache.get(guildId);
     if (cached) {
-      const cfg = hot.config.bootstrap ?? {};
+      const cfg = hot.config.warmup ?? {};
       const windows = cached.windows;
       const eligibleChannels = windows; // every readable channel gets a note: the map must cover channels that may wake up later
       const people = pickPeople(windows, cfg);
@@ -1637,11 +1652,11 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
     return { ...base, phase, channelsEligible, peopleEligible, nextTarget, activity: { ...activity }, stopRequested };
   }
 
-  /** `/nep warmup reset`: clears `state.bootstrap` (progress only, never any profile/channel/
+  /** `/nep warmup reset`: clears `state.warmup` (progress only, never any profile/channel/
    * guild/lore data already written). Refused while a run is in flight. */
   function reset() {
-    if (running) return { ok: false, message: 'a bootstrap run is in flight -- pause or wait for it first' };
-    delete store.state.data.bootstrap;
+    if (running) return { ok: false, message: 'a warmup run is in flight -- pause or wait for it first' };
+    delete store.state.data.warmup;
     store.state.markDirty();
     store.flush();
     activity = freshActivity();
@@ -1651,12 +1666,12 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
   /**
    * The stream analyzer's cue that a member's stored portrait misses or contradicts something
    * (src/memory/update.js's `onPortraitRequest`, docs/prompt-contract.md, "Data model"):
-   * samples their newest `bootstrap.refreshMessages` own messages exactly like the bootstrap, calls
+   * samples their newest `warmup.refreshMessages` own messages exactly like the warmup, calls
    * `profile.md` with `<draft>` = the stored character+style and `<hint>` = `reason`, and replaces
    * ONLY `character`/`style` from the answer -- interests/details/episodes/aliases of that answer
    * are ignored, they keep flowing through the stream analyzer's own ops. Rails: at most one refresh
    * per member per `memory.portraitRefreshHours` (skipped when `force` is false), at most
-   * `memory.portraitRefreshPerDay` per server, never while a bootstrap run is in flight (queues
+   * `memory.portraitRefreshPerDay` per server, never while a warmup run is in flight (queues
    * nothing, just logs and returns). Counts against the daily LLM request cap -- this is live
    * behaviour, not seeding.
    * @param {string} guildId
@@ -1667,8 +1682,8 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
    */
   async function refreshPortrait(guildId, userId, reason, { force = false } = {}) {
     if (running) {
-      log.info('bootstrap: portrait refresh skipped, a bootstrap run is in flight', { userId });
-      return { ok: false, reason: 'bootstrapping' };
+      log.info('warmup: portrait refresh skipped, a warmup run is in flight', { userId });
+      return { ok: false, reason: 'warming-up' };
     }
     if (store.state.data.paused) return { ok: false, reason: 'paused' };
 
@@ -1678,12 +1693,12 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
       const lastMs = Date.parse(profile.portraitRefreshedAt);
       const hoursMs = (memoryCfg.portraitRefreshHours ?? 24) * 3_600_000;
       if (Number.isFinite(lastMs) && now() - lastMs < hoursMs) {
-        log.info('bootstrap: portrait refresh skipped, refreshed too recently', { userId });
+        log.info('warmup: portrait refresh skipped, refreshed too recently', { userId });
         return { ok: false, reason: 'too-soon' };
       }
     }
 
-    const bs = bootstrapState(store);
+    const bs = warmupState(store);
     const today = new Date(now()).toISOString().slice(0, 10);
     if (bs.refreshDay !== today) {
       bs.refreshDay = today;
@@ -1691,7 +1706,7 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
     }
     const perDay = Number.isFinite(memoryCfg.portraitRefreshPerDay) ? memoryCfg.portraitRefreshPerDay : 20;
     if (bs.refreshCount >= perDay) {
-      log.info('bootstrap: portrait refresh skipped, daily refresh cap reached', { userId, perDay });
+      log.info('warmup: portrait refresh skipped, daily refresh cap reached', { userId, perDay });
       return { ok: false, reason: 'daily-cap' };
     }
 
@@ -1701,7 +1716,7 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
     const guild = resolvedGuild(guildId);
     if (!guild) return { ok: false, reason: 'no-guild' };
 
-    const cfg = hot.config.bootstrap ?? {};
+    const cfg = hot.config.warmup ?? {};
     const windows = await getWindows(guildId, guild, cfg);
     const mainChannelIds = new Set((memoryCfg.mainChannelIds ?? []).map(String));
     const member = memberStats(windows, userId) ?? {
@@ -1713,7 +1728,7 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
     };
     const sample = sampleMember(windows, userId, { ...cfg, messagesPerPerson: cfg.refreshMessages ?? 400 }, mainChannelIds);
     if (sample.messages.length === 0) {
-      log.info('bootstrap: portrait refresh: nothing to sample for this member', { userId });
+      log.info('warmup: portrait refresh: nothing to sample for this member', { userId });
       return { ok: false, reason: 'nothing-to-sample' };
     }
 
@@ -1748,10 +1763,10 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
       completion = await llm.complete(messages, {
         model: memoryCfg.model ?? hot.config.llm?.model,
         maxOutputTokens: cfg.maxOutputTokens ?? 6000,
-        maxRequestTokens: bootstrapRequestCap(cfg),
+        maxRequestTokens: warmupRequestCap(cfg),
       });
     } catch (err) {
-      log.warn('bootstrap: portrait refresh call failed', { userId, detail: detailOf(err) });
+      log.warn('warmup: portrait refresh call failed', { userId, detail: detailOf(err) });
       return { ok: false, reason: 'llm-error' };
     }
 
@@ -1759,7 +1774,7 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
     try {
       parsed = parseJsonObject(completion.text);
     } catch (err) {
-      log.warn('bootstrap: portrait refresh answer could not be parsed', { userId, detail: detailOf(err) });
+      log.warn('warmup: portrait refresh answer could not be parsed', { userId, detail: detailOf(err) });
       return { ok: false, reason: 'bad-json' };
     }
 
@@ -1780,7 +1795,7 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
     store.state.markDirty();
     store.flush();
 
-    log.info('bootstrap: portrait refreshed', { userId, reason: reason ?? null });
+    log.info('warmup: portrait refreshed', { userId, reason: reason ?? null });
     return { ok: true, userId };
   }
 
@@ -1798,7 +1813,7 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
     status,
     reset,
     refreshPortrait,
-    isBootstrapping,
+    isWarmingUp,
     waitIdle,
   };
 }

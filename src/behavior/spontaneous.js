@@ -139,9 +139,9 @@ export function pickChannel(candidates, now, rng) {
  * @param {import('discord.js').Client} params.client
  * @param {ReturnType<import('./turn.js').createTurnRunner>} params.turns
  * @param {() => string | null} params.getGuildId  the single guild this instance serves, or null before it resolves
- * @param {() => boolean} [params.isBootstrapping]  true while the memory bootstrap runner
- *   (src/memory/bootstrap.js) is in flight: no tick and no eavesdrop scheduling happens.
- *   Default: never bootstrapping.
+ * @param {() => boolean} [params.isWarmingUp]  true while the memory warmup runner
+ *   (src/memory/warmup.js) is in flight: no tick and no eavesdrop scheduling happens.
+ *   Default: never warming up.
  * @param {() => number} [params.rng]
  * @param {() => number} [params.now]
  */
@@ -151,7 +151,7 @@ export function createSpontaneous({
   client,
   turns,
   getGuildId,
-  isBootstrapping = () => false,
+  isWarmingUp = () => false,
   rng = Math.random,
   now = Date.now,
 }) {
@@ -188,8 +188,8 @@ export function createSpontaneous({
     // /nep pause: the owner is editing data/ by hand -- no spontaneous
     // activity, and nothing here (not even the schedule) may become dirty.
     if (store.state.data.paused) return;
-    // A memory bootstrap run is in flight: the persona stays mute, same as a pause.
-    if (isBootstrapping()) return;
+    // A memory warmup run is in flight: the persona stays mute, same as a pause.
+    if (isWarmingUp()) return;
 
     const config = hot.config;
     const cfg = config.spontaneous;
@@ -252,8 +252,8 @@ export function createSpontaneous({
   function onMessage(channel, normalized) {
     // /nep pause: no eavesdrop scheduling while paused.
     if (store.state.data.paused) return;
-    // A memory bootstrap run is in flight: no eavesdrop scheduling either.
-    if (isBootstrapping()) return;
+    // A memory warmup run is in flight: no eavesdrop scheduling either.
+    if (isWarmingUp()) return;
 
     const config = hot.config;
     const cfg = config.spontaneous;

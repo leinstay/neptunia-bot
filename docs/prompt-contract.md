@@ -1,7 +1,7 @@
 # Prompt ↔ code contract
 
 Where the prompt files and the code (`src/behavior/prompt.js`, `src/llm/parse.js`, `src/discord/format.js`,
-`src/memory/update.js`, `src/memory/channels.js`, `src/memory/bootstrap.js`) meet. Change one side only with the
+`src/memory/update.js`, `src/memory/channels.js`, `src/memory/warmup.js`) meet. Change one side only with the
 other. See `CONTRIBUTING.md` for the workflow around changes.
 
 ## Layers
@@ -25,9 +25,9 @@ All instructions are English in both layers; a character's speech samples may be
 | `reply.md` | yes | Task: somebody called the persona | `{{name}}` `{{author}}` `{{trigger}}` `{{target}}` |
 | `interject.md` / `initiate.md` | yes | Tasks: cut into a live conversation / start a topic in a silent chat | `{{name}}` |
 | `memory.md` | yes | Out-of-character prompt of the stream analyzer: targeted edits to memory from live batches | `{{name}}` `{{fieldChars}}` `{{guildFieldChars}}` `{{maxDetails}}` `{{maxInjokes}}` `{{maxSelfFacts}}` `{{maxNewEpisodes}}` `{{maxEpisodes}}` `{{maxDeltaPerUpdate}}` `{{maxInterests}}` `{{interestTopicChars}}` `{{interestNoteChars}}` `{{loreTextChars}}` |
-| `profile.md` | yes | Bootstrap / portrait refresh: one member's profile from a message sample | `{{name}}` `{{fieldChars}}` `{{maxInterests}}` `{{maxDetails}}` `{{interestTopicChars}}` `{{interestNoteChars}}` `{{maxNewEpisodes}}` |
-| `channel.md` | yes | Bootstrap: channel notes from a message sample | `{{fieldChars}}` |
-| `server.md` | yes | Bootstrap: server-level notes from channel notes and member summaries | `{{name}}` `{{fieldChars}}` `{{maxInjokes}}` `{{loreTextChars}}` |
+| `profile.md` | yes | Warmup / portrait refresh: one member's profile from a message sample | `{{name}}` `{{fieldChars}}` `{{maxInterests}}` `{{maxDetails}}` `{{interestTopicChars}}` `{{interestNoteChars}}` `{{maxNewEpisodes}}` |
+| `channel.md` | yes | Warmup: channel notes from a message sample | `{{fieldChars}}` |
+| `server.md` | yes | Warmup: server-level notes from channel notes and member summaries | `{{name}}` `{{fieldChars}}` `{{maxInjokes}}` `{{loreTextChars}}` |
 | `describe.md` | yes | Out-of-character prompt of the media describer (`features.mediaDescriptions`): one picture in, one plain line out — what is on it, any legible text, in the language the chat speaks. No opinions, no markdown | — |
 | `address.md` | yes | Classifier: is this untagged message addressed to the persona | `{{name}}` |
 | `labels.json` | yes | Every string the CODE inserts into a prompt. Keys fixed below, values are the writer's | see below |
@@ -35,7 +35,7 @@ All instructions are English in both layers; a character's speech samples may be
 `{{name}}` bot's display name · `{{author}}` caller's display name · `{{trigger}}` one of `labels.triggers.*` ·
 `{{target}}` index of the calling message (`#87`).
 System message = `system-prompt` + `character-card` + `rules` + `format`. For the analyzer: `memory.md` alone.
-The analyzer and the bootstrap's `profile.md` and `server.md` receive the character card and `rules.md` as a
+The analyzer and the warmup's `profile.md` and `server.md` receive the character card and `rules.md` as a
 `<character>` block in the user message. `channel.md`, `describe.md` and `address.md` do not receive the card.
 
 `{{guildFieldChars}}` is `fieldChars * 2` — the limit code clamps guild-level patterns and starters to.
@@ -138,8 +138,8 @@ server.activity                          {activity} = server.activityLive | acti
 server.lastMessage                       {when} — humanised age of the channel's newest message
 server.topWriters                        {names} — current names of the members who write there most
 triggers.mention | reply | name | followUp   followUp = an untagged message the address classifier judged to be for the persona; such a turn posts plain, never as a Discord reply
-bootstrap.ownMark                        prefixed to a member's own lines in the profile.md transcript
-bootstrap.contextMark                    prefixed to context lines in the profile.md transcript
+warmup.ownMark                           prefixed to a member's own lines in the profile.md transcript
+warmup.contextMark                       prefixed to context lines in the profile.md transcript
 ```
 
 ## Model output — only these tags
@@ -156,7 +156,7 @@ bootstrap.contextMark                    prefixed to context lines in the profil
 
 One call updates everything the persona remembers. It judges people **through the persona's eyes**, so it receives
 the character card. Whether a channel is alive is NOT its call — code counts that. The warmup feeds old history
-through the bootstrap prompts (`profile.md`, `channel.md`, `server.md`), not through the analyzer.
+through the warmup prompts (`profile.md`, `channel.md`, `server.md`), not through the analyzer.
 
 The numeric limits in the prompt are placeholders filled at runtime from `config.memory.*` and `relationships.maxDeltaPerUpdate`.
 
@@ -233,7 +233,7 @@ of what is already stored, so facts are not degraded by being rewritten batch af
   HOW the person writes (length, rhythm, vocabulary, emoji habits), not what they do or talk about. `relationship`:
   how the persona and this person stand with each other, not news and not the person's relations with others. Each
   ≤ `memory.fieldChars`, returned only when it needs to change; an absent field leaves the stored text untouched.
-  `character` and `style` are written ONLY by `profile.md` (the bootstrap and a portrait refresh), never edited by the
+  `character` and `style` are written ONLY by `profile.md` (the warmup and a portrait refresh), never edited by the
   stream analyzer directly — the analyzer returns `portrait` (a one-line cue about what the stored text misses) when
   a batch warrants it, and code queues a refresh.
 - **Members are referred to by id, never by nickname.** Nicknames change daily, so in every free-text field the
@@ -307,12 +307,12 @@ is left out — on a large server most of them are irrelevant and waste budget.
 A channel entry (`renderChannel` in `src/memory/channels.js`) carries:
 
 - **Discord facts** — name (the `# heading`), category, topic. Present from the moment the channel is first seen.
-- **Analyzer notes** — purpose, topics, tone. Written by `channel.md` during the bootstrap and updated by the stream
+- **Analyzer notes** — purpose, topics, tone. Written by `channel.md` during the warmup and updated by the stream
   analyzer (`memory.md`) from live batches. All three are free-text, token-resolved (`<@id>` → current name) at render
   time.
 - **Code-maintained counters** — message count, the timestamp of the first and last message, a 30-day activity
   histogram (messages per UTC day, trimmed to the 30 most recent days), and the top 5 writers (by message count,
-  excluding bots and the persona). The bootstrap fills these from the channel's fetched history via
+  excluding bots and the persona). The warmup fills these from the channel's fetched history via
   `store.setChannelFacts`; live traffic keeps them current via `store.touchChannel`.
 - **Activity verdict** — `live`, `slow` or `dead`, computed by `channelActivity` from the counters, never the model's
   call. `live` when the sum of today's and yesterday's (UTC) messages reaches
@@ -326,7 +326,7 @@ A channel entry (`renderChannel` in `src/memory/channels.js`) carries:
 When the current channel has no stored note yet (the analyzer has not touched it), a fallback entry is synthesised from
 the Discord facts of the messages in the transcript, so the persona still knows where it is.
 
-## The bootstrap (`profile.md`, `channel.md`, `server.md`) — how memory starts
+## The warmup (`profile.md`, `channel.md`, `server.md`) — how memory starts
 
 A portrait is defined by a person's recent messages; one request about one person removes attribution errors by
 construction. The stream analyzer (`memory.md`) keeps running on live batches and applies targeted edits: one fact per
@@ -334,11 +334,11 @@ entry, added / confirmed / corrected / removed in place, never a rewrite of ever
 
 ### Data model
 
-`character` and `style` STAY PROSE and are written ONLY by `profile.md` — by the bootstrap and by a PORTRAIT REFRESH.
+`character` and `style` STAY PROSE and are written ONLY by `profile.md` — by the warmup and by a PORTRAIT REFRESH.
 The stream analyzer never edits them: for a member whose batch showed a recurring habit or a change in how they write
 that the stored portrait misses or contradicts, it returns `users.<id>.portrait: "one line: what the portrait misses"`.
-Code then queues a refresh for that member: their newest `bootstrap.refreshMessages` (default 400) own messages with
-context are sampled exactly like the bootstrap, `profile.md` is called with `<draft>` = the stored character + style,
+Code then queues a refresh for that member: their newest `warmup.refreshMessages` (default 400) own messages with
+context are sampled exactly like the warmup, `profile.md` is called with `<draft>` = the stored character + style,
 `<hint>` = the analyzer's line, and the answer's `character` and `style` replace the stored ones (interests, details,
 episodes and aliases of that answer are IGNORED; they keep flowing through the stream ops). Rails: at most one refresh
 per member per `memory.portraitRefreshHours` (default 24), at most `memory.portraitRefreshPerDay` (default 20) per
@@ -346,27 +346,27 @@ server, counted against the daily request cap; `/nep memory refresh <user>` forc
 
 ### Run order
 
-`/nep warmup run` (also automatic on start when `bootstrap.enabled` and no profile exists):
+`/nep warmup run` (also automatic on start when `warmup.enabled` and no profile exists):
 
 1. **Channels**: every readable channel gets one request, described from the newest
-   `bootstrap.messagesPerChannel` (default 200) messages. When a channel's window has fewer messages than that, a
+   `warmup.messagesPerChannel` (default 200) messages. When a channel's window has fewer messages than that, a
    deeper fetch is attempted regardless of age. A channel with no history is described from its name, category and
    topic alone. The result is a set of channel notes (purpose, topics, tone) and code-maintained facts (counts, top
    writers, activity histogram).
-2. **People**: `pickPeople` (≥ `bootstrap.minMessages` in `bootstrap.lookbackDays`, most active first,
-   ≤ `bootstrap.maxPeople`); per person the sample (`bootstrap.messagesPerPerson` default 2000,
-   `bootstrap.contextBefore` 1) is cut chronologically into chunks that fit `bootstrap.maxRequestTokens`; each chunk
+2. **People**: `pickPeople` (≥ `warmup.minMessages` in `warmup.lookbackDays`, most active first,
+   ≤ `warmup.maxPeople`); per person the sample (`warmup.messagesPerPerson` default 2000,
+   `warmup.contextBefore` 1) is cut chronologically into chunks that fit `warmup.maxRequestTokens`; each chunk
    after the first receives the previous answer as `<draft>` ("your own draft from older messages; keep what holds,
    correct, extend; newest evidence wins"); the last answer is stored: character/style entries and interests/details
    (weight from `times`), episodes, aliases, plus counters (message count, first/last seen) computed by code.
 3. **Server**: one request, `server.md`: input = all channel notes, one line per profiled member (name, top habits,
-   top interests), and the newest `bootstrap.serverSampleMessages` (default 600) lines of the main channels → output
+   top interests), and the newest `warmup.serverSampleMessages` (default 600) lines of the main channels → output
    `{ "patterns": "", "starters": "", "injokes": [""], "lore": [{ "title", "keys", "text" }] }` stored as guild notes and lore.
 
-Attitude and `relationship` are NOT bootstrapped. Progress (`state.bootstrap`: done channels / people / server,
-tokens used) is persisted after every request so a restart resumes. Rails: `bootstrap.maxTokens` (default 6M) and the
-per-request cap; a 429 is waited out (`bootstrap.rateLimitWaitMinutes` 10 × `bootstrap.rateLimitMaxWaits` 36). The
-persona stays mute while a bootstrap run is in flight.
+Attitude and `relationship` are NOT warmed up. Progress (`state.warmup`: done channels / people / server,
+tokens used) is persisted after every request so a restart resumes. Rails: `warmup.maxTokens` (default 6M) and the
+per-request cap; a 429 is waited out (`warmup.rateLimitWaitMinutes` 10 × `warmup.rateLimitMaxWaits` 36). The
+persona stays mute while a warmup run is in flight.
 
 `/nep warmup people` lists qualifying members. `/nep warmup status` shows progress and token usage. `/nep warmup stop`
 cancels any warmup work in flight (the request in progress is aborted, progress is kept so `run` can resume).
@@ -377,8 +377,8 @@ server: profiles, attitudes, episodes, server habits, channel notes, lore and wa
 
 `profile.md` output: `{ "character": "", "style": "", "interests": [{ topic, note, times }], "details": [{ text, times }],
 "episodes": [...], "aliases": [""] }`; blocks `<character>` `<member>` `<draft>` (optional) `<hint>` (optional, portrait
-refresh only) `<snippets>`. Own lines in the snippets start with `labels.bootstrap.ownMark`; context lines start with
-`labels.bootstrap.contextMark`. Aliases come from OTHER people's lines (how they address the member), so the
+refresh only) `<snippets>`. Own lines in the snippets start with `labels.warmup.ownMark`; context lines start with
+`labels.warmup.contextMark`. Aliases come from OTHER people's lines (how they address the member), so the
 own-lines attribution rule does not apply to them.
 
 ## The address classifier (`address.md`) — is this untagged message for the persona?

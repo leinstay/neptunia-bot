@@ -1141,7 +1141,7 @@ test('applyMemoryUpdate: an empty-string prose field never blanks the stored val
 
 // ---- applyMemoryUpdate: portrait refresh cues --------------------------------
 // See docs/prompt-contract.md, "Data model": `character`/`style` stay
-// plain prose, written only by profile.md (the bootstrap / a portrait
+// plain prose, written only by profile.md (the warmup / a portrait
 // refresh). The stream analyzer's `users.<id>.portrait` is a CUE, not an
 // edit: never stored, only collected into `result.portraitRequests` for the
 // caller (analyze()) to hand to an injected refresh callback.

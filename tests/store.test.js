@@ -66,14 +66,14 @@ test('touchUser: an empty/falsy name does not touch the names list', () => {
   assert.deepEqual(profile.names, ['Alice']);
 });
 
-// ---- out-of-order touches (the memory bootstrap feeding old history after a live touch today) ----
+// ---- out-of-order touches (the memory warmup feeding old history after a live touch today) ----
 
 test('touchUser: firstSeen is min(existing, at) and lastSeen is max(existing, at), regardless of arrival order', () => {
   const dir = tmpDataDir();
   const store = createStore({ dataDir: dir });
   // Live touch today...
   store.touchUser('g1', 'u1', 'Alice', 5_000_000);
-  // ...then the bootstrap feeds four years of older history.
+  // ...then the warmup feeds four years of older history.
   const profile = store.touchUser('g1', 'u1', 'Alice', 1000);
   assert.equal(profile.firstSeen, new Date(1000).toISOString(), 'firstSeen widens to the older message');
   assert.equal(profile.lastSeen, new Date(5_000_000).toISOString(), 'lastSeen does NOT regress to the older message');
@@ -1077,7 +1077,7 @@ function seedGuild(store) {
   const cache = store.getMediaCache('g1');
   cache.a1 = { text: 'a cat', ts: 1000 };
   store.markMediaCacheDirty('g1');
-  store.state.data.bootstrap = { done: false, channels: { c1: { batchesDone: 2 } } };
+  store.state.data.warmup = { done: false, channels: { c1: { batchesDone: 2 } } };
   store.state.data.llmDay = '2026-09-20';
   store.state.data.llmCount = 7;
   store.state.markDirty();
@@ -1103,7 +1103,7 @@ test('wipeGuild: removes profiles, guild memory, channels, buffer and analyzer l
   assert.equal(lore[0].title, 'Founders Day');
   assert.equal(lore[0].source, 'owner');
   assert.deepEqual(storeA.getMediaCache('g1'), { a1: { text: 'a cat', ts: 1000 } });
-  assert.equal(storeA.state.data.bootstrap, undefined);
+  assert.equal(storeA.state.data.warmup, undefined);
   assert.equal(storeA.state.data.llmDay, '2026-09-20');
   assert.equal(storeA.state.data.llmCount, 7);
 
@@ -1118,7 +1118,7 @@ test('wipeGuild: removes profiles, guild memory, channels, buffer and analyzer l
   assert.equal(loreB.length, 1);
   assert.equal(loreB[0].title, 'Founders Day');
   assert.deepEqual(storeB.getMediaCache('g1'), { a1: { text: 'a cat', ts: 1000 } });
-  assert.equal(storeB.state.data.bootstrap, undefined);
+  assert.equal(storeB.state.data.warmup, undefined);
   assert.equal(storeB.state.data.llmDay, '2026-09-20');
   assert.equal(storeB.state.data.llmCount, 7);
 });
@@ -1340,13 +1340,13 @@ test('reloadState: re-reads state.json from disk, discarding the cached in-memor
   store.state.markDirty();
   store.flush();
 
-  // A hand-edit to state.json itself, e.g. bootstrap progress, made while paused.
-  fs.writeFileSync(path.join(dir, 'state.json'), JSON.stringify({ llmCount: 99, bootstrap: { done: false } }));
+  // A hand-edit to state.json itself, e.g. warmup progress, made while paused.
+  fs.writeFileSync(path.join(dir, 'state.json'), JSON.stringify({ llmCount: 99, warmup: { done: false } }));
 
   assert.equal(store.state.data.llmCount, 1, 'still the stale cached value before reloadState');
   store.reloadState();
   assert.equal(store.state.data.llmCount, 99);
-  assert.deepEqual(store.state.data.bootstrap, { done: false });
+  assert.deepEqual(store.state.data.warmup, { done: false });
 });
 
 test('reloadState: falls back to {} when state.json does not exist', () => {

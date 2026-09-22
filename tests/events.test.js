@@ -154,7 +154,7 @@ function makeHandler({
   client,
   store,
   getGuildId,
-  isBootstrapping,
+  isWarmingUp,
   describer,
   prompts,
   llm,
@@ -168,7 +168,7 @@ function makeHandler({
     memory: memory ?? fakeMemory(),
     tagHistory: tagHistory ?? createTagHistory(),
     getGuildId: getGuildId ?? (() => 'g1'),
-    isBootstrapping,
+    isWarmingUp,
     describer,
     llm,
     rng: rng ?? Math.random,
@@ -758,14 +758,14 @@ test('features.relationships=false: affinityScore is never looked up or passed',
 });
 
 // ---------------------------------------------------------------------------
-// isBootstrapping: the persona is mute while a memory bootstrap run is in
+// isWarmingUp: the persona is mute while a memory warmup run is in
 // flight.
 
-test('events: while bootstrapping a plain message is observed but no turn or eavesdrop happens', async () => {
+test('events: while warming up a plain message is observed but no turn or eavesdrop happens', async () => {
   const memory = fakeMemory();
   const spontaneous = fakeSpontaneous();
   const turns = fakeTurns();
-  const handler = makeHandler({ memory, spontaneous, turns, isBootstrapping: () => true });
+  const handler = makeHandler({ memory, spontaneous, turns, isWarmingUp: () => true });
 
   const message = fakeMessage({ cleanContent: 'ένα απλό μήνυμα' });
   await handler(message);
@@ -775,12 +775,12 @@ test('events: while bootstrapping a plain message is observed but no turn or eav
   assert.equal(spontaneous.onMessageCalls.length, 0);
 });
 
-test('events: while bootstrapping a mention never runs a turn, even though it would normally trigger', async () => {
+test('events: while warming up a mention never runs a turn, even though it would normally trigger', async () => {
   let called = false;
   const turns = fakeTurns({ runTurn: async () => { called = true; return { outcome: 'spoke' }; } });
   const memory = fakeMemory();
   const spontaneous = fakeSpontaneous();
-  const handler = makeHandler({ turns, memory, spontaneous, isBootstrapping: () => true, rng: scripted([0.99]) });
+  const handler = makeHandler({ turns, memory, spontaneous, isWarmingUp: () => true, rng: scripted([0.99]) });
 
   const message = fakeMessage({
     cleanContent: 'γεια',
@@ -795,7 +795,7 @@ test('events: while bootstrapping a mention never runs a turn, even though it wo
   assert.deepEqual(memory.observeCalls[0][2], { direct: false });
 });
 
-test('events: while bootstrapping, a pending ping already queued is left for a later drain', async () => {
+test('events: while warming up, a pending ping already queued is left for a later drain', async () => {
   let muted = false;
   let seenArgs = null;
   const turns = fakeTurns({
@@ -806,7 +806,7 @@ test('events: while bootstrapping, a pending ping already queued is left for a l
       return { outcome: 'spoke' };
     },
   });
-  const handler = makeHandler({ turns, isBootstrapping: () => muted, rng: scripted([0.5, 0.99]) });
+  const handler = makeHandler({ turns, isWarmingUp: () => muted, rng: scripted([0.5, 0.99]) });
 
   const guild = fakeGuild();
   const channel = fakeChannelWithMessage('c1', guild, 'm1');
@@ -815,14 +815,14 @@ test('events: while bootstrapping, a pending ping already queued is left for a l
 
   muted = true;
   await handler.drainPending();
-  assert.equal(seenArgs, null, 'the queue is left untouched while bootstrapping');
+  assert.equal(seenArgs, null, 'the queue is left untouched while warming up');
 
   muted = false;
   await handler.drainPending();
-  assert.ok(seenArgs, 'and answered once bootstrapping ends');
+  assert.ok(seenArgs, 'and answered once warming up ends');
 });
 
-test('events: isBootstrapping defaults to false when not provided (unmuted: a trigger runs a turn normally)', async () => {
+test('events: isWarmingUp defaults to false when not provided (unmuted: a trigger runs a turn normally)', async () => {
   let called = false;
   const turns = fakeTurns({ runTurn: async () => { called = true; return { outcome: 'spoke' }; } });
   const handler = makeHandler({ turns, rng: scripted([0.99]) });
@@ -908,7 +908,7 @@ test('events: an empty bot.dryRunChannelId (default) does not affect any channel
 });
 
 // ---------------------------------------------------------------------------
-// features.mediaDescriptions: fire-and-forget describer warm-up from the
+// features.mediaDescriptions: fire-and-forget describer pre-fetch from the
 // message path (src/memory/describe.js's cache), so the live memory analyzer
 // (src/memory/update.js#analyze) finds a caption already cached.
 
@@ -1011,10 +1011,10 @@ test('events: the dry-run mirror channel never triggers a describer call, even w
   assert.equal(describer.calls.length, 0);
 });
 
-test('events: while bootstrapping, an observed human message with a picture still warms the describer cache', async () => {
+test('events: while warming up, an observed human message with a picture still warms the describer cache', async () => {
   const describer = fakeDescriber();
   const config = baseConfig({ features: { mediaDescriptions: true } });
-  const handler = makeHandler({ config, describer, isBootstrapping: () => true });
+  const handler = makeHandler({ config, describer, isWarmingUp: () => true });
 
   const message = fakeMessage({ cleanContent: 'look', attachments: pictureAttachments(1) });
   await handler(message);

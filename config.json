@@ -151,7 +151,7 @@
     "filePreviewChars": 500,
     "embedTextChars": 200
   },
-  "bootstrap": {
+  "warmup": {
     "enabled": true,
     "lookbackDays": 60,
     "minMessages": 30,

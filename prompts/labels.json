@@ -128,7 +128,7 @@
   "ping": {
     "prompt": "Reply with the single word pong."
   },
-  "bootstrap": {
+  "warmup": {
     "ownMark": ">> ",
     "contextMark": "(ctx) "
   }

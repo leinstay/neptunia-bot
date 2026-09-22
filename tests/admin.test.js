@@ -330,12 +330,12 @@ function makeAdmin(rootDir, extra = {}) {
     spontaneous: extra.spontaneous ?? {},
     calibrator: extra.calibrator ?? { ratio: 1 },
     getGuildId: extra.getGuildId ?? (() => 'g1'),
-    isBootstrapping: extra.isBootstrapping,
+    isWarmingUp: extra.isWarmingUp,
     turns: extra.turns,
     memory: extra.memory,
     pending: extra.pending,
     llm: extra.llm,
-    bootstrap: extra.bootstrap,
+    warmup: extra.warmup,
   });
   return { admin, hot, store };
 }
@@ -1896,13 +1896,13 @@ test('run: status reports model, calibration ratio and the daily request count',
   assert.match(body, /guild: The Server \(g1\)/);
 });
 
-test('run: status reports "bootstrapping: false" by default and "true" when the hook says so', async () => {
+test('run: status reports "warming up: false" by default and "true" when the hook says so', async () => {
   const rootDir = makeRoot();
   const { admin: idleAdmin } = makeAdmin(rootDir);
-  assert.ok((await idleAdmin.run('status', {}, {})).includes('bootstrapping: false'));
+  assert.ok((await idleAdmin.run('status', {}, {})).includes('warming up: false'));
 
-  const { admin: busyAdmin } = makeAdmin(rootDir, { isBootstrapping: () => true });
-  assert.ok((await busyAdmin.run('status', {}, {})).includes('bootstrapping: true'));
+  const { admin: busyAdmin } = makeAdmin(rootDir, { isWarmingUp: () => true });
+  assert.ok((await busyAdmin.run('status', {}, {})).includes('warming up: true'));
 });
 
 test('run: status reports dry-run off by default, as its first line', async () => {
@@ -2075,19 +2075,19 @@ test('run: pause waits for an in-flight live-analyzer run before dropping caches
   assert.equal(store.dropCachesCalls, 1);
 });
 
-test('run: pause waits for an in-flight bootstrap run before dropping caches', async () => {
+test('run: pause waits for an in-flight warmup run before dropping caches', async () => {
   const rootDir = makeRoot();
   let resolveIdle;
   const idlePromise = new Promise((resolve) => {
     resolveIdle = resolve;
   });
-  const bootstrap = { waitIdle: () => idlePromise };
-  const { admin, store } = makeAdmin(rootDir, { bootstrap });
+  const warmup = { waitIdle: () => idlePromise };
+  const { admin, store } = makeAdmin(rootDir, { warmup });
 
   const pausePromise = admin.run('pause', {}, {});
   await Promise.resolve();
   await Promise.resolve();
-  assert.equal(store.dropCachesCalls, 0, 'must not drop caches before the in-flight bootstrap run finished');
+  assert.equal(store.dropCachesCalls, 0, 'must not drop caches before the in-flight warmup run finished');
 
   resolveIdle();
   await pausePromise;
@@ -2352,11 +2352,11 @@ test('run: memory.show/lore.list/lore.show drop caches first while paused, so a 
 });
 
 // ---------------------------------------------------------------------------
-// bootstrap -- people stays read-only; run/user/users/channel/channels/server
+// warmup -- people stays read-only; run/user/users/channel/channels/server
 // write under data/ and are guarded by assertNotPaused().
 // ---------------------------------------------------------------------------
 
-function fakeBootstrap(overrides = {}) {
+function fakeWarmup(overrides = {}) {
   const calls = {
     peopleReport: 0,
     run: 0,
@@ -2481,103 +2481,103 @@ function fakeBootstrap(overrides = {}) {
   };
 }
 
-test('run: bootstrap.people reports "not available" when the dependency is absent', async () => {
+test('run: warmup.people reports "not available" when the dependency is absent', async () => {
   const rootDir = makeRoot();
   const { admin } = makeAdmin(rootDir);
-  assert.equal(await admin.run('warmup.people', {}, { guildId: 'g1' }), 'bootstrap is not available');
+  assert.equal(await admin.run('warmup.people', {}, { guildId: 'g1' }), 'warmup is not available');
 });
 
-test('run: bootstrap.people formats the people list and totals', async () => {
+test('run: warmup.people formats the people list and totals', async () => {
   const rootDir = makeRoot();
-  const bootstrap = fakeBootstrap();
-  const { admin } = makeAdmin(rootDir, { bootstrap });
+  const warmup = fakeWarmup();
+  const { admin } = makeAdmin(rootDir, { warmup });
 
   const body = await admin.run('warmup.people', {}, { guildId: 'g1' });
-  assert.equal(bootstrap.calls.peopleReport, 1);
+  assert.equal(warmup.calls.peopleReport, 1);
   assert.ok(body.includes('Alice (id:1)'));
   assert.ok(body.includes('channels read: 3'));
   assert.ok(body.includes('messages read: 500'));
   assert.ok(body.includes('people below the threshold: 2'));
 });
 
-test('run: bootstrap.people keeps working while paused', async () => {
+test('run: warmup.people keeps working while paused', async () => {
   const rootDir = makeRoot();
-  const bootstrap = fakeBootstrap();
-  const { admin } = makeAdmin(rootDir, { bootstrap });
+  const warmup = fakeWarmup();
+  const { admin } = makeAdmin(rootDir, { warmup });
 
   await admin.run('pause', {}, {});
 
   await assert.doesNotReject(() => admin.run('warmup.people', {}, { guildId: 'g1' }));
-  assert.equal(bootstrap.calls.peopleReport, 1);
+  assert.equal(warmup.calls.peopleReport, 1);
 });
 
 // ---------------------------------------------------------------------------
-// bootstrap.run / users / channels / server / status / reset / memory.refresh
+// warmup.run / users / channels / server / status / reset / memory.refresh
 // -- the write path
 // ---------------------------------------------------------------------------
 
-test('run: bootstrap.run/users/channels/server/status/reset and memory.refresh report "not available" when the dependency is absent', async () => {
+test('run: warmup.run/users/channels/server/status/reset and memory.refresh report "not available" when the dependency is absent', async () => {
   const rootDir = makeRoot();
   const { admin } = makeAdmin(rootDir);
-  assert.equal(await admin.run('warmup.run', {}, { guildId: 'g1' }), 'bootstrap is not available');
-  assert.equal(await admin.run('warmup.stop', {}, { guildId: 'g1' }), 'bootstrap is not available');
-  assert.equal(await admin.run('warmup.users', { userId: '1' }, { guildId: 'g1' }), 'bootstrap is not available');
-  assert.equal(await admin.run('warmup.users', {}, { guildId: 'g1' }), 'bootstrap is not available');
-  assert.equal(await admin.run('warmup.channels', { channelId: 'c1' }, { guildId: 'g1' }), 'bootstrap is not available');
-  assert.equal(await admin.run('warmup.channels', {}, { guildId: 'g1' }), 'bootstrap is not available');
-  assert.equal(await admin.run('warmup.server', {}, { guildId: 'g1' }), 'bootstrap is not available');
-  assert.equal(await admin.run('warmup.status', {}, { guildId: 'g1' }), 'bootstrap is not available');
-  assert.equal(await admin.run('warmup.reset', {}, { guildId: 'g1' }), 'bootstrap is not available');
-  await assert.rejects(() => admin.run('memory.refresh', { userId: '1' }, { guildId: 'g1' }), /bootstrap is not available/);
+  assert.equal(await admin.run('warmup.run', {}, { guildId: 'g1' }), 'warmup is not available');
+  assert.equal(await admin.run('warmup.stop', {}, { guildId: 'g1' }), 'warmup is not available');
+  assert.equal(await admin.run('warmup.users', { userId: '1' }, { guildId: 'g1' }), 'warmup is not available');
+  assert.equal(await admin.run('warmup.users', {}, { guildId: 'g1' }), 'warmup is not available');
+  assert.equal(await admin.run('warmup.channels', { channelId: 'c1' }, { guildId: 'g1' }), 'warmup is not available');
+  assert.equal(await admin.run('warmup.channels', {}, { guildId: 'g1' }), 'warmup is not available');
+  assert.equal(await admin.run('warmup.server', {}, { guildId: 'g1' }), 'warmup is not available');
+  assert.equal(await admin.run('warmup.status', {}, { guildId: 'g1' }), 'warmup is not available');
+  assert.equal(await admin.run('warmup.reset', {}, { guildId: 'g1' }), 'warmup is not available');
+  await assert.rejects(() => admin.run('memory.refresh', { userId: '1' }, { guildId: 'g1' }), /warmup is not available/);
 });
 
 test('run: warmup.run starts the whole run in the background and replies at once', async () => {
   const rootDir = makeRoot();
-  const bootstrap = fakeBootstrap();
-  const { admin } = makeAdmin(rootDir, { bootstrap });
+  const warmup = fakeWarmup();
+  const { admin } = makeAdmin(rootDir, { warmup });
 
   const body = await admin.run('warmup.run', {}, { guildId: 'g1' });
-  assert.equal(bootstrap.calls.run, 1);
-  assert.equal(bootstrap.calls.lastRunGuildId, 'g1');
+  assert.equal(warmup.calls.run, 1);
+  assert.equal(warmup.calls.lastRunGuildId, 'g1');
   assert.match(body, /warmup started/);
   assert.match(body, /warmup status/);
 });
 
 test('run: warmup.run is refused while a warmup is already in flight', async () => {
   const rootDir = makeRoot();
-  const bootstrap = fakeBootstrap();
-  bootstrap.isBootstrapping = () => true;
-  const { admin } = makeAdmin(rootDir, { bootstrap });
+  const warmup = fakeWarmup();
+  warmup.isWarmingUp = () => true;
+  const { admin } = makeAdmin(rootDir, { warmup });
 
   const body = await admin.run('warmup.run', {}, { guildId: 'g1' });
-  assert.equal(bootstrap.calls.run, 0);
+  assert.equal(warmup.calls.run, 0);
   assert.match(body, /already in flight/);
 });
 
-test('run: bootstrap.run is refused while paused', async () => {
+test('run: warmup.run is refused while paused', async () => {
   const rootDir = makeRoot();
-  const bootstrap = fakeBootstrap();
-  const { admin } = makeAdmin(rootDir, { bootstrap });
+  const warmup = fakeWarmup();
+  const { admin } = makeAdmin(rootDir, { warmup });
 
   await admin.run('pause', {}, {});
   await assert.rejects(() => admin.run('warmup.run', {}, { guildId: 'g1' }), /paused/);
-  assert.equal(bootstrap.calls.run, 0);
+  assert.equal(warmup.calls.run, 0);
 });
 
 test('run: warmup.stop replies "warmup stopped" when a run is in flight', async () => {
   const rootDir = makeRoot();
-  const bootstrap = fakeBootstrap({ stop: { ok: true } });
-  const { admin } = makeAdmin(rootDir, { bootstrap });
+  const warmup = fakeWarmup({ stop: { ok: true } });
+  const { admin } = makeAdmin(rootDir, { warmup });
 
   const body = await admin.run('warmup.stop', {}, { guildId: 'g1' });
-  assert.equal(bootstrap.calls.stop, 1);
+  assert.equal(warmup.calls.stop, 1);
   assert.equal(body, 'warmup stopped');
 });
 
 test('run: warmup.stop replies "no warmup in flight" when nothing is running', async () => {
   const rootDir = makeRoot();
-  const bootstrap = fakeBootstrap({ stop: { ok: false } });
-  const { admin } = makeAdmin(rootDir, { bootstrap });
+  const warmup = fakeWarmup({ stop: { ok: false } });
+  const { admin } = makeAdmin(rootDir, { warmup });
 
   const body = await admin.run('warmup.stop', {}, { guildId: 'g1' });
   assert.equal(body, 'no warmup in flight');
@@ -2585,23 +2585,23 @@ test('run: warmup.stop replies "no warmup in flight" when nothing is running', a
 
 test('run: warmup.stop keeps working while paused (touches no data/)', async () => {
   const rootDir = makeRoot();
-  const bootstrap = fakeBootstrap({ stop: { ok: true } });
-  const { admin } = makeAdmin(rootDir, { bootstrap });
+  const warmup = fakeWarmup({ stop: { ok: true } });
+  const { admin } = makeAdmin(rootDir, { warmup });
 
   await admin.run('pause', {}, {});
   await assert.doesNotReject(() => admin.run('warmup.stop', {}, { guildId: 'g1' }));
-  assert.equal(bootstrap.calls.stop, 1);
+  assert.equal(warmup.calls.stop, 1);
 });
 
 test('run: warmup.users with a member profiles exactly that member now, synchronously, and summarizes what was written', async () => {
   const rootDir = makeRoot();
-  const bootstrap = fakeBootstrap();
-  const { admin } = makeAdmin(rootDir, { bootstrap });
+  const warmup = fakeWarmup();
+  const { admin } = makeAdmin(rootDir, { warmup });
 
   const body = await admin.run('warmup.users', { userId: '1' }, { guildId: 'g1' });
-  assert.equal(bootstrap.calls.runPerson, 1);
-  assert.equal(bootstrap.calls.lastRunPersonId, '1');
-  assert.equal(bootstrap.calls.runUsers, 0, 'a member given must not also start the background bulk redo');
+  assert.equal(warmup.calls.runPerson, 1);
+  assert.equal(warmup.calls.lastRunPersonId, '1');
+  assert.equal(warmup.calls.runUsers, 0, 'a member given must not also start the background bulk redo');
   assert.match(body, /profiled Alice \(id:1\)/);
   assert.match(body, /sample: 10 own \/ 5 context lines/);
   assert.match(body, /tokens used: 1234/);
@@ -2611,8 +2611,8 @@ test('run: warmup.users with a member profiles exactly that member now, synchron
 
 test('run: warmup.users with a member relays "no messages in the window" unchanged', async () => {
   const rootDir = makeRoot();
-  const bootstrap = fakeBootstrap({ runPerson: { ok: false, message: 'no messages in the window' } });
-  const { admin } = makeAdmin(rootDir, { bootstrap });
+  const warmup = fakeWarmup({ runPerson: { ok: false, message: 'no messages in the window' } });
+  const { admin } = makeAdmin(rootDir, { warmup });
 
   const body = await admin.run('warmup.users', { userId: '1' }, { guildId: 'g1' });
   assert.equal(body, 'no messages in the window');
@@ -2620,54 +2620,54 @@ test('run: warmup.users with a member relays "no messages in the window" unchang
 
 test('run: warmup.users with a member is refused while paused', async () => {
   const rootDir = makeRoot();
-  const bootstrap = fakeBootstrap();
-  const { admin } = makeAdmin(rootDir, { bootstrap });
+  const warmup = fakeWarmup();
+  const { admin } = makeAdmin(rootDir, { warmup });
 
   await admin.run('pause', {}, {});
   await assert.rejects(() => admin.run('warmup.users', { userId: '1' }, { guildId: 'g1' }), /paused/);
-  assert.equal(bootstrap.calls.runPerson, 0);
+  assert.equal(warmup.calls.runPerson, 0);
 });
 
 test('run: warmup.users with no member starts a background redo of every qualifying member', async () => {
   const rootDir = makeRoot();
-  const bootstrap = fakeBootstrap();
-  const { admin } = makeAdmin(rootDir, { bootstrap });
+  const warmup = fakeWarmup();
+  const { admin } = makeAdmin(rootDir, { warmup });
 
   const body = await admin.run('warmup.users', {}, { guildId: 'g1' });
-  assert.equal(bootstrap.calls.runUsers, 1);
-  assert.equal(bootstrap.calls.lastRunUsersGuildId, 'g1');
-  assert.equal(bootstrap.calls.runPerson, 0, 'no member given must not also profile one synchronously');
+  assert.equal(warmup.calls.runUsers, 1);
+  assert.equal(warmup.calls.lastRunUsersGuildId, 'g1');
+  assert.equal(warmup.calls.runPerson, 0, 'no member given must not also profile one synchronously');
   assert.equal(body, 'started 5 members');
 });
 
 test('run: warmup.users with no member relays a refusal (e.g. a run already in flight)', async () => {
   const rootDir = makeRoot();
-  const bootstrap = fakeBootstrap({ runUsers: { ok: false, message: 'a bootstrap run is already in flight' } });
-  const { admin } = makeAdmin(rootDir, { bootstrap });
+  const warmup = fakeWarmup({ runUsers: { ok: false, message: 'a warmup run is already in flight' } });
+  const { admin } = makeAdmin(rootDir, { warmup });
 
   const body = await admin.run('warmup.users', {}, { guildId: 'g1' });
-  assert.equal(body, 'a bootstrap run is already in flight');
+  assert.equal(body, 'a warmup run is already in flight');
 });
 
 test('run: warmup.users with no member is refused while paused', async () => {
   const rootDir = makeRoot();
-  const bootstrap = fakeBootstrap();
-  const { admin } = makeAdmin(rootDir, { bootstrap });
+  const warmup = fakeWarmup();
+  const { admin } = makeAdmin(rootDir, { warmup });
 
   await admin.run('pause', {}, {});
   await assert.rejects(() => admin.run('warmup.users', {}, { guildId: 'g1' }), /paused/);
-  assert.equal(bootstrap.calls.runUsers, 0);
+  assert.equal(warmup.calls.runUsers, 0);
 });
 
 test('run: warmup.channels with a channel describes exactly that channel now, synchronously, and reports the note written', async () => {
   const rootDir = makeRoot();
-  const bootstrap = fakeBootstrap();
-  const { admin } = makeAdmin(rootDir, { bootstrap });
+  const warmup = fakeWarmup();
+  const { admin } = makeAdmin(rootDir, { warmup });
 
   const body = await admin.run('warmup.channels', { channelId: 'c1' }, { guildId: 'g1' });
-  assert.equal(bootstrap.calls.runChannel, 1);
-  assert.equal(bootstrap.calls.lastRunChannelId, 'c1');
-  assert.equal(bootstrap.calls.runChannels, 0, 'a channel given must not also start the background bulk redo');
+  assert.equal(warmup.calls.runChannel, 1);
+  assert.equal(warmup.calls.lastRunChannelId, 'c1');
+  assert.equal(warmup.calls.runChannels, 0, 'a channel given must not also start the background bulk redo');
   assert.match(body, /described #general \(id:c1\)/);
   assert.match(body, /purpose: general chat/);
   assert.match(body, /topics: everything/);
@@ -2676,7 +2676,7 @@ test('run: warmup.channels with a channel describes exactly that channel now, sy
 
 test('run: warmup.channels with a channel reports counters and top writers when the outcome carries facts', async () => {
   const rootDir = makeRoot();
-  const bootstrap = fakeBootstrap({
+  const warmup = fakeWarmup({
     runChannel: {
       ok: true,
       outcome: {
@@ -2693,7 +2693,7 @@ test('run: warmup.channels with a channel reports counters and top writers when 
       },
     },
   });
-  const { admin, store } = makeAdmin(rootDir, { bootstrap });
+  const { admin, store } = makeAdmin(rootDir, { warmup });
   store.profiles.set('g1:u1', { id: 'u1', names: ['Alice'] });
 
   const body = await admin.run('warmup.channels', { channelId: 'c1' }, { guildId: 'g1' });
@@ -2705,8 +2705,8 @@ test('run: warmup.channels with a channel reports counters and top writers when 
 
 test('run: warmup.channels with a channel relays a failure message unchanged', async () => {
   const rootDir = makeRoot();
-  const bootstrap = fakeBootstrap({ runChannel: { ok: false, message: 'channel not found, not readable, or not in this guild' } });
-  const { admin } = makeAdmin(rootDir, { bootstrap });
+  const warmup = fakeWarmup({ runChannel: { ok: false, message: 'channel not found, not readable, or not in this guild' } });
+  const { admin } = makeAdmin(rootDir, { warmup });
 
   const body = await admin.run('warmup.channels', { channelId: 'c1' }, { guildId: 'g1' });
   assert.equal(body, 'channel not found, not readable, or not in this guild');
@@ -2714,71 +2714,71 @@ test('run: warmup.channels with a channel relays a failure message unchanged', a
 
 test('run: warmup.channels with a channel is refused while paused', async () => {
   const rootDir = makeRoot();
-  const bootstrap = fakeBootstrap();
-  const { admin } = makeAdmin(rootDir, { bootstrap });
+  const warmup = fakeWarmup();
+  const { admin } = makeAdmin(rootDir, { warmup });
 
   await admin.run('pause', {}, {});
   await assert.rejects(() => admin.run('warmup.channels', { channelId: 'c1' }, { guildId: 'g1' }), /paused/);
-  assert.equal(bootstrap.calls.runChannel, 0);
+  assert.equal(warmup.calls.runChannel, 0);
 });
 
 test('run: warmup.channels with no channel starts a background redo of every readable channel', async () => {
   const rootDir = makeRoot();
-  const bootstrap = fakeBootstrap();
-  const { admin } = makeAdmin(rootDir, { bootstrap });
+  const warmup = fakeWarmup();
+  const { admin } = makeAdmin(rootDir, { warmup });
 
   const body = await admin.run('warmup.channels', {}, { guildId: 'g1' });
-  assert.equal(bootstrap.calls.runChannels, 1);
-  assert.equal(bootstrap.calls.runChannel, 0, 'no channel given must not also describe one synchronously');
+  assert.equal(warmup.calls.runChannels, 1);
+  assert.equal(warmup.calls.runChannel, 0, 'no channel given must not also describe one synchronously');
   assert.equal(body, 'started 8 channels');
 });
 
 test('run: warmup.channels with no channel is refused while paused', async () => {
   const rootDir = makeRoot();
-  const bootstrap = fakeBootstrap();
-  const { admin } = makeAdmin(rootDir, { bootstrap });
+  const warmup = fakeWarmup();
+  const { admin } = makeAdmin(rootDir, { warmup });
 
   await admin.run('pause', {}, {});
   await assert.rejects(() => admin.run('warmup.channels', {}, { guildId: 'g1' }), /paused/);
-  assert.equal(bootstrap.calls.runChannels, 0);
+  assert.equal(warmup.calls.runChannels, 0);
 });
 
-test('run: bootstrap.server (re)builds the server-wide notes and reports counts', async () => {
+test('run: warmup.server (re)builds the server-wide notes and reports counts', async () => {
   const rootDir = makeRoot();
-  const bootstrap = fakeBootstrap();
-  const { admin } = makeAdmin(rootDir, { bootstrap });
+  const warmup = fakeWarmup();
+  const { admin } = makeAdmin(rootDir, { warmup });
 
   const body = await admin.run('warmup.server', {}, { guildId: 'g1' });
-  assert.equal(bootstrap.calls.runServer, 1);
+  assert.equal(warmup.calls.runServer, 1);
   assert.match(body, /patterns 120 chars/);
   assert.match(body, /starters 40 chars/);
   assert.match(body, /injokes 3/);
   assert.match(body, /lore entries 2/);
 });
 
-test('run: bootstrap.server relays a failure message unchanged', async () => {
+test('run: warmup.server relays a failure message unchanged', async () => {
   const rootDir = makeRoot();
-  const bootstrap = fakeBootstrap({ runServer: { ok: false, message: 'prompt file missing: prompts/server.md is not configured yet' } });
-  const { admin } = makeAdmin(rootDir, { bootstrap });
+  const warmup = fakeWarmup({ runServer: { ok: false, message: 'prompt file missing: prompts/server.md is not configured yet' } });
+  const { admin } = makeAdmin(rootDir, { warmup });
 
   const body = await admin.run('warmup.server', {}, { guildId: 'g1' });
   assert.equal(body, 'prompt file missing: prompts/server.md is not configured yet');
 });
 
-test('run: bootstrap.server is refused while paused', async () => {
+test('run: warmup.server is refused while paused', async () => {
   const rootDir = makeRoot();
-  const bootstrap = fakeBootstrap();
-  const { admin } = makeAdmin(rootDir, { bootstrap });
+  const warmup = fakeWarmup();
+  const { admin } = makeAdmin(rootDir, { warmup });
 
   await admin.run('pause', {}, {});
   await assert.rejects(() => admin.run('warmup.server', {}, { guildId: 'g1' }), /paused/);
-  assert.equal(bootstrap.calls.runServer, 0);
+  assert.equal(warmup.calls.runServer, 0);
 });
 
-test('run: bootstrap.status formats phase, progress, tokens and the next target', async () => {
+test('run: warmup.status formats phase, progress, tokens and the next target', async () => {
   const rootDir = makeRoot();
-  const bootstrap = fakeBootstrap();
-  const { admin } = makeAdmin(rootDir, { bootstrap });
+  const warmup = fakeWarmup();
+  const { admin } = makeAdmin(rootDir, { warmup });
 
   const body = await admin.run('warmup.status', {}, { guildId: 'g1' });
   assert.match(body, /phase: running/);
@@ -2788,10 +2788,10 @@ test('run: bootstrap.status formats phase, progress, tokens and the next target'
   assert.match(body, /next target: person: Bob \(id:2\)/);
 });
 
-test('run: bootstrap.status falls back to the coarse phase and "never" when activity is absent', async () => {
+test('run: warmup.status falls back to the coarse phase and "never" when activity is absent', async () => {
   const rootDir = makeRoot();
-  const bootstrap = fakeBootstrap();
-  const { admin } = makeAdmin(rootDir, { bootstrap });
+  const warmup = fakeWarmup();
+  const { admin } = makeAdmin(rootDir, { warmup });
 
   const body = await admin.run('warmup.status', {}, { guildId: 'g1' });
   assert.match(body, /phase: running/);
@@ -2799,11 +2799,11 @@ test('run: bootstrap.status falls back to the coarse phase and "never" when acti
 });
 
 // ---------------------------------------------------------------------------
-// bootstrap.status: the activity-driven phase line and "last activity: …ago"
+// warmup.status: the activity-driven phase line and "last activity: …ago"
 // ---------------------------------------------------------------------------
 
 function withActivity(activity, overrides = {}) {
-  return fakeBootstrap({
+  return fakeWarmup({
     status: {
       phase: 'running',
       doneChannels: 0,
@@ -2823,122 +2823,122 @@ function withActivity(activity, overrides = {}) {
   });
 }
 
-test('run: bootstrap.status shows the fetching phase with channel counts', async () => {
+test('run: warmup.status shows the fetching phase with channel counts', async () => {
   const rootDir = makeRoot();
-  const bootstrap = withActivity({ phase: 'fetching', detail: { channelsFetched: 12, channelsTotal: 29 }, lastActivityAt: Date.now() - 3000 });
-  const { admin } = makeAdmin(rootDir, { bootstrap });
+  const warmup = withActivity({ phase: 'fetching', detail: { channelsFetched: 12, channelsTotal: 29 }, lastActivityAt: Date.now() - 3000 });
+  const { admin } = makeAdmin(rootDir, { warmup });
 
   const body = await admin.run('warmup.status', {}, { guildId: 'g1' });
   assert.match(body, /phase: fetching history, 12\/29 channels/);
   assert.match(body, /last activity: 3 s ago/);
 });
 
-test('run: bootstrap.status shows the channel phase with its name and position', async () => {
+test('run: warmup.status shows the channel phase with its name and position', async () => {
   const rootDir = makeRoot();
-  const bootstrap = withActivity({ phase: 'channel', detail: { id: 'c1', name: 'general', index: 3, total: 21 }, lastActivityAt: Date.now() });
-  const { admin } = makeAdmin(rootDir, { bootstrap });
+  const warmup = withActivity({ phase: 'channel', detail: { id: 'c1', name: 'general', index: 3, total: 21 }, lastActivityAt: Date.now() });
+  const { admin } = makeAdmin(rootDir, { warmup });
 
   const body = await admin.run('warmup.status', {}, { guildId: 'g1' });
   assert.match(body, /phase: describing channel #general \(3 of 21\)/);
 });
 
-test('run: bootstrap.status shows the person phase with its name, position and chunk count', async () => {
+test('run: warmup.status shows the person phase with its name, position and chunk count', async () => {
   const rootDir = makeRoot();
-  const bootstrap = withActivity({
+  const warmup = withActivity({
     phase: 'person',
     detail: { id: '42', name: 'Alice', index: 7, total: 38, chunk: { k: 2, n: 3 } },
     lastActivityAt: Date.now(),
   });
-  const { admin } = makeAdmin(rootDir, { bootstrap });
+  const { admin } = makeAdmin(rootDir, { warmup });
 
   const body = await admin.run('warmup.status', {}, { guildId: 'g1' });
   assert.match(body, /phase: profiling Alice \(id:42\) \(7 of 38\), chunk 2\/3/);
 });
 
-test('run: bootstrap.status shows the server phase', async () => {
+test('run: warmup.status shows the server phase', async () => {
   const rootDir = makeRoot();
-  const bootstrap = withActivity({ phase: 'server', detail: null, lastActivityAt: Date.now() });
-  const { admin } = makeAdmin(rootDir, { bootstrap });
+  const warmup = withActivity({ phase: 'server', detail: null, lastActivityAt: Date.now() });
+  const { admin } = makeAdmin(rootDir, { warmup });
 
   const body = await admin.run('warmup.status', {}, { guildId: 'g1' });
   assert.match(body, /phase: building the server notes/);
 });
 
-test('run: bootstrap.status shows the waiting-rate-limit phase with "until" and the wait count', async () => {
+test('run: warmup.status shows the waiting-rate-limit phase with "until" and the wait count', async () => {
   const rootDir = makeRoot();
   const until = Date.UTC(2026, 0, 1, 14, 30);
-  const bootstrap = withActivity({ phase: 'waiting-rate-limit', detail: { until, waits: 2 }, lastActivityAt: Date.now() });
-  const { admin } = makeAdmin(rootDir, { bootstrap });
+  const warmup = withActivity({ phase: 'waiting-rate-limit', detail: { until, waits: 2 }, lastActivityAt: Date.now() });
+  const { admin } = makeAdmin(rootDir, { warmup });
 
   const body = await admin.run('warmup.status', {}, { guildId: 'g1' });
   assert.match(body, /phase: waiting for the provider rate limit until 14:30 UTC \(wait 2\)/);
 });
 
-test('run: bootstrap.status shows the paused/finished/aborted phases', async () => {
+test('run: warmup.status shows the paused/finished/aborted phases', async () => {
   const rootDir = makeRoot();
 
   const paused = withActivity({ phase: 'paused', detail: null, lastActivityAt: Date.now() });
-  const { admin: adminPaused } = makeAdmin(rootDir, { bootstrap: paused });
+  const { admin: adminPaused } = makeAdmin(rootDir, { warmup: paused });
   assert.match(await adminPaused.run('warmup.status', {}, { guildId: 'g1' }), /phase: paused/);
 
   const stopped = withActivity({ phase: 'stopped', detail: null, lastActivityAt: Date.now() });
-  const { admin: adminStopped } = makeAdmin(rootDir, { bootstrap: stopped });
+  const { admin: adminStopped } = makeAdmin(rootDir, { warmup: stopped });
   assert.match(await adminStopped.run('warmup.status', {}, { guildId: 'g1' }), /phase: stopped/);
 
   const finished = withActivity({ phase: 'finished', detail: null, lastActivityAt: Date.now() });
-  const { admin: adminFinished } = makeAdmin(rootDir, { bootstrap: finished });
+  const { admin: adminFinished } = makeAdmin(rootDir, { warmup: finished });
   assert.match(await adminFinished.run('warmup.status', {}, { guildId: 'g1' }), /phase: finished/);
 
   const aborted = withActivity({ phase: 'aborted', detail: { reason: 'rate-limit' }, lastActivityAt: Date.now() });
-  const { admin: adminAborted } = makeAdmin(rootDir, { bootstrap: aborted });
+  const { admin: adminAborted } = makeAdmin(rootDir, { warmup: aborted });
   assert.match(await adminAborted.run('warmup.status', {}, { guildId: 'g1' }), /phase: aborted \(rate-limit\)/);
 });
 
-test('run: bootstrap.reset clears progress (the factory itself refuses while running)', async () => {
+test('run: warmup.reset clears progress (the factory itself refuses while running)', async () => {
   const rootDir = makeRoot();
-  const bootstrap = fakeBootstrap();
-  const { admin } = makeAdmin(rootDir, { bootstrap });
+  const warmup = fakeWarmup();
+  const { admin } = makeAdmin(rootDir, { warmup });
 
   const body = await admin.run('warmup.reset', {}, { guildId: 'g1' });
-  assert.equal(bootstrap.calls.reset, 1);
+  assert.equal(warmup.calls.reset, 1);
   assert.match(body, /reset/);
 });
 
-test('run: bootstrap.reset relays a refusal message from the factory (e.g. a run in flight)', async () => {
+test('run: warmup.reset relays a refusal message from the factory (e.g. a run in flight)', async () => {
   const rootDir = makeRoot();
-  const bootstrap = fakeBootstrap({ reset: { ok: false, message: 'a bootstrap run is in flight -- pause or wait for it first' } });
-  const { admin } = makeAdmin(rootDir, { bootstrap });
+  const warmup = fakeWarmup({ reset: { ok: false, message: 'a warmup run is in flight -- pause or wait for it first' } });
+  const { admin } = makeAdmin(rootDir, { warmup });
 
   const body = await admin.run('warmup.reset', {}, { guildId: 'g1' });
-  assert.equal(body, 'a bootstrap run is in flight -- pause or wait for it first');
+  assert.equal(body, 'a warmup run is in flight -- pause or wait for it first');
 });
 
-test('run: warmup.reset is refused while paused and never touches bootstrap progress', async () => {
+test('run: warmup.reset is refused while paused and never touches warmup progress', async () => {
   const rootDir = makeRoot();
-  const bootstrap = fakeBootstrap();
-  const { admin } = makeAdmin(rootDir, { bootstrap });
+  const warmup = fakeWarmup();
+  const { admin } = makeAdmin(rootDir, { warmup });
 
   await admin.run('pause', {}, {});
   await assert.rejects(() => admin.run('warmup.reset', {}, { guildId: 'g1' }), /paused/);
-  assert.equal(bootstrap.calls.reset, 0);
+  assert.equal(warmup.calls.reset, 0);
 });
 
 test('run: memory.refresh forces a portrait refresh, ignoring the hours rail', async () => {
   const rootDir = makeRoot();
-  const bootstrap = fakeBootstrap();
-  const { admin } = makeAdmin(rootDir, { bootstrap });
+  const warmup = fakeWarmup();
+  const { admin } = makeAdmin(rootDir, { warmup });
 
   const body = await admin.run('memory.refresh', { userId: '1' }, { guildId: 'g1' });
-  assert.equal(bootstrap.calls.refreshPortrait, 1);
-  assert.equal(bootstrap.calls.lastRefreshUserId, '1');
-  assert.deepEqual(bootstrap.calls.lastRefreshOpts, { force: true });
+  assert.equal(warmup.calls.refreshPortrait, 1);
+  assert.equal(warmup.calls.lastRefreshUserId, '1');
+  assert.deepEqual(warmup.calls.lastRefreshOpts, { force: true });
   assert.match(body, /refreshed/);
 });
 
 test('run: memory.refresh reports the reason when the refresh is not performed', async () => {
   const rootDir = makeRoot();
-  const bootstrap = fakeBootstrap({ refreshPortrait: { ok: false, reason: 'daily-cap' } });
-  const { admin } = makeAdmin(rootDir, { bootstrap });
+  const warmup = fakeWarmup({ refreshPortrait: { ok: false, reason: 'daily-cap' } });
+  const { admin } = makeAdmin(rootDir, { warmup });
 
   const body = await admin.run('memory.refresh', { userId: '1' }, { guildId: 'g1' });
   assert.match(body, /daily-cap/);
@@ -2946,28 +2946,28 @@ test('run: memory.refresh reports the reason when the refresh is not performed',
 
 test('run: memory.refresh is refused while paused', async () => {
   const rootDir = makeRoot();
-  const bootstrap = fakeBootstrap();
-  const { admin } = makeAdmin(rootDir, { bootstrap });
+  const warmup = fakeWarmup();
+  const { admin } = makeAdmin(rootDir, { warmup });
 
   await admin.run('pause', {}, {});
   await assert.rejects(() => admin.run('memory.refresh', { userId: '1' }, { guildId: 'g1' }), /paused/);
-  assert.equal(bootstrap.calls.refreshPortrait, 0);
+  assert.equal(warmup.calls.refreshPortrait, 0);
 });
 
-test('run: status includes a bootstrap progress line when the dependency is available', async () => {
+test('run: status includes a warmup progress line when the dependency is available', async () => {
   const rootDir = makeRoot();
-  const bootstrap = {
+  const warmup = {
     summary: () => ({ doneChannels: 2, donePeople: 4, doneServer: true, tokensUsed: 500, requests: 6, aborted: null }),
   };
-  const { admin } = makeAdmin(rootDir, { bootstrap });
+  const { admin } = makeAdmin(rootDir, { warmup });
 
   const body = await admin.run('status', {}, {});
-  assert.match(body, /bootstrap: channels=2 people=4 server=done tokens=500 requests=6 aborted=no/);
+  assert.match(body, /warmup: channels=2 people=4 server=done tokens=500 requests=6 aborted=no/);
 });
 
 test('run: memory.wipe is refused while a warmup is in flight', async () => {
   const rootDir = makeRoot();
-  const { admin } = makeAdmin(rootDir, { isBootstrapping: () => true });
+  const { admin } = makeAdmin(rootDir, { isWarmingUp: () => true });
   await assert.rejects(
     () => admin.run('memory.wipe', { confirm: 'Guild' }, { guildId: 'g1' }),
     /warmup is running/,

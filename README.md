@@ -287,23 +287,23 @@ With `damping` on, a change that pushes the score further from zero is scaled by
 
 ## Getting started with memory
 
-The engine builds its memory of people and channels from a sample of recent messages. On first start, when `bootstrap.enabled` is true and no profile exists yet, a warmup run starts automatically. The persona stays mute while it runs.
+The engine builds its memory of people and channels from a sample of recent messages. On first start, when `warmup.enabled` is true and no profile exists yet, a warmup run starts automatically. The persona stays mute while it runs.
 
 **Order of operations:**
 
-1. **Channels**: every readable channel gets one request, described from the newest `bootstrap.messagesPerChannel` messages regardless of their age. A channel with no history is described from its name, category and topic. The result is a set of channel notes: purpose, topics, tone.
-2. **People**: the most active members (at least `bootstrap.minMessages` own messages in the window, up to `bootstrap.maxPeople`) each get a profile. The engine samples up to `bootstrap.messagesPerPerson` of their messages with `bootstrap.contextBefore` lines of surrounding context. Large samples are split into chunks that fit `bootstrap.maxRequestTokens`; each later chunk receives the previous answer as a draft to keep, correct and extend. The final answer stores character, style, interests, details, episodes and aliases.
-3. **Server**: one request takes the channel notes, a summary line per profiled member and the newest `bootstrap.serverSampleMessages` lines of the main channels, and produces server-wide patterns, conversation starters, in-jokes and lore.
+1. **Channels**: every readable channel gets one request, described from the newest `warmup.messagesPerChannel` messages regardless of their age. A channel with no history is described from its name, category and topic. The result is a set of channel notes: purpose, topics, tone.
+2. **People**: the most active members (at least `warmup.minMessages` own messages in the window, up to `warmup.maxPeople`) each get a profile. The engine samples up to `warmup.messagesPerPerson` of their messages with `warmup.contextBefore` lines of surrounding context. Large samples are split into chunks that fit `warmup.maxRequestTokens`; each later chunk receives the previous answer as a draft to keep, correct and extend. The final answer stores character, style, interests, details, episodes and aliases.
+3. **Server**: one request takes the channel notes, a summary line per profiled member and the newest `warmup.serverSampleMessages` lines of the main channels, and produces server-wide patterns, conversation starters, in-jokes and lore.
 
 Attitude and relationship are not warmed up; they grow from live conversation.
 
-Progress is persisted after every request and survives restarts. The total token budget is `bootstrap.maxTokens`; the per-request cap (`bootstrap.maxRequestTokens`) applies to each call. A provider rate limit (HTTP 429) is waited out for `bootstrap.rateLimitWaitMinutes` per wait, up to `bootstrap.rateLimitMaxWaits` consecutive waits.
+Progress is persisted after every request and survives restarts. The total token budget is `warmup.maxTokens`; the per-request cap (`warmup.maxRequestTokens`) applies to each call. A provider rate limit (HTTP 429) is waited out for `warmup.rateLimitWaitMinutes` per wait, up to `warmup.rateLimitMaxWaits` consecutive waits.
 
-After the warmup finishes, the live stream analyzer keeps memory current. It processes batches of new messages and updates interests, details, attitudes, episodes, aliases, channel notes and server patterns. When it detects that a stored portrait misses a recurring habit or contradicts how the person now writes, the engine refreshes the portrait from `bootstrap.refreshMessages` recent messages using the profile prompt. A portrait can be refreshed at most once every `memory.portraitRefreshHours` hours, up to `memory.portraitRefreshPerDay` times per day across the server. `/nep memory refresh <user>` forces one.
+After the warmup finishes, the live stream analyzer keeps memory current. It processes batches of new messages and updates interests, details, attitudes, episodes, aliases, channel notes and server patterns. When it detects that a stored portrait misses a recurring habit or contradicts how the person now writes, the engine refreshes the portrait from `warmup.refreshMessages` recent messages using the profile prompt. A portrait can be refreshed at most once every `memory.portraitRefreshHours` hours, up to `memory.portraitRefreshPerDay` times per day across the server. `/nep memory refresh <user>` forces one.
 
 `/nep warmup run` starts or resumes a full run. `/nep warmup users [member]` profiles one member or every qualifying member; `/nep warmup channels [channel]` describes one channel or every readable channel; `/nep warmup server` rebuilds the server notes and lore. `/nep warmup people` lists qualifying members. `/nep warmup status` shows progress and token usage. `/nep warmup stop` ends any warmup work at once: the request in flight is cancelled, progress is kept so `run` can resume. `/nep warmup reset` clears progress only, not stored memory. All warmup commands except `status`, `people` and `stop` are refused while paused; `run`, `users` and `channels` are also refused while a run is in flight. For a truly fresh start, use `/nep memory wipe` first: it clears member profiles with their attitudes and moments, server habits, the channel map, the analyzer's lore entries and the warmup progress, after the owner types the server's exact name.
 
-### `bootstrap`
+### `warmup`
 
 | Key | Default | Meaning |
 |---|---|---|
@@ -509,12 +509,12 @@ src/
     ranking.js             shared ranking for interests and details: frequency, recency, decay
     lore.js                lorebook logic: key matching, entry selection
     describe.js            media describer: one picture in, one cached caption out
-    bootstrap.js           sample-based memory warmup
+    warmup.js              sample-based memory warmup
 tests/                     node --test, pure-function unit tests
 deploy/
   neptunia-bot.service     example systemd unit
 data/                      persistent state (gitignored, created at runtime)
-  state.json               scheduler times, token calibration, daily request counter, bootstrap progress
+  state.json               scheduler times, token calibration, daily request counter, warmup progress
   guilds/<id>/guild.json   server habits, in-jokes, the persona's self-claims
   guilds/<id>/buffer.json  messages observed since the last memory update
   guilds/<id>/media.json   media description cache

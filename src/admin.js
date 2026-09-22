@@ -419,9 +419,9 @@ function writeLocalConfig(localPath, value) {
  * `spontaneous` — the spontaneous scheduler: `poke(channel, mode)` and `status()`.
  * `calibrator` — token calibrator (src/llm/tokens.js), read for `.ratio`.
  * `getGuildId` — the single guild this instance serves, or null before it resolves.
- * `isBootstrapping` — `() => boolean`, optional: true while the memory bootstrap runner
- *   (src/memory/bootstrap.js) is in flight. Read by `cmdMemoryWipe`, the warmup commands and
- *   `cmdStatus`. Default: never bootstrapping.
+ * `isWarmingUp` — `() => boolean`, optional: true while the memory warmup runner
+ *   (src/memory/warmup.js) is in flight. Read by `cmdMemoryWipe`, the warmup commands and
+ *   `cmdStatus`. Default: never warming up.
  * `turns` — from createTurnRunner() (src/behavior/turn.js), optional: `waitIdle()`, used by
  *   `/nep pause` to wait out a turn already in flight. Absent -> the wait is simply skipped.
  * `memory` — from createMemoryUpdater() (src/memory/update.js), optional: `waitIdle()`, used by
@@ -431,10 +431,10 @@ function writeLocalConfig(localPath, value) {
  *   Absent -> nothing to clear.
  * `llm` — from createLlm() (src/llm/openrouter.js), optional: `complete()`, used by `/nep ping`
  *   to reach each role's model directly. Absent -> `/nep ping` reports it is not available.
- * `bootstrap` — from createBootstrap() (src/memory/bootstrap.js), optional: the sample-based
- *   memory bootstrap -- `peopleReport` (read-only), `run`/`runPerson`/`runChannel`/`runServer`/
+ * `warmup` — from createWarmup() (src/memory/warmup.js), optional: the sample-based
+ *   memory warmup -- `peopleReport` (read-only), `run`/`runPerson`/`runChannel`/`runServer`/
  *   `runUsers`/`runChannels`/`status`/`reset` (write under data/), `refreshPortrait`, `waitIdle`
- *   (awaited by `/nep pause`, same shape as `memory`/`turns`). Absent -> every `bootstrap.*`/
+ *   (awaited by `/nep pause`, same shape as `memory`/`turns`). Absent -> every `warmup.*`/
  *   `memory.refresh` command reports it is not available.
  *
  * `run(commandKey, args, context)` throws a plain `Error` (operator-facing
@@ -447,12 +447,12 @@ export function createAdmin({
   spontaneous,
   calibrator,
   getGuildId,
-  isBootstrapping = () => false,
+  isWarmingUp = () => false,
   turns,
   memory,
   pending,
   llm,
-  bootstrap,
+  warmup,
 }) {
   function isOwner(userId) {
     const owners = hot.config?.bot?.owners ?? [];
@@ -611,10 +611,10 @@ export function createAdmin({
       await memory.waitIdle();
     }
 
-    // A bootstrap run/one-off target already in flight: same rule, its own
+    // A warmup run/one-off target already in flight: same rule, its own
     // loop already stops after the request in flight once `paused` is seen.
-    if (bootstrap && typeof bootstrap.waitIdle === 'function') {
-      await bootstrap.waitIdle();
+    if (warmup && typeof warmup.waitIdle === 'function') {
+      await warmup.waitIdle();
     }
 
     if (pending && typeof pending.clear === 'function') {
@@ -698,13 +698,13 @@ export function createAdmin({
       `calibration ratio: ${calibrator ? calibrator.ratio.toFixed(3) : '-'}`,
       `llm requests today: ${data.llmCount ?? 0} / ${cfg?.llm?.maxRequestsPerDay ?? '-'} (day: ${data.llmDay ?? '-'})`,
       data.paused ? `paused: true (since ${data.pausedAt ?? '?'})` : 'paused: false',
-      `bootstrapping: ${isBootstrapping() ? 'true' : 'false'}`,
+      `warming up: ${isWarmingUp() ? 'true' : 'false'}`,
     ];
 
-    if (bootstrap && typeof bootstrap.summary === 'function') {
-      const bs = bootstrap.summary();
+    if (warmup && typeof warmup.summary === 'function') {
+      const bs = warmup.summary();
       lines.push(
-        `bootstrap: channels=${bs.doneChannels} people=${bs.donePeople} server=${bs.doneServer ? 'done' : 'pending'} ` +
+        `warmup: channels=${bs.doneChannels} people=${bs.donePeople} server=${bs.doneServer ? 'done' : 'pending'} ` +
           `tokens=${bs.tokensUsed} requests=${bs.requests} aborted=${bs.aborted ?? 'no'}`,
       );
     }
@@ -871,7 +871,7 @@ export function createAdmin({
   // ---------------------------------------------------------------------
 
   /** `hot.config.memory.mainChannelIds`, normalized to a string Set -- mirrors
-   * src/memory/update.js#mainChannelSet and src/memory/bootstrap.js's own copies. */
+   * src/memory/update.js#mainChannelSet and src/memory/warmup.js's own copies. */
   function mainChannelIdSet() {
     return new Set((hot.config?.memory?.mainChannelIds ?? []).map(String));
   }
@@ -903,7 +903,7 @@ export function createAdmin({
 
   /**
    * `/nep memory channel [channel]`: with a channel, that channel's full stored note (Discord
-   * facts, the analyzer/bootstrap-written purpose/topics/tone, counters, activity verdict and top
+   * facts, the analyzer/warmup-written purpose/topics/tone, counters, activity verdict and top
    * writers); without one, a compact table of every stored channel, sorted by last message desc.
    * `<@id>` tokens in `purpose`/`topics`/`tone` are resolved the same way `memory.show` resolves
    * free-text fields (`fromTokens(..., 'analyzer')`).
@@ -1091,7 +1091,7 @@ export function createAdmin({
     assertNotPaused();
     const guildId = resolvedGuildId(context);
     if (!guildId) throw new Error('no guild resolved yet');
-    if (isBootstrapping()) throw new Error('a warmup is running: /nep warmup stop first');
+    if (isWarmingUp()) throw new Error('a warmup is running: /nep warmup stop first');
 
     const guildName = client?.guilds?.cache?.get(guildId)?.name || guildId;
     const confirm = String(args?.confirm ?? '').trim();
@@ -1392,17 +1392,17 @@ async function cmdPing(args) {
 }
 
   // ---------------------------------------------------------------------
-  // bootstrap: the sample-based memory bootstrap -- see the module header of
-  // src/memory/bootstrap.js. `people`/`status` stay read-only, never guarded
+  // warmup: the sample-based memory warmup -- see the module header of
+  // src/memory/warmup.js. `people`/`status` stay read-only, never guarded
   // by assertNotPaused(); everything else writes under data/ and is.
   // ---------------------------------------------------------------------
 
   /** `YYYY-MM-DD`, or `-` when `ts` is not a finite timestamp. */
-  function bootstrapDate(ts) {
+  function warmupDate(ts) {
     return Number.isFinite(ts) ? new Date(ts).toISOString().slice(0, 10) : '-';
   }
 
-  function formatBootstrapPeople(report) {
+  function formatWarmupPeople(report) {
     if (!report.ok) return report.message;
     const lines = report.people.map((p, i) => {
       const topChannels = Object.entries(p.byChannel)
@@ -1410,7 +1410,7 @@ async function cmdPing(args) {
         .slice(0, 3)
         .map(([cid, count]) => `${cid}:${count}`)
         .join(', ');
-      return `${i + 1}. ${p.name} (id:${p.id}) — ${p.messages} messages, ${bootstrapDate(p.firstTs)}..${bootstrapDate(p.lastTs)}, top channels: ${topChannels || '-'}`;
+      return `${i + 1}. ${p.name} (id:${p.id}) — ${p.messages} messages, ${warmupDate(p.firstTs)}..${warmupDate(p.lastTs)}, top channels: ${topChannels || '-'}`;
     });
     if (lines.length === 0) lines.push('(nobody currently qualifies)');
     lines.push('');
@@ -1420,30 +1420,30 @@ async function cmdPing(args) {
     return lines.join('\n');
   }
 
-  async function cmdBootstrapPeople(_args, context) {
+  async function cmdWarmupPeople(_args, context) {
     const guildId = resolvedGuildId(context);
     if (!guildId) throw new Error('no guild resolved yet');
-    return formatBootstrapPeople(await bootstrap.peopleReport(guildId));
+    return formatWarmupPeople(await warmup.peopleReport(guildId));
   }
 
-  async function cmdBootstrapRun(_args, context) {
+  async function cmdWarmupRun(_args, context) {
     const guildId = resolvedGuildId(context);
     if (!guildId) throw new Error('no guild resolved yet');
     assertNotPaused();
-    if (typeof bootstrap.isBootstrapping === 'function' && bootstrap.isBootstrapping()) return 'a warmup is already in flight: see /nep warmup status';
+    if (typeof warmup.isWarmingUp === 'function' && warmup.isWarmingUp()) return 'a warmup is already in flight: see /nep warmup status';
 
     // Fire and forget: a full run takes many minutes, far beyond an interaction's lifetime.
     // Progress is persisted after every request; /nep warmup status follows it.
-    bootstrap.run(guildId).catch((err) => log.warn('admin: warmup run failed', { error: err }));
+    warmup.run(guildId).catch((err) => log.warn('admin: warmup run failed', { error: err }));
     return 'warmup started: channels, then people, then the server. Follow it with /nep warmup status.';
   }
 
   /** `/nep warmup stop`: ends any warmup work in flight for good -- the full run, a
    * `users`/`channels` bulk redo, or a synchronous one-off -- including cancelling the model call
-   * actually in progress (see src/memory/bootstrap.js#stop). Reads no `data/` itself, so not
+   * actually in progress (see src/memory/warmup.js#stop). Reads no `data/` itself, so not
    * guarded by assertNotPaused(). */
   function cmdWarmupStop() {
-    const result = bootstrap.stop();
+    const result = warmup.stop();
     return result.ok ? 'warmup stopped' : 'no warmup in flight';
   }
 
@@ -1451,7 +1451,7 @@ async function cmdPing(args) {
    * size, tokens, counts of interests/details/episodes/aliases, and the first ~300 chars of the
    * character field. Relays `outcome.message` unchanged when nothing was written (missing prompt
    * file, no messages in the window, a bad model answer, a stop mid-flight, ...). */
-  function formatBootstrapUserWritten(outcome) {
+  function formatWarmupUserWritten(outcome) {
     if (!outcome.ok) return outcome.message ?? outcome.reason ?? 'not done';
     const { member, answer, sample, tokensUsed, chunks } = outcome;
     const a = answer ?? {};
@@ -1476,11 +1476,11 @@ async function cmdPing(args) {
 
     const userId = args?.userId;
     if (userId) {
-      const result = await bootstrap.runPerson(guildId, userId);
-      return formatBootstrapUserWritten(result.ok ? result.outcome : result);
+      const result = await warmup.runPerson(guildId, userId);
+      return formatWarmupUserWritten(result.ok ? result.outcome : result);
     }
 
-    const result = await bootstrap.runUsers(guildId);
+    const result = await warmup.runUsers(guildId);
     if (!result.ok) return result.message ?? 'not started';
     return `started ${result.count} members`;
   }
@@ -1489,7 +1489,7 @@ async function cmdPing(args) {
    * plus the counters and top writers `store.setChannelFacts` just filled in -- writers
    * resolved to their current stored name, an id with no profile skipped. Relays `outcome.message`
    * unchanged when nothing was written. */
-  function formatBootstrapChannelWritten(outcome, guildId) {
+  function formatWarmupChannelWritten(outcome, guildId) {
     if (!outcome.ok) return outcome.message ?? outcome.reason ?? 'not done';
     const { channel, result, facts } = outcome;
     const lines = [
@@ -1519,30 +1519,30 @@ async function cmdPing(args) {
 
     const channelId = args?.channelId;
     if (channelId) {
-      const result = await bootstrap.runChannel(guildId, channelId);
-      return formatBootstrapChannelWritten(result.ok ? result.outcome : result, guildId);
+      const result = await warmup.runChannel(guildId, channelId);
+      return formatWarmupChannelWritten(result.ok ? result.outcome : result, guildId);
     }
 
-    const result = await bootstrap.runChannels(guildId);
+    const result = await warmup.runChannels(guildId);
     if (!result.ok) return result.message ?? 'not started';
     return `started ${result.count} channels`;
   }
 
   /** `/nep warmup server`: counts of what was written (patterns/starters lengths, injokes, lore
    * entries). Relays `outcome.message` unchanged when nothing was written. */
-  function formatBootstrapServerWritten(outcome) {
+  function formatWarmupServerWritten(outcome) {
     if (!outcome.ok) return outcome.message ?? outcome.reason ?? 'not done';
     const c = outcome.counts;
     return `server notes updated: patterns ${c.patternsChars} chars, starters ${c.startersChars} chars, injokes ${c.injokes}, lore entries ${c.lore}`;
   }
 
-  async function cmdBootstrapServer(_args, context) {
+  async function cmdWarmupServer(_args, context) {
     const guildId = resolvedGuildId(context);
     if (!guildId) throw new Error('no guild resolved yet');
     assertNotPaused();
 
-    const result = await bootstrap.runServer(guildId);
-    return formatBootstrapServerWritten(result.ok ? result.outcome : result);
+    const result = await warmup.runServer(guildId);
+    return formatWarmupServerWritten(result.ok ? result.outcome : result);
   }
 
   /** `N s ago` / `N min ago` / `N h ago`, or `never` when `lastActivityAt` is unknown. */
@@ -1556,12 +1556,12 @@ async function cmdPing(args) {
     return `${Math.round(minutes / 60)} h ago`;
   }
 
-  /** One `phase: …` line's TEXT from a bootstrap status's in-memory `activity` snapshot (see
-   * src/memory/bootstrap.js's `touchActivity`) -- falls back to `s.phase` (the coarser "running" /
+  /** One `phase: …` line's TEXT from a warmup status's in-memory `activity` snapshot (see
+   * src/memory/warmup.js's `touchActivity`) -- falls back to `s.phase` (the coarser "running" /
    * "not started" / "finished" / "aborted (reason)" / "idle" summary) whenever `activity` carries
    * nothing more specific yet (e.g. right after a restart, before the first channel is fetched).
    * Never throws on a missing/partial snapshot. */
-  function formatBootstrapPhase(s) {
+  function formatWarmupPhase(s) {
     const a = s?.activity;
     const d = a?.detail ?? {};
     switch (a?.phase) {
@@ -1597,17 +1597,17 @@ async function cmdPing(args) {
     }
   }
 
-  async function cmdBootstrapStatus(_args, context) {
+  async function cmdWarmupStatus(_args, context) {
     const guildId = resolvedGuildId(context);
     if (!guildId) throw new Error('no guild resolved yet');
-    const s = await bootstrap.status(guildId); // synchronous in the real runner; awaiting a plain value is harmless
+    const s = await warmup.status(guildId); // synchronous in the real runner; awaiting a plain value is harmless
     return [
-      `phase: ${formatBootstrapPhase(s)}`,
+      `phase: ${formatWarmupPhase(s)}`,
       `last activity: ${humanizeAgo(s.activity?.lastActivityAt)}`,
       `channels: ${s.doneChannels}/${s.channelsEligible ?? "?"}`,
       `people: ${s.donePeople}/${s.peopleEligible ?? "?"}`,
       `server: ${s.doneServer ? 'done' : 'pending'}`,
-      `tokens used: ${s.tokensUsed} / ${hot.config.bootstrap?.maxTokens ?? '-'}`,
+      `tokens used: ${s.tokensUsed} / ${hot.config.warmup?.maxTokens ?? '-'}`,
       `requests: ${s.requests}`,
       `started: ${s.startedAt ?? '-'}`,
       `finished: ${s.finishedAt ?? '-'}`,
@@ -1616,33 +1616,33 @@ async function cmdPing(args) {
     ].join('\n');
   }
 
-  /** `/nep warmup reset`: clears bootstrap progress only (stored profiles/channel/guild data
+  /** `/nep warmup reset`: clears warmup progress only (stored profiles/channel/guild data
    * untouched). Writes `state.json`, so refused while paused like the other warmup commands. */
-  function cmdBootstrapReset() {
+  function cmdWarmupReset() {
     assertNotPaused();
-    const result = bootstrap.reset();
-    return result.ok ? 'Bootstrap progress reset (stored profiles/channel/guild data untouched).' : result.message;
+    const result = warmup.reset();
+    return result.ok ? 'Warmup progress reset (stored profiles/channel/guild data untouched).' : result.message;
   }
 
   /** `/nep memory refresh user:<member>`: forces a portrait refresh (character/style only),
    * ignoring the hours rail, not the daily request cap. Refused while paused. */
   async function cmdMemoryRefresh(args, context) {
-    if (!bootstrap) throw new Error('bootstrap is not available');
+    if (!warmup) throw new Error('warmup is not available');
     assertNotPaused();
     const userId = args?.userId;
     if (!userId) throw new Error('a user is required');
     const guildId = resolvedGuildId(context);
     if (!guildId) throw new Error('no guild resolved yet');
 
-    const result = await bootstrap.refreshPortrait(guildId, userId, 'manual refresh requested by the owner', { force: true });
+    const result = await warmup.refreshPortrait(guildId, userId, 'manual refresh requested by the owner', { force: true });
     if (!result.ok) return `Refresh not performed: ${result.reason ?? result.message ?? 'unknown reason'}`;
     return `Portrait refreshed for ${userId}.`;
   }
 
-  /** Wraps a `bootstrap.*` handler so both report the same thing when the dependency is absent. */
-  function withBootstrap(fn) {
+  /** Wraps a `warmup.*` handler so both report the same thing when the dependency is absent. */
+  function withWarmup(fn) {
     return (args, context) => {
-      if (!bootstrap) return 'bootstrap is not available';
+      if (!warmup) return 'warmup is not available';
       return fn(args, context);
     };
   }
@@ -1674,14 +1674,14 @@ async function cmdPing(args) {
     'lore.remove': (args, context) => cmdLoreRemove(args, context),
     'model.show': () => cmdModelShow(),
     'model.set': (args) => cmdModelSet(args),
-    'warmup.people': withBootstrap((args, context) => cmdBootstrapPeople(args, context)),
-    'warmup.run': withBootstrap((args, context) => cmdBootstrapRun(args, context)),
-    'warmup.stop': withBootstrap(() => cmdWarmupStop()),
-    'warmup.users': withBootstrap((args, context) => cmdWarmupUsers(args, context)),
-    'warmup.channels': withBootstrap((args, context) => cmdWarmupChannels(args, context)),
-    'warmup.server': withBootstrap((args, context) => cmdBootstrapServer(args, context)),
-    'warmup.status': withBootstrap((args, context) => cmdBootstrapStatus(args, context)),
-    'warmup.reset': withBootstrap(() => cmdBootstrapReset()),
+    'warmup.people': withWarmup((args, context) => cmdWarmupPeople(args, context)),
+    'warmup.run': withWarmup((args, context) => cmdWarmupRun(args, context)),
+    'warmup.stop': withWarmup(() => cmdWarmupStop()),
+    'warmup.users': withWarmup((args, context) => cmdWarmupUsers(args, context)),
+    'warmup.channels': withWarmup((args, context) => cmdWarmupChannels(args, context)),
+    'warmup.server': withWarmup((args, context) => cmdWarmupServer(args, context)),
+    'warmup.status': withWarmup((args, context) => cmdWarmupStatus(args, context)),
+    'warmup.reset': withWarmup(() => cmdWarmupReset()),
   };
 
   /**

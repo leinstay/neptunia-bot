@@ -16,7 +16,7 @@ import { createLlm } from './llm/openrouter.js';
 import { createTurnRunner } from './behavior/turn.js';
 import { createSpontaneous } from './behavior/spontaneous.js';
 import { createMemoryUpdater } from './memory/update.js';
-import { createBootstrap } from './memory/bootstrap.js';
+import { createWarmup } from './memory/warmup.js';
 import { createDescriber } from './memory/describe.js';
 import { createImageFetcher } from './discord/fetch-image.js';
 import { createAdmin } from './admin.js';
@@ -90,12 +90,12 @@ const imageFetcher = createImageFetcher();
 const describer = createDescriber({ hot, store, llm, imageFetcher });
 const turns = createTurnRunner({ hot, store, llm, calibrator, client, describer, imageFetcher });
 const getSelfName = (guildId) => client.guilds.cache.get(guildId)?.members.me?.displayName ?? client.user?.username ?? 'bot';
-// THE way memory starts (docs/prompt-contract.md, "The bootstrap"): sample-based,
-// resumable, mutes the persona while a run is in flight (see isBootstrapping below).
-const bootstrap = createBootstrap({ hot, store, client, llm, calibrator, getSelfName, getGuildId });
-const isBootstrapping = bootstrap.isBootstrapping;
-const spontaneous = createSpontaneous({ hot, store, client, turns, getGuildId, isBootstrapping });
-// The stream analyzer's "the stored portrait misses something" cue -- src/memory/bootstrap.js's
+// THE way memory starts (docs/prompt-contract.md, "The warmup"): sample-based,
+// resumable, mutes the persona while a run is in flight (see isWarmingUp below).
+const warmup = createWarmup({ hot, store, client, llm, calibrator, getSelfName, getGuildId });
+const isWarmingUp = warmup.isWarmingUp;
+const spontaneous = createSpontaneous({ hot, store, client, turns, getGuildId, isWarmingUp });
+// The stream analyzer's "the stored portrait misses something" cue -- src/memory/warmup.js's
 // own rails (hours/day/mute) decide whether a refresh actually runs; never awaited here.
 const memory = createMemoryUpdater({
   hot,
@@ -104,7 +104,7 @@ const memory = createMemoryUpdater({
   calibrator,
   getSelfName,
   onPortraitRequest: (guildId, userId, reason) => {
-    bootstrap.refreshPortrait(guildId, userId, reason).catch((err) => log.error('index: portrait refresh failed', { error: err }));
+    warmup.refreshPortrait(guildId, userId, reason).catch((err) => log.error('index: portrait refresh failed', { error: err }));
   },
 });
 const tagHistory = createTagHistory();
@@ -118,7 +118,7 @@ const onMessage = createMessageHandler({
   memory,
   tagHistory,
   getGuildId,
-  isBootstrapping,
+  isWarmingUp,
   describer,
   // features.followUp: the address classifier's own, separate LLM call.
   llm,
@@ -135,15 +135,15 @@ const admin = createAdmin({
   spontaneous,
   calibrator,
   getGuildId,
-  isBootstrapping,
+  isWarmingUp,
   turns,
   memory,
   // /nep pause: clears the pending-ping queue on pause.
   pending: { clear: () => onMessage.clearPending() },
   // /nep ping: reaches each role's model directly through the same rails.
   llm,
-  // The sample-based memory bootstrap: run, user/users, channel/channels, server, status, reset, portrait refresh.
-  bootstrap,
+  // The sample-based memory warmup: run, user/users, channel/channels, server, status, reset, portrait refresh.
+  warmup,
 });
 const onInteraction = createInteractionHandler({ hot, admin, getGuildId });
 
@@ -188,9 +188,9 @@ client.once(Events.ClientReady, async () => {
   const guild = client.guilds.cache.get(instance.guildId);
   await registerCommands(guild, hot.config);
 
-  // THE way memory starts: with bootstrap.enabled and no stored profile at all, starts a run
+  // THE way memory starts: with warmup.enabled and no stored profile at all, starts a run
   // automatically; with an unfinished run left from before a restart, resumes it. Fire-and-forget.
-  bootstrap.resumeIfNeeded(instance.guildId);
+  warmup.resumeIfNeeded(instance.guildId);
 
   every(30_000, () => spontaneous.tick(), 'spontaneous.tick');
   // The tick still runs on schedule even with the switch off, so flipping it

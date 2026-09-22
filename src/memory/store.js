@@ -252,7 +252,7 @@ export function createStore({ dataDir }) {
     /**
      * Record that a member spoke: names, counters, timestamps. Creates the
      * profile. Messages do not always arrive in chronological order (the
-     * memory bootstrap, src/memory/bootstrap.js, can feed months of history
+     * memory warmup, src/memory/warmup.js, can feed months of history
      * after the live pipeline already touched a profile today) -- `firstSeen`/`lastSeen` are therefore
      * min/max'd against `at`, never just overwritten, so a late/backdated
      * touch can only widen the known range, never regress `lastSeen` to an
@@ -523,7 +523,7 @@ export function createStore({ dataDir }) {
 
     /**
      * SET (never add) a channel entry's Discord facts and counters from a
-     * fetched history window (the bootstrap, src/memory/bootstrap.js#processChannel):
+     * fetched history window (the warmup, src/memory/warmup.js#processChannel):
      * unlike `touchChannel` (the live pipeline's one-message-at-a-time
      * increments), a redo of the same window lands on the same numbers
      * instead of doubling them -- mirrors `touchUserFromWindows`' SET-not-ADD
@@ -652,8 +652,8 @@ export function createStore({ dataDir }) {
      * the live observation buffer, and lorebook entries whose `source` is
      * `'analyzer'` (every entry, owner included, when `keepOwnerLore` is
      * false). Keeps, by default, owner lore (`source: 'owner'`) and the
-     * media description cache. Drops `state.bootstrap` (the bootstrap's own
-     * progress, see src/memory/bootstrap.js) so the next run starts clean;
+     * media description cache. Drops `state.warmup` (the warmup's own
+     * progress, see src/memory/warmup.js) so the next run starts clean;
      * everything else in `state.json` — token calibration, the daily LLM
      * counter and the spontaneous schedule — survives untouched. Safe when
      * some files never existed; the store stays fully usable afterwards (a following
@@ -704,7 +704,7 @@ export function createStore({ dataDir }) {
         fs.rmSync(file, { force: true });
       }
 
-      for (const key of ['bootstrap']) {
+      for (const key of ['warmup']) {
         if (stateEntry.value[key] !== undefined) {
           delete stateEntry.value[key];
           stateEntry.dirty = true;
@@ -747,7 +747,7 @@ export function createStore({ dataDir }) {
     /**
      * Force `state.json` to be re-read from disk right now, discarding
      * whatever was cached (`/nep resume`): the owner may have
-     * hand-edited it (e.g. bootstrap progress) while paused. Any unflushed
+     * hand-edited it (e.g. warmup progress) while paused. Any unflushed
      * in-memory change is lost, the same guarantee every other cached file
      * already has once dropped.
      */
