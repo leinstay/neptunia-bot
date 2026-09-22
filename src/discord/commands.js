@@ -28,17 +28,7 @@ const REPLY_CHUNK_CHARS = 1900;
 const MAX_AUTOCOMPLETE_CHOICES = 25;
 
 /** Commands that may take long enough to need `deferReply` before `editReply`. */
-const SLOW_COMMANDS = new Set([
-  'poke',
-  'warmup.plan',
-  'warmup.run',
-  'reload',
-  'pause',
-  'resume',
-  'ping',
-  'bootstrap.people',
-  'bootstrap.preview',
-]);
+const SLOW_COMMANDS = new Set(['poke', 'reload', 'pause', 'resume', 'ping', 'bootstrap.people', 'bootstrap.preview']);
 
 const DISABLED_MESSAGE = 'Owner commands are disabled (features.adminCommands is off).';
 const NOT_ALLOWED_MESSAGE = 'Not allowed.';
@@ -321,84 +311,6 @@ export function buildCommandTree(commandName) {
         },
         {
           type: SUBCOMMAND_GROUP,
-          name: 'warmup',
-          description: 'Memory warm-up controls.',
-          options: [
-            { type: SUBCOMMAND, name: 'status', description: 'Warm-up status.' },
-            { type: SUBCOMMAND, name: 'plan', description: 'The ordered read plan.' },
-            { type: SUBCOMMAND, name: 'run', description: 'Start or resume the warm-up now.' },
-            { type: SUBCOMMAND, name: 'stop', description: 'Pause after the batch in flight.' },
-            { type: SUBCOMMAND, name: 'reset', description: 'Clear warm-up progress.' },
-            {
-              type: SUBCOMMAND,
-              name: 'channel',
-              description: "Set a channel's read depth.",
-              options: [
-                { type: CHANNEL, name: 'channel', description: 'Channel.', required: true, channel_types: [GUILD_TEXT] },
-                {
-                  type: INTEGER,
-                  name: 'depth',
-                  description: 'Messages to read (0 skips the channel).',
-                  required: true,
-                  min_value: 0,
-                  max_value: 1_000_000,
-                },
-              ],
-            },
-            {
-              type: SUBCOMMAND,
-              name: 'channel-default',
-              description: "Remove a channel's depth override.",
-              options: [
-                { type: CHANNEL, name: 'channel', description: 'Channel.', required: true, channel_types: [GUILD_TEXT] },
-              ],
-            },
-            {
-              type: SUBCOMMAND,
-              name: 'only',
-              description: 'Read only channels with a set depth.',
-              options: [{ type: BOOLEAN, name: 'enabled', description: 'On or off.', required: true }],
-            },
-            {
-              type: SUBCOMMAND,
-              name: 'depth',
-              description: 'Default read depth.',
-              options: [
-                {
-                  type: INTEGER,
-                  name: 'messages',
-                  description: 'Messages per channel (1..1000000).',
-                  required: true,
-                  min_value: 1,
-                  max_value: 1_000_000,
-                },
-              ],
-            },
-            {
-              type: SUBCOMMAND,
-              name: 'budget',
-              description: 'Warm-up token budget.',
-              options: [{ type: STRING, name: 'tokens', description: 'Amount, k/m allowed (e.g. 500k, 10m).', required: true }],
-            },
-            {
-              type: SUBCOMMAND,
-              name: 'output',
-              description: 'Analyzer output limit.',
-              options: [
-                {
-                  type: INTEGER,
-                  name: 'tokens',
-                  description: 'Output tokens (256..32000).',
-                  required: true,
-                  min_value: 256,
-                  max_value: 32000,
-                },
-              ],
-            },
-          ],
-        },
-        {
-          type: SUBCOMMAND_GROUP,
           name: 'bootstrap',
           description: 'Sample-based memory bootstrap preview -- writes nothing under data/.',
           options: [
@@ -528,20 +440,6 @@ const OPTION_MAPPERS = {
   'lore.remove': (options) => ({ id: options.getString('id', true) }),
   'model.show': () => ({}),
   'model.set': (options) => ({ role: options.getString('role', true), id: options.getString('id', true) }),
-  'warmup.status': () => ({}),
-  'warmup.plan': () => ({}),
-  'warmup.run': () => ({}),
-  'warmup.stop': () => ({}),
-  'warmup.reset': () => ({}),
-  'warmup.channel': (options) => ({
-    channelId: options.getChannel('channel', true).id,
-    depth: options.getInteger('depth', true),
-  }),
-  'warmup.channel-default': (options) => ({ channelId: options.getChannel('channel', true).id }),
-  'warmup.only': (options) => ({ enabled: options.getBoolean('enabled', true) }),
-  'warmup.depth': (options) => ({ messages: options.getInteger('messages', true) }),
-  'warmup.budget': (options) => ({ tokens: options.getString('tokens', true) }),
-  'warmup.output': (options) => ({ tokens: options.getInteger('tokens', true) }),
   'bootstrap.people': () => ({}),
   'bootstrap.preview': (options) => ({
     userId: options.getUser('user')?.id,

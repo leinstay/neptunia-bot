@@ -16,8 +16,8 @@ import { createLlm } from './llm/openrouter.js';
 import { createTurnRunner } from './behavior/turn.js';
 import { createSpontaneous } from './behavior/spontaneous.js';
 import { createMemoryUpdater } from './memory/update.js';
-import { createWarmup } from './memory/warmup.js';
 import { createBootstrap } from './memory/bootstrap.js';
+import { dropStaleWarmupProgress } from './memory/state-cleanup.js';
 import { createDescriber } from './memory/describe.js';
 import { createImageFetcher } from './discord/fetch-image.js';
 import { createAdmin } from './admin.js';
@@ -70,6 +70,8 @@ if (!isValidCommandName(hot.config.bot.commandName)) {
 }
 
 const store = createStore({ dataDir: path.join(ROOT_DIR, 'data') });
+dropStaleWarmupProgress(store);
+
 const calibrator = createCalibrator(store.state.data.calibration);
 const llm = createLlm({ apiKey: openrouterKey, getConfig: () => hot.config, calibrator, state: store.state });
 
@@ -92,7 +94,6 @@ const turns = createTurnRunner({ hot, store, llm, calibrator, client, describer,
 const spontaneous = createSpontaneous({ hot, store, client, turns, getGuildId });
 const getSelfName = (guildId) => client.guilds.cache.get(guildId)?.members.me?.displayName ?? client.user?.username ?? 'bot';
 const memory = createMemoryUpdater({ hot, store, llm, calibrator, getSelfName });
-const warmup = createWarmup({ hot, store, client, memory, getGuildId, describer });
 // F36 phase A: a read-only, sample-based memory preview -- writes nothing under data/.
 const bootstrap = createBootstrap({ hot, client, llm, calibrator, getSelfName });
 const tagHistory = createTagHistory();
@@ -106,7 +107,6 @@ const onMessage = createMessageHandler({
   memory,
   tagHistory,
   getGuildId,
-  isWarmingUp: () => warmup.isBlocking(),
   describer,
 });
 
@@ -121,7 +121,6 @@ const admin = createAdmin({
   spontaneous,
   calibrator,
   getGuildId,
-  warmup,
   turns,
   memory,
   // F30 (/nep pause): clears the pending-ping queue on pause.
@@ -164,9 +163,7 @@ client.once(Events.ClientReady, async () => {
   log.info('index: ready', { guild: instance.guildId, tag: client.user.tag });
 
   // F30 (/nep pause): a pause persisted before this restart comes back
-  // paused -- the warm-up must not auto-start (warmup.isBlocking() already
-  // accounts for this), and every spontaneous/analyzer tick keeps no-op'ing
-  // until /nep resume.
+  // paused -- every spontaneous/analyzer tick keeps no-op'ing until /nep resume.
   if (store.state.data.paused) {
     log.info('index: starting up paused, run /nep resume when data/ is ready', {
       pausedAt: store.state.data.pausedAt ?? null,
@@ -176,34 +173,10 @@ client.once(Events.ClientReady, async () => {
   const guild = client.guilds.cache.get(instance.guildId);
   await registerCommands(guild, hot.config);
 
-  // Before the persona is allowed to speak: run the memory warm-up if one is
-  // due (config.warmup.enabled and not already done/aborted). Not awaited —
-  // events.js mutes the persona for the duration via isWarmingUp().
-  if (warmup.isBlocking()) {
-    warmup
-      .run()
-      .then((result) => {
-        log.info('index: warm-up run ended', {
-          done: result?.done ?? false,
-          aborted: result?.aborted ?? false,
-          tokensUsed: result?.tokensUsed ?? 0,
-          requests: result?.requests ?? 0,
-        });
-      })
-      .catch((err) => log.error('index: warm-up run failed', { error: err }));
-  }
-
-  // The live analyzer must never run concurrently with the warm-up, and
-  // spontaneous speech makes no sense while the persona is still mute — both
-  // wrappers just no-op while a warm-up is due or running.
-  every(30_000, () => (warmup.isBlocking() ? undefined : spontaneous.tick()), 'spontaneous.tick');
+  every(30_000, () => spontaneous.tick(), 'spontaneous.tick');
   // The tick still runs on schedule even with the switch off, so flipping it
   // back on later needs no restart; it is the wrapper here that no-ops.
-  every(
-    60_000,
-    () => (warmup.isBlocking() ? undefined : hot.config.features?.memory !== false ? memory.tick() : undefined),
-    'memory.tick',
-  );
+  every(60_000, () => (hot.config.features?.memory !== false ? memory.tick() : undefined), 'memory.tick');
   every(30_000, () => store.flush(), 'store.flush');
 });
 

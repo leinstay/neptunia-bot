@@ -470,10 +470,21 @@ export function batchAuthorNamesMap(messages) {
  *   used for them (see `batchAuthorNamesMap` below), so the `Name (id:...)` normalization below
  *   recognises a name even for someone whose stored profile has not caught up yet. Omitted ->
  *   only the stored profile's own `names` are known.
- * @returns {{ users: number, guild: boolean, self: boolean, affinity: number, channels: number, episodes: number, lore: number, interestsChanged: number }}
+ * @returns {{ users: number, guild: boolean, self: boolean, affinity: number, channels: number, episodes: number, lore: number,
+ *   interestsChanged: number, portraitRequests: { userId: string, reason: string }[] }}
  */
 export function applyMemoryUpdate(store, guildId, update, cfg, knownUserIds, knownChannelIds = new Set(), relationships, episodes, lore, timing, batchAuthorNames) {
-  const result = { users: 0, guild: false, self: false, affinity: 0, channels: 0, episodes: 0, lore: 0, interestsChanged: 0 };
+  const result = {
+    users: 0,
+    guild: false,
+    self: false,
+    affinity: 0,
+    channels: 0,
+    episodes: 0,
+    lore: 0,
+    interestsChanged: 0,
+    portraitRequests: [],
+  };
   if (!update || typeof update !== 'object' || Array.isArray(update)) return result;
 
   // A member is written as `<@id>` in every free-text field the analyzer
@@ -520,9 +531,24 @@ export function applyMemoryUpdate(store, guildId, update, cfg, knownUserIds, kno
       // decides whether they are non-empty and clamps them. `interests`/
       // `details` are ops objects; one release of backward tolerance accepts
       // the OLD shapes too (a string interests blob, an array of details).
+      // `character`/`style` stay plain prose (see .claude/docs/prompt-contract.md,
+      // "Data model"): the stream analyzer never edits them directly -- they
+      // are written only by profile.md (the bootstrap and a portrait refresh,
+      // see `raw.portrait` below). The whole-string form is kept here for
+      // that writer, not for the stream analyzer's own JSON.
       const ops = {};
       for (const key of ['character', 'style', 'relationship']) {
         if (typeof raw[key] === 'string') ops[key] = tokenize(raw[key]);
+      }
+
+      // `portrait`: the stream analyzer's cue that this member's stored
+      // character/style misses or contradicts something the batch showed --
+      // never stored here, just collected for the caller (analyze()) to hand
+      // to an injected refresh callback; see .claude/docs/prompt-contract.md,
+      // "Data model".
+      if (typeof raw.portrait === 'string') {
+        const reason = clampText(tokenize(raw.portrait), 200, { tolerance: cfg.clampTolerance });
+        if (reason) result.portraitRequests.push({ userId: String(userId), reason });
       }
 
       if (typeof raw.interests === 'string') {
@@ -699,6 +725,10 @@ export function touchMemory(store, guildId, normalized) {
  * @param {object} deps.calibrator   From createCalibrator().
  * @param {(guildId: string) => string} deps.getSelfName
  * @param {() => number} [deps.now]
+ * @param {(guildId: string, userId: string, reason: string) => void} [deps.onPortraitRequest]
+ *   Called once per user for every `raw.portrait` cue a successful `analyze()` collected (see
+ *   .claude/docs/prompt-contract.md, "Data model") -- the actual portrait refresh (profile.md,
+ *   `<draft>`/`<hint>`) is wired by a later task; this module only reports the cue. Omitted -> no-op.
  */
 /** `nameOf` for buildMemoryRequest's token resolution: a member's current
  * stored name, or null when the guild has no profile for that id -- see
@@ -708,7 +738,7 @@ function storeNameOf(store, guildId) {
   return (id) => store.getUser(guildId, id)?.names?.[0] ?? null;
 }
 
-export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, now = Date.now }) {
+export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, now = Date.now, onPortraitRequest }) {
   const running = new Set();
   let idleWaiters = []; // resolvers for waitIdle() (F30, /nep pause), notified once running.size hits 0
   const backoffUntil = new Map();
@@ -918,6 +948,10 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
         timing,
         batchAuthorNamesMap(messages),
       );
+
+      if (typeof onPortraitRequest === 'function') {
+        for (const { userId, reason } of result.portraitRequests) onPortraitRequest(guildId, userId, reason);
+      }
 
       return { ok: true, usage: completion.usage ?? null, estimated: completion.estimated ?? 0, result };
     } catch (err) {

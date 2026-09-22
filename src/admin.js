@@ -6,13 +6,12 @@
 // inspection/deletion. This is the ONLY place in the project that ever
 // deletes stored memory, through the two functions store.js allows for it:
 // store.forgetUser (one profile) and store.wipeGuild (a whole guild's memory,
-// `/nep memory wipe`, gated by the served guild's exact name and refused
-// while a warm-up is running). The tracked prompts/ layer is never written at
-// runtime — live corrections always land in the untracked prompts.local/
-// layer.
+// `/nep memory wipe`, gated by the served guild's exact name). The tracked
+// prompts/ layer is never written at runtime — live corrections always land
+// in the untracked prompts.local/ layer.
 //
 // This module knows nothing about discord.js: `createAdmin(deps).run` takes
-// a `commandKey` (e.g. `'warmup.channel'`), a plain `args` object and a
+// a `commandKey` (e.g. `'memory.forget'`), a plain `args` object and a
 // `context` (`{ guildId, channelId, userId }`) and returns the reply text, or
 // throws an `Error` with an operator-facing message on bad input. Mapping a
 // discord.js interaction's options onto `args` is src/discord/commands.js's
@@ -398,21 +397,6 @@ function pathExists(object, dottedPath) {
   return true;
 }
 
-/**
- * A token amount: a plain integer, or an integer followed by `k` (x1,000) or
- * `m` (x1,000,000) — e.g. `500k`, `10m`. Returns null for anything else.
- */
-function parseTokenAmount(raw) {
-  const trimmed = String(raw ?? '').trim().toLowerCase();
-  const match = /^(\d+)([km]?)$/.exec(trimmed);
-  if (!match) return null;
-  const n = Number.parseInt(match[1], 10);
-  if (!Number.isFinite(n)) return null;
-  if (match[2] === 'k') return n * 1_000;
-  if (match[2] === 'm') return n * 1_000_000;
-  return n;
-}
-
 function readLocalConfig(localPath) {
   if (!fs.existsSync(localPath)) return {};
   const raw = fs.readFileSync(localPath, 'utf8').trim();
@@ -434,8 +418,9 @@ function writeLocalConfig(localPath, value) {
  * `spontaneous` — the spontaneous scheduler: `poke(channel, mode)` and `status()`.
  * `calibrator` — token calibrator (src/llm/tokens.js), read for `.ratio`.
  * `getGuildId` — the single guild this instance serves, or null before it resolves.
- * `warmup` — from createWarmup() (src/memory/warmup.js), optional: `run()`, `stop()`, `status()`, `plan()`,
- *   `reset()`. When absent, every `warmup.*` command reports it is not available.
+ * `isBootstrapping` — `() => boolean`, optional: true while the memory bootstrap runner
+ *   (src/memory/bootstrap.js, a later task) is in flight. Reserved for that runner to wire in;
+ *   this module does not act on it yet. Default: never bootstrapping.
  * `turns` — from createTurnRunner() (src/behavior/turn.js), optional: `waitIdle()`, used by
  *   `/nep pause` (F30) to wait out a turn already in flight. Absent -> the wait is simply skipped.
  * `memory` — from createMemoryUpdater() (src/memory/update.js), optional: `waitIdle()`, used by
@@ -453,7 +438,20 @@ function writeLocalConfig(localPath, value) {
  * `run(commandKey, args, context)` throws a plain `Error` (operator-facing
  * message) on bad input; it never touches discord.js.
  */
-export function createAdmin({ hot, store, client, spontaneous, calibrator, getGuildId, warmup, turns, memory, pending, llm, bootstrap }) {
+export function createAdmin({
+  hot,
+  store,
+  client,
+  spontaneous,
+  calibrator,
+  getGuildId,
+  isBootstrapping = () => false,
+  turns,
+  memory,
+  pending,
+  llm,
+  bootstrap,
+}) {
   function isOwner(userId) {
     const owners = hot.config?.bot?.owners ?? [];
     return owners.map(String).includes(String(userId));
@@ -464,7 +462,7 @@ export function createAdmin({ hot, store, client, spontaneous, calibrator, getGu
    * paused, with a hint to resume first -- see the module header comment's
    * "MUST NOT touch" list in the task and the DESIGN section 3 list of
    * refused commands (memory.forget, memory.affinity with a score,
-   * memory.wipe, lore.add, lore.remove, warmup.run, warmup.reset, poke).
+   * memory.wipe, lore.add, lore.remove, poke).
    */
   function assertNotPaused() {
     if (store.state.data.paused) {
@@ -577,16 +575,15 @@ export function createAdmin({ hot, store, client, spontaneous, calibrator, getGu
 
   /**
    * Sets `paused`/`pausedAt` in state.json FIRST (so a crash or restart
-   * mid-pause comes back paused), then waits out a warm-up in flight (via
-   * its own `stop()`, remembering `resumeWarmup` for `/nep resume`), a turn
-   * already running, AND a live-analyzer `run()` already in flight (its LLM
-   * call can take 30-90s; `tick()`/`observe()` are already no-ops from the
-   * moment `paused` is set, so no NEW run can start -- this only waits out
-   * one that started before the pause). Only once all three are idle does it
-   * clear the pending-ping queue, flush everything and drop every cache
-   * except state.json itself, so nothing stale (or a late in-flight write)
-   * can land in data/ after the owner starts editing it. Idempotent: a
-   * second call just reports the state.
+   * mid-pause comes back paused), then waits out a turn already running, AND
+   * a live-analyzer `run()` already in flight (its LLM call can take
+   * 30-90s; `tick()`/`observe()` are already no-ops from the moment `paused`
+   * is set, so no NEW run can start -- this only waits out one that started
+   * before the pause). Only once both are idle does it clear the pending-ping
+   * queue, flush everything and drop every cache except state.json itself, so
+   * nothing stale (or a late in-flight write) can land in data/ after the
+   * owner starts editing it. Idempotent: a second call just reports the
+   * state.
    */
   async function cmdPause() {
     const state = store.state.data;
@@ -601,30 +598,6 @@ export function createAdmin({ hot, store, client, spontaneous, calibrator, getGu
     state.pausedAt = new Date().toISOString();
     store.state.markDirty();
     store.flush();
-
-    let warmupInterrupted = false;
-    if (warmup && typeof warmup.status === 'function' && typeof warmup.stop === 'function' && typeof warmup.run === 'function') {
-      let running = false;
-      try {
-        running = Boolean(warmup.status()?.running);
-      } catch {
-        running = false;
-      }
-      if (running) {
-        warmupInterrupted = true;
-        warmup.stop();
-        try {
-          await warmup.run(); // the SAME in-flight run (warmup.run() is idempotent while running) -- resolves once it pauses
-        } catch (err) {
-          log.warn('admin: the interrupted warm-up run rejected while pausing', { error: err });
-        }
-      }
-    }
-
-    if (warmupInterrupted) {
-      store.state.data.resumeWarmup = true;
-      store.state.markDirty();
-    }
 
     if (turns && typeof turns.waitIdle === 'function') {
       await turns.waitIdle();
@@ -643,7 +616,7 @@ export function createAdmin({ hot, store, client, spontaneous, calibrator, getGu
     store.flush();
     const dropped = typeof store.dropCaches === 'function' ? store.dropCaches() : 0;
 
-    log.info('admin: paused', { warmupInterrupted, dropped });
+    log.info('admin: paused', { dropped });
 
     return [
       'Paused. Memory is flushed to disk -- files under data/ can be edited safely now.',
@@ -654,10 +627,9 @@ export function createAdmin({ hot, store, client, spontaneous, calibrator, getGu
   /**
    * Refuses (staying paused) if any `*.json` under data/ fails to parse,
    * naming the offending paths. Otherwise re-reads state.json (the owner may
-   * have hand-edited warm-up progress while paused), clears the pause flags
-   * and lets every other cache lazily re-populate from disk. Restarts the
-   * warm-up (not awaited) if it was the one interrupted by this pause.
-   * Idempotent: reports "not paused" when called while not paused.
+   * have hand-edited data/ while paused) and clears the pause flags, letting
+   * every other cache lazily re-populate from disk. Idempotent: reports "not
+   * paused" when called while not paused.
    */
   function cmdResume() {
     const badFiles = typeof store.validate === 'function' ? store.validate() : [];
@@ -674,20 +646,14 @@ export function createAdmin({ hot, store, client, spontaneous, calibrator, getGu
       return 'Not paused.';
     }
 
-    const resumeWarmup = Boolean(state.resumeWarmup);
     delete state.paused;
     delete state.pausedAt;
-    delete state.resumeWarmup;
     store.state.markDirty();
     store.flush();
 
-    if (resumeWarmup && warmup && typeof warmup.run === 'function') {
-      warmup.run().catch((err) => log.error('admin: resumed warm-up run failed', { error: err }));
-    }
+    log.info('admin: resumed', {});
 
-    log.info('admin: resumed', { resumeWarmup });
-
-    return resumeWarmup ? 'Resumed. The warm-up will continue where it left off.' : 'Resumed.';
+    return 'Resumed.';
   }
 
   function nextSpontaneousFor(guildId) {
@@ -724,6 +690,7 @@ export function createAdmin({ hot, store, client, spontaneous, calibrator, getGu
       `calibration ratio: ${calibrator ? calibrator.ratio.toFixed(3) : '-'}`,
       `llm requests today: ${data.llmCount ?? 0} / ${cfg?.llm?.maxRequestsPerDay ?? '-'} (day: ${data.llmDay ?? '-'})`,
       data.paused ? `paused: true (since ${data.pausedAt ?? '?'})` : 'paused: false',
+      `bootstrapping: ${isBootstrapping() ? 'true' : 'false'}`,
     ];
 
     const guildId = getGuildId?.() ?? null;
@@ -974,26 +941,14 @@ export function createAdmin({ hot, store, client, spontaneous, calibrator, getGu
 
   /**
    * A deliberate, owner-only clean start: wipes this guild's whole stored
-   * memory (store.wipeGuild) and resets warm-up progress with it, so a
-   * re-run never double-counts against old data. Runs only when `confirm`
-   * matches the served guild's name exactly (trimmed, case-sensitive) —
-   * otherwise nothing changes and the reply says what to type. Refused
-   * outright while a warm-up is running.
+   * memory (store.wipeGuild). Runs only when `confirm` matches the served
+   * guild's name exactly (trimmed, case-sensitive) — otherwise nothing
+   * changes and the reply says what to type.
    */
   function cmdMemoryWipe(args, context) {
     assertNotPaused();
     const guildId = resolvedGuildId(context);
     if (!guildId) throw new Error('no guild resolved yet');
-
-    if (warmup && typeof warmup.status === 'function') {
-      let running = false;
-      try {
-        running = Boolean(warmup.status()?.running);
-      } catch {
-        running = false;
-      }
-      if (running) throw new Error('a warm-up is running — run /nep warmup stop first');
-    }
 
     const guildName = client?.guilds?.cache?.get(guildId)?.name || guildId;
     const confirm = String(args?.confirm ?? '').trim();
@@ -1011,7 +966,6 @@ export function createAdmin({ hot, store, client, spontaneous, calibrator, getGu
       `lore removed: ${counts.loreRemoved} (kept: ${counts.loreKept})`,
       `buffer messages cleared: ${counts.bufferMessages}`,
       'Kept: owner lore, the media description cache, token calibration, the daily request count and the spontaneous schedule.',
-      'Warm-up progress was cleared. Next step: /nep warmup run.',
     ].join('\n');
   }
 
@@ -1292,175 +1246,6 @@ async function cmdPing(args) {
     .join('\n');
 }
 
-function warmupLocalConfigPath() {
-    return path.join(hot.rootDir, 'config.local.json');
-  }
-
-  /** Read-modify-write one key of config.local.json, the same path `set` uses. */
-  function writeWarmupConfig(dottedPath, value) {
-    const localPath = warmupLocalConfigPath();
-    const next = setPath(readLocalConfig(localPath), dottedPath, value);
-    writeLocalConfig(localPath, next);
-    return hot.reloadConfig();
-  }
-
-  function unsetWarmupConfig(dottedPath) {
-    const localPath = warmupLocalConfigPath();
-    const next = unsetPath(readLocalConfig(localPath), dottedPath);
-    writeLocalConfig(localPath, next);
-    return hot.reloadConfig();
-  }
-
-  /** `N s ago` / `N min ago`, or `never` when `lastActivityAt` is unknown (F35 addendum). */
-  function humanizeAgo(lastActivityAt) {
-    if (!Number.isFinite(lastActivityAt)) return 'never';
-    const deltaMs = Math.max(0, Date.now() - lastActivityAt);
-    const seconds = Math.round(deltaMs / 1000);
-    if (seconds < 60) return `${seconds} s ago`;
-    return `${Math.round(seconds / 60)} min ago`;
-  }
-
-  /** One terse `phase: …` line from a warm-up's in-memory `activity` snapshot (F35 addendum, see
-   * src/memory/warmup.js's `touchActivity`) — never throws on a missing/partial snapshot. */
-  function formatWarmupPhase(activity) {
-    const a = activity ?? {};
-    const phase = a.phase ?? 'idle';
-    if (phase === 'fetching') {
-      return `phase: fetching history, ${a.channelsFetched ?? 0}/${a.channelsTotal ?? 0} channels`;
-    }
-    if (phase === 'analysing' || phase === 'describing') {
-      const verb = phase === 'describing' ? 'describing media' : 'analysing';
-      return `phase: ${verb}, batch ${a.windowBatch ?? 0} of ${a.windowBatches ?? 0} in the window (${a.messages ?? 0} messages)`;
-    }
-    if (phase === 'waiting-rate-limit') {
-      const until = Number.isFinite(a.until) ? `${new Date(a.until).toISOString().slice(11, 16)} UTC` : '?';
-      return `phase: waiting for the provider rate limit until ${until} (wait ${a.waits ?? 1})`;
-    }
-    if (phase === 'paused') return 'phase: paused';
-    if (phase === 'aborted') {
-      const reason = a.reason ?? 'unknown';
-      const detail = a.detail ? `: ${String(a.detail).slice(0, 160)}` : '';
-      return `phase: aborted (${reason}${detail})`;
-    }
-    if (phase === 'done') return 'phase: done';
-    return 'phase: idle';
-  }
-
-  function cmdWarmupStatus() {
-    const s = warmup.status();
-    const reached = s.reachedTs ? new Date(s.reachedTs).toISOString() : '(not started)';
-    const analyzerModel = hot.config?.memory?.model ?? hot.config?.llm?.model ?? '-';
-    const lines = [
-      formatWarmupPhase(s.activity),
-      `last activity: ${humanizeAgo(s.activity?.lastActivityAt)}`,
-      `analyzer model: ${analyzerModel}`,
-      `enabled: ${s.enabled}`,
-      `done: ${s.done}`,
-      `paused: ${s.paused}`,
-      `aborted: ${s.aborted}`,
-      `running: ${s.running}`,
-      `tokens: ${s.tokensUsed} / ${s.maxTokens}`,
-      `requests: ${s.requests}`,
-      `analysed ${s.messagesAnalyzed} of ${s.messagesTotal} messages`,
-      `timeline reached: ${reached}`,
-      `skipped messages: ${s.skippedMessages}`,
-      `only listed channels: ${s.onlyListed}`,
-    ];
-    for (const row of s.channels ?? []) {
-      const label = row.name ? `#${row.name} (${row.id})` : row.id;
-      lines.push(`  ${label}: ${row.messages}/${row.limit ?? '?'} msgs`);
-    }
-    return lines.join('\n');
-  }
-
-  async function cmdWarmupPlan() {
-    const p = await warmup.plan();
-    const lines = p.plan.map((c, i) => `${i + 1}. #${c.name ?? c.id} (${c.id}) — ${c.depth}, ${c.role}`);
-    if (lines.length === 0) lines.push('(no readable channels)');
-    if (p.missing.length > 0) lines.push(`missing: ${p.missing.join(', ')}`);
-    lines.push(`budget: ${p.maxTokens} tokens, output limit: ${p.outputTokens}, batch size: ${p.batchMessages}`);
-    return lines.join('\n');
-  }
-
-  function cmdWarmupChannel(args) {
-    const channelId = args?.channelId;
-    const depth = args?.depth;
-    if (!channelId) throw new Error('a channel is required');
-    if (!Number.isInteger(depth) || depth < 0 || depth > 1_000_000) {
-      throw new Error('depth must be an integer between 0 and 1000000');
-    }
-    const ok = writeWarmupConfig(`warmup.channelDepths.${channelId}`, depth);
-    return `Channel ${channelId}: depth set to ${depth}${depth === 0 ? ' (will be skipped)' : ''} (reload ${ok ? 'ok' : 'FAILED'})`;
-  }
-
-  function cmdWarmupChannelDefault(args) {
-    const channelId = args?.channelId;
-    if (!channelId) throw new Error('a channel is required');
-    const ok = unsetWarmupConfig(`warmup.channelDepths.${channelId}`);
-    return `Channel ${channelId}: depth reset to the default (reload ${ok ? 'ok' : 'FAILED'})`;
-  }
-
-  function cmdWarmupOnly(args) {
-    const enabled = Boolean(args?.enabled);
-    const ok = writeWarmupConfig('warmup.onlyListed', enabled);
-    return `Only listed channels: ${enabled} (reload ${ok ? 'ok' : 'FAILED'})`;
-  }
-
-  function cmdWarmupDepth(args) {
-    const n = args?.messages;
-    if (!Number.isInteger(n) || n < 1 || n > 1_000_000) {
-      throw new Error('messages must be an integer between 1 and 1000000');
-    }
-    const ok = writeWarmupConfig('warmup.messagesPerChannel', n);
-    return `Default read depth set to ${n} (reload ${ok ? 'ok' : 'FAILED'})`;
-  }
-
-  function cmdWarmupBudget(args) {
-    const tokens = parseTokenAmount(args?.tokens);
-    if (tokens == null || tokens < 1) throw new Error('tokens must be an amount like 500k or 10m');
-    const ok = writeWarmupConfig('warmup.maxTokens', tokens);
-    return `Warm-up token budget set to ${tokens} (reload ${ok ? 'ok' : 'FAILED'})`;
-  }
-
-  function cmdWarmupOutput(args) {
-    const n = args?.tokens;
-    if (!Number.isInteger(n) || n < 256 || n > 32000) {
-      throw new Error('tokens must be an integer between 256 and 32000');
-    }
-    const ok = writeWarmupConfig('memory.maxOutputTokens', n);
-    return `Analyzer output limit set to ${n} (reload ${ok ? 'ok' : 'FAILED'})`;
-  }
-
-  function cmdWarmupRun() {
-    assertNotPaused();
-    const s = warmup.status();
-    if (s.running) return 'warm-up is already running.';
-    if (s.done) return 'warm-up has already finished.';
-    warmup.run().catch((err) => log.error('warmup: run failed', { error: err }));
-    return 'Warm-up started.';
-  }
-
-  function cmdWarmupStop() {
-    const s = warmup.status();
-    if (!s.running) return 'warm-up is not running.';
-    warmup.stop();
-    return 'Stop requested: warm-up will pause after the batch in flight.';
-  }
-
-  function cmdWarmupReset() {
-    assertNotPaused();
-    warmup.reset();
-    return 'Warm-up progress reset.';
-  }
-
-  /** Wraps a `warmup.*` handler so every one of them reports the same thing when the dependency is absent. */
-  function withWarmup(fn) {
-    return (args, context) => {
-      if (!warmup) return 'warm-up is not available';
-      return fn(args, context);
-    };
-  }
-
   // ---------------------------------------------------------------------
   // bootstrap (F36 phase A): a read-only sample-based preview -- see the
   // module header of src/memory/bootstrap.js. Never writes under data/, so
@@ -1583,17 +1368,6 @@ function warmupLocalConfigPath() {
     'lore.remove': (args, context) => cmdLoreRemove(args, context),
     'model.show': () => cmdModelShow(),
     'model.set': (args) => cmdModelSet(args),
-    'warmup.status': withWarmup(() => cmdWarmupStatus()),
-    'warmup.plan': withWarmup(() => cmdWarmupPlan()),
-    'warmup.run': withWarmup(() => cmdWarmupRun()),
-    'warmup.stop': withWarmup(() => cmdWarmupStop()),
-    'warmup.reset': withWarmup(() => cmdWarmupReset()),
-    'warmup.channel': withWarmup((args) => cmdWarmupChannel(args)),
-    'warmup.channel-default': withWarmup((args) => cmdWarmupChannelDefault(args)),
-    'warmup.only': withWarmup((args) => cmdWarmupOnly(args)),
-    'warmup.depth': withWarmup((args) => cmdWarmupDepth(args)),
-    'warmup.budget': withWarmup((args) => cmdWarmupBudget(args)),
-    'warmup.output': withWarmup((args) => cmdWarmupOutput(args)),
     'bootstrap.people': withBootstrap((args, context) => cmdBootstrapPeople(args, context)),
     'bootstrap.preview': withBootstrap((args, context) => cmdBootstrapPreview(args, context)),
   };

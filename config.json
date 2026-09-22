@@ -143,19 +143,6 @@
     "filePreviewChars": 500,
     "embedTextChars": 200
   },
-  "warmup": {
-    "enabled": false,
-    "maxTokens": 1000000,
-    "messagesPerChannel": 2000,
-    "batchMessages": 150,
-    "windowBatches": 3,
-    "cutAtGapMinutes": 30,
-    "maxAgeDays": 0,
-    "channelDepths": {},
-    "onlyListed": false,
-    "rateLimitWaitMinutes": 10,
-    "rateLimitMaxWaits": 36
-  },
   "bootstrap": {
     "lookbackDays": 60,
     "minMessages": 30,

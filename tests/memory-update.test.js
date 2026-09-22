@@ -1133,6 +1133,84 @@ test('applyMemoryUpdate: an empty-string prose field never blanks the stored val
   });
 });
 
+// ---- applyMemoryUpdate: portrait refresh cues (F39) -------------------------
+// See .claude/docs/prompt-contract.md, "Data model": `character`/`style` stay
+// plain prose, written only by profile.md (the bootstrap / a portrait
+// refresh). The stream analyzer's `users.<id>.portrait` is a CUE, not an
+// edit: never stored, only collected into `result.portraitRequests` for the
+// caller (analyze()) to hand to an injected refresh callback.
+
+test('applyMemoryUpdate: a portrait cue for a known user is collected, never stored', () => {
+  withStore((store) => {
+    const guildId = 'g1';
+    store.touchUser(guildId, '1', 'nick', Date.now());
+
+    const result = applyMemoryUpdate(
+      store,
+      guildId,
+      { users: { 1: { portrait: 'now argues a lot, the stored portrait never mentions it' } } },
+      MEMORY_CFG,
+      new Set(['1']),
+    );
+
+    assert.deepEqual(result.portraitRequests, [{ userId: '1', reason: 'now argues a lot, the stored portrait never mentions it' }]);
+    assert.equal(store.getUser(guildId, '1').character, '', 'never written to the profile');
+  });
+});
+
+test('applyMemoryUpdate: a portrait cue for an unknown user is ignored', () => {
+  withStore((store) => {
+    const guildId = 'g1';
+    store.touchUser(guildId, '1', 'nick', Date.now());
+
+    const result = applyMemoryUpdate(store, guildId, { users: { 999: { portrait: 'x'.repeat(20) } } }, MEMORY_CFG, new Set(['1']));
+
+    assert.deepEqual(result.portraitRequests, []);
+  });
+});
+
+test('applyMemoryUpdate: a portrait cue is clamped to 200 characters', () => {
+  withStore((store) => {
+    const guildId = 'g1';
+    store.touchUser(guildId, '1', 'nick', Date.now());
+    const cfg = { ...MEMORY_CFG, clampTolerance: 1 };
+
+    const result = applyMemoryUpdate(store, guildId, { users: { 1: { portrait: 'x'.repeat(250) } } }, cfg, new Set(['1']));
+
+    assert.equal(result.portraitRequests[0].reason.length, 200);
+  });
+});
+
+test('applyMemoryUpdate: a portrait cue is tokenized like other prose', () => {
+  withStore((store) => {
+    const guildId = 'g1';
+    store.touchUser(guildId, '1', 'Aria', Date.now());
+    store.touchUser(guildId, '223456789012345678', 'Bran', Date.now());
+
+    const result = applyMemoryUpdate(
+      store,
+      guildId,
+      { users: { 1: { portrait: 'now argues with Bran (id:223456789012345678) a lot' } } },
+      MEMORY_CFG,
+      new Set(['1']),
+    );
+
+    assert.equal(result.portraitRequests[0].reason, 'now argues with <@223456789012345678> a lot');
+  });
+});
+
+test('applyMemoryUpdate: an empty/whitespace-only or non-string portrait cue is dropped, not collected', () => {
+  withStore((store) => {
+    const guildId = 'g1';
+    store.touchUser(guildId, '1', 'nick', Date.now());
+
+    for (const garbage of ['', '   ', null, 42, {}, []]) {
+      const result = applyMemoryUpdate(store, guildId, { users: { 1: { portrait: garbage } } }, MEMORY_CFG, new Set(['1']));
+      assert.deepEqual(result.portraitRequests, [], `garbage ${JSON.stringify(garbage)} must not be collected`);
+    }
+  });
+});
+
 test('applyMemoryUpdate: empty guild and self updates are no-ops', () => {
   withStore((store) => {
     const guildId = 'g1';
@@ -1161,7 +1239,17 @@ test('applyMemoryUpdate: garbage input changes nothing and never throws', () => 
 
     for (const garbage of [null, undefined, 'not an object', 42, [1, 2, 3]]) {
       const result = applyMemoryUpdate(store, guildId, garbage, cfg, new Set(['1']));
-      assert.deepEqual(result, { users: 0, guild: false, self: false, affinity: 0, channels: 0, episodes: 0, lore: 0, interestsChanged: 0 });
+      assert.deepEqual(result, {
+        users: 0,
+        guild: false,
+        self: false,
+        affinity: 0,
+        channels: 0,
+        episodes: 0,
+        lore: 0,
+        interestsChanged: 0,
+        portraitRequests: [],
+      });
     }
     assert.deepEqual(store.getGuild(guildId), before);
   });
@@ -2648,6 +2736,74 @@ test('analyze: forwards countAgainstDailyCap to llm.complete, default true', asy
 
     await updater.analyze(guildId, [slimMessage({ id: 'm2' })], { countAgainstDailyCap: false });
     assert.equal(seenOptions.countAgainstDailyCap, false);
+  });
+});
+
+// ---- analyze: onPortraitRequest (F39) ---------------------------------------
+// See .claude/docs/prompt-contract.md, "Data model": a successful analyze()
+// hands every collected `users.<id>.portrait` cue to the injected
+// onPortraitRequest(guildId, userId, reason) callback; a later task wires the
+// actual refresh. Never a store write on its own.
+
+test('analyze: a portrait cue in the completion calls onPortraitRequest once for that user', async () => {
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    const hot = { config: makeConfig(), prompts: { memory: 'sys', labels } };
+    const calibrator = createCalibrator();
+    const llm = { complete: async () => ({ text: JSON.stringify({ users: { 1: { portrait: 'now argues a lot' } } }) }) };
+    const calls = [];
+    const updater = createMemoryUpdater({
+      hot,
+      store,
+      llm,
+      calibrator,
+      getSelfName: () => 'Nept',
+      onPortraitRequest: (gid, userId, reason) => calls.push({ gid, userId, reason }),
+    });
+
+    await updater.analyze(guildId, [slimMessage({ id: 'm1', authorId: '1', authorName: 'nick' })]);
+
+    assert.deepEqual(calls, [{ gid: guildId, userId: '1', reason: 'now argues a lot' }]);
+    assert.equal(store.getUser(guildId, '1').character, '', 'the cue is never written to the profile');
+  });
+});
+
+test('analyze: no portrait cue in the completion never calls onPortraitRequest', async () => {
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    const hot = { config: makeConfig(), prompts: { memory: 'sys', labels } };
+    const calibrator = createCalibrator();
+    const llm = { complete: async () => ({ text: '{}' }) };
+    let called = false;
+    const updater = createMemoryUpdater({
+      hot,
+      store,
+      llm,
+      calibrator,
+      getSelfName: () => 'Nept',
+      onPortraitRequest: () => {
+        called = true;
+      },
+    });
+
+    await updater.analyze(guildId, [slimMessage({ id: 'm1', authorId: '1', authorName: 'nick' })]);
+
+    assert.equal(called, false);
+  });
+});
+
+test('analyze: an absent onPortraitRequest is fine, no throw, even with a portrait cue in the completion', async () => {
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    const hot = { config: makeConfig(), prompts: { memory: 'sys', labels } };
+    const calibrator = createCalibrator();
+    const llm = { complete: async () => ({ text: JSON.stringify({ users: { 1: { portrait: 'now argues a lot' } } }) }) };
+    const updater = createMemoryUpdater({ hot, store, llm, calibrator, getSelfName: () => 'Nept' });
+
+    const outcome = await updater.analyze(guildId, [slimMessage({ id: 'm1', authorId: '1', authorName: 'nick' })]);
+
+    assert.equal(outcome.ok, true);
+    assert.deepEqual(outcome.result.portraitRequests, [{ userId: '1', reason: 'now argues a lot' }]);
   });
 });
 

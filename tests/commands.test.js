@@ -62,7 +62,7 @@ test('buildCommandTree: one top-level command, hidden by default, named from the
 test('buildCommandTree: top-level leaves (status, ping, reload, pause, resume, poke, set, unset)', () => {
   const [command] = buildCommandTree('nep');
   const names = command.options.map((o) => o.name);
-  assert.deepEqual(names, ['status', 'ping', 'reload', 'pause', 'resume', 'poke', 'set', 'unset', 'rule', 'memory', 'lore', 'model', 'warmup', 'bootstrap']);
+  assert.deepEqual(names, ['status', 'ping', 'reload', 'pause', 'resume', 'poke', 'set', 'unset', 'rule', 'memory', 'lore', 'model', 'bootstrap']);
 
   const status = findOption(command.options, 'status');
   assert.equal(status.type, 1); // SUBCOMMAND
@@ -211,45 +211,6 @@ test('buildCommandTree: lore group (add/list/show/remove)', () => {
 
   const remove = findOption(lore.options, 'remove');
   assert.equal(findOption(remove.options, 'id').required, true);
-});
-
-test('buildCommandTree: warmup group, every sub-command and its bounds', () => {
-  const [command] = buildCommandTree('nep');
-  const warmup = findOption(command.options, 'warmup');
-  assert.equal(warmup.type, 2);
-  assert.deepEqual(
-    warmup.options.map((o) => o.name),
-    ['status', 'plan', 'run', 'stop', 'reset', 'channel', 'channel-default', 'only', 'depth', 'budget', 'output'],
-  );
-
-  const channel = findOption(warmup.options, 'channel');
-  assert.equal(findOption(channel.options, 'channel').required, true);
-  const depth = findOption(channel.options, 'depth');
-  assert.equal(depth.type, 4);
-  assert.equal(depth.min_value, 0);
-  assert.equal(depth.max_value, 1_000_000);
-
-  const channelDefault = findOption(warmup.options, 'channel-default');
-  assert.equal(findOption(channelDefault.options, 'channel').required, true);
-
-  const only = findOption(warmup.options, 'only');
-  const enabled = findOption(only.options, 'enabled');
-  assert.equal(enabled.type, 5); // BOOLEAN
-  assert.equal(enabled.required, true);
-
-  const depthCmd = findOption(warmup.options, 'depth');
-  const messages = findOption(depthCmd.options, 'messages');
-  assert.equal(messages.min_value, 1);
-  assert.equal(messages.max_value, 1_000_000);
-
-  const budget = findOption(warmup.options, 'budget');
-  assert.equal(findOption(budget.options, 'tokens').type, 3); // STRING, k/m parsed by admin.js
-
-  const output = findOption(warmup.options, 'output');
-  const tokens = findOption(output.options, 'tokens');
-  assert.equal(tokens.type, 4);
-  assert.equal(tokens.min_value, 256);
-  assert.equal(tokens.max_value, 32000);
 });
 
 test('buildCommandTree: bootstrap group (people, preview with optional user/channel)', () => {
@@ -455,7 +416,7 @@ function baseHot(featuresOverrides = {}) {
     config: {
       bot: { commandName: 'nep', owners: ['owner1'] },
       features: { ...featuresOverrides },
-      llm: {}, memory: {}, warmup: {}, relationships: {}, spontaneous: {}, mention: {},
+      llm: {}, memory: {}, relationships: {}, spontaneous: {}, mention: {},
     },
   };
 }
@@ -620,31 +581,6 @@ test('interaction handler: lore.show/lore.remove map id straight through', async
 
   await handler(fakeInteraction({ group: 'lore', subcommand: 'remove', optionValues: { id: 'abc123' } }));
   assert.deepEqual(admin.runCalls[1][1], { id: 'abc123' });
-});
-
-test('interaction handler: warmup.channel maps the channel option to channelId and an integer depth', async () => {
-  const admin = fakeAdmin();
-  const handler = createInteractionHandler({ hot: baseHot(), admin, getGuildId: () => 'g1' });
-
-  const interaction = fakeInteraction({
-    group: 'warmup',
-    subcommand: 'channel',
-    optionValues: { channel: { id: 'chan1' }, depth: 500 },
-  });
-  await handler(interaction);
-
-  assert.equal(admin.runCalls[0][0], 'warmup.channel');
-  assert.deepEqual(admin.runCalls[0][1], { channelId: 'chan1', depth: 500 });
-});
-
-test('interaction handler: warmup.only maps the boolean option', async () => {
-  const admin = fakeAdmin();
-  const handler = createInteractionHandler({ hot: baseHot(), admin, getGuildId: () => 'g1' });
-
-  const interaction = fakeInteraction({ group: 'warmup', subcommand: 'only', optionValues: { enabled: true } });
-  await handler(interaction);
-
-  assert.deepEqual(admin.runCalls[0][1], { enabled: true });
 });
 
 test('interaction handler: bootstrap.people maps to empty args', async () => {

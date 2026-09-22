@@ -887,3 +887,99 @@ test('onMessage (eavesdrop): does not schedule while busy elsewhere and oneAtATi
 
   assert.equal(calls, 0);
 });
+
+// ---------------------------------------------------------------------------
+// F37: isBootstrapping -- the generic mute hook a memory bootstrap run (a
+// later task) plugs into, replacing the mute the retired long warm-up used
+// to apply. Same shape as the F30 paused tests above.
+
+test('tick: does nothing while isBootstrapping() is true, not even the first-schedule write', async () => {
+  const guild = fakeGuild('g1');
+  const channel = fakeChannel('c1', guild);
+  guild.channels.cache.set(channel.id, channel);
+  const client = { guilds: { cache: new Map([[guild.id, guild]]) } };
+  const store = fakeStore();
+  let calls = 0;
+  const turns = fakeTurns({ runTurn: async () => { calls += 1; return { outcome: 'spoke' }; } });
+
+  const spontaneous = createSpontaneous({
+    hot: { config: baseConfig() },
+    store,
+    client,
+    turns,
+    getGuildId: () => 'g1',
+    isBootstrapping: () => true,
+    rng: () => 0.1,
+    now: () => Date.UTC(2026, 0, 5, 12, 0, 0),
+  });
+  await spontaneous.tick();
+
+  assert.equal(calls, 0);
+  assert.equal(store.state.data.spontaneous, undefined, 'must not even set up the schedule while bootstrapping');
+  assert.equal(store.dirtyCalls, 0);
+});
+
+test('tick: does nothing while a run was already due, when isBootstrapping() is true', async () => {
+  const guild = fakeGuild('g1');
+  const channel = fakeChannel('c1', guild);
+  guild.channels.cache.set(channel.id, channel);
+  const client = { guilds: { cache: new Map([[guild.id, guild]]) } };
+  const t = Date.UTC(2026, 0, 5, 12, 0, 0);
+  const store = fakeStore({ spontaneous: { g1: t } }); // already due
+  let calls = 0;
+  const turns = fakeTurns({ runTurn: async () => { calls += 1; return { outcome: 'spoke' }; } });
+
+  const spontaneous = createSpontaneous({
+    hot: { config: baseConfig() },
+    store,
+    client,
+    turns,
+    getGuildId: () => 'g1',
+    isBootstrapping: () => true,
+    rng: () => 0.1,
+    now: () => t,
+  });
+  await spontaneous.tick();
+
+  assert.equal(calls, 0);
+  assert.equal(store.state.data.spontaneous.g1, t, 'the schedule is left exactly as it was');
+});
+
+test('onMessage: does not schedule an eavesdrop while isBootstrapping() is true', async () => {
+  const guild = fakeGuild('g1');
+  const channel = fakeChannel('c1', guild);
+  let calls = 0;
+  const turns = fakeTurns({ runTurn: async () => { calls += 1; return { outcome: 'spoke' }; } });
+  const now = () => Date.UTC(2026, 0, 5, 12, 0, 0);
+
+  const spontaneous = createSpontaneous({
+    hot: { config: eagerEavesdropConfig() },
+    store: fakeStore(),
+    client: {},
+    turns,
+    getGuildId: () => 'g1',
+    isBootstrapping: () => true,
+    rng: () => 0,
+    now,
+  });
+  spontaneous.onMessage(channel, { self: false, bot: false });
+  await flushTimers();
+
+  assert.equal(calls, 0);
+});
+
+test('tick / onMessage: isBootstrapping defaults to false when not provided (unmuted: normal)', async () => {
+  const guild = fakeGuild('g1');
+  const channel = fakeChannel('c1', guild);
+  guild.channels.cache.set(channel.id, channel);
+  const client = { guilds: { cache: new Map([[guild.id, guild]]) } };
+  const t = Date.UTC(2026, 0, 5, 12, 0, 0);
+  const store = fakeStore({ spontaneous: { g1: t } });
+  let seenChannel = null;
+  const turns = fakeTurns({ runTurn: async ({ channel: ch }) => { seenChannel = ch; return { outcome: 'spoke' }; } });
+
+  const spontaneous = createSpontaneous({ hot: { config: baseConfig() }, store, client, turns, getGuildId: () => 'g1', rng: () => 0.1, now: () => t });
+  await spontaneous.tick();
+
+  assert.equal(seenChannel, channel);
+});

@@ -5,10 +5,10 @@
 //
 // Deliberate exception: `complete(messages, { countAgainstDailyCap: false })`
 // skips the daily-request counter and is never refused by it. This exists
-// ONLY for the memory warm-up (src/memory/warmup.js), which has its own rail
-// — a token budget (`config.warmup.maxTokens`) — and would otherwise burn
-// through the whole day's request cap while seeding memory. The per-request
-// token cap (`TokenLimitError`) always applies, with no exception.
+// ONLY for a long-running memory-seeding job with its own separate token
+// budget, which would otherwise burn through the whole day's request cap
+// while seeding memory. The per-request token cap (`TokenLimitError`) always
+// applies, with no exception.
 
 import { estimateMessages } from './tokens.js';
 import { log } from '../log.js';

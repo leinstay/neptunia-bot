@@ -153,7 +153,7 @@ export function createDescriber({ hot, store, llm, now = Date.now, imageFetcher 
    * caption text, ready to hand to formatTranscript's `descriptions` option.
    * `onCharge(result)` is called once per NEW request (successful or not,
    * whenever the provider actually billed something) so a caller with its
-   * own budget (the warm-up) can account for it.
+   * own separate token budget (a history backfill) can account for it.
    * @param {string} guildId
    * @param {object[]} items
    * @param {{ maxNew?: number, countAgainstDailyCap?: boolean, onCharge?: (r: object) => void }} [options]

@@ -253,8 +253,8 @@ function bumpSnowflake(id) {
 }
 
 /**
- * Fetch a window of a channel's history, OLDEST first, for the memory
- * warm-up. Pages backwards 100 messages at a time, starting at `anchorId`
+ * Fetch a window of a channel's history, OLDEST first, for a memory history
+ * backfill. Pages backwards 100 messages at a time, starting at `anchorId`
  * inclusive (or the channel's most recent message when `anchorId` is
  * absent), until `limit` messages are collected, the channel start is
  * reached (a page comes back short), or a message older than `minTs` is met

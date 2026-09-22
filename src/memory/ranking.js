@@ -8,8 +8,8 @@
 // interests.js/details.js, the `<existing_profiles>` view builder
 // (src/memory/update.js) and the chat-facing renderer (src/behavior/prompt.js)
 // and `/nep memory show` (src/admin.js) -- every place that decides what is
-// shown or what survives an eviction goes through the SAME function, so the
-// warm-up (old history) and the live bot agree on what matters.
+// shown or what survives an eviction goes through the SAME function, so a
+// history backfill and the live bot agree on what matters.
 
 const DAY_MS = 86_400_000;
 
@@ -28,7 +28,7 @@ function resolvedDateMs(item) {
  * uses the ABSOLUTE timestamp, not an age relative to "now": rank is meant to
  * compare two items against each other, and the difference between their
  * ranks must not depend on when the comparison happens -- the same function
- * therefore serves a warm-up walking old history and the live bot alike. One
+ * therefore serves a history backfill and the live bot alike. One
  * half-life of silence costs exactly 1 off the rank -- the same as it takes
  * for `weight` to double (a unit in log2). `halfLifeDays` not a positive,
  * finite number disables decay entirely: rank is pure `log2(weight + 0.5)`.

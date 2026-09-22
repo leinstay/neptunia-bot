@@ -140,7 +140,7 @@ function fakeDescriber() {
   };
 }
 
-function makeHandler({ config, turns, spontaneous, memory, tagHistory, rng, now, sleep, client, store, getGuildId, isWarmingUp, describer } = {}) {
+function makeHandler({ config, turns, spontaneous, memory, tagHistory, rng, now, sleep, client, store, getGuildId, isBootstrapping, describer } = {}) {
   return createMessageHandler({
     hot: { config: config ?? baseConfig() },
     store: store ?? fakeStore(),
@@ -150,7 +150,7 @@ function makeHandler({ config, turns, spontaneous, memory, tagHistory, rng, now,
     memory: memory ?? fakeMemory(),
     tagHistory: tagHistory ?? createTagHistory(),
     getGuildId: getGuildId ?? (() => 'g1'),
-    isWarmingUp,
+    isBootstrapping,
     describer,
     rng: rng ?? Math.random,
     now,
@@ -644,13 +644,14 @@ test('features.relationships=false: affinityScore is never looked up or passed',
 });
 
 // ---------------------------------------------------------------------------
-// isWarmingUp: the persona is mute while the memory warm-up is due/running
+// isBootstrapping: the persona is mute while a memory bootstrap run is in
+// flight (the generic mute hook the long warm-up used to occupy -- F37).
 
-test('events: while warming up a plain message is observed but no turn or eavesdrop happens', async () => {
+test('events: while bootstrapping a plain message is observed but no turn or eavesdrop happens', async () => {
   const memory = fakeMemory();
   const spontaneous = fakeSpontaneous();
   const turns = fakeTurns();
-  const handler = makeHandler({ memory, spontaneous, turns, isWarmingUp: () => true });
+  const handler = makeHandler({ memory, spontaneous, turns, isBootstrapping: () => true });
 
   const message = fakeMessage({ cleanContent: 'ένα απλό μήνυμα' });
   await handler(message);
@@ -660,12 +661,12 @@ test('events: while warming up a plain message is observed but no turn or eavesd
   assert.equal(spontaneous.onMessageCalls.length, 0);
 });
 
-test('events: while warming up a mention never runs a turn, even though it would normally trigger', async () => {
+test('events: while bootstrapping a mention never runs a turn, even though it would normally trigger', async () => {
   let called = false;
   const turns = fakeTurns({ runTurn: async () => { called = true; return { outcome: 'spoke' }; } });
   const memory = fakeMemory();
   const spontaneous = fakeSpontaneous();
-  const handler = makeHandler({ turns, memory, spontaneous, isWarmingUp: () => true, rng: scripted([0.99]) });
+  const handler = makeHandler({ turns, memory, spontaneous, isBootstrapping: () => true, rng: scripted([0.99]) });
 
   const message = fakeMessage({
     cleanContent: 'γεια',
@@ -680,7 +681,34 @@ test('events: while warming up a mention never runs a turn, even though it would
   assert.deepEqual(memory.observeCalls[0][2], { direct: false });
 });
 
-test('events: isWarmingUp defaults to false when not provided', async () => {
+test('events: while bootstrapping, a pending ping already queued is left for a later drain', async () => {
+  let muted = false;
+  let seenArgs = null;
+  const turns = fakeTurns({
+    isBusy: () => false,
+    isAnyBusy: () => true,
+    runTurn: async (args) => {
+      seenArgs = args;
+      return { outcome: 'spoke' };
+    },
+  });
+  const handler = makeHandler({ turns, isBootstrapping: () => muted, rng: scripted([0.5, 0.99]) });
+
+  const guild = fakeGuild();
+  const channel = fakeChannelWithMessage('c1', guild, 'm1');
+  const message = directPingMessage({ guild, channel, channelId: 'c1' });
+  await handler(message);
+
+  muted = true;
+  await handler.drainPending();
+  assert.equal(seenArgs, null, 'the queue is left untouched while bootstrapping');
+
+  muted = false;
+  await handler.drainPending();
+  assert.ok(seenArgs, 'and answered once bootstrapping ends');
+});
+
+test('events: isBootstrapping defaults to false when not provided (unmuted: a trigger runs a turn normally)', async () => {
   let called = false;
   const turns = fakeTurns({ runTurn: async () => { called = true; return { outcome: 'spoke' }; } });
   const handler = makeHandler({ turns, rng: scripted([0.99]) });
@@ -726,7 +754,7 @@ test('events: a message that looks like an owner command in the dry-run mirror c
   const channel = fakeChannel('mirror1', fakeGuild());
   const handler = makeHandler({ config, memory, spontaneous, turns });
 
-  const message = fakeMessage({ channel, channelId: 'mirror1', cleanContent: 'old bang-prefix warmup command' });
+  const message = fakeMessage({ channel, channelId: 'mirror1', cleanContent: 'old bang-prefix admin command' });
   await handler(message);
 
   assert.equal(memory.observeCalls.length, 0);
@@ -869,10 +897,10 @@ test('events: the dry-run mirror channel never triggers a describer call, even w
   assert.equal(describer.calls.length, 0);
 });
 
-test('events: while warming up, an observed human message with a picture still warms the describer cache', async () => {
+test('events: while bootstrapping, an observed human message with a picture still warms the describer cache', async () => {
   const describer = fakeDescriber();
   const config = baseConfig({ features: { mediaDescriptions: true } });
-  const handler = makeHandler({ config, describer, isWarmingUp: () => true });
+  const handler = makeHandler({ config, describer, isBootstrapping: () => true });
 
   const message = fakeMessage({ cleanContent: 'look', attachments: pictureAttachments(1) });
   await handler(message);
