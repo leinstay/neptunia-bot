@@ -17,7 +17,6 @@ import { createTurnRunner } from './behavior/turn.js';
 import { createSpontaneous } from './behavior/spontaneous.js';
 import { createMemoryUpdater } from './memory/update.js';
 import { createBootstrap } from './memory/bootstrap.js';
-import { dropStaleWarmupProgress } from './memory/state-cleanup.js';
 import { createDescriber } from './memory/describe.js';
 import { createImageFetcher } from './discord/fetch-image.js';
 import { createAdmin } from './admin.js';
@@ -70,7 +69,6 @@ if (!isValidCommandName(hot.config.bot.commandName)) {
 }
 
 const store = createStore({ dataDir: path.join(ROOT_DIR, 'data') });
-dropStaleWarmupProgress(store);
 
 const calibrator = createCalibrator(store.state.data.calibration);
 const llm = createLlm({ apiKey: openrouterKey, getConfig: () => hot.config, calibrator, state: store.state });
@@ -92,7 +90,7 @@ const imageFetcher = createImageFetcher();
 const describer = createDescriber({ hot, store, llm, imageFetcher });
 const turns = createTurnRunner({ hot, store, llm, calibrator, client, describer, imageFetcher });
 const getSelfName = (guildId) => client.guilds.cache.get(guildId)?.members.me?.displayName ?? client.user?.username ?? 'bot';
-// THE way memory starts (.claude/docs/prompt-contract.md, "The bootstrap"): sample-based,
+// THE way memory starts (docs/prompt-contract.md, "The bootstrap"): sample-based,
 // resumable, mutes the persona while a run is in flight (see isBootstrapping below).
 const bootstrap = createBootstrap({ hot, store, client, llm, calibrator, getSelfName, getGuildId });
 const isBootstrapping = bootstrap.isBootstrapping;
@@ -122,7 +120,7 @@ const onMessage = createMessageHandler({
   getGuildId,
   isBootstrapping,
   describer,
-  // F48 (features.followUp): the address classifier's own, separate LLM call.
+  // features.followUp: the address classifier's own, separate LLM call.
   llm,
 });
 
@@ -140,9 +138,9 @@ const admin = createAdmin({
   isBootstrapping,
   turns,
   memory,
-  // F30 (/nep pause): clears the pending-ping queue on pause.
+  // /nep pause: clears the pending-ping queue on pause.
   pending: { clear: () => onMessage.clearPending() },
-  // F35 (/nep ping): reaches each role's model directly through the same rails.
+  // /nep ping: reaches each role's model directly through the same rails.
   llm,
   // The sample-based memory bootstrap: run, user/users, channel/channels, server, status, reset, portrait refresh.
   bootstrap,
@@ -179,7 +177,7 @@ client.once(Events.ClientReady, async () => {
 
   log.info('index: ready', { guild: instance.guildId, tag: client.user.tag });
 
-  // F30 (/nep pause): a pause persisted before this restart comes back
+  // /nep pause: a pause persisted before this restart comes back
   // paused -- every spontaneous/analyzer tick keeps no-op'ing until /nep resume.
   if (store.state.data.paused) {
     log.info('index: starting up paused, run /nep resume when data/ is ready', {

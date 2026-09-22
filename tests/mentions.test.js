@@ -1,9 +1,8 @@
 // Tests for src/memory/mentions.js: toTokens/fromTokens (the analyzer's
-// id-token round trip) and namesToTokens (the one-off migration helper).
-// Pure, no I/O.
+// id-token round trip). Pure, no I/O.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { toTokens, fromTokens, namesToTokens, occursAsWholeWord } from '../src/memory/mentions.js';
+import { toTokens, fromTokens, occursAsWholeWord } from '../src/memory/mentions.js';
 
 const ID_A = '123456789012345678';
 const ID_B = '223456789012345678';
@@ -191,65 +190,6 @@ test('round trip: toTokens then fromTokens(analyzer) reconstructs an equivalent 
   const tokenized = toTokens(original, () => true);
   const back = fromTokens(tokenized, (id) => (id === ID_A ? 'Vertex' : null), 'analyzer');
   assert.equal(back, original);
-});
-
-// ---- namesToTokens (migration) -------------------------------------------------
-
-test('namesToTokens: replaces an exact whole-word occurrence of a known display name', () => {
-  const out = namesToTokens('Vertex finished it', [{ id: ID_A, names: ['Vertex'] }]);
-  assert.equal(out, `<@${ID_A}> finished it`);
-});
-
-test('namesToTokens: case-sensitive -- a different-case occurrence is not replaced', () => {
-  const out = namesToTokens('vertex finished it', [{ id: ID_A, names: ['Vertex'] }]);
-  assert.equal(out, 'vertex finished it');
-});
-
-test('namesToTokens: skips names shorter than 4 characters', () => {
-  const out = namesToTokens('Ann helped Bob today', [{ id: ID_A, names: ['Ann'] }, { id: ID_B, names: ['Bob'] }]);
-  assert.equal(out, 'Ann helped Bob today');
-});
-
-test('namesToTokens: a name belonging to more than one id is skipped for both', () => {
-  const out = namesToTokens('Vertex and Vertex talked', [
-    { id: ID_A, names: ['Vertex'] },
-    { id: ID_B, names: ['Vertex'] },
-  ]);
-  assert.equal(out, 'Vertex and Vertex talked');
-});
-
-test('namesToTokens: longest names replaced first -- a longer name is not partially eaten by a shorter one', () => {
-  const out = namesToTokens('Anna Banana helped', [
-    { id: ID_A, names: ['Anna Banana'] },
-    { id: ID_B, names: ['Anna'] },
-  ]);
-  assert.equal(out, `<@${ID_A}> helped`);
-});
-
-test('namesToTokens: never touches text inside an existing token', () => {
-  const text = `<@${ID_A}> and Vertex talked`;
-  const out = namesToTokens(text, [{ id: ID_B, names: ['Vertex'] }]);
-  assert.equal(out, `<@${ID_A}> and <@${ID_B}> talked`);
-});
-
-test('namesToTokens: a name is not matched glued to letters/digits of another script (Unicode word boundary)', () => {
-  const out = namesToTokens('Καφενείο and Ann1e', [{ id: ID_A, names: ['Καφε'] }, { id: ID_B, names: ['Ann1'] }]);
-  assert.equal(out, 'Καφενείο and Ann1e', 'both are prefixes glued to more letters/digits, not whole words');
-});
-
-test('namesToTokens: matches a name preceded/followed by punctuation, not just spaces', () => {
-  const out = namesToTokens('(Vertex) said hi, Vertex.', [{ id: ID_A, names: ['Vertex'] }]);
-  assert.equal(out, `(<@${ID_A}>) said hi, <@${ID_A}>.`);
-});
-
-test('namesToTokens: no entries, or entries with only short/ambiguous names, returns the text unchanged', () => {
-  assert.equal(namesToTokens('Vertex helped', []), 'Vertex helped');
-  assert.equal(namesToTokens('Vertex helped', undefined), 'Vertex helped');
-});
-
-test('namesToTokens: empty/non-string text is returned as-is', () => {
-  assert.equal(namesToTokens('', [{ id: ID_A, names: ['Vertex'] }]), '');
-  assert.equal(namesToTokens(undefined, [{ id: ID_A, names: ['Vertex'] }]), undefined);
 });
 
 // ---- occursAsWholeWord ----------------------------------------------------------

@@ -1,7 +1,7 @@
 // A member is stored and passed to the model as an id token, never as a
 // nickname -- Discord display names change daily, so free text that names
 // someone by nickname rots the moment they rename (see
-// .claude/docs/prompt-contract.md, "Members are referred to by id, never by
+// docs/prompt-contract.md, "Members are referred to by id, never by
 // nickname"). This module is the one place that converts between the two
 // representations:
 //
@@ -10,11 +10,6 @@
 //                normalized rather than rejected)
 //   fromTokens   tokens -> display text, on the way OUT: the member's current
 //                name for the chat model, `name (id:123...)` for the analyzer
-//   namesToTokens  a one-off migration: literal display-name occurrences in
-//                already-stored free text become tokens, for the lead to run
-//                once over existing data (src/memory/update.js and
-//                src/behavior/prompt.js do not need this at runtime -- new
-//                text already arrives as tokens)
 //
 // Pure, no discord.js dependency: `isKnownId`/`nameOf`/`namesOf` are injected
 // so the caller decides what "known" means (an author of the batch, an
@@ -142,83 +137,6 @@ export function fromTokens(text, nameOf, mode) {
     if (typeof name !== 'string' || !name) return whole;
     return mode === 'analyzer' ? `${name} (id:${id})` : name;
   });
-}
-
-function escapeRegExp(value) {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
-/** Every `<@id>` span in `text` marked so later replacements never touch it. */
-function markExistingTokens(text) {
-  const chunks = [];
-  let lastIndex = 0;
-  for (const match of text.matchAll(TOKEN_RE)) {
-    if (match.index > lastIndex) chunks.push({ text: text.slice(lastIndex, match.index), isToken: false });
-    chunks.push({ text: match[0], isToken: true });
-    lastIndex = match.index + match[0].length;
-  }
-  if (lastIndex < text.length) chunks.push({ text: text.slice(lastIndex), isToken: false });
-  return chunks;
-}
-
-/**
- * One-off migration helper: replace exact, whole-word, case-sensitive
- * occurrences of a KNOWN display name with its token. `entries` is
- * `[{ id, names: [...] }]` -- every name at least 4 characters long is a
- * candidate; a name belonging to more than one id (ambiguous) is skipped
- * entirely, never replaced for either id. Longest names are replaced first
- * (so "Anna Banana" is not partially eaten by a shorter "Anna"), and a
- * replacement never touches text already inside a token -- including one
- * created earlier in the very same call. Word boundaries are Unicode-aware:
- * a name glued to a letter or digit of any script is not a match.
- * @param {string} text
- * @param {{ id: string|number, names: string[] }[]} entries
- * @returns {string}
- */
-export function namesToTokens(text, entries) {
-  if (typeof text !== 'string' || !text) return text;
-
-  const nameToId = new Map();
-  const AMBIGUOUS = Symbol('ambiguous');
-  for (const entry of Array.isArray(entries) ? entries : []) {
-    if (!entry || entry.id === undefined || entry.id === null) continue;
-    const id = String(entry.id);
-    for (const rawName of Array.isArray(entry.names) ? entry.names : []) {
-      if (typeof rawName !== 'string') continue;
-      const name = rawName.trim();
-      if (name.length < 4) continue;
-      const current = nameToId.get(name);
-      if (current === undefined) nameToId.set(name, id);
-      else if (current !== id) nameToId.set(name, AMBIGUOUS);
-    }
-  }
-
-  const candidates = [...nameToId.entries()]
-    .filter(([, id]) => id !== AMBIGUOUS)
-    .sort((a, b) => b[0].length - a[0].length);
-  if (candidates.length === 0) return text;
-
-  let chunks = markExistingTokens(text);
-  for (const [name, id] of candidates) {
-    const re = new RegExp(`(?<![\\p{L}\\p{N}_])${escapeRegExp(name)}(?![\\p{L}\\p{N}_])`, 'gu');
-    const next = [];
-    for (const chunk of chunks) {
-      if (chunk.isToken) {
-        next.push(chunk);
-        continue;
-      }
-      let lastIndex = 0;
-      for (const match of chunk.text.matchAll(re)) {
-        if (match.index > lastIndex) next.push({ text: chunk.text.slice(lastIndex, match.index), isToken: false });
-        next.push({ text: `<@${id}>`, isToken: true });
-        lastIndex = match.index + match[0].length;
-      }
-      if (lastIndex < chunk.text.length) next.push({ text: chunk.text.slice(lastIndex), isToken: false });
-    }
-    chunks = next;
-  }
-
-  return chunks.map((chunk) => chunk.text).join('');
 }
 
 /** Whether `needleLower` occurs in `haystackLower` as a whole word/phrase (Unicode-aware boundaries). */
