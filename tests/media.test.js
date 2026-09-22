@@ -345,7 +345,7 @@ test('collectPictures: includes any embed with a thumbnail, gif or link kind ali
   assert.deepEqual(pictures.map((p) => p.itemId), ['m1#e0', 'm1#e1']);
 });
 
-test('isDescribable: true for image/gif/video/sticker/emoji/link (a link thumbnail is describable, see F17)', () => {
+test('isDescribable: true for image/gif/video/sticker/emoji/link (a link thumbnail is describable)', () => {
   assert.equal(isDescribable({ kind: 'image' }), true);
   assert.equal(isDescribable({ kind: 'gif' }), true);
   assert.equal(isDescribable({ kind: 'video' }), true);
@@ -470,7 +470,7 @@ test('selectPictures: never picks the same item twice across tiers', () => {
   assert.deepEqual(picked.map((p) => p.itemId), ['shared']);
 });
 
-// --- stickerUrl / emojiUrl / linkThumbnailCacheKey (F17) ------------------------
+// --- stickerUrl / emojiUrl / linkThumbnailCacheKey ------------------------
 
 test('stickerUrl: PNG and APNG sizes to media.discordapp.net/.../<id>.png?size=160', () => {
   assert.equal(stickerUrl('123', 1), 'https://media.discordapp.net/stickers/123.png?size=160');
@@ -552,7 +552,7 @@ test('stickerLabelFor: attached with no description keeps the blind sticker tag 
   });
 });
 
-// --- collectPictures / collectEmojiItems: stickers and emoji (F17) --------------
+// --- collectPictures / collectEmojiItems: stickers and emoji --------------
 
 function stickerMessage(id, ts, stickers) {
   return message(id, { ts, stickers });
@@ -583,7 +583,7 @@ test('collectEmojiItems: every distinct emoji of a message becomes a describable
   assert.deepEqual(collectPictures(m).map((p) => p.itemId), []);
 });
 
-// --- selectPictures: sticker vision eligibility (F17) ---------------------------
+// --- selectPictures: sticker vision eligibility ---------------------------
 
 test('selectPictures: the trigger\'s own picture-format sticker is eligible, same priority as its images', () => {
   const now = 1_000_000;

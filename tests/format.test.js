@@ -539,7 +539,7 @@ test('formatTranscript: a tenor/giphy embed (kind gif) keeps its gif form and ad
 });
 
 // --- formatTranscript: a plain 'link' embed's thumbnail can be described too
-// (F17) -- the link/linkText tag itself never swaps, one extra tag follows.
+// -- the link/linkText tag itself never swaps, one extra tag follows.
 
 test('formatTranscript: a link thumbnail description appends thumbnailDescribed, the link tag stays', () => {
   const t0 = Date.UTC(2026, 8, 20, 10, 0, 0);
@@ -607,7 +607,7 @@ test('formatTranscript: an attached link thumbnail keeps the link tag and adds f
   assert.ok(!items[0].text.includes('a cat plays piano'));
 });
 
-// --- formatTranscript: stickers (F17) ---------------------------------------
+// --- formatTranscript: stickers ---------------------------------------
 
 function stickerItem(id, name, url) {
   return { id, name, url };
@@ -674,7 +674,7 @@ test('formatTranscript: a Lottie sticker (url null) is always the plain sticker 
   assert.ok(!items[0].text.includes('still frame'));
 });
 
-// --- formatTranscript: custom emoji (F17) -----------------------------------
+// --- formatTranscript: custom emoji -----------------------------------
 
 test('formatTranscript: a described custom emoji appends ONE emojiDescribed tag, text keeps reading :name:', () => {
   const t0 = Date.UTC(2026, 8, 20, 10, 0, 0);

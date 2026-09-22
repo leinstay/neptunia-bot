@@ -140,8 +140,8 @@ export function pickChannel(candidates, now, rng) {
  * @param {ReturnType<import('./turn.js').createTurnRunner>} params.turns
  * @param {() => string | null} params.getGuildId  the single guild this instance serves, or null before it resolves
  * @param {() => boolean} [params.isBootstrapping]  true while the memory bootstrap runner
- *   (src/memory/bootstrap.js, a later task) is in flight: no tick and no eavesdrop scheduling
- *   happens, the same mute the memory warm-up used to apply. Default: never bootstrapping.
+ *   (src/memory/bootstrap.js) is in flight: no tick and no eavesdrop scheduling happens.
+ *   Default: never bootstrapping.
  * @param {() => number} [params.rng]
  * @param {() => number} [params.now]
  */
@@ -185,7 +185,7 @@ export function createSpontaneous({
   }
 
   async function tick() {
-    // F30 (/nep pause): the owner is editing data/ by hand -- no spontaneous
+    // /nep pause: the owner is editing data/ by hand -- no spontaneous
     // activity, and nothing here (not even the schedule) may become dirty.
     if (store.state.data.paused) return;
     // A memory bootstrap run is in flight: the persona stays mute, same as a pause.
@@ -250,7 +250,7 @@ export function createSpontaneous({
 
   /** Eavesdrop on a freshly observed message and maybe jump in after a delay. */
   function onMessage(channel, normalized) {
-    // F30 (/nep pause): no eavesdrop scheduling while paused.
+    // /nep pause: no eavesdrop scheduling while paused.
     if (store.state.data.paused) return;
     // A memory bootstrap run is in flight: no eavesdrop scheduling either.
     if (isBootstrapping()) return;

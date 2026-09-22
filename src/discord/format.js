@@ -1,7 +1,7 @@
 // Pure text formatting of normalized messages (see normalizeMessage in
 // collect.js) into the transcript the model reads. No discord.js imports here,
 // so everything is unit-testable. Every word that ends up in the prompt comes
-// from `labels` (see prompts/labels.json and .claude/docs/prompt-contract.md);
+// from `labels` (see prompts/labels.json and docs/prompt-contract.md);
 // this module only knows the shape of a transcript line, e.g.:
 //   #87 [14:32] nick: text (replyTo marker) [image]
 //   --- {duration} passed ---
@@ -16,7 +16,7 @@ const DAY = 24 * HOUR;
 
 // A language-neutral marker (memory transcript only) for a message addressed
 // to the persona, so the analyzer can weigh "how people talk TO it" apart
-// from general chatter. See .claude/docs/prompt-contract.md, "Memory update".
+// from general chatter. See docs/prompt-contract.md, "Memory update".
 const DIRECT_MARKER = '→ '; // "→ "
 
 // A value no real channelId can equal, so the very first message of a memory
@@ -109,7 +109,7 @@ function truncate(text, maxChars) {
 
 /**
  * One rendered tag per attachment/embed/sticker of `message`, most
- * informative form available (see .claude/docs/prompt-contract.md, "Media in
+ * informative form available (see docs/prompt-contract.md, "Media in
  * a transcript line" and src/discord/media.js#mediaLabelFor/stickerLabelFor):
  * attached to this request > described > blind, plus one extra tag per
  * distinct described custom emoji. `context.attachedIndex`/
@@ -204,7 +204,7 @@ function renderForwarded(snapshot, labels, context, maxChars, channelName) {
  * @returns {{ id: string, index: number, ts: number, text: string }[]}
  *
  * In `mode: 'memory'`, messages come from possibly several channels (see
- * .claude/docs/prompt-contract.md, "Memory update"): whenever the channel
+ * docs/prompt-contract.md, "Memory update"): whenever the channel
  * changes between two consecutive messages — including before the very first
  * one — the item opens with a `## #channel-name (id:channelId)` heading, and
  * the gap/date marker is computed against the previous message of the SAME

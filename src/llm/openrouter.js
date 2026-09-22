@@ -64,7 +64,7 @@ export function createLlm({ apiKey, getConfig, calibrator, state, fetchImpl = fe
    * the memory bootstrap (src/memory/bootstrap.js), whose requests are fitted under a much larger,
    * separately-budgeted cap (`bootstrap.maxRequestTokens`) than a live chat/analyzer request.
    * `options.skipCalibration` (default false) — never feeds `usage.prompt_tokens`
-   * into the calibrator. For `/nep ping` (F35): a 16-token ping reply is
+   * into the calibrator. For `/nep ping`: a 16-token ping reply is
    * nothing like a real turn's request/response shape, and would only skew
    * the ratio every other request is checked against.
    * `options.signal` — an external `AbortSignal` (e.g. an `AbortController`'s)
@@ -123,7 +123,7 @@ export function createLlm({ apiKey, getConfig, calibrator, state, fetchImpl = fe
 
         if (!response.ok) {
           // Full (untrimmed) body kept on `.body` for a caller that needs more than the
-          // 500-char message allows -- e.g. `/nep ping` (F35) picking OpenRouter's
+          // 500-char message allows -- e.g. `/nep ping` picking OpenRouter's
           // `routing_funnel` diagnostic out of a "No endpoints found" error.
           const rawBody = await response.text();
           const detail = rawBody.slice(0, 500);
@@ -148,7 +148,7 @@ export function createLlm({ apiKey, getConfig, calibrator, state, fetchImpl = fe
         }
         // `json.provider` is OpenRouter's own name for whichever upstream provider
         // actually served the request (undefined when the response omits it) --
-        // surfaced so `/nep ping` (F35) can report it without a second request shape.
+        // surfaced so `/nep ping` can report it without a second request shape.
         return { text: typeof text === 'string' ? text : '', usage, estimated, finishReason, provider: json.provider };
       } catch (err) {
         if (options.signal?.aborted) throw err; // a deliberate external abort is never retried

@@ -301,7 +301,7 @@ test('decideMention: affinityScore is ignored for the "name" kind', () => {
   assert.deepEqual(withAffinity, withoutAffinity);
 });
 
-// --- The address classifier (F48): isFollowUpOpen / followUpPreFilter / parseFollowUpVerdict --
+// --- The address classifier: isFollowUpOpen / followUpPreFilter / parseFollowUpVerdict --
 
 const FOLLOW_UP_CFG = { followUpMinutes: 2, followUpNoStreak: 3 };
 

@@ -293,7 +293,7 @@ async function withCapturedLogs(fn) {
   return { result, logs };
 }
 
-// F30 (/nep pause): no new turn may start while paused -- a reply, an
+// /nep pause: no new turn may start while paused -- a reply, an
 // interject, an initiate, an eavesdrop or a poke alike, whatever the mode.
 test('runTurn: refuses with outcome "paused" while store.state.data.paused is true, before touching the LLM or busy', async () => {
   const raw = rawMessage({ id: 'm1' });
@@ -702,7 +702,7 @@ test('createTurnRunner: a 4xx image error (download succeeded, the provider itse
 });
 
 // ---------------------------------------------------------------------------
-// F19: the picture is downloaded and inlined as a data: URL BEFORE the model
+// The picture is downloaded and inlined as a data: URL BEFORE the model
 // ever sees the request -- the provider's own fetcher gets a 403 from
 // Discord on some CDN hosts even though our server fetches the same URL
 // fine. A failed download drops EVERY picture of the turn (never a partial,
@@ -964,7 +964,7 @@ test('createTurnRunner: features.dryRun=false (default) sends for real even when
 });
 
 // ---------------------------------------------------------------------------
-// F49: a follow-up turn is its own trigger kind and never posts as a Discord
+// A follow-up turn is its own trigger kind and never posts as a Discord
 // reply, whatever reply="#n" the model wrote.
 
 test('createTurnRunner: a normal reply turn keeps reply="#n" as a real Discord reply', async () => {

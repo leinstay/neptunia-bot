@@ -471,7 +471,7 @@ test('complete: llm.provider is read fresh on every call (hot-reloadable), not c
   assert.equal('provider' in bodies[1], false);
 });
 
-// F44: options.signal -- an external AbortController cancels the in-flight
+// options.signal -- an external AbortController cancels the in-flight
 // request (for /nep warmup stop), and is never retried afterwards.
 test('complete: options.signal aborts the in-flight fetch and rejects without retrying', async () => {
   let calls = 0;

@@ -373,7 +373,7 @@ export function collectPictures(message) {
  * Every custom emoji written in one normalized message's text (see
  * src/discord/collect.js), as a describable item -- never a vision picture
  * (too small a slot to spend an attached-image budget on, see
- * .claude/docs/prompt-contract.md), so this is kept apart from
+ * docs/prompt-contract.md), so this is kept apart from
  * collectPictures on purpose: nothing here is ever picked by selectPictures.
  * @param {object} message  A normalized message (see src/discord/collect.js).
  */

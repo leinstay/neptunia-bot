@@ -818,7 +818,7 @@ test('interaction handler: defers then edits for a slow command (poke)', async (
 });
 
 // ---------------------------------------------------------------------------
-// pause / resume — F30
+// pause / resume
 // ---------------------------------------------------------------------------
 
 test('interaction handler: pause/resume take no options and map to empty args', async () => {

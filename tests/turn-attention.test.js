@@ -1,4 +1,4 @@
-// Tests for the F28 "one attention" rail added to src/behavior/turn.js:
+// Tests for the "one attention" rail in src/behavior/turn.js:
 // isAnyBusy(), the busy-elsewhere refusal (mention.oneAtATime), and
 // setOnIdle(). Kept in its own file (rather than tests/turn.test.js)
 // deliberately: its fixtures are otherwise identical to turn.test.js's, but

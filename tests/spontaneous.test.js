@@ -621,7 +621,7 @@ test('stop: clears pending eavesdrop timers without throwing', () => {
 });
 
 // ---------------------------------------------------------------------------
-// F28: dead channels (spontaneous.maxChannelSilenceHours) never start a
+// Dead channels (spontaneous.maxChannelSilenceHours) never start a
 // spontaneous turn on their own -- a direct ping there is unaffected (that
 // path never goes through channelCandidates at all).
 
@@ -749,7 +749,7 @@ test('tick: a hot change to maxChannelSilenceHours is picked up without recreati
 });
 
 // ---------------------------------------------------------------------------
-// F28: one attention (mention.oneAtATime) -- while a turn is running
+// One attention (mention.oneAtATime) -- while a turn is running
 // anywhere, the spontaneous scheduler treats every channel as unavailable.
 
 test('tick: turns.isAnyBusy() true blocks every channel when oneAtATime is on (default) -- "not now"', async () => {
@@ -800,7 +800,7 @@ test('tick: mention.oneAtATime=false lets a spontaneous tick proceed even while 
 });
 
 // ---------------------------------------------------------------------------
-// F30: /nep pause -- no spontaneous activity, nothing may go dirty
+// /nep pause -- no spontaneous activity, nothing may go dirty
 
 test('tick: does nothing while store.state.data.paused is true, not even the first-schedule write', async () => {
   const guild = fakeGuild('g1');
@@ -889,9 +889,8 @@ test('onMessage (eavesdrop): does not schedule while busy elsewhere and oneAtATi
 });
 
 // ---------------------------------------------------------------------------
-// F37: isBootstrapping -- the generic mute hook a memory bootstrap run (a
-// later task) plugs into, replacing the mute the retired long warm-up used
-// to apply. Same shape as the F30 paused tests above.
+// isBootstrapping -- the mute hook the memory bootstrap runner
+// (src/memory/bootstrap.js) uses. Same shape as the paused tests above.
 
 test('tick: does nothing while isBootstrapping() is true, not even the first-schedule write', async () => {
   const guild = fakeGuild('g1');

@@ -187,7 +187,7 @@ function pictureAttachments(count = 1) {
 }
 
 // ---------------------------------------------------------------------------
-// F48: the address classifier (features.followUp) -- fixtures.
+// The address classifier (features.followUp) -- fixtures.
 
 /** A raw discord.js-shaped message, minimal enough for normalizeMessage / fetchHistory. */
 function rawHistoryMessage({ id, authorId = 'u1', authorName = 'Alice', ts, content = 'hi', channelId = 'c1' }) {
@@ -302,7 +302,7 @@ test('events: a DM is ignored entirely, never reaches memory or the spontaneous 
   assert.equal(turns.notePostCalls.length, 0);
 });
 
-// F30 (/nep pause): while paused, nothing here may observe, trigger, run a
+// /nep pause: while paused, nothing here may observe, trigger, run a
 // turn or eavesdrop -- a burst of otherwise-triggering messages is a no-op.
 test('events: while paused, a burst of messages triggers no observe, no trigger, no turn, no eavesdrop', async () => {
   let runTurnCalls = 0;
@@ -759,7 +759,7 @@ test('features.relationships=false: affinityScore is never looked up or passed',
 
 // ---------------------------------------------------------------------------
 // isBootstrapping: the persona is mute while a memory bootstrap run is in
-// flight (the generic mute hook the long warm-up used to occupy -- F37).
+// flight.
 
 test('events: while bootstrapping a plain message is observed but no turn or eavesdrop happens', async () => {
   const memory = fakeMemory();
@@ -1066,7 +1066,7 @@ test('features.memory=false: affinityScore is never looked up even when relation
 });
 
 // ---------------------------------------------------------------------------
-// F28: one attention (mention.oneAtATime) -- a direct ping (mention/reply)
+// One attention (mention.oneAtATime) -- a direct ping (mention/reply)
 // that arrives while a turn is running elsewhere is remembered as pending
 // instead of dropped; drainPending() (called in production once a turn
 // frees its channel, see src/behavior/turn.js's setOnIdle) answers the
@@ -1186,7 +1186,7 @@ test('events: mention.maxPending caps distinct pending channels, dropping the ol
   assert.deepEqual(answeredChannels.sort(), ['c2', 'c3'], 'c1 (the oldest) was evicted once maxPending=2 was exceeded');
 });
 
-// F30 (/nep pause): clearPending() drops every queued ping without answering any of them.
+// /nep pause: clearPending() drops every queued ping without answering any of them.
 test('events: clearPending empties the pending queue -- drainPending afterwards answers nothing', async () => {
   let called = false;
   const turns = fakeTurns({
@@ -1350,7 +1350,7 @@ test('events: mention.oneAtATime=false runs the turn immediately even while busy
   await handler(directPingMessage());
   await Promise.resolve();
 
-  assert.equal(called, true, 'oneAtATime=false: nothing is ever deferred, exactly like before F28');
+  assert.equal(called, true, 'oneAtATime=false: nothing is ever deferred');
 });
 
 test('events: a hot change to mention.oneAtATime is picked up without recreating the handler', async () => {
@@ -1443,7 +1443,7 @@ test('events: a hot change to mention.maxPending is picked up', async () => {
 });
 
 // ---------------------------------------------------------------------------
-// F48: the address classifier (features.followUp) -- an untagged follow-up
+// The address classifier (features.followUp) -- an untagged follow-up
 // message inside a window the persona opened by answering is checked by
 // address.md before it is (or is not) answered.
 

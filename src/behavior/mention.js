@@ -94,11 +94,11 @@ export function decideMention({ kind, textLength, recentCalls, neverIgnore, affi
 
 export const repeatWindowMs = (cfg) => cfg.repeatWindowMinutes * MINUTE;
 
-// --- The address classifier (F48) -------------------------------------------
+// --- The address classifier --------------------------------------------------
 // After the persona answers in a channel, a conversation window stays open for
 // a little while: an UNTAGGED message inside it is not answered blindly, it is
 // checked by a cheap classifier first (see events.js and
-// .claude/docs/prompt-contract.md, "The address classifier"). The functions
+// docs/prompt-contract.md, "The address classifier"). The functions
 // below are the pure pieces of that decision.
 
 /**

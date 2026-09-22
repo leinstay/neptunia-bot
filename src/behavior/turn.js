@@ -101,7 +101,7 @@ export function createTurnRunner({
   const busy = new Set();
   const lastPostAt = new Map(); // channelId -> ts of the persona's last message
   let onIdle = null; // set via setOnIdle(); see the finally block of runTurn below
-  let idleWaiters = []; // resolvers for waitIdle() (F30, /nep pause), notified once busy.size hits 0
+  let idleWaiters = []; // resolvers for waitIdle() (/nep pause), notified once busy.size hits 0
 
   /**
    * Post one readable mirror of a would-be action into `dryRunChannelId`, when
@@ -130,7 +130,7 @@ export function createTurnRunner({
   async function dryAct(channel, parsed, idByIndex, history, mode, triggerKind = null) {
     const channelName = channel.name ?? null;
     const dryRunChannelId = hot.config.bot?.dryRunChannelId || '';
-    // A follow-up turn (F49) never posted as a Discord reply, in this mirror
+    // A follow-up turn never posts as a Discord reply, in this mirror
     // either -- the model's reply="#n" is ignored the same as in act() below.
     const isFollowUp = triggerKind === 'followUp';
 
@@ -169,7 +169,7 @@ export function createTurnRunner({
   async function act(channel, parsed, idByIndex, history, startedAt = Date.now(), triggerKind = null) {
     const cfg = hot.config.typing;
     const typingOn = hot.config.features?.typingSimulation !== false;
-    // A follow-up turn (F49, triggerKind: 'followUp') is its own trigger kind
+    // A follow-up turn (triggerKind: 'followUp') is its own trigger kind
     // and never posts as a Discord reply -- the model's reply="#n" (if any)
     // is ignored, plain messages only.
     const isFollowUp = triggerKind === 'followUp';
@@ -224,7 +224,7 @@ export function createTurnRunner({
    * @returns {Promise<{ outcome: string, mode?: string }>}
    */
   async function runTurn({ channel, mode, trigger = null, triggerKind = null, chooseMode = null }) {
-    // F30 (/nep pause): the owner is editing data/ by hand -- no new turn may
+    // /nep pause: the owner is editing data/ by hand -- no new turn may
     // start (a reply, an interject, an initiate, an eavesdrop, or a poke)
     // until /nep resume. A turn already in flight when the pause is
     // requested is left to finish naturally; admin.js's pause handler waits
@@ -417,7 +417,7 @@ export function createTurnRunner({
     notePost: (channelId, ts) => lastPostAt.set(channelId, ts),
     /**
      * Resolves once no turn is in flight anywhere -- immediately if that is
-     * already true. Used by admin.js's `/nep pause` (F30) to wait out a turn
+     * already true. Used by admin.js's `/nep pause` to wait out a turn
      * that was already running when the pause was requested, instead of
      * aborting it.
      * @returns {Promise<void>}

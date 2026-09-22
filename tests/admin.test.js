@@ -150,7 +150,7 @@ test('unsetPath: rejects prototype-pollution paths', () => {
 });
 
 // ---------------------------------------------------------------------------
-// buildProfileSummary (F32, pure)
+// buildProfileSummary (pure)
 // ---------------------------------------------------------------------------
 
 test('buildProfileSummary: a minimal profile renders the expected fields', () => {
@@ -342,10 +342,6 @@ function makeAdmin(rootDir, extra = {}) {
 
 function readLocal(rootDir) {
   return JSON.parse(fs.readFileSync(path.join(rootDir, 'config.local.json'), 'utf8'));
-}
-
-function hasLocal(rootDir) {
-  return fs.existsSync(path.join(rootDir, 'config.local.json'));
 }
 
 // ---------------------------------------------------------------------------
@@ -586,7 +582,7 @@ test('run: model.set accepts a loosely-valid id (letters, digits, dot, colon, sl
 });
 
 // ---------------------------------------------------------------------------
-// ping (F35): reach each role's model directly, in parallel
+// ping: reach each role's model directly, in parallel
 // ---------------------------------------------------------------------------
 
 function fakeLlm(script) {
@@ -1023,9 +1019,8 @@ test('run: memory.wipe requires a resolved guild', async () => {
   await assert.rejects(() => admin.run('memory.wipe', { confirm: 'anything' }, {}), /no guild resolved yet/);
 });
 
-// The following memory.show tests exercise `section: 'raw'` -- the exact
-// output the command produced before F32 added the sectioned view (see
-// src/admin.js#legacyMemoryShowView). F32's own sections are covered further
+// The following memory.show tests exercise `section: 'raw'` (see
+// src/admin.js#rawMemoryShowView). The other sections are covered further
 // below.
 
 test('run: memory.show section:raw also prints the stored episodes (date, weight, what, quote)', async () => {
@@ -1198,7 +1193,7 @@ test('run: memory.show section:raw with no more stored items than the shown cap 
 });
 
 // ---------------------------------------------------------------------------
-// memory.show (F32) -- sectioned view: summary (default), character/style/
+// memory.show -- sectioned view: summary (default), character/style/
 // relationship, affinity, aliases/interests/details/episodes with order/limit
 // ---------------------------------------------------------------------------
 
@@ -1476,7 +1471,7 @@ test('run: memory.show section:interests order:rank (default) marks the divider 
 });
 
 // ---------------------------------------------------------------------------
-// memory.channel (F45) -- the channel-note inspector: one channel's full
+// memory.channel -- the channel-note inspector: one channel's full
 // stored note, or a compact table of every stored channel.
 // ---------------------------------------------------------------------------
 
@@ -1601,7 +1596,7 @@ test('run: memory.channel drops caches first while paused, so a hand-edit is alw
 });
 
 // ---------------------------------------------------------------------------
-// memory.server (F45) -- the stored guild-wide notes plus counts.
+// memory.server -- the stored guild-wide notes plus counts.
 // ---------------------------------------------------------------------------
 
 test('run: memory.server on an empty guild reports "(empty)"/none and zero counts', async () => {
@@ -1661,7 +1656,7 @@ test('run: memory.server drops caches first while paused, so a hand-edit is alwa
 });
 
 // ---------------------------------------------------------------------------
-// memory.alias-add / memory.alias-remove (F32) -- real store.js/aliases.js,
+// memory.alias-add / memory.alias-remove -- real store.js/aliases.js,
 // so these prove the actual store integration, not a re-implementation.
 // ---------------------------------------------------------------------------
 
@@ -1999,7 +1994,7 @@ test('run: poke throws when no channel is available at all', async () => {
 });
 
 // ---------------------------------------------------------------------------
-// pause / resume — F30
+// pause / resume
 // ---------------------------------------------------------------------------
 
 test('run: pause sets paused/pausedAt first, flushes, and drops caches', async () => {
@@ -2099,7 +2094,7 @@ test('run: pause waits for an in-flight bootstrap run before dropping caches', a
   assert.equal(store.dropCachesCalls, 1);
 });
 
-// F30 review fix: a live-analyzer run() already in flight when /nep pause
+// /nep pause: a live-analyzer run() already in flight when the pause
 // arrives (an LLM call can take 30-90s) must be allowed to finish and apply
 // normally -- its result must land on disk BEFORE the flush + dropCaches, or
 // the eventual applyMemoryUpdate would re-read a profile from disk, mutate it
@@ -2185,7 +2180,7 @@ test('run: pause waits for an in-flight live-analyzer run to finish -- its resul
   }
 });
 
-test('F30: no timer-driven writer (spontaneous.tick, memory.tick, store.flush) touches data/ while paused', async () => {
+test('/nep pause: no timer-driven writer (spontaneous.tick, memory.tick, store.flush) touches data/ while paused', async () => {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'nep-admin-timers-'));
   try {
     const realStore = createStore({ dataDir });
@@ -2679,7 +2674,7 @@ test('run: warmup.channels with a channel describes exactly that channel now, sy
   assert.match(body, /tone: casual/);
 });
 
-test('run: warmup.channels with a channel reports counters and top writers when the outcome carries facts (F42)', async () => {
+test('run: warmup.channels with a channel reports counters and top writers when the outcome carries facts', async () => {
   const rootDir = makeRoot();
   const bootstrap = fakeBootstrap({
     runChannel: {
@@ -2804,7 +2799,7 @@ test('run: bootstrap.status falls back to the coarse phase and "never" when acti
 });
 
 // ---------------------------------------------------------------------------
-// bootstrap.status: the F40 activity-driven phase line and "last activity: …ago"
+// bootstrap.status: the activity-driven phase line and "last activity: …ago"
 // ---------------------------------------------------------------------------
 
 function withActivity(activity, overrides = {}) {

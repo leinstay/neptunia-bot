@@ -132,7 +132,7 @@ test('normalizeMessage: no messageSnapshots means an empty forwarded array', () 
   assert.deepEqual(m.forwarded, []);
 });
 
-// --- normalizeMessage: stickers (F17) ----------------------------------------
+// --- normalizeMessage: stickers ----------------------------------------
 
 function sticker(id, name, format) {
   return { id, name, format };
@@ -158,7 +158,7 @@ test('normalizeMessage: a Lottie sticker (format 3) has a null url, name only', 
   assert.deepEqual(m.stickers[0], { id: 's1', name: 'wiggle', format: 3, url: null });
 });
 
-// --- normalizeMessage: custom emoji extraction (F17) -------------------------
+// --- normalizeMessage: custom emoji extraction -------------------------
 
 test('normalizeMessage: a static custom emoji is extracted, text keeps reading as :name:', () => {
   const raw = rawMessage({ cleanContent: 'nice <:pog:111> job' });
@@ -218,7 +218,7 @@ test('normalizeMessage: a forwarded snapshot also carries its own stickers and e
   assert.deepEqual(m.forwarded[0].stickers, [{ id: 's1', name: 'pepe', format: 1, url: 'https://media.discordapp.net/stickers/s1.png?size=160' }]);
 });
 
-// --- normalizeMessage: describable link thumbnails get a stable id (F17) ----
+// --- normalizeMessage: describable link thumbnails get a stable id ----
 
 test('normalizeMessage: a link embed with a thumbnail (e.g. YouTube) gets a stable hash id, not the per-message index', () => {
   const raw = rawMessage({
@@ -337,7 +337,7 @@ test('normalizeMessage: a forward with no guild on the message never throws, for
   assert.equal(m.replyToId, null);
 });
 
-// --- normalizeMessage: mentionedUserIds (F47) ---------------------------------
+// --- normalizeMessage: mentionedUserIds ---------------------------------
 
 test('normalizeMessage: mentionedUserIds carries the real mention ids, in order', () => {
   const raw = rawMessage({ mentions: { users: new Map([['u2', {}], ['u3', {}]]) } });

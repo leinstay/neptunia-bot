@@ -153,7 +153,7 @@ export function normalizeMessage(message, selfId, options = {}) {
     content: stripEmbedUrls(rawContent, links),
     ts: message.createdTimestamp,
     // Real mentions -- the strongest signal for who this message names, see
-    // src/behavior/prompt.js's <people> "asked about" window (F47). `content`
+    // src/behavior/prompt.js's <people> "asked about" window. `content`
     // above is `cleanContent`-derived and already reads "@DisplayName", so
     // this is the only place a stable member id survives normalization.
     mentionedUserIds: [...(message.mentions?.users?.keys?.() ?? [])],

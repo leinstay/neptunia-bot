@@ -37,13 +37,13 @@ const MAX_WARM_PICTURES_PER_MESSAGE = 2;
  * @param {ReturnType<import('../memory/update.js').createMemoryUpdater>} deps.memory
  * @param {ReturnType<import('../behavior/mention.js').createTagHistory>} deps.tagHistory
  * @param {object} [deps.llm]  From createLlm() (src/llm/openrouter.js), used ONLY for the address
- *   classifier (F48, `features.followUp`): a message with no trigger, arriving while a
+ *   classifier (`features.followUp`): a message with no trigger, arriving while a
  *   conversation window this instance opened by answering is still open, is checked here before
  *   ever running a turn. Absent -- an older/direct caller, or a test that never opens a window --
  *   simply means `features.followUp` cannot ever fire (nothing reaches this dependency otherwise).
  * @param {() => string | null} deps.getGuildId  the single guild this instance serves, or null before it resolves
  * @param {() => boolean} [deps.isBootstrapping]  true while the memory bootstrap runner
- *   (src/memory/bootstrap.js, a later task) is in flight: messages are still observed, but no
+ *   (src/memory/bootstrap.js) is in flight: messages are still observed, but no
  *   trigger, turn, eavesdrop or pending-ping drain happens. Default: never bootstrapping.
  * @param {object} [deps.describer]  From createDescriber() (src/memory/describe.js), optional: when
  *   absent, or features.mediaDescriptions is off, no description request is ever made from this
@@ -60,7 +60,7 @@ const MAX_WARM_PICTURES_PER_MESSAGE = 2;
  *   `.drainPending()` method: called once a turn finishes anywhere (src/index.js wires it to
  *   src/behavior/turn.js's `setOnIdle`, in the same `finally` that frees the channel) to answer
  *   the oldest non-expired pending direct ping, one at a time, after a human switch pause. And a
- *   `.clearPending()` method (F30, `/nep pause`, wired from src/admin.js via src/index.js) that
+ *   `.clearPending()` method (`/nep pause`, wired from src/admin.js via src/index.js) that
  *   drops every queued ping without answering any of them.
  */
 export function createMessageHandler({
@@ -103,13 +103,13 @@ export function createMessageHandler({
     describer.describeMany(guildId, candidates).catch((err) => log.warn('events: media cache prefill failed', { error: err }));
   }
 
-  // --- The address classifier (mention.followUp*, F48) ---------------------
+  // --- The address classifier (mention.followUp*) ---------------------------
   // A conversation window per channel: (re)opened and extended to `now`
   // whenever the persona sends a message there -- hooked in the self-message
   // branch of onMessage below (the same place turns.notePost() is called),
   // never here. An untagged message that arrives while the window is open is
   // not answered blindly: it goes through address.md first (see
-  // .claude/docs/prompt-contract.md, "The address classifier").
+  // docs/prompt-contract.md, "The address classifier").
   let missingAddressPromptLogged = false;
   const followUpWindows = new Map(); // channelId -> { openedAt, lastAnswerAt, noStreak }
   const followUpInFlight = new Set(); // channelIds with a classifier call running right now
@@ -237,7 +237,7 @@ export function createMessageHandler({
       if (verdict === 'yes') {
         // Still counted for spam (mention.spamThreshold, future explicit
         // pings), just never rolled for the ignore chance -- a follow-up is a
-        // continuation, not a ping (see .claude/docs/prompt-contract.md).
+        // continuation, not a ping (see docs/prompt-contract.md).
         tagHistory.hit(normalized.authorId, now(), repeatWindowMs(mentionCfg));
         turns
           .runTurn({ channel, mode: 'reply', trigger: normalized, triggerKind: 'followUp' })
@@ -362,7 +362,7 @@ export function createMessageHandler({
       // 1. System / webhook messages are not conversation.
       if (message.system || message.webhookId) return;
 
-      // 1b. Paused (owner editing data/ by hand, /nep pause, F30): the
+      // 1b. Paused (owner editing data/ by hand, /nep pause): the
       // persona does nothing at all -- no observe, no trigger, no turn, no
       // eavesdrop -- and nothing below may mark the store dirty.
       if (store?.state?.data?.paused) return;
@@ -393,7 +393,7 @@ export function createMessageHandler({
       const normalized = normalizeMessage(message, selfId);
       const guildId = message.guild.id;
 
-      // 5. Its own message: only bookkeeping. Also (re)opens/extends the F48
+      // 5. Its own message: only bookkeeping. Also (re)opens/extends the
       // follow-up window for this channel -- see noteFollowUpSend above.
       if (normalized.self) {
         turns.notePost(normalized.channelId, normalized.ts);
@@ -432,7 +432,7 @@ export function createMessageHandler({
       warmMediaCache(guildId, normalized);
       if (memoryOn) memory.observe(guildId, normalized, { direct: Boolean(kind) });
 
-      // 10. No trigger: maybe a follow-up (F48, features.followUp) inside a
+      // 10. No trigger: maybe a follow-up (features.followUp) inside a
       // window the persona itself opened by answering -- fully handled by
       // maybeFollowUp either way (a computed verdict or a deliberate no-op,
       // see its own header comment); otherwise let the spontaneous scheduler
@@ -498,7 +498,7 @@ export function createMessageHandler({
   }
 
   onMessage.drainPending = drainPending;
-  /** Drop every pending direct ping without answering any of them (F30, `/nep pause`). */
+  /** Drop every pending direct ping without answering any of them (`/nep pause`). */
   onMessage.clearPending = () => {
     pendingList = [];
   };

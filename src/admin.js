@@ -178,7 +178,7 @@ function lastDateSuffix(lastSeen) {
  * Every stored `items`, in RANK order (src/memory/ranking.js#topByRank,
  * decayed with `halfLifeDays`), formatted one per line via `formatLine`, with
  * a divider line inserted right after the top `maxShown` -- the ones the
- * persona actually sees (see .claude/docs/prompt-contract.md, "More is stored
+ * persona actually sees (see docs/prompt-contract.md, "More is stored
  * than shown, and rank decays with age") -- so `/nep memory show` makes the
  * gap between "stored" and "shown" visible. `maxShown` not an integer ->
  * every item is shown, no divider. Never throws on an empty `items`.
@@ -200,7 +200,7 @@ function rankedLines(items, maxShown, halfLifeDays, formatLine) {
 }
 
 // ---------------------------------------------------------------------------
-// `/nep memory show` — sectioned view (F32)
+// `/nep memory show` — sectioned view
 // ---------------------------------------------------------------------------
 
 /** The `section` choices `/nep memory show` accepts; anything else falls back to `'summary'`. */
@@ -217,7 +217,7 @@ const MEMORY_SHOW_SECTIONS = new Set([
   'raw',
 ]);
 
-/** Owner-configurable list length for `/nep memory show`'s per-section views (F32). */
+/** Owner-configurable list length for `/nep memory show`'s per-section views. */
 const MEMORY_SHOW_DEFAULT_LIMIT = 25;
 const MEMORY_SHOW_MAX_LIMIT = 100;
 
@@ -299,7 +299,7 @@ export function buildProfileSummary(profile, memoryCfg = {}, nameOf = () => null
  * divider; the default `'rank'` order reuses the persona's own rank
  * (src/memory/ranking.js#topByRank) and inserts `DIVIDER_LINE` right after
  * `maxShown` items — the ones the persona is actually shown (see
- * .claude/docs/prompt-contract.md, "More is stored than shown, and rank
+ * docs/prompt-contract.md, "More is stored than shown, and rank
  * decays with age") — before either is capped to `limit` lines. Never throws
  * on an empty/missing `items`.
  * @param {object[]} items
@@ -327,12 +327,12 @@ function orderedSectionLines(items, { order, limit, halfLifeDays, maxShown, form
 }
 
 /**
- * The exact output `/nep memory show` produced before F32 (section `'raw'`):
- * the whole profile as JSON, followed by every stored interest/detail/alias
- * in rank order (divider included) and every episode — `<@id>` tokens are
- * deliberately left unresolved here, unlike every other section.
+ * `/nep memory show`'s `raw` section: the whole profile as JSON, followed by
+ * every stored interest/detail/alias in rank order (divider included) and
+ * every episode — `<@id>` tokens are deliberately left unresolved here,
+ * unlike every other section.
  */
-function legacyMemoryShowView(profile, memoryCfg) {
+function rawMemoryShowView(profile, memoryCfg) {
   const lines = [JSON.stringify(profile, null, 2)];
   if (profile.interests?.length) {
     lines.push('', 'interests: (rank order, everything stored -- see the divider for what the persona is shown)');
@@ -365,15 +365,15 @@ function legacyMemoryShowView(profile, memoryCfg) {
   return lines.join('\n');
 }
 
-/** `[weight N, last DATE] name`, or just `[weight N] name` — unchanged since before F32, used by
- * both the `raw` view (via `legacyMemoryShowView`) and the `aliases` section, and by `/nep memory
+/** `[weight N, last DATE] name`, or just `[weight N] name`, used by
+ * both the `raw` view (via `rawMemoryShowView`) and the `aliases` section, and by `/nep memory
  * alias add`/`remove`'s "resulting alias list" reply. */
 function aliasLine(alias) {
   return `[weight ${alias.weight}${lastDateSuffix(alias.lastSeen)}] ${alias.name}`;
 }
 
 /** The member's stored aliases, rank-ordered, one per line — the reply `/nep memory alias
- * add`/`remove` gives after writing (see the module header's DO §2). */
+ * add`/`remove` gives after writing. */
 function formatAliasList(profile, memoryCfg) {
   const aliases = profile?.aliases ?? [];
   if (!aliases.length) return 'No aliases stored.';
@@ -420,17 +420,17 @@ function writeLocalConfig(localPath, value) {
  * `calibrator` — token calibrator (src/llm/tokens.js), read for `.ratio`.
  * `getGuildId` — the single guild this instance serves, or null before it resolves.
  * `isBootstrapping` — `() => boolean`, optional: true while the memory bootstrap runner
- *   (src/memory/bootstrap.js, a later task) is in flight. Reserved for that runner to wire in;
- *   this module does not act on it yet. Default: never bootstrapping.
+ *   (src/memory/bootstrap.js) is in flight. Read by `cmdMemoryWipe`, the warmup commands and
+ *   `cmdStatus`. Default: never bootstrapping.
  * `turns` — from createTurnRunner() (src/behavior/turn.js), optional: `waitIdle()`, used by
- *   `/nep pause` (F30) to wait out a turn already in flight. Absent -> the wait is simply skipped.
+ *   `/nep pause` to wait out a turn already in flight. Absent -> the wait is simply skipped.
  * `memory` — from createMemoryUpdater() (src/memory/update.js), optional: `waitIdle()`, used by
- *   `/nep pause` (F30) to wait out a live-analyzer `run()` already in flight (an LLM call can take
+ *   `/nep pause` to wait out a live-analyzer `run()` already in flight (an LLM call can take
  *   30-90s) before the pause flushes and drops the store's caches. Absent -> the wait is skipped.
- * `pending` — `{ clear() }`, optional: clears src/discord/events.js's pending-ping queue on pause
- *   (F30). Absent -> nothing to clear.
+ * `pending` — `{ clear() }`, optional: clears src/discord/events.js's pending-ping queue on pause.
+ *   Absent -> nothing to clear.
  * `llm` — from createLlm() (src/llm/openrouter.js), optional: `complete()`, used by `/nep ping`
- *   (F35) to reach each role's model directly. Absent -> `/nep ping` reports it is not available.
+ *   to reach each role's model directly. Absent -> `/nep ping` reports it is not available.
  * `bootstrap` — from createBootstrap() (src/memory/bootstrap.js), optional: the sample-based
  *   memory bootstrap -- `peopleReport` (read-only), `run`/`runPerson`/`runChannel`/`runServer`/
  *   `runUsers`/`runChannels`/`status`/`reset` (write under data/), `refreshPortrait`, `waitIdle`
@@ -460,11 +460,11 @@ export function createAdmin({
   }
 
   /**
-   * F30 (`/nep pause`): refuse a command that would write under `data/` while
-   * paused, with a hint to resume first -- see the module header comment's
-   * "MUST NOT touch" list in the task and the DESIGN section 3 list of
-   * refused commands (memory.forget, memory.affinity with a score,
-   * memory.wipe, lore.add, lore.remove, poke).
+   * `/nep pause`: refuse a command that would write under `data/` while
+   * paused, with a hint to resume first. Guards poke, memory.alias-add,
+   * memory.alias-remove, memory.forget, memory.wipe, memory.affinity (when
+   * setting a score), memory.refresh, lore.add, lore.remove, warmup.run,
+   * warmup.users, warmup.channels and warmup.server.
    */
   function assertNotPaused() {
     if (store.state.data.paused) {
@@ -473,7 +473,7 @@ export function createAdmin({
   }
 
   /**
-   * F30: a read-only command must see a hand-edit made while paused, even a
+   * A read-only command must see a hand-edit made while paused, even a
    * second one made between two calls of the same command -- `dropCaches`
    * only drops what a WRITE would otherwise dirty (users/guild/channels/lore
    * /media/buffer), so this is safe to call before every read while paused.
@@ -568,7 +568,7 @@ export function createAdmin({
   }
 
   // ---------------------------------------------------------------------
-  // pause / resume — F30: a maintenance mode so the owner can edit files
+  // pause / resume: a maintenance mode so the owner can edit files
   // under data/ by hand while the process stays up. See src/memory/store.js
   // (dropCaches/reloadState/validate) and the module header comments of
   // src/behavior/turn.js (waitIdle), src/behavior/spontaneous.js and
@@ -686,7 +686,7 @@ export function createAdmin({
   }
 
   function cmdStatus() {
-    freshenIfPaused(); // F30: read the freshest data/ even mid-pause
+    freshenIfPaused(); // read the freshest data/ even mid-pause
     const cfg = hot.config;
     const data = store.state.data ?? {};
     const dryRunOn = cfg?.features?.dryRun === true;
@@ -752,10 +752,10 @@ export function createAdmin({
   }
 
   /**
-   * F32: sectioned, human-readable view of one member's profile — see the
+   * Sectioned, human-readable view of one member's profile — see the
    * module-level `MEMORY_SHOW_SECTIONS` for the choices and the header
    * comments of `buildProfileSummary`/`orderedSectionLines`/
-   * `legacyMemoryShowView` for what each section does. `section` defaults to
+   * `rawMemoryShowView` for what each section does. `section` defaults to
    * `'summary'`; `order` to `'rank'`; `limit` to 25 (1..100) — anything else
    * given falls back to these defaults rather than throwing, since this is a
    * read-only command. Every section except `'raw'` resolves `<@id>` tokens
@@ -783,7 +783,7 @@ export function createAdmin({
     const nameOf = (id) => store.getUser(guildId, id)?.names?.[0] ?? null;
     const resolve = (text) => fromTokens(typeof text === 'string' ? text : '', nameOf, 'analyzer');
 
-    if (section === 'raw') return legacyMemoryShowView(profile, memoryCfg);
+    if (section === 'raw') return rawMemoryShowView(profile, memoryCfg);
 
     if (section === 'character') return resolve(profile.character) || '(empty)';
     if (section === 'style') return resolve(profile.style) || '(empty)';
@@ -863,7 +863,7 @@ export function createAdmin({
   }
 
   // ---------------------------------------------------------------------
-  // memory.channel / memory.server (F45): read-only views of the server-wide
+  // memory.channel / memory.server: read-only views of the server-wide
   // memory -- the channel map (src/memory/channels.js) and the guild notes
   // (src/memory/store.js#getGuild) -- alongside `memory.show`'s per-member
   // view. Both read fresh data even mid-pause (`freshenIfPaused`, same as
@@ -902,7 +902,7 @@ export function createAdmin({
   }
 
   /**
-   * `/nep memory channel [channel]` (F45): with a channel, that channel's full stored note (Discord
+   * `/nep memory channel [channel]`: with a channel, that channel's full stored note (Discord
    * facts, the analyzer/bootstrap-written purpose/topics/tone, counters, activity verdict and top
    * writers); without one, a compact table of every stored channel, sorted by last message desc.
    * `<@id>` tokens in `purpose`/`topics`/`tone` are resolved the same way `memory.show` resolves
@@ -962,7 +962,7 @@ export function createAdmin({
   }
 
   /**
-   * `/nep memory server` (F45): the stored guild-wide notes (`patterns`, `starters`, numbered
+   * `/nep memory server`: the stored guild-wide notes (`patterns`, `starters`, numbered
    * in-jokes and self facts -- src/memory/store.js#getGuild) plus counts of what else this guild has
    * stored (profiles, channel notes, lore entries) and when the guild notes were last updated.
    * `<@id>` tokens are resolved the same way `memory.show`/`memory.channel` resolve free text.
@@ -989,7 +989,7 @@ export function createAdmin({
   }
 
   /**
-   * F32 (`/nep memory alias add`): confirms the alias at once instead of
+   * `/nep memory alias add`: confirms the alias at once instead of
    * waiting for it to be sighted `memory.confirmAfter` times naturally —
    * store.applyProfileOps/src/memory/aliases.js has no option to set a
    * weight directly, so this calls it repeatedly with `confirmGapHours: 0`
@@ -1041,7 +1041,7 @@ export function createAdmin({
     return formatAliasList(after, memoryCfg);
   }
 
-  /** F32 (`/nep memory alias remove`): removes by name, case-insensitively (store.applyProfileOps
+  /** `/nep memory alias remove`: removes by name, case-insensitively (store.applyProfileOps
    * matches an alias's identity the same way, see src/memory/interests.js#normalizeTopic). */
   function cmdMemoryAliasRemove(args, context) {
     assertNotPaused();
@@ -1261,10 +1261,10 @@ function cmdModelSet(args) {
 }
 
 // ---------------------------------------------------------------------
-// ping (F35): one minimal chat completion per role's model, in parallel,
-// to tell the owner in seconds whether each one is actually reachable --
-// see the module header's DO list. Never touches the daily request cap or
-// token calibration (src/llm/openrouter.js#complete's `countAgainstDailyCap`
+// ping: one minimal chat completion per role's model, in parallel,
+// to tell the owner in seconds whether each one is actually reachable.
+// Never touches the daily request cap or token calibration
+// (src/llm/openrouter.js#complete's `countAgainstDailyCap`
 // / `skipCalibration` options), never writes under data/.
 // ---------------------------------------------------------------------
 
@@ -1297,8 +1297,8 @@ function describeFunnelStep(entry) {
 
 /**
  * The last `routing_funnel` step out of an OpenRouter error body, when present -- the diagnostic
- * that actually tells "wrong provider keys" apart from a genuine outage (see the module header's
- * WHY). A real captured 404 body carries it at `error.metadata.routing_funnel` (checked first); a
+ * that actually tells "wrong provider keys" apart from a genuine outage. A real captured 404 body
+ * carries it at `error.metadata.routing_funnel` (checked first); a
  * couple of other plausible locations are tried too, and it never throws on a body that is not
  * JSON or carries no such field. When the step that first hit 0 endpoints is not the last step
  * (the funnel kept going after already emptying out), both are shown -- the first zero is usually
@@ -1438,7 +1438,7 @@ async function cmdPing(args) {
     return 'warmup started: channels, then people, then the server. Follow it with /nep warmup status.';
   }
 
-  /** `/nep warmup stop` (F43/F44): ends any warmup work in flight for good -- the full run, a
+  /** `/nep warmup stop`: ends any warmup work in flight for good -- the full run, a
    * `users`/`channels` bulk redo, or a synchronous one-off -- including cancelling the model call
    * actually in progress (see src/memory/bootstrap.js#stop). Reads no `data/` itself, so not
    * guarded by assertNotPaused(). */
@@ -1466,7 +1466,7 @@ async function cmdPing(args) {
     ].join('\n');
   }
 
-  /** `/nep warmup users [user]` (F44, merges the old `warmup user`/`warmup users`): a `user` given
+  /** `/nep warmup users [user]`: a `user` given
    * -> (re)profiles exactly that member now, synchronously; omitted -> starts a background redo of
    * every qualifying member, sharing every rail with the full run. */
   async function cmdWarmupUsers(args, context) {
@@ -1486,7 +1486,7 @@ async function cmdPing(args) {
   }
 
   /** `/nep warmup channels channel:<channel>`: the note actually written (purpose/topics/tone),
-   * plus the counters and top writers `store.setChannelFacts` just filled in (F42) -- writers
+   * plus the counters and top writers `store.setChannelFacts` just filled in -- writers
    * resolved to their current stored name, an id with no profile skipped. Relays `outcome.message`
    * unchanged when nothing was written. */
   function formatBootstrapChannelWritten(outcome, guildId) {
@@ -1509,7 +1509,7 @@ async function cmdPing(args) {
     return lines.join('\n');
   }
 
-  /** `/nep warmup channels [channel]` (F44, merges the old `warmup channel`/`warmup channels`): a
+  /** `/nep warmup channels [channel]`: a
    * `channel` given -> (re)describes exactly that channel now, synchronously; omitted -> starts a
    * background redo of every readable channel, sharing every rail with the full run. */
   async function cmdWarmupChannels(args, context) {
@@ -1545,7 +1545,7 @@ async function cmdPing(args) {
     return formatBootstrapServerWritten(result.ok ? result.outcome : result);
   }
 
-  /** `N s ago` / `N min ago` / `N h ago`, or `never` when `lastActivityAt` is unknown (F40). */
+  /** `N s ago` / `N min ago` / `N h ago`, or `never` when `lastActivityAt` is unknown. */
   function humanizeAgo(lastActivityAt) {
     if (!Number.isFinite(lastActivityAt)) return 'never';
     const deltaMs = Math.max(0, Date.now() - lastActivityAt);
@@ -1556,7 +1556,7 @@ async function cmdPing(args) {
     return `${Math.round(minutes / 60)} h ago`;
   }
 
-  /** One `phase: …` line's TEXT from a bootstrap status's in-memory `activity` snapshot (F40, see
+  /** One `phase: …` line's TEXT from a bootstrap status's in-memory `activity` snapshot (see
    * src/memory/bootstrap.js's `touchActivity`) -- falls back to `s.phase` (the coarser "running" /
    * "not started" / "finished" / "aborted (reason)" / "idle" summary) whenever `activity` carries
    * nothing more specific yet (e.g. right after a restart, before the first channel is fetched).

@@ -1,5 +1,5 @@
 // English test fixture covering every key of the labels.json contract
-// (.claude/docs/prompt-contract.md, "labels.json keys"). Terse technical
+// (docs/prompt-contract.md, "labels.json keys"). Terse technical
 // wording on purpose -- this is a fixture for the tests, not shipped prompt
 // text (that belongs to prompts/labels.json, written by nep-writer).
 export const labels = {
