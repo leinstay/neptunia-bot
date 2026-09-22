@@ -1972,3 +1972,21 @@ test('refreshPortrait: queues nothing and just logs while a bootstrap run is in 
   resolveGate();
   await runPromise;
 });
+
+test('createBootstrap: resumeIfNeeded resumes a run that has progress but no start stamp, even when profiles exist', async () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  const c1 = fakeChannel('c1', [rawMessage(1000, { authorId: 'a' }), rawMessage(2000, { authorId: 'a' })]);
+  const guild = fakeGuild('g1', [c1]);
+  const client = fakeClient(guild);
+  const hot = fakeHot();
+  const llm = scriptedLlm([{ purpose: 'p' }, { character: 'c', style: 's', interests: [], details: [], episodes: [], aliases: [] }, { patterns: '', starters: '', injokes: [], lore: [] }]);
+  store.touchUser('g1', 'a', 'alpha');
+  store.state.data.bootstrap = { startedAt: null, finishedAt: null, done: { channels: [], people: ['someone'], server: false } };
+  const bootstrap = createBootstrap({ hot, store, client, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => 10_000_000 });
+
+  bootstrap.resumeIfNeeded('g1');
+  await new Promise((r) => setTimeout(r, 20));
+  while (bootstrap.isBootstrapping()) await new Promise((r) => setTimeout(r, 5));
+  assert.ok(store.state.data.bootstrap.finishedAt, 'the run should have resumed and finished');
+});

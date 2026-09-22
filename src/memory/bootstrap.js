@@ -1577,7 +1577,8 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
     if (hot.config.bootstrap?.enabled === false) return false;
     if (running || store.state.data.paused) return false;
     const bs = bootstrapState(store);
-    const unfinished = Boolean(bs.startedAt) && !bs.finishedAt;
+    const hasProgress = bs.done.channels.length > 0 || bs.done.people.length > 0 || bs.done.server;
+    const unfinished = !bs.finishedAt && (Boolean(bs.startedAt) || hasProgress);
     const neverStarted = !bs.startedAt && store.listUserProfiles(guildId).length === 0;
     if (!unfinished && !neverStarted) return false;
 
