@@ -1626,8 +1626,10 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
       const people = pickPeople(windows, cfg);
       channelsEligible = eligibleChannels.length;
       peopleEligible = people.length;
-      const nextChannel = eligibleChannels.find((window) => !bs.done.channels.includes(window.id));
-      const nextPerson = people.find((person) => !bs.done.people.includes(person.id));
+      // "Next" means after the target in flight: the one being worked on is shown by the phase line.
+      const inFlightId = activity.phase === 'channel' || activity.phase === 'person' ? String(activity.detail?.id ?? '') : '';
+      const nextChannel = eligibleChannels.find((window) => !bs.done.channels.includes(window.id) && String(window.id) !== inFlightId);
+      const nextPerson = people.find((person) => !bs.done.people.includes(person.id) && String(person.id) !== inFlightId);
       if (nextChannel) nextTarget = `channel: ${nextChannel.name} (id:${nextChannel.id})`;
       else if (nextPerson) nextTarget = `person: ${nextPerson.name} (id:${nextPerson.id})`;
       else if (!bs.done.server) nextTarget = 'server';

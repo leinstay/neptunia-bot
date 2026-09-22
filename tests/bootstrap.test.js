@@ -1990,3 +1990,24 @@ test('createBootstrap: resumeIfNeeded resumes a run that has progress but no sta
   while (bootstrap.isBootstrapping()) await new Promise((r) => setTimeout(r, 5));
   assert.ok(store.state.data.bootstrap.finishedAt, 'the run should have resumed and finished');
 });
+
+test('status: next target skips the target currently in flight', async () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  const c1 = fakeChannel('c1', [rawMessage(1000, { authorId: 'a' })]);
+  const c2 = fakeChannel('c2', [rawMessage(2000, { authorId: 'a' })]);
+  const guild = fakeGuild('g1', [c1, c2]);
+  const client = fakeClient(guild);
+  const hot = fakeHot();
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  const llm = { complete: async () => { await gate; return { content: JSON.stringify({ purpose: 'p', topics: 't', tone: 'n' }), usage: { prompt_tokens: 1, completion_tokens: 1 } }; } };
+  const bootstrap = createBootstrap({ hot, store, client, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => 10_000_000 });
+  const running = bootstrap.run('g1');
+  while (bootstrap.status('g1').activity.phase !== 'channel') await new Promise((r) => setTimeout(r, 5));
+  const s = bootstrap.status('g1');
+  assert.equal(s.activity.detail.id, 'c1');
+  assert.match(s.nextTarget, /c2/);
+  release();
+  await running;
+});
