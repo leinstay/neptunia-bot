@@ -171,7 +171,6 @@ Settings for the media describer (`features.mediaDescriptions`).
 | `maxOutputTokens` | `120` | Max output tokens per description |
 | `imageSize` | `512` | Downscale target in px |
 | `maxPerTurn` | `6` | Max descriptions generated per turn |
-| `maxPerBatch` | `20` | Max descriptions per memory batch |
 | `cacheEntries` | `5000` | Description cache size, keyed by attachment |
 | `filePreviewChars` | `500` | Characters shown from the beginning of text files |
 | `embedTextChars` | `200` | Characters shown from link embed text |
@@ -180,8 +179,8 @@ Settings for the media describer (`features.mediaDescriptions`).
 
 | Key | Default | Meaning |
 |---|---|---|
-| `ignoreChance` | `0` | Base ignore chance; raise to make her skip some pings |
-| `emptyMentionIgnoreChance` | `0` | Ignore chance for bare @mention; raise to make her skip some |
+| `ignoreChance` | `0` | Base ignore chance; raise to make the persona skip some pings |
+| `emptyMentionIgnoreChance` | `0` | Ignore chance for bare @mention; raise to make the persona skip some |
 | `repeatWindowMinutes` | `10` | Repeat tracking window (min) |
 | `repeatPenalty` | `0` | Added ignore chance per repeat; raise to penalize repeats |
 | `spamThreshold` | `50` | Calls in window before spam |
@@ -351,13 +350,15 @@ One Discord slash command, `/nep` (the name comes from `bot.commandName`). Guild
 | `/nep model show` | Show active models for each role (`talk`, `analyzer`, `media`, `followup`) |
 | `/nep model set <role> <id>` | Set the model for a role (`talk`, `analyzer`, `media`, `followup`) |
 | `/nep memory show <user> [section] [limit] [order]` | Without a section: compact summary. Sections: `character`, `style`, `relationship`, `affinity`, `aliases`, `interests`, `details`, `episodes`, `raw` (stored JSON). List sections take `limit` 1..100 (default 25) and `order`: `rank` (default, divider at the visibility cutoff) or `recent`. Stored member references resolve to the current name, except in `raw` |
+| `/nep memory channel [channel]` | With a channel: stored note in full (purpose, topics, tone, message count, activity, top writers). Without: a table of every channel the persona knows, sorted by last message |
+| `/nep memory server` | Server-wide notes: how people talk, how conversations start, in-jokes, self-facts, plus counts of profiles, channels and lore entries |
 | `/nep memory refresh <user>` | Force a portrait refresh for a member |
 | `/nep memory forget <user>` | Delete a stored profile |
 | `/nep memory affinity <user> [score] [reason]` | Show or set attitude (-100..100) |
 | `/nep memory alias-add <user> <name>` | Add a chat alias; confirmed at once |
 | `/nep memory alias-remove <user> <name>` | Remove a chat alias |
 | `/nep memory wipe <confirm>` | Wipe all analyzer memory for this server; type the exact server name to confirm |
-| `/nep lore add <title> <keys> <text> [always]` | Add a lorebook entry |
+| `/nep lore add <title> <keys> <text> [always]` | Add or overwrite a lorebook entry; an entry with the same title is replaced and becomes owner-owned, so the analyzer never edits it again |
 | `/nep lore list [query]` | List lorebook entries |
 | `/nep lore show <id>` | Show a lorebook entry |
 | `/nep lore remove <id>` | Remove a lorebook entry |
@@ -434,13 +435,17 @@ A restart loses nothing; all state is on disk. Restarts are only needed after co
 
 Memory lives in the process and is written to `data/`; editing those files under a running bot is unsafe because the next write overwrites the change. To edit memory by hand: `/nep pause`, edit the files, `/nep resume`. The pause stops all activity, flushes memory to disk and unloads it; a running warmup pauses after the current request. The state is persisted: a restart comes back paused, and the warmup does not auto-start until resume. `/nep resume` validates every JSON file under `data/` and refuses if any do not parse, naming the broken ones; otherwise it reloads memory and continues, including a warmup from where it left off. Read-only and config commands work while paused; commands that write memory are refused. `/nep status` shows the paused state.
 
+## Contributing
+
+Issues and pull requests are welcome; read `CONTRIBUTING.md` first. Target branch is `main`, one change per pull request, tests pass with `npm test`, English only. The contract between the prompt files and the code is in `docs/prompt-contract.md` — a change on one side changes the other in the same pull request. The engine stays character-neutral; behaviour of one character belongs in that deployment's `prompts.local/`. Security reports go through `SECURITY.md`, not public issues.
+
 ## Tests
 
 ```bash
 npm test
 ```
 
-Runs with `node --test`. No network or Discord connection needed.
+Runs with `node --test`. No network or Discord connection needed. The same command runs in CI on every pull request.
 
 ## Project structure
 
@@ -463,6 +468,8 @@ prompts/
   server.md                warmup: server-level notes from channel notes and member summaries
   labels.json              every code-inserted string in prompts
 prompts.local/             your personality (gitignored)
+docs/
+  prompt-contract.md       the contract between prompt files and code
 src/
   index.js                 entry point, wiring, timers, shutdown
   config.js                .env parser, config loader, deepMerge
@@ -480,23 +487,37 @@ src/
     events.js              message pipeline
     collect.js             channel history, neighbours, permissions
     format.js              transcript lines, time gaps, tempo
+    media.js               media classification, label selection, proxy URLs
+    fetch-image.js         download and cache images for inline LLM requests
   behavior/
     mention.js             call detection, ignore heuristics
     prompt.js              request builder with token budget
     turn.js                one turn: collect, build, call, act
     spontaneous.js         chaotic timer, eavesdrop
+    pending.js             pending direct pings while the persona is busy
   memory/
     store.js               JSON file persistence, atomic writes
     update.js              batch memory updates
     affinity.js            relationship score logic
     interests.js           remembered interests: sightings, confirmation, eviction
     details.js             remembered details: sightings, confirmation, eviction
+    aliases.js             remembered aliases: sightings, confirmation, eviction
+    episodes.js            remembered episodes: append, weight-based eviction
     channels.js            channel map rendering, activity verdicts
+    mentions.js            member-id tokens in stored text: toTokens and fromTokens
+    clamp.js               text clamping: soft limits, sentence boundaries, safe member tokens
+    ranking.js             shared ranking for interests and details: frequency, recency, decay
+    lore.js                lorebook logic: key matching, entry selection
+    describe.js            media describer: one picture in, one cached caption out
     bootstrap.js           sample-based memory warmup
 tests/                     node --test, pure-function unit tests
 deploy/
   neptunia-bot.service     example systemd unit
 data/                      persistent state (gitignored, created at runtime)
+  state.json               scheduler times, token calibration, daily request counter, bootstrap progress
+  guilds/<id>/guild.json   server habits, in-jokes, the persona's self-claims
+  guilds/<id>/buffer.json  messages observed since the last memory update
+  guilds/<id>/media.json   media description cache
   guilds/<id>/users/       per-member profiles and relationships
   guilds/<id>/channels/    channel observations from the analyzer
   guilds/<id>/lore.json    lorebook entries
