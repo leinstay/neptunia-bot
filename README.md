@@ -80,7 +80,7 @@ Both are hot-reloaded.
 
 **The only file you must rewrite is `character-card.md`.** Copy it to `prompts.local/` and write your persona. Everything else works as-is, or override individual files as needed.
 
-The memory analyzer judges how the character feels about people. Both it and the warmup receive your character card and `rules.md`, so include what your character likes and dislikes; a live rule about voice or judgement shapes portraits and attitude the same way the card does.
+The memory analyzer judges how the character feels about people. Both it and the warmup receive your character card and `rules.md`, so include what your character likes and dislikes.
 
 The placeholders, `labels.json` keys, context blocks and output tags every prompt file may use are specified in [`docs/prompt-contract.md`](docs/prompt-contract.md); a change on one side requires the matching change on the other.
 
