@@ -62,7 +62,7 @@ test('buildCommandTree: one top-level command, hidden by default, named from the
 test('buildCommandTree: top-level leaves (status, ping, reload, pause, resume, poke, set, unset)', () => {
   const [command] = buildCommandTree('nep');
   const names = command.options.map((o) => o.name);
-  assert.deepEqual(names, ['status', 'ping', 'reload', 'pause', 'resume', 'poke', 'set', 'unset', 'rule', 'memory', 'lore', 'model', 'bootstrap']);
+  assert.deepEqual(names, ['status', 'ping', 'reload', 'pause', 'resume', 'poke', 'set', 'unset', 'rule', 'memory', 'lore', 'model', 'warmup']);
 
   const status = findOption(command.options, 'status');
   assert.equal(status.type, 1); // SUBCOMMAND
@@ -217,9 +217,9 @@ test('buildCommandTree: lore group (add/list/show/remove)', () => {
   assert.equal(findOption(remove.options, 'id').required, true);
 });
 
-test('buildCommandTree: bootstrap group (people, run, user, users, channel, channels, server, status, reset)', () => {
+test('buildCommandTree: warmup group (people, run, user, users, channel, channels, server, status, reset)', () => {
   const [command] = buildCommandTree('nep');
-  const bootstrap = findOption(command.options, 'bootstrap');
+  const bootstrap = findOption(command.options, 'warmup');
   assert.equal(bootstrap.type, 2); // SUBCOMMAND_GROUP
   assert.deepEqual(
     bootstrap.options.map((o) => o.name),
@@ -618,49 +618,49 @@ test('interaction handler: lore.show/lore.remove map id straight through', async
   assert.deepEqual(admin.runCalls[1][1], { id: 'abc123' });
 });
 
-test('interaction handler: bootstrap.people maps to empty args', async () => {
+test('interaction handler: warmup.people maps to empty args', async () => {
   const admin = fakeAdmin();
   const handler = createInteractionHandler({ hot: baseHot(), admin, getGuildId: () => 'g1' });
 
-  await handler(fakeInteraction({ group: 'bootstrap', subcommand: 'people' }));
+  await handler(fakeInteraction({ group: 'warmup', subcommand: 'people' }));
 
-  assert.equal(admin.runCalls[0][0], 'bootstrap.people');
+  assert.equal(admin.runCalls[0][0], 'warmup.people');
   assert.deepEqual(admin.runCalls[0][1], {});
 });
 
-test('interaction handler: bootstrap.user maps the user option to userId', async () => {
+test('interaction handler: warmup.user maps the user option to userId', async () => {
   const admin = fakeAdmin();
   const handler = createInteractionHandler({ hot: baseHot(), admin, getGuildId: () => 'g1' });
 
-  await handler(fakeInteraction({ group: 'bootstrap', subcommand: 'user', optionValues: { user: { id: 'target1' } } }));
-  assert.equal(admin.runCalls[0][0], 'bootstrap.user');
+  await handler(fakeInteraction({ group: 'warmup', subcommand: 'user', optionValues: { user: { id: 'target1' } } }));
+  assert.equal(admin.runCalls[0][0], 'warmup.user');
   assert.deepEqual(admin.runCalls[0][1], { userId: 'target1' });
 });
 
-test('interaction handler: bootstrap.channel maps the channel option to channelId', async () => {
+test('interaction handler: warmup.channel maps the channel option to channelId', async () => {
   const admin = fakeAdmin();
   const handler = createInteractionHandler({ hot: baseHot(), admin, getGuildId: () => 'g1' });
 
-  await handler(fakeInteraction({ group: 'bootstrap', subcommand: 'channel', optionValues: { channel: { id: 'chan1' } } }));
-  assert.equal(admin.runCalls[0][0], 'bootstrap.channel');
+  await handler(fakeInteraction({ group: 'warmup', subcommand: 'channel', optionValues: { channel: { id: 'chan1' } } }));
+  assert.equal(admin.runCalls[0][0], 'warmup.channel');
   assert.deepEqual(admin.runCalls[0][1], { channelId: 'chan1' });
 });
 
-test('interaction handler: bootstrap.users/channels/server/run map to empty args', async () => {
+test('interaction handler: warmup.users/channels/server/run map to empty args', async () => {
   const admin = fakeAdmin();
   const handler = createInteractionHandler({ hot: baseHot(), admin, getGuildId: () => 'g1' });
 
-  await handler(fakeInteraction({ group: 'bootstrap', subcommand: 'users' }));
-  assert.equal(admin.runCalls[0][0], 'bootstrap.users');
+  await handler(fakeInteraction({ group: 'warmup', subcommand: 'users' }));
+  assert.equal(admin.runCalls[0][0], 'warmup.users');
   assert.deepEqual(admin.runCalls[0][1], {});
 
-  await handler(fakeInteraction({ group: 'bootstrap', subcommand: 'channels' }));
+  await handler(fakeInteraction({ group: 'warmup', subcommand: 'channels' }));
   assert.deepEqual(admin.runCalls[1][1], {});
 
-  await handler(fakeInteraction({ group: 'bootstrap', subcommand: 'server' }));
+  await handler(fakeInteraction({ group: 'warmup', subcommand: 'server' }));
   assert.deepEqual(admin.runCalls[2][1], {});
 
-  await handler(fakeInteraction({ group: 'bootstrap', subcommand: 'run' }));
+  await handler(fakeInteraction({ group: 'warmup', subcommand: 'run' }));
   assert.deepEqual(admin.runCalls[3][1], {});
 });
 
@@ -668,33 +668,33 @@ test('interaction handler: defers then edits for every bootstrap subcommand (slo
   const admin = fakeAdmin({ runImpl: () => 'bootstrap result' });
   const handler = createInteractionHandler({ hot: baseHot(), admin, getGuildId: () => 'g1' });
 
-  const peopleInteraction = fakeInteraction({ group: 'bootstrap', subcommand: 'people' });
+  const peopleInteraction = fakeInteraction({ group: 'warmup', subcommand: 'people' });
   await handler(peopleInteraction);
   assert.equal(peopleInteraction.deferred, true);
   assert.equal(peopleInteraction.edits[0].content, 'bootstrap result');
 
-  const userInteraction = fakeInteraction({ group: 'bootstrap', subcommand: 'user', optionValues: { user: { id: 'target1' } } });
+  const userInteraction = fakeInteraction({ group: 'warmup', subcommand: 'user', optionValues: { user: { id: 'target1' } } });
   await handler(userInteraction);
   assert.equal(userInteraction.deferred, true);
   assert.equal(userInteraction.edits[0].content, 'bootstrap result');
 
-  const usersInteraction = fakeInteraction({ group: 'bootstrap', subcommand: 'users' });
+  const usersInteraction = fakeInteraction({ group: 'warmup', subcommand: 'users' });
   await handler(usersInteraction);
   assert.equal(usersInteraction.deferred, true);
 
-  const channelInteraction = fakeInteraction({ group: 'bootstrap', subcommand: 'channel', optionValues: { channel: { id: 'chan1' } } });
+  const channelInteraction = fakeInteraction({ group: 'warmup', subcommand: 'channel', optionValues: { channel: { id: 'chan1' } } });
   await handler(channelInteraction);
   assert.equal(channelInteraction.deferred, true);
 
-  const channelsInteraction = fakeInteraction({ group: 'bootstrap', subcommand: 'channels' });
+  const channelsInteraction = fakeInteraction({ group: 'warmup', subcommand: 'channels' });
   await handler(channelsInteraction);
   assert.equal(channelsInteraction.deferred, true);
 
-  const serverInteraction = fakeInteraction({ group: 'bootstrap', subcommand: 'server' });
+  const serverInteraction = fakeInteraction({ group: 'warmup', subcommand: 'server' });
   await handler(serverInteraction);
   assert.equal(serverInteraction.deferred, true);
 
-  const resetInteraction = fakeInteraction({ group: 'bootstrap', subcommand: 'reset' });
+  const resetInteraction = fakeInteraction({ group: 'warmup', subcommand: 'reset' });
   await handler(resetInteraction);
   assert.equal(resetInteraction.deferred, true);
 });

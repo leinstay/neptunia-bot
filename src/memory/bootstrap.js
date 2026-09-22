@@ -20,9 +20,9 @@
 // `runServer` (re)do exactly one target now, synchronously, for `/nep
 // bootstrap user`/`channel`/`server`; `runUsers`/`runChannels` (re)do EVERY
 // qualifying member/every readable channel now, sharing `running` and every
-// rail with `run()`, for `/nep bootstrap users`/`channels` -- a redo always
+// rail with `run()`, for `/nep warmup users`/`channels` -- a redo always
 // re-processes its targets regardless of `state.bootstrap.done`, then marks
-// them done, so `/nep bootstrap status` reports the same progress either way.
+// them done, so `/nep warmup status` reports the same progress either way.
 // `refreshPortrait()` is the stream analyzer's "the stored portrait misses
 // something" cue (src/memory/update.js's `onPortraitRequest`), rewriting only
 // `character`/`style` from a fresh sample. A missing `prompts.profile` /
@@ -32,7 +32,7 @@
 // right now -- fetching history, describing a channel, profiling a person
 // (with a chunk count when its sample does not fit one request), building
 // the server notes, waiting out a provider rate limit, paused, finished or
-// aborted -- exposed through `status()` for `/nep bootstrap status`.
+// aborted -- exposed through `status()` for `/nep warmup status`.
 
 import { readableChannels, fetchHistoryWindow } from '../discord/collect.js';
 import { formatTranscript, renderTranscript } from '../discord/format.js';
@@ -50,7 +50,7 @@ const CACHE_TTL_MS = 15 * 60_000;
 
 /** `err?.statusCode === 429` — the one rate-limit signal src/llm/openrouter.js#complete surfaces
  * (it already retries a 429 a couple of times itself; this is for the SUSTAINED case where the
- * provider keeps refusing across the retries too). The old long warm-up's own `isRateLimited`
+ * provider keeps refusing across the retries too). The old long warmup's own `isRateLimited`
  * helper is gone along with it (src/memory/warmup.js no longer exists) -- reimplemented minimally. */
 function isRateLimited(err) {
   return err?.statusCode === 429;
@@ -176,7 +176,7 @@ export function pickPeople(windows, cfg = {}) {
 }
 
 /** One member's stats (see pickPeople), with no threshold/cap applied -- `null` when they wrote
- * nothing in `windows` at all. Used by `/nep bootstrap user` to report on exactly the member asked
+ * nothing in `windows` at all. Used by `/nep warmup user` to report on exactly the member asked
  * for, regardless of `bootstrap.minMessages`. */
 export function memberStats(windows, memberId) {
   const entry = collectAuthorStats(windows).get(String(memberId));
@@ -774,7 +774,7 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
   // paused, finished, aborted) instead of just "running" for minutes at a time, and progress
   // fields staying "?"/"-" while the windows cache is still being filled. Never persisted, never
   // read back, never affects the run itself -- a fresh factory always starts at `idle`. Mirrors
-  // src/memory/warmup.js's own `activity` (git history, since removed with the long warm-up).
+  // src/memory/warmup.js's own `activity` (git history, since removed with the long warmup).
   function freshActivity() {
     return { phase: 'idle', detail: null, lastActivityAt: null };
   }
@@ -831,7 +831,7 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
     return client.guilds?.cache?.get(guildId) ?? null;
   }
 
-  /** `/nep bootstrap people`: who currently qualifies, plus totals. Never calls the model. */
+  /** `/nep warmup people`: who currently qualifies, plus totals. Never calls the model. */
   async function peopleReport(guildId) {
     const guild = resolvedGuild(guildId);
     if (!guild) return { ok: false, message: 'no guild resolved yet' };
@@ -1075,7 +1075,7 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
   /** One channel → `channel.md` → `store.updateChannel`. See `callWithRails` for the stop/failure
    * contract; `{ ok: true }` on a clean write, marks the channel done either way it succeeds.
    * `progress` (`{ index, total }`, both 1-based/count, optional) is this channel's position among
-   * the run's eligible channels -- purely for `activity.detail`, a one-off `/nep bootstrap run
+   * the run's eligible channels -- purely for `activity.detail`, a one-off `/nep warmup run
    * channel:` call omits it. */
   async function processChannel(guildId, window, cfg, mainChannelIds, progress) {
     touchActivity('channel', { id: window.id, name: window.name, index: progress?.index ?? null, total: progress?.total ?? null });
@@ -1139,7 +1139,7 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
    * answer is retried once with half the sample; a second failure skips (and marks done) this
    * person. `progress` (`{ index, total }`, optional) is this person's position among the run's
    * eligible people, carried through the half-sample retry -- purely for `activity.detail`, a
-   * one-off `/nep bootstrap run user:` call omits it. */
+   * one-off `/nep warmup run user:` call omits it. */
   async function processPerson(guildId, windows, member, cfg, mainChannelIds, sampleCfgOverride, progress) {
     touchActivity('person', { id: member.id, name: member.name, index: progress?.index ?? null, total: progress?.total ?? null, chunk: null });
     if (!hot.prompts?.profile) {
@@ -1177,7 +1177,7 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
     let draft = null;
     let answer = null;
     let chunksDone = 0; // completed chunks so far -- feeds the "chunk k/n" detail below
-    let tokensUsed = 0; // summed across every chunk -- surfaced to `/nep bootstrap user`'s reply
+    let tokensUsed = 0; // summed across every chunk -- surfaced to `/nep warmup user`'s reply
 
     while (remaining.length > 0) {
       if (store.state.data.paused) {
@@ -1413,7 +1413,7 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
     }
   }
 
-  /** `/nep bootstrap user|channel|server`: (re)do exactly one target right now, synchronously.
+  /** `/nep warmup user|channel|server`: (re)do exactly one target right now, synchronously.
    * Refused while a run (full, another one-off, or a `users`/`channels` bulk redo) is already in
    * flight, or while paused. */
   async function runOneTarget(guildId, kind, id) {
@@ -1454,13 +1454,13 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
   }
 
   /**
-   * `/nep bootstrap users`/`/nep bootstrap channels`: (re)do EVERY qualifying member (`pickPeople`)
+   * `/nep warmup users`/`/nep warmup channels`: (re)do EVERY qualifying member (`pickPeople`)
    * or every readable channel now, sharing `running` (and so every rail: mute, pause/resume,
    * `state.bootstrap.done`) with `run()` -- a redo re-processes every target regardless of `done`,
    * then marks it done either way (processChannel/processPerson already do, idempotently). Resolves
    * once the target COUNT is known and the background loop has been started, NOT once the loop
    * itself finishes, so the caller can report "started N …" at once; progress from then on is
-   * `/nep bootstrap status`'s job. Refused (before starting anything) while a run/one-off target is
+   * `/nep warmup status`'s job. Refused (before starting anything) while a run/one-off target is
    * already in flight, or while paused.
    * @param {string} guildId
    * @param {'people'|'channels'} kind
@@ -1540,7 +1540,7 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
     };
   }
 
-  /** `/nep bootstrap status`: `summary()` plus totals, the next target and `activity` (F40, this
+  /** `/nep warmup status`: `summary()` plus totals, the next target and `activity` (F40, this
    * module's own in-memory "what is it doing right now" snapshot -- see `touchActivity` above).
    * Synchronous, side-effect free, never fetches: the totals come from the windows cache when a
    * run or a recent command filled it, otherwise they are reported as unknown (null) -- `activity`
@@ -1572,7 +1572,7 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
     return { ...base, phase, channelsEligible, peopleEligible, nextTarget, activity: { ...activity } };
   }
 
-  /** `/nep bootstrap reset`: clears `state.bootstrap` (progress only, never any profile/channel/
+  /** `/nep warmup reset`: clears `state.bootstrap` (progress only, never any profile/channel/
    * guild/lore data already written). Refused while a run is in flight. */
   function reset() {
     if (running) return { ok: false, message: 'a bootstrap run is in flight -- pause or wait for it first' };

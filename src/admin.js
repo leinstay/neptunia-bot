@@ -1305,7 +1305,7 @@ async function cmdPing(args) {
     return result.ok ? 'Bootstrap run finished (or already fully done).' : `Bootstrap run stopped: ${result.message ?? 'unknown reason'} (resumable -- run again to continue).`;
   }
 
-  /** `/nep bootstrap user`: a short summary of what was actually written -- sample size, tokens,
+  /** `/nep warmup user`: a short summary of what was actually written -- sample size, tokens,
    * counts of interests/details/episodes/aliases, and the first ~300 chars of the character field.
    * Relays `outcome.message` unchanged when nothing was written (missing prompt file, no messages in
    * the window, a bad model answer, ...). */
@@ -1345,7 +1345,7 @@ async function cmdPing(args) {
     return `started ${result.count} members`;
   }
 
-  /** `/nep bootstrap channel`: the note actually written (purpose/topics/tone), plus the counters
+  /** `/nep warmup channel`: the note actually written (purpose/topics/tone), plus the counters
    * and top writers `store.setChannelFacts` just filled in (F42) -- writers resolved to their
    * current stored name, an id with no profile skipped. Relays `outcome.message` unchanged when
    * nothing was written. */
@@ -1390,7 +1390,7 @@ async function cmdPing(args) {
     return `started ${result.count} channels`;
   }
 
-  /** `/nep bootstrap server`: counts of what was written (patterns/starters lengths, injokes, lore
+  /** `/nep warmup server`: counts of what was written (patterns/starters lengths, injokes, lore
    * entries). Relays `outcome.message` unchanged when nothing was written. */
   function formatBootstrapServerWritten(outcome) {
     if (!outcome.ok) return outcome.message ?? outcome.reason ?? 'not done';
@@ -1529,15 +1529,15 @@ async function cmdPing(args) {
     'lore.remove': (args, context) => cmdLoreRemove(args, context),
     'model.show': () => cmdModelShow(),
     'model.set': (args) => cmdModelSet(args),
-    'bootstrap.people': withBootstrap((args, context) => cmdBootstrapPeople(args, context)),
-    'bootstrap.run': withBootstrap((args, context) => cmdBootstrapRun(args, context)),
-    'bootstrap.user': withBootstrap((args, context) => cmdBootstrapUser(args, context)),
-    'bootstrap.users': withBootstrap((args, context) => cmdBootstrapUsers(args, context)),
-    'bootstrap.channel': withBootstrap((args, context) => cmdBootstrapChannel(args, context)),
-    'bootstrap.channels': withBootstrap((args, context) => cmdBootstrapChannels(args, context)),
-    'bootstrap.server': withBootstrap((args, context) => cmdBootstrapServer(args, context)),
-    'bootstrap.status': withBootstrap((args, context) => cmdBootstrapStatus(args, context)),
-    'bootstrap.reset': withBootstrap(() => cmdBootstrapReset()),
+    'warmup.people': withBootstrap((args, context) => cmdBootstrapPeople(args, context)),
+    'warmup.run': withBootstrap((args, context) => cmdBootstrapRun(args, context)),
+    'warmup.user': withBootstrap((args, context) => cmdBootstrapUser(args, context)),
+    'warmup.users': withBootstrap((args, context) => cmdBootstrapUsers(args, context)),
+    'warmup.channel': withBootstrap((args, context) => cmdBootstrapChannel(args, context)),
+    'warmup.channels': withBootstrap((args, context) => cmdBootstrapChannels(args, context)),
+    'warmup.server': withBootstrap((args, context) => cmdBootstrapServer(args, context)),
+    'warmup.status': withBootstrap((args, context) => cmdBootstrapStatus(args, context)),
+    'warmup.reset': withBootstrap(() => cmdBootstrapReset()),
   };
 
   /**
