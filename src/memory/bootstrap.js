@@ -1,4 +1,4 @@
-// THE way memory starts (.claude/docs/prompt-contract.md, "The bootstrap").
+// THE way memory starts (docs/prompt-contract.md, "The bootstrap").
 // Sampling: up to `bootstrap.messagesPerPerson` of a member's own messages
 // (newest-heavy but spread over `bootstrap.lookbackDays`, one channel capped
 // at `bootstrap.maxChannelShare` unless it is a main channel), a little
@@ -51,8 +51,7 @@ const CACHE_TTL_MS = 15 * 60_000;
 
 /** `err?.statusCode === 429` — the one rate-limit signal src/llm/openrouter.js#complete surfaces
  * (it already retries a 429 a couple of times itself; this is for the SUSTAINED case where the
- * provider keeps refusing across the retries too). The old long warmup's own `isRateLimited`
- * helper is gone along with it (src/memory/warmup.js no longer exists) -- reimplemented minimally. */
+ * provider keeps refusing across the retries too). */
 function isRateLimited(err) {
   return err?.statusCode === 429;
 }
@@ -80,8 +79,7 @@ function looksTruncated(text, finishReason) {
 // Fallbacks for the profile-prompt placeholders, mirroring config.json's own
 // defaults -- used only when a deployment's config is missing the key. Kept
 // separate from src/memory/update.js's own MEMORY_LIMIT_DEFAULTS so this
-// module never has to import from it (see the task's "MUST NOT touch"
-// list -- update.js's logic is off-limits, its shape is not otherwise shared).
+// module never has to import from it (its shape is not otherwise shared).
 const BOOTSTRAP_LIMIT_DEFAULTS = {
   fieldChars: 400,
   maxInterests: 12,
@@ -638,7 +636,7 @@ export function clampServerResult(raw, config, nameOf = () => null) {
  * chronological) whose costs sum to at most `budget` -- the opposite of `fitNewest` above, which
  * drops the oldest to fit ONE request; this instead leaves the rest for a FOLLOWING request, so a
  * member's sample that does not fit in one request is cut into the fewest chronological chunks
- * that do (.claude/docs/prompt-contract.md, "The bootstrap"). Always takes at least one item when
+ * that do (docs/prompt-contract.md, "The bootstrap"). Always takes at least one item when
  * `items` is non-empty, even if that single item alone exceeds `budget` -- progress must be made;
  * the resulting request may then exceed the cap for that one oversized item, an edge case rather
  * than the common path. Pure.
@@ -677,7 +675,7 @@ function countChunks(items, budget, cost) {
 /**
  * The per-iteration `users.<id>` op payloads that write one `profile.md` answer through
  * src/memory/update.js#applyMemoryUpdate -- reused so every existing clamp/token/eviction/
- * confirmation rule applies for free (.claude/docs/prompt-contract.md, "The bootstrap", DO §3).
+ * confirmation rule applies for free (docs/prompt-contract.md, "The bootstrap").
  *
  * `character`/`style`/`aliases`/`episodes` are written once, on the first iteration. `interests`/
  * `details` need their stored WEIGHT to land exactly on the answer's `times` (1..5) -- since one
@@ -732,7 +730,7 @@ function buildNameIndex(windows) {
   return (id) => latest.get(String(id))?.name ?? null;
 }
 
-/** The state.json shape this module owns (see .claude/docs/prompt-contract.md, "The bootstrap"),
+/** The state.json shape this module owns (see docs/prompt-contract.md, "The bootstrap"),
  * created and self-healed in place -- garbage left by an old shape never crashes a read. */
 function bootstrapState(store) {
   const data = store.state.data;
@@ -771,18 +769,17 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
   let running = false; // a full run() or one-off runXxx() in flight -- see isBootstrapping()
   let idleWaiters = []; // resolvers for waitIdle(), notified once running goes back to false
   let consecutiveFailures = 0; // resets on any successful request; 3 in a row aborts the run (resumable)
-  let stopRequested = false; // F43/F44: /nep warmup stop -- see `stop()` and run()'s own checkpoints
-  let currentAbort = null; // F44: the AbortController for whichever model call is in flight right now
+  let stopRequested = false; // /nep warmup stop -- see `stop()` and run()'s own checkpoints
+  let currentAbort = null; // the AbortController for whichever model call is in flight right now
   // (callWithRails), or null between calls -- `stop()` aborts it so the request itself is cancelled,
   // not just the loop stopped after it finishes.
 
-  // In-memory-only run activity (F40): exposed via status() as `activity` so `/nep bootstrap
+  // In-memory-only run activity: exposed via status() as `activity` so `/nep warmup
   // status` can show WHICH phase a run is actually in right now (fetching history, describing a
   // channel, profiling a person, building the server notes, waiting out a provider rate limit,
   // paused, finished, aborted) instead of just "running" for minutes at a time, and progress
   // fields staying "?"/"-" while the windows cache is still being filled. Never persisted, never
-  // read back, never affects the run itself -- a fresh factory always starts at `idle`. Mirrors
-  // src/memory/warmup.js's own `activity` (git history, since removed with the long warmup).
+  // read back, never affects the run itself -- a fresh factory always starts at `idle`.
   function freshActivity() {
     return { phase: 'idle', detail: null, lastActivityAt: null };
   }
@@ -883,7 +880,7 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
     return running;
   }
 
-  /** `/nep warmup stop` (F43/F44): ENDS any warmup work for good, not just after the request in
+  /** `/nep warmup stop`: ENDS any warmup work for good, not just after the request in
    * flight -- sets `stopRequested`, which the same checkpoints in `run()`/`startBulk()` that
    * already honour `store.state.data.paused` also check before starting a new target, AND aborts
    * the model call for the target actually in flight right now (`currentAbort`, see
@@ -911,7 +908,7 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
 
   /** `config` with `llm.maxRequestTokens` overridden to `cfg.maxRequestTokens` (the bootstrap's own,
    * much larger, cap) -- so buildChannelRequest fits under IT, not the global
-   * per-request rail (.claude/docs/prompt-contract.md, "The bootstrap", DO §2). */
+   * per-request rail (docs/prompt-contract.md, "The bootstrap"). */
   function requestConfigFor(cfg) {
     return { ...hot.config, llm: { ...hot.config.llm, maxRequestTokens: cfg.maxRequestTokens ?? hot.config.llm?.maxRequestTokens } };
   }
@@ -943,7 +940,7 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
 
     let waits = 0;
     for (;;) {
-      // F44: honour a stop requested while this target was queued (e.g. between rate-limit waits,
+      // Honour a stop requested while this target was queued (e.g. between rate-limit waits,
       // or a fresh chunk of the same person's sample) before spending a request on it at all.
       if (stopRequested) {
         touchActivity('stopped');
@@ -964,7 +961,7 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
         });
       } catch (err) {
         currentAbort = null;
-        // F44: /nep warmup stop aborted THIS call -- report it as a clean stop, never a failure
+        // /nep warmup stop aborted THIS call -- report it as a clean stop, never a failure
         // (never retried, never counted towards the 3-consecutive-failures abort).
         if (stopRequested) {
           log.info('bootstrap: the in-flight request was cancelled by /nep warmup stop', {});
@@ -1065,10 +1062,11 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
 
   /** Sets `messageCount`/`firstSeen`/`lastSeen`/`names` on the stored profile FROM the fetched
    * window (`member`, see pickPeople/memberStats: `messages` = count in the window, `firstTs`/
-   * `lastTs` = min/max, `name` = the newest nick) -- SET, never added, so a redo (`/nep bootstrap
-   * user`/`users` reprocessing an already-profiled member) lands on the same counters as a first
-   * write instead of doubling them (unlike src/memory/store.js#touchUser, built for the live
-   * pipeline's one-message-at-a-time calls, which this deliberately does NOT use here). */
+   * `lastTs` = min/max, `name` = the newest nick) -- SET, never added, so a redo (`/nep warmup
+   * users`, with or without `user:<member>`, reprocessing an already-profiled member) lands on the
+   * same counters as a first write instead of doubling them (unlike src/memory/store.js#touchUser,
+   * built for the live pipeline's one-message-at-a-time calls, which this deliberately does NOT use
+   * here). */
   function touchUserFromWindows(guildId, member) {
     const existing = store.getUser(guildId, member.id);
     const names = existing?.names?.length
@@ -1117,7 +1115,7 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
   /** One channel → `channel.md` → `store.updateChannel`. See `callWithRails` for the stop/failure
    * contract; `{ ok: true }` on a clean write, marks the channel done either way it succeeds.
    * `progress` (`{ index, total }`, both 1-based/count, optional) is this channel's position among
-   * the run's eligible channels -- purely for `activity.detail`, a one-off `/nep warmup run
+   * the run's eligible channels -- purely for `activity.detail`, a one-off `/nep warmup channels
    * channel:` call omits it. */
   async function processChannel(guildId, window, cfg, mainChannelIds, progress) {
     touchActivity('channel', { id: window.id, name: window.name, index: progress?.index ?? null, total: progress?.total ?? null });
@@ -1167,7 +1165,7 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
     store.updateChannel(guildId, window.id, clamped);
     // A channel note without its counters/top writers looks dead and
     // anonymous until live traffic slowly fills them in (see the module
-    // header and .claude/docs/prompt-contract.md) -- fill them now from the
+    // header and docs/prompt-contract.md) -- fill them now from the
     // same messages the note itself was written from.
     const facts = channelFactsFromMessages(window, source);
     store.setChannelFacts(guildId, window.id, facts);
@@ -1181,7 +1179,7 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
    * answer is retried once with half the sample; a second failure skips (and marks done) this
    * person. `progress` (`{ index, total }`, optional) is this person's position among the run's
    * eligible people, carried through the half-sample retry -- purely for `activity.detail`, a
-   * one-off `/nep warmup run user:` call omits it. */
+   * one-off `/nep warmup users user:` call omits it. */
   async function processPerson(guildId, windows, member, cfg, mainChannelIds, sampleCfgOverride, progress) {
     touchActivity('person', { id: member.id, name: member.name, index: progress?.index ?? null, total: progress?.total ?? null, chunk: null });
     if (!hot.prompts?.profile) {
@@ -1603,7 +1601,7 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
     };
   }
 
-  /** `/nep warmup status`: `summary()` plus totals, the next target and `activity` (F40, this
+  /** `/nep warmup status`: `summary()` plus totals, the next target and `activity` (this
    * module's own in-memory "what is it doing right now" snapshot -- see `touchActivity` above).
    * Synchronous, side-effect free, never fetches: the totals come from the windows cache when a
    * run or a recent command filled it, otherwise they are reported as unknown (null) -- `activity`
@@ -1652,7 +1650,7 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
 
   /**
    * The stream analyzer's cue that a member's stored portrait misses or contradicts something
-   * (src/memory/update.js's `onPortraitRequest`, .claude/docs/prompt-contract.md, "Data model"):
+   * (src/memory/update.js's `onPortraitRequest`, docs/prompt-contract.md, "Data model"):
    * samples their newest `bootstrap.refreshMessages` own messages exactly like the bootstrap, calls
    * `profile.md` with `<draft>` = the stored character+style and `<hint>` = `reason`, and replaces
    * ONLY `character`/`style` from the answer -- interests/details/episodes/aliases of that answer

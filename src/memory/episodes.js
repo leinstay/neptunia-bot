@@ -1,7 +1,7 @@
 // Pure merge logic for a member's remembered episodes -- moments the persona
 // recalls about the two of them, appended by the analyzer (never rewritten)
 // and evicted by weight then age once the per-person cap is exceeded. See
-// .claude/docs/prompt-contract.md ("episodes" in "The analyzer") and
+// docs/prompt-contract.md ("episodes" in "The analyzer") and
 // src/memory/update.js#applyMemoryUpdate, which routes the model's
 // `users.<id>.episodes` through this module via src/memory/store.js#addEpisodes.
 
@@ -29,7 +29,7 @@ function normalizeWhat(what) {
  * no usable `what` (the one required field). `what`/`feeling` are free prose,
  * clamped tolerantly via src/memory/clamp.js; `quote` is the person's own
  * words verbatim, so it gets a hard cut (`tolerance: 1`) at a clean boundary
- * instead -- see .claude/docs/prompt-contract.md, "Limits are soft for the
+ * instead -- see docs/prompt-contract.md, "Limits are soft for the
  * model, clean in code".
  */
 function sanitizeEpisode(raw, now, clampTolerance) {
@@ -108,7 +108,7 @@ export function mergeEpisodes(existing, incoming, { maxEpisodes, maxNew = Infini
 
 /**
  * Order episodes for rendering: heaviest weight first, then newest (by
- * `date`, `addedAt` as a tiebreaker) -- see .claude/docs/prompt-contract.md,
+ * `date`, `addedAt` as a tiebreaker) -- see docs/prompt-contract.md,
  * `<people>` and `profile.episode(s)`. Pure, does not mutate `episodes`.
  * @param {object[]} episodes
  */

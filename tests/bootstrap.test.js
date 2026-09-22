@@ -687,7 +687,7 @@ async function waitFor(predicate, tries = 50) {
   throw new Error('waitFor: condition not met in time');
 }
 
-/** F44: a fake `llm.complete` whose promise never settles on its own -- it only rejects once
+/** A fake `llm.complete` whose promise never settles on its own -- it only rejects once
  * `opts.signal` (the AbortController `callWithRails` now attaches to every call) actually fires,
  * exactly as a real cancelled `fetch` would. Simulates the model call a `/nep warmup stop` catches
  * mid-flight. */
@@ -879,7 +879,7 @@ test('createBootstrap: run() pauses after the request in flight, resumable', asy
 });
 
 // ---------------------------------------------------------------------------
-// F43: /nep warmup stop -- stopRequested, honoured at the same checkpoints as
+// /nep warmup stop -- stopRequested, honoured at the same checkpoints as
 // store.state.data.paused, cleared at the start of every run().
 // ---------------------------------------------------------------------------
 
@@ -958,7 +958,7 @@ test('createBootstrap: run() clears stopRequested at the start of the next run',
 });
 
 // ---------------------------------------------------------------------------
-// F44: /nep warmup stop cancels the model call ACTUALLY in flight (an
+// /nep warmup stop cancels the model call ACTUALLY in flight (an
 // AbortController threaded through llm.complete's `signal`), not just the
 // loop after it finishes -- see src/memory/bootstrap.js#callWithRails/`stop`.
 // ---------------------------------------------------------------------------
@@ -1158,9 +1158,10 @@ test('createBootstrap: a bad-json person answer is retried once with half the sa
 });
 
 // ---------------------------------------------------------------------------
-// F41: /nep bootstrap user/channel/server (runPerson/runChannel/runServer's
-// richer outcome) and /nep bootstrap users/channels (runUsers/runChannels,
-// the background bulk redo sharing `running` with run()).
+// /nep warmup users user:<member> / channels channel:<channel> / server
+// (runPerson/runChannel/runServer's richer outcome) and /nep warmup
+// users/channels with no member/channel (runUsers/runChannels, the
+// background bulk redo sharing `running` with run()).
 // ---------------------------------------------------------------------------
 
 test('createBootstrap: runPerson reports "no messages in the window" when the member never wrote at all', async () => {
@@ -1562,7 +1563,7 @@ test('createBootstrap: status() reports phase, progress and the next target', as
 });
 
 // ---------------------------------------------------------------------------
-// status().activity -- in-memory run phase (F40), never persisted
+// status().activity -- in-memory run phase, never persisted
 // ---------------------------------------------------------------------------
 
 test('activity: idle by default, before any run', () => {

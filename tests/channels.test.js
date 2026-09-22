@@ -1,5 +1,5 @@
 // Tests for src/memory/channels.js: pure activity classification and channel
-// rendering for the <server> prompt block (see .claude/docs/prompt-contract.md,
+// rendering for the <server> prompt block (see docs/prompt-contract.md,
 // "Server memory (the channel map)"). tests/fixtures/labels.js is an English
 // fixture covering every key of the prompt contract, including labels.server.*.
 import { test } from 'node:test';

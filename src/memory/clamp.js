@@ -1,9 +1,9 @@
 // Pure text clamping shared by every place the analyzer's free text is cut
-// down to a configured limit (see .claude/docs/prompt-contract.md, "Limits
+// down to a configured limit (see docs/prompt-contract.md, "Limits
 // are soft for the model, clean in code"). The model cannot count characters
 // exactly and routinely overshoots a stated limit by 10-30%, and member
 // mentions are `<@id>` tokens (20+ characters) that must never be split in
-// half -- a blind `.slice(0, limit)` used to do both. `clampText` instead:
+// half -- a blind `.slice(0, limit)` handles neither. `clampText` instead:
 //
 //   - lets a stored value overshoot the limit by up to `tolerance` (soft,
 //     for prose the model wrote to a limit named in the prompt) before

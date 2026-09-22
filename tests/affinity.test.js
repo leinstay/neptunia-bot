@@ -1,5 +1,5 @@
 // Tests for src/memory/affinity.js: pure attitude scoring for
-// features.relationships (.claude/docs/prompt-contract.md, "Relationships").
+// features.relationships (docs/prompt-contract.md, "Relationships").
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { emptyAffinity, affinityBand, applyDelta, ignoreAdjustment, roundScore } from '../src/memory/affinity.js';
@@ -166,7 +166,7 @@ test('ignoreAdjustment: score 50 subtracts half the affinityLikeBonus (linear)',
 });
 
 // --- applyDelta: relationships.damping --------------------------------------
-// F33: undamped growth saturates every active member at +-100 well before a
+// Undamped growth saturates every active member at +-100 well before a
 // server's history runs out. `opts.damping` (config `relationships.damping`,
 // default true) scales a delta that pushes the score further from zero by
 // `(1 - |score| / 100)`; a delta that moves toward zero, starts at zero, or

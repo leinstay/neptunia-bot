@@ -1,6 +1,6 @@
 // Pure logic for the server memory: how alive a channel is (computed from
 // real message statistics, never the model's call — see
-// .claude/docs/prompt-contract.md, "Server memory (the channel map)") and how
+// docs/prompt-contract.md, "Server memory (the channel map)") and how
 // one channel entry is rendered into the <server> prompt block. No I/O here;
 // `now` and the channel record are always injected.
 

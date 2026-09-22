@@ -3,7 +3,7 @@
 // often it was confirmed (`weight`) with how long ago it was last mentioned,
 // so a frequent-and-recent item outranks an ancient heavy one and a newcomer
 // can gather weight in the unseen tail instead of being evicted the moment it
-// arrives -- see .claude/docs/prompt-contract.md, "More is stored than shown,
+// arrives -- see docs/prompt-contract.md, "More is stored than shown,
 // and rank decays with age". Used by the storage-eviction code in
 // interests.js/details.js, the `<existing_profiles>` view builder
 // (src/memory/update.js) and the chat-facing renderer (src/behavior/prompt.js)
@@ -51,7 +51,7 @@ export function rank(item, halfLifeDays) {
  * a further tie (including two items that both lack any date) keeps whichever
  * sits LATER in `items` ahead -- a just-touched item in this very call is at
  * least as fresh as one nothing happened to, so it is treated as the newer of
- * the two. See .claude/docs/prompt-contract.md, "More is stored than shown,
+ * the two. See docs/prompt-contract.md, "More is stored than shown,
  * and rank decays with age".
  * @param {object[]} items
  * @param {number} [halfLifeDays]

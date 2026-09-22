@@ -3,7 +3,7 @@
 // only the relevant few of possibly hundreds are shown). Storage itself
 // (data/guilds/<id>/lore.json) lives behind src/memory/store.js, same
 // cache/dirty/atomic pattern as everything else; this module never touches
-// disk. See .claude/docs/prompt-contract.md ("<lore>" and "lore" in "The
+// disk. See docs/prompt-contract.md ("<lore>" and "lore" in "The
 // analyzer").
 
 import { clampText } from './clamp.js';
@@ -22,8 +22,8 @@ function normalizeTitle(title) {
 }
 
 /** Lowercase, trim, drop too-short/duplicate keys, clamp an over-long one to
- * MAX_KEY at a word boundary (never dropped for being too long -- see the
- * F31 addendum), keep at most MAX_KEYS. */
+ * MAX_KEY at a word boundary (never dropped for being too long), keep at
+ * most MAX_KEYS. */
 function normalizeKeys(rawKeys) {
   if (!Array.isArray(rawKeys)) return [];
   const seen = new Set();
@@ -191,7 +191,7 @@ export function keywordMatches(entries, recentTexts) {
  * Entries to show in one turn's `<lore>` block: every entry marked `always`
  * (first, never counted against `maxMatches`), plus up to `maxMatches` of the
  * remaining entries whose keys occur in `recentTexts`, most relevant first.
- * See .claude/docs/prompt-contract.md, "<lore>".
+ * See docs/prompt-contract.md, "<lore>".
  * @param {object[]} entries
  * @param {string[]} recentTexts  Recent plain message texts, oldest first.
  * @param {{ maxMatches?: number }} [opts]

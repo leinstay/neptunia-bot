@@ -5,7 +5,7 @@
 // exactly like interests (src/memory/interests.js#applyRankedOps): `{ name,
 // weight, firstSeen, lastSeen }`, a sighting bumps weight on the same
 // confirmGapHours rule, eviction keeps the top-ranked ones once over the
-// storage cap. See .claude/docs/prompt-contract.md, "Aliases".
+// storage cap. See docs/prompt-contract.md, "Aliases".
 
 import { applyRankedOps, effectiveStorageCap, normalizeTopic } from './interests.js';
 
