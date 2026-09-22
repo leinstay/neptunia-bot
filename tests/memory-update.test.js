@@ -8,7 +8,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { createStore } from '../src/memory/store.js';
-import { isDue, buildMemoryRequest, applyMemoryUpdate, createMemoryUpdater, touchMemory, computeSeenAt, batchAuthorNamesMap } from '../src/memory/update.js';
+import { isDue, buildMemoryRequest, applyMemoryUpdate, createMemoryUpdater, touchMemory, computeSeenAt, batchAuthorNamesMap, characterText } from '../src/memory/update.js';
 import { createCalibrator, estimateTokens, estimateMessages } from '../src/llm/tokens.js';
 import { formatTranscript } from '../src/discord/format.js';
 import { TokenLimitError } from '../src/llm/openrouter.js';
@@ -505,6 +505,61 @@ test('buildMemoryRequest: relationships off never renders a <character> block', 
 
   assert.ok(!llmMessages[1].content.includes('<character>'));
   assert.ok(!llmMessages[1].content.includes('Card of Nept'));
+});
+
+// ---- F43: <character> = card + the owner's live rules, same as the chat prompt --------
+
+test('characterText: joins the card and the rules with a blank line, both {{name}} filled', () => {
+  const text = characterText({ 'character-card': 'Card of {{name}}.', rules: 'Never mention {{name}} twice.' }, 'Nept');
+  assert.equal(text, 'Card of Nept.\n\nNever mention Nept twice.');
+});
+
+test('characterText: no rules -> the card alone', () => {
+  const text = characterText({ 'character-card': 'Card of {{name}}.' }, 'Nept');
+  assert.equal(text, 'Card of Nept.');
+});
+
+test('characterText: empty rules -> the card alone', () => {
+  const text = characterText({ 'character-card': 'Card of {{name}}.', rules: '' }, 'Nept');
+  assert.equal(text, 'Card of Nept.');
+});
+
+test('buildMemoryRequest: relationships on appends prompts.rules after the card in the <character> block', () => {
+  const config = makeConfig({ features: { relationships: true } });
+  const calibrator = createCalibrator();
+  const messages = [slimMessage({ id: 'm1', ts: Date.UTC(2026, 0, 1, 12, 0, 0) })];
+
+  const { messages: llmMessages } = buildMemoryRequest({
+    prompts: { memory: 'sys', 'character-card': 'Card of {{name}}.', rules: 'Never say {{name}} twice.', labels },
+    config,
+    calibrator,
+    profiles: {},
+    guildMemory: {},
+    messages,
+    selfName: 'Nept',
+  });
+
+  const user = llmMessages[1].content;
+  assert.match(user, /<character>\nCard of Nept\.\n\nNever say Nept twice\.\n<\/character>/);
+});
+
+test('buildMemoryRequest: relationships on with no rules configured renders the card alone', () => {
+  const config = makeConfig({ features: { relationships: true } });
+  const calibrator = createCalibrator();
+  const messages = [slimMessage({ id: 'm1', ts: Date.UTC(2026, 0, 1, 12, 0, 0) })];
+
+  const { messages: llmMessages } = buildMemoryRequest({
+    prompts: { memory: 'sys', 'character-card': 'Card of {{name}}.', labels },
+    config,
+    calibrator,
+    profiles: {},
+    guildMemory: {},
+    messages,
+    selfName: 'Nept',
+  });
+
+  const user = llmMessages[1].content;
+  assert.match(user, /<character>\nCard of Nept\.\n<\/character>/);
 });
 
 test('buildMemoryRequest: relationships on adds affinity: { score, reason } to each existing profile', () => {

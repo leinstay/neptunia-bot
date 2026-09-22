@@ -12,15 +12,16 @@
 // clampText/toTokens/fromTokens helpers).
 //
 // `peopleReport` stays read-only (never touches the store) for `/nep
-// bootstrap people`. `createBootstrap().run()` is the write path: channels →
+// warmup people`. `createBootstrap().run()` is the write path: channels →
 // people → server, in order, resumable (progress in `state.bootstrap`,
 // flushed after every request), muting the persona for as long as it is in
 // flight (`isBootstrapping()`, wired into src/discord/events.js,
 // src/behavior/spontaneous.js and src/admin.js). `runPerson`/`runChannel`/
 // `runServer` (re)do exactly one target now, synchronously, for `/nep
-// bootstrap user`/`channel`/`server`; `runUsers`/`runChannels` (re)do EVERY
-// qualifying member/every readable channel now, sharing `running` and every
-// rail with `run()`, for `/nep warmup users`/`channels` -- a redo always
+// warmup users user:<member>` / `channels channel:<channel>` / `server`;
+// `runUsers`/`runChannels` (re)do EVERY qualifying member/every readable
+// channel now, sharing `running` and every rail with `run()`, for `/nep
+// warmup users`/`channels` given with no member/channel -- a redo always
 // re-processes its targets regardless of `state.bootstrap.done`, then marks
 // them done, so `/nep warmup status` reports the same progress either way.
 // `refreshPortrait()` is the stream analyzer's "the stored portrait misses
@@ -39,7 +40,7 @@ import { formatTranscript, renderTranscript } from '../discord/format.js';
 import { fitSections, SectionsTooLargeError } from '../llm/budget.js';
 import { estimateTokens, estimateMessages } from '../llm/tokens.js';
 import { parseJsonObject } from '../llm/parse.js';
-import { applyMemoryUpdate } from './update.js';
+import { applyMemoryUpdate, characterText } from './update.js';
 import { topByRank } from './ranking.js';
 import { clampText } from './clamp.js';
 import { normalizeTopic } from './interests.js';
@@ -92,7 +93,10 @@ const BOOTSTRAP_LIMIT_DEFAULTS = {
 
 // ---------------------------------------------------------------------------
 // Small pure helpers local to this module (deliberately not imported from
-// src/memory/update.js, whose internals are off-limits to this task).
+// src/memory/update.js, whose internals are off-limits to this task, except
+// `characterText` -- the one helper the two modules deliberately share, so a
+// `/nep rule add` reaches every `<character>` block the same way it reaches
+// the chat prompt).
 // ---------------------------------------------------------------------------
 
 function block(tag, body) {
@@ -176,8 +180,8 @@ export function pickPeople(windows, cfg = {}) {
 }
 
 /** One member's stats (see pickPeople), with no threshold/cap applied -- `null` when they wrote
- * nothing in `windows` at all. Used by `/nep warmup user` to report on exactly the member asked
- * for, regardless of `bootstrap.minMessages`. */
+ * nothing in `windows` at all. Used by `/nep warmup users user:<member>` to report on exactly the
+ * member asked for, regardless of `bootstrap.minMessages`. */
 export function memberStats(windows, memberId) {
   const entry = collectAuthorStats(windows).get(String(memberId));
   if (!entry) return null;
@@ -767,6 +771,10 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
   let running = false; // a full run() or one-off runXxx() in flight -- see isBootstrapping()
   let idleWaiters = []; // resolvers for waitIdle(), notified once running goes back to false
   let consecutiveFailures = 0; // resets on any successful request; 3 in a row aborts the run (resumable)
+  let stopRequested = false; // F43/F44: /nep warmup stop -- see `stop()` and run()'s own checkpoints
+  let currentAbort = null; // F44: the AbortController for whichever model call is in flight right now
+  // (callWithRails), or null between calls -- `stop()` aborts it so the request itself is cancelled,
+  // not just the loop stopped after it finishes.
 
   // In-memory-only run activity (F40): exposed via status() as `activity` so `/nep bootstrap
   // status` can show WHICH phase a run is actually in right now (fetching history, describing a
@@ -875,6 +883,21 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
     return running;
   }
 
+  /** `/nep warmup stop` (F43/F44): ENDS any warmup work for good, not just after the request in
+   * flight -- sets `stopRequested`, which the same checkpoints in `run()`/`startBulk()` that
+   * already honour `store.state.data.paused` also check before starting a new target, AND aborts
+   * the model call for the target actually in flight right now (`currentAbort`, see
+   * `callWithRails`), so no further tokens are spent past this moment and nothing partial is
+   * written for that target (activity ends up `stopped`, progress kept, nothing marks
+   * `state.bootstrap` aborted). Every entry point (`run()`, `runOneTarget()`, `startBulk()`) clears
+   * the flag again on its own next start. A no-op, reported as such, when no run is in flight. */
+  function stop() {
+    if (!running) return { ok: false };
+    stopRequested = true;
+    currentAbort?.abort();
+    return { ok: true };
+  }
+
   function markDone(kind, id) {
     const bs = bootstrapState(store);
     if (kind === 'server') {
@@ -920,7 +943,16 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
 
     let waits = 0;
     for (;;) {
+      // F44: honour a stop requested while this target was queued (e.g. between rate-limit waits,
+      // or a fresh chunk of the same person's sample) before spending a request on it at all.
+      if (stopRequested) {
+        touchActivity('stopped');
+        return { ok: false, stop: true, reason: 'stopped' };
+      }
+
       let completion;
+      const controller = new AbortController();
+      currentAbort = controller;
       try {
         completion = await llm.complete(messages, {
           model: hot.config.memory?.model ?? hot.config.llm?.model,
@@ -928,8 +960,17 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
           maxRequestTokens: bootstrapRequestCap(cfg),
           countAgainstDailyCap: false,
           timeoutMs: hot.config.memory?.timeoutMs ?? hot.config.llm?.timeoutMs,
+          signal: controller.signal,
         });
       } catch (err) {
+        currentAbort = null;
+        // F44: /nep warmup stop aborted THIS call -- report it as a clean stop, never a failure
+        // (never retried, never counted towards the 3-consecutive-failures abort).
+        if (stopRequested) {
+          log.info('bootstrap: the in-flight request was cancelled by /nep warmup stop', {});
+          touchActivity('stopped');
+          return { ok: false, stop: true, reason: 'stopped' };
+        }
         if (isRateLimited(err)) {
           waits += 1;
           const maxWaits = Number.isFinite(cfg.rateLimitMaxWaits) ? cfg.rateLimitMaxWaits : 36;
@@ -961,6 +1002,7 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
         return { ok: false, stop: false, reason: 'llm-error', error: err };
       }
 
+      currentAbort = null;
       consecutiveFailures = 0;
       bs.tokensUsed += completion.usage?.total_tokens ?? completion.estimated ?? estimate;
       bs.requests += 1;
@@ -1168,7 +1210,7 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
     const limit = bootstrapRequestCap(cfg);
     const cost = (text) => calibrator.apply(estimateTokens(text)) + 2;
     const system = fillTemplate(hot.prompts.profile, profileTemplateValues(hot.config, selfName));
-    const characterBlock = block('character', fillTemplate(hot.prompts['character-card'], { name: selfName }));
+    const characterBlock = block('character', characterText(hot.prompts, selfName));
     const memberLine = `${member.name} (id:${member.id}), ${member.messages} messages in the window, first ${isoDateOrDash(member.firstTs)}, last ${isoDateOrDash(member.lastTs)}`;
     const memberBlock = block('member', memberLine);
     const nameOf = buildNameIndex(windows);
@@ -1177,7 +1219,7 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
     let draft = null;
     let answer = null;
     let chunksDone = 0; // completed chunks so far -- feeds the "chunk k/n" detail below
-    let tokensUsed = 0; // summed across every chunk -- surfaced to `/nep warmup user`'s reply
+    let tokensUsed = 0; // summed across every chunk -- surfaced to `/nep warmup users user:<member>`'s reply
 
     while (remaining.length > 0) {
       if (store.state.data.paused) {
@@ -1263,7 +1305,7 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
     const timezone = hot.config.bot?.timezone ?? 'UTC';
 
     const system = fillTemplate(hot.prompts.server, serverTemplateValues(hot.config, selfName));
-    const characterBlock = block('character', fillTemplate(hot.prompts['character-card'], { name: selfName }));
+    const characterBlock = block('character', characterText(hot.prompts, selfName));
 
     const channelsView = {};
     for (const window of windows) {
@@ -1355,6 +1397,7 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
 
     running = true;
     consecutiveFailures = 0;
+    stopRequested = false;
     const bs = bootstrapState(store);
     if (!bs.startedAt) bs.startedAt = new Date(now()).toISOString();
     bs.finishedAt = null;
@@ -1375,6 +1418,10 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
           touchActivity('paused');
           return { ok: false, message: 'paused' };
         }
+        if (stopRequested) {
+          touchActivity('stopped');
+          return { ok: false, message: 'stopped' };
+        }
         if (bs.done.channels.includes(window.id)) continue;
         const outcome = await processChannel(guildId, window, cfg, mainChannelIds, { index: i + 1, total: eligibleChannels.length });
         if (outcome.stop) return { ok: false, message: outcome.message ?? outcome.reason };
@@ -1387,6 +1434,10 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
           touchActivity('paused');
           return { ok: false, message: 'paused' };
         }
+        if (stopRequested) {
+          touchActivity('stopped');
+          return { ok: false, message: 'stopped' };
+        }
         if (bs.done.people.includes(person.id)) continue;
         const outcome = await processPerson(guildId, windows, person, cfg, mainChannelIds, undefined, { index: i + 1, total: people.length });
         if (outcome.stop) return { ok: false, message: outcome.message ?? outcome.reason };
@@ -1396,6 +1447,10 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
         if (store.state.data.paused) {
           touchActivity('paused');
           return { ok: false, message: 'paused' };
+        }
+        if (stopRequested) {
+          touchActivity('stopped');
+          return { ok: false, message: 'stopped' };
         }
         const outcome = await processServer(guildId, windows, cfg, mainChannelIds, people);
         if (outcome.stop) return { ok: false, message: outcome.message ?? outcome.reason };
@@ -1413,7 +1468,8 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
     }
   }
 
-  /** `/nep warmup user|channel|server`: (re)do exactly one target right now, synchronously.
+  /** `/nep warmup users user:<member>` / `channels channel:<channel>` / `server`: (re)do exactly
+   * one target right now, synchronously.
    * Refused while a run (full, another one-off, or a `users`/`channels` bulk redo) is already in
    * flight, or while paused. */
   async function runOneTarget(guildId, kind, id) {
@@ -1424,6 +1480,7 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
 
     running = true;
     consecutiveFailures = 0;
+    stopRequested = false;
     try {
       const cfg = hot.config.bootstrap ?? {};
       const windows = await getWindows(guildId, guild, cfg);
@@ -1479,12 +1536,17 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
 
     running = true;
     consecutiveFailures = 0;
+    stopRequested = false;
 
     (async () => {
       try {
         for (let i = 0; i < targets.length; i += 1) {
           if (store.state.data.paused) {
             touchActivity('paused');
+            return;
+          }
+          if (stopRequested) {
+            touchActivity('stopped');
             return;
           }
           const outcome =
@@ -1569,7 +1631,7 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
     }
 
     const phase = running ? 'running' : !base.startedAt ? 'not started' : base.finishedAt ? 'finished' : base.aborted ? `aborted (${base.aborted})` : 'idle';
-    return { ...base, phase, channelsEligible, peopleEligible, nextTarget, activity: { ...activity } };
+    return { ...base, phase, channelsEligible, peopleEligible, nextTarget, activity: { ...activity }, stopRequested };
   }
 
   /** `/nep warmup reset`: clears `state.bootstrap` (progress only, never any profile/channel/
@@ -1666,7 +1728,7 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
     const items = markOwnContext(formatTranscript(sample.messages, formatOptions), sample.ownIds, labels);
 
     const system = fillTemplate(hot.prompts.profile, profileTemplateValues(hot.config, selfName));
-    const characterBlock = block('character', fillTemplate(hot.prompts['character-card'], { name: selfName }));
+    const characterBlock = block('character', characterText(hot.prompts, selfName));
     const memberLine = `${member.name} (id:${member.id}), ${member.messages} messages in the window, first ${isoDateOrDash(member.firstTs)}, last ${isoDateOrDash(member.lastTs)}`;
     const memberBlock = block('member', memberLine);
     const draftBlock = block('draft', JSON.stringify({ character: profile?.character ?? '', style: profile?.style ?? '' }));
@@ -1722,6 +1784,7 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
   return {
     peopleReport,
     run,
+    stop,
     runPerson: (guildId, userId) => runOneTarget(guildId, 'person', userId),
     runChannel: (guildId, channelId) => runOneTarget(guildId, 'channel', channelId),
     runServer: (guildId) => runOneTarget(guildId, 'server', null),

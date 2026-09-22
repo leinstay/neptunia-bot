@@ -471,6 +471,71 @@ test('complete: llm.provider is read fresh on every call (hot-reloadable), not c
   assert.equal('provider' in bodies[1], false);
 });
 
+// F44: options.signal -- an external AbortController cancels the in-flight
+// request (for /nep warmup stop), and is never retried afterwards.
+test('complete: options.signal aborts the in-flight fetch and rejects without retrying', async () => {
+  let calls = 0;
+  let seenSignal;
+  const controller = new AbortController();
+  const llm = createLlm({
+    apiKey: 'k',
+    getConfig: () => baseConfig({ retries: 2 }),
+    calibrator: fakeCalibrator(),
+    state: fakeState(),
+    fetchImpl: (url, init) => {
+      calls += 1;
+      seenSignal = init.signal;
+      return new Promise((_resolve, reject) => {
+        init.signal.addEventListener('abort', () => {
+          const err = new Error('The operation was aborted.');
+          err.name = 'AbortError';
+          reject(err);
+        });
+      });
+    },
+  });
+
+  const promise = llm.complete([{ role: 'user', content: 'hi' }], { signal: controller.signal });
+  controller.abort();
+
+  await assert.rejects(promise, (err) => err.name === 'AbortError');
+  assert.equal(seenSignal.aborted, true, 'the signal handed to fetch must reflect the external abort');
+  assert.equal(calls, 1, 'a deliberate external abort must never be retried');
+});
+
+test('complete: options.signal already aborted before the call is never sent to fetch', async () => {
+  let calls = 0;
+  const controller = new AbortController();
+  controller.abort();
+  const llm = createLlm({
+    apiKey: 'k',
+    getConfig: () => baseConfig({ retries: 2 }),
+    calibrator: fakeCalibrator(),
+    state: fakeState(),
+    fetchImpl: async () => { calls += 1; return okResponse('x'); },
+  });
+
+  await assert.rejects(llm.complete([{ role: 'user', content: 'hi' }], { signal: controller.signal }));
+  assert.equal(calls, 0);
+});
+
+test('complete: without options.signal, behaviour is unchanged (only the per-request timeout applies)', async () => {
+  let seenSignal;
+  const llm = createLlm({
+    apiKey: 'k',
+    getConfig: () => baseConfig({ timeoutMs: 100000 }),
+    calibrator: fakeCalibrator(),
+    state: fakeState(),
+    fetchImpl: async (url, init) => {
+      seenSignal = init.signal;
+      return okResponse('hi');
+    },
+  });
+  const result = await llm.complete([{ role: 'user', content: 'hi' }]);
+  assert.equal(result.text, 'hi');
+  assert.equal(seenSignal.aborted, false);
+});
+
 // Only ONE test exercises the real retry backoff sleep (~1.5s at attempt 1).
 test('complete: retries once on a 503 then succeeds', async () => {
   let calls = 0;

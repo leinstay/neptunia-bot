@@ -270,6 +270,22 @@ function existingLoreBlock(loreEntries, batchTexts, nameOf) {
 }
 
 /**
+ * The character card followed by the owner's live rules (`prompts.rules`) -- exactly how the chat
+ * system prompt composes the same two files (src/behavior/prompt.js#buildRequest): both
+ * placeholders filled the same way, joined by a blank line; rules absent/empty -> the card alone.
+ * Shared by this module's own `<character>` block and every request src/memory/bootstrap.js sends
+ * that carries one, so a `/nep rule add` reaches memory work the same turn it reaches the chat
+ * prompt, not just the live persona.
+ * @param {object} prompts  Live prompts (`hot.prompts`, or a fixture with the same shape).
+ * @param {string} selfName
+ * @returns {string}
+ */
+export function characterText(prompts, selfName) {
+  const nameFill = (text) => fillTemplate(text, { name: selfName });
+  return [prompts['character-card'], prompts.rules].map(nameFill).filter(Boolean).join('\n\n');
+}
+
+/**
  * Build one memory-update LLM request. Pure: no I/O, no clock reads besides
  * what is already baked into `messages`.
  *
@@ -302,7 +318,7 @@ export function buildMemoryRequest({ prompts, config, calibrator, profiles, guil
   const loreOn = config.features?.lore !== false;
   const resolveName = typeof nameOf === 'function' ? nameOf : () => null;
   const system = fillTemplate(prompts.memory, memoryTemplateValues(config, selfName));
-  const characterBlock = relationships ? block('character', fillTemplate(prompts['character-card'], { name: selfName })) : '';
+  const characterBlock = relationships ? block('character', characterText(prompts, selfName)) : '';
 
   const existingProfiles = {};
   for (const [id, profile] of Object.entries(profiles ?? {})) {

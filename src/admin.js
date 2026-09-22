@@ -1305,10 +1305,19 @@ async function cmdPing(args) {
     return result.ok ? 'Bootstrap run finished (or already fully done).' : `Bootstrap run stopped: ${result.message ?? 'unknown reason'} (resumable -- run again to continue).`;
   }
 
-  /** `/nep warmup user`: a short summary of what was actually written -- sample size, tokens,
-   * counts of interests/details/episodes/aliases, and the first ~300 chars of the character field.
-   * Relays `outcome.message` unchanged when nothing was written (missing prompt file, no messages in
-   * the window, a bad model answer, ...). */
+  /** `/nep warmup stop` (F43/F44): ends any warmup work in flight for good -- the full run, a
+   * `users`/`channels` bulk redo, or a synchronous one-off -- including cancelling the model call
+   * actually in progress (see src/memory/bootstrap.js#stop). Reads no `data/` itself, so not
+   * guarded by assertNotPaused(). */
+  function cmdWarmupStop() {
+    const result = bootstrap.stop();
+    return result.ok ? 'warmup stopped' : 'no warmup in flight';
+  }
+
+  /** `/nep warmup users user:<member>`: a short summary of what was actually written -- sample
+   * size, tokens, counts of interests/details/episodes/aliases, and the first ~300 chars of the
+   * character field. Relays `outcome.message` unchanged when nothing was written (missing prompt
+   * file, no messages in the window, a bad model answer, a stop mid-flight, ...). */
   function formatBootstrapUserWritten(outcome) {
     if (!outcome.ok) return outcome.message ?? outcome.reason ?? 'not done';
     const { member, answer, sample, tokensUsed, chunks } = outcome;
@@ -1324,31 +1333,29 @@ async function cmdPing(args) {
     ].join('\n');
   }
 
-  async function cmdBootstrapUser(args, context) {
+  /** `/nep warmup users [user]` (F44, merges the old `warmup user`/`warmup users`): a `user` given
+   * -> (re)profiles exactly that member now, synchronously; omitted -> starts a background redo of
+   * every qualifying member, sharing every rail with the full run. */
+  async function cmdWarmupUsers(args, context) {
     const guildId = resolvedGuildId(context);
     if (!guildId) throw new Error('no guild resolved yet');
     assertNotPaused();
+
     const userId = args?.userId;
-    if (!userId) throw new Error('a user is required');
-
-    const result = await bootstrap.runPerson(guildId, userId);
-    return formatBootstrapUserWritten(result.ok ? result.outcome : result);
-  }
-
-  async function cmdBootstrapUsers(_args, context) {
-    const guildId = resolvedGuildId(context);
-    if (!guildId) throw new Error('no guild resolved yet');
-    assertNotPaused();
+    if (userId) {
+      const result = await bootstrap.runPerson(guildId, userId);
+      return formatBootstrapUserWritten(result.ok ? result.outcome : result);
+    }
 
     const result = await bootstrap.runUsers(guildId);
     if (!result.ok) return result.message ?? 'not started';
     return `started ${result.count} members`;
   }
 
-  /** `/nep warmup channel`: the note actually written (purpose/topics/tone), plus the counters
-   * and top writers `store.setChannelFacts` just filled in (F42) -- writers resolved to their
-   * current stored name, an id with no profile skipped. Relays `outcome.message` unchanged when
-   * nothing was written. */
+  /** `/nep warmup channels channel:<channel>`: the note actually written (purpose/topics/tone),
+   * plus the counters and top writers `store.setChannelFacts` just filled in (F42) -- writers
+   * resolved to their current stored name, an id with no profile skipped. Relays `outcome.message`
+   * unchanged when nothing was written. */
   function formatBootstrapChannelWritten(outcome, guildId) {
     if (!outcome.ok) return outcome.message ?? outcome.reason ?? 'not done';
     const { channel, result, facts } = outcome;
@@ -1369,21 +1376,19 @@ async function cmdPing(args) {
     return lines.join('\n');
   }
 
-  async function cmdBootstrapChannel(args, context) {
+  /** `/nep warmup channels [channel]` (F44, merges the old `warmup channel`/`warmup channels`): a
+   * `channel` given -> (re)describes exactly that channel now, synchronously; omitted -> starts a
+   * background redo of every readable channel, sharing every rail with the full run. */
+  async function cmdWarmupChannels(args, context) {
     const guildId = resolvedGuildId(context);
     if (!guildId) throw new Error('no guild resolved yet');
     assertNotPaused();
+
     const channelId = args?.channelId;
-    if (!channelId) throw new Error('a channel is required');
-
-    const result = await bootstrap.runChannel(guildId, channelId);
-    return formatBootstrapChannelWritten(result.ok ? result.outcome : result, guildId);
-  }
-
-  async function cmdBootstrapChannels(_args, context) {
-    const guildId = resolvedGuildId(context);
-    if (!guildId) throw new Error('no guild resolved yet');
-    assertNotPaused();
+    if (channelId) {
+      const result = await bootstrap.runChannel(guildId, channelId);
+      return formatBootstrapChannelWritten(result.ok ? result.outcome : result, guildId);
+    }
 
     const result = await bootstrap.runChannels(guildId);
     if (!result.ok) return result.message ?? 'not started';
@@ -1448,6 +1453,8 @@ async function cmdPing(args) {
       }
       case 'paused':
         return 'paused';
+      case 'stopped':
+        return 'stopped';
       case 'finished':
         return 'finished';
       case 'aborted':
@@ -1531,10 +1538,9 @@ async function cmdPing(args) {
     'model.set': (args) => cmdModelSet(args),
     'warmup.people': withBootstrap((args, context) => cmdBootstrapPeople(args, context)),
     'warmup.run': withBootstrap((args, context) => cmdBootstrapRun(args, context)),
-    'warmup.user': withBootstrap((args, context) => cmdBootstrapUser(args, context)),
-    'warmup.users': withBootstrap((args, context) => cmdBootstrapUsers(args, context)),
-    'warmup.channel': withBootstrap((args, context) => cmdBootstrapChannel(args, context)),
-    'warmup.channels': withBootstrap((args, context) => cmdBootstrapChannels(args, context)),
+    'warmup.stop': withBootstrap(() => cmdWarmupStop()),
+    'warmup.users': withBootstrap((args, context) => cmdWarmupUsers(args, context)),
+    'warmup.channels': withBootstrap((args, context) => cmdWarmupChannels(args, context)),
     'warmup.server': withBootstrap((args, context) => cmdBootstrapServer(args, context)),
     'warmup.status': withBootstrap((args, context) => cmdBootstrapStatus(args, context)),
     'warmup.reset': withBootstrap(() => cmdBootstrapReset()),

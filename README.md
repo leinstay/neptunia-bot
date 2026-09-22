@@ -67,7 +67,7 @@ Both are hot-reloaded.
 
 Write your prompts in the language the character speaks. Translate `labels.json` too: copy it to `prompts.local/`, change the `locale` and values, so the model reads one language throughout.
 
-The memory analyzer judges how the character feels about people. It receives your character card, so include what your character likes and dislikes; that drives the relationship scores.
+The memory analyzer judges how the character feels about people. Both it and the warmup receive your character card and `rules.md`, so include what your character likes and dislikes; a live rule about voice or judgement shapes portraits and attitude the same way the card does.
 
 ### Tips
 
@@ -294,7 +294,7 @@ Progress is persisted after every request and survives restarts. The total token
 
 After the warmup finishes, the live stream analyzer keeps memory current. It processes batches of new messages and updates interests, details, attitudes, episodes, aliases, channel notes and server patterns. When it detects that a stored portrait misses a recurring habit or contradicts how the person now writes, the engine refreshes the portrait from `bootstrap.refreshMessages` recent messages using the profile prompt. A portrait can be refreshed at most once every `memory.portraitRefreshHours` hours, up to `memory.portraitRefreshPerDay` times per day across the server. `/nep memory refresh <user>` forces one.
 
-`/nep warmup run` starts or resumes a full run. `/nep warmup user` and `/nep warmup channel` rerun a single member or channel; `/nep warmup users`, `/nep warmup channels` and `/nep warmup server` rerun an entire phase. `/nep warmup people` lists qualifying members. `/nep warmup status` shows progress and token usage. `/nep warmup reset` clears progress only, not stored memory. All warmup commands except `status` and `people` are refused while paused; `run`, `users` and `channels` are also refused while a run is in flight. For a truly fresh start, use `/nep memory wipe` first: it clears member profiles with their attitudes and moments, server habits, the channel map, the analyzer's lore entries and the warmup progress, after the owner types the server's exact name.
+`/nep warmup run` starts or resumes a full run. `/nep warmup users [member]` profiles one member or every qualifying member; `/nep warmup channels [channel]` describes one channel or every readable channel; `/nep warmup server` rebuilds the server notes and lore. `/nep warmup people` lists qualifying members. `/nep warmup status` shows progress and token usage. `/nep warmup stop` ends any warmup work at once: the request in flight is cancelled, progress is kept so `run` can resume. `/nep warmup reset` clears progress only, not stored memory. All warmup commands except `status`, `people` and `stop` are refused while paused; `run`, `users` and `channels` are also refused while a run is in flight. For a truly fresh start, use `/nep memory wipe` first: it clears member profiles with their attitudes and moments, server habits, the channel map, the analyzer's lore entries and the warmup progress, after the owner types the server's exact name.
 
 ### `bootstrap`
 
@@ -354,13 +354,12 @@ One Discord slash command, `/nep` (the name comes from `bot.commandName`). Guild
 | `/nep lore show <id>` | Show a lorebook entry |
 | `/nep lore remove <id>` | Remove a lorebook entry |
 | `/nep warmup run` | Start or resume a full run: channels, then people, then server |
-| `/nep warmup user <member>` | Profile or re-profile one member now |
-| `/nep warmup users` | Re-profile every qualifying member |
-| `/nep warmup channel <channel>` | Describe or re-describe one channel now |
-| `/nep warmup channels` | Re-describe every readable channel |
+| `/nep warmup users [member]` | With a member: profile or re-profile that one now; without: re-profile every qualifying member |
+| `/nep warmup channels [channel]` | With a channel: describe or re-describe that one now; without: every readable channel |
 | `/nep warmup server` | Rebuild the server notes and lore now |
 | `/nep warmup people` | List members who qualify |
 | `/nep warmup status` | Show warmup progress and token usage |
+| `/nep warmup stop` | End any warmup work at once; the request in flight is cancelled, progress is kept so `run` can resume |
 | `/nep warmup reset` | Clear warmup progress, not stored memory |
 
 ## How a turn works

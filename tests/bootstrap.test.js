@@ -675,6 +675,39 @@ test('createBootstrap: peopleReport never writes anything under a real data/ dir
 // (temp-dir) store.
 // ---------------------------------------------------------------------------
 
+/** Polls `predicate` on the microtask queue (no real timer) until it is true, or throws after
+ * `tries` empty polls -- used only to observe a fake async dependency (fetch, `llm.complete`) has
+ * actually been reached mid-flight, without hardcoding how many awaits its callers take to get
+ * there. */
+async function waitFor(predicate, tries = 50) {
+  for (let i = 0; i < tries; i += 1) {
+    if (predicate()) return;
+    await Promise.resolve();
+  }
+  throw new Error('waitFor: condition not met in time');
+}
+
+/** F44: a fake `llm.complete` whose promise never settles on its own -- it only rejects once
+ * `opts.signal` (the AbortController `callWithRails` now attaches to every call) actually fires,
+ * exactly as a real cancelled `fetch` would. Simulates the model call a `/nep warmup stop` catches
+ * mid-flight. */
+function abortAwareLlm() {
+  const calls = [];
+  return {
+    calls,
+    complete: (messages, opts) => {
+      calls.push({ messages, opts });
+      return new Promise((_resolve, reject) => {
+        opts.signal?.addEventListener('abort', () => {
+          const err = new Error('The operation was aborted.');
+          err.name = 'AbortError';
+          reject(err);
+        });
+      });
+    },
+  };
+}
+
 function scriptedLlm(results) {
   const calls = [];
   return {
@@ -843,6 +876,159 @@ test('createBootstrap: run() pauses after the request in flight, resumable', asy
   assert.equal(result.ok, false);
   assert.equal(llm.calls.length, 1);
   assert.deepEqual(store.state.data.bootstrap.done.channels, ['c1']);
+});
+
+// ---------------------------------------------------------------------------
+// F43: /nep warmup stop -- stopRequested, honoured at the same checkpoints as
+// store.state.data.paused, cleared at the start of every run().
+// ---------------------------------------------------------------------------
+
+test('createBootstrap: stop() ends the run after the request in flight, activity stopped, progress kept, nothing marked aborted', async () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  const c1 = fakeChannel('c1', [rawMessage(1000, { authorId: 'a' }), rawMessage(2000, { authorId: 'a' })]);
+  const c2 = fakeChannel('c2', [rawMessage(1000, { authorId: 'b' }), rawMessage(2000, { authorId: 'b' })]);
+  const guild = fakeGuild('g1', [c1, c2]);
+  const client = fakeClient(guild);
+  const hot = fakeHot();
+
+  const llm = scriptedLlm([
+    () => {
+      const result = bootstrap.stop(); // simulate /nep warmup stop landing while call #1 was in flight
+      assert.equal(result.ok, true);
+      return { purpose: 'p1' };
+    },
+    { purpose: 'p2' }, // must never be reached
+  ]);
+  const bootstrap = createBootstrap({ hot, store, client, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => 10_000_000 });
+
+  const result = await bootstrap.run('g1');
+  assert.equal(result.ok, false);
+  assert.equal(result.message, 'stopped');
+  assert.equal(llm.calls.length, 1); // c2 never reached
+  assert.deepEqual(store.state.data.bootstrap.done.channels, ['c1']); // progress kept
+  assert.equal(store.state.data.bootstrap.aborted, null); // nothing marks it aborted
+
+  const status = bootstrap.status('g1');
+  assert.equal(status.activity.phase, 'stopped');
+  assert.equal(status.stopRequested, true);
+});
+
+test('createBootstrap: stop() before any run is in flight is a no-op', async () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  const guild = fakeGuild('g1', []);
+  const client = fakeClient(guild);
+  const hot = fakeHot();
+  const bootstrap = createBootstrap({ hot, store, client, llm: { complete: async () => { throw new Error('must not be called'); } }, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => 10_000_000 });
+
+  const result = bootstrap.stop();
+  assert.equal(result.ok, false);
+  assert.equal(bootstrap.status('g1').stopRequested, false);
+});
+
+test('createBootstrap: run() clears stopRequested at the start of the next run', async () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  const c1 = fakeChannel('c1', [rawMessage(1000, { authorId: 'a' }), rawMessage(2000, { authorId: 'a' })]);
+  const guild = fakeGuild('g1', [c1]);
+  const client = fakeClient(guild);
+  const hot = fakeHot();
+  hot.config.bootstrap.minMessages = 1;
+
+  let sawStopRequestedDuringSecondRun = null;
+  const llm = scriptedLlm([
+    () => { bootstrap.stop(); return { purpose: 'p1' }; }, // channel call: request a stop mid-run
+    () => {
+      sawStopRequestedDuringSecondRun = bootstrap.status('g1').stopRequested;
+      return { character: 'c', style: 's', interests: [], details: [], episodes: [], aliases: [] };
+    },
+    { patterns: '', starters: '', injokes: [], lore: [] },
+  ]);
+  const bootstrap = createBootstrap({ hot, store, client, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => 10_000_000 });
+
+  const first = await bootstrap.run('g1');
+  assert.equal(first.message, 'stopped');
+  assert.equal(bootstrap.status('g1').stopRequested, true);
+
+  const second = await bootstrap.run('g1');
+  assert.equal(sawStopRequestedDuringSecondRun, false); // cleared before the person request that follows
+  assert.equal(second.ok, true);
+  assert.equal(bootstrap.status('g1').stopRequested, false);
+});
+
+// ---------------------------------------------------------------------------
+// F44: /nep warmup stop cancels the model call ACTUALLY in flight (an
+// AbortController threaded through llm.complete's `signal`), not just the
+// loop after it finishes -- see src/memory/bootstrap.js#callWithRails/`stop`.
+// ---------------------------------------------------------------------------
+
+test('createBootstrap: stop() aborts the model call in flight during a bulk users run; nothing written for that target, resumable', async () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  const c1 = fakeChannel('c1', [rawMessage(1000, { authorId: 'a' }), rawMessage(2000, { authorId: 'a' })]);
+  const guild = fakeGuild('g1', [c1]);
+  const client = fakeClient(guild);
+  const hot = fakeHot();
+  hot.config.bootstrap.minMessages = 1;
+
+  const llm = abortAwareLlm();
+  const bootstrap = createBootstrap({ hot, store, client, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => 10_000_000 });
+
+  const started = await bootstrap.runUsers('g1');
+  assert.equal(started.ok, true);
+  assert.equal(started.count, 1);
+  assert.equal(llm.calls.length, 1, 'the person request must already be in flight');
+  assert.equal(llm.calls[0].opts.signal.aborted, false);
+
+  const stopResult = bootstrap.stop();
+  assert.equal(stopResult.ok, true);
+  assert.equal(llm.calls[0].opts.signal.aborted, true, '/nep warmup stop must cancel the in-flight call');
+
+  await bootstrap.waitIdle();
+
+  assert.equal(llm.calls.length, 1, 'no retry after a deliberate abort');
+  assert.deepEqual(store.state.data.bootstrap.done.people, []); // not marked done
+  assert.equal(store.getUser('g1', 'a'), null); // nothing partial written
+  assert.equal(store.state.data.bootstrap.aborted, null); // a deliberate stop, never a failure
+
+  const status = bootstrap.status('g1');
+  assert.equal(status.running, false);
+  assert.equal(status.activity.phase, 'stopped');
+
+  // Later: a fresh warmup users run resumes and actually profiles the member.
+  const llm2 = scriptedLlm([{ character: 'c', style: 's', interests: [], details: [], episodes: [], aliases: [] }]);
+  const bootstrap2 = createBootstrap({ hot, store, client, llm: llm2, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => 10_000_000 });
+  const resumed = await bootstrap2.runUsers('g1');
+  assert.equal(resumed.ok, true);
+  await bootstrap2.waitIdle();
+  assert.deepEqual(store.state.data.bootstrap.done.people, ['a']);
+});
+
+test('createBootstrap: stop() aborts the model call in flight during a synchronous warmup users one-off (a single member)', async () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  const c1 = fakeChannel('c1', [rawMessage(1000, { authorId: 'a' }), rawMessage(2000, { authorId: 'a' })]);
+  const guild = fakeGuild('g1', [c1]);
+  const client = fakeClient(guild);
+  const hot = fakeHot();
+
+  const llm = abortAwareLlm();
+  const bootstrap = createBootstrap({ hot, store, client, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => 10_000_000 });
+
+  const runPromise = bootstrap.runPerson('g1', 'a');
+  // Let the synchronous one-off actually reach its (hanging) model call before stopping it.
+  await waitFor(() => llm.calls.length === 1);
+
+  const stopResult = bootstrap.stop();
+  assert.equal(stopResult.ok, true);
+  assert.equal(llm.calls[0].opts.signal.aborted, true);
+
+  const result = await runPromise;
+  assert.equal(result.ok, false);
+  assert.equal(result.message, 'stopped');
+  assert.equal(store.getUser('g1', 'a'), null);
+  assert.deepEqual(store.state.data.bootstrap.done.people, []);
 });
 
 test('createBootstrap: run() waits out a sustained rate limit then aborts (resumable)', async () => {
@@ -1014,6 +1200,42 @@ test('createBootstrap: runPerson returns sample size, tokens used and the writte
   assert.equal(outcome.outcome.answer.interests.length, 1);
 });
 
+test('createBootstrap: runPerson appends prompts.rules after the card in the <character> block', async () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  const history = [rawMessage(1000, { authorId: 'a', content: 'hi one' }), rawMessage(2000, { authorId: 'a', content: 'hi two' })];
+  const c1 = fakeChannel('c1', history);
+  const guild = fakeGuild('g1', [c1]);
+  const client = fakeClient(guild);
+  const hot = fakeHot({ prompts: { rules: 'Never repeat yourself.' } });
+  hot.config.bootstrap.minMessages = 1;
+  const llm = scriptedLlm([{ character: 'friendly', style: 'short', interests: [], details: [], episodes: [], aliases: [] }]);
+  const bootstrap = createBootstrap({ hot, store, client, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => 10_000_000 });
+
+  await bootstrap.runPerson('g1', 'a');
+
+  const user = llm.calls[0].messages[1].content;
+  assert.match(user, /<character>\nCARD Nept\n\nNever repeat yourself\.\n<\/character>/);
+});
+
+test('createBootstrap: runPerson renders the card alone when prompts.rules is absent', async () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  const history = [rawMessage(1000, { authorId: 'a', content: 'hi one' })];
+  const c1 = fakeChannel('c1', history);
+  const guild = fakeGuild('g1', [c1]);
+  const client = fakeClient(guild);
+  const hot = fakeHot(); // no prompts.rules configured
+  hot.config.bootstrap.minMessages = 1;
+  const llm = scriptedLlm([{ character: 'friendly', style: 'short', interests: [], details: [], episodes: [], aliases: [] }]);
+  const bootstrap = createBootstrap({ hot, store, client, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => 10_000_000 });
+
+  await bootstrap.runPerson('g1', 'a');
+
+  const user = llm.calls[0].messages[1].content;
+  assert.match(user, /<character>\nCARD Nept\n<\/character>/);
+});
+
 test('createBootstrap: runChannel returns the channel and the written note on success', async () => {
   const dir = tmpDataDir();
   const store = createStore({ dataDir: dir });
@@ -1118,6 +1340,22 @@ test('createBootstrap: runServer returns counts of what was written on success',
   assert.equal(outcome.outcome.counts.lore, 1);
   assert.ok(outcome.outcome.counts.patternsChars > 0);
   assert.ok(outcome.outcome.counts.startersChars > 0);
+});
+
+test('createBootstrap: runServer appends prompts.rules after the card in the <character> block', async () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  const c1 = fakeChannel('c1', [rawMessage(1000, { authorId: 'a' })]);
+  const guild = fakeGuild('g1', [c1]);
+  const client = fakeClient(guild);
+  const hot = fakeHot({ prompts: { rules: 'Stay in character.' } });
+  const llm = scriptedLlm([{ patterns: 'p', starters: 's', injokes: [], lore: [] }]);
+  const bootstrap = createBootstrap({ hot, store, client, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => 10_000_000 });
+
+  await bootstrap.runServer('g1');
+
+  const user = llm.calls[0].messages[1].content;
+  assert.match(user, /<character>\nCARD Nept\n\nStay in character\.\n<\/character>/);
 });
 
 test('createBootstrap: a redo (runPerson called again) SETS messageCount/firstSeen/lastSeen from the window instead of adding', async () => {
@@ -1646,6 +1884,25 @@ test('refreshPortrait: samples the member and replaces only character/style, wit
   assert.equal(profile.interests.length, 1);
   assert.equal(profile.interests[0].topic, 'chess'); // interests from the refresh answer are IGNORED
   assert.ok(profile.portraitRefreshedAt);
+});
+
+test('refreshPortrait: appends prompts.rules after the card in the <character> block', async () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  store.touchUser('g1', 'a', 'Alice', 1000);
+  const history = Array.from({ length: 3 }, (_, i) => rawMessage(1000 + i * 1000, { authorId: 'a', content: `m${i}` }));
+  const c1 = fakeChannel('c1', history);
+  const guild = fakeGuild('g1', [c1]);
+  const client = fakeClient(guild);
+  const hot = fakeHot({ prompts: { rules: 'No spoilers.' } });
+
+  const llm = scriptedLlm([{ character: 'new character', style: 'new style', interests: [], details: [], episodes: [], aliases: [] }]);
+  const bootstrap = createBootstrap({ hot, store, client, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => 20_000_000 });
+
+  await bootstrap.refreshPortrait('g1', 'a', 'reason');
+
+  const user = llm.calls[0].messages[1].content;
+  assert.match(user, /<character>\nCARD Nept\n\nNo spoilers\.\n<\/character>/);
 });
 
 test('refreshPortrait: skips a member refreshed less than memory.portraitRefreshHours ago, unless forced', async () => {

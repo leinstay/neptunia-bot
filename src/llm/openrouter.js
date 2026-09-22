@@ -67,6 +67,15 @@ export function createLlm({ apiKey, getConfig, calibrator, state, fetchImpl = fe
    * into the calibrator. For `/nep ping` (F35): a 16-token ping reply is
    * nothing like a real turn's request/response shape, and would only skew
    * the ratio every other request is checked against.
+   * `options.signal` — an external `AbortSignal` (e.g. an `AbortController`'s)
+   * that cancels the in-flight HTTP request the moment it aborts, on top of
+   * the per-attempt timeout signal (`options.timeoutMs`/`cfg.timeoutMs`) —
+   * both combined with `AbortSignal.any`. Once `options.signal` is aborted,
+   * a caught error is rethrown immediately with NO retry (an external abort
+   * is deliberate, not a transient failure worth retrying). Exists for the
+   * memory bootstrap's `/nep warmup stop` (src/memory/bootstrap.js): the
+   * request already counted by the provider cannot be un-billed, but no
+   * further retry/tokens are spent past the moment of the abort.
    */
   async function complete(messages, options = {}) {
     const cfg = getConfig().llm;
@@ -97,7 +106,10 @@ export function createLlm({ apiKey, getConfig, calibrator, state, fetchImpl = fe
     let lastError;
     for (let attempt = 0; attempt <= cfg.retries; attempt += 1) {
       if (attempt > 0) await sleep(1500 * 2 ** (attempt - 1));
+      if (options.signal?.aborted) throw lastError ?? options.signal.reason ?? new Error('request aborted');
       try {
+        const timeoutSignal = AbortSignal.timeout(options.timeoutMs ?? cfg.timeoutMs);
+        const signal = options.signal ? AbortSignal.any([options.signal, timeoutSignal]) : timeoutSignal;
         const response = await fetchImpl(chatCompletionsUrl(cfg.baseUrl), {
           method: 'POST',
           headers: {
@@ -106,7 +118,7 @@ export function createLlm({ apiKey, getConfig, calibrator, state, fetchImpl = fe
             'X-Title': 'neptunia-bot',
           },
           body: JSON.stringify(body),
-          signal: AbortSignal.timeout(options.timeoutMs ?? cfg.timeoutMs),
+          signal,
         });
 
         if (!response.ok) {
@@ -139,6 +151,7 @@ export function createLlm({ apiKey, getConfig, calibrator, state, fetchImpl = fe
         // surfaced so `/nep ping` (F35) can report it without a second request shape.
         return { text: typeof text === 'string' ? text : '', usage, estimated, finishReason, provider: json.provider };
       } catch (err) {
+        if (options.signal?.aborted) throw err; // a deliberate external abort is never retried
         if (err.statusCode && !RETRY_STATUS.has(err.statusCode)) throw err;
         lastError = err;
       }
