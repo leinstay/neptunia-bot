@@ -1572,7 +1572,7 @@ test('follow-up: a "yes" verdict runs a reply turn with the candidate as the tar
 
   assert.ok(seenArgs, 'expected the reply turn to run');
   assert.equal(seenArgs.mode, 'reply');
-  assert.equal(seenArgs.triggerKind, 'reply');
+  assert.equal(seenArgs.triggerKind, 'followUp');
   assert.equal(seenArgs.trigger.id, 'm-candidate', 'the candidate is the target, so replyTo works');
   assert.equal(seenArgs.trigger.content, 'so what do you think');
   assert.equal(seenArgs.channel, channel);

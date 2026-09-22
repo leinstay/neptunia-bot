@@ -127,9 +127,12 @@ export function createTurnRunner({
    * react, no artificial timing. Logs one line per would-be action and, when
    * `bot.dryRunChannelId` is configured, mirrors it there in plain language.
    */
-  async function dryAct(channel, parsed, idByIndex, history, mode) {
+  async function dryAct(channel, parsed, idByIndex, history, mode, triggerKind = null) {
     const channelName = channel.name ?? null;
     const dryRunChannelId = hot.config.bot?.dryRunChannelId || '';
+    // A follow-up turn (F49) never posted as a Discord reply, in this mirror
+    // either -- the model's reply="#n" is ignored the same as in act() below.
+    const isFollowUp = triggerKind === 'followUp';
 
     for (const reaction of parsed.reactions) {
       const targetId = idByIndex.get(reaction.to);
@@ -147,7 +150,7 @@ export function createTurnRunner({
     }
 
     for (const message of parsed.messages) {
-      const replyId = message.replyTo !== null ? idByIndex.get(message.replyTo) : null;
+      const replyId = !isFollowUp && message.replyTo !== null ? idByIndex.get(message.replyTo) : null;
       const authorName = replyId ? (authorNameFor(history, replyId) ?? '—') : '—';
       // Same deliberate exception as above: the persona's own output, dry-run only.
       const { text } = resolveMentions(message.text, history);
@@ -163,9 +166,13 @@ export function createTurnRunner({
     }
   }
 
-  async function act(channel, parsed, idByIndex, history, startedAt = Date.now()) {
+  async function act(channel, parsed, idByIndex, history, startedAt = Date.now(), triggerKind = null) {
     const cfg = hot.config.typing;
     const typingOn = hot.config.features?.typingSimulation !== false;
+    // A follow-up turn (F49, triggerKind: 'followUp') is its own trigger kind
+    // and never posts as a Discord reply -- the model's reply="#n" (if any)
+    // is ignored, plain messages only.
+    const isFollowUp = triggerKind === 'followUp';
 
     for (const reaction of parsed.reactions) {
       const targetId = idByIndex.get(reaction.to);
@@ -190,14 +197,19 @@ export function createTurnRunner({
         await sleep(typingMs(text, cfg, rng));
       }
 
-      const replyId = message.replyTo !== null ? idByIndex.get(message.replyTo) : null;
+      const replyId = !isFollowUp && message.replyTo !== null ? idByIndex.get(message.replyTo) : null;
       await channel.send({
         content: text,
         reply: replyId ? { messageReference: replyId, failIfNotExists: false } : undefined,
         allowedMentions: { parse: [], users: userIds, repliedUser: true },
       });
       lastPostAt.set(channel.id, Date.now());
-      log.info('turn: sent', { channel: channel.id, chars: text.length, secondsSinceTrigger: Math.round((Date.now() - startedAt) / 100) / 10 });
+      log.info('turn: sent', {
+        channel: channel.id,
+        chars: text.length,
+        secondsSinceTrigger: Math.round((Date.now() - startedAt) / 100) / 10,
+        ...(isFollowUp ? { followUp: true } : {}),
+      });
     }
   }
 
@@ -366,10 +378,10 @@ export function createTurnRunner({
       // top of this turn: unlike the other switches this one defaults to OFF,
       // and whether to actually post is the very last decision of a turn.
       if (hot.config.features?.dryRun === true) {
-        await dryAct(channel, parsed, request.idByIndex, history, finalMode);
+        await dryAct(channel, parsed, request.idByIndex, history, finalMode, triggerKind);
         return { outcome: 'spoke', mode: finalMode, dryRun: true };
       }
-      await act(channel, parsed, request.idByIndex, history, startedAt);
+      await act(channel, parsed, request.idByIndex, history, startedAt, triggerKind);
       return { outcome: 'spoke', mode: finalMode };
     } catch (err) {
       if (err instanceof DailyCapError || err instanceof TokenLimitError) {

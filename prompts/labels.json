@@ -122,7 +122,8 @@
   "triggers": {
     "mention": "mentioned you",
     "reply": "replied to your message",
-    "name": "said your name"
+    "name": "said your name",
+    "followUp": "continued your conversation"
   },
   "ping": {
     "prompt": "Reply with the single word pong."

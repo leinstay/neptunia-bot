@@ -672,10 +672,14 @@ export function buildRequest(input) {
   const tempoText = renderTempo(tempo, labels, config.context.tempo);
 
   const triggerItem = trigger ? chatItems.find((item) => item.id === trigger.id) : null;
+  // A follow-up (F49, triggerKind: 'followUp') falls back to labels.triggers.reply
+  // when an older labels.json has no dedicated label yet -- see prompt-contract.md.
+  const triggerLabel =
+    triggerKind === 'followUp' ? (labels.triggers?.followUp ?? labels.triggers?.reply ?? '') : (labels.triggers?.[triggerKind] ?? '');
   const task = fillTemplate(prompts[mode] ?? '', {
     name: selfName,
     author: trigger?.authorName ?? '',
-    trigger: labels.triggers?.[triggerKind] ?? '',
+    trigger: triggerLabel,
     target: triggerItem ? `#${triggerItem.index}` : '',
   });
 

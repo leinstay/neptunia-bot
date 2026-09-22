@@ -120,6 +120,24 @@ test('buildRequest: {{trigger}} resolves through labels.triggers, not config.men
   assert.ok(user.includes(labels.triggers.name));
 });
 
+// F49: a follow-up turn is its own trigger kind.
+test('buildRequest: triggerKind "followUp" fills {{trigger}} from labels.triggers.followUp', () => {
+  const trigger = makeMessage(1, NOW - MIN, { authorName: 'Alice' });
+  const request = buildRequest(baseInput({ history: [trigger], trigger, triggerKind: 'followUp' }));
+  const user = request.messages[1].content;
+  assert.ok(user.includes(labels.triggers.followUp));
+});
+
+test('buildRequest: triggerKind "followUp" falls back to labels.triggers.reply when labels.triggers.followUp is missing (an older labels.json)', () => {
+  const olderLabels = { ...labels, triggers: { mention: labels.triggers.mention, reply: labels.triggers.reply, name: labels.triggers.name } };
+  const trigger = makeMessage(1, NOW - MIN, { authorName: 'Alice' });
+  const request = buildRequest(
+    baseInput({ prompts: fakePrompts({ labels: olderLabels }), history: [trigger], trigger, triggerKind: 'followUp' }),
+  );
+  const user = request.messages[1].content;
+  assert.ok(user.includes(labels.triggers.reply));
+});
+
 test('buildRequest: blocks appear in the documented order', () => {
   const trigger = makeMessage(1, NOW - MIN, { authorName: 'Alice' });
   const request = buildRequest(

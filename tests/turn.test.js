@@ -962,3 +962,68 @@ test('createTurnRunner: features.dryRun=false (default) sends for real even when
   assert.equal(channel.sent.length, 1);
   assert.equal(channel.sent[0].content, 'hello');
 });
+
+// ---------------------------------------------------------------------------
+// F49: a follow-up turn is its own trigger kind and never posts as a Discord
+// reply, whatever reply="#n" the model wrote.
+
+test('createTurnRunner: a normal reply turn keeps reply="#n" as a real Discord reply', async () => {
+  const raw = rawMessage({ id: 'm1', authorName: 'Alice' });
+  const channel = fakeTurnChannel({ id: 'c1', historyMessages: [raw] });
+  const llm = fakeLlm('<msg reply="#1">hi</msg>');
+  const store = fakeStore();
+  const hot = fakeHot();
+  const turns = createTurnRunner({ hot, store, llm, calibrator: identityCalibrator(), client: fakeClient() });
+
+  const { result, logs } = await withCapturedLogs(() =>
+    turns.runTurn({ channel, mode: 'reply', trigger: normalizedTrigger(raw), triggerKind: 'mention' }),
+  );
+
+  assert.equal(result.outcome, 'spoke');
+  assert.equal(channel.sent.length, 1);
+  assert.deepEqual(channel.sent[0].reply, { messageReference: 'm1', failIfNotExists: false });
+  const sentLine = logs.find((l) => l.msg === 'turn: sent');
+  assert.ok(sentLine);
+  assert.equal(sentLine.followUp, undefined);
+});
+
+test('createTurnRunner: a follow-up turn (triggerKind "followUp") ignores reply="#n" and sends a plain message', async () => {
+  const raw = rawMessage({ id: 'm1', authorName: 'Alice' });
+  const channel = fakeTurnChannel({ id: 'c1', historyMessages: [raw] });
+  const llm = fakeLlm('<msg reply="#1">hi</msg>');
+  const store = fakeStore();
+  const hot = fakeHot();
+  const turns = createTurnRunner({ hot, store, llm, calibrator: identityCalibrator(), client: fakeClient() });
+
+  const { result, logs } = await withCapturedLogs(() =>
+    turns.runTurn({ channel, mode: 'reply', trigger: normalizedTrigger(raw), triggerKind: 'followUp' }),
+  );
+
+  assert.equal(result.outcome, 'spoke');
+  assert.equal(channel.sent.length, 1);
+  assert.equal(channel.sent[0].reply, undefined, 'a follow-up turn never posts as a Discord reply');
+  assert.equal(channel.sent[0].content, 'hi');
+  const sentLine = logs.find((l) => l.msg === 'turn: sent');
+  assert.ok(sentLine);
+  assert.equal(sentLine.followUp, true);
+});
+
+test('createTurnRunner: features.dryRun=true on a follow-up turn logs replyTo=null and never mirrors "reply to X"', async () => {
+  const raw = rawMessage({ id: 'm1', authorName: 'Alice' });
+  const channel = fakeTurnChannel({ id: 'c1', name: 'general', historyMessages: [raw] });
+  const llm = fakeLlm('<msg reply="#1">hi</msg>');
+  const store = fakeStore();
+  const hot = fakeHot({ dryRun: true });
+  const turns = createTurnRunner({ hot, store, llm, calibrator: identityCalibrator(), client: fakeClient() });
+
+  const { result, logs } = await withCapturedLogs(() =>
+    turns.runTurn({ channel, mode: 'reply', trigger: normalizedTrigger(raw), triggerKind: 'followUp' }),
+  );
+
+  assert.equal(result.outcome, 'spoke');
+  assert.equal(result.dryRun, true);
+  const sendLine = logs.find((l) => l.msg === 'dry-run: would send');
+  assert.ok(sendLine);
+  assert.equal(sendLine.replyTo, null, 'a follow-up turn never carries a reply target, even in the dry-run log');
+  assert.equal(sendLine.text, 'hi');
+});

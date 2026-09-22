@@ -240,7 +240,7 @@ export function createMessageHandler({
         // continuation, not a ping (see .claude/docs/prompt-contract.md).
         tagHistory.hit(normalized.authorId, now(), repeatWindowMs(mentionCfg));
         turns
-          .runTurn({ channel, mode: 'reply', trigger: normalized, triggerKind: 'reply' })
+          .runTurn({ channel, mode: 'reply', trigger: normalized, triggerKind: 'followUp' })
           .catch((err) => log.error('events: follow-up reply turn failed', { channel: channelId, error: err }));
       } else {
         bumpFollowUpNoStreak(channelId, state, mentionCfg);

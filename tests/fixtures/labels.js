@@ -127,6 +127,7 @@ export const labels = {
     mention: 'tagged you',
     reply: 'replied to your message',
     name: 'mentioned you by name, without a tag',
+    followUp: 'continued the conversation with you without tagging you',
   },
   ping: {
     prompt: 'Reply with one word: pong',
