@@ -1,0 +1,278 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="../../.github/assets/banner-dark.png">
+    <img src="../../.github/assets/banner.png" width="700" alt="Neptunia - Discord用AIキャラクターエンジン">
+  </picture>
+</p>
+<p align="center"><a href="../../README.md">English</a> | <a href="../zh/README.md">中文</a> | 日本語 | <a href="../ru/README.md">Русский</a></p>
+<p align="center">
+  <a href="https://github.com/leinstay/neptunia-bot/stargazers"><img src="https://img.shields.io/github/stars/leinstay/neptunia-bot" alt="GitHub stars"></a>
+  <a href="https://github.com/leinstay/neptunia-bot/forks"><img src="https://img.shields.io/github/forks/leinstay/neptunia-bot" alt="GitHub forks"></a>
+  <a href="https://github.com/leinstay/neptunia-bot/issues"><img src="https://img.shields.io/github/issues/leinstay/neptunia-bot" alt="GitHub issues"></a>
+  <a href="https://github.com/leinstay/neptunia-bot/pulls"><img src="https://img.shields.io/github/issues-pr/leinstay/neptunia-bot" alt="GitHub pull requests"></a>
+  <a href="https://github.com/leinstay/neptunia-bot/blob/main/LICENSE"><img src="https://img.shields.io/github/license/leinstay/neptunia-bot" alt="License"></a>
+  <a href="https://github.com/leinstay/neptunia-bot/actions/workflows/test.yml"><img src="https://github.com/leinstay/neptunia-bot/actions/workflows/test.yml/badge.svg" alt="Tests"></a>
+</p>
+
+---
+
+Neptunia はローカルで動作する Discord ボットで、LLM を通じて設定可能な一人のキャラクターを演じ、通常のチャットメンバーのように振る舞います。Node.js 20 以上、依存ライブラリは discord.js のみ。OpenRouter 互換の任意のエンドポイント、コードに触れずに書けるキャラクターカード、ホットリロードされるプロンプトと設定、メンバーごとの態度とエピソード付きメモリ、サーバー全体のロアブック、添付画像のビジョン、ヘルパーモデルによる一行メディア説明文、ライブ調整用のオーナースラッシュコマンド、ドライランモードを備えています。動作するサンプルキャラクターが付属しており、別のペルソナにするには自分のカードを作成してください。
+
+ペルソナはメンション、リプライ、名前トリガーに応答しますが、時には無視することもあります。ランダムな間隔で会話に割り込み、静かなチャンネルで話題を切り出します。人々を記憶し、-100 から 100 の態度を追跡して返答に反映します。スコアはチャットに表示されません。すべての設定とプロンプトはホットリロードされ、オーナーコマンドにより Discord からライブでボットを調整できます。
+
+各インスタンスは一つのサーバー、一つのボットアカウント、一つのパーソナリティを担当します。別のサーバーやキャラクターには、独自の `.env`、`config.local.json`、`prompts.local/`、`data/` を持つ別のコピーを実行してください。Discord はボットアカウントに APP バッジを表示します。エンジンはこれを隠しません。
+
+## クイックスタート
+
+[discord.com/developers](https://discord.com/developers/applications) で Discord アプリケーションを作成します。Bot ページで **Message Content** 特権インテントを有効にします。招待 URL には両方のスコープ（`scope=bot%20applications.commands`）と `permissions=68672`（チャンネル閲覧、メッセージ送信、履歴閲覧、リアクション追加）が必要です。ボット参加後にスラッシュコマンドが表示されない場合、ログに原因が記録されます。招待 URL を再度開いてやり直すことで、ボットを削除せずにコマンド登録を修正できます。
+
+[OpenRouter](https://openrouter.ai/keys) から API キーを取得します（互換エンドポイントでも可）。
+
+```bash
+git clone https://github.com/leinstay/neptunia-bot.git
+cd neptunia-bot && npm install
+cp .env.example .env
+```
+
+`.env` に Discord トークンと API キーを入力します。Discord ユーザー ID を指定した `config.local.json` を作成します。
+
+```json
+{
+  "bot": {
+    "owners": ["YOUR_DISCORD_USER_ID"]
+  }
+}
+```
+
+```bash
+npm start
+```
+
+`bot.guildId` が空でボットが一つのサーバーにのみ参加している場合、そのサーバーに自動的にロックされます。複数のサーバーに参加している場合、起動を拒否します。`config.local.json` で `bot.guildId` を設定してください。
+
+## プロンプトレイヤー
+
+プロンプトは二つのディレクトリから読み込まれます。
+
+- `prompts/`: 追跡されるエンジンのデフォルト。動作するサンプルキャラクター付き。
+- `prompts.local/`: デプロイ先のパーソナリティ（gitignore 対象）。ここに置いたファイルは `prompts/` 内の同名ファイルを置き換えます。`labels.json` はディープマージされるため、変更するキーだけをオーバーライドすれば済みます。
+
+どちらもホットリロードされます。
+
+### プロンプトファイル
+
+| ファイル | 必須 | 用途 |
+|---|---|---|
+| `system-prompt.md` | はい | 通常のチャットメンバーとして振る舞う方法（キャラクター非依存） |
+| `character-card.md` | はい | パーソナリティ: 人物像、話し方、関心事 |
+| `rules.md` | いいえ | オーナーのライブ修正、`/nep rule add` で追記 |
+| `format.md` | はい | 出力プロトコル: モデルが使うタグ |
+| `reply.md` | はい | タスク: ペルソナに話しかけられた |
+| `interject.md` | はい | タスク: 進行中の会話に割り込む |
+| `initiate.md` | はい | タスク: 沈黙を破り話題を切り出す |
+| `memory.md` | はい | メモリ/関係性アナライザーの技術プロンプト |
+| `describe.md` | はい | ヘルパーモデル用の一行メディア説明文 |
+| `address.md` | はい | 分類器: タグなしメッセージがペルソナ宛かどうか |
+| `profile.md` | はい | ウォームアップ: メッセージサンプルからメンバーのプロファイルを作成 |
+| `channel.md` | はい | ウォームアップ: メッセージサンプルからチャンネルノートを作成 |
+| `server.md` | はい | ウォームアップ: チャンネルノートとメンバーの要約からサーバーレベルのノートを作成 |
+| `labels.json` | はい | コードがプロンプトに挿入するすべての文字列（レイヤー間でディープマージ） |
+
+**書き換えが必要なファイルは `character-card.md` だけです。** `prompts.local/` にコピーしてペルソナを記述してください。他のファイルはそのままで動作しますが、必要に応じて個別にオーバーライドできます。
+
+メモリアナライザーはキャラクターが人々に対してどう感じるかを判断します。アナライザーとウォームアップの両方がキャラクターカードと `rules.md` を受け取るため、キャラクターの好き嫌いを記述してください。声や判断に関するライブルールは、カードと同様にポートレートや態度に影響します。
+
+各プロンプトファイルが使用できるプレースホルダー、`labels.json` キー、コンテキストブロック、出力タグは [`docs/prompt-contract.md`](../prompt-contract.md) で定義されています。一方を変更すると他方も変更が必要です。
+
+### ヒント
+
+システムプロンプトが人間らしさを担当するため、カードは純粋にパーソナリティだけを記述します。キャラクターには、同調性ではなく、意見とデフォルトの気分を与えてください。リファレンスラインは短く多様にしてください。長い会話でスタイルを固定する役割があります。カードはキャラクターの声で書いてください。罵倒語は意味を持たせ、埋め草にしないでください。沈黙を有効な選択肢にしてください。常に返答するキャラクターは最もわかりやすいボットの兆候です。
+
+## 設定
+
+`config.json` にすべての設定とデフォルト値が格納されています。`config.local.json`（gitignore 対象）がディープマージされます。どちらもホットリロードされます。全キーの詳細は[設定リファレンス](configuration.md)を参照してください。
+
+## メモリの使い始め
+
+初回起動時、`warmup.enabled` が true でプロファイルがまだ存在しない場合、エンジンは最近のメッセージのサンプルからメンバー、チャンネル、サーバーのメモリを構築するウォームアップを実行します。トークンの総消費量は `warmup.maxTokens` で制限されます。ウォームアップの実行中、ペルソナは発言しません。ステージ、進捗、レール、オーナーコマンドについては[ウォームアップ](warmup.md)を参照してください。
+
+## ドライラン
+
+`features.dryRun: true` の場合、ボットはフルパイプライン（メモリ、トリガー、LLM 呼び出し）を実行しますが、メッセージやリアクションを送信しません。出力はログに記録されます（`dry-run: would send` / `dry-run: would react`）。`bot.dryRunChannelId` にプライベートチャンネルを設定すると読みやすいミラーになります。そのチャンネルに投稿されたメッセージはボットに無視されます。スラッシュコマンドはミラーを含むどのチャンネルでも動作します。メッセージではないためです。
+
+新しいサーバーでの初回実行: `features.dryRun` を有効にし、ミラーまたは `journalctl -u neptunia-bot -f` を監視し、ライブで調整した後、`/nep set features.dryRun false` で無効にします。
+
+## オーナーコマンド
+
+一つの Discord スラッシュコマンド `/nep`（名前は `bot.commandName` に由来）。ギルドコマンドとして起動時に対象サーバーに登録されます。すべての応答はエフェメラルで、入力したチャンネルに関係なく呼び出し者だけに表示されます。すべてのサブコマンドとアクセスグラントの詳細は[オーナーコマンド](owner-commands.md)を参照してください。
+
+## ターンの仕組み
+
+メッセージはギルド、チャンネル、自身のメッセージのフィルターを通過します。ペルソナが呼ばれた場合（@メンション、リプライ、名前トリガー）、無視ヒューリスティクスがベースの確率に対してロールし、素のピング、繰り返しタグ、スパム、発話者の関係スコアで調整されます。ペルソナが応答した後、そのチャンネルのタグなしメッセージは `mention.followUpMinutes` 分間、`followUp` モデルロール（デフォルトはメディアモデル）上の分類器に送られ、会話が続いているか判定します。3 回連続で `no` が出るとウィンドウが閉じます。`features.followUp` でオフにできます。自発的なターンはカオスタイマーまたはメッセージごとの盗み聞き確率から発生します。`spontaneous.maxChannelSilenceHours` 時間以上沈黙したチャンネルでは、ペルソナは自発的に発言しません。ただし直接のピングには応答します。
+
+ペルソナはサーバー全体で一度に一つのリプライを書きます。応答中に同じチャンネルに届いたピングは見逃されます。見逃されたメッセージは次のリプライ構築時にトランスクリプトに含まれます。別のチャンネルからの直接のピング（@メンションまたはペルソナのメッセージへのリプライ、名前トリガーではない）は、最大 `mention.maxPending` チャンネルで `mention.pendingMinutes` 分間保持されます。同じ保留チャンネルに新しいピングが来ると古いものが置き換えられます。現在のリプライが完了すると、ペルソナは短いポーズ（`mention.switchDelayMs`）の後にチャンネルを切り替え、その時点の会話から応答します。通常の無視確率が適用されます。ビジー中の名前トリガーや盗み聞きヒットはスキップされます。`mention.oneAtATime: false` の場合、チャンネルごとに独立して処理されます。ペルソナは Send Messages 権限がない場所では書き込みもリアクションもしません。LLM リクエストを消費する前に確認します。ただしそうしたチャンネルは読み取られ記憶されます。
+
+ターンはチャンネルのトランスクリプトと隣接チャンネルを収集し、トークンバジェット内で一つの LLM リクエストを構築します。セクションは優先順に充填されます。システムプロンプトとタスクは決してカットされません。続いて発話者のプロファイル、サーバーの傾向と自己言及、チャンネルマップ、トランスクリプト（新しい順）、他のプロファイル、隣接チャンネルの順です。モデルにはサーバーのチャンネルマップ（目的、トピック、トーン、アクティビティレベル）が表示され、現在のチャンネルがマークされます。各チャンネルエントリにはコードが管理するファクトも含まれます。メッセージ数、最初と最後のメッセージ、過去 30 日間のアクティビティ、トップライターです。ウォームアップがチャンネルの履歴から充填し、ライブトラフィックが最新に保ちます。
+
+モデルは `<think>`（隠れた計画）、`<msg>`（1〜3 件のチャットメッセージ。`reply="#87"` でトランスクリプトの行にリプライ）、`<react>`（絵文字リアクション一つ）、`<skip/>`（沈黙）で応答します。解析後、人間の速度でタイピングがシミュレートされ、出力内の `@nick` が実際のメンションに変換されます。
+
+メモリアナライザーは十分なメッセージが蓄積した時点で別の LLM 呼び出しとして実行されます。キャラクターカードを受け取り、キャラクターの目を通して各人を判断し、態度の変化、プロファイルの変更、チャンネルの観察、サーバーレベルのノートを返します。メンバーのキャラクターと話し方のポートレートは `memory.mainChannelIds` のチャンネルから作成されます。リストが空の場合はすべてのチャンネルが対象です。プロファイルは差分で更新されます。アナライザーは変更があったものだけを返し、保存された事実が再要約されることはありません。キャラクターとスタイルはウォームアップ時にプロファイルプロンプトが全文を書き込む散文段落で、アナライザーがギャップや矛盾を指摘した際に最近のメッセージからリフレッシュされます。関心と詳細は別々の項目で、別の機会に再び話題になると確定されます。表示されるよりも多くの項目がメンバーごとに保持され、頻度と新しさでランク付けされ、重みは時間とともに減衰します。長期間目撃されていない関心は古いものとしてペルソナに表示されます。保存されたメモリはメンバーを ID で参照し、使用時に現在の名前が置換されるため、名前の変更で保存されたノートが壊れることはありません。ペルソナはチャットで人々が互いをどう呼ぶかも学び、名前やエイリアスで言及されたメンバーが会話に参加していなくても認識します。
+
+## エピソードとロアブック
+
+メモリアナライザーはプロファイル以外に二種類の長期ノートを書きます。
+
+エピソードはペルソナが個々の人について記憶する出来事です。侮辱、親切、約束、賭け、共有されたジョーク、ペルソナに何かをするよう頼んだりしないよう頼んだりしたこと。アナライザーは日付、短い説明、時にはその人自身の言葉、1 から 5 の重みとともにプロファイルに追記します。重いものほど長く残ります。プロファイルが `memory.maxEpisodes` に達すると、最も軽いものから、次に最も古いものから削除されます。表示されるのは発話者のエピソードのみで、`<people>` ブロック内に含まれます。
+
+ロアブックはサーバー全体の知識を保存します。会話を超えて残るもの、すなわちイベント、繰り返し登場するキャラクター、長期にわたるストーリー、対立、伝統です。各エントリにはタイトル、キーワードセット、短いテキストがあります。コードは直近の `lore.scanMessages` 件のメッセージをキーワードマッチでスキャンし、最大 `lore.maxMatches` エントリを `<lore>` ブロックに含めます。`always` とマークされたエントリは常に表示されます。マッチする少数だけが表示されるため、数百のエントリが存在してもコストはほぼゼロです。
+
+アナライザーは独自にロアブックエントリを追加・更新しますが、オーナーが `/nep lore` コマンドで追加したエントリには手を触れません。ロアブックデータは `data/guilds/<id>/lore.json` に保存されます。
+
+## ビジョンとメディア
+
+トランスクリプトの行にはメディアマーカーが括弧で表示されます。画像、GIF、動画、スティッカー、カスタム絵文字、ボイスメッセージ、音声ファイル、リンク、テキストファイルのプレビュー、転送されたメッセージです。同じサーバーの別のチャンネルから転送されたメッセージにはソースチャンネル名が含まれます。ペルソナが何を知覚するかは二つの機能に依存します。
+
+`features.vision` は呼び出しメッセージ、リプライ先のメッセージ、チャンネル内の最新の画像を、Discord のメディアプロキシ経由でダウンスケールして LLM リクエストに画像として添付します。ボットはすべての画像を自分でダウンロードし、データとしてインライン送信します。Discord がモデルプロバイダーからのダウンロードを拒否するためです。`context.vision.maxBytes` を超える画像や `context.vision.fetchTimeoutMs` より遅い画像はスキップされます。ペルソナはこれらを直接見ます。設定は `context.vision` 配下にあります。
+
+`features.mediaDescriptions`（デフォルト有効）はヘルパーモデル（`media.model`）を使い、画像、GIF フレーム、動画ポスター、スティッカー、カスタム絵文字、リンクサムネイルに対して一行の説明文を書きます。各添付ファイルは一度だけ記述されキャッシュされます。説明文はチャットのトランスクリプト、メモリアナライザー、ウォームアップに供給されます。ウォームアップ中の説明文はそのトークンバジェットから消費されます。デスクライバーのプロンプトは `prompts/describe.md` です。設定は `media` 配下にあります。
+
+スティッカーとカスタム絵文字は頻繁に繰り返されるため、ID でキャッシュされ、初回の記述後はほぼコストがかかりません。`features.vision` が有効な場合、呼び出しメッセージのスティッカーは画像として添付されます。Discord の組み込みアニメーションスティッカーは Lottie アニメーションであり画像ではないため、名前以上の情報は得られません。
+
+ユーザーメッセージ内の `<senses>` ブロックは、現在の設定でペルソナが何を知覚でき何を知覚できないかを伝えます。ペルソナはこのブロックを信頼し、そこに記載されている以上のものを見た、聞いた、開いたと主張しません。
+
+ペルソナは動画を視聴したり音声を聴いたりできません。名前、長さ、そしてせいぜい一フレームの説明文が得られます。ボイスメッセージは長さのみ表示されます。リンクは Discord の埋め込みからサイト名、タイトル、スニペットが表示されますが、ページ自体は表示されません。
+
+## コストとプライバシー
+
+各ターンは一つの LLM リクエストで、メモリ更新が二つ目を追加します。コストはモデルとエンドポイントに依存します。`llm.model` と `llm.baseUrl` は互換性のある任意の値を受け付けます。1 日の上限（`llm.maxRequestsPerDay`）が過剰な支出を防ぎます。
+
+`data/` にはメンバーごとのプロファイル、関係スコア、チャンネルの観察、サーバーパターンが保存されます。あなたのマシン上に留まり、gitignore 対象で、LLM にはコンテキストとしてのみ送信されます。アナライザーはセンシティブな詳細を保存しないよう指示されています。`/nep memory forget` でプロファイルを完全に削除できます。
+
+サーバーのメンバーに知らせてください。自分のメッセージが LLM で処理されること、ボットがノートを保持することを知っておくべきです。
+
+## サービスとして実行する
+
+`deploy/neptunia-bot.service` にサンプルの systemd ユニットがあります。`WorkingDirectory` と `User` を調整してからインストールします。
+
+```bash
+sudo cp deploy/neptunia-bot.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now neptunia-bot
+```
+
+プライベートレイヤーはコードと同じ場所に配置されます。`.env`、`config.local.json`、`prompts.local/`、`data/` です。更新するには:
+
+```bash
+git pull && sudo systemctl restart neptunia-bot
+```
+
+再起動でデータは失われません。すべての状態はディスク上にあります。再起動が必要なのは `src/` 配下のコード変更の後だけです。プロンプトと設定の変更はライブで反映されます。
+
+メモリはプロセス内に保持され `data/` に書き込まれます。実行中のボットのファイルを直接編集すると、次の書き込みで変更が上書きされるため安全ではありません。手動でメモリを編集するには: `/nep pause` でボットを一時停止し、ファイルを編集してから `/nep resume` で再開します。一時停止はすべてのアクティビティを停止し、メモリをディスクにフラッシュしてアンロードします。実行中のウォームアップは現在のリクエストの後に一時停止します。状態は永続化されます。再起動後も一時停止のままで、再開するまでウォームアップは自動開始しません。`/nep resume` は `data/` 配下のすべての JSON ファイルを検証し、パースできないものがあれば壊れたファイル名を表示して拒否します。検証に問題がなければメモリをリロードして続行します（中断されたウォームアップも含む）。読み取り専用コマンドと設定コマンドは一時停止中も動作します。メモリに書き込むコマンドは拒否されます。`/nep status` で一時停止状態を確認できます。
+
+## コントリビューション
+
+イシューとプルリクエストを歓迎します。まず `CONTRIBUTING.md` をお読みください。ターゲットブランチは `main`、プルリクエストは一つの変更のみ、テストは `npm test` で合格、英語のみです。プロンプトファイルとコードの間のコントラクトは `docs/prompt-contract.md` にあります。一方を変更する場合、同じプルリクエストでもう一方も変更してください。エンジンはキャラクター中立です。特定のキャラクターの挙動はそのデプロイの `prompts.local/` に属します。セキュリティレポートは `SECURITY.md` を通じて行い、公開イシューには書かないでください。
+
+## テスト
+
+```bash
+npm test
+```
+
+`node --test` で実行されます。ネットワークや Discord 接続は不要です。同じコマンドがすべてのプルリクエストで CI によって実行されます。
+
+## プロジェクト構成
+
+```
+config.json                defaults for every setting, hot-reloaded
+.env.example               template for DISCORD_TOKEN and OPENROUTER_API_KEY
+prompts/
+  system-prompt.md         how to behave like an ordinary chat member
+  character-card.md        the personality (working example)
+  rules.md                 owner's live corrections
+  format.md                output tags the model uses
+  reply.md                 task: someone called you
+  interject.md             task: jump into a conversation
+  initiate.md              task: start a topic
+  memory.md                prompt for the memory analyzer
+  describe.md              prompt for the media describer
+  address.md               classifier for follow-up messages
+  profile.md               warmup: one member's profile from a message sample
+  channel.md               warmup: channel notes from a message sample
+  server.md                warmup: server-level notes from channel notes and member summaries
+  labels.json              every code-inserted string in prompts
+prompts.local/             your personality (gitignored)
+docs/
+  prompt-contract.md       the contract between prompt files and code
+  en/
+    configuration.md       full reference for every config key
+    owner-commands.md      every subcommand and the access grants
+    warmup.md              the warmup: stages, progress, rails, commands
+  zh/                      Chinese
+    README.md
+    configuration.md
+    owner-commands.md
+    warmup.md
+  ja/                      Japanese
+    README.md
+    configuration.md
+    owner-commands.md
+    warmup.md
+  ru/                      Russian
+    README.md
+    configuration.md
+    owner-commands.md
+    warmup.md
+src/
+  index.js                 entry point, wiring, timers, shutdown
+  config.js                .env parser, config loader, deepMerge
+  hot.js                   live config + prompts via fs.watch
+  log.js                   structured JSON logging
+  admin.js                 owner commands
+  llm/
+    tokens.js              token estimation with self-calibration
+    budget.js              priority-ordered section trimming
+    openrouter.js          chat completions, safety rails
+    parse.js               output tags to actions
+  discord/
+    guild.js               single-guild resolution
+    commands.js            slash commands, registration, interaction adapter
+    events.js              message pipeline
+    collect.js             channel history, neighbours, permissions
+    format.js              transcript lines, time gaps, tempo
+    media.js               media classification, label selection, proxy URLs
+    fetch-image.js         download and cache images for inline LLM requests
+  behavior/
+    mention.js             call detection, ignore heuristics
+    prompt.js              request builder with token budget
+    turn.js                one turn: collect, build, call, act
+    spontaneous.js         chaotic timer, eavesdrop
+    pending.js             pending direct pings while the persona is busy
+  memory/
+    store.js               JSON file persistence, atomic writes
+    update.js              batch memory updates
+    affinity.js            relationship score logic
+    interests.js           remembered interests: sightings, confirmation, eviction
+    details.js             remembered details: sightings, confirmation, eviction
+    aliases.js             remembered aliases: sightings, confirmation, eviction
+    episodes.js            remembered episodes: append, weight-based eviction
+    channels.js            channel map rendering, activity verdicts
+    mentions.js            member-id tokens in stored text: toTokens and fromTokens
+    clamp.js               text clamping: soft limits, sentence boundaries, safe member tokens
+    ranking.js             shared ranking for interests and details: frequency, recency, decay
+    lore.js                lorebook logic: key matching, entry selection
+    describe.js            media describer: one picture in, one cached caption out
+    warmup.js              sample-based memory warmup
+tests/                     node --test, pure-function unit tests
+deploy/
+  neptunia-bot.service     example systemd unit
+data/                      persistent state (gitignored, created at runtime)
+  state.json               scheduler times, token calibration, daily request counter, warmup progress
+  guilds/<id>/guild.json   server habits, in-jokes, the persona's self-claims
+  guilds/<id>/buffer.json  messages observed since the last memory update
+  guilds/<id>/media.json   media description cache
+  guilds/<id>/users/       per-member profiles and relationships
+  guilds/<id>/channels/    channel observations from the analyzer
+  guilds/<id>/lore.json    lorebook entries
+```

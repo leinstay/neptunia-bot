@@ -12,7 +12,7 @@ Node.js 20 or newer. No build step, no TypeScript, no `dotenv`. Tests run with `
 
 ## Before you start
 
-Neptunia is a Discord pseudo-user engine: one instance, one server, one bot account, one personality supplied through prompt files. The engine stays character-neutral — a character's behaviour belongs in a deployment's own `prompts.local/`, never in `src/` or tracked `prompts/`. Pull requests that add character-specific logic will be declined.
+Neptunia is a Discord pseudo-user engine: one instance, one server, one bot account, one personality supplied through prompt files. The engine stays character-neutral. A character's behaviour belongs in a deployment's own `prompts.local/`, never in `src/` or tracked `prompts/`. Pull requests that add character-specific logic will be declined.
 
 Open an issue before a change of behaviour, a new config setting, a new owner command or a new prompt file, so the design is agreed before the code. A bug fix with a test can go straight to a pull request.
 
@@ -36,11 +36,11 @@ Fork the repository, branch from `main`, make the change, open a pull request ba
 - The model's output is data: only the tags in the output contract are acted on.
 - Logs carry counts, never message contents.
 
-**Every behaviour has a config setting.** A new behaviour needs its switch or number in `config.json` (`features.*` for on/off) and a row in the [configuration reference](docs/configuration.md).
+**Every behaviour has a config setting.** A new behaviour needs its switch or number in `config.json` (`features.*` for on/off) and a row in the [configuration reference](docs/en/configuration.md).
 
-**No model-facing text in `src/`.** Anything the model or the chat reads lives in `prompts/*.md` and `prompts/labels.json`. The prompt-to-code contract — placeholders, `labels.json` keys, context blocks, output tags, analyzer JSON — is documented in [`docs/prompt-contract.md`](docs/prompt-contract.md). A change on one side of the contract changes the other in the same pull request.
+**No model-facing text in `src/`.** Anything the model or the chat reads lives in `prompts/*.md` and `prompts/labels.json`. The prompt-to-code contract (placeholders, `labels.json` keys, context blocks, output tags, analyzer JSON) is documented in [`docs/prompt-contract.md`](docs/prompt-contract.md). A change on one side of the contract changes the other in the same pull request.
 
-**English only.** Code, comments, commit messages, documentation, prompt defaults — everything in the repository is English. A deployment's `prompts.local/` can be in any language, but it is never committed.
+**English only.** Code, comments, commit messages, documentation and prompt defaults are all English. A deployment's `prompts.local/` can be in any language, but it is never committed.
 
 **Commit messages.** English, imperative subject line. The body says why when the subject is not enough.
 
@@ -65,7 +65,7 @@ CI runs `npm test` on every pull request; the tests must pass. A single maintain
 
 ## AI-assisted contributions
 
-This project is built with AI coding assistants, so they are not banned. The rule: the human who opens the pull request has read, tested and can explain every line. The pull request must follow the same conventions as any other — no drive-by comment rewrites, no added logging, no new abstractions the change does not need. A pull request that would take longer to fix than to rewrite may be closed.
+This project is built with AI coding assistants, so they are not banned. The rule: the human who opens the pull request has read, tested and can explain every line. The pull request must follow the same conventions as any other: no drive-by comment rewrites, no added logging, no new abstractions the change does not need. A pull request that would take longer to fix than to rewrite may be closed.
 
 ## Licence
 

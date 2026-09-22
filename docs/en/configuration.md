@@ -6,7 +6,7 @@ Every key in `config.json` with its default, grouped by section.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `dryRun` | `false` | Full pipeline, never sends (see [Dry run](../README.md#dry-run)) |
+| `dryRun` | `false` | Full pipeline, never sends (see [Dry run](../../README.md#dry-run)) |
 | `mentions` | `true` | React to @mentions |
 | `replies` | `true` | React to replies |
 | `nameTriggers` | `true` | React to name mentions in messages |
@@ -33,7 +33,7 @@ Every key in `config.json` with its default, grouped by section.
 | `commandName` | `"nep"` | Slash command name (lowercase `a-z 0-9 _ -`, up to 32 chars; re-registered on change) |
 | `nameTriggers` | `[]` | Extra trigger strings besides @mention |
 | `guildId` | `""` | Server to lock to; auto-detected if in exactly one |
-| `dryRunChannelId` | `""` | Channel for dry-run mirror (see [Dry run](../README.md#dry-run)) |
+| `dryRunChannelId` | `""` | Channel for dry-run mirror (see [Dry run](../../README.md#dry-run)) |
 | `channels.allow` | `[]` | Allowed channels (empty = all visible) |
 | `channels.deny` | `[]` | Ignored channels |
 | `access` | `{}` | Who besides owners may run which commands (managed by `/nep access`) |
@@ -209,3 +209,24 @@ With `damping` on, a change that pushes the score further from zero is scaled by
 | `scanMessages` | `30` | Messages scanned for key matches |
 | `maxMatches` | `8` | Max entries shown per request |
 | `textChars` | `600` | Lore entry text limit (chars) |
+
+## `warmup`
+
+| Key | Default | Meaning |
+|---|---|---|
+| `enabled` | `true` | Run the warmup automatically on first start |
+| `lookbackDays` | `60` | How far back to sample (days) |
+| `minMessages` | `30` | Own messages for a member to qualify |
+| `maxPeople` | `40` | Members processed, most active first |
+| `messagesPerPerson` | `2000` | Own messages sampled per member |
+| `contextBefore` | `1` | Context lines before each sampled message |
+| `maxChannelShare` | `0.5` | Max share of samples from one channel |
+| `messagesPerChannel` | `200` | Newest messages a channel is described from |
+| `serverSampleMessages` | `600` | Recent main-channel messages for the server request |
+| `refreshMessages` | `400` | Messages sampled for a portrait refresh |
+| `fetchLimitPerChannel` | `15000` | Messages fetched per channel for the sample pool |
+| `maxOutputTokens` | `6000` | Max output tokens per warmup request |
+| `maxRequestTokens` | `120000` | Max tokens per warmup request (input + output) |
+| `maxTokens` | `6000000` | Total token budget for the run |
+| `rateLimitWaitMinutes` | `10` | Minutes to wait on a rate limit |
+| `rateLimitMaxWaits` | `36` | Consecutive waits before the run aborts |

@@ -18,17 +18,17 @@ All instructions are English in both layers; a character's speech samples may be
 
 | File | Required | Role | Placeholders |
 |---|---|---|---|
-| `system-prompt.md` | yes | Character-agnostic craft of passing for a chat member: length, anti-AI rules, use of context, attitude toward people, boundaries. Says the card wins on voice | `{{name}}` |
+| `system-prompt.md` | yes | Character-agnostic rules for acting like a chat member: length, anti-AI rules, use of context, attitude toward people, boundaries. Says the card wins on voice | `{{name}}` |
 | `character-card.md` | yes | The personality: who, character, voice and language, meta layer, **what earns and loses their good opinion** (read by the analyzer), reference lines. The one file a deployer rewrites | `{{name}}` |
-| `rules.md` | no | Owner's live corrections, override the two above. **Must end with the bullet list under its last `## ` heading** — code appends `- …` lines | `{{name}}` |
-| `format.md` | yes | The output protocol | — |
+| `rules.md` | no | Owner's live corrections, override the two above. **Must end with the bullet list under its last `## ` heading.** Code appends `- …` lines | `{{name}}` |
+| `format.md` | yes | The output protocol | none |
 | `reply.md` | yes | Task: somebody called the persona | `{{name}}` `{{author}}` `{{trigger}}` `{{target}}` |
 | `interject.md` / `initiate.md` | yes | Tasks: cut into a live conversation / start a topic in a silent chat | `{{name}}` |
 | `memory.md` | yes | Out-of-character prompt of the stream analyzer: targeted edits to memory from live batches | `{{name}}` `{{fieldChars}}` `{{guildFieldChars}}` `{{maxDetails}}` `{{maxInjokes}}` `{{maxSelfFacts}}` `{{maxNewEpisodes}}` `{{maxEpisodes}}` `{{maxDeltaPerUpdate}}` `{{maxInterests}}` `{{interestTopicChars}}` `{{interestNoteChars}}` `{{loreTextChars}}` |
 | `profile.md` | yes | Warmup / portrait refresh: one member's profile from a message sample | `{{name}}` `{{fieldChars}}` `{{maxInterests}}` `{{maxDetails}}` `{{interestTopicChars}}` `{{interestNoteChars}}` `{{maxNewEpisodes}}` |
 | `channel.md` | yes | Warmup: channel notes from a message sample | `{{fieldChars}}` |
 | `server.md` | yes | Warmup: server-level notes from channel notes and member summaries | `{{name}}` `{{fieldChars}}` `{{maxInjokes}}` `{{loreTextChars}}` |
-| `describe.md` | yes | Out-of-character prompt of the media describer (`features.mediaDescriptions`): one picture in, one plain line out — what is on it, any legible text, in the language the chat speaks. No opinions, no markdown | — |
+| `describe.md` | yes | Out-of-character prompt of the media describer (`features.mediaDescriptions`): one picture in, one plain line out: what is on it, any legible text, in the language the chat speaks. No opinions, no markdown | none |
 | `address.md` | yes | Classifier: is this untagged message addressed to the persona | `{{name}}` |
 | `labels.json` | yes | Every string the CODE inserts into a prompt. Keys fixed below, values are the writer's | see below |
 
@@ -38,7 +38,7 @@ System message = `system-prompt` + `character-card` + `rules` + `format`. For th
 The analyzer and the warmup's `profile.md` and `server.md` receive the character card and `rules.md` as a
 `<character>` block in the user message. `channel.md`, `describe.md` and `address.md` do not receive the card.
 
-`{{guildFieldChars}}` is `fieldChars * 2` — the limit code clamps guild-level patterns and starters to.
+`{{guildFieldChars}}` is `fieldChars * 2`, the limit code clamps guild-level patterns and starters to.
 `{{maxEpisodes}}` is the total episodes kept per person. Both are filled from config but not used by the default
 prompts; a custom `memory.md` may reference them.
 
@@ -47,12 +47,12 @@ prompts; a custom `memory.md` may reference them.
 | Block | Content |
 |---|---|
 | `<now>` | Date, weekday, time in `config.bot.timezone`, formatted with `labels.locale` |
-| `<senses>` | What the persona can and cannot perceive RIGHT NOW, generated from the live config: which pictures it sees itself, which come as a helper's description, what it is blind and deaf to. So it never pretends to have watched a video — and can joke about it in its own voice |
+| `<senses>` | What the persona can and cannot perceive RIGHT NOW, generated from the live config: which pictures it sees itself, which come as a helper's description, what it is blind and deaf to. So it never pretends to have watched a video and can joke about it in its own voice |
 | `<about_chat>` | How people talk here, how they start and cut into conversations, in-jokes |
 | `<server>` | The CURRENT channel in full (Discord category and topic, purpose, what people write, tone, activity, last message, top writers; marked with `labels.server.currentMark`) plus only the neighbour channels that fed `<other_channels>` this turn; no other channel |
 | `<lore>` | Server lore entries whose keys occur in the recent messages (plus entries marked always): events, recurring characters, long-running stories. Like a lorebook: hundreds may exist, only the relevant few are shown |
 | `<self_facts>` | What the persona has claimed about itself |
-| `<people>` | Member profiles; the caller first, marked with `labels.profile.interlocutorMark`; each with the persona's attitude and, for the caller, the **episodes** — moments the persona remembers about the two of them, with dates and short quotes |
+| `<people>` | Member profiles; the caller first, marked with `labels.profile.interlocutorMark`; each with the persona's attitude and, for the caller, the **episodes**: moments the persona remembers about the two of them, with dates and short quotes |
 | `<other_channels>` | Up to `context.neighborMessages` messages per neighbouring channel, not older than `context.neighborMaxAgeMinutes` |
 | `<chat>` | Up to `context.channelMessages` latest messages of the current channel |
 | `<tempo>` | Counts for 10 min / hour / day, distinct people, silence, a verdict (live / slow / dead) |
@@ -86,22 +86,22 @@ transcript.empty | replyToOld | image
 transcript.replyTo                       {index}
 transcript.file | sticker                {name}
 transcript.stickerDescribed              {name} {text}
-transcript.emojiDescribed                {name} {text} — appended to a line for a custom emoji; text keeps :name:
-transcript.imageAttached                 {n} — this picture is attached to the request, the persona sees it
+transcript.emojiDescribed                {name} {text}: appended to a line for a custom emoji; text keeps :name:
+transcript.imageAttached                 {n}: this picture is attached to the request, the persona sees it
 transcript.imageDescribed                {text}
 transcript.gif                           {name}
 transcript.gifDescribed                  {text}
 transcript.video                         {name} {duration}
-transcript.videoDescribed                {name} {duration} {text} — text describes ONE frame
+transcript.videoDescribed                {name} {duration} {text}: text describes ONE frame
 transcript.voice                         {duration}
 transcript.audio                         {name} {duration}
 transcript.link                          {site} {title}
 transcript.linkText                      {site} {title} {text}
-transcript.thumbnailDescribed            {text} — follows a link tag; describes the link's preview picture
+transcript.thumbnailDescribed            {text}: follows a link tag; describes the link's preview picture
 transcript.filePreview                   {name} {text}
 transcript.forwarded                     {text}
-transcript.forwardedFrom                 {channel} {text} — used when the source channel is known; falls back to `forwarded`
-transcript.frameAttached                 {n} — follows a video/gif item whose still frame is attached picture n
+transcript.forwardedFrom                 {channel} {text}: used when the source channel is known; falls back to `forwarded`
+transcript.frameAttached                 {n}: follows a video/gif item whose still frame is attached picture n
 transcript.unknownDuration               shown in place of {duration} when Discord gave none
 senses.imageSee | imageDescribed | imageBlind        one line each; code picks the ones true under the live config
 senses.gifDescribed | gifBlind
@@ -110,15 +110,15 @@ senses.stickerSee | stickerDescribed | stickerBlind
 senses.lottie
 senses.voice | links | files
 tempo.counts                             {last10min} {lastHour} {lastDay}
-tempo.authors                            {authors} — a head count
+tempo.authors                            {authors}: a head count
 tempo.silenceBeforeTrigger | lastMessageAgo | sinceOwn          {duration}
 tempo.emptyChannel | ownUnanswered
 tempo.verdict                            {verdict} = tempo.verdictLive | verdictSlow | verdictDead
 profile.interlocutorMark                 appended to the caller's heading (starts with a space)
 profile.formerNames                      {names}
 profile.character | interests | style | details | relationship  {text}
-profile.aliases                          {text} — what people in chat call this member (comma-separated by code)
-profile.interestItem                     {topic} {note} — one interest with a note
+profile.aliases                          {text}: what people in chat call this member (comma-separated by code)
+profile.interestItem                     {topic} {note}: one interest with a note
 profile.interestItemNoNote               {topic}
 profile.unsureMark                       appended to an unconfirmed interest or detail (starts with a space, self-explanatory)
 profile.staleMark                        appended to an interest not seen for memory.interestStaleDays (starts with a space)
@@ -126,8 +126,8 @@ profile.unknown
 profile.messageCount                     {count}
 profile.affinity                         {score} {band} {reason}
 profile.episodes                         heading line above the caller's episodes
-profile.episode                          {date} {what} {quote} {feeling} — one remembered moment
-profile.episodeNoQuote                   {date} {what} {feeling} — the same without a quote
+profile.episode                          {date} {what} {quote} {feeling}: one remembered moment
+profile.episodeNoQuote                   {date} {what} {feeling}: the same without a quote
 lore.entry                               {title} {text}
 affinity.bands.hostile | dislike | cool | neutral | warm | fond | devoted
                                          thresholds in code: ≤-60 · ≤-25 · ≤-8 · <8 · <25 · <60 · ≥60
@@ -135,14 +135,14 @@ aboutChat.patterns | starters | injokes  {text}
 server.currentMark                       appended to the current channel's heading (starts with a space)
 server.category | topic | purpose | topics | tone               {text}
 server.activity                          {activity} = server.activityLive | activitySlow | activityDead
-server.lastMessage                       {when} — humanised age of the channel's newest message
-server.topWriters                        {names} — current names of the members who write there most
+server.lastMessage                       {when}: humanised age of the channel's newest message
+server.topWriters                        {names}: current names of the members who write there most
 triggers.mention | reply | name | followUp   followUp = an untagged message the address classifier judged to be for the persona; such a turn posts plain, never as a Discord reply
 warmup.ownMark                           prefixed to a member's own lines in the profile.md transcript
 warmup.contextMark                       prefixed to context lines in the profile.md transcript
 ```
 
-## Model output — only these tags
+## Model output: only these tags
 
 - `<think>…</think>` optional, first, 1–4 lines of hidden planning; an unclosed one means silence.
 - `<msg>text</msg>` one chat message, up to 3 in a row; `reply="#87"` makes it a Discord reply.
@@ -155,7 +155,7 @@ warmup.contextMark                       prefixed to context lines in the profil
 ## The analyzer (`memory.md`)
 
 One call updates everything the persona remembers. It judges people **through the persona's eyes**, so it receives
-the character card. Whether a channel is alive is NOT its call — code counts that. The warmup feeds old history
+the character card. Whether a channel is alive is NOT its call; code counts that. The warmup feeds old history
 through the warmup prompts (`profile.md`, `channel.md`, `server.md`), not through the analyzer.
 
 The numeric limits in the prompt are placeholders filled at runtime from `config.memory.*` and `relationships.maxDeltaPerUpdate`.
@@ -166,7 +166,7 @@ Input: `<character>` · `<existing_profiles>` (JSON by user id, incl. current `a
 `topics`, `tone`) · `<new_messages>` grouped under `## #channel-name (id:123)`, lines `[14:32] nick (id:123): text`,
 a line addressed to the persona starts with `→ `, own lines use `labels.self`.
 
-Output — a bare JSON object. Profiles are updated INCREMENTALLY: the analyzer returns changes, never a re-summary
+Output: a bare JSON object. Profiles are updated INCREMENTALLY: the analyzer returns changes, never a re-summary
 of what is already stored, so facts are not degraded by being rewritten batch after batch:
 
 ```
@@ -234,7 +234,7 @@ of what is already stored, so facts are not degraded by being rewritten batch af
   how the persona and this person stand with each other, not news and not the person's relations with others. Each
   ≤ `memory.fieldChars`, returned only when it needs to change; an absent field leaves the stored text untouched.
   `character` and `style` are written ONLY by `profile.md` (the warmup and a portrait refresh), never edited by the
-  stream analyzer directly — the analyzer returns `portrait` (a one-line cue about what the stored text misses) when
+  stream analyzer directly. The analyzer returns `portrait` (a one-line cue about what the stored text misses) when
   a batch warrants it, and code queues a refresh.
 - **Members are referred to by id, never by nickname.** Nicknames change daily, so in every free-text field the
   analyzer writes (profile prose, interest notes, detail text, episode `what`/`feeling`, affinity reason, `guild`
@@ -282,16 +282,16 @@ of what is already stored, so facts are not degraded by being rewritten batch af
 - `affinity` is a CHANGE: integer `delta` (usually ±1…5, up to ±`relationships.maxDeltaPerUpdate` for something
   striking), one-line `reason` naming an observed event. Code clamps it to ±`relationships.maxDeltaPerUpdate`, accumulates into −100…100, keeps a short
   history. The model never sets the absolute score.
-- `episodes` are APPENDED, never rewritten: return only NEW moments worth remembering for months — an insult, a
+- `episodes` are APPENDED, never rewritten: return only NEW moments worth remembering for months: an insult, a
   kindness, a promise, a bet, a fight, a shared joke, something the person asked the persona to do or never do. `what`
   one line; `quote` the person's own words verbatim, short (≤ 120 chars), or empty; `feeling` how the persona took it,
   judged through the character card; `weight` 1–5 (5 = never forget). At most `memory.maxNewEpisodes` per user per
   batch; most batches add none. The input shows the episodes already stored so nothing is recorded twice. Code keeps
   `memory.maxEpisodes` per person, evicting the lightest, then the oldest.
-- `lore` is the server's lorebook: things that outlive a conversation — events ("the day X left"), recurring
+- `lore` is the server's lorebook: things that outlive a conversation: events ("the day X left"), recurring
   characters and pets, long-running stories, feuds, traditions. `title` is the identity (an entry with the same title
   is an UPDATE and carries the whole merged text), `keys` 2–6 words or short phrases that people actually type when
-  the thing comes up (names, nicknames, the meme's wording — in the chat's language, lowercase), `text` ≤ `lore.textChars` (`{{loreTextChars}}`).
+  the thing comes up (names, nicknames, the meme's wording, in the chat's language, lowercase), `text` ≤ `lore.textChars` (`{{loreTextChars}}`).
   Input `<existing_lore>` lists stored titles with their keys, and the full text of entries the batch touches.
   Entries added by the owner (`/nep lore add`) are never changed by the analyzer.
 - String fields ≤ `memory.fieldChars`; details ≤ `memory.maxDetails`, injokes ≤ `memory.maxInjokes`, self ≤ `memory.maxSelfFacts`. Notes in the language the chat speaks.
@@ -302,78 +302,47 @@ of what is already stored, so facts are not degraded by being rewritten batch af
 The `<server>` block is assembled from stored channel notes and code-maintained facts, filtered to only the channels
 that matter for this turn. The current channel appears first, marked with `labels.server.currentMark`; then only the
 neighbour channels that contributed messages to `<other_channels>` this turn, each in full. Every other stored channel
-is left out — on a large server most of them are irrelevant and waste budget.
+is left out. On a large server most of them are irrelevant and waste budget.
 
 A channel entry (`renderChannel` in `src/memory/channels.js`) carries:
 
-- **Discord facts** — name (the `# heading`), category, topic. Present from the moment the channel is first seen.
-- **Analyzer notes** — purpose, topics, tone. Written by `channel.md` during the warmup and updated by the stream
+- **Discord facts:** name (the `# heading`), category, topic. Present from the moment the channel is first seen.
+- **Analyzer notes:** purpose, topics, tone. Written by `channel.md` during the warmup and updated by the stream
   analyzer (`memory.md`) from live batches. All three are free-text, token-resolved (`<@id>` → current name) at render
   time.
-- **Code-maintained counters** — message count, the timestamp of the first and last message, a 30-day activity
+- **Code-maintained counters:** message count, the timestamp of the first and last message, a 30-day activity
   histogram (messages per UTC day, trimmed to the 30 most recent days), and the top 5 writers (by message count,
   excluding bots and the persona). The warmup fills these from the channel's fetched history via
   `store.setChannelFacts`; live traffic keeps them current via `store.touchChannel`.
-- **Activity verdict** — `live`, `slow` or `dead`, computed by `channelActivity` from the counters, never the model's
+- **Activity verdict:** `live`, `slow` or `dead`, computed by `channelActivity` from the counters, never the model's
   call. `live` when the sum of today's and yesterday's (UTC) messages reaches
   `context.channelActivity.liveMessagesPerDay` (default 20). `dead` when the channel has never seen a message or the
   last one is older than `context.channelActivity.deadAfterDays` (default 7). `slow` is everything in between.
   Rendered via `labels.server.activity` / `activityLive` / `activitySlow` / `activityDead`.
-- **Last message age** — humanised via `labels.server.lastMessage` when the label exists and the data is available.
-- **Top writers** — rendered via `labels.server.topWriters`, resolving stored author ids to current names; an id with
+- **Last message age:** humanised via `labels.server.lastMessage` when the label exists and the data is available.
+- **Top writers:** rendered via `labels.server.topWriters`, resolving stored author ids to current names; an id with
   no profile is skipped.
 
 When the current channel has no stored note yet (the analyzer has not touched it), a fallback entry is synthesised from
 the Discord facts of the messages in the transcript, so the persona still knows where it is.
 
-## The warmup (`profile.md`, `channel.md`, `server.md`) — how memory starts
+## The warmup (`profile.md`, `channel.md`, `server.md`): how memory starts
 
-A portrait is defined by a person's recent messages; one request about one person removes attribution errors by
-construction. The stream analyzer (`memory.md`) keeps running on live batches and applies targeted edits: one fact per
-entry, added / confirmed / corrected / removed in place, never a rewrite of everything.
+Each warmup request handles one unit of work (one channel, one person or the server), so attribution stays clean.
+`channel.md` produces channel notes (purpose, topics, tone). `profile.md` produces a member's character, style,
+interests, details, episodes and aliases. `server.md` produces server-wide patterns, conversation starters, in-jokes and
+lore. For the run order, sampling, progress, rails and subcommands see [Warmup](en/warmup.md).
 
 ### Data model
 
-`character` and `style` STAY PROSE and are written ONLY by `profile.md` — by the warmup and by a PORTRAIT REFRESH.
+`character` and `style` STAY PROSE and are written ONLY by `profile.md`: by the warmup and by a PORTRAIT REFRESH.
 The stream analyzer never edits them: for a member whose batch showed a recurring habit or a change in how they write
 that the stored portrait misses or contradicts, it returns `users.<id>.portrait: "one line: what the portrait misses"`.
-Code then queues a refresh for that member: their newest `warmup.refreshMessages` (default 400) own messages with
-context are sampled exactly like the warmup, `profile.md` is called with `<draft>` = the stored character + style,
+Code then queues a refresh for that member: `profile.md` is called with `<draft>` = the stored character + style,
 `<hint>` = the analyzer's line, and the answer's `character` and `style` replace the stored ones (interests, details,
-episodes and aliases of that answer are IGNORED; they keep flowing through the stream ops). Rails: at most one refresh
-per member per `memory.portraitRefreshHours` (default 24), at most `memory.portraitRefreshPerDay` (default 20) per
-server, counted against the daily request cap; `/nep memory refresh <user>` forces one.
+episodes and aliases of that answer are IGNORED; they keep flowing through the stream ops).
 
-### Run order
-
-`/nep warmup run` (also automatic on start when `warmup.enabled` and no profile exists):
-
-1. **Channels**: every readable channel gets one request, described from the newest
-   `warmup.messagesPerChannel` (default 200) messages. When a channel's window has fewer messages than that, a
-   deeper fetch is attempted regardless of age. A channel with no history is described from its name, category and
-   topic alone. The result is a set of channel notes (purpose, topics, tone) and code-maintained facts (counts, top
-   writers, activity histogram).
-2. **People**: `pickPeople` (≥ `warmup.minMessages` in `warmup.lookbackDays`, most active first,
-   ≤ `warmup.maxPeople`); per person the sample (`warmup.messagesPerPerson` default 2000,
-   `warmup.contextBefore` 1) is cut chronologically into chunks that fit `warmup.maxRequestTokens`; each chunk
-   after the first receives the previous answer as `<draft>` ("your own draft from older messages; keep what holds,
-   correct, extend; newest evidence wins"); the last answer is stored: character/style entries and interests/details
-   (weight from `times`), episodes, aliases, plus counters (message count, first/last seen) computed by code.
-3. **Server**: one request, `server.md`: input = all channel notes, one line per profiled member (name, top habits,
-   top interests), and the newest `warmup.serverSampleMessages` (default 600) lines of the main channels → output
-   `{ "patterns": "", "starters": "", "injokes": [""], "lore": [{ "title", "keys", "text" }] }` stored as guild notes and lore.
-
-Attitude and `relationship` are NOT warmed up. Progress (`state.warmup`: done channels / people / server,
-tokens used) is persisted after every request so a restart resumes. Rails: `warmup.maxTokens` (default 6M) and the
-per-request cap; a 429 is waited out (`warmup.rateLimitWaitMinutes` 10 × `warmup.rateLimitMaxWaits` 36). The
-persona stays mute while a warmup run is in flight.
-
-`/nep warmup people` lists qualifying members. `/nep warmup status` shows progress and token usage. `/nep warmup stop`
-cancels any warmup work in flight (the request in progress is aborted, progress is kept so `run` can resume).
-`/nep warmup users [member]` profiles one member or every qualifying member; `/nep warmup channels [channel]` describes
-one channel or every readable channel; `/nep warmup server` rebuilds the server notes and lore.
-`/nep warmup reset` clears progress only, not stored memory. `/nep memory wipe` clears all analyzer memory for the
-server: profiles, attitudes, episodes, server habits, channel notes, lore and warmup progress.
+Attitude and `relationship` are NOT warmed up; they grow from live conversation only.
 
 `profile.md` output: `{ "character": "", "style": "", "interests": [{ topic, note, times }], "details": [{ text, times }],
 "episodes": [...], "aliases": [""] }`; blocks `<character>` `<member>` `<draft>` (optional) `<hint>` (optional, portrait
@@ -381,7 +350,7 @@ refresh only) `<snippets>`. Own lines in the snippets start with `labels.warmup.
 `labels.warmup.contextMark`. Aliases come from OTHER people's lines (how they address the member), so the
 own-lines attribution rule does not apply to them.
 
-## The address classifier (`address.md`) — is this untagged message for the persona?
+## The address classifier (`address.md`): is this untagged message for the persona?
 
 After the persona answers someone, a conversation window opens in that channel (`mention.followUpMinutes`, extended
 by every further answer). A message inside the window that carries no trigger (no mention, no reply to the persona,

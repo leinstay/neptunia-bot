@@ -21,7 +21,7 @@ Worth reporting here:
 - Anything that lets a non-owner run owner commands or write to the bot's files.
 - Anything that makes the bot send or act outside the output contract (`<msg>`, `<react>`, `<skip/>`).
 
-Prompt injection that makes the persona say something silly is a prompt-quality matter — open a regular issue unless it crosses one of the lines above.
+Prompt injection that makes the persona say something silly is a prompt-quality matter. Open a regular issue unless it crosses one of the lines above.
 
 ## Supported versions
 

@@ -19,11 +19,13 @@ Thumbs.db
 .vscode/
 .idea/
 
-# Local specs and plans; only the tracked contract and configuration documents are allowed through
+# Local specs and plans; only the contract and the per-language documentation are allowed through
 /docs/*
 !/docs/prompt-contract.md
-!/docs/configuration.md
-!/docs/owner-commands.md
+!/docs/en/
+!/docs/zh/
+!/docs/ja/
+!/docs/ru/
 
 # Node
 node_modules/

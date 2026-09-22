@@ -4,6 +4,7 @@
     <img src=".github/assets/banner.png" width="700" alt="Neptunia - AI character engine for Discord">
   </picture>
 </p>
+<p align="center">English | <a href="docs/zh/README.md">中文</a> | <a href="docs/ja/README.md">日本語</a> | <a href="docs/ru/README.md">Русский</a></p>
 <p align="center">
   <a href="https://github.com/leinstay/neptunia-bot/stargazers"><img src="https://img.shields.io/github/stars/leinstay/neptunia-bot" alt="GitHub stars"></a>
   <a href="https://github.com/leinstay/neptunia-bot/forks"><img src="https://img.shields.io/github/forks/leinstay/neptunia-bot" alt="GitHub forks"></a>
@@ -15,11 +16,11 @@
 
 ---
 
-Neptunia is a locally run Discord bot that plays one configurable character through an LLM and passes for a regular chat member, not an assistant. Node.js 20+ with a single dependency (discord.js), any OpenRouter-compatible endpoint, a pluggable character card written without touching code, hot-reloaded prompts and config, per-member memory with attitudes and episodes, a server-wide lorebook, vision for attached pictures, one-line media descriptions from a helper model, owner slash commands for live tuning, and a dry-run mode for safe first runs. It ships with a working example character; write your own card for a different persona.
+Neptunia is a locally run Discord bot that plays one configurable character through an LLM, behaving like an ordinary chat member. Node.js 20+ with a single dependency (discord.js), any OpenRouter-compatible endpoint, a pluggable character card written without touching code, hot-reloaded prompts and config, per-member memory with attitudes and episodes, a server-wide lorebook, vision for attached pictures, one-line media descriptions from a helper model, owner slash commands for live tuning, and a dry-run mode. It ships with a working example character; write your own card for a different persona.
 
-The persona responds to mentions, replies and name triggers, sometimes ignoring them. It cuts into conversations at random intervals and starts topics in dead channels. It remembers people, tracks attitudes from -100 to 100, and lets those shape how it engages — the score never appears in chat. All config and prompts are hot-reloaded; owner commands tune the bot live from Discord.
+The persona responds to mentions, replies and name triggers, sometimes ignoring them. It cuts into conversations at random intervals and starts topics in dead channels. It remembers people, tracks attitudes from -100 to 100, and uses them in replies. The score never appears in chat. All config and prompts are hot-reloaded; owner commands tune the bot live from Discord.
 
-Each instance serves one server, one bot account, one personality. For a second server or character, run a second copy with its own `.env`, `config.local.json`, `prompts.local/` and `data/`. Discord marks bot accounts with an APP badge; the engine does not disguise that. The goal is behaviour and voice.
+Each instance serves one server, one bot account, one personality. For a second server or character, run a second copy with its own `.env`, `config.local.json`, `prompts.local/` and `data/`. Discord marks bot accounts with an APP badge; the engine does not disguise that.
 
 ## Quick start
 
@@ -62,7 +63,7 @@ Both are hot-reloaded.
 
 | File | Required | Purpose |
 |---|---|---|
-| `system-prompt.md` | yes | How to pass for a human chat member, character-agnostic |
+| `system-prompt.md` | yes | How to behave like an ordinary chat member, character-agnostic |
 | `character-card.md` | yes | The personality: who they are, how they talk, what they care about |
 | `rules.md` | no | Owner's live corrections, appended by `/nep rule add` |
 | `format.md` | yes | Output protocol: tags the model uses to act |
@@ -79,8 +80,6 @@ Both are hot-reloaded.
 
 **The only file you must rewrite is `character-card.md`.** Copy it to `prompts.local/` and write your persona. Everything else works as-is, or override individual files as needed.
 
-Write your prompts in the language the character speaks. Translate `labels.json` too: copy it to `prompts.local/`, change the `locale` and values, so the model reads one language throughout.
-
 The memory analyzer judges how the character feels about people. Both it and the warmup receive your character card and `rules.md`, so include what your character likes and dislikes; a live rule about voice or judgement shapes portraits and attitude the same way the card does.
 
 The placeholders, `labels.json` keys, context blocks and output tags every prompt file may use are specified in [`docs/prompt-contract.md`](docs/prompt-contract.md); a change on one side changes the other.
@@ -91,46 +90,11 @@ The system prompt handles sounding human, so the card is purely personality. Giv
 
 ## Configuration
 
-`config.json` holds every setting with its default. `config.local.json` (gitignored) is deep-merged over it. Both are hot-reloaded. See [`docs/configuration.md`](docs/configuration.md) for the full reference of every key.
+`config.json` holds every setting with its default. `config.local.json` (gitignored) is deep-merged over it. Both are hot-reloaded. See [`docs/en/configuration.md`](docs/en/configuration.md) for the full reference of every key.
 
 ## Getting started with memory
 
-The engine builds its memory of people and channels from a sample of recent messages. On first start, when `warmup.enabled` is true and no profile exists yet, a warmup run starts automatically. The persona stays mute while it runs.
-
-**Order of operations:**
-
-1. **Channels**: every readable channel gets one request, described from the newest `warmup.messagesPerChannel` messages regardless of their age. A channel with no history is described from its name, category and topic. The result is a set of channel notes: purpose, topics, tone.
-2. **People**: the most active members (at least `warmup.minMessages` own messages in the window, up to `warmup.maxPeople`) each get a profile. The engine samples up to `warmup.messagesPerPerson` of their messages with `warmup.contextBefore` lines of surrounding context. Large samples are split into chunks that fit `warmup.maxRequestTokens`; each later chunk receives the previous answer as a draft to keep, correct and extend. The final answer stores character, style, interests, details, episodes and aliases.
-3. **Server**: one request takes the channel notes, a summary line per profiled member and the newest `warmup.serverSampleMessages` lines of the main channels, and produces server-wide patterns, conversation starters, in-jokes and lore.
-
-Attitude and relationship are not warmed up; they grow from live conversation.
-
-Progress is persisted after every request and survives restarts. The total token budget is `warmup.maxTokens`; the per-request cap (`warmup.maxRequestTokens`) applies to each call. A provider rate limit (HTTP 429) is waited out for `warmup.rateLimitWaitMinutes` per wait, up to `warmup.rateLimitMaxWaits` consecutive waits.
-
-After the warmup finishes, the live stream analyzer keeps memory current. It processes batches of new messages and updates interests, details, attitudes, episodes, aliases, channel notes and server patterns. When it detects that a stored portrait misses a recurring habit or contradicts how the person now writes, the engine refreshes the portrait from `warmup.refreshMessages` recent messages using the profile prompt. A portrait can be refreshed at most once every `memory.portraitRefreshHours` hours, up to `memory.portraitRefreshPerDay` times per day across the server. `/nep memory refresh <user>` forces one.
-
-`/nep warmup run` starts or resumes a full run. `/nep warmup users [member]` profiles one member or every qualifying member; `/nep warmup channels [channel]` describes one channel or every readable channel; `/nep warmup server` rebuilds the server notes and lore. `/nep warmup people` lists qualifying members. `/nep warmup status` shows progress and token usage. `/nep warmup stop` ends any warmup work at once: the request in flight is cancelled, progress is kept so `run` can resume. `/nep warmup reset` clears progress only, not stored memory. All warmup commands except `status`, `people` and `stop` are refused while paused; `run`, `users` and `channels` are also refused while a run is in flight. For a truly fresh start, use `/nep memory wipe` first: it clears member profiles with their attitudes and moments, server habits, the channel map, the analyzer's lore entries and the warmup progress, after the owner types the server's exact name.
-
-### `warmup`
-
-| Key | Default | Meaning |
-|---|---|---|
-| `enabled` | `true` | Run the warmup automatically on first start |
-| `lookbackDays` | `60` | How far back to sample (days) |
-| `minMessages` | `30` | Own messages for a member to qualify |
-| `maxPeople` | `40` | Members processed, most active first |
-| `messagesPerPerson` | `2000` | Own messages sampled per member |
-| `contextBefore` | `1` | Context lines before each sampled message |
-| `maxChannelShare` | `0.5` | Max share of samples from one channel |
-| `messagesPerChannel` | `200` | Newest messages a channel is described from |
-| `serverSampleMessages` | `600` | Recent main-channel messages for the server request |
-| `refreshMessages` | `400` | Messages sampled for a portrait refresh |
-| `fetchLimitPerChannel` | `15000` | Messages fetched per channel for the sample pool |
-| `maxOutputTokens` | `6000` | Max output tokens per warmup request |
-| `maxRequestTokens` | `120000` | Max tokens per warmup request (input + output) |
-| `maxTokens` | `6000000` | Total token budget for the run |
-| `rateLimitWaitMinutes` | `10` | Minutes to wait on a rate limit |
-| `rateLimitMaxWaits` | `36` | Consecutive waits before the run aborts |
+On first start, when `warmup.enabled` is true and no profile exists, the engine runs a warmup that builds memory of people, channels and the server from a sample of recent messages. The total token spend is capped by `warmup.maxTokens`. The persona stays mute while the warmup runs. See [`docs/en/warmup.md`](docs/en/warmup.md) for the stages, progress, rails and owner commands.
 
 ## Dry run
 
@@ -140,7 +104,7 @@ First run on a new server: enable `features.dryRun`, watch the mirror or `journa
 
 ## Owner commands
 
-One Discord slash command, `/nep` (the name comes from `bot.commandName`). Guild commands, registered on start for the served server. Every answer is ephemeral; only the caller sees it, in whatever channel it was typed. See [`docs/owner-commands.md`](docs/owner-commands.md) for every subcommand and the access grants.
+One Discord slash command, `/nep` (the name comes from `bot.commandName`). Guild commands, registered on start for the served server. Every answer is ephemeral; only the caller sees it, in whatever channel it was typed. See [`docs/en/owner-commands.md`](docs/en/owner-commands.md) for every subcommand and the access grants.
 
 ## How a turn works
 
@@ -208,7 +172,7 @@ Memory lives in the process and is written to `data/`; editing those files under
 
 ## Contributing
 
-Issues and pull requests are welcome; read `CONTRIBUTING.md` first. Target branch is `main`, one change per pull request, tests pass with `npm test`, English only. The contract between the prompt files and the code is in `docs/prompt-contract.md` — a change on one side changes the other in the same pull request. The engine stays character-neutral; behaviour of one character belongs in that deployment's `prompts.local/`. Security reports go through `SECURITY.md`, not public issues.
+Issues and pull requests are welcome; read `CONTRIBUTING.md` first. Target branch is `main`, one change per pull request, tests pass with `npm test`, English only. The contract between the prompt files and the code is in `docs/prompt-contract.md`. A change on one side changes the other in the same pull request. The engine stays character-neutral; behaviour of one character belongs in that deployment's `prompts.local/`. Security reports go through `SECURITY.md`, not public issues.
 
 ## Tests
 
@@ -224,7 +188,7 @@ Runs with `node --test`. No network or Discord connection needed. The same comma
 config.json                defaults for every setting, hot-reloaded
 .env.example               template for DISCORD_TOKEN and OPENROUTER_API_KEY
 prompts/
-  system-prompt.md         how to pass for a human chat member
+  system-prompt.md         how to behave like an ordinary chat member
   character-card.md        the personality (working example)
   rules.md                 owner's live corrections
   format.md                output tags the model uses
@@ -241,8 +205,25 @@ prompts/
 prompts.local/             your personality (gitignored)
 docs/
   prompt-contract.md       the contract between prompt files and code
-  configuration.md         full reference for every config key
-  owner-commands.md        every subcommand and the access grants
+  en/
+    configuration.md       full reference for every config key
+    owner-commands.md      every subcommand and the access grants
+    warmup.md              the warmup: stages, progress, rails, commands
+  zh/                      Chinese
+    README.md
+    configuration.md
+    owner-commands.md
+    warmup.md
+  ja/                      Japanese
+    README.md
+    configuration.md
+    owner-commands.md
+    warmup.md
+  ru/                      Russian
+    README.md
+    configuration.md
+    owner-commands.md
+    warmup.md
 src/
   index.js                 entry point, wiring, timers, shutdown
   config.js                .env parser, config loader, deepMerge
