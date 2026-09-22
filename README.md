@@ -15,11 +15,7 @@
 
 ---
 
-Neptunia provides a locally run Discord bot that plays one LLM-driven character: Node.js 20+ with a single dependency (discord.js), any OpenRouter-compatible endpoint, a pluggable character card written without touching code, hot-reloaded prompts and config, per-member memory with attitudes and episodes, a server-wide lorebook, vision for attached pictures, one-line media descriptions from a helper model, owner slash commands for live tuning, and a dry-run mode for safe first runs.
-
-## What is Neptunia?
-
-Neptunia is a locally run Discord bot that plays one configurable character through an LLM and passes for a regular chat member, not an assistant. It ships with a working example character; write your own character card without touching code.
+Neptunia is a locally run Discord bot that plays one configurable character through an LLM and passes for a regular chat member, not an assistant. Node.js 20+ with a single dependency (discord.js), any OpenRouter-compatible endpoint, a pluggable character card written without touching code, hot-reloaded prompts and config, per-member memory with attitudes and episodes, a server-wide lorebook, vision for attached pictures, one-line media descriptions from a helper model, owner slash commands for live tuning, and a dry-run mode for safe first runs. It ships with a working example character; write your own card for a different persona.
 
 The persona responds to mentions, replies and name triggers, sometimes ignoring them. It cuts into conversations at random intervals and starts topics in dead channels. It remembers people, tracks attitudes from -100 to 100, and lets those shape how it engages — the score never appears in chat. All config and prompts are hot-reloaded; owner commands tune the bot live from Discord.
 
