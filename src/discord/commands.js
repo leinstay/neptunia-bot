@@ -10,6 +10,7 @@
 // command means adding one tree entry and one mapper, nothing else.
 
 import { log } from '../log.js';
+import { hasAnyGrant } from './access.js';
 
 // Raw Discord API option-type numbers (application-command-option-type):
 // https://discord.com/developers/docs/interactions/application-commands
@@ -20,6 +21,7 @@ const INTEGER = 4;
 const BOOLEAN = 5;
 const USER = 6;
 const CHANNEL = 7;
+const ROLE = 8;
 
 // application-command-types#channel-type: GUILD_TEXT
 const GUILD_TEXT = 0;
@@ -56,14 +58,18 @@ export function isValidCommandName(name) {
 /**
  * The whole command tree as plain, JSON-serializable objects (the shape
  * `guild.commands.set([...])` expects), for one top-level command named
- * `commandName`. Pure — no discord.js import, no I/O.
+ * `commandName`. Pure — no discord.js import, no I/O. `visible` (default
+ * false, today's behaviour) omits `default_member_permissions` so Discord
+ * shows the command to every member instead of hiding it behind the
+ * `MANAGE_GUILD`-only default — per-command gating still happens at
+ * interaction time (`createInteractionHandler`, `admin.isAllowed`).
  */
-export function buildCommandTree(commandName) {
+export function buildCommandTree(commandName, { visible = false } = {}) {
   return [
     {
       name: commandName,
       description: 'Owner controls for the persona.',
-      default_member_permissions: '0',
+      ...(visible ? {} : { default_member_permissions: '0' }),
       options: [
         { type: SUBCOMMAND, name: 'status', description: 'Model, calibration, quotas and per-guild memory status.' },
         {
@@ -391,9 +397,60 @@ export function buildCommandTree(commandName) {
             { type: SUBCOMMAND, name: 'reset', description: 'Clear warmup progress only (never the memory already written); refused while running.' },
           ],
         },
+        {
+          type: SUBCOMMAND_GROUP,
+          name: 'access',
+          description: 'Who besides owners may run which commands.',
+          options: [
+            {
+              type: SUBCOMMAND,
+              name: 'grant',
+              description: 'Open a command, group or * to everyone, a role or a user.',
+              options: [
+                { type: STRING, name: 'command', description: 'Command key, group name, or *.', required: true, autocomplete: true },
+                { type: ROLE, name: 'role', description: 'Role to grant (omit with user for everyone).', required: false },
+                { type: USER, name: 'user', description: 'User to grant (omit with role for everyone).', required: false },
+              ],
+            },
+            {
+              type: SUBCOMMAND,
+              name: 'revoke',
+              description: 'Revoke a command, group or * from everyone, a role or a user.',
+              options: [
+                { type: STRING, name: 'command', description: 'Command key, group name, or *.', required: true, autocomplete: true },
+                { type: ROLE, name: 'role', description: 'Role to revoke (omit with user to clear everyone).', required: false },
+                { type: USER, name: 'user', description: 'User to revoke (omit with role to clear everyone).', required: false },
+              ],
+            },
+            { type: SUBCOMMAND, name: 'list', description: 'List every access grant.' },
+          ],
+        },
       ],
     },
   ];
+}
+
+/**
+ * Every command key `/nep access` may name: every leaf `<group>.<name>` (or
+ * bare top-level `<name>`) command key, and every subcommand-group name —
+ * derived straight from the tree, so a new command is grantable the moment
+ * it exists, with nothing to keep in sync by hand. `'*'` is a caller-known
+ * constant, not part of either set. Pure — no discord.js import, no I/O.
+ * @returns {{ keys: Set<string>, groups: Set<string> }}
+ */
+export function commandKeys() {
+  const [command] = buildCommandTree('nep');
+  const keys = new Set();
+  const groups = new Set();
+  for (const option of command.options) {
+    if (option.type === SUBCOMMAND_GROUP) {
+      groups.add(option.name);
+      for (const sub of option.options ?? []) keys.add(`${option.name}.${sub.name}`);
+    } else if (option.type === SUBCOMMAND) {
+      keys.add(option.name);
+    }
+  }
+  return { keys, groups };
 }
 
 /**
@@ -421,8 +478,10 @@ export async function registerCommands(guild, config) {
     return false;
   }
 
+  const visible = hasAnyGrant(config?.bot?.access);
   try {
-    await guild.commands.set(buildCommandTree(commandName));
+    await guild.commands.set(buildCommandTree(commandName, { visible }));
+    log.info('commands: registered', { visible });
     return true;
   } catch (err) {
     const appId = guild.client?.application?.id ?? guild.client?.user?.id ?? 'YOUR_APPLICATION_ID';
@@ -510,6 +569,17 @@ const OPTION_MAPPERS = {
   'warmup.server': () => ({}),
   'warmup.status': () => ({}),
   'warmup.reset': () => ({}),
+  'access.grant': (options) => ({
+    command: options.getString('command', true),
+    roleId: options.getRole('role')?.id,
+    userId: options.getUser('user')?.id,
+  }),
+  'access.revoke': (options) => ({
+    command: options.getString('command', true),
+    roleId: options.getRole('role')?.id,
+    userId: options.getUser('user')?.id,
+  }),
+  'access.list': () => ({}),
 };
 
 function buildArgs(commandKey, interaction) {
@@ -548,6 +618,27 @@ async function respond(interaction, text, deferred) {
   }
 }
 
+/** The interacting member's role ids as strings — discord.js gives a `GuildMemberRoleManager`
+ * (`.roles.cache`, a Collection keyed by id) on a live interaction; tests fake it either that way
+ * or as a plain array of ids. Neither shape present -> no roles. */
+function roleIdsFor(interaction) {
+  const roles = interaction.member?.roles;
+  if (roles && typeof roles.cache?.keys === 'function') return [...roles.cache.keys()].map(String);
+  if (Array.isArray(roles)) return roles.map(String);
+  return [];
+}
+
+/** `command`-option autocomplete choices for `/nep access grant|revoke`: every known command key,
+ * every group name, and `*`, filtered by the typed text. */
+function accessKeyChoices(typed) {
+  const { keys, groups } = commandKeys();
+  const all = ['*', ...groups, ...keys];
+  return all
+    .filter((key) => key.toLowerCase().includes(typed))
+    .slice(0, MAX_AUTOCOMPLETE_CHOICES)
+    .map((key) => ({ name: key, value: key }));
+}
+
 /**
  * `hot`, `admin` — see src/hot.js, src/admin.js#createAdmin.
  * `getGuildId` — the single guild this instance serves, or null before it resolves.
@@ -561,23 +652,32 @@ export function createInteractionHandler({ hot, admin, getGuildId }) {
       await interaction.respond([]).catch(() => {});
       return;
     }
-    if (!admin.isOwner(interaction.user.id)) {
+
+    const commandKey = commandKeyFor(interaction);
+    const allowed = admin.isAllowed(commandKey, { userId: interaction.user.id, roleIds: roleIdsFor(interaction) });
+    if (!allowed) {
       await interaction.respond([]).catch(() => {});
       return;
     }
 
     const focused = interaction.options.getFocused(true);
-    if (focused.name !== 'path') {
-      await interaction.respond([]).catch(() => {});
+    const typed = String(focused.value ?? '').toLowerCase();
+
+    if (focused.name === 'path') {
+      const choices = leafPaths(hot.config)
+        .filter((p) => p.toLowerCase().includes(typed))
+        .slice(0, MAX_AUTOCOMPLETE_CHOICES)
+        .map((p) => ({ name: p, value: p }));
+      await interaction.respond(choices).catch(() => {});
       return;
     }
 
-    const typed = String(focused.value ?? '').toLowerCase();
-    const choices = leafPaths(hot.config)
-      .filter((p) => p.toLowerCase().includes(typed))
-      .slice(0, MAX_AUTOCOMPLETE_CHOICES)
-      .map((p) => ({ name: p, value: p }));
-    await interaction.respond(choices).catch(() => {});
+    if (focused.name === 'command') {
+      await interaction.respond(accessKeyChoices(typed)).catch(() => {});
+      return;
+    }
+
+    await interaction.respond([]).catch(() => {});
   }
 
   async function handleChatInput(interaction) {
@@ -589,14 +689,15 @@ export function createInteractionHandler({ hot, admin, getGuildId }) {
       return;
     }
 
-    if (!admin.isOwner(interaction.user.id)) {
-      await interaction.reply({ content: NOT_ALLOWED_MESSAGE, ephemeral: true }).catch(() => {});
-      return;
-    }
-
     const commandKey = commandKeyFor(interaction);
     if (!commandKey) {
       await interaction.reply({ content: 'Error: no subcommand given.', ephemeral: true }).catch(() => {});
+      return;
+    }
+
+    const allowed = admin.isAllowed(commandKey, { userId: interaction.user.id, roleIds: roleIdsFor(interaction) });
+    if (!allowed) {
+      await interaction.reply({ content: NOT_ALLOWED_MESSAGE, ephemeral: true }).catch(() => {});
       return;
     }
 

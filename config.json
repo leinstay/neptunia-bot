@@ -25,7 +25,8 @@
     "nameTriggers": [],
     "guildId": "",
     "dryRunChannelId": "",
-    "channels": { "allow": [], "deny": [] }
+    "channels": { "allow": [], "deny": [] },
+    "access": {}
   },
   "llm": {
     "baseUrl": "https://openrouter.ai/api/v1",

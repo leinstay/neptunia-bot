@@ -112,6 +112,7 @@ The system prompt handles sounding human, so the card is purely personality. Giv
 | `dryRunChannelId` | `""` | Channel for dry-run mirror (see [Dry run](#dry-run)) |
 | `channels.allow` | `[]` | Allowed channels (empty = all visible) |
 | `channels.deny` | `[]` | Ignored channels |
+| `access` | `{}` | Who besides owners may run which commands (managed by `/nep access`) |
 
 ### `llm`
 
@@ -332,7 +333,9 @@ First run on a new server: enable `features.dryRun`, watch the mirror or `journa
 
 ## Owner commands
 
-One Discord slash command, `/nep` (the name comes from `bot.commandName`). Guild commands, registered on start for the served server. Hidden from ordinary members (`default_member_permissions: 0`) and restricted to the ids in `bot.owners`. Every answer is ephemeral; only the owner sees it, in whatever channel it was typed. Channels and users are picked from Discord's own pickers; `set`/`unset` autocomplete config paths. The bot does not read direct messages.
+One Discord slash command, `/nep` (the name comes from `bot.commandName`). Guild commands, registered on start for the served server. Every answer is ephemeral; only the caller sees it, in whatever channel it was typed. Channels, roles and users are picked from Discord's own pickers; `set`/`unset` and `access grant`/`access revoke` autocomplete their `path`/`command` options. The bot does not read direct messages.
+
+Owners (`bot.owners`) can always run every command. Everyone else needs a grant: `/nep access grant <command> [role] [user]` opens one command key (e.g. `memory.show`), a whole group (e.g. `memory`), or every command (`*`) to everyone (no role/user given), a role, or a user; `/nep access revoke` undoes one of those; `/nep access list` shows the current grants. Until the first grant exists, the command is hidden from ordinary members (`default_member_permissions: 0`, same as before); the moment any grant exists, Discord shows `/nep` to everyone, and access is gated per command at the moment it runs.
 
 | Command | What it does |
 |---|---|
@@ -370,6 +373,9 @@ One Discord slash command, `/nep` (the name comes from `bot.commandName`). Guild
 | `/nep warmup status` | Show warmup progress and token usage |
 | `/nep warmup stop` | End any warmup work at once; the request in flight is cancelled, progress is kept so `run` can resume |
 | `/nep warmup reset` | Clear warmup progress, not stored memory |
+| `/nep access grant <command> [role] [user]` | Open a command, group or `*` to everyone (default), a role, or a user |
+| `/nep access revoke <command> [role] [user]` | Revoke a previous grant from everyone (default), a role, or a user |
+| `/nep access list` | List every current access grant |
 
 ## How a turn works
 

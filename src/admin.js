@@ -26,7 +26,28 @@ import { topByRank } from './memory/ranking.js';
 import { fromTokens } from './memory/mentions.js';
 import { sortEpisodesForDisplay } from './memory/episodes.js';
 import { channelActivity } from './memory/channels.js';
+import { commandKeys } from './discord/commands.js';
+import { isAllowed as accessIsAllowed, grant as accessGrant, revoke as accessRevoke } from './discord/access.js';
 import { log } from './log.js';
+
+/** `/nep access grant/revoke`'s command keys that ONLY read — everything else (including every
+ * group and `*`) is treated as opening a write command, and gets the "changes memory or config"
+ * note in the grant reply. Kept in sync by hand with the read-only command list in AGENTS/README;
+ * a new read-only command is simply added here. */
+const READ_ONLY_ACCESS_KEYS = new Set([
+  'status',
+  'ping',
+  'memory.show',
+  'memory.channel',
+  'memory.server',
+  'rule.list',
+  'lore.list',
+  'lore.show',
+  'model.show',
+  'warmup.status',
+  'warmup.people',
+  'access.list',
+]);
 
 const FORBIDDEN_SEGMENTS = new Set(['__proto__', 'constructor', 'prototype']);
 
@@ -457,6 +478,19 @@ export function createAdmin({
   function isOwner(userId) {
     const owners = hot.config?.bot?.owners ?? [];
     return owners.map(String).includes(String(userId));
+  }
+
+  /** Owner, or `bot.access` granted the command by exact key, group, or `*` — see
+   * src/discord/access.js#isAllowed. `roleIds` -- the caller's Discord role ids -- comes from
+   * src/discord/commands.js#createInteractionHandler, which reads them off the interaction. */
+  function isAllowed(commandKey, { userId, roleIds } = {}) {
+    return accessIsAllowed({
+      commandKey,
+      userId,
+      roleIds,
+      owners: hot.config?.bot?.owners ?? [],
+      access: hot.config?.bot?.access ?? {},
+    });
   }
 
   /**
@@ -1639,6 +1673,117 @@ async function cmdPing(args) {
     return `Portrait refreshed for ${userId}.`;
   }
 
+  // ---------------------------------------------------------------------
+  // access: who besides owners may run which commands (src/discord/access.js)
+  // ---------------------------------------------------------------------
+
+  /** `key` is grantable when it is `*`, a known subcommand-group name, or a known
+   * `<group>.<name>`/bare top-level command key (src/discord/commands.js#commandKeys). */
+  function isKnownAccessKey(key) {
+    if (key === '*') return true;
+    const { keys, groups } = commandKeys();
+    return keys.has(key) || groups.has(key);
+  }
+
+  /** True when granting `key` opens at least one command that writes (everything not in
+   * READ_ONLY_ACCESS_KEYS) — a bare write key, `*`, or a group containing a write subcommand. */
+  function accessKeyOpensWrite(key) {
+    if (key === '*') return true;
+    const { keys, groups } = commandKeys();
+    if (groups.has(key)) {
+      for (const full of keys) {
+        if (full.startsWith(`${key}.`) && !READ_ONLY_ACCESS_KEYS.has(full)) return true;
+      }
+      return false;
+    }
+    return !READ_ONLY_ACCESS_KEYS.has(key);
+  }
+
+/** `bot.access` as of the last write, WITHOUT relying on `hot.reloadConfig()` having actually
+   * re-merged config.local.json into `hot.config` yet -- config.local.json already holds the whole
+   * merged object the moment one grant/revoke writes it (see `writeAccess`), so reading it back
+   * first keeps repeated grant/revoke/list calls consistent even a moment before the next reload
+   * lands. Falls back to `hot.config.bot.access` (the base config.json default, `{}`) before
+   * anything has ever been written locally. */
+  function effectiveAccess() {
+    const localPath = path.join(hot.rootDir, 'config.local.json');
+    const local = readLocalConfig(localPath);
+    if (local?.bot && typeof local.bot === 'object' && Object.hasOwn(local.bot, 'access')) {
+      return local.bot.access ?? {};
+    }
+    return hot.config?.bot?.access ?? {};
+  }
+
+  /** Writes `nextAccess` to `bot.access` in config.local.json and reloads config -- the same
+   * mechanism cmdSet/cmdUnset use. */
+  function writeAccess(nextAccess) {
+    const localPath = path.join(hot.rootDir, 'config.local.json');
+    const next = setPath(readLocalConfig(localPath), 'bot.access', nextAccess);
+    writeLocalConfig(localPath, next);
+    hot.reloadConfig();
+  }
+
+  /** `role <@&id>` / `user <@id>` / `everyone`, matching whichever one target option (or neither) was given. */
+  function accessTargetArgs(args) {
+    const roleId = args?.roleId;
+    const userId = args?.userId;
+    if (roleId && userId) throw new Error('give a role or a user, not both');
+    if (roleId) return { kind: 'role', id: String(roleId), label: `role <@&${roleId}>` };
+    if (userId) return { kind: 'user', id: String(userId), label: `user <@${userId}>` };
+    return { kind: 'everyone', label: 'everyone' };
+  }
+
+  function cmdAccessGrant(args) {
+    const key = String(args?.command ?? '').trim();
+    if (!key) throw new Error('a command key is required');
+    if (!isKnownAccessKey(key)) throw new Error(`unknown command key: ${key}`);
+
+    const target = accessTargetArgs(args);
+    const what = target.kind === 'role' ? { roleId: target.id } : target.kind === 'user' ? { userId: target.id } : { everyone: true };
+    writeAccess(accessGrant(effectiveAccess(), key, what));
+
+    const note = accessKeyOpensWrite(key) ? '\nNote: this opens commands that change memory or config.' : '';
+    return `Granted ${key} to ${target.label}${note}`;
+  }
+
+  function cmdAccessRevoke(args) {
+    const key = String(args?.command ?? '').trim();
+    if (!key) throw new Error('a command key is required');
+    if (!isKnownAccessKey(key)) throw new Error(`unknown command key: ${key}`);
+
+    const target = accessTargetArgs(args);
+    const currentAccess = effectiveAccess();
+    const entry = currentAccess[key];
+    const existed =
+      target.kind === 'role'
+        ? Array.isArray(entry?.roles) && entry.roles.map(String).includes(target.id)
+        : target.kind === 'user'
+          ? Array.isArray(entry?.users) && entry.users.map(String).includes(target.id)
+          : entry?.everyone === true;
+    if (!existed) return 'Nothing to revoke';
+
+    const what = target.kind === 'role' ? { roleId: target.id } : target.kind === 'user' ? { userId: target.id } : { everyone: true };
+    writeAccess(accessRevoke(currentAccess, key, what));
+    return `Revoked ${key} from ${target.label}`;
+  }
+
+  function cmdAccessList() {
+    const access = effectiveAccess();
+    const keys = Object.keys(access);
+    if (keys.length === 0) return 'No grants';
+
+    return keys
+      .map((key) => {
+        const entry = access[key];
+        const parts = [];
+        if (entry?.everyone === true) parts.push('everyone');
+        if (Array.isArray(entry?.roles) && entry.roles.length > 0) parts.push(`roles ${entry.roles.map((id) => `<@&${id}>`).join(', ')}`);
+        if (Array.isArray(entry?.users) && entry.users.length > 0) parts.push(`users ${entry.users.map((id) => `<@${id}>`).join(', ')}`);
+        return `${key}: ${parts.join(', ')}`;
+      })
+      .join('\n');
+  }
+
   /** Wraps a `warmup.*` handler so both report the same thing when the dependency is absent. */
   function withWarmup(fn) {
     return (args, context) => {
@@ -1682,6 +1827,9 @@ async function cmdPing(args) {
     'warmup.server': withWarmup((args, context) => cmdWarmupServer(args, context)),
     'warmup.status': withWarmup((args, context) => cmdWarmupStatus(args, context)),
     'warmup.reset': withWarmup(() => cmdWarmupReset()),
+    'access.grant': (args) => cmdAccessGrant(args),
+    'access.revoke': (args) => cmdAccessRevoke(args),
+    'access.list': () => cmdAccessList(),
   };
 
   /**
@@ -1695,5 +1843,5 @@ async function cmdPing(args) {
     return handler(args, context);
   }
 
-  return { isOwner, run };
+  return { isOwner, isAllowed, run };
 }

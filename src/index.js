@@ -24,6 +24,7 @@ import { createTagHistory } from './behavior/mention.js';
 import { createMessageHandler } from './discord/events.js';
 import { resolveGuild } from './discord/guild.js';
 import { isValidCommandName, registerCommands, createInteractionHandler } from './discord/commands.js';
+import { hasAnyGrant } from './discord/access.js';
 
 const REQUIRED_PROMPTS = ['system-prompt', 'character-card', 'format', 'reply', 'interject', 'initiate', 'memory'];
 
@@ -162,6 +163,7 @@ function every(ms, fn, label) {
 
 let lastCommandName = hot.config.bot.commandName;
 let lastAdminCommandsOn = hot.config.features?.adminCommands !== false;
+let lastVisible = hasAnyGrant(hot.config.bot.access);
 
 client.once(Events.ClientReady, async () => {
   const guilds = [...client.guilds.cache.values()].map((guild) => ({ id: guild.id, name: guild.name }));
@@ -212,14 +214,17 @@ hot.on('change', ({ what }) => {
     });
   }
 
-  // The command tree (and whether it is registered at all) depends on
-  // bot.commandName and features.adminCommands — re-push it only when one of
-  // those actually changed, never on every unrelated config edit.
+  // The command tree (and whether it is registered at all, and whether it is
+  // visible to ordinary members) depends on bot.commandName,
+  // features.adminCommands and bot.access — re-push it only when one of those
+  // actually changed, never on every unrelated config edit.
   const commandName = hot.config.bot.commandName;
   const adminCommandsOn = hot.config.features?.adminCommands !== false;
-  if (commandName !== lastCommandName || adminCommandsOn !== lastAdminCommandsOn) {
+  const visible = hasAnyGrant(hot.config.bot.access);
+  if (commandName !== lastCommandName || adminCommandsOn !== lastAdminCommandsOn || visible !== lastVisible) {
     lastCommandName = commandName;
     lastAdminCommandsOn = adminCommandsOn;
+    lastVisible = visible;
     const guild = client.guilds.cache.get(instance.guildId);
     if (guild) {
       registerCommands(guild, hot.config).catch((err) => log.error('index: failed to re-register commands', { error: err }));

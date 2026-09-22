@@ -582,6 +582,199 @@ test('run: model.set accepts a loosely-valid id (letters, digits, dot, colon, sl
 });
 
 // ---------------------------------------------------------------------------
+// isAllowed
+// ---------------------------------------------------------------------------
+
+test('isAllowed: an owner always passes, even for a command nobody was granted', async () => {
+  const rootDir = makeRoot();
+  const { admin } = makeAdmin(rootDir);
+  assert.equal(admin.isAllowed('memory.wipe', { userId: '42', roleIds: [] }), true);
+});
+
+test('isAllowed: a non-owner with no grant is refused', async () => {
+  const rootDir = makeRoot();
+  const { admin } = makeAdmin(rootDir);
+  assert.equal(admin.isAllowed('status', { userId: '999', roleIds: [] }), false);
+});
+
+test('isAllowed: a non-owner reads bot.access off the live hot.config, role grant included', async () => {
+  const rootDir = makeRoot();
+  const hot = makeHot(rootDir);
+  hot.config.bot.access = { status: { everyone: false, roles: ['staff'], users: [] } };
+  const { admin } = makeAdmin(rootDir, { hot });
+
+  assert.equal(admin.isAllowed('status', { userId: '999', roleIds: ['staff'] }), true);
+  assert.equal(admin.isAllowed('status', { userId: '999', roleIds: ['other'] }), false);
+});
+
+// ---------------------------------------------------------------------------
+// access.grant / access.revoke / access.list
+// ---------------------------------------------------------------------------
+
+test('run: access.grant with no role/user grants everyone; a read-only key gets no write note', async () => {
+  const rootDir = makeRoot();
+  const { admin } = makeAdmin(rootDir);
+
+  const result = await admin.run('access.grant', { command: 'status' }, {});
+
+  assert.deepEqual(readLocal(rootDir), { bot: { access: { status: { everyone: true, roles: [], users: [] } } } });
+  assert.equal(result, 'Granted status to everyone');
+});
+
+test('run: access.grant on a group containing a write subcommand appends the write note', async () => {
+  const rootDir = makeRoot();
+  const { admin } = makeAdmin(rootDir);
+
+  const result = await admin.run('access.grant', { command: 'memory' }, {});
+
+  assert.match(result, /^Granted memory to everyone/);
+  assert.match(result, /Note: this opens commands that change memory or config\./);
+});
+
+test('run: access.grant on * always appends the write note', async () => {
+  const rootDir = makeRoot();
+  const { admin } = makeAdmin(rootDir);
+
+  const result = await admin.run('access.grant', { command: '*' }, {});
+  assert.match(result, /Note: this opens commands that change memory or config\./);
+});
+
+test('run: access.grant with a role writes the role id and mentions it in the reply', async () => {
+  const rootDir = makeRoot();
+  const { admin } = makeAdmin(rootDir);
+
+  const result = await admin.run('access.grant', { command: 'memory.show', roleId: '123' }, {});
+
+  assert.deepEqual(readLocal(rootDir), { bot: { access: { 'memory.show': { everyone: false, roles: ['123'], users: [] } } } });
+  assert.equal(result, 'Granted memory.show to role <@&123>');
+});
+
+test('run: access.grant with a user writes the user id and mentions it in the reply', async () => {
+  const rootDir = makeRoot();
+  const { admin } = makeAdmin(rootDir);
+
+  const result = await admin.run('access.grant', { command: 'status', userId: '456' }, {});
+
+  assert.deepEqual(readLocal(rootDir), { bot: { access: { status: { everyone: false, roles: [], users: ['456'] } } } });
+  assert.equal(result, 'Granted status to user <@456>');
+});
+
+test('run: access.grant rejects both a role and a user at once, writing nothing', async () => {
+  const rootDir = makeRoot();
+  const { admin } = makeAdmin(rootDir);
+
+  await assert.rejects(
+    () => admin.run('access.grant', { command: 'status', roleId: '1', userId: '2' }, {}),
+    /give a role or a user, not both/,
+  );
+  assert.equal(fs.existsSync(path.join(rootDir, 'config.local.json')), false);
+});
+
+test('run: access.grant rejects an unknown command key, writing nothing', async () => {
+  const rootDir = makeRoot();
+  const { admin } = makeAdmin(rootDir);
+
+  await assert.rejects(() => admin.run('access.grant', { command: 'nonsense' }, {}), /unknown command key: nonsense/);
+  assert.equal(fs.existsSync(path.join(rootDir, 'config.local.json')), false);
+});
+
+test('run: access.grant accepts known top-level keys, group names and *', async () => {
+  const rootDir = makeRoot();
+  const { admin } = makeAdmin(rootDir);
+
+  await assert.doesNotReject(() => admin.run('access.grant', { command: 'reload' }, {}));
+  await assert.doesNotReject(() => admin.run('access.grant', { command: 'warmup' }, {}));
+  await assert.doesNotReject(() => admin.run('access.grant', { command: '*' }, {}));
+});
+
+test('run: access.grant twice accumulates -- a second role does not drop the first', async () => {
+  const rootDir = makeRoot();
+  const { admin } = makeAdmin(rootDir);
+
+  await admin.run('access.grant', { command: 'status', roleId: '1' }, {});
+  await admin.run('access.grant', { command: 'status', roleId: '2' }, {});
+
+  assert.deepEqual(readLocal(rootDir), { bot: { access: { status: { everyone: false, roles: ['1', '2'], users: [] } } } });
+});
+
+test('run: access.revoke reports "Nothing to revoke" and writes nothing when there was no such grant', async () => {
+  const rootDir = makeRoot();
+  const { admin } = makeAdmin(rootDir);
+
+  const result = await admin.run('access.revoke', { command: 'status' }, {});
+
+  assert.equal(result, 'Nothing to revoke');
+  assert.equal(fs.existsSync(path.join(rootDir, 'config.local.json')), false);
+});
+
+test('run: access.revoke removes a previously granted role, dropping the entry once it is the last thing set', async () => {
+  const rootDir = makeRoot();
+  const { admin } = makeAdmin(rootDir);
+
+  await admin.run('access.grant', { command: 'status', roleId: '1' }, {});
+  const result = await admin.run('access.revoke', { command: 'status', roleId: '1' }, {});
+
+  assert.equal(result, 'Revoked status from role <@&1>');
+  assert.deepEqual(readLocal(rootDir), { bot: { access: {} } });
+});
+
+test('run: access.revoke with no role/user clears everyone, keeping any roles/users still set', async () => {
+  const rootDir = makeRoot();
+  const { admin } = makeAdmin(rootDir);
+
+  await admin.run('access.grant', { command: 'status' }, {});
+  await admin.run('access.grant', { command: 'status', roleId: '1' }, {});
+  const result = await admin.run('access.revoke', { command: 'status' }, {});
+
+  assert.equal(result, 'Revoked status from everyone');
+  assert.deepEqual(readLocal(rootDir), { bot: { access: { status: { everyone: false, roles: ['1'], users: [] } } } });
+});
+
+test('run: access.revoke rejects an unknown command key', async () => {
+  const rootDir = makeRoot();
+  const { admin } = makeAdmin(rootDir);
+  await assert.rejects(() => admin.run('access.revoke', { command: 'nonsense' }, {}), /unknown command key: nonsense/);
+});
+
+test('run: access.revoke rejects both a role and a user at once', async () => {
+  const rootDir = makeRoot();
+  const { admin } = makeAdmin(rootDir);
+  await assert.rejects(
+    () => admin.run('access.revoke', { command: 'status', roleId: '1', userId: '2' }, {}),
+    /give a role or a user, not both/,
+  );
+});
+
+test('run: access.list reports "No grants" with nothing granted', async () => {
+  const rootDir = makeRoot();
+  const { admin } = makeAdmin(rootDir);
+  assert.equal(await admin.run('access.list', {}, {}), 'No grants');
+});
+
+test('run: access.list formats everyone/roles/users, one line per entry', async () => {
+  const rootDir = makeRoot();
+  const { admin } = makeAdmin(rootDir);
+
+  await admin.run('access.grant', { command: 'status' }, {});
+  await admin.run('access.grant', { command: 'memory.show', roleId: '1' }, {});
+  await admin.run('access.grant', { command: 'memory.show', userId: '2' }, {});
+
+  const result = await admin.run('access.list', {}, {});
+  assert.equal(result, ['status: everyone', 'memory.show: roles <@&1>, users <@2>'].join('\n'));
+});
+
+test('run: access grant/list/revoke/list round trip', async () => {
+  const rootDir = makeRoot();
+  const { admin } = makeAdmin(rootDir);
+
+  await admin.run('access.grant', { command: 'memory', roleId: 'staff' }, {});
+  assert.equal(await admin.run('access.list', {}, {}), 'memory: roles <@&staff>');
+
+  await admin.run('access.revoke', { command: 'memory', roleId: 'staff' }, {});
+  assert.equal(await admin.run('access.list', {}, {}), 'No grants');
+});
+
+// ---------------------------------------------------------------------------
 // ping: reach each role's model directly, in parallel
 // ---------------------------------------------------------------------------
 
