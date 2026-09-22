@@ -92,7 +92,7 @@ npm start
 
 `config.json` 包含所有设置及其默认值。`config.local.json`（已加入 gitignore）会深度合并覆盖。两者均支持热重载。完整配置参考请参阅 [`configuration.md`](configuration.md)。
 
-## 记忆入门
+## 预热
 
 首次启动时，当 `warmup.enabled` 为 true 且不存在任何档案时，引擎会运行预热，从近期消息样本中构建对人、频道和服务器的记忆。总 token 消耗受 `warmup.maxTokens` 限制。预热运行期间角色保持静默。预热的阶段、进度、限制和所有者命令请参阅 [`warmup.md`](warmup.md)。
 

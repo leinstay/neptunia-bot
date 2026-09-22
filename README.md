@@ -92,7 +92,7 @@ The system prompt handles sounding human, so the card is purely personality. Giv
 
 `config.json` holds every setting with its default. `config.local.json` (gitignored) is deep-merged over it. Both are hot-reloaded. See [`docs/en/configuration.md`](docs/en/configuration.md) for the full reference of every key.
 
-## Getting started with memory
+## Warmup
 
 On first start, when `warmup.enabled` is true and no profile exists, the engine runs a warmup that builds memory of people, channels and the server from a sample of recent messages. The total token spend is capped by `warmup.maxTokens`. The persona stays mute while the warmup runs. See [`docs/en/warmup.md`](docs/en/warmup.md) for the stages, progress, rails and owner commands.
 
