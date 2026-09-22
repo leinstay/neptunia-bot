@@ -1234,7 +1234,7 @@ test('createBootstrap: status() reports phase, progress and the next target', as
   const bootstrap = createBootstrap({ hot, store, client, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => 10_000_000 });
 
   await bootstrap.run('g1');
-  const s = await bootstrap.status('g1');
+  const s = bootstrap.status('g1');
   assert.match(s.phase, /aborted/);
   assert.equal(s.channelsEligible, 2);
   assert.equal(s.doneChannels, 0);

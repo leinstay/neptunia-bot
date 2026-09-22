@@ -1376,11 +1376,11 @@ async function cmdPing(args) {
   async function cmdBootstrapStatus(_args, context) {
     const guildId = resolvedGuildId(context);
     if (!guildId) throw new Error('no guild resolved yet');
-    const s = await bootstrap.status(guildId);
+    const s = await bootstrap.status(guildId); // synchronous in the real runner; awaiting a plain value is harmless
     return [
       `phase: ${s.phase}`,
-      `channels: ${s.doneChannels}/${s.channelsEligible}`,
-      `people: ${s.donePeople}/${s.peopleEligible}`,
+      `channels: ${s.doneChannels}/${s.channelsEligible ?? "?"}`,
+      `people: ${s.donePeople}/${s.peopleEligible ?? "?"}`,
       `server: ${s.doneServer ? 'done' : 'pending'}`,
       `tokens used: ${s.tokensUsed} / ${hot.config.bootstrap?.maxTokens ?? '-'}`,
       `requests: ${s.requests}`,

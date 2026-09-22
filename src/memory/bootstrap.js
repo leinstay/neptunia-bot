@@ -1490,19 +1490,20 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
     };
   }
 
-  /** `/nep bootstrap status`: the same as `summary()` plus totals and the next target, which cost a
-   * (cached) history fetch. */
-  async function status(guildId) {
+  /** `/nep bootstrap status`: `summary()` plus totals and the next target. Never fetches: the
+   * totals come from the windows cache when a run or a recent command filled it, otherwise they
+   * are reported as unknown (null), so the command answers at once even while a run is fetching. */
+  function status(guildId) {
     const bs = bootstrapState(store);
     const base = summary();
-    const guild = resolvedGuild(guildId);
-    let channelsEligible = 0;
-    let peopleEligible = 0;
+    let channelsEligible = null;
+    let peopleEligible = null;
     let nextTarget = null;
 
-    if (guild) {
+    const cached = cache.get(guildId);
+    if (cached && now() - cached.fetchedAt < CACHE_TTL_MS) {
       const cfg = hot.config.bootstrap ?? {};
-      const windows = await getWindows(guildId, guild, cfg);
+      const windows = cached.windows;
       const eligibleChannels = windows.filter((window) => window.messages.length >= (cfg.minChannelMessages ?? 0));
       const people = pickPeople(windows, cfg);
       channelsEligible = eligibleChannels.length;
