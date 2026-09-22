@@ -9,7 +9,7 @@ import path from 'node:path';
 
 import { createStore } from '../src/memory/store.js';
 import { isDue, buildMemoryRequest, applyMemoryUpdate, createMemoryUpdater, touchMemory, computeSeenAt, batchAuthorNamesMap, characterText } from '../src/memory/update.js';
-import { createCalibrator, estimateTokens, estimateMessages } from '../src/llm/tokens.js';
+import { createCalibrator, estimateTokens } from '../src/llm/tokens.js';
 import { formatTranscript } from '../src/discord/format.js';
 import { TokenLimitError } from '../src/llm/openrouter.js';
 import { labels } from './fixtures/labels.js';
@@ -320,32 +320,6 @@ test('analyze: the completion sent to the LLM carries the filled number, not the
     await updater.analyze(guildId, [slimMessage({ id: 'm1' })]);
 
     assert.equal(seenSystem, 'Keep every field under 1000 characters.');
-  });
-});
-
-test('estimate: costs the same filled memory prompt the LLM would actually receive', () => {
-  withStore((store) => {
-    const guildId = 'g1';
-    const config = makeConfig({ memory: { ...makeConfig().memory, fieldChars: 1000 } });
-    const hot = { config, prompts: { memory: 'Keep every field under {{fieldChars}} characters.', labels } };
-    const calibrator = createCalibrator();
-    const updater = createMemoryUpdater({ hot, store, llm: {}, calibrator, getSelfName: () => 'Nept' });
-    const messages = [slimMessage({ id: 'm1' })];
-
-    const { messages: llmMessages } = buildMemoryRequest({
-      prompts: hot.prompts,
-      config,
-      calibrator,
-      profiles: {},
-      guildMemory: store.getGuild(guildId),
-      channels: {},
-      messages,
-      selfName: 'Nept',
-      loreEntries: store.getLore(guildId),
-    });
-
-    assert.equal(llmMessages[0].content, 'Keep every field under 1000 characters.');
-    assert.equal(updater.estimate(guildId, messages), calibrator.apply(estimateMessages(llmMessages)));
   });
 });
 
@@ -1047,29 +1021,6 @@ test('analyze: a described link thumbnail renders via thumbnailDescribed, keyed 
     await updater.analyze(guildId, messages);
 
     assert.ok(seenUser.includes(labels.transcript.thumbnailDescribed.replace('{text}', 'a cat plays piano')));
-  });
-});
-
-test('analyze: an explicitly-passed descriptions map is used as-is, the cache never consulted', async () => {
-  await withStoreAsync(async (store) => {
-    const guildId = 'g1';
-    const hot = {
-      config: makeConfig({ features: { mediaDescriptions: true } }),
-      prompts: { memory: 'sys', labels },
-    };
-    const calibrator = createCalibrator();
-    let seenUser = null;
-    const llm = { complete: async (messages) => { seenUser = messages[1].content; return { text: '{}' }; } };
-    const updater = createMemoryUpdater({ hot, store, llm, calibrator, getSelfName: () => 'Nept' });
-    store.getMediaCache(guildId).a1 = { text: 'wrong, should not be used', ts: Date.now() };
-
-    const messages = [
-      slimMessage({ id: 'm1', content: '', attachments: [{ id: 'a1', kind: 'image', name: 'pic.png', durationSec: null }] }),
-    ];
-    await updater.analyze(guildId, messages, { descriptions: new Map([['a1', 'precomputed caption']]) });
-
-    assert.ok(seenUser.includes(labels.transcript.imageDescribed.replace('{text}', 'precomputed caption')));
-    assert.ok(!seenUser.includes('wrong, should not be used'));
   });
 });
 
@@ -2728,7 +2679,7 @@ test('analyze: a request that fails to build (e.g. missing labels) reports usage
   });
 });
 
-test('analyze: forwards countAgainstDailyCap to llm.complete, default true', async () => {
+test('analyze: never opts out of the daily request cap, relying on llm.complete\'s own default (true)', async () => {
   await withStoreAsync(async (store) => {
     const guildId = 'g1';
     const hot = { config: makeConfig(), prompts: { memory: 'sys', labels } };
@@ -2738,10 +2689,8 @@ test('analyze: forwards countAgainstDailyCap to llm.complete, default true', asy
     const updater = createMemoryUpdater({ hot, store, llm, calibrator, getSelfName: () => 'Nept' });
 
     await updater.analyze(guildId, [slimMessage({ id: 'm1' })]);
-    assert.equal(seenOptions.countAgainstDailyCap, true);
 
-    await updater.analyze(guildId, [slimMessage({ id: 'm2' })], { countAgainstDailyCap: false });
-    assert.equal(seenOptions.countAgainstDailyCap, false);
+    assert.notEqual(seenOptions.countAgainstDailyCap, false);
   });
 });
 
@@ -2847,69 +2796,6 @@ test('run: does nothing when prompts.memory is missing', async () => {
   });
 });
 
-// ---- estimate ---------------------------------------------------------------
-
-test('estimate: matches the calibrated cost of the exact request analyze would build', () => {
-  withStore((store) => {
-    const guildId = 'g1';
-    store.touchUser(guildId, '1', 'nick', Date.now());
-    store.updateUser(guildId, '1', { character: 'cheerful, talks a lot about anime and games' });
-    const hot = { config: makeConfig(), prompts: { memory: 'memory system prompt', labels } };
-    const calibrator = createCalibrator();
-    const updater = createMemoryUpdater({ hot, store, llm: {}, calibrator, getSelfName: () => 'Nept' });
-
-    const messages = [
-      slimMessage({ id: 'm1', authorId: '1', channelId: 'c1', channelName: 'general', content: 'hello there', ts: Date.UTC(2026, 0, 1, 12, 0, 0) }),
-    ];
-
-    const got = updater.estimate(guildId, messages);
-
-    const { messages: llmMessages } = buildMemoryRequest({
-      prompts: hot.prompts,
-      config: hot.config,
-      calibrator,
-      profiles: { 1: store.getUser(guildId, '1') },
-      guildMemory: store.getGuild(guildId),
-      channels: {},
-      messages,
-      selfName: 'Nept',
-    });
-    const expected = calibrator.apply(estimateMessages(llmMessages));
-
-    assert.equal(got, expected);
-    assert.ok(got > 0);
-  });
-});
-
-test('estimate: never touches the buffer or the store beyond reading it', () => {
-  withStore((store) => {
-    const guildId = 'g1';
-    const hot = { config: makeConfig(), prompts: { memory: 'sys', labels } };
-    const calibrator = createCalibrator();
-    const updater = createMemoryUpdater({ hot, store, llm: {}, calibrator, getSelfName: () => 'Nept' });
-    store.pushBuffer(guildId, slimMessage({ id: 'buffered' }), 100);
-
-    updater.estimate(guildId, [slimMessage({ id: 'm1' })]);
-
-    assert.equal(store.getBuffer(guildId).length, 1, 'the live buffer is untouched');
-  });
-});
-
-test('estimate: falls back to a content-only heuristic when the request cannot be built', () => {
-  withStore((store) => {
-    const guildId = 'g1';
-    const hot = { config: makeConfig(), prompts: {} }; // no labels: buildMemoryRequest throws
-    const calibrator = createCalibrator();
-    const updater = createMemoryUpdater({ hot, store, llm: {}, calibrator, getSelfName: () => 'Nept' });
-
-    const messages = [slimMessage({ content: 'hello world' }), slimMessage({ id: 'm2', content: 'second one' })];
-    const got = updater.estimate(guildId, messages);
-
-    const expected = estimateTokens('hello world') + estimateTokens('second one');
-    assert.equal(got, expected);
-  });
-});
-
 // ---- computeSeenAt -----------------------------------------------------------
 
 test('computeSeenAt: per user, the newest timestamp of THAT user\'s own messages in the batch', () => {
@@ -2997,7 +2883,7 @@ test('analyze: dates a new interest/detail by the message\'s own (old) timestamp
     const oldTs = Date.UTC(2020, 0, 1, 12, 0, 0); // years-old history, as a replayed batch would feed it
     const messages = [slimMessage({ id: 'old1', authorId: '1', authorName: 'nick', content: 'i love chess', ts: oldTs })];
 
-    const outcome = await updater.analyze(guildId, messages, { countAgainstDailyCap: false });
+    const outcome = await updater.analyze(guildId, messages);
     assert.equal(outcome.ok, true);
 
     const profile = store.getUser(guildId, '1');

@@ -7,7 +7,7 @@
 // a failed update just leaves the buffer alone and backs off for a while.
 
 import { fitSections, SectionsTooLargeError } from '../llm/budget.js';
-import { estimateTokens, estimateMessages } from '../llm/tokens.js';
+import { estimateTokens } from '../llm/tokens.js';
 import { formatTranscript, renderTranscript } from '../discord/format.js';
 import { parseJsonObject } from '../llm/parse.js';
 import { TokenLimitError } from '../llm/openrouter.js';
@@ -743,7 +743,7 @@ export function touchMemory(store, guildId, normalized) {
 /** `nameOf` for buildMemoryRequest's token resolution: a member's current
  * stored name, or null when the guild has no profile for that id -- see
  * docs/prompt-contract.md, "Members are referred to by id, never by
- * nickname". The one place `analyze()`/`estimate()` touch the store for this. */
+ * nickname". The one place `analyze()` touches the store for this. */
 function storeNameOf(store, guildId) {
   return (id) => store.getUser(guildId, id)?.names?.[0] ?? null;
 }
@@ -797,9 +797,9 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
   }
 
   /**
-   * The stored profiles/channels `analyze()` and `estimate()` both need for
-   * `messages`, plus the distinct author/channel ids they were built from
-   * (kept as strings-to-be via `knownUserIds`/`knownChannelIds` downstream).
+   * The stored profiles/channels `analyze()` needs for `messages`, plus the
+   * distinct author/channel ids they were built from (kept as
+   * strings-to-be via `knownUserIds`/`knownChannelIds` downstream).
    */
   function collectContext(guildId, messages) {
     const authorIds = [...new Set(messages.filter((m) => !m.self).map((m) => m.authorId))];
@@ -837,15 +837,9 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
    *
    * @param {string} guildId
    * @param {object[]} messages  Slim messages (oldest first) to summarize; NOT read from or removed off any buffer.
-   * @param {object} [opts]
-   * @param {boolean} [opts.countAgainstDailyCap]  Forwarded to llm.complete(); a caller with its own
-   *   token budget (not the daily request cap) passes `false`.
-   * @param {Map<string, string>} [opts.descriptions]  Pre-computed describer captions (see
-   *   src/memory/bootstrap.js, which budgets and charges these itself). When omitted, cached
-   *   captions are looked up by item id instead -- see below.
    * @returns {Promise<{ ok: boolean, usage: object|null, estimated: number, result: object|null, error?: Error }>}
    */
-  async function analyze(guildId, messages, { countAgainstDailyCap = true, descriptions } = {}) {
+  async function analyze(guildId, messages) {
     const cfg = hot.config.memory;
     const promptText = hot.prompts.memory;
     if (!promptText) {
@@ -860,15 +854,15 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
     // observe() above). It only reads whatever src/discord/events.js has
     // already warmed into the cache for these item ids, fire-and-forget, as
     // the messages came in; a cache miss just renders blind.
-    let effectiveDescriptions = descriptions;
-    if (!effectiveDescriptions && hot.config.features?.mediaDescriptions === true) {
+    let descriptions = null;
+    if (hot.config.features?.mediaDescriptions === true) {
       const cache = store.getMediaCache(guildId);
-      effectiveDescriptions = new Map();
+      descriptions = new Map();
       for (const message of messages) {
         for (const item of [...(message.attachments ?? []), ...(message.links ?? [])]) {
           if (item.id == null || !isDescribable(item)) continue;
           const cached = cache[item.id];
-          if (cached && !cached.miss) effectiveDescriptions.set(item.id, cached.text);
+          if (cached && !cached.miss) descriptions.set(item.id, cached.text);
         }
         // Stickers/emoji keep no URL in the buffer (see observe() above) --
         // stickerUrl rebuilds it from id/format only to tell a Lottie
@@ -878,12 +872,12 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
           if (!stickerUrl(sticker.id, sticker.format)) continue;
           const itemId = `sticker:${sticker.id}`;
           const cached = cache[itemId];
-          if (cached && !cached.miss) effectiveDescriptions.set(itemId, cached.text);
+          if (cached && !cached.miss) descriptions.set(itemId, cached.text);
         }
         for (const emoji of message.emojis ?? []) {
           const itemId = `emoji:${emoji.id}`;
           const cached = cache[itemId];
-          if (cached && !cached.miss) effectiveDescriptions.set(itemId, cached.text);
+          if (cached && !cached.miss) descriptions.set(itemId, cached.text);
         }
       }
     }
@@ -900,7 +894,7 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
         messages,
         selfName: getSelfName(guildId),
         loreEntries: store.getLore(guildId),
-        descriptions: effectiveDescriptions,
+        descriptions,
         nameOf: storeNameOf(store, guildId),
       });
 
@@ -908,7 +902,6 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
         model: cfg.model ?? undefined,
         maxOutputTokens: cfg.maxOutputTokens,
         temperature: 0.3,
-        countAgainstDailyCap,
         // A 150-message batch with an 8000-token answer on a large model can
         // take longer than the chat timeout -- the analyzer gets its own,
         // much larger budget (see docs/prompt-contract.md, "The analyzer").
@@ -980,40 +973,6 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
         reason,
         detail: detailOf(err),
       };
-    }
-  }
-
-  /**
-   * Calibrated input-token estimate of the exact memory-update request
-   * `analyze` would send for `messages`, built through the same
-   * `buildMemoryRequest` path — so it carries the memory prompt, the
-   * character card and the stored profiles/channels JSON, not just the raw
-   * message contents. Used to judge whether a batch is affordable before
-   * spending a real request on it. Never throws: if the request cannot even
-   * be built (e.g. broken prompts), falls back to a cheap content-only
-   * heuristic so that check alone cannot crash a caller.
-   * @param {string} guildId
-   * @param {object[]} messages  Slim messages (oldest first), same shape `analyze` expects.
-   * @returns {number}
-   */
-  function estimate(guildId, messages) {
-    try {
-      const { profiles, channels } = collectContext(guildId, messages);
-      const { messages: llmMessages } = buildMemoryRequest({
-        prompts: hot.prompts,
-        config: hot.config,
-        calibrator,
-        profiles,
-        guildMemory: store.getGuild(guildId),
-        channels,
-        messages,
-        selfName: getSelfName(guildId),
-        loreEntries: store.getLore(guildId),
-        nameOf: storeNameOf(store, guildId),
-      });
-      return calibrator.apply(estimateMessages(llmMessages));
-    } catch {
-      return messages.reduce((sum, m) => sum + estimateTokens(m.content ?? ''), 0);
     }
   }
 
@@ -1106,5 +1065,5 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
     return running.size === 0 ? Promise.resolve() : new Promise((resolve) => idleWaiters.push(resolve));
   }
 
-  return { observe, tick, run, analyze, estimate, waitIdle };
+  return { observe, tick, run, analyze, waitIdle };
 }
