@@ -28,7 +28,18 @@ const REPLY_CHUNK_CHARS = 1900;
 const MAX_AUTOCOMPLETE_CHOICES = 25;
 
 /** Commands that may take long enough to need `deferReply` before `editReply`. */
-const SLOW_COMMANDS = new Set(['poke', 'reload', 'pause', 'resume', 'ping', 'bootstrap.people', 'bootstrap.preview']);
+const SLOW_COMMANDS = new Set([
+  'poke',
+  'reload',
+  'pause',
+  'resume',
+  'ping',
+  'bootstrap.people',
+  'bootstrap.preview',
+  'bootstrap.run',
+  'bootstrap.status',
+  'memory.refresh',
+]);
 
 const DISABLED_MESSAGE = 'Owner commands are disabled (features.adminCommands is off).';
 const NOT_ALLOWED_MESSAGE = 'Not allowed.';
@@ -244,6 +255,12 @@ export function buildCommandTree(commandName) {
                 },
               ],
             },
+            {
+              type: SUBCOMMAND,
+              name: 'refresh',
+              description: "Force a member's portrait (character/style) to be rewritten now, ignoring the refresh-hours rail.",
+              options: [{ type: USER, name: 'user', description: 'Member.', required: true }],
+            },
           ],
         },
         {
@@ -312,13 +329,13 @@ export function buildCommandTree(commandName) {
         {
           type: SUBCOMMAND_GROUP,
           name: 'bootstrap',
-          description: 'Sample-based memory bootstrap preview -- writes nothing under data/.',
+          description: 'The sample-based memory bootstrap -- THE way memory starts.',
           options: [
             { type: SUBCOMMAND, name: 'people', description: 'Who currently qualifies for the bootstrap sample.' },
             {
               type: SUBCOMMAND,
               name: 'preview',
-              description: 'Preview a bootstrap profile/channel analysis (give exactly one of user/channel).',
+              description: 'Preview a bootstrap profile/channel analysis, without writing anything (give exactly one of user/channel).',
               options: [
                 { type: USER, name: 'user', description: 'Member to preview.', required: false },
                 {
@@ -330,6 +347,24 @@ export function buildCommandTree(commandName) {
                 },
               ],
             },
+            {
+              type: SUBCOMMAND,
+              name: 'run',
+              description: 'Start/resume the whole run, or (re)do exactly one target now (give at most one of user/channel/server).',
+              options: [
+                { type: USER, name: 'user', description: 'Do this member now.', required: false },
+                {
+                  type: CHANNEL,
+                  name: 'channel',
+                  description: 'Do this channel now.',
+                  required: false,
+                  channel_types: [GUILD_TEXT],
+                },
+                { type: BOOLEAN, name: 'server', description: 'Do the server-wide step now.', required: false },
+              ],
+            },
+            { type: SUBCOMMAND, name: 'status', description: 'Phase, progress, tokens used and the next target.' },
+            { type: SUBCOMMAND, name: 'reset', description: 'Clear bootstrap progress only (never the memory already written); refused while running.' },
           ],
         },
       ],
@@ -424,6 +459,7 @@ const OPTION_MAPPERS = {
   'memory.alias-add': (options) => ({ userId: options.getUser('user', true).id, name: options.getString('name', true) }),
   'memory.alias-remove': (options) => ({ userId: options.getUser('user', true).id, name: options.getString('name', true) }),
   'memory.wipe': (options) => ({ confirm: options.getString('confirm', true) }),
+  'memory.refresh': (options) => ({ userId: options.getUser('user', true).id }),
   'memory.affinity': (options) => ({
     userId: options.getUser('user', true).id,
     score: options.getInteger('score') ?? undefined,
@@ -445,6 +481,13 @@ const OPTION_MAPPERS = {
     userId: options.getUser('user')?.id,
     channelId: options.getChannel('channel')?.id,
   }),
+  'bootstrap.run': (options) => ({
+    userId: options.getUser('user')?.id,
+    channelId: options.getChannel('channel')?.id,
+    server: options.getBoolean('server') ?? false,
+  }),
+  'bootstrap.status': () => ({}),
+  'bootstrap.reset': () => ({}),
 };
 
 function buildArgs(commandKey, interaction) {

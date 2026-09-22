@@ -1,14 +1,17 @@
-// Tests for src/memory/bootstrap.js: the F36 phase-A sample-based bootstrap
-// PREVIEW. Pure helpers (pickPeople, memberStats, splitNewestOlder,
-// sampleMember, selectChannelMessages, markOwnContext, buildProfileRequest,
-// buildChannelRequest, clampProfileResult, clampChannelResult) are tested
-// directly; the factory is tested against a fake discord.js guild/channel and
-// a fake LLM client. No network, no real prompts/ or data/.
+// Tests for src/memory/bootstrap.js: THE way memory starts. Pure helpers
+// (pickPeople, memberStats, splitNewestOlder, sampleMember,
+// selectChannelMessages, markOwnContext, buildProfileRequest,
+// buildChannelRequest, clampProfileResult, clampChannelResult,
+// clampServerResult, takeFittingPrefix, buildPersonWriteIterations) are
+// tested directly; the factory is tested against a fake discord.js
+// guild/channel, a fake LLM client and a real (temp-dir) store. No network,
+// no real prompts/ or data/.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { createStore } from '../src/memory/store.js';
 
 import {
   pickPeople,
@@ -21,6 +24,9 @@ import {
   buildChannelRequest,
   clampProfileResult,
   clampChannelResult,
+  clampServerResult,
+  takeFittingPrefix,
+  buildPersonWriteIterations,
   createBootstrap,
 } from '../src/memory/bootstrap.js';
 import { createCalibrator } from '../src/llm/tokens.js';
@@ -453,6 +459,88 @@ test('clampChannelResult: clamps purpose/topics/tone, null on garbage', () => {
 });
 
 // ---------------------------------------------------------------------------
+// clampServerResult
+// ---------------------------------------------------------------------------
+
+test('clampServerResult: empty fields on garbage input, never throws', () => {
+  const result = clampServerResult('nope', baseConfig());
+  assert.deepEqual(result, { patterns: '', starters: '', injokes: [], lore: [] });
+});
+
+test('clampServerResult: clamps patterns/starters/injokes and validates lore entries', () => {
+  const result = clampServerResult(
+    {
+      patterns: 'people banter a lot',
+      starters: 'someone posts a link',
+      injokes: ['the eternal bug', 42, ''],
+      lore: [{ title: 'The Great Outage', keys: ['outage', 'the incident'], text: 'server went down for a day' }, { title: '' }, 'nope'],
+    },
+    baseConfig(),
+  );
+  assert.equal(result.patterns, 'people banter a lot');
+  assert.equal(result.starters, 'someone posts a link');
+  assert.deepEqual(result.injokes, ['the eternal bug']);
+  assert.equal(result.lore.length, 1);
+  assert.equal(result.lore[0].title, 'The Great Outage');
+  assert.deepEqual(result.lore[0].keys, ['outage', 'the incident']);
+});
+
+// ---------------------------------------------------------------------------
+// takeFittingPrefix
+// ---------------------------------------------------------------------------
+
+test('takeFittingPrefix: greedily fills the prefix under budget, leaves the rest', () => {
+  const items = [1, 2, 3, 4, 5];
+  const { taken, rest } = takeFittingPrefix(items, 6, (n) => n);
+  assert.deepEqual(taken, [1, 2, 3]); // 1+2+3=6 <= 6, +4 would overflow
+  assert.deepEqual(rest, [4, 5]);
+});
+
+test('takeFittingPrefix: always takes at least one item, even an oversized one', () => {
+  const items = [10, 1, 1];
+  const { taken, rest } = takeFittingPrefix(items, 1, (n) => n);
+  assert.deepEqual(taken, [10]);
+  assert.deepEqual(rest, [1, 1]);
+});
+
+test('takeFittingPrefix: empty input yields empty output', () => {
+  assert.deepEqual(takeFittingPrefix([], 10, () => 1), { taken: [], rest: [] });
+});
+
+// ---------------------------------------------------------------------------
+// buildPersonWriteIterations
+// ---------------------------------------------------------------------------
+
+test('buildPersonWriteIterations: character/style/aliases/episodes land only on the first iteration', () => {
+  const answer = { character: 'friendly', style: 'short', interests: [], details: [], episodes: [{ date: '2026-01-01', what: 'x', weight: 3 }], aliases: ['Al'] };
+  const iterations = buildPersonWriteIterations(answer);
+  assert.equal(iterations.length, 1);
+  assert.equal(iterations[0].character, 'friendly');
+  assert.equal(iterations[0].style, 'short');
+  assert.deepEqual(iterations[0].aliases, { add: ['Al'] });
+  assert.deepEqual(iterations[0].episodes, answer.episodes);
+});
+
+test('buildPersonWriteIterations: an interest/detail with times: N appears in exactly the first N iterations', () => {
+  const answer = {
+    interests: [{ topic: 'anime', note: '', times: 3 }, { topic: 'chess', note: '', times: 1 }],
+    details: [{ text: 'plays guitar', times: 2 }],
+  };
+  const iterations = buildPersonWriteIterations(answer);
+  assert.equal(iterations.length, 3);
+  assert.deepEqual(iterations[0].interests.add.map((i) => i.topic), ['anime', 'chess']);
+  assert.deepEqual(iterations[1].interests.add.map((i) => i.topic), ['anime']);
+  assert.deepEqual(iterations[2].interests.add.map((i) => i.topic), ['anime']);
+  assert.deepEqual(iterations[0].details, ['plays guitar']);
+  assert.deepEqual(iterations[1].details, ['plays guitar']);
+  assert.equal(iterations[2].details, undefined);
+});
+
+test('buildPersonWriteIterations: an empty answer yields no iterations', () => {
+  assert.deepEqual(buildPersonWriteIterations({ character: '', style: '', interests: [], details: [], episodes: [], aliases: [] }), []);
+});
+
+// ---------------------------------------------------------------------------
 // Factory: createBootstrap against a fake discord.js guild + fake LLM client
 // ---------------------------------------------------------------------------
 
@@ -524,33 +612,63 @@ function fakeHot(overrides = {}) {
         fieldChars: 400,
         maxInterests: 12,
         maxDetails: 15,
+        maxEpisodes: 20,
+        maxInjokes: 15,
         interestTopicChars: 40,
         interestNoteChars: 120,
         maxNewEpisodes: 3,
         clampTolerance: 1.25,
+        confirmGapHours: 12,
+        portraitRefreshHours: 24,
+        portraitRefreshPerDay: 20,
       },
+      lore: { maxEntries: 500, textChars: 400 },
       media: {},
       bootstrap: {
+        enabled: true,
         lookbackDays: 60,
         minMessages: 2,
         maxPeople: 40,
         messagesPerPerson: 10,
         contextBefore: 1,
         maxChannelShare: 1,
+        minChannelMessages: 2,
         messagesPerChannel: 50,
+        serverSampleMessages: 50,
         fetchLimitPerChannel: 1000,
+        maxRequestTokens: 50000,
         maxOutputTokens: 6000,
+        maxTokens: 6_000_000,
+        rateLimitWaitMinutes: 10,
+        rateLimitMaxWaits: 36,
+        refreshMessages: 20,
       },
       ...overrides.config,
     },
     prompts: {
       profile: 'SYSTEM {{name}}',
       channel: 'CHANNEL {{fieldChars}}',
+      server: 'SERVER {{fieldChars}}',
       'character-card': 'CARD {{name}}',
       labels,
       ...overrides.prompts,
     },
   };
+}
+
+function tmpDataDir() {
+  return fs.mkdtempSync(path.join(os.tmpdir(), 'nep-bootstrap-store-'));
+}
+
+/** A fake sleep that resolves immediately but records every requested duration. */
+function fakeSleep() {
+  const calls = [];
+  const sleep = (ms) => {
+    calls.push(ms);
+    return Promise.resolve();
+  };
+  sleep.calls = calls;
+  return sleep;
 }
 
 function fakeLlm(script) {
@@ -738,4 +856,491 @@ test('createBootstrap: never writes anything under a real data/ directory', asyn
   } finally {
     fs.rmSync(dataDir, { recursive: true, force: true });
   }
+});
+
+// ---------------------------------------------------------------------------
+// Factory write path: run() / runXxx() / refreshPortrait() against a real
+// (temp-dir) store.
+// ---------------------------------------------------------------------------
+
+function scriptedLlm(results) {
+  const calls = [];
+  return {
+    calls,
+    complete: async (messages, opts) => {
+      const i = calls.length;
+      calls.push({ messages, opts });
+      const entry = results[Math.min(i, results.length - 1)];
+      const payload = typeof entry === 'function' ? entry(i, messages, opts) : entry;
+      if (payload instanceof Error) throw payload;
+      return { text: JSON.stringify(payload), usage: { prompt_tokens: 100, completion_tokens: 20 }, estimated: 120, finishReason: 'stop' };
+    },
+  };
+}
+
+test('createBootstrap: run() processes channels, then people, then the server, writing through the store', async () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  const history = [
+    rawMessage(1000, { authorId: 'a', content: 'hi one' }),
+    rawMessage(2000, { authorId: 'a', content: 'hi two' }),
+    rawMessage(3000, { authorId: 'a', content: 'hi three' }),
+  ];
+  const c1 = fakeChannel('c1', history, { name: 'general', category: 'Chat', topic: 'chit-chat' });
+  const guild = fakeGuild('g1', [c1]);
+  const client = fakeClient(guild);
+  const hot = fakeHot();
+
+  const llm = scriptedLlm([
+    { purpose: 'general chatter', topics: 'everything', tone: 'casual' }, // channel c1
+    { character: 'friendly and curious', style: 'short messages', interests: [{ topic: 'anime', note: 'watches subs', times: 2 }], details: [], episodes: [], aliases: [] }, // person a
+    { patterns: 'lots of banter', starters: 'someone posts a link', injokes: ['the eternal bug'], lore: [{ title: 'The Outage', keys: ['outage'], text: 'the server went down once' }] }, // server
+  ]);
+
+  const bootstrap = createBootstrap({ hot, store, client, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => 10_000_000 });
+  const result = await bootstrap.run('g1');
+
+  assert.equal(result.ok, true);
+  assert.equal(llm.calls.length, 3);
+
+  const channel = store.getChannel('g1', 'c1');
+  assert.equal(channel.purpose, 'general chatter');
+
+  const profile = store.getUser('g1', 'a');
+  assert.equal(profile.character, 'friendly and curious');
+  assert.equal(profile.messageCount, 3);
+  assert.equal(profile.interests.length, 1);
+  assert.equal(profile.interests[0].weight, 2); // times: 2 -> weight 2, via two sightings
+
+  const guildMemory = store.getGuild('g1');
+  assert.equal(guildMemory.patterns, 'lots of banter');
+  assert.deepEqual(guildMemory.injokes, ['the eternal bug']);
+  assert.equal(store.getLore('g1').length, 1);
+
+  const bs = store.state.data.bootstrap;
+  assert.deepEqual(bs.done.channels, ['c1']);
+  assert.deepEqual(bs.done.people, ['a']);
+  assert.equal(bs.done.server, true);
+  assert.ok(bs.startedAt);
+  assert.ok(bs.finishedAt);
+  assert.equal(bs.aborted, null);
+});
+
+test('createBootstrap: run() is idempotent once finished -- a second call makes no further requests', async () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  const history = [rawMessage(1000, { authorId: 'a' }), rawMessage(2000, { authorId: 'a' })];
+  const c1 = fakeChannel('c1', history);
+  const guild = fakeGuild('g1', [c1]);
+  const client = fakeClient(guild);
+  const hot = fakeHot();
+  const llm = scriptedLlm([{ purpose: 'p', topics: 't', tone: 'x' }, { character: 'c', style: 's', interests: [], details: [], episodes: [], aliases: [] }, { patterns: '', starters: '', injokes: [], lore: [] }]);
+  const bootstrap = createBootstrap({ hot, store, client, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => 10_000_000 });
+
+  await bootstrap.run('g1');
+  const callsAfterFirst = llm.calls.length;
+
+  const failingLlm = { complete: async () => { throw new Error('must not be called again'); } };
+  const bootstrap2 = createBootstrap({ hot, store, client, llm: failingLlm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => 10_000_000 });
+  const second = await bootstrap2.run('g1');
+
+  assert.equal(second.ok, true);
+  assert.equal(llm.calls.length, callsAfterFirst); // unchanged -- the second run made no new model calls
+});
+
+test('createBootstrap: run() resumes after a stop, never reprocessing a done item', async () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  const history1 = [rawMessage(1000, { authorId: 'a' }), rawMessage(2000, { authorId: 'a' })];
+  const history2 = [rawMessage(1000, { authorId: 'b' }), rawMessage(2000, { authorId: 'b' })];
+  const c1 = fakeChannel('c1', history1);
+  const c2 = fakeChannel('c2', history2);
+  const guild = fakeGuild('g1', [c1, c2]);
+  const client = fakeClient(guild);
+  const hot = fakeHot();
+  hot.config.bootstrap.maxTokens = 1; // stop immediately, before the very first request
+
+  const llm1 = scriptedLlm([{ purpose: 'p' }]);
+  const bootstrap1 = createBootstrap({ hot, store, client, llm: llm1, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => 10_000_000 });
+  const first = await bootstrap1.run('g1');
+  assert.equal(first.ok, false);
+  assert.equal(llm1.calls.length, 0);
+  assert.equal(store.state.data.bootstrap.aborted, 'budget');
+  assert.deepEqual(store.state.data.bootstrap.done.channels, []);
+
+  hot.config.bootstrap.maxTokens = 6_000_000; // lift the rail, resume
+  const llm2 = scriptedLlm([
+    { purpose: 'p1' },
+    { purpose: 'p2' },
+    { character: 'ca', style: 'sa', interests: [], details: [], episodes: [], aliases: [] },
+    { character: 'cb', style: 'sb', interests: [], details: [], episodes: [], aliases: [] },
+    { patterns: '', starters: '', injokes: [], lore: [] },
+  ]);
+  const bootstrap2 = createBootstrap({ hot, store, client, llm: llm2, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => 10_000_000 });
+  const second = await bootstrap2.run('g1');
+
+  assert.equal(second.ok, true);
+  assert.deepEqual(store.state.data.bootstrap.done.channels.sort(), ['c1', 'c2']);
+  assert.deepEqual(store.state.data.bootstrap.done.people.sort(), ['a', 'b']);
+  assert.equal(store.state.data.bootstrap.aborted, null);
+});
+
+test('createBootstrap: run() refuses while another run is already in flight', async () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  const c1 = fakeChannel('c1', [rawMessage(1000, { authorId: 'a' }), rawMessage(2000, { authorId: 'a' })]);
+  const guild = fakeGuild('g1', [c1]);
+  const client = fakeClient(guild);
+  const hot = fakeHot();
+
+  let resolveFirst;
+  const gate = new Promise((resolve) => { resolveFirst = resolve; });
+  const llm = { complete: async () => { await gate; return { text: '{}', usage: {}, estimated: 0, finishReason: 'stop' }; } };
+  const bootstrap = createBootstrap({ hot, store, client, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => 10_000_000 });
+
+  const firstRun = bootstrap.run('g1');
+  assert.equal(bootstrap.isBootstrapping(), true);
+  const secondRun = await bootstrap.run('g1');
+  assert.equal(secondRun.ok, false);
+  assert.match(secondRun.message, /already in flight/);
+
+  resolveFirst();
+  await firstRun;
+  assert.equal(bootstrap.isBootstrapping(), false);
+});
+
+test('createBootstrap: run() pauses after the request in flight, resumable', async () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  const c1 = fakeChannel('c1', [rawMessage(1000, { authorId: 'a' }), rawMessage(2000, { authorId: 'a' })]);
+  const c2 = fakeChannel('c2', [rawMessage(1000, { authorId: 'b' }), rawMessage(2000, { authorId: 'b' })]);
+  const guild = fakeGuild('g1', [c1, c2]);
+  const client = fakeClient(guild);
+  const hot = fakeHot();
+
+  const llm = scriptedLlm([
+    (i) => {
+      store.state.data.paused = true; // simulate /nep pause landing while call #1 was in flight
+      return { purpose: 'p1' };
+    },
+    { purpose: 'p2' }, // must never be reached
+  ]);
+  const bootstrap = createBootstrap({ hot, store, client, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => 10_000_000 });
+
+  const result = await bootstrap.run('g1');
+  assert.equal(result.ok, false);
+  assert.equal(llm.calls.length, 1);
+  assert.deepEqual(store.state.data.bootstrap.done.channels, ['c1']);
+});
+
+test('createBootstrap: run() waits out a sustained rate limit then aborts (resumable)', async () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  const c1 = fakeChannel('c1', [rawMessage(1000, { authorId: 'a' }), rawMessage(2000, { authorId: 'a' })]);
+  const guild = fakeGuild('g1', [c1]);
+  const client = fakeClient(guild);
+  const hot = fakeHot();
+  hot.config.bootstrap.rateLimitMaxWaits = 2;
+
+  const rateLimitError = new Error('rate limited');
+  rateLimitError.statusCode = 429;
+  const llm = { complete: async () => { throw rateLimitError; } };
+  const sleep = fakeSleep();
+  const bootstrap = createBootstrap({ hot, store, client, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => 10_000_000, sleep });
+
+  const result = await bootstrap.run('g1');
+  assert.equal(result.ok, false);
+  assert.equal(sleep.calls.length, 2); // 2 allowed waits, then a 3rd attempt that also fails -> abort without a 3rd wait
+  assert.equal(store.state.data.bootstrap.aborted, 'rate-limit');
+});
+
+test('createBootstrap: run() aborts after three consecutive other failures (resumable)', async () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  const c1 = fakeChannel('c1', [rawMessage(1000, { authorId: 'a' }), rawMessage(2000, { authorId: 'a' })]);
+  const c2 = fakeChannel('c2', [rawMessage(1000, { authorId: 'b' }), rawMessage(2000, { authorId: 'b' })]);
+  const c3 = fakeChannel('c3', [rawMessage(1000, { authorId: 'c' }), rawMessage(2000, { authorId: 'c' })]);
+  const guild = fakeGuild('g1', [c1, c2, c3]);
+  const client = fakeClient(guild);
+  const hot = fakeHot();
+
+  let calls = 0;
+  const llm = { complete: async () => { calls += 1; throw new Error(`boom ${calls}`); } };
+  const bootstrap = createBootstrap({ hot, store, client, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => 10_000_000 });
+
+  const result = await bootstrap.run('g1');
+  assert.equal(result.ok, false);
+  assert.equal(calls, 3);
+  assert.equal(store.state.data.bootstrap.aborted, 'failures');
+  assert.deepEqual(store.state.data.bootstrap.done.channels, []); // nothing ever succeeded
+});
+
+test('createBootstrap: run() reports a missing prompts.profile instead of throwing', async () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  const c1 = fakeChannel('c1', [rawMessage(1000, { authorId: 'a' }), rawMessage(2000, { authorId: 'a' })]);
+  const guild = fakeGuild('g1', [c1]);
+  const client = fakeClient(guild);
+  const hot = fakeHot({ prompts: { profile: undefined } });
+  const llm = scriptedLlm([{ purpose: 'p' }]);
+  const bootstrap = createBootstrap({ hot, store, client, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => 10_000_000 });
+
+  const result = await bootstrap.run('g1');
+  assert.equal(result.ok, false);
+  assert.match(result.message, /profile\.md/);
+});
+
+test('createBootstrap: run() reports a missing prompts.server instead of throwing', async () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  const c1 = fakeChannel('c1', [rawMessage(1000, { authorId: 'a' }), rawMessage(2000, { authorId: 'a' })]);
+  const guild = fakeGuild('g1', [c1]);
+  const client = fakeClient(guild);
+  const hot = fakeHot({ prompts: { server: undefined } });
+  const llm = scriptedLlm([{ purpose: 'p' }, { character: 'c', style: 's', interests: [], details: [], episodes: [], aliases: [] }]);
+  const bootstrap = createBootstrap({ hot, store, client, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => 10_000_000 });
+
+  const result = await bootstrap.run('g1');
+  assert.equal(result.ok, false);
+  assert.match(result.message, /server\.md/);
+});
+
+test('createBootstrap: a person whose sample does not fit one request is chunked, each later chunk carrying a <draft>, the LAST answer wins', async () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  const history = Array.from({ length: 12 }, (_, i) => rawMessage(1000 + i * 1000, { authorId: 'a', content: `padded message content number ${i} with extra words to make it long` }));
+  const c1 = fakeChannel('c1', history);
+  const guild = fakeGuild('g1', [c1]);
+  const client = fakeClient(guild);
+  const hot = fakeHot();
+  hot.config.bootstrap.minMessages = 1;
+  hot.config.bootstrap.messagesPerPerson = 12;
+  hot.config.bootstrap.contextBefore = 0;
+  hot.config.bootstrap.maxRequestTokens = 90;
+  hot.config.llm.safetyMargin = 1;
+
+  const llm = scriptedLlm([
+    (i) => ({ character: `chunk-${i}`, style: 's', interests: [], details: [], episodes: [], aliases: [] }),
+  ]);
+  const bootstrap = createBootstrap({ hot, store, client, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => 10_000_000 });
+
+  const outcome = await bootstrap.runPerson('g1', 'a');
+  assert.equal(outcome.ok, true);
+  assert.ok(llm.calls.length > 1, 'expected the sample to be split into more than one request');
+
+  const firstUser = llm.calls[0].messages[1].content;
+  assert.ok(!firstUser.includes('<draft>'));
+  const secondUser = llm.calls[1].messages[1].content;
+  assert.ok(secondUser.includes('<draft>'));
+  assert.ok(secondUser.includes('chunk-0'));
+
+  const profile = store.getUser('g1', 'a');
+  assert.equal(profile.character, `chunk-${llm.calls.length - 1}`); // the LAST answer wins
+});
+
+test('createBootstrap: a bad-json person answer is retried once with half the sample, then skipped', async () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  const history = Array.from({ length: 4 }, (_, i) => rawMessage(1000 + i * 1000, { authorId: 'a', content: `m${i}` }));
+  const c1 = fakeChannel('c1', history);
+  const guild = fakeGuild('g1', [c1]);
+  const client = fakeClient(guild);
+  const hot = fakeHot();
+  hot.config.bootstrap.minMessages = 1;
+
+  let calls = 0;
+  const llm = { complete: async () => { calls += 1; return { text: 'not json at all', usage: {}, estimated: 0, finishReason: 'stop' }; } };
+  const bootstrap = createBootstrap({ hot, store, client, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => 10_000_000 });
+
+  const outcome = await bootstrap.runPerson('g1', 'a');
+  assert.equal(outcome.ok, false);
+  assert.equal(calls, 2); // one attempt, one retry with half the sample
+  const store2 = store; // the person is marked done (skipped), not retried forever
+  assert.deepEqual(store2.state.data.bootstrap.done.people, ['a']);
+});
+
+test('createBootstrap: resumeIfNeeded starts a run automatically when no profile exists at all', async () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  const c1 = fakeChannel('c1', [rawMessage(1000, { authorId: 'a' }), rawMessage(2000, { authorId: 'a' })]);
+  const guild = fakeGuild('g1', [c1]);
+  const client = fakeClient(guild);
+  const hot = fakeHot();
+  const llm = scriptedLlm([{ purpose: 'p' }, { character: 'c', style: 's', interests: [], details: [], episodes: [], aliases: [] }, { patterns: '', starters: '', injokes: [], lore: [] }]);
+  const bootstrap = createBootstrap({ hot, store, client, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => 10_000_000 });
+
+  const started = bootstrap.resumeIfNeeded('g1');
+  assert.equal(started, true);
+  // resumeIfNeeded fires the run without awaiting it -- wait for it to actually finish.
+  while (bootstrap.isBootstrapping()) await new Promise((r) => setTimeout(r, 5));
+  assert.ok(store.state.data.bootstrap.finishedAt);
+});
+
+test('createBootstrap: resumeIfNeeded does nothing once a profile already exists and no run is unfinished', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  store.touchUser('g1', 'a', 'Alice', 1000);
+  const guild = fakeGuild('g1', []);
+  const client = fakeClient(guild);
+  const hot = fakeHot();
+  const llm = { complete: async () => { throw new Error('must not be called'); } };
+  const bootstrap = createBootstrap({ hot, store, client, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => 10_000_000 });
+
+  assert.equal(bootstrap.resumeIfNeeded('g1'), false);
+});
+
+test('createBootstrap: resumeIfNeeded respects bootstrap.enabled: false', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  const guild = fakeGuild('g1', []);
+  const client = fakeClient(guild);
+  const hot = fakeHot({ config: { bootstrap: { ...fakeHot().config.bootstrap, enabled: false } } });
+  const llm = { complete: async () => { throw new Error('must not be called'); } };
+  const bootstrap = createBootstrap({ hot, store, client, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => 10_000_000 });
+
+  assert.equal(bootstrap.resumeIfNeeded('g1'), false);
+});
+
+test('createBootstrap: reset() clears progress only, refused while running', async () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  const c1 = fakeChannel('c1', [rawMessage(1000, { authorId: 'a' }), rawMessage(2000, { authorId: 'a' })]);
+  const guild = fakeGuild('g1', [c1]);
+  const client = fakeClient(guild);
+  const hot = fakeHot();
+  const llm = scriptedLlm([{ purpose: 'p' }, { character: 'c', style: 's', interests: [], details: [], episodes: [], aliases: [] }, { patterns: '', starters: '', injokes: [], lore: [] }]);
+  const bootstrap = createBootstrap({ hot, store, client, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => 10_000_000 });
+
+  await bootstrap.run('g1');
+  assert.ok(store.state.data.bootstrap.finishedAt);
+
+  const result = bootstrap.reset();
+  assert.equal(result.ok, true);
+  assert.equal(store.state.data.bootstrap, undefined);
+  // The already-written profile/channel/guild data is untouched.
+  assert.ok(store.getUser('g1', 'a'));
+});
+
+test('createBootstrap: status() reports phase, progress and the next target', async () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  const c1 = fakeChannel('c1', [rawMessage(1000, { authorId: 'a' }), rawMessage(2000, { authorId: 'a' })]);
+  const c2 = fakeChannel('c2', [rawMessage(1000, { authorId: 'b' }), rawMessage(2000, { authorId: 'b' })]);
+  const guild = fakeGuild('g1', [c1, c2]);
+  const client = fakeClient(guild);
+  const hot = fakeHot();
+  hot.config.bootstrap.maxTokens = 1; // stop immediately, before the first request
+  const llm = scriptedLlm([{}]);
+  const bootstrap = createBootstrap({ hot, store, client, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => 10_000_000 });
+
+  await bootstrap.run('g1');
+  const s = await bootstrap.status('g1');
+  assert.match(s.phase, /aborted/);
+  assert.equal(s.channelsEligible, 2);
+  assert.equal(s.doneChannels, 0);
+  assert.match(s.nextTarget, /channel:/);
+});
+
+// ---------------------------------------------------------------------------
+// Factory write path: refreshPortrait()
+// ---------------------------------------------------------------------------
+
+test('refreshPortrait: samples the member and replaces only character/style, with <draft> and <hint> blocks', async () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  store.touchUser('g1', 'a', 'Alice', 1000);
+  store.applyProfileOps('g1', 'a', { character: 'old character', style: 'old style', interests: { add: [{ topic: 'chess', note: '' }] } }, { fieldChars: 400, seenAt: 1000 });
+
+  const history = Array.from({ length: 5 }, (_, i) => rawMessage(1000 + i * 1000, { authorId: 'a', content: `m${i}` }));
+  const c1 = fakeChannel('c1', history);
+  const guild = fakeGuild('g1', [c1]);
+  const client = fakeClient(guild);
+  const hot = fakeHot();
+
+  const llm = scriptedLlm([{ character: 'new character', style: 'new style', interests: [{ topic: 'poker', note: '', times: 5 }], details: [], episodes: [], aliases: [] }]);
+  const bootstrap = createBootstrap({ hot, store, client, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => 20_000_000 });
+
+  const result = await bootstrap.refreshPortrait('g1', 'a', 'writes shorter than usual now');
+  assert.equal(result.ok, true);
+
+  const user = llm.calls[0].messages[1].content;
+  assert.ok(user.includes('<draft>'));
+  assert.ok(user.includes('old character'));
+  assert.ok(user.includes('<hint>'));
+  assert.ok(user.includes('writes shorter than usual now'));
+
+  const profile = store.getUser('g1', 'a');
+  assert.equal(profile.character, 'new character');
+  assert.equal(profile.style, 'new style');
+  assert.equal(profile.interests.length, 1);
+  assert.equal(profile.interests[0].topic, 'chess'); // interests from the refresh answer are IGNORED
+  assert.ok(profile.portraitRefreshedAt);
+});
+
+test('refreshPortrait: skips a member refreshed less than memory.portraitRefreshHours ago, unless forced', async () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  store.touchUser('g1', 'a', 'Alice', 1000);
+  store.updateUser('g1', 'a', { portraitRefreshedAt: new Date(10_000_000).toISOString() });
+
+  const c1 = fakeChannel('c1', [rawMessage(1000, { authorId: 'a' })]);
+  const guild = fakeGuild('g1', [c1]);
+  const client = fakeClient(guild);
+  const hot = fakeHot();
+  let calls = 0;
+  const llm = { complete: async () => { calls += 1; return { text: '{}', usage: {}, estimated: 0, finishReason: 'stop' }; } };
+  const bootstrap = createBootstrap({ hot, store, client, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => 10_000_000 + 3600_000 }); // 1h later, rail is 24h
+
+  const skipped = await bootstrap.refreshPortrait('g1', 'a', 'reason');
+  assert.equal(skipped.ok, false);
+  assert.equal(skipped.reason, 'too-soon');
+  assert.equal(calls, 0);
+
+  const forced = await bootstrap.refreshPortrait('g1', 'a', 'reason', { force: true });
+  assert.equal(forced.ok, true);
+  assert.equal(calls, 1);
+});
+
+test('refreshPortrait: skips once the daily refresh cap is reached', async () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  store.touchUser('g1', 'a', 'Alice', 1000);
+  const c1 = fakeChannel('c1', [rawMessage(1000, { authorId: 'a' })]);
+  const guild = fakeGuild('g1', [c1]);
+  const client = fakeClient(guild);
+  const hot = fakeHot();
+  hot.config.memory.portraitRefreshPerDay = 1;
+  let calls = 0;
+  const llm = { complete: async () => { calls += 1; return { text: '{}', usage: {}, estimated: 0, finishReason: 'stop' }; } };
+  const bootstrap = createBootstrap({ hot, store, client, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => 10_000_000 });
+
+  const first = await bootstrap.refreshPortrait('g1', 'a', 'r1', { force: true });
+  assert.equal(first.ok, true);
+  const second = await bootstrap.refreshPortrait('g1', 'a', 'r2', { force: true });
+  assert.equal(second.ok, false);
+  assert.equal(second.reason, 'daily-cap');
+  assert.equal(calls, 1);
+});
+
+test('refreshPortrait: queues nothing and just logs while a bootstrap run is in flight', async () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  store.touchUser('g1', 'a', 'Alice', 1000);
+  const c1 = fakeChannel('c1', [rawMessage(1000, { authorId: 'a' }), rawMessage(2000, { authorId: 'a' })]);
+  const guild = fakeGuild('g1', [c1]);
+  const client = fakeClient(guild);
+  const hot = fakeHot();
+
+  let resolveGate;
+  const gate = new Promise((resolve) => { resolveGate = resolve; });
+  const llm = { complete: async () => { await gate; return { text: '{}', usage: {}, estimated: 0, finishReason: 'stop' }; } };
+  const bootstrap = createBootstrap({ hot, store, client, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => 10_000_000 });
+
+  const runPromise = bootstrap.run('g1');
+  const refreshResult = await bootstrap.refreshPortrait('g1', 'a', 'reason');
+  assert.equal(refreshResult.ok, false);
+  assert.equal(refreshResult.reason, 'bootstrapping');
+
+  resolveGate();
+  await runPromise;
 });

@@ -430,10 +430,11 @@ function writeLocalConfig(localPath, value) {
  *   (F30). Absent -> nothing to clear.
  * `llm` — from createLlm() (src/llm/openrouter.js), optional: `complete()`, used by `/nep ping`
  *   (F35) to reach each role's model directly. Absent -> `/nep ping` reports it is not available.
- * `bootstrap` — from createBootstrap() (src/memory/bootstrap.js), optional: `peopleReport(guildId)`,
- *   `previewUser(guildId, userId)`, `previewChannel(guildId, channelId)` — the sample-based
- *   bootstrap PREVIEW (F36 phase A), writes nothing under data/. Absent -> every `bootstrap.*`
- *   command reports it is not available.
+ * `bootstrap` — from createBootstrap() (src/memory/bootstrap.js), optional: the sample-based
+ *   memory bootstrap -- `peopleReport`/`previewUser`/`previewChannel` (read-only), `run`/
+ *   `runPerson`/`runChannel`/`runServer`/`status`/`reset` (write under data/), `refreshPortrait`,
+ *   `waitIdle` (awaited by `/nep pause`, same shape as `memory`/`turns`). Absent -> every
+ *   `bootstrap.*`/`memory.refresh` command reports it is not available.
  *
  * `run(commandKey, args, context)` throws a plain `Error` (operator-facing
  * message) on bad input; it never touches discord.js.
@@ -609,6 +610,12 @@ export function createAdmin({
       await memory.waitIdle();
     }
 
+    // A bootstrap run/one-off target already in flight: same rule, its own
+    // loop already stops after the request in flight once `paused` is seen.
+    if (bootstrap && typeof bootstrap.waitIdle === 'function') {
+      await bootstrap.waitIdle();
+    }
+
     if (pending && typeof pending.clear === 'function') {
       pending.clear();
     }
@@ -692,6 +699,14 @@ export function createAdmin({
       data.paused ? `paused: true (since ${data.pausedAt ?? '?'})` : 'paused: false',
       `bootstrapping: ${isBootstrapping() ? 'true' : 'false'}`,
     ];
+
+    if (bootstrap && typeof bootstrap.summary === 'function') {
+      const bs = bootstrap.summary();
+      lines.push(
+        `bootstrap: channels=${bs.doneChannels} people=${bs.donePeople} server=${bs.doneServer ? 'done' : 'pending'} ` +
+          `tokens=${bs.tokensUsed} requests=${bs.requests} aborted=${bs.aborted ?? 'no'}`,
+      );
+    }
 
     const guildId = getGuildId?.() ?? null;
     if (guildId) {
@@ -1247,9 +1262,9 @@ async function cmdPing(args) {
 }
 
   // ---------------------------------------------------------------------
-  // bootstrap (F36 phase A): a read-only sample-based preview -- see the
-  // module header of src/memory/bootstrap.js. Never writes under data/, so
-  // unlike most commands here it is never guarded by assertNotPaused().
+  // bootstrap: the sample-based memory bootstrap -- see the module header of
+  // src/memory/bootstrap.js. `people`/`preview` stay read-only, never guarded
+  // by assertNotPaused(); `run`/`reset` write under data/ and are.
   // ---------------------------------------------------------------------
 
   /** `YYYY-MM-DD`, or `-` when `ts` is not a finite timestamp. */
@@ -1336,6 +1351,66 @@ async function cmdPing(args) {
     return formatBootstrapChannelPreview(await bootstrap.previewChannel(guildId, args.channelId));
   }
 
+  /** One-off target outcome (`bootstrap.runXxx`) as a short operator-facing line. */
+  function formatOneOffOutcome(kind, id, outcome) {
+    if (!outcome.ok) return `${kind}${id ? ` ${id}` : ''}: not done -- ${outcome.message ?? 'failed'}`;
+    return `${kind}${id ? ` ${id}` : ''}: done.`;
+  }
+
+  async function cmdBootstrapRun(args, context) {
+    const guildId = resolvedGuildId(context);
+    if (!guildId) throw new Error('no guild resolved yet');
+    assertNotPaused();
+
+    const picks = [args?.userId, args?.channelId, args?.server].filter(Boolean);
+    if (picks.length > 1) throw new Error('give at most one of user, channel, server');
+
+    if (args?.userId) return formatOneOffOutcome('person', args.userId, await bootstrap.runPerson(guildId, args.userId));
+    if (args?.channelId) return formatOneOffOutcome('channel', args.channelId, await bootstrap.runChannel(guildId, args.channelId));
+    if (args?.server) return formatOneOffOutcome('server', null, await bootstrap.runServer(guildId));
+
+    const result = await bootstrap.run(guildId);
+    return result.ok ? 'Bootstrap run finished (or already fully done).' : `Bootstrap run stopped: ${result.message ?? 'unknown reason'} (resumable -- run again to continue).`;
+  }
+
+  async function cmdBootstrapStatus(_args, context) {
+    const guildId = resolvedGuildId(context);
+    if (!guildId) throw new Error('no guild resolved yet');
+    const s = await bootstrap.status(guildId);
+    return [
+      `phase: ${s.phase}`,
+      `channels: ${s.doneChannels}/${s.channelsEligible}`,
+      `people: ${s.donePeople}/${s.peopleEligible}`,
+      `server: ${s.doneServer ? 'done' : 'pending'}`,
+      `tokens used: ${s.tokensUsed} / ${hot.config.bootstrap?.maxTokens ?? '-'}`,
+      `requests: ${s.requests}`,
+      `started: ${s.startedAt ?? '-'}`,
+      `finished: ${s.finishedAt ?? '-'}`,
+      `aborted: ${s.aborted ?? 'no'}`,
+      `next target: ${s.nextTarget ?? '-'}`,
+    ].join('\n');
+  }
+
+  function cmdBootstrapReset() {
+    const result = bootstrap.reset();
+    return result.ok ? 'Bootstrap progress reset (stored profiles/channel/guild data untouched).' : result.message;
+  }
+
+  /** `/nep memory refresh user:<member>`: forces a portrait refresh (character/style only),
+   * ignoring the hours rail, not the daily request cap. Refused while paused. */
+  async function cmdMemoryRefresh(args, context) {
+    if (!bootstrap) throw new Error('bootstrap is not available');
+    assertNotPaused();
+    const userId = args?.userId;
+    if (!userId) throw new Error('a user is required');
+    const guildId = resolvedGuildId(context);
+    if (!guildId) throw new Error('no guild resolved yet');
+
+    const result = await bootstrap.refreshPortrait(guildId, userId, 'manual refresh requested by the owner', { force: true });
+    if (!result.ok) return `Refresh not performed: ${result.reason ?? result.message ?? 'unknown reason'}`;
+    return `Portrait refreshed for ${userId}.`;
+  }
+
   /** Wraps a `bootstrap.*` handler so both report the same thing when the dependency is absent. */
   function withBootstrap(fn) {
     return (args, context) => {
@@ -1362,6 +1437,7 @@ async function cmdPing(args) {
     'memory.alias-remove': (args, context) => cmdMemoryAliasRemove(args, context),
     'memory.wipe': (args, context) => cmdMemoryWipe(args, context),
     'memory.affinity': (args, context) => cmdMemoryAffinity(args, context),
+    'memory.refresh': (args, context) => cmdMemoryRefresh(args, context),
     'lore.add': (args, context) => cmdLoreAdd(args, context),
     'lore.list': (args, context) => cmdLoreList(args, context),
     'lore.show': (args, context) => cmdLoreShow(args, context),
@@ -1370,6 +1446,9 @@ async function cmdPing(args) {
     'model.set': (args) => cmdModelSet(args),
     'bootstrap.people': withBootstrap((args, context) => cmdBootstrapPeople(args, context)),
     'bootstrap.preview': withBootstrap((args, context) => cmdBootstrapPreview(args, context)),
+    'bootstrap.run': withBootstrap((args, context) => cmdBootstrapRun(args, context)),
+    'bootstrap.status': withBootstrap((args, context) => cmdBootstrapStatus(args, context)),
+    'bootstrap.reset': withBootstrap(() => cmdBootstrapReset()),
   };
 
   /**

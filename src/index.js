@@ -91,11 +91,24 @@ const getGuildId = () => instance.guildId;
 const imageFetcher = createImageFetcher();
 const describer = createDescriber({ hot, store, llm, imageFetcher });
 const turns = createTurnRunner({ hot, store, llm, calibrator, client, describer, imageFetcher });
-const spontaneous = createSpontaneous({ hot, store, client, turns, getGuildId });
 const getSelfName = (guildId) => client.guilds.cache.get(guildId)?.members.me?.displayName ?? client.user?.username ?? 'bot';
-const memory = createMemoryUpdater({ hot, store, llm, calibrator, getSelfName });
-// F36 phase A: a read-only, sample-based memory preview -- writes nothing under data/.
-const bootstrap = createBootstrap({ hot, client, llm, calibrator, getSelfName });
+// THE way memory starts (.claude/docs/prompt-contract.md, "The bootstrap"): sample-based,
+// resumable, mutes the persona while a run is in flight (see isBootstrapping below).
+const bootstrap = createBootstrap({ hot, store, client, llm, calibrator, getSelfName, getGuildId });
+const isBootstrapping = bootstrap.isBootstrapping;
+const spontaneous = createSpontaneous({ hot, store, client, turns, getGuildId, isBootstrapping });
+// The stream analyzer's "the stored portrait misses something" cue -- src/memory/bootstrap.js's
+// own rails (hours/day/mute) decide whether a refresh actually runs; never awaited here.
+const memory = createMemoryUpdater({
+  hot,
+  store,
+  llm,
+  calibrator,
+  getSelfName,
+  onPortraitRequest: (guildId, userId, reason) => {
+    bootstrap.refreshPortrait(guildId, userId, reason).catch((err) => log.error('index: portrait refresh failed', { error: err }));
+  },
+});
 const tagHistory = createTagHistory();
 
 const onMessage = createMessageHandler({
@@ -107,6 +120,7 @@ const onMessage = createMessageHandler({
   memory,
   tagHistory,
   getGuildId,
+  isBootstrapping,
   describer,
 });
 
@@ -121,13 +135,14 @@ const admin = createAdmin({
   spontaneous,
   calibrator,
   getGuildId,
+  isBootstrapping,
   turns,
   memory,
   // F30 (/nep pause): clears the pending-ping queue on pause.
   pending: { clear: () => onMessage.clearPending() },
   // F35 (/nep ping): reaches each role's model directly through the same rails.
   llm,
-  // F36 phase A: the sample-based bootstrap preview.
+  // The sample-based memory bootstrap: preview, run, status, reset, portrait refresh.
   bootstrap,
 });
 const onInteraction = createInteractionHandler({ hot, admin, getGuildId });
@@ -172,6 +187,10 @@ client.once(Events.ClientReady, async () => {
 
   const guild = client.guilds.cache.get(instance.guildId);
   await registerCommands(guild, hot.config);
+
+  // THE way memory starts: with bootstrap.enabled and no stored profile at all, starts a run
+  // automatically; with an unfinished run left from before a restart, resumes it. Fire-and-forget.
+  bootstrap.resumeIfNeeded(instance.guildId);
 
   every(30_000, () => spontaneous.tick(), 'spontaneous.tick');
   // The tick still runs on schedule even with the switch off, so flipping it

@@ -66,14 +66,14 @@ test('touchUser: an empty/falsy name does not touch the names list', () => {
   assert.deepEqual(profile.names, ['Alice']);
 });
 
-// ---- out-of-order touches (the warm-up feeding old history after a live touch today) ----
+// ---- out-of-order touches (the memory bootstrap feeding old history after a live touch today) ----
 
 test('touchUser: firstSeen is min(existing, at) and lastSeen is max(existing, at), regardless of arrival order', () => {
   const dir = tmpDataDir();
   const store = createStore({ dataDir: dir });
   // Live touch today...
   store.touchUser('g1', 'u1', 'Alice', 5_000_000);
-  // ...then the warm-up feeds four years of older history.
+  // ...then the bootstrap feeds four years of older history.
   const profile = store.touchUser('g1', 'u1', 'Alice', 1000);
   assert.equal(profile.firstSeen, new Date(1000).toISOString(), 'firstSeen widens to the older message');
   assert.equal(profile.lastSeen, new Date(5_000_000).toISOString(), 'lastSeen does NOT regress to the older message');
@@ -986,7 +986,7 @@ function seedGuild(store) {
   store.state.markDirty();
 }
 
-test('wipeGuild: removes profiles, guild memory, channels, buffer and analyzer lore; keeps owner lore, media cache and non-warm-up state', () => {
+test('wipeGuild: removes profiles, guild memory, channels, buffer and analyzer lore; keeps owner lore, media cache and other state.json keys', () => {
   const dir = tmpDataDir();
   const storeA = createStore({ dataDir: dir });
   seedGuild(storeA);

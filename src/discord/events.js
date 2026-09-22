@@ -85,7 +85,7 @@ export function createMessageHandler({
       .filter(isDescribable)
       .slice(0, MAX_WARM_PICTURES_PER_MESSAGE);
     if (candidates.length === 0) return;
-    describer.describeMany(guildId, candidates).catch((err) => log.warn('events: media cache warm-up failed', { error: err }));
+    describer.describeMany(guildId, candidates).catch((err) => log.warn('events: media cache prefill failed', { error: err }));
   }
 
   // --- One attention (mention.oneAtATime): pending direct pings ------------

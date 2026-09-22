@@ -118,7 +118,9 @@
     "interestStaleDays": 90,
     "timeoutMs": 300000,
     "mainChannelIds": [],
-    "clampTolerance": 1.25
+    "clampTolerance": 1.25,
+    "portraitRefreshHours": 24,
+    "portraitRefreshPerDay": 20
   },
   "lore": {
     "maxEntries": 500,
@@ -144,14 +146,22 @@
     "embedTextChars": 200
   },
   "bootstrap": {
+    "enabled": true,
     "lookbackDays": 60,
     "minMessages": 30,
     "maxPeople": 40,
-    "messagesPerPerson": 300,
-    "contextBefore": 2,
+    "messagesPerPerson": 2000,
+    "contextBefore": 1,
     "maxChannelShare": 0.5,
+    "minChannelMessages": 30,
     "messagesPerChannel": 200,
+    "serverSampleMessages": 600,
     "fetchLimitPerChannel": 15000,
-    "maxOutputTokens": 6000
+    "maxRequestTokens": 120000,
+    "maxOutputTokens": 6000,
+    "maxTokens": 6000000,
+    "rateLimitWaitMinutes": 10,
+    "rateLimitMaxWaits": 36,
+    "refreshMessages": 400
   }
 }

@@ -1,33 +1,69 @@
-// Phase A of the sample-based bootstrap (.claude/docs/prompt-contract.md,
-// "The bootstrap") — a read-only PREVIEW of what a fresh, sample-based memory
-// seed would look like, without writing anything under data/. Take up to
-// `bootstrap.messagesPerPerson` of a member's own messages (newest-heavy but
-// spread over `bootstrap.lookbackDays`, one channel capped at
-// `bootstrap.maxChannelShare` unless it is a main channel), a little
-// conversational context around each, and ask `prompts/profile.md` for one
+// THE way memory starts (.claude/docs/prompt-contract.md, "The bootstrap").
+// Sampling: up to `bootstrap.messagesPerPerson` of a member's own messages
+// (newest-heavy but spread over `bootstrap.lookbackDays`, one channel capped
+// at `bootstrap.maxChannelShare` unless it is a main channel), a little
+// conversational context around each, asked of `prompts/profile.md` one
 // person at a time; `prompts/channel.md` does the same for a channel's newest
-// `bootstrap.messagesPerChannel` messages. Both prompts are read the same way
-// the stream analyzer's `memory.md` is (formatTranscript's 'memory' mode, the
-// same character card, the same clampText/toTokens/fromTokens helpers) so a
-// preview and the live analyzer's own portraits are directly comparable.
+// `bootstrap.messagesPerChannel` messages; `prompts/server.md` closes a run
+// with one request over every channel's notes, a line per profiled member and
+// the newest `bootstrap.serverSampleMessages` messages of the main channels.
+// All three are read the same way the stream analyzer's `memory.md` is
+// (formatTranscript's 'memory' mode, the same character card, the same
+// clampText/toTokens/fromTokens helpers).
 //
-// Nothing here ever touches the store: `analyze` output is parsed and
-// clamped only to render a preview, never applied to a profile. The stream
-// analyzer, the warm-up and every existing command are untouched — this is a
-// parallel, read-only path the owner can compare against them before the
-// long warm-up is retired.
+// `peopleReport`/`previewUser`/`previewChannel` stay read-only (never touch
+// the store) for `/nep bootstrap people`/`preview`. `createBootstrap().run()`
+// is the write path: channels → people → server, in order, resumable (progress
+// in `state.bootstrap`, flushed after every request), muting the persona for
+// as long as it is in flight (`isBootstrapping()`, wired into
+// src/discord/events.js, src/behavior/spontaneous.js and src/admin.js).
+// `refreshPortrait()` is the stream analyzer's "the stored portrait misses
+// something" cue (src/memory/update.js's `onPortraitRequest`), rewriting only
+// `character`/`style` from a fresh sample. A missing `prompts.profile` /
+// `prompts.channel` / `prompts.server` is reported (and logged), never thrown
+// through to discord.js.
 
 import { readableChannels, fetchHistoryWindow } from '../discord/collect.js';
 import { formatTranscript, renderTranscript } from '../discord/format.js';
 import { fitSections, SectionsTooLargeError } from '../llm/budget.js';
 import { estimateTokens, estimateMessages } from '../llm/tokens.js';
 import { parseJsonObject } from '../llm/parse.js';
+import { applyMemoryUpdate } from './update.js';
+import { topByRank } from './ranking.js';
 import { clampText } from './clamp.js';
 import { normalizeTopic } from './interests.js';
 import { toTokens, fromTokens } from './mentions.js';
 import { log } from '../log.js';
 
 const CACHE_TTL_MS = 15 * 60_000;
+
+/** `err?.statusCode === 429` — the one rate-limit signal src/llm/openrouter.js#complete surfaces
+ * (it already retries a 429 a couple of times itself; this is for the SUSTAINED case where the
+ * provider keeps refusing across the retries too). The old long warm-up's own `isRateLimited`
+ * helper is gone along with it (src/memory/warmup.js no longer exists) -- reimplemented minimally. */
+function isRateLimited(err) {
+  return err?.statusCode === 429;
+}
+
+/** `error?.message`, trimmed to 200 chars — never message contents. */
+function detailOf(err) {
+  return err?.message ? String(err.message).slice(0, 200) : undefined;
+}
+
+/**
+ * Whether a completion looks cut off by the output token cap: the provider
+ * said so (`finish_reason: 'length'`), or the text has no closing `}` for
+ * its first `{`. Mirrors src/memory/update.js#looksTruncated (kept local:
+ * this module's helpers are deliberately not shared with the stream
+ * analyzer's, only the small validated surface it needs is imported).
+ */
+function looksTruncated(text, finishReason) {
+  if (finishReason === 'length') return true;
+  const start = String(text ?? '').indexOf('{');
+  if (start === -1) return false;
+  const end = String(text ?? '').lastIndexOf('}');
+  return end <= start;
+}
 
 // Fallbacks for the profile-prompt placeholders, mirroring config.json's own
 // defaults -- used only when a deployment's config is missing the key. Kept
@@ -592,6 +628,123 @@ export function clampChannelResult(raw, config) {
   };
 }
 
+/**
+ * The `{{fieldChars}}`/`{{maxInjokes}}`/`{{loreTextChars}}` placeholders `prompts.server` may use.
+ * @param {object} config  Live config.
+ * @param {string} selfName
+ */
+function serverTemplateValues(config, selfName) {
+  const memoryCfg = config?.memory ?? {};
+  return {
+    name: selfName,
+    fieldChars: memoryCfg.fieldChars ?? BOOTSTRAP_LIMIT_DEFAULTS.fieldChars,
+    maxInjokes: memoryCfg.maxInjokes ?? 15,
+    loreTextChars: config?.lore?.textChars ?? 400,
+  };
+}
+
+/** Validate and clamp the model's `server.md` JSON. Never `null` -- an empty/garbage answer just
+ * yields empty fields, since a server-level write only ever ADDS what is non-empty (see
+ * store.updateGuild/store.setLore). */
+export function clampServerResult(raw, config, nameOf = () => null) {
+  const memoryCfg = config?.memory ?? {};
+  const tolerance = memoryCfg.clampTolerance;
+  const fieldChars = memoryCfg.fieldChars ?? BOOTSTRAP_LIMIT_DEFAULTS.fieldChars;
+  const maxInjokes = memoryCfg.maxInjokes ?? 15;
+  const loreTextChars = config?.lore?.textChars ?? 400;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { patterns: '', starters: '', injokes: [], lore: [] };
+
+  const tokenize = makeTokenizer(nameOf);
+  const resolve = (text, limit) => clampResolvedField(text, limit, tolerance, tokenize, nameOf);
+
+  const patterns = resolve(raw.patterns, fieldChars * 2);
+  const starters = resolve(raw.starters, fieldChars * 2);
+  const injokes = (Array.isArray(raw.injokes) ? raw.injokes : [])
+    .map((s) => (typeof s === 'string' ? clampText(tokenize(s), 200, { tolerance }) : ''))
+    .filter(Boolean)
+    .slice(0, maxInjokes);
+
+  const lore = (Array.isArray(raw.lore) ? raw.lore : [])
+    .map((entry) => {
+      if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return null;
+      const title = typeof entry.title === 'string' ? entry.title.trim().slice(0, 80) : '';
+      if (!title) return null;
+      const keys = Array.isArray(entry.keys) ? entry.keys.filter((k) => typeof k === 'string' && k.trim()).map((k) => k.trim()) : [];
+      const text = resolve(entry.text, loreTextChars);
+      return { title, keys, text };
+    })
+    .filter(Boolean);
+
+  return { patterns, starters, injokes, lore };
+}
+
+/**
+ * Greedily take the longest PREFIX of `items` (already in the order they must be sent, typically
+ * chronological) whose costs sum to at most `budget` -- the opposite of `fitNewest` above, which
+ * drops the oldest to fit ONE request; this instead leaves the rest for a FOLLOWING request, so a
+ * member's sample that does not fit in one request is cut into the fewest chronological chunks
+ * that do (.claude/docs/prompt-contract.md, "The bootstrap"). Always takes at least one item when
+ * `items` is non-empty, even if that single item alone exceeds `budget` -- progress must be made;
+ * the resulting request may then exceed the cap for that one oversized item, an edge case rather
+ * than the common path. Pure.
+ * @param {object[]} items
+ * @param {number} budget
+ * @param {(item: object) => number} cost
+ * @returns {{ taken: object[], rest: object[] }}
+ */
+export function takeFittingPrefix(items, budget, cost) {
+  if (!Array.isArray(items) || items.length === 0) return { taken: [], rest: [] };
+  let used = 0;
+  let count = 0;
+  for (; count < items.length; count += 1) {
+    const c = cost(items[count]);
+    if (count > 0 && used + c > budget) break;
+    used += c;
+  }
+  if (count === 0) count = 1;
+  return { taken: items.slice(0, count), rest: items.slice(count) };
+}
+
+/**
+ * The per-iteration `users.<id>` op payloads that write one `profile.md` answer through
+ * src/memory/update.js#applyMemoryUpdate -- reused so every existing clamp/token/eviction/
+ * confirmation rule applies for free (.claude/docs/prompt-contract.md, "The bootstrap", DO §3).
+ *
+ * `character`/`style`/`aliases`/`episodes` are written once, on the first iteration. `interests`/
+ * `details` need their stored WEIGHT to land exactly on the answer's `times` (1..5) -- since one
+ * `applyMemoryUpdate` call only ever bumps an item's weight by 1 (one sighting per call, see
+ * src/memory/interests.js), this returns `max(times)` iterations; an item with `times: T` is
+ * included in the first `T` of them, so after all iterations run (each a fresh "sighting" of the
+ * SAME item) its stored weight is exactly `T`. Pure: returns iteration payloads, touches nothing.
+ * @param {{ character?: string, style?: string, interests?: {topic:string,note:string,times:number}[],
+ *   details?: {text:string,times:number}[], episodes?: object[], aliases?: string[] }} answer  From
+ *   `clampProfileResult`.
+ * @returns {object[]} `ops` objects, each suitable as `update.users.<id>` for `applyMemoryUpdate`.
+ */
+export function buildPersonWriteIterations(answer) {
+  const interests = Array.isArray(answer?.interests) ? answer.interests : [];
+  const details = Array.isArray(answer?.details) ? answer.details : [];
+  const times = [1, ...interests.map((it) => it.times ?? 1), ...details.map((d) => d.times ?? 1)];
+  const maxTimes = Math.max(...times);
+
+  const iterations = [];
+  for (let i = 1; i <= maxTimes; i += 1) {
+    const ops = {};
+    const interestAdd = interests.filter((it) => (it.times ?? 1) >= i).map((it) => ({ topic: it.topic, note: it.note }));
+    if (interestAdd.length > 0) ops.interests = { add: interestAdd };
+    const detailAdd = details.filter((d) => (d.times ?? 1) >= i).map((d) => d.text);
+    if (detailAdd.length > 0) ops.details = detailAdd;
+    if (i === 1) {
+      if (typeof answer?.character === 'string' && answer.character) ops.character = answer.character;
+      if (typeof answer?.style === 'string' && answer.style) ops.style = answer.style;
+      if (Array.isArray(answer?.aliases) && answer.aliases.length > 0) ops.aliases = { add: answer.aliases };
+      if (Array.isArray(answer?.episodes) && answer.episodes.length > 0) ops.episodes = answer.episodes;
+    }
+    if (Object.keys(ops).length > 0) iterations.push(ops);
+  }
+  return iterations;
+}
+
 // ---------------------------------------------------------------------------
 // Factory -- the only place that touches discord.js and the LLM client
 // ---------------------------------------------------------------------------
@@ -610,17 +763,45 @@ function buildNameIndex(windows) {
   return (id) => latest.get(String(id))?.name ?? null;
 }
 
+/** The state.json shape this module owns (see .claude/docs/prompt-contract.md, "The bootstrap"),
+ * created and self-healed in place -- garbage left by an old shape never crashes a read. */
+function bootstrapState(store) {
+  const data = store.state.data;
+  if (!data.bootstrap || typeof data.bootstrap !== 'object' || Array.isArray(data.bootstrap)) {
+    data.bootstrap = {};
+  }
+  const bs = data.bootstrap;
+  if (typeof bs.startedAt !== 'string') bs.startedAt = null;
+  if (typeof bs.finishedAt !== 'string') bs.finishedAt = null;
+  if (!Number.isFinite(bs.tokensUsed)) bs.tokensUsed = 0;
+  if (!Number.isFinite(bs.requests)) bs.requests = 0;
+  if (!bs.done || typeof bs.done !== 'object' || Array.isArray(bs.done)) bs.done = {};
+  if (!Array.isArray(bs.done.channels)) bs.done.channels = [];
+  if (!Array.isArray(bs.done.people)) bs.done.people = [];
+  if (typeof bs.done.server !== 'boolean') bs.done.server = false;
+  if (bs.aborted !== null && typeof bs.aborted !== 'string') bs.aborted = null;
+  if (typeof bs.refreshDay !== 'string') bs.refreshDay = null;
+  if (!Number.isFinite(bs.refreshCount)) bs.refreshCount = 0;
+  return bs;
+}
+
 /**
  * @param {object} deps
  * @param {object} deps.hot       Live config + prompts; read at the moment of use.
+ * @param {object} deps.store     From createStore() (src/memory/store.js).
  * @param {import('discord.js').Client} deps.client
  * @param {object} deps.llm       From createLlm() (src/llm/openrouter.js).
  * @param {object} deps.calibrator  From createCalibrator().
  * @param {(guildId: string) => string} deps.getSelfName
  * @param {() => number} [deps.now]
+ * @param {(ms: number) => Promise<void>} [deps.sleep]  Used only for a sustained-rate-limit wait
+ *   (`bootstrap.rateLimitWaitMinutes`) -- injectable so tests never actually sleep.
  */
-export function createBootstrap({ hot, client, llm, calibrator, getSelfName, now = Date.now }) {
+export function createBootstrap({ hot, store, client, llm, calibrator, getSelfName, now = Date.now, sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)) }) {
   const cache = new Map(); // guildId -> { fetchedAt, windows }
+  let running = false; // a full run() or one-off runXxx() in flight -- see isBootstrapping()
+  let idleWaiters = []; // resolvers for waitIdle(), notified once running goes back to false
+  let consecutiveFailures = 0; // resets on any successful request; 3 in a row aborts the run (resumable)
 
   /** (Re-)fetch every readable channel's window, sequentially -- see the module header;
    * `bootstrap.lookbackDays`/`fetchLimitPerChannel` are read fresh, never cached. */
@@ -682,7 +863,7 @@ export function createBootstrap({ hot, client, llm, calibrator, getSelfName, now
     };
   }
 
-  /** Shared by previewUser/previewChannel: the analyzer-role model, called with the warm-up's own
+  /** Shared by previewUser/previewChannel: the analyzer-role model, called with the bootstrap's own
    * rail (never the daily request cap) and the bootstrap output budget. */
   async function callModel(messages, cfg) {
     const model = hot.config.memory?.model ?? hot.config.llm?.model;
@@ -799,5 +980,704 @@ export function createBootstrap({ hot, client, llm, calibrator, getSelfName, now
     };
   }
 
-  return { peopleReport, previewUser, previewChannel };
+  // -------------------------------------------------------------------
+  // Write path: run() / runXxx() / refreshPortrait() -- see the module header.
+  // -------------------------------------------------------------------
+
+  function notifyIdle() {
+    if (running) return;
+    const waiters = idleWaiters;
+    idleWaiters = [];
+    for (const resolve of waiters) resolve();
+  }
+
+  /** Resolves once no run()/runXxx() is in flight -- immediately if that is already true. Used by
+   * `/nep pause` (src/admin.js), the same shape as src/memory/update.js#createMemoryUpdater's own
+   * `waitIdle`. */
+  function waitIdle() {
+    return running ? new Promise((resolve) => idleWaiters.push(resolve)) : Promise.resolve();
+  }
+
+  function isBootstrapping() {
+    return running;
+  }
+
+  function markDone(kind, id) {
+    const bs = bootstrapState(store);
+    if (kind === 'server') {
+      bs.done.server = true;
+    } else if (!bs.done[kind].includes(id)) {
+      bs.done[kind].push(id);
+    }
+    store.state.markDirty();
+    store.flush();
+  }
+
+  /** `config` with `llm.maxRequestTokens` overridden to `cfg.maxRequestTokens` (the bootstrap's own,
+   * much larger, cap) -- so buildProfileRequest/buildChannelRequest fit under IT, not the global
+   * per-request rail (.claude/docs/prompt-contract.md, "The bootstrap", DO §2). */
+  function requestConfigFor(cfg) {
+    return { ...hot.config, llm: { ...hot.config.llm, maxRequestTokens: cfg.maxRequestTokens ?? hot.config.llm?.maxRequestTokens } };
+  }
+
+  function bootstrapRequestCap(cfg) {
+    return Math.floor((cfg.maxRequestTokens ?? 120000) * (hot.config.llm?.safetyMargin ?? 0.9));
+  }
+
+  /**
+   * One analyzer-role call, with every bootstrap rail applied: the token budget
+   * (`bootstrap.maxTokens`, a "stop here, resumable" outcome, never a throw), the per-request cap
+   * override, a sustained-429 wait (`rateLimitWaitMinutes` × up to `rateLimitMaxWaits`, then abort,
+   * resumable), and the 3-consecutive-other-failures abort. Progress (`tokensUsed`/`requests`) is
+   * persisted after every completed request. Never throws: every outcome is reported.
+   * @returns {Promise<{ ok: true, completion: object } | { ok: false, stop?: boolean, reason: string, error?: Error }>}
+   */
+  async function callWithRails(messages, cfg) {
+    const bs = bootstrapState(store);
+    const estimate = calibrator.apply(estimateMessages(messages));
+    const maxTokens = Number.isFinite(cfg.maxTokens) ? cfg.maxTokens : Infinity;
+    if (bs.tokensUsed + estimate > maxTokens) {
+      log.info('bootstrap: token budget reached, stopping the run (resumable)', { tokensUsed: bs.tokensUsed, estimate, maxTokens });
+      bs.aborted = 'budget';
+      store.state.markDirty();
+      store.flush();
+      return { ok: false, stop: true, reason: 'budget' };
+    }
+
+    let waits = 0;
+    for (;;) {
+      let completion;
+      try {
+        completion = await llm.complete(messages, {
+          model: hot.config.memory?.model ?? hot.config.llm?.model,
+          maxOutputTokens: cfg.maxOutputTokens ?? 6000,
+          maxRequestTokens: bootstrapRequestCap(cfg),
+          countAgainstDailyCap: false,
+          timeoutMs: hot.config.memory?.timeoutMs ?? hot.config.llm?.timeoutMs,
+        });
+      } catch (err) {
+        if (isRateLimited(err)) {
+          waits += 1;
+          const maxWaits = Number.isFinite(cfg.rateLimitMaxWaits) ? cfg.rateLimitMaxWaits : 36;
+          if (waits > maxWaits) {
+            log.warn('bootstrap: rate limit outlasted the wait budget, aborting the run (resumable)', { waits });
+            bs.aborted = 'rate-limit';
+            store.state.markDirty();
+            store.flush();
+            return { ok: false, stop: true, reason: 'rate-limit' };
+          }
+          log.warn('bootstrap: rate limited, waiting before retrying', { attempt: waits, waitMinutes: cfg.rateLimitWaitMinutes ?? 10 });
+          await sleep((cfg.rateLimitWaitMinutes ?? 10) * 60_000);
+          continue;
+        }
+
+        consecutiveFailures += 1;
+        log.warn('bootstrap: request failed', { detail: detailOf(err), consecutiveFailures });
+        if (consecutiveFailures >= 3) {
+          log.warn('bootstrap: three consecutive failures, aborting the run (resumable)');
+          bs.aborted = 'failures';
+          store.state.markDirty();
+          store.flush();
+          return { ok: false, stop: true, reason: 'failures', error: err };
+        }
+        return { ok: false, stop: false, reason: 'llm-error', error: err };
+      }
+
+      consecutiveFailures = 0;
+      bs.tokensUsed += completion.usage?.total_tokens ?? completion.estimated ?? estimate;
+      bs.requests += 1;
+      store.state.markDirty();
+      store.flush();
+      return { ok: true, completion };
+    }
+  }
+
+  /** Every message `memberId` wrote across `windows` (bots and the persona's own lines already
+   * excluded upstream), oldest first -- fed one at a time into `store.touchUser` so the resulting
+   * profile's `messageCount`/`firstSeen`/`lastSeen`/`names` are computed by code from the actual
+   * fetched window, exactly as if the live pipeline had observed each of them
+   * (.claude/docs/prompt-contract.md, "The bootstrap", DO §3). */
+  function touchUserFromWindows(guildId, windows, memberId) {
+    const id = String(memberId);
+    const messages = [];
+    for (const window of windows) {
+      for (const message of window.messages ?? []) {
+        if (!message.bot && !message.self && String(message.authorId) === id) messages.push(message);
+      }
+    }
+    messages.sort((a, b) => a.ts - b.ts);
+    for (const message of messages) store.touchUser(guildId, id, message.authorName, message.ts);
+    return messages.length;
+  }
+
+  /** Writes one `profile.md` answer for `member` through applyMemoryUpdate (see
+   * `buildPersonWriteIterations`) -- attitude/relationship untouched. */
+  function writePersonAnswer(guildId, windows, member, answer) {
+    touchUserFromWindows(guildId, windows, member.id);
+
+    const knownUserIds = new Set([String(member.id)]);
+    const batchAuthorNames = new Map([[String(member.id), member.name]]);
+    const seenAt = Number.isFinite(member.lastTs) ? member.lastTs : now();
+    const timing = { seenAtByUser: new Map([[String(member.id), seenAt]]), seenAt };
+    const cfgForOps = { ...hot.config.memory, confirmGapHours: 0 };
+    const episodesCfg = { enabled: true, maxEpisodes: hot.config.memory?.maxEpisodes, maxNew: Infinity, now: seenAt };
+
+    const iterations = buildPersonWriteIterations(answer);
+    for (const ops of iterations) {
+      applyMemoryUpdate(
+        store,
+        guildId,
+        { users: { [member.id]: ops } },
+        cfgForOps,
+        knownUserIds,
+        new Set(),
+        undefined, // relationships/affinity: untouched by the bootstrap
+        episodesCfg,
+        undefined, // lore: not a per-person field
+        timing,
+        batchAuthorNames,
+      );
+    }
+    store.flush();
+    return { iterations: iterations.length };
+  }
+
+  /** One channel → `channel.md` → `store.updateChannel`. See `callWithRails` for the stop/failure
+   * contract; `{ ok: true }` on a clean write, marks the channel done either way it succeeds. */
+  async function processChannel(guildId, window, cfg, mainChannelIds) {
+    if (!hot.prompts?.channel) {
+      return { ok: false, stop: true, reason: 'missing-prompt', message: 'prompt file missing: prompts/channel.md (or prompts.local/channel.md) is not configured yet' };
+    }
+    const isMain = mainChannelIds.has(String(window.id));
+    const selected = selectChannelMessages(window.messages, cfg.messagesPerChannel);
+    const selfName = getSelfName(guildId);
+
+    let built;
+    try {
+      built = buildChannelRequest({ prompts: hot.prompts, config: requestConfigFor(cfg), calibrator, channel: window, messages: selected, isMain, selfName });
+    } catch (err) {
+      if (err instanceof SectionsTooLargeError) {
+        log.warn('bootstrap: channel request does not fit even the minimum, skipping this round', { channel: window.id });
+        return { ok: false };
+      }
+      throw err;
+    }
+
+    const result = await callWithRails(built.messages, cfg);
+    if (!result.ok) return result;
+
+    let parsed;
+    try {
+      parsed = parseJsonObject(result.completion.text);
+    } catch (err) {
+      log.warn('bootstrap: channel answer could not be parsed, will retry next run', { channel: window.id, detail: detailOf(err) });
+      return { ok: false };
+    }
+
+    const clamped = clampChannelResult(parsed, hot.config) ?? { purpose: '', topics: '', tone: '' };
+    store.updateChannel(guildId, window.id, clamped);
+    markDone('channels', window.id);
+    return { ok: true };
+  }
+
+  /** One person → `profile.md`, chunked chronologically when the sample does not fit one request
+   * (each chunk after the first carries the previous answer as `<draft>`) → the store, via
+   * `writePersonAnswer`. See `callWithRails` for the stop/failure contract. A bad-json/truncated
+   * answer is retried once with half the sample; a second failure skips (and marks done) this
+   * person. */
+  async function processPerson(guildId, windows, member, cfg, mainChannelIds, sampleCfgOverride) {
+    if (!hot.prompts?.profile) {
+      return { ok: false, stop: true, reason: 'missing-prompt', message: 'prompt file missing: prompts/profile.md (or prompts.local/profile.md) is not configured yet' };
+    }
+    const sampleCfg = sampleCfgOverride ?? cfg;
+    const sample = sampleMember(windows, member.id, sampleCfg, mainChannelIds);
+    if (sample.messages.length === 0) {
+      markDone('people', member.id);
+      return { ok: false, skipped: true, reason: 'nothing-to-sample' };
+    }
+
+    const selfName = getSelfName(guildId);
+    const labels = hot.prompts.labels ?? {};
+    const timezone = hot.config.bot?.timezone ?? 'UTC';
+    const formatOptions = {
+      timezone,
+      gapMinutes: hot.config.context?.gapMarkerMinutes ?? 20,
+      maxChars: hot.config.context?.maxMessageChars ?? 800,
+      selfName,
+      mode: 'memory',
+      labels,
+    };
+    const items = markOwnContext(formatTranscript(sample.messages, formatOptions), sample.ownIds, labels);
+
+    const limit = bootstrapRequestCap(cfg);
+    const cost = (text) => calibrator.apply(estimateTokens(text)) + 2;
+    const system = fillTemplate(hot.prompts.profile, profileTemplateValues(hot.config, selfName));
+    const characterBlock = block('character', fillTemplate(hot.prompts['character-card'], { name: selfName }));
+    const memberLine = `${member.name} (id:${member.id}), ${member.messages} messages in the window, first ${isoDateOrDash(member.firstTs)}, last ${isoDateOrDash(member.lastTs)}`;
+    const memberBlock = block('member', memberLine);
+    const nameOf = buildNameIndex(windows);
+
+    let remaining = items;
+    let draft = null;
+    let answer = null;
+
+    while (remaining.length > 0) {
+      if (store.state.data.paused) return { ok: false, stop: true, reason: 'paused' };
+
+      const draftBlock = draft ? block('draft', JSON.stringify(draft)) : '';
+      const fixedTexts = [system, characterBlock, memberBlock, draftBlock].filter(Boolean);
+      const fixedCost = fixedTexts.reduce((sum, text) => sum + cost(text), 0);
+      const budget = limit - fixedCost;
+      if (budget <= 0) {
+        log.warn('bootstrap: the fixed profile blocks alone exceed the request cap, skipping this person', { member: member.id });
+        return { ok: false, skipped: true };
+      }
+
+      const { taken, rest } = takeFittingPrefix(remaining, budget, (item) => cost(item.text));
+      remaining = rest;
+      const snippetsBlock = block('snippets', renderTranscript(taken, timezone, labels));
+      const user = [characterBlock, memberBlock, draftBlock, snippetsBlock].filter(Boolean).join('\n\n');
+      const messages = [
+        { role: 'system', content: system },
+        { role: 'user', content: user },
+      ];
+
+      const result = await callWithRails(messages, cfg);
+      if (!result.ok) {
+        if (result.stop) return result;
+        return { ok: false }; // llm-error, not (yet) a run-aborting streak -- retry this person next run
+      }
+
+      let parsed;
+      try {
+        parsed = parseJsonObject(result.completion.text);
+      } catch (err) {
+        if (!sampleCfgOverride) {
+          const truncated = looksTruncated(result.completion.text, result.completion.finishReason);
+          const halved = { ...cfg, messagesPerPerson: Math.max(1, Math.floor((sampleCfg.messagesPerPerson ?? sample.messages.length) / 2)) };
+          log.warn('bootstrap: person answer could not be parsed, retrying with half the sample', { member: member.id, truncated, detail: detailOf(err) });
+          return processPerson(guildId, windows, member, halved, mainChannelIds, halved);
+        }
+        log.warn('bootstrap: person answer still bad after a retry, skipping this person', { member: member.id, detail: detailOf(err) });
+        markDone('people', member.id);
+        return { ok: false, skipped: true };
+      }
+
+      const clamped = clampProfileResult(parsed, hot.config, nameOf);
+      draft = clamped;
+      answer = clamped;
+    }
+
+    writePersonAnswer(guildId, windows, member, answer ?? { character: '', style: '', interests: [], details: [], episodes: [], aliases: [] });
+    markDone('people', member.id);
+    return { ok: true, member, answer };
+  }
+
+  /** The server-wide `server.md` request: `<channels>` = stored channel notes, `<members>` = one
+   * line per profiled member, `<messages>` = newest `serverSampleMessages` of the main channels (or
+   * the single busiest channel when none is marked main) → `store.updateGuild`/`store.setLore`. */
+  async function processServer(guildId, windows, cfg, mainChannelIds, people) {
+    if (!hot.prompts?.server) {
+      return { ok: false, stop: true, reason: 'missing-prompt', message: 'prompt file missing: prompts/server.md (or prompts.local/server.md) is not configured yet' };
+    }
+    const selfName = getSelfName(guildId);
+    const labels = hot.prompts.labels ?? {};
+    const timezone = hot.config.bot?.timezone ?? 'UTC';
+
+    const system = fillTemplate(hot.prompts.server, serverTemplateValues(hot.config, selfName));
+    const characterBlock = block('character', fillTemplate(hot.prompts['character-card'], { name: selfName }));
+
+    const channelsView = {};
+    for (const window of windows) {
+      const stored = store.getChannel(guildId, window.id);
+      channelsView[window.id] = {
+        name: stored?.name || window.name,
+        category: stored?.category ?? window.category,
+        topic: stored?.topic ?? window.topic,
+        purpose: stored?.purpose ?? '',
+        topics: stored?.topics ?? '',
+        tone: stored?.tone ?? '',
+      };
+    }
+    const channelsBlock = block('channels', JSON.stringify(channelsView));
+
+    const memberLines = people.map((person) => {
+      const profile = store.getUser(guildId, person.id);
+      const character = String(profile?.character ?? '').slice(0, 150);
+      const topInterests = topByRank(profile?.interests ?? [], 5).map((it) => it.topic);
+      const interestsPart = topInterests.length > 0 ? ` | interests: ${topInterests.join(', ')}` : '';
+      return `${person.name} (id:${person.id}): ${character}${interestsPart}`;
+    });
+    const membersBlock = block('members', memberLines.join('\n'));
+
+    const mainWindows = windows.filter((window) => mainChannelIds.has(String(window.id)));
+    const sourceWindows = mainWindows.length > 0 ? mainWindows : [...windows].sort((a, b) => b.messages.length - a.messages.length).slice(0, 1);
+    const pooled = sourceWindows.flatMap((window) => window.messages).sort((a, b) => a.ts - b.ts);
+    const newest = selectChannelMessages(pooled, cfg.serverSampleMessages);
+    const formatOptions = {
+      timezone,
+      gapMinutes: hot.config.context?.gapMarkerMinutes ?? 20,
+      maxChars: hot.config.context?.maxMessageChars ?? 800,
+      selfName,
+      mode: 'memory',
+      labels,
+    };
+    const items = formatTranscript(newest, formatOptions);
+    const messagesBlock = block('messages', renderTranscript(items, timezone, labels));
+
+    const user = [characterBlock, channelsBlock, membersBlock, messagesBlock].filter(Boolean).join('\n\n');
+    const messages = [
+      { role: 'system', content: system },
+      { role: 'user', content: user },
+    ];
+
+    const result = await callWithRails(messages, cfg);
+    if (!result.ok) return result;
+
+    let parsed;
+    try {
+      parsed = parseJsonObject(result.completion.text);
+    } catch (err) {
+      log.warn('bootstrap: server answer could not be parsed, will retry next run', { detail: detailOf(err) });
+      return { ok: false };
+    }
+
+    const nameOf = buildNameIndex(windows);
+    const clamped = clampServerResult(parsed, hot.config, nameOf);
+    store.updateGuild(guildId, { patterns: clamped.patterns, starters: clamped.starters, injokes: clamped.injokes });
+    if (clamped.lore.length > 0) {
+      store.setLore(guildId, clamped.lore, {
+        source: 'analyzer',
+        now: now(),
+        maxEntries: hot.config.lore?.maxEntries,
+        textChars: hot.config.lore?.textChars,
+        clampTolerance: hot.config.memory?.clampTolerance,
+      });
+    }
+    markDone('server');
+    return { ok: true };
+  }
+
+  /** The whole run, in order (channels → people → server), resuming whatever `state.bootstrap.done`
+   * already covers. Stops (never throws) on: pause, a missing prompt file, the token budget, a
+   * sustained rate limit, or three consecutive other failures -- all resumable by calling `run`
+   * again. Refuses while another run/one-off target is already in flight. */
+  async function run(guildId) {
+    if (running) return { ok: false, message: 'a bootstrap run is already in flight' };
+    const guild = resolvedGuild(guildId);
+    if (!guild) return { ok: false, message: 'no guild resolved yet' };
+
+    running = true;
+    consecutiveFailures = 0;
+    const bs = bootstrapState(store);
+    if (!bs.startedAt) bs.startedAt = new Date(now()).toISOString();
+    bs.finishedAt = null;
+    bs.aborted = null;
+    store.state.markDirty();
+    store.flush();
+    log.info('bootstrap: run starting', { guildId });
+
+    try {
+      const cfg = hot.config.bootstrap ?? {};
+      const windows = await getWindows(guildId, guild, cfg);
+      const mainChannelIds = new Set((hot.config.memory?.mainChannelIds ?? []).map(String));
+
+      const eligibleChannels = windows.filter((window) => window.messages.length >= (cfg.minChannelMessages ?? 0));
+      for (const window of eligibleChannels) {
+        if (store.state.data.paused) return { ok: false, message: 'paused' };
+        if (bs.done.channels.includes(window.id)) continue;
+        const outcome = await processChannel(guildId, window, cfg, mainChannelIds);
+        if (outcome.stop) return { ok: false, message: outcome.message ?? outcome.reason };
+      }
+
+      const people = pickPeople(windows, cfg);
+      for (const person of people) {
+        if (store.state.data.paused) return { ok: false, message: 'paused' };
+        if (bs.done.people.includes(person.id)) continue;
+        const outcome = await processPerson(guildId, windows, person, cfg, mainChannelIds);
+        if (outcome.stop) return { ok: false, message: outcome.message ?? outcome.reason };
+      }
+
+      if (!bs.done.server) {
+        if (store.state.data.paused) return { ok: false, message: 'paused' };
+        const outcome = await processServer(guildId, windows, cfg, mainChannelIds, people);
+        if (outcome.stop) return { ok: false, message: outcome.message ?? outcome.reason };
+      }
+
+      bs.finishedAt = new Date(now()).toISOString();
+      store.state.markDirty();
+      store.flush();
+      log.info('bootstrap: run finished', { guildId, tokensUsed: bs.tokensUsed, requests: bs.requests });
+      return { ok: true };
+    } finally {
+      running = false;
+      notifyIdle();
+    }
+  }
+
+  /** `/nep bootstrap run user|channel|server:<target>`: (re)do exactly one target right now,
+   * synchronously. Refused while a run (full or another one-off) is already in flight, or while
+   * paused. */
+  async function runOneTarget(guildId, kind, id) {
+    if (running) return { ok: false, message: 'a bootstrap run is already in flight' };
+    if (store.state.data.paused) return { ok: false, message: 'paused -- run /nep resume first' };
+    const guild = resolvedGuild(guildId);
+    if (!guild) return { ok: false, message: 'no guild resolved yet' };
+
+    running = true;
+    consecutiveFailures = 0;
+    try {
+      const cfg = hot.config.bootstrap ?? {};
+      const windows = await getWindows(guildId, guild, cfg);
+      const mainChannelIds = new Set((hot.config.memory?.mainChannelIds ?? []).map(String));
+
+      if (kind === 'channel') {
+        const window = windows.find((w) => w.id === String(id));
+        if (!window) return { ok: false, message: 'channel not found, not readable, or not in this guild' };
+        const outcome = await processChannel(guildId, window, cfg, mainChannelIds);
+        return outcome.ok ? { ok: true, outcome } : { ok: false, message: outcome.message ?? outcome.reason ?? 'failed', outcome };
+      }
+      if (kind === 'person') {
+        const member = memberStats(windows, id);
+        if (!member) return { ok: false, message: `no messages from this member in the last ${cfg.lookbackDays ?? 60} days` };
+        const outcome = await processPerson(guildId, windows, member, cfg, mainChannelIds);
+        return outcome.ok ? { ok: true, outcome } : { ok: false, message: outcome.message ?? outcome.reason ?? 'failed', outcome };
+      }
+      if (kind === 'server') {
+        const people = pickPeople(windows, cfg);
+        const outcome = await processServer(guildId, windows, cfg, mainChannelIds, people);
+        return outcome.ok ? { ok: true, outcome } : { ok: false, message: outcome.message ?? outcome.reason ?? 'failed', outcome };
+      }
+      return { ok: false, message: `unknown target: ${kind}` };
+    } finally {
+      running = false;
+      notifyIdle();
+    }
+  }
+
+  /**
+   * Start (nothing stored anywhere yet) or resume (a previous run began but never finished) a run,
+   * automatically -- called once at startup (src/index.js) and safe to call again on every tick, a
+   * no-op otherwise. Never awaited by the caller: fire-and-forget, errors logged.
+   * @returns {boolean} true when a run was (re)started
+   */
+  function resumeIfNeeded(guildId) {
+    if (hot.config.bootstrap?.enabled === false) return false;
+    if (running || store.state.data.paused) return false;
+    const bs = bootstrapState(store);
+    const unfinished = Boolean(bs.startedAt) && !bs.finishedAt;
+    const neverStarted = !bs.startedAt && store.listUserProfiles(guildId).length === 0;
+    if (!unfinished && !neverStarted) return false;
+
+    log.info('bootstrap: starting/resuming a run automatically', { guildId, unfinished, neverStarted });
+    run(guildId).catch((err) => log.error('bootstrap: automatic run failed', { error: err }));
+    return true;
+  }
+
+  /** Cheap, synchronous summary for `/nep status` -- never fetches Discord history. */
+  function summary() {
+    const bs = bootstrapState(store);
+    return {
+      running,
+      startedAt: bs.startedAt,
+      finishedAt: bs.finishedAt,
+      tokensUsed: bs.tokensUsed,
+      requests: bs.requests,
+      doneChannels: bs.done.channels.length,
+      donePeople: bs.done.people.length,
+      doneServer: bs.done.server,
+      aborted: bs.aborted,
+    };
+  }
+
+  /** `/nep bootstrap status`: the same as `summary()` plus totals and the next target, which cost a
+   * (cached) history fetch. */
+  async function status(guildId) {
+    const bs = bootstrapState(store);
+    const base = summary();
+    const guild = resolvedGuild(guildId);
+    let channelsEligible = 0;
+    let peopleEligible = 0;
+    let nextTarget = null;
+
+    if (guild) {
+      const cfg = hot.config.bootstrap ?? {};
+      const windows = await getWindows(guildId, guild, cfg);
+      const eligibleChannels = windows.filter((window) => window.messages.length >= (cfg.minChannelMessages ?? 0));
+      const people = pickPeople(windows, cfg);
+      channelsEligible = eligibleChannels.length;
+      peopleEligible = people.length;
+      const nextChannel = eligibleChannels.find((window) => !bs.done.channels.includes(window.id));
+      const nextPerson = people.find((person) => !bs.done.people.includes(person.id));
+      if (nextChannel) nextTarget = `channel: ${nextChannel.name} (id:${nextChannel.id})`;
+      else if (nextPerson) nextTarget = `person: ${nextPerson.name} (id:${nextPerson.id})`;
+      else if (!bs.done.server) nextTarget = 'server';
+    }
+
+    const phase = running ? 'running' : !base.startedAt ? 'not started' : base.finishedAt ? 'finished' : base.aborted ? `aborted (${base.aborted})` : 'idle';
+    return { ...base, phase, channelsEligible, peopleEligible, nextTarget };
+  }
+
+  /** `/nep bootstrap reset`: clears `state.bootstrap` (progress only, never any profile/channel/
+   * guild/lore data already written). Refused while a run is in flight. */
+  function reset() {
+    if (running) return { ok: false, message: 'a bootstrap run is in flight -- pause or wait for it first' };
+    delete store.state.data.bootstrap;
+    store.state.markDirty();
+    store.flush();
+    return { ok: true };
+  }
+
+  /**
+   * The stream analyzer's cue that a member's stored portrait misses or contradicts something
+   * (src/memory/update.js's `onPortraitRequest`, .claude/docs/prompt-contract.md, "Data model"):
+   * samples their newest `bootstrap.refreshMessages` own messages exactly like the bootstrap, calls
+   * `profile.md` with `<draft>` = the stored character+style and `<hint>` = `reason`, and replaces
+   * ONLY `character`/`style` from the answer -- interests/details/episodes/aliases of that answer
+   * are ignored, they keep flowing through the stream analyzer's own ops. Rails: at most one refresh
+   * per member per `memory.portraitRefreshHours` (skipped when `force` is false), at most
+   * `memory.portraitRefreshPerDay` per server, never while a bootstrap run is in flight (queues
+   * nothing, just logs and returns). Counts against the daily LLM request cap -- this is live
+   * behaviour, not seeding.
+   * @param {string} guildId
+   * @param {string} userId
+   * @param {string} [reason]  The analyzer's one-line cue, used as `<hint>`.
+   * @param {{ force?: boolean }} [opts]  `force: true` (owner's `/nep memory refresh`) ignores the
+   *   hours rail, never the daily cap.
+   */
+  async function refreshPortrait(guildId, userId, reason, { force = false } = {}) {
+    if (running) {
+      log.info('bootstrap: portrait refresh skipped, a bootstrap run is in flight', { userId });
+      return { ok: false, reason: 'bootstrapping' };
+    }
+    if (store.state.data.paused) return { ok: false, reason: 'paused' };
+
+    const memoryCfg = hot.config.memory ?? {};
+    const profile = store.getUser(guildId, userId);
+    if (!force && profile?.portraitRefreshedAt) {
+      const lastMs = Date.parse(profile.portraitRefreshedAt);
+      const hoursMs = (memoryCfg.portraitRefreshHours ?? 24) * 3_600_000;
+      if (Number.isFinite(lastMs) && now() - lastMs < hoursMs) {
+        log.info('bootstrap: portrait refresh skipped, refreshed too recently', { userId });
+        return { ok: false, reason: 'too-soon' };
+      }
+    }
+
+    const bs = bootstrapState(store);
+    const today = new Date(now()).toISOString().slice(0, 10);
+    if (bs.refreshDay !== today) {
+      bs.refreshDay = today;
+      bs.refreshCount = 0;
+    }
+    const perDay = Number.isFinite(memoryCfg.portraitRefreshPerDay) ? memoryCfg.portraitRefreshPerDay : 20;
+    if (bs.refreshCount >= perDay) {
+      log.info('bootstrap: portrait refresh skipped, daily refresh cap reached', { userId, perDay });
+      return { ok: false, reason: 'daily-cap' };
+    }
+
+    if (!hot.prompts?.profile) {
+      return { ok: false, reason: 'missing-prompt', message: 'prompt file missing: prompts/profile.md (or prompts.local/profile.md) is not configured yet' };
+    }
+    const guild = resolvedGuild(guildId);
+    if (!guild) return { ok: false, reason: 'no-guild' };
+
+    const cfg = hot.config.bootstrap ?? {};
+    const windows = await getWindows(guildId, guild, cfg);
+    const mainChannelIds = new Set((memoryCfg.mainChannelIds ?? []).map(String));
+    const member = memberStats(windows, userId) ?? {
+      id: String(userId),
+      name: profile?.names?.[0] ?? String(userId),
+      messages: 0,
+      firstTs: null,
+      lastTs: now(),
+    };
+    const sample = sampleMember(windows, userId, { ...cfg, messagesPerPerson: cfg.refreshMessages ?? 400 }, mainChannelIds);
+    if (sample.messages.length === 0) {
+      log.info('bootstrap: portrait refresh: nothing to sample for this member', { userId });
+      return { ok: false, reason: 'nothing-to-sample' };
+    }
+
+    const selfName = getSelfName(guildId);
+    const labels = hot.prompts.labels ?? {};
+    const timezone = hot.config.bot?.timezone ?? 'UTC';
+    const formatOptions = {
+      timezone,
+      gapMinutes: hot.config.context?.gapMarkerMinutes ?? 20,
+      maxChars: hot.config.context?.maxMessageChars ?? 800,
+      selfName,
+      mode: 'memory',
+      labels,
+    };
+    const items = markOwnContext(formatTranscript(sample.messages, formatOptions), sample.ownIds, labels);
+
+    const system = fillTemplate(hot.prompts.profile, profileTemplateValues(hot.config, selfName));
+    const characterBlock = block('character', fillTemplate(hot.prompts['character-card'], { name: selfName }));
+    const memberLine = `${member.name} (id:${member.id}), ${member.messages} messages in the window, first ${isoDateOrDash(member.firstTs)}, last ${isoDateOrDash(member.lastTs)}`;
+    const memberBlock = block('member', memberLine);
+    const draftBlock = block('draft', JSON.stringify({ character: profile?.character ?? '', style: profile?.style ?? '' }));
+    const hintBlock = reason ? block('hint', reason) : '';
+    const snippetsBlock = block('snippets', renderTranscript(items, timezone, labels));
+    const user = [characterBlock, memberBlock, draftBlock, hintBlock, snippetsBlock].filter(Boolean).join('\n\n');
+    const messages = [
+      { role: 'system', content: system },
+      { role: 'user', content: user },
+    ];
+
+    let completion;
+    try {
+      completion = await llm.complete(messages, {
+        model: memoryCfg.model ?? hot.config.llm?.model,
+        maxOutputTokens: cfg.maxOutputTokens ?? 6000,
+        maxRequestTokens: bootstrapRequestCap(cfg),
+      });
+    } catch (err) {
+      log.warn('bootstrap: portrait refresh call failed', { userId, detail: detailOf(err) });
+      return { ok: false, reason: 'llm-error' };
+    }
+
+    let parsed;
+    try {
+      parsed = parseJsonObject(completion.text);
+    } catch (err) {
+      log.warn('bootstrap: portrait refresh answer could not be parsed', { userId, detail: detailOf(err) });
+      return { ok: false, reason: 'bad-json' };
+    }
+
+    const nameOf = buildNameIndex(windows);
+    const clamped = clampProfileResult(parsed, hot.config, nameOf);
+    const ops = {};
+    if (clamped?.character) ops.character = clamped.character;
+    if (clamped?.style) ops.style = clamped.style;
+
+    const knownUserIds = new Set([String(userId)]);
+    const batchAuthorNames = new Map([[String(userId), member.name]]);
+    const seenAt = Number.isFinite(member.lastTs) ? member.lastTs : now();
+    const timing = { seenAtByUser: new Map([[String(userId), seenAt]]), seenAt };
+    applyMemoryUpdate(store, guildId, { users: { [userId]: ops } }, memoryCfg, knownUserIds, new Set(), undefined, undefined, undefined, timing, batchAuthorNames);
+
+    store.updateUser(guildId, userId, { portraitRefreshedAt: new Date(now()).toISOString() });
+    bs.refreshCount += 1;
+    store.state.markDirty();
+    store.flush();
+
+    log.info('bootstrap: portrait refreshed', { userId, reason: reason ?? null });
+    return { ok: true, userId };
+  }
+
+  return {
+    peopleReport,
+    previewUser,
+    previewChannel,
+    run,
+    runPerson: (guildId, userId) => runOneTarget(guildId, 'person', userId),
+    runChannel: (guildId, channelId) => runOneTarget(guildId, 'channel', channelId),
+    runServer: (guildId) => runOneTarget(guildId, 'server', null),
+    resumeIfNeeded,
+    summary,
+    status,
+    reset,
+    refreshPortrait,
+    isBootstrapping,
+    waitIdle,
+  };
 }

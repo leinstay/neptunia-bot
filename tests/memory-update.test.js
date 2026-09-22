@@ -995,7 +995,7 @@ test('analyze: a described link thumbnail renders via thumbnailDescribed, keyed 
   });
 });
 
-test('analyze: an explicitly-passed descriptions map (the warm-up path) is used as-is, the cache never consulted', async () => {
+test('analyze: an explicitly-passed descriptions map is used as-is, the cache never consulted', async () => {
   await withStoreAsync(async (store) => {
     const guildId = 'g1';
     const hot = {
@@ -1011,9 +1011,9 @@ test('analyze: an explicitly-passed descriptions map (the warm-up path) is used 
     const messages = [
       slimMessage({ id: 'm1', content: '', attachments: [{ id: 'a1', kind: 'image', name: 'pic.png', durationSec: null }] }),
     ];
-    await updater.analyze(guildId, messages, { descriptions: new Map([['a1', 'from the warm-up']]) });
+    await updater.analyze(guildId, messages, { descriptions: new Map([['a1', 'precomputed caption']]) });
 
-    assert.ok(seenUser.includes(labels.transcript.imageDescribed.replace('{text}', 'from the warm-up')));
+    assert.ok(seenUser.includes(labels.transcript.imageDescribed.replace('{text}', 'precomputed caption')));
     assert.ok(!seenUser.includes('wrong, should not be used'));
   });
 });
@@ -2556,7 +2556,7 @@ test('analyze: a SectionsTooLargeError from buildMemoryRequest (required section
     // A huge memory prompt against a tiny per-request cap: buildMemoryRequest's
     // fitSections cannot fit even the required sections, and throws a
     // SectionsTooLargeError before llm.complete is ever called (F34: this used
-    // to surface as a plain 'llm-error', which the warm-up could not tell apart
+    // to surface as a plain 'llm-error', which a caller could not tell apart
     // from a genuine, retryable failure).
     const hot = {
       config: makeConfig({ llm: { ...makeConfig().llm, maxRequestTokens: 50, safetyMargin: 1 } }),
@@ -2968,11 +2968,11 @@ test('applyMemoryUpdate: without timing, seenAt falls back to relationships.now/
 });
 
 // ---- analyze: dates interests/details by the message, not the wall clock ----
-// The warm-up (src/memory/warmup.js) feeds old history through this exact
-// same analyze() path -- proving this here proves the warm-up gets old dates
-// too, without needing to script a full channel fetch.
+// analyze() accepts a batch of any age (a caller replaying old history feeds
+// it through this exact same path) -- proving this here proves old messages
+// get old dates too, without needing to script a full channel fetch.
 
-test('analyze: dates a new interest/detail by the message\'s own (old) timestamp, not the wall clock "now" (the warm-up path)', async () => {
+test('analyze: dates a new interest/detail by the message\'s own (old) timestamp, not the wall clock "now"', async () => {
   await withStoreAsync(async (store) => {
     const guildId = 'g1';
     const hot = { config: makeConfig({ memory: { ...makeConfig().memory, confirmGapHours: 12 } }), prompts: { memory: 'sys', labels } };
@@ -2984,11 +2984,11 @@ test('analyze: dates a new interest/detail by the message\'s own (old) timestamp
         }),
       }),
     };
-    // The wall clock this run happens to execute at is far in the future of the history being warmed up.
+    // The wall clock this run happens to execute at is far in the future of the history being replayed.
     const wallClockNow = Date.UTC(2026, 8, 21);
     const updater = createMemoryUpdater({ hot, store, llm, calibrator, getSelfName: () => 'Nept', now: () => wallClockNow });
 
-    const oldTs = Date.UTC(2020, 0, 1, 12, 0, 0); // years-old history, as the warm-up would feed it
+    const oldTs = Date.UTC(2020, 0, 1, 12, 0, 0); // years-old history, as a replayed batch would feed it
     const messages = [slimMessage({ id: 'old1', authorId: '1', authorName: 'nick', content: 'i love chess', ts: oldTs })];
 
     const outcome = await updater.analyze(guildId, messages, { countAgainstDailyCap: false });

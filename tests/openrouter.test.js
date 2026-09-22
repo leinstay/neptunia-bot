@@ -311,6 +311,36 @@ test('complete: countAgainstDailyCap: false still enforces the per-request token
   assert.equal(called, false);
 });
 
+test('complete: options.maxRequestTokens overrides the global cap for one call only', async () => {
+  let called = false;
+  const llm = createLlm({
+    apiKey: 'k',
+    getConfig: () => baseConfig({ maxRequestTokens: 50 }),
+    calibrator: fakeCalibrator(),
+    state: fakeState(),
+    fetchImpl: async () => { called = true; return okResponse('x'); },
+  });
+  const result = await llm.complete([{ role: 'user', content: 'a'.repeat(200) }], { maxRequestTokens: 1000 });
+  assert.equal(called, true);
+  assert.equal(result.text, 'x');
+});
+
+test('complete: options.maxRequestTokens can also tighten the cap for one call', async () => {
+  let called = false;
+  const llm = createLlm({
+    apiKey: 'k',
+    getConfig: () => baseConfig({ maxRequestTokens: 1000 }),
+    calibrator: fakeCalibrator(),
+    state: fakeState(),
+    fetchImpl: async () => { called = true; return okResponse('x'); },
+  });
+  await assert.rejects(
+    llm.complete([{ role: 'user', content: 'a'.repeat(2000) }], { maxRequestTokens: 50 }),
+    (err) => err instanceof TokenLimitError,
+  );
+  assert.equal(called, false);
+});
+
 test('complete: passes through choices[0].finish_reason as finishReason', async () => {
   const llm = createLlm({
     apiKey: 'k',

@@ -59,6 +59,10 @@ export function createLlm({ apiKey, getConfig, calibrator, state, fetchImpl = fe
    * describer need more room than a chat reply's default.
    * `options.countAgainstDailyCap` (default true) — see the header comment
    * for the one deliberate exception.
+   * `options.maxRequestTokens` — overrides `cfg.maxRequestTokens` for this one call's pre-flight
+   * cap check only (the global rail stays in force for every caller that omits it). Exists for
+   * the memory bootstrap (src/memory/bootstrap.js), whose requests are fitted under a much larger,
+   * separately-budgeted cap (`bootstrap.maxRequestTokens`) than a live chat/analyzer request.
    * `options.skipCalibration` (default false) — never feeds `usage.prompt_tokens`
    * into the calibrator. For `/nep ping` (F35): a 16-token ping reply is
    * nothing like a real turn's request/response shape, and would only skew
@@ -69,8 +73,9 @@ export function createLlm({ apiKey, getConfig, calibrator, state, fetchImpl = fe
     const tokensPerImage = getConfig().context?.vision?.tokensPerImage;
     const raw = estimateMessages(messages, tokensPerImage);
     const estimated = calibrator.apply(raw);
-    if (estimated > cfg.maxRequestTokens) {
-      throw new TokenLimitError(`request estimated at ${estimated} tokens, cap is ${cfg.maxRequestTokens}`);
+    const requestTokenCap = Number.isFinite(options.maxRequestTokens) ? options.maxRequestTokens : cfg.maxRequestTokens;
+    if (estimated > requestTokenCap) {
+      throw new TokenLimitError(`request estimated at ${estimated} tokens, cap is ${requestTokenCap}`);
     }
     if (options.countAgainstDailyCap !== false) {
       countRequest(cfg.maxRequestsPerDay);
@@ -126,7 +131,7 @@ export function createLlm({ apiKey, getConfig, calibrator, state, fetchImpl = fe
         const usage = json.usage ?? {};
         const finishReason = json.choices?.[0]?.finish_reason ?? undefined;
         if (options.skipCalibration !== true && usage.prompt_tokens) calibrator.observe(raw, usage.prompt_tokens);
-        if (usage.prompt_tokens > cfg.maxRequestTokens) {
+        if (usage.prompt_tokens > requestTokenCap) {
           log.warn('llm: provider counted more prompt tokens than the cap', { usage, estimated });
         }
         // `json.provider` is OpenRouter's own name for whichever upstream provider

@@ -125,13 +125,13 @@ test('buildCommandTree: rule group (add/list/remove)', () => {
   assert.equal(number.min_value, 1);
 });
 
-test('buildCommandTree: memory group (show/forget/affinity/wipe/alias-add/alias-remove)', () => {
+test('buildCommandTree: memory group (show/forget/affinity/wipe/alias-add/alias-remove/refresh)', () => {
   const [command] = buildCommandTree('nep');
   const memory = findOption(command.options, 'memory');
   assert.equal(memory.type, 2);
   assert.deepEqual(
     memory.options.map((o) => o.name),
-    ['show', 'forget', 'alias-add', 'alias-remove', 'affinity', 'wipe'],
+    ['show', 'forget', 'alias-add', 'alias-remove', 'affinity', 'wipe', 'refresh'],
   );
 
   const show = findOption(memory.options, 'show');
@@ -184,6 +184,10 @@ test('buildCommandTree: memory group (show/forget/affinity/wipe/alias-add/alias-
   const confirm = findOption(wipe.options, 'confirm');
   assert.equal(confirm.type, 3); // STRING
   assert.equal(confirm.required, true);
+
+  const refresh = findOption(memory.options, 'refresh');
+  assert.equal(refresh.type, 1); // SUBCOMMAND
+  assert.equal(findOption(refresh.options, 'user').required, true);
 });
 
 test('buildCommandTree: lore group (add/list/show/remove)', () => {
@@ -213,11 +217,11 @@ test('buildCommandTree: lore group (add/list/show/remove)', () => {
   assert.equal(findOption(remove.options, 'id').required, true);
 });
 
-test('buildCommandTree: bootstrap group (people, preview with optional user/channel)', () => {
+test('buildCommandTree: bootstrap group (people, preview, run, status, reset)', () => {
   const [command] = buildCommandTree('nep');
   const bootstrap = findOption(command.options, 'bootstrap');
   assert.equal(bootstrap.type, 2); // SUBCOMMAND_GROUP
-  assert.deepEqual(bootstrap.options.map((o) => o.name), ['people', 'preview']);
+  assert.deepEqual(bootstrap.options.map((o) => o.name), ['people', 'preview', 'run', 'status', 'reset']);
 
   const people = findOption(bootstrap.options, 'people');
   assert.equal(people.type, 1); // SUBCOMMAND
@@ -231,6 +235,22 @@ test('buildCommandTree: bootstrap group (people, preview with optional user/chan
   assert.equal(channel.type, 7); // CHANNEL
   assert.equal(channel.required, false);
   assert.deepEqual(channel.channel_types, [0]); // GUILD_TEXT
+
+  const run = findOption(bootstrap.options, 'run');
+  assert.equal(run.type, 1); // SUBCOMMAND
+  assert.equal(findOption(run.options, 'user').required, false);
+  assert.equal(findOption(run.options, 'channel').required, false);
+  const server = findOption(run.options, 'server');
+  assert.equal(server.type, 5); // BOOLEAN
+  assert.equal(server.required, false);
+
+  const status = findOption(bootstrap.options, 'status');
+  assert.equal(status.type, 1);
+  assert.equal(status.options, undefined);
+
+  const reset = findOption(bootstrap.options, 'reset');
+  assert.equal(reset.type, 1);
+  assert.equal(reset.options, undefined);
 });
 
 // ---------------------------------------------------------------------------

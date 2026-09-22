@@ -260,8 +260,8 @@ export function createStore({ dataDir }) {
     /**
      * Record that a member spoke: names, counters, timestamps. Creates the
      * profile. Messages do not always arrive in chronological order (the
-     * warm-up can feed years of history after the live pipeline already
-     * touched a profile today) -- `firstSeen`/`lastSeen` are therefore
+     * memory bootstrap, src/memory/bootstrap.js, can feed months of history
+     * after the live pipeline already touched a profile today) -- `firstSeen`/`lastSeen` are therefore
      * min/max'd against `at`, never just overwritten, so a late/backdated
      * touch can only widen the known range, never regress `lastSeen` to an
      * older message. `names`' order is meant to read "most recent display
@@ -616,9 +616,10 @@ export function createStore({ dataDir }) {
      * `'analyzer'` (every entry, owner included, when `keepOwnerLore` is
      * false). Keeps, by default, owner lore (`source: 'owner'`) and the
      * media description cache, and always keeps everything in `state.json`
-     * except `state.warmup`, which is cleared so the next warm-up run
-     * starts from the top — token calibration, the daily LLM counter and
-     * the spontaneous schedule survive untouched. Safe when some files
+     * except `state.warmup` (stale progress from the now-retired long
+     * warm-up, see src/memory/state-cleanup.js — never set by anything
+     * current) — token calibration, the daily LLM counter, `state.bootstrap`
+     * and the spontaneous schedule survive untouched. Safe when some files
      * never existed; the store stays fully usable afterwards (a following
      * `touchUser`/`getGuild` works and persists), no restart required.
      * @param {string} guildId
@@ -708,7 +709,7 @@ export function createStore({ dataDir }) {
     /**
      * Force `state.json` to be re-read from disk right now, discarding
      * whatever was cached (F30, `/nep resume`): the owner may have
-     * hand-edited it (e.g. warm-up progress) while paused. Any unflushed
+     * hand-edited it (e.g. bootstrap progress) while paused. Any unflushed
      * in-memory change is lost, the same guarantee every other cached file
      * already has once dropped.
      */

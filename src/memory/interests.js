@@ -21,7 +21,8 @@
 // EXISTING item changes nothing at all, not even the note or the dates.
 // `firstSeen`/`lastSeen` are min/max'd against `opts.seenAt` (the time of the
 // person's message, not the wall clock the analyzer happened to run at), so
-// history fed out of order (the warm-up) still ends up with correct dates.
+// history fed out of order (the memory bootstrap, src/memory/bootstrap.js) still ends up with
+// correct dates.
 
 import { topByRank } from './ranking.js';
 import { clampText } from './clamp.js';

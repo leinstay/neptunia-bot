@@ -1848,6 +1848,25 @@ test('run: pause waits for an in-flight live-analyzer run before dropping caches
   assert.equal(store.dropCachesCalls, 1);
 });
 
+test('run: pause waits for an in-flight bootstrap run before dropping caches', async () => {
+  const rootDir = makeRoot();
+  let resolveIdle;
+  const idlePromise = new Promise((resolve) => {
+    resolveIdle = resolve;
+  });
+  const bootstrap = { waitIdle: () => idlePromise };
+  const { admin, store } = makeAdmin(rootDir, { bootstrap });
+
+  const pausePromise = admin.run('pause', {}, {});
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(store.dropCachesCalls, 0, 'must not drop caches before the in-flight bootstrap run finished');
+
+  resolveIdle();
+  await pausePromise;
+  assert.equal(store.dropCachesCalls, 1);
+});
+
 // F30 review fix: a live-analyzer run() already in flight when /nep pause
 // arrives (an LLM call can take 30-90s) must be allowed to finish and apply
 // normally -- its result must land on disk BEFORE the flush + dropCaches, or
@@ -2110,9 +2129,57 @@ test('run: memory.show/lore.list/lore.show drop caches first while paused, so a 
 // ---------------------------------------------------------------------------
 
 function fakeBootstrap(overrides = {}) {
-  const calls = { peopleReport: 0, previewUser: 0, previewChannel: 0 };
+  const calls = { peopleReport: 0, previewUser: 0, previewChannel: 0, run: 0, runPerson: 0, runChannel: 0, runServer: 0, status: 0, reset: 0, refreshPortrait: 0 };
   return {
     calls,
+    run: async (guildId) => {
+      calls.run += 1;
+      calls.lastRunGuildId = guildId;
+      return overrides.run ?? { ok: true };
+    },
+    runPerson: async (guildId, userId) => {
+      calls.runPerson += 1;
+      calls.lastRunPersonId = userId;
+      return overrides.runPerson ?? { ok: true };
+    },
+    runChannel: async (guildId, channelId) => {
+      calls.runChannel += 1;
+      calls.lastRunChannelId = channelId;
+      return overrides.runChannel ?? { ok: true };
+    },
+    runServer: async () => {
+      calls.runServer += 1;
+      return overrides.runServer ?? { ok: true };
+    },
+    status: async () => {
+      calls.status += 1;
+      return (
+        overrides.status ?? {
+          phase: 'running',
+          doneChannels: 1,
+          channelsEligible: 2,
+          donePeople: 3,
+          peopleEligible: 5,
+          doneServer: false,
+          tokensUsed: 1000,
+          requests: 4,
+          startedAt: '2026-01-01T00:00:00.000Z',
+          finishedAt: null,
+          aborted: null,
+          nextTarget: 'person: Bob (id:2)',
+        }
+      );
+    },
+    reset: () => {
+      calls.reset += 1;
+      return overrides.reset ?? { ok: true };
+    },
+    refreshPortrait: async (guildId, userId, reason, opts) => {
+      calls.refreshPortrait += 1;
+      calls.lastRefreshUserId = userId;
+      calls.lastRefreshOpts = opts;
+      return overrides.refreshPortrait ?? { ok: true, userId };
+    },
     peopleReport: async () => {
       calls.peopleReport += 1;
       return (
@@ -2238,4 +2305,163 @@ test('run: bootstrap.people/preview keep working while paused -- a read-only pre
   await assert.doesNotReject(() => admin.run('bootstrap.preview', { userId: '1' }, { guildId: 'g1' }));
   assert.equal(bootstrap.calls.peopleReport, 1);
   assert.equal(bootstrap.calls.previewUser, 1);
+});
+
+// ---------------------------------------------------------------------------
+// bootstrap.run / bootstrap.status / bootstrap.reset / memory.refresh -- the write path
+// ---------------------------------------------------------------------------
+
+test('run: bootstrap.run/status/reset and memory.refresh report "not available" when the dependency is absent', async () => {
+  const rootDir = makeRoot();
+  const { admin } = makeAdmin(rootDir);
+  assert.equal(await admin.run('bootstrap.run', {}, { guildId: 'g1' }), 'bootstrap is not available');
+  assert.equal(await admin.run('bootstrap.status', {}, { guildId: 'g1' }), 'bootstrap is not available');
+  assert.equal(await admin.run('bootstrap.reset', {}, { guildId: 'g1' }), 'bootstrap is not available');
+  await assert.rejects(() => admin.run('memory.refresh', { userId: '1' }, { guildId: 'g1' }), /bootstrap is not available/);
+});
+
+test('run: bootstrap.run with no target starts/resumes the whole run', async () => {
+  const rootDir = makeRoot();
+  const bootstrap = fakeBootstrap();
+  const { admin } = makeAdmin(rootDir, { bootstrap });
+
+  const body = await admin.run('bootstrap.run', {}, { guildId: 'g1' });
+  assert.equal(bootstrap.calls.run, 1);
+  assert.equal(bootstrap.calls.lastRunGuildId, 'g1');
+  assert.match(body, /finished/);
+});
+
+test('run: bootstrap.run reports a stopped/resumable outcome without throwing', async () => {
+  const rootDir = makeRoot();
+  const bootstrap = fakeBootstrap({ run: { ok: false, message: 'paused' } });
+  const { admin } = makeAdmin(rootDir, { bootstrap });
+
+  const body = await admin.run('bootstrap.run', {}, { guildId: 'g1' });
+  assert.match(body, /stopped/);
+  assert.match(body, /paused/);
+});
+
+test('run: bootstrap.run user:<id> runs exactly that person now', async () => {
+  const rootDir = makeRoot();
+  const bootstrap = fakeBootstrap();
+  const { admin } = makeAdmin(rootDir, { bootstrap });
+
+  const body = await admin.run('bootstrap.run', { userId: '1' }, { guildId: 'g1' });
+  assert.equal(bootstrap.calls.runPerson, 1);
+  assert.equal(bootstrap.calls.lastRunPersonId, '1');
+  assert.equal(bootstrap.calls.run, 0);
+  assert.match(body, /done/);
+});
+
+test('run: bootstrap.run channel:<id> runs exactly that channel now', async () => {
+  const rootDir = makeRoot();
+  const bootstrap = fakeBootstrap();
+  const { admin } = makeAdmin(rootDir, { bootstrap });
+
+  await admin.run('bootstrap.run', { channelId: 'c1' }, { guildId: 'g1' });
+  assert.equal(bootstrap.calls.runChannel, 1);
+  assert.equal(bootstrap.calls.lastRunChannelId, 'c1');
+});
+
+test('run: bootstrap.run server: true runs the server target now', async () => {
+  const rootDir = makeRoot();
+  const bootstrap = fakeBootstrap();
+  const { admin } = makeAdmin(rootDir, { bootstrap });
+
+  await admin.run('bootstrap.run', { server: true }, { guildId: 'g1' });
+  assert.equal(bootstrap.calls.runServer, 1);
+});
+
+test('run: bootstrap.run refuses more than one of user/channel/server', async () => {
+  const rootDir = makeRoot();
+  const bootstrap = fakeBootstrap();
+  const { admin } = makeAdmin(rootDir, { bootstrap });
+
+  await assert.rejects(() => admin.run('bootstrap.run', { userId: '1', channelId: 'c1' }, { guildId: 'g1' }), /at most one/);
+  assert.equal(bootstrap.calls.runPerson, 0);
+  assert.equal(bootstrap.calls.runChannel, 0);
+});
+
+test('run: bootstrap.run is refused while paused', async () => {
+  const rootDir = makeRoot();
+  const bootstrap = fakeBootstrap();
+  const { admin } = makeAdmin(rootDir, { bootstrap });
+
+  await admin.run('pause', {}, {});
+  await assert.rejects(() => admin.run('bootstrap.run', {}, { guildId: 'g1' }), /paused/);
+  assert.equal(bootstrap.calls.run, 0);
+});
+
+test('run: bootstrap.status formats phase, progress, tokens and the next target', async () => {
+  const rootDir = makeRoot();
+  const bootstrap = fakeBootstrap();
+  const { admin } = makeAdmin(rootDir, { bootstrap });
+
+  const body = await admin.run('bootstrap.status', {}, { guildId: 'g1' });
+  assert.match(body, /phase: running/);
+  assert.match(body, /channels: 1\/2/);
+  assert.match(body, /people: 3\/5/);
+  assert.match(body, /tokens used: 1000/);
+  assert.match(body, /next target: person: Bob \(id:2\)/);
+});
+
+test('run: bootstrap.reset clears progress and is not guarded by assertNotPaused (the factory itself refuses while running)', async () => {
+  const rootDir = makeRoot();
+  const bootstrap = fakeBootstrap();
+  const { admin } = makeAdmin(rootDir, { bootstrap });
+
+  const body = await admin.run('bootstrap.reset', {}, { guildId: 'g1' });
+  assert.equal(bootstrap.calls.reset, 1);
+  assert.match(body, /reset/);
+});
+
+test('run: bootstrap.reset relays a refusal message from the factory (e.g. a run in flight)', async () => {
+  const rootDir = makeRoot();
+  const bootstrap = fakeBootstrap({ reset: { ok: false, message: 'a bootstrap run is in flight -- pause or wait for it first' } });
+  const { admin } = makeAdmin(rootDir, { bootstrap });
+
+  const body = await admin.run('bootstrap.reset', {}, { guildId: 'g1' });
+  assert.equal(body, 'a bootstrap run is in flight -- pause or wait for it first');
+});
+
+test('run: memory.refresh forces a portrait refresh, ignoring the hours rail', async () => {
+  const rootDir = makeRoot();
+  const bootstrap = fakeBootstrap();
+  const { admin } = makeAdmin(rootDir, { bootstrap });
+
+  const body = await admin.run('memory.refresh', { userId: '1' }, { guildId: 'g1' });
+  assert.equal(bootstrap.calls.refreshPortrait, 1);
+  assert.equal(bootstrap.calls.lastRefreshUserId, '1');
+  assert.deepEqual(bootstrap.calls.lastRefreshOpts, { force: true });
+  assert.match(body, /refreshed/);
+});
+
+test('run: memory.refresh reports the reason when the refresh is not performed', async () => {
+  const rootDir = makeRoot();
+  const bootstrap = fakeBootstrap({ refreshPortrait: { ok: false, reason: 'daily-cap' } });
+  const { admin } = makeAdmin(rootDir, { bootstrap });
+
+  const body = await admin.run('memory.refresh', { userId: '1' }, { guildId: 'g1' });
+  assert.match(body, /daily-cap/);
+});
+
+test('run: memory.refresh is refused while paused', async () => {
+  const rootDir = makeRoot();
+  const bootstrap = fakeBootstrap();
+  const { admin } = makeAdmin(rootDir, { bootstrap });
+
+  await admin.run('pause', {}, {});
+  await assert.rejects(() => admin.run('memory.refresh', { userId: '1' }, { guildId: 'g1' }), /paused/);
+  assert.equal(bootstrap.calls.refreshPortrait, 0);
+});
+
+test('run: status includes a bootstrap progress line when the dependency is available', async () => {
+  const rootDir = makeRoot();
+  const bootstrap = {
+    summary: () => ({ doneChannels: 2, donePeople: 4, doneServer: true, tokensUsed: 500, requests: 6, aborted: null }),
+  };
+  const { admin } = makeAdmin(rootDir, { bootstrap });
+
+  const body = await admin.run('status', {}, {});
+  assert.match(body, /bootstrap: channels=2 people=4 server=done tokens=500 requests=6 aborted=no/);
 });

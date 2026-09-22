@@ -401,10 +401,10 @@ function clampStringArray(value, maxChars, maxItems, tolerance) {
  * `seenAtByUser` holds, for each non-self author, the timestamp of THAT
  * user's newest message in the batch; `seenAt` is the batch's own newest
  * message overall, the fallback used when a particular user is somehow
- * missing from the map. Shared by the live analyzer and the warm-up, which
- * feeds old history through the exact same `analyze()` path -- so an
- * old-history batch dates its sightings with the old timestamps, not
- * whenever the warm-up happened to process it.
+ * missing from the map. Used by the live analyzer; an older long warm-up
+ * (now retired, see src/memory/bootstrap.js) fed old history through this
+ * exact same `analyze()` path -- so an old-history batch dated its sightings
+ * with the old timestamps, not whenever the warm-up happened to process it.
  * @param {object[]} messages  Slim buffered messages (any order); `ts`/`authorId`/`self` read.
  * @returns {{ seenAtByUser: Map<string, number>, seenAt: number }}
  */
@@ -696,10 +696,11 @@ export function applyMemoryUpdate(store, guildId, update, cfg, knownUserIds, kno
 /**
  * Record that a normalized message happened, for the counters kept on a
  * user's profile and a channel's map entry: `touchUser` (skipped for the
- * persona's own messages) and `touchChannel`. Shared by `observe()` (the live
- * pipeline) and the memory warm-up (src/memory/warmup.js), which walks
- * history instead of the live stream — both must compute the same counters
- * the same way, so this is the one place that does it.
+ * persona's own messages) and `touchChannel`. Used by `observe()`, the live
+ * pipeline; the memory bootstrap (src/memory/bootstrap.js) computes a
+ * profiled member's counters the same way, from the fetched history window
+ * directly, rather than through this shared helper (it never touches a
+ * channel's own counters — those stay the live pipeline's job).
  * @param {object} store
  * @param {string} guildId
  * @param {object} normalized  A normalized message (see src/discord/collect.js);
@@ -727,8 +728,10 @@ export function touchMemory(store, guildId, normalized) {
  * @param {() => number} [deps.now]
  * @param {(guildId: string, userId: string, reason: string) => void} [deps.onPortraitRequest]
  *   Called once per user for every `raw.portrait` cue a successful `analyze()` collected (see
- *   .claude/docs/prompt-contract.md, "Data model") -- the actual portrait refresh (profile.md,
- *   `<draft>`/`<hint>`) is wired by a later task; this module only reports the cue. Omitted -> no-op.
+ *   .claude/docs/prompt-contract.md, "Data model") -- src/index.js wires this to
+ *   src/memory/bootstrap.js#createBootstrap's `refreshPortrait`, which does the actual rewrite
+ *   (`profile.md`, `<draft>`/`<hint>`); this module only reports the cue, never awaits the result.
+ *   Omitted -> no-op.
  */
 /** `nameOf` for buildMemoryRequest's token resolution: a member's current
  * stored name, or null when the guild has no profile for that id -- see
@@ -812,10 +815,12 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
   /**
    * The one analyzer code path: build the memory-update request from
    * `messages`, send it to the LLM, parse the reply and apply it to the
-   * store. Used both by `run()` (a batch shifted off the live buffer) and by
-   * the memory warm-up (history batches, see src/memory/warmup.js). Never
-   * touches the live buffer and never throws — a failure is reported in the
-   * returned `error`, not raised.
+   * store. Used by `run()` (a batch shifted off the live buffer); the memory
+   * bootstrap (src/memory/bootstrap.js) does not go through this path at all
+   * — it calls `profile.md`/`channel.md`/`server.md` and applyMemoryUpdate
+   * directly (an older long warm-up used to feed old history through this
+   * exact `analyze()` path; it is retired). Never touches the live buffer and
+   * never throws — a failure is reported in the returned `error`, not raised.
    *
    * `usage`/`estimated` reflect a completion whenever one was actually
    * received from the provider — including when `ok: false` because parsing
@@ -827,8 +832,8 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
    * @param {string} guildId
    * @param {object[]} messages  Slim messages (oldest first) to summarize; NOT read from or removed off any buffer.
    * @param {object} [opts]
-   * @param {boolean} [opts.countAgainstDailyCap]  Forwarded to llm.complete(); the warm-up passes `false`
-   *   because it has its own rail (a token budget), not the daily request cap.
+   * @param {boolean} [opts.countAgainstDailyCap]  Forwarded to llm.complete(); a caller with its own
+   *   token budget (not the daily request cap) passes `false`.
    * @param {Map<string, string>} [opts.descriptions]  Pre-computed describer captions (see
    *   src/memory/warmup.js, which budgets and charges these itself). When omitted, cached
    *   captions are looked up by item id instead -- see below.
@@ -906,14 +911,14 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
     } catch (err) {
       // Nothing was billed: the request never left this process, or the
       // provider never returned a completion. `status` (the HTTP status when
-      // the error carries one, e.g. 429) lets a caller -- the warm-up -- tell
-      // a rate limit apart from a genuine failure without parsing `detail`.
+      // the error carries one, e.g. 429) lets a caller tell a rate limit apart
+      // from a genuine failure without parsing `detail`.
       // A `SectionsTooLargeError` (buildMemoryRequest's fitSections could not
       // even fit the required sections -- profiles alone over the cap, no
       // room left to trim) is the same kind of failure as a `TokenLimitError`
       // from the provider call itself: the request does not fit the per-request
-      // token cap, full stop. Both surface as 'token-limit' so a caller (the
-      // warm-up) can split the batch instead of retrying it unchanged.
+      // token cap, full stop. Both surface as 'token-limit' so a caller can
+      // split the batch instead of retrying it unchanged.
       const reason = err instanceof TokenLimitError || err instanceof SectionsTooLargeError ? 'token-limit' : 'llm-error';
       return { ok: false, usage: null, estimated: 0, result: null, error: err, reason, detail: detailOf(err), status: err?.statusCode };
     }
@@ -977,11 +982,10 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
    * `analyze` would send for `messages`, built through the same
    * `buildMemoryRequest` path — so it carries the memory prompt, the
    * character card and the stored profiles/channels JSON, not just the raw
-   * message contents. Used by the warm-up (src/memory/warmup.js) to judge
-   * whether a batch is affordable before spending a real request on it.
-   * Never throws: if the request cannot even be built (e.g. broken prompts),
-   * falls back to a cheap content-only heuristic so that check alone cannot
-   * crash a warm-up run.
+   * message contents. Used to judge whether a batch is affordable before
+   * spending a real request on it. Never throws: if the request cannot even
+   * be built (e.g. broken prompts), falls back to a cheap content-only
+   * heuristic so that check alone cannot crash a caller.
    * @param {string} guildId
    * @param {object[]} messages  Slim messages (oldest first), same shape `analyze` expects.
    * @returns {number}
