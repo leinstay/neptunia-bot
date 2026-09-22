@@ -1,13 +1,12 @@
 // Pure logic for a member's remembered interests: atomic `{ topic, note,
 // weight, firstSeen, lastSeen }` items, incrementally updated by the analyzer
 // (add/update/seen/remove) instead of a prose blob rewritten batch after
-// batch -- see .claude/docs/prompt-contract.md ("Interests are atomic items",
+// batch -- see docs/prompt-contract.md ("Interests are atomic items",
 // "Confirmation (the "(?)" mechanism)" and "Dates come from the messages", in
 // "The analyzer") and src/memory/update.js#applyMemoryUpdate, which routes
 // the model's `users.<id>.interests` through this module via
-// src/memory/store.js#applyProfileOps. `migrateInterests` upgrades an old
-// profile whose `interests` field is still the legacy comma-separated prose
-// string.
+// src/memory/store.js#applyProfileOps. `normalizeInterests` validates
+// whatever a profile's `interests` field currently holds on disk.
 //
 // Confirmation: `weight` counts the separate OCCASIONS a topic was observed,
 // not how many ops mentioned it. A brand new item starts at weight 1, or 0
@@ -47,7 +46,7 @@ export function normalizeTopic(topic) {
 
 /**
  * The storage cap actually enforced: `max(storedMax, shownMax)` -- see
- * .claude/docs/prompt-contract.md, "More is stored than shown, and rank
+ * docs/prompt-contract.md, "More is stored than shown, and rank
  * decays with age". A deployment can show fewer than it stores, but never
  * store fewer than it shows, even when misconfigured. Neither value given ->
  * no cap (`Infinity`), same as before this feature existed. Shared by
@@ -107,7 +106,7 @@ function isFarEnough(seenAt, priorLastSeenIso, gapMs) {
 
 /**
  * Whether a stored item (interest or detail; anything with a `weight`) counts
- * as CONFIRMED for the chat model -- see .claude/docs/prompt-contract.md,
+ * as CONFIRMED for the chat model -- see docs/prompt-contract.md,
  * "Confirmation". Below this, the chat model sees it with `labels.profile.unsureMark`.
  * @param {{ weight?: number }} item
  * @param {number} [confirmAfter]
@@ -118,7 +117,7 @@ export function isConfirmed(item, confirmAfter = 2) {
 
 /**
  * Whether a stored item's `lastSeen` is old enough to render with
- * `labels.profile.staleMark` -- see .claude/docs/prompt-contract.md, "Dates
+ * `labels.profile.staleMark` -- see docs/prompt-contract.md, "Dates
  * come from the messages". An unknown `lastSeen`, or a `staleDays` that is
  * not a positive number (feature off / not configured), is never stale.
  * @param {{ lastSeen?: string|null }} item
@@ -161,8 +160,8 @@ export function isStale(item, nowMs, staleDays) {
  *   outright.
  * - Once over `opts.cap`, the lowest-RANKED items are evicted first (see
  *   src/memory/ranking.js#rank, driven by `halfLifeDays`) -- this runs on
- *   every call, even one with no ops, so an over-stuffed legacy profile
- *   self-heals on its first update.
+ *   every call, even one with no ops, so a profile left over-stuffed by a
+ *   lowered cap self-heals on its first update.
  *
  * @param {object[]|undefined} existing
  * @param {{ add?: unknown, update?: unknown, seen?: unknown, remove?: unknown }} ops  Untrusted, model-extracted.
@@ -247,7 +246,7 @@ export function applyRankedOps(
  * Strip ONE trailing parenthetical qualifier off a topic: `Name (qualifier)`
  * -> `{ topic: 'Name', qualifier: 'qualifier' }` (both trimmed) -- fixes the
  * near-duplicate topics the analyzer tends to write (`anime` / `anime
- * (bleak/hopeless)`), see the F31 addendum. Left alone (`qualifier: ''`,
+ * (bleak/hopeless)`). Left alone (`qualifier: ''`,
  * `topic` returned as trimmed but otherwise untouched) when: the text does
  * not end in `)`; the parenthesis is unbalanced (no matching `(`); the topic
  * would be empty once stripped (the text is ONLY a parenthetical); or the
@@ -351,7 +350,7 @@ function pickSurvivingNote(a, b) {
 }
 
 /** Merge two stored interest items that turned out to be the same topic
- * (a legacy parenthetical variant and its plain form): the heavier weight,
+ * (a topic still carrying a trailing qualifier and its plain form): the heavier weight,
  * the earliest firstSeen, the latest lastSeen, and the note of the heavier
  * item (ties: the newer lastSeen), falling back to the other's note if that
  * one is empty -- see `pickSurvivingNote`. */
@@ -366,12 +365,12 @@ function mergeInterestItems(primary, other) {
 }
 
 /**
- * Resolve legacy topics that still carry a trailing parenthetical baked into
- * their stored `topic` (from before this feature): a stored item whose plain
- * form is targeted by an incoming op (see `targetTopics`) is rewritten to the
- * plain form; any items that now -- or already did -- share the same plain
- * form (case-insensitively) are merged into one via `mergeInterestItems`. See
- * the F31 addendum ("Interest topics with a qualifier in parentheses").
+ * Fold a stored topic that still carries a trailing `(qualifier)` baked into
+ * its `topic` (data edited by hand, or written by a caller that did not
+ * strip one) into its plain form: a stored item whose plain form is targeted
+ * by an incoming op (see `targetTopics`) is rewritten to the plain form; any
+ * items that now -- or already did -- share the same plain form
+ * (case-insensitively) are merged into one via `mergeInterestItems`.
  * @param {object[]|undefined} existing
  * @param {object} strippedOps  Already run through `stripParentheticalTopics`.
  * @returns {object[]|undefined}
@@ -443,10 +442,10 @@ function fillQualifierNotes(strippedOps, resolvedExisting) {
  * `applyRankedOps` above for the full sighting/eviction rules; this is a
  * thin wrapper fixing `identityField: 'topic'`, `noteField: 'note'` and the
  * storage cap (`max(maxInterestsStored, maxInterests)`, see
- * .claude/docs/prompt-contract.md, "More is stored than shown, and rank
+ * docs/prompt-contract.md, "More is stored than shown, and rank
  * decays with age"). Before that, it strips a trailing `(qualifier)` off
  * every incoming topic (see `stripTrailingParenthetical`), resolves any
- * stored legacy topic that still carries one (see `resolveParentheticalVariants`),
+ * stored topic that still carries one (see `resolveParentheticalVariants`),
  * then decides whether the stripped qualifier may fill an item's note (see
  * `fillQualifierNotes`).
  * @param {object[]|undefined} existing  Stored interests.
@@ -476,75 +475,26 @@ export function applyInterestOps(
   });
 }
 
-/** One legacy comma-separated segment split into `{ topic, note }`. `note` is
- * whatever sits between the segment's FIRST `(` and its LAST `)` (so a
- * parenthesis nested inside the note is kept literally); no parenthesis at
- * all means the whole segment is the topic and the note is empty.
- */
-function parseLegacySegment(raw) {
-  const trimmed = String(raw ?? '').trim();
-  if (!trimmed) return null;
-  const open = trimmed.indexOf('(');
-  const close = trimmed.lastIndexOf(')');
-  if (open === -1 || close === -1 || close < open) {
-    return trimmed ? { topic: trimmed, note: '' } : null;
-  }
-  const topic = trimmed.slice(0, open).trim();
-  const note = trimmed.slice(open + 1, close).trim();
-  return topic ? { topic, note } : null;
-}
-
-/** Split on commas that are not nested inside parentheses (so a note's own commas never break the item). */
-function splitTopLevelCommas(text) {
-  const parts = [];
-  let depth = 0;
-  let current = '';
-  for (const ch of text) {
-    if (ch === '(') depth += 1;
-    else if (ch === ')') depth = Math.max(0, depth - 1);
-    if (ch === ',' && depth === 0) {
-      parts.push(current);
-      current = '';
-    } else {
-      current += ch;
-    }
-  }
-  parts.push(current);
-  return parts;
-}
-
 /**
- * Upgrade whatever a profile's `interests` field currently holds to the
- * atomic-item array shape: a legacy STRING (the old prose format, one
- * comma-separated dump -- possibly a "Game A (a remark that was about game
- * B), Game B, ..." glued dump of many items) is split into `{ topic, note,
- * weight: 1, firstSeen: null, lastSeen: null }` items; an ARRAY is validated
- * and passed through (unknown/garbage entries dropped); anything else -> `[]`.
+ * Validate whatever a profile's `interests` field currently holds on disk:
+ * an ARRAY is checked item by item (unknown/garbage entries dropped, missing
+ * fields defaulted -- untrusted JSON, possibly hand-edited while paused);
+ * anything that is not an array becomes `[]`.
  * @param {unknown} value
  * @returns {object[]}
  */
-export function migrateInterests(value) {
-  if (Array.isArray(value)) {
-    const out = [];
-    for (const raw of value) {
-      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) continue;
-      const topic = typeof raw.topic === 'string' ? raw.topic.trim() : '';
-      if (!topic) continue;
-      const note = typeof raw.note === 'string' ? raw.note.trim() : '';
-      const weight = Number.isInteger(raw.weight) ? raw.weight : 1;
-      const firstSeen = typeof raw.firstSeen === 'string' ? raw.firstSeen : null;
-      const lastSeen = typeof raw.lastSeen === 'string' ? raw.lastSeen : null;
-      out.push({ topic, note, weight, firstSeen, lastSeen });
-    }
-    return out;
+export function normalizeInterests(value) {
+  if (!Array.isArray(value)) return [];
+  const out = [];
+  for (const raw of value) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) continue;
+    const topic = typeof raw.topic === 'string' ? raw.topic.trim() : '';
+    if (!topic) continue;
+    const note = typeof raw.note === 'string' ? raw.note.trim() : '';
+    const weight = Number.isInteger(raw.weight) ? raw.weight : 1;
+    const firstSeen = typeof raw.firstSeen === 'string' ? raw.firstSeen : null;
+    const lastSeen = typeof raw.lastSeen === 'string' ? raw.lastSeen : null;
+    out.push({ topic, note, weight, firstSeen, lastSeen });
   }
-  if (typeof value === 'string') {
-    const trimmed = value.trim();
-    if (!trimmed) return [];
-    return splitTopLevelCommas(trimmed)
-      .map(parseLegacySegment)
-      .filter(Boolean)
-      .map(({ topic, note }) => ({ topic, note, weight: 1, firstSeen: null, lastSeen: null }));
-  }
-  return [];
+  return out;
 }

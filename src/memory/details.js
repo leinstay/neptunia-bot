@@ -2,13 +2,13 @@
 // item `{ id, text, weight, firstSeen, lastSeen }`, incrementally updated by
 // the analyzer (add/seen/remove) with the same confirmation/date mechanics as
 // src/memory/interests.js#applyInterestOps -- see
-// .claude/docs/prompt-contract.md, "Details are atomic items too" and
+// docs/prompt-contract.md, "Details are atomic items too" and
 // "Confirmation (the "(?)" mechanism), same for interests and details". A
 // detail's `id` is a per-profile incrementing integer (`opts.nextId` in,
 // `nextId` out -- the caller, src/memory/store.js#applyProfileOps, persists
 // it on the profile) that is never reused, even for a removed item.
-// `migrateDetails` upgrades a legacy profile whose `details` field is still a
-// bare array of strings.
+// `normalizeDetails` validates whatever a profile's `details` field currently
+// holds on disk.
 
 import { normalizeTopic } from './interests.js';
 import { topByRank } from './ranking.js';
@@ -41,7 +41,7 @@ function isFarEnough(seenAt, priorLastSeenIso, gapMs) {
 
 /**
  * The storage cap actually enforced: `max(maxDetailsStored, maxDetails)` --
- * see .claude/docs/prompt-contract.md, "More is stored than shown, and rank
+ * see docs/prompt-contract.md, "More is stored than shown, and rank
  * decays with age". A deployment can show fewer than it stores, but never
  * store fewer than it shows, even when misconfigured. Neither value given ->
  * no cap (`Infinity`), same as before this feature existed.
@@ -89,7 +89,7 @@ function normalizedNextId(startId) {
  * - `text` is clamped to `fieldChars`; an item whose text is empty after
  *   trimming is rejected outright.
  * - Once over the storage cap (`max(maxDetailsStored, maxDetails)` -- see
- *   .claude/docs/prompt-contract.md, "More is stored than shown, and rank
+ *   docs/prompt-contract.md, "More is stored than shown, and rank
  *   decays with age"), the lowest-RANKED items are evicted first (see
  *   src/memory/ranking.js#rank, driven by `halfLifeDays`).
  *
@@ -178,29 +178,21 @@ export function applyDetailOps(
 }
 
 /**
- * Upgrade whatever a profile's `details` field currently holds to the atomic
- * item array shape: a legacy array of bare strings (`profile.details` before
- * this feature) becomes `{ id, text, weight: 1, firstSeen: null, lastSeen:
- * null }` items with fresh sequential ids starting at `startId`; an array
- * already in the item shape is validated and passed through (a valid integer
- * `id` is kept, otherwise one is assigned fresh so the sequence never
- * collides); anything else -> `{ items: [], nextId: startId }`. Never throws
- * on garbage.
+ * Validate whatever a profile's `details` field currently holds on disk: an
+ * ARRAY is checked item by item (untrusted JSON, possibly hand-edited while
+ * paused) -- a valid integer `id` is kept, otherwise one is assigned fresh
+ * off `startId` so the sequence never collides; anything else ->
+ * `{ items: [], nextId: startId }`. Never throws on garbage.
  * @param {unknown} value
  * @param {number} [startId]
  * @returns {{ items: object[], nextId: number }}
  */
-export function migrateDetails(value, startId = 1) {
+export function normalizeDetails(value, startId = 1) {
   let id = normalizedNextId(startId);
   const items = [];
   if (Array.isArray(value)) {
     for (const raw of value) {
-      if (typeof raw === 'string') {
-        const text = raw.trim();
-        if (!text) continue;
-        items.push({ id, text, weight: 1, firstSeen: null, lastSeen: null });
-        id += 1;
-      } else if (raw && typeof raw === 'object' && !Array.isArray(raw) && typeof raw.text === 'string') {
+      if (raw && typeof raw === 'object' && !Array.isArray(raw) && typeof raw.text === 'string') {
         const text = raw.text.trim();
         if (!text) continue;
         const weight = Number.isInteger(raw.weight) ? raw.weight : 1;

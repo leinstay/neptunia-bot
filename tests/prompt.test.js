@@ -120,7 +120,7 @@ test('buildRequest: {{trigger}} resolves through labels.triggers, not config.men
   assert.ok(user.includes(labels.triggers.name));
 });
 
-// F49: a follow-up turn is its own trigger kind.
+// A follow-up turn is its own trigger kind.
 test('buildRequest: triggerKind "followUp" fills {{trigger}} from labels.triggers.followUp', () => {
   const trigger = makeMessage(1, NOW - MIN, { authorName: 'Alice' });
   const request = buildRequest(baseInput({ history: [trigger], trigger, triggerKind: 'followUp' }));
@@ -215,7 +215,7 @@ test('buildRequest: under a tiny token budget, neighbours and other profiles are
       history,
       neighbors,
       otherProfiles,
-      // 340 was tight enough pre-F17; the <senses> block grew a few lines
+      // 340 was tight enough before the <senses> block grew a few lines
       // (stickers/lottie, part of the always-kept "fixed" section) so the
       // budget needs a little more headroom to still leave room for chat.
       config: fakeConfig({ llm: { maxRequestTokens: 400, safetyMargin: 1 } }),
@@ -322,7 +322,7 @@ test('buildRequest: the media proxy resizes a Discord CDN picture to context.vis
   assert.equal(url.searchParams.get('format'), 'webp');
 });
 
-// --- vision: the trigger's own sticker (F17) --------------------------------
+// --- vision: the trigger's own sticker --------------------------------------
 
 test('buildRequest: the trigger\'s picture-format sticker is attached, rendered as the sticker tag + frameAttached', () => {
   const trigger = makeMessage(1, NOW - MIN, {
@@ -503,7 +503,7 @@ test('buildRequest: under a tiny server cap, the map is trimmed but <chat> still
     fakeChannel('c2', { name: 'random', purpose: 'y'.repeat(200), lastMessageAt: NOW - MIN }),
   ];
   const neighbors = [{ channelId: 'c2', channelName: 'random', messages: [makeMessage(20, NOW - MIN)] }];
-  // 340 was tight enough pre-F17; the <senses> block grew a few lines
+  // 340 was tight enough before the <senses> block grew a few lines
   // (stickers/lottie, part of the always-kept "fixed" section) so the
   // budget needs a little more headroom to still leave room for chat.
   const config = fakeConfig({ llm: { maxRequestTokens: 400, safetyMargin: 1 } });
@@ -784,7 +784,7 @@ test('renderProfile: with interestHalfLifeDays, a much fresher interest outranks
   const profile = { id: 'p1', names: ['Carl'], interests: [stale, fresh] };
   // A 90-day half-life makes the ~199-day recency gap (about 2.2 half-lives, +2.2
   // rank) outweigh the weight gap (log2(5.5) - log2(1.5) =~ 1.88 rank) between
-  // the two -- see .claude/docs/prompt-contract.md, "More is stored than shown,
+  // the two -- see docs/prompt-contract.md, "More is stored than shown,
   // and rank decays with age". This REPLACES the old "fresh first, then weight
   // desc" sort with pure rank order.
   const text = renderProfile(profile, labels, { staleDays: 90, interestHalfLifeDays: 90, now });
@@ -991,7 +991,7 @@ test('buildRequest: <senses> is omitted entirely when labels has no senses secti
   assert.ok(!user.includes('<senses>'));
 });
 
-// --- <senses>: stickers/Lottie (F17) ---------------------------------------
+// --- <senses>: stickers/Lottie -----------------------------------------------
 
 test('buildRequest: vision on, mediaDescriptions off -> stickerSee + stickerBlind + lottie', () => {
   const config = fakeConfig({ features: { vision: true, mediaDescriptions: false } });
@@ -1109,7 +1109,7 @@ test('buildRequest: under a tiny lore cap, only the entries that fit survive', (
   assert.equal(request.stats.lore.kept, 0);
 });
 
-// --- renderProfile: aliases (F29) ----------------------------------------------
+// --- renderProfile: aliases -----------------------------------------------------
 
 function aliasFixture(overrides = {}) {
   return { name: 'Ari', weight: 2, firstSeen: 'a', lastSeen: 'a', ...overrides };
@@ -1145,7 +1145,7 @@ test('renderProfile: no aliases line when the profile has none, or when labels.p
   assert.ok(!renderProfile(withAliases, brokenLabels).includes('Called:'));
 });
 
-// --- renderProfile: <@id> tokens resolved for the chat model (F29) -------------
+// --- renderProfile: <@id> tokens resolved for the chat model -------------------
 
 test('renderProfile: character/style/relationship resolve <@id> tokens via nameOf', () => {
   const profile = {
@@ -1202,7 +1202,7 @@ test('renderProfile: the affinity reason resolves <@id> tokens via nameOf', () =
   assert.ok(text.includes('stood up for Dana'));
 });
 
-// --- buildRequest: <@id> tokens resolved for the chat model, wired through (F29) --
+// --- buildRequest: <@id> tokens resolved for the chat model, wired through ------
 
 test('buildRequest: about_chat/self_facts/lore/server resolve <@id> tokens via input.nameOf', () => {
   const history = [makeMessage(1, NOW - MIN, { content: 'the incident again' })];
@@ -1227,7 +1227,7 @@ test('buildRequest: about_chat/self_facts/lore/server resolve <@id> tokens via i
   assert.ok(user.includes('Dana caused it'));
 });
 
-// --- buildRequest: silent members pulled into <people> by name/alias (F29) -----
+// --- buildRequest: silent members pulled into <people> by name/alias -----------
 
 test('buildRequest: a silent member whose current name occurs in the transcript is pulled into <people>', () => {
   const history = [makeMessage(1, NOW - MIN, { content: 'Dana would love this joke' })];
@@ -1273,7 +1273,7 @@ test('buildRequest: a candidate already covered as the interlocutor or an active
   assert.equal((user.match(/## Dana/g) ?? []).length, 1, 'Dana appears once, as the interlocutor, not twice');
 });
 
-test('buildRequest: a silent member named in the trigger/recent messages (asked-about) is rendered BEFORE a plain active participant (F47)', () => {
+test('buildRequest: a silent member named in the trigger/recent messages (asked-about) is rendered BEFORE a plain active participant', () => {
   const history = [makeMessage(1, NOW - MIN, { authorName: 'Carl', content: 'Dana would find this funny' })];
   const otherProfiles = [{ id: 'p2', names: ['Carl'], character: 'talkative' }];
   const candidateProfiles = [{ id: 'p9', names: ['Dana'], character: 'sarcastic' }];
@@ -1293,7 +1293,7 @@ test('buildRequest: no candidateProfiles at all pulls nobody in and never throws
   assert.ok(!request.messages[1].content.includes('## Dana'));
 });
 
-// --- renderProfile: compact (F47) -----------------------------------------------
+// --- renderProfile: compact -------------------------------------------------------
 
 test('renderProfile: compact renders current name, aliases, character, attitude and up to 5 bare-topic interests -- nothing else', () => {
   const profile = {
@@ -1369,7 +1369,7 @@ test('renderProfile: compact interests cap at 5 regardless of maxInterests', () 
   assert.ok(!text.includes('F'));
 });
 
-// --- buildRequest: <people> priority (a)/(b)/(c) (F47) --------------------------
+// --- buildRequest: <people> priority (a)/(b)/(c) --------------------------------
 
 test('buildRequest: a name of 4+ characters also matches as the START of a longer word in the transcript', () => {
   const history = [makeMessage(1, NOW - MIN, { content: 'ask Vertexia about it' })];

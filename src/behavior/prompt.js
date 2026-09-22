@@ -31,7 +31,7 @@ function block(tag, body) {
 
 /** `fromTokens(text, nameOf, 'chat')`, tolerating a non-string `text` and a
  * missing `nameOf` (an unresolved `<@id>` token is then left exactly as
- * stored) -- see .claude/docs/prompt-contract.md, "Members are referred to
+ * stored) -- see docs/prompt-contract.md, "Members are referred to
  * by id, never by nickname". */
 function resolveChatText(text, nameOf) {
   if (typeof text !== 'string') return text;
@@ -43,7 +43,7 @@ function resolveChatText(text, nameOf) {
  * heaviest weight first then newest (see sortEpisodesForDisplay). `[]` when
  * there is nothing to show, or when `labels.profile` lacks any of
  * `episodes`/`episode`/`episodeNoQuote` — an older labels.json simply never
- * renders this, see .claude/docs/prompt-contract.md.
+ * renders this, see docs/prompt-contract.md.
  */
 function episodeLines(episodes, labels, nameOf) {
   const p = labels.profile;
@@ -84,7 +84,7 @@ function fitEpisodeLines(lines, remaining, cost) {
 
 /**
  * Append `labels.profile.unsureMark`/`staleMark` to `text` per
- * .claude/docs/prompt-contract.md, "Confirmation"/"Dates come from the
+ * docs/prompt-contract.md, "Confirmation"/"Dates come from the
  * messages": the unsure mark when `item` is below `marks.confirmAfter`, then
  * the stale mark when `item` is older than `marks.staleDays` (skipped
  * entirely for `marks.stale === false`, since details never go stale). Both
@@ -132,7 +132,7 @@ function renderInterestItem(item, p, marks) {
  * The `labels.profile.interests` line's `{text}`: the top `maxInterests`
  * stored interests (topic/note atomic items, see src/memory/interests.js) by
  * RANK (src/memory/ranking.js#topByRank, decayed with `marks.interestHalfLifeDays`),
- * in rank order -- see .claude/docs/prompt-contract.md, "More is stored than
+ * in rank order -- see docs/prompt-contract.md, "More is stored than
  * shown, and rank decays with age". `''` when there is nothing to show.
  * `maxInterests` not an integer -> every stored interest renders (a stored
  * profile can hold more than a lowered live cap until the next analyzer
@@ -152,27 +152,21 @@ function interestsText(interests, labels, maxInterests, marks) {
  * src/memory/details.js) by RANK (decayed with `marks.detailHalfLifeDays`),
  * in rank order, each with the unsure mark appended when unconfirmed -- never
  * the stale mark, details do not go stale (see
- * .claude/docs/prompt-contract.md, "Dates come from the messages"). `''` when
+ * docs/prompt-contract.md, "Dates come from the messages"). `''` when
  * there is nothing to show. `maxDetails` not an integer -> every stored
- * detail renders. A legacy bare-string item (should not occur past
- * store.getUser's migration, kept defensive) renders as-is, never marked or
- * ranked.
+ * detail renders.
  */
 function detailsText(details, labels, maxDetails, marks) {
   if (!Array.isArray(details) || details.length === 0) return '';
   const p = labels.profile;
   const ordered = topByRank(details, maxDetails, marks?.detailHalfLifeDays);
   return ordered
-    .map((item) =>
-      item && typeof item === 'object'
-        ? markConfirmation(resolveChatText(item.text, marks?.nameOf) ?? '', item, p, { ...marks, stale: false })
-        : String(item ?? ''),
-    )
+    .map((item) => markConfirmation(resolveChatText(item.text, marks?.nameOf) ?? '', item, p, { ...marks, stale: false }))
     .join('; ');
 }
 
 /**
- * The compact `<people>` interests line's `{text}` (F47): just the top 5
+ * The compact `<people>` interests line's `{text}`: just the top 5
  * stored interests BY RANK (see `interestsText` above), bare topics only --
  * no note, no unsure/stale marks. `''` when there is nothing to show. The 5
  * cap is fixed in code, not `maxInterests` -- a compact profile is meant to
@@ -189,7 +183,7 @@ function compactInterestsText(interests, labels, halfLifeDays) {
 /**
  * The `labels.profile.aliases` line's `{text}`: the top `maxAliases` stored
  * alias names (see src/memory/aliases.js) by RANK (decayed with
- * `aliasHalfLifeDays`), comma-separated -- see .claude/docs/prompt-contract.md,
+ * `aliasHalfLifeDays`), comma-separated -- see docs/prompt-contract.md,
  * "Aliases". `''` when there is nothing to show, or when
  * `labels.profile.aliases` is missing (an older labels.json never renders
  * this line). Alias names are never token-resolved -- they are literal
@@ -213,7 +207,7 @@ function aliasesText(aliases, labels, maxAliases, aliasHalfLifeDays) {
  * For the interlocutor (`interlocutor: true`), right after the attitude line
  * (or right after the heading, if there is none), `opts.episodes.enabled`
  * additionally renders the caller's remembered episodes -- see
- * .claude/docs/prompt-contract.md, "<people>". `opts.episodes.cap`/`.cost`
+ * docs/prompt-contract.md, "<people>". `opts.episodes.cap`/`.cost`
  * (when given) trim the episode list, heaviest-first, to fit that token
  * budget on top of the rest of the profile; without them every episode
  * renders. `opts.maxInterests`/`opts.maxDetails` cap how many interests/details
@@ -227,7 +221,7 @@ function aliasesText(aliases, labels, maxAliases, aliasHalfLifeDays) {
  * marks on interests and details -- see `markConfirmation`; omitted, nothing
  * is ever marked.
  *
- * `opts.compact` (F47) renders the SHORT form used for `<people>` priority
+ * `opts.compact` renders the SHORT form used for `<people>` priority
  * (c), the other recent participants: current name, aliases, `character`
  * (as stored), the attitude line, and the top 5 interests (bare topics, no
  * note) -- no former names, no `style`, no `details`, no `relationship`, no
@@ -341,8 +335,8 @@ function currentChannelFallback(currentChannelId, history) {
  * `<other_channels>` this turn, `neighborChannelIds` (matched by id, never by
  * name -- a rename or a same-named channel elsewhere must never cross-wire
  * two entries), each in full too. Every other stored channel note is left
- * out on purpose (F46): on a large server most of them are irrelevant to this
- * reply and used to eat most of the block's budget for nothing. A neighbour
+ * out on purpose: on a large server most of them are irrelevant to this
+ * reply and would eat most of the block's budget for nothing. A neighbour
  * id with no stored note is skipped, not synthesized -- unlike the current
  * channel, a neighbour the persona is not replying in does not need a
  * where-am-I fallback.
@@ -446,7 +440,7 @@ function requireLabels(prompts) {
 
 /**
  * Render the `<senses>` block from `labels.senses`: which lines are true
- * under the live config (see .claude/docs/prompt-contract.md, "`<senses>`").
+ * under the live config (see docs/prompt-contract.md, "`<senses>`").
  * Returns '' when `labels.senses` is missing entirely, so an older
  * deployment's labels.json never breaks — the block is simply omitted.
  */
@@ -488,7 +482,7 @@ function isWordChar(ch) {
 /**
  * Whether `nameLower` (already lower-cased) is "named" inside `haystackLower`
  * for the purpose of pulling someone into `<people>` -- see
- * .claude/docs/prompt-contract.md, "Aliases". A name of 4+ characters also
+ * docs/prompt-contract.md, "Aliases". A name of 4+ characters also
  * matches at the START of a longer word (a declined/compound form of a short
  * nickname, e.g. `vert` inside `vertexia`, still counts); a name of exactly
  * 3 characters (the caller's minimum, see `isAskedAbout` below) must match a
@@ -518,7 +512,7 @@ function profileNames(profile, maxAliases, aliasHalfLifeDays) {
 
 /**
  * The window that decides who the persona is being asked about (`<people>`
- * priority (b), F47): the trigger message plus the last `ASKED_ABOUT_SCAN_MESSAGES`
+ * priority (b)): the trigger message plus the last `ASKED_ABOUT_SCAN_MESSAGES`
  * messages of `history` (trigger is usually already the newest of those, but
  * is added explicitly in case it is not). Real mention ids
  * (`normalizeMessage`'s `mentionedUserIds`, see src/discord/collect.js) are the
@@ -552,8 +546,8 @@ function isAskedAbout(profile, mentionedIds, scanTextLower, maxAliases, aliasHal
 /**
  * Split the people who may appear in `<people>` into `askedAbout` (priority
  * (b): rendered FULL, ahead of everyone else) and `participants` (priority
- * (c): the other active participants, rendered COMPACT) -- see F47 /
- * .claude/docs/prompt-contract.md, "<people>"/"Aliases".
+ * (c): the other active participants, rendered COMPACT) -- see
+ * docs/prompt-contract.md, "<people>"/"Aliases".
  *
  * `otherProfiles` (the active participants, most relevant first) are checked
  * against the asked-about window first, in order; a match is promoted into
@@ -630,7 +624,7 @@ function splitPeople(otherProfiles, candidateProfiles, history, trigger, exclude
  *   above); [] or omitted -> nobody is pulled in.
  * @param {(id: string) => (string|null)} [input.nameOf]  Resolves a member id to their
  *   current stored name, for turning every `<@id>` token this request renders into
- *   display text -- see .claude/docs/prompt-contract.md, "Members are referred to by
+ *   display text -- see docs/prompt-contract.md, "Members are referred to by
  *   id, never by nickname". Omitted -> tokens render exactly as stored.
  * @param {object[]} [input.channels]      The server's channel map (store.listChannels), [] when memory is off.
  * @param {object[]} [input.loreEntries]   The guild's stored lorebook (store.getLore), [] when memory is off.
@@ -672,7 +666,7 @@ export function buildRequest(input) {
   const tempoText = renderTempo(tempo, labels, config.context.tempo);
 
   const triggerItem = trigger ? chatItems.find((item) => item.id === trigger.id) : null;
-  // A follow-up (F49, triggerKind: 'followUp') falls back to labels.triggers.reply
+  // A follow-up (triggerKind: 'followUp') falls back to labels.triggers.reply
   // when an older labels.json has no dedicated label yet -- see prompt-contract.md.
   const triggerLabel =
     triggerKind === 'followUp' ? (labels.triggers?.followUp ?? labels.triggers?.reply ?? '') : (labels.triggers?.[triggerKind] ?? '');
@@ -699,10 +693,10 @@ export function buildRequest(input) {
     pictures.length * (visionCfg.tokensPerImage ?? 0) -
     TAG_OVERHEAD;
 
-  // <people> priority (b)/(c) (F47): who the trigger message / the last few
+  // <people> priority (b)/(c): who the trigger message / the last few
   // messages name or @mention (askedAbout, rendered FULL, no episodes) vs. the
   // other active participants (participants, rendered COMPACT) -- see
-  // .claude/docs/prompt-contract.md, "Aliases".
+  // docs/prompt-contract.md, "Aliases".
   const { askedAbout, participants } = splitPeople(
     input.otherProfiles,
     input.candidateProfiles,

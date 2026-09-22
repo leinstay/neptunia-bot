@@ -15,8 +15,8 @@ import { isDescribable, stickerUrl } from '../discord/media.js';
 import { log } from '../log.js';
 import { emptyAffinity, roundScore } from './affinity.js';
 import { keywordMatches } from './lore.js';
-import { migrateInterests } from './interests.js';
-import { migrateDetails } from './details.js';
+import { normalizeInterests } from './interests.js';
+import { normalizeDetails } from './details.js';
 import { topByRank } from './ranking.js';
 import { toTokens, fromTokens } from './mentions.js';
 import { clampText } from './clamp.js';
@@ -128,23 +128,18 @@ function requireLabels(prompts) {
 }
 
 /** Only the fields the memory prompt is allowed to see/update for a user profile.
- * `interests`/`details` are upgraded via migrateInterests/migrateDetails when
- * the profile still carries the old shape (defensive; store.getUser already
- * migrates on read). */
+ * `interests`/`details` are validated via normalizeInterests/normalizeDetails
+ * (defensive; store.getUser already normalises on read). */
 function pickProfileFields(profile) {
   const { names = [], character = '', style = '', relationship = '' } = profile ?? {};
-  const interests = Array.isArray(profile?.interests) ? profile.interests : migrateInterests(profile?.interests);
-  const detailsRaw = profile?.details;
-  const details =
-    Array.isArray(detailsRaw) && detailsRaw.every((d) => d && typeof d === 'object')
-      ? detailsRaw
-      : migrateDetails(detailsRaw).items;
+  const interests = normalizeInterests(profile?.interests);
+  const details = normalizeDetails(profile?.details).items;
   return { names, character, interests, style, details, relationship };
 }
 
 /** `YYYY-MM-DD` of an ISO timestamp, or `undefined` (so JSON.stringify omits
  * the key entirely) when the date is unknown -- see
- * .claude/docs/prompt-contract.md, "The input view of a stored item". */
+ * docs/prompt-contract.md, "The input view of a stored item". */
 function dateOnly(iso) {
   return typeof iso === 'string' && iso ? iso.slice(0, 10) : undefined;
 }
@@ -164,11 +159,11 @@ function resolveTextArray(values, nameOf) {
  * `halfLifeDays`), in rank order -- `{ topic, note, seen, last }` (`seen` =
  * weight, `last` = the date-only lastSeen, omitted when unknown). `note` is
  * resolved (`<@id>` tokens -> `name (id:...)`) via `nameOf` -- see
- * .claude/docs/prompt-contract.md, "Members are referred to by id, never by
+ * docs/prompt-contract.md, "Members are referred to by id, never by
  * nickname". `maxInterests` not an integer -> every stored interest
  * (unlimited, matching the behaviour before this feature); `halfLifeDays` not
  * a positive number -> no decay, ranked by weight alone. See
- * .claude/docs/prompt-contract.md, "The analyzer" and "More is stored than
+ * docs/prompt-contract.md, "The analyzer" and "More is stored than
  * shown, and rank decays with age". */
 function existingInterestsView(interests, maxInterests, halfLifeDays, nameOf) {
   const list = Array.isArray(interests) ? interests : [];
@@ -195,7 +190,7 @@ function existingDetailsView(details, maxDetails, halfLifeDays, nameOf) {
 }
 
 /** The `<existing_profiles>` view of one person's aliases: a plain list of
- * names, top `maxAliases` by rank -- see .claude/docs/prompt-contract.md,
+ * names, top `maxAliases` by rank -- see docs/prompt-contract.md,
  * "Aliases". Alias names are never token-resolved: they are literal
  * nicknames, not free text that could name a member by id. */
 function existingAliasesView(aliases, maxAliases, halfLifeDays) {
@@ -232,7 +227,7 @@ function pickChannelFields(channel, nameOf) {
 
 /**
  * Normalized set of `config.memory.mainChannelIds`, compared as strings --
- * see .claude/docs/prompt-contract.md, "Main channels are the source of the
+ * see docs/prompt-contract.md, "Main channels are the source of the
  * portrait". Garbage config (not an array, non-string entries) never throws:
  * a non-array collapses to an empty set, every entry is coerced with String().
  * @param {unknown} mainChannelIds
@@ -247,7 +242,7 @@ function mainChannelSet(mainChannelIds) {
  * only, capped to the 200 most recently updated -- so the analyzer never
  * creates a duplicate title it just cannot see), plus the full text of
  * entries the batch's own messages touch (so those can be updated with
- * context). '' when the lorebook is empty. See .claude/docs/prompt-contract.md,
+ * context). '' when the lorebook is empty. See docs/prompt-contract.md,
  * "The analyzer".
  * @param {object[]} loreEntries   Every stored entry for the guild.
  * @param {string[]} batchTexts    Plain message contents of this batch.
@@ -305,7 +300,7 @@ export function characterText(prompts, selfName) {
  * @param {(id: string) => (string|null)} [input.nameOf]  Resolves a member id to their
  *   current stored name (`profile.names[0]`), for turning every `<@id>` token this
  *   request's views carry into `name (id:...)` -- see
- *   .claude/docs/prompt-contract.md, "Members are referred to by id, never by
+ *   docs/prompt-contract.md, "Members are referred to by id, never by
  *   nickname". Omitted -> every token is left exactly as stored (no I/O of its own;
  *   the caller, src/memory/update.js#analyze, injects a store-backed lookup).
  * @returns {{ messages: object[], consumed: number }}
@@ -413,14 +408,11 @@ function clampStringArray(value, maxChars, maxItems, tolerance) {
 /**
  * Per-user sighting time for one analyzer batch, for dating `interests`/
  * `details` by the MESSAGE, not the wall clock the analyzer happens to run
- * at (see .claude/docs/prompt-contract.md, "Dates come from the messages").
+ * at (see docs/prompt-contract.md, "Dates come from the messages").
  * `seenAtByUser` holds, for each non-self author, the timestamp of THAT
  * user's newest message in the batch; `seenAt` is the batch's own newest
  * message overall, the fallback used when a particular user is somehow
- * missing from the map. Used by the live analyzer; an older long warm-up
- * (now retired, see src/memory/bootstrap.js) fed old history through this
- * exact same `analyze()` path -- so an old-history batch dated its sightings
- * with the old timestamps, not whenever the warm-up happened to process it.
+ * missing from the map. Used by the live analyzer.
  * @param {object[]} messages  Slim buffered messages (any order); `ts`/`authorId`/`self` read.
  * @returns {{ seenAtByUser: Map<string, number>, seenAt: number }}
  */
@@ -504,7 +496,7 @@ export function applyMemoryUpdate(store, guildId, update, cfg, knownUserIds, kno
   if (!update || typeof update !== 'object' || Array.isArray(update)) return result;
 
   // A member is written as `<@id>` in every free-text field the analyzer
-  // returns (see .claude/docs/prompt-contract.md, "Members are referred to
+  // returns (see docs/prompt-contract.md, "Members are referred to
   // by id, never by nickname"); this normalizes the fallback shape the model
   // sometimes writes instead, `Name (id:123...)`, into the token -- but only
   // for an id this guild actually knows (an author of the batch, or an
@@ -542,12 +534,11 @@ export function applyMemoryUpdate(store, guildId, update, cfg, knownUserIds, kno
       if (!knownUserIds.has(String(userId))) continue;
       if (!raw || typeof raw !== 'object' || Array.isArray(raw)) continue;
 
-      // Incremental profile ops (see .claude/docs/prompt-contract.md, "The
+      // Incremental profile ops (see docs/prompt-contract.md, "The
       // analyzer"): prose fields pass through as-is, store.applyProfileOps
       // decides whether they are non-empty and clamps them. `interests`/
-      // `details` are ops objects; one release of backward tolerance accepts
-      // the OLD shapes too (a string interests blob, an array of details).
-      // `character`/`style` stay plain prose (see .claude/docs/prompt-contract.md,
+      // `details` are ops objects, the only shape accepted.
+      // `character`/`style` stay plain prose (see docs/prompt-contract.md,
       // "Data model"): the stream analyzer never edits them directly -- they
       // are written only by profile.md (the bootstrap and a portrait refresh,
       // see `raw.portrait` below). The whole-string form is kept here for
@@ -560,17 +551,14 @@ export function applyMemoryUpdate(store, guildId, update, cfg, knownUserIds, kno
       // `portrait`: the stream analyzer's cue that this member's stored
       // character/style misses or contradicts something the batch showed --
       // never stored here, just collected for the caller (analyze()) to hand
-      // to an injected refresh callback; see .claude/docs/prompt-contract.md,
+      // to an injected refresh callback; see docs/prompt-contract.md,
       // "Data model".
       if (typeof raw.portrait === 'string') {
         const reason = clampText(tokenize(raw.portrait), 200, { tolerance: cfg.clampTolerance });
         if (reason) result.portraitRequests.push({ userId: String(userId), reason });
       }
 
-      if (typeof raw.interests === 'string') {
-        const migrated = migrateInterests(raw.interests);
-        if (migrated.length > 0) ops.interests = { add: migrated.map(({ topic, note }) => ({ topic, note: tokenize(note) })) };
-      } else if (raw.interests && typeof raw.interests === 'object' && !Array.isArray(raw.interests)) {
+      if (raw.interests && typeof raw.interests === 'object' && !Array.isArray(raw.interests)) {
         ops.interests = {
           ...raw.interests,
           add: tokenizeNoted(raw.interests.add),
@@ -578,14 +566,12 @@ export function applyMemoryUpdate(store, guildId, update, cfg, knownUserIds, kno
         };
       }
 
-      if (Array.isArray(raw.details)) {
-        ops.details = { add: raw.details.map(tokenizeDetail) };
-      } else if (raw.details && typeof raw.details === 'object' && !Array.isArray(raw.details)) {
+      if (raw.details && typeof raw.details === 'object' && !Array.isArray(raw.details)) {
         ops.details = { ...raw.details, add: Array.isArray(raw.details.add) ? raw.details.add.map(tokenizeDetail) : raw.details.add };
       }
 
       // Aliases are literal nicknames, never a `<@id>` reference to someone
-      // else -- passed through untouched, see .claude/docs/prompt-contract.md,
+      // else -- passed through untouched, see docs/prompt-contract.md,
       // "Aliases".
       if (raw.aliases && typeof raw.aliases === 'object' && !Array.isArray(raw.aliases)) {
         ops.aliases = raw.aliases;
@@ -749,14 +735,14 @@ export function touchMemory(store, guildId, normalized) {
  * @param {() => number} [deps.now]
  * @param {(guildId: string, userId: string, reason: string) => void} [deps.onPortraitRequest]
  *   Called once per user for every `raw.portrait` cue a successful `analyze()` collected (see
- *   .claude/docs/prompt-contract.md, "Data model") -- src/index.js wires this to
+ *   docs/prompt-contract.md, "Data model") -- src/index.js wires this to
  *   src/memory/bootstrap.js#createBootstrap's `refreshPortrait`, which does the actual rewrite
  *   (`profile.md`, `<draft>`/`<hint>`); this module only reports the cue, never awaits the result.
  *   Omitted -> no-op.
  */
 /** `nameOf` for buildMemoryRequest's token resolution: a member's current
  * stored name, or null when the guild has no profile for that id -- see
- * .claude/docs/prompt-contract.md, "Members are referred to by id, never by
+ * docs/prompt-contract.md, "Members are referred to by id, never by
  * nickname". The one place `analyze()`/`estimate()` touch the store for this. */
 function storeNameOf(store, guildId) {
   return (id) => store.getUser(guildId, id)?.names?.[0] ?? null;
@@ -764,7 +750,7 @@ function storeNameOf(store, guildId) {
 
 export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, now = Date.now, onPortraitRequest }) {
   const running = new Set();
-  let idleWaiters = []; // resolvers for waitIdle() (F30, /nep pause), notified once running.size hits 0
+  let idleWaiters = []; // resolvers for waitIdle() (/nep pause), notified once running.size hits 0
   const backoffUntil = new Map();
   // Per-guild in-memory factor on the live batch size (1 = normal). Halved on
   // a 'truncated'/'bad-json' failure so the next attempt for that guild asks
@@ -778,7 +764,7 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
    * analyzer can tell how people talk TO it apart from general chatter.
    */
   function observe(guildId, normalized, { direct = false } = {}) {
-    // F30 (/nep pause): nothing may make the store dirty while paused.
+    // /nep pause: nothing may make the store dirty while paused.
     if (store.state.data.paused) return;
     if (normalized.bot) return;
     touchMemory(store, guildId, normalized);
@@ -839,9 +825,8 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
    * store. Used by `run()` (a batch shifted off the live buffer); the memory
    * bootstrap (src/memory/bootstrap.js) does not go through this path at all
    * — it calls `profile.md`/`channel.md`/`server.md` and applyMemoryUpdate
-   * directly (an older long warm-up used to feed old history through this
-   * exact `analyze()` path; it is retired). Never touches the live buffer and
-   * never throws — a failure is reported in the returned `error`, not raised.
+   * directly. Never touches the live buffer and never throws — a failure is
+   * reported in the returned `error`, not raised.
    *
    * `usage`/`estimated` reflect a completion whenever one was actually
    * received from the provider — including when `ok: false` because parsing
@@ -856,7 +841,7 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
    * @param {boolean} [opts.countAgainstDailyCap]  Forwarded to llm.complete(); a caller with its own
    *   token budget (not the daily request cap) passes `false`.
    * @param {Map<string, string>} [opts.descriptions]  Pre-computed describer captions (see
-   *   src/memory/warmup.js, which budgets and charges these itself). When omitted, cached
+   *   src/memory/bootstrap.js, which budgets and charges these itself). When omitted, cached
    *   captions are looked up by item id instead -- see below.
    * @returns {Promise<{ ok: boolean, usage: object|null, estimated: number, result: object|null, error?: Error }>}
    */
@@ -926,7 +911,7 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
         countAgainstDailyCap,
         // A 150-message batch with an 8000-token answer on a large model can
         // take longer than the chat timeout -- the analyzer gets its own,
-        // much larger budget (see .claude/docs/prompt-contract.md, "The analyzer").
+        // much larger budget (see docs/prompt-contract.md, "The analyzer").
         timeoutMs: cfg.timeoutMs ?? hot.config.llm.timeoutMs,
       });
     } catch (err) {
@@ -1060,7 +1045,7 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
         // means the completion is being cut by the output cap, and 'token-limit'
         // means the request itself (stored profiles included) does not fit the
         // per-request cap -- neither is transient bad luck. A plain back-off
-        // would just retry the exact same buffer forever (see F34): halve the
+        // would just retry the exact same buffer forever: halve the
         // batch size for next time instead, same as the output-cap case, so
         // the following attempt asks for fewer messages and pulls in fewer
         // distinct authors' profiles.
@@ -1091,7 +1076,7 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
 
   /** Check every guild and kick off a memory update for the ones that are due. */
   async function tick() {
-    // F30 (/nep pause): the live analyzer never runs while paused.
+    // /nep pause: the live analyzer never runs while paused.
     if (store.state.data.paused) return;
     const nowMs = now();
     const cfg = hot.config.memory;
@@ -1109,7 +1094,7 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
   /**
    * Resolves once no `run()` is in flight for any guild -- immediately if
    * that is already true. Never starts a new run itself. Used by admin.js's
-   * `/nep pause` (F30) to wait out a live-analyzer run that was already in
+   * `/nep pause` to wait out a live-analyzer run that was already in
    * flight when the pause was requested (an LLM call can take 30-90s): its
    * result must land on disk BEFORE the pause flushes and drops the store's
    * caches, or the eventual `applyMemoryUpdate` would re-read a profile from

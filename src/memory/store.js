@@ -6,6 +6,8 @@
 //   data/guilds/<guildId>/buffer.json        messages observed since the last memory update
 //   data/guilds/<guildId>/users/<userId>.json  one profile per active member
 //   data/guilds/<guildId>/channels/<channelId>.json  one entry per channel the persona has seen (the server map)
+//   data/guilds/<guildId>/lore.json           the guild's lorebook
+//   data/guilds/<guildId>/media.json          the media description cache
 //
 // Everything is cached in memory, marked dirty on change and flushed on a
 // timer and on shutdown. Writes are atomic (temp file + rename) so a crash
@@ -21,8 +23,8 @@ import { log } from '../log.js';
 import { emptyAffinity, applyDelta } from './affinity.js';
 import { mergeEpisodes } from './episodes.js';
 import { upsertLore } from './lore.js';
-import { applyInterestOps, migrateInterests } from './interests.js';
-import { applyDetailOps, migrateDetails } from './details.js';
+import { applyInterestOps, normalizeInterests } from './interests.js';
+import { applyDetailOps, normalizeDetails } from './details.js';
 import { applyAliasOps } from './aliases.js';
 import { clampText } from './clamp.js';
 
@@ -57,7 +59,7 @@ function walkJsonFiles(dir) {
 
 /**
  * Every `*.json` file under `dataDir` that fails to parse as JSON -- used by
- * `/nep resume` (F30, see src/admin.js) to refuse coming back from a pause if
+ * `/nep resume` (see src/admin.js) to refuse coming back from a pause if
  * a hand-edit broke a file, without touching any cache. Paths are relative to
  * `dataDir`, forward-slash separated (stable across platforms), never file
  * contents.
@@ -131,43 +133,21 @@ export function emptyChannel(id) {
   };
 }
 
-/** Upgrade a profile's `interests` field in place: a legacy prose string
- * becomes the atomic-item array (see src/memory/interests.js#migrateInterests);
- * anything not already an array becomes `[]`. Never marks anything dirty --
- * the caller (`getUser`/`applyProfileOps`) decides whether this is persisted. */
-function migrateProfileInterests(profile) {
-  if (typeof profile.interests === 'string') {
-    profile.interests = migrateInterests(profile.interests);
-  } else if (!Array.isArray(profile.interests)) {
-    profile.interests = [];
-  }
-}
-
-/** Upgrade a profile's `details` field in place: a legacy array of bare
- * strings becomes the atomic-item array (see
- * src/memory/details.js#migrateDetails), assigning fresh ids off the
- * profile's own `detailsSeq` counter; anything not already an array becomes
- * `[]`. A no-op once `details` is already item-shaped. Never marks anything
- * dirty -- the caller (`getUser`/`applyProfileOps`) decides whether this is
- * persisted. */
-function migrateProfileDetails(profile) {
-  if (!Number.isInteger(profile.detailsSeq) || profile.detailsSeq < 1) profile.detailsSeq = 1;
-  if (!Array.isArray(profile.details)) {
-    profile.details = [];
-    return;
-  }
-  if (profile.details.some((d) => typeof d === 'string')) {
-    const { items, nextId } = migrateDetails(profile.details, profile.detailsSeq);
-    profile.details = items;
-    profile.detailsSeq = nextId;
-  }
-}
-
-/** Upgrade a profile's `aliases` field in place: a profile written before
- * this feature existed has no `aliases` key at all -- anything not already
- * an array becomes `[]`. Never marks anything dirty -- the caller
+/** Normalize a profile's `interests`/`details`/`aliases` fields in place:
+ * stored JSON is untrusted (possibly hand-edited while paused) -- `interests`
+ * is validated via src/memory/interests.js#normalizeInterests, `details` via
+ * src/memory/details.js#normalizeDetails (assigning fresh ids off the
+ * profile's own `detailsSeq` counter when needed), `aliases` becomes `[]`
+ * when it is not already an array. Never marks anything dirty -- the caller
  * (`getUser`/`applyProfileOps`) decides whether this is persisted. */
-function migrateProfileAliases(profile) {
+function normalizeProfile(profile) {
+  profile.interests = normalizeInterests(profile.interests);
+
+  if (!Number.isInteger(profile.detailsSeq) || profile.detailsSeq < 1) profile.detailsSeq = 1;
+  const { items, nextId } = normalizeDetails(profile.details, profile.detailsSeq);
+  profile.details = items;
+  profile.detailsSeq = nextId;
+
   if (!Array.isArray(profile.aliases)) profile.aliases = [];
 }
 
@@ -256,21 +236,16 @@ export function createStore({ dataDir }) {
     },
 
     /**
-     * Profile of a member, or null when the persona has never seen them. A
-     * legacy profile whose `interests` is still the old prose string, or
-     * whose `details` is still a bare array of strings, is migrated to the
-     * atomic-item array in memory here (see
-     * src/memory/interests.js#migrateInterests and
-     * src/memory/details.js#migrateDetails) -- persisted the next time
+     * Profile of a member, or null when the persona has never seen them.
+     * Stored JSON is normalised on read here (see `normalizeProfile` above,
+     * which tolerates a hand-edited file) -- persisted the next time
      * anything writes this profile, never wiped implicitly.
      */
     getUser(guildId, userId) {
       const file = userFile(guildId, userId);
       if (!entries.has(file) && !fs.existsSync(file)) return null;
       const item = entry(file, () => emptyProfile(String(userId)));
-      migrateProfileInterests(item.value);
-      migrateProfileDetails(item.value);
-      migrateProfileAliases(item.value);
+      normalizeProfile(item.value);
       return item.value;
     },
 
@@ -333,7 +308,7 @@ export function createStore({ dataDir }) {
 
     /**
      * Apply one analyzer batch's INCREMENTAL profile update (see
-     * .claude/docs/prompt-contract.md, "The analyzer"): `character`/`style`/
+     * docs/prompt-contract.md, "The analyzer"): `character`/`style`/
      * `relationship` replace the stored text only when given as a non-empty
      * string, clamped to `opts.fieldChars` -- an absent or empty field never
      * blanks what is already stored. `ops.interests` (`{ add, update, seen,
@@ -343,9 +318,8 @@ export function createStore({ dataDir }) {
      * profile's own `detailsSeq` id counter. `opts.seenAt` is the time of the
      * PERSON'S message that produced this sighting (falls back to `opts.now`,
      * then the wall clock) -- see the two modules' header comments for the
-     * confirmation/date rules `opts.confirmGapHours` feeds. A legacy profile
-     * whose `interests`/`details` is still the old shape is migrated first.
-     * Tolerates garbage `ops`, never throws.
+     * confirmation/date rules `opts.confirmGapHours` feeds. Stored JSON is
+     * normalised first (see `normalizeProfile`). Tolerates garbage `ops`, never throws.
      * @param {string} guildId
      * @param {string} userId
      * @param {{ character?: string, style?: string, relationship?: string,
@@ -358,7 +332,7 @@ export function createStore({ dataDir }) {
      *   confirmGapHours?: number, seenAt?: number, now?: number, clampTolerance?: number }} [opts]
      *   `maxInterestsStored`/`maxDetailsStored`/`interestHalfLifeDays`/`detailHalfLifeDays` drive the
      *   storage-cap-vs-shown-cap split and the rank decay -- see
-     *   .claude/docs/prompt-contract.md, "More is stored than shown, and rank decays with age".
+     *   docs/prompt-contract.md, "More is stored than shown, and rank decays with age".
      *   `clampTolerance` (see src/memory/clamp.js) governs how far prose text may run over
      *   `fieldChars`/`noteChars`/etc. before it is cut, at a clean boundary, never mid-token.
      * @returns {object} The updated profile.
@@ -366,9 +340,7 @@ export function createStore({ dataDir }) {
     applyProfileOps(guildId, userId, ops, opts = {}) {
       const item = entry(userFile(guildId, userId), () => emptyProfile(String(userId)));
       const profile = item.value;
-      migrateProfileInterests(profile);
-      migrateProfileDetails(profile);
-      migrateProfileAliases(profile);
+      normalizeProfile(profile);
 
       const seenAt = Number.isFinite(opts.seenAt) ? opts.seenAt : Number.isFinite(opts.now) ? opts.now : Date.now();
 
@@ -466,8 +438,8 @@ export function createStore({ dataDir }) {
     /**
      * Every member profile stored for a guild, cached or on disk -- the pool
      * a turn scans to pull a silent member into `<people>` by name/alias (see
-     * src/behavior/prompt.js and .claude/docs/prompt-contract.md, "Aliases").
-     * Same migrate-on-read guarantee as `getUser`.
+     * src/behavior/prompt.js and docs/prompt-contract.md, "Aliases").
+     * Same normalize-on-read guarantee as `getUser`.
      */
     listUserProfiles(guildId) {
       return idsUnder(path.join(guildDir(guildId), 'users')).map((id) => store.getUser(guildId, id)).filter(Boolean);
@@ -680,12 +652,11 @@ export function createStore({ dataDir }) {
      * the live observation buffer, and lorebook entries whose `source` is
      * `'analyzer'` (every entry, owner included, when `keepOwnerLore` is
      * false). Keeps, by default, owner lore (`source: 'owner'`) and the
-     * media description cache, and always keeps everything in `state.json`
-     * except `state.warmup` (stale progress from the now-retired long
-     * warm-up, see src/memory/state-cleanup.js — never set by anything
-     * current) — token calibration, the daily LLM counter, `state.bootstrap`
-     * and the spontaneous schedule survive untouched. Safe when some files
-     * never existed; the store stays fully usable afterwards (a following
+     * media description cache. Drops `state.bootstrap` (the bootstrap's own
+     * progress, see src/memory/bootstrap.js) so the next run starts clean;
+     * everything else in `state.json` — token calibration, the daily LLM
+     * counter and the spontaneous schedule — survives untouched. Safe when
+     * some files never existed; the store stays fully usable afterwards (a following
      * `touchUser`/`getGuild` works and persists), no restart required.
      * @param {string} guildId
      * @param {{ keepOwnerLore?: boolean, keepMediaCache?: boolean }} [opts]
@@ -733,7 +704,7 @@ export function createStore({ dataDir }) {
         fs.rmSync(file, { force: true });
       }
 
-      for (const key of ['warmup', 'bootstrap']) {
+      for (const key of ['bootstrap']) {
         if (stateEntry.value[key] !== undefined) {
           delete stateEntry.value[key];
           stateEntry.dirty = true;
@@ -750,7 +721,7 @@ export function createStore({ dataDir }) {
     },
 
     /**
-     * Drop every cached file EXCEPT `state.json` (F30, `/nep pause`): called
+     * Drop every cached file EXCEPT `state.json` (`/nep pause`): called
      * right after a flush, so nothing stale can be written from memory while
      * the owner hand-edits files under `data/` -- the next read of any
      * profile/guild/channel/lore/media/buffer lazily re-populates from disk,
@@ -775,7 +746,7 @@ export function createStore({ dataDir }) {
 
     /**
      * Force `state.json` to be re-read from disk right now, discarding
-     * whatever was cached (F30, `/nep resume`): the owner may have
+     * whatever was cached (`/nep resume`): the owner may have
      * hand-edited it (e.g. bootstrap progress) while paused. Any unflushed
      * in-memory change is lost, the same guarantee every other cached file
      * already has once dropped.
@@ -787,7 +758,7 @@ export function createStore({ dataDir }) {
 
     /**
      * Every `*.json` file under this store's `dataDir` that fails to parse
-     * (F30, `/nep resume`) -- see `findInvalidJsonFiles` above.
+     * (`/nep resume`) -- see `findInvalidJsonFiles` above.
      * @returns {string[]}
      */
     validate() {

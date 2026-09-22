@@ -1,12 +1,12 @@
 // Tests for src/memory/interests.js: applyInterestOps (add/update/seen/remove,
 // the confirmation weight/gap rule, clamping, rejection, eviction),
-// migrateInterests (legacy prose -> atomic items) and the isConfirmed/isStale
+// normalizeInterests (validates stored items) and the isConfirmed/isStale
 // helpers. Pure, no I/O.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   applyInterestOps,
-  migrateInterests,
+  normalizeInterests,
   normalizeTopic,
   isConfirmed,
   isStale,
@@ -245,7 +245,7 @@ test('applyInterestOps: among equal weights, evicts the oldest lastSeen first', 
   assert.deepEqual(items.map((i) => i.topic).sort(), ['b', 'c']);
 });
 
-test('applyInterestOps: eviction runs even with no ops, self-healing an over-stuffed legacy profile', () => {
+test('applyInterestOps: eviction runs even with no ops, self-healing an over-stuffed profile', () => {
   const existing = stored([
     ['a', 1, '2026-01-01T00:00:00.000Z'],
     ['b', 1, '2026-01-02T00:00:00.000Z'],
@@ -255,7 +255,7 @@ test('applyInterestOps: eviction runs even with no ops, self-healing an over-stu
   assert.equal(items.length, 2);
 });
 
-// ---- storage cap vs shown cap, and rank-driven eviction (the F27 defect) -----
+// ---- storage cap vs shown cap, and rank-driven eviction -----------------------
 
 test('applyInterestOps: the storage cap is max(maxInterestsStored, maxInterests) -- a smaller stored cap never wins', () => {
   const existing = stored([['a', 1, '2026-01-01T00:00:00.000Z'], ['b', 1, '2026-01-02T00:00:00.000Z']]);
@@ -387,82 +387,34 @@ test('isStale: staleDays not a positive number means never stale', () => {
   assert.equal(isStale(item, NOW, NaN), false);
 });
 
-// ---- migrateInterests: legacy string ------------------------------------------
+// ---- normalizeInterests: array validation -------------------------------------
 
-test('migrateInterests: a plain comma-separated string with no notes', () => {
-  const items = migrateInterests('Chess, Anime, Cooking');
-  assert.deepEqual(items.map((i) => i.topic), ['Chess', 'Anime', 'Cooking']);
-  assert.ok(items.every((i) => i.note === '' && i.weight === 1));
-});
-
-test('migrateInterests: "topic (note)" segments', () => {
-  const items = migrateInterests('Chess (weekly club), Anime (mostly shonen)');
-  assert.deepEqual(items, [
-    { topic: 'Chess', note: 'weekly club', weight: 1, firstSeen: null, lastSeen: null },
-    { topic: 'Anime', note: 'mostly shonen', weight: 1, firstSeen: null, lastSeen: null },
-  ]);
-});
-
-test('migrateInterests: a comma inside a note does not split the item (top-level commas only)', () => {
-  const items = migrateInterests('Board games (Catan, Carcassonne, weekly), Chess');
-  assert.deepEqual(items.map((i) => i.topic), ['Board games', 'Chess']);
-  assert.equal(items[0].note, 'Catan, Carcassonne, weekly');
-});
-
-test('migrateInterests: nested parentheses inside a note are kept literally', () => {
-  const items = migrateInterests('Fishing (caught a bass (a big one) last week)');
-  assert.equal(items.length, 1);
-  assert.equal(items[0].topic, 'Fishing');
-  assert.equal(items[0].note, 'caught a bass (a big one) last week');
-});
-
-test('migrateInterests: the glued-dump shape (many comma-separated items, some with notes) splits cleanly', () => {
-  const dump = 'Game A (a remark about game A), Game B, Cooking (likes pasta), Anime, Board games (Catan)';
-  const items = migrateInterests(dump);
-  assert.deepEqual(items.map((i) => i.topic), ['Game A', 'Game B', 'Cooking', 'Anime', 'Board games']);
-  assert.equal(items[0].note, 'a remark about game A');
-  assert.equal(items[1].note, '');
-  assert.equal(items[2].note, 'likes pasta');
-  assert.equal(items[4].note, 'Catan');
-});
-
-test('migrateInterests: blank/whitespace-only string yields []', () => {
-  assert.deepEqual(migrateInterests(''), []);
-  assert.deepEqual(migrateInterests('   '), []);
-});
-
-test('migrateInterests: a stray empty segment (double comma) is dropped', () => {
-  const items = migrateInterests('Chess,, Anime');
-  assert.deepEqual(items.map((i) => i.topic), ['Chess', 'Anime']);
-});
-
-// ---- migrateInterests: array pass-through -------------------------------------
-
-test('migrateInterests: an array of well-formed items passes through validated', () => {
-  const items = migrateInterests([{ topic: 'Chess', note: 'plays weekly', weight: 4, firstSeen: 'a', lastSeen: 'b' }]);
+test('normalizeInterests: an array of well-formed items passes through validated', () => {
+  const items = normalizeInterests([{ topic: 'Chess', note: 'plays weekly', weight: 4, firstSeen: 'a', lastSeen: 'b' }]);
   assert.deepEqual(items, [{ topic: 'Chess', note: 'plays weekly', weight: 4, firstSeen: 'a', lastSeen: 'b' }]);
 });
 
-test('migrateInterests: array items missing optional fields get sane defaults', () => {
-  const items = migrateInterests([{ topic: 'Chess' }]);
+test('normalizeInterests: array items missing optional fields get sane defaults', () => {
+  const items = normalizeInterests([{ topic: 'Chess' }]);
   assert.deepEqual(items, [{ topic: 'Chess', note: '', weight: 1, firstSeen: null, lastSeen: null }]);
 });
 
-test('migrateInterests: garbage entries inside an array are dropped, valid ones survive', () => {
-  const items = migrateInterests([null, 42, 'garbage', { topic: '' }, { note: 'no topic at all' }, { topic: 'OK' }]);
+test('normalizeInterests: garbage entries inside an array are dropped, valid ones survive', () => {
+  const items = normalizeInterests([null, 42, 'garbage', { topic: '' }, { note: 'no topic at all' }, { topic: 'OK' }]);
   assert.deepEqual(items, [{ topic: 'OK', note: '', weight: 1, firstSeen: null, lastSeen: null }]);
 });
 
-// ---- migrateInterests: anything else -------------------------------------------
+// ---- normalizeInterests: anything else -----------------------------------------
 
-test('migrateInterests: null/undefined/number/object all yield []', () => {
-  assert.deepEqual(migrateInterests(null), []);
-  assert.deepEqual(migrateInterests(undefined), []);
-  assert.deepEqual(migrateInterests(42), []);
-  assert.deepEqual(migrateInterests({ not: 'an array or string' }), []);
+test('normalizeInterests: null/undefined/number/string/object all yield []', () => {
+  assert.deepEqual(normalizeInterests(null), []);
+  assert.deepEqual(normalizeInterests(undefined), []);
+  assert.deepEqual(normalizeInterests(42), []);
+  assert.deepEqual(normalizeInterests('Chess, Anime'), []);
+  assert.deepEqual(normalizeInterests({ not: 'an array' }), []);
 });
 
-// ---- F31 addendum: a trailing "(qualifier)" is stripped off the topic ---------
+// ---- a trailing "(qualifier)" is stripped off the topic -----------------------
 
 test('stripTrailingParenthetical: strips one trailing parenthetical, trimmed', () => {
   assert.deepEqual(stripTrailingParenthetical('anime (bleak/hopeless)'), { topic: 'anime', qualifier: 'bleak/hopeless' });
@@ -553,7 +505,7 @@ test('applyInterestOps: remove matches by the stripped plain topic', () => {
   assert.deepEqual(items.map((i) => i.topic), ['Chess']);
 });
 
-test('applyInterestOps: a legacy stored topic that still carries the qualifier is rewritten to plain when a matching op arrives, and sighted as the same item', () => {
+test('applyInterestOps: a stored topic that still carries the qualifier is rewritten to plain when a matching op arrives, and sighted as the same item', () => {
   const existing = [{ topic: 'Anime (bleak/hopeless)', note: 'watches subbed', weight: 1, firstSeen: 'a', lastSeen: null }];
   const items = applyInterestOps(existing, { seen: ['anime'] }, opts());
   assert.equal(items.length, 1, 'still one item, not two');
@@ -562,7 +514,7 @@ test('applyInterestOps: a legacy stored topic that still carries the qualifier i
   assert.equal(items[0].note, 'watches subbed', 'the note carries over untouched');
 });
 
-test('applyInterestOps: an untargeted legacy parenthetical topic is left as stored', () => {
+test('applyInterestOps: an untargeted stored topic still carrying a parenthetical is left as stored', () => {
   const existing = [{ topic: 'Anime (bleak/hopeless)', note: '', weight: 1, firstSeen: 'a', lastSeen: null }];
   const items = applyInterestOps(existing, { add: [{ topic: 'Chess', note: '' }] }, opts());
   assert.ok(items.some((i) => i.topic === 'Anime (bleak/hopeless)'), 'no op targeted it, so it is left alone');
@@ -581,9 +533,9 @@ test('applyInterestOps: two stored variants (plain + parenthetical) collapse int
   assert.equal(items[0].note, 'likes dark stories', 'the note of the heavier stored variant survives the merge');
 });
 
-// ---- lead review fix: the stripped qualifier must never clobber a real stored note ----
+// ---- the stripped qualifier must never clobber a real stored note ------------
 
-test('F31 review fix: reproduced case -- collapsing two stored variants then adding "Topic (qualifier)" keeps the real note, drops the qualifier', () => {
+test('applyInterestOps: collapsing two stored variants then adding "Topic (qualifier)" keeps the real note, drops the qualifier', () => {
   const existing = [
     { topic: 'anime', note: 'watches', weight: 2, firstSeen: 'a', lastSeen: '2025-01-01T00:00:00.000Z' },
     { topic: 'anime (bleak/hopeless)', note: 'looks for heavy shows', weight: 3, firstSeen: 'a', lastSeen: '2025-06-01T00:00:00.000Z' },

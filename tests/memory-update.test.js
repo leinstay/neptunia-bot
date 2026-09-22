@@ -507,7 +507,7 @@ test('buildMemoryRequest: relationships off never renders a <character> block', 
   assert.ok(!llmMessages[1].content.includes('Card of Nept'));
 });
 
-// ---- F43: <character> = card + the owner's live rules, same as the chat prompt --------
+// ---- <character> = card + the owner's live rules, same as the chat prompt ----
 
 test('characterText: joins the card and the rules with a blank line, both {{name}} filled', () => {
   const text = characterText({ 'character-card': 'Card of {{name}}.', rules: 'Never mention {{name}} twice.' }, 'Nept');
@@ -1131,7 +1131,7 @@ test('applyMemoryUpdate: clamps string and detail fields to the configured limit
     const cfg = { fieldChars: 5, maxDetails: 2, maxInjokes: 2, maxSelfFacts: 2 };
     const longDetail = 'x'.repeat(250);
     const update = {
-      users: { 1: { character: '0123456789', details: [longDetail, 'b', 'c'] } },
+      users: { 1: { character: '0123456789', details: { add: [longDetail, 'b', 'c'] } } },
     };
 
     const result = applyMemoryUpdate(store, guildId, update, cfg, new Set(['1']));
@@ -1188,8 +1188,8 @@ test('applyMemoryUpdate: an empty-string prose field never blanks the stored val
   });
 });
 
-// ---- applyMemoryUpdate: portrait refresh cues (F39) -------------------------
-// See .claude/docs/prompt-contract.md, "Data model": `character`/`style` stay
+// ---- applyMemoryUpdate: portrait refresh cues --------------------------------
+// See docs/prompt-contract.md, "Data model": `character`/`style` stay
 // plain prose, written only by profile.md (the bootstrap / a portrait
 // refresh). The stream analyzer's `users.<id>.portrait` is a CUE, not an
 // edit: never stored, only collected into `result.portraitRequests` for the
@@ -1328,7 +1328,7 @@ test('applyMemoryUpdate: relationships enabled applies and clamps the affinity d
     const guildId = 'g1';
     store.touchUser(guildId, '1', 'nick', Date.now());
 
-    const update = { users: { 1: { interests: 'anime', affinity: { delta: 999, reason: 'was really kind' } } } };
+    const update = { users: { 1: { affinity: { delta: 999, reason: 'was really kind' } } } };
     const result = applyMemoryUpdate(store, guildId, update, MEMORY_CFG, new Set(['1']), new Set(), RELATIONSHIPS_CFG);
 
     assert.equal(result.users, 1);
@@ -1398,14 +1398,14 @@ test('applyMemoryUpdate: a zero/absent affinity delta does not count as a change
     const guildId = 'g1';
     store.touchUser(guildId, '1', 'nick', Date.now());
 
-    const update = { users: { 1: { interests: 'anime', affinity: { delta: 0, reason: 'no change' } } } };
+    const update = { users: { 1: { affinity: { delta: 0, reason: 'no change' } } } };
     const result = applyMemoryUpdate(store, guildId, update, MEMORY_CFG, new Set(['1']), new Set(), RELATIONSHIPS_CFG);
     assert.equal(result.affinity, 0);
 
     const noAffinityField = applyMemoryUpdate(
       store,
       guildId,
-      { users: { 1: { interests: 'anime again' } } },
+      { users: { 1: { style: 'still chatty' } } },
       MEMORY_CFG,
       new Set(['1']),
       new Set(),
@@ -1460,7 +1460,7 @@ test('applyMemoryUpdate: a malformed affinity value is ignored, other fields sti
     const result = applyMemoryUpdate(
       store,
       guildId,
-      { users: { 1: { interests: 'games', affinity: 'not an object' } } },
+      { users: { 1: { interests: { add: [{ topic: 'games', note: '' }] }, affinity: 'not an object' } } },
       MEMORY_CFG,
       new Set(['1']),
       new Set(),
@@ -1821,26 +1821,6 @@ test('buildMemoryRequest: a profile with no interests yet renders an empty inter
   assert.deepEqual(profiles['1'].interests, []);
 });
 
-test('buildMemoryRequest: a legacy string interests field is migrated for the existing_profiles view', () => {
-  const config = makeConfig();
-  const calibrator = createCalibrator();
-  const messages = [slimMessage({ id: 'm1', ts: Date.UTC(2026, 0, 1, 12, 0, 0) })];
-
-  const { messages: llmMessages } = buildMemoryRequest({
-    prompts: { memory: 'sys', labels },
-    config,
-    calibrator,
-    profiles: { 1: { names: ['nick'], character: '', style: '', details: [], relationship: '', interests: 'Chess (weekly club)' } },
-    guildMemory: {},
-    messages,
-    selfName: 'Nept',
-  });
-
-  const user = llmMessages[1].content;
-  const profiles = JSON.parse(/<existing_profiles>\n([\s\S]*?)\n<\/existing_profiles>/.exec(user)[1]);
-  assert.deepEqual(profiles['1'].interests, [{ topic: 'Chess', note: 'weekly club', seen: 1 }]);
-});
-
 test('buildMemoryRequest: existing_profiles details are [{id, text, seen, last}]', () => {
   const config = makeConfig();
   const calibrator = createCalibrator();
@@ -1874,26 +1854,6 @@ test('buildMemoryRequest: existing_profiles details are [{id, text, seen, last}]
     { id: 3, text: 'Owns a cat', seen: 2, last: '2026-01-05' },
     { id: 4, text: 'Plays guitar', seen: 1 },
   ]);
-});
-
-test('buildMemoryRequest: a legacy string-array details field is migrated for the existing_profiles view', () => {
-  const config = makeConfig();
-  const calibrator = createCalibrator();
-  const messages = [slimMessage({ id: 'm1', ts: Date.UTC(2026, 0, 1, 12, 0, 0) })];
-
-  const { messages: llmMessages } = buildMemoryRequest({
-    prompts: { memory: 'sys', labels },
-    config,
-    calibrator,
-    profiles: { 1: { names: ['nick'], character: '', style: '', relationship: '', interests: [], details: ['Owns a cat'] } },
-    guildMemory: {},
-    messages,
-    selfName: 'Nept',
-  });
-
-  const user = llmMessages[1].content;
-  const profiles = JSON.parse(/<existing_profiles>\n([\s\S]*?)\n<\/existing_profiles>/.exec(user)[1]);
-  assert.deepEqual(profiles['1'].details, [{ id: 1, text: 'Owns a cat', seen: 1 }]);
 });
 
 // ---- buildMemoryRequest: existing_profiles interests/details, top N by rank ---
@@ -2101,44 +2061,11 @@ test('applyMemoryUpdate: a no-op interests update (garbage ops, nothing to chang
   });
 });
 
-test('applyMemoryUpdate: raw.interests as a legacy STRING is migrated and applied as add ops', () => {
-  withStore((store) => {
-    const guildId = 'g1';
-    store.touchUser(guildId, '1', 'nick', Date.now());
-
-    const update = { users: { 1: { interests: 'Chess (weekly club), Anime' } } };
-    const result = applyMemoryUpdate(store, guildId, update, MEMORY_CFG, new Set(['1']));
-
-    assert.equal(result.interestsChanged, 1);
-    const profile = store.getUser(guildId, '1');
-    assert.deepEqual(profile.interests.map((i) => i.topic), ['Chess', 'Anime']);
-    assert.equal(profile.interests[0].note, 'weekly club');
-  });
-});
-
-test('applyMemoryUpdate: raw.details as a legacy ARRAY is treated as {add: [...]}', () => {
-  withStore((store) => {
-    const guildId = 'g1';
-    store.touchUser(guildId, '1', 'nick', Date.now());
-
-    const result = applyMemoryUpdate(
-      store,
-      guildId,
-      { users: { 1: { details: ['owns a cat', 'plays guitar'] } } },
-      MEMORY_CFG,
-      new Set(['1']),
-    );
-
-    assert.equal(result.users, 1);
-    assert.deepEqual(store.getUser(guildId, '1').details.map((d) => d.text), ['owns a cat', 'plays guitar']);
-  });
-});
-
 test('applyMemoryUpdate: raw.details as {add, remove} is applied directly', () => {
   withStore((store) => {
     const guildId = 'g1';
     store.touchUser(guildId, '1', 'nick', Date.now());
-    applyMemoryUpdate(store, guildId, { users: { 1: { details: ['old fact'] } } }, MEMORY_CFG, new Set(['1']));
+    applyMemoryUpdate(store, guildId, { users: { 1: { details: { add: ['old fact'] } } } }, MEMORY_CFG, new Set(['1']));
 
     const result = applyMemoryUpdate(
       store,
@@ -2267,7 +2194,7 @@ test('observe: marks a message as direct only when told to', () => {
   });
 });
 
-// F30 (/nep pause): observe() must make the store dirty in NO way while paused.
+// /nep pause: observe() must make the store dirty in NO way while paused.
 test('observe: does nothing while store.state.data.paused is true -- no buffer, no user, no channel', () => {
   withStore((store) => {
     store.state.data.paused = true;
@@ -2302,7 +2229,7 @@ test('run: happy path applies the update, shifts the buffer and flushes to disk'
     const llm = {
       complete: async (messages, options) => {
         seenOptions = options;
-        return { text: JSON.stringify({ users: { 1: { interests: 'anime' } }, guild: { patterns: 'friendly' }, self: [] }) };
+        return { text: JSON.stringify({ users: { 1: { interests: { add: [{ topic: 'anime', note: '' }] } } }, guild: { patterns: 'friendly' }, self: [] }) };
       },
     };
     const updater = createMemoryUpdater({ hot, store, llm, calibrator, getSelfName: () => 'Nept' });
@@ -2320,7 +2247,7 @@ test('run: happy path applies the update, shifts the buffer and flushes to disk'
   });
 });
 
-// F30 (/nep pause): waitIdle() lets /nep pause wait out a live-analyzer run()
+// /nep pause: waitIdle() lets /nep pause wait out a live-analyzer run()
 // already in flight (an LLM call can take 30-90s) before it flushes and
 // drops the store's caches -- see src/admin.js#cmdPause.
 test('waitIdle: resolves immediately when no run() is in flight', async () => {
@@ -2370,7 +2297,7 @@ test('waitIdle: resolves only once the in-flight run() has finished, never start
   });
 });
 
-// F30 (/nep pause): the live analyzer must never run while paused, even with a fully due buffer.
+// /nep pause: the live analyzer must never run while paused, even with a fully due buffer.
 test('tick: does nothing while store.state.data.paused is true, even with a due buffer', async () => {
   await withStoreAsync(async (store) => {
     const guildId = 'g1';
@@ -2470,7 +2397,7 @@ test('run: a truncated failure halves the next batch size for that guild; a succ
   });
 });
 
-test('run: a "token-limit" failure halves the next batch size too, instead of looping on the same buffer forever (F34)', async () => {
+test('run: a "token-limit" failure halves the next batch size too, instead of looping on the same buffer forever', async () => {
   await withStoreAsync(async (store) => {
     const guildId = 'g1';
     const base = Date.now();
@@ -2573,7 +2500,7 @@ test('analyze: never touches the buffer, returns usage/estimated/result on succe
     const calibrator = createCalibrator();
     const llm = {
       complete: async () => ({
-        text: JSON.stringify({ users: { 1: { interests: 'anime' } } }),
+        text: JSON.stringify({ users: { 1: { interests: { add: [{ topic: 'anime', note: '' }] } } } }),
         usage: { prompt_tokens: 111, completion_tokens: 22 },
         estimated: 130,
       }),
@@ -2634,9 +2561,9 @@ test('analyze: a SectionsTooLargeError from buildMemoryRequest (required section
     const guildId = 'g1';
     // A huge memory prompt against a tiny per-request cap: buildMemoryRequest's
     // fitSections cannot fit even the required sections, and throws a
-    // SectionsTooLargeError before llm.complete is ever called (F34: this used
-    // to surface as a plain 'llm-error', which a caller could not tell apart
-    // from a genuine, retryable failure).
+    // SectionsTooLargeError before llm.complete is ever called (this must
+    // surface as its own reason, not a plain 'llm-error', so a caller can tell
+    // it apart from a genuine, retryable failure).
     const hot = {
       config: makeConfig({ llm: { ...makeConfig().llm, maxRequestTokens: 50, safetyMargin: 1 } }),
       prompts: { memory: 'x'.repeat(2000), labels },
@@ -2818,8 +2745,8 @@ test('analyze: forwards countAgainstDailyCap to llm.complete, default true', asy
   });
 });
 
-// ---- analyze: onPortraitRequest (F39) ---------------------------------------
-// See .claude/docs/prompt-contract.md, "Data model": a successful analyze()
+// ---- analyze: onPortraitRequest ----------------------------------------------
+// See docs/prompt-contract.md, "Data model": a successful analyze()
 // hands every collected `users.<id>.portrait` cue to the injected
 // onPortraitRequest(guildId, userId, reason) callback; a later task wires the
 // actual refresh. Never a store write on its own.
@@ -3121,8 +3048,8 @@ test('buildMemoryRequest: {{interestTopicChars}}/{{interestNoteChars}} fall back
   assert.equal(llmMessages[0].content, '40 120');
 });
 
-// ---- applyMemoryUpdate: id tokens on the way IN (F29) --------------------------
-// See .claude/docs/prompt-contract.md, "Members are referred to by id, never
+// ---- applyMemoryUpdate: id tokens on the way IN ---------------------------------
+// See docs/prompt-contract.md, "Members are referred to by id, never
 // by nickname" -- a `Name (id:123...)` the model writes in a free-text field
 // becomes `<@id>` when the id is known (an author of the batch, or an
 // existing stored profile); an unknown id is left exactly as written.
@@ -3178,13 +3105,19 @@ test('applyMemoryUpdate: an interest note "Name (id:...)" is tokenized, the topi
   });
 });
 
-test('applyMemoryUpdate: a detail text "Name (id:...)" is tokenized (both the array-add and ops shapes)', () => {
+test('applyMemoryUpdate: a detail text "Name (id:...)" is tokenized (both a bare-string and an object add item)', () => {
   withStore((store) => {
     const guildId = 'g1';
     store.touchUser(guildId, '1', 'Aria', Date.now());
     store.touchUser(guildId, '223456789012345678', 'Bran', Date.now());
 
-    applyMemoryUpdate(store, guildId, { users: { 1: { details: ['a gift from Bran (id:223456789012345678)'] } } }, MEMORY_CFG, new Set(['1']));
+    applyMemoryUpdate(
+      store,
+      guildId,
+      { users: { 1: { details: { add: ['a gift from Bran (id:223456789012345678)'] } } } },
+      MEMORY_CFG,
+      new Set(['1']),
+    );
     assert.equal(store.getUser(guildId, '1').details[0].text, 'a gift from <@223456789012345678>');
 
     applyMemoryUpdate(
@@ -3345,7 +3278,7 @@ test('applyMemoryUpdate: threads maxAliases/maxAliasesStored/aliasHalfLifeDays i
   });
 });
 
-// ---- buildMemoryRequest: id tokens resolved on the way OUT (analyzer mode, F29) --
+// ---- buildMemoryRequest: id tokens resolved on the way OUT (analyzer mode) ------
 
 function baseNameOf(names) {
   return (id) => names[id] ?? null;
@@ -3566,7 +3499,7 @@ test('buildMemoryRequest: no aliases field in existing_profiles when the profile
   assert.ok(!('aliases' in profiles['1']));
 });
 
-// ---- toTokens name-aware round trip through the real pipeline (F29 defect) ----
+// ---- toTokens name-aware round trip through the real pipeline ------------------
 // Reproduces the reported defect: a multi-word display name in the model's
 // "Name (id:...)" fallback form must round-trip through
 // applyMemoryUpdate -> buildMemoryRequest's analyzer view -> the model

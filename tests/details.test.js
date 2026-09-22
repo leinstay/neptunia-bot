@@ -1,10 +1,10 @@
 // Tests for src/memory/details.js: applyDetailOps (add/seen/remove, the
 // confirmation weight/gap rule shared with interests, id assignment/reuse,
-// clamping, eviction) and migrateDetails (legacy string array -> atomic
-// items). Pure, no I/O.
+// clamping, eviction) and normalizeDetails (validates stored items). Pure,
+// no I/O.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { applyDetailOps, migrateDetails } from '../src/memory/details.js';
+import { applyDetailOps, normalizeDetails } from '../src/memory/details.js';
 import { isConfirmed } from '../src/memory/interests.js';
 
 const NOW = Date.UTC(2026, 8, 21, 12, 0, 0); // 2026-09-21T12:00:00Z
@@ -165,7 +165,7 @@ test('applyDetailOps: among equal weights, evicts the oldest lastSeen first', ()
   assert.deepEqual(items.map((i) => i.text).sort(), ['b', 'c']);
 });
 
-// ---- storage cap vs shown cap, and rank-driven eviction (the F27 defect) -----
+// ---- storage cap vs shown cap, and rank-driven eviction -----------------------
 
 test('applyDetailOps: the storage cap is max(maxDetailsStored, maxDetails) -- a smaller stored cap never wins', () => {
   const existing = [
@@ -223,47 +223,39 @@ test('applyDetailOps: does not mutate the existing array or its items', () => {
   assert.deepEqual(existing, copy);
 });
 
-// ---- migrateDetails: legacy string array ----------------------------------------
+// ---- normalizeDetails: array validation -------------------------------------
 
-test('migrateDetails: a legacy array of bare strings becomes items with weight 1, null dates, fresh ids', () => {
-  const { items, nextId } = migrateDetails(['Owns a cat', 'Plays guitar'], 1);
-  assert.deepEqual(items, [
-    { id: 1, text: 'Owns a cat', weight: 1, firstSeen: null, lastSeen: null },
-    { id: 2, text: 'Plays guitar', weight: 1, firstSeen: null, lastSeen: null },
-  ]);
-  assert.equal(nextId, 3);
-});
-
-test('migrateDetails: startId offsets the assigned ids', () => {
-  const { items, nextId } = migrateDetails(['a', 'b'], 5);
+test('normalizeDetails: startId offsets the ids assigned to entries missing one', () => {
+  const { items, nextId } = normalizeDetails([{ text: 'a' }, { text: 'b' }], 5);
   assert.deepEqual(items.map((i) => i.id), [5, 6]);
   assert.equal(nextId, 7);
 });
 
-test('migrateDetails: blank/whitespace-only entries are dropped', () => {
-  const { items } = migrateDetails(['  ', 'Owns a cat', '']);
+test('normalizeDetails: blank/whitespace-only text is dropped', () => {
+  const { items } = normalizeDetails([{ text: '  ' }, { text: 'Owns a cat' }, { text: '' }]);
   assert.deepEqual(items.map((i) => i.text), ['Owns a cat']);
 });
 
-test('migrateDetails: an array already in the item shape passes through, keeping valid ids', () => {
-  const { items, nextId } = migrateDetails([{ id: 7, text: 'Owns a cat', weight: 3, firstSeen: 'a', lastSeen: 'b' }], 1);
+test('normalizeDetails: an array already in the item shape passes through, keeping valid ids', () => {
+  const { items, nextId } = normalizeDetails([{ id: 7, text: 'Owns a cat', weight: 3, firstSeen: 'a', lastSeen: 'b' }], 1);
   assert.deepEqual(items, [{ id: 7, text: 'Owns a cat', weight: 3, firstSeen: 'a', lastSeen: 'b' }]);
   assert.equal(nextId, 8, 'the sequence continues past the highest id seen');
 });
 
-test('migrateDetails: item-shaped entries missing a valid id get one assigned fresh', () => {
-  const { items } = migrateDetails([{ text: 'Owns a cat' }], 1);
+test('normalizeDetails: item-shaped entries missing a valid id get one assigned fresh', () => {
+  const { items } = normalizeDetails([{ text: 'Owns a cat' }], 1);
   assert.deepEqual(items, [{ id: 1, text: 'Owns a cat', weight: 1, firstSeen: null, lastSeen: null }]);
 });
 
-test('migrateDetails: garbage entries never throw, valid ones survive', () => {
-  const { items } = migrateDetails([null, 42, {}, { text: '' }, 'Owns a cat'], 1);
-  assert.deepEqual(items.map((i) => i.text), ['Owns a cat']);
+test('normalizeDetails: garbage entries (including a bare string) never throw, valid ones survive', () => {
+  const { items } = normalizeDetails([null, 42, {}, { text: '' }, 'Owns a cat', { text: 'Plays guitar' }], 1);
+  assert.deepEqual(items.map((i) => i.text), ['Plays guitar']);
 });
 
-test('migrateDetails: null/undefined/number/object all yield an empty list', () => {
-  assert.deepEqual(migrateDetails(null).items, []);
-  assert.deepEqual(migrateDetails(undefined).items, []);
-  assert.deepEqual(migrateDetails(42).items, []);
-  assert.deepEqual(migrateDetails({ not: 'an array' }).items, []);
+test('normalizeDetails: null/undefined/number/string/object all yield an empty list', () => {
+  assert.deepEqual(normalizeDetails(null).items, []);
+  assert.deepEqual(normalizeDetails(undefined).items, []);
+  assert.deepEqual(normalizeDetails(42).items, []);
+  assert.deepEqual(normalizeDetails('Owns a cat, plays guitar').items, []);
+  assert.deepEqual(normalizeDetails({ not: 'an array' }).items, []);
 });

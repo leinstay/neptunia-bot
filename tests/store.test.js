@@ -726,23 +726,14 @@ test('emptyProfile: a fresh profile starts with no interests', () => {
   assert.deepEqual(profile.interests, []);
 });
 
-test('getUser: migrates a legacy prose interests string to atomic items, in memory', () => {
+test('getUser: a hand-edited details array missing valid ids gets fresh ones assigned, advancing detailsSeq', () => {
   const dir = tmpDataDir();
   const guildDir = path.join(dir, 'guilds', 'g1', 'users');
   fs.mkdirSync(guildDir, { recursive: true });
-  fs.writeFileSync(path.join(guildDir, 'u1.json'), JSON.stringify({ id: 'u1', names: ['Alice'], interests: 'Chess (weekly club), Anime' }));
-
-  const store = createStore({ dataDir: dir });
-  const profile = store.getUser('g1', 'u1');
-  assert.deepEqual(profile.interests.map((i) => i.topic), ['Chess', 'Anime']);
-  assert.equal(profile.interests[0].note, 'weekly club');
-});
-
-test('getUser: migrates a legacy array-of-strings details field to atomic items, assigning fresh ids', () => {
-  const dir = tmpDataDir();
-  const guildDir = path.join(dir, 'guilds', 'g1', 'users');
-  fs.mkdirSync(guildDir, { recursive: true });
-  fs.writeFileSync(path.join(guildDir, 'u1.json'), JSON.stringify({ id: 'u1', names: ['Alice'], details: ['Owns a cat', 'Plays guitar'] }));
+  fs.writeFileSync(
+    path.join(guildDir, 'u1.json'),
+    JSON.stringify({ id: 'u1', names: ['Alice'], details: [{ text: 'Owns a cat' }, { text: 'Plays guitar' }] }),
+  );
 
   const store = createStore({ dataDir: dir });
   const profile = store.getUser('g1', 'u1');
@@ -851,11 +842,14 @@ test('applyProfileOps: routes interests ops through applyInterestOps', () => {
   assert.equal(profile.interests[0].note, 'plays weekly');
 });
 
-test('applyProfileOps: migrates a legacy prose interests string before applying ops', () => {
+test('applyProfileOps: normalizes a hand-edited interests array before applying ops', () => {
   const dir = tmpDataDir();
   const guildDir = path.join(dir, 'guilds', 'g1', 'users');
   fs.mkdirSync(guildDir, { recursive: true });
-  fs.writeFileSync(path.join(guildDir, 'u1.json'), JSON.stringify({ id: 'u1', names: ['Alice'], interests: 'Chess, Anime' }));
+  fs.writeFileSync(
+    path.join(guildDir, 'u1.json'),
+    JSON.stringify({ id: 'u1', names: ['Alice'], interests: [{ topic: 'Chess' }, { topic: 'Anime' }] }),
+  );
 
   const store = createStore({ dataDir: dir });
   const profile = store.applyProfileOps('g1', 'u1', { interests: { add: [{ topic: 'Cooking', note: '' }] } }, {
@@ -977,11 +971,14 @@ test('applyProfileOps: tolerates garbage ops without throwing, leaves the profil
   assert.deepEqual(profile.details, []);
 });
 
-test('applyProfileOps: persists across store instances, including a migrated legacy profile', () => {
+test('applyProfileOps: persists across store instances', () => {
   const dir = tmpDataDir();
   const guildDir = path.join(dir, 'guilds', 'g1', 'users');
   fs.mkdirSync(guildDir, { recursive: true });
-  fs.writeFileSync(path.join(guildDir, 'u1.json'), JSON.stringify({ id: 'u1', names: ['Alice'], interests: 'Chess (weekly club)' }));
+  fs.writeFileSync(
+    path.join(guildDir, 'u1.json'),
+    JSON.stringify({ id: 'u1', names: ['Alice'], interests: [{ topic: 'Chess', note: 'weekly club', weight: 1, firstSeen: null, lastSeen: null }] }),
+  );
 
   const storeA = createStore({ dataDir: dir });
   storeA.applyProfileOps('g1', 'u1', { interests: { add: [{ topic: 'Anime', note: '' }] }, details: { add: ['owns a cat'] } }, {
@@ -1080,7 +1077,7 @@ function seedGuild(store) {
   const cache = store.getMediaCache('g1');
   cache.a1 = { text: 'a cat', ts: 1000 };
   store.markMediaCacheDirty('g1');
-  store.state.data.warmup = { done: false, channels: { c1: { batchesDone: 2 } } };
+  store.state.data.bootstrap = { done: false, channels: { c1: { batchesDone: 2 } } };
   store.state.data.llmDay = '2026-09-20';
   store.state.data.llmCount = 7;
   store.state.markDirty();
@@ -1106,7 +1103,7 @@ test('wipeGuild: removes profiles, guild memory, channels, buffer and analyzer l
   assert.equal(lore[0].title, 'Founders Day');
   assert.equal(lore[0].source, 'owner');
   assert.deepEqual(storeA.getMediaCache('g1'), { a1: { text: 'a cat', ts: 1000 } });
-  assert.equal(storeA.state.data.warmup, undefined);
+  assert.equal(storeA.state.data.bootstrap, undefined);
   assert.equal(storeA.state.data.llmDay, '2026-09-20');
   assert.equal(storeA.state.data.llmCount, 7);
 
@@ -1121,7 +1118,7 @@ test('wipeGuild: removes profiles, guild memory, channels, buffer and analyzer l
   assert.equal(loreB.length, 1);
   assert.equal(loreB[0].title, 'Founders Day');
   assert.deepEqual(storeB.getMediaCache('g1'), { a1: { text: 'a cat', ts: 1000 } });
-  assert.equal(storeB.state.data.warmup, undefined);
+  assert.equal(storeB.state.data.bootstrap, undefined);
   assert.equal(storeB.state.data.llmDay, '2026-09-20');
   assert.equal(storeB.state.data.llmCount, 7);
 });
@@ -1190,7 +1187,7 @@ test('wipeGuild: does not touch another guild\'s memory', () => {
   assert.ok(storeB.getUser('g2', 'u9'));
 });
 
-// --- aliases (applyProfileOps) — F29 -----------------------------------------
+// --- aliases (applyProfileOps) ------------------------------------------------
 
 test('emptyProfile: a fresh profile starts with no aliases', () => {
   const dir = tmpDataDir();
@@ -1199,7 +1196,7 @@ test('emptyProfile: a fresh profile starts with no aliases', () => {
   assert.deepEqual(profile.aliases, []);
 });
 
-test('getUser: a legacy profile with no aliases key at all is tolerated, gets []', () => {
+test('getUser: a profile with no aliases key at all is tolerated, gets []', () => {
   const dir = tmpDataDir();
   const guildDir = path.join(dir, 'guilds', 'g1', 'users');
   fs.mkdirSync(guildDir, { recursive: true });
@@ -1282,7 +1279,7 @@ test('applyProfileOps: garbage aliases ops never throw and change nothing', () =
   }
 });
 
-// --- listUserProfiles — F29 ---------------------------------------------------
+// --- listUserProfiles -----------------------------------------------------------
 
 test('listUserProfiles: every stored profile of a guild, cached or on disk', () => {
   const dir = tmpDataDir();
@@ -1304,7 +1301,7 @@ test('listUserProfiles: an empty/never-seen guild returns []', () => {
   assert.deepEqual(store.listUserProfiles('g1'), []);
 });
 
-// --- dropCaches / reloadState / validate — F30 (/nep pause, /nep resume) ----
+// --- dropCaches / reloadState / validate (/nep pause, /nep resume) ------------
 
 test('dropCaches: forgets every cached file except state.json, so the next read is a fresh disk read', () => {
   const dir = tmpDataDir();
@@ -1343,13 +1340,13 @@ test('reloadState: re-reads state.json from disk, discarding the cached in-memor
   store.state.markDirty();
   store.flush();
 
-  // A hand-edit to state.json itself, e.g. warm-up progress, made while paused.
-  fs.writeFileSync(path.join(dir, 'state.json'), JSON.stringify({ llmCount: 99, warmup: { done: false } }));
+  // A hand-edit to state.json itself, e.g. bootstrap progress, made while paused.
+  fs.writeFileSync(path.join(dir, 'state.json'), JSON.stringify({ llmCount: 99, bootstrap: { done: false } }));
 
   assert.equal(store.state.data.llmCount, 1, 'still the stale cached value before reloadState');
   store.reloadState();
   assert.equal(store.state.data.llmCount, 99);
-  assert.deepEqual(store.state.data.warmup, { done: false });
+  assert.deepEqual(store.state.data.bootstrap, { done: false });
 });
 
 test('reloadState: falls back to {} when state.json does not exist', () => {
