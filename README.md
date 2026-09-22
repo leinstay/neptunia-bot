@@ -1,11 +1,9 @@
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset=".github/assets/logo-dark.png">
-    <img src=".github/assets/logo.png" width="128" alt="Neptunia Engine logo">
+    <source media="(prefers-color-scheme: dark)" srcset=".github/assets/banner-dark.png">
+    <img src=".github/assets/banner.png" width="700" alt="Neptunia - AI character engine for Discord">
   </picture>
 </p>
-<h1 align="center">Neptunia Engine</h1>
-<p align="center"><em>An LLM character engine for Discord</em></p>
 <p align="center">
   <a href="https://github.com/leinstay/neptunia-bot/stargazers"><img src="https://img.shields.io/github/stars/leinstay/neptunia-bot" alt="GitHub stars"></a>
   <a href="https://github.com/leinstay/neptunia-bot/forks"><img src="https://img.shields.io/github/forks/leinstay/neptunia-bot" alt="GitHub forks"></a>
@@ -17,9 +15,7 @@
 
 ---
 
-Neptunia Engine provides a locally run Discord bot that plays one LLM-driven character: Node.js 20+ with a single dependency (discord.js), any OpenRouter-compatible endpoint, a pluggable character card written without touching code, hot-reloaded prompts and config, per-member memory with attitudes and episodes, a server-wide lorebook, vision for attached pictures, one-line media descriptions from a helper model, owner slash commands for live tuning, and a dry-run mode for safe first runs.
-
-Setup, configuration and every command are documented in the sections below; the contract between the prompt files and the code lives in [`docs/prompt-contract.md`](docs/prompt-contract.md).
+Neptunia provides a locally run Discord bot that plays one LLM-driven character: Node.js 20+ with a single dependency (discord.js), any OpenRouter-compatible endpoint, a pluggable character card written without touching code, hot-reloaded prompts and config, per-member memory with attitudes and episodes, a server-wide lorebook, vision for attached pictures, one-line media descriptions from a helper model, owner slash commands for live tuning, and a dry-run mode for safe first runs.
 
 ## What is Neptunia?
 
@@ -91,221 +87,15 @@ Write your prompts in the language the character speaks. Translate `labels.json`
 
 The memory analyzer judges how the character feels about people. Both it and the warmup receive your character card and `rules.md`, so include what your character likes and dislikes; a live rule about voice or judgement shapes portraits and attitude the same way the card does.
 
+The placeholders, `labels.json` keys, context blocks and output tags every prompt file may use are specified in [`docs/prompt-contract.md`](docs/prompt-contract.md); a change on one side changes the other.
+
 ### Tips
 
 The system prompt handles sounding human, so the card is purely personality. Give the character opinions and a default mood rather than agreeability. Keep reference lines short and varied; they anchor style over long conversations. Write the card in the character's voice. Make profanity carry meaning, not fill space. Make silence a real option. A character that always answers is the most obvious bot tell.
 
 ## Configuration
 
-`config.json` holds every setting with its default. `config.local.json` (gitignored) is deep-merged over it. Both are hot-reloaded.
-
-### `features`
-
-| Key | Default | Meaning |
-|---|---|---|
-| `dryRun` | `false` | Full pipeline, never sends (see [Dry run](#dry-run)) |
-| `mentions` | `true` | React to @mentions |
-| `replies` | `true` | React to replies |
-| `nameTriggers` | `true` | React to name mentions in messages |
-| `spontaneous` | `true` | Unprompted messages on a random timer |
-| `eavesdrop` | `true` | Random chance to jump into any message |
-| `memory` | `true` | Build profiles, track server patterns, record self-claims |
-| `relationships` | `true` | Per-member attitude scores (-100..100) |
-| `episodes` | `true` | Per-person long-term memories (moments, quotes, grudges) |
-| `lore` | `true` | Server-wide lorebook |
-| `reactions` | `true` | Emoji reactions |
-| `multiMessage` | `true` | Allow 2–3 messages in a row |
-| `vision` | `true` | Process attached images |
-| `mediaDescriptions` | `true` | One-line descriptions for pictures, GIFs, video frames and link thumbnails |
-| `followUp` | `true` | Classify untagged messages after the persona answers to continue a conversation |
-| `typingSimulation` | `true` | Simulate typing speed |
-| `adminCommands` | `true` | Owner slash commands; `false` unregisters them |
-
-### `bot`
-
-| Key | Default | Meaning |
-|---|---|---|
-| `timezone` | `"UTC"` | Timezone for model timestamps |
-| `owners` | `[]` | User IDs for owner commands |
-| `commandName` | `"nep"` | Slash command name (lowercase `a-z 0-9 _ -`, up to 32 chars; re-registered on change) |
-| `nameTriggers` | `[]` | Extra trigger strings besides @mention |
-| `guildId` | `""` | Server to lock to; auto-detected if in exactly one |
-| `dryRunChannelId` | `""` | Channel for dry-run mirror (see [Dry run](#dry-run)) |
-| `channels.allow` | `[]` | Allowed channels (empty = all visible) |
-| `channels.deny` | `[]` | Ignored channels |
-| `access` | `{}` | Who besides owners may run which commands (managed by `/nep access`) |
-
-### `llm`
-
-| Key | Default | Meaning |
-|---|---|---|
-| `baseUrl` | `"https://openrouter.ai/api/v1"` | Chat completions endpoint |
-| `model` | `"anthropic/claude-opus-4.6"` | Model ID |
-| `temperature` | `1` | Sampling temperature |
-| `maxOutputTokens` | `700` | Max output tokens |
-| `maxRequestTokens` | `50000` | Hard token cap per request |
-| `safetyMargin` | `0.9` | Budgeting fraction of maxRequestTokens |
-| `timeoutMs` | `300000` | Request timeout (ms) |
-| `pingTimeoutMs` | `30000` | Timeout for `/nep ping` requests (ms) |
-| `retries` | `2` | Retries on transient failures |
-| `maxRequestsPerDay` | `300` | Daily request cap |
-| `provider` | `null` | OpenRouter `provider` routing object, passed verbatim; `null` sends nothing |
-
-`llm.provider` sets OpenRouter's provider routing field on every request, for example `{ "ignore": ["some-provider"] }` or `{ "order": ["anthropic"], "allow_fallbacks": true }`. If the OpenRouter account itself restricts allowed providers, ignoring the only one left makes every request fail with "No endpoints found". After changing provider settings, run `/nep ping` to verify that every model role is reachable.
-
-### `context`
-
-| Key | Default | Meaning |
-|---|---|---|
-| `channelMessages` | `100` | Current channel messages |
-| `neighborMessages` | `5` | Messages per neighbour channel |
-| `neighborMaxAgeMinutes` | `60` | Max age for neighbour messages (min) |
-| `neighborMaxChannels` | `8` | Max neighbour channels |
-| `maxMessageChars` | `800` | Truncate messages beyond this (chars) |
-| `gapMarkerMinutes` | `20` | Time-gap marker threshold (min) |
-| `otherProfiles` | `6` | Max other profiles shown |
-| `askedAboutProfiles` | `3` | Members referred to in the recent messages shown in full, ahead of the other participants |
-| `tempo.liveMessages10min` | `4` | Messages in 10 min = "live" |
-| `tempo.deadSilenceMinutes` | `45` | Silence minutes = "dead" |
-| `caps.interlocutor` | `6000` | Token cap: caller's profile with episodes |
-| `caps.aboutChat` | `2500` | Token cap: server habits / self-facts |
-| `caps.lore` | `1500` | Token cap: lore entries |
-| `caps.people` | `9000` | Token cap: other profiles |
-| `caps.neighbors` | `3000` | Token cap: neighbour channels |
-| `caps.server` | `4000` | Token cap: channel map |
-| `channelActivity.liveMessagesPerDay` | `20` | Daily messages = "active" channel |
-| `channelActivity.deadAfterDays` | `7` | Days without messages = "dead" channel |
-| `vision.maxImages` | `4` | Max images per request |
-| `vision.tokensPerImage` | `400` | Token budget per image |
-| `vision.imageSize` | `512` | Downscale target in px, via Discord's media proxy |
-| `vision.recentImages` | `3` | Recent channel images to include |
-| `vision.recentImageMinutes` | `30` | Max age for recent images (min) |
-| `vision.maxBytes` | `1500000` | Max image file size (bytes); larger pictures are skipped |
-| `vision.fetchTimeoutMs` | `10000` | Download timeout per image (ms) |
-
-### `media`
-
-Settings for the media describer (`features.mediaDescriptions`).
-
-| Key | Default | Meaning |
-|---|---|---|
-| `model` | `"anthropic/claude-haiku-4.5"` | Describer model |
-| `maxOutputTokens` | `120` | Max output tokens per description |
-| `imageSize` | `512` | Downscale target in px |
-| `maxPerTurn` | `6` | Max descriptions generated per turn |
-| `cacheEntries` | `5000` | Description cache size, keyed by attachment |
-| `filePreviewChars` | `500` | Characters shown from the beginning of text files |
-| `embedTextChars` | `200` | Characters shown from link embed text |
-
-### `mention`
-
-| Key | Default | Meaning |
-|---|---|---|
-| `ignoreChance` | `0` | Base ignore chance; raise to make the persona skip some pings |
-| `emptyMentionIgnoreChance` | `0` | Ignore chance for bare @mention; raise to make the persona skip some |
-| `repeatWindowMinutes` | `10` | Repeat tracking window (min) |
-| `repeatPenalty` | `0` | Added ignore chance per repeat; raise to penalize repeats |
-| `spamThreshold` | `50` | Calls in window before spam |
-| `spamIgnoreChance` | `0.9` | Ignore chance when spammed |
-| `nameTriggerChance` | `1` | Name trigger response chance |
-| `neverIgnore` | `[]` | User IDs never ignored |
-| `affinityIgnoreBonus` | `0` | Max added ignore at affinity -100; raise to make disliked members get ignored more |
-| `affinityLikeBonus` | `0.08` | Max reduced ignore at affinity +100 |
-| `oneAtATime` | `true` | One reply at a time across the server |
-| `maxPending` | `3` | Channels that can hold a direct ping while busy |
-| `pendingMinutes` | `10` | Minutes before a held ping expires |
-| `switchDelayMs` | `[2000, 9000]` | Pause before answering in the next channel (ms) |
-| `followUpMinutes` | `2` | Follow-up window after the persona's last reply (min) |
-| `followUpContext` | `15` | Transcript lines sent to the classifier |
-| `followUpModel` | `null` | Classifier model (`null` = media model) |
-| `followUpMaxOutputTokens` | `8` | Max output tokens for the classifier |
-| `followUpNoStreak` | `3` | Consecutive `no` verdicts that close the window |
-
-### `typing`
-
-| Key | Default | Meaning |
-|---|---|---|
-| `reactionDelayMs` | `[800, 4000]` | Reaction delay range (ms) |
-| `msPerChar` | `[35, 75]` | Per-character typing speed (ms) |
-| `minMs` | `900` | Min typing duration (ms) |
-| `maxMs` | `12000` | Max typing duration (ms) |
-| `betweenMessagesMs` | `[700, 3500]` | Pause between messages (ms) |
-
-### `spontaneous`
-
-| Key | Default | Meaning |
-|---|---|---|
-| `channels` | `[]` | Allowed channels |
-| `maxChannelSilenceHours` | `72` | Channel silence that blocks spontaneous messages (hours); 0 = no limit |
-| `minIntervalMinutes` | `25` | Min check interval (min) |
-| `maxIntervalMinutes` | `420` | Max check interval (min) |
-| `burstChance` | `0.15` | Burst follow-up chance |
-| `burstMinutes` | `[3, 15]` | Burst timing range (min) |
-| `activeHours` | `{ from: 10, to: 3 }` | Active hours (wraps midnight) |
-| `liveWindowMinutes` | `15` | Live window (min) |
-| `liveMinMessages` | `4` | Min messages for "live" |
-| `deadAfterMinutes` | `90` | Silence before "dead" (min) |
-| `initiateChance` | `0.35` | Chance of starting a topic vs interjecting |
-| `eavesdropChance` | `0.02` | Per-message jump-in chance |
-| `eavesdropDelayMs` | `[5000, 40000]` | Eavesdrop delay range (ms) |
-| `minGapMinutes` | `12` | Min gap between actions (min) |
-
-### `memory`
-
-| Key | Default | Meaning |
-|---|---|---|
-| `model` | `null` | Analyzer model (`null` = llm.model) |
-| `mainChannelIds` | `[]` | Channels where people talk to each other; the portrait of a member's character and style is drawn from them; empty means every channel counts |
-| `portraitRefreshHours` | `24` | Min hours between portrait refreshes per member |
-| `portraitRefreshPerDay` | `20` | Max portrait refreshes per server per day |
-| `batchMessages` | `60` | Ideal batch size |
-| `minBatchMessages` | `15` | Min messages before update |
-| `maxBatchAgeMinutes` | `180` | Force update after (min) |
-| `maxOutputTokens` | `20000` | Max analyzer output tokens |
-| `fieldChars` | `1000` | Profile field limit (chars) |
-| `clampTolerance` | `1.25` | Text from the analyzer may exceed a limit by this factor before it is cut; cuts land on a sentence or word boundary and never inside a member reference |
-| `maxDetails` | `15` | Detail items shown to the persona and analyzer per profile |
-| `maxDetailsStored` | `40` | Detail items kept per profile; the top by frequency and recency are shown |
-| `maxInterests` | `12` | Interest items shown to the persona and analyzer per profile |
-| `maxInterestsStored` | `40` | Interest items kept per profile; the top by frequency and recency are shown |
-| `interestTopicChars` | `40` | Max chars for an interest topic |
-| `interestNoteChars` | `120` | Max chars for an interest note |
-| `confirmAfter` | `2` | Sightings before an interest or detail is confirmed |
-| `confirmGapHours` | `12` | Hours between sightings to count as a new occasion |
-| `interestStaleDays` | `90` | Days without sighting before an interest is marked old |
-| `interestHalfLifeDays` | `180` | Weight half-life for interests (days); an unseen item's weight halves each period, so a new pastime can overtake an old one |
-| `detailHalfLifeDays` | `720` | Weight half-life for details (days) |
-| `maxAliases` | `5` | Aliases shown to the persona and analyzer per profile |
-| `maxAliasesStored` | `15` | Aliases kept per profile; the top by frequency and recency are shown |
-| `aliasHalfLifeDays` | `365` | Weight half-life for aliases (days) |
-| `maxInjokes` | `15` | Max server in-jokes |
-| `maxSelfFacts` | `20` | Max self-claims |
-| `maxEpisodes` | `20` | Max episodes kept per person |
-| `maxNewEpisodes` | `3` | Max new episodes per person per batch |
-| `timeoutMs` | `900000` | Analyzer timeout (ms), separate from `llm.timeoutMs` |
-
-The analyzer prompt reads these limits as placeholders, so raising a value takes effect on the next batch. Bigger profiles cost context tokens (`context.caps.people`, `context.caps.interlocutor`) and analyzer output (`memory.maxOutputTokens`).
-
-### `relationships`
-
-| Key | Default | Meaning |
-|---|---|---|
-| `damping` | `true` | Damp score changes that push further from zero; changes toward zero apply in full |
-| `dampingPower` | `1` | Exponent of the damping factor; higher values make the ends of the scale harder to reach |
-| `maxDeltaPerUpdate` | `15` | Max score change per update |
-| `historySize` | `10` | Attitude changes kept per member |
-| `directTriggerCount` | `6` | Direct interactions that force early update |
-
-With `damping` on, a change that pushes the score further from zero is scaled by `(1 - |score| / 100) ^ dampingPower`, so extremes take sustained effort; a change back toward zero applies at full strength. The score is stored with fractional precision and shown as a whole number; `/nep memory affinity` sets it directly without damping.
-
-### `lore`
-
-| Key | Default | Meaning |
-|---|---|---|
-| `maxEntries` | `500` | Max lorebook entries per server |
-| `scanMessages` | `30` | Messages scanned for key matches |
-| `maxMatches` | `8` | Max entries shown per request |
-| `textChars` | `600` | Lore entry text limit (chars) |
+`config.json` holds every setting with its default. `config.local.json` (gitignored) is deep-merged over it. Both are hot-reloaded. See [`docs/configuration.md`](docs/configuration.md) for the full reference of every key.
 
 ## Getting started with memory
 
@@ -354,49 +144,7 @@ First run on a new server: enable `features.dryRun`, watch the mirror or `journa
 
 ## Owner commands
 
-One Discord slash command, `/nep` (the name comes from `bot.commandName`). Guild commands, registered on start for the served server. Every answer is ephemeral; only the caller sees it, in whatever channel it was typed. Channels, roles and users are picked from Discord's own pickers; `set`/`unset` and `access grant`/`access revoke` autocomplete their `path`/`command` options. The bot does not read direct messages.
-
-`/nep` is visible to every member from the start; access is gated per command at the moment it runs, never through Discord's own command visibility. Owners (`bot.owners`) can always run every command. Everyone else needs a grant: `/nep access grant <command> [role] [user]` opens one command key (e.g. `memory.show`), a whole group (e.g. `memory`), or every command (`*`) to everyone (no role/user given), a role, or a user; `/nep access revoke` undoes one of those; `/nep access list` shows the current grants. Without a grant, a non-owner who runs `/nep` gets an ephemeral "Not allowed" reply.
-
-| Command | What it does |
-|---|---|
-| `/nep status` | Model, calibration, quotas and per-guild memory status |
-| `/nep reload` | Reload config and prompts now |
-| `/nep ping [role]` | Send a minimal request to one or all model roles (`talk`, `analyzer`, `media`, `followup`) and report model, latency, provider, tokens or the error; does not count against `llm.maxRequestsPerDay` and works while paused or warming up |
-| `/nep pause` | Stop all activity, flush memory to disk and unload it; `data/` is safe to edit while paused |
-| `/nep resume` | Reload memory from `data/` and continue; refuses if any JSON file does not parse, naming the broken ones |
-| `/nep poke [mode] [channel]` | Force a spontaneous action |
-| `/nep set <path> <value>` | Override a config value (writes to `config.local.json`) |
-| `/nep unset <path>` | Remove a config override |
-| `/nep rule add <text>` | Append a rule to `prompts.local/rules.md` |
-| `/nep rule list` | List the rules, numbered |
-| `/nep rule remove <number>` | Remove a rule by number |
-| `/nep model show` | Show active models for each role (`talk`, `analyzer`, `media`, `followup`) |
-| `/nep model set <role> <id>` | Set the model for a role (`talk`, `analyzer`, `media`, `followup`) |
-| `/nep memory show <user> [section] [limit] [order]` | Without a section: compact summary. Sections: `character`, `style`, `relationship`, `affinity`, `aliases`, `interests`, `details`, `episodes`, `raw` (stored JSON). List sections take `limit` 1..100 (default 25) and `order`: `rank` (default, divider at the visibility cutoff) or `recent`. Stored member references resolve to the current name, except in `raw` |
-| `/nep memory channel [channel]` | With a channel: stored note in full (purpose, topics, tone, message count, activity, top writers). Without: a table of every channel the persona knows, sorted by last message |
-| `/nep memory server` | Server-wide notes: how people talk, how conversations start, in-jokes, self-facts, plus counts of profiles, channels and lore entries |
-| `/nep memory refresh <user>` | Force a portrait refresh for a member |
-| `/nep memory forget <user>` | Delete a stored profile |
-| `/nep memory affinity <user> [score] [reason]` | Show or set attitude (-100..100) |
-| `/nep memory alias-add <user> <name>` | Add a chat alias; confirmed at once |
-| `/nep memory alias-remove <user> <name>` | Remove a chat alias |
-| `/nep memory wipe <confirm>` | Wipe all analyzer memory for this server; type the exact server name to confirm |
-| `/nep lore add <title> <keys> <text> [always]` | Add or overwrite a lorebook entry; an entry with the same title is replaced and becomes owner-owned, so the analyzer never edits it again |
-| `/nep lore list [query]` | List lorebook entries |
-| `/nep lore show <id>` | Show a lorebook entry |
-| `/nep lore remove <id>` | Remove a lorebook entry |
-| `/nep warmup run` | Start or resume a full run: channels, then people, then server |
-| `/nep warmup users [member]` | With a member: profile or re-profile that one now; without: re-profile every qualifying member |
-| `/nep warmup channels [channel]` | With a channel: describe or re-describe that one now; without: every readable channel |
-| `/nep warmup server` | Rebuild the server notes and lore now |
-| `/nep warmup people` | List members who qualify |
-| `/nep warmup status` | Show warmup progress and token usage |
-| `/nep warmup stop` | End any warmup work at once; the request in flight is cancelled, progress is kept so `run` can resume |
-| `/nep warmup reset` | Clear warmup progress, not stored memory |
-| `/nep access grant <command> [role] [user]` | Open a command, group or `*` to everyone (default), a role, or a user |
-| `/nep access revoke <command> [role] [user]` | Revoke a previous grant from everyone (default), a role, or a user |
-| `/nep access list` | List every current access grant |
+One Discord slash command, `/nep` (the name comes from `bot.commandName`). Guild commands, registered on start for the served server. Every answer is ephemeral; only the caller sees it, in whatever channel it was typed. See [`docs/owner-commands.md`](docs/owner-commands.md) for every subcommand and the access grants.
 
 ## How a turn works
 
@@ -497,6 +245,8 @@ prompts/
 prompts.local/             your personality (gitignored)
 docs/
   prompt-contract.md       the contract between prompt files and code
+  configuration.md         full reference for every config key
+  owner-commands.md        every subcommand and the access grants
 src/
   index.js                 entry point, wiring, timers, shutdown
   config.js                .env parser, config loader, deepMerge

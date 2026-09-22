@@ -12,7 +12,7 @@ Node.js 20 or newer. No build step, no TypeScript, no `dotenv`. Tests run with `
 
 ## Before you start
 
-Neptunia Engine is a Discord pseudo-user engine: one instance, one server, one bot account, one personality supplied through prompt files. The engine stays character-neutral — a character's behaviour belongs in a deployment's own `prompts.local/`, never in `src/` or tracked `prompts/`. Pull requests that add character-specific logic will be declined.
+Neptunia is a Discord pseudo-user engine: one instance, one server, one bot account, one personality supplied through prompt files. The engine stays character-neutral — a character's behaviour belongs in a deployment's own `prompts.local/`, never in `src/` or tracked `prompts/`. Pull requests that add character-specific logic will be declined.
 
 Open an issue before a change of behaviour, a new config setting, a new owner command or a new prompt file, so the design is agreed before the code. A bug fix with a test can go straight to a pull request.
 
@@ -36,7 +36,7 @@ Fork the repository, branch from `main`, make the change, open a pull request ba
 - The model's output is data: only the tags in the output contract are acted on.
 - Logs carry counts, never message contents.
 
-**Every behaviour has a config setting.** A new behaviour needs its switch or number in `config.json` (`features.*` for on/off) and a row in the README configuration tables.
+**Every behaviour has a config setting.** A new behaviour needs its switch or number in `config.json` (`features.*` for on/off) and a row in the [configuration reference](docs/configuration.md).
 
 **No model-facing text in `src/`.** Anything the model or the chat reads lives in `prompts/*.md` and `prompts/labels.json`. The prompt-to-code contract — placeholders, `labels.json` keys, context blocks, output tags, analyzer JSON — is documented in [`docs/prompt-contract.md`](docs/prompt-contract.md). A change on one side of the contract changes the other in the same pull request.
 

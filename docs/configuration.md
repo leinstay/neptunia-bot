@@ -1,0 +1,211 @@
+# Configuration
+
+Every key in `config.json` with its default, grouped by section.
+
+## `features`
+
+| Key | Default | Meaning |
+|---|---|---|
+| `dryRun` | `false` | Full pipeline, never sends (see [Dry run](../README.md#dry-run)) |
+| `mentions` | `true` | React to @mentions |
+| `replies` | `true` | React to replies |
+| `nameTriggers` | `true` | React to name mentions in messages |
+| `spontaneous` | `true` | Unprompted messages on a random timer |
+| `eavesdrop` | `true` | Random chance to jump into any message |
+| `memory` | `true` | Build profiles, track server patterns, record self-claims |
+| `relationships` | `true` | Per-member attitude scores (-100..100) |
+| `episodes` | `true` | Per-person long-term memories (moments, quotes, grudges) |
+| `lore` | `true` | Server-wide lorebook |
+| `reactions` | `true` | Emoji reactions |
+| `multiMessage` | `true` | Allow 2–3 messages in a row |
+| `vision` | `true` | Process attached images |
+| `mediaDescriptions` | `true` | One-line descriptions for pictures, GIFs, video frames and link thumbnails |
+| `followUp` | `true` | Classify untagged messages after the persona answers to continue a conversation |
+| `typingSimulation` | `true` | Simulate typing speed |
+| `adminCommands` | `true` | Owner slash commands; `false` unregisters them |
+
+## `bot`
+
+| Key | Default | Meaning |
+|---|---|---|
+| `timezone` | `"UTC"` | Timezone for model timestamps |
+| `owners` | `[]` | User IDs for owner commands |
+| `commandName` | `"nep"` | Slash command name (lowercase `a-z 0-9 _ -`, up to 32 chars; re-registered on change) |
+| `nameTriggers` | `[]` | Extra trigger strings besides @mention |
+| `guildId` | `""` | Server to lock to; auto-detected if in exactly one |
+| `dryRunChannelId` | `""` | Channel for dry-run mirror (see [Dry run](../README.md#dry-run)) |
+| `channels.allow` | `[]` | Allowed channels (empty = all visible) |
+| `channels.deny` | `[]` | Ignored channels |
+| `access` | `{}` | Who besides owners may run which commands (managed by `/nep access`) |
+
+## `llm`
+
+| Key | Default | Meaning |
+|---|---|---|
+| `baseUrl` | `"https://openrouter.ai/api/v1"` | Chat completions endpoint |
+| `model` | `"anthropic/claude-opus-4.6"` | Model ID |
+| `temperature` | `1` | Sampling temperature |
+| `maxOutputTokens` | `700` | Max output tokens |
+| `maxRequestTokens` | `50000` | Hard token cap per request |
+| `safetyMargin` | `0.9` | Budgeting fraction of maxRequestTokens |
+| `timeoutMs` | `300000` | Request timeout (ms) |
+| `pingTimeoutMs` | `30000` | Timeout for `/nep ping` requests (ms) |
+| `retries` | `2` | Retries on transient failures |
+| `maxRequestsPerDay` | `300` | Daily request cap |
+| `provider` | `null` | OpenRouter `provider` routing object, passed verbatim; `null` sends nothing |
+
+`llm.provider` sets OpenRouter's provider routing field on every request, for example `{ "ignore": ["some-provider"] }` or `{ "order": ["anthropic"], "allow_fallbacks": true }`. If the OpenRouter account itself restricts allowed providers, ignoring the only one left makes every request fail with "No endpoints found". After changing provider settings, run `/nep ping` to verify that every model role is reachable.
+
+## `context`
+
+| Key | Default | Meaning |
+|---|---|---|
+| `channelMessages` | `100` | Current channel messages |
+| `neighborMessages` | `5` | Messages per neighbour channel |
+| `neighborMaxAgeMinutes` | `60` | Max age for neighbour messages (min) |
+| `neighborMaxChannels` | `8` | Max neighbour channels |
+| `maxMessageChars` | `800` | Truncate messages beyond this (chars) |
+| `gapMarkerMinutes` | `20` | Time-gap marker threshold (min) |
+| `otherProfiles` | `6` | Max other profiles shown |
+| `askedAboutProfiles` | `3` | Members referred to in the recent messages shown in full, ahead of the other participants |
+| `tempo.liveMessages10min` | `4` | Messages in 10 min = "live" |
+| `tempo.deadSilenceMinutes` | `45` | Silence minutes = "dead" |
+| `caps.interlocutor` | `6000` | Token cap: caller's profile with episodes |
+| `caps.aboutChat` | `2500` | Token cap: server habits / self-facts |
+| `caps.lore` | `1500` | Token cap: lore entries |
+| `caps.people` | `9000` | Token cap: other profiles |
+| `caps.neighbors` | `3000` | Token cap: neighbour channels |
+| `caps.server` | `4000` | Token cap: channel map |
+| `channelActivity.liveMessagesPerDay` | `20` | Daily messages = "active" channel |
+| `channelActivity.deadAfterDays` | `7` | Days without messages = "dead" channel |
+| `vision.maxImages` | `4` | Max images per request |
+| `vision.tokensPerImage` | `400` | Token budget per image |
+| `vision.imageSize` | `512` | Downscale target in px, via Discord's media proxy |
+| `vision.recentImages` | `3` | Recent channel images to include |
+| `vision.recentImageMinutes` | `30` | Max age for recent images (min) |
+| `vision.maxBytes` | `1500000` | Max image file size (bytes); larger pictures are skipped |
+| `vision.fetchTimeoutMs` | `10000` | Download timeout per image (ms) |
+
+## `media`
+
+Settings for the media describer (`features.mediaDescriptions`).
+
+| Key | Default | Meaning |
+|---|---|---|
+| `model` | `"anthropic/claude-haiku-4.5"` | Describer model |
+| `maxOutputTokens` | `120` | Max output tokens per description |
+| `imageSize` | `512` | Downscale target in px |
+| `maxPerTurn` | `6` | Max descriptions generated per turn |
+| `cacheEntries` | `5000` | Description cache size, keyed by attachment |
+| `filePreviewChars` | `500` | Characters shown from the beginning of text files |
+| `embedTextChars` | `200` | Characters shown from link embed text |
+
+## `mention`
+
+| Key | Default | Meaning |
+|---|---|---|
+| `ignoreChance` | `0` | Base ignore chance; raise to make the persona skip some pings |
+| `emptyMentionIgnoreChance` | `0` | Ignore chance for bare @mention; raise to make the persona skip some |
+| `repeatWindowMinutes` | `10` | Repeat tracking window (min) |
+| `repeatPenalty` | `0` | Added ignore chance per repeat; raise to penalize repeats |
+| `spamThreshold` | `50` | Calls in window before spam |
+| `spamIgnoreChance` | `0.9` | Ignore chance when spammed |
+| `nameTriggerChance` | `1` | Name trigger response chance |
+| `neverIgnore` | `[]` | User IDs never ignored |
+| `affinityIgnoreBonus` | `0` | Max added ignore at affinity -100; raise to make disliked members get ignored more |
+| `affinityLikeBonus` | `0.08` | Max reduced ignore at affinity +100 |
+| `oneAtATime` | `true` | One reply at a time across the server |
+| `maxPending` | `3` | Channels that can hold a direct ping while busy |
+| `pendingMinutes` | `10` | Minutes before a held ping expires |
+| `switchDelayMs` | `[2000, 9000]` | Pause before answering in the next channel (ms) |
+| `followUpMinutes` | `2` | Follow-up window after the persona's last reply (min) |
+| `followUpContext` | `15` | Transcript lines sent to the classifier |
+| `followUpModel` | `null` | Classifier model (`null` = media model) |
+| `followUpMaxOutputTokens` | `8` | Max output tokens for the classifier |
+| `followUpNoStreak` | `3` | Consecutive `no` verdicts that close the window |
+
+## `typing`
+
+| Key | Default | Meaning |
+|---|---|---|
+| `reactionDelayMs` | `[800, 4000]` | Reaction delay range (ms) |
+| `msPerChar` | `[35, 75]` | Per-character typing speed (ms) |
+| `minMs` | `900` | Min typing duration (ms) |
+| `maxMs` | `12000` | Max typing duration (ms) |
+| `betweenMessagesMs` | `[700, 3500]` | Pause between messages (ms) |
+
+## `spontaneous`
+
+| Key | Default | Meaning |
+|---|---|---|
+| `channels` | `[]` | Allowed channels |
+| `maxChannelSilenceHours` | `72` | Channel silence that blocks spontaneous messages (hours); 0 = no limit |
+| `minIntervalMinutes` | `25` | Min check interval (min) |
+| `maxIntervalMinutes` | `420` | Max check interval (min) |
+| `burstChance` | `0.15` | Burst follow-up chance |
+| `burstMinutes` | `[3, 15]` | Burst timing range (min) |
+| `activeHours` | `{ from: 10, to: 3 }` | Active hours (wraps midnight) |
+| `liveWindowMinutes` | `15` | Live window (min) |
+| `liveMinMessages` | `4` | Min messages for "live" |
+| `deadAfterMinutes` | `90` | Silence before "dead" (min) |
+| `initiateChance` | `0.35` | Chance of starting a topic vs interjecting |
+| `eavesdropChance` | `0.02` | Per-message jump-in chance |
+| `eavesdropDelayMs` | `[5000, 40000]` | Eavesdrop delay range (ms) |
+| `minGapMinutes` | `12` | Min gap between actions (min) |
+
+## `memory`
+
+| Key | Default | Meaning |
+|---|---|---|
+| `model` | `null` | Analyzer model (`null` = llm.model) |
+| `mainChannelIds` | `[]` | Channels where people talk to each other; the portrait of a member's character and style is drawn from them; empty means every channel counts |
+| `portraitRefreshHours` | `24` | Min hours between portrait refreshes per member |
+| `portraitRefreshPerDay` | `20` | Max portrait refreshes per server per day |
+| `batchMessages` | `60` | Ideal batch size |
+| `minBatchMessages` | `15` | Min messages before update |
+| `maxBatchAgeMinutes` | `180` | Force update after (min) |
+| `maxOutputTokens` | `20000` | Max analyzer output tokens |
+| `fieldChars` | `1000` | Profile field limit (chars) |
+| `clampTolerance` | `1.25` | Text from the analyzer may exceed a limit by this factor before it is cut; cuts land on a sentence or word boundary and never inside a member reference |
+| `maxDetails` | `15` | Detail items shown to the persona and analyzer per profile |
+| `maxDetailsStored` | `40` | Detail items kept per profile; the top by frequency and recency are shown |
+| `maxInterests` | `12` | Interest items shown to the persona and analyzer per profile |
+| `maxInterestsStored` | `40` | Interest items kept per profile; the top by frequency and recency are shown |
+| `interestTopicChars` | `40` | Max chars for an interest topic |
+| `interestNoteChars` | `120` | Max chars for an interest note |
+| `confirmAfter` | `2` | Sightings before an interest or detail is confirmed |
+| `confirmGapHours` | `12` | Hours between sightings to count as a new occasion |
+| `interestStaleDays` | `90` | Days without sighting before an interest is marked old |
+| `interestHalfLifeDays` | `180` | Weight half-life for interests (days); an unseen item's weight halves each period, so a new pastime can overtake an old one |
+| `detailHalfLifeDays` | `720` | Weight half-life for details (days) |
+| `maxAliases` | `5` | Aliases shown to the persona and analyzer per profile |
+| `maxAliasesStored` | `15` | Aliases kept per profile; the top by frequency and recency are shown |
+| `aliasHalfLifeDays` | `365` | Weight half-life for aliases (days) |
+| `maxInjokes` | `15` | Max server in-jokes |
+| `maxSelfFacts` | `20` | Max self-claims |
+| `maxEpisodes` | `20` | Max episodes kept per person |
+| `maxNewEpisodes` | `3` | Max new episodes per person per batch |
+| `timeoutMs` | `900000` | Analyzer timeout (ms), separate from `llm.timeoutMs` |
+
+The analyzer prompt reads these limits as placeholders, so raising a value takes effect on the next batch. Bigger profiles cost context tokens (`context.caps.people`, `context.caps.interlocutor`) and analyzer output (`memory.maxOutputTokens`).
+
+## `relationships`
+
+| Key | Default | Meaning |
+|---|---|---|
+| `damping` | `true` | Damp score changes that push further from zero; changes toward zero apply in full |
+| `dampingPower` | `1` | Exponent of the damping factor; higher values make the ends of the scale harder to reach |
+| `maxDeltaPerUpdate` | `15` | Max score change per update |
+| `historySize` | `10` | Attitude changes kept per member |
+| `directTriggerCount` | `6` | Direct interactions that force early update |
+
+With `damping` on, a change that pushes the score further from zero is scaled by `(1 - |score| / 100) ^ dampingPower`, so extremes take sustained effort; a change back toward zero applies at full strength. The score is stored with fractional precision and shown as a whole number; `/nep memory affinity` sets it directly without damping.
+
+## `lore`
+
+| Key | Default | Meaning |
+|---|---|---|
+| `maxEntries` | `500` | Max lorebook entries per server |
+| `scanMessages` | `30` | Messages scanned for key matches |
+| `maxMatches` | `8` | Max entries shown per request |
+| `textChars` | `600` | Lore entry text limit (chars) |
