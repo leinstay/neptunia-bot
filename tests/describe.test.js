@@ -1,6 +1,6 @@
 // Tests for src/memory/describe.js: the media describer — caching, LRU
 // trimming, persistence, per-batch caps, the feature switch, and the
-// download-first flow (F19): a picture is downloaded and sent to the model
+// download-first flow: a picture is downloaded and sent to the model
 // as a data: URL, never as a bare Discord URL a provider might refuse to
 // fetch itself; a failed download is cached as a miss exactly like a failed
 // LLM request, and every failure path logs one `describe: failed` line.
@@ -20,7 +20,7 @@ function fakeHot(overrides = {}) {
   return {
     config: {
       features: { mediaDescriptions: true },
-      media: { model: 'x/haiku', maxOutputTokens: 120, imageSize: 512, cacheEntries: 5000, maxPerTurn: 6, maxPerBatch: 20 },
+      media: { model: 'x/haiku', maxOutputTokens: 120, imageSize: 512, cacheEntries: 5000, maxPerTurn: 6 },
       context: { vision: { maxBytes: 1_500_000, fetchTimeoutMs: 10_000 } },
       ...overrides.config,
     },
@@ -166,7 +166,7 @@ test('describe: a cache hit is free -- no download, no LLM request, marked cache
   assert.equal(second.text, 'a cat');
 });
 
-// --- F19: download-first, download failure, LLM failure --------------------
+// --- download-first, download failure, LLM failure --------------------
 
 test('describe: a failed download is cached as a miss, costs no LLM request, and logs reason "download"', async () => {
   const dir = tmpDataDir();
@@ -357,7 +357,7 @@ test('describe: an image request resizes through the media proxy at media.imageS
   assert.equal(new URL(fetchedUrl).searchParams.get('width'), '256');
 });
 
-// --- F17: stickers, custom emoji, link thumbnails -------------------------
+// --- stickers, custom emoji, link thumbnails -------------------------
 
 test('describe: a sticker item is downloaded as-is, never through the media proxy (already sized via ?size=)', async () => {
   const dir = tmpDataDir();

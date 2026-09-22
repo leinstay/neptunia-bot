@@ -147,7 +147,6 @@
     "maxOutputTokens": 120,
     "imageSize": 512,
     "maxPerTurn": 6,
-    "maxPerBatch": 20,
     "cacheEntries": 5000,
     "filePreviewChars": 500,
     "embedTextChars": 200
