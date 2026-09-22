@@ -10,7 +10,6 @@
 // command means adding one tree entry and one mapper, nothing else.
 
 import { log } from '../log.js';
-import { hasAnyGrant } from './access.js';
 
 // Raw Discord API option-type numbers (application-command-option-type):
 // https://discord.com/developers/docs/interactions/application-commands
@@ -48,7 +47,7 @@ const SLOW_COMMANDS = new Set([
 ]);
 
 const DISABLED_MESSAGE = 'Owner commands are disabled (features.adminCommands is off).';
-const NOT_ALLOWED_MESSAGE = 'Not allowed.';
+const NOT_ALLOWED_MESSAGE = 'Not allowed';
 
 /** `^[a-z0-9_-]{1,32}$` — Discord's rule for a command name. */
 export function isValidCommandName(name) {
@@ -58,18 +57,18 @@ export function isValidCommandName(name) {
 /**
  * The whole command tree as plain, JSON-serializable objects (the shape
  * `guild.commands.set([...])` expects), for one top-level command named
- * `commandName`. Pure — no discord.js import, no I/O. `visible` (default
- * false, today's behaviour) omits `default_member_permissions` so Discord
- * shows the command to every member instead of hiding it behind the
- * `MANAGE_GUILD`-only default — per-command gating still happens at
- * interaction time (`createInteractionHandler`, `admin.isAllowed`).
+ * `commandName`. Pure — no discord.js import, no I/O. Always visible to
+ * every member (no `default_member_permissions`); an ungranted member who
+ * runs it gets the not-allowed reply — all gating happens at interaction
+ * time (`createInteractionHandler`, `admin.isAllowed`), never through
+ * Discord's own command visibility, so re-registering never invalidates a
+ * client's cached command.
  */
-export function buildCommandTree(commandName, { visible = false } = {}) {
+export function buildCommandTree(commandName) {
   return [
     {
       name: commandName,
       description: 'Owner controls for the persona.',
-      ...(visible ? {} : { default_member_permissions: '0' }),
       options: [
         { type: SUBCOMMAND, name: 'status', description: 'Model, calibration, quotas and per-guild memory status.' },
         {
@@ -478,10 +477,9 @@ export async function registerCommands(guild, config) {
     return false;
   }
 
-  const visible = hasAnyGrant(config?.bot?.access);
   try {
-    await guild.commands.set(buildCommandTree(commandName, { visible }));
-    log.info('commands: registered', { visible });
+    await guild.commands.set(buildCommandTree(commandName));
+    log.info('commands: registered');
     return true;
   } catch (err) {
     const appId = guild.client?.application?.id ?? guild.client?.user?.id ?? 'YOUR_APPLICATION_ID';

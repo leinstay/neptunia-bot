@@ -1,9 +1,9 @@
 // Tests for src/discord/access.js: the pure owner-managed access decision
-// (isAllowed, hasAnyGrant) and the immutable grant/revoke helpers.
+// (isAllowed) and the immutable grant/revoke helpers.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { isAllowed, hasAnyGrant, grant, revoke } from '../src/discord/access.js';
+import { isAllowed, grant, revoke } from '../src/discord/access.js';
 
 // ---------------------------------------------------------------------------
 // isAllowed
@@ -99,34 +99,6 @@ test('isAllowed: a malformed entry (not an object) on a matching key is skipped,
   const access = { status: 'not an object', '*': { everyone: true, roles: [], users: [] } };
   const allowed = isAllowed({ commandKey: 'status', userId: '2', roleIds: [], owners: ['1'], access });
   assert.equal(allowed, true);
-});
-
-// ---------------------------------------------------------------------------
-// hasAnyGrant
-// ---------------------------------------------------------------------------
-
-test('hasAnyGrant: false for an empty, missing or invalid access', () => {
-  assert.equal(hasAnyGrant({}), false);
-  assert.equal(hasAnyGrant(undefined), false);
-  assert.equal(hasAnyGrant(null), false);
-  assert.equal(hasAnyGrant('nope'), false);
-});
-
-test('hasAnyGrant: false when every entry is empty', () => {
-  const access = { status: { everyone: false, roles: [], users: [] } };
-  assert.equal(hasAnyGrant(access), false);
-});
-
-test('hasAnyGrant: true with an everyone grant', () => {
-  assert.equal(hasAnyGrant({ status: { everyone: true, roles: [], users: [] } }), true);
-});
-
-test('hasAnyGrant: true with a role grant', () => {
-  assert.equal(hasAnyGrant({ status: { everyone: false, roles: ['r1'], users: [] } }), true);
-});
-
-test('hasAnyGrant: true with a user grant', () => {
-  assert.equal(hasAnyGrant({ status: { everyone: false, roles: [], users: ['u1'] } }), true);
 });
 
 // ---------------------------------------------------------------------------

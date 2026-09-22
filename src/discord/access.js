@@ -38,21 +38,6 @@ export function isAllowed({ commandKey, userId, roleIds, owners, access }) {
   return false;
 }
 
-/** True when `access` grants at least one thing (everyone, a role or a user)
- * on at least one entry — used to decide whether the command tree should be
- * visible to ordinary members at all (see commands.js#buildCommandTree). */
-export function hasAnyGrant(access) {
-  if (!access || typeof access !== 'object') return false;
-  return Object.values(access).some(
-    (entry) =>
-      entry &&
-      typeof entry === 'object' &&
-      (entry.everyone === true ||
-        (Array.isArray(entry.roles) && entry.roles.length > 0) ||
-        (Array.isArray(entry.users) && entry.users.length > 0)),
-  );
-}
-
 /** `access[key]`, normalized to `{ everyone, roles, users }` with fresh arrays (never the caller's own). */
 function entryOf(access, key) {
   const raw = access?.[key];

@@ -53,20 +53,16 @@ function findOption(options, name) {
 // buildCommandTree
 // ---------------------------------------------------------------------------
 
-test('buildCommandTree: one top-level command, hidden by default, named from the argument', () => {
+test('buildCommandTree: one top-level command, named from the argument', () => {
   const tree = buildCommandTree('nep');
   assert.equal(tree.length, 1);
   const [command] = tree;
   assert.equal(command.name, 'nep');
-  assert.equal(command.default_member_permissions, '0');
 });
 
-test('buildCommandTree: visible:true omits default_member_permissions; visible:false (or omitted) keeps it hidden', () => {
-  const visible = buildCommandTree('nep', { visible: true })[0];
-  assert.equal('default_member_permissions' in visible, false);
-
-  const hidden = buildCommandTree('nep', { visible: false })[0];
-  assert.equal(hidden.default_member_permissions, '0');
+test('buildCommandTree: never emits default_member_permissions -- always visible, gating happens in code', () => {
+  const [command] = buildCommandTree('nep');
+  assert.equal('default_member_permissions' in command, false);
 });
 
 test('buildCommandTree: top-level leaves (status, ping, reload, pause, resume, poke, set, unset)', () => {
@@ -422,7 +418,7 @@ test('registerCommands: pushes the built tree for the configured command name', 
   assert.deepEqual(guild.setCalls[0], buildCommandTree('nep'));
 });
 
-test('registerCommands: bot.access with at least one grant pushes a visible tree (no default_member_permissions)', async () => {
+test('registerCommands: pushes a visible tree (no default_member_permissions) regardless of bot.access', async () => {
   const guild = fakeGuild();
   const config = {
     bot: { commandName: 'nep', access: { status: { everyone: true, roles: [], users: [] } } },
@@ -432,17 +428,17 @@ test('registerCommands: bot.access with at least one grant pushes a visible tree
   const ok = await registerCommands(guild, config);
 
   assert.equal(ok, true);
-  assert.deepEqual(guild.setCalls[0], buildCommandTree('nep', { visible: true }));
+  assert.deepEqual(guild.setCalls[0], buildCommandTree('nep'));
   assert.equal('default_member_permissions' in guild.setCalls[0][0], false);
 });
 
-test('registerCommands: an empty bot.access (no grants) still pushes a hidden tree', async () => {
+test('registerCommands: an empty bot.access (no grants) still pushes a visible tree', async () => {
   const guild = fakeGuild();
   const config = { bot: { commandName: 'nep', access: {} }, features: { adminCommands: true } };
 
   await registerCommands(guild, config);
 
-  assert.equal(guild.setCalls[0][0].default_member_permissions, '0');
+  assert.equal('default_member_permissions' in guild.setCalls[0][0], false);
 });
 
 test('registerCommands: features.adminCommands false clears the guild command list instead of setting the tree', async () => {
