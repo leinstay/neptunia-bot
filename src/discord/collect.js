@@ -317,7 +317,7 @@ export function lastActivity(channel) {
  * Up to `neighborMessages` recent messages from each neighbouring channel that
  * saw activity within `neighborMaxAgeMinutes`. Channels are pre-filtered by the
  * snowflake of their last message, so quiet channels cost no API calls.
- * @returns {Promise<{ channelName: string, messages: object[] }[]>}
+ * @returns {Promise<{ channelId: string, channelName: string, messages: object[] }[]>}
  */
 export async function fetchNeighbors(channel, config, selfId, now = Date.now()) {
   const { neighborMessages, neighborMaxAgeMinutes, neighborMaxChannels } = config.context;
@@ -334,10 +334,10 @@ export async function fetchNeighbors(channel, config, selfId, now = Date.now()) 
         const messages = (await fetchHistory(other, neighborMessages, selfId, config.media?.embedTextChars)).filter(
           (m) => m.ts >= minTs,
         );
-        return { channelName: other.name, messages };
+        return { channelId: other.id, channelName: other.name, messages };
       } catch (err) {
         log.warn('collect: neighbour channel fetch failed', { channel: other.id, error: err });
-        return { channelName: other.name, messages: [] };
+        return { channelId: other.id, channelName: other.name, messages: [] };
       }
     }),
   );

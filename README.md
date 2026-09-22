@@ -147,7 +147,7 @@ The system prompt handles sounding human, so the card is purely personality. Giv
 | `caps.lore` | `1500` | Token cap: lore entries |
 | `caps.people` | `4000` | Token cap: other profiles |
 | `caps.neighbors` | `3000` | Token cap: neighbour channels |
-| `caps.server` | `2500` | Token cap: channel map |
+| `caps.server` | `1500` | Token cap: channel map |
 | `channelActivity.liveMessagesPerDay` | `20` | Daily messages = "active" channel |
 | `channelActivity.deadAfterDays` | `7` | Days without messages = "dead" channel |
 | `vision.maxImages` | `4` | Max images per request |

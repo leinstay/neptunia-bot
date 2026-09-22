@@ -383,12 +383,13 @@ test('buildRequest: hides <server> entirely when channels is empty', () => {
   assert.ok(!request.messages[1].content.includes('<server>'));
 });
 
-test('buildRequest: the current channel is first and carries labels.server.currentMark', () => {
+test('buildRequest: the current channel is first and carries labels.server.currentMark, a contributing neighbour follows', () => {
   const channels = [
     fakeChannel('c1', { name: 'general', lastMessageAt: NOW - 5 * MIN }),
     fakeChannel('c2', { name: 'random', lastMessageAt: NOW }), // more recent, but not the current channel
   ];
-  const request = buildRequest(baseInput({ channels, currentChannelId: 'c1' }));
+  const neighbors = [{ channelId: 'c2', channelName: 'random', messages: [makeMessage(9, NOW - 5 * MIN)] }];
+  const request = buildRequest(baseInput({ channels, currentChannelId: 'c1', neighbors }));
   const user = request.messages[1].content;
   const serverStart = user.indexOf('<server>');
   const generalIdx = user.indexOf('# general', serverStart);
@@ -397,19 +398,73 @@ test('buildRequest: the current channel is first and carries labels.server.curre
   assert.ok(user.includes(`# general${labels.server.currentMark}`));
 });
 
-test('buildRequest: channels other than the current one are ordered by lastMessageAt descending', () => {
+test('buildRequest: <server> shows only the current channel and the neighbours that contributed to <other_channels>, nothing else', () => {
   const channels = [
-    fakeChannel('c1', { name: 'oldest', lastMessageAt: NOW - 3 * MIN }),
-    fakeChannel('c2', { name: 'newest', lastMessageAt: NOW - 1 * MIN }),
-    fakeChannel('c3', { name: 'never-active', lastMessageAt: null }),
+    fakeChannel('c1', { name: 'general' }),
+    fakeChannel('c2', { name: 'random' }),
+    fakeChannel('c3', { name: 'off-topic' }), // never a neighbour this turn -- must not appear
   ];
-  const request = buildRequest(baseInput({ channels, currentChannelId: 'other-channel' }));
+  const neighbors = [
+    { channelId: 'c2', channelName: 'random', messages: [makeMessage(9, NOW - 5 * MIN)] },
+  ];
+  const request = buildRequest(baseInput({ channels, currentChannelId: 'c1', neighbors }));
+  const user = request.messages[1].content;
+  assert.ok(user.includes('# general'));
+  assert.ok(user.includes('# random'));
+  assert.ok(!user.includes('# off-topic'));
+});
+
+test('buildRequest: several contributing neighbours render in the order given by `neighbors`, by id not by name', () => {
+  const channels = [
+    fakeChannel('c1', { name: 'general' }),
+    fakeChannel('c2', { name: 'zzz-last-by-name' }),
+    fakeChannel('c3', { name: 'aaa-first-by-name' }),
+  ];
+  const neighbors = [
+    { channelId: 'c2', channelName: 'zzz-last-by-name', messages: [makeMessage(9, NOW - 5 * MIN)] },
+    { channelId: 'c3', channelName: 'aaa-first-by-name', messages: [makeMessage(10, NOW - 4 * MIN)] },
+  ];
+  const request = buildRequest(baseInput({ channels, currentChannelId: 'c1', neighbors }));
   const user = request.messages[1].content;
   const serverStart = user.indexOf('<server>');
-  const newestIdx = user.indexOf('# newest', serverStart);
-  const oldestIdx = user.indexOf('# oldest', serverStart);
-  const neverIdx = user.indexOf('# never-active', serverStart);
-  assert.ok(newestIdx < oldestIdx && oldestIdx < neverIdx);
+  const c2Idx = user.indexOf('# zzz-last-by-name', serverStart);
+  const c3Idx = user.indexOf('# aaa-first-by-name', serverStart);
+  assert.ok(c2Idx !== -1 && c3Idx !== -1 && c2Idx < c3Idx, 'neighbours keep the order of the `neighbors` input');
+});
+
+test('buildRequest: a neighbour with no stored channel note is skipped, not synthesized', () => {
+  const channels = [fakeChannel('c1', { name: 'general' })];
+  const neighbors = [{ channelId: 'never-touched', channelName: 'never-touched', messages: [makeMessage(9, NOW - 5 * MIN)] }];
+  const request = buildRequest(baseInput({ channels, currentChannelId: 'c1', neighbors }));
+  const user = request.messages[1].content;
+  const serverBlock = user.slice(user.indexOf('<server>'), user.indexOf('</server>'));
+  assert.ok(serverBlock.includes('# general'));
+  assert.ok(!serverBlock.includes('# never-touched'), 'a neighbour with no note must not appear in <server>');
+  // It still contributes its messages to <other_channels>, unaffected by this feature.
+  assert.ok(user.includes('<other_channels>'));
+});
+
+test('buildRequest: with no stored note for the current channel, its Discord facts and activity still render from history', () => {
+  const history = [
+    makeMessage(1, NOW - MIN, {
+      channelId: 'c1',
+      channelName: 'brand-new-channel',
+      channelCategory: 'General',
+      channelTopic: 'say hi',
+    }),
+  ];
+  const request = buildRequest(baseInput({ history, channels: [], currentChannelId: 'c1' }));
+  const user = request.messages[1].content;
+  assert.ok(user.includes(`# brand-new-channel${labels.server.currentMark}`));
+  assert.ok(user.includes(fill(labels.server.category, { text: 'General' })));
+  assert.ok(user.includes(fill(labels.server.topic, { text: 'say hi' })));
+  assert.ok(user.includes(`activity: ${labels.server.activityDead}`));
+});
+
+test('buildRequest: with no stored note and no channel facts anywhere in history, <server> stays empty', () => {
+  const history = [makeMessage(1, NOW - MIN)];
+  const request = buildRequest(baseInput({ history, channels: [], currentChannelId: 'c1' }));
+  assert.ok(!request.messages[1].content.includes('<server>'));
 });
 
 test('buildRequest: every channel is listed even with no purpose/topics/tone, name and activity survive', () => {
@@ -429,11 +484,12 @@ test('buildRequest: under a tiny server cap, the map is trimmed but <chat> still
     fakeChannel('c1', { name: 'general', purpose: 'x'.repeat(200), lastMessageAt: NOW }),
     fakeChannel('c2', { name: 'random', purpose: 'y'.repeat(200), lastMessageAt: NOW - MIN }),
   ];
+  const neighbors = [{ channelId: 'c2', channelName: 'random', messages: [makeMessage(20, NOW - MIN)] }];
   // 340 was tight enough pre-F17; the <senses> block grew a few lines
   // (stickers/lottie, part of the always-kept "fixed" section) so the
   // budget needs a little more headroom to still leave room for chat.
   const config = fakeConfig({ llm: { maxRequestTokens: 400, safetyMargin: 1 } });
-  const request = buildRequest(baseInput({ history, channels, currentChannelId: 'c1', config }));
+  const request = buildRequest(baseInput({ history, channels, neighbors, currentChannelId: 'c1', config }));
 
   assert.equal(request.stats.server.kept, 0);
   assert.ok(request.stats.chat.kept > 0, 'expected at least some chat lines to survive');

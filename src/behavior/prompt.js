@@ -278,17 +278,56 @@ export function renderProfile(
 }
 
 /**
- * Render the <server> block: the current channel first (marked via
- * `labels.server.currentMark`), then the rest by `lastMessageAt` descending —
- * a channel never seen yet sorts last. See .claude/docs/prompt-contract.md,
- * "Server memory (the channel map)".
+ * A stand-in channel entry for `serverItems` when the current channel has no
+ * stored note yet (see below): Discord facts (name/category/topic) read off
+ * whichever `history` message actually belongs to `currentChannelId` (every
+ * message `buildRequest` is given for `<chat>` comes from that one channel,
+ * see src/discord/collect.js#normalizeMessage) -- so the persona still knows
+ * where it is even before the analyzer has touched this channel once. `null`
+ * when no message carries a usable channel name (nothing to render then; a
+ * channel with counters but no name never happens in practice).
  */
-function serverItems(channels, currentChannelId, now, activityCfg, labels, nameOf) {
-  const current = channels.find((channel) => channel.id === currentChannelId);
-  const rest = channels
-    .filter((channel) => channel.id !== currentChannelId)
-    .sort((a, b) => (b.lastMessageAt ?? 0) - (a.lastMessageAt ?? 0));
-  const ordered = current ? [current, ...rest] : rest;
+function currentChannelFallback(currentChannelId, history) {
+  if (!currentChannelId) return null;
+  const source = [...history].reverse().find((m) => m.channelId === currentChannelId && m.channelName);
+  if (!source) return null;
+  return {
+    id: currentChannelId,
+    name: source.channelName,
+    category: source.channelCategory ?? null,
+    topic: source.channelTopic ?? null,
+    purpose: '',
+    topics: '',
+    tone: '',
+    days: {},
+    lastMessageAt: null,
+    topWriters: [],
+  };
+}
+
+/**
+ * Render the `<server>` block: ONLY the channels that matter for this turn --
+ * the current channel first, marked via `labels.server.currentMark` (its
+ * stored note in full, or -- when nothing is stored for it yet, see
+ * `currentChannelFallback` above -- just its Discord facts and activity), then
+ * the neighbour channels that actually contributed messages to
+ * `<other_channels>` this turn, `neighborChannelIds` (matched by id, never by
+ * name -- a rename or a same-named channel elsewhere must never cross-wire
+ * two entries), each in full too. Every other stored channel note is left
+ * out on purpose (F46): on a large server most of them are irrelevant to this
+ * reply and used to eat most of the block's budget for nothing. A neighbour
+ * id with no stored note is skipped, not synthesized -- unlike the current
+ * channel, a neighbour the persona is not replying in does not need a
+ * where-am-I fallback.
+ */
+function serverItems(channels, currentChannelId, neighborChannelIds, history, now, activityCfg, labels, nameOf) {
+  const byId = new Map(channels.map((channel) => [channel.id, channel]));
+  const current = byId.get(currentChannelId) ?? currentChannelFallback(currentChannelId, history);
+  const neighborEntries = [...new Set(neighborChannelIds)]
+    .filter((id) => id !== currentChannelId)
+    .map((id) => byId.get(id))
+    .filter(Boolean);
+  const ordered = current ? [current, ...neighborEntries] : neighborEntries;
   return ordered.map((channel) =>
     renderChannel(
       {
@@ -452,7 +491,10 @@ function pullInByName(scanText, candidates, excludeIds, maxAliases, aliasHalfLif
  * @param {number} input.now
  * @param {string} input.selfName
  * @param {object[]} input.history         Normalized channel messages, oldest first.
- * @param {{channelName: string, messages: object[]}[]} input.neighbors
+ * @param {{channelId?: string, channelName: string, messages: object[]}[]} input.neighbors
+ *   `channelId` (see src/discord/collect.js#fetchNeighbors) is how `<server>` tells which
+ *   stored channel note, if any, belongs to a neighbour that contributed to `<other_channels>` --
+ *   omitted (an older/direct caller) simply means that neighbour never gets its note shown.
  * @param {object|null} input.trigger      Normalized message that called the persona (reply mode).
  * @param {string|null} input.triggerKind
  * @param {object} input.guildMemory
@@ -580,7 +622,16 @@ export function buildRequest(input) {
         name: 'server',
         cap: caps.server ?? 2500,
         keep: 'first',
-        items: serverItems(channels, currentChannelId, now, config.context.channelActivity, labels, nameOf),
+        items: serverItems(
+          channels,
+          currentChannelId,
+          neighbors.map((n) => n.channelId).filter(Boolean),
+          history,
+          now,
+          config.context.channelActivity,
+          labels,
+          nameOf,
+        ),
       },
       { name: 'chat', keep: 'newest', items: chatItems.map((item) => item.text) },
       {
