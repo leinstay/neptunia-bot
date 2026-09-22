@@ -84,10 +84,6 @@ The memory analyzer judges how the character feels about people. Both it and the
 
 The placeholders, `labels.json` keys, context blocks and output tags every prompt file may use are specified in [`docs/prompt-contract.md`](docs/prompt-contract.md); a change on one side requires the matching change on the other.
 
-### Tips
-
-The system prompt handles sounding human, so the card is purely personality. Give the character opinions and a default mood rather than agreeability. Keep reference lines short and varied; they anchor style over long conversations. Write the card in the character's voice. Make profanity carry meaning, not fill space. Make silence a real option. A character that always answers is the most obvious bot tell.
-
 ## Configuration
 
 `config.json` holds every setting with its default. `config.local.json` (gitignored) is deep-merged over it. Both are hot-reloaded. See [`docs/en/configuration.md`](docs/en/configuration.md) for the full reference of every key.
