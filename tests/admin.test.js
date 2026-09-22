@@ -2926,3 +2926,12 @@ test('run: status includes a bootstrap progress line when the dependency is avai
   const body = await admin.run('status', {}, {});
   assert.match(body, /bootstrap: channels=2 people=4 server=done tokens=500 requests=6 aborted=no/);
 });
+
+test('run: memory.wipe is refused while a warmup is in flight', async () => {
+  const rootDir = makeRoot();
+  const { admin } = makeAdmin(rootDir, { isBootstrapping: () => true });
+  await assert.rejects(
+    () => admin.run('memory.wipe', { confirm: 'Guild' }, { guildId: 'g1' }),
+    /warmup is running/,
+  );
+});

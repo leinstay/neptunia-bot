@@ -1615,8 +1615,10 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
     let peopleEligible = null;
     let nextTarget = null;
 
+    // Totals come from whatever windows were fetched last, however old: a run keeps working from
+    // them long after the 15-minute refetch window, and a stale count beats a "?".
     const cached = cache.get(guildId);
-    if (cached && now() - cached.fetchedAt < CACHE_TTL_MS) {
+    if (cached) {
       const cfg = hot.config.bootstrap ?? {};
       const windows = cached.windows;
       const eligibleChannels = windows; // every readable channel gets a note: the map must cover channels that may wake up later

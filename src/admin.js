@@ -1091,6 +1091,7 @@ export function createAdmin({
     assertNotPaused();
     const guildId = resolvedGuildId(context);
     if (!guildId) throw new Error('no guild resolved yet');
+    if (isBootstrapping()) throw new Error('a warmup is running: /nep warmup stop first');
 
     const guildName = client?.guilds?.cache?.get(guildId)?.name || guildId;
     const confirm = String(args?.confirm ?? '').trim();
