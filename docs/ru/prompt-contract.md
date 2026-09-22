@@ -173,7 +173,7 @@ warmup.contextMark                       prefixed to context lines in the profil
 {
   "users": { "<userId>": {
       "portrait": "",                                                // OPTIONAL: one-line cue that the stored character/style misses something
-      "relationship": "",                                            // OPTIONAL: present only when it must change, then the whole new text
+      "relationship": "",                                            // OPTIONAL: present when first written or when it must change, then the whole new text
       "aliases": { "add": [""], "remove": [""] },
       "interests": { "add": [ { "topic": "", "note": "", "sure": false } ], "update": [ { "topic": "", "note": "" } ],
                      "seen": [ "topic" ], "remove": [ "topic" ] },
@@ -231,9 +231,10 @@ warmup.contextMark                       prefixed to context lines in the profil
   оценок переписывается из батча заново, а не правится по частям. `character`, `relationship`, `reason` отношения и
   `feeling` эпизода пишутся голосом персонажа из карточки (первое лицо допускается, клинической лексики нет). `style`:
   КАК человек пишет (длина, ритм, словарь, привычки с эмодзи), а не что делает или о чём говорит. `relationship`:
-  как персонаж и этот человек стоят друг к другу, без новостей и без отношений человека с другими людьми. Каждое
-  ≤ `memory.fieldChars`, возвращается только при необходимости изменения; отсутствующее поле оставляет сохранённый текст
-  нетронутым. `character` и `style` пишутся ТОЛЬКО промптом `profile.md` (прогрев и обновление портрета), потоковый
+  как персонаж и этот человек стоят друг к другу, без новостей и без отношений человека с другими людьми; записывается
+  впервые, когда сохранённый текст пуст и батч показывает их реальное взаимодействие (или affinity/episodes уже есть),
+  далее — только при необходимости изменения. Каждое ≤ `memory.fieldChars`; отсутствующее поле оставляет сохранённый
+  текст нетронутым. `character` и `style` пишутся ТОЛЬКО промптом `profile.md` (прогрев и обновление портрета), потоковый
   анализатор их никогда не редактирует напрямую. Анализатор возвращает `portrait` (однострочная подсказка о том, что
   упускает сохранённый текст), когда батч того требует, и код ставит обновление в очередь.
 - **Участники указываются по id, никогда по нику.** Ники меняются ежедневно, поэтому во всех текстовых полях, которые

@@ -173,7 +173,7 @@ of what is already stored, so facts are not degraded by being rewritten batch af
 {
   "users": { "<userId>": {
       "portrait": "",                                                // OPTIONAL: one-line cue that the stored character/style misses something
-      "relationship": "",                                            // OPTIONAL: present only when it must change, then the whole new text
+      "relationship": "",                                            // OPTIONAL: present when first written or when it must change, then the whole new text
       "aliases": { "add": [""], "remove": [""] },
       "interests": { "add": [ { "topic": "", "note": "", "sure": false } ], "update": [ { "topic": "", "note": "" } ],
                      "seen": [ "topic" ], "remove": [ "topic" ] },
@@ -231,8 +231,10 @@ of what is already stored, so facts are not degraded by being rewritten batch af
   rewritten from the batch, not patched. `character`, `relationship`, the affinity `reason` and an episode's `feeling`
   are written in the persona's voice from the card (first person allowed, no clinical vocabulary). `style`:
   HOW the person writes (length, rhythm, vocabulary, emoji habits), not what they do or talk about. `relationship`:
-  how the persona and this person stand with each other, not news and not the person's relations with others. Each
-  ≤ `memory.fieldChars`, returned only when it needs to change; an absent field leaves the stored text untouched.
+  how the persona and this person stand with each other, not news and not the person's relations with others; written
+  first when the stored text is empty and a batch shows them dealing with each other (or affinity/episodes already
+  exist), afterwards only when it must change. Each ≤ `memory.fieldChars`; an absent field leaves the stored text
+  untouched.
   `character` and `style` are written ONLY by `profile.md` (the warmup and a portrait refresh), never edited by the
   stream analyzer directly. The analyzer returns `portrait` (a one-line cue about what the stored text misses) when
   a batch warrants it, and code queues a refresh.

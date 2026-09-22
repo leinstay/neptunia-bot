@@ -172,7 +172,7 @@ warmup.contextMark                       prefixed to context lines in the profil
 {
   "users": { "<userId>": {
       "portrait": "",                                                // OPTIONAL: one-line cue that the stored character/style misses something
-      "relationship": "",                                            // OPTIONAL: present only when it must change, then the whole new text
+      "relationship": "",                                            // OPTIONAL: present when first written or when it must change, then the whole new text
       "aliases": { "add": [""], "remove": [""] },
       "interests": { "add": [ { "topic": "", "note": "", "sure": false } ], "update": [ { "topic": "", "note": "" } ],
                      "seen": [ "topic" ], "remove": [ "topic" ] },
@@ -222,8 +222,9 @@ warmup.contextMark                       prefixed to context lines in the profil
   行为不是性格。已存储的形容词/评价文本从该批次中重写，而非修补。`character`、`relationship`、态度
   `reason` 和回忆的 `feeling` 以角色卡中的角色声音撰写（可用第一人称，不用生硬术语）。`style`：该成员
   怎么写（长度、节奏、词汇、表情使用习惯），而非他们做什么或谈什么。`relationship`：角色和这个人之间的
-  关系如何，不是新闻，也不是该成员与其他人的关系。每个字段 ≤ `memory.fieldChars`，仅在需要变更时返回；
-  缺失的字段保持已存储的文本不变。`character` 和 `style` 仅由 `profile.md`（预热和画像刷新）撰写，流
+  关系如何，不是新闻，也不是该成员与其他人的关系；当已存储文本为空且批次显示双方有实际互动（或已有
+  affinity/episodes）时首次写入，之后仅在需要变更时返回。每个字段 ≤ `memory.fieldChars`；缺失的字段保持
+  已存储的文本不变。`character` 和 `style` 仅由 `profile.md`（预热和画像刷新）撰写，流
   分析器不直接编辑。分析器在批次有必要时返回 `portrait`（一行提示，指出已存储文本遗漏了什么），代码会
   排队进行刷新。
 - **成员通过 id 引用，而非昵称。**昵称随时变化，因此分析器撰写的每个自由文本字段（档案文本、兴趣笔记、
