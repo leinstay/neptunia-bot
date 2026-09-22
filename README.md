@@ -60,6 +60,7 @@ Both are hot-reloaded.
 | `describe.md` | yes | One-line media descriptions for the helper model |
 | `profile.md` | yes | Bootstrap: one member's profile from a message sample |
 | `channel.md` | yes | Bootstrap: channel notes from a message sample |
+| `server.md` | yes | Bootstrap: server-level notes from channel notes and member summaries |
 | `labels.json` | yes | Every string the code inserts into prompts (deep-merged between layers) |
 
 **The only file you must rewrite is `character-card.md`.** Copy it to `prompts.local/` and write your persona. Everything else works as-is, or override individual files as needed.
@@ -226,6 +227,8 @@ Settings for the media describer (`features.mediaDescriptions`).
 |---|---|---|
 | `model` | `null` | Analyzer model (`null` = llm.model) |
 | `mainChannelIds` | `[]` | Channels where people talk to each other; the portrait of a member's character and style is drawn from them; empty means every channel counts |
+| `portraitRefreshHours` | `24` | Min hours between portrait refreshes per member |
+| `portraitRefreshPerDay` | `20` | Max portrait refreshes per server per day |
 | `batchMessages` | `60` | Ideal batch size |
 | `minBatchMessages` | `15` | Min messages before update |
 | `maxBatchAgeMinutes` | `180` | Force update after (min) |
@@ -275,74 +278,51 @@ With `damping` on, a change that pushes the score further from zero is scaled by
 | `maxMatches` | `8` | Max entries shown per request |
 | `textChars` | `600` | Lore entry text limit (chars) |
 
-## Large servers
+## Getting started with memory
 
-Storage does not limit the number of people: each member is one small JSON file, a couple of kilobytes. The cost and size of one reply do not grow with the server either, because a turn carries only the caller's profile with their moments, the profiles of the last few people in the transcript (`context.otherProfiles`, default 6, inside `context.caps.people`), and the few lore entries whose keys came up. The defaults suit a server of a few dozen active people as they are.
+The engine builds its memory of people and channels from a sample of recent messages. On first start, when `bootstrap.enabled` is true and no profile exists yet, a bootstrap run starts automatically. The persona stays mute while it runs.
 
-For a server of a couple of hundred active members, four settings are worth raising:
+**Order of operations:**
 
-- `context.caps.server` to about 5000. The channel map fits roughly 25 channels in the default 2500; the current channel is always kept and the quietest ones are dropped first.
-- `llm.maxRequestsPerDay` to about 1000. The analyzer runs every `memory.batchMessages` messages and the describer adds requests; when the cap is hit the bot goes quiet until the next UTC day, nothing breaks. The warm-up is exempt.
-- `memory.maxOutputTokens` to about 12000. A busy batch has many authors; a truncated answer is split automatically but costs more.
-- Optionally, `context.otherProfiles` to 12 with `context.caps.people` 8000 if the persona should keep more people in mind per turn.
+1. **Channels**: every readable channel with at least `bootstrap.minChannelMessages` messages in the last `bootstrap.lookbackDays` days gets one request. The result is a set of channel notes: purpose, topics, tone.
+2. **People**: the most active members (at least `bootstrap.minMessages` own messages in the window, up to `bootstrap.maxPeople`) each get a profile. The engine samples up to `bootstrap.messagesPerPerson` of their messages with `bootstrap.contextBefore` lines of surrounding context. Large samples are split into chunks that fit `bootstrap.maxRequestTokens`; each later chunk receives the previous answer as a draft to keep, correct and extend. The final answer stores character, style, interests, details, episodes and aliases.
+3. **Server**: one request takes the channel notes, a summary line per profiled member and the newest `bootstrap.serverSampleMessages` lines of the main channels, and produces server-wide patterns, conversation starters, in-jokes and lore.
 
-Running cost grows with chat volume, not with member count: the analyzer spends roughly 12–18k tokens per 60 messages of chat. On a busy server, point `memory.model` at a cheaper model than the one that talks (`/nep model set analyzer <id>`).
+Attitude and relationship are not bootstrapped; they grow from live conversation.
 
-## Warm-up
+Progress is persisted after every request and survives restarts. The total token budget is `bootstrap.maxTokens`; the per-request cap (`bootstrap.maxRequestTokens`) applies to each call. A provider rate limit (HTTP 429) is waited out for `bootstrap.rateLimitWaitMinutes` per wait, up to `bootstrap.rateLimitMaxWaits` consecutive waits.
 
-With `warmup.enabled: true`, the bot reads channel history before speaking. It fetches each channel's history to the planned depth, merges all messages into one timeline ordered by time, and walks it oldest first through the memory analyzer, building profiles, attitudes, the channel map and in-jokes. What the persona learns later really happened later, and one evening's talk spread over several channels is analysed together. The bot stays mute until the warm-up finishes (including runs started by command); incoming messages are still observed and owner commands work.
+After the bootstrap finishes, the live stream analyzer keeps memory current. It processes batches of new messages and updates interests, details, attitudes, episodes, aliases, channel notes and server patterns. When it detects that a stored portrait misses a recurring habit or contradicts how the person now writes, the engine refreshes the portrait from `bootstrap.refreshMessages` recent messages using the profile prompt. A portrait can be refreshed at most once every `memory.portraitRefreshHours` hours, up to `memory.portraitRefreshPerDay` times per day across the server. `/nep memory refresh <user>` forces one.
 
-The budget `warmup.maxTokens` is counted from the provider's reported usage. Warm-up is exempt from `llm.maxRequestsPerDay` but the per-request cap applies. Progress survives restarts: the run resumes from the last analysed point of the timeline; on a restart the history windows are fetched from Discord again, which costs a few minutes and no LLM tokens. A batch whose analysis is truncated at `memory.maxOutputTokens` is split in half and the halves analyzed separately; splitting recurses down to 20 messages, then the piece is skipped and counted. Other failures log their reason; three in a row abort without leaving the bot mute.
-
-A provider rate limit (HTTP 429, an exhausted daily token quota) is not a failure; the run waits `warmup.rateLimitWaitMinutes` and retries the same batch, up to `warmup.rateLimitMaxWaits` consecutive waits, and refused requests cost nothing. A warm-up aborted by rate limits or repeated failures resumes by itself on the next start when `warmup.enabled` is true.
-
-`/nep warmup stop` pauses after the batch in flight and interrupts a rate-limit wait; `/nep warmup run` resumes from the saved progress. Suggested flow for a first run: leave `warmup.enabled` off, plan the channels with `/nep warmup` commands, check `/nep warmup plan`, then `/nep warmup run`.
-
-`/nep warmup reset` clears only the progress marker, so running a warm-up again over existing memory counts the same messages twice. Channel depths and batching settings are frozen when a run starts; a reset is needed for new values to take effect. For a truly fresh start, use `/nep memory wipe` first: it clears member profiles with their attitudes and moments, server habits, the channel map, the analyzer's lore entries, the message buffer and the warm-up progress, after the owner types the server's exact name. It keeps the owner's own lore entries, the media description cache, token calibration and the spontaneous schedule. The command is refused while a warm-up is running.
-
-The warm-up budget is real money. Set `memory.model` to a cheaper model for the analyzer and warm-up.
-
-### `warmup`
-
-| Key | Default | Meaning |
-|---|---|---|
-| `enabled` | `false` | Warm up before talking |
-| `maxTokens` | `1000000` | Token budget (input + output); caps the run regardless of the plan |
-| `messagesPerChannel` | `2000` | Default depth: messages read per channel, counting back from the newest |
-| `batchMessages` | `150` | Messages per analyzer batch |
-| `windowBatches` | `3` | Batches per analysis window |
-| `cutAtGapMinutes` | `30` | Preferred minimum gap between analysis windows (min) |
-| `maxAgeDays` | `0` | Max message age in days (0 = unlimited) |
-| `channelDepths` | `{}` | Per-channel depth override by channel id (`0` skips a channel); `messagesPerChannel` is the fallback |
-| `onlyListed` | `false` | Read only channels listed in `channelDepths`; skip everything else |
-| `rateLimitWaitMinutes` | `10` | Minutes to wait when the provider returns a rate limit |
-| `rateLimitMaxWaits` | `36` | Consecutive waits before the run aborts |
-
-By default every readable channel is fetched at `messagesPerChannel` depth. `channelDepths` sets a depth for particular channels while the rest keep the default; `onlyListed: true` reads strictly the listed channels at their depths. Give a more important channel a larger depth. The merged timeline is cut into analysis windows of about `batchMessages` x `windowBatches` messages; each window prefers to end on a pause of at least `cutAtGapMinutes`. Inside a window each channel's messages stay together: a busy channel fills whole batches of its own, small scraps of quiet channels share one analyzer call.
-
-## Bootstrap
-
-The engine can build member profiles and channel notes from a sample of recent messages instead of reading the whole history through the warm-up. For each qualifying member, the engine samples up to `messagesPerPerson` of their messages from the last `lookbackDays` days, spreads them across channels, and asks the analyzer about that one person in a single request. Channel notes work the same way: one sample, one request. The feature is currently available as a preview; both commands are read-only and write nothing under `data/`.
+`/nep bootstrap run` starts or resumes a run. `/nep bootstrap run [user|channel|server]` reruns one target or one phase. `/nep bootstrap people` lists qualifying members. `/nep bootstrap preview <user|channel>` previews what would be written without writing anything. `/nep bootstrap reset` clears progress only, not stored memory. For a truly fresh start, use `/nep memory wipe` first: it clears member profiles with their attitudes and moments, server habits, the channel map, the analyzer's lore entries and the bootstrap progress, after the owner types the server's exact name.
 
 ### `bootstrap`
 
 | Key | Default | Meaning |
 |---|---|---|
+| `enabled` | `true` | Run the bootstrap automatically on first start |
 | `lookbackDays` | `60` | How far back to sample (days) |
 | `minMessages` | `30` | Own messages for a member to qualify |
 | `maxPeople` | `40` | Members processed, most active first |
-| `messagesPerPerson` | `300` | Own messages sampled per member |
-| `contextBefore` | `2` | Context lines before each sampled message |
+| `messagesPerPerson` | `2000` | Own messages sampled per member |
+| `contextBefore` | `1` | Context lines before each sampled message |
 | `maxChannelShare` | `0.5` | Max share of samples from one channel |
+| `minChannelMessages` | `30` | Min messages for a channel to be bootstrapped |
 | `messagesPerChannel` | `200` | Messages sampled per channel |
+| `serverSampleMessages` | `600` | Recent main-channel messages for the server request |
+| `refreshMessages` | `400` | Messages sampled for a portrait refresh |
 | `fetchLimitPerChannel` | `15000` | Messages fetched per channel for the sample pool |
 | `maxOutputTokens` | `6000` | Max output tokens per bootstrap request |
+| `maxRequestTokens` | `120000` | Max tokens per bootstrap request (input + output) |
+| `maxTokens` | `6000000` | Total token budget for the run |
+| `rateLimitWaitMinutes` | `10` | Minutes to wait on a rate limit |
+| `rateLimitMaxWaits` | `36` | Consecutive waits before the run aborts |
 
 ## Dry run
 
-With `features.dryRun: true` the bot runs the full pipeline (warm-up, memory, triggers, LLM calls) but never sends a message or reaction. Output goes to the log (`dry-run: would send` / `dry-run: would react`). Set `bot.dryRunChannelId` to a private channel for a readable mirror; everything posted in that channel is ignored by the bot. Slash commands work in any channel, the mirror included, because they are not messages.
+With `features.dryRun: true` the bot runs the full pipeline (memory, triggers, LLM calls) but never sends a message or reaction. Output goes to the log (`dry-run: would send` / `dry-run: would react`). Set `bot.dryRunChannelId` to a private channel for a readable mirror; everything posted in that channel is ignored by the bot. Slash commands work in any channel, the mirror included, because they are not messages.
 
-First run on a new server: enable `features.dryRun`, plan the warm-up with `/nep warmup` commands, watch the mirror or `journalctl -u neptunia-bot -f`, tune live, then `/nep set features.dryRun false`.
+First run on a new server: enable `features.dryRun`, watch the mirror or `journalctl -u neptunia-bot -f`, tune live, then `/nep set features.dryRun false`.
 
 ## Owner commands
 
@@ -352,7 +332,7 @@ One Discord slash command, `/nep` (the name comes from `bot.commandName`). Guild
 |---|---|
 | `/nep status` | Model, calibration, quotas and per-guild memory status |
 | `/nep reload` | Reload config and prompts now |
-| `/nep ping [role]` | Send a minimal request to one or all model roles (`talk`, `analyzer`, `media`) and report model, latency, provider, tokens or the error; does not count against `llm.maxRequestsPerDay` and works while paused or warming up |
+| `/nep ping [role]` | Send a minimal request to one or all model roles (`talk`, `analyzer`, `media`) and report model, latency, provider, tokens or the error; does not count against `llm.maxRequestsPerDay` and works while paused or bootstrapping |
 | `/nep pause` | Stop all activity, flush memory to disk and unload it; `data/` is safe to edit while paused |
 | `/nep resume` | Reload memory from `data/` and continue; refuses if any JSON file does not parse, naming the broken ones |
 | `/nep poke [mode] [channel]` | Force a spontaneous action |
@@ -364,6 +344,7 @@ One Discord slash command, `/nep` (the name comes from `bot.commandName`). Guild
 | `/nep model show` | Show active models for each role (`talk`, `analyzer`, `media`) |
 | `/nep model set <role> <id>` | Set the model for a role (`talk`, `analyzer`, `media`) |
 | `/nep memory show <user> [section] [limit] [order]` | Without a section: compact summary. Sections: `character`, `style`, `relationship`, `affinity`, `aliases`, `interests`, `details`, `episodes`, `raw` (stored JSON). List sections take `limit` 1..100 (default 25) and `order`: `rank` (default, divider at the visibility cutoff) or `recent`. Stored member references resolve to the current name, except in `raw` |
+| `/nep memory refresh <user>` | Force a portrait refresh for a member |
 | `/nep memory forget <user>` | Delete a stored profile |
 | `/nep memory affinity <user> [score] [reason]` | Show or set attitude (-100..100) |
 | `/nep memory alias-add <user> <name>` | Add a chat alias; confirmed at once |
@@ -373,19 +354,10 @@ One Discord slash command, `/nep` (the name comes from `bot.commandName`). Guild
 | `/nep lore list [query]` | List lorebook entries |
 | `/nep lore show <id>` | Show a lorebook entry |
 | `/nep lore remove <id>` | Remove a lorebook entry |
-| `/nep warmup status` | Timeline progress: date reached, messages analysed, per-channel counts |
-| `/nep warmup plan` | The ordered read plan |
-| `/nep warmup run` | Start or resume the warm-up now |
-| `/nep warmup stop` | Pause after the batch in flight |
-| `/nep warmup reset` | Clear warm-up progress (refused while running) |
-| `/nep warmup channel <channel> <depth>` | Set a channel's read depth (0 skips it) |
-| `/nep warmup channel-default <channel>` | Remove a channel's depth override |
-| `/nep warmup only <enabled>` | Read only channels with a set depth |
-| `/nep warmup depth <messages>` | Default read depth (1..1000000) |
-| `/nep warmup budget <tokens>` | Warm-up token budget (`500k` / `10m` accepted) |
-| `/nep warmup output <tokens>` | Analyzer output limit (256..32000) |
-| `/nep bootstrap people` | List members who qualify for profile bootstrap |
-| `/nep bootstrap preview <user\|channel>` | Preview what would be written for a member or channel without writing anything |
+| `/nep bootstrap run [user\|channel\|server]` | Start or resume a bootstrap; optionally rerun one target or phase |
+| `/nep bootstrap people` | List members who qualify for bootstrap |
+| `/nep bootstrap preview <user\|channel>` | Preview what would be written without writing anything |
+| `/nep bootstrap reset` | Clear bootstrap progress, not stored memory |
 
 ## How a turn works
 
@@ -397,7 +369,7 @@ The turn collects the channel transcript and neighbouring channels, then builds 
 
 The model responds with `<think>` (hidden planning), `<msg>` (1–3 chat messages; `reply="#87"` replies to a transcript line), `<react>` (one emoji reaction), or `<skip/>` (silence). After parsing, typing is simulated at human speed and `@nick` in the output becomes a real mention.
 
-The memory analyzer runs as a separate LLM call when enough messages accumulate. It receives the character card and judges each person through the character's eyes, returning attitude deltas, profile changes, channel observations, and server-level notes. The portrait of a member's character and manner of speech is drawn from the channels in `memory.mainChannelIds`; when the list is empty, every channel counts. Profiles are updated incrementally: the analyzer returns only what changed, and stored facts are never re-summarised. Interests and details are separate items that become confirmed when they come up again on a separate occasion; more items are kept per person than shown, ranked by frequency and recency with a weight that decays over time. Dates come from the messages, so a warm-up over old history dates things correctly. Interests not seen for a long time are shown to the persona as old. Stored memory refers to members by id and the current name is substituted when the memory is used, so renames never break stored notes. The persona also learns what people in chat call each other and recognises a member mentioned by name or alias even when they are not in the conversation.
+The memory analyzer runs as a separate LLM call when enough messages accumulate. It receives the character card and judges each person through the character's eyes, returning attitude deltas, profile changes, channel observations, and server-level notes. The portrait of a member's character and manner of speech is drawn from the channels in `memory.mainChannelIds`; when the list is empty, every channel counts. Profiles are updated incrementally: the analyzer returns only what changed, and stored facts are never re-summarised. Character and style are prose paragraphs written whole by the profile prompt at bootstrap and refreshed from recent messages when the analyzer flags a gap or contradiction. Interests and details are separate items that become confirmed when they come up again on a separate occasion; more items are kept per person than shown, ranked by frequency and recency with a weight that decays over time. Interests not seen for a long time are shown to the persona as old. Stored memory refers to members by id and the current name is substituted when the memory is used, so renames never break stored notes. The persona also learns what people in chat call each other and recognises a member mentioned by name or alias even when they are not in the conversation.
 
 ## Episodes and lorebook
 
@@ -415,7 +387,7 @@ Transcript lines carry media markers in brackets: pictures, GIFs, videos, sticke
 
 `features.vision` attaches pictures from the calling message, from the message it replies to, and the newest few in the channel to the LLM request as images, downscaled through Discord's media proxy. The bot downloads every picture itself and sends it inline as data, because Discord refuses downloads coming from the model provider; pictures larger than `context.vision.maxBytes` or slower than `context.vision.fetchTimeoutMs` are skipped. The persona sees these directly. Settings live under `context.vision`.
 
-`features.mediaDescriptions` (off by default) runs a helper model (`media.model`) that writes a one-line description for pictures, GIF frames, video posters, stickers, custom emoji and link thumbnails. Each attachment is described once and cached. Descriptions feed the chat transcript, the memory analyzer and the warm-up, whose token budget pays for warm-up descriptions. The describer's prompt is `prompts/describe.md`. Settings live under `media`.
+`features.mediaDescriptions` (off by default) runs a helper model (`media.model`) that writes a one-line description for pictures, GIF frames, video posters, stickers, custom emoji and link thumbnails. Each attachment is described once and cached. Descriptions feed the chat transcript, the memory analyzer and the bootstrap, whose token budget pays for bootstrap descriptions. The describer's prompt is `prompts/describe.md`. Settings live under `media`.
 
 Stickers and custom emoji recur constantly, so they are cached by id and cost nearly nothing after the first description. With `features.vision`, the sticker of the calling message is attached as a picture. Discord's built-in animated stickers are Lottie animations, not images, so they are never more than a name.
 
@@ -449,7 +421,7 @@ git pull && sudo systemctl restart neptunia-bot
 
 A restart loses nothing; all state is on disk. Restarts are only needed after code changes under `src/`. Prompt and config edits apply live.
 
-Memory lives in the process and is written to `data/`; editing those files under a running bot is unsafe because the next write overwrites the change. To edit memory by hand: `/nep pause`, edit the files, `/nep resume`. The pause stops all activity, flushes memory to disk and unloads it; a running warm-up pauses after the current batch. The state is persisted: a restart comes back paused, and the warm-up does not auto-start until resume. `/nep resume` validates every JSON file under `data/` and refuses if any do not parse, naming the broken ones; otherwise it reloads memory and continues, including a warm-up from where it left off. Read-only and config commands work while paused; commands that write memory are refused. `/nep status` shows the paused state.
+Memory lives in the process and is written to `data/`; editing those files under a running bot is unsafe because the next write overwrites the change. To edit memory by hand: `/nep pause`, edit the files, `/nep resume`. The pause stops all activity, flushes memory to disk and unloads it; a running bootstrap pauses after the current request. The state is persisted: a restart comes back paused, and the bootstrap does not auto-start until resume. `/nep resume` validates every JSON file under `data/` and refuses if any do not parse, naming the broken ones; otherwise it reloads memory and continues, including a bootstrap from where it left off. Read-only and config commands work while paused; commands that write memory are refused. `/nep status` shows the paused state.
 
 ## Tests
 
@@ -476,6 +448,7 @@ prompts/
   describe.md              prompt for the media describer
   profile.md               bootstrap: one member's profile from a message sample
   channel.md               bootstrap: channel notes from a message sample
+  server.md                bootstrap: server-level notes from channel notes and member summaries
   labels.json              every code-inserted string in prompts
 prompts.local/             your personality (gitignored)
 src/
@@ -507,7 +480,7 @@ src/
     interests.js           remembered interests: sightings, confirmation, eviction
     details.js             remembered details: sightings, confirmation, eviction
     channels.js            channel map rendering, activity verdicts
-    warmup.js              pre-talk channel history ingestion
+    bootstrap.js           sample-based memory bootstrap
 tests/                     node --test, pure-function unit tests
 deploy/
   neptunia-bot.service     example systemd unit
