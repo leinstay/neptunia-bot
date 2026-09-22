@@ -11,7 +11,7 @@
 | `replies` | `true` | 响应回复 |
 | `nameTriggers` | `true` | 响应消息中的名字提及 |
 | `spontaneous` | `true` | 随机定时器触发的主动消息 |
-| `eavesdrop` | `true` | 随机概率插入任何消息 |
+| `eavesdrop` | `true` | 随机概率对任意消息插话 |
 | `memory` | `true` | 构建档案、追踪服务器规律、记录自述 |
 | `relationships` | `true` | 每成员态度分数（-100..100） |
 | `episodes` | `true` | 每人的长期回忆（时刻、引言、恩怨） |
@@ -52,7 +52,7 @@
 | `pingTimeoutMs` | `30000` | `/nep ping` 请求超时（毫秒） |
 | `retries` | `2` | 临时故障重试次数 |
 | `maxRequestsPerDay` | `300` | 每日请求上限 |
-| `provider` | `null` | OpenRouter `provider` 路由对象，原样传递；`null` 不发送 |
+| `provider` | `null` | OpenRouter `provider` 路由对象，原样传递；`null` 表示不发送该字段 |
 
 `llm.provider` 在每个请求上设置 OpenRouter 的 provider 路由字段，例如 `{ "ignore": ["some-provider"] }` 或 `{ "order": ["anthropic"], "allow_fallbacks": true }`。如果 OpenRouter 账户本身限制了允许的 provider，忽略仅剩的那个会导致每个请求失败并报错 "No endpoints found"。更改 provider 设置后，运行 `/nep ping` 验证每个模型角色是否可达。
 
@@ -68,16 +68,16 @@
 | `gapMarkerMinutes` | `20` | 时间间隔标记阈值（分钟） |
 | `otherProfiles` | `6` | 显示的其他档案最大数量 |
 | `askedAboutProfiles` | `3` | 在近期消息中被提及的成员以完整档案显示，排在其他参与者之前 |
-| `tempo.liveMessages10min` | `4` | 10 分钟内的消息数 = "活跃" |
-| `tempo.deadSilenceMinutes` | `45` | 沉默分钟数 = "沉寂" |
+| `tempo.liveMessages10min` | `4` | 10 分钟内的消息数 = “活跃” |
+| `tempo.deadSilenceMinutes` | `45` | 沉默分钟数 = “沉寂” |
 | `caps.interlocutor` | `6000` | Token 上限：呼叫者的档案与回忆 |
 | `caps.aboutChat` | `2500` | Token 上限：服务器习惯/自述事实 |
 | `caps.lore` | `1500` | Token 上限：世界书条目 |
 | `caps.people` | `9000` | Token 上限：其他档案 |
 | `caps.neighbors` | `3000` | Token 上限：相邻频道 |
 | `caps.server` | `4000` | Token 上限：频道地图 |
-| `channelActivity.liveMessagesPerDay` | `20` | 每日消息数 = "活跃"频道 |
-| `channelActivity.deadAfterDays` | `7` | 无消息天数 = "沉寂"频道 |
+| `channelActivity.liveMessagesPerDay` | `20` | 每日消息数 = “活跃”频道 |
+| `channelActivity.deadAfterDays` | `7` | 无消息天数 = “沉寂”频道 |
 | `vision.maxImages` | `4` | 每请求最大图片数 |
 | `vision.tokensPerImage` | `400` | 每张图片的 token 预算 |
 | `vision.imageSize` | `512` | 通过 Discord 媒体代理缩放的目标像素 |
@@ -96,7 +96,7 @@
 | `maxOutputTokens` | `120` | 每次描述的最大输出 token 数 |
 | `imageSize` | `512` | 缩放目标像素 |
 | `maxPerTurn` | `6` | 每回合生成的最大描述数 |
-| `cacheEntries` | `5000` | 按附件键存储的描述缓存大小 |
+| `cacheEntries` | `5000` | 描述缓存大小，以附件为键 |
 | `filePreviewChars` | `500` | 文本文件开头显示的字符数 |
 | `embedTextChars` | `200` | 链接嵌入文本显示的字符数 |
 
@@ -142,13 +142,13 @@
 | `maxChannelSilenceHours` | `72` | 阻止主动消息的频道沉默时长（小时）；0 = 无限制 |
 | `minIntervalMinutes` | `25` | 最短检查间隔（分钟） |
 | `maxIntervalMinutes` | `420` | 最长检查间隔（分钟） |
-| `burstChance` | `0.15` | 连发后续的概率 |
+| `burstChance` | `0.15` | 连发追加消息的概率 |
 | `burstMinutes` | `[3, 15]` | 连发时间范围（分钟） |
 | `activeHours` | `{ from: 10, to: 3 }` | 活跃时段（跨午夜） |
 | `liveWindowMinutes` | `15` | 活跃窗口（分钟） |
-| `liveMinMessages` | `4` | "活跃"所需最少消息数 |
-| `deadAfterMinutes` | `90` | 沉默达此时长视为"沉寂"（分钟） |
-| `initiateChance` | `0.35` | 发起话题与插入对话的概率比 |
+| `liveMinMessages` | `4` | “活跃”所需最少消息数 |
+| `deadAfterMinutes` | `90` | 沉默达此时长视为“沉寂”（分钟） |
+| `initiateChance` | `0.35` | 发起话题（而非插话）的概率 |
 | `eavesdropChance` | `0.02` | 逐消息插入概率 |
 | `eavesdropDelayMs` | `[5000, 40000]` | 窃听延迟范围（毫秒） |
 | `minGapMinutes` | `12` | 动作之间的最短间隔（分钟） |
@@ -216,7 +216,7 @@
 |---|---|---|
 | `enabled` | `true` | 首次启动时自动运行预热 |
 | `lookbackDays` | `60` | 回溯采样天数 |
-| `minMessages` | `30` | 成员参选所需的最少自身消息数 |
+| `minMessages` | `30` | 成员入选所需的最少自身消息数 |
 | `maxPeople` | `40` | 处理的成员数，按活跃度排序 |
 | `messagesPerPerson` | `2000` | 每成员采样的自身消息数 |
 | `contextBefore` | `1` | 每条采样消息前的上下文行数 |

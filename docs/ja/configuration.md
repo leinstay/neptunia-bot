@@ -11,7 +11,7 @@
 | `replies` | `true` | リプライに反応 |
 | `nameTriggers` | `true` | メッセージ中の名前トリガーに反応 |
 | `spontaneous` | `true` | ランダムタイマーによる自発的メッセージ |
-| `eavesdrop` | `true` | 任意のメッセージに割り込むランダムチャンス |
+| `eavesdrop` | `true` | どのメッセージにも割り込みうるランダムな確率 |
 | `memory` | `true` | プロファイル構築、サーバーパターン追跡、自己言及の記録 |
 | `relationships` | `true` | メンバーごとの態度スコア（-100..100） |
 | `episodes` | `true` | メンバーごとの長期記憶（出来事、引用、恨み） |
@@ -88,11 +88,11 @@
 
 ## `media`
 
-メディアデスクライバー（`features.mediaDescriptions`）の設定です。
+メディア説明モデル（`features.mediaDescriptions`）の設定です。
 
 | キー | デフォルト | 説明 |
 |---|---|---|
-| `model` | `"anthropic/claude-haiku-4.5"` | デスクライバーモデル |
+| `model` | `"anthropic/claude-haiku-4.5"` | 説明モデル |
 | `maxOutputTokens` | `120` | 説明文あたりの最大出力トークン数 |
 | `imageSize` | `512` | ダウンスケール目標（px） |
 | `maxPerTurn` | `6` | ターンあたりの最大説明文生成数 |
@@ -142,13 +142,13 @@
 | `maxChannelSilenceHours` | `72` | 自発的メッセージをブロックするチャンネル沈黙時間（時間）。0 = 制限なし |
 | `minIntervalMinutes` | `25` | 最小チェック間隔（分） |
 | `maxIntervalMinutes` | `420` | 最大チェック間隔（分） |
-| `burstChance` | `0.15` | バースト追随の確率 |
+| `burstChance` | `0.15` | バースト（続けてもう一言）の確率 |
 | `burstMinutes` | `[3, 15]` | バーストのタイミング範囲（分） |
 | `activeHours` | `{ from: 10, to: 3 }` | アクティブ時間帯（深夜をまたぐ） |
 | `liveWindowMinutes` | `15` | ライブウィンドウ（分） |
 | `liveMinMessages` | `4` | 「ライブ」判定に必要な最小メッセージ数 |
 | `deadAfterMinutes` | `90` | 「デッド」判定までの沈黙時間（分） |
-| `initiateChance` | `0.35` | 割り込みに対する話題切り出しの確率 |
+| `initiateChance` | `0.35` | 割り込みではなく話題を切り出す確率 |
 | `eavesdropChance` | `0.02` | メッセージごとの割り込み確率 |
 | `eavesdropDelayMs` | `[5000, 40000]` | 盗み聞き時の遅延範囲（ミリ秒） |
 | `minGapMinutes` | `12` | アクション間の最小間隔（分） |
@@ -199,7 +199,7 @@
 | `historySize` | `10` | メンバーごとに保持される態度変化の履歴数 |
 | `directTriggerCount` | `6` | 早期更新を強制する直接インタラクション回数 |
 
-`damping` が有効な場合、ゼロから離れる方向のスコア変化は `(1 - |score| / 100) ^ dampingPower` でスケールされるため、極端な値には継続的な努力が必要です。ゼロに向かう変化はフルの強度で適用されます。スコアは小数精度で保存され、整数で表示されます。`/nep memory affinity` は減衰なしで直接設定します。
+`damping` が有効な場合、ゼロから離れる方向のスコア変化は `(1 - |score| / 100) ^ dampingPower` でスケールされるため、極端な値には継続的な努力が必要です。ゼロに向かう変化はそのまま適用されます。スコアは小数精度で保存され、整数で表示されます。`/nep memory affinity` は減衰なしで直接設定します。
 
 ## `lore`
 
@@ -219,7 +219,7 @@
 | `minMessages` | `30` | メンバーが対象となるための自身のメッセージの最低数 |
 | `maxPeople` | `40` | 処理するメンバー数（アクティブ順） |
 | `messagesPerPerson` | `2000` | メンバーあたりにサンプルする自身のメッセージ数 |
-| `contextBefore` | `1` | サンプルメッセージごとの前後コンテキスト行数 |
+| `contextBefore` | `1` | サンプルメッセージごとの直前のコンテキスト行数 |
 | `maxChannelShare` | `0.5` | 一つのチャンネルからのサンプルの最大割合 |
 | `messagesPerChannel` | `200` | チャンネル記述に使う最新メッセージ数 |
 | `serverSampleMessages` | `600` | サーバーリクエスト用のメインチャンネルの最新メッセージ数 |

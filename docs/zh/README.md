@@ -54,7 +54,7 @@ npm start
 
 提示从两个目录加载：
 
-- `prompts/`：已跟踪的引擎默认值。自带一个可用的示例角色。
+- `prompts/`：随仓库提供的引擎默认值。自带一个可用的示例角色。
 - `prompts.local/`：你的角色定义（已加入 gitignore）。此目录下的文件会替换 `prompts/` 中的同名文件。`labels.json` 采用深度合并，因此你只需覆盖需要更改的键。
 
 两者均支持热重载。
@@ -86,7 +86,7 @@ npm start
 
 ### 建议
 
-系统提示负责让语言听起来像人类，因此角色卡只需定义个性。给角色观点和默认情绪，而不是和气。参考台词要简短多样；它们在长对话中锚定风格。用角色自己的声音写角色卡。粗话要有意义，不是填充。让沉默成为真正的选项。一个总是回复的角色是最明显的机器人破绽。
+系统提示负责让语言听起来像人类，因此角色卡只需定义个性。给角色观点和默认情绪，而不是一味随和。参考台词要简短多样；它们在长对话中锚定风格。用角色自己的声音写角色卡。粗话要有分量，不是凑字数。让沉默成为真正的选项。一个总是回复的角色是最明显的机器人破绽。
 
 ## 配置
 
@@ -104,7 +104,7 @@ npm start
 
 ## 所有者命令
 
-一个 Discord 斜杠命令 `/nep`（名称来自 `bot.commandName`）。服务器级命令，启动时为服务的服务器注册。所有回复都是临时的；只有调用者可以看到，不论在哪个频道输入。所有子命令和访问授权请参阅 [`owner-commands.md`](owner-commands.md)。
+一个 Discord 斜杠命令 `/nep`（名称来自 `bot.commandName`）。以服务器（guild）命令的形式在启动时注册到所服务的服务器。所有回复仅调用者可见（ephemeral），不论在哪个频道输入。所有子命令和访问授权请参阅 [`owner-commands.md`](owner-commands.md)。
 
 ## 回合运作方式
 
@@ -116,7 +116,7 @@ npm start
 
 模型使用 `<think>`（隐藏的思考过程）、`<msg>`（1–3 条聊天消息；`reply="#87"` 回复对话记录中的某一行）、`<react>`（一个 emoji 反应）或 `<skip/>`（保持沉默）来回应。解析后，按人类速度模拟输入，输出中的 `@nick` 会转换为真实的提及。
 
-记忆分析器在累积了足够的消息时作为单独的 LLM 调用运行。它接收角色卡，以角色的视角评判每个人，返回态度变化、档案更改、频道观察和服务器级笔记。成员性格和说话方式的画像取自 `memory.mainChannelIds` 中的频道；当列表为空时，所有频道均计入。档案以增量方式更新：分析器只返回变更内容，已存储的事实不会被重新概括。性格和风格是由档案提示在预热期间完整撰写的散文段落，当分析器标记出缺失或矛盾时会从近期消息刷新。兴趣和细节是独立的条目，在另一个场合再次出现时变为已确认；每个人保存的条目多于显示的，按频率和近期程度排名，权重随时间衰减。长时间未出现的兴趣会以过时状态展示给角色。存储的记忆通过 id 引用成员，使用时替换为当前名称，因此改名不会破坏已存储的笔记。角色还会学习聊天中人们对彼此的称呼，即使某成员不在对话中，也能通过名字或别名识别。
+记忆分析器在累积了足够的消息时作为单独的 LLM 调用运行。它接收角色卡，以角色的视角评判每个人，返回态度变化、档案更改、频道观察和服务器级笔记。成员性格和说话方式的画像取自 `memory.mainChannelIds` 中的频道；当列表为空时，所有频道均计入。档案以增量方式更新：分析器只返回变更内容，已存储的事实不会被重新概括。性格和风格是由档案提示在预热期间完整撰写的自由文本段落，当分析器标记出缺失或矛盾时会从近期消息刷新。兴趣和细节是独立的条目，在另一个场合再次出现时变为已确认；每个人保存的条目多于显示的，按频率和近期程度排名，权重随时间衰减。长时间未出现的兴趣会以过时状态展示给角色。存储的记忆通过 id 引用成员，使用时替换为当前名称，因此改名不会破坏已存储的笔记。角色还会学习聊天中人们对彼此的称呼，即使某成员不在对话中，也能通过名字或别名识别。
 
 ## 回忆与世界书
 
@@ -148,7 +148,7 @@ npm start
 
 `data/` 存储每个成员的档案、关系分数、频道观察和服务器规律。它保留在你的机器上，已加入 gitignore，仅作为上下文发送给 LLM。分析器被指示不存储敏感信息。`/nep memory forget` 会完全删除一个档案。
 
-告知你的服务器成员。他们应该知道自己的消息会被 LLM 处理，且机器人会保留笔记。
+请告知服务器成员。他们应该知道自己的消息会被 LLM 处理，且机器人会保留笔记。
 
 ## 作为服务运行
 
@@ -160,7 +160,7 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now neptunia-bot
 ```
 
-私有层与代码并列：`.env`、`config.local.json`、`prompts.local/`、`data/`。更新方法：
+私有层与代码放在一起：`.env`、`config.local.json`、`prompts.local/`、`data/`。更新方法：
 
 ```bash
 git pull && sudo systemctl restart neptunia-bot
@@ -168,11 +168,11 @@ git pull && sudo systemctl restart neptunia-bot
 
 重启不会丢失任何数据；所有状态都在磁盘上。仅在 `src/` 下的代码变更后才需要重启。提示和配置的编辑会实时生效。
 
-记忆存活在进程中并写入 `data/`；在运行中的机器人下编辑这些文件是不安全的，因为下一次写入会覆盖更改。手动编辑记忆的方法：`/nep pause`，编辑文件，`/nep resume`。暂停会停止所有活动，将记忆刷入磁盘并卸载；正在运行的预热会在当前请求完成后暂停。状态会被持久化：重启后仍保持暂停状态，预热在恢复前不会自动启动。`/nep resume` 会验证 `data/` 下的每个 JSON 文件，如果有任何文件无法解析则拒绝恢复并指出哪些文件有问题；否则重新加载记忆并继续，包括从中断处恢复预热。暂停期间只读和配置命令仍可使用；写入记忆的命令会被拒绝。`/nep status` 会显示暂停状态。
+记忆保存在进程内存中并写入 `data/`；机器人运行时直接编辑这些文件并不安全，因为下一次写入会覆盖更改。手动编辑记忆的方法：`/nep pause`，编辑文件，`/nep resume`。暂停会停止所有活动，将记忆刷入磁盘并卸载；正在运行的预热会在当前请求完成后暂停。状态会被持久化：重启后仍保持暂停状态，预热在恢复前不会自动启动。`/nep resume` 会验证 `data/` 下的每个 JSON 文件，如果有任何文件无法解析则拒绝恢复并指出哪些文件有问题；否则重新加载记忆并继续，包括从中断处恢复预热。暂停期间只读和配置命令仍可使用；写入记忆的命令会被拒绝。`/nep status` 会显示暂停状态。
 
 ## 参与贡献
 
-欢迎提交 issue 和 pull request；请先阅读 `CONTRIBUTING.md`。目标分支为 `main`，每个 pull request 只包含一项变更，测试通过 `npm test`，仅限英语。提示文件与代码之间的契约在 `docs/prompt-contract.md` 中。一方的变更需要在同一个 pull request 中同步另一方。引擎保持角色中立；特定角色的行为属于该部署的 `prompts.local/`。安全报告通过 `SECURITY.md` 提交，不使用公开 issue。
+欢迎提交 issue 和 pull request；请先阅读 `CONTRIBUTING.md`。目标分支为 `main`，每个 pull request 只包含一项变更，`npm test` 测试通过，仅限英语。提示文件与代码之间的契约在 `docs/prompt-contract.md` 中。一方的变更需要在同一个 pull request 中同步另一方。引擎保持角色中立；特定角色的行为属于该部署的 `prompts.local/`。安全报告通过 `SECURITY.md` 提交，不使用公开 issue。
 
 ## 测试
 
@@ -185,94 +185,94 @@ npm test
 ## 项目结构
 
 ```
-config.json                defaults for every setting, hot-reloaded
-.env.example               template for DISCORD_TOKEN and OPENROUTER_API_KEY
+config.json                所有设置及其默认值，热重载
+.env.example               DISCORD_TOKEN 和 OPENROUTER_API_KEY 的模板
 prompts/
-  system-prompt.md         how to behave like an ordinary chat member
-  character-card.md        the personality (working example)
-  rules.md                 owner's live corrections
-  format.md                output tags the model uses
-  reply.md                 task: someone called you
-  interject.md             task: jump into a conversation
-  initiate.md              task: start a topic
-  memory.md                prompt for the memory analyzer
-  describe.md              prompt for the media describer
-  address.md               classifier for follow-up messages
-  profile.md               warmup: one member's profile from a message sample
-  channel.md               warmup: channel notes from a message sample
-  server.md                warmup: server-level notes from channel notes and member summaries
-  labels.json              every code-inserted string in prompts
-prompts.local/             your personality (gitignored)
+  system-prompt.md         如何表现得像普通聊天成员
+  character-card.md        角色定义（可用示例）
+  rules.md                 所有者的实时修正
+  format.md                模型使用的输出标签
+  reply.md                 任务：有人呼叫了你
+  interject.md             任务：插入对话
+  initiate.md              任务：发起话题
+  memory.md                记忆分析器的提示
+  describe.md              媒体描述器的提示
+  address.md               后续消息分类器
+  profile.md               预热：从消息样本生成一个成员的档案
+  channel.md               预热：从消息样本生成频道笔记
+  server.md                预热：从频道笔记和成员摘要生成服务器级笔记
+  labels.json              代码插入提示中的所有字符串
+prompts.local/             你的角色定义（已加入 gitignore）
 docs/
-  prompt-contract.md       the contract between prompt files and code
+  prompt-contract.md       提示文件与代码之间的契约
   en/
-    configuration.md       full reference for every config key
-    owner-commands.md      every subcommand and the access grants
-    warmup.md              the warmup: stages, progress, rails, commands
-  zh/                      Chinese
+    configuration.md       所有配置键的完整参考
+    owner-commands.md      所有子命令和访问授权
+    warmup.md              预热：阶段、进度、限制、命令
+  zh/                      中文
     README.md
     configuration.md
     owner-commands.md
     warmup.md
-  ja/                      Japanese
+  ja/                      日文
     README.md
     configuration.md
     owner-commands.md
     warmup.md
-  ru/                      Russian
+  ru/                      俄文
     README.md
     configuration.md
     owner-commands.md
     warmup.md
 src/
-  index.js                 entry point, wiring, timers, shutdown
-  config.js                .env parser, config loader, deepMerge
-  hot.js                   live config + prompts via fs.watch
-  log.js                   structured JSON logging
-  admin.js                 owner commands
+  index.js                 入口，组装，定时器，关闭
+  config.js                .env 解析器，配置加载器，deepMerge
+  hot.js                   通过 fs.watch 实时更新的配置和提示
+  log.js                   结构化 JSON 日志
+  admin.js                 所有者命令
   llm/
-    tokens.js              token estimation with self-calibration
-    budget.js              priority-ordered section trimming
-    openrouter.js          chat completions, safety rails
-    parse.js               output tags to actions
+    tokens.js              带自校准的 token 估算
+    budget.js              按优先级裁剪区块
+    openrouter.js          聊天补全，安全限制
+    parse.js               输出标签转为动作
   discord/
-    guild.js               single-guild resolution
-    commands.js            slash commands, registration, interaction adapter
-    events.js              message pipeline
-    collect.js             channel history, neighbours, permissions
-    format.js              transcript lines, time gaps, tempo
-    media.js               media classification, label selection, proxy URLs
-    fetch-image.js         download and cache images for inline LLM requests
+    guild.js               单服务器解析
+    commands.js            斜杠命令，注册，交互适配器
+    events.js              消息流水线
+    collect.js             频道历史，相邻频道，权限
+    format.js              对话记录行，时间间隔，节奏
+    media.js               媒体分类，标签选择，代理 URL
+    fetch-image.js         下载并缓存图片供 LLM 内联请求使用
   behavior/
-    mention.js             call detection, ignore heuristics
-    prompt.js              request builder with token budget
-    turn.js                one turn: collect, build, call, act
-    spontaneous.js         chaotic timer, eavesdrop
-    pending.js             pending direct pings while the persona is busy
+    mention.js             呼叫检测，忽略启发式
+    prompt.js              带 token 预算的请求构建器
+    turn.js                一个回合：收集、构建、调用、执行
+    spontaneous.js         混沌定时器，窃听
+    pending.js             角色繁忙时挂起的直接提及
   memory/
-    store.js               JSON file persistence, atomic writes
-    update.js              batch memory updates
-    affinity.js            relationship score logic
-    interests.js           remembered interests: sightings, confirmation, eviction
-    details.js             remembered details: sightings, confirmation, eviction
-    aliases.js             remembered aliases: sightings, confirmation, eviction
-    episodes.js            remembered episodes: append, weight-based eviction
-    channels.js            channel map rendering, activity verdicts
-    mentions.js            member-id tokens in stored text: toTokens and fromTokens
-    clamp.js               text clamping: soft limits, sentence boundaries, safe member tokens
-    ranking.js             shared ranking for interests and details: frequency, recency, decay
-    lore.js                lorebook logic: key matching, entry selection
-    describe.js            media describer: one picture in, one cached caption out
-    warmup.js              sample-based memory warmup
-tests/                     node --test, pure-function unit tests
+    store.js               JSON 文件持久化，原子写入
+    update.js              批量记忆更新
+    affinity.js            关系分数逻辑
+    interests.js           记住的兴趣：观察、确认、淘汰
+    details.js             记住的细节：观察、确认、淘汰
+    aliases.js             记住的别名：观察、确认、淘汰
+    episodes.js            记住的回忆：追加、按权重淘汰
+    channels.js            频道地图渲染，活跃度判定
+    mentions.js            存储文本中的成员 id 标记：toTokens 和 fromTokens
+    clamp.js               文本截断：软限制、句子边界、完整的成员标记
+    ranking.js             兴趣和细节的共享排名：频率、近期程度、衰减
+    lore.js                世界书逻辑：关键词匹配、条目选择
+    describe.js            媒体描述器：一张图片进，一条缓存的描述出
+    warmup.js              基于样本的记忆预热
+tests/                     node --test，纯函数单元测试
 deploy/
-  neptunia-bot.service     example systemd unit
-data/                      persistent state (gitignored, created at runtime)
-  state.json               scheduler times, token calibration, daily request counter, warmup progress
-  guilds/<id>/guild.json   server habits, in-jokes, the persona's self-claims
-  guilds/<id>/buffer.json  messages observed since the last memory update
-  guilds/<id>/media.json   media description cache
-  guilds/<id>/users/       per-member profiles and relationships
-  guilds/<id>/channels/    channel observations from the analyzer
-  guilds/<id>/lore.json    lorebook entries
+  neptunia-bot.service     systemd 单元示例
+data/                      持久状态（已加入 gitignore，运行时创建）
+  state.json               调度时间、token 校准、每日请求计数、预热进度
+  guilds/<id>/guild.json   服务器习惯、内部梗、角色的自述
+  guilds/<id>/buffer.json  自上次记忆更新以来观察到的消息
+  guilds/<id>/media.json   媒体描述缓存
+  guilds/<id>/users/       每成员档案和关系
+  guilds/<id>/channels/    分析器的频道观察
+  guilds/<id>/lore.json    世界书条目
 ```

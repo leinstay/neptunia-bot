@@ -2,7 +2,7 @@
 
 频道、身份组和用户从 Discord 自带的选择器中选取；`set`/`unset` 和 `access grant`/`access revoke` 会自动补全其 `path`/`command` 选项。机器人不读取私信。
 
-`/nep` 从一开始就对所有成员可见；访问权限在命令执行时按命令逐一检查，不通过 Discord 自身的命令可见性控制。所有者（`bot.owners`）始终可以运行所有命令。其他人需要授权：`/nep access grant <command> [role] [user]` 可开放一个命令键（如 `memory.show`）、一个完整组（如 `memory`）或所有命令（`*`）给所有人（不指定身份组/用户）、某个身份组或某个用户；`/nep access revoke` 撤销授权；`/nep access list` 显示当前授权。没有授权的非所有者运行 `/nep` 会收到一条临时的"Not allowed"回复。
+`/nep` 从一开始就对所有成员可见；访问权限在命令执行时按命令逐一检查，不通过 Discord 自身的命令可见性控制。所有者（`bot.owners`）始终可以运行所有命令。其他人需要授权：`/nep access grant <command> [role] [user]` 可开放一个命令键（如 `memory.show`）、一个完整组（如 `memory`）或所有命令（`*`）给所有人（不指定身份组/用户）、某个身份组或某个用户；`/nep access revoke` 撤销授权；`/nep access list` 显示当前授权。没有授权的非所有者运行 `/nep` 会收到一条仅自己可见的 “Not allowed” 回复。
 
 | 命令 | 说明 |
 |---|---|

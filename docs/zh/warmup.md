@@ -10,11 +10,11 @@
 
 ### 频道
 
-每个可读频道生成一个请求，从最新的 `warmup.messagesPerChannel`（默认 200）条消息中描述，不限消息时效。如果频道历史消息少于该数量，会尝试更深层获取。完全没有历史的频道仅从其名称、分类和话题描述。结果是一组频道笔记（用途、话题、氛围）和代码维护的数据（消息计数、最活跃作者、30 天活跃度直方图）。
+每个可读频道生成一个请求，从最新的 `warmup.messagesPerChannel`（默认 200）条消息中描述，不限消息时效。如果频道历史消息少于该数量，会尝试更深入地抓取。完全没有历史的频道仅从其名称、分类和话题描述。结果是一组频道笔记（用途、话题、氛围）和代码维护的数据（消息计数、最活跃作者、30 天活跃度直方图）。
 
 ### 人物
 
-最活跃的成员参选：在最近 `warmup.lookbackDays` 天内至少有 `warmup.minMessages` 条自身消息，最多 `warmup.maxPeople` 人，按活跃度排序。`/nep warmup people` 列出当前设置下符合条件的成员。
+最活跃的成员入选：在最近 `warmup.lookbackDays` 天内至少有 `warmup.minMessages` 条自身消息，最多 `warmup.maxPeople` 人，按活跃度排序。`/nep warmup people` 列出当前设置下符合条件的成员。
 
 对于每个符合条件的成员，引擎采样最多 `warmup.messagesPerPerson` 条其消息，附带 `warmup.contextBefore` 行上下文。单个频道在样本中的占比不超过 `warmup.maxChannelShare`。大样本按时间顺序分成适合 `warmup.maxRequestTokens` 的块；第一块之后的每个块都会收到前一个回答作为 `<draft>` 块，以便模型保留有效内容、纠正变化并用新证据扩展。最终回答存储性格、风格、兴趣、细节、回忆和别名；消息计数和首次/末次出现时间戳由代码计算。
 
@@ -28,7 +28,7 @@
 
 态度和关系永远不会被预热。它们仅通过流分析器从实时对话中增长。
 
-`character` 和 `style` 是散文字段，仅由档案提示（`profile.md`）撰写，包括预热期间和画像刷新期间。流分析器不会直接编辑它们。数据模型和输出格式请参阅[提示契约](../prompt-contract.md)。
+`character` 和 `style` 是自由文本字段，仅由档案提示（`profile.md`）撰写，包括预热期间和画像刷新期间。流分析器不会直接编辑它们。数据模型和输出格式请参阅[提示契约](../prompt-contract.md)。
 
 ## 进度与恢复
 

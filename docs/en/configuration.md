@@ -67,7 +67,7 @@ Every key in `config.json` with its default, grouped by section.
 | `maxMessageChars` | `800` | Truncate messages beyond this (chars) |
 | `gapMarkerMinutes` | `20` | Time-gap marker threshold (min) |
 | `otherProfiles` | `6` | Max other profiles shown |
-| `askedAboutProfiles` | `3` | Members referred to in the recent messages shown in full, ahead of the other participants |
+| `askedAboutProfiles` | `3` | Members named in recent messages whose profiles are shown in full, ahead of the other participants |
 | `tempo.liveMessages10min` | `4` | Messages in 10 min = "live" |
 | `tempo.deadSilenceMinutes` | `45` | Silence minutes = "dead" |
 | `caps.interlocutor` | `6000` | Token cap: caller's profile with episodes |
@@ -112,7 +112,7 @@ Settings for the media describer (`features.mediaDescriptions`).
 | `spamIgnoreChance` | `0.9` | Ignore chance when spammed |
 | `nameTriggerChance` | `1` | Name trigger response chance |
 | `neverIgnore` | `[]` | User IDs never ignored |
-| `affinityIgnoreBonus` | `0` | Max added ignore at affinity -100; raise to make disliked members get ignored more |
+| `affinityIgnoreBonus` | `0` | Max added ignore at affinity -100; raise so disliked members are ignored more often |
 | `affinityLikeBonus` | `0.08` | Max reduced ignore at affinity +100 |
 | `oneAtATime` | `true` | One reply at a time across the server |
 | `maxPending` | `3` | Channels that can hold a direct ping while busy |

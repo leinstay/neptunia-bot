@@ -54,7 +54,7 @@ npm start
 
 プロンプトは二つのディレクトリから読み込まれます。
 
-- `prompts/`: 追跡されるエンジンのデフォルト。動作するサンプルキャラクター付き。
+- `prompts/`: リポジトリに含まれるエンジンのデフォルト。動作するサンプルキャラクター付き。
 - `prompts.local/`: デプロイ先のパーソナリティ（gitignore 対象）。ここに置いたファイルは `prompts/` 内の同名ファイルを置き換えます。`labels.json` はディープマージされるため、変更するキーだけをオーバーライドすれば済みます。
 
 どちらもホットリロードされます。
@@ -86,15 +86,15 @@ npm start
 
 ### ヒント
 
-システムプロンプトが人間らしさを担当するため、カードは純粋にパーソナリティだけを記述します。キャラクターには、同調性ではなく、意見とデフォルトの気分を与えてください。リファレンスラインは短く多様にしてください。長い会話でスタイルを固定する役割があります。カードはキャラクターの声で書いてください。罵倒語は意味を持たせ、埋め草にしないでください。沈黙を有効な選択肢にしてください。常に返答するキャラクターは最もわかりやすいボットの兆候です。
+システムプロンプトが人間らしさを担当するため、カードは純粋にパーソナリティだけを記述します。キャラクターには、同調性ではなく、意見とデフォルトの気分を与えてください。参考セリフは短く、バリエーションを持たせてください。長い会話でスタイルを固定する役割があります。カードはキャラクターの声で書いてください。罵倒語は意味を持たせ、埋め草にしないでください。沈黙を有効な選択肢にしてください。常に返答するキャラクターは最もわかりやすいボットの兆候です。
 
 ## 設定
 
 `config.json` にすべての設定とデフォルト値が格納されています。`config.local.json`（gitignore 対象）がディープマージされます。どちらもホットリロードされます。全キーの詳細は[設定リファレンス](configuration.md)を参照してください。
 
-## メモリの使い始め
+## メモリの初期構築
 
-初回起動時、`warmup.enabled` が true でプロファイルがまだ存在しない場合、エンジンは最近のメッセージのサンプルからメンバー、チャンネル、サーバーのメモリを構築するウォームアップを実行します。トークンの総消費量は `warmup.maxTokens` で制限されます。ウォームアップの実行中、ペルソナは発言しません。ステージ、進捗、レール、オーナーコマンドについては[ウォームアップ](warmup.md)を参照してください。
+初回起動時、`warmup.enabled` が true でプロファイルがまだ存在しない場合、エンジンは最近のメッセージのサンプルからメンバー、チャンネル、サーバーのメモリを構築するウォームアップを実行します。トークンの総消費量は `warmup.maxTokens` で制限されます。ウォームアップの実行中、ペルソナは発言しません。ステージ、進捗、制限、オーナーコマンドについては[ウォームアップ](warmup.md)を参照してください。
 
 ## ドライラン
 
@@ -116,13 +116,13 @@ npm start
 
 モデルは `<think>`（隠れた計画）、`<msg>`（1〜3 件のチャットメッセージ。`reply="#87"` でトランスクリプトの行にリプライ）、`<react>`（絵文字リアクション一つ）、`<skip/>`（沈黙）で応答します。解析後、人間の速度でタイピングがシミュレートされ、出力内の `@nick` が実際のメンションに変換されます。
 
-メモリアナライザーは十分なメッセージが蓄積した時点で別の LLM 呼び出しとして実行されます。キャラクターカードを受け取り、キャラクターの目を通して各人を判断し、態度の変化、プロファイルの変更、チャンネルの観察、サーバーレベルのノートを返します。メンバーのキャラクターと話し方のポートレートは `memory.mainChannelIds` のチャンネルから作成されます。リストが空の場合はすべてのチャンネルが対象です。プロファイルは差分で更新されます。アナライザーは変更があったものだけを返し、保存された事実が再要約されることはありません。キャラクターとスタイルはウォームアップ時にプロファイルプロンプトが全文を書き込む散文段落で、アナライザーがギャップや矛盾を指摘した際に最近のメッセージからリフレッシュされます。関心と詳細は別々の項目で、別の機会に再び話題になると確定されます。表示されるよりも多くの項目がメンバーごとに保持され、頻度と新しさでランク付けされ、重みは時間とともに減衰します。長期間目撃されていない関心は古いものとしてペルソナに表示されます。保存されたメモリはメンバーを ID で参照し、使用時に現在の名前が置換されるため、名前の変更で保存されたノートが壊れることはありません。ペルソナはチャットで人々が互いをどう呼ぶかも学び、名前やエイリアスで言及されたメンバーが会話に参加していなくても認識します。
+メモリアナライザーは十分なメッセージが蓄積した時点で別の LLM 呼び出しとして実行されます。キャラクターカードを受け取り、キャラクターの目を通して各人を判断し、態度の変化、プロファイルの変更、チャンネルの観察、サーバーレベルのノートを返します。メンバーのキャラクターと話し方のポートレートは `memory.mainChannelIds` のチャンネルから作成されます。リストが空の場合はすべてのチャンネルが対象です。プロファイルは差分で更新されます。アナライザーは変更があったものだけを返し、保存された事実が再要約されることはありません。キャラクターとスタイルはウォームアップ時にプロファイルプロンプトが全文を書き込む自由記述の段落で、アナライザーがギャップや矛盾を指摘した際に最近のメッセージからリフレッシュされます。関心と詳細は別々の項目で、別の機会に再び話題になると確定されます。表示されるよりも多くの項目がメンバーごとに保持され、頻度と新しさでランク付けされ、重みは時間とともに減衰します。長期間目撃されていない関心は古いものとしてペルソナに表示されます。保存されたメモリはメンバーを ID で参照し、使用時に現在の名前が置換されるため、名前の変更で保存されたノートが壊れることはありません。ペルソナはチャットで人々が互いをどう呼ぶかも学び、名前やエイリアスで言及されたメンバーが会話に参加していなくても認識します。
 
 ## エピソードとロアブック
 
 メモリアナライザーはプロファイル以外に二種類の長期ノートを書きます。
 
-エピソードはペルソナが個々の人について記憶する出来事です。侮辱、親切、約束、賭け、共有されたジョーク、ペルソナに何かをするよう頼んだりしないよう頼んだりしたこと。アナライザーは日付、短い説明、時にはその人自身の言葉、1 から 5 の重みとともにプロファイルに追記します。重いものほど長く残ります。プロファイルが `memory.maxEpisodes` に達すると、最も軽いものから、次に最も古いものから削除されます。表示されるのは発話者のエピソードのみで、`<people>` ブロック内に含まれます。
+エピソードはペルソナが個々の人について記憶する出来事です。侮辱、親切、約束、賭け、共有されたジョーク、ペルソナに何かを頼んだこと、あるいは決してしないよう頼んだこと。アナライザーは日付、短い説明、時にはその人自身の言葉、1 から 5 の重みとともにプロファイルに追記します。重いものほど長く残ります。プロファイルが `memory.maxEpisodes` に達すると、最も軽いものから、次に最も古いものから削除されます。表示されるのは発話者のエピソードのみで、`<people>` ブロック内に含まれます。
 
 ロアブックはサーバー全体の知識を保存します。会話を超えて残るもの、すなわちイベント、繰り返し登場するキャラクター、長期にわたるストーリー、対立、伝統です。各エントリにはタイトル、キーワードセット、短いテキストがあります。コードは直近の `lore.scanMessages` 件のメッセージをキーワードマッチでスキャンし、最大 `lore.maxMatches` エントリを `<lore>` ブロックに含めます。`always` とマークされたエントリは常に表示されます。マッチする少数だけが表示されるため、数百のエントリが存在してもコストはほぼゼロです。
 
@@ -134,7 +134,7 @@ npm start
 
 `features.vision` は呼び出しメッセージ、リプライ先のメッセージ、チャンネル内の最新の画像を、Discord のメディアプロキシ経由でダウンスケールして LLM リクエストに画像として添付します。ボットはすべての画像を自分でダウンロードし、データとしてインライン送信します。Discord がモデルプロバイダーからのダウンロードを拒否するためです。`context.vision.maxBytes` を超える画像や `context.vision.fetchTimeoutMs` より遅い画像はスキップされます。ペルソナはこれらを直接見ます。設定は `context.vision` 配下にあります。
 
-`features.mediaDescriptions`（デフォルト有効）はヘルパーモデル（`media.model`）を使い、画像、GIF フレーム、動画ポスター、スティッカー、カスタム絵文字、リンクサムネイルに対して一行の説明文を書きます。各添付ファイルは一度だけ記述されキャッシュされます。説明文はチャットのトランスクリプト、メモリアナライザー、ウォームアップに供給されます。ウォームアップ中の説明文はそのトークンバジェットから消費されます。デスクライバーのプロンプトは `prompts/describe.md` です。設定は `media` 配下にあります。
+`features.mediaDescriptions`（デフォルト有効）はヘルパーモデル（`media.model`）を使い、画像、GIF フレーム、動画ポスター、スティッカー、カスタム絵文字、リンクサムネイルに対して一行の説明文を書きます。各添付ファイルは一度だけ記述されキャッシュされます。説明文はチャットのトランスクリプト、メモリアナライザー、ウォームアップに供給されます。ウォームアップ中の説明文はそのトークンバジェットから消費されます。説明モデルのプロンプトは `prompts/describe.md` です。設定は `media` 配下にあります。
 
 スティッカーとカスタム絵文字は頻繁に繰り返されるため、ID でキャッシュされ、初回の記述後はほぼコストがかかりません。`features.vision` が有効な場合、呼び出しメッセージのスティッカーは画像として添付されます。Discord の組み込みアニメーションスティッカーは Lottie アニメーションであり画像ではないため、名前以上の情報は得られません。
 
@@ -185,94 +185,94 @@ npm test
 ## プロジェクト構成
 
 ```
-config.json                defaults for every setting, hot-reloaded
-.env.example               template for DISCORD_TOKEN and OPENROUTER_API_KEY
+config.json                すべての設定とデフォルト値、ホットリロード
+.env.example               DISCORD_TOKEN と OPENROUTER_API_KEY のテンプレート
 prompts/
-  system-prompt.md         how to behave like an ordinary chat member
-  character-card.md        the personality (working example)
-  rules.md                 owner's live corrections
-  format.md                output tags the model uses
-  reply.md                 task: someone called you
-  interject.md             task: jump into a conversation
-  initiate.md              task: start a topic
-  memory.md                prompt for the memory analyzer
-  describe.md              prompt for the media describer
-  address.md               classifier for follow-up messages
-  profile.md               warmup: one member's profile from a message sample
-  channel.md               warmup: channel notes from a message sample
-  server.md                warmup: server-level notes from channel notes and member summaries
-  labels.json              every code-inserted string in prompts
-prompts.local/             your personality (gitignored)
+  system-prompt.md         通常のチャットメンバーとして振る舞う方法
+  character-card.md        パーソナリティ（動作するサンプル）
+  rules.md                 オーナーのライブ修正
+  format.md                モデルが使う出力タグ
+  reply.md                 タスク: 誰かに呼ばれた
+  interject.md             タスク: 会話に割り込む
+  initiate.md              タスク: 話題を切り出す
+  memory.md                メモリアナライザーのプロンプト
+  describe.md              メディア説明モデルのプロンプト
+  address.md               フォローアップメッセージの分類器
+  profile.md               ウォームアップ: メッセージサンプルからメンバーのプロファイルを作成
+  channel.md               ウォームアップ: メッセージサンプルからチャンネルノートを作成
+  server.md                ウォームアップ: チャンネルノートとメンバーの要約からサーバーレベルのノートを作成
+  labels.json              コードがプロンプトに挿入するすべての文字列
+prompts.local/             デプロイ先のパーソナリティ（gitignore 対象）
 docs/
-  prompt-contract.md       the contract between prompt files and code
+  prompt-contract.md       プロンプトファイルとコードの間のコントラクト
   en/
-    configuration.md       full reference for every config key
-    owner-commands.md      every subcommand and the access grants
-    warmup.md              the warmup: stages, progress, rails, commands
-  zh/                      Chinese
+    configuration.md       全設定キーのリファレンス
+    owner-commands.md      全サブコマンドとアクセスグラント
+    warmup.md              ウォームアップ: ステージ、進捗、制限、コマンド
+  zh/                      中国語
     README.md
     configuration.md
     owner-commands.md
     warmup.md
-  ja/                      Japanese
+  ja/                      日本語
     README.md
     configuration.md
     owner-commands.md
     warmup.md
-  ru/                      Russian
+  ru/                      ロシア語
     README.md
     configuration.md
     owner-commands.md
     warmup.md
 src/
-  index.js                 entry point, wiring, timers, shutdown
-  config.js                .env parser, config loader, deepMerge
-  hot.js                   live config + prompts via fs.watch
-  log.js                   structured JSON logging
-  admin.js                 owner commands
+  index.js                 エントリポイント、配線、タイマー、シャットダウン
+  config.js                .env パーサー、設定ローダー、deepMerge
+  hot.js                   fs.watch によるライブな設定とプロンプト
+  log.js                   構造化 JSON ログ
+  admin.js                 オーナーコマンド
   llm/
-    tokens.js              token estimation with self-calibration
-    budget.js              priority-ordered section trimming
-    openrouter.js          chat completions, safety rails
-    parse.js               output tags to actions
+    tokens.js              自己キャリブレーション付きトークン推定
+    budget.js              優先順によるセクションのトリミング
+    openrouter.js          チャットコンプリーション、安全制限
+    parse.js               出力タグをアクションに変換
   discord/
-    guild.js               single-guild resolution
-    commands.js            slash commands, registration, interaction adapter
-    events.js              message pipeline
-    collect.js             channel history, neighbours, permissions
-    format.js              transcript lines, time gaps, tempo
-    media.js               media classification, label selection, proxy URLs
-    fetch-image.js         download and cache images for inline LLM requests
+    guild.js               単一ギルドの解決
+    commands.js            スラッシュコマンド、登録、インタラクションアダプター
+    events.js              メッセージパイプライン
+    collect.js             チャンネル履歴、隣接チャンネル、権限
+    format.js              トランスクリプト行、タイムギャップ、テンポ
+    media.js               メディア分類、ラベル選択、プロキシ URL
+    fetch-image.js         LLM のインラインリクエスト用に画像をダウンロードしてキャッシュ
   behavior/
-    mention.js             call detection, ignore heuristics
-    prompt.js              request builder with token budget
-    turn.js                one turn: collect, build, call, act
-    spontaneous.js         chaotic timer, eavesdrop
-    pending.js             pending direct pings while the persona is busy
+    mention.js             呼び出し検出、無視ヒューリスティクス
+    prompt.js              トークンバジェット付きリクエストビルダー
+    turn.js                1 ターン: 収集、構築、呼び出し、実行
+    spontaneous.js         カオスタイマー、盗み聞き
+    pending.js             ペルソナがビジー中に保留される直接ピング
   memory/
-    store.js               JSON file persistence, atomic writes
-    update.js              batch memory updates
-    affinity.js            relationship score logic
-    interests.js           remembered interests: sightings, confirmation, eviction
-    details.js             remembered details: sightings, confirmation, eviction
-    aliases.js             remembered aliases: sightings, confirmation, eviction
-    episodes.js            remembered episodes: append, weight-based eviction
-    channels.js            channel map rendering, activity verdicts
-    mentions.js            member-id tokens in stored text: toTokens and fromTokens
-    clamp.js               text clamping: soft limits, sentence boundaries, safe member tokens
-    ranking.js             shared ranking for interests and details: frequency, recency, decay
-    lore.js                lorebook logic: key matching, entry selection
-    describe.js            media describer: one picture in, one cached caption out
-    warmup.js              sample-based memory warmup
-tests/                     node --test, pure-function unit tests
+    store.js               JSON ファイル永続化、アトミック書き込み
+    update.js              バッチメモリ更新
+    affinity.js            関係スコアのロジック
+    interests.js           記憶された関心: 目撃、確定、削除
+    details.js             記憶された詳細: 目撃、確定、削除
+    aliases.js             記憶されたエイリアス: 目撃、確定、削除
+    episodes.js            記憶されたエピソード: 追記、重みによる削除
+    channels.js            チャンネルマップの描画、アクティビティ判定
+    mentions.js            保存テキスト内のメンバー ID トークン: toTokens と fromTokens
+    clamp.js               テキストの切り詰め: ソフト上限、文の境界、メンバートークンの保護
+    ranking.js             関心と詳細の共通ランキング: 頻度、新しさ、減衰
+    lore.js                ロアブックのロジック: キーマッチ、エントリ選択
+    describe.js            メディア説明モデル: 画像 1 枚を入力、キャッシュされた説明文 1 行を出力
+    warmup.js              サンプルベースのメモリウォームアップ
+tests/                     node --test、純粋関数のユニットテスト
 deploy/
-  neptunia-bot.service     example systemd unit
-data/                      persistent state (gitignored, created at runtime)
-  state.json               scheduler times, token calibration, daily request counter, warmup progress
-  guilds/<id>/guild.json   server habits, in-jokes, the persona's self-claims
-  guilds/<id>/buffer.json  messages observed since the last memory update
-  guilds/<id>/media.json   media description cache
-  guilds/<id>/users/       per-member profiles and relationships
-  guilds/<id>/channels/    channel observations from the analyzer
-  guilds/<id>/lore.json    lorebook entries
+  neptunia-bot.service     systemd ユニットのサンプル
+data/                      永続状態（gitignore 対象、実行時に作成）
+  state.json               スケジューラーの時刻、トークンキャリブレーション、1 日のリクエストカウンター、ウォームアップの進捗
+  guilds/<id>/guild.json   サーバーの傾向、内輪ネタ、ペルソナの自己言及
+  guilds/<id>/buffer.json  前回のメモリ更新以降に観測されたメッセージ
+  guilds/<id>/media.json   メディア説明文のキャッシュ
+  guilds/<id>/users/       メンバーごとのプロファイルと関係
+  guilds/<id>/channels/    アナライザーによるチャンネルの観察
+  guilds/<id>/lore.json    ロアブックエントリ
 ```

@@ -16,7 +16,7 @@
 
 ---
 
-Neptunia is a locally run Discord bot that plays one configurable character through an LLM, behaving like an ordinary chat member. Node.js 20+ with a single dependency (discord.js), any OpenRouter-compatible endpoint, a pluggable character card written without touching code, hot-reloaded prompts and config, per-member memory with attitudes and episodes, a server-wide lorebook, vision for attached pictures, one-line media descriptions from a helper model, owner slash commands for live tuning, and a dry-run mode. It ships with a working example character; write your own card for a different persona.
+Neptunia is a locally run Discord bot that plays one configurable character through an LLM, behaving like an ordinary chat member. It runs on Node.js 20+ with a single dependency (discord.js) and talks to any OpenRouter-compatible endpoint. It comes with a pluggable character card written without touching code, hot-reloaded prompts and config, per-member memory with attitudes and episodes, a server-wide lorebook, vision for attached pictures, one-line media descriptions from a helper model, owner slash commands for live tuning, and a dry-run mode. A working example character is included; write your own card for a different persona.
 
 The persona responds to mentions, replies and name triggers, sometimes ignoring them. It cuts into conversations at random intervals and starts topics in dead channels. It remembers people, tracks attitudes from -100 to 100, and uses them in replies. The score never appears in chat. All config and prompts are hot-reloaded; owner commands tune the bot live from Discord.
 
@@ -82,7 +82,7 @@ Both are hot-reloaded.
 
 The memory analyzer judges how the character feels about people. Both it and the warmup receive your character card and `rules.md`, so include what your character likes and dislikes; a live rule about voice or judgement shapes portraits and attitude the same way the card does.
 
-The placeholders, `labels.json` keys, context blocks and output tags every prompt file may use are specified in [`docs/prompt-contract.md`](docs/prompt-contract.md); a change on one side changes the other.
+The placeholders, `labels.json` keys, context blocks and output tags every prompt file may use are specified in [`docs/prompt-contract.md`](docs/prompt-contract.md); a change on one side requires the matching change on the other.
 
 ### Tips
 
@@ -104,7 +104,7 @@ First run on a new server: enable `features.dryRun`, watch the mirror or `journa
 
 ## Owner commands
 
-One Discord slash command, `/nep` (the name comes from `bot.commandName`). Guild commands, registered on start for the served server. Every answer is ephemeral; only the caller sees it, in whatever channel it was typed. See [`docs/en/owner-commands.md`](docs/en/owner-commands.md) for every subcommand and the access grants.
+One Discord slash command, `/nep` (the name comes from `bot.commandName`). They are registered as guild commands on start, for the served server only. Every answer is ephemeral; only the caller sees it, in whatever channel it was typed. See [`docs/en/owner-commands.md`](docs/en/owner-commands.md) for every subcommand and the access grants.
 
 ## How a turn works
 
@@ -172,7 +172,7 @@ Memory lives in the process and is written to `data/`; editing those files under
 
 ## Contributing
 
-Issues and pull requests are welcome; read `CONTRIBUTING.md` first. Target branch is `main`, one change per pull request, tests pass with `npm test`, English only. The contract between the prompt files and the code is in `docs/prompt-contract.md`. A change on one side changes the other in the same pull request. The engine stays character-neutral; behaviour of one character belongs in that deployment's `prompts.local/`. Security reports go through `SECURITY.md`, not public issues.
+Issues and pull requests are welcome; read `CONTRIBUTING.md` first. Target branch is `main`, one change per pull request, tests pass with `npm test`, English only. The contract between the prompt files and the code is in `docs/prompt-contract.md`. A change on one side requires the matching change on the other, in the same pull request. The engine stays character-neutral; behaviour of one character belongs in that deployment's `prompts.local/`. Security reports go through `SECURITY.md`, not public issues.
 
 ## Tests
 
