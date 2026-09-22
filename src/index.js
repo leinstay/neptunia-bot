@@ -142,7 +142,7 @@ const admin = createAdmin({
   pending: { clear: () => onMessage.clearPending() },
   // F35 (/nep ping): reaches each role's model directly through the same rails.
   llm,
-  // The sample-based memory bootstrap: preview, run, status, reset, portrait refresh.
+  // The sample-based memory bootstrap: run, user/users, channel/channels, server, status, reset, portrait refresh.
   bootstrap,
 });
 const onInteraction = createInteractionHandler({ hot, admin, getGuildId });

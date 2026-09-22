@@ -152,6 +152,61 @@ test('renderChannel: activityLive/Slow/Dead select the right label for {activity
   assert.ok(renderChannel(c, labels, { activity: 'dead' }).includes(`activity: ${labels.server.activityDead}`));
 });
 
+test('renderChannel: lastMessage is omitted when now is not given, even with lastMessageAt set', () => {
+  const c = channel({ name: 'general', lastMessageAt: NOW - 3 * DAY });
+  const text = renderChannel(c, labels, { current: false, activity: 'slow' });
+  assert.ok(!text.includes('last message'));
+});
+
+test('renderChannel: lastMessage is omitted when the channel has never seen a message', () => {
+  const c = channel({ name: 'general', lastMessageAt: null });
+  const text = renderChannel(c, labels, { current: false, activity: 'dead', now: NOW });
+  assert.ok(!text.includes('last message'));
+});
+
+test('renderChannel: lastMessage renders a humanised age via labels.units, right before the activity line', () => {
+  const c = channel({ name: 'general', lastMessageAt: NOW - 3 * DAY });
+  const text = renderChannel(c, labels, { current: false, activity: 'slow', now: NOW });
+  assert.equal(text, '# general\nlast message: 3 d ago\nactivity: slow');
+});
+
+test('renderChannel: lastMessage under a minute old renders labels.units.lessThanMinute', () => {
+  const c = channel({ name: 'general', lastMessageAt: NOW });
+  const text = renderChannel(c, labels, { current: false, activity: 'live', now: NOW });
+  assert.ok(text.includes(`last message: ${labels.units.lessThanMinute} ago`));
+});
+
+test('renderChannel: lastMessage line is omitted entirely when labels.server.lastMessage is missing', () => {
+  const noLastMessageLabels = { server: { ...labels.server, lastMessage: undefined }, units: labels.units };
+  const c = channel({ name: 'general', lastMessageAt: NOW - 3 * DAY });
+  const text = renderChannel(c, noLastMessageLabels, { current: false, activity: 'slow', now: NOW });
+  assert.ok(!text.includes('last message'));
+});
+
+test('renderChannel: topWriters resolves ids to current names via nameOf, in the stored order', () => {
+  const c = channel({ name: 'general', topWriters: [{ id: 'a', count: 8 }, { id: 'b', count: 3 }] });
+  const nameOf = (id) => ({ a: 'Alice', b: 'Bob' })[id] ?? null;
+  const text = renderChannel(c, labels, { current: false, activity: 'live', nameOf });
+  assert.equal(text, '# general\nwrites here most: Alice, Bob\nactivity: live');
+});
+
+test('renderChannel: topWriters skips an id nameOf cannot resolve (e.g. someone who left)', () => {
+  const c = channel({ name: 'general', topWriters: [{ id: 'a', count: 8 }, { id: 'gone', count: 3 }, { id: 'b', count: 1 }] });
+  const nameOf = (id) => ({ a: 'Alice', b: 'Bob' })[id] ?? null;
+  const text = renderChannel(c, labels, { current: false, activity: 'live', nameOf });
+  assert.ok(text.includes('writes here most: Alice, Bob'));
+  assert.ok(!text.includes('gone'));
+});
+
+test('renderChannel: topWriters is omitted when there is no nameOf, or an empty list, or no label', () => {
+  const c = channel({ name: 'general', topWriters: [{ id: 'a', count: 8 }] });
+  assert.ok(!renderChannel(c, labels, { current: false, activity: 'live' }).includes('writes here most'));
+  const nameOf = (id) => ({ a: 'Alice' })[id] ?? null;
+  assert.ok(!renderChannel(channel({ name: 'general', topWriters: [] }), labels, { activity: 'live', nameOf }).includes('writes here most'));
+  const noTopWritersLabels = { server: { ...labels.server, topWriters: undefined }, units: labels.units };
+  assert.ok(!renderChannel(c, noTopWritersLabels, { activity: 'live', nameOf }).includes('writes here most'));
+});
+
 test('renderChannel: works with a non-English (Greek) labels object', () => {
   const grLabels = {
     server: {

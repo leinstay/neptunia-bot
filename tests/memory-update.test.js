@@ -2479,6 +2479,30 @@ test('touchMemory: never touches the user profile for the persona\'s own message
   });
 });
 
+test('touchMemory: bumps a human author into the channel\'s topWriters', () => {
+  withStore((store) => {
+    touchMemory(store, 'g1', slimMessage({ channelId: 'c1', channelName: 'general', authorId: '1', authorName: 'nick', self: false }));
+    const channel = store.getChannel('g1', 'c1');
+    assert.deepEqual(channel.topWriters, [{ id: '1', count: 1 }]);
+  });
+});
+
+test('touchMemory: the persona\'s own message never counts toward topWriters', () => {
+  withStore((store) => {
+    touchMemory(store, 'g1', slimMessage({ channelId: 'c1', channelName: 'general', authorId: 'self1', self: true }));
+    const channel = store.getChannel('g1', 'c1');
+    assert.deepEqual(channel.topWriters, []);
+  });
+});
+
+test('touchMemory: another bot\'s message never counts toward topWriters', () => {
+  withStore((store) => {
+    touchMemory(store, 'g1', slimMessage({ channelId: 'c1', channelName: 'general', authorId: 'bot1', bot: true, self: false }));
+    const channel = store.getChannel('g1', 'c1');
+    assert.deepEqual(channel.topWriters, []);
+  });
+});
+
 // ---- analyze -----------------------------------------------------------------
 
 test('analyze: never touches the buffer, returns usage/estimated/result on success', async () => {

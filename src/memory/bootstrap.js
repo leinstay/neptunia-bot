@@ -11,12 +11,18 @@
 // (formatTranscript's 'memory' mode, the same character card, the same
 // clampText/toTokens/fromTokens helpers).
 //
-// `peopleReport`/`previewUser`/`previewChannel` stay read-only (never touch
-// the store) for `/nep bootstrap people`/`preview`. `createBootstrap().run()`
-// is the write path: channels → people → server, in order, resumable (progress
-// in `state.bootstrap`, flushed after every request), muting the persona for
-// as long as it is in flight (`isBootstrapping()`, wired into
-// src/discord/events.js, src/behavior/spontaneous.js and src/admin.js).
+// `peopleReport` stays read-only (never touches the store) for `/nep
+// bootstrap people`. `createBootstrap().run()` is the write path: channels →
+// people → server, in order, resumable (progress in `state.bootstrap`,
+// flushed after every request), muting the persona for as long as it is in
+// flight (`isBootstrapping()`, wired into src/discord/events.js,
+// src/behavior/spontaneous.js and src/admin.js). `runPerson`/`runChannel`/
+// `runServer` (re)do exactly one target now, synchronously, for `/nep
+// bootstrap user`/`channel`/`server`; `runUsers`/`runChannels` (re)do EVERY
+// qualifying member/every readable channel now, sharing `running` and every
+// rail with `run()`, for `/nep bootstrap users`/`channels` -- a redo always
+// re-processes its targets regardless of `state.bootstrap.done`, then marks
+// them done, so `/nep bootstrap status` reports the same progress either way.
 // `refreshPortrait()` is the stream analyzer's "the stored portrait misses
 // something" cue (src/memory/update.js's `onPortraitRequest`), rewriting only
 // `character`/`style` from a fresh sample. A missing `prompts.profile` /
@@ -170,8 +176,8 @@ export function pickPeople(windows, cfg = {}) {
 }
 
 /** One member's stats (see pickPeople), with no threshold/cap applied -- `null` when they wrote
- * nothing in `windows` at all. Used by `/nep bootstrap preview user:` to report on exactly the
- * member asked for, regardless of `bootstrap.minMessages`. */
+ * nothing in `windows` at all. Used by `/nep bootstrap user` to report on exactly the member asked
+ * for, regardless of `bootstrap.minMessages`. */
 export function memberStats(windows, memberId) {
   const entry = collectAuthorStats(windows).get(String(memberId));
   if (!entry) return null;
@@ -389,68 +395,8 @@ function fitNewest(fixedItems, items, limit, cost) {
 }
 
 /**
- * Build one `profile.md` request for `member` (see pickPeople/memberStats),
- * from `sample` (see sampleMember). Pure: no I/O, no clock reads. Mirrors
- * src/memory/update.js#buildMemoryRequest's shape (system + one user message
- * with `<character>`/`<member>`/`<snippets>` blocks, fitted under
- * `llm.maxRequestTokens * llm.safetyMargin`, oldest snippets dropped first)
- * without importing anything from it.
- * @param {object} input
- * @param {object} input.prompts   `prompts.profile` is the system message; `prompts['character-card']`
- *   is the same source src/memory/update.js#buildMemoryRequest uses for `<character>`.
- * @param {object} input.config    Live config.
- * @param {object} input.calibrator  From createCalibrator().
- * @param {{ id: string, name: string, messages: number, firstTs: number, lastTs: number }} input.member
- * @param {{ messages: object[], ownIds: Set<string> }} input.sample
- * @param {string} input.selfName
- * @returns {{ messages: {role: string, content: string}[], stats: { ownKept: number, contextKept: number,
- *   snippetsDropped: number, estimatedTokens: number } }}
- */
-export function buildProfileRequest({ prompts, config, calibrator, member, sample, selfName }) {
-  const labels = prompts?.labels ?? {};
-  const timezone = config?.bot?.timezone ?? 'UTC';
-  const system = fillTemplate(prompts?.profile, profileTemplateValues(config, selfName));
-  const characterBlock = block('character', fillTemplate(prompts?.['character-card'], { name: selfName }));
-  const memberLine = `${member.name} (id:${member.id}), ${member.messages} messages in the window, first ${isoDateOrDash(member.firstTs)}, last ${isoDateOrDash(member.lastTs)}`;
-  const memberBlock = block('member', memberLine);
-
-  const formatOptions = {
-    timezone,
-    gapMinutes: config?.context?.gapMarkerMinutes ?? 20,
-    maxChars: config?.context?.maxMessageChars ?? 800,
-    selfName,
-    mode: 'memory',
-    labels,
-  };
-  const items = markOwnContext(formatTranscript(sample.messages, formatOptions), sample.ownIds, labels);
-  const transcriptTexts = items.map((item) => item.text);
-
-  const cost = (text) => calibrator.apply(estimateTokens(text)) + 2;
-  const limit = Math.floor((config?.llm?.maxRequestTokens ?? 50000) * (config?.llm?.safetyMargin ?? 0.9));
-  const keptTexts = fitNewest([system, characterBlock, memberBlock], transcriptTexts, limit, cost);
-  const keptItems = items.slice(items.length - keptTexts.length);
-
-  const snippetsBlock = block('snippets', renderTranscript(keptItems, timezone, labels));
-  const user = [characterBlock, memberBlock, snippetsBlock].filter(Boolean).join('\n\n');
-  const messages = [
-    { role: 'system', content: system },
-    { role: 'user', content: user },
-  ];
-
-  const ownKept = keptItems.filter((item) => sample.ownIds.has(item.id)).length;
-  return {
-    messages,
-    stats: {
-      ownKept,
-      contextKept: keptItems.length - ownKept,
-      snippetsDropped: items.length - keptItems.length,
-      estimatedTokens: calibrator.apply(estimateMessages(messages)),
-    },
-  };
-}
-
-/**
- * Build one `channel.md` request. Pure, mirrors buildProfileRequest above.
+ * Build one `channel.md` request. Pure, mirrors the per-chunk request `processPerson` builds for
+ * `profile.md` inline (see its own header comment).
  * @param {object} input
  * @param {object} input.prompts   `prompts.channel` is the system message.
  * @param {object} input.config    Live config.
@@ -907,123 +853,6 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
     };
   }
 
-  /** Shared by previewUser/previewChannel: the analyzer-role model, called with the bootstrap's own
-   * rail (never the daily request cap) and the bootstrap output budget. */
-  async function callModel(messages, cfg) {
-    const model = hot.config.memory?.model ?? hot.config.llm?.model;
-    const completion = await llm.complete(messages, {
-      model,
-      maxOutputTokens: cfg.maxOutputTokens ?? 6000,
-      countAgainstDailyCap: false,
-    });
-    return { model, completion };
-  }
-
-  /** `/nep bootstrap preview user:<member>`. Never writes anything; a missing `prompts.profile`
-   * (the writer may land after the code) is reported instead of calling the model. */
-  async function previewUser(guildId, userId) {
-    if (!hot.prompts?.profile) {
-      return { ok: false, message: 'prompt file missing: prompts/profile.md (or prompts.local/profile.md) is not configured yet' };
-    }
-    const guild = resolvedGuild(guildId);
-    if (!guild) return { ok: false, message: 'no guild resolved yet' };
-
-    const cfg = hot.config.bootstrap ?? {};
-    const windows = await getWindows(guildId, guild, cfg);
-    const member = memberStats(windows, userId);
-    if (!member) return { ok: false, message: `no messages from this member in the last ${cfg.lookbackDays ?? 60} days` };
-
-    const mainChannelIds = new Set((hot.config.memory?.mainChannelIds ?? []).map(String));
-    const sample = sampleMember(windows, userId, cfg, mainChannelIds);
-    if (sample.messages.length === 0) return { ok: false, message: 'nothing to sample for this member' };
-
-    const nameOf = buildNameIndex(windows);
-    const selfName = getSelfName(guildId);
-
-    let built;
-    try {
-      built = buildProfileRequest({ prompts: hot.prompts, config: hot.config, calibrator, member, sample, selfName });
-    } catch (err) {
-      if (err instanceof SectionsTooLargeError) return { ok: false, message: `request does not fit the token cap: ${err.message}` };
-      throw err;
-    }
-
-    let completion;
-    try {
-      ({ completion } = await callModel(built.messages, cfg));
-    } catch (err) {
-      return { ok: false, message: `model call failed: ${err?.message ?? err}` };
-    }
-
-    let parsed;
-    try {
-      parsed = parseJsonObject(completion.text);
-    } catch (err) {
-      return { ok: false, message: `could not parse the model's answer: ${err?.message ?? err}` };
-    }
-
-    return {
-      ok: true,
-      member,
-      sample: { ownCount: sample.ownCount, contextCount: sample.contextCount, channels: sample.channels },
-      estimatedTokens: built.stats.estimatedTokens,
-      usage: completion.usage ?? null,
-      result: clampProfileResult(parsed, hot.config, nameOf),
-    };
-  }
-
-  /** `/nep bootstrap preview channel:<channel>`. Never writes anything; a missing
-   * `prompts.channel` is reported instead of calling the model. */
-  async function previewChannel(guildId, channelId) {
-    if (!hot.prompts?.channel) {
-      return { ok: false, message: 'prompt file missing: prompts/channel.md (or prompts.local/channel.md) is not configured yet' };
-    }
-    const guild = resolvedGuild(guildId);
-    if (!guild) return { ok: false, message: 'no guild resolved yet' };
-
-    const cfg = hot.config.bootstrap ?? {};
-    const windows = await getWindows(guildId, guild, cfg);
-    const window = windows.find((w) => w.id === String(channelId));
-    if (!window) return { ok: false, message: 'channel not found, not readable, or not in this guild' };
-    if (window.messages.length === 0) return { ok: false, message: `channel has no messages in the last ${cfg.lookbackDays ?? 60} days` };
-
-    const mainChannelIds = new Set((hot.config.memory?.mainChannelIds ?? []).map(String));
-    const isMain = mainChannelIds.has(String(channelId));
-    const selected = selectChannelMessages(window.messages, cfg.messagesPerChannel);
-    const selfName = getSelfName(guildId);
-
-    let built;
-    try {
-      built = buildChannelRequest({ prompts: hot.prompts, config: hot.config, calibrator, channel: window, messages: selected, isMain, selfName });
-    } catch (err) {
-      if (err instanceof SectionsTooLargeError) return { ok: false, message: `request does not fit the token cap: ${err.message}` };
-      throw err;
-    }
-
-    let completion;
-    try {
-      ({ completion } = await callModel(built.messages, cfg));
-    } catch (err) {
-      return { ok: false, message: `model call failed: ${err?.message ?? err}` };
-    }
-
-    let parsed;
-    try {
-      parsed = parseJsonObject(completion.text);
-    } catch (err) {
-      return { ok: false, message: `could not parse the model's answer: ${err?.message ?? err}` };
-    }
-
-    return {
-      ok: true,
-      channel: { id: window.id, name: window.name, category: window.category, topic: window.topic, isMain },
-      sample: { kept: built.stats.kept, dropped: built.stats.dropped, total: window.messages.length },
-      estimatedTokens: built.stats.estimatedTokens,
-      usage: completion.usage ?? null,
-      result: clampChannelResult(parsed, hot.config),
-    };
-  }
-
   // -------------------------------------------------------------------
   // Write path: run() / runXxx() / refreshPortrait() -- see the module header.
   // -------------------------------------------------------------------
@@ -1058,7 +887,7 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
   }
 
   /** `config` with `llm.maxRequestTokens` overridden to `cfg.maxRequestTokens` (the bootstrap's own,
-   * much larger, cap) -- so buildProfileRequest/buildChannelRequest fit under IT, not the global
+   * much larger, cap) -- so buildChannelRequest fits under IT, not the global
    * per-request rail (.claude/docs/prompt-contract.md, "The bootstrap", DO §2). */
   function requestConfigFor(cfg) {
     return { ...hot.config, llm: { ...hot.config.llm, maxRequestTokens: cfg.maxRequestTokens ?? hot.config.llm?.maxRequestTokens } };
@@ -1142,28 +971,79 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
     }
   }
 
-  /** Every message `memberId` wrote across `windows` (bots and the persona's own lines already
-   * excluded upstream), oldest first -- fed one at a time into `store.touchUser` so the resulting
-   * profile's `messageCount`/`firstSeen`/`lastSeen`/`names` are computed by code from the actual
-   * fetched window, exactly as if the live pipeline had observed each of them
-   * (.claude/docs/prompt-contract.md, "The bootstrap", DO §3). */
-  function touchUserFromWindows(guildId, windows, memberId) {
-    const id = String(memberId);
-    const messages = [];
-    for (const window of windows) {
-      for (const message of window.messages ?? []) {
-        if (!message.bot && !message.self && String(message.authorId) === id) messages.push(message);
-      }
+  /** A fresh 30-newest-UTC-date histogram of `messages` -- mirrors src/memory/store.js's own
+   * (private) `trimDays`, computed once from the whole window instead of accumulated incrementally;
+   * the highest date key present is always the newest message's date, so trimming to the newest 30
+   * KEYS is the same as trimming "relative to the newest message". Pure. */
+  function dayHistogram(messages) {
+    const days = {};
+    for (const message of messages ?? []) {
+      if (!Number.isFinite(message?.ts)) continue;
+      const key = new Date(message.ts).toISOString().slice(0, 10);
+      days[key] = (days[key] ?? 0) + 1;
     }
-    messages.sort((a, b) => a.ts - b.ts);
-    for (const message of messages) store.touchUser(guildId, id, message.authorName, message.ts);
-    return messages.length;
+    const keys = Object.keys(days).sort();
+    for (const key of keys.slice(0, Math.max(0, keys.length - 30))) delete days[key];
+    return days;
+  }
+
+  /** Up to 5 `{ id, count }` of who wrote most in `messages`, most active first -- bots and the
+   * persona's own messages excluded, same as `collectAuthorStats` above. Pure. */
+  function topWritersOf(messages) {
+    const counts = new Map();
+    for (const message of messages ?? []) {
+      if (message?.bot || message?.self) continue;
+      const id = String(message.authorId);
+      counts.set(id, (counts.get(id) ?? 0) + 1);
+    }
+    return [...counts.entries()]
+      .map(([id, count]) => ({ id, count }))
+      .sort((a, b) => b.count - a.count || a.id.localeCompare(b.id))
+      .slice(0, 5);
+  }
+
+  /** The `store.setChannelFacts` payload for one channel, from the messages it actually had
+   * (`messages` -- the deeper-fetched set when `processChannel` used one): count, min/max ts, a
+   * fresh 30-day histogram and the top 5 writers. Zeros and empty lists when the channel had no
+   * messages at all. Pure. */
+  function channelFactsFromMessages(window, messages) {
+    const list = messages ?? [];
+    const timestamps = list.map((m) => m.ts).filter(Number.isFinite);
+    return {
+      name: window.name,
+      category: window.category,
+      topic: window.topic,
+      messageCount: list.length,
+      firstMessageAt: timestamps.length ? Math.min(...timestamps) : null,
+      lastMessageAt: timestamps.length ? Math.max(...timestamps) : null,
+      days: dayHistogram(list),
+      topWriters: topWritersOf(list),
+    };
+  }
+
+  /** Sets `messageCount`/`firstSeen`/`lastSeen`/`names` on the stored profile FROM the fetched
+   * window (`member`, see pickPeople/memberStats: `messages` = count in the window, `firstTs`/
+   * `lastTs` = min/max, `name` = the newest nick) -- SET, never added, so a redo (`/nep bootstrap
+   * user`/`users` reprocessing an already-profiled member) lands on the same counters as a first
+   * write instead of doubling them (unlike src/memory/store.js#touchUser, built for the live
+   * pipeline's one-message-at-a-time calls, which this deliberately does NOT use here). */
+  function touchUserFromWindows(guildId, member) {
+    const existing = store.getUser(guildId, member.id);
+    const names = existing?.names?.length
+      ? [member.name, ...existing.names.filter((n) => n !== member.name)].slice(0, 5)
+      : [member.name];
+    store.updateUser(guildId, member.id, {
+      names,
+      firstSeen: new Date(member.firstTs).toISOString(),
+      lastSeen: new Date(member.lastTs).toISOString(),
+      messageCount: member.messages,
+    });
   }
 
   /** Writes one `profile.md` answer for `member` through applyMemoryUpdate (see
    * `buildPersonWriteIterations`) -- attitude/relationship untouched. */
-  function writePersonAnswer(guildId, windows, member, answer) {
-    touchUserFromWindows(guildId, windows, member.id);
+  function writePersonAnswer(guildId, member, answer) {
+    touchUserFromWindows(guildId, member);
 
     const knownUserIds = new Set([String(member.id)]);
     const batchAuthorNames = new Map([[String(member.id), member.name]]);
@@ -1243,8 +1123,14 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
 
     const clamped = clampChannelResult(parsed, hot.config) ?? { purpose: '', topics: '', tone: '' };
     store.updateChannel(guildId, window.id, clamped);
+    // A channel note without its counters/top writers looks dead and
+    // anonymous until live traffic slowly fills them in (see the module
+    // header and .claude/docs/prompt-contract.md) -- fill them now from the
+    // same messages the note itself was written from.
+    const facts = channelFactsFromMessages(window, source);
+    store.setChannelFacts(guildId, window.id, facts);
     markDone('channels', window.id);
-    return { ok: true };
+    return { ok: true, channel: { id: window.id, name: window.name }, result: clamped, facts };
   }
 
   /** One person → `profile.md`, chunked chronologically when the sample does not fit one request
@@ -1291,6 +1177,7 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
     let draft = null;
     let answer = null;
     let chunksDone = 0; // completed chunks so far -- feeds the "chunk k/n" detail below
+    let tokensUsed = 0; // summed across every chunk -- surfaced to `/nep bootstrap user`'s reply
 
     while (remaining.length > 0) {
       if (store.state.data.paused) {
@@ -1329,6 +1216,7 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
         if (result.stop) return result;
         return { ok: false }; // llm-error, not (yet) a run-aborting streak -- retry this person next run
       }
+      tokensUsed += result.completion.usage?.total_tokens ?? result.completion.estimated ?? 0;
 
       let parsed;
       try {
@@ -1350,9 +1238,16 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
       answer = clamped;
     }
 
-    writePersonAnswer(guildId, windows, member, answer ?? { character: '', style: '', interests: [], details: [], episodes: [], aliases: [] });
+    writePersonAnswer(guildId, member, answer ?? { character: '', style: '', interests: [], details: [], episodes: [], aliases: [] });
     markDone('people', member.id);
-    return { ok: true, member, answer };
+    return {
+      ok: true,
+      member,
+      answer,
+      sample: { ownCount: sample.ownCount, contextCount: sample.contextCount },
+      tokensUsed,
+      chunks: chunksDone,
+    };
   }
 
   /** The server-wide `server.md` request: `<channels>` = stored channel notes, `<members>` = one
@@ -1438,7 +1333,15 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
       });
     }
     markDone('server');
-    return { ok: true };
+    return {
+      ok: true,
+      counts: {
+        patternsChars: clamped.patterns.length,
+        startersChars: clamped.starters.length,
+        injokes: clamped.injokes.length,
+        lore: clamped.lore.length,
+      },
+    };
   }
 
   /** The whole run, in order (channels → people → server), resuming whatever `state.bootstrap.done`
@@ -1510,9 +1413,9 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
     }
   }
 
-  /** `/nep bootstrap run user|channel|server:<target>`: (re)do exactly one target right now,
-   * synchronously. Refused while a run (full or another one-off) is already in flight, or while
-   * paused. */
+  /** `/nep bootstrap user|channel|server`: (re)do exactly one target right now, synchronously.
+   * Refused while a run (full, another one-off, or a `users`/`channels` bulk redo) is already in
+   * flight, or while paused. */
   async function runOneTarget(guildId, kind, id) {
     if (running) return { ok: false, message: 'a bootstrap run is already in flight' };
     if (store.state.data.paused) return { ok: false, message: 'paused -- run /nep resume first' };
@@ -1534,7 +1437,7 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
       }
       if (kind === 'person') {
         const member = memberStats(windows, id);
-        if (!member) return { ok: false, message: `no messages from this member in the last ${cfg.lookbackDays ?? 60} days` };
+        if (!member) return { ok: false, message: 'no messages in the window' };
         const outcome = await processPerson(guildId, windows, member, cfg, mainChannelIds);
         return outcome.ok ? { ok: true, outcome } : { ok: false, message: outcome.message ?? outcome.reason ?? 'failed', outcome };
       }
@@ -1548,6 +1451,58 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
       running = false;
       notifyIdle();
     }
+  }
+
+  /**
+   * `/nep bootstrap users`/`/nep bootstrap channels`: (re)do EVERY qualifying member (`pickPeople`)
+   * or every readable channel now, sharing `running` (and so every rail: mute, pause/resume,
+   * `state.bootstrap.done`) with `run()` -- a redo re-processes every target regardless of `done`,
+   * then marks it done either way (processChannel/processPerson already do, idempotently). Resolves
+   * once the target COUNT is known and the background loop has been started, NOT once the loop
+   * itself finishes, so the caller can report "started N …" at once; progress from then on is
+   * `/nep bootstrap status`'s job. Refused (before starting anything) while a run/one-off target is
+   * already in flight, or while paused.
+   * @param {string} guildId
+   * @param {'people'|'channels'} kind
+   */
+  async function startBulk(guildId, kind) {
+    if (running) return { ok: false, message: 'a bootstrap run is already in flight' };
+    if (store.state.data.paused) return { ok: false, message: 'paused -- run /nep resume first' };
+    const guild = resolvedGuild(guildId);
+    if (!guild) return { ok: false, message: 'no guild resolved yet' };
+
+    const cfg = hot.config.bootstrap ?? {};
+    const windows = await getWindows(guildId, guild, cfg);
+    const mainChannelIds = new Set((hot.config.memory?.mainChannelIds ?? []).map(String));
+    const targets = kind === 'channels' ? windows : pickPeople(windows, cfg);
+    if (targets.length === 0) return { ok: true, count: 0 };
+
+    running = true;
+    consecutiveFailures = 0;
+
+    (async () => {
+      try {
+        for (let i = 0; i < targets.length; i += 1) {
+          if (store.state.data.paused) {
+            touchActivity('paused');
+            return;
+          }
+          const outcome =
+            kind === 'channels'
+              ? await processChannel(guildId, targets[i], cfg, mainChannelIds, { index: i + 1, total: targets.length })
+              : await processPerson(guildId, windows, targets[i], cfg, mainChannelIds, undefined, { index: i + 1, total: targets.length });
+          if (outcome.stop) return;
+        }
+        touchActivity('finished');
+      } catch (err) {
+        log.error(`bootstrap: ${kind} redo failed`, { error: err });
+      } finally {
+        running = false;
+        notifyIdle();
+      }
+    })();
+
+    return { ok: true, count: targets.length };
   }
 
   /**
@@ -1766,12 +1721,12 @@ export function createBootstrap({ hot, store, client, llm, calibrator, getSelfNa
 
   return {
     peopleReport,
-    previewUser,
-    previewChannel,
     run,
     runPerson: (guildId, userId) => runOneTarget(guildId, 'person', userId),
     runChannel: (guildId, channelId) => runOneTarget(guildId, 'channel', channelId),
     runServer: (guildId) => runOneTarget(guildId, 'server', null),
+    runUsers: (guildId) => startBulk(guildId, 'people'),
+    runChannels: (guildId) => startBulk(guildId, 'channels'),
     resumeIfNeeded,
     summary,
     status,

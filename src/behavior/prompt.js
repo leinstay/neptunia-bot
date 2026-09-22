@@ -301,6 +301,8 @@ function serverItems(channels, currentChannelId, now, activityCfg, labels, nameO
       {
         current: channel.id === currentChannelId,
         activity: channelActivity(channel, now, activityCfg),
+        now,
+        nameOf,
       },
     ),
   );

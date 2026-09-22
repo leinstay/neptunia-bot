@@ -217,32 +217,47 @@ test('buildCommandTree: lore group (add/list/show/remove)', () => {
   assert.equal(findOption(remove.options, 'id').required, true);
 });
 
-test('buildCommandTree: bootstrap group (people, preview, run, status, reset)', () => {
+test('buildCommandTree: bootstrap group (people, run, user, users, channel, channels, server, status, reset)', () => {
   const [command] = buildCommandTree('nep');
   const bootstrap = findOption(command.options, 'bootstrap');
   assert.equal(bootstrap.type, 2); // SUBCOMMAND_GROUP
-  assert.deepEqual(bootstrap.options.map((o) => o.name), ['people', 'preview', 'run', 'status', 'reset']);
+  assert.deepEqual(
+    bootstrap.options.map((o) => o.name),
+    ['people', 'run', 'user', 'users', 'channel', 'channels', 'server', 'status', 'reset'],
+  );
 
   const people = findOption(bootstrap.options, 'people');
   assert.equal(people.type, 1); // SUBCOMMAND
   assert.equal(people.options, undefined);
 
-  const preview = findOption(bootstrap.options, 'preview');
-  const user = findOption(preview.options, 'user');
-  assert.equal(user.type, 6); // USER
-  assert.equal(user.required, false);
-  const channel = findOption(preview.options, 'channel');
-  assert.equal(channel.type, 7); // CHANNEL
-  assert.equal(channel.required, false);
-  assert.deepEqual(channel.channel_types, [0]); // GUILD_TEXT
-
   const run = findOption(bootstrap.options, 'run');
   assert.equal(run.type, 1); // SUBCOMMAND
-  assert.equal(findOption(run.options, 'user').required, false);
-  assert.equal(findOption(run.options, 'channel').required, false);
-  const server = findOption(run.options, 'server');
-  assert.equal(server.type, 5); // BOOLEAN
-  assert.equal(server.required, false);
+  assert.equal(run.options, undefined);
+
+  const user = findOption(bootstrap.options, 'user');
+  assert.equal(user.type, 1); // SUBCOMMAND
+  const userOpt = findOption(user.options, 'user');
+  assert.equal(userOpt.type, 6); // USER
+  assert.equal(userOpt.required, true);
+
+  const users = findOption(bootstrap.options, 'users');
+  assert.equal(users.type, 1);
+  assert.equal(users.options, undefined);
+
+  const channel = findOption(bootstrap.options, 'channel');
+  assert.equal(channel.type, 1); // SUBCOMMAND
+  const channelOpt = findOption(channel.options, 'channel');
+  assert.equal(channelOpt.type, 7); // CHANNEL
+  assert.equal(channelOpt.required, true);
+  assert.deepEqual(channelOpt.channel_types, [0]); // GUILD_TEXT
+
+  const channels = findOption(bootstrap.options, 'channels');
+  assert.equal(channels.type, 1);
+  assert.equal(channels.options, undefined);
+
+  const server = findOption(bootstrap.options, 'server');
+  assert.equal(server.type, 1); // SUBCOMMAND
+  assert.equal(server.options, undefined);
 
   const status = findOption(bootstrap.options, 'status');
   assert.equal(status.type, 1);
@@ -613,19 +628,43 @@ test('interaction handler: bootstrap.people maps to empty args', async () => {
   assert.deepEqual(admin.runCalls[0][1], {});
 });
 
-test('interaction handler: bootstrap.preview maps user/channel, undefined when omitted', async () => {
+test('interaction handler: bootstrap.user maps the user option to userId', async () => {
   const admin = fakeAdmin();
   const handler = createInteractionHandler({ hot: baseHot(), admin, getGuildId: () => 'g1' });
 
-  await handler(fakeInteraction({ group: 'bootstrap', subcommand: 'preview', optionValues: { user: { id: 'target1' } } }));
-  assert.equal(admin.runCalls[0][0], 'bootstrap.preview');
-  assert.deepEqual(admin.runCalls[0][1], { userId: 'target1', channelId: undefined });
-
-  await handler(fakeInteraction({ group: 'bootstrap', subcommand: 'preview', optionValues: { channel: { id: 'chan1' } } }));
-  assert.deepEqual(admin.runCalls[1][1], { userId: undefined, channelId: 'chan1' });
+  await handler(fakeInteraction({ group: 'bootstrap', subcommand: 'user', optionValues: { user: { id: 'target1' } } }));
+  assert.equal(admin.runCalls[0][0], 'bootstrap.user');
+  assert.deepEqual(admin.runCalls[0][1], { userId: 'target1' });
 });
 
-test('interaction handler: defers then edits for bootstrap.people and bootstrap.preview (slow commands)', async () => {
+test('interaction handler: bootstrap.channel maps the channel option to channelId', async () => {
+  const admin = fakeAdmin();
+  const handler = createInteractionHandler({ hot: baseHot(), admin, getGuildId: () => 'g1' });
+
+  await handler(fakeInteraction({ group: 'bootstrap', subcommand: 'channel', optionValues: { channel: { id: 'chan1' } } }));
+  assert.equal(admin.runCalls[0][0], 'bootstrap.channel');
+  assert.deepEqual(admin.runCalls[0][1], { channelId: 'chan1' });
+});
+
+test('interaction handler: bootstrap.users/channels/server/run map to empty args', async () => {
+  const admin = fakeAdmin();
+  const handler = createInteractionHandler({ hot: baseHot(), admin, getGuildId: () => 'g1' });
+
+  await handler(fakeInteraction({ group: 'bootstrap', subcommand: 'users' }));
+  assert.equal(admin.runCalls[0][0], 'bootstrap.users');
+  assert.deepEqual(admin.runCalls[0][1], {});
+
+  await handler(fakeInteraction({ group: 'bootstrap', subcommand: 'channels' }));
+  assert.deepEqual(admin.runCalls[1][1], {});
+
+  await handler(fakeInteraction({ group: 'bootstrap', subcommand: 'server' }));
+  assert.deepEqual(admin.runCalls[2][1], {});
+
+  await handler(fakeInteraction({ group: 'bootstrap', subcommand: 'run' }));
+  assert.deepEqual(admin.runCalls[3][1], {});
+});
+
+test('interaction handler: defers then edits for every bootstrap subcommand (slow commands)', async () => {
   const admin = fakeAdmin({ runImpl: () => 'bootstrap result' });
   const handler = createInteractionHandler({ hot: baseHot(), admin, getGuildId: () => 'g1' });
 
@@ -634,10 +673,30 @@ test('interaction handler: defers then edits for bootstrap.people and bootstrap.
   assert.equal(peopleInteraction.deferred, true);
   assert.equal(peopleInteraction.edits[0].content, 'bootstrap result');
 
-  const previewInteraction = fakeInteraction({ group: 'bootstrap', subcommand: 'preview', optionValues: { user: { id: 'target1' } } });
-  await handler(previewInteraction);
-  assert.equal(previewInteraction.deferred, true);
-  assert.equal(previewInteraction.edits[0].content, 'bootstrap result');
+  const userInteraction = fakeInteraction({ group: 'bootstrap', subcommand: 'user', optionValues: { user: { id: 'target1' } } });
+  await handler(userInteraction);
+  assert.equal(userInteraction.deferred, true);
+  assert.equal(userInteraction.edits[0].content, 'bootstrap result');
+
+  const usersInteraction = fakeInteraction({ group: 'bootstrap', subcommand: 'users' });
+  await handler(usersInteraction);
+  assert.equal(usersInteraction.deferred, true);
+
+  const channelInteraction = fakeInteraction({ group: 'bootstrap', subcommand: 'channel', optionValues: { channel: { id: 'chan1' } } });
+  await handler(channelInteraction);
+  assert.equal(channelInteraction.deferred, true);
+
+  const channelsInteraction = fakeInteraction({ group: 'bootstrap', subcommand: 'channels' });
+  await handler(channelsInteraction);
+  assert.equal(channelsInteraction.deferred, true);
+
+  const serverInteraction = fakeInteraction({ group: 'bootstrap', subcommand: 'server' });
+  await handler(serverInteraction);
+  assert.equal(serverInteraction.deferred, true);
+
+  const resetInteraction = fakeInteraction({ group: 'bootstrap', subcommand: 'reset' });
+  await handler(resetInteraction);
+  assert.equal(resetInteraction.deferred, true);
 });
 
 test('interaction handler: poke maps the optional mode (default) and channel', async () => {

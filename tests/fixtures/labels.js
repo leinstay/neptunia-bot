@@ -116,6 +116,8 @@ export const labels = {
     purpose: 'purpose: {text}',
     topics: 'what people write here: {text}',
     tone: 'tone: {text}',
+    lastMessage: 'last message: {when} ago',
+    topWriters: 'writes here most: {names}',
     activity: 'activity: {activity}',
     activityLive: 'live',
     activitySlow: 'slow',

@@ -124,7 +124,9 @@ export function emptyChannel(id) {
     tone: '',
     days: {},
     messageCount: 0,
+    firstMessageAt: null,
     lastMessageAt: null,
+    topWriters: [],
     updatedAt: null,
   };
 }
@@ -173,6 +175,21 @@ function migrateProfileAliases(profile) {
 function trimDays(days, max) {
   const keys = Object.keys(days).sort();
   for (const key of keys.slice(0, Math.max(0, keys.length - max))) delete days[key];
+}
+
+/** Bump one author's count in a channel's `topWriters` list (`{ id, count }[]`), keeping only the
+ * top 5 by count -- used by `touchChannel` (live traffic, one message at a time); ids compared as
+ * strings. A writer who falls out of the top 5 loses their tally (this is a best-effort ranking,
+ * not an exact per-author ledger -- `setChannelFacts` below computes an exact top 5 from a fetched
+ * window instead). */
+function bumpTopWriters(topWriters, authorId) {
+  const id = String(authorId);
+  const list = (Array.isArray(topWriters) ? topWriters : []).map((w) => ({ ...w }));
+  const existing = list.find((w) => w.id === id);
+  if (existing) existing.count += 1;
+  else list.push({ id, count: 1 });
+  list.sort((a, b) => b.count - a.count);
+  return list.slice(0, 5);
 }
 
 export function createStore({ dataDir }) {
@@ -509,8 +526,12 @@ export function createStore({ dataDir }) {
     /**
      * Record one observed message in a channel: Discord facts (name, category,
      * topic), counters and the per-day activity histogram. Creates the entry.
+     * `authorId` (the message's author, omitted for the persona's own
+     * messages and other bots -- see src/memory/update.js#touchMemory) bumps
+     * that author's tally in `topWriters` (see `bumpTopWriters` above); `null`
+     * (the default) leaves `topWriters` untouched.
      */
-    touchChannel(guildId, channelId, facts, ts = Date.now()) {
+    touchChannel(guildId, channelId, facts, ts = Date.now(), authorId = null) {
       const item = entry(channelFile(guildId, channelId), () => emptyChannel(String(channelId)));
       const channel = item.value;
       const { name, category = null, topic = null } = facts ?? {};
@@ -518,10 +539,54 @@ export function createStore({ dataDir }) {
       channel.category = category;
       channel.topic = topic;
       channel.messageCount += 1;
+      channel.firstMessageAt = channel.firstMessageAt === null ? ts : Math.min(channel.firstMessageAt, ts);
       channel.lastMessageAt = channel.lastMessageAt === null ? ts : Math.max(channel.lastMessageAt, ts);
       const dateKey = new Date(ts).toISOString().slice(0, 10);
       channel.days[dateKey] = (channel.days[dateKey] ?? 0) + 1;
       trimDays(channel.days, 30);
+      if (authorId !== null && authorId !== undefined) channel.topWriters = bumpTopWriters(channel.topWriters, authorId);
+      item.dirty = true;
+      return channel;
+    },
+
+    /**
+     * SET (never add) a channel entry's Discord facts and counters from a
+     * fetched history window (the bootstrap, src/memory/bootstrap.js#processChannel):
+     * unlike `touchChannel` (the live pipeline's one-message-at-a-time
+     * increments), a redo of the same window lands on the same numbers
+     * instead of doubling them -- mirrors `touchUserFromWindows`' SET-not-ADD
+     * pattern for user profiles. `topWriters` (`{ id, count }[]`, already
+     * computed by the caller from the same window) is stored as-is, ids
+     * coerced to strings and capped to 5. Creates the entry.
+     * @param {string} guildId
+     * @param {string} channelId
+     * @param {{ name?: string, category?: string|null, topic?: string|null, messageCount?: number,
+     *   firstMessageAt?: number|null, lastMessageAt?: number|null, days?: Record<string, number>,
+     *   topWriters?: {id: string, count: number}[] }} facts
+     */
+    setChannelFacts(guildId, channelId, facts) {
+      const item = entry(channelFile(guildId, channelId), () => emptyChannel(String(channelId)));
+      const channel = item.value;
+      const {
+        name,
+        category = null,
+        topic = null,
+        messageCount = 0,
+        firstMessageAt = null,
+        lastMessageAt = null,
+        days = {},
+        topWriters = [],
+      } = facts ?? {};
+      if (name) channel.name = name;
+      channel.category = category;
+      channel.topic = topic;
+      channel.messageCount = messageCount;
+      channel.firstMessageAt = firstMessageAt;
+      channel.lastMessageAt = lastMessageAt;
+      channel.days = { ...days };
+      channel.topWriters = Array.isArray(topWriters)
+        ? topWriters.slice(0, 5).map(({ id, count }) => ({ id: String(id), count }))
+        : [];
       item.dirty = true;
       return channel;
     },

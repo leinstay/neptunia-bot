@@ -411,6 +411,106 @@ test('touchChannel: trims the day histogram to the newest 30 dates', () => {
   assert.equal(keys.at(-1), '2026-02-04');
 });
 
+test('touchChannel: sets firstMessageAt on first touch, then keeps the minimum', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  const facts = { name: 'general', category: null, topic: null };
+  store.touchChannel('g1', 'c1', facts, 5000);
+  const channel = store.touchChannel('g1', 'c1', facts, 1000); // arrives "late", out of order
+  assert.equal(channel.firstMessageAt, 1000);
+});
+
+test('touchChannel: bumps the author into topWriters and adds up repeated visits', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  const facts = { name: 'general', category: null, topic: null };
+  store.touchChannel('g1', 'c1', facts, 1000, 'alice');
+  store.touchChannel('g1', 'c1', facts, 2000, 'alice');
+  const channel = store.touchChannel('g1', 'c1', facts, 3000, 'bob');
+  assert.deepEqual(channel.topWriters, [
+    { id: 'alice', count: 2 },
+    { id: 'bob', count: 1 },
+  ]);
+});
+
+test('touchChannel: a null authorId (the persona/other bots) never touches topWriters', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  const facts = { name: 'general', category: null, topic: null };
+  const channel = store.touchChannel('g1', 'c1', facts, 1000);
+  assert.deepEqual(channel.topWriters, []);
+});
+
+test('touchChannel: topWriters never grows past the top 5 by count', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  const facts = { name: 'general', category: null, topic: null };
+  let channel;
+  for (const id of ['a', 'b', 'c', 'd', 'e', 'f']) {
+    channel = store.touchChannel('g1', 'c1', facts, 1000, id);
+  }
+  // every author wrote exactly once here -- 6 candidates, only 5 kept.
+  assert.equal(channel.topWriters.length, 5);
+});
+
+test('setChannelFacts: SETs counters, never adds, so a redo lands on the same numbers', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  const facts = {
+    name: 'general',
+    category: 'Text',
+    topic: 'chat',
+    messageCount: 12,
+    firstMessageAt: 1000,
+    lastMessageAt: 9000,
+    days: { '2026-09-20': 12 },
+    topWriters: [{ id: 'a', count: 8 }, { id: 'b', count: 4 }],
+  };
+  store.setChannelFacts('g1', 'c1', facts);
+  const channel = store.setChannelFacts('g1', 'c1', facts); // redo, same window
+  assert.equal(channel.messageCount, 12);
+  assert.equal(channel.firstMessageAt, 1000);
+  assert.equal(channel.lastMessageAt, 9000);
+  assert.deepEqual(channel.days, { '2026-09-20': 12 });
+  assert.deepEqual(channel.topWriters, [{ id: 'a', count: 8 }, { id: 'b', count: 4 }]);
+});
+
+test('setChannelFacts: caps topWriters to 5 and coerces ids to strings', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  const topWriters = [1, 2, 3, 4, 5, 6].map((id) => ({ id, count: id }));
+  const channel = store.setChannelFacts('g1', 'c1', { messageCount: 21, days: {}, topWriters });
+  assert.equal(channel.topWriters.length, 5);
+  assert.ok(channel.topWriters.every((w) => typeof w.id === 'string'));
+});
+
+test('setChannelFacts: zeros and empty lists for a channel with no messages at all', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  const channel = store.setChannelFacts('g1', 'c1', { name: 'quiet-room', category: null, topic: null, messageCount: 0, firstMessageAt: null, lastMessageAt: null, days: {}, topWriters: [] });
+  assert.equal(channel.messageCount, 0);
+  assert.equal(channel.firstMessageAt, null);
+  assert.equal(channel.lastMessageAt, null);
+  assert.deepEqual(channel.days, {});
+  assert.deepEqual(channel.topWriters, []);
+});
+
+test('setChannelFacts: leaves purpose/topics/tone (the analyzer\'s own fields) untouched', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  store.updateChannel('g1', 'c1', { purpose: 'general chatter' });
+  const channel = store.setChannelFacts('g1', 'c1', { messageCount: 3, days: {} });
+  assert.equal(channel.purpose, 'general chatter');
+});
+
+test('setChannelFacts: creates the channel if it did not already exist', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  const channel = store.setChannelFacts('g1', 'newchannel', { messageCount: 1, days: {} });
+  assert.equal(channel.id, 'newchannel');
+  assert.equal(channel.messageCount, 1);
+});
+
 test('updateChannel: merges purpose/topics/tone and stamps updatedAt', () => {
   const dir = tmpDataDir();
   const store = createStore({ dataDir: dir });

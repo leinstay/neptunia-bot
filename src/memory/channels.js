@@ -4,7 +4,7 @@
 // one channel entry is rendered into the <server> prompt block. No I/O here;
 // `now` and the channel record are always injected.
 
-import { fill } from '../discord/format.js';
+import { fill, formatDuration } from '../discord/format.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -43,15 +43,39 @@ export function channelActivity(channel, now, cfg) {
 }
 
 /**
+ * The `labels.server.topWriters` line's `{names}`: up to the stored `topWriters`' current names
+ * (`nameOf`, the store's `profile.names[0]`), in the stored (count-descending) order,
+ * comma-separated -- an id `nameOf` cannot resolve (no profile, e.g. someone who left) is skipped
+ * silently, never rendered as a bare id. `''` when there is nothing to show, or when `nameOf` is
+ * missing.
+ * @param {{id: string, count: number}[]} topWriters
+ * @param {(id: string) => (string|null)} [nameOf]
+ */
+function topWritersText(topWriters, nameOf) {
+  if (!Array.isArray(topWriters) || topWriters.length === 0 || typeof nameOf !== 'function') return '';
+  return topWriters
+    .map((writer) => nameOf(writer?.id))
+    .filter((name) => typeof name === 'string' && name)
+    .join(', ');
+}
+
+/**
  * Render one channel entry for the <server> prompt block.
  *
  * @param {{ name: string, category?: string|null, topic?: string|null, purpose?: string,
- *   topics?: string, tone?: string }} channel
- * @param {object} labels  Live `prompts.labels`; uses `labels.server.*`.
- * @param {{ current?: boolean, activity: 'live'|'slow'|'dead' }} options
+ *   topics?: string, tone?: string, lastMessageAt?: number|null,
+ *   topWriters?: {id: string, count: number}[] }} channel
+ * @param {object} labels  Live `prompts.labels`; uses `labels.server.*`/`labels.units`.
+ * @param {{ current?: boolean, activity: 'live'|'slow'|'dead', now?: number,
+ *   nameOf?: (id: string) => (string|null) }} options  `now` and `labels.server.lastMessage`
+ *   together render "how long ago the last message was" (`formatDuration`, the same humanised-age
+ *   helper the `<tempo>` block uses); `nameOf` and `labels.server.topWriters` together render who
+ *   writes here most. Either fact is omitted -- not rendered as an empty/placeholder line -- when
+ *   its label is missing (an older labels.json never breaks), when the underlying data is missing,
+ *   or (for the last-message line) when `now` was not given.
  * @returns {string}
  */
-export function renderChannel(channel, labels, { current = false, activity } = {}) {
+export function renderChannel(channel, labels, { current = false, activity, now, nameOf } = {}) {
   const s = labels.server;
   const mark = current ? s.currentMark : '';
   const lines = [`# ${channel.name}${mark}`];
@@ -61,6 +85,14 @@ export function renderChannel(channel, labels, { current = false, activity } = {
   if (channel.purpose) lines.push(fill(s.purpose, { text: channel.purpose }));
   if (channel.topics) lines.push(fill(s.topics, { text: channel.topics }));
   if (channel.tone) lines.push(fill(s.tone, { text: channel.tone }));
+
+  if (s.lastMessage && Number.isFinite(channel.lastMessageAt) && Number.isFinite(now)) {
+    const when = formatDuration(Math.max(0, now - channel.lastMessageAt), labels.units);
+    lines.push(fill(s.lastMessage, { when }));
+  }
+
+  const topWritersLine = s.topWriters ? topWritersText(channel.topWriters, nameOf) : '';
+  if (topWritersLine) lines.push(fill(s.topWriters, { names: topWritersLine }));
 
   const activityLabel = { live: s.activityLive, slow: s.activitySlow, dead: s.activityDead }[activity];
   lines.push(fill(s.activity, { activity: activityLabel }));

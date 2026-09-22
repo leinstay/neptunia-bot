@@ -1,11 +1,10 @@
 // Tests for src/memory/bootstrap.js: THE way memory starts. Pure helpers
 // (pickPeople, memberStats, splitNewestOlder, sampleMember,
-// selectChannelMessages, markOwnContext, buildProfileRequest,
-// buildChannelRequest, clampProfileResult, clampChannelResult,
-// clampServerResult, takeFittingPrefix, buildPersonWriteIterations) are
-// tested directly; the factory is tested against a fake discord.js
-// guild/channel, a fake LLM client and a real (temp-dir) store. No network,
-// no real prompts/ or data/.
+// selectChannelMessages, markOwnContext, buildChannelRequest,
+// clampProfileResult, clampChannelResult, clampServerResult,
+// takeFittingPrefix, buildPersonWriteIterations) are tested directly; the
+// factory is tested against a fake discord.js guild/channel, a fake LLM
+// client and a real (temp-dir) store. No network, no real prompts/ or data/.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -20,7 +19,6 @@ import {
   sampleMember,
   selectChannelMessages,
   markOwnContext,
-  buildProfileRequest,
   buildChannelRequest,
   clampProfileResult,
   clampChannelResult,
@@ -282,7 +280,7 @@ test('markOwnContext: missing labels leaves every item untouched, nothing skippe
 });
 
 // ---------------------------------------------------------------------------
-// buildProfileRequest
+// buildChannelRequest
 // ---------------------------------------------------------------------------
 
 function baseConfig(overrides = {}) {
@@ -302,73 +300,6 @@ function baseConfig(overrides = {}) {
     ...overrides,
   };
 }
-
-function profilePrompts(overrides = {}) {
-  return {
-    profile: 'SYSTEM name={{name}} chars={{fieldChars}} maxI={{maxInterests}} maxD={{maxDetails}} topicChars={{interestTopicChars}} noteChars={{interestNoteChars}} maxEp={{maxNewEpisodes}}',
-    'character-card': 'CARD for {{name}}',
-    labels,
-    ...overrides,
-  };
-}
-
-test('buildProfileRequest: fills every profile.md placeholder from live config', () => {
-  const sample = { messages: [msg(1, 1000, { authorId: 'a', authorName: 'Alice' })], ownIds: new Set(['1']) };
-  const member = { id: 'a', name: 'Alice', messages: 1, firstTs: 1000, lastTs: 1000 };
-  const { messages } = buildProfileRequest({
-    prompts: profilePrompts(),
-    config: baseConfig(),
-    calibrator: createCalibrator(),
-    member,
-    sample,
-    selfName: 'Nept',
-  });
-  assert.equal(messages[0].role, 'system');
-  assert.equal(messages[0].content, 'SYSTEM name=Nept chars=400 maxI=12 maxD=15 topicChars=40 noteChars=120 maxEp=3');
-});
-
-test('buildProfileRequest: <character> and <member> blocks, marked <snippets>', () => {
-  const sample = { messages: [msg(1, 1000, { authorId: 'a', authorName: 'Alice' })], ownIds: new Set(['1']) };
-  const member = { id: 'a', name: 'Alice', messages: 1, firstTs: 1000, lastTs: 1000 };
-  const { messages } = buildProfileRequest({
-    prompts: profilePrompts(),
-    config: baseConfig(),
-    calibrator: createCalibrator(),
-    member,
-    sample,
-    selfName: 'Nept',
-  });
-  const user = messages[1].content;
-  assert.match(user, /<character>\nCARD for Nept\n<\/character>/);
-  assert.match(user, /<member>\nAlice \(id:a\), 1 messages in the window, first .*, last .*\n<\/member>/);
-  assert.match(user, /<snippets>[\s\S]*<\/snippets>/);
-  assert.ok(user.includes('[own] '));
-});
-
-test('buildProfileRequest: fitting drops the OLDEST snippets only, never the fixed blocks', () => {
-  const many = Array.from({ length: 40 }, (_, i) => msg(i, i * 60_000, { authorId: 'a', authorName: 'Alice', content: `content number ${i} with some padding text` }));
-  const sample = { messages: many, ownIds: new Set(many.map((m) => m.id)) };
-  const member = { id: 'a', name: 'Alice', messages: many.length, firstTs: many[0].ts, lastTs: many.at(-1).ts };
-  const config = baseConfig({ llm: { maxRequestTokens: 260, safetyMargin: 1 } });
-  const { messages, stats } = buildProfileRequest({
-    prompts: profilePrompts(),
-    config,
-    calibrator: createCalibrator(),
-    member,
-    sample,
-    selfName: 'Nept',
-  });
-  assert.ok(stats.snippetsDropped > 0, 'expected some snippets to be dropped under a tiny token cap');
-  const user = messages[1].content;
-  assert.ok(!user.includes('content number 0 '), 'the oldest snippet must be dropped first');
-  assert.ok(user.includes(`content number ${many.length - 1} `), 'the newest snippet must survive');
-  // The system message (never trimmed) still carries every placeholder value.
-  assert.ok(messages[0].content.startsWith('SYSTEM name=Nept'));
-});
-
-// ---------------------------------------------------------------------------
-// buildChannelRequest
-// ---------------------------------------------------------------------------
 
 test('buildChannelRequest: fills {{fieldChars}} and the <channel>/<messages> blocks', () => {
   const messages = [msg(1, 1000, { authorId: 'a', authorName: 'Alice', channelId: 'general', channelName: 'general' })];
@@ -682,10 +613,6 @@ function fakeLlm(script) {
   };
 }
 
-function okResult(payload, usage = { prompt_tokens: 100, completion_tokens: 20 }) {
-  return () => ({ text: JSON.stringify(payload), usage, estimated: 120, finishReason: 'stop' });
-}
-
 test('createBootstrap: peopleReport respects bot.channels.deny and reports totals', async () => {
   const c1 = fakeChannel('c1', [rawMessage(1000, { authorId: 'a' }), rawMessage(2000, { authorId: 'a' }), rawMessage(3000, { authorId: 'b' })]);
   const denied = fakeChannel('c2', [rawMessage(1000, { authorId: 'a' })]);
@@ -720,121 +647,7 @@ test('createBootstrap: fetched windows are cached for 15 minutes per guild', asy
   assert.equal(c1.messages.fetchCalls, 2, 'a call after the cache expired must refetch');
 });
 
-test('createBootstrap: previewUser reports a missing profile.md instead of calling the model', async () => {
-  const guild = fakeGuild('g1', []);
-  const client = fakeClient(guild);
-  const hot = fakeHot({ prompts: { profile: undefined } });
-  const llm = fakeLlm(() => ({ text: '{}', usage: null, estimated: 0 }));
-  const bootstrap = createBootstrap({ hot, client, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => 10_000_000 });
-
-  const result = await bootstrap.previewUser('g1', 'a');
-  assert.equal(result.ok, false);
-  assert.match(result.message, /profile\.md/);
-  assert.equal(llm.calls.length, 0);
-});
-
-test('createBootstrap: previewUser reports nothing to sample when the member never wrote in the window', async () => {
-  const c1 = fakeChannel('c1', [rawMessage(1000, { authorId: 'other' })]);
-  const guild = fakeGuild('g1', [c1]);
-  const client = fakeClient(guild);
-  const hot = fakeHot();
-  const bootstrap = createBootstrap({ hot, client, llm: fakeLlm(() => ({})), calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => 10_000_000 });
-
-  const result = await bootstrap.previewUser('g1', 'ghost');
-  assert.equal(result.ok, false);
-});
-
-test('createBootstrap: previewUser calls the analyzer role, never the daily cap, and returns a clamped result', async () => {
-  const history = Array.from({ length: 5 }, (_, i) => rawMessage(1000 + i * 1000, { authorId: 'a', content: `own message ${i}` }));
-  const c1 = fakeChannel('c1', history);
-  const guild = fakeGuild('g1', [c1]);
-  const client = fakeClient(guild);
-  const hot = fakeHot({ config: { memory: { model: 'analyzer/model', mainChannelIds: [] } } });
-  hot.config.memory = { ...fakeHot().config.memory, model: 'analyzer/model' };
-  hot.config.bootstrap.minMessages = 1;
-
-  const llm = fakeLlm(okResult({ character: 'friendly', style: 'short messages', interests: [], details: [], episodes: [], aliases: [] }));
-  const bootstrap = createBootstrap({ hot, client, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => 10_000_000 });
-
-  const result = await bootstrap.previewUser('g1', 'a');
-  assert.equal(result.ok, true);
-  assert.equal(result.result.character, 'friendly');
-  assert.equal(llm.calls.length, 1);
-  assert.equal(llm.calls[0].opts.model, 'analyzer/model');
-  assert.equal(llm.calls[0].opts.countAgainstDailyCap, false);
-  assert.equal(llm.calls[0].opts.maxOutputTokens, hot.config.bootstrap.maxOutputTokens);
-});
-
-test('createBootstrap: previewUser falls back to llm.model when memory.model is unset', async () => {
-  const c1 = fakeChannel('c1', [rawMessage(1000, { authorId: 'a' })]);
-  const guild = fakeGuild('g1', [c1]);
-  const client = fakeClient(guild);
-  const hot = fakeHot();
-  hot.config.bootstrap.minMessages = 1;
-  const llm = fakeLlm(okResult({}));
-  const bootstrap = createBootstrap({ hot, client, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => 10_000_000 });
-
-  await bootstrap.previewUser('g1', 'a');
-  assert.equal(llm.calls[0].opts.model, hot.config.llm.model);
-});
-
-test('createBootstrap: previewUser surfaces a model-call failure without throwing', async () => {
-  const c1 = fakeChannel('c1', [rawMessage(1000, { authorId: 'a' })]);
-  const guild = fakeGuild('g1', [c1]);
-  const client = fakeClient(guild);
-  const hot = fakeHot();
-  hot.config.bootstrap.minMessages = 1;
-  const llm = { complete: async () => { throw new Error('provider down'); } };
-  const bootstrap = createBootstrap({ hot, client, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => 10_000_000 });
-
-  const result = await bootstrap.previewUser('g1', 'a');
-  assert.equal(result.ok, false);
-  assert.match(result.message, /provider down/);
-});
-
-test('createBootstrap: previewChannel reports a missing channel.md instead of calling the model', async () => {
-  const guild = fakeGuild('g1', []);
-  const client = fakeClient(guild);
-  const hot = fakeHot({ prompts: { channel: undefined } });
-  const llm = fakeLlm(() => ({}));
-  const bootstrap = createBootstrap({ hot, client, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => 10_000_000 });
-
-  const result = await bootstrap.previewChannel('g1', 'c1');
-  assert.equal(result.ok, false);
-  assert.match(result.message, /channel\.md/);
-  assert.equal(llm.calls.length, 0);
-});
-
-test('createBootstrap: previewChannel reports an empty channel without calling the model', async () => {
-  const c1 = fakeChannel('c1', []);
-  const guild = fakeGuild('g1', [c1]);
-  const client = fakeClient(guild);
-  const hot = fakeHot();
-  const llm = fakeLlm(() => ({}));
-  const bootstrap = createBootstrap({ hot, client, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => 10_000_000 });
-
-  const result = await bootstrap.previewChannel('g1', 'c1');
-  assert.equal(result.ok, false);
-  assert.equal(llm.calls.length, 0);
-});
-
-test('createBootstrap: previewChannel succeeds and marks the main flag', async () => {
-  const history = Array.from({ length: 3 }, (_, i) => rawMessage(1000 + i * 1000, { authorId: 'a', content: `msg ${i}` }));
-  const c1 = fakeChannel('c1', history, { name: 'general', category: 'Chat', topic: 'chit-chat' });
-  const guild = fakeGuild('g1', [c1]);
-  const client = fakeClient(guild);
-  const hot = fakeHot();
-  hot.config.memory.mainChannelIds = ['c1'];
-  const llm = fakeLlm(okResult({ purpose: 'general chatter', topics: 'everything', tone: 'casual' }));
-  const bootstrap = createBootstrap({ hot, client, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => 10_000_000 });
-
-  const result = await bootstrap.previewChannel('g1', 'c1');
-  assert.equal(result.ok, true);
-  assert.equal(result.channel.isMain, true);
-  assert.equal(result.result.purpose, 'general chatter');
-});
-
-test('createBootstrap: never writes anything under a real data/ directory', async () => {
+test('createBootstrap: peopleReport never writes anything under a real data/ directory', async () => {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'nep-bootstrap-data-'));
   fs.writeFileSync(path.join(dataDir, 'marker.json'), '{}');
   const before = fs.readdirSync(dataDir).sort();
@@ -846,11 +659,10 @@ test('createBootstrap: never writes anything under a real data/ directory', asyn
     const client = fakeClient(guild);
     const hot = fakeHot();
     hot.config.bootstrap.minMessages = 1;
-    const llm = fakeLlm(okResult({ character: 'x' }));
-    const bootstrap = createBootstrap({ hot, client, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => 10_000_000 });
+    const bootstrap = createBootstrap({ hot, client, llm: fakeLlm(() => ({})), calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => 10_000_000 });
 
     await bootstrap.peopleReport('g1');
-    await bootstrap.previewUser('g1', 'a');
+    await bootstrap.peopleReport('g1');
 
     assert.deepEqual(fs.readdirSync(dataDir).sort(), before);
   } finally {
@@ -1157,6 +969,276 @@ test('createBootstrap: a bad-json person answer is retried once with half the sa
   assert.equal(calls, 2); // one attempt, one retry with half the sample
   const store2 = store; // the person is marked done (skipped), not retried forever
   assert.deepEqual(store2.state.data.bootstrap.done.people, ['a']);
+});
+
+// ---------------------------------------------------------------------------
+// F41: /nep bootstrap user/channel/server (runPerson/runChannel/runServer's
+// richer outcome) and /nep bootstrap users/channels (runUsers/runChannels,
+// the background bulk redo sharing `running` with run()).
+// ---------------------------------------------------------------------------
+
+test('createBootstrap: runPerson reports "no messages in the window" when the member never wrote at all', async () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  const c1 = fakeChannel('c1', [rawMessage(1000, { authorId: 'other' })]);
+  const guild = fakeGuild('g1', [c1]);
+  const client = fakeClient(guild);
+  const hot = fakeHot();
+  const llm = { complete: async () => { throw new Error('must not be called'); } };
+  const bootstrap = createBootstrap({ hot, store, client, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => 10_000_000 });
+
+  const outcome = await bootstrap.runPerson('g1', 'ghost');
+  assert.equal(outcome.ok, false);
+  assert.equal(outcome.message, 'no messages in the window');
+});
+
+test('createBootstrap: runPerson returns sample size, tokens used and the written answer on success', async () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  const history = [rawMessage(1000, { authorId: 'a', content: 'hi one' }), rawMessage(2000, { authorId: 'a', content: 'hi two' })];
+  const c1 = fakeChannel('c1', history);
+  const guild = fakeGuild('g1', [c1]);
+  const client = fakeClient(guild);
+  const hot = fakeHot();
+  hot.config.bootstrap.minMessages = 1;
+  const llm = scriptedLlm([{ character: 'friendly', style: 'short', interests: [{ topic: 'anime', note: '', times: 1 }], details: [], episodes: [], aliases: [] }]);
+  const bootstrap = createBootstrap({ hot, store, client, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => 10_000_000 });
+
+  const outcome = await bootstrap.runPerson('g1', 'a');
+  assert.equal(outcome.ok, true);
+  assert.equal(outcome.outcome.member.id, 'a');
+  assert.equal(outcome.outcome.sample.ownCount, 2);
+  assert.ok(outcome.outcome.tokensUsed > 0);
+  assert.equal(outcome.outcome.chunks, 1);
+  assert.equal(outcome.outcome.answer.character, 'friendly');
+  assert.equal(outcome.outcome.answer.interests.length, 1);
+});
+
+test('createBootstrap: runChannel returns the channel and the written note on success', async () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  const c1 = fakeChannel('c1', [rawMessage(1000, { authorId: 'a' })], { name: 'general', category: 'Chat', topic: 'chit-chat' });
+  const guild = fakeGuild('g1', [c1]);
+  const client = fakeClient(guild);
+  const hot = fakeHot();
+  const llm = scriptedLlm([{ purpose: 'general chatter', topics: 'everything', tone: 'casual' }]);
+  const bootstrap = createBootstrap({ hot, store, client, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => 10_000_000 });
+
+  const outcome = await bootstrap.runChannel('g1', 'c1');
+  assert.equal(outcome.ok, true);
+  assert.deepEqual(outcome.outcome.channel, { id: 'c1', name: 'general' });
+  assert.equal(outcome.outcome.result.purpose, 'general chatter');
+  assert.equal(outcome.outcome.facts.messageCount, 1);
+  assert.deepEqual(outcome.outcome.facts.topWriters, [{ id: 'a', count: 1 }]);
+});
+
+test('createBootstrap: processChannel fills the channel\'s counters and top writers from the messages it actually had', async () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  const history = [
+    rawMessage(1000, { authorId: 'a' }),
+    rawMessage(2000, { authorId: 'a' }),
+    rawMessage(3000, { authorId: 'b' }),
+    rawMessage(4000, { authorId: 'a' }),
+    rawMessage(5000, { authorId: 'bot1', bot: true }),
+  ];
+  const c1 = fakeChannel('c1', history, { name: 'general', category: 'Chat', topic: 'chit-chat' });
+  const guild = fakeGuild('g1', [c1]);
+  const client = fakeClient(guild);
+  const hot = fakeHot();
+  const llm = scriptedLlm([{ purpose: 'general chatter', topics: 'everything', tone: 'casual' }]);
+  const bootstrap = createBootstrap({ hot, store, client, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => 10_000_000 });
+
+  const outcome = await bootstrap.runChannel('g1', 'c1');
+  assert.equal(outcome.ok, true);
+
+  const channel = store.getChannel('g1', 'c1');
+  assert.equal(channel.messageCount, 5); // the channel's own traffic counts a bot's message too
+  assert.equal(channel.firstMessageAt, 1000);
+  assert.equal(channel.lastMessageAt, 5000);
+  assert.deepEqual(channel.days, { [new Date(1000).toISOString().slice(0, 10)]: 5 });
+  assert.deepEqual(channel.topWriters, [{ id: 'a', count: 3 }, { id: 'b', count: 1 }]); // the bot never counts as a writer
+});
+
+test('createBootstrap: processChannel redone (runChannel again) SETS the counters, never adding to a previous run', async () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  const history = [rawMessage(1000, { authorId: 'a' }), rawMessage(2000, { authorId: 'a' })];
+  const c1 = fakeChannel('c1', history, { name: 'general' });
+  const guild = fakeGuild('g1', [c1]);
+  const client = fakeClient(guild);
+  const hot = fakeHot();
+  const llm1 = scriptedLlm([{ purpose: 'p1' }]);
+  const bootstrap1 = createBootstrap({ hot, store, client, llm: llm1, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => 10_000_000 });
+  await bootstrap1.runChannel('g1', 'c1');
+  assert.equal(store.getChannel('g1', 'c1').messageCount, 2);
+
+  const llm2 = scriptedLlm([{ purpose: 'p2' }]);
+  const bootstrap2 = createBootstrap({ hot, store, client, llm: llm2, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => 10_000_000 });
+  await bootstrap2.runChannel('g1', 'c1');
+  assert.equal(store.getChannel('g1', 'c1').messageCount, 2); // SET, not added -- a redo must not double the count
+});
+
+test('createBootstrap: processChannel sets zeros and empty lists for a channel with no messages at all', async () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  const c1 = fakeChannel('c1', [], { name: 'empty-room' });
+  const guild = fakeGuild('g1', [c1]);
+  const client = fakeClient(guild);
+  const hot = fakeHot();
+  const llm = scriptedLlm([{ purpose: '', topics: '', tone: '' }]);
+  const bootstrap = createBootstrap({ hot, store, client, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => 10_000_000 });
+
+  const outcome = await bootstrap.runChannel('g1', 'c1');
+  assert.equal(outcome.ok, true);
+
+  const channel = store.getChannel('g1', 'c1');
+  assert.equal(channel.messageCount, 0);
+  assert.equal(channel.firstMessageAt, null);
+  assert.equal(channel.lastMessageAt, null);
+  assert.deepEqual(channel.days, {});
+  assert.deepEqual(channel.topWriters, []);
+});
+
+test('createBootstrap: runServer returns counts of what was written on success', async () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  const c1 = fakeChannel('c1', [rawMessage(1000, { authorId: 'a' })]);
+  const guild = fakeGuild('g1', [c1]);
+  const client = fakeClient(guild);
+  const hot = fakeHot();
+  const llm = scriptedLlm([
+    { patterns: 'lots of banter', starters: 'someone posts a link', injokes: ['the eternal bug'], lore: [{ title: 'The Outage', keys: ['outage'], text: 'the server went down once' }] },
+  ]);
+  const bootstrap = createBootstrap({ hot, store, client, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => 10_000_000 });
+
+  const outcome = await bootstrap.runServer('g1');
+  assert.equal(outcome.ok, true);
+  assert.equal(outcome.outcome.counts.injokes, 1);
+  assert.equal(outcome.outcome.counts.lore, 1);
+  assert.ok(outcome.outcome.counts.patternsChars > 0);
+  assert.ok(outcome.outcome.counts.startersChars > 0);
+});
+
+test('createBootstrap: a redo (runPerson called again) SETS messageCount/firstSeen/lastSeen from the window instead of adding', async () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  const history = [
+    rawMessage(1000, { authorId: 'a', content: 'hi one' }),
+    rawMessage(2000, { authorId: 'a', content: 'hi two' }),
+    rawMessage(3000, { authorId: 'a', content: 'hi three' }),
+  ];
+  const c1 = fakeChannel('c1', history);
+  const guild = fakeGuild('g1', [c1]);
+  const client = fakeClient(guild);
+  const hot = fakeHot();
+  hot.config.bootstrap.minMessages = 1;
+  const llm = scriptedLlm([{ character: 'friendly', style: 's', interests: [], details: [], episodes: [], aliases: [] }]);
+  const bootstrap = createBootstrap({ hot, store, client, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => 10_000_000 });
+
+  await bootstrap.runPerson('g1', 'a');
+  const first = store.getUser('g1', 'a');
+  assert.equal(first.messageCount, 3);
+
+  await bootstrap.runPerson('g1', 'a');
+  const second = store.getUser('g1', 'a');
+  assert.equal(second.messageCount, 3); // SET, not added -- a redo must not double the count
+  assert.equal(second.firstSeen, first.firstSeen);
+  assert.equal(second.lastSeen, first.lastSeen);
+});
+
+test('createBootstrap: runUsers starts a background redo of every qualifying member, resolving once the count is known', async () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  const history = [
+    rawMessage(1000, { authorId: 'a' }),
+    rawMessage(2000, { authorId: 'a' }),
+    rawMessage(3000, { authorId: 'b' }),
+    rawMessage(4000, { authorId: 'b' }),
+  ];
+  const c1 = fakeChannel('c1', history);
+  const guild = fakeGuild('g1', [c1]);
+  const client = fakeClient(guild);
+  const hot = fakeHot();
+  hot.config.bootstrap.minMessages = 1;
+  const llm = scriptedLlm([{ character: 'c', style: 's', interests: [], details: [], episodes: [], aliases: [] }]);
+  const bootstrap = createBootstrap({ hot, store, client, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => 10_000_000 });
+
+  const started = await bootstrap.runUsers('g1');
+  assert.equal(started.ok, true);
+  assert.equal(started.count, 2);
+  assert.equal(bootstrap.isBootstrapping(), true); // shares `running` with run()
+
+  while (bootstrap.isBootstrapping()) await new Promise((r) => setTimeout(r, 5));
+  assert.deepEqual(store.state.data.bootstrap.done.people.sort(), ['a', 'b']);
+});
+
+test('createBootstrap: runUsers redoes an already-done member, overwriting its previous answer', async () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  const c1 = fakeChannel('c1', [rawMessage(1000, { authorId: 'a' }), rawMessage(2000, { authorId: 'a' })]);
+  const guild = fakeGuild('g1', [c1]);
+  const client = fakeClient(guild);
+  const hot = fakeHot();
+  hot.config.bootstrap.minMessages = 1;
+  const llm1 = scriptedLlm([{ character: 'first', style: 's', interests: [], details: [], episodes: [], aliases: [] }]);
+  const bootstrap1 = createBootstrap({ hot, store, client, llm: llm1, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => 10_000_000 });
+
+  await bootstrap1.runPerson('g1', 'a');
+  assert.deepEqual(store.state.data.bootstrap.done.people, ['a']);
+
+  const llm2 = scriptedLlm([{ character: 'second', style: 's', interests: [], details: [], episodes: [], aliases: [] }]);
+  const bootstrap2 = createBootstrap({ hot, store, client, llm: llm2, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => 10_000_000 });
+
+  const started = await bootstrap2.runUsers('g1');
+  assert.equal(started.ok, true);
+  assert.equal(started.count, 1); // "a" is redone even though already marked done
+  while (bootstrap2.isBootstrapping()) await new Promise((r) => setTimeout(r, 5));
+
+  const profile = store.getUser('g1', 'a');
+  assert.equal(profile.character, 'second');
+});
+
+test('createBootstrap: runUsers is refused while a run/one-off target is already in flight', async () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  const c1 = fakeChannel('c1', [rawMessage(1000, { authorId: 'a' }), rawMessage(2000, { authorId: 'a' })]);
+  const guild = fakeGuild('g1', [c1]);
+  const client = fakeClient(guild);
+  const hot = fakeHot();
+
+  let resolveFirst;
+  const gate = new Promise((resolve) => { resolveFirst = resolve; });
+  const llm = { complete: async () => { await gate; return { text: '{}', usage: {}, estimated: 0, finishReason: 'stop' }; } };
+  const bootstrap = createBootstrap({ hot, store, client, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => 10_000_000 });
+
+  const firstRun = bootstrap.run('g1');
+  assert.equal(bootstrap.isBootstrapping(), true);
+  const usersResult = await bootstrap.runUsers('g1');
+  assert.equal(usersResult.ok, false);
+  assert.match(usersResult.message, /already in flight/);
+
+  resolveFirst();
+  await firstRun;
+});
+
+test('createBootstrap: runChannels starts a background redo of every readable channel', async () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  const c1 = fakeChannel('c1', [rawMessage(1000, { authorId: 'a' })], { name: 'general' });
+  const c2 = fakeChannel('c2', [rawMessage(1000, { authorId: 'b' })], { name: 'random' });
+  const guild = fakeGuild('g1', [c1, c2]);
+  const client = fakeClient(guild);
+  const hot = fakeHot();
+  const llm = scriptedLlm([{ purpose: 'p' }]);
+  const bootstrap = createBootstrap({ hot, store, client, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => 10_000_000 });
+
+  const started = await bootstrap.runChannels('g1');
+  assert.equal(started.ok, true);
+  assert.equal(started.count, 2);
+
+  while (bootstrap.isBootstrapping()) await new Promise((r) => setTimeout(r, 5));
+  assert.deepEqual(store.state.data.bootstrap.done.channels.sort(), ['c1', 'c2']);
 });
 
 test('createBootstrap: resumeIfNeeded starts a run automatically when no profile exists at all', async () => {

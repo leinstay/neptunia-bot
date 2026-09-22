@@ -284,7 +284,7 @@ The engine builds its memory of people and channels from a sample of recent mess
 
 **Order of operations:**
 
-1. **Channels**: every readable channel gets one request. The result is a set of channel notes: purpose, topics, tone.
+1. **Channels**: every readable channel gets one request, described from the newest `bootstrap.messagesPerChannel` messages regardless of their age. A channel with no history is described from its name, category and topic. The result is a set of channel notes: purpose, topics, tone.
 2. **People**: the most active members (at least `bootstrap.minMessages` own messages in the window, up to `bootstrap.maxPeople`) each get a profile. The engine samples up to `bootstrap.messagesPerPerson` of their messages with `bootstrap.contextBefore` lines of surrounding context. Large samples are split into chunks that fit `bootstrap.maxRequestTokens`; each later chunk receives the previous answer as a draft to keep, correct and extend. The final answer stores character, style, interests, details, episodes and aliases.
 3. **Server**: one request takes the channel notes, a summary line per profiled member and the newest `bootstrap.serverSampleMessages` lines of the main channels, and produces server-wide patterns, conversation starters, in-jokes and lore.
 
@@ -294,7 +294,7 @@ Progress is persisted after every request and survives restarts. The total token
 
 After the bootstrap finishes, the live stream analyzer keeps memory current. It processes batches of new messages and updates interests, details, attitudes, episodes, aliases, channel notes and server patterns. When it detects that a stored portrait misses a recurring habit or contradicts how the person now writes, the engine refreshes the portrait from `bootstrap.refreshMessages` recent messages using the profile prompt. A portrait can be refreshed at most once every `memory.portraitRefreshHours` hours, up to `memory.portraitRefreshPerDay` times per day across the server. `/nep memory refresh <user>` forces one.
 
-`/nep bootstrap run` starts or resumes a run. `/nep bootstrap run [user|channel|server]` reruns one target or one phase. `/nep bootstrap people` lists qualifying members. `/nep bootstrap preview <user|channel>` previews what would be written without writing anything. `/nep bootstrap reset` clears progress only, not stored memory. For a truly fresh start, use `/nep memory wipe` first: it clears member profiles with their attitudes and moments, server habits, the channel map, the analyzer's lore entries and the bootstrap progress, after the owner types the server's exact name.
+`/nep bootstrap run` starts or resumes a full run. `/nep bootstrap user` and `/nep bootstrap channel` rerun a single member or channel; `/nep bootstrap users`, `/nep bootstrap channels` and `/nep bootstrap server` rerun an entire phase. `/nep bootstrap people` lists qualifying members. `/nep bootstrap status` shows progress and token usage. `/nep bootstrap reset` clears progress only, not stored memory. All bootstrap commands except `status` and `people` are refused while paused; `run`, `users` and `channels` are also refused while a run is in flight. For a truly fresh start, use `/nep memory wipe` first: it clears member profiles with their attitudes and moments, server habits, the channel map, the analyzer's lore entries and the bootstrap progress, after the owner types the server's exact name.
 
 ### `bootstrap`
 
@@ -307,7 +307,7 @@ After the bootstrap finishes, the live stream analyzer keeps memory current. It 
 | `messagesPerPerson` | `2000` | Own messages sampled per member |
 | `contextBefore` | `1` | Context lines before each sampled message |
 | `maxChannelShare` | `0.5` | Max share of samples from one channel |
-| `messagesPerChannel` | `200` | Messages sampled per channel |
+| `messagesPerChannel` | `200` | Newest messages a channel is described from |
 | `serverSampleMessages` | `600` | Recent main-channel messages for the server request |
 | `refreshMessages` | `400` | Messages sampled for a portrait refresh |
 | `fetchLimitPerChannel` | `15000` | Messages fetched per channel for the sample pool |
@@ -353,9 +353,14 @@ One Discord slash command, `/nep` (the name comes from `bot.commandName`). Guild
 | `/nep lore list [query]` | List lorebook entries |
 | `/nep lore show <id>` | Show a lorebook entry |
 | `/nep lore remove <id>` | Remove a lorebook entry |
-| `/nep bootstrap run [user\|channel\|server]` | Start or resume a bootstrap; optionally rerun one target or phase |
-| `/nep bootstrap people` | List members who qualify for bootstrap |
-| `/nep bootstrap preview <user\|channel>` | Preview what would be written without writing anything |
+| `/nep bootstrap run` | Start or resume a full run: channels, then people, then server |
+| `/nep bootstrap user <member>` | Profile or re-profile one member now |
+| `/nep bootstrap users` | Re-profile every qualifying member |
+| `/nep bootstrap channel <channel>` | Describe or re-describe one channel now |
+| `/nep bootstrap channels` | Re-describe every readable channel |
+| `/nep bootstrap server` | Rebuild the server notes and lore now |
+| `/nep bootstrap people` | List members who qualify |
+| `/nep bootstrap status` | Show bootstrap progress and token usage |
 | `/nep bootstrap reset` | Clear bootstrap progress, not stored memory |
 
 ## How a turn works
@@ -364,7 +369,7 @@ A message passes through guild, channel and self-message filters. If the persona
 
 The persona writes one reply at a time across the server. A ping in the same channel while it is already answering is missed; the missed messages are in the transcript when the next reply is built. A direct ping in another channel (an @mention or reply to its message, not a name trigger) is held, one per channel, in up to `mention.maxPending` channels for `mention.pendingMinutes` minutes; a newer ping in the same pending channel replaces the older one. When the current reply finishes, the persona switches channel after a short pause (`mention.switchDelayMs`) and answers from the conversation as it stands; the usual ignore chance applies. Name triggers and eavesdrop hits that arrive while busy are skipped. With `mention.oneAtATime: false` every channel is handled independently. The persona never writes or reacts where it lacks Send Messages, checking before it spends an LLM request; such channels are still read and remembered.
 
-The turn collects the channel transcript and neighbouring channels, then builds one LLM request inside the token budget. Sections fill in priority order: system prompt and task are never cut; then the caller's profile, server habits and self-facts, the channel map, the transcript (newest first), other profiles, and neighbouring channels. The model sees a map of the server's channels (purpose, topics, tone, activity level), with the current channel marked.
+The turn collects the channel transcript and neighbouring channels, then builds one LLM request inside the token budget. Sections fill in priority order: system prompt and task are never cut; then the caller's profile, server habits and self-facts, the channel map, the transcript (newest first), other profiles, and neighbouring channels. The model sees a map of the server's channels (purpose, topics, tone, activity level), with the current channel marked. Each channel entry also carries facts the code maintains: message count, first and last message, activity over the last 30 days and the top writers; the bootstrap fills them from the channel's history and live traffic keeps them current.
 
 The model responds with `<think>` (hidden planning), `<msg>` (1–3 chat messages; `reply="#87"` replies to a transcript line), `<react>` (one emoji reaction), or `<skip/>` (silence). After parsing, typing is simulated at human speed and `@nick` in the output becomes a real mention.
 

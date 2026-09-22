@@ -112,6 +112,8 @@
     "purpose": "What it's for: {text}",
     "topics": "People talk about: {text}",
     "tone": "Tone: {text}",
+    "lastMessage": "Last message: {when}",
+    "topWriters": "Top writers: {names}",
     "activity": "Activity: {activity}",
     "activityLive": "active",
     "activitySlow": "slow",

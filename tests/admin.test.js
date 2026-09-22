@@ -2125,11 +2125,23 @@ test('run: memory.show/lore.list/lore.show drop caches first while paused, so a 
 });
 
 // ---------------------------------------------------------------------------
-// bootstrap (F36 phase A) -- a read-only preview, never guarded by assertNotPaused()
+// bootstrap -- people stays read-only; run/user/users/channel/channels/server
+// write under data/ and are guarded by assertNotPaused().
 // ---------------------------------------------------------------------------
 
 function fakeBootstrap(overrides = {}) {
-  const calls = { peopleReport: 0, previewUser: 0, previewChannel: 0, run: 0, runPerson: 0, runChannel: 0, runServer: 0, status: 0, reset: 0, refreshPortrait: 0 };
+  const calls = {
+    peopleReport: 0,
+    run: 0,
+    runPerson: 0,
+    runChannel: 0,
+    runServer: 0,
+    runUsers: 0,
+    runChannels: 0,
+    status: 0,
+    reset: 0,
+    refreshPortrait: 0,
+  };
   return {
     calls,
     run: async (guildId) => {
@@ -2140,16 +2152,60 @@ function fakeBootstrap(overrides = {}) {
     runPerson: async (guildId, userId) => {
       calls.runPerson += 1;
       calls.lastRunPersonId = userId;
-      return overrides.runPerson ?? { ok: true };
+      return (
+        overrides.runPerson ?? {
+          ok: true,
+          outcome: {
+            ok: true,
+            member: { id: userId, name: 'Alice', messages: 40, firstTs: 1000, lastTs: 5000 },
+            answer: {
+              character: 'friendly and curious',
+              style: 'short',
+              interests: [{ topic: 'games', note: 'plays a lot', times: 3 }],
+              details: [{ text: 'lives nearby', times: 1 }],
+              episodes: [],
+              aliases: ['Al'],
+            },
+            sample: { ownCount: 10, contextCount: 5 },
+            tokensUsed: 1234,
+            chunks: 1,
+          },
+        }
+      );
     },
     runChannel: async (guildId, channelId) => {
       calls.runChannel += 1;
       calls.lastRunChannelId = channelId;
-      return overrides.runChannel ?? { ok: true };
+      return (
+        overrides.runChannel ?? {
+          ok: true,
+          outcome: {
+            ok: true,
+            channel: { id: channelId, name: 'general' },
+            result: { purpose: 'general chat', topics: 'everything', tone: 'casual' },
+          },
+        }
+      );
     },
-    runServer: async () => {
+    runServer: async (guildId) => {
       calls.runServer += 1;
-      return overrides.runServer ?? { ok: true };
+      calls.lastRunServerGuildId = guildId;
+      return (
+        overrides.runServer ?? {
+          ok: true,
+          outcome: { ok: true, counts: { patternsChars: 120, startersChars: 40, injokes: 3, lore: 2 } },
+        }
+      );
+    },
+    runUsers: async (guildId) => {
+      calls.runUsers += 1;
+      calls.lastRunUsersGuildId = guildId;
+      return overrides.runUsers ?? { ok: true, count: 5 };
+    },
+    runChannels: async (guildId) => {
+      calls.runChannels += 1;
+      calls.lastRunChannelsGuildId = guildId;
+      return overrides.runChannels ?? { ok: true, count: 8 };
     },
     status: async () => {
       calls.status += 1;
@@ -2190,49 +2246,13 @@ function fakeBootstrap(overrides = {}) {
         }
       );
     },
-    previewUser: async (guildId, userId) => {
-      calls.previewUser += 1;
-      calls.lastUserId = userId;
-      return (
-        overrides.previewUser ?? {
-          ok: true,
-          member: { id: userId, name: 'Alice', messages: 40, firstTs: 1000, lastTs: 5000 },
-          sample: { ownCount: 10, contextCount: 5, channels: ['c1'] },
-          estimatedTokens: 1234,
-          usage: { prompt_tokens: 1000, completion_tokens: 200 },
-          result: {
-            character: 'friendly',
-            style: 'short',
-            interests: [{ topic: 'games', note: 'plays a lot', times: 3 }],
-            details: [],
-            episodes: [],
-            aliases: ['Al'],
-          },
-        }
-      );
-    },
-    previewChannel: async (guildId, channelId) => {
-      calls.previewChannel += 1;
-      calls.lastChannelId = channelId;
-      return (
-        overrides.previewChannel ?? {
-          ok: true,
-          channel: { id: channelId, name: 'general', category: 'Chat', topic: 'chit chat', isMain: false },
-          sample: { kept: 100, dropped: 0, total: 100 },
-          estimatedTokens: 500,
-          usage: { prompt_tokens: 400, completion_tokens: 50 },
-          result: { purpose: 'general chat', topics: 'everything', tone: 'casual' },
-        }
-      );
-    },
   };
 }
 
-test('run: bootstrap.people/preview report "not available" when the dependency is absent', async () => {
+test('run: bootstrap.people reports "not available" when the dependency is absent', async () => {
   const rootDir = makeRoot();
   const { admin } = makeAdmin(rootDir);
   assert.equal(await admin.run('bootstrap.people', {}, { guildId: 'g1' }), 'bootstrap is not available');
-  assert.equal(await admin.run('bootstrap.preview', { userId: '1' }, { guildId: 'g1' }), 'bootstrap is not available');
 });
 
 test('run: bootstrap.people formats the people list and totals', async () => {
@@ -2248,53 +2268,7 @@ test('run: bootstrap.people formats the people list and totals', async () => {
   assert.ok(body.includes('people below the threshold: 2'));
 });
 
-test('run: bootstrap.preview requires exactly one of user/channel', async () => {
-  const rootDir = makeRoot();
-  const bootstrap = fakeBootstrap();
-  const { admin } = makeAdmin(rootDir, { bootstrap });
-
-  await assert.rejects(() => admin.run('bootstrap.preview', {}, { guildId: 'g1' }), /exactly one/);
-  await assert.rejects(() => admin.run('bootstrap.preview', { userId: '1', channelId: 'c1' }, { guildId: 'g1' }), /exactly one/);
-  assert.equal(bootstrap.calls.previewUser, 0);
-  assert.equal(bootstrap.calls.previewChannel, 0);
-});
-
-test('run: bootstrap.preview user: calls previewUser and formats the profile result', async () => {
-  const rootDir = makeRoot();
-  const bootstrap = fakeBootstrap();
-  const { admin } = makeAdmin(rootDir, { bootstrap });
-
-  const body = await admin.run('bootstrap.preview', { userId: '1' }, { guildId: 'g1' });
-  assert.equal(bootstrap.calls.previewUser, 1);
-  assert.equal(bootstrap.calls.lastUserId, '1');
-  assert.ok(body.includes('character: friendly'));
-  assert.ok(body.includes('games'));
-  assert.ok(body.includes('Al'));
-});
-
-test('run: bootstrap.preview channel: calls previewChannel and formats the channel result', async () => {
-  const rootDir = makeRoot();
-  const bootstrap = fakeBootstrap();
-  const { admin } = makeAdmin(rootDir, { bootstrap });
-
-  const body = await admin.run('bootstrap.preview', { channelId: 'c1' }, { guildId: 'g1' });
-  assert.equal(bootstrap.calls.previewChannel, 1);
-  assert.equal(bootstrap.calls.lastChannelId, 'c1');
-  assert.ok(body.includes('purpose: general chat'));
-});
-
-test('run: bootstrap.preview passes through a missing-prompt-file message unchanged', async () => {
-  const rootDir = makeRoot();
-  const bootstrap = fakeBootstrap({
-    previewUser: { ok: false, message: 'prompt file missing: prompts/profile.md is not configured yet' },
-  });
-  const { admin } = makeAdmin(rootDir, { bootstrap });
-
-  const body = await admin.run('bootstrap.preview', { userId: '1' }, { guildId: 'g1' });
-  assert.equal(body, 'prompt file missing: prompts/profile.md is not configured yet');
-});
-
-test('run: bootstrap.people/preview keep working while paused -- a read-only preview writes nothing under data/', async () => {
+test('run: bootstrap.people keeps working while paused', async () => {
   const rootDir = makeRoot();
   const bootstrap = fakeBootstrap();
   const { admin } = makeAdmin(rootDir, { bootstrap });
@@ -2302,25 +2276,29 @@ test('run: bootstrap.people/preview keep working while paused -- a read-only pre
   await admin.run('pause', {}, {});
 
   await assert.doesNotReject(() => admin.run('bootstrap.people', {}, { guildId: 'g1' }));
-  await assert.doesNotReject(() => admin.run('bootstrap.preview', { userId: '1' }, { guildId: 'g1' }));
   assert.equal(bootstrap.calls.peopleReport, 1);
-  assert.equal(bootstrap.calls.previewUser, 1);
 });
 
 // ---------------------------------------------------------------------------
-// bootstrap.run / bootstrap.status / bootstrap.reset / memory.refresh -- the write path
+// bootstrap.run / user / users / channel / channels / server / status / reset
+// / memory.refresh -- the write path
 // ---------------------------------------------------------------------------
 
-test('run: bootstrap.run/status/reset and memory.refresh report "not available" when the dependency is absent', async () => {
+test('run: bootstrap.run/user/users/channel/channels/server/status/reset and memory.refresh report "not available" when the dependency is absent', async () => {
   const rootDir = makeRoot();
   const { admin } = makeAdmin(rootDir);
   assert.equal(await admin.run('bootstrap.run', {}, { guildId: 'g1' }), 'bootstrap is not available');
+  assert.equal(await admin.run('bootstrap.user', { userId: '1' }, { guildId: 'g1' }), 'bootstrap is not available');
+  assert.equal(await admin.run('bootstrap.users', {}, { guildId: 'g1' }), 'bootstrap is not available');
+  assert.equal(await admin.run('bootstrap.channel', { channelId: 'c1' }, { guildId: 'g1' }), 'bootstrap is not available');
+  assert.equal(await admin.run('bootstrap.channels', {}, { guildId: 'g1' }), 'bootstrap is not available');
+  assert.equal(await admin.run('bootstrap.server', {}, { guildId: 'g1' }), 'bootstrap is not available');
   assert.equal(await admin.run('bootstrap.status', {}, { guildId: 'g1' }), 'bootstrap is not available');
   assert.equal(await admin.run('bootstrap.reset', {}, { guildId: 'g1' }), 'bootstrap is not available');
   await assert.rejects(() => admin.run('memory.refresh', { userId: '1' }, { guildId: 'g1' }), /bootstrap is not available/);
 });
 
-test('run: bootstrap.run with no target starts/resumes the whole run', async () => {
+test('run: bootstrap.run starts/resumes the whole run', async () => {
   const rootDir = makeRoot();
   const bootstrap = fakeBootstrap();
   const { admin } = makeAdmin(rootDir, { bootstrap });
@@ -2341,47 +2319,6 @@ test('run: bootstrap.run reports a stopped/resumable outcome without throwing', 
   assert.match(body, /paused/);
 });
 
-test('run: bootstrap.run user:<id> runs exactly that person now', async () => {
-  const rootDir = makeRoot();
-  const bootstrap = fakeBootstrap();
-  const { admin } = makeAdmin(rootDir, { bootstrap });
-
-  const body = await admin.run('bootstrap.run', { userId: '1' }, { guildId: 'g1' });
-  assert.equal(bootstrap.calls.runPerson, 1);
-  assert.equal(bootstrap.calls.lastRunPersonId, '1');
-  assert.equal(bootstrap.calls.run, 0);
-  assert.match(body, /done/);
-});
-
-test('run: bootstrap.run channel:<id> runs exactly that channel now', async () => {
-  const rootDir = makeRoot();
-  const bootstrap = fakeBootstrap();
-  const { admin } = makeAdmin(rootDir, { bootstrap });
-
-  await admin.run('bootstrap.run', { channelId: 'c1' }, { guildId: 'g1' });
-  assert.equal(bootstrap.calls.runChannel, 1);
-  assert.equal(bootstrap.calls.lastRunChannelId, 'c1');
-});
-
-test('run: bootstrap.run server: true runs the server target now', async () => {
-  const rootDir = makeRoot();
-  const bootstrap = fakeBootstrap();
-  const { admin } = makeAdmin(rootDir, { bootstrap });
-
-  await admin.run('bootstrap.run', { server: true }, { guildId: 'g1' });
-  assert.equal(bootstrap.calls.runServer, 1);
-});
-
-test('run: bootstrap.run refuses more than one of user/channel/server', async () => {
-  const rootDir = makeRoot();
-  const bootstrap = fakeBootstrap();
-  const { admin } = makeAdmin(rootDir, { bootstrap });
-
-  await assert.rejects(() => admin.run('bootstrap.run', { userId: '1', channelId: 'c1' }, { guildId: 'g1' }), /at most one/);
-  assert.equal(bootstrap.calls.runPerson, 0);
-  assert.equal(bootstrap.calls.runChannel, 0);
-});
-
 test('run: bootstrap.run is refused while paused', async () => {
   const rootDir = makeRoot();
   const bootstrap = fakeBootstrap();
@@ -2390,6 +2327,202 @@ test('run: bootstrap.run is refused while paused', async () => {
   await admin.run('pause', {}, {});
   await assert.rejects(() => admin.run('bootstrap.run', {}, { guildId: 'g1' }), /paused/);
   assert.equal(bootstrap.calls.run, 0);
+});
+
+test('run: bootstrap.user requires a user', async () => {
+  const rootDir = makeRoot();
+  const bootstrap = fakeBootstrap();
+  const { admin } = makeAdmin(rootDir, { bootstrap });
+
+  await assert.rejects(() => admin.run('bootstrap.user', {}, { guildId: 'g1' }), /a user is required/);
+  assert.equal(bootstrap.calls.runPerson, 0);
+});
+
+test('run: bootstrap.user profiles exactly that member now and summarizes what was written', async () => {
+  const rootDir = makeRoot();
+  const bootstrap = fakeBootstrap();
+  const { admin } = makeAdmin(rootDir, { bootstrap });
+
+  const body = await admin.run('bootstrap.user', { userId: '1' }, { guildId: 'g1' });
+  assert.equal(bootstrap.calls.runPerson, 1);
+  assert.equal(bootstrap.calls.lastRunPersonId, '1');
+  assert.match(body, /profiled Alice \(id:1\)/);
+  assert.match(body, /sample: 10 own \/ 5 context lines/);
+  assert.match(body, /tokens used: 1234/);
+  assert.match(body, /interests: 1, details: 1, episodes: 0, aliases: 1/);
+  assert.match(body, /character: friendly and curious/);
+});
+
+test('run: bootstrap.user relays "no messages in the window" unchanged', async () => {
+  const rootDir = makeRoot();
+  const bootstrap = fakeBootstrap({ runPerson: { ok: false, message: 'no messages in the window' } });
+  const { admin } = makeAdmin(rootDir, { bootstrap });
+
+  const body = await admin.run('bootstrap.user', { userId: '1' }, { guildId: 'g1' });
+  assert.equal(body, 'no messages in the window');
+});
+
+test('run: bootstrap.user is refused while paused', async () => {
+  const rootDir = makeRoot();
+  const bootstrap = fakeBootstrap();
+  const { admin } = makeAdmin(rootDir, { bootstrap });
+
+  await admin.run('pause', {}, {});
+  await assert.rejects(() => admin.run('bootstrap.user', { userId: '1' }, { guildId: 'g1' }), /paused/);
+  assert.equal(bootstrap.calls.runPerson, 0);
+});
+
+test('run: bootstrap.users starts a background redo of every qualifying member', async () => {
+  const rootDir = makeRoot();
+  const bootstrap = fakeBootstrap();
+  const { admin } = makeAdmin(rootDir, { bootstrap });
+
+  const body = await admin.run('bootstrap.users', {}, { guildId: 'g1' });
+  assert.equal(bootstrap.calls.runUsers, 1);
+  assert.equal(bootstrap.calls.lastRunUsersGuildId, 'g1');
+  assert.equal(body, 'started 5 members');
+});
+
+test('run: bootstrap.users relays a refusal (e.g. a run already in flight)', async () => {
+  const rootDir = makeRoot();
+  const bootstrap = fakeBootstrap({ runUsers: { ok: false, message: 'a bootstrap run is already in flight' } });
+  const { admin } = makeAdmin(rootDir, { bootstrap });
+
+  const body = await admin.run('bootstrap.users', {}, { guildId: 'g1' });
+  assert.equal(body, 'a bootstrap run is already in flight');
+});
+
+test('run: bootstrap.users is refused while paused', async () => {
+  const rootDir = makeRoot();
+  const bootstrap = fakeBootstrap();
+  const { admin } = makeAdmin(rootDir, { bootstrap });
+
+  await admin.run('pause', {}, {});
+  await assert.rejects(() => admin.run('bootstrap.users', {}, { guildId: 'g1' }), /paused/);
+  assert.equal(bootstrap.calls.runUsers, 0);
+});
+
+test('run: bootstrap.channel requires a channel', async () => {
+  const rootDir = makeRoot();
+  const bootstrap = fakeBootstrap();
+  const { admin } = makeAdmin(rootDir, { bootstrap });
+
+  await assert.rejects(() => admin.run('bootstrap.channel', {}, { guildId: 'g1' }), /a channel is required/);
+  assert.equal(bootstrap.calls.runChannel, 0);
+});
+
+test('run: bootstrap.channel describes exactly that channel now and reports the note written', async () => {
+  const rootDir = makeRoot();
+  const bootstrap = fakeBootstrap();
+  const { admin } = makeAdmin(rootDir, { bootstrap });
+
+  const body = await admin.run('bootstrap.channel', { channelId: 'c1' }, { guildId: 'g1' });
+  assert.equal(bootstrap.calls.runChannel, 1);
+  assert.equal(bootstrap.calls.lastRunChannelId, 'c1');
+  assert.match(body, /described #general \(id:c1\)/);
+  assert.match(body, /purpose: general chat/);
+  assert.match(body, /topics: everything/);
+  assert.match(body, /tone: casual/);
+});
+
+test('run: bootstrap.channel reports counters and top writers when the outcome carries facts (F42)', async () => {
+  const rootDir = makeRoot();
+  const bootstrap = fakeBootstrap({
+    runChannel: {
+      ok: true,
+      outcome: {
+        ok: true,
+        channel: { id: 'c1', name: 'general' },
+        result: { purpose: 'general chat', topics: 'everything', tone: 'casual' },
+        facts: {
+          messageCount: 42,
+          firstMessageAt: 1000,
+          lastMessageAt: Date.now() - 5 * 60_000,
+          days: {},
+          topWriters: [{ id: 'u1', count: 10 }, { id: 'ghost', count: 2 }], // 'ghost' has no stored profile
+        },
+      },
+    },
+  });
+  const { admin, store } = makeAdmin(rootDir, { bootstrap });
+  store.profiles.set('g1:u1', { id: 'u1', names: ['Alice'] });
+
+  const body = await admin.run('bootstrap.channel', { channelId: 'c1' }, { guildId: 'g1' });
+  assert.match(body, /messages seen: 42/);
+  assert.match(body, /last message: \d+ min ago/);
+  assert.match(body, /top writers: Alice/);
+  assert.ok(!body.includes('ghost'), 'an id with no stored profile must be skipped, not shown raw');
+});
+
+test('run: bootstrap.channel relays a failure message unchanged', async () => {
+  const rootDir = makeRoot();
+  const bootstrap = fakeBootstrap({ runChannel: { ok: false, message: 'channel not found, not readable, or not in this guild' } });
+  const { admin } = makeAdmin(rootDir, { bootstrap });
+
+  const body = await admin.run('bootstrap.channel', { channelId: 'c1' }, { guildId: 'g1' });
+  assert.equal(body, 'channel not found, not readable, or not in this guild');
+});
+
+test('run: bootstrap.channel is refused while paused', async () => {
+  const rootDir = makeRoot();
+  const bootstrap = fakeBootstrap();
+  const { admin } = makeAdmin(rootDir, { bootstrap });
+
+  await admin.run('pause', {}, {});
+  await assert.rejects(() => admin.run('bootstrap.channel', { channelId: 'c1' }, { guildId: 'g1' }), /paused/);
+  assert.equal(bootstrap.calls.runChannel, 0);
+});
+
+test('run: bootstrap.channels starts a background redo of every readable channel', async () => {
+  const rootDir = makeRoot();
+  const bootstrap = fakeBootstrap();
+  const { admin } = makeAdmin(rootDir, { bootstrap });
+
+  const body = await admin.run('bootstrap.channels', {}, { guildId: 'g1' });
+  assert.equal(bootstrap.calls.runChannels, 1);
+  assert.equal(body, 'started 8 channels');
+});
+
+test('run: bootstrap.channels is refused while paused', async () => {
+  const rootDir = makeRoot();
+  const bootstrap = fakeBootstrap();
+  const { admin } = makeAdmin(rootDir, { bootstrap });
+
+  await admin.run('pause', {}, {});
+  await assert.rejects(() => admin.run('bootstrap.channels', {}, { guildId: 'g1' }), /paused/);
+  assert.equal(bootstrap.calls.runChannels, 0);
+});
+
+test('run: bootstrap.server (re)builds the server-wide notes and reports counts', async () => {
+  const rootDir = makeRoot();
+  const bootstrap = fakeBootstrap();
+  const { admin } = makeAdmin(rootDir, { bootstrap });
+
+  const body = await admin.run('bootstrap.server', {}, { guildId: 'g1' });
+  assert.equal(bootstrap.calls.runServer, 1);
+  assert.match(body, /patterns 120 chars/);
+  assert.match(body, /starters 40 chars/);
+  assert.match(body, /injokes 3/);
+  assert.match(body, /lore entries 2/);
+});
+
+test('run: bootstrap.server relays a failure message unchanged', async () => {
+  const rootDir = makeRoot();
+  const bootstrap = fakeBootstrap({ runServer: { ok: false, message: 'prompt file missing: prompts/server.md is not configured yet' } });
+  const { admin } = makeAdmin(rootDir, { bootstrap });
+
+  const body = await admin.run('bootstrap.server', {}, { guildId: 'g1' });
+  assert.equal(body, 'prompt file missing: prompts/server.md is not configured yet');
+});
+
+test('run: bootstrap.server is refused while paused', async () => {
+  const rootDir = makeRoot();
+  const bootstrap = fakeBootstrap();
+  const { admin } = makeAdmin(rootDir, { bootstrap });
+
+  await admin.run('pause', {}, {});
+  await assert.rejects(() => admin.run('bootstrap.server', {}, { guildId: 'g1' }), /paused/);
+  assert.equal(bootstrap.calls.runServer, 0);
 });
 
 test('run: bootstrap.status formats phase, progress, tokens and the next target', async () => {

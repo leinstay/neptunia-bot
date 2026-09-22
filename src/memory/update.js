@@ -696,11 +696,12 @@ export function applyMemoryUpdate(store, guildId, update, cfg, knownUserIds, kno
 /**
  * Record that a normalized message happened, for the counters kept on a
  * user's profile and a channel's map entry: `touchUser` (skipped for the
- * persona's own messages) and `touchChannel`. Used by `observe()`, the live
- * pipeline; the memory bootstrap (src/memory/bootstrap.js) computes a
- * profiled member's counters the same way, from the fetched history window
- * directly, rather than through this shared helper (it never touches a
- * channel's own counters — those stay the live pipeline's job).
+ * persona's own messages) and `touchChannel`, whose `topWriters` tally also
+ * skips the persona's own messages and other bots. Used by `observe()`, the
+ * live pipeline; the memory bootstrap (src/memory/bootstrap.js) computes a
+ * profiled member's counters, and a channel's own counters/top writers, the
+ * same way but from the fetched history window directly (via
+ * `store.setChannelFacts`), rather than through this shared helper.
  * @param {object} store
  * @param {string} guildId
  * @param {object} normalized  A normalized message (see src/discord/collect.js);
@@ -710,11 +711,15 @@ export function touchMemory(store, guildId, normalized) {
   if (!normalized.self) {
     store.touchUser(guildId, normalized.authorId, normalized.authorName, normalized.ts);
   }
+  // The persona's own messages and other bots never count toward a channel's
+  // top writers -- see src/memory/store.js#touchChannel.
+  const writerId = !normalized.self && !normalized.bot ? normalized.authorId : null;
   store.touchChannel(
     guildId,
     normalized.channelId,
     { name: normalized.channelName, category: normalized.channelCategory, topic: normalized.channelTopic },
     normalized.ts,
+    writerId,
   );
 }
 

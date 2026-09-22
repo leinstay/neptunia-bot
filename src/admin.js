@@ -431,10 +431,10 @@ function writeLocalConfig(localPath, value) {
  * `llm` — from createLlm() (src/llm/openrouter.js), optional: `complete()`, used by `/nep ping`
  *   (F35) to reach each role's model directly. Absent -> `/nep ping` reports it is not available.
  * `bootstrap` — from createBootstrap() (src/memory/bootstrap.js), optional: the sample-based
- *   memory bootstrap -- `peopleReport`/`previewUser`/`previewChannel` (read-only), `run`/
- *   `runPerson`/`runChannel`/`runServer`/`status`/`reset` (write under data/), `refreshPortrait`,
- *   `waitIdle` (awaited by `/nep pause`, same shape as `memory`/`turns`). Absent -> every
- *   `bootstrap.*`/`memory.refresh` command reports it is not available.
+ *   memory bootstrap -- `peopleReport` (read-only), `run`/`runPerson`/`runChannel`/`runServer`/
+ *   `runUsers`/`runChannels`/`status`/`reset` (write under data/), `refreshPortrait`, `waitIdle`
+ *   (awaited by `/nep pause`, same shape as `memory`/`turns`). Absent -> every `bootstrap.*`/
+ *   `memory.refresh` command reports it is not available.
  *
  * `run(commandKey, args, context)` throws a plain `Error` (operator-facing
  * message) on bad input; it never touches discord.js.
@@ -1263,8 +1263,8 @@ async function cmdPing(args) {
 
   // ---------------------------------------------------------------------
   // bootstrap: the sample-based memory bootstrap -- see the module header of
-  // src/memory/bootstrap.js. `people`/`preview` stay read-only, never guarded
-  // by assertNotPaused(); `run`/`reset` write under data/ and are.
+  // src/memory/bootstrap.js. `people`/`status` stay read-only, never guarded
+  // by assertNotPaused(); everything else writes under data/ and is.
   // ---------------------------------------------------------------------
 
   /** `YYYY-MM-DD`, or `-` when `ts` is not a finite timestamp. */
@@ -1290,87 +1290,121 @@ async function cmdPing(args) {
     return lines.join('\n');
   }
 
-  function formatBootstrapProfilePreview(preview) {
-    if (!preview.ok) return preview.message;
-    const { member, sample, estimatedTokens, usage, result } = preview;
-    const usageLine = usage ? `${usage.prompt_tokens ?? '?'}/${usage.completion_tokens ?? '?'}` : '-';
-    return [
-      `member: ${member.name} (id:${member.id})`,
-      `messages in window: ${member.messages}, ${bootstrapDate(member.firstTs)}..${bootstrapDate(member.lastTs)}`,
-      `sample: ${sample.ownCount} own / ${sample.contextCount} context lines, channels: ${sample.channels.join(', ') || '-'}`,
-      `estimated input tokens: ${estimatedTokens}, real usage: ${usageLine}`,
-      '',
-      `character: ${result?.character || '(empty)'}`,
-      `style: ${result?.style || '(empty)'}`,
-      'interests:',
-      ...(result?.interests?.length
-        ? result.interests.map((it) => `  ${it.topic}${it.note ? ` — ${it.note}` : ''} (times: ${it.times})`)
-        : ['  (none)']),
-      'details:',
-      ...(result?.details?.length ? result.details.map((d) => `  ${d.text} (times: ${d.times})`) : ['  (none)']),
-      'episodes:',
-      ...(result?.episodes?.length
-        ? result.episodes.map((ep) => `  ${ep.date} [weight ${ep.weight}] ${ep.what}${ep.quote ? ` "${ep.quote}"` : ''} (${ep.feeling})`)
-        : ['  (none)']),
-      `aliases: ${result?.aliases?.join(', ') || '(none)'}`,
-    ].join('\n');
-  }
-
-  function formatBootstrapChannelPreview(preview) {
-    if (!preview.ok) return preview.message;
-    const { channel, sample, estimatedTokens, usage, result } = preview;
-    const usageLine = usage ? `${usage.prompt_tokens ?? '?'}/${usage.completion_tokens ?? '?'}` : '-';
-    return [
-      `channel: #${channel.name} (id:${channel.id})${channel.isMain ? ' [main]' : ''}`,
-      channel.category ? `category: ${channel.category}` : null,
-      channel.topic ? `topic: ${channel.topic}` : null,
-      `sample: ${sample.kept} of ${sample.total} messages kept (${sample.dropped} dropped to fit)`,
-      `estimated input tokens: ${estimatedTokens}, real usage: ${usageLine}`,
-      '',
-      `purpose: ${result?.purpose || '(empty)'}`,
-      `topics: ${result?.topics || '(empty)'}`,
-      `tone: ${result?.tone || '(empty)'}`,
-    ]
-      .filter((line) => line !== null)
-      .join('\n');
-  }
-
   async function cmdBootstrapPeople(_args, context) {
     const guildId = resolvedGuildId(context);
     if (!guildId) throw new Error('no guild resolved yet');
     return formatBootstrapPeople(await bootstrap.peopleReport(guildId));
   }
 
-  async function cmdBootstrapPreview(args, context) {
-    const guildId = resolvedGuildId(context);
-    if (!guildId) throw new Error('no guild resolved yet');
-    const hasUser = Boolean(args?.userId);
-    const hasChannel = Boolean(args?.channelId);
-    if (hasUser === hasChannel) throw new Error('give exactly one of user or channel');
-    if (hasUser) return formatBootstrapProfilePreview(await bootstrap.previewUser(guildId, args.userId));
-    return formatBootstrapChannelPreview(await bootstrap.previewChannel(guildId, args.channelId));
-  }
-
-  /** One-off target outcome (`bootstrap.runXxx`) as a short operator-facing line. */
-  function formatOneOffOutcome(kind, id, outcome) {
-    if (!outcome.ok) return `${kind}${id ? ` ${id}` : ''}: not done -- ${outcome.message ?? 'failed'}`;
-    return `${kind}${id ? ` ${id}` : ''}: done.`;
-  }
-
-  async function cmdBootstrapRun(args, context) {
+  async function cmdBootstrapRun(_args, context) {
     const guildId = resolvedGuildId(context);
     if (!guildId) throw new Error('no guild resolved yet');
     assertNotPaused();
 
-    const picks = [args?.userId, args?.channelId, args?.server].filter(Boolean);
-    if (picks.length > 1) throw new Error('give at most one of user, channel, server');
-
-    if (args?.userId) return formatOneOffOutcome('person', args.userId, await bootstrap.runPerson(guildId, args.userId));
-    if (args?.channelId) return formatOneOffOutcome('channel', args.channelId, await bootstrap.runChannel(guildId, args.channelId));
-    if (args?.server) return formatOneOffOutcome('server', null, await bootstrap.runServer(guildId));
-
     const result = await bootstrap.run(guildId);
     return result.ok ? 'Bootstrap run finished (or already fully done).' : `Bootstrap run stopped: ${result.message ?? 'unknown reason'} (resumable -- run again to continue).`;
+  }
+
+  /** `/nep bootstrap user`: a short summary of what was actually written -- sample size, tokens,
+   * counts of interests/details/episodes/aliases, and the first ~300 chars of the character field.
+   * Relays `outcome.message` unchanged when nothing was written (missing prompt file, no messages in
+   * the window, a bad model answer, ...). */
+  function formatBootstrapUserWritten(outcome) {
+    if (!outcome.ok) return outcome.message ?? outcome.reason ?? 'not done';
+    const { member, answer, sample, tokensUsed, chunks } = outcome;
+    const a = answer ?? {};
+    const characterExcerpt = String(a.character ?? '').slice(0, 300) || '(empty)';
+    const chunkNote = chunks > 1 ? `, ${chunks} chunks` : '';
+    return [
+      `profiled ${member.name} (id:${member.id})`,
+      `sample: ${sample?.ownCount ?? '?'} own / ${sample?.contextCount ?? '?'} context lines${chunkNote}`,
+      `tokens used: ${tokensUsed ?? '?'}`,
+      `interests: ${a.interests?.length ?? 0}, details: ${a.details?.length ?? 0}, episodes: ${a.episodes?.length ?? 0}, aliases: ${a.aliases?.length ?? 0}`,
+      `character: ${characterExcerpt}`,
+    ].join('\n');
+  }
+
+  async function cmdBootstrapUser(args, context) {
+    const guildId = resolvedGuildId(context);
+    if (!guildId) throw new Error('no guild resolved yet');
+    assertNotPaused();
+    const userId = args?.userId;
+    if (!userId) throw new Error('a user is required');
+
+    const result = await bootstrap.runPerson(guildId, userId);
+    return formatBootstrapUserWritten(result.ok ? result.outcome : result);
+  }
+
+  async function cmdBootstrapUsers(_args, context) {
+    const guildId = resolvedGuildId(context);
+    if (!guildId) throw new Error('no guild resolved yet');
+    assertNotPaused();
+
+    const result = await bootstrap.runUsers(guildId);
+    if (!result.ok) return result.message ?? 'not started';
+    return `started ${result.count} members`;
+  }
+
+  /** `/nep bootstrap channel`: the note actually written (purpose/topics/tone), plus the counters
+   * and top writers `store.setChannelFacts` just filled in (F42) -- writers resolved to their
+   * current stored name, an id with no profile skipped. Relays `outcome.message` unchanged when
+   * nothing was written. */
+  function formatBootstrapChannelWritten(outcome, guildId) {
+    if (!outcome.ok) return outcome.message ?? outcome.reason ?? 'not done';
+    const { channel, result, facts } = outcome;
+    const lines = [
+      `described #${channel.name} (id:${channel.id})`,
+      `purpose: ${result.purpose || '(empty)'}`,
+      `topics: ${result.topics || '(empty)'}`,
+      `tone: ${result.tone || '(empty)'}`,
+    ];
+    if (facts) {
+      lines.push(`messages seen: ${facts.messageCount}`);
+      lines.push(`last message: ${facts.lastMessageAt ? humanizeAgo(facts.lastMessageAt) : 'never'}`);
+      const writers = (facts.topWriters ?? [])
+        .map((w) => store.getUser(guildId, w.id)?.names?.[0])
+        .filter(Boolean);
+      if (writers.length > 0) lines.push(`top writers: ${writers.join(', ')}`);
+    }
+    return lines.join('\n');
+  }
+
+  async function cmdBootstrapChannel(args, context) {
+    const guildId = resolvedGuildId(context);
+    if (!guildId) throw new Error('no guild resolved yet');
+    assertNotPaused();
+    const channelId = args?.channelId;
+    if (!channelId) throw new Error('a channel is required');
+
+    const result = await bootstrap.runChannel(guildId, channelId);
+    return formatBootstrapChannelWritten(result.ok ? result.outcome : result, guildId);
+  }
+
+  async function cmdBootstrapChannels(_args, context) {
+    const guildId = resolvedGuildId(context);
+    if (!guildId) throw new Error('no guild resolved yet');
+    assertNotPaused();
+
+    const result = await bootstrap.runChannels(guildId);
+    if (!result.ok) return result.message ?? 'not started';
+    return `started ${result.count} channels`;
+  }
+
+  /** `/nep bootstrap server`: counts of what was written (patterns/starters lengths, injokes, lore
+   * entries). Relays `outcome.message` unchanged when nothing was written. */
+  function formatBootstrapServerWritten(outcome) {
+    if (!outcome.ok) return outcome.message ?? outcome.reason ?? 'not done';
+    const c = outcome.counts;
+    return `server notes updated: patterns ${c.patternsChars} chars, starters ${c.startersChars} chars, injokes ${c.injokes}, lore entries ${c.lore}`;
+  }
+
+  async function cmdBootstrapServer(_args, context) {
+    const guildId = resolvedGuildId(context);
+    if (!guildId) throw new Error('no guild resolved yet');
+    assertNotPaused();
+
+    const result = await bootstrap.runServer(guildId);
+    return formatBootstrapServerWritten(result.ok ? result.outcome : result);
   }
 
   /** `N s ago` / `N min ago` / `N h ago`, or `never` when `lastActivityAt` is unknown (F40). */
@@ -1496,8 +1530,12 @@ async function cmdPing(args) {
     'model.show': () => cmdModelShow(),
     'model.set': (args) => cmdModelSet(args),
     'bootstrap.people': withBootstrap((args, context) => cmdBootstrapPeople(args, context)),
-    'bootstrap.preview': withBootstrap((args, context) => cmdBootstrapPreview(args, context)),
     'bootstrap.run': withBootstrap((args, context) => cmdBootstrapRun(args, context)),
+    'bootstrap.user': withBootstrap((args, context) => cmdBootstrapUser(args, context)),
+    'bootstrap.users': withBootstrap((args, context) => cmdBootstrapUsers(args, context)),
+    'bootstrap.channel': withBootstrap((args, context) => cmdBootstrapChannel(args, context)),
+    'bootstrap.channels': withBootstrap((args, context) => cmdBootstrapChannels(args, context)),
+    'bootstrap.server': withBootstrap((args, context) => cmdBootstrapServer(args, context)),
     'bootstrap.status': withBootstrap((args, context) => cmdBootstrapStatus(args, context)),
     'bootstrap.reset': withBootstrap(() => cmdBootstrapReset()),
   };
