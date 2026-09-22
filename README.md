@@ -95,7 +95,7 @@ The system prompt handles sounding human, so the card is purely personality. Giv
 | `reactions` | `true` | Emoji reactions |
 | `multiMessage` | `true` | Allow 2–3 messages in a row |
 | `vision` | `true` | Process attached images |
-| `mediaDescriptions` | `false` | One-line descriptions for pictures, GIFs, video frames and link thumbnails |
+| `mediaDescriptions` | `true` | One-line descriptions for pictures, GIFs, video frames and link thumbnails |
 | `followUp` | `true` | Classify untagged messages after the persona answers to continue a conversation |
 | `typingSimulation` | `true` | Simulate typing speed |
 | `adminCommands` | `true` | Owner slash commands; `false` unregisters them |
@@ -123,7 +123,7 @@ The system prompt handles sounding human, so the card is purely personality. Giv
 | `maxOutputTokens` | `700` | Max output tokens |
 | `maxRequestTokens` | `50000` | Hard token cap per request |
 | `safetyMargin` | `0.9` | Budgeting fraction of maxRequestTokens |
-| `timeoutMs` | `90000` | Request timeout (ms) |
+| `timeoutMs` | `300000` | Request timeout (ms) |
 | `pingTimeoutMs` | `30000` | Timeout for `/nep ping` requests (ms) |
 | `retries` | `2` | Retries on transient failures |
 | `maxRequestsPerDay` | `300` | Daily request cap |
@@ -145,12 +145,12 @@ The system prompt handles sounding human, so the card is purely personality. Giv
 | `askedAboutProfiles` | `3` | Members referred to in the recent messages shown in full, ahead of the other participants |
 | `tempo.liveMessages10min` | `4` | Messages in 10 min = "live" |
 | `tempo.deadSilenceMinutes` | `45` | Silence minutes = "dead" |
-| `caps.interlocutor` | `3500` | Token cap: caller's profile with episodes |
+| `caps.interlocutor` | `6000` | Token cap: caller's profile with episodes |
 | `caps.aboutChat` | `2500` | Token cap: server habits / self-facts |
 | `caps.lore` | `1500` | Token cap: lore entries |
-| `caps.people` | `4000` | Token cap: other profiles |
+| `caps.people` | `9000` | Token cap: other profiles |
 | `caps.neighbors` | `3000` | Token cap: neighbour channels |
-| `caps.server` | `1500` | Token cap: channel map |
+| `caps.server` | `4000` | Token cap: channel map |
 | `channelActivity.liveMessagesPerDay` | `20` | Daily messages = "active" channel |
 | `channelActivity.deadAfterDays` | `7` | Days without messages = "dead" channel |
 | `vision.maxImages` | `4` | Max images per request |
@@ -180,15 +180,15 @@ Settings for the media describer (`features.mediaDescriptions`).
 
 | Key | Default | Meaning |
 |---|---|---|
-| `ignoreChance` | `0.12` | Base ignore chance |
-| `emptyMentionIgnoreChance` | `0.35` | Ignore chance for bare @mention |
+| `ignoreChance` | `0` | Base ignore chance; raise to make her skip some pings |
+| `emptyMentionIgnoreChance` | `0` | Ignore chance for bare @mention; raise to make her skip some |
 | `repeatWindowMinutes` | `10` | Repeat tracking window (min) |
-| `repeatPenalty` | `0.25` | Added ignore chance per repeat |
-| `spamThreshold` | `4` | Calls in window before spam |
+| `repeatPenalty` | `0` | Added ignore chance per repeat; raise to penalize repeats |
+| `spamThreshold` | `50` | Calls in window before spam |
 | `spamIgnoreChance` | `0.9` | Ignore chance when spammed |
-| `nameTriggerChance` | `0.5` | Name trigger response chance |
+| `nameTriggerChance` | `1` | Name trigger response chance |
 | `neverIgnore` | `[]` | User IDs never ignored |
-| `affinityIgnoreBonus` | `0.3` | Max added ignore at affinity -100 |
+| `affinityIgnoreBonus` | `0` | Max added ignore at affinity -100; raise to make disliked members get ignored more |
 | `affinityLikeBonus` | `0.08` | Max reduced ignore at affinity +100 |
 | `oneAtATime` | `true` | One reply at a time across the server |
 | `maxPending` | `3` | Channels that can hold a direct ping while busy |
@@ -240,8 +240,8 @@ Settings for the media describer (`features.mediaDescriptions`).
 | `batchMessages` | `60` | Ideal batch size |
 | `minBatchMessages` | `15` | Min messages before update |
 | `maxBatchAgeMinutes` | `180` | Force update after (min) |
-| `maxOutputTokens` | `8000` | Max analyzer output tokens |
-| `fieldChars` | `400` | Profile field limit (chars) |
+| `maxOutputTokens` | `20000` | Max analyzer output tokens |
+| `fieldChars` | `1000` | Profile field limit (chars) |
 | `clampTolerance` | `1.25` | Text from the analyzer may exceed a limit by this factor before it is cut; cuts land on a sentence or word boundary and never inside a member reference |
 | `maxDetails` | `15` | Detail items shown to the persona and analyzer per profile |
 | `maxDetailsStored` | `40` | Detail items kept per profile; the top by frequency and recency are shown |
@@ -261,7 +261,7 @@ Settings for the media describer (`features.mediaDescriptions`).
 | `maxSelfFacts` | `20` | Max self-claims |
 | `maxEpisodes` | `20` | Max episodes kept per person |
 | `maxNewEpisodes` | `3` | Max new episodes per person per batch |
-| `timeoutMs` | `300000` | Analyzer timeout (ms), separate from `llm.timeoutMs` |
+| `timeoutMs` | `900000` | Analyzer timeout (ms), separate from `llm.timeoutMs` |
 
 The analyzer prompt reads these limits as placeholders, so raising a value takes effect on the next batch. Bigger profiles cost context tokens (`context.caps.people`, `context.caps.interlocutor`) and analyzer output (`memory.maxOutputTokens`).
 
@@ -398,7 +398,7 @@ Transcript lines carry media markers in brackets: pictures, GIFs, videos, sticke
 
 `features.vision` attaches pictures from the calling message, from the message it replies to, and the newest few in the channel to the LLM request as images, downscaled through Discord's media proxy. The bot downloads every picture itself and sends it inline as data, because Discord refuses downloads coming from the model provider; pictures larger than `context.vision.maxBytes` or slower than `context.vision.fetchTimeoutMs` are skipped. The persona sees these directly. Settings live under `context.vision`.
 
-`features.mediaDescriptions` (off by default) runs a helper model (`media.model`) that writes a one-line description for pictures, GIF frames, video posters, stickers, custom emoji and link thumbnails. Each attachment is described once and cached. Descriptions feed the chat transcript, the memory analyzer and the warmup, whose token budget pays for warmup descriptions. The describer's prompt is `prompts/describe.md`. Settings live under `media`.
+`features.mediaDescriptions` (on by default) runs a helper model (`media.model`) that writes a one-line description for pictures, GIF frames, video posters, stickers, custom emoji and link thumbnails. Each attachment is described once and cached. Descriptions feed the chat transcript, the memory analyzer and the warmup, whose token budget pays for warmup descriptions. The describer's prompt is `prompts/describe.md`. Settings live under `media`.
 
 Stickers and custom emoji recur constantly, so they are cached by id and cost nearly nothing after the first description. With `features.vision`, the sticker of the calling message is attached as a picture. Discord's built-in animated stickers are Lottie animations, not images, so they are never more than a name.
 

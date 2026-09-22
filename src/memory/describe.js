@@ -1,7 +1,7 @@
 // The media describer: turns one picture (an image, a gif frame or a video
 // poster — see src/discord/media.js#isDescribable) into a plain one-line
 // caption via a cheap vision-capable model, so the persona can react to what
-// is on a picture it did not itself see (features.mediaDescriptions, off by
+// is on a picture it did not itself see (features.mediaDescriptions, on by
 // default). One request per NEW picture; results are cached per
 // attachment/embed id in data/guilds/<id>/media.json (src/memory/store.js),
 // LRU-trimmed to `media.cacheEntries`. A failure is cached as a miss for an

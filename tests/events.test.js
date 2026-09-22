@@ -433,9 +433,10 @@ test('events: a mention with rng above ignoreChance runs a reply turn', async ()
 
 test('events: a mention with rng below ignoreChance is observed but not answered', async () => {
   let called = false;
+  const config = baseConfig({ mention: { ignoreChance: 0.5 } });
   const turns = fakeTurns({ runTurn: async () => { called = true; return { outcome: 'spoke' }; } });
   const memory = fakeMemory();
-  const handler = makeHandler({ turns, memory, rng: scripted([0.0]) });
+  const handler = makeHandler({ config, turns, memory, rng: scripted([0.0]) });
 
   const message = fakeMessage({
     cleanContent: 'γεια',
@@ -478,7 +479,7 @@ test('events: a reply to its own message is detected as kind "reply"', async () 
 
 test('events: a name trigger respects config.mention.nameTriggerChance', async () => {
   let calls = 0;
-  const config = baseConfig({ bot: { nameTriggers: ['νεπτούνια'] } });
+  const config = baseConfig({ bot: { nameTriggers: ['νεπτούνια'] }, mention: { nameTriggerChance: 0.5 } });
   const turnsRespond = fakeTurns({ runTurn: async () => { calls += 1; return { outcome: 'spoke' }; } });
   const handlerRespond = makeHandler({ config, turns: turnsRespond, rng: scripted([0.1]) });
   const message1 = fakeMessage({ cleanContent: 'γεια νεπτούνια όμορφη' });
@@ -1244,7 +1245,8 @@ test('events: the ignore decision is rolled at pick-up time, not when the ping a
   });
   // Exactly one value for the switch-delay sample, one for decideMention -- if
   // arrival wrongly rolled decideMention too, this queue would run out and throw.
-  const handler = makeHandler({ turns, sleep: async () => {}, rng: scripted([0.5, 0]) });
+  const config = baseConfig({ mention: { ignoreChance: 0.5 } });
+  const handler = makeHandler({ config, turns, sleep: async () => {}, rng: scripted([0.5, 0]) });
 
   const guild = fakeGuild();
   const channel = fakeChannelWithMessage('c1', guild, 'm1');
@@ -1252,7 +1254,7 @@ test('events: the ignore decision is rolled at pick-up time, not when the ping a
 
   await handler.drainPending();
 
-  assert.equal(respondedArgs, null, 'rng=0 at pick-up time is below the default ignoreChance (0.12): ignored');
+  assert.equal(respondedArgs, null, 'rng=0 at pick-up time is below the configured ignoreChance (0.5): ignored');
 });
 
 test('events: a pending ping whose message no longer exists is dropped silently', async () => {
