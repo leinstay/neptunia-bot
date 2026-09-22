@@ -125,13 +125,13 @@ test('buildCommandTree: rule group (add/list/remove)', () => {
   assert.equal(number.min_value, 1);
 });
 
-test('buildCommandTree: memory group (show/forget/affinity/wipe/alias-add/alias-remove/refresh)', () => {
+test('buildCommandTree: memory group (show/channel/server/forget/affinity/wipe/alias-add/alias-remove/refresh)', () => {
   const [command] = buildCommandTree('nep');
   const memory = findOption(command.options, 'memory');
   assert.equal(memory.type, 2);
   assert.deepEqual(
     memory.options.map((o) => o.name),
-    ['show', 'forget', 'alias-add', 'alias-remove', 'affinity', 'wipe', 'refresh'],
+    ['show', 'channel', 'server', 'forget', 'alias-add', 'alias-remove', 'affinity', 'wipe', 'refresh'],
   );
 
   const show = findOption(memory.options, 'show');
@@ -160,6 +160,18 @@ test('buildCommandTree: memory group (show/forget/affinity/wipe/alias-add/alias-
     order.choices.map((c) => c.value),
     ['rank', 'recent'],
   );
+
+  const channel = findOption(memory.options, 'channel');
+  assert.equal(channel.type, 1); // SUBCOMMAND
+  const channelOpt = findOption(channel.options, 'channel');
+  assert.equal(channelOpt.type, 7); // CHANNEL
+  assert.equal(channelOpt.required, false);
+  assert.deepEqual(channelOpt.channel_types, [0]); // GUILD_TEXT
+  assert.ok(channelOpt.description.length <= 100);
+
+  const server = findOption(memory.options, 'server');
+  assert.equal(server.type, 1); // SUBCOMMAND
+  assert.equal(server.options, undefined);
 
   const aliasAdd = findOption(memory.options, 'alias-add');
   assert.equal(findOption(aliasAdd.options, 'user').required, true);
@@ -557,6 +569,27 @@ test('interaction handler: memory.alias-add/alias-remove map user/name straight 
   }));
   assert.equal(admin.runCalls[1][0], 'memory.alias-remove');
   assert.deepEqual(admin.runCalls[1][1], { userId: 'target1', name: 'Ari' });
+});
+
+test('interaction handler: memory.channel maps the optional channel option to channelId (undefined when omitted)', async () => {
+  const admin = fakeAdmin();
+  const handler = createInteractionHandler({ hot: baseHot(), admin, getGuildId: () => 'g1' });
+
+  await handler(fakeInteraction({ group: 'memory', subcommand: 'channel', optionValues: { channel: { id: 'chan1' } } }));
+  assert.equal(admin.runCalls[0][0], 'memory.channel');
+  assert.deepEqual(admin.runCalls[0][1], { channelId: 'chan1' });
+
+  await handler(fakeInteraction({ group: 'memory', subcommand: 'channel' }));
+  assert.deepEqual(admin.runCalls[1][1], { channelId: undefined });
+});
+
+test('interaction handler: memory.server maps to empty args', async () => {
+  const admin = fakeAdmin();
+  const handler = createInteractionHandler({ hot: baseHot(), admin, getGuildId: () => 'g1' });
+
+  await handler(fakeInteraction({ group: 'memory', subcommand: 'server' }));
+  assert.equal(admin.runCalls[0][0], 'memory.server');
+  assert.deepEqual(admin.runCalls[0][1], {});
 });
 
 test('interaction handler: memory.wipe maps the confirm string option straight through', async () => {

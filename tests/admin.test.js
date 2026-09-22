@@ -238,10 +238,24 @@ function makeStore() {
   const profiles = new Map();
   const forgotten = [];
   const lore = new Map(); // guildId -> entries[]
+  const channels = new Map(); // `${guildId}:${channelId}` -> channel entry
+  const guilds = new Map(); // guildId -> guild notes
   const store = {
     profiles,
     forgotten,
     lore,
+    channels,
+    guilds,
+    getChannel(guildId, channelId) {
+      return channels.get(`${guildId}:${channelId}`) ?? null;
+    },
+    listChannels(guildId) {
+      const prefix = `${guildId}:`;
+      return [...channels.entries()].filter(([key]) => key.startsWith(prefix)).map(([, value]) => value);
+    },
+    getGuild(guildId) {
+      return guilds.get(guildId) ?? { patterns: '', starters: '', injokes: [], self: [], updatedAt: null };
+    },
     state: { data: { llmCount: 5, llmDay: '2026-09-20' }, markDirty() {} },
     flushCalls: 0,
     flush() {
@@ -1426,6 +1440,191 @@ test('run: memory.show section:interests order:rank (default) marks the divider 
   assert.ok(lines[0].startsWith('Fresh interest'));
   assert.ok(lines[1].includes('not shown'));
   assert.ok(lines[2].startsWith('Ancient favorite'));
+});
+
+// ---------------------------------------------------------------------------
+// memory.channel (F45) -- the channel-note inspector: one channel's full
+// stored note, or a compact table of every stored channel.
+// ---------------------------------------------------------------------------
+
+test('run: memory.channel with no channels stored reports "No channels stored."', async () => {
+  const rootDir = makeRoot();
+  const { admin } = makeAdmin(rootDir);
+  assert.equal(await admin.run('memory.channel', {}, { guildId: 'g1' }), 'No channels stored.');
+});
+
+test('run: memory.channel reports an unknown channel as an error', async () => {
+  const rootDir = makeRoot();
+  const { admin } = makeAdmin(rootDir);
+  await assert.rejects(
+    () => admin.run('memory.channel', { channelId: '999' }, { guildId: 'g1' }),
+    /no channel entry for 999/,
+  );
+});
+
+test('run: memory.channel/memory.server report an error before the guild has been resolved', async () => {
+  const rootDir = makeRoot();
+  const { admin } = makeAdmin(rootDir, { getGuildId: () => null });
+  await assert.rejects(() => admin.run('memory.channel', {}, {}), /no guild resolved yet/);
+  await assert.rejects(() => admin.run('memory.server', {}, {}), /no guild resolved yet/);
+});
+
+test('run: memory.channel with a channel shows the full stored note, resolves <@id> tokens, and marks main channels', async () => {
+  const rootDir = makeRoot();
+  const hot = makeHot(rootDir);
+  hot.config.memory = { mainChannelIds: ['c1'] };
+  hot.config.context = { channelActivity: { liveMessagesPerDay: 20, deadAfterDays: 7 } };
+  const { admin, store } = makeAdmin(rootDir, { hot });
+  const zoeId = '999999999999999942'; // 18-digit snowflake, matches src/memory/mentions.js#TOKEN_RE
+  const strangerId = '888888888888888888';
+  store.profiles.set(`g1:${zoeId}`, { id: zoeId, names: ['Zoe'] });
+  store.channels.set('g1:c1', {
+    id: 'c1',
+    name: 'general',
+    category: 'Text Channels',
+    topic: 'general chat',
+    purpose: `hanging out with <@${zoeId}>`,
+    topics: 'games, memes',
+    tone: 'casual',
+    messageCount: 340,
+    firstMessageAt: Date.parse('2026-01-01T00:00:00.000Z'),
+    lastMessageAt: Date.parse('2026-09-20T00:00:00.000Z'),
+    topWriters: [{ id: zoeId, count: 12 }, { id: strangerId, count: 3 }],
+    updatedAt: '2026-09-20T12:00:00.000Z',
+  });
+
+  const result = await admin.run('memory.channel', { channelId: 'c1' }, { guildId: 'g1' });
+
+  assert.ok(result.includes('name: general'));
+  assert.ok(result.includes('category: Text Channels'));
+  assert.ok(result.includes('topic: general chat'));
+  assert.ok(result.includes('main: true'));
+  assert.ok(result.includes(`purpose: hanging out with Zoe (id:${zoeId})`));
+  assert.ok(result.includes('topics: games, memes'));
+  assert.ok(result.includes('tone: casual'));
+  assert.ok(result.includes('messages: 340'));
+  assert.ok(result.includes('first message: 2026-01-01'));
+  assert.ok(result.includes('last message: 2026-09-20'));
+  assert.ok(result.includes('activity:'));
+  assert.ok(result.includes('top writers: Zoe (12)'), 'the unknown id (a stranger with no profile) is skipped, not rendered bare');
+  assert.ok(!result.includes(strangerId));
+  assert.ok(result.includes('updatedAt: 2026-09-20T12:00:00.000Z'));
+});
+
+test('run: memory.channel with a channel reports "(empty)"/none/false for a bare, never-annotated entry', async () => {
+  const rootDir = makeRoot();
+  const { admin, store } = makeAdmin(rootDir);
+  store.channels.set('g1:c1', { id: 'c1', name: 'general', category: null, topic: null, purpose: '', topics: '', tone: '', messageCount: 0, firstMessageAt: null, lastMessageAt: null, topWriters: [], updatedAt: null });
+
+  const result = await admin.run('memory.channel', { channelId: 'c1' }, { guildId: 'g1' });
+
+  assert.ok(result.includes('category: -'));
+  assert.ok(result.includes('topic: -'));
+  assert.ok(result.includes('main: false'));
+  assert.ok(result.includes('purpose: (empty)'));
+  assert.ok(result.includes('topics: (empty)'));
+  assert.ok(result.includes('tone: (empty)'));
+  assert.ok(result.includes('first message: -'));
+  assert.ok(result.includes('last message: -'));
+  assert.ok(result.includes('top writers: none'));
+  assert.ok(result.includes('updatedAt: -'));
+});
+
+test('run: memory.channel without a channel lists every stored channel, one line each, sorted by last message desc', async () => {
+  const rootDir = makeRoot();
+  const { admin, store } = makeAdmin(rootDir);
+  store.channels.set('g1:old', {
+    id: 'old', name: 'archive', messageCount: 5, lastMessageAt: Date.parse('2025-01-01T00:00:00.000Z'), days: {}, purpose: '',
+  });
+  store.channels.set('g1:new', {
+    id: 'new', name: 'general', messageCount: 500, lastMessageAt: Date.parse('2026-09-20T00:00:00.000Z'), days: {}, purpose: 'chat',
+  });
+
+  const result = await admin.run('memory.channel', {}, { guildId: 'g1' });
+  const lines = result.split('\n');
+
+  assert.equal(lines.length, 2);
+  assert.ok(lines[0].startsWith('general'), 'the more recently active channel comes first');
+  assert.match(lines[0], /messages=500/);
+  assert.match(lines[0], /last=2026-09-20/);
+  assert.match(lines[0], /note=yes/);
+  assert.ok(lines[1].startsWith('archive'));
+  assert.match(lines[1], /note=no/);
+});
+
+test('run: memory.channel drops caches first while paused, so a hand-edit is always seen', async () => {
+  const rootDir = makeRoot();
+  const { admin, store } = makeAdmin(rootDir);
+  store.channels.set('g1:c1', { id: 'c1', name: 'general', purpose: '', days: {} });
+
+  await admin.run('pause', {}, {});
+  const dropsAfterPause = store.dropCachesCalls;
+
+  await admin.run('memory.channel', {}, { guildId: 'g1' });
+  assert.equal(store.dropCachesCalls, dropsAfterPause + 1);
+
+  await admin.run('memory.channel', { channelId: 'c1' }, { guildId: 'g1' });
+  assert.equal(store.dropCachesCalls, dropsAfterPause + 2);
+});
+
+// ---------------------------------------------------------------------------
+// memory.server (F45) -- the stored guild-wide notes plus counts.
+// ---------------------------------------------------------------------------
+
+test('run: memory.server on an empty guild reports "(empty)"/none and zero counts', async () => {
+  const rootDir = makeRoot();
+  const { admin } = makeAdmin(rootDir);
+
+  const result = await admin.run('memory.server', {}, { guildId: 'g1' });
+
+  assert.ok(result.includes('patterns: (empty)'));
+  assert.ok(result.includes('starters: (empty)'));
+  assert.ok(result.includes('in-jokes:\nnone'));
+  assert.ok(result.includes('self facts:\nnone'));
+  assert.ok(result.includes('profiles stored: 0'));
+  assert.ok(result.includes('channel notes stored: 0'));
+  assert.ok(result.includes('lore entries: 0'));
+  assert.ok(result.includes('updatedAt: -'));
+});
+
+test('run: memory.server numbers in-jokes and self facts, resolves <@id> tokens, and counts stored profiles/channels/lore', async () => {
+  const rootDir = makeRoot();
+  const { admin, store } = makeAdmin(rootDir);
+  const zoeId = '999999999999999942'; // 18-digit snowflake, matches src/memory/mentions.js#TOKEN_RE
+  store.profiles.set(`g1:${zoeId}`, { id: zoeId, names: ['Zoe'] });
+  store.profiles.set('g1:43', { id: '43', names: ['Al'] });
+  store.channels.set('g1:c1', { id: 'c1', name: 'general' });
+  store.setLore('g1', [{ title: 'X', keys: ['xx'], text: 'y' }], { source: 'owner', now: 1 });
+  store.guilds.set('g1', {
+    patterns: 'talks a lot about games',
+    starters: 'good morning',
+    injokes: [`the great <@${zoeId}> incident`, 'pineapple pizza'],
+    self: ['loves puns'],
+    updatedAt: '2026-09-20T12:00:00.000Z',
+  });
+
+  const result = await admin.run('memory.server', {}, { guildId: 'g1' });
+
+  assert.ok(result.includes('patterns: talks a lot about games'));
+  assert.ok(result.includes('starters: good morning'));
+  assert.ok(result.includes(`in-jokes:\n1. the great Zoe (id:${zoeId}) incident\n2. pineapple pizza`));
+  assert.ok(result.includes('self facts:\n1. loves puns'));
+  assert.ok(result.includes('profiles stored: 2'));
+  assert.ok(result.includes('channel notes stored: 1'));
+  assert.ok(result.includes('lore entries: 1'));
+  assert.ok(result.includes('updatedAt: 2026-09-20T12:00:00.000Z'));
+});
+
+test('run: memory.server drops caches first while paused, so a hand-edit is always seen', async () => {
+  const rootDir = makeRoot();
+  const { admin, store } = makeAdmin(rootDir);
+  store.guilds.set('g1', { patterns: 'x', starters: '', injokes: [], self: [], updatedAt: null });
+
+  await admin.run('pause', {}, {});
+  const dropsAfterPause = store.dropCachesCalls;
+
+  await admin.run('memory.server', {}, { guildId: 'g1' });
+  assert.equal(store.dropCachesCalls, dropsAfterPause + 1);
 });
 
 // ---------------------------------------------------------------------------

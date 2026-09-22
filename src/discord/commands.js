@@ -207,6 +207,25 @@ export function buildCommandTree(commandName) {
             },
             {
               type: SUBCOMMAND,
+              name: 'channel',
+              description: "Show a channel's stored note, or a table of every stored channel.",
+              options: [
+                {
+                  type: CHANNEL,
+                  name: 'channel',
+                  description: 'Channel to show (omit for a table of every stored channel).',
+                  required: false,
+                  channel_types: [GUILD_TEXT],
+                },
+              ],
+            },
+            {
+              type: SUBCOMMAND,
+              name: 'server',
+              description: 'Show the stored server notes: patterns, starters, in-jokes, self facts.',
+            },
+            {
+              type: SUBCOMMAND,
               name: 'forget',
               description: "Delete a member's stored profile.",
               options: [{ type: USER, name: 'user', description: 'Member.', required: true }],
@@ -458,6 +477,8 @@ const OPTION_MAPPERS = {
     limit: options.getInteger('limit') ?? undefined,
     order: options.getString('order') ?? undefined,
   }),
+  'memory.channel': (options) => ({ channelId: options.getChannel('channel')?.id }),
+  'memory.server': () => ({}),
   'memory.forget': (options) => ({ userId: options.getUser('user', true).id }),
   'memory.alias-add': (options) => ({ userId: options.getUser('user', true).id, name: options.getString('name', true) }),
   'memory.alias-remove': (options) => ({ userId: options.getUser('user', true).id, name: options.getString('name', true) }),

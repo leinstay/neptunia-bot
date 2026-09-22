@@ -25,6 +25,7 @@ import { emptyAffinity, affinityBand, roundScore } from './memory/affinity.js';
 import { topByRank } from './memory/ranking.js';
 import { fromTokens } from './memory/mentions.js';
 import { sortEpisodesForDisplay } from './memory/episodes.js';
+import { channelActivity } from './memory/channels.js';
 import { log } from './log.js';
 
 const FORBIDDEN_SEGMENTS = new Set(['__proto__', 'constructor', 'prototype']);
@@ -861,6 +862,132 @@ export function createAdmin({
     return buildProfileSummary(profile, memoryCfg, nameOf);
   }
 
+  // ---------------------------------------------------------------------
+  // memory.channel / memory.server (F45): read-only views of the server-wide
+  // memory -- the channel map (src/memory/channels.js) and the guild notes
+  // (src/memory/store.js#getGuild) -- alongside `memory.show`'s per-member
+  // view. Both read fresh data even mid-pause (`freshenIfPaused`, same as
+  // `memory.show`) and never write anything.
+  // ---------------------------------------------------------------------
+
+  /** `hot.config.memory.mainChannelIds`, normalized to a string Set -- mirrors
+   * src/memory/update.js#mainChannelSet and src/memory/bootstrap.js's own copies. */
+  function mainChannelIdSet() {
+    return new Set((hot.config?.memory?.mainChannelIds ?? []).map(String));
+  }
+
+  /** `YYYY-MM-DD` for an epoch-ms channel timestamp (`firstMessageAt`/`lastMessageAt`), or `-` when missing. */
+  function channelDate(ts) {
+    return Number.isFinite(ts) ? new Date(ts).toISOString().slice(0, 10) : '-';
+  }
+
+  /** A channel's stored `topWriters` (`{ id, count }[]`) resolved to current stored names, comma
+   * -separated -- an id with no stored profile (e.g. someone who left) is skipped silently, same as
+   * src/memory/channels.js#renderChannel's own topWriters line. `''` when there is nothing to show. */
+  function channelTopWritersText(topWriters, nameOf) {
+    return (Array.isArray(topWriters) ? topWriters : [])
+      .map((writer) => {
+        const name = nameOf(writer?.id);
+        return name ? `${name} (${writer.count})` : null;
+      })
+      .filter(Boolean)
+      .join(', ');
+  }
+
+  /** One line of `/nep memory channel`'s table view (no channel given): name, activity verdict,
+   * message count, last message date, whether a note exists (a non-empty `purpose`). */
+  function channelTableLine(channel, activity) {
+    const note = channel.purpose ? 'yes' : 'no';
+    return `${channel.name || channel.id}  activity=${activity}  messages=${channel.messageCount ?? 0}  last=${channelDate(channel.lastMessageAt)}  note=${note}`;
+  }
+
+  /**
+   * `/nep memory channel [channel]` (F45): with a channel, that channel's full stored note (Discord
+   * facts, the analyzer/bootstrap-written purpose/topics/tone, counters, activity verdict and top
+   * writers); without one, a compact table of every stored channel, sorted by last message desc.
+   * `<@id>` tokens in `purpose`/`topics`/`tone` are resolved the same way `memory.show` resolves
+   * free-text fields (`fromTokens(..., 'analyzer')`).
+   */
+  function cmdMemoryChannel(args, context) {
+    freshenIfPaused();
+    const guildId = resolvedGuildId(context);
+    if (!guildId) throw new Error('no guild resolved yet');
+
+    const activityCfg = hot.config?.context?.channelActivity ?? {};
+    const now = Date.now();
+    const nameOf = (id) => store.getUser(guildId, id)?.names?.[0] ?? null;
+    const resolve = (text) => fromTokens(typeof text === 'string' ? text : '', nameOf, 'analyzer');
+
+    const channelId = args?.channelId;
+    if (channelId) {
+      const channel = store.getChannel(guildId, channelId);
+      if (!channel) throw new Error(`no channel entry for ${channelId}`);
+
+      const activity = channelActivity(channel, now, activityCfg);
+      const isMain = mainChannelIdSet().has(String(channelId));
+      const writers = channelTopWritersText(channel.topWriters, nameOf);
+
+      return [
+        `name: ${channel.name || '-'}`,
+        `category: ${channel.category || '-'}`,
+        `topic: ${channel.topic || '-'}`,
+        `main: ${isMain}`,
+        `purpose: ${resolve(channel.purpose) || '(empty)'}`,
+        `topics: ${resolve(channel.topics) || '(empty)'}`,
+        `tone: ${resolve(channel.tone) || '(empty)'}`,
+        `messages: ${channel.messageCount ?? 0}`,
+        `first message: ${channelDate(channel.firstMessageAt)}`,
+        `last message: ${channelDate(channel.lastMessageAt)}`,
+        `activity: ${activity}`,
+        `top writers: ${writers || 'none'}`,
+        `updatedAt: ${channel.updatedAt ?? '-'}`,
+      ].join('\n');
+    }
+
+    const channels = store.listChannels(guildId);
+    if (channels.length === 0) return 'No channels stored.';
+
+    return [...channels]
+      .sort((a, b) => (b.lastMessageAt ?? 0) - (a.lastMessageAt ?? 0))
+      .map((channel) => channelTableLine(channel, channelActivity(channel, now, activityCfg)))
+      .join('\n');
+  }
+
+  /** Numbered `1. …` list of `items` (in-jokes/self facts), each resolved via `resolve`; `'none'`
+   * when the list is empty. Used by `cmdMemoryServer`. */
+  function numberedNotes(items, resolve) {
+    const list = Array.isArray(items) ? items : [];
+    if (list.length === 0) return 'none';
+    return list.map((item, i) => `${i + 1}. ${resolve(item)}`).join('\n');
+  }
+
+  /**
+   * `/nep memory server` (F45): the stored guild-wide notes (`patterns`, `starters`, numbered
+   * in-jokes and self facts -- src/memory/store.js#getGuild) plus counts of what else this guild has
+   * stored (profiles, channel notes, lore entries) and when the guild notes were last updated.
+   * `<@id>` tokens are resolved the same way `memory.show`/`memory.channel` resolve free text.
+   */
+  function cmdMemoryServer(_args, context) {
+    freshenIfPaused();
+    const guildId = resolvedGuildId(context);
+    if (!guildId) throw new Error('no guild resolved yet');
+
+    const guild = store.getGuild(guildId);
+    const nameOf = (id) => store.getUser(guildId, id)?.names?.[0] ?? null;
+    const resolve = (text) => fromTokens(typeof text === 'string' ? text : '', nameOf, 'analyzer');
+
+    return [
+      `patterns: ${resolve(guild.patterns) || '(empty)'}`,
+      `starters: ${resolve(guild.starters) || '(empty)'}`,
+      `in-jokes:\n${numberedNotes(guild.injokes, resolve)}`,
+      `self facts:\n${numberedNotes(guild.self, resolve)}`,
+      `profiles stored: ${store.countUsers(guildId)}`,
+      `channel notes stored: ${store.listChannels(guildId).length}`,
+      `lore entries: ${store.getLore(guildId).length}`,
+      `updatedAt: ${guild.updatedAt ?? '-'}`,
+    ].join('\n');
+  }
+
   /**
    * F32 (`/nep memory alias add`): confirms the alias at once instead of
    * waiting for it to be sighted `memory.confirmAfter` times naturally —
@@ -1524,6 +1651,8 @@ async function cmdPing(args) {
     'rule.list': () => cmdRuleList(),
     'rule.remove': (args) => cmdRuleRemove(args),
     'memory.show': (args, context) => cmdMemoryShow(args, context),
+    'memory.channel': (args, context) => cmdMemoryChannel(args, context),
+    'memory.server': (args, context) => cmdMemoryServer(args, context),
     'memory.forget': (args, context) => cmdMemoryForget(args, context),
     'memory.alias-add': (args, context) => cmdMemoryAliasAdd(args, context),
     'memory.alias-remove': (args, context) => cmdMemoryAliasRemove(args, context),
