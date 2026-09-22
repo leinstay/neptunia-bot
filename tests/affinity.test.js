@@ -1,5 +1,5 @@
 // Tests for src/memory/affinity.js: pure attitude scoring for
-// features.relationships (docs/prompt-contract.md, "Relationships").
+// features.relationships (docs/prompt-contract.md, "The analyzer").
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { emptyAffinity, affinityBand, applyDelta, ignoreAdjustment, roundScore } from '../src/memory/affinity.js';

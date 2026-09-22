@@ -16,7 +16,7 @@ const DAY = 24 * HOUR;
 
 // A language-neutral marker (memory transcript only) for a message addressed
 // to the persona, so the analyzer can weigh "how people talk TO it" apart
-// from general chatter. See docs/prompt-contract.md, "Memory update".
+// from general chatter. See docs/prompt-contract.md, "The analyzer".
 const DIRECT_MARKER = '→ '; // "→ "
 
 // A value no real channelId can equal, so the very first message of a memory
@@ -204,7 +204,7 @@ function renderForwarded(snapshot, labels, context, maxChars, channelName) {
  * @returns {{ id: string, index: number, ts: number, text: string }[]}
  *
  * In `mode: 'memory'`, messages come from possibly several channels (see
- * docs/prompt-contract.md, "Memory update"): whenever the channel
+ * docs/prompt-contract.md, "The analyzer"): whenever the channel
  * changes between two consecutive messages — including before the very first
  * one — the item opens with a `## #channel-name (id:channelId)` heading, and
  * the gap/date marker is computed against the previous message of the SAME

@@ -4,7 +4,7 @@
 // `delta`; this module clamps it, folds it into the stored score and keeps a
 // short history of what moved it. Also used by `decideMention` to make the
 // persona a little quicker to ignore someone it dislikes, a little slower to
-// ignore someone it likes. See docs/prompt-contract.md, "Relationships".
+// ignore someone it likes. See docs/prompt-contract.md, "The analyzer".
 
 import { clampText } from './clamp.js';
 
