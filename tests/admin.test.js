@@ -2894,7 +2894,7 @@ test('run: bootstrap.status shows the paused/finished/aborted phases', async () 
   assert.match(await adminAborted.run('warmup.status', {}, { guildId: 'g1' }), /phase: aborted \(rate-limit\)/);
 });
 
-test('run: bootstrap.reset clears progress and is not guarded by assertNotPaused (the factory itself refuses while running)', async () => {
+test('run: bootstrap.reset clears progress (the factory itself refuses while running)', async () => {
   const rootDir = makeRoot();
   const bootstrap = fakeBootstrap();
   const { admin } = makeAdmin(rootDir, { bootstrap });
@@ -2911,6 +2911,16 @@ test('run: bootstrap.reset relays a refusal message from the factory (e.g. a run
 
   const body = await admin.run('warmup.reset', {}, { guildId: 'g1' });
   assert.equal(body, 'a bootstrap run is in flight -- pause or wait for it first');
+});
+
+test('run: warmup.reset is refused while paused and never touches bootstrap progress', async () => {
+  const rootDir = makeRoot();
+  const bootstrap = fakeBootstrap();
+  const { admin } = makeAdmin(rootDir, { bootstrap });
+
+  await admin.run('pause', {}, {});
+  await assert.rejects(() => admin.run('warmup.reset', {}, { guildId: 'g1' }), /paused/);
+  assert.equal(bootstrap.calls.reset, 0);
 });
 
 test('run: memory.refresh forces a portrait refresh, ignoring the hours rail', async () => {

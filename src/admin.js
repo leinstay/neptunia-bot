@@ -464,7 +464,7 @@ export function createAdmin({
    * paused, with a hint to resume first. Guards poke, memory.alias-add,
    * memory.alias-remove, memory.forget, memory.wipe, memory.affinity (when
    * setting a score), memory.refresh, lore.add, lore.remove, warmup.run,
-   * warmup.users, warmup.channels and warmup.server.
+   * warmup.users, warmup.channels, warmup.server and warmup.reset.
    */
   function assertNotPaused() {
     if (store.state.data.paused) {
@@ -1616,7 +1616,10 @@ async function cmdPing(args) {
     ].join('\n');
   }
 
+  /** `/nep warmup reset`: clears bootstrap progress only (stored profiles/channel/guild data
+   * untouched). Writes `state.json`, so refused while paused like the other warmup commands. */
   function cmdBootstrapReset() {
+    assertNotPaused();
     const result = bootstrap.reset();
     return result.ok ? 'Bootstrap progress reset (stored profiles/channel/guild data untouched).' : result.message;
   }
