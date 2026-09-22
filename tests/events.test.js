@@ -3,7 +3,10 @@ import assert from 'node:assert/strict';
 
 import { createMessageHandler } from '../src/discord/events.js';
 import { createTagHistory } from '../src/behavior/mention.js';
-import { readConfig, deepMerge } from '../src/config.js';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { deepMerge } from '../src/config.js';
 import { DailyCapError } from '../src/llm/openrouter.js';
 import { labels } from './fixtures/labels.js';
 
@@ -11,8 +14,14 @@ import { labels } from './fixtures/labels.js';
 // Fixtures
 // ---------------------------------------------------------------------------
 
+// The tracked defaults only -- never the deployment's config.local.json, so
+// the suite passes the same on every machine.
+const DEFAULT_CONFIG = JSON.parse(
+  fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'config.json'), 'utf8'),
+);
+
 function baseConfig(overrides = {}) {
-  return deepMerge(structuredClone(readConfig()), overrides);
+  return deepMerge(structuredClone(DEFAULT_CONFIG), overrides);
 }
 
 function fakeGuild(id = 'g1', displayName = 'Ζωή') {
