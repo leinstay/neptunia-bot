@@ -1,12 +1,33 @@
-# Neptunia Engine
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset=".github/assets/logo-dark.png">
+    <img src=".github/assets/logo.png" width="128" alt="Neptunia Engine logo">
+  </picture>
+</p>
+<h1 align="center">Neptunia Engine</h1>
+<p align="center"><em>An LLM character engine for Discord</em></p>
+<p align="center">
+  <a href="https://github.com/leinstay/neptunia-bot/stargazers"><img src="https://img.shields.io/github/stars/leinstay/neptunia-bot" alt="GitHub stars"></a>
+  <a href="https://github.com/leinstay/neptunia-bot/forks"><img src="https://img.shields.io/github/forks/leinstay/neptunia-bot" alt="GitHub forks"></a>
+  <a href="https://github.com/leinstay/neptunia-bot/issues"><img src="https://img.shields.io/github/issues/leinstay/neptunia-bot" alt="GitHub issues"></a>
+  <a href="https://github.com/leinstay/neptunia-bot/pulls"><img src="https://img.shields.io/github/issues-pr/leinstay/neptunia-bot" alt="GitHub pull requests"></a>
+  <a href="https://github.com/leinstay/neptunia-bot/blob/main/LICENSE"><img src="https://img.shields.io/github/license/leinstay/neptunia-bot" alt="License"></a>
+  <a href="https://github.com/leinstay/neptunia-bot/actions/workflows/test.yml"><img src="https://github.com/leinstay/neptunia-bot/actions/workflows/test.yml/badge.svg" alt="Tests"></a>
+</p>
 
-SillyTavern-inspired Discord pseudo-user engine with a pluggable personality.
+---
 
-Node.js 20+, one dependency (discord.js), any OpenRouter-compatible endpoint. Ships with a working example character; write your own without touching code. Each instance serves one server, one bot account, one personality. For a second server or character, run a second copy with its own `.env`, `config.local.json`, `prompts.local/` and `data/`.
+Neptunia Engine provides a locally run Discord bot that plays one LLM-driven character: Node.js 20+ with a single dependency (discord.js), any OpenRouter-compatible endpoint, a pluggable character card written without touching code, hot-reloaded prompts and config, per-member memory with attitudes and episodes, a server-wide lorebook, vision for attached pictures, one-line media descriptions from a helper model, owner slash commands for live tuning, and a dry-run mode for safe first runs.
 
-Discord marks bot accounts with an APP badge. The engine does not disguise that; the goal is behaviour and voice.
+Setup, configuration and every command are documented in the sections below; the contract between the prompt files and the code lives in [`docs/prompt-contract.md`](docs/prompt-contract.md).
 
-The persona responds to mentions, replies and name triggers, sometimes ignoring them. It cuts into conversations at random intervals and starts topics in dead channels. It remembers people, tracks attitudes from -100 to 100, and lets those shape how it engages. The score never appears in chat. All config and prompts are hot-reloaded; owner commands tune the bot live from Discord.
+## What is Neptunia?
+
+Neptunia is a locally run Discord bot that plays one configurable character through an LLM and passes for a regular chat member, not an assistant. It ships with a working example character; write your own character card without touching code.
+
+The persona responds to mentions, replies and name triggers, sometimes ignoring them. It cuts into conversations at random intervals and starts topics in dead channels. It remembers people, tracks attitudes from -100 to 100, and lets those shape how it engages — the score never appears in chat. All config and prompts are hot-reloaded; owner commands tune the bot live from Discord.
+
+Each instance serves one server, one bot account, one personality. For a second server or character, run a second copy with its own `.env`, `config.local.json`, `prompts.local/` and `data/`. Discord marks bot accounts with an APP badge; the engine does not disguise that. The goal is behaviour and voice.
 
 ## Quick start
 
