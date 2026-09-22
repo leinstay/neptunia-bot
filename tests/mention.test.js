@@ -2,7 +2,16 @@
 // whether it reacts to it at all.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { detectTrigger, strippedLength, createTagHistory, decideMention, repeatWindowMs } from '../src/behavior/mention.js';
+import {
+  detectTrigger,
+  strippedLength,
+  createTagHistory,
+  decideMention,
+  repeatWindowMs,
+  isFollowUpOpen,
+  followUpPreFilter,
+  parseFollowUpVerdict,
+} from '../src/behavior/mention.js';
 
 const NAME_TRIGGERS = ['νεπτούνια'];
 
@@ -290,6 +299,85 @@ test('decideMention: affinityScore is ignored for the "name" kind', () => {
   });
   const withoutAffinity = decideMention({ kind: 'name', textLength: 5, recentCalls: 1, neverIgnore: false, cfg: CFG, rng: rngReturning(0.4) });
   assert.deepEqual(withAffinity, withoutAffinity);
+});
+
+// --- The address classifier (F48): isFollowUpOpen / followUpPreFilter / parseFollowUpVerdict --
+
+const FOLLOW_UP_CFG = { followUpMinutes: 2, followUpNoStreak: 3 };
+
+test('isFollowUpOpen: false when there is no window at all', () => {
+  assert.equal(isFollowUpOpen(null, 1000, FOLLOW_UP_CFG), false);
+  assert.equal(isFollowUpOpen(undefined, 1000, FOLLOW_UP_CFG), false);
+});
+
+test('isFollowUpOpen: true right after the persona answered', () => {
+  const state = { openedAt: 1000, lastAnswerAt: 1000, noStreak: 0 };
+  assert.equal(isFollowUpOpen(state, 1000, FOLLOW_UP_CFG), true);
+  assert.equal(isFollowUpOpen(state, 1000 + 60_000, FOLLOW_UP_CFG), true); // 1 min < followUpMinutes=2
+});
+
+test('isFollowUpOpen: false once followUpMinutes has passed since the last answer', () => {
+  const state = { openedAt: 1000, lastAnswerAt: 1000, noStreak: 0 };
+  assert.equal(isFollowUpOpen(state, 1000 + 2 * 60_000, FOLLOW_UP_CFG), false);
+});
+
+test('isFollowUpOpen: false once noStreak reaches followUpNoStreak, even if still fresh', () => {
+  const state = { openedAt: 1000, lastAnswerAt: 1000, noStreak: 3 };
+  assert.equal(isFollowUpOpen(state, 1000, FOLLOW_UP_CFG), false);
+});
+
+test('isFollowUpOpen: true just below the noStreak cap', () => {
+  const state = { openedAt: 1000, lastAnswerAt: 1000, noStreak: 2 };
+  assert.equal(isFollowUpOpen(state, 1000, FOLLOW_UP_CFG), true);
+});
+
+test('isFollowUpOpen: falls back to defaults (2 min, streak 3) when cfg omits the keys', () => {
+  const state = { openedAt: 0, lastAnswerAt: 0, noStreak: 0 };
+  assert.equal(isFollowUpOpen(state, 119_000, {}), true); // just under 2 min
+  assert.equal(isFollowUpOpen(state, 120_000, {}), false); // exactly 2 min
+});
+
+test('followUpPreFilter: a reply to another message is always "no" material', () => {
+  const normalized = { replyToId: 'm100', mentionedUserIds: [] };
+  assert.equal(followUpPreFilter(normalized, 'self1'), true);
+});
+
+test('followUpPreFilter: a mention of another member is always "no" material', () => {
+  const normalized = { replyToId: null, mentionedUserIds: ['u2'] };
+  assert.equal(followUpPreFilter(normalized, 'self1'), true);
+});
+
+test('followUpPreFilter: a mention of the persona itself does not pre-filter', () => {
+  const normalized = { replyToId: null, mentionedUserIds: ['self1'] };
+  assert.equal(followUpPreFilter(normalized, 'self1'), false);
+});
+
+test('followUpPreFilter: plain text with no reply and no mention reaches the model', () => {
+  const normalized = { replyToId: null, mentionedUserIds: [] };
+  assert.equal(followUpPreFilter(normalized, 'self1'), false);
+});
+
+test('followUpPreFilter: mentionedUserIds omitted is treated as empty', () => {
+  const normalized = { replyToId: null };
+  assert.equal(followUpPreFilter(normalized, 'self1'), false);
+});
+
+test('parseFollowUpVerdict: a bare "yes" is a yes', () => {
+  assert.equal(parseFollowUpVerdict('yes'), 'yes');
+});
+
+test('parseFollowUpVerdict: case-insensitive and tolerates surrounding text/whitespace', () => {
+  assert.equal(parseFollowUpVerdict('  Yes, obviously.'), 'yes');
+  assert.equal(parseFollowUpVerdict('YES'), 'yes');
+});
+
+test('parseFollowUpVerdict: "no" and anything else is a no', () => {
+  assert.equal(parseFollowUpVerdict('no'), 'no');
+  assert.equal(parseFollowUpVerdict('No.'), 'no');
+  assert.equal(parseFollowUpVerdict('not sure'), 'no');
+  assert.equal(parseFollowUpVerdict(''), 'no');
+  assert.equal(parseFollowUpVerdict(null), 'no');
+  assert.equal(parseFollowUpVerdict(undefined), 'no');
 });
 
 test('decideMention: affinityScore is ignored inside the spam branch', () => {

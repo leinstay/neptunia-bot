@@ -122,6 +122,8 @@ const onMessage = createMessageHandler({
   getGuildId,
   isBootstrapping,
   describer,
+  // F48 (features.followUp): the address classifier's own, separate LLM call.
+  llm,
 });
 
 // One attention (mention.oneAtATime): once a turn frees its channel, answer

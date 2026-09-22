@@ -4,6 +4,7 @@
     "mentions": true,
     "replies": true,
     "nameTriggers": true,
+    "followUp": true,
     "spontaneous": true,
     "eavesdrop": true,
     "memory": true,
@@ -67,7 +68,12 @@
     "oneAtATime": true,
     "pendingMinutes": 10,
     "maxPending": 3,
-    "switchDelayMs": [2000, 9000]
+    "switchDelayMs": [2000, 9000],
+    "followUpMinutes": 2,
+    "followUpContext": 15,
+    "followUpModel": null,
+    "followUpMaxOutputTokens": 8,
+    "followUpNoStreak": 3
   },
   "typing": {
     "reactionDelayMs": [800, 4000],

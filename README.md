@@ -58,6 +58,7 @@ Both are hot-reloaded.
 | `initiate.md` | yes | Task: break a silence, start a topic |
 | `memory.md` | yes | Technical prompt for the memory/relationship analyzer |
 | `describe.md` | yes | One-line media descriptions for the helper model |
+| `address.md` | yes | Classifier: is an untagged message addressed to the persona |
 | `profile.md` | yes | Warmup: one member's profile from a message sample |
 | `channel.md` | yes | Warmup: channel notes from a message sample |
 | `server.md` | yes | Warmup: server-level notes from channel notes and member summaries |
@@ -95,6 +96,7 @@ The system prompt handles sounding human, so the card is purely personality. Giv
 | `multiMessage` | `true` | Allow 2–3 messages in a row |
 | `vision` | `true` | Process attached images |
 | `mediaDescriptions` | `false` | One-line descriptions for pictures, GIFs, video frames and link thumbnails |
+| `followUp` | `true` | Classify untagged messages after the persona answers to continue a conversation |
 | `typingSimulation` | `true` | Simulate typing speed |
 | `adminCommands` | `true` | Owner slash commands; `false` unregisters them |
 
@@ -192,6 +194,11 @@ Settings for the media describer (`features.mediaDescriptions`).
 | `maxPending` | `3` | Channels that can hold a direct ping while busy |
 | `pendingMinutes` | `10` | Minutes before a held ping expires |
 | `switchDelayMs` | `[2000, 9000]` | Pause before answering in the next channel (ms) |
+| `followUpMinutes` | `2` | Follow-up window after the persona's last reply (min) |
+| `followUpContext` | `15` | Transcript lines sent to the classifier |
+| `followUpModel` | `null` | Classifier model (`null` = media model) |
+| `followUpMaxOutputTokens` | `8` | Max output tokens for the classifier |
+| `followUpNoStreak` | `3` | Consecutive `no` verdicts that close the window |
 
 ### `typing`
 
@@ -365,7 +372,7 @@ One Discord slash command, `/nep` (the name comes from `bot.commandName`). Guild
 
 ## How a turn works
 
-A message passes through guild, channel and self-message filters. If the persona was called (@mention, reply, or name trigger), an ignore heuristic rolls against a base chance adjusted for bare pings, repeated tags, spam, and the caller's relationship score. Spontaneous turns fire from a chaotic timer or the per-message eavesdrop chance. The persona will not speak unprompted in a channel silent for more than `spontaneous.maxChannelSilenceHours` hours; a direct ping there is still answered.
+A message passes through guild, channel and self-message filters. If the persona was called (@mention, reply, or name trigger), an ignore heuristic rolls against a base chance adjusted for bare pings, repeated tags, spam, and the caller's relationship score. After the persona answers someone, untagged messages in that channel for the next `mention.followUpMinutes` minutes are sent to a classifier on the `followUp` model role, defaulting to the media model, that decides whether they continue the exchange; three `no` in a row close the window. `features.followUp` switches it off. Spontaneous turns fire from a chaotic timer or the per-message eavesdrop chance. The persona will not speak unprompted in a channel silent for more than `spontaneous.maxChannelSilenceHours` hours; a direct ping there is still answered.
 
 The persona writes one reply at a time across the server. A ping in the same channel while it is already answering is missed; the missed messages are in the transcript when the next reply is built. A direct ping in another channel (an @mention or reply to its message, not a name trigger) is held, one per channel, in up to `mention.maxPending` channels for `mention.pendingMinutes` minutes; a newer ping in the same pending channel replaces the older one. When the current reply finishes, the persona switches channel after a short pause (`mention.switchDelayMs`) and answers from the conversation as it stands; the usual ignore chance applies. Name triggers and eavesdrop hits that arrive while busy are skipped. With `mention.oneAtATime: false` every channel is handled independently. The persona never writes or reacts where it lacks Send Messages, checking before it spends an LLM request; such channels are still read and remembered.
 
@@ -450,6 +457,7 @@ prompts/
   initiate.md              task: start a topic
   memory.md                prompt for the memory analyzer
   describe.md              prompt for the media describer
+  address.md               classifier for follow-up messages
   profile.md               warmup: one member's profile from a message sample
   channel.md               warmup: channel notes from a message sample
   server.md                warmup: server-level notes from channel notes and member summaries

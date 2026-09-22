@@ -4,6 +4,8 @@ import assert from 'node:assert/strict';
 import { createMessageHandler } from '../src/discord/events.js';
 import { createTagHistory } from '../src/behavior/mention.js';
 import { readConfig, deepMerge } from '../src/config.js';
+import { DailyCapError } from '../src/llm/openrouter.js';
+import { labels } from './fixtures/labels.js';
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -140,9 +142,25 @@ function fakeDescriber() {
   };
 }
 
-function makeHandler({ config, turns, spontaneous, memory, tagHistory, rng, now, sleep, client, store, getGuildId, isBootstrapping, describer } = {}) {
+function makeHandler({
+  config,
+  turns,
+  spontaneous,
+  memory,
+  tagHistory,
+  rng,
+  now,
+  sleep,
+  client,
+  store,
+  getGuildId,
+  isBootstrapping,
+  describer,
+  prompts,
+  llm,
+} = {}) {
   return createMessageHandler({
-    hot: { config: config ?? baseConfig() },
+    hot: prompts !== undefined ? { config: config ?? baseConfig(), prompts } : { config: config ?? baseConfig() },
     store: store ?? fakeStore(),
     client: client ?? fakeClient(),
     turns: turns ?? fakeTurns(),
@@ -152,6 +170,7 @@ function makeHandler({ config, turns, spontaneous, memory, tagHistory, rng, now,
     getGuildId: getGuildId ?? (() => 'g1'),
     isBootstrapping,
     describer,
+    llm,
     rng: rng ?? Math.random,
     now,
     sleep,
@@ -165,6 +184,100 @@ function pictureAttachments(count = 1) {
     entries.push([`a${i}`, { id: `a${i}`, contentType: 'image/png', name: `${i}.png`, url: `https://cdn.discordapp.com/x/${i}.png` }]);
   }
   return new Map(entries);
+}
+
+// ---------------------------------------------------------------------------
+// F48: the address classifier (features.followUp) -- fixtures.
+
+/** A raw discord.js-shaped message, minimal enough for normalizeMessage / fetchHistory. */
+function rawHistoryMessage({ id, authorId = 'u1', authorName = 'Alice', ts, content = 'hi', channelId = 'c1' }) {
+  return {
+    id,
+    channelId,
+    author: { id: authorId, bot: false, globalName: authorName, username: authorName },
+    member: { displayName: authorName },
+    cleanContent: content,
+    createdTimestamp: ts,
+    reference: null,
+    mentions: { users: new Map() },
+    attachments: new Map(),
+    stickers: new Map(),
+  };
+}
+
+/** A fakeChannel whose messages.fetch({limit}) serves `historyMessages` (see fetchHistory). */
+function fakeChannelWithHistory(id, guild, historyMessages = [], overrides = {}) {
+  return fakeChannel(id, guild, {
+    messages: {
+      cache: new Map(),
+      fetch: async (arg) => {
+        if (arg && typeof arg === 'object' && 'limit' in arg) {
+          return new Map(historyMessages.map((m) => [m.id, m]));
+        }
+        return null;
+      },
+    },
+    ...overrides,
+  });
+}
+
+function fakeAddressPrompts() {
+  return {
+    'system-prompt': 'system',
+    'character-card': 'card',
+    format: 'format',
+    reply: 'Someone called you: {{author}}.',
+    interject: 'interject',
+    initiate: 'initiate',
+    memory: 'memory',
+    address: 'You are {{name}}. Is the candidate message addressed to you? Answer yes or no.',
+    labels,
+  };
+}
+
+/** A controllable fake LLM client (src/llm/openrouter.js#createLlm shape): `respond(text)` resolves
+ * every currently-queued call, `fail(err)` rejects it instead -- lets a test hold a call open to
+ * probe single-flight behaviour before letting it settle. */
+function fakeFollowUpLlm() {
+  const calls = [];
+  let resolvers = [];
+  return {
+    calls,
+    complete: (messages, options) =>
+      new Promise((resolve, reject) => {
+        calls.push({ messages, options });
+        resolvers.push({ resolve, reject });
+      }),
+    respond(text) {
+      const pending = resolvers;
+      resolvers = [];
+      for (const { resolve } of pending) resolve({ text, usage: {}, estimated: 1 });
+    },
+    fail(err) {
+      const pending = resolvers;
+      resolvers = [];
+      for (const { reject } of pending) reject(err);
+    },
+  };
+}
+
+/** Sends the persona's own message through the handler, opening/extending the follow-up window. */
+async function openFollowUpWindow(handler, { guild, channel, ts }) {
+  await handler({
+    system: false,
+    webhookId: null,
+    author: { id: 'self1', bot: true, globalName: 'Neptunia', username: 'neptunia' },
+    member: { displayName: 'Neptunia' },
+    guild,
+    channel,
+    channelId: channel.id,
+    cleanContent: 'here you go',
+    createdTimestamp: ts,
+    reference: null,
+    mentions: { users: new Map() },
+    attachments: new Map(),
+    stickers: new Map(),
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -1325,4 +1438,321 @@ test('events: a hot change to mention.maxPending is picked up', async () => {
   await handler.drainPending();
 
   assert.deepEqual(answeredChannels.sort(), ['a', 'b'], 'both fit once the cap was raised live, so "a" was never evicted');
+});
+
+// ---------------------------------------------------------------------------
+// F48: the address classifier (features.followUp) -- an untagged follow-up
+// message inside a window the persona opened by answering is checked by
+// address.md before it is (or is not) answered.
+
+test('follow-up: the classifier request is address.md as system and a <candidate> block in the user message', async () => {
+  const llm = fakeFollowUpLlm();
+  const handler = makeHandler({ llm, prompts: fakeAddressPrompts() });
+  const guild = fakeGuild('g1', 'Neptunia');
+  const t0 = Date.now();
+  const history = [rawHistoryMessage({ id: 'h1', authorId: 'u1', authorName: 'Alice', ts: t0, content: 'earlier message' })];
+  const channel = fakeChannelWithHistory('c1', guild, history);
+  await openFollowUpWindow(handler, { guild, channel, ts: t0 + 1000 });
+
+  const msg = fakeMessage({ id: 'm-candidate', guild, channel, channelId: 'c1', cleanContent: 'is this for you', createdTimestamp: t0 + 2000 });
+  const p = handler(msg);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.equal(llm.calls.length, 1);
+  const [{ messages, options }] = llm.calls;
+  assert.equal(messages[0].role, 'system');
+  assert.ok(messages[0].content.includes('Neptunia'), 'the {{name}} placeholder is filled');
+  assert.equal(messages[1].role, 'user');
+  assert.ok(messages[1].content.includes('<candidate>'));
+  assert.ok(messages[1].content.includes('is this for you'));
+  assert.ok(messages[1].content.includes('earlier message'), 'the channel context is included');
+  assert.equal(options.maxOutputTokens, 8, 'mention.followUpMaxOutputTokens');
+  assert.equal(options.model, 'anthropic/claude-haiku-4.5', 'followUpModel=null falls back to media.model');
+  assert.equal(options.countAgainstDailyCap, true);
+  assert.equal(options.skipCalibration, true);
+
+  llm.respond('no');
+  await p;
+});
+
+test('follow-up: the window opens on send and expires after followUpMinutes', async () => {
+  const clock = mutableNow(0);
+  const llm = fakeFollowUpLlm();
+  const spontaneous = fakeSpontaneous();
+  const handler = makeHandler({ spontaneous, now: clock, llm, prompts: fakeAddressPrompts() });
+
+  const guild = fakeGuild();
+  const channel = fakeChannelWithHistory('c1', guild, []);
+  await openFollowUpWindow(handler, { guild, channel, ts: clock() });
+
+  const msg1 = fakeMessage({ guild, channel, channelId: 'c1', cleanContent: 'plain follow-up', createdTimestamp: clock() });
+  const p1 = handler(msg1);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(llm.calls.length, 1, 'inside the window, a plain message reaches the classifier');
+  llm.respond('no');
+  await p1;
+
+  clock.set(3 * 60_000); // past the default followUpMinutes=2
+  const msg2 = fakeMessage({
+    guild,
+    channel,
+    channelId: 'c1',
+    cleanContent: 'too late',
+    createdTimestamp: clock(),
+    author: { id: 'u2', bot: false, globalName: 'Bob', username: 'bob' },
+  });
+  await handler(msg2);
+
+  assert.equal(llm.calls.length, 1, 'once the window expired, the classifier is not consulted again');
+  assert.equal(spontaneous.onMessageCalls.length, 1, 'the expired-window message falls back to the spontaneous scheduler');
+});
+
+test('follow-up: a reply to another member is "no" without consulting the model', async () => {
+  const llm = fakeFollowUpLlm();
+  const spontaneous = fakeSpontaneous();
+  const handler = makeHandler({ spontaneous, llm, prompts: fakeAddressPrompts() });
+  const guild = fakeGuild();
+  const channel = fakeChannelWithHistory('c1', guild, []);
+  await openFollowUpWindow(handler, { guild, channel, ts: Date.now() });
+
+  const msg = fakeMessage({
+    guild,
+    channel,
+    channelId: 'c1',
+    cleanContent: 'replying to someone else',
+    reference: { messageId: 'm-other' },
+  });
+  await handler(msg);
+
+  assert.equal(llm.calls.length, 0, 'a reply to another member never reaches the model');
+  assert.equal(spontaneous.onMessageCalls.length, 0, 'handled by the pre-filter, not handed to spontaneous');
+});
+
+test('follow-up: a mention of another member is "no" without consulting the model', async () => {
+  const llm = fakeFollowUpLlm();
+  const spontaneous = fakeSpontaneous();
+  const handler = makeHandler({ spontaneous, llm, prompts: fakeAddressPrompts() });
+  const guild = fakeGuild();
+  const channel = fakeChannelWithHistory('c1', guild, []);
+  await openFollowUpWindow(handler, { guild, channel, ts: Date.now() });
+
+  const msg = fakeMessage({
+    guild,
+    channel,
+    channelId: 'c1',
+    cleanContent: '@Bob check this out',
+    mentions: { users: new Map([['u2', { id: 'u2' }]]) },
+  });
+  await handler(msg);
+
+  assert.equal(llm.calls.length, 0, 'a mention of another member never reaches the model');
+  assert.equal(spontaneous.onMessageCalls.length, 0);
+});
+
+test('follow-up: a "yes" verdict runs a reply turn with the candidate as the target', async () => {
+  const llm = fakeFollowUpLlm();
+  let seenArgs = null;
+  const turns = fakeTurns({
+    runTurn: async (args) => {
+      seenArgs = args;
+      return { outcome: 'spoke' };
+    },
+  });
+  const spontaneous = fakeSpontaneous();
+  const handler = makeHandler({ turns, spontaneous, llm, prompts: fakeAddressPrompts() });
+  const guild = fakeGuild();
+  const channel = fakeChannelWithHistory('c1', guild, []);
+  await openFollowUpWindow(handler, { guild, channel, ts: Date.now() });
+
+  const msg = fakeMessage({ id: 'm-candidate', guild, channel, channelId: 'c1', cleanContent: 'so what do you think' });
+  const p = handler(msg);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  llm.respond('yes');
+  await p;
+
+  assert.ok(seenArgs, 'expected the reply turn to run');
+  assert.equal(seenArgs.mode, 'reply');
+  assert.equal(seenArgs.triggerKind, 'reply');
+  assert.equal(seenArgs.trigger.id, 'm-candidate', 'the candidate is the target, so replyTo works');
+  assert.equal(seenArgs.trigger.content, 'so what do you think');
+  assert.equal(seenArgs.channel, channel);
+  assert.equal(spontaneous.onMessageCalls.length, 0);
+});
+
+test('follow-up: three "no" verdicts in a row close the window (the default followUpNoStreak)', async () => {
+  const clock = mutableNow(0);
+  const llm = fakeFollowUpLlm();
+  const spontaneous = fakeSpontaneous();
+  const handler = makeHandler({ spontaneous, now: clock, llm, prompts: fakeAddressPrompts() });
+  const guild = fakeGuild();
+  const channel = fakeChannelWithHistory('c1', guild, []);
+  await openFollowUpWindow(handler, { guild, channel, ts: clock() });
+
+  for (let i = 0; i < 3; i += 1) {
+    const msg = fakeMessage({ id: `m${i}`, guild, channel, channelId: 'c1', cleanContent: `plain ${i}`, createdTimestamp: clock() });
+    const p = handler(msg);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    llm.respond('no');
+    await p;
+  }
+  assert.equal(llm.calls.length, 3);
+  assert.equal(spontaneous.onMessageCalls.length, 0, 'every one of the 3 was still handled by the classifier itself');
+
+  const msg4 = fakeMessage({ id: 'm4', guild, channel, channelId: 'c1', cleanContent: 'plain 4', createdTimestamp: clock() });
+  await handler(msg4);
+
+  assert.equal(llm.calls.length, 3, 'the window is closed now, the classifier is not consulted a 4th time');
+  assert.equal(spontaneous.onMessageCalls.length, 1, 'falls back to the spontaneous scheduler once the window is closed');
+});
+
+test('follow-up: a missing prompts.address is a "no" without calling the model', async () => {
+  const llm = fakeFollowUpLlm();
+  const spontaneous = fakeSpontaneous();
+  const prompts = { ...fakeAddressPrompts(), address: undefined };
+  const handler = makeHandler({ spontaneous, llm, prompts });
+  const guild = fakeGuild();
+  const channel = fakeChannelWithHistory('c1', guild, []);
+  await openFollowUpWindow(handler, { guild, channel, ts: Date.now() });
+
+  const msg = fakeMessage({ guild, channel, channelId: 'c1', cleanContent: 'plain follow-up' });
+  await handler(msg);
+
+  assert.equal(llm.calls.length, 0);
+  assert.equal(spontaneous.onMessageCalls.length, 0, 'still handled (as a no), not handed to spontaneous');
+});
+
+test('follow-up: an LLM error is a "no", never thrown', async () => {
+  const llm = fakeFollowUpLlm();
+  const spontaneous = fakeSpontaneous();
+  const handler = makeHandler({ spontaneous, llm, prompts: fakeAddressPrompts() });
+  const guild = fakeGuild();
+  const channel = fakeChannelWithHistory('c1', guild, []);
+  await openFollowUpWindow(handler, { guild, channel, ts: Date.now() });
+
+  const msg = fakeMessage({ guild, channel, channelId: 'c1', cleanContent: 'plain follow-up' });
+  const p = handler(msg);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  llm.fail(new Error('boom'));
+  await assert.doesNotReject(() => p);
+
+  assert.equal(spontaneous.onMessageCalls.length, 0);
+});
+
+test('follow-up: a DailyCapError from the LLM is a "no" too (the request never actually left)', async () => {
+  const llm = fakeFollowUpLlm();
+  const spontaneous = fakeSpontaneous();
+  const handler = makeHandler({ spontaneous, llm, prompts: fakeAddressPrompts() });
+  const guild = fakeGuild();
+  const channel = fakeChannelWithHistory('c1', guild, []);
+  await openFollowUpWindow(handler, { guild, channel, ts: Date.now() });
+
+  const msg = fakeMessage({ guild, channel, channelId: 'c1', cleanContent: 'plain follow-up' });
+  const p = handler(msg);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  llm.fail(new DailyCapError('daily LLM request cap reached (300)'));
+  await assert.doesNotReject(() => p);
+
+  assert.equal(spontaneous.onMessageCalls.length, 0, 'still handled as a "no", not handed to spontaneous');
+});
+
+test('features.followUp=false: an open window is never consulted, falls back to spontaneous', async () => {
+  const config = baseConfig({ features: { followUp: false } });
+  const llm = fakeFollowUpLlm();
+  const spontaneous = fakeSpontaneous();
+  const handler = makeHandler({ config, spontaneous, llm, prompts: fakeAddressPrompts() });
+  const guild = fakeGuild();
+  const channel = fakeChannelWithHistory('c1', guild, []);
+  await openFollowUpWindow(handler, { guild, channel, ts: Date.now() });
+
+  const msg = fakeMessage({ guild, channel, channelId: 'c1', cleanContent: 'plain follow-up' });
+  await handler(msg);
+
+  assert.equal(llm.calls.length, 0);
+  assert.equal(spontaneous.onMessageCalls.length, 1);
+});
+
+test('follow-up: a message that carries a trigger is never sent to the classifier, even inside an open window', async () => {
+  const llm = fakeFollowUpLlm();
+  let seenArgs = null;
+  const turns = fakeTurns({
+    runTurn: async (args) => {
+      seenArgs = args;
+      return { outcome: 'spoke' };
+    },
+  });
+  const handler = makeHandler({ turns, llm, prompts: fakeAddressPrompts(), rng: scripted([0.99]) });
+  const guild = fakeGuild();
+  const channel = fakeChannelWithHistory('c1', guild, []);
+  await openFollowUpWindow(handler, { guild, channel, ts: Date.now() });
+
+  const msg = fakeMessage({
+    guild,
+    channel,
+    channelId: 'c1',
+    cleanContent: 'γεια',
+    mentions: { users: new Map([['self1', { id: 'self1' }]]) },
+  });
+  await handler(msg);
+  await Promise.resolve();
+
+  assert.equal(llm.calls.length, 0, 'the normal trigger path never touches the classifier');
+  assert.ok(seenArgs, 'the normal mention path still runs a turn');
+  assert.equal(seenArgs.triggerKind, 'mention');
+});
+
+test('follow-up: at most one classifier call in flight per channel', async () => {
+  const llm = fakeFollowUpLlm();
+  const spontaneous = fakeSpontaneous();
+  const handler = makeHandler({ spontaneous, llm, prompts: fakeAddressPrompts() });
+  const guild = fakeGuild();
+  const channel = fakeChannelWithHistory('c1', guild, []);
+  await openFollowUpWindow(handler, { guild, channel, ts: Date.now() });
+
+  const msg1 = fakeMessage({
+    id: 'm1',
+    guild,
+    channel,
+    channelId: 'c1',
+    cleanContent: 'first',
+    author: { id: 'u1', bot: false, globalName: 'Alice', username: 'alice' },
+  });
+  const p1 = handler(msg1);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(llm.calls.length, 1);
+
+  const msg2 = fakeMessage({
+    id: 'm2',
+    guild,
+    channel,
+    channelId: 'c1',
+    cleanContent: 'second',
+    author: { id: 'u2', bot: false, globalName: 'Bob', username: 'bob' },
+  });
+  await handler(msg2); // must not start a second classifier call while the first is in flight
+
+  assert.equal(llm.calls.length, 1, 'the second message found a call already in flight for this channel');
+  assert.equal(spontaneous.onMessageCalls.length, 0, 'left alone entirely, not handed to spontaneous either');
+
+  llm.respond('no');
+  await p1;
+});
+
+test('follow-up: a hot change to mention.followUpMinutes is picked up without recreating the handler', async () => {
+  const clock = mutableNow(0);
+  const config = baseConfig();
+  const llm = fakeFollowUpLlm();
+  const spontaneous = fakeSpontaneous();
+  const handler = makeHandler({ config, spontaneous, now: clock, llm, prompts: fakeAddressPrompts() });
+  const guild = fakeGuild();
+  const channel = fakeChannelWithHistory('c1', guild, []);
+  await openFollowUpWindow(handler, { guild, channel, ts: clock() });
+
+  config.mention.followUpMinutes = 1; // was 2
+
+  clock.set(90_000); // 1.5 min: inside the old default, past the new shorter one
+  const msg = fakeMessage({ guild, channel, channelId: 'c1', cleanContent: 'plain follow-up' });
+  await handler(msg);
+
+  assert.equal(llm.calls.length, 0, 'the shorter window (read live) had already expired');
+  assert.equal(spontaneous.onMessageCalls.length, 1);
 });

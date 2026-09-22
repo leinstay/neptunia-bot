@@ -93,3 +93,44 @@ export function decideMention({ kind, textLength, recentCalls, neverIgnore, affi
 }
 
 export const repeatWindowMs = (cfg) => cfg.repeatWindowMinutes * MINUTE;
+
+// --- The address classifier (F48) -------------------------------------------
+// After the persona answers in a channel, a conversation window stays open for
+// a little while: an UNTAGGED message inside it is not answered blindly, it is
+// checked by a cheap classifier first (see events.js and
+// .claude/docs/prompt-contract.md, "The address classifier"). The functions
+// below are the pure pieces of that decision.
+
+/**
+ * Whether a follow-up window (per channel; see events.js) is currently open:
+ * the persona answered recently enough, and has not been ignored
+ * `cfg.followUpNoStreak` times in a row since.
+ * @param {{ lastAnswerAt: number, noStreak: number }|null|undefined} state
+ * @param {number} now
+ * @param {{ followUpMinutes?: number, followUpNoStreak?: number }} cfg  config.mention
+ */
+export function isFollowUpOpen(state, now, cfg) {
+  if (!state) return false;
+  const minutes = cfg?.followUpMinutes ?? 2;
+  const noStreakLimit = cfg?.followUpNoStreak ?? 3;
+  return now - state.lastAnswerAt < minutes * MINUTE && state.noStreak < noStreakLimit;
+}
+
+/**
+ * A reply to another member, or a mention of another member (not the
+ * persona), is always `no` before the classifier is ever asked — see the
+ * prompt contract. `normalized` is the shape src/discord/collect.js's
+ * `normalizeMessage` produces.
+ * @param {{ replyToId: string|null, mentionedUserIds: string[] }} normalized
+ * @param {string} selfId
+ */
+export function followUpPreFilter(normalized, selfId) {
+  if (normalized.replyToId) return true;
+  return (normalized.mentionedUserIds ?? []).some((id) => id !== selfId);
+}
+
+/** The classifier answers with one word: `yes` when it starts with 'y' (case-insensitive), else `no`. */
+export function parseFollowUpVerdict(text) {
+  const firstWord = String(text ?? '').trim().split(/\s+/)[0] ?? '';
+  return firstWord.toLowerCase().startsWith('y') ? 'yes' : 'no';
+}

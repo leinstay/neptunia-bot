@@ -7,9 +7,18 @@
 // src/discord/collect.js, so it can be driven with plain fake objects in
 // tests.
 
-import { normalizeMessage, channelAllowed, canSend } from './collect.js';
+import { normalizeMessage, channelAllowed, canSend, fetchHistory } from './collect.js';
 import { collectPictures, collectEmojiItems, isDescribable } from './media.js';
-import { detectTrigger, strippedLength, decideMention, repeatWindowMs } from '../behavior/mention.js';
+import {
+  detectTrigger,
+  strippedLength,
+  decideMention,
+  repeatWindowMs,
+  isFollowUpOpen,
+  followUpPreFilter,
+  parseFollowUpVerdict,
+} from '../behavior/mention.js';
+import { fill, formatTranscript, renderTranscript } from './format.js';
 import { addPending, isExpired, popOldest } from '../behavior/pending.js';
 import { between } from '../behavior/turn.js';
 import { log } from '../log.js';
@@ -27,6 +36,11 @@ const MAX_WARM_PICTURES_PER_MESSAGE = 2;
  * @param {ReturnType<import('../behavior/spontaneous.js').createSpontaneous>} deps.spontaneous
  * @param {ReturnType<import('../memory/update.js').createMemoryUpdater>} deps.memory
  * @param {ReturnType<import('../behavior/mention.js').createTagHistory>} deps.tagHistory
+ * @param {object} [deps.llm]  From createLlm() (src/llm/openrouter.js), used ONLY for the address
+ *   classifier (F48, `features.followUp`): a message with no trigger, arriving while a
+ *   conversation window this instance opened by answering is still open, is checked here before
+ *   ever running a turn. Absent -- an older/direct caller, or a test that never opens a window --
+ *   simply means `features.followUp` cannot ever fire (nothing reaches this dependency otherwise).
  * @param {() => string | null} deps.getGuildId  the single guild this instance serves, or null before it resolves
  * @param {() => boolean} [deps.isBootstrapping]  true while the memory bootstrap runner
  *   (src/memory/bootstrap.js, a later task) is in flight: messages are still observed, but no
@@ -60,6 +74,7 @@ export function createMessageHandler({
   getGuildId,
   isBootstrapping = () => false,
   describer,
+  llm,
   rng = Math.random,
   now = Date.now,
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
@@ -86,6 +101,154 @@ export function createMessageHandler({
       .slice(0, MAX_WARM_PICTURES_PER_MESSAGE);
     if (candidates.length === 0) return;
     describer.describeMany(guildId, candidates).catch((err) => log.warn('events: media cache prefill failed', { error: err }));
+  }
+
+  // --- The address classifier (mention.followUp*, F48) ---------------------
+  // A conversation window per channel: (re)opened and extended to `now`
+  // whenever the persona sends a message there -- hooked in the self-message
+  // branch of onMessage below (the same place turns.notePost() is called),
+  // never here. An untagged message that arrives while the window is open is
+  // not answered blindly: it goes through address.md first (see
+  // .claude/docs/prompt-contract.md, "The address classifier").
+  let missingAddressPromptLogged = false;
+  const followUpWindows = new Map(); // channelId -> { openedAt, lastAnswerAt, noStreak }
+  const followUpInFlight = new Set(); // channelIds with a classifier call running right now
+
+  /** (Re)opens/extends the window -- called wherever the persona's own message is observed. */
+  function noteFollowUpSend(channelId, ts) {
+    followUpWindows.set(channelId, { openedAt: ts, lastAnswerAt: ts, noStreak: 0 });
+  }
+
+  /** One "no" verdict (pre-filter or model): bump the streak, log once the window closes because of it. */
+  function bumpFollowUpNoStreak(channelId, state, mentionCfg) {
+    state.noStreak += 1;
+    if (state.noStreak >= (mentionCfg.followUpNoStreak ?? 3)) log.info('follow-up: window closed', { channel: channelId });
+  }
+
+  /**
+   * The classifier's request: system = address.md (`{{name}}` filled), user =
+   * the last `mention.followUpContext` lines of the channel plus the new
+   * message wrapped in a `<candidate>` block (structural, not model-facing
+   * wording). `null` when `prompts.address` is missing -- the caller treats
+   * that the same as a "no".
+   */
+  async function buildFollowUpRequest({ config, prompts, channel, selfId, selfName, normalized }) {
+    const addressPrompt = prompts?.address;
+    if (!addressPrompt) return null;
+    const labels = prompts.labels;
+    const contextLines = Math.max(0, config.mention.followUpContext ?? 15);
+    const raw = contextLines > 0 ? await fetchHistory(channel, contextLines, selfId, config.media?.embedTextChars) : [];
+    const history = raw.filter((m) => m.id !== normalized.id);
+    const items = formatTranscript([...history, normalized], {
+      timezone: config.bot.timezone,
+      gapMinutes: config.context.gapMarkerMinutes,
+      maxChars: config.context.maxMessageChars,
+      selfName,
+      labels,
+    });
+    const candidateItem = items[items.length - 1];
+    const transcript = renderTranscript(items.slice(0, -1), config.bot.timezone, labels);
+    return {
+      system: fill(addressPrompt, { name: selfName }),
+      user: `${transcript}\n<candidate>\n${candidateItem.text}\n</candidate>`,
+    };
+  }
+
+  /**
+   * Whether an untagged `normalized` message was fully handled by the address
+   * classifier (pre-filter or a real model verdict, "yes" or "no" alike) --
+   * the caller must then NOT also hand it to the spontaneous scheduler. Never
+   * throws: an LLM/context-building error is treated as a "no" per the
+   * contract. `false` means none of this applied (feature off, no open
+   * window, busy in this channel, or a classifier call already in flight for
+   * it) and the caller falls back to its usual handling.
+   */
+  async function maybeFollowUp(message, normalized, selfId) {
+    const config = hot.config;
+    const features = config.features ?? {};
+    if (features.followUp === false || features.mentions === false) return false;
+
+    const channel = message.channel;
+    const channelId = channel.id;
+    const mentionCfg = config.mention;
+    const state = followUpWindows.get(channelId);
+    if (!isFollowUpOpen(state, now(), mentionCfg)) return false;
+    if (turns.isBusy(channelId)) return false;
+    if (!canSend(channel)) return false;
+
+    const startedAt = now();
+    if (followUpPreFilter(normalized, selfId)) {
+      log.info('follow-up: verdict', { channel: channelId, author: normalized.authorId, verdict: 'no', ms: now() - startedAt });
+      bumpFollowUpNoStreak(channelId, state, mentionCfg);
+      return true;
+    }
+
+    // At most one classifier call in flight per channel: a message landing
+    // while one is already running is left alone entirely -- no verdict, no
+    // streak change, nothing logged, exactly as if the window were closed.
+    if (followUpInFlight.has(channelId)) return true;
+
+    followUpInFlight.add(channelId);
+    try {
+      const selfName = channel.guild.members.me?.displayName ?? client.user.username;
+      let request = null;
+      try {
+        request = await buildFollowUpRequest({ config, prompts: hot.prompts, channel, selfId, selfName, normalized });
+      } catch (err) {
+        log.warn('follow-up: building the classifier request failed', { channel: channelId, error: err });
+      }
+
+      if (!request) {
+        if (!missingAddressPromptLogged) {
+          missingAddressPromptLogged = true;
+          log.warn('follow-up: prompts.address is missing, every follow-up is treated as "no"', {});
+        }
+        log.info('follow-up: verdict', { channel: channelId, author: normalized.authorId, verdict: 'no', ms: now() - startedAt });
+        bumpFollowUpNoStreak(channelId, state, mentionCfg);
+        return true;
+      }
+
+      let verdict = 'no';
+      if (llm) {
+        try {
+          // A classifier call skipped by the daily cap (DailyCapError, thrown
+          // synchronously before any fetch) lands here exactly like any other
+          // error -- "no", logged, no request ever left the process.
+          const completion = await llm.complete(
+            [
+              { role: 'system', content: request.system },
+              { role: 'user', content: request.user },
+            ],
+            {
+              model: mentionCfg.followUpModel || config.media?.model,
+              maxOutputTokens: mentionCfg.followUpMaxOutputTokens,
+              countAgainstDailyCap: true,
+              skipCalibration: true,
+            },
+          );
+          verdict = parseFollowUpVerdict(completion.text);
+        } catch {
+          verdict = 'no';
+        }
+      }
+
+      log.info('follow-up: verdict', { channel: channelId, author: normalized.authorId, verdict, ms: now() - startedAt });
+
+      if (verdict === 'yes') {
+        // Still counted for spam (mention.spamThreshold, future explicit
+        // pings), just never rolled for the ignore chance -- a follow-up is a
+        // continuation, not a ping (see .claude/docs/prompt-contract.md).
+        tagHistory.hit(normalized.authorId, now(), repeatWindowMs(mentionCfg));
+        turns
+          .runTurn({ channel, mode: 'reply', trigger: normalized, triggerKind: 'reply' })
+          .catch((err) => log.error('events: follow-up reply turn failed', { channel: channelId, error: err }));
+      } else {
+        bumpFollowUpNoStreak(channelId, state, mentionCfg);
+      }
+      return true;
+    } finally {
+      followUpInFlight.delete(channelId);
+    }
   }
 
   // --- One attention (mention.oneAtATime): pending direct pings ------------
@@ -230,9 +393,11 @@ export function createMessageHandler({
       const normalized = normalizeMessage(message, selfId);
       const guildId = message.guild.id;
 
-      // 5. Its own message: only bookkeeping.
+      // 5. Its own message: only bookkeeping. Also (re)opens/extends the F48
+      // follow-up window for this channel -- see noteFollowUpSend above.
       if (normalized.self) {
         turns.notePost(normalized.channelId, normalized.ts);
+        noteFollowUpSend(normalized.channelId, normalized.ts);
         if (memoryOn) memory.observe(guildId, normalized);
         return;
       }
@@ -267,9 +432,14 @@ export function createMessageHandler({
       warmMediaCache(guildId, normalized);
       if (memoryOn) memory.observe(guildId, normalized, { direct: Boolean(kind) });
 
-      // 10. No trigger: let the spontaneous scheduler eavesdrop, nothing more.
+      // 10. No trigger: maybe a follow-up (F48, features.followUp) inside a
+      // window the persona itself opened by answering -- fully handled by
+      // maybeFollowUp either way (a computed verdict or a deliberate no-op,
+      // see its own header comment); otherwise let the spontaneous scheduler
+      // eavesdrop, nothing more.
       if (!kind) {
-        spontaneous.onMessage(message.channel, normalized);
+        const followedUp = await maybeFollowUp(message, normalized, selfId);
+        if (!followedUp) spontaneous.onMessage(message.channel, normalized);
         return;
       }
 
