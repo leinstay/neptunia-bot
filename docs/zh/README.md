@@ -102,7 +102,7 @@ npm start
 
 一个 Discord 斜杠命令 `/nep`（名称来自 `bot.commandName`）。以服务器（guild）命令的形式在启动时注册到所服务的服务器。所有回复仅调用者可见（ephemeral），不论在哪个频道输入。所有子命令和访问授权请参阅 [`owner-commands.md`](owner-commands.md)。
 
-## 回合运作方式
+## 消息处理流程
 
 消息经过服务器、频道和自身消息过滤。如果角色被呼叫（@提及、回复或名字触发），忽略启发式会根据基础概率进行判定，该概率会因空提及、重复标记、垃圾消息和呼叫者的关系分数而调整。角色回复某人后，该频道内接下来 `mention.followUpMinutes` 分钟的未标记消息会被发送到 `followUp` 模型角色上的分类器（默认使用媒体模型），判断它们是否在延续对话；连续三个 `no` 判定会关闭窗口。`features.followUp` 可关闭此功能。自发回合由混沌定时器或逐消息窃听概率触发。角色不会在沉默超过 `spontaneous.maxChannelSilenceHours` 小时的频道中主动发言；但该频道中的直接提及仍会回复。
 

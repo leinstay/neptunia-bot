@@ -102,7 +102,7 @@ First run on a new server: enable `features.dryRun`, watch the mirror or `journa
 
 One Discord slash command, `/nep` (the name comes from `bot.commandName`). They are registered as guild commands on start, for the served server only. Every answer is ephemeral; only the caller sees it, in whatever channel it was typed. See [`docs/en/owner-commands.md`](docs/en/owner-commands.md) for every subcommand and the access grants.
 
-## How a turn works
+## Message pipeline
 
 A message passes through guild, channel and self-message filters. If the persona was called (@mention, reply, or name trigger), an ignore heuristic rolls against a base chance adjusted for bare pings, repeated tags, spam, and the caller's relationship score. After the persona answers someone, untagged messages in that channel for the next `mention.followUpMinutes` minutes are sent to a classifier on the `followUp` model role, defaulting to the media model, that decides whether they continue the exchange; three `no` in a row close the window. `features.followUp` switches it off. Spontaneous turns fire from a chaotic timer or the per-message eavesdrop chance. The persona will not speak unprompted in a channel silent for more than `spontaneous.maxChannelSilenceHours` hours; a direct ping there is still answered.
 
