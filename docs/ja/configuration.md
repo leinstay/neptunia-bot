@@ -119,11 +119,14 @@
 | `toolTimeoutMs` | `60000` | `yt-dlp` と `ffmpeg` サブプロセスのタイムアウト（ミリ秒） |
 | `sites` | `["youtube.com", "youtu.be", "tiktok.com", "vk.com", "vkvideo.ru", "x.com", "twitter.com", "reddit.com", "twitch.tv"]` | 動画として扱うリンクのホスト名 |
 | `directUrlSites` | `["youtube.com", "youtu.be"]` | 公開 URL を直接プロバイダーに渡せるサイト（プロバイダーが動画を取得） |
+| `directUrlUnknownDuration` | `false` | プローブで再生時間を特定できなかった場合でも directUrlSites のリンクをプロバイダーに送信する。トークン推定は `maxSeconds` を使用。下記の再生時間チェーンを参照 |
 | `ytdlpPath` | `"yt-dlp"` | `yt-dlp` バイナリのパス。サイト動画リンクと再生時間のプローブに必要 |
 | `ffmpegPath` | `"ffmpeg"` | `ffmpeg` のパス。長い、またはサイズの大きい添付ファイルのトリムとダウンスケールに必要 |
 | `prefill` | `true` | 動画が届いた時点で視聴し、次のターンでキャッシュ済みの状態にする |
 
 `yt-dlp` と `ffmpeg` はどちらもオプションのシステムバイナリです。これらがなくても上限内の添付ファイルはそのまま動作します（そのまま送信されます）。長い添付ファイルとすべてのサイトリンクは静止フレームまたはプレビュー画像にフォールバックし、ペルソナには理由が伝えられます。すべての動画リクエストは `llm.maxRequestsPerDay` とリクエストあたりのトークン上限にカウントされます。
+
+YouTube リンクの再生時間は次の順序で取得されます: まず yt-dlp、次に YouTube Data API（`.env` に `YOUTUBE_API_KEY` が設定されている場合）、最後にウォッチページのスクレイプ。すべてのプローブが失敗し `directUrlUnknownDuration` がオフ（デフォルト）の場合、リンクは「読み込めませんでした」と報告されます。スイッチがオンの場合、URL はそのままプロバイダーに送信され、トークン推定では `maxSeconds` として計上されます。Data API キーは無料です: Google Cloud コンソールで YouTube Data API v3 を有効にしてキーを作成します。無料枠は 1 日 10,000 ユニット、再生時間のルックアップ 1 回は 1 ユニットです。
 
 ## `mention`
 

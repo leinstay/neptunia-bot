@@ -137,7 +137,7 @@ npm start
 
 ユーザーメッセージ内の `<senses>` ブロックは、現在の設定でペルソナが何を知覚でき何を知覚できないかを伝えます。ペルソナはこのブロックを信頼し、そこに記載されている以上のものを見た、聞いた、開いたと主張しません。
 
-`features.videoDescriptions`（デフォルト有効、`mediaDescriptions` も必要）は、動画対応モデル（`media.video.model`、デフォルト `google/gemini-3.8-flash`）を追加し、短い動画クリップを視聴します。対象は Discord の動画添付ファイルと既知の動画サイトへのリンク（YouTube、TikTok、VK、X、Reddit、Twitch）です。クリップの上限は `media.video.maxSeconds`（デフォルト 60 秒）と `media.video.maxBytes` です。ターンあたり最大 `maxPerTurn` 件の新規動画（成否を問わずすべての取得試行がカウント）、1 日あたり `maxPerDay` 件です。結果は画像の説明文と同じキャッシュに保存されます。上限内の YouTube リンクは URL としてプロバイダー（Google AI Studio）に渡されます。それ以外は `yt-dlp` でダウンロードされ `ffmpeg` でトリムされます。どちらもオプションのシステムバイナリです。これらがなくても上限内の添付ファイルはそのまま動作します。長い添付ファイルとサイトリンクは静止フレームにフォールバックします。動画プロンプトは `prompts/describe-video.md` です。設定は `media.video` 配下にあります。すべてのキーとモデル比較表については[設定リファレンス](configuration.md)を参照してください。
+`features.videoDescriptions`（デフォルト有効、`mediaDescriptions` も必要）は、動画対応モデル（`media.video.model`、デフォルト `google/gemini-3.8-flash`）を追加し、短い動画クリップを視聴します。対象は Discord の動画添付ファイルと既知の動画サイトへのリンク（YouTube、TikTok、VK、X、Reddit、Twitch）です。クリップの上限は `media.video.maxSeconds`（デフォルト 60 秒）と `media.video.maxBytes` です。ターンあたり最大 `maxPerTurn` 件の新規動画（成否を問わずすべての取得試行がカウント）、1 日あたり `maxPerDay` 件です。結果は画像の説明文と同じキャッシュに保存されます。上限内の YouTube リンクは URL としてプロバイダー（Google AI Studio）に渡されます。それ以外は `yt-dlp` でダウンロードされ `ffmpeg` でトリムされます。どちらもオプションのシステムバイナリです。これらがなくても上限内の添付ファイルはそのまま動作します。長い添付ファイルとサイトリンクは静止フレームにフォールバックします。YouTube の場合、`yt-dlp` が再生時間を取得できないときは、`.env` のオプションの `YOUTUBE_API_KEY`（無料、Google Cloud コンソール、YouTube Data API v3）またはウォッチページのスクレイプが補完します。動画プロンプトは `prompts/describe-video.md` です。設定は `media.video` 配下にあります。すべてのキーとモデル比較表については[設定リファレンス](configuration.md)を参照してください。
 
 ボイスメッセージは長さのみ表示されます。リンクは Discord の埋め込みからサイト名、タイトル、スニペットが表示されますが、ページ自体は表示されません。
 
@@ -185,7 +185,7 @@ npm test
 
 ```
 config.json                すべての設定とデフォルト値、ホットリロード
-.env.example               DISCORD_TOKEN と OPENROUTER_API_KEY のテンプレート
+.env.example               DISCORD_TOKEN、OPENROUTER_API_KEY およびオプションの YOUTUBE_API_KEY のテンプレート
 prompts/
   system-prompt.md         通常のチャットメンバーとして振る舞う方法
   character-card.md        パーソナリティ（動作するサンプル）

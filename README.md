@@ -137,7 +137,7 @@ Stickers and custom emoji recur constantly, so they are cached by id and cost ne
 
 A `<senses>` block in the user message tells the persona what it can and cannot perceive under the current config. The persona trusts this block and never claims to have seen, heard or opened anything beyond it.
 
-`features.videoDescriptions` (on by default, needs `mediaDescriptions` too) adds a video-capable model (`media.video.model`, default `google/gemini-3.8-flash`) that watches short clips: Discord video attachments and links to known video sites (YouTube, TikTok, VK, X, Reddit, Twitch). The clip is capped at `media.video.maxSeconds` (default 60 s) and `media.video.maxBytes`; at most `maxPerTurn` new videos per turn (every attempt counts, failed or not) and `maxPerDay` per day. Results are cached alongside picture descriptions. YouTube links within the cap are passed as a URL to the provider (Google AI Studio); everything else is downloaded with `yt-dlp` and trimmed with `ffmpeg`, both optional system binaries. Without them, attachments within the caps still work; longer attachments and site links fall back to a still frame. The video prompt is `prompts/describe-video.md`. Settings live under `media.video`. See [`docs/en/configuration.md`](docs/en/configuration.md) for every key and a model comparison table.
+`features.videoDescriptions` (on by default, needs `mediaDescriptions` too) adds a video-capable model (`media.video.model`, default `google/gemini-3.8-flash`) that watches short clips: Discord video attachments and links to known video sites (YouTube, TikTok, VK, X, Reddit, Twitch). The clip is capped at `media.video.maxSeconds` (default 60 s) and `media.video.maxBytes`; at most `maxPerTurn` new videos per turn (every attempt counts, failed or not) and `maxPerDay` per day. Results are cached alongside picture descriptions. YouTube links within the cap are passed as a URL to the provider (Google AI Studio); everything else is downloaded with `yt-dlp` and trimmed with `ffmpeg`, both optional system binaries. Without them, attachments within the caps still work; longer attachments and site links fall back to a still frame. For YouTube, when `yt-dlp` cannot probe the duration, an optional `YOUTUBE_API_KEY` in `.env` (free, from the Google Cloud console's YouTube Data API v3) or a watch-page scrape provides it. The video prompt is `prompts/describe-video.md`. Settings live under `media.video`. See [`docs/en/configuration.md`](docs/en/configuration.md) for every key and a model comparison table.
 
 Voice messages show only duration. Links show the site, the title and a snippet from Discord's embed, never the page itself.
 
@@ -185,7 +185,7 @@ Runs with `node --test`. No network or Discord connection needed. The same comma
 
 ```
 config.json                defaults for every setting, hot-reloaded
-.env.example               template for DISCORD_TOKEN and OPENROUTER_API_KEY
+.env.example               template for DISCORD_TOKEN, OPENROUTER_API_KEY and optional YOUTUBE_API_KEY
 prompts/
   system-prompt.md         how to behave like an ordinary chat member
   character-card.md        the personality (working example)
