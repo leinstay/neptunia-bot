@@ -8,7 +8,7 @@
 |---|---|
 | `/nep status` | モデル、キャリブレーション、クォータ、ギルドごとのメモリ状況を表示 |
 | `/nep reload` | 設定とプロンプトを即時リロード |
-| `/nep ping [role]` | 一つまたはすべてのモデルロール（`talk`、`analyzer`、`media`、`followup`）にミニマルリクエストを送信し、モデル、レイテンシ、プロバイダー、トークン数またはエラーを報告。`llm.maxRequestsPerDay` にカウントされず、一時停止中やウォームアップ中でも動作 |
+| `/nep ping [role]` | 一つまたはすべてのモデルロール（`talk`、`analyzer`、`media`、`followup`、`video`）にミニマルリクエストを送信し、モデル、レイテンシ、プロバイダー、トークン数またはエラーを報告。`llm.maxRequestsPerDay` にカウントされず、一時停止中やウォームアップ中でも動作 |
 | `/nep pause` | すべてのアクティビティを停止し、メモリをディスクにフラッシュしてアンロード。一時停止中は `data/` を安全に編集可能 |
 | `/nep resume` | `data/` からメモリをリロードして再開。JSON ファイルがパースできない場合は拒否し、壊れたファイル名を表示 |
 | `/nep interject [channel]` | そのチャンネルの会話に今すぐ割り込む |
@@ -18,8 +18,8 @@
 | `/nep rule add <text>` | `prompts.local/rules.md` にルールを追記 |
 | `/nep rule list` | ルール一覧を番号付きで表示 |
 | `/nep rule remove <number>` | 番号指定でルールを削除 |
-| `/nep model show` | 各ロール（`talk`、`analyzer`、`media`、`followup`）のアクティブなモデルを表示 |
-| `/nep model set <role> <id>` | ロール（`talk`、`analyzer`、`media`、`followup`）のモデルを設定 |
+| `/nep model show` | 各ロール（`talk`、`analyzer`、`media`、`followup`、`video`）のアクティブなモデルを表示 |
+| `/nep model set <role> <id>` | ロール（`talk`、`analyzer`、`media`、`followup`、`video`）のモデルを設定 |
 | `/nep memory show <user> [section] [limit] [order]` | セクション指定なし: コンパクトな要約。セクション: `character`、`style`、`relationship`、`affinity`、`aliases`、`interests`、`details`、`episodes`、`raw`（保存された JSON）。リスト系セクションは `limit` 1..100（デフォルト 25）と `order`: `rank`（デフォルト、表示上限で区切り線あり）または `recent` を指定可能。保存されたメンバー参照は現在の名前に解決されるが、`raw` では解決しない |
 | `/nep memory channel [channel]` | チャンネル指定あり: 保存されたノートの全文（目的、トピック、トーン、メッセージ数、アクティビティ、トップライター）。指定なし: ペルソナが把握している全チャンネルの一覧（最終メッセージ順） |
 | `/nep memory server` | サーバー全体のノート: 会話のしかた、会話の始め方、内輪ネタ、自己言及、およびプロファイル・チャンネル・ロアブックエントリの件数 |

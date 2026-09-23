@@ -80,7 +80,7 @@ export function buildCommandTree(commandName) {
             {
               type: STRING,
               name: 'role',
-              description: 'Which role to ping (default: all four).',
+              description: 'Which role to ping (default: all).',
               required: false,
               choices: [
                 { name: 'talk', value: 'talk' },
