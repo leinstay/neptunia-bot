@@ -21,6 +21,7 @@
 | `vision` | `true` | 处理附加图片 |
 | `mediaDescriptions` | `true` | 为图片、GIF、视频帧和链接缩略图生成单行描述 |
 | `videoDescriptions` | `true` | 通过支持视频的模型观看短视频片段；需同时开启 `mediaDescriptions` |
+| `videoRewatch` | `true` | 被呼叫时重看视频以回答相关问题；需要 `videoDescriptions` |
 | `followUp` | `true` | 角色回复后对未标记消息进行分类以延续对话 |
 | `typingSimulation` | `true` | 模拟输入速度 |
 | `adminCommands` | `true` | 所有者斜杠命令；设为 `false` 时注销命令 |
@@ -109,7 +110,8 @@
 |---|---|---|
 | `model` | `"google/gemini-3.8-flash"` | 支持视频的模型；必须同时接受视频和音频输入 |
 | `provider` | `{ "order": ["google-ai-studio"], "allow_fallbacks": false }` | 直接 URL 路径（在长度限制内的 YouTube）的 OpenRouter provider 路由；`null` 使用 `llm.provider` |
-| `maxOutputTokens` | `400` | 每个视频摘要的最大输出 token 数 |
+| `maxOutputTokens` | `800` | 每个视频摘要的最大输出 token 数 |
+| `summaryChars` | `1500` | 视频描述的最大字符数；填充 `describe-video.md` 中的 `{{maxChars}}` |
 | `maxRequestTokens` | `60000` | 每次视频请求的 token 上限（输入 + 输出），替代 `llm.maxRequestTokens`；3 分钟片段按 `tokensPerSecond` 约为 54 000 token，超过默认全局上限 |
 | `maxSeconds` | `60` | 附件和下载的站点视频的最大片段时长（秒）；更长的附件由 `ffmpeg` 裁剪，更长的站点视频回退到静帧。直接 URL 站点使用 `directUrlMaxSeconds` |
 | `directUrlMaxSeconds` | `180` | 通过公开 URL 发送给提供商的视频的最大时长（秒），适用于 YouTube 及其他 `directUrlSites`；更长的视频走下载裁剪路径，受 `maxSeconds` 限制 |
@@ -130,6 +132,20 @@
 `yt-dlp` 和 `ffmpeg` 均为可选的系统二进制文件。没有它们时，在限制内的附件仍然可用（直接发送）。更长的附件和所有站点链接会回退到静帧或预览图，角色会被告知原因。每个视频请求都计入 `llm.maxRequestsPerDay` 和视频 token 上限（`maxRequestTokens`）。
 
 YouTube 链接的时长通过以下链式探测获取：首先尝试 yt-dlp，然后尝试 YouTube Data API（需在 `.env` 中设置 `YOUTUBE_API_KEY`），最后尝试抓取观看页面。如果所有探测均失败且 `directUrlUnknownDuration` 处于关闭状态（默认），链接将报告为"无法加载"。开启该开关后，URL 仍会发送给提供商，token 估算按 `maxSeconds` 计费。Data API 密钥免费获取：在 Google Cloud 控制台中启用 YouTube Data API v3 并创建密钥；免费配额为每天 10,000 个单位，一次时长查询消耗 1 个单位。`/nep ping video` 探测 `canaryUrl` 并报告此主机上哪个时长来源可用。缓存的长度限制结果会记录视频时长，当上限提高后会重新尝试。
+
+### `media.video.rewatch`
+
+重看分类器（`features.videoRewatch`）的设置。当角色被呼叫且近期对话记录中有已观看的视频时，一个低成本分类器判断消息是否在询问其中某个视频；如果是，视频模型再次观看片段，回答追加到对话记录中。分类器模型默认通过 `mention.followUpModel` 回退到媒体模型。重看始终使用 `media.video.model`。
+
+| 键 | 默认值 | 说明 |
+|---|---|---|
+| `model` | `null` | 分类器模型（`null` = `mention.followUpModel`，其默认值为 `media.model`） |
+| `maxPerDay` | `20` | 每日重看上限（独立于 `media.video.maxPerDay`） |
+| `maxOutputTokens` | `600` | 重看回答的最大输出 token 数 |
+| `answerChars` | `1200` | 回答的最大字符数；填充 `rewatch-answer.md` 中的 `{{maxChars}}` |
+| `recentMessages` | `15` | 扫描已观看视频的近期消息数 |
+
+每回合最多一次重看。回答按问题缓存一小时。分类器和重看各自计入 `llm.maxRequestsPerDay`；重看还计入 `media.video.maxPerDay`。
 
 ## `mention`
 
@@ -285,6 +301,8 @@ YouTube 链接的时长通过以下链式探测获取：首先尝试 yt-dlp，�
 ### `mention.followUpModel` — 地址分类器
 
 能可靠回答 "yes" 或 "no" 的最便宜的文本模型。`null`（默认）使用媒体模型。
+
+重看分类器（`media.video.rewatch.model`）是同类工作的可选覆盖：判断消息是否在询问已观看的视频。`null`（默认）使用后续模型，然后是媒体模型。它不是独立的角色；重看始终使用视频模型。
 
 ### `media.video.model` — 带声音的视频
 

@@ -30,7 +30,9 @@ All instructions are English in both layers; a character's speech samples may be
 | `channel.md` | yes | Warmup: channel notes from a message sample | `{{fieldChars}}` |
 | `server.md` | yes | Warmup: server-level notes from channel notes and member summaries | `{{name}}` `{{fieldChars}}` `{{maxInjokes}}` `{{loreTextChars}}` |
 | `describe.md` | yes | Out-of-character prompt of the media describer (`features.mediaDescriptions`): one picture in, one plain line out: what is on it, any legible text, in the language the chat speaks. No opinions, no markdown | none |
-| `describe-video.md` | yes | Out-of-character prompt of the video describer (`features.videoDescriptions`): one video clip in (with sound), 3–5 plain lines out: what happens, key speech quoted, text on screen, music/sound when relevant. Same language and restriction rules as `describe.md`. No character card | none |
+| `describe-video.md` | yes | Out-of-character prompt of the video describer (`features.videoDescriptions`): one video clip in (with sound), a full ordered account out: who appears, what is said (key phrases quoted), text on screen, what happens visually, music/sound when relevant. Configurable length. Same language and restriction rules as `describe.md`. No character card | `{{maxChars}}` |
+| `rewatch.md` | yes | Classifier: does this message need the persona to re-watch a video (`features.videoRewatch`). Receives a list of watched videos and the new message. Output is ONE line: `<itemId> \| <question>` or `none` | `{{name}}` |
+| `rewatch-answer.md` | yes | Out-of-character prompt for the re-watch answer: the video model watches a clip again and answers one question. Same language and restriction rules as `describe-video.md`. No character card | `{{question}}` `{{maxChars}}` |
 | `address.md` | yes | Classifier: is this untagged message addressed to the persona | `{{name}}` |
 | `labels.json` | yes | Every string the CODE inserts into a prompt. Keys fixed below, values are the writer's | see below |
 
@@ -39,7 +41,7 @@ All instructions are English in both layers; a character's speech samples may be
 System message = `system-prompt` + `character-card` + `rules` + `format`. For the analyzer: `memory.md` alone.
 On a forced turn (`/nep interject`, `/nep initiate`), `forced.md` is appended after the mode prompt if the file exists.
 The analyzer and the warmup's `profile.md` and `server.md` receive the character card and `rules.md` as a
-`<character>` block in the user message. `channel.md`, `describe.md`, `describe-video.md` and `address.md` do not receive the card.
+`<character>` block in the user message. `channel.md`, `describe.md`, `describe-video.md`, `rewatch.md`, `rewatch-answer.md` and `address.md` do not receive the card.
 
 `{{guildFieldChars}}` is `fieldChars * 2`, the limit code clamps guild-level patterns and starters to.
 `{{maxEpisodes}}` is the total episodes kept per person. Both are filled from config but not used by the default
@@ -85,6 +87,8 @@ Video results are cached per attachment or per link in `data/guilds/<id>/media.j
 - Error miss: `{ miss: true, ts, reason: "error" }` — retried after one hour.
 - Daily limit: not cached; returned as `{ state: "limit", reason: "daily" }` for that turn only.
 
+A re-watch answer is cached under the key `video:<itemId>:q:<hash>` (the first 16 hex digits of SHA-1 of the lower-cased, whitespace-collapsed question): `{ text, ts, answer: true }`. Expires after one hour; code deletes expired entries on read.
+
 A picture's still-frame entry keeps its own `<itemId>` key as before. Both can coexist for the same item.
 
 Transcript line: `#87 [14:32] nick: text <replyTo> <media…> <sticker>`; own lines use `labels.self`; between
@@ -115,6 +119,7 @@ transcript.videoDescribed                {name} {duration} {text}: text describe
 transcript.videoWatched                  {name} {duration} {text}: first-hand — the persona saw and heard the clip
 transcript.videoNotWatched               {name} {duration} {reason}: reason is the human phrase from videoReason.*
 transcript.videoNotWatchedFrame          {name} {duration} {reason} {text}: not watched but a still frame was described
+transcript.videoAnswered                {question} {text}: extra tag after a watched video tag; the persona re-watched the clip for this question
 transcript.videoReason.length | size | daily | error    human phrases for the four reason codes
 transcript.linkWatched                   {text}: extra tag after a link tag, first-hand video summary
 transcript.linkNotWatched                {reason}: extra tag after a link tag, not watched with reason
@@ -133,6 +138,7 @@ senses.imageSee | imageDescribed | imageBlind        one line each; code picks t
 senses.gifDescribed | gifBlind
 senses.videoDescribed | videoBlind
 senses.videoWatch                        replaces videoDescribed when features.videoDescriptions is on (needs mediaDescriptions too); covers watched, still frame and not-watched states
+senses.videoRewatch                      shown alongside videoWatch when features.videoRewatch is on; tells the persona that a second look at a watched video may appear, marked as first-hand
 senses.stickerSee | stickerDescribed | stickerBlind
 senses.lottie
 senses.voice | links | files
@@ -391,3 +397,34 @@ addresses the persona or continues the exchange with it, `no` when people talk a
 (a reply to another member or a mention of another member is always `no` before the model is asked). `yes` runs a
 normal reply turn (the model may still `<skip/>`); three `no` in a row (`mention.followUpNoStreak`, default 3) close
 the window. Switch `features.followUp` (default on). Logged as counts and verdicts only.
+
+## The re-watch classifier (`rewatch.md`): does someone need a second look at a video?
+
+When the persona is addressed (a reply turn) and a watched video sits in the last `media.video.rewatch.recentMessages`
+(default 15) messages of the channel, a classifier decides whether the message asks about one of those videos. Code
+sends `rewatch.md` as the system prompt on the `rewatch` model role (`media.video.rewatch.model`, default
+`mention.followUpModel`, default the media model) with a user message containing two blocks:
+
+```
+<videos>
+<itemId> | <name> | <first 200 chars of the summary>
+...
+</videos>
+<candidate>
+<author name>: <trigger text>
+</candidate>
+```
+
+Videos are listed newest-message first; names and summaries are whitespace-collapsed to one line. The trigger text is
+cut at `context.maxMessageChars`. Output is ONE line: `<itemId> | <question>` when the message asks about a listed
+video and the question needs a detail the summary does not cover, or `none` when no second look is needed.
+
+On a hit, the video model watches the clip again with `rewatch-answer.md` (`{{question}}` and `{{maxChars}}` =
+`rewatch.answerChars`, default 1200) and the answer is appended to the transcript as `transcript.videoAnswered`
+(`{question}`, `{text}`) after the watched tag. The `<senses>` block includes `senses.videoRewatch` when the feature
+is on.
+
+Rails: at most one re-watch per turn; the classifier and the second look each count against `llm.maxRequestsPerDay`;
+the second look also counts against `media.video.maxPerDay`; `media.video.rewatch.maxPerDay` (default 20) caps the
+re-watches separately. Answers are cached for one hour per question (see the video cache section above). Switch
+`features.videoRewatch` (missing = on, needs `videoDescriptions` on).

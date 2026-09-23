@@ -21,6 +21,7 @@
 | `vision` | `true` | 添付画像を処理 |
 | `mediaDescriptions` | `true` | 画像、GIF、動画フレーム、リンクサムネイルの一行説明文 |
 | `videoDescriptions` | `true` | 動画対応モデルで短い動画クリップを視聴。`mediaDescriptions` も有効にする必要がある |
+| `videoRewatch` | `true` | 話しかけられた時に動画を再視聴して質問に回答。`videoDescriptions` が必要 |
 | `followUp` | `true` | ペルソナの応答後、タグなしメッセージを分類して会話を継続 |
 | `typingSimulation` | `true` | タイピング速度をシミュレート |
 | `adminCommands` | `true` | オーナースラッシュコマンド。`false` でコマンド登録を解除 |
@@ -109,7 +110,8 @@
 |---|---|---|
 | `model` | `"google/gemini-3.8-flash"` | 動画対応モデル。動画と音声の両方の入力を受け付ける必要がある |
 | `provider` | `{ "order": ["google-ai-studio"], "allow_fallbacks": false }` | ダイレクト URL パス（上限内の YouTube）用の OpenRouter プロバイダールーティング。`null` の場合は `llm.provider` を使用 |
-| `maxOutputTokens` | `400` | 動画サマリーあたりの最大出力トークン数 |
+| `maxOutputTokens` | `800` | 動画サマリーあたりの最大出力トークン数 |
+| `summaryChars` | `1500` | 動画説明の最大文字数。`describe-video.md` の `{{maxChars}}` に使用 |
 | `maxRequestTokens` | `60000` | 動画リクエストあたりのトークン上限（入力 + 出力）、`llm.maxRequestTokens` の代わりに使用。3 分のクリップを `tokensPerSecond` で換算すると約 54 000 トークンとなり、デフォルトのグローバル上限を超える |
 | `maxSeconds` | `60` | 添付ファイルとダウンロードしたサイト動画のクリップの最大長（秒）。超過する添付ファイルは `ffmpeg` でトリムされ、超過するサイト動画は静止フレームにフォールバック。ダイレクト URL サイトには `directUrlMaxSeconds` が適用される |
 | `directUrlMaxSeconds` | `180` | 公開 URL でプロバイダーに送信する動画の最大長（秒）。YouTube およびその他の `directUrlSites` が対象。超過する動画はダウンロード＋クリップルート（上限 `maxSeconds`）へ移行 |
@@ -130,6 +132,20 @@
 `yt-dlp` と `ffmpeg` はどちらもオプションのシステムバイナリです。これらがなくても上限内の添付ファイルはそのまま動作します（そのまま送信されます）。長い添付ファイルとすべてのサイトリンクは静止フレームまたはプレビュー画像にフォールバックし、ペルソナには理由が伝えられます。すべての動画リクエストは `llm.maxRequestsPerDay` と動画トークン上限（`maxRequestTokens`）にカウントされます。
 
 YouTube リンクの再生時間は次の順序で取得されます: まず yt-dlp、次に YouTube Data API（`.env` に `YOUTUBE_API_KEY` が設定されている場合）、最後にウォッチページのスクレイプ。すべてのプローブが失敗し `directUrlUnknownDuration` がオフ（デフォルト）の場合、リンクは「読み込めませんでした」と報告されます。スイッチがオンの場合、URL はそのままプロバイダーに送信され、トークン推定では `maxSeconds` として計上されます。Data API キーは無料です: Google Cloud コンソールで YouTube Data API v3 を有効にしてキーを作成します。無料枠は 1 日 10,000 ユニット、再生時間のルックアップ 1 回は 1 ユニットです。`/nep ping video` は `canaryUrl` をプローブし、このホストでどのソースが動作するかを報告します。キャッシュされた長さ制限の結果は動画の再生時間を記録し、上限が引き上げられたときに再試行されます。
+
+### `media.video.rewatch`
+
+再視聴分類器（`features.videoRewatch`）の設定です。ペルソナに話しかけられた時に直近のトランスクリプトに視聴済み動画がある場合、安価な分類器がメッセージがそれらの動画について質問しているかを判定します。ヒットすると動画モデルがクリップを再度視聴し、回答がトランスクリプトに追加されます。分類器モデルのデフォルトは `mention.followUpModel` 経由でメディアモデルです。再視聴は常に `media.video.model` を使用します。
+
+| キー | デフォルト | 説明 |
+|---|---|---|
+| `model` | `null` | 分類器モデル（`null` = `mention.followUpModel`、デフォルトは `media.model`） |
+| `maxPerDay` | `20` | 1 日あたりの再視聴上限（`media.video.maxPerDay` とは別） |
+| `maxOutputTokens` | `600` | 再視聴回答の最大出力トークン数 |
+| `answerChars` | `1200` | 回答の最大文字数。`rewatch-answer.md` の `{{maxChars}}` に使用 |
+| `recentMessages` | `15` | 視聴済み動画をスキャンする直近のメッセージ数 |
+
+ターンあたり最大 1 回の再視聴。回答は質問ごとに 1 時間キャッシュされます。分類器と再視聴はそれぞれ `llm.maxRequestsPerDay` にカウントされます。再視聴は `media.video.maxPerDay` にもカウントされます。
 
 ## `mention`
 
@@ -285,6 +301,8 @@ YouTube リンクの再生時間は次の順序で取得されます: まず yt-
 ### `mention.followUpModel` — アドレス分類器
 
 「yes」または「no」を確実に回答できる最も安価なテキストモデルです。`null`（デフォルト）はメディアモデルを使用します。
+
+再視聴分類器（`media.video.rewatch.model`）は同じ種類の仕事のためのオプションのオーバーライドです: メッセージが視聴済み動画について質問しているかを判定します。`null`（デフォルト）はフォローアップモデル、次にメディアモデルを使用します。独立したロールではありません。再視聴は常に動画モデルを使用します。
 
 ### `media.video.model` — 音声付き動画
 

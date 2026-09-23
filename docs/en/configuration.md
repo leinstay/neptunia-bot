@@ -21,6 +21,7 @@ Every key in `config.json` with its default, grouped by section.
 | `vision` | `true` | Process attached images |
 | `mediaDescriptions` | `true` | One-line descriptions for pictures, GIFs, video frames and link thumbnails |
 | `videoDescriptions` | `true` | Watch short video clips through a video-capable model; needs `mediaDescriptions` on as well |
+| `videoRewatch` | `true` | When addressed, re-watch a video to answer a question about it; needs `videoDescriptions` on |
 | `followUp` | `true` | Classify untagged messages after the persona answers to continue a conversation |
 | `typingSimulation` | `true` | Simulate typing speed |
 | `adminCommands` | `true` | Owner slash commands; `false` unregisters them |
@@ -109,7 +110,8 @@ Settings for the video describer (`features.videoDescriptions`). Video vision ne
 |---|---|---|
 | `model` | `"google/gemini-3.8-flash"` | Video-capable model; must accept both video and audio input |
 | `provider` | `{ "order": ["google-ai-studio"], "allow_fallbacks": false }` | OpenRouter provider routing for the direct-URL path (YouTube within the length cap); `null` uses `llm.provider` |
-| `maxOutputTokens` | `400` | Max output tokens per video summary |
+| `maxOutputTokens` | `800` | Max output tokens per video summary |
+| `summaryChars` | `1500` | Max characters for a video account; fills `{{maxChars}}` in `describe-video.md` |
 | `maxRequestTokens` | `60000` | Token cap per video request (input + output), used instead of `llm.maxRequestTokens`; a 3-minute clip at `tokensPerSecond` is ~54 000 tokens, above the default global cap |
 | `maxSeconds` | `60` | Max clip duration (seconds) for attachments and downloaded site videos; longer attachments are trimmed with `ffmpeg`, longer site videos fall back to a still frame. Direct-URL sites use `directUrlMaxSeconds` instead |
 | `directUrlMaxSeconds` | `180` | Max duration (seconds) for a video sent to the provider by public URL (YouTube and other `directUrlSites`); longer ones take the download-and-clip route capped at `maxSeconds` |
@@ -130,6 +132,20 @@ Settings for the video describer (`features.videoDescriptions`). Video vision ne
 Both `yt-dlp` and `ffmpeg` are optional system binaries. Without them, attachments within the caps still work (sent as-is). Longer attachments and all site links fall back to the still frame or preview picture, and the persona is told the reason. Every video request counts against `llm.maxRequestsPerDay` and the video token cap (`maxRequestTokens`).
 
 For YouTube links, the duration is learned through a chain: yt-dlp first, then the YouTube Data API (when `YOUTUBE_API_KEY` is set in `.env`), then a scrape of the watch page. When every probe fails and `directUrlUnknownDuration` is off (the default), the link is reported as "could not load." With the switch on, the URL is sent to the provider anyway, billed as `maxSeconds` in the token estimate. The Data API key is free: enable YouTube Data API v3 in the Google Cloud console and create a key; the free quota is 10,000 units/day and one duration lookup costs 1 unit. `/nep ping video` probes `canaryUrl` and reports which source works on this host. A cached length-limit result records the video's duration and is retried when the cap is raised.
+
+### `media.video.rewatch`
+
+Settings for the re-watch classifier (`features.videoRewatch`). When the persona is addressed and a watched video sits in the recent transcript, a cheap classifier decides whether the message asks about one of those videos; if so, the video model watches the clip again and the answer is appended to the transcript. The classifier model defaults through `mention.followUpModel` to the media model. The second look always uses `media.video.model`.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `model` | `null` | Classifier model (`null` = `mention.followUpModel`, which defaults to `media.model`) |
+| `maxPerDay` | `20` | Daily re-watch cap (separate from `media.video.maxPerDay`) |
+| `maxOutputTokens` | `600` | Max output tokens for the re-watch answer |
+| `answerChars` | `1200` | Max characters for the answer; fills `{{maxChars}}` in `rewatch-answer.md` |
+| `recentMessages` | `15` | How many recent messages to scan for watched videos |
+
+At most one re-watch per turn. Answers are cached for one hour per question. The classifier and the second look each count against `llm.maxRequestsPerDay`; the second look also counts against `media.video.maxPerDay`.
 
 ## `mention`
 
@@ -285,6 +301,8 @@ Default: `anthropic/claude-haiku-4.5`. Cheapest alternative: `google/gemini-2.5-
 ### `mention.followUpModel` — the address classifier
 
 The cheapest text model that can answer "yes" or "no" reliably. `null` (default) uses the media model.
+
+The re-watch classifier (`media.video.rewatch.model`) is an optional override for the same kind of job: decide whether a message asks about a watched video. `null` (default) uses the follow-up model, then the media model. It is not a separate role; the second look always uses the video model.
 
 ### `media.video.model` — video with sound
 

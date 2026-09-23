@@ -30,7 +30,9 @@
 | `channel.md` | はい | ウォームアップ: メッセージサンプルからチャンネルノートを作成 | `{{fieldChars}}` |
 | `server.md` | はい | ウォームアップ: チャンネルノートとメンバーの要約からサーバーレベルのノートを作成 | `{{name}}` `{{fieldChars}}` `{{maxInjokes}}` `{{loreTextChars}}` |
 | `describe.md` | はい | メディア説明モデルのアウトオブキャラクタープロンプト（`features.mediaDescriptions`）: 画像 1 枚を入力、チャットの言語でプレーンテキスト 1 行を出力: 写っているもの、判読可能なテキスト。意見なし、マークダウンなし | なし |
-| `describe-video.md` | はい | 動画説明モデルのアウトオブキャラクタープロンプト（`features.videoDescriptions`）: 動画クリップ 1 本（音声付き）を入力、プレーンテキスト 3–5 行を出力: 何が起きているか、重要な発言の引用、画面上のテキスト、音楽/効果音が関連する場合はそれも。言語と制約のルールは `describe.md` と同じ。キャラクターカードなし | なし |
+| `describe-video.md` | はい | 動画説明モデルのアウトオブキャラクタープロンプト（`features.videoDescriptions`）: 動画クリップ 1 本（音声付き）を入力、設定可能な長さの完全な説明を出力: 誰が登場するか、何が言われるか（重要なフレーズを引用）、画面上のテキスト、視覚的に何が起きるか、音楽/効果音。キャラクターカードなし | `{{maxChars}}` |
+| `rewatch.md` | はい | 分類器: ペルソナが動画を再視聴する必要があるか（`features.videoRewatch`）。視聴済み動画のリストと新しいメッセージを受け取る。出力は 1 行: `<itemId> \| <question>` または `none` | `{{name}}` |
+| `rewatch-answer.md` | はい | 再視聴のアウトオブキャラクタープロンプト: 動画モデルがクリップを再度視聴し、1 つの質問に回答する。言語と制約のルールは `describe-video.md` と同じ。キャラクターカードなし | `{{question}}` `{{maxChars}}` |
 | `address.md` | はい | 分類器: タグなしメッセージがペルソナ宛かどうか | `{{name}}` |
 | `labels.json` | はい | コードがプロンプトに挿入するすべての文字列。キーは以下で固定、値はライターが記述する | 以下参照 |
 
@@ -39,7 +41,7 @@
 システムメッセージ = `system-prompt` + `character-card` + `rules` + `format`。アナライザーの場合: `memory.md` のみ。
 強制ターン（`/nep interject`、`/nep initiate`）では、`forced.md` が存在する場合、モードプロンプトの後に追加されます。
 アナライザーとウォームアップの `profile.md` および `server.md` はキャラクターカードと `rules.md` をユーザーメッセージ内の
-`<character>` ブロックとして受け取ります。`channel.md`、`describe.md`、`describe-video.md`、`address.md` はカードを受け取りません。
+`<character>` ブロックとして受け取ります。`channel.md`、`describe.md`、`describe-video.md`、`rewatch.md`、`rewatch-answer.md`、`address.md` はカードを受け取りません。
 
 `{{guildFieldChars}}` は `fieldChars * 2` で、コードがギルドレベルのパターンとスターターをクランプする上限です。
 `{{maxEpisodes}}` はメンバーごとに保持されるエピソードの総数です。どちらも config から設定されますが、デフォルトプロンプトでは
@@ -84,6 +86,8 @@
 - エラーミス: `{ miss: true, ts, reason: "error" }` — 1 時間後にリトライ。
 - デイリーリミット: キャッシュされない。そのターンのみ `{ state: "limit", reason: "daily" }` として返される。
 
+再視聴の回答はキー `video:<itemId>:q:<hash>`（小文字化・空白正規化した質問の SHA-1 の先頭 16 桁の十六進数）で保存されます: `{ text, ts, answer: true }`。1 時間で期限切れ。コードは読み取り時に期限切れのエントリを削除します。
+
 画像の静止フレームエントリは従来通り独自の `<itemId>` キーを保持します。同一アイテムに対して両方が共存できます。
 
 トランスクリプト行: `#87 [14:32] nick: text <replyTo> <media…> <sticker>`。自分の行には `labels.self` を使用。
@@ -114,6 +118,7 @@ transcript.videoDescribed                {name} {duration} {text}: text describe
 transcript.videoWatched                  {name} {duration} {text}: first-hand — the persona saw and heard the clip
 transcript.videoNotWatched               {name} {duration} {reason}: reason is the human phrase from videoReason.*
 transcript.videoNotWatchedFrame          {name} {duration} {reason} {text}: not watched but a still frame was described
+transcript.videoAnswered                {question} {text}: extra tag after a watched video tag; the persona re-watched the clip for this question
 transcript.videoReason.length | size | daily | error    human phrases for the four reason codes
 transcript.linkWatched                   {text}: extra tag after a link tag, first-hand video summary
 transcript.linkNotWatched                {reason}: extra tag after a link tag, not watched with reason
@@ -132,6 +137,7 @@ senses.imageSee | imageDescribed | imageBlind        one line each; code picks t
 senses.gifDescribed | gifBlind
 senses.videoDescribed | videoBlind
 senses.videoWatch                        replaces videoDescribed when features.videoDescriptions is on (needs mediaDescriptions too); covers watched, still frame and not-watched states
+senses.videoRewatch                      shown alongside videoWatch when features.videoRewatch is on; tells the persona that a second look at a watched video may appear, marked as first-hand
 senses.stickerSee | stickerDescribed | stickerBlind
 senses.lottie
 senses.voice | links | files
@@ -268,3 +274,33 @@ warmup.contextMark                       prefixed to context lines in the profil
 ## アドレス分類器（`address.md`）: タグなしメッセージはペルソナ宛か?
 
 ペルソナが誰かに応答した後、そのチャンネルで会話ウィンドウが開きます（`mention.followUpMinutes`、応答ごとに延長）。ウィンドウ内でトリガー（メンション、ペルソナへのリプライ、名前）を持たないメッセージは無条件には応答されません。コードはチャンネルの直近 `mention.followUpContext`（デフォルト 15）行を送信します。ペルソナ自身の行は `labels.self` でマーク、新しいメッセージは `<candidate>` としてマークされ、`address.md` に `followUp` モデルロール（`mention.followUpModel`、デフォルトはメディアモデル）で送信されます。出力は 1 行: 候補がペルソナに話しかけているか、ペルソナとのやり取りを続けている場合は `yes`、人々が自分たち同士で話しているか別の相手に話している場合は `no`（別のメンバーへのリプライや別のメンバーへのメンションは、モデルに尋ねる前に常に `no`）。`yes` は通常のリプライターンを実行します（モデルは `<skip/>` を返す可能性があります）。3 回連続の `no`（`mention.followUpNoStreak`、デフォルト 3）でウィンドウが閉じます。スイッチ `features.followUp`（デフォルトオン）。カウントと判定のみログに記録されます。
+
+## 再視聴分類器（`rewatch.md`）: 動画をもう一度見る必要があるか?
+
+ペルソナに話しかけられた（リプライターン）とき、チャンネルの直近 `media.video.rewatch.recentMessages`（デフォルト 15）
+件のメッセージに視聴済み動画がある場合、分類器がそのメッセージがそれらの動画について質問しているかを判定します。コードは
+`rewatch.md` をシステムプロンプトとして `rewatch` モデルロール（`media.video.rewatch.model`、デフォルト
+`mention.followUpModel`、デフォルトはメディアモデル）に送信し、ユーザーメッセージに 2 つのブロックを含めます:
+
+```
+<videos>
+<itemId> | <name> | <サマリーの先頭 200 文字>
+...
+</videos>
+<candidate>
+<著者名>: <トリガーテキスト>
+</candidate>
+```
+
+動画は新しいメッセージ順にリストされます。名前とサマリーは空白が正規化されて 1 行に。トリガーテキストは
+`context.maxMessageChars` で切り詰め。出力は 1 行: メッセージがリストされた動画について質問しており、サマリーでカバー
+されていない詳細を必要とする場合は `<itemId> | <question>`、二度見が不要な場合は `none`。
+
+ヒットした場合、動画モデルが `rewatch-answer.md`（`{{question}}` と `{{maxChars}}` = `rewatch.answerChars`、
+デフォルト 1200）でクリップを再度視聴し、回答は `transcript.videoAnswered`（`{question}`、`{text}`）として視聴済み
+タグの後にトランスクリプトに追加されます。`<senses>` ブロックには機能が有効な場合に `senses.videoRewatch` が含まれます。
+
+制限: ターンあたり最大 1 回の再視聴。分類器と再視聴はそれぞれ `llm.maxRequestsPerDay` にカウントされます。再視聴は
+`media.video.maxPerDay` にもカウントされます。`media.video.rewatch.maxPerDay`（デフォルト 20）は再視聴を個別に制限
+します。回答は質問ごとに 1 時間キャッシュされます（上記の動画キャッシュセクションを参照）。スイッチ
+`features.videoRewatch`（未設定 = オン、`videoDescriptions` が必要）。

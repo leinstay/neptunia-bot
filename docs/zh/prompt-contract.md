@@ -30,7 +30,9 @@
 | `channel.md` | 是 | 预热：从消息样本生成频道笔记 | `{{fieldChars}}` |
 | `server.md` | 是 | 预热：从频道笔记和成员摘要生成服务器级笔记 | `{{name}}` `{{fieldChars}}` `{{maxInjokes}}` `{{loreTextChars}}` |
 | `describe.md` | 是 | 角色外提示，用于媒体描述器（`features.mediaDescriptions`）：输入一张图片，输出一行描述：图中内容、可辨认的文字，使用聊天所用的语言。无评论，无 markdown | 无 |
-| `describe-video.md` | 是 | 角色外提示，用于视频描述器（`features.videoDescriptions`）：输入一个视频片段（含声音），输出 3–5 行纯文本：发生了什么、关键对白引用、屏幕上的文字、相关时的音乐/音效。语言和限制规则与 `describe.md` 相同。不接收角色卡 | 无 |
+| `describe-video.md` | 是 | 角色外提示，用于视频描述器（`features.videoDescriptions`）：输入一个视频片段（含声音），输出可配置长度的完整有序描述：谁出现了、说了什么（关键短语引用）、屏幕上的文字、视觉上发生了什么、音乐/音效。不接收角色卡 | `{{maxChars}}` |
+| `rewatch.md` | 是 | 分类器：角色是否需要重新观看视频（`features.videoRewatch`）。接收已观看视频列表和新消息。输出为一行：`<itemId> \| <question>` 或 `none` | `{{name}}` |
+| `rewatch-answer.md` | 是 | 角色外提示，用于重看回答：视频模型再次观看片段并回答一个问题。语言和限制规则与 `describe-video.md` 相同。不接收角色卡 | `{{question}}` `{{maxChars}}` |
 | `address.md` | 是 | 分类器：未标记的消息是否在对角色说话 | `{{name}}` |
 | `labels.json` | 是 | 代码插入提示中的所有字符串。键在下方固定，值由编写者决定 | 见下文 |
 
@@ -39,7 +41,7 @@
 系统消息 = `system-prompt` + `character-card` + `rules` + `format`。分析器则单独使用 `memory.md`。
 在强制回合（`/nep interject`、`/nep initiate`）中，如果 `forced.md` 存在，则追加在模式提示之后。
 分析器和预热的 `profile.md`、`server.md` 在用户消息中以 `<character>` 块接收角色卡和 `rules.md`。
-`channel.md`、`describe.md`、`describe-video.md` 和 `address.md` 不接收角色卡。
+`channel.md`、`describe.md`、`describe-video.md`、`rewatch.md`、`rewatch-answer.md` 和 `address.md` 不接收角色卡。
 
 `{{guildFieldChars}}` 等于 `fieldChars * 2`，是代码对服务器级规律和开场白进行截断的上限。
 `{{maxEpisodes}}` 是每人保留的回忆总数上限。两者均从配置填充，但默认提示未使用；自定义的 `memory.md`
@@ -84,6 +86,8 @@
 - 错误未命中：`{ miss: true, ts, reason: "error" }` — 一小时后重试。
 - 每日上限：不缓存；仅在该回合返回 `{ state: "limit", reason: "daily" }`。
 
+重看回答缓存在键 `video:<itemId>:q:<hash>`（问题小写化并合并空白后 SHA-1 的前 16 位十六进制数字）下：`{ text, ts, answer: true }`。一小时后过期；代码在读取时删除过期条目。
+
 图片的静帧条目保留其自身的 `<itemId>` 键。同一个条目可以同时存在两者。
 
 对话记录行：`#87 [14:32] nick: text <replyTo> <media…> <sticker>`；角色自身的行使用 `labels.self`；行间使用
@@ -114,6 +118,7 @@ transcript.videoDescribed                {name} {duration} {text}: text describe
 transcript.videoWatched                  {name} {duration} {text}: first-hand — the persona saw and heard the clip
 transcript.videoNotWatched               {name} {duration} {reason}: reason is the human phrase from videoReason.*
 transcript.videoNotWatchedFrame          {name} {duration} {reason} {text}: not watched but a still frame was described
+transcript.videoAnswered                {question} {text}: extra tag after a watched video tag; the persona re-watched the clip for this question
 transcript.videoReason.length | size | daily | error    human phrases for the four reason codes
 transcript.linkWatched                   {text}: extra tag after a link tag, first-hand video summary
 transcript.linkNotWatched                {reason}: extra tag after a link tag, not watched with reason
@@ -132,6 +137,7 @@ senses.imageSee | imageDescribed | imageBlind        one line each; code picks t
 senses.gifDescribed | gifBlind
 senses.videoDescribed | videoBlind
 senses.videoWatch                        replaces videoDescribed when features.videoDescriptions is on (needs mediaDescriptions too); covers watched, still frame and not-watched states
+senses.videoRewatch                      shown alongside videoWatch when features.videoRewatch is on; tells the persona that a second look at a watched video may appear, marked as first-hand
 senses.stickerSee | stickerDescribed | stickerBlind
 senses.lottie
 senses.voice | links | files
@@ -368,3 +374,30 @@ warmup.contextMark                       prefixed to context lines in the profil
 （对另一成员的回复或对另一成员的提及在询问模型之前即为 `no`）。`yes` 触发正常的回复回合（模型仍可
 `<skip/>`）；连续三个 `no`（`mention.followUpNoStreak`，默认 3）关闭窗口。开关 `features.followUp`
 （默认开启）。仅记录计数和判定结果。
+
+## 重看分类器（`rewatch.md`）：是否需要再看一遍视频？
+
+当角色被呼叫（回复回合）且频道最近 `media.video.rewatch.recentMessages`（默认 15）条消息中有已观看的视频时，分类器
+判断该消息是否在询问其中某个视频。代码将 `rewatch.md` 作为系统提示发送到 `rewatch` 模型角色
+（`media.video.rewatch.model`，默认 `mention.followUpModel`，默认媒体模型），用户消息包含两个块：
+
+```
+<videos>
+<itemId> | <name> | <摘要的前 200 个字符>
+...
+</videos>
+<candidate>
+<作者名>: <触发文本>
+</candidate>
+```
+
+视频按最新消息优先列出；名称和摘要的空白合并为一行。触发文本在 `context.maxMessageChars` 处截断。输出为一行：
+当消息询问列出的某个视频且问题需要摘要未涵盖的细节时为 `<itemId> | <question>`，不需要重看时为 `none`。
+
+命中时，视频模型使用 `rewatch-answer.md`（`{{question}}` 和 `{{maxChars}}` = `rewatch.answerChars`，默认 1200）
+再次观看片段，回答以 `transcript.videoAnswered`（`{question}`、`{text}`）的形式追加在已观看标签之后。当功能开启时，
+`<senses>` 块包含 `senses.videoRewatch`。
+
+限制：每回合最多一次重看；分类器和重看各自计入 `llm.maxRequestsPerDay`；重看还计入 `media.video.maxPerDay`；
+`media.video.rewatch.maxPerDay`（默认 20）单独限制重看次数。回答按问题缓存一小时（参见上方视频缓存部分）。开关
+`features.videoRewatch`（缺失 = 开启，需要 `videoDescriptions`）。

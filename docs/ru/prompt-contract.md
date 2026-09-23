@@ -30,7 +30,9 @@
 | `channel.md` | да | Прогрев: заметки о канале из выборки сообщений | `{{fieldChars}}` |
 | `server.md` | да | Прогрев: серверные заметки из заметок каналов и сводок участников | `{{name}}` `{{fieldChars}}` `{{maxInjokes}}` `{{loreTextChars}}` |
 | `describe.md` | да | Внеролевой промпт модели описаний медиа (`features.mediaDescriptions`): одна картинка на входе, одна строка на выходе: что изображено, любой читаемый текст, на языке чата. Без мнений, без разметки | нет |
-| `describe-video.md` | да | Внеролевой промпт модели описаний видео (`features.videoDescriptions`): один видеоклип на входе (со звуком), 3–5 строк на выходе: что происходит, ключевые реплики цитатой, текст на экране, музыка/звук при необходимости. Те же язык и правила ограничений, что у `describe.md`. Без карточки персонажа | нет |
+| `describe-video.md` | да | Внеролевой промпт модели описаний видео (`features.videoDescriptions`): один видеоклип на входе (со звуком), полное описание настраиваемой длины на выходе: кто появляется, что говорится (ключевые фразы цитатой), текст на экране, что происходит визуально, музыка/звук при необходимости. Без карточки персонажа | `{{maxChars}}` |
+| `rewatch.md` | да | Классификатор: нужно ли персонажу пересмотреть видео (`features.videoRewatch`). Получает список просмотренных видео и новое сообщение. Выход: ОДНА строка: `<itemId> \| <question>` или `none` | `{{name}}` |
+| `rewatch-answer.md` | да | Внеролевой промпт для повторного просмотра: видеомодель смотрит клип ещё раз и отвечает на один вопрос. Те же язык и правила ограничений, что у `describe-video.md`. Без карточки персонажа | `{{question}}` `{{maxChars}}` |
 | `address.md` | да | Классификатор: адресовано ли сообщение без обращения персонажу | `{{name}}` |
 | `labels.json` | да | Все строки, которые КОД вставляет в промпт. Ключи фиксированы ниже, формулировки определяет автор текстов | см. ниже |
 
@@ -39,7 +41,7 @@
 Системное сообщение = `system-prompt` + `character-card` + `rules` + `format`. Для анализатора: только `memory.md`.
 При принудительном ходе (`/nep interject`, `/nep initiate`) `forced.md` добавляется после промпта режима, если файл существует.
 Анализатор и промпты прогрева `profile.md` и `server.md` получают карточку персонажа и `rules.md` как блок
-`<character>` в пользовательском сообщении. `channel.md`, `describe.md`, `describe-video.md` и `address.md` карточку не получают.
+`<character>` в пользовательском сообщении. `channel.md`, `describe.md`, `describe-video.md`, `rewatch.md`, `rewatch-answer.md` и `address.md` карточку не получают.
 
 `{{guildFieldChars}}` равен `fieldChars * 2`, лимит, до которого код обрезает серверные паттерны и зачины разговоров.
 `{{maxEpisodes}}` определяет общее количество хранимых эпизодов на человека. Оба заполняются из конфигурации, но не
@@ -85,6 +87,8 @@
 - Ошибка: `{ miss: true, ts, reason: "error" }` — повторная попытка через час.
 - Дневной лимит: не кэшируется; возвращается как `{ state: "limit", reason: "daily" }` только для этого хода.
 
+Ответ повторного просмотра кэшируется под ключом `video:<itemId>:q:<hash>` (первые 16 шестнадцатеричных цифр SHA-1 от приведённого к нижнему регистру и схлопнутого по пробелам вопроса): `{ text, ts, answer: true }`. Истекает через час; код удаляет просроченные записи при чтении.
+
 Запись стоп-кадра картинки хранится под собственным ключом `<itemId>`, как и прежде. Обе могут сосуществовать для одного элемента.
 
 Строка транскрипта: `#87 [14:32] nick: text <replyTo> <media…> <sticker>`; собственные строки используют `labels.self`; между
@@ -115,6 +119,7 @@ transcript.videoDescribed                {name} {duration} {text}: text describe
 transcript.videoWatched                  {name} {duration} {text}: first-hand — the persona saw and heard the clip
 transcript.videoNotWatched               {name} {duration} {reason}: reason is the human phrase from videoReason.*
 transcript.videoNotWatchedFrame          {name} {duration} {reason} {text}: not watched but a still frame was described
+transcript.videoAnswered                {question} {text}: extra tag after a watched video tag; the persona re-watched the clip for this question
 transcript.videoReason.length | size | daily | error    human phrases for the four reason codes
 transcript.linkWatched                   {text}: extra tag after a link tag, first-hand video summary
 transcript.linkNotWatched                {reason}: extra tag after a link tag, not watched with reason
@@ -133,6 +138,7 @@ senses.imageSee | imageDescribed | imageBlind        one line each; code picks t
 senses.gifDescribed | gifBlind
 senses.videoDescribed | videoBlind
 senses.videoWatch                        replaces videoDescribed when features.videoDescriptions is on (needs mediaDescriptions too); covers watched, still frame and not-watched states
+senses.videoRewatch                      shown alongside videoWatch when features.videoRewatch is on; tells the persona that a second look at a watched video may appear, marked as first-hand
 senses.stickerSee | stickerDescribed | stickerBlind
 senses.lottie
 senses.voice | links | files
@@ -397,3 +403,36 @@ warmup.contextMark                       prefixed to context lines in the profil
 или упоминание другого участника всегда `no` до обращения к модели). `yes` запускает обычный ход ответа (модель всё ещё
 может ответить `<skip/>`); три `no` подряд (`mention.followUpNoStreak`, по умолчанию 3) закрывают окно. Переключатель
 `features.followUp` (по умолчанию включён). Логируются только счётчики и вердикты.
+
+## Классификатор повторного просмотра (`rewatch.md`): нужен ли кому-то второй взгляд на видео?
+
+Когда персонажу обращаются (ход ответа) и в последних `media.video.rewatch.recentMessages` (по умолчанию 15)
+сообщениях канала есть просмотренное видео, классификатор определяет, спрашивает ли сообщение об одном из этих видео.
+Код отправляет `rewatch.md` как системный промпт на роли модели `rewatch` (`media.video.rewatch.model`, по умолчанию
+`mention.followUpModel`, по умолчанию медиа-модель) с пользовательским сообщением, содержащим два блока:
+
+```
+<videos>
+<itemId> | <name> | <первые 200 символов описания>
+...
+</videos>
+<candidate>
+<имя автора>: <текст триггера>
+</candidate>
+```
+
+Видео перечислены от новейшего сообщения к старейшему; названия и описания схлопнуты по пробелам в одну строку. Текст
+триггера обрезан до `context.maxMessageChars`. Выход: ОДНА строка: `<itemId> | <question>`, если сообщение спрашивает
+об одном из перечисленных видео и вопрос требует детали, не покрытой описанием, или `none`, если второй просмотр не
+нужен.
+
+При попадании видеомодель смотрит клип ещё раз с `rewatch-answer.md` (`{{question}}` и `{{maxChars}}` =
+`rewatch.answerChars`, по умолчанию 1200), и ответ добавляется в транскрипт как `transcript.videoAnswered`
+(`{question}`, `{text}`) после тега просмотра. Блок `<senses>` включает `senses.videoRewatch`, когда функция
+включена.
+
+Ограничения: не более одного повторного просмотра за ход; классификатор и повторный просмотр каждый считаются в
+`llm.maxRequestsPerDay`; повторный просмотр также считается в `media.video.maxPerDay`;
+`media.video.rewatch.maxPerDay` (по умолчанию 20) ограничивает повторные просмотры отдельно. Ответы кэшируются на час
+по каждому вопросу (см. раздел кэша видео выше). Переключатель `features.videoRewatch` (отсутствие = включён,
+требуется `videoDescriptions`).
