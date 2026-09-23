@@ -28,7 +28,7 @@ import { sortEpisodesForDisplay } from './memory/episodes.js';
 import { channelActivity } from './memory/channels.js';
 import { commandKeys } from './discord/commands.js';
 import { isAllowed as accessIsAllowed, grant as accessGrant, revoke as accessRevoke } from './discord/access.js';
-import { classifierModelOf } from './behavior/mention.js';
+import { classifierTextModel, classifierMediaModel, classifierVideoModel } from './behavior/mention.js';
 import { log } from './log.js';
 
 /** `/nep access grant/revoke`'s command keys that ONLY read — everything else (including every
@@ -1274,16 +1274,19 @@ export function createAdmin({
   }
 
   const MODEL_ID_RE = /^[\w.:/-]{3,100}$/;
-const MODEL_ROLE_PATHS = { talk: 'llm.model', analyzer: 'memory.model', media: 'media.model', classifier: 'llm.classifierModel', video: 'media.video.model' };
+const MODEL_ROLE_PATHS = {
+  talk: 'llm.model',
+  analyzer: 'memory.model',
+  'classifier.text': 'classifier.text',
+  'classifier.media': 'classifier.media',
+  'classifier.video': 'classifier.video',
+};
+const MODEL_ROLES = Object.keys(MODEL_ROLE_PATHS);
 
 function cmdModelShow() {
   const cfg = hot.config;
   const lines = [
-    `talk: ${cfg?.llm?.model ?? '-'}`,
-    `analyzer: ${cfg?.memory?.model ?? cfg?.llm?.model ?? '-'}`,
-    `media: ${cfg?.media?.model ?? '-'}`,
-    `classifier: ${classifierModelOf(cfg) ?? '-'}`,
-    `video: ${cfg?.media?.video?.model ?? '-'}`,
+    ...MODEL_ROLES.map((role) => `${role}: ${modelForRole(role, cfg) ?? '-'}`),
     `mediaDescriptions: ${cfg?.features?.mediaDescriptions === true ? 'on' : 'off'}`,
   ];
   return lines.join('\n');
@@ -1292,7 +1295,7 @@ function cmdModelShow() {
 function cmdModelSet(args) {
   const role = String(args?.role ?? '');
   const dottedPath = MODEL_ROLE_PATHS[role];
-  if (!dottedPath) throw new Error(`unknown role: ${role} (talk, analyzer, media, classifier, video)`);
+  if (!dottedPath) throw new Error(`unknown role: ${role} (${MODEL_ROLES.join(', ')})`);
 
   const id = String(args?.id ?? '').trim();
   if (!MODEL_ID_RE.test(id)) throw new Error('id must look like a model id, e.g. anthropic/claude-haiku-4.5 (3-100 chars)');
@@ -1312,15 +1315,23 @@ function cmdModelSet(args) {
 // / `skipCalibration` options), never writes under data/.
 // ---------------------------------------------------------------------
 
-const PING_ROLES = ['talk', 'analyzer', 'media', 'classifier', 'video'];
+/** `/nep ping classifier` pings the three classifier roles together. */
+const PING_GROUPS = { classifier: ['classifier.text', 'classifier.media', 'classifier.video'] };
 
-/** The model id one role resolves to right now — mirrors cmdModelShow/MODEL_ROLE_PATHS. */
-function pingModelFor(role, cfg) {
+/** The roles one `/nep ping` argument stands for: one role, a group, or (anything else) all of them. */
+function pingRolesFor(role) {
+  if (MODEL_ROLES.includes(role)) return [role];
+  if (PING_GROUPS[role]) return PING_GROUPS[role];
+  return MODEL_ROLES;
+}
+
+/** The model id one role resolves to right now — used by model show and ping alike. */
+function modelForRole(role, cfg) {
   if (role === 'talk') return cfg?.llm?.model || undefined;
   if (role === 'analyzer') return cfg?.memory?.model || cfg?.llm?.model || undefined;
-  if (role === 'media') return cfg?.media?.model || undefined;
-  if (role === 'classifier') return classifierModelOf(cfg);
-  if (role === 'video') return cfg?.media?.video?.model || undefined;
+  if (role === 'classifier.text') return classifierTextModel(cfg);
+  if (role === 'classifier.media') return classifierMediaModel(cfg);
+  if (role === 'classifier.video') return classifierVideoModel(cfg);
   return undefined;
 }
 
@@ -1409,27 +1420,27 @@ function formatYoutubeLine(result) {
   return detail ? `${head} — ${detail}` : head;
 }
 
-/** Start the YouTube check when the video role is pinged and a describer is wired; never rejects. */
+/** Start the YouTube check when the classifier.video role is pinged and a describer is wired; never rejects. */
 function startPingYoutube(requested) {
-  if (!requested.includes('video') || typeof describer?.checkYoutube !== 'function') return null;
+  if (!requested.includes('classifier.video') || typeof describer?.checkYoutube !== 'function') return null;
   return Promise.resolve()
     .then(() => describer.checkYoutube())
     .then(formatYoutubeLine, () => 'youtube: check failed');
 }
 
-/** `lines` with the YouTube line inserted right after the video role's line. */
+/** `lines` with the YouTube line inserted right after the classifier.video line. */
 function withYoutubeLine(lines, requested, youtubeLine) {
   if (youtubeLine == null) return lines;
-  const at = requested.indexOf('video');
+  const at = requested.indexOf('classifier.video');
   return [...lines.slice(0, at + 1), youtubeLine, ...lines.slice(at + 1)];
 }
 
 async function cmdPing(args) {
   if (!llm) throw new Error('ping is not available (no llm client configured)');
 
-  const requested = PING_ROLES.includes(args?.role) ? [args.role] : PING_ROLES;
+  const requested = pingRolesFor(args?.role);
   const cfg = hot.config;
-  const roleModel = new Map(requested.map((role) => [role, pingModelFor(role, cfg)]));
+  const roleModel = new Map(requested.map((role) => [role, modelForRole(role, cfg)]));
 
   const youtube = startPingYoutube(requested);
 

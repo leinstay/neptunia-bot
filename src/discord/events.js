@@ -17,7 +17,7 @@ import {
   isFollowUpOpen,
   followUpPreFilter,
   parseFollowUpVerdict,
-  classifierModelOf,
+  classifierTextModel,
 } from '../behavior/mention.js';
 import { formatTranscript, renderTranscript } from './format.js';
 import { addPending, isExpired, popOldest } from '../behavior/pending.js';
@@ -314,7 +314,7 @@ export function createMessageHandler({
               { role: 'user', content: request.user },
             ],
             {
-              model: classifierModelOf(config),
+              model: classifierTextModel(config),
               maxOutputTokens: mentionCfg.followUpMaxOutputTokens,
               countAgainstDailyCap: true,
               skipCalibration: true,

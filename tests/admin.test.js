@@ -488,54 +488,63 @@ test('run: unset removes a previously set override', async () => {
 function makeHotWithMedia(rootDir) {
   const hot = makeHot(rootDir);
   hot.config.memory = { model: null };
-  hot.config.media = { model: 'anthropic/claude-haiku-4.5' };
+  hot.config.media = {};
+  hot.config.classifier = { media: 'anthropic/claude-haiku-4.5' };
   hot.config.features = { mediaDescriptions: false };
   return hot;
 }
 
-test('run: model.show reports talk/analyzer/media/classifier/video models and whether mediaDescriptions is on', async () => {
+test('run: model.show lists the five roles in order, then whether mediaDescriptions is on', async () => {
   const rootDir = makeRoot();
   const hot = makeHotWithMedia(rootDir);
+  hot.config.classifier.text = 'openrouter/text-model';
   const { admin } = makeAdmin(rootDir, { hot });
 
   const result = await admin.run('model.show', {}, {});
 
-  assert.ok(result.includes('talk: anthropic/claude-opus-4.6'));
-  assert.ok(result.includes('media: anthropic/claude-haiku-4.5'));
-  assert.ok(result.includes('classifier: anthropic/claude-haiku-4.5'));
-  assert.ok(result.split('\n').includes('video: -'), 'no media.video.model -> shown as -');
-  assert.ok(result.includes('mediaDescriptions: off'));
+  assert.deepEqual(result.split('\n'), [
+    'talk: anthropic/claude-opus-4.6',
+    'analyzer: anthropic/claude-opus-4.6',
+    'classifier.text: openrouter/text-model',
+    'classifier.media: anthropic/claude-haiku-4.5',
+    'classifier.video: -',
+    'mediaDescriptions: off',
+  ]);
 });
 
-test('run: model.show reports media.video.model for the video role when set', async () => {
+test('run: model.show reports classifier.video when set', async () => {
   const rootDir = makeRoot();
   const hot = makeHotWithMedia(rootDir);
-  hot.config.media.video = { model: 'openrouter/video-model' };
+  hot.config.classifier.video = 'openrouter/video-model';
   const { admin } = makeAdmin(rootDir, { hot });
 
   const result = await admin.run('model.show', {}, {});
-  assert.ok(result.split('\n').includes('video: openrouter/video-model'));
+  assert.ok(result.split('\n').includes('classifier.video: openrouter/video-model'));
 });
 
-test('run: model.show reports the configured classifier model, when set, instead of falling back to media', async () => {
+test('run: model.show falls back to classifier.media for classifier.text when unset', async () => {
   const rootDir = makeRoot();
   const hot = makeHotWithMedia(rootDir);
-  hot.config.llm.classifierModel = 'openrouter/classifier-model';
   const { admin } = makeAdmin(rootDir, { hot });
 
   const result = await admin.run('model.show', {}, {});
-  assert.ok(result.split('\n').includes('classifier: openrouter/classifier-model'));
+  assert.ok(result.split('\n').includes('classifier.text: anthropic/claude-haiku-4.5'));
 });
 
-test('run: model.show still reports a deprecated mention.followUpModel as the classifier model', async () => {
+test('run: model.show resolves the deprecated keys of an old config.local.json', async () => {
   const rootDir = makeRoot();
   const hot = makeHotWithMedia(rootDir);
-  hot.config.mention = { followUpModel: 'openrouter/old-model' };
+  hot.config.classifier = {};
+  hot.config.llm.classifierModel = 'openrouter/old-classifier';
+  hot.config.mention = { followUpModel: 'openrouter/older-classifier' };
+  hot.config.media = { model: 'openrouter/old-media', video: { model: 'openrouter/old-video' } };
   const { admin } = makeAdmin(rootDir, { hot });
 
-  const result = await admin.run('model.show', {}, {});
-  assert.ok(result.split('\n').includes('classifier: openrouter/old-model'));
-  assert.ok(!result.includes('followup'), 'the old role name is gone from the listing');
+  const lines = (await admin.run('model.show', {}, {})).split('\n');
+  assert.ok(lines.includes('classifier.text: openrouter/old-classifier'));
+  assert.ok(lines.includes('classifier.media: openrouter/old-media'));
+  assert.ok(lines.includes('classifier.video: openrouter/old-video'));
+  assert.ok(!lines.some((l) => /^(followup|media|video|classifier):/.test(l)), 'the old role names are gone from the listing');
 });
 
 test('run: model.show falls back to the talk model for the analyzer when memory.model is unset', async () => {
@@ -568,13 +577,13 @@ test('run: model.set writes the right config path for each role', async () => {
   assert.deepEqual(readLocal(rootDir), { llm: { model: 'anthropic/claude-opus-4.6' } });
 
   await admin.run('model.set', { role: 'analyzer', id: 'openrouter/cheap-model' }, {});
-  await admin.run('model.set', { role: 'media', id: 'anthropic/claude-haiku-4.5' }, {});
-  await admin.run('model.set', { role: 'classifier', id: 'openrouter/classifier-model' }, {});
-  await admin.run('model.set', { role: 'video', id: 'openrouter/video-model' }, {});
+  await admin.run('model.set', { role: 'classifier.text', id: 'openrouter/text-model' }, {});
+  await admin.run('model.set', { role: 'classifier.media', id: 'anthropic/claude-haiku-4.5' }, {});
+  await admin.run('model.set', { role: 'classifier.video', id: 'openrouter/video-model' }, {});
   assert.deepEqual(readLocal(rootDir), {
-    llm: { model: 'anthropic/claude-opus-4.6', classifierModel: 'openrouter/classifier-model' },
+    llm: { model: 'anthropic/claude-opus-4.6' },
     memory: { model: 'openrouter/cheap-model' },
-    media: { model: 'anthropic/claude-haiku-4.5', video: { model: 'openrouter/video-model' } },
+    classifier: { text: 'openrouter/text-model', media: 'anthropic/claude-haiku-4.5', video: 'openrouter/video-model' },
   });
   assert.equal(hot.reloadConfigCalls, 5);
 });
@@ -583,18 +592,20 @@ test('run: model.set rejects an unknown role and writes nothing', async () => {
   const rootDir = makeRoot();
   const { admin } = makeAdmin(rootDir, { hot: makeHotWithMedia(rootDir) });
 
-  await assert.rejects(() => admin.run('model.set', { role: 'bogus', id: 'x/y' }, {}), /unknown role: bogus \(talk, analyzer, media, classifier, video\)/);
+  await assert.rejects(() => admin.run('model.set', { role: 'bogus', id: 'x/y' }, {}), /unknown role: bogus \(talk, analyzer, classifier\.text, classifier\.media, classifier\.video\)/);
   assert.equal(fs.existsSync(path.join(rootDir, 'config.local.json')), false);
 });
 
-test('run: model.set rejects the old followup role name and writes nothing', async () => {
+test('run: model.set rejects the old role names and the classifier group, and writes nothing', async () => {
   const rootDir = makeRoot();
   const { admin } = makeAdmin(rootDir, { hot: makeHotWithMedia(rootDir) });
 
-  await assert.rejects(
-    () => admin.run('model.set', { role: 'followup', id: 'x/y' }, {}),
-    /unknown role: followup \(talk, analyzer, media, classifier, video\)/,
-  );
+  for (const role of ['followup', 'media', 'video', 'classifier']) {
+    await assert.rejects(
+      () => admin.run('model.set', { role, id: 'x/y' }, {}),
+      new RegExp(`unknown role: ${role} \\(talk, analyzer, classifier\\.text, classifier\\.media, classifier\\.video\\)`),
+    );
+  }
   assert.equal(fs.existsSync(path.join(rootDir, 'config.local.json')), false);
 });
 
@@ -611,8 +622,8 @@ test('run: model.set accepts a loosely-valid id (letters, digits, dot, colon, sl
   const rootDir = makeRoot();
   const { admin } = makeAdmin(rootDir, { hot: makeHotWithMedia(rootDir) });
 
-  await admin.run('model.set', { role: 'media', id: 'anthropic/claude-haiku-4.5:beta' }, {});
-  assert.deepEqual(readLocal(rootDir), { media: { model: 'anthropic/claude-haiku-4.5:beta' } });
+  await admin.run('model.set', { role: 'classifier.media', id: 'anthropic/claude-haiku-4.5:beta' }, {});
+  assert.deepEqual(readLocal(rootDir), { classifier: { media: 'anthropic/claude-haiku-4.5:beta' } });
 });
 
 // ---------------------------------------------------------------------------
@@ -832,11 +843,11 @@ function hotForPing(rootDir, { label = true } = {}) {
   return hot;
 }
 
-test('run: ping pings talk/analyzer/media/classifier/video in parallel and reports latency, provider and tokens', async () => {
+test('run: ping pings the five roles in parallel and reports latency, provider and tokens', async () => {
   const rootDir = makeRoot();
   const hot = hotForPing(rootDir);
   hot.config.memory.model = 'openrouter/analyzer-model'; // distinct from talk, so every role gets its own call
-  hot.config.media.video = { model: 'openrouter/video-model' };
+  hot.config.classifier.video = 'openrouter/video-model';
   const llm = fakeLlm((options) => ({
     text: 'pong',
     usage: { prompt_tokens: 5, completion_tokens: 1 },
@@ -849,53 +860,74 @@ test('run: ping pings talk/analyzer/media/classifier/video in parallel and repor
   const body = await admin.run('ping', {}, {});
   const lines = body.split('\n');
 
-  assert.equal(llm.calls.length, 4, 'talk, analyzer, media and video are four distinct models here; classifier falls back to media');
+  assert.equal(llm.calls.length, 4, 'talk, analyzer, media and video are four distinct models here; classifier.text falls back to classifier.media');
+  assert.equal(lines.length, 5);
   assert.ok(lines.some((l) => l.startsWith('talk: anthropic/claude-opus-4.6 — ok,') && l.includes('provider=provider-for-anthropic/claude-opus-4.6') && l.includes('tokens 5/1')));
   assert.ok(lines.some((l) => l.startsWith('analyzer: openrouter/analyzer-model — ok,')));
-  assert.ok(lines.some((l) => l.startsWith('media: anthropic/claude-haiku-4.5 — ok,')));
-  assert.ok(lines.some((l) => l.startsWith('classifier: anthropic/claude-haiku-4.5 — ok,')));
-  assert.ok(lines.some((l) => l.startsWith('video: openrouter/video-model — ok,')));
+  assert.ok(lines.some((l) => l.startsWith('classifier.media: anthropic/claude-haiku-4.5 — ok,')));
+  assert.ok(lines.some((l) => l.startsWith('classifier.text: anthropic/claude-haiku-4.5 — ok,')));
+  assert.ok(lines.some((l) => l.startsWith('classifier.video: openrouter/video-model — ok,')));
   assert.ok(llm.calls.some((c) => c.options.model === 'openrouter/video-model'));
 });
 
-test('run: ping single-role video form pings media.video.model, and reports no model when it is unset', async () => {
+test('run: ping single-role classifier.video form pings classifier.video, and reports no model when it is unset', async () => {
   const rootDir = makeRoot();
   const hot = hotForPing(rootDir);
-  hot.config.media.video = { model: 'openrouter/video-model' };
+  hot.config.classifier.video = 'openrouter/video-model';
   const llm = fakeLlm(() => ({ text: 'pong', usage: {}, estimated: 1 }));
   const { admin } = makeAdmin(rootDir, { hot, llm });
 
-  const body = await admin.run('ping', { role: 'video' }, {});
+  const body = await admin.run('ping', { role: 'classifier.video' }, {});
   assert.equal(llm.calls.length, 1);
   assert.equal(llm.calls[0].options.model, 'openrouter/video-model');
-  assert.ok(body.startsWith('video: openrouter/video-model — ok,'));
+  assert.ok(body.startsWith('classifier.video: openrouter/video-model — ok,'));
 
   const hotNoVideo = hotForPing(rootDir);
   const llm2 = fakeLlm(() => ({ text: 'pong', usage: {}, estimated: 1 }));
   const { admin: adminNoVideo } = makeAdmin(rootDir, { hot: hotNoVideo, llm: llm2 });
 
-  const noVideoBody = await adminNoVideo.run('ping', { role: 'video' }, {});
+  const noVideoBody = await adminNoVideo.run('ping', { role: 'classifier.video' }, {});
   assert.equal(llm2.calls.length, 0);
-  assert.equal(noVideoBody, 'video: (no model configured)');
+  assert.equal(noVideoBody, 'classifier.video: (no model configured)');
 });
 
-test('run: ping resolves the classifier role to llm.classifierModel when set, media.model when not', async () => {
+test('run: ping classifier.text resolves classifier.text when set, classifier.media when not', async () => {
   const rootDir = makeRoot();
   const hot = hotForPing(rootDir);
   const llm = fakeLlm(() => ({ text: 'pong', usage: {}, estimated: 1 }));
   const { admin: adminFallback } = makeAdmin(rootDir, { hot, llm });
 
-  const fallbackBody = await adminFallback.run('ping', { role: 'classifier' }, {});
-  assert.ok(fallbackBody.startsWith('classifier: anthropic/claude-haiku-4.5 — ok,'));
+  const fallbackBody = await adminFallback.run('ping', { role: 'classifier.text' }, {});
+  assert.ok(fallbackBody.startsWith('classifier.text: anthropic/claude-haiku-4.5 — ok,'));
 
-  const hotWithClassifier = hotForPing(rootDir);
-  hotWithClassifier.config.llm.classifierModel = 'openrouter/classifier-model';
+  const hotWithText = hotForPing(rootDir);
+  hotWithText.config.classifier.text = 'openrouter/text-model';
   const llm2 = fakeLlm(() => ({ text: 'pong', usage: {}, estimated: 1 }));
-  const { admin: adminSet } = makeAdmin(rootDir, { hot: hotWithClassifier, llm: llm2 });
+  const { admin: adminSet } = makeAdmin(rootDir, { hot: hotWithText, llm: llm2 });
 
-  const setBody = await adminSet.run('ping', { role: 'classifier' }, {});
-  assert.ok(setBody.startsWith('classifier: openrouter/classifier-model — ok,'));
-  assert.equal(llm2.calls[0].options.model, 'openrouter/classifier-model');
+  const setBody = await adminSet.run('ping', { role: 'classifier.text' }, {});
+  assert.ok(setBody.startsWith('classifier.text: openrouter/text-model — ok,'));
+  assert.equal(llm2.calls.length, 1);
+  assert.equal(llm2.calls[0].options.model, 'openrouter/text-model');
+});
+
+test('run: ping classifier pings the three classifier roles and no other', async () => {
+  const rootDir = makeRoot();
+  const hot = hotForPing(rootDir);
+  hot.config.classifier.text = 'openrouter/text-model';
+  hot.config.classifier.video = 'openrouter/video-model';
+  const llm = fakeLlm(() => ({ text: 'pong', usage: {}, estimated: 1 }));
+  const describer = fakeYoutubeDescriber({ status: 'ytdlp', detail: '', keySet: false });
+  const { admin } = makeAdmin(rootDir, { hot, llm, describer });
+
+  const lines = (await admin.run('ping', { role: 'classifier' }, {})).split('\n');
+
+  assert.equal(lines.length, 4, 'three role lines and the YouTube line');
+  assert.ok(lines[0].startsWith('classifier.text: openrouter/text-model — ok,'));
+  assert.ok(lines[1].startsWith('classifier.media: anthropic/claude-haiku-4.5 — ok,'));
+  assert.ok(lines[2].startsWith('classifier.video: openrouter/video-model — ok,'));
+  assert.equal(lines[3], 'youtube: yt-dlp ok', 'the YouTube line follows the video role');
+  assert.deepEqual(llm.calls.map((c) => c.options.model).sort(), ['anthropic/claude-haiku-4.5', 'openrouter/text-model', 'openrouter/video-model']);
 });
 
 test('run: ping calls llm.complete with the ping prompt, 16 max tokens, no daily cap and no calibration', async () => {
@@ -933,11 +965,11 @@ test('run: ping single-role form only pings that one role', async () => {
   const llm = fakeLlm(() => ({ text: 'pong', usage: {}, estimated: 1 }));
   const { admin } = makeAdmin(rootDir, { hot, llm });
 
-  const body = await admin.run('ping', { role: 'media' }, {});
+  const body = await admin.run('ping', { role: 'classifier.media' }, {});
 
   assert.equal(llm.calls.length, 1);
   assert.equal(body.split('\n').length, 1);
-  assert.ok(body.startsWith('media: anthropic/claude-haiku-4.5 — ok,'));
+  assert.ok(body.startsWith('classifier.media: anthropic/claude-haiku-4.5 — ok,'));
 });
 
 test('run: ping de-duplicates identical models: one call, reported for every role that uses it', async () => {
@@ -950,12 +982,12 @@ test('run: ping de-duplicates identical models: one call, reported for every rol
   const body = await admin.run('ping', {}, {});
   const lines = body.split('\n');
 
-  assert.equal(llm.calls.length, 2, 'talk+analyzer share one model, media (and classifier, which falls back to it) share another: two calls');
+  assert.equal(llm.calls.length, 2, 'talk+analyzer share one model, classifier.media (and classifier.text, which falls back to it) share another: two calls');
   assert.equal(lines.length, 5, 'still one line per requested role');
   assert.ok(lines.some((l) => l.startsWith('talk: anthropic/claude-opus-4.6 — ok,')));
   assert.ok(lines.some((l) => l.startsWith('analyzer: anthropic/claude-opus-4.6 — ok,')));
-  assert.ok(lines.some((l) => l.startsWith('classifier: anthropic/claude-haiku-4.5 — ok,')));
-  assert.ok(lines.includes('video: (no model configured)'), 'no media.video.model -> skipped, like any role without a model');
+  assert.ok(lines.some((l) => l.startsWith('classifier.text: anthropic/claude-haiku-4.5 — ok,')));
+  assert.ok(lines.includes('classifier.video: (no model configured)'), 'no classifier.video -> skipped, like any role without a model');
 });
 
 // A real "wrong provider keys" 404 body captured from OpenRouter, verbatim -- see the
@@ -996,7 +1028,7 @@ test('run: ping reports a role that returns an HTTP error with its status, a tri
   assert.ok(talkLine.includes('funnel: Add BYOK Endpoints -> 0 endpoints'));
   assert.ok(!talkLine.includes('first hit 0 at'));
   assert.ok(lines.some((l) => l.startsWith('analyzer: openrouter/analyzer-model — ok,')));
-  assert.ok(lines.some((l) => l.startsWith('media: anthropic/claude-haiku-4.5 — ok,')));
+  assert.ok(lines.some((l) => l.startsWith('classifier.media: anthropic/claude-haiku-4.5 — ok,')));
 });
 
 test('run: ping shows both the last step and the first step that hit 0 endpoints, when they differ', async () => {
@@ -3293,14 +3325,14 @@ test('run: ping video appends the YouTube line right after the video line, one p
   for (const [result, expected] of cases) {
     const rootDir = makeRoot();
     const hot = hotForPing(rootDir);
-    hot.config.media.video = { model: 'openrouter/video-model' };
+    hot.config.classifier.video = 'openrouter/video-model';
     const llm = fakeLlm(() => ({ text: 'pong', usage: {}, estimated: 1 }));
     const describer = fakeYoutubeDescriber(result);
     const { admin } = makeAdmin(rootDir, { hot, llm, describer });
 
-    const lines = (await admin.run('ping', { role: 'video' }, {})).split('\n');
+    const lines = (await admin.run('ping', { role: 'classifier.video' }, {})).split('\n');
     assert.equal(lines.length, 2);
-    assert.ok(lines[0].startsWith('video: openrouter/video-model — ok,'));
+    assert.ok(lines[0].startsWith('classifier.video: openrouter/video-model — ok,'));
     assert.equal(lines[1], expected);
     assert.equal(describer.calls, 1);
   }
@@ -3309,13 +3341,13 @@ test('run: ping video appends the YouTube line right after the video line, one p
 test('run: full ping puts the YouTube line right after the video line', async () => {
   const rootDir = makeRoot();
   const hot = hotForPing(rootDir);
-  hot.config.media.video = { model: 'openrouter/video-model' };
+  hot.config.classifier.video = 'openrouter/video-model';
   const llm = fakeLlm(() => ({ text: 'pong', usage: {}, estimated: 1 }));
   const describer = fakeYoutubeDescriber({ status: 'ytdlp', detail: '', keySet: false });
   const { admin } = makeAdmin(rootDir, { hot, llm, describer });
 
   const lines = (await admin.run('ping', {}, {})).split('\n');
-  const at = lines.findIndex((l) => l.startsWith('video: '));
+  const at = lines.findIndex((l) => l.startsWith('classifier.video: '));
   assert.ok(at >= 0);
   assert.equal(lines[at + 1], 'youtube: yt-dlp ok');
   assert.equal(lines.filter((l) => l.startsWith('youtube:')).length, 1);
@@ -3336,24 +3368,24 @@ test('run: ping without the video role never runs the YouTube check', async () =
 test('run: ping video reports a throwing YouTube check as failed, keeping the model line', async () => {
   const rootDir = makeRoot();
   const hot = hotForPing(rootDir);
-  hot.config.media.video = { model: 'openrouter/video-model' };
+  hot.config.classifier.video = 'openrouter/video-model';
   const llm = fakeLlm(() => ({ text: 'pong', usage: {}, estimated: 1 }));
   const { admin } = makeAdmin(rootDir, { hot, llm, describer: fakeYoutubeDescriber(new Error('boom')) });
 
-  const lines = (await admin.run('ping', { role: 'video' }, {})).split('\n');
-  assert.ok(lines[0].startsWith('video: openrouter/video-model — ok,'));
+  const lines = (await admin.run('ping', { role: 'classifier.video' }, {})).split('\n');
+  assert.ok(lines[0].startsWith('classifier.video: openrouter/video-model — ok,'));
   assert.equal(lines[1], 'youtube: check failed');
 });
 
 test('run: ping video with the ping label missing still appends the YouTube line', async () => {
   const rootDir = makeRoot();
   const hot = hotForPing(rootDir, { label: false });
-  hot.config.media.video = { model: 'openrouter/video-model' };
+  hot.config.classifier.video = 'openrouter/video-model';
   const llm = fakeLlm(() => ({ text: 'pong', usage: {}, estimated: 1 }));
   const describer = fakeYoutubeDescriber({ status: 'blocked', detail: '', keySet: false });
   const { admin } = makeAdmin(rootDir, { hot, llm, describer });
 
-  const lines = (await admin.run('ping', { role: 'video' }, {})).split('\n');
+  const lines = (await admin.run('ping', { role: 'classifier.video' }, {})).split('\n');
   assert.equal(llm.calls.length, 0);
   assert.equal(lines[1], 'youtube: blocked (set YOUTUBE_API_KEY)');
 });

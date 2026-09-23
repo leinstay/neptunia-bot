@@ -431,6 +431,18 @@ test('describe: passes llm.timeoutMs (the chat timeout, not the analyzer\'s) as 
   assert.equal(llm.calls[0].options.timeoutMs, 90000);
 });
 
+test('describe: the picture model is classifier.media, over the deprecated media.model', async () => {
+  const run = async (config) => {
+    const hot = fakeHot({ config });
+    const llm = fakeLlm({ text: 'a cat' });
+    const describer = createDescriber({ hot, store: createStore({ dataDir: tmpDataDir() }), llm, imageFetcher: fakeImageFetcher() });
+    await describer.describe('g1', pictureItem('a1'));
+    return llm.calls[0].options.model;
+  };
+  assert.equal(await run({ classifier: { media: 'x/vision' } }), 'x/vision');
+  assert.equal(await run({ classifier: { media: null } }), 'x/haiku', 'an old config.local.json media.model still works');
+});
+
 // --- describeMany --------------------------------------------------------
 
 test('describeMany: caps NEW descriptions at maxNew, cache hits are free', async () => {
@@ -639,6 +651,26 @@ test('describeVideo: attachment is watched through a data URL with the video set
   assert.equal(options.skipCalibration, true, 'a video request must never feed the text calibration');
   assert.equal(options.countAgainstDailyCap, true);
   assert.equal(state.data.videoCount, 1);
+});
+
+test('describeVideo: the video model is classifier.video, over the deprecated media.video.model', async () => {
+  const withNew = videoHot();
+  withNew.config.classifier = { video: 'x/new-video', media: 'x/vision' };
+  const fresh = videoDescriber({ hot: withNew });
+  await fresh.describer.describeVideo('g1', videoAttachment());
+  assert.equal(fresh.llm.calls[0].options.model, 'x/new-video');
+
+  const old = videoDescriber();
+  await old.describer.describeVideo('g1', videoAttachment());
+  assert.equal(old.llm.calls[0].options.model, 'x/video-model', 'an old config.local.json media.video.model still works');
+});
+
+test('describe: config.json ships the helper models under classifier, none under media', () => {
+  const shipped = JSON.parse(fs.readFileSync(new URL('../config.json', import.meta.url), 'utf8'));
+  assert.equal(typeof shipped.classifier.media, 'string');
+  assert.equal(typeof shipped.classifier.video, 'string');
+  assert.equal('model' in shipped.media, false);
+  assert.equal('model' in shipped.media.video, false);
 });
 
 test('describeVideo: a direct-URL site within maxSeconds sends the public URL with the pinned provider', async () => {
@@ -1508,7 +1540,7 @@ test('rewatchVideo: one fetch and one video request with the question and answer
   assert.equal(system.content, 'Question: De quelle couleur est la voiture ?. At most 1200 characters.');
   assert.deepEqual(user.content, [{ type: 'video_url', video_url: { url: CLIP_DATA_URL } }]);
   const options = llm.calls[0].options;
-  assert.equal(options.model, 'x/video-model', 'the second look uses media.video.model');
+  assert.equal(options.model, 'x/video-model', 'the second look uses the video model (here the deprecated media.video.model)');
   assert.equal(options.maxOutputTokens, 600);
   assert.equal(options.maxRequestTokens, 60_000);
   assert.equal(options.videoSeconds, 12);
@@ -1519,6 +1551,14 @@ test('rewatchVideo: one fetch and one video request with the question and answer
   const keys = Object.keys(store.getMediaCache('g1')).filter((k) => k.startsWith('video:v1:q:'));
   assert.equal(keys.length, 1);
   assert.equal(store.getMediaCache('g1')[keys[0]].answer, 'la voiture est rouge');
+});
+
+test('rewatchVideo: the second look uses classifier.video when set', async () => {
+  const hot = rewatchHot();
+  hot.config.classifier = { video: 'x/new-video' };
+  const { describer, llm } = videoDescriber({ hot, llm: fakeLlm({ text: 'rouge' }), now: clock() });
+  await describer.rewatchVideo('g1', videoAttachment(), 'De quelle couleur ?');
+  assert.equal(llm.calls[0].options.model, 'x/new-video');
 });
 
 test('rewatchVideo: a pinnable link goes out by URL with the pinned provider, like a watch', async () => {

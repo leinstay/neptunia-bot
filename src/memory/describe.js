@@ -61,6 +61,7 @@ import { createVideoFetcher } from '../discord/fetch-video.js';
 import { isDirectUrlSite, safeLocation, youtubeVideoId } from '../discord/video-sites.js';
 import { TokenLimitError, DailyCapError } from '../llm/openrouter.js';
 import { clampText } from './clamp.js';
+import { classifierMediaModel, classifierVideoModel } from '../behavior/mention.js';
 import { createYoutubeCheck } from './youtube-check.js';
 import { log } from '../log.js';
 
@@ -230,7 +231,7 @@ export function createDescriber({
           { role: 'user', content: [{ type: 'image_url', image_url: { url: downloaded.dataUrl } }] },
         ],
         {
-          model: mediaCfg.model,
+          model: classifierMediaModel(hot.config),
           maxOutputTokens: mediaCfg.maxOutputTokens,
           countAgainstDailyCap,
           // A vision request has its own (usually cheap/fast) model, but still
@@ -404,7 +405,7 @@ export function createDescriber({
    */
   function videoRequestOptions(videoCfg, media, { maxOutputTokens, countAgainstDailyCap }) {
     return {
-      model: videoCfg.model,
+      model: classifierVideoModel(hot.config),
       maxOutputTokens,
       timeoutMs: videoCfg.timeoutMs,
       videoSeconds: media.seconds ?? videoCfg.maxSeconds,

@@ -135,14 +135,55 @@ export function parseFollowUpVerdict(text) {
   return firstWord.toLowerCase().startsWith('y') ? 'yes' : 'no';
 }
 
+// The helper models, grouped by modality under the `classifier` config block.
+// Each resolver takes the full hot config at the moment of use.
+
 /**
- * The model id of the cheap classifier role (the address classifier, the
- * re-watch classifier): `llm.classifierModel`, else the DEPRECATED
- * `mention.followUpModel` (kept only so an old config.local.json still
- * works), else `media.model`; `undefined` when none is set.
+ * The text classifier model (the address classifier, the re-watch
+ * classifier): `classifier.text`, else the DEPRECATED `llm.classifierModel`,
+ * else the DEPRECATED `mention.followUpModel` (both kept only so an old
+ * config.local.json still works), else the media model
+ * (classifierMediaModel); `undefined` when none is set.
+ * @param {object|undefined} config  the full hot config
+ * @returns {string|undefined}
+ */
+export function classifierTextModel(config) {
+  return (
+    config?.classifier?.text ||
+    config?.llm?.classifierModel ||
+    config?.mention?.followUpModel ||
+    classifierMediaModel(config)
+  );
+}
+
+/**
+ * The picture model (the media describer): `classifier.media`, else the
+ * DEPRECATED `media.model` (an old config.local.json). No further fallback:
+ * the describer needs a vision-capable model. `undefined` when none is set.
+ * @param {object|undefined} config  the full hot config
+ * @returns {string|undefined}
+ */
+export function classifierMediaModel(config) {
+  return config?.classifier?.media || config?.media?.model || undefined;
+}
+
+/**
+ * The video model (the video describer and its second look):
+ * `classifier.video`, else the DEPRECATED `media.video.model` (an old
+ * config.local.json). `undefined` when none is set.
+ * @param {object|undefined} config  the full hot config
+ * @returns {string|undefined}
+ */
+export function classifierVideoModel(config) {
+  return config?.classifier?.video || config?.media?.video?.model || undefined;
+}
+
+/**
+ * DEPRECATED alias of classifierTextModel, kept for callers written against
+ * the earlier `llm.classifierModel` shape.
  * @param {object|undefined} config  the full hot config
  * @returns {string|undefined}
  */
 export function classifierModelOf(config) {
-  return config?.llm?.classifierModel || config?.mention?.followUpModel || config?.media?.model || undefined;
+  return classifierTextModel(config);
 }

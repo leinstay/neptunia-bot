@@ -11,6 +11,9 @@ import {
   isFollowUpOpen,
   followUpPreFilter,
   classifierModelOf,
+  classifierTextModel,
+  classifierMediaModel,
+  classifierVideoModel,
   parseFollowUpVerdict,
 } from '../src/behavior/mention.js';
 
@@ -410,4 +413,43 @@ test('classifierModelOf: falls back to media.model, and to undefined with nothin
   assert.equal(classifierModelOf({ llm: { classifierModel: null }, media: { model: 'x/media' } }), 'x/media');
   assert.equal(classifierModelOf({}), undefined);
   assert.equal(classifierModelOf(undefined), undefined);
+});
+
+test('classifierTextModel: classifier.text wins over every deprecated key and the media model', () => {
+  const config = {
+    classifier: { text: 'x/text', media: 'x/media' },
+    llm: { classifierModel: 'x/llm-classifier' },
+    mention: { followUpModel: 'x/old' },
+    media: { model: 'x/old-media' },
+  };
+  assert.equal(classifierTextModel(config), 'x/text');
+});
+
+test('classifierTextModel: the deprecated llm.classifierModel, then mention.followUpModel, then the media model', () => {
+  const base = { classifier: { text: null, media: 'x/media' } };
+  assert.equal(classifierTextModel({ ...base, llm: { classifierModel: 'x/llm-classifier' }, mention: { followUpModel: 'x/old' } }), 'x/llm-classifier');
+  assert.equal(classifierTextModel({ ...base, mention: { followUpModel: 'x/old' } }), 'x/old');
+  assert.equal(classifierTextModel(base), 'x/media');
+  assert.equal(classifierTextModel({ media: { model: 'x/old-media' } }), 'x/old-media', 'the media fallback goes through classifierMediaModel');
+  assert.equal(classifierTextModel({}), undefined);
+  assert.equal(classifierTextModel(undefined), undefined);
+});
+
+test('classifierModelOf: an alias of classifierTextModel', () => {
+  const config = { classifier: { text: 'x/text' }, llm: { classifierModel: 'x/llm-classifier' } };
+  assert.equal(classifierModelOf(config), classifierTextModel(config));
+});
+
+test('classifierMediaModel: classifier.media, else the deprecated media.model, and nothing further', () => {
+  assert.equal(classifierMediaModel({ classifier: { media: 'x/media' }, media: { model: 'x/old-media' } }), 'x/media');
+  assert.equal(classifierMediaModel({ classifier: { media: null }, media: { model: 'x/old-media' } }), 'x/old-media');
+  assert.equal(classifierMediaModel({ classifier: { text: 'x/text' }, llm: { model: 'x/talk', classifierModel: 'x/c' } }), undefined, 'never a text-only model');
+  assert.equal(classifierMediaModel(undefined), undefined);
+});
+
+test('classifierVideoModel: classifier.video, else the deprecated media.video.model', () => {
+  assert.equal(classifierVideoModel({ classifier: { video: 'x/video' }, media: { video: { model: 'x/old-video' } } }), 'x/video');
+  assert.equal(classifierVideoModel({ classifier: { video: null }, media: { video: { model: 'x/old-video' } } }), 'x/old-video');
+  assert.equal(classifierVideoModel({ classifier: { media: 'x/media' }, media: { model: 'x/old-media' } }), undefined, 'never the picture model');
+  assert.equal(classifierVideoModel(undefined), undefined);
 });
