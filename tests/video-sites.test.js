@@ -118,10 +118,10 @@ test('ytdlpProbeArgs: metadata-only arguments', () => {
   });
 });
 
-test('ytdlpClipArgs: clip download arguments, one element per token', () => {
-  const out = ytdlpClipArgs('https://youtu.be/abc', {
-    ytdlpPath: '/opt/yt-dlp', ffmpegPath: '/usr/bin/ffmpeg', maxSeconds: 60, maxBytes: 8_000_000, outPath: '/tmp/d/clip.mp4',
-  });
+const CLIP = { ytdlpPath: '/opt/yt-dlp', maxSeconds: 60, maxBytes: 8_000_000, outPath: '/tmp/d/clip.mp4' };
+
+test('ytdlpClipArgs: a long or unknown video is cut to its first maxSeconds, one element per token', () => {
+  const out = ytdlpClipArgs('https://youtu.be/abc', { ...CLIP, ffmpegPath: '/usr/bin/ffmpeg', durationSec: 125 });
   assert.deepEqual(out, {
     command: '/opt/yt-dlp',
     args: [
@@ -137,6 +137,57 @@ test('ytdlpClipArgs: clip download arguments, one element per token', () => {
       'https://youtu.be/abc',
     ],
   });
+});
+
+test('ytdlpClipArgs: a null or missing duration keeps the cut', () => {
+  for (const durationSec of [null, undefined, Number.NaN]) {
+    const { args } = ytdlpClipArgs('https://youtu.be/abc', { ...CLIP, ffmpegPath: '/usr/bin/ffmpeg', durationSec });
+    assert.equal(args[args.indexOf('--download-sections') + 1], '*0-60');
+    assert.ok(args.includes('--force-keyframes-at-cuts'));
+  }
+});
+
+test('ytdlpClipArgs: a video no longer than maxSeconds is downloaded whole, without a cut', () => {
+  for (const durationSec of [14, 60]) {
+    const out = ytdlpClipArgs('https://youtu.be/abc', { ...CLIP, ffmpegPath: '/usr/bin/ffmpeg', durationSec });
+    assert.deepEqual(out, {
+      command: '/opt/yt-dlp',
+      args: [
+        '--no-playlist', '--no-warnings', '--quiet',
+        '--ffmpeg-location', '/usr/bin/ffmpeg',
+        '-f', 'bv*[height<=360]+ba/b[height<=360]/w',
+        '--merge-output-format', 'mp4',
+        '--max-filesize', '8000000',
+        '-o', '/tmp/d/clip.mp4',
+        '--',
+        'https://youtu.be/abc',
+      ],
+    });
+  }
+});
+
+test('ytdlpClipArgs: a bare ffmpeg name omits --ffmpeg-location so yt-dlp searches PATH', () => {
+  const { args } = ytdlpClipArgs('https://youtu.be/abc', { ...CLIP, ffmpegPath: 'ffmpeg', durationSec: null });
+  assert.equal(args.includes('--ffmpeg-location'), false);
+  assert.equal(args.includes('ffmpeg'), false);
+  assert.equal(args[args.indexOf('--download-sections') + 1], '*0-60');
+  const short = ytdlpClipArgs('https://youtu.be/abc', { ...CLIP, ffmpegPath: 'ffmpeg', durationSec: 14 }).args;
+  assert.deepEqual(short, [
+    '--no-playlist', '--no-warnings', '--quiet',
+    '-f', 'bv*[height<=360]+ba/b[height<=360]/w',
+    '--merge-output-format', 'mp4',
+    '--max-filesize', '8000000',
+    '-o', '/tmp/d/clip.mp4',
+    '--',
+    'https://youtu.be/abc',
+  ]);
+});
+
+test('ytdlpClipArgs: a path with either separator is passed as --ffmpeg-location', () => {
+  for (const ffmpegPath of ['/usr/local/bin/ffmpeg', 'C:\\tools\\ffmpeg.exe', './bin/ffmpeg']) {
+    const { args } = ytdlpClipArgs('https://youtu.be/abc', { ...CLIP, ffmpegPath, durationSec: null });
+    assert.equal(args[args.indexOf('--ffmpeg-location') + 1], ffmpegPath);
+  }
 });
 
 test('ffmpegTrimArgs: trim and re-encode arguments', () => {

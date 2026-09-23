@@ -156,22 +156,32 @@ export function ytdlpProbeArgs(url, { ytdlpPath } = {}) {
 }
 
 /**
- * A yt-dlp run that downloads only the first `maxSeconds` of the video at
- * low resolution, merged into one mp4 at `outPath`.
+ * A yt-dlp run that downloads a video at low resolution, merged into one mp4
+ * at `outPath`. A video longer than `maxSeconds` (or of unknown length) is
+ * cut to its first `maxSeconds`, which needs ffmpeg; a known duration within
+ * `maxSeconds` is downloaded whole, with no cut. `--ffmpeg-location` is passed
+ * only when `ffmpegPath` contains a path separator: yt-dlp resolves the value
+ * as a path, so a bare name like `ffmpeg` is left to its own PATH search.
  * @param {string} url
- * @param {{ ytdlpPath: string, ffmpegPath: string, maxSeconds: number, maxBytes: number, outPath: string }} options
+ * @param {{ ytdlpPath: string, ffmpegPath: string, maxSeconds: number, maxBytes: number, outPath: string,
+ *   durationSec?: number|null }} options
  * @returns {{ command: string, args: string[] }}
  */
-export function ytdlpClipArgs(url, { ytdlpPath, ffmpegPath, maxSeconds, maxBytes, outPath } = {}) {
+export function ytdlpClipArgs(url, {
+  ytdlpPath, ffmpegPath, maxSeconds, maxBytes, outPath, durationSec = null,
+} = {}) {
+  const ffmpegPathStr = ffmpegPath == null ? '' : String(ffmpegPath);
+  const location = /[\\/]/.test(ffmpegPathStr) ? ['--ffmpeg-location', ffmpegPathStr] : [];
+  const whole = Number.isFinite(durationSec) && durationSec <= maxSeconds;
+  const cut = whole ? [] : ['--download-sections', `*0-${maxSeconds}`, '--force-keyframes-at-cuts'];
   return {
     command: ytdlpPath,
     args: [
       '--no-playlist', '--no-warnings', '--quiet',
-      '--ffmpeg-location', String(ffmpegPath),
+      ...location,
       '-f', YTDLP_FORMAT,
       '--merge-output-format', 'mp4',
-      '--download-sections', `*0-${maxSeconds}`,
-      '--force-keyframes-at-cuts',
+      ...cut,
       '--max-filesize', String(maxBytes),
       '-o', String(outPath),
       '--',

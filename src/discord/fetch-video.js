@@ -353,7 +353,8 @@ export function createVideoFetcher({
   /**
    * yt-dlp clip of the first `maxSeconds` of a video-site link, inlined as an
    * mp4 data URL. `durationSec` (from a probe) lowers the reported seconds
-   * when the video is shorter. Never rejects.
+   * when the video is shorter, and a known duration within `maxSeconds` is
+   * downloaded whole without a cut (see ytdlpClipArgs). Never rejects.
    * @param {string} url
    * @param {{ ytdlpPath: string, ffmpegPath: string, maxSeconds: number, maxBytes: number,
    *   toolTimeoutMs: number, durationSec?: number|null }} options
@@ -368,7 +369,7 @@ export function createVideoFetcher({
       dir = await makeWorkDir();
       const outPath = path.join(dir, 'clip.mp4');
       const run = await runTool(
-        ytdlpClipArgs(url, { ytdlpPath, ffmpegPath, maxSeconds, maxBytes, outPath }),
+        ytdlpClipArgs(url, { ytdlpPath, ffmpegPath, maxSeconds, maxBytes, outPath, durationSec }),
         toolTimeoutMs,
       );
       if (run.timedOut) return fail('site', url, 'timeout', { code: runCode(run) });

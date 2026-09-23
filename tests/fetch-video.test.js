@@ -417,14 +417,29 @@ test('fetchSiteClip: returns the downloaded clip as an mp4 data URL and removes 
   const args = calls[0].args;
   assert.equal(args[args.indexOf('--download-sections') + 1], '*0-60');
   assert.equal(args[args.indexOf('--max-filesize') + 1], '1000');
+  assert.equal(args.includes('--ffmpeg-location'), false, 'a bare ffmpeg name is left to PATH');
   assert.ok(args[args.indexOf('-o') + 1].startsWith(tmpDir));
   assert.deepEqual(await leftovers(), []);
 });
 
-test('fetchSiteClip: a shorter probed duration is reported as seconds', async () => {
-  const fetcher = makeFetcher({ spawnImpl: fakeSpawn(writesOutput(10, '-o')).spawnImpl, tmpDir });
+test('fetchSiteClip: a shorter probed duration is reported as seconds and skips the cut', async () => {
+  const { spawnImpl, calls } = fakeSpawn(writesOutput(10, '-o'));
+  const fetcher = makeFetcher({ spawnImpl, tmpDir });
   const result = await fetcher.fetchSiteClip(SITE_URL, { ...OPTS, durationSec: 14 });
   assert.equal(result.seconds, 14);
+  const args = calls[0].args;
+  assert.equal(args.includes('--download-sections'), false);
+  assert.equal(args.includes('--force-keyframes-at-cuts'), false);
+});
+
+test('fetchSiteClip: a longer probed duration keeps the cut; a path ffmpeg is passed on', async () => {
+  const { spawnImpl, calls } = fakeSpawn(writesOutput(10, '-o'));
+  const fetcher = makeFetcher({ spawnImpl, tmpDir });
+  const result = await fetcher.fetchSiteClip(SITE_URL, { ...OPTS, ffmpegPath: '/usr/bin/ffmpeg', durationSec: 125 });
+  assert.equal(result.seconds, 60);
+  const args = calls[0].args;
+  assert.equal(args[args.indexOf('--download-sections') + 1], '*0-60');
+  assert.equal(args[args.indexOf('--ffmpeg-location') + 1], '/usr/bin/ffmpeg');
 });
 
 test('fetchSiteClip: ENOENT -> tool, non-zero -> download, hang -> timeout, oversize -> size; no leftovers', async () => {
