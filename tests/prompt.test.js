@@ -1552,3 +1552,30 @@ test('buildRequest: under a tight caps.people, the member asked about survives w
   assert.ok(user.includes('## Wanda'), 'the member asked about must survive the tight cap');
   assert.ok(request.stats.people.dropped > 0, 'at least one active participant is trimmed under the tight cap');
 });
+
+// --- <senses>: the second look on a question (videoRewatch) --------------------------
+
+test('buildRequest: video watching on and videoRewatch missing (counts as on) -> the videoRewatch line right after the video line', () => {
+  const config = fakeConfig({ features: { vision: true, mediaDescriptions: true } });
+  const lines = sensesOf(buildRequest(baseInput({ config }))).split('\n');
+  const at = lines.indexOf(labels.senses.videoWatch);
+  assert.ok(at !== -1);
+  assert.equal(lines[at + 1], labels.senses.videoRewatch);
+});
+
+test('buildRequest: videoRewatch false, video watching off, or no videoRewatch label -> no videoRewatch line', () => {
+  const cases = [
+    { features: { vision: true, mediaDescriptions: true, videoRewatch: false } },
+    { features: { vision: true, mediaDescriptions: true, videoDescriptions: false } },
+    { features: { vision: true, mediaDescriptions: false } },
+  ];
+  for (const overrides of cases) {
+    const senses = sensesOf(buildRequest(baseInput({ config: fakeConfig(overrides) })));
+    assert.ok(!senses.includes(labels.senses.videoRewatch), JSON.stringify(overrides));
+  }
+  const oldLabels = { ...labels, senses: { ...labels.senses, videoRewatch: undefined } };
+  const config = fakeConfig({ features: { vision: true, mediaDescriptions: true } });
+  const senses = sensesOf(buildRequest(baseInput({ config, prompts: fakePrompts({ labels: oldLabels }) })));
+  assert.ok(senses.includes(labels.senses.videoWatch));
+  assert.ok(!senses.includes(labels.senses.videoRewatch));
+});

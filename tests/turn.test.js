@@ -6,7 +6,8 @@
 // them.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { between, typingMs, resolveMentions, createTurnRunner } from '../src/behavior/turn.js';
+import { between, typingMs, resolveMentions, createTurnRunner, parseRewatchPick } from '../src/behavior/turn.js';
+import { fill } from '../src/discord/format.js';
 import { labels } from './fixtures/labels.js';
 
 function rngReturning(value) {
@@ -1164,4 +1165,174 @@ test('createTurnRunner: features.dryRun=true on a follow-up turn logs replyTo=nu
   assert.ok(sendLine);
   assert.equal(sendLine.replyTo, null, 'a follow-up turn never carries a reply target, even in the dry-run log');
   assert.equal(sendLine.text, 'hi');
+});
+
+// ---------------------------------------------------------------------------
+// The re-watch on a question (features.videoRewatch).
+
+test('parseRewatchPick: none (any case), garbage, an unknown id or an empty question -> null', () => {
+  const ids = ['va', 'video:url:abc'];
+  for (const raw of ['none', 'NONE', '  None  ', '', 'va', 'maybe the first one', 'vb | what colour?', 'va |   ', ' | what?', null]) {
+    assert.equal(parseRewatchPick(raw, ids), null, String(raw));
+  }
+});
+
+test('parseRewatchPick: <id> | <question> picks that candidate; only the first line counts; the question is cut to 300 chars', () => {
+  const ids = ['va', 'video:url:abc'];
+  assert.deepEqual(parseRewatchPick('  video:url:abc |  τι χρώμα έχει;  \nva | other', ids), {
+    id: 'video:url:abc',
+    question: 'τι χρώμα έχει;',
+  });
+  const long = parseRewatchPick(`va | ${'é'.repeat(400)}`, ids);
+  assert.equal([...long.question].length, 300);
+});
+
+/** fakeVideoDescriber plus rewatchVideo, answering every call with `answer`. */
+function fakeRewatchDescriber(statesById, answer = { question: 'q', text: 'κόκκινο' }) {
+  const base = fakeVideoDescriber(statesById);
+  const rewatchCalls = [];
+  return {
+    ...base,
+    rewatchCalls,
+    rewatchVideo: async (guildId, item, question) => {
+      rewatchCalls.push({ guildId, item, question });
+      return answer ? { ...answer, question } : null;
+    },
+  };
+}
+
+/** An llm fake routing the re-watch classifier (system = REWATCH_SYSTEM) apart from the turn itself. */
+const REWATCH_SYSTEM = 'Pick the video the message to {{name}} asks about; {{name}} saw them.';
+function rewatchLlm(classifierText, turnText = '<msg>ok</msg>') {
+  const classifierCalls = [];
+  const turnCalls = [];
+  return {
+    classifierCalls,
+    turnCalls,
+    complete: async (messages, options) => {
+      if (messages[0].content.startsWith('Pick the video')) {
+        classifierCalls.push({ messages, options });
+        if (classifierText instanceof Error) throw classifierText;
+        return { text: classifierText, usage: {}, estimated: 5 };
+      }
+      turnCalls.push({ messages, options });
+      return { text: turnText, usage: {}, estimated: 10 };
+    },
+  };
+}
+
+function rewatchHot(features = {}, video = {}, config = {}) {
+  const hot = fakeHot(
+    { mediaDescriptions: true, videoDescriptions: true, vision: false, ...features },
+    {},
+    {
+      media: { model: 'x/haiku', maxPerTurn: 6, filePreviewChars: 500, video: { maxPerTurn: 1, sites: ['youtube.com'], ...video } },
+      mention: { followUpModel: null },
+      ...config,
+    },
+  );
+  hot.config.llm.timeoutMs = 300_000;
+  hot.prompts.rewatch = REWATCH_SYSTEM;
+  return hot;
+}
+
+/** A watched video message, then the trigger asking about it. */
+function rewatchScene(triggerContent = 'τι χρώμα είναι το αυτοκίνητο;') {
+  const video = videoAttachmentRaw('m1', NOW - 5000, 'va', 'clip.mp4');
+  const trigger = rawMessage({ id: 'm2', ts: NOW - 1000, authorName: 'Zoë', content: triggerContent });
+  return { video, trigger, channel: fakeTurnChannel({ historyMessages: [video, trigger] }) };
+}
+
+async function runRewatch({ hot = rewatchHot(), llm = rewatchLlm('va | τι χρώμα;'), describer, scene = rewatchScene(), turn } = {}) {
+  const d = describer ?? fakeRewatchDescriber({ va: { state: 'watched', text: 'ένα αυτοκίνητο περνά' } });
+  const turns = createTurnRunner({ hot, store: fakeStore(), llm, calibrator: identityCalibrator(), client: fakeClient(), describer: d });
+  await turns.runTurn(turn ?? { channel: scene.channel, mode: 'reply', trigger: normalizedTrigger(scene.trigger), triggerKind: 'mention' });
+  return { describer: d, llm };
+}
+
+test('createTurnRunner: rewatch -- the classifier gets the watched videos and the trigger, then one second look fills videoAnswered', async () => {
+  const { describer, llm } = await runRewatch();
+
+  assert.equal(llm.classifierCalls.length, 1);
+  const { messages, options } = llm.classifierCalls[0];
+  assert.equal(messages[0].content, 'Pick the video the message to Bot asks about; Bot saw them.', '{{name}} is the persona\'s display name');
+  assert.equal(
+    messages[1].content,
+    '<videos>\nva | clip.mp4 | ένα αυτοκίνητο περνά\n</videos>\n<candidate>\nZoë: τι χρώμα είναι το αυτοκίνητο;\n</candidate>',
+  );
+  assert.equal(options.model, 'x/haiku', 'rewatch.model and mention.followUpModel unset -> media.model');
+  assert.equal(options.maxOutputTokens, 120);
+  assert.equal(options.timeoutMs, 300_000);
+  assert.equal(options.countAgainstDailyCap, true);
+  assert.equal(options.skipCalibration, true);
+
+  assert.equal(describer.rewatchCalls.length, 1);
+  assert.equal(describer.rewatchCalls[0].item.itemId, 'va');
+  assert.equal(describer.rewatchCalls[0].question, 'τι χρώμα;');
+  const userMessage = llm.turnCalls[0].messages[1].content;
+  const watched = fill(labels.transcript.videoWatched, { name: 'clip.mp4', duration: '0:20', text: 'ένα αυτοκίνητο περνά' });
+  const answered = fill(labels.transcript.videoAnswered, { question: 'τι χρώμα;', text: 'κόκκινο' });
+  assert.ok(userMessage.includes(`${watched} ${answered}`), 'the answer follows the watched tag');
+});
+
+test('createTurnRunner: rewatch -- the classifier model is rewatch.model, else mention.followUpModel, else media.model', async () => {
+  const withRewatch = await runRewatch({ hot: rewatchHot({}, { rewatch: { model: 'x/pick' } }, { mention: { followUpModel: 'x/follow' } }) });
+  assert.equal(withRewatch.llm.classifierCalls[0].options.model, 'x/pick');
+  const withFollowUp = await runRewatch({ hot: rewatchHot({}, {}, { mention: { followUpModel: 'x/follow' } }) });
+  assert.equal(withFollowUp.llm.classifierCalls[0].options.model, 'x/follow');
+});
+
+test('createTurnRunner: rewatch -- none, garbage, an unknown id or a classifier error stop without a second look', async () => {
+  for (const reply of ['none', 'I think the first video', 'vz | τι χρώμα;', new Error('boom')]) {
+    const { describer, llm } = await runRewatch({ llm: rewatchLlm(reply) });
+    assert.equal(llm.classifierCalls.length, 1);
+    assert.equal(describer.rewatchCalls.length, 0, String(reply));
+    assert.equal(llm.turnCalls.length, 1, 'the turn itself still runs');
+    assert.ok(!llm.turnCalls[0].messages[1].content.includes('looked again'));
+  }
+});
+
+test('createTurnRunner: rewatch -- never on a spontaneous turn (no trigger)', async () => {
+  const scene = rewatchScene();
+  const { describer, llm } = await runRewatch({ scene, turn: { channel: scene.channel, mode: 'interject' } });
+  assert.equal(describer.videoCalls.length, 1, 'videos are still watched');
+  assert.equal(llm.classifierCalls.length, 0);
+  assert.equal(describer.rewatchCalls.length, 0);
+});
+
+test('createTurnRunner: rewatch -- no watched video in the last rewatch.recentMessages messages -> no classifier call', async () => {
+  const outOfWindow = await runRewatch({ hot: rewatchHot({}, { rewatch: { recentMessages: 1 } }) });
+  assert.equal(outOfWindow.llm.classifierCalls.length, 0);
+  const notWatched = await runRewatch({ describer: fakeRewatchDescriber({ va: { state: 'limit', reason: 'length' } }) });
+  assert.equal(notWatched.llm.classifierCalls.length, 0);
+  assert.equal(notWatched.describer.rewatchCalls.length, 0);
+});
+
+test('createTurnRunner: rewatch -- features.videoRewatch false, video vision off, or no prompts.rewatch -> no classifier call', async () => {
+  const noPrompt = rewatchHot();
+  delete noPrompt.prompts.rewatch;
+  for (const hot of [rewatchHot({ videoRewatch: false }), rewatchHot({ videoDescriptions: false }), noPrompt]) {
+    const { describer, llm } = await runRewatch({ hot });
+    assert.equal(llm.classifierCalls.length, 0);
+    assert.equal(describer.rewatchCalls.length, 0);
+  }
+});
+
+test('createTurnRunner: rewatch -- a second look that returns null leaves the video watched, without an answer', async () => {
+  const describer = fakeRewatchDescriber({ va: { state: 'watched', text: 'ένα αυτοκίνητο περνά' } }, null);
+  const { llm } = await runRewatch({ describer });
+  assert.equal(describer.rewatchCalls.length, 1);
+  const userMessage = llm.turnCalls[0].messages[1].content;
+  assert.ok(userMessage.includes(fill(labels.transcript.videoWatched, { name: 'clip.mp4', duration: '0:20', text: 'ένα αυτοκίνητο περνά' })));
+  assert.ok(!userMessage.includes('looked again'));
+});
+
+test('createTurnRunner: rewatch -- logs rewatch: classified with counts only, never the question', async () => {
+  const { logs } = await withCapturedLogs(() => runRewatch());
+  const line = logs.find((entry) => entry.msg === 'rewatch: classified' || JSON.stringify(entry).includes('rewatch: classified'));
+  assert.ok(line);
+  const all = JSON.stringify(logs);
+  assert.ok(all.includes('"picked":true'));
+  assert.ok(all.includes('"candidates":1'));
+  assert.ok(!all.includes('τι χρώμα'));
 });

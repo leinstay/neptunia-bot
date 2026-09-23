@@ -1159,3 +1159,44 @@ test('renderTempo: works with a non-English labels object', () => {
   const text = renderTempo(baseTempo({ last10min: 4 }), grLabels);
   assert.ok(text.includes(grLabels.tempo.verdictLive));
 });
+
+// --- formatTranscript: a second look on a question (videoAnswered) -----------------
+
+const answered = { question: 'τι χρώμα είναι;', text: 'κόκκινο' };
+
+test('formatTranscript: a watched video with an answer renders videoAnswered right after videoWatched', () => {
+  const items = videoTranscript([videoMsg()], { videos: new Map([['v1', { state: 'watched', text: 'a dog runs', answer: answered }]]) });
+  assert.ok(items[0].text.endsWith('[video: clip.mp4, 1:05, watched: a dog runs] [looked again for "τι χρώμα είναι;": κόκκινο]'));
+});
+
+test('formatTranscript: a watched link with an answer renders videoAnswered right after linkWatched', () => {
+  const messages = [msg('a', T0, { content: '', links: [ytLink] })];
+  const items = videoTranscript(messages, {
+    videos: new Map([['link:abcd1234', { state: 'watched', text: 'a talk', answer: answered }]]),
+  });
+  assert.ok(items[0].text.endsWith('[link: YouTube — Cool video] [watched: a talk] [looked again for "τι χρώμα είναι;": κόκκινο]'));
+});
+
+test('formatTranscript: labels without videoAnswered render an answered video exactly as a plain watched one', () => {
+  const oldLabels = { ...labels, transcript: { ...labels.transcript, videoAnswered: undefined } };
+  const messages = [msg('a', T0, { content: '', attachments: [{ id: 'v1', kind: 'video', name: 'clip.mp4', durationSec: 65 }], links: [ytLink] })];
+  const context = { attachedIndex: new Map([['v1', 1]]) };
+  const plain = videoTranscript(messages, {
+    labels: oldLabels,
+    ...context,
+    videos: new Map([
+      ['v1', { state: 'watched', text: 'a dog runs' }],
+      ['link:abcd1234', { state: 'watched', text: 'a talk' }],
+    ]),
+  });
+  const withAnswers = videoTranscript(messages, {
+    labels: oldLabels,
+    ...context,
+    videos: new Map([
+      ['v1', { state: 'watched', text: 'a dog runs', answer: answered }],
+      ['link:abcd1234', { state: 'watched', text: 'a talk', answer: answered }],
+    ]),
+  });
+  assert.deepEqual(withAnswers, plain);
+  assert.ok(!withAnswers[0].text.includes('κόκκινο'));
+});

@@ -118,12 +118,21 @@ function truncate(text, maxChars) {
  * `emoji:<id>` — see normalizeMessage). `context.videos` is an optional
  * `Map` of the same ids to a video state (see mediaLabelFor); it only takes
  * effect when the labels carry `transcript.videoWatched`, so an older
- * labels.json renders exactly as before.
+ * labels.json renders exactly as before; a video state's `answer` (a second
+ * look on a question) likewise needs `transcript.videoAnswered`.
  */
 function mediaTags(message, labels, context = {}) {
   const unknownDuration = labels.transcript.unknownDuration ?? '?';
   const videosOn = Boolean(labels.transcript.videoWatched);
-  const videoOf = (id) => (videosOn ? (context.videos?.get(id) ?? null) : null);
+  // A second look's answer (videoAnswered) is a newer, optional key: without
+  // it the video renders exactly as before.
+  const answersOn = Boolean(labels.transcript.videoAnswered);
+  const videoOf = (id) => {
+    const video = videosOn ? (context.videos?.get(id) ?? null) : null;
+    if (!video?.answer || answersOn) return video;
+    const { answer, ...rest } = video;
+    return rest;
+  };
   const tags = [];
   // A video tag's `reason` is a code (media.js is label-free): swap it for
   // its label before filling.

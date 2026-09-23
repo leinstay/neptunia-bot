@@ -457,6 +457,9 @@ function renderSenses(config, labels) {
   // without the video-watching lines falls back to the still-frame ones.
   const videoOn = describedOn && config.features?.videoDescriptions !== false;
   lines.push(videoOn ? (senses.videoWatch ?? senses.videoDescribed) : describedOn ? senses.videoDescribed : senses.videoBlind);
+  // The second look on a question (features.videoRewatch, a missing key
+  // counts as on); an older labels.json without the line shows nothing.
+  if (videoOn && config.features?.videoRewatch !== false && senses.videoRewatch) lines.push(senses.videoRewatch);
 
   // Stickers get their own lines (a picture-format one behaves like an
   // image); senses.lottie only shows up alongside them -- an animated

@@ -255,6 +255,22 @@ function linkVideoExtra(video, description) {
 }
 
 /**
+ * The `videoAnswered` extra of a watched video that got a second look on a
+ * question (`video.answer = { question, text }`), else null.
+ */
+function answeredExtra(video) {
+  if (video?.state !== 'watched' || !video.answer) return null;
+  return { key: 'videoAnswered', values: { question: video.answer.question ?? '', text: video.answer.text ?? '' } };
+}
+
+/** `extras` without the nulls: none -> undefined, one -> that tag, more -> the array. */
+function extraOf(...extras) {
+  const kept = extras.flatMap((extra) => (Array.isArray(extra) ? extra : extra ? [extra] : []));
+  if (kept.length === 0) return undefined;
+  return kept.length === 1 ? kept[0] : kept;
+}
+
+/**
  * Choose which `labels.transcript.*` key (and fill values) renders one media
  * item, in priority order: attached to this request (most informative) >
  * described > blind. `item` is a normalized attachment or link/embed item
@@ -281,10 +297,14 @@ function linkVideoExtra(video, description) {
  * src/discord/format.js). A `link` with a video state swaps its one extra for
  * `linkWatched` / `linkNotWatchedFrame` / `linkNotWatched`; when its
  * thumbnail is also attached, `extra` is an array: `frameAttached` first,
- * the video extra second. Every other kind ignores `context.video`.
+ * the video extra second. A watched video (attachment or link) whose state
+ * carries `answer: { question, text }` (a second look on a question, see
+ * src/memory/describe.js#rewatchVideo) appends `videoAnswered` after every
+ * other tag of the item. Every other kind ignores `context.video`.
  * @param {object} item
  * @param {{ attachedIndex?: number|null, description?: string|null, unknownDuration?: string,
- *   video?: { state: 'watched'|'limit'|'error', text?: string, reason?: string }|null }} [context]
+ *   video?: { state: 'watched'|'limit'|'error', text?: string, reason?: string,
+ *     answer?: { question: string, text: string } }|null }} [context]
  * @returns {{ key: string, values: object,
  *   extra?: { key: string, values: object }|{ key: string, values: object }[] }}
  */
@@ -293,7 +313,7 @@ export function mediaLabelFor(item, { attachedIndex = null, description = null, 
   if (attachedIndex != null && isPicture && item.kind !== 'link') {
     if (item.kind === 'video' || item.kind === 'gif') {
       const base = mediaLabelFor(item, { description, unknownDuration, video });
-      return { ...base, extra: { key: 'frameAttached', values: { n: attachedIndex } } };
+      return { ...base, extra: extraOf({ key: 'frameAttached', values: { n: attachedIndex } }, base.extra) };
     }
     return { key: 'imageAttached', values: { n: attachedIndex } };
   }
@@ -309,7 +329,9 @@ export function mediaLabelFor(item, { attachedIndex = null, description = null, 
       const name = item.name ?? '';
       const duration = durationOrUnknown(item.durationSec, unknownDuration);
       if (video?.state === 'watched') {
-        return { key: 'videoWatched', values: { name, duration, text: video.text ?? '' } };
+        const watched = { key: 'videoWatched', values: { name, duration, text: video.text ?? '' } };
+        const extra = extraOf(answeredExtra(video));
+        return extra ? { ...watched, extra } : watched;
       }
       if (video) {
         const reason = videoReasonCode(video);
@@ -336,7 +358,7 @@ export function mediaLabelFor(item, { attachedIndex = null, description = null, 
       const frame = attachedIndex != null && item.thumbnailUrl ? { key: 'frameAttached', values: { n: attachedIndex } } : null;
       if (video) {
         const videoExtra = linkVideoExtra(video, description);
-        return { ...base, extra: frame ? [frame, videoExtra] : videoExtra };
+        return { ...base, extra: extraOf(frame, videoExtra, answeredExtra(video)) };
       }
       if (frame) return { ...base, extra: frame };
       return description ? { ...base, extra: { key: 'thumbnailDescribed', values: { text: description } } } : base;

@@ -40,7 +40,17 @@
 // fetch and kept even when the fetch or the request fails. Summaries are
 // data: never logged. `checkYoutube()` probes one canary video to tell the
 // operator which link of the YouTube duration chain works here.
+//
+// A summary is capped at `media.video.summaryChars` (the describe-video
+// prompt learns the cap through `{{maxChars}}`). `rewatchVideo()` is the
+// second look on a question (features.videoRewatch, a missing key counts as
+// on): the same media fetch as a watch, asked one question through the
+// `rewatch-answer` prompt. It has its own daily counter
+// (`state.data.rewatchDay` / `rewatchCount`, `media.video.rewatch.maxPerDay`)
+// on top of the ordinary video one; its answer is cached for an hour under
+// `video:<itemId>:q:<hash of the question>`, failures never.
 
+import { createHash } from 'node:crypto';
 import { mediaProxyUrl } from '../discord/media.js';
 import { createImageFetcher } from '../discord/fetch-image.js';
 import { createVideoFetcher } from '../discord/fetch-video.js';
@@ -51,7 +61,10 @@ import { createYoutubeCheck } from './youtube-check.js';
 import { log } from '../log.js';
 
 const MISS_TTL_MS = 60 * 60_000;
-const VIDEO_TEXT_CHARS = 600;
+// Only when media.video.summaryChars is missing (config.json always has it).
+const VIDEO_TEXT_CHARS_FALLBACK = 600;
+const REWATCH_ANSWER_CHARS_FALLBACK = 1200;
+const REWATCH_TTL_MS = 60 * 60_000;
 const PERMANENT_VIDEO_MISSES = new Set(['length', 'size']);
 
 /** Whether `item` is one collectVideos candidate (an attached video or a video-site link). */
@@ -61,12 +74,34 @@ function isVideoCandidate(item) {
   );
 }
 
-/** Collapse every run of whitespace to one space, then cap at a word boundary. */
-function cleanVideoText(raw) {
+/** Collapse every run of whitespace to one space, then cap at `maxChars` on a word boundary. */
+function cleanVideoText(raw, maxChars) {
   const collapsed = String(raw ?? '')
     .replace(/\s+/gu, ' ')
     .trim();
-  return clampText(collapsed, VIDEO_TEXT_CHARS, { tolerance: 1 });
+  return clampText(collapsed, maxChars, { tolerance: 1 });
+}
+
+/** A positive number from the config, else `fallback`. */
+function positiveOr(value, fallback) {
+  return typeof value === 'number' && value > 0 ? value : fallback;
+}
+
+/** Fill `{{key}}` placeholders of a prompt file; an unknown key is left as it is (same rule as src/behavior/prompt.js). */
+function fillTemplate(template, values) {
+  return (template ?? '').replace(/\{\{(\w+)\}\}/g, (all, key) =>
+    Object.prototype.hasOwnProperty.call(values, key) ? String(values[key]) : all,
+  );
+}
+
+/** The cache key of one question's answer: lower-cased, whitespace-collapsed, sha1-prefixed. */
+function questionKey(itemId, question) {
+  const normalised = String(question ?? '')
+    .toLowerCase()
+    .replace(/\s+/gu, ' ')
+    .trim();
+  const digest = createHash('sha1').update(normalised).digest('hex').slice(0, 16);
+  return `video:${itemId}:q:${digest}`;
 }
 
 /** Whether `value` is a plain object (a usable OpenRouter `provider` routing block). */
@@ -108,7 +143,7 @@ function trimCache(cache, maxEntries) {
  * @param {object} [deps.imageFetcher]  From createImageFetcher() (src/discord/fetch-image.js).
  * @param {object} [deps.videoFetcher]  From createVideoFetcher() (src/discord/fetch-video.js).
  * @param {{ data: object, markDirty: () => void }} [deps.state]  The persistent state (store.state) holding the
- *   daily video counter; without it the counter lives in memory only.
+ *   daily video and re-watch counters; without it the counters live in memory only.
  * @param {string|null} [deps.youtubeApiKey]  Optional YouTube Data API key (YOUTUBE_API_KEY), handed to
  *   probeYoutube only; never logged.
  */
@@ -309,15 +344,45 @@ export function createDescriber({
     return null;
   }
 
-  /** Today's video count; resets the counter when the day changed (same day logic as the LLM client's). */
-  function videoCountToday() {
+  /**
+   * Today's count of one daily counter (`state.data[dayKey]` / `[countKey]`);
+   * resets it when the day changed (same day logic as the LLM client's).
+   */
+  function countToday(dayKey, countKey) {
     const today = new Date(now()).toISOString().slice(0, 10);
-    if (state.data.videoDay !== today) {
-      state.data.videoDay = today;
-      state.data.videoCount = 0;
+    if (state.data[dayKey] !== today) {
+      state.data[dayKey] = today;
+      state.data[countKey] = 0;
       state.markDirty();
     }
-    return state.data.videoCount ?? 0;
+    return state.data[countKey] ?? 0;
+  }
+
+  /** Today's video count (every watch and every re-watch attempt). */
+  function videoCountToday() {
+    return countToday('videoDay', 'videoCount');
+  }
+
+  /**
+   * The `llm.complete` options of a video request (a watch or a re-watch):
+   * the video model and timeout, the video-only token cap, the pinned
+   * provider only for a public URL, never the text calibration.
+   */
+  function videoRequestOptions(videoCfg, media, { maxOutputTokens, countAgainstDailyCap }) {
+    return {
+      model: videoCfg.model,
+      maxOutputTokens,
+      timeoutMs: videoCfg.timeoutMs,
+      videoSeconds: media.seconds ?? videoCfg.maxSeconds,
+      // Video requests have their own pre-flight cap; every other caller
+      // stays under the global llm.maxRequestTokens.
+      maxRequestTokens: videoCfg.maxRequestTokens,
+      provider: media.pinned ? videoCfg.provider : undefined,
+      countAgainstDailyCap,
+      // A video's provider-counted prompt tokens say nothing about the
+      // text ratio every chat request is checked against.
+      skipCalibration: true,
+    };
   }
 
   /**
@@ -391,6 +456,7 @@ export function createDescriber({
    */
   async function watchVideo(guildId, item, key, promptText, countAgainstDailyCap) {
     const videoCfg = hot.config.media?.video ?? {};
+    const summaryChars = positiveOr(videoCfg.summaryChars, VIDEO_TEXT_CHARS_FALLBACK);
     const report = (result, extra = {}) => {
       log.info('describe: video', {
         source: item.source,
@@ -435,23 +501,10 @@ export function createDescriber({
     try {
       completion = await llm.complete(
         [
-          { role: 'system', content: promptText },
+          { role: 'system', content: fillTemplate(promptText, { maxChars: summaryChars }) },
           { role: 'user', content: [{ type: 'video_url', video_url: { url: media.url } }] },
         ],
-        {
-          model: videoCfg.model,
-          maxOutputTokens: videoCfg.maxOutputTokens,
-          timeoutMs: videoCfg.timeoutMs,
-          videoSeconds: media.seconds ?? videoCfg.maxSeconds,
-          // Video requests have their own pre-flight cap; every other caller
-          // stays under the global llm.maxRequestTokens.
-          maxRequestTokens: videoCfg.maxRequestTokens,
-          provider: media.pinned ? videoCfg.provider : undefined,
-          countAgainstDailyCap,
-          // A video's provider-counted prompt tokens say nothing about the
-          // text ratio every chat request is checked against.
-          skipCalibration: true,
-        },
+        videoRequestOptions(videoCfg, media, { maxOutputTokens: videoCfg.maxOutputTokens, countAgainstDailyCap }),
       );
     } catch (err) {
       const railHit = err instanceof TokenLimitError || err instanceof DailyCapError;
@@ -459,7 +512,7 @@ export function createDescriber({
       return { result: errorMiss(reason, { ...sizes, status: err.statusCode }), sent: !railHit, attempted: true };
     }
 
-    const text = cleanVideoText(completion.text);
+    const text = cleanVideoText(completion.text, summaryChars);
     if (!text) return { result: errorMiss('empty', sizes), sent: true, attempted: true };
 
     putVideoEntry(guildId, key, { text, ts: now(), watched: true });
@@ -545,9 +598,104 @@ export function createDescriber({
     return { videos, newCount };
   }
 
+  /**
+   * The second look on a question: fetch `item` again exactly like a watch
+   * (fetchVideoMedia -- same probe chain, direct-URL rules, caps and pinned
+   * provider) and ask the video model `question` through the
+   * `rewatch-answer` prompt (`{{question}}`, `{{maxChars}}` =
+   * `media.video.rewatch.answerChars`). Needs video vision on,
+   * `features.videoRewatch` not false, the prompt, a video candidate and a
+   * non-empty question. Both daily counters must have room
+   * (`media.video.rewatch.maxPerDay` and `media.video.maxPerDay`); both
+   * slots are reserved before the fetch and kept on failure. An answer is
+   * cached for an hour under `video:<itemId>:q:<hash>`; a failure is never
+   * cached. The question and the answer are data: never logged.
+   * @param {string} guildId
+   * @param {object} item  One collectVideos candidate.
+   * @param {string} question
+   * @returns {Promise<{ question: string, text: string }|null>}
+   */
+  async function rewatchVideo(guildId, item, question) {
+    const features = hot.config.features ?? {};
+    if (features.mediaDescriptions !== true || features.videoDescriptions === false) return null;
+    if (features.videoRewatch === false) return null;
+    const promptText = hot.prompts?.['rewatch-answer'];
+    const asked = String(question ?? '').trim();
+    if (!promptText || !isVideoCandidate(item) || !asked) return null;
+
+    const videoCfg = hot.config.media?.video ?? {};
+    const rewatchCfg = videoCfg.rewatch ?? {};
+    const answerChars = positiveOr(rewatchCfg.answerChars, REWATCH_ANSWER_CHARS_FALLBACK);
+    const report = (outcome, extra = {}) => {
+      log.info('describe: rewatch', {
+        source: item.source,
+        state: outcome,
+        reason: extra.reason ?? null,
+        cached: extra.cached ?? false,
+        seconds: extra.seconds ?? null,
+        location: safeLocation(item.url),
+      });
+    };
+
+    const cache = store.getMediaCache(guildId);
+    const key = questionKey(item.itemId, asked);
+    const hit = cache[key];
+    if (hit && typeof hit.answer === 'string') {
+      if (now() - hit.ts < REWATCH_TTL_MS) {
+        touchKey(cache, key, hit);
+        store.markMediaCacheDirty(guildId);
+        report('answered', { cached: true });
+        return { question: hit.question ?? asked, text: hit.answer };
+      }
+      delete cache[key];
+      store.markMediaCacheDirty(guildId);
+    }
+
+    // Both rails, both reserved synchronously before any await (like a watch).
+    const rewatchedToday = countToday('rewatchDay', 'rewatchCount');
+    const videosToday = videoCountToday();
+    if (rewatchedToday >= (rewatchCfg.maxPerDay ?? Infinity) || videosToday >= (videoCfg.maxPerDay ?? Infinity)) {
+      report('limit', { reason: 'daily' });
+      return null;
+    }
+    state.data.rewatchCount = rewatchedToday + 1;
+    state.data.videoCount = videosToday + 1;
+    state.markDirty();
+
+    const media = await fetchVideoMedia(item, videoCfg);
+    if (!media.ok) {
+      report(PERMANENT_VIDEO_MISSES.has(media.reason) ? 'limit' : 'error', { reason: media.reason ?? 'download' });
+      return null;
+    }
+
+    let completion;
+    try {
+      completion = await llm.complete(
+        [
+          { role: 'system', content: fillTemplate(promptText, { question: asked, maxChars: answerChars }) },
+          { role: 'user', content: [{ type: 'video_url', video_url: { url: media.url } }] },
+        ],
+        videoRequestOptions(videoCfg, media, { maxOutputTokens: rewatchCfg.maxOutputTokens, countAgainstDailyCap: true }),
+      );
+    } catch (err) {
+      const reason = err instanceof TokenLimitError ? 'tokenLimit' : err instanceof DailyCapError ? 'dailyCap' : 'llm';
+      report('error', { reason, seconds: media.seconds ?? null });
+      return null;
+    }
+
+    const text = cleanVideoText(completion.text, answerChars);
+    if (!text) {
+      report('error', { reason: 'empty', seconds: media.seconds ?? null });
+      return null;
+    }
+    putVideoEntry(guildId, key, { answer: text, question: asked, ts: now() });
+    report('answered', { seconds: media.seconds ?? null });
+    return { question: asked, text };
+  }
+
   // Which link of the YouTube duration chain works on this host (src/memory/youtube-check.js):
   // the same fetcher and key as a real link, no LLM call, nothing cached.
   const checkYoutube = createYoutubeCheck({ hot, videoFetcher, youtubeApiKey });
 
-  return { describe, describeMany, describeVideo, describeVideos, checkYoutube };
+  return { describe, describeMany, describeVideo, describeVideos, rewatchVideo, checkYoutube };
 }

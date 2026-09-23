@@ -1317,3 +1317,179 @@ test('describeVideo: a cached length miss with durationSec null or absent (an ol
     assert.equal(store.getMediaCache('g1')[LINK_KEY].watched, true);
   }
 });
+
+// --- account length: media.video.summaryChars ------------------------------
+
+test('describeVideo: the account is capped at media.video.summaryChars and {{maxChars}} is filled with it', async () => {
+  const hot = videoHot({ video: { summaryChars: 40 }, prompts: { 'describe-video': 'Summarise in at most {{maxChars}} characters.' } });
+  const { describer, llm } = videoDescriber({ hot, llm: fakeLlm({ text: `Première scène ${'mot '.repeat(50)}` }) });
+  const { text } = await describer.describeVideo('g1', videoAttachment());
+
+  assert.ok([...text].length <= 40, text);
+  assert.ok(text.startsWith('Première scène mot'));
+  assert.equal(llm.calls[0].messages[0].content, 'Summarise in at most 40 characters.');
+});
+
+test('describeVideo: a larger summaryChars keeps a longer account than the old 600-char cap', async () => {
+  const long = 'mot '.repeat(300).trim();
+  const { describer } = videoDescriber({ hot: videoHot({ video: { summaryChars: 1500 } }), llm: fakeLlm({ text: long }) });
+  const { text } = await describer.describeVideo('g1', videoAttachment());
+  assert.equal(text, long);
+});
+
+// --- rewatchVideo: the second look on a question ---------------------------------
+
+const REWATCH_PROMPT = 'Question: {{question}}. At most {{maxChars}} characters.';
+const REWATCH_CFG = { model: null, maxPerDay: 20, maxOutputTokens: 600, answerChars: 1200, recentMessages: 15 };
+
+function rewatchHot({ features = {}, video = {}, rewatch = {}, prompts = {} } = {}) {
+  return videoHot({
+    features,
+    video: { rewatch: { ...REWATCH_CFG, ...rewatch }, ...video },
+    prompts: { 'rewatch-answer': REWATCH_PROMPT, ...prompts },
+  });
+}
+
+function clock(start = Date.parse('2026-09-23T12:00:00Z')) {
+  let t = start;
+  const now = () => t;
+  now.advance = (ms) => {
+    t += ms;
+  };
+  return now;
+}
+
+test('rewatchVideo: one fetch and one video request with the question and answerChars filled', async () => {
+  const now = clock();
+  const state = fakeState();
+  const { describer, llm, videoFetcher, store } = videoDescriber({
+    hot: rewatchHot(),
+    llm: fakeLlm({ text: '  la voiture   est rouge ' }),
+    state,
+    now,
+  });
+
+  const result = await describer.rewatchVideo('g1', videoAttachment(), 'De quelle couleur est la voiture ?');
+
+  assert.deepEqual(result, { question: 'De quelle couleur est la voiture ?', text: 'la voiture est rouge' });
+  assert.equal(videoFetcher.calls.length, 1);
+  assert.equal(videoFetcher.calls[0].fn, 'fetchAttachment');
+  assert.equal(llm.calls.length, 1);
+  const [system, user] = llm.calls[0].messages;
+  assert.equal(system.content, 'Question: De quelle couleur est la voiture ?. At most 1200 characters.');
+  assert.deepEqual(user.content, [{ type: 'video_url', video_url: { url: CLIP_DATA_URL } }]);
+  const options = llm.calls[0].options;
+  assert.equal(options.model, 'x/video-model', 'the second look uses media.video.model');
+  assert.equal(options.maxOutputTokens, 600);
+  assert.equal(options.maxRequestTokens, 60_000);
+  assert.equal(options.videoSeconds, 12);
+  assert.equal(options.skipCalibration, true);
+  assert.equal(options.countAgainstDailyCap, true);
+  assert.equal(state.data.rewatchCount, 1);
+  assert.equal(state.data.videoCount, 1);
+  const keys = Object.keys(store.getMediaCache('g1')).filter((k) => k.startsWith('video:v1:q:'));
+  assert.equal(keys.length, 1);
+  assert.equal(store.getMediaCache('g1')[keys[0]].answer, 'la voiture est rouge');
+});
+
+test('rewatchVideo: a pinnable link goes out by URL with the pinned provider, like a watch', async () => {
+  const { describer, llm } = videoDescriber({ hot: rewatchHot() });
+  await describer.rewatchVideo('g1', videoLink(), 'τι λέει στο τέλος;');
+  assert.equal(llm.calls[0].messages[1].content[0].video_url.url, 'https://www.youtube.com/watch?v=abc');
+  assert.deepEqual(llm.calls[0].options.provider, VIDEO_CFG.provider);
+  assert.equal(llm.calls[0].options.videoSeconds, 30);
+});
+
+test('rewatchVideo: the answer is capped at rewatch.answerChars', async () => {
+  const { describer } = videoDescriber({ hot: rewatchHot({ rewatch: { answerChars: 30 } }), llm: fakeLlm({ text: 'mot '.repeat(40) }) });
+  const { text } = await describer.rewatchVideo('g1', videoAttachment(), 'q?');
+  assert.ok([...text].length <= 30);
+  assert.ok(text.endsWith('mot'));
+});
+
+test('rewatchVideo: the same question within an hour is free; after an hour it is asked again', async () => {
+  const now = clock();
+  const { describer, llm, videoFetcher, state } = videoDescriber({ hot: rewatchHot(), llm: fakeLlm({ text: 'rouge' }), now });
+
+  await describer.rewatchVideo('g1', videoAttachment(), 'Quelle couleur ?');
+  now.advance(59 * 60_000);
+  const again = await describer.rewatchVideo('g1', videoAttachment(), '  quelle   COULEUR ? ');
+  assert.equal(again.text, 'rouge');
+  assert.equal(videoFetcher.calls.length, 1, 'a cached answer costs no fetch');
+  assert.equal(llm.calls.length, 1);
+  assert.equal(state.data.rewatchCount, 1);
+
+  now.advance(2 * 60_000);
+  await describer.rewatchVideo('g1', videoAttachment(), 'Quelle couleur ?');
+  assert.equal(videoFetcher.calls.length, 2, 'past an hour the answer is stale');
+  assert.equal(llm.calls.length, 2);
+});
+
+test('rewatchVideo: a failure is not cached -- the next call fetches again', async () => {
+  const llm = fakeLlm([new Error('boom'), { text: 'rouge' }]);
+  const { describer, videoFetcher, store } = videoDescriber({ hot: rewatchHot(), llm });
+
+  assert.equal(await describer.rewatchVideo('g1', videoAttachment(), 'Quelle couleur ?'), null);
+  assert.equal(Object.keys(store.getMediaCache('g1')).filter((k) => k.includes(':q:')).length, 0);
+  assert.deepEqual(await describer.rewatchVideo('g1', videoAttachment(), 'Quelle couleur ?'), { question: 'Quelle couleur ?', text: 'rouge' });
+  assert.equal(videoFetcher.calls.length, 2);
+});
+
+test('rewatchVideo: a full re-watch counter or a full video counter refuses without a fetch', async () => {
+  const now = () => Date.parse('2026-09-23T12:00:00Z');
+  const cases = [
+    fakeState({ rewatchDay: '2026-09-23', rewatchCount: 20, videoDay: '2026-09-23', videoCount: 0 }),
+    fakeState({ rewatchDay: '2026-09-23', rewatchCount: 0, videoDay: '2026-09-23', videoCount: 40 }),
+  ];
+  for (const state of cases) {
+    const before = { ...state.data };
+    const { describer, llm, videoFetcher } = videoDescriber({ hot: rewatchHot(), state, now });
+    assert.equal(await describer.rewatchVideo('g1', videoAttachment(), 'q?'), null);
+    assert.equal(videoFetcher.calls.length, 0);
+    assert.equal(llm.calls.length, 0);
+    assert.equal(state.data.rewatchCount, before.rewatchCount);
+    assert.equal(state.data.videoCount, before.videoCount);
+  }
+});
+
+test('rewatchVideo: the re-watch counter resets on a new day; a failed fetch keeps both slots', async () => {
+  const now = () => Date.parse('2026-09-24T00:10:00Z');
+  const state = fakeState({ rewatchDay: '2026-09-23', rewatchCount: 20 });
+  const { describer } = videoDescriber({
+    hot: rewatchHot(),
+    state,
+    now,
+    videoFetcher: fakeVideoFetcher({ attachment: { ok: false, reason: 'download' } }),
+  });
+  assert.equal(await describer.rewatchVideo('g1', videoAttachment(), 'q?'), null);
+  assert.equal(state.data.rewatchDay, '2026-09-24');
+  assert.equal(state.data.rewatchCount, 1);
+  assert.equal(state.data.videoCount, 1);
+});
+
+test('rewatchVideo: feature off, video vision off, missing prompt, a non-video item or an empty question -> null, no fetch', async () => {
+  const cases = [
+    { hot: rewatchHot({ features: { videoRewatch: false } }), item: videoAttachment(), question: 'q?' },
+    { hot: rewatchHot({ features: { videoDescriptions: false } }), item: videoAttachment(), question: 'q?' },
+    { hot: rewatchHot({ prompts: { 'rewatch-answer': undefined } }), item: videoAttachment(), question: 'q?' },
+    { hot: rewatchHot(), item: pictureItem('a1'), question: 'q?' },
+    { hot: rewatchHot(), item: videoAttachment(), question: '   ' },
+  ];
+  for (const { hot, item, question } of cases) {
+    const { describer, llm, videoFetcher } = videoDescriber({ hot });
+    assert.equal(await describer.rewatchVideo('g1', item, question), null);
+    assert.equal(videoFetcher.calls.length, 0);
+    assert.equal(llm.calls.length, 0);
+  }
+});
+
+test('rewatchVideo: logs one describe: rewatch line -- never the question, the answer or a full URL', async () => {
+  const { describer } = videoDescriber({ hot: rewatchHot(), llm: fakeLlm({ text: 'a secret answer' }) });
+  const { logs } = await withCapturedLogs(() => describer.rewatchVideo('g1', videoAttachment(), 'a secret question'));
+  const line = logs.find((entry) => JSON.stringify(entry).includes('describe: rewatch'));
+  assert.ok(line);
+  const all = JSON.stringify(logs);
+  assert.ok(!all.includes('a secret answer'));
+  assert.ok(!all.includes('a secret question'));
+  assert.ok(!all.includes('ex=secret'));
+});

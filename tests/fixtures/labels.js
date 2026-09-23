@@ -46,6 +46,7 @@ export const labels = {
     linkWatched: '[watched: {text}]',
     linkNotWatched: '[not watched: {reason}]',
     linkNotWatchedFrame: '[not watched: {reason}; thumbnail: {text}]',
+    videoAnswered: '[looked again for "{question}": {text}]',
     videoReason: {
       length: 'too long',
       size: 'too big',
@@ -62,6 +63,7 @@ export const labels = {
     videoDescribed: 'videos come with a caption of one frame, never the motion or sound',
     videoBlind: 'you cannot see or hear videos, only their [video] tag',
     videoWatch: 'short videos come with a summary of what was watched, or why not',
+    videoRewatch: 'asked about a watched video, you may get a second look answering that question',
     stickerSee: 'a sticker attached to a request you see with your own eyes',
     stickerDescribed: 'stickers you do not see yourself come with a helper\'s caption',
     stickerBlind: 'stickers you do not see yourself are just a name',

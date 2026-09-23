@@ -64,6 +64,46 @@ function authorNameFor(history, messageId) {
   return message?.authorName ?? null;
 }
 
+const REWATCH_QUESTION_CHARS = 300;
+const REWATCH_SUMMARY_CHARS = 200;
+const REWATCH_CLASSIFIER_MAX_TOKENS = 120;
+
+/**
+ * Parse the re-watch classifier's answer (prompts/rewatch.md): ONE line,
+ * `none` or `<id> | <question>`. Only the first non-empty line counts; `none`
+ * (any case), anything unparsable, an id that is not exactly one of
+ * `candidateIds` or an empty question -> null. The question is trimmed and
+ * cut to 300 characters.
+ * @param {string} raw
+ * @param {string[]} candidateIds
+ * @returns {{ id: string, question: string }|null}
+ */
+export function parseRewatchPick(raw, candidateIds) {
+  const line = String(raw ?? '')
+    .split('\n')
+    .map((l) => l.trim())
+    .find(Boolean);
+  if (!line || /^none$/i.test(line)) return null;
+  const bar = line.indexOf('|');
+  if (bar === -1) return null;
+  const id = line.slice(0, bar).trim();
+  const question = [...line.slice(bar + 1).trim()].slice(0, REWATCH_QUESTION_CHARS).join('').trim();
+  if (!id || !question || !candidateIds.includes(id)) return null;
+  return { id, question };
+}
+
+/** Fill the `{{name}}` placeholder of a prompt file with the persona's display name (as src/behavior/prompt.js does). */
+function fillName(template, name) {
+  return String(template ?? '').replace(/\{\{name\}\}/g, () => String(name ?? ''));
+}
+
+/** Collapse whitespace so a name or summary stays on its one `<videos>` line. */
+function oneLine(text) {
+  return String(text ?? '')
+    .replace(/\s+/gu, ' ')
+    .trim();
+}
+
 /**
  * Describable pictures (image/gif/video/sticker/link-thumbnail, plus custom
  * emoji — see src/discord/media.js#isDescribable) of `history` that are NOT
@@ -217,6 +257,69 @@ export function createTurnRunner({
   }
 
   /**
+   * The re-watch on a question (features.videoRewatch): when the trigger
+   * asks about a video watched in the last `media.video.rewatch.recentMessages`
+   * messages, one cheap classifier call (prompts.rewatch) picks the video and
+   * the question, then the describer looks at it again
+   * (describer.rewatchVideo) and the answer joins that video's state as
+   * `answer: { question, text }` -- mutating `videos` in place. At most one
+   * re-watch per turn. Never throws: any failure leaves `videos` as it was.
+   * The question and the answer are data: never logged.
+   */
+  async function maybeRewatch({ config, guildId, channelId, selfName, history, trigger, videos, candidates }) {
+    const prompt = hot.prompts?.rewatch;
+    if (!prompt) return;
+    const system = fillName(prompt, selfName);
+    const mediaCfg = config.media ?? {};
+    const rewatchCfg = mediaCfg.video?.rewatch ?? {};
+    const recent = Math.max(0, Math.floor(rewatchCfg.recentMessages ?? 15));
+    if (recent === 0) return;
+    const recentIds = new Set(history.slice(-recent).map((m) => m.id));
+    const seen = new Set();
+    const watched = [];
+    for (const item of candidates) {
+      if (seen.has(item.itemId) || !recentIds.has(item.messageId)) continue;
+      if (videos.get(item.itemId)?.state !== 'watched') continue;
+      seen.add(item.itemId);
+      watched.push(item);
+    }
+    if (watched.length === 0) return;
+
+    const lines = watched.map(
+      (item) => `${item.itemId} | ${oneLine(item.name)} | ${[...oneLine(videos.get(item.itemId).text)].slice(0, REWATCH_SUMMARY_CHARS).join('')}`,
+    );
+    const triggerText = [...String(trigger.content ?? '')].slice(0, config.context?.maxMessageChars ?? 800).join('');
+    const user = `<videos>\n${lines.join('\n')}\n</videos>\n<candidate>\n${trigger.authorName}: ${triggerText}\n</candidate>`;
+
+    let completion;
+    try {
+      completion = await llm.complete(
+        [
+          { role: 'system', content: system },
+          { role: 'user', content: user },
+        ],
+        {
+          model: rewatchCfg.model || config.mention?.followUpModel || mediaCfg.model,
+          maxOutputTokens: REWATCH_CLASSIFIER_MAX_TOKENS,
+          timeoutMs: config.llm?.timeoutMs,
+          countAgainstDailyCap: true,
+          skipCalibration: true,
+        },
+      );
+    } catch (err) {
+      log.warn('rewatch: classifier failed', { channel: channelId, status: err.statusCode ?? null, name: err.name });
+      return;
+    }
+    const pick = parseRewatchPick(completion.text, watched.map((item) => item.itemId));
+    log.info('rewatch: classified', { channel: channelId, candidates: watched.length, picked: Boolean(pick) });
+    if (!pick) return;
+
+    const item = watched.find((candidate) => candidate.itemId === pick.id);
+    const answer = await describer.rewatchVideo(guildId, item, pick.question);
+    if (answer) videos.set(item.itemId, { ...videos.get(item.itemId), answer });
+  }
+
+  /**
    * @param {object} params
    * @param {import('discord.js').TextBasedChannel} params.channel
    * @param {'reply'|'interject'|'initiate'|'auto'} params.mode  'auto' lets `chooseMode` pick
@@ -306,6 +409,18 @@ export function createTurnRunner({
           countAgainstDailyCap: true,
         });
         videos = watched.videos;
+
+        // A second look when the trigger asks about a watched video: a
+        // direct address only (never a spontaneous turn), switch
+        // features.videoRewatch (a missing key counts as on).
+        if (trigger && features.videoRewatch !== false && typeof describer.rewatchVideo === 'function') {
+          try {
+            const selfName = channel.guild.members.me?.displayName ?? client.user.username;
+            await maybeRewatch({ config, guildId, channelId: channel.id, selfName, history, trigger, videos, candidates });
+          } catch (err) {
+            log.warn('rewatch: failed', { channel: channel.id, error: err });
+          }
+        }
       }
 
       const neighbors = await fetchNeighbors(channel, config, selfId, now);

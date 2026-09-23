@@ -795,3 +795,41 @@ test('selectPictures: a sticker in the "recent" tier is never vision-eligible, e
   });
   assert.deepEqual(picked, []);
 });
+
+// --- mediaLabelFor: a second look on a question (videoAnswered) -------------------
+
+const answer = { question: 'quelle couleur a la voiture ?', text: 'rouge, garée à gauche' };
+
+test('mediaLabelFor: a watched video with an answer appends videoAnswered after videoWatched', () => {
+  assert.deepEqual(mediaLabelFor(clip, { video: { state: 'watched', text: 'a dog runs', answer } }), {
+    key: 'videoWatched',
+    values: { name: 'clip.mp4', duration: '1:05', text: 'a dog runs' },
+    extra: { key: 'videoAnswered', values: { question: answer.question, text: answer.text } },
+  });
+});
+
+test('mediaLabelFor: a watched video with an attached frame and an answer -> frameAttached, then videoAnswered', () => {
+  assert.deepEqual(mediaLabelFor(clip, { attachedIndex: 2, video: { state: 'watched', text: 'a dog runs', answer } }).extra, [
+    { key: 'frameAttached', values: { n: 2 } },
+    { key: 'videoAnswered', values: { question: answer.question, text: answer.text } },
+  ]);
+});
+
+test('mediaLabelFor: a watched link with an answer -> linkWatched, then videoAnswered (after frameAttached too)', () => {
+  const item = { kind: 'link', site: 's', title: 't', thumbnailUrl: 'https://x/y.jpg' };
+  const video = { state: 'watched', text: 'a talk', answer };
+  const answered = { key: 'videoAnswered', values: { question: answer.question, text: answer.text } };
+  assert.deepEqual(mediaLabelFor(item, { video }).extra, [{ key: 'linkWatched', values: { text: 'a talk' } }, answered]);
+  assert.deepEqual(mediaLabelFor(item, { attachedIndex: 1, video }).extra, [
+    { key: 'frameAttached', values: { n: 1 } },
+    { key: 'linkWatched', values: { text: 'a talk' } },
+    answered,
+  ]);
+});
+
+test('mediaLabelFor: an answer on a state that is not watched is ignored', () => {
+  assert.deepEqual(mediaLabelFor(clip, { video: { state: 'error', answer } }), {
+    key: 'videoNotWatched',
+    values: { name: 'clip.mp4', duration: '1:05', reason: 'error' },
+  });
+});

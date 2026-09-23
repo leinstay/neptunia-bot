@@ -16,6 +16,7 @@
     "vision": true,
     "mediaDescriptions": true,
     "videoDescriptions": true,
+    "videoRewatch": true,
     "typingSimulation": true,
     "adminCommands": true
   },
@@ -155,7 +156,8 @@
     "video": {
       "model": "google/gemini-3.8-flash",
       "provider": { "order": ["google-ai-studio"], "allow_fallbacks": false },
-      "maxOutputTokens": 400,
+      "maxOutputTokens": 800,
+      "summaryChars": 1500,
       "maxRequestTokens": 60000,
       "maxSeconds": 60,
       "directUrlMaxSeconds": 180,
@@ -171,7 +173,8 @@
       "canaryUrl": "https://www.youtube.com/watch?v=jNQXAC9IVRw",
       "ytdlpPath": "yt-dlp",
       "ffmpegPath": "ffmpeg",
-      "prefill": true
+      "prefill": true,
+      "rewatch": { "model": null, "maxPerDay": 20, "maxOutputTokens": 600, "answerChars": 1200, "recentMessages": 15 }
     }
   },
   "warmup": {
