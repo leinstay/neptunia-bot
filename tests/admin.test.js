@@ -336,6 +336,7 @@ function makeAdmin(rootDir, extra = {}) {
     pending: extra.pending,
     llm: extra.llm,
     warmup: extra.warmup,
+    describer: extra.describer,
   });
   return { admin, hot, store };
 }
@@ -3232,4 +3233,105 @@ test('run: memory.wipe is refused while a warmup is in flight', async () => {
     () => admin.run('memory.wipe', { confirm: 'Guild' }, { guildId: 'g1' }),
     /warmup is running/,
   );
+});
+
+// ---------------------------------------------------------------------------
+// ping: the YouTube line after the video role (src/memory/youtube-check.js)
+// ---------------------------------------------------------------------------
+
+function fakeYoutubeDescriber(result) {
+  let calls = 0;
+  return {
+    get calls() {
+      return calls;
+    },
+    checkYoutube: async () => {
+      calls += 1;
+      if (result instanceof Error) throw result;
+      return result;
+    },
+  };
+}
+
+test('run: ping video appends the YouTube line right after the video line, one per status', async () => {
+  const cases = [
+    [{ status: 'ytdlp', detail: 'duration 19s', keySet: false }, 'youtube: yt-dlp ok — duration 19s'],
+    [{ status: 'api', detail: 'duration 19s', keySet: true }, 'youtube: Data API key ok — duration 19s'],
+    [{ status: 'page', detail: 'duration 19s', keySet: false }, 'youtube: page only (unreliable; set YOUTUBE_API_KEY) — duration 19s'],
+    [
+      { status: 'page', detail: 'duration 19s', keySet: true },
+      'youtube: page only (unreliable; the YOUTUBE_API_KEY request failed) — duration 19s',
+    ],
+    [{ status: 'blocked', detail: '', keySet: false }, 'youtube: blocked (set YOUTUBE_API_KEY)'],
+    [
+      { status: 'blocked', detail: 'ytdlp=download api=download page=download', keySet: true },
+      'youtube: blocked (the YOUTUBE_API_KEY request failed too) — ytdlp=download api=download page=download',
+    ],
+  ];
+  for (const [result, expected] of cases) {
+    const rootDir = makeRoot();
+    const hot = hotForPing(rootDir);
+    hot.config.media.video = { model: 'openrouter/video-model' };
+    const llm = fakeLlm(() => ({ text: 'pong', usage: {}, estimated: 1 }));
+    const describer = fakeYoutubeDescriber(result);
+    const { admin } = makeAdmin(rootDir, { hot, llm, describer });
+
+    const lines = (await admin.run('ping', { role: 'video' }, {})).split('\n');
+    assert.equal(lines.length, 2);
+    assert.ok(lines[0].startsWith('video: openrouter/video-model — ok,'));
+    assert.equal(lines[1], expected);
+    assert.equal(describer.calls, 1);
+  }
+});
+
+test('run: full ping puts the YouTube line right after the video line', async () => {
+  const rootDir = makeRoot();
+  const hot = hotForPing(rootDir);
+  hot.config.media.video = { model: 'openrouter/video-model' };
+  const llm = fakeLlm(() => ({ text: 'pong', usage: {}, estimated: 1 }));
+  const describer = fakeYoutubeDescriber({ status: 'ytdlp', detail: '', keySet: false });
+  const { admin } = makeAdmin(rootDir, { hot, llm, describer });
+
+  const lines = (await admin.run('ping', {}, {})).split('\n');
+  const at = lines.findIndex((l) => l.startsWith('video: '));
+  assert.ok(at >= 0);
+  assert.equal(lines[at + 1], 'youtube: yt-dlp ok');
+  assert.equal(lines.filter((l) => l.startsWith('youtube:')).length, 1);
+});
+
+test('run: ping without the video role never runs the YouTube check', async () => {
+  const rootDir = makeRoot();
+  const hot = hotForPing(rootDir);
+  const llm = fakeLlm(() => ({ text: 'pong', usage: {}, estimated: 1 }));
+  const describer = fakeYoutubeDescriber({ status: 'ytdlp', detail: '', keySet: false });
+  const { admin } = makeAdmin(rootDir, { hot, llm, describer });
+
+  const body = await admin.run('ping', { role: 'talk' }, {});
+  assert.ok(!body.includes('youtube:'));
+  assert.equal(describer.calls, 0);
+});
+
+test('run: ping video reports a throwing YouTube check as failed, keeping the model line', async () => {
+  const rootDir = makeRoot();
+  const hot = hotForPing(rootDir);
+  hot.config.media.video = { model: 'openrouter/video-model' };
+  const llm = fakeLlm(() => ({ text: 'pong', usage: {}, estimated: 1 }));
+  const { admin } = makeAdmin(rootDir, { hot, llm, describer: fakeYoutubeDescriber(new Error('boom')) });
+
+  const lines = (await admin.run('ping', { role: 'video' }, {})).split('\n');
+  assert.ok(lines[0].startsWith('video: openrouter/video-model — ok,'));
+  assert.equal(lines[1], 'youtube: check failed');
+});
+
+test('run: ping video with the ping label missing still appends the YouTube line', async () => {
+  const rootDir = makeRoot();
+  const hot = hotForPing(rootDir, { label: false });
+  hot.config.media.video = { model: 'openrouter/video-model' };
+  const llm = fakeLlm(() => ({ text: 'pong', usage: {}, estimated: 1 }));
+  const describer = fakeYoutubeDescriber({ status: 'blocked', detail: '', keySet: false });
+  const { admin } = makeAdmin(rootDir, { hot, llm, describer });
+
+  const lines = (await admin.run('ping', { role: 'video' }, {})).split('\n');
+  assert.equal(llm.calls.length, 0);
+  assert.equal(lines[1], 'youtube: blocked (set YOUTUBE_API_KEY)');
 });

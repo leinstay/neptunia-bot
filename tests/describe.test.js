@@ -1129,3 +1129,18 @@ test('describeVideo: a clip failure of a video within maxSeconds (or of unknown 
     assert.deepEqual(await describer.describeVideo('g1', videoLink('video:url:bbbbbbbbbbbbbbbb', TIKTOK)), { state: 'error' });
   }
 });
+
+test('checkYoutube: the describer probes the configured canary through its own video fetcher and key', async () => {
+  const hot = videoHot();
+  hot.config.media.video.canaryUrl = 'https://www.youtube.com/watch?v=canary00001';
+  const videoFetcher = fakeVideoFetcher({ probe: { ok: false, reason: 'download' }, youtube: { ok: true, durationSec: 19 } });
+  const { describer, llm } = videoDescriber({ hot, videoFetcher, youtubeApiKey: 'AIzaSecretTestKey' });
+
+  const result = await describer.checkYoutube();
+
+  assert.equal(result.status, 'api');
+  assert.deepEqual(videoFetcher.calls.map((c) => c.fn), ['probeSite', 'probeYoutube']);
+  assert.equal(videoFetcher.calls[1].url, 'https://www.youtube.com/watch?v=canary00001');
+  assert.equal(videoFetcher.calls[1].options.apiKey, 'AIzaSecretTestKey');
+  assert.equal(llm.calls.length, 0, 'no LLM call');
+});

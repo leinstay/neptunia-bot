@@ -690,3 +690,33 @@ test('probeYoutube: a non-YouTube URL gives download without any request', async
   assert.deepEqual(result, { ok: false, reason: 'download' });
   assert.equal(calls.length, 0);
 });
+
+test('probeYoutube: pageFallback false stops after a failed Data API call, never fetching the page', async () => {
+  const { fetchImpl, calls } = routedFetch({
+    [API_PREFIX]: textResponse('', { ok: false, status: 403 }),
+    [PAGE_PREFIX]: textResponse('{"lengthSeconds":"42"}'),
+  });
+  const fetcher = makeFetcher({ fetchImpl, tmpDir });
+  const { result } = await withCapturedLogs(() =>
+    fetcher.probeYoutube(SITE_URL, { fetchTimeoutMs: 10_000, apiKey: API_KEY, pageFallback: false }),
+  );
+  assert.deepEqual(result, { ok: false, reason: 'download' });
+  assert.deepEqual(calls.map((c) => c.url), [API_URL]);
+});
+
+test('probeYoutube: pageFallback false still returns a Data API duration', async () => {
+  const { fetchImpl } = routedFetch({ [API_PREFIX]: textResponse(API_OK) });
+  const fetcher = makeFetcher({ fetchImpl, tmpDir });
+  const result = await fetcher.probeYoutube(SITE_URL, { fetchTimeoutMs: 10_000, apiKey: API_KEY, pageFallback: false });
+  assert.deepEqual(result, { ok: true, durationSec: 214 });
+});
+
+test('probeYoutube: pageFallback false without a key makes no request', async () => {
+  const { fetchImpl, calls } = fakeFetch(textResponse('{"lengthSeconds":"42"}'));
+  const fetcher = makeFetcher({ fetchImpl, tmpDir });
+  const { result } = await withCapturedLogs(() =>
+    fetcher.probeYoutube(SITE_URL, { fetchTimeoutMs: 10_000, apiKey: null, pageFallback: false }),
+  );
+  assert.deepEqual(result, { ok: false, reason: 'download' });
+  assert.equal(calls.length, 0);
+});

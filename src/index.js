@@ -18,6 +18,7 @@ import { createSpontaneous } from './behavior/spontaneous.js';
 import { createMemoryUpdater } from './memory/update.js';
 import { createWarmup } from './memory/warmup.js';
 import { createDescriber } from './memory/describe.js';
+import { startYoutubeCheck } from './memory/youtube-check.js';
 import { createImageFetcher } from './discord/fetch-image.js';
 import { createVideoFetcher } from './discord/fetch-video.js';
 import { createAdmin } from './admin.js';
@@ -149,8 +150,14 @@ const admin = createAdmin({
   llm,
   // The sample-based memory warmup: run, user/users, channel/channels, server, status, reset, portrait refresh.
   warmup,
+  // /nep ping video: which YouTube duration source works on this host.
+  describer,
 });
 const onInteraction = createInteractionHandler({ hot, admin, getGuildId });
+
+// Once at startup, fire-and-forget: tell the operator whether YouTube links can
+// be watched here (only when video vision is on). Logs the status, never the URL or key.
+startYoutubeCheck({ hot, checkYoutube: describer.checkYoutube });
 
 const timers = [];
 

@@ -457,6 +457,9 @@ function writeLocalConfig(localPath, value) {
  *   `runUsers`/`runChannels`/`status`/`reset` (write under data/), `refreshPortrait`, `waitIdle`
  *   (awaited by `/nep pause`, same shape as `memory`/`turns`). Absent -> every `warmup.*`/
  *   `memory.refresh` command reports it is not available.
+ * `describer` — from createDescriber() (src/memory/describe.js), optional: `checkYoutube()`, used by
+ *   `/nep ping` (video role) to add a line saying which YouTube duration source works on this host.
+ *   Absent -> no such line.
  *
  * `run(commandKey, args, context)` throws a plain `Error` (operator-facing
  * message) on bad input; it never touches discord.js.
@@ -474,6 +477,7 @@ export function createAdmin({
   pending,
   llm,
   warmup,
+  describer,
 }) {
   function isOwner(userId) {
     const owners = hot.config?.bot?.owners ?? [];
@@ -1386,6 +1390,39 @@ function formatPingFailure(role, model, err, ms) {
   return parts.join(' | ');
 }
 
+/** The YouTube line of `/nep ping video`: which duration source works here
+ * (src/memory/youtube-check.js), and what the operator can do about it. */
+function formatYoutubeLine(result) {
+  const status = result?.status;
+  let head;
+  if (status === 'ytdlp') head = 'youtube: yt-dlp ok';
+  else if (status === 'api') head = 'youtube: Data API key ok';
+  else if (status === 'page') {
+    head = result.keySet
+      ? 'youtube: page only (unreliable; the YOUTUBE_API_KEY request failed)'
+      : 'youtube: page only (unreliable; set YOUTUBE_API_KEY)';
+  } else {
+    head = result?.keySet ? 'youtube: blocked (the YOUTUBE_API_KEY request failed too)' : 'youtube: blocked (set YOUTUBE_API_KEY)';
+  }
+  const detail = typeof result?.detail === 'string' ? result.detail.slice(0, 200) : '';
+  return detail ? `${head} — ${detail}` : head;
+}
+
+/** Start the YouTube check when the video role is pinged and a describer is wired; never rejects. */
+function startPingYoutube(requested) {
+  if (!requested.includes('video') || typeof describer?.checkYoutube !== 'function') return null;
+  return Promise.resolve()
+    .then(() => describer.checkYoutube())
+    .then(formatYoutubeLine, () => 'youtube: check failed');
+}
+
+/** `lines` with the YouTube line inserted right after the video role's line. */
+function withYoutubeLine(lines, requested, youtubeLine) {
+  if (youtubeLine == null) return lines;
+  const at = requested.indexOf('video');
+  return [...lines.slice(0, at + 1), youtubeLine, ...lines.slice(at + 1)];
+}
+
 async function cmdPing(args) {
   if (!llm) throw new Error('ping is not available (no llm client configured)');
 
@@ -1393,9 +1430,12 @@ async function cmdPing(args) {
   const cfg = hot.config;
   const roleModel = new Map(requested.map((role) => [role, pingModelFor(role, cfg)]));
 
+  const youtube = startPingYoutube(requested);
+
   const promptText = hot.prompts?.labels?.ping?.prompt;
   if (!promptText) {
-    return requested.map((role) => `${role}: ${roleModel.get(role) ?? '(no model configured)'} — skipped: label missing`).join('\n');
+    const skipped = requested.map((role) => `${role}: ${roleModel.get(role) ?? '(no model configured)'} — skipped: label missing`);
+    return withYoutubeLine(skipped, requested, await youtube).join('\n');
   }
 
   const uniqueModels = [...new Set([...roleModel.values()].filter(Boolean))];
@@ -1419,16 +1459,15 @@ async function cmdPing(args) {
     }),
   );
 
-  return requested
-    .map((role) => {
-      const model = roleModel.get(role);
-      if (!model) return `${role}: (no model configured)`;
-      const outcome = results.get(model);
-      return outcome.ok
-        ? formatPingSuccess(role, model, outcome.result, outcome.ms)
-        : formatPingFailure(role, model, outcome.err, outcome.ms);
-    })
-    .join('\n');
+  const lines = requested.map((role) => {
+    const model = roleModel.get(role);
+    if (!model) return `${role}: (no model configured)`;
+    const outcome = results.get(model);
+    return outcome.ok
+      ? formatPingSuccess(role, model, outcome.result, outcome.ms)
+      : formatPingFailure(role, model, outcome.err, outcome.ms);
+  });
+  return withYoutubeLine(lines, requested, await youtube).join('\n');
 }
 
   // ---------------------------------------------------------------------

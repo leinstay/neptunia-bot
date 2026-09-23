@@ -35,7 +35,8 @@
 // counter (`state.data.videoDay` / `videoCount`, `media.video.maxPerDay`)
 // caps how many videos are attempted per day: the slot is reserved before the
 // fetch and kept even when the fetch or the request fails. Summaries are
-// data: never logged.
+// data: never logged. `checkYoutube()` probes one canary video to tell the
+// operator which link of the YouTube duration chain works here.
 
 import { mediaProxyUrl } from '../discord/media.js';
 import { createImageFetcher } from '../discord/fetch-image.js';
@@ -43,6 +44,7 @@ import { createVideoFetcher } from '../discord/fetch-video.js';
 import { isDirectUrlSite, safeLocation, youtubeVideoId } from '../discord/video-sites.js';
 import { TokenLimitError, DailyCapError } from '../llm/openrouter.js';
 import { clampText } from './clamp.js';
+import { createYoutubeCheck } from './youtube-check.js';
 import { log } from '../log.js';
 
 const MISS_TTL_MS = 60 * 60_000;
@@ -492,5 +494,9 @@ export function createDescriber({
     return { videos, newCount };
   }
 
-  return { describe, describeMany, describeVideo, describeVideos };
+  // Which link of the YouTube duration chain works on this host (src/memory/youtube-check.js):
+  // the same fetcher and key as a real link, no LLM call, nothing cached.
+  const checkYoutube = createYoutubeCheck({ hot, videoFetcher, youtubeApiKey });
+
+  return { describe, describeMany, describeVideo, describeVideos, checkYoutube };
 }

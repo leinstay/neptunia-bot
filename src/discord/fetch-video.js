@@ -436,12 +436,13 @@ export function createVideoFetcher({
   /**
    * The duration of a YouTube video without yt-dlp: the Data API first when
    * `apiKey` is a non-empty string (any failure is logged as `api` and falls
-   * through), then the watch page (at most 2 MB of it). Never rejects.
+   * through), then the watch page (at most 2 MB of it). `pageFallback: false`
+   * stops after the Data API (the startup check tells the two apart). Never rejects.
    * @param {string} url
-   * @param {{ fetchTimeoutMs?: number, apiKey?: string|null }} options
+   * @param {{ fetchTimeoutMs?: number, apiKey?: string|null, pageFallback?: boolean }} options
    * @returns {Promise<{ ok: true, durationSec: number } | { ok: false, reason: 'download'|'timeout' }>}
    */
-  async function probeYoutube(url, { fetchTimeoutMs, apiKey } = {}) {
+  async function probeYoutube(url, { fetchTimeoutMs, apiKey, pageFallback = true } = {}) {
     try {
       const id = youtubeVideoId(url);
       if (!id) return fail('youtube', url, 'download');
@@ -459,6 +460,7 @@ export function createVideoFetcher({
         }
         log.warn('fetch-video: failed', meta);
       }
+      if (pageFallback === false) return { ok: false, reason: 'download' };
 
       const pageUrl = `https://www.youtube.com/watch?v=${encodeURIComponent(id)}&hl=en`;
       const page = await fetchText(pageUrl, { headers: PAGE_HEADERS, timeoutMs: fetchTimeoutMs, maxBytes: PAGE_MAX_BYTES });

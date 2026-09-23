@@ -166,6 +166,7 @@
       "sites": ["youtube.com", "youtu.be", "tiktok.com", "vk.com", "vkvideo.ru", "x.com", "twitter.com", "reddit.com", "twitch.tv"],
       "directUrlSites": ["youtube.com", "youtu.be"],
       "directUrlUnknownDuration": false,
+      "canaryUrl": "https://www.youtube.com/watch?v=jNQXAC9IVRw",
       "ytdlpPath": "yt-dlp",
       "ffmpegPath": "ffmpeg",
       "prefill": true
