@@ -14,7 +14,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { createStore } from '../src/memory/store.js';
 import { createDescriber } from '../src/memory/describe.js';
-import { TokenLimitError, DailyCapError } from '../src/llm/openrouter.js';
+import { createLlm, TokenLimitError, DailyCapError } from '../src/llm/openrouter.js';
 
 function tmpDataDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'nep-describe-'));
@@ -518,7 +518,9 @@ const VIDEO_CFG = {
   model: 'x/video-model',
   provider: { order: ['pinned'], allow_fallbacks: false },
   maxOutputTokens: 400,
+  maxRequestTokens: 60_000,
   maxSeconds: 60,
+  directUrlMaxSeconds: 180,
   maxBytes: 8_000_000,
   maxPerTurn: 1,
   maxPerDay: 40,
@@ -751,7 +753,9 @@ test('describeVideo: shares the media cache under video:<itemId>, LRU-trimmed to
 test('describeVideo: a length or size failure is a permanent limit, never retried', async () => {
   for (const reason of ['length', 'size']) {
     let t = 1_000_000;
-    const videoFetcher = fakeVideoFetcher({ attachment: { ok: false, reason } });
+    // A length miss stays a limit only with a known duration over the cap.
+    const attachment = reason === 'length' ? { ok: false, reason, durationSec: 600 } : { ok: false, reason };
+    const videoFetcher = fakeVideoFetcher({ attachment });
     const { describer, llm, store, state } = videoDescriber({ videoFetcher, now: () => t });
 
     assert.deepEqual(await describer.describeVideo('g1', videoAttachment()), { state: 'limit', reason });
@@ -876,7 +880,7 @@ test('describeVideo: two concurrent calls for one video send one request', async
 test('describeVideos: caps NEW requests at maxNew; cache hits and limit states are free', async () => {
   const { describer, llm, store } = videoDescriber({ llm: fakeLlm([{ text: 'one' }, { text: 'two' }, { text: 'three' }]) });
   await describer.describeVideo('g1', videoAttachment('v1'));
-  store.getMediaCache('g1')['video:v0'] = { miss: true, ts: Date.now(), reason: 'length' };
+  store.getMediaCache('g1')['video:v0'] = { miss: true, ts: Date.now(), reason: 'length', durationSec: 600 };
 
   const items = [videoAttachment('v0'), videoAttachment('v1'), videoAttachment('v2'), videoAttachment('v3')];
   const { videos, newCount } = await describer.describeVideos('g1', items, { maxNew: 1 });
@@ -1143,4 +1147,173 @@ test('checkYoutube: the describer probes the configured canary through its own v
   assert.equal(videoFetcher.calls[1].url, 'https://www.youtube.com/watch?v=canary00001');
   assert.equal(videoFetcher.calls[1].options.apiKey, 'AIzaSecretTestKey');
   assert.equal(llm.calls.length, 0, 'no LLM call');
+});
+
+// --- directUrlMaxSeconds and re-evaluated length misses ------------------
+
+test('describeVideo: a direct-URL link of 120 s (within directUrlMaxSeconds) goes out pinned with videoSeconds 120', async () => {
+  const videoFetcher = fakeVideoFetcher({ probe: { ok: true, durationSec: 120, title: null } });
+  const { describer, llm } = videoDescriber({ videoFetcher });
+  assert.equal((await describer.describeVideo('g1', videoLink())).state, 'watched');
+  assert.deepEqual(videoFetcher.calls.map((c) => c.fn), ['probeSite']);
+  assert.deepEqual(llm.calls[0].messages[1].content, [
+    { type: 'video_url', video_url: { url: 'https://www.youtube.com/watch?v=abc' } },
+  ]);
+  assert.deepEqual(llm.calls[0].options.provider, VIDEO_CFG.provider);
+  assert.equal(llm.calls[0].options.videoSeconds, 120);
+});
+
+test('describeVideo: a direct-URL link of 200 s (over directUrlMaxSeconds) takes the clip route capped at maxSeconds', async () => {
+  const videoFetcher = fakeVideoFetcher({ probe: { ok: true, durationSec: 200, title: null } });
+  const { describer, llm } = videoDescriber({ videoFetcher });
+  assert.equal((await describer.describeVideo('g1', videoLink())).state, 'watched');
+  assert.deepEqual(videoFetcher.calls.map((c) => c.fn), ['probeSite', 'fetchSiteClip']);
+  assert.equal(videoFetcher.calls[1].options.maxSeconds, 60);
+  assert.equal(videoFetcher.calls[1].options.durationSec, 200);
+  assert.equal(llm.calls[0].options.provider, undefined);
+});
+
+test('describeVideo: a 200 s direct-URL link whose clip fails is a length limit storing durationSec', async () => {
+  const videoFetcher = fakeVideoFetcher({ probe: { ok: true, durationSec: 200, title: null }, clip: { ok: false, reason: 'tool' } });
+  const { describer, store } = videoDescriber({ videoFetcher, now: () => 5_000 });
+  assert.deepEqual(await describer.describeVideo('g1', videoLink()), { state: 'limit', reason: 'length' });
+  assert.deepEqual(store.getMediaCache('g1')[LINK_KEY], { miss: true, ts: 5_000, reason: 'length', durationSec: 200 });
+});
+
+test('describeVideo: a 120 s link on a non-direct site still takes the clip route', async () => {
+  const videoFetcher = fakeVideoFetcher({ probe: { ok: true, durationSec: 120, title: null } });
+  const { describer, llm } = videoDescriber({ videoFetcher });
+  assert.equal((await describer.describeVideo('g1', videoLink('video:url:bbbbbbbbbbbbbbbb', TIKTOK))).state, 'watched');
+  assert.deepEqual(videoFetcher.calls.map((c) => c.fn), ['probeSite', 'fetchSiteClip']);
+  assert.equal(videoFetcher.calls[1].options.maxSeconds, 60);
+  assert.equal(llm.calls[0].options.provider, undefined);
+});
+
+test('describeVideo: a 120 s non-direct link whose clip fails stores a length miss with durationSec 120', async () => {
+  const videoFetcher = fakeVideoFetcher({ probe: { ok: true, durationSec: 120, title: null }, clip: { ok: false, reason: 'download' } });
+  const { describer, store } = videoDescriber({ videoFetcher, now: () => 7_000 });
+  const item = videoLink('video:url:bbbbbbbbbbbbbbbb', TIKTOK);
+  assert.deepEqual(await describer.describeVideo('g1', item), { state: 'limit', reason: 'length' });
+  assert.deepEqual(store.getMediaCache('g1')['video:video:url:bbbbbbbbbbbbbbbb'], {
+    miss: true,
+    ts: 7_000,
+    reason: 'length',
+    durationSec: 120,
+  });
+  // Still over maxSeconds for a non-direct site: served from the cache, no new fetch.
+  assert.deepEqual(await describer.describeVideo('g1', item), { state: 'limit', reason: 'length' });
+  assert.equal(videoFetcher.calls.length, 2);
+});
+
+test('describeVideo: a cached length miss with durationSec 120 is retried once the direct-URL cap allows it', async () => {
+  const videoFetcher = fakeVideoFetcher({ probe: { ok: true, durationSec: 120, title: null } });
+  const { describer, store, llm } = videoDescriber({ videoFetcher });
+  store.getMediaCache('g1')[LINK_KEY] = { miss: true, ts: 1, reason: 'length', durationSec: 120 };
+  const result = await describer.describeVideo('g1', videoLink());
+  assert.equal(result.state, 'watched');
+  assert.equal(llm.calls.length, 1);
+  assert.equal(llm.calls[0].options.videoSeconds, 120);
+  assert.equal(store.getMediaCache('g1')[LINK_KEY].watched, true);
+});
+
+test('describeVideo: a cached length miss is re-read against the live caps (maxSeconds raised for a non-direct site)', async () => {
+  const hot = videoHot();
+  const { describer, store, videoFetcher } = videoDescriber({ hot });
+  const item = videoLink('video:url:bbbbbbbbbbbbbbbb', TIKTOK);
+  store.getMediaCache('g1')['video:video:url:bbbbbbbbbbbbbbbb'] = { miss: true, ts: 1, reason: 'length', durationSec: 120 };
+  assert.deepEqual(await describer.describeVideo('g1', item), { state: 'limit', reason: 'length' });
+  assert.equal(videoFetcher.calls.length, 0);
+  hot.config.media.video.maxSeconds = 120;
+  assert.equal((await describer.describeVideo('g1', item)).state, 'watched');
+  assert.equal(videoFetcher.calls.length, 2);
+});
+
+test('describeVideo: a cached length miss with durationSec 200 stays a limit', async () => {
+  for (const extra of [{ durationSec: 200 }]) {
+    const { describer, store, videoFetcher, llm } = videoDescriber();
+    store.getMediaCache('g1')[LINK_KEY] = { miss: true, ts: 1, reason: 'length', ...extra };
+    assert.deepEqual(await describer.describeVideo('g1', videoLink()), { state: 'limit', reason: 'length' }, JSON.stringify(extra));
+    assert.equal(videoFetcher.calls.length, 0);
+    assert.equal(llm.calls.length, 0);
+  }
+});
+
+test('describeVideo: a cached size miss stays permanent whatever its duration', async () => {
+  const { describer, store, videoFetcher } = videoDescriber();
+  store.getMediaCache('g1')[LINK_KEY] = { miss: true, ts: 1, reason: 'size', durationSec: 30 };
+  assert.deepEqual(await describer.describeVideo('g1', videoLink()), { state: 'limit', reason: 'size' });
+  assert.equal(videoFetcher.calls.length, 0);
+});
+
+test('describeVideo: a size miss is stored without durationSec', async () => {
+  const videoFetcher = fakeVideoFetcher({ attachment: { ok: false, reason: 'size' } });
+  const { describer, store } = videoDescriber({ videoFetcher, now: () => 9_000 });
+  await describer.describeVideo('g1', videoAttachment());
+  assert.deepEqual(store.getMediaCache('g1')['video:v1'], { miss: true, ts: 9_000, reason: 'size' });
+});
+
+test('describeVideo: every video request carries media.video.maxRequestTokens as its own pre-flight cap', async () => {
+  const videoFetcher = fakeVideoFetcher({ probe: { ok: true, durationSec: 180, title: null } });
+  const { describer, llm } = videoDescriber({ videoFetcher });
+  assert.equal((await describer.describeVideo('g1', videoLink())).state, 'watched');
+  assert.equal(llm.calls[0].options.videoSeconds, 180, '180 s is within directUrlMaxSeconds: sent pinned');
+  assert.deepEqual(llm.calls[0].options.provider, VIDEO_CFG.provider);
+  assert.equal(llm.calls[0].options.maxRequestTokens, 60_000);
+
+  const clip = videoDescriber();
+  await clip.describer.describeVideo('g1', videoAttachment());
+  assert.equal(clip.llm.calls[0].options.maxRequestTokens, 60_000, 'a downloaded clip too');
+});
+
+test('describeVideo: a 180 s direct-URL video passes the video cap through the real client, while the 50 000 global cap alone would refuse it', async () => {
+  const hot = videoHot();
+  hot.config.media.video.tokensPerSecond = 300;
+  hot.config.llm = {
+    baseUrl: 'https://openrouter.test/api/v1',
+    model: 'x/chat',
+    temperature: 1,
+    maxOutputTokens: 100,
+    maxRequestTokens: 50_000,
+    maxRequestsPerDay: 300,
+    timeoutMs: 5_000,
+    retries: 0,
+  };
+  const bodies = [];
+  const llm = createLlm({
+    apiKey: 'k',
+    getConfig: () => hot.config,
+    calibrator: { ratio: 1, apply: (n) => n, observe: () => {} },
+    state: { data: {}, markDirty() {} },
+    fetchImpl: async (url, init) => {
+      bodies.push(JSON.parse(init.body));
+      return { ok: true, status: 200, json: async () => ({ choices: [{ message: { content: 'someone dances' } }], usage: {} }) };
+    },
+  });
+  const videoFetcher = fakeVideoFetcher({ probe: { ok: true, durationSec: 180, title: null } });
+  const { describer } = videoDescriber({ hot, llm, videoFetcher });
+
+  assert.equal((await describer.describeVideo('g1', videoLink())).state, 'watched');
+  assert.equal(bodies.length, 1);
+
+  const messages = [
+    { role: 'system', content: VIDEO_PROMPT },
+    { role: 'user', content: [{ type: 'video_url', video_url: { url: 'https://www.youtube.com/watch?v=abc' } }] },
+  ];
+  await assert.rejects(
+    llm.complete(messages, { videoSeconds: 180, skipCalibration: true }),
+    (err) => err instanceof TokenLimitError,
+  );
+  assert.equal(bodies.length, 1, 'the refused request never left the process');
+});
+
+test('describeVideo: a cached length miss with durationSec null or absent (an older entry) is retried', async () => {
+  for (const extra of [{ durationSec: null }, {}]) {
+    const videoFetcher = fakeVideoFetcher({ probe: { ok: true, durationSec: 120, title: null } });
+    const { describer, store, llm } = videoDescriber({ videoFetcher });
+    store.getMediaCache('g1')[LINK_KEY] = { miss: true, ts: 1, reason: 'length', ...extra };
+    assert.equal((await describer.describeVideo('g1', videoLink())).state, 'watched', JSON.stringify(extra));
+    assert.deepEqual(videoFetcher.calls.map((c) => c.fn), ['probeSite']);
+    assert.equal(llm.calls.length, 1);
+    assert.equal(store.getMediaCache('g1')[LINK_KEY].watched, true);
+  }
 });

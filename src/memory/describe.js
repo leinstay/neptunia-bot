@@ -19,19 +19,22 @@
 // features.videoDescriptions -- a missing key counts as on -- like the senses
 // line): an attached video or a link to a known video site
 // (src/discord/media.js#collectVideos)
-// is fetched through src/discord/fetch-video.js -- or, for a short video on a
-// site whose public URL the pinned provider can open itself
-// (`media.video.directUrlSites`, and only when `media.video.provider` is a
-// real provider object), passed by URL -- and summarised by a
+// is fetched through src/discord/fetch-video.js -- or, for a video of at most
+// `media.video.directUrlMaxSeconds` on a site whose public URL the pinned
+// provider can open itself (`media.video.directUrlSites`, and only when
+// `media.video.provider` is a real provider object), passed by URL -- and
+// summarised by a
 // video-capable model into one line. A link's duration comes from yt-dlp;
 // when yt-dlp fails on a YouTube link, from the YouTube Data API (with a
 // configured key) or the watch page (src/discord/fetch-video.js#probeYoutube).
 // With no duration at all a direct-URL link is sent only when the owner
 // opted in (`media.video.directUrlUnknownDuration`, billed as `maxSeconds`).
 // Results share the picture cache under `video:<itemId>`: a watched summary,
-// a permanent `length`/`size` miss (never retried; a video longer than
-// `maxSeconds` whose clip download fails is a `length` miss -- it will not get
-// shorter) or an `error` miss (retried after an hour). A separate daily
+// a `length` miss (a video over its cap whose clip download fails; it keeps
+// the known `durationSec` and is retried once the live cap -- see lengthCap
+// -- has grown to fit it, or when the duration is unknown), a permanent
+// `size` miss, or an `error`
+// miss (retried after an hour). A separate daily
 // counter (`state.data.videoDay` / `videoCount`, `media.video.maxPerDay`)
 // caps how many videos are attempted per day: the slot is reserved before the
 // fetch and kept even when the fetch or the request fails. Summaries are
@@ -256,10 +259,38 @@ export function createDescriber({
   }
 
   /**
-   * The cached state under `key`, or null when the video must be (re)watched.
-   * A watched entry is LRU-touched; an error miss counts only for an hour.
+   * Whether `item` is a link that may go out by its public URL: a pinned
+   * provider object and a `directUrlSites` site.
    */
-  function cachedVideo(guildId, key) {
+  function isPinnableLink(item, videoCfg) {
+    return (
+      item.source === 'link' &&
+      isPlainObject(videoCfg.provider) &&
+      isDirectUrlSite(item.url, videoCfg.directUrlSites ?? [])
+    );
+  }
+
+  /**
+   * The length cap that applies to `item` under the live config: a pinnable
+   * direct-URL link is sent by URL up to `directUrlMaxSeconds` (falling back
+   * to `maxSeconds` when unset); anything else is clipped at `maxSeconds`.
+   * `directUrlMaxSeconds * tokensPerSecond` must stay under
+   * `media.video.maxRequestTokens` (180 * 300 = 54 000 < 60 000 by default),
+   * or every long direct-URL video trips the token rail.
+   */
+  function lengthCap(item, videoCfg) {
+    if (isPinnableLink(item, videoCfg)) return videoCfg.directUrlMaxSeconds ?? videoCfg.maxSeconds;
+    return videoCfg.maxSeconds;
+  }
+
+  /**
+   * The cached state under `key`, or null when the video must be (re)watched.
+   * A watched entry is LRU-touched; an error miss counts only for an hour; a
+   * `length` miss is treated as absent when its `durationSec` is unknown
+   * (null or missing, as in entries written before it was stored) or now fits
+   * `lengthCap(item)`, so a raised cap retries it.
+   */
+  function cachedVideo(guildId, key, item) {
     const cache = store.getMediaCache(guildId);
     const entry = cache[key];
     if (!entry) return null;
@@ -267,6 +298,11 @@ export function createDescriber({
       touchKey(cache, key, entry);
       store.markMediaCacheDirty(guildId);
       return { state: 'watched', text: entry.text, usage: null, estimated: 0, cached: true };
+    }
+    if (entry.miss && entry.reason === 'length') {
+      // An unknown duration (older entries included) costs one probe to learn.
+      if (typeof entry.durationSec !== 'number') return null;
+      if (entry.durationSec <= lengthCap(item, hot.config.media?.video ?? {})) return null;
     }
     if (entry.miss && PERMANENT_VIDEO_MISSES.has(entry.reason)) return { state: 'limit', reason: entry.reason };
     if (entry.miss && now() - entry.ts < MISS_TTL_MS) return { state: 'error' };
@@ -284,7 +320,10 @@ export function createDescriber({
     return state.data.videoCount ?? 0;
   }
 
-  /** Get the media of one candidate: `{ ok: true, url, seconds, bytes, pinned }` or `{ ok: false, reason }`. */
+  /**
+   * Get the media of one candidate: `{ ok: true, url, seconds, bytes, pinned }`
+   * or `{ ok: false, reason }` (a `length` failure adds `durationSec`, null when unknown).
+   */
   async function fetchVideoMedia(item, videoCfg) {
     const { maxSeconds, maxBytes, toolTimeoutMs, ffmpegPath, ytdlpPath } = videoCfg;
     if (item.source === 'attachment') {
@@ -296,7 +335,11 @@ export function createDescriber({
         ffmpegPath,
         fetchTimeoutMs: hot.config.context?.vision?.fetchTimeoutMs,
       });
-      return got.ok ? { ok: true, url: got.dataUrl, seconds: got.seconds, bytes: got.bytes, pinned: false } : got;
+      if (got.ok) return { ok: true, url: got.dataUrl, seconds: got.seconds, bytes: got.bytes, pinned: false };
+      if (got.reason === 'length') {
+        return { ok: false, reason: 'length', durationSec: Number.isFinite(got.durationSec) ? got.durationSec : null };
+      }
+      return got;
     }
     let probe = await videoFetcher.probeSite(item.url, { ytdlpPath, toolTimeoutMs });
     // yt-dlp can be blocked by YouTube's bot check; the duration alone is
@@ -310,7 +353,7 @@ export function createDescriber({
     }
     // The public URL goes out only with a pinned provider that can open it;
     // without one the clip is downloaded like any other site's.
-    const pinnable = isPlainObject(videoCfg.provider) && isDirectUrlSite(item.url, videoCfg.directUrlSites ?? []);
+    const pinnable = isPinnableLink(item, videoCfg);
     if (!probe.ok) {
       // No duration at all: only the owner's explicit switch sends the URL,
       // billed as the longest allowed video.
@@ -320,7 +363,9 @@ export function createDescriber({
       return probe;
     }
     const durationSec = probe.durationSec ?? item.durationSec ?? null;
-    if (pinnable && durationSec != null && durationSec <= maxSeconds) {
+    // A direct-URL video has its own cap (directUrlMaxSeconds, see lengthCap);
+    // past it the clip route below still gets the first maxSeconds.
+    if (pinnable && durationSec != null && durationSec <= lengthCap(item, videoCfg)) {
       return { ok: true, url: item.url, seconds: durationSec, bytes: null, pinned: true };
     }
     const clip = await videoFetcher.fetchSiteClip(item.url, {
@@ -333,7 +378,8 @@ export function createDescriber({
     });
     if (clip.ok) return { ok: true, url: clip.dataUrl, seconds: clip.seconds, bytes: clip.bytes, pinned: false };
     // Too long and not clippable: the video will not get shorter, so this is final.
-    if (durationSec != null && durationSec > maxSeconds) return { ok: false, reason: 'length' };
+    // The duration is kept so a later, larger cap can retry it (cachedVideo).
+    if (durationSec != null && durationSec > maxSeconds) return { ok: false, reason: 'length', durationSec };
     return clip;
   }
 
@@ -376,7 +422,9 @@ export function createDescriber({
     const media = await fetchVideoMedia(item, videoCfg);
     if (!media.ok) {
       if (PERMANENT_VIDEO_MISSES.has(media.reason)) {
-        putVideoEntry(guildId, key, { miss: true, ts: now(), reason: media.reason });
+        const entry = { miss: true, ts: now(), reason: media.reason };
+        if (media.reason === 'length') entry.durationSec = media.durationSec ?? null;
+        putVideoEntry(guildId, key, entry);
         return { result: report({ state: 'limit', reason: media.reason }), sent: false, attempted: true };
       }
       return { result: errorMiss(media.reason ?? 'download'), sent: false, attempted: true };
@@ -395,6 +443,9 @@ export function createDescriber({
           maxOutputTokens: videoCfg.maxOutputTokens,
           timeoutMs: videoCfg.timeoutMs,
           videoSeconds: media.seconds ?? videoCfg.maxSeconds,
+          // Video requests have their own pre-flight cap; every other caller
+          // stays under the global llm.maxRequestTokens.
+          maxRequestTokens: videoCfg.maxRequestTokens,
           provider: media.pinned ? videoCfg.provider : undefined,
           countAgainstDailyCap,
           // A video's provider-counted prompt tokens say nothing about the
@@ -433,7 +484,7 @@ export function createDescriber({
     if (!promptText || !isVideoCandidate(item)) return { result: null, sent: false, attempted: false };
 
     const key = `video:${item.itemId}`;
-    const cached = cachedVideo(guildId, key);
+    const cached = cachedVideo(guildId, key, item);
     if (cached) {
       log.info('describe: video', { source: item.source, state: cached.state, reason: cached.reason ?? null, cached: true });
       return { result: cached, sent: false, attempted: false };
