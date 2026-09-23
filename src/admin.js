@@ -1406,22 +1406,17 @@ function formatPingFailure(role, model, err, ms) {
   return parts.join(' | ');
 }
 
-/** The YouTube line of `/nep ping video`: which duration source works here
- * (src/memory/youtube-check.js), and what the operator can do about it. */
+/** The YouTube line of `/nep ping video`: the state of the Data API key given which duration
+ * source works here (src/memory/youtube-check.js). No duration, no detail. */
 function formatYoutubeLine(result) {
   const status = result?.status;
-  let head;
-  if (status === 'ytdlp') head = 'youtube: yt-dlp ok';
-  else if (status === 'api') head = 'youtube: Data API key ok';
-  else if (status === 'page') {
-    head = result.keySet
-      ? 'youtube: page only (unreliable; the YOUTUBE_API_KEY request failed)'
-      : 'youtube: page only (unreliable; set YOUTUBE_API_KEY)';
-  } else {
-    head = result?.keySet ? 'youtube: blocked (the YOUTUBE_API_KEY request failed too)' : 'youtube: blocked (set YOUTUBE_API_KEY)';
-  }
-  const detail = typeof result?.detail === 'string' ? result.detail.slice(0, 200) : '';
-  return detail ? `${head} — ${detail}` : head;
+  const keySet = Boolean(result?.keySet);
+  let state;
+  if (status === 'api') state = 'ok';
+  else if (status === 'ytdlp') state = 'not needed (yt-dlp ok)';
+  else if (status === 'page') state = keySet ? 'failed (page only, unreliable)' : 'missing (page only, unreliable)';
+  else state = keySet ? 'failed (blocked)' : 'missing (blocked)';
+  return `youtube: API key — ${state}`;
 }
 
 /** Start the YouTube check when the classifier.video role is pinged and a describer is wired; never rejects. */
@@ -1429,7 +1424,7 @@ function startPingYoutube(requested) {
   if (!requested.includes('classifier.video') || typeof describer?.checkYoutube !== 'function') return null;
   return Promise.resolve()
     .then(() => describer.checkYoutube())
-    .then(formatYoutubeLine, () => 'youtube: check failed');
+    .then(formatYoutubeLine, () => 'youtube: API key — unknown');
 }
 
 /** `lines` with the YouTube line inserted right after the classifier.video line. */
@@ -1448,8 +1443,8 @@ function withYoutubeLine(lines, requested, youtubeLine) {
 function withWebLine(lines, requested) {
   if (!requested.includes('classifier.text') || typeof lookup?.hasSearch !== 'function') return lines;
   let line;
-  if (hot.config?.features?.webLookup !== true) line = 'web: lookup off';
-  else line = lookup.hasSearch() ? 'web: search key ok' : 'web: no BRAVE_SEARCH_API_KEY';
+  if (hot.config?.features?.webLookup !== true) line = 'web: API key — off';
+  else line = lookup.hasSearch() ? 'web: API key — ok' : 'web: API key — missing';
   return [...lines, line];
 }
 

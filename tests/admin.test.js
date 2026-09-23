@@ -928,7 +928,7 @@ test('run: ping classifier pings the three classifier roles and no other', async
   assert.ok(lines[0].startsWith('classifier.text: openrouter/text-model — ok,'));
   assert.ok(lines[1].startsWith('classifier.media: anthropic/claude-haiku-4.5 — ok,'));
   assert.ok(lines[2].startsWith('classifier.video: openrouter/video-model — ok,'));
-  assert.equal(lines[3], 'youtube: yt-dlp ok', 'the YouTube line follows the video role');
+  assert.equal(lines[3], 'youtube: API key — not needed (yt-dlp ok)', 'the YouTube line follows the video role');
   assert.deepEqual(llm.calls.map((c) => c.options.model).sort(), ['anthropic/claude-haiku-4.5', 'openrouter/text-model', 'openrouter/video-model']);
 });
 
@@ -3311,17 +3311,17 @@ function fakeYoutubeDescriber(result) {
 
 test('run: ping video appends the YouTube line right after the video line, one per status', async () => {
   const cases = [
-    [{ status: 'ytdlp', detail: 'duration 19s', keySet: false }, 'youtube: yt-dlp ok — duration 19s'],
-    [{ status: 'api', detail: 'duration 19s', keySet: true }, 'youtube: Data API key ok — duration 19s'],
-    [{ status: 'page', detail: 'duration 19s', keySet: false }, 'youtube: page only (unreliable; set YOUTUBE_API_KEY) — duration 19s'],
+    [{ status: 'ytdlp', detail: 'duration 19s', keySet: false }, 'youtube: API key — not needed (yt-dlp ok)'],
+    [{ status: 'api', detail: 'duration 19s', keySet: true }, 'youtube: API key — ok'],
+    [{ status: 'page', detail: 'duration 19s', keySet: false }, 'youtube: API key — missing (page only, unreliable)'],
     [
       { status: 'page', detail: 'duration 19s', keySet: true },
-      'youtube: page only (unreliable; the YOUTUBE_API_KEY request failed) — duration 19s',
+      'youtube: API key — failed (page only, unreliable)',
     ],
-    [{ status: 'blocked', detail: '', keySet: false }, 'youtube: blocked (set YOUTUBE_API_KEY)'],
+    [{ status: 'blocked', detail: '', keySet: false }, 'youtube: API key — missing (blocked)'],
     [
       { status: 'blocked', detail: 'ytdlp=download api=download page=download', keySet: true },
-      'youtube: blocked (the YOUTUBE_API_KEY request failed too) — ytdlp=download api=download page=download',
+      'youtube: API key — failed (blocked)',
     ],
   ];
   for (const [result, expected] of cases) {
@@ -3351,7 +3351,7 @@ test('run: full ping puts the YouTube line right after the video line', async ()
   const lines = (await admin.run('ping', {}, {})).split('\n');
   const at = lines.findIndex((l) => l.startsWith('classifier.video: '));
   assert.ok(at >= 0);
-  assert.equal(lines[at + 1], 'youtube: yt-dlp ok');
+  assert.equal(lines[at + 1], 'youtube: API key — not needed (yt-dlp ok)');
   assert.equal(lines.filter((l) => l.startsWith('youtube:')).length, 1);
 });
 
@@ -3367,7 +3367,7 @@ test('run: ping without the video role never runs the YouTube check', async () =
   assert.equal(describer.calls, 0);
 });
 
-test('run: ping video reports a throwing YouTube check as failed, keeping the model line', async () => {
+test('run: ping video reports a throwing YouTube check as unknown, keeping the model line', async () => {
   const rootDir = makeRoot();
   const hot = hotForPing(rootDir);
   hot.config.classifier.video = 'openrouter/video-model';
@@ -3376,7 +3376,7 @@ test('run: ping video reports a throwing YouTube check as failed, keeping the mo
 
   const lines = (await admin.run('ping', { role: 'classifier.video' }, {})).split('\n');
   assert.ok(lines[0].startsWith('classifier.video: openrouter/video-model — ok,'));
-  assert.equal(lines[1], 'youtube: check failed');
+  assert.equal(lines[1], 'youtube: API key — unknown');
 });
 
 test('run: ping video with the ping label missing still appends the YouTube line', async () => {
@@ -3389,7 +3389,7 @@ test('run: ping video with the ping label missing still appends the YouTube line
 
   const lines = (await admin.run('ping', { role: 'classifier.video' }, {})).split('\n');
   assert.equal(llm.calls.length, 0);
-  assert.equal(lines[1], 'youtube: blocked (set YOUTUBE_API_KEY)');
+  assert.equal(lines[1], 'youtube: API key — missing (blocked)');
 });
 
 // ---------------------------------------------------------------------------
@@ -3412,10 +3412,10 @@ function fakeWebLookup(hasKey) {
 
 test('run: ping classifier appends the web line last: key ok, no key, or lookup off', async () => {
   const cases = [
-    [true, true, 'web: search key ok'],
-    [true, false, 'web: no BRAVE_SEARCH_API_KEY'],
-    [false, true, 'web: lookup off'],
-    [undefined, true, 'web: lookup off'],
+    [true, true, 'web: API key — ok'],
+    [true, false, 'web: API key — missing'],
+    [false, true, 'web: API key — off'],
+    [undefined, true, 'web: API key — off'],
   ];
   for (const [webLookup, hasKey, expected] of cases) {
     const rootDir = makeRoot();
@@ -3441,7 +3441,7 @@ test('run: full ping appends the web line too; a talk-only ping or no lookup wir
   const llm = fakeLlm(() => ({ text: 'pong', usage: {}, estimated: 1 }));
   const { admin } = makeAdmin(rootDir, { hot, llm, lookup: fakeWebLookup(true) });
 
-  assert.equal((await admin.run('ping', {}, {})).split('\n').at(-1), 'web: search key ok');
+  assert.equal((await admin.run('ping', {}, {})).split('\n').at(-1), 'web: API key — ok');
   assert.ok(!(await admin.run('ping', { role: 'talk' }, {})).includes('web:'));
 
   const { admin: bare } = makeAdmin(rootDir, { hot, llm });
@@ -3457,5 +3457,5 @@ test('run: ping classifier with the ping label missing still appends the web lin
 
   const lines = (await admin.run('ping', { role: 'classifier' }, {})).split('\n');
   assert.equal(llm.calls.length, 0);
-  assert.equal(lines.at(-1), 'web: no BRAVE_SEARCH_API_KEY');
+  assert.equal(lines.at(-1), 'web: API key — missing');
 });
