@@ -34,6 +34,9 @@
 | `rewatch.md` | да | Классификатор: нужно ли персонажу пересмотреть видео или повторить загрузку незагрузившегося (`features.videoRewatch`). Получает нумерованный список недавних видео с их статусом и новое сообщение. Выход: ОДНА строка: `<number> \| <question>`, `<number> \| retry` или `none` | `{{name}}` |
 | `rewatch-answer.md` | да | Внеролевой промпт для повторного просмотра: видеомодель смотрит клип ещё раз и отвечает на один вопрос. Те же язык и правила ограничений, что у `describe-video.md`. Без карточки персонажа | `{{question}}` `{{maxChars}}` |
 | `address.md` | да | Классификатор: адресовано ли сообщение без обращения персонажу | `{{name}}` |
+| `lookup.md` | нет | Классификатор: нужно ли персонажу искать в интернете, чтобы ответить на сообщение (`features.webLookup`). Получает короткий транскрипт и блок `<candidate>`. Выход: ОДНА строка: поисковый запрос (обычные слова, не более 12) или `none` | `{{name}}` |
+| `read-link.md` | нет | Внеролевой промпт для чтения ссылок (`features.webLookup`, `web.links.enabled`): сжать загруженную страницу в один абзац. Получает заголовок и тело страницы. Без карточки персонажа | `{{maxChars}}` |
+| `search-summary.md` | нет | Внеролевой промпт для конденсатора поиска (`features.webLookup`, `web.search.enabled`): сжать нумерованные результаты поиска в одну заметку со встроенными ссылками на источники. Без карточки персонажа | `{{query}}` `{{maxChars}}` |
 | `labels.json` | да | Все строки, которые КОД вставляет в промпт. Ключи фиксированы ниже, формулировки определяет автор текстов | см. ниже |
 
 `{{name}}` отображаемое имя бота · `{{author}}` отображаемое имя вызвавшего · `{{trigger}}` одно из значений `labels.triggers.*` ·
@@ -41,7 +44,7 @@
 Системное сообщение = `system-prompt` + `character-card` + `rules` + `format`. Для анализатора: только `memory.md`.
 При принудительном ходе (`/nep interject`, `/nep initiate`) `forced.md` добавляется после промпта режима, если файл существует.
 Анализатор и промпты прогрева `profile.md` и `server.md` получают карточку персонажа и `rules.md` как блок
-`<character>` в пользовательском сообщении. `channel.md`, `describe.md`, `describe-video.md`, `rewatch.md`, `rewatch-answer.md` и `address.md` карточку не получают.
+`<character>` в пользовательском сообщении. `channel.md`, `describe.md`, `describe-video.md`, `rewatch.md`, `rewatch-answer.md`, `address.md`, `lookup.md`, `read-link.md` и `search-summary.md` карточку не получают.
 
 `{{guildFieldChars}}` равен `fieldChars * 2`, лимит, до которого код обрезает серверные паттерны и зачины разговоров.
 `{{maxEpisodes}}` определяет общее количество хранимых эпизодов на человека. Оба заполняются из конфигурации, но не
@@ -59,12 +62,13 @@
 | `<self_facts>` | Что персонаж утверждал о себе |
 | `<people>` | Профили участников; вызвавший первым, отмечен `labels.profile.interlocutorMark`; каждый с отношением персонажа, а для вызвавшего ещё и **эпизоды**: моменты, которые персонаж помнит о них двоих, с датами и короткими цитатами |
 | `<other_channels>` | До `context.neighborMessages` сообщений на соседний канал, не старше `context.neighborMaxAgeMinutes` |
+| `<lookup>` | Что персонаж нашёл в интернете на этом ходу (`features.webLookup`): запрос, сжатый ответ и сайты-источники, или строка «ничего не найдено». Появляется только когда классификатор поиска сработал и поиск завершён |
 | `<chat>` | До `context.channelMessages` последних сообщений текущего канала |
 | `<tempo>` | Счётчики за 10 мин / час / сутки, число участников, тишина, вердикт (live / slow / dead) |
 | `<task>` | `reply` / `interject` / `initiate` с заполненными плейсхолдерами |
 
 Приоритет бюджета (секции обрезаются с конца этого списка): системный промпт + задача + часы + темп + восприятие
-(никогда не обрезаются) → профиль вызвавшего с эпизодами → серверные привычки → факты о себе → лорбук → карта каналов → транскрипт (новейшие сначала) →
+(никогда не обрезаются) → профиль вызвавшего с эпизодами → lookup (сохраняется или отбрасывается целиком) → серверные привычки → факты о себе → лорбук → карта каналов → транскрипт (новейшие сначала) →
 остальные профили → соседние каналы.
 
 Медиа в строке транскрипта, наиболее информативная доступная форма: картинка, прикреплённая к ЭТОМУ запросу →
@@ -76,7 +80,7 @@
 `error`) заменяется человекочитаемой фразой из `transcript.videoReason.*`, прежде чем попадает в транскрипт. Ссылки
 сохраняют свой базовый тег (`link` / `linkText`) и получают видеодополнение: `linkWatched`, `linkNotWatchedFrame` или
 `linkNotWatched`. Если стоп-кадр прикреплён как картинка, добавляется также `frameAttached`. Ссылки используют
-`link` / `linkText`, построенные из эмбеда Discord (сайт, заголовок, фрагмент); текстовые файлы показывают начало через
+`link` / `linkText`, построенные из эмбеда Discord (сайт, заголовок, фрагмент); когда `features.webLookup` включён и ссылка была прочитана, `linkRead` добавляется после остальных дополнений ссылки (видео, превью). Текстовые файлы показывают начало через
 `filePreview`; пересланное сообщение обёрнуто в `forwarded`.
 
 Результаты просмотра видео кэшируются по вложению или ссылке в `data/guilds/<id>/media.json` под ключом
@@ -90,6 +94,11 @@
 Ответ повторного просмотра кэшируется под ключом `video:<itemId>:q:<hash>` (первые 16 шестнадцатеричных цифр SHA-1 от приведённого к нижнему регистру и схлопнутого по пробелам вопроса): `{ text, ts, answer: true }`. Истекает через час; код удаляет просроченные записи при чтении.
 
 Запись стоп-кадра картинки хранится под собственным ключом `<itemId>`, как и прежде. Обе могут сосуществовать для одного элемента.
+
+Результаты веб-поиска кэшируются в том же `data/guilds/<id>/media.json` рядом с записями видео и картинок:
+
+- Чтение ссылки: `read:<link.id>` хранит `{ text, ts }` (сжатую выдержку, постоянную) или `{ miss, ts, reason }` (промах, пропускаемый 6 часов; причины: `scheme`, `private`, `redirects`, `type`, `size`, `timeout`, `http`, `network`, `empty`, `unreadable`, `llm`). `TokenLimitError` или `DailyCapError` никогда не кэшируются.
+- Поиск: `search:<первые 16 hex-цифр SHA-1 нормализованного запроса>` хранит `{ query, text, sources, ts }`, отдаётся, пока моложе `web.search.cacheHours` (по умолчанию 24). Пустой `text` означает отсутствие результатов (рендерится `labels.lookup.none`). Ошибки не кэшируются.
 
 Строка транскрипта: `#87 [14:32] nick: text <replyTo> <media…> <sticker>`; собственные строки используют `labels.self`; между
 строками `labels.transcript.gap` / `gapWithDate` / `date`; блок начинается с `labels.transcript.header`. Соседние
@@ -128,6 +137,7 @@ transcript.voice                         {duration}
 transcript.audio                         {name} {duration}
 transcript.link                          {site} {title}
 transcript.linkText                      {site} {title} {text}
+transcript.linkRead                      {text}: extra tag after a link tag; the page was fetched and condensed — first-hand
 transcript.thumbnailDescribed            {text}: follows a link tag; describes the link's preview picture
 transcript.filePreview                   {name} {text}
 transcript.forwarded                     {text}
@@ -143,6 +153,11 @@ senses.stickerSee | stickerDescribed | stickerBlind
 senses.lottie
 senses.voice | links | files
 senses.linksWatch                        replaces links when features.videoDescriptions is on; adds that a linked video may come watched or not watched with the reason
+senses.linksRead                         shown after the links line when features.webLookup is on and web.links.enabled is not false; tells the persona that a link may come with a read excerpt — first-hand
+senses.search                            shown when features.webLookup is on, web.search.enabled is not false AND a Brave Search key is configured; tells the persona that a `<lookup>` block may appear with web results
+lookup.header                            {query}: heading of the `<lookup>` block
+lookup.sources                           {list}: site names, comma-separated by code
+lookup.none                              shown in `<lookup>` when the search found nothing useful
 tempo.counts                             {last10min} {lastHour} {lastDay}
 tempo.authors                            {authors}: a head count
 tempo.silenceBeforeTrigger | lastMessageAgo | sinceOwn          {duration}
@@ -454,3 +469,39 @@ warmup.contextMark                       prefixed to context lines in the profil
 `media.video.rewatch.maxPerDay` (по умолчанию 20) ограничивает повторные просмотры отдельно. Ответы кэшируются на час
 по каждому вопросу (см. раздел кэша видео выше). Переключатель `features.videoRewatch` (отсутствие = включён,
 требуется `videoDescriptions`).
+
+## Классификатор поиска (`lookup.md`): нужны ли факты из интернета для ответа на вопрос?
+
+Когда персонажу обращаются (ход ответа) и выполнены все условия — `features.webLookup` включён, `web.search.enabled`
+не false, промпт `lookup.md` существует, `web.search.maxPerTurn` не менее 1 и `BRAVE_SEARCH_API_KEY` настроен —
+классификатор определяет, спрашивает ли триггерное сообщение о чём-то, что требует поиска в интернете. Он использует
+роль модели `classifier.text`. Код отправляет `lookup.md` как системный промпт с пользовательским сообщением,
+содержащим короткий `<transcript>` (тот же, что у классификатора повторного просмотра, собственные строки персонажа
+отмечены `labels.self`) и блок `<candidate>`:
+
+```
+<transcript>
+...
+</transcript>
+<candidate>
+<имя автора>: <текст триггера>
+</candidate>
+```
+
+Транскрипт содержит описания, описания видео и прочитанные ссылки, если доступны. Текст триггера обрезан до
+`context.maxMessageChars`. Выход: ОДНА строка:
+
+- Поисковый запрос — обычные слова, без кавычек, без операторов, не более 12 слов — когда сообщение требует фактов
+  извне чата.
+- `none` — во всех остальных случаях.
+
+При совпадении Brave Search выполняет запрос (`web.search.results` результатов, по умолчанию 5), нумерованные
+результаты сжимаются ролью `classifier.text` через `search-summary.md` (`{{query}}`, `{{maxChars}}` =
+`web.search.summaryChars`, по умолчанию 900), и ответ рендерится в блок `<lookup>` непосредственно перед `<chat>`:
+`labels.lookup.header` с запросом, сжатый текст и `labels.lookup.sources` с именами сайтов. Если поиск ничего не вернул
+или конденсатор не нашёл полезного, вместо этого появляется `labels.lookup.none`.
+
+Ограничения: не более одного поиска за ход; и классификатор, и конденсатор считаются в `llm.maxRequestsPerDay`;
+сам поиск считается в `web.maxPerDay` (общий с чтением ссылок). Результаты кэшируются на
+`web.search.cacheHours` (по умолчанию 24) часов на нормализованный запрос. Переключатель `features.webLookup`
+(отсутствие = выключен).
