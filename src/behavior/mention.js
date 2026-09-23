@@ -111,7 +111,7 @@ export const repeatWindowMs = (cfg) => cfg.repeatWindowMinutes * MINUTE;
  */
 export function isFollowUpOpen(state, now, cfg) {
   if (!state) return false;
-  const minutes = cfg?.followUpMinutes ?? 2;
+  const minutes = cfg?.followUpMinutes ?? 15;
   const noStreakLimit = cfg?.followUpNoStreak ?? 3;
   return now - state.lastAnswerAt < minutes * MINUTE && state.noStreak < noStreakLimit;
 }

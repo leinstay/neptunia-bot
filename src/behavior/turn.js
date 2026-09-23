@@ -349,7 +349,7 @@ export function createTurnRunner({
     });
     const triggerText = [...String(trigger.content ?? '')].slice(0, config.context?.maxMessageChars ?? 800).join('');
     // The chat around the question, rendered like the address classifier's context (src/discord/events.js).
-    const contextMessages = Math.max(0, Math.floor(rewatchCfg.contextMessages ?? 8));
+    const contextMessages = Math.max(0, Math.floor(rewatchCfg.contextMessages ?? 50));
     const context = contextMessages > 0 ? history.filter((m) => m.id !== trigger.id).slice(-contextMessages) : [];
     let transcriptBlock = '';
     if (context.length > 0) {

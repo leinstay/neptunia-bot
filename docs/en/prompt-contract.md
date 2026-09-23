@@ -392,7 +392,7 @@ After the persona answers someone, a conversation window opens in that channel (
 by every further answer). A message inside the window that carries no trigger (no mention, no reply to the persona,
 no name) is not answered blindly: code sends the last `mention.followUpContext` (default 15) lines of the channel, the
 persona's own lines marked with `labels.self`, plus the new message marked as `<candidate>`, to `address.md` on the
-`followUp` model role (`mention.followUpModel`, default the media model). Output is ONE line: `yes` when the candidate
+`followUp` model role (`mention.followUpModel`, default `anthropic/claude-sonnet-4.6`). Output is ONE line: `yes` when the candidate
 addresses the persona or continues the exchange with it, `no` when people talk among themselves or to someone else
 (a reply to another member or a mention of another member is always `no` before the model is asked). `yes` runs a
 normal reply turn (the model may still `<skip/>`); three `no` in a row (`mention.followUpNoStreak`, default 3) close
@@ -406,7 +406,7 @@ When the persona is addressed (a reply turn) and a video sits in the last `media
 to retry one that did not load. Candidates are watched videos and error-state videos (a requested retry uses its own slot, independent of the turn's
 `media.video.maxPerTurn` attempts). At most `media.video.rewatch.maxCandidates` (default 6) are
 offered to the classifier, newest-message first. Code sends `rewatch.md` as the system prompt on the follow-up model
-role (`mention.followUpModel`, default the media model) with a user message
+role (`mention.followUpModel`, default `anthropic/claude-sonnet-4.6`) with a user message
 containing three blocks: a short `<transcript>` of the last few channel messages with the persona's own lines marked
 with `labels.self` (so the classifier sees what the candidate replies to), then the video list and the candidate:
 

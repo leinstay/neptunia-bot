@@ -1567,9 +1567,28 @@ test('follow-up: the classifier request is address.md as system and a <candidate
   assert.ok(messages[1].content.includes('is this for you'));
   assert.ok(messages[1].content.includes('earlier message'), 'the channel context is included');
   assert.equal(options.maxOutputTokens, 8, 'mention.followUpMaxOutputTokens');
-  assert.equal(options.model, 'anthropic/claude-haiku-4.5', 'followUpModel=null falls back to media.model');
+  assert.equal(options.model, 'anthropic/claude-sonnet-4.6', 'the shipped mention.followUpModel');
   assert.equal(options.countAgainstDailyCap, true);
   assert.equal(options.skipCalibration, true);
+
+  llm.respond('no');
+  await p;
+});
+
+test('follow-up: mention.followUpModel null falls back to media.model', async () => {
+  const llm = fakeFollowUpLlm();
+  const config = baseConfig({ mention: { followUpModel: null } });
+  const handler = makeHandler({ config, llm, prompts: fakeAddressPrompts() });
+  const guild = fakeGuild('g1', 'Neptunia');
+  const t0 = Date.now();
+  const channel = fakeChannelWithHistory('c1', guild, []);
+  await openFollowUpWindow(handler, { guild, channel, ts: t0 + 1000 });
+
+  const p = handler(fakeMessage({ id: 'm-candidate', guild, channel, channelId: 'c1', cleanContent: 'is this for you', createdTimestamp: t0 + 2000 }));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.equal(llm.calls.length, 1);
+  assert.equal(llm.calls[0].options.model, config.media.model, 'followUpModel=null falls back to media.model');
 
   llm.respond('no');
   await p;
@@ -1613,7 +1632,7 @@ test('follow-up: the window opens on send and expires after followUpMinutes', as
   llm.respond('no');
   await p1;
 
-  clock.set(3 * 60_000); // past the default followUpMinutes=2
+  clock.set(16 * 60_000); // past the default followUpMinutes=15
   const msg2 = fakeMessage({
     guild,
     channel,
@@ -1868,7 +1887,7 @@ test('follow-up: a hot change to mention.followUpMinutes is picked up without re
   const channel = fakeChannelWithHistory('c1', guild, []);
   await openFollowUpWindow(handler, { guild, channel, ts: clock() });
 
-  config.mention.followUpMinutes = 1; // was 2
+  config.mention.followUpMinutes = 1; // was 15
 
   clock.set(90_000); // 1.5 min: inside the old default, past the new shorter one
   const msg = fakeMessage({ guild, channel, channelId: 'c1', cleanContent: 'plain follow-up' });
@@ -1905,7 +1924,7 @@ test('follow-up persistence: an open window survives a re-created handler with t
   assert.deepEqual(store.state.data.followUpWindows, { c1: { openedAt: 10_000, lastAnswerAt: 10_000, noStreak: 0 } });
   assert.ok(store.dirtyCount > 0, 'opening a window marks the state dirty');
 
-  clock.set(40_000); // "restart" half a minute later, well inside followUpMinutes=2
+  clock.set(40_000); // "restart" half a minute later, well inside followUpMinutes=15
   const llm = fakeFollowUpLlm();
   const spontaneous = fakeSpontaneous();
   const second = makeHandler({ store, spontaneous, now: clock, llm, prompts: fakeAddressPrompts() });
@@ -1924,10 +1943,10 @@ test('follow-up persistence: an expired window is dropped on load', async () => 
   const store = fakeStateStore({
     followUpWindows: {
       old: { openedAt: 0, lastAnswerAt: 0, noStreak: 0 },
-      fresh: { openedAt: 170_000, lastAnswerAt: 170_000, noStreak: 1 },
+      fresh: { openedAt: 950_000, lastAnswerAt: 950_000, noStreak: 1 },
     },
   });
-  const clock = mutableNow(180_000); // 3 min: past followUpMinutes=2 for "old", 10 s for "fresh"
+  const clock = mutableNow(960_000); // 16 min: past followUpMinutes=15 for "old", 10 s for "fresh"
   const llm = fakeFollowUpLlm();
   const spontaneous = fakeSpontaneous();
   const handler = makeHandler({ store, spontaneous, now: clock, llm, prompts: fakeAddressPrompts() });
@@ -1969,7 +1988,7 @@ test('follow-up persistence: an expired window is removed from state when next c
   const channel = fakeChannelWithHistory('c1', guild, []);
   await openFollowUpWindow(handler, { guild, channel, ts: clock() });
 
-  clock.set(3 * 60_000);
+  clock.set(16 * 60_000); // past the default followUpMinutes=15
   await handler(fakeMessage({ guild, channel, channelId: 'c1', cleanContent: 'too late', createdTimestamp: clock() }));
 
   assert.equal(Object.hasOwn(store.state.data.followUpWindows, 'c1'), false);

@@ -1607,17 +1607,23 @@ function rewatchTranscriptLines(content) {
   return content.slice('<transcript>\n'.length, content.indexOf('\n</transcript>\n<videos>\n')).split('\n');
 }
 
-test('createTurnRunner: rewatch -- contextMessages defaults to 8 (config.json and the code fallback)', async () => {
+test('createTurnRunner: rewatch -- contextMessages defaults to 50 (config.json and the code fallback)', async () => {
   const shipped = JSON.parse(fs.readFileSync(new URL('../config.json', import.meta.url), 'utf8'));
-  assert.equal(shipped.media.video.rewatch.contextMessages, 8);
+  assert.equal(shipped.media.video.rewatch.contextMessages, 50);
 
-  const { llm } = await runRewatch({ scene: rewatchContextScene(10), llm: rewatchLlm('none') });
+  // recentMessages widened so the video 62 messages back is still a candidate;
+  // contextMessages stays unset, so the code fallback applies.
+  const { llm } = await runRewatch({
+    hot: rewatchHot({}, { rewatch: { recentMessages: 100 } }),
+    scene: rewatchContextScene(61),
+    llm: rewatchLlm('none'),
+  });
   const lines = rewatchTranscriptLines(llm.classifierCalls[0].messages[1].content);
   assert.equal(lines[0], fill(labels.transcript.header, { date: lines[0].slice(4, -4) }), 'opens with the transcript header');
   const items = lines.slice(1);
-  assert.equal(items.length, 8);
-  assert.ok(items[0].endsWith('Zoë: ligne 2'), 'the eight messages before the trigger, oldest first');
-  assert.ok(items[7].endsWith('Zoë: ligne 9'));
+  assert.equal(items.length, 50);
+  assert.ok(items[0].endsWith('Zoë: ligne 11'), 'the fifty messages before the trigger, oldest first');
+  assert.ok(items[49].endsWith('Zoë: ligne 60'));
 });
 
 test('createTurnRunner: rewatch -- the <transcript> block holds the last contextMessages before the trigger, the persona marked, the trigger only in <candidate>', async () => {

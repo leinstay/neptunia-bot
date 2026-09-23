@@ -107,7 +107,7 @@ npm start
 
 ## 消息处理流程
 
-消息经过服务器、频道和自身消息过滤。如果角色被呼叫（@提及、回复或名字触发），忽略启发式会根据基础概率进行判定，该概率会因空提及、重复标记、垃圾消息和呼叫者的关系分数而调整。角色回复某人后，该频道内接下来 `mention.followUpMinutes` 分钟的未标记消息会被发送到 `followUp` 模型角色上的分类器（默认使用媒体模型），判断它们是否在延续对话；连续三个 `no` 判定会关闭窗口。后续窗口在重启后保留。`features.followUp` 可关闭此功能。自发回合由混沌定时器或逐消息窃听概率触发。角色不会在沉默超过 `spontaneous.maxChannelSilenceHours` 小时的频道中主动发言；但该频道中的直接提及仍会回复。
+消息经过服务器、频道和自身消息过滤。如果角色被呼叫（@提及、回复或名字触发），忽略启发式会根据基础概率进行判定，该概率会因空提及、重复标记、垃圾消息和呼叫者的关系分数而调整。角色回复某人后，该频道内接下来 `mention.followUpMinutes` 分钟的未标记消息会被发送到 `followUp` 模型角色上的分类器（默认 `anthropic/claude-sonnet-4.6`），判断它们是否在延续对话；连续三个 `no` 判定会关闭窗口。后续窗口在重启后保留。`features.followUp` 可关闭此功能。自发回合由混沌定时器或逐消息窃听概率触发。角色不会在沉默超过 `spontaneous.maxChannelSilenceHours` 小时的频道中主动发言；但该频道中的直接提及仍会回复。
 
 角色在整个服务器范围内同一时间只写一条回复。在角色正在回复时，同一频道的提及会被错过；这些错过的消息会出现在下次回复的对话记录中。来自其他频道的直接提及（@提及或回复其消息，非名字触发）会被挂起，每个频道保留一条，最多在 `mention.maxPending` 个频道中保留 `mention.pendingMinutes` 分钟；同一待处理频道中较新的提及会替换较旧的。当前回复完成后，角色在短暂停顿（`mention.switchDelayMs`）后切换频道，基于当前对话状态进行回复；通常的忽略概率仍然适用。繁忙期间到达的名字触发和窃听命中会被跳过。设置 `mention.oneAtATime: false` 后，每个频道独立处理。角色不会在缺少发送消息权限的频道中发言或做出反应，且在消耗 LLM 请求之前检查权限；此类频道仍会被读取和记忆。
 
@@ -139,7 +139,7 @@ npm start
 
 用户消息中的 `<senses>` 块告知角色在当前配置下能和不能感知什么。角色信任此块的内容，不会声称看到、听到或打开了超出其描述的任何东西。
 
-`features.videoDescriptions`（默认开启，需同时开启 `mediaDescriptions`）添加一个支持视频的模型（`media.video.model`，默认 `google/gemini-3.8-flash`），可观看短视频片段：Discord 视频附件和已知视频站点的链接（YouTube、TikTok、VK、X、Reddit、Twitch）。附件和下载的站点视频受 `media.video.maxSeconds`（默认 60 秒）和 `media.video.maxBytes` 限制；`directUrlMaxSeconds`（默认 180 秒）以内的 YouTube 链接会作为 URL 直接传递给提供商（Google AI Studio）。每回合最多 `maxPerTurn` 个新视频（每次尝试都计数，无论成功与否），每天最多 `maxPerDay` 个。结果与图片描述一起缓存。其他内容通过 `yt-dlp` 下载并使用 `ffmpeg` 裁剪，两者均为可选的系统二进制文件。没有它们时，在限制内的附件仍然可用；更长的附件和站点链接会回退到静帧。对于 YouTube，当 `yt-dlp` 无法探测时长时，`.env` 中的可选 `YOUTUBE_API_KEY`（免费，Google Cloud 控制台，YouTube Data API v3）或观看页面抓取可以提供时长信息。`/nep ping video` 报告此主机上哪个时长来源可用。当有人对角色提出关于已观看视频的问题时，低成本分类器（`prompts/rewatch.md`）判断是否需要再看一遍；如果需要，视频模型使用 `prompts/rewatch-answer.md` 再次观看片段，回答与原始摘要一起出现在对话记录中。当有人再次询问未能加载的视频时，同一分类器也可以重试加载。每回合最多一次重看或重试；回答缓存一小时。开关 `features.videoRewatch`（默认开启）。
+`features.videoDescriptions`（默认关闭；在 `config.local.json` 中开启；需同时开启 `mediaDescriptions`）添加一个支持视频的模型（`media.video.model`，默认 `google/gemini-3.8-flash`），可观看短视频片段：Discord 视频附件和已知视频站点的链接（YouTube、TikTok、VK、X、Reddit、Twitch）。附件和下载的站点视频受 `media.video.maxSeconds`（默认 60 秒）和 `media.video.maxBytes` 限制；`directUrlMaxSeconds`（默认 180 秒）以内的 YouTube 链接会作为 URL 直接传递给提供商（Google AI Studio）。每回合最多 `maxPerTurn` 个新视频（每次尝试都计数，无论成功与否），每天最多 `maxPerDay` 个。结果与图片描述一起缓存。其他内容通过 `yt-dlp` 下载并使用 `ffmpeg` 裁剪，两者均为可选的系统二进制文件。没有它们时，在限制内的附件仍然可用；更长的附件和站点链接会回退到静帧。对于 YouTube，当 `yt-dlp` 无法探测时长时，`.env` 中的可选 `YOUTUBE_API_KEY`（免费，Google Cloud 控制台，YouTube Data API v3）或观看页面抓取可以提供时长信息。`/nep ping video` 报告此主机上哪个时长来源可用。当有人对角色提出关于已观看视频的问题时，低成本分类器（`prompts/rewatch.md`）判断是否需要再看一遍；如果需要，视频模型使用 `prompts/rewatch-answer.md` 再次观看片段，回答与原始摘要一起出现在对话记录中。当有人再次询问未能加载的视频时，同一分类器也可以重试加载。每回合最多一次重看或重试；回答缓存一小时。开关 `features.videoRewatch`（默认开启）。
 
 视频提示是 `prompts/describe-video.md`。设置位于 `media.video` 下。每个键和模型对比表请参阅 [`configuration.md`](configuration.md)。
 

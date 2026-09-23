@@ -20,7 +20,7 @@ Every key in `config.json` with its default, grouped by section.
 | `multiMessage` | `true` | Allow 2–3 messages in a row |
 | `vision` | `true` | Process attached images |
 | `mediaDescriptions` | `true` | One-line descriptions for pictures, GIFs, video frames and link thumbnails |
-| `videoDescriptions` | `true` | Watch short video clips through a video-capable model; needs `mediaDescriptions` on as well |
+| `videoDescriptions` | `false` | Watch short video clips through a video-capable model; needs `mediaDescriptions` on as well. Turn on in `config.local.json`; still needs a video-capable model and, for site links, `yt-dlp`/`ffmpeg` |
 | `videoRewatch` | `true` | When addressed, re-watch a video to answer a question about it; needs `videoDescriptions` on |
 | `followUp` | `true` | Classify untagged messages after the persona answers to continue a conversation |
 | `typingSimulation` | `true` | Simulate typing speed |
@@ -138,7 +138,7 @@ For YouTube links, the duration is learned through a chain: yt-dlp first, then t
 
 ### `media.video.rewatch`
 
-Settings for the re-watch classifier (`features.videoRewatch`). When the persona is addressed and a watched video sits in the recent transcript, a cheap classifier decides whether the message asks about one of those videos; if so, the video model watches the clip again and the answer is appended to the transcript. The classifier uses the follow-up model (`mention.followUpModel`, default the media model). The second look always uses `media.video.model`.
+Settings for the re-watch classifier (`features.videoRewatch`). When the persona is addressed and a watched video sits in the recent transcript, a cheap classifier decides whether the message asks about one of those videos; if so, the video model watches the clip again and the answer is appended to the transcript. The classifier uses the follow-up model (`mention.followUpModel`, default `anthropic/claude-sonnet-4.6`). The second look always uses `media.video.model`.
 
 | Key | Default | Meaning |
 |---|---|---|
@@ -147,7 +147,7 @@ Settings for the re-watch classifier (`features.videoRewatch`). When the persona
 | `answerChars` | `1200` | Max characters for the answer; fills `{{maxChars}}` in `rewatch-answer.md` |
 | `recentMessages` | `60` | How many recent messages to scan for watched or error-state videos |
 | `maxCandidates` | `6` | Max videos offered to the classifier from the recent window, newest first |
-| `contextMessages` | `8` | Recent channel messages (excluding the trigger) rendered as a `<transcript>` block for the classifier; `0` omits the block |
+| `contextMessages` | `50` | Recent channel messages (excluding the trigger) rendered as a `<transcript>` block for the classifier; `0` omits the block |
 
 At most one re-watch or retry per turn. Answers are cached for one hour per question. The classifier and the second look each count against `llm.maxRequestsPerDay`; the second look also counts against `media.video.maxPerDay`.
 
@@ -169,9 +169,9 @@ At most one re-watch or retry per turn. Answers are cached for one hour per ques
 | `maxPending` | `3` | Channels that can hold a direct ping while busy |
 | `pendingMinutes` | `10` | Minutes before a held ping expires |
 | `switchDelayMs` | `[2000, 9000]` | Pause before answering in the next channel (ms) |
-| `followUpMinutes` | `2` | Follow-up window after the persona's last reply (min) |
+| `followUpMinutes` | `15` | Follow-up window after the persona's last reply (min) |
 | `followUpContext` | `15` | Transcript lines sent to the classifier |
-| `followUpModel` | `null` | Classifier model (`null` = media model) |
+| `followUpModel` | `"anthropic/claude-sonnet-4.6"` | Classifier model; `null` uses the media model |
 | `followUpMaxOutputTokens` | `8` | Max output tokens for the classifier |
 | `followUpNoStreak` | `3` | Consecutive `no` verdicts that close the window |
 
@@ -306,7 +306,7 @@ Default: `anthropic/claude-haiku-4.5`. Cheapest alternative: `google/gemini-2.5-
 
 ### `mention.followUpModel` — the address classifier
 
-The cheapest text model that can answer "yes" or "no" reliably. `null` (default) uses the media model.
+The cheapest text model that can answer "yes" or "no" reliably. Default: `anthropic/claude-sonnet-4.6`. `null` uses the media model.
 
 The re-watch classifier shares this model: it is the same kind of cheap yes/no job (does a message ask about a watched video?). The second look always uses the video model.
 

@@ -20,7 +20,7 @@
 | `multiMessage` | `true` | 2〜3 件の連続メッセージを許可 |
 | `vision` | `true` | 添付画像を処理 |
 | `mediaDescriptions` | `true` | 画像、GIF、動画フレーム、リンクサムネイルの一行説明文 |
-| `videoDescriptions` | `true` | 動画対応モデルで短い動画クリップを視聴。`mediaDescriptions` も有効にする必要がある |
+| `videoDescriptions` | `false` | 動画対応モデルで短い動画クリップを視聴。`mediaDescriptions` も有効にする必要がある。`config.local.json` で有効化。動画対応モデルが必要で、サイトリンクには `yt-dlp`/`ffmpeg` も必要 |
 | `videoRewatch` | `true` | 話しかけられた時に動画を再視聴して質問に回答。`videoDescriptions` が必要 |
 | `followUp` | `true` | ペルソナの応答後、タグなしメッセージを分類して会話を継続 |
 | `typingSimulation` | `true` | タイピング速度をシミュレート |
@@ -138,7 +138,7 @@ YouTube リンクの再生時間は次の順序で取得されます: まず yt-
 
 ### `media.video.rewatch`
 
-再視聴分類器（`features.videoRewatch`）の設定です。ペルソナに話しかけられた時に直近のトランスクリプトに視聴済み動画がある場合、安価な分類器がメッセージがそれらの動画について質問しているかを判定します。ヒットすると動画モデルがクリップを再度視聴し、回答がトランスクリプトに追加されます。分類器はフォローアップモデル（`mention.followUpModel`、デフォルトはメディアモデル）を使用します。再視聴は常に `media.video.model` を使用します。
+再視聴分類器（`features.videoRewatch`）の設定です。ペルソナに話しかけられた時に直近のトランスクリプトに視聴済み動画がある場合、安価な分類器がメッセージがそれらの動画について質問しているかを判定します。ヒットすると動画モデルがクリップを再度視聴し、回答がトランスクリプトに追加されます。分類器はフォローアップモデル（`mention.followUpModel`、デフォルト `anthropic/claude-sonnet-4.6`）を使用します。再視聴は常に `media.video.model` を使用します。
 
 | キー | デフォルト | 説明 |
 |---|---|---|
@@ -147,7 +147,7 @@ YouTube リンクの再生時間は次の順序で取得されます: まず yt-
 | `answerChars` | `1200` | 回答の最大文字数。`rewatch-answer.md` の `{{maxChars}}` に使用 |
 | `recentMessages` | `60` | 視聴済みまたはエラー状態の動画をスキャンする直近のメッセージ数 |
 | `maxCandidates` | `6` | 直近ウィンドウから分類器に渡す最大動画数（新しい順） |
-| `contextMessages` | `8` | 分類器に `<transcript>` ブロックとして渡す直近のチャンネルメッセージ数（トリガーを除く）。`0` でブロック省略 |
+| `contextMessages` | `50` | 分類器に `<transcript>` ブロックとして渡す直近のチャンネルメッセージ数（トリガーを除く）。`0` でブロック省略 |
 
 ターンあたり最大 1 回の再視聴またはリトライ。回答は質問ごとに 1 時間キャッシュされます。分類器と再視聴はそれぞれ `llm.maxRequestsPerDay` にカウントされます。再視聴は `media.video.maxPerDay` にもカウントされます。
 
@@ -169,9 +169,9 @@ YouTube リンクの再生時間は次の順序で取得されます: まず yt-
 | `maxPending` | `3` | ビジー時に直接ピングを保持できるチャンネル数 |
 | `pendingMinutes` | `10` | 保持されたピングが期限切れになるまでの分数 |
 | `switchDelayMs` | `[2000, 9000]` | 次のチャンネルで応答する前の待機時間（ミリ秒） |
-| `followUpMinutes` | `2` | ペルソナの最後のリプライ後のフォローアップウィンドウ（分） |
+| `followUpMinutes` | `15` | ペルソナの最後のリプライ後のフォローアップウィンドウ（分） |
 | `followUpContext` | `15` | 分類器に送信するトランスクリプト行数 |
-| `followUpModel` | `null` | 分類器モデル（`null` = メディアモデル） |
+| `followUpModel` | `"anthropic/claude-sonnet-4.6"` | 分類器モデル。`null` の場合はメディアモデルを使用 |
 | `followUpMaxOutputTokens` | `8` | 分類器の最大出力トークン数 |
 | `followUpNoStreak` | `3` | ウィンドウを閉じる連続 `no` 判定回数 |
 
@@ -306,7 +306,7 @@ YouTube リンクの再生時間は次の順序で取得されます: まず yt-
 
 ### `mention.followUpModel` — アドレス分類器
 
-「yes」または「no」を確実に回答できる最も安価なテキストモデルです。`null`（デフォルト）はメディアモデルを使用します。
+「yes」または「no」を確実に回答できる最も安価なテキストモデルです。デフォルト: `anthropic/claude-sonnet-4.6`。`null` の場合はメディアモデルを使用します。
 
 再視聴分類器はこのモデルを共有します。同じ種類の安価な yes/no 判定（メッセージが視聴済み動画について質問しているか？）です。再視聴は常に動画モデルを使用します。
 

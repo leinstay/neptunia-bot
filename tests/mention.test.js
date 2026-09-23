@@ -331,10 +331,10 @@ test('isFollowUpOpen: true just below the noStreak cap', () => {
   assert.equal(isFollowUpOpen(state, 1000, FOLLOW_UP_CFG), true);
 });
 
-test('isFollowUpOpen: falls back to defaults (2 min, streak 3) when cfg omits the keys', () => {
+test('isFollowUpOpen: falls back to defaults (15 min, streak 3) when cfg omits the keys', () => {
   const state = { openedAt: 0, lastAnswerAt: 0, noStreak: 0 };
-  assert.equal(isFollowUpOpen(state, 119_000, {}), true); // just under 2 min
-  assert.equal(isFollowUpOpen(state, 120_000, {}), false); // exactly 2 min
+  assert.equal(isFollowUpOpen(state, 899_000, {}), true); // just under 15 min
+  assert.equal(isFollowUpOpen(state, 900_000, {}), false); // exactly 15 min
 });
 
 test('followUpPreFilter: a reply to another message is always "no" material', () => {

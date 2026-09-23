@@ -20,7 +20,7 @@
 | `multiMessage` | `true` | 允许连续发 2–3 条消息 |
 | `vision` | `true` | 处理附加图片 |
 | `mediaDescriptions` | `true` | 为图片、GIF、视频帧和链接缩略图生成单行描述 |
-| `videoDescriptions` | `true` | 通过支持视频的模型观看短视频片段；需同时开启 `mediaDescriptions` |
+| `videoDescriptions` | `false` | 通过支持视频的模型观看短视频片段；需同时开启 `mediaDescriptions`。在 `config.local.json` 中开启；还需要支持视频的模型，以及站点链接需要 `yt-dlp`/`ffmpeg` |
 | `videoRewatch` | `true` | 被呼叫时重看视频以回答相关问题；需要 `videoDescriptions` |
 | `followUp` | `true` | 角色回复后对未标记消息进行分类以延续对话 |
 | `typingSimulation` | `true` | 模拟输入速度 |
@@ -138,7 +138,7 @@ YouTube 链接的时长通过以下链式探测获取：首先尝试 yt-dlp，�
 
 ### `media.video.rewatch`
 
-重看分类器（`features.videoRewatch`）的设置。当角色被呼叫且近期对话记录中有已观看的视频时，一个低成本分类器判断消息是否在询问其中某个视频；如果是，视频模型再次观看片段，回答追加到对话记录中。分类器使用后续模型（`mention.followUpModel`，默认媒体模型）。重看始终使用 `media.video.model`。
+重看分类器（`features.videoRewatch`）的设置。当角色被呼叫且近期对话记录中有已观看的视频时，一个低成本分类器判断消息是否在询问其中某个视频；如果是，视频模型再次观看片段，回答追加到对话记录中。分类器使用后续模型（`mention.followUpModel`，默认 `anthropic/claude-sonnet-4.6`）。重看始终使用 `media.video.model`。
 
 | 键 | 默认值 | 说明 |
 |---|---|---|
@@ -147,7 +147,7 @@ YouTube 链接的时长通过以下链式探测获取：首先尝试 yt-dlp，�
 | `answerChars` | `1200` | 回答的最大字符数；填充 `rewatch-answer.md` 中的 `{{maxChars}}` |
 | `recentMessages` | `60` | 扫描已观看或错误状态视频的近期消息数 |
 | `maxCandidates` | `6` | 从近期窗口中提供给分类器的最大视频数，按最新排序 |
-| `contextMessages` | `8` | 作为 `<transcript>` 块渲染给分类器的近期频道消息数（不含触发消息）；`0` 省略该块 |
+| `contextMessages` | `50` | 作为 `<transcript>` 块渲染给分类器的近期频道消息数（不含触发消息）；`0` 省略该块 |
 
 每回合最多一次重看或重试。回答按问题缓存一小时。分类器和重看各自计入 `llm.maxRequestsPerDay`；重看还计入 `media.video.maxPerDay`。
 
@@ -169,9 +169,9 @@ YouTube 链接的时长通过以下链式探测获取：首先尝试 yt-dlp，�
 | `maxPending` | `3` | 繁忙时可挂起直接提及的频道数 |
 | `pendingMinutes` | `10` | 挂起的提及过期时间（分钟） |
 | `switchDelayMs` | `[2000, 9000]` | 在下一个频道回复前的暂停时间（毫秒） |
-| `followUpMinutes` | `2` | 角色最后一条回复后的后续窗口（分钟） |
+| `followUpMinutes` | `15` | 角色最后一条回复后的后续窗口（分钟） |
 | `followUpContext` | `15` | 发送给分类器的对话记录行数 |
-| `followUpModel` | `null` | 分类器模型（`null` = 媒体模型） |
+| `followUpModel` | `"anthropic/claude-sonnet-4.6"` | 分类器模型；`null` 使用媒体模型 |
 | `followUpMaxOutputTokens` | `8` | 分类器的最大输出 token 数 |
 | `followUpNoStreak` | `3` | 连续 `no` 判定次数达到此值关闭窗口 |
 
@@ -306,7 +306,7 @@ YouTube 链接的时长通过以下链式探测获取：首先尝试 yt-dlp，�
 
 ### `mention.followUpModel` — 地址分类器
 
-能可靠回答 "yes" 或 "no" 的最便宜的文本模型。`null`（默认）使用媒体模型。
+能可靠回答 "yes" 或 "no" 的最便宜的文本模型。默认：`anthropic/claude-sonnet-4.6`。`null` 使用媒体模型。
 
 重看分类器共享此模型：同样是低成本的 yes/no 判断（消息是否在询问已观看的视频？）。重看始终使用视频模型。
 

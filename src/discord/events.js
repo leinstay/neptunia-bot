@@ -173,7 +173,7 @@ export function createMessageHandler({
   function loadFollowUpWindows() {
     const saved = store?.state?.data?.followUpWindows;
     if (!saved || typeof saved !== 'object') return;
-    const minutes = hot.config.mention?.followUpMinutes ?? 2;
+    const minutes = hot.config.mention?.followUpMinutes ?? 15;
     const t = now();
     let dropped = 0;
     for (const [channelId, entry] of Object.entries(saved)) {

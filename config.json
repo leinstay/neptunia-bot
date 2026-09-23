@@ -15,7 +15,7 @@
     "multiMessage": true,
     "vision": true,
     "mediaDescriptions": true,
-    "videoDescriptions": true,
+    "videoDescriptions": false,
     "videoRewatch": true,
     "typingSimulation": true,
     "adminCommands": true
@@ -72,9 +72,9 @@
     "pendingMinutes": 10,
     "maxPending": 3,
     "switchDelayMs": [2000, 9000],
-    "followUpMinutes": 2,
+    "followUpMinutes": 15,
     "followUpContext": 15,
-    "followUpModel": null,
+    "followUpModel": "anthropic/claude-sonnet-4.6",
     "followUpMaxOutputTokens": 8,
     "followUpNoStreak": 3
   },
@@ -177,7 +177,7 @@
       "urlProcessing": "agentic",
       "reasoning": { "effort": "low" },
       "prefill": true,
-      "rewatch": { "maxPerDay": 20, "maxOutputTokens": 600, "answerChars": 1200, "recentMessages": 60, "maxCandidates": 6, "contextMessages": 8 }
+      "rewatch": { "maxPerDay": 20, "maxOutputTokens": 600, "answerChars": 1200, "recentMessages": 60, "maxCandidates": 6, "contextMessages": 50 }
     }
   },
   "warmup": {

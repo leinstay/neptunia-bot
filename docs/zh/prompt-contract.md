@@ -369,7 +369,7 @@ warmup.contextMark                       prefixed to context lines in the profil
 角色回复某人后，该频道内打开一个对话窗口（`mention.followUpMinutes`，每次进一步回复时延长）。窗口内不
 携带触发信号（无提及、无对角色消息的回复、无名字）的消息不会被盲目回复：代码将频道最近的
 `mention.followUpContext`（默认 15）行发送给 `address.md`，角色自身的行以 `labels.self` 标记，加上以
-`<candidate>` 标记的新消息，使用 `followUp` 模型角色（`mention.followUpModel`，默认使用媒体模型）。输出
+`<candidate>` 标记的新消息，使用 `followUp` 模型角色（`mention.followUpModel`，默认 `anthropic/claude-sonnet-4.6`）。输出
 为一行：当候选消息是在对角色说话或延续与角色的对话时为 `yes`，当人们在相互交谈或对其他人说话时为 `no`
 （对另一成员的回复或对另一成员的提及在询问模型之前即为 `no`）。`yes` 触发正常的回复回合（模型仍可
 `<skip/>`）；连续三个 `no`（`mention.followUpNoStreak`，默认 3）关闭窗口。开关 `features.followUp`
@@ -381,7 +381,7 @@ warmup.contextMark                       prefixed to context lines in the profil
 当角色被呼叫（回复回合）且频道最近 `media.video.rewatch.recentMessages`（默认 60）条消息中有视频时，分类器判断
 该消息是否在询问其中某个视频，或请求重试一个未加载的视频。候选包括已观看视频和错误状态视频（请求的重试使用独立于回合 `media.video.maxPerTurn`
 尝试次数的专用槽位）。分类器最多收到 `media.video.rewatch.maxCandidates`（默认 6）个视频，按最新
-消息优先排列。代码将 `rewatch.md` 作为系统提示发送到后续模型角色（`mention.followUpModel`，默认媒体模型），
+消息优先排列。代码将 `rewatch.md` 作为系统提示发送到后续模型角色（`mention.followUpModel`，默认 `anthropic/claude-sonnet-4.6`），
 用户消息包含三个块：一个短的 `<transcript>` 包含频道最近几条消息，角色自身的行以 `labels.self` 标记（使分类器能看到候选消息回复的对象），然后是视频列表和候选：
 
 ```
