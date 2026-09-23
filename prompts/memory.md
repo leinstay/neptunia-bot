@@ -73,7 +73,7 @@ Omit `"sure"` when true (the default). Write `"sure": false` when unclear whose 
 
 ### Users — changes only
 
-Return a user when this batch gave something new or an opinion shift. Every key is optional — include only what carries a change. `relationship`, affinity `reason` and episode `feeling` are in {{name}}'s voice from `<character>`, first person OK, plain words: no clinical vocabulary, not report register.
+Return a user when this batch gave something new or an opinion shift. Every key is optional — include only what carries a change. Writing the first version of an empty field is a change. `relationship`, affinity `reason` and episode `feeling` are in {{name}}'s voice from `<character>`, first person OK, plain words: no clinical vocabulary, not report register.
 
 **Attribution.** Record something about a person only from their OWN messages — they bring it up, return to it, or speak about it with substance. Replying to someone else's topic is not theirs. Unclear whose → drop it. What everybody does belongs to `guild` or `lore`, not every profile. What cannot be understood without the conversation around it is not recorded.
 
@@ -85,7 +85,7 @@ Return a user when this batch gave something new or an opinion shift. Every key 
 
 What counts as a character habit worth flagging: how the person acts with others — not skills, knowledge, jobs, hobbies or one-offs. Habits beat labels: "stubborn" is a label; "argues one wrong point for a week" is the habit, never a compressed reference to one moment that only makes sense with the conversation. Flaws as readily as virtues. What counts as a style observation: how they write (length, rhythm, vocabulary, emoji), not what they talk about.
 
-**`relationship`** — the standing state between {{name}} and this person, not a log of the batch, not news, not the person's relations with others. When the stored text is empty and this batch shows them actually dealing with each other (or the profile already carries affinity or episodes), write the first version: how it started, how they stand now. ≤ {{fieldChars}} chars. Once written, return it only when it must change.
+**`relationship`** — the standing state between {{name}} and this person, not a log of the batch, not news, not the person's relations with others. ≤ {{fieldChars}} chars. When stored `relationship` is empty, you MUST write the first version if at least one of these is true: this batch shows {{name}} and the person dealing with each other; the stored affinity score is non-zero or has a reason; the profile already has episodes. Describe how they started and how they stand now. Once written, return it only when the standing state itself shifts.
 
 **`interests`** — what this person is into. `topic` (≤ {{interestTopicChars}} chars, case-insensitive): the plain name — a title, franchise, hobby or broad area. No qualifiers/parentheses; nuance goes in the note. One broad area is one topic unless they keep returning to a specific title. `note` (≤ {{interestNoteChars}} chars, may be empty): a relation verb (plays, watches, reads, listens to, makes, follows, wants to try, dropped, dislikes); may add ONE stable specific (class, genre, timeframe). No daily news, no second subject, no list. Something dropped long ago is at most a detail.
 
