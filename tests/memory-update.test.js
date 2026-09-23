@@ -1024,6 +1024,81 @@ test('analyze: a described link thumbnail renders via thumbnailDescribed, keyed 
   });
 });
 
+// ---- analyze: video states from the shared media cache ----------------------
+
+/** Run analyze() over `messages` with `cacheEntries` preset; returns the user text the analyzer saw. */
+async function analyzerTranscriptWithCache(cacheEntries, messages, features = { mediaDescriptions: true, videoDescriptions: true }) {
+  let seenUser = null;
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    const hot = { config: makeConfig({ features }), prompts: { memory: 'sys', labels } };
+    const llm = { complete: async (llmMessages) => { seenUser = llmMessages[1].content; return { text: '{}' }; } };
+    const updater = createMemoryUpdater({ hot, store, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept' });
+    Object.assign(store.getMediaCache(guildId), cacheEntries);
+    await updater.analyze(guildId, messages);
+  });
+  return seenUser;
+}
+
+const VIDEO_SLIM = slimMessage({
+  id: 'm1',
+  content: '',
+  attachments: [{ id: 'v1', kind: 'video', name: 'clip.mp4', durationSec: 20 }],
+});
+const VIDEO_LINK_SLIM = slimMessage({
+  id: 'm1',
+  content: '',
+  links: [{ id: 'video:url:0123456789abcdef', kind: 'link', name: 'A title', durationSec: null }],
+});
+
+test('analyze: a watched video in the cache renders videoWatched in the analyzer transcript', async () => {
+  const seen = await analyzerTranscriptWithCache({ 'video:v1': { text: 'κάποιος χορεύει', ts: Date.now(), watched: true } }, [VIDEO_SLIM]);
+  const watched = labels.transcript.videoWatched
+    .replace('{name}', 'clip.mp4')
+    .replace('{duration}', '0:20')
+    .replace('{text}', 'κάποιος χορεύει');
+  assert.ok(seen.includes(watched));
+});
+
+test('analyze: a watched video-site link renders linkWatched, keyed video:<link id>', async () => {
+  const seen = await analyzerTranscriptWithCache(
+    { 'video:video:url:0123456789abcdef': { text: 'un chat joue du piano', ts: Date.now(), watched: true } },
+    [VIDEO_LINK_SLIM],
+  );
+  assert.ok(seen.includes(labels.transcript.linkWatched.replace('{text}', 'un chat joue du piano')));
+});
+
+test('analyze: a permanent limit renders as not watched with its reason', async () => {
+  const seen = await analyzerTranscriptWithCache({ 'video:v1': { miss: true, ts: Date.now(), reason: 'length' } }, [VIDEO_SLIM]);
+  const notWatched = labels.transcript.videoNotWatched
+    .replace('{name}', 'clip.mp4')
+    .replace('{duration}', '0:20')
+    .replace('{reason}', labels.transcript.videoReason.length);
+  assert.ok(seen.includes(notWatched));
+});
+
+test('analyze: an error miss or no entry renders the plain video form', async () => {
+  for (const cache of [{ 'video:v1': { miss: true, ts: Date.now(), reason: 'error' } }, {}]) {
+    const seen = await analyzerTranscriptWithCache(cache, [VIDEO_SLIM]);
+    assert.ok(seen.includes(labels.transcript.video.replace('{name}', 'clip.mp4').replace('{duration}', '0:20')));
+    assert.ok(!seen.includes('not watched'));
+  }
+});
+
+test('analyze: videoDescriptions off, or mediaDescriptions off, never renders a cached video state', async () => {
+  for (const features of [
+    { mediaDescriptions: true, videoDescriptions: false },
+    { mediaDescriptions: false, videoDescriptions: true },
+  ]) {
+    const seen = await analyzerTranscriptWithCache(
+      { 'video:v1': { text: 'should never show', ts: Date.now(), watched: true } },
+      [VIDEO_SLIM],
+      features,
+    );
+    assert.ok(!seen.includes('should never show'));
+  }
+});
+
 // ---- applyMemoryUpdate: channels --------------------------------------------
 
 test('applyMemoryUpdate: merges purpose/topics/tone for a known channel id, clamped tolerantly to fieldChars', () => {

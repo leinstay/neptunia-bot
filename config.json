@@ -166,7 +166,8 @@
       "sites": ["youtube.com", "youtu.be", "tiktok.com", "vk.com", "vkvideo.ru", "x.com", "twitter.com", "reddit.com", "twitch.tv"],
       "directUrlSites": ["youtube.com", "youtu.be"],
       "ytdlpPath": "yt-dlp",
-      "ffmpegPath": "ffmpeg"
+      "ffmpegPath": "ffmpeg",
+      "prefill": true
     }
   },
   "warmup": {

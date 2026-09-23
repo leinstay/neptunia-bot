@@ -8,7 +8,7 @@
 // tests.
 
 import { normalizeMessage, channelAllowed, canSend, fetchHistory } from './collect.js';
-import { collectPictures, collectEmojiItems, isDescribable } from './media.js';
+import { collectPictures, collectEmojiItems, collectVideos, isDescribable } from './media.js';
 import {
   detectTrigger,
   strippedLength,
@@ -26,6 +26,9 @@ import { log } from '../log.js';
 // The most pictures one observed message warms the describer cache for --
 // this runs per real-time message, not per batch, so it stays cheap.
 const MAX_WARM_PICTURES_PER_MESSAGE = 2;
+// The most videos one observed message has watched ahead of time
+// (media.video.prefill): watching is far dearer than a picture caption.
+const MAX_WARM_VIDEOS_PER_MESSAGE = 1;
 
 /**
  * @param {object} deps
@@ -51,7 +54,9 @@ const MAX_WARM_PICTURES_PER_MESSAGE = 2;
  *   MAX_WARM_PICTURES_PER_MESSAGE) are handed to it fire-and-forget -- never awaited here, errors
  *   swallowed -- so the cache is already warm by the time the live memory analyzer
  *   (src/memory/update.js#analyze) wants a caption for one of them; the analyzer itself never
- *   triggers a new request.
+ *   triggers a new request. With features.mediaDescriptions, features.videoDescriptions and
+ *   media.video.prefill all on, the message's first video (MAX_WARM_VIDEOS_PER_MESSAGE) is handed
+ *   to `describer.describeVideos` the same way.
  * @param {() => number} [deps.rng]
  * @param {() => number} [deps.now]
  * @param {(ms: number) => Promise<void>} [deps.sleep]  Used only for the "human switch pause"
@@ -93,7 +98,9 @@ export function createMessageHandler({
    * this pipeline makes zero describer calls in that case.
    */
   function warmMediaCache(guildId, normalized) {
-    if (!describer || hot.config.features?.mediaDescriptions !== true) return;
+    if (!describer) return;
+    warmVideoCache(guildId, normalized);
+    if (hot.config.features?.mediaDescriptions !== true) return;
     // Pictures (attachments/embeds/stickers) before the message's custom
     // emoji, both filtered to what the describer can actually caption.
     const candidates = [...collectPictures(normalized), ...collectEmojiItems(normalized)]
@@ -101,6 +108,21 @@ export function createMessageHandler({
       .slice(0, MAX_WARM_PICTURES_PER_MESSAGE);
     if (candidates.length === 0) return;
     describer.describeMany(guildId, candidates).catch((err) => log.warn('events: media cache prefill failed', { error: err }));
+  }
+
+  /** Fire-and-forget like warmMediaCache: watch the message's first video now, not when a turn needs it. */
+  function warmVideoCache(guildId, normalized) {
+    const config = hot.config;
+    const features = config.features ?? {};
+    // Both switches, like the senses line (src/behavior/prompt.js#renderSenses).
+    if (features.mediaDescriptions !== true || features.videoDescriptions !== true) return;
+    if (config.media?.video?.prefill !== true) return;
+    if (typeof describer.describeVideos !== 'function') return;
+    const candidates = collectVideos(normalized, { sites: config.media.video.sites }).slice(0, MAX_WARM_VIDEOS_PER_MESSAGE);
+    if (candidates.length === 0) return;
+    describer
+      .describeVideos(guildId, candidates)
+      .catch((err) => log.warn('events: video cache prefill failed', { error: err }));
   }
 
   // --- The address classifier (mention.followUp*) ---------------------------
@@ -137,7 +159,7 @@ export function createMessageHandler({
     if (!addressPrompt) return null;
     const labels = prompts.labels;
     const contextLines = Math.max(0, config.mention.followUpContext ?? 15);
-    const raw = contextLines > 0 ? await fetchHistory(channel, contextLines, selfId, config.media?.embedTextChars) : [];
+    const raw = contextLines > 0 ? await fetchHistory(channel, contextLines, selfId, config.media?.embedTextChars, config.media?.video?.sites) : [];
     const history = raw.filter((m) => m.id !== normalized.id);
     const items = formatTranscript([...history, normalized], {
       timezone: config.bot.timezone,
@@ -390,7 +412,7 @@ export function createMessageHandler({
 
       // 4. Normalize.
       const selfId = client.user.id;
-      const normalized = normalizeMessage(message, selfId);
+      const normalized = normalizeMessage(message, selfId, { videoSites: config.media?.video?.sites });
       const guildId = message.guild.id;
 
       // 5. Its own message: only bookkeeping. Also (re)opens/extends the

@@ -346,6 +346,19 @@ test('buildRequest: textFallback re-renders the same chat with attachedIndex dro
   assert.ok(!request.textFallback.includes(labels.transcript.imageAttached.replace('{n}', '1')));
 });
 
+test('buildRequest: videos reach the transcript, and the textFallback keeps them', () => {
+  const trigger = makeMessage(1, NOW - MIN, {
+    attachments: [{ id: 'v1', kind: 'video', url: 'https://cdn.discordapp.com/attachments/1/2/clip.mp4', name: 'clip.mp4', durationSec: 34 }],
+  });
+  const videos = new Map([['v1', { state: 'watched', text: 'κάποιος χορεύει' }]]);
+  const request = buildRequest(baseInput({ history: [trigger], trigger, triggerKind: 'mention', videos }));
+
+  const watched = fill(labels.transcript.videoWatched, { name: 'clip.mp4', duration: '0:34', text: 'κάποιος χορεύει' });
+  const primaryText = request.messages[1].content.find((part) => part.type === 'text').text;
+  assert.ok(primaryText.includes(watched));
+  assert.ok(request.textFallback.includes(watched));
+});
+
 test('buildRequest: textFallback is null when nothing is attached (no pictures selected)', () => {
   const request = buildRequest(baseInput());
   assert.equal(request.textFallback, null);

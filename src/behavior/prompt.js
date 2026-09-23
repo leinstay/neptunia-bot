@@ -638,10 +638,12 @@ function splitPeople(otherProfiles, candidateProfiles, history, trigger, exclude
  * @param {string|null} [input.currentChannelId]  Id of the channel this turn happens in.
  * @param {Map<string, string>} [input.descriptions]  Item id -> describer caption, for pictures
  *   NOT selected to be attached (see src/behavior/turn.js, src/memory/describe.js).
+ * @param {Map<string, object>} [input.videos]  Item id -> video state from the video describer
+ *   (src/memory/describe.js#describeVideos), passed to formatTranscript.
  * @returns {{ messages: object[], stats: object, idByIndex: Map<number, string>, tempo: object }}
  */
 export function buildRequest(input) {
-  const { config, prompts, calibrator, mode, forced = false, now, selfName, history, neighbors, trigger, triggerKind, channels = [], currentChannelId = null, descriptions } = input;
+  const { config, prompts, calibrator, mode, forced = false, now, selfName, history, neighbors, trigger, triggerKind, channels = [], currentChannelId = null, descriptions, videos } = input;
   const labels = requireLabels(prompts);
   const nameOf = typeof input.nameOf === 'function' ? input.nameOf : () => null;
   const { timezone } = config.bot;
@@ -660,6 +662,7 @@ export function buildRequest(input) {
     labels,
     attachedIndex,
     descriptions,
+    videos,
   };
 
   const nameFill = (text) => fillTemplate(text, { name: selfName });

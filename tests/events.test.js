@@ -921,6 +921,82 @@ test('events: an empty bot.dryRunChannelId (default) does not affect any channel
 // message path (src/memory/describe.js's cache), so the live memory analyzer
 // (src/memory/update.js#analyze) finds a caption already cached.
 
+// features.videoDescriptions + media.video.prefill: a posted video is watched
+// fire-and-forget, at most one per message.
+
+function fakeVideoDescriber() {
+  const base = fakeDescriber();
+  const videoCalls = [];
+  return {
+    ...base,
+    videoCalls,
+    describeVideos: async (guildId, items) => {
+      videoCalls.push({ guildId, items });
+      return { videos: new Map(), newCount: 0 };
+    },
+  };
+}
+
+/** A discord.js attachments Map with `count` video entries. */
+function videoAttachments(count = 1) {
+  const entries = [];
+  for (let i = 1; i <= count; i += 1) {
+    entries.push([`v${i}`, { id: `v${i}`, contentType: 'video/mp4', name: `${i}.mp4`, url: `https://cdn.discordapp.com/x/${i}.mp4`, duration: 10 }]);
+  }
+  return new Map(entries);
+}
+
+test('events: media.video.prefill on watches one video per message, fire-and-forget', async () => {
+  const describer = fakeVideoDescriber();
+  const config = baseConfig({ features: { videoDescriptions: true }, media: { video: { prefill: true } } });
+  const handler = makeHandler({ config, describer });
+
+  await handler(fakeMessage({ cleanContent: 'look', attachments: videoAttachments(2) }));
+
+  assert.equal(describer.videoCalls.length, 1);
+  assert.equal(describer.videoCalls[0].guildId, 'g1');
+  assert.deepEqual(
+    describer.videoCalls[0].items.map((item) => item.itemId),
+    ['v1'],
+  );
+});
+
+test('events: a typed video-site link is prefilled too (normalizeMessage got media.video.sites)', async () => {
+  const describer = fakeVideoDescriber();
+  const config = baseConfig({ features: { videoDescriptions: true }, media: { video: { prefill: true, sites: ['youtube.com'] } } });
+  const handler = makeHandler({ config, describer });
+
+  await handler(fakeMessage({ cleanContent: 'regarde https://www.youtube.com/watch?v=abc' }));
+
+  assert.equal(describer.videoCalls.length, 1);
+  assert.equal(describer.videoCalls[0].items[0].source, 'link');
+});
+
+test('events: no video prefill when media.video.prefill is off, videoDescriptions is off or mediaDescriptions is off', async () => {
+  for (const overrides of [
+    { features: { videoDescriptions: true }, media: { video: { prefill: false } } },
+    { features: { videoDescriptions: false }, media: { video: { prefill: true } } },
+    { features: { mediaDescriptions: false, videoDescriptions: true }, media: { video: { prefill: true } } },
+  ]) {
+    const describer = fakeVideoDescriber();
+    const handler = makeHandler({ config: baseConfig(overrides), describer });
+
+    await handler(fakeMessage({ cleanContent: 'look', attachments: videoAttachments(1) }));
+
+    assert.equal(describer.videoCalls.length, 0);
+  }
+});
+
+test('events: a message with no video never calls describeVideos', async () => {
+  const describer = fakeVideoDescriber();
+  const config = baseConfig({ features: { videoDescriptions: true }, media: { video: { prefill: true } } });
+  const handler = makeHandler({ config, describer });
+
+  await handler(fakeMessage({ cleanContent: 'just words' }));
+
+  assert.equal(describer.videoCalls.length, 0);
+});
+
 test('events: features.mediaDescriptions off makes zero describer calls from the message path', async () => {
   const describer = fakeDescriber();
   const config = baseConfig({ features: { mediaDescriptions: false } });

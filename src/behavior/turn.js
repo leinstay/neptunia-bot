@@ -8,7 +8,7 @@ import { fetchHistory, fetchNeighbors, withTextPreviews } from '../discord/colle
 import { buildRequest } from './prompt.js';
 import { parseOutput } from '../llm/parse.js';
 import { DailyCapError, TokenLimitError } from '../llm/openrouter.js';
-import { collectPictures, collectEmojiItems, isDescribable, selectPictures } from '../discord/media.js';
+import { collectPictures, collectEmojiItems, collectVideos, isDescribable, selectPictures } from '../discord/media.js';
 import { createImageFetcher } from '../discord/fetch-image.js';
 import { log } from '../log.js';
 
@@ -86,6 +86,9 @@ function describableCandidates(history, pickedIds) {
  * `describer` (src/memory/describe.js#createDescriber) is optional: when
  * absent, or `features.mediaDescriptions` is off, no description request is
  * ever made — buildRequest simply renders every un-attached picture blind.
+ * Likewise, videos are only watched when `features.mediaDescriptions` AND
+ * `features.videoDescriptions` are on and the describer has
+ * `describeVideos`; otherwise they render as before.
  */
 export function createTurnRunner({
   hot,
@@ -251,7 +254,13 @@ export function createTurnRunner({
       const now = Date.now();
       const startedAt = now;
 
-      let history = await fetchHistory(channel, config.context.channelMessages, selfId, config.media?.embedTextChars);
+      let history = await fetchHistory(
+        channel,
+        config.context.channelMessages,
+        selfId,
+        config.media?.embedTextChars,
+        config.media?.video?.sites,
+      );
 
       let finalMode = mode;
       if (mode === 'auto') {
@@ -279,6 +288,25 @@ export function createTurnRunner({
         descriptions = described.descriptions;
       }
 
+      // Videos (attached, or linked from a known video site) may be watched
+      // by the video describer, newest first, at most media.video.maxPerTurn
+      // NEW ones per turn; cached results and limit/error states are free.
+      let videos;
+      // Both switches, like the senses line (src/behavior/prompt.js#renderSenses).
+      const videoOn = features.mediaDescriptions === true && features.videoDescriptions === true;
+      if (videoOn && typeof describer?.describeVideos === 'function') {
+        const videoCfg = config.media?.video ?? {};
+        const candidates = [];
+        for (let i = history.length - 1; i >= 0; i -= 1) {
+          candidates.push(...collectVideos(history[i], { sites: videoCfg.sites }));
+        }
+        const watched = await describer.describeVideos(guildId, candidates, {
+          maxNew: videoCfg.maxPerTurn ?? 1,
+          countAgainstDailyCap: true,
+        });
+        videos = watched.videos;
+      }
+
       const neighbors = await fetchNeighbors(channel, config, selfId, now);
       const request = buildRequest({
         config,
@@ -303,6 +331,7 @@ export function createTurnRunner({
         loreEntries: memoryOn ? store.getLore(guildId) : [],
         currentChannelId: channel.id,
         descriptions,
+        videos,
       });
 
       // A Discord CDN image the provider cannot fetch must not cost the

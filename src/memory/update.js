@@ -297,6 +297,8 @@ export function characterText(prompts, selfName) {
  *   for the `<existing_lore>` input; omitted or `features.lore: false` -> no block at all.
  * @param {Map<string, string>} [input.descriptions]  Item id -> describer caption
  *   (src/memory/describe.js), for pictures the analyzer cannot see itself.
+ * @param {Map<string, object>} [input.videos]  Item id -> video state read from the video
+ *   describer's cache (src/memory/describe.js#describeVideo), for videos it cannot watch itself.
  * @param {(id: string) => (string|null)} [input.nameOf]  Resolves a member id to their
  *   current stored name (`profile.names[0]`), for turning every `<@id>` token this
  *   request's views carry into `name (id:...)` -- see
@@ -305,7 +307,7 @@ export function characterText(prompts, selfName) {
  *   the caller, src/memory/update.js#analyze, injects a store-backed lookup).
  * @returns {{ messages: object[], consumed: number }}
  */
-export function buildMemoryRequest({ prompts, config, calibrator, profiles, guildMemory, channels, messages, selfName, loreEntries, descriptions, nameOf }) {
+export function buildMemoryRequest({ prompts, config, calibrator, profiles, guildMemory, channels, messages, selfName, loreEntries, descriptions, videos, nameOf }) {
   const { timezone } = config.bot;
   const labels = requireLabels(prompts);
   const relationships = config.features?.relationships !== false;
@@ -359,6 +361,7 @@ export function buildMemoryRequest({ prompts, config, calibrator, profiles, guil
     mode: 'memory',
     labels,
     descriptions,
+    videos,
   };
   const transcriptItems = formatTranscript(messages, formatOptions);
   const transcriptTexts = transcriptItems.map((item) => item.text);
@@ -882,6 +885,28 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
       }
     }
 
+    // Videos the video describer already watched (or refused for good) are
+    // read from the same cache under `video:<item id>`; an error miss or no
+    // entry at all renders the plain form. Never a request from here. Both
+    // switches must be on, like the senses line.
+    let videos = null;
+    const videoOn = hot.config.features?.mediaDescriptions === true && hot.config.features?.videoDescriptions === true;
+    if (videoOn) {
+      const cache = store.getMediaCache(guildId);
+      videos = new Map();
+      for (const message of messages) {
+        const items = [...(message.attachments ?? []).filter((a) => a.kind === 'video'), ...(message.links ?? [])];
+        for (const item of items) {
+          if (item.id == null) continue;
+          const cached = cache[`video:${item.id}`];
+          if (cached?.watched) videos.set(item.id, { state: 'watched', text: cached.text });
+          else if (cached?.miss && (cached.reason === 'length' || cached.reason === 'size')) {
+            videos.set(item.id, { state: 'limit', reason: cached.reason });
+          }
+        }
+      }
+    }
+
     let completion;
     try {
       const { messages: llmMessages } = buildMemoryRequest({
@@ -895,6 +920,7 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
         selfName: getSelfName(guildId),
         loreEntries: store.getLore(guildId),
         descriptions,
+        videos,
         nameOf: storeNameOf(store, guildId),
       });
 

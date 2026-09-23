@@ -4,7 +4,7 @@
 // fixtures shaped just enough for normalizeMessage to read.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { normalizeMessage, fetchTextPreview, withTextPreviews, fetchHistory } from '../src/discord/collect.js';
+import { normalizeMessage, fetchTextPreview, withTextPreviews, fetchHistory, fetchHistoryWindow } from '../src/discord/collect.js';
 import { MessageReferenceType } from 'discord.js';
 import { videoUrlCacheKey } from '../src/discord/video-sites.js';
 
@@ -463,6 +463,26 @@ test('fetchHistory: defaults to 200 chars when embedTextChars is not given', asy
   const channel = { messages: { fetch: async () => new Map([[raw.id, raw]]) } };
   const [message] = await fetchHistory(channel, 10, 'self');
   assert.equal(message.links[0].title, 'x'.repeat(50));
+});
+
+test('fetchHistory: threads videoSites through, a typed video-site URL becomes a link item', async () => {
+  const raw = rawMessage({ cleanContent: 'regarde https://www.youtube.com/watch?v=abc' });
+  const channel = { messages: { fetch: async () => new Map([[raw.id, raw]]) } };
+
+  const [withSites] = await fetchHistory(channel, 10, 'self', 200, ['youtube.com']);
+  assert.equal(withSites.links.length, 1);
+  assert.equal(withSites.links[0].url, 'https://www.youtube.com/watch?v=abc');
+
+  const [withoutSites] = await fetchHistory(channel, 10, 'self', 200);
+  assert.equal(withoutSites.links.length, 0);
+});
+
+test('fetchHistoryWindow: threads videoSites through to normalizeMessage', async () => {
+  const raw = rawMessage({ cleanContent: 'regarde https://www.youtube.com/watch?v=abc' });
+  const channel = { id: 'c1', messages: { fetch: async () => new Map([[raw.id, raw]]) } };
+
+  const [message] = await fetchHistoryWindow(channel, { limit: 10, selfId: 'self', videoSites: ['youtube.com'] });
+  assert.equal(message.links.length, 1);
 });
 
 // --- fetchTextPreview / withTextPreviews ------------------------------------

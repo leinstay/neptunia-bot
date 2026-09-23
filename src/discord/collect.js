@@ -289,12 +289,13 @@ export function canSend(channel) {
 /**
  * Last `limit` messages of a channel, oldest first, normalized.
  * @param {number} [embedTextChars]  Caps link/gif embed title+description (config.media.embedTextChars).
+ * @param {string[]} [videoSites]  Video-site hosts whose typed URLs become link items (config.media.video.sites).
  */
-export async function fetchHistory(channel, limit, selfId, embedTextChars) {
+export async function fetchHistory(channel, limit, selfId, embedTextChars, videoSites) {
   const fetched = await channel.messages.fetch({ limit: Math.min(100, limit) });
   return [...fetched.values()]
     .sort((a, b) => a.createdTimestamp - b.createdTimestamp)
-    .map((message) => normalizeMessage(message, selfId, { embedTextChars }));
+    .map((message) => normalizeMessage(message, selfId, { embedTextChars, videoSites }));
 }
 
 /** A Discord snowflake string one greater than `id`, so `before: bump(id)` includes `id` itself. */
@@ -311,10 +312,11 @@ function bumpSnowflake(id) {
  * (only when `minTs > 0`). A page fetch error ends the window with whatever
  * was collected so far; it is logged, never thrown.
  * @param {import('discord.js').TextBasedChannel} channel
- * @param {{ anchorId?: string|null, limit: number, minTs?: number, selfId: string, embedTextChars?: number }} options
+ * @param {{ anchorId?: string|null, limit: number, minTs?: number, selfId: string, embedTextChars?: number,
+ *   videoSites?: string[] }} options
  * @returns {Promise<object[]>}
  */
-export async function fetchHistoryWindow(channel, { anchorId, limit, minTs = 0, selfId, embedTextChars }) {
+export async function fetchHistoryWindow(channel, { anchorId, limit, minTs = 0, selfId, embedTextChars, videoSites }) {
   const collected = []; // newest first while accumulating; reversed at the end
   let before = anchorId ? bumpSnowflake(anchorId) : undefined;
 
@@ -335,7 +337,7 @@ export async function fetchHistoryWindow(channel, { anchorId, limit, minTs = 0, 
         hitFloor = true;
         break;
       }
-      collected.push(normalizeMessage(message, selfId, { embedTextChars }));
+      collected.push(normalizeMessage(message, selfId, { embedTextChars, videoSites }));
       if (collected.length >= limit) break;
     }
 
@@ -381,9 +383,9 @@ export async function fetchNeighbors(channel, config, selfId, now = Date.now()) 
   const results = await Promise.all(
     candidates.map(async (other) => {
       try {
-        const messages = (await fetchHistory(other, neighborMessages, selfId, config.media?.embedTextChars)).filter(
-          (m) => m.ts >= minTs,
-        );
+        const messages = (
+          await fetchHistory(other, neighborMessages, selfId, config.media?.embedTextChars, config.media?.video?.sites)
+        ).filter((m) => m.ts >= minTs);
         return { channelId: other.id, channelName: other.name, messages };
       } catch (err) {
         log.warn('collect: neighbour channel fetch failed', { channel: other.id, error: err });

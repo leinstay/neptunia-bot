@@ -549,6 +549,98 @@ function fakeDescriber(descriptionsById) {
   };
 }
 
+/** fakeDescriber plus describeVideos: every candidate in `statesById` gets that state. */
+function fakeVideoDescriber(statesById, descriptionsById = {}) {
+  const base = fakeDescriber(descriptionsById);
+  const videoCalls = [];
+  return {
+    ...base,
+    videoCalls,
+    describeVideos: async (guildId, items, options) => {
+      videoCalls.push({ guildId, items, options });
+      const videos = new Map();
+      for (const item of items) {
+        if (statesById[item.itemId]) videos.set(item.itemId, statesById[item.itemId]);
+      }
+      return { videos, newCount: videos.size };
+    },
+  };
+}
+
+function videoAttachmentRaw(id, ts, attachmentId, name) {
+  return rawMessage({
+    id,
+    ts,
+    attachments: new Map([
+      [attachmentId, { id: attachmentId, contentType: 'video/mp4', name, url: `https://cdn.discordapp.com/attachments/1/2/${name}`, duration: 20 }],
+    ]),
+  });
+}
+
+const VIDEO_TURN_CONFIG = {
+  media: { maxPerTurn: 6, filePreviewChars: 500, video: { maxPerTurn: 1, sites: ['youtube.com'] } },
+};
+
+test('createTurnRunner: features.videoDescriptions on -- videos newest first, capped at media.video.maxPerTurn, rendered watched', async () => {
+  const older = videoAttachmentRaw('m1', NOW - 5000, 'va', 'older.mp4');
+  const newer = rawMessage({ id: 'm2', ts: NOW - 1000, content: 'look https://www.youtube.com/watch?v=abc' });
+  const channel = fakeTurnChannel({ historyMessages: [older, newer] });
+  const llm = fakeLlm('<msg>ok</msg>');
+  const hot = fakeHot({ mediaDescriptions: true, videoDescriptions: true, vision: false }, {}, VIDEO_TURN_CONFIG);
+  const describer = fakeVideoDescriber({ va: { state: 'watched', text: 'κάποιος χορεύει' } });
+  const turns = createTurnRunner({ hot, store: fakeStore(), llm, calibrator: identityCalibrator(), client: fakeClient(), describer });
+
+  await turns.runTurn({ channel, mode: 'reply', trigger: normalizedTrigger(newer), triggerKind: 'mention' });
+
+  assert.equal(describer.videoCalls.length, 1);
+  const { guildId, items, options } = describer.videoCalls[0];
+  assert.equal(guildId, 'g1');
+  assert.deepEqual(
+    items.map((item) => item.source),
+    ['link', 'attachment'],
+    'the newest message first; the typed video link is found because fetchHistory got media.video.sites',
+  );
+  assert.equal(items[1].itemId, 'va');
+  assert.equal(options.maxNew, 1);
+  assert.equal(options.countAgainstDailyCap, true);
+  const userMessage = llm.calls[0][1].content;
+  const watched = labels.transcript.videoWatched
+    .replace('{name}', 'older.mp4')
+    .replace('{duration}', '0:20')
+    .replace('{text}', 'κάποιος χορεύει');
+  assert.ok(userMessage.includes(watched));
+});
+
+test('createTurnRunner: media.video.maxPerTurn missing -> at most one new video per turn', async () => {
+  const raw = videoAttachmentRaw('m1', NOW - 1000, 'va', 'clip.mp4');
+  const channel = fakeTurnChannel({ historyMessages: [raw] });
+  const hot = fakeHot({ mediaDescriptions: true, videoDescriptions: true }, {}, { media: { maxPerTurn: 6, filePreviewChars: 500 } });
+  const describer = fakeVideoDescriber({});
+  const turns = createTurnRunner({ hot, store: fakeStore(), llm: fakeLlm('<msg>ok</msg>'), calibrator: identityCalibrator(), client: fakeClient(), describer });
+
+  await turns.runTurn({ channel, mode: 'reply', trigger: normalizedTrigger(raw), triggerKind: 'mention' });
+
+  assert.equal(describer.videoCalls[0].options.maxNew, 1);
+});
+
+test('createTurnRunner: videoDescriptions off/missing, or mediaDescriptions off, never calls describeVideos', async () => {
+  for (const features of [
+    { mediaDescriptions: true, videoDescriptions: false },
+    { mediaDescriptions: true },
+    { mediaDescriptions: false, videoDescriptions: true },
+  ]) {
+    const raw = videoAttachmentRaw('m1', NOW - 1000, 'va', 'clip.mp4');
+    const channel = fakeTurnChannel({ historyMessages: [raw] });
+    const hot = fakeHot(features, {}, VIDEO_TURN_CONFIG);
+    const describer = fakeVideoDescriber({ va: { state: 'watched', text: 'x' } });
+    const turns = createTurnRunner({ hot, store: fakeStore(), llm: fakeLlm('<msg>ok</msg>'), calibrator: identityCalibrator(), client: fakeClient(), describer });
+
+    await turns.runTurn({ channel, mode: 'reply', trigger: normalizedTrigger(raw), triggerKind: 'mention' });
+
+    assert.equal(describer.videoCalls.length, 0);
+  }
+});
+
 test('createTurnRunner: features.mediaDescriptions off (default) never calls the describer', async () => {
   const raw = rawMessage({
     id: 'm1',

@@ -19,6 +19,7 @@ import { createMemoryUpdater } from './memory/update.js';
 import { createWarmup } from './memory/warmup.js';
 import { createDescriber } from './memory/describe.js';
 import { createImageFetcher } from './discord/fetch-image.js';
+import { createVideoFetcher } from './discord/fetch-video.js';
 import { createAdmin } from './admin.js';
 import { createTagHistory } from './behavior/mention.js';
 import { createMessageHandler } from './discord/events.js';
@@ -87,7 +88,9 @@ const getGuildId = () => instance.guildId;
 // Shared so a picture attached on consecutive turns, or described more than
 // once, is only ever downloaded once within the fetcher's LRU window.
 const imageFetcher = createImageFetcher();
-const describer = createDescriber({ hot, store, llm, imageFetcher });
+const videoFetcher = createVideoFetcher();
+// state: the daily video counter lives next to the LLM client's daily counter.
+const describer = createDescriber({ hot, store, llm, imageFetcher, videoFetcher, state: store.state });
 const turns = createTurnRunner({ hot, store, llm, calibrator, client, describer, imageFetcher });
 const getSelfName = (guildId) => client.guilds.cache.get(guildId)?.members.me?.displayName ?? client.user?.username ?? 'bot';
 // THE way memory starts (docs/prompt-contract.md, "The warmup"): sample-based,
