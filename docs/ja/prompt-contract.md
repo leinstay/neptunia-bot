@@ -279,8 +279,8 @@ warmup.contextMark                       prefixed to context lines in the profil
 
 ペルソナに話しかけられた（リプライターン）とき、チャンネルの直近 `media.video.rewatch.recentMessages`（デフォルト
 60）件のメッセージに動画がある場合、分類器がそのメッセージがそれらの動画について質問しているか、または読み込めなかった
-動画のリトライを求めているかを判定します。候補は視聴済み動画とエラー状態の動画（後者はそのターンに
-`media.video.maxPerTurn` の試行が残っている場合のみ）です。分類器には最大
+動画のリトライを求めているかを判定します。候補は視聴済み動画とエラー状態の動画（リクエストされたリトライはターンの `media.video.maxPerTurn` 試行とは独立した
+専用スロットを使用します）です。分類器には最大
 `media.video.rewatch.maxCandidates`（デフォルト 6）件の動画が新しい順に渡されます。コードは `rewatch.md` を
 システムプロンプトとして `rewatch` モデルロール（`media.video.rewatch.model`、デフォルト `mention.followUpModel`、
 デフォルトはメディアモデル）に送信し、ユーザーメッセージに 2 つのブロックを含めます:

@@ -378,8 +378,8 @@ warmup.contextMark                       prefixed to context lines in the profil
 ## 重看分类器（`rewatch.md`）：是否需要再看一遍视频？
 
 当角色被呼叫（回复回合）且频道最近 `media.video.rewatch.recentMessages`（默认 60）条消息中有视频时，分类器判断
-该消息是否在询问其中某个视频，或请求重试一个未加载的视频。候选包括已观看视频和错误状态视频（后者仅在该回合仍有
-`media.video.maxPerTurn` 尝试次数时）。分类器最多收到 `media.video.rewatch.maxCandidates`（默认 6）个视频，按最新
+该消息是否在询问其中某个视频，或请求重试一个未加载的视频。候选包括已观看视频和错误状态视频（请求的重试使用独立于回合 `media.video.maxPerTurn`
+尝试次数的专用槽位）。分类器最多收到 `media.video.rewatch.maxCandidates`（默认 6）个视频，按最新
 消息优先排列。代码将 `rewatch.md` 作为系统提示发送到 `rewatch` 模型角色（`media.video.rewatch.model`，默认
 `mention.followUpModel`，默认媒体模型），用户消息包含两个块：
 

@@ -402,8 +402,8 @@ the window. Switch `features.followUp` (default on). Logged as counts and verdic
 
 When the persona is addressed (a reply turn) and a video sits in the last `media.video.rewatch.recentMessages`
 (default 60) messages of the channel, a classifier decides whether the message asks about one of those videos or asks
-to retry one that did not load. Candidates are watched videos and error-state videos (the latter only while the turn
-still has a `media.video.maxPerTurn` attempt left). At most `media.video.rewatch.maxCandidates` (default 6) are
+to retry one that did not load. Candidates are watched videos and error-state videos (a requested retry uses its own slot, independent of the turn's
+`media.video.maxPerTurn` attempts). At most `media.video.rewatch.maxCandidates` (default 6) are
 offered to the classifier, newest-message first. Code sends `rewatch.md` as the system prompt on the `rewatch` model
 role (`media.video.rewatch.model`, default `mention.followUpModel`, default the media model) with a user message
 containing two blocks:
