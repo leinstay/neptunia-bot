@@ -6,6 +6,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { normalizeMessage, fetchTextPreview, withTextPreviews, fetchHistory } from '../src/discord/collect.js';
 import { MessageReferenceType } from 'discord.js';
+import { videoUrlCacheKey } from '../src/discord/video-sites.js';
 
 function flagsWith(names) {
   const set = new Set(names);
@@ -265,6 +266,100 @@ test('normalizeMessage: an embed thumbnail prefers proxyURL over url when discor
   });
   const m = normalizeMessage(raw, 'self');
   assert.equal(m.links[0].thumbnailUrl, 'https://media.discordapp.net/external/abc/hq.jpg');
+});
+
+// --- normalizeMessage: video-site URLs typed in the text ----------------------
+
+const VIDEO_SITES = ['youtube.com', 'youtu.be'];
+
+test('normalizeMessage: a typed video-site URL becomes a synthetic link, its URL stays in the text', () => {
+  const raw = rawMessage({ cleanContent: 'mira esto https://www.youtube.com/watch?v=abc&t=5 qué risa' });
+  const m = normalizeMessage(raw, 'self', { videoSites: VIDEO_SITES });
+  assert.equal(m.links.length, 1);
+  assert.deepEqual(m.links[0], {
+    id: videoUrlCacheKey('https://www.youtube.com/watch?v=abc&t=5'),
+    kind: 'link',
+    site: 'youtube.com',
+    title: '',
+    text: '',
+    thumbnailUrl: null,
+    url: 'https://www.youtube.com/watch?v=abc&t=5',
+  });
+  assert.ok(m.links[0].id.startsWith('video:url:'));
+  assert.equal(m.content, 'mira esto https://www.youtube.com/watch?v=abc&t=5 qué risa');
+});
+
+test('normalizeMessage: without videoSites (the default) a typed video URL adds no link', () => {
+  const raw = rawMessage({ cleanContent: 'https://youtu.be/xyz' });
+  assert.deepEqual(normalizeMessage(raw, 'self').links, []);
+  assert.deepEqual(normalizeMessage(raw, 'self', { videoSites: [] }).links, []);
+});
+
+test('normalizeMessage: a URL on a site outside videoSites adds no link', () => {
+  const raw = rawMessage({ cleanContent: 'https://example.com/clip' });
+  assert.deepEqual(normalizeMessage(raw, 'self', { videoSites: VIDEO_SITES }).links, []);
+});
+
+test('normalizeMessage: a typed URL that an embed already carries is added once (the embed), embed id kept', () => {
+  const url = 'https://www.youtube.com/watch?v=xyz';
+  const raw = rawMessage({
+    cleanContent: `look ${url}`,
+    embeds: [{ url, provider: { name: 'YouTube' }, title: 'Cool video', thumbnail: { url: 'https://i.ytimg.com/vi/xyz/hq.jpg' } }],
+  });
+  const m = normalizeMessage(raw, 'self', { videoSites: VIDEO_SITES });
+  assert.equal(m.links.length, 1);
+  assert.ok(m.links[0].id.startsWith('link:'));
+  assert.equal(m.content, 'look');
+});
+
+test('normalizeMessage: a typed URL whose canonical key matches an embed URL is not added again', () => {
+  const raw = rawMessage({
+    cleanContent: 'look https://youtube.com/watch?v=xyz&si=tracking',
+    embeds: [{ url: 'https://www.youtube.com/watch?v=xyz', provider: { name: 'YouTube' }, title: 'Cool video' }],
+  });
+  const m = normalizeMessage(raw, 'self', { videoSites: VIDEO_SITES });
+  assert.equal(m.links.length, 1);
+  assert.equal(m.links[0].id, 'm1#e0');
+});
+
+test('normalizeMessage: the same typed video URL twice becomes one synthetic link', () => {
+  const raw = rawMessage({ cleanContent: 'https://youtu.be/xyz and again https://youtu.be/xyz' });
+  const m = normalizeMessage(raw, 'self', { videoSites: VIDEO_SITES });
+  assert.equal(m.links.length, 1);
+  assert.equal(m.links[0].site, 'youtu.be');
+});
+
+test('normalizeMessage: synthetic video links follow the embed links', () => {
+  const raw = rawMessage({
+    cleanContent: 'https://example.com/page https://youtu.be/xyz',
+    embeds: [{ url: 'https://example.com/page', title: 'A page' }],
+  });
+  const m = normalizeMessage(raw, 'self', { videoSites: VIDEO_SITES });
+  assert.deepEqual(m.links.map((link) => link.url), ['https://example.com/page', 'https://youtu.be/xyz']);
+  assert.equal(m.content, 'https://youtu.be/xyz');
+});
+
+test('normalizeMessage: a forwarded snapshot also turns a typed video URL into a synthetic link', () => {
+  const raw = rawMessage({
+    cleanContent: '',
+    messageSnapshots: new Map([
+      [
+        'snap1',
+        {
+          id: 'snap1',
+          cleanContent: 'δες αυτό https://youtu.be/xyz',
+          attachments: new Map(),
+          embeds: [],
+          stickers: new Map(),
+          flags: flagsWith([]),
+        },
+      ],
+    ]),
+  });
+  const m = normalizeMessage(raw, 'self', { videoSites: VIDEO_SITES });
+  assert.equal(m.forwarded[0].links.length, 1);
+  assert.equal(m.forwarded[0].links[0].id, videoUrlCacheKey('https://youtu.be/xyz'));
+  assert.equal(m.forwarded[0].content, 'δες αυτό https://youtu.be/xyz');
 });
 
 // --- normalizeMessage: forward vs. plain reply -------------------------------

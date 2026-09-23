@@ -14,6 +14,7 @@ import {
   linkThumbnailCacheKey,
   collectPictures,
   collectEmojiItems,
+  collectVideos,
   isDescribable,
   selectPictures,
 } from '../src/discord/media.js';
@@ -310,6 +311,171 @@ test('mediaLabelFor: a link with description text uses linkText, else link', () 
     key: 'linkText',
     values: { site: 's', title: 't', text: 'd' },
   });
+});
+
+// --- mediaLabelFor: video states -----------------------------------------------
+
+const clip = { kind: 'video', name: 'clip.mp4', durationSec: 65 };
+
+test('mediaLabelFor: a watched video renders videoWatched with name, duration and the watch text', () => {
+  assert.deepEqual(mediaLabelFor(clip, { video: { state: 'watched', text: 'a dog runs' } }), {
+    key: 'videoWatched',
+    values: { name: 'clip.mp4', duration: '1:05', text: 'a dog runs' },
+  });
+});
+
+test('mediaLabelFor: a watched video wins over a still-frame description', () => {
+  const result = mediaLabelFor(clip, { description: 'one frame', video: { state: 'watched', text: 'the whole clip' } });
+  assert.equal(result.key, 'videoWatched');
+  assert.equal(result.values.text, 'the whole clip');
+});
+
+test('mediaLabelFor: a watched video with an attached still frame keeps frameAttached as its extra', () => {
+  assert.deepEqual(mediaLabelFor(clip, { attachedIndex: 2, video: { state: 'watched', text: 'a dog runs' } }), {
+    key: 'videoWatched',
+    values: { name: 'clip.mp4', duration: '1:05', text: 'a dog runs' },
+    extra: { key: 'frameAttached', values: { n: 2 } },
+  });
+});
+
+test('mediaLabelFor: a video not watched for a limit carries the reason CODE, not a label', () => {
+  for (const reason of ['length', 'size', 'daily']) {
+    assert.deepEqual(mediaLabelFor(clip, { video: { state: 'limit', reason } }), {
+      key: 'videoNotWatched',
+      values: { name: 'clip.mp4', duration: '1:05', reason },
+    });
+  }
+});
+
+test('mediaLabelFor: an error state carries the reason code "error"', () => {
+  assert.deepEqual(mediaLabelFor(clip, { video: { state: 'error' } }), {
+    key: 'videoNotWatched',
+    values: { name: 'clip.mp4', duration: '1:05', reason: 'error' },
+  });
+});
+
+test('mediaLabelFor: a video not watched but with a still-frame caption renders videoNotWatchedFrame', () => {
+  assert.deepEqual(mediaLabelFor(clip, { description: 'a café terrace', video: { state: 'limit', reason: 'size' } }), {
+    key: 'videoNotWatchedFrame',
+    values: { name: 'clip.mp4', duration: '1:05', reason: 'size', text: 'a café terrace' },
+  });
+});
+
+test('mediaLabelFor: a video not watched with an attached frame keeps frameAttached as its extra', () => {
+  assert.deepEqual(mediaLabelFor(clip, { attachedIndex: 1, video: { state: 'error' } }), {
+    key: 'videoNotWatched',
+    values: { name: 'clip.mp4', duration: '1:05', reason: 'error' },
+    extra: { key: 'frameAttached', values: { n: 1 } },
+  });
+});
+
+test('mediaLabelFor: a video with an unknown duration and a video state still uses unknownDuration', () => {
+  const result = mediaLabelFor({ kind: 'video', name: 'clip.mp4' }, { unknownDuration: 'n/a', video: { state: 'error' } });
+  assert.equal(result.values.duration, 'n/a');
+});
+
+test('mediaLabelFor: a watched link keeps its link tag, the one extra becomes linkWatched', () => {
+  const item = { kind: 'link', site: 's', title: 't', thumbnailUrl: 'https://x/y.jpg' };
+  assert.deepEqual(mediaLabelFor(item, { description: 'thumb', video: { state: 'watched', text: 'a talk' } }), {
+    key: 'link',
+    values: { site: 's', title: 't' },
+    extra: { key: 'linkWatched', values: { text: 'a talk' } },
+  });
+});
+
+test('mediaLabelFor: a link not watched with a thumbnail caption renders linkNotWatchedFrame', () => {
+  const item = { kind: 'link', site: 's', title: 't', text: 'd', thumbnailUrl: 'https://x/y.jpg' };
+  assert.deepEqual(mediaLabelFor(item, { description: 'a stage', video: { state: 'limit', reason: 'length' } }), {
+    key: 'linkText',
+    values: { site: 's', title: 't', text: 'd' },
+    extra: { key: 'linkNotWatchedFrame', values: { reason: 'length', text: 'a stage' } },
+  });
+});
+
+test('mediaLabelFor: a link not watched without a caption renders linkNotWatched (a text-only link included)', () => {
+  const item = { kind: 'link', site: 'youtube.com', title: '', thumbnailUrl: null };
+  assert.deepEqual(mediaLabelFor(item, { video: { state: 'error' } }), {
+    key: 'link',
+    values: { site: 'youtube.com', title: '' },
+    extra: { key: 'linkNotWatched', values: { reason: 'error' } },
+  });
+});
+
+test('mediaLabelFor: an attached link thumbnail AND a video state -> extra array, frameAttached first', () => {
+  const item = { kind: 'link', site: 's', title: 't', thumbnailUrl: 'https://x/y.jpg' };
+  assert.deepEqual(mediaLabelFor(item, { attachedIndex: 3, video: { state: 'watched', text: 'a talk' } }), {
+    key: 'link',
+    values: { site: 's', title: 't' },
+    extra: [
+      { key: 'frameAttached', values: { n: 3 } },
+      { key: 'linkWatched', values: { text: 'a talk' } },
+    ],
+  });
+});
+
+test('mediaLabelFor: other kinds ignore a video state', () => {
+  const video = { state: 'watched', text: 'x' };
+  assert.deepEqual(mediaLabelFor({ kind: 'image' }, { video }), { key: 'image', values: {} });
+  assert.deepEqual(mediaLabelFor({ kind: 'gif', name: 'cat.gif' }, { video }), { key: 'gif', values: { name: 'cat.gif' } });
+  assert.deepEqual(mediaLabelFor({ kind: 'audio', name: 'a.mp3', durationSec: 5 }, { video }), {
+    key: 'audio',
+    values: { name: 'a.mp3', duration: '0:05' },
+  });
+});
+
+// --- collectVideos ---------------------------------------------------------------
+
+function videoMessage() {
+  return {
+    id: 'm1',
+    attachments: [
+      { id: 'a1', kind: 'image', url: 'u1', name: 'a.png', size: 10 },
+      { id: 'a2', kind: 'video', url: 'u2', name: 'ταξίδι.mp4', size: 2048, durationSec: 12 },
+      { id: 'a3', kind: 'gif', url: 'u3', name: 'a.gif', size: 5 },
+    ],
+    links: [
+      { id: 'link:aaaa', kind: 'link', url: 'https://www.youtube.com/watch?v=abc', site: 'YouTube', title: 'Cool video' },
+      { id: 'm1#e1', kind: 'link', url: 'https://example.com/page', site: 'example.com', title: 'A page' },
+      { id: 'video:url:bbbb', kind: 'link', url: 'https://youtu.be/xyz', site: 'youtu.be', title: '' },
+      { id: 'm1#e3', kind: 'gif', url: 'https://tenor.com/view/x', site: 'Tenor', title: 'cat' },
+    ],
+  };
+}
+
+test('collectVideos: video attachments first, then links on a video site, in order', () => {
+  const items = collectVideos(videoMessage(), { sites: ['youtube.com', 'youtu.be'] });
+  assert.deepEqual(items, [
+    { source: 'attachment', messageId: 'm1', itemId: 'a2', kind: 'video', url: 'u2', name: 'ταξίδι.mp4', durationSec: 12, bytes: 2048 },
+    {
+      source: 'link',
+      messageId: 'm1',
+      itemId: 'link:aaaa',
+      kind: 'link',
+      url: 'https://www.youtube.com/watch?v=abc',
+      site: 'youtube.com',
+      name: 'Cool video',
+      durationSec: null,
+    },
+    {
+      source: 'link',
+      messageId: 'm1',
+      itemId: 'video:url:bbbb',
+      kind: 'link',
+      url: 'https://youtu.be/xyz',
+      site: 'youtu.be',
+      name: 'youtu.be',
+      durationSec: null,
+    },
+  ]);
+});
+
+test('collectVideos: no sites (missing or empty) -> attachments only', () => {
+  assert.deepEqual(collectVideos(videoMessage()).map((item) => item.itemId), ['a2']);
+  assert.deepEqual(collectVideos(videoMessage(), { sites: [] }).map((item) => item.itemId), ['a2']);
+});
+
+test('collectVideos: a message with no media returns an empty list', () => {
+  assert.deepEqual(collectVideos({ id: 'm1' }, { sites: ['youtube.com'] }), []);
 });
 
 // --- collectPictures / isDescribable -------------------------------------------

@@ -5,6 +5,7 @@
 import { PermissionFlagsBits, SnowflakeUtil, MessageReferenceType } from 'discord.js';
 import { log } from '../log.js';
 import { classifyAttachment, classifyEmbed, stickerUrl, emojiUrl, linkThumbnailCacheKey } from './media.js';
+import { extractVideoUrls, videoUrlCacheKey } from './video-sites.js';
 
 const TEXT_PREVIEW_SIZE_GUARD = 256 * 1024; // 256 KB — never fetch a bigger "text" attachment
 const MAX_EMOJIS_PER_MESSAGE = 5;
@@ -77,7 +78,7 @@ function normalizeAttachments(attachments, isVoice) {
  * `observe()`/`analyze()`). A `kind: 'gif'` embed (tenor/giphy) keeps the
  * existing per-message-index id, unchanged.
  */
-function normalizeLinks(idPrefix, embeds, embedTextChars) {
+function normalizeEmbedLinks(idPrefix, embeds, embedTextChars) {
   return [...(embeds ?? [])]
     .filter((embed) => embed?.url)
     .map((embed, index) => {
@@ -88,6 +89,41 @@ function normalizeLinks(idPrefix, embeds, embedTextChars) {
           : `${idPrefix}#e${index}`;
       return { id, ...classified };
     });
+}
+
+/** Hostname without a leading `www.`, or '' for an unparsable URL. */
+function siteOf(url) {
+  try {
+    return new URL(url).hostname.replace(/^www\./i, '');
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * The embed links (see normalizeEmbedLinks) followed by one synthetic link per
+ * video-site URL typed in the text (`videoSites`, see
+ * src/discord/video-sites.js) that no embed already carries -- compared by the
+ * exact URL and by its canonical `videoUrlCacheKey`, so a video Discord did
+ * embed is never listed twice. A synthetic link's id IS that cache key.
+ * `embedLinks` is returned apart because only those URLs are stripped from
+ * the message text: a typed video link stays readable where the person put it.
+ */
+function normalizeLinks(idPrefix, embeds, embedTextChars, rawContent, videoSites) {
+  const embedLinks = normalizeEmbedLinks(idPrefix, embeds, embedTextChars);
+  const links = [...embedLinks];
+  if (Array.isArray(videoSites) && videoSites.length > 0) {
+    const seenUrls = new Set(embedLinks.map((link) => link.url));
+    const seenKeys = new Set(embedLinks.map((link) => videoUrlCacheKey(link.url)));
+    for (const url of extractVideoUrls(rawContent, videoSites)) {
+      const key = videoUrlCacheKey(url);
+      if (seenUrls.has(url) || seenKeys.has(key)) continue;
+      seenUrls.add(url);
+      seenKeys.add(key);
+      links.push({ id: key, kind: 'link', site: siteOf(url), title: '', text: '', thumbnailUrl: null, url });
+    }
+  }
+  return { embedLinks, links };
 }
 
 /** Remove the raw URL of every rendered link/gif embed from the message text, so it never appears twice. */
@@ -101,15 +137,15 @@ function stripEmbedUrls(content, links) {
 }
 
 /** A forwarded message (message snapshot): its own content, media and stickers, no id/channel/author. */
-function normalizeSnapshot(snapshot, embedTextChars) {
+function normalizeSnapshot(snapshot, embedTextChars, videoSites) {
   const isVoice = isVoiceMessageFlag(snapshot);
   const attachments = normalizeAttachments(snapshot.attachments, isVoice);
-  const links = normalizeLinks(snapshot.id ?? 'fwd', snapshot.embeds, embedTextChars);
   const cleanContent = snapshot.cleanContent ?? snapshot.content ?? '';
   const emojis = extractEmojis(cleanContent);
   const rawContent = cleanEmoji(cleanContent).trim();
+  const { embedLinks, links } = normalizeLinks(snapshot.id ?? 'fwd', snapshot.embeds, embedTextChars, rawContent, videoSites);
   return {
-    content: stripEmbedUrls(rawContent, links),
+    content: stripEmbedUrls(rawContent, embedLinks),
     attachments,
     links,
     stickers: normalizeStickers(snapshot.stickers),
@@ -121,16 +157,25 @@ function normalizeSnapshot(snapshot, embedTextChars) {
  * Reduce a discord.js Message to the plain shape the rest of the code works
  * with. `options.embedTextChars` caps link/gif title+description text
  * (default `config.media.embedTextChars`, see config.json).
+ * `options.videoSites` (default `[]`) lists the video-site hosts whose URLs
+ * typed in the text become synthetic `link` items (see normalizeLinks), in
+ * the message and its forwarded snapshots alike.
+ * @param {object} message  A discord.js Message.
+ * @param {string} selfId
+ * @param {{ embedTextChars?: number, videoSites?: string[] }} [options]
  */
 export function normalizeMessage(message, selfId, options = {}) {
   const embedTextChars = options.embedTextChars ?? 200;
+  const videoSites = options.videoSites ?? [];
   const isVoice = isVoiceMessageFlag(message);
   const attachments = normalizeAttachments(message.attachments, isVoice);
-  const links = normalizeLinks(message.id, message.embeds, embedTextChars);
   const cleanContent = message.cleanContent ?? '';
   const emojis = extractEmojis(cleanContent);
   const rawContent = cleanEmoji(cleanContent).trim();
-  const forwarded = [...(message.messageSnapshots?.values?.() ?? [])].map((snapshot) => normalizeSnapshot(snapshot, embedTextChars));
+  const { embedLinks, links } = normalizeLinks(message.id, message.embeds, embedTextChars, rawContent, videoSites);
+  const forwarded = [...(message.messageSnapshots?.values?.() ?? [])].map((snapshot) =>
+    normalizeSnapshot(snapshot, embedTextChars, videoSites),
+  );
 
   // A forward's `message.reference.messageId` is the ORIGINAL message, not
   // something this message replies to -- treating it as `replyToId` would
@@ -150,7 +195,7 @@ export function normalizeMessage(message, selfId, options = {}) {
     authorName: message.member?.displayName ?? message.author.globalName ?? message.author.username,
     self: message.author.id === selfId,
     bot: message.author.bot && message.author.id !== selfId,
-    content: stripEmbedUrls(rawContent, links),
+    content: stripEmbedUrls(rawContent, embedLinks),
     ts: message.createdTimestamp,
     // Real mentions -- the strongest signal for who this message names, see
     // src/behavior/prompt.js's <people> "asked about" window. `content`

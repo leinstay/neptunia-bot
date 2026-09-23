@@ -115,19 +115,34 @@ function truncate(text, maxChars) {
  * distinct described custom emoji. `context.attachedIndex`/
  * `context.descriptions` are optional `Map`s keyed by the item's id (an
  * attachment's Discord id, a link's synthesized id, `sticker:<id>` or
- * `emoji:<id>` — see normalizeMessage).
+ * `emoji:<id>` — see normalizeMessage). `context.videos` is an optional
+ * `Map` of the same ids to a video state (see mediaLabelFor); it only takes
+ * effect when the labels carry `transcript.videoWatched`, so an older
+ * labels.json renders exactly as before.
  */
 function mediaTags(message, labels, context = {}) {
   const unknownDuration = labels.transcript.unknownDuration ?? '?';
+  const videosOn = Boolean(labels.transcript.videoWatched);
+  const videoOf = (id) => (videosOn ? (context.videos?.get(id) ?? null) : null);
   const tags = [];
+  // A video tag's `reason` is a code (media.js is label-free): swap it for
+  // its label before filling.
+  const pushTag = ({ key, values }) => {
+    const filled =
+      values && Object.prototype.hasOwnProperty.call(values, 'reason')
+        ? { ...values, reason: labels.transcript.videoReason?.[values.reason] ?? '' }
+        : values;
+    tags.push(fill(labels.transcript[key], filled));
+  };
   const pushLabel = ({ key, values, extra }) => {
-    tags.push(fill(labels.transcript[key], values));
-    if (extra) tags.push(fill(labels.transcript[extra.key], extra.values));
+    pushTag({ key, values });
+    for (const tag of Array.isArray(extra) ? extra : extra ? [extra] : []) pushTag(tag);
   };
   for (const attachment of message.attachments ?? []) {
     const attachedIndex = context.attachedIndex?.get(attachment.id) ?? null;
     const description = context.descriptions?.get(attachment.id) ?? null;
-    pushLabel(mediaLabelFor(attachment, { attachedIndex, description, unknownDuration }));
+    const video = videoOf(attachment.id);
+    pushLabel(mediaLabelFor(attachment, { attachedIndex, description, unknownDuration, video }));
   }
   for (const link of message.links ?? []) {
     const attachedIndex = context.attachedIndex?.get(link.id) ?? null;
@@ -138,7 +153,7 @@ function mediaTags(message, labels, context = {}) {
     // this way.
     const canDescribe = link.kind !== 'link' || Boolean(labels.transcript.thumbnailDescribed);
     const description = canDescribe ? (context.descriptions?.get(link.id) ?? null) : null;
-    pushLabel(mediaLabelFor(link, { attachedIndex, description, unknownDuration }));
+    pushLabel(mediaLabelFor(link, { attachedIndex, description, unknownDuration, video: videoOf(link.id) }));
   }
   for (const sticker of message.stickers ?? []) {
     const attachedIndex = context.attachedIndex?.get(`sticker:${sticker.id}`) ?? null;
@@ -201,6 +216,10 @@ function renderForwarded(snapshot, labels, context, maxChars, channelName) {
  *   src/behavior/prompt.js#selectPictures); renders `transcript.imageAttached`.
  * @param {Map<string, string>} [options.descriptions]  Item id -> a describer
  *   caption (src/memory/describe.js); renders the `*Described` label forms.
+ * @param {Map<string, { state: 'watched'|'limit'|'error', text?: string, reason?: string }>} [options.videos]
+ *   Item id -> a video state (the video describer); renders the
+ *   `videoWatched`/`videoNotWatched*`/`linkWatched`/`linkNotWatched*` forms.
+ *   Ignored when the labels have no `transcript.videoWatched` key.
  * @returns {{ id: string, index: number, ts: number, text: string }[]}
  *
  * In `mode: 'memory'`, messages come from possibly several channels (see
@@ -211,8 +230,8 @@ function renderForwarded(snapshot, labels, context, maxChars, channelName) {
  * channel run, never across a channel switch.
  */
 export function formatTranscript(messages, options) {
-  const { timezone, gapMinutes, maxChars, selfName, labels, mode = 'chat', attachedIndex, descriptions } = options;
-  const mediaContext = { attachedIndex, descriptions };
+  const { timezone, gapMinutes, maxChars, selfName, labels, mode = 'chat', attachedIndex, descriptions, videos } = options;
+  const mediaContext = { attachedIndex, descriptions, videos };
   const locale = labels.locale;
   const selfLabel = fill(labels.self, { name: selfName });
   const indexById = new Map(messages.map((message, i) => [message.id, i + 1]));

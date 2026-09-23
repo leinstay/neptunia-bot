@@ -607,6 +607,127 @@ test('formatTranscript: an attached link thumbnail keeps the link tag and adds f
   assert.ok(!items[0].text.includes('a cat plays piano'));
 });
 
+// --- formatTranscript: video states ------------------------------------
+
+function videoTranscript(messages, extra = {}) {
+  return formatTranscript(messages, { timezone: TZ, gapMinutes: 20, maxChars: 100, selfName: 'Nept', labels, ...extra });
+}
+
+const T0 = Date.UTC(2026, 8, 20, 10, 0, 0);
+const videoMsg = () => msg('a', T0, { content: '', attachments: [{ id: 'v1', kind: 'video', name: 'clip.mp4', durationSec: 65 }] });
+const ytLink = { id: 'link:abcd1234', kind: 'link', site: 'YouTube', title: 'Cool video', thumbnailUrl: 'https://i.ytimg.com/x.jpg' };
+
+test('formatTranscript: a watched video renders videoWatched', () => {
+  const items = videoTranscript([videoMsg()], { videos: new Map([['v1', { state: 'watched', text: 'a dog runs' }]]) });
+  assert.ok(items[0].text.endsWith('[video: clip.mp4, 1:05, watched: a dog runs]'));
+});
+
+test('formatTranscript: a watched video with an attached still frame renders both tags, in order', () => {
+  const items = videoTranscript([videoMsg()], {
+    attachedIndex: new Map([['v1', 1]]),
+    videos: new Map([['v1', { state: 'watched', text: 'a dog runs' }]]),
+  });
+  assert.ok(items[0].text.endsWith('[video: clip.mp4, 1:05, watched: a dog runs] [its still frame is attached image 1]'));
+});
+
+test('formatTranscript: the reason code is swapped for its label, for all four codes', () => {
+  const cases = [
+    [{ state: 'limit', reason: 'length' }, 'too long'],
+    [{ state: 'limit', reason: 'size' }, 'too big'],
+    [{ state: 'limit', reason: 'daily' }, 'daily limit'],
+    [{ state: 'error' }, 'failed'],
+  ];
+  for (const [video, label] of cases) {
+    const items = videoTranscript([videoMsg()], { videos: new Map([['v1', video]]) });
+    assert.ok(items[0].text.endsWith(`[video: clip.mp4, 1:05, not watched: ${label}]`), items[0].text);
+  }
+});
+
+test('formatTranscript: a video not watched but with a still-frame caption renders videoNotWatchedFrame', () => {
+  const items = videoTranscript([videoMsg()], {
+    descriptions: new Map([['v1', 'a café terrace']]),
+    videos: new Map([['v1', { state: 'limit', reason: 'size' }]]),
+  });
+  assert.ok(items[0].text.endsWith('[video: clip.mp4, 1:05, not watched: too big; one frame: a café terrace]'));
+});
+
+test('formatTranscript: a reason code missing from labels.transcript.videoReason renders empty, never the code', () => {
+  const partial = { ...labels, transcript: { ...labels.transcript, videoReason: undefined } };
+  const items = videoTranscript([videoMsg()], { labels: partial, videos: new Map([['v1', { state: 'error' }]]) });
+  assert.ok(items[0].text.endsWith('[video: clip.mp4, 1:05, not watched: ]'));
+  assert.ok(!items[0].text.includes('error'));
+});
+
+test('formatTranscript: a watched link keeps the link tag, linkWatched follows', () => {
+  const messages = [msg('a', T0, { content: '', links: [ytLink] })];
+  const items = videoTranscript(messages, {
+    descriptions: new Map([['link:abcd1234', 'a stage']]),
+    videos: new Map([['link:abcd1234', { state: 'watched', text: 'a talk about bridges' }]]),
+  });
+  assert.ok(items[0].text.endsWith('[link: YouTube — Cool video] [watched: a talk about bridges]'));
+  assert.ok(!items[0].text.includes('[thumbnail:'));
+});
+
+test('formatTranscript: a link not watched renders linkNotWatchedFrame with a caption, linkNotWatched without', () => {
+  const messages = [msg('a', T0, { content: '', links: [ytLink] })];
+  const videos = new Map([['link:abcd1234', { state: 'limit', reason: 'daily' }]]);
+  const framed = videoTranscript(messages, { videos, descriptions: new Map([['link:abcd1234', 'a stage']]) });
+  assert.ok(framed[0].text.endsWith('[link: YouTube — Cool video] [not watched: daily limit; thumbnail: a stage]'));
+  const bare = videoTranscript(messages, { videos });
+  assert.ok(bare[0].text.endsWith('[link: YouTube — Cool video] [not watched: daily limit]'));
+});
+
+test('formatTranscript: an attached link thumbnail AND a video state -> frameAttached first, then the video tag', () => {
+  const messages = [msg('a', T0, { content: '', links: [ytLink] })];
+  const items = videoTranscript(messages, {
+    attachedIndex: new Map([['link:abcd1234', 2]]),
+    videos: new Map([['link:abcd1234', { state: 'watched', text: 'a talk' }]]),
+  });
+  assert.ok(items[0].text.endsWith('[link: YouTube — Cool video] [its still frame is attached image 2] [watched: a talk]'));
+});
+
+test('formatTranscript: a forwarded snapshot\'s video also reads its state', () => {
+  const messages = [
+    msg('a', T0, {
+      content: '',
+      forwarded: [{ content: '', attachments: [{ id: 'v9', kind: 'video', name: 'ρολόι.mp4', durationSec: 3 }], links: [] }],
+    }),
+  ];
+  const items = videoTranscript(messages, { videos: new Map([['v9', { state: 'watched', text: 'a clock ticks' }]]) });
+  assert.ok(items[0].text.includes('[forwarded: [video: ρολόι.mp4, 0:03, watched: a clock ticks]]'));
+});
+
+test('formatTranscript: labels without the video keys render byte-for-byte as before, video states ignored', () => {
+  const oldTranscript = { ...labels.transcript };
+  for (const key of ['videoWatched', 'videoNotWatched', 'videoNotWatchedFrame', 'linkWatched', 'linkNotWatched', 'linkNotWatchedFrame', 'videoReason']) {
+    delete oldTranscript[key];
+  }
+  const oldLabels = { ...labels, transcript: oldTranscript };
+  const messages = [
+    msg('a', T0, { content: 'look', attachments: [{ id: 'v1', kind: 'video', name: 'clip.mp4', durationSec: 65 }], links: [ytLink] }),
+  ];
+  const context = {
+    attachedIndex: new Map([['link:abcd1234', 1]]),
+    descriptions: new Map([['v1', 'a dog runs']]),
+  };
+  const before = videoTranscript(messages, { labels: oldLabels, ...context });
+  const after = videoTranscript(messages, {
+    labels: oldLabels,
+    ...context,
+    videos: new Map([
+      ['v1', { state: 'watched', text: 'the whole clip' }],
+      ['link:abcd1234', { state: 'error' }],
+    ]),
+  });
+  assert.equal(after[0].text, before[0].text);
+  assert.ok(before[0].text.endsWith('look [video: clip.mp4, 1:05: a dog runs] [link: YouTube — Cool video] [its still frame is attached image 1]'));
+});
+
+test('formatTranscript: no videos map at all renders today\'s still-frame forms with the new labels too', () => {
+  const items = videoTranscript([videoMsg()], { descriptions: new Map([['v1', 'a dog runs']]) });
+  assert.ok(items[0].text.endsWith('[video: clip.mp4, 1:05: a dog runs]'));
+});
+
 // --- formatTranscript: stickers ---------------------------------------
 
 function stickerItem(id, name, url) {

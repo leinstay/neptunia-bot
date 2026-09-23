@@ -3,12 +3,15 @@
 // (vision selection): classifying an attachment/embed into a kind, choosing
 // which label form a media item takes in a transcript line, rewriting a
 // Discord CDN URL through the media proxy for resizing, and picking which
-// pictures of a channel a live turn may see. No network I/O, no discord.js
+// pictures of a channel a live turn may see, and listing the video
+// candidates of a message (attached videos, video-site links) for the video
+// describer. No network I/O, no discord.js
 // import — callers hand in plain data already read off a discord.js
 // Message/Embed (node:crypto is used only for a deterministic, synchronous
 // hash, not for any I/O).
 
 import { createHash } from 'node:crypto';
+import { videoSiteFor } from './video-sites.js';
 
 const DISCORD_CDN_HOSTS = new Set(['cdn.discordapp.com', 'media.discordapp.net']);
 const GIF_PROVIDERS = new Set(['tenor', 'giphy']);
@@ -230,6 +233,28 @@ function durationOrUnknown(durationSec, unknownDuration) {
 }
 
 /**
+ * The reason CODE of a not-watched video state: `'length' | 'size' | 'daily'`
+ * for a `limit` state, `'error'` for an `error` state. Label-free on purpose:
+ * src/discord/format.js swaps it for `labels.transcript.videoReason[code]`.
+ */
+function videoReasonCode(video) {
+  return video.state === 'error' ? 'error' : String(video.reason ?? '');
+}
+
+/**
+ * The ONE video extra tag of a `link` item with a video state: `linkWatched`
+ * when the video was watched, else `linkNotWatchedFrame` when a thumbnail
+ * caption exists, else `linkNotWatched`.
+ */
+function linkVideoExtra(video, description) {
+  if (video.state === 'watched') return { key: 'linkWatched', values: { text: video.text ?? '' } };
+  const reason = videoReasonCode(video);
+  return description
+    ? { key: 'linkNotWatchedFrame', values: { reason, text: description } }
+    : { key: 'linkNotWatched', values: { reason } };
+}
+
+/**
  * Choose which `labels.transcript.*` key (and fill values) renders one media
  * item, in priority order: attached to this request (most informative) >
  * described > blind. `item` is a normalized attachment or link/embed item
@@ -245,15 +270,29 @@ function durationOrUnknown(durationSec, unknownDuration) {
  * `link`/`linkText` form always stays, and ONE extra tag follows it —
  * `frameAttached` when its thumbnail is attached, else `thumbnailDescribed`
  * when a caption exists, else nothing.
+ *
+ * `context.video` is the item's video state (see collectVideos and the video
+ * describer): `{ state: 'watched', text }`, `{ state: 'limit', reason:
+ * 'length'|'size'|'daily' }` or `{ state: 'error' }`; null keeps the
+ * still-frame behaviour above. A `video` item that was watched renders
+ * `videoWatched`; one not watched renders `videoNotWatchedFrame` (a still
+ * frame caption exists) or `videoNotWatched`, `values.reason` carrying the
+ * reason CODE (`'length'|'size'|'daily'|'error'`, never a label -- see
+ * src/discord/format.js). A `link` with a video state swaps its one extra for
+ * `linkWatched` / `linkNotWatchedFrame` / `linkNotWatched`; when its
+ * thumbnail is also attached, `extra` is an array: `frameAttached` first,
+ * the video extra second. Every other kind ignores `context.video`.
  * @param {object} item
- * @param {{ attachedIndex?: number|null, description?: string|null, unknownDuration?: string }} [context]
- * @returns {{ key: string, values: object, extra?: { key: string, values: object } }}
+ * @param {{ attachedIndex?: number|null, description?: string|null, unknownDuration?: string,
+ *   video?: { state: 'watched'|'limit'|'error', text?: string, reason?: string }|null }} [context]
+ * @returns {{ key: string, values: object,
+ *   extra?: { key: string, values: object }|{ key: string, values: object }[] }}
  */
-export function mediaLabelFor(item, { attachedIndex = null, description = null, unknownDuration = '?' } = {}) {
+export function mediaLabelFor(item, { attachedIndex = null, description = null, unknownDuration = '?', video = null } = {}) {
   const isPicture = PICTURE_ATTACHMENT_KINDS.has(item.kind) || (item.kind === 'link' && item.thumbnailUrl);
   if (attachedIndex != null && isPicture && item.kind !== 'link') {
     if (item.kind === 'video' || item.kind === 'gif') {
-      const base = mediaLabelFor(item, { description, unknownDuration });
+      const base = mediaLabelFor(item, { description, unknownDuration, video });
       return { ...base, extra: { key: 'frameAttached', values: { n: attachedIndex } } };
     }
     return { key: 'imageAttached', values: { n: attachedIndex } };
@@ -267,10 +306,20 @@ export function mediaLabelFor(item, { attachedIndex = null, description = null, 
         ? { key: 'gifDescribed', values: { text: description } }
         : { key: 'gif', values: { name: item.name || item.title || item.site || '' } };
     case 'video': {
+      const name = item.name ?? '';
       const duration = durationOrUnknown(item.durationSec, unknownDuration);
+      if (video?.state === 'watched') {
+        return { key: 'videoWatched', values: { name, duration, text: video.text ?? '' } };
+      }
+      if (video) {
+        const reason = videoReasonCode(video);
+        return description
+          ? { key: 'videoNotWatchedFrame', values: { name, duration, reason, text: description } }
+          : { key: 'videoNotWatched', values: { name, duration, reason } };
+      }
       return description
-        ? { key: 'videoDescribed', values: { name: item.name ?? '', duration, text: description } }
-        : { key: 'video', values: { name: item.name ?? '', duration } };
+        ? { key: 'videoDescribed', values: { name, duration, text: description } }
+        : { key: 'video', values: { name, duration } };
     }
     case 'voice':
       return { key: 'voice', values: { duration: durationOrUnknown(item.durationSec, unknownDuration) } };
@@ -284,9 +333,12 @@ export function mediaLabelFor(item, { attachedIndex = null, description = null, 
       const base = item.text
         ? { key: 'linkText', values: { site: item.site ?? '', title: item.title ?? '', text: item.text } }
         : { key: 'link', values: { site: item.site ?? '', title: item.title ?? '' } };
-      if (attachedIndex != null && item.thumbnailUrl) {
-        return { ...base, extra: { key: 'frameAttached', values: { n: attachedIndex } } };
+      const frame = attachedIndex != null && item.thumbnailUrl ? { key: 'frameAttached', values: { n: attachedIndex } } : null;
+      if (video) {
+        const videoExtra = linkVideoExtra(video, description);
+        return { ...base, extra: frame ? [frame, videoExtra] : videoExtra };
       }
+      if (frame) return { ...base, extra: frame };
       return description ? { ...base, extra: { key: 'thumbnailDescribed', values: { text: description } } } : base;
     }
     default:
@@ -386,6 +438,50 @@ export function collectEmojiItems(message) {
     url: emoji.url,
     name: emoji.name,
   }));
+}
+
+/**
+ * The video candidates of one normalized message (see src/discord/collect.js),
+ * in the order they appear in it: every attachment of kind `video`, then every
+ * link whose `url` belongs to one of `sites` (see videoSiteFor in
+ * src/discord/video-sites.js). `itemId` is the id the transcript's `videos`
+ * state map is keyed by (the attachment's Discord id, or the link's id).
+ * `sites` missing or empty -> attachments only.
+ * @param {object} message  A normalized message (see src/discord/collect.js).
+ * @param {{ sites?: string[] }} [options]
+ */
+export function collectVideos(message, { sites = [] } = {}) {
+  const items = [];
+  for (const attachment of message.attachments ?? []) {
+    if (attachment.kind !== 'video') continue;
+    items.push({
+      source: 'attachment',
+      messageId: message.id,
+      itemId: attachment.id,
+      kind: 'video',
+      url: attachment.url,
+      name: attachment.name,
+      durationSec: attachment.durationSec,
+      bytes: attachment.size,
+    });
+  }
+  if (!Array.isArray(sites) || sites.length === 0) return items;
+  for (const link of message.links ?? []) {
+    if (!link.url) continue;
+    const site = videoSiteFor(link.url, sites);
+    if (!site) continue;
+    items.push({
+      source: 'link',
+      messageId: message.id,
+      itemId: link.id,
+      kind: 'link',
+      url: link.url,
+      site,
+      name: link.title || link.site,
+      durationSec: null,
+    });
+  }
+  return items;
 }
 
 /** Whether a picture item (see collectPictures/collectEmojiItems) is one the describer can caption. */

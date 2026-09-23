@@ -453,7 +453,10 @@ function renderSenses(config, labels) {
   if (visionOn) lines.push(senses.imageSee);
   lines.push(describedOn ? senses.imageDescribed : senses.imageBlind);
   lines.push(describedOn ? senses.gifDescribed : senses.gifBlind);
-  lines.push(describedOn ? senses.videoDescribed : senses.videoBlind);
+  // Watching a video needs the describer on too; an older labels.json
+  // without the video-watching lines falls back to the still-frame ones.
+  const videoOn = describedOn && config.features?.videoDescriptions !== false;
+  lines.push(videoOn ? (senses.videoWatch ?? senses.videoDescribed) : describedOn ? senses.videoDescribed : senses.videoBlind);
 
   // Stickers get their own lines (a picture-format one behaves like an
   // image); senses.lottie only shows up alongside them -- an animated
@@ -466,7 +469,7 @@ function renderSenses(config, labels) {
   lines.push(...shownStickerLines);
   if (shownStickerLines.length > 0) lines.push(senses.lottie);
 
-  lines.push(senses.voice, senses.links, senses.files);
+  lines.push(senses.voice, videoOn ? (senses.linksWatch ?? senses.links) : senses.links, senses.files);
   return lines.filter(Boolean).join('\n');
 }
 

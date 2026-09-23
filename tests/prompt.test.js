@@ -1017,7 +1017,9 @@ test('buildRequest: vision off -> no imageSee line, blind forms still shown', ()
 });
 
 test('buildRequest: mediaDescriptions on -> described forms replace the blind ones', () => {
-  const config = fakeConfig({ features: { vision: true, mediaDescriptions: true } });
+  // videoDescriptions off pins the still-frame video line (with it on, the
+  // video line becomes videoWatch -- see the video-watching tests below).
+  const config = fakeConfig({ features: { vision: true, mediaDescriptions: true, videoDescriptions: false } });
   const request = buildRequest(baseInput({ config }));
   const senses = sensesOf(request);
   assert.ok(senses.includes(labels.senses.imageDescribed));
@@ -1026,6 +1028,44 @@ test('buildRequest: mediaDescriptions on -> described forms replace the blind on
   assert.ok(!senses.includes(labels.senses.imageBlind));
   assert.ok(!senses.includes(labels.senses.gifBlind));
   assert.ok(!senses.includes(labels.senses.videoBlind));
+});
+
+// --- <senses>: video watching ---------------------------------------------------
+
+test('buildRequest: mediaDescriptions on, videoDescriptions missing (counts as on) -> videoWatch and linksWatch', () => {
+  const config = fakeConfig({ features: { vision: true, mediaDescriptions: true } });
+  const senses = sensesOf(buildRequest(baseInput({ config })));
+  assert.ok(senses.includes(labels.senses.videoWatch));
+  assert.ok(senses.includes(labels.senses.linksWatch));
+  assert.ok(!senses.includes(labels.senses.videoDescribed));
+  assert.ok(!senses.includes(labels.senses.videoBlind));
+  assert.ok(!senses.split('\n').includes(labels.senses.links));
+});
+
+test('buildRequest: videoDescriptions false -> the still-frame video line and the plain links line', () => {
+  const config = fakeConfig({ features: { vision: true, mediaDescriptions: true, videoDescriptions: false } });
+  const senses = sensesOf(buildRequest(baseInput({ config })));
+  assert.ok(senses.includes(labels.senses.videoDescribed));
+  assert.ok(senses.split('\n').includes(labels.senses.links));
+  assert.ok(!senses.includes(labels.senses.videoWatch));
+  assert.ok(!senses.includes(labels.senses.linksWatch));
+});
+
+test('buildRequest: mediaDescriptions off -> no video watching even with videoDescriptions on', () => {
+  const config = fakeConfig({ features: { vision: true, mediaDescriptions: false, videoDescriptions: true } });
+  const senses = sensesOf(buildRequest(baseInput({ config })));
+  assert.ok(senses.includes(labels.senses.videoBlind));
+  assert.ok(senses.split('\n').includes(labels.senses.links));
+  assert.ok(!senses.includes(labels.senses.videoWatch));
+  assert.ok(!senses.includes(labels.senses.linksWatch));
+});
+
+test('buildRequest: an older labels set without videoWatch/linksWatch falls back to videoDescribed/links', () => {
+  const oldLabels = { ...labels, senses: { ...labels.senses, videoWatch: undefined, linksWatch: undefined } };
+  const config = fakeConfig({ features: { vision: true, mediaDescriptions: true } });
+  const senses = sensesOf(buildRequest(baseInput({ config, prompts: fakePrompts({ labels: oldLabels }) })));
+  assert.ok(senses.includes(labels.senses.videoDescribed));
+  assert.ok(senses.split('\n').includes(labels.senses.links));
 });
 
 test('buildRequest: <senses> is omitted entirely when labels has no senses section', () => {
