@@ -11,6 +11,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createTurnRunner } from '../src/behavior/turn.js';
 import { labels } from './fixtures/labels.js';
+import { withCapturedLogs } from './fixtures/capture-logs.js';
 
 /** A discord.js-shaped raw message, just enough for normalizeMessage. */
 function rawMessage({ id, authorId = 'u1', authorName = 'Alice', ts = Date.now() - 1000, content = 'hey bot' }) {
@@ -156,33 +157,6 @@ async function waitForCalls(llm, count) {
   for (let i = 0; i < 200 && llm.calls.length < count; i += 1) await Promise.resolve();
 }
 
-/** Runs `fn`, capturing every `process.stdout.write` call and restoring the original afterwards. */
-async function withCapturedLogs(fn) {
-  const original = process.stdout.write.bind(process.stdout);
-  const chunks = [];
-  process.stdout.write = (chunk) => {
-    chunks.push(String(chunk));
-    return true;
-  };
-  let result;
-  try {
-    result = await fn();
-  } finally {
-    process.stdout.write = original;
-  }
-  const logs = [];
-  for (const chunk of chunks) {
-    for (const line of chunk.split('\n')) {
-      if (!line.trim()) continue;
-      try {
-        logs.push(JSON.parse(line));
-      } catch {
-        // not a JSON log line -- ignore
-      }
-    }
-  }
-  return { result, logs };
-}
 
 // ---------------------------------------------------------------------------
 // isAnyBusy() / busy-elsewhere refusal (mention.oneAtATime)

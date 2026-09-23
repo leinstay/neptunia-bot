@@ -4,6 +4,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createImageFetcher } from '../src/discord/fetch-image.js';
+import { withCapturedLogs } from './fixtures/capture-logs.js';
 
 const PNG_BYTES = Buffer.from('fake-png-bytes');
 
@@ -30,34 +31,6 @@ function fakeFetchImpl(response) {
       return typeof response === 'function' ? response(url, options) : response;
     },
   };
-}
-
-/** Captures process.stdout.write calls (the log module's only sink) around `fn`. */
-async function withCapturedLogs(fn) {
-  const original = process.stdout.write.bind(process.stdout);
-  const chunks = [];
-  process.stdout.write = (chunk) => {
-    chunks.push(String(chunk));
-    return true;
-  };
-  let result;
-  try {
-    result = await fn();
-  } finally {
-    process.stdout.write = original;
-  }
-  const logs = [];
-  for (const chunk of chunks) {
-    for (const line of chunk.split('\n')) {
-      if (!line.trim()) continue;
-      try {
-        logs.push(JSON.parse(line));
-      } catch {
-        // not one of our JSON log lines -- ignore
-      }
-    }
-  }
-  return { result, logs };
 }
 
 const OPTIONS = { maxBytes: 1_500_000, timeoutMs: 10_000 };

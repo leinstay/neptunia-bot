@@ -10,6 +10,7 @@ import fs from 'node:fs';
 import { between, typingMs, resolveMentions, createTurnRunner, parseRewatchPick, parseRewatchPickDetailed } from '../src/behavior/turn.js';
 import { fill } from '../src/discord/format.js';
 import { labels } from './fixtures/labels.js';
+import { withCapturedLogs } from './fixtures/capture-logs.js';
 
 function rngReturning(value) {
   return () => value;
@@ -264,36 +265,6 @@ function fakeImageFetcher(result = { dataUrl: 'data:image/webp;base64,ZmFrZQ==',
   };
 }
 
-/** Runs `fn`, capturing every `process.stdout.write` call (the log module's only sink) and
- * restoring the original afterwards even if `fn` throws. Returns the parsed JSON log entries
- * alongside `fn`'s resolved value; non-JSON stdout noise (e.g. the test runner's own output
- * interleaving) is silently skipped rather than failing the capture. */
-async function withCapturedLogs(fn) {
-  const original = process.stdout.write.bind(process.stdout);
-  const chunks = [];
-  process.stdout.write = (chunk) => {
-    chunks.push(String(chunk));
-    return true;
-  };
-  let result;
-  try {
-    result = await fn();
-  } finally {
-    process.stdout.write = original;
-  }
-  const logs = [];
-  for (const chunk of chunks) {
-    for (const line of chunk.split('\n')) {
-      if (!line.trim()) continue;
-      try {
-        logs.push(JSON.parse(line));
-      } catch {
-        // not one of our JSON log lines -- ignore
-      }
-    }
-  }
-  return { result, logs };
-}
 
 // /nep pause: no new turn may start while paused -- a reply, an
 // interject, an initiate, an eavesdrop or a forced turn alike, whatever the mode.

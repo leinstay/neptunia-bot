@@ -15,6 +15,7 @@ import path from 'node:path';
 import { createStore } from '../src/memory/store.js';
 import { createDescriber } from '../src/memory/describe.js';
 import { createLlm, TokenLimitError, DailyCapError } from '../src/llm/openrouter.js';
+import { withCapturedLogs } from './fixtures/capture-logs.js';
 
 function tmpDataDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'nep-describe-'));
@@ -64,34 +65,6 @@ function fakeImageFetcher(result = SUCCESSFUL_DOWNLOAD) {
       return typeof result === 'function' ? result(url, options) : result;
     },
   };
-}
-
-/** Captures process.stdout.write calls (the log module's only sink) around `fn`. */
-async function withCapturedLogs(fn) {
-  const original = process.stdout.write.bind(process.stdout);
-  const chunks = [];
-  process.stdout.write = (chunk) => {
-    chunks.push(String(chunk));
-    return true;
-  };
-  let result;
-  try {
-    result = await fn();
-  } finally {
-    process.stdout.write = original;
-  }
-  const logs = [];
-  for (const chunk of chunks) {
-    for (const line of chunk.split('\n')) {
-      if (!line.trim()) continue;
-      try {
-        logs.push(JSON.parse(line));
-      } catch {
-        // not one of our JSON log lines -- ignore
-      }
-    }
-  }
-  return { result, logs };
 }
 
 test('describe: feature off returns null without any request', async () => {

@@ -14,36 +14,7 @@ import {
   commandKeys,
 } from '../src/discord/commands.js';
 import { isAllowed as accessIsAllowed } from '../src/discord/access.js';
-
-/** Runs `fn`, capturing every `process.stdout.write` call (the log module's only sink) and
- * restoring the original afterwards even if `fn` throws. Returns the parsed JSON log entries
- * alongside `fn`'s resolved value; non-JSON stdout noise is silently skipped. */
-async function withCapturedLogs(fn) {
-  const original = process.stdout.write.bind(process.stdout);
-  const chunks = [];
-  process.stdout.write = (chunk) => {
-    chunks.push(String(chunk));
-    return true;
-  };
-  let result;
-  try {
-    result = await fn();
-  } finally {
-    process.stdout.write = original;
-  }
-  const logs = [];
-  for (const chunk of chunks) {
-    for (const line of chunk.split('\n')) {
-      if (!line.trim()) continue;
-      try {
-        logs.push(JSON.parse(line));
-      } catch {
-        // not one of our JSON log lines -- ignore
-      }
-    }
-  }
-  return { result, logs };
-}
+import { withCapturedLogs } from './fixtures/capture-logs.js';
 
 function findOption(options, name) {
   return options?.find((o) => o.name === name);

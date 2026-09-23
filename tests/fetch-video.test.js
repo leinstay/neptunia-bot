@@ -11,6 +11,7 @@ import * as fsp from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { createVideoFetcher } from '../src/discord/fetch-video.js';
+import { withCapturedLogs } from './fixtures/capture-logs.js';
 
 const OPTS = {
   maxSeconds: 60,
@@ -133,31 +134,6 @@ function writesOutput(size, flag) {
     await fsp.writeFile(out, Buffer.alloc(size, 7));
     child.emit('close', 0, null);
   };
-}
-
-async function withCapturedLogs(fn) {
-  const original = process.stdout.write.bind(process.stdout);
-  const chunks = [];
-  process.stdout.write = (chunk) => {
-    chunks.push(String(chunk));
-    return true;
-  };
-  let result;
-  try {
-    result = await fn();
-  } finally {
-    process.stdout.write = original;
-  }
-  const logs = [];
-  for (const line of chunks.join('').split('\n')) {
-    if (!line.trim()) continue;
-    try {
-      logs.push(JSON.parse(line));
-    } catch {
-      // not a log line
-    }
-  }
-  return { result, logs };
 }
 
 // --- fetchAttachment ------------------------------------------------------
