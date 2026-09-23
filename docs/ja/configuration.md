@@ -22,6 +22,7 @@
 | `mediaDescriptions` | `true` | 画像、GIF、動画フレーム、リンクサムネイルの一行説明文 |
 | `videoDescriptions` | `false` | 動画対応モデルで短い動画クリップを視聴。`mediaDescriptions` も有効にする必要がある。`config.local.json` で有効化。動画対応モデルが必要で、サイトリンクには `yt-dlp`/`ffmpeg` も必要 |
 | `videoRewatch` | `true` | 話しかけられた時に動画を再視聴して質問に回答。`videoDescriptions` が必要 |
+| `webLookup` | `false` | チャットに投稿されたリンクを読み取り、事実に関する質問にウェブ検索で回答。他の機能と異なり、キーが存在しない場合はオフとして扱われる。検索には `.env` に `BRAVE_SEARCH_API_KEY` が必要。キーがない場合はリンク読み取りのみ動作する。[メディア: リンクと検索](media.md#リンク-ページの読み取り)を参照 |
 | `followUp` | `true` | ペルソナの応答後、タグなしメッセージを分類して会話を継続 |
 | `typingSimulation` | `true` | タイピング速度をシミュレート |
 | `adminCommands` | `true` | オーナースラッシュコマンド。`false` でコマンド登録を解除 |
@@ -58,6 +59,18 @@
 
 `llm.provider` はすべてのリクエストで OpenRouter のプロバイダールーティングフィールドを設定します。例: `{ "ignore": ["some-provider"] }` や `{ "order": ["anthropic"], "allow_fallbacks": true }`。OpenRouter アカウント自体が許可プロバイダーを制限している場合、唯一残ったプロバイダーを除外するとすべてのリクエストが "No endpoints found" で失敗します。プロバイダー設定を変更した後は `/nep ping` を実行してすべてのモデルロールが到達可能か確認してください。
 
+## `classifier`
+
+3 つのヘルパーモデルロールを 1 つのキーにまとめています。それぞれ独立して設定できるため、ペルソナの声にはプレミアムモデルを使い、ヘルパーには安価なモデルを使うことができます。
+
+| キー | デフォルト | 説明 |
+|---|---|---|
+| `text` | `"anthropic/claude-sonnet-4.6"` | テキスト分類器: アドレス分類器（`features.followUp`）、再視聴分類器（`features.videoRewatch`）、検索分類器（`features.webLookup`）。リンク読み取りと検索結果の要約も行う |
+| `media` | `"anthropic/claude-haiku-4.5"` | 画像説明モデル（`features.mediaDescriptions`）: 画像、GIF フレーム、動画ポスター、スティッカー、カスタム絵文字、リンクサムネイルの一行説明文 |
+| `video` | `"google/gemini-3.8-flash"` | 動画説明モデル（`features.videoDescriptions`）: 短いクリップの視聴、質問に対する再視聴、リクエストに応じたリトライ。動画と音声の両方の入力を受け付ける必要がある |
+
+**旧キーからの移行。** 非推奨のキー `llm.classifierModel`、`mention.followUpModel`、`media.model`、`media.video.model` は読み取られなくなりました。これらのいずれかが `config.local.json` に存在する場合、ボットは起動時に警告をログに記録し（`config: deprecated model key ignored`）、キー名とその置き換え先を示します。値を `classifier.text`、`classifier.media`、`classifier.video` にそれぞれ移行してください。
+
 ## `context`
 
 | キー | デフォルト | 説明 |
@@ -90,11 +103,10 @@
 
 ## `media`
 
-メディア説明モデル（`features.mediaDescriptions`）の設定です。
+メディア説明モデル（`features.mediaDescriptions`）の設定です。説明モデルは `classifier.media` です。
 
 | キー | デフォルト | 説明 |
 |---|---|---|
-| `model` | `"anthropic/claude-haiku-4.5"` | 説明モデル |
 | `maxOutputTokens` | `120` | 説明文あたりの最大出力トークン数 |
 | `imageSize` | `512` | ダウンスケール目標（px） |
 | `maxPerTurn` | `6` | ターンあたりの最大説明文生成数 |
@@ -104,11 +116,10 @@
 
 ### `media.video`
 
-動画説明モデル（`features.videoDescriptions`）の設定です。動画ビジョンは `features.mediaDescriptions` と `features.videoDescriptions` の両方が有効である必要があります。動画対応の別モデルが短いクリップを視聴します。対象は Discord の動画添付ファイルと `media.video.sites` に含まれるサイトへのリンクです。結果は画像の説明文と同じメディアキャッシュに保存されるため、再投稿のコストはかかりません。
+動画説明モデル（`features.videoDescriptions`）の設定です。動画ビジョンは `features.mediaDescriptions` と `features.videoDescriptions` の両方が有効である必要があります。動画モデルは `classifier.video` です。動画対応の別モデルが短いクリップを視聴します。対象は Discord の動画添付ファイルと `media.video.sites` に含まれるサイトへのリンクです。結果は画像の説明文と同じメディアキャッシュに保存されるため、再投稿のコストはかかりません。
 
 | キー | デフォルト | 説明 |
 |---|---|---|
-| `model` | `"google/gemini-3.8-flash"` | 動画対応モデル。動画と音声の両方の入力を受け付ける必要がある |
 | `provider` | `{ "order": ["google-ai-studio"], "allow_fallbacks": false }` | ダイレクト URL パス（上限内の YouTube）用の OpenRouter プロバイダールーティング。`null` の場合は `llm.provider` を使用 |
 | `maxOutputTokens` | `800` | 動画サマリーあたりの最大出力トークン数 |
 | `summaryChars` | `1500` | 動画説明の最大文字数。`describe-video.md` の `{{maxChars}}` に使用 |
@@ -138,7 +149,7 @@ YouTube リンクの再生時間は次の順序で取得されます: まず yt-
 
 ### `media.video.rewatch`
 
-再視聴分類器（`features.videoRewatch`）の設定です。ペルソナに話しかけられた時に直近のトランスクリプトに視聴済み動画がある場合、安価な分類器がメッセージがそれらの動画について質問しているかを判定します。ヒットすると動画モデルがクリップを再度視聴し、回答がトランスクリプトに追加されます。分類器はフォローアップモデル（`mention.followUpModel`、デフォルト `anthropic/claude-sonnet-4.6`）を使用します。再視聴は常に `media.video.model` を使用します。
+再視聴分類器（`features.videoRewatch`）の設定です。ペルソナに話しかけられた時に直近のトランスクリプトに視聴済み動画がある場合、安価な分類器がメッセージがそれらの動画について質問しているかを判定します。ヒットすると動画モデルがクリップを再度視聴し、回答がトランスクリプトに追加されます。分類器は `classifier.text` を使用します。再視聴は常に `classifier.video` を使用します。
 
 | キー | デフォルト | 説明 |
 |---|---|---|
@@ -171,7 +182,6 @@ YouTube リンクの再生時間は次の順序で取得されます: まず yt-
 | `switchDelayMs` | `[2000, 9000]` | 次のチャンネルで応答する前の待機時間（ミリ秒） |
 | `followUpMinutes` | `15` | ペルソナの最後のリプライ後のフォローアップウィンドウ（分） |
 | `followUpContext` | `15` | 分類器に送信するトランスクリプト行数 |
-| `followUpModel` | `"anthropic/claude-sonnet-4.6"` | 分類器モデル。`null` の場合はメディアモデルを使用 |
 | `followUpMaxOutputTokens` | `8` | 分類器の最大出力トークン数 |
 | `followUpNoStreak` | `3` | ウィンドウを閉じる連続 `no` 判定回数 |
 
@@ -263,6 +273,42 @@ YouTube リンクの再生時間は次の順序で取得されます: まず yt-
 | `maxMatches` | `8` | リクエストあたりに表示されるエントリの最大数 |
 | `textChars` | `600` | ロアブックエントリのテキスト上限（文字） |
 
+## `web`
+
+ウェブルックアップ（`features.webLookup`）の設定です。リンク読み取りと検索は日次カウンター（`web.maxPerDay`）を共有します。結果はメディアキャッシュ（`data/guilds/<id>/media.json`）に保存されます。すべてのモデル呼び出しは `classifier.text` ロールを使用します。
+
+| キー | デフォルト | 説明 |
+|---|---|---|
+| `maxPerDay` | `60` | リンク読み取りと検索リクエストの合計に対する共有日次上限 |
+
+### `web.links`
+
+| キー | デフォルト | 説明 |
+|---|---|---|
+| `enabled` | `true` | チャットに投稿されたリンクを読み取り（http/https のみ、プライベートアドレスは拒否、動画サイトリンクは除外） |
+| `prefill` | `true` | リンクが投稿された時点で読み取り、次のターンでキャッシュ済みの状態にする |
+| `prefillPerUserPerDay` | `10` | プリフィルがメンバーあたり 1 日に到着時に読み取る最大リンク数。ターンパスはこの制限を受けない |
+| `maxPerTurn` | `2` | ターンあたりの最大新規リンク読み取り数（各フェッチ試行がカウントされる） |
+| `maxBytes` | `1500000` | ページの最大サイズ（バイト）。超過するとページを拒否 |
+| `textChars` | `6000` | 要約モデルに送信するページテキストの最大文字数 |
+| `summaryChars` | `700` | 要約抜粋の最大文字数。`read-link.md` の `{{maxChars}}` に使用 |
+| `maxOutputTokens` | `300` | 要約モデルの最大出力トークン数 |
+| `fetchTimeoutMs` | `10000` | ページあたりのダウンロードタイムアウト（ミリ秒） |
+| `skipSites` | `[]` | リンクを読み取らないホスト名（動画サイトは常に除外されるため、それに追加） |
+
+### `web.search`
+
+| キー | デフォルト | 説明 |
+|---|---|---|
+| `enabled` | `true` | 分類器が発火した時に検索を実行。`.env` に `BRAVE_SEARCH_API_KEY` が必要 |
+| `maxPerTurn` | `1` | ターンあたりの最大検索数 |
+| `results` | `5` | Brave Search に要求する結果数 |
+| `summaryChars` | `900` | 要約回答の最大文字数。`search-summary.md` の `{{maxChars}}` に使用 |
+| `maxOutputTokens` | `400` | 要約モデルの最大出力トークン数 |
+| `cacheHours` | `24` | キャッシュされた検索結果が再検索されるまでの時間 |
+| `contextMessages` | `50` | 検索分類器に `<transcript>` として渡す直近のチャンネルメッセージ数 |
+| `timeoutMs` | `10000` | Brave Search リクエストのタイムアウト（ミリ秒） |
+
 ## `warmup`
 
 | キー | デフォルト | 説明 |
@@ -288,29 +334,27 @@ YouTube リンクの再生時間は次の順序で取得されます: まず yt-
 
 エンジンは 5 つのモデルロールを使用します。それぞれ独立して設定できるため、ペルソナの声にはプレミアムモデルを使い、ヘルパーには安価なモデルを使うことができます。
 
-### `llm.model` — ペルソナの声
+### `llm.model` — ペルソナの声（`talk`）
 
 バジェットが許す最も高性能なモデルを選びます。ロールプレイの品質、キャラクターの一貫性、自然な会話のすべてがこのモデルに依存します。小さなモデルはキャラクターが崩れ、コンテキストの手がかりを忘れ、平坦に聞こえます。
 
 デフォルト: `anthropic/claude-opus-4.6`。より安価な選択肢: `anthropic/claude-sonnet-4.5`。
 
-### `memory.model` — アナライザー
+### `memory.model` — アナライザー（`analyzer`）
 
 長いトランスクリプトを推論し、厳密な JSON を返します。ペルソナの声と同じティアの知性が必要です。`null`（デフォルト）はペルソナのモデルを使用します。同じ例が適用されます。
 
-### `media.model` — 画像
+### `classifier.text` — テキスト分類器（`classifier.text`）
+
+「yes」または「no」を確実に回答できる最も安価なテキストモデルです。アドレス分類器、再視聴分類器、検索分類器を実行し、リンク読み取りと検索結果の要約も行います。デフォルト: `anthropic/claude-sonnet-4.6`。
+
+### `classifier.media` — 画像（`classifier.media`）
 
 安価なビジョンモデルであれば何でも使えます。一行の説明文を書くだけなので、推論能力はほとんど問題になりません。
 
 デフォルト: `anthropic/claude-haiku-4.5`。最も安価な代替: `google/gemini-2.5-flash-lite`。
 
-### `mention.followUpModel` — アドレス分類器
-
-「yes」または「no」を確実に回答できる最も安価なテキストモデルです。デフォルト: `anthropic/claude-sonnet-4.6`。`null` の場合はメディアモデルを使用します。
-
-再視聴分類器はこのモデルを共有します。同じ種類の安価な yes/no 判定（メッセージが視聴済み動画について質問しているか？）です。再視聴は常に動画モデルを使用します。
-
-### `media.video.model` — 音声付き動画
+### `classifier.video` — 音声付き動画（`classifier.video`）
 
 OpenRouter を通じて動画と音声の両方の入力を受け付けるモデルのみがここで動作します。フレームは受け付けるが音声は受け付けないモデル（Qwen VL、GLM、Seed、Gemma）は音声を聞き取れず、重要な情報の大部分を逃します。
 
