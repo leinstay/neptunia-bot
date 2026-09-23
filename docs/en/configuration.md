@@ -127,6 +127,9 @@ Settings for the video describer (`features.videoDescriptions`). Video vision ne
 | `canaryUrl` | `"https://www.youtube.com/watch?v=jNQXAC9IVRw"` | A fixed YouTube video probed at startup and by `/nep ping video` to learn which duration source works on this host |
 | `ytdlpPath` | `"yt-dlp"` | Path to the `yt-dlp` binary; needed for site video links and for probing duration |
 | `ffmpegPath` | `"ffmpeg"` | Path to `ffmpeg`; needed for trimming and downscaling long or large attachments |
+| `errorRetryMinutes` | `60` | Minutes before an error-cached video is retried on its own; a forced retry from the re-watch classifier ignores this |
+| `urlProcessing` | `"agentic"` | OpenRouter's processing mode sent on public-URL video parts; without it some providers see only a single frame. `null` omits the field |
+| `reasoning` | `{ "effort": "low" }` | OpenRouter `reasoning` setting for every video request; keeps reasoning from eating the output budget. A non-object omits the field |
 | `prefill` | `true` | Watch a video as soon as it arrives, so the next turn finds it cached |
 
 Both `yt-dlp` and `ffmpeg` are optional system binaries. Without them, attachments within the caps still work (sent as-is). Longer attachments and all site links fall back to the still frame or preview picture, and the persona is told the reason. Every video request counts against `llm.maxRequestsPerDay` and the video token cap (`maxRequestTokens`).
@@ -143,9 +146,10 @@ Settings for the re-watch classifier (`features.videoRewatch`). When the persona
 | `maxPerDay` | `20` | Daily re-watch cap (separate from `media.video.maxPerDay`) |
 | `maxOutputTokens` | `600` | Max output tokens for the re-watch answer |
 | `answerChars` | `1200` | Max characters for the answer; fills `{{maxChars}}` in `rewatch-answer.md` |
-| `recentMessages` | `15` | How many recent messages to scan for watched videos |
+| `recentMessages` | `60` | How many recent messages to scan for watched or error-state videos |
+| `maxCandidates` | `6` | Max videos offered to the classifier from the recent window, newest first |
 
-At most one re-watch per turn. Answers are cached for one hour per question. The classifier and the second look each count against `llm.maxRequestsPerDay`; the second look also counts against `media.video.maxPerDay`.
+At most one re-watch or retry per turn. Answers are cached for one hour per question. The classifier and the second look each count against `llm.maxRequestsPerDay`; the second look also counts against `media.video.maxPerDay`.
 
 ## `mention`
 

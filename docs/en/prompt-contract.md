@@ -31,7 +31,7 @@ All instructions are English in both layers; a character's speech samples may be
 | `server.md` | yes | Warmup: server-level notes from channel notes and member summaries | `{{name}}` `{{fieldChars}}` `{{maxInjokes}}` `{{loreTextChars}}` |
 | `describe.md` | yes | Out-of-character prompt of the media describer (`features.mediaDescriptions`): one picture in, one plain line out: what is on it, any legible text, in the language the chat speaks. No opinions, no markdown | none |
 | `describe-video.md` | yes | Out-of-character prompt of the video describer (`features.videoDescriptions`): one video clip in (with sound), a full ordered account out: who appears, what is said (key phrases quoted), text on screen, what happens visually, music/sound when relevant. Configurable length. Same language and restriction rules as `describe.md`. No character card | `{{maxChars}}` |
-| `rewatch.md` | yes | Classifier: does this message need the persona to re-watch a video (`features.videoRewatch`). Receives a list of watched videos and the new message. Output is ONE line: `<itemId> \| <question>` or `none` | `{{name}}` |
+| `rewatch.md` | yes | Classifier: does this message need the persona to re-watch a video or retry one that did not load (`features.videoRewatch`). Receives a list of recent videos with their status and the new message. Output is ONE line: `<itemId> \| <question>`, `<itemId> \| retry` or `none` | `{{name}}` |
 | `rewatch-answer.md` | yes | Out-of-character prompt for the re-watch answer: the video model watches a clip again and answers one question. Same language and restriction rules as `describe-video.md`. No character card | `{{question}}` `{{maxChars}}` |
 | `address.md` | yes | Classifier: is this untagged message addressed to the persona | `{{name}}` |
 | `labels.json` | yes | Every string the CODE inserts into a prompt. Keys fixed below, values are the writer's | see below |
@@ -84,7 +84,7 @@ Video results are cached per attachment or per link in `data/guilds/<id>/media.j
 
 - Watched: `{ text, ts, watched: true }` — permanent, the summary text.
 - Limit miss (length or size): `{ miss: true, ts, reason: "length"|"size" }` — permanent, the file will not change.
-- Error miss: `{ miss: true, ts, reason: "error" }` — retried after one hour.
+- Error miss: `{ miss: true, ts, reason: "error" }` — retried after `media.video.errorRetryMinutes` (default 60) minutes, or at once on a forced retry from the re-watch classifier.
 - Daily limit: not cached; returned as `{ state: "limit", reason: "daily" }` for that turn only.
 
 A re-watch answer is cached under the key `video:<itemId>:q:<hash>` (the first 16 hex digits of SHA-1 of the lower-cased, whitespace-collapsed question): `{ text, ts, answer: true }`. Expires after one hour; code deletes expired entries on read.
@@ -400,14 +400,17 @@ the window. Switch `features.followUp` (default on). Logged as counts and verdic
 
 ## The re-watch classifier (`rewatch.md`): does someone need a second look at a video?
 
-When the persona is addressed (a reply turn) and a watched video sits in the last `media.video.rewatch.recentMessages`
-(default 15) messages of the channel, a classifier decides whether the message asks about one of those videos. Code
-sends `rewatch.md` as the system prompt on the `rewatch` model role (`media.video.rewatch.model`, default
-`mention.followUpModel`, default the media model) with a user message containing two blocks:
+When the persona is addressed (a reply turn) and a video sits in the last `media.video.rewatch.recentMessages`
+(default 60) messages of the channel, a classifier decides whether the message asks about one of those videos or asks
+to retry one that did not load. Candidates are watched videos and error-state videos (the latter only while the turn
+still has a `media.video.maxPerTurn` attempt left). At most `media.video.rewatch.maxCandidates` (default 6) are
+offered to the classifier, newest-message first. Code sends `rewatch.md` as the system prompt on the `rewatch` model
+role (`media.video.rewatch.model`, default `mention.followUpModel`, default the media model) with a user message
+containing two blocks:
 
 ```
 <videos>
-<itemId> | <name> | <first 200 chars of the summary>
+<itemId> | <name> | <status> | <beginning of the account>
 ...
 </videos>
 <candidate>
@@ -415,16 +418,27 @@ sends `rewatch.md` as the system prompt on the `rewatch` model role (`media.vide
 </candidate>
 ```
 
-Videos are listed newest-message first; names and summaries are whitespace-collapsed to one line. The trigger text is
-cut at `context.maxMessageChars`. Output is ONE line: `<itemId> | <question>` when the message asks about a listed
-video and the question needs a detail the summary does not cover, or `none` when no second look is needed.
+Each `<videos>` line carries four pipe-separated columns: the item id, the video name, a status (`watched` or
+`not loaded`), and the first 200 characters of the summary (empty for not-loaded videos). Videos are listed
+newest-message first; names and summaries are whitespace-collapsed to one line. The trigger text is cut at
+`context.maxMessageChars`. Output is ONE line:
 
-On a hit, the video model watches the clip again with `rewatch-answer.md` (`{{question}}` and `{{maxChars}}` =
-`rewatch.answerChars`, default 1200) and the answer is appended to the transcript as `transcript.videoAnswered`
+- `<itemId> | <question>` — the message asks about a watched video and needs a detail the account does not cover.
+- `<itemId> | retry` — the message is about a not-loaded video and asks to try again or asks about its content.
+- `none` — no second look or retry needed.
+
+On a question hit, the video model watches the clip again with `rewatch-answer.md` (`{{question}}` and `{{maxChars}}`
+= `rewatch.answerChars`, default 1200) and the answer is appended to the transcript as `transcript.videoAnswered`
 (`{question}`, `{text}`) after the watched tag. The `<senses>` block includes `senses.videoRewatch` when the feature
 is on.
 
-Rails: at most one re-watch per turn; the classifier and the second look each count against `llm.maxRequestsPerDay`;
-the second look also counts against `media.video.maxPerDay`; `media.video.rewatch.maxPerDay` (default 20) caps the
-re-watches separately. Answers are cached for one hour per question (see the video cache section above). Switch
-`features.videoRewatch` (missing = on, needs `videoDescriptions` on).
+On a retry hit, the video model watches the clip with `force` (ignoring the error cache), using the same
+`describeVideo` path as a first watch. If the retry succeeds, the video's state changes from error to watched and the
+transcript shows the summary as first-hand. A retry counts as a new video attempt against `media.video.maxPerTurn` and
+`media.video.maxPerDay`.
+
+Rails: at most one re-watch or retry per turn; the classifier and the second look each count against
+`llm.maxRequestsPerDay`; the second look also counts against `media.video.maxPerDay`;
+`media.video.rewatch.maxPerDay` (default 20) caps the re-watches separately. Answers are cached for one hour per
+question (see the video cache section above). Switch `features.videoRewatch` (missing = on, needs
+`videoDescriptions` on).

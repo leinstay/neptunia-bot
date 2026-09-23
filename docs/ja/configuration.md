@@ -127,6 +127,9 @@
 | `canaryUrl` | `"https://www.youtube.com/watch?v=jNQXAC9IVRw"` | 起動時と `/nep ping video` でプローブされる固定の YouTube 動画。このホストでどの再生時間ソースが動作するかを確認する |
 | `ytdlpPath` | `"yt-dlp"` | `yt-dlp` バイナリのパス。サイト動画リンクと再生時間のプローブに必要 |
 | `ffmpegPath` | `"ffmpeg"` | `ffmpeg` のパス。長い、またはサイズの大きい添付ファイルのトリムとダウンスケールに必要 |
+| `errorRetryMinutes` | `60` | エラーキャッシュされた動画が自動リトライされるまでの分数。再視聴分類器からの強制リトライはこの値を無視する |
+| `urlProcessing` | `"agentic"` | 公開 URL 動画パーツに送信される OpenRouter の処理モード。これがないと一部のプロバイダーは 1 フレームしか見ない。`null` でフィールドを省略 |
+| `reasoning` | `{ "effort": "low" }` | すべての動画リクエストに使用する OpenRouter `reasoning` 設定。推論が出力バジェットを消費するのを防ぐ。非オブジェクトでフィールドを省略 |
 | `prefill` | `true` | 動画が届いた時点で視聴し、次のターンでキャッシュ済みの状態にする |
 
 `yt-dlp` と `ffmpeg` はどちらもオプションのシステムバイナリです。これらがなくても上限内の添付ファイルはそのまま動作します（そのまま送信されます）。長い添付ファイルとすべてのサイトリンクは静止フレームまたはプレビュー画像にフォールバックし、ペルソナには理由が伝えられます。すべての動画リクエストは `llm.maxRequestsPerDay` と動画トークン上限（`maxRequestTokens`）にカウントされます。
@@ -143,9 +146,10 @@ YouTube リンクの再生時間は次の順序で取得されます: まず yt-
 | `maxPerDay` | `20` | 1 日あたりの再視聴上限（`media.video.maxPerDay` とは別） |
 | `maxOutputTokens` | `600` | 再視聴回答の最大出力トークン数 |
 | `answerChars` | `1200` | 回答の最大文字数。`rewatch-answer.md` の `{{maxChars}}` に使用 |
-| `recentMessages` | `15` | 視聴済み動画をスキャンする直近のメッセージ数 |
+| `recentMessages` | `60` | 視聴済みまたはエラー状態の動画をスキャンする直近のメッセージ数 |
+| `maxCandidates` | `6` | 直近ウィンドウから分類器に渡す最大動画数（新しい順） |
 
-ターンあたり最大 1 回の再視聴。回答は質問ごとに 1 時間キャッシュされます。分類器と再視聴はそれぞれ `llm.maxRequestsPerDay` にカウントされます。再視聴は `media.video.maxPerDay` にもカウントされます。
+ターンあたり最大 1 回の再視聴またはリトライ。回答は質問ごとに 1 時間キャッシュされます。分類器と再視聴はそれぞれ `llm.maxRequestsPerDay` にカウントされます。再視聴は `media.video.maxPerDay` にもカウントされます。
 
 ## `mention`
 

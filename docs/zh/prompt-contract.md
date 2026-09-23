@@ -31,7 +31,7 @@
 | `server.md` | 是 | 预热：从频道笔记和成员摘要生成服务器级笔记 | `{{name}}` `{{fieldChars}}` `{{maxInjokes}}` `{{loreTextChars}}` |
 | `describe.md` | 是 | 角色外提示，用于媒体描述器（`features.mediaDescriptions`）：输入一张图片，输出一行描述：图中内容、可辨认的文字，使用聊天所用的语言。无评论，无 markdown | 无 |
 | `describe-video.md` | 是 | 角色外提示，用于视频描述器（`features.videoDescriptions`）：输入一个视频片段（含声音），输出可配置长度的完整有序描述：谁出现了、说了什么（关键短语引用）、屏幕上的文字、视觉上发生了什么、音乐/音效。不接收角色卡 | `{{maxChars}}` |
-| `rewatch.md` | 是 | 分类器：角色是否需要重新观看视频（`features.videoRewatch`）。接收已观看视频列表和新消息。输出为一行：`<itemId> \| <question>` 或 `none` | `{{name}}` |
+| `rewatch.md` | 是 | 分类器：角色是否需要重看视频或重试未加载的视频（`features.videoRewatch`）。接收带状态的近期视频列表和新消息。输出为一行：`<itemId> \| <question>`、`<itemId> \| retry` 或 `none` | `{{name}}` |
 | `rewatch-answer.md` | 是 | 角色外提示，用于重看回答：视频模型再次观看片段并回答一个问题。语言和限制规则与 `describe-video.md` 相同。不接收角色卡 | `{{question}}` `{{maxChars}}` |
 | `address.md` | 是 | 分类器：未标记的消息是否在对角色说话 | `{{name}}` |
 | `labels.json` | 是 | 代码插入提示中的所有字符串。键在下方固定，值由编写者决定 | 见下文 |
@@ -83,7 +83,7 @@
 
 - 已观看：`{ text, ts, watched: true }` — 永久，摘要文本。
 - 限制未命中（时长或大小）：`{ miss: true, ts, reason: "length"|"size" }` — 永久，文件不会改变。
-- 错误未命中：`{ miss: true, ts, reason: "error" }` — 一小时后重试。
+- 错误未命中：`{ miss: true, ts, reason: "error" }` — `media.video.errorRetryMinutes`（默认 60）分钟后重试，或在重看分类器发出强制重试时立即重试。
 - 每日上限：不缓存；仅在该回合返回 `{ state: "limit", reason: "daily" }`。
 
 重看回答缓存在键 `video:<itemId>:q:<hash>`（问题小写化并合并空白后 SHA-1 的前 16 位十六进制数字）下：`{ text, ts, answer: true }`。一小时后过期；代码在读取时删除过期条目。
@@ -377,13 +377,15 @@ warmup.contextMark                       prefixed to context lines in the profil
 
 ## 重看分类器（`rewatch.md`）：是否需要再看一遍视频？
 
-当角色被呼叫（回复回合）且频道最近 `media.video.rewatch.recentMessages`（默认 15）条消息中有已观看的视频时，分类器
-判断该消息是否在询问其中某个视频。代码将 `rewatch.md` 作为系统提示发送到 `rewatch` 模型角色
-（`media.video.rewatch.model`，默认 `mention.followUpModel`，默认媒体模型），用户消息包含两个块：
+当角色被呼叫（回复回合）且频道最近 `media.video.rewatch.recentMessages`（默认 60）条消息中有视频时，分类器判断
+该消息是否在询问其中某个视频，或请求重试一个未加载的视频。候选包括已观看视频和错误状态视频（后者仅在该回合仍有
+`media.video.maxPerTurn` 尝试次数时）。分类器最多收到 `media.video.rewatch.maxCandidates`（默认 6）个视频，按最新
+消息优先排列。代码将 `rewatch.md` 作为系统提示发送到 `rewatch` 模型角色（`media.video.rewatch.model`，默认
+`mention.followUpModel`，默认媒体模型），用户消息包含两个块：
 
 ```
 <videos>
-<itemId> | <name> | <摘要的前 200 个字符>
+<itemId> | <name> | <status> | <描述的开头>
 ...
 </videos>
 <candidate>
@@ -391,13 +393,22 @@ warmup.contextMark                       prefixed to context lines in the profil
 </candidate>
 ```
 
-视频按最新消息优先列出；名称和摘要的空白合并为一行。触发文本在 `context.maxMessageChars` 处截断。输出为一行：
-当消息询问列出的某个视频且问题需要摘要未涵盖的细节时为 `<itemId> | <question>`，不需要重看时为 `none`。
+每行 `<videos>` 包含四个 `|` 分隔的列：条目 ID、视频名称、状态（`watched` 或 `not loaded`）和摘要的前 200 个字符
+（未加载的视频为空）。视频按最新消息优先列出；名称和摘要的空白合并为一行。触发文本在 `context.maxMessageChars` 处
+截断。输出为一行：
 
-命中时，视频模型使用 `rewatch-answer.md`（`{{question}}` 和 `{{maxChars}}` = `rewatch.answerChars`，默认 1200）
-再次观看片段，回答以 `transcript.videoAnswered`（`{question}`、`{text}`）的形式追加在已观看标签之后。当功能开启时，
-`<senses>` 块包含 `senses.videoRewatch`。
+- `<itemId> | <question>` — 消息询问已观看视频，需要描述未涵盖的细节。
+- `<itemId> | retry` — 消息关于未加载的视频，请求再试或询问其内容。
+- `none` — 不需要重看或重试。
 
-限制：每回合最多一次重看；分类器和重看各自计入 `llm.maxRequestsPerDay`；重看还计入 `media.video.maxPerDay`；
-`media.video.rewatch.maxPerDay`（默认 20）单独限制重看次数。回答按问题缓存一小时（参见上方视频缓存部分）。开关
-`features.videoRewatch`（缺失 = 开启，需要 `videoDescriptions`）。
+问题命中时，视频模型使用 `rewatch-answer.md`（`{{question}}` 和 `{{maxChars}}` = `rewatch.answerChars`，默认
+1200）再次观看片段，回答以 `transcript.videoAnswered`（`{question}`、`{text}`）的形式追加在已观看标签之后。当功能
+开启时，`<senses>` 块包含 `senses.videoRewatch`。
+
+重试命中时，视频模型使用 `force`（忽略错误缓存）观看片段，使用与首次观看相同的 `describeVideo` 路径。如果重试成功，
+视频状态从错误变为已观看，对话记录中显示的摘要为第一手内容。重试计为 `media.video.maxPerTurn` 和
+`media.video.maxPerDay` 的新视频尝试。
+
+限制：每回合最多一次重看或重试；分类器和重看各自计入 `llm.maxRequestsPerDay`；重看还计入
+`media.video.maxPerDay`；`media.video.rewatch.maxPerDay`（默认 20）单独限制重看次数。回答按问题缓存一小时（参见
+上方视频缓存部分）。开关 `features.videoRewatch`（缺失 = 开启，需要 `videoDescriptions`）。

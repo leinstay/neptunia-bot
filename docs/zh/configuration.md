@@ -127,6 +127,9 @@
 | `canaryUrl` | `"https://www.youtube.com/watch?v=jNQXAC9IVRw"` | 启动时和 `/nep ping video` 探测的固定 YouTube 视频，用于确认此主机上哪个时长来源可用 |
 | `ytdlpPath` | `"yt-dlp"` | `yt-dlp` 二进制文件的路径；站点视频链接和探测时长需要此工具 |
 | `ffmpegPath` | `"ffmpeg"` | `ffmpeg` 的路径；裁剪和缩小过长或过大的附件需要此工具 |
+| `errorRetryMinutes` | `60` | 错误缓存视频自动重试前的等待分钟数；重看分类器的强制重试忽略此值 |
+| `urlProcessing` | `"agentic"` | 公开 URL 视频部分发送的 OpenRouter 处理模式；缺少时某些提供商只能看到单帧。`null` 省略该字段 |
+| `reasoning` | `{ "effort": "low" }` | 每个视频请求的 OpenRouter `reasoning` 设置；防止推理占用输出预算。非对象值省略该字段 |
 | `prefill` | `true` | 视频到达时立即观看，以便下次回合时已有缓存 |
 
 `yt-dlp` 和 `ffmpeg` 均为可选的系统二进制文件。没有它们时，在限制内的附件仍然可用（直接发送）。更长的附件和所有站点链接会回退到静帧或预览图，角色会被告知原因。每个视频请求都计入 `llm.maxRequestsPerDay` 和视频 token 上限（`maxRequestTokens`）。
@@ -143,9 +146,10 @@ YouTube 链接的时长通过以下链式探测获取：首先尝试 yt-dlp，�
 | `maxPerDay` | `20` | 每日重看上限（独立于 `media.video.maxPerDay`） |
 | `maxOutputTokens` | `600` | 重看回答的最大输出 token 数 |
 | `answerChars` | `1200` | 回答的最大字符数；填充 `rewatch-answer.md` 中的 `{{maxChars}}` |
-| `recentMessages` | `15` | 扫描已观看视频的近期消息数 |
+| `recentMessages` | `60` | 扫描已观看或错误状态视频的近期消息数 |
+| `maxCandidates` | `6` | 从近期窗口中提供给分类器的最大视频数，按最新排序 |
 
-每回合最多一次重看。回答按问题缓存一小时。分类器和重看各自计入 `llm.maxRequestsPerDay`；重看还计入 `media.video.maxPerDay`。
+每回合最多一次重看或重试。回答按问题缓存一小时。分类器和重看各自计入 `llm.maxRequestsPerDay`；重看还计入 `media.video.maxPerDay`。
 
 ## `mention`
 

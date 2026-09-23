@@ -31,7 +31,7 @@
 | `server.md` | はい | ウォームアップ: チャンネルノートとメンバーの要約からサーバーレベルのノートを作成 | `{{name}}` `{{fieldChars}}` `{{maxInjokes}}` `{{loreTextChars}}` |
 | `describe.md` | はい | メディア説明モデルのアウトオブキャラクタープロンプト（`features.mediaDescriptions`）: 画像 1 枚を入力、チャットの言語でプレーンテキスト 1 行を出力: 写っているもの、判読可能なテキスト。意見なし、マークダウンなし | なし |
 | `describe-video.md` | はい | 動画説明モデルのアウトオブキャラクタープロンプト（`features.videoDescriptions`）: 動画クリップ 1 本（音声付き）を入力、設定可能な長さの完全な説明を出力: 誰が登場するか、何が言われるか（重要なフレーズを引用）、画面上のテキスト、視覚的に何が起きるか、音楽/効果音。キャラクターカードなし | `{{maxChars}}` |
-| `rewatch.md` | はい | 分類器: ペルソナが動画を再視聴する必要があるか（`features.videoRewatch`）。視聴済み動画のリストと新しいメッセージを受け取る。出力は 1 行: `<itemId> \| <question>` または `none` | `{{name}}` |
+| `rewatch.md` | はい | 分類器: ペルソナが動画を再視聴する必要があるか、または読み込めなかった動画をリトライする必要があるか（`features.videoRewatch`）。ステータス付きの最近の動画リストと新しいメッセージを受け取る。出力は 1 行: `<itemId> \| <question>`、`<itemId> \| retry` または `none` | `{{name}}` |
 | `rewatch-answer.md` | はい | 再視聴のアウトオブキャラクタープロンプト: 動画モデルがクリップを再度視聴し、1 つの質問に回答する。言語と制約のルールは `describe-video.md` と同じ。キャラクターカードなし | `{{question}}` `{{maxChars}}` |
 | `address.md` | はい | 分類器: タグなしメッセージがペルソナ宛かどうか | `{{name}}` |
 | `labels.json` | はい | コードがプロンプトに挿入するすべての文字列。キーは以下で固定、値はライターが記述する | 以下参照 |
@@ -83,7 +83,7 @@
 
 - 視聴済み: `{ text, ts, watched: true }` — 永続、サマリーテキスト。
 - リミットミス（length または size）: `{ miss: true, ts, reason: "length"|"size" }` — 永続、ファイルは変化しない。
-- エラーミス: `{ miss: true, ts, reason: "error" }` — 1 時間後にリトライ。
+- エラーミス: `{ miss: true, ts, reason: "error" }` — `media.video.errorRetryMinutes`（デフォルト 60）分後にリトライ、または再視聴分類器からの強制リトライで即時リトライ。
 - デイリーリミット: キャッシュされない。そのターンのみ `{ state: "limit", reason: "daily" }` として返される。
 
 再視聴の回答はキー `video:<itemId>:q:<hash>`（小文字化・空白正規化した質問の SHA-1 の先頭 16 桁の十六進数）で保存されます: `{ text, ts, answer: true }`。1 時間で期限切れ。コードは読み取り時に期限切れのエントリを削除します。
@@ -277,14 +277,17 @@ warmup.contextMark                       prefixed to context lines in the profil
 
 ## 再視聴分類器（`rewatch.md`）: 動画をもう一度見る必要があるか?
 
-ペルソナに話しかけられた（リプライターン）とき、チャンネルの直近 `media.video.rewatch.recentMessages`（デフォルト 15）
-件のメッセージに視聴済み動画がある場合、分類器がそのメッセージがそれらの動画について質問しているかを判定します。コードは
-`rewatch.md` をシステムプロンプトとして `rewatch` モデルロール（`media.video.rewatch.model`、デフォルト
-`mention.followUpModel`、デフォルトはメディアモデル）に送信し、ユーザーメッセージに 2 つのブロックを含めます:
+ペルソナに話しかけられた（リプライターン）とき、チャンネルの直近 `media.video.rewatch.recentMessages`（デフォルト
+60）件のメッセージに動画がある場合、分類器がそのメッセージがそれらの動画について質問しているか、または読み込めなかった
+動画のリトライを求めているかを判定します。候補は視聴済み動画とエラー状態の動画（後者はそのターンに
+`media.video.maxPerTurn` の試行が残っている場合のみ）です。分類器には最大
+`media.video.rewatch.maxCandidates`（デフォルト 6）件の動画が新しい順に渡されます。コードは `rewatch.md` を
+システムプロンプトとして `rewatch` モデルロール（`media.video.rewatch.model`、デフォルト `mention.followUpModel`、
+デフォルトはメディアモデル）に送信し、ユーザーメッセージに 2 つのブロックを含めます:
 
 ```
 <videos>
-<itemId> | <name> | <サマリーの先頭 200 文字>
+<itemId> | <name> | <status> | <説明の冒頭>
 ...
 </videos>
 <candidate>
@@ -292,15 +295,25 @@ warmup.contextMark                       prefixed to context lines in the profil
 </candidate>
 ```
 
-動画は新しいメッセージ順にリストされます。名前とサマリーは空白が正規化されて 1 行に。トリガーテキストは
-`context.maxMessageChars` で切り詰め。出力は 1 行: メッセージがリストされた動画について質問しており、サマリーでカバー
-されていない詳細を必要とする場合は `<itemId> | <question>`、二度見が不要な場合は `none`。
+各 `<videos>` 行には `|` 区切りの 4 列: アイテム ID、動画名、ステータス（`watched` または `not loaded`）、サマリーの
+先頭 200 文字（読み込めなかった動画は空）。動画は新しいメッセージ順にリストされます。名前とサマリーは空白が正規化されて
+1 行に。トリガーテキストは `context.maxMessageChars` で切り詰め。出力は 1 行:
 
-ヒットした場合、動画モデルが `rewatch-answer.md`（`{{question}}` と `{{maxChars}}` = `rewatch.answerChars`、
-デフォルト 1200）でクリップを再度視聴し、回答は `transcript.videoAnswered`（`{question}`、`{text}`）として視聴済み
-タグの後にトランスクリプトに追加されます。`<senses>` ブロックには機能が有効な場合に `senses.videoRewatch` が含まれます。
+- `<itemId> | <question>` — メッセージが視聴済み動画について質問しており、説明でカバーされていない詳細を必要とする。
+- `<itemId> | retry` — メッセージが読み込めなかった動画について、再試行を求めるかその内容を質問している。
+- `none` — 再視聴もリトライも不要。
 
-制限: ターンあたり最大 1 回の再視聴。分類器と再視聴はそれぞれ `llm.maxRequestsPerDay` にカウントされます。再視聴は
-`media.video.maxPerDay` にもカウントされます。`media.video.rewatch.maxPerDay`（デフォルト 20）は再視聴を個別に制限
-します。回答は質問ごとに 1 時間キャッシュされます（上記の動画キャッシュセクションを参照）。スイッチ
+質問でヒットした場合、動画モデルが `rewatch-answer.md`（`{{question}}` と `{{maxChars}}` =
+`rewatch.answerChars`、デフォルト 1200）でクリップを再度視聴し、回答は `transcript.videoAnswered`（`{question}`、
+`{text}`）として視聴済みタグの後にトランスクリプトに追加されます。`<senses>` ブロックには機能が有効な場合に
+`senses.videoRewatch` が含まれます。
+
+リトライでヒットした場合、動画モデルが `force`（エラーキャッシュを無視）でクリップを視聴します。初回視聴と同じ
+`describeVideo` パスを使用します。リトライが成功すると、動画のステータスがエラーから視聴済みに変わり、トランスクリプト
+にはサマリーがファーストハンドとして表示されます。リトライは `media.video.maxPerTurn` と `media.video.maxPerDay` に
+対する新しい動画試行としてカウントされます。
+
+制限: ターンあたり最大 1 回の再視聴またはリトライ。分類器と再視聴はそれぞれ `llm.maxRequestsPerDay` にカウントされ
+ます。再視聴は `media.video.maxPerDay` にもカウントされます。`media.video.rewatch.maxPerDay`（デフォルト 20）は
+再視聴を個別に制限します。回答は質問ごとに 1 時間キャッシュされます（上記の動画キャッシュセクションを参照）。スイッチ
 `features.videoRewatch`（未設定 = オン、`videoDescriptions` が必要）。
