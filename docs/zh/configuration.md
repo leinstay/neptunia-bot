@@ -138,11 +138,10 @@ YouTube 链接的时长通过以下链式探测获取：首先尝试 yt-dlp，�
 
 ### `media.video.rewatch`
 
-重看分类器（`features.videoRewatch`）的设置。当角色被呼叫且近期对话记录中有已观看的视频时，一个低成本分类器判断消息是否在询问其中某个视频；如果是，视频模型再次观看片段，回答追加到对话记录中。分类器模型默认通过 `mention.followUpModel` 回退到媒体模型。重看始终使用 `media.video.model`。
+重看分类器（`features.videoRewatch`）的设置。当角色被呼叫且近期对话记录中有已观看的视频时，一个低成本分类器判断消息是否在询问其中某个视频；如果是，视频模型再次观看片段，回答追加到对话记录中。分类器使用后续模型（`mention.followUpModel`，默认媒体模型）。重看始终使用 `media.video.model`。
 
 | 键 | 默认值 | 说明 |
 |---|---|---|
-| `model` | `null` | 分类器模型（`null` = `mention.followUpModel`，其默认值为 `media.model`） |
 | `maxPerDay` | `20` | 每日重看上限（独立于 `media.video.maxPerDay`） |
 | `maxOutputTokens` | `600` | 重看回答的最大输出 token 数 |
 | `answerChars` | `1200` | 回答的最大字符数；填充 `rewatch-answer.md` 中的 `{{maxChars}}` |
@@ -307,7 +306,7 @@ YouTube 链接的时长通过以下链式探测获取：首先尝试 yt-dlp，�
 
 能可靠回答 "yes" 或 "no" 的最便宜的文本模型。`null`（默认）使用媒体模型。
 
-重看分类器（`media.video.rewatch.model`）是同类工作的可选覆盖：判断消息是否在询问已观看的视频。`null`（默认）使用后续模型，然后是媒体模型。它不是独立的角色；重看始终使用视频模型。
+重看分类器共享此模型：同样是低成本的 yes/no 判断（消息是否在询问已观看的视频？）。重看始终使用视频模型。
 
 ### `media.video.model` — 带声音的视频
 

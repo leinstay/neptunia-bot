@@ -1275,7 +1275,7 @@ test('createTurnRunner: rewatch -- the classifier gets the watched videos and th
     `<videos>\n${videosPart}`,
     '<videos>\n1 | clip.mp4 | watched | ένα αυτοκίνητο περνά\n</videos>\n<candidate>\nZoë: τι χρώμα είναι το αυτοκίνητο;\n</candidate>',
   );
-  assert.equal(options.model, 'x/haiku', 'rewatch.model and mention.followUpModel unset -> media.model');
+  assert.equal(options.model, 'x/haiku', 'mention.followUpModel unset -> media.model');
   assert.equal(options.maxOutputTokens, 120);
   assert.equal(options.timeoutMs, 300_000);
   assert.equal(options.countAgainstDailyCap, true);
@@ -1290,9 +1290,9 @@ test('createTurnRunner: rewatch -- the classifier gets the watched videos and th
   assert.ok(userMessage.includes(`${watched} ${answered}`), 'the answer follows the watched tag');
 });
 
-test('createTurnRunner: rewatch -- the classifier model is rewatch.model, else mention.followUpModel, else media.model', async () => {
-  const withRewatch = await runRewatch({ hot: rewatchHot({}, { rewatch: { model: 'x/pick' } }, { mention: { followUpModel: 'x/follow' } }) });
-  assert.equal(withRewatch.llm.classifierCalls[0].options.model, 'x/pick');
+test('createTurnRunner: rewatch -- the classifier model is mention.followUpModel, else media.model; a stale rewatch.model is ignored', async () => {
+  const withStale = await runRewatch({ hot: rewatchHot({}, { rewatch: { model: 'x/pick' } }, { mention: { followUpModel: 'x/follow' } }) });
+  assert.equal(withStale.llm.classifierCalls[0].options.model, 'x/follow');
   const withFollowUp = await runRewatch({ hot: rewatchHot({}, {}, { mention: { followUpModel: 'x/follow' } }) });
   assert.equal(withFollowUp.llm.classifierCalls[0].options.model, 'x/follow');
 });

@@ -138,11 +138,10 @@ For YouTube links, the duration is learned through a chain: yt-dlp first, then t
 
 ### `media.video.rewatch`
 
-Settings for the re-watch classifier (`features.videoRewatch`). When the persona is addressed and a watched video sits in the recent transcript, a cheap classifier decides whether the message asks about one of those videos; if so, the video model watches the clip again and the answer is appended to the transcript. The classifier model defaults through `mention.followUpModel` to the media model. The second look always uses `media.video.model`.
+Settings for the re-watch classifier (`features.videoRewatch`). When the persona is addressed and a watched video sits in the recent transcript, a cheap classifier decides whether the message asks about one of those videos; if so, the video model watches the clip again and the answer is appended to the transcript. The classifier uses the follow-up model (`mention.followUpModel`, default the media model). The second look always uses `media.video.model`.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `model` | `null` | Classifier model (`null` = `mention.followUpModel`, which defaults to `media.model`) |
 | `maxPerDay` | `20` | Daily re-watch cap (separate from `media.video.maxPerDay`) |
 | `maxOutputTokens` | `600` | Max output tokens for the re-watch answer |
 | `answerChars` | `1200` | Max characters for the answer; fills `{{maxChars}}` in `rewatch-answer.md` |
@@ -307,7 +306,7 @@ Default: `anthropic/claude-haiku-4.5`. Cheapest alternative: `google/gemini-2.5-
 
 The cheapest text model that can answer "yes" or "no" reliably. `null` (default) uses the media model.
 
-The re-watch classifier (`media.video.rewatch.model`) is an optional override for the same kind of job: decide whether a message asks about a watched video. `null` (default) uses the follow-up model, then the media model. It is not a separate role; the second look always uses the video model.
+The re-watch classifier shares this model: it is the same kind of cheap yes/no job (does a message ask about a watched video?). The second look always uses the video model.
 
 ### `media.video.model` — video with sound
 

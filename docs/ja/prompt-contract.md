@@ -282,8 +282,8 @@ warmup.contextMark                       prefixed to context lines in the profil
 動画のリトライを求めているかを判定します。候補は視聴済み動画とエラー状態の動画（リクエストされたリトライはターンの `media.video.maxPerTurn` 試行とは独立した
 専用スロットを使用します）です。分類器には最大
 `media.video.rewatch.maxCandidates`（デフォルト 6）件の動画が新しい順に渡されます。コードは `rewatch.md` を
-システムプロンプトとして `rewatch` モデルロール（`media.video.rewatch.model`、デフォルト `mention.followUpModel`、
-デフォルトはメディアモデル）に送信し、ユーザーメッセージに 3 つのブロックを含めます: チャンネルの直近数件のメッセージを含む短い `<transcript>`（ペルソナ自身の行は `labels.self` でマーク、分類器が候補の返信先を把握できるようにする）、続いて動画リストと候補:
+システムプロンプトとしてフォローアップモデルロール（`mention.followUpModel`、デフォルトはメディアモデル）に送信し、
+ユーザーメッセージに 3 つのブロックを含めます: チャンネルの直近数件のメッセージを含む短い `<transcript>`（ペルソナ自身の行は `labels.self` でマーク、分類器が候補の返信先を把握できるようにする）、続いて動画リストと候補:
 
 ```
 <transcript>

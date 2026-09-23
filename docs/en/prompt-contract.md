@@ -404,8 +404,8 @@ When the persona is addressed (a reply turn) and a video sits in the last `media
 (default 60) messages of the channel, a classifier decides whether the message asks about one of those videos or asks
 to retry one that did not load. Candidates are watched videos and error-state videos (a requested retry uses its own slot, independent of the turn's
 `media.video.maxPerTurn` attempts). At most `media.video.rewatch.maxCandidates` (default 6) are
-offered to the classifier, newest-message first. Code sends `rewatch.md` as the system prompt on the `rewatch` model
-role (`media.video.rewatch.model`, default `mention.followUpModel`, default the media model) with a user message
+offered to the classifier, newest-message first. Code sends `rewatch.md` as the system prompt on the follow-up model
+role (`mention.followUpModel`, default the media model) with a user message
 containing three blocks: a short `<transcript>` of the last few channel messages with the persona's own lines marked
 with `labels.self` (so the classifier sees what the candidate replies to), then the video list and the candidate:
 
