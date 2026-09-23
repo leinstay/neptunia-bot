@@ -22,6 +22,7 @@
 | `mediaDescriptions` | `true` | 为图片、GIF、视频帧和链接缩略图生成单行描述 |
 | `videoDescriptions` | `false` | 通过支持视频的模型观看短视频片段；需同时开启 `mediaDescriptions`。在 `config.local.json` 中开启；还需要支持视频的模型，以及站点链接需要 `yt-dlp`/`ffmpeg` |
 | `videoRewatch` | `true` | 被呼叫时重看视频以回答相关问题；需要 `videoDescriptions` |
+| `webLookup` | `false` | 阅读聊天中发布的链接并在被问到事实性问题时搜索网络。与其他功能不同，缺失的键视为关闭。搜索需要 `.env` 中的 `BRAVE_SEARCH_API_KEY`；没有密钥时只有链接阅读可用。参见[媒体：链接与搜索](media.md#链接阅读页面) |
 | `followUp` | `true` | 角色回复后对未标记消息进行分类以延续对话 |
 | `typingSimulation` | `true` | 模拟输入速度 |
 | `adminCommands` | `true` | 所有者斜杠命令；设为 `false` 时注销命令 |
@@ -58,6 +59,18 @@
 
 `llm.provider` 在每个请求上设置 OpenRouter 的 provider 路由字段，例如 `{ "ignore": ["some-provider"] }` 或 `{ "order": ["anthropic"], "allow_fallbacks": true }`。如果 OpenRouter 账户本身限制了允许的 provider，忽略仅剩的那个会导致每个请求失败并报错 "No endpoints found"。更改 provider 设置后，运行 `/nep ping` 验证每个模型角色是否可达。
 
+## `classifier`
+
+三个辅助模型角色，统一归入一个键下。每个独立设置，因此辅助工具可以使用低成本模型，而语音使用高端模型。
+
+| 键 | 默认值 | 说明 |
+|---|---|---|
+| `text` | `"anthropic/claude-sonnet-4.6"` | 文本分类器：地址分类器（`features.followUp`）、重看分类器（`features.videoRewatch`）和搜索分类器（`features.webLookup`）。同时负责浓缩链接阅读和搜索结果 |
+| `media` | `"anthropic/claude-haiku-4.5"` | 图片描述器（`features.mediaDescriptions`）：为图片、GIF 帧、视频封面、贴纸、自定义表情和链接缩略图生成单行描述 |
+| `video` | `"google/gemini-3.8-flash"` | 视频描述器（`features.videoDescriptions`）：观看短片段，基于问题重看，按请求重试。必须同时接受视频和音频输入 |
+
+**从旧键迁移。**已废弃的键 `llm.classifierModel`、`mention.followUpModel`、`media.model` 和 `media.video.model` 不再读取。如果 `config.local.json` 中存在这些键，机器人会在启动时记录一条警告（`config: deprecated model key ignored`），指出该键及其替代键。请将值分别移至 `classifier.text`、`classifier.media` 或 `classifier.video`。
+
 ## `context`
 
 | 键 | 默认值 | 说明 |
@@ -90,11 +103,10 @@
 
 ## `media`
 
-媒体描述器（`features.mediaDescriptions`）的设置。
+媒体描述器（`features.mediaDescriptions`）的设置。描述器模型为 `classifier.media`。
 
 | 键 | 默认值 | 说明 |
 |---|---|---|
-| `model` | `"anthropic/claude-haiku-4.5"` | 描述器模型 |
 | `maxOutputTokens` | `120` | 每次描述的最大输出 token 数 |
 | `imageSize` | `512` | 缩放目标像素 |
 | `maxPerTurn` | `6` | 每回合生成的最大描述数 |
@@ -104,11 +116,10 @@
 
 ### `media.video`
 
-视频描述器（`features.videoDescriptions`）的设置。视频视觉需要同时开启 `features.mediaDescriptions` 和 `features.videoDescriptions`。一个独立的支持视频的模型观看短视频片段：Discord 视频附件和 `media.video.sites` 中站点的链接。结果与图片描述一起缓存在媒体缓存中；重复发布不产生额外开销。
+视频描述器（`features.videoDescriptions`）的设置。视频视觉需要同时开启 `features.mediaDescriptions` 和 `features.videoDescriptions`。视频模型为 `classifier.video`。一个独立的支持视频的模型观看短视频片段：Discord 视频附件和 `media.video.sites` 中站点的链接。结果与图片描述一起缓存在媒体缓存中；重复发布不产生额外开销。
 
 | 键 | 默认值 | 说明 |
 |---|---|---|
-| `model` | `"google/gemini-3.8-flash"` | 支持视频的模型；必须同时接受视频和音频输入 |
 | `provider` | `{ "order": ["google-ai-studio"], "allow_fallbacks": false }` | 直接 URL 路径（在长度限制内的 YouTube）的 OpenRouter provider 路由；`null` 使用 `llm.provider` |
 | `maxOutputTokens` | `800` | 每个视频摘要的最大输出 token 数 |
 | `summaryChars` | `1500` | 视频描述的最大字符数；填充 `describe-video.md` 中的 `{{maxChars}}` |
@@ -138,7 +149,7 @@ YouTube 链接的时长通过以下链式探测获取：首先尝试 yt-dlp，�
 
 ### `media.video.rewatch`
 
-重看分类器（`features.videoRewatch`）的设置。当角色被呼叫且近期对话记录中有已观看的视频时，一个低成本分类器判断消息是否在询问其中某个视频；如果是，视频模型再次观看片段，回答追加到对话记录中。分类器使用后续模型（`mention.followUpModel`，默认 `anthropic/claude-sonnet-4.6`）。重看始终使用 `media.video.model`。
+重看分类器（`features.videoRewatch`）的设置。当角色被呼叫且近期对话记录中有已观看的视频时，一个低成本分类器判断消息是否在询问其中某个视频；如果是，视频模型再次观看片段，回答追加到对话记录中。分类器使用 `classifier.text`。重看始终使用 `classifier.video`。
 
 | 键 | 默认值 | 说明 |
 |---|---|---|
@@ -171,7 +182,6 @@ YouTube 链接的时长通过以下链式探测获取：首先尝试 yt-dlp，�
 | `switchDelayMs` | `[2000, 9000]` | 在下一个频道回复前的暂停时间（毫秒） |
 | `followUpMinutes` | `15` | 角色最后一条回复后的后续窗口（分钟） |
 | `followUpContext` | `15` | 发送给分类器的对话记录行数 |
-| `followUpModel` | `"anthropic/claude-sonnet-4.6"` | 分类器模型；`null` 使用媒体模型 |
 | `followUpMaxOutputTokens` | `8` | 分类器的最大输出 token 数 |
 | `followUpNoStreak` | `3` | 连续 `no` 判定次数达到此值关闭窗口 |
 
@@ -263,6 +273,42 @@ YouTube 链接的时长通过以下链式探测获取：首先尝试 yt-dlp，�
 | `maxMatches` | `8` | 每请求显示的最大条目数 |
 | `textChars` | `600` | 世界书条目文本限制（字符） |
 
+## `web`
+
+网络查询（`features.webLookup`）的设置。链接阅读和搜索共享一个每日计数器（`web.maxPerDay`）。结果缓存在媒体缓存（`data/guilds/<id>/media.json`）中。所有模型调用通过 `classifier.text` 角色。
+
+| 键 | 默认值 | 说明 |
+|---|---|---|
+| `maxPerDay` | `60` | 链接阅读和搜索请求合计的共享每日上限 |
+
+### `web.links`
+
+| 键 | 默认值 | 说明 |
+|---|---|---|
+| `enabled` | `true` | 阅读聊天中发布的链接（仅 http/https，拒绝私有地址，排除视频站点链接） |
+| `prefill` | `true` | 链接到达时立即阅读，以便下次回合时已有缓存 |
+| `prefillPerUserPerDay` | `10` | 预读在到达时每个成员每天最多阅读的链接数；回合路径不受此限制 |
+| `maxPerTurn` | `2` | 每回合最大新链接阅读数（每次抓取尝试都计数） |
+| `maxBytes` | `1500000` | 页面大小上限（字节），超过则拒绝 |
+| `textChars` | `6000` | 发送给浓缩器的页面文本最大字符数 |
+| `summaryChars` | `700` | 浓缩摘要的最大字符数；填充 `read-link.md` 中的 `{{maxChars}}` |
+| `maxOutputTokens` | `300` | 浓缩器的最大输出 token 数 |
+| `fetchTimeoutMs` | `10000` | 每页下载超时（毫秒） |
+| `skipSites` | `[]` | 永不阅读的主机名（在视频站点之外，视频站点始终排除） |
+
+### `web.search`
+
+| 键 | 默认值 | 说明 |
+|---|---|---|
+| `enabled` | `true` | 分类器触发时运行搜索；需要 `.env` 中的 `BRAVE_SEARCH_API_KEY` |
+| `maxPerTurn` | `1` | 每回合最大搜索次数 |
+| `results` | `5` | 请求的 Brave Search 结果数 |
+| `summaryChars` | `900` | 浓缩答案的最大字符数；填充 `search-summary.md` 中的 `{{maxChars}}` |
+| `maxOutputTokens` | `400` | 浓缩器的最大输出 token 数 |
+| `cacheHours` | `24` | 缓存的搜索结果在重新搜索前服务的小时数 |
+| `contextMessages` | `50` | 为搜索分类器渲染为 `<transcript>` 的近期频道消息数 |
+| `timeoutMs` | `10000` | Brave Search 请求超时（毫秒） |
+
 ## `warmup`
 
 | 键 | 默认值 | 说明 |
@@ -288,29 +334,27 @@ YouTube 链接的时长通过以下链式探测获取：首先尝试 yt-dlp，�
 
 引擎使用五个模型角色。每个独立设置，因此语音可以使用高端模型，而辅助工具保持低成本。
 
-### `llm.model` — 角色的声音
+### `llm.model` — 角色的声音（`talk`）
 
 预算允许范围内最强的模型。角色扮演质量、角色一致性和自然对话均依赖于此。较小的模型会破坏角色、忽略上下文线索且语气平淡。
 
 默认：`anthropic/claude-opus-4.6`。更便宜的选择：`anthropic/claude-sonnet-4.5`。
 
-### `memory.model` — 分析器
+### `memory.model` — 分析器（`analyzer`）
 
 在长对话记录上进行推理并返回严格的 JSON。需要与语音相同级别的智能。`null`（默认）使用角色的模型。适用相同的示例。
 
-### `media.model` — 图片
+### `classifier.text` — 文本分类器（`classifier.text`）
+
+能可靠回答 "yes" 或 "no" 的最便宜的文本模型。运行地址分类器、重看分类器、搜索分类器，并浓缩链接阅读和搜索结果。默认：`anthropic/claude-sonnet-4.6`。
+
+### `classifier.media` — 图片（`classifier.media`）
 
 任何低成本的视觉模型。只需写一行描述，推理能力几乎不重要。
 
 默认：`anthropic/claude-haiku-4.5`。最便宜的替代：`google/gemini-2.5-flash-lite`。
 
-### `mention.followUpModel` — 地址分类器
-
-能可靠回答 "yes" 或 "no" 的最便宜的文本模型。默认：`anthropic/claude-sonnet-4.6`。`null` 使用媒体模型。
-
-重看分类器共享此模型：同样是低成本的 yes/no 判断（消息是否在询问已观看的视频？）。重看始终使用视频模型。
-
-### `media.video.model` — 带声音的视频
+### `classifier.video` — 带声音的视频（`classifier.video`）
 
 只有通过 OpenRouter 同时接受视频和音频输入的模型才能在此工作。接受帧但不接受音频的模型（Qwen VL、GLM、Seed、Gemma）无法听到语音，会遗漏大部分要点。
 

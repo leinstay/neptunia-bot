@@ -76,6 +76,9 @@ npm start
 | `rewatch.md` | 是 | 分类器：是否需要重看视频以回答问题 |
 | `rewatch-answer.md` | 是 | 重看提示：从片段中回答一个问题 |
 | `address.md` | 是 | 分类器：未标记的消息是否在对角色说话 |
+| `lookup.md` | 否 | 分类器：问题是否需要网络搜索 |
+| `read-link.md` | 否 | 将获取的页面浓缩为一个段落 |
+| `search-summary.md` | 否 | 将搜索结果浓缩为带来源的笔记 |
 | `profile.md` | 是 | 预热：从消息样本生成一个成员的档案 |
 | `channel.md` | 是 | 预热：从消息样本生成频道笔记 |
 | `server.md` | 是 | 预热：从频道笔记和成员摘要生成服务器级笔记 |
@@ -105,51 +108,23 @@ npm start
 
 一个 Discord 斜杠命令 `/nep`（名称来自 `bot.commandName`）。以服务器（guild）命令的形式在启动时注册到所服务的服务器。所有回复仅调用者可见（ephemeral），不论在哪个频道输入。所有子命令和访问授权请参阅 [`owner-commands.md`](owner-commands.md)。
 
-## 消息处理流程
+## 消息与记忆
 
-消息经过服务器、频道和自身消息过滤。如果角色被呼叫（@提及、回复或名字触发），忽略启发式会根据基础概率进行判定，该概率会因空提及、重复标记、垃圾消息和呼叫者的关系分数而调整。角色回复某人后，该频道内接下来 `mention.followUpMinutes` 分钟的未标记消息会被发送到 `followUp` 模型角色上的分类器（默认 `anthropic/claude-sonnet-4.6`），判断它们是否在延续对话；连续三个 `no` 判定会关闭窗口。后续窗口在重启后保留。`features.followUp` 可关闭此功能。自发回合由混沌定时器或逐消息窃听概率触发。角色不会在沉默超过 `spontaneous.maxChannelSilenceHours` 小时的频道中主动发言；但该频道中的直接提及仍会回复。
+角色会响应提及、回复和名字触发，有时会忽略它们。它会在随机间隔插入对话，在沉寂的频道中发起话题。角色回复某人后，它会通过分类器追踪该频道中的后续消息。它在整个服务器范围内同一时间只写一条回复；其他频道的提及会被挂起并依次回复。
 
-角色在整个服务器范围内同一时间只写一条回复。在角色正在回复时，同一频道的提及会被错过；这些错过的消息会出现在下次回复的对话记录中。来自其他频道的直接提及（@提及或回复其消息，非名字触发）会被挂起，每个频道保留一条，最多在 `mention.maxPending` 个频道中保留 `mention.pendingMinutes` 分钟；同一待处理频道中较新的提及会替换较旧的。当前回复完成后，角色在短暂停顿（`mention.switchDelayMs`）后切换频道，基于当前对话状态进行回复；通常的忽略概率仍然适用。繁忙期间到达的名字触发和窃听命中会被跳过。设置 `mention.oneAtATime: false` 后，每个频道独立处理。角色不会在缺少发送消息权限的频道中发言或做出反应，且在消耗 LLM 请求之前检查权限；此类频道仍会被读取和记忆。
+一个独立的记忆分析器在累积了足够消息时运行。它构建每成员档案，包含兴趣、细节、别名、回忆和态度，以及服务器级的习惯、内部梗和事件与故事的世界书。档案以增量方式更新；已存储的事实不会被重新概括。角色还会学习人们对彼此的称呼，并通过名字或别名识别成员。
 
-回合收集频道对话记录和相邻频道，然后在 token 预算内构建一个 LLM 请求。各区块按优先级填充：系统提示和任务永不裁剪；然后是呼叫者的档案、服务器习惯和自述事实、频道地图、对话记录（最新优先）、其他档案和相邻频道。模型可以看到服务器的频道地图（用途、话题、氛围、活跃度），当前频道会被标记。每个频道条目还包含代码维护的数据：消息数量、首条和末条消息、近 30 天的活跃度和最活跃的作者；预热从频道历史中填充这些数据，实时流量保持其更新。
+详见 [`docs/zh/messages-and-memory.md`](messages-and-memory.md)：流程步骤、分析器、档案、回忆、世界书以及涉及记忆的所有者命令。
 
-模型使用 `<think>`（隐藏的思考过程）、`<msg>`（1–3 条聊天消息；`reply="#87"` 回复对话记录中的某一行）、`<react>`（一个 emoji 反应）或 `<skip/>`（保持沉默）来回应。解析后，按人类速度模拟输入，输出中的 `@nick` 会转换为真实的提及。
+## 媒体
 
-记忆分析器在累积了足够的消息时作为单独的 LLM 调用运行。它接收角色卡，以角色的视角评判每个人，返回态度变化、档案更改、频道观察和服务器级笔记。成员性格和说话方式的画像取自 `memory.mainChannelIds` 中的频道；当列表为空时，所有频道均计入。档案以增量方式更新：分析器只返回变更内容，已存储的事实不会被重新概括。性格和风格是由档案提示在预热期间完整撰写的自由文本段落，当分析器标记出缺失或矛盾时会从近期消息刷新。兴趣和细节是独立的条目，在另一个场合再次出现时变为已确认；每个人保存的条目多于显示的，按频率和近期程度排名，权重随时间衰减。长时间未出现的兴趣会以过时状态展示给角色。存储的记忆通过 id 引用成员，使用时替换为当前名称，因此改名不会破坏已存储的笔记。角色还会学习聊天中人们对彼此的称呼，即使某成员不在对话中，也能通过名字或别名识别。
-
-## 回忆与世界书
-
-记忆分析器在档案之外记录两种长期笔记。
-
-回忆是角色记住的关于个人的时刻：一次冒犯、一次善意、一个承诺、一次打赌、一个共同的笑话、某人要求角色做或不做的事情。分析器将它们追加到相应人员的档案中，附带日期、简短描述、有时还有当事人的原话，以及 1 到 5 的权重。权重最高的存续最久；当档案达到 `memory.maxEpisodes` 上限时，最轻的先被淘汰，然后是最旧的。只有呼叫者的回忆会在 `<people>` 块中显示。
-
-世界书存储跨对话的服务器级知识：事件、常驻角色、长期故事、恩怨、传统。每个条目有一个标题、一组关键词和一段简短文本。代码扫描最近 `lore.scanMessages` 条消息以匹配关键词，在 `<lore>` 块中最多包含 `lore.maxMatches` 个条目；标记为 `always` 的条目每次都会出现。可以存在数百个条目而几乎不增加开销，因为只有匹配的少数才会被展示。
-
-分析器会自行添加和更新世界书条目，但不会触碰所有者通过 `/nep lore` 命令添加的条目。世界书数据存储在 `data/guilds/<id>/lore.json`。
-
-## 视觉与媒体
-
-对话记录行在括号中携带媒体标记：图片、GIF、视频、贴纸、自定义表情、语音消息、音频文件、链接、文本文件预览和转发消息。来自同一服务器其他频道的转发消息会标注源频道。角色感知到什么取决于两个功能开关。
-
-`features.vision` 将呼叫消息、被回复消息以及频道中最新的几张图片作为图像附加到 LLM 请求中，通过 Discord 的媒体代理缩小。机器人自行下载每张图片并以内联数据发送，因为 Discord 拒绝来自模型提供商的下载请求；超过 `context.vision.maxBytes` 或下载时间超过 `context.vision.fetchTimeoutMs` 的图片会被跳过。角色直接看到这些图片。设置位于 `context.vision` 下。
-
-`features.mediaDescriptions`（默认开启）运行辅助模型（`media.model`）为图片、GIF 帧、视频封面、贴纸、自定义表情和链接缩略图生成单行描述。每个附件只描述一次并缓存。描述提供给对话记录、记忆分析器和预热，预热的 token 预算支付预热描述的开销。描述器的提示是 `prompts/describe.md`。设置位于 `media` 下。
-
-贴纸和自定义表情经常重复出现，因此按 id 缓存，首次描述后几乎没有开销。启用 `features.vision` 时，呼叫消息的贴纸会作为图片附加。Discord 内置的动态贴纸是 Lottie 动画而非图片，因此只能显示名称。
-
-用户消息中的 `<senses>` 块告知角色在当前配置下能和不能感知什么。角色信任此块的内容，不会声称看到、听到或打开了超出其描述的任何东西。
-
-`features.videoDescriptions`（默认关闭；在 `config.local.json` 中开启；需同时开启 `mediaDescriptions`）添加一个支持视频的模型（`media.video.model`，默认 `google/gemini-3.8-flash`），可观看短视频片段：Discord 视频附件和已知视频站点的链接（YouTube、TikTok、VK、X、Reddit、Twitch）。附件和下载的站点视频受 `media.video.maxSeconds`（默认 60 秒）和 `media.video.maxBytes` 限制；`directUrlMaxSeconds`（默认 180 秒）以内的 YouTube 链接会作为 URL 直接传递给提供商（Google AI Studio）。每回合最多 `maxPerTurn` 个新视频（每次尝试都计数，无论成功与否），每天最多 `maxPerDay` 个。结果与图片描述一起缓存。其他内容通过 `yt-dlp` 下载并使用 `ffmpeg` 裁剪，两者均为可选的系统二进制文件。没有它们时，在限制内的附件仍然可用；更长的附件和站点链接会回退到静帧。对于 YouTube，当 `yt-dlp` 无法探测时长时，`.env` 中的可选 `YOUTUBE_API_KEY`（免费，Google Cloud 控制台，YouTube Data API v3）或观看页面抓取可以提供时长信息。`/nep ping video` 报告此主机上哪个时长来源可用。当有人对角色提出关于已观看视频的问题时，低成本分类器（`prompts/rewatch.md`）判断是否需要再看一遍；如果需要，视频模型使用 `prompts/rewatch-answer.md` 再次观看片段，回答与原始摘要一起出现在对话记录中。当有人再次询问未能加载的视频时，同一分类器也可以重试加载。每回合最多一次重看或重试；回答缓存一小时。开关 `features.videoRewatch`（默认开启）。
-
-视频提示是 `prompts/describe-video.md`。设置位于 `media.video` 下。每个键和模型对比表请参阅 [`configuration.md`](configuration.md)。
-
-语音消息只显示时长。链接显示站点、标题和 Discord 嵌入中的摘要，不显示页面本身。
+角色可以看到附加图片、观看短视频片段、阅读链接后的页面以及搜索网络以获取它没有的事实。每种能力是一个独立的功能开关，默认关闭或有上限，各自有每日限制。每个请求中的 `<senses>` 块告知角色当前什么是开启的；它不会声称感知了超出此块描述的任何东西。详见 [`docs/zh/media.md`](media.md)：图片、视频视觉、链接阅读、搜索、工具、成本和隐私。
 
 ## 成本与隐私
 
-每个回合是一次 LLM 请求；记忆更新再增加一次。成本取决于模型和端点；`llm.model` 和 `llm.baseUrl` 接受任何兼容的值。每日上限（`llm.maxRequestsPerDay`）防止开销失控。视频描述为每个观看的片段向独立的、更便宜的模型发送一次请求（`media.video.maxPerDay` 限制每日数量）；`yt-dlp` 和 `ffmpeg` 在本地运行，除带宽外不产生费用。
+每个回合是一次 LLM 请求；记忆更新再增加一次。成本取决于模型和端点；`llm.model` 和 `llm.baseUrl` 接受任何兼容的值。每日上限（`llm.maxRequestsPerDay`）防止开销失控。视频描述为每个观看的片段向独立的、更便宜的模型发送一次请求（`media.video.maxPerDay` 限制每日数量）；`yt-dlp` 和 `ffmpeg` 在本地运行，除带宽外不产生费用。链接阅读和搜索（`features.webLookup`，默认关闭）向文本分类器模型发送请求，受 `web.maxPerDay` 限制；搜索还需要 Brave Search API 密钥（免费层：每月 2,000 次查询）。启用 `features.webLookup` 后，机器人会发出出站 HTTP 请求以获取页面和访问 Brave Search API；私有地址会被拒绝。
 
-`data/` 存储每个成员的档案、关系分数、频道观察和服务器规律。它保留在你的机器上，已加入 gitignore，仅作为上下文发送给 LLM。分析器被指示不存储敏感信息。`/nep memory forget` 会完全删除一个档案。
+`data/` 存储每个成员的档案、关系分数、频道观察、服务器规律、缓存的媒体描述和网页摘要。它保留在你的机器上，已加入 gitignore，仅作为上下文发送给 LLM。分析器被指示不存储敏感信息。`/nep memory forget` 会完全删除一个档案。
 
 请告知服务器成员。他们应该知道自己的消息会被 LLM 处理，且机器人会保留笔记。
 
@@ -189,7 +164,7 @@ npm test
 
 ```
 config.json                所有设置及其默认值，热重载
-.env.example               DISCORD_TOKEN、OPENROUTER_API_KEY 和可选的 YOUTUBE_API_KEY 的模板
+.env.example               DISCORD_TOKEN、OPENROUTER_API_KEY 和可选的 YOUTUBE_API_KEY、BRAVE_SEARCH_API_KEY 的模板
 prompts/
   system-prompt.md         如何表现得像普通聊天成员
   character-card.md        角色定义（可用示例）
@@ -204,6 +179,9 @@ prompts/
   rewatch.md               分类器：是否需要重看视频
   rewatch-answer.md        重看回答的提示
   address.md               后续消息分类器
+  lookup.md                分类器：问题是否需要网络搜索
+  read-link.md             浓缩获取的页面
+  search-summary.md        浓缩搜索结果
   profile.md               预热：从消息样本生成一个成员的档案
   channel.md               预热：从消息样本生成频道笔记
   server.md                预热：从频道笔记和成员摘要生成服务器级笔记
@@ -215,24 +193,32 @@ docs/
     configuration.md       所有配置键的完整参考
     owner-commands.md      所有子命令和访问授权
     warmup.md              预热：阶段、进度、限制、命令
+    media.md               图片、视频、链接、搜索、工具、成本
+    messages-and-memory.md 流程、分析器、档案、回忆、世界书
   zh/                      中文
     README.md
     prompt-contract.md
     configuration.md
     owner-commands.md
     warmup.md
+    media.md
+    messages-and-memory.md
   ja/                      日文
     README.md
     prompt-contract.md
     configuration.md
     owner-commands.md
     warmup.md
+    media.md
+    messages-and-memory.md
   ru/                      俄文
     README.md
     prompt-contract.md
     configuration.md
     owner-commands.md
     warmup.md
+    media.md
+    messages-and-memory.md
 src/
   index.js                 入口，组装，定时器，关闭
   config.js                .env 解析器，配置加载器，deepMerge
@@ -254,6 +240,11 @@ src/
     fetch-image.js         下载并缓存图片供 LLM 内联请求使用
     video-sites.js         视频站点匹配、URL 缓存键、yt-dlp/ffmpeg 参数
     fetch-video.js         下载、探测和裁剪视频供视频描述器使用
+  web/
+    readable.js            HTML 转文本，付费墙检测
+    fetch-page.js          SSRF 防护的页面抓取器
+    brave.js               Brave Search 客户端
+    lookup.js              链接阅读和网络搜索
   behavior/
     mention.js             呼叫检测，忽略启发式
     prompt.js              带 token 预算的请求构建器

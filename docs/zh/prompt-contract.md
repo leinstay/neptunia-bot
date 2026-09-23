@@ -34,6 +34,9 @@
 | `rewatch.md` | 是 | 分类器：角色是否需要重看视频或重试未加载的视频（`features.videoRewatch`）。接收带状态的编号近期视频列表和新消息。输出为一行：`<number> \| <question>`、`<number> \| retry` 或 `none` | `{{name}}` |
 | `rewatch-answer.md` | 是 | 角色外提示，用于重看回答：视频模型再次观看片段并回答一个问题。语言和限制规则与 `describe-video.md` 相同。不接收角色卡 | `{{question}}` `{{maxChars}}` |
 | `address.md` | 是 | 分类器：未标记的消息是否在对角色说话 | `{{name}}` |
+| `lookup.md` | 否 | 分类器：角色是否需要搜索网络来回答这条消息（`features.webLookup`）。接收一段短对话记录和一个 `<candidate>` 块。输出为一行：一个搜索查询（纯文字，最多 12 个词）或 `none` | `{{name}}` |
+| `read-link.md` | 否 | 角色外提示，用于链接阅读器（`features.webLookup`，`web.links.enabled`）：将获取的页面浓缩为一个段落。接收页面标题和正文。不接收角色卡 | `{{maxChars}}` |
+| `search-summary.md` | 否 | 角色外提示，用于搜索浓缩器（`features.webLookup`，`web.search.enabled`）：将编号的搜索结果浓缩为带内联来源的笔记。不接收角色卡 | `{{query}}` `{{maxChars}}` |
 | `labels.json` | 是 | 代码插入提示中的所有字符串。键在下方固定，值由编写者决定 | 见下文 |
 
 `{{name}}` 机器人的显示名称 · `{{author}}` 呼叫者的显示名称 · `{{trigger}}` `labels.triggers.*` 之一 ·
@@ -41,7 +44,7 @@
 系统消息 = `system-prompt` + `character-card` + `rules` + `format`。分析器则单独使用 `memory.md`。
 在强制回合（`/nep interject`、`/nep initiate`）中，如果 `forced.md` 存在，则追加在模式提示之后。
 分析器和预热的 `profile.md`、`server.md` 在用户消息中以 `<character>` 块接收角色卡和 `rules.md`。
-`channel.md`、`describe.md`、`describe-video.md`、`rewatch.md`、`rewatch-answer.md` 和 `address.md` 不接收角色卡。
+`channel.md`、`describe.md`、`describe-video.md`、`rewatch.md`、`rewatch-answer.md`、`address.md`、`lookup.md`、`read-link.md` 和 `search-summary.md` 不接收角色卡。
 
 `{{guildFieldChars}}` 等于 `fieldChars * 2`，是代码对服务器级规律和开场白进行截断的上限。
 `{{maxEpisodes}}` 是每人保留的回忆总数上限。两者均从配置填充，但默认提示未使用；自定义的 `memory.md`
@@ -59,12 +62,13 @@
 | `<self_facts>` | 角色声称过的关于自身的事实 |
 | `<people>` | 成员档案；呼叫者排首位，以 `labels.profile.interlocutorMark` 标记；每个档案包含角色的态度，呼叫者还包含**回忆**：角色记住的关于两人之间的时刻，附带日期和简短引用 |
 | `<other_channels>` | 每个相邻频道最多 `context.neighborMessages` 条消息，不超过 `context.neighborMaxAgeMinutes` 的时效 |
+| `<lookup>` | 角色本轮在线查询的内容（`features.webLookup`）：查询词、浓缩的答案和来源站点，或"未找到"行。仅在搜索分类器触发且搜索完成后出现 |
 | `<chat>` | 当前频道最新的 `context.channelMessages` 条消息 |
 | `<tempo>` | 10 分钟 / 1 小时 / 1 天的消息计数，不同人数，沉默时长，一个判定（活跃 / 缓慢 / 沉寂） |
 | `<task>` | `reply` / `interject` / `initiate`，占位符已填充 |
 
 预算优先级（区块从此列表的底部开始裁剪）：系统提示 + 任务 + 时钟 + 节奏 + 感知
-（永不裁剪）→ 呼叫者的档案含回忆 → 聊天习惯 → 自述事实 → 世界书 → 服务器 → 对话记录（最新优先）→
+（永不裁剪）→ 呼叫者的档案含回忆 → 查询结果（整体保留或丢弃）→ 聊天习惯 → 自述事实 → 世界书 → 服务器 → 对话记录（最新优先）→
 其他档案 → 相邻频道。
 
 对话记录行中的媒体，使用可用的最具信息量的形式：附加在当前请求上的图片 →
@@ -75,7 +79,7 @@
 `videoNotWatched`（未观看，无帧）。原因代码（`length` / `size` / `daily` / `error`）在进入对话记录前会被替换
 为 `transcript.videoReason.*` 中的人类可读短语。链接保留其基础标签（`link` / `linkText`）并添加视频附加标签：
 `linkWatched`、`linkNotWatchedFrame` 或 `linkNotWatched`。当静帧作为图片附加时，还会添加 `frameAttached`。
-链接使用 `link` / `linkText`，取自 Discord 的嵌入（站点、标题、摘要）；文本文件通过 `filePreview` 显示开头
+链接使用 `link` / `linkText`，取自 Discord 的嵌入（站点、标题、摘要）；当 `features.webLookup` 开启且链接已被阅读时，`linkRead` 追加在链接的其他附加标签（视频、缩略图）之后。文本文件通过 `filePreview` 显示开头
 内容；转发消息用 `forwarded` 包裹。
 
 视频结果按附件或链接缓存在 `data/guilds/<id>/media.json` 中，键为 `video:<itemId>`（附件 id 或链接 URL 的稳定
@@ -89,6 +93,11 @@
 重看回答缓存在键 `video:<itemId>:q:<hash>`（问题小写化并合并空白后 SHA-1 的前 16 位十六进制数字）下：`{ text, ts, answer: true }`。一小时后过期；代码在读取时删除过期条目。
 
 图片的静帧条目保留其自身的 `<itemId>` 键。同一个条目可以同时存在两者。
+
+网络查询结果缓存在同一个 `data/guilds/<id>/media.json` 中，与视频和图片条目并列：
+
+- 链接阅读：`read:<link.id>` 保存 `{ text, ts }`（浓缩摘要，永久）或 `{ miss, ts, reason }`（未命中跳过 6 小时；原因：`scheme`、`private`、`redirects`、`type`、`size`、`timeout`、`http`、`network`、`empty`、`unreadable`、`llm`）。`TokenLimitError` 或 `DailyCapError` 不缓存。
+- 搜索：`search:<规范化查询 SHA-1 前缀，16 位十六进制>` 保存 `{ query, text, sources, ts }`，在 `web.search.cacheHours`（默认 24）小时内从缓存提供。空 `text` 表示无结果（渲染 `labels.lookup.none`）。失败不缓存。
 
 对话记录行：`#87 [14:32] nick: text <replyTo> <media…> <sticker>`；角色自身的行使用 `labels.self`；行间使用
 `labels.transcript.gap` / `gapWithDate` / `date`；区块以 `labels.transcript.header` 开头。相邻频道：相同的行
@@ -127,6 +136,7 @@ transcript.voice                         {duration}
 transcript.audio                         {name} {duration}
 transcript.link                          {site} {title}
 transcript.linkText                      {site} {title} {text}
+transcript.linkRead                      {text}: extra tag after a link tag; the page was fetched and condensed — first-hand
 transcript.thumbnailDescribed            {text}: follows a link tag; describes the link's preview picture
 transcript.filePreview                   {name} {text}
 transcript.forwarded                     {text}
@@ -142,6 +152,11 @@ senses.stickerSee | stickerDescribed | stickerBlind
 senses.lottie
 senses.voice | links | files
 senses.linksWatch                        replaces links when features.videoDescriptions is on; adds that a linked video may come watched or not watched with the reason
+senses.linksRead                         shown after the links line when features.webLookup is on and web.links.enabled is not false; tells the persona that a link may come with a read excerpt — first-hand
+senses.search                            shown when features.webLookup is on, web.search.enabled is not false AND a Brave Search key is configured; tells the persona that a `<lookup>` block may appear with web results
+lookup.header                            {query}: heading of the `<lookup>` block
+lookup.sources                           {list}: site names, comma-separated by code
+lookup.none                              shown in `<lookup>` when the search found nothing useful
 tempo.counts                             {last10min} {lastHour} {lastDay}
 tempo.authors                            {authors}: a head count
 tempo.silenceBeforeTrigger | lastMessageAgo | sinceOwn          {duration}
@@ -369,7 +384,7 @@ warmup.contextMark                       prefixed to context lines in the profil
 角色回复某人后，该频道内打开一个对话窗口（`mention.followUpMinutes`，每次进一步回复时延长）。窗口内不
 携带触发信号（无提及、无对角色消息的回复、无名字）的消息不会被盲目回复：代码将频道最近的
 `mention.followUpContext`（默认 15）行发送给 `address.md`，角色自身的行以 `labels.self` 标记，加上以
-`<candidate>` 标记的新消息，使用 `followUp` 模型角色（`mention.followUpModel`，默认 `anthropic/claude-sonnet-4.6`）。输出
+`<candidate>` 标记的新消息，使用 `classifier.text` 模型角色（默认 `anthropic/claude-sonnet-4.6`）。输出
 为一行：当候选消息是在对角色说话或延续与角色的对话时为 `yes`，当人们在相互交谈或对其他人说话时为 `no`
 （对另一成员的回复或对另一成员的提及在询问模型之前即为 `no`）。`yes` 触发正常的回复回合（模型仍可
 `<skip/>`）；连续三个 `no`（`mention.followUpNoStreak`，默认 3）关闭窗口。开关 `features.followUp`
@@ -381,7 +396,7 @@ warmup.contextMark                       prefixed to context lines in the profil
 当角色被呼叫（回复回合）且频道最近 `media.video.rewatch.recentMessages`（默认 60）条消息中有视频时，分类器判断
 该消息是否在询问其中某个视频，或请求重试一个未加载的视频。候选包括已观看视频和错误状态视频（请求的重试使用独立于回合 `media.video.maxPerTurn`
 尝试次数的专用槽位）。分类器最多收到 `media.video.rewatch.maxCandidates`（默认 6）个视频，按最新
-消息优先排列。代码将 `rewatch.md` 作为系统提示发送到后续模型角色（`mention.followUpModel`，默认 `anthropic/claude-sonnet-4.6`），
+消息优先排列。代码将 `rewatch.md` 作为系统提示发送到 `classifier.text` 模型角色（默认 `anthropic/claude-sonnet-4.6`），
 用户消息包含三个块：一个短的 `<transcript>` 包含频道最近几条消息，角色自身的行以 `labels.self` 标记（使分类器能看到候选消息回复的对象），然后是视频列表和候选：
 
 ```
@@ -416,3 +431,33 @@ warmup.contextMark                       prefixed to context lines in the profil
 限制：每回合最多一次重看或重试；分类器和重看各自计入 `llm.maxRequestsPerDay`；重看还计入
 `media.video.maxPerDay`；`media.video.rewatch.maxPerDay`（默认 20）单独限制重看次数。回答按问题缓存一小时（参见
 上方视频缓存部分）。开关 `features.videoRewatch`（缺失 = 开启，需要 `videoDescriptions`）。
+
+## 搜索分类器（`lookup.md`）：问题是否需要从网上获取事实？
+
+当角色被呼叫（回复回合）且以下条件全部满足时 — `features.webLookup` 开启、`web.search.enabled` 不为 false、
+`lookup.md` 提示文件存在、`web.search.maxPerTurn` 至少为 1、且已配置 `BRAVE_SEARCH_API_KEY` — 分类器判断触发消息
+是否需要网络搜索。它使用 `classifier.text` 模型角色。代码将 `lookup.md` 作为系统提示，用户消息包含一个短的
+`<transcript>`（与重看分类器相同，角色自身的行以 `labels.self` 标记）和一个 `<candidate>` 块：
+
+```
+<transcript>
+...
+</transcript>
+<candidate>
+<作者名>: <触发文本>
+</candidate>
+```
+
+对话记录在可用时携带描述、视频摘要和链接阅读内容。触发文本在 `context.maxMessageChars` 处截断。输出为一行：
+
+- 一个搜索查询 — 纯文字，无引号，无操作符，最多 12 个词 — 当消息需要聊天之外的事实时。
+- `none` — 其他所有情况。
+
+查询命中时，Brave Search 运行查询（`web.search.results` 个结果，默认 5），编号的结果通过 `classifier.text` 经
+`search-summary.md`（`{{query}}`、`{{maxChars}}` = `web.search.summaryChars`，默认 900）浓缩，答案渲染为
+`<chat>` 之前的 `<lookup>` 块：`labels.lookup.header` 附带查询词，浓缩文本，以及 `labels.lookup.sources` 附带
+不同的站点名称。当搜索无结果或浓缩器未找到有用内容时，显示 `labels.lookup.none`。
+
+限制：每回合最多一次搜索；分类器和浓缩器各自计入 `llm.maxRequestsPerDay`；搜索本身计入 `web.maxPerDay`
+（与链接阅读共享）。结果按规范化查询缓存 `web.search.cacheHours`（默认 24）小时。开关 `features.webLookup`
+（缺失 = 关闭）。
