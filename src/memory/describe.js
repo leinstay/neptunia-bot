@@ -23,10 +23,16 @@
 // site whose public URL the pinned provider can open itself
 // (`media.video.directUrlSites`, and only when `media.video.provider` is a
 // real provider object), passed by URL -- and summarised by a
-// video-capable model into one line. Results share the picture cache under
-// `video:<itemId>`: a watched summary, a permanent `length`/`size` miss
-// (never retried) or an `error` miss (retried after an hour). A separate
-// daily counter (`state.data.videoDay` / `videoCount`, `media.video.maxPerDay`)
+// video-capable model into one line. A link's duration comes from yt-dlp;
+// when yt-dlp fails on a YouTube link, from the YouTube Data API (with a
+// configured key) or the watch page (src/discord/fetch-video.js#probeYoutube).
+// With no duration at all a direct-URL link is sent only when the owner
+// opted in (`media.video.directUrlUnknownDuration`, billed as `maxSeconds`).
+// Results share the picture cache under `video:<itemId>`: a watched summary,
+// a permanent `length`/`size` miss (never retried; a video longer than
+// `maxSeconds` whose clip download fails is a `length` miss -- it will not get
+// shorter) or an `error` miss (retried after an hour). A separate daily
+// counter (`state.data.videoDay` / `videoCount`, `media.video.maxPerDay`)
 // caps how many videos are attempted per day: the slot is reserved before the
 // fetch and kept even when the fetch or the request fails. Summaries are
 // data: never logged.
@@ -34,7 +40,7 @@
 import { mediaProxyUrl } from '../discord/media.js';
 import { createImageFetcher } from '../discord/fetch-image.js';
 import { createVideoFetcher } from '../discord/fetch-video.js';
-import { isDirectUrlSite, safeLocation } from '../discord/video-sites.js';
+import { isDirectUrlSite, safeLocation, youtubeVideoId } from '../discord/video-sites.js';
 import { TokenLimitError, DailyCapError } from '../llm/openrouter.js';
 import { clampText } from './clamp.js';
 import { log } from '../log.js';
@@ -98,6 +104,8 @@ function trimCache(cache, maxEntries) {
  * @param {object} [deps.videoFetcher]  From createVideoFetcher() (src/discord/fetch-video.js).
  * @param {{ data: object, markDirty: () => void }} [deps.state]  The persistent state (store.state) holding the
  *   daily video counter; without it the counter lives in memory only.
+ * @param {string|null} [deps.youtubeApiKey]  Optional YouTube Data API key (YOUTUBE_API_KEY), handed to
+ *   probeYoutube only; never logged.
  */
 export function createDescriber({
   hot,
@@ -107,6 +115,7 @@ export function createDescriber({
   imageFetcher = createImageFetcher(),
   videoFetcher = createVideoFetcher(),
   state = memoryState(),
+  youtubeApiKey = null,
 }) {
   /**
    * @param {string} guildId
@@ -287,12 +296,28 @@ export function createDescriber({
       });
       return got.ok ? { ok: true, url: got.dataUrl, seconds: got.seconds, bytes: got.bytes, pinned: false } : got;
     }
-    const probe = await videoFetcher.probeSite(item.url, { ytdlpPath, toolTimeoutMs });
-    if (!probe.ok) return probe;
-    const durationSec = probe.durationSec ?? item.durationSec ?? null;
+    let probe = await videoFetcher.probeSite(item.url, { ytdlpPath, toolTimeoutMs });
+    // yt-dlp can be blocked by YouTube's bot check; the duration alone is
+    // still learnable from the Data API or the watch page.
+    if (!probe.ok && youtubeVideoId(item.url) !== null) {
+      const youtube = await videoFetcher.probeYoutube(item.url, {
+        fetchTimeoutMs: hot.config.context?.vision?.fetchTimeoutMs,
+        apiKey: youtubeApiKey,
+      });
+      if (youtube.ok) probe = youtube;
+    }
     // The public URL goes out only with a pinned provider that can open it;
     // without one the clip is downloaded like any other site's.
     const pinnable = isPlainObject(videoCfg.provider) && isDirectUrlSite(item.url, videoCfg.directUrlSites ?? []);
+    if (!probe.ok) {
+      // No duration at all: only the owner's explicit switch sends the URL,
+      // billed as the longest allowed video.
+      if (pinnable && videoCfg.directUrlUnknownDuration === true) {
+        return { ok: true, url: item.url, seconds: maxSeconds, bytes: null, pinned: true };
+      }
+      return probe;
+    }
+    const durationSec = probe.durationSec ?? item.durationSec ?? null;
     if (pinnable && durationSec != null && durationSec <= maxSeconds) {
       return { ok: true, url: item.url, seconds: durationSec, bytes: null, pinned: true };
     }
@@ -304,7 +329,10 @@ export function createDescriber({
       toolTimeoutMs,
       durationSec,
     });
-    return clip.ok ? { ok: true, url: clip.dataUrl, seconds: clip.seconds, bytes: clip.bytes, pinned: false } : clip;
+    if (clip.ok) return { ok: true, url: clip.dataUrl, seconds: clip.seconds, bytes: clip.bytes, pinned: false };
+    // Too long and not clippable: the video will not get shorter, so this is final.
+    if (durationSec != null && durationSec > maxSeconds) return { ok: false, reason: 'length' };
+    return clip;
   }
 
   /**

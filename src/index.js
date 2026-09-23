@@ -7,7 +7,7 @@
 import path from 'node:path';
 import { Client, Events, GatewayIntentBits } from 'discord.js';
 
-import { ROOT_DIR, loadDotEnv, need } from './config.js';
+import { ROOT_DIR, env, loadDotEnv, need } from './config.js';
 import { createHot } from './hot.js';
 import { log } from './log.js';
 import { createStore } from './memory/store.js';
@@ -46,6 +46,8 @@ function needOrFail(key) {
 loadDotEnv();
 const discordToken = needOrFail('DISCORD_TOKEN');
 const openrouterKey = needOrFail('OPENROUTER_API_KEY');
+// Optional: without it a YouTube duration comes from the watch page only.
+const youtubeApiKey = env.YOUTUBE_API_KEY || null;
 
 const hot = createHot({ rootDir: ROOT_DIR }).watch();
 
@@ -90,7 +92,7 @@ const getGuildId = () => instance.guildId;
 const imageFetcher = createImageFetcher();
 const videoFetcher = createVideoFetcher();
 // state: the daily video counter lives next to the LLM client's daily counter.
-const describer = createDescriber({ hot, store, llm, imageFetcher, videoFetcher, state: store.state });
+const describer = createDescriber({ hot, store, llm, imageFetcher, videoFetcher, state: store.state, youtubeApiKey });
 const turns = createTurnRunner({ hot, store, llm, calibrator, client, describer, imageFetcher });
 const getSelfName = (guildId) => client.guilds.cache.get(guildId)?.members.me?.displayName ?? client.user?.username ?? 'bot';
 // THE way memory starts (docs/prompt-contract.md, "The warmup"): sample-based,

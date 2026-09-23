@@ -561,6 +561,7 @@ function fakeVideoFetcher({
   attachment = { ok: true, dataUrl: CLIP_DATA_URL, mimeType: 'video/mp4', seconds: 12, bytes: 4 },
   probe = { ok: true, durationSec: 30, title: 'Ελληνικό' },
   clip = { ok: true, dataUrl: CLIP_DATA_URL, mimeType: 'video/mp4', seconds: 60, bytes: 4 },
+  youtube = { ok: false, reason: 'download' },
 } = {}) {
   const calls = [];
   return {
@@ -576,6 +577,10 @@ function fakeVideoFetcher({
     fetchSiteClip: async (url, options) => {
       calls.push({ fn: 'fetchSiteClip', url, options });
       return clip;
+    },
+    probeYoutube: async (url, options) => {
+      calls.push({ fn: 'probeYoutube', url, options });
+      return youtube;
     },
   };
 }
@@ -614,6 +619,7 @@ function videoDescriber({
   videoFetcher = fakeVideoFetcher(),
   state = fakeState(),
   now,
+  youtubeApiKey,
 } = {}) {
   const store = createStore({ dataDir: tmpDataDir() });
   const describer = createDescriber({
@@ -624,6 +630,7 @@ function videoDescriber({
     videoFetcher,
     state,
     ...(now ? { now } : {}),
+    ...(youtubeApiKey !== undefined ? { youtubeApiKey } : {}),
   });
   return { describer, store, llm, videoFetcher, state, hot };
 }
@@ -1008,5 +1015,117 @@ test('describeVideo: without a usable provider object a direct-URL site is downl
     assert.ok(!body.includes('youtube.com'), 'only the data URL is sent');
     assert.ok(body.includes(CLIP_DATA_URL));
     assert.equal(llm.calls[0].options.provider, undefined);
+  }
+});
+
+// --- the link chain: yt-dlp, then the YouTube probe, then the unknown-duration switch ---
+
+const TIKTOK = { url: 'https://www.tiktok.com/@someone/video/123', site: 'tiktok.com' };
+const PROBE_FAILED = { ok: false, reason: 'download' };
+const LINK_KEY = 'video:video:url:0123456789abcdef';
+
+test('describeVideo: yt-dlp fails on YouTube -> the page probe gives the duration -> the URL goes out pinned', async () => {
+  const videoFetcher = fakeVideoFetcher({ probe: PROBE_FAILED, youtube: { ok: true, durationSec: 42 } });
+  const { describer, llm } = videoDescriber({ videoFetcher, youtubeApiKey: 'test-key' });
+
+  const result = await describer.describeVideo('g1', videoLink());
+
+  assert.equal(result.state, 'watched');
+  assert.deepEqual(videoFetcher.calls.map((c) => c.fn), ['probeSite', 'probeYoutube']);
+  assert.equal(videoFetcher.calls[1].url, 'https://www.youtube.com/watch?v=abc');
+  assert.deepEqual(videoFetcher.calls[1].options, { fetchTimeoutMs: 10_000, apiKey: 'test-key' });
+  assert.deepEqual(llm.calls[0].messages[1].content, [
+    { type: 'video_url', video_url: { url: 'https://www.youtube.com/watch?v=abc' } },
+  ]);
+  assert.deepEqual(llm.calls[0].options.provider, VIDEO_CFG.provider);
+  assert.equal(llm.calls[0].options.videoSeconds, 42);
+});
+
+test('describeVideo: the YouTube probe runs only when yt-dlp failed and only for a YouTube URL', async () => {
+  const ok = fakeVideoFetcher({ youtube: { ok: true, durationSec: 42 } });
+  await videoDescriber({ videoFetcher: ok }).describer.describeVideo('g1', videoLink());
+  assert.deepEqual(ok.calls.map((c) => c.fn), ['probeSite']);
+
+  const tiktok = fakeVideoFetcher({ probe: PROBE_FAILED, youtube: { ok: true, durationSec: 42 } });
+  const { describer, llm } = videoDescriber({ videoFetcher: tiktok });
+  assert.deepEqual(await describer.describeVideo('g1', videoLink('video:url:bbbbbbbbbbbbbbbb', TIKTOK)), { state: 'error' });
+  assert.deepEqual(tiktok.calls.map((c) => c.fn), ['probeSite']);
+  assert.equal(llm.calls.length, 0);
+});
+
+test('describeVideo: without a YouTube key the probe gets apiKey null', async () => {
+  const videoFetcher = fakeVideoFetcher({ probe: PROBE_FAILED, youtube: { ok: true, durationSec: 42 } });
+  await videoDescriber({ videoFetcher }).describer.describeVideo('g1', videoLink());
+  assert.equal(videoFetcher.calls[1].options.apiKey, null);
+});
+
+test('describeVideo: every probe failed and directUrlUnknownDuration off (or not exactly true) -> error miss, no request', async () => {
+  for (const directUrlUnknownDuration of [false, undefined, 'true', 1]) {
+    const videoFetcher = fakeVideoFetcher({ probe: PROBE_FAILED });
+    const { describer, llm, store } = videoDescriber({ videoFetcher, hot: videoHot({ video: { directUrlUnknownDuration } }) });
+
+    assert.deepEqual(await describer.describeVideo('g1', videoLink()), { state: 'error' }, String(directUrlUnknownDuration));
+    assert.deepEqual(videoFetcher.calls.map((c) => c.fn), ['probeSite', 'probeYoutube']);
+    assert.equal(llm.calls.length, 0);
+    assert.equal(store.getMediaCache('g1')[LINK_KEY].reason, 'error');
+  }
+});
+
+test('describeVideo: every probe failed and directUrlUnknownDuration on -> the URL goes out pinned with videoSeconds = maxSeconds', async () => {
+  const videoFetcher = fakeVideoFetcher({ probe: PROBE_FAILED });
+  const { describer, llm } = videoDescriber({ videoFetcher, hot: videoHot({ video: { directUrlUnknownDuration: true } }) });
+
+  const result = await describer.describeVideo('g1', videoLink());
+
+  assert.equal(result.state, 'watched');
+  assert.deepEqual(videoFetcher.calls.map((c) => c.fn), ['probeSite', 'probeYoutube']);
+  assert.deepEqual(llm.calls[0].messages[1].content, [
+    { type: 'video_url', video_url: { url: 'https://www.youtube.com/watch?v=abc' } },
+  ]);
+  assert.deepEqual(llm.calls[0].options.provider, VIDEO_CFG.provider);
+  assert.equal(llm.calls[0].options.videoSeconds, 60);
+});
+
+test('describeVideo: directUrlUnknownDuration never sends a non-direct site or an unpinned URL', async () => {
+  const on = videoHot({ video: { directUrlUnknownDuration: true } });
+  const first = videoDescriber({ videoFetcher: fakeVideoFetcher({ probe: PROBE_FAILED }), hot: on });
+  assert.deepEqual(await first.describer.describeVideo('g1', videoLink('video:url:bbbbbbbbbbbbbbbb', TIKTOK)), { state: 'error' });
+  assert.equal(first.llm.calls.length, 0);
+
+  const second = videoDescriber({
+    videoFetcher: fakeVideoFetcher({ probe: PROBE_FAILED }),
+    hot: videoHot({ video: { directUrlUnknownDuration: true, provider: null } }),
+  });
+  assert.deepEqual(await second.describer.describeVideo('g1', videoLink()), { state: 'error' });
+  assert.equal(second.llm.calls.length, 0);
+});
+
+test('describeVideo: longer than maxSeconds and the clip fails -> a permanent length limit, never retried', async () => {
+  const setups = [
+    { probe: { ok: true, durationSec: 600, title: null } },
+    { probe: PROBE_FAILED, youtube: { ok: true, durationSec: 600 } },
+  ];
+  for (const setup of setups) {
+    for (const reason of ['download', 'tool', 'timeout', 'size']) {
+      let t = 1_000_000;
+      const videoFetcher = fakeVideoFetcher({ ...setup, clip: { ok: false, reason } });
+      const { describer, llm, store } = videoDescriber({ videoFetcher, now: () => t });
+
+      assert.deepEqual(await describer.describeVideo('g1', videoLink()), { state: 'limit', reason: 'length' });
+      assert.equal(store.getMediaCache('g1')[LINK_KEY].reason, 'length');
+      const fetches = videoFetcher.calls.length;
+      t += 30 * 24 * 60 * 60_000;
+      assert.deepEqual(await describer.describeVideo('g1', videoLink()), { state: 'limit', reason: 'length' });
+      assert.equal(videoFetcher.calls.length, fetches, 'the permanent miss is served from the cache');
+      assert.equal(llm.calls.length, 0);
+    }
+  }
+});
+
+test('describeVideo: a clip failure of a video within maxSeconds (or of unknown length) stays an error miss', async () => {
+  for (const durationSec of [30, null]) {
+    const videoFetcher = fakeVideoFetcher({ probe: { ok: true, durationSec, title: null }, clip: { ok: false, reason: 'download' } });
+    const { describer } = videoDescriber({ videoFetcher });
+    assert.deepEqual(await describer.describeVideo('g1', videoLink('video:url:bbbbbbbbbbbbbbbb', TIKTOK)), { state: 'error' });
   }
 });

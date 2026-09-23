@@ -2,9 +2,12 @@
 // take: a Discord attachment is downloaded and, when short and small enough,
 // inlined as-is; otherwise ffmpeg cuts it to the first `maxSeconds` at 360p.
 // A video-site link goes through yt-dlp: a metadata-only probe (duration,
-// title) and a clip download of the first `maxSeconds`. The argument arrays
-// come from the pure src/discord/video-sites.js; this module is only the edge
-// (child processes, fetch, temp files).
+// title) and a clip download of the first `maxSeconds`. Where yt-dlp cannot
+// read YouTube (a bot check), probeYoutube learns the duration without it:
+// the YouTube Data API when a key is configured, else the watch page itself.
+// The argument arrays and parsers come from the pure
+// src/discord/video-sites.js; this module is only the edge (child processes,
+// fetch, temp files).
 //
 // Every function resolves to a result object and never rejects. Temp files
 // live in a fresh directory per call under `tmpDir`, removed in `finally`.
@@ -17,18 +20,35 @@
 // Log lines carry codes only: source, reason, the host and path (never a
 // query string -- a Discord CDN signature, tracking ids), an exit code,
 // signal or errno, an HTTP status. Never tool output, never an error
-// message, never file contents.
+// message, never file contents, never the Data API key (its request is
+// logged under a fixed key-free location).
 
 import { spawn } from 'node:child_process';
 import * as fsPromises from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { log } from '../log.js';
-import { ffmpegTrimArgs, parseProbe, safeLocation, ytdlpClipArgs, ytdlpProbeArgs } from './video-sites.js';
+import {
+  ffmpegTrimArgs,
+  parseProbe,
+  parseYoutubeDataApi,
+  parseYoutubePageDuration,
+  safeLocation,
+  youtubeDataApiUrl,
+  youtubeVideoId,
+  ytdlpClipArgs,
+  ytdlpProbeArgs,
+} from './video-sites.js';
 
 const STDOUT_MAX_BYTES = 32 * 1024 * 1024;
 const DOWNLOAD_CEILING_FACTOR = 4;
 const CLOSE_GRACE_MS = 5000;
+const PAGE_MAX_BYTES = 2 * 1024 * 1024;
+const YOUTUBE_API_LOCATION = 'www.googleapis.com/youtube/v3/videos';
+const PAGE_HEADERS = {
+  'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
+  'Accept-Language': 'en',
+};
 
 /** The loggable code of a thrown error: its errno-style `code`, else its class name. Never the message. */
 function errorCode(err) {
@@ -373,5 +393,83 @@ export function createVideoFetcher({
     }
   }
 
-  return { fetchAttachment, probeSite, fetchSiteClip };
+  /**
+   * GET `url` and read at most `maxBytes` of its body as text (the rest is
+   * never pulled). Never rejects.
+   * @returns {Promise<{ ok: true, text: string } | { ok: false, reason: 'download'|'timeout', extra?: object }>}
+   */
+  async function fetchText(url, { headers, timeoutMs, maxBytes }) {
+    const controller = new AbortController();
+    let timedOut = false;
+    const timer = Number.isFinite(timeoutMs) && timeoutMs > 0
+      ? setTimeout(() => {
+        timedOut = true;
+        controller.abort();
+      }, timeoutMs)
+      : null;
+    try {
+      const options = { method: 'GET', signal: controller.signal };
+      if (headers) options.headers = headers;
+      const response = await fetchImpl(url, options);
+      if (!response?.ok) return { ok: false, reason: 'download', extra: { status: response?.status } };
+      if (!response.body) return { ok: false, reason: 'download' };
+      const chunks = [];
+      let bytes = 0;
+      for await (const chunk of response.body) {
+        const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+        chunks.push(buf);
+        bytes += buf.byteLength;
+        if (bytes >= maxBytes) {
+          controller.abort();
+          break;
+        }
+      }
+      return { ok: true, text: Buffer.concat(chunks).subarray(0, maxBytes).toString('utf8') };
+    } catch (err) {
+      if (timedOut) return { ok: false, reason: 'timeout' };
+      return { ok: false, reason: 'download', extra: { code: errorCode(err) } };
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  /**
+   * The duration of a YouTube video without yt-dlp: the Data API first when
+   * `apiKey` is a non-empty string (any failure is logged as `api` and falls
+   * through), then the watch page (at most 2 MB of it). Never rejects.
+   * @param {string} url
+   * @param {{ fetchTimeoutMs?: number, apiKey?: string|null }} options
+   * @returns {Promise<{ ok: true, durationSec: number } | { ok: false, reason: 'download'|'timeout' }>}
+   */
+  async function probeYoutube(url, { fetchTimeoutMs, apiKey } = {}) {
+    try {
+      const id = youtubeVideoId(url);
+      if (!id) return fail('youtube', url, 'download');
+
+      if (typeof apiKey === 'string' && apiKey) {
+        const got = await fetchText(youtubeDataApiUrl(id, apiKey), { timeoutMs: fetchTimeoutMs, maxBytes: PAGE_MAX_BYTES });
+        const durationSec = got.ok ? parseYoutubeDataApi(got.text) : null;
+        if (durationSec !== null) return { ok: true, durationSec };
+        const meta = { source: 'youtube', reason: 'api', location: YOUTUBE_API_LOCATION };
+        if (got.ok) meta.status = 200;
+        else if (got.reason === 'timeout') meta.code = 'timeout';
+        else {
+          if (got.extra?.status !== undefined) meta.status = got.extra.status;
+          if (got.extra?.code !== undefined && got.extra.code !== null) meta.code = got.extra.code;
+        }
+        log.warn('fetch-video: failed', meta);
+      }
+
+      const pageUrl = `https://www.youtube.com/watch?v=${encodeURIComponent(id)}&hl=en`;
+      const page = await fetchText(pageUrl, { headers: PAGE_HEADERS, timeoutMs: fetchTimeoutMs, maxBytes: PAGE_MAX_BYTES });
+      if (!page.ok) return fail('youtube', pageUrl, page.reason, page.extra);
+      const durationSec = parseYoutubePageDuration(page.text);
+      if (durationSec === null) return fail('youtube', pageUrl, 'download');
+      return { ok: true, durationSec };
+    } catch (err) {
+      return fail('youtube', url, 'download', { code: errorCode(err) });
+    }
+  }
+
+  return { fetchAttachment, probeSite, fetchSiteClip, probeYoutube };
 }

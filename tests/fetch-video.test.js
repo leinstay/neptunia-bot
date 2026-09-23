@@ -547,3 +547,146 @@ test('logging: a non-OK download logs its HTTP status', async () => {
   const [line] = logs.filter((l) => l.msg.startsWith('fetch-video:'));
   assert.equal(line.status, 403);
 });
+
+// --- probeYoutube ----------------------------------------------------------
+
+const API_KEY = 'AIzaSecretTestKey';
+const WATCH_PAGE = 'https://www.youtube.com/watch?v=abc123&hl=en';
+const API_URL = `https://www.googleapis.com/youtube/v3/videos?part=contentDetails&id=abc123&key=${API_KEY}`;
+
+/** An HTTP response whose body is `text` (or the given chunks). */
+function textResponse(text, { ok = true, status = 200, chunks } = {}) {
+  return fakeResponse({ ok, status, contentType: 'text/html', chunks: chunks ?? [Buffer.from(text)] });
+}
+
+/** A fetch fake answering by URL prefix: `routes` maps a prefix to a response, an Error or a function. */
+function routedFetch(routes) {
+  return fakeFetch((url, options) => {
+    for (const [prefix, response] of Object.entries(routes)) {
+      if (!url.startsWith(prefix)) continue;
+      if (response instanceof Error) throw response;
+      return typeof response === 'function' ? response(url, options) : response;
+    }
+    throw new Error(`unexpected url ${url}`);
+  });
+}
+
+const API_PREFIX = 'https://www.googleapis.com/';
+const PAGE_PREFIX = 'https://www.youtube.com/watch';
+const API_OK = JSON.stringify({ items: [{ contentDetails: { duration: 'PT3M34S' } }] });
+
+test('probeYoutube: with an API key the Data API answers first and the page is never fetched', async () => {
+  const { fetchImpl, calls } = routedFetch({ [API_PREFIX]: textResponse(API_OK) });
+  const fetcher = makeFetcher({ fetchImpl, tmpDir });
+
+  const result = await fetcher.probeYoutube(SITE_URL, { fetchTimeoutMs: 10_000, apiKey: API_KEY });
+
+  assert.deepEqual(result, { ok: true, durationSec: 214 });
+  assert.deepEqual(calls.map((c) => c.url), [API_URL]);
+});
+
+test('probeYoutube: without an API key only the watch page is fetched, with a browser UA and Accept-Language', async () => {
+  for (const apiKey of [undefined, null, '']) {
+    const { fetchImpl, calls } = routedFetch({ [PAGE_PREFIX]: textResponse('<script>{"lengthSeconds":"42"}</script>') });
+    const fetcher = makeFetcher({ fetchImpl, tmpDir });
+
+    const result = await fetcher.probeYoutube('https://youtu.be/abc123?si=track', { fetchTimeoutMs: 10_000, apiKey });
+
+    assert.deepEqual(result, { ok: true, durationSec: 42 });
+    assert.deepEqual(calls.map((c) => c.url), [WATCH_PAGE]);
+    const { headers } = calls[0].options;
+    assert.equal(
+      headers['User-Agent'],
+      'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
+    );
+    assert.equal(headers['Accept-Language'], 'en');
+  }
+});
+
+test('probeYoutube: an API failure falls through to the page, logging reason api without the key', async () => {
+  const apiFailures = [
+    textResponse('{"error":{}}', { ok: false, status: 403 }),
+    textResponse(JSON.stringify({ items: [] })),
+    Object.assign(new Error(`connect ECONNRESET ${API_URL}`), { code: 'ECONNRESET' }),
+  ];
+  for (const apiResponse of apiFailures) {
+    const { fetchImpl, calls } = routedFetch({
+      [API_PREFIX]: apiResponse,
+      [PAGE_PREFIX]: textResponse('{"approxDurationMs":"61500"}'),
+    });
+    const fetcher = makeFetcher({ fetchImpl, tmpDir });
+
+    const { result, logs } = await withCapturedLogs(() =>
+      fetcher.probeYoutube(SITE_URL, { fetchTimeoutMs: 10_000, apiKey: API_KEY }),
+    );
+
+    assert.deepEqual(result, { ok: true, durationSec: 62 });
+    assert.deepEqual(calls.map((c) => c.url), [API_URL, WATCH_PAGE]);
+    const lines = logs.filter((l) => l.msg.startsWith('fetch-video:'));
+    assert.equal(lines.length, 1);
+    assert.equal(lines[0].reason, 'api');
+    assert.equal(lines[0].location, 'www.googleapis.com/youtube/v3/videos');
+    const serialized = JSON.stringify(lines);
+    assert.ok(!serialized.includes(API_KEY), 'the key is never logged');
+    assert.ok(!serialized.includes('ECONNRESET https'), 'never an error message');
+  }
+});
+
+test('probeYoutube: the API failure log carries the HTTP status', async () => {
+  const { fetchImpl } = routedFetch({
+    [API_PREFIX]: textResponse('', { ok: false, status: 403 }),
+    [PAGE_PREFIX]: textResponse('{"lengthSeconds":"42"}'),
+  });
+  const fetcher = makeFetcher({ fetchImpl, tmpDir });
+  const { logs } = await withCapturedLogs(() => fetcher.probeYoutube(SITE_URL, { fetchTimeoutMs: 10_000, apiKey: API_KEY }));
+  const [line] = logs.filter((l) => l.msg.startsWith('fetch-video:'));
+  assert.equal(line.status, 403);
+});
+
+test('probeYoutube: a page without a duration, a non-OK page or a thrown fetch gives download', async () => {
+  for (const page of [
+    textResponse('<html>Before you continue to YouTube</html>'),
+    textResponse('', { ok: false, status: 429 }),
+    new TypeError('fetch failed'),
+  ]) {
+    const { fetchImpl } = routedFetch({ [PAGE_PREFIX]: page });
+    const fetcher = makeFetcher({ fetchImpl, tmpDir });
+    assert.deepEqual(await fetcher.probeYoutube(SITE_URL, { fetchTimeoutMs: 10_000 }), { ok: false, reason: 'download' });
+  }
+});
+
+test('probeYoutube: a page that outlives fetchTimeoutMs is aborted -> timeout', async () => {
+  const fetchImpl = (url, { signal }) => new Promise((resolve, reject) => {
+    signal.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })));
+  });
+  const fetcher = makeFetcher({ fetchImpl, tmpDir });
+  assert.deepEqual(await fetcher.probeYoutube(SITE_URL, { fetchTimeoutMs: 20 }), { ok: false, reason: 'timeout' });
+});
+
+test('probeYoutube: at most 2 MB of the page is read -- a duration past the cap is never seen', async () => {
+  const filler = Buffer.alloc(2 * 1024 * 1024, 'x');
+  const page = textResponse('', { chunks: [filler, Buffer.from('{"lengthSeconds":"42"}'), Buffer.from('tail')] });
+  const { fetchImpl } = routedFetch({ [PAGE_PREFIX]: page });
+  const fetcher = makeFetcher({ fetchImpl, tmpDir });
+
+  const result = await fetcher.probeYoutube(SITE_URL, { fetchTimeoutMs: 10_000 });
+
+  assert.deepEqual(result, { ok: false, reason: 'download' });
+  assert.ok(page.body.pulled <= 2, `pulled ${page.body.pulled} chunks`);
+});
+
+test('probeYoutube: a duration inside the first 2 MB is found', async () => {
+  const filler = Buffer.alloc(1024 * 1024, 'x');
+  const page = textResponse('', { chunks: [filler, Buffer.from('{"lengthSeconds":"42"}')] });
+  const { fetchImpl } = routedFetch({ [PAGE_PREFIX]: page });
+  const fetcher = makeFetcher({ fetchImpl, tmpDir });
+  assert.deepEqual(await fetcher.probeYoutube(SITE_URL, { fetchTimeoutMs: 10_000 }), { ok: true, durationSec: 42 });
+});
+
+test('probeYoutube: a non-YouTube URL gives download without any request', async () => {
+  const { fetchImpl, calls } = fakeFetch(textResponse('{"lengthSeconds":"42"}'));
+  const fetcher = makeFetcher({ fetchImpl, tmpDir });
+  const result = await fetcher.probeYoutube('https://www.tiktok.com/@someone/video/123', { fetchTimeoutMs: 10_000, apiKey: API_KEY });
+  assert.deepEqual(result, { ok: false, reason: 'download' });
+  assert.equal(calls.length, 0);
+});

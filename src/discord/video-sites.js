@@ -1,8 +1,10 @@
 // Pure helpers for the persona's video vision: which links point at a video
 // site, a stable cache key for a video URL (so a repost of the same video
-// shares one cache entry), and the exact yt-dlp / ffmpeg argument arrays the
-// fetcher (src/discord/fetch-video.js) runs. No I/O here -- the child
-// processes live at the edge, these functions only decide what to run.
+// shares one cache entry), the exact yt-dlp / ffmpeg argument arrays the
+// fetcher (src/discord/fetch-video.js) runs, and the parsers behind the
+// YouTube duration probe that works without yt-dlp (the watch page, the
+// optional Data API). No I/O here -- the child processes and requests live at
+// the edge, these functions only decide what to run and read what came back.
 
 import { createHash } from 'node:crypto';
 
@@ -89,6 +91,27 @@ function youtubeId(host, parsed) {
   return null;
 }
 
+/** Lowercase hostname of a parsed URL without a leading `www.` / `m.`. */
+function canonicalHost(parsed) {
+  return parsed.hostname.toLowerCase().replace(/^(www\.|m\.)/, '');
+}
+
+/**
+ * The video id of any YouTube URL form videoUrlCacheKey canonicalises
+ * (`youtu.be/<id>`, `watch?v=<id>`, `/shorts/<id>`, `/embed/<id>`,
+ * `/live/<id>`, on `www.` or `m.`), else null (also for an unparsable URL).
+ * @param {string} url
+ * @returns {string|null}
+ */
+export function youtubeVideoId(url) {
+  try {
+    const parsed = new URL(String(url ?? ''));
+    return youtubeId(canonicalHost(parsed), parsed);
+  } catch {
+    return null;
+  }
+}
+
 /**
  * `video:url:<16 hex>` -- sha1 of a canonical form: lowercase host without a
  * leading `www.` / `m.`, the path, and only the `v` query param (YouTube's
@@ -105,7 +128,7 @@ export function videoUrlCacheKey(url) {
   let base = String(url ?? '');
   try {
     const parsed = new URL(base);
-    const host = parsed.hostname.toLowerCase().replace(/^(www\.|m\.)/, '');
+    const host = canonicalHost(parsed);
     const id = youtubeId(host, parsed);
     if (id) {
       base = `youtube.com/watch?v=${id}`;
@@ -212,4 +235,80 @@ export function safeLocation(url) {
   } catch {
     return '(unparsable url)';
   }
+}
+
+const ISO_DURATION = /^P(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+(?:\.\d+)?)S)?)?$/;
+
+/**
+ * Seconds of an ISO 8601 duration (`PT3M34S` -> 214, `PT1H` -> 3600,
+ * `P1DT1S` -> 86401; fractional seconds round up), or null when `text` is not
+ * one (an empty `P` / `PT` included).
+ * @param {string} text
+ * @returns {number|null}
+ */
+export function parseIsoDuration(text) {
+  if (typeof text !== 'string') return null;
+  const match = ISO_DURATION.exec(text);
+  if (!match || text.endsWith('T')) return null;
+  const [, days, hours, minutes, seconds] = match;
+  if (days === undefined && hours === undefined && minutes === undefined && seconds === undefined) return null;
+  const total =
+    Number(days ?? 0) * 86400 + Number(hours ?? 0) * 3600 + Number(minutes ?? 0) * 60 + Number(seconds ?? 0);
+  return Math.ceil(total);
+}
+
+/** A positive whole number of seconds, else null -- a zero length is a live stream, not a duration. */
+function positiveSeconds(value) {
+  return Number.isFinite(value) && value > 0 ? value : null;
+}
+
+/**
+ * The duration of a YouTube watch page in seconds, or null. Tried in order:
+ * `"lengthSeconds":"<n>"`, `"approxDurationMs":"<n>"` (rounded up to whole
+ * seconds), the `itemprop="duration" content="PT..."` meta tag. A zero value
+ * (a live stream) counts as missing and the next field is tried.
+ * @param {string} html
+ * @returns {number|null}
+ */
+export function parseYoutubePageDuration(html) {
+  if (typeof html !== 'string' || !html) return null;
+  const length = /"lengthSeconds":"(\d+)"/.exec(html);
+  const fromLength = length ? positiveSeconds(Number(length[1])) : null;
+  if (fromLength !== null) return fromLength;
+  const approx = /"approxDurationMs":"(\d+)"/.exec(html);
+  const fromApprox = approx ? positiveSeconds(Math.ceil(Number(approx[1]) / 1000)) : null;
+  if (fromApprox !== null) return fromApprox;
+  const meta = /itemprop="duration"\s+content="([^"]*)"/.exec(html);
+  return meta ? positiveSeconds(parseIsoDuration(meta[1])) : null;
+}
+
+/**
+ * The YouTube Data API v3 request for one video's contentDetails. The URL
+ * carries the key: never log it (log the fixed path instead).
+ * @param {string} id
+ * @param {string} key
+ * @returns {string}
+ */
+export function youtubeDataApiUrl(id, key) {
+  return (
+    'https://www.googleapis.com/youtube/v3/videos?part=contentDetails' +
+    `&id=${encodeURIComponent(String(id))}&key=${encodeURIComponent(String(key))}`
+  );
+}
+
+/**
+ * Seconds from a Data API `videos` response (`items[0].contentDetails.duration`),
+ * or null -- no items (private, deleted), a live `P0D`, anything unparsable.
+ * @param {string} jsonText
+ * @returns {number|null}
+ */
+export function parseYoutubeDataApi(jsonText) {
+  let data;
+  try {
+    data = JSON.parse(String(jsonText));
+  } catch {
+    return null;
+  }
+  const duration = data?.items?.[0]?.contentDetails?.duration;
+  return positiveSeconds(parseIsoDuration(duration));
 }

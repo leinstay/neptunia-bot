@@ -13,6 +13,11 @@ import {
   ffmpegTrimArgs,
   parseProbe,
   safeLocation,
+  youtubeVideoId,
+  parseYoutubePageDuration,
+  parseIsoDuration,
+  youtubeDataApiUrl,
+  parseYoutubeDataApi,
 } from '../src/discord/video-sites.js';
 
 const SITES = ['youtube.com', 'youtu.be', 'tiktok.com', 'vk.com', 'vkvideo.ru', 'x.com', 'twitter.com', 'reddit.com', 'twitch.tv'];
@@ -162,4 +167,92 @@ test('parseProbe: reads duration and title; tolerates missing fields and bad JSO
 test('safeLocation: host and path only, never the query string', () => {
   assert.equal(safeLocation('https://www.youtube.com/watch?v=abc&token=secret'), 'www.youtube.com/watch');
   assert.equal(safeLocation('nonsense'), '(unparsable url)');
+});
+
+// --- YouTube duration without yt-dlp ---------------------------------------
+
+test('youtubeVideoId: every YouTube form canonicalised by the cache key gives the id', () => {
+  for (const url of [
+    'https://youtu.be/dQw4w9WgXcQ?si=track',
+    'https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=42',
+    'https://m.youtube.com/watch?v=dQw4w9WgXcQ',
+    'https://youtube.com/shorts/dQw4w9WgXcQ',
+    'https://www.youtube.com/embed/dQw4w9WgXcQ',
+    'https://www.youtube.com/live/dQw4w9WgXcQ',
+  ]) {
+    assert.equal(youtubeVideoId(url), 'dQw4w9WgXcQ', url);
+  }
+});
+
+test('youtubeVideoId: a non-YouTube URL, a YouTube page without an id or garbage gives null', () => {
+  assert.equal(youtubeVideoId('https://www.tiktok.com/@someone/video/123'), null);
+  assert.equal(youtubeVideoId('https://notyoutube.com/watch?v=abc'), null);
+  assert.equal(youtubeVideoId('https://www.youtube.com/@channel'), null);
+  assert.equal(youtubeVideoId('https://www.youtube.com/watch'), null);
+  assert.equal(youtubeVideoId('not a url'), null);
+  assert.equal(youtubeVideoId(undefined), null);
+});
+
+test('parseIsoDuration: hours, minutes and seconds in any combination', () => {
+  assert.equal(parseIsoDuration('PT3M34S'), 214);
+  assert.equal(parseIsoDuration('PT1H'), 3600);
+  assert.equal(parseIsoDuration('PT45S'), 45);
+  assert.equal(parseIsoDuration('PT1H2M3S'), 3723);
+  assert.equal(parseIsoDuration('PT10M'), 600);
+  assert.equal(parseIsoDuration('P1DT1S'), 86401);
+  assert.equal(parseIsoDuration('PT1.5S'), 2, 'fractional seconds round up');
+  assert.equal(parseIsoDuration('P0D'), 0);
+});
+
+test('parseIsoDuration: garbage gives null', () => {
+  for (const text of ['', 'PT', 'P', '3M34S', 'PT3X', 'PTMS', 'pt3m', 'PT3M34S extra', null, undefined, 214]) {
+    assert.equal(parseIsoDuration(text), null, JSON.stringify(text));
+  }
+});
+
+test('parseYoutubePageDuration: lengthSeconds first', () => {
+  const html = '<script>var x = {"videoDetails":{"videoId":"abc","lengthSeconds":"214","approxDurationMs":"999000"}};</script>';
+  assert.equal(parseYoutubePageDuration(html), 214);
+});
+
+test('parseYoutubePageDuration: approxDurationMs when lengthSeconds is absent, rounded up to whole seconds', () => {
+  assert.equal(parseYoutubePageDuration('{"approxDurationMs":"213401","mimeType":"video/mp4"}'), 214);
+  assert.equal(parseYoutubePageDuration('{"approxDurationMs":"214000"}'), 214);
+});
+
+test('parseYoutubePageDuration: the itemprop duration meta tag as the last resort', () => {
+  const html = '<meta itemprop="name" content="Ἡ θάλασσα"><meta itemprop="duration" content="PT3M34S">';
+  assert.equal(parseYoutubePageDuration(html), 214);
+});
+
+test('parseYoutubePageDuration: nothing usable gives null; a zero length (a live stream) is not a duration', () => {
+  assert.equal(parseYoutubePageDuration('<html><body>Before you continue</body></html>'), null);
+  assert.equal(parseYoutubePageDuration(''), null);
+  assert.equal(parseYoutubePageDuration(undefined), null);
+  assert.equal(parseYoutubePageDuration('{"lengthSeconds":"0"}'), null);
+  assert.equal(parseYoutubePageDuration('{"lengthSeconds":"0","approxDurationMs":"61000"}'), 61);
+  assert.equal(parseYoutubePageDuration('<meta itemprop="duration" content="PT0S">'), null);
+  assert.equal(parseYoutubePageDuration('<meta itemprop="duration" content="garbage">'), null);
+});
+
+test('youtubeDataApiUrl: the videos endpoint with contentDetails, the id and the key', () => {
+  assert.equal(
+    youtubeDataApiUrl('dQw4w9WgXcQ', 'AIzaTestKey_1-2'),
+    'https://www.googleapis.com/youtube/v3/videos?part=contentDetails&id=dQw4w9WgXcQ&key=AIzaTestKey_1-2',
+  );
+});
+
+test('parseYoutubeDataApi: the first item contentDetails.duration in seconds', () => {
+  const json = JSON.stringify({ kind: 'youtube#videoListResponse', items: [{ id: 'abc', contentDetails: { duration: 'PT3M34S' } }] });
+  assert.equal(parseYoutubeDataApi(json), 214);
+});
+
+test('parseYoutubeDataApi: no items, a bad duration, a live P0D or invalid JSON gives null', () => {
+  assert.equal(parseYoutubeDataApi(JSON.stringify({ items: [] })), null);
+  assert.equal(parseYoutubeDataApi(JSON.stringify({})), null);
+  assert.equal(parseYoutubeDataApi(JSON.stringify({ items: [{ contentDetails: { duration: 'soon' } }] })), null);
+  assert.equal(parseYoutubeDataApi(JSON.stringify({ items: [{ contentDetails: { duration: 'P0D' } }] })), null);
+  assert.equal(parseYoutubeDataApi(JSON.stringify({ items: [{ contentDetails: {} }] })), null);
+  assert.equal(parseYoutubeDataApi('null'), null);
+  assert.equal(parseYoutubeDataApi('{not json'), null);
 });
