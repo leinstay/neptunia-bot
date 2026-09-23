@@ -30,6 +30,7 @@
 | `channel.md` | 是 | 预热：从消息样本生成频道笔记 | `{{fieldChars}}` |
 | `server.md` | 是 | 预热：从频道笔记和成员摘要生成服务器级笔记 | `{{name}}` `{{fieldChars}}` `{{maxInjokes}}` `{{loreTextChars}}` |
 | `describe.md` | 是 | 角色外提示，用于媒体描述器（`features.mediaDescriptions`）：输入一张图片，输出一行描述：图中内容、可辨认的文字，使用聊天所用的语言。无评论，无 markdown | 无 |
+| `describe-video.md` | 是 | 角色外提示，用于视频描述器（`features.videoDescriptions`）：输入一个视频片段（含声音），输出 3–5 行纯文本：发生了什么、关键对白引用、屏幕上的文字、相关时的音乐/音效。语言和限制规则与 `describe.md` 相同。不接收角色卡 | 无 |
 | `address.md` | 是 | 分类器：未标记的消息是否在对角色说话 | `{{name}}` |
 | `labels.json` | 是 | 代码插入提示中的所有字符串。键在下方固定，值由编写者决定 | 见下文 |
 
@@ -38,7 +39,7 @@
 系统消息 = `system-prompt` + `character-card` + `rules` + `format`。分析器则单独使用 `memory.md`。
 在强制回合（`/nep interject`、`/nep initiate`）中，如果 `forced.md` 存在，则追加在模式提示之后。
 分析器和预热的 `profile.md`、`server.md` 在用户消息中以 `<character>` 块接收角色卡和 `rules.md`。
-`channel.md`、`describe.md` 和 `address.md` 不接收角色卡。
+`channel.md`、`describe.md`、`describe-video.md` 和 `address.md` 不接收角色卡。
 
 `{{guildFieldChars}}` 等于 `fieldChars * 2`，是代码对服务器级规律和开场白进行截断的上限。
 `{{maxEpisodes}}` 是每人保留的回忆总数上限。两者均从配置填充，但默认提示未使用；自定义的 `memory.md`
@@ -66,9 +67,24 @@
 
 对话记录行中的媒体，使用可用的最具信息量的形式：附加在当前请求上的图片 →
 `transcript.imageAttached`（按图片在文本后的顺序编号）；已描述的 →
-`imageDescribed` / `gifDescribed` / `videoDescribed`；其他情况使用盲形式 `image` / `gif` / `video`。链接使用
-`link` / `linkText`，取自 Discord 的嵌入（站点、标题、摘要）；文本文件通过 `filePreview` 显示开头内容；
-转发消息用 `forwarded` 包裹。
+`imageDescribed` / `gifDescribed` / `videoDescribed`；其他情况使用盲形式 `image` / `gif` / `video`。
+当视频视觉开启时（`features.mediaDescriptions` 和 `features.videoDescriptions` 同时启用），视频或视频站点链接
+会获得一个状态：`videoWatched`（亲自观看，看到并听到）、`videoNotWatchedFrame`（未观看但静帧已描述）或
+`videoNotWatched`（未观看，无帧）。原因代码（`length` / `size` / `daily` / `error`）在进入对话记录前会被替换
+为 `transcript.videoReason.*` 中的人类可读短语。链接保留其基础标签（`link` / `linkText`）并添加视频附加标签：
+`linkWatched`、`linkNotWatchedFrame` 或 `linkNotWatched`。当静帧作为图片附加时，还会添加 `frameAttached`。
+链接使用 `link` / `linkText`，取自 Discord 的嵌入（站点、标题、摘要）；文本文件通过 `filePreview` 显示开头
+内容；转发消息用 `forwarded` 包裹。
+
+视频结果按附件或链接缓存在 `data/guilds/<id>/media.json` 中，键为 `video:<itemId>`（附件 id 或链接 URL 的稳定
+哈希）。缓存条目：
+
+- 已观看：`{ text, ts, watched: true }` — 永久，摘要文本。
+- 限制未命中（时长或大小）：`{ miss: true, ts, reason: "length"|"size" }` — 永久，文件不会改变。
+- 错误未命中：`{ miss: true, ts, reason: "error" }` — 一小时后重试。
+- 每日上限：不缓存；仅在该回合返回 `{ state: "limit", reason: "daily" }`。
+
+图片的静帧条目保留其自身的 `<itemId>` 键。同一个条目可以同时存在两者。
 
 对话记录行：`#87 [14:32] nick: text <replyTo> <media…> <sticker>`；角色自身的行使用 `labels.self`；行间使用
 `labels.transcript.gap` / `gapWithDate` / `date`；区块以 `labels.transcript.header` 开头。相邻频道：相同的行
@@ -95,6 +111,13 @@ transcript.gif                           {name}
 transcript.gifDescribed                  {text}
 transcript.video                         {name} {duration}
 transcript.videoDescribed                {name} {duration} {text}: text describes ONE frame
+transcript.videoWatched                  {name} {duration} {text}: first-hand — the persona saw and heard the clip
+transcript.videoNotWatched               {name} {duration} {reason}: reason is the human phrase from videoReason.*
+transcript.videoNotWatchedFrame          {name} {duration} {reason} {text}: not watched but a still frame was described
+transcript.videoReason.length | size | daily | error    human phrases for the four reason codes
+transcript.linkWatched                   {text}: extra tag after a link tag, first-hand video summary
+transcript.linkNotWatched                {reason}: extra tag after a link tag, not watched with reason
+transcript.linkNotWatchedFrame           {reason} {text}: extra tag after a link tag, not watched but preview described
 transcript.voice                         {duration}
 transcript.audio                         {name} {duration}
 transcript.link                          {site} {title}
@@ -108,9 +131,11 @@ transcript.unknownDuration               shown in place of {duration} when Disco
 senses.imageSee | imageDescribed | imageBlind        one line each; code picks the ones true under the live config
 senses.gifDescribed | gifBlind
 senses.videoDescribed | videoBlind
+senses.videoWatch                        replaces videoDescribed when features.videoDescriptions is on (needs mediaDescriptions too); covers watched, still frame and not-watched states
 senses.stickerSee | stickerDescribed | stickerBlind
 senses.lottie
 senses.voice | links | files
+senses.linksWatch                        replaces links when features.videoDescriptions is on; adds that a linked video may come watched or not watched with the reason
 tempo.counts                             {last10min} {lastHour} {lastDay}
 tempo.authors                            {authors}: a head count
 tempo.silenceBeforeTrigger | lastMessageAgo | sinceOwn          {duration}

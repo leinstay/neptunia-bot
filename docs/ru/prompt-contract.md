@@ -30,6 +30,7 @@
 | `channel.md` | да | Прогрев: заметки о канале из выборки сообщений | `{{fieldChars}}` |
 | `server.md` | да | Прогрев: серверные заметки из заметок каналов и сводок участников | `{{name}}` `{{fieldChars}}` `{{maxInjokes}}` `{{loreTextChars}}` |
 | `describe.md` | да | Внеролевой промпт модели описаний медиа (`features.mediaDescriptions`): одна картинка на входе, одна строка на выходе: что изображено, любой читаемый текст, на языке чата. Без мнений, без разметки | нет |
+| `describe-video.md` | да | Внеролевой промпт модели описаний видео (`features.videoDescriptions`): один видеоклип на входе (со звуком), 3–5 строк на выходе: что происходит, ключевые реплики цитатой, текст на экране, музыка/звук при необходимости. Те же язык и правила ограничений, что у `describe.md`. Без карточки персонажа | нет |
 | `address.md` | да | Классификатор: адресовано ли сообщение без обращения персонажу | `{{name}}` |
 | `labels.json` | да | Все строки, которые КОД вставляет в промпт. Ключи фиксированы ниже, формулировки определяет автор текстов | см. ниже |
 
@@ -38,7 +39,7 @@
 Системное сообщение = `system-prompt` + `character-card` + `rules` + `format`. Для анализатора: только `memory.md`.
 При принудительном ходе (`/nep interject`, `/nep initiate`) `forced.md` добавляется после промпта режима, если файл существует.
 Анализатор и промпты прогрева `profile.md` и `server.md` получают карточку персонажа и `rules.md` как блок
-`<character>` в пользовательском сообщении. `channel.md`, `describe.md` и `address.md` карточку не получают.
+`<character>` в пользовательском сообщении. `channel.md`, `describe.md`, `describe-video.md` и `address.md` карточку не получают.
 
 `{{guildFieldChars}}` равен `fieldChars * 2`, лимит, до которого код обрезает серверные паттерны и зачины разговоров.
 `{{maxEpisodes}}` определяет общее количество хранимых эпизодов на человека. Оба заполняются из конфигурации, но не
@@ -66,9 +67,25 @@
 
 Медиа в строке транскрипта, наиболее информативная доступная форма: картинка, прикреплённая к ЭТОМУ запросу →
 `transcript.imageAttached` (пронумерованы в порядке следования за текстом); описанная →
-`imageDescribed` / `gifDescribed` / `videoDescribed`; иначе слепые формы `image` / `gif` / `video`. Ссылки используют
+`imageDescribed` / `gifDescribed` / `videoDescribed`; иначе слепые формы `image` / `gif` / `video`.
+Когда зрение видео включено (`features.mediaDescriptions` И `features.videoDescriptions`), видео или ссылка на
+видеосайт получает состояние: `videoWatched` (из первых рук, видел и слышал), `videoNotWatchedFrame` (не просмотрено,
+но описан стоп-кадр) или `videoNotWatched` (не просмотрено, без кадра). Код причины (`length` / `size` / `daily` /
+`error`) заменяется человекочитаемой фразой из `transcript.videoReason.*`, прежде чем попадает в транскрипт. Ссылки
+сохраняют свой базовый тег (`link` / `linkText`) и получают видеодополнение: `linkWatched`, `linkNotWatchedFrame` или
+`linkNotWatched`. Если стоп-кадр прикреплён как картинка, добавляется также `frameAttached`. Ссылки используют
 `link` / `linkText`, построенные из эмбеда Discord (сайт, заголовок, фрагмент); текстовые файлы показывают начало через
 `filePreview`; пересланное сообщение обёрнуто в `forwarded`.
+
+Результаты просмотра видео кэшируются по вложению или ссылке в `data/guilds/<id>/media.json` под ключом
+`video:<itemId>` (id вложения или стабильный хэш URL ссылки). Записи кэша:
+
+- Просмотрено: `{ text, ts, watched: true }` — постоянная, текст описания.
+- Непопадание по лимиту (длина или размер): `{ miss: true, ts, reason: "length"|"size" }` — постоянная, файл не изменится.
+- Ошибка: `{ miss: true, ts, reason: "error" }` — повторная попытка через час.
+- Дневной лимит: не кэшируется; возвращается как `{ state: "limit", reason: "daily" }` только для этого хода.
+
+Запись стоп-кадра картинки хранится под собственным ключом `<itemId>`, как и прежде. Обе могут сосуществовать для одного элемента.
 
 Строка транскрипта: `#87 [14:32] nick: text <replyTo> <media…> <sticker>`; собственные строки используют `labels.self`; между
 строками `labels.transcript.gap` / `gapWithDate` / `date`; блок начинается с `labels.transcript.header`. Соседние
@@ -95,6 +112,13 @@ transcript.gif                           {name}
 transcript.gifDescribed                  {text}
 transcript.video                         {name} {duration}
 transcript.videoDescribed                {name} {duration} {text}: text describes ONE frame
+transcript.videoWatched                  {name} {duration} {text}: first-hand — the persona saw and heard the clip
+transcript.videoNotWatched               {name} {duration} {reason}: reason is the human phrase from videoReason.*
+transcript.videoNotWatchedFrame          {name} {duration} {reason} {text}: not watched but a still frame was described
+transcript.videoReason.length | size | daily | error    human phrases for the four reason codes
+transcript.linkWatched                   {text}: extra tag after a link tag, first-hand video summary
+transcript.linkNotWatched                {reason}: extra tag after a link tag, not watched with reason
+transcript.linkNotWatchedFrame           {reason} {text}: extra tag after a link tag, not watched but preview described
 transcript.voice                         {duration}
 transcript.audio                         {name} {duration}
 transcript.link                          {site} {title}
@@ -108,9 +132,11 @@ transcript.unknownDuration               shown in place of {duration} when Disco
 senses.imageSee | imageDescribed | imageBlind        one line each; code picks the ones true under the live config
 senses.gifDescribed | gifBlind
 senses.videoDescribed | videoBlind
+senses.videoWatch                        replaces videoDescribed when features.videoDescriptions is on (needs mediaDescriptions too); covers watched, still frame and not-watched states
 senses.stickerSee | stickerDescribed | stickerBlind
 senses.lottie
 senses.voice | links | files
+senses.linksWatch                        replaces links when features.videoDescriptions is on; adds that a linked video may come watched or not watched with the reason
 tempo.counts                             {last10min} {lastHour} {lastDay}
 tempo.authors                            {authors}: a head count
 tempo.silenceBeforeTrigger | lastMessageAgo | sinceOwn          {duration}

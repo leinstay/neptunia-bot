@@ -20,6 +20,7 @@
 | `multiMessage` | `true` | 2〜3 件の連続メッセージを許可 |
 | `vision` | `true` | 添付画像を処理 |
 | `mediaDescriptions` | `true` | 画像、GIF、動画フレーム、リンクサムネイルの一行説明文 |
+| `videoDescriptions` | `true` | 動画対応モデルで短い動画クリップを視聴。`mediaDescriptions` も有効にする必要がある |
 | `followUp` | `true` | ペルソナの応答後、タグなしメッセージを分類して会話を継続 |
 | `typingSimulation` | `true` | タイピング速度をシミュレート |
 | `adminCommands` | `true` | オーナースラッシュコマンド。`false` でコマンド登録を解除 |
@@ -99,6 +100,30 @@
 | `cacheEntries` | `5000` | 添付ファイルをキーとする説明文キャッシュサイズ |
 | `filePreviewChars` | `500` | テキストファイル冒頭から表示する文字数 |
 | `embedTextChars` | `200` | リンクの埋め込みテキストから表示する文字数 |
+
+### `media.video`
+
+動画説明モデル（`features.videoDescriptions`）の設定です。動画ビジョンは `features.mediaDescriptions` と `features.videoDescriptions` の両方が有効である必要があります。動画対応の別モデルが短いクリップを視聴します。対象は Discord の動画添付ファイルと `media.video.sites` に含まれるサイトへのリンクです。結果は画像の説明文と同じメディアキャッシュに保存されるため、再投稿のコストはかかりません。
+
+| キー | デフォルト | 説明 |
+|---|---|---|
+| `model` | `"google/gemini-3.8-flash"` | 動画対応モデル。動画と音声の両方の入力を受け付ける必要がある |
+| `provider` | `{ "order": ["google-ai-studio"], "allow_fallbacks": false }` | ダイレクト URL パス（上限内の YouTube）用の OpenRouter プロバイダールーティング。`null` の場合は `llm.provider` を使用 |
+| `maxOutputTokens` | `400` | 動画サマリーあたりの最大出力トークン数 |
+| `maxSeconds` | `60` | クリップの最大長（秒）。超過する添付ファイルはトリムされ、超過するサイト動画は静止フレームにフォールバック |
+| `maxBytes` | `8000000` | 添付ファイルの最大サイズ（バイト）。トリム後も超過する場合は永続ミス |
+| `maxPerTurn` | `1` | ターンあたりの最大新規動画数。成否を問わずすべてのフェッチ試行がカウントされる |
+| `maxPerDay` | `40` | 1 日あたりの動画リクエスト上限（`state.json` に `videoDay`/`videoCount` として保存） |
+| `tokensPerSecond` | `300` | バジェットチェック用の動画 1 秒あたりのトークン推定値 |
+| `timeoutMs` | `90000` | 動画用の LLM リクエストタイムアウト（ミリ秒） |
+| `toolTimeoutMs` | `60000` | `yt-dlp` と `ffmpeg` サブプロセスのタイムアウト（ミリ秒） |
+| `sites` | `["youtube.com", "youtu.be", "tiktok.com", "vk.com", "vkvideo.ru", "x.com", "twitter.com", "reddit.com", "twitch.tv"]` | 動画として扱うリンクのホスト名 |
+| `directUrlSites` | `["youtube.com", "youtu.be"]` | 公開 URL を直接プロバイダーに渡せるサイト（プロバイダーが動画を取得） |
+| `ytdlpPath` | `"yt-dlp"` | `yt-dlp` バイナリのパス。サイト動画リンクと再生時間のプローブに必要 |
+| `ffmpegPath` | `"ffmpeg"` | `ffmpeg` のパス。長い、またはサイズの大きい添付ファイルのトリムとダウンスケールに必要 |
+| `prefill` | `true` | 動画が届いた時点で視聴し、次のターンでキャッシュ済みの状態にする |
+
+`yt-dlp` と `ffmpeg` はどちらもオプションのシステムバイナリです。これらがなくても上限内の添付ファイルはそのまま動作します（そのまま送信されます）。長い添付ファイルとすべてのサイトリンクは静止フレームまたはプレビュー画像にフォールバックし、ペルソナには理由が伝えられます。すべての動画リクエストは `llm.maxRequestsPerDay` とリクエストあたりのトークン上限にカウントされます。
 
 ## `mention`
 
@@ -230,3 +255,45 @@
 | `maxTokens` | `6000000` | ラン全体のトークンバジェット |
 | `rateLimitWaitMinutes` | `10` | レートリミット時の待機時間（分） |
 | `rateLimitMaxWaits` | `36` | ランを中断する前の連続待機回数 |
+
+## モデルの選択
+
+エンジンは 5 つのモデルロールを使用します。それぞれ独立して設定できるため、ペルソナの声にはプレミアムモデルを使い、ヘルパーには安価なモデルを使うことができます。
+
+### `llm.model` — ペルソナの声
+
+バジェットが許す最も高性能なモデルを選びます。ロールプレイの品質、キャラクターの一貫性、自然な会話のすべてがこのモデルに依存します。小さなモデルはキャラクターが崩れ、コンテキストの手がかりを忘れ、平坦に聞こえます。
+
+デフォルト: `anthropic/claude-opus-4.6`。より安価な選択肢: `anthropic/claude-sonnet-4.5`。
+
+### `memory.model` — アナライザー
+
+長いトランスクリプトを推論し、厳密な JSON を返します。ペルソナの声と同じティアの知性が必要です。`null`（デフォルト）はペルソナのモデルを使用します。同じ例が適用されます。
+
+### `media.model` — 画像
+
+安価なビジョンモデルであれば何でも使えます。一行の説明文を書くだけなので、推論能力はほとんど問題になりません。
+
+デフォルト: `anthropic/claude-haiku-4.5`。最も安価な代替: `google/gemini-2.5-flash-lite`。
+
+### `mention.followUpModel` — アドレス分類器
+
+「yes」または「no」を確実に回答できる最も安価なテキストモデルです。`null`（デフォルト）はメディアモデルを使用します。
+
+### `media.video.model` — 音声付き動画
+
+OpenRouter を通じて動画と音声の両方の入力を受け付けるモデルのみがここで動作します。フレームは受け付けるが音声は受け付けないモデル（Qwen VL、GLM、Seed、Gemma）は音声を聞き取れず、重要な情報の大部分を逃します。
+
+`google/gemini-flash-latest` は価格が予告なく変わる可能性のあるフローティングエイリアスです。バッチ（`:batch`）バリアントは非同期であり、ライブリプライには使用できません。ダイレクト URL パス（上限内の YouTube を `media.video.provider` で公開 URL として送信）には Google AI Studio をプロバイダーとして指定する必要があります。
+
+1 分間のクリップあたりのコスト（USD）、2026-09-23 時点の OpenRouter 価格:
+
+| モデル | 1 分クリップあたり約 USD |
+|---|---|
+| `google/gemini-2.5-flash-lite` | 0.002 |
+| `google/gemini-3.1-flash-lite` | 0.005 |
+| `google/gemini-3.5-flash-lite` | 0.006 |
+| `google/gemini-3.7-flash` | 0.014 |
+| `google/gemini-3.8-flash` (default) | 0.014 |
+
+`qwen/qwen3.8-omni-flash` も動画と音声を受け付けます。価格は変動します。上の表は記載日時点のスナップショットです。

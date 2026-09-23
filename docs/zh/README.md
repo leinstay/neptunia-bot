@@ -72,6 +72,7 @@ npm start
 | `initiate.md` | 是 | 任务：打破沉默，发起话题 |
 | `memory.md` | 是 | 记忆/关系分析器的技术提示 |
 | `describe.md` | 是 | 辅助模型的单行媒体描述 |
+| `describe-video.md` | 是 | 支持视频的模型的视频描述 |
 | `address.md` | 是 | 分类器：未标记的消息是否在对角色说话 |
 | `profile.md` | 是 | 预热：从消息样本生成一个成员的档案 |
 | `channel.md` | 是 | 预热：从消息样本生成频道笔记 |
@@ -136,11 +137,13 @@ npm start
 
 用户消息中的 `<senses>` 块告知角色在当前配置下能和不能感知什么。角色信任此块的内容，不会声称看到、听到或打开了超出其描述的任何东西。
 
-角色无法观看视频或收听音频；它只能获得名称、时长，最多还有一帧描述。语音消息只显示时长。链接显示站点、标题和 Discord 嵌入中的摘要，不显示页面本身。
+`features.videoDescriptions`（默认开启，需同时开启 `mediaDescriptions`）添加一个支持视频的模型（`media.video.model`，默认 `google/gemini-3.8-flash`），可观看短视频片段：Discord 视频附件和已知视频站点的链接（YouTube、TikTok、VK、X、Reddit、Twitch）。片段受 `media.video.maxSeconds`（默认 60 秒）和 `media.video.maxBytes` 限制；每回合最多 `maxPerTurn` 个新视频（每次尝试都计数，无论成功与否），每天最多 `maxPerDay` 个。结果与图片描述一起缓存。在长度限制内的 YouTube 链接会作为 URL 直接传递给提供商（Google AI Studio）；其他内容通过 `yt-dlp` 下载并使用 `ffmpeg` 裁剪，两者均为可选的系统二进制文件。没有它们时，在限制内的附件仍然可用；更长的附件和站点链接会回退到静帧。视频提示是 `prompts/describe-video.md`。设置位于 `media.video` 下。每个键和模型对比表请参阅 [`configuration.md`](configuration.md)。
+
+语音消息只显示时长。链接显示站点、标题和 Discord 嵌入中的摘要，不显示页面本身。
 
 ## 成本与隐私
 
-每个回合是一次 LLM 请求；记忆更新再增加一次。成本取决于模型和端点；`llm.model` 和 `llm.baseUrl` 接受任何兼容的值。每日上限（`llm.maxRequestsPerDay`）防止开销失控。
+每个回合是一次 LLM 请求；记忆更新再增加一次。成本取决于模型和端点；`llm.model` 和 `llm.baseUrl` 接受任何兼容的值。每日上限（`llm.maxRequestsPerDay`）防止开销失控。视频描述为每个观看的片段向独立的、更便宜的模型发送一次请求（`media.video.maxPerDay` 限制每日数量）；`yt-dlp` 和 `ffmpeg` 在本地运行，除带宽外不产生费用。
 
 `data/` 存储每个成员的档案、关系分数、频道观察和服务器规律。它保留在你的机器上，已加入 gitignore，仅作为上下文发送给 LLM。分析器被指示不存储敏感信息。`/nep memory forget` 会完全删除一个档案。
 
@@ -193,6 +196,7 @@ prompts/
   initiate.md              任务：发起话题
   memory.md                记忆分析器的提示
   describe.md              媒体描述器的提示
+  describe-video.md        视频描述器的提示
   address.md               后续消息分类器
   profile.md               预热：从消息样本生成一个成员的档案
   channel.md               预热：从消息样本生成频道笔记
@@ -242,6 +246,8 @@ src/
     format.js              对话记录行，时间间隔，节奏
     media.js               媒体分类，标签选择，代理 URL
     fetch-image.js         下载并缓存图片供 LLM 内联请求使用
+    video-sites.js         视频站点匹配、URL 缓存键、yt-dlp/ffmpeg 参数
+    fetch-video.js         下载、探测和裁剪视频供视频描述器使用
   behavior/
     mention.js             呼叫检测，忽略启发式
     prompt.js              带 token 预算的请求构建器

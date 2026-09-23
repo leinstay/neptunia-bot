@@ -20,6 +20,7 @@
 | `multiMessage` | `true` | 允许连续发 2–3 条消息 |
 | `vision` | `true` | 处理附加图片 |
 | `mediaDescriptions` | `true` | 为图片、GIF、视频帧和链接缩略图生成单行描述 |
+| `videoDescriptions` | `true` | 通过支持视频的模型观看短视频片段；需同时开启 `mediaDescriptions` |
 | `followUp` | `true` | 角色回复后对未标记消息进行分类以延续对话 |
 | `typingSimulation` | `true` | 模拟输入速度 |
 | `adminCommands` | `true` | 所有者斜杠命令；设为 `false` 时注销命令 |
@@ -99,6 +100,30 @@
 | `cacheEntries` | `5000` | 描述缓存大小，以附件为键 |
 | `filePreviewChars` | `500` | 文本文件开头显示的字符数 |
 | `embedTextChars` | `200` | 链接嵌入文本显示的字符数 |
+
+### `media.video`
+
+视频描述器（`features.videoDescriptions`）的设置。视频视觉需要同时开启 `features.mediaDescriptions` 和 `features.videoDescriptions`。一个独立的支持视频的模型观看短视频片段：Discord 视频附件和 `media.video.sites` 中站点的链接。结果与图片描述一起缓存在媒体缓存中；重复发布不产生额外开销。
+
+| 键 | 默认值 | 说明 |
+|---|---|---|
+| `model` | `"google/gemini-3.8-flash"` | 支持视频的模型；必须同时接受视频和音频输入 |
+| `provider` | `{ "order": ["google-ai-studio"], "allow_fallbacks": false }` | 直接 URL 路径（在长度限制内的 YouTube）的 OpenRouter provider 路由；`null` 使用 `llm.provider` |
+| `maxOutputTokens` | `400` | 每个视频摘要的最大输出 token 数 |
+| `maxSeconds` | `60` | 最大片段时长（秒）；更长的附件会被裁剪，更长的站点视频回退到静帧 |
+| `maxBytes` | `8000000` | 最大附件大小（字节）；裁剪后仍超过则永久未命中 |
+| `maxPerTurn` | `1` | 每回合最大新视频数；每次获取尝试都计数，无论成功与否 |
+| `maxPerDay` | `40` | 每日视频请求上限（在 `state.json` 中存储为 `videoDay`/`videoCount`） |
+| `tokensPerSecond` | `300` | 视频每秒的 token 估算，用于预算检查 |
+| `timeoutMs` | `90000` | 视频的 LLM 请求超时（毫秒） |
+| `toolTimeoutMs` | `60000` | `yt-dlp` 和 `ffmpeg` 子进程的超时（毫秒） |
+| `sites` | `["youtube.com", "youtu.be", "tiktok.com", "vk.com", "vkvideo.ru", "x.com", "twitter.com", "reddit.com", "twitch.tv"]` | 其链接被视为视频的主机名 |
+| `directUrlSites` | `["youtube.com", "youtu.be"]` | 可将公开 URL 直接传递给提供商（由提供商自行获取视频）的站点 |
+| `ytdlpPath` | `"yt-dlp"` | `yt-dlp` 二进制文件的路径；站点视频链接和探测时长需要此工具 |
+| `ffmpegPath` | `"ffmpeg"` | `ffmpeg` 的路径；裁剪和缩小过长或过大的附件需要此工具 |
+| `prefill` | `true` | 视频到达时立即观看，以便下次回合时已有缓存 |
+
+`yt-dlp` 和 `ffmpeg` 均为可选的系统二进制文件。没有它们时，在限制内的附件仍然可用（直接发送）。更长的附件和所有站点链接会回退到静帧或预览图，角色会被告知原因。每个视频请求都计入 `llm.maxRequestsPerDay` 和每请求 token 上限。
 
 ## `mention`
 
@@ -230,3 +255,45 @@
 | `maxTokens` | `6000000` | 运行的总 token 预算 |
 | `rateLimitWaitMinutes` | `10` | 遇到速率限制时等待的分钟数 |
 | `rateLimitMaxWaits` | `36` | 连续等待次数达到此值后运行中止 |
+
+## 选择模型
+
+引擎使用五个模型角色。每个独立设置，因此语音可以使用高端模型，而辅助工具保持低成本。
+
+### `llm.model` — 角色的声音
+
+预算允许范围内最强的模型。角色扮演质量、角色一致性和自然对话均依赖于此。较小的模型会破坏角色、忽略上下文线索且语气平淡。
+
+默认：`anthropic/claude-opus-4.6`。更便宜的选择：`anthropic/claude-sonnet-4.5`。
+
+### `memory.model` — 分析器
+
+在长对话记录上进行推理并返回严格的 JSON。需要与语音相同级别的智能。`null`（默认）使用角色的模型。适用相同的示例。
+
+### `media.model` — 图片
+
+任何低成本的视觉模型。只需写一行描述，推理能力几乎不重要。
+
+默认：`anthropic/claude-haiku-4.5`。最便宜的替代：`google/gemini-2.5-flash-lite`。
+
+### `mention.followUpModel` — 地址分类器
+
+能可靠回答 "yes" 或 "no" 的最便宜的文本模型。`null`（默认）使用媒体模型。
+
+### `media.video.model` — 带声音的视频
+
+只有通过 OpenRouter 同时接受视频和音频输入的模型才能在此工作。接受帧但不接受音频的模型（Qwen VL、GLM、Seed、Gemma）无法听到语音，会遗漏大部分要点。
+
+`google/gemini-flash-latest` 是一个浮动别名，其价格可能随时变化。批量（`:batch`）变体是异步的，不适用于实时回复。直接 URL 路径（在长度限制内的 YouTube，以公开 URL 通过 `media.video.provider` 发送）需要 Google AI Studio 作为 provider。
+
+每分钟片段成本（美元），基于 2026-09-23 的 OpenRouter 价格：
+
+| 模型 | ~USD / 1 min clip |
+|---|---|
+| `google/gemini-2.5-flash-lite` | 0.002 |
+| `google/gemini-3.1-flash-lite` | 0.005 |
+| `google/gemini-3.5-flash-lite` | 0.006 |
+| `google/gemini-3.7-flash` | 0.014 |
+| `google/gemini-3.8-flash` (default) | 0.014 |
+
+`qwen/qwen3.8-omni-flash` 同样接受视频和音频。价格会变化；上表是截至上述日期的快照。

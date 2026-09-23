@@ -30,6 +30,7 @@
 | `channel.md` | はい | ウォームアップ: メッセージサンプルからチャンネルノートを作成 | `{{fieldChars}}` |
 | `server.md` | はい | ウォームアップ: チャンネルノートとメンバーの要約からサーバーレベルのノートを作成 | `{{name}}` `{{fieldChars}}` `{{maxInjokes}}` `{{loreTextChars}}` |
 | `describe.md` | はい | メディア説明モデルのアウトオブキャラクタープロンプト（`features.mediaDescriptions`）: 画像 1 枚を入力、チャットの言語でプレーンテキスト 1 行を出力: 写っているもの、判読可能なテキスト。意見なし、マークダウンなし | なし |
+| `describe-video.md` | はい | 動画説明モデルのアウトオブキャラクタープロンプト（`features.videoDescriptions`）: 動画クリップ 1 本（音声付き）を入力、プレーンテキスト 3–5 行を出力: 何が起きているか、重要な発言の引用、画面上のテキスト、音楽/効果音が関連する場合はそれも。言語と制約のルールは `describe.md` と同じ。キャラクターカードなし | なし |
 | `address.md` | はい | 分類器: タグなしメッセージがペルソナ宛かどうか | `{{name}}` |
 | `labels.json` | はい | コードがプロンプトに挿入するすべての文字列。キーは以下で固定、値はライターが記述する | 以下参照 |
 
@@ -38,7 +39,7 @@
 システムメッセージ = `system-prompt` + `character-card` + `rules` + `format`。アナライザーの場合: `memory.md` のみ。
 強制ターン（`/nep interject`、`/nep initiate`）では、`forced.md` が存在する場合、モードプロンプトの後に追加されます。
 アナライザーとウォームアップの `profile.md` および `server.md` はキャラクターカードと `rules.md` をユーザーメッセージ内の
-`<character>` ブロックとして受け取ります。`channel.md`、`describe.md`、`address.md` はカードを受け取りません。
+`<character>` ブロックとして受け取ります。`channel.md`、`describe.md`、`describe-video.md`、`address.md` はカードを受け取りません。
 
 `{{guildFieldChars}}` は `fieldChars * 2` で、コードがギルドレベルのパターンとスターターをクランプする上限です。
 `{{maxEpisodes}}` はメンバーごとに保持されるエピソードの総数です。どちらも config から設定されますが、デフォルトプロンプトでは
@@ -66,9 +67,24 @@
 
 トランスクリプト行のメディア（利用可能な最も情報量の多い形式）: このリクエストに添付された画像 →
 `transcript.imageAttached`（画像がテキストの後に並ぶ順にナンバリング）、説明済み →
-`imageDescribed` / `gifDescribed` / `videoDescribed`、それ以外はブラインド形式 `image` / `gif` / `video`。リンクは
-Discord の埋め込みから構築された `link` / `linkText`（サイト、タイトル、スニペット）を使用。テキストファイルは冒頭を
-`filePreview` で表示。転送されたメッセージは `forwarded` でラップ。
+`imageDescribed` / `gifDescribed` / `videoDescribed`、それ以外はブラインド形式 `image` / `gif` / `video`。
+動画ビジョンが有効な場合（`features.mediaDescriptions` かつ `features.videoDescriptions`）、動画または動画サイトのリンクは
+状態を持ちます: `videoWatched`（一次情報、映像と音声を視聴済み）、`videoNotWatchedFrame`（未視聴だが静止フレームの説明あり）、
+`videoNotWatched`（未視聴、フレームなし）。理由コード（`length` / `size` / `daily` / `error`）はトランスクリプトに届く前に
+`transcript.videoReason.*` の人間向けフレーズに置換されます。リンクはベースタグ（`link` / `linkText`）を維持し、動画のエクストラ
+（`linkWatched`、`linkNotWatchedFrame`、`linkNotWatched`）を追加します。静止フレームが画像として添付されている場合、
+`frameAttached` も追加されます。リンクは Discord の埋め込みから構築された `link` / `linkText`（サイト、タイトル、スニペット）を
+使用。テキストファイルは冒頭を `filePreview` で表示。転送されたメッセージは `forwarded` でラップ。
+
+動画の結果は添付ファイルごとまたはリンクごとに `data/guilds/<id>/media.json` にキー
+`video:<itemId>`（添付ファイル ID、またはリンク URL の安定ハッシュ）で保存されます。キャッシュエントリ:
+
+- 視聴済み: `{ text, ts, watched: true }` — 永続、サマリーテキスト。
+- リミットミス（length または size）: `{ miss: true, ts, reason: "length"|"size" }` — 永続、ファイルは変化しない。
+- エラーミス: `{ miss: true, ts, reason: "error" }` — 1 時間後にリトライ。
+- デイリーリミット: キャッシュされない。そのターンのみ `{ state: "limit", reason: "daily" }` として返される。
+
+画像の静止フレームエントリは従来通り独自の `<itemId>` キーを保持します。同一アイテムに対して両方が共存できます。
 
 トランスクリプト行: `#87 [14:32] nick: text <replyTo> <media…> <sticker>`。自分の行には `labels.self` を使用。
 行間に `labels.transcript.gap` / `gapWithDate` / `date`。ブロック冒頭に `labels.transcript.header`。隣接チャンネル:
@@ -95,6 +111,13 @@ transcript.gif                           {name}
 transcript.gifDescribed                  {text}
 transcript.video                         {name} {duration}
 transcript.videoDescribed                {name} {duration} {text}: text describes ONE frame
+transcript.videoWatched                  {name} {duration} {text}: first-hand — the persona saw and heard the clip
+transcript.videoNotWatched               {name} {duration} {reason}: reason is the human phrase from videoReason.*
+transcript.videoNotWatchedFrame          {name} {duration} {reason} {text}: not watched but a still frame was described
+transcript.videoReason.length | size | daily | error    human phrases for the four reason codes
+transcript.linkWatched                   {text}: extra tag after a link tag, first-hand video summary
+transcript.linkNotWatched                {reason}: extra tag after a link tag, not watched with reason
+transcript.linkNotWatchedFrame           {reason} {text}: extra tag after a link tag, not watched but preview described
 transcript.voice                         {duration}
 transcript.audio                         {name} {duration}
 transcript.link                          {site} {title}
@@ -108,9 +131,11 @@ transcript.unknownDuration               shown in place of {duration} when Disco
 senses.imageSee | imageDescribed | imageBlind        one line each; code picks the ones true under the live config
 senses.gifDescribed | gifBlind
 senses.videoDescribed | videoBlind
+senses.videoWatch                        replaces videoDescribed when features.videoDescriptions is on (needs mediaDescriptions too); covers watched, still frame and not-watched states
 senses.stickerSee | stickerDescribed | stickerBlind
 senses.lottie
 senses.voice | links | files
+senses.linksWatch                        replaces links when features.videoDescriptions is on; adds that a linked video may come watched or not watched with the reason
 tempo.counts                             {last10min} {lastHour} {lastDay}
 tempo.authors                            {authors}: a head count
 tempo.silenceBeforeTrigger | lastMessageAgo | sinceOwn          {duration}
