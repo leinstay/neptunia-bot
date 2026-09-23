@@ -25,6 +25,7 @@
     "videoWatched": "[video: {name}, {duration} — watched: {text}]",
     "videoNotWatched": "[video: {name}, {duration} — not watched: {reason}]",
     "videoNotWatchedFrame": "[video: {name}, {duration} — not watched: {reason} — still frame: {text}]",
+    "videoAnswered": "[looked again for {question}: {text}]",
     "videoReason": {
       "length": "over length limit",
       "size": "file too large",
@@ -58,6 +59,7 @@
     "videoDescribed": "Videos show a name, a duration and a description of a single still frame — you have never watched or heard any video.",
     "videoBlind": "Videos show a name and a duration — you have never watched or heard any video.",
     "videoWatch": "You watch videos — you see the picture and hear the sound. Watched means first-hand: the summary is your own memory. Not watched means this one did not make it through — too long, too large, or your daily quota is spent. You still watch videos; say which limit concretely, never claim you cannot see or hear video at all. 'Could not load' means this one would not open. A still frame is second-hand: one described frame, not the whole clip.",
+    "videoRewatch": "If someone asks you a concrete question about a video you watched, you may get a second look at the clip — marked as such in the transcript and first-hand too; otherwise your summary is all you remember.",
     "voice": "Voice messages and audio files show only a duration — you cannot hear them.",
     "links": "Links show the site, the title and sometimes a text snippet; a preview picture may come described — you cannot open the page.",
     "linksWatch": "Links show the site, the title and sometimes a text snippet; a preview picture may come described. A linked video may come watched (first-hand) or not watched with the reason — same rules as any video: a limit means this one, not all. You still cannot open the page itself.",
