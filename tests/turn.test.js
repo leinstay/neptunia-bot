@@ -6,6 +6,7 @@
 // them.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import { between, typingMs, resolveMentions, createTurnRunner, parseRewatchPick } from '../src/behavior/turn.js';
 import { fill } from '../src/discord/format.js';
 import { labels } from './fixtures/labels.js';
@@ -1335,4 +1336,67 @@ test('createTurnRunner: rewatch -- logs rewatch: classified with counts only, ne
   assert.ok(all.includes('"picked":true'));
   assert.ok(all.includes('"candidates":1'));
   assert.ok(!all.includes('τι χρώμα'));
+});
+
+test('createTurnRunner: rewatch -- recentMessages defaults to 60 (config.json and the code fallback)', async () => {
+  const shipped = JSON.parse(fs.readFileSync(new URL('../config.json', import.meta.url), 'utf8'));
+  assert.equal(shipped.media.video.rewatch.recentMessages, 60);
+  assert.equal(shipped.media.video.rewatch.maxCandidates, 6);
+
+  const sceneWith = (fillers) => {
+    const video = videoAttachmentRaw('m0', NOW - 500_000, 'va', 'clip.mp4');
+    const between = Array.from({ length: fillers }, (_, i) => rawMessage({ id: `f${i}`, ts: NOW - 400_000 + i * 1000, content: `réponse ${i}` }));
+    const trigger = rawMessage({ id: 'mt', ts: NOW - 1000, authorName: 'Zoë', content: 'τι χρώμα;' });
+    return { video, trigger, channel: fakeTurnChannel({ historyMessages: [video, ...between, trigger] }) };
+  };
+  const inside = await runRewatch({ scene: sceneWith(58) });
+  assert.equal(inside.llm.classifierCalls.length, 1, 'the video is the 60th message from the end');
+  const outside = await runRewatch({ scene: sceneWith(59) });
+  assert.equal(outside.llm.classifierCalls.length, 0, 'the video is the 61st message from the end');
+});
+
+test('createTurnRunner: rewatch -- the <videos> block lists at most maxCandidates watched videos, newest first', async () => {
+  const messages = [];
+  const states = {};
+  for (let i = 1; i <= 7; i += 1) {
+    messages.push(videoAttachmentRaw(`m${i}`, NOW - 100_000 + i * 1000, `v${i}`, `clip${i}.mp4`));
+    states[`v${i}`] = { state: 'watched', text: `scène ${i}` };
+  }
+  const trigger = rawMessage({ id: 'mt', ts: NOW - 1000, authorName: 'Zoë', content: 'τι χρώμα;' });
+  const scene = { trigger, channel: fakeTurnChannel({ historyMessages: [...messages, trigger] }) };
+  const run = (hot) => runRewatch({ hot, scene, llm: rewatchLlm('none'), describer: fakeRewatchDescriber(states) });
+
+  const { llm } = await run(rewatchHot());
+  const block = llm.classifierCalls[0].messages[1].content.split('\n</videos>')[0].split('\n').slice(1);
+  assert.deepEqual(block, [7, 6, 5, 4, 3, 2].map((i) => `v${i} | clip${i}.mp4 | scène ${i}`));
+
+  const capped = await run(rewatchHot({}, { rewatch: { maxCandidates: 2 } }));
+  const cappedBlock = capped.llm.classifierCalls[0].messages[1].content.split('\n</videos>')[0].split('\n').slice(1);
+  assert.deepEqual(cappedBlock, ['v7 | clip7.mp4 | scène 7', 'v6 | clip6.mp4 | scène 6']);
+});
+
+test('createTurnRunner: rewatch -- every early stop logs rewatch: skipped with its reason, never text', async () => {
+  const skipped = async (hot, describer) => {
+    const { logs } = await withCapturedLogs(() => runRewatch({ hot, describer }));
+    const line = logs.find((entry) => JSON.stringify(entry).includes('rewatch: skipped'));
+    assert.ok(line, 'one rewatch: skipped line');
+    const all = JSON.stringify(logs);
+    assert.ok(!all.includes('τι χρώμα'), 'never the trigger text');
+    assert.ok(!all.includes('ένα αυτοκίνητο'), 'never the video summary');
+    return line;
+  };
+
+  const noPrompt = rewatchHot();
+  delete noPrompt.prompts.rewatch;
+  const a = await skipped(noPrompt);
+  assert.equal(a.reason, 'no-prompt');
+  assert.equal(a.channel, 'c1');
+
+  const b = await skipped(rewatchHot({}, { rewatch: { recentMessages: 0 } }));
+  assert.equal(b.reason, 'no-window');
+
+  const c = await skipped(rewatchHot(), fakeRewatchDescriber({ va: { state: 'limit', reason: 'length' } }));
+  assert.equal(c.reason, 'no-watched');
+  assert.equal(c.watched, 0);
+  assert.equal(c.recent, 60);
 });

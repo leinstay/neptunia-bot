@@ -174,7 +174,7 @@
       "ytdlpPath": "yt-dlp",
       "ffmpegPath": "ffmpeg",
       "prefill": true,
-      "rewatch": { "model": null, "maxPerDay": 20, "maxOutputTokens": 600, "answerChars": 1200, "recentMessages": 15 }
+      "rewatch": { "model": null, "maxPerDay": 20, "maxOutputTokens": 600, "answerChars": 1200, "recentMessages": 60, "maxCandidates": 6 }
     }
   },
   "warmup": {

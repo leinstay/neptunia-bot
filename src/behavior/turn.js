@@ -259,31 +259,45 @@ export function createTurnRunner({
   /**
    * The re-watch on a question (features.videoRewatch): when the trigger
    * asks about a video watched in the last `media.video.rewatch.recentMessages`
-   * messages, one cheap classifier call (prompts.rewatch) picks the video and
+   * messages (at most `media.video.rewatch.maxCandidates` of them, newest
+   * first), one cheap classifier call (prompts.rewatch) picks the video and
    * the question, then the describer looks at it again
    * (describer.rewatchVideo) and the answer joins that video's state as
    * `answer: { question, text }` -- mutating `videos` in place. At most one
    * re-watch per turn. Never throws: any failure leaves `videos` as it was.
-   * The question and the answer are data: never logged.
+   * The question and the answer are data: never logged; every early stop
+   * logs `rewatch: skipped` with its reason.
    */
   async function maybeRewatch({ config, guildId, channelId, selfName, history, trigger, videos, candidates }) {
     const prompt = hot.prompts?.rewatch;
-    if (!prompt) return;
+    if (!prompt) {
+      log.info('rewatch: skipped', { channel: channelId, reason: 'no-prompt' });
+      return;
+    }
     const system = fillName(prompt, selfName);
     const mediaCfg = config.media ?? {};
     const rewatchCfg = mediaCfg.video?.rewatch ?? {};
-    const recent = Math.max(0, Math.floor(rewatchCfg.recentMessages ?? 15));
-    if (recent === 0) return;
+    const recent = Math.max(0, Math.floor(rewatchCfg.recentMessages ?? 60));
+    if (recent === 0) {
+      log.info('rewatch: skipped', { channel: channelId, reason: 'no-window' });
+      return;
+    }
+    // `candidates` is already newest first, so the cap keeps the newest videos.
+    const maxCandidates = Math.max(1, Math.floor(rewatchCfg.maxCandidates ?? 6));
     const recentIds = new Set(history.slice(-recent).map((m) => m.id));
     const seen = new Set();
     const watched = [];
     for (const item of candidates) {
+      if (watched.length >= maxCandidates) break;
       if (seen.has(item.itemId) || !recentIds.has(item.messageId)) continue;
       if (videos.get(item.itemId)?.state !== 'watched') continue;
       seen.add(item.itemId);
       watched.push(item);
     }
-    if (watched.length === 0) return;
+    if (watched.length === 0) {
+      log.info('rewatch: skipped', { channel: channelId, reason: 'no-watched', watched: 0, recent });
+      return;
+    }
 
     const lines = watched.map(
       (item) => `${item.itemId} | ${oneLine(item.name)} | ${[...oneLine(videos.get(item.itemId).text)].slice(0, REWATCH_SUMMARY_CHARS).join('')}`,
