@@ -397,6 +397,7 @@ addresses the persona or continues the exchange with it, `no` when people talk a
 (a reply to another member or a mention of another member is always `no` before the model is asked). `yes` runs a
 normal reply turn (the model may still `<skip/>`); three `no` in a row (`mention.followUpNoStreak`, default 3) close
 the window. Switch `features.followUp` (default on). Logged as counts and verdicts only.
+The window state survives a restart: active windows are saved in `data/state.json` under `followUpWindows` and restored at startup, with expired ones dropped.
 
 ## The re-watch classifier (`rewatch.md`): does someone need a second look at a video?
 

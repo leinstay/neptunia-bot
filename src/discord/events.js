@@ -134,19 +134,85 @@ export function createMessageHandler({
   // never here. An untagged message that arrives while the window is open is
   // not answered blindly: it goes through address.md first (see
   // docs/prompt-contract.md, "The address classifier").
+  //
+  // The Map is mirrored into `store.state.data.followUpWindows` (timestamps
+  // and a counter only, never message text) so a restart does not close
+  // every open window; the saved entries are loaded back just below.
   let missingAddressPromptLogged = false;
   const followUpWindows = new Map(); // channelId -> { openedAt, lastAnswerAt, noStreak }
   const followUpInFlight = new Set(); // channelIds with a classifier call running right now
 
-  /** (Re)opens/extends the window -- called wherever the persona's own message is observed. */
-  function noteFollowUpSend(channelId, ts) {
-    followUpWindows.set(channelId, { openedAt: ts, lastAnswerAt: ts, noStreak: 0 });
+  /** Mirror one window into state.json (a fresh copy, numbers only). */
+  function persistFollowUpWindow(channelId, window) {
+    const state = store?.state;
+    if (!state?.data) return;
+    if (!state.data.followUpWindows || typeof state.data.followUpWindows !== 'object') state.data.followUpWindows = {};
+    state.data.followUpWindows[channelId] = {
+      openedAt: window.openedAt,
+      lastAnswerAt: window.lastAnswerAt,
+      noStreak: window.noStreak,
+    };
+    state.markDirty?.();
   }
 
-  /** One "no" verdict (pre-filter or model): bump the streak, log once the window closes because of it. */
+  /** Close a window: drop it from the Map and delete its key from state.json. */
+  function closeFollowUpWindow(channelId) {
+    followUpWindows.delete(channelId);
+    const saved = store?.state?.data?.followUpWindows;
+    if (saved && typeof saved === 'object' && Object.hasOwn(saved, channelId)) {
+      delete saved[channelId];
+      store.state.markDirty?.();
+    }
+  }
+
+  /**
+   * Startup: load the saved windows back, dropping (and deleting from state)
+   * any whose last answer is already older than `mention.followUpMinutes`
+   * (read now) or that is malformed.
+   */
+  function loadFollowUpWindows() {
+    const saved = store?.state?.data?.followUpWindows;
+    if (!saved || typeof saved !== 'object') return;
+    const minutes = hot.config.mention?.followUpMinutes ?? 2;
+    const t = now();
+    let dropped = 0;
+    for (const [channelId, entry] of Object.entries(saved)) {
+      const valid =
+        entry &&
+        Number.isFinite(entry.openedAt) &&
+        Number.isFinite(entry.lastAnswerAt) &&
+        Number.isFinite(entry.noStreak);
+      if (valid && t - entry.lastAnswerAt < minutes * 60_000) {
+        followUpWindows.set(channelId, { openedAt: entry.openedAt, lastAnswerAt: entry.lastAnswerAt, noStreak: entry.noStreak });
+      } else {
+        delete saved[channelId];
+        dropped += 1;
+      }
+    }
+    if (dropped > 0) store.state.markDirty?.();
+    if (followUpWindows.size > 0 || dropped > 0) log.info('follow-up: windows restored', { restored: followUpWindows.size, dropped });
+  }
+  loadFollowUpWindows();
+
+  /** (Re)opens/extends the window -- called wherever the persona's own message is observed. */
+  function noteFollowUpSend(channelId, ts) {
+    const window = { openedAt: ts, lastAnswerAt: ts, noStreak: 0 };
+    followUpWindows.set(channelId, window);
+    persistFollowUpWindow(channelId, window);
+  }
+
+  /** One "no" verdict (pre-filter or model): bump the streak, close the window once the streak reaches the limit. */
   function bumpFollowUpNoStreak(channelId, state, mentionCfg) {
     state.noStreak += 1;
-    if (state.noStreak >= (mentionCfg.followUpNoStreak ?? 3)) log.info('follow-up: window closed', { channel: channelId });
+    // A window replaced meanwhile (the persona spoke again while a classifier
+    // call was in flight) is not the live one: nothing to mirror or close.
+    if (followUpWindows.get(channelId) !== state) return;
+    if (state.noStreak >= (mentionCfg.followUpNoStreak ?? 3)) {
+      log.info('follow-up: window closed', { channel: channelId });
+      closeFollowUpWindow(channelId);
+    } else {
+      persistFollowUpWindow(channelId, state);
+    }
   }
 
   /**
@@ -196,7 +262,10 @@ export function createMessageHandler({
     const channelId = channel.id;
     const mentionCfg = config.mention;
     const state = followUpWindows.get(channelId);
-    if (!isFollowUpOpen(state, now(), mentionCfg)) return false;
+    if (!isFollowUpOpen(state, now(), mentionCfg)) {
+      if (state) closeFollowUpWindow(channelId); // expired: forget it here and in state.json
+      return false;
+    }
     if (turns.isBusy(channelId)) return false;
     if (!canSend(channel)) return false;
 

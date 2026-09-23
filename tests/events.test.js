@@ -1877,3 +1877,120 @@ test('follow-up: a hot change to mention.followUpMinutes is picked up without re
   assert.equal(llm.calls.length, 0, 'the shorter window (read live) had already expired');
   assert.equal(spontaneous.onMessageCalls.length, 1);
 });
+
+// ---------------------------------------------------------------------------
+// Follow-up windows survive a restart: mirrored into store.state.data.followUpWindows.
+
+/** A fakeStore with a real-shaped `state` ({ data, markDirty }) that counts markDirty calls. */
+function fakeStateStore(data = {}) {
+  const store = fakeStore();
+  store.dirtyCount = 0;
+  store.state = {
+    data,
+    markDirty() {
+      store.dirtyCount += 1;
+    },
+  };
+  return store;
+}
+
+test('follow-up persistence: an open window survives a re-created handler with the same state', async () => {
+  const clock = mutableNow(10_000);
+  const store = fakeStateStore();
+  const guild = fakeGuild();
+  const channel = fakeChannelWithHistory('c1', guild, []);
+  const first = makeHandler({ store, now: clock, llm: fakeFollowUpLlm(), prompts: fakeAddressPrompts() });
+  await openFollowUpWindow(first, { guild, channel, ts: clock() });
+
+  assert.deepEqual(store.state.data.followUpWindows, { c1: { openedAt: 10_000, lastAnswerAt: 10_000, noStreak: 0 } });
+  assert.ok(store.dirtyCount > 0, 'opening a window marks the state dirty');
+
+  clock.set(40_000); // "restart" half a minute later, well inside followUpMinutes=2
+  const llm = fakeFollowUpLlm();
+  const spontaneous = fakeSpontaneous();
+  const second = makeHandler({ store, spontaneous, now: clock, llm, prompts: fakeAddressPrompts() });
+  const msg = fakeMessage({ guild, channel, channelId: 'c1', cleanContent: 'plain follow-up', createdTimestamp: clock() });
+  const p = second(msg);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(llm.calls.length, 1, 'the restored window sends the untagged message to the classifier');
+  llm.respond('no');
+  await p;
+
+  assert.equal(spontaneous.onMessageCalls.length, 0);
+  assert.equal(store.state.data.followUpWindows.c1.noStreak, 1, 'the streak change is mirrored too');
+});
+
+test('follow-up persistence: an expired window is dropped on load', async () => {
+  const store = fakeStateStore({
+    followUpWindows: {
+      old: { openedAt: 0, lastAnswerAt: 0, noStreak: 0 },
+      fresh: { openedAt: 170_000, lastAnswerAt: 170_000, noStreak: 1 },
+    },
+  });
+  const clock = mutableNow(180_000); // 3 min: past followUpMinutes=2 for "old", 10 s for "fresh"
+  const llm = fakeFollowUpLlm();
+  const spontaneous = fakeSpontaneous();
+  const handler = makeHandler({ store, spontaneous, now: clock, llm, prompts: fakeAddressPrompts() });
+
+  assert.deepEqual(Object.keys(store.state.data.followUpWindows), ['fresh'], 'the expired key is deleted from state');
+  assert.ok(store.dirtyCount > 0);
+
+  const guild = fakeGuild();
+  const oldChannel = fakeChannelWithHistory('old', guild, []);
+  await handler(fakeMessage({ guild, channel: oldChannel, channelId: 'old', cleanContent: 'plain', createdTimestamp: clock() }));
+  assert.equal(llm.calls.length, 0, 'the dropped window is not consulted');
+  assert.equal(spontaneous.onMessageCalls.length, 1);
+});
+
+test('follow-up persistence: closing the window by the "no" streak removes its key from state', async () => {
+  const clock = mutableNow(0);
+  const store = fakeStateStore();
+  const llm = fakeFollowUpLlm();
+  const handler = makeHandler({ store, now: clock, llm, prompts: fakeAddressPrompts() });
+  const guild = fakeGuild();
+  const channel = fakeChannelWithHistory('c1', guild, []);
+  await openFollowUpWindow(handler, { guild, channel, ts: clock() });
+
+  for (let i = 0; i < 3; i += 1) {
+    const p = handler(fakeMessage({ id: `m${i}`, guild, channel, channelId: 'c1', cleanContent: `plain ${i}`, createdTimestamp: clock() }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    llm.respond('no');
+    await p;
+  }
+
+  assert.equal(Object.hasOwn(store.state.data.followUpWindows, 'c1'), false, 'the closed window is gone from state');
+});
+
+test('follow-up persistence: an expired window is removed from state when next consulted', async () => {
+  const clock = mutableNow(0);
+  const store = fakeStateStore();
+  const handler = makeHandler({ store, now: clock, llm: fakeFollowUpLlm(), prompts: fakeAddressPrompts() });
+  const guild = fakeGuild();
+  const channel = fakeChannelWithHistory('c1', guild, []);
+  await openFollowUpWindow(handler, { guild, channel, ts: clock() });
+
+  clock.set(3 * 60_000);
+  await handler(fakeMessage({ guild, channel, channelId: 'c1', cleanContent: 'too late', createdTimestamp: clock() }));
+
+  assert.equal(Object.hasOwn(store.state.data.followUpWindows, 'c1'), false);
+});
+
+test('follow-up persistence: no message text ever reaches the state', async () => {
+  const clock = mutableNow(0);
+  const store = fakeStateStore();
+  const llm = fakeFollowUpLlm();
+  const handler = makeHandler({ store, now: clock, llm, prompts: fakeAddressPrompts() });
+  const guild = fakeGuild();
+  const channel = fakeChannelWithHistory('c1', guild, []);
+  await openFollowUpWindow(handler, { guild, channel, ts: clock() });
+  const p = handler(fakeMessage({ guild, channel, channelId: 'c1', cleanContent: 'ένα μυστικό μήνυμα', createdTimestamp: clock() }));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  llm.respond('no');
+  await p;
+
+  const saved = store.state.data.followUpWindows.c1;
+  assert.deepEqual(Object.keys(saved).sort(), ['lastAnswerAt', 'noStreak', 'openedAt']);
+  for (const value of Object.values(saved)) assert.equal(typeof value, 'number');
+  const json = JSON.stringify(store.state.data);
+  assert.ok(!json.includes('μυστικό') && !json.includes('here you go'), 'neither the member\'s nor the persona\'s text is stored');
+});

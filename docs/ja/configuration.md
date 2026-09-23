@@ -175,6 +175,8 @@ YouTube リンクの再生時間は次の順序で取得されます: まず yt-
 | `followUpMaxOutputTokens` | `8` | 分類器の最大出力トークン数 |
 | `followUpNoStreak` | `3` | ウィンドウを閉じる連続 `no` 判定回数 |
 
+フォローアップウィンドウは `data/state.json` の `followUpWindows` に保存され、起動時に復元されます。期限切れのウィンドウは削除されます。
+
 ## `typing`
 
 | キー | デフォルト | 説明 |

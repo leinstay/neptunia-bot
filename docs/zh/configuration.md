@@ -175,6 +175,8 @@ YouTube 链接的时长通过以下链式探测获取：首先尝试 yt-dlp，�
 | `followUpMaxOutputTokens` | `8` | 分类器的最大输出 token 数 |
 | `followUpNoStreak` | `3` | 连续 `no` 判定次数达到此值关闭窗口 |
 
+后续窗口保存在 `data/state.json` 的 `followUpWindows` 中，启动时恢复；过期的窗口会被丢弃。
+
 ## `typing`
 
 | 键 | 默认值 | 说明 |

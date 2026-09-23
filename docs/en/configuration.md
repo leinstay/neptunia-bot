@@ -175,6 +175,8 @@ At most one re-watch or retry per turn. Answers are cached for one hour per ques
 | `followUpMaxOutputTokens` | `8` | Max output tokens for the classifier |
 | `followUpNoStreak` | `3` | Consecutive `no` verdicts that close the window |
 
+Follow-up windows are persisted in `data/state.json` under `followUpWindows` and restored at startup; expired ones are dropped.
+
 ## `typing`
 
 | Key | Default | Meaning |

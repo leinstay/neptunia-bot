@@ -374,6 +374,7 @@ warmup.contextMark                       prefixed to context lines in the profil
 （对另一成员的回复或对另一成员的提及在询问模型之前即为 `no`）。`yes` 触发正常的回复回合（模型仍可
 `<skip/>`）；连续三个 `no`（`mention.followUpNoStreak`，默认 3）关闭窗口。开关 `features.followUp`
 （默认开启）。仅记录计数和判定结果。
+窗口状态在重启后保留：活跃窗口保存在 `data/state.json` 的 `followUpWindows` 中，启动时恢复，过期的窗口会被丢弃。
 
 ## 重看分类器（`rewatch.md`）：是否需要再看一遍视频？
 
