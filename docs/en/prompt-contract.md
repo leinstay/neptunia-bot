@@ -34,6 +34,9 @@ All instructions are English in both layers; a character's speech samples may be
 | `rewatch.md` | yes | Classifier: does this message need the persona to re-watch a video or retry one that did not load (`features.videoRewatch`). Receives a numbered list of recent videos with their status and the new message. Output is ONE line: `<number> \| <question>`, `<number> \| retry` or `none` | `{{name}}` |
 | `rewatch-answer.md` | yes | Out-of-character prompt for the re-watch answer: the video model watches a clip again and answers one question. Same language and restriction rules as `describe-video.md`. No character card | `{{question}}` `{{maxChars}}` |
 | `address.md` | yes | Classifier: is this untagged message addressed to the persona | `{{name}}` |
+| `lookup.md` | no | Classifier: does the persona need to search the web to answer this message (`features.webLookup`). Receives a short transcript and a `<candidate>` block. Output is ONE line: a search query (plain words, at most 12) or `none` | `{{name}}` |
+| `read-link.md` | no | Out-of-character prompt for the link reader (`features.webLookup`, `web.links.enabled`): condense a fetched page into one paragraph. Receives the page title and body. No character card | `{{maxChars}}` |
+| `search-summary.md` | no | Out-of-character prompt for the search condenser (`features.webLookup`, `web.search.enabled`): condense numbered search results into one note with inline sources. No character card | `{{query}}` `{{maxChars}}` |
 | `labels.json` | yes | Every string the CODE inserts into a prompt. Keys fixed below, values are the writer's | see below |
 
 `{{name}}` bot's display name · `{{author}}` caller's display name · `{{trigger}}` one of `labels.triggers.*` ·
@@ -41,7 +44,7 @@ All instructions are English in both layers; a character's speech samples may be
 System message = `system-prompt` + `character-card` + `rules` + `format`. For the analyzer: `memory.md` alone.
 On a forced turn (`/nep interject`, `/nep initiate`), `forced.md` is appended after the mode prompt if the file exists.
 The analyzer and the warmup's `profile.md` and `server.md` receive the character card and `rules.md` as a
-`<character>` block in the user message. `channel.md`, `describe.md`, `describe-video.md`, `rewatch.md`, `rewatch-answer.md` and `address.md` do not receive the card.
+`<character>` block in the user message. `channel.md`, `describe.md`, `describe-video.md`, `rewatch.md`, `rewatch-answer.md`, `address.md`, `lookup.md`, `read-link.md` and `search-summary.md` do not receive the card.
 
 `{{guildFieldChars}}` is `fieldChars * 2`, the limit code clamps guild-level patterns and starters to.
 `{{maxEpisodes}}` is the total episodes kept per person. Both are filled from config but not used by the default
@@ -59,12 +62,13 @@ prompts; a custom `memory.md` may reference them.
 | `<self_facts>` | What the persona has claimed about itself |
 | `<people>` | Member profiles; the caller first, marked with `labels.profile.interlocutorMark`; each with the persona's attitude and, for the caller, the **episodes**: moments the persona remembers about the two of them, with dates and short quotes |
 | `<other_channels>` | Up to `context.neighborMessages` messages per neighbouring channel, not older than `context.neighborMaxAgeMinutes` |
+| `<lookup>` | What the persona looked up online this turn (`features.webLookup`): the query, the condensed answer and the source sites, or a "nothing found" line. Appears only when the search classifier fired and the search completed |
 | `<chat>` | Up to `context.channelMessages` latest messages of the current channel |
 | `<tempo>` | Counts for 10 min / hour / day, distinct people, silence, a verdict (live / slow / dead) |
 | `<task>` | `reply` / `interject` / `initiate`, placeholders filled |
 
 Budget priority (sections are trimmed from the bottom of this list first): system + task + clock + tempo + senses
-(never cut) → caller's profile with episodes → about_chat → self_facts → lore → server → chat (newest first) →
+(never cut) → caller's profile with episodes → lookup (kept or dropped whole) → about_chat → self_facts → lore → server → chat (newest first) →
 other profiles → other channels.
 
 Media in a transcript line, most informative form available: a picture attached to THIS request →
@@ -76,8 +80,9 @@ described), or `videoNotWatched` (not watched, no frame). The reason code (`leng
 swapped for the human phrase from `transcript.videoReason.*` before it reaches the transcript. Links keep their base
 tag (`link` / `linkText`) and add a video extra: `linkWatched`, `linkNotWatchedFrame` or `linkNotWatched`. When a still
 frame is attached as a picture, `frameAttached` is added as well. Links use `link` / `linkText` built from Discord's
-embed (site, title, snippet); text files show their beginning via `filePreview`; a forwarded message is wrapped in
-`forwarded`.
+embed (site, title, snippet); when `features.webLookup` is on and the link was read, `linkRead` is appended after the
+link's other extras (video, thumbnail). Text files show their beginning via `filePreview`; a forwarded message is
+wrapped in `forwarded`.
 
 Video results are cached per attachment or per link in `data/guilds/<id>/media.json` under the key
 `video:<itemId>` (the attachment id, or a stable hash of the link URL). Cache entries:
@@ -90,6 +95,11 @@ Video results are cached per attachment or per link in `data/guilds/<id>/media.j
 A re-watch answer is cached under the key `video:<itemId>:q:<hash>` (the first 16 hex digits of SHA-1 of the lower-cased, whitespace-collapsed question): `{ text, ts, answer: true }`. Expires after one hour; code deletes expired entries on read.
 
 A picture's still-frame entry keeps its own `<itemId>` key as before. Both can coexist for the same item.
+
+Web lookup results are cached in the same `data/guilds/<id>/media.json` alongside video and picture entries:
+
+- Read link: `read:<link.id>` holds `{ text, ts }` (the condensed excerpt, permanent) or `{ miss, ts, reason }` (a miss skipped for 6 hours; reasons: `scheme`, `private`, `redirects`, `type`, `size`, `timeout`, `http`, `network`, `empty`, `unreadable`, `llm`). A `TokenLimitError` or `DailyCapError` is never cached.
+- Search: `search:<sha1 prefix of the normalised query, 16 hex>` holds `{ query, text, sources, ts }`, served while younger than `web.search.cacheHours` (default 24). An empty `text` means no results (renders `labels.lookup.none`). Failures are never cached.
 
 Transcript line: `#87 [14:32] nick: text <replyTo> <media…> <sticker>`; own lines use `labels.self`; between
 lines `labels.transcript.gap` / `gapWithDate` / `date`; the block opens with `labels.transcript.header`. Neighbour
@@ -128,6 +138,7 @@ transcript.voice                         {duration}
 transcript.audio                         {name} {duration}
 transcript.link                          {site} {title}
 transcript.linkText                      {site} {title} {text}
+transcript.linkRead                      {text}: extra tag after a link tag; the page was fetched and condensed — first-hand
 transcript.thumbnailDescribed            {text}: follows a link tag; describes the link's preview picture
 transcript.filePreview                   {name} {text}
 transcript.forwarded                     {text}
@@ -143,6 +154,11 @@ senses.stickerSee | stickerDescribed | stickerBlind
 senses.lottie
 senses.voice | links | files
 senses.linksWatch                        replaces links when features.videoDescriptions is on; adds that a linked video may come watched or not watched with the reason
+senses.linksRead                         shown after the links line when features.webLookup is on and web.links.enabled is not false; tells the persona that a link may come with a read excerpt — first-hand
+senses.search                            shown when features.webLookup is on, web.search.enabled is not false AND a Brave Search key is configured; tells the persona that a `<lookup>` block may appear with web results
+lookup.header                            {query}: heading of the `<lookup>` block
+lookup.sources                           {list}: site names, comma-separated by code
+lookup.none                              shown in `<lookup>` when the search found nothing useful
 tempo.counts                             {last10min} {lastHour} {lastDay}
 tempo.authors                            {authors}: a head count
 tempo.silenceBeforeTrigger | lastMessageAgo | sinceOwn          {duration}
@@ -447,3 +463,38 @@ Rails: at most one re-watch or retry per turn; the classifier and the second loo
 `media.video.rewatch.maxPerDay` (default 20) caps the re-watches separately. Answers are cached for one hour per
 question (see the video cache section above). Switch `features.videoRewatch` (missing = on, needs
 `videoDescriptions` on).
+
+## The search classifier (`lookup.md`): does a question need facts from the web?
+
+When the persona is addressed (a reply turn) and all of the following hold — `features.webLookup` is on,
+`web.search.enabled` is not false, the `lookup.md` prompt exists, `web.search.maxPerTurn` is at least 1, and a
+`BRAVE_SEARCH_API_KEY` is configured — the classifier decides whether the trigger message asks something that needs
+a web search. It uses the `classifier.text` model role. Code sends `lookup.md` as the system prompt with a user
+message containing a short `<transcript>` (the same as the re-watch classifier, with the persona's own lines
+marked by `labels.self`) and a `<candidate>` block:
+
+```
+<transcript>
+...
+</transcript>
+<candidate>
+<author name>: <trigger text>
+</candidate>
+```
+
+The transcript carries descriptions, video summaries and link reads when available. The trigger text is cut at
+`context.maxMessageChars`. Output is ONE line:
+
+- A search query — plain words, no quotes, no operators, at most 12 words — when the message needs facts from
+  outside the chat.
+- `none` — everything else.
+
+On a query hit, Brave Search runs the query (`web.search.results` results, default 5), the numbered results are
+condensed by `classifier.text` through `search-summary.md` (`{{query}}`, `{{maxChars}}` = `web.search.summaryChars`,
+default 900), and the answer is rendered as a `<lookup>` block right before `<chat>`: `labels.lookup.header` with
+the query, the condensed text, and `labels.lookup.sources` with the distinct site names. When the search returned
+nothing or the condenser found nothing useful, `labels.lookup.none` appears instead.
+
+Rails: at most one search per turn; both the classifier and the condenser count against `llm.maxRequestsPerDay`;
+the search itself counts against `web.maxPerDay` (shared with link reads). Results are cached for
+`web.search.cacheHours` (default 24) hours per normalised query. Switch `features.webLookup` (missing = off).

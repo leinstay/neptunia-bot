@@ -76,6 +76,9 @@ Both are hot-reloaded.
 | `rewatch.md` | yes | Classifier: does a message need the persona to re-watch a video |
 | `rewatch-answer.md` | yes | Prompt for the re-watch: answer one question from the clip |
 | `address.md` | yes | Classifier: is an untagged message addressed to the persona |
+| `lookup.md` | no | Classifier: does a question need a web search |
+| `read-link.md` | no | Condense a fetched page into one paragraph |
+| `search-summary.md` | no | Condense search results into one note with sources |
 | `profile.md` | yes | Warmup: one member's profile from a message sample |
 | `channel.md` | yes | Warmup: channel notes from a message sample |
 | `server.md` | yes | Warmup: server-level notes from channel notes and member summaries |
@@ -105,51 +108,23 @@ First run on a new server: enable `features.dryRun`, watch the mirror or `journa
 
 One Discord slash command, `/nep` (the name comes from `bot.commandName`). They are registered as guild commands on start, for the served server only. Every answer is ephemeral; only the caller sees it, in whatever channel it was typed. See [`docs/en/owner-commands.md`](docs/en/owner-commands.md) for every subcommand and the access grants.
 
-## Message pipeline
+## Messages and memory
 
-A message passes through guild, channel and self-message filters. If the persona was called (@mention, reply, or name trigger), an ignore heuristic rolls against a base chance adjusted for bare pings, repeated tags, spam, and the caller's relationship score. After the persona answers someone, untagged messages in that channel for the next `mention.followUpMinutes` minutes are sent to a classifier on the `followUp` model role (default `anthropic/claude-sonnet-4.6`) that decides whether they continue the exchange; three `no` in a row close the window. Follow-up windows survive restarts. `features.followUp` switches it off. Spontaneous turns fire from a chaotic timer or the per-message eavesdrop chance. The persona will not speak unprompted in a channel silent for more than `spontaneous.maxChannelSilenceHours` hours; a direct ping there is still answered.
+The persona responds to mentions, replies and name triggers, sometimes ignoring them. It cuts into conversations at random intervals and starts topics in dead channels. After answering, it tracks follow-up messages in that channel through a classifier. It writes one reply at a time across the server; pings in other channels are held and answered in turn.
 
-The persona writes one reply at a time across the server. A ping in the same channel while it is already answering is missed; the missed messages are in the transcript when the next reply is built. A direct ping in another channel (an @mention or reply to its message, not a name trigger) is held, one per channel, in up to `mention.maxPending` channels for `mention.pendingMinutes` minutes; a newer ping in the same pending channel replaces the older one. When the current reply finishes, the persona switches channel after a short pause (`mention.switchDelayMs`) and answers from the conversation as it stands; the usual ignore chance applies. Name triggers and eavesdrop hits that arrive while busy are skipped. With `mention.oneAtATime: false` every channel is handled independently. The persona never writes or reacts where it lacks Send Messages, checking before it spends an LLM request; such channels are still read and remembered.
+A separate memory analyzer runs when enough messages accumulate. It builds per-member profiles with interests, details, aliases, episodes and attitudes, server-wide habits and in-jokes, and a lorebook of events and stories. Profiles are updated incrementally; stored facts are never re-summarised. The persona also learns what people call each other and recognises a member by name or alias.
 
-The turn collects the channel transcript and neighbouring channels, then builds one LLM request inside the token budget. Sections fill in priority order: system prompt and task are never cut; then the caller's profile, server habits and self-facts, the channel map, the transcript (newest first), other profiles, and neighbouring channels. The model sees a map of the server's channels (purpose, topics, tone, activity level), with the current channel marked. Each channel entry also carries facts the code maintains: message count, first and last message, activity over the last 30 days and the top writers; the warmup fills them from the channel's history and live traffic keeps them current.
+See [`docs/en/messages-and-memory.md`](docs/en/messages-and-memory.md) for the pipeline steps, the analyzer, profiles, episodes, the lorebook and the owner commands that touch memory.
 
-The model responds with `<think>` (hidden planning), `<msg>` (1–3 chat messages; `reply="#87"` replies to a transcript line), `<react>` (one emoji reaction), or `<skip/>` (silence). After parsing, typing is simulated at human speed and `@nick` in the output becomes a real mention.
+## Media
 
-The memory analyzer runs as a separate LLM call when enough messages accumulate. It receives the character card and judges each person through the character's eyes, returning attitude deltas, profile changes, channel observations, and server-level notes. The portrait of a member's character and manner of speech is drawn from the channels in `memory.mainChannelIds`; when the list is empty, every channel counts. Profiles are updated incrementally: the analyzer returns only what changed, and stored facts are never re-summarised. Character and style are prose paragraphs written whole by the profile prompt during the warmup and refreshed from recent messages when the analyzer flags a gap or contradiction. Interests and details are separate items that become confirmed when they come up again on a separate occasion; more items are kept per person than shown, ranked by frequency and recency with a weight that decays over time. Interests not seen for a long time are shown to the persona as old. Stored memory refers to members by id and the current name is substituted when the memory is used, so renames never break stored notes. The persona also learns what people in chat call each other and recognises a member mentioned by name or alias even when they are not in the conversation.
-
-## Episodes and lorebook
-
-The memory analyzer writes two kinds of long-term notes beyond profiles.
-
-Episodes are moments the persona remembers about individual people: an insult, a kindness, a promise, a bet, a shared joke, something someone asked the persona to do or never do. The analyzer appends them to the person's profile with a date, a short description, sometimes the person's own words, and a weight from 1 to 5. The heaviest survive longest; when a profile hits `memory.maxEpisodes`, the lightest are evicted first, then the oldest. Only the caller's episodes are shown, inside the `<people>` block.
-
-The lorebook stores server-wide knowledge that outlives any conversation: events, recurring characters, long-running stories, feuds, traditions. Each entry has a title, a set of keywords and a short text. The code scans the last `lore.scanMessages` messages for keyword matches and includes up to `lore.maxMatches` entries in a `<lore>` block; entries marked `always` appear every time. Hundreds of entries can exist at negligible cost because only the matching few are shown.
-
-The analyzer adds and updates lorebook entries on its own but never touches entries added by the owner through `/nep lore` commands. Lorebook data lives in `data/guilds/<id>/lore.json`.
-
-## Vision and media
-
-Transcript lines carry media markers in brackets: pictures, GIFs, videos, stickers, custom emoji, voice messages, audio files, links, text file previews and forwarded messages. Forwarded messages from another channel of the same server name the source channel. What the persona perceives depends on two features.
-
-`features.vision` attaches pictures from the calling message, from the message it replies to, and the newest few in the channel to the LLM request as images, downscaled through Discord's media proxy. The bot downloads every picture itself and sends it inline as data, because Discord refuses downloads coming from the model provider; pictures larger than `context.vision.maxBytes` or slower than `context.vision.fetchTimeoutMs` are skipped. The persona sees these directly. Settings live under `context.vision`.
-
-`features.mediaDescriptions` (on by default) runs a helper model (`media.model`) that writes a one-line description for pictures, GIF frames, video posters, stickers, custom emoji and link thumbnails. Each attachment is described once and cached. Descriptions feed the chat transcript, the memory analyzer and the warmup, whose token budget pays for warmup descriptions. The describer's prompt is `prompts/describe.md`. Settings live under `media`.
-
-Stickers and custom emoji recur constantly, so they are cached by id and cost nearly nothing after the first description. With `features.vision`, the sticker of the calling message is attached as a picture. Discord's built-in animated stickers are Lottie animations, not images, so they are never more than a name.
-
-A `<senses>` block in the user message tells the persona what it can and cannot perceive under the current config. The persona trusts this block and never claims to have seen, heard or opened anything beyond it.
-
-`features.videoDescriptions` (off by default; turn it on in `config.local.json`; needs `mediaDescriptions` too) adds a video-capable model (`media.video.model`, default `google/gemini-3.8-flash`) that watches short clips: Discord video attachments and links to known video sites (YouTube, TikTok, VK, X, Reddit, Twitch). Attachments and downloaded site videos are capped at `media.video.maxSeconds` (default 60 s) and `media.video.maxBytes`; YouTube links up to `directUrlMaxSeconds` (default 180 s) are passed as a URL to the provider (Google AI Studio). At most `maxPerTurn` new videos per turn (every attempt counts, failed or not) and `maxPerDay` per day. Results are cached alongside picture descriptions. Everything else is downloaded with `yt-dlp` and trimmed with `ffmpeg`, both optional system binaries. Without them, attachments within the caps still work; longer attachments and site links fall back to a still frame. For YouTube, when `yt-dlp` cannot probe the duration, an optional `YOUTUBE_API_KEY` in `.env` (free, from the Google Cloud console's YouTube Data API v3) or a watch-page scrape provides it. `/nep ping video` reports which source works on this host. When someone addresses the persona with a question about a video it has already watched, a cheap classifier (`prompts/rewatch.md`) decides whether a second look is needed; if so, the video model watches the clip again with `prompts/rewatch-answer.md` and the answer appears in the transcript alongside the original summary. The same classifier can retry a video that failed to load when the person asks about it again. At most one re-watch or retry per turn; answers are cached for one hour. Switch `features.videoRewatch` (default on).
-
-The video prompt is `prompts/describe-video.md`. Settings live under `media.video`. See [`docs/en/configuration.md`](docs/en/configuration.md) for every key and a model comparison table.
-
-Voice messages show only duration. Links show the site, the title and a snippet from Discord's embed, never the page itself.
+The persona can see attached pictures, watch short video clips, read pages behind links and search the web for facts it does not have. Each capability is a separate feature switch, off or capped by default, with its own daily limit. A `<senses>` block in each request tells the persona what is on; it never claims to have perceived anything beyond it. See [`docs/en/media.md`](docs/en/media.md) for pictures, video vision, link reading, search, tools, costs and privacy.
 
 ## Cost and privacy
 
-Each turn is one LLM request; a memory update adds a second. Cost depends on the model and endpoint; `llm.model` and `llm.baseUrl` accept any compatible values. The daily cap (`llm.maxRequestsPerDay`) prevents runaway spending. Video descriptions add one request per watched clip to a separate, cheaper model (`media.video.maxPerDay` caps the daily count); `yt-dlp` and `ffmpeg` run locally and cost nothing beyond bandwidth.
+Each turn is one LLM request; a memory update adds a second. Cost depends on the model and endpoint; `llm.model` and `llm.baseUrl` accept any compatible values. The daily cap (`llm.maxRequestsPerDay`) prevents runaway spending. Video descriptions add one request per watched clip to a separate, cheaper model (`media.video.maxPerDay` caps the daily count); `yt-dlp` and `ffmpeg` run locally and cost nothing beyond bandwidth. Link reads and searches (`features.webLookup`, off by default) add requests to the text classifier model, capped by `web.maxPerDay`; search additionally needs a Brave Search API key (free tier: 2,000 queries/month). With `features.webLookup` on, the bot makes outbound HTTP requests to fetch pages and to the Brave Search API; private addresses are refused.
 
-`data/` holds per-member profiles, relationship scores, channel observations and server patterns. It stays on your machine, is gitignored, and is only sent to the LLM as context. The analyzer is instructed not to store sensitive details. `/nep memory forget` deletes a profile entirely.
+`data/` holds per-member profiles, relationship scores, channel observations, server patterns, cached media descriptions and web excerpts. It stays on your machine, is gitignored, and is only sent to the LLM as context. The analyzer is instructed not to store sensitive details. `/nep memory forget` deletes a profile entirely.
 
 Tell your server members. They should know their messages are processed by an LLM and that the bot keeps notes.
 
@@ -189,7 +164,7 @@ Runs with `node --test`. No network or Discord connection needed. The same comma
 
 ```
 config.json                defaults for every setting, hot-reloaded
-.env.example               template for DISCORD_TOKEN, OPENROUTER_API_KEY and optional YOUTUBE_API_KEY
+.env.example               template for DISCORD_TOKEN, OPENROUTER_API_KEY, optional YOUTUBE_API_KEY and BRAVE_SEARCH_API_KEY
 prompts/
   system-prompt.md         how to behave like an ordinary chat member
   character-card.md        the personality (working example)
@@ -204,6 +179,9 @@ prompts/
   rewatch.md               classifier: re-watch a video for a question
   rewatch-answer.md        prompt for the re-watch answer
   address.md               classifier for follow-up messages
+  lookup.md                classifier: does a question need a web search
+  read-link.md             condense a fetched page
+  search-summary.md        condense search results
   profile.md               warmup: one member's profile from a message sample
   channel.md               warmup: channel notes from a message sample
   server.md                warmup: server-level notes from channel notes and member summaries
@@ -215,24 +193,32 @@ docs/
     configuration.md       full reference for every config key
     owner-commands.md      every subcommand and the access grants
     warmup.md              the warmup: stages, progress, rails, commands
+    media.md               pictures, video, links, search, tools, costs
+    messages-and-memory.md the pipeline, the analyzer, profiles, episodes, the lorebook
   zh/                      Chinese
     README.md
     prompt-contract.md
     configuration.md
     owner-commands.md
     warmup.md
+    media.md
+    messages-and-memory.md
   ja/                      Japanese
     README.md
     prompt-contract.md
     configuration.md
     owner-commands.md
     warmup.md
+    media.md
+    messages-and-memory.md
   ru/                      Russian
     README.md
     prompt-contract.md
     configuration.md
     owner-commands.md
     warmup.md
+    media.md
+    messages-and-memory.md
 src/
   index.js                 entry point, wiring, timers, shutdown
   config.js                .env parser, config loader, deepMerge
@@ -254,6 +240,11 @@ src/
     fetch-image.js         download and cache images for inline LLM requests
     video-sites.js         video site matching, URL cache keys, yt-dlp/ffmpeg args
     fetch-video.js         download, probe and trim videos for the video describer
+  web/
+    readable.js            HTML to text, paywall detection
+    fetch-page.js          SSRF-guarded page fetcher
+    brave.js               Brave Search client
+    lookup.js              link reading and web search
   behavior/
     mention.js             call detection, ignore heuristics
     prompt.js              request builder with token budget

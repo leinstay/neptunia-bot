@@ -22,6 +22,7 @@ Every key in `config.json` with its default, grouped by section.
 | `mediaDescriptions` | `true` | One-line descriptions for pictures, GIFs, video frames and link thumbnails |
 | `videoDescriptions` | `false` | Watch short video clips through a video-capable model; needs `mediaDescriptions` on as well. Turn on in `config.local.json`; still needs a video-capable model and, for site links, `yt-dlp`/`ffmpeg` |
 | `videoRewatch` | `true` | When addressed, re-watch a video to answer a question about it; needs `videoDescriptions` on |
+| `webLookup` | `false` | Read links posted in chat and search the web when asked a factual question. Unlike other features, a missing key counts as OFF. Needs `BRAVE_SEARCH_API_KEY` in `.env` for search; without it only link reading works. See [Media: Links and search](media.md#links-reading-a-page) |
 | `followUp` | `true` | Classify untagged messages after the persona answers to continue a conversation |
 | `typingSimulation` | `true` | Simulate typing speed |
 | `adminCommands` | `true` | Owner slash commands; `false` unregisters them |
@@ -58,6 +59,18 @@ Every key in `config.json` with its default, grouped by section.
 
 `llm.provider` sets OpenRouter's provider routing field on every request, for example `{ "ignore": ["some-provider"] }` or `{ "order": ["anthropic"], "allow_fallbacks": true }`. If the OpenRouter account itself restricts allowed providers, ignoring the only one left makes every request fail with "No endpoints found". After changing provider settings, run `/nep ping` to verify that every model role is reachable.
 
+## `classifier`
+
+The three helper model roles, grouped under one key. Each is set independently, so the helpers can stay on cheap models while the voice uses a premium one.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `text` | `"anthropic/claude-sonnet-4.6"` | Text classifiers: the address classifier (`features.followUp`), the re-watch classifier (`features.videoRewatch`) and the search classifier (`features.webLookup`). Also condenses link reads and search results |
+| `media` | `"anthropic/claude-haiku-4.5"` | Picture describer (`features.mediaDescriptions`): one-line descriptions for pictures, GIF frames, video posters, stickers, custom emoji and link thumbnails |
+| `video` | `"google/gemini-3.8-flash"` | Video describer (`features.videoDescriptions`): watches short clips, re-watches on a question, retries on request. Must accept both video and audio input |
+
+**Migration from the old keys.** The deprecated keys `llm.classifierModel`, `mention.followUpModel`, `media.model` and `media.video.model` are no longer read. If any of them is present in `config.local.json`, the bot logs a startup warning (`config: deprecated model key ignored`) naming the key and its replacement. Move the value to `classifier.text`, `classifier.media` or `classifier.video` respectively.
+
 ## `context`
 
 | Key | Default | Meaning |
@@ -90,11 +103,10 @@ Every key in `config.json` with its default, grouped by section.
 
 ## `media`
 
-Settings for the media describer (`features.mediaDescriptions`).
+Settings for the media describer (`features.mediaDescriptions`). The describer model is `classifier.media`.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `model` | `"anthropic/claude-haiku-4.5"` | Describer model |
 | `maxOutputTokens` | `120` | Max output tokens per description |
 | `imageSize` | `512` | Downscale target in px |
 | `maxPerTurn` | `6` | Max descriptions generated per turn |
@@ -104,11 +116,10 @@ Settings for the media describer (`features.mediaDescriptions`).
 
 ### `media.video`
 
-Settings for the video describer (`features.videoDescriptions`). Video vision needs BOTH `features.mediaDescriptions` and `features.videoDescriptions` on. A separate video-capable model watches short clips: Discord video attachments and links to the sites in `media.video.sites`. Results are cached in the media cache alongside picture descriptions; a repost costs nothing.
+Settings for the video describer (`features.videoDescriptions`). Video vision needs BOTH `features.mediaDescriptions` and `features.videoDescriptions` on. The video model is `classifier.video`. A separate video-capable model watches short clips: Discord video attachments and links to the sites in `media.video.sites`. Results are cached in the media cache alongside picture descriptions; a repost costs nothing.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `model` | `"google/gemini-3.8-flash"` | Video-capable model; must accept both video and audio input |
 | `provider` | `{ "order": ["google-ai-studio"], "allow_fallbacks": false }` | OpenRouter provider routing for the direct-URL path (YouTube within the length cap); `null` uses `llm.provider` |
 | `maxOutputTokens` | `800` | Max output tokens per video summary |
 | `summaryChars` | `1500` | Max characters for a video account; fills `{{maxChars}}` in `describe-video.md` |
@@ -138,7 +149,7 @@ For YouTube links, the duration is learned through a chain: yt-dlp first, then t
 
 ### `media.video.rewatch`
 
-Settings for the re-watch classifier (`features.videoRewatch`). When the persona is addressed and a watched video sits in the recent transcript, a cheap classifier decides whether the message asks about one of those videos; if so, the video model watches the clip again and the answer is appended to the transcript. The classifier uses the follow-up model (`mention.followUpModel`, default `anthropic/claude-sonnet-4.6`). The second look always uses `media.video.model`.
+Settings for the re-watch classifier (`features.videoRewatch`). When the persona is addressed and a watched video sits in the recent transcript, a cheap classifier decides whether the message asks about one of those videos; if so, the video model watches the clip again and the answer is appended to the transcript. The classifier uses `classifier.text`. The second look always uses `classifier.video`.
 
 | Key | Default | Meaning |
 |---|---|---|
@@ -171,7 +182,6 @@ At most one re-watch or retry per turn. Answers are cached for one hour per ques
 | `switchDelayMs` | `[2000, 9000]` | Pause before answering in the next channel (ms) |
 | `followUpMinutes` | `15` | Follow-up window after the persona's last reply (min) |
 | `followUpContext` | `15` | Transcript lines sent to the classifier |
-| `followUpModel` | `"anthropic/claude-sonnet-4.6"` | Classifier model; `null` uses the media model |
 | `followUpMaxOutputTokens` | `8` | Max output tokens for the classifier |
 | `followUpNoStreak` | `3` | Consecutive `no` verdicts that close the window |
 
@@ -263,6 +273,42 @@ With `damping` on, a change that pushes the score further from zero is scaled by
 | `maxMatches` | `8` | Max entries shown per request |
 | `textChars` | `600` | Lore entry text limit (chars) |
 
+## `web`
+
+Settings for the web lookup (`features.webLookup`). Both link reading and search share a daily counter (`web.maxPerDay`). Results are cached in the media cache (`data/guilds/<id>/media.json`). All model calls go through the `classifier.text` role.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `maxPerDay` | `60` | Shared daily cap for link reads and search requests combined |
+
+### `web.links`
+
+| Key | Default | Meaning |
+|---|---|---|
+| `enabled` | `true` | Read links posted in chat (http/https only, private addresses refused, video-site links excluded) |
+| `prefill` | `true` | Read a link as soon as it arrives, so the next turn finds it cached |
+| `prefillPerUserPerDay` | `10` | Max links the prefill reads per member per day on arrival; the turn path is not limited by this |
+| `maxPerTurn` | `2` | Max new link reads per turn (each fetch attempt counts) |
+| `maxBytes` | `1500000` | Max page size (bytes) before the page is refused |
+| `textChars` | `6000` | Max characters of page text sent to the condenser |
+| `summaryChars` | `700` | Max characters for the condensed excerpt; fills `{{maxChars}}` in `read-link.md` |
+| `maxOutputTokens` | `300` | Max output tokens for the condenser |
+| `fetchTimeoutMs` | `10000` | Download timeout per page (ms) |
+| `skipSites` | `[]` | Hostnames whose links are never read (in addition to video sites, which are always excluded) |
+
+### `web.search`
+
+| Key | Default | Meaning |
+|---|---|---|
+| `enabled` | `true` | Run a search when the classifier fires; needs `BRAVE_SEARCH_API_KEY` in `.env` |
+| `maxPerTurn` | `1` | Max searches per turn |
+| `results` | `5` | Number of Brave Search results requested |
+| `summaryChars` | `900` | Max characters for the condensed answer; fills `{{maxChars}}` in `search-summary.md` |
+| `maxOutputTokens` | `400` | Max output tokens for the condenser |
+| `cacheHours` | `24` | Hours a cached search result is served before re-searching |
+| `contextMessages` | `50` | Recent channel messages rendered as a `<transcript>` for the search classifier |
+| `timeoutMs` | `10000` | Brave Search request timeout (ms) |
+
 ## `warmup`
 
 | Key | Default | Meaning |
@@ -288,29 +334,27 @@ With `damping` on, a change that pushes the score further from zero is scaled by
 
 The engine uses five model roles. Each is set independently, so the voice can use a premium model while the helpers stay cheap.
 
-### `llm.model` — the persona's voice
+### `llm.model` — the persona's voice (`talk`)
 
 The most capable model the budget allows. Roleplay quality, in-character consistency and natural conversation all depend on it. A smaller model breaks character, forgets context cues and sounds flat.
 
 Default: `anthropic/claude-opus-4.6`. A cheaper option: `anthropic/claude-sonnet-4.5`.
 
-### `memory.model` — the analyzer
+### `memory.model` — the analyzer (`analyzer`)
 
 Reasons over long transcripts and returns strict JSON. Needs the same tier of intelligence as the voice. `null` (default) uses the persona's model. The same examples apply.
 
-### `media.model` — pictures
+### `classifier.text` — text classifiers (`classifier.text`)
+
+The cheapest text model that can answer "yes" or "no" reliably. Runs the address classifier, the re-watch classifier, the search classifier, and condenses link reads and search results. Default: `anthropic/claude-sonnet-4.6`.
+
+### `classifier.media` — pictures (`classifier.media`)
 
 Any cheap vision model. Writes one-line descriptions, so reasoning power barely matters.
 
 Default: `anthropic/claude-haiku-4.5`. Cheapest alternative: `google/gemini-2.5-flash-lite`.
 
-### `mention.followUpModel` — the address classifier
-
-The cheapest text model that can answer "yes" or "no" reliably. Default: `anthropic/claude-sonnet-4.6`. `null` uses the media model.
-
-The re-watch classifier shares this model: it is the same kind of cheap yes/no job (does a message ask about a watched video?). The second look always uses the video model.
-
-### `media.video.model` — video with sound
+### `classifier.video` — video with sound (`classifier.video`)
 
 Only models that accept BOTH video and audio input through OpenRouter work here. Models that take frames but no audio (Qwen VL, GLM, Seed, Gemma) do not hear speech and miss most of the point.
 
