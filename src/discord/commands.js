@@ -338,7 +338,7 @@ export function buildCommandTree(commandName) {
         {
           type: SUBCOMMAND_GROUP,
           name: 'model',
-          description: 'Which model talks, analyzes memory, describes pictures, and classifies follow-ups.',
+          description: 'Which model talks, analyzes memory, describes pictures and videos, and classifies.',
           options: [
             { type: SUBCOMMAND, name: 'show', description: 'Show the model configured for each role.' },
             {
