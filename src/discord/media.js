@@ -301,14 +301,19 @@ function extraOf(...extras) {
  * carries `answer: { question, text }` (a second look on a question, see
  * src/memory/describe.js#rewatchVideo) appends `videoAnswered` after every
  * other tag of the item. Every other kind ignores `context.video`.
+ *
+ * `context.read` is the excerpt of a `link` page read by the web lookup
+ * (src/web/lookup.js#readLink): it appends `linkRead` after every other extra
+ * of the link (frameAttached, the video extra, videoAnswered or
+ * thumbnailDescribed). Every other kind ignores it.
  * @param {object} item
  * @param {{ attachedIndex?: number|null, description?: string|null, unknownDuration?: string,
  *   video?: { state: 'watched'|'limit'|'error', text?: string, reason?: string,
- *     answer?: { question: string, text: string } }|null }} [context]
+ *     answer?: { question: string, text: string } }|null, read?: string|null }} [context]
  * @returns {{ key: string, values: object,
  *   extra?: { key: string, values: object }|{ key: string, values: object }[] }}
  */
-export function mediaLabelFor(item, { attachedIndex = null, description = null, unknownDuration = '?', video = null } = {}) {
+export function mediaLabelFor(item, { attachedIndex = null, description = null, unknownDuration = '?', video = null, read = null } = {}) {
   const isPicture = PICTURE_ATTACHMENT_KINDS.has(item.kind) || (item.kind === 'link' && item.thumbnailUrl);
   if (attachedIndex != null && isPicture && item.kind !== 'link') {
     if (item.kind === 'video' || item.kind === 'gif') {
@@ -356,12 +361,14 @@ export function mediaLabelFor(item, { attachedIndex = null, description = null, 
         ? { key: 'linkText', values: { site: item.site ?? '', title: item.title ?? '', text: item.text } }
         : { key: 'link', values: { site: item.site ?? '', title: item.title ?? '' } };
       const frame = attachedIndex != null && item.thumbnailUrl ? { key: 'frameAttached', values: { n: attachedIndex } } : null;
+      const readExtra = read ? { key: 'linkRead', values: { text: read } } : null;
       if (video) {
         const videoExtra = linkVideoExtra(video, description);
-        return { ...base, extra: extraOf(frame, videoExtra, answeredExtra(video)) };
+        return { ...base, extra: extraOf(frame, videoExtra, answeredExtra(video), readExtra) };
       }
-      if (frame) return { ...base, extra: frame };
-      return description ? { ...base, extra: { key: 'thumbnailDescribed', values: { text: description } } } : base;
+      const thumbnail = !frame && description ? { key: 'thumbnailDescribed', values: { text: description } } : null;
+      const extra = extraOf(frame, thumbnail, readExtra);
+      return extra ? { ...base, extra } : base;
     }
     default:
       return { key: 'file', values: { name: item.name ?? '' } };
@@ -502,6 +509,26 @@ export function collectVideos(message, { sites = [] } = {}) {
       name: link.title || link.site,
       durationSec: null,
     });
+  }
+  return items;
+}
+
+/**
+ * The links of one normalized message (see src/discord/collect.js) the web
+ * lookup may read (src/web/lookup.js#readLinks), in the order they appear in
+ * it: every `link` item with a url, minus the ones on a video site of
+ * `sites` (the video describer's, see collectVideos) and every gif embed.
+ * `sites` missing or empty -> no link is excluded as a video.
+ * @param {object} message  A normalized message (see src/discord/collect.js).
+ * @param {{ sites?: string[] }} [options]
+ * @returns {{ id: string, messageId: string, url: string, site: string, title: string }[]}
+ */
+export function collectReadableLinks(message, { sites = [] } = {}) {
+  const items = [];
+  for (const link of message.links ?? []) {
+    if (link?.kind !== 'link' || !link.url || !link.id) continue;
+    if (Array.isArray(sites) && sites.length > 0 && videoSiteFor(link.url, sites)) continue;
+    items.push({ id: link.id, messageId: message.id, url: link.url, site: link.site ?? '', title: link.title ?? '' });
   }
   return items;
 }

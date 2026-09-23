@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import { between, typingMs, resolveMentions, createTurnRunner, parseRewatchPick, parseRewatchPickDetailed } from '../src/behavior/turn.js';
+import { between, typingMs, resolveMentions, createTurnRunner, parseRewatchPick, parseRewatchPickDetailed, parseLookupQuery } from '../src/behavior/turn.js';
 import { fill } from '../src/discord/format.js';
 import { labels } from './fixtures/labels.js';
 import { withCapturedLogs } from './fixtures/capture-logs.js';
@@ -1675,4 +1675,241 @@ test('createTurnRunner: rewatch -- a video that did not load renders its not-wat
   assert.equal(items.length, 1, 'the video message only; the trigger stays in <candidate>');
   const tag = fill(labels.transcript.videoNotWatched, { name: 'clip.mp4', duration: '0:20', reason: labels.transcript.videoReason.error });
   assert.ok(items[0].endsWith(`Alice: hey bot ${tag}`), items[0]);
+});
+
+// ---------------------------------------------------------------------------
+// The web lookup: read links and the search on a question.
+
+test('parseLookupQuery: none (any case, a trailing dot), empty or blank -> no query; else the first line, cut to 200', () => {
+  assert.deepEqual(parseLookupQuery('none'), { query: null, reason: 'none' });
+  assert.deepEqual(parseLookupQuery('  NONE.\nextra'), { query: null, reason: 'none' });
+  assert.deepEqual(parseLookupQuery(''), { query: null, reason: 'empty' });
+  assert.deepEqual(parseLookupQuery(' \n \n'), { query: null, reason: 'empty' });
+  assert.deepEqual(parseLookupQuery(null), { query: null, reason: 'empty' });
+  assert.deepEqual(parseLookupQuery('\n  qui a gagné la finale  \nsecond'), { query: 'qui a gagné la finale', reason: 'ok' });
+  assert.equal([...parseLookupQuery('λ'.repeat(300)).query].length, 200);
+});
+
+/** A raw message carrying link embeds. */
+function linkRaw(id, ts, embeds, content = 'κοίτα αυτό') {
+  return { ...rawMessage({ id, ts, content }), embeds };
+}
+
+const PAGE_EMBED = { url: 'https://example.org/a', title: 'Crêpes', description: null, provider: null, thumbnail: null };
+
+/** A fake createLookup()-shaped dependency. */
+function fakeLookup({ reads = {}, searchResult = { query: 'q', text: 'ευρήματα', sources: [{ title: 'Un', url: 'https://www.example.com/1', site: 'example.com' }] }, hasKey = true } = {}) {
+  const readCalls = [];
+  const searchCalls = [];
+  return {
+    readCalls,
+    searchCalls,
+    readLinks: async (guildId, links, options) => {
+      readCalls.push({ guildId, links, options });
+      const map = new Map();
+      for (const link of links) if (reads[link.id]) map.set(link.id, reads[link.id]);
+      return { reads: map, newCount: map.size };
+    },
+    search: async (guildId, query) => {
+      searchCalls.push({ guildId, query });
+      return searchResult ? { ...searchResult, query } : null;
+    },
+    hasSearch: () => hasKey,
+  };
+}
+
+const LOOKUP_SYSTEM = 'Decide whether {{name}} needs to look something up.';
+/** An llm fake routing the search classifier (system starts with "Decide whether") apart from the turn. */
+function lookupLlm(classifierText = 'none', turnText = '<msg>ok</msg>') {
+  const classifierCalls = [];
+  const turnCalls = [];
+  return {
+    classifierCalls,
+    turnCalls,
+    complete: async (messages, options) => {
+      if (messages[0].content.startsWith('Decide whether')) {
+        classifierCalls.push({ messages, options });
+        if (classifierText instanceof Error) throw classifierText;
+        return { text: classifierText, usage: {}, estimated: 5 };
+      }
+      turnCalls.push({ messages, options });
+      return { text: turnText, usage: {}, estimated: 10 };
+    },
+  };
+}
+
+function lookupHot(features = {}, web = {}, config = {}) {
+  const hot = fakeHot(
+    { webLookup: true, vision: false, ...features },
+    {},
+    {
+      classifier: { text: 'x/text' },
+      media: { maxPerTurn: 6, filePreviewChars: 500, video: { sites: ['youtube.com'] } },
+      web: {
+        maxPerDay: 60,
+        links: { enabled: true, maxPerTurn: 2, ...web.links },
+        search: { enabled: true, maxPerTurn: 1, contextMessages: 50, ...web.search },
+      },
+      ...config,
+    },
+  );
+  hot.config.llm.timeoutMs = 300_000;
+  hot.prompts.lookup = LOOKUP_SYSTEM;
+  return hot;
+}
+
+async function runLookupTurn({ hot = lookupHot(), llm = lookupLlm(), lookup = fakeLookup(), history, trigger = true } = {}) {
+  const messages = history ?? [
+    linkRaw('m1', NOW - 5000, [
+      PAGE_EMBED,
+      { url: 'https://www.youtube.com/watch?v=abc', title: 'v', provider: { name: 'YouTube' } },
+      { url: 'https://tenor.com/view/x', provider: { name: 'Tenor' } },
+    ]),
+    rawMessage({ id: 'm2', ts: NOW - 1000, authorName: 'Zoë', content: 'ποιος κέρδισε τον τελικό;' }),
+  ];
+  const channel = fakeTurnChannel({ historyMessages: messages });
+  const turns = createTurnRunner({ hot, store: fakeStore(), llm, calibrator: identityCalibrator(), client: fakeClient(), lookup });
+  const last = messages[messages.length - 1];
+  const turn = trigger
+    ? { channel, mode: 'reply', trigger: normalizedTrigger(last), triggerKind: 'mention' }
+    : { channel, mode: 'interject' };
+  const result = await turns.runTurn(turn);
+  return { result, llm, lookup };
+}
+
+test('createTurnRunner: lookup -- readable links (no video site, no gif) go to readLinks newest first; reads reach the transcript', async () => {
+  const lookup = fakeLookup({ reads: { 'm1#e0': 'une recette, trois œufs' } });
+  const { llm } = await runLookupTurn({ lookup });
+
+  assert.equal(lookup.readCalls.length, 1);
+  const { guildId, links, options } = lookup.readCalls[0];
+  assert.equal(guildId, 'g1');
+  assert.deepEqual(links.map((l) => l.id), ['m1#e0']);
+  assert.equal(links[0].url, 'https://example.org/a');
+  assert.equal(options.maxNew, 2);
+  const userMessage = llm.turnCalls[0].messages[1].content;
+  assert.ok(userMessage.includes('[link: example.org — Crêpes] [page read: une recette, trois œufs]'), userMessage);
+});
+
+test('createTurnRunner: lookup -- links are offered newest message first', async () => {
+  const lookup = fakeLookup();
+  const history = [
+    linkRaw('m1', NOW - 9000, [PAGE_EMBED]),
+    linkRaw('m2', NOW - 5000, [{ ...PAGE_EMBED, url: 'https://example.org/b', title: 'B' }]),
+    rawMessage({ id: 'm3', ts: NOW - 1000, content: 'λοιπόν;' }),
+  ];
+  await runLookupTurn({ lookup, history });
+  assert.deepEqual(lookup.readCalls[0].links.map((l) => l.id), ['m2#e0', 'm1#e0']);
+});
+
+test('createTurnRunner: lookup -- the classifier gets the transcript and the candidate; a query becomes a <lookup> block', async () => {
+  const llm = lookupLlm('champions final winner 2026');
+  const lookup = fakeLookup({ reads: { 'm1#e0': 'une recette' } });
+  await runLookupTurn({ llm, lookup });
+
+  assert.equal(llm.classifierCalls.length, 1);
+  const { messages, options } = llm.classifierCalls[0];
+  assert.equal(messages[0].content, 'Decide whether Bot needs to look something up.');
+  const user = messages[1].content;
+  assert.ok(user.startsWith('<transcript>\n'));
+  assert.ok(user.includes('[page read: une recette]'), 'the classifier transcript carries the reads');
+  assert.ok(user.endsWith('</transcript>\n<candidate>\nZoë: ποιος κέρδισε τον τελικό;\n</candidate>'), user);
+  assert.ok(!user.split('<candidate>')[0].includes('ποιος κέρδισε'), 'the trigger only in <candidate>');
+  assert.equal(options.model, 'x/text');
+  assert.equal(options.maxOutputTokens, 60);
+  assert.equal(options.timeoutMs, 300_000);
+  assert.equal(options.skipCalibration, true);
+  assert.equal(options.countAgainstDailyCap, true);
+
+  assert.deepEqual(lookup.searchCalls, [{ guildId: 'g1', query: 'champions final winner 2026' }]);
+  const turnUser = llm.turnCalls[0].messages[1].content;
+  const block = [
+    fill(labels.lookup.header, { query: 'champions final winner 2026' }),
+    'ευρήματα',
+    fill(labels.lookup.sources, { list: 'example.com' }),
+  ].join('\n');
+  assert.ok(turnUser.includes(`<lookup>\n${block}\n</lookup>`), turnUser);
+});
+
+test('createTurnRunner: lookup -- contextMessages 0 omits the <transcript> block', async () => {
+  const llm = lookupLlm('none');
+  await runLookupTurn({ llm, hot: lookupHot({}, { search: { contextMessages: 0 } }) });
+  assert.equal(llm.classifierCalls[0].messages[1].content, '<candidate>\nZoë: ποιος κέρδισε τον τελικό;\n</candidate>');
+});
+
+test('createTurnRunner: lookup -- none, an empty answer or a classifier error -> no search, no <lookup> block', async () => {
+  for (const answer of ['none', '', new Error('boom')]) {
+    const lookup = fakeLookup();
+    const { llm, result } = await runLookupTurn({ llm: lookupLlm(answer), lookup });
+    assert.equal(result.outcome, 'spoke');
+    assert.equal(lookup.searchCalls.length, 0);
+    assert.ok(!llm.turnCalls[0].messages[1].content.includes('\n<lookup>\n'));
+  }
+});
+
+test('createTurnRunner: lookup -- a search returning null leaves no <lookup> block', async () => {
+  const lookup = fakeLookup({ searchResult: null });
+  const { llm } = await runLookupTurn({ llm: lookupLlm('x y'), lookup });
+  assert.equal(lookup.searchCalls.length, 1);
+  assert.ok(!llm.turnCalls[0].messages[1].content.includes('\n<lookup>\n'));
+});
+
+test('createTurnRunner: lookup -- only on a direct address: a spontaneous turn reads links but never classifies', async () => {
+  const lookup = fakeLookup();
+  const { llm } = await runLookupTurn({ lookup, llm: lookupLlm('x y'), trigger: false });
+  assert.equal(lookup.readCalls.length, 1);
+  assert.equal(llm.classifierCalls.length, 0);
+  assert.equal(lookup.searchCalls.length, 0);
+});
+
+test('createTurnRunner: lookup -- one classifier call and at most one search per turn', async () => {
+  const lookup = fakeLookup();
+  const { llm } = await runLookupTurn({ lookup, llm: lookupLlm('first query\nsecond query') });
+  assert.equal(llm.classifierCalls.length, 1);
+  assert.deepEqual(lookup.searchCalls.map((c) => c.query), ['first query']);
+});
+
+test('createTurnRunner: lookup -- no key, no prompt, search disabled or maxPerTurn 0 -> no classifier call', async () => {
+  const noPrompt = lookupHot();
+  delete noPrompt.prompts.lookup;
+  const cases = [
+    { hot: lookupHot(), lookup: fakeLookup({ hasKey: false }) },
+    { hot: noPrompt, lookup: fakeLookup() },
+    { hot: lookupHot({}, { search: { enabled: false } }), lookup: fakeLookup() },
+    { hot: lookupHot({}, { search: { maxPerTurn: 0 } }), lookup: fakeLookup() },
+  ];
+  for (const { hot, lookup } of cases) {
+    const { llm } = await runLookupTurn({ hot, lookup, llm: lookupLlm('x y') });
+    assert.equal(llm.classifierCalls.length, 0);
+    assert.equal(lookup.searchCalls.length, 0);
+  }
+});
+
+test('createTurnRunner: lookup -- links disabled -> no readLinks, the search still runs', async () => {
+  const lookup = fakeLookup();
+  await runLookupTurn({ hot: lookupHot({}, { links: { enabled: false } }), lookup, llm: lookupLlm('x y') });
+  assert.equal(lookup.readCalls.length, 0);
+  assert.equal(lookup.searchCalls.length, 1);
+});
+
+test('createTurnRunner: lookup -- features.webLookup off or missing -> zero lookup calls and no classifier call', async () => {
+  for (const features of [{ webLookup: false }, { webLookup: undefined }]) {
+    const lookup = fakeLookup();
+    const { llm } = await runLookupTurn({ hot: lookupHot(features), lookup, llm: lookupLlm('x y') });
+    assert.equal(lookup.readCalls.length, 0);
+    assert.equal(lookup.searchCalls.length, 0);
+    assert.equal(llm.classifierCalls.length, 0);
+    assert.equal(llm.turnCalls.length, 1);
+  }
+});
+
+test('createTurnRunner: lookup -- logs lookup: classified with codes only, never the query or the transcript', async () => {
+  const { logs } = await withCapturedLogs(() => runLookupTurn({ llm: lookupLlm('requête très secrète') }));
+  const line = logs.find((l) => l.msg === 'lookup: classified');
+  assert.ok(line);
+  assert.equal(line.picked, true);
+  assert.equal(line.parse, 'ok');
+  const all = JSON.stringify(logs);
+  assert.ok(!all.includes('secrète'));
+  assert.ok(!all.includes('κέρδισε'));
 });

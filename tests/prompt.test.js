@@ -1579,3 +1579,122 @@ test('buildRequest: videoRewatch false, video watching off, or no videoRewatch l
   assert.ok(senses.includes(labels.senses.videoWatch));
   assert.ok(!senses.includes(labels.senses.videoRewatch));
 });
+
+// --- the web lookup: <lookup>, read links, senses -----------------------------------
+
+function webConfig(features = {}, web = {}) {
+  const config = fakeConfig({ features: { webLookup: true, ...features } });
+  config.web = { links: { enabled: true, ...web.links }, search: { enabled: true, ...web.search } };
+  return config;
+}
+
+function lookupOf(request) {
+  const text = typeof request.messages[1].content === 'string' ? request.messages[1].content : request.messages[1].content[0].text;
+  const match = /<lookup>\n([\s\S]*?)\n<\/lookup>/.exec(text);
+  return match ? match[1] : null;
+}
+
+const LOOKUP = {
+  query: 'qui a gagné la finale',
+  text: 'Deux sources le confirment (example.com).',
+  sources: [
+    { title: 'Un', url: 'https://www.example.com/1', site: 'example.com' },
+    { title: 'Deux', url: 'https://news.example.org/2', site: 'news.example.org' },
+  ],
+};
+
+test('buildRequest: a lookup renders <lookup> -- the header with the query, the text, the sources line', () => {
+  const request = buildRequest(baseInput({ config: webConfig(), lookup: LOOKUP }));
+  assert.equal(
+    lookupOf(request),
+    [
+      fill(labels.lookup.header, { query: LOOKUP.query }),
+      LOOKUP.text,
+      fill(labels.lookup.sources, { list: 'example.com, news.example.org' }),
+    ].join('\n'),
+  );
+  assert.equal(request.stats.lookup.kept, 1);
+});
+
+test('buildRequest: <lookup> sits right before <chat>, after the reference blocks', () => {
+  const request = buildRequest(baseInput({ config: webConfig(), lookup: LOOKUP }));
+  const user = request.messages[1].content;
+  const at = user.indexOf('\n<lookup>\n');
+  assert.ok(at > user.indexOf('</senses>'));
+  assert.ok(at < user.indexOf('<chat>'));
+  assert.ok(user.indexOf('</lookup>\n\n<chat>') !== -1);
+});
+
+test('buildRequest: an empty lookup text renders the none line, without a sources line', () => {
+  const request = buildRequest(baseInput({ config: webConfig(), lookup: { query: 'ζζζ', text: '', sources: [] } }));
+  assert.equal(lookupOf(request), [fill(labels.lookup.header, { query: 'ζζζ' }), labels.lookup.none].join('\n'));
+});
+
+test('buildRequest: a missing site is derived from the url without www.; duplicate sites are listed once', () => {
+  const lookup = { query: 'q', text: 't', sources: [{ url: 'https://www.exemple.fr/a' }, { url: 'https://exemple.fr/b', site: 'exemple.fr' }] };
+  const request = buildRequest(baseInput({ config: webConfig(), lookup }));
+  assert.ok(lookupOf(request).endsWith(fill(labels.lookup.sources, { list: 'exemple.fr' })));
+});
+
+test('buildRequest: no lookup, or an older labels.json without labels.lookup -> no <lookup> block', () => {
+  assert.equal(lookupOf(buildRequest(baseInput({ config: webConfig() }))), null);
+  const { lookup: _omit, ...older } = labels;
+  const request = buildRequest(baseInput({ config: webConfig(), lookup: LOOKUP, prompts: fakePrompts({ labels: older }) }));
+  assert.equal(lookupOf(request), null);
+});
+
+test('buildRequest: the <lookup> block is kept whole, ahead of the chat, when the budget is tight', () => {
+  const history = Array.from({ length: 60 }, (_, i) => makeMessage(i + 1, NOW - (60 - i) * MIN, { content: 'λόγια '.repeat(30) }));
+  const config = webConfig();
+  config.llm.maxRequestTokens = 2500;
+  const request = buildRequest(baseInput({ config, history, lookup: LOOKUP }));
+  assert.ok(request.stats.chat.dropped > 0, 'the chat is trimmed');
+  assert.equal(request.stats.lookup.kept, 1);
+  assert.ok(lookupOf(request).includes(LOOKUP.text));
+});
+
+test('buildRequest: reads reach the <chat> transcript as linkRead', () => {
+  const history = [
+    makeMessage(1, NOW - MIN, { links: [{ id: '1#e0', kind: 'link', site: 'example.org', title: 'Crêpes', url: 'https://example.org/c' }] }),
+  ];
+  const request = buildRequest(baseInput({ config: webConfig(), history, reads: new Map([['1#e0', 'trois œufs']]) }));
+  assert.ok(request.messages[1].content.includes('[link: example.org — Crêpes] [page read: trois œufs]'));
+});
+
+test('buildRequest: webLookup on with links -> linksRead replaces the links line; search on -> the search line after it', () => {
+  const senses = sensesOf(buildRequest(baseInput({ config: webConfig({ mediaDescriptions: true }) }))).split('\n');
+  const at = senses.indexOf(labels.senses.linksRead);
+  assert.ok(at !== -1);
+  assert.equal(senses[at + 1], labels.senses.search);
+  assert.ok(!senses.includes(labels.senses.linksWatch));
+  assert.ok(!senses.includes(labels.senses.links));
+});
+
+test('buildRequest: links disabled keeps the old links line; search disabled drops the search line', () => {
+  const noLinks = sensesOf(buildRequest(baseInput({ config: webConfig({ mediaDescriptions: true }, { links: { enabled: false } }) }))).split('\n');
+  assert.ok(noLinks.includes(labels.senses.linksWatch));
+  assert.ok(!noLinks.includes(labels.senses.linksRead));
+  assert.ok(noLinks.includes(labels.senses.search));
+  const noSearch = sensesOf(buildRequest(baseInput({ config: webConfig({}, { search: { enabled: false } }) }))).split('\n');
+  assert.ok(noSearch.includes(labels.senses.linksRead));
+  assert.ok(!noSearch.includes(labels.senses.search));
+});
+
+test('buildRequest: webLookup off or missing -> no linksRead and no search line', () => {
+  for (const features of [{ webLookup: false }, {}]) {
+    const config = fakeConfig({ features });
+    config.web = { links: { enabled: true }, search: { enabled: true } };
+    const senses = sensesOf(buildRequest(baseInput({ config }))).split('\n');
+    assert.ok(senses.includes(labels.senses.links));
+    assert.ok(!senses.includes(labels.senses.linksRead));
+    assert.ok(!senses.includes(labels.senses.search));
+  }
+});
+
+test('buildRequest: an older labels set without linksRead falls back to linksWatch, then links', () => {
+  const older = { ...labels, senses: { ...labels.senses, linksRead: undefined, search: undefined } };
+  const watch = sensesOf(buildRequest(baseInput({ config: webConfig({ mediaDescriptions: true }), prompts: fakePrompts({ labels: older }) }))).split('\n');
+  assert.ok(watch.includes(labels.senses.linksWatch));
+  const plain = sensesOf(buildRequest(baseInput({ config: webConfig(), prompts: fakePrompts({ labels: older }) }))).split('\n');
+  assert.ok(plain.includes(labels.senses.links));
+});

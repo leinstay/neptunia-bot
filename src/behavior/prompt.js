@@ -3,6 +3,7 @@
 // is spent in this priority order (see src/llm/budget.js):
 //   1. system prompt (persona + live rules + output format), task, clock, tempo — never cut
 //   2. memory about the person the persona is talking to
+//   2b. what the persona looked up online this turn (`<lookup>`, one piece)
 //   3. how this server talks + what the persona has said about itself
 //   4. the map of the server's channels
 //   5. the channel transcript, newest messages first
@@ -417,6 +418,8 @@ function assembleUser({ now, timezone, labels, sensesText, kept, tempoText, task
     block('self_facts', kept.self.join('\n')),
     block('people', [...kept.interlocutor, ...kept.people].join('\n\n')),
     block('other_channels', kept.neighbors.join('\n\n')),
+    // Right before the chat it answers a question from.
+    block('lookup', (kept.lookup ?? []).join('\n')),
     block('chat', renderTranscript(chatItems, timezone, labels)),
     block('tempo', tempoText),
     block('task', task),
@@ -443,6 +446,40 @@ function requireLabels(prompts) {
     throw new Error('prompts.labels is missing or incomplete: labels.transcript is required');
   }
   return labels;
+}
+
+/** Hostname of `url` without a leading `www.`, or '' for an unparsable URL. */
+function siteOf(url) {
+  try {
+    return new URL(String(url)).hostname.replace(/^www\./i, '');
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * The `<lookup>` block body: what the persona looked up online this turn
+ * (src/web/lookup.js#search) -- `labels.lookup.header` with the query, then
+ * the condensed text and `labels.lookup.sources` with the distinct sites, or
+ * `labels.lookup.none` when nothing useful came back. '' when there is no
+ * lookup or an older labels.json has no `labels.lookup` (no block at all).
+ * @param {{ query: string, text: string, sources?: { site?: string, url?: string }[] }|null} lookup
+ * @param {object} labels
+ */
+function renderLookup(lookup, labels) {
+  const l = labels.lookup;
+  if (!lookup || !l?.header) return '';
+  const lines = [fill(l.header, { query: lookup.query ?? '' })];
+  const text = String(lookup.text ?? '').trim();
+  if (!text) {
+    if (l.none) lines.push(l.none);
+    return lines.join('\n');
+  }
+  lines.push(text);
+  const sources = Array.isArray(lookup.sources) ? lookup.sources : [];
+  const sites = [...new Set(sources.map((source) => source?.site || siteOf(source?.url)).filter(Boolean))];
+  if (sites.length > 0 && l.sources) lines.push(fill(l.sources, { list: sites.join(', ') }));
+  return lines.join('\n');
 }
 
 /**
@@ -479,7 +516,16 @@ function renderSenses(config, labels) {
   lines.push(...shownStickerLines);
   if (shownStickerLines.length > 0) lines.push(senses.lottie);
 
-  lines.push(senses.voice, videoOn ? (senses.linksWatch ?? senses.links) : senses.links, senses.files);
+  // The web lookup (features.webLookup -- a missing key counts as OFF, it
+  // costs money and needs a key): read links replace the links line, the
+  // search line follows it. Older labels fall back to the lines before.
+  const webOn = config.features?.webLookup === true;
+  const linksLine = videoOn ? (senses.linksWatch ?? senses.links) : senses.links;
+  const readOn = webOn && config.web?.links?.enabled !== false;
+  const searchOn = webOn && config.web?.search?.enabled !== false;
+  lines.push(senses.voice, readOn ? (senses.linksRead ?? linksLine) : linksLine);
+  if (searchOn && senses.search) lines.push(senses.search);
+  lines.push(senses.files);
   return lines.filter(Boolean).join('\n');
 }
 
@@ -650,10 +696,14 @@ function splitPeople(otherProfiles, candidateProfiles, history, trigger, exclude
  *   NOT selected to be attached (see src/behavior/turn.js, src/memory/describe.js).
  * @param {Map<string, object>} [input.videos]  Item id -> video state from the video describer
  *   (src/memory/describe.js#describeVideos), passed to formatTranscript.
+ * @param {Map<string, string>} [input.reads]  Link id -> the excerpt the web lookup read from that
+ *   page (src/web/lookup.js#readLinks), passed to formatTranscript.
+ * @param {{ query: string, text: string, sources: object[] }|null} [input.lookup]  What the web
+ *   search found this turn (src/web/lookup.js#search), rendered as `<lookup>`.
  * @returns {{ messages: object[], stats: object, idByIndex: Map<number, string>, tempo: object }}
  */
 export function buildRequest(input) {
-  const { config, prompts, calibrator, mode, forced = false, now, selfName, history, neighbors, trigger, triggerKind, channels = [], currentChannelId = null, descriptions, videos } = input;
+  const { config, prompts, calibrator, mode, forced = false, now, selfName, history, neighbors, trigger, triggerKind, channels = [], currentChannelId = null, descriptions, videos, reads, lookup = null } = input;
   const labels = requireLabels(prompts);
   const nameOf = typeof input.nameOf === 'function' ? input.nameOf : () => null;
   const { timezone } = config.bot;
@@ -673,6 +723,7 @@ export function buildRequest(input) {
     attachedIndex,
     descriptions,
     videos,
+    reads,
   };
 
   const nameFill = (text) => fillPromptTemplate(text, { name: selfName });
@@ -759,6 +810,9 @@ export function buildRequest(input) {
           }),
         ].filter(Boolean),
       },
+      // One piece, never split: already bounded by web.search.summaryChars,
+      // and ahead of the chat so a tight budget trims old messages first.
+      { name: 'lookup', items: [renderLookup(lookup, labels)].filter(Boolean) },
       { name: 'aboutChat', cap: caps.aboutChat, items: aboutChatItems(input.guildMemory, labels, nameOf) },
       {
         name: 'self',

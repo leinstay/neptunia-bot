@@ -167,6 +167,7 @@ function makeHandler({
   describer,
   prompts,
   llm,
+  lookup,
 } = {}) {
   return createMessageHandler({
     hot: prompts !== undefined ? { config: config ?? baseConfig(), prompts } : { config: config ?? baseConfig() },
@@ -180,6 +181,7 @@ function makeHandler({
     isWarmingUp,
     describer,
     llm,
+    lookup,
     rng: rng ?? Math.random,
     now,
     sleep,
@@ -2069,4 +2071,72 @@ test('follow-up persistence: no message text ever reaches the state', async () =
   for (const value of Object.values(saved)) assert.equal(typeof value, 'number');
   const json = JSON.stringify(store.state.data);
   assert.ok(!json.includes('μυστικό') && !json.includes('here you go'), 'neither the member\'s nor the persona\'s text is stored');
+});
+
+// ---------------------------------------------------------------------------
+// features.webLookup + web.links.prefill: a posted link is read
+// fire-and-forget, at most one per message, never a video-site or gif link.
+
+function fakeLookup() {
+  const readCalls = [];
+  return {
+    readCalls,
+    readLinks: async (guildId, links, options) => {
+      readCalls.push({ guildId, links, options });
+      return { reads: new Map(), newCount: 0 };
+    },
+  };
+}
+
+const LINK_EMBEDS = [
+  { url: 'https://www.youtube.com/watch?v=abc', title: 'v', provider: { name: 'YouTube' } },
+  { url: 'https://tenor.com/view/x', provider: { name: 'Tenor' } },
+  { url: 'https://example.org/a', title: 'Crêpes' },
+  { url: 'https://example.org/b', title: 'Galettes' },
+];
+
+function webConfig(overrides = {}) {
+  return baseConfig(deepMerge({ features: { webLookup: true }, web: { links: { enabled: true, prefill: true } } }, overrides));
+}
+
+test('events: web.links.prefill on reads the first readable link of a message, fire-and-forget', async () => {
+  const lookup = fakeLookup();
+  const handler = makeHandler({ config: webConfig(), lookup });
+
+  await handler(fakeMessage({ id: 'm1', cleanContent: 'κοίτα', embeds: LINK_EMBEDS }));
+
+  assert.equal(lookup.readCalls.length, 1);
+  assert.equal(lookup.readCalls[0].guildId, 'g1');
+  assert.deepEqual(
+    lookup.readCalls[0].links.map((link) => link.url),
+    ['https://example.org/a'],
+    'the video-site and gif embeds are skipped, one link only',
+  );
+});
+
+test('events: no link prefill when webLookup is off or missing, links are disabled or prefill is off', async () => {
+  const missing = webConfig();
+  delete missing.features.webLookup;
+  for (const config of [
+    webConfig({ features: { webLookup: false } }),
+    missing,
+    webConfig({ web: { links: { enabled: false } } }),
+    webConfig({ web: { links: { prefill: false } } }),
+    baseConfig(),
+  ]) {
+    const lookup = fakeLookup();
+    const handler = makeHandler({ config, lookup });
+    await handler(fakeMessage({ id: 'm1', cleanContent: 'κοίτα', embeds: LINK_EMBEDS }));
+    assert.equal(lookup.readCalls.length, 0);
+  }
+});
+
+test('events: a message with no readable link never calls readLinks; a lookup failure is swallowed', async () => {
+  const lookup = fakeLookup();
+  await makeHandler({ config: webConfig(), lookup })(fakeMessage({ id: 'm1', cleanContent: 'just words' }));
+  assert.equal(lookup.readCalls.length, 0);
+
+  const failing = { readLinks: async () => { throw new Error('boom'); } };
+  await makeHandler({ config: webConfig(), lookup: failing })(fakeMessage({ id: 'm2', cleanContent: 'κοίτα', embeds: LINK_EMBEDS }));
+  await new Promise((resolve) => setImmediate(resolve));
 });

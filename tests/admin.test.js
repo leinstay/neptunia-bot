@@ -337,6 +337,7 @@ function makeAdmin(rootDir, extra = {}) {
     llm: extra.llm,
     warmup: extra.warmup,
     describer: extra.describer,
+    lookup: extra.lookup,
   });
   return { admin, hot, store };
 }
@@ -3388,4 +3389,72 @@ test('run: ping video with the ping label missing still appends the YouTube line
   const lines = (await admin.run('ping', { role: 'classifier.video' }, {})).split('\n');
   assert.equal(llm.calls.length, 0);
   assert.equal(lines[1], 'youtube: blocked (set YOUTUBE_API_KEY)');
+});
+
+// ---------------------------------------------------------------------------
+// ping: the web line (src/web/lookup.js), no network call
+// ---------------------------------------------------------------------------
+
+function fakeWebLookup(hasKey) {
+  let searches = 0;
+  return {
+    hasSearch: () => hasKey,
+    search: async () => {
+      searches += 1;
+      return null;
+    },
+    get searches() {
+      return searches;
+    },
+  };
+}
+
+test('run: ping classifier appends the web line last: key ok, no key, or lookup off', async () => {
+  const cases = [
+    [true, true, 'web: search key ok'],
+    [true, false, 'web: no BRAVE_SEARCH_API_KEY'],
+    [false, true, 'web: lookup off'],
+    [undefined, true, 'web: lookup off'],
+  ];
+  for (const [webLookup, hasKey, expected] of cases) {
+    const rootDir = makeRoot();
+    const hot = hotForPing(rootDir);
+    if (webLookup !== undefined) hot.config.features = { ...hot.config.features, webLookup };
+    else if (hot.config.features) delete hot.config.features.webLookup;
+    const llm = fakeLlm(() => ({ text: 'pong', usage: {}, estimated: 1 }));
+    const lookup = fakeWebLookup(hasKey);
+    const { admin } = makeAdmin(rootDir, { hot, llm, lookup });
+
+    const lines = (await admin.run('ping', { role: 'classifier' }, {})).split('\n');
+    assert.equal(lines.at(-1), expected);
+    assert.equal(lines.filter((l) => l.startsWith('web:')).length, 1);
+    assert.equal(lookup.searches, 0, 'no search request');
+    assert.ok(llm.calls.every((c) => c.options.maxOutputTokens === 16), 'only the model pings');
+  }
+});
+
+test('run: full ping appends the web line too; a talk-only ping or no lookup wired does not', async () => {
+  const rootDir = makeRoot();
+  const hot = hotForPing(rootDir);
+  hot.config.features = { ...hot.config.features, webLookup: true };
+  const llm = fakeLlm(() => ({ text: 'pong', usage: {}, estimated: 1 }));
+  const { admin } = makeAdmin(rootDir, { hot, llm, lookup: fakeWebLookup(true) });
+
+  assert.equal((await admin.run('ping', {}, {})).split('\n').at(-1), 'web: search key ok');
+  assert.ok(!(await admin.run('ping', { role: 'talk' }, {})).includes('web:'));
+
+  const { admin: bare } = makeAdmin(rootDir, { hot, llm });
+  assert.ok(!(await bare.run('ping', { role: 'classifier' }, {})).includes('web:'));
+});
+
+test('run: ping classifier with the ping label missing still appends the web line', async () => {
+  const rootDir = makeRoot();
+  const hot = hotForPing(rootDir, { label: false });
+  hot.config.features = { ...hot.config.features, webLookup: true };
+  const llm = fakeLlm(() => ({ text: 'pong', usage: {}, estimated: 1 }));
+  const { admin } = makeAdmin(rootDir, { hot, llm, lookup: fakeWebLookup(false) });
+
+  const lines = (await admin.run('ping', { role: 'classifier' }, {})).split('\n');
+  assert.equal(llm.calls.length, 0);
+  assert.equal(lines.at(-1), 'web: no BRAVE_SEARCH_API_KEY');
 });

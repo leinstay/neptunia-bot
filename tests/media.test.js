@@ -15,6 +15,7 @@ import {
   collectPictures,
   collectEmojiItems,
   collectVideos,
+  collectReadableLinks,
   isDescribable,
   selectPictures,
 } from '../src/discord/media.js';
@@ -832,4 +833,75 @@ test('mediaLabelFor: an answer on a state that is not watched is ignored', () =>
     key: 'videoNotWatched',
     values: { name: 'clip.mp4', duration: '1:05', reason: 'error' },
   });
+});
+
+// --- mediaLabelFor: a link read by the web lookup (linkRead) -----------------------
+
+test('mediaLabelFor: a read link keeps its link tag and gets linkRead as its one extra', () => {
+  const item = { kind: 'link', site: 'example.org', title: 'Café' };
+  assert.deepEqual(mediaLabelFor(item, { read: 'une recette de crêpes' }), {
+    key: 'link',
+    values: { site: 'example.org', title: 'Café' },
+    extra: { key: 'linkRead', values: { text: 'une recette de crêpes' } },
+  });
+});
+
+test('mediaLabelFor: linkRead follows thumbnailDescribed, and frameAttached when the thumbnail is attached', () => {
+  const item = { kind: 'link', site: 's', title: 't', thumbnailUrl: 'https://x/y.jpg' };
+  const read = { key: 'linkRead', values: { text: 'page gist' } };
+  assert.deepEqual(mediaLabelFor(item, { description: 'thumb', read: 'page gist' }).extra, [
+    { key: 'thumbnailDescribed', values: { text: 'thumb' } },
+    read,
+  ]);
+  assert.deepEqual(mediaLabelFor(item, { attachedIndex: 2, read: 'page gist' }).extra, [{ key: 'frameAttached', values: { n: 2 } }, read]);
+});
+
+test('mediaLabelFor: linkRead comes after frameAttached, the video extra and videoAnswered', () => {
+  const item = { kind: 'link', site: 's', title: 't', thumbnailUrl: 'https://x/y.jpg' };
+  const video = { state: 'watched', text: 'a talk', answer };
+  assert.deepEqual(mediaLabelFor(item, { attachedIndex: 1, video, read: 'page gist' }).extra, [
+    { key: 'frameAttached', values: { n: 1 } },
+    { key: 'linkWatched', values: { text: 'a talk' } },
+    { key: 'videoAnswered', values: { question: answer.question, text: answer.text } },
+    { key: 'linkRead', values: { text: 'page gist' } },
+  ]);
+});
+
+test('mediaLabelFor: without a read the link renders exactly as before; other kinds ignore a read', () => {
+  const item = { kind: 'link', site: 's', title: 't', thumbnailUrl: 'https://x/y.jpg' };
+  assert.deepEqual(mediaLabelFor(item, { read: null }), mediaLabelFor(item));
+  assert.deepEqual(mediaLabelFor(item, { description: 'thumb', read: '' }), {
+    key: 'link',
+    values: { site: 's', title: 't' },
+    extra: { key: 'thumbnailDescribed', values: { text: 'thumb' } },
+  });
+  assert.deepEqual(mediaLabelFor({ kind: 'gif', name: 'cat.gif' }, { read: 'x' }), { key: 'gif', values: { name: 'cat.gif' } });
+  assert.deepEqual(mediaLabelFor({ kind: 'image' }, { read: 'x' }), { key: 'image', values: {} });
+});
+
+// --- collectReadableLinks: the links the web lookup may read ------------------------
+
+test('collectReadableLinks: plain links in order, without gif embeds, video-site links or links with no url', () => {
+  const message = {
+    id: 'm1',
+    links: [
+      { id: 'm1#e0', kind: 'link', site: 'example.org', title: 'Á', url: 'https://example.org/a' },
+      { id: 'm1#e1', kind: 'gif', site: 'tenor', title: '', url: 'https://tenor.com/view/x' },
+      { id: 'video:url:1', kind: 'link', site: 'youtube.com', title: 'v', url: 'https://www.youtube.com/watch?v=abc' },
+      { id: 'm1#e3', kind: 'link', site: 'x', title: 'no url', url: null },
+      { id: 'm1#e4', kind: 'link', site: 'news.example.com', title: 'B', url: 'https://news.example.com/b' },
+    ],
+  };
+  const items = collectReadableLinks(message, { sites: ['youtube.com'] });
+  assert.deepEqual(
+    items.map((item) => item.id),
+    ['m1#e0', 'm1#e4'],
+  );
+  assert.deepEqual(items[0], { id: 'm1#e0', messageId: 'm1', url: 'https://example.org/a', site: 'example.org', title: 'Á' });
+});
+
+test('collectReadableLinks: no sites keeps video-site links; no links -> []', () => {
+  const message = { id: 'm1', links: [{ id: 'v', kind: 'link', site: 'youtube.com', title: '', url: 'https://youtu.be/abc' }] };
+  assert.equal(collectReadableLinks(message).length, 1);
+  assert.deepEqual(collectReadableLinks({ id: 'm2' }), []);
 });

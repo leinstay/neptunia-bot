@@ -47,6 +47,7 @@ export const labels = {
     linkNotWatched: '[not watched: {reason}]',
     linkNotWatchedFrame: '[not watched: {reason}; thumbnail: {text}]',
     videoAnswered: '[looked again for "{question}": {text}]',
+    linkRead: '[page read: {text}]',
     videoReason: {
       length: 'too long',
       size: 'too big',
@@ -71,6 +72,8 @@ export const labels = {
     voice: 'you cannot hear voice messages, only their length',
     links: 'links show their site, title and snippet, never the live page',
     linksWatch: 'links show their site, title and snippet; a video-site link may come with a watch summary',
+    linksRead: 'links show their site, title and snippet; a link may come with an excerpt of the page, read first-hand',
+    search: 'a question you cannot answer may come with a <lookup> block of what was found online',
     files: 'files show only their name, or a short preview for plain text ones',
   },
   tempo: {
@@ -108,6 +111,11 @@ export const labels = {
   },
   lore: {
     entry: '{title}: {text}',
+  },
+  lookup: {
+    header: 'searched for: {query}',
+    sources: 'from: {list}',
+    none: 'the search found nothing useful',
   },
   affinity: {
     bands: {

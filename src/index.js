@@ -21,6 +21,9 @@ import { createDescriber } from './memory/describe.js';
 import { startYoutubeCheck } from './memory/youtube-check.js';
 import { createImageFetcher } from './discord/fetch-image.js';
 import { createVideoFetcher } from './discord/fetch-video.js';
+import { createPageFetcher } from './web/fetch-page.js';
+import { createBraveSearch } from './web/brave.js';
+import { createLookup } from './web/lookup.js';
 import { createAdmin } from './admin.js';
 import { createTagHistory } from './behavior/mention.js';
 import { createMessageHandler } from './discord/events.js';
@@ -49,6 +52,8 @@ const discordToken = needOrFail('DISCORD_TOKEN');
 const openrouterKey = needOrFail('OPENROUTER_API_KEY');
 // Optional: without it a YouTube duration comes from the watch page only.
 const youtubeApiKey = env.YOUTUBE_API_KEY || null;
+// Optional: without it the web lookup reads links but never searches. Never logged.
+const braveApiKey = env.BRAVE_SEARCH_API_KEY || null;
 
 const hot = createHot({ rootDir: ROOT_DIR }).watch();
 
@@ -94,7 +99,18 @@ const imageFetcher = createImageFetcher();
 const videoFetcher = createVideoFetcher();
 // state: the daily video counter lives next to the LLM client's daily counter.
 const describer = createDescriber({ hot, store, llm, imageFetcher, videoFetcher, state: store.state, youtubeApiKey });
-const turns = createTurnRunner({ hot, store, llm, calibrator, client, describer, imageFetcher });
+// The web lookup (features.webLookup, off by default): link reader + search on a question.
+// state: the daily web counter lives next to the LLM client's daily counter.
+const lookup = createLookup({
+  hot,
+  store,
+  llm,
+  state: store.state,
+  pageFetcher: createPageFetcher(),
+  braveSearch: createBraveSearch(),
+  braveApiKey,
+});
+const turns = createTurnRunner({ hot, store, llm, calibrator, client, describer, imageFetcher, lookup });
 const getSelfName = (guildId) => client.guilds.cache.get(guildId)?.members.me?.displayName ?? client.user?.username ?? 'bot';
 // THE way memory starts (docs/prompt-contract.md, "The warmup"): sample-based,
 // resumable, mutes the persona while a run is in flight (see isWarmingUp below).
@@ -128,6 +144,8 @@ const onMessage = createMessageHandler({
   describer,
   // features.followUp: the address classifier's own, separate LLM call.
   llm,
+  // web.links.prefill: a posted link is read ahead of time.
+  lookup,
 });
 
 // One attention (mention.oneAtATime): once a turn frees its channel, answer
@@ -152,6 +170,8 @@ const admin = createAdmin({
   warmup,
   // /nep ping video: which YouTube duration source works on this host.
   describer,
+  // /nep ping classifier: whether the web lookup is on and has a search key.
+  lookup,
 });
 const onInteraction = createInteractionHandler({ hot, admin, getGuildId });
 

@@ -299,6 +299,8 @@ export function characterText(prompts, selfName) {
  *   (src/memory/describe.js), for pictures the analyzer cannot see itself.
  * @param {Map<string, object>} [input.videos]  Item id -> video state read from the video
  *   describer's cache (src/memory/describe.js#describeVideo), for videos it cannot watch itself.
+ * @param {Map<string, string>} [input.reads]  Link id -> the excerpt the web lookup read from that
+ *   page (src/web/lookup.js), read from the same cache.
  * @param {(id: string) => (string|null)} [input.nameOf]  Resolves a member id to their
  *   current stored name (`profile.names[0]`), for turning every `<@id>` token this
  *   request's views carry into `name (id:...)` -- see
@@ -307,7 +309,7 @@ export function characterText(prompts, selfName) {
  *   the caller, src/memory/update.js#analyze, injects a store-backed lookup).
  * @returns {{ messages: object[], consumed: number }}
  */
-export function buildMemoryRequest({ prompts, config, calibrator, profiles, guildMemory, channels, messages, selfName, loreEntries, descriptions, videos, nameOf }) {
+export function buildMemoryRequest({ prompts, config, calibrator, profiles, guildMemory, channels, messages, selfName, loreEntries, descriptions, videos, reads, nameOf }) {
   const { timezone } = config.bot;
   const labels = requireLabels(prompts);
   const relationships = config.features?.relationships !== false;
@@ -362,6 +364,7 @@ export function buildMemoryRequest({ prompts, config, calibrator, profiles, guil
     labels,
     descriptions,
     videos,
+    reads,
   };
   const transcriptItems = formatTranscript(messages, formatOptions);
   const transcriptTexts = transcriptItems.map((item) => item.text);
@@ -908,6 +911,23 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
       }
     }
 
+    // Pages the web lookup already read (src/web/lookup.js) are read from the
+    // same cache under `read:<link id>`; a miss or no entry renders the plain
+    // link. Never a request from here. features.webLookup: unlike the other
+    // switches a missing key counts as OFF.
+    let reads = null;
+    if (hot.config.features?.webLookup === true && hot.config.web?.links?.enabled !== false) {
+      const cache = store.getMediaCache(guildId);
+      reads = new Map();
+      for (const message of messages) {
+        for (const link of message.links ?? []) {
+          if (link.id == null) continue;
+          const cached = cache[`read:${link.id}`];
+          if (cached && !cached.miss && typeof cached.text === 'string') reads.set(link.id, cached.text);
+        }
+      }
+    }
+
     let completion;
     try {
       const { messages: llmMessages } = buildMemoryRequest({
@@ -922,6 +942,7 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
         loreEntries: store.getLore(guildId),
         descriptions,
         videos,
+        reads,
         nameOf: storeNameOf(store, guildId),
       });
 

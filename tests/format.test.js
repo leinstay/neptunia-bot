@@ -1200,3 +1200,54 @@ test('formatTranscript: labels without videoAnswered render an answered video ex
   assert.deepEqual(withAnswers, plain);
   assert.ok(!withAnswers[0].text.includes('κόκκινο'));
 });
+
+// --- formatTranscript: a link page read by the web lookup (reads -> linkRead)
+
+test('formatTranscript: reads appends linkRead after the link tag and its other extras', () => {
+  const t0 = Date.UTC(2026, 8, 20, 10, 0, 0);
+  const messages = [
+    msg('a', t0, {
+      content: 'regarde',
+      links: [
+        { id: 'a#e0', kind: 'link', site: 'example.org', title: 'Crêpes', thumbnailUrl: 'https://example.org/t.jpg', url: 'https://example.org/c' },
+        { id: 'a#e1', kind: 'link', site: 'other.org', title: 'Autre', url: 'https://other.org/x' },
+      ],
+    }),
+  ];
+  const items = formatTranscript(messages, {
+    timezone: TZ,
+    gapMinutes: 20,
+    maxChars: 100,
+    selfName: 'Nept',
+    labels,
+    descriptions: new Map([['a#e0', 'une assiette']]),
+    reads: new Map([['a#e0', 'une recette simple, 3 œufs']]),
+  });
+  assert.ok(
+    items[0].text.includes('[link: example.org — Crêpes] [thumbnail: une assiette] [page read: une recette simple, 3 œufs] [link: other.org — Autre]'),
+    items[0].text,
+  );
+});
+
+test('formatTranscript: an older labels.json with no linkRead key ignores reads, rendering as before', () => {
+  const t0 = Date.UTC(2026, 8, 20, 10, 0, 0);
+  const oldLabels = { ...labels, transcript: { ...labels.transcript, linkRead: undefined } };
+  const messages = [msg('a', t0, { content: '', links: [{ id: 'a#e0', kind: 'link', site: 'example.org', title: 'Crêpes', url: 'https://example.org/c' }] })];
+  const options = { timezone: TZ, gapMinutes: 20, maxChars: 100, selfName: 'Nept' };
+  const withReads = formatTranscript(messages, { ...options, labels: oldLabels, reads: new Map([['a#e0', 'texte']]) });
+  const without = formatTranscript(messages, { ...options, labels });
+  assert.equal(withReads[0].text, without[0].text);
+  assert.ok(!withReads[0].text.includes('texte'));
+});
+
+test('formatTranscript: reads apply inside a forwarded snapshot too', () => {
+  const t0 = Date.UTC(2026, 8, 20, 10, 0, 0);
+  const messages = [
+    msg('a', t0, {
+      content: '',
+      forwarded: [{ content: '', links: [{ id: 'f#e0', kind: 'link', site: 'example.org', title: 'Á', url: 'https://example.org/a' }] }],
+    }),
+  ];
+  const items = formatTranscript(messages, { timezone: TZ, gapMinutes: 20, maxChars: 100, selfName: 'Nept', labels, reads: new Map([['f#e0', 'résumé']]) });
+  assert.ok(items[0].text.includes('[link: example.org — Á] [page read: résumé]'), items[0].text);
+});

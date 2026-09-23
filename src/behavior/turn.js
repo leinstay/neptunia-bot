@@ -9,7 +9,14 @@ import { buildRequest } from './prompt.js';
 import { classifierTextModel } from './mention.js';
 import { parseOutput } from '../llm/parse.js';
 import { DailyCapError, TokenLimitError } from '../llm/openrouter.js';
-import { collectPictures, collectEmojiItems, collectVideos, isDescribable, selectPictures } from '../discord/media.js';
+import {
+  collectPictures,
+  collectEmojiItems,
+  collectVideos,
+  collectReadableLinks,
+  isDescribable,
+  selectPictures,
+} from '../discord/media.js';
 import { createImageFetcher } from '../discord/fetch-image.js';
 import { formatTranscript, renderTranscript } from '../discord/format.js';
 import { log } from '../log.js';
@@ -122,6 +129,43 @@ export function parseRewatchPickDetailed(raw, count) {
   return { pick: { n, question, retry: REWATCH_RETRY.test(question) }, reason: 'ok' };
 }
 
+const LOOKUP_QUERY_CHARS = 200;
+const LOOKUP_CLASSIFIER_MAX_TOKENS = 60;
+// Protocol token of the search classifier (prompts/lookup.md), not wording.
+const LOOKUP_NONE = /^none\.?$/i;
+
+/**
+ * Parse the search classifier's answer (prompts/lookup.md): ONE line, `none`
+ * or a search query. Only the first non-empty line counts; `none` (any case,
+ * a trailing dot tolerated) or nothing at all -> no query. The query is
+ * trimmed and cut to 200 characters. `reason` is a code safe to log:
+ * `none`, `empty` or `ok`.
+ * @param {string} raw
+ * @returns {{ query: string|null, reason: 'none'|'empty'|'ok' }}
+ */
+export function parseLookupQuery(raw) {
+  const line = String(raw ?? '')
+    .split('\n')
+    .map((l) => l.trim())
+    .find(Boolean);
+  if (!line) return { query: null, reason: 'empty' };
+  if (LOOKUP_NONE.test(line)) return { query: null, reason: 'none' };
+  const query = [...line].slice(0, LOOKUP_QUERY_CHARS).join('').trim();
+  return query ? { query, reason: 'ok' } : { query: null, reason: 'empty' };
+}
+
+/**
+ * The link items of `history` the web lookup may read (src/discord/media.js#collectReadableLinks:
+ * no video-site link, no gif embed), newest message first.
+ */
+function readableLinkCandidates(history, sites) {
+  const out = [];
+  for (let i = history.length - 1; i >= 0; i -= 1) {
+    out.push(...collectReadableLinks(history[i], { sites: sites ?? [] }));
+  }
+  return out;
+}
+
 /** Fill the `{{name}}` placeholder of a prompt file with the persona's display name (as src/behavior/prompt.js does). */
 function fillName(template, name) {
   return String(template ?? '').replace(/\{\{name\}\}/g, () => String(name ?? ''));
@@ -153,6 +197,9 @@ function describableCandidates(history, pickedIds) {
 }
 
 /**
+ * `lookup` (src/web/lookup.js#createLookup) is optional too: absent, or
+ * `features.webLookup` not true, no link is read and no search is made.
+ *
  * `describer` (src/memory/describe.js#createDescriber) is optional: when
  * absent, or `features.mediaDescriptions` is off, no description request is
  * ever made — buildRequest simply renders every un-attached picture blind.
@@ -170,6 +217,7 @@ export function createTurnRunner({
   describer,
   fetchImpl = fetch,
   imageFetcher = createImageFetcher(),
+  lookup,
 }) {
   const busy = new Set();
   const lastPostAt = new Map(); // channelId -> ts of the persona's last message
@@ -416,6 +464,77 @@ export function createTurnRunner({
   }
 
   /**
+   * The search on a question (features.webLookup, web.search.enabled): one
+   * cheap classifier call (prompts.lookup, `{{name}}` = the persona's display
+   * name, on classifierTextModel) reads the last `web.search.contextMessages`
+   * messages before the trigger (with the pictures' captions, the video
+   * states and the read links this turn already has) and the trigger itself,
+   * and answers `none` or a query (parseLookupQuery); a query goes to
+   * lookup.search. One classifier call and at most one search per turn
+   * (`web.search.maxPerTurn` below 1 turns the search off). Resolves the
+   * search result or null. The query and the transcript are data: never
+   * logged; every early stop logs `lookup: skipped` with its reason.
+   */
+  async function maybeLookup({ config, guildId, channelId, selfName, history, trigger, descriptions, videos, reads }) {
+    const prompt = hot.prompts?.lookup;
+    const searchCfg = config.web?.search ?? {};
+    let skip = null;
+    if (!prompt) skip = 'no-prompt';
+    else if ((searchCfg.maxPerTurn ?? 1) < 1) skip = 'no-slot';
+    else if (typeof lookup.hasSearch === 'function' && !lookup.hasSearch()) skip = 'no-key';
+    if (skip) {
+      log.info('lookup: skipped', { channel: channelId, reason: skip });
+      return null;
+    }
+
+    const triggerText = [...String(trigger.content ?? '')].slice(0, config.context?.maxMessageChars ?? 800).join('');
+    // The chat around the question, rendered like the re-watch classifier's context.
+    const contextMessages = Math.max(0, Math.floor(searchCfg.contextMessages ?? 50));
+    const context = contextMessages > 0 ? history.filter((m) => m.id !== trigger.id).slice(-contextMessages) : [];
+    let transcriptBlock = '';
+    if (context.length > 0) {
+      const labels = hot.prompts.labels;
+      const items = formatTranscript(context, {
+        timezone: config.bot.timezone,
+        gapMinutes: config.context.gapMarkerMinutes,
+        maxChars: config.context.maxMessageChars,
+        selfName,
+        labels,
+        descriptions,
+        videos,
+        reads,
+      });
+      transcriptBlock = `<transcript>\n${renderTranscript(items, config.bot.timezone, labels)}\n</transcript>\n`;
+    }
+    const user = `${transcriptBlock}<candidate>\n${trigger.authorName}: ${triggerText}\n</candidate>`;
+
+    let completion;
+    try {
+      completion = await llm.complete(
+        [
+          { role: 'system', content: fillName(prompt, selfName) },
+          { role: 'user', content: user },
+        ],
+        {
+          model: classifierTextModel(config),
+          maxOutputTokens: LOOKUP_CLASSIFIER_MAX_TOKENS,
+          timeoutMs: config.llm?.timeoutMs,
+          countAgainstDailyCap: true,
+          skipCalibration: true,
+        },
+      );
+    } catch (err) {
+      log.warn('lookup: classifier failed', { channel: channelId, status: err.statusCode ?? null, name: err.name });
+      return null;
+    }
+    const { query, reason } = parseLookupQuery(completion.text);
+    // Codes only, never the query.
+    log.info('lookup: classified', { channel: channelId, picked: Boolean(query), parse: reason });
+    if (!query) return null;
+    return lookup.search(guildId, query);
+  }
+
+  /**
    * @param {object} params
    * @param {import('discord.js').TextBasedChannel} params.channel
    * @param {'reply'|'interject'|'initiate'|'auto'} params.mode  'auto' lets `chooseMode` pick
@@ -529,6 +648,43 @@ export function createTurnRunner({
         }
       }
 
+      // The web lookup (features.webLookup -- unlike the other switches a
+      // missing key counts as OFF: it costs money and the search needs a
+      // key). Links first: the newest readable links of the history, at most
+      // web.links.maxPerTurn NEW reads (cached excerpts are free). Then, on a
+      // direct address only, the search classifier and at most one search.
+      let reads;
+      let lookupResult = null;
+      const webCfg = config.web ?? {};
+      if (features.webLookup === true && lookup) {
+        if (webCfg.links?.enabled !== false && typeof lookup.readLinks === 'function') {
+          try {
+            const candidates = readableLinkCandidates(history, config.media?.video?.sites);
+            const read = await lookup.readLinks(guildId, candidates, { maxNew: webCfg.links?.maxPerTurn ?? 2 });
+            reads = read.reads;
+          } catch (err) {
+            log.warn('lookup: links failed', { channel: channel.id, error: err });
+          }
+        }
+        if (trigger && webCfg.search?.enabled !== false && typeof lookup.search === 'function') {
+          try {
+            lookupResult = await maybeLookup({
+              config,
+              guildId,
+              channelId: channel.id,
+              selfName: channel.guild.members.me?.displayName ?? client.user.username,
+              history,
+              trigger,
+              descriptions,
+              videos,
+              reads,
+            });
+          } catch (err) {
+            log.warn('lookup: failed', { channel: channel.id, error: err });
+          }
+        }
+      }
+
       const neighbors = await fetchNeighbors(channel, config, selfId, now);
       const request = buildRequest({
         config,
@@ -554,6 +710,8 @@ export function createTurnRunner({
         currentChannelId: channel.id,
         descriptions,
         videos,
+        reads,
+        lookup: lookupResult,
       });
 
       // A Discord CDN image the provider cannot fetch must not cost the

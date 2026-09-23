@@ -17,6 +17,7 @@
     "mediaDescriptions": true,
     "videoDescriptions": false,
     "videoRewatch": true,
+    "webLookup": false,
     "typingSimulation": true,
     "adminCommands": true
   },
@@ -181,6 +182,11 @@
       "prefill": true,
       "rewatch": { "maxPerDay": 20, "maxOutputTokens": 600, "answerChars": 1200, "recentMessages": 60, "maxCandidates": 6, "contextMessages": 50 }
     }
+  },
+  "web": {
+    "maxPerDay": 60,
+    "links": { "enabled": true, "prefill": true, "maxPerTurn": 2, "maxBytes": 1500000, "textChars": 6000, "summaryChars": 700, "maxOutputTokens": 300, "fetchTimeoutMs": 10000, "skipSites": [] },
+    "search": { "enabled": true, "maxPerTurn": 1, "results": 5, "summaryChars": 900, "maxOutputTokens": 400, "cacheHours": 24, "contextMessages": 50, "timeoutMs": 10000 }
   },
   "warmup": {
     "enabled": true,

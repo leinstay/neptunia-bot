@@ -8,7 +8,7 @@
 // tests.
 
 import { normalizeMessage, channelAllowed, canSend, fetchHistory } from './collect.js';
-import { collectPictures, collectEmojiItems, collectVideos, isDescribable } from './media.js';
+import { collectPictures, collectEmojiItems, collectVideos, collectReadableLinks, isDescribable } from './media.js';
 import {
   detectTrigger,
   strippedLength,
@@ -31,6 +31,8 @@ const MAX_WARM_PICTURES_PER_MESSAGE = 2;
 // The most videos one observed message has watched ahead of time
 // (media.video.prefill): watching is far dearer than a picture caption.
 const MAX_WARM_VIDEOS_PER_MESSAGE = 1;
+// The most links one observed message has read ahead of time (web.links.prefill).
+const MAX_WARM_LINKS_PER_MESSAGE = 1;
 
 /**
  * @param {object} deps
@@ -59,6 +61,10 @@ const MAX_WARM_VIDEOS_PER_MESSAGE = 1;
  *   triggers a new request. With features.mediaDescriptions, features.videoDescriptions (a missing
  *   key counts as on) and media.video.prefill all on, the message's first video
  *   (MAX_WARM_VIDEOS_PER_MESSAGE) is handed to `describer.describeVideos` the same way.
+ * @param {object} [deps.lookup]  From createLookup() (src/web/lookup.js), optional: with
+ *   features.webLookup, web.links.enabled and web.links.prefill on, the message's first readable
+ *   link (MAX_WARM_LINKS_PER_MESSAGE) is handed to `lookup.readLinks` the same way. Absent -> no
+ *   link is ever read from this pipeline.
  * @param {() => number} [deps.rng]
  * @param {() => number} [deps.now]
  * @param {(ms: number) => Promise<void>} [deps.sleep]  Used only for the "human switch pause"
@@ -82,6 +88,7 @@ export function createMessageHandler({
   isWarmingUp = () => false,
   describer,
   llm,
+  lookup,
   rng = Math.random,
   now = Date.now,
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
@@ -100,6 +107,7 @@ export function createMessageHandler({
    * this pipeline makes zero describer calls in that case.
    */
   function warmMediaCache(guildId, normalized) {
+    warmLinkCache(guildId, normalized);
     if (!describer) return;
     warmVideoCache(guildId, normalized);
     if (hot.config.features?.mediaDescriptions !== true) return;
@@ -126,6 +134,25 @@ export function createMessageHandler({
     describer
       .describeVideos(guildId, candidates)
       .catch((err) => log.warn('events: video cache prefill failed', { error: err }));
+  }
+
+  /**
+   * Fire-and-forget like warmMediaCache: read the message's first readable
+   * link now (src/web/lookup.js), not when a turn needs it. Needs
+   * features.webLookup (a missing key counts as OFF: it costs money),
+   * web.links.enabled (a missing key counts as on) and web.links.prefill.
+   */
+  function warmLinkCache(guildId, normalized) {
+    if (typeof lookup?.readLinks !== 'function') return;
+    const config = hot.config;
+    if (config.features?.webLookup !== true) return;
+    const linksCfg = config.web?.links ?? {};
+    if (linksCfg.enabled === false || linksCfg.prefill !== true) return;
+    const links = collectReadableLinks(normalized, { sites: config.media?.video?.sites ?? [] }).slice(0, MAX_WARM_LINKS_PER_MESSAGE);
+    if (links.length === 0) return;
+    Promise.resolve()
+      .then(() => lookup.readLinks(guildId, links))
+      .catch((err) => log.warn('events: link prefill failed', { error: err }));
   }
 
   // --- The address classifier (mention.followUp*) ---------------------------

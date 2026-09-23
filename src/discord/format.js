@@ -120,6 +120,9 @@ function truncate(text, maxChars) {
  * effect when the labels carry `transcript.videoWatched`, so an older
  * labels.json renders exactly as before; a video state's `answer` (a second
  * look on a question) likewise needs `transcript.videoAnswered`.
+ * `context.reads` is an optional `Map` of link ids to the excerpt the web
+ * lookup read from that page (src/web/lookup.js); it needs
+ * `transcript.linkRead`, so an older labels.json renders exactly as before.
  */
 function mediaTags(message, labels, context = {}) {
   const unknownDuration = labels.transcript.unknownDuration ?? '?';
@@ -127,6 +130,8 @@ function mediaTags(message, labels, context = {}) {
   // A second look's answer (videoAnswered) is a newer, optional key: without
   // it the video renders exactly as before.
   const answersOn = Boolean(labels.transcript.videoAnswered);
+  // A read page's excerpt (linkRead) is a newer, optional key too.
+  const readsOn = Boolean(labels.transcript.linkRead);
   const videoOf = (id) => {
     const video = videosOn ? (context.videos?.get(id) ?? null) : null;
     if (!video?.answer || answersOn) return video;
@@ -162,7 +167,8 @@ function mediaTags(message, labels, context = {}) {
     // this way.
     const canDescribe = link.kind !== 'link' || Boolean(labels.transcript.thumbnailDescribed);
     const description = canDescribe ? (context.descriptions?.get(link.id) ?? null) : null;
-    pushLabel(mediaLabelFor(link, { attachedIndex, description, unknownDuration, video: videoOf(link.id) }));
+    const read = readsOn ? (context.reads?.get(link.id) ?? null) : null;
+    pushLabel(mediaLabelFor(link, { attachedIndex, description, unknownDuration, video: videoOf(link.id), read }));
   }
   for (const sticker of message.stickers ?? []) {
     const attachedIndex = context.attachedIndex?.get(`sticker:${sticker.id}`) ?? null;
@@ -229,6 +235,9 @@ function renderForwarded(snapshot, labels, context, maxChars, channelName) {
  *   Item id -> a video state (the video describer); renders the
  *   `videoWatched`/`videoNotWatched*`/`linkWatched`/`linkNotWatched*` forms.
  *   Ignored when the labels have no `transcript.videoWatched` key.
+ * @param {Map<string, string>} [options.reads]  Link id -> the excerpt the web lookup read from
+ *   that page (src/web/lookup.js); renders `transcript.linkRead`. Ignored when the labels have
+ *   no `transcript.linkRead` key.
  * @returns {{ id: string, index: number, ts: number, text: string }[]}
  *
  * In `mode: 'memory'`, messages come from possibly several channels (see
@@ -239,8 +248,8 @@ function renderForwarded(snapshot, labels, context, maxChars, channelName) {
  * channel run, never across a channel switch.
  */
 export function formatTranscript(messages, options) {
-  const { timezone, gapMinutes, maxChars, selfName, labels, mode = 'chat', attachedIndex, descriptions, videos } = options;
-  const mediaContext = { attachedIndex, descriptions, videos };
+  const { timezone, gapMinutes, maxChars, selfName, labels, mode = 'chat', attachedIndex, descriptions, videos, reads } = options;
+  const mediaContext = { attachedIndex, descriptions, videos, reads };
   const locale = labels.locale;
   const selfLabel = fill(labels.self, { name: selfName });
   const indexById = new Map(messages.map((message, i) => [message.id, i + 1]));

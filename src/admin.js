@@ -461,6 +461,9 @@ function writeLocalConfig(localPath, value) {
  * `describer` — from createDescriber() (src/memory/describe.js), optional: `checkYoutube()`, used by
  *   `/nep ping` (video role) to add a line saying which YouTube duration source works on this host.
  *   Absent -> no such line.
+ * `lookup` — from createLookup() (src/web/lookup.js), optional: `hasSearch()`, used by `/nep ping`
+ *   (classifier.text role) to add a line saying whether the web lookup is on and has a search key.
+ *   Absent -> no such line.
  *
  * `run(commandKey, args, context)` throws a plain `Error` (operator-facing
  * message) on bad input; it never touches discord.js.
@@ -479,6 +482,7 @@ export function createAdmin({
   llm,
   warmup,
   describer,
+  lookup,
 }) {
   function isOwner(userId) {
     const owners = hot.config?.bot?.owners ?? [];
@@ -1435,6 +1439,20 @@ function withYoutubeLine(lines, requested, youtubeLine) {
   return [...lines.slice(0, at + 1), youtubeLine, ...lines.slice(at + 1)];
 }
 
+/**
+ * `lines` with the web lookup line appended when the classifier.text role (the
+ * page and search condensers' model) is pinged and a lookup is wired: whether
+ * the lookup is on (features.webLookup, a missing key counts as OFF) and a
+ * search key is configured. No network call; never the key itself.
+ */
+function withWebLine(lines, requested) {
+  if (!requested.includes('classifier.text') || typeof lookup?.hasSearch !== 'function') return lines;
+  let line;
+  if (hot.config?.features?.webLookup !== true) line = 'web: lookup off';
+  else line = lookup.hasSearch() ? 'web: search key ok' : 'web: no BRAVE_SEARCH_API_KEY';
+  return [...lines, line];
+}
+
 async function cmdPing(args) {
   if (!llm) throw new Error('ping is not available (no llm client configured)');
 
@@ -1447,7 +1465,7 @@ async function cmdPing(args) {
   const promptText = hot.prompts?.labels?.ping?.prompt;
   if (!promptText) {
     const skipped = requested.map((role) => `${role}: ${roleModel.get(role) ?? '(no model configured)'} — skipped: label missing`);
-    return withYoutubeLine(skipped, requested, await youtube).join('\n');
+    return withWebLine(withYoutubeLine(skipped, requested, await youtube), requested).join('\n');
   }
 
   const uniqueModels = [...new Set([...roleModel.values()].filter(Boolean))];
@@ -1479,7 +1497,7 @@ async function cmdPing(args) {
       ? formatPingSuccess(role, model, outcome.result, outcome.ms)
       : formatPingFailure(role, model, outcome.err, outcome.ms);
   });
-  return withYoutubeLine(lines, requested, await youtube).join('\n');
+  return withWebLine(withYoutubeLine(lines, requested, await youtube), requested).join('\n');
 }
 
   // ---------------------------------------------------------------------

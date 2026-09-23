@@ -3603,3 +3603,50 @@ test('batchAuthorNamesMap: the author\'s latest message in the batch wins when t
   assert.equal(names.get('1'), 'NewNick');
   assert.ok(!names.has('2'), 'the persona\'s own line never contributes a name');
 });
+
+// ---- analyze: pages the web lookup read, from the shared media cache ---------
+
+/** Run analyze() with `cacheEntries` preset and a given config; returns the user text the analyzer saw. */
+async function analyzerTranscriptWithConfig(cacheEntries, messages, configOverrides) {
+  let seenUser = null;
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    const hot = { config: makeConfig(configOverrides), prompts: { memory: 'sys', labels } };
+    const llm = { complete: async (llmMessages) => { seenUser = llmMessages[1].content; return { text: '{}' }; } };
+    const updater = createMemoryUpdater({ hot, store, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept' });
+    Object.assign(store.getMediaCache(guildId), cacheEntries);
+    await updater.analyze(guildId, messages);
+  });
+  return seenUser;
+}
+
+const LINK_SLIM = slimMessage({
+  id: 'm1',
+  content: '',
+  links: [{ id: 'm1#e0', kind: 'link', name: 'Crêpes', durationSec: null }],
+});
+
+test('analyze: a page the web lookup read renders linkRead, keyed read:<link id>', async () => {
+  const seen = await analyzerTranscriptWithConfig(
+    { 'read:m1#e0': { text: 'une recette, trois œufs', ts: Date.now() } },
+    [LINK_SLIM],
+    { features: { webLookup: true }, web: { links: { enabled: true } } },
+  );
+  assert.ok(seen.includes(labels.transcript.linkRead.replace('{text}', 'une recette, trois œufs')));
+});
+
+test('analyze: a read miss, no entry, webLookup off/missing or links disabled never renders a read', async () => {
+  const hit = { 'read:m1#e0': { text: 'should never show', ts: Date.now() } };
+  const cases = [
+    [{ 'read:m1#e0': { miss: true, ts: Date.now(), reason: 'http' } }, { features: { webLookup: true } }],
+    [{}, { features: { webLookup: true } }],
+    [hit, { features: { webLookup: false } }],
+    [hit, { features: {} }],
+    [hit, { features: { webLookup: true }, web: { links: { enabled: false } } }],
+  ];
+  for (const [cache, config] of cases) {
+    const seen = await analyzerTranscriptWithConfig(cache, [LINK_SLIM], config);
+    assert.ok(!seen.includes('should never show'));
+    assert.ok(!seen.includes(labels.transcript.linkRead.replace('{text}', '')));
+  }
+});
