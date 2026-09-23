@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import { between, typingMs, resolveMentions, createTurnRunner, parseRewatchPick } from '../src/behavior/turn.js';
+import { between, typingMs, resolveMentions, createTurnRunner, parseRewatchPick, parseRewatchPickDetailed } from '../src/behavior/turn.js';
 import { fill } from '../src/discord/format.js';
 import { labels } from './fixtures/labels.js';
 
@@ -1198,6 +1198,30 @@ test('parseRewatchPick: <id> | retry (any case) sets retry; anything longer is a
   assert.equal(parseRewatchPick('va | retry?', ids).retry, false);
 });
 
+test('parseRewatchPickDetailed: each null answer carries its reason code; a pick carries ok', () => {
+  const ids = ['va', 'video:url:abc'];
+  const cases = [
+    ['none', 'none'],
+    ['  NONE  \nva | x', 'none'],
+    ['', 'empty'],
+    ['  \n \n', 'empty'],
+    [null, 'empty'],
+    ['maybe the first one', 'no-bar'],
+    ['va', 'no-bar'],
+    ['vb | what colour?', 'unknown-id'],
+    [' | what?', 'unknown-id'],
+    ['va |   ', 'no-question'],
+  ];
+  for (const [raw, reason] of cases) {
+    assert.deepEqual(parseRewatchPickDetailed(raw, ids), { pick: null, reason }, String(raw));
+  }
+  assert.deepEqual(parseRewatchPickDetailed('va | τι χρώμα;', ids), {
+    pick: { id: 'va', question: 'τι χρώμα;', retry: false },
+    reason: 'ok',
+  });
+  assert.deepEqual(parseRewatchPickDetailed('va | retry', ids).pick, parseRewatchPick('va | retry', ids));
+});
+
 /** fakeVideoDescriber plus rewatchVideo, answering every call with `answer`. */
 function fakeRewatchDescriber(statesById, answer = { question: 'q', text: 'κόκκινο' }) {
   const base = fakeVideoDescriber(statesById);
@@ -1346,6 +1370,53 @@ test('createTurnRunner: rewatch -- logs rewatch: classified with counts only, ne
   assert.ok(all.includes('"picked":true'));
   assert.ok(all.includes('"candidates":1'));
   assert.ok(!all.includes('τι χρώμα'));
+});
+
+test('createTurnRunner: rewatch -- rewatch: classified carries offered counts, retryAllowed, the parse code and the kind, never text', async () => {
+  const cases = [
+    { reply: 'va | τι χρώμα;', parse: 'ok', kind: 'question', picked: true, level: 'info' },
+    { reply: 'none', parse: 'none', kind: null, picked: false, level: 'info' },
+    { reply: '   ', parse: 'empty', kind: null, picked: false, level: 'info' },
+    { reply: 'the first video please', parse: 'no-bar', kind: null, picked: false, level: 'warn' },
+    { reply: 'vz | τι χρώμα;', parse: 'unknown-id', kind: null, picked: false, level: 'warn' },
+    { reply: 'va |  ', parse: 'no-question', kind: null, picked: false, level: 'info' },
+    { reply: 'va | retry', parse: 'ok', kind: 'retry', picked: false, level: 'info' },
+  ];
+  for (const { reply, parse, kind, picked, level } of cases) {
+    const { logs } = await withCapturedLogs(() => runRewatch({ llm: rewatchLlm(reply) }));
+    const line = logs.find((entry) => entry.msg === 'rewatch: classified');
+    assert.ok(line, reply);
+    assert.equal(line.level, level, reply);
+    assert.equal(line.parse, parse, reply);
+    assert.equal(line.kind, kind, reply);
+    assert.equal(line.picked, picked, reply);
+    assert.deepEqual(line.offered, { watched: 1, notLoaded: 0 }, reply);
+    assert.equal(line.retryAllowed, false, 'the default describer has no describeVideo');
+    assert.ok(!JSON.stringify(logs).includes('χρώμα;'), reply);
+    assert.ok(!JSON.stringify(logs).includes('first video'), reply);
+  }
+});
+
+test('createTurnRunner: rewatch -- rewatch: classified counts watched and not-loaded offers apart, retryAllowed true while an attempt is left', async () => {
+  const messages = [];
+  const states = {};
+  for (let i = 1; i <= 3; i += 1) {
+    messages.push(videoAttachmentRaw(`m${i}`, NOW - 100_000 + i * 1000, `v${i}`, `clip${i}.mp4`));
+    states[`v${i}`] = i === 2 ? { state: 'error' } : { state: 'watched', text: `scène ${i}` };
+  }
+  const trigger = rawMessage({ id: 'mt', ts: NOW - 1000, authorName: 'Zoë', content: 'και τώρα;' });
+  const scene = { trigger, channel: fakeTurnChannel({ historyMessages: [...messages, trigger] }) };
+  const { logs } = await withCapturedLogs(() =>
+    runRewatch({ scene, llm: rewatchLlm('v2 | retry'), describer: fakeRetryDescriber(states) }),
+  );
+  const line = logs.find((entry) => entry.msg === 'rewatch: classified');
+  assert.deepEqual(line.offered, { watched: 2, notLoaded: 1 });
+  assert.equal(line.candidates, 3);
+  assert.equal(line.retryAllowed, true);
+  assert.equal(line.parse, 'ok');
+  assert.equal(line.kind, 'retry');
+  assert.equal(line.picked, true);
+  assert.equal(line.level, 'info');
 });
 
 test('createTurnRunner: rewatch -- recentMessages defaults to 60 (config.json and the code fallback)', async () => {

@@ -85,17 +85,32 @@ const REWATCH_RETRY = /^retry$/i;
  * @returns {{ id: string, question: string, retry: boolean }|null}
  */
 export function parseRewatchPick(raw, candidateIds) {
+  return parseRewatchPickDetailed(raw, candidateIds).pick;
+}
+
+/**
+ * parseRewatchPick with the reason for its result, a code safe to log:
+ * `none` (the model answered none), `empty` (no non-empty line), `no-bar`,
+ * `unknown-id` (an id not among the candidates), `no-question` or `ok`.
+ * @param {string} raw
+ * @param {string[]} candidateIds
+ * @returns {{ pick: { id: string, question: string, retry: boolean }|null,
+ *   reason: 'none'|'empty'|'no-bar'|'unknown-id'|'no-question'|'ok' }}
+ */
+export function parseRewatchPickDetailed(raw, candidateIds) {
   const line = String(raw ?? '')
     .split('\n')
     .map((l) => l.trim())
     .find(Boolean);
-  if (!line || /^none$/i.test(line)) return null;
+  if (!line) return { pick: null, reason: 'empty' };
+  if (/^none$/i.test(line)) return { pick: null, reason: 'none' };
   const bar = line.indexOf('|');
-  if (bar === -1) return null;
+  if (bar === -1) return { pick: null, reason: 'no-bar' };
   const id = line.slice(0, bar).trim();
   const question = [...line.slice(bar + 1).trim()].slice(0, REWATCH_QUESTION_CHARS).join('').trim();
-  if (!id || !question || !candidateIds.includes(id)) return null;
-  return { id, question, retry: REWATCH_RETRY.test(question) };
+  if (!id || !candidateIds.includes(id)) return { pick: null, reason: 'unknown-id' };
+  if (!question) return { pick: null, reason: 'no-question' };
+  return { pick: { id, question, retry: REWATCH_RETRY.test(question) }, reason: 'ok' };
 }
 
 /** Fill the `{{name}}` placeholder of a prompt file with the persona's display name (as src/behavior/prompt.js does). */
@@ -341,12 +356,23 @@ export function createTurnRunner({
       log.warn('rewatch: classifier failed', { channel: channelId, status: err.statusCode ?? null, name: err.name });
       return;
     }
-    const pick = parseRewatchPick(completion.text, watched.map((item) => item.itemId));
+    const { pick, reason } = parseRewatchPickDetailed(completion.text, watched.map((item) => item.itemId));
     const item = pick ? watched.find((candidate) => candidate.itemId === pick.id) : null;
     const loaded = item ? videos.get(item.itemId).state === 'watched' : false;
     // A retry is for a video that did not load, a question for a watched one; anything else is ignored.
     const usable = Boolean(item) && pick.retry !== loaded;
-    log.info('rewatch: classified', { channel: channelId, candidates: watched.length, picked: usable });
+    const watchedCount = watched.filter((candidate) => videos.get(candidate.itemId).state === 'watched').length;
+    // Codes and counts only, never the question: an answer outside the format hints at a prompt mismatch.
+    const level = reason === 'unknown-id' || reason === 'no-bar' ? 'warn' : 'info';
+    log[level]('rewatch: classified', {
+      channel: channelId,
+      candidates: watched.length,
+      offered: { watched: watchedCount, notLoaded: watched.length - watchedCount },
+      retryAllowed: canRetry,
+      parse: reason,
+      kind: pick ? (pick.retry ? 'retry' : 'question') : null,
+      picked: usable,
+    });
     if (!usable) return;
 
     if (pick.retry) {
