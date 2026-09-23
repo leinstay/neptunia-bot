@@ -80,6 +80,10 @@ export function createLlm({ apiKey, getConfig, calibrator, state, fetchImpl = fe
    * object REPLACES `cfg.provider` (any other value leaves `cfg.provider` in
    * charge). Exists for the video describer, which pins the provider that can
    * fetch a public video URL.
+   * `options.reasoning` — OpenRouter's reasoning settings for this one call
+   * (e.g. `{ enabled: false }`); a plain object is sent verbatim as
+   * `body.reasoning`, anything else omits the field. Exists for the video
+   * describer, whose model otherwise spends the output budget on reasoning.
    * `options.videoSeconds` — seconds of video the request carries. A finite,
    * non-negative value adds `ceil(videoSeconds * media.video.tokensPerSecond)`
    * (default 300 per second) to the raw estimate before calibration, because
@@ -119,6 +123,7 @@ export function createLlm({ apiKey, getConfig, calibrator, state, fetchImpl = fe
     } else if (isRouting(cfg.provider)) {
       body.provider = cfg.provider;
     }
+    if (isRouting(options.reasoning)) body.reasoning = options.reasoning;
 
     let lastError;
     for (let attempt = 0; attempt <= cfg.retries; attempt += 1) {

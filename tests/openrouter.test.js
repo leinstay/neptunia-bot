@@ -683,3 +683,24 @@ test('complete: retries once on a 503 then succeeds', async () => {
   assert.equal(result.text, 'recovered');
   assert.equal(calls, 2);
 });
+
+test('complete: options.reasoning (a plain object) is sent verbatim as body.reasoning; anything else omits it', async () => {
+  const bodies = [];
+  const llm = createLlm({
+    apiKey: 'k',
+    getConfig: () => baseConfig(),
+    calibrator: fakeCalibrator(),
+    state: fakeState(),
+    fetchImpl: async (url, init) => {
+      bodies.push(JSON.parse(init.body));
+      return okResponse('hi');
+    },
+  });
+  await llm.complete([{ role: 'user', content: 'hi' }], { reasoning: { enabled: false } });
+  await llm.complete([{ role: 'user', content: 'hi' }]);
+  await llm.complete([{ role: 'user', content: 'hi' }], { reasoning: null });
+  await llm.complete([{ role: 'user', content: 'hi' }], { reasoning: 'off' });
+  await llm.complete([{ role: 'user', content: 'hi' }], { reasoning: ['x'] });
+  assert.deepEqual(bodies[0].reasoning, { enabled: false });
+  for (const body of bodies.slice(1)) assert.equal('reasoning' in body, false);
+});

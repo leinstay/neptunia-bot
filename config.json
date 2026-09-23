@@ -173,6 +173,9 @@
       "canaryUrl": "https://www.youtube.com/watch?v=jNQXAC9IVRw",
       "ytdlpPath": "yt-dlp",
       "ffmpegPath": "ffmpeg",
+      "errorRetryMinutes": 60,
+      "urlProcessing": "agentic",
+      "reasoning": { "effort": "low" },
       "prefill": true,
       "rewatch": { "model": null, "maxPerDay": 20, "maxOutputTokens": 600, "answerChars": 1200, "recentMessages": 60, "maxCandidates": 6 }
     }

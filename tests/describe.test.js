@@ -679,7 +679,7 @@ test('describeVideo: a direct-URL site within maxSeconds sends the public URL wi
   );
   assert.deepEqual(videoFetcher.calls[0].options, { ytdlpPath: 'yt-dlp-test', toolTimeoutMs: 60_000 });
   assert.deepEqual(llm.calls[0].messages[1].content, [
-    { type: 'video_url', video_url: { url: 'https://www.youtube.com/watch?v=abc' } },
+    { type: 'video_url', video_url: { url: 'https://www.youtube.com/watch?v=abc', processing: 'agentic' } },
   ]);
   assert.deepEqual(llm.calls[0].options.provider, VIDEO_CFG.provider);
   assert.equal(llm.calls[0].options.videoSeconds, 30);
@@ -783,6 +783,162 @@ test('describeVideo: a download/tool/timeout failure is an error miss, retried a
     assert.deepEqual(await describer.describeVideo('g1', videoAttachment()), { state: 'error' });
     assert.equal(videoFetcher.calls.length, 2, 'after the hour it is retried');
   }
+});
+
+test('describeVideo: media.video.errorRetryMinutes sets the error-miss TTL, read at the moment of use', async () => {
+  let t = 1_000_000;
+  const hot = videoHot();
+  hot.config.media.video.errorRetryMinutes = 30;
+  const videoFetcher = fakeVideoFetcher({ attachment: { ok: false, reason: 'download' } });
+  const { describer } = videoDescriber({ hot, videoFetcher, now: () => t });
+
+  assert.deepEqual(await describer.describeVideo('g1', videoAttachment()), { state: 'error' });
+  t += 29 * 60_000;
+  assert.deepEqual(await describer.describeVideo('g1', videoAttachment()), { state: 'error' });
+  assert.equal(videoFetcher.calls.length, 1, 'inside 30 minutes the miss is served from the cache');
+  t += 2 * 60_000;
+  assert.deepEqual(await describer.describeVideo('g1', videoAttachment()), { state: 'error' });
+  assert.equal(videoFetcher.calls.length, 2, 'after 31 minutes it is retried');
+
+  hot.config.media.video.errorRetryMinutes = 120;
+  t += 61 * 60_000;
+  await describer.describeVideo('g1', videoAttachment());
+  assert.equal(videoFetcher.calls.length, 2, 'a live change applies to the next lookup');
+});
+
+test('describeVideo: errorRetryMinutes defaults to 60 in config.json', () => {
+  const shipped = JSON.parse(fs.readFileSync(new URL('../config.json', import.meta.url), 'utf8'));
+  assert.equal(shipped.media.video.errorRetryMinutes, 60);
+});
+
+test('describeVideo: force retries an error miss at once and logs forced: true', async () => {
+  let t = 1_000_000;
+  let attachment = { ok: false, reason: 'download' };
+  const videoFetcher = fakeVideoFetcher();
+  const fetchAttachment = videoFetcher.fetchAttachment;
+  videoFetcher.fetchAttachment = async (url, options) => {
+    await fetchAttachment(url, options);
+    return attachment;
+  };
+  const { describer, llm, state } = videoDescriber({ videoFetcher, now: () => t });
+
+  assert.deepEqual(await describer.describeVideo('g1', videoAttachment()), { state: 'error' });
+  t += 60_000;
+  attachment = { ok: true, dataUrl: CLIP_DATA_URL, mimeType: 'video/mp4', seconds: 12, bytes: 4 };
+  const { result, logs } = await withCapturedLogs(() => describer.describeVideo('g1', videoAttachment(), { force: true }));
+
+  assert.equal(result.state, 'watched');
+  assert.equal(result.text, 'someone dances');
+  assert.equal(videoFetcher.calls.length, 2);
+  assert.equal(llm.calls.length, 1);
+  assert.equal(state.data.videoCount, 2, 'the forced attempt takes a daily slot like any other');
+  const line = logs.find((l) => l.msg === 'describe: video');
+  assert.equal(line.forced, true);
+  assert.equal(line.cached, false);
+  assert.ok(!JSON.stringify(logs).includes('someone dances'));
+  assert.ok(!JSON.stringify(logs).includes('ex=secret'));
+});
+
+test('describeVideo: force still honours a limit miss and a watched entry', async () => {
+  const limited = videoDescriber({ videoFetcher: fakeVideoFetcher({ attachment: { ok: false, reason: 'size' } }) });
+  await limited.describer.describeVideo('g1', videoAttachment());
+  assert.deepEqual(await limited.describer.describeVideo('g1', videoAttachment(), { force: true }), { state: 'limit', reason: 'size' });
+  assert.equal(limited.videoFetcher.calls.length, 1, 'a limit stays a limit');
+
+  const watched = videoDescriber();
+  await watched.describer.describeVideo('g1', videoAttachment());
+  const again = await watched.describer.describeVideo('g1', videoAttachment(), { force: true });
+  assert.equal(again.cached, true);
+  assert.equal(watched.videoFetcher.calls.length, 1, 'a watched video is never re-fetched');
+  assert.equal(watched.llm.calls.length, 1);
+});
+
+test('describeVideo: force keeps the daily cap', async () => {
+  const hot = videoHot();
+  hot.config.media.video.maxPerDay = 1;
+  const videoFetcher = fakeVideoFetcher({ attachment: { ok: false, reason: 'download' } });
+  const { describer } = videoDescriber({ hot, videoFetcher });
+  assert.deepEqual(await describer.describeVideo('g1', videoAttachment()), { state: 'error' });
+  assert.deepEqual(await describer.describeVideo('g1', videoAttachment(), { force: true }), { state: 'limit', reason: 'daily' });
+  assert.equal(videoFetcher.calls.length, 1);
+});
+
+test('describeVideo: a public-URL part carries media.video.urlProcessing; a data: URL part never does', async () => {
+  const pinned = videoDescriber();
+  await pinned.describer.describeVideo('g1', videoLink());
+  assert.deepEqual(pinned.llm.calls[0].messages[1].content, [
+    { type: 'video_url', video_url: { url: 'https://www.youtube.com/watch?v=abc', processing: 'agentic' } },
+  ]);
+
+  const clipped = videoDescriber();
+  await clipped.describer.describeVideo('g1', videoLink('video:url:aaaaaaaaaaaaaaaa', { url: 'https://www.tiktok.com/@someone/video/123', site: 'tiktok.com' }));
+  assert.deepEqual(clipped.llm.calls[0].messages[1].content, [{ type: 'video_url', video_url: { url: CLIP_DATA_URL } }]);
+
+  const custom = videoDescriber({ hot: videoHot({ video: { urlProcessing: 'frames' } }) });
+  await custom.describer.describeVideo('g1', videoLink());
+  assert.equal(custom.llm.calls[0].messages[1].content[0].video_url.processing, 'frames');
+
+  const hot = videoHot({ video: { urlProcessing: null } });
+  const off = videoDescriber({ hot });
+  await off.describer.describeVideo('g1', videoLink());
+  assert.equal('processing' in off.llm.calls[0].messages[1].content[0].video_url, false, 'null omits the field');
+});
+
+test('describeVideo: config.json ships urlProcessing agentic and reasoning effort low', () => {
+  const shipped = JSON.parse(fs.readFileSync(new URL('../config.json', import.meta.url), 'utf8'));
+  assert.equal(shipped.media.video.urlProcessing, 'agentic');
+  assert.deepEqual(shipped.media.video.reasoning, { effort: 'low' });
+});
+
+test('describeVideo: the request body carries media.video.reasoning (shipped default) through the real client; a non-object omits it', async () => {
+  const shipped = JSON.parse(fs.readFileSync(new URL('../config.json', import.meta.url), 'utf8'));
+  const run = async (reasoning) => {
+    const hot = videoHot({ video: { reasoning } });
+    hot.config.llm = {
+      baseUrl: 'https://openrouter.test/api/v1',
+      model: 'x/chat',
+      temperature: 1,
+      maxOutputTokens: 100,
+      maxRequestTokens: 50_000,
+      maxRequestsPerDay: 300,
+      timeoutMs: 5_000,
+      retries: 0,
+    };
+    const bodies = [];
+    const llm = createLlm({
+      apiKey: 'k',
+      getConfig: () => hot.config,
+      calibrator: { ratio: 1, apply: (n) => n, observe: () => {} },
+      state: { data: {}, markDirty() {} },
+      fetchImpl: async (url, init) => {
+        bodies.push(JSON.parse(init.body));
+        return { ok: true, status: 200, json: async () => ({ choices: [{ message: { content: 'someone dances' } }], usage: {} }) };
+      },
+    });
+    const { describer } = videoDescriber({ hot, llm });
+    assert.equal((await describer.describeVideo('g1', videoAttachment())).state, 'watched');
+    return bodies[0];
+  };
+  assert.deepEqual((await run(shipped.media.video.reasoning)).reasoning, { effort: 'low' });
+  assert.equal('reasoning' in (await run(null)), false);
+  assert.equal('reasoning' in (await run('off')), false);
+});
+
+test('describeVideo: a forced retry and a re-watch pass media.video.reasoning too', async () => {
+  let t = 1_000_000;
+  let attachment = { ok: false, reason: 'download' };
+  const videoFetcher = fakeVideoFetcher();
+  videoFetcher.fetchAttachment = async () => attachment;
+  const hot = videoHot({ video: { reasoning: { effort: 'low' } } });
+  hot.prompts['rewatch-answer'] = 'Answer {{question}} in {{maxChars}}.';
+  const { describer, llm } = videoDescriber({ hot, videoFetcher, now: () => t });
+  await describer.describeVideo('g1', videoAttachment());
+  attachment = { ok: true, dataUrl: CLIP_DATA_URL, mimeType: 'video/mp4', seconds: 12, bytes: 4 };
+  t += 60_000;
+  await describer.describeVideo('g1', videoAttachment(), { force: true });
+  await describer.rewatchVideo('g1', videoAttachment(), 'τι χρώμα;');
+  assert.equal(llm.calls.length, 2);
+  for (const call of llm.calls) assert.deepEqual(call.options.reasoning, { effort: 'low' });
 });
 
 test('describeVideo: a failed probe maps its reason like a fetch failure', async () => {
@@ -1039,7 +1195,7 @@ test('describeVideo: yt-dlp fails on YouTube -> the page probe gives the duratio
   assert.equal(videoFetcher.calls[1].url, 'https://www.youtube.com/watch?v=abc');
   assert.deepEqual(videoFetcher.calls[1].options, { fetchTimeoutMs: 10_000, apiKey: 'test-key' });
   assert.deepEqual(llm.calls[0].messages[1].content, [
-    { type: 'video_url', video_url: { url: 'https://www.youtube.com/watch?v=abc' } },
+    { type: 'video_url', video_url: { url: 'https://www.youtube.com/watch?v=abc', processing: 'agentic' } },
   ]);
   assert.deepEqual(llm.calls[0].options.provider, VIDEO_CFG.provider);
   assert.equal(llm.calls[0].options.videoSeconds, 42);
@@ -1084,7 +1240,7 @@ test('describeVideo: every probe failed and directUrlUnknownDuration on -> the U
   assert.equal(result.state, 'watched');
   assert.deepEqual(videoFetcher.calls.map((c) => c.fn), ['probeSite', 'probeYoutube']);
   assert.deepEqual(llm.calls[0].messages[1].content, [
-    { type: 'video_url', video_url: { url: 'https://www.youtube.com/watch?v=abc' } },
+    { type: 'video_url', video_url: { url: 'https://www.youtube.com/watch?v=abc', processing: 'agentic' } },
   ]);
   assert.deepEqual(llm.calls[0].options.provider, VIDEO_CFG.provider);
   assert.equal(llm.calls[0].options.videoSeconds, 60);
@@ -1157,7 +1313,7 @@ test('describeVideo: a direct-URL link of 120 s (within directUrlMaxSeconds) goe
   assert.equal((await describer.describeVideo('g1', videoLink())).state, 'watched');
   assert.deepEqual(videoFetcher.calls.map((c) => c.fn), ['probeSite']);
   assert.deepEqual(llm.calls[0].messages[1].content, [
-    { type: 'video_url', video_url: { url: 'https://www.youtube.com/watch?v=abc' } },
+    { type: 'video_url', video_url: { url: 'https://www.youtube.com/watch?v=abc', processing: 'agentic' } },
   ]);
   assert.deepEqual(llm.calls[0].options.provider, VIDEO_CFG.provider);
   assert.equal(llm.calls[0].options.videoSeconds, 120);

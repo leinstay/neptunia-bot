@@ -24,7 +24,9 @@
 // provider can open itself (`media.video.directUrlSites`, and only when
 // `media.video.provider` is a real provider object), passed by URL -- and
 // summarised by a
-// video-capable model into one line. A link's duration comes from yt-dlp;
+// video-capable model into one line. A public URL goes out with OpenRouter's
+// processing mode (`media.video.urlProcessing`); every video request carries
+// `media.video.reasoning` so reasoning does not eat the output budget. A link's duration comes from yt-dlp;
 // when yt-dlp fails on a YouTube link, from the YouTube Data API (with a
 // configured key) or the watch page (src/discord/fetch-video.js#probeYoutube).
 // With no duration at all a direct-URL link is sent only when the owner
@@ -34,7 +36,9 @@
 // the known `durationSec` and is retried once the live cap -- see lengthCap
 // -- has grown to fit it, or when the duration is unknown), a permanent
 // `size` miss, or an `error`
-// miss (retried after an hour). A separate daily
+// miss (retried after `media.video.errorRetryMinutes`, default 60, or at
+// once on a forced attempt -- describeVideo's `force`, used when the person
+// asks to try a video that did not load again). A separate daily
 // counter (`state.data.videoDay` / `videoCount`, `media.video.maxPerDay`)
 // caps how many videos are attempted per day: the slot is reserved before the
 // fetch and kept even when the fetch or the request fails. Summaries are
@@ -61,6 +65,10 @@ import { createYoutubeCheck } from './youtube-check.js';
 import { log } from '../log.js';
 
 const MISS_TTL_MS = 60 * 60_000;
+// Only when media.video.errorRetryMinutes is missing or invalid (config.json always has it).
+const VIDEO_ERROR_RETRY_MINUTES_FALLBACK = 60;
+// Only when media.video.urlProcessing is missing (config.json always has it; null omits the field).
+const VIDEO_URL_PROCESSING_FALLBACK = 'agentic';
 // Only when media.video.summaryChars is missing (config.json always has it).
 const VIDEO_TEXT_CHARS_FALLBACK = 600;
 const REWATCH_ANSWER_CHARS_FALLBACK = 1200;
@@ -320,12 +328,13 @@ export function createDescriber({
 
   /**
    * The cached state under `key`, or null when the video must be (re)watched.
-   * A watched entry is LRU-touched; an error miss counts only for an hour; a
+   * A watched entry is LRU-touched; an error miss counts only for
+   * `media.video.errorRetryMinutes` (read now) and never when `force` is set; a
    * `length` miss is treated as absent when its `durationSec` is unknown
    * (null or missing, as in entries written before it was stored) or now fits
    * `lengthCap(item)`, so a raised cap retries it.
    */
-  function cachedVideo(guildId, key, item) {
+  function cachedVideo(guildId, key, item, force = false) {
     const cache = store.getMediaCache(guildId);
     const entry = cache[key];
     if (!entry) return null;
@@ -340,8 +349,15 @@ export function createDescriber({
       if (entry.durationSec <= lengthCap(item, hot.config.media?.video ?? {})) return null;
     }
     if (entry.miss && PERMANENT_VIDEO_MISSES.has(entry.reason)) return { state: 'limit', reason: entry.reason };
-    if (entry.miss && now() - entry.ts < MISS_TTL_MS) return { state: 'error' };
+    if (entry.miss && !force && now() - entry.ts < videoErrorTtlMs()) return { state: 'error' };
     return null;
+  }
+
+  /** How long a video error miss is served from the cache: `media.video.errorRetryMinutes`, read at the moment of use. */
+  function videoErrorTtlMs() {
+    const minutes = hot.config.media?.video?.errorRetryMinutes;
+    const valid = typeof minutes === 'number' && Number.isFinite(minutes) && minutes >= 0;
+    return (valid ? minutes : VIDEO_ERROR_RETRY_MINUTES_FALLBACK) * 60_000;
   }
 
   /**
@@ -364,9 +380,27 @@ export function createDescriber({
   }
 
   /**
+   * The `video_url` part of a video request. A public URL (a pinned
+   * direct-URL request) carries OpenRouter's processing mode
+   * (`media.video.urlProcessing`, a missing key = 'agentic', a non-string or
+   * empty value omits it) -- without it the provider samples a single frame;
+   * a data: URL part never does.
+   */
+  function videoPart(videoCfg, media) {
+    const videoUrl = { url: media.url };
+    if (media.pinned) {
+      const mode = videoCfg.urlProcessing === undefined ? VIDEO_URL_PROCESSING_FALLBACK : videoCfg.urlProcessing;
+      if (typeof mode === 'string' && mode) videoUrl.processing = mode;
+    }
+    return { type: 'video_url', video_url: videoUrl };
+  }
+
+  /**
    * The `llm.complete` options of a video request (a watch or a re-watch):
    * the video model and timeout, the video-only token cap, the pinned
-   * provider only for a public URL, never the text calibration.
+   * provider only for a public URL, the reasoning settings
+   * (`media.video.reasoning`, a plain object or nothing), never the text
+   * calibration.
    */
   function videoRequestOptions(videoCfg, media, { maxOutputTokens, countAgainstDailyCap }) {
     return {
@@ -378,6 +412,8 @@ export function createDescriber({
       // stays under the global llm.maxRequestTokens.
       maxRequestTokens: videoCfg.maxRequestTokens,
       provider: media.pinned ? videoCfg.provider : undefined,
+      // Without it the video model's reasoning can eat the whole output budget.
+      reasoning: isPlainObject(videoCfg.reasoning) ? videoCfg.reasoning : undefined,
       countAgainstDailyCap,
       // A video's provider-counted prompt tokens say nothing about the
       // text ratio every chat request is checked against.
@@ -452,9 +488,9 @@ export function createDescriber({
    * The uncached part of describeVideo: resolves `{ result, sent, attempted }`.
    * `sent` = a request reached the provider; `attempted` = the media was
    * fetched (or probed) at all, successful or not -- the daily cap alone is
-   * not an attempt.
+   * not an attempt. `forced` only marks the log line.
    */
-  async function watchVideo(guildId, item, key, promptText, countAgainstDailyCap) {
+  async function watchVideo(guildId, item, key, promptText, countAgainstDailyCap, forced = false) {
     const videoCfg = hot.config.media?.video ?? {};
     const summaryChars = positiveOr(videoCfg.summaryChars, VIDEO_TEXT_CHARS_FALLBACK);
     const report = (result, extra = {}) => {
@@ -467,6 +503,7 @@ export function createDescriber({
         status: extra.status,
         cached: false,
         location: safeLocation(item.url),
+        ...(forced ? { forced: true } : {}),
       });
       return result;
     };
@@ -502,7 +539,7 @@ export function createDescriber({
       completion = await llm.complete(
         [
           { role: 'system', content: fillTemplate(promptText, { maxChars: summaryChars }) },
-          { role: 'user', content: [{ type: 'video_url', video_url: { url: media.url } }] },
+          { role: 'user', content: [videoPart(videoCfg, media)] },
         ],
         videoRequestOptions(videoCfg, media, { maxOutputTokens: videoCfg.maxOutputTokens, countAgainstDailyCap }),
       );
@@ -524,9 +561,11 @@ export function createDescriber({
   /**
    * describeVideo plus describeVideos' accounting: `sent` (a request reached
    * the provider) and `attempted` (a fetch was tried, or this call waited on
-   * another caller's in-flight watch of the same video).
+   * another caller's in-flight watch of the same video). `force` ignores an
+   * `error` miss (a limit miss and a watched entry still count; every rail
+   * still applies).
    */
-  async function describeVideoCharged(guildId, item, { countAgainstDailyCap = true, cacheOnly = false } = {}) {
+  async function describeVideoCharged(guildId, item, { countAgainstDailyCap = true, cacheOnly = false, force = false } = {}) {
     // Video vision needs both switches, like the senses line (src/behavior/prompt.js#renderSenses);
     // a missing videoDescriptions counts as on.
     const features = hot.config.features ?? {};
@@ -537,7 +576,7 @@ export function createDescriber({
     if (!promptText || !isVideoCandidate(item)) return { result: null, sent: false, attempted: false };
 
     const key = `video:${item.itemId}`;
-    const cached = cachedVideo(guildId, key, item);
+    const cached = cachedVideo(guildId, key, item, force);
     if (cached) {
       log.info('describe: video', { source: item.source, state: cached.state, reason: cached.reason ?? null, cached: true });
       return { result: cached, sent: false, attempted: false };
@@ -550,7 +589,7 @@ export function createDescriber({
       const { result } = await running;
       return { result, sent: false, attempted: true };
     }
-    const promise = watchVideo(guildId, item, key, promptText, countAgainstDailyCap).finally(() =>
+    const promise = watchVideo(guildId, item, key, promptText, countAgainstDailyCap, force).finally(() =>
       inFlight.delete(flightKey),
     );
     inFlight.set(flightKey, promise);
@@ -562,13 +601,14 @@ export function createDescriber({
    * summarise it in one line, through the shared media cache.
    * @param {string} guildId
    * @param {object} item  One collectVideos candidate.
-   * @param {{ countAgainstDailyCap?: boolean }} [options]
+   * @param {{ countAgainstDailyCap?: boolean, force?: boolean }} [options]  `force`: try again
+   *   despite a cached `error` miss (a limit and a watched entry are still served from the cache).
    * @returns {Promise<{ state: 'watched', text: string, usage: object|null, estimated: number, cached?: true }
    *   | { state: 'limit', reason: 'length'|'size'|'daily' } | { state: 'error' } | null>}  null when the
    *   feature is off, the prompt is missing or `item` is not a video candidate.
    */
-  async function describeVideo(guildId, item, { countAgainstDailyCap = true } = {}) {
-    const { result } = await describeVideoCharged(guildId, item, { countAgainstDailyCap });
+  async function describeVideo(guildId, item, { countAgainstDailyCap = true, force = false } = {}) {
+    const { result } = await describeVideoCharged(guildId, item, { countAgainstDailyCap, force });
     return result;
   }
 
@@ -673,7 +713,7 @@ export function createDescriber({
       completion = await llm.complete(
         [
           { role: 'system', content: fillTemplate(promptText, { question: asked, maxChars: answerChars }) },
-          { role: 'user', content: [{ type: 'video_url', video_url: { url: media.url } }] },
+          { role: 'user', content: [videoPart(videoCfg, media)] },
         ],
         videoRequestOptions(videoCfg, media, { maxOutputTokens: rewatchCfg.maxOutputTokens, countAgainstDailyCap: true }),
       );

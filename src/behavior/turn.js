@@ -67,16 +67,22 @@ function authorNameFor(history, messageId) {
 const REWATCH_QUESTION_CHARS = 300;
 const REWATCH_SUMMARY_CHARS = 200;
 const REWATCH_CLASSIFIER_MAX_TOKENS = 120;
+// Protocol tokens of the re-watch classifier (docs/en/prompt-contract.md), not wording:
+// the status column of a `<videos>` line and the answer that asks for a retry.
+const REWATCH_STATUS_WATCHED = 'watched';
+const REWATCH_STATUS_NOT_LOADED = 'not loaded';
+const REWATCH_RETRY = /^retry$/i;
 
 /**
  * Parse the re-watch classifier's answer (prompts/rewatch.md): ONE line,
- * `none` or `<id> | <question>`. Only the first non-empty line counts; `none`
- * (any case), anything unparsable, an id that is not exactly one of
- * `candidateIds` or an empty question -> null. The question is trimmed and
- * cut to 300 characters.
+ * `none` or `<id> | <question>` (`<id> | retry` asks to try a video that did
+ * not load again). Only the first non-empty line counts; `none` (any case),
+ * anything unparsable, an id that is not exactly one of `candidateIds` or an
+ * empty question -> null. The question is trimmed and cut to 300 characters;
+ * `retry` is true when it is exactly `retry` (any case).
  * @param {string} raw
  * @param {string[]} candidateIds
- * @returns {{ id: string, question: string }|null}
+ * @returns {{ id: string, question: string, retry: boolean }|null}
  */
 export function parseRewatchPick(raw, candidateIds) {
   const line = String(raw ?? '')
@@ -89,7 +95,7 @@ export function parseRewatchPick(raw, candidateIds) {
   const id = line.slice(0, bar).trim();
   const question = [...line.slice(bar + 1).trim()].slice(0, REWATCH_QUESTION_CHARS).join('').trim();
   if (!id || !question || !candidateIds.includes(id)) return null;
-  return { id, question };
+  return { id, question, retry: REWATCH_RETRY.test(question) };
 }
 
 /** Fill the `{{name}}` placeholder of a prompt file with the persona's display name (as src/behavior/prompt.js does). */
@@ -263,12 +269,16 @@ export function createTurnRunner({
    * first), one cheap classifier call (prompts.rewatch) picks the video and
    * the question, then the describer looks at it again
    * (describer.rewatchVideo) and the answer joins that video's state as
-   * `answer: { question, text }` -- mutating `videos` in place. At most one
-   * re-watch per turn. Never throws: any failure leaves `videos` as it was.
-   * The question and the answer are data: never logged; every early stop
-   * logs `rewatch: skipped` with its reason.
+   * `answer: { question, text }` -- mutating `videos` in place. Videos that
+   * did not load (`error` state) are candidates too, while this turn still
+   * has a `media.video.maxPerTurn` attempt left (`attemptsUsed` so far): the
+   * classifier's `<id> | retry` watches one again with `force`
+   * (describer.describeVideo) and its new state replaces the old one. At
+   * most one re-watch or retry per turn. Never throws: any failure leaves
+   * `videos` as it was. The question and the answer are data: never logged;
+   * every early stop logs `rewatch: skipped` with its reason.
    */
-  async function maybeRewatch({ config, guildId, channelId, selfName, history, trigger, videos, candidates }) {
+  async function maybeRewatch({ config, guildId, channelId, selfName, history, trigger, videos, candidates, attemptsUsed = 0 }) {
     const prompt = hot.prompts?.rewatch;
     if (!prompt) {
       log.info('rewatch: skipped', { channel: channelId, reason: 'no-prompt' });
@@ -284,13 +294,17 @@ export function createTurnRunner({
     }
     // `candidates` is already newest first, so the cap keeps the newest videos.
     const maxCandidates = Math.max(1, Math.floor(rewatchCfg.maxCandidates ?? 6));
+    // A retry is a fetch attempt: offered only while this turn has one left.
+    const canRetry =
+      typeof describer.describeVideo === 'function' && attemptsUsed < (mediaCfg.video?.maxPerTurn ?? 1);
     const recentIds = new Set(history.slice(-recent).map((m) => m.id));
     const seen = new Set();
     const watched = [];
     for (const item of candidates) {
       if (watched.length >= maxCandidates) break;
       if (seen.has(item.itemId) || !recentIds.has(item.messageId)) continue;
-      if (videos.get(item.itemId)?.state !== 'watched') continue;
+      const state = videos.get(item.itemId)?.state;
+      if (state !== 'watched' && !(state === 'error' && canRetry)) continue;
       seen.add(item.itemId);
       watched.push(item);
     }
@@ -299,9 +313,12 @@ export function createTurnRunner({
       return;
     }
 
-    const lines = watched.map(
-      (item) => `${item.itemId} | ${oneLine(item.name)} | ${[...oneLine(videos.get(item.itemId).text)].slice(0, REWATCH_SUMMARY_CHARS).join('')}`,
-    );
+    const lines = watched.map((item) => {
+      const video = videos.get(item.itemId);
+      const status = video.state === 'watched' ? REWATCH_STATUS_WATCHED : REWATCH_STATUS_NOT_LOADED;
+      const summary = video.state === 'watched' ? [...oneLine(video.text)].slice(0, REWATCH_SUMMARY_CHARS).join('') : '';
+      return `${item.itemId} | ${oneLine(item.name)} | ${status} | ${summary}`.trimEnd();
+    });
     const triggerText = [...String(trigger.content ?? '')].slice(0, config.context?.maxMessageChars ?? 800).join('');
     const user = `<videos>\n${lines.join('\n')}\n</videos>\n<candidate>\n${trigger.authorName}: ${triggerText}\n</candidate>`;
 
@@ -325,10 +342,18 @@ export function createTurnRunner({
       return;
     }
     const pick = parseRewatchPick(completion.text, watched.map((item) => item.itemId));
-    log.info('rewatch: classified', { channel: channelId, candidates: watched.length, picked: Boolean(pick) });
-    if (!pick) return;
+    const item = pick ? watched.find((candidate) => candidate.itemId === pick.id) : null;
+    const loaded = item ? videos.get(item.itemId).state === 'watched' : false;
+    // A retry is for a video that did not load, a question for a watched one; anything else is ignored.
+    const usable = Boolean(item) && pick.retry !== loaded;
+    log.info('rewatch: classified', { channel: channelId, candidates: watched.length, picked: usable });
+    if (!usable) return;
 
-    const item = watched.find((candidate) => candidate.itemId === pick.id);
+    if (pick.retry) {
+      const retried = await describer.describeVideo(guildId, item, { force: true });
+      if (retried) videos.set(item.itemId, retried);
+      return;
+    }
     const answer = await describer.rewatchVideo(guildId, item, pick.question);
     if (answer) videos.set(item.itemId, { ...videos.get(item.itemId), answer });
   }
@@ -430,7 +455,17 @@ export function createTurnRunner({
         if (trigger && features.videoRewatch !== false && typeof describer.rewatchVideo === 'function') {
           try {
             const selfName = channel.guild.members.me?.displayName ?? client.user.username;
-            await maybeRewatch({ config, guildId, channelId: channel.id, selfName, history, trigger, videos, candidates });
+            await maybeRewatch({
+              config,
+              guildId,
+              channelId: channel.id,
+              selfName,
+              history,
+              trigger,
+              videos,
+              candidates,
+              attemptsUsed: watched.newCount ?? 0,
+            });
           } catch (err) {
             log.warn('rewatch: failed', { channel: channel.id, error: err });
           }
