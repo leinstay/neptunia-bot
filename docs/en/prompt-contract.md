@@ -31,7 +31,7 @@ All instructions are English in both layers; a character's speech samples may be
 | `server.md` | yes | Warmup: server-level notes from channel notes and member summaries | `{{name}}` `{{fieldChars}}` `{{maxInjokes}}` `{{loreTextChars}}` |
 | `describe.md` | yes | Out-of-character prompt of the media describer (`features.mediaDescriptions`): one picture in, one plain line out: what is on it, any legible text, in the language the chat speaks. No opinions, no markdown | none |
 | `describe-video.md` | yes | Out-of-character prompt of the video describer (`features.videoDescriptions`): one video clip in (with sound), a full ordered account out: who appears, what is said (key phrases quoted), text on screen, what happens visually, music/sound when relevant. Configurable length. Same language and restriction rules as `describe.md`. No character card | `{{maxChars}}` |
-| `rewatch.md` | yes | Classifier: does this message need the persona to re-watch a video or retry one that did not load (`features.videoRewatch`). Receives a list of recent videos with their status and the new message. Output is ONE line: `<itemId> \| <question>`, `<itemId> \| retry` or `none` | `{{name}}` |
+| `rewatch.md` | yes | Classifier: does this message need the persona to re-watch a video or retry one that did not load (`features.videoRewatch`). Receives a numbered list of recent videos with their status and the new message. Output is ONE line: `<number> \| <question>`, `<number> \| retry` or `none` | `{{name}}` |
 | `rewatch-answer.md` | yes | Out-of-character prompt for the re-watch answer: the video model watches a clip again and answers one question. Same language and restriction rules as `describe-video.md`. No character card | `{{question}}` `{{maxChars}}` |
 | `address.md` | yes | Classifier: is this untagged message addressed to the persona | `{{name}}` |
 | `labels.json` | yes | Every string the CODE inserts into a prompt. Keys fixed below, values are the writer's | see below |
@@ -410,7 +410,7 @@ containing two blocks:
 
 ```
 <videos>
-<itemId> | <name> | <status> | <beginning of the account>
+<number> | <name> | <status> | <beginning of the account>
 ...
 </videos>
 <candidate>
@@ -418,13 +418,13 @@ containing two blocks:
 </candidate>
 ```
 
-Each `<videos>` line carries four pipe-separated columns: the item id, the video name, a status (`watched` or
-`not loaded`), and the first 200 characters of the summary (empty for not-loaded videos). Videos are listed
-newest-message first; names and summaries are whitespace-collapsed to one line. The trigger text is cut at
-`context.maxMessageChars`. Output is ONE line:
+Each `<videos>` line carries four pipe-separated columns: a sequential number (1 = newest video), the video name,
+a status (`watched` or `not loaded`), and the first 200 characters of the summary (empty for not-loaded videos).
+Names and summaries are whitespace-collapsed to one line. The trigger text is cut at `context.maxMessageChars`.
+Output is ONE line:
 
-- `<itemId> | <question>` — the message asks about a watched video and needs a detail the account does not cover.
-- `<itemId> | retry` — the message is about a not-loaded video and asks to try again or asks about its content.
+- `<number> | <question>` — the message asks about a watched video and needs a detail the account does not cover. The number is copied from the list.
+- `<number> | retry` — the message is about a not-loaded video and asks to try again or asks about its content. The number is copied from the list.
 - `none` — no second look or retry needed.
 
 On a question hit, the video model watches the clip again with `rewatch-answer.md` (`{{question}}` and `{{maxChars}}`

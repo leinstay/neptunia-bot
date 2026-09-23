@@ -72,32 +72,38 @@ const REWATCH_CLASSIFIER_MAX_TOKENS = 120;
 const REWATCH_STATUS_WATCHED = 'watched';
 const REWATCH_STATUS_NOT_LOADED = 'not loaded';
 const REWATCH_RETRY = /^retry$/i;
+// The ordinal column: `<n>`, tolerating a `#` before it or a `.` after it.
+const REWATCH_ORDINAL = /^#?\s*(\d+)\.?$/;
 
 /**
  * Parse the re-watch classifier's answer (prompts/rewatch.md): ONE line,
- * `none` or `<id> | <question>` (`<id> | retry` asks to try a video that did
- * not load again). Only the first non-empty line counts; `none` (any case),
- * anything unparsable, an id that is not exactly one of `candidateIds` or an
+ * `none` or `<n> | <question>` (`<n> | retry` asks to try a video that did
+ * not load again), where `<n>` is the 1-based ordinal of a `<videos>` line
+ * (1 = the newest; ordinals, not ids, because the model miscopies long ids).
+ * `#1` and `1.` are accepted as `1`. Only the first non-empty line counts;
+ * `none` (any case), anything unparsable, an ordinal outside 1..`count` or an
  * empty question -> null. The question is trimmed and cut to 300 characters;
- * `retry` is true when it is exactly `retry` (any case).
+ * `retry` is true when it is exactly `retry` (any case). The caller maps
+ * `n` back to its candidate (`candidates[n - 1]`).
  * @param {string} raw
- * @param {string[]} candidateIds
- * @returns {{ id: string, question: string, retry: boolean }|null}
+ * @param {number} count  How many videos the `<videos>` block listed.
+ * @returns {{ n: number, question: string, retry: boolean }|null}
  */
-export function parseRewatchPick(raw, candidateIds) {
-  return parseRewatchPickDetailed(raw, candidateIds).pick;
+export function parseRewatchPick(raw, count) {
+  return parseRewatchPickDetailed(raw, count).pick;
 }
 
 /**
  * parseRewatchPick with the reason for its result, a code safe to log:
  * `none` (the model answered none), `empty` (no non-empty line), `no-bar`,
- * `unknown-id` (an id not among the candidates), `no-question` or `ok`.
+ * `unknown-id` (not an ordinal within 1..`count`; the name predates ordinals
+ * and is kept for log continuity), `no-question` or `ok`.
  * @param {string} raw
- * @param {string[]} candidateIds
- * @returns {{ pick: { id: string, question: string, retry: boolean }|null,
+ * @param {number} count
+ * @returns {{ pick: { n: number, question: string, retry: boolean }|null,
  *   reason: 'none'|'empty'|'no-bar'|'unknown-id'|'no-question'|'ok' }}
  */
-export function parseRewatchPickDetailed(raw, candidateIds) {
+export function parseRewatchPickDetailed(raw, count) {
   const line = String(raw ?? '')
     .split('\n')
     .map((l) => l.trim())
@@ -106,11 +112,12 @@ export function parseRewatchPickDetailed(raw, candidateIds) {
   if (/^none$/i.test(line)) return { pick: null, reason: 'none' };
   const bar = line.indexOf('|');
   if (bar === -1) return { pick: null, reason: 'no-bar' };
-  const id = line.slice(0, bar).trim();
+  const ordinal = REWATCH_ORDINAL.exec(line.slice(0, bar).trim());
+  const n = ordinal ? Number(ordinal[1]) : NaN;
   const question = [...line.slice(bar + 1).trim()].slice(0, REWATCH_QUESTION_CHARS).join('').trim();
-  if (!id || !candidateIds.includes(id)) return { pick: null, reason: 'unknown-id' };
+  if (!Number.isSafeInteger(n) || n < 1 || n > count) return { pick: null, reason: 'unknown-id' };
   if (!question) return { pick: null, reason: 'no-question' };
-  return { pick: { id, question, retry: REWATCH_RETRY.test(question) }, reason: 'ok' };
+  return { pick: { n, question, retry: REWATCH_RETRY.test(question) }, reason: 'ok' };
 }
 
 /** Fill the `{{name}}` placeholder of a prompt file with the persona's display name (as src/behavior/prompt.js does). */
@@ -286,12 +293,13 @@ export function createTurnRunner({
    * (describer.rewatchVideo) and the answer joins that video's state as
    * `answer: { question, text }` -- mutating `videos` in place. Videos that
    * did not load (`error` state) are candidates too whenever the describer
-   * can fetch one (describer.describeVideo): the classifier's `<id> | retry`
+   * can fetch one (describer.describeVideo): the classifier's `<n> | retry`
    * watches one again with `force` and its new state replaces the old one.
    * The explicit request has its own slot, apart from the
    * `media.video.maxPerTurn` new videos this turn already fetched; the
    * describer's daily caps still apply. At most one re-watch or retry per
-   * turn. Never throws: any failure leaves
+   * turn. The `<videos>` lines are numbered 1.. newest first and the
+   * classifier answers with that ordinal, mapped back here. Never throws: any failure leaves
    * `videos` as it was. The question and the answer are data: never logged;
    * every early stop logs `rewatch: skipped` with its reason.
    */
@@ -329,11 +337,11 @@ export function createTurnRunner({
       return;
     }
 
-    const lines = watched.map((item) => {
+    const lines = watched.map((item, index) => {
       const video = videos.get(item.itemId);
       const status = video.state === 'watched' ? REWATCH_STATUS_WATCHED : REWATCH_STATUS_NOT_LOADED;
       const summary = video.state === 'watched' ? [...oneLine(video.text)].slice(0, REWATCH_SUMMARY_CHARS).join('') : '';
-      return `${item.itemId} | ${oneLine(item.name)} | ${status} | ${summary}`.trimEnd();
+      return `${index + 1} | ${oneLine(item.name)} | ${status} | ${summary}`.trimEnd();
     });
     const triggerText = [...String(trigger.content ?? '')].slice(0, config.context?.maxMessageChars ?? 800).join('');
     const user = `<videos>\n${lines.join('\n')}\n</videos>\n<candidate>\n${trigger.authorName}: ${triggerText}\n</candidate>`;
@@ -357,8 +365,8 @@ export function createTurnRunner({
       log.warn('rewatch: classifier failed', { channel: channelId, status: err.statusCode ?? null, name: err.name });
       return;
     }
-    const { pick, reason } = parseRewatchPickDetailed(completion.text, watched.map((item) => item.itemId));
-    const item = pick ? watched.find((candidate) => candidate.itemId === pick.id) : null;
+    const { pick, reason } = parseRewatchPickDetailed(completion.text, watched.length);
+    const item = pick ? watched[pick.n - 1] : null;
     const loaded = item ? videos.get(item.itemId).state === 'watched' : false;
     // A retry is for a video that did not load, a question for a watched one; anything else is ignored.
     const usable = Boolean(item) && pick.retry !== loaded;

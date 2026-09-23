@@ -31,7 +31,7 @@
 | `server.md` | はい | ウォームアップ: チャンネルノートとメンバーの要約からサーバーレベルのノートを作成 | `{{name}}` `{{fieldChars}}` `{{maxInjokes}}` `{{loreTextChars}}` |
 | `describe.md` | はい | メディア説明モデルのアウトオブキャラクタープロンプト（`features.mediaDescriptions`）: 画像 1 枚を入力、チャットの言語でプレーンテキスト 1 行を出力: 写っているもの、判読可能なテキスト。意見なし、マークダウンなし | なし |
 | `describe-video.md` | はい | 動画説明モデルのアウトオブキャラクタープロンプト（`features.videoDescriptions`）: 動画クリップ 1 本（音声付き）を入力、設定可能な長さの完全な説明を出力: 誰が登場するか、何が言われるか（重要なフレーズを引用）、画面上のテキスト、視覚的に何が起きるか、音楽/効果音。キャラクターカードなし | `{{maxChars}}` |
-| `rewatch.md` | はい | 分類器: ペルソナが動画を再視聴する必要があるか、または読み込めなかった動画をリトライする必要があるか（`features.videoRewatch`）。ステータス付きの最近の動画リストと新しいメッセージを受け取る。出力は 1 行: `<itemId> \| <question>`、`<itemId> \| retry` または `none` | `{{name}}` |
+| `rewatch.md` | はい | 分類器: ペルソナが動画を再視聴する必要があるか、または読み込めなかった動画をリトライする必要があるか（`features.videoRewatch`）。番号付きの最近の動画リストとステータス、および新しいメッセージを受け取る。出力は 1 行: `<number> \| <question>`、`<number> \| retry` または `none` | `{{name}}` |
 | `rewatch-answer.md` | はい | 再視聴のアウトオブキャラクタープロンプト: 動画モデルがクリップを再度視聴し、1 つの質問に回答する。言語と制約のルールは `describe-video.md` と同じ。キャラクターカードなし | `{{question}}` `{{maxChars}}` |
 | `address.md` | はい | 分類器: タグなしメッセージがペルソナ宛かどうか | `{{name}}` |
 | `labels.json` | はい | コードがプロンプトに挿入するすべての文字列。キーは以下で固定、値はライターが記述する | 以下参照 |
@@ -287,7 +287,7 @@ warmup.contextMark                       prefixed to context lines in the profil
 
 ```
 <videos>
-<itemId> | <name> | <status> | <説明の冒頭>
+<number> | <name> | <status> | <説明の冒頭>
 ...
 </videos>
 <candidate>
@@ -295,12 +295,12 @@ warmup.contextMark                       prefixed to context lines in the profil
 </candidate>
 ```
 
-各 `<videos>` 行には `|` 区切りの 4 列: アイテム ID、動画名、ステータス（`watched` または `not loaded`）、サマリーの
-先頭 200 文字（読み込めなかった動画は空）。動画は新しいメッセージ順にリストされます。名前とサマリーは空白が正規化されて
-1 行に。トリガーテキストは `context.maxMessageChars` で切り詰め。出力は 1 行:
+各 `<videos>` 行には `|` 区切りの 4 列: 連番（1 = 最新の動画）、動画名、ステータス（`watched` または `not loaded`）、
+サマリーの先頭 200 文字（読み込めなかった動画は空）。名前とサマリーは空白が正規化されて 1 行に。トリガーテキストは
+`context.maxMessageChars` で切り詰め。出力は 1 行:
 
-- `<itemId> | <question>` — メッセージが視聴済み動画について質問しており、説明でカバーされていない詳細を必要とする。
-- `<itemId> | retry` — メッセージが読み込めなかった動画について、再試行を求めるかその内容を質問している。
+- `<number> | <question>` — メッセージが視聴済み動画について質問しており、説明でカバーされていない詳細を必要とする。番号はリストからそのままコピーする。
+- `<number> | retry` — メッセージが読み込めなかった動画について、再試行を求めるかその内容を質問している。番号はリストからそのままコピーする。
 - `none` — 再視聴もリトライも不要。
 
 質問でヒットした場合、動画モデルが `rewatch-answer.md`（`{{question}}` と `{{maxChars}}` =

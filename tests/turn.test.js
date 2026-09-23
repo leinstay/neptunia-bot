@@ -1171,55 +1171,62 @@ test('createTurnRunner: features.dryRun=true on a follow-up turn logs replyTo=nu
 // ---------------------------------------------------------------------------
 // The re-watch on a question (features.videoRewatch).
 
-test('parseRewatchPick: none (any case), garbage, an unknown id or an empty question -> null', () => {
-  const ids = ['va', 'video:url:abc'];
-  for (const raw of ['none', 'NONE', '  None  ', '', 'va', 'maybe the first one', 'vb | what colour?', 'va |   ', ' | what?', null]) {
-    assert.equal(parseRewatchPick(raw, ids), null, String(raw));
+test('parseRewatchPick: none (any case), garbage, an ordinal out of range or an empty question -> null', () => {
+  for (const raw of ['none', 'NONE', '  None  ', '', '1', 'maybe the first one', '3 | what colour?', '0 | what?', '1 |   ', ' | what?', 'va | what?', '1.5 | what?', '-1 | what?', null]) {
+    assert.equal(parseRewatchPick(raw, 2), null, String(raw));
   }
 });
 
-test('parseRewatchPick: <id> | <question> picks that candidate; only the first line counts; the question is cut to 300 chars', () => {
-  const ids = ['va', 'video:url:abc'];
-  assert.deepEqual(parseRewatchPick('  video:url:abc |  τι χρώμα έχει;  \nva | other', ids), {
-    id: 'video:url:abc',
+test('parseRewatchPick: <n> | <question> picks that ordinal; only the first line counts; the question is cut to 300 chars', () => {
+  assert.deepEqual(parseRewatchPick('  2 |  τι χρώμα έχει;  \n1 | other', 2), {
+    n: 2,
     question: 'τι χρώμα έχει;',
     retry: false,
   });
-  const long = parseRewatchPick(`va | ${'é'.repeat(400)}`, ids);
+  const long = parseRewatchPick(`1 | ${'é'.repeat(400)}`, 2);
   assert.equal([...long.question].length, 300);
 });
 
-test('parseRewatchPick: <id> | retry (any case) sets retry; anything longer is a question', () => {
-  const ids = ['va'];
-  assert.deepEqual(parseRewatchPick('va | retry', ids), { id: 'va', question: 'retry', retry: true });
-  assert.equal(parseRewatchPick('va |  RETRY  ', ids).retry, true);
-  assert.equal(parseRewatchPick('va | Retry', ids).retry, true);
-  assert.equal(parseRewatchPick('va | retry it please', ids).retry, false);
-  assert.equal(parseRewatchPick('va | retry?', ids).retry, false);
+test('parseRewatchPick: #n and n. prefixes are tolerated', () => {
+  for (const raw of ['#2 | τι χρώμα;', '2. | τι χρώμα;', '# 2 | τι χρώμα;', '#2. | τι χρώμα;']) {
+    assert.deepEqual(parseRewatchPick(raw, 2), { n: 2, question: 'τι χρώμα;', retry: false }, raw);
+  }
+  assert.equal(parseRewatchPick('#3 | τι χρώμα;', 2), null);
+});
+
+test('parseRewatchPick: <n> | retry (any case) sets retry; anything longer is a question', () => {
+  assert.deepEqual(parseRewatchPick('1 | retry', 1), { n: 1, question: 'retry', retry: true });
+  assert.equal(parseRewatchPick('1 |  RETRY  ', 1).retry, true);
+  assert.equal(parseRewatchPick('1 | Retry', 1).retry, true);
+  assert.equal(parseRewatchPick('1 | retry it please', 1).retry, false);
+  assert.equal(parseRewatchPick('1 | retry?', 1).retry, false);
 });
 
 test('parseRewatchPickDetailed: each null answer carries its reason code; a pick carries ok', () => {
-  const ids = ['va', 'video:url:abc'];
   const cases = [
     ['none', 'none'],
-    ['  NONE  \nva | x', 'none'],
+    ['  NONE  \n1 | x', 'none'],
     ['', 'empty'],
     ['  \n \n', 'empty'],
     [null, 'empty'],
     ['maybe the first one', 'no-bar'],
-    ['va', 'no-bar'],
-    ['vb | what colour?', 'unknown-id'],
+    ['1', 'no-bar'],
+    ['3 | what colour?', 'unknown-id'],
+    ['0 | what colour?', 'unknown-id'],
+    ['va | what colour?', 'unknown-id'],
+    ['1234567890123456789 | what colour?', 'unknown-id'],
     [' | what?', 'unknown-id'],
-    ['va |   ', 'no-question'],
+    ['1 |   ', 'no-question'],
   ];
   for (const [raw, reason] of cases) {
-    assert.deepEqual(parseRewatchPickDetailed(raw, ids), { pick: null, reason }, String(raw));
+    assert.deepEqual(parseRewatchPickDetailed(raw, 2), { pick: null, reason }, String(raw));
   }
-  assert.deepEqual(parseRewatchPickDetailed('va | τι χρώμα;', ids), {
-    pick: { id: 'va', question: 'τι χρώμα;', retry: false },
+  assert.deepEqual(parseRewatchPickDetailed('1 | τι χρώμα;', 2), {
+    pick: { n: 1, question: 'τι χρώμα;', retry: false },
     reason: 'ok',
   });
-  assert.deepEqual(parseRewatchPickDetailed('va | retry', ids).pick, parseRewatchPick('va | retry', ids));
+  assert.deepEqual(parseRewatchPickDetailed('1 | retry', 2).pick, parseRewatchPick('1 | retry', 2));
+  assert.deepEqual(parseRewatchPickDetailed('1 | x', 0), { pick: null, reason: 'unknown-id' }, 'no candidates');
 });
 
 /** fakeVideoDescriber plus rewatchVideo, answering every call with `answer`. */
@@ -1278,7 +1285,7 @@ function rewatchScene(triggerContent = 'τι χρώμα είναι το αυτο
   return { video, trigger, channel: fakeTurnChannel({ historyMessages: [video, trigger] }) };
 }
 
-async function runRewatch({ hot = rewatchHot(), llm = rewatchLlm('va | τι χρώμα;'), describer, scene = rewatchScene(), turn } = {}) {
+async function runRewatch({ hot = rewatchHot(), llm = rewatchLlm('1 | τι χρώμα;'), describer, scene = rewatchScene(), turn } = {}) {
   const d = describer ?? fakeRewatchDescriber({ va: { state: 'watched', text: 'ένα αυτοκίνητο περνά' } });
   const turns = createTurnRunner({ hot, store: fakeStore(), llm, calibrator: identityCalibrator(), client: fakeClient(), describer: d });
   await turns.runTurn(turn ?? { channel: scene.channel, mode: 'reply', trigger: normalizedTrigger(scene.trigger), triggerKind: 'mention' });
@@ -1293,7 +1300,7 @@ test('createTurnRunner: rewatch -- the classifier gets the watched videos and th
   assert.equal(messages[0].content, 'Pick the video the message to Bot asks about; Bot saw them.', '{{name}} is the persona\'s display name');
   assert.equal(
     messages[1].content,
-    '<videos>\nva | clip.mp4 | watched | ένα αυτοκίνητο περνά\n</videos>\n<candidate>\nZoë: τι χρώμα είναι το αυτοκίνητο;\n</candidate>',
+    '<videos>\n1 | clip.mp4 | watched | ένα αυτοκίνητο περνά\n</videos>\n<candidate>\nZoë: τι χρώμα είναι το αυτοκίνητο;\n</candidate>',
   );
   assert.equal(options.model, 'x/haiku', 'rewatch.model and mention.followUpModel unset -> media.model');
   assert.equal(options.maxOutputTokens, 120);
@@ -1318,7 +1325,7 @@ test('createTurnRunner: rewatch -- the classifier model is rewatch.model, else m
 });
 
 test('createTurnRunner: rewatch -- none, garbage, an unknown id or a classifier error stop without a second look', async () => {
-  for (const reply of ['none', 'I think the first video', 'vz | τι χρώμα;', new Error('boom')]) {
+  for (const reply of ['none', 'I think the first video', '2 | τι χρώμα;', new Error('boom')]) {
     const { describer, llm } = await runRewatch({ llm: rewatchLlm(reply) });
     assert.equal(llm.classifierCalls.length, 1);
     assert.equal(describer.rewatchCalls.length, 0, String(reply));
@@ -1374,13 +1381,13 @@ test('createTurnRunner: rewatch -- logs rewatch: classified with counts only, ne
 
 test('createTurnRunner: rewatch -- rewatch: classified carries offered counts, retryAllowed, the parse code and the kind, never text', async () => {
   const cases = [
-    { reply: 'va | τι χρώμα;', parse: 'ok', kind: 'question', picked: true, level: 'info' },
+    { reply: '1 | τι χρώμα;', parse: 'ok', kind: 'question', picked: true, level: 'info' },
     { reply: 'none', parse: 'none', kind: null, picked: false, level: 'info' },
     { reply: '   ', parse: 'empty', kind: null, picked: false, level: 'info' },
     { reply: 'the first video please', parse: 'no-bar', kind: null, picked: false, level: 'warn' },
-    { reply: 'vz | τι χρώμα;', parse: 'unknown-id', kind: null, picked: false, level: 'warn' },
-    { reply: 'va |  ', parse: 'no-question', kind: null, picked: false, level: 'info' },
-    { reply: 'va | retry', parse: 'ok', kind: 'retry', picked: false, level: 'info' },
+    { reply: '2 | τι χρώμα;', parse: 'unknown-id', kind: null, picked: false, level: 'warn' },
+    { reply: '1 |  ', parse: 'no-question', kind: null, picked: false, level: 'info' },
+    { reply: '1 | retry', parse: 'ok', kind: 'retry', picked: false, level: 'info' },
   ];
   for (const { reply, parse, kind, picked, level } of cases) {
     const { logs } = await withCapturedLogs(() => runRewatch({ llm: rewatchLlm(reply) }));
@@ -1406,9 +1413,9 @@ test('createTurnRunner: rewatch -- rewatch: classified counts watched and not-lo
   }
   const trigger = rawMessage({ id: 'mt', ts: NOW - 1000, authorName: 'Zoë', content: 'και τώρα;' });
   const scene = { trigger, channel: fakeTurnChannel({ historyMessages: [...messages, trigger] }) };
-  const { logs } = await withCapturedLogs(() =>
-    runRewatch({ scene, llm: rewatchLlm('v2 | retry'), describer: fakeRetryDescriber(states) }),
-  );
+  const describer = fakeRetryDescriber(states);
+  const { logs } = await withCapturedLogs(() => runRewatch({ scene, llm: rewatchLlm('2 | retry'), describer }));
+  assert.equal(describer.retryCalls[0].item.itemId, 'v2', 'ordinal 2 is the second newest');
   const line = logs.find((entry) => entry.msg === 'rewatch: classified');
   assert.deepEqual(line.offered, { watched: 2, notLoaded: 1 });
   assert.equal(line.candidates, 3);
@@ -1417,6 +1424,27 @@ test('createTurnRunner: rewatch -- rewatch: classified counts watched and not-lo
   assert.equal(line.kind, 'retry');
   assert.equal(line.picked, true);
   assert.equal(line.level, 'info');
+});
+
+test('createTurnRunner: rewatch -- the ordinal maps back to the candidate, 1 for the newest', async () => {
+  const messages = [];
+  const states = {};
+  for (let i = 1; i <= 3; i += 1) {
+    messages.push(videoAttachmentRaw(`m${i}`, NOW - 100_000 + i * 1000, `v${i}`, `clip${i}.mp4`));
+    states[`v${i}`] = { state: 'watched', text: `scène ${i}` };
+  }
+  const trigger = rawMessage({ id: 'mt', ts: NOW - 1000, authorName: 'Zoë', content: 'τι χρώμα;' });
+  const scene = { trigger, channel: fakeTurnChannel({ historyMessages: [...messages, trigger] }) };
+  for (const [reply, itemId] of [['1 | τι χρώμα;', 'v3'], ['#2 | τι χρώμα;', 'v2'], ['3. | τι χρώμα;', 'v1']]) {
+    const describer = fakeRewatchDescriber(states);
+    await runRewatch({ scene, llm: rewatchLlm(reply), describer });
+    assert.equal(describer.rewatchCalls.length, 1, reply);
+    assert.equal(describer.rewatchCalls[0].item.itemId, itemId, reply);
+  }
+  const describer = fakeRewatchDescriber(states);
+  const { logs } = await withCapturedLogs(() => runRewatch({ scene, llm: rewatchLlm('4 | τι χρώμα;'), describer }));
+  assert.equal(describer.rewatchCalls.length, 0, 'an ordinal past the list picks nothing');
+  assert.equal(logs.find((entry) => entry.msg === 'rewatch: classified').parse, 'unknown-id');
 });
 
 test('createTurnRunner: rewatch -- recentMessages defaults to 60 (config.json and the code fallback)', async () => {
@@ -1449,11 +1477,11 @@ test('createTurnRunner: rewatch -- the <videos> block lists at most maxCandidate
 
   const { llm } = await run(rewatchHot());
   const block = llm.classifierCalls[0].messages[1].content.split('\n</videos>')[0].split('\n').slice(1);
-  assert.deepEqual(block, [7, 6, 5, 4, 3, 2].map((i) => `v${i} | clip${i}.mp4 | watched | scène ${i}`));
+  assert.deepEqual(block, [7, 6, 5, 4, 3, 2].map((i, k) => `${k + 1} | clip${i}.mp4 | watched | scène ${i}`));
 
   const capped = await run(rewatchHot({}, { rewatch: { maxCandidates: 2 } }));
   const cappedBlock = capped.llm.classifierCalls[0].messages[1].content.split('\n</videos>')[0].split('\n').slice(1);
-  assert.deepEqual(cappedBlock, ['v7 | clip7.mp4 | watched | scène 7', 'v6 | clip6.mp4 | watched | scène 6']);
+  assert.deepEqual(cappedBlock, ['1 | clip7.mp4 | watched | scène 7', '2 | clip6.mp4 | watched | scène 6']);
 });
 
 /**
@@ -1484,14 +1512,14 @@ test('createTurnRunner: rewatch -- a video that did not load is offered as not l
   assert.equal(llm.classifierCalls.length, 1);
   assert.equal(
     llm.classifierCalls[0].messages[1].content,
-    '<videos>\nva | clip.mp4 | not loaded |\n</videos>\n<candidate>\nZoë: τι χρώμα είναι το αυτοκίνητο;\n</candidate>',
+    '<videos>\n1 | clip.mp4 | not loaded |\n</videos>\n<candidate>\nZoë: τι χρώμα είναι το αυτοκίνητο;\n</candidate>',
   );
   assert.equal(describer.retryCalls.length, 0);
 });
 
 test('createTurnRunner: rewatch -- <id> | retry on a video that did not load tries it once more, forced, and the transcript shows it watched', async () => {
   const describer = fakeRetryDescriber({ va: { state: 'error' } });
-  const { result, logs } = await withCapturedLogs(() => runRewatch({ describer, llm: rewatchLlm('va | retry') }));
+  const { result, logs } = await withCapturedLogs(() => runRewatch({ describer, llm: rewatchLlm('1 | retry') }));
 
   assert.equal(describer.retryCalls.length, 1);
   assert.equal(describer.retryCalls[0].item.itemId, 'va');
@@ -1507,7 +1535,7 @@ test('createTurnRunner: rewatch -- <id> | retry on a video that did not load tri
 
 test('createTurnRunner: rewatch -- a retry that fails again replaces the state with the new one', async () => {
   const describer = fakeRetryDescriber({ va: { state: 'error' } }, { state: 'limit', reason: 'size' });
-  const { llm } = await runRewatch({ describer, llm: rewatchLlm('va | retry') });
+  const { llm } = await runRewatch({ describer, llm: rewatchLlm('1 | retry') });
   assert.equal(describer.retryCalls.length, 1);
   const userMessage = llm.turnCalls[0].messages[1].content;
   const reason = labels.transcript.videoReason.size;
@@ -1516,8 +1544,8 @@ test('createTurnRunner: rewatch -- a retry that fails again replaces the state w
 
 test('createTurnRunner: rewatch -- retry on a watched video, or a question on one that did not load, does nothing', async () => {
   const cases = [
-    { states: { va: { state: 'watched', text: 'ένα αυτοκίνητο περνά' } }, reply: 'va | retry' },
-    { states: { va: { state: 'error' } }, reply: 'va | τι χρώμα;' },
+    { states: { va: { state: 'watched', text: 'ένα αυτοκίνητο περνά' } }, reply: '1 | retry' },
+    { states: { va: { state: 'error' } }, reply: '1 | τι χρώμα;' },
   ];
   for (const { states, reply } of cases) {
     const describer = fakeRetryDescriber(states);
@@ -1545,13 +1573,13 @@ test('createTurnRunner: rewatch -- maxCandidates counts watched and not-loaded v
     describer: fakeRetryDescriber(states),
   });
   const block = llm.classifierCalls[0].messages[1].content.split('\n</videos>')[0].split('\n').slice(1);
-  assert.deepEqual(block, ['v4 | clip4.mp4 | not loaded |', 'v3 | clip3.mp4 | watched | scène 3', 'v2 | clip2.mp4 | not loaded |']);
+  assert.deepEqual(block, ['1 | clip4.mp4 | not loaded |', '2 | clip3.mp4 | watched | scène 3', '3 | clip2.mp4 | not loaded |']);
 });
 
 test('createTurnRunner: rewatch -- a video that did not load is still offered and retried after this turn spent media.video.maxPerTurn attempts', async () => {
   const describer = fakeRetryDescriber({ va: { state: 'error' } }, undefined, { newCount: 1 });
-  const { result, logs } = await withCapturedLogs(() => runRewatch({ describer, llm: rewatchLlm('va | retry') }));
-  assert.ok(result.llm.classifierCalls[0].messages[1].content.includes('va | clip.mp4 | not loaded |'), 'still offered');
+  const { result, logs } = await withCapturedLogs(() => runRewatch({ describer, llm: rewatchLlm('1 | retry') }));
+  assert.ok(result.llm.classifierCalls[0].messages[1].content.includes('1 | clip.mp4 | not loaded |'), 'still offered');
   assert.equal(describer.retryCalls.length, 1);
   assert.equal(describer.retryCalls[0].options.force, true);
   assert.ok(!logs.some((entry) => entry.msg === 'rewatch: skipped'));

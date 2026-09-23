@@ -31,7 +31,7 @@
 | `server.md` | 是 | 预热：从频道笔记和成员摘要生成服务器级笔记 | `{{name}}` `{{fieldChars}}` `{{maxInjokes}}` `{{loreTextChars}}` |
 | `describe.md` | 是 | 角色外提示，用于媒体描述器（`features.mediaDescriptions`）：输入一张图片，输出一行描述：图中内容、可辨认的文字，使用聊天所用的语言。无评论，无 markdown | 无 |
 | `describe-video.md` | 是 | 角色外提示，用于视频描述器（`features.videoDescriptions`）：输入一个视频片段（含声音），输出可配置长度的完整有序描述：谁出现了、说了什么（关键短语引用）、屏幕上的文字、视觉上发生了什么、音乐/音效。不接收角色卡 | `{{maxChars}}` |
-| `rewatch.md` | 是 | 分类器：角色是否需要重看视频或重试未加载的视频（`features.videoRewatch`）。接收带状态的近期视频列表和新消息。输出为一行：`<itemId> \| <question>`、`<itemId> \| retry` 或 `none` | `{{name}}` |
+| `rewatch.md` | 是 | 分类器：角色是否需要重看视频或重试未加载的视频（`features.videoRewatch`）。接收带状态的编号近期视频列表和新消息。输出为一行：`<number> \| <question>`、`<number> \| retry` 或 `none` | `{{name}}` |
 | `rewatch-answer.md` | 是 | 角色外提示，用于重看回答：视频模型再次观看片段并回答一个问题。语言和限制规则与 `describe-video.md` 相同。不接收角色卡 | `{{question}}` `{{maxChars}}` |
 | `address.md` | 是 | 分类器：未标记的消息是否在对角色说话 | `{{name}}` |
 | `labels.json` | 是 | 代码插入提示中的所有字符串。键在下方固定，值由编写者决定 | 见下文 |
@@ -385,7 +385,7 @@ warmup.contextMark                       prefixed to context lines in the profil
 
 ```
 <videos>
-<itemId> | <name> | <status> | <描述的开头>
+<number> | <name> | <status> | <描述的开头>
 ...
 </videos>
 <candidate>
@@ -393,12 +393,12 @@ warmup.contextMark                       prefixed to context lines in the profil
 </candidate>
 ```
 
-每行 `<videos>` 包含四个 `|` 分隔的列：条目 ID、视频名称、状态（`watched` 或 `not loaded`）和摘要的前 200 个字符
-（未加载的视频为空）。视频按最新消息优先列出；名称和摘要的空白合并为一行。触发文本在 `context.maxMessageChars` 处
-截断。输出为一行：
+每行 `<videos>` 包含四个 `|` 分隔的列：序号（1 = 最新视频）、视频名称、状态（`watched` 或 `not loaded`）和摘要的
+前 200 个字符（未加载的视频为空）。名称和摘要的空白合并为一行。触发文本在 `context.maxMessageChars` 处截断。输出
+为一行：
 
-- `<itemId> | <question>` — 消息询问已观看视频，需要描述未涵盖的细节。
-- `<itemId> | retry` — 消息关于未加载的视频，请求再试或询问其内容。
+- `<number> | <question>` — 消息询问已观看视频，需要描述未涵盖的细节。编号从列表原样复制。
+- `<number> | retry` — 消息关于未加载的视频，请求再试或询问其内容。编号从列表原样复制。
 - `none` — 不需要重看或重试。
 
 问题命中时，视频模型使用 `rewatch-answer.md`（`{{question}}` 和 `{{maxChars}}` = `rewatch.answerChars`，默认
