@@ -6,7 +6,7 @@
 
 | キー | デフォルト | 説明 |
 |---|---|---|
-| `dryRun` | `false` | フルパイプラインを実行するが送信しない（[ドライラン](README.md#ドライラン)を参照） |
+| `dryRun` | `false` | フルパイプラインを実行するが送信しない。[ドライラン](README.md#ドライラン)を参照 |
 | `mentions` | `true` | @メンションに反応 |
 | `replies` | `true` | リプライに反応 |
 | `nameTriggers` | `true` | メッセージ中の名前トリガーに反応 |
@@ -22,7 +22,7 @@
 | `mediaDescriptions` | `true` | 画像、GIF、動画フレーム、リンクサムネイルの一行説明文 |
 | `videoDescriptions` | `false` | 動画対応モデルで短い動画クリップを視聴。`mediaDescriptions` も有効にする必要がある。`config.local.json` で有効化。動画対応モデルが必要で、サイトリンクには `yt-dlp`/`ffmpeg` も必要 |
 | `videoRewatch` | `true` | 話しかけられた時に動画を再視聴して質問に回答。`videoDescriptions` が必要 |
-| `webLookup` | `false` | チャットに投稿されたリンクを読み取り、事実に関する質問にウェブ検索で回答。他の機能と異なり、キーが存在しない場合はオフとして扱われる。検索には `.env` に `BRAVE_SEARCH_API_KEY` が必要。キーがない場合はリンク読み取りのみ動作する。[メディア: リンクと検索](media.md#リンク-ページの読み取り)を参照 |
+| `webLookup` | `false` | チャットに投稿されたリンクを読み取り、事実に関する質問にウェブ検索で回答。他の機能と異なり、キーが存在しない場合はオフとして扱われる。検索には `.env` に `BRAVE_SEARCH_API_KEY` が必要。キーがない場合はリンク読み取りのみ動作する。[メディア: リンクと検索](media.md#リンク)を参照 |
 | `followUp` | `true` | ペルソナの応答後、タグなしメッセージを分類して会話を継続 |
 | `typingSimulation` | `true` | タイピング速度をシミュレート |
 | `adminCommands` | `true` | オーナースラッシュコマンド。`false` でコマンド登録を解除 |
@@ -36,7 +36,7 @@
 | `commandName` | `"nep"` | スラッシュコマンド名（小文字 `a-z 0-9 _ -`、最大 32 文字。変更時に再登録） |
 | `nameTriggers` | `[]` | @メンション以外の追加トリガー文字列 |
 | `guildId` | `""` | ロックするサーバー。一つだけに参加している場合は自動検出 |
-| `dryRunChannelId` | `""` | ドライランミラー用チャンネル（[ドライラン](README.md#ドライラン)を参照） |
+| `dryRunChannelId` | `""` | ドライランミラー用チャンネル。[ドライラン](README.md#ドライラン)を参照 |
 | `channels.allow` | `[]` | 許可チャンネル（空 = 表示可能なすべて） |
 | `channels.deny` | `[]` | 無視するチャンネル |
 | `access` | `{}` | オーナー以外がどのコマンドを実行できるか（`/nep access` で管理） |
@@ -135,7 +135,7 @@
 | `sites` | `["youtube.com", "youtu.be", "tiktok.com", "vk.com", "vkvideo.ru", "x.com", "twitter.com", "reddit.com", "twitch.tv"]` | 動画として扱うリンクのホスト名 |
 | `directUrlSites` | `["youtube.com", "youtu.be"]` | 公開 URL を直接プロバイダーに渡せるサイト（プロバイダーが動画を取得） |
 | `directUrlUnknownDuration` | `false` | プローブで再生時間を特定できなかった場合でも directUrlSites のリンクをプロバイダーに送信する。トークン推定は `maxSeconds` を使用。下記の再生時間チェーンを参照 |
-| `canaryUrl` | `"https://www.youtube.com/watch?v=jNQXAC9IVRw"` | 起動時と `/nep ping video` でプローブされる固定の YouTube 動画。YouTube API key と再生時間ソースをテストする |
+| `canaryUrl` | `"https://www.youtube.com/watch?v=jNQXAC9IVRw"` | 起動時と `/nep ping classifier.video` でプローブされる固定の YouTube 動画。YouTube API key と再生時間ソースをテストする |
 | `ytdlpPath` | `"yt-dlp"` | `yt-dlp` バイナリのパス。サイト動画リンクと再生時間のプローブに必要 |
 | `ffmpegPath` | `"ffmpeg"` | `ffmpeg` のパス。長い、またはサイズの大きい添付ファイルのトリムとダウンスケールに必要 |
 | `errorRetryMinutes` | `60` | エラーキャッシュされた動画が自動リトライされるまでの分数。再視聴分類器からの強制リトライはこの値を無視する |
@@ -145,7 +145,7 @@
 
 `yt-dlp` と `ffmpeg` はどちらもオプションのシステムバイナリです。これらがなくても上限内の添付ファイルはそのまま動作します（そのまま送信されます）。長い添付ファイルとすべてのサイトリンクは静止フレームまたはプレビュー画像にフォールバックし、ペルソナには理由が伝えられます。すべての動画リクエストは `llm.maxRequestsPerDay` と動画トークン上限（`maxRequestTokens`）にカウントされます。
 
-YouTube リンクの再生時間は次の順序で取得されます: まず yt-dlp、次に YouTube Data API（`.env` に `YOUTUBE_API_KEY` が設定されている場合）、最後にウォッチページのスクレイプ。すべてのプローブが失敗し `directUrlUnknownDuration` がオフ（デフォルト）の場合、リンクは「読み込めませんでした」と報告されます。スイッチがオンの場合、URL はそのままプロバイダーに送信され、トークン推定では `maxSeconds` として計上されます。Data API キーは無料です: Google Cloud コンソールで YouTube Data API v3 を有効にしてキーを作成します。無料枠は 1 日 10,000 ユニット、再生時間のルックアップ 1 回は 1 ユニットです。`/nep ping video` は `canaryUrl` をプローブし、API key のステータスを報告します（例: `youtube: API key — ok`）。キャッシュされた長さ制限の結果は動画の再生時間を記録し、上限が引き上げられたときに再試行されます。
+YouTube リンクの再生時間は次の順序で取得されます: まず yt-dlp、次に YouTube Data API（`.env` に `YOUTUBE_API_KEY` が設定されている場合）、最後にウォッチページのスクレイプ。すべてのプローブが失敗し `directUrlUnknownDuration` がオフ（デフォルト）の場合、リンクは「読み込めませんでした」と報告されます。スイッチがオンの場合、URL はそのままプロバイダーに送信され、トークン推定では `maxSeconds` として計上されます。Data API キーは無料です: Google Cloud コンソールで YouTube Data API v3 を有効にしてキーを作成します。無料枠は 1 日 10,000 ユニット、再生時間のルックアップ 1 回は 1 ユニットです。`/nep ping classifier.video` は `canaryUrl` をプローブし、API key のステータスを報告します（例: `youtube: API key — ok`）。キャッシュされた長さ制限の結果は動画の再生時間を記録し、上限が引き上げられたときに再試行されます。
 
 ### `media.video.rewatch`
 
@@ -330,31 +330,31 @@ YouTube リンクの再生時間は次の順序で取得されます: まず yt-
 | `rateLimitWaitMinutes` | `10` | レートリミット時の待機時間（分） |
 | `rateLimitMaxWaits` | `36` | ランを中断する前の連続待機回数 |
 
-## モデルの選択
+## モデル
 
 エンジンは 5 つのモデルロールを使用します。それぞれ独立して設定できるため、ペルソナの声にはプレミアムモデルを使い、ヘルパーには安価なモデルを使うことができます。
 
-### `llm.model` — ペルソナの声（`talk`）
+### 声（`llm.model`）
 
-バジェットが許す最も高性能なモデルを選びます。ロールプレイの品質、キャラクターの一貫性、自然な会話のすべてがこのモデルに依存します。小さなモデルはキャラクターが崩れ、コンテキストの手がかりを忘れ、平坦に聞こえます。
+ロール `talk`。バジェットが許す最も高性能なモデルを選びます。ロールプレイの品質、キャラクターの一貫性、自然な会話のすべてがこのモデルに依存します。小さなモデルはキャラクターが崩れ、コンテキストの手がかりを忘れ、平坦に聞こえます。
 
-デフォルト: `anthropic/claude-opus-4.6`。より安価な選択肢: `anthropic/claude-sonnet-4.5`。
+デフォルト: `anthropic/claude-opus-4.6`。より安価な選択肢: `anthropic/claude-sonnet-4.6`。
 
-### `memory.model` — アナライザー（`analyzer`）
+### アナライザー（`memory.model`）
 
-長いトランスクリプトを推論し、厳密な JSON を返します。ペルソナの声と同じティアの知性が必要です。`null`（デフォルト）はペルソナのモデルを使用します。同じ例が適用されます。
+ロール `analyzer`。長いトランスクリプトを推論し、厳密な JSON を返します。ペルソナの声と同じティアの知性が必要です。`null`（デフォルト）はペルソナのモデルを使用します。同じ例が適用されます。
 
-### `classifier.text` — テキスト分類器（`classifier.text`）
+### テキスト分類器（`classifier.text`）
 
 「yes」または「no」を確実に回答できる最も安価なテキストモデルです。アドレス分類器、再視聴分類器、検索分類器を実行し、リンク読み取りと検索結果の要約も行います。デフォルト: `anthropic/claude-sonnet-4.6`。
 
-### `classifier.media` — 画像（`classifier.media`）
+### 画像（`classifier.media`）
 
 安価なビジョンモデルであれば何でも使えます。一行の説明文を書くだけなので、推論能力はほとんど問題になりません。
 
 デフォルト: `anthropic/claude-haiku-4.5`。最も安価な代替: `google/gemini-2.5-flash-lite`。
 
-### `classifier.video` — 音声付き動画（`classifier.video`）
+### 動画（`classifier.video`）
 
 OpenRouter を通じて動画と音声の両方の入力を受け付けるモデルのみがここで動作します。フレームは受け付けるが音声は受け付けないモデル（Qwen VL、GLM、Seed、Gemma）は音声を聞き取れず、重要な情報の大部分を逃します。
 

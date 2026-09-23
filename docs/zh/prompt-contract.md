@@ -1,4 +1,4 @@
-# 提示与代码的契约
+# 提示契约
 
 提示文件与代码（`src/behavior/prompt.js`、`src/llm/parse.js`、`src/discord/format.js`、
 `src/memory/update.js`、`src/memory/channels.js`、`src/memory/warmup.js`）的交汇点。修改一方时需同步修改
@@ -50,7 +50,9 @@
 `{{maxEpisodes}}` 是每人保留的回忆总数上限。两者均从配置填充，但默认提示未使用；自定义的 `memory.md`
 可引用它们。
 
-## 用户消息块（空块省略，按此顺序排列）
+## 块
+
+用户消息的各个块。空块省略；顺序如下表所列。
 
 | 块 | 内容 |
 |---|---|
@@ -85,9 +87,9 @@
 视频结果按附件或链接缓存在 `data/guilds/<id>/media.json` 中，键为 `video:<itemId>`（附件 id 或链接 URL 的稳定
 哈希）。缓存条目：
 
-- 已观看：`{ text, ts, watched: true }` — 永久，摘要文本。
-- 限制未命中（时长或大小）：`{ miss: true, ts, reason: "length"|"size" }` — 永久，文件不会改变。
-- 错误未命中：`{ miss: true, ts, reason: "error" }` — `media.video.errorRetryMinutes`（默认 60）分钟后重试，或在重看分类器发出强制重试时立即重试。
+- 已观看：`{ text, ts, watched: true }`：永久，摘要文本。
+- 限制未命中（时长或大小）：`{ miss: true, ts, reason: "length"|"size" }`：永久，文件不会改变。
+- 错误未命中：`{ miss: true, ts, reason: "error" }`：`media.video.errorRetryMinutes`（默认 60）分钟后重试，或在重看分类器发出强制重试时立即重试。
 - 每日上限：不缓存；仅在该回合返回 `{ state: "limit", reason: "daily" }`。
 
 重看回答缓存在键 `video:<itemId>:q:<hash>`（问题小写化并合并空白后 SHA-1 的前 16 位十六进制数字）下：`{ text, ts, answer: true }`。一小时后过期；代码在读取时删除过期条目。
@@ -103,7 +105,9 @@
 `labels.transcript.gap` / `gapWithDate` / `date`；区块以 `labels.transcript.header` 开头。相邻频道：相同的行
 格式但不含 `#n`，位于 `# channel-name` 之下。
 
-## `labels.json` 键（`{x}` 由代码填充）
+## 标签
+
+`labels.json` 的键；`{x}` 由代码填充。
 
 ```
 locale                                   BCP-47 tag for dates
@@ -124,7 +128,7 @@ transcript.gif                           {name}
 transcript.gifDescribed                  {text}
 transcript.video                         {name} {duration}
 transcript.videoDescribed                {name} {duration} {text}: text describes ONE frame
-transcript.videoWatched                  {name} {duration} {text}: first-hand — the persona saw and heard the clip
+transcript.videoWatched                  {name} {duration} {text}: first-hand, the persona saw and heard the clip
 transcript.videoNotWatched               {name} {duration} {reason}: reason is the human phrase from videoReason.*
 transcript.videoNotWatchedFrame          {name} {duration} {reason} {text}: not watched but a still frame was described
 transcript.videoAnswered                {question} {text}: extra tag after a watched video tag; the persona re-watched the clip for this question
@@ -136,7 +140,7 @@ transcript.voice                         {duration}
 transcript.audio                         {name} {duration}
 transcript.link                          {site} {title}
 transcript.linkText                      {site} {title} {text}
-transcript.linkRead                      {text}: extra tag after a link tag; the page was fetched and condensed — first-hand
+transcript.linkRead                      {text}: extra tag after a link tag; the page was fetched and condensed, first-hand
 transcript.thumbnailDescribed            {text}: follows a link tag; describes the link's preview picture
 transcript.filePreview                   {name} {text}
 transcript.forwarded                     {text}
@@ -152,7 +156,7 @@ senses.stickerSee | stickerDescribed | stickerBlind
 senses.lottie
 senses.voice | links | files
 senses.linksWatch                        replaces links when features.videoDescriptions is on; adds that a linked video may come watched or not watched with the reason
-senses.linksRead                         shown after the links line when features.webLookup is on and web.links.enabled is not false; tells the persona that a link may come with a read excerpt — first-hand
+senses.linksRead                         shown after the links line when features.webLookup is on and web.links.enabled is not false; tells the persona that a link may come with a read excerpt, first-hand
 senses.search                            shown when features.webLookup is on, web.search.enabled is not false AND a Brave Search key is configured; tells the persona that a `<lookup>` block may appear with web results
 lookup.header                            {query}: heading of the `<lookup>` block
 lookup.sources                           {list}: site names, comma-separated by code
@@ -190,7 +194,9 @@ warmup.ownMark                           prefixed to a member's own lines in the
 warmup.contextMark                       prefixed to context lines in the profile.md transcript
 ```
 
-## 模型输出：仅限以下标签
+## 输出
+
+模型输出中只处理以下标签：
 
 - `<think>…</think>` 可选，位于最前，1–4 行隐藏的思考过程；未闭合表示保持沉默。
 - `<msg>text</msg>` 一条聊天消息，连续最多 3 条；`reply="#87"` 使其成为对对话记录中某行的 Discord 回复。
@@ -200,9 +206,9 @@ warmup.contextMark                       prefixed to context lines in the profil
 
 `features.reactions: false` 移除 `<react>`，`features.multiMessage: false` 仅保留第一个 `<msg>`；提示无需知道这些。
 
-## 分析器（`memory.md`）
+## 分析器
 
-一次调用更新角色记住的所有内容。它以角色的视角评判人们，因此会接收角色卡。频道是否活跃不由它判断，
+一次调用（`memory.md`）更新角色记住的所有内容。它以角色的视角评判人们，因此会接收角色卡。频道是否活跃不由它判断，
 由代码计数。预热通过预热提示（`profile.md`、`channel.md`、`server.md`）输入旧历史，不通过分析器。
 
 提示中的数值限制是占位符，在运行时从 `config.memory.*` 和 `relationships.maxDeltaPerUpdate` 填充。
@@ -238,11 +244,11 @@ warmup.contextMark                       prefixed to context lines in the profil
 - **兴趣是独立条目**，而非文本段落：`topic`（≤ `{{interestTopicChars}}`，标识，大小写不敏感地比较）和
   `note`（≤ `{{interestNoteChars}}`，具体是关于它的什么；可为空）。两个占位符分别从
   `memory.interestTopicChars` / `memory.interestNoteChars` 填充，与其他限制类似。每人最多存储
-  `memory.maxInterests` 个，每个有一个权重，当分析器再次添加或更新时权重增长；权重最低的最先被淘汰。输入
+  `memory.maxInterestsStored` 个，每个有一个权重，当分析器再次添加或更新时权重增长；排名最低的最先被淘汰。输入
   中显示已存储的条目，因此分析器仅添加新的，仅在学到新内容时更新笔记，仅移除该成员已明确放弃的。
 - **细节也是独立条目**：`{ id, text, weight, firstSeen, lastSeen }`。输入中显示每个已存储细节及其数字
   `id`；`seen` 和 `remove` 通过该 id 引用细节（代码也接受完全匹配的已存储文本）。`add` 接受
-  `{ text, sure? }`（也接受纯字符串）。超过 `memory.maxDetails` 时，权重最低的先淘汰，然后是最旧的。
+  `{ text, sure? }`（也接受纯字符串）。超过 `memory.maxDetailsStored` 时，排名最低的先淘汰。
 - **确认（"(?)" 机制），兴趣和细节通用。**`weight` 统计一个事物被观察到的不同场合次数。新条目起始权重为
   1，或当分析器标记 `"sure": false` 时为 0（不确定属于谁、不确定是否认真的、或分析器不认识的名称）。
   `seen`（无新内容可说，但再次出现）、对已有条目的 `add` 和 `update` 各计为一次观察；仅当该成员在此批次
@@ -332,7 +338,7 @@ warmup.contextMark                       prefixed to context lines in the profil
   `memory.maxSelfFacts`。笔记使用聊天所用的语言。仅记录观察到的事实；不记录敏感信息（地址、电话、证件、
   健康、财务、真实全名）。
 
-## 服务器记忆（频道地图）
+## 频道地图
 
 `<server>` 块由已存储的频道笔记和代码维护的事实组装而成，过滤后仅包含与本轮相关的频道。当前频道排首位，
 以 `labels.server.currentMark` 标记；然后仅包含本轮向 `<other_channels>` 贡献了消息的相邻频道，各自完整
@@ -357,7 +363,7 @@ warmup.contextMark                       prefixed to context lines in the profil
 当前频道尚无存储笔记（分析器尚未处理过）时，会从对话记录中消息的 Discord 事实合成一个回退条目，使角色
 仍然知道自己在哪里。
 
-## 预热（`profile.md`、`channel.md`、`server.md`）：记忆如何启动
+## 预热
 
 每个预热请求处理一个工作单元（一个频道、一个成员或服务器），以保持归属的清晰。`channel.md` 生成频道笔记
 （用途、话题、氛围）。`profile.md` 生成成员的性格、风格、兴趣、细节、回忆和别名。`server.md` 生成服务器
@@ -379,7 +385,7 @@ warmup.contextMark                       prefixed to context lines in the profil
 `labels.warmup.contextMark` 开头。别名来自其他人的行（他们如何称呼该成员），因此自身消息的归属规则不适用
 于别名。
 
-## 地址分类器（`address.md`）：未标记的消息是否在对角色说话？
+## 地址分类器
 
 角色回复某人后，该频道内打开一个对话窗口（`mention.followUpMinutes`，每次进一步回复时延长）。窗口内不
 携带触发信号（无提及、无对角色消息的回复、无名字）的消息不会被盲目回复：代码将频道最近的
@@ -391,7 +397,7 @@ warmup.contextMark                       prefixed to context lines in the profil
 （默认开启）。仅记录计数和判定结果。
 窗口状态在重启后保留：活跃窗口保存在 `data/state.json` 的 `followUpWindows` 中，启动时恢复，过期的窗口会被丢弃。
 
-## 重看分类器（`rewatch.md`）：是否需要再看一遍视频？
+## 重看分类器
 
 当角色被呼叫（回复回合）且频道最近 `media.video.rewatch.recentMessages`（默认 60）条消息中有视频时，分类器判断
 该消息是否在询问其中某个视频，或请求重试一个未加载的视频。候选包括已观看视频和错误状态视频（请求的重试使用独立于回合 `media.video.maxPerTurn`
@@ -416,9 +422,9 @@ warmup.contextMark                       prefixed to context lines in the profil
 前 200 个字符（未加载的视频为空）。名称和摘要的空白合并为一行。触发文本在 `context.maxMessageChars` 处截断。输出
 为一行：
 
-- `<number> | <question>` — 消息询问已观看视频，需要描述未涵盖的细节。编号从列表原样复制。
-- `<number> | retry` — 消息关于未加载的视频，请求再试或询问其内容。编号从列表原样复制。
-- `none` — 不需要重看或重试。
+- `<number> | <question>`：消息询问已观看视频，需要描述未涵盖的细节。编号从列表原样复制。
+- `<number> | retry`：消息关于未加载的视频，请求再试或询问其内容。编号从列表原样复制。
+- `none`：不需要重看或重试。
 
 问题命中时，视频模型使用 `rewatch-answer.md`（`{{question}}` 和 `{{maxChars}}` = `rewatch.answerChars`，默认
 1200）再次观看片段，回答以 `transcript.videoAnswered`（`{question}`、`{text}`）的形式追加在已观看标签之后。当功能
@@ -432,10 +438,10 @@ warmup.contextMark                       prefixed to context lines in the profil
 `media.video.maxPerDay`；`media.video.rewatch.maxPerDay`（默认 20）单独限制重看次数。回答按问题缓存一小时（参见
 上方视频缓存部分）。开关 `features.videoRewatch`（缺失 = 开启，需要 `videoDescriptions`）。
 
-## 搜索分类器（`lookup.md`）：问题是否需要从网上获取事实？
+## 搜索分类器
 
-当角色被呼叫（回复回合）且以下条件全部满足时 — `features.webLookup` 开启、`web.search.enabled` 不为 false、
-`lookup.md` 提示文件存在、`web.search.maxPerTurn` 至少为 1、且已配置 `BRAVE_SEARCH_API_KEY` — 分类器判断触发消息
+当角色被呼叫（回复回合）且以下条件全部满足时（`features.webLookup` 开启、`web.search.enabled` 不为 false、
+`lookup.md` 提示文件存在、`web.search.maxPerTurn` 至少为 1、且已配置 `BRAVE_SEARCH_API_KEY`），分类器判断触发消息
 是否需要网络搜索。它使用 `classifier.text` 模型角色。代码将 `lookup.md` 作为系统提示，用户消息包含一个短的
 `<transcript>`（与重看分类器相同，角色自身的行以 `labels.self` 标记）和一个 `<candidate>` 块：
 
@@ -450,8 +456,8 @@ warmup.contextMark                       prefixed to context lines in the profil
 
 对话记录在可用时携带描述、视频摘要和链接阅读内容。触发文本在 `context.maxMessageChars` 处截断。输出为一行：
 
-- 一个搜索查询 — 纯文字，无引号，无操作符，最多 12 个词 — 当消息需要聊天之外的事实时。
-- `none` — 其他所有情况。
+- 一个搜索查询（纯文字，无引号，无操作符，最多 12 个词）：当消息需要聊天之外的事实时。
+- `none`：其他所有情况。
 
 查询命中时，Brave Search 运行查询（`web.search.results` 个结果，默认 5），编号的结果通过 `classifier.text` 经
 `search-summary.md`（`{{query}}`、`{{maxChars}}` = `web.search.summaryChars`，默认 900）浓缩，答案渲染为

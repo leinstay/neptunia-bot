@@ -1,4 +1,4 @@
-# Media and perception
+# Media
 
 What the persona can see, hear and read, and the helpers that make it happen.
 
@@ -16,9 +16,9 @@ Settings: `context.vision.*` for direct vision, `media.*` for the describer. See
 
 ## Video
 
-`features.videoDescriptions` (off by default; turn it on in `config.local.json`; needs `mediaDescriptions` too) adds the `classifier.video` model, which watches short clips: Discord video attachments and links to known video sites (YouTube, TikTok, VK, X, Reddit, Twitch). The model must accept both video and audio input through OpenRouter.
+`features.videoDescriptions` is off by default; turn it on in `config.local.json`, with `mediaDescriptions` on as well. It adds the `classifier.video` model, which watches short clips: Discord video attachments and links to known video sites (YouTube, TikTok, VK, X, Reddit, Twitch). The model must accept both video and audio input through OpenRouter.
 
-### Clips and caps
+### Caps
 
 Attachments and downloaded site videos are capped at `media.video.maxSeconds` (default 60 s) and `media.video.maxBytes`. YouTube links up to `directUrlMaxSeconds` (default 180 s) are passed as a URL to the provider (Google AI Studio). At most `maxPerTurn` new videos per turn (every attempt counts, failed or not) and `maxPerDay` per day. Results are cached alongside picture descriptions; a repost costs nothing.
 
@@ -26,13 +26,13 @@ Attachments and downloaded site videos are capped at `media.video.maxSeconds` (d
 
 Everything beyond attachments within the caps is downloaded with `yt-dlp` and trimmed with `ffmpeg`, both optional system binaries. Without them, attachments within the caps still work (sent as-is). Longer attachments and all site links fall back to a still frame. For YouTube, when `yt-dlp` cannot probe the duration, an optional `YOUTUBE_API_KEY` in `.env` (free, from the Google Cloud console's YouTube Data API v3) or a watch-page scrape provides it. `/nep ping classifier.video` reports the API key status.
 
-### Re-watch on a question
+### Re-watch
 
 When someone addresses the persona with a question about a video it has already watched, a classifier (`prompts/rewatch.md`, on the `classifier.text` role) decides whether a second look is needed. If so, the video model watches the clip again with `prompts/rewatch-answer.md` and the answer appears in the transcript alongside the original summary. The same classifier can retry a video that failed to load when the person asks about it again. At most one re-watch or retry per turn; answers are cached for one hour. Switch `features.videoRewatch` (default on).
 
 The video prompt is `prompts/describe-video.md`. Settings live under `media.video`. See [Configuration](configuration.md#mediavideo) for every key and a model comparison table.
 
-## Links: reading a page
+## Links
 
 `features.webLookup` (off by default; unlike other features, a missing key counts as off) lets the persona open links posted in the chat and read them.
 
@@ -52,7 +52,7 @@ At most one search per turn; both the classifier and the condenser count against
 
 Settings live under `web`. See [Configuration](configuration.md#web) for every key. The contract between the prompt files and the code is in [Prompt contract](prompt-contract.md).
 
-## Voice, audio and other blind spots
+## Blind spots
 
 Voice messages show only duration. Audio files show a name and duration. The persona cannot hear either. How it handles a blind spot is the character card's call.
 
@@ -60,6 +60,6 @@ Voice messages show only duration. Audio files show a name and duration. The per
 
 Each turn is one LLM request; a memory update adds a second. Video descriptions add one request per watched clip to the `classifier.video` model (`media.video.maxPerDay` caps the daily count); `yt-dlp` and `ffmpeg` run locally and cost nothing beyond bandwidth. Link reads and searches add requests to the `classifier.text` model, capped by `web.maxPerDay` (shared) and `llm.maxRequestsPerDay` (global). Search additionally needs a Brave Search key; the free tier handles a low-traffic server.
 
-## External requests and privacy
+## Privacy
 
 With `features.webLookup` on, the bot makes outbound HTTP requests to read pages and to the Brave Search API. Pages are fetched directly from the host; private addresses (loopback, link-local, private ranges) are refused. Page content is sent to the `classifier.text` model through the LLM endpoint for condensation; neither the page text nor the search query is logged. `data/` holds the cached excerpts and search results on your machine, gitignored, sent to the LLM as context only.

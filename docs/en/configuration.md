@@ -6,7 +6,7 @@ Every key in `config.json` with its default, grouped by section.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `dryRun` | `false` | Full pipeline, never sends (see [Dry run](../../README.md#dry-run)) |
+| `dryRun` | `false` | Full pipeline, never sends. See [Dry run](../../README.md#dry-run) |
 | `mentions` | `true` | React to @mentions |
 | `replies` | `true` | React to replies |
 | `nameTriggers` | `true` | React to name mentions in messages |
@@ -22,7 +22,7 @@ Every key in `config.json` with its default, grouped by section.
 | `mediaDescriptions` | `true` | One-line descriptions for pictures, GIFs, video frames and link thumbnails |
 | `videoDescriptions` | `false` | Watch short video clips through a video-capable model; needs `mediaDescriptions` on as well. Turn on in `config.local.json`; still needs a video-capable model and, for site links, `yt-dlp`/`ffmpeg` |
 | `videoRewatch` | `true` | When addressed, re-watch a video to answer a question about it; needs `videoDescriptions` on |
-| `webLookup` | `false` | Read links posted in chat and search the web when asked a factual question. Unlike other features, a missing key counts as OFF. Needs `BRAVE_SEARCH_API_KEY` in `.env` for search; without it only link reading works. See [Media: Links and search](media.md#links-reading-a-page) |
+| `webLookup` | `false` | Read links posted in chat and search the web when asked a factual question. Unlike other features, a missing key counts as OFF. Needs `BRAVE_SEARCH_API_KEY` in `.env` for search; without it only link reading works. See [Media: Links and search](media.md#links) |
 | `followUp` | `true` | Classify untagged messages after the persona answers to continue a conversation |
 | `typingSimulation` | `true` | Simulate typing speed |
 | `adminCommands` | `true` | Owner slash commands; `false` unregisters them |
@@ -36,7 +36,7 @@ Every key in `config.json` with its default, grouped by section.
 | `commandName` | `"nep"` | Slash command name (lowercase `a-z 0-9 _ -`, up to 32 chars; re-registered on change) |
 | `nameTriggers` | `[]` | Extra trigger strings besides @mention |
 | `guildId` | `""` | Server to lock to; auto-detected if in exactly one |
-| `dryRunChannelId` | `""` | Channel for dry-run mirror (see [Dry run](../../README.md#dry-run)) |
+| `dryRunChannelId` | `""` | Channel for the dry-run mirror. See [Dry run](../../README.md#dry-run) |
 | `channels.allow` | `[]` | Allowed channels (empty = all visible) |
 | `channels.deny` | `[]` | Ignored channels |
 | `access` | `{}` | Who besides owners may run which commands (managed by `/nep access`) |
@@ -135,7 +135,7 @@ Settings for the video describer (`features.videoDescriptions`). Video vision ne
 | `sites` | `["youtube.com", "youtu.be", "tiktok.com", "vk.com", "vkvideo.ru", "x.com", "twitter.com", "reddit.com", "twitch.tv"]` | Hostnames whose links are treated as video |
 | `directUrlSites` | `["youtube.com", "youtu.be"]` | Sites whose public URL can be passed directly to the provider (the provider fetches the video itself) |
 | `directUrlUnknownDuration` | `false` | Send a direct-URL-site link to the provider even when no probe could determine the duration; the token estimate uses `maxSeconds`. See the duration chain below |
-| `canaryUrl` | `"https://www.youtube.com/watch?v=jNQXAC9IVRw"` | A fixed YouTube video probed at startup and by `/nep ping video` to test the YouTube API key and duration sources |
+| `canaryUrl` | `"https://www.youtube.com/watch?v=jNQXAC9IVRw"` | A fixed YouTube video probed at startup and by `/nep ping classifier.video` to test the YouTube API key and duration sources |
 | `ytdlpPath` | `"yt-dlp"` | Path to the `yt-dlp` binary; needed for site video links and for probing duration |
 | `ffmpegPath` | `"ffmpeg"` | Path to `ffmpeg`; needed for trimming and downscaling long or large attachments |
 | `errorRetryMinutes` | `60` | Minutes before an error-cached video is retried on its own; a forced retry from the re-watch classifier ignores this |
@@ -145,7 +145,7 @@ Settings for the video describer (`features.videoDescriptions`). Video vision ne
 
 Both `yt-dlp` and `ffmpeg` are optional system binaries. Without them, attachments within the caps still work (sent as-is). Longer attachments and all site links fall back to the still frame or preview picture, and the persona is told the reason. Every video request counts against `llm.maxRequestsPerDay` and the video token cap (`maxRequestTokens`).
 
-For YouTube links, the duration is learned through a chain: yt-dlp first, then the YouTube Data API (when `YOUTUBE_API_KEY` is set in `.env`), then a scrape of the watch page. When every probe fails and `directUrlUnknownDuration` is off (the default), the link is reported as "could not load." With the switch on, the URL is sent to the provider anyway, billed as `maxSeconds` in the token estimate. The Data API key is free: enable YouTube Data API v3 in the Google Cloud console and create a key; the free quota is 10,000 units/day and one duration lookup costs 1 unit. `/nep ping video` probes `canaryUrl` and reports the API key status (e.g. `youtube: API key — ok`). A cached length-limit result records the video's duration and is retried when the cap is raised.
+For YouTube links, the duration is learned through a chain: yt-dlp first, then the YouTube Data API (when `YOUTUBE_API_KEY` is set in `.env`), then a scrape of the watch page. When every probe fails and `directUrlUnknownDuration` is off (the default), the link is reported as "could not load." With the switch on, the URL is sent to the provider anyway, billed as `maxSeconds` in the token estimate. The Data API key is free: enable YouTube Data API v3 in the Google Cloud console and create a key; the free quota is 10,000 units/day and one duration lookup costs 1 unit. `/nep ping classifier.video` probes `canaryUrl` and reports the API key status (e.g. `youtube: API key — ok`). A cached length-limit result records the video's duration and is retried when the cap is raised.
 
 ### `media.video.rewatch`
 
@@ -330,31 +330,31 @@ Settings for the web lookup (`features.webLookup`). Both link reading and search
 | `rateLimitWaitMinutes` | `10` | Minutes to wait on a rate limit |
 | `rateLimitMaxWaits` | `36` | Consecutive waits before the run aborts |
 
-## Choosing models
+## Models
 
 The engine uses five model roles. Each is set independently, so the voice can use a premium model while the helpers stay cheap.
 
-### `llm.model` — the persona's voice (`talk`)
+### Voice (`llm.model`)
 
-The most capable model the budget allows. Roleplay quality, in-character consistency and natural conversation all depend on it. A smaller model breaks character, forgets context cues and sounds flat.
+Role `talk`. The most capable model the budget allows. Roleplay quality, in-character consistency and natural conversation all depend on it. A smaller model breaks character, forgets context cues and sounds flat.
 
-Default: `anthropic/claude-opus-4.6`. A cheaper option: `anthropic/claude-sonnet-4.5`.
+Default: `anthropic/claude-opus-4.6`. A cheaper option: `anthropic/claude-sonnet-4.6`.
 
-### `memory.model` — the analyzer (`analyzer`)
+### Analyzer (`memory.model`)
 
-Reasons over long transcripts and returns strict JSON. Needs the same tier of intelligence as the voice. `null` (default) uses the persona's model. The same examples apply.
+Role `analyzer`. Reasons over long transcripts and returns strict JSON. Needs the same tier of intelligence as the voice. `null` (default) uses the persona's model. The same examples apply.
 
-### `classifier.text` — text classifiers (`classifier.text`)
+### Text classifiers (`classifier.text`)
 
 The cheapest text model that can answer "yes" or "no" reliably. Runs the address classifier, the re-watch classifier, the search classifier, and condenses link reads and search results. Default: `anthropic/claude-sonnet-4.6`.
 
-### `classifier.media` — pictures (`classifier.media`)
+### Pictures (`classifier.media`)
 
 Any cheap vision model. Writes one-line descriptions, so reasoning power barely matters.
 
 Default: `anthropic/claude-haiku-4.5`. Cheapest alternative: `google/gemini-2.5-flash-lite`.
 
-### `classifier.video` — video with sound (`classifier.video`)
+### Video (`classifier.video`)
 
 Only models that accept BOTH video and audio input through OpenRouter work here. Models that take frames but no audio (Qwen VL, GLM, Seed, Gemma) do not hear speech and miss most of the point.
 

@@ -1,4 +1,4 @@
-# Контракт промптов и кода
+# Контракт промптов
 
 Где файлы промптов встречаются с кодом (`src/behavior/prompt.js`, `src/llm/parse.js`, `src/discord/format.js`,
 `src/memory/update.js`, `src/memory/channels.js`, `src/memory/warmup.js`). Меняйте одну сторону только вместе с
@@ -50,7 +50,9 @@
 `{{maxEpisodes}}` определяет общее количество хранимых эпизодов на человека. Оба заполняются из конфигурации, но не
 используются дефолтными промптами; пользовательский `memory.md` может на них ссылаться.
 
-## Блоки пользовательского сообщения (пустые опускаются, в этом порядке)
+## Блоки
+
+Блоки пользовательского сообщения. Пустые опускаются; порядок ниже соответствует порядку в запросе.
 
 | Блок | Содержимое |
 |---|---|
@@ -86,9 +88,9 @@
 Результаты просмотра видео кэшируются по вложению или ссылке в `data/guilds/<id>/media.json` под ключом
 `video:<itemId>` (id вложения или стабильный хэш URL ссылки). Записи кэша:
 
-- Просмотрено: `{ text, ts, watched: true }` — постоянная, текст описания.
-- Непопадание по лимиту (длина или размер): `{ miss: true, ts, reason: "length"|"size" }` — постоянная, файл не изменится.
-- Ошибка: `{ miss: true, ts, reason: "error" }` — повторная попытка через `media.video.errorRetryMinutes` (по умолчанию 60) минут или немедленно при принудительной попытке от классификатора повторного просмотра.
+- Просмотрено: `{ text, ts, watched: true }`: постоянная, текст описания.
+- Непопадание по лимиту (длина или размер): `{ miss: true, ts, reason: "length"|"size" }`: постоянная, файл не изменится.
+- Ошибка: `{ miss: true, ts, reason: "error" }`: повторная попытка через `media.video.errorRetryMinutes` (по умолчанию 60) минут или немедленно при принудительной попытке от классификатора повторного просмотра.
 - Дневной лимит: не кэшируется; возвращается как `{ state: "limit", reason: "daily" }` только для этого хода.
 
 Ответ повторного просмотра кэшируется под ключом `video:<itemId>:q:<hash>` (первые 16 шестнадцатеричных цифр SHA-1 от приведённого к нижнему регистру и схлопнутого по пробелам вопроса): `{ text, ts, answer: true }`. Истекает через час; код удаляет просроченные записи при чтении.
@@ -104,7 +106,9 @@
 строками `labels.transcript.gap` / `gapWithDate` / `date`; блок начинается с `labels.transcript.header`. Соседние
 каналы: те же строки без `#n`, под `# channel-name`.
 
-## Ключи `labels.json` (`{x}` заполняются кодом)
+## Метки
+
+Ключи `labels.json`; `{x}` заполняет код.
 
 ```
 locale                                   BCP-47 tag for dates
@@ -125,7 +129,7 @@ transcript.gif                           {name}
 transcript.gifDescribed                  {text}
 transcript.video                         {name} {duration}
 transcript.videoDescribed                {name} {duration} {text}: text describes ONE frame
-transcript.videoWatched                  {name} {duration} {text}: first-hand — the persona saw and heard the clip
+transcript.videoWatched                  {name} {duration} {text}: first-hand, the persona saw and heard the clip
 transcript.videoNotWatched               {name} {duration} {reason}: reason is the human phrase from videoReason.*
 transcript.videoNotWatchedFrame          {name} {duration} {reason} {text}: not watched but a still frame was described
 transcript.videoAnswered                {question} {text}: extra tag after a watched video tag; the persona re-watched the clip for this question
@@ -137,7 +141,7 @@ transcript.voice                         {duration}
 transcript.audio                         {name} {duration}
 transcript.link                          {site} {title}
 transcript.linkText                      {site} {title} {text}
-transcript.linkRead                      {text}: extra tag after a link tag; the page was fetched and condensed — first-hand
+transcript.linkRead                      {text}: extra tag after a link tag; the page was fetched and condensed, first-hand
 transcript.thumbnailDescribed            {text}: follows a link tag; describes the link's preview picture
 transcript.filePreview                   {name} {text}
 transcript.forwarded                     {text}
@@ -153,7 +157,7 @@ senses.stickerSee | stickerDescribed | stickerBlind
 senses.lottie
 senses.voice | links | files
 senses.linksWatch                        replaces links when features.videoDescriptions is on; adds that a linked video may come watched or not watched with the reason
-senses.linksRead                         shown after the links line when features.webLookup is on and web.links.enabled is not false; tells the persona that a link may come with a read excerpt — first-hand
+senses.linksRead                         shown after the links line when features.webLookup is on and web.links.enabled is not false; tells the persona that a link may come with a read excerpt, first-hand
 senses.search                            shown when features.webLookup is on, web.search.enabled is not false AND a Brave Search key is configured; tells the persona that a `<lookup>` block may appear with web results
 lookup.header                            {query}: heading of the `<lookup>` block
 lookup.sources                           {list}: site names, comma-separated by code
@@ -191,7 +195,9 @@ warmup.ownMark                           prefixed to a member's own lines in the
 warmup.contextMark                       prefixed to context lines in the profile.md transcript
 ```
 
-## Вывод модели: только эти теги
+## Вывод
+
+В выводе модели распознаются только эти теги:
 
 - `<think>…</think>` необязателен, первый, 1–4 строки скрытого планирования; незакрытый означает молчание.
 - `<msg>text</msg>` одно сообщение в чат, до 3 подряд; `reply="#87"` превращает его в ответ Discord.
@@ -201,9 +207,9 @@ warmup.contextMark                       prefixed to context lines in the profil
 
 `features.reactions: false` убирает `<react>`, `features.multiMessage: false` оставляет только первый `<msg>`; промптам об этом знать не обязательно.
 
-## Анализатор (`memory.md`)
+## Анализатор
 
-Один вызов обновляет всё, что персонаж помнит. Он оценивает людей **глазами персонажа**, поэтому получает
+Один вызов (`memory.md`) обновляет всё, что персонаж помнит. Он оценивает людей **глазами персонажа**, поэтому получает
 карточку персонажа. Жив ли канал, определяет НЕ он; это считает код. Прогрев пропускает старую историю
 через свои промпты (`profile.md`, `channel.md`, `server.md`), а не через анализатор.
 
@@ -240,13 +246,13 @@ warmup.contextMark                       prefixed to context lines in the profil
 - **Интересы хранятся атомарно**, не прозой: `topic` (≤ `{{interestTopicChars}}`, идентификатор, сравнивается
   без учёта регистра) и `note` (≤ `{{interestNoteChars}}`, что именно об этом; может быть пустым). Оба плейсхолдера
   заполняются из `memory.interestTopicChars` / `memory.interestNoteChars`, как и остальные лимиты. Хранятся на человека
-  до `memory.maxInterests`, каждый с весом, который растёт при повторном добавлении или обновлении; самые лёгкие
-  вытесняются первыми. На входе показаны сохранённые элементы, чтобы анализатор добавлял только новое, обновлял заметку
+  до `memory.maxInterestsStored`, каждый с весом, который растёт при повторном добавлении или обновлении; вытесняется
+  элемент с наименьшим рангом. На входе показаны сохранённые элементы, чтобы анализатор добавлял только новое, обновлял заметку
   только при новых сведениях и удалял только то, что человек явно забросил.
 - **Детали тоже хранятся атомарно**: `{ id, text, weight, firstSeen, lastSeen }`. На входе каждая сохранённая деталь
   показана с числовым `id`; `seen` и `remove` ссылаются на детали по этому id (код также принимает точный сохранённый
-  текст). `add` принимает `{ text, sure? }` (допускается и голая строка). Свыше `memory.maxDetails` вытесняются
-  сначала самые лёгкие, затем самые старые.
+  текст). `add` принимает `{ text, sure? }` (допускается и голая строка). Свыше `memory.maxDetailsStored` вытесняется
+  элемент с наименьшим рангом.
 - **Подтверждение (механизм «(?)»), общий для интересов и деталей.** `weight` считает отдельные СЛУЧАИ, когда нечто
   было замечено. Новый элемент начинает с веса 1 или 0, если анализатор пометил его `"sure": false` (неясно чьё,
   неясно серьёзно ли, или имя, которое анализатор не распознаёт). `seen` (ничего нового, но тема всплыла снова), `add`
@@ -282,7 +288,7 @@ warmup.contextMark                       prefixed to context lines in the profil
   КАК человек пишет (длина, ритм, словарь, привычки с эмодзи), а не что делает или о чём говорит. `relationship`:
   как персонаж и этот человек стоят друг к другу, без новостей и без отношений человека с другими людьми; записывается
   впервые, когда сохранённый текст пуст и батч показывает их реальное взаимодействие (или affinity/episodes уже есть),
-  далее — только при необходимости изменения. Каждое ≤ `memory.fieldChars`; отсутствующее поле оставляет сохранённый
+  далее только при необходимости изменения. Каждое ≤ `memory.fieldChars`; отсутствующее поле оставляет сохранённый
   текст нетронутым. `character` и `style` пишутся ТОЛЬКО промптом `profile.md` (прогрев и обновление портрета), потоковый
   анализатор их никогда не редактирует напрямую. Анализатор возвращает `portrait` (однострочная подсказка о том, что
   упускает сохранённый текст), когда батч того требует, и код ставит обновление в очередь.
@@ -351,7 +357,7 @@ warmup.contextMark                       prefixed to context lines in the profil
   self ≤ `memory.maxSelfFacts`. Заметки на языке чата. Только наблюдаемые факты; ничего чувствительного (адреса, телефоны,
   документы, здоровье, финансы, полные настоящие имена).
 
-## Память сервера (карта каналов)
+## Карта каналов
 
 Блок `<server>` собирается из сохранённых заметок каналов и фактов, которые ведёт код, и фильтруется до каналов, важных
 для этого хода. Текущий канал показывается первым, отмечен `labels.server.currentMark`; затем только те соседние каналы,
@@ -381,7 +387,7 @@ warmup.contextMark                       prefixed to context lines in the profil
 Когда у текущего канала ещё нет сохранённой заметки (анализатор его не обрабатывал), запись-заглушка синтезируется из
 фактов Discord по сообщениям в транскрипте, чтобы персонаж всё же знал, где находится.
 
-## Прогрев (`profile.md`, `channel.md`, `server.md`): как начинается память
+## Прогрев
 
 Каждый запрос прогрева обрабатывает одну единицу работы (один канал, одного человека или сервер), чтобы атрибуция
 оставалась чистой. `channel.md` создаёт заметки канала (назначение, темы, тон). `profile.md` создаёт характер, стиль,
@@ -407,27 +413,27 @@ warmup.contextMark                       prefixed to context lines in the profil
 контекста начинаются с `labels.warmup.contextMark`. Псевдонимы берутся из строк ДРУГИХ людей (как они обращаются к
 участнику), поэтому правило атрибуции по собственным строкам к ним не применяется.
 
-## Классификатор обращений (`address.md`): адресовано ли сообщение без обращения персонажу?
+## Классификатор обращений
 
 После того как персонаж ответил кому-то, в этом канале открывается окно разговора (`mention.followUpMinutes`, продлевается
 каждым следующим ответом). Сообщение внутри окна, не содержащее триггера (ни упоминания, ни ответа персонажу, ни имени), не
 получает ответ вслепую: код отправляет последние `mention.followUpContext` (по умолчанию 15) строк канала, собственные
 строки персонажа отмечены `labels.self`, плюс новое сообщение, отмеченное как `<candidate>`, в `address.md` на роли модели
-`classifier.text` (`classifier.text`, по умолчанию `anthropic/claude-sonnet-4.6`). Выход: ОДНА строка: `yes`, когда кандидат адресован
+`classifier.text` (по умолчанию `anthropic/claude-sonnet-4.6`). Выход: ОДНА строка: `yes`, когда кандидат адресован
 персонажу или продолжает обмен с ним, `no`, когда люди говорят между собой или с кем-то другим (ответ другому участнику
 или упоминание другого участника всегда `no` до обращения к модели). `yes` запускает обычный ход ответа (модель всё ещё
 может ответить `<skip/>`); три `no` подряд (`mention.followUpNoStreak`, по умолчанию 3) закрывают окно. Переключатель
 `features.followUp` (по умолчанию включён). Логируются только счётчики и вердикты.
 Состояние окна переживает перезапуск: активные окна сохраняются в `data/state.json` под ключом `followUpWindows` и восстанавливаются при запуске, истёкшие удаляются.
 
-## Классификатор повторного просмотра (`rewatch.md`): нужен ли кому-то второй взгляд на видео?
+## Классификатор пересмотра
 
-Когда персонажу обращаются (ход ответа) и в последних `media.video.rewatch.recentMessages` (по умолчанию 60)
+Когда к персонажу обращаются (ход ответа) и в последних `media.video.rewatch.recentMessages` (по умолчанию 60)
 сообщениях канала есть видео, классификатор определяет, спрашивает ли сообщение об одном из этих видео или просит
-повторить загрузку незагрузившегося. Кандидаты — просмотренные видео и видео с ошибкой (запрошенная повторная загрузка использует собственный слот,
+повторить загрузку незагрузившегося. Кандидаты: просмотренные видео и видео с ошибкой (запрошенная повторная загрузка использует собственный слот,
 независимый от попыток `media.video.maxPerTurn` хода). Классификатору предлагается не более
 `media.video.rewatch.maxCandidates` (по умолчанию 6) видео, от новейшего к старейшему. Код отправляет `rewatch.md`
-как системный промпт на роли модели `classifier.text` (`classifier.text`, по умолчанию `anthropic/claude-sonnet-4.6`) с
+как системный промпт на роли модели `classifier.text` (по умолчанию `anthropic/claude-sonnet-4.6`) с
 пользовательским сообщением, содержащим три блока: короткий `<transcript>` из последних
 сообщений канала, собственные строки персонажа отмечены `labels.self` (чтобы классификатор видел, на что отвечает
 кандидат), затем список видео и кандидат:
@@ -450,9 +456,9 @@ warmup.contextMark                       prefixed to context lines in the profil
 Названия и описания схлопнуты по пробелам в одну строку. Текст триггера обрезан до `context.maxMessageChars`.
 Выход: ОДНА строка:
 
-- `<number> | <question>` — сообщение спрашивает о просмотренном видео и требует деталь, не покрытую описанием. Номер копируется из списка.
-- `<number> | retry` — сообщение о незагрузившемся видео и просит попробовать снова или спрашивает о его содержимом. Номер копируется из списка.
-- `none` — второй просмотр или повтор загрузки не нужны.
+- `<number> | <question>`: сообщение спрашивает о просмотренном видео и требует деталь, не покрытую описанием. Номер копируется из списка.
+- `<number> | retry`: сообщение о незагрузившемся видео и просит попробовать снова или спрашивает о его содержимом. Номер копируется из списка.
+- `none`: второй просмотр или повтор загрузки не нужны.
 
 При попадании с вопросом видеомодель смотрит клип ещё раз с `rewatch-answer.md` (`{{question}}` и `{{maxChars}}` =
 `rewatch.answerChars`, по умолчанию 1200), и ответ добавляется в транскрипт как `transcript.videoAnswered`
@@ -470,10 +476,10 @@ warmup.contextMark                       prefixed to context lines in the profil
 по каждому вопросу (см. раздел кэша видео выше). Переключатель `features.videoRewatch` (отсутствие = включён,
 требуется `videoDescriptions`).
 
-## Классификатор поиска (`lookup.md`): нужны ли факты из интернета для ответа на вопрос?
+## Классификатор поиска
 
-Когда персонажу обращаются (ход ответа) и выполнены все условия — `features.webLookup` включён, `web.search.enabled`
-не false, промпт `lookup.md` существует, `web.search.maxPerTurn` не менее 1 и `BRAVE_SEARCH_API_KEY` настроен —
+Когда к персонажу обращаются (ход ответа) и выполнены все условия (`features.webLookup` включён, `web.search.enabled`
+не false, промпт `lookup.md` существует, `web.search.maxPerTurn` не менее 1 и `BRAVE_SEARCH_API_KEY` настроен),
 классификатор определяет, спрашивает ли триггерное сообщение о чём-то, что требует поиска в интернете. Он использует
 роль модели `classifier.text`. Код отправляет `lookup.md` как системный промпт с пользовательским сообщением,
 содержащим короткий `<transcript>` (тот же, что у классификатора повторного просмотра, собственные строки персонажа
@@ -491,9 +497,9 @@ warmup.contextMark                       prefixed to context lines in the profil
 Транскрипт содержит описания, описания видео и прочитанные ссылки, если доступны. Текст триггера обрезан до
 `context.maxMessageChars`. Выход: ОДНА строка:
 
-- Поисковый запрос — обычные слова, без кавычек, без операторов, не более 12 слов — когда сообщение требует фактов
+- Поисковый запрос (обычные слова, без кавычек, без операторов, не более 12 слов), когда сообщение требует фактов
   извне чата.
-- `none` — во всех остальных случаях.
+- `none` во всех остальных случаях.
 
 При совпадении Brave Search выполняет запрос (`web.search.results` результатов, по умолчанию 5), нумерованные
 результаты сжимаются ролью `classifier.text` через `search-summary.md` (`{{query}}`, `{{maxChars}}` =

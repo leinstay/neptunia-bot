@@ -79,7 +79,7 @@ First run on a new server: enable `features.dryRun`, watch the mirror or `journa
 
 ## Commands
 
-One Discord slash command, `/nep` (the name comes from `bot.commandName`). They are registered as guild commands on start, for the served server only. Every answer is ephemeral; only the caller sees it, in whatever channel it was typed. See [`docs/en/owner-commands.md`](docs/en/owner-commands.md) for every subcommand and the access grants.
+One Discord slash command, `/nep` (the name comes from `bot.commandName`). It is registered as a guild command on start, for the served server only. Every answer is ephemeral; only the caller sees it, in whatever channel it was typed. See [`docs/en/owner-commands.md`](docs/en/owner-commands.md) for every subcommand and the access grants.
 
 ## Messages and memory
 
@@ -93,7 +93,7 @@ See [`docs/en/messages-and-memory.md`](docs/en/messages-and-memory.md) for the p
 
 The persona can see attached pictures, watch short video clips, read pages behind links and search the web for facts it does not have. Each capability is a separate feature switch, off or capped by default, with its own daily limit. A `<senses>` block in each request tells the persona what is on; it never claims to have perceived anything beyond it. See [`docs/en/media.md`](docs/en/media.md) for pictures, video vision, link reading, search, tools, costs and privacy.
 
-## Cost and privacy
+## Costs
 
 Each turn is one LLM request; a memory update adds a second. Cost depends on the model and endpoint; `llm.model` and `llm.baseUrl` accept any compatible values. The daily cap (`llm.maxRequestsPerDay`) prevents runaway spending. Video descriptions add one request per watched clip to a separate, cheaper model (`media.video.maxPerDay` caps the daily count); `yt-dlp` and `ffmpeg` run locally and cost nothing beyond bandwidth. Link reads and searches (`features.webLookup`, off by default) add requests to the text classifier model, capped by `web.maxPerDay`; search additionally needs a Brave Search API key (free tier: 2,000 queries/month). With `features.webLookup` on, the bot makes outbound HTTP requests to fetch pages and to the Brave Search API; private addresses are refused.
 
@@ -101,7 +101,7 @@ Each turn is one LLM request; a memory update adds a second. Cost depends on the
 
 Tell your server members. They should know their messages are processed by an LLM and that the bot keeps notes.
 
-## Running as a service
+## Service
 
 An example systemd unit is in `deploy/neptunia-bot.service`. Adjust `WorkingDirectory` and `User`, then install:
 
@@ -133,7 +133,7 @@ npm test
 
 Runs with `node --test`. No network or Discord connection needed. The same command runs in CI on every pull request.
 
-## Project structure
+## Structure
 
 ```
 config.json                defaults for every setting, hot-reloaded
@@ -146,6 +146,7 @@ prompts/
   reply.md                 task: someone called you
   interject.md             task: jump into a conversation
   initiate.md              task: start a topic
+  forced.md                appended on a forced turn (/nep interject, /nep initiate)
   memory.md                prompt for the memory analyzer
   describe.md              prompt for the media describer
   describe-video.md        prompt for the video describer
@@ -162,7 +163,7 @@ prompts/
 prompts.local/             your personality (gitignored)
 docs/
   en/
-    prompt-contract.md   the contract between prompt files and code
+    prompt-contract.md     the contract between prompt files and code
     configuration.md       full reference for every config key
     owner-commands.md      every subcommand and the access grants
     warmup.md              the warmup: stages, progress, rails, commands
@@ -206,6 +207,7 @@ src/
   discord/
     guild.js               single-guild resolution
     commands.js            slash commands, registration, interaction adapter
+    access.js              per-command access grants for non-owners
     events.js              message pipeline
     collect.js             channel history, neighbours, permissions
     format.js              transcript lines, time gaps, tempo
@@ -238,6 +240,7 @@ src/
     ranking.js             shared ranking for interests and details: frequency, recency, decay
     lore.js                lorebook logic: key matching, entry selection
     describe.js            media describer: one picture in, one cached caption out
+    youtube-check.js       YouTube duration probes and the API key check
     warmup.js              sample-based memory warmup
 tests/                     node --test, pure-function unit tests
 deploy/

@@ -6,7 +6,7 @@
 
 | 键 | 默认值 | 说明 |
 |---|---|---|
-| `dryRun` | `false` | 完整流程运行但不发送（见[试运行](README.md#试运行)） |
+| `dryRun` | `false` | 完整流程运行但不发送。见[试运行](README.md#试运行) |
 | `mentions` | `true` | 响应 @提及 |
 | `replies` | `true` | 响应回复 |
 | `nameTriggers` | `true` | 响应消息中的名字提及 |
@@ -22,7 +22,7 @@
 | `mediaDescriptions` | `true` | 为图片、GIF、视频帧和链接缩略图生成单行描述 |
 | `videoDescriptions` | `false` | 通过支持视频的模型观看短视频片段；需同时开启 `mediaDescriptions`。在 `config.local.json` 中开启；还需要支持视频的模型，以及站点链接需要 `yt-dlp`/`ffmpeg` |
 | `videoRewatch` | `true` | 被呼叫时重看视频以回答相关问题；需要 `videoDescriptions` |
-| `webLookup` | `false` | 阅读聊天中发布的链接并在被问到事实性问题时搜索网络。与其他功能不同，缺失的键视为关闭。搜索需要 `.env` 中的 `BRAVE_SEARCH_API_KEY`；没有密钥时只有链接阅读可用。参见[媒体：链接与搜索](media.md#链接阅读页面) |
+| `webLookup` | `false` | 阅读聊天中发布的链接并在被问到事实性问题时搜索网络。与其他功能不同，缺失的键视为关闭。搜索需要 `.env` 中的 `BRAVE_SEARCH_API_KEY`；没有密钥时只有链接阅读可用。参见[媒体：链接与搜索](media.md#链接) |
 | `followUp` | `true` | 角色回复后对未标记消息进行分类以延续对话 |
 | `typingSimulation` | `true` | 模拟输入速度 |
 | `adminCommands` | `true` | 所有者斜杠命令；设为 `false` 时注销命令 |
@@ -36,7 +36,7 @@
 | `commandName` | `"nep"` | 斜杠命令名称（小写 `a-z 0-9 _ -`，最多 32 字符；更改后重新注册） |
 | `nameTriggers` | `[]` | 除 @提及外的额外触发字符串 |
 | `guildId` | `""` | 锁定的服务器；若只在一个服务器中则自动检测 |
-| `dryRunChannelId` | `""` | 试运行镜像频道（见[试运行](README.md#试运行)） |
+| `dryRunChannelId` | `""` | 试运行镜像频道。见[试运行](README.md#试运行) |
 | `channels.allow` | `[]` | 允许的频道（空 = 所有可见频道） |
 | `channels.deny` | `[]` | 忽略的频道 |
 | `access` | `{}` | 除所有者外谁可运行哪些命令（由 `/nep access` 管理） |
@@ -135,7 +135,7 @@
 | `sites` | `["youtube.com", "youtu.be", "tiktok.com", "vk.com", "vkvideo.ru", "x.com", "twitter.com", "reddit.com", "twitch.tv"]` | 其链接被视为视频的主机名 |
 | `directUrlSites` | `["youtube.com", "youtu.be"]` | 可将公开 URL 直接传递给提供商（由提供商自行获取视频）的站点 |
 | `directUrlUnknownDuration` | `false` | 即使所有探测均未获取到时长，仍将 directUrlSites 站点的链接发送给提供商；token 估算使用 `maxSeconds`。参见下方的时长探测链 |
-| `canaryUrl` | `"https://www.youtube.com/watch?v=jNQXAC9IVRw"` | 启动时和 `/nep ping video` 探测的固定 YouTube 视频，用于测试 YouTube API key 和时长来源 |
+| `canaryUrl` | `"https://www.youtube.com/watch?v=jNQXAC9IVRw"` | 启动时和 `/nep ping classifier.video` 探测的固定 YouTube 视频，用于测试 YouTube API key 和时长来源 |
 | `ytdlpPath` | `"yt-dlp"` | `yt-dlp` 二进制文件的路径；站点视频链接和探测时长需要此工具 |
 | `ffmpegPath` | `"ffmpeg"` | `ffmpeg` 的路径；裁剪和缩小过长或过大的附件需要此工具 |
 | `errorRetryMinutes` | `60` | 错误缓存视频自动重试前的等待分钟数；重看分类器的强制重试忽略此值 |
@@ -145,7 +145,7 @@
 
 `yt-dlp` 和 `ffmpeg` 均为可选的系统二进制文件。没有它们时，在限制内的附件仍然可用（直接发送）。更长的附件和所有站点链接会回退到静帧或预览图，角色会被告知原因。每个视频请求都计入 `llm.maxRequestsPerDay` 和视频 token 上限（`maxRequestTokens`）。
 
-YouTube 链接的时长通过以下链式探测获取：首先尝试 yt-dlp，然后尝试 YouTube Data API（需在 `.env` 中设置 `YOUTUBE_API_KEY`），最后尝试抓取观看页面。如果所有探测均失败且 `directUrlUnknownDuration` 处于关闭状态（默认），链接将报告为"无法加载"。开启该开关后，URL 仍会发送给提供商，token 估算按 `maxSeconds` 计费。Data API 密钥免费获取：在 Google Cloud 控制台中启用 YouTube Data API v3 并创建密钥；免费配额为每天 10,000 个单位，一次时长查询消耗 1 个单位。`/nep ping video` 探测 `canaryUrl` 并报告 API key 状态（如 `youtube: API key — ok`）。缓存的长度限制结果会记录视频时长，当上限提高后会重新尝试。
+YouTube 链接的时长通过以下链式探测获取：首先尝试 yt-dlp，然后尝试 YouTube Data API（需在 `.env` 中设置 `YOUTUBE_API_KEY`），最后尝试抓取观看页面。如果所有探测均失败且 `directUrlUnknownDuration` 处于关闭状态（默认），链接将报告为"无法加载"。开启该开关后，URL 仍会发送给提供商，token 估算按 `maxSeconds` 计费。Data API 密钥免费获取：在 Google Cloud 控制台中启用 YouTube Data API v3 并创建密钥；免费配额为每天 10,000 个单位，一次时长查询消耗 1 个单位。`/nep ping classifier.video` 探测 `canaryUrl` 并报告 API key 状态（如 `youtube: API key — ok`）。缓存的长度限制结果会记录视频时长，当上限提高后会重新尝试。
 
 ### `media.video.rewatch`
 
@@ -330,31 +330,31 @@ YouTube 链接的时长通过以下链式探测获取：首先尝试 yt-dlp，�
 | `rateLimitWaitMinutes` | `10` | 遇到速率限制时等待的分钟数 |
 | `rateLimitMaxWaits` | `36` | 连续等待次数达到此值后运行中止 |
 
-## 选择模型
+## 模型
 
 引擎使用五个模型角色。每个独立设置，因此语音可以使用高端模型，而辅助工具保持低成本。
 
-### `llm.model` — 角色的声音（`talk`）
+### 声音（`llm.model`）
 
-预算允许范围内最强的模型。角色扮演质量、角色一致性和自然对话均依赖于此。较小的模型会破坏角色、忽略上下文线索且语气平淡。
+`talk` 角色。预算允许范围内最强的模型。角色扮演质量、角色一致性和自然对话均依赖于此。较小的模型会破坏角色、忽略上下文线索且语气平淡。
 
-默认：`anthropic/claude-opus-4.6`。更便宜的选择：`anthropic/claude-sonnet-4.5`。
+默认：`anthropic/claude-opus-4.6`。更便宜的选择：`anthropic/claude-sonnet-4.6`。
 
-### `memory.model` — 分析器（`analyzer`）
+### 分析器（`memory.model`）
 
-在长对话记录上进行推理并返回严格的 JSON。需要与语音相同级别的智能。`null`（默认）使用角色的模型。适用相同的示例。
+`analyzer` 角色。在长对话记录上进行推理并返回严格的 JSON。需要与语音相同级别的智能。`null`（默认）使用角色的模型。适用相同的示例。
 
-### `classifier.text` — 文本分类器（`classifier.text`）
+### 文本分类器（`classifier.text`）
 
 能可靠回答 "yes" 或 "no" 的最便宜的文本模型。运行地址分类器、重看分类器、搜索分类器，并浓缩链接阅读和搜索结果。默认：`anthropic/claude-sonnet-4.6`。
 
-### `classifier.media` — 图片（`classifier.media`）
+### 图片（`classifier.media`）
 
 任何低成本的视觉模型。只需写一行描述，推理能力几乎不重要。
 
 默认：`anthropic/claude-haiku-4.5`。最便宜的替代：`google/gemini-2.5-flash-lite`。
 
-### `classifier.video` — 带声音的视频（`classifier.video`）
+### 视频（`classifier.video`）
 
 只有通过 OpenRouter 同时接受视频和音频输入的模型才能在此工作。接受帧但不接受音频的模型（Qwen VL、GLM、Seed、Gemma）无法听到语音，会遗漏大部分要点。
 

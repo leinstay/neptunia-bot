@@ -18,8 +18,8 @@
 | `/nep rule add <text>` | Добавить правило в `prompts.local/rules.md` |
 | `/nep rule list` | Показать правила с нумерацией |
 | `/nep rule remove <number>` | Удалить правило по номеру |
-| `/nep model show` | Показать активные модели для каждой роли (`talk`, `analyzer`, `classifier.text`, `classifier.media`, `classifier.video`; `/nep ping classifier` пингует все три классификатора) |
-| `/nep model set <role> <id>` | Установить модель для роли (`talk`, `analyzer`, `classifier.text`, `classifier.media`, `classifier.video`; `/nep ping classifier` пингует все три классификатора) |
+| `/nep model show` | Показать активные модели для каждой роли (`talk`, `analyzer`, `classifier.text`, `classifier.media`, `classifier.video`) |
+| `/nep model set <role> <id>` | Установить модель для роли (`talk`, `analyzer`, `classifier.text`, `classifier.media`, `classifier.video`) |
 | `/nep memory show <user> [section] [limit] [order]` | Без секции: краткая сводка. Секции: `character`, `style`, `relationship`, `affinity`, `aliases`, `interests`, `details`, `episodes`, `raw` (сохранённый JSON). Секции-списки принимают `limit` 1..100 (по умолчанию 25) и `order`: `rank` (по умолчанию, с разделителем на границе видимой части) или `recent`. Сохранённые ссылки на участников заменяются на текущее имя (кроме `raw`) |
 | `/nep memory channel [channel]` | С указанным каналом: полная сохранённая заметка (назначение, темы, тон, количество сообщений, активность, самые активные авторы). Без канала: таблица всех каналов, которые знает персонаж, по дате последнего сообщения |
 | `/nep memory server` | Серверные заметки: как люди общаются, как начинаются разговоры, внутренние шутки, факты о себе, плюс количество профилей, каналов и записей лорбука |

@@ -93,7 +93,7 @@ npm start
 
 ペルソナは添付画像を見て、短い動画クリップを視聴し、リンク先のページを読み、知らない事実についてウェブ検索できます。各機能は個別のフィーチャースイッチで、デフォルトではオフまたは上限付きで、それぞれ独自の 1 日あたりの制限があります。各リクエストの `<senses>` ブロックがペルソナに何が有効かを伝え、ペルソナはそれ以上のものを知覚したと主張しません。画像、動画ビジョン、リンク読み取り、検索、ツール、コスト、プライバシーの詳細は[メディア](media.md)を参照してください。
 
-## コストとプライバシー
+## コスト
 
 各ターンは一つの LLM リクエストで、メモリ更新が二つ目を追加します。コストはモデルとエンドポイントに依存します。`llm.model` と `llm.baseUrl` は互換性のある任意の値を受け付けます。1 日の上限（`llm.maxRequestsPerDay`）が過剰な支出を防ぎます。動画説明文は視聴したクリップごとに別の安価なモデル（`media.video.maxPerDay` で 1 日の件数を制限）へ 1 リクエストを追加します。`yt-dlp` と `ffmpeg` はローカルで実行され、帯域幅以外のコストはかかりません。リンク読み取りと検索（`features.webLookup`、デフォルトオフ）はテキスト分類器モデルへのリクエストを追加し、`web.maxPerDay` で制限されます。検索にはさらに Brave Search API キー（無料枠: 2,000 クエリ/月）が必要です。`features.webLookup` が有効な場合、ボットはページ取得と Brave Search API への送信 HTTP リクエストを行います。プライベートアドレスは拒否されます。
 
@@ -101,7 +101,7 @@ npm start
 
 サーバーのメンバーに知らせてください。自分のメッセージが LLM で処理されること、ボットがノートを保持することを知っておくべきです。
 
-## サービスとして実行する
+## サービス
 
 `deploy/neptunia-bot.service` にサンプルの systemd ユニットがあります。`WorkingDirectory` と `User` を調整してからインストールします。
 
@@ -133,7 +133,7 @@ npm test
 
 `node --test` で実行されます。ネットワークや Discord 接続は不要です。同じコマンドがすべてのプルリクエストで CI によって実行されます。
 
-## プロジェクト構成
+## 構成
 
 ```
 config.json                すべての設定とデフォルト値、ホットリロード
@@ -146,6 +146,7 @@ prompts/
   reply.md                 タスク: 誰かに呼ばれた
   interject.md             タスク: 会話に割り込む
   initiate.md              タスク: 話題を切り出す
+  forced.md                強制ターン（/nep interject、/nep initiate）時に追加
   memory.md                メモリアナライザーのプロンプト
   describe.md              メディア説明モデルのプロンプト
   describe-video.md        動画説明モデルのプロンプト
@@ -162,7 +163,7 @@ prompts/
 prompts.local/             デプロイ先のパーソナリティ（gitignore 対象）
 docs/
   en/
-    prompt-contract.md   プロンプトファイルとコードの間のコントラクト
+    prompt-contract.md     プロンプトファイルとコードの間のコントラクト
     configuration.md       全設定キーのリファレンス
     owner-commands.md      全サブコマンドとアクセスグラント
     warmup.md              ウォームアップ: ステージ、進捗、制限、コマンド
@@ -206,6 +207,7 @@ src/
   discord/
     guild.js               単一ギルドの解決
     commands.js            スラッシュコマンド、登録、インタラクションアダプター
+    access.js              オーナー以外へのコマンド単位のアクセスグラント
     events.js              メッセージパイプライン
     collect.js             チャンネル履歴、隣接チャンネル、権限
     format.js              トランスクリプト行、タイムギャップ、テンポ
@@ -238,6 +240,7 @@ src/
     ranking.js             関心と詳細の共通ランキング: 頻度、新しさ、減衰
     lore.js                ロアブックのロジック: キーマッチ、エントリ選択
     describe.js            メディア説明モデル: 画像 1 枚を入力、キャッシュされた説明文 1 行を出力
+    youtube-check.js       YouTube の再生時間プローブと API キーの確認
     warmup.js              サンプルベースのメモリウォームアップ
 tests/                     node --test、純粋関数のユニットテスト
 deploy/

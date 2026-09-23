@@ -87,13 +87,13 @@ npm start
 
 一个独立的记忆分析器在累积了足够消息时运行。它构建每成员档案，包含兴趣、细节、别名、回忆和态度，以及服务器级的习惯、内部梗和事件与故事的世界书。档案以增量方式更新；已存储的事实不会被重新概括。角色还会学习人们对彼此的称呼，并通过名字或别名识别成员。
 
-详见 [`docs/zh/messages-and-memory.md`](messages-and-memory.md)：流程步骤、分析器、档案、回忆、世界书以及涉及记忆的所有者命令。
+详见 [`messages-and-memory.md`](messages-and-memory.md)：流程步骤、分析器、档案、回忆、世界书以及涉及记忆的所有者命令。
 
 ## 媒体
 
-角色可以看到附加图片、观看短视频片段、阅读链接后的页面以及搜索网络以获取它没有的事实。每种能力是一个独立的功能开关，默认关闭或有上限，各自有每日限制。每个请求中的 `<senses>` 块告知角色当前什么是开启的；它不会声称感知了超出此块描述的任何东西。详见 [`docs/zh/media.md`](media.md)：图片、视频视觉、链接阅读、搜索、工具、成本和隐私。
+角色可以看到附加图片、观看短视频片段、阅读链接后的页面以及搜索网络以获取它没有的事实。每种能力是一个独立的功能开关，默认关闭或有上限，各自有每日限制。每个请求中的 `<senses>` 块告知角色当前什么是开启的；它不会声称感知了超出此块描述的任何东西。详见 [`media.md`](media.md)：图片、视频视觉、链接阅读、搜索、工具、成本和隐私。
 
-## 成本与隐私
+## 成本
 
 每个回合是一次 LLM 请求；记忆更新再增加一次。成本取决于模型和端点；`llm.model` 和 `llm.baseUrl` 接受任何兼容的值。每日上限（`llm.maxRequestsPerDay`）防止开销失控。视频描述为每个观看的片段向独立的、更便宜的模型发送一次请求（`media.video.maxPerDay` 限制每日数量）；`yt-dlp` 和 `ffmpeg` 在本地运行，除带宽外不产生费用。链接阅读和搜索（`features.webLookup`，默认关闭）向文本分类器模型发送请求，受 `web.maxPerDay` 限制；搜索还需要 Brave Search API 密钥（免费层：每月 2,000 次查询）。启用 `features.webLookup` 后，机器人会发出出站 HTTP 请求以获取页面和访问 Brave Search API；私有地址会被拒绝。
 
@@ -101,7 +101,7 @@ npm start
 
 请告知服务器成员。他们应该知道自己的消息会被 LLM 处理，且机器人会保留笔记。
 
-## 作为服务运行
+## 服务
 
 示例 systemd 单元文件在 `deploy/neptunia-bot.service`。调整 `WorkingDirectory` 和 `User`，然后安装：
 
@@ -133,7 +133,7 @@ npm test
 
 使用 `node --test` 运行。无需网络或 Discord 连接。同一命令在每次 pull request 时在 CI 中运行。
 
-## 项目结构
+## 结构
 
 ```
 config.json                所有设置及其默认值，热重载
@@ -146,6 +146,7 @@ prompts/
   reply.md                 任务：有人呼叫了你
   interject.md             任务：插入对话
   initiate.md              任务：发起话题
+  forced.md                强制回合（/nep interject、/nep initiate）时追加
   memory.md                记忆分析器的提示
   describe.md              媒体描述器的提示
   describe-video.md        视频描述器的提示
@@ -162,7 +163,7 @@ prompts/
 prompts.local/             你的角色定义（已加入 gitignore）
 docs/
   en/
-    prompt-contract.md   提示文件与代码之间的契约
+    prompt-contract.md     提示文件与代码之间的契约
     configuration.md       所有配置键的完整参考
     owner-commands.md      所有子命令和访问授权
     warmup.md              预热：阶段、进度、限制、命令
@@ -206,6 +207,7 @@ src/
   discord/
     guild.js               单服务器解析
     commands.js            斜杠命令，注册，交互适配器
+    access.js              非所有者的按命令访问授权
     events.js              消息流水线
     collect.js             频道历史，相邻频道，权限
     format.js              对话记录行，时间间隔，节奏
@@ -238,6 +240,7 @@ src/
     ranking.js             兴趣和细节的共享排名：频率、近期程度、衰减
     lore.js                世界书逻辑：关键词匹配、条目选择
     describe.js            媒体描述器：一张图片进，一条缓存的描述出
+    youtube-check.js       YouTube 时长探测和 API 密钥检查
     warmup.js              基于样本的记忆预热
 tests/                     node --test，纯函数单元测试
 deploy/

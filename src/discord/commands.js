@@ -311,7 +311,7 @@ export function buildCommandTree(commandName) {
               options: [
                 { type: STRING, name: 'title', description: 'Entry title (its identity).', required: true },
                 { type: STRING, name: 'keys', description: 'Comma-separated keys/phrases people type.', required: true },
-                { type: STRING, name: 'text', description: 'The lore text, up to 400 chars.', required: true },
+                { type: STRING, name: 'text', description: 'The lore text, up to lore.textChars.', required: true },
                 { type: BOOLEAN, name: 'always', description: 'Always show this entry, regardless of a match.', required: false },
               ],
             },

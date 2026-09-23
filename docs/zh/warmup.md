@@ -4,7 +4,7 @@
 
 `/nep warmup run` 可随时启动或恢复完整运行；完整命令列表见[命令](owner-commands.md)。
 
-## 三个阶段
+## 阶段
 
 完整运行按固定顺序进行：频道、人物、服务器。
 
@@ -22,7 +22,7 @@
 
 一个请求包含所有频道笔记、每个已建档成员的单行摘要（名称、主要习惯、主要兴趣）以及主频道（`memory.mainChannelIds`；为空时所有频道均计入）的最新 `warmup.serverSampleMessages`（默认 600）行。输出存储为服务器级规律、对话开场白、内部梗和世界书条目。
 
-## 预热的范围
+## 范围
 
 预热写入：频道笔记（用途、话题、氛围）、成员档案（性格、风格、兴趣、细节、回忆、别名）、服务器习惯（规律、开场白、内部梗）和世界书。
 
@@ -30,11 +30,11 @@
 
 `character` 和 `style` 是自由文本字段，仅由档案提示（`profile.md`）撰写，包括预热期间和画像刷新期间。流分析器不会直接编辑它们。数据模型和输出格式请参阅[提示契约](prompt-contract.md)。
 
-## 进度与恢复
+## 进度
 
 每次请求后进度持久化到 `state.warmup`，重启后仍保留。因重启、速率限制或 `/nep warmup stop` 中断的运行，在再次调用 `/nep warmup run` 时从中断处恢复。`/nep warmup reset` 仅清除进度，不清除已存储的记忆。
 
-## 限制与速率限制处理
+## 限制
 
 运行的总 token 预算为 `warmup.maxTokens`（默认 6,000,000）。每个请求上限为 `warmup.maxRequestTokens`（默认 120,000 输入加输出）和 `warmup.maxOutputTokens`（默认 6,000 输出）。构建样本池的频道获取每个频道最多读取 `warmup.fetchLimitPerChannel`（默认 15,000）条消息。
 

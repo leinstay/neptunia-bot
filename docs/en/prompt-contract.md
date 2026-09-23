@@ -1,4 +1,4 @@
-# Prompt ↔ code contract
+# Prompt contract
 
 Where the prompt files and the code (`src/behavior/prompt.js`, `src/llm/parse.js`, `src/discord/format.js`,
 `src/memory/update.js`, `src/memory/channels.js`, `src/memory/warmup.js`) meet. Change one side only with the
@@ -50,7 +50,9 @@ The analyzer and the warmup's `profile.md` and `server.md` receive the character
 `{{maxEpisodes}}` is the total episodes kept per person. Both are filled from config but not used by the default
 prompts; a custom `memory.md` may reference them.
 
-## User message blocks (empty ones omitted, in this order)
+## Blocks
+
+The blocks of the user message. Empty ones are omitted; the order below is the order in the request.
 
 | Block | Content |
 |---|---|
@@ -87,9 +89,9 @@ wrapped in `forwarded`.
 Video results are cached per attachment or per link in `data/guilds/<id>/media.json` under the key
 `video:<itemId>` (the attachment id, or a stable hash of the link URL). Cache entries:
 
-- Watched: `{ text, ts, watched: true }` — permanent, the summary text.
-- Limit miss (length or size): `{ miss: true, ts, reason: "length"|"size" }` — permanent, the file will not change.
-- Error miss: `{ miss: true, ts, reason: "error" }` — retried after `media.video.errorRetryMinutes` (default 60) minutes, or at once on a forced retry from the re-watch classifier.
+- Watched: `{ text, ts, watched: true }`: permanent, the summary text.
+- Limit miss (length or size): `{ miss: true, ts, reason: "length"|"size" }`: permanent, the file will not change.
+- Error miss: `{ miss: true, ts, reason: "error" }`: retried after `media.video.errorRetryMinutes` (default 60) minutes, or at once on a forced retry from the re-watch classifier.
 - Daily limit: not cached; returned as `{ state: "limit", reason: "daily" }` for that turn only.
 
 A re-watch answer is cached under the key `video:<itemId>:q:<hash>` (the first 16 hex digits of SHA-1 of the lower-cased, whitespace-collapsed question): `{ text, ts, answer: true }`. Expires after one hour; code deletes expired entries on read.
@@ -105,7 +107,9 @@ Transcript line: `#87 [14:32] nick: text <replyTo> <media…> <sticker>`; own li
 lines `labels.transcript.gap` / `gapWithDate` / `date`; the block opens with `labels.transcript.header`. Neighbour
 channels: same lines without `#n`, under `# channel-name`.
 
-## `labels.json` keys (`{x}` filled by code)
+## Labels
+
+The keys of `labels.json`; `{x}` is filled by code.
 
 ```
 locale                                   BCP-47 tag for dates
@@ -126,7 +130,7 @@ transcript.gif                           {name}
 transcript.gifDescribed                  {text}
 transcript.video                         {name} {duration}
 transcript.videoDescribed                {name} {duration} {text}: text describes ONE frame
-transcript.videoWatched                  {name} {duration} {text}: first-hand — the persona saw and heard the clip
+transcript.videoWatched                  {name} {duration} {text}: first-hand, the persona saw and heard the clip
 transcript.videoNotWatched               {name} {duration} {reason}: reason is the human phrase from videoReason.*
 transcript.videoNotWatchedFrame          {name} {duration} {reason} {text}: not watched but a still frame was described
 transcript.videoAnswered                {question} {text}: extra tag after a watched video tag; the persona re-watched the clip for this question
@@ -138,7 +142,7 @@ transcript.voice                         {duration}
 transcript.audio                         {name} {duration}
 transcript.link                          {site} {title}
 transcript.linkText                      {site} {title} {text}
-transcript.linkRead                      {text}: extra tag after a link tag; the page was fetched and condensed — first-hand
+transcript.linkRead                      {text}: extra tag after a link tag; the page was fetched and condensed, first-hand
 transcript.thumbnailDescribed            {text}: follows a link tag; describes the link's preview picture
 transcript.filePreview                   {name} {text}
 transcript.forwarded                     {text}
@@ -154,7 +158,7 @@ senses.stickerSee | stickerDescribed | stickerBlind
 senses.lottie
 senses.voice | links | files
 senses.linksWatch                        replaces links when features.videoDescriptions is on; adds that a linked video may come watched or not watched with the reason
-senses.linksRead                         shown after the links line when features.webLookup is on and web.links.enabled is not false; tells the persona that a link may come with a read excerpt — first-hand
+senses.linksRead                         shown after the links line when features.webLookup is on and web.links.enabled is not false; tells the persona that a link may come with a read excerpt, first-hand
 senses.search                            shown when features.webLookup is on, web.search.enabled is not false AND a Brave Search key is configured; tells the persona that a `<lookup>` block may appear with web results
 lookup.header                            {query}: heading of the `<lookup>` block
 lookup.sources                           {list}: site names, comma-separated by code
@@ -192,7 +196,9 @@ warmup.ownMark                           prefixed to a member's own lines in the
 warmup.contextMark                       prefixed to context lines in the profile.md transcript
 ```
 
-## Model output: only these tags
+## Output
+
+Only these tags are acted on:
 
 - `<think>…</think>` optional, first, 1–4 lines of hidden planning; an unclosed one means silence.
 - `<msg>text</msg>` one chat message, up to 3 in a row; `reply="#87"` makes it a Discord reply.
@@ -202,9 +208,9 @@ warmup.contextMark                       prefixed to context lines in the profil
 
 `features.reactions: false` drops `<react>`, `features.multiMessage: false` keeps the first `<msg>`; prompts need not know.
 
-## The analyzer (`memory.md`)
+## Analyzer
 
-One call updates everything the persona remembers. It judges people **through the persona's eyes**, so it receives
+One call (`memory.md`) updates everything the persona remembers. It judges people **through the persona's eyes**, so it receives
 the character card. Whether a channel is alive is NOT its call; code counts that. The warmup feeds old history
 through the warmup prompts (`profile.md`, `channel.md`, `server.md`), not through the analyzer.
 
@@ -240,14 +246,14 @@ of what is already stored, so facts are not degraded by being rewritten batch af
 
 - **Interests are atomic items**, not prose: `topic` (≤ `{{interestTopicChars}}`, the identity, compared
   case-insensitively) and `note` (≤ `{{interestNoteChars}}`, what exactly about it; may be empty). Both placeholders
-  are filled from `memory.interestTopicChars` / `memory.interestNoteChars` like the other limits. Stored per person up to `memory.maxInterests`, each with a
-  weight that grows when the analyzer adds or updates it again; the lightest are evicted first. The input shows the
+  are filled from `memory.interestTopicChars` / `memory.interestNoteChars` like the other limits. Stored per person up to `memory.maxInterestsStored`, each with a
+  weight that grows when the analyzer adds or updates it again; the lowest rank is evicted first. The input shows the
   stored items so the analyzer adds only new ones, updates a note only when it learned something, removes only what
   the person has clearly dropped.
 - **Details are atomic items too**: `{ id, text, weight, firstSeen, lastSeen }`. The input shows each stored detail
   with its numeric `id`; `seen` and `remove` refer to details by that id (code also accepts the exact stored text).
-  `add` takes `{ text, sure? }` (a bare string is accepted). Over `memory.maxDetails` the lightest, then the oldest,
-  are evicted.
+  `add` takes `{ text, sure? }` (a bare string is accepted). Over `memory.maxDetailsStored` the lowest rank is
+  evicted.
 - **Confirmation (the "(?)" mechanism), same for interests and details.** `weight` counts the separate OCCASIONS a
   thing was observed. A new item starts at weight 1, or 0 when the analyzer marks it `"sure": false` (unclear whose it
   is, unclear whether it was meant seriously, or a name the analyzer does not recognise). `seen` (nothing new to say,
@@ -349,7 +355,7 @@ of what is already stored, so facts are not degraded by being rewritten batch af
 - String fields ≤ `memory.fieldChars`; details ≤ `memory.maxDetails`, injokes ≤ `memory.maxInjokes`, self ≤ `memory.maxSelfFacts`. Notes in the language the chat speaks.
   Observed facts only; nothing sensitive (addresses, phones, documents, health, finances, real full names).
 
-## Server memory (the channel map)
+## Channel map
 
 The `<server>` block is assembled from stored channel notes and code-maintained facts, filtered to only the channels
 that matter for this turn. The current channel appears first, marked with `labels.server.currentMark`; then only the
@@ -378,7 +384,7 @@ A channel entry (`renderChannel` in `src/memory/channels.js`) carries:
 When the current channel has no stored note yet (the analyzer has not touched it), a fallback entry is synthesised from
 the Discord facts of the messages in the transcript, so the persona still knows where it is.
 
-## The warmup (`profile.md`, `channel.md`, `server.md`): how memory starts
+## Warmup
 
 Each warmup request handles one unit of work (one channel, one person or the server), so attribution stays clean.
 `channel.md` produces channel notes (purpose, topics, tone). `profile.md` produces a member's character, style,
@@ -402,27 +408,27 @@ refresh only) `<snippets>`. Own lines in the snippets start with `labels.warmup.
 `labels.warmup.contextMark`. Aliases come from OTHER people's lines (how they address the member), so the
 own-lines attribution rule does not apply to them.
 
-## The address classifier (`address.md`): is this untagged message for the persona?
+## Address classifier
 
 After the persona answers someone, a conversation window opens in that channel (`mention.followUpMinutes`, extended
 by every further answer). A message inside the window that carries no trigger (no mention, no reply to the persona,
 no name) is not answered blindly: code sends the last `mention.followUpContext` (default 15) lines of the channel, the
 persona's own lines marked with `labels.self`, plus the new message marked as `<candidate>`, to `address.md` on the
-`classifier.text` model role (`classifier.text`, default `anthropic/claude-sonnet-4.6`). Output is ONE line: `yes` when the candidate
+`classifier.text` model role (default `anthropic/claude-sonnet-4.6`). Output is ONE line: `yes` when the candidate
 addresses the persona or continues the exchange with it, `no` when people talk among themselves or to someone else
 (a reply to another member or a mention of another member is always `no` before the model is asked). `yes` runs a
 normal reply turn (the model may still `<skip/>`); three `no` in a row (`mention.followUpNoStreak`, default 3) close
 the window. Switch `features.followUp` (default on). Logged as counts and verdicts only.
 The window state survives a restart: active windows are saved in `data/state.json` under `followUpWindows` and restored at startup, with expired ones dropped.
 
-## The re-watch classifier (`rewatch.md`): does someone need a second look at a video?
+## Re-watch classifier
 
 When the persona is addressed (a reply turn) and a video sits in the last `media.video.rewatch.recentMessages`
 (default 60) messages of the channel, a classifier decides whether the message asks about one of those videos or asks
 to retry one that did not load. Candidates are watched videos and error-state videos (a requested retry uses its own slot, independent of the turn's
 `media.video.maxPerTurn` attempts). At most `media.video.rewatch.maxCandidates` (default 6) are
 offered to the classifier, newest-message first. Code sends `rewatch.md` as the system prompt on the
-`classifier.text` model role (`classifier.text`, default `anthropic/claude-sonnet-4.6`) with a user message
+`classifier.text` model role (default `anthropic/claude-sonnet-4.6`) with a user message
 containing three blocks: a short `<transcript>` of the last few channel messages with the persona's own lines marked
 with `labels.self` (so the classifier sees what the candidate replies to), then the video list and the candidate:
 
@@ -444,9 +450,9 @@ a status (`watched` or `not loaded`), and the first 200 characters of the summar
 Names and summaries are whitespace-collapsed to one line. The trigger text is cut at `context.maxMessageChars`.
 Output is ONE line:
 
-- `<number> | <question>` — the message asks about a watched video and needs a detail the account does not cover. The number is copied from the list.
-- `<number> | retry` — the message is about a not-loaded video and asks to try again or asks about its content. The number is copied from the list.
-- `none` — no second look or retry needed.
+- `<number> | <question>`: the message asks about a watched video and needs a detail the account does not cover. The number is copied from the list.
+- `<number> | retry`: the message is about a not-loaded video and asks to try again or asks about its content. The number is copied from the list.
+- `none`: no second look or retry needed.
 
 On a question hit, the video model watches the clip again with `rewatch-answer.md` (`{{question}}` and `{{maxChars}}`
 = `rewatch.answerChars`, default 1200) and the answer is appended to the transcript as `transcript.videoAnswered`
@@ -464,11 +470,11 @@ Rails: at most one re-watch or retry per turn; the classifier and the second loo
 question (see the video cache section above). Switch `features.videoRewatch` (missing = on, needs
 `videoDescriptions` on).
 
-## The search classifier (`lookup.md`): does a question need facts from the web?
+## Search classifier
 
-When the persona is addressed (a reply turn) and all of the following hold — `features.webLookup` is on,
+When the persona is addressed (a reply turn) and all of the following hold (`features.webLookup` is on,
 `web.search.enabled` is not false, the `lookup.md` prompt exists, `web.search.maxPerTurn` is at least 1, and a
-`BRAVE_SEARCH_API_KEY` is configured — the classifier decides whether the trigger message asks something that needs
+`BRAVE_SEARCH_API_KEY` is configured), the classifier decides whether the trigger message asks something that needs
 a web search. It uses the `classifier.text` model role. Code sends `lookup.md` as the system prompt with a user
 message containing a short `<transcript>` (the same as the re-watch classifier, with the persona's own lines
 marked by `labels.self`) and a `<candidate>` block:
@@ -485,9 +491,9 @@ marked by `labels.self`) and a `<candidate>` block:
 The transcript carries descriptions, video summaries and link reads when available. The trigger text is cut at
 `context.maxMessageChars`. Output is ONE line:
 
-- A search query — plain words, no quotes, no operators, at most 12 words — when the message needs facts from
+- A search query (plain words, no quotes, no operators, at most 12 words) when the message needs facts from
   outside the chat.
-- `none` — everything else.
+- `none` for everything else.
 
 On a query hit, Brave Search runs the query (`web.search.results` results, default 5), the numbered results are
 condensed by `classifier.text` through `search-summary.md` (`{{query}}`, `{{maxChars}}` = `web.search.summaryChars`,

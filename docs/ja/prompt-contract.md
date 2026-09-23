@@ -1,4 +1,4 @@
-# プロンプト ↔ コードのコントラクト
+# プロンプトコントラクト
 
 プロンプトファイルとコード（`src/behavior/prompt.js`、`src/llm/parse.js`、`src/discord/format.js`、
 `src/memory/update.js`、`src/memory/channels.js`、`src/memory/warmup.js`）が接するポイントです。一方を変更する場合、
@@ -50,7 +50,9 @@
 `{{maxEpisodes}}` はメンバーごとに保持されるエピソードの総数です。どちらも config から設定されますが、デフォルトプロンプトでは
 使用されません。カスタムの `memory.md` が参照する場合があります。
 
-## ユーザーメッセージブロック（空のものは省略、この順序で）
+## ブロック
+
+ユーザーメッセージのブロックです。空のものは省略され、順序は以下の通りです。
 
 | ブロック | 内容 |
 |---|---|
@@ -85,9 +87,9 @@
 動画の結果は添付ファイルごとまたはリンクごとに `data/guilds/<id>/media.json` にキー
 `video:<itemId>`（添付ファイル ID、またはリンク URL の安定ハッシュ）で保存されます。キャッシュエントリ:
 
-- 視聴済み: `{ text, ts, watched: true }` — 永続、サマリーテキスト。
-- リミットミス（length または size）: `{ miss: true, ts, reason: "length"|"size" }` — 永続、ファイルは変化しない。
-- エラーミス: `{ miss: true, ts, reason: "error" }` — `media.video.errorRetryMinutes`（デフォルト 60）分後にリトライ、または再視聴分類器からの強制リトライで即時リトライ。
+- 視聴済み: `{ text, ts, watched: true }`: 永続、サマリーテキスト。
+- リミットミス（length または size）: `{ miss: true, ts, reason: "length"|"size" }`: 永続、ファイルは変化しない。
+- エラーミス: `{ miss: true, ts, reason: "error" }`: `media.video.errorRetryMinutes`（デフォルト 60）分後にリトライ、または再視聴分類器からの強制リトライで即時リトライ。
 - デイリーリミット: キャッシュされない。そのターンのみ `{ state: "limit", reason: "daily" }` として返される。
 
 再視聴の回答はキー `video:<itemId>:q:<hash>`（小文字化・空白正規化した質問の SHA-1 の先頭 16 桁の十六進数）で保存されます: `{ text, ts, answer: true }`。1 時間で期限切れ。コードは読み取り時に期限切れのエントリを削除します。
@@ -103,7 +105,9 @@
 行間に `labels.transcript.gap` / `gapWithDate` / `date`。ブロック冒頭に `labels.transcript.header`。隣接チャンネル:
 `#n` なしの同じ行形式、`# channel-name` の下に配置。
 
-## `labels.json` キー（`{x}` はコードが挿入）
+## ラベル
+
+`labels.json` のキー。`{x}` はコードが挿入します。
 
 ```
 locale                                   BCP-47 tag for dates
@@ -124,7 +128,7 @@ transcript.gif                           {name}
 transcript.gifDescribed                  {text}
 transcript.video                         {name} {duration}
 transcript.videoDescribed                {name} {duration} {text}: text describes ONE frame
-transcript.videoWatched                  {name} {duration} {text}: first-hand — the persona saw and heard the clip
+transcript.videoWatched                  {name} {duration} {text}: first-hand, the persona saw and heard the clip
 transcript.videoNotWatched               {name} {duration} {reason}: reason is the human phrase from videoReason.*
 transcript.videoNotWatchedFrame          {name} {duration} {reason} {text}: not watched but a still frame was described
 transcript.videoAnswered                {question} {text}: extra tag after a watched video tag; the persona re-watched the clip for this question
@@ -136,7 +140,7 @@ transcript.voice                         {duration}
 transcript.audio                         {name} {duration}
 transcript.link                          {site} {title}
 transcript.linkText                      {site} {title} {text}
-transcript.linkRead                      {text}: extra tag after a link tag; the page was fetched and condensed — first-hand
+transcript.linkRead                      {text}: extra tag after a link tag; the page was fetched and condensed, first-hand
 transcript.thumbnailDescribed            {text}: follows a link tag; describes the link's preview picture
 transcript.filePreview                   {name} {text}
 transcript.forwarded                     {text}
@@ -152,7 +156,7 @@ senses.stickerSee | stickerDescribed | stickerBlind
 senses.lottie
 senses.voice | links | files
 senses.linksWatch                        replaces links when features.videoDescriptions is on; adds that a linked video may come watched or not watched with the reason
-senses.linksRead                         shown after the links line when features.webLookup is on and web.links.enabled is not false; tells the persona that a link may come with a read excerpt — first-hand
+senses.linksRead                         shown after the links line when features.webLookup is on and web.links.enabled is not false; tells the persona that a link may come with a read excerpt, first-hand
 senses.search                            shown when features.webLookup is on, web.search.enabled is not false AND a Brave Search key is configured; tells the persona that a `<lookup>` block may appear with web results
 lookup.header                            {query}: heading of the `<lookup>` block
 lookup.sources                           {list}: site names, comma-separated by code
@@ -190,7 +194,9 @@ warmup.ownMark                           prefixed to a member's own lines in the
 warmup.contextMark                       prefixed to context lines in the profile.md transcript
 ```
 
-## モデル出力: これらのタグのみ
+## 出力
+
+モデルの出力で処理されるのは以下のタグのみです:
 
 - `<think>…</think>` 任意、先頭に配置、1–4 行の隠れた計画。閉じていない場合は沈黙を意味する。
 - `<msg>text</msg>` チャットメッセージ 1 件、最大 3 件連続可能。`reply="#87"` で Discord リプライになる。
@@ -200,9 +206,9 @@ warmup.contextMark                       prefixed to context lines in the profil
 
 `features.reactions: false` は `<react>` を無効化、`features.multiMessage: false` は最初の `<msg>` のみを保持します。プロンプトが知る必要はありません。
 
-## アナライザー（`memory.md`）
+## アナライザー
 
-1 回の呼び出しでペルソナが記憶するすべてを更新します。ペルソナの**目を通して**人々を判断するため、キャラクターカードを受け取ります。チャンネルが活発かどうかの判断はアナライザーの役割ではなく、コードがカウントします。ウォームアップは古い履歴をウォームアップ用プロンプト（`profile.md`、`channel.md`、`server.md`）を通じて供給し、アナライザーは通しません。
+1 回の呼び出し（`memory.md`）でペルソナが記憶するすべてを更新します。ペルソナの**目を通して**人々を判断するため、キャラクターカードを受け取ります。チャンネルが活発かどうかの判断はアナライザーの役割ではなく、コードがカウントします。ウォームアップは古い履歴をウォームアップ用プロンプト（`profile.md`、`channel.md`、`server.md`）を通じて供給し、アナライザーは通しません。
 
 プロンプト内の数値制限はプレースホルダーで、ランタイムに `config.memory.*` と `relationships.maxDeltaPerUpdate` から設定されます。
 
@@ -233,8 +239,8 @@ warmup.contextMark                       prefixed to context lines in the profil
 }
 ```
 
-- **関心はアトミックな項目であり**、散文ではありません。`topic`（≤ `{{interestTopicChars}}`、アイデンティティ、大文字小文字を無視して比較）と `note`（≤ `{{interestNoteChars}}`、具体的に何が。空でも可）。両方のプレースホルダーは他の制限と同様に `memory.interestTopicChars` / `memory.interestNoteChars` から設定されます。メンバーごとに最大 `memory.maxInterests` 件保存され、アナライザーが再び追加または更新すると重みが増加します。最も軽いものから先に削除されます。入力には保存済みの項目が表示されるため、アナライザーは新しいものだけを追加し、ノートは新情報があるときだけ更新し、本人が明確にやめたものだけを削除します。
-- **詳細もアトミックな項目です**: `{ id, text, weight, firstSeen, lastSeen }`。入力には保存済みの各詳細が数値 `id` 付きで表示されます。`seen` と `remove` はその id で詳細を参照します（コードは保存された正確なテキストも受け付けます）。`add` は `{ text, sure? }` を受け取ります（単純な文字列も受け付けます）。`memory.maxDetails` を超えると、最も軽いものから、次に最も古いものから削除されます。
+- **関心はアトミックな項目であり**、散文ではありません。`topic`（≤ `{{interestTopicChars}}`、アイデンティティ、大文字小文字を無視して比較）と `note`（≤ `{{interestNoteChars}}`、具体的に何が。空でも可）。両方のプレースホルダーは他の制限と同様に `memory.interestTopicChars` / `memory.interestNoteChars` から設定されます。メンバーごとに最大 `memory.maxInterestsStored` 件保存され、アナライザーが再び追加または更新すると重みが増加します。ランク最下位から削除されます。入力には保存済みの項目が表示されるため、アナライザーは新しいものだけを追加し、ノートは新情報があるときだけ更新し、本人が明確にやめたものだけを削除します。
+- **詳細もアトミックな項目です**: `{ id, text, weight, firstSeen, lastSeen }`。入力には保存済みの各詳細が数値 `id` 付きで表示されます。`seen` と `remove` はその id で詳細を参照します（コードは保存された正確なテキストも受け付けます）。`add` は `{ text, sure? }` を受け取ります（単純な文字列も受け付けます）。`memory.maxDetailsStored` を超えると、ランク最下位から削除されます。
 - **確定（「(?)」メカニズム）、関心と詳細に共通。** `weight` はその事柄が観測された個別の機会をカウントします。新しい項目は重み 1 で始まりますが、アナライザーが `"sure": false` をマークした場合は 0 です（誰のものか不明確、本気かどうか不明確、またはアナライザーが認識しない名前）。`seen`（新情報はないが再び話題になった）、既存項目への `add`、`update` はそれぞれ 1 回の目撃としてカウントされます。目撃が重みを 1 上げるのは、そのバッチ内のその人のメッセージが項目の `lastSeen` から少なくとも `memory.confirmGapHours` 時間離れている場合のみです（長い会話がバッチ分割されても 1 回とカウント）。既存項目への `"sure": false` 付きの操作は何も変更しません。項目は重みが `memory.confirmAfter` 以上で**確定**されます。それまではチャットモデルに `labels.profile.unsureMark` 付きで表示されます。
 - **表示されるよりも多くが保存され、ランクは時間とともに減衰します。** コードはメンバーごとに最大 `memory.maxInterestsStored` / `memory.maxDetailsStored` 件の項目を保持します。ペルソナとアナライザーはランク上位の `memory.maxInterests` / `memory.maxDetails` 件だけを見ます。ランク = `log2(weight + 0.5) + lastSeen / halfLife`（半減期は `memory.interestHalfLifeDays`、`memory.detailHalfLifeDays`）。つまり重みは沈黙の半減期ごとに半分になり、頻繁かつ最近のものが上位に来ます。新規項目は削除されずに表示されない末尾で重みを蓄積できます。削除はランク最下位から行います。アナライザーが保存済みだが表示されていない項目を `add` した場合、コードは目撃としてカウントします。そのため、プロンプトはアナライザーに対してリストが一杯に見えるからといって控えず、新しいと思うものは何でも追加するよう指示します。
 - **日付はメッセージから取得し**、時計からではありません。`firstSeen` / `lastSeen` は、目撃を発生させたバッチ内のその人の最新メッセージの時刻です（min / max。履歴が順序通りでなくても正しく動作します）。`lastSeen` が `memory.interestStaleDays` より古い関心は、チャットモデルに `labels.profile.staleMark` 付きで表示され、新しいものの後にソートされます。詳細は古くなりません。
@@ -258,7 +264,7 @@ warmup.contextMark                       prefixed to context lines in the profil
 - `lore` はサーバーのロアブックです: 会話を超えて残るもの、すなわちイベント（「X が去った日」）、繰り返し登場するキャラクターやペット、長期にわたるストーリー、対立、伝統。`title` はアイデンティティ（同じタイトルのエントリは更新であり、マージ後の全体テキストを持つ）、`keys` は 2–6 個の単語または短いフレーズで、そのことが話題になるとき人々が実際に入力するもの（名前、ニックネーム、ミームの文言、チャットの言語で、小文字）、`text` ≤ `lore.textChars`（`{{loreTextChars}}`）。入力の `<existing_lore>` には保存済みのタイトルとキーのリスト、およびバッチが触れるエントリの全テキストが表示されます。オーナーが追加したエントリ（`/nep lore add`）はアナライザーが変更しません。
 - 文字列フィールド ≤ `memory.fieldChars`。詳細 ≤ `memory.maxDetails`、内輪ネタ ≤ `memory.maxInjokes`、self ≤ `memory.maxSelfFacts`。ノートはチャットの言語で記述します。観測された事実のみ。センシティブな情報（住所、電話番号、書類、健康、財務、本名）は記録しません。
 
-## サーバーメモリ（チャンネルマップ）
+## チャンネルマップ
 
 `<server>` ブロックは保存されたチャンネルノートとコードが管理するファクトから構成され、このターンに関連するチャンネルだけにフィルタリングされます。現在のチャンネルが最初に表示され、`labels.server.currentMark` でマークされます。続いて、このターンで `<other_channels>` にメッセージを提供した隣接チャンネルのみがフル表示されます。その他の保存済みチャンネルはすべて除外されます。大規模サーバーではほとんどが無関係でバジェットの無駄です。
 
@@ -273,7 +279,7 @@ warmup.contextMark                       prefixed to context lines in the profil
 
 現在のチャンネルに保存済みノートがまだない場合（アナライザーが触れていない）、トランスクリプト内のメッセージの Discord ファクトからフォールバックエントリが合成されるため、ペルソナは自分がどこにいるか把握できます。
 
-## ウォームアップ（`profile.md`、`channel.md`、`server.md`）: メモリの開始方法
+## ウォームアップ
 
 各ウォームアップリクエストは一つの作業単位（一つのチャンネル、一人のメンバー、またはサーバー）を処理し、帰属を正確に保ちます。`channel.md` はチャンネルノート（目的、トピック、トーン）を生成します。`profile.md` はメンバーのキャラクター、スタイル、関心、詳細、エピソード、エイリアスを生成します。`server.md` はサーバー全体のパターン、会話の始め方、内輪ネタ、ロアブックを生成します。実行順序、サンプリング、進捗、制限、サブコマンドについては[ウォームアップ](warmup.md)を参照してください。
 
@@ -286,12 +292,12 @@ warmup.contextMark                       prefixed to context lines in the profil
 `profile.md` の出力: `{ "character": "", "style": "", "interests": [{ topic, note, times }], "details": [{ text, times }],
 "episodes": [...], "aliases": [""] }`。ブロック `<character>` `<member>` `<draft>`（任意）`<hint>`（任意、ポートレートリフレッシュ時のみ）`<snippets>`。スニペット内の本人の行は `labels.warmup.ownMark` で始まり、コンテキスト行は `labels.warmup.contextMark` で始まります。エイリアスは他の人の行（その人をどう呼んでいるか）から得られるため、本人の行の帰属ルールは適用されません。
 
-## アドレス分類器（`address.md`）: タグなしメッセージはペルソナ宛か?
+## アドレス分類器
 
 ペルソナが誰かに応答した後、そのチャンネルで会話ウィンドウが開きます（`mention.followUpMinutes`、応答ごとに延長）。ウィンドウ内でトリガー（メンション、ペルソナへのリプライ、名前）を持たないメッセージは無条件には応答されません。コードはチャンネルの直近 `mention.followUpContext`（デフォルト 15）行を送信します。ペルソナ自身の行は `labels.self` でマーク、新しいメッセージは `<candidate>` としてマークされ、`address.md` に `classifier.text` モデルロール（デフォルト `anthropic/claude-sonnet-4.6`）で送信されます。出力は 1 行: 候補がペルソナに話しかけているか、ペルソナとのやり取りを続けている場合は `yes`、人々が自分たち同士で話しているか別の相手に話している場合は `no`（別のメンバーへのリプライや別のメンバーへのメンションは、モデルに尋ねる前に常に `no`）。`yes` は通常のリプライターンを実行します（モデルは `<skip/>` を返す可能性があります）。3 回連続の `no`（`mention.followUpNoStreak`、デフォルト 3）でウィンドウが閉じます。スイッチ `features.followUp`（デフォルトオン）。カウントと判定のみログに記録されます。
 ウィンドウの状態は再起動後も維持されます。アクティブなウィンドウは `data/state.json` の `followUpWindows` に保存され、起動時に復元されます。期限切れのウィンドウは削除されます。
 
-## 再視聴分類器（`rewatch.md`）: 動画をもう一度見る必要があるか?
+## 再視聴分類器
 
 ペルソナに話しかけられた（リプライターン）とき、チャンネルの直近 `media.video.rewatch.recentMessages`（デフォルト
 60）件のメッセージに動画がある場合、分類器がそのメッセージがそれらの動画について質問しているか、または読み込めなかった
@@ -318,9 +324,9 @@ warmup.contextMark                       prefixed to context lines in the profil
 サマリーの先頭 200 文字（読み込めなかった動画は空）。名前とサマリーは空白が正規化されて 1 行に。トリガーテキストは
 `context.maxMessageChars` で切り詰め。出力は 1 行:
 
-- `<number> | <question>` — メッセージが視聴済み動画について質問しており、説明でカバーされていない詳細を必要とする。番号はリストからそのままコピーする。
-- `<number> | retry` — メッセージが読み込めなかった動画について、再試行を求めるかその内容を質問している。番号はリストからそのままコピーする。
-- `none` — 再視聴もリトライも不要。
+- `<number> | <question>`: メッセージが視聴済み動画について質問しており、説明でカバーされていない詳細を必要とする。番号はリストからそのままコピーする。
+- `<number> | retry`: メッセージが読み込めなかった動画について、再試行を求めるかその内容を質問している。番号はリストからそのままコピーする。
+- `none`: 再視聴もリトライも不要。
 
 質問でヒットした場合、動画モデルが `rewatch-answer.md`（`{{question}}` と `{{maxChars}}` =
 `rewatch.answerChars`、デフォルト 1200）でクリップを再度視聴し、回答は `transcript.videoAnswered`（`{question}`、
@@ -337,11 +343,11 @@ warmup.contextMark                       prefixed to context lines in the profil
 再視聴を個別に制限します。回答は質問ごとに 1 時間キャッシュされます（上記の動画キャッシュセクションを参照）。スイッチ
 `features.videoRewatch`（未設定 = オン、`videoDescriptions` が必要）。
 
-## 検索分類器（`lookup.md`）: 質問にウェブの事実が必要か?
+## 検索分類器
 
-ペルソナに話しかけられた（リプライターン）とき、以下のすべてが成立する場合 — `features.webLookup` がオン、
+ペルソナに話しかけられた（リプライターン）とき、以下のすべてが成立する場合（`features.webLookup` がオン、
 `web.search.enabled` が false でない、`lookup.md` プロンプトが存在する、`web.search.maxPerTurn` が 1 以上、
-`BRAVE_SEARCH_API_KEY` が設定されている — 分類器がトリガーメッセージにウェブ検索が必要かを判定します。`classifier.text`
+`BRAVE_SEARCH_API_KEY` が設定されている）、分類器がトリガーメッセージにウェブ検索が必要かを判定します。`classifier.text`
 モデルロールを使用します。コードは `lookup.md` をシステムプロンプトとして送信し、ユーザーメッセージに短い `<transcript>`
 （再視聴分類器と同じもの、ペルソナ自身の行は `labels.self` でマーク）と `<candidate>` ブロックを含めます:
 
@@ -357,8 +363,8 @@ warmup.contextMark                       prefixed to context lines in the profil
 トランスクリプトには利用可能な場合、説明文、動画サマリー、リンク読み取りが含まれます。トリガーテキストは
 `context.maxMessageChars` で切り詰め。出力は 1 行:
 
-- 検索クエリ — プレーンワード、引用符なし、演算子なし、最大 12 語 — メッセージがチャット外の事実を必要とする場合。
-- `none` — それ以外すべて。
+- 検索クエリ（プレーンワード、引用符なし、演算子なし、最大 12 語）: メッセージがチャット外の事実を必要とする場合。
+- `none`: それ以外すべて。
 
 クエリでヒットした場合、Brave Search がクエリを実行し（`web.search.results` 件の結果、デフォルト 5）、番号付きの結果が
 `classifier.text` を通じて `search-summary.md`（`{{query}}`、`{{maxChars}}` = `web.search.summaryChars`、
