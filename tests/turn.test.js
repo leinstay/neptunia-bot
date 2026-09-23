@@ -1397,7 +1397,7 @@ test('createTurnRunner: rewatch -- rewatch: classified carries offered counts, r
   }
 });
 
-test('createTurnRunner: rewatch -- rewatch: classified counts watched and not-loaded offers apart, retryAllowed true while an attempt is left', async () => {
+test('createTurnRunner: rewatch -- rewatch: classified counts watched and not-loaded offers apart, retryAllowed true with a describeVideo', async () => {
   const messages = [];
   const states = {};
   for (let i = 1; i <= 3; i += 1) {
@@ -1548,12 +1548,16 @@ test('createTurnRunner: rewatch -- maxCandidates counts watched and not-loaded v
   assert.deepEqual(block, ['v4 | clip4.mp4 | not loaded |', 'v3 | clip3.mp4 | watched | scène 3', 'v2 | clip2.mp4 | not loaded |']);
 });
 
-test('createTurnRunner: rewatch -- a video that did not load is not offered once media.video.maxPerTurn attempts are spent', async () => {
+test('createTurnRunner: rewatch -- a video that did not load is still offered and retried after this turn spent media.video.maxPerTurn attempts', async () => {
   const describer = fakeRetryDescriber({ va: { state: 'error' } }, undefined, { newCount: 1 });
-  const { logs } = await withCapturedLogs(() => runRewatch({ describer, llm: rewatchLlm('va | retry') }));
-  assert.equal(describer.retryCalls.length, 0);
-  const line = logs.find((entry) => entry.msg === 'rewatch: skipped');
-  assert.equal(line.reason, 'no-watched');
+  const { result, logs } = await withCapturedLogs(() => runRewatch({ describer, llm: rewatchLlm('va | retry') }));
+  assert.ok(result.llm.classifierCalls[0].messages[1].content.includes('va | clip.mp4 | not loaded |'), 'still offered');
+  assert.equal(describer.retryCalls.length, 1);
+  assert.equal(describer.retryCalls[0].options.force, true);
+  assert.ok(!logs.some((entry) => entry.msg === 'rewatch: skipped'));
+  const line = logs.find((entry) => entry.msg === 'rewatch: classified');
+  assert.equal(line.retryAllowed, true);
+  assert.equal(line.picked, true);
 });
 
 test('createTurnRunner: rewatch -- every early stop logs rewatch: skipped with its reason, never text', async () => {

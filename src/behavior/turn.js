@@ -285,15 +285,17 @@ export function createTurnRunner({
    * the question, then the describer looks at it again
    * (describer.rewatchVideo) and the answer joins that video's state as
    * `answer: { question, text }` -- mutating `videos` in place. Videos that
-   * did not load (`error` state) are candidates too, while this turn still
-   * has a `media.video.maxPerTurn` attempt left (`attemptsUsed` so far): the
-   * classifier's `<id> | retry` watches one again with `force`
-   * (describer.describeVideo) and its new state replaces the old one. At
-   * most one re-watch or retry per turn. Never throws: any failure leaves
+   * did not load (`error` state) are candidates too whenever the describer
+   * can fetch one (describer.describeVideo): the classifier's `<id> | retry`
+   * watches one again with `force` and its new state replaces the old one.
+   * The explicit request has its own slot, apart from the
+   * `media.video.maxPerTurn` new videos this turn already fetched; the
+   * describer's daily caps still apply. At most one re-watch or retry per
+   * turn. Never throws: any failure leaves
    * `videos` as it was. The question and the answer are data: never logged;
    * every early stop logs `rewatch: skipped` with its reason.
    */
-  async function maybeRewatch({ config, guildId, channelId, selfName, history, trigger, videos, candidates, attemptsUsed = 0 }) {
+  async function maybeRewatch({ config, guildId, channelId, selfName, history, trigger, videos, candidates }) {
     const prompt = hot.prompts?.rewatch;
     if (!prompt) {
       log.info('rewatch: skipped', { channel: channelId, reason: 'no-prompt' });
@@ -309,9 +311,8 @@ export function createTurnRunner({
     }
     // `candidates` is already newest first, so the cap keeps the newest videos.
     const maxCandidates = Math.max(1, Math.floor(rewatchCfg.maxCandidates ?? 6));
-    // A retry is a fetch attempt: offered only while this turn has one left.
-    const canRetry =
-      typeof describer.describeVideo === 'function' && attemptsUsed < (mediaCfg.video?.maxPerTurn ?? 1);
+    // A retry requested by the person has its own slot, outside media.video.maxPerTurn.
+    const canRetry = typeof describer.describeVideo === 'function';
     const recentIds = new Set(history.slice(-recent).map((m) => m.id));
     const seen = new Set();
     const watched = [];
@@ -490,7 +491,6 @@ export function createTurnRunner({
               trigger,
               videos,
               candidates,
-              attemptsUsed: watched.newCount ?? 0,
             });
           } catch (err) {
             log.warn('rewatch: failed', { channel: channel.id, error: err });
