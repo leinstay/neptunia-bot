@@ -18,9 +18,10 @@ import {
   followUpPreFilter,
   parseFollowUpVerdict,
 } from '../behavior/mention.js';
-import { fill, formatTranscript, renderTranscript } from './format.js';
+import { formatTranscript, renderTranscript } from './format.js';
 import { addPending, isExpired, popOldest } from '../behavior/pending.js';
 import { between } from '../behavior/turn.js';
+import { fillPromptTemplate } from '../behavior/prompt.js';
 import { log } from '../log.js';
 
 // The most pictures one observed message warms the describer cache for --
@@ -172,7 +173,7 @@ export function createMessageHandler({
     const candidateItem = items[items.length - 1];
     const transcript = renderTranscript(items.slice(0, -1), config.bot.timezone, labels);
     return {
-      system: fill(addressPrompt, { name: selfName }),
+      system: fillPromptTemplate(addressPrompt, { name: selfName }),
       user: `${transcript}\n<candidate>\n${candidateItem.text}\n</candidate>`,
     };
   }

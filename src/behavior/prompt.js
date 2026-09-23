@@ -425,7 +425,14 @@ function assembleUser({ now, timezone, labels, sensesText, kept, tempoText, task
     .join('\n\n');
 }
 
-function fillTemplate(template, values) {
+/**
+ * Fill the double-brace `{{key}}` placeholders of a prompt file (the prompt
+ * contract's form; labels.json uses single braces, see fill() in
+ * src/discord/format.js). An unknown key is left untouched.
+ * @param {string} template
+ * @param {object} values
+ */
+export function fillPromptTemplate(template, values) {
   return (template ?? '').replace(/\{\{(\w+)\}\}/g, (all, key) => values[key] ?? all);
 }
 
@@ -668,7 +675,7 @@ export function buildRequest(input) {
     videos,
   };
 
-  const nameFill = (text) => fillTemplate(text, { name: selfName });
+  const nameFill = (text) => fillPromptTemplate(text, { name: selfName });
   const system = [prompts['system-prompt'], prompts['character-card'], prompts.rules, prompts.format]
     .map(nameFill)
     .filter(Boolean)
@@ -689,11 +696,11 @@ export function buildRequest(input) {
     trigger: triggerLabel,
     target: triggerItem ? `#${triggerItem.index}` : '',
   };
-  const baseTask = fillTemplate(prompts[mode] ?? '', taskValues);
+  const baseTask = fillPromptTemplate(prompts[mode] ?? '', taskValues);
   // Owner-forced turn (`/nep interject`/`/nep initiate`): tell the model
   // `<skip/>` is not the expected outcome this time -- optional, missing
   // prompts.forced (an older/undeployed labels layer) leaves the task as-is.
-  const forcedText = forced && typeof prompts.forced === 'string' && prompts.forced.trim() ? fillTemplate(prompts.forced, taskValues) : '';
+  const forcedText = forced && typeof prompts.forced === 'string' && prompts.forced.trim() ? fillPromptTemplate(prompts.forced, taskValues) : '';
   const task = forcedText ? `${baseTask}\n\n${forcedText}` : baseTask;
 
   const sensesText = renderSenses(config, labels);

@@ -1575,6 +1575,27 @@ test('follow-up: the classifier request is address.md as system and a <candidate
   await p;
 });
 
+test('follow-up: the classifier system prompt carries the bare display name, no braces around it', async () => {
+  const llm = fakeFollowUpLlm();
+  const handler = makeHandler({ llm, prompts: fakeAddressPrompts() });
+  const guild = fakeGuild('g1', 'Nepτune');
+  const t0 = Date.now();
+  const channel = fakeChannelWithHistory('c1', guild, []);
+  await openFollowUpWindow(handler, { guild, channel, ts: t0 + 1000 });
+
+  const msg = fakeMessage({ id: 'm-candidate', guild, channel, channelId: 'c1', cleanContent: 'is this for you', createdTimestamp: t0 + 2000 });
+  const p = handler(msg);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.equal(llm.calls.length, 1);
+  const system = llm.calls[0].messages[0].content;
+  assert.ok(system.startsWith('You are Nepτune. '), 'the {{name}} placeholder is replaced whole');
+  assert.ok(!system.includes('{') && !system.includes('}'), 'no brace is left around the name');
+
+  llm.respond('no');
+  await p;
+});
+
 test('follow-up: the window opens on send and expires after followUpMinutes', async () => {
   const clock = mutableNow(0);
   const llm = fakeFollowUpLlm();
