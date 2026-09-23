@@ -24,7 +24,7 @@
 
 ### 工具
 
-超出限制的所有内容通过 `yt-dlp` 下载并使用 `ffmpeg` 裁剪，两者均为可选的系统二进制文件。没有它们时，在限制内的附件仍然可用（直接发送）。更长的附件和所有站点链接会回退到静帧。对于 YouTube，当 `yt-dlp` 无法探测时长时，`.env` 中的可选 `YOUTUBE_API_KEY`（免费，Google Cloud 控制台，YouTube Data API v3）或观看页面抓取可以提供时长信息。`/nep ping classifier.video` 报告此主机上哪个时长来源可用。
+超出限制的所有内容通过 `yt-dlp` 下载并使用 `ffmpeg` 裁剪，两者均为可选的系统二进制文件。没有它们时，在限制内的附件仍然可用（直接发送）。更长的附件和所有站点链接会回退到静帧。对于 YouTube，当 `yt-dlp` 无法探测时长时，`.env` 中的可选 `YOUTUBE_API_KEY`（免费，Google Cloud 控制台，YouTube Data API v3）或观看页面抓取可以提供时长信息。`/nep ping classifier.video` 报告 API key 状态。
 
 ### 基于问题的重看
 

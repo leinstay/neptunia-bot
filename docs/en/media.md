@@ -24,7 +24,7 @@ Attachments and downloaded site videos are capped at `media.video.maxSeconds` (d
 
 ### Tools
 
-Everything beyond attachments within the caps is downloaded with `yt-dlp` and trimmed with `ffmpeg`, both optional system binaries. Without them, attachments within the caps still work (sent as-is). Longer attachments and all site links fall back to a still frame. For YouTube, when `yt-dlp` cannot probe the duration, an optional `YOUTUBE_API_KEY` in `.env` (free, from the Google Cloud console's YouTube Data API v3) or a watch-page scrape provides it. `/nep ping classifier.video` reports which source works on the host.
+Everything beyond attachments within the caps is downloaded with `yt-dlp` and trimmed with `ffmpeg`, both optional system binaries. Without them, attachments within the caps still work (sent as-is). Longer attachments and all site links fall back to a still frame. For YouTube, when `yt-dlp` cannot probe the duration, an optional `YOUTUBE_API_KEY` in `.env` (free, from the Google Cloud console's YouTube Data API v3) or a watch-page scrape provides it. `/nep ping classifier.video` reports the API key status.
 
 ### Re-watch on a question
 

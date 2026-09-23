@@ -8,7 +8,7 @@
 |---|---|
 | `/nep status` | モデル、キャリブレーション、クォータ、ギルドごとのメモリ状況を表示 |
 | `/nep reload` | 設定とプロンプトを即時リロード |
-| `/nep ping [role]` | 一つまたはすべてのモデルロール（`talk`、`analyzer`、`classifier.text`、`classifier.media`、`classifier.video`）にミニマルリクエストを送信し、モデル、レイテンシ、プロバイダー、トークン数またはエラーを報告。`video` ロールでは YouTube の到達性（このホストでどの再生時間ソースが動作するか）も報告。`llm.maxRequestsPerDay` にカウントされず、一時停止中やウォームアップ中でも動作 |
+| `/nep ping [role]` | 一つまたはすべてのモデルロール（`talk`、`analyzer`、`classifier.text`、`classifier.media`、`classifier.video`）にミニマルリクエストを送信し、モデル、レイテンシ、プロバイダー、トークン数またはエラーを報告。`classifier.video` の後に `youtube: API key — {status}`（例: `ok`、`not needed (yt-dlp ok)`、`missing (blocked)`）を報告。`classifier.text` の後に `web: API key — {status}`（`ok`、`missing`、`off`）を報告。`llm.maxRequestsPerDay` にカウントされず、一時停止中やウォームアップ中でも動作 |
 | `/nep pause` | すべてのアクティビティを停止し、メモリをディスクにフラッシュしてアンロード。一時停止中は `data/` を安全に編集可能 |
 | `/nep resume` | `data/` からメモリをリロードして再開。JSON ファイルがパースできない場合は拒否し、壊れたファイル名を表示 |
 | `/nep interject [channel]` | そのチャンネルの会話に今すぐ割り込む |

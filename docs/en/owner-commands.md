@@ -8,7 +8,7 @@ Channels, roles and users are picked from Discord's own pickers; `set`/`unset` a
 |---|---|
 | `/nep status` | Model, calibration, quotas and per-guild memory status |
 | `/nep reload` | Reload config and prompts now |
-| `/nep ping [role]` | Send a minimal request to one or all model roles (`talk`, `analyzer`, `classifier.text`, `classifier.media`, `classifier.video`) and report model, latency, provider, tokens or the error; `/nep ping classifier` pings all three classifier roles. For the video role, also reports YouTube reachability; for `classifier.text`, reports `web: search key ok`, `web: no BRAVE_SEARCH_API_KEY` or `web: lookup off`. Does not count against `llm.maxRequestsPerDay` and works while paused or warming up |
+| `/nep ping [role]` | Send a minimal request to one or all model roles (`talk`, `analyzer`, `classifier.text`, `classifier.media`, `classifier.video`) and report model, latency, provider, tokens or the error; `/nep ping classifier` pings all three classifier roles. After `classifier.video`, reports `youtube: API key — {status}` (e.g. `ok`, `not needed (yt-dlp ok)`, `missing (blocked)`); after `classifier.text`, reports `web: API key — {status}` (`ok`, `missing` or `off`). Does not count against `llm.maxRequestsPerDay` and works while paused or warming up |
 | `/nep pause` | Stop all activity, flush memory to disk and unload it; `data/` is safe to edit while paused |
 | `/nep resume` | Reload memory from `data/` and continue; refuses if any JSON file does not parse, naming the broken ones |
 | `/nep interject [channel]` | Jump into the current conversation in this channel now |
