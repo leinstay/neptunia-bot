@@ -106,6 +106,36 @@ test('pageTitle: null when there is no title at all', () => {
   assert.equal(pageTitle(null), null);
 });
 
+test('pageTitle: a title with attributes, an uppercase tag and a spaced closing tag', () => {
+  assert.equal(pageTitle('<TITLE lang="en">Upper</TITLE >'), 'Upper');
+  assert.equal(pageTitle('<titles>no</titles><title>Real</title>'), 'Real');
+});
+
+test('pageTitle: an unclosed title falls through to og:title, a meta with a quoted > still parses', () => {
+  assert.equal(pageTitle('<title>never closed <meta property="og:title" content="Fallback">'), 'Fallback');
+  assert.equal(pageTitle('<meta name="x" content="a > b"><meta name="og:title" content=\'Q &gt; R\'>'), 'Q > R');
+  assert.equal(pageTitle('<meta property=og:title content=Bare>'), 'Bare');
+});
+
+test('pageTitle: only the first 64 KB of the document are looked at', () => {
+  const pad = `<p>${'x'.repeat(70 * 1024)}</p>`;
+  assert.equal(pageTitle(`${pad}<title>Late</title>`), null);
+  assert.equal(pageTitle(`<title>Early</title>${pad}`), 'Early');
+});
+
+test('readable: pageTitle and htmlToText stay linear on 1.5 MB of unclosed title or meta tags', () => {
+  const size = 1.5 * 1024 * 1024;
+  for (const unit of ['<title>', '<meta ', '<meta a="', '<title x=\'', '<meta ' + 'a'.repeat(50)]) {
+    const page = unit.repeat(Math.ceil(size / unit.length));
+    for (const [name, fn] of [['pageTitle', pageTitle], ['htmlToText', htmlToText]]) {
+      const started = process.hrtime.bigint();
+      fn(page);
+      const ms = Number(process.hrtime.bigint() - started) / 1e6;
+      assert.ok(ms < 500, `${name} on repeated ${JSON.stringify(unit.slice(0, 12))}: ${ms.toFixed(0)} ms`);
+    }
+  }
+});
+
 test('looksLikePaywallOrConsent: short consent, login and script walls are flagged', () => {
   assert.equal(looksLikePaywallOrConsent('We use cookies. Accept all or manage settings.'), true);
   assert.equal(looksLikePaywallOrConsent('Before you continue, review our consent options.'), true);

@@ -33,6 +33,8 @@ const MAX_WARM_PICTURES_PER_MESSAGE = 2;
 const MAX_WARM_VIDEOS_PER_MESSAGE = 1;
 // The most links one observed message has read ahead of time (web.links.prefill).
 const MAX_WARM_LINKS_PER_MESSAGE = 1;
+// Only when web.links.prefillPerUserPerDay is missing (config.json always has it).
+const PREFILL_PER_USER_PER_DAY_FALLBACK = 10;
 
 /**
  * @param {object} deps
@@ -141,6 +143,9 @@ export function createMessageHandler({
    * link now (src/web/lookup.js), not when a turn needs it. Needs
    * features.webLookup (a missing key counts as OFF: it costs money),
    * web.links.enabled (a missing key counts as on) and web.links.prefill.
+   * One member gets at most `web.links.prefillPerUserPerDay` new fetches a
+   * UTC day this way (in memory; cache hits are free), so posting links
+   * cannot spend `web.maxPerDay` for everyone. The turn path is not limited.
    */
   function warmLinkCache(guildId, normalized) {
     if (typeof lookup?.readLinks !== 'function') return;
@@ -150,9 +155,39 @@ export function createMessageHandler({
     if (linksCfg.enabled === false || linksCfg.prefill !== true) return;
     const links = collectReadableLinks(normalized, { sites: config.media?.video?.sites ?? [] }).slice(0, MAX_WARM_LINKS_PER_MESSAGE);
     if (links.length === 0) return;
+    const perUser = Number.isFinite(linksCfg.prefillPerUserPerDay)
+      ? Math.max(0, Math.floor(linksCfg.prefillPerUserPerDay))
+      : PREFILL_PER_USER_PER_DAY_FALLBACK;
+    const slot = reservePrefill(`${guildId}:${normalized.authorId ?? ''}`, links.length, perUser);
+    if (slot.granted === 0) return;
     Promise.resolve()
-      .then(() => lookup.readLinks(guildId, links))
+      .then(() => lookup.readLinks(guildId, links, { maxNew: slot.granted }))
+      .then((result) => refundPrefill(slot, slot.granted - (result?.newCount ?? 0)))
       .catch((err) => log.warn('events: link prefill failed', { error: err }));
+  }
+
+  // Per-(guild, author) prefill counts for the current UTC day; cleared when the day turns.
+  const prefillCounts = new Map();
+  let prefillDay = null;
+
+  /** Take up to `wanted` of the member's remaining daily prefill slots: `{ key, day, granted }`. */
+  function reservePrefill(key, wanted, perUser) {
+    const day = new Date(now()).toISOString().slice(0, 10);
+    if (day !== prefillDay) {
+      prefillDay = day;
+      prefillCounts.clear();
+    }
+    const used = prefillCounts.get(key) ?? 0;
+    const granted = Math.max(0, Math.min(wanted, perUser - used));
+    if (granted > 0) prefillCounts.set(key, used + granted);
+    return { key, day, granted };
+  }
+
+  /** Give back the slots a prefill did not spend on a new fetch (a cache hit, a fresh miss, the daily cap). */
+  function refundPrefill(slot, unused) {
+    if (unused <= 0 || slot.day !== prefillDay) return;
+    const used = prefillCounts.get(slot.key) ?? 0;
+    prefillCounts.set(slot.key, Math.max(0, used - unused));
   }
 
   // --- The address classifier (mention.followUp*) ---------------------------

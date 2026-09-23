@@ -29,6 +29,7 @@ const BLOCK = new Set([
 const CELL = new Set(['td', 'th']);
 const ELLIPSIS = '\u2026';
 const TITLE_MAX_CHARS = 300;
+const TITLE_SCAN_CHARS = 64 * 1024;
 const WALL_MAX_CHARS = 1200;
 
 // Latin-1 letters 0xC0-0xFF by their entity names, plus the usual punctuation.
@@ -258,13 +259,58 @@ export function htmlToText(html, { maxChars } = {}) {
   }
 }
 
-/** Attribute name -> value of one tag's source, names lowercased. */
+const isSpace = (c) => c === ' ' || c === '\t' || c === '\n' || c === '\r' || c === '\f';
+
+/**
+ * Attribute name -> value of one tag's source (the part after the tag name),
+ * names lowercased; attributes without `=` are skipped. One forward pass --
+ * no regex, so a long malformed tag cannot backtrack.
+ */
 function attributes(tagSource) {
   const out = {};
-  const attr = /([a-zA-Z_:][a-zA-Z0-9_:.-]*)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))/g;
-  let m;
-  while ((m = attr.exec(tagSource)) !== null) out[m[1].toLowerCase()] = m[2] ?? m[3] ?? m[4] ?? '';
+  const s = tagSource;
+  let i = 0;
+  while (i < s.length) {
+    while (i < s.length && (isSpace(s[i]) || s[i] === '/')) i += 1;
+    const nameStart = i;
+    while (i < s.length && !isSpace(s[i]) && s[i] !== '=' && s[i] !== '>' && s[i] !== '/') i += 1;
+    const name = s.slice(nameStart, i).toLowerCase();
+    if (!name) {
+      i += 1;
+      continue;
+    }
+    while (i < s.length && isSpace(s[i])) i += 1;
+    if (s[i] !== '=') continue;
+    i += 1;
+    while (i < s.length && isSpace(s[i])) i += 1;
+    let value;
+    if (s[i] === '"' || s[i] === "'") {
+      const close = s.indexOf(s[i], i + 1);
+      value = s.slice(i + 1, close === -1 ? s.length : close);
+      i = close === -1 ? s.length : close + 1;
+    } else {
+      const valueStart = i;
+      while (i < s.length && !isSpace(s[i]) && s[i] !== '>') i += 1;
+      value = s.slice(valueStart, i);
+    }
+    out[name] = value;
+  }
   return out;
+}
+
+/**
+ * The next opening `<name` tag at or after `from` (case-insensitive, a whole
+ * tag name): `{ start, nameEnd }`, or null. Plain indexOf scanning.
+ */
+function findTag(s, lower, name, from) {
+  const needle = `<${name}`;
+  let at = lower.indexOf(needle, from);
+  while (at !== -1) {
+    const after = s[at + needle.length];
+    if (after === undefined || after === '>' || after === '/' || isSpace(after)) return { start: at, nameEnd: at + needle.length };
+    at = lower.indexOf(needle, at + 1);
+  }
+  return null;
 }
 
 /** Entities decoded, whitespace collapsed, invisible characters removed, capped. */
@@ -275,25 +321,44 @@ function cleanTitle(raw) {
 
 /**
  * The page title: the `<title>` element, else the `og:title` meta, else null.
- * Entities decoded, whitespace collapsed. Never throws.
+ * Entities decoded, whitespace collapsed. Only the first 64 KB of the
+ * document are scanned (the head lives there), with indexOf and the
+ * tokenizer's `tagEnd` -- no backtracking regex, linear on any input.
+ * Never throws.
  * @param {string} html
  * @returns {string|null}
  */
 export function pageTitle(html) {
   if (typeof html !== 'string') return null;
   try {
-    const title = /<title\b[^>]*>([\s\S]*?)<\/title\s*>/i.exec(html);
-    const fromTitle = title ? cleanTitle(title[1]) : null;
-    if (fromTitle) return fromTitle;
-    const meta = /<meta\b[^>]*>/gi;
-    let m;
-    while ((m = meta.exec(html)) !== null) {
-      const attrs = attributes(m[0]);
+    const s = html.slice(0, TITLE_SCAN_CHARS);
+    // Lowercasing ASCII only keeps every index aligned with `s`.
+    const lower = s.replace(/[A-Z]+/g, (m) => m.toLowerCase());
+    const title = findTag(s, lower, 'title', 0);
+    if (title) {
+      const open = tagEnd(s, title.nameEnd);
+      if (open !== -1) {
+        let close = lower.indexOf('</title', open + 1);
+        while (close !== -1) {
+          const after = s[close + 7];
+          if (after === undefined || after === '>' || isSpace(after)) break;
+          close = lower.indexOf('</title', close + 1);
+        }
+        const fromTitle = close === -1 ? null : cleanTitle(s.slice(open + 1, close));
+        if (fromTitle) return fromTitle;
+      }
+    }
+    let from = 0;
+    for (let meta = findTag(s, lower, 'meta', from); meta; meta = findTag(s, lower, 'meta', from)) {
+      const end = tagEnd(s, meta.nameEnd);
+      if (end === -1) break; // no `>` left: no further tag can close
+      const attrs = attributes(s.slice(meta.nameEnd, end));
       const key = (attrs.property ?? attrs.name ?? '').toLowerCase();
       if (key === 'og:title' && attrs.content) {
         const fromMeta = cleanTitle(attrs.content);
         if (fromMeta) return fromMeta;
       }
+      from = end + 1;
     }
     return null;
   } catch {

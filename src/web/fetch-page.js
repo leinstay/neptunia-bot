@@ -4,20 +4,22 @@
 // literal; the hostname is resolved before EVERY request (the first one and
 // each redirect, which are followed by hand) and refused when any address it
 // resolves to is loopback, private, link-local, unspecified (or an
-// IPv4-mapped IPv6 form of one). The body is streamed under a byte cap and a
-// single timeout covers the whole chain, DNS included.
-//
-// A residual window stays: `fetch` resolves the hostname again itself, so a
-// DNS answer that changes between our check and its connect (rebinding) is
-// not caught here -- pinning the address would need a custom dispatcher,
-// which the built-in fetch does not expose without a dependency.
+// IPv4-mapped IPv6 form of one). The request then connects to exactly the
+// address that was checked (node:http/https with a `lookup` that returns
+// it), so a DNS answer that changes after the check is never used. The body
+// is streamed under a byte cap and a single timeout covers the whole chain,
+// DNS included.
 //
 // Every call resolves to a result object and never rejects. One warn line per
 // failure, carrying the reason, an HTTP status and `host/path` -- never a
 // query string (tracking ids, tokens), never the page text.
 
 import dns from 'node:dns';
+import http from 'node:http';
+import https from 'node:https';
 import net from 'node:net';
+import { pipeline } from 'node:stream';
+import zlib from 'node:zlib';
 import { log } from '../log.js';
 import { htmlToText, pageTitle, truncateText } from './readable.js';
 
@@ -62,6 +64,7 @@ function isForbiddenIpv4([a, b]) {
     || (a === 192 && b === 168) // private
     || (a === 169 && b === 254) // link-local
     || (a === 100 && b >= 64 && b <= 127) // carrier-grade NAT
+    || (a === 198 && (b === 18 || b === 19)) // benchmarking 198.18/15
     || a >= 224; // multicast, reserved, broadcast
 }
 
@@ -93,8 +96,10 @@ function ipv6Groups(ip) {
  * Whether the bot must never connect to `ip`: loopback (127/8, ::1), private
  * (10/8, 172.16/12, 192.168/16, fc00::/7), link-local (169.254/16,
  * fe80::/10), unspecified (0.0.0.0, ::), an IPv4-mapped or IPv4-compatible
- * IPv6 form of those -- plus 0/8, carrier-grade NAT (100.64/10) and
- * multicast/reserved space, which no public page lives on either. Anything
+ * IPv6 form of those -- plus 0/8, carrier-grade NAT (100.64/10),
+ * benchmarking (198.18/15), site-local fec0::/10 and multicast/reserved
+ * space, which no public page lives on either. NAT64 (64:ff9b::/96) and 6to4
+ * (2002::/16) addresses are judged by the IPv4 address they embed. Anything
  * that is not a valid address fails closed (true).
  * @param {string} ip
  * @returns {boolean}
@@ -112,8 +117,13 @@ export function isForbiddenAddress(ip) {
     if (g[5] === 0 && g[6] === 0 && g[7] <= 1) return true; // :: and ::1
     return isForbiddenIpv4([g[6] >> 8, g[6] & 0xff, g[7] >> 8, g[7] & 0xff]); // ::ffff:a.b.c.d, ::a.b.c.d
   }
+  if (g[0] === 0x64 && g[1] === 0xff9b && g.slice(2, 6).every((x) => x === 0)) {
+    return isForbiddenIpv4([g[6] >> 8, g[6] & 0xff, g[7] >> 8, g[7] & 0xff]); // NAT64 64:ff9b::a.b.c.d
+  }
+  if (g[0] === 0x2002) return isForbiddenIpv4([g[1] >> 8, g[1] & 0xff, g[2] >> 8, g[2] & 0xff]); // 6to4 2002:AABB:CCDD::/48
   return (g[0] & 0xfe00) === 0xfc00 // unique local fc00::/7
     || (g[0] & 0xffc0) === 0xfe80 // link-local fe80::/10
+    || (g[0] & 0xffc0) === 0xfec0 // site-local fec0::/10 (deprecated)
     || (g[0] & 0xff00) === 0xff00; // multicast
 }
 
@@ -139,11 +149,55 @@ function raceAbort(promise, signal) {
 /** Drop a response body we will not read, ignoring any error. */
 function discardBody(response) {
   try {
-    const pending = response?.body?.cancel?.();
-    pending?.catch?.(() => {});
+    const body = response?.body;
+    if (typeof body?.destroy === 'function') body.destroy();
+    else body?.cancel?.()?.catch?.(() => {});
   } catch {
     // nothing to release
   }
+}
+
+/** One response header (a plain object with lowercase keys, as node gives them), first value of a list. */
+function headerOf(response, name) {
+  const value = response?.headers?.[name];
+  return Array.isArray(value) ? value[0] : value ?? null;
+}
+
+/** `res` decoded when a server compresses although none was asked for; errors travel down the pipe. */
+function decodedBody(res) {
+  const encoding = String(res.headers?.['content-encoding'] ?? '').trim().toLowerCase();
+  let decoder = null;
+  if (encoding === 'gzip' || encoding === 'x-gzip') decoder = zlib.createGunzip();
+  else if (encoding === 'deflate') decoder = zlib.createInflate();
+  else if (encoding === 'br') decoder = zlib.createBrotliDecompress();
+  if (!decoder) return res;
+  return pipeline(res, decoder, () => {});
+}
+
+/**
+ * The real request: one GET over node:http/https that connects to
+ * `lookupAddress` (the address the guard checked) instead of resolving the
+ * hostname again. The Host header and the TLS server name still come from
+ * the URL. No connection pooling, so no socket outlives its check.
+ * @param {string} url
+ * @param {{ lookupAddress: string, family: number, headers: object, signal: AbortSignal }} options
+ * @returns {Promise<{ status: number, headers: object, body: AsyncIterable<Uint8Array> }>}
+ */
+function nodeRequest(url, { lookupAddress, family, headers, signal }) {
+  const parsed = new URL(url);
+  const transport = parsed.protocol === 'https:' ? https : http;
+  const pinned = (hostname, options, callback) => {
+    const done = typeof options === 'function' ? options : callback;
+    if (options?.all) done(null, [{ address: lookupAddress, family }]);
+    else done(null, lookupAddress, family);
+  };
+  return new Promise((resolve, reject) => {
+    const req = transport.request(parsed, { method: 'GET', headers, signal, agent: false, lookup: pinned }, (res) => {
+      resolve({ status: res.statusCode, headers: res.headers, body: decodedBody(res) });
+    });
+    req.on('error', reject);
+    req.end();
+  });
 }
 
 /** The charset to decode with: the header's, else an HTML meta declaration, else utf-8. */
@@ -168,10 +222,12 @@ function decode(bytes, charset) {
 
 /**
  * @param {object} [deps]
- * @param {typeof fetch} [deps.fetchImpl]
+ * @param {(url: string, options: { lookupAddress: string, family: number, headers: object, signal: AbortSignal })
+ *   => Promise<{ status: number, headers: object, body: AsyncIterable<Uint8Array> }>} [deps.requestImpl]
+ *   One GET to `url` connected to `lookupAddress`; response headers as a plain object with lowercase keys.
  * @param {(host: string, options: { all: true }) => Promise<Array<{ address: string, family: number }>>} [deps.lookup]
  */
-export function createPageFetcher({ fetchImpl = fetch, lookup = dns.promises.lookup } = {}) {
+export function createPageFetcher({ requestImpl = nodeRequest, lookup = dns.promises.lookup } = {}) {
   /** One warn line (reason, status, host/path), then the failure object. */
   function fail(url, reason, status) {
     const meta = { reason };
@@ -182,24 +238,29 @@ export function createPageFetcher({ fetchImpl = fetch, lookup = dns.promises.loo
   }
 
   /**
-   * 'ok', 'private' or 'network' for `hostname`. localhost and IP literals
-   * are refused without a lookup. A lookup cut short by the timeout rethrows,
-   * so the caller reports `timeout`.
+   * `{ verdict: 'ok', address, family }` (the first resolved address, the
+   * one to connect to) or `{ verdict: 'private'|'network' }` for `hostname`.
+   * localhost and IP literals are refused without a lookup. A lookup cut
+   * short by the timeout rethrows, so the caller reports `timeout`.
    */
   async function checkHost(hostname, signal) {
     const host = String(hostname ?? '').toLowerCase().replace(/^\[|\]$/g, '').replace(/\.+$/, '');
-    if (!host || host === 'localhost' || host.endsWith('.localhost')) return 'private';
-    if (net.isIP(host.split('%')[0]) !== 0) return 'private';
+    if (!host || host === 'localhost' || host.endsWith('.localhost')) return { verdict: 'private' };
+    if (net.isIP(host.split('%')[0]) !== 0) return { verdict: 'private' };
     let answers;
     try {
       answers = await raceAbort(lookup(host, { all: true }), signal);
     } catch (err) {
       if (signal.aborted) throw err;
-      return 'network';
+      return { verdict: 'network' };
     }
-    const list = (Array.isArray(answers) ? answers : [answers]).filter(Boolean);
-    if (!list.length) return 'network';
-    return list.some((entry) => isForbiddenAddress(typeof entry === 'string' ? entry : entry.address)) ? 'private' : 'ok';
+    const list = (Array.isArray(answers) ? answers : [answers]).filter(Boolean)
+      .map((entry) => (typeof entry === 'string' ? { address: entry } : entry));
+    if (!list.length) return { verdict: 'network' };
+    if (list.some((entry) => isForbiddenAddress(entry.address))) return { verdict: 'private' };
+    const [first] = list;
+    const family = first.family === 4 || first.family === 6 ? first.family : net.isIP(first.address);
+    return { verdict: 'ok', address: first.address, family };
   }
 
   /**
@@ -234,21 +295,21 @@ export function createPageFetcher({ fetchImpl = fetch, lookup = dns.promises.loo
         }
         if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return fail(current, 'scheme');
 
-        const verdict = await checkHost(parsed.hostname, controller.signal);
-        if (verdict !== 'ok') return fail(current, verdict);
+        const checked = await checkHost(parsed.hostname, controller.signal);
+        if (checked.verdict !== 'ok') return fail(current, checked.verdict);
 
-        const response = await fetchImpl(parsed.href, {
-          method: 'GET',
-          redirect: 'manual',
+        const response = await raceAbort(requestImpl(parsed.href, {
+          lookupAddress: checked.address,
+          family: checked.family,
           headers: { ...REQUEST_HEADERS },
           signal: controller.signal,
-        });
+        }), controller.signal);
         if (!response || typeof response !== 'object') return fail(current, 'network');
         const { status } = response;
 
         if (REDIRECT_STATUSES.has(status)) {
           discardBody(response);
-          const location = response.headers?.get?.('location');
+          const location = headerOf(response, 'location');
           if (!location) return fail(current, 'http', status);
           if (hop >= hops) return fail(current, 'redirects');
           try {
@@ -258,19 +319,19 @@ export function createPageFetcher({ fetchImpl = fetch, lookup = dns.promises.loo
           }
           continue;
         }
-        if (!response.ok) {
+        if (!(status >= 200 && status < 300)) {
           discardBody(response);
           return fail(current, 'http', status);
         }
 
-        const rawType = response.headers?.get?.('content-type');
+        const rawType = headerOf(response, 'content-type');
         const contentType = bareContentType(rawType);
         const isHtml = HTML_TYPES.has(contentType);
         if (!isHtml && contentType !== PLAIN_TYPE) {
           discardBody(response);
           return fail(current, 'type');
         }
-        const declared = Number(response.headers?.get?.('content-length') ?? NaN);
+        const declared = Number(headerOf(response, 'content-length') ?? NaN);
         if (Number.isFinite(declared) && declared > byteCap) {
           discardBody(response);
           return fail(current, 'size');

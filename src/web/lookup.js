@@ -36,6 +36,10 @@ const UNREADABLE_MAX_WORDS = 4;
 const LINK_SUMMARY_CHARS_FALLBACK = 700;
 const SEARCH_SUMMARY_CHARS_FALLBACK = 900;
 const SEARCH_CACHE_HOURS_FALLBACK = 24;
+const QUERY_MAX_CHARS = 200;
+// Tab, line feed, vertical tab, form feed, carriage return, NEL, line and paragraph separators.
+const QUERY_LINE_BREAKS = /[\t\n\v\f\r\u0085\u2028\u2029]+/g;
+const QUERY_CONTROLS = /[\u0000-\u001f\u007f-\u009f]/g;
 
 /**
  * Whether the web lookup is on. Unlike the other `features.*` switches a
@@ -102,6 +106,28 @@ export function normaliseQuery(query) {
     .toLowerCase()
     .replace(/\s+/gu, ' ')
     .trim();
+}
+
+/**
+ * A search query made safe to fill into the search-summary prompt (and to
+ * render in the `<lookup>` header): one line (line breaks and tabs become a
+ * space), no `<` or `>`, no control characters, trimmed, at most 200
+ * UTF-16 units without splitting a surrogate pair. Inner spaces are kept.
+ * @param {string} query
+ * @returns {string}
+ */
+export function cleanQuery(query) {
+  const flat = String(query ?? '')
+    .replace(QUERY_LINE_BREAKS, ' ')
+    .replace(QUERY_CONTROLS, '')
+    .replace(/[<>]/g, '')
+    .trim();
+  let out = '';
+  for (const point of flat) {
+    if (out.length + point.length > QUERY_MAX_CHARS) break;
+    out += point;
+  }
+  return out.trim();
 }
 
 /** The cache key of one search. */
@@ -232,11 +258,11 @@ export function createLookup({ hot, store, llm, state = memoryState(), pageFetch
         },
       );
     } catch (err) {
-      if (err instanceof TokenLimitError || err instanceof DailyCapError) {
-        // A safety rail is not the page's fault: nothing cached, retried later.
-        report('error', err instanceof TokenLimitError ? 'tokenLimit' : 'dailyCap');
-        return { result: null, attempted: true };
-      }
+      // A safety-rail refusal is cached as a miss like any other (skipped for
+      // the same 6 hours), so the page is not re-fetched and re-charged on
+      // every turn that sees the link.
+      if (err instanceof TokenLimitError) return miss('tokenLimit');
+      if (err instanceof DailyCapError) return miss('dailyCap');
       return miss('llm', err?.statusCode !== undefined ? { status: err.statusCode } : {});
     }
 
@@ -322,7 +348,7 @@ export function createLookup({ hot, store, llm, state = memoryState(), pageFetch
     const searchCfg = config.web?.search ?? {};
     if (searchCfg.enabled === false) return null;
     const promptText = hot.prompts?.['search-summary'];
-    const asked = String(query ?? '').trim();
+    const asked = cleanQuery(query);
     if (!promptText || !asked) return null;
     if (!hasSearch()) return null;
 

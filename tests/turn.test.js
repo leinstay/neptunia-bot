@@ -1239,7 +1239,8 @@ function rewatchHot(features = {}, video = {}, config = {}) {
     { mediaDescriptions: true, videoDescriptions: true, vision: false, ...features },
     {},
     {
-      media: { model: 'x/haiku', maxPerTurn: 6, filePreviewChars: 500, video: { maxPerTurn: 1, sites: ['youtube.com'], ...video } },
+      classifier: { media: 'x/haiku' },
+      media: { maxPerTurn: 6, filePreviewChars: 500, video: { maxPerTurn: 1, sites: ['youtube.com'], ...video } },
       ...config,
     },
   );
@@ -1289,19 +1290,19 @@ test('createTurnRunner: rewatch -- the classifier gets the watched videos and th
   assert.ok(userMessage.includes(`${watched} ${answered}`), 'the answer follows the watched tag');
 });
 
-test('createTurnRunner: rewatch -- the classifier model is classifierTextModel (classifier.text, the deprecated llm.classifierModel and mention.followUpModel, then the media model); a stale rewatch.model is ignored', async () => {
+test('createTurnRunner: rewatch -- the classifier model is classifierTextModel (classifier.text, then classifier.media); the deprecated keys and a stale rewatch.model are ignored', async () => {
   const withText = rewatchHot({}, { rewatch: { model: 'x/pick' } }, { classifier: { text: 'x/text' }, mention: { followUpModel: 'x/older' } });
   withText.config.llm.classifierModel = 'x/old';
   assert.equal((await runRewatch({ hot: withText })).llm.classifierCalls[0].options.model, 'x/text');
   const withOld = rewatchHot({}, { rewatch: { model: 'x/pick' } }, { mention: { followUpModel: 'x/older' } });
   withOld.config.llm.classifierModel = 'x/old';
-  assert.equal((await runRewatch({ hot: withOld })).llm.classifierCalls[0].options.model, 'x/old');
-  const withOlder = await runRewatch({ hot: rewatchHot({}, { rewatch: { model: 'x/pick' } }, { mention: { followUpModel: 'x/older' } }) });
-  assert.equal(withOlder.llm.classifierCalls[0].options.model, 'x/older');
+  assert.equal((await runRewatch({ hot: withOld })).llm.classifierCalls[0].options.model, 'x/haiku', 'classifier.media, never a deprecated key');
   const withMedia = await runRewatch({ hot: rewatchHot({}, { rewatch: { model: 'x/pick' } }, { classifier: { media: 'x/vision' } }) });
   assert.equal(withMedia.llm.classifierCalls[0].options.model, 'x/vision');
-  const withNone = await runRewatch({ hot: rewatchHot({}, { rewatch: { model: 'x/pick' } }) });
-  assert.equal(withNone.llm.classifierCalls[0].options.model, 'x/haiku', 'the deprecated media.model as the last fallback');
+  const staleMedia = rewatchHot({}, { rewatch: { model: 'x/pick' } }, { classifier: {} });
+  staleMedia.config.media.model = 'x/old-media';
+  const withNone = await runRewatch({ hot: staleMedia });
+  assert.equal(withNone.llm.classifierCalls[0].options.model, undefined, 'the deprecated media.model is no fallback');
 });
 
 test('createTurnRunner: rewatch -- none, garbage, an unknown id or a classifier error stop without a second look', async () => {
@@ -1688,6 +1689,21 @@ test('parseLookupQuery: none (any case, a trailing dot), empty or blank -> no qu
   assert.deepEqual(parseLookupQuery(null), { query: null, reason: 'empty' });
   assert.deepEqual(parseLookupQuery('\n  qui a gagné la finale  \nsecond'), { query: 'qui a gagné la finale', reason: 'ok' });
   assert.equal([...parseLookupQuery('λ'.repeat(300)).query].length, 200);
+});
+
+test('parseLookupQuery: any first line starting with the word none is none, quotes and trailing punctuation aside', () => {
+  for (const raw of ['None needed.', '"none"', '`none`', "'None.'", 'none!', 'NONE -- nothing to look up', '\u201cnone\u201d', '``none``']) {
+    assert.deepEqual(parseLookupQuery(raw), { query: null, reason: 'none' }, raw);
+  }
+  assert.deepEqual(parseLookupQuery('nonexistent planets list'), { query: 'nonexistent planets list', reason: 'ok' });
+  assert.deepEqual(parseLookupQuery('nonetheless the score'), { query: 'nonetheless the score', reason: 'ok' });
+});
+
+test('parseLookupQuery: surrounding quotes/backticks and trailing punctuation are stripped from the query', () => {
+  assert.deepEqual(parseLookupQuery('"qui a gagné la finale ?"'), { query: 'qui a gagné la finale', reason: 'ok' });
+  assert.deepEqual(parseLookupQuery('`ώρα στην Αθήνα`.'), { query: 'ώρα στην Αθήνα', reason: 'ok' });
+  assert.deepEqual(parseLookupQuery("'C++ release date'"), { query: 'C++ release date', reason: 'ok' });
+  assert.deepEqual(parseLookupQuery('"..."'), { query: null, reason: 'empty' });
 });
 
 /** A raw message carrying link embeds. */

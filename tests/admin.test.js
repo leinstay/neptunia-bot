@@ -532,7 +532,7 @@ test('run: model.show falls back to classifier.media for classifier.text when un
   assert.ok(result.split('\n').includes('classifier.text: anthropic/claude-haiku-4.5'));
 });
 
-test('run: model.show resolves the deprecated keys of an old config.local.json', async () => {
+test('run: model.show ignores the deprecated keys of an old config.local.json', async () => {
   const rootDir = makeRoot();
   const hot = makeHotWithMedia(rootDir);
   hot.config.classifier = {};
@@ -542,9 +542,10 @@ test('run: model.show resolves the deprecated keys of an old config.local.json',
   const { admin } = makeAdmin(rootDir, { hot });
 
   const lines = (await admin.run('model.show', {}, {})).split('\n');
-  assert.ok(lines.includes('classifier.text: openrouter/old-classifier'));
-  assert.ok(lines.includes('classifier.media: openrouter/old-media'));
-  assert.ok(lines.includes('classifier.video: openrouter/old-video'));
+  assert.ok(lines.includes('classifier.text: -'));
+  assert.ok(lines.includes('classifier.media: -'));
+  assert.ok(lines.includes('classifier.video: -'));
+  assert.ok(!lines.some((l) => l.includes('openrouter/old')), 'no deprecated key is shown');
   assert.ok(!lines.some((l) => /^(followup|media|video|classifier):/.test(l)), 'the old role names are gone from the listing');
 });
 

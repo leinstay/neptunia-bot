@@ -1596,7 +1596,7 @@ test('follow-up: the address classifier uses classifier.text over the deprecated
   await p;
 });
 
-test('follow-up: the address classifier still honours a deprecated llm.classifierModel when classifier.text is null', async () => {
+test('follow-up: the address classifier ignores a deprecated llm.classifierModel when classifier.text is null', async () => {
   const llm = fakeFollowUpLlm();
   const config = baseConfig({ classifier: { text: null }, llm: { classifierModel: 'x/old' }, mention: { followUpModel: 'x/older' } });
   const handler = makeHandler({ config, llm, prompts: fakeAddressPrompts() });
@@ -1609,13 +1609,13 @@ test('follow-up: the address classifier still honours a deprecated llm.classifie
   await new Promise((resolve) => setTimeout(resolve, 0));
 
   assert.equal(llm.calls.length, 1);
-  assert.equal(llm.calls[0].options.model, 'x/old');
+  assert.equal(llm.calls[0].options.model, config.classifier.media, 'classifier.media, never the deprecated key');
 
   llm.respond('no');
   await p;
 });
 
-test('follow-up: the address classifier still honours a deprecated mention.followUpModel when classifier.text and llm.classifierModel are null', async () => {
+test('follow-up: the address classifier ignores a deprecated mention.followUpModel when classifier.text and llm.classifierModel are null', async () => {
   const llm = fakeFollowUpLlm();
   const config = baseConfig({ classifier: { text: null }, llm: { classifierModel: null }, mention: { followUpModel: 'x/older' } });
   const handler = makeHandler({ config, llm, prompts: fakeAddressPrompts() });
@@ -1628,7 +1628,7 @@ test('follow-up: the address classifier still honours a deprecated mention.follo
   await new Promise((resolve) => setTimeout(resolve, 0));
 
   assert.equal(llm.calls.length, 1);
-  assert.equal(llm.calls[0].options.model, 'x/older');
+  assert.equal(llm.calls[0].options.model, config.classifier.media, 'classifier.media, never the deprecated key');
 
   llm.respond('no');
   await p;
@@ -2129,6 +2129,94 @@ test('events: no link prefill when webLookup is off or missing, links are disabl
     await handler(fakeMessage({ id: 'm1', cleanContent: 'κοίτα', embeds: LINK_EMBEDS }));
     assert.equal(lookup.readCalls.length, 0);
   }
+});
+
+/** A lookup whose every prefill read is a new fetch attempt (newCount = the links it was allowed). */
+function attemptingLookup({ attempted = true } = {}) {
+  const readCalls = [];
+  return {
+    readCalls,
+    readLinks: async (guildId, links, options) => {
+      readCalls.push({ guildId, links, options });
+      return { reads: new Map(), newCount: attempted ? Math.min(links.length, options?.maxNew ?? Infinity) : 0 };
+    },
+  };
+}
+
+/** A message from `authorId` carrying one readable link of its own. */
+function linkMessage(id, authorId) {
+  return fakeMessage({
+    id,
+    cleanContent: 'κοίτα',
+    author: { id: authorId, bot: false, globalName: authorId, username: authorId },
+    embeds: [{ url: `https://example.org/${id}`, title: 'Crêpes' }],
+  });
+}
+
+const settle = () => new Promise((resolve) => setImmediate(resolve));
+
+test('events: link prefill is capped per member per day by web.links.prefillPerUserPerDay; others are unaffected', async () => {
+  const lookup = attemptingLookup();
+  const handler = makeHandler({ config: webConfig({ web: { links: { prefillPerUserPerDay: 2 } } }), lookup, now: () => Date.UTC(2026, 8, 20, 10) });
+  for (const id of ['m1', 'm2', 'm3', 'm4']) {
+    await handler(linkMessage(id, 'u1'));
+    await settle();
+  }
+  assert.deepEqual(lookup.readCalls.map((c) => c.links[0].url), ['https://example.org/m1', 'https://example.org/m2']);
+  assert.ok(lookup.readCalls.every((c) => c.options.maxNew === 1));
+
+  await handler(linkMessage('m5', 'u2'));
+  await settle();
+  assert.equal(lookup.readCalls.length, 3, 'another member still gets a prefill');
+  assert.equal(lookup.readCalls[2].links[0].url, 'https://example.org/m5');
+});
+
+test('events: the per-member prefill count resets on a new UTC day', async () => {
+  let now = Date.UTC(2026, 8, 20, 23, 59);
+  const lookup = attemptingLookup();
+  const handler = makeHandler({ config: webConfig({ web: { links: { prefillPerUserPerDay: 1 } } }), lookup, now: () => now });
+  await handler(linkMessage('m1', 'u1'));
+  await settle();
+  await handler(linkMessage('m2', 'u1'));
+  await settle();
+  assert.equal(lookup.readCalls.length, 1);
+  now = Date.UTC(2026, 8, 21, 0, 1);
+  await handler(linkMessage('m3', 'u1'));
+  await settle();
+  assert.equal(lookup.readCalls.length, 2);
+});
+
+test('events: a prefill that fetched nothing new (a cache hit) does not count toward the member limit', async () => {
+  const lookup = attemptingLookup({ attempted: false });
+  const handler = makeHandler({ config: webConfig({ web: { links: { prefillPerUserPerDay: 1 } } }), lookup });
+  for (const id of ['m1', 'm2', 'm3']) {
+    await handler(linkMessage(id, 'u1'));
+    await settle();
+  }
+  assert.equal(lookup.readCalls.length, 3);
+});
+
+test('events: prefillPerUserPerDay 0 turns the link prefill off; a missing key means 10', async () => {
+  const off = attemptingLookup();
+  const offHandler = makeHandler({ config: webConfig({ web: { links: { prefillPerUserPerDay: 0 } } }), lookup: off });
+  await offHandler(linkMessage('m1', 'u1'));
+  await settle();
+  assert.equal(off.readCalls.length, 0);
+
+  const config = webConfig();
+  delete config.web.links.prefillPerUserPerDay;
+  const byDefault = attemptingLookup();
+  const handler = makeHandler({ config, lookup: byDefault });
+  for (let i = 0; i < 12; i += 1) {
+    await handler(linkMessage(`n${i}`, 'u1'));
+    await settle();
+  }
+  assert.equal(byDefault.readCalls.length, 10);
+});
+
+test('events: config.json ships web.links.prefillPerUserPerDay = 10', () => {
+  const shipped = JSON.parse(fs.readFileSync(new URL('../config.json', import.meta.url), 'utf8'));
+  assert.equal(shipped.web.links.prefillPerUserPerDay, 10);
 });
 
 test('events: a message with no readable link never calls readLinks; a lookup failure is swallowed', async () => {

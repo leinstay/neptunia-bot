@@ -131,15 +131,31 @@ export function parseRewatchPickDetailed(raw, count) {
 
 const LOOKUP_QUERY_CHARS = 200;
 const LOOKUP_CLASSIFIER_MAX_TOKENS = 60;
-// Protocol token of the search classifier (prompts/lookup.md), not wording.
-const LOOKUP_NONE = /^none\.?$/i;
+// Protocol token of the search classifier (prompts/lookup.md), not wording:
+// a line whose first word is `none` (so `None needed.` counts too).
+const LOOKUP_NONE = /^none\b/i;
+// Quotes and backticks a model may wrap its one line in (straight, curly, guillemets).
+const LOOKUP_QUOTES = new Set(['"', "'", '`', '\u201c', '\u201d', '\u2018', '\u2019', '\u00ab', '\u00bb']);
+const LOOKUP_TRAILING_PUNCTUATION = new Set(['.', ',', ';', ':', '!', '?', '\u2026']);
+
+/** `line` without surrounding quotes/backticks and trailing punctuation (one pass each way, no regex). */
+function stripLookupLine(line) {
+  const points = [...line];
+  let start = 0;
+  let end = points.length;
+  const isSpace = (c) => c.trim() === '';
+  while (start < end && (LOOKUP_QUOTES.has(points[start]) || isSpace(points[start]))) start += 1;
+  while (end > start && (LOOKUP_QUOTES.has(points[end - 1]) || LOOKUP_TRAILING_PUNCTUATION.has(points[end - 1]) || isSpace(points[end - 1]))) end -= 1;
+  return points.slice(start, end).join('');
+}
 
 /**
  * Parse the search classifier's answer (prompts/lookup.md): ONE line, `none`
- * or a search query. Only the first non-empty line counts; `none` (any case,
- * a trailing dot tolerated) or nothing at all -> no query. The query is
- * trimmed and cut to 200 characters. `reason` is a code safe to log:
- * `none`, `empty` or `ok`.
+ * or a search query. Only the first non-empty line counts. Surrounding
+ * quotes/backticks and trailing punctuation are stripped first; then a line
+ * whose first word is `none` (any case: `none`, `"none"`, `None needed.`) or
+ * nothing at all -> no query. The query is cut to 200 characters. `reason`
+ * is a code safe to log: `none`, `empty` or `ok`.
  * @param {string} raw
  * @returns {{ query: string|null, reason: 'none'|'empty'|'ok' }}
  */
@@ -149,8 +165,9 @@ export function parseLookupQuery(raw) {
     .map((l) => l.trim())
     .find(Boolean);
   if (!line) return { query: null, reason: 'empty' };
-  if (LOOKUP_NONE.test(line)) return { query: null, reason: 'none' };
-  const query = [...line].slice(0, LOOKUP_QUERY_CHARS).join('').trim();
+  const stripped = stripLookupLine(line);
+  if (LOOKUP_NONE.test(stripped)) return { query: null, reason: 'none' };
+  const query = [...stripped].slice(0, LOOKUP_QUERY_CHARS).join('').trim();
   return query ? { query, reason: 'ok' } : { query: null, reason: 'empty' };
 }
 

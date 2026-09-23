@@ -25,7 +25,8 @@ function fakeHot(overrides = {}) {
   return {
     config: {
       features: { mediaDescriptions: true },
-      media: { model: 'x/haiku', maxOutputTokens: 120, imageSize: 512, cacheEntries: 5000, maxPerTurn: 6 },
+      classifier: { media: 'x/haiku' },
+      media: { maxOutputTokens: 120, imageSize: 512, cacheEntries: 5000, maxPerTurn: 6 },
       context: { vision: { maxBytes: 1_500_000, fetchTimeoutMs: 10_000 } },
       ...overrides.config,
     },
@@ -431,7 +432,7 @@ test('describe: passes llm.timeoutMs (the chat timeout, not the analyzer\'s) as 
   assert.equal(llm.calls[0].options.timeoutMs, 90000);
 });
 
-test('describe: the picture model is classifier.media, over the deprecated media.model', async () => {
+test('describe: the picture model is classifier.media; the deprecated media.model is ignored', async () => {
   const run = async (config) => {
     const hot = fakeHot({ config });
     const llm = fakeLlm({ text: 'a cat' });
@@ -440,7 +441,8 @@ test('describe: the picture model is classifier.media, over the deprecated media
     return llm.calls[0].options.model;
   };
   assert.equal(await run({ classifier: { media: 'x/vision' } }), 'x/vision');
-  assert.equal(await run({ classifier: { media: null } }), 'x/haiku', 'an old config.local.json media.model still works');
+  const stale = { classifier: { media: null }, media: { model: 'x/old-media', maxOutputTokens: 120, imageSize: 512, cacheEntries: 5000, maxPerTurn: 6 } };
+  assert.equal(await run(stale), undefined, 'an old config.local.json media.model never takes effect');
 });
 
 // --- describeMany --------------------------------------------------------
@@ -500,7 +502,6 @@ test('describeMany: feature off -- every describe() call is a no-op, empty resul
 
 const VIDEO_PROMPT = 'Watch this clip and say what happens.';
 const VIDEO_CFG = {
-  model: 'x/video-model',
   provider: { order: ['pinned'], allow_fallbacks: false },
   maxOutputTokens: 400,
   maxRequestTokens: 60_000,
@@ -521,7 +522,8 @@ function videoHot({ features = {}, video = {}, prompts = {} } = {}) {
   return {
     config: {
       features: { mediaDescriptions: true, videoDescriptions: true, ...features },
-      media: { model: 'x/haiku', maxOutputTokens: 120, cacheEntries: 5000, video: { ...VIDEO_CFG, ...video } },
+      classifier: { media: 'x/haiku', video: 'x/video-model' },
+      media: { maxOutputTokens: 120, cacheEntries: 5000, video: { ...VIDEO_CFG, ...video } },
       context: { vision: { maxBytes: 1_500_000, fetchTimeoutMs: 10_000 } },
     },
     prompts: { describe: 'Describe this picture.', 'describe-video': VIDEO_PROMPT, ...prompts },
@@ -653,16 +655,18 @@ test('describeVideo: attachment is watched through a data URL with the video set
   assert.equal(state.data.videoCount, 1);
 });
 
-test('describeVideo: the video model is classifier.video, over the deprecated media.video.model', async () => {
+test('describeVideo: the video model is classifier.video; the deprecated media.video.model is ignored', async () => {
   const withNew = videoHot();
   withNew.config.classifier = { video: 'x/new-video', media: 'x/vision' };
   const fresh = videoDescriber({ hot: withNew });
   await fresh.describer.describeVideo('g1', videoAttachment());
   assert.equal(fresh.llm.calls[0].options.model, 'x/new-video');
 
-  const old = videoDescriber();
+  const withOld = videoHot({ video: { model: 'x/old-video' } });
+  withOld.config.classifier = { video: null, media: 'x/vision' };
+  const old = videoDescriber({ hot: withOld });
   await old.describer.describeVideo('g1', videoAttachment());
-  assert.equal(old.llm.calls[0].options.model, 'x/video-model', 'an old config.local.json media.video.model still works');
+  assert.equal(old.llm.calls[0].options.model, undefined, 'an old config.local.json media.video.model never takes effect');
 });
 
 test('describe: config.json ships the helper models under classifier, none under media', () => {
@@ -1540,7 +1544,7 @@ test('rewatchVideo: one fetch and one video request with the question and answer
   assert.equal(system.content, 'Question: De quelle couleur est la voiture ?. At most 1200 characters.');
   assert.deepEqual(user.content, [{ type: 'video_url', video_url: { url: CLIP_DATA_URL } }]);
   const options = llm.calls[0].options;
-  assert.equal(options.model, 'x/video-model', 'the second look uses the video model (here the deprecated media.video.model)');
+  assert.equal(options.model, 'x/video-model', 'the second look uses the video model (classifier.video)');
   assert.equal(options.maxOutputTokens, 600);
   assert.equal(options.maxRequestTokens, 60_000);
   assert.equal(options.videoSeconds, 12);

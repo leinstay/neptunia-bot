@@ -25,7 +25,7 @@ import { createPageFetcher } from './web/fetch-page.js';
 import { createBraveSearch } from './web/brave.js';
 import { createLookup } from './web/lookup.js';
 import { createAdmin } from './admin.js';
-import { createTagHistory } from './behavior/mention.js';
+import { createTagHistory, deprecatedModelKeys } from './behavior/mention.js';
 import { createMessageHandler } from './discord/events.js';
 import { resolveGuild } from './discord/guild.js';
 import { isValidCommandName, registerCommands, createInteractionHandler } from './discord/commands.js';
@@ -76,6 +76,10 @@ if (!isValidCommandName(hot.config.bot.commandName)) {
       '(config.local.json).',
   );
 }
+
+// The old per-feature model keys are never read (classifier.* replaced them);
+// say so once, key names only, never a value.
+for (const { key, use } of deprecatedModelKeys(hot.config)) log.warn('config: deprecated model key ignored', { key, use });
 
 const store = createStore({ dataDir: path.join(ROOT_DIR, 'data') });
 

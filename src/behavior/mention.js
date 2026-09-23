@@ -136,46 +136,57 @@ export function parseFollowUpVerdict(text) {
 }
 
 // The helper models, grouped by modality under the `classifier` config block.
-// Each resolver takes the full hot config at the moment of use.
+// Each resolver takes the full hot config at the moment of use. The older
+// per-feature keys are never read: config.json always ships `classifier.*`,
+// so they could never take effect; deprecatedModelKeys lets startup warn.
 
 /**
  * The text classifier model (the address classifier, the re-watch
- * classifier): `classifier.text`, else the DEPRECATED `llm.classifierModel`,
- * else the DEPRECATED `mention.followUpModel` (both kept only so an old
- * config.local.json still works), else the media model
+ * classifier): `classifier.text`, else the media model
  * (classifierMediaModel); `undefined` when none is set.
  * @param {object|undefined} config  the full hot config
  * @returns {string|undefined}
  */
 export function classifierTextModel(config) {
-  return (
-    config?.classifier?.text ||
-    config?.llm?.classifierModel ||
-    config?.mention?.followUpModel ||
-    classifierMediaModel(config)
-  );
+  return config?.classifier?.text || classifierMediaModel(config);
 }
 
 /**
- * The picture model (the media describer): `classifier.media`, else the
- * DEPRECATED `media.model` (an old config.local.json). No further fallback:
+ * The picture model (the media describer): `classifier.media`. No fallback:
  * the describer needs a vision-capable model. `undefined` when none is set.
  * @param {object|undefined} config  the full hot config
  * @returns {string|undefined}
  */
 export function classifierMediaModel(config) {
-  return config?.classifier?.media || config?.media?.model || undefined;
+  return config?.classifier?.media || undefined;
 }
 
 /**
  * The video model (the video describer and its second look):
- * `classifier.video`, else the DEPRECATED `media.video.model` (an old
- * config.local.json). `undefined` when none is set.
+ * `classifier.video`. `undefined` when none is set.
  * @param {object|undefined} config  the full hot config
  * @returns {string|undefined}
  */
 export function classifierVideoModel(config) {
-  return config?.classifier?.video || config?.media?.video?.model || undefined;
+  return config?.classifier?.video || undefined;
+}
+
+const DEPRECATED_MODEL_KEYS = [
+  { key: 'llm.classifierModel', use: 'classifier.text', read: (c) => c?.llm?.classifierModel },
+  { key: 'mention.followUpModel', use: 'classifier.text', read: (c) => c?.mention?.followUpModel },
+  { key: 'media.model', use: 'classifier.media', read: (c) => c?.media?.model },
+  { key: 'media.video.model', use: 'classifier.video', read: (c) => c?.media?.video?.model },
+];
+
+/**
+ * The old model keys set (non-null) in `config`, each with the key that
+ * replaced it -- they are ignored, so startup warns about them. Key names
+ * only, never a value.
+ * @param {object|undefined} config  the full hot config
+ * @returns {Array<{ key: string, use: string }>}
+ */
+export function deprecatedModelKeys(config) {
+  return DEPRECATED_MODEL_KEYS.filter(({ read }) => read(config) != null).map(({ key, use }) => ({ key, use }));
 }
 
 /**

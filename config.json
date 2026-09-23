@@ -185,7 +185,7 @@
   },
   "web": {
     "maxPerDay": 60,
-    "links": { "enabled": true, "prefill": true, "maxPerTurn": 2, "maxBytes": 1500000, "textChars": 6000, "summaryChars": 700, "maxOutputTokens": 300, "fetchTimeoutMs": 10000, "skipSites": [] },
+    "links": { "enabled": true, "prefill": true, "prefillPerUserPerDay": 10, "maxPerTurn": 2, "maxBytes": 1500000, "textChars": 6000, "summaryChars": 700, "maxOutputTokens": 300, "fetchTimeoutMs": 10000, "skipSites": [] },
     "search": { "enabled": true, "maxPerTurn": 1, "results": 5, "summaryChars": 900, "maxOutputTokens": 400, "cacheHours": 24, "contextMessages": 50, "timeoutMs": 10000 }
   },
   "warmup": {

@@ -14,6 +14,7 @@ import {
   classifierTextModel,
   classifierMediaModel,
   classifierVideoModel,
+  deprecatedModelKeys,
   parseFollowUpVerdict,
 } from '../src/behavior/mention.js';
 
@@ -399,40 +400,27 @@ test('decideMention: affinityScore is ignored inside the spam branch', () => {
   assert.equal(withAffinity.ignoreChance, CFG.spamIgnoreChance);
 });
 
-test('classifierModelOf: llm.classifierModel wins over the deprecated mention.followUpModel and media.model', () => {
-  const config = { llm: { classifierModel: 'x/classifier' }, mention: { followUpModel: 'x/old' }, media: { model: 'x/media' } };
-  assert.equal(classifierModelOf(config), 'x/classifier');
+const OLD_KEYS = {
+  llm: { classifierModel: 'x/llm-classifier' },
+  mention: { followUpModel: 'x/old' },
+  media: { model: 'x/old-media', video: { model: 'x/old-video' } },
+};
+
+test('classifierTextModel: classifier.text, else classifier.media', () => {
+  assert.equal(classifierTextModel({ ...OLD_KEYS, classifier: { text: 'x/text', media: 'x/media' } }), 'x/text');
+  assert.equal(classifierTextModel({ ...OLD_KEYS, classifier: { text: null, media: 'x/media' } }), 'x/media');
 });
 
-test('classifierModelOf: an old config.local.json mention.followUpModel is still honoured when llm.classifierModel is unset', () => {
-  assert.equal(classifierModelOf({ llm: { classifierModel: null }, mention: { followUpModel: 'x/old' }, media: { model: 'x/media' } }), 'x/old');
-  assert.equal(classifierModelOf({ mention: { followUpModel: 'x/old' }, media: { model: 'x/media' } }), 'x/old');
-});
-
-test('classifierModelOf: falls back to media.model, and to undefined with nothing set', () => {
-  assert.equal(classifierModelOf({ llm: { classifierModel: null }, media: { model: 'x/media' } }), 'x/media');
-  assert.equal(classifierModelOf({}), undefined);
-  assert.equal(classifierModelOf(undefined), undefined);
-});
-
-test('classifierTextModel: classifier.text wins over every deprecated key and the media model', () => {
-  const config = {
-    classifier: { text: 'x/text', media: 'x/media' },
-    llm: { classifierModel: 'x/llm-classifier' },
-    mention: { followUpModel: 'x/old' },
-    media: { model: 'x/old-media' },
-  };
-  assert.equal(classifierTextModel(config), 'x/text');
-});
-
-test('classifierTextModel: the deprecated llm.classifierModel, then mention.followUpModel, then the media model', () => {
-  const base = { classifier: { text: null, media: 'x/media' } };
-  assert.equal(classifierTextModel({ ...base, llm: { classifierModel: 'x/llm-classifier' }, mention: { followUpModel: 'x/old' } }), 'x/llm-classifier');
-  assert.equal(classifierTextModel({ ...base, mention: { followUpModel: 'x/old' } }), 'x/old');
-  assert.equal(classifierTextModel(base), 'x/media');
-  assert.equal(classifierTextModel({ media: { model: 'x/old-media' } }), 'x/old-media', 'the media fallback goes through classifierMediaModel');
+test('classifierTextModel: the deprecated llm.classifierModel, mention.followUpModel and media.model are ignored', () => {
+  assert.equal(classifierTextModel({ ...OLD_KEYS, classifier: { text: null, media: null, video: 'x/video' } }), undefined);
+  assert.equal(classifierTextModel(OLD_KEYS), undefined);
   assert.equal(classifierTextModel({}), undefined);
   assert.equal(classifierTextModel(undefined), undefined);
+});
+
+test('classifierModelOf: the deprecated keys are ignored there too', () => {
+  assert.equal(classifierModelOf(OLD_KEYS), undefined);
+  assert.equal(classifierModelOf({ ...OLD_KEYS, classifier: { media: 'x/media' } }), 'x/media');
 });
 
 test('classifierModelOf: an alias of classifierTextModel', () => {
@@ -440,16 +428,35 @@ test('classifierModelOf: an alias of classifierTextModel', () => {
   assert.equal(classifierModelOf(config), classifierTextModel(config));
 });
 
-test('classifierMediaModel: classifier.media, else the deprecated media.model, and nothing further', () => {
-  assert.equal(classifierMediaModel({ classifier: { media: 'x/media' }, media: { model: 'x/old-media' } }), 'x/media');
-  assert.equal(classifierMediaModel({ classifier: { media: null }, media: { model: 'x/old-media' } }), 'x/old-media');
-  assert.equal(classifierMediaModel({ classifier: { text: 'x/text' }, llm: { model: 'x/talk', classifierModel: 'x/c' } }), undefined, 'never a text-only model');
+test('classifierMediaModel: classifier.media only; the deprecated media.model is ignored', () => {
+  assert.equal(classifierMediaModel({ ...OLD_KEYS, classifier: { media: 'x/media' } }), 'x/media');
+  assert.equal(classifierMediaModel({ ...OLD_KEYS, classifier: { media: null } }), undefined);
+  assert.equal(classifierMediaModel(OLD_KEYS), undefined);
+  assert.equal(classifierMediaModel({ classifier: { text: 'x/text' }, llm: { model: 'x/talk' } }), undefined, 'never a text-only model');
   assert.equal(classifierMediaModel(undefined), undefined);
 });
 
-test('classifierVideoModel: classifier.video, else the deprecated media.video.model', () => {
-  assert.equal(classifierVideoModel({ classifier: { video: 'x/video' }, media: { video: { model: 'x/old-video' } } }), 'x/video');
-  assert.equal(classifierVideoModel({ classifier: { video: null }, media: { video: { model: 'x/old-video' } } }), 'x/old-video');
-  assert.equal(classifierVideoModel({ classifier: { media: 'x/media' }, media: { model: 'x/old-media' } }), undefined, 'never the picture model');
+test('classifierVideoModel: classifier.video only; the deprecated media.video.model is ignored', () => {
+  assert.equal(classifierVideoModel({ ...OLD_KEYS, classifier: { video: 'x/video' } }), 'x/video');
+  assert.equal(classifierVideoModel({ ...OLD_KEYS, classifier: { video: null } }), undefined);
+  assert.equal(classifierVideoModel({ ...OLD_KEYS, classifier: { media: 'x/media' } }), undefined, 'never the picture model');
   assert.equal(classifierVideoModel(undefined), undefined);
+});
+
+test('deprecatedModelKeys: each old model key that is set, with its replacement, in a fixed order', () => {
+  assert.deepEqual(deprecatedModelKeys(OLD_KEYS), [
+    { key: 'llm.classifierModel', use: 'classifier.text' },
+    { key: 'mention.followUpModel', use: 'classifier.text' },
+    { key: 'media.model', use: 'classifier.media' },
+    { key: 'media.video.model', use: 'classifier.video' },
+  ]);
+  assert.deepEqual(deprecatedModelKeys({ media: { video: { model: 'x/v' } }, llm: { model: 'x/talk' } }), [
+    { key: 'media.video.model', use: 'classifier.video' },
+  ]);
+});
+
+test('deprecatedModelKeys: none for a current config, a null old key or no config', () => {
+  assert.deepEqual(deprecatedModelKeys({ classifier: { text: 'a', media: 'b', video: 'c' }, llm: { model: 'x' }, media: { maxPerTurn: 6 } }), []);
+  assert.deepEqual(deprecatedModelKeys({ llm: { classifierModel: null }, mention: {} }), []);
+  assert.deepEqual(deprecatedModelKeys(undefined), []);
 });
