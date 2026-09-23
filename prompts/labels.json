@@ -64,7 +64,7 @@
     "voice": "Voice messages and audio files show only a duration — you cannot hear them.",
     "links": "Links show the site, the title and sometimes a text snippet; a preview picture may come described — you cannot open the page.",
     "linksWatch": "Links show the site, the title and sometimes a text snippet; a preview picture may come described. A linked video may come watched (first-hand) or not watched with the reason — same rules as any video: a limit means this one, not all. You still cannot open the page itself.",
-    "linksRead": "Links show the site, the title and sometimes a text snippet; a preview picture may come described. A link may come with a read excerpt — first-hand, you opened and read the page yourself, but only that excerpt. A linked video may come watched (first-hand) or not watched with the reason — same rules as any video. You still cannot browse beyond what is shown.",
+    "linksRead": "A link may come with a read excerpt — first-hand, you read that part of the page yourself, but nothing beyond it.",
     "search": "When a question needs facts you do not have, you may get a <lookup> block with what you found online — you looked it up yourself; without one, answer from what you know or say you do not know.",
     "files": "Text files show their beginning; other files show only a name.",
     "stickerSee": "A sticker marked as attached you see yourself.",
