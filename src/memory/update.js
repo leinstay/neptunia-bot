@@ -484,7 +484,7 @@ export function batchAuthorNamesMap(messages) {
  *   used for them (see `batchAuthorNamesMap` below), so the `Name (id:...)` normalization below
  *   recognises a name even for someone whose stored profile has not caught up yet. Omitted ->
  *   only the stored profile's own `names` are known.
- * @returns {{ users: number, guild: boolean, self: boolean, affinity: number, channels: number, episodes: number, lore: number,
+ * @returns {{ users: number, guild: boolean, self: boolean, affinity: number, relationships: number, channels: number, episodes: number, lore: number,
  *   interestsChanged: number, portraitRequests: { userId: string, reason: string }[] }}
  */
 export function applyMemoryUpdate(store, guildId, update, cfg, knownUserIds, knownChannelIds = new Set(), relationships, episodes, lore, timing, batchAuthorNames) {
@@ -493,6 +493,7 @@ export function applyMemoryUpdate(store, guildId, update, cfg, knownUserIds, kno
     guild: false,
     self: false,
     affinity: 0,
+    relationships: 0,
     channels: 0,
     episodes: 0,
     lore: 0,
@@ -586,6 +587,7 @@ export function applyMemoryUpdate(store, guildId, update, cfg, knownUserIds, kno
       const profileOpsNow = relationships?.now ?? episodes?.now ?? Date.now();
       const seenAt = timing?.seenAtByUser?.get(String(userId)) ?? timing?.seenAt ?? profileOpsNow;
       const beforeInterests = JSON.stringify(store.getUser(guildId, userId)?.interests ?? []);
+      const beforeRelationship = store.getUser(guildId, userId)?.relationship ?? '';
 
       store.applyProfileOps(guildId, userId, ops, {
         fieldChars: cfg.fieldChars,
@@ -609,6 +611,8 @@ export function applyMemoryUpdate(store, guildId, update, cfg, knownUserIds, kno
 
       const afterInterests = JSON.stringify(store.getUser(guildId, userId)?.interests ?? []);
       if (afterInterests !== beforeInterests) result.interestsChanged += 1;
+      // Diagnostic: how many members had their stored relationship text rewritten.
+      if ((store.getUser(guildId, userId)?.relationship ?? '') !== beforeRelationship) result.relationships += 1;
 
       if (relationships?.enabled && raw.affinity && typeof raw.affinity === 'object' && !Array.isArray(raw.affinity)) {
         const before = store.getUser(guildId, userId)?.affinity?.score ?? 0;

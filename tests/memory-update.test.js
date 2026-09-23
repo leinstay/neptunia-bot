@@ -1334,6 +1334,7 @@ test('applyMemoryUpdate: garbage input changes nothing and never throws', () => 
         guild: false,
         self: false,
         affinity: 0,
+        relationships: 0,
         channels: 0,
         episodes: 0,
         lore: 0,
@@ -1342,6 +1343,33 @@ test('applyMemoryUpdate: garbage input changes nothing and never throws', () => 
       });
     }
     assert.deepEqual(store.getGuild(guildId), before);
+  });
+});
+
+test('applyMemoryUpdate: counts a member whose relationship text was written', () => {
+  withStore((store) => {
+    const guildId = 'g1';
+    store.touchUser(guildId, '1', 'nick', Date.now());
+
+    const update = { users: { 1: { relationship: 'we argued once, now she teases me' } } };
+    const result = applyMemoryUpdate(store, guildId, update, MEMORY_CFG, new Set(['1']));
+
+    assert.equal(result.relationships, 1);
+    assert.equal(store.getUser(guildId, '1').relationship, 'we argued once, now she teases me');
+  });
+});
+
+test('applyMemoryUpdate: an empty, absent or unchanged relationship is not counted and leaves the stored text', () => {
+  withStore((store) => {
+    const guildId = 'g1';
+    store.touchUser(guildId, '1', 'nick', Date.now());
+    applyMemoryUpdate(store, guildId, { users: { 1: { relationship: 'old friend' } } }, MEMORY_CFG, new Set(['1']));
+
+    for (const raw of [{ relationship: '' }, { relationship: '   ' }, { style: 'calm' }, { relationship: 'old friend' }]) {
+      const result = applyMemoryUpdate(store, guildId, { users: { 1: raw } }, MEMORY_CFG, new Set(['1']));
+      assert.equal(result.relationships, 0, JSON.stringify(raw));
+      assert.equal(store.getUser(guildId, '1').relationship, 'old friend');
+    }
   });
 });
 
