@@ -148,6 +148,7 @@ YouTube 链接的时长通过以下链式探测获取：首先尝试 yt-dlp，�
 | `answerChars` | `1200` | 回答的最大字符数；填充 `rewatch-answer.md` 中的 `{{maxChars}}` |
 | `recentMessages` | `60` | 扫描已观看或错误状态视频的近期消息数 |
 | `maxCandidates` | `6` | 从近期窗口中提供给分类器的最大视频数，按最新排序 |
+| `contextMessages` | `8` | 作为 `<transcript>` 块渲染给分类器的近期频道消息数（不含触发消息）；`0` 省略该块 |
 
 每回合最多一次重看或重试。回答按问题缓存一小时。分类器和重看各自计入 `llm.maxRequestsPerDay`；重看还计入 `media.video.maxPerDay`。
 

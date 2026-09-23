@@ -148,6 +148,7 @@ YouTube リンクの再生時間は次の順序で取得されます: まず yt-
 | `answerChars` | `1200` | 回答の最大文字数。`rewatch-answer.md` の `{{maxChars}}` に使用 |
 | `recentMessages` | `60` | 視聴済みまたはエラー状態の動画をスキャンする直近のメッセージ数 |
 | `maxCandidates` | `6` | 直近ウィンドウから分類器に渡す最大動画数（新しい順） |
+| `contextMessages` | `8` | 分類器に `<transcript>` ブロックとして渡す直近のチャンネルメッセージ数（トリガーを除く）。`0` でブロック省略 |
 
 ターンあたり最大 1 回の再視聴またはリトライ。回答は質問ごとに 1 時間キャッシュされます。分類器と再視聴はそれぞれ `llm.maxRequestsPerDay` にカウントされます。再視聴は `media.video.maxPerDay` にもカウントされます。
 

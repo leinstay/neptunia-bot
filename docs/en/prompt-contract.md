@@ -406,9 +406,13 @@ to retry one that did not load. Candidates are watched videos and error-state vi
 `media.video.maxPerTurn` attempts). At most `media.video.rewatch.maxCandidates` (default 6) are
 offered to the classifier, newest-message first. Code sends `rewatch.md` as the system prompt on the `rewatch` model
 role (`media.video.rewatch.model`, default `mention.followUpModel`, default the media model) with a user message
-containing two blocks:
+containing three blocks: a short `<transcript>` of the last few channel messages with the persona's own lines marked
+with `labels.self` (so the classifier sees what the candidate replies to), then the video list and the candidate:
 
 ```
+<transcript>
+...
+</transcript>
 <videos>
 <number> | <name> | <status> | <beginning of the account>
 ...

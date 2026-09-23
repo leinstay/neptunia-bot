@@ -1298,8 +1298,10 @@ test('createTurnRunner: rewatch -- the classifier gets the watched videos and th
   assert.equal(llm.classifierCalls.length, 1);
   const { messages, options } = llm.classifierCalls[0];
   assert.equal(messages[0].content, 'Pick the video the message to Bot asks about; Bot saw them.', '{{name}} is the persona\'s display name');
+  const [transcriptPart, videosPart] = messages[1].content.split('\n<videos>\n');
+  assert.ok(transcriptPart.startsWith('<transcript>\n') && transcriptPart.endsWith('\n</transcript>'), 'the transcript comes first');
   assert.equal(
-    messages[1].content,
+    `<videos>\n${videosPart}`,
     '<videos>\n1 | clip.mp4 | watched | ένα αυτοκίνητο περνά\n</videos>\n<candidate>\nZoë: τι χρώμα είναι το αυτοκίνητο;\n</candidate>',
   );
   assert.equal(options.model, 'x/haiku', 'rewatch.model and mention.followUpModel unset -> media.model');
@@ -1476,11 +1478,11 @@ test('createTurnRunner: rewatch -- the <videos> block lists at most maxCandidate
   const run = (hot) => runRewatch({ hot, scene, llm: rewatchLlm('none'), describer: fakeRewatchDescriber(states) });
 
   const { llm } = await run(rewatchHot());
-  const block = llm.classifierCalls[0].messages[1].content.split('\n</videos>')[0].split('\n').slice(1);
+  const block = llm.classifierCalls[0].messages[1].content.split('<videos>\n')[1].split('\n</videos>')[0].split('\n');
   assert.deepEqual(block, [7, 6, 5, 4, 3, 2].map((i, k) => `${k + 1} | clip${i}.mp4 | watched | scène ${i}`));
 
   const capped = await run(rewatchHot({}, { rewatch: { maxCandidates: 2 } }));
-  const cappedBlock = capped.llm.classifierCalls[0].messages[1].content.split('\n</videos>')[0].split('\n').slice(1);
+  const cappedBlock = capped.llm.classifierCalls[0].messages[1].content.split('<videos>\n')[1].split('\n</videos>')[0].split('\n');
   assert.deepEqual(cappedBlock, ['1 | clip7.mp4 | watched | scène 7', '2 | clip6.mp4 | watched | scène 6']);
 });
 
@@ -1510,9 +1512,11 @@ test('createTurnRunner: rewatch -- a video that did not load is offered as not l
   const describer = fakeRetryDescriber({ va: { state: 'error' } });
   const { llm } = await runRewatch({ describer, llm: rewatchLlm('none') });
   assert.equal(llm.classifierCalls.length, 1);
-  assert.equal(
-    llm.classifierCalls[0].messages[1].content,
-    '<videos>\n1 | clip.mp4 | not loaded |\n</videos>\n<candidate>\nZoë: τι χρώμα είναι το αυτοκίνητο;\n</candidate>',
+  assert.ok(llm.classifierCalls[0].messages[1].content.startsWith('<transcript>\n'));
+  assert.ok(
+    llm.classifierCalls[0].messages[1].content.endsWith(
+      '\n</transcript>\n<videos>\n1 | clip.mp4 | not loaded |\n</videos>\n<candidate>\nZoë: τι χρώμα είναι το αυτοκίνητο;\n</candidate>',
+    ),
   );
   assert.equal(describer.retryCalls.length, 0);
 });
@@ -1572,7 +1576,7 @@ test('createTurnRunner: rewatch -- maxCandidates counts watched and not-loaded v
     llm: rewatchLlm('none'),
     describer: fakeRetryDescriber(states),
   });
-  const block = llm.classifierCalls[0].messages[1].content.split('\n</videos>')[0].split('\n').slice(1);
+  const block = llm.classifierCalls[0].messages[1].content.split('<videos>\n')[1].split('\n</videos>')[0].split('\n');
   assert.deepEqual(block, ['1 | clip4.mp4 | not loaded |', '2 | clip3.mp4 | watched | scène 3', '3 | clip2.mp4 | not loaded |']);
 });
 
@@ -1612,4 +1616,79 @@ test('createTurnRunner: rewatch -- every early stop logs rewatch: skipped with i
   assert.equal(c.reason, 'no-watched');
   assert.equal(c.watched, 0);
   assert.equal(c.recent, 60);
+});
+
+/** A video, `fillers` chat lines (every third one the persona's own), then the trigger. */
+function rewatchContextScene(fillers) {
+  const video = videoAttachmentRaw('m0', NOW - 100_000, 'va', 'clip.mp4');
+  const between = Array.from({ length: fillers }, (_, i) =>
+    i % 3 === 1
+      ? rawMessage({ id: `f${i}`, ts: NOW - 90_000 + i * 1000, authorId: 'self-id', authorName: 'Bot', content: `ligne ${i}` })
+      : rawMessage({ id: `f${i}`, ts: NOW - 90_000 + i * 1000, authorName: 'Zoë', content: `ligne ${i}` }),
+  );
+  const trigger = rawMessage({ id: 'mt', ts: NOW - 1000, authorName: 'Zoë', content: 'τι χρώμα έχει;' });
+  return { trigger, channel: fakeTurnChannel({ historyMessages: [video, ...between, trigger] }) };
+}
+
+/** The lines between <transcript> and </transcript>, or null when the block is absent. */
+function rewatchTranscriptLines(content) {
+  if (!content.startsWith('<transcript>\n')) return null;
+  return content.slice('<transcript>\n'.length, content.indexOf('\n</transcript>\n<videos>\n')).split('\n');
+}
+
+test('createTurnRunner: rewatch -- contextMessages defaults to 8 (config.json and the code fallback)', async () => {
+  const shipped = JSON.parse(fs.readFileSync(new URL('../config.json', import.meta.url), 'utf8'));
+  assert.equal(shipped.media.video.rewatch.contextMessages, 8);
+
+  const { llm } = await runRewatch({ scene: rewatchContextScene(10), llm: rewatchLlm('none') });
+  const lines = rewatchTranscriptLines(llm.classifierCalls[0].messages[1].content);
+  assert.equal(lines[0], fill(labels.transcript.header, { date: lines[0].slice(4, -4) }), 'opens with the transcript header');
+  const items = lines.slice(1);
+  assert.equal(items.length, 8);
+  assert.ok(items[0].endsWith('Zoë: ligne 2'), 'the eight messages before the trigger, oldest first');
+  assert.ok(items[7].endsWith('Zoë: ligne 9'));
+});
+
+test('createTurnRunner: rewatch -- the <transcript> block holds the last contextMessages before the trigger, the persona marked, the trigger only in <candidate>', async () => {
+  const { llm } = await runRewatch({
+    hot: rewatchHot({}, { rewatch: { contextMessages: 3 } }),
+    scene: rewatchContextScene(10),
+    llm: rewatchLlm('none'),
+  });
+  const content = llm.classifierCalls[0].messages[1].content;
+  const items = rewatchTranscriptLines(content).slice(1);
+  assert.equal(items.length, 3);
+  const self = fill(labels.self, { name: 'Bot' });
+  assert.match(items[0], /^#1 \[\d\d:\d\d\] /);
+  assert.ok(items[0].endsWith(`] ${self}: ligne 7`), 'the persona\'s own line is marked');
+  assert.match(items[1], /^#2 \[\d\d:\d\d\] Zoë: ligne 8$/);
+  assert.match(items[2], /^#3 \[\d\d:\d\d\] Zoë: ligne 9$/);
+  assert.equal(content.split('τι χρώμα έχει;').length, 2, 'the trigger appears once');
+  assert.ok(content.endsWith('<candidate>\nZoë: τι χρώμα έχει;\n</candidate>'));
+});
+
+test('createTurnRunner: rewatch -- contextMessages 0 omits the <transcript> block', async () => {
+  const { llm } = await runRewatch({
+    hot: rewatchHot({}, { rewatch: { contextMessages: 0 } }),
+    scene: rewatchContextScene(4),
+    llm: rewatchLlm('none'),
+  });
+  const content = llm.classifierCalls[0].messages[1].content;
+  assert.ok(!content.includes('<transcript>'));
+  assert.ok(content.startsWith('<videos>\n1 | clip.mp4 | watched |'));
+});
+
+test('createTurnRunner: rewatch -- the transcript lines are never logged', async () => {
+  const { logs } = await withCapturedLogs(() => runRewatch({ scene: rewatchContextScene(6), llm: rewatchLlm('1 | τι χρώμα;') }));
+  assert.ok(logs.some((entry) => entry.msg === 'rewatch: classified'));
+  assert.ok(!JSON.stringify(logs).includes('ligne'));
+});
+
+test('createTurnRunner: rewatch -- a video that did not load renders its not-watched tag inside the <transcript> block', async () => {
+  const describer = fakeRetryDescriber({ va: { state: 'error' } });
+  const { llm } = await runRewatch({ describer, llm: rewatchLlm('none') });
+  const items = rewatchTranscriptLines(llm.classifierCalls[0].messages[1].content).slice(1);
+  assert.equal(items.length, 1, 'the video message only; the trigger stays in <candidate>');
+  const tag = fill(labels.transcript.videoNotWatched, { name: 'clip.mp4', duration: '0:20', reason: labels.transcript.videoReason.error });
+  assert.ok(items[0].endsWith(`Alice: hey bot ${tag}`), items[0]);
 });

@@ -148,6 +148,7 @@ Settings for the re-watch classifier (`features.videoRewatch`). When the persona
 | `answerChars` | `1200` | Max characters for the answer; fills `{{maxChars}}` in `rewatch-answer.md` |
 | `recentMessages` | `60` | How many recent messages to scan for watched or error-state videos |
 | `maxCandidates` | `6` | Max videos offered to the classifier from the recent window, newest first |
+| `contextMessages` | `8` | Recent channel messages (excluding the trigger) rendered as a `<transcript>` block for the classifier; `0` omits the block |
 
 At most one re-watch or retry per turn. Answers are cached for one hour per question. The classifier and the second look each count against `llm.maxRequestsPerDay`; the second look also counts against `media.video.maxPerDay`.
 

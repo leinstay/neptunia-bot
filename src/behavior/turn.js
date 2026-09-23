@@ -10,6 +10,7 @@ import { parseOutput } from '../llm/parse.js';
 import { DailyCapError, TokenLimitError } from '../llm/openrouter.js';
 import { collectPictures, collectEmojiItems, collectVideos, isDescribable, selectPictures } from '../discord/media.js';
 import { createImageFetcher } from '../discord/fetch-image.js';
+import { formatTranscript, renderTranscript } from '../discord/format.js';
 import { log } from '../log.js';
 
 function sleep(ms) {
@@ -299,11 +300,13 @@ export function createTurnRunner({
    * `media.video.maxPerTurn` new videos this turn already fetched; the
    * describer's daily caps still apply. At most one re-watch or retry per
    * turn. The `<videos>` lines are numbered 1.. newest first and the
-   * classifier answers with that ordinal, mapped back here. Never throws: any failure leaves
+   * classifier answers with that ordinal, mapped back here. A `<transcript>` block before
+   * `<videos>` carries the last `media.video.rewatch.contextMessages` messages before the
+   * trigger (0 omits it), with the video states and captions this turn already has. Never throws: any failure leaves
    * `videos` as it was. The question and the answer are data: never logged;
    * every early stop logs `rewatch: skipped` with its reason.
    */
-  async function maybeRewatch({ config, guildId, channelId, selfName, history, trigger, videos, candidates }) {
+  async function maybeRewatch({ config, guildId, channelId, selfName, history, trigger, videos, descriptions, candidates }) {
     const prompt = hot.prompts?.rewatch;
     if (!prompt) {
       log.info('rewatch: skipped', { channel: channelId, reason: 'no-prompt' });
@@ -344,7 +347,24 @@ export function createTurnRunner({
       return `${index + 1} | ${oneLine(item.name)} | ${status} | ${summary}`.trimEnd();
     });
     const triggerText = [...String(trigger.content ?? '')].slice(0, config.context?.maxMessageChars ?? 800).join('');
-    const user = `<videos>\n${lines.join('\n')}\n</videos>\n<candidate>\n${trigger.authorName}: ${triggerText}\n</candidate>`;
+    // The chat around the question, rendered like the address classifier's context (src/discord/events.js).
+    const contextMessages = Math.max(0, Math.floor(rewatchCfg.contextMessages ?? 8));
+    const context = contextMessages > 0 ? history.filter((m) => m.id !== trigger.id).slice(-contextMessages) : [];
+    let transcriptBlock = '';
+    if (context.length > 0) {
+      const labels = hot.prompts.labels;
+      const items = formatTranscript(context, {
+        timezone: config.bot.timezone,
+        gapMinutes: config.context.gapMarkerMinutes,
+        maxChars: config.context.maxMessageChars,
+        selfName,
+        labels,
+        descriptions,
+        videos,
+      });
+      transcriptBlock = `<transcript>\n${renderTranscript(items, config.bot.timezone, labels)}\n</transcript>\n`;
+    }
+    const user = `${transcriptBlock}<videos>\n${lines.join('\n')}\n</videos>\n<candidate>\n${trigger.authorName}: ${triggerText}\n</candidate>`;
 
     let completion;
     try {
@@ -498,6 +518,7 @@ export function createTurnRunner({
               history,
               trigger,
               videos,
+              descriptions,
               candidates,
             });
           } catch (err) {
