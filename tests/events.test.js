@@ -1567,7 +1567,7 @@ test('follow-up: the classifier request is address.md as system and a <candidate
   assert.ok(messages[1].content.includes('is this for you'));
   assert.ok(messages[1].content.includes('earlier message'), 'the channel context is included');
   assert.equal(options.maxOutputTokens, 8, 'mention.followUpMaxOutputTokens');
-  assert.equal(options.model, 'anthropic/claude-sonnet-4.6', 'the shipped mention.followUpModel');
+  assert.equal(options.model, 'anthropic/claude-sonnet-4.6', 'the shipped llm.classifierModel');
   assert.equal(options.countAgainstDailyCap, true);
   assert.equal(options.skipCalibration, true);
 
@@ -1575,9 +1575,9 @@ test('follow-up: the classifier request is address.md as system and a <candidate
   await p;
 });
 
-test('follow-up: mention.followUpModel null falls back to media.model', async () => {
+test('follow-up: the address classifier uses llm.classifierModel over the deprecated mention.followUpModel', async () => {
   const llm = fakeFollowUpLlm();
-  const config = baseConfig({ mention: { followUpModel: null } });
+  const config = baseConfig({ llm: { classifierModel: 'x/classifier' }, mention: { followUpModel: 'x/old' } });
   const handler = makeHandler({ config, llm, prompts: fakeAddressPrompts() });
   const guild = fakeGuild('g1', 'Neptunia');
   const t0 = Date.now();
@@ -1588,7 +1588,45 @@ test('follow-up: mention.followUpModel null falls back to media.model', async ()
   await new Promise((resolve) => setTimeout(resolve, 0));
 
   assert.equal(llm.calls.length, 1);
-  assert.equal(llm.calls[0].options.model, config.media.model, 'followUpModel=null falls back to media.model');
+  assert.equal(llm.calls[0].options.model, 'x/classifier');
+
+  llm.respond('no');
+  await p;
+});
+
+test('follow-up: the address classifier still honours a deprecated mention.followUpModel when llm.classifierModel is null', async () => {
+  const llm = fakeFollowUpLlm();
+  const config = baseConfig({ llm: { classifierModel: null }, mention: { followUpModel: 'x/old' } });
+  const handler = makeHandler({ config, llm, prompts: fakeAddressPrompts() });
+  const guild = fakeGuild('g1', 'Neptunia');
+  const t0 = Date.now();
+  const channel = fakeChannelWithHistory('c1', guild, []);
+  await openFollowUpWindow(handler, { guild, channel, ts: t0 + 1000 });
+
+  const p = handler(fakeMessage({ id: 'm-candidate', guild, channel, channelId: 'c1', cleanContent: 'is this for you', createdTimestamp: t0 + 2000 }));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.equal(llm.calls.length, 1);
+  assert.equal(llm.calls[0].options.model, 'x/old');
+
+  llm.respond('no');
+  await p;
+});
+
+test('follow-up: llm.classifierModel null falls back to media.model', async () => {
+  const llm = fakeFollowUpLlm();
+  const config = baseConfig({ llm: { classifierModel: null } });
+  const handler = makeHandler({ config, llm, prompts: fakeAddressPrompts() });
+  const guild = fakeGuild('g1', 'Neptunia');
+  const t0 = Date.now();
+  const channel = fakeChannelWithHistory('c1', guild, []);
+  await openFollowUpWindow(handler, { guild, channel, ts: t0 + 1000 });
+
+  const p = handler(fakeMessage({ id: 'm-candidate', guild, channel, channelId: 'c1', cleanContent: 'is this for you', createdTimestamp: t0 + 2000 }));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.equal(llm.calls.length, 1);
+  assert.equal(llm.calls[0].options.model, config.media.model, 'classifierModel=null falls back to media.model');
 
   llm.respond('no');
   await p;

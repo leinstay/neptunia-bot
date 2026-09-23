@@ -134,3 +134,15 @@ export function parseFollowUpVerdict(text) {
   const firstWord = String(text ?? '').trim().split(/\s+/)[0] ?? '';
   return firstWord.toLowerCase().startsWith('y') ? 'yes' : 'no';
 }
+
+/**
+ * The model id of the cheap classifier role (the address classifier, the
+ * re-watch classifier): `llm.classifierModel`, else the DEPRECATED
+ * `mention.followUpModel` (kept only so an old config.local.json still
+ * works), else `media.model`; `undefined` when none is set.
+ * @param {object|undefined} config  the full hot config
+ * @returns {string|undefined}
+ */
+export function classifierModelOf(config) {
+  return config?.llm?.classifierModel || config?.mention?.followUpModel || config?.media?.model || undefined;
+}

@@ -1240,7 +1240,6 @@ function rewatchHot(features = {}, video = {}, config = {}) {
     {},
     {
       media: { model: 'x/haiku', maxPerTurn: 6, filePreviewChars: 500, video: { maxPerTurn: 1, sites: ['youtube.com'], ...video } },
-      mention: { followUpModel: null },
       ...config,
     },
   );
@@ -1275,7 +1274,7 @@ test('createTurnRunner: rewatch -- the classifier gets the watched videos and th
     `<videos>\n${videosPart}`,
     '<videos>\n1 | clip.mp4 | watched | ένα αυτοκίνητο περνά\n</videos>\n<candidate>\nZoë: τι χρώμα είναι το αυτοκίνητο;\n</candidate>',
   );
-  assert.equal(options.model, 'x/haiku', 'mention.followUpModel unset -> media.model');
+  assert.equal(options.model, 'x/haiku', 'llm.classifierModel unset -> media.model');
   assert.equal(options.maxOutputTokens, 120);
   assert.equal(options.timeoutMs, 300_000);
   assert.equal(options.countAgainstDailyCap, true);
@@ -1290,11 +1289,15 @@ test('createTurnRunner: rewatch -- the classifier gets the watched videos and th
   assert.ok(userMessage.includes(`${watched} ${answered}`), 'the answer follows the watched tag');
 });
 
-test('createTurnRunner: rewatch -- the classifier model is mention.followUpModel, else media.model; a stale rewatch.model is ignored', async () => {
-  const withStale = await runRewatch({ hot: rewatchHot({}, { rewatch: { model: 'x/pick' } }, { mention: { followUpModel: 'x/follow' } }) });
-  assert.equal(withStale.llm.classifierCalls[0].options.model, 'x/follow');
-  const withFollowUp = await runRewatch({ hot: rewatchHot({}, {}, { mention: { followUpModel: 'x/follow' } }) });
-  assert.equal(withFollowUp.llm.classifierCalls[0].options.model, 'x/follow');
+test('createTurnRunner: rewatch -- the classifier model is llm.classifierModel, else the deprecated mention.followUpModel, else media.model; a stale rewatch.model is ignored', async () => {
+  const withClassifier = rewatchHot({}, { rewatch: { model: 'x/pick' } }, { mention: { followUpModel: 'x/old' } });
+  withClassifier.config.llm.classifierModel = 'x/classifier';
+  const classified = await runRewatch({ hot: withClassifier });
+  assert.equal(classified.llm.classifierCalls[0].options.model, 'x/classifier');
+  const withOld = await runRewatch({ hot: rewatchHot({}, { rewatch: { model: 'x/pick' } }, { mention: { followUpModel: 'x/old' } }) });
+  assert.equal(withOld.llm.classifierCalls[0].options.model, 'x/old');
+  const withNone = await runRewatch({ hot: rewatchHot({}, { rewatch: { model: 'x/pick' } }) });
+  assert.equal(withNone.llm.classifierCalls[0].options.model, 'x/haiku');
 });
 
 test('createTurnRunner: rewatch -- none, garbage, an unknown id or a classifier error stop without a second look', async () => {

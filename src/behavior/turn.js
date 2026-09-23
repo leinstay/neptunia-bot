@@ -6,6 +6,7 @@
 
 import { fetchHistory, fetchNeighbors, withTextPreviews } from '../discord/collect.js';
 import { buildRequest } from './prompt.js';
+import { classifierModelOf } from './mention.js';
 import { parseOutput } from '../llm/parse.js';
 import { DailyCapError, TokenLimitError } from '../llm/openrouter.js';
 import { collectPictures, collectEmojiItems, collectVideos, isDescribable, selectPictures } from '../discord/media.js';
@@ -289,8 +290,8 @@ export function createTurnRunner({
    * The re-watch on a question (features.videoRewatch): when the trigger
    * asks about a video watched in the last `media.video.rewatch.recentMessages`
    * messages (at most `media.video.rewatch.maxCandidates` of them, newest
-   * first), one cheap classifier call (prompts.rewatch, on the follow-up
-   * model: `mention.followUpModel`, else `media.model`) picks the video and
+   * first), one cheap classifier call (prompts.rewatch, on the classifier
+   * model: `classifierModelOf` -- `llm.classifierModel`, else `media.model`) picks the video and
    * the question, then the describer looks at it again
    * (describer.rewatchVideo) and the answer joins that video's state as
    * `answer: { question, text }` -- mutating `videos` in place. Videos that
@@ -375,7 +376,7 @@ export function createTurnRunner({
           { role: 'user', content: user },
         ],
         {
-          model: config.mention?.followUpModel || mediaCfg.model,
+          model: classifierModelOf(config),
           maxOutputTokens: REWATCH_CLASSIFIER_MAX_TOKENS,
           timeoutMs: config.llm?.timeoutMs,
           countAgainstDailyCap: true,

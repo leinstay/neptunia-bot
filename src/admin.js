@@ -28,6 +28,7 @@ import { sortEpisodesForDisplay } from './memory/episodes.js';
 import { channelActivity } from './memory/channels.js';
 import { commandKeys } from './discord/commands.js';
 import { isAllowed as accessIsAllowed, grant as accessGrant, revoke as accessRevoke } from './discord/access.js';
+import { classifierModelOf } from './behavior/mention.js';
 import { log } from './log.js';
 
 /** `/nep access grant/revoke`'s command keys that ONLY read — everything else (including every
@@ -1273,7 +1274,7 @@ export function createAdmin({
   }
 
   const MODEL_ID_RE = /^[\w.:/-]{3,100}$/;
-const MODEL_ROLE_PATHS = { talk: 'llm.model', analyzer: 'memory.model', media: 'media.model', followup: 'mention.followUpModel', video: 'media.video.model' };
+const MODEL_ROLE_PATHS = { talk: 'llm.model', analyzer: 'memory.model', media: 'media.model', classifier: 'llm.classifierModel', video: 'media.video.model' };
 
 function cmdModelShow() {
   const cfg = hot.config;
@@ -1281,7 +1282,7 @@ function cmdModelShow() {
     `talk: ${cfg?.llm?.model ?? '-'}`,
     `analyzer: ${cfg?.memory?.model ?? cfg?.llm?.model ?? '-'}`,
     `media: ${cfg?.media?.model ?? '-'}`,
-    `followup: ${cfg?.mention?.followUpModel ?? cfg?.media?.model ?? '-'}`,
+    `classifier: ${classifierModelOf(cfg) ?? '-'}`,
     `video: ${cfg?.media?.video?.model ?? '-'}`,
     `mediaDescriptions: ${cfg?.features?.mediaDescriptions === true ? 'on' : 'off'}`,
   ];
@@ -1291,7 +1292,7 @@ function cmdModelShow() {
 function cmdModelSet(args) {
   const role = String(args?.role ?? '');
   const dottedPath = MODEL_ROLE_PATHS[role];
-  if (!dottedPath) throw new Error(`unknown role: ${role} (talk, analyzer, media, followup, video)`);
+  if (!dottedPath) throw new Error(`unknown role: ${role} (talk, analyzer, media, classifier, video)`);
 
   const id = String(args?.id ?? '').trim();
   if (!MODEL_ID_RE.test(id)) throw new Error('id must look like a model id, e.g. anthropic/claude-haiku-4.5 (3-100 chars)');
@@ -1311,14 +1312,14 @@ function cmdModelSet(args) {
 // / `skipCalibration` options), never writes under data/.
 // ---------------------------------------------------------------------
 
-const PING_ROLES = ['talk', 'analyzer', 'media', 'followup', 'video'];
+const PING_ROLES = ['talk', 'analyzer', 'media', 'classifier', 'video'];
 
 /** The model id one role resolves to right now — mirrors cmdModelShow/MODEL_ROLE_PATHS. */
 function pingModelFor(role, cfg) {
   if (role === 'talk') return cfg?.llm?.model || undefined;
   if (role === 'analyzer') return cfg?.memory?.model || cfg?.llm?.model || undefined;
   if (role === 'media') return cfg?.media?.model || undefined;
-  if (role === 'followup') return cfg?.mention?.followUpModel || cfg?.media?.model || undefined;
+  if (role === 'classifier') return classifierModelOf(cfg);
   if (role === 'video') return cfg?.media?.video?.model || undefined;
   return undefined;
 }

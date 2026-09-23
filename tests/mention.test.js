@@ -10,6 +10,7 @@ import {
   repeatWindowMs,
   isFollowUpOpen,
   followUpPreFilter,
+  classifierModelOf,
   parseFollowUpVerdict,
 } from '../src/behavior/mention.js';
 
@@ -393,4 +394,20 @@ test('decideMention: affinityScore is ignored inside the spam branch', () => {
   const withoutAffinity = decideMention({ kind: 'reply', textLength: 5, recentCalls: 4, neverIgnore: false, cfg: CFG, rng: rngReturning(0) });
   assert.equal(withAffinity.ignoreChance, withoutAffinity.ignoreChance);
   assert.equal(withAffinity.ignoreChance, CFG.spamIgnoreChance);
+});
+
+test('classifierModelOf: llm.classifierModel wins over the deprecated mention.followUpModel and media.model', () => {
+  const config = { llm: { classifierModel: 'x/classifier' }, mention: { followUpModel: 'x/old' }, media: { model: 'x/media' } };
+  assert.equal(classifierModelOf(config), 'x/classifier');
+});
+
+test('classifierModelOf: an old config.local.json mention.followUpModel is still honoured when llm.classifierModel is unset', () => {
+  assert.equal(classifierModelOf({ llm: { classifierModel: null }, mention: { followUpModel: 'x/old' }, media: { model: 'x/media' } }), 'x/old');
+  assert.equal(classifierModelOf({ mention: { followUpModel: 'x/old' }, media: { model: 'x/media' } }), 'x/old');
+});
+
+test('classifierModelOf: falls back to media.model, and to undefined with nothing set', () => {
+  assert.equal(classifierModelOf({ llm: { classifierModel: null }, media: { model: 'x/media' } }), 'x/media');
+  assert.equal(classifierModelOf({}), undefined);
+  assert.equal(classifierModelOf(undefined), undefined);
 });
