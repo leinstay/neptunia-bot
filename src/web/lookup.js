@@ -4,8 +4,10 @@
 // halves, both modelled on the video describer (src/memory/describe.js):
 //
 // - readLink: a normal page link (never a video-site link -- the video
-//   describer owns those -- never a gif embed, never a `web.links.skipSites`
-//   host) is fetched through the SSRF-guarded page fetcher
+//   describer owns those -- never an embed classified as anything but a link
+//   (a gif), never a `web.links.skipSites` host, never a URL whose path ends
+//   with a picture/video/audio/archive/pdf extension) is fetched through the
+//   SSRF-guarded page fetcher
 //   (src/web/fetch-page.js) and condensed by the text classifier model through
 //   prompts/read-link.md into one excerpt of at most `web.links.summaryChars`.
 // - search: one Brave Search request (src/web/brave.js) whose numbered
@@ -40,6 +42,8 @@ const QUERY_MAX_CHARS = 200;
 // Tab, line feed, vertical tab, form feed, carriage return, NEL, line and paragraph separators.
 const QUERY_LINE_BREAKS = /[\t\n\v\f\r\u0085\u2028\u2029]+/g;
 const QUERY_CONTROLS = /[\u0000-\u001f\u007f-\u009f]/g;
+// A link to a file, not a page: the reader would only spend an attempt on it.
+const BINARY_PATH = /\.(?:png|jpe?g|gif|webp|avif|svg|mp4|webm|mov|mkv|mp3|ogg|wav|zip|rar|7z|pdf)$/i;
 
 /**
  * Whether the web lookup is on. Unlike the other `features.*` switches a
@@ -75,6 +79,15 @@ function siteOf(url) {
     return new URL(String(url)).hostname.replace(/^www\./i, '');
   } catch {
     return '';
+  }
+}
+
+/** Whether `url`'s path (query and fragment aside) ends with a file extension the reader skips. */
+function isBinaryPath(url) {
+  try {
+    return BINARY_PATH.test(new URL(String(url)).pathname);
+  } catch {
+    return false;
   }
 }
 
@@ -187,16 +200,18 @@ export function createLookup({ hot, store, llm, state = memoryState(), pageFetch
     return true;
   }
 
-  /** Whether `link` may be read under the live config at all (switches, prompt, sites, kind). */
+  /** Whether `link` may be read under the live config at all (switches, prompt, kind, sites, file path). */
   function readable(link) {
     const config = hot.config;
     if (!webOn(config)) return false;
     const linksCfg = config.web?.links ?? {};
     if (linksCfg.enabled === false) return false;
     if (!hot.prompts?.['read-link']) return false;
-    if (!link?.id || !link.url || link.kind === 'gif') return false;
+    if (!link?.id || !link.url) return false;
+    if (link.kind !== undefined && link.kind !== 'link') return false;
     if (videoSiteFor(link.url, linksCfg.skipSites ?? [])) return false;
     if (videoSiteFor(link.url, config.media?.video?.sites ?? [])) return false;
+    if (isBinaryPath(link.url)) return false;
     return true;
   }
 

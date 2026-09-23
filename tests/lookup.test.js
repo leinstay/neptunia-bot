@@ -3,6 +3,7 @@
 // in-memory media cache. No network, no real data/.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { createLookup, normaliseQuery, cleanQuery } from '../src/web/lookup.js';
 import { DailyCapError, TokenLimitError } from '../src/llm/openrouter.js';
 import { withCapturedLogs } from './fixtures/capture-logs.js';
@@ -201,6 +202,73 @@ test('readLink: skipSites and video-site links are never read; a gif is never re
   assert.equal(await lookup.readLink('g1', { id: 'g', url: 'https://tenor.com/view/x', site: 'tenor', title: '', kind: 'gif' }), null);
   assert.equal(pageFetcher.calls.length, 0);
   assert.equal(llm.calls.length, 0);
+});
+
+test('readLink: the default skipSites (config.json) cover gif hosts and Discord attachments, subdomains included', async () => {
+  const shipped = JSON.parse(readFileSync(new URL('../config.json', import.meta.url), 'utf8'));
+  const skipSites = shipped.web.links.skipSites;
+  const { lookup, pageFetcher, llm } = setup({ hotOptions: { web: { links: { skipSites } } } });
+  for (const url of [
+    'https://cdn.discordapp.com/attachments/1/2/file',
+    'https://media.discordapp.net/attachments/1/2/file',
+    'https://tenor.com/view/x',
+    'https://media.giphy.com/media/x',
+    'https://static.klipy.com/page/x',
+    'https://imgur.com/gallery/x',
+    'https://i.redd.it/x',
+    'https://v.redd.it/x',
+    'https://pbs.twimg.com/media/x',
+  ]) {
+    assert.equal(await lookup.readLink('g1', { ...LINK, id: url, url }), null, url);
+  }
+  assert.equal(pageFetcher.calls.length, 0);
+  assert.equal(llm.calls.length, 0);
+  assert.ok(await lookup.readLink('g1', LINK), 'an ordinary page is still read');
+});
+
+test('readLink: a URL whose path ends with a binary extension is never read, whatever the case or query', async () => {
+  const { lookup, pageFetcher, llm, state } = setup();
+  for (const ext of ['png', 'jpg', 'jpeg', 'gif', 'webp', 'avif', 'svg', 'mp4', 'webm', 'mov', 'mkv', 'mp3', 'ogg', 'wav', 'zip', 'rar', '7z', 'pdf']) {
+    const url = `https://example.org/files/thing.${ext}`;
+    assert.equal(await lookup.readLink('g1', { ...LINK, id: url, url }), null, ext);
+  }
+  assert.equal(await lookup.readLink('g1', { ...LINK, id: 'up', url: 'https://example.org/Photo.JPG?width=640' }), null);
+  assert.equal(await lookup.readLink('g1', { ...LINK, id: 'frag', url: 'https://example.org/clip.mp4#t=10' }), null);
+  assert.equal(pageFetcher.calls.length, 0);
+  assert.equal(llm.calls.length, 0);
+  assert.equal(state.data.webCount ?? 0, 0, 'no daily slot spent');
+});
+
+test('readLink: an extension only in the query, the host or mid-path does not block the read', async () => {
+  const { lookup, pageFetcher } = setup();
+  assert.ok(await lookup.readLink('g1', { ...LINK, id: 'q', url: 'https://example.org/view?file=a.png' }));
+  assert.ok(await lookup.readLink('g1', { ...LINK, id: 'h', url: 'https://example.pdf/article' }));
+  assert.ok(await lookup.readLink('g1', { ...LINK, id: 'p', url: 'https://example.org/a.png/details' }));
+  assert.ok(await lookup.readLink('g1', { ...LINK, id: 'x', url: 'https://example.org/page.html' }));
+  assert.equal(pageFetcher.calls.length, 4);
+});
+
+test('readLinks: skipped links (binary path, skip site) spend no maxNew attempt', async () => {
+  const { lookup, pageFetcher } = setup({ hotOptions: { web: { links: { skipSites: ['klipy.com'] } } } });
+  const links = [
+    { ...LINK, id: 'b', url: 'https://example.org/x.gif' },
+    { ...LINK, id: 'k', url: 'https://klipy.com/gifs/x' },
+    { ...LINK, id: 'ok', url: 'https://example.org/a' },
+  ];
+  const { reads, newCount } = await lookup.readLinks('g1', links, { maxNew: 1 });
+  assert.equal(newCount, 1);
+  assert.deepEqual([...reads.keys()], ['ok']);
+  assert.equal(pageFetcher.calls.length, 1);
+});
+
+test('readLink: an embed whose kind is not link (gif, video) is never read; kind link or none is', async () => {
+  const { lookup, pageFetcher } = setup();
+  assert.equal(await lookup.readLink('g1', { ...LINK, id: 'g', kind: 'gif' }), null);
+  assert.equal(await lookup.readLink('g1', { ...LINK, id: 'v', kind: 'video' }), null);
+  assert.equal(pageFetcher.calls.length, 0);
+  assert.ok(await lookup.readLink('g1', { ...LINK, id: 'l', kind: 'link' }));
+  assert.ok(await lookup.readLink('g1', { ...LINK, id: 'n' }));
+  assert.equal(pageFetcher.calls.length, 2);
 });
 
 test('readLink: feature off (false or missing), links.enabled off or no read-link prompt -> null, zero calls', async () => {
