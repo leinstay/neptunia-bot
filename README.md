@@ -54,41 +54,14 @@ When `bot.guildId` is empty and the bot is in exactly one server, it locks to th
 
 Prompts load from two directories:
 
-- `prompts/`: tracked engine defaults. Ships with a working example character.
-- `prompts.local/`: your personality (gitignored). A file here replaces the same-named file in `prompts/`. `labels.json` is deep-merged, so you only override the keys you change.
+- `prompts/`: tracked engine defaults shipping a working example character.
+- `prompts.local/`: your personality (gitignored). A file here replaces the same-named file in `prompts/`. `labels.json` is deep-merged, so only overridden keys are needed.
 
 Both are hot-reloaded.
 
-### Prompt files
+The only file you must rewrite is `character-card.md`. Copy it to `prompts.local/` and write your persona. Everything else works as-is, or override individual files as needed.
 
-| File | Required | Purpose |
-|---|---|---|
-| `system-prompt.md` | yes | How to behave like an ordinary chat member, character-agnostic |
-| `character-card.md` | yes | The personality: who they are, how they talk, what they care about |
-| `rules.md` | no | Owner's live corrections, appended by `/nep rule add` |
-| `format.md` | yes | Output protocol: tags the model uses to act |
-| `reply.md` | yes | Task: someone addressed the persona |
-| `interject.md` | yes | Task: cut into a live conversation |
-| `initiate.md` | yes | Task: break a silence, start a topic |
-| `memory.md` | yes | Technical prompt for the memory/relationship analyzer |
-| `describe.md` | yes | One-line media descriptions for the helper model |
-| `describe-video.md` | yes | Video descriptions for the video-capable model |
-| `rewatch.md` | yes | Classifier: does a message need the persona to re-watch a video |
-| `rewatch-answer.md` | yes | Prompt for the re-watch: answer one question from the clip |
-| `address.md` | yes | Classifier: is an untagged message addressed to the persona |
-| `lookup.md` | no | Classifier: does a question need a web search |
-| `read-link.md` | no | Condense a fetched page into one paragraph |
-| `search-summary.md` | no | Condense search results into one note with sources |
-| `profile.md` | yes | Warmup: one member's profile from a message sample |
-| `channel.md` | yes | Warmup: channel notes from a message sample |
-| `server.md` | yes | Warmup: server-level notes from channel notes and member summaries |
-| `labels.json` | yes | Every string the code inserts into prompts (deep-merged between layers) |
-
-**The only file you must rewrite is `character-card.md`.** Copy it to `prompts.local/` and write your persona. Everything else works as-is, or override individual files as needed.
-
-The memory analyzer judges how the character feels about people. Both it and the warmup receive your character card and `rules.md`, so include what your character likes and dislikes.
-
-The placeholders, `labels.json` keys, context blocks and output tags every prompt file may use are specified in [`docs/en/prompt-contract.md`](docs/en/prompt-contract.md); a change on one side requires the matching change on the other.
+The prompt files, placeholders, labels, context blocks and output tags are described in [`docs/en/prompt-contract.md`](docs/en/prompt-contract.md).
 
 ## Configuration
 

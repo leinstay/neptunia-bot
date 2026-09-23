@@ -54,41 +54,14 @@ npm start
 
 提示从两个目录加载：
 
-- `prompts/`：随仓库提供的引擎默认值。自带一个可用的示例角色。
-- `prompts.local/`：你的角色定义（已加入 gitignore）。此目录下的文件会替换 `prompts/` 中的同名文件。`labels.json` 采用深度合并，因此你只需覆盖需要更改的键。
+- `prompts/`：附带可用示例角色的引擎默认值（随仓库追踪）。
+- `prompts.local/`：你的角色定义（已加入 gitignore）。此目录下的文件会替换 `prompts/` 中的同名文件。`labels.json` 采用深度合并，只需覆盖需要更改的键即可。
 
 两者均支持热重载。
 
-### 提示文件
+你必须重写的唯一文件是 `character-card.md`。将其复制到 `prompts.local/` 并编写你的角色。其他内容可直接使用，也可按需覆盖单个文件。
 
-| 文件 | 必需 | 用途 |
-|---|---|---|
-| `system-prompt.md` | 是 | 如何表现得像普通聊天成员，与角色无关 |
-| `character-card.md` | 是 | 角色定义：身份、说话方式、关注点 |
-| `rules.md` | 否 | 所有者的实时修正，由 `/nep rule add` 追加 |
-| `format.md` | 是 | 输出协议：模型用于行动的标签 |
-| `reply.md` | 是 | 任务：有人呼叫了角色 |
-| `interject.md` | 是 | 任务：插入正在进行的对话 |
-| `initiate.md` | 是 | 任务：打破沉默，发起话题 |
-| `memory.md` | 是 | 记忆/关系分析器的技术提示 |
-| `describe.md` | 是 | 辅助模型的单行媒体描述 |
-| `describe-video.md` | 是 | 支持视频的模型的视频描述 |
-| `rewatch.md` | 是 | 分类器：是否需要重看视频以回答问题 |
-| `rewatch-answer.md` | 是 | 重看提示：从片段中回答一个问题 |
-| `address.md` | 是 | 分类器：未标记的消息是否在对角色说话 |
-| `lookup.md` | 否 | 分类器：问题是否需要网络搜索 |
-| `read-link.md` | 否 | 将获取的页面浓缩为一个段落 |
-| `search-summary.md` | 否 | 将搜索结果浓缩为带来源的笔记 |
-| `profile.md` | 是 | 预热：从消息样本生成一个成员的档案 |
-| `channel.md` | 是 | 预热：从消息样本生成频道笔记 |
-| `server.md` | 是 | 预热：从频道笔记和成员摘要生成服务器级笔记 |
-| `labels.json` | 是 | 代码插入提示中的所有字符串（两层之间深度合并） |
-
-**你必须重写的唯一文件是 `character-card.md`。**将其复制到 `prompts.local/` 并编写你的角色。其他内容可直接使用，也可按需覆盖单个文件。
-
-记忆分析器会判断角色对人们的感受。分析器和预热都会接收你的角色卡和 `rules.md`，因此请包含角色的好恶。
-
-每个提示文件可使用的占位符、`labels.json` 键、上下文块和输出标签均在 [`docs/zh/prompt-contract.md`](prompt-contract.md) 中定义；一方变更时另一方也需同步修改。
+提示文件、占位符、标签、上下文块和输出标签均在 [`prompt-contract.md`](prompt-contract.md) 中定义。
 
 ## 配置
 
