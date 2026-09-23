@@ -471,6 +471,135 @@ test('complete: llm.provider is read fresh on every call (hot-reloadable), not c
   assert.equal('provider' in bodies[1], false);
 });
 
+test('complete: options.provider is sent as the provider field and overrides a configured llm.provider', async () => {
+  let seenBody = null;
+  const pinned = { order: ['google-ai-studio'], allow_fallbacks: false };
+  const llm = createLlm({
+    apiKey: 'k',
+    getConfig: () => baseConfig({ provider: { ignore: ['amazon-bedrock'] } }),
+    calibrator: fakeCalibrator(),
+    state: fakeState(),
+    fetchImpl: async (url, init) => {
+      seenBody = JSON.parse(init.body);
+      return okResponse('hi');
+    },
+  });
+  await llm.complete([{ role: 'user', content: 'hi' }], { provider: pinned });
+  assert.deepEqual(seenBody.provider, pinned);
+});
+
+test('complete: options.provider is sent even when llm.provider is null', async () => {
+  let seenBody = null;
+  const pinned = { order: ['google-ai-studio'], allow_fallbacks: false };
+  const llm = createLlm({
+    apiKey: 'k',
+    getConfig: () => baseConfig({ provider: null }),
+    calibrator: fakeCalibrator(),
+    state: fakeState(),
+    fetchImpl: async (url, init) => {
+      seenBody = JSON.parse(init.body);
+      return okResponse('hi');
+    },
+  });
+  await llm.complete([{ role: 'user', content: 'hi' }], { provider: pinned });
+  assert.deepEqual(seenBody.provider, pinned);
+});
+
+test('complete: a non-object options.provider (array, null, string) falls back to llm.provider', async () => {
+  const bodies = [];
+  const configured = { ignore: ['amazon-bedrock'] };
+  const llm = createLlm({
+    apiKey: 'k',
+    getConfig: () => baseConfig({ provider: configured }),
+    calibrator: fakeCalibrator(),
+    state: fakeState(),
+    fetchImpl: async (url, init) => {
+      bodies.push(JSON.parse(init.body));
+      return okResponse('hi');
+    },
+  });
+  await llm.complete([{ role: 'user', content: 'hi' }], { provider: ['google-ai-studio'] });
+  await llm.complete([{ role: 'user', content: 'hi' }], { provider: null });
+  await llm.complete([{ role: 'user', content: 'hi' }], { provider: 'google-ai-studio' });
+  await llm.complete([{ role: 'user', content: 'hi' }]);
+  for (const body of bodies) assert.deepEqual(body.provider, configured);
+});
+
+test('complete: options.videoSeconds raises the estimate by videoSeconds * media.video.tokensPerSecond', async () => {
+  const llm = createLlm({
+    apiKey: 'k',
+    getConfig: () => ({ ...baseConfig({ maxRequestTokens: 50000 }), media: { video: { tokensPerSecond: 300 } } }),
+    calibrator: fakeCalibrator(),
+    state: fakeState(),
+    fetchImpl: async () => okResponse('hi'),
+  });
+  const messages = [{ role: 'user', content: 'hi' }];
+  const plain = await llm.complete(messages);
+  const withVideo = await llm.complete(messages, { videoSeconds: 60 });
+  assert.equal(withVideo.estimated - plain.estimated, 18000);
+});
+
+test('complete: options.videoSeconds defaults to 300 tokens per second when media.video is absent', async () => {
+  const llm = createLlm({
+    apiKey: 'k',
+    getConfig: () => baseConfig({ maxRequestTokens: 50000 }),
+    calibrator: fakeCalibrator(),
+    state: fakeState(),
+    fetchImpl: async () => okResponse('hi'),
+  });
+  const messages = [{ role: 'user', content: 'hi' }];
+  const plain = await llm.complete(messages);
+  const withVideo = await llm.complete(messages, { videoSeconds: 10 });
+  assert.equal(withVideo.estimated - plain.estimated, 3000);
+});
+
+test('complete: options.videoSeconds counts against the token cap (just below passes, just above refuses)', async () => {
+  const messages = [{ role: 'user', content: 'hi' }];
+  // raw text estimate: overhead 6 + ceil(2/3.5)=1 -> 7; plus 60 s * 300 = 18000 -> 18007
+  const make = (cap) => createLlm({
+    apiKey: 'k',
+    getConfig: () => ({ ...baseConfig({ maxRequestTokens: cap }), media: { video: { tokensPerSecond: 300 } } }),
+    calibrator: fakeCalibrator(),
+    state: fakeState(),
+    fetchImpl: async () => okResponse('hi'),
+  });
+  const ok = await make(18007).complete(messages, { videoSeconds: 60 });
+  assert.equal(ok.estimated, 18007);
+  await assert.rejects(
+    make(18006).complete(messages, { videoSeconds: 60 }),
+    (err) => err instanceof TokenLimitError,
+  );
+});
+
+test('complete: the calibrator is applied to the text estimate plus the video estimate', async () => {
+  const calibrator = { ...fakeCalibrator(), apply: (n) => n * 2 };
+  const llm = createLlm({
+    apiKey: 'k',
+    getConfig: () => ({ ...baseConfig({ maxRequestTokens: 100000 }), media: { video: { tokensPerSecond: 300 } } }),
+    calibrator,
+    state: fakeState(),
+    fetchImpl: async () => okResponse('hi'),
+  });
+  const result = await llm.complete([{ role: 'user', content: 'hi' }], { videoSeconds: 60 });
+  assert.equal(result.estimated, (7 + 18000) * 2);
+});
+
+test('complete: a non-finite or negative options.videoSeconds leaves the estimate unchanged', async () => {
+  const llm = createLlm({
+    apiKey: 'k',
+    getConfig: () => ({ ...baseConfig({ maxRequestTokens: 50000 }), media: { video: { tokensPerSecond: 300 } } }),
+    calibrator: fakeCalibrator(),
+    state: fakeState(),
+    fetchImpl: async () => okResponse('hi'),
+  });
+  const messages = [{ role: 'user', content: 'hi' }];
+  const plain = await llm.complete(messages);
+  for (const videoSeconds of [NaN, Infinity, -5, '60', undefined]) {
+    const result = await llm.complete(messages, { videoSeconds });
+    assert.equal(result.estimated, plain.estimated, `videoSeconds=${String(videoSeconds)}`);
+  }
+});
+
 // options.signal -- an external AbortController cancels the in-flight
 // request (for /nep warmup stop), and is never retried afterwards.
 test('complete: options.signal aborts the in-flight fetch and rejects without retrying', async () => {

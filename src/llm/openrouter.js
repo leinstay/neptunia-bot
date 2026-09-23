@@ -76,11 +76,24 @@ export function createLlm({ apiKey, getConfig, calibrator, state, fetchImpl = fe
    * memory warmup's `/nep warmup stop` (src/memory/warmup.js): the
    * request already counted by the provider cannot be un-billed, but no
    * further retry/tokens are spent past the moment of the abort.
+   * `options.provider` — OpenRouter provider routing for this one call; a plain
+   * object REPLACES `cfg.provider` (any other value leaves `cfg.provider` in
+   * charge). Exists for the video describer, which pins the provider that can
+   * fetch a public video URL.
+   * `options.videoSeconds` — seconds of video the request carries. A finite,
+   * non-negative value adds `ceil(videoSeconds * media.video.tokensPerSecond)`
+   * (default 300 per second) to the raw estimate before calibration, because
+   * `estimateMessages` cannot size a `video_url` part on its own; the token
+   * cap then applies to the sum.
    */
   async function complete(messages, options = {}) {
     const cfg = getConfig().llm;
     const tokensPerImage = getConfig().context?.vision?.tokensPerImage;
-    const raw = estimateMessages(messages, tokensPerImage);
+    let raw = estimateMessages(messages, tokensPerImage);
+    if (typeof options.videoSeconds === 'number' && Number.isFinite(options.videoSeconds) && options.videoSeconds >= 0) {
+      const tokensPerSecond = getConfig().media?.video?.tokensPerSecond ?? 300;
+      raw += Math.ceil(options.videoSeconds * tokensPerSecond);
+    }
     const estimated = calibrator.apply(raw);
     const requestTokenCap = Number.isFinite(options.maxRequestTokens) ? options.maxRequestTokens : cfg.maxRequestTokens;
     if (estimated > requestTokenCap) {
@@ -99,7 +112,11 @@ export function createLlm({ apiKey, getConfig, calibrator, state, fetchImpl = fe
     // OpenRouter's provider routing (e.g. `{ ignore: [...] }`, `{ order: [...] }`), sent
     // verbatim and read fresh on every call so it is hot-reloadable. A non-object (including
     // the default null) omits the field entirely -- OpenRouter then picks providers itself.
-    if (cfg.provider && typeof cfg.provider === 'object' && !Array.isArray(cfg.provider)) {
+    // A plain-object `options.provider` replaces it for this one call.
+    const isRouting = (value) => Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+    if (isRouting(options.provider)) {
+      body.provider = options.provider;
+    } else if (isRouting(cfg.provider)) {
       body.provider = cfg.provider;
     }
 

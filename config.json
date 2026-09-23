@@ -15,6 +15,7 @@
     "multiMessage": true,
     "vision": true,
     "mediaDescriptions": true,
+    "videoDescriptions": true,
     "typingSimulation": true,
     "adminCommands": true
   },
@@ -150,7 +151,23 @@
     "maxPerTurn": 6,
     "cacheEntries": 5000,
     "filePreviewChars": 500,
-    "embedTextChars": 200
+    "embedTextChars": 200,
+    "video": {
+      "model": "google/gemini-3.8-flash",
+      "provider": { "order": ["google-ai-studio"], "allow_fallbacks": false },
+      "maxOutputTokens": 400,
+      "maxSeconds": 60,
+      "maxBytes": 8000000,
+      "maxPerTurn": 1,
+      "maxPerDay": 40,
+      "tokensPerSecond": 300,
+      "timeoutMs": 90000,
+      "toolTimeoutMs": 60000,
+      "sites": ["youtube.com", "youtu.be", "tiktok.com", "vk.com", "vkvideo.ru", "x.com", "twitter.com", "reddit.com", "twitch.tv"],
+      "directUrlSites": ["youtube.com", "youtu.be"],
+      "ytdlpPath": "yt-dlp",
+      "ffmpegPath": "ffmpeg"
+    }
   },
   "warmup": {
     "enabled": true,

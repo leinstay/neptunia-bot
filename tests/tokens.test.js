@@ -59,6 +59,28 @@ test('estimateMessages: an image_url part is charged the flat tokensPerImage reg
   assert.equal(total, 6 + 400);
 });
 
+test('estimateMessages: a video_url part is charged 0 tokens (its cost comes through videoSeconds)', () => {
+  const total = estimateMessages(
+    [{ role: 'user', content: [{ type: 'video_url', video_url: { url: 'https://www.youtube.com/watch?v=x' } }] }],
+    400,
+  );
+  assert.equal(total, 6);
+});
+
+test('estimateMessages: next to a video_url part, an image_url part still costs tokensPerImage', () => {
+  const total = estimateMessages(
+    [{
+      role: 'user',
+      content: [
+        { type: 'video_url', video_url: { url: 'data:video/mp4;base64,AAAA' } },
+        { type: 'image_url', image_url: { url: 'x' } },
+      ],
+    }],
+    400,
+  );
+  assert.equal(total, 6 + 400);
+});
+
 test('estimateMessages: custom tokensPerImage is honoured', () => {
   const total = estimateMessages(
     [{ role: 'user', content: [{ type: 'image_url', image_url: { url: 'x' } }] }],
