@@ -30,6 +30,7 @@ All instructions are English in both layers; a character's speech samples may be
 | `channel.md` | yes | Warmup: channel notes from a message sample | `{{fieldChars}}` |
 | `server.md` | yes | Warmup: server-level notes from channel notes and member summaries | `{{name}}` `{{fieldChars}}` `{{maxInjokes}}` `{{loreTextChars}}` |
 | `describe.md` | yes | Out-of-character prompt of the media describer (`features.mediaDescriptions`): one picture in, one plain line out: what is on it, any legible text, in the language the chat speaks. No opinions, no markdown | none |
+| `describe-video.md` | yes | Out-of-character prompt of the video describer (`features.videoDescriptions`): one video clip in (with sound), 3–5 plain lines out: what happens, key speech quoted, text on screen, music/sound when relevant. Same language and restriction rules as `describe.md`. No character card | none |
 | `address.md` | yes | Classifier: is this untagged message addressed to the persona | `{{name}}` |
 | `labels.json` | yes | Every string the CODE inserts into a prompt. Keys fixed below, values are the writer's | see below |
 
@@ -38,7 +39,7 @@ All instructions are English in both layers; a character's speech samples may be
 System message = `system-prompt` + `character-card` + `rules` + `format`. For the analyzer: `memory.md` alone.
 On a forced turn (`/nep interject`, `/nep initiate`), `forced.md` is appended after the mode prompt if the file exists.
 The analyzer and the warmup's `profile.md` and `server.md` receive the character card and `rules.md` as a
-`<character>` block in the user message. `channel.md`, `describe.md` and `address.md` do not receive the card.
+`<character>` block in the user message. `channel.md`, `describe.md`, `describe-video.md` and `address.md` do not receive the card.
 
 `{{guildFieldChars}}` is `fieldChars * 2`, the limit code clamps guild-level patterns and starters to.
 `{{maxEpisodes}}` is the total episodes kept per person. Both are filled from config but not used by the default
@@ -66,9 +67,25 @@ other profiles → other channels.
 
 Media in a transcript line, most informative form available: a picture attached to THIS request →
 `transcript.imageAttached` (numbered in the order the pictures follow the text); a described one →
-`imageDescribed` / `gifDescribed` / `videoDescribed`; otherwise the blind forms `image` / `gif` / `video`. Links use
-`link` / `linkText` built from Discord's embed (site, title, snippet); text files show their beginning via
-`filePreview`; a forwarded message is wrapped in `forwarded`.
+`imageDescribed` / `gifDescribed` / `videoDescribed`; otherwise the blind forms `image` / `gif` / `video`.
+When video vision is on (`features.mediaDescriptions` AND `features.videoDescriptions`), a video or video-site link
+gains a state: `videoWatched` (first-hand, seen and heard), `videoNotWatchedFrame` (not watched but a still frame was
+described), or `videoNotWatched` (not watched, no frame). The reason code (`length` / `size` / `daily` / `error`) is
+swapped for the human phrase from `transcript.videoReason.*` before it reaches the transcript. Links keep their base
+tag (`link` / `linkText`) and add a video extra: `linkWatched`, `linkNotWatchedFrame` or `linkNotWatched`. When a still
+frame is attached as a picture, `frameAttached` is added as well. Links use `link` / `linkText` built from Discord's
+embed (site, title, snippet); text files show their beginning via `filePreview`; a forwarded message is wrapped in
+`forwarded`.
+
+Video results are cached per attachment or per link in `data/guilds/<id>/media.json` under the key
+`video:<itemId>` (the attachment id, or a stable hash of the link URL). Cache entries:
+
+- Watched: `{ text, ts, watched: true }` — permanent, the summary text.
+- Limit miss (length or size): `{ miss: true, ts, reason: "length"|"size" }` — permanent, the file will not change.
+- Error miss: `{ miss: true, ts, reason: "error" }` — retried after one hour.
+- Daily limit: not cached; returned as `{ state: "limit", reason: "daily" }` for that turn only.
+
+A picture's still-frame entry keeps its own `<itemId>` key as before. Both can coexist for the same item.
 
 Transcript line: `#87 [14:32] nick: text <replyTo> <media…> <sticker>`; own lines use `labels.self`; between
 lines `labels.transcript.gap` / `gapWithDate` / `date`; the block opens with `labels.transcript.header`. Neighbour
@@ -95,6 +112,13 @@ transcript.gif                           {name}
 transcript.gifDescribed                  {text}
 transcript.video                         {name} {duration}
 transcript.videoDescribed                {name} {duration} {text}: text describes ONE frame
+transcript.videoWatched                  {name} {duration} {text}: first-hand — the persona saw and heard the clip
+transcript.videoNotWatched               {name} {duration} {reason}: reason is the human phrase from videoReason.*
+transcript.videoNotWatchedFrame          {name} {duration} {reason} {text}: not watched but a still frame was described
+transcript.videoReason.length | size | daily | error    human phrases for the four reason codes
+transcript.linkWatched                   {text}: extra tag after a link tag, first-hand video summary
+transcript.linkNotWatched                {reason}: extra tag after a link tag, not watched with reason
+transcript.linkNotWatchedFrame           {reason} {text}: extra tag after a link tag, not watched but preview described
 transcript.voice                         {duration}
 transcript.audio                         {name} {duration}
 transcript.link                          {site} {title}
@@ -108,9 +132,11 @@ transcript.unknownDuration               shown in place of {duration} when Disco
 senses.imageSee | imageDescribed | imageBlind        one line each; code picks the ones true under the live config
 senses.gifDescribed | gifBlind
 senses.videoDescribed | videoBlind
+senses.videoWatch                        replaces videoDescribed when features.videoDescriptions is on (needs mediaDescriptions too); covers watched, still frame and not-watched states
 senses.stickerSee | stickerDescribed | stickerBlind
 senses.lottie
 senses.voice | links | files
+senses.linksWatch                        replaces links when features.videoDescriptions is on; adds that a linked video may come watched or not watched with the reason
 tempo.counts                             {last10min} {lastHour} {lastDay}
 tempo.authors                            {authors}: a head count
 tempo.silenceBeforeTrigger | lastMessageAgo | sinceOwn          {duration}

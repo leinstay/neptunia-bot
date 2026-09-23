@@ -72,6 +72,7 @@ Both are hot-reloaded.
 | `initiate.md` | yes | Task: break a silence, start a topic |
 | `memory.md` | yes | Technical prompt for the memory/relationship analyzer |
 | `describe.md` | yes | One-line media descriptions for the helper model |
+| `describe-video.md` | yes | Video descriptions for the video-capable model |
 | `address.md` | yes | Classifier: is an untagged message addressed to the persona |
 | `profile.md` | yes | Warmup: one member's profile from a message sample |
 | `channel.md` | yes | Warmup: channel notes from a message sample |
@@ -136,11 +137,13 @@ Stickers and custom emoji recur constantly, so they are cached by id and cost ne
 
 A `<senses>` block in the user message tells the persona what it can and cannot perceive under the current config. The persona trusts this block and never claims to have seen, heard or opened anything beyond it.
 
-The persona can't watch videos or listen to audio; it gets a name, a duration, and at best a one-frame description. Voice messages show only duration. Links show the site, the title and a snippet from Discord's embed, never the page itself.
+`features.videoDescriptions` (on by default, needs `mediaDescriptions` too) adds a video-capable model (`media.video.model`, default `google/gemini-3.8-flash`) that watches short clips: Discord video attachments and links to known video sites (YouTube, TikTok, VK, X, Reddit, Twitch). The clip is capped at `media.video.maxSeconds` (default 60 s) and `media.video.maxBytes`; at most `maxPerTurn` new videos per turn (every attempt counts, failed or not) and `maxPerDay` per day. Results are cached alongside picture descriptions. YouTube links within the cap are passed as a URL to the provider (Google AI Studio); everything else is downloaded with `yt-dlp` and trimmed with `ffmpeg`, both optional system binaries. Without them, attachments within the caps still work; longer attachments and site links fall back to a still frame. The video prompt is `prompts/describe-video.md`. Settings live under `media.video`. See [`docs/en/configuration.md`](docs/en/configuration.md) for every key and a model comparison table.
+
+Voice messages show only duration. Links show the site, the title and a snippet from Discord's embed, never the page itself.
 
 ## Cost and privacy
 
-Each turn is one LLM request; a memory update adds a second. Cost depends on the model and endpoint; `llm.model` and `llm.baseUrl` accept any compatible values. The daily cap (`llm.maxRequestsPerDay`) prevents runaway spending.
+Each turn is one LLM request; a memory update adds a second. Cost depends on the model and endpoint; `llm.model` and `llm.baseUrl` accept any compatible values. The daily cap (`llm.maxRequestsPerDay`) prevents runaway spending. Video descriptions add one request per watched clip to a separate, cheaper model (`media.video.maxPerDay` caps the daily count); `yt-dlp` and `ffmpeg` run locally and cost nothing beyond bandwidth.
 
 `data/` holds per-member profiles, relationship scores, channel observations and server patterns. It stays on your machine, is gitignored, and is only sent to the LLM as context. The analyzer is instructed not to store sensitive details. `/nep memory forget` deletes a profile entirely.
 
@@ -193,6 +196,7 @@ prompts/
   initiate.md              task: start a topic
   memory.md                prompt for the memory analyzer
   describe.md              prompt for the media describer
+  describe-video.md        prompt for the video describer
   address.md               classifier for follow-up messages
   profile.md               warmup: one member's profile from a message sample
   channel.md               warmup: channel notes from a message sample
@@ -242,6 +246,8 @@ src/
     format.js              transcript lines, time gaps, tempo
     media.js               media classification, label selection, proxy URLs
     fetch-image.js         download and cache images for inline LLM requests
+    video-sites.js         video site matching, URL cache keys, yt-dlp/ffmpeg args
+    fetch-video.js         download, probe and trim videos for the video describer
   behavior/
     mention.js             call detection, ignore heuristics
     prompt.js              request builder with token budget

@@ -20,6 +20,7 @@ Every key in `config.json` with its default, grouped by section.
 | `multiMessage` | `true` | Allow 2–3 messages in a row |
 | `vision` | `true` | Process attached images |
 | `mediaDescriptions` | `true` | One-line descriptions for pictures, GIFs, video frames and link thumbnails |
+| `videoDescriptions` | `true` | Watch short video clips through a video-capable model; needs `mediaDescriptions` on as well |
 | `followUp` | `true` | Classify untagged messages after the persona answers to continue a conversation |
 | `typingSimulation` | `true` | Simulate typing speed |
 | `adminCommands` | `true` | Owner slash commands; `false` unregisters them |
@@ -99,6 +100,30 @@ Settings for the media describer (`features.mediaDescriptions`).
 | `cacheEntries` | `5000` | Description cache size, keyed by attachment |
 | `filePreviewChars` | `500` | Characters shown from the beginning of text files |
 | `embedTextChars` | `200` | Characters shown from link embed text |
+
+### `media.video`
+
+Settings for the video describer (`features.videoDescriptions`). Video vision needs BOTH `features.mediaDescriptions` and `features.videoDescriptions` on. A separate video-capable model watches short clips: Discord video attachments and links to the sites in `media.video.sites`. Results are cached in the media cache alongside picture descriptions; a repost costs nothing.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `model` | `"google/gemini-3.8-flash"` | Video-capable model; must accept both video and audio input |
+| `provider` | `{ "order": ["google-ai-studio"], "allow_fallbacks": false }` | OpenRouter provider routing for the direct-URL path (YouTube within the length cap); `null` uses `llm.provider` |
+| `maxOutputTokens` | `400` | Max output tokens per video summary |
+| `maxSeconds` | `60` | Max clip duration (seconds); longer attachments are trimmed, longer site videos fall back to a still frame |
+| `maxBytes` | `8000000` | Max attachment size (bytes); over-size after trimming is a permanent miss |
+| `maxPerTurn` | `1` | Max NEW videos per turn; every fetch attempt counts, failed or not |
+| `maxPerDay` | `40` | Daily video request cap (stored in `state.json` as `videoDay`/`videoCount`) |
+| `tokensPerSecond` | `300` | Token estimate per second of video for the budget check |
+| `timeoutMs` | `90000` | LLM request timeout for video (ms) |
+| `toolTimeoutMs` | `60000` | Timeout for `yt-dlp` and `ffmpeg` subprocesses (ms) |
+| `sites` | `["youtube.com", "youtu.be", "tiktok.com", "vk.com", "vkvideo.ru", "x.com", "twitter.com", "reddit.com", "twitch.tv"]` | Hostnames whose links are treated as video |
+| `directUrlSites` | `["youtube.com", "youtu.be"]` | Sites whose public URL can be passed directly to the provider (the provider fetches the video itself) |
+| `ytdlpPath` | `"yt-dlp"` | Path to the `yt-dlp` binary; needed for site video links and for probing duration |
+| `ffmpegPath` | `"ffmpeg"` | Path to `ffmpeg`; needed for trimming and downscaling long or large attachments |
+| `prefill` | `true` | Watch a video as soon as it arrives, so the next turn finds it cached |
+
+Both `yt-dlp` and `ffmpeg` are optional system binaries. Without them, attachments within the caps still work (sent as-is). Longer attachments and all site links fall back to the still frame or preview picture, and the persona is told the reason. Every video request counts against `llm.maxRequestsPerDay` and the per-request token cap.
 
 ## `mention`
 
@@ -230,3 +255,45 @@ With `damping` on, a change that pushes the score further from zero is scaled by
 | `maxTokens` | `6000000` | Total token budget for the run |
 | `rateLimitWaitMinutes` | `10` | Minutes to wait on a rate limit |
 | `rateLimitMaxWaits` | `36` | Consecutive waits before the run aborts |
+
+## Choosing models
+
+The engine uses five model roles. Each is set independently, so the voice can use a premium model while the helpers stay cheap.
+
+### `llm.model` — the persona's voice
+
+The most capable model the budget allows. Roleplay quality, in-character consistency and natural conversation all depend on it. A smaller model breaks character, forgets context cues and sounds flat.
+
+Default: `anthropic/claude-opus-4.6`. A cheaper option: `anthropic/claude-sonnet-4.5`.
+
+### `memory.model` — the analyzer
+
+Reasons over long transcripts and returns strict JSON. Needs the same tier of intelligence as the voice. `null` (default) uses the persona's model. The same examples apply.
+
+### `media.model` — pictures
+
+Any cheap vision model. Writes one-line descriptions, so reasoning power barely matters.
+
+Default: `anthropic/claude-haiku-4.5`. Cheapest alternative: `google/gemini-2.5-flash-lite`.
+
+### `mention.followUpModel` — the address classifier
+
+The cheapest text model that can answer "yes" or "no" reliably. `null` (default) uses the media model.
+
+### `media.video.model` — video with sound
+
+Only models that accept BOTH video and audio input through OpenRouter work here. Models that take frames but no audio (Qwen VL, GLM, Seed, Gemma) do not hear speech and miss most of the point.
+
+`google/gemini-flash-latest` is a floating alias whose price can change without notice. Batch (`:batch`) variants are asynchronous and unusable for a live reply. The direct-URL path (YouTube within the length cap, sent as a public URL with `media.video.provider`) needs Google AI Studio as the provider.
+
+Cost per one-minute clip, USD, from OpenRouter prices on 2026-09-23:
+
+| Model | ~USD / 1 min clip |
+|---|---|
+| `google/gemini-2.5-flash-lite` | 0.002 |
+| `google/gemini-3.1-flash-lite` | 0.005 |
+| `google/gemini-3.5-flash-lite` | 0.006 |
+| `google/gemini-3.7-flash` | 0.014 |
+| `google/gemini-3.8-flash` (default) | 0.014 |
+
+`qwen/qwen3.8-omni-flash` also accepts video and audio. Prices change; the table is a snapshot as of the date above.
