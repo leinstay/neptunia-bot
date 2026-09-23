@@ -54,9 +54,9 @@ const MAX_WARM_VIDEOS_PER_MESSAGE = 1;
  *   MAX_WARM_PICTURES_PER_MESSAGE) are handed to it fire-and-forget -- never awaited here, errors
  *   swallowed -- so the cache is already warm by the time the live memory analyzer
  *   (src/memory/update.js#analyze) wants a caption for one of them; the analyzer itself never
- *   triggers a new request. With features.mediaDescriptions, features.videoDescriptions and
- *   media.video.prefill all on, the message's first video (MAX_WARM_VIDEOS_PER_MESSAGE) is handed
- *   to `describer.describeVideos` the same way.
+ *   triggers a new request. With features.mediaDescriptions, features.videoDescriptions (a missing
+ *   key counts as on) and media.video.prefill all on, the message's first video
+ *   (MAX_WARM_VIDEOS_PER_MESSAGE) is handed to `describer.describeVideos` the same way.
  * @param {() => number} [deps.rng]
  * @param {() => number} [deps.now]
  * @param {(ms: number) => Promise<void>} [deps.sleep]  Used only for the "human switch pause"
@@ -114,8 +114,9 @@ export function createMessageHandler({
   function warmVideoCache(guildId, normalized) {
     const config = hot.config;
     const features = config.features ?? {};
-    // Both switches, like the senses line (src/behavior/prompt.js#renderSenses).
-    if (features.mediaDescriptions !== true || features.videoDescriptions !== true) return;
+    // Both switches, like the senses line (src/behavior/prompt.js#renderSenses); a missing
+    // videoDescriptions counts as on.
+    if (features.mediaDescriptions !== true || features.videoDescriptions === false) return;
     if (config.media?.video?.prefill !== true) return;
     if (typeof describer.describeVideos !== 'function') return;
     const candidates = collectVideos(normalized, { sites: config.media.video.sites }).slice(0, MAX_WARM_VIDEOS_PER_MESSAGE);

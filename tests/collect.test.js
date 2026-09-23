@@ -300,7 +300,7 @@ test('normalizeMessage: a URL on a site outside videoSites adds no link', () => 
   assert.deepEqual(normalizeMessage(raw, 'self', { videoSites: VIDEO_SITES }).links, []);
 });
 
-test('normalizeMessage: a typed URL that an embed already carries is added once (the embed), embed id kept', () => {
+test('normalizeMessage: a typed URL that an embed already carries is added once (the embed), id = the video cache key', () => {
   const url = 'https://www.youtube.com/watch?v=xyz';
   const raw = rawMessage({
     cleanContent: `look ${url}`,
@@ -308,7 +308,8 @@ test('normalizeMessage: a typed URL that an embed already carries is added once 
   });
   const m = normalizeMessage(raw, 'self', { videoSites: VIDEO_SITES });
   assert.equal(m.links.length, 1);
-  assert.ok(m.links[0].id.startsWith('link:'));
+  assert.equal(m.links[0].id, videoUrlCacheKey(url));
+  assert.equal(m.links[0].title, 'Cool video');
   assert.equal(m.content, 'look');
 });
 
@@ -319,7 +320,39 @@ test('normalizeMessage: a typed URL whose canonical key matches an embed URL is 
   });
   const m = normalizeMessage(raw, 'self', { videoSites: VIDEO_SITES });
   assert.equal(m.links.length, 1);
-  assert.equal(m.links[0].id, 'm1#e0');
+  assert.equal(m.links[0].id, videoUrlCacheKey('https://www.youtube.com/watch?v=xyz'));
+});
+
+test('normalizeMessage: a typed youtu.be link and a watch?v= embed of one video are one link with the canonical key', () => {
+  const raw = rawMessage({
+    cleanContent: 'δες https://youtu.be/ID42',
+    embeds: [
+      {
+        url: 'https://www.youtube.com/watch?v=ID42',
+        provider: { name: 'YouTube' },
+        title: 'Cool video',
+        thumbnail: { url: 'https://i.ytimg.com/vi/ID42/hq.jpg' },
+      },
+    ],
+  });
+  const m = normalizeMessage(raw, 'self', { videoSites: VIDEO_SITES });
+  assert.equal(m.links.length, 1);
+  assert.equal(m.links[0].id, videoUrlCacheKey('https://youtube.com/watch?v=ID42'));
+  assert.equal(m.links[0].id, videoUrlCacheKey('https://youtu.be/ID42'));
+  assert.equal(m.links[0].title, 'Cool video');
+  assert.equal(m.links[0].thumbnailUrl, 'https://i.ytimg.com/vi/ID42/hq.jpg');
+});
+
+test('normalizeMessage: with videoSites set, a non-video embed keeps its existing id', () => {
+  const raw = rawMessage({
+    embeds: [
+      { url: 'https://example.com/page', title: 'A page', thumbnail: { url: 'https://example.com/t.jpg' } },
+      { url: 'https://example.com/other', title: 'Other' },
+    ],
+  });
+  const m = normalizeMessage(raw, 'self', { videoSites: VIDEO_SITES });
+  assert.ok(m.links[0].id.startsWith('link:'));
+  assert.equal(m.links[1].id, 'm1#e1');
 });
 
 test('normalizeMessage: the same typed video URL twice becomes one synthetic link', () => {

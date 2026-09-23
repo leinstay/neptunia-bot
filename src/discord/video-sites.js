@@ -72,11 +72,32 @@ export function extractVideoUrls(text, sites) {
   return out;
 }
 
+// YouTube paths whose second segment is the video id.
+const YOUTUBE_ID_PATHS = new Set(['shorts', 'embed', 'live']);
+
+/**
+ * The video id of a YouTube URL (`youtu.be/<id>`, `youtube.com/watch?v=<id>`,
+ * `/shorts/<id>`, `/embed/<id>`, `/live/<id>`), or null. `host` is already
+ * lowercased and stripped of a leading `www.` / `m.`.
+ */
+function youtubeId(host, parsed) {
+  const segments = parsed.pathname.split('/').filter(Boolean);
+  if (host === 'youtu.be') return segments[0] ?? null;
+  if (host !== 'youtube.com') return null;
+  if (segments[0] === 'watch') return parsed.searchParams.get('v') || null;
+  if (YOUTUBE_ID_PATHS.has(segments[0])) return segments[1] ?? null;
+  return null;
+}
+
 /**
  * `video:url:<16 hex>` -- sha1 of a canonical form: lowercase host without a
  * leading `www.` / `m.`, the path, and only the `v` query param (YouTube's
- * video id) when present. Tracking params, timestamps and playlists never
- * split the cache.
+ * video id) when present. Every YouTube form of one video (`youtu.be/<id>`,
+ * `/shorts/<id>`, `/embed/<id>`, `/live/<id>`, `watch?v=<id>`, any of them on
+ * `m.`) canonicalises to `youtube.com/watch?v=<id>` first, so an embed and a
+ * typed link of the same video share one key. Tracking params, timestamps
+ * and playlists never split the cache. Short links with no id in them
+ * (TikTok's `vm.` / `vt.`) are hashed as they are.
  * @param {string} url
  * @returns {string}
  */
@@ -85,8 +106,13 @@ export function videoUrlCacheKey(url) {
   try {
     const parsed = new URL(base);
     const host = parsed.hostname.toLowerCase().replace(/^(www\.|m\.)/, '');
-    const v = parsed.searchParams.get('v');
-    base = `${host}${parsed.pathname}${v !== null ? `?v=${v}` : ''}`;
+    const id = youtubeId(host, parsed);
+    if (id) {
+      base = `youtube.com/watch?v=${id}`;
+    } else {
+      const v = parsed.searchParams.get('v');
+      base = `${host}${parsed.pathname}${v !== null ? `?v=${v}` : ''}`;
+    }
   } catch {
     // An unparsable URL still hashes to something stable -- best effort.
   }
@@ -102,7 +128,7 @@ export function videoUrlCacheKey(url) {
 export function ytdlpProbeArgs(url, { ytdlpPath } = {}) {
   return {
     command: ytdlpPath,
-    args: ['--dump-single-json', '--skip-download', '--no-playlist', '--no-warnings', '--quiet', String(url)],
+    args: ['--dump-single-json', '--skip-download', '--no-playlist', '--no-warnings', '--quiet', '--', String(url)],
   };
 }
 
@@ -125,6 +151,7 @@ export function ytdlpClipArgs(url, { ytdlpPath, ffmpegPath, maxSeconds, maxBytes
       '--force-keyframes-at-cuts',
       '--max-filesize', String(maxBytes),
       '-o', String(outPath),
+      '--',
       String(url),
     ],
   };

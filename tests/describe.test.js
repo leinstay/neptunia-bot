@@ -754,7 +754,7 @@ test('describeVideo: a length or size failure is a permanent limit, never retrie
     assert.equal(videoFetcher.calls.length, 1, 'the permanent miss is served from the cache');
     assert.equal(llm.calls.length, 0);
     assert.equal(store.getMediaCache('g1')['video:v1'].reason, reason);
-    assert.equal(state.data.videoCount ?? 0, 0, 'no request was sent, nothing counted');
+    assert.equal(state.data.videoCount, 1, 'the attempt reserved its daily slot, which it keeps');
   }
 });
 
@@ -815,7 +815,6 @@ test('describeVideo: the daily counter resets on a new day and counts only sent 
 test('describeVideo: feature off, missing prompt or a non-video item -> null without any request', async () => {
   const cases = [
     { hot: videoHot({ features: { videoDescriptions: false } }), item: videoAttachment() },
-    { hot: videoHot({ features: { videoDescriptions: undefined } }), item: videoAttachment() },
     { hot: videoHot({ prompts: { 'describe-video': undefined } }), item: videoAttachment() },
     { hot: videoHot(), item: pictureItem('a1') },
   ];
@@ -952,4 +951,62 @@ test('describeVideo: mediaDescriptions off with videoDescriptions on -> null and
   assert.equal(await describer.describeVideo('g1', videoAttachment()), null);
   assert.equal(videoFetcher.calls.length, 0);
   assert.equal(llm.calls.length, 0);
+});
+
+test('describeVideo: features.videoDescriptions absent counts as on (mediaDescriptions on) -> the video is watched', async () => {
+  const hot = videoHot();
+  delete hot.config.features.videoDescriptions;
+  const { describer, llm, videoFetcher } = videoDescriber({ hot });
+
+  assert.equal((await describer.describeVideo('g1', videoAttachment())).state, 'watched');
+  assert.equal(videoFetcher.calls.length, 1);
+  assert.equal(llm.calls.length, 1);
+});
+
+test('describeVideo: the daily slot is reserved before the fetch -- two concurrent new videos at cap-1 fetch once', async () => {
+  const now = () => Date.parse('2026-09-23T12:00:00Z');
+  const state = fakeState({ videoDay: '2026-09-23', videoCount: 39 });
+  const { describer, llm, videoFetcher } = videoDescriber({ state, now });
+
+  const [a, b] = await Promise.all([
+    describer.describeVideo('g1', videoAttachment('v1')),
+    describer.describeVideo('g1', videoAttachment('v2')),
+  ]);
+
+  assert.equal(a.state, 'watched');
+  assert.deepEqual(b, { state: 'limit', reason: 'daily' });
+  assert.equal(videoFetcher.calls.length, 1);
+  assert.equal(llm.calls.length, 1);
+  assert.equal(state.data.videoCount, 40);
+});
+
+test('describeVideo: a fetch that fails after the reservation keeps its daily slot', async () => {
+  const now = () => Date.parse('2026-09-23T12:00:00Z');
+  const state = fakeState({ videoDay: '2026-09-23', videoCount: 39 });
+  const videoFetcher = fakeVideoFetcher({ attachment: { ok: false, reason: 'download' } });
+  const { describer, llm } = videoDescriber({ state, now, videoFetcher });
+
+  assert.deepEqual(await describer.describeVideo('g1', videoAttachment('v1')), { state: 'error' });
+  assert.equal(state.data.videoCount, 40);
+  assert.deepEqual(await describer.describeVideo('g1', videoAttachment('v2')), { state: 'limit', reason: 'daily' });
+  assert.equal(videoFetcher.calls.length, 1);
+  assert.equal(llm.calls.length, 0);
+});
+
+test('describeVideo: without a usable provider object a direct-URL site is downloaded, never sent by public URL', async () => {
+  for (const provider of [null, undefined, 'google-ai-studio', ['pinned']]) {
+    const { describer, llm, videoFetcher } = videoDescriber({ hot: videoHot({ video: { provider } }) });
+    const result = await describer.describeVideo('g1', videoLink());
+
+    assert.equal(result.state, 'watched');
+    assert.deepEqual(
+      videoFetcher.calls.map((c) => c.fn),
+      ['probeSite', 'fetchSiteClip'],
+      `provider ${JSON.stringify(provider)}`,
+    );
+    const body = JSON.stringify(llm.calls[0].messages);
+    assert.ok(!body.includes('youtube.com'), 'only the data URL is sent');
+    assert.ok(body.includes(CLIP_DATA_URL));
+    assert.equal(llm.calls[0].options.provider, undefined);
+  }
 });

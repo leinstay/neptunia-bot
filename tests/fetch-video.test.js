@@ -1,7 +1,9 @@
 // Tests for src/discord/fetch-video.js: attachment sent as-is or trimmed by
 // ffmpeg, the download hard ceiling, yt-dlp probe and clip runs, failure
-// reasons, timeouts, temp-file cleanup and query-free logging. Child
-// processes and fetch are fakes; temp files go to a throwaway directory.
+// reasons, timeouts (the whole tool process tree killed, cleanup only after
+// the tool closed), temp-file cleanup and logging that carries codes only,
+// never tool output or a query string. Child processes, process.kill and
+// fetch are fakes; temp files go to a throwaway directory.
 import { test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
@@ -69,6 +71,10 @@ function fakeFetch(response) {
   };
 }
 
+// Every fake child by pid, so the fake process.kill can find the one it targets.
+const children = new Map();
+let nextPid = 1000;
+
 /**
  * A spawn stub. `behave(child, command, args)` runs on the next tick and may
  * write to stdout/stderr, create files, and emit `close` / `error`.
@@ -76,8 +82,9 @@ function fakeFetch(response) {
  */
 function fakeSpawn(behave) {
   const calls = [];
-  const spawnImpl = (command, args) => {
+  const spawnImpl = (command, args, options) => {
     const child = new EventEmitter();
+    child.pid = nextPid++;
     child.stdout = new EventEmitter();
     child.stderr = new EventEmitter();
     child.killed = false;
@@ -86,11 +93,31 @@ function fakeSpawn(behave) {
       setImmediate(() => child.emit('close', null, 'SIGKILL'));
       return true;
     };
-    calls.push({ command, args, child });
+    children.set(child.pid, child);
+    calls.push({ command, args, options, child });
     setImmediate(() => behave(child, command, args));
     return child;
   };
   return { spawnImpl, calls };
+}
+
+/** A process.kill stub: a negative pid is a process group; the target child closes on the next tick. */
+function fakeKill() {
+  const kills = [];
+  const killProcess = (pid, signal) => {
+    kills.push({ pid, signal });
+    const child = children.get(Math.abs(pid));
+    if (!child) throw Object.assign(new Error('no such process'), { code: 'ESRCH' });
+    child.killed = true;
+    setImmediate(() => child.emit('close', null, signal));
+    return true;
+  };
+  return { killProcess, kills };
+}
+
+/** createVideoFetcher on a POSIX platform with a fake process.kill, unless overridden. */
+function makeFetcher(deps) {
+  return createVideoFetcher({ platform: 'linux', killProcess: fakeKill().killProcess, ...deps });
 }
 
 function enoent(child) {
@@ -138,7 +165,7 @@ async function withCapturedLogs(fn) {
 test('fetchAttachment: a short small video is sent as-is with its own content type, no ffmpeg', async () => {
   const { fetchImpl } = fakeFetch(fakeResponse({ contentType: 'video/webm; codecs=vp9' }));
   const { spawnImpl, calls } = fakeSpawn(() => assert.fail('ffmpeg must not run'));
-  const fetcher = createVideoFetcher({ fetchImpl, spawnImpl, tmpDir });
+  const fetcher = makeFetcher({ fetchImpl, spawnImpl, tmpDir });
 
   const result = await fetcher.fetchAttachment(ATTACHMENT, { ...OPTS, durationSec: 12 });
 
@@ -154,7 +181,7 @@ test('fetchAttachment: a short small video is sent as-is with its own content ty
 test('fetchAttachment: a long video is trimmed by ffmpeg into an mp4 clip', async () => {
   const { fetchImpl, calls: fetchCalls } = fakeFetch(fakeResponse());
   const { spawnImpl, calls } = fakeSpawn(writesOutput(300));
-  const fetcher = createVideoFetcher({ fetchImpl, spawnImpl, tmpDir });
+  const fetcher = makeFetcher({ fetchImpl, spawnImpl, tmpDir });
 
   const result = await fetcher.fetchAttachment(ATTACHMENT, { ...OPTS, durationSec: 125 });
 
@@ -175,7 +202,7 @@ test('fetchAttachment: a long video is trimmed by ffmpeg into an mp4 clip', asyn
 test('fetchAttachment: an unknown duration always goes through ffmpeg; seconds falls back to maxSeconds', async () => {
   const { fetchImpl } = fakeFetch(fakeResponse());
   const { spawnImpl, calls } = fakeSpawn(writesOutput(100));
-  const fetcher = createVideoFetcher({ fetchImpl, spawnImpl, tmpDir });
+  const fetcher = makeFetcher({ fetchImpl, spawnImpl, tmpDir });
 
   const result = await fetcher.fetchAttachment(ATTACHMENT, { ...OPTS, durationSec: null });
 
@@ -187,7 +214,7 @@ test('fetchAttachment: an unknown duration always goes through ffmpeg; seconds f
 test('fetchAttachment: a short but oversized video is re-encoded; seconds keeps the real duration', async () => {
   const { fetchImpl } = fakeFetch(fakeResponse({ chunks: [Buffer.alloc(1500, 1)] }));
   const { spawnImpl, calls } = fakeSpawn(writesOutput(500));
-  const fetcher = createVideoFetcher({ fetchImpl, spawnImpl, tmpDir });
+  const fetcher = makeFetcher({ fetchImpl, spawnImpl, tmpDir });
 
   const result = await fetcher.fetchAttachment(ATTACHMENT, { ...OPTS, durationSec: 20 });
 
@@ -196,31 +223,25 @@ test('fetchAttachment: a short but oversized video is re-encoded; seconds keeps 
   assert.equal(calls.length, 1);
 });
 
-test('fetchAttachment: ffmpeg missing -> length when the video is too long', async () => {
-  const { fetchImpl } = fakeFetch(fakeResponse());
-  const { spawnImpl } = fakeSpawn(enoent);
-  const fetcher = createVideoFetcher({ fetchImpl, spawnImpl, tmpDir });
+test('fetchAttachment: ffmpeg missing -> tool (retryable), whether the video was too long or only too big', async () => {
+  const cases = [
+    [fakeResponse(), 90],
+    [fakeResponse({ chunks: [Buffer.alloc(1500, 1)] }), 30],
+  ];
+  for (const [response, durationSec] of cases) {
+    const { fetchImpl } = fakeFetch(response);
+    const { spawnImpl } = fakeSpawn(enoent);
+    const fetcher = makeFetcher({ fetchImpl, spawnImpl, tmpDir });
 
-  const result = await fetcher.fetchAttachment(ATTACHMENT, { ...OPTS, durationSec: 90 });
-
-  assert.deepEqual(result, { ok: false, reason: 'length' });
-  assert.deepEqual(await leftovers(), []);
-});
-
-test('fetchAttachment: ffmpeg missing -> size when the video was only too big', async () => {
-  const { fetchImpl } = fakeFetch(fakeResponse({ chunks: [Buffer.alloc(1500, 1)] }));
-  const { spawnImpl } = fakeSpawn(enoent);
-  const fetcher = createVideoFetcher({ fetchImpl, spawnImpl, tmpDir });
-
-  const result = await fetcher.fetchAttachment(ATTACHMENT, { ...OPTS, durationSec: 30 });
-
-  assert.deepEqual(result, { ok: false, reason: 'size' });
+    assert.deepEqual(await fetcher.fetchAttachment(ATTACHMENT, { ...OPTS, durationSec }), { ok: false, reason: 'tool' });
+    assert.deepEqual(await leftovers(), []);
+  }
 });
 
 test('fetchAttachment: the trimmed clip still over maxBytes -> size', async () => {
   const { fetchImpl } = fakeFetch(fakeResponse());
   const { spawnImpl } = fakeSpawn(writesOutput(1001));
-  const fetcher = createVideoFetcher({ fetchImpl, spawnImpl, tmpDir });
+  const fetcher = makeFetcher({ fetchImpl, spawnImpl, tmpDir });
 
   const result = await fetcher.fetchAttachment(ATTACHMENT, { ...OPTS, durationSec: 90 });
 
@@ -231,7 +252,7 @@ test('fetchAttachment: the trimmed clip still over maxBytes -> size', async () =
 test('fetchAttachment: ffmpeg non-zero exit -> tool', async () => {
   const { fetchImpl } = fakeFetch(fakeResponse());
   const { spawnImpl } = fakeSpawn((child) => child.emit('close', 1, null));
-  const fetcher = createVideoFetcher({ fetchImpl, spawnImpl, tmpDir });
+  const fetcher = makeFetcher({ fetchImpl, spawnImpl, tmpDir });
 
   assert.deepEqual(await fetcher.fetchAttachment(ATTACHMENT, { ...OPTS, durationSec: 90 }), { ok: false, reason: 'tool' });
 });
@@ -239,7 +260,7 @@ test('fetchAttachment: ffmpeg non-zero exit -> tool', async () => {
 test('fetchAttachment: a hung ffmpeg is killed after toolTimeoutMs -> timeout', async () => {
   const { fetchImpl } = fakeFetch(fakeResponse());
   const { spawnImpl, calls } = fakeSpawn(() => {});
-  const fetcher = createVideoFetcher({ fetchImpl, spawnImpl, tmpDir });
+  const fetcher = makeFetcher({ fetchImpl, spawnImpl, tmpDir });
 
   const result = await fetcher.fetchAttachment(ATTACHMENT, { ...OPTS, toolTimeoutMs: 20, durationSec: 90 });
 
@@ -248,12 +269,84 @@ test('fetchAttachment: a hung ffmpeg is killed after toolTimeoutMs -> timeout', 
   assert.deepEqual(await leftovers(), []);
 });
 
+// --- killing the tool process tree -------------------------------------------
+
+test('kill: on POSIX a tool is spawned detached and a timeout kills its whole process group', async () => {
+  const { spawnImpl, calls } = fakeSpawn(() => {});
+  const { killProcess, kills } = fakeKill();
+  const fetcher = createVideoFetcher({ spawnImpl, killProcess, platform: 'linux', tmpDir });
+
+  assert.deepEqual(await fetcher.fetchSiteClip(SITE_URL, { ...OPTS, toolTimeoutMs: 20 }), { ok: false, reason: 'timeout' });
+
+  assert.equal(calls[0].options.detached, true);
+  assert.deepEqual(kills, [{ pid: -calls[0].child.pid, signal: 'SIGKILL' }]);
+  assert.deepEqual(await leftovers(), []);
+});
+
+test('kill: the temp directory is removed only after the killed tool has closed', async () => {
+  const { spawnImpl, calls } = fakeSpawn(() => {});
+  let seenBeforeClose = null;
+  const killProcess = (pid) => {
+    const child = children.get(Math.abs(pid));
+    setTimeout(async () => {
+      seenBeforeClose = await fsp.readdir(tmpDir);
+      child.emit('close', null, 'SIGKILL');
+    }, 30);
+    return true;
+  };
+  const fetcher = createVideoFetcher({ spawnImpl, killProcess, platform: 'linux', tmpDir });
+
+  const result = await fetcher.fetchSiteClip(SITE_URL, { ...OPTS, toolTimeoutMs: 20 });
+
+  assert.deepEqual(result, { ok: false, reason: 'timeout' });
+  assert.equal(calls.length, 1);
+  assert.equal(seenBeforeClose.length, 1, 'the work directory still exists while the tool is closing');
+  assert.deepEqual(await leftovers(), [], 'and is removed once it has closed');
+});
+
+test('kill: a tool that never closes after the kill is given up on after the grace period', async () => {
+  const { spawnImpl } = fakeSpawn(() => {});
+  const fetcher = createVideoFetcher({ spawnImpl, killProcess: () => true, platform: 'linux', closeGraceMs: 30, tmpDir });
+
+  assert.deepEqual(await fetcher.fetchSiteClip(SITE_URL, { ...OPTS, toolTimeoutMs: 20 }), { ok: false, reason: 'timeout' });
+  assert.deepEqual(await leftovers(), []);
+});
+
+test('kill: a failing group kill falls back to killing the child itself', async () => {
+  const { spawnImpl, calls } = fakeSpawn(() => {});
+  const killProcess = () => {
+    throw Object.assign(new Error('no such process group'), { code: 'ESRCH' });
+  };
+  const fetcher = createVideoFetcher({ spawnImpl, killProcess, platform: 'linux', tmpDir });
+
+  assert.deepEqual(await fetcher.probeSite(SITE_URL, { ...OPTS, toolTimeoutMs: 20 }), { ok: false, reason: 'timeout' });
+  assert.equal(calls[0].child.killed, true);
+});
+
+test('kill: on Windows the tool is not detached and the tree is killed with taskkill /T /F', async () => {
+  const { spawnImpl, calls } = fakeSpawn((child, command, args) => {
+    if (command !== 'taskkill') return; // the tool itself hangs
+    const target = children.get(Number(args[args.indexOf('/PID') + 1]));
+    target.emit('close', 1, null);
+    child.emit('close', 0, null);
+  });
+  const killProcess = () => assert.fail('no process-group kill on Windows');
+  const fetcher = createVideoFetcher({ spawnImpl, killProcess, platform: 'win32', tmpDir });
+
+  assert.deepEqual(await fetcher.fetchSiteClip(SITE_URL, { ...OPTS, toolTimeoutMs: 20 }), { ok: false, reason: 'timeout' });
+
+  assert.equal(calls[0].options.detached, false);
+  assert.equal(calls[1].command, 'taskkill');
+  assert.deepEqual(calls[1].args, ['/PID', String(calls[0].child.pid), '/T', '/F']);
+  assert.deepEqual(await leftovers(), []);
+});
+
 test('fetchAttachment: the download stops at the hard ceiling (maxBytes * 4) and deletes the partial file', async () => {
   const chunks = Array.from({ length: 100 }, () => Buffer.alloc(100, 1)); // 10 000 bytes offered
   const response = fakeResponse({ chunks });
   const { fetchImpl } = fakeFetch(response);
   const { spawnImpl, calls } = fakeSpawn(() => assert.fail('ffmpeg must not run'));
-  const fetcher = createVideoFetcher({ fetchImpl, spawnImpl, tmpDir });
+  const fetcher = makeFetcher({ fetchImpl, spawnImpl, tmpDir });
 
   const result = await fetcher.fetchAttachment(ATTACHMENT, { ...OPTS, durationSec: 10 });
 
@@ -266,7 +359,7 @@ test('fetchAttachment: the download stops at the hard ceiling (maxBytes * 4) and
 test('fetchAttachment: a declared content-length over the ceiling is refused before reading the body', async () => {
   const response = fakeResponse({ contentLength: 5000 });
   const { fetchImpl } = fakeFetch(response);
-  const fetcher = createVideoFetcher({ fetchImpl, spawnImpl: fakeSpawn(() => {}).spawnImpl, tmpDir });
+  const fetcher = makeFetcher({ fetchImpl, spawnImpl: fakeSpawn(() => {}).spawnImpl, tmpDir });
 
   assert.deepEqual(await fetcher.fetchAttachment(ATTACHMENT, { ...OPTS, durationSec: 10 }), { ok: false, reason: 'size' });
   assert.equal(response.body.pulled, 0);
@@ -275,7 +368,7 @@ test('fetchAttachment: a declared content-length over the ceiling is refused bef
 test('fetchAttachment: non-video content type, non-OK status and a thrown fetch all give download', async () => {
   for (const response of [fakeResponse({ contentType: 'text/html' }), fakeResponse({ ok: false, status: 403 }), new Error('network down')]) {
     const { fetchImpl } = fakeFetch(response);
-    const fetcher = createVideoFetcher({ fetchImpl, spawnImpl: fakeSpawn(() => {}).spawnImpl, tmpDir });
+    const fetcher = makeFetcher({ fetchImpl, spawnImpl: fakeSpawn(() => {}).spawnImpl, tmpDir });
     assert.deepEqual(await fetcher.fetchAttachment(ATTACHMENT, { ...OPTS, durationSec: 10 }), { ok: false, reason: 'download' });
   }
   assert.deepEqual(await leftovers(), []);
@@ -285,7 +378,7 @@ test('fetchAttachment: a download that outlives fetchTimeoutMs is aborted -> tim
   const fetchImpl = (url, { signal }) => new Promise((resolve, reject) => {
     signal.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })));
   });
-  const fetcher = createVideoFetcher({ fetchImpl, spawnImpl: fakeSpawn(() => {}).spawnImpl, tmpDir });
+  const fetcher = makeFetcher({ fetchImpl, spawnImpl: fakeSpawn(() => {}).spawnImpl, tmpDir });
 
   const result = await fetcher.fetchAttachment(ATTACHMENT, { ...OPTS, fetchTimeoutMs: 20, durationSec: 10 });
 
@@ -302,7 +395,7 @@ test('probeSite: parses duration and title from yt-dlp stdout', async () => {
     child.stdout.emit('data', bytes.subarray(10));
     child.emit('close', 0, null);
   });
-  const fetcher = createVideoFetcher({ spawnImpl, tmpDir });
+  const fetcher = makeFetcher({ spawnImpl, tmpDir });
 
   const result = await fetcher.probeSite(SITE_URL, OPTS);
 
@@ -319,7 +412,7 @@ test('probeSite: ENOENT -> tool, non-zero -> download, hang -> timeout', async (
     [() => {}, 'timeout'],
   ];
   for (const [behave, reason] of cases) {
-    const fetcher = createVideoFetcher({ spawnImpl: fakeSpawn(behave).spawnImpl, tmpDir });
+    const fetcher = makeFetcher({ spawnImpl: fakeSpawn(behave).spawnImpl, tmpDir });
     assert.deepEqual(await fetcher.probeSite(SITE_URL, { ...OPTS, toolTimeoutMs: 20 }), { ok: false, reason });
   }
 });
@@ -328,7 +421,7 @@ test('probeSite: a spawn that throws synchronously resolves to tool, never rejec
   const spawnImpl = () => {
     throw Object.assign(new Error('boom'), { code: 'EACCES' });
   };
-  const fetcher = createVideoFetcher({ spawnImpl, tmpDir });
+  const fetcher = makeFetcher({ spawnImpl, tmpDir });
   assert.deepEqual(await fetcher.probeSite(SITE_URL, OPTS), { ok: false, reason: 'tool' });
 });
 
@@ -336,7 +429,7 @@ test('probeSite: a spawn that throws synchronously resolves to tool, never rejec
 
 test('fetchSiteClip: returns the downloaded clip as an mp4 data URL and removes the temp file', async () => {
   const { spawnImpl, calls } = fakeSpawn(writesOutput(400, '-o'));
-  const fetcher = createVideoFetcher({ spawnImpl, tmpDir });
+  const fetcher = makeFetcher({ spawnImpl, tmpDir });
 
   const result = await fetcher.fetchSiteClip(SITE_URL, OPTS);
 
@@ -353,7 +446,7 @@ test('fetchSiteClip: returns the downloaded clip as an mp4 data URL and removes 
 });
 
 test('fetchSiteClip: a shorter probed duration is reported as seconds', async () => {
-  const fetcher = createVideoFetcher({ spawnImpl: fakeSpawn(writesOutput(10, '-o')).spawnImpl, tmpDir });
+  const fetcher = makeFetcher({ spawnImpl: fakeSpawn(writesOutput(10, '-o')).spawnImpl, tmpDir });
   const result = await fetcher.fetchSiteClip(SITE_URL, { ...OPTS, durationSec: 14 });
   assert.equal(result.seconds, 14);
 });
@@ -366,7 +459,7 @@ test('fetchSiteClip: ENOENT -> tool, non-zero -> download, hang -> timeout, over
     [writesOutput(1001, '-o'), 'size'],
   ];
   for (const [behave, reason] of cases) {
-    const fetcher = createVideoFetcher({ spawnImpl: fakeSpawn(behave).spawnImpl, tmpDir });
+    const fetcher = makeFetcher({ spawnImpl: fakeSpawn(behave).spawnImpl, tmpDir });
     assert.deepEqual(await fetcher.fetchSiteClip(SITE_URL, { ...OPTS, toolTimeoutMs: 20 }), { ok: false, reason });
     assert.deepEqual(await leftovers(), [], `leftovers after ${reason}`);
   }
@@ -374,13 +467,13 @@ test('fetchSiteClip: ENOENT -> tool, non-zero -> download, hang -> timeout, over
 
 // --- logging ---------------------------------------------------------------
 
-test('logging: one warn per failure with source, reason, a query-free location and scrubbed stderr tail', async () => {
+test('logging: one warn per failure with source, reason, a query-free location and the exit code -- never tool output', async () => {
   const stderr = `${'x'.repeat(400)} ERROR: unable to fetch https://www.youtube.com/watch?v=abc123&token=secret now`;
   const { spawnImpl } = fakeSpawn((child) => {
     child.stderr.emit('data', Buffer.from(stderr));
     child.emit('close', 1, null);
   });
-  const fetcher = createVideoFetcher({ spawnImpl, tmpDir });
+  const fetcher = makeFetcher({ spawnImpl, tmpDir });
 
   const { logs } = await withCapturedLogs(() => fetcher.fetchSiteClip(SITE_URL, OPTS));
 
@@ -391,9 +484,12 @@ test('logging: one warn per failure with source, reason, a query-free location a
   assert.equal(line.source, 'site');
   assert.equal(line.reason, 'download');
   assert.equal(line.location, 'www.youtube.com/watch');
-  assert.ok(line.stderr.length <= 200);
-  assert.ok(line.stderr.includes('<url>'));
+  assert.equal(line.code, 1);
+  assert.ok(!('stderr' in line));
+  assert.ok(!('error' in line));
   const serialized = JSON.stringify(line);
+  assert.ok(!serialized.includes('unable to fetch'));
+  assert.ok(!serialized.includes('xxxx'));
   assert.ok(!serialized.includes('secret'));
   assert.ok(!serialized.includes('abc123'));
   assert.ok(!serialized.includes('?'));
@@ -401,7 +497,7 @@ test('logging: one warn per failure with source, reason, a query-free location a
 
 test('logging: an attachment failure logs source attachment without the signed query string', async () => {
   const { fetchImpl } = fakeFetch(fakeResponse({ ok: false, status: 403 }));
-  const fetcher = createVideoFetcher({ fetchImpl, spawnImpl: fakeSpawn(() => {}).spawnImpl, tmpDir });
+  const fetcher = makeFetcher({ fetchImpl, spawnImpl: fakeSpawn(() => {}).spawnImpl, tmpDir });
 
   const { logs } = await withCapturedLogs(() => fetcher.fetchAttachment(ATTACHMENT, { ...OPTS, durationSec: 5 }));
 
@@ -412,4 +508,42 @@ test('logging: an attachment failure logs source attachment without the signed q
   const serialized = JSON.stringify(lines[0]);
   assert.ok(!serialized.includes('deadbeef'));
   assert.ok(!serialized.includes('cafef00d'));
+});
+
+test('logging: a thrown error logs its code or name only, never its message', async () => {
+  const cases = [
+    [Object.assign(new Error('connect ECONNREFUSED https://cdn.discordapp.com/x?hm=secret'), { code: 'ECONNREFUSED' }), 'ECONNREFUSED'],
+    [new TypeError('fetch failed for https://cdn.discordapp.com/x?hm=secret'), 'TypeError'],
+  ];
+  for (const [error, code] of cases) {
+    const { fetchImpl } = fakeFetch(error);
+    const fetcher = makeFetcher({ fetchImpl, spawnImpl: fakeSpawn(() => {}).spawnImpl, tmpDir });
+
+    const { logs } = await withCapturedLogs(() => fetcher.fetchAttachment(ATTACHMENT, { ...OPTS, durationSec: 5 }));
+
+    const [line] = logs.filter((l) => l.msg.startsWith('fetch-video:'));
+    assert.equal(line.reason, 'download');
+    assert.equal(line.code, code);
+    assert.ok(!('error' in line));
+    const serialized = JSON.stringify(line);
+    assert.ok(!serialized.includes('secret'));
+    assert.ok(!serialized.includes('fetch failed'));
+  }
+});
+
+test('logging: a missing tool logs its errno code', async () => {
+  const fetcher = makeFetcher({ spawnImpl: fakeSpawn(enoent).spawnImpl, tmpDir });
+  const { logs } = await withCapturedLogs(() => fetcher.probeSite(SITE_URL, OPTS));
+  const [line] = logs.filter((l) => l.msg.startsWith('fetch-video:'));
+  assert.equal(line.reason, 'tool');
+  assert.equal(line.code, 'ENOENT');
+  assert.ok(!JSON.stringify(line).includes('spawn tool'));
+});
+
+test('logging: a non-OK download logs its HTTP status', async () => {
+  const { fetchImpl } = fakeFetch(fakeResponse({ ok: false, status: 403 }));
+  const fetcher = makeFetcher({ fetchImpl, spawnImpl: fakeSpawn(() => {}).spawnImpl, tmpDir });
+  const { logs } = await withCapturedLogs(() => fetcher.fetchAttachment(ATTACHMENT, { ...OPTS, durationSec: 5 }));
+  const [line] = logs.filter((l) => l.msg.startsWith('fetch-video:'));
+  assert.equal(line.status, 403);
 });

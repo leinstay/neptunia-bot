@@ -16,16 +16,20 @@
 // miss exactly like a failed LLM request.
 //
 // The same module watches videos (features.mediaDescriptions AND
-// features.videoDescriptions, like the senses line): an attached
-// video or a link to a known video site (src/discord/media.js#collectVideos)
+// features.videoDescriptions -- a missing key counts as on -- like the senses
+// line): an attached video or a link to a known video site
+// (src/discord/media.js#collectVideos)
 // is fetched through src/discord/fetch-video.js -- or, for a short video on a
 // site whose public URL the pinned provider can open itself
-// (`media.video.directUrlSites`), passed by URL -- and summarised by a
+// (`media.video.directUrlSites`, and only when `media.video.provider` is a
+// real provider object), passed by URL -- and summarised by a
 // video-capable model into one line. Results share the picture cache under
 // `video:<itemId>`: a watched summary, a permanent `length`/`size` miss
 // (never retried) or an `error` miss (retried after an hour). A separate
 // daily counter (`state.data.videoDay` / `videoCount`, `media.video.maxPerDay`)
-// caps how many videos are sent per day. Summaries are data: never logged.
+// caps how many videos are attempted per day: the slot is reserved before the
+// fetch and kept even when the fetch or the request fails. Summaries are
+// data: never logged.
 
 import { mediaProxyUrl } from '../discord/media.js';
 import { createImageFetcher } from '../discord/fetch-image.js';
@@ -52,6 +56,11 @@ function cleanVideoText(raw) {
     .replace(/\s+/gu, ' ')
     .trim();
   return clampText(collapsed, VIDEO_TEXT_CHARS, { tolerance: 1 });
+}
+
+/** Whether `value` is a plain object (a usable OpenRouter `provider` routing block). */
+function isPlainObject(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
 /** A stand-in for the persistent state when none is wired (tests, tools): the daily count lives in memory. */
@@ -281,7 +290,10 @@ export function createDescriber({
     const probe = await videoFetcher.probeSite(item.url, { ytdlpPath, toolTimeoutMs });
     if (!probe.ok) return probe;
     const durationSec = probe.durationSec ?? item.durationSec ?? null;
-    if (isDirectUrlSite(item.url, videoCfg.directUrlSites ?? []) && durationSec != null && durationSec <= maxSeconds) {
+    // The public URL goes out only with a pinned provider that can open it;
+    // without one the clip is downloaded like any other site's.
+    const pinnable = isPlainObject(videoCfg.provider) && isDirectUrlSite(item.url, videoCfg.directUrlSites ?? []);
+    if (pinnable && durationSec != null && durationSec <= maxSeconds) {
       return { ok: true, url: item.url, seconds: durationSec, bytes: null, pinned: true };
     }
     const clip = await videoFetcher.fetchSiteClip(item.url, {
@@ -321,9 +333,15 @@ export function createDescriber({
       return report({ state: 'error' }, { ...extra, reason });
     };
 
-    if (videoCountToday() >= (videoCfg.maxPerDay ?? Infinity)) {
+    // Reserve the daily slot synchronously, before any await, so concurrent
+    // watches can never overshoot maxPerDay. A failed fetch or request keeps
+    // its slot: attempts count, like media.video.maxPerTurn.
+    const countToday = videoCountToday();
+    if (countToday >= (videoCfg.maxPerDay ?? Infinity)) {
       return { result: report({ state: 'limit', reason: 'daily' }), sent: false, attempted: false };
     }
+    state.data.videoCount = countToday + 1;
+    state.markDirty();
 
     const media = await fetchVideoMedia(item, videoCfg);
     if (!media.ok) {
@@ -333,10 +351,6 @@ export function createDescriber({
       }
       return { result: errorMiss(media.reason ?? 'download'), sent: false, attempted: true };
     }
-
-    // Counted as the request goes out, like the LLM client's own daily counter.
-    state.data.videoCount = videoCountToday() + 1;
-    state.markDirty();
 
     const sizes = { seconds: media.seconds ?? null, bytes: media.bytes ?? null };
     let completion;
@@ -379,9 +393,10 @@ export function createDescriber({
    * another caller's in-flight watch of the same video).
    */
   async function describeVideoCharged(guildId, item, { countAgainstDailyCap = true, cacheOnly = false } = {}) {
-    // Video vision needs both switches, like the senses line (src/behavior/prompt.js#renderSenses).
+    // Video vision needs both switches, like the senses line (src/behavior/prompt.js#renderSenses);
+    // a missing videoDescriptions counts as on.
     const features = hot.config.features ?? {};
-    if (features.mediaDescriptions !== true || features.videoDescriptions !== true) {
+    if (features.mediaDescriptions !== true || features.videoDescriptions === false) {
       return { result: null, sent: false, attempted: false };
     }
     const promptText = hot.prompts?.['describe-video'];

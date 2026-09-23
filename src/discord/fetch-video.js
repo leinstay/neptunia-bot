@@ -8,9 +8,16 @@
 //
 // Every function resolves to a result object and never rejects. Temp files
 // live in a fresh directory per call under `tmpDir`, removed in `finally`.
-// Log lines carry the host and path only -- never a query string (a Discord
-// CDN signature, tracking ids), never file contents; the tool's stderr tail
-// is logged with every URL in it replaced by `<url>`.
+// A tool that outlives its timeout is killed with its whole process tree (on
+// POSIX the tool runs detached as its own process group and the group is
+// killed; on Windows `taskkill /T /F` kills the tree, falling back to killing
+// the tool alone when taskkill cannot run), and the temp directory is removed
+// only once the tool has closed (or a short grace period ran out) -- so an
+// ffmpeg that yt-dlp started never writes into a directory being removed.
+// Log lines carry codes only: source, reason, the host and path (never a
+// query string -- a Discord CDN signature, tracking ids), an exit code,
+// signal or errno, an HTTP status. Never tool output, never an error
+// message, never file contents.
 
 import { spawn } from 'node:child_process';
 import * as fsPromises from 'node:fs/promises';
@@ -19,15 +26,13 @@ import path from 'node:path';
 import { log } from '../log.js';
 import { ffmpegTrimArgs, parseProbe, safeLocation, ytdlpClipArgs, ytdlpProbeArgs } from './video-sites.js';
 
-const STDERR_KEEP_CHARS = 4000;
-const STDERR_LOG_CHARS = 200;
 const STDOUT_MAX_BYTES = 32 * 1024 * 1024;
 const DOWNLOAD_CEILING_FACTOR = 4;
-const URL_IN_TEXT = /https?:\/\/\S+/gi;
+const CLOSE_GRACE_MS = 5000;
 
-/** The last STDERR_LOG_CHARS of `text` with every http(s) URL replaced by `<url>`. */
-function scrub(text) {
-  return String(text ?? '').replace(URL_IN_TEXT, '<url>').slice(-STDERR_LOG_CHARS);
+/** The loggable code of a thrown error: its errno-style `code`, else its class name. Never the message. */
+function errorCode(err) {
+  return err?.code ?? err?.name ?? null;
 }
 
 /** `type/subtype` in lowercase, parameters dropped. */
@@ -41,46 +46,108 @@ function bareContentType(value) {
  * @param {typeof fetch} [deps.fetchImpl]
  * @param {typeof fsPromises} [deps.fs]
  * @param {string} [deps.tmpDir]
+ * @param {string} [deps.platform]  `process.platform` by default; 'win32' switches the tree kill to taskkill.
+ * @param {typeof process.kill} [deps.killProcess]  Used for the POSIX process-group kill.
+ * @param {number} [deps.closeGraceMs]  How long a killed tool may take to close before cleanup goes ahead.
  */
 export function createVideoFetcher({
   spawnImpl = spawn,
   fetchImpl = fetch,
   fs = fsPromises,
   tmpDir = os.tmpdir(),
+  platform = process.platform,
+  killProcess = process.kill.bind(process),
+  closeGraceMs = CLOSE_GRACE_MS,
 } = {}) {
-  /** One warn line per failure, then the failure object. */
+  const isWindows = platform === 'win32';
+
+  /** One warn line per failure (codes only, see the header), then the failure object. */
   function fail(source, url, reason, extra = {}) {
     const meta = { source, reason, location: safeLocation(url) };
-    if (extra.stderr) meta.stderr = scrub(extra.stderr);
-    if (extra.error) meta.error = scrub(extra.error);
+    if (extra.code !== undefined && extra.code !== null) meta.code = extra.code;
     if (extra.status !== undefined) meta.status = extra.status;
     log.warn('fetch-video: failed', meta);
     return { ok: false, reason };
   }
 
+  /** The loggable code of a tool run: errno of a spawn failure, else exit code, else the signal. */
+  function runCode(run) {
+    if (run.spawnError) return errorCode(run.spawnError);
+    return run.code ?? run.signal ?? null;
+  }
+
+  /** Plain kill of the tool alone -- the fallback when the tree kill cannot run. */
+  function killChild(child) {
+    try {
+      child.kill('SIGKILL');
+    } catch {
+      // already gone
+    }
+  }
+
   /**
-   * Run one tool; resolves `{ code, stdout, stderr, spawnError, timedOut }`.
-   * A tool still running at `timeoutMs` is killed and reported as timed out.
+   * Kill `child` with every process it started. POSIX: the tool was spawned
+   * detached (its own process group), so the whole group gets SIGKILL.
+   * Windows: `taskkill /PID <pid> /T /F`; when taskkill itself cannot run,
+   * only the tool is killed and a grandchild (ffmpeg under yt-dlp) may
+   * survive until it finishes on its own -- a known Windows limitation.
+   */
+  function killTree(child) {
+    if (!child.pid) {
+      killChild(child);
+      return;
+    }
+    if (isWindows) {
+      try {
+        const killer = spawnImpl('taskkill', ['/PID', String(child.pid), '/T', '/F'], {
+          stdio: 'ignore',
+          windowsHide: true,
+        });
+        killer.on?.('error', () => killChild(child));
+      } catch {
+        killChild(child);
+      }
+      return;
+    }
+    try {
+      killProcess(-child.pid, 'SIGKILL');
+    } catch {
+      killChild(child);
+    }
+  }
+
+  /**
+   * Run one tool; resolves `{ code, signal, stdout, spawnError, timedOut }`.
+   * A tool still running at `timeoutMs` is killed with its process tree and
+   * reported as timed out -- but only once it has closed, or `closeGraceMs`
+   * after the kill, so the caller never removes a directory it still writes
+   * to. stderr is never read (never logged either).
    */
   function runTool({ command, args }, timeoutMs) {
     return new Promise((resolve) => {
       const out = [];
       let outBytes = 0;
-      let stderr = '';
       let settled = false;
+      let timedOut = false;
       let timer = null;
+      let graceTimer = null;
       const settle = (result) => {
         if (settled) return;
         settled = true;
         if (timer) clearTimeout(timer);
-        resolve({ stdout: Buffer.concat(out).toString('utf8'), stderr, ...result });
+        if (graceTimer) clearTimeout(graceTimer);
+        resolve({ stdout: Buffer.concat(out).toString('utf8'), signal: null, ...result, timedOut });
       };
 
       let child;
       try {
-        child = spawnImpl(command, args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+        child = spawnImpl(command, args, {
+          stdio: ['ignore', 'pipe', 'ignore'],
+          windowsHide: true,
+          detached: !isWindows,
+        });
       } catch (err) {
-        settle({ code: null, spawnError: err, timedOut: false });
+        settle({ code: null, spawnError: err });
         return;
       }
 
@@ -90,20 +157,18 @@ export function createVideoFetcher({
         out.push(buf);
         outBytes += buf.byteLength;
       });
-      child.stderr?.on?.('data', (chunk) => {
-        stderr = (stderr + String(chunk)).slice(-STDERR_KEEP_CHARS);
+      child.on('error', (err) => {
+        // After a timeout kill only `close` (or the grace timer) ends the run.
+        if (!timedOut) settle({ code: null, spawnError: err });
       });
-      child.on('error', (err) => settle({ code: null, spawnError: err, timedOut: false }));
-      child.on('close', (code) => settle({ code, spawnError: null, timedOut: false }));
+      child.on('close', (code, signal) => settle({ code, signal: signal ?? null, spawnError: null }));
 
       if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
         timer = setTimeout(() => {
-          try {
-            child.kill('SIGKILL');
-          } catch {
-            // already gone
-          }
-          settle({ code: null, spawnError: null, timedOut: true });
+          timer = null;
+          timedOut = true;
+          killTree(child);
+          graceTimer = setTimeout(() => settle({ code: null, spawnError: null }), closeGraceMs);
         }, timeoutMs);
       }
     });
@@ -173,7 +238,7 @@ export function createVideoFetcher({
       return { ok: true, bytes, contentType };
     } catch (err) {
       if (timedOut) return { ok: false, reason: 'timeout' };
-      return { ok: false, reason: 'download', extra: { error: err?.message ?? err } };
+      return { ok: false, reason: 'download', extra: { code: errorCode(err) } };
     } finally {
       if (timer) clearTimeout(timer);
       if (handle) {
@@ -193,8 +258,10 @@ export function createVideoFetcher({
    * @param {string} url
    * @param {{ durationSec?: number|null, maxSeconds: number, maxBytes: number, toolTimeoutMs: number,
    *   ffmpegPath: string, fetchTimeoutMs?: number }} options  `fetchTimeoutMs` falls back to `toolTimeoutMs`.
+   * A missing ffmpeg (ENOENT) is `tool` -- an error miss the describer retries
+   * later, so installing ffmpeg takes effect -- never a permanent length/size.
    * @returns {Promise<{ ok: true, dataUrl: string, mimeType: string, seconds: number|null, bytes: number }
-   *   | { ok: false, reason: 'length'|'size'|'download'|'tool'|'timeout' }>}
+   *   | { ok: false, reason: 'size'|'download'|'tool'|'timeout' }>}
    */
   async function fetchAttachment(url, {
     durationSec = null, maxSeconds, maxBytes, toolTimeoutMs, ffmpegPath, fetchTimeoutMs,
@@ -223,15 +290,12 @@ export function createVideoFetcher({
       }
 
       const run = await runTool(ffmpegTrimArgs(inPath, outPath, { ffmpegPath, maxSeconds }), toolTimeoutMs);
-      if (run.timedOut) return fail('attachment', url, 'timeout', { stderr: run.stderr });
-      if (run.spawnError) {
-        const reason = run.spawnError.code === 'ENOENT' ? (fitsLength ? 'size' : 'length') : 'tool';
-        return fail('attachment', url, reason, { error: run.spawnError.code ?? run.spawnError.message });
-      }
-      if (run.code !== 0) return fail('attachment', url, 'tool', { stderr: run.stderr });
+      if (run.timedOut) return fail('attachment', url, 'timeout', { code: runCode(run) });
+      if (run.spawnError) return fail('attachment', url, 'tool', { code: runCode(run) });
+      if (run.code !== 0) return fail('attachment', url, 'tool', { code: runCode(run) });
 
       const bytes = await sizeOf(outPath);
-      if (bytes === null) return fail('attachment', url, 'tool', { stderr: run.stderr });
+      if (bytes === null) return fail('attachment', url, 'tool', { code: runCode(run) });
       if (bytes > maxBytes) return fail('attachment', url, 'size');
       return {
         ok: true,
@@ -241,7 +305,7 @@ export function createVideoFetcher({
         bytes,
       };
     } catch (err) {
-      return fail('attachment', url, 'download', { error: err?.code ?? err?.message ?? err });
+      return fail('attachment', url, 'download', { code: errorCode(err) });
     } finally {
       await removeWorkDir(dir);
     }
@@ -257,12 +321,12 @@ export function createVideoFetcher({
   async function probeSite(url, { ytdlpPath, toolTimeoutMs } = {}) {
     try {
       const run = await runTool(ytdlpProbeArgs(url, { ytdlpPath }), toolTimeoutMs);
-      if (run.timedOut) return fail('site', url, 'timeout', { stderr: run.stderr });
-      if (run.spawnError) return fail('site', url, 'tool', { error: run.spawnError.code ?? run.spawnError.message });
-      if (run.code !== 0) return fail('site', url, 'download', { stderr: run.stderr });
+      if (run.timedOut) return fail('site', url, 'timeout', { code: runCode(run) });
+      if (run.spawnError) return fail('site', url, 'tool', { code: runCode(run) });
+      if (run.code !== 0) return fail('site', url, 'download', { code: runCode(run) });
       return { ok: true, ...parseProbe(run.stdout) };
     } catch (err) {
-      return fail('site', url, 'tool', { error: err?.message ?? err });
+      return fail('site', url, 'tool', { code: errorCode(err) });
     }
   }
 
@@ -287,13 +351,13 @@ export function createVideoFetcher({
         ytdlpClipArgs(url, { ytdlpPath, ffmpegPath, maxSeconds, maxBytes, outPath }),
         toolTimeoutMs,
       );
-      if (run.timedOut) return fail('site', url, 'timeout', { stderr: run.stderr });
-      if (run.spawnError) return fail('site', url, 'tool', { error: run.spawnError.code ?? run.spawnError.message });
-      if (run.code !== 0) return fail('site', url, 'download', { stderr: run.stderr });
+      if (run.timedOut) return fail('site', url, 'timeout', { code: runCode(run) });
+      if (run.spawnError) return fail('site', url, 'tool', { code: runCode(run) });
+      if (run.code !== 0) return fail('site', url, 'download', { code: runCode(run) });
 
       // yt-dlp exits 0 without writing anything when --max-filesize skips the download.
       const bytes = await sizeOf(outPath);
-      if (bytes === null || bytes > maxBytes) return fail('site', url, 'size', { stderr: run.stderr });
+      if (bytes === null || bytes > maxBytes) return fail('site', url, 'size');
       const seconds = Number.isFinite(durationSec) && durationSec < maxSeconds ? durationSec : maxSeconds;
       return {
         ok: true,
@@ -303,7 +367,7 @@ export function createVideoFetcher({
         bytes,
       };
     } catch (err) {
-      return fail('site', url, 'download', { error: err?.code ?? err?.message ?? err });
+      return fail('site', url, 'download', { code: errorCode(err) });
     } finally {
       await removeWorkDir(dir);
     }

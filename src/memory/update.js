@@ -888,9 +888,10 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
     // Videos the video describer already watched (or refused for good) are
     // read from the same cache under `video:<item id>`; an error miss or no
     // entry at all renders the plain form. Never a request from here. Both
-    // switches must be on, like the senses line.
+    // switches must be on, like the senses line; a missing videoDescriptions
+    // counts as on.
     let videos = null;
-    const videoOn = hot.config.features?.mediaDescriptions === true && hot.config.features?.videoDescriptions === true;
+    const videoOn = hot.config.features?.mediaDescriptions === true && hot.config.features?.videoDescriptions !== false;
     if (videoOn) {
       const cache = store.getMediaCache(guildId);
       videos = new Map();

@@ -1085,6 +1085,15 @@ test('analyze: an error miss or no entry renders the plain video form', async ()
   }
 });
 
+test('analyze: videoDescriptions missing counts as on (mediaDescriptions on) -- a watched video renders', async () => {
+  const seen = await analyzerTranscriptWithCache(
+    { 'video:v1': { text: 'κάποιος χορεύει', ts: Date.now(), watched: true } },
+    [VIDEO_SLIM],
+    { mediaDescriptions: true },
+  );
+  assert.ok(seen.includes('κάποιος χορεύει'));
+});
+
 test('analyze: videoDescriptions off, or mediaDescriptions off, never renders a cached video state', async () => {
   for (const features of [
     { mediaDescriptions: true, videoDescriptions: false },

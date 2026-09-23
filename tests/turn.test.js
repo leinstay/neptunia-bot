@@ -623,10 +623,22 @@ test('createTurnRunner: media.video.maxPerTurn missing -> at most one new video 
   assert.equal(describer.videoCalls[0].options.maxNew, 1);
 });
 
-test('createTurnRunner: videoDescriptions off/missing, or mediaDescriptions off, never calls describeVideos', async () => {
+test('createTurnRunner: features.videoDescriptions missing counts as on (mediaDescriptions on) -- videos are watched', async () => {
+  const raw = videoAttachmentRaw('m1', NOW - 1000, 'va', 'clip.mp4');
+  const channel = fakeTurnChannel({ historyMessages: [raw] });
+  const hot = fakeHot({ mediaDescriptions: true }, {}, VIDEO_TURN_CONFIG);
+  const describer = fakeVideoDescriber({ va: { state: 'watched', text: 'x' } });
+  const turns = createTurnRunner({ hot, store: fakeStore(), llm: fakeLlm('<msg>ok</msg>'), calibrator: identityCalibrator(), client: fakeClient(), describer });
+
+  await turns.runTurn({ channel, mode: 'reply', trigger: normalizedTrigger(raw), triggerKind: 'mention' });
+
+  assert.equal(describer.videoCalls.length, 1);
+  assert.equal(describer.videoCalls[0].items[0].itemId, 'va');
+});
+
+test('createTurnRunner: videoDescriptions off, or mediaDescriptions off, never calls describeVideos', async () => {
   for (const features of [
     { mediaDescriptions: true, videoDescriptions: false },
-    { mediaDescriptions: true },
     { mediaDescriptions: false, videoDescriptions: true },
   ]) {
     const raw = videoAttachmentRaw('m1', NOW - 1000, 'va', 'clip.mp4');

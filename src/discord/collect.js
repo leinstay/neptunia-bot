@@ -5,7 +5,7 @@
 import { PermissionFlagsBits, SnowflakeUtil, MessageReferenceType } from 'discord.js';
 import { log } from '../log.js';
 import { classifyAttachment, classifyEmbed, stickerUrl, emojiUrl, linkThumbnailCacheKey } from './media.js';
-import { extractVideoUrls, videoUrlCacheKey } from './video-sites.js';
+import { extractVideoUrls, videoSiteFor, videoUrlCacheKey } from './video-sites.js';
 
 const TEXT_PREVIEW_SIZE_GUARD = 256 * 1024; // 256 KB — never fetch a bigger "text" attachment
 const MAX_EMOJIS_PER_MESSAGE = 5;
@@ -76,17 +76,26 @@ function normalizeAttachments(attachments, isVoice) {
  * shares one description-cache entry and the slim memory buffer never has to
  * store the URL to look it up again later (see src/memory/update.js
  * `observe()`/`analyze()`). A `kind: 'gif'` embed (tenor/giphy) keeps the
- * existing per-message-index id, unchanged.
+ * existing per-message-index id, unchanged. A `kind: 'link'` embed whose URL
+ * is on one of `videoSites` takes `videoUrlCacheKey(url)` instead -- the same
+ * id a typed link of that video gets (see normalizeLinks), so one video has
+ * one id (and one video/still-frame cache entry) whether Discord embedded it
+ * or not.
  */
-function normalizeEmbedLinks(idPrefix, embeds, embedTextChars) {
+function normalizeEmbedLinks(idPrefix, embeds, embedTextChars, videoSites) {
+  const watchSites = Array.isArray(videoSites) && videoSites.length > 0;
   return [...(embeds ?? [])]
     .filter((embed) => embed?.url)
     .map((embed, index) => {
       const classified = classifyEmbed(embed, { embedTextChars });
-      const id =
-        classified.kind === 'link' && classified.thumbnailUrl
-          ? linkThumbnailCacheKey(classified.thumbnailUrl)
-          : `${idPrefix}#e${index}`;
+      let id;
+      if (classified.kind === 'link' && watchSites && videoSiteFor(classified.url, videoSites) !== null) {
+        id = videoUrlCacheKey(classified.url);
+      } else if (classified.kind === 'link' && classified.thumbnailUrl) {
+        id = linkThumbnailCacheKey(classified.thumbnailUrl);
+      } else {
+        id = `${idPrefix}#e${index}`;
+      }
       return { id, ...classified };
     });
 }
@@ -110,7 +119,7 @@ function siteOf(url) {
  * the message text: a typed video link stays readable where the person put it.
  */
 function normalizeLinks(idPrefix, embeds, embedTextChars, rawContent, videoSites) {
-  const embedLinks = normalizeEmbedLinks(idPrefix, embeds, embedTextChars);
+  const embedLinks = normalizeEmbedLinks(idPrefix, embeds, embedTextChars, videoSites);
   const links = [...embedLinks];
   if (Array.isArray(videoSites) && videoSites.length > 0) {
     const seenUrls = new Set(embedLinks.map((link) => link.url));

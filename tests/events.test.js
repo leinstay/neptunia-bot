@@ -987,6 +987,19 @@ test('events: no video prefill when media.video.prefill is off, videoDescription
   }
 });
 
+test('events: features.videoDescriptions missing counts as on (mediaDescriptions on) -- the video is prefilled', async () => {
+  const describer = fakeVideoDescriber();
+  const config = baseConfig({ media: { video: { prefill: true } } });
+  config.features.mediaDescriptions = true;
+  delete config.features.videoDescriptions;
+  const handler = makeHandler({ config, describer });
+
+  await handler(fakeMessage({ cleanContent: 'look', attachments: videoAttachments(1) }));
+
+  assert.equal(describer.videoCalls.length, 1);
+  assert.equal(describer.videoCalls[0].items[0].itemId, 'v1');
+});
+
 test('events: a message with no video never calls describeVideos', async () => {
   const describer = fakeVideoDescriber();
   const config = baseConfig({ features: { videoDescriptions: true }, media: { video: { prefill: true } } });

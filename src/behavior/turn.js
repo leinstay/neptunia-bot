@@ -87,7 +87,7 @@ function describableCandidates(history, pickedIds) {
  * absent, or `features.mediaDescriptions` is off, no description request is
  * ever made — buildRequest simply renders every un-attached picture blind.
  * Likewise, videos are only watched when `features.mediaDescriptions` AND
- * `features.videoDescriptions` are on and the describer has
+ * `features.videoDescriptions` (a missing key counts as on) are on and the describer has
  * `describeVideos`; otherwise they render as before.
  */
 export function createTurnRunner({
@@ -292,8 +292,9 @@ export function createTurnRunner({
       // by the video describer, newest first, at most media.video.maxPerTurn
       // NEW ones per turn; cached results and limit/error states are free.
       let videos;
-      // Both switches, like the senses line (src/behavior/prompt.js#renderSenses).
-      const videoOn = features.mediaDescriptions === true && features.videoDescriptions === true;
+      // Both switches, like the senses line (src/behavior/prompt.js#renderSenses); a missing
+      // videoDescriptions counts as on.
+      const videoOn = features.mediaDescriptions === true && features.videoDescriptions !== false;
       if (videoOn && typeof describer?.describeVideos === 'function') {
         const videoCfg = config.media?.video ?? {};
         const candidates = [];
