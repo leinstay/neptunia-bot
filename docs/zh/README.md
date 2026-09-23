@@ -137,7 +137,7 @@ npm start
 
 用户消息中的 `<senses>` 块告知角色在当前配置下能和不能感知什么。角色信任此块的内容，不会声称看到、听到或打开了超出其描述的任何东西。
 
-`features.videoDescriptions`（默认开启，需同时开启 `mediaDescriptions`）添加一个支持视频的模型（`media.video.model`，默认 `google/gemini-3.8-flash`），可观看短视频片段：Discord 视频附件和已知视频站点的链接（YouTube、TikTok、VK、X、Reddit、Twitch）。片段受 `media.video.maxSeconds`（默认 60 秒）和 `media.video.maxBytes` 限制；每回合最多 `maxPerTurn` 个新视频（每次尝试都计数，无论成功与否），每天最多 `maxPerDay` 个。结果与图片描述一起缓存。在长度限制内的 YouTube 链接会作为 URL 直接传递给提供商（Google AI Studio）；其他内容通过 `yt-dlp` 下载并使用 `ffmpeg` 裁剪，两者均为可选的系统二进制文件。没有它们时，在限制内的附件仍然可用；更长的附件和站点链接会回退到静帧。对于 YouTube，当 `yt-dlp` 无法探测时长时，`.env` 中的可选 `YOUTUBE_API_KEY`（免费，Google Cloud 控制台，YouTube Data API v3）或观看页面抓取可以提供时长信息。`/nep ping video` 报告此主机上哪个时长来源可用。视频提示是 `prompts/describe-video.md`。设置位于 `media.video` 下。每个键和模型对比表请参阅 [`configuration.md`](configuration.md)。
+`features.videoDescriptions`（默认开启，需同时开启 `mediaDescriptions`）添加一个支持视频的模型（`media.video.model`，默认 `google/gemini-3.8-flash`），可观看短视频片段：Discord 视频附件和已知视频站点的链接（YouTube、TikTok、VK、X、Reddit、Twitch）。附件和下载的站点视频受 `media.video.maxSeconds`（默认 60 秒）和 `media.video.maxBytes` 限制；`directUrlMaxSeconds`（默认 180 秒）以内的 YouTube 链接会作为 URL 直接传递给提供商（Google AI Studio）。每回合最多 `maxPerTurn` 个新视频（每次尝试都计数，无论成功与否），每天最多 `maxPerDay` 个。结果与图片描述一起缓存。其他内容通过 `yt-dlp` 下载并使用 `ffmpeg` 裁剪，两者均为可选的系统二进制文件。没有它们时，在限制内的附件仍然可用；更长的附件和站点链接会回退到静帧。对于 YouTube，当 `yt-dlp` 无法探测时长时，`.env` 中的可选 `YOUTUBE_API_KEY`（免费，Google Cloud 控制台，YouTube Data API v3）或观看页面抓取可以提供时长信息。`/nep ping video` 报告此主机上哪个时长来源可用。视频提示是 `prompts/describe-video.md`。设置位于 `media.video` 下。每个键和模型对比表请参阅 [`configuration.md`](configuration.md)。
 
 语音消息只显示时长。链接显示站点、标题和 Discord 嵌入中的摘要，不显示页面本身。
 

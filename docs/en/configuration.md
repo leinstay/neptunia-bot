@@ -110,7 +110,9 @@ Settings for the video describer (`features.videoDescriptions`). Video vision ne
 | `model` | `"google/gemini-3.8-flash"` | Video-capable model; must accept both video and audio input |
 | `provider` | `{ "order": ["google-ai-studio"], "allow_fallbacks": false }` | OpenRouter provider routing for the direct-URL path (YouTube within the length cap); `null` uses `llm.provider` |
 | `maxOutputTokens` | `400` | Max output tokens per video summary |
-| `maxSeconds` | `60` | Max clip duration (seconds); longer attachments are trimmed, longer site videos fall back to a still frame |
+| `maxRequestTokens` | `60000` | Token cap per video request (input + output), used instead of `llm.maxRequestTokens`; a 3-minute clip at `tokensPerSecond` is ~54 000 tokens, above the default global cap |
+| `maxSeconds` | `60` | Max clip duration (seconds) for attachments and downloaded site videos; longer attachments are trimmed with `ffmpeg`, longer site videos fall back to a still frame. Direct-URL sites use `directUrlMaxSeconds` instead |
+| `directUrlMaxSeconds` | `180` | Max duration (seconds) for a video sent to the provider by public URL (YouTube and other `directUrlSites`); longer ones take the download-and-clip route capped at `maxSeconds` |
 | `maxBytes` | `8000000` | Max attachment size (bytes); over-size after trimming is a permanent miss |
 | `maxPerTurn` | `1` | Max NEW videos per turn; every fetch attempt counts, failed or not |
 | `maxPerDay` | `40` | Daily video request cap (stored in `state.json` as `videoDay`/`videoCount`) |
@@ -125,9 +127,9 @@ Settings for the video describer (`features.videoDescriptions`). Video vision ne
 | `ffmpegPath` | `"ffmpeg"` | Path to `ffmpeg`; needed for trimming and downscaling long or large attachments |
 | `prefill` | `true` | Watch a video as soon as it arrives, so the next turn finds it cached |
 
-Both `yt-dlp` and `ffmpeg` are optional system binaries. Without them, attachments within the caps still work (sent as-is). Longer attachments and all site links fall back to the still frame or preview picture, and the persona is told the reason. Every video request counts against `llm.maxRequestsPerDay` and the per-request token cap.
+Both `yt-dlp` and `ffmpeg` are optional system binaries. Without them, attachments within the caps still work (sent as-is). Longer attachments and all site links fall back to the still frame or preview picture, and the persona is told the reason. Every video request counts against `llm.maxRequestsPerDay` and the video token cap (`maxRequestTokens`).
 
-For YouTube links, the duration is learned through a chain: yt-dlp first, then the YouTube Data API (when `YOUTUBE_API_KEY` is set in `.env`), then a scrape of the watch page. When every probe fails and `directUrlUnknownDuration` is off (the default), the link is reported as "could not load." With the switch on, the URL is sent to the provider anyway, billed as `maxSeconds` in the token estimate. The Data API key is free: enable YouTube Data API v3 in the Google Cloud console and create a key; the free quota is 10,000 units/day and one duration lookup costs 1 unit. `/nep ping video` probes `canaryUrl` and reports which source works on this host.
+For YouTube links, the duration is learned through a chain: yt-dlp first, then the YouTube Data API (when `YOUTUBE_API_KEY` is set in `.env`), then a scrape of the watch page. When every probe fails and `directUrlUnknownDuration` is off (the default), the link is reported as "could not load." With the switch on, the URL is sent to the provider anyway, billed as `maxSeconds` in the token estimate. The Data API key is free: enable YouTube Data API v3 in the Google Cloud console and create a key; the free quota is 10,000 units/day and one duration lookup costs 1 unit. `/nep ping video` probes `canaryUrl` and reports which source works on this host. A cached length-limit result records the video's duration and is retried when the cap is raised.
 
 ## `mention`
 
