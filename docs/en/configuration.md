@@ -294,7 +294,7 @@ Settings for the web lookup (`features.webLookup`). Both link reading and search
 | `summaryChars` | `700` | Max characters for the condensed excerpt; fills `{{maxChars}}` in `read-link.md` |
 | `maxOutputTokens` | `300` | Max output tokens for the condenser |
 | `fetchTimeoutMs` | `10000` | Download timeout per page (ms) |
-| `skipSites` | `[]` | Hostnames whose links are never read (in addition to video sites, which are always excluded) |
+| `skipSites` | `["cdn.discordapp.com", "media.discordapp.net", "tenor.com", "giphy.com", "klipy.com", "imgur.com", "i.redd.it", "v.redd.it", "pbs.twimg.com"]` | Hostnames (subdomains included) whose links are never read (in addition to video sites, which are always excluded) |
 
 ### `web.search`
 

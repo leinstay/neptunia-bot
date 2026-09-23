@@ -294,7 +294,7 @@
 | `summaryChars` | `700` | Макс. символов для сжатой выдержки; заполняет `{{maxChars}}` в `read-link.md` |
 | `maxOutputTokens` | `300` | Макс. токенов на выходе конденсатора |
 | `fetchTimeoutMs` | `10000` | Таймаут загрузки на страницу (мс) |
-| `skipSites` | `[]` | Хосты, ссылки на которые не читаются (помимо видеосайтов, которые исключены всегда) |
+| `skipSites` | `["cdn.discordapp.com", "media.discordapp.net", "tenor.com", "giphy.com", "klipy.com", "imgur.com", "i.redd.it", "v.redd.it", "pbs.twimg.com"]` | Хосты (включая поддомены), ссылки на которые не читаются (помимо видеосайтов, которые исключены всегда) |
 
 ### `web.search`
 

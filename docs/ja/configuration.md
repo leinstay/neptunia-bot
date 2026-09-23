@@ -294,7 +294,7 @@ YouTube リンクの再生時間は次の順序で取得されます: まず yt-
 | `summaryChars` | `700` | 要約抜粋の最大文字数。`read-link.md` の `{{maxChars}}` に使用 |
 | `maxOutputTokens` | `300` | 要約モデルの最大出力トークン数 |
 | `fetchTimeoutMs` | `10000` | ページあたりのダウンロードタイムアウト（ミリ秒） |
-| `skipSites` | `[]` | リンクを読み取らないホスト名（動画サイトは常に除外されるため、それに追加） |
+| `skipSites` | `["cdn.discordapp.com", "media.discordapp.net", "tenor.com", "giphy.com", "klipy.com", "imgur.com", "i.redd.it", "v.redd.it", "pbs.twimg.com"]` | リンクを読み取らないホスト名（サブドメインを含む。動画サイトは常に除外されるため、それに追加） |
 
 ### `web.search`
 

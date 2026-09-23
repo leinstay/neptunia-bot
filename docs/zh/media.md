@@ -36,7 +36,7 @@
 
 `features.webLookup`（默认关闭；与其他功能不同，缺失的键视为关闭）允许角色打开聊天中发布的链接并阅读它们。
 
-当功能开启且 `web.links.enabled` 不为 false 时，对话记录中的链接（仅 http/https，拒绝私有地址，排除视频站点链接，排除 `web.links.skipSites`）会通过 SSRF 防护的页面抓取器获取（大小限制 `web.links.maxBytes`，超时 `web.links.fetchTimeoutMs`，最多 3 次重定向，仅 html 和纯文本）。页面文本通过 `classifier.text` 模型经由 `prompts/read-link.md` 浓缩为不超过 `web.links.summaryChars` 字符的摘要。摘要以 `transcript.linkRead` 追加到链接的对话记录标签之后，显示为第一手信息：角色自己打开并阅读了页面，在该摘要的范围内。无法阅读的页面（付费墙、同意屏幕、登录门控、空内容）会被检测并缓存为未命中。
+当功能开启且 `web.links.enabled` 不为 false 时，对话记录中的链接（仅 http/https，拒绝私有地址，排除视频站点链接，排除 `web.links.skipSites`）会通过 SSRF 防护的页面抓取器获取（大小限制 `web.links.maxBytes`，超时 `web.links.fetchTimeoutMs`，最多 3 次重定向，仅 html 和纯文本）。页面文本通过 `classifier.text` 模型经由 `prompts/read-link.md` 浓缩为不超过 `web.links.summaryChars` 字符的摘要。摘要以 `transcript.linkRead` 追加到链接的对话记录标签之后，显示为第一手信息：角色自己打开并阅读了页面，在该摘要的范围内。无法阅读的页面（付费墙、同意屏幕、登录门控、空内容）会被检测并缓存为未命中。URL 路径以图片、视频、音频或压缩文件扩展名（png、jpg、jpeg、gif、webp、avif、svg、mp4、webm、mov、mkv、mp3、ogg、wav、zip、rar、7z、pdf）结尾的链接不论主机一律不读取，`web.links.skipSites`（含子域名）默认排除 Discord CDN、Tenor、Giphy、Klipy、Imgur、Reddit 媒体和 Twitter 图片。
 
 当 `web.links.prefill` 开启时（默认如此），链接在到达时立即被阅读，以便下次回合时已有缓存。预读按每个成员每天 `web.links.prefillPerUserPerDay`（默认 10）个限制；回合路径不受此限制。回合期间每次抓取尝试计入 `web.links.maxPerTurn`（默认 2）。链接阅读和搜索共享一个每日计数器，上限为 `web.maxPerDay`（默认 60）。
 

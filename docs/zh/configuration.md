@@ -294,7 +294,7 @@ YouTube 链接的时长通过以下链式探测获取：首先尝试 yt-dlp，�
 | `summaryChars` | `700` | 浓缩摘要的最大字符数；填充 `read-link.md` 中的 `{{maxChars}}` |
 | `maxOutputTokens` | `300` | 浓缩器的最大输出 token 数 |
 | `fetchTimeoutMs` | `10000` | 每页下载超时（毫秒） |
-| `skipSites` | `[]` | 永不阅读的主机名（在视频站点之外，视频站点始终排除） |
+| `skipSites` | `["cdn.discordapp.com", "media.discordapp.net", "tenor.com", "giphy.com", "klipy.com", "imgur.com", "i.redd.it", "v.redd.it", "pbs.twimg.com"]` | 永不阅读的主机名（含子域名；在视频站点之外，视频站点始终排除） |
 
 ### `web.search`
 

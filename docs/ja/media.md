@@ -36,7 +36,7 @@
 
 `features.webLookup`（デフォルトオフ。他の機能と異なり、キーが存在しない場合はオフとして扱われる）を有効にすると、ペルソナはチャットに投稿されたリンクを開いて読み取れます。
 
-機能が有効で `web.links.enabled` が false でない場合、トランスクリプト内のリンク（http/https のみ、プライベートアドレスは拒否、動画サイトリンクは除外、`web.links.skipSites` は除外）は SSRF ガード付きページフェッチャーでフェッチされます（サイズ上限 `web.links.maxBytes`、タイムアウト `web.links.fetchTimeoutMs`、最大 3 リダイレクト、html とプレーンテキストのみ）。ページテキストは `classifier.text` モデルが `prompts/read-link.md` を通じて最大 `web.links.summaryChars` 文字の抜粋に要約します。抜粋はリンクのトランスクリプトタグに `transcript.linkRead` として追加され、ファーストハンドとして表示されます: ペルソナがその抜粋の範囲内でページを自分で開いて読みました。読み取れないページ（ペイウォール、同意画面、ログインゲート、空のコンテンツ）は検出されミスとしてキャッシュされます。
+機能が有効で `web.links.enabled` が false でない場合、トランスクリプト内のリンク（http/https のみ、プライベートアドレスは拒否、動画サイトリンクは除外、`web.links.skipSites` は除外）は SSRF ガード付きページフェッチャーでフェッチされます（サイズ上限 `web.links.maxBytes`、タイムアウト `web.links.fetchTimeoutMs`、最大 3 リダイレクト、html とプレーンテキストのみ）。ページテキストは `classifier.text` モデルが `prompts/read-link.md` を通じて最大 `web.links.summaryChars` 文字の抜粋に要約します。抜粋はリンクのトランスクリプトタグに `transcript.linkRead` として追加され、ファーストハンドとして表示されます: ペルソナがその抜粋の範囲内でページを自分で開いて読みました。読み取れないページ（ペイウォール、同意画面、ログインゲート、空のコンテンツ）は検出されミスとしてキャッシュされます。URL パスが画像・動画・音声・アーカイブの拡張子（png, jpg, jpeg, gif, webp, avif, svg, mp4, webm, mov, mkv, mp3, ogg, wav, zip, rar, 7z, pdf）で終わるリンクはホストに関係なく読み取られず、`web.links.skipSites`（サブドメインを含む）のデフォルトは Discord CDN、Tenor、Giphy、Klipy、Imgur、Reddit メディア、Twitter 画像です。
 
 `web.links.prefill` が有効（デフォルト）の場合、リンクは到着した時点で読み取られ、次のターンでキャッシュ済みの状態になります。プリフィルはメンバーあたり 1 日 `web.links.prefillPerUserPerDay`（デフォルト 10）で制限されます。ターンパスはこの制限を受けません。ターン中の各フェッチ試行は `web.links.maxPerTurn`（デフォルト 2）にカウントされます。リンク読み取りと検索は日次カウンター `web.maxPerDay`（デフォルト 60）を共有します。
 
