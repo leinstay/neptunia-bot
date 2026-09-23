@@ -8,7 +8,7 @@
 |---|---|
 | `/nep status` | 模型、校准、配额和每服务器记忆状态 |
 | `/nep reload` | 立即重新加载配置和提示 |
-| `/nep ping [role]` | 向一个或所有模型角色（`talk`、`analyzer`、`media`、`followup`、`video`）发送最小请求并报告模型、延迟、provider、token 或错误；不计入 `llm.maxRequestsPerDay`，在暂停或预热期间均可使用 |
+| `/nep ping [role]` | 向一个或所有模型角色（`talk`、`analyzer`、`media`、`followup`、`video`）发送最小请求并报告模型、延迟、provider、token 或错误；对于 `video` 角色，还会报告 YouTube 可达性（此主机上哪个时长来源可用）；不计入 `llm.maxRequestsPerDay`，在暂停或预热期间均可使用 |
 | `/nep pause` | 停止所有活动，将记忆刷入磁盘并卸载；暂停期间可安全编辑 `data/` |
 | `/nep resume` | 从 `data/` 重新加载记忆并继续；如有 JSON 文件无法解析则拒绝并指出问题文件 |
 | `/nep interject [channel]` | 立即插入该频道的当前对话 |

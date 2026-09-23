@@ -8,7 +8,7 @@ Channels, roles and users are picked from Discord's own pickers; `set`/`unset` a
 |---|---|
 | `/nep status` | Model, calibration, quotas and per-guild memory status |
 | `/nep reload` | Reload config and prompts now |
-| `/nep ping [role]` | Send a minimal request to one or all model roles (`talk`, `analyzer`, `media`, `followup`, `video`) and report model, latency, provider, tokens or the error; does not count against `llm.maxRequestsPerDay` and works while paused or warming up |
+| `/nep ping [role]` | Send a minimal request to one or all model roles (`talk`, `analyzer`, `media`, `followup`, `video`) and report model, latency, provider, tokens or the error; for the `video` role, also reports YouTube reachability (which duration source works on this host); does not count against `llm.maxRequestsPerDay` and works while paused or warming up |
 | `/nep pause` | Stop all activity, flush memory to disk and unload it; `data/` is safe to edit while paused |
 | `/nep resume` | Reload memory from `data/` and continue; refuses if any JSON file does not parse, naming the broken ones |
 | `/nep interject [channel]` | Jump into the current conversation in this channel now |
