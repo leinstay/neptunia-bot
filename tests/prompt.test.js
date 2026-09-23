@@ -1661,40 +1661,57 @@ test('buildRequest: reads reach the <chat> transcript as linkRead', () => {
   assert.ok(request.messages[1].content.includes('[link: example.org — Crêpes] [page read: trois œufs]'));
 });
 
-test('buildRequest: webLookup on with links -> linksRead replaces the links line; search on -> the search line after it', () => {
-  const senses = sensesOf(buildRequest(baseInput({ config: webConfig({ mediaDescriptions: true }) }))).split('\n');
-  const at = senses.indexOf(labels.senses.linksRead);
-  assert.ok(at !== -1);
-  assert.equal(senses[at + 1], labels.senses.search);
-  assert.ok(!senses.includes(labels.senses.linksWatch));
-  assert.ok(!senses.includes(labels.senses.links));
+test('buildRequest: webLookup on with links -> the links line stays and linksRead follows it; a search key -> the search line after that', () => {
+  const senses = sensesOf(buildRequest(baseInput({ config: webConfig({ mediaDescriptions: true }), searchAvailable: true }))).split('\n');
+  const at = senses.indexOf(labels.senses.linksWatch);
+  assert.ok(at !== -1, 'the links line is the same as without the lookup');
+  assert.equal(senses[at + 1], labels.senses.linksRead);
+  assert.equal(senses[at + 2], labels.senses.search);
+  assert.equal(senses[at + 3], labels.senses.files);
+
+  const plain = sensesOf(buildRequest(baseInput({ config: webConfig(), searchAvailable: true }))).split('\n');
+  const plainAt = plain.indexOf(labels.senses.links);
+  assert.ok(plainAt !== -1, 'video watching off -> the plain links line');
+  assert.equal(plain[plainAt + 1], labels.senses.linksRead);
 });
 
-test('buildRequest: links disabled keeps the old links line; search disabled drops the search line', () => {
-  const noLinks = sensesOf(buildRequest(baseInput({ config: webConfig({ mediaDescriptions: true }, { links: { enabled: false } }) }))).split('\n');
+test('buildRequest: the search line needs searchAvailable -- no key, or searchAvailable omitted, shows no search line', () => {
+  for (const searchAvailable of [false, undefined]) {
+    const senses = sensesOf(buildRequest(baseInput({ config: webConfig(), searchAvailable }))).split('\n');
+    assert.ok(!senses.includes(labels.senses.search));
+    assert.ok(senses.includes(labels.senses.linksRead), 'reading links needs no search key');
+  }
+});
+
+test('buildRequest: links disabled -> no linksRead; search disabled -> no search line even with a key', () => {
+  const noLinks = sensesOf(
+    buildRequest(baseInput({ config: webConfig({ mediaDescriptions: true }, { links: { enabled: false } }), searchAvailable: true })),
+  ).split('\n');
   assert.ok(noLinks.includes(labels.senses.linksWatch));
   assert.ok(!noLinks.includes(labels.senses.linksRead));
   assert.ok(noLinks.includes(labels.senses.search));
-  const noSearch = sensesOf(buildRequest(baseInput({ config: webConfig({}, { search: { enabled: false } }) }))).split('\n');
+  const noSearch = sensesOf(buildRequest(baseInput({ config: webConfig({}, { search: { enabled: false } }), searchAvailable: true }))).split('\n');
   assert.ok(noSearch.includes(labels.senses.linksRead));
   assert.ok(!noSearch.includes(labels.senses.search));
 });
 
-test('buildRequest: webLookup off or missing -> no linksRead and no search line', () => {
+test('buildRequest: webLookup off or missing -> no linksRead and no search line, even with a key', () => {
   for (const features of [{ webLookup: false }, {}]) {
     const config = fakeConfig({ features });
     config.web = { links: { enabled: true }, search: { enabled: true } };
-    const senses = sensesOf(buildRequest(baseInput({ config }))).split('\n');
+    const senses = sensesOf(buildRequest(baseInput({ config, searchAvailable: true }))).split('\n');
     assert.ok(senses.includes(labels.senses.links));
     assert.ok(!senses.includes(labels.senses.linksRead));
     assert.ok(!senses.includes(labels.senses.search));
   }
 });
 
-test('buildRequest: an older labels set without linksRead falls back to linksWatch, then links', () => {
+test('buildRequest: an older labels set without linksRead/search keeps only the links line', () => {
   const older = { ...labels, senses: { ...labels.senses, linksRead: undefined, search: undefined } };
-  const watch = sensesOf(buildRequest(baseInput({ config: webConfig({ mediaDescriptions: true }), prompts: fakePrompts({ labels: older }) }))).split('\n');
-  assert.ok(watch.includes(labels.senses.linksWatch));
-  const plain = sensesOf(buildRequest(baseInput({ config: webConfig(), prompts: fakePrompts({ labels: older }) }))).split('\n');
-  assert.ok(plain.includes(labels.senses.links));
+  const withLabels = sensesOf(buildRequest(baseInput({ config: webConfig({ mediaDescriptions: true }), searchAvailable: true }))).split('\n');
+  const senses = sensesOf(
+    buildRequest(baseInput({ config: webConfig({ mediaDescriptions: true }), searchAvailable: true, prompts: fakePrompts({ labels: older }) })),
+  ).split('\n');
+  assert.ok(senses.includes(labels.senses.linksWatch));
+  assert.equal(senses.length, withLabels.length - 2);
 });

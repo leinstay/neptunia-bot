@@ -712,6 +712,7 @@ export function createTurnRunner({
         videos,
         reads,
         lookup: lookupResult,
+        searchAvailable: features.webLookup === true && typeof lookup?.hasSearch === 'function' && lookup.hasSearch() === true,
       });
 
       // A Discord CDN image the provider cannot fetch must not cost the

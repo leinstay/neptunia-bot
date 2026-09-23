@@ -1913,3 +1913,12 @@ test('createTurnRunner: lookup -- logs lookup: classified with codes only, never
   assert.ok(!all.includes('secrète'));
   assert.ok(!all.includes('κέρδισε'));
 });
+
+test('createTurnRunner: lookup -- senses.search reaches the request only when lookup.hasSearch() is true', async () => {
+  for (const hasKey of [true, false]) {
+    const { llm } = await runLookupTurn({ lookup: fakeLookup({ hasKey }) });
+    const user = llm.turnCalls[0].messages[1].content;
+    assert.equal(user.includes(labels.senses.search), hasKey);
+    assert.ok(user.includes(labels.senses.linksRead), 'reading links needs no search key');
+  }
+});

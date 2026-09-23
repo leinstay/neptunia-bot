@@ -488,7 +488,7 @@ function renderLookup(lookup, labels) {
  * Returns '' when `labels.senses` is missing entirely, so an older
  * deployment's labels.json never breaks — the block is simply omitted.
  */
-function renderSenses(config, labels) {
+function renderSenses(config, labels, { searchAvailable = false } = {}) {
   const senses = labels.senses;
   if (!senses) return '';
   const visionOn = config.features?.vision !== false;
@@ -517,13 +517,15 @@ function renderSenses(config, labels) {
   if (shownStickerLines.length > 0) lines.push(senses.lottie);
 
   // The web lookup (features.webLookup -- a missing key counts as OFF, it
-  // costs money and needs a key): read links replace the links line, the
-  // search line follows it. Older labels fall back to the lines before.
+  // costs money and needs a key): the links line stays as it is and the
+  // read-excerpt line follows it; the search line follows only when a search
+  // key is configured (`searchAvailable`). An older labels.json without
+  // either line shows nothing extra.
   const webOn = config.features?.webLookup === true;
-  const linksLine = videoOn ? (senses.linksWatch ?? senses.links) : senses.links;
   const readOn = webOn && config.web?.links?.enabled !== false;
-  const searchOn = webOn && config.web?.search?.enabled !== false;
-  lines.push(senses.voice, readOn ? (senses.linksRead ?? linksLine) : linksLine);
+  const searchOn = webOn && config.web?.search?.enabled !== false && searchAvailable === true;
+  lines.push(senses.voice, videoOn ? (senses.linksWatch ?? senses.links) : senses.links);
+  if (readOn && senses.linksRead) lines.push(senses.linksRead);
   if (searchOn && senses.search) lines.push(senses.search);
   lines.push(senses.files);
   return lines.filter(Boolean).join('\n');
@@ -700,6 +702,8 @@ function splitPeople(otherProfiles, candidateProfiles, history, trigger, exclude
  *   page (src/web/lookup.js#readLinks), passed to formatTranscript.
  * @param {{ query: string, text: string, sources: object[] }|null} [input.lookup]  What the web
  *   search found this turn (src/web/lookup.js#search), rendered as `<lookup>`.
+ * @param {boolean} [input.searchAvailable]  Whether a web search key is configured
+ *   (lookup.hasSearch()); `senses.search` renders only when it is true.
  * @returns {{ messages: object[], stats: object, idByIndex: Map<number, string>, tempo: object }}
  */
 export function buildRequest(input) {
@@ -754,7 +758,7 @@ export function buildRequest(input) {
   const forcedText = forced && typeof prompts.forced === 'string' && prompts.forced.trim() ? fillPromptTemplate(prompts.forced, taskValues) : '';
   const task = forcedText ? `${baseTask}\n\n${forcedText}` : baseTask;
 
-  const sensesText = renderSenses(config, labels);
+  const sensesText = renderSenses(config, labels, { searchAvailable: input.searchAvailable === true });
 
   const neighborItems = neighbors.map(
     ({ channelName, messages }) =>
