@@ -2,7 +2,8 @@
 // reloads and prompt edits; nothing in the codebase ever wipes it implicitly.
 //
 //   data/state.json                          scheduler times, token calibration, daily LLM counter
-//   data/guilds/<guildId>/guild.json         how this server talks, in-jokes, what the persona said about itself
+//   data/guilds/<guildId>/guild.json         how this server talks, in-jokes, what the persona said about itself,
+//                                            what people taught it (`learned`)
 //   data/guilds/<guildId>/buffer.json        messages observed since the last memory update
 //   data/guilds/<guildId>/users/<userId>.json  one profile per active member
 //   data/guilds/<guildId>/channels/<channelId>.json  one entry per channel the persona has seen (the server map)
@@ -112,7 +113,15 @@ export function emptyProfile(id) {
 }
 
 export function emptyGuild() {
-  return { patterns: '', starters: '', injokes: [], self: [], updatedAt: null };
+  return {
+    patterns: '',
+    starters: '',
+    injokes: [],
+    self: [],
+    learned: [], // things people taught the persona: detail-shaped items plus an optional `from` -- see applyLearnedOps
+    learnedNextId: 1, // the next id a learned item gets -- never reused, even after a remove
+    updatedAt: null,
+  };
 }
 
 export function emptyChannel(id) {
@@ -149,6 +158,20 @@ function normalizeProfile(profile) {
   profile.detailsSeq = nextId;
 
   if (!Array.isArray(profile.aliases)) profile.aliases = [];
+}
+
+/** Normalize a guild's `learned`/`learnedNextId` fields in place: a
+ * guild.json written before this list existed loads it as empty, a
+ * hand-edited one is validated via src/memory/details.js#normalizeDetails
+ * (fresh ids off `learnedNextId` when needed). Every other field is left
+ * exactly as stored; a non-object value is left alone entirely. Never marks
+ * anything dirty -- same contract as `normalizeProfile`. */
+function normalizeGuild(guild) {
+  if (!guild || typeof guild !== 'object' || Array.isArray(guild)) return;
+  if (!Number.isInteger(guild.learnedNextId) || guild.learnedNextId < 1) guild.learnedNextId = 1;
+  const { items, nextId } = normalizeDetails(guild.learned, guild.learnedNextId);
+  guild.learned = items;
+  guild.learnedNextId = nextId;
 }
 
 /** Keep only the newest `max` UTC-date keys of a `days` counter map. */
@@ -460,15 +483,75 @@ export function createStore({ dataDir }) {
       return [...ids];
     },
 
+    /**
+     * The guild's memory (data/guilds/<id>/guild.json), the empty default
+     * when nothing is stored. `learned` is normalised on read (see
+     * `normalizeGuild` above) -- persisted the next time anything writes the
+     * guild, never wiped implicitly.
+     */
     getGuild(guildId) {
-      return entry(guildFile(guildId), emptyGuild).value;
+      const item = entry(guildFile(guildId), emptyGuild);
+      normalizeGuild(item.value);
+      return item.value;
     },
 
+    /**
+     * Merge fields into the guild's memory and stamp `updatedAt`. `learned`/
+     * `learnedNextId` are never taken from here -- they only ever change
+     * through `applyLearnedOps`, which merges incrementally instead of
+     * overwriting wholesale (mirrors `updateUser`).
+     */
     updateGuild(guildId, fields) {
       const item = entry(guildFile(guildId), emptyGuild);
-      Object.assign(item.value, fields, { updatedAt: new Date().toISOString() });
+      normalizeGuild(item.value);
+      const { learned, learnedNextId, ...safeFields } = fields ?? {};
+      Object.assign(item.value, safeFields, { updatedAt: new Date().toISOString() });
       item.dirty = true;
       return item.value;
+    },
+
+    /**
+     * Apply one batch of `learned` ops (`{ add, seen, remove }`, add items a
+     * bare string or `{ text, from?, sure? }`) to the guild's list of things
+     * people taught the persona, via src/memory/details.js#applyDetailOps --
+     * the same confirmation/ranking/eviction mechanics as a member's
+     * details, with the guild's own `learnedNextId` id counter. Used by the
+     * analyzer (src/memory/update.js#applyMemoryUpdate) and the owner
+     * commands. The limits are the `config.memory` keys of the same name, so
+     * a caller can pass `{ ...config.memory, seenAt }` as-is; `seenAt` falls
+     * back to the wall clock. Garbage `ops` change nothing and never throw.
+     * The guild is marked dirty (and `updatedAt` stamped) only when the list
+     * or the counter actually changed.
+     * @param {string} guildId
+     * @param {{ add?: unknown[], seen?: unknown[], remove?: unknown[] }} ops
+     * @param {{ seenAt?: number, maxLearned?: number, maxLearnedStored?: number, learnedChars?: number,
+     *   learnedHalfLifeDays?: number, confirmGapHours?: number, clampTolerance?: number }} [opts]
+     * @returns {object[]} The guild's `learned` list after the ops.
+     */
+    applyLearnedOps(guildId, ops, opts = {}) {
+      const item = entry(guildFile(guildId), emptyGuild);
+      const guild = item.value;
+      normalizeGuild(guild);
+      if (!ops || typeof ops !== 'object' || Array.isArray(ops)) return guild.learned;
+
+      const before = JSON.stringify([guild.learned, guild.learnedNextId]);
+      const { items, nextId } = applyDetailOps(guild.learned, ops, {
+        maxDetails: opts.maxLearned,
+        maxDetailsStored: opts.maxLearnedStored,
+        fieldChars: opts.learnedChars,
+        halfLifeDays: opts.learnedHalfLifeDays,
+        confirmGapHours: opts.confirmGapHours,
+        clampTolerance: opts.clampTolerance,
+        seenAt: Number.isFinite(opts.seenAt) ? opts.seenAt : Date.now(),
+        nextId: guild.learnedNextId,
+      });
+      if (JSON.stringify([items, nextId]) !== before) {
+        guild.learned = items;
+        guild.learnedNextId = nextId;
+        guild.updatedAt = new Date().toISOString();
+        item.dirty = true;
+      }
+      return guild.learned;
     },
 
     /** One channel's stored entry (the server map), or null when never seen. */

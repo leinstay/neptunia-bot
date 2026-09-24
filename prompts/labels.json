@@ -127,7 +127,11 @@
   "aboutChat": {
     "patterns": "How people talk here: {text}",
     "starters": "How conversations start: {text}",
-    "injokes": "Running jokes: {text}"
+    "injokes": "Running jokes: {text}",
+    "learned": "Things people taught you: {text}",
+    "learnedItem": "{text} (from {who})",
+    "learnedItemNoFrom": "{text}",
+    "unsureMark": " (unconfirmed)"
   },
   "server": {
     "currentMark": " ← you are here",

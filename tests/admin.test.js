@@ -1943,7 +1943,7 @@ test('run: memory.server drops caches first while paused, so a hand-edit is alwa
 });
 
 // ---------------------------------------------------------------------------
-// memory.alias-add / memory.alias-remove -- real store.js/aliases.js,
+// alias.add / alias.remove -- real store.js/aliases.js,
 // so these prove the actual store integration, not a re-implementation.
 // ---------------------------------------------------------------------------
 
@@ -1955,12 +1955,12 @@ function makeRealStoreAdmin(rootDir, extra = {}) {
   return { admin, store: realStore, hot, dataDir };
 }
 
-test('run: memory.alias-add creates a new alias already confirmed, firstSeen == lastSeen == now', async () => {
+test('run: alias.add creates a new alias already confirmed, firstSeen == lastSeen == now', async () => {
   const rootDir = makeRoot();
   const { admin, store, dataDir } = makeRealStoreAdmin(rootDir);
   try {
     const before = Date.now();
-    const result = await admin.run('memory.alias-add', { userId: '123', name: 'Ari' }, { guildId: 'g1' });
+    const result = await admin.run('alias.add', { userId: '123', name: 'Ari' }, { guildId: 'g1' });
     const after = Date.now();
 
     const alias = store.getUser('g1', '123').aliases.find((a) => a.name === 'Ari');
@@ -1975,13 +1975,13 @@ test('run: memory.alias-add creates a new alias already confirmed, firstSeen == 
   }
 });
 
-test('run: memory.alias-add reads memory.confirmAfter and gives at least that weight', async () => {
+test('run: alias.add reads memory.confirmAfter and gives at least that weight', async () => {
   const rootDir = makeRoot();
   const hot = makeHot(rootDir);
   hot.config.memory = { confirmAfter: 4 };
   const { admin, store, dataDir } = makeRealStoreAdmin(rootDir, { hot });
   try {
-    await admin.run('memory.alias-add', { userId: '123', name: 'Ari' }, { guildId: 'g1' });
+    await admin.run('alias.add', { userId: '123', name: 'Ari' }, { guildId: 'g1' });
     const alias = store.getUser('g1', '123').aliases.find((a) => a.name === 'Ari');
     assert.ok(alias.weight >= 4);
   } finally {
@@ -1989,14 +1989,14 @@ test('run: memory.alias-add reads memory.confirmAfter and gives at least that we
   }
 });
 
-test('run: memory.alias-add is idempotent -- a second call does not keep bumping the weight', async () => {
+test('run: alias.add is idempotent -- a second call does not keep bumping the weight', async () => {
   const rootDir = makeRoot();
   const { admin, store, dataDir } = makeRealStoreAdmin(rootDir);
   try {
-    await admin.run('memory.alias-add', { userId: '123', name: 'Ari' }, { guildId: 'g1' });
+    await admin.run('alias.add', { userId: '123', name: 'Ari' }, { guildId: 'g1' });
     const weightAfterFirst = store.getUser('g1', '123').aliases.find((a) => a.name === 'Ari').weight;
 
-    await admin.run('memory.alias-add', { userId: '123', name: 'Ari' }, { guildId: 'g1' });
+    await admin.run('alias.add', { userId: '123', name: 'Ari' }, { guildId: 'g1' });
     const weightAfterSecond = store.getUser('g1', '123').aliases.find((a) => a.name === 'Ari').weight;
 
     assert.equal(weightAfterSecond, weightAfterFirst, 'already-confirmed alias is left alone by a repeat add');
@@ -2005,12 +2005,12 @@ test('run: memory.alias-add is idempotent -- a second call does not keep bumping
   }
 });
 
-test('run: memory.alias-add clamps to 40 characters', async () => {
+test('run: alias.add clamps to 40 characters', async () => {
   const rootDir = makeRoot();
   const { admin, store, dataDir } = makeRealStoreAdmin(rootDir);
   try {
     const longName = 'x'.repeat(60);
-    await admin.run('memory.alias-add', { userId: '123', name: longName }, { guildId: 'g1' });
+    await admin.run('alias.add', { userId: '123', name: longName }, { guildId: 'g1' });
     const [alias] = store.getUser('g1', '123').aliases;
     assert.equal(alias.name.length, 40);
     assert.equal(alias.name, 'x'.repeat(40));
@@ -2019,12 +2019,12 @@ test('run: memory.alias-add clamps to 40 characters', async () => {
   }
 });
 
-test('run: memory.alias-add ignores a name equal, case-insensitively, to one of the member\'s display names', async () => {
+test('run: alias.add ignores a name equal, case-insensitively, to one of the member\'s display names', async () => {
   const rootDir = makeRoot();
   const { admin, store, dataDir } = makeRealStoreAdmin(rootDir);
   try {
     store.touchUser('g1', '123', 'Bob', Date.now());
-    const result = await admin.run('memory.alias-add', { userId: '123', name: 'bob' }, { guildId: 'g1' });
+    const result = await admin.run('alias.add', { userId: '123', name: 'bob' }, { guildId: 'g1' });
     assert.deepEqual(store.getUser('g1', '123').aliases, []);
     assert.equal(result, 'No aliases stored.');
   } finally {
@@ -2032,22 +2032,22 @@ test('run: memory.alias-add ignores a name equal, case-insensitively, to one of 
   }
 });
 
-test('run: memory.alias-add rejects an empty name', async () => {
+test('run: alias.add rejects an empty name', async () => {
   const rootDir = makeRoot();
   const { admin, dataDir } = makeRealStoreAdmin(rootDir);
   try {
-    await assert.rejects(() => admin.run('memory.alias-add', { userId: '123', name: '   ' }, { guildId: 'g1' }));
+    await assert.rejects(() => admin.run('alias.add', { userId: '123', name: '   ' }, { guildId: 'g1' }));
   } finally {
     fs.rmSync(dataDir, { recursive: true, force: true });
   }
 });
 
-test('run: memory.alias-remove removes an alias case-insensitively and reports the resulting list', async () => {
+test('run: alias.remove removes an alias case-insensitively and reports the resulting list', async () => {
   const rootDir = makeRoot();
   const { admin, store, dataDir } = makeRealStoreAdmin(rootDir);
   try {
-    await admin.run('memory.alias-add', { userId: '123', name: 'Ari' }, { guildId: 'g1' });
-    const result = await admin.run('memory.alias-remove', { userId: '123', name: 'ARI' }, { guildId: 'g1' });
+    await admin.run('alias.add', { userId: '123', name: 'Ari' }, { guildId: 'g1' });
+    const result = await admin.run('alias.remove', { userId: '123', name: 'ARI' }, { guildId: 'g1' });
 
     assert.deepEqual(store.getUser('g1', '123').aliases, []);
     assert.equal(result, 'No aliases stored.');
@@ -2056,20 +2056,216 @@ test('run: memory.alias-remove removes an alias case-insensitively and reports t
   }
 });
 
-test('run: memory.alias-add/memory.alias-remove are refused while paused', async () => {
+test('run: alias.add/alias.remove are refused while paused', async () => {
   const rootDir = makeRoot();
   const { admin } = makeAdmin(rootDir);
 
   await admin.run('pause', {}, {});
 
   await assert.rejects(
-    () => admin.run('memory.alias-add', { userId: '123', name: 'Ari' }, { guildId: 'g1' }),
+    () => admin.run('alias.add', { userId: '123', name: 'Ari' }, { guildId: 'g1' }),
     /paused.*resume/i,
   );
   await assert.rejects(
-    () => admin.run('memory.alias-remove', { userId: '123', name: 'Ari' }, { guildId: 'g1' }),
+    () => admin.run('alias.remove', { userId: '123', name: 'Ari' }, { guildId: 'g1' }),
     /paused.*resume/i,
   );
+});
+
+test('run: the old memory.alias-add/memory.alias-remove keys are gone', async () => {
+  const rootDir = makeRoot();
+  const { admin } = makeAdmin(rootDir);
+  await assert.rejects(
+    () => admin.run('memory.alias-add', { userId: '123', name: 'Ari' }, { guildId: 'g1' }),
+    /unknown command/,
+  );
+  await assert.rejects(
+    () => admin.run('memory.alias-remove', { userId: '123', name: 'Ari' }, { guildId: 'g1' }),
+    /unknown command/,
+  );
+});
+
+// ---------------------------------------------------------------------------
+// learned.list / learned.add / learned.remove -- real store.js/details.js,
+// the guild's list of things people taught the persona.
+// ---------------------------------------------------------------------------
+
+const LEARNED_DAY = (iso) => Date.parse(`${iso}T12:00:00.000Z`);
+
+test('run: learned.list says (none) when nothing is stored', async () => {
+  const rootDir = makeRoot();
+  const { admin, dataDir } = makeRealStoreAdmin(rootDir);
+  try {
+    assert.equal(await admin.run('learned.list', {}, { guildId: 'g1' }), '(none)');
+  } finally {
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test('run: learned.list formats one line per item, resolving <@id> in text and from, omitting an absent from', async () => {
+  const rootDir = makeRoot();
+  const { admin, store, dataDir } = makeRealStoreAdmin(rootDir);
+  try {
+    store.touchUser('g1', '100000000000000555', 'Ελένη', LEARNED_DAY('2026-08-01'));
+    store.applyLearnedOps('g1', { add: [{ text: 'ο <@100000000000000555> πίνει τσάι', from: '<@100000000000000555>' }] }, { seenAt: LEARNED_DAY('2026-09-01') });
+    store.applyLearnedOps('g1', { add: [{ text: 'café au lait', from: '<@100000000000000999>' }] }, { seenAt: LEARNED_DAY('2026-09-02') });
+    store.applyLearnedOps('g1', { add: ['Zoë arrive tard'] }, { seenAt: LEARNED_DAY('2026-09-03') });
+
+    const lines = (await admin.run('learned.list', {}, { guildId: 'g1' })).split('\n');
+    assert.equal(lines.length, 3);
+    assert.ok(lines.includes('#1 ο Ελένη (id:100000000000000555) πίνει τσάι — from Ελένη (id:100000000000000555) · seen 1 · last 2026-09-01'));
+    assert.ok(lines.includes('#2 café au lait — from <@100000000000000999> · seen 1 · last 2026-09-02'), 'an unknown teacher keeps the token');
+    assert.ok(lines.includes('#3 Zoë arrive tard · seen 1 · last 2026-09-03'), 'no from -> no from part');
+  } finally {
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test('run: learned.list orders by rank, decayed with memory.learnedHalfLifeDays', async () => {
+  const rootDir = makeRoot();
+  const hot = makeHot(rootDir);
+  const { admin, store, dataDir } = makeRealStoreAdmin(rootDir, { hot });
+  try {
+    const opts = { confirmGapHours: 0 };
+    // #1: heavy (weight 3) but last seen in March; #2: weight 1, seen in September.
+    store.applyLearnedOps('g1', { add: ['ἀρχαῖα ἑλληνικά'] }, { ...opts, seenAt: LEARNED_DAY('2026-01-01') });
+    store.applyLearnedOps('g1', { seen: [1] }, { ...opts, seenAt: LEARNED_DAY('2026-02-01') });
+    store.applyLearnedOps('g1', { seen: [1] }, { ...opts, seenAt: LEARNED_DAY('2026-03-01') });
+    store.applyLearnedOps('g1', { add: ['crème brûlée'] }, { ...opts, seenAt: LEARNED_DAY('2026-09-01') });
+
+    hot.config.memory = { learnedHalfLifeDays: 720 };
+    let lines = (await admin.run('learned.list', {}, { guildId: 'g1' })).split('\n');
+    assert.match(lines[0], /^#1 ἀρχαῖα ἑλληνικά · seen 3 · last 2026-03-01$/);
+    assert.match(lines[1], /^#2 crème brûlée /);
+
+    hot.config.memory = { learnedHalfLifeDays: 10 };
+    lines = (await admin.run('learned.list', {}, { guildId: 'g1' })).split('\n');
+    assert.match(lines[0], /^#2 crème brûlée /, 'a short half-life lets the recent item outrank the heavy old one');
+    assert.match(lines[1], /^#1 /);
+  } finally {
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test('run: learned.add stores a new item without from, confirmed at once (default confirmAfter 2), firstSeen == lastSeen == now', async () => {
+  const rootDir = makeRoot();
+  const { admin, store, dataDir } = makeRealStoreAdmin(rootDir);
+  try {
+    const before = Date.now();
+    const result = await admin.run('learned.add', { text: '  ο φάρος ανάβει στις εννιά  ' }, { guildId: 'g1' });
+    const after = Date.now();
+    const learned = store.getGuild('g1').learned;
+    assert.equal(learned.length, 1);
+    const [item] = learned;
+    assert.equal(item.text, 'ο φάρος ανάβει στις εννιά');
+    assert.equal(item.weight, 2, 'confirmed at once, and no further');
+    assert.equal('from' in item, false);
+    assert.equal(item.firstSeen, item.lastSeen, 'every sighting lands on the same instant');
+    const seenMs = Date.parse(item.lastSeen);
+    assert.ok(seenMs >= before && seenMs <= after);
+    assert.equal(result, `#${item.id} ο φάρος ανάβει στις εννιά · seen 2 · last ${item.lastSeen.slice(0, 10)}`);
+  } finally {
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test('run: learned.add reads memory.confirmAfter and confirms up to exactly that weight', async () => {
+  const rootDir = makeRoot();
+  const hot = makeHot(rootDir);
+  hot.config.memory = { confirmAfter: 4 };
+  const { admin, store, dataDir } = makeRealStoreAdmin(rootDir, { hot });
+  try {
+    await admin.run('learned.add', { text: 'crème brûlée' }, { guildId: 'g1' });
+    assert.equal(store.getGuild('g1').learned[0].weight, 4);
+  } finally {
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test('run: learned.add confirms an existing unconfirmed item in place (same id and text)', async () => {
+  const rootDir = makeRoot();
+  const { admin, store, dataDir } = makeRealStoreAdmin(rootDir);
+  try {
+    store.applyLearnedOps('g1', { add: ['Ο Φάρος'] }, { seenAt: LEARNED_DAY('2026-09-01') });
+    const result = await admin.run('learned.add', { text: 'ο φάρος' }, { guildId: 'g1' });
+    const learned = store.getGuild('g1').learned;
+    assert.equal(learned.length, 1);
+    assert.equal(learned[0].id, 1);
+    assert.equal(learned[0].weight, 2);
+    assert.match(result, /^#1 Ο Φάρος · seen 2 · last \d{4}-\d{2}-\d{2}$/);
+  } finally {
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test('run: a repeat learned.add of a confirmed item is one ordinary sighting, never more', async () => {
+  const rootDir = makeRoot();
+  const hot = makeHot(rootDir);
+  const { admin, store, dataDir } = makeRealStoreAdmin(rootDir, { hot });
+  try {
+    await admin.run('learned.add', { text: 'première' }, { guildId: 'g1' });
+    assert.equal(store.getGuild('g1').learned[0].weight, 2);
+
+    // Within the default confirmGapHours: a sighting would not bump it, so neither does the repeat.
+    await admin.run('learned.add', { text: 'Première' }, { guildId: 'g1' });
+    assert.equal(store.getGuild('g1').learned[0].weight, 2);
+
+    // With no gap required, a sighting bumps by exactly one -- and so does the repeat.
+    hot.config.memory = { confirmGapHours: 0 };
+    await admin.run('learned.add', { text: 'première' }, { guildId: 'g1' });
+    const learned = store.getGuild('g1').learned;
+    assert.equal(learned.length, 1);
+    assert.equal(learned[0].weight, 3);
+  } finally {
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test('run: learned.add rejects empty text', async () => {
+  const rootDir = makeRoot();
+  const { admin, store, dataDir } = makeRealStoreAdmin(rootDir);
+  try {
+    await assert.rejects(() => admin.run('learned.add', { text: '   ' }, { guildId: 'g1' }), /text is required/);
+    assert.deepEqual(store.getGuild('g1').learned, []);
+  } finally {
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test('run: learned.remove deletes the item by id and reports it', async () => {
+  const rootDir = makeRoot();
+  const { admin, store, dataDir } = makeRealStoreAdmin(rootDir);
+  try {
+    store.applyLearnedOps('g1', { add: ['première', 'δεύτερο'] }, { seenAt: LEARNED_DAY('2026-09-01') });
+    const result = await admin.run('learned.remove', { id: 1 }, { guildId: 'g1' });
+    assert.deepEqual(store.getGuild('g1').learned.map((i) => i.id), [2]);
+    assert.match(result, /#1/);
+    assert.match(result, /première/);
+  } finally {
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test('run: learned.remove of a missing id is an error and changes nothing', async () => {
+  const rootDir = makeRoot();
+  const { admin, store, dataDir } = makeRealStoreAdmin(rootDir);
+  try {
+    store.applyLearnedOps('g1', { add: ['première'] }, { seenAt: LEARNED_DAY('2026-09-01') });
+    await assert.rejects(() => admin.run('learned.remove', { id: 9 }, { guildId: 'g1' }), /^Error: no learned item #9$/);
+    assert.equal(store.getGuild('g1').learned.length, 1);
+  } finally {
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test('run: learned.add/learned.remove are refused while paused', async () => {
+  const rootDir = makeRoot();
+  const { admin } = makeAdmin(rootDir);
+
+  await admin.run('pause', {}, {});
+
+  await assert.rejects(() => admin.run('learned.add', { text: 'première' }, { guildId: 'g1' }), /paused.*resume/i);
+  await assert.rejects(() => admin.run('learned.remove', { id: 1 }, { guildId: 'g1' }), /paused.*resume/i);
 });
 
 // ---------------------------------------------------------------------------

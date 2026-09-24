@@ -26,9 +26,12 @@
 | `/nep memory refresh <user>` | メンバーのポートレートを強制リフレッシュ |
 | `/nep memory forget <user>` | 保存されたプロファイルを削除 |
 | `/nep memory affinity <user> [score] [reason]` | 態度を表示または設定（-100..100） |
-| `/nep memory alias-add <user> <name>` | チャット用エイリアスを追加（即時確定） |
-| `/nep memory alias-remove <user> <name>` | チャット用エイリアスを削除 |
 | `/nep memory wipe <confirm>` | このサーバーのアナライザーメモリをすべて消去。確認のためサーバー名を正確に入力 |
+| `/nep alias add <user> <name>` | チャット用エイリアスを追加（即時確定） |
+| `/nep alias remove <user> <name>` | チャット用エイリアスを削除 |
+| `/nep learned list` | レッスンの一覧を表示（ID、教えた人、観測回数付き） |
+| `/nep learned add <text>` | レッスンを手動で追加（教師なし、確定済み） |
+| `/nep learned remove <id>` | レッスンを削除 |
 | `/nep lore add <title> <keys> <text> [always]` | ロアブックエントリを追加または上書き。同じタイトルのエントリは置き換えられオーナー所有になるため、アナライザーは以後編集しない |
 | `/nep lore list [query]` | ロアブックエントリ一覧を表示 |
 | `/nep lore show <id>` | ロアブックエントリを表示 |

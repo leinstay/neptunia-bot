@@ -85,7 +85,7 @@ One Discord slash command, `/nep` (the name comes from `bot.commandName`). It is
 
 The persona responds to mentions, replies and name triggers, sometimes ignoring them. It cuts into conversations at random intervals and starts topics in dead channels. After answering, it tracks follow-up messages in that channel through a classifier. It writes one reply at a time across the server; pings in other channels are held and answered in turn.
 
-A separate memory analyzer runs when enough messages accumulate. It builds per-member profiles with interests, details, aliases, episodes and attitudes, server-wide habits and in-jokes, and a lorebook of events and stories. Profiles are updated incrementally; stored facts are never re-summarised. The persona also learns what people call each other and recognises a member by name or alias.
+A separate memory analyzer runs when enough messages accumulate. It builds per-member profiles with interests, details, aliases, episodes and attitudes, server-wide habits and in-jokes, a lorebook of events and stories, and a list of things people taught the persona directly (words, facts, requests). Profiles are updated incrementally; stored facts are never re-summarised. The persona also learns what people call each other and recognises a member by name or alias. Lessons are stored at the server level (`memory.maxLearned` shown, `memory.maxLearnedStored` kept on disk, `memory.learnedChars` per item) and always appear in the prompt.
 
 See [`docs/en/messages-and-memory.md`](docs/en/messages-and-memory.md) for the pipeline steps, the analyzer, profiles, episodes, the lorebook and the owner commands that touch memory.
 

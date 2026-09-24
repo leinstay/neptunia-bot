@@ -22,7 +22,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { emptyAffinity, affinityBand, roundScore } from './memory/affinity.js';
-import { topByRank } from './memory/ranking.js';
+import { topByRank, sortByRank } from './memory/ranking.js';
 import { fromTokens } from './memory/mentions.js';
 import { sortEpisodesForDisplay } from './memory/episodes.js';
 import { channelActivity } from './memory/channels.js';
@@ -44,6 +44,7 @@ const READ_ONLY_ACCESS_KEYS = new Set([
   'rule.list',
   'lore.list',
   'lore.show',
+  'learned.list',
   'model.show',
   'warmup.status',
   'warmup.people',
@@ -388,13 +389,13 @@ function rawMemoryShowView(profile, memoryCfg) {
 }
 
 /** `[weight N, last DATE] name`, or just `[weight N] name`, used by
- * both the `raw` view (via `rawMemoryShowView`) and the `aliases` section, and by `/nep memory
- * alias add`/`remove`'s "resulting alias list" reply. */
+ * both the `raw` view (via `rawMemoryShowView`) and the `aliases` section, and by `/nep alias
+ * add`/`remove`'s "resulting alias list" reply. */
 function aliasLine(alias) {
   return `[weight ${alias.weight}${lastDateSuffix(alias.lastSeen)}] ${alias.name}`;
 }
 
-/** The member's stored aliases, rank-ordered, one per line — the reply `/nep memory alias
+/** The member's stored aliases, rank-ordered, one per line — the reply `/nep alias
  * add`/`remove` gives after writing. */
 function formatAliasList(profile, memoryCfg) {
   const aliases = profile?.aliases ?? [];
@@ -505,9 +506,10 @@ export function createAdmin({
   /**
    * `/nep pause`: refuse a command that would write under `data/` while
    * paused, with a hint to resume first. Guards interject, initiate,
-   * memory.alias-add, memory.alias-remove, memory.forget, memory.wipe, memory.affinity (when
-   * setting a score), memory.refresh, lore.add, lore.remove, warmup.run,
-   * warmup.users, warmup.channels, warmup.server and warmup.reset.
+   * alias.add, alias.remove, memory.forget, memory.wipe, memory.affinity (when
+   * setting a score), memory.refresh, lore.add, lore.remove, learned.add,
+   * learned.remove, warmup.run, warmup.users, warmup.channels, warmup.server
+   * and warmup.reset.
    */
   function assertNotPaused() {
     if (store.state.data.paused) {
@@ -1036,7 +1038,7 @@ export function createAdmin({
   }
 
   /**
-   * `/nep memory alias add`: confirms the alias at once instead of
+   * `/nep alias add`: confirms the alias at once instead of
    * waiting for it to be sighted `memory.confirmAfter` times naturally —
    * store.applyProfileOps/src/memory/aliases.js has no option to set a
    * weight directly, so this calls it repeatedly with `confirmGapHours: 0`
@@ -1048,7 +1050,7 @@ export function createAdmin({
    * chars and dropping a name equal to one of the member's display names are
    * both store.js's own applyAliasOps behaviour, untouched here.
    */
-  function cmdMemoryAliasAdd(args, context) {
+  function cmdAliasAdd(args, context) {
     assertNotPaused();
     const userId = args?.userId;
     if (!userId) throw new Error('a user is required');
@@ -1088,9 +1090,9 @@ export function createAdmin({
     return formatAliasList(after, memoryCfg);
   }
 
-  /** `/nep memory alias remove`: removes by name, case-insensitively (store.applyProfileOps
+  /** `/nep alias remove`: removes by name, case-insensitively (store.applyProfileOps
    * matches an alias's identity the same way, see src/memory/interests.js#normalizeTopic). */
-  function cmdMemoryAliasRemove(args, context) {
+  function cmdAliasRemove(args, context) {
     assertNotPaused();
     const userId = args?.userId;
     if (!userId) throw new Error('a user is required');
@@ -1275,6 +1277,104 @@ export function createAdmin({
     if (!entry) throw new Error(`no lore entry ${id}`);
     store.removeLore(guildId, id);
     return `Removed lore entry ${id}: ${entry.title}`;
+  }
+
+  // ---------------------------------------------------------------------
+  // learned: the owner's side of the guild's list of things people taught
+  // the persona (store.js#applyLearnedOps). Items are detail-shaped
+  // (`{ id, text, weight, firstSeen, lastSeen, from? }`); `from` is the
+  // teacher as a `<@id>` token. The owner's own adds carry no `from`.
+  // ---------------------------------------------------------------------
+
+  /** `<@id>` -> `name (id:…)` for this guild, the same resolution `memory.show` uses; an id with no
+   * stored name keeps its token. */
+  function tokenResolver(guildId) {
+    const nameOf = (id) => store.getUser(guildId, id)?.names?.[0] ?? null;
+    return (text) => fromTokens(typeof text === 'string' ? text : '', nameOf, 'analyzer');
+  }
+
+  /** `#<id> <text> — from <name> · seen <weight> · last <YYYY-MM-DD>`, the `from` part only when
+   * the item has one. */
+  function learnedLine(item, resolve) {
+    const from = item.from ? ` — from ${resolve(item.from)}` : '';
+    const last = String(item.lastSeen ?? item.firstSeen ?? '-').slice(0, 10);
+    return `#${item.id} ${resolve(item.text)}${from} · seen ${item.weight} · last ${last}`;
+  }
+
+  /** `/nep learned list`: every stored item, rank order (`memory.learnedHalfLifeDays`). */
+  function cmdLearnedList(_args, context) {
+    freshenIfPaused();
+    const guildId = resolvedGuildId(context);
+    if (!guildId) throw new Error('no guild resolved yet');
+
+    const learned = store.getGuild(guildId).learned ?? [];
+    if (learned.length === 0) return '(none)';
+    const resolve = tokenResolver(guildId);
+    return sortByRank(learned, hot.config?.memory?.learnedHalfLifeDays)
+      .map((item) => learnedLine(item, resolve))
+      .join('\n');
+  }
+
+  /**
+   * `/nep learned add`: an `add` op with no `from` that confirms the lesson at once, the same way
+   * `/nep alias add` confirms an alias: repeated sightings with `confirmGapHours: 0` and ONE
+   * `seenAt` (an add of a stored text counts as a sighting of it) until the item's weight reaches
+   * `memory.confirmAfter` (default 2). A lesson already at or past that weight gets one ordinary
+   * sighting under the live `config.memory` (so `confirmGapHours` applies) -- never more than the
+   * analyzer seeing it again would give. Every other limit is the live `config.memory`. Replies
+   * with the resulting item's line.
+   */
+  function cmdLearnedAdd(args, context) {
+    assertNotPaused();
+    const guildId = resolvedGuildId(context);
+    if (!guildId) throw new Error('no guild resolved yet');
+
+    const text = String(args?.text ?? '').trim();
+    if (!text) throw new Error('text is required');
+
+    const memoryCfg = hot.config?.memory ?? {};
+    const confirmAfter = Number.isFinite(memoryCfg.confirmAfter) && memoryCfg.confirmAfter > 0 ? Math.ceil(memoryCfg.confirmAfter) : 2;
+    const target = Math.max(1, confirmAfter);
+
+    const key = normalizeAliasKey(text);
+    const before = store.getGuild(guildId).learned ?? [];
+    const beforeIds = new Set(before.map((item) => item.id));
+    const seenAt = Date.now();
+    const seenIso = new Date(seenAt).toISOString();
+    // The item this command added or sighted: a fresh id, else the same text, else the one
+    // stamped just now (a text the store clamped no longer matches `key`).
+    const locate = (items) =>
+      items.find((it) => !beforeIds.has(it.id)) ??
+      items.find((it) => normalizeAliasKey(it.text) === key) ??
+      items.find((it) => it.lastSeen === seenIso);
+
+    const existing = before.find((it) => normalizeAliasKey(it.text) === key);
+    let item;
+    if (existing && existing.weight >= target) {
+      item = locate(store.applyLearnedOps(guildId, { add: [{ text }] }, { ...memoryCfg, seenAt }));
+    } else {
+      for (let i = 0; i < target; i += 1) {
+        item = locate(store.applyLearnedOps(guildId, { add: [{ text }] }, { ...memoryCfg, confirmGapHours: 0, seenAt }));
+        if (!item || item.weight >= target) break;
+      }
+    }
+    if (!item) throw new Error('the item was not kept (the learned list is full)');
+    return learnedLine(item, tokenResolver(guildId));
+  }
+
+  /** `/nep learned remove`: deletes one item by id; an id that is not stored is an error. */
+  function cmdLearnedRemove(args, context) {
+    assertNotPaused();
+    const guildId = resolvedGuildId(context);
+    if (!guildId) throw new Error('no guild resolved yet');
+
+    const id = args?.id;
+    if (!Number.isInteger(id)) throw new Error('an item id is required');
+    const existing = (store.getGuild(guildId).learned ?? []).find((item) => item.id === id);
+    if (!existing) throw new Error(`no learned item #${id}`);
+
+    store.applyLearnedOps(guildId, { remove: [id] }, { ...(hot.config?.memory ?? {}), seenAt: Date.now() });
+    return `Removed learned item #${id}: ${tokenResolver(guildId)(existing.text)}`;
   }
 
   const MODEL_ID_RE = /^[\w.:/-]{3,100}$/;
@@ -1879,15 +1979,18 @@ async function cmdPing(args) {
     'memory.channel': (args, context) => cmdMemoryChannel(args, context),
     'memory.server': (args, context) => cmdMemoryServer(args, context),
     'memory.forget': (args, context) => cmdMemoryForget(args, context),
-    'memory.alias-add': (args, context) => cmdMemoryAliasAdd(args, context),
-    'memory.alias-remove': (args, context) => cmdMemoryAliasRemove(args, context),
     'memory.wipe': (args, context) => cmdMemoryWipe(args, context),
     'memory.affinity': (args, context) => cmdMemoryAffinity(args, context),
     'memory.refresh': (args, context) => cmdMemoryRefresh(args, context),
+    'alias.add': (args, context) => cmdAliasAdd(args, context),
+    'alias.remove': (args, context) => cmdAliasRemove(args, context),
     'lore.add': (args, context) => cmdLoreAdd(args, context),
     'lore.list': (args, context) => cmdLoreList(args, context),
     'lore.show': (args, context) => cmdLoreShow(args, context),
     'lore.remove': (args, context) => cmdLoreRemove(args, context),
+    'learned.list': (args, context) => cmdLearnedList(args, context),
+    'learned.add': (args, context) => cmdLearnedAdd(args, context),
+    'learned.remove': (args, context) => cmdLearnedRemove(args, context),
     'model.show': () => cmdModelShow(),
     'model.set': (args) => cmdModelSet(args),
     'warmup.people': withWarmup((args, context) => cmdWarmupPeople(args, context)),

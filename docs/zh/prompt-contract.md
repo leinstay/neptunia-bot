@@ -25,7 +25,7 @@
 | `reply.md` | 是 | 任务：有人呼叫了角色 | `{{name}}` `{{author}}` `{{trigger}}` `{{target}}` |
 | `interject.md` / `initiate.md` | 是 | 任务：插入正在进行的对话 / 在沉寂的频道中发起话题 | `{{name}}` |
 | `forced.md` | 否 | 强制回合（`/nep interject`、`/nep initiate`）时追加在模式提示之后。覆盖默认的 `<skip/>` 选项 | `{{name}}` |
-| `memory.md` | 是 | 角色外提示，用于流分析器：从实时批次中对记忆进行针对性编辑 | `{{name}}` `{{fieldChars}}` `{{guildFieldChars}}` `{{maxDetails}}` `{{maxInjokes}}` `{{maxSelfFacts}}` `{{maxNewEpisodes}}` `{{maxEpisodes}}` `{{maxDeltaPerUpdate}}` `{{maxInterests}}` `{{interestTopicChars}}` `{{interestNoteChars}}` `{{loreTextChars}}` |
+| `memory.md` | 是 | 角色外提示，用于流分析器：从实时批次中对记忆进行针对性编辑 | `{{name}}` `{{fieldChars}}` `{{guildFieldChars}}` `{{maxDetails}}` `{{maxInjokes}}` `{{maxSelfFacts}}` `{{maxNewEpisodes}}` `{{maxEpisodes}}` `{{maxDeltaPerUpdate}}` `{{maxInterests}}` `{{interestTopicChars}}` `{{interestNoteChars}}` `{{loreTextChars}}` `{{maxLearned}}` `{{learnedChars}}` |
 | `profile.md` | 是 | 预热 / 画像刷新：从消息样本生成一个成员的档案 | `{{name}}` `{{fieldChars}}` `{{maxInterests}}` `{{maxDetails}}` `{{interestTopicChars}}` `{{interestNoteChars}}` `{{maxNewEpisodes}}` |
 | `channel.md` | 是 | 预热：从消息样本生成频道笔记 | `{{fieldChars}}` |
 | `server.md` | 是 | 预热：从频道笔记和成员摘要生成服务器级笔记 | `{{name}}` `{{fieldChars}}` `{{maxInjokes}}` `{{loreTextChars}}` |
@@ -58,7 +58,7 @@
 |---|---|
 | `<now>` | 日期、星期、`config.bot.timezone` 中的时间，使用 `labels.locale` 格式化 |
 | `<senses>` | 角色此刻能感知和不能感知的内容，根据实时配置生成：哪些图片由角色自己看到，哪些通过辅助描述获得，对什么视而不见、听而不闻。使角色不会假装看过视频，并能用自己的语气开玩笑 |
-| `<about_chat>` | 人们在这里如何交谈，如何发起和插入对话，内部梗 |
+| `<about_chat>` | 人们在这里如何交谈，如何发起和插入对话，内部梗，人们教给角色的东西 |
 | `<server>` | 当前频道的完整信息（Discord 分类和话题、用途、人们写什么、氛围、活跃度、最后一条消息、最活跃作者；以 `labels.server.currentMark` 标记），加上仅限本轮向 `<other_channels>` 提供了消息的相邻频道；不包含其他频道 |
 | `<lore>` | 关键词出现在近期消息中的服务器世界书条目（加上标记为 always 的条目）：事件、常驻角色、长期故事。如同世界书：可存在数百个，仅显示相关的少数 |
 | `<self_facts>` | 角色声称过的关于自身的事实 |
@@ -184,6 +184,10 @@ lore.entry                               {title} {text}
 affinity.bands.hostile | dislike | cool | neutral | warm | fond | devoted
                                          thresholds in code: ≤-60 · ≤-25 · ≤-8 · <8 · <25 · <60 · ≥60
 aboutChat.patterns | starters | injokes  {text}
+aboutChat.learned                        {text}: things people taught the persona, joined by `; ` by code
+aboutChat.learnedItem                    {text} {who}: one lesson with a teacher
+aboutChat.learnedItemNoFrom              {text}: one lesson with no known teacher
+aboutChat.unsureMark                     appended to an unconfirmed learned item (starts with a space)
 server.currentMark                       appended to the current channel's heading (starts with a space)
 server.category | topic | purpose | topics | tone               {text}
 server.activity                          {activity} = server.activityLive | activitySlow | activityDead
@@ -215,7 +219,7 @@ warmup.contextMark                       prefixed to context lines in the profil
 
 输入：`<character>` · `<existing_profiles>`（按用户 id 的 JSON，包含当前 `affinity` 分数、原因和已存储的
 `episodes`）· `<existing_lore>` ·
-`<existing_guild>` · `<existing_channels>`（按频道 id 的 JSON：`name`、Discord `category`、`topic`、已存储的
+`<existing_guild>`（JSON：规律、开场白、内部梗、学到的条目）· `<existing_channels>`（按频道 id 的 JSON：`name`、Discord `category`、`topic`、已存储的
 `purpose`、`topics`、`tone`）· `<new_messages>` 按 `## #channel-name (id:123)` 分组，行格式为
 `[14:32] nick (id:123): text`，对角色说话的行以 `→ ` 开头，角色自身的行使用 `labels.self`。
 
@@ -234,7 +238,8 @@ warmup.contextMark                       prefixed to context lines in the profil
                                                                                  // "sure" is OPTIONAL everywhere, default true
       "affinity":  { "delta": 0, "reason": "" },
       "episodes":  [ { "date": "YYYY-MM-DD", "what": "", "quote": "", "feeling": "", "weight": 3 } ] } },
-  "guild": { "patterns": "", "starters": "", "injokes": [""] },
+  "guild": { "patterns": "", "starters": "", "injokes": [""],
+             "learned": { "add": [{ "text": "", "from": "<@id>" }], "seen": [3], "remove": [3] } },
   "channels": { "<channelId>": { "purpose": "", "topics": "", "tone": "" } },
   "lore": [ { "title": "", "keys": [""], "text": "" } ],
   "self": [""]
@@ -249,7 +254,11 @@ warmup.contextMark                       prefixed to context lines in the profil
 - **细节也是独立条目**：`{ id, text, weight, firstSeen, lastSeen }`。输入中显示每个已存储细节及其数字
   `id`；`seen` 和 `remove` 通过该 id 引用细节（代码也接受完全匹配的已存储文本）。`add` 接受
   `{ text, sure? }`（也接受纯字符串）。超过 `memory.maxDetailsStored` 时，排名最低的先淘汰。
-- **确认（"(?)" 机制），兴趣和细节通用。**`weight` 统计一个事物被观察到的不同场合次数。新条目起始权重为
+- **学到的条目是服务器级的独立条目**：`{ id, text, from, weight, firstSeen, lastSeen }`。`from` 存储教导者
+  （`<@id>`，或为空）。使用与细节相同的 `add` / `seen` / `remove` 操作、相同的确认机制、相同的排名和淘汰规则。
+  `memory.maxLearned` 个显示，`memory.maxLearnedStored` 个保留，`memory.learnedChars` 为每个条目的字符上限。
+  聊天模型在 `<about_chat>` 中内部梗行之后按排名顺序看到它们，未确认的带有 `labels.aboutChat.unsureMark` 标记。
+- **确认（"(?)" 机制），兴趣、细节和学到的条目通用。**`weight` 统计一个事物被观察到的不同场合次数。新条目起始权重为
   1，或当分析器标记 `"sure": false` 时为 0（不确定属于谁、不确定是否认真的、或分析器不认识的名称）。
   `seen`（无新内容可说，但再次出现）、对已有条目的 `add` 和 `update` 各计为一次观察；仅当该成员在此批次
   中的消息距离该条目的 `lastSeen` 至少 `memory.confirmGapHours` 时，一次观察才使权重增加 1（因此一段跨
@@ -311,7 +320,7 @@ warmup.contextMark                       prefixed to context lines in the profil
   存储笔记或文本（被旧版本截断）会在其主题下次出现时被完整重写。
 - **输出精简。**`"sure"` 仅在值为 false 时写入；`affinity` 在无变化时省略。
 - **每个事实只归一处。**一个事件归入 `episodes` 或 `lore`，一个事实归入 `details`，一个消遣归入
-  `interests`；同一事物绝不写入多个字段。
+  `interests`，对角色的教导归入 `learned`；同一事物绝不写入多个字段。
 - **与模型已有知识的合理性检查。**在将一个命名事物关联到另一个（一个地区、模式、角色或物品关联到一个
   游戏；一个人关联到一个作品系列）之前，分析器检查它们确实相关。当聊天的措辞与其知识冲突，或它不认识该
   事物时，不进行关联：单独记录该事物并标记 `"sure": false`。它绝不"纠正"聊天内容。

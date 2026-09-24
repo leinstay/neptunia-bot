@@ -26,9 +26,12 @@
 | `/nep memory refresh <user>` | 强制刷新成员画像 |
 | `/nep memory forget <user>` | 删除存储的档案 |
 | `/nep memory affinity <user> [score] [reason]` | 查看或设置态度（-100..100） |
-| `/nep memory alias-add <user> <name>` | 添加聊天别名；立即确认 |
-| `/nep memory alias-remove <user> <name>` | 移除聊天别名 |
 | `/nep memory wipe <confirm>` | 清除该服务器的所有分析器记忆；输入准确的服务器名称以确认 |
+| `/nep alias add <user> <name>` | 添加聊天别名；立即确认 |
+| `/nep alias remove <user> <name>` | 移除聊天别名 |
+| `/nep learned list` | 列出所学内容（含 ID、教授者、观察次数） |
+| `/nep learned add <text>` | 手动添加所学内容（无教授者，已确认） |
+| `/nep learned remove <id>` | 删除一条所学内容 |
 | `/nep lore add <title> <keys> <text> [always]` | 添加或覆盖世界书条目；同标题的条目会被替换并变为所有者拥有，分析器不再编辑 |
 | `/nep lore list [query]` | 列出世界书条目 |
 | `/nep lore show <id>` | 显示世界书条目 |

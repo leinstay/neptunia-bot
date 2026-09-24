@@ -259,3 +259,52 @@ test('normalizeDetails: null/undefined/number/string/object all yield an empty l
   assert.deepEqual(normalizeDetails('Owns a cat, plays guitar').items, []);
   assert.deepEqual(normalizeDetails({ not: 'an array' }).items, []);
 });
+
+// ---- the optional `from` (who taught an item; used by guild.learned) ---------
+
+test('applyDetailOps: an add item keeps a non-empty string from, trimmed', () => {
+  const { items } = applyDetailOps([], { add: [{ text: 'Friday is τυρόπιτα day', from: ' <@322222222222222222> ' }] }, opts());
+  assert.equal(items[0].from, '<@322222222222222222>');
+});
+
+test('applyDetailOps: a missing, empty or non-string from is dropped, the item still lands', () => {
+  for (const from of [undefined, '', '   ', 42, null, { id: 1 }, ['<@322222222222222222>']]) {
+    const { items } = applyDetailOps([], { add: [{ text: 'Café closes at nine', from }] }, opts());
+    assert.equal(items.length, 1, `from ${JSON.stringify(from)} must not reject the item`);
+    assert.equal('from' in items[0], false, `from ${JSON.stringify(from)} must not be stored`);
+  }
+});
+
+test('applyDetailOps: a bare-string add and a detail without from keep their exact old shape', () => {
+  const { items } = applyDetailOps([], { add: ['Owns a cat', { text: 'Plays guitar', sure: false }] }, opts());
+  assert.deepEqual(Object.keys(items[0]).sort(), ['firstSeen', 'id', 'lastSeen', 'text', 'weight']);
+  assert.deepEqual(Object.keys(items[1]).sort(), ['firstSeen', 'id', 'lastSeen', 'text', 'weight']);
+});
+
+test('applyDetailOps: sure:false with from starts at weight 0 and keeps the from', () => {
+  const { items } = applyDetailOps([], { add: [{ text: 'Maybe the kettle is Ὠκεανός', from: '<@322222222222222222>', sure: false }] }, opts());
+  assert.equal(items[0].weight, 0);
+  assert.equal(items[0].from, '<@322222222222222222>');
+});
+
+test('applyDetailOps: a sighting of a known item never rewrites its stored from', () => {
+  const existing = [{ id: 1, text: 'Café closes at nine', weight: 1, firstSeen: 'a', lastSeen: null, from: '<@322222222222222222>' }];
+  const { items } = applyDetailOps(existing, { add: [{ text: 'café closes at nine', from: '<@422222222222222222>' }] }, opts({ nextId: 2 }));
+  assert.equal(items.length, 1);
+  assert.equal(items[0].from, '<@322222222222222222>');
+  assert.equal(items[0].weight, 2);
+});
+
+test('normalizeDetails: a valid string from survives, a garbage from is dropped', () => {
+  const { items } = normalizeDetails(
+    [
+      { id: 1, text: 'Café closes at nine', weight: 2, firstSeen: 'a', lastSeen: 'b', from: '<@322222222222222222>' },
+      { id: 2, text: 'Friday is τυρόπιτα day', weight: 1, firstSeen: 'a', lastSeen: 'b', from: 42 },
+      { id: 3, text: 'Owns a cat', weight: 1, firstSeen: 'a', lastSeen: 'b', from: '  ' },
+    ],
+    1,
+  );
+  assert.deepEqual(items[0], { id: 1, text: 'Café closes at nine', weight: 2, firstSeen: 'a', lastSeen: 'b', from: '<@322222222222222222>' });
+  assert.equal('from' in items[1], false);
+  assert.equal('from' in items[2], false);
+});

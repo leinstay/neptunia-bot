@@ -25,7 +25,7 @@
 | `reply.md` | да | Задача: кто-то позвал персонажа | `{{name}}` `{{author}}` `{{trigger}}` `{{target}}` |
 | `interject.md` / `initiate.md` | да | Задачи: вклиниться в живой разговор / начать тему в молчащем канале | `{{name}}` |
 | `forced.md` | нет | Добавляется после промпта режима при принудительном ходе (`/nep interject`, `/nep initiate`). Отменяет вариант `<skip/>` по умолчанию | `{{name}}` |
-| `memory.md` | да | Внеролевой промпт потокового анализатора: точечные правки памяти по живым батчам | `{{name}}` `{{fieldChars}}` `{{guildFieldChars}}` `{{maxDetails}}` `{{maxInjokes}}` `{{maxSelfFacts}}` `{{maxNewEpisodes}}` `{{maxEpisodes}}` `{{maxDeltaPerUpdate}}` `{{maxInterests}}` `{{interestTopicChars}}` `{{interestNoteChars}}` `{{loreTextChars}}` |
+| `memory.md` | да | Внеролевой промпт потокового анализатора: точечные правки памяти по живым батчам | `{{name}}` `{{fieldChars}}` `{{guildFieldChars}}` `{{maxDetails}}` `{{maxInjokes}}` `{{maxSelfFacts}}` `{{maxNewEpisodes}}` `{{maxEpisodes}}` `{{maxDeltaPerUpdate}}` `{{maxInterests}}` `{{interestTopicChars}}` `{{interestNoteChars}}` `{{loreTextChars}}` `{{maxLearned}}` `{{learnedChars}}` |
 | `profile.md` | да | Прогрев / обновление портрета: профиль одного участника из выборки сообщений | `{{name}}` `{{fieldChars}}` `{{maxInterests}}` `{{maxDetails}}` `{{interestTopicChars}}` `{{interestNoteChars}}` `{{maxNewEpisodes}}` |
 | `channel.md` | да | Прогрев: заметки о канале из выборки сообщений | `{{fieldChars}}` |
 | `server.md` | да | Прогрев: серверные заметки из заметок каналов и сводок участников | `{{name}}` `{{fieldChars}}` `{{maxInjokes}}` `{{loreTextChars}}` |
@@ -58,7 +58,7 @@
 |---|---|
 | `<now>` | Дата, день недели, время в часовом поясе `config.bot.timezone`, отформатированные через `labels.locale` |
 | `<senses>` | Что персонаж может и чего не может воспринимать ПРЯМО СЕЙЧАС. Генерируется из текущей конфигурации: какие картинки он видит сам, какие приходят описанием от вспомогательной модели, к чему слеп и глух. Поэтому он никогда не притворяется, что посмотрел видео, и может пошутить об этом в своей манере |
-| `<about_chat>` | Как здесь общаются, как заводят и подхватывают разговоры, внутренние шутки |
+| `<about_chat>` | Как здесь общаются, как заводят и подхватывают разговоры, внутренние шутки, то, чему люди научили персонажа |
 | `<server>` | ТЕКУЩИЙ канал полностью (категория и тема Discord, назначение, о чём пишут, тон, активность, последнее сообщение, самые активные авторы; отмечен `labels.server.currentMark`), затем только те соседние каналы, которые дали сообщения в `<other_channels>` этого хода; никаких других каналов |
 | `<lore>` | Записи серверного лорбука, чьи ключевые слова встречаются в последних сообщениях (плюс записи с пометкой always): события, повторяющиеся персонажи, длительные истории. Как лорбук: записей могут быть сотни, показываются только подходящие |
 | `<self_facts>` | Что персонаж утверждал о себе |
@@ -185,6 +185,10 @@ lore.entry                               {title} {text}
 affinity.bands.hostile | dislike | cool | neutral | warm | fond | devoted
                                          thresholds in code: ≤-60 · ≤-25 · ≤-8 · <8 · <25 · <60 · ≥60
 aboutChat.patterns | starters | injokes  {text}
+aboutChat.learned                        {text}: things people taught the persona, joined by `; ` by code
+aboutChat.learnedItem                    {text} {who}: one lesson with a teacher
+aboutChat.learnedItemNoFrom              {text}: one lesson with no known teacher
+aboutChat.unsureMark                     appended to an unconfirmed learned item (starts with a space)
 server.currentMark                       appended to the current channel's heading (starts with a space)
 server.category | topic | purpose | topics | tone               {text}
 server.activity                          {activity} = server.activityLive | activitySlow | activityDead
@@ -217,7 +221,7 @@ warmup.contextMark                       prefixed to context lines in the profil
 
 Вход: `<character>` · `<existing_profiles>` (JSON по user id, включая текущий балл `affinity` с причиной и сохранённые
 `episodes`) · `<existing_lore>` ·
-`<existing_guild>` · `<existing_channels>` (JSON по channel id: `name`, категория Discord `category`, `topic`, сохранённые `purpose`,
+`<existing_guild>` (JSON: паттерны, зачины, внутренние шутки, усвоенное) · `<existing_channels>` (JSON по channel id: `name`, категория Discord `category`, `topic`, сохранённые `purpose`,
 `topics`, `tone`) · `<new_messages>`, сгруппированные под `## #channel-name (id:123)`, строки `[14:32] nick (id:123): text`,
 строка, адресованная персонажу, начинается с `→ `, собственные строки используют `labels.self`.
 
@@ -236,7 +240,8 @@ warmup.contextMark                       prefixed to context lines in the profil
                                                                                  // "sure" is OPTIONAL everywhere, default true
       "affinity":  { "delta": 0, "reason": "" },
       "episodes":  [ { "date": "YYYY-MM-DD", "what": "", "quote": "", "feeling": "", "weight": 3 } ] } },
-  "guild": { "patterns": "", "starters": "", "injokes": [""] },
+  "guild": { "patterns": "", "starters": "", "injokes": [""],
+             "learned": { "add": [{ "text": "", "from": "<@id>" }], "seen": [3], "remove": [3] } },
   "channels": { "<channelId>": { "purpose": "", "topics": "", "tone": "" } },
   "lore": [ { "title": "", "keys": [""], "text": "" } ],
   "self": [""]
@@ -253,7 +258,12 @@ warmup.contextMark                       prefixed to context lines in the profil
   показана с числовым `id`; `seen` и `remove` ссылаются на детали по этому id (код также принимает точный сохранённый
   текст). `add` принимает `{ text, sure? }` (допускается и голая строка). Свыше `memory.maxDetailsStored` вытесняется
   элемент с наименьшим рангом.
-- **Подтверждение (механизм «(?)»), общий для интересов и деталей.** `weight` считает отдельные СЛУЧАИ, когда нечто
+- **Усвоенное хранится атомарно на уровне сервера**: `{ id, text, from, weight, firstSeen, lastSeen }`. `from` хранит
+  участника, который научил (`<@id>`, или пусто). Те же операции `add` / `seen` / `remove`, та же механика подтверждения,
+  тот же ранг и вытеснение, что у деталей. `memory.maxLearned` показывается, `memory.maxLearnedStored` хранится,
+  `memory.learnedChars` на элемент. Модель чата видит их в `<about_chat>` после строки внутренних шуток, ранжированными,
+  неподтверждённые — с `labels.aboutChat.unsureMark`.
+- **Подтверждение (механизм «(?)»), общий для интересов, деталей и усвоенного.** `weight` считает отдельные СЛУЧАИ, когда нечто
   было замечено. Новый элемент начинает с веса 1 или 0, если анализатор пометил его `"sure": false` (неясно чьё,
   неясно серьёзно ли, или имя, которое анализатор не распознаёт). `seen` (ничего нового, но тема всплыла снова), `add`
   уже существующего элемента и `update` засчитываются как одно наблюдение; наблюдение увеличивает вес на 1 только если
@@ -325,8 +335,8 @@ warmup.contextMark                       prefixed to context lines in the profil
   разделители. Сохранённая заметка или текст, видимо оборванные на середине слова (обрезка старой версией), целиком
   переписываются при следующем появлении их темы.
 - **Экономия выхода.** `"sure"` записывается только при значении false; `affinity` опускается, когда ничего не изменилось.
-- **Один дом для каждого факта.** Событие идёт в `episodes` или `lore`, факт в `details`, увлечение в `interests`; одно
-  и то же никогда не записывается в несколько полей.
+- **Один дом для каждого факта.** Событие идёт в `episodes` или `lore`, факт в `details`, увлечение в `interests`,
+  урок, адресованный персонажу, в `learned`; одно и то же никогда не записывается в несколько полей.
 - **Проверка по знаниям модели.** Прежде чем привязать одну сущность к другой (регион, режим, персонаж или предмет к
   игре; человека к франшизе), анализатор проверяет, что они связаны. Если формулировка чата противоречит его знаниям или
   он не узнаёт сущность, он не склеивает: записывает сущность отдельно с `"sure": false`. Он никогда не «исправляет» чат.

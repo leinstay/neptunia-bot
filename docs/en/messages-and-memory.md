@@ -53,6 +53,8 @@ The lorebook stores server-wide knowledge that outlives any conversation: events
 
 The analyzer adds and updates lorebook entries on its own but never touches entries added by the owner through `/nep lore` commands. Lorebook data lives in `data/guilds/<id>/lore.json`.
 
+The analyzer also records things people taught the persona directly — words and expressions, facts about the server, requests about its behaviour — as server-level learned items that are always present in the prompt.
+
 ## Commands
 
 The full command list is in [Commands](owner-commands.md). The most relevant for memory:

@@ -369,13 +369,59 @@ function serverItems(channels, currentChannelId, neighborChannelIds, history, no
   );
 }
 
-function aboutChatItems(guildMemory, labels, nameOf) {
+/** The member id inside a stored `from` (`<@id>`/`<@!id>`, or a bare id), or null. */
+function teacherId(from) {
+  if (typeof from !== 'string') return null;
+  const match = from.trim().match(/^(?:<@!?(\d+)>|(\d+))$/);
+  return match ? (match[1] ?? match[2]) : null;
+}
+
+/**
+ * The `labels.aboutChat.learned` line's `{text}`: the top `learnedCfg.max`
+ * stored guild items (`{ id, text, from?, weight, firstSeen, lastSeen }`, the
+ * same atomic items as a member's details) by RANK (decayed with
+ * `learnedCfg.halfLifeDays`), in rank order, joined with `'; '`. Each item is
+ * `aboutChat.learnedItem` (`{text}`/`{who}`) when its `from` resolves through
+ * `nameOf` to a name, else `aboutChat.learnedItemNoFrom` (`{text}`); a missing
+ * item label falls back to the next simpler form, then to the bare text. An
+ * item below `learnedCfg.confirmAfter` gets `aboutChat.unsureMark` appended
+ * when that label exists. `''` when there is nothing to show.
+ */
+function learnedText(learned, a, learnedCfg, nameOf) {
+  if (!Array.isArray(learned) || learned.length === 0) return '';
+  return topByRank(learned, learnedCfg.max, learnedCfg.halfLifeDays)
+    .map((item) => {
+      const text = resolveChatText(item?.text, nameOf) ?? '';
+      const id = teacherId(item?.from);
+      const who = id && typeof nameOf === 'function' ? nameOf(id) : null;
+      const noFrom = a.learnedItemNoFrom ? fill(a.learnedItemNoFrom, { text }) : text;
+      const line = who && a.learnedItem ? fill(a.learnedItem, { text, who }) : noFrom;
+      return !isConfirmed(item, learnedCfg.confirmAfter) && a.unsureMark ? line + a.unsureMark : line;
+    })
+    .join('; ');
+}
+
+/**
+ * The `<about_chat>` lines: how this server talks (`patterns`), how people
+ * start conversations (`starters`), the in-jokes, then what people taught the
+ * persona (`guild.learned`, see `learnedText` above) -- the last one only when
+ * `labels.aboutChat.learned` exists, so an older labels.json simply never
+ * renders it. Every stored text is token-resolved via `nameOf`.
+ * `learnedCfg` carries `max`/`halfLifeDays`/`confirmAfter`, read by the
+ * caller from `memory.maxLearned`/`memory.learnedHalfLifeDays`/
+ * `memory.confirmAfter` at the moment of use.
+ */
+function aboutChatItems(guildMemory, labels, nameOf, learnedCfg = {}) {
   const a = labels.aboutChat;
   const items = [];
   if (guildMemory?.patterns) items.push(fill(a.patterns, { text: resolveChatText(guildMemory.patterns, nameOf) }));
   if (guildMemory?.starters) items.push(fill(a.starters, { text: resolveChatText(guildMemory.starters, nameOf) }));
   if (guildMemory?.injokes?.length) {
     items.push(fill(a.injokes, { text: guildMemory.injokes.map((text) => resolveChatText(text, nameOf)).join('; ') }));
+  }
+  if (a?.learned) {
+    const text = learnedText(guildMemory?.learned, a, learnedCfg, nameOf);
+    if (text) items.push(fill(a.learned, { text }));
   }
   return items;
 }
@@ -817,7 +863,15 @@ export function buildRequest(input) {
       // One piece, never split: already bounded by web.search.summaryChars,
       // and ahead of the chat so a tight budget trims old messages first.
       { name: 'lookup', items: [renderLookup(lookup, labels)].filter(Boolean) },
-      { name: 'aboutChat', cap: caps.aboutChat, items: aboutChatItems(input.guildMemory, labels, nameOf) },
+      {
+        name: 'aboutChat',
+        cap: caps.aboutChat,
+        items: aboutChatItems(input.guildMemory, labels, nameOf, {
+          max: Number.isInteger(config.memory?.maxLearned) ? config.memory.maxLearned : 20,
+          halfLifeDays: typeof config.memory?.learnedHalfLifeDays === 'number' ? config.memory.learnedHalfLifeDays : 720,
+          confirmAfter: typeof config.memory?.confirmAfter === 'number' ? config.memory.confirmAfter : undefined,
+        }),
+      },
       {
         name: 'self',
         cap: caps.aboutChat,

@@ -24,8 +24,9 @@ import { clampText } from './clamp.js';
 const BACKOFF_MS = 15 * 60_000;
 const MIN_LIVE_BATCH = 20; // the live analyzer never shrinks below this many messages
 
-// Fallbacks for the memory-prompt placeholders below, equal to config.json's
-// own defaults -- used only when a deployment's config is missing the key.
+// Fallbacks for the memory-prompt placeholders below (and for the guild
+// `learned` limits), equal to config.json's own defaults -- used only when a
+// deployment's config is missing the key.
 const MEMORY_LIMIT_DEFAULTS = {
   fieldChars: 400,
   maxDetails: 15,
@@ -38,6 +39,10 @@ const MEMORY_LIMIT_DEFAULTS = {
   interestTopicChars: 40,
   interestNoteChars: 120,
   loreTextChars: 400,
+  maxLearned: 20,
+  maxLearnedStored: 60,
+  learnedChars: 160,
+  learnedHalfLifeDays: 720,
 };
 
 /** `error?.message`, trimmed to 200 chars — never message contents. */
@@ -115,6 +120,8 @@ function memoryTemplateValues(config, selfName) {
     interestTopicChars: memoryCfg.interestTopicChars ?? MEMORY_LIMIT_DEFAULTS.interestTopicChars,
     interestNoteChars: memoryCfg.interestNoteChars ?? MEMORY_LIMIT_DEFAULTS.interestNoteChars,
     loreTextChars: config.lore?.textChars ?? MEMORY_LIMIT_DEFAULTS.loreTextChars,
+    maxLearned: memoryCfg.maxLearned ?? MEMORY_LIMIT_DEFAULTS.maxLearned,
+    learnedChars: memoryCfg.learnedChars ?? MEMORY_LIMIT_DEFAULTS.learnedChars,
   };
 }
 
@@ -198,16 +205,41 @@ function existingAliasesView(aliases, maxAliases, halfLifeDays) {
   return topByRank(list, maxAliases, halfLifeDays).map((item) => item.name);
 }
 
+/** The `<existing_guild>` view of the things people taught the persona: only
+ * the top `maxLearned` by rank (decayed with `halfLifeDays`), in rank order
+ * -- `{ id, text, from, seen, last }` (`seen` = weight, `last` = the
+ * date-only lastSeen, omitted when unknown; `from` omitted when the item has
+ * no teacher). `text` and `from` are resolved via `nameOf`, same as
+ * `existingDetailsView` above. Stored JSON is validated first (defensive;
+ * store.getGuild already normalises on read). */
+function existingLearnedView(guildMemory, maxLearned, halfLifeDays, nameOf) {
+  const learned = normalizeDetails(guildMemory?.learned, guildMemory?.learnedNextId).items;
+  return topByRank(learned, maxLearned, halfLifeDays).map(({ id, text, from, weight, lastSeen }) => {
+    const view = { id, text: resolveText(text, nameOf) };
+    if (from) view.from = resolveText(from, nameOf);
+    view.seen = weight;
+    view.last = dateOnly(lastSeen);
+    return view;
+  });
+}
+
 /** Only the fields the memory prompt is allowed to see/update for guild
  * memory, with every free-text field resolved (`<@id>` -> `name (id:...)`)
- * via `nameOf`. */
-function pickGuildFields(guildMemory, nameOf) {
+ * via `nameOf`. `memoryCfg` (`config.memory`) sizes the `learned` view
+ * (`maxLearned`, `learnedHalfLifeDays`, config.json's defaults when absent). */
+function pickGuildFields(guildMemory, nameOf, memoryCfg = {}) {
   const { patterns = '', starters = '', injokes = [], self = [] } = guildMemory ?? {};
   return {
     patterns: resolveText(patterns, nameOf),
     starters: resolveText(starters, nameOf),
     injokes: resolveTextArray(injokes, nameOf),
     self: resolveTextArray(self, nameOf),
+    learned: existingLearnedView(
+      guildMemory,
+      memoryCfg.maxLearned ?? MEMORY_LIMIT_DEFAULTS.maxLearned,
+      memoryCfg.learnedHalfLifeDays ?? MEMORY_LIMIT_DEFAULTS.learnedHalfLifeDays,
+      nameOf,
+    ),
   };
 }
 
@@ -344,7 +376,7 @@ export function buildMemoryRequest({ prompts, config, calibrator, profiles, guil
   }
   const profilesBlock = block('existing_profiles', JSON.stringify(existingProfiles));
   const loreBlock = loreOn ? existingLoreBlock(loreEntries, messages.map((m) => m.content).filter(Boolean), resolveName) : '';
-  const guildBlock = block('existing_guild', JSON.stringify(pickGuildFields(guildMemory, resolveName)));
+  const guildBlock = block('existing_guild', JSON.stringify(pickGuildFields(guildMemory, resolveName, config.memory ?? {})));
 
   const mainChannels = mainChannelSet(config.memory?.mainChannelIds);
   const existingChannels = {};
@@ -409,6 +441,55 @@ function clampStringArray(value, maxChars, maxItems, tolerance) {
     .map((item) => (typeof item === 'string' ? clampText(item, maxChars, { tolerance }) : ''))
     .filter(Boolean)
     .slice(0, maxItems);
+}
+
+const TEACHER_TOKEN_RE = /^<@(\d{17,20})>$/;
+const TEACHER_REF_RE = /^[^()<>]*\(id:(\d{17,20})\)$/;
+
+/**
+ * The analyzer's `guild.learned` ops (`{ add, seen, remove }`), validated for
+ * src/memory/store.js#applyLearnedOps. `add` items are a bare string or
+ * `{ text, from?, sure? }`: `text` is tokenized and clamped to `learnedChars`
+ * (an empty result drops the item); `from` is kept only when it is exactly one
+ * `<@id>` token or one `name (id:123)` reference whose id `isKnownId` accepts,
+ * normalised to the token -- anything else is dropped, never guessed from the
+ * text or the batch; `sure: false` travels on. `seen`/`remove` keep positive
+ * integer ids only. Untrusted input: any shape -> `null` or a valid subset,
+ * never a throw.
+ * @param {unknown} raw
+ * @param {{ tokenize: (text: string) => string, isKnownId: (id: string) => boolean,
+ *   learnedChars: number, clampTolerance?: number }} deps
+ * @returns {{ ops: { add: object[], seen: number[], remove: number[] }, added: number }|null}
+ */
+function parseLearnedOps(raw, { tokenize, isKnownId, learnedChars, clampTolerance }) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+
+  const teacher = (from) => {
+    if (typeof from !== 'string') return undefined;
+    const trimmed = from.trim();
+    const id = TEACHER_TOKEN_RE.exec(trimmed)?.[1] ?? TEACHER_REF_RE.exec(trimmed)?.[1];
+    return id && isKnownId(id) ? `<@${id}>` : undefined;
+  };
+
+  const add = [];
+  for (const item of Array.isArray(raw.add) ? raw.add : []) {
+    const isObj = item && typeof item === 'object' && !Array.isArray(item);
+    const rawText = isObj ? item.text : item;
+    if (typeof rawText !== 'string') continue;
+    const text = clampText(tokenize(rawText), learnedChars, { tolerance: clampTolerance });
+    if (!text) continue;
+    const op = { text };
+    const from = isObj ? teacher(item.from) : undefined;
+    if (from) op.from = from;
+    if (isObj && item.sure === false) op.sure = false;
+    add.push(op);
+  }
+  const ids = (value) => (Array.isArray(value) ? value.filter((id) => Number.isInteger(id) && id >= 1) : []);
+  const seen = ids(raw.seen);
+  const remove = ids(raw.remove);
+
+  if (add.length === 0 && seen.length === 0 && remove.length === 0) return null;
+  return { ops: { add, seen, remove }, added: add.length };
 }
 
 /**
@@ -485,7 +566,9 @@ export function batchAuthorNamesMap(messages) {
  *   recognises a name even for someone whose stored profile has not caught up yet. Omitted ->
  *   only the stored profile's own `names` are known.
  * @returns {{ users: number, guild: boolean, self: boolean, affinity: number, relationships: number, channels: number, episodes: number, lore: number,
- *   interestsChanged: number, portraitRequests: { userId: string, reason: string }[] }}
+ *   learned: number, interestsChanged: number, portraitRequests: { userId: string, reason: string }[] }}
+ *   `guild`: patterns/starters/injokes changed. `learned`: how many valid `guild.learned` add ops were
+ *   handed to `store.applyLearnedOps` (a re-add of a stored item counts too -- it is a sighting).
  */
 export function applyMemoryUpdate(store, guildId, update, cfg, knownUserIds, knownChannelIds = new Set(), relationships, episodes, lore, timing, batchAuthorNames) {
   const result = {
@@ -497,6 +580,7 @@ export function applyMemoryUpdate(store, guildId, update, cfg, knownUserIds, kno
     channels: 0,
     episodes: 0,
     lore: 0,
+    learned: 0,
     interestsChanged: 0,
     portraitRequests: [],
   };
@@ -692,6 +776,29 @@ export function applyMemoryUpdate(store, guildId, update, cfg, knownUserIds, kno
   if (Object.keys(guildFields).length > 0) {
     store.updateGuild(guildId, guildFields);
     result.guild = true;
+  }
+
+  // Things people taught the persona: incremental ops, same mechanics as a
+  // member's details (see src/memory/store.js#applyLearnedOps), dated by the
+  // batch's newest message.
+  const guildRaw = update.guild && typeof update.guild === 'object' && !Array.isArray(update.guild) ? update.guild : null;
+  const learned = parseLearnedOps(guildRaw?.learned, {
+    tokenize,
+    isKnownId,
+    learnedChars: cfg.learnedChars ?? MEMORY_LIMIT_DEFAULTS.learnedChars,
+    clampTolerance: cfg.clampTolerance,
+  });
+  if (learned) {
+    store.applyLearnedOps(guildId, learned.ops, {
+      maxLearned: cfg.maxLearned ?? MEMORY_LIMIT_DEFAULTS.maxLearned,
+      maxLearnedStored: cfg.maxLearnedStored ?? MEMORY_LIMIT_DEFAULTS.maxLearnedStored,
+      learnedChars: cfg.learnedChars ?? MEMORY_LIMIT_DEFAULTS.learnedChars,
+      learnedHalfLifeDays: cfg.learnedHalfLifeDays ?? MEMORY_LIMIT_DEFAULTS.learnedHalfLifeDays,
+      confirmGapHours: cfg.confirmGapHours,
+      clampTolerance: cfg.clampTolerance,
+      seenAt: timing?.seenAt ?? relationships?.now ?? episodes?.now ?? Date.now(),
+    });
+    result.learned = learned.added;
   }
 
   if (Array.isArray(update.self) && update.self.length > 0) {

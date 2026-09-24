@@ -8,7 +8,9 @@
 // `nextId` out -- the caller, src/memory/store.js#applyProfileOps, persists
 // it on the profile) that is never reused, even for a removed item.
 // `normalizeDetails` validates whatever a profile's `details` field currently
-// holds on disk.
+// holds on disk. The same mechanics serve the guild's `learned` list (things
+// people taught the persona, see src/memory/store.js#applyLearnedOps), whose
+// items may also carry `from` -- the teacher's `<@id>` token.
 
 import { normalizeTopic } from './interests.js';
 import { topByRank } from './ranking.js';
@@ -74,6 +76,15 @@ function normalizedNextId(startId) {
   return Number.isInteger(startId) && startId >= 1 ? startId : 1;
 }
 
+/** An item's optional `from` (who taught it -- guild `learned` items, see
+ * src/memory/store.js#applyLearnedOps): kept only as a non-empty string,
+ * trimmed; anything else -> `undefined`, so the key is never stored. */
+function validFrom(from) {
+  if (typeof from !== 'string') return undefined;
+  const trimmed = from.trim();
+  return trimmed || undefined;
+}
+
 /**
  * Merge one analyzer batch's detail ops into a member's stored list. Pure:
  * `existing` is never mutated.
@@ -88,6 +99,11 @@ function normalizedNextId(startId) {
  * - `remove` (by id or by exact stored text) deletes the matching item.
  * - `text` is clamped to `fieldChars`; an item whose text is empty after
  *   trimming is rejected outright.
+ * - An add item's optional `from` (`{ text, from, sure }`, who taught it --
+ *   guild `learned` items) is stored on a NEW item when it is a non-empty
+ *   string, trimmed; anything else is dropped. A sighting of an existing
+ *   item never rewrites its stored `from`. Items without one keep the exact
+ *   shape they always had (no `from` key at all).
  * - Once over the storage cap (`max(maxDetailsStored, maxDetails)` -- see
  *   docs/prompt-contract.md, "More is stored than shown, and rank
  *   decays with age"), the lowest-RANKED items are evicted first (see
@@ -137,14 +153,12 @@ export function applyDetailOps(
     const text = clampText(isObj ? raw.text : raw, fieldChars, { tolerance: clampTolerance });
     if (!text) return;
     const sure = isObj ? raw.sure !== false : true;
+    const from = isObj ? validFrom(raw.from) : undefined;
     const index = findIndex(text);
     if (index === -1) {
-      if (!sure) {
-        items.push({ id, text, weight: 0, firstSeen: seenAtIso, lastSeen: seenAtIso });
-        id += 1;
-        return;
-      }
-      items.push({ id, text, weight: 1, firstSeen: seenAtIso, lastSeen: seenAtIso });
+      const item = { id, text, weight: sure ? 1 : 0, firstSeen: seenAtIso, lastSeen: seenAtIso };
+      if (from) item.from = from;
+      items.push(item);
       id += 1;
       return;
     }
@@ -181,7 +195,8 @@ export function applyDetailOps(
  * Validate whatever a profile's `details` field currently holds on disk: an
  * ARRAY is checked item by item (untrusted JSON, possibly hand-edited while
  * paused) -- a valid integer `id` is kept, otherwise one is assigned fresh
- * off `startId` so the sequence never collides; anything else ->
+ * off `startId` so the sequence never collides; an optional `from` survives
+ * only as a non-empty string (see `applyDetailOps`); anything else ->
  * `{ items: [], nextId: startId }`. Never throws on garbage.
  * @param {unknown} value
  * @param {number} [startId]
@@ -200,7 +215,10 @@ export function normalizeDetails(value, startId = 1) {
         const lastSeen = typeof raw.lastSeen === 'string' ? raw.lastSeen : null;
         const itemId = Number.isInteger(raw.id) && raw.id >= 1 ? raw.id : id;
         if (itemId >= id) id = itemId + 1;
-        items.push({ id: itemId, text, weight, firstSeen, lastSeen });
+        const item = { id: itemId, text, weight, firstSeen, lastSeen };
+        const from = validFrom(raw.from);
+        if (from) item.from = from;
+        items.push(item);
       }
     }
   }

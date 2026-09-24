@@ -25,7 +25,7 @@ All instructions are English in both layers; a character's speech samples may be
 | `reply.md` | yes | Task: somebody called the persona | `{{name}}` `{{author}}` `{{trigger}}` `{{target}}` |
 | `interject.md` / `initiate.md` | yes | Tasks: cut into a live conversation / start a topic in a silent chat | `{{name}}` |
 | `forced.md` | no | Appended after the mode prompt on a forced turn (`/nep interject`, `/nep initiate`). Overrides the `<skip/>` default | `{{name}}` |
-| `memory.md` | yes | Out-of-character prompt of the stream analyzer: targeted edits to memory from live batches | `{{name}}` `{{fieldChars}}` `{{guildFieldChars}}` `{{maxDetails}}` `{{maxInjokes}}` `{{maxSelfFacts}}` `{{maxNewEpisodes}}` `{{maxEpisodes}}` `{{maxDeltaPerUpdate}}` `{{maxInterests}}` `{{interestTopicChars}}` `{{interestNoteChars}}` `{{loreTextChars}}` |
+| `memory.md` | yes | Out-of-character prompt of the stream analyzer: targeted edits to memory from live batches | `{{name}}` `{{fieldChars}}` `{{guildFieldChars}}` `{{maxDetails}}` `{{maxInjokes}}` `{{maxSelfFacts}}` `{{maxNewEpisodes}}` `{{maxEpisodes}}` `{{maxDeltaPerUpdate}}` `{{maxInterests}}` `{{interestTopicChars}}` `{{interestNoteChars}}` `{{loreTextChars}}` `{{maxLearned}}` `{{learnedChars}}` |
 | `profile.md` | yes | Warmup / portrait refresh: one member's profile from a message sample | `{{name}}` `{{fieldChars}}` `{{maxInterests}}` `{{maxDetails}}` `{{interestTopicChars}}` `{{interestNoteChars}}` `{{maxNewEpisodes}}` |
 | `channel.md` | yes | Warmup: channel notes from a message sample | `{{fieldChars}}` |
 | `server.md` | yes | Warmup: server-level notes from channel notes and member summaries | `{{name}}` `{{fieldChars}}` `{{maxInjokes}}` `{{loreTextChars}}` |
@@ -58,7 +58,7 @@ The blocks of the user message. Empty ones are omitted; the order below is the o
 |---|---|
 | `<now>` | Date, weekday, time in `config.bot.timezone`, formatted with `labels.locale` |
 | `<senses>` | What the persona can and cannot perceive RIGHT NOW, generated from the live config: which pictures it sees itself, which come as a helper's description, what it is blind and deaf to. So it never pretends to have watched a video and can joke about it in its own voice |
-| `<about_chat>` | How people talk here, how they start and cut into conversations, in-jokes |
+| `<about_chat>` | How people talk here, how they start and cut into conversations, in-jokes, things people taught the persona |
 | `<server>` | The CURRENT channel in full (Discord category and topic, purpose, what people write, tone, activity, last message, top writers; marked with `labels.server.currentMark`) plus only the neighbour channels that fed `<other_channels>` this turn; no other channel |
 | `<lore>` | Server lore entries whose keys occur in the recent messages (plus entries marked always): events, recurring characters, long-running stories. Like a lorebook: hundreds may exist, only the relevant few are shown |
 | `<self_facts>` | What the persona has claimed about itself |
@@ -186,6 +186,10 @@ lore.entry                               {title} {text}
 affinity.bands.hostile | dislike | cool | neutral | warm | fond | devoted
                                          thresholds in code: ≤-60 · ≤-25 · ≤-8 · <8 · <25 · <60 · ≥60
 aboutChat.patterns | starters | injokes  {text}
+aboutChat.learned                        {text}: things people taught the persona, joined by `; ` by code
+aboutChat.learnedItem                    {text} {who}: one lesson with a teacher
+aboutChat.learnedItemNoFrom              {text}: one lesson with no known teacher
+aboutChat.unsureMark                     appended to an unconfirmed learned item (starts with a space)
 server.currentMark                       appended to the current channel's heading (starts with a space)
 server.category | topic | purpose | topics | tone               {text}
 server.activity                          {activity} = server.activityLive | activitySlow | activityDead
@@ -218,7 +222,7 @@ The numeric limits in the prompt are placeholders filled at runtime from `config
 
 Input: `<character>` · `<existing_profiles>` (JSON by user id, incl. current `affinity` score and reason and stored
 `episodes`) · `<existing_lore>` ·
-`<existing_guild>` · `<existing_channels>` (JSON by channel id: `name`, Discord `category`, `topic`, stored `purpose`,
+`<existing_guild>` (JSON: patterns, starters, in-jokes, learned items) · `<existing_channels>` (JSON by channel id: `name`, Discord `category`, `topic`, stored `purpose`,
 `topics`, `tone`) · `<new_messages>` grouped under `## #channel-name (id:123)`, lines `[14:32] nick (id:123): text`,
 a line addressed to the persona starts with `→ `, own lines use `labels.self`.
 
@@ -237,7 +241,8 @@ of what is already stored, so facts are not degraded by being rewritten batch af
                                                                                  // "sure" is OPTIONAL everywhere, default true
       "affinity":  { "delta": 0, "reason": "" },
       "episodes":  [ { "date": "YYYY-MM-DD", "what": "", "quote": "", "feeling": "", "weight": 3 } ] } },
-  "guild": { "patterns": "", "starters": "", "injokes": [""] },
+  "guild": { "patterns": "", "starters": "", "injokes": [""],
+             "learned": { "add": [{ "text": "", "from": "<@id>" }], "seen": [3], "remove": [3] } },
   "channels": { "<channelId>": { "purpose": "", "topics": "", "tone": "" } },
   "lore": [ { "title": "", "keys": [""], "text": "" } ],
   "self": [""]
@@ -254,7 +259,12 @@ of what is already stored, so facts are not degraded by being rewritten batch af
   with its numeric `id`; `seen` and `remove` refer to details by that id (code also accepts the exact stored text).
   `add` takes `{ text, sure? }` (a bare string is accepted). Over `memory.maxDetailsStored` the lowest rank is
   evicted.
-- **Confirmation (the "(?)" mechanism), same for interests and details.** `weight` counts the separate OCCASIONS a
+- **Learned items are atomic items at the guild level**: `{ id, text, from, weight, firstSeen, lastSeen }`. `from`
+  stores the member who taught it (`<@id>`, or empty). The same `add` / `seen` / `remove` ops, the same confirmation
+  mechanics, the same rank and eviction as details. `memory.maxLearned` shown, `memory.maxLearnedStored` kept,
+  `memory.learnedChars` per item. The chat model sees them in `<about_chat>` after the in-jokes line, ranked,
+  unconfirmed ones marked with `labels.aboutChat.unsureMark`.
+- **Confirmation (the "(?)" mechanism), same for interests, details and learned items.** `weight` counts the separate OCCASIONS a
   thing was observed. A new item starts at weight 1, or 0 when the analyzer marks it `"sure": false` (unclear whose it
   is, unclear whether it was meant seriously, or a name the analyzer does not recognise). `seen` (nothing new to say,
   but it came up again), `add` of an existing item and `update` each count as one sighting; a sighting raises the
@@ -324,8 +334,8 @@ of what is already stored, so facts are not degraded by being rewritten batch af
   separators. A stored note or text that visibly breaks off mid-word (cut by an older version) is rewritten whole the
   next time its subject comes up.
 - **Output economy.** `"sure"` is written only when false; `affinity` is omitted when nothing changed.
-- **One home per fact.** An event goes to `episodes` or `lore`, a fact to `details`, a pastime to `interests`; the
-  same thing is never written into several fields.
+- **One home per fact.** An event goes to `episodes` or `lore`, a fact to `details`, a pastime to `interests`, a
+  lesson addressed to the persona to `learned`; the same thing is never written into several fields.
 - **Sanity check against what the model knows.** Before attaching one named thing to another (a region, mode,
   character or item to a game; a person to a franchise), the analyzer checks that they belong together. When the
   chat's wording conflicts with its knowledge, or it does not recognise the thing, it does not glue: it records the

@@ -182,7 +182,122 @@ test('getGuild: returns the default empty guild memory when nothing is stored', 
   const dir = tmpDataDir();
   const store = createStore({ dataDir: dir });
   const guild = store.getGuild('g1');
-  assert.deepEqual(guild, { patterns: '', starters: '', injokes: [], self: [], updatedAt: null });
+  assert.deepEqual(guild, { patterns: '', starters: '', injokes: [], self: [], learned: [], learnedNextId: 1, updatedAt: null });
+});
+
+// ---- guild.learned: things people taught the persona --------------------------
+
+const LEARNED_CFG = { maxLearned: 20, maxLearnedStored: 60, learnedChars: 160, learnedHalfLifeDays: 720, confirmGapHours: 12 };
+const TEACH_AT = Date.UTC(2026, 8, 21, 12, 0, 0);
+
+test('getGuild: an old guild.json without learned loads it as empty, every other field and the file untouched', () => {
+  const dir = tmpDataDir();
+  const file = path.join(dir, 'guilds', 'g1', 'guild.json');
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const old = { patterns: 'μιμίδια', starters: 'καλημέρα', injokes: ['ο βράχος'], self: ['likes tea'], custom: 7, updatedAt: '2026-01-01T00:00:00.000Z' };
+  const raw = JSON.stringify(old, null, 2);
+  fs.writeFileSync(file, raw);
+
+  const store = createStore({ dataDir: dir });
+  const guild = store.getGuild('g1');
+  assert.deepEqual(guild, { ...old, learned: [], learnedNextId: 1 });
+  store.flush();
+  assert.equal(fs.readFileSync(file, 'utf8'), raw, 'reading alone never rewrites the file');
+});
+
+test('getGuild: a hand-edited learned list is validated, ids assigned off learnedNextId', () => {
+  const dir = tmpDataDir();
+  const file = path.join(dir, 'guilds', 'g1', 'guild.json');
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(
+    file,
+    JSON.stringify({ patterns: '', learned: [{ id: 4, text: 'Café closes at nine', weight: 2, from: '<@322222222222222222>' }, { text: 'Friday is τυρόπιτα day' }, 'garbage', { text: '' }], learnedNextId: 3 }),
+  );
+  const guild = createStore({ dataDir: dir }).getGuild('g1');
+  assert.deepEqual(guild.learned.map((i) => [i.id, i.text, i.from]), [
+    [4, 'Café closes at nine', '<@322222222222222222>'],
+    [5, 'Friday is τυρόπιτα day', undefined],
+  ]);
+  assert.equal(guild.learnedNextId, 6);
+});
+
+test('getGuild: learned that is not an array or a garbage learnedNextId never throws', () => {
+  const dir = tmpDataDir();
+  const file = path.join(dir, 'guilds', 'g1', 'guild.json');
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, JSON.stringify({ patterns: 'x', learned: 'nope', learnedNextId: -3 }));
+  const guild = createStore({ dataDir: dir }).getGuild('g1');
+  assert.deepEqual(guild.learned, []);
+  assert.equal(guild.learnedNextId, 1);
+  assert.equal(guild.patterns, 'x');
+});
+
+test('applyLearnedOps: adds items with per-guild ids, from kept, returns the new list, persists across a restart', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  const learned = store.applyLearnedOps(
+    'g1',
+    { add: [{ text: 'Café closes at nine', from: '<@322222222222222222>' }, 'Friday is τυρόπιτα day'] },
+    { ...LEARNED_CFG, seenAt: TEACH_AT },
+  );
+  assert.deepEqual(learned, [
+    { id: 1, text: 'Café closes at nine', weight: 1, firstSeen: new Date(TEACH_AT).toISOString(), lastSeen: new Date(TEACH_AT).toISOString(), from: '<@322222222222222222>' },
+    { id: 2, text: 'Friday is τυρόπιτα day', weight: 1, firstSeen: new Date(TEACH_AT).toISOString(), lastSeen: new Date(TEACH_AT).toISOString() },
+  ]);
+  assert.equal(store.getGuild('g1').learnedNextId, 3);
+  store.flush();
+
+  const again = createStore({ dataDir: dir }).getGuild('g1');
+  assert.deepEqual(again.learned, learned);
+  assert.equal(again.learnedNextId, 3);
+});
+
+test('applyLearnedOps: ids are never reused after a remove; seen bumps past the gap; sure:false starts at 0', () => {
+  const store = createStore({ dataDir: tmpDataDir() });
+  store.applyLearnedOps('g1', { add: ['a fact', 'b fact'] }, { ...LEARNED_CFG, seenAt: TEACH_AT });
+  store.applyLearnedOps('g1', { remove: [2], seen: [1] }, { ...LEARNED_CFG, seenAt: TEACH_AT + 24 * 3_600_000 });
+  const learned = store.applyLearnedOps('g1', { add: [{ text: 'c fact', sure: false }] }, { ...LEARNED_CFG, seenAt: TEACH_AT });
+  assert.deepEqual(learned.map((i) => [i.id, i.text, i.weight]), [
+    [1, 'a fact', 2],
+    [3, 'c fact', 0],
+  ]);
+});
+
+test('applyLearnedOps: text is clamped to learnedChars, storage capped at max(maxLearnedStored, maxLearned)', () => {
+  const store = createStore({ dataDir: tmpDataDir() });
+  const long = 'ω'.repeat(400);
+  const cfg = { ...LEARNED_CFG, learnedChars: 10, clampTolerance: 1, maxLearned: 2, maxLearnedStored: 3 };
+  const learned = store.applyLearnedOps('g1', { add: [long, 'f1', 'f2', 'f3', 'f4'] }, { ...cfg, seenAt: TEACH_AT });
+  assert.equal(learned.length, 3);
+  assert.ok(learned.every((i) => Array.from(i.text).length <= 10));
+});
+
+test('applyLearnedOps: garbage ops never throw and change nothing', () => {
+  const store = createStore({ dataDir: tmpDataDir() });
+  store.applyLearnedOps('g1', { add: ['kept fact'] }, { ...LEARNED_CFG, seenAt: TEACH_AT });
+  for (const garbage of [null, undefined, 'nope', 42, [1], { add: 'x' }, { add: [null, 42, {}] }, { seen: [{}] }, { remove: [{}] }]) {
+    const learned = store.applyLearnedOps('g1', garbage, { ...LEARNED_CFG, seenAt: TEACH_AT });
+    assert.deepEqual(learned.map((i) => i.text), ['kept fact'], `garbage ${JSON.stringify(garbage)}`);
+  }
+});
+
+test('applyLearnedOps: leaves every other guild field alone', () => {
+  const store = createStore({ dataDir: tmpDataDir() });
+  store.updateGuild('g1', { patterns: 'μιμίδια', injokes: ['ο βράχος'] });
+  store.applyLearnedOps('g1', { add: ['a fact'] }, { ...LEARNED_CFG, seenAt: TEACH_AT });
+  const guild = store.getGuild('g1');
+  assert.equal(guild.patterns, 'μιμίδια');
+  assert.deepEqual(guild.injokes, ['ο βράχος']);
+});
+
+test('updateGuild: can never overwrite learned or learnedNextId wholesale', () => {
+  const store = createStore({ dataDir: tmpDataDir() });
+  store.applyLearnedOps('g1', { add: ['a fact'] }, { ...LEARNED_CFG, seenAt: TEACH_AT });
+  store.updateGuild('g1', { patterns: 'p', learned: [], learnedNextId: 99 });
+  const guild = store.getGuild('g1');
+  assert.deepEqual(guild.learned.map((i) => i.text), ['a fact']);
+  assert.equal(guild.learnedNextId, 2);
+  assert.equal(guild.patterns, 'p');
 });
 
 test('updateGuild: merges fields and stamps updatedAt', () => {
@@ -1065,6 +1180,7 @@ function seedGuild(store) {
   store.touchUser('g1', 'u1', 'Alice', 1000);
   store.touchUser('g1', 'u2', 'Bob', 1000);
   store.updateGuild('g1', { patterns: 'μιμίδια' });
+  store.applyLearnedOps('g1', { add: ['Café closes at nine'] }, { seenAt: 1000 });
   store.touchChannel('g1', 'c1', { name: 'general', category: null, topic: null }, 1000);
   store.touchChannel('g1', 'c2', { name: 'random', category: null, topic: null }, 1000);
   store.pushBuffer('g1', { text: 'hi' }, 100);
@@ -1095,7 +1211,7 @@ test('wipeGuild: removes profiles, guild memory, channels, buffer and analyzer l
   // cache is immediately usable
   assert.equal(storeA.getUser('g1', 'u1'), null);
   assert.equal(storeA.getUser('g1', 'u2'), null);
-  assert.deepEqual(storeA.getGuild('g1'), { patterns: '', starters: '', injokes: [], self: [], updatedAt: null });
+  assert.deepEqual(storeA.getGuild('g1'), { patterns: '', starters: '', injokes: [], self: [], learned: [], learnedNextId: 1, updatedAt: null });
   assert.deepEqual(storeA.listChannels('g1'), []);
   assert.deepEqual(storeA.getBuffer('g1'), []);
   const lore = storeA.getLore('g1');
@@ -1111,7 +1227,7 @@ test('wipeGuild: removes profiles, guild memory, channels, buffer and analyzer l
   const storeB = createStore({ dataDir: dir });
   assert.equal(storeB.getUser('g1', 'u1'), null);
   assert.equal(storeB.getUser('g1', 'u2'), null);
-  assert.deepEqual(storeB.getGuild('g1'), { patterns: '', starters: '', injokes: [], self: [], updatedAt: null });
+  assert.deepEqual(storeB.getGuild('g1'), { patterns: '', starters: '', injokes: [], self: [], learned: [], learnedNextId: 1, updatedAt: null });
   assert.deepEqual(storeB.listChannels('g1'), []);
   assert.deepEqual(storeB.getBuffer('g1'), []);
   const loreB = storeB.getLore('g1');

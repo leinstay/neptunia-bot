@@ -26,9 +26,12 @@ Channels, roles and users are picked from Discord's own pickers; `set`/`unset` a
 | `/nep memory refresh <user>` | Force a portrait refresh for a member |
 | `/nep memory forget <user>` | Delete a stored profile |
 | `/nep memory affinity <user> [score] [reason]` | Show or set attitude (-100..100) |
-| `/nep memory alias-add <user> <name>` | Add a chat alias; confirmed at once |
-| `/nep memory alias-remove <user> <name>` | Remove a chat alias |
 | `/nep memory wipe <confirm>` | Wipe all analyzer memory for this server; type the exact server name to confirm |
+| `/nep alias add <user> <name>` | Add a chat alias; confirmed at once |
+| `/nep alias remove <user> <name>` | Remove a chat alias |
+| `/nep learned list` | List lessons with ids, who taught each one, sightings |
+| `/nep learned add <text>` | Add a lesson by hand (no teacher, confirmed) |
+| `/nep learned remove <id>` | Delete a lesson |
 | `/nep lore add <title> <keys> <text> [always]` | Add or overwrite a lorebook entry; an entry with the same title is replaced and becomes owner-owned, so the analyzer never edits it again |
 | `/nep lore list [query]` | List lorebook entries |
 | `/nep lore show <id>` | Show a lorebook entry |

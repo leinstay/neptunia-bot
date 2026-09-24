@@ -245,24 +245,6 @@ export function buildCommandTree(commandName) {
             },
             {
               type: SUBCOMMAND,
-              name: 'alias-add',
-              description: "Add, or strengthen, a member's alias -- a nickname others in chat call them.",
-              options: [
-                { type: USER, name: 'user', description: 'Member.', required: true },
-                { type: STRING, name: 'name', description: 'The alias.', required: true },
-              ],
-            },
-            {
-              type: SUBCOMMAND,
-              name: 'alias-remove',
-              description: "Remove one of a member's stored aliases.",
-              options: [
-                { type: USER, name: 'user', description: 'Member.', required: true },
-                { type: STRING, name: 'name', description: 'The alias to remove.', required: true },
-              ],
-            },
-            {
-              type: SUBCOMMAND,
               name: 'affinity',
               description: "Show, or set, a member's attitude score.",
               options: [
@@ -301,6 +283,31 @@ export function buildCommandTree(commandName) {
         },
         {
           type: SUBCOMMAND_GROUP,
+          name: 'alias',
+          description: "A member's aliases: nicknames others in chat call them.",
+          options: [
+            {
+              type: SUBCOMMAND,
+              name: 'add',
+              description: "Add, or strengthen, a member's alias -- a nickname others in chat call them.",
+              options: [
+                { type: USER, name: 'user', description: 'Member.', required: true },
+                { type: STRING, name: 'name', description: 'The alias.', required: true },
+              ],
+            },
+            {
+              type: SUBCOMMAND,
+              name: 'remove',
+              description: "Remove one of a member's stored aliases.",
+              options: [
+                { type: USER, name: 'user', description: 'Member.', required: true },
+                { type: STRING, name: 'name', description: 'The alias to remove.', required: true },
+              ],
+            },
+          ],
+        },
+        {
+          type: SUBCOMMAND_GROUP,
           name: 'lore',
           description: "The server's lorebook (events, recurring characters, running jokes).",
           options: [
@@ -332,6 +339,26 @@ export function buildCommandTree(commandName) {
               name: 'remove',
               description: 'Delete one lore entry.',
               options: [{ type: STRING, name: 'id', description: 'Entry id.', required: true }],
+            },
+          ],
+        },
+        {
+          type: SUBCOMMAND_GROUP,
+          name: 'learned',
+          description: 'Things people taught the persona on this server.',
+          options: [
+            { type: SUBCOMMAND, name: 'list', description: 'List every stored learned item, best ranked first.' },
+            {
+              type: SUBCOMMAND,
+              name: 'add',
+              description: 'Add, or strengthen, a learned item.',
+              options: [{ type: STRING, name: 'text', description: 'What the persona should know.', required: true }],
+            },
+            {
+              type: SUBCOMMAND,
+              name: 'remove',
+              description: 'Delete one learned item by id.',
+              options: [{ type: INTEGER, name: 'id', description: 'Item id (the #number in the list).', required: true, min_value: 1 }],
             },
           ],
         },
@@ -545,8 +572,6 @@ const OPTION_MAPPERS = {
   'memory.channel': (options) => ({ channelId: options.getChannel('channel')?.id }),
   'memory.server': () => ({}),
   'memory.forget': (options) => ({ userId: options.getUser('user', true).id }),
-  'memory.alias-add': (options) => ({ userId: options.getUser('user', true).id, name: options.getString('name', true) }),
-  'memory.alias-remove': (options) => ({ userId: options.getUser('user', true).id, name: options.getString('name', true) }),
   'memory.wipe': (options) => ({ confirm: options.getString('confirm', true) }),
   'memory.refresh': (options) => ({ userId: options.getUser('user', true).id }),
   'memory.affinity': (options) => ({
@@ -554,6 +579,8 @@ const OPTION_MAPPERS = {
     score: options.getInteger('score') ?? undefined,
     reason: options.getString('reason') ?? undefined,
   }),
+  'alias.add': (options) => ({ userId: options.getUser('user', true).id, name: options.getString('name', true) }),
+  'alias.remove': (options) => ({ userId: options.getUser('user', true).id, name: options.getString('name', true) }),
   'lore.add': (options) => ({
     title: options.getString('title', true),
     keys: options.getString('keys', true),
@@ -563,6 +590,9 @@ const OPTION_MAPPERS = {
   'lore.list': (options) => ({ query: options.getString('query') ?? undefined }),
   'lore.show': (options) => ({ id: options.getString('id', true) }),
   'lore.remove': (options) => ({ id: options.getString('id', true) }),
+  'learned.list': () => ({}),
+  'learned.add': (options) => ({ text: options.getString('text', true) }),
+  'learned.remove': (options) => ({ id: options.getInteger('id', true) }),
   'model.show': () => ({}),
   'model.set': (options) => ({ role: options.getString('role', true), id: options.getString('id', true) }),
   'warmup.people': () => ({}),

@@ -132,6 +132,10 @@ export const labels = {
     patterns: 'how people talk here: {text}',
     starters: 'how people start conversations and cut in: {text}',
     injokes: 'local in-jokes: {text}',
+    learned: 'Things people taught you: {text}',
+    learnedItem: '{text} (from {who})',
+    learnedItemNoFrom: '{text}',
+    unsureMark: ' (unconfirmed)',
   },
   server: {
     currentMark: ' ← you are here',

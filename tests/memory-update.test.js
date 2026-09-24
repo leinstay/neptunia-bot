@@ -13,6 +13,7 @@ import { createCalibrator, estimateTokens } from '../src/llm/tokens.js';
 import { formatTranscript } from '../src/discord/format.js';
 import { TokenLimitError } from '../src/llm/openrouter.js';
 import { labels } from './fixtures/labels.js';
+import { withCapturedLogs } from './fixtures/capture-logs.js';
 
 function tempDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'nep-'));
@@ -404,7 +405,7 @@ test('buildMemoryRequest: a tiny token limit still consumes everything but keeps
   const selfName = 'Nept';
   const system = 'S';
   const profilesJson = JSON.stringify({});
-  const guildJson = JSON.stringify({ patterns: '', starters: '', injokes: [], self: [] });
+  const guildJson = JSON.stringify({ patterns: '', starters: '', injokes: [], self: [], learned: [] });
   const channelsJson = JSON.stringify({});
   const profilesBlock = `<existing_profiles>\n${profilesJson}\n</existing_profiles>`;
   const guildBlock = `<existing_guild>\n${guildJson}\n</existing_guild>`;
@@ -1338,6 +1339,7 @@ test('applyMemoryUpdate: garbage input changes nothing and never throws', () => 
         channels: 0,
         episodes: 0,
         lore: 0,
+        learned: 0,
         interestsChanged: 0,
         portraitRequests: [],
       });
@@ -3677,4 +3679,226 @@ test('analyze: a read miss, no entry, webLookup off/missing or links disabled ne
     assert.ok(!seen.includes('should never show'));
     assert.ok(!seen.includes(labels.transcript.linkRead.replace('{text}', '')));
   }
+});
+
+// ---- guild.learned: things people taught the persona ---------------------------
+
+const TEACHER_A = '322222222222222222';
+const TEACHER_B = '422222222222222222';
+const STRANGER = '622222222222222222';
+const LEARNED_AT = Date.UTC(2026, 8, 21, 12, 0, 0);
+
+function learnedRequest(guildMemory, memory, nameOf) {
+  return buildMemoryRequest({
+    prompts: { memory: 'x', labels },
+    config: makeConfig(memory ? { memory } : {}),
+    calibrator: createCalibrator(),
+    profiles: {},
+    guildMemory,
+    messages: [slimMessage({ id: 'm1', ts: Date.UTC(2026, 0, 1, 12, 0, 0) })],
+    selfName: 'Nept',
+    nameOf,
+  });
+}
+
+function existingGuildOf(request) {
+  return JSON.parse(/<existing_guild>\n([\s\S]*?)\n<\/existing_guild>/.exec(request.messages[1].content)[1]);
+}
+
+test('buildMemoryRequest: fills {{maxLearned}} and {{learnedChars}} from config.memory, falling back to 20 and 160', () => {
+  const run = (memory) =>
+    buildMemoryRequest({
+      prompts: { memory: '{{maxLearned}} {{learnedChars}}', labels },
+      config: makeConfig({ memory }),
+      calibrator: createCalibrator(),
+      profiles: {},
+      guildMemory: {},
+      messages: [slimMessage({ id: 'm1', ts: Date.UTC(2026, 0, 1, 12, 0, 0) })],
+      selfName: 'Nept',
+    }).messages[0].content;
+  assert.equal(run({ ...makeConfig().memory, maxLearned: 7, learnedChars: 90 }), '7 90');
+  assert.equal(run({}), '20 160');
+});
+
+test('buildMemoryRequest: existing_guild learned is [{id, text, from, seen, last}], top memory.maxLearned by rank, tokens resolved', () => {
+  const guildMemory = {
+    learned: [
+      { id: 1, text: 'forgotten one', weight: 1, firstSeen: '2026-01-01T00:00:00.000Z', lastSeen: '2026-01-01T00:00:00.000Z' },
+      { id: 2, text: 'the kettle is called Ὠκεανός', weight: 5, firstSeen: '2026-09-01T00:00:00.000Z', lastSeen: '2026-09-10T08:00:00.000Z', from: `<@${TEACHER_A}>` },
+      { id: 3, text: `pizza with <@${TEACHER_B}> on Fridays`, weight: 3, firstSeen: '2026-09-01T00:00:00.000Z', lastSeen: '2026-09-10T08:00:00.000Z' },
+      { id: 4, text: 'café closes at nine', weight: 2, firstSeen: '2026-09-12T00:00:00.000Z', lastSeen: null, from: `<@${STRANGER}>` },
+    ],
+    learnedNextId: 5,
+  };
+  const nameOf = baseNameOf({ [TEACHER_A]: 'Aurélie', [TEACHER_B]: 'Björn' });
+  const view = existingGuildOf(learnedRequest(guildMemory, { ...makeConfig().memory, maxLearned: 3, learnedHalfLifeDays: 720 }, nameOf)).learned;
+
+  assert.deepEqual(view, [
+    { id: 2, text: 'the kettle is called Ὠκεανός', from: `Aurélie (id:${TEACHER_A})`, seen: 5, last: '2026-09-10' },
+    { id: 3, text: `pizza with Björn (id:${TEACHER_B}) on Fridays`, seen: 3, last: '2026-09-10' },
+    { id: 4, text: 'café closes at nine', from: `<@${STRANGER}>`, seen: 2 },
+  ]);
+  assert.deepEqual(Object.keys(view[0]), ['id', 'text', 'from', 'seen', 'last']);
+  assert.deepEqual(Object.keys(view[1]), ['id', 'text', 'seen', 'last'], 'from omitted when the item has none');
+});
+
+test('buildMemoryRequest: existing_guild learned uses 20 items when config lacks maxLearned, [] when nothing is stored', () => {
+  const learned = Array.from({ length: 25 }, (_, i) => ({ id: i + 1, text: `fact ${i}`, weight: 1, firstSeen: null, lastSeen: null }));
+  assert.equal(existingGuildOf(learnedRequest({ learned }, {})).learned.length, 20);
+  assert.deepEqual(existingGuildOf(learnedRequest({}, {})).learned, []);
+  assert.deepEqual(existingGuildOf(learnedRequest({ learned: 'garbage' }, {})).learned, []);
+});
+
+test('applyMemoryUpdate: guild.learned add items are tokenized and stored, the teacher resolved to a token', () => {
+  withStore((store) => {
+    const guildId = 'g1';
+    store.touchUser(guildId, TEACHER_A, 'Aurélie', LEARNED_AT);
+    const update = {
+      guild: {
+        learned: {
+          add: [
+            { text: 'the kettle is called Ὠκεανός', from: `Aurélie (id:${TEACHER_A})` },
+            { text: 'Friday is τυρόπιτα day', from: `<@${TEACHER_B}>` },
+            'café closes at nine',
+            { text: `pizza with Aurélie (id:${TEACHER_A}) on Fridays`, sure: false },
+          ],
+        },
+      },
+    };
+    // TEACHER_B has no stored profile but is an author of the batch: known.
+    const result = applyMemoryUpdate(store, guildId, update, MEMORY_CFG, new Set([TEACHER_B]), new Set(), undefined, undefined, undefined, { seenAt: LEARNED_AT });
+
+    assert.equal(result.learned, 4);
+    assert.equal(result.guild, false, 'learned alone does not flip the patterns/starters/injokes flag');
+    const learned = store.getGuild(guildId).learned;
+    assert.deepEqual(
+      learned.map((i) => [i.id, i.text, i.from, i.weight]),
+      [
+        [1, 'the kettle is called Ὠκεανός', `<@${TEACHER_A}>`, 1],
+        [2, 'Friday is τυρόπιτα day', `<@${TEACHER_B}>`, 1],
+        [3, 'café closes at nine', undefined, 1],
+        [4, `pizza with <@${TEACHER_A}> on Fridays`, undefined, 0],
+      ],
+    );
+    assert.equal(learned[0].firstSeen, new Date(LEARNED_AT).toISOString(), 'dated by the batch, not the wall clock');
+    assert.equal(store.getGuild(guildId).learnedNextId, 5);
+  });
+});
+
+test('applyMemoryUpdate: a learned from is never invented -- an unknown or unparseable teacher is dropped, the item kept', () => {
+  withStore((store) => {
+    const guildId = 'g1';
+    store.touchUser(guildId, TEACHER_A, 'Aurélie', LEARNED_AT);
+    const bad = [
+      `<@${STRANGER}>`,
+      `Zoë (id:${STRANGER})`,
+      'Aurélie',
+      TEACHER_A,
+      `<@${TEACHER_A}> and <@${TEACHER_A}>`,
+      `<@${TEACHER_A}> said so`,
+      '',
+      42,
+      { id: TEACHER_A },
+      [`<@${TEACHER_A}>`],
+      null,
+    ];
+    const add = bad.map((from, i) => ({ text: `fact ${i}`, from }));
+    add.push({ text: `a fact mentioning Aurélie (id:${TEACHER_A})` }); // no from: never derived from the text
+    const result = applyMemoryUpdate(store, guildId, { guild: { learned: { add } } }, MEMORY_CFG, new Set());
+
+    assert.equal(result.learned, add.length);
+    const learned = store.getGuild(guildId).learned;
+    assert.equal(learned.length, add.length);
+    for (const item of learned) assert.equal('from' in item, false, `${item.text} must carry no teacher`);
+  });
+});
+
+test('applyMemoryUpdate: guild.learned seen/remove take integer ids only', () => {
+  withStore((store) => {
+    const guildId = 'g1';
+    store.applyLearnedOps(guildId, { add: ['a fact', 'b fact', 'c fact'] }, { seenAt: LEARNED_AT });
+    const update = { guild: { learned: { seen: [1, '3', 1.5, null], remove: ['a fact', 2, '3', -1] } } };
+    const result = applyMemoryUpdate(store, guildId, update, MEMORY_CFG, new Set(), new Set(), undefined, undefined, undefined, {
+      seenAt: LEARNED_AT + 24 * 3_600_000,
+    });
+
+    assert.equal(result.learned, 0, 'no add ops');
+    assert.deepEqual(
+      store.getGuild(guildId).learned.map((i) => [i.id, i.text, i.weight]),
+      [
+        [1, 'a fact', 2],
+        [3, 'c fact', 1],
+      ],
+    );
+  });
+});
+
+test('applyMemoryUpdate: malformed guild.learned never throws and stores nothing', () => {
+  withStore((store) => {
+    const guildId = 'g1';
+    const garbage = [
+      null,
+      'x',
+      42,
+      [],
+      [{ text: 'an array is not ops' }],
+      { add: 'x' },
+      { add: [null, 42, {}, [], { text: 42 }, { text: '   ' }, { from: `<@${TEACHER_A}>` }] },
+      { seen: '1' },
+      { remove: { id: 1 } },
+    ];
+    for (const learned of garbage) {
+      const result = applyMemoryUpdate(store, guildId, { guild: { learned } }, MEMORY_CFG, new Set());
+      assert.equal(result.learned, 0, `garbage ${JSON.stringify(learned)}`);
+    }
+    assert.deepEqual(store.getGuild(guildId).learned, []);
+    assert.equal(store.getGuild(guildId).learnedNextId, 1);
+  });
+});
+
+test('applyMemoryUpdate: learned text is clamped to memory.learnedChars and the caps come from config.memory', () => {
+  withStore((store) => {
+    const guildId = 'g1';
+    const cfg = { ...MEMORY_CFG, learnedChars: 10, clampTolerance: 1, maxLearned: 1, maxLearnedStored: 2 };
+    const add = ['ω'.repeat(50), 'second', 'third'];
+    applyMemoryUpdate(store, guildId, { guild: { learned: { add } } }, cfg, new Set());
+    const learned = store.getGuild(guildId).learned;
+    assert.equal(learned.length, 2);
+    assert.ok(learned.every((i) => Array.from(i.text).length <= 10));
+  });
+});
+
+test('applyMemoryUpdate: without learnedChars in config, learned text falls back to 160 chars (soft)', () => {
+  withStore((store) => {
+    const guildId = 'g1';
+    applyMemoryUpdate(store, guildId, { guild: { learned: { add: ['ω'.repeat(400)] } } }, MEMORY_CFG, new Set());
+    const [item] = store.getGuild(guildId).learned;
+    assert.ok(Array.from(item.text).length <= 200);
+    assert.ok(Array.from(item.text).length >= 160);
+  });
+});
+
+test('run: the "memory: update applied" log line carries the learned add count', async () => {
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    const base = Date.now() - 60_000;
+    for (let i = 0; i < 4; i += 1) {
+      store.pushBuffer(guildId, slimMessage({ id: `m${i}`, content: `hi ${i}`, ts: base + i * 1000 }), 100);
+    }
+    const hot = {
+      config: makeConfig({ memory: { ...makeConfig().memory, batchMessages: 4, minBatchMessages: 1 } }),
+      prompts: { memory: 'memory system prompt', labels },
+    };
+    const llm = {
+      complete: async () => ({ text: JSON.stringify({ guild: { learned: { add: ['café closes at nine', { text: 'Friday is τυρόπιτα day' }] } } }) }),
+    };
+    const updater = createMemoryUpdater({ hot, store, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept' });
+
+    const { logs } = await withCapturedLogs(() => updater.run(guildId));
+
+    const applied = logs.find((entry) => entry.msg === 'memory: update applied');
+    assert.ok(applied, 'the update was applied');
+    assert.equal(applied.learned, 2);
+    assert.equal(store.getGuild(guildId).learned.length, 2);
+  });
 });

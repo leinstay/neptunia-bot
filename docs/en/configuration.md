@@ -241,6 +241,10 @@ Follow-up windows are persisted in `data/state.json` under `followUpWindows` and
 | `interestStaleDays` | `90` | Days without sighting before an interest is marked old |
 | `interestHalfLifeDays` | `180` | Weight half-life for interests (days); an unseen item's weight halves each period, so a new pastime can overtake an old one |
 | `detailHalfLifeDays` | `720` | Weight half-life for details (days) |
+| `maxLearned` | `20` | Lessons shown to the analyzer and the chat model |
+| `maxLearnedStored` | `60` | Lessons kept on disk; the top by frequency and recency are shown |
+| `learnedChars` | `160` | Max chars per lesson |
+| `learnedHalfLifeDays` | `720` | Weight half-life for lessons (days) |
 | `maxAliases` | `5` | Aliases shown to the persona and analyzer per profile |
 | `maxAliasesStored` | `15` | Aliases kept per profile; the top by frequency and recency are shown |
 | `aliasHalfLifeDays` | `365` | Weight half-life for aliases (days) |

@@ -1715,3 +1715,100 @@ test('buildRequest: an older labels set without linksRead/search keeps only the 
   assert.ok(senses.includes(labels.senses.linksWatch));
   assert.equal(senses.length, withLabels.length - 2);
 });
+
+// --- <about_chat>: what people taught the persona (guild.learned) ------------------
+
+const TEACHER_A = '311111111111111111';
+const TEACHER_B = '322222222222222222';
+const STRANGER = '399999999999999999';
+
+function learnedItem(id, text, weight, lastSeen, from) {
+  const item = { id, text, weight, firstSeen: lastSeen, lastSeen };
+  if (from !== undefined) item.from = from;
+  return item;
+}
+
+function aboutChatOf(request) {
+  const match = request.messages[1].content.match(/<about_chat>\n([\s\S]*?)\n<\/about_chat>/);
+  return match ? match[1] : null;
+}
+
+const learnedNameOf = (id) => ({ [TEACHER_A]: 'Aurélie', [TEACHER_B]: 'Björn' })[id] ?? null;
+
+test('buildRequest: learned renders after the injokes, ranked, capped, with teachers and unsure marks', () => {
+  const guildMemory = {
+    patterns: 'short lines',
+    injokes: ['the lamp'],
+    learned: [
+      learnedItem('l5', 'forgotten one', 1, '2026-01-01T00:00:00.000Z'),
+      learnedItem('l3', 'café closes at nine', 2, '2026-09-10T00:00:00.000Z', `<@${STRANGER}>`),
+      learnedItem('l1', 'the kettle is called Ὠκεανός', 5, '2026-09-10T00:00:00.000Z', `<@${TEACHER_A}>`),
+      learnedItem('l4', 'Friday is τυρόπιτα day', 1, '2026-09-15T00:00:00.000Z', `<@${TEACHER_B}>`),
+      learnedItem('l2', 'pizza with <@322222222222222222> on Fridays', 3, '2026-09-10T00:00:00.000Z'),
+    ],
+  };
+  const config = fakeConfig({ memory: { maxLearned: 4, learnedHalfLifeDays: 720, confirmAfter: 2 } });
+  const lines = aboutChatOf(buildRequest(baseInput({ config, guildMemory, nameOf: learnedNameOf }))).split('\n');
+  assert.deepEqual(lines, [
+    fill(labels.aboutChat.patterns, { text: 'short lines' }),
+    fill(labels.aboutChat.injokes, { text: 'the lamp' }),
+    fill(labels.aboutChat.learned, {
+      text: [
+        fill(labels.aboutChat.learnedItem, { text: 'the kettle is called Ὠκεανός', who: 'Aurélie' }),
+        fill(labels.aboutChat.learnedItemNoFrom, { text: 'pizza with Björn on Fridays' }),
+        fill(labels.aboutChat.learnedItemNoFrom, { text: 'café closes at nine' }),
+        fill(labels.aboutChat.learnedItem, { text: 'Friday is τυρόπιτα day', who: 'Björn' }) + labels.aboutChat.unsureMark,
+      ].join('; '),
+    }),
+  ]);
+});
+
+test('buildRequest: learned uses memory.maxLearned 20 and learnedHalfLifeDays 720 when config lacks them', () => {
+  const many = Array.from({ length: 25 }, (_, i) =>
+    learnedItem(`m${i}`, `fact ${i}`, 2, `2026-09-${String(i + 1).padStart(2, '0')}T00:00:00.000Z`),
+  );
+  const oldHeavy = learnedItem('old', 'ancient heavy fact', 3, '2020-01-01T00:00:00.000Z');
+  const recentLight = learnedItem('new', 'recent light fact', 1, '2026-09-01T00:00:00.000Z');
+  const capped = aboutChatOf(buildRequest(baseInput({ guildMemory: { learned: many } })));
+  assert.equal(capped.split('; ').length, 20);
+  const decayed = aboutChatOf(buildRequest(baseInput({ guildMemory: { learned: [oldHeavy, recentLight] } })));
+  assert.ok(decayed.indexOf('recent light fact') < decayed.indexOf('ancient heavy fact'));
+  const noDecay = aboutChatOf(
+    buildRequest(baseInput({ config: fakeConfig({ memory: { learnedHalfLifeDays: 1e9 } }), guildMemory: { learned: [oldHeavy, recentLight] } })),
+  );
+  assert.ok(noDecay.indexOf('ancient heavy fact') < noDecay.indexOf('recent light fact'));
+});
+
+test('buildRequest: learned without nameOf falls back to the no-teacher form', () => {
+  const guildMemory = { learned: [learnedItem('l1', 'Ἑρμῆς is the cat', 4, '2026-09-10T00:00:00.000Z', `<@${TEACHER_A}>`)] };
+  const text = aboutChatOf(buildRequest(baseInput({ config: fakeConfig({ memory: { confirmAfter: 2 } }), guildMemory })));
+  assert.equal(text, fill(labels.aboutChat.learned, { text: fill(labels.aboutChat.learnedItemNoFrom, { text: 'Ἑρμῆς is the cat' }) }));
+});
+
+test('buildRequest: no learned / an empty learned leaves about_chat unchanged', () => {
+  const base = { patterns: 'short lines', injokes: ['the lamp'] };
+  const without = aboutChatOf(buildRequest(baseInput({ guildMemory: base })));
+  const empty = aboutChatOf(buildRequest(baseInput({ guildMemory: { ...base, learned: [] } })));
+  assert.equal(empty, without);
+  assert.equal(aboutChatOf(buildRequest(baseInput({ guildMemory: { learned: [] } }))), null);
+});
+
+test('buildRequest: an older labels.json without the learned keys renders nothing for it, never throws', () => {
+  const { learned, learnedItem: li, learnedItemNoFrom, unsureMark, ...olderAboutChat } = labels.aboutChat;
+  const older = { ...labels, aboutChat: olderAboutChat };
+  const guildMemory = {
+    patterns: 'short lines',
+    learned: [learnedItem('l1', 'café closes at nine', 1, '2026-09-10T00:00:00.000Z', `<@${TEACHER_A}>`)],
+  };
+  const text = aboutChatOf(buildRequest(baseInput({ prompts: fakePrompts({ labels: older }), guildMemory, nameOf: learnedNameOf })));
+  assert.equal(text, fill(labels.aboutChat.patterns, { text: 'short lines' }));
+});
+
+test('buildRequest: learned without the unsureMark label appends no mark', () => {
+  const { unsureMark, ...noMark } = labels.aboutChat;
+  const guildMemory = { learned: [learnedItem('l1', 'café closes at nine', 1, '2026-09-10T00:00:00.000Z')] };
+  const text = aboutChatOf(
+    buildRequest(baseInput({ config: fakeConfig({ memory: { confirmAfter: 2 } }), prompts: fakePrompts({ labels: { ...labels, aboutChat: noMark } }), guildMemory })),
+  );
+  assert.equal(text, fill(labels.aboutChat.learned, { text: 'café closes at nine' }));
+});

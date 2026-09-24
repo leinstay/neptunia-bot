@@ -39,7 +39,7 @@ test('buildCommandTree: never emits default_member_permissions -- always visible
 test('buildCommandTree: top-level leaves (status, ping, reload, pause, resume, interject, initiate, set, unset)', () => {
   const [command] = buildCommandTree('nep');
   const names = command.options.map((o) => o.name);
-  assert.deepEqual(names, ['status', 'ping', 'reload', 'pause', 'resume', 'interject', 'initiate', 'set', 'unset', 'rule', 'memory', 'lore', 'model', 'warmup', 'access']);
+  assert.deepEqual(names, ['status', 'ping', 'reload', 'pause', 'resume', 'interject', 'initiate', 'set', 'unset', 'rule', 'memory', 'alias', 'lore', 'learned', 'model', 'warmup', 'access']);
 
   const status = findOption(command.options, 'status');
   assert.equal(status.type, 1); // SUBCOMMAND
@@ -104,14 +104,15 @@ test('buildCommandTree: rule group (add/list/remove)', () => {
   assert.equal(number.min_value, 1);
 });
 
-test('buildCommandTree: memory group (show/channel/server/forget/affinity/wipe/alias-add/alias-remove/refresh)', () => {
+test('buildCommandTree: memory group (show/channel/server/forget/affinity/wipe/refresh), no alias subcommands', () => {
   const [command] = buildCommandTree('nep');
   const memory = findOption(command.options, 'memory');
   assert.equal(memory.type, 2);
   assert.deepEqual(
     memory.options.map((o) => o.name),
-    ['show', 'channel', 'server', 'forget', 'alias-add', 'alias-remove', 'affinity', 'wipe', 'refresh'],
+    ['show', 'channel', 'server', 'forget', 'affinity', 'wipe', 'refresh'],
   );
+  assert.ok(!memory.options.some((o) => o.name.startsWith('alias')), 'the alias commands moved to their own group');
 
   const show = findOption(memory.options, 'show');
   const user = findOption(show.options, 'user');
@@ -152,14 +153,6 @@ test('buildCommandTree: memory group (show/channel/server/forget/affinity/wipe/a
   assert.equal(server.type, 1); // SUBCOMMAND
   assert.equal(server.options, undefined);
 
-  const aliasAdd = findOption(memory.options, 'alias-add');
-  assert.equal(findOption(aliasAdd.options, 'user').required, true);
-  assert.equal(findOption(aliasAdd.options, 'name').required, true);
-
-  const aliasRemove = findOption(memory.options, 'alias-remove');
-  assert.equal(findOption(aliasRemove.options, 'user').required, true);
-  assert.equal(findOption(aliasRemove.options, 'name').required, true);
-
   const affinity = findOption(memory.options, 'affinity');
   assert.equal(findOption(affinity.options, 'user').required, true);
   const score = findOption(affinity.options, 'score');
@@ -179,6 +172,71 @@ test('buildCommandTree: memory group (show/channel/server/forget/affinity/wipe/a
   const refresh = findOption(memory.options, 'refresh');
   assert.equal(refresh.type, 1); // SUBCOMMAND
   assert.equal(findOption(refresh.options, 'user').required, true);
+});
+
+test('buildCommandTree: alias group (add/remove), each with a required user and name', () => {
+  const [command] = buildCommandTree('nep');
+  const alias = findOption(command.options, 'alias');
+  assert.equal(alias.type, 2); // SUBCOMMAND_GROUP
+  assert.deepEqual(
+    alias.options.map((o) => o.name),
+    ['add', 'remove'],
+  );
+  for (const sub of alias.options) {
+    assert.equal(sub.type, 1); // SUBCOMMAND
+    assert.ok(sub.description.length <= 100, `${sub.name} description must be <= 100 chars`);
+    const user = findOption(sub.options, 'user');
+    assert.equal(user.type, 6); // USER
+    assert.equal(user.required, true);
+    const name = findOption(sub.options, 'name');
+    assert.equal(name.type, 3); // STRING
+    assert.equal(name.required, true);
+  }
+});
+
+test('buildCommandTree: learned group (list/add/remove)', () => {
+  const [command] = buildCommandTree('nep');
+  const learned = findOption(command.options, 'learned');
+  assert.equal(learned.type, 2); // SUBCOMMAND_GROUP
+  assert.ok(learned.description.length <= 100);
+  assert.deepEqual(
+    learned.options.map((o) => o.name),
+    ['list', 'add', 'remove'],
+  );
+  for (const sub of learned.options) {
+    assert.equal(sub.type, 1); // SUBCOMMAND
+    assert.ok(sub.description.length <= 100, `${sub.name} description must be <= 100 chars`);
+  }
+
+  const list = findOption(learned.options, 'list');
+  assert.equal(list.options, undefined);
+
+  const add = findOption(learned.options, 'add');
+  const text = findOption(add.options, 'text');
+  assert.equal(text.type, 3); // STRING
+  assert.equal(text.required, true);
+
+  const remove = findOption(learned.options, 'remove');
+  const id = findOption(remove.options, 'id');
+  assert.equal(id.type, 4); // INTEGER
+  assert.equal(id.required, true);
+  assert.equal(id.min_value, 1);
+});
+
+test('buildCommandTree: no subcommand or group name anywhere in the tree contains a hyphen', () => {
+  const [command] = buildCommandTree('nep');
+  const names = [];
+  const walk = (options) => {
+    for (const option of options ?? []) {
+      if (option.type === 1 || option.type === 2) {
+        names.push(option.name);
+        walk(option.options);
+      }
+    }
+  };
+  walk(command.options);
+  assert.ok(names.length > 0);
+  for (const name of names) assert.ok(!name.includes('-'), `${name} must not contain a hyphen`);
 });
 
 test('buildCommandTree: lore group (add/list/show/remove)', () => {
@@ -323,6 +381,8 @@ test('commandKeys: every group and every leaf command key, derived from the tree
   assert.ok(groups.has('model'));
   assert.ok(groups.has('warmup'));
   assert.ok(groups.has('access'));
+  assert.ok(groups.has('alias'));
+  assert.ok(groups.has('learned'));
   assert.ok(!groups.has('status'), 'a bare top-level command is not a group');
 
   assert.ok(keys.has('status'));
@@ -330,6 +390,13 @@ test('commandKeys: every group and every leaf command key, derived from the tree
   assert.ok(keys.has('access.grant'));
   assert.ok(keys.has('access.revoke'));
   assert.ok(keys.has('access.list'));
+  assert.ok(keys.has('alias.add'));
+  assert.ok(keys.has('alias.remove'));
+  assert.ok(keys.has('learned.list'));
+  assert.ok(keys.has('learned.add'));
+  assert.ok(keys.has('learned.remove'));
+  assert.ok(!keys.has('memory.alias-add'));
+  assert.ok(!keys.has('memory.alias-remove'));
   assert.ok(!keys.has('memory'), 'a group name alone is not a leaf key');
 });
 
@@ -711,25 +778,42 @@ test('interaction handler: memory.show maps section/limit/order straight through
   assert.deepEqual(admin.runCalls[0][1], { userId: 'target1', section: 'interests', limit: 10, order: 'recent' });
 });
 
-test('interaction handler: memory.alias-add/alias-remove map user/name straight through', async () => {
+test('interaction handler: alias.add/alias.remove map user/name straight through', async () => {
   const admin = fakeAdmin();
   const handler = createInteractionHandler({ hot: baseHot(), admin, getGuildId: () => 'g1' });
 
   await handler(fakeInteraction({
-    group: 'memory',
-    subcommand: 'alias-add',
+    group: 'alias',
+    subcommand: 'add',
     optionValues: { user: { id: 'target1' }, name: 'Ari' },
   }));
-  assert.equal(admin.runCalls[0][0], 'memory.alias-add');
+  assert.equal(admin.runCalls[0][0], 'alias.add');
   assert.deepEqual(admin.runCalls[0][1], { userId: 'target1', name: 'Ari' });
 
   await handler(fakeInteraction({
-    group: 'memory',
-    subcommand: 'alias-remove',
+    group: 'alias',
+    subcommand: 'remove',
     optionValues: { user: { id: 'target1' }, name: 'Ari' },
   }));
-  assert.equal(admin.runCalls[1][0], 'memory.alias-remove');
+  assert.equal(admin.runCalls[1][0], 'alias.remove');
   assert.deepEqual(admin.runCalls[1][1], { userId: 'target1', name: 'Ari' });
+});
+
+test('interaction handler: learned.list/add/remove map their options straight through', async () => {
+  const admin = fakeAdmin();
+  const handler = createInteractionHandler({ hot: baseHot(), admin, getGuildId: () => 'g1' });
+
+  await handler(fakeInteraction({ group: 'learned', subcommand: 'list' }));
+  assert.equal(admin.runCalls[0][0], 'learned.list');
+  assert.deepEqual(admin.runCalls[0][1], {});
+
+  await handler(fakeInteraction({ group: 'learned', subcommand: 'add', optionValues: { text: 'ο καφές πρώτα' } }));
+  assert.equal(admin.runCalls[1][0], 'learned.add');
+  assert.deepEqual(admin.runCalls[1][1], { text: 'ο καφές πρώτα' });
+
+  await handler(fakeInteraction({ group: 'learned', subcommand: 'remove', optionValues: { id: 7 } }));
+  assert.equal(admin.runCalls[2][0], 'learned.remove');
+  assert.deepEqual(admin.runCalls[2][1], { id: 7 });
 });
 
 test('interaction handler: memory.channel maps the optional channel option to channelId (undefined when omitted)', async () => {
