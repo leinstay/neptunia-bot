@@ -1109,6 +1109,70 @@ test('analyze: videoDescriptions off, or mediaDescriptions off, never renders a 
   }
 });
 
+// ---- analyze: media inside a forwarded message (message snapshot) -----------
+
+const FORWARD_SLIM = slimMessage({
+  id: 'm1',
+  content: '',
+  forwardedFrom: 'news',
+  forwarded: [
+    {
+      content: 'look at this',
+      attachments: [
+        { kind: 'image', name: 'pic.png', id: 'fa1', durationSec: null },
+        { kind: 'video', name: 'clip.mp4', id: 'fv1', durationSec: 20 },
+      ],
+      links: [
+        { kind: 'link', name: 'A video', id: 'video:url:fwd0123456789ab', durationSec: null },
+        { kind: 'link', name: 'A page', id: 'fwd#e1', durationSec: null },
+      ],
+      stickers: [{ id: 'fs1', name: 'wave', format: 1 }],
+      emojis: [{ id: 'fe1', name: 'hey' }],
+    },
+  ],
+});
+
+test('analyze: a forwarded picture, sticker and emoji render their cached descriptions inside the forward', async () => {
+  const seen = await analyzerTranscriptWithCache(
+    {
+      fa1: { text: 'a forwarded cat', ts: Date.now() },
+      'sticker:fs1': { text: 'a waving hand', ts: Date.now() },
+      'emoji:fe1': { text: 'a smiling face', ts: Date.now() },
+    },
+    [FORWARD_SLIM],
+  );
+  assert.ok(seen.includes(labels.transcript.imageDescribed.replace('{text}', 'a forwarded cat')));
+  assert.ok(seen.includes(labels.transcript.stickerDescribed.replace('{name}', 'wave').replace('{text}', 'a waving hand')));
+  assert.ok(seen.includes(labels.transcript.emojiDescribed.replace('{name}', 'hey').replace('{text}', 'a smiling face')));
+  // The forward wrapper itself, opened with the snapshot's own text.
+  assert.ok(seen.includes('[forwarded from #news: look at this'));
+});
+
+test('analyze: a forwarded video attachment and video-site link render their cached video states', async () => {
+  const seen = await analyzerTranscriptWithCache(
+    {
+      'video:fv1': { text: 'someone dances', ts: Date.now(), watched: true },
+      'video:video:url:fwd0123456789ab': { text: 'a cat plays piano', ts: Date.now(), watched: true },
+    },
+    [FORWARD_SLIM],
+  );
+  const watched = labels.transcript.videoWatched
+    .replace('{name}', 'clip.mp4')
+    .replace('{duration}', '0:20')
+    .replace('{text}', 'someone dances');
+  assert.ok(seen.includes(watched));
+  assert.ok(seen.includes(labels.transcript.linkWatched.replace('{text}', 'a cat plays piano')));
+});
+
+test('analyze: a forwarded link the web lookup read renders linkRead', async () => {
+  const seen = await analyzerTranscriptWithConfig(
+    { 'read:fwd#e1': { text: 'a recipe with three eggs', ts: Date.now() } },
+    [FORWARD_SLIM],
+    { features: { webLookup: true }, web: { links: { enabled: true } } },
+  );
+  assert.ok(seen.includes(labels.transcript.linkRead.replace('{text}', 'a recipe with three eggs')));
+});
+
 // ---- applyMemoryUpdate: channels --------------------------------------------
 
 test('applyMemoryUpdate: merges purpose/topics/tone for a known channel id, clamped tolerantly to fieldChars', () => {
@@ -2199,6 +2263,82 @@ test('observe: strips attachment/link urls before buffering, keeps the item id f
     assert.equal('url' in buffered.stickers[0], false);
     assert.deepEqual(buffered.emojis, [{ id: 'e1', name: 'pog' }]);
     assert.equal('url' in buffered.emojis[0], false);
+  });
+});
+
+/** Every key of `value` (objects and arrays, recursively), for "no url anywhere" checks. */
+function allKeys(value, out = []) {
+  if (Array.isArray(value)) value.forEach((item) => allKeys(item, out));
+  else if (value && typeof value === 'object') {
+    for (const [key, inner] of Object.entries(value)) {
+      out.push(key);
+      allKeys(inner, out);
+    }
+  }
+  return out;
+}
+
+test('observe: keeps a forwarded snapshot\'s content and media ids, stripped like the top level -- no url anywhere', () => {
+  withStore((store) => {
+    const hot = { config: makeConfig() };
+    const updater = createMemoryUpdater({ hot, store, llm: {}, calibrator: createCalibrator(), getSelfName: () => 'Nept' });
+
+    updater.observe(
+      'g1',
+      slimMessage({
+        content: '',
+        forwardedFrom: 'news',
+        forwarded: [
+          {
+            content: 'watch this',
+            attachments: [{ id: 'fa1', kind: 'video', name: 'clip.mp4', url: 'https://cdn.example/fa1', size: 10, durationSec: 12 }],
+            links: [
+              {
+                id: 'video:url:yt1',
+                kind: 'link',
+                site: 'YouTube',
+                title: 'A video',
+                text: 'desc',
+                url: 'https://www.youtube.com/watch?v=abc',
+                thumbnailUrl: 'https://i.ytimg.com/vi/abc/hq.jpg',
+              },
+            ],
+            stickers: [{ id: 's9', name: 'wave', format: 1, url: 'https://media.discordapp.net/stickers/s9.png?size=160' }],
+            emojis: [{ id: 'e9', name: 'hey', animated: false, url: 'https://cdn.discordapp.com/emojis/e9.webp?size=96' }],
+          },
+        ],
+      }),
+    );
+
+    const [buffered] = store.getBuffer('g1');
+    assert.equal(buffered.forwardedFrom, 'news');
+    assert.deepEqual(buffered.forwarded, [
+      {
+        content: 'watch this',
+        attachments: [{ kind: 'video', name: 'clip.mp4', id: 'fa1', durationSec: 12 }],
+        links: [{ kind: 'link', name: 'A video', id: 'video:url:yt1', durationSec: null }],
+        stickers: [{ id: 's9', name: 'wave', format: 1 }],
+        emojis: [{ id: 'e9', name: 'hey' }],
+      },
+    ]);
+    const keys = allKeys(buffered);
+    assert.equal(keys.includes('url'), false);
+    assert.equal(keys.includes('thumbnailUrl'), false);
+  });
+});
+
+test('observe: a message without forwards buffers no forwarded keys at all', () => {
+  withStore((store) => {
+    const hot = { config: makeConfig() };
+    const updater = createMemoryUpdater({ hot, store, llm: {}, calibrator: createCalibrator(), getSelfName: () => 'Nept' });
+
+    updater.observe('g1', slimMessage({ id: 'm1', forwarded: [], forwardedFrom: null }));
+    updater.observe('g1', slimMessage({ id: 'm2' }));
+
+    for (const buffered of store.getBuffer('g1')) {
+      assert.equal('forwarded' in buffered, false);
+      assert.equal('forwardedFrom' in buffered, false);
+    }
   });
 });
 

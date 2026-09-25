@@ -905,3 +905,118 @@ test('collectReadableLinks: no sites keeps video-site links; no links -> []', ()
   assert.equal(collectReadableLinks(message).length, 1);
   assert.deepEqual(collectReadableLinks({ id: 'm2' }), []);
 });
+
+// --- forwarded messages (message snapshots): the collectors walk them too ------------
+
+/** A message with its own media plus two forwarded snapshots (no id of their own). */
+function forwardMessage() {
+  return {
+    id: 'outer',
+    ts: 0,
+    attachments: [{ id: 'own-a', kind: 'image', url: 'u-own', name: 'own.png' }],
+    links: [{ id: 'outer#e0', kind: 'link', url: 'https://example.org/own', site: 'example.org', title: 'Own', thumbnailUrl: null }],
+    stickers: [],
+    emojis: [{ id: 'e-own', name: 'own', url: 'https://cdn.discordapp.com/emojis/e-own.webp?size=96' }],
+    forwarded: [
+      {
+        content: 'first snapshot',
+        attachments: [
+          { id: 'fwd-a1', kind: 'video', url: 'u-fwd1', name: 'clip.mp4', size: 4096, durationSec: 30 },
+          { id: 'fwd-a2', kind: 'file', url: 'u-fwd2', name: 'notes.zip' },
+        ],
+        links: [
+          {
+            id: 'video:url:yt1',
+            kind: 'link',
+            url: 'https://www.youtube.com/watch?v=abc',
+            site: 'YouTube',
+            title: 'Forwarded video',
+            thumbnailUrl: 'https://i.ytimg.com/vi/abc/hq.jpg',
+          },
+          { id: 'fwd#e1', kind: 'link', url: 'https://news.example.com/story', site: 'news.example.com', title: 'Story', thumbnailUrl: null },
+        ],
+        stickers: [{ id: 's-fwd', name: 'wave', format: 1, url: 'https://media.discordapp.net/stickers/s-fwd.png?size=160' }],
+        emojis: [{ id: 'e-fwd1', name: 'fwd', url: 'https://cdn.discordapp.com/emojis/e-fwd1.webp?size=96' }],
+      },
+      {
+        content: '',
+        attachments: [{ id: 'fwd-a3', kind: 'gif', url: 'u-fwd3', name: 'loop.gif' }],
+        links: [],
+        stickers: [],
+        emojis: [{ id: 'e-fwd2', name: 'fwd2', url: 'https://cdn.discordapp.com/emojis/e-fwd2.webp?size=96' }],
+      },
+    ],
+  };
+}
+
+test('collectPictures: forwarded snapshots follow the message\'s own pictures, in order, with the outer messageId', () => {
+  const pictures = collectPictures(forwardMessage());
+  assert.deepEqual(
+    pictures.map((p) => p.itemId),
+    ['own-a', 'fwd-a1', 'video:url:yt1', 'sticker:s-fwd', 'fwd-a3'],
+  );
+  assert.ok(pictures.every((p) => p.messageId === 'outer'));
+  assert.deepEqual(pictures[2], {
+    source: 'embed',
+    messageId: 'outer',
+    itemId: 'video:url:yt1',
+    kind: 'link',
+    url: 'https://i.ytimg.com/vi/abc/hq.jpg',
+    name: 'Forwarded video',
+  });
+});
+
+test('collectEmojiItems: a forwarded snapshot\'s custom emoji follow the message\'s own, with the outer messageId', () => {
+  const items = collectEmojiItems(forwardMessage());
+  assert.deepEqual(items.map((i) => i.itemId), ['emoji:e-own', 'emoji:e-fwd1', 'emoji:e-fwd2']);
+  assert.ok(items.every((i) => i.messageId === 'outer' && i.source === 'emoji'));
+});
+
+test('collectVideos: a forwarded YouTube link is a candidate with its site set (the forwarded-video case)', () => {
+  const items = collectVideos(forwardMessage(), { sites: ['youtube.com', 'youtu.be'] });
+  assert.deepEqual(items, [
+    { source: 'attachment', messageId: 'outer', itemId: 'fwd-a1', kind: 'video', url: 'u-fwd1', name: 'clip.mp4', durationSec: 30, bytes: 4096 },
+    {
+      source: 'link',
+      messageId: 'outer',
+      itemId: 'video:url:yt1',
+      kind: 'link',
+      url: 'https://www.youtube.com/watch?v=abc',
+      site: 'youtube.com',
+      name: 'Forwarded video',
+      durationSec: null,
+    },
+  ]);
+});
+
+test('collectVideos: no sites -> a forwarded message still yields its forwarded video attachments only', () => {
+  assert.deepEqual(collectVideos(forwardMessage()).map((item) => item.itemId), ['fwd-a1']);
+});
+
+test('collectReadableLinks: forwarded plain links follow the message\'s own, video-site links still excluded', () => {
+  const items = collectReadableLinks(forwardMessage(), { sites: ['youtube.com'] });
+  assert.deepEqual(items, [
+    { id: 'outer#e0', messageId: 'outer', url: 'https://example.org/own', site: 'example.org', title: 'Own' },
+    { id: 'fwd#e1', messageId: 'outer', url: 'https://news.example.com/story', site: 'news.example.com', title: 'Story' },
+  ]);
+});
+
+test('collectors: a message with an empty forwarded list returns exactly what it did without the key', () => {
+  const plain = videoMessage();
+  const withEmpty = { ...videoMessage(), forwarded: [] };
+  const sites = { sites: ['youtube.com', 'youtu.be'] };
+  assert.deepEqual(collectPictures(withEmpty), collectPictures(plain));
+  assert.deepEqual(collectEmojiItems(withEmpty), collectEmojiItems(plain));
+  assert.deepEqual(collectVideos(withEmpty, sites), collectVideos(plain, sites));
+  assert.deepEqual(collectReadableLinks(withEmpty, sites), collectReadableLinks(plain, sites));
+});
+
+test('selectPictures: a forwarded picture on the trigger is eligible and sorted by the outer message', () => {
+  const now = 1_000_000;
+  const trigger = {
+    ...message('t', { ts: now }),
+    forwarded: [{ content: '', attachments: [{ id: 'fa', kind: 'image', url: 'u-fa', name: 'fa.png' }], links: [], stickers: [] }],
+  };
+  const picked = selectPictures({ trigger, history: [trigger], visionCfg: { maxImages: 4, recentImages: 3, recentImageMinutes: 30 }, now });
+  assert.deepEqual(picked.map((p) => [p.itemId, p.messageId]), [['fa', 't']]);
+});

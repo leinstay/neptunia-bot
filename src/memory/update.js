@@ -843,6 +843,29 @@ export function touchMemory(store, guildId, normalized) {
 }
 
 /**
+ * The media of one normalized message part (the message itself or one
+ * forwarded snapshot) as the memory buffer keeps it. No URL ever survives
+ * into the buffer -- but the item `id` does, so the live analyzer can look up
+ * a describer caption already warmed into the cache by src/discord/events.js
+ * (see analyze() below). A sticker keeps `id`/`name`/`format` (its URL is
+ * rebuilt from those via stickerUrl when needed); a custom emoji keeps only
+ * `id`/`name` (its URL is rebuilt via emojiUrl).
+ */
+function slimMedia(part) {
+  return {
+    attachments: (part.attachments ?? []).map((a) => ({ kind: a.kind, name: a.name, id: a.id, durationSec: a.durationSec ?? null })),
+    links: (part.links ?? []).map((l) => ({ kind: l.kind, name: l.title || l.site || '', id: l.id, durationSec: null })),
+    stickers: (part.stickers ?? []).map((s) => ({ id: s.id, name: s.name, format: s.format })),
+    emojis: (part.emojis ?? []).map((e) => ({ id: e.id, name: e.name })),
+  };
+}
+
+/** A buffered message followed by its forwarded snapshots: every part whose media ids analyze() looks up. */
+function mediaParts(message) {
+  return [message, ...(Array.isArray(message.forwarded) ? message.forwarded : [])];
+}
+
+/**
  * @param {object} deps
  * @param {object} deps.hot          Live config + prompts; read at the moment of use.
  * @param {object} deps.store
@@ -886,6 +909,10 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
     if (normalized.bot) return;
     touchMemory(store, guildId, normalized);
 
+    const forwarded = (normalized.forwarded ?? []).map((snapshot) => ({
+      content: snapshot.content ?? '',
+      ...slimMedia(snapshot),
+    }));
     const slim = {
       id: normalized.id,
       channelId: normalized.channelId,
@@ -897,16 +924,12 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
       content: normalized.content,
       ts: normalized.ts,
       replyToId: normalized.replyToId,
-      // No URL ever survives into the buffer -- but the item `id` does, so
-      // the live analyzer can look up a describer caption already warmed
-      // into the cache by src/discord/events.js (see analyze() below). A
-      // sticker keeps `id`/`name`/`format` (its URL is rebuilt from those via
-      // stickerUrl when needed); a custom emoji keeps only `id`/`name` (its
-      // URL is rebuilt via emojiUrl).
-      attachments: (normalized.attachments ?? []).map((a) => ({ kind: a.kind, name: a.name, id: a.id, durationSec: a.durationSec ?? null })),
-      links: (normalized.links ?? []).map((l) => ({ kind: l.kind, name: l.title || l.site || '', id: l.id, durationSec: null })),
-      stickers: (normalized.stickers ?? []).map((s) => ({ id: s.id, name: s.name, format: s.format })),
-      emojis: (normalized.emojis ?? []).map((e) => ({ id: e.id, name: e.name })),
+      ...slimMedia(normalized),
+      // A forwarded message's snapshots (src/discord/collect.js
+      // #normalizeSnapshot), stripped the same way, so the analyzer's
+      // transcript renders a forward like the live one. Absent for a message
+      // with no forward: the buffer entry stays as it was.
+      ...(forwarded.length > 0 ? { forwardedFrom: normalized.forwardedFrom ?? null, forwarded } : {}),
       direct: Boolean(direct),
     };
     const cfg = hot.config.memory;
@@ -975,8 +998,10 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
     if (hot.config.features?.mediaDescriptions === true) {
       const cache = store.getMediaCache(guildId);
       descriptions = new Map();
-      for (const message of messages) {
-        for (const item of [...(message.attachments ?? []), ...(message.links ?? [])]) {
+      // A forwarded snapshot's items are looked up exactly like the
+      // message's own (see mediaParts).
+      for (const part of messages.flatMap(mediaParts)) {
+        for (const item of [...(part.attachments ?? []), ...(part.links ?? [])]) {
           if (item.id == null || !isDescribable(item)) continue;
           const cached = cache[item.id];
           if (cached && !cached.miss) descriptions.set(item.id, cached.text);
@@ -985,13 +1010,13 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
         // stickerUrl rebuilds it from id/format only to tell a Lottie
         // sticker (never describable) apart, the cache is still looked up by
         // the stable `sticker:<id>` / `emoji:<id>` key alone.
-        for (const sticker of message.stickers ?? []) {
+        for (const sticker of part.stickers ?? []) {
           if (!stickerUrl(sticker.id, sticker.format)) continue;
           const itemId = `sticker:${sticker.id}`;
           const cached = cache[itemId];
           if (cached && !cached.miss) descriptions.set(itemId, cached.text);
         }
-        for (const emoji of message.emojis ?? []) {
+        for (const emoji of part.emojis ?? []) {
           const itemId = `emoji:${emoji.id}`;
           const cached = cache[itemId];
           if (cached && !cached.miss) descriptions.set(itemId, cached.text);
@@ -1009,8 +1034,8 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
     if (videoOn) {
       const cache = store.getMediaCache(guildId);
       videos = new Map();
-      for (const message of messages) {
-        const items = [...(message.attachments ?? []).filter((a) => a.kind === 'video'), ...(message.links ?? [])];
+      for (const part of messages.flatMap(mediaParts)) {
+        const items = [...(part.attachments ?? []).filter((a) => a.kind === 'video'), ...(part.links ?? [])];
         for (const item of items) {
           if (item.id == null) continue;
           const cached = cache[`video:${item.id}`];
@@ -1030,8 +1055,8 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
     if (hot.config.features?.webLookup === true && hot.config.web?.links?.enabled !== false) {
       const cache = store.getMediaCache(guildId);
       reads = new Map();
-      for (const message of messages) {
-        for (const link of message.links ?? []) {
+      for (const part of messages.flatMap(mediaParts)) {
+        for (const link of part.links ?? []) {
           if (link.id == null) continue;
           const cached = cache[`read:${link.id}`];
           if (cached && !cached.miss && typeof cached.text === 'string') reads.set(link.id, cached.text);
