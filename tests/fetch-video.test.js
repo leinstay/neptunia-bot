@@ -1,5 +1,6 @@
 // Tests for src/discord/fetch-video.js: attachment sent as-is or trimmed by
-// ffmpeg, the download hard ceiling, yt-dlp probe and clip runs, failure
+// ffmpeg, the download hard ceiling, yt-dlp probe and clip runs (an oversized
+// clip re-encoded by ffmpeg), failure
 // reasons, timeouts (the whole tool process tree killed, cleanup only after
 // the tool closed), temp-file cleanup and logging that carries codes only,
 // never tool output or a query string. Child processes, process.kill and
@@ -416,7 +417,7 @@ test('fetchSiteClip: returns the downloaded clip as an mp4 data URL and removes 
   assert.equal(result.seconds, 60);
   const args = calls[0].args;
   assert.equal(args[args.indexOf('--download-sections') + 1], '*0-60');
-  assert.equal(args[args.indexOf('--max-filesize') + 1], '1000');
+  assert.equal(args[args.indexOf('--max-filesize') + 1], '4000');
   assert.equal(args.includes('--ffmpeg-location'), false, 'a bare ffmpeg name is left to PATH');
   assert.ok(args[args.indexOf('-o') + 1].startsWith(tmpDir));
   assert.deepEqual(await leftovers(), []);
@@ -442,12 +443,131 @@ test('fetchSiteClip: a longer probed duration keeps the cut; a path ffmpeg is pa
   assert.equal(args[args.indexOf('--ffmpeg-location') + 1], '/usr/bin/ffmpeg');
 });
 
+/**
+ * A spawn behaviour per tool: yt-dlp (`-o` output) and ffmpeg (last-arg
+ * output) act differently; any other command fails the test.
+ */
+function byTool({ ytdlp = () => assert.fail('yt-dlp must not run'), ffmpeg = () => assert.fail('ffmpeg must not run') }) {
+  return (child, command, args) => {
+    if (command === 'yt-dlp') return ytdlp(child, command, args);
+    if (command === 'ffmpeg') return ffmpeg(child, command, args);
+    return assert.fail(`unexpected command ${command}`);
+  };
+}
+
+test('fetchSiteClip: yt-dlp gets the download ceiling (maxBytes * 4) as --max-filesize, whole or cut', async () => {
+  for (const durationSec of [14, 58, 125, null]) {
+    const { spawnImpl, calls } = fakeSpawn(byTool({ ytdlp: writesOutput(10, '-o') }));
+    const fetcher = makeFetcher({ spawnImpl, tmpDir });
+    const result = await fetcher.fetchSiteClip(SITE_URL, { ...OPTS, durationSec });
+    assert.equal(result.ok, true);
+    const args = calls[0].args;
+    assert.equal(args[args.indexOf('--max-filesize') + 1], '4000', `ceiling for duration ${durationSec}`);
+  }
+});
+
+test('fetchSiteClip: a small whole download is returned as-is, without ffmpeg', async () => {
+  const { spawnImpl, calls } = fakeSpawn(byTool({ ytdlp: writesOutput(1000, '-o') }));
+  const fetcher = makeFetcher({ spawnImpl, tmpDir });
+
+  const result = await fetcher.fetchSiteClip(SITE_URL, { ...OPTS, durationSec: 58 });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.bytes, 1000);
+  assert.equal(result.seconds, 58);
+  assert.equal(result.mimeType, 'video/mp4');
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].args.includes('--download-sections'), false);
+  assert.deepEqual(await leftovers(), []);
+});
+
+test('fetchSiteClip: a small cut download is returned as-is, without ffmpeg', async () => {
+  const { spawnImpl, calls } = fakeSpawn(byTool({ ytdlp: writesOutput(400, '-o') }));
+  const fetcher = makeFetcher({ spawnImpl, tmpDir });
+
+  const result = await fetcher.fetchSiteClip(SITE_URL, { ...OPTS, durationSec: 125 });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.bytes, 400);
+  assert.equal(result.seconds, 60);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].args[calls[0].args.indexOf('--download-sections') + 1], '*0-60');
+});
+
+test('fetchSiteClip: an oversized whole download is re-encoded by ffmpeg and the smaller file returned', async () => {
+  const { spawnImpl, calls } = fakeSpawn(byTool({ ytdlp: writesOutput(3000, '-o'), ffmpeg: writesOutput(600) }));
+  const fetcher = makeFetcher({ spawnImpl, tmpDir });
+
+  const result = await fetcher.fetchSiteClip(SITE_URL, { ...OPTS, durationSec: 58 });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.mimeType, 'video/mp4');
+  assert.equal(result.bytes, 600);
+  assert.equal(result.dataUrl, `data:video/mp4;base64,${Buffer.alloc(600, 7).toString('base64')}`);
+  assert.equal(result.seconds, 58);
+  assert.equal(calls.length, 2);
+  const clipPath = calls[0].args[calls[0].args.indexOf('-o') + 1];
+  const ffArgs = calls[1].args;
+  assert.equal(calls[1].command, 'ffmpeg');
+  assert.equal(ffArgs[ffArgs.indexOf('-i') + 1], clipPath, 'ffmpeg reads the yt-dlp download');
+  assert.notEqual(ffArgs[ffArgs.length - 1], clipPath, 'and writes a second file');
+  assert.equal(ffArgs[ffArgs.indexOf('-t') + 1], '60');
+  assert.deepEqual(await leftovers(), [], 'both temp files are removed');
+});
+
+test('fetchSiteClip: an oversized cut of unknown length is re-encoded; seconds falls back to maxSeconds', async () => {
+  const { spawnImpl, calls } = fakeSpawn(byTool({ ytdlp: writesOutput(1001, '-o'), ffmpeg: writesOutput(999) }));
+  const fetcher = makeFetcher({ spawnImpl, tmpDir });
+
+  const result = await fetcher.fetchSiteClip(SITE_URL, { ...OPTS, durationSec: null });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.bytes, 999);
+  assert.equal(result.seconds, 60);
+  assert.equal(calls.length, 2);
+});
+
+test('fetchSiteClip: still over maxBytes after the re-encode -> size', async () => {
+  const { spawnImpl, calls } = fakeSpawn(byTool({ ytdlp: writesOutput(3000, '-o'), ffmpeg: writesOutput(1001) }));
+  const fetcher = makeFetcher({ spawnImpl, tmpDir });
+
+  assert.deepEqual(await fetcher.fetchSiteClip(SITE_URL, { ...OPTS, durationSec: 58 }), { ok: false, reason: 'size' });
+  assert.equal(calls.length, 2);
+  assert.deepEqual(await leftovers(), []);
+});
+
+test('fetchSiteClip: nothing written (the ceiling was exceeded) -> size, without ffmpeg', async () => {
+  const { spawnImpl, calls } = fakeSpawn(byTool({ ytdlp: (child) => child.emit('close', 0, null) }));
+  const fetcher = makeFetcher({ spawnImpl, tmpDir });
+
+  assert.deepEqual(await fetcher.fetchSiteClip(SITE_URL, { ...OPTS, durationSec: 58 }), { ok: false, reason: 'size' });
+  assert.equal(calls.length, 1);
+  assert.deepEqual(await leftovers(), []);
+});
+
+test('fetchSiteClip: a failed re-encode -> tool (missing ffmpeg, non-zero exit, no output); a hung one -> timeout', async () => {
+  const cases = [
+    [enoent, 'tool'],
+    [(child) => child.emit('close', 1, null), 'tool'],
+    [(child) => child.emit('close', 0, null), 'tool'],
+    [() => {}, 'timeout'],
+  ];
+  for (const [ffmpeg, reason] of cases) {
+    const { spawnImpl, calls } = fakeSpawn(byTool({ ytdlp: writesOutput(3000, '-o'), ffmpeg }));
+    const fetcher = makeFetcher({ spawnImpl, tmpDir });
+    const result = await fetcher.fetchSiteClip(SITE_URL, { ...OPTS, toolTimeoutMs: 50, durationSec: 58 });
+    assert.deepEqual(result, { ok: false, reason });
+    assert.equal(calls.length, 2);
+    assert.deepEqual(await leftovers(), [], `leftovers after ffmpeg ${reason}`);
+  }
+});
+
 test('fetchSiteClip: ENOENT -> tool, non-zero -> download, hang -> timeout, oversize -> size; no leftovers', async () => {
   const cases = [
     [enoent, 'tool'],
     [(child) => child.emit('close', 2, null), 'download'],
     [() => {}, 'timeout'],
-    [writesOutput(1001, '-o'), 'size'],
+    [byTool({ ytdlp: writesOutput(1001, '-o'), ffmpeg: writesOutput(1001) }), 'size'],
   ];
   for (const [behave, reason] of cases) {
     const fetcher = makeFetcher({ spawnImpl: fakeSpawn(behave).spawnImpl, tmpDir });

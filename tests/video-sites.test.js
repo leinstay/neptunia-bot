@@ -118,7 +118,9 @@ test('ytdlpProbeArgs: metadata-only arguments', () => {
   });
 });
 
-const CLIP = { ytdlpPath: '/opt/yt-dlp', maxSeconds: 60, maxBytes: 8_000_000, outPath: '/tmp/d/clip.mp4' };
+const CLIP = { ytdlpPath: '/opt/yt-dlp', maxSeconds: 60, maxFileSize: 8_000_000, outPath: '/tmp/d/clip.mp4' };
+const FORMAT =
+  'bv*[height<=360]+ba/b[height<=360]/b[height<=720][vcodec^=h264]/b[width<=720][vcodec^=h264]/b[height<=720][vcodec^=avc]/b[width<=720][vcodec^=avc]/w';
 
 test('ytdlpClipArgs: a long or unknown video is cut to its first maxSeconds, one element per token', () => {
   const out = ytdlpClipArgs('https://youtu.be/abc', { ...CLIP, ffmpegPath: '/usr/bin/ffmpeg', durationSec: 125 });
@@ -127,7 +129,7 @@ test('ytdlpClipArgs: a long or unknown video is cut to its first maxSeconds, one
     args: [
       '--no-playlist', '--no-warnings', '--quiet',
       '--ffmpeg-location', '/usr/bin/ffmpeg',
-      '-f', 'bv*[height<=360]+ba/b[height<=360]/w',
+      '-f', FORMAT,
       '--merge-output-format', 'mp4',
       '--download-sections', '*0-60',
       '--force-keyframes-at-cuts',
@@ -155,7 +157,7 @@ test('ytdlpClipArgs: a video no longer than maxSeconds is downloaded whole, with
       args: [
         '--no-playlist', '--no-warnings', '--quiet',
         '--ffmpeg-location', '/usr/bin/ffmpeg',
-        '-f', 'bv*[height<=360]+ba/b[height<=360]/w',
+        '-f', FORMAT,
         '--merge-output-format', 'mp4',
         '--max-filesize', '8000000',
         '-o', '/tmp/d/clip.mp4',
@@ -174,7 +176,7 @@ test('ytdlpClipArgs: a bare ffmpeg name omits --ffmpeg-location so yt-dlp search
   const short = ytdlpClipArgs('https://youtu.be/abc', { ...CLIP, ffmpegPath: 'ffmpeg', durationSec: 14 }).args;
   assert.deepEqual(short, [
     '--no-playlist', '--no-warnings', '--quiet',
-    '-f', 'bv*[height<=360]+ba/b[height<=360]/w',
+    '-f', FORMAT,
     '--merge-output-format', 'mp4',
     '--max-filesize', '8000000',
     '-o', '/tmp/d/clip.mp4',

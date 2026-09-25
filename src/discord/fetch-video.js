@@ -2,7 +2,9 @@
 // take: a Discord attachment is downloaded and, when short and small enough,
 // inlined as-is; otherwise ffmpeg cuts it to the first `maxSeconds` at 360p.
 // A video-site link goes through yt-dlp: a metadata-only probe (duration,
-// title) and a clip download of the first `maxSeconds`. Where yt-dlp cannot
+// title) and a clip download of the first `maxSeconds` (whole when it is no
+// longer), capped at the same download ceiling as an attachment; a clip over
+// `maxBytes` is then re-encoded by ffmpeg the same way. Where yt-dlp cannot
 // read YouTube (a bot check), probeYoutube learns the duration without it:
 // the YouTube Data API when a key is configured, else the watch page itself.
 // The argument arrays and parsers come from the pure
@@ -354,7 +356,12 @@ export function createVideoFetcher({
    * yt-dlp clip of the first `maxSeconds` of a video-site link, inlined as an
    * mp4 data URL. `durationSec` (from a probe) lowers the reported seconds
    * when the video is shorter, and a known duration within `maxSeconds` is
-   * downloaded whole without a cut (see ytdlpClipArgs). Never rejects.
+   * downloaded whole without a cut (see ytdlpClipArgs). The download is capped
+   * at `maxBytes * DOWNLOAD_CEILING_FACTOR` (over it yt-dlp writes nothing:
+   * `size`); a clip within `maxBytes` is sent as-is, a bigger one is
+   * re-encoded by ffmpeg (360p, first `maxSeconds`) and is `size` only when
+   * still over `maxBytes`. A missing or failing ffmpeg there is `tool`. Each
+   * tool run gets its own `toolTimeoutMs`. Never rejects.
    * @param {string} url
    * @param {{ ytdlpPath: string, ffmpegPath: string, maxSeconds: number, maxBytes: number,
    *   toolTimeoutMs: number, durationSec?: number|null }} options
@@ -367,9 +374,17 @@ export function createVideoFetcher({
     let dir = null;
     try {
       dir = await makeWorkDir();
-      const outPath = path.join(dir, 'clip.mp4');
+      const clipPath = path.join(dir, 'clip.mp4');
+      const smallPath = path.join(dir, 'small.mp4');
       const run = await runTool(
-        ytdlpClipArgs(url, { ytdlpPath, ffmpegPath, maxSeconds, maxBytes, outPath, durationSec }),
+        ytdlpClipArgs(url, {
+          ytdlpPath,
+          ffmpegPath,
+          maxSeconds,
+          maxFileSize: maxBytes * DOWNLOAD_CEILING_FACTOR,
+          outPath: clipPath,
+          durationSec,
+        }),
         toolTimeoutMs,
       );
       if (run.timedOut) return fail('site', url, 'timeout', { code: runCode(run) });
@@ -377,9 +392,20 @@ export function createVideoFetcher({
       if (run.code !== 0) return fail('site', url, 'download', { code: runCode(run) });
 
       // yt-dlp exits 0 without writing anything when --max-filesize skips the download.
-      const bytes = await sizeOf(outPath);
-      if (bytes === null || bytes > maxBytes) return fail('site', url, 'size');
+      const clipBytes = await sizeOf(clipPath);
+      if (clipBytes === null) return fail('site', url, 'size');
       const seconds = Number.isFinite(durationSec) && durationSec < maxSeconds ? durationSec : maxSeconds;
+      let outPath = clipPath;
+      let bytes = clipBytes;
+      if (clipBytes > maxBytes) {
+        const trim = await runTool(ffmpegTrimArgs(clipPath, smallPath, { ffmpegPath, maxSeconds }), toolTimeoutMs);
+        if (trim.timedOut) return fail('site', url, 'timeout', { code: runCode(trim) });
+        if (trim.spawnError || trim.code !== 0) return fail('site', url, 'tool', { code: runCode(trim) });
+        bytes = await sizeOf(smallPath);
+        if (bytes === null) return fail('site', url, 'tool', { code: runCode(trim) });
+        if (bytes > maxBytes) return fail('site', url, 'size');
+        outPath = smallPath;
+      }
       return {
         ok: true,
         dataUrl: await asDataUrl(outPath, 'video/mp4'),

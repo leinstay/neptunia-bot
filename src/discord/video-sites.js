@@ -12,7 +12,19 @@ import { createHash } from 'node:crypto';
 // belong to a bare URL in chat text.
 const URL_PATTERN = /https?:\/\/[^\s<>"']+/gi;
 const TRAILING_PUNCTUATION = /[).,>]+$/;
-const YTDLP_FORMAT = 'bv*[height<=360]+ba/b[height<=360]/w';
+// Tried left to right: a <=360p stream pair, a <=360p single file, then the
+// best H.264 single file up to 720 on its short side, and only then `w`.
+// yt-dlp always ranks the extractor's own preference first, so `w` lands on
+// the format the extractor demoted -- on TikTok the watermarked copy of
+// unknown size. The H.264 steps keep a real, re-encodable format ahead of it
+// (the fetcher re-encodes an oversized download to 360p): the height tier
+// catches landscape videos, the width tier portrait ones (TikTok is
+// 720x1280, which a height limit alone rejects). `h264` is how TikTok names
+// the codec, `avc` how most other extractors do. When none of them exists,
+// `w` as before, last.
+const YTDLP_FORMAT =
+  'bv*[height<=360]+ba/b[height<=360]/b[height<=720][vcodec^=h264]/b[width<=720][vcodec^=h264]/' +
+  'b[height<=720][vcodec^=avc]/b[width<=720][vcodec^=avc]/w';
 
 /** Lowercase hostname of `url`, or null when it does not parse. */
 function hostOf(url) {
@@ -159,16 +171,19 @@ export function ytdlpProbeArgs(url, { ytdlpPath } = {}) {
  * A yt-dlp run that downloads a video at low resolution, merged into one mp4
  * at `outPath`. A video longer than `maxSeconds` (or of unknown length) is
  * cut to its first `maxSeconds`, which needs ffmpeg; a known duration within
- * `maxSeconds` is downloaded whole, with no cut. `--ffmpeg-location` is passed
+ * `maxSeconds` is downloaded whole, with no cut. `maxFileSize` is the
+ * download ceiling passed as `--max-filesize` (yt-dlp then writes nothing),
+ * not the final size limit: the fetcher re-encodes a download over its
+ * `maxBytes` with ffmpegTrimArgs. `--ffmpeg-location` is passed
  * only when `ffmpegPath` contains a path separator: yt-dlp resolves the value
  * as a path, so a bare name like `ffmpeg` is left to its own PATH search.
  * @param {string} url
- * @param {{ ytdlpPath: string, ffmpegPath: string, maxSeconds: number, maxBytes: number, outPath: string,
+ * @param {{ ytdlpPath: string, ffmpegPath: string, maxSeconds: number, maxFileSize: number, outPath: string,
  *   durationSec?: number|null }} options
  * @returns {{ command: string, args: string[] }}
  */
 export function ytdlpClipArgs(url, {
-  ytdlpPath, ffmpegPath, maxSeconds, maxBytes, outPath, durationSec = null,
+  ytdlpPath, ffmpegPath, maxSeconds, maxFileSize, outPath, durationSec = null,
 } = {}) {
   const ffmpegPathStr = ffmpegPath == null ? '' : String(ffmpegPath);
   const location = /[\\/]/.test(ffmpegPathStr) ? ['--ffmpeg-location', ffmpegPathStr] : [];
@@ -182,7 +197,7 @@ export function ytdlpClipArgs(url, {
       '-f', YTDLP_FORMAT,
       '--merge-output-format', 'mp4',
       ...cut,
-      '--max-filesize', String(maxBytes),
+      '--max-filesize', String(maxFileSize),
       '-o', String(outPath),
       '--',
       String(url),
