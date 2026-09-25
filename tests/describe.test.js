@@ -1720,8 +1720,38 @@ test('describeVideo: config.json ships directUrlMaxSeconds 3600 and directUrlTok
   const video = shipped.media.video;
   assert.equal(video.directUrlMaxSeconds, 3600);
   assert.equal(video.directUrlTokensPerSecond, 10);
-  assert.equal(video.tokensPerSecond, 300, 'data-URL clips keep the static estimate');
+  assert.equal(video.tokensPerSecond, 120, 'data-URL clips keep the static estimate');
   assert.ok(video.directUrlMaxSeconds * video.directUrlTokensPerSecond < video.maxRequestTokens);
+});
+
+test('describeVideo: config.json ships 180 s clips of at most 12 MB, estimated at 120 tokens per second', () => {
+  const shipped = JSON.parse(fs.readFileSync(new URL('../config.json', import.meta.url), 'utf8'));
+  const video = shipped.media.video;
+  assert.equal(video.maxSeconds, 180);
+  assert.equal(video.maxBytes, 12_000_000);
+  assert.equal(video.tokensPerSecond, 120);
+  assert.equal(video.maxRequestTokens, 60_000);
+  // Base64 of the largest clip stays under the provider's ~20 MB inline request limit.
+  assert.ok(Math.ceil(video.maxBytes / 3) * 4 < 20_000_000);
+});
+
+test('describeVideo: a shipped-length clip at the shipped rate plus the shipped prompt stays under media.video.maxRequestTokens', async () => {
+  const shipped = JSON.parse(fs.readFileSync(new URL('../config.json', import.meta.url), 'utf8'));
+  const prompt = fs.readFileSync(new URL('../prompts/describe-video.md', import.meta.url), 'utf8');
+  const video = shipped.media.video;
+  const hot = videoHot({ video, prompts: { 'describe-video': prompt } });
+  const { llm, bodies } = realVideoLlm(hot);
+  const videoFetcher = fakeVideoFetcher({
+    attachment: { ok: true, dataUrl: CLIP_DATA_URL, mimeType: 'video/mp4', seconds: video.maxSeconds, bytes: 4 },
+  });
+  const { describer } = videoDescriber({ hot, llm, videoFetcher });
+
+  const watched = await describer.describeVideo('g1', videoAttachment('v1', { durationSec: video.maxSeconds }));
+
+  assert.equal(watched.state, 'watched');
+  assert.equal(bodies.length, 1, 'the token rail let the request through');
+  assert.ok(watched.estimated >= video.maxSeconds * video.tokensPerSecond, String(watched.estimated));
+  assert.ok(watched.estimated < video.maxRequestTokens, String(watched.estimated));
 });
 
 test('rewatchVideo: a pinned agentic link passes directUrlTokensPerSecond like a watch; a clip does not', async () => {

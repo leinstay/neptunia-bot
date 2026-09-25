@@ -89,8 +89,8 @@ export function createLlm({ apiKey, getConfig, calibrator, state, fetchImpl = fe
    * estimate before calibration, because `estimateMessages` cannot size a
    * `video_url` part on its own; the token cap then applies to the sum.
    * `tokensPerSecond` is `options.videoTokensPerSecond` when that is a finite
-   * positive number, else `media.video.tokensPerSecond` (default 300 per
-   * second, the rate of a statically sampled clip). The override exists for
+   * positive number, else `media.video.tokensPerSecond` (300 per second when
+   * unset; the rate of a statically sampled clip). The override exists for
    * the video describer's public-URL requests in agentic processing, where the
    * provider does not count the video as prompt tokens and the per-second cost
    * is far lower (`media.video.directUrlTokensPerSecond`).

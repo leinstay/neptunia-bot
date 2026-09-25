@@ -326,7 +326,7 @@ export function createDescriber({
    * 60 000 by default), or every long direct-URL video trips the token rail.
    * With any other processing mode the request is estimated at
    * `tokensPerSecond`, so the cap is also held to what the video token cap
-   * allows (60 000 / 300 = 200 s by default): a longer video takes the clip
+   * allows (60 000 / 120 = 500 s by default): a longer video takes the clip
    * route instead of being refused by the rail on every retry.
    */
   function lengthCap(item, videoCfg) {

@@ -3,6 +3,7 @@
 // the query-free log location.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import {
   videoSiteFor,
   extractVideoUrls,
@@ -201,11 +202,22 @@ test('ffmpegTrimArgs: trim and re-encode arguments', () => {
       '-t', '60',
       '-vf', 'scale=-2:360',
       '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '28',
+      '-maxrate', '400k', '-bufsize', '800k',
       '-c:a', 'aac', '-b:a', '96k',
       '-movflags', '+faststart',
       '/tmp/out.mp4',
     ],
   });
+});
+
+test('ffmpegTrimArgs: the capped bitrate keeps a shipped-length re-encode within the shipped maxBytes', () => {
+  const shipped = JSON.parse(fs.readFileSync(new URL('../config.json', import.meta.url), 'utf8'));
+  const { maxSeconds, maxBytes } = shipped.media.video;
+  const { args } = ffmpegTrimArgs('/tmp/in.webm', '/tmp/out.mp4', { ffmpegPath: 'ffmpeg', maxSeconds });
+  const kbps = (flag) => Number(String(args[args.indexOf(flag) + 1]).replace(/k$/, ''));
+  assert.ok(args.includes('-maxrate') && args.includes('-bufsize') && args.includes('-b:a'));
+  const bytes = ((kbps('-maxrate') + kbps('-b:a')) * 1000 / 8) * maxSeconds;
+  assert.ok(bytes < maxBytes, `${bytes} bytes for ${maxSeconds} s`);
 });
 
 test('parseProbe: reads duration and title; tolerates missing fields and bad JSON', () => {

@@ -207,7 +207,10 @@ export function ytdlpClipArgs(url, {
 
 /**
  * An ffmpeg run that cuts `inPath` to its first `maxSeconds` and re-encodes
- * it small (360p H.264 + AAC) into `outPath`.
+ * it small (360p H.264 + AAC) into `outPath`. The video bitrate is capped
+ * (`-maxrate 400k -bufsize 800k` on top of CRF 28) so high-motion content
+ * cannot blow the size up: 400k video + 96k audio is ~496 kbps, ~11.2 MB for
+ * a 180 s clip, within the shipped `media.video.maxBytes` (12 MB).
  * @param {string} inPath
  * @param {string} outPath
  * @param {{ ffmpegPath: string, maxSeconds: number }} options
@@ -222,6 +225,7 @@ export function ffmpegTrimArgs(inPath, outPath, { ffmpegPath, maxSeconds } = {})
       '-t', String(maxSeconds),
       '-vf', 'scale=-2:360',
       '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '28',
+      '-maxrate', '400k', '-bufsize', '800k',
       '-c:a', 'aac', '-b:a', '96k',
       '-movflags', '+faststart',
       String(outPath),
