@@ -123,13 +123,14 @@
 | `provider` | `{ "order": ["google-ai-studio"], "allow_fallbacks": false }` | 直接 URL 路径（在长度限制内的 YouTube）的 OpenRouter provider 路由；`null` 使用 `llm.provider` |
 | `maxOutputTokens` | `800` | 每个视频摘要的最大输出 token 数 |
 | `summaryChars` | `1500` | 视频描述的最大字符数；填充 `describe-video.md` 中的 `{{maxChars}}` |
-| `maxRequestTokens` | `60000` | 每次视频请求的 token 上限（输入 + 输出），替代 `llm.maxRequestTokens`；3 分钟片段按 `tokensPerSecond` 约为 54 000 token，超过默认全局上限 |
-| `maxSeconds` | `60` | 附件和下载的站点视频的最大片段时长（秒）；更长的附件由 `ffmpeg` 裁剪，更长的站点视频回退到静帧。直接 URL 站点使用 `directUrlMaxSeconds` |
-| `directUrlMaxSeconds` | `180` | 通过公开 URL 发送给提供商的视频的最大时长（秒），适用于 YouTube 及其他 `directUrlSites`；更长的视频走下载裁剪路径，受 `maxSeconds` 限制 |
-| `maxBytes` | `8000000` | 最大附件大小（字节）；裁剪后仍超过则永久未命中 |
+| `maxRequestTokens` | `60000` | 每次视频请求的 token 上限（输入 + 输出），替代 `llm.maxRequestTokens`。agentic 模式下公开 URL 视频使用 `directUrlTokensPerSecond`（10）估算: 一小时 YouTube 为 36 000 token。下载的片段使用 `tokensPerSecond`（300）估算: 一分钟为 18 000 token |
+| `maxSeconds` | `60` | 附件和下载的站点视频的最大片段时长（秒）；更长的附件由 `ffmpeg` 裁剪，更长的站点视频由 `yt-dlp` 截取前 `maxSeconds`。直接 URL 站点使用 `directUrlMaxSeconds` |
+| `directUrlMaxSeconds` | `3600` | 公开 URL 视频（YouTube 及其他 `directUrlSites`）的最大时长（秒），当 `urlProcessing` 为 `agentic` 时生效。其他模式下有效上限为此值与 `maxRequestTokens / tokensPerSecond` 中较小者。超长视频走下载路径（通过 yt-dlp 取前 `maxSeconds`），但 YouTube 在服务器上经常以 bot 验证阻止下载 |
+| `maxBytes` | `8000000` | 附件和下载的站点片段的最大文件大小（字节）；下载本身最大可达此值的 4 倍。超限的文件先由 `ffmpeg` 重编码为 360p；仅重编码后仍超限的片段才被拒绝为永久未命中 |
 | `maxPerTurn` | `1` | 每回合最大新视频数；每次获取尝试都计数，无论成功与否 |
 | `maxPerDay` | `40` | 每日视频请求上限（在 `state.json` 中存储为 `videoDay`/`videoCount`） |
-| `tokensPerSecond` | `300` | 视频每秒的 token 估算，用于预算检查 |
+| `tokensPerSecond` | `300` | 视频每秒的 token 估算，用于预算检查。适用于下载的片段和非 agentic 模式的公开 URL 视频；agentic 模式下使用 `directUrlTokensPerSecond` 替代 |
+| `directUrlTokensPerSecond` | `10` | agentic 模式下公开 URL 视频预检 token 预算的每秒估算值（模型按需加载，视频本身不计为提示 token）。缺失或无效时回退到 `tokensPerSecond`。`tokensPerSecond`（300）仍适用于下载的片段和非 agentic 模式的 URL |
 | `timeoutMs` | `90000` | 视频的 LLM 请求超时（毫秒） |
 | `toolTimeoutMs` | `60000` | `yt-dlp` 和 `ffmpeg` 子进程的超时（毫秒） |
 | `sites` | `["youtube.com", "youtu.be", "tiktok.com", "vk.com", "vkvideo.ru", "x.com", "twitter.com", "reddit.com", "twitch.tv"]` | 其链接被视为视频的主机名 |

@@ -123,13 +123,14 @@ Settings for the video describer (`features.videoDescriptions`). Video vision ne
 | `provider` | `{ "order": ["google-ai-studio"], "allow_fallbacks": false }` | OpenRouter provider routing for the direct-URL path (YouTube within the length cap); `null` uses `llm.provider` |
 | `maxOutputTokens` | `800` | Max output tokens per video summary |
 | `summaryChars` | `1500` | Max characters for a video account; fills `{{maxChars}}` in `describe-video.md` |
-| `maxRequestTokens` | `60000` | Token cap per video request (input + output), used instead of `llm.maxRequestTokens`; a 3-minute clip at `tokensPerSecond` is ~54 000 tokens, above the default global cap |
-| `maxSeconds` | `60` | Max clip duration (seconds) for attachments and downloaded site videos; longer attachments are trimmed with `ffmpeg`, longer site videos fall back to a still frame. Direct-URL sites use `directUrlMaxSeconds` instead |
-| `directUrlMaxSeconds` | `180` | Max duration (seconds) for a video sent to the provider by public URL (YouTube and other `directUrlSites`); longer ones take the download-and-clip route capped at `maxSeconds` |
-| `maxBytes` | `8000000` | Max attachment size (bytes); over-size after trimming is a permanent miss |
+| `maxRequestTokens` | `60000` | Token cap per video request (input + output), used instead of `llm.maxRequestTokens`. A public-URL video in agentic mode uses `directUrlTokensPerSecond` (10) for the estimate: one hour of YouTube is 36 000 tokens. Downloaded clips use `tokensPerSecond` (300): one minute is 18 000 tokens |
+| `maxSeconds` | `60` | Max clip duration (seconds) for attachments and downloaded site videos; longer attachments are trimmed with `ffmpeg`, longer site videos are cut to their first `maxSeconds` by `yt-dlp`. Direct-URL sites use `directUrlMaxSeconds` instead |
+| `directUrlMaxSeconds` | `3600` | Max duration (seconds) for a public-URL video (YouTube and other `directUrlSites`) when `urlProcessing` is `agentic`. In any other mode the effective cap is the smaller of this value and `maxRequestTokens / tokensPerSecond`. Longer videos take the download route (first `maxSeconds` via yt-dlp), which YouTube often blocks with a bot check on servers |
+| `maxBytes` | `8000000` | Max file size (bytes) for attachments and downloaded site clips; the download itself may be up to 4x this size. Over-size files are re-encoded to 360p with `ffmpeg` first; only a clip still too large after re-encoding is refused as a permanent miss |
 | `maxPerTurn` | `1` | Max NEW videos per turn; every fetch attempt counts, failed or not |
 | `maxPerDay` | `40` | Daily video request cap (stored in `state.json` as `videoDay`/`videoCount`) |
-| `tokensPerSecond` | `300` | Token estimate per second of video for the budget check |
+| `tokensPerSecond` | `300` | Token estimate per second of video for the budget check. Applies to downloaded clips and to public-URL videos outside agentic mode; in agentic mode `directUrlTokensPerSecond` is used instead |
+| `directUrlTokensPerSecond` | `10` | Per-second token estimate for the pre-flight budget check on a public-URL video in agentic mode (the model loads only what it needs; the video itself is not counted as prompt tokens). A missing or invalid value falls back to `tokensPerSecond`. `tokensPerSecond` (300) still applies to downloaded clips and to URLs in other modes |
 | `timeoutMs` | `90000` | LLM request timeout for video (ms) |
 | `toolTimeoutMs` | `60000` | Timeout for `yt-dlp` and `ffmpeg` subprocesses (ms) |
 | `sites` | `["youtube.com", "youtu.be", "tiktok.com", "vk.com", "vkvideo.ru", "x.com", "twitter.com", "reddit.com", "twitch.tv"]` | Hostnames whose links are treated as video |

@@ -20,7 +20,7 @@ Settings: `context.vision.*` for direct vision, `media.*` for the describer. See
 
 ### Caps
 
-Attachments and downloaded site videos are capped at `media.video.maxSeconds` (default 60 s) and `media.video.maxBytes`. YouTube links up to `directUrlMaxSeconds` (default 180 s) are passed as a URL to the provider (Google AI Studio). At most `maxPerTurn` new videos per turn (every attempt counts, failed or not) and `maxPerDay` per day. Results are cached alongside picture descriptions; a repost costs nothing.
+Attachments and downloaded site videos are capped at `media.video.maxSeconds` (default 60 s) and `media.video.maxBytes` (over-size files are re-encoded to 360p first; only a clip still too large after re-encoding is refused). In agentic mode (`urlProcessing`, the default), public-URL videos (YouTube and other `directUrlSites`) up to `directUrlMaxSeconds` (default 3600 s, one hour) are sent by URL to the pinned provider; in other modes the effective cap is the smaller of this value and `maxRequestTokens / tokensPerSecond` (200 s with the defaults). Longer videos take the download route (first `maxSeconds` via yt-dlp), which YouTube often blocks with a bot check on servers. At most `maxPerTurn` new videos per turn (every attempt counts, failed or not) and `maxPerDay` per day. Results are cached alongside picture descriptions; a repost costs nothing.
 
 ### Tools
 

@@ -123,13 +123,14 @@
 | `provider` | `{ "order": ["google-ai-studio"], "allow_fallbacks": false }` | ダイレクト URL パス（上限内の YouTube）用の OpenRouter プロバイダールーティング。`null` の場合は `llm.provider` を使用 |
 | `maxOutputTokens` | `800` | 動画サマリーあたりの最大出力トークン数 |
 | `summaryChars` | `1500` | 動画説明の最大文字数。`describe-video.md` の `{{maxChars}}` に使用 |
-| `maxRequestTokens` | `60000` | 動画リクエストあたりのトークン上限（入力 + 出力）、`llm.maxRequestTokens` の代わりに使用。3 分のクリップを `tokensPerSecond` で換算すると約 54 000 トークンとなり、デフォルトのグローバル上限を超える |
-| `maxSeconds` | `60` | 添付ファイルとダウンロードしたサイト動画のクリップの最大長（秒）。超過する添付ファイルは `ffmpeg` でトリムされ、超過するサイト動画は静止フレームにフォールバック。ダイレクト URL サイトには `directUrlMaxSeconds` が適用される |
-| `directUrlMaxSeconds` | `180` | 公開 URL でプロバイダーに送信する動画の最大長（秒）。YouTube およびその他の `directUrlSites` が対象。超過する動画はダウンロード＋クリップルート（上限 `maxSeconds`）へ移行 |
-| `maxBytes` | `8000000` | 添付ファイルの最大サイズ（バイト）。トリム後も超過する場合は永続ミス |
+| `maxRequestTokens` | `60000` | 動画リクエストあたりのトークン上限（入力 + 出力）、`llm.maxRequestTokens` の代わりに使用。agentic モードでは公開 URL 動画の推定に `directUrlTokensPerSecond`（10）を使用: 1 時間の YouTube で 36 000 トークン。ダウンロードしたクリップは `tokensPerSecond`（300）を使用: 1 分で 18 000 トークン |
+| `maxSeconds` | `60` | 添付ファイルとダウンロードしたサイト動画のクリップの最大長（秒）。超過する添付ファイルは `ffmpeg` でトリムされ、超過するサイト動画は `yt-dlp` で先頭の `maxSeconds` に切り取られる。ダイレクト URL サイトには `directUrlMaxSeconds` が適用される |
+| `directUrlMaxSeconds` | `3600` | 公開 URL 動画（YouTube およびその他の `directUrlSites`）の最大長（秒）。`urlProcessing` が `agentic` の場合に適用。他のモードではこの値と `maxRequestTokens / tokensPerSecond` の小さい方が有効。超過する動画はダウンロードルート（先頭の `maxSeconds` を yt-dlp で取得）へ移行するが、YouTube はサーバーからのダウンロードをボットチェックでブロックすることが多い |
+| `maxBytes` | `8000000` | 添付ファイルとダウンロードしたサイトクリップの最大ファイルサイズ（バイト）。ダウンロード自体はこの 4 倍までのサイズになることがある。超過するファイルはまず `ffmpeg` で 360p に再エンコードされ、再エンコード後も超過する場合のみ永続ミスとして拒否 |
 | `maxPerTurn` | `1` | ターンあたりの最大新規動画数。成否を問わずすべてのフェッチ試行がカウントされる |
 | `maxPerDay` | `40` | 1 日あたりの動画リクエスト上限（`state.json` に `videoDay`/`videoCount` として保存） |
-| `tokensPerSecond` | `300` | バジェットチェック用の動画 1 秒あたりのトークン推定値 |
+| `tokensPerSecond` | `300` | バジェットチェック用の動画 1 秒あたりのトークン推定値。ダウンロードしたクリップと agentic モード以外の公開 URL 動画に適用。agentic モードでは代わりに `directUrlTokensPerSecond` を使用 |
+| `directUrlTokensPerSecond` | `10` | agentic モードにおける公開 URL 動画のプリフライトバジェットチェック用の 1 秒あたりのトークン推定値（モデルは必要な部分だけ読み込み、動画自体はプロンプトトークンとしてカウントされない）。値が未設定または無効な場合は `tokensPerSecond` にフォールバック。`tokensPerSecond`（300）はダウンロードしたクリップと agentic 以外のモードの URL に引き続き適用 |
 | `timeoutMs` | `90000` | 動画用の LLM リクエストタイムアウト（ミリ秒） |
 | `toolTimeoutMs` | `60000` | `yt-dlp` と `ffmpeg` サブプロセスのタイムアウト（ミリ秒） |
 | `sites` | `["youtube.com", "youtu.be", "tiktok.com", "vk.com", "vkvideo.ru", "x.com", "twitter.com", "reddit.com", "twitch.tv"]` | 動画として扱うリンクのホスト名 |

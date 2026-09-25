@@ -20,7 +20,7 @@
 
 ### 限制
 
-附件和下载的站点视频受 `media.video.maxSeconds`（默认 60 秒）和 `media.video.maxBytes` 限制。`directUrlMaxSeconds`（默认 180 秒）以内的 YouTube 链接会作为 URL 直接传递给提供商（Google AI Studio）。每回合最多 `maxPerTurn` 个新视频（每次尝试都计数，无论成功与否），每天最多 `maxPerDay` 个。结果与图片描述一起缓存；重复发布不产生额外开销。
+附件和下载的站点视频受 `media.video.maxSeconds`（默认 60 秒）和 `media.video.maxBytes` 限制（超限的文件先重编码为 360p；仅重编码后仍超限的片段才被拒绝）。agentic 模式（`urlProcessing`，默认）下，公开 URL 视频（YouTube 及其他 `directUrlSites`）在 `directUrlMaxSeconds`（默认 3600 秒，一小时）以内时通过 URL 发送给固定的提供商；其他模式下有效上限为此值与 `maxRequestTokens / tokensPerSecond`（默认值下为 200 秒）中较小者。超长视频走下载路径（通过 yt-dlp 取前 `maxSeconds`），但 YouTube 在服务器上经常以 bot 验证阻止下载。每回合最多 `maxPerTurn` 个新视频（每次尝试都计数，无论成功与否），每天最多 `maxPerDay` 个。结果与图片描述一起缓存；重复发布不产生额外开销。
 
 ### 工具
 
