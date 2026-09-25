@@ -20,7 +20,7 @@
 
 ### 上限
 
-添付ファイルとダウンロードしたサイト動画は `media.video.maxSeconds`（デフォルト 60 秒）と `media.video.maxBytes` で制限されます（超過するファイルはまず 360p に再エンコードされ、再エンコード後も超過する場合のみ拒否）。agentic モード（`urlProcessing`、デフォルト）では、公開 URL 動画（YouTube およびその他の `directUrlSites`）は `directUrlMaxSeconds`（デフォルト 3600 秒、1 時間）までピン留めされたプロバイダーに URL で送信されます。他のモードではこの値と `maxRequestTokens / tokensPerSecond`（デフォルトでは 200 秒）の小さい方が有効です。超過する動画はダウンロードルート（先頭の `maxSeconds` を yt-dlp で取得）へ移行しますが、YouTube はサーバーからのダウンロードをボットチェックでブロックすることが多いです。ターンあたり最大 `maxPerTurn` 件の新規動画（成否を問わずすべての試行がカウント）、1 日あたり `maxPerDay` 件です。結果は画像の説明文と同じキャッシュに保存されるため、再投稿のコストはかかりません。
+添付ファイルとダウンロードしたサイト動画は `media.video.maxSeconds`（デフォルト 180 秒）と `media.video.maxBytes` で制限されます（超過するファイルはまずビットレートを制限して 360p に再エンコードされ、再エンコード後も超過する場合のみ拒否）。agentic モード（`urlProcessing`、デフォルト）では、公開 URL 動画（YouTube およびその他の `directUrlSites`）は `directUrlMaxSeconds`（デフォルト 3600 秒、1 時間）までピン留めされたプロバイダーに URL で送信されます。他のモードではこの値と `maxRequestTokens / tokensPerSecond`（デフォルトでは 500 秒）の小さい方が有効です。超過する動画はダウンロードルート（先頭の `maxSeconds` を yt-dlp で取得）へ移行しますが、YouTube はサーバーからのダウンロードをボットチェックでブロックすることが多いです。ターンあたり最大 `maxPerTurn` 件の新規動画（成否を問わずすべての試行がカウント）、1 日あたり `maxPerDay` 件です。結果は画像の説明文と同じキャッシュに保存されるため、再投稿のコストはかかりません。
 
 ### ツール
 
