@@ -85,17 +85,26 @@ export function createLlm({ apiKey, getConfig, calibrator, state, fetchImpl = fe
    * `body.reasoning`, anything else omits the field. Exists for the video
    * describer, whose model otherwise spends the output budget on reasoning.
    * `options.videoSeconds` — seconds of video the request carries. A finite,
-   * non-negative value adds `ceil(videoSeconds * media.video.tokensPerSecond)`
-   * (default 300 per second) to the raw estimate before calibration, because
-   * `estimateMessages` cannot size a `video_url` part on its own; the token
-   * cap then applies to the sum.
+   * non-negative value adds `ceil(videoSeconds * tokensPerSecond)` to the raw
+   * estimate before calibration, because `estimateMessages` cannot size a
+   * `video_url` part on its own; the token cap then applies to the sum.
+   * `tokensPerSecond` is `options.videoTokensPerSecond` when that is a finite
+   * positive number, else `media.video.tokensPerSecond` (default 300 per
+   * second, the rate of a statically sampled clip). The override exists for
+   * the video describer's public-URL requests in agentic processing, where the
+   * provider does not count the video as prompt tokens and the per-second cost
+   * is far lower (`media.video.directUrlTokensPerSecond`).
    */
   async function complete(messages, options = {}) {
     const cfg = getConfig().llm;
     const tokensPerImage = getConfig().context?.vision?.tokensPerImage;
     let raw = estimateMessages(messages, tokensPerImage);
     if (typeof options.videoSeconds === 'number' && Number.isFinite(options.videoSeconds) && options.videoSeconds >= 0) {
-      const tokensPerSecond = getConfig().media?.video?.tokensPerSecond ?? 300;
+      const override = options.videoTokensPerSecond;
+      const tokensPerSecond =
+        typeof override === 'number' && Number.isFinite(override) && override > 0
+          ? override
+          : (getConfig().media?.video?.tokensPerSecond ?? 300);
       raw += Math.ceil(options.videoSeconds * tokensPerSecond);
     }
     const estimated = calibrator.apply(raw);

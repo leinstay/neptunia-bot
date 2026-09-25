@@ -20,7 +20,8 @@
 // line): an attached video or a link to a known video site
 // (src/discord/media.js#collectVideos)
 // is fetched through src/discord/fetch-video.js -- or, for a video of at most
-// `media.video.directUrlMaxSeconds` on a site whose public URL the pinned
+// `media.video.directUrlMaxSeconds` (less outside agentic processing, see
+// lengthCap) on a site whose public URL the pinned
 // provider can open itself (`media.video.directUrlSites`, and only when
 // `media.video.provider` is a real provider object), passed by URL -- and
 // summarised by a
@@ -70,6 +71,8 @@ const MISS_TTL_MS = 60 * 60_000;
 const VIDEO_ERROR_RETRY_MINUTES_FALLBACK = 60;
 // Only when media.video.urlProcessing is missing (config.json always has it; null omits the field).
 const VIDEO_URL_PROCESSING_FALLBACK = 'agentic';
+// Only when media.video.tokensPerSecond is missing or invalid; the same default as src/llm/openrouter.js.
+const STATIC_TOKENS_PER_SECOND_FALLBACK = 300;
 // Only when media.video.summaryChars is missing (config.json always has it).
 const VIDEO_TEXT_CHARS_FALLBACK = 600;
 const REWATCH_ANSWER_CHARS_FALLBACK = 1200;
@@ -318,13 +321,37 @@ export function createDescriber({
    * The length cap that applies to `item` under the live config: a pinnable
    * direct-URL link is sent by URL up to `directUrlMaxSeconds` (falling back
    * to `maxSeconds` when unset); anything else is clipped at `maxSeconds`.
-   * `directUrlMaxSeconds * tokensPerSecond` must stay under
-   * `media.video.maxRequestTokens` (180 * 300 = 54 000 < 60 000 by default),
-   * or every long direct-URL video trips the token rail.
+   * With agentic processing `directUrlMaxSeconds * directUrlTokensPerSecond`
+   * must stay under `media.video.maxRequestTokens` (3600 * 10 = 36 000 <
+   * 60 000 by default), or every long direct-URL video trips the token rail.
+   * With any other processing mode the request is estimated at
+   * `tokensPerSecond`, so the cap is also held to what the video token cap
+   * allows (60 000 / 300 = 200 s by default): a longer video takes the clip
+   * route instead of being refused by the rail on every retry.
    */
   function lengthCap(item, videoCfg) {
-    if (isPinnableLink(item, videoCfg)) return videoCfg.directUrlMaxSeconds ?? videoCfg.maxSeconds;
-    return videoCfg.maxSeconds;
+    if (!isPinnableLink(item, videoCfg)) return videoCfg.maxSeconds;
+    const cap = videoCfg.directUrlMaxSeconds ?? videoCfg.maxSeconds;
+    if (urlProcessingMode(videoCfg) === 'agentic') return cap;
+    const tokenSeconds = staticRequestSeconds(videoCfg);
+    return tokenSeconds === null ? cap : Math.min(cap, tokenSeconds);
+  }
+
+  /**
+   * How many seconds of video fit the pre-flight token cap at the static
+   * per-second estimate: `floor(maxRequestTokens / tokensPerSecond)`, with the
+   * same values the client then applies (`media.video.maxRequestTokens`, else
+   * `llm.maxRequestTokens`; `tokensPerSecond`, else 300). Null when no cap is
+   * known.
+   */
+  function staticRequestSeconds(videoCfg) {
+    const isPositive = (value) => typeof value === 'number' && Number.isFinite(value) && value > 0;
+    const maxRequestTokens = isPositive(videoCfg.maxRequestTokens)
+      ? videoCfg.maxRequestTokens
+      : hot.config.llm?.maxRequestTokens;
+    if (!isPositive(maxRequestTokens)) return null;
+    const tokensPerSecond = isPositive(videoCfg.tokensPerSecond) ? videoCfg.tokensPerSecond : STATIC_TOKENS_PER_SECOND_FALLBACK;
+    return Math.floor(maxRequestTokens / tokensPerSecond);
   }
 
   /**
@@ -390,18 +417,39 @@ export function createDescriber({
   function videoPart(videoCfg, media) {
     const videoUrl = { url: media.url };
     if (media.pinned) {
-      const mode = videoCfg.urlProcessing === undefined ? VIDEO_URL_PROCESSING_FALLBACK : videoCfg.urlProcessing;
-      if (typeof mode === 'string' && mode) videoUrl.processing = mode;
+      const mode = urlProcessingMode(videoCfg);
+      if (mode) videoUrl.processing = mode;
     }
     return { type: 'video_url', video_url: videoUrl };
   }
 
+  /** The processing mode a public URL goes out with (see videoPart), or null when the field is omitted. */
+  function urlProcessingMode(videoCfg) {
+    const mode = videoCfg.urlProcessing === undefined ? VIDEO_URL_PROCESSING_FALLBACK : videoCfg.urlProcessing;
+    return typeof mode === 'string' && mode ? mode : null;
+  }
+
+  /**
+   * The per-second token estimate of a public URL in agentic processing
+   * (`media.video.directUrlTokensPerSecond`), or undefined for every other
+   * request -- a data: URL clip, a public URL in another or no processing
+   * mode, a missing or invalid setting -- which then keeps the client's
+   * `media.video.tokensPerSecond`. Agentic processing does not bill the video
+   * as prompt tokens; its exploration shows up as a few completion tokens per
+   * second of video.
+   */
+  function videoTokensPerSecond(videoCfg, media) {
+    if (!media.pinned || urlProcessingMode(videoCfg) !== 'agentic') return undefined;
+    const value = videoCfg.directUrlTokensPerSecond;
+    return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : undefined;
+  }
+
   /**
    * The `llm.complete` options of a video request (a watch or a re-watch):
-   * the video model and timeout, the video-only token cap, the pinned
-   * provider only for a public URL, the reasoning settings
-   * (`media.video.reasoning`, a plain object or nothing), never the text
-   * calibration.
+   * the video model and timeout, the video-only token cap, the per-second
+   * estimate of an agentic public URL, the pinned provider only for a public
+   * URL, the reasoning settings (`media.video.reasoning`, a plain object or
+   * nothing), never the text calibration.
    */
   function videoRequestOptions(videoCfg, media, { maxOutputTokens, countAgainstDailyCap }) {
     return {
@@ -409,6 +457,7 @@ export function createDescriber({
       maxOutputTokens,
       timeoutMs: videoCfg.timeoutMs,
       videoSeconds: media.seconds ?? videoCfg.maxSeconds,
+      videoTokensPerSecond: videoTokensPerSecond(videoCfg, media),
       // Video requests have their own pre-flight cap; every other caller
       // stays under the global llm.maxRequestTokens.
       maxRequestTokens: videoCfg.maxRequestTokens,

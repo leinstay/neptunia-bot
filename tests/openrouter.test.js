@@ -600,6 +600,54 @@ test('complete: a non-finite or negative options.videoSeconds leaves the estimat
   }
 });
 
+test('complete: options.videoTokensPerSecond replaces media.video.tokensPerSecond for this one call', async () => {
+  const llm = createLlm({
+    apiKey: 'k',
+    getConfig: () => ({ ...baseConfig({ maxRequestTokens: 50000 }), media: { video: { tokensPerSecond: 300 } } }),
+    calibrator: fakeCalibrator(),
+    state: fakeState(),
+    fetchImpl: async () => okResponse('hi'),
+  });
+  const messages = [{ role: 'user', content: 'hi' }];
+  const plain = await llm.complete(messages);
+  const agentic = await llm.complete(messages, { videoSeconds: 3289, videoTokensPerSecond: 10 });
+  assert.equal(agentic.estimated - plain.estimated, 32890);
+  const fractional = await llm.complete(messages, { videoSeconds: 3, videoTokensPerSecond: 0.5 });
+  assert.equal(fractional.estimated - plain.estimated, 2);
+  const next = await llm.complete(messages, { videoSeconds: 60 });
+  assert.equal(next.estimated - plain.estimated, 18000, 'the override never sticks to later calls');
+});
+
+test('complete: a non-finite or non-positive options.videoTokensPerSecond falls back to media.video.tokensPerSecond', async () => {
+  const llm = createLlm({
+    apiKey: 'k',
+    getConfig: () => ({ ...baseConfig({ maxRequestTokens: 50000 }), media: { video: { tokensPerSecond: 300 } } }),
+    calibrator: fakeCalibrator(),
+    state: fakeState(),
+    fetchImpl: async () => okResponse('hi'),
+  });
+  const messages = [{ role: 'user', content: 'hi' }];
+  const plain = await llm.complete(messages);
+  for (const videoTokensPerSecond of [NaN, Infinity, -Infinity, 0, -10, '10', null, undefined, {}]) {
+    const result = await llm.complete(messages, { videoSeconds: 60, videoTokensPerSecond });
+    assert.equal(result.estimated - plain.estimated, 18000, `videoTokensPerSecond=${String(videoTokensPerSecond)}`);
+  }
+});
+
+test('complete: options.videoTokensPerSecond alone (no videoSeconds) leaves the estimate unchanged', async () => {
+  const llm = createLlm({
+    apiKey: 'k',
+    getConfig: () => ({ ...baseConfig({ maxRequestTokens: 50000 }), media: { video: { tokensPerSecond: 300 } } }),
+    calibrator: fakeCalibrator(),
+    state: fakeState(),
+    fetchImpl: async () => okResponse('hi'),
+  });
+  const messages = [{ role: 'user', content: 'hi' }];
+  const plain = await llm.complete(messages);
+  const result = await llm.complete(messages, { videoTokensPerSecond: 10 });
+  assert.equal(result.estimated, plain.estimated);
+});
+
 // options.signal -- an external AbortController cancels the in-flight
 // request (for /nep warmup stop), and is never retried afterwards.
 test('complete: options.signal aborts the in-flight fetch and rejects without retrying', async () => {

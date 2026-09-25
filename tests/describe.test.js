@@ -1483,6 +1483,268 @@ test('describeVideo: a cached length miss with durationSec null or absent (an ol
   }
 });
 
+// --- directUrlTokensPerSecond: the estimate of an agentic public-URL request ---
+
+// The shipped long-video settings on top of the test defaults.
+const LONG_URL_VIDEO = { directUrlMaxSeconds: 3600, directUrlTokensPerSecond: 10, tokensPerSecond: 300, urlProcessing: 'agentic' };
+
+/** A real client (fake fetch) over `hot`, recording every request body that left the process. */
+function realVideoLlm(hot) {
+  hot.config.llm = {
+    baseUrl: 'https://openrouter.test/api/v1',
+    model: 'x/chat',
+    temperature: 1,
+    maxOutputTokens: 100,
+    maxRequestTokens: 50_000,
+    maxRequestsPerDay: 300,
+    timeoutMs: 5_000,
+    retries: 0,
+  };
+  const bodies = [];
+  const llm = createLlm({
+    apiKey: 'k',
+    getConfig: () => hot.config,
+    calibrator: { ratio: 1, apply: (n) => n, observe: () => {} },
+    state: { data: {}, markDirty() {} },
+    fetchImpl: async (url, init) => {
+      bodies.push(JSON.parse(init.body));
+      return { ok: true, status: 200, json: async () => ({ choices: [{ message: { content: 'someone talks' } }], usage: {} }) };
+    },
+  });
+  return { llm, bodies };
+}
+
+test('describeVideo: a pinned agentic link of 3289 s goes out by URL, estimated at directUrlTokensPerSecond under maxRequestTokens', async () => {
+  const hot = videoHot({ video: LONG_URL_VIDEO });
+  const { llm, bodies } = realVideoLlm(hot);
+  const videoFetcher = fakeVideoFetcher({ probe: { ok: true, durationSec: 3289, title: null } });
+  const { describer } = videoDescriber({ hot, llm, videoFetcher });
+
+  const result = await describer.describeVideo('g1', videoLink());
+
+  assert.equal(result.state, 'watched');
+  assert.ok(result.estimated >= 32_890 && result.estimated < 60_000, String(result.estimated));
+  assert.deepEqual(videoFetcher.calls.map((c) => c.fn), ['probeSite']);
+  assert.equal(bodies.length, 1);
+  assert.deepEqual(bodies[0].messages[1].content, [
+    { type: 'video_url', video_url: { url: 'https://www.youtube.com/watch?v=abc', processing: 'agentic' } },
+  ]);
+  assert.deepEqual(bodies[0].provider, VIDEO_CFG.provider);
+});
+
+test('describeVideo: a pinned agentic link passes directUrlTokensPerSecond as videoTokensPerSecond', async () => {
+  const videoFetcher = fakeVideoFetcher({ probe: { ok: true, durationSec: 3289, title: null } });
+  const { describer, llm } = videoDescriber({ hot: videoHot({ video: LONG_URL_VIDEO }), videoFetcher });
+  await describer.describeVideo('g1', videoLink());
+  assert.equal(llm.calls[0].options.videoSeconds, 3289);
+  assert.equal(llm.calls[0].options.videoTokensPerSecond, 10);
+
+  // A missing urlProcessing resolves to agentic, exactly as the video_url part does.
+  const fallback = videoDescriber({
+    hot: videoHot({ video: { ...LONG_URL_VIDEO, urlProcessing: undefined } }),
+    videoFetcher: fakeVideoFetcher({ probe: { ok: true, durationSec: 3289, title: null } }),
+  });
+  await fallback.describer.describeVideo('g1', videoLink());
+  assert.equal(fallback.llm.calls[0].messages[1].content[0].video_url.processing, 'agentic');
+  assert.equal(fallback.llm.calls[0].options.videoTokensPerSecond, 10);
+});
+
+test('describeVideo: a pinnable 3289 s link with another or no processing mode takes the clip route at tokensPerSecond', async () => {
+  for (const urlProcessing of ['static', 'frames', null, '']) {
+    const hot = videoHot({ video: { ...LONG_URL_VIDEO, urlProcessing } });
+    const { llm, bodies } = realVideoLlm(hot);
+    const videoFetcher = fakeVideoFetcher({ probe: { ok: true, durationSec: 3289, title: null } });
+    const { describer } = videoDescriber({ hot, llm, videoFetcher });
+
+    const result = await describer.describeVideo('g1', videoLink());
+    assert.equal(result.state, 'watched', String(urlProcessing));
+    assert.ok(result.estimated >= 60 * 300, `${String(urlProcessing)}: ${result.estimated}`);
+    assert.deepEqual(videoFetcher.calls.map((c) => c.fn), ['probeSite', 'fetchSiteClip']);
+    assert.equal(bodies.length, 1);
+    assert.deepEqual(bodies[0].messages[1].content, [{ type: 'video_url', video_url: { url: CLIP_DATA_URL } }]);
+    assert.equal(bodies[0].provider, undefined);
+
+    const fake = videoDescriber({
+      hot: videoHot({ video: { ...LONG_URL_VIDEO, urlProcessing } }),
+      videoFetcher: fakeVideoFetcher({ probe: { ok: true, durationSec: 3289, title: null } }),
+    });
+    await fake.describer.describeVideo('g1', videoLink());
+    assert.equal(fake.llm.calls[0].options.videoTokensPerSecond, undefined, String(urlProcessing));
+  }
+});
+
+/** Which route a pinnable link of `durationSec` takes under `video`: 'url' (sent pinned) or 'clip'. */
+async function linkRoute(video, durationSec, hotPatch = (hot) => hot) {
+  const videoFetcher = fakeVideoFetcher({ probe: { ok: true, durationSec, title: null } });
+  const { describer, llm } = videoDescriber({ hot: hotPatch(videoHot({ video })), videoFetcher });
+  await describer.describeVideo('g1', videoLink());
+  const pinned = llm.calls[0].messages[1].content[0].video_url.url === 'https://www.youtube.com/watch?v=abc';
+  return pinned ? 'url' : 'clip';
+}
+
+test('describeVideo: a non-agentic pinnable link is capped at min(directUrlMaxSeconds, floor(maxRequestTokens / tokensPerSecond))', async () => {
+  for (const urlProcessing of ['static', null]) {
+    const video = { ...LONG_URL_VIDEO, urlProcessing };
+    assert.equal(await linkRoute(video, 200), 'url', `${urlProcessing}: 60000 / 300 = 200 s`);
+    assert.equal(await linkRoute(video, 201), 'clip', String(urlProcessing));
+    assert.equal(await linkRoute({ ...video, tokensPerSecond: 400 }, 150), 'url');
+    assert.equal(await linkRoute({ ...video, tokensPerSecond: 400 }, 151), 'clip');
+    assert.equal(await linkRoute({ ...video, directUrlMaxSeconds: 120 }, 120), 'url', 'directUrlMaxSeconds is the smaller one');
+    assert.equal(await linkRoute({ ...video, directUrlMaxSeconds: 120 }, 121), 'clip');
+  }
+});
+
+test('describeVideo: an agentic pinnable link is capped at directUrlMaxSeconds alone', async () => {
+  assert.equal(await linkRoute(LONG_URL_VIDEO, 3600), 'url');
+  assert.equal(await linkRoute(LONG_URL_VIDEO, 3601), 'clip');
+  assert.equal(await linkRoute({ ...LONG_URL_VIDEO, urlProcessing: undefined }, 3600), 'url', 'a missing mode resolves to agentic');
+});
+
+test('describeVideo: the non-agentic cap falls back like the client for missing token settings', async () => {
+  const video = { ...LONG_URL_VIDEO, urlProcessing: 'static' };
+  // tokensPerSecond missing or invalid -> 300, as src/llm/openrouter.js assumes.
+  for (const tokensPerSecond of [undefined, 0, -1, NaN, '300']) {
+    assert.equal(await linkRoute({ ...video, tokensPerSecond }, 200), 'url', String(tokensPerSecond));
+    assert.equal(await linkRoute({ ...video, tokensPerSecond }, 201), 'clip', String(tokensPerSecond));
+  }
+  // media.video.maxRequestTokens missing -> the global llm.maxRequestTokens the client then applies.
+  const withGlobal = (hot) => {
+    hot.config.llm = { maxRequestTokens: 30_000 };
+    return hot;
+  };
+  assert.equal(await linkRoute({ ...video, maxRequestTokens: undefined }, 100, withGlobal), 'url');
+  assert.equal(await linkRoute({ ...video, maxRequestTokens: undefined }, 101, withGlobal), 'clip');
+  // No token cap known at all -> directUrlMaxSeconds alone; no directUrlMaxSeconds -> maxSeconds.
+  assert.equal(await linkRoute({ ...video, maxRequestTokens: undefined }, 3600), 'url');
+  assert.equal(await linkRoute({ ...video, maxRequestTokens: undefined, directUrlMaxSeconds: undefined }, 60), 'url');
+  assert.equal(await linkRoute({ ...video, maxRequestTokens: undefined, directUrlMaxSeconds: undefined }, 61), 'clip');
+});
+
+test('describeVideo: a cached length miss is re-read against the mode-dependent cap', async () => {
+  const hot = videoHot({ video: { ...LONG_URL_VIDEO, urlProcessing: 'static' } });
+  const videoFetcher = fakeVideoFetcher({ probe: { ok: true, durationSec: 570, title: null } });
+  const { describer, store, llm } = videoDescriber({ hot, videoFetcher });
+  store.getMediaCache('g1')[LINK_KEY] = { miss: true, ts: 1, reason: 'length', durationSec: 570 };
+
+  assert.deepEqual(await describer.describeVideo('g1', videoLink()), { state: 'limit', reason: 'length' });
+  assert.equal(videoFetcher.calls.length, 0, 'over the 200 s static cap: served from the cache');
+
+  hot.config.media.video.urlProcessing = 'agentic';
+  assert.equal((await describer.describeVideo('g1', videoLink())).state, 'watched');
+  assert.deepEqual(videoFetcher.calls.map((c) => c.fn), ['probeSite']);
+  assert.equal(llm.calls[0].messages[1].content[0].video_url.url, 'https://www.youtube.com/watch?v=abc');
+});
+
+test('describeVideo: a data-URL clip is still estimated at tokensPerSecond', async () => {
+  const hot = videoHot({ video: LONG_URL_VIDEO });
+  const { llm, bodies } = realVideoLlm(hot);
+  const { describer } = videoDescriber({ hot, llm });
+  const watched = await describer.describeVideo('g1', videoAttachment());
+  assert.equal(watched.state, 'watched');
+  assert.ok(watched.estimated >= 12 * 300, String(watched.estimated));
+  assert.equal(bodies.length, 1);
+
+  const attachment = videoDescriber({ hot: videoHot({ video: LONG_URL_VIDEO }) });
+  await attachment.describer.describeVideo('g1', videoAttachment());
+  assert.equal(attachment.llm.calls[0].options.videoTokensPerSecond, undefined);
+
+  const siteClip = videoDescriber({ hot: videoHot({ video: LONG_URL_VIDEO }) });
+  await siteClip.describer.describeVideo('g1', videoLink('video:url:bbbbbbbbbbbbbbbb', TIKTOK));
+  assert.equal(siteClip.llm.calls[0].messages[1].content[0].video_url.url, CLIP_DATA_URL);
+  assert.equal(siteClip.llm.calls[0].options.videoTokensPerSecond, undefined);
+});
+
+test('describeVideo: a pinnable link longer than directUrlMaxSeconds still takes the clip route', async () => {
+  const videoFetcher = fakeVideoFetcher({ probe: { ok: true, durationSec: 3601, title: null } });
+  const { describer, llm } = videoDescriber({ hot: videoHot({ video: LONG_URL_VIDEO }), videoFetcher });
+  assert.equal((await describer.describeVideo('g1', videoLink())).state, 'watched');
+  assert.deepEqual(videoFetcher.calls.map((c) => c.fn), ['probeSite', 'fetchSiteClip']);
+  assert.equal(videoFetcher.calls[1].options.maxSeconds, 60);
+  assert.equal(llm.calls[0].options.provider, undefined);
+  assert.equal(llm.calls[0].options.videoTokensPerSecond, undefined);
+  assert.equal(llm.calls[0].messages[1].content[0].video_url.url, CLIP_DATA_URL);
+});
+
+test('describeVideo: a missing or invalid directUrlTokensPerSecond falls back to tokensPerSecond', async () => {
+  for (const directUrlTokensPerSecond of [undefined, null, 0, -5, NaN, Infinity, '10', {}]) {
+    const label = String(directUrlTokensPerSecond);
+    const fake = videoDescriber({
+      hot: videoHot({ video: { ...LONG_URL_VIDEO, directUrlTokensPerSecond } }),
+      videoFetcher: fakeVideoFetcher({ probe: { ok: true, durationSec: 120, title: null } }),
+    });
+    await fake.describer.describeVideo('g1', videoLink());
+    assert.equal(fake.llm.calls[0].options.videoTokensPerSecond, undefined, label);
+
+    const hot = videoHot({ video: { ...LONG_URL_VIDEO, directUrlTokensPerSecond } });
+    const { llm, bodies } = realVideoLlm(hot);
+    const { describer } = videoDescriber({
+      hot,
+      llm,
+      videoFetcher: fakeVideoFetcher({ probe: { ok: true, durationSec: 120, title: null } }),
+    });
+    const result = await describer.describeVideo('g1', videoLink());
+    assert.ok(result.estimated >= 120 * 300, `${label}: ${result.estimated}`);
+    assert.equal(bodies.length, 1, label);
+  }
+});
+
+test('describeVideo: directUrlTokensPerSecond is read at the moment of use', async () => {
+  const hot = videoHot({ video: LONG_URL_VIDEO });
+  const { describer, llm } = videoDescriber({ hot });
+  await describer.describeVideo('g1', videoLink('video:url:1111111111111111'));
+  hot.config.media.video.directUrlTokensPerSecond = 4;
+  await describer.describeVideo('g1', videoLink('video:url:2222222222222222'));
+  assert.equal(llm.calls[0].options.videoTokensPerSecond, 10);
+  assert.equal(llm.calls[1].options.videoTokensPerSecond, 4);
+});
+
+test('describeVideo: cached length misses of 2719 s and 570 s pinned links are retried under the 3600 s cap, not served', async () => {
+  for (const durationSec of [2719, 570]) {
+    const videoFetcher = fakeVideoFetcher({ probe: { ok: true, durationSec, title: null } });
+    const { describer, store, llm } = videoDescriber({ hot: videoHot({ video: LONG_URL_VIDEO }), videoFetcher });
+    store.getMediaCache('g1')[LINK_KEY] = { miss: true, ts: 1, reason: 'length', durationSec };
+
+    const result = await describer.describeVideo('g1', videoLink());
+
+    assert.equal(result.state, 'watched', String(durationSec));
+    assert.deepEqual(videoFetcher.calls.map((c) => c.fn), ['probeSite']);
+    assert.equal(llm.calls[0].messages[1].content[0].video_url.url, 'https://www.youtube.com/watch?v=abc');
+    assert.equal(llm.calls[0].options.videoSeconds, durationSec);
+    assert.equal(llm.calls[0].options.videoTokensPerSecond, 10);
+    assert.equal(store.getMediaCache('g1')[LINK_KEY].watched, true);
+  }
+});
+
+test('describeVideo: config.json ships directUrlMaxSeconds 3600 and directUrlTokensPerSecond 10, within maxRequestTokens', () => {
+  const shipped = JSON.parse(fs.readFileSync(new URL('../config.json', import.meta.url), 'utf8'));
+  const video = shipped.media.video;
+  assert.equal(video.directUrlMaxSeconds, 3600);
+  assert.equal(video.directUrlTokensPerSecond, 10);
+  assert.equal(video.tokensPerSecond, 300, 'data-URL clips keep the static estimate');
+  assert.ok(video.directUrlMaxSeconds * video.directUrlTokensPerSecond < video.maxRequestTokens);
+});
+
+test('rewatchVideo: a pinned agentic link passes directUrlTokensPerSecond like a watch; a clip does not', async () => {
+  const pinned = videoDescriber({
+    hot: rewatchHot({ video: LONG_URL_VIDEO }),
+    videoFetcher: fakeVideoFetcher({ probe: { ok: true, durationSec: 3289, title: null } }),
+    llm: fakeLlm({ text: 'rouge' }),
+  });
+  assert.equal((await pinned.describer.rewatchVideo('g1', videoLink(), 'τι λέει;')).text, 'rouge');
+  assert.equal(pinned.llm.calls[0].options.videoSeconds, 3289);
+  assert.equal(pinned.llm.calls[0].options.videoTokensPerSecond, 10);
+
+  const clip = videoDescriber({ hot: rewatchHot({ video: LONG_URL_VIDEO }), llm: fakeLlm({ text: 'rouge' }) });
+  await clip.describer.rewatchVideo('g1', videoAttachment(), 'τι λέει;');
+  assert.equal(clip.llm.calls[0].options.videoTokensPerSecond, undefined);
+
+  const hot = rewatchHot({ video: LONG_URL_VIDEO });
+  const { llm, bodies } = realVideoLlm(hot);
+  const real = videoDescriber({ hot, llm, videoFetcher: fakeVideoFetcher({ probe: { ok: true, durationSec: 3289, title: null } }) });
+  assert.equal((await real.describer.rewatchVideo('g1', videoLink(), 'τι λέει;')).text, 'someone talks');
+  assert.equal(bodies.length, 1);
+});
+
 // --- account length: media.video.summaryChars ------------------------------
 
 test('describeVideo: the account is capped at media.video.summaryChars and {{maxChars}} is filled with it', async () => {
