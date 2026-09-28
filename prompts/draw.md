@@ -29,7 +29,7 @@ When the request does not specify an expression, choose one that fits the action
 
 The reference image's facial expression, mouth shape, gaze direction and head angle are a snapshot of one moment — never reproduce them. The face in the picture is built from the brief's description alone: when the brief says the mouth is closed, render it closed; when it describes a smirk, show a smirk. The reference supplies the face's structure, colouring and hair — nothing about how the face is set.
 
-When the request does not specify clothing, dress the character for the setting, season and activity: a beach in heat calls for summer clothes, snow and cold for winter layers, bed for nightwear, water for swimwear. The character's usual outfit is the default only for ordinary indoor or city scenes at mild temperature. Signature small items — a hair clip, a pendant — may stay whenever they plausibly fit the scene.
+When the request does not specify clothing, dress the character for the setting, season and activity: a beach in heat calls for summer clothes, snow and cold for winter layers, water for swimwear. At home — own room, bed, sofa, kitchen, bathroom — the character wears home clothes: no outdoor shoes, no jacket, no bag; feet bare, in socks or slippers; sleepwear at night. The usual outfit is the default for going out: streets, shops, cafés, school or work, other people's places, at mild temperature. Signature small items — a hair clip, a pendant — may stay whenever they plausibly fit the scene.
 
 {{appearance}}
 
