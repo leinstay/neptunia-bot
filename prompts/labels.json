@@ -155,7 +155,7 @@
     "reply": "replied to your message",
     "name": "said your name",
     "followUp": "continued your conversation",
-    "drawFailed": "you tried to draw a picture but the sub-process failed: {reason}"
+    "drawFailed": "was about to get a picture, but the drawing sub-process failed: {reason}"
   },
   "ping": {
     "prompt": "Reply with the single word pong."
