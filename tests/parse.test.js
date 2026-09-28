@@ -115,6 +115,59 @@ test('parseOutput: null/undefined raw input is treated as empty and skipped', ()
   assert.equal(parseOutput(null).skip, true);
 });
 
+test('parseOutput: no <draw> gives draw null', () => {
+  assert.equal(parseOutput('<msg>γεια</msg>').draw, null);
+  assert.equal(parseOutput('<skip/>').draw, null);
+  assert.equal(parseOutput('απλό κείμενο').draw, null);
+});
+
+test('parseOutput: <draw> yields the scene with defaults', () => {
+  const result = parseOutput('<draw> a cat on a windowsill </draw>');
+  assert.deepEqual(result.draw, { text: 'a cat on a windowsill', self: false, replyTo: null });
+});
+
+test('parseOutput: <draw self="yes" reply="#12"> sets self and replyTo', () => {
+  const result = parseOutput('<draw self="yes" reply="#12">a portrait</draw>');
+  assert.deepEqual(result.draw, { text: 'a portrait', self: true, replyTo: 12 });
+});
+
+test('parseOutput: <draw> attributes work in any order and any case', () => {
+  const result = parseOutput('<DRAW Reply="#7" SELF="TRUE">a lake</DRAW>');
+  assert.deepEqual(result.draw, { text: 'a lake', self: true, replyTo: 7 });
+  assert.equal(parseOutput('<draw self="1">x</draw>').draw.self, true);
+  assert.equal(parseOutput('<draw self="no">x</draw>').draw.self, false);
+});
+
+test('parseOutput: a second <draw> is ignored', () => {
+  const result = parseOutput('<draw>first scene</draw><draw self="yes">second scene</draw>');
+  assert.deepEqual(result.draw, { text: 'first scene', self: false, replyTo: null });
+});
+
+test('parseOutput: an empty <draw> is skipped in favour of a later non-empty one', () => {
+  const result = parseOutput('<draw>   </draw><draw>a forest</draw>');
+  assert.equal(result.draw.text, 'a forest');
+});
+
+test('parseOutput: <draw> text is clamped to 800 chars', () => {
+  const result = parseOutput(`<draw>${'a'.repeat(900)}</draw>`);
+  assert.equal(result.draw.text.length, 800);
+});
+
+test('parseOutput: <draw> alone is not a skip and adds no fallback message', () => {
+  const result = parseOutput('<draw>a mountain at dawn</draw>');
+  assert.equal(result.skip, false);
+  assert.deepEqual(result.messages, []);
+  assert.deepEqual(result.reactions, []);
+  assert.equal(result.draw.text, 'a mountain at dawn');
+});
+
+test('parseOutput: <draw> alongside <msg> keeps both', () => {
+  const result = parseOutput('<msg reply="#4">εντάξει</msg><draw reply="#4">a boat</draw>');
+  assert.equal(result.skip, false);
+  assert.deepEqual(result.messages, [{ text: 'εντάξει', replyTo: 4 }]);
+  assert.deepEqual(result.draw, { text: 'a boat', self: false, replyTo: 4 });
+});
+
 test('parseJsonObject: extracts a bare JSON object', () => {
   const parsed = parseJsonObject('{"a": 1, "b": "x"}');
   assert.deepEqual(parsed, { a: 1, b: 'x' });
