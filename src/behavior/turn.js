@@ -5,10 +5,11 @@
 // ('interject' / 'initiate').
 
 import { fetchHistory, fetchNeighbors, withTextPreviews } from '../discord/collect.js';
-import { buildRequest } from './prompt.js';
+import { buildDrawPrompt, buildRequest } from './prompt.js';
 import { classifierTextModel } from './mention.js';
 import { parseOutput } from '../llm/parse.js';
 import { DailyCapError, TokenLimitError } from '../llm/openrouter.js';
+import { ImageCapError, ImageGenError } from '../llm/images.js';
 import {
   collectPictures,
   collectEmojiItems,
@@ -188,6 +189,18 @@ function fillName(template, name) {
   return String(template ?? '').replace(/\{\{name\}\}/g, () => String(name ?? ''));
 }
 
+/** Upload file name for a generated picture: `image/jpeg` -> `image.jpg`, else `image.<subtype>`. */
+function imageFileName(mediaType) {
+  const subtype = String(mediaType ?? '').split('/')[1]?.split(';')[0]?.trim().toLowerCase() || 'png';
+  return `image.${subtype === 'jpeg' ? 'jpg' : subtype}`;
+}
+
+/** `text` cut to at most `max` code points; a non-number `max` leaves it whole. */
+function clampChars(text, max) {
+  const value = String(text ?? '');
+  return Number.isFinite(max) && max >= 0 ? [...value].slice(0, Math.floor(max)).join('') : value;
+}
+
 /** Collapse whitespace so a name or summary stays on its one `<videos>` line. */
 function oneLine(text) {
   return String(text ?? '')
@@ -214,6 +227,10 @@ function describableCandidates(history, pickedIds) {
 }
 
 /**
+ * `images` (src/llm/images.js#createImageGen) is optional: absent, or
+ * `features.imageGeneration` false, the persona's `<draw>` is dropped and no
+ * drawing line reaches `<senses>`.
+ *
  * `lookup` (src/web/lookup.js#createLookup) is optional too: absent, or
  * `features.webLookup` not true, no link is read and no search is made.
  *
@@ -235,6 +252,7 @@ export function createTurnRunner({
   fetchImpl = fetch,
   imageFetcher = createImageFetcher(),
   lookup,
+  images,
 }) {
   const busy = new Set();
   const lastPostAt = new Map(); // channelId -> ts of the persona's last message
@@ -302,9 +320,88 @@ export function createTurnRunner({
       );
       lastPostAt.set(channel.id, Date.now());
     }
+
+    if (parsed.draw) {
+      const prompt = clampChars(parsed.draw.text, hot.config.image?.maxPromptChars);
+      const self = parsed.draw.self === true;
+      // Same deliberate exception: the persona's own draw request, dry-run only. Nothing is generated.
+      log.info('dry-run: would draw', { channel: channel.id, channelName, mode, self, prompt });
+      await mirrorDryRun(dryRunChannelId, `[dry-run] #${channelName} · ${mode} · draw${self ? ' (self)' : ''}`, prompt);
+      lastPostAt.set(channel.id, Date.now());
+    }
   }
 
-  async function act(channel, parsed, idByIndex, history, startedAt = Date.now(), triggerKind = null) {
+  /**
+   * The persona's picture, after its messages: the draw prompt (prompts.draw,
+   * read now) with the request clamped to `image.maxPromptChars`, the avatar as
+   * reference for a picture the persona is in (`image.reference: 'avatar'`),
+   * then one generation and one upload. No typing indicator while it works.
+   * Resolves `{}` when posted, `{ drawFailed: reason }` otherwise (a rail or
+   * generation failure keeps its reason, `empty` counts as `error`; anything
+   * else, the upload included, is `error`).
+   */
+  async function draw(channel, parsed, idByIndex, trigger, isFollowUp) {
+    const imageCfg = hot.config.image ?? {};
+    const self = parsed.draw.self === true;
+    const selfName = channel.guild.members.me?.displayName ?? client.user.username;
+    const prompt = buildDrawPrompt({
+      prompts: hot.prompts,
+      selfName,
+      request: clampChars(parsed.draw.text, imageCfg.maxPromptChars),
+      self,
+    });
+    try {
+      let reference = null;
+      if (self && imageCfg.reference === 'avatar') {
+        let downloaded = null;
+        try {
+          const url =
+            typeof client.user?.displayAvatarURL === 'function'
+              ? client.user.displayAvatarURL({ extension: 'png', size: 1024, forceStatic: true })
+              : null;
+          if (url) {
+            downloaded = await imageFetcher.fetchAsDataUrl(url, {
+              maxBytes: imageCfg.referenceMaxBytes,
+              timeoutMs: hot.config.context?.vision?.fetchTimeoutMs,
+            });
+          }
+        } catch {
+          downloaded = null;
+        }
+        if (downloaded?.dataUrl) reference = downloaded.dataUrl;
+        else log.warn('turn: avatar reference unavailable', { channel: channel.id });
+      }
+
+      const picture = await images.generate({ prompt, reference, userId: trigger?.authorId ?? null });
+      const replyId = !isFollowUp && parsed.draw.replyTo !== null ? idByIndex.get(parsed.draw.replyTo) : null;
+      await channel.send({
+        files: [{ attachment: picture.buffer, name: imageFileName(picture.mediaType) }],
+        reply: replyId ? { messageReference: replyId, failIfNotExists: false } : undefined,
+        allowedMentions: { parse: [] },
+      });
+      lastPostAt.set(channel.id, Date.now());
+      log.info('turn: drew', {
+        channel: channel.id,
+        seconds: picture.seconds,
+        cost: picture.cost,
+        self,
+        bytes: picture.buffer?.length ?? 0,
+      });
+      return {};
+    } catch (err) {
+      if (err instanceof ImageCapError || err instanceof ImageGenError) {
+        return { drawFailed: err.reason === 'empty' ? 'error' : err.reason };
+      }
+      log.warn('turn: draw error', { channel: channel.id, error: err });
+      return { drawFailed: 'error' };
+    }
+  }
+
+  /**
+   * Post the turn for real. Resolves `{ drawFailed }` from draw() when the
+   * persona's picture could not be posted, `{}` otherwise.
+   */
+  async function act(channel, parsed, idByIndex, history, startedAt = Date.now(), triggerKind = null, trigger = null) {
     const cfg = hot.config.typing;
     const typingOn = hot.config.features?.typingSimulation !== false;
     // A follow-up turn (triggerKind: 'followUp') is its own trigger kind
@@ -349,6 +446,10 @@ export function createTurnRunner({
         ...(isFollowUp ? { followUp: true } : {}),
       });
     }
+
+    // The picture comes last, once every message is out.
+    if (parsed.draw) return draw(channel, parsed, idByIndex, trigger, isFollowUp);
+    return {};
   }
 
   /**
@@ -562,9 +663,28 @@ export function createTurnRunner({
    * @param {boolean} [params.forced]  True for an owner-forced turn (`/nep interject`, `/nep
    *   initiate`) -- passed straight through to buildRequest, which appends prompts.forced (when
    *   present) to the task text so the model knows `<skip/>` is not the expected outcome this time.
-   * @returns {Promise<{ outcome: string, mode?: string }>}
+   * @returns {Promise<{ outcome: string, mode?: string, dryRun?: boolean, drawFailed?: string }>}
+   *   `drawFailed` (the reason) when the persona's picture could not be posted.
    */
-  async function runTurn({ channel, mode, trigger = null, triggerKind = null, chooseMode = null, forced = false }) {
+  async function runTurn(params) {
+    const first = await runTurnOnce(params);
+    if (!first.drawFailed) return first;
+    const { channel, trigger = null } = params;
+    // A failed picture someone asked for gets its own turn, started only once
+    // the first one has fully returned (and freed the channel), with the
+    // reason in the trigger label; its own <draw> is dropped. Nobody asked on
+    // a spontaneous turn: the failure is only logged.
+    if (trigger) {
+      const second = await runTurnOnce({ channel, mode: 'reply', trigger, triggerKind: 'drawFailed', drawReason: first.drawFailed });
+      log.info('turn: draw failure answered', { channel: channel.id, reason: first.drawFailed, outcome: second.outcome });
+    } else {
+      log.warn('turn: draw failed', { channel: channel.id, reason: first.drawFailed });
+    }
+    return first;
+  }
+
+  /** One turn, as described on runTurn; `drawReason` only for the internal `drawFailed` turn. */
+  async function runTurnOnce({ channel, mode, trigger = null, triggerKind = null, chooseMode = null, forced = false, drawReason = null }) {
     // /nep pause: the owner is editing data/ by hand -- no new turn may
     // start (a reply, an interject, an initiate, an eavesdrop, or a forced turn)
     // until /nep resume. A turn already in flight when the pause is
@@ -703,6 +823,9 @@ export function createTurnRunner({
       }
 
       const neighbors = await fetchNeighbors(channel, config, selfId, now);
+      // Drawing (features.imageGeneration, a missing key counts as on) needs the image client.
+      const drawOn = Boolean(images) && features.imageGeneration !== false;
+      const drawQuota = drawOn ? images.quota({ userId: trigger?.authorId ?? null }) : undefined;
       const request = buildRequest({
         config,
         prompts: hot.prompts,
@@ -730,6 +853,8 @@ export function createTurnRunner({
         reads,
         lookup: lookupResult,
         searchAvailable: features.webLookup === true && typeof lookup?.hasSearch === 'function' && lookup.hasSearch() === true,
+        drawQuota,
+        drawReason,
       });
 
       // A Discord CDN image the provider cannot fetch must not cost the
@@ -785,7 +910,9 @@ export function createTurnRunner({
       // Feature switches drop parts of the model's output before it is acted on.
       if (features.reactions === false) parsed.reactions = [];
       if (features.multiMessage === false) parsed.messages = parsed.messages.slice(0, 1);
-      const nothingToDo = parsed.messages.length === 0 && parsed.reactions.length === 0;
+      // No image client, drawing off, or already answering a failed picture: the <draw> is dropped.
+      if (!drawOn || triggerKind === 'drawFailed') parsed.draw = null;
+      const nothingToDo = parsed.messages.length === 0 && parsed.reactions.length === 0 && parsed.draw === null;
 
       log.info('turn: model answered', {
         mode: finalMode,
@@ -799,6 +926,7 @@ export function createTurnRunner({
         skip: parsed.skip || nothingToDo,
         messages: parsed.messages.length,
         reactions: parsed.reactions.length,
+        draw: Boolean(parsed.draw),
       });
       store.state.data.calibration = calibrator.ratio;
       store.state.markDirty();
@@ -812,8 +940,8 @@ export function createTurnRunner({
         await dryAct(channel, parsed, request.idByIndex, history, finalMode, triggerKind);
         return { outcome: 'spoke', mode: finalMode, dryRun: true };
       }
-      await act(channel, parsed, request.idByIndex, history, startedAt, triggerKind);
-      return { outcome: 'spoke', mode: finalMode };
+      const acted = await act(channel, parsed, request.idByIndex, history, startedAt, triggerKind, trigger);
+      return acted.drawFailed ? { outcome: 'spoke', mode: finalMode, drawFailed: acted.drawFailed } : { outcome: 'spoke', mode: finalMode };
     } catch (err) {
       if (err instanceof DailyCapError || err instanceof TokenLimitError) {
         log.warn('turn: refused by a safety rail', { error: err });

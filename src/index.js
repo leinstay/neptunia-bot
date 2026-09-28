@@ -13,6 +13,7 @@ import { log } from './log.js';
 import { createStore } from './memory/store.js';
 import { createCalibrator } from './llm/tokens.js';
 import { createLlm } from './llm/openrouter.js';
+import { createImageGen } from './llm/images.js';
 import { createTurnRunner } from './behavior/turn.js';
 import { createSpontaneous } from './behavior/spontaneous.js';
 import { createMemoryUpdater } from './memory/update.js';
@@ -85,6 +86,8 @@ const store = createStore({ dataDir: path.join(ROOT_DIR, 'data') });
 
 const calibrator = createCalibrator(store.state.data.calibration);
 const llm = createLlm({ apiKey: openrouterKey, getConfig: () => hot.config, calibrator, state: store.state });
+// The persona's drawings (features.imageGeneration): its own daily rails, counted on the same state.
+const images = createImageGen({ apiKey: openrouterKey, getConfig: () => hot.config, state: store.state });
 
 const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent],
@@ -114,7 +117,7 @@ const lookup = createLookup({
   braveSearch: createBraveSearch(),
   braveApiKey,
 });
-const turns = createTurnRunner({ hot, store, llm, calibrator, client, describer, imageFetcher, lookup });
+const turns = createTurnRunner({ hot, store, llm, calibrator, client, describer, imageFetcher, lookup, images });
 const getSelfName = (guildId) => client.guilds.cache.get(guildId)?.members.me?.displayName ?? client.user?.username ?? 'bot';
 // THE way memory starts (docs/prompt-contract.md, "The warmup"): sample-based,
 // resumable, mutes the persona while a run is in flight (see isWarmingUp below).
@@ -176,6 +179,8 @@ const admin = createAdmin({
   describer,
   // /nep ping classifier: whether the web lookup is on and has a search key.
   lookup,
+  // The image client's quota and model family, for the owner commands.
+  images,
 });
 const onInteraction = createInteractionHandler({ hot, admin, getGuildId });
 

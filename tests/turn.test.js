@@ -11,6 +11,7 @@ import { between, typingMs, resolveMentions, createTurnRunner, parseRewatchPick,
 import { fill } from '../src/discord/format.js';
 import { labels } from './fixtures/labels.js';
 import { withCapturedLogs } from './fixtures/capture-logs.js';
+import { ImageCapError, ImageGenError } from '../src/llm/images.js';
 
 function rngReturning(value) {
   return () => value;
@@ -1937,4 +1938,288 @@ test('createTurnRunner: lookup -- senses.search reaches the request only when lo
     assert.equal(user.includes(labels.senses.search), hasKey);
     assert.ok(user.includes(labels.senses.linksRead), 'reading links needs no search key');
   }
+});
+
+// ---------------------------------------------------------------------------
+// Drawing: the persona's <draw> goes to the image client after its messages;
+// a failed generation gets its own follow-up turn.
+
+const DRAW_IMAGE_CFG = { maxPromptChars: 800, reference: 'avatar', referenceMaxBytes: 4_000_000 };
+
+/** A fake createImageGen()-shaped dependency (see src/llm/images.js). */
+function fakeImages({ error = null, mediaType = 'image/png', quota = { used: 0, cap: 5, userUsed: 0, userCap: 3, spent: false, userSpent: false } } = {}) {
+  const generateCalls = [];
+  const quotaCalls = [];
+  return {
+    generateCalls,
+    quotaCalls,
+    generate: async (args) => {
+      generateCalls.push(args);
+      if (error) throw error;
+      return { buffer: Buffer.from('fake picture'), mediaType, cost: 0.02, usage: {}, model: 'fake/model', seconds: 1.5 };
+    },
+    quota: (args) => {
+      quotaCalls.push(args);
+      return quota;
+    },
+  };
+}
+
+/** A fake LLM answering each call with the next text of `answers` (the last one repeats). */
+function sequenceLlm(answers) {
+  const calls = [];
+  return {
+    calls,
+    complete: async (messages) => {
+      calls.push(messages);
+      return { text: answers[Math.min(calls.length - 1, answers.length - 1)], usage: {}, estimated: 10 };
+    },
+  };
+}
+
+function drawHot(features = {}, image = {}, bot = {}) {
+  const hot = fakeHot({ typingSimulation: false, ...features }, bot, { image: { ...DRAW_IMAGE_CFG, ...image } });
+  hot.prompts.draw = 'Drawing for {{name}}.\n\n{{appearance}}\n\n{{request}}';
+  hot.prompts.appearance = '{{name}} wears a green scarf.';
+  hot.prompts.reply = 'Someone called you: {{author}}, they {{trigger}}.';
+  return hot;
+}
+
+async function runDrawTurn({ answers, hot = drawHot(), images = fakeImages(), client = fakeClient(), imageFetcher = fakeImageFetcher(), withTrigger = true } = {}) {
+  const raw = rawMessage({ id: 'm1', authorId: 'u1', authorName: 'Alice', content: 'draw me a cat' });
+  const channel = fakeTurnChannel({ id: 'c1', name: 'general', historyMessages: [raw] });
+  const llm = sequenceLlm(answers);
+  const turns = createTurnRunner({ hot, store: fakeStore(), llm, calibrator: identityCalibrator(), client, images, imageFetcher });
+  const params = withTrigger
+    ? { channel, mode: 'reply', trigger: normalizedTrigger(raw), triggerKind: 'mention' }
+    : { channel, mode: 'interject' };
+  const { result, logs } = await withCapturedLogs(() => turns.runTurn(params));
+  return { result, logs, channel, llm, images, imageFetcher, turns };
+}
+
+function userTextOf(messages) {
+  const content = messages[1].content;
+  return Array.isArray(content) ? content.find((part) => part.type === 'text').text : content;
+}
+
+test('runTurn: a <draw> after <msg> posts the messages then a file', async () => {
+  const { result, channel, images } = await runDrawTurn({ answers: ['<msg>one sec</msg><msg>here</msg><draw reply="#1">a cat on a roof</draw>'] });
+
+  assert.equal(result.outcome, 'spoke');
+  assert.equal(result.drawFailed, undefined);
+  assert.equal(channel.sent.length, 3);
+  assert.equal(channel.sent[0].content, 'one sec');
+  assert.equal(channel.sent[1].content, 'here');
+  const file = channel.sent[2];
+  assert.equal(file.content, undefined);
+  assert.equal(file.files.length, 1);
+  assert.ok(file.files[0].name.endsWith('.png'));
+  assert.ok(Buffer.isBuffer(file.files[0].attachment));
+  assert.deepEqual(file.reply, { messageReference: 'm1', failIfNotExists: false });
+  assert.deepEqual(file.allowedMentions, { parse: [] });
+
+  assert.equal(images.generateCalls.length, 1);
+  const call = images.generateCalls[0];
+  assert.equal(call.userId, 'u1');
+  assert.equal(call.reference, null, 'a non-self picture never carries the avatar');
+  assert.equal(call.prompt, 'Drawing for Bot.\n\na cat on a roof');
+});
+
+test('runTurn: the file name follows the media type (image/jpeg -> .jpg)', async () => {
+  const { channel } = await runDrawTurn({ answers: ['<draw>a cat</draw>'], images: fakeImages({ mediaType: 'image/jpeg' }) });
+  assert.equal(channel.sent[0].files[0].name, 'image.jpg');
+});
+
+test('runTurn: the draw request is clamped to image.maxPromptChars', async () => {
+  const { images } = await runDrawTurn({ answers: ['<draw>abcdefghij</draw>'], hot: drawHot({}, { maxPromptChars: 4 }) });
+  assert.ok(images.generateCalls[0].prompt.endsWith('\n\nabcd'));
+});
+
+test('runTurn: a self <draw> passes the avatar as reference', async () => {
+  const avatarCalls = [];
+  const client = fakeClient();
+  client.user.displayAvatarURL = (options) => {
+    avatarCalls.push(options);
+    return 'https://cdn.example.com/avatar.png';
+  };
+  const imageFetcher = fakeImageFetcher({ dataUrl: 'data:image/png;base64,YXZhdGFy', bytes: 6, contentType: 'image/png' });
+  const { images } = await runDrawTurn({ answers: ['<draw self="yes">me waving</draw>'], client, imageFetcher });
+
+  assert.deepEqual(avatarCalls, [{ extension: 'png', size: 1024, forceStatic: true }]);
+  assert.equal(imageFetcher.calls.length, 1);
+  assert.equal(imageFetcher.calls[0].url, 'https://cdn.example.com/avatar.png');
+  assert.equal(imageFetcher.calls[0].options.maxBytes, DRAW_IMAGE_CFG.referenceMaxBytes);
+  assert.equal(imageFetcher.calls[0].options.timeoutMs, 10_000);
+  assert.equal(images.generateCalls[0].reference, 'data:image/png;base64,YXZhdGFy');
+  assert.ok(images.generateCalls[0].prompt.includes('Bot wears a green scarf.'), 'a self picture carries the appearance');
+});
+
+test('runTurn: reference none skips the avatar', async () => {
+  let avatarAsked = false;
+  const client = fakeClient();
+  client.user.displayAvatarURL = () => {
+    avatarAsked = true;
+    return 'https://cdn.example.com/avatar.png';
+  };
+  const { images, imageFetcher } = await runDrawTurn({ answers: ['<draw self="yes">me waving</draw>'], hot: drawHot({}, { reference: 'none' }), client });
+
+  assert.equal(avatarAsked, false);
+  assert.equal(imageFetcher.calls.length, 0);
+  assert.equal(images.generateCalls[0].reference, null);
+});
+
+test('runTurn: an avatar that cannot be fetched is logged and the picture is drawn without it', async () => {
+  const client = fakeClient();
+  client.user.displayAvatarURL = () => 'https://cdn.example.com/avatar.png';
+  const { images, channel, logs } = await runDrawTurn({ answers: ['<draw self="yes">me</draw>'], client, imageFetcher: fakeImageFetcher(null) });
+
+  assert.ok(logs.some((l) => l.msg === 'turn: avatar reference unavailable'));
+  assert.equal(images.generateCalls[0].reference, null);
+  assert.equal(channel.sent.length, 1);
+});
+
+test('runTurn: dry-run logs the draw prompt and never calls generate', async () => {
+  const mirrorSent = [];
+  const client = fakeClient({ channels: { fetch: async () => ({ send: async (payload) => mirrorSent.push(payload) }) } });
+  const { result, logs, channel, images } = await runDrawTurn({
+    answers: ['<draw self="yes">me on a bicycle</draw>'],
+    hot: drawHot({ dryRun: true }, {}, { dryRunChannelId: 'mirror1' }),
+    client,
+  });
+
+  assert.equal(result.outcome, 'spoke');
+  assert.equal(result.dryRun, true);
+  assert.equal(result.drawFailed, undefined);
+  assert.equal(images.generateCalls.length, 0);
+  assert.equal(channel.sent.length, 0);
+  const line = logs.find((l) => l.msg === 'dry-run: would draw');
+  assert.ok(line);
+  assert.equal(line.channel, 'c1');
+  assert.equal(line.channelName, 'general');
+  assert.equal(line.mode, 'reply');
+  assert.equal(line.self, true);
+  assert.equal(line.prompt, 'me on a bicycle');
+  assert.equal(mirrorSent.length, 1);
+  assert.equal(mirrorSent[0].content, '[dry-run] #general · reply · draw (self)\nme on a bicycle');
+});
+
+test('runTurn: a failed generation runs a second turn with triggerKind drawFailed', async () => {
+  const { result, llm, channel, images, logs } = await runDrawTurn({
+    answers: ['<msg>on it</msg><draw>a cat</draw>', '<msg>it did not work</msg><draw>a cat again</draw>'],
+    images: fakeImages({ error: new ImageGenError('moderation') }),
+  });
+
+  assert.equal(result.outcome, 'spoke');
+  assert.equal(result.drawFailed, 'moderation');
+  assert.equal(llm.calls.length, 2, 'exactly one extra turn');
+  const second = userTextOf(llm.calls[1]);
+  assert.ok(second.includes(fill(labels.triggers.drawFailed, { reason: labels.draw.reasons.moderation })));
+  assert.equal(images.generateCalls.length, 1, 'the <draw> of the second answer is dropped');
+  assert.deepEqual(channel.sent.map((p) => p.content), ['on it', 'it did not work']);
+  const answered = logs.find((l) => l.msg === 'turn: draw failure answered');
+  assert.ok(answered);
+  assert.equal(answered.channel, 'c1');
+  assert.equal(answered.outcome, 'spoke');
+});
+
+test('runTurn: a cap refusal and an empty picture reach the second turn as their reason labels', async () => {
+  for (const [error, reason] of [
+    [new ImageCapError('userDaily'), 'userDaily'],
+    [new ImageGenError('empty'), 'error'],
+  ]) {
+    const { result, llm } = await runDrawTurn({ answers: ['<draw>a cat</draw>', '<msg>no</msg>'], images: fakeImages({ error }) });
+    assert.equal(result.drawFailed, reason);
+    assert.ok(userTextOf(llm.calls[1]).includes(fill(labels.triggers.drawFailed, { reason: labels.draw.reasons[reason] })));
+  }
+});
+
+test('runTurn: an upload failure counts as a failed drawing', async () => {
+  const hot = drawHot();
+  const raw = rawMessage({ id: 'm1' });
+  const channel = fakeTurnChannel({ historyMessages: [raw] });
+  const send = channel.send;
+  channel.send = async (payload) => {
+    if (payload.files) throw new Error('upload rejected');
+    return send(payload);
+  };
+  const llm = sequenceLlm(['<draw>a cat</draw>', '<msg>no</msg>']);
+  const turns = createTurnRunner({ hot, store: fakeStore(), llm, calibrator: identityCalibrator(), client: fakeClient(), images: fakeImages() });
+  const { result } = await withCapturedLogs(() => turns.runTurn({ channel, mode: 'reply', trigger: normalizedTrigger(raw), triggerKind: 'mention' }));
+
+  assert.equal(result.drawFailed, 'error');
+  assert.equal(llm.calls.length, 2);
+  assert.deepEqual(channel.sent.map((p) => p.content), ['no']);
+  assert.equal(turns.isAnyBusy(), false);
+});
+
+test('runTurn: a failed generation without a trigger runs no second turn', async () => {
+  const { result, llm, logs, images } = await runDrawTurn({
+    answers: ['<draw>a sunset</draw>'],
+    images: fakeImages({ error: new ImageGenError('timeout') }),
+    withTrigger: false,
+  });
+
+  assert.equal(result.outcome, 'spoke');
+  assert.equal(result.drawFailed, 'timeout');
+  assert.equal(llm.calls.length, 1);
+  assert.equal(images.generateCalls[0].userId, null);
+  const line = logs.find((l) => l.msg === 'turn: draw failed');
+  assert.ok(line);
+  assert.equal(line.reason, 'timeout');
+});
+
+test('runTurn: features.imageGeneration false drops the tag', async () => {
+  const { result, channel, images, llm } = await runDrawTurn({
+    answers: ['<msg>hi</msg><draw>a cat</draw>'],
+    hot: drawHot({ imageGeneration: false }),
+  });
+
+  assert.equal(result.outcome, 'spoke');
+  assert.equal(images.generateCalls.length, 0);
+  assert.equal(images.quotaCalls.length, 0, 'no quota lookup without the feature');
+  assert.equal(channel.sent.length, 1);
+  assert.equal(channel.sent[0].files, undefined);
+  assert.ok(!userTextOf(llm.calls[0]).includes(labels.senses.draw));
+});
+
+test('runTurn: a <draw> alone with the feature off, or without an image client, is a skip', async () => {
+  const off = await runDrawTurn({ answers: ['<draw>a cat</draw>'], hot: drawHot({ imageGeneration: false }) });
+  assert.equal(off.result.outcome, 'skip');
+  assert.equal(off.channel.sent.length, 0);
+
+  const raw = rawMessage({ id: 'm1' });
+  const channel = fakeTurnChannel({ historyMessages: [raw] });
+  const turns = createTurnRunner({ hot: drawHot(), store: fakeStore(), llm: sequenceLlm(['<draw>a cat</draw>']), calibrator: identityCalibrator(), client: fakeClient() });
+  const { result } = await withCapturedLogs(() => turns.runTurn({ channel, mode: 'reply', trigger: normalizedTrigger(raw), triggerKind: 'mention' }));
+  assert.equal(result.outcome, 'skip');
+  assert.equal(channel.sent.length, 0);
+});
+
+test('runTurn: a <draw> alone is a spoken turn', async () => {
+  const { result, channel, llm, images, logs } = await runDrawTurn({ answers: ['<draw>a cat</draw>'] });
+
+  assert.equal(result.outcome, 'spoke');
+  assert.equal(channel.sent.length, 1);
+  assert.equal(channel.sent[0].content, undefined);
+  assert.equal(channel.sent[0].files.length, 1);
+  assert.equal(channel.typingCalls.length, 0);
+  assert.deepEqual(images.quotaCalls, [{ userId: 'u1' }]);
+  assert.ok(userTextOf(llm.calls[0]).includes(labels.senses.draw), 'the draw sense reaches the request');
+  const answered = logs.find((l) => l.msg === 'turn: model answered');
+  assert.equal(answered.draw, true);
+  const drew = logs.find((l) => l.msg === 'turn: drew');
+  assert.ok(drew);
+  assert.equal(drew.channel, 'c1');
+  assert.equal(drew.self, false);
+  assert.equal(drew.bytes, Buffer.byteLength('fake picture'));
+  assert.ok(!JSON.stringify(logs).includes('a cat'), 'the draw prompt is never logged outside dry-run');
+});
+
+test('runTurn: a follow-up turn posts the picture without a Discord reply', async () => {
+  const raw = rawMessage({ id: 'm1' });
+  const channel = fakeTurnChannel({ historyMessages: [raw] });
+  const turns = createTurnRunner({ hot: drawHot(), store: fakeStore(), llm: sequenceLlm(['<draw reply="#1">a cat</draw>']), calibrator: identityCalibrator(), client: fakeClient(), images: fakeImages() });
+  await withCapturedLogs(() => turns.runTurn({ channel, mode: 'reply', trigger: normalizedTrigger(raw), triggerKind: 'followUp' }));
+  assert.equal(channel.sent.length, 1);
+  assert.equal(channel.sent[0].reply, undefined);
 });

@@ -4,7 +4,7 @@
 // the prompt contract.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildRequest, renderProfile } from '../src/behavior/prompt.js';
+import { buildDrawPrompt, buildRequest, renderProfile } from '../src/behavior/prompt.js';
 import { estimateTokens } from '../src/llm/tokens.js';
 import { fill } from '../src/discord/format.js';
 import { labels } from './fixtures/labels.js';
@@ -1811,4 +1811,83 @@ test('buildRequest: learned without the unsureMark label appends no mark', () =>
     buildRequest(baseInput({ config: fakeConfig({ memory: { confirmAfter: 2 } }), prompts: fakePrompts({ labels: { ...labels, aboutChat: noMark } }), guildMemory })),
   );
   assert.equal(text, fill(labels.aboutChat.learned, { text: 'café closes at nine' }));
+});
+
+// --- drawing ----------------------------------------------------------------
+
+const DRAW_PROMPTS = {
+  draw: 'Drawing for {{name}}.\n\n## Look\n\n{{appearance}}\n\n## Request\n\n{{request}}\n',
+  appearance: '{{name}}: short hair, green scarf.',
+};
+
+test('buildDrawPrompt: fills name and request and blanks appearance for a non-self picture', () => {
+  const text = buildDrawPrompt({ prompts: DRAW_PROMPTS, selfName: 'Nept', request: 'a cat on a roof', self: false });
+  assert.ok(text.startsWith('Drawing for Nept.'));
+  assert.ok(text.endsWith('a cat on a roof'));
+  assert.ok(!text.includes('{{appearance}}'));
+  assert.ok(!text.includes('green scarf'));
+  assert.ok(!text.includes('\n\n\n'), 'the blanked appearance leaves no double blank line');
+});
+
+test('buildDrawPrompt: includes the rendered appearance for a self picture', () => {
+  const text = buildDrawPrompt({ prompts: DRAW_PROMPTS, selfName: 'Nept', request: 'waving at the café', self: true });
+  assert.ok(text.includes('## Look\n\nNept: short hair, green scarf.\n\n## Request'));
+  assert.ok(text.endsWith('waving at the café'));
+});
+
+const DRAW_OPEN = { spent: false, userSpent: false };
+
+test('renderSenses: draw line shows when the feature is on', () => {
+  for (const features of [{ imageGeneration: true }, {}]) {
+    const senses = sensesOf(buildRequest(baseInput({ config: fakeConfig({ features }), drawQuota: DRAW_OPEN }))).split('\n');
+    const at = senses.indexOf(labels.senses.draw);
+    assert.ok(at !== -1, 'a missing imageGeneration key counts as on');
+    assert.equal(senses[at + 1], labels.senses.files, 'the draw line sits right before the files line');
+    assert.ok(!senses.includes(labels.senses.drawSpent));
+    assert.ok(!senses.includes(labels.senses.drawSpentUser));
+  }
+});
+
+test('renderSenses: draw line is absent when features.imageGeneration is false', () => {
+  const senses = sensesOf(buildRequest(baseInput({ config: fakeConfig({ features: { imageGeneration: false } }), drawQuota: { spent: true, userSpent: true } })));
+  for (const line of [labels.senses.draw, labels.senses.drawSpent, labels.senses.drawSpentUser]) assert.ok(!senses.includes(line));
+});
+
+test('renderSenses: draw line is absent without a drawQuota (no image client wired)', () => {
+  const senses = sensesOf(buildRequest(baseInput()));
+  for (const line of [labels.senses.draw, labels.senses.drawSpent, labels.senses.drawSpentUser]) assert.ok(!senses.includes(line));
+});
+
+test('renderSenses: shows drawSpent when the daily quota is spent', () => {
+  const senses = sensesOf(buildRequest(baseInput({ drawQuota: { spent: true, userSpent: true } }))).split('\n');
+  assert.ok(senses.includes(labels.senses.drawSpent));
+  assert.ok(!senses.includes(labels.senses.draw));
+  assert.ok(!senses.includes(labels.senses.drawSpentUser));
+});
+
+test('renderSenses: shows drawSpentUser when the member\'s quota is spent', () => {
+  const senses = sensesOf(buildRequest(baseInput({ drawQuota: { spent: false, userSpent: true } }))).split('\n');
+  assert.ok(senses.includes(labels.senses.drawSpentUser));
+  assert.ok(!senses.includes(labels.senses.draw));
+  assert.ok(!senses.includes(labels.senses.drawSpent));
+});
+
+test('renderSenses: an older labels set without senses.draw shows no draw line', () => {
+  const older = { ...labels, senses: { ...labels.senses, draw: undefined, drawSpent: undefined, drawSpentUser: undefined } };
+  const senses = sensesOf(buildRequest(baseInput({ prompts: fakePrompts({ labels: older }), drawQuota: DRAW_OPEN }))).split('\n');
+  assert.equal(senses[senses.length - 1], labels.senses.files);
+});
+
+test('buildRequest: a drawFailed turn fills triggers.drawFailed with the reason label', () => {
+  const trigger = makeMessage(1, NOW - MIN, { authorName: 'Alice' });
+  const request = buildRequest(baseInput({ history: [trigger], trigger, triggerKind: 'drawFailed', drawReason: 'moderation' }));
+  const user = request.messages[1].content;
+  assert.ok(user.includes(`they ${fill(labels.triggers.drawFailed, { reason: labels.draw.reasons.moderation })}.`));
+  assert.ok(!user.includes('{reason}'));
+});
+
+test('buildRequest: a drawFailed reason without a label is passed through as is', () => {
+  const trigger = makeMessage(1, NOW - MIN, { authorName: 'Alice' });
+  const request = buildRequest(baseInput({ history: [trigger], trigger, triggerKind: 'drawFailed', drawReason: 'quux' }));
+  assert.ok(request.messages[1].content.includes(fill(labels.triggers.drawFailed, { reason: 'quux' })));
 });

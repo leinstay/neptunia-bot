@@ -75,6 +75,9 @@ export const labels = {
     linksRead: 'links show their site, title and snippet; a link may come with an excerpt of the page, read first-hand',
     search: 'a question you cannot answer may come with a <lookup> block of what was found online',
     files: 'files show only their name, or a short preview for plain text ones',
+    draw: 'you can hand a scene to a drawing sub-process; the picture is posted after your words',
+    drawSpent: 'the daily picture quota is spent, no drawing until tomorrow',
+    drawSpentUser: 'this person has used up their pictures for today',
   },
   tempo: {
     counts: 'messages in the last 10 min: {last10min}, last hour: {lastHour}, last day: {lastDay}',
@@ -156,6 +159,16 @@ export const labels = {
     reply: 'replied to your message',
     name: 'mentioned you by name, without a tag',
     followUp: 'continued the conversation with you without tagging you',
+    drawFailed: 'asked for a picture, the drawing failed: {reason}',
+  },
+  draw: {
+    reasons: {
+      moderation: 'filtered',
+      daily: 'daily limit',
+      userDaily: 'member daily limit',
+      timeout: 'timed out',
+      error: 'failed',
+    },
   },
   ping: {
     prompt: 'Reply with one word: pong',

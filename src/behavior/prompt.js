@@ -485,6 +485,23 @@ export function fillPromptTemplate(template, values) {
   return (template ?? '').replace(/\{\{(\w+)\}\}/g, (all, key) => values[key] ?? all);
 }
 
+/**
+ * The drawing sub-process's prompt (prompts/draw.md): `{{name}}` and
+ * `{{request}}` filled, `{{appearance}}` filled with prompts/appearance.md
+ * (its own `{{name}}` filled) for a picture the persona is in, else blanked;
+ * then runs of blank lines collapse to one and the result is trimmed.
+ * `request` is expected already clamped to `image.maxPromptChars` by the
+ * caller (src/behavior/turn.js).
+ * @param {{ prompts: object, selfName: string, request: string, self: boolean }} args
+ * @returns {string}
+ */
+export function buildDrawPrompt({ prompts, selfName, request, self }) {
+  const appearance = self ? fillPromptTemplate(prompts?.appearance ?? '', { name: selfName }).trim() : '';
+  return fillPromptTemplate(prompts?.draw ?? '', { name: selfName, appearance, request: request ?? '' })
+    .replace(/(?:\r?\n){3,}/g, '\n\n')
+    .trim();
+}
+
 /** A deployment with no/broken labels.json must fail loudly, not send a broken prompt. */
 function requireLabels(prompts) {
   const labels = prompts?.labels;
@@ -533,8 +550,10 @@ function renderLookup(lookup, labels) {
  * under the live config (see docs/prompt-contract.md, "`<senses>`").
  * Returns '' when `labels.senses` is missing entirely, so an older
  * deployment's labels.json never breaks — the block is simply omitted.
+ * `drawQuota` (`{ spent, userSpent }` from the image client's quota(), or
+ * undefined when no image client is wired) picks the drawing line.
  */
-function renderSenses(config, labels, { searchAvailable = false } = {}) {
+function renderSenses(config, labels, { searchAvailable = false, drawQuota } = {}) {
   const senses = labels.senses;
   if (!senses) return '';
   const visionOn = config.features?.vision !== false;
@@ -573,6 +592,12 @@ function renderSenses(config, labels, { searchAvailable = false } = {}) {
   lines.push(senses.voice, videoOn ? (senses.linksWatch ?? senses.links) : senses.links);
   if (readOn && senses.linksRead) lines.push(senses.linksRead);
   if (searchOn && senses.search) lines.push(senses.search);
+  // Drawing (features.imageGeneration, a missing key counts as on) needs the
+  // image client (`drawQuota` present): one line, the spent forms first. An
+  // older labels.json without senses.draw shows nothing.
+  if (drawQuota && config.features?.imageGeneration !== false && senses.draw) {
+    lines.push(drawQuota.spent ? senses.drawSpent : drawQuota.userSpent ? senses.drawSpentUser : senses.draw);
+  }
   lines.push(senses.files);
   return lines.filter(Boolean).join('\n');
 }
@@ -750,6 +775,10 @@ function splitPeople(otherProfiles, candidateProfiles, history, trigger, exclude
  *   search found this turn (src/web/lookup.js#search), rendered as `<lookup>`.
  * @param {boolean} [input.searchAvailable]  Whether a web search key is configured
  *   (lookup.hasSearch()); `senses.search` renders only when it is true.
+ * @param {{ spent: boolean, userSpent: boolean }} [input.drawQuota]  The image client's
+ *   quota for this turn (src/llm/images.js#quota); omitted -> no drawing line in `<senses>`.
+ * @param {string} [input.drawReason]  For `triggerKind: 'drawFailed'`: the failure reason,
+ *   rendered through `labels.draw.reasons` into `labels.triggers.drawFailed`'s `{reason}`.
  * @returns {{ messages: object[], stats: object, idByIndex: Map<number, string>, tempo: object }}
  */
 export function buildRequest(input) {
@@ -789,8 +818,13 @@ export function buildRequest(input) {
   const triggerItem = trigger ? chatItems.find((item) => item.id === trigger.id) : null;
   // A follow-up (triggerKind: 'followUp') falls back to labels.triggers.reply
   // when an older labels.json has no dedicated label yet -- see prompt-contract.md.
-  const triggerLabel =
+  // A failed drawing (triggerKind: 'drawFailed') names its reason through labels.draw.reasons.
+  const rawTriggerLabel =
     triggerKind === 'followUp' ? (labels.triggers?.followUp ?? labels.triggers?.reply ?? '') : (labels.triggers?.[triggerKind] ?? '');
+  const triggerLabel =
+    triggerKind === 'drawFailed'
+      ? fill(rawTriggerLabel, { reason: labels.draw?.reasons?.[input.drawReason] ?? input.drawReason ?? '' })
+      : rawTriggerLabel;
   const taskValues = {
     name: selfName,
     author: trigger?.authorName ?? '',
@@ -804,7 +838,7 @@ export function buildRequest(input) {
   const forcedText = forced && typeof prompts.forced === 'string' && prompts.forced.trim() ? fillPromptTemplate(prompts.forced, taskValues) : '';
   const task = forcedText ? `${baseTask}\n\n${forcedText}` : baseTask;
 
-  const sensesText = renderSenses(config, labels, { searchAvailable: input.searchAvailable === true });
+  const sensesText = renderSenses(config, labels, { searchAvailable: input.searchAvailable === true, drawQuota: input.drawQuota });
 
   const neighborItems = neighbors.map(
     ({ channelName, messages }) =>
