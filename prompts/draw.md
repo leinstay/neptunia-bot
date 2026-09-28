@@ -25,6 +25,10 @@ If a character description follows, it is the exact look of {{name}} — follow 
 
 The appearance text and any reference image define identity only: face shape, hair, eye colour, build, and signature clothing. Expression, mood, pose, camera angle, framing and background come from the request, not from the reference — never copy, trace or restage the reference image. When the request implies a different outfit or state (sleeping, soaked, in armour, in pyjamas), keep the identity and dress for the scene; carry signature items only when they naturally fit.
 
+When the request does not specify an expression, choose one that fits the action and mood of the scene — reading calls for calm absorption, losing a game for anger, falling asleep for closed eyes. Never default to the expression in the reference image; that is a posed snapshot, not a universal face.
+
+When the request does not specify clothing, dress the character for the setting, season and activity: a beach in heat calls for summer clothes, snow and cold for winter layers, bed for nightwear, water for swimwear. The character's usual outfit is the default only for ordinary indoor or city scenes at mild temperature. Signature small items — a hair clip, a pendant — may stay whenever they plausibly fit the scene.
+
 {{appearance}}
 
 ## Request
