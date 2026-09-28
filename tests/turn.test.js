@@ -7,6 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { PermissionFlagsBits } from 'discord.js';
 import { between, typingMs, resolveMentions, createTurnRunner, parseRewatchPick, parseRewatchPickDetailed, parseLookupQuery } from '../src/behavior/turn.js';
 import { fill } from '../src/discord/format.js';
 import { labels } from './fixtures/labels.js';
@@ -155,7 +156,7 @@ function normalizedTrigger(raw) {
   };
 }
 
-function fakeTurnChannel({ id = 'c1', name = 'general', guildId = 'g1', historyMessages = [] } = {}) {
+function fakeTurnChannel({ id = 'c1', name = 'general', guildId = 'g1', historyMessages = [], attachFiles = true } = {}) {
   const guild = { id: guildId, members: { me: { displayName: 'Bot' } }, channels: { cache: new Map() } };
   const sent = [];
   const typingCalls = [];
@@ -164,6 +165,9 @@ function fakeTurnChannel({ id = 'c1', name = 'general', guildId = 'g1', historyM
     id,
     name,
     guild,
+    viewable: true,
+    // Every permission is granted, Attach Files only when `attachFiles`.
+    permissionsFor: () => ({ has: (flag) => attachFiles || flag !== PermissionFlagsBits.AttachFiles }),
     sendTyping: async () => {
       typingCalls.push(Date.now());
     },
@@ -1985,9 +1989,9 @@ function drawHot(features = {}, image = {}, bot = {}) {
   return hot;
 }
 
-async function runDrawTurn({ answers, hot = drawHot(), images = fakeImages(), client = fakeClient(), imageFetcher = fakeImageFetcher(), withTrigger = true } = {}) {
+async function runDrawTurn({ answers, hot = drawHot(), images = fakeImages(), client = fakeClient(), imageFetcher = fakeImageFetcher(), withTrigger = true, attachFiles = true } = {}) {
   const raw = rawMessage({ id: 'm1', authorId: 'u1', authorName: 'Alice', content: 'draw me a cat' });
-  const channel = fakeTurnChannel({ id: 'c1', name: 'general', historyMessages: [raw] });
+  const channel = fakeTurnChannel({ id: 'c1', name: 'general', historyMessages: [raw], attachFiles });
   const llm = sequenceLlm(answers);
   const turns = createTurnRunner({ hot, store: fakeStore(), llm, calibrator: identityCalibrator(), client, images, imageFetcher });
   const params = withTrigger
@@ -2135,8 +2139,12 @@ test('runTurn: a failed generation runs a second turn with triggerKind drawFaile
   assert.equal(result.outcome, 'spoke');
   assert.equal(result.drawFailed, 'moderation');
   assert.equal(llm.calls.length, 2, 'exactly one extra turn');
+  assert.ok(userTextOf(llm.calls[0]).includes(labels.senses.draw), 'the first turn offers drawing');
   const second = userTextOf(llm.calls[1]);
   assert.ok(second.includes(fill(labels.triggers.drawFailed, { reason: labels.draw.reasons.moderation })));
+  for (const line of [labels.senses.draw, labels.senses.drawSpent, labels.senses.drawSpentUser]) {
+    assert.ok(!second.includes(line), 'the drawFailed turn offers no drawing');
+  }
   assert.equal(images.generateCalls.length, 1, 'the <draw> of the second answer is dropped');
   assert.deepEqual(channel.sent.map((p) => p.content), ['on it', 'it did not work']);
   const answered = logs.find((l) => l.msg === 'turn: draw failure answered');
@@ -2203,6 +2211,22 @@ test('runTurn: features.imageGeneration false drops the tag', async () => {
   assert.equal(channel.sent.length, 1);
   assert.equal(channel.sent[0].files, undefined);
   assert.ok(!userTextOf(llm.calls[0]).includes(labels.senses.draw));
+});
+
+test('runTurn: a channel without Attach Files offers no drawing and never generates', async () => {
+  const { result, channel, images, llm } = await runDrawTurn({
+    answers: ['<msg>hi</msg><draw>a cat</draw>'],
+    attachFiles: false,
+  });
+
+  assert.equal(result.outcome, 'spoke');
+  assert.equal(result.drawFailed, undefined);
+  assert.equal(images.generateCalls.length, 0, 'nothing is generated (or paid for)');
+  assert.equal(images.quotaCalls.length, 0, 'no quota lookup where no file can be posted');
+  assert.equal(channel.sent.length, 1);
+  assert.equal(channel.sent[0].files, undefined);
+  assert.ok(!userTextOf(llm.calls[0]).includes(labels.senses.draw), 'no drawing line in the senses');
+  assert.equal(llm.calls.length, 1, 'no drawFailed turn');
 });
 
 test('runTurn: a <draw> alone with the feature off, or without an image client, is a skip', async () => {

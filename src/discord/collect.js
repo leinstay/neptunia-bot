@@ -296,6 +296,18 @@ export function canSend(channel) {
 }
 
 /**
+ * Whether the bot may attach files in `channel` (a drawing is posted as one).
+ * Resolved like canSend: no bot member, an unviewable channel or no
+ * permissions for the member count as no.
+ * @returns {boolean}
+ */
+export function canAttach(channel) {
+  const me = channel.guild.members.me;
+  if (!me || !channel.viewable) return false;
+  return channel.permissionsFor(me)?.has(PermissionFlagsBits.AttachFiles) ?? false;
+}
+
+/**
  * Last `limit` messages of a channel, oldest first, normalized.
  * @param {number} [embedTextChars]  Caps link/gif embed title+description (config.media.embedTextChars).
  * @param {string[]} [videoSites]  Video-site hosts whose typed URLs become link items (config.media.video.sites).

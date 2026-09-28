@@ -4,7 +4,7 @@
 // Used for answering a call ('reply') and for spontaneous turns
 // ('interject' / 'initiate').
 
-import { fetchHistory, fetchNeighbors, withTextPreviews } from '../discord/collect.js';
+import { canAttach, fetchHistory, fetchNeighbors, withTextPreviews } from '../discord/collect.js';
 import { buildDrawPrompt, buildRequest } from './prompt.js';
 import { classifierTextModel } from './mention.js';
 import { parseOutput } from '../llm/parse.js';
@@ -250,8 +250,9 @@ function describableCandidates(history, pickedIds) {
 }
 
 /**
- * `images` (src/llm/images.js#createImageGen) is optional: absent, or
- * `features.imageGeneration` false, the persona's `<draw>` is dropped and no
+ * `images` (src/llm/images.js#createImageGen) is optional: absent,
+ * `features.imageGeneration` false, a `drawFailed` turn, or a channel where
+ * the bot cannot attach files, the persona's `<draw>` is dropped and no
  * drawing line reaches `<senses>`.
  *
  * `lookup` (src/web/lookup.js#createLookup) is optional too: absent, or
@@ -896,8 +897,9 @@ export function createTurnRunner({
       }
 
       const neighbors = await fetchNeighbors(channel, config, selfId, now);
-      // Drawing (features.imageGeneration, a missing key counts as on) needs the image client.
-      const drawOn = Boolean(images) && features.imageGeneration !== false;
+      // Drawing (features.imageGeneration, a missing key counts as on) needs the image client
+      // and Attach Files here; a drawFailed turn answers the failure and never draws again.
+      const drawOn = Boolean(images) && features.imageGeneration !== false && triggerKind !== 'drawFailed' && canAttach(channel);
       const drawQuota = drawOn ? images.quota({ userId: trigger?.authorId ?? null }) : undefined;
       const request = buildRequest({
         config,
@@ -983,8 +985,8 @@ export function createTurnRunner({
       // Feature switches drop parts of the model's output before it is acted on.
       if (features.reactions === false) parsed.reactions = [];
       if (features.multiMessage === false) parsed.messages = parsed.messages.slice(0, 1);
-      // No image client, drawing off, or already answering a failed picture: the <draw> is dropped.
-      if (!drawOn || triggerKind === 'drawFailed') parsed.draw = null;
+      // No image client, drawing off, no Attach Files, or already answering a failed picture: the <draw> is dropped.
+      if (!drawOn) parsed.draw = null;
       const nothingToDo = parsed.messages.length === 0 && parsed.reactions.length === 0 && parsed.draw === null;
 
       log.info('turn: model answered', {

@@ -182,7 +182,8 @@ export function createImageGen({ apiKey, getConfig, state, fetchImpl = fetch, no
     }
 
     const body = JSON.stringify(buildBody({ cfg, family, prompt, reference }));
-    const retries = cfg.retries ?? 1;
+    // Normalised so a negative, NaN or non-numeric value still sends one request.
+    const retries = Math.max(0, Math.floor(Number(cfg.retries ?? 1)) || 0);
     const timeoutMs = cfg.timeoutMs ?? 120000;
     const started = now();
 

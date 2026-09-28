@@ -4,8 +4,8 @@
 // fixtures shaped just enough for normalizeMessage to read.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { normalizeMessage, fetchTextPreview, withTextPreviews, fetchHistory, fetchHistoryWindow } from '../src/discord/collect.js';
-import { MessageReferenceType } from 'discord.js';
+import { normalizeMessage, fetchTextPreview, withTextPreviews, fetchHistory, fetchHistoryWindow, canAttach } from '../src/discord/collect.js';
+import { MessageReferenceType, PermissionFlagsBits } from 'discord.js';
 import { videoUrlCacheKey } from '../src/discord/video-sites.js';
 
 function flagsWith(names) {
@@ -574,4 +574,28 @@ test('withTextPreviews: a message with no text attachments is returned as the sa
   const messages = [{ id: 'm1', attachments: [] }];
   const result = await withTextPreviews(messages, 20, fakeFetch(''));
   assert.equal(result[0], messages[0]);
+});
+
+/** A channel whose bot member holds exactly `granted` permission flags. */
+function permChannel({ granted = [], me = { id: 'self-id' }, viewable = true, permissionsFor } = {}) {
+  return {
+    viewable,
+    guild: { members: { me } },
+    permissionsFor: permissionsFor ?? ((member) => (member === me ? { has: (flag) => granted.includes(flag) } : null)),
+  };
+}
+
+test('canAttach: true when the bot member has Attach Files in the channel', () => {
+  assert.equal(canAttach(permChannel({ granted: [PermissionFlagsBits.SendMessages, PermissionFlagsBits.AttachFiles] })), true);
+});
+
+test('canAttach: false when the bot member can send but not attach files', () => {
+  assert.equal(canAttach(permChannel({ granted: [PermissionFlagsBits.SendMessages] })), false);
+});
+
+test('canAttach: false without the bot member, in a channel it cannot view, or with no resolved permissions', () => {
+  const all = [PermissionFlagsBits.AttachFiles];
+  assert.equal(canAttach(permChannel({ granted: all, me: null })), false);
+  assert.equal(canAttach(permChannel({ granted: all, viewable: false })), false);
+  assert.equal(canAttach(permChannel({ granted: all, permissionsFor: () => null })), false);
 });

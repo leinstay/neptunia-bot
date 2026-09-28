@@ -249,6 +249,19 @@ test('images: 502 is retried up to image.retries then fails with reason error', 
   assert.equal(state.data.imageCount, 1, 'one generate call counts once, retries included');
 });
 
+test('images: a negative or non-numeric image.retries still sends exactly one request and fails with reason error', async () => {
+  for (const retries of [-1, 'x']) {
+    const { gen, fetchImpl } = makeGen({ config: baseConfig({ retries }), fetchImpl: fakeFetch(errorResponse(502)) });
+    await assert.rejects(gen.generate({ prompt: 'a small boat' }), (err) => {
+      assert.ok(err instanceof ImageGenError, `retries ${retries}: an ImageGenError, not a TypeError`);
+      assert.equal(err.reason, 'error');
+      assert.equal(err.statusCode, 502);
+      return true;
+    });
+    assert.equal(fetchImpl.calls.length, 1, `retries ${retries}: one request`);
+  }
+});
+
 test('images: moderation-looking 400 is not retried and has reason moderation', async () => {
   const body = '{"error":{"code":"moderation_blocked","message":"Your request was rejected by the safety system."}}';
   const { gen, fetchImpl } = makeGen({ config: baseConfig({ retries: 3 }), fetchImpl: fakeFetch(errorResponse(400, body)) });
