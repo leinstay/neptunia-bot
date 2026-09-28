@@ -18,6 +18,7 @@
     "videoDescriptions": false,
     "videoRewatch": true,
     "webLookup": false,
+    "imageGeneration": true,
     "typingSimulation": true,
     "adminCommands": true
   },
@@ -192,6 +193,22 @@
     "maxPerDay": 60,
     "links": { "enabled": true, "prefill": true, "prefillPerUserPerDay": 10, "maxPerTurn": 2, "maxBytes": 1500000, "textChars": 6000, "summaryChars": 700, "maxOutputTokens": 300, "fetchTimeoutMs": 10000, "skipSites": ["cdn.discordapp.com", "media.discordapp.net", "tenor.com", "giphy.com", "klipy.com", "imgur.com", "i.redd.it", "v.redd.it", "pbs.twimg.com"] },
     "search": { "enabled": true, "maxPerTurn": 1, "results": 5, "summaryChars": 900, "maxOutputTokens": 400, "cacheHours": 24, "contextMessages": 50, "timeoutMs": 10000 }
+  },
+  "image": {
+    "model": "openai/gpt-image-2.5-flare",
+    "maxPerDay": 50,
+    "maxPerUserPerDay": 50,
+    "maxPerTurn": 1,
+    "maxPromptChars": 800,
+    "reference": "avatar",
+    "referenceMaxBytes": 4000000,
+    "outputFormat": "png",
+    "aspectRatio": "auto",
+    "timeoutMs": 120000,
+    "retries": 1,
+    "provider": null,
+    "openai": { "quality": "medium", "background": "auto", "moderation": "low" },
+    "google": { "resolution": "1K" }
   },
   "warmup": {
     "enabled": true,
