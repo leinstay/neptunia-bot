@@ -18,6 +18,8 @@ import { upsertLore } from '../src/memory/lore.js';
 import { createStore } from '../src/memory/store.js';
 import { createMemoryUpdater } from '../src/memory/update.js';
 import { createSpontaneous } from '../src/behavior/spontaneous.js';
+import { buildDrawPrompt } from '../src/behavior/prompt.js';
+import { familyOf, ImageCapError, ImageGenError } from '../src/llm/images.js';
 import { labels } from './fixtures/labels.js';
 
 // ---------------------------------------------------------------------------
@@ -338,6 +340,8 @@ function makeAdmin(rootDir, extra = {}) {
     warmup: extra.warmup,
     describer: extra.describer,
     lookup: extra.lookup,
+    images: extra.images,
+    imageFetcher: extra.imageFetcher,
   });
   return { admin, hot, store };
 }
@@ -495,7 +499,7 @@ function makeHotWithMedia(rootDir) {
   return hot;
 }
 
-test('run: model.show lists the five roles in order, then whether mediaDescriptions is on', async () => {
+test('run: model.show lists the five roles in order, the image model, then whether mediaDescriptions is on', async () => {
   const rootDir = makeRoot();
   const hot = makeHotWithMedia(rootDir);
   hot.config.classifier.text = 'openrouter/text-model';
@@ -509,6 +513,7 @@ test('run: model.show lists the five roles in order, then whether mediaDescripti
     'classifier.text: openrouter/text-model',
     'classifier.media: anthropic/claude-haiku-4.5',
     'classifier.video: -',
+    'image: -',
     'mediaDescriptions: off',
   ]);
 });
@@ -3654,4 +3659,290 @@ test('run: ping classifier with the ping label missing still appends the web lin
   const lines = (await admin.run('ping', { role: 'classifier' }, {})).split('\n');
   assert.equal(llm.calls.length, 0);
   assert.equal(lines.at(-1), 'web: API key — missing');
+});
+
+// ---------------------------------------------------------------------------
+// draw / the image lines of status and model.show (src/llm/images.js)
+// ---------------------------------------------------------------------------
+
+/** A fake image client: records every generate() call, answers with `picture` or throws `error`. */
+function fakeImages({ picture, error, quota } = {}) {
+  const calls = [];
+  return {
+    calls,
+    familyOf,
+    async generate(args) {
+      calls.push(args);
+      if (error) throw error;
+      return (
+        picture ?? {
+          buffer: Buffer.from('fake-png'),
+          mediaType: 'image/png',
+          cost: 0.042,
+          usage: {},
+          model: 'openai/image-model',
+          seconds: 12.3,
+        }
+      );
+    },
+    quota: () => quota ?? { used: 3, cap: 50, userUsed: 0, userCap: 50, spent: false, userSpent: false },
+  };
+}
+
+/** A fake imageFetcher: records every fetchAsDataUrl() call and answers `result`. */
+function fakeImageFetcher(result = { dataUrl: 'data:image/png;base64,QUFB' }) {
+  const calls = [];
+  return {
+    calls,
+    async fetchAsDataUrl(url, opts) {
+      calls.push({ url, opts });
+      return result;
+    },
+  };
+}
+
+function hotForDraw(rootDir, image = {}) {
+  const hot = makeHot(rootDir);
+  hot.config.image = { model: 'openai/image-model', maxPromptChars: 800, reference: 'avatar', referenceMaxBytes: 4000000, ...image };
+  hot.config.context = { vision: { fetchTimeoutMs: 7000 } };
+  hot.prompts = {
+    ...hot.prompts,
+    draw: 'Picture by {{name}}.\n\n{{appearance}}\n\nRequest: {{request}}',
+    appearance: '{{name}} has silver hair.',
+  };
+  return hot;
+}
+
+function drawClient() {
+  const guild = { id: 'g1', name: 'The Server', members: { me: { displayName: 'Persona' } } };
+  const avatarCalls = [];
+  return {
+    avatarCalls,
+    guilds: { cache: new Map([['g1', guild]]) },
+    user: {
+      username: 'persona-bot',
+      displayAvatarURL(opts) {
+        avatarCalls.push(opts);
+        return 'https://cdn.example/avatar.png';
+      },
+    },
+  };
+}
+
+test('run: draw builds the prompt as a turn does and answers with the picture as a file', async () => {
+  const rootDir = makeRoot();
+  const hot = hotForDraw(rootDir);
+  const images = fakeImages();
+  const imageFetcher = fakeImageFetcher();
+  const { admin } = makeAdmin(rootDir, { hot, images, imageFetcher, client: drawClient() });
+
+  const result = await admin.run('draw', { text: 'a lighthouse at dusk', self: false }, { guildId: 'g1' });
+
+  assert.equal(images.calls.length, 1);
+  assert.deepEqual(images.calls[0], {
+    prompt: buildDrawPrompt({ prompts: hot.prompts, selfName: 'Persona', request: 'a lighthouse at dusk', self: false }),
+    reference: null,
+    userId: null,
+  });
+  assert.ok(!images.calls[0].prompt.includes('silver hair'), 'no appearance without self');
+  assert.equal(imageFetcher.calls.length, 0, 'no avatar fetched without self');
+  assert.equal(result.files.length, 1);
+  assert.equal(result.files[0].name, 'image.png');
+  assert.ok(Buffer.isBuffer(result.files[0].attachment));
+  assert.equal(result.files[0].attachment.toString(), 'fake-png');
+  assert.ok(!result.text.includes('\n'), 'one line');
+  assert.match(result.text, /openai\/image-model/);
+  assert.match(result.text, /12\.3s/);
+  assert.match(result.text, /0\.042/);
+});
+
+test('run: draw clamps the request to image.maxPromptChars before building the prompt', async () => {
+  const rootDir = makeRoot();
+  const hot = hotForDraw(rootDir, { maxPromptChars: 5 });
+  const images = fakeImages();
+  const { admin } = makeAdmin(rootDir, { hot, images, client: drawClient() });
+
+  await admin.run('draw', { text: 'άλφαβήτα', self: false }, { guildId: 'g1' });
+
+  assert.equal(
+    images.calls[0].prompt,
+    buildDrawPrompt({ prompts: hot.prompts, selfName: 'Persona', request: 'άλφαβ', self: false }),
+  );
+});
+
+test('run: draw with self adds the appearance and sends the avatar as the reference', async () => {
+  const rootDir = makeRoot();
+  const hot = hotForDraw(rootDir);
+  const images = fakeImages();
+  const imageFetcher = fakeImageFetcher();
+  const client = drawClient();
+  const { admin } = makeAdmin(rootDir, { hot, images, imageFetcher, client });
+
+  await admin.run('draw', { text: 'at the beach', self: true }, { guildId: 'g1' });
+
+  assert.deepEqual(client.avatarCalls, [{ extension: 'png', size: 1024, forceStatic: true }]);
+  assert.deepEqual(imageFetcher.calls, [
+    { url: 'https://cdn.example/avatar.png', opts: { maxBytes: 4000000, timeoutMs: 7000 } },
+  ]);
+  assert.equal(images.calls[0].reference, 'data:image/png;base64,QUFB');
+  assert.equal(images.calls[0].userId, null);
+  assert.equal(
+    images.calls[0].prompt,
+    buildDrawPrompt({ prompts: hot.prompts, selfName: 'Persona', request: 'at the beach', self: true }),
+  );
+  assert.ok(images.calls[0].prompt.includes('Persona has silver hair.'));
+});
+
+test('run: draw with self but image.reference none sends no reference', async () => {
+  const rootDir = makeRoot();
+  const hot = hotForDraw(rootDir, { reference: 'none' });
+  const images = fakeImages();
+  const imageFetcher = fakeImageFetcher();
+  const { admin } = makeAdmin(rootDir, { hot, images, imageFetcher, client: drawClient() });
+
+  await admin.run('draw', { text: 'at the beach', self: true }, { guildId: 'g1' });
+
+  assert.equal(imageFetcher.calls.length, 0);
+  assert.equal(images.calls[0].reference, null);
+  assert.ok(images.calls[0].prompt.includes('Persona has silver hair.'), 'the appearance is still described');
+});
+
+test('run: draw still generates when the avatar cannot be fetched, and says so', async () => {
+  const rootDir = makeRoot();
+  const hot = hotForDraw(rootDir);
+  const images = fakeImages();
+  const imageFetcher = fakeImageFetcher(null);
+  const { admin } = makeAdmin(rootDir, { hot, images, imageFetcher, client: drawClient() });
+
+  const result = await admin.run('draw', { text: 'at the beach', self: true }, { guildId: 'g1' });
+
+  assert.equal(images.calls.length, 1);
+  assert.equal(images.calls[0].reference, null);
+  assert.match(result.text, /no avatar reference/);
+});
+
+test('run: draw names a jpeg picture image.jpg and reports an unknown cost', async () => {
+  const rootDir = makeRoot();
+  const hot = hotForDraw(rootDir);
+  const images = fakeImages({
+    picture: { buffer: Buffer.from('jpg'), mediaType: 'image/jpeg', cost: null, usage: null, model: 'google/image-model', seconds: 4 },
+  });
+  const { admin } = makeAdmin(rootDir, { hot, images, client: drawClient() });
+
+  const result = await admin.run('draw', { text: 'a cat' }, { guildId: 'g1' });
+
+  assert.equal(result.files[0].name, 'image.jpg');
+  assert.match(result.text, /google\/image-model/);
+  assert.match(result.text, /cost unknown/);
+});
+
+test('run: draw without an image client says image generation is not available', async () => {
+  const rootDir = makeRoot();
+  const { admin } = makeAdmin(rootDir, { hot: hotForDraw(rootDir), client: drawClient() });
+
+  const result = await admin.run('draw', { text: 'a cat' }, { guildId: 'g1' });
+  assert.equal(result, 'image generation is not available');
+});
+
+test('run: draw with an unsupported image model answers with a message and never generates', async () => {
+  const rootDir = makeRoot();
+  const hot = hotForDraw(rootDir, { model: 'someone/else-model' });
+  const images = fakeImages();
+  const { admin } = makeAdmin(rootDir, { hot, images, client: drawClient() });
+
+  const result = await admin.run('draw', { text: 'a cat' }, { guildId: 'g1' });
+
+  assert.equal(typeof result, 'string');
+  assert.match(result, /someone\/else-model/);
+  assert.match(result, /unsupported/);
+  assert.equal(images.calls.length, 0);
+});
+
+test('run: draw reports a failed generation with its reason and HTTP status', async () => {
+  const rootDir = makeRoot();
+  const hot = hotForDraw(rootDir);
+  const error = new ImageGenError('moderation', 'image refused by moderation (HTTP 400)', { statusCode: 400, body: 'provider text' });
+  const { admin } = makeAdmin(rootDir, { hot, images: fakeImages({ error }), client: drawClient() });
+
+  await assert.rejects(
+    () => admin.run('draw', { text: 'a cat' }, { guildId: 'g1' }),
+    (err) => /moderation/.test(err.message) && /400/.test(err.message) && !err.message.includes('provider text'),
+  );
+});
+
+test('run: draw reports a daily cap refusal with its reason', async () => {
+  const rootDir = makeRoot();
+  const hot = hotForDraw(rootDir);
+  const error = new ImageCapError('daily', 'daily image cap reached (50)');
+  const { admin } = makeAdmin(rootDir, { hot, images: fakeImages({ error }), client: drawClient() });
+
+  await assert.rejects(() => admin.run('draw', { text: 'a cat' }, { guildId: 'g1' }), /daily/);
+});
+
+test('run: draw requires a text', async () => {
+  const rootDir = makeRoot();
+  const images = fakeImages();
+  const { admin } = makeAdmin(rootDir, { hot: hotForDraw(rootDir), images, client: drawClient() });
+
+  await assert.rejects(() => admin.run('draw', { text: '   ' }, { guildId: 'g1' }), /text is required/);
+  assert.equal(images.calls.length, 0);
+});
+
+test('run: draw is refused while paused', async () => {
+  const rootDir = makeRoot();
+  const images = fakeImages();
+  const { admin } = makeAdmin(rootDir, { hot: hotForDraw(rootDir), images, client: drawClient() });
+
+  await admin.run('pause', {}, {});
+  await assert.rejects(() => admin.run('draw', { text: 'a cat' }, { guildId: 'g1' }), /paused/);
+  assert.equal(images.calls.length, 0);
+});
+
+test('run: draw is a write command -- granting it carries the write-command note', async () => {
+  const rootDir = makeRoot();
+  const { admin } = makeAdmin(rootDir);
+
+  const drawGrant = await admin.run('access.grant', { command: 'draw' }, {});
+  const statusGrant = await admin.run('access.grant', { command: 'status' }, {});
+  assert.match(drawGrant, /change memory or config/);
+  assert.doesNotMatch(statusGrant, /change memory or config/);
+});
+
+test('run: status shows today\'s image quota and the image model', async () => {
+  const rootDir = makeRoot();
+  const hot = hotForDraw(rootDir);
+  const images = fakeImages({ quota: { used: 7, cap: 50, userUsed: 0, userCap: 50, spent: false, userSpent: false } });
+  const { admin } = makeAdmin(rootDir, { hot, images });
+
+  const lines = (await admin.run('status', {}, {})).split('\n');
+  assert.ok(lines.includes('images today: 7/50'));
+  assert.ok(lines.includes('image model: openai/image-model'));
+});
+
+test('run: status flags an image model of an unsupported family', async () => {
+  const rootDir = makeRoot();
+  const hot = hotForDraw(rootDir, { model: 'someone/else-model' });
+  const { admin } = makeAdmin(rootDir, { hot, images: fakeImages() });
+
+  const lines = (await admin.run('status', {}, {})).split('\n');
+  assert.ok(lines.includes('image model: someone/else-model (unsupported family)'));
+});
+
+test('run: status has no image lines without an image client', async () => {
+  const rootDir = makeRoot();
+  const { admin } = makeAdmin(rootDir, { hot: hotForDraw(rootDir) });
+
+  const body = await admin.run('status', {}, {});
+  assert.ok(!body.includes('images today'));
+  assert.ok(!body.includes('image model'));
+});
+
+test('run: model.show lists the image model, flagging an unsupported family', async () => {
+  const rootDir = makeRoot();
+  const hot = hotForDraw(rootDir);
+  const { admin } = makeAdmin(rootDir, { hot, images: fakeImages() });
+  assert.ok((await admin.run('model.show', {}, {})).split('\n').includes('image: openai/image-model'));
+
+  hot.config.image.model = 'someone/else-model';
+  assert.ok((await admin.run('model.show', {}, {})).split('\n').includes('image: someone/else-model (unsupported family)'));
 });

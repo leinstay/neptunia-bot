@@ -45,6 +45,7 @@ const SLOW_COMMANDS = new Set([
   'warmup.status',
   'warmup.reset',
   'memory.refresh',
+  'draw',
 ]);
 
 const DISABLED_MESSAGE = 'Owner commands are disabled (features.adminCommands is off).';
@@ -130,6 +131,15 @@ export function buildCommandTree(commandName) {
               required: false,
               channel_types: [GUILD_TEXT],
             },
+          ],
+        },
+        {
+          type: SUBCOMMAND,
+          name: 'draw',
+          description: 'Draw one picture through the drawing prompt, answered only to you. Spends balance.',
+          options: [
+            { type: STRING, name: 'text', description: 'What to draw.', required: true },
+            { type: BOOLEAN, name: 'self', description: 'The persona is in the picture (adds the appearance prompt).', required: false },
           ],
         },
         {
@@ -558,6 +568,7 @@ const OPTION_MAPPERS = {
   resume: () => ({}),
   interject: (options) => ({ channelId: options.getChannel('channel')?.id }),
   initiate: (options) => ({ channelId: options.getChannel('channel')?.id }),
+  draw: (options) => ({ text: options.getString('text', true), self: options.getBoolean('self') ?? false }),
   set: (options) => ({ path: options.getString('path', true), value: options.getString('value', true) }),
   unset: (options) => ({ path: options.getString('path', true) }),
   'rule.add': (options) => ({ text: options.getString('text', true) }),
@@ -636,16 +647,25 @@ export function leafPaths(config, prefix = '') {
   return out;
 }
 
-async function respond(interaction, text, deferred) {
-  const body = String(text ?? '');
+/**
+ * Reply with an admin handler's result, always ephemerally: a string (chunked
+ * into follow-ups when long, code-fenced when multi-line), or
+ * `{ text, files: [{ attachment: Buffer, name }] }`, whose files ride on the
+ * first message.
+ */
+async function respond(interaction, result, deferred) {
+  const isObject = result !== null && typeof result === 'object';
+  const body = String((isObject ? result.text : result) ?? '');
+  const files = isObject && Array.isArray(result.files) && result.files.length > 0 ? result.files : null;
   const wrap = body.includes('\n');
   const chunks = chunkText(body, REPLY_CHUNK_CHARS);
   const format = (chunk) => (wrap ? `\`\`\`\n${chunk}\n\`\`\`` : chunk);
+  const first = files ? { content: format(chunks[0]), files } : { content: format(chunks[0]) };
 
   if (deferred) {
-    await interaction.editReply({ content: format(chunks[0]) });
+    await interaction.editReply(first);
   } else {
-    await interaction.reply({ content: format(chunks[0]), ephemeral: true });
+    await interaction.reply({ ...first, ephemeral: true });
   }
   for (const chunk of chunks.slice(1)) {
     await interaction.followUp({ content: format(chunk), ephemeral: true });

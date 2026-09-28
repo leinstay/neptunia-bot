@@ -12,8 +12,9 @@
 //
 // This module knows nothing about discord.js: `createAdmin(deps).run` takes
 // a `commandKey` (e.g. `'memory.forget'`), a plain `args` object and a
-// `context` (`{ guildId, channelId, userId }`) and returns the reply text, or
-// throws an `Error` with an operator-facing message on bad input. Mapping a
+// `context` (`{ guildId, channelId, userId }`) and returns the reply text
+// (or, for `/nep draw`, `{ text, files }` with the picture), or throws an
+// `Error` with an operator-facing message on bad input. Mapping a
 // discord.js interaction's options onto `args` is src/discord/commands.js's
 // job. Everything below the pure-function section is thin I/O glued around
 // them; the pure functions (listRules, appendRule, removeRule, setPath,
@@ -29,6 +30,8 @@ import { channelActivity } from './memory/channels.js';
 import { commandKeys } from './discord/commands.js';
 import { isAllowed as accessIsAllowed, grant as accessGrant, revoke as accessRevoke } from './discord/access.js';
 import { classifierTextModel, classifierMediaModel, classifierVideoModel } from './behavior/mention.js';
+import { buildDrawPrompt } from './behavior/prompt.js';
+import { ImageCapError, ImageGenError, UnsupportedImageModelError, familyOf as imageFamilyOf } from './llm/images.js';
 import { log } from './log.js';
 
 /** `/nep access grant/revoke`'s command keys that ONLY read — everything else (including every
@@ -432,6 +435,21 @@ function writeLocalConfig(localPath, value) {
   fs.writeFileSync(localPath, `${JSON.stringify(value, null, 2)}\n`);
 }
 
+// The next two mirror src/behavior/turn.js's private helpers of the same name,
+// so `/nep draw` builds and names a picture exactly as a turn does.
+
+/** `text` cut to at most `max` code points; a non-number `max` leaves it whole. */
+function clampChars(text, max) {
+  const value = String(text ?? '');
+  return Number.isFinite(max) && max >= 0 ? [...value].slice(0, Math.floor(max)).join('') : value;
+}
+
+/** Upload file name for a generated picture: `image/jpeg` -> `image.jpg`, else `image.<subtype>`. */
+function imageFileName(mediaType) {
+  const subtype = String(mediaType ?? '').split('/')[1]?.split(';')[0]?.trim().toLowerCase() || 'png';
+  return `image.${subtype === 'jpeg' ? 'jpg' : subtype}`;
+}
+
 // ---------------------------------------------------------------------------
 // Factory
 // ---------------------------------------------------------------------------
@@ -465,6 +483,11 @@ function writeLocalConfig(localPath, value) {
  * `lookup` — from createLookup() (src/web/lookup.js), optional: `hasSearch()`, used by `/nep ping`
  *   (classifier.text role) to add a line saying whether the web lookup is on and has a search key.
  *   Absent -> no such line.
+ * `images` — from createImageGen() (src/llm/images.js), optional: `generate()` for `/nep draw`,
+ *   `quota()` and `familyOf()` for the image lines of `/nep status` and `/nep model show`.
+ *   Absent -> `/nep draw` reports it is not available and `/nep status` has no image lines.
+ * `imageFetcher` — from createImageFetcher() (src/discord/fetch-image.js), optional: downloads the
+ *   bot's avatar as the reference of a `/nep draw self` picture. Absent -> no reference is sent.
  *
  * `run(commandKey, args, context)` throws a plain `Error` (operator-facing
  * message) on bad input; it never touches discord.js.
@@ -484,6 +507,8 @@ export function createAdmin({
   warmup,
   describer,
   lookup,
+  images,
+  imageFetcher,
 }) {
   function isOwner(userId) {
     const owners = hot.config?.bot?.owners ?? [];
@@ -508,8 +533,8 @@ export function createAdmin({
    * paused, with a hint to resume first. Guards interject, initiate,
    * alias.add, alias.remove, memory.forget, memory.wipe, memory.affinity (when
    * setting a score), memory.refresh, lore.add, lore.remove, learned.add,
-   * learned.remove, warmup.run, warmup.users, warmup.channels, warmup.server
-   * and warmup.reset.
+   * learned.remove, warmup.run, warmup.users, warmup.channels, warmup.server,
+   * warmup.reset and draw (it counts against the image rail in state.json).
    */
   function assertNotPaused() {
     if (store.state.data.paused) {
@@ -746,6 +771,11 @@ export function createAdmin({
       `warming up: ${isWarmingUp() ? 'true' : 'false'}`,
     ];
 
+    if (images) {
+      const quota = images.quota({ userId: null });
+      lines.push(`images today: ${quota.used}/${quota.cap ?? '-'}`, `image model: ${imageModelLabel(cfg)}`);
+    }
+
     if (warmup && typeof warmup.summary === 'function') {
       const bs = warmup.summary();
       lines.push(
@@ -798,6 +828,83 @@ export function createAdmin({
 
   function resolvedGuildId(context) {
     return context?.guildId ?? getGuildId?.() ?? null;
+  }
+
+  /** The bot's avatar as a data: URL for a self-portrait, or null when it cannot be had. */
+  async function avatarReference() {
+    if (!imageFetcher || typeof client?.user?.displayAvatarURL !== 'function') return null;
+    try {
+      const url = client.user.displayAvatarURL({ extension: 'png', size: 1024, forceStatic: true });
+      if (!url) return null;
+      const downloaded = await imageFetcher.fetchAsDataUrl(url, {
+        maxBytes: hot.config.image?.referenceMaxBytes,
+        timeoutMs: hot.config.context?.vision?.fetchTimeoutMs,
+      });
+      return downloaded?.dataUrl || null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * `/nep draw`: one picture through the same prompt a turn builds (prompts
+   * read now, the request clamped to `image.maxPromptChars`, the avatar as
+   * reference for `self` when `image.reference` is `'avatar'`), counted
+   * against `image.maxPerDay` only (no member). Answers `{ text, files }`:
+   * one line with the model, seconds and cost, plus the picture. A rail or
+   * generation failure throws with its reason and HTTP status; the prompt is
+   * never logged.
+   */
+  async function cmdDraw(args, context) {
+    if (!images) return 'image generation is not available';
+    assertNotPaused();
+    const request = String(args?.text ?? '').trim();
+    if (!request) throw new Error('text is required');
+
+    const imageCfg = hot.config.image ?? {};
+    if (!images.familyOf(imageCfg.model)) {
+      return `unsupported image model: ${imageCfg.model ?? '-'} (no supported family); nothing was generated`;
+    }
+
+    const self = args?.self === true;
+    const guildId = resolvedGuildId(context);
+    const selfName = client?.guilds?.cache?.get(guildId)?.members?.me?.displayName ?? client?.user?.username ?? '';
+    const prompt = buildDrawPrompt({
+      prompts: hot.prompts,
+      selfName,
+      request: clampChars(request, imageCfg.maxPromptChars),
+      self,
+    });
+
+    let reference = null;
+    let referenceMissing = false;
+    if (self && imageCfg.reference === 'avatar') {
+      reference = await avatarReference();
+      referenceMissing = reference === null;
+      if (referenceMissing) log.warn('admin: draw avatar reference unavailable', {});
+    }
+
+    let picture;
+    try {
+      picture = await images.generate({ prompt, reference, userId: null });
+    } catch (err) {
+      if (err instanceof ImageCapError || err instanceof ImageGenError) {
+        const status = err.statusCode ? `, HTTP ${err.statusCode}` : '';
+        throw new Error(`draw failed (${err.reason}${status}): ${err.message}`);
+      }
+      if (err instanceof UnsupportedImageModelError) throw new Error(`draw failed: ${err.message}`);
+      throw err;
+    }
+
+    log.info('admin: drew', { model: picture.model, seconds: picture.seconds, cost: picture.cost, self, bytes: picture.buffer?.length ?? 0 });
+
+    const cost = picture.cost == null ? 'cost unknown' : `cost ${picture.cost}`;
+    const parts = [picture.model, `${picture.seconds}s`, cost];
+    if (referenceMissing) parts.push('no avatar reference');
+    return {
+      text: parts.join(' · '),
+      files: [{ attachment: picture.buffer, name: imageFileName(picture.mediaType) }],
+    };
   }
 
   /**
@@ -1387,10 +1494,20 @@ const MODEL_ROLE_PATHS = {
 };
 const MODEL_ROLES = Object.keys(MODEL_ROLE_PATHS);
 
+/** `image.model` for status and model show, `-` when unset, flagged when src/llm/images.js
+ * has no request mapping for its family (every generation would be refused). */
+function imageModelLabel(cfg) {
+  const model = cfg?.image?.model;
+  if (!model) return '-';
+  const family = (images?.familyOf ?? imageFamilyOf)(model);
+  return family ? model : `${model} (unsupported family)`;
+}
+
 function cmdModelShow() {
   const cfg = hot.config;
   const lines = [
     ...MODEL_ROLES.map((role) => `${role}: ${modelForRole(role, cfg) ?? '-'}`),
+    `image: ${imageModelLabel(cfg)}`,
     `mediaDescriptions: ${cfg?.features?.mediaDescriptions === true ? 'on' : 'off'}`,
   ];
   return lines.join('\n');
@@ -1970,6 +2087,7 @@ async function cmdPing(args) {
     resume: () => cmdResume(),
     interject: (args, context) => cmdForce('interject', args, context),
     initiate: (args, context) => cmdForce('initiate', args, context),
+    draw: (args, context) => cmdDraw(args, context),
     set: (args) => cmdSet(args),
     unset: (args) => cmdUnset(args),
     'rule.add': (args) => cmdRuleAdd(args),

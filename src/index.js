@@ -179,8 +179,10 @@ const admin = createAdmin({
   describer,
   // /nep ping classifier: whether the web lookup is on and has a search key.
   lookup,
-  // The image client's quota and model family, for the owner commands.
+  // The image client's quota and model family, for the owner commands; /nep draw generates through it.
   images,
+  // /nep draw self: the avatar reference, fetched the same way a turn fetches it.
+  imageFetcher,
 });
 const onInteraction = createInteractionHandler({ hot, admin, getGuildId });
 

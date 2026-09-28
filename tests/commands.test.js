@@ -36,10 +36,10 @@ test('buildCommandTree: never emits default_member_permissions -- always visible
   assert.equal('default_member_permissions' in command, false);
 });
 
-test('buildCommandTree: top-level leaves (status, ping, reload, pause, resume, interject, initiate, set, unset)', () => {
+test('buildCommandTree: top-level leaves (status, ping, reload, pause, resume, interject, initiate, draw, set, unset)', () => {
   const [command] = buildCommandTree('nep');
   const names = command.options.map((o) => o.name);
-  assert.deepEqual(names, ['status', 'ping', 'reload', 'pause', 'resume', 'interject', 'initiate', 'set', 'unset', 'rule', 'memory', 'alias', 'lore', 'learned', 'model', 'warmup', 'access']);
+  assert.deepEqual(names, ['status', 'ping', 'reload', 'pause', 'resume', 'interject', 'initiate', 'draw', 'set', 'unset', 'rule', 'memory', 'alias', 'lore', 'learned', 'model', 'warmup', 'access']);
 
   const status = findOption(command.options, 'status');
   assert.equal(status.type, 1); // SUBCOMMAND
@@ -1251,4 +1251,89 @@ test('buildCommandTree: every description fits Discord\'s 1..100 character limit
     for (const x of o.options || []) walk(x, `${path}/${x.name}`);
   };
   walk(top, top.name);
+});
+
+// ---------------------------------------------------------------------------
+// draw: an ephemeral answer with a file
+// ---------------------------------------------------------------------------
+
+test('buildCommandTree: draw takes a required text and an optional self flag', () => {
+  const [command] = buildCommandTree('nep');
+  const draw = findOption(command.options, 'draw');
+  assert.equal(draw.type, 1); // SUBCOMMAND
+
+  const text = findOption(draw.options, 'text');
+  assert.equal(text.type, 3); // STRING
+  assert.equal(text.required, true);
+
+  const self = findOption(draw.options, 'self');
+  assert.equal(self.type, 5); // BOOLEAN
+  assert.equal(self.required, false);
+
+  assert.ok(commandKeys().keys.has('draw'));
+});
+
+test('interaction handler: draw maps text and self (self false when omitted)', async () => {
+  const admin = fakeAdmin();
+  const handler = createInteractionHandler({ hot: baseHot(), admin, getGuildId: () => 'g1' });
+
+  await handler(fakeInteraction({ subcommand: 'draw', optionValues: { text: 'a lighthouse', self: true } }));
+  assert.equal(admin.runCalls[0][0], 'draw');
+  assert.deepEqual(admin.runCalls[0][1], { text: 'a lighthouse', self: true });
+
+  await handler(fakeInteraction({ subcommand: 'draw', optionValues: { text: 'a cat' } }));
+  assert.deepEqual(admin.runCalls[1][1], { text: 'a cat', self: false });
+});
+
+test('interaction handler: draw defers, then edits the reply with the text and the file', async () => {
+  const attachment = Buffer.from('fake-png');
+  const admin = fakeAdmin({ runImpl: () => ({ text: 'openai/x · 12.3s · cost 0.04', files: [{ attachment, name: 'image.png' }] }) });
+  const handler = createInteractionHandler({ hot: baseHot(), admin, getGuildId: () => 'g1' });
+
+  const interaction = fakeInteraction({ subcommand: 'draw', optionValues: { text: 'a cat' } });
+  await handler(interaction);
+
+  assert.equal(interaction.deferred, true);
+  assert.deepEqual(interaction.replies[0], { deferred: true, opts: { ephemeral: true } });
+  assert.equal(interaction.edits.length, 1);
+  assert.equal(interaction.edits[0].content, 'openai/x · 12.3s · cost 0.04');
+  assert.deepEqual(interaction.edits[0].files, [{ attachment, name: 'image.png' }]);
+  assert.equal(interaction.followUps.length, 0);
+});
+
+test('interaction handler: an object result on a fast command replies ephemerally with its files', async () => {
+  const attachment = Buffer.from('fake-png');
+  const admin = fakeAdmin({ runImpl: () => ({ text: 'done', files: [{ attachment, name: 'image.png' }] }) });
+  const handler = createInteractionHandler({ hot: baseHot(), admin, getGuildId: () => 'g1' });
+
+  const interaction = fakeInteraction({ subcommand: 'status' });
+  await handler(interaction);
+
+  assert.deepEqual(interaction.replies[0], { content: 'done', files: [{ attachment, name: 'image.png' }], ephemeral: true });
+});
+
+test('interaction handler: a plain string result carries no files key', async () => {
+  const admin = fakeAdmin({ runImpl: () => 'fast result' });
+  const handler = createInteractionHandler({ hot: baseHot(), admin, getGuildId: () => 'g1' });
+
+  const interaction = fakeInteraction({ subcommand: 'status' });
+  await handler(interaction);
+
+  assert.deepEqual(interaction.replies[0], { content: 'fast result', ephemeral: true });
+});
+
+test('interaction handler: a failed draw is reported as an error text with no file', async () => {
+  const admin = fakeAdmin({
+    runImpl: () => {
+      throw new Error('draw failed (moderation, HTTP 400)');
+    },
+  });
+  const handler = createInteractionHandler({ hot: baseHot(), admin, getGuildId: () => 'g1' });
+
+  const interaction = fakeInteraction({ subcommand: 'draw', optionValues: { text: 'a cat' } });
+  await handler(interaction);
+
+  assert.equal(interaction.edits.length, 1);
+  assert.match(interaction.edits[0].content, /Error: draw failed \(moderation, HTTP 400\)/);
+  assert.equal(interaction.edits[0].files, undefined);
 });
