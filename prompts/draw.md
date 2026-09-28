@@ -13,7 +13,7 @@ Background: present and grounded — a setting, not a void — but softer in det
 
 ## Defects to avoid
 
-Extra or missing fingers, extra limbs, fused or split limbs, hands with the wrong number of joints. Warped or asymmetric faces. Eyes at different sizes or angles unless intended. Garbled or unreadable text (do not render text unless the scene specifically asks for it). Watermarks, signatures, artist credits, borders, frames. Duplicated subjects. Photo-realistic rendering of real people's faces.
+Extra or missing fingers, extra limbs, fused or split limbs, hands with the wrong number of joints. Warped or asymmetric faces. Eyes at different sizes or angles unless intended. Garbled or unreadable text (do not render text unless the scene specifically asks for it). Watermarks, signatures, artist credits, borders, frames. Duplicated subjects. Photo-realistic rendering of real people's faces. Repeated identical objects: a prop appears once unless the request asks for multiples, and then every instance differs in detail. No tiled or cloned background elements — signs, screens, cans, plants, posters must not repeat. No wallpaper-like repetition of shapes. Vary the form, size and placement of background details.
 
 ## Content restrictions
 
@@ -22,6 +22,8 @@ No real person's likeness. No text in the image unless the request explicitly as
 ## Character appearance
 
 If a character description follows, it is the exact look of {{name}} — follow it over the request's wording when they conflict.
+
+The appearance text and any reference image define identity only: face shape, hair, eye colour, build, and signature clothing. Expression, mood, pose, camera angle, framing and background come from the request, not from the reference — never copy, trace or restage the reference image. When the request implies a different outfit or state (sleeping, soaked, in armour, in pyjamas), keep the identity and dress for the scene; carry signature items only when they naturally fit.
 
 {{appearance}}
 
