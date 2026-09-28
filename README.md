@@ -16,7 +16,7 @@
 
 ---
 
-Neptunia is a locally run Discord bot that plays one configurable character through an LLM, behaving like an ordinary chat member. It runs on Node.js 20+ with a single dependency (discord.js) and talks to any OpenRouter-compatible endpoint. It comes with a pluggable character card written without touching code, hot-reloaded prompts and config, per-member memory with attitudes and episodes, a server-wide lorebook, vision for attached pictures, one-line media descriptions from a helper model, owner slash commands for live tuning, and a dry-run mode. A working example character is included; write your own card for a different persona.
+Neptunia is a locally run Discord bot that plays one configurable character through an LLM, behaving like an ordinary chat member. It runs on Node.js 20+ with a single dependency (discord.js) and talks to any OpenRouter-compatible endpoint. It comes with a pluggable character card written without touching code, hot-reloaded prompts and config, per-member memory with attitudes and episodes, a server-wide lorebook, vision for attached pictures, one-line media descriptions from a helper model, drawing on request through an image generation model, owner slash commands for live tuning, and a dry-run mode. A working example character is included; write your own card for a different persona.
 
 The persona responds to mentions, replies and name triggers, sometimes ignoring them. It cuts into conversations at random intervals and starts topics in dead channels. It remembers people, tracks attitudes from -100 to 100, and uses them in replies. The score never appears in chat. All config and prompts are hot-reloaded; owner commands tune the bot live from Discord.
 
@@ -24,7 +24,7 @@ Each instance serves one server, one bot account, one personality. For a second 
 
 ## Quick start
 
-Create a Discord application at [discord.com/developers](https://discord.com/developers/applications). Enable the **Message Content** privileged intent on the Bot page. The invite URL needs both scopes (`scope=bot%20applications.commands`) and `permissions=68672` (view channels, send messages, read history, add reactions). If slash commands do not appear after the bot joins, the log says why; re-opening the invite URL and walking through it again fixes registration without removing the bot.
+Create a Discord application at [discord.com/developers](https://discord.com/developers/applications). Enable the **Message Content** privileged intent on the Bot page. The invite URL needs both scopes (`scope=bot%20applications.commands`) and `permissions=101440` (view channels, send messages, read history, add reactions, attach files). If slash commands do not appear after the bot joins, the log says why; re-opening the invite URL and walking through it again fixes registration without removing the bot.
 
 Get an API key from [OpenRouter](https://openrouter.ai/keys) (or any compatible endpoint).
 

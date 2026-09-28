@@ -324,7 +324,6 @@ YouTube 链接的时长通过以下链式探测获取：首先尝试 yt-dlp，�
 | `model` | `"openai/gpt-image-2.5-flare"` | 图像模型 ID。仅支持 `openai/*` 和 `google/*` 系列；其他系列在发送请求前即被拒绝 |
 | `maxPerDay` | `50` | 整个实例的每日生成上限 |
 | `maxPerUserPerDay` | `50` | 每个成员的每日生成上限；自发回合和 `/nep draw` 不计入成员配额 |
-| `maxPerTurn` | `1` | 每回合最大图片数 |
 | `maxPromptChars` | `800` | `<draw>` 标签的场景文本截断至此长度 |
 | `reference` | `"avatar"` | 角色出现在图片中（`self="yes"`）时发送的视觉参考。`"avatar"` 下载机器人的 Discord 头像；其他值或 `null` 不发送 |
 | `referenceMaxBytes` | `4000000` | 头像最大文件大小（字节）；超过则跳过 |
@@ -437,4 +436,4 @@ YouTube 链接的时长通过以下链式探测获取：首先尝试 yt-dlp，�
 | `google/gemini-3-pro-image-preview` | |
 | `google/gemini-2.5-flash-image` | 无分辨率设置 |
 
-按输出 token 计费，而非按图片计费；provider 的 `usage.cost` 由 `/nep draw` 报告并记入日志。失败的生成不计费。
+按输出 token 计费，而非按图片计费；provider 的 `usage.cost` 由 `/nep draw` 报告并记入日志。引擎在发送前拒绝的请求（每日或每人上限、不支持的模型系列）不产生费用；provider 拒绝的生成通常不计费；超时或图片生成后上传失败的情况仍可能产生费用。

@@ -54,7 +54,7 @@
 
 ## 绘画
 
-`features.imageGeneration`（默认开启）允许角色绘制图片。当模型输出 `<draw>` 标签时，引擎通过 OpenRouter Images API（`image.model`，默认 `openai/gpt-image-2.5-flare`）生成一张图片，并在角色的文本消息之后作为独立消息发布。是否绘画由模型自行决定，可以拒绝。
+`features.imageGeneration`（默认开启）允许角色绘制图片。当模型输出 `<draw>` 标签时，引擎通过 OpenRouter Images API（`image.model`，默认 `openai/gpt-image-2.5-flare`）生成一张图片，并在角色的文本消息之后作为独立消息发布。是否绘画由模型自行决定，可以拒绝。在机器人没有附加文件权限的频道中，绘画感知行不会显示，`<draw>` 标签会被丢弃，因此不会生成任何图片，也不会产生费用。
 
 ### 限制
 
@@ -62,7 +62,7 @@
 
 ### 成本
 
-按输出 token 计费，而非按图片。provider 的 `usage.cost` 由 `/nep draw` 报告并记入日志。失败的生成不计费。图像请求不计入 `llm.maxRequestsPerDay`。
+按输出 token 计费，而非按图片。provider 的 `usage.cost` 由 `/nep draw` 报告并记入日志。引擎在发送前拒绝的请求（每日或每人上限、不支持的模型系列）不产生费用；provider 拒绝的生成通常不计费；超时或图片生成后上传失败的情况仍可能产生费用。图像请求不计入 `llm.maxRequestsPerDay`。
 
 ### 隐私
 

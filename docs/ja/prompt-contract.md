@@ -426,7 +426,7 @@ warmup.contextMark                       prefixed to context lines in the profil
 - `triggerKind: 'drawFailed'`、失敗理由が `labels.draw.reasons.*` を通じて `labels.triggers.drawFailed` の `{reason}` プレースホルダーにレンダリングされます。
 - モードは `reply`、同じトリガーメッセージ、リプライ可。
 - 2 回目のターン自体の `<draw>` は無効化されるため、モデルは生成をリトライできません。
-- チャンネルのアイドル通知は 2 回目のターンが終了するまで保留されます。
+- チャンネルのアイドル通知は 2 回目のターンが終了するまで保留されるため、保留中のピングはフォローアップの後にのみ処理されます。
 
 自発的ターン（誰も依頼していない）では、失敗はログに記録されるだけでフォローアップは実行されません。
 

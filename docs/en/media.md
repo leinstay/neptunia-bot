@@ -54,7 +54,7 @@ Settings live under `web`. See [Configuration](configuration.md#web) for every k
 
 ## Drawing
 
-`features.imageGeneration` (on by default) lets the persona draw pictures. When the model emits a `<draw>` tag, the engine generates one picture through OpenRouter's Images API (`image.model`, default `openai/gpt-image-2.5-flare`) and posts it as a separate message after the persona's words. Whether to draw is the model's own decision; it can refuse.
+`features.imageGeneration` (on by default) lets the persona draw pictures. When the model emits a `<draw>` tag, the engine generates one picture through OpenRouter's Images API (`image.model`, default `openai/gpt-image-2.5-flare`) and posts it as a separate message after the persona's words. Whether to draw is the model's own decision; it can refuse. In a channel where the bot lacks Attach Files permission, the drawing sense is not shown and a `<draw>` tag is dropped, so nothing is generated or billed.
 
 ### Caps
 
@@ -62,7 +62,7 @@ At most `image.maxPerDay` (default 50) pictures per day for the instance and `im
 
 ### Cost
 
-Pricing is per output token, not per picture. The provider's `usage.cost` is reported by `/nep draw` and logged. A failed generation is not billed. Image requests do not count against `llm.maxRequestsPerDay`.
+Pricing is per output token, not per picture. The provider's `usage.cost` is reported by `/nep draw` and logged. A request refused by the engine before it is sent (daily or per-member cap, unsupported model family) costs nothing; a generation the provider rejects is usually not billed; a timeout, or an upload that fails after the picture was generated, may still be billed. Image requests do not count against `llm.maxRequestsPerDay`.
 
 ### Privacy
 

@@ -16,7 +16,7 @@
 
 ---
 
-Neptunia 是一个本地运行的 Discord 机器人，用 LLM 扮演一个可配置的角色，看起来就像普通聊天成员。基于 Node.js 20+，唯一依赖是 discord.js，支持任何兼容 OpenRouter 的端点。角色卡无需改代码即可替换，提示词和配置热重载。具备按成员记忆（含态度和回忆）、服务器级世界书、附图识别、辅助模型的单行媒体描述、所有者斜杠命令和试运行模式。自带可用的示例角色；换角色只需写自己的角色卡。
+Neptunia 是一个本地运行的 Discord 机器人，用 LLM 扮演一个可配置的角色，看起来就像普通聊天成员。基于 Node.js 20+，唯一依赖是 discord.js，支持任何兼容 OpenRouter 的端点。角色卡无需改代码即可替换，提示词和配置热重载。具备按成员记忆（含态度和回忆）、服务器级世界书、附图识别、辅助模型的单行媒体描述、通过图像生成模型按需绘画、所有者斜杠命令和试运行模式。自带可用的示例角色；换角色只需写自己的角色卡。
 
 角色响应 @提及、回复和名字触发，有时会选择无视。它会随机插入对话，在安静的频道发起话题。它记住每个人，追踪 -100 到 100 的态度分数并体现在回复中。分数不会出现在聊天里。配置和提示词全部热重载；所有者命令可在 Discord 中实时调整。
 
@@ -24,7 +24,7 @@ Neptunia 是一个本地运行的 Discord 机器人，用 LLM 扮演一个可配
 
 ## 快速开始
 
-在 [discord.com/developers](https://discord.com/developers/applications) 创建一个 Discord 应用。在 Bot 页面启用 **Message Content** 特权意图。邀请链接需要两个 scope（`scope=bot%20applications.commands`）和 `permissions=68672`（查看频道、发送消息、读取历史、添加反应）。如果机器人加入后斜杠命令未出现，日志会说明原因；重新打开邀请链接并再次完成流程即可修复注册，无需移除机器人。
+在 [discord.com/developers](https://discord.com/developers/applications) 创建一个 Discord 应用。在 Bot 页面启用 **Message Content** 特权意图。邀请链接需要两个 scope（`scope=bot%20applications.commands`）和 `permissions=101440`（查看频道、发送消息、读取历史、添加反应、附加文件）。如果机器人加入后斜杠命令未出现，日志会说明原因；重新打开邀请链接并再次完成流程即可修复注册，无需移除机器人。
 
 从 [OpenRouter](https://openrouter.ai/keys)（或任何兼容端点）获取 API 密钥。
 

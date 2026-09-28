@@ -324,7 +324,6 @@ Settings for the drawing sub-process (`features.imageGeneration`). The persona e
 | `model` | `"openai/gpt-image-2.5-flare"` | Image model ID. Only `openai/*` and `google/*` families are supported; anything else is refused before any request |
 | `maxPerDay` | `50` | Daily generation cap for the whole instance |
 | `maxPerUserPerDay` | `50` | Daily generation cap per member; spontaneous turns and `/nep draw` do not count against a member |
-| `maxPerTurn` | `1` | Max pictures per turn |
 | `maxPromptChars` | `800` | Scene text from the `<draw>` tag is clamped to this length |
 | `reference` | `"avatar"` | What to send as a visual reference when the persona is in the picture (`self="yes"`). `"avatar"` downloads the bot's Discord avatar; any other value or `null` sends nothing |
 | `referenceMaxBytes` | `4000000` | Max avatar file size (bytes); a larger avatar is skipped |
@@ -437,4 +436,4 @@ Separate from `classifier.media` (which describes pictures IN). This model gener
 | `google/gemini-3-pro-image-preview` | |
 | `google/gemini-2.5-flash-image` | No resolution knob |
 
-Pricing is per output token, not per picture; the provider's `usage.cost` is reported by `/nep draw` and logged. A failed generation is not billed.
+Pricing is per output token, not per picture; the provider's `usage.cost` is reported by `/nep draw` and logged. A request refused by the engine before it is sent (daily or per-member cap, unsupported model family) costs nothing; a generation the provider rejects is usually not billed; a timeout, or an upload that fails after the picture was generated, may still be billed.
