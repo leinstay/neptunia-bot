@@ -201,6 +201,29 @@ function clampChars(text, max) {
   return Number.isFinite(max) && max >= 0 ? [...value].slice(0, Math.floor(max)).join('') : value;
 }
 
+// A Discord message holds 2000 characters; the part mark is ` (n/m)` on the header plus the newline.
+const MIRROR_MAX_CHARS = 2000;
+const MIRROR_PART_MARK_CHARS = 16;
+
+/**
+ * `text` in pieces of at most `max` code points, each cut at its last newline
+ * when there is one, so a dry-run mirror of a long text fits Discord messages.
+ */
+function splitForMirror(text, max) {
+  const limit = Math.max(1, Math.floor(max));
+  const parts = [];
+  let rest = [...String(text ?? '')];
+  while (rest.length > limit) {
+    const window = rest.slice(0, limit);
+    const newline = window.lastIndexOf('\n');
+    const cut = newline > 0 ? newline : limit;
+    parts.push(rest.slice(0, cut).join(''));
+    rest = rest.slice(newline > 0 ? cut + 1 : cut);
+  }
+  parts.push(rest.join(''));
+  return parts;
+}
+
 /** Collapse whitespace so a name or summary stays on its one `<videos>` line. */
 function oneLine(text) {
   return String(text ?? '')
@@ -322,13 +345,30 @@ export function createTurnRunner({
     }
 
     if (parsed.draw) {
-      const prompt = clampChars(parsed.draw.text, hot.config.image?.maxPromptChars);
       const self = parsed.draw.self === true;
-      // Same deliberate exception: the persona's own draw request, dry-run only. Nothing is generated.
+      // The FULL image prompt (prompt files + the persona's request), so the
+      // owner can check the prompt files in dry-run. Same deliberate exception:
+      // the persona's own output, dry-run only. Nothing is generated.
+      const prompt = drawPromptFor(channel, parsed.draw);
       log.info('dry-run: would draw', { channel: channel.id, channelName, mode, self, prompt });
-      await mirrorDryRun(dryRunChannelId, `[dry-run] #${channelName} · ${mode} · draw${self ? ' (self)' : ''}`, prompt);
+      // A full prompt outgrows one Discord message: mirrored in numbered parts.
+      const header = `[dry-run] #${channelName} · ${mode} · draw${self ? ' (self)' : ''}`;
+      const parts = splitForMirror(prompt, MIRROR_MAX_CHARS - header.length - MIRROR_PART_MARK_CHARS);
+      for (const [i, part] of parts.entries()) {
+        await mirrorDryRun(dryRunChannelId, parts.length > 1 ? `${header} (${i + 1}/${parts.length})` : header, part);
+      }
       lastPostAt.set(channel.id, Date.now());
     }
+  }
+
+  /** The image prompt for `draw` (parsed.draw): prompts read now, the request clamped to image.maxPromptChars. */
+  function drawPromptFor(channel, draw) {
+    return buildDrawPrompt({
+      prompts: hot.prompts,
+      selfName: channel.guild.members.me?.displayName ?? client.user.username,
+      request: clampChars(draw.text, hot.config.image?.maxPromptChars),
+      self: draw.self === true,
+    });
   }
 
   /**
@@ -343,13 +383,7 @@ export function createTurnRunner({
   async function draw(channel, parsed, idByIndex, trigger, isFollowUp) {
     const imageCfg = hot.config.image ?? {};
     const self = parsed.draw.self === true;
-    const selfName = channel.guild.members.me?.displayName ?? client.user.username;
-    const prompt = buildDrawPrompt({
-      prompts: hot.prompts,
-      selfName,
-      request: clampChars(parsed.draw.text, imageCfg.maxPromptChars),
-      self,
-    });
+    const prompt = drawPromptFor(channel, parsed.draw);
     try {
       let reference = null;
       if (self && imageCfg.reference === 'avatar') {
@@ -672,19 +706,58 @@ export function createTurnRunner({
     const { channel, trigger = null } = params;
     // A failed picture someone asked for gets its own turn, started only once
     // the first one has fully returned (and freed the channel), with the
-    // reason in the trigger label; its own <draw> is dropped. Nobody asked on
-    // a spontaneous turn: the failure is only logged.
+    // reason in the trigger label; its own <draw> is dropped. The first turn
+    // held back its idle notifications (see runTurnOnce's `finally`), so a
+    // pending ping is drained only after this second turn -- never raced by
+    // it. Nobody asked on a spontaneous turn: the failure is only logged.
     if (trigger) {
-      const second = await runTurnOnce({ channel, mode: 'reply', trigger, triggerKind: 'drawFailed', drawReason: first.drawFailed });
-      log.info('turn: draw failure answered', { channel: channel.id, reason: first.drawFailed, outcome: second.outcome });
+      try {
+        const second = await runTurnOnce({
+          channel,
+          mode: 'reply',
+          trigger,
+          triggerKind: 'drawFailed',
+          drawReason: first.drawFailed,
+          holdIdle: true,
+        });
+        log.info('turn: draw failure answered', { channel: channel.id, reason: first.drawFailed, outcome: second.outcome });
+      } finally {
+        notifyIdle();
+      }
     } else {
       log.warn('turn: draw failed', { channel: channel.id, reason: first.drawFailed });
     }
     return first;
   }
 
-  /** One turn, as described on runTurn; `drawReason` only for the internal `drawFailed` turn. */
-  async function runTurnOnce({ channel, mode, trigger = null, triggerKind = null, chooseMode = null, forced = false, drawReason = null }) {
+  /**
+   * Tell whoever waits that a turn has finished: onIdle (fire-and-forget, same
+   * as the caller of runTurn itself: whatever wants to run next --
+   * src/discord/events.js's pending-ping drain, wired in src/index.js -- must
+   * never hold up, or throw into, the turn that just freed the channel), and
+   * the waitIdle() waiters once no turn is in flight anywhere.
+   */
+  function notifyIdle() {
+    if (onIdle) {
+      Promise.resolve()
+        .then(() => onIdle())
+        .catch((err) => log.warn('turn: onIdle failed', { error: err }));
+    }
+    if (busy.size === 0 && idleWaiters.length > 0) {
+      const waiters = idleWaiters;
+      idleWaiters = [];
+      for (const resolve of waiters) resolve();
+    }
+  }
+
+  /**
+   * One turn, as described on runTurn. Internal for the `drawFailed` turn:
+   * `drawReason`, and `holdIdle` -- leave the idle notifications to the
+   * caller (runTurn fires them once the second turn is over).
+   */
+  async function runTurnOnce({ channel, mode, trigger = null, triggerKind = null, chooseMode = null, forced = false, drawReason = null, holdIdle = false }) {
+    // Set when this turn hands off to a drawFailed turn: runTurn notifies after it.
+    let handOff = false;
     // /nep pause: the owner is editing data/ by hand -- no new turn may
     // start (a reply, an interject, an initiate, an eavesdrop, or a forced turn)
     // until /nep resume. A turn already in flight when the pause is
@@ -941,7 +1014,9 @@ export function createTurnRunner({
         return { outcome: 'spoke', mode: finalMode, dryRun: true };
       }
       const acted = await act(channel, parsed, request.idByIndex, history, startedAt, triggerKind, trigger);
-      return acted.drawFailed ? { outcome: 'spoke', mode: finalMode, drawFailed: acted.drawFailed } : { outcome: 'spoke', mode: finalMode };
+      if (!acted.drawFailed) return { outcome: 'spoke', mode: finalMode };
+      handOff = Boolean(trigger);
+      return { outcome: 'spoke', mode: finalMode, drawFailed: acted.drawFailed };
     } catch (err) {
       if (err instanceof DailyCapError || err instanceof TokenLimitError) {
         log.warn('turn: refused by a safety rail', { error: err });
@@ -951,20 +1026,9 @@ export function createTurnRunner({
       return { outcome: 'error' };
     } finally {
       busy.delete(channel.id);
-      // Fire-and-forget, same as the caller of runTurn itself: whatever
-      // wants to run next (src/discord/events.js's pending-ping drain, wired
-      // in src/index.js) must never hold up -- or throw into -- the turn
-      // that just freed the channel.
-      if (onIdle) {
-        Promise.resolve()
-          .then(() => onIdle())
-          .catch((err) => log.warn('turn: onIdle failed', { error: err }));
-      }
-      if (busy.size === 0 && idleWaiters.length > 0) {
-        const waiters = idleWaiters;
-        idleWaiters = [];
-        for (const resolve of waiters) resolve();
-      }
+      // A hand-off to the drawFailed turn (or that turn itself) leaves the
+      // notifications to runTurn, which fires them once both are done.
+      if (!handOff && !holdIdle) notifyIdle();
     }
   }
 

@@ -2098,9 +2098,32 @@ test('runTurn: dry-run logs the draw prompt and never calls generate', async () 
   assert.equal(line.channelName, 'general');
   assert.equal(line.mode, 'reply');
   assert.equal(line.self, true);
-  assert.equal(line.prompt, 'me on a bicycle');
+  // The full image prompt: the fixture's draw prompt, the appearance (a self picture) and the request.
+  assert.ok(line.prompt.includes('Drawing for Bot.'), 'the draw prompt file is in the logged prompt');
+  assert.ok(line.prompt.includes('Bot wears a green scarf.'), 'the appearance is in the logged prompt');
+  assert.ok(line.prompt.endsWith('me on a bicycle'), 'the request is in the logged prompt');
+  assert.equal(line.prompt, 'Drawing for Bot.\n\nBot wears a green scarf.\n\nme on a bicycle');
   assert.equal(mirrorSent.length, 1);
-  assert.equal(mirrorSent[0].content, '[dry-run] #general · reply · draw (self)\nme on a bicycle');
+  assert.equal(mirrorSent[0].content, `[dry-run] #general \u00b7 reply \u00b7 draw (self)\n${line.prompt}`);
+});
+
+test('runTurn: dry-run mirrors a long draw prompt in numbered parts that each fit a Discord message', async () => {
+  const mirrorSent = [];
+  const client = fakeClient({ channels: { fetch: async () => ({ send: async (payload) => mirrorSent.push(payload) }) } });
+  const hot = drawHot({ dryRun: true }, {}, { dryRunChannelId: 'mirror1' });
+  hot.prompts.draw = `${'style line é\n'.repeat(300)}{{request}}`;
+  const { logs } = await runDrawTurn({ answers: ['<draw>a cat</draw>'], hot, client });
+
+  const prompt = logs.find((l) => l.msg === 'dry-run: would draw').prompt;
+  assert.ok(prompt.length > 2000);
+  assert.ok(mirrorSent.length >= 2);
+  const bodies = mirrorSent.map((payload, i) => {
+    const [header, ...body] = payload.content.split('\n');
+    assert.ok([...payload.content].length <= 2000, 'every part fits one Discord message');
+    assert.equal(header, `[dry-run] #general \u00b7 reply \u00b7 draw (${i + 1}/${mirrorSent.length})`);
+    return body.join('\n');
+  });
+  assert.equal(bodies.join('\n'), prompt, 'the parts put together are the whole prompt');
 });
 
 test('runTurn: a failed generation runs a second turn with triggerKind drawFailed', async () => {
@@ -2222,4 +2245,111 @@ test('runTurn: a follow-up turn posts the picture without a Discord reply', asyn
   await withCapturedLogs(() => turns.runTurn({ channel, mode: 'reply', trigger: normalizedTrigger(raw), triggerKind: 'followUp' }));
   assert.equal(channel.sent.length, 1);
   assert.equal(channel.sent[0].reply, undefined);
+});
+
+test('runTurn: a failed drawing fires onIdle once, only after the drawFailed turn has sent', async () => {
+  const order = [];
+  const raw = rawMessage({ id: 'm1' });
+  const channel = fakeTurnChannel({ historyMessages: [raw] });
+  const send = channel.send;
+  channel.send = async (payload) => {
+    order.push(`send:${payload.content}`);
+    return send(payload);
+  };
+  const llm = sequenceLlm(['<msg>on it</msg><draw>a cat</draw>', '<msg>it did not work</msg>']);
+  const turns = createTurnRunner({
+    hot: drawHot(),
+    store: fakeStore(),
+    llm,
+    calibrator: identityCalibrator(),
+    client: fakeClient(),
+    images: fakeImages({ error: new ImageGenError('timeout') }),
+  });
+  turns.setOnIdle(() => order.push('idle'));
+
+  await withCapturedLogs(() => turns.runTurn({ channel, mode: 'reply', trigger: normalizedTrigger(raw), triggerKind: 'mention' }));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.deepEqual(order, ['send:on it', 'send:it did not work', 'idle']);
+});
+
+test('runTurn: waitIdle() during a failed drawing resolves only after the drawFailed turn', async () => {
+  const order = [];
+  const raw = rawMessage({ id: 'm1' });
+  const channel = fakeTurnChannel({ historyMessages: [raw] });
+  const send = channel.send;
+  channel.send = async (payload) => {
+    order.push(`send:${payload.content}`);
+    return send(payload);
+  };
+  const llm = sequenceLlm(['<draw>a cat</draw>', '<msg>it did not work</msg>']);
+  let turns;
+  const images = {
+    quota: () => ({ spent: false, userSpent: false }),
+    generate: async () => {
+      // Asked while the first turn is still in flight, like /nep pause would.
+      turns.waitIdle().then(() => order.push('idle'));
+      throw new ImageGenError('moderation');
+    },
+  };
+  turns = createTurnRunner({ hot: drawHot(), store: fakeStore(), llm, calibrator: identityCalibrator(), client: fakeClient(), images });
+
+  await withCapturedLogs(() => turns.runTurn({ channel, mode: 'reply', trigger: normalizedTrigger(raw), triggerKind: 'mention' }));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.deepEqual(order, ['send:it did not work', 'idle']);
+});
+
+test('runTurn: a drawFailed turn that fails itself still fires onIdle once', async () => {
+  const raw = rawMessage({ id: 'm1' });
+  const channel = fakeTurnChannel({ historyMessages: [raw] });
+  let calls = 0;
+  const llm = {
+    complete: async () => {
+      calls += 1;
+      if (calls > 1) throw new Error('provider down');
+      return { text: '<draw>a cat</draw>', usage: {}, estimated: 1 };
+    },
+  };
+  const turns = createTurnRunner({
+    hot: drawHot(),
+    store: fakeStore(),
+    llm,
+    calibrator: identityCalibrator(),
+    client: fakeClient(),
+    images: fakeImages({ error: new ImageGenError('error') }),
+  });
+  let idle = 0;
+  turns.setOnIdle(() => {
+    idle += 1;
+  });
+
+  await withCapturedLogs(() => turns.runTurn({ channel, mode: 'reply', trigger: normalizedTrigger(raw), triggerKind: 'mention' }));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.equal(calls, 2);
+  assert.equal(idle, 1);
+  assert.equal(turns.isAnyBusy(), false);
+});
+
+test('runTurn: a failed drawing without a trigger fires onIdle once, right away', async () => {
+  const raw = rawMessage({ id: 'm1' });
+  const channel = fakeTurnChannel({ historyMessages: [raw] });
+  const turns = createTurnRunner({
+    hot: drawHot(),
+    store: fakeStore(),
+    llm: sequenceLlm(['<draw>a sunset</draw>']),
+    calibrator: identityCalibrator(),
+    client: fakeClient(),
+    images: fakeImages({ error: new ImageGenError('timeout') }),
+  });
+  let idle = 0;
+  turns.setOnIdle(() => {
+    idle += 1;
+  });
+
+  await withCapturedLogs(() => turns.runTurn({ channel, mode: 'interject' }));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.equal(idle, 1);
 });
