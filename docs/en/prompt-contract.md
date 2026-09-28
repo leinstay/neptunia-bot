@@ -37,6 +37,8 @@ All instructions are English in both layers; a character's speech samples may be
 | `lookup.md` | no | Classifier: does the persona need to search the web to answer this message (`features.webLookup`). Receives a short transcript and a `<candidate>` block. Output is ONE line: a search query (plain words, at most 12) or `none` | `{{name}}` |
 | `read-link.md` | no | Out-of-character prompt for the link reader (`features.webLookup`, `web.links.enabled`): condense a fetched page into one paragraph. Receives the page title and body. No character card | `{{maxChars}}` |
 | `search-summary.md` | no | Out-of-character prompt for the search condenser (`features.webLookup`, `web.search.enabled`): condense numbered search results into one note with inline sources. No character card | `{{query}}` `{{maxChars}}` |
+| `draw.md` | yes | Out-of-character prompt of the drawing sub-process (`features.imageGeneration`): produces one picture from a scene description. Receives only the appearance and the request — never the character card | `{{name}}` `{{appearance}}` `{{request}}` |
+| `appearance.md` | no | The persona's visual look, inserted into `draw.md` when `self="yes"`. One paragraph, no personality, no backstory | `{{name}}` |
 | `labels.json` | yes | Every string the CODE inserts into a prompt. Keys fixed below, values are the writer's | see below |
 
 `{{name}}` bot's display name · `{{author}}` caller's display name · `{{trigger}}` one of `labels.triggers.*` ·
@@ -44,7 +46,7 @@ All instructions are English in both layers; a character's speech samples may be
 System message = `system-prompt` + `character-card` + `rules` + `format`. For the analyzer: `memory.md` alone.
 On a forced turn (`/nep interject`, `/nep initiate`), `forced.md` is appended after the mode prompt if the file exists.
 The analyzer and the warmup's `profile.md` and `server.md` receive the character card and `rules.md` as a
-`<character>` block in the user message. `channel.md`, `describe.md`, `describe-video.md`, `rewatch.md`, `rewatch-answer.md`, `address.md`, `lookup.md`, `read-link.md` and `search-summary.md` do not receive the card.
+`<character>` block in the user message. `channel.md`, `describe.md`, `describe-video.md`, `draw.md`, `rewatch.md`, `rewatch-answer.md`, `address.md`, `lookup.md`, `read-link.md` and `search-summary.md` do not receive the card.
 
 `{{guildFieldChars}}` is `fieldChars * 2`, the limit code clamps guild-level patterns and starters to.
 `{{maxEpisodes}}` is the total episodes kept per person. Both are filled from config but not used by the default
@@ -160,6 +162,9 @@ senses.voice | links | files
 senses.linksWatch                        replaces links when features.videoDescriptions is on; adds that a linked video may come watched or not watched with the reason
 senses.linksRead                         shown after the links line when features.webLookup is on and web.links.enabled is not false; tells the persona that a link may come with a read excerpt, first-hand
 senses.search                            shown when features.webLookup is on, web.search.enabled is not false AND a Brave Search key is configured; tells the persona that a `<lookup>` block may appear with web results
+senses.draw                              shown when features.imageGeneration is on and an image client is wired; tells the persona it can draw
+senses.drawSpent                         replaces draw when the daily picture quota is spent
+senses.drawSpentUser                     replaces draw when this member's daily quota is spent
 lookup.header                            {query}: heading of the `<lookup>` block
 lookup.sources                           {list}: site names, comma-separated by code
 lookup.none                              shown in `<lookup>` when the search found nothing useful
@@ -196,6 +201,8 @@ server.activity                          {activity} = server.activityLive | acti
 server.lastMessage                       {when}: humanised age of the channel's newest message
 server.topWriters                        {names}: current names of the members who write there most
 triggers.mention | reply | name | followUp   followUp = an untagged message the address classifier judged to be for the persona; such a turn posts plain, never as a Discord reply
+triggers.drawFailed                      {reason}: the drawing sub-process failed; reason is the human phrase from draw.reasons.*
+draw.reasons.moderation | daily | userDaily | timeout | error    human phrases for the five failure reasons
 warmup.ownMark                           prefixed to a member's own lines in the profile.md transcript
 warmup.contextMark                       prefixed to context lines in the profile.md transcript
 ```
@@ -207,10 +214,12 @@ Only these tags are acted on:
 - `<think>…</think>` optional, first, 1–4 lines of hidden planning; an unclosed one means silence.
 - `<msg>text</msg>` one chat message, up to 3 in a row; `reply="#87"` makes it a Discord reply.
 - `<react to="#87">💀</react>` one unicode emoji; alone or with `<msg>`.
+- `<draw self="yes" reply="#87">scene</draw>` a picture for the drawing sub-process. One per turn, first non-empty wins, clamped to 800 chars. `self="yes"` adds the persona's appearance; `reply="#87"` works like on `<msg>`. May appear alongside `<msg>` and `<react>`.
 - `<skip/>` stay silent.
 - `@nick` exactly as in the transcript becomes a real mention.
 
-`features.reactions: false` drops `<react>`, `features.multiMessage: false` keeps the first `<msg>`; prompts need not know.
+`features.reactions: false` drops `<react>`, `features.multiMessage: false` keeps the first `<msg>`;
+`features.imageGeneration: false` or no image client drops `<draw>`; on a `drawFailed` turn `<draw>` is dropped too. Prompts need not know.
 
 ## Analyzer
 
@@ -514,3 +523,64 @@ nothing or the condenser found nothing useful, `labels.lookup.none` appears inst
 Rails: at most one search per turn; both the classifier and the condenser count against `llm.maxRequestsPerDay`;
 the search itself counts against `web.maxPerDay` (shared with link reads). Results are cached for
 `web.search.cacheHours` (default 24) hours per normalised query. Switch `features.webLookup` (missing = off).
+
+## Drawing
+
+The persona can produce pictures through a drawing sub-process (`features.imageGeneration`, on by default). When the
+model emits a `<draw>` tag, `src/behavior/turn.js` assembles the image prompt from `draw.md` and generates one picture
+through OpenRouter's Images API (`src/llm/images.js`). The picture is posted as its own message after the persona's
+text messages, never inlined.
+
+### Prompt assembly
+
+`buildDrawPrompt` (`src/behavior/prompt.js`) fills `draw.md` with three placeholders:
+
+- `{{name}}` — the bot's display name.
+- `{{appearance}}` — `appearance.md` with `{{name}}` filled, included only when `self="yes"`. Empty otherwise.
+- `{{request}}` — the scene text from the `<draw>` tag, clamped to `image.maxPromptChars` (default 800).
+
+The drawing sub-process never receives the character card, `rules.md` or the system prompt. It follows its own style
+section inside `draw.md`.
+
+### Reference
+
+When the persona is in the picture (`self="yes"`) and `image.reference` is `'avatar'` (the default), the bot's
+Discord avatar is downloaded and sent as an `input_references` entry so the image model can see what the persona looks
+like. If the avatar cannot be fetched, the generation proceeds without a reference.
+
+### Senses
+
+The `<senses>` block includes one drawing line when an image client is wired and `features.imageGeneration` is not
+false:
+
+- `senses.draw` — the persona can draw.
+- `senses.drawSpent` — the daily quota (`image.maxPerDay`) is spent.
+- `senses.drawSpentUser` — this member's daily quota (`image.maxPerUserPerDay`) is spent.
+
+An older `labels.json` without `senses.draw` shows nothing.
+
+### Failure turn
+
+When a generation fails on a reply turn (someone asked for the picture), a second turn fires automatically:
+
+- `triggerKind: 'drawFailed'`, with the failure reason rendered through `labels.draw.reasons.*` into
+  `labels.triggers.drawFailed`'s `{reason}` placeholder.
+- Mode is `reply`, same trigger message, replies allowed.
+- The second turn's own `<draw>` is dropped, so the model cannot retry the generation.
+- The channel's idle notification is held until the second turn finishes, so a pending ping is drained only after
+  the follow-up.
+
+On a spontaneous turn (nobody asked), a failed generation is only logged and no follow-up runs.
+
+### Rails
+
+- One `<draw>` per turn; first non-empty wins, clamped to `image.maxPromptChars` (default 800).
+- `image.maxPerDay` (default 50) and `image.maxPerUserPerDay` (default 50) are checked and counted before the
+  request; a cap error throws `ImageCapError` with reason `daily` or `userDaily`.
+- An unsupported model family (not `openai/*` or `google/*`) is refused with `UnsupportedImageModelError`.
+- Generation failures throw `ImageGenError` with reason `moderation`, `timeout`, `error` or `empty`.
+- Transient HTTP errors (408, 429, 5xx) and network failures are retried up to `image.retries` (default 1).
+- Moderation refusals (HTTP 400/403 with a moderation marker) are not retried.
+- Logs carry the model, counts, cost and failure reasons — never the prompt, because it may quote members.
+- In dry-run, the full image prompt (prompt files + the persona's request) is logged and mirrored, but nothing is
+  generated.

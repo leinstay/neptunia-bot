@@ -91,11 +91,11 @@ See [`docs/en/messages-and-memory.md`](docs/en/messages-and-memory.md) for the p
 
 ## Media
 
-The persona can see attached pictures, watch short video clips, read pages behind links and search the web for facts it does not have. Each capability is a separate feature switch, off or capped by default, with its own daily limit. A `<senses>` block in each request tells the persona what is on; it never claims to have perceived anything beyond it. See [`docs/en/media.md`](docs/en/media.md) for pictures, video vision, link reading, search, tools, costs and privacy.
+The persona can see attached pictures, watch short video clips, read pages behind links, search the web for facts it does not have, and draw pictures on request through an image generation model. Each capability is a separate feature switch, off or capped by default, with its own daily limit. A `<senses>` block in each request tells the persona what is on; it never claims to have perceived anything beyond it. See [`docs/en/media.md`](docs/en/media.md) for pictures, video vision, link reading, search, drawing, tools, costs and privacy.
 
 ## Costs
 
-Each turn is one LLM request; a memory update adds a second. Cost depends on the model and endpoint; `llm.model` and `llm.baseUrl` accept any compatible values. The daily cap (`llm.maxRequestsPerDay`) prevents runaway spending. Video descriptions add one request per watched clip to a separate, cheaper model (`media.video.maxPerDay` caps the daily count); `yt-dlp` and `ffmpeg` run locally and cost nothing beyond bandwidth. Link reads and searches (`features.webLookup`, off by default) add requests to the text classifier model, capped by `web.maxPerDay`; search additionally needs a Brave Search API key (free tier: 2,000 queries/month). With `features.webLookup` on, the bot makes outbound HTTP requests to fetch pages and to the Brave Search API; private addresses are refused.
+Each turn is one LLM request; a memory update adds a second. Cost depends on the model and endpoint; `llm.model` and `llm.baseUrl` accept any compatible values. The daily cap (`llm.maxRequestsPerDay`) prevents runaway spending. Video descriptions add one request per watched clip to a separate, cheaper model (`media.video.maxPerDay` caps the daily count); `yt-dlp` and `ffmpeg` run locally and cost nothing beyond bandwidth. Link reads and searches (`features.webLookup`, off by default) add requests to the text classifier model, capped by `web.maxPerDay`; search additionally needs a Brave Search API key (free tier: 2,000 queries/month). Image generation (`features.imageGeneration`, on by default) bills per output token through `image.model`; `image.maxPerDay` caps the daily count separately from chat requests. With `features.webLookup` on, the bot makes outbound HTTP requests to fetch pages and to the Brave Search API; private addresses are refused.
 
 `data/` holds per-member profiles, relationship scores, channel observations, server patterns, cached media descriptions and web excerpts. It stays on your machine, is gitignored, and is only sent to the LLM as context. The analyzer is instructed not to store sensitive details. `/nep memory forget` deletes a profile entirely.
 
@@ -148,6 +148,8 @@ prompts/
   initiate.md              task: start a topic
   forced.md                appended on a forced turn (/nep interject, /nep initiate)
   memory.md                prompt for the memory analyzer
+  draw.md                  prompt for the drawing sub-process (image generation)
+  appearance.md            the persona's visual look for self-portraits
   describe.md              prompt for the media describer
   describe-video.md        prompt for the video describer
   rewatch.md               classifier: re-watch a video for a question

@@ -37,6 +37,8 @@
 | `lookup.md` | нет | Классификатор: нужно ли персонажу искать в интернете, чтобы ответить на сообщение (`features.webLookup`). Получает короткий транскрипт и блок `<candidate>`. Выход: ОДНА строка: поисковый запрос (обычные слова, не более 12) или `none` | `{{name}}` |
 | `read-link.md` | нет | Внеролевой промпт для чтения ссылок (`features.webLookup`, `web.links.enabled`): сжать загруженную страницу в один абзац. Получает заголовок и тело страницы. Без карточки персонажа | `{{maxChars}}` |
 | `search-summary.md` | нет | Внеролевой промпт для конденсатора поиска (`features.webLookup`, `web.search.enabled`): сжать нумерованные результаты поиска в одну заметку со встроенными ссылками на источники. Без карточки персонажа | `{{query}}` `{{maxChars}}` |
+| `draw.md` | да | Внеролевой промпт подпроцесса рисования (`features.imageGeneration`): создаёт одну картинку по описанию сцены. Получает только внешность и запрос — никогда карточку персонажа | `{{name}}` `{{appearance}}` `{{request}}` |
+| `appearance.md` | нет | Внешний вид персонажа, вставляется в `draw.md` при `self="yes"`. Один абзац, без личности, без предыстории | `{{name}}` |
 | `labels.json` | да | Все строки, которые КОД вставляет в промпт. Ключи фиксированы ниже, формулировки определяет автор текстов | см. ниже |
 
 `{{name}}` отображаемое имя бота · `{{author}}` отображаемое имя вызвавшего · `{{trigger}}` одно из значений `labels.triggers.*` ·
@@ -44,7 +46,7 @@
 Системное сообщение = `system-prompt` + `character-card` + `rules` + `format`. Для анализатора: только `memory.md`.
 При принудительном ходе (`/nep interject`, `/nep initiate`) `forced.md` добавляется после промпта режима, если файл существует.
 Анализатор и промпты прогрева `profile.md` и `server.md` получают карточку персонажа и `rules.md` как блок
-`<character>` в пользовательском сообщении. `channel.md`, `describe.md`, `describe-video.md`, `rewatch.md`, `rewatch-answer.md`, `address.md`, `lookup.md`, `read-link.md` и `search-summary.md` карточку не получают.
+`<character>` в пользовательском сообщении. `channel.md`, `describe.md`, `describe-video.md`, `draw.md`, `rewatch.md`, `rewatch-answer.md`, `address.md`, `lookup.md`, `read-link.md` и `search-summary.md` карточку не получают.
 
 `{{guildFieldChars}}` равен `fieldChars * 2`, лимит, до которого код обрезает серверные паттерны и зачины разговоров.
 `{{maxEpisodes}}` определяет общее количество хранимых эпизодов на человека. Оба заполняются из конфигурации, но не
@@ -159,6 +161,9 @@ senses.voice | links | files
 senses.linksWatch                        replaces links when features.videoDescriptions is on; adds that a linked video may come watched or not watched with the reason
 senses.linksRead                         shown after the links line when features.webLookup is on and web.links.enabled is not false; tells the persona that a link may come with a read excerpt, first-hand
 senses.search                            shown when features.webLookup is on, web.search.enabled is not false AND a Brave Search key is configured; tells the persona that a `<lookup>` block may appear with web results
+senses.draw                              shown when features.imageGeneration is on and an image client is wired; tells the persona it can draw
+senses.drawSpent                         replaces draw when the daily picture quota is spent
+senses.drawSpentUser                     replaces draw when this member's daily quota is spent
 lookup.header                            {query}: heading of the `<lookup>` block
 lookup.sources                           {list}: site names, comma-separated by code
 lookup.none                              shown in `<lookup>` when the search found nothing useful
@@ -195,6 +200,8 @@ server.activity                          {activity} = server.activityLive | acti
 server.lastMessage                       {when}: humanised age of the channel's newest message
 server.topWriters                        {names}: current names of the members who write there most
 triggers.mention | reply | name | followUp   followUp = an untagged message the address classifier judged to be for the persona; such a turn posts plain, never as a Discord reply
+triggers.drawFailed                      {reason}: the drawing sub-process failed; reason is the human phrase from draw.reasons.*
+draw.reasons.moderation | daily | userDaily | timeout | error    human phrases for the five failure reasons
 warmup.ownMark                           prefixed to a member's own lines in the profile.md transcript
 warmup.contextMark                       prefixed to context lines in the profile.md transcript
 ```
@@ -206,10 +213,12 @@ warmup.contextMark                       prefixed to context lines in the profil
 - `<think>…</think>` необязателен, первый, 1–4 строки скрытого планирования; незакрытый означает молчание.
 - `<msg>text</msg>` одно сообщение в чат, до 3 подряд; `reply="#87"` превращает его в ответ Discord.
 - `<react to="#87">💀</react>` один юникодный эмодзи; отдельно или вместе с `<msg>`.
+- `<draw self="yes" reply="#87">scene</draw>` картинка для подпроцесса рисования. Один на ход, первый непустой побеждает, обрезается до 800 символов. `self="yes"` добавляет внешность персонажа; `reply="#87"` работает как на `<msg>`. Может быть вместе с `<msg>` и `<react>`.
 - `<skip/>` промолчать.
 - `@nick` в точности как в транскрипте становится реальным упоминанием.
 
-`features.reactions: false` убирает `<react>`, `features.multiMessage: false` оставляет только первый `<msg>`; промптам об этом знать не обязательно.
+`features.reactions: false` убирает `<react>`, `features.multiMessage: false` оставляет только первый `<msg>`;
+`features.imageGeneration: false` или отсутствие клиента изображений убирает `<draw>`; на ходе `drawFailed` тег `<draw>` тоже убирается. Промптам об этом знать не обязательно.
 
 ## Анализатор
 
@@ -521,3 +530,63 @@ warmup.contextMark                       prefixed to context lines in the profil
 сам поиск считается в `web.maxPerDay` (общий с чтением ссылок). Результаты кэшируются на
 `web.search.cacheHours` (по умолчанию 24) часов на нормализованный запрос. Переключатель `features.webLookup`
 (отсутствие = выключен).
+
+## Рисование
+
+Персонаж может создавать картинки через подпроцесс рисования (`features.imageGeneration`, включён по умолчанию). Когда
+модель выдаёт тег `<draw>`, `src/behavior/turn.js` собирает промпт изображения из `draw.md` и генерирует одну картинку
+через OpenRouter Images API (`src/llm/images.js`). Картинка публикуется отдельным сообщением после текстовых сообщений
+персонажа, никогда не встраивается.
+
+### Сборка промпта
+
+`buildDrawPrompt` (`src/behavior/prompt.js`) заполняет `draw.md` тремя плейсхолдерами:
+
+- `{{name}}` — отображаемое имя бота.
+- `{{appearance}}` — `appearance.md` с заполненным `{{name}}`, включается только при `self="yes"`. Иначе пусто.
+- `{{request}}` — текст сцены из тега `<draw>`, обрезанный до `image.maxPromptChars` (по умолчанию 800).
+
+Подпроцесс рисования никогда не получает карточку персонажа, `rules.md` или системный промпт. Он следует собственному
+разделу стиля внутри `draw.md`.
+
+### Референс
+
+Когда персонаж изображён на картинке (`self="yes"`) и `image.reference` равен `'avatar'` (по умолчанию), аватар бота из
+Discord загружается и отправляется как элемент `input_references`, чтобы модель изображений видела, как выглядит персонаж.
+Если аватар не удаётся загрузить, генерация продолжается без референса.
+
+### Восприятие
+
+Блок `<senses>` включает одну строку о рисовании, когда клиент изображений подключён и `features.imageGeneration` не false:
+
+- `senses.draw` — персонаж может рисовать.
+- `senses.drawSpent` — дневная квота (`image.maxPerDay`) исчерпана.
+- `senses.drawSpentUser` — дневная квота этого участника (`image.maxPerUserPerDay`) исчерпана.
+
+Старый `labels.json` без `senses.draw` ничего не покажет.
+
+### Ход при ошибке
+
+Когда генерация не удалась на ходе ответа (кто-то просил картинку), автоматически запускается второй ход:
+
+- `triggerKind: 'drawFailed'`, с причиной ошибки через `labels.draw.reasons.*` в плейсхолдер `{reason}` метки
+  `labels.triggers.drawFailed`.
+- Режим `reply`, то же триггерное сообщение, ответы разрешены.
+- Собственный `<draw>` второго хода убирается, поэтому модель не может повторить генерацию.
+- Уведомление о простое канала откладывается до завершения второго хода, поэтому отложенный пинг обрабатывается только
+  после продолжения.
+
+На спонтанном ходе (никто не просил) неудачная генерация только логируется, второй ход не запускается.
+
+### Ограничения
+
+- Один `<draw>` на ход; первый непустой побеждает, обрезается до `image.maxPromptChars` (по умолчанию 800).
+- `image.maxPerDay` (по умолчанию 50) и `image.maxPerUserPerDay` (по умолчанию 50) проверяются и считаются до отправки
+  запроса; превышение выбрасывает `ImageCapError` с причиной `daily` или `userDaily`.
+- Неподдерживаемое семейство моделей (не `openai/*` и не `google/*`) отклоняется с `UnsupportedImageModelError`.
+- Ошибки генерации выбрасывают `ImageGenError` с причиной `moderation`, `timeout`, `error` или `empty`.
+- Транзиентные HTTP-ошибки (408, 429, 5xx) и сетевые сбои повторяются до `image.retries` (по умолчанию 1) раз.
+- Отклонения модерацией (HTTP 400/403 с маркером модерации) не повторяются.
+- Логи содержат модель, счётчики, стоимость и причины ошибок — никогда промпт, потому что он может цитировать участников.
+- В сухом прогоне полный промпт изображения (файлы промптов + запрос персонажа) логируется и зеркалируется, но ничего не
+  генерируется.

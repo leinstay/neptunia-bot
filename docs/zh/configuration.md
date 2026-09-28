@@ -23,6 +23,7 @@
 | `videoDescriptions` | `false` | 通过支持视频的模型观看短视频片段；需同时开启 `mediaDescriptions`。在 `config.local.json` 中开启；还需要支持视频的模型，以及站点链接需要 `yt-dlp`/`ffmpeg` |
 | `videoRewatch` | `true` | 被呼叫时重看视频以回答相关问题；需要 `videoDescriptions` |
 | `webLookup` | `false` | 阅读聊天中发布的链接并在被问到事实性问题时搜索网络。与其他功能不同，缺失的键视为关闭。搜索需要 `.env` 中的 `BRAVE_SEARCH_API_KEY`；没有密钥时只有链接阅读可用。参见[媒体：链接与搜索](media.md#链接) |
+| `imageGeneration` | `true` | 允许角色通过绘画子进程绘制图片。缺失的键视为开启。需要 `image.model` 中配置支持图像生成的模型。参见[媒体：绘画](media.md#绘画) |
 | `followUp` | `true` | 角色回复后对未标记消息进行分类以延续对话 |
 | `typingSimulation` | `true` | 模拟输入速度 |
 | `adminCommands` | `true` | 所有者斜杠命令；设为 `false` 时注销命令 |
@@ -314,6 +315,43 @@ YouTube 链接的时长通过以下链式探测获取：首先尝试 yt-dlp，�
 | `contextMessages` | `50` | 为搜索分类器渲染为 `<transcript>` 的近期频道消息数 |
 | `timeoutMs` | `10000` | Brave Search 请求超时（毫秒） |
 
+## `image`
+
+绘画子进程（`features.imageGeneration`）的设置。角色输出 `<draw>` 标签后，代码通过 OpenRouter Images API 生成一张图片并作为独立消息发布。生成次数和每日计数器存储在 `data/state.json`（`imageDay`、`imageCount`、`imageUsers`）中。所有图片使用 `image.model`，不使用聊天模型或分类器模型。
+
+| 键 | 默认值 | 说明 |
+|---|---|---|
+| `model` | `"openai/gpt-image-2.5-flare"` | 图像模型 ID。仅支持 `openai/*` 和 `google/*` 系列；其他系列在发送请求前即被拒绝 |
+| `maxPerDay` | `50` | 整个实例的每日生成上限 |
+| `maxPerUserPerDay` | `50` | 每个成员的每日生成上限；自发回合和 `/nep draw` 不计入成员配额 |
+| `maxPerTurn` | `1` | 每回合最大图片数 |
+| `maxPromptChars` | `800` | `<draw>` 标签的场景文本截断至此长度 |
+| `reference` | `"avatar"` | 角色出现在图片中（`self="yes"`）时发送的视觉参考。`"avatar"` 下载机器人的 Discord 头像；其他值或 `null` 不发送 |
+| `referenceMaxBytes` | `4000000` | 头像最大文件大小（字节）；超过则跳过 |
+| `outputFormat` | `"png"` | 请求的输出格式（`png`、`jpeg`、`webp`） |
+| `aspectRatio` | `"auto"` | 宽高比（`auto`、`1:1`、`16:9`、`9:16` 等）。Google 模型中 `auto` 从请求中省略 |
+| `timeoutMs` | `120000` | 请求超时（毫秒） |
+| `retries` | `1` | 瞬态错误（HTTP 408/429/5xx、网络错误）的重试次数 |
+| `provider` | `null` | 图像请求的 OpenRouter `provider` 路由对象；`null` 不发送。系列特定的 provider 选项（如 `openai.moderation`）会合并在此之上 |
+
+### `image.openai`
+
+`openai/*` 图像模型的特定选项。
+
+| 键 | 默认值 | 说明 |
+|---|---|---|
+| `quality` | `"medium"` | 图像质量（`auto`、`low`、`medium`、`high`；2.5 模型还接受 `xhigh`、`max`） |
+| `background` | `"auto"` | 背景模式（`auto`、`opaque`；2.5 模型还接受 `transparent`） |
+| `moderation` | `"low"` | 作为 provider passthrough 发送到 `provider.options.openai.moderation` |
+
+### `image.google`
+
+`google/*` 图像模型的特定选项。
+
+| 键 | 默认值 | 说明 |
+|---|---|---|
+| `resolution` | `"1K"` | 输出分辨率（`512`、`1K`、`2K`、`4K`；支持因模型而异）。`gemini-2.5-flash-image` 无分辨率设置 |
+
 ## `warmup`
 
 | 键 | 默认值 | 说明 |
@@ -376,3 +414,27 @@ YouTube 链接的时长通过以下链式探测获取：首先尝试 yt-dlp，�
 | `google/gemini-3.8-flash` (default) | 0.014 |
 
 `qwen/qwen3.8-omni-flash` 同样接受视频和音频。价格会变化；上表是截至上述日期的快照。
+
+### 图片输出（`image.model`）
+
+与 `classifier.media`（描述输入图片的模型）分开。此模型通过 OpenRouter Images API（`POST /api/v1/images`）生成图片。仅支持两个系列：`openai/*` 和 `google/*`。不支持的系列在发送请求或计数前即被拒绝。
+
+**OpenAI 模型。** 使用 `image.openai.quality`、`image.openai.background`、`image.openai.moderation`、`image.aspectRatio`、`image.outputFormat` 和 `input_references`。
+
+| 模型 | 备注 |
+|---|---|
+| `openai/gpt-image-2.5-flare` (default) | 快速层 |
+| `openai/gpt-image-2.5-sunburst` | 高精度层 |
+| `openai/gpt-image-2` | |
+| `openai/gpt-image-1` | |
+| `openai/gpt-image-1-mini` | |
+
+**Google 模型。** 使用 `image.google.resolution`、`image.aspectRatio`、`image.outputFormat` 和 `input_references`。`image.aspectRatio` 为 `auto` 时从 Google 请求中省略。
+
+| 模型 | 备注 |
+|---|---|
+| `google/gemini-3.1-flash-image` | Nano Banana 2 |
+| `google/gemini-3-pro-image-preview` | |
+| `google/gemini-2.5-flash-image` | 无分辨率设置 |
+
+按输出 token 计费，而非按图片计费；provider 的 `usage.cost` 由 `/nep draw` 报告并记入日志。失败的生成不计费。

@@ -91,11 +91,11 @@ Discord 斜杠命令只有一个：`/nep`（名称来自 `bot.commandName`）。
 
 ## 媒体
 
-角色可以看到附加图片、观看短视频片段、阅读链接后的页面以及搜索网络以获取它没有的事实。每种能力是一个独立的功能开关，默认关闭或有上限，各自有每日限制。每个请求中的 `<senses>` 块告知角色当前什么是开启的；它不会声称感知了超出此块描述的任何东西。详见 [`media.md`](media.md)：图片、视频视觉、链接阅读、搜索、工具、成本和隐私。
+角色可以看到附加图片、观看短视频片段、阅读链接后的页面、搜索网络以获取它没有的事实，以及应请求通过图像生成模型绘制图片。每种能力是一个独立的功能开关，默认关闭或有上限，各自有每日限制。每个请求中的 `<senses>` 块告知角色当前什么是开启的；它不会声称感知了超出此块描述的任何东西。详见 [`media.md`](media.md)：图片、视频视觉、链接阅读、搜索、绘画、工具、成本和隐私。
 
 ## 成本
 
-每个回合消耗一次 LLM 请求；记忆更新再加一次。成本取决于模型和端点；`llm.model` 和 `llm.baseUrl` 接受任何兼容值。每日上限（`llm.maxRequestsPerDay`）防止超支。视频描述每个片段向更便宜的独立模型发一次请求（`media.video.maxPerDay` 限制每日数量）；`yt-dlp` 和 `ffmpeg` 在本地运行，只消耗带宽。链接阅读和搜索（`features.webLookup`，默认关闭）向文本分类器发请求，受 `web.maxPerDay` 限制；搜索还需要 Brave Search API 密钥（免费层：每月 2,000 次查询）。启用 `features.webLookup` 后，机器人会发出 HTTP 请求获取页面和访问 Brave Search API；私有地址拒绝访问。
+每个回合消耗一次 LLM 请求；记忆更新再加一次。成本取决于模型和端点；`llm.model` 和 `llm.baseUrl` 接受任何兼容值。每日上限（`llm.maxRequestsPerDay`）防止超支。视频描述每个片段向更便宜的独立模型发一次请求（`media.video.maxPerDay` 限制每日数量）；`yt-dlp` 和 `ffmpeg` 在本地运行，只消耗带宽。链接阅读和搜索（`features.webLookup`，默认关闭）向文本分类器发请求，受 `web.maxPerDay` 限制；搜索还需要 Brave Search API 密钥（免费层：每月 2,000 次查询）。图像生成（`features.imageGeneration`，默认开启）通过 `image.model` 按输出 token 计费；`image.maxPerDay` 独立于聊天请求限制每日数量。启用 `features.webLookup` 后，机器人会发出 HTTP 请求获取页面和访问 Brave Search API；私有地址拒绝访问。
 
 `data/` 存储成员档案、关系分数、频道观察、服务器规律、媒体描述和网页摘要的缓存。全部保留在你的机器上，已加入 gitignore，仅作为上下文发送给 LLM。分析器被指示不存储敏感信息。`/nep memory forget` 可完全删除某人的档案。
 
@@ -148,6 +148,8 @@ prompts/
   initiate.md              任务：发起话题
   forced.md                强制回合（/nep interject、/nep initiate）时追加
   memory.md                记忆分析器的提示
+  draw.md                  绘画子进程的提示（图像生成）
+  appearance.md            自画像用的角色外貌
   describe.md              媒体描述器的提示
   describe-video.md        视频描述器的提示
   rewatch.md               分类器：是否需要重看视频

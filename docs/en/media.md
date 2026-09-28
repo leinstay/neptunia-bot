@@ -52,13 +52,35 @@ At most one search per turn; both the classifier and the condenser count against
 
 Settings live under `web`. See [Configuration](configuration.md#web) for every key. The contract between the prompt files and the code is in [Prompt contract](prompt-contract.md).
 
+## Drawing
+
+`features.imageGeneration` (on by default) lets the persona draw pictures. When the model emits a `<draw>` tag, the engine generates one picture through OpenRouter's Images API (`image.model`, default `openai/gpt-image-2.5-flare`) and posts it as a separate message after the persona's words. Whether to draw is the model's own decision; it can refuse.
+
+### Caps
+
+At most `image.maxPerDay` (default 50) pictures per day for the instance and `image.maxPerUserPerDay` (default 50) per member. Both are checked before the request and counted only when it is sent. One picture per turn. The scene text from the `<draw>` tag is clamped to `image.maxPromptChars` (default 800). When the persona is in the picture (`self="yes"`) and `image.reference` is `'avatar'`, the bot's Discord avatar is sent as a visual reference.
+
+### Cost
+
+Pricing is per output token, not per picture. The provider's `usage.cost` is reported by `/nep draw` and logged. A failed generation is not billed. Image requests do not count against `llm.maxRequestsPerDay`.
+
+### Privacy
+
+The drawing prompt may quote members (it includes the scene text the model wrote, which can reference the conversation). Only counts are logged — never the prompt itself. In dry-run, the full image prompt is logged and mirrored to the dry-run channel, but nothing is generated.
+
+### Failure
+
+When the drawing fails on a reply turn, a second turn fires with the failure reason in the trigger label, so the persona can tell the requester what happened. The second turn's own `<draw>` is dropped. On a spontaneous turn, a failure is only logged.
+
+Settings live under `image`. See [Configuration](configuration.md#image) for every key and [Configuration: Pictures out](configuration.md#pictures-out-imagemodel) for the supported models.
+
 ## Blind spots
 
 Voice messages show only duration. Audio files show a name and duration. The persona cannot hear either. How it handles a blind spot is the character card's call.
 
 ## Cost
 
-Each turn is one LLM request; a memory update adds a second. Video descriptions add one request per watched clip to the `classifier.video` model (`media.video.maxPerDay` caps the daily count); `yt-dlp` and `ffmpeg` run locally and cost nothing beyond bandwidth. Link reads and searches add requests to the `classifier.text` model, capped by `web.maxPerDay` (shared) and `llm.maxRequestsPerDay` (global). Search additionally needs a Brave Search key; the free tier handles a low-traffic server.
+Each turn is one LLM request; a memory update adds a second. Video descriptions add one request per watched clip to the `classifier.video` model (`media.video.maxPerDay` caps the daily count); `yt-dlp` and `ffmpeg` run locally and cost nothing beyond bandwidth. Link reads and searches add requests to the `classifier.text` model, capped by `web.maxPerDay` (shared) and `llm.maxRequestsPerDay` (global). Search additionally needs a Brave Search key; the free tier handles a low-traffic server. Image generation bills per output token through the `image.model`; `image.maxPerDay` caps the daily count separately from chat requests.
 
 ## Privacy
 

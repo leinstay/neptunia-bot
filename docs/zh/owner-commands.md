@@ -6,13 +6,14 @@
 
 | 命令 | 说明 |
 |---|---|
-| `/nep status` | 模型、校准、配额和每服务器记忆状态 |
+| `/nep status` | 模型、校准、配额（包括图片计数和图像模型）和每服务器记忆状态 |
 | `/nep reload` | 立即重新加载配置和提示 |
 | `/nep ping [role]` | 向一个或所有模型角色（`talk`、`analyzer`、`classifier.text`、`classifier.media`、`classifier.video`）发送最小请求并报告模型、延迟、provider、token 或错误；`classifier.video` 之后报告 `youtube: API key — {status}`（如 `ok`、`not needed (yt-dlp ok)`、`missing (blocked)`）；`classifier.text` 之后报告 `web: API key — {status}`（`ok`、`missing` 或 `off`）。不计入 `llm.maxRequestsPerDay`，在暂停或预热期间均可使用 |
 | `/nep pause` | 停止所有活动，将记忆刷入磁盘并卸载；暂停期间可安全编辑 `data/` |
 | `/nep resume` | 从 `data/` 重新加载记忆并继续；如有 JSON 文件无法解析则拒绝并指出问题文件 |
 | `/nep interject [channel]` | 立即插入该频道的当前对话 |
 | `/nep initiate [channel]` | 立即在该频道中发起话题 |
+| `/nep draw <text> [self]` | 通过绘画提示绘制一张图片。仅回复给你（ephemeral 附带图片）。消耗 `image.maxPerDay` 的余额但不计入成员配额。暂停时拒绝。不依赖 `features.imageGeneration` |
 | `/nep set <path> <value>` | 覆盖配置值（写入 `config.local.json`） |
 | `/nep unset <path>` | 移除配置覆盖 |
 | `/nep rule add <text>` | 向 `prompts.local/rules.md` 追加规则 |

@@ -52,13 +52,35 @@
 
 设置位于 `web` 下。每个键请参阅[配置](configuration.md#web)。提示文件与代码之间的契约在[提示契约](prompt-contract.md)中。
 
+## 绘画
+
+`features.imageGeneration`（默认开启）允许角色绘制图片。当模型输出 `<draw>` 标签时，引擎通过 OpenRouter Images API（`image.model`，默认 `openai/gpt-image-2.5-flare`）生成一张图片，并在角色的文本消息之后作为独立消息发布。是否绘画由模型自行决定，可以拒绝。
+
+### 限制
+
+每日整个实例最多 `image.maxPerDay`（默认 50）张，每个成员最多 `image.maxPerUserPerDay`（默认 50）张。在请求前检查，仅在发送时计数。每回合一张。`<draw>` 标签的场景文本截断至 `image.maxPromptChars`（默认 800）。角色出现在图片中（`self="yes"`）且 `image.reference` 为 `'avatar'` 时，机器人的 Discord 头像作为视觉参考发送。
+
+### 成本
+
+按输出 token 计费，而非按图片。provider 的 `usage.cost` 由 `/nep draw` 报告并记入日志。失败的生成不计费。图像请求不计入 `llm.maxRequestsPerDay`。
+
+### 隐私
+
+绘画提示可能引用成员（它包含模型编写的场景文本，可能涉及对话内容）。日志只记录计数，不记录提示本身。试运行中，完整的图像提示被记录并镜像到试运行频道，但不生成任何图片。
+
+### 失败
+
+当回复回合中绘画失败时，触发第二个回合，触发标签中包含失败原因，以便角色告知请求者发生了什么。第二个回合自身的 `<draw>` 被移除。自发回合中失败仅记录日志。
+
+设置位于 `image` 下。每个键请参阅[配置](configuration.md#image)，支持的模型请参阅[配置：图片输出](configuration.md#图片输出imagemodel)。
+
 ## 盲区
 
 语音消息只显示时长。音频文件显示名称和时长。角色无法听到任何一种。如何处理盲区由角色卡决定。
 
 ## 成本
 
-每个回合是一次 LLM 请求；记忆更新再增加一次。视频描述为每个观看的片段向 `classifier.video` 模型发送一次请求（`media.video.maxPerDay` 限制每日数量）；`yt-dlp` 和 `ffmpeg` 在本地运行，除带宽外不产生费用。链接阅读和搜索向 `classifier.text` 模型发送请求，受 `web.maxPerDay`（共享）和 `llm.maxRequestsPerDay`（全局）限制。搜索还需要 Brave Search 密钥；免费层可以处理低流量的服务器。
+每个回合是一次 LLM 请求；记忆更新再增加一次。视频描述为每个观看的片段向 `classifier.video` 模型发送一次请求（`media.video.maxPerDay` 限制每日数量）；`yt-dlp` 和 `ffmpeg` 在本地运行，除带宽外不产生费用。链接阅读和搜索向 `classifier.text` 模型发送请求，受 `web.maxPerDay`（共享）和 `llm.maxRequestsPerDay`（全局）限制。搜索还需要 Brave Search 密钥；免费层可以处理低流量的服务器。图像生成通过 `image.model` 按输出 token 计费；`image.maxPerDay` 独立于聊天请求限制每日数量。
 
 ## 隐私
 

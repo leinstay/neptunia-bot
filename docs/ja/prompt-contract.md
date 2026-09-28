@@ -37,6 +37,8 @@
 | `lookup.md` | いいえ | 分類器: ペルソナがこのメッセージに答えるためにウェブ検索が必要か（`features.webLookup`）。短いトランスクリプトと `<candidate>` ブロックを受け取る。出力は 1 行: 検索クエリ（プレーンワード、最大 12 語）または `none` | `{{name}}` |
 | `read-link.md` | いいえ | リンク読み取りのアウトオブキャラクタープロンプト（`features.webLookup`、`web.links.enabled`）: フェッチしたページを 1 段落に要約する。ページのタイトルと本文を受け取る。キャラクターカードなし | `{{maxChars}}` |
 | `search-summary.md` | いいえ | 検索要約のアウトオブキャラクタープロンプト（`features.webLookup`、`web.search.enabled`）: 番号付き検索結果をインラインソース付きの 1 つのノートに要約する。キャラクターカードなし | `{{query}}` `{{maxChars}}` |
+| `draw.md` | はい | 描画サブプロセスのアウトオブキャラクタープロンプト（`features.imageGeneration`）: シーン説明から画像 1 枚を生成する。外見とリクエストのみを受け取り、キャラクターカードは受け取らない | `{{name}}` `{{appearance}}` `{{request}}` |
+| `appearance.md` | いいえ | ペルソナのビジュアル外見。`self="yes"` 時に `draw.md` に挿入される。パーソナリティやバックストーリーなし、1 段落 | `{{name}}` |
 | `labels.json` | はい | コードがプロンプトに挿入するすべての文字列。キーは以下で固定、値はライターが記述する | 以下参照 |
 
 `{{name}}` ボットの表示名 · `{{author}}` 発話者の表示名 · `{{trigger}}` `labels.triggers.*` のいずれか ·
@@ -44,7 +46,7 @@
 システムメッセージ = `system-prompt` + `character-card` + `rules` + `format`。アナライザーの場合: `memory.md` のみ。
 強制ターン（`/nep interject`、`/nep initiate`）では、`forced.md` が存在する場合、モードプロンプトの後に追加されます。
 アナライザーとウォームアップの `profile.md` および `server.md` はキャラクターカードと `rules.md` をユーザーメッセージ内の
-`<character>` ブロックとして受け取ります。`channel.md`、`describe.md`、`describe-video.md`、`rewatch.md`、`rewatch-answer.md`、`address.md`、`lookup.md`、`read-link.md`、`search-summary.md` はカードを受け取りません。
+`<character>` ブロックとして受け取ります。`channel.md`、`describe.md`、`describe-video.md`、`draw.md`、`rewatch.md`、`rewatch-answer.md`、`address.md`、`lookup.md`、`read-link.md`、`search-summary.md` はカードを受け取りません。
 
 `{{guildFieldChars}}` は `fieldChars * 2` で、コードがギルドレベルのパターンとスターターをクランプする上限です。
 `{{maxEpisodes}}` はメンバーごとに保持されるエピソードの総数です。どちらも config から設定されますが、デフォルトプロンプトでは
@@ -158,6 +160,9 @@ senses.voice | links | files
 senses.linksWatch                        replaces links when features.videoDescriptions is on; adds that a linked video may come watched or not watched with the reason
 senses.linksRead                         shown after the links line when features.webLookup is on and web.links.enabled is not false; tells the persona that a link may come with a read excerpt, first-hand
 senses.search                            shown when features.webLookup is on, web.search.enabled is not false AND a Brave Search key is configured; tells the persona that a `<lookup>` block may appear with web results
+senses.draw                              shown when features.imageGeneration is on and an image client is wired; tells the persona it can draw
+senses.drawSpent                         replaces draw when the daily picture quota is spent
+senses.drawSpentUser                     replaces draw when this member's daily quota is spent
 lookup.header                            {query}: heading of the `<lookup>` block
 lookup.sources                           {list}: site names, comma-separated by code
 lookup.none                              shown in `<lookup>` when the search found nothing useful
@@ -194,6 +199,8 @@ server.activity                          {activity} = server.activityLive | acti
 server.lastMessage                       {when}: humanised age of the channel's newest message
 server.topWriters                        {names}: current names of the members who write there most
 triggers.mention | reply | name | followUp   followUp = an untagged message the address classifier judged to be for the persona; such a turn posts plain, never as a Discord reply
+triggers.drawFailed                      {reason}: the drawing sub-process failed; reason is the human phrase from draw.reasons.*
+draw.reasons.moderation | daily | userDaily | timeout | error    human phrases for the five failure reasons
 warmup.ownMark                           prefixed to a member's own lines in the profile.md transcript
 warmup.contextMark                       prefixed to context lines in the profile.md transcript
 ```
@@ -205,10 +212,12 @@ warmup.contextMark                       prefixed to context lines in the profil
 - `<think>…</think>` 任意、先頭に配置、1–4 行の隠れた計画。閉じていない場合は沈黙を意味する。
 - `<msg>text</msg>` チャットメッセージ 1 件、最大 3 件連続可能。`reply="#87"` で Discord リプライになる。
 - `<react to="#87">💀</react>` Unicode 絵文字 1 つ。`<msg>` と単独でも併用でも可。
+- `<draw self="yes" reply="#87">scene</draw>` 描画サブプロセスへの画像。ターンにつき 1 つ、最初の非空が優先、800 文字でクランプ。`self="yes"` でペルソナの外見が追加。`reply="#87"` は `<msg>` と同じ。`<msg>` や `<react>` と併用可。
 - `<skip/>` 沈黙。
 - `@nick` トランスクリプトと同一の表記が実際のメンションになる。
 
-`features.reactions: false` は `<react>` を無効化、`features.multiMessage: false` は最初の `<msg>` のみを保持します。プロンプトが知る必要はありません。
+`features.reactions: false` は `<react>` を無効化、`features.multiMessage: false` は最初の `<msg>` のみを保持。
+`features.imageGeneration: false` またはイメージクライアントなしの場合は `<draw>` を無効化。`drawFailed` ターンでも `<draw>` は無効化されます。プロンプトが知る必要はありません。
 
 ## アナライザー
 
@@ -381,3 +390,53 @@ warmup.contextMark                       prefixed to context lines in the profil
 制限: ターンあたり最大 1 回の検索。分類器と要約はそれぞれ `llm.maxRequestsPerDay` にカウントされます。検索自体は
 `web.maxPerDay`（リンク読み取りと共有）にカウントされます。結果は正規化されたクエリごとに `web.search.cacheHours`
 （デフォルト 24）時間キャッシュされます。スイッチ `features.webLookup`（未設定 = オフ）。
+
+## 描画
+
+ペルソナは描画サブプロセス（`features.imageGeneration`、デフォルトオン）を通じて画像を生成できます。モデルが `<draw>` タグを出力すると、`src/behavior/turn.js` が `draw.md` からイメージプロンプトを組み立て、OpenRouter Images API（`src/llm/images.js`）を通じて 1 枚の画像を生成します。画像はペルソナのテキストメッセージの後に独立したメッセージとして投稿され、インラインにはなりません。
+
+### プロンプトの組み立て
+
+`buildDrawPrompt`（`src/behavior/prompt.js`）が `draw.md` を 3 つのプレースホルダーで埋めます:
+
+- `{{name}}` — ボットの表示名。
+- `{{appearance}}` — `{{name}}` を埋めた `appearance.md`。`self="yes"` の場合のみ含まれ、それ以外は空。
+- `{{request}}` — `<draw>` タグのシーンテキスト。`image.maxPromptChars`（デフォルト 800）でクランプ。
+
+描画サブプロセスはキャラクターカード、`rules.md`、システムプロンプトを一切受け取りません。`draw.md` 内の独自のスタイルセクションに従います。
+
+### リファレンス
+
+ペルソナが画像に含まれ（`self="yes"`）、`image.reference` が `'avatar'`（デフォルト）の場合、ボットの Discord アバターがダウンロードされ `input_references` エントリとして送信されます。アバターの取得に失敗した場合はリファレンスなしで生成が続行されます。
+
+### 感覚
+
+`<senses>` ブロックには、イメージクライアントが接続され `features.imageGeneration` が false でない場合に描画行が 1 行含まれます:
+
+- `senses.draw` — ペルソナは描画できる。
+- `senses.drawSpent` — 日次クォータ（`image.maxPerDay`）が使い切られた。
+- `senses.drawSpentUser` — このメンバーの日次クォータ（`image.maxPerUserPerDay`）が使い切られた。
+
+`senses.draw` のない古い `labels.json` では何も表示されません。
+
+### 失敗ターン
+
+リプライターンで生成が失敗した場合（誰かが画像を依頼した場合）、2 回目のターンが自動的に発火します:
+
+- `triggerKind: 'drawFailed'`、失敗理由が `labels.draw.reasons.*` を通じて `labels.triggers.drawFailed` の `{reason}` プレースホルダーにレンダリングされます。
+- モードは `reply`、同じトリガーメッセージ、リプライ可。
+- 2 回目のターン自体の `<draw>` は無効化されるため、モデルは生成をリトライできません。
+- チャンネルのアイドル通知は 2 回目のターンが終了するまで保留されます。
+
+自発的ターン（誰も依頼していない）では、失敗はログに記録されるだけでフォローアップは実行されません。
+
+### 制限
+
+- ターンあたり `<draw>` は 1 つ。最初の非空が優先、`image.maxPromptChars`（デフォルト 800）でクランプ。
+- `image.maxPerDay`（デフォルト 50）と `image.maxPerUserPerDay`（デフォルト 50）はリクエスト前にチェックしカウント。上限エラーは `ImageCapError`（理由 `daily` または `userDaily`）。
+- サポートされないモデルファミリー（`openai/*` でも `google/*` でもない）は `UnsupportedImageModelError` で拒否。
+- 生成失敗は `ImageGenError`（理由 `moderation`、`timeout`、`error`、`empty`）。
+- 一時的な HTTP エラー（408、429、5xx）とネットワーク障害は `image.retries`（デフォルト 1）回までリトライ。
+- モデレーション拒否（HTTP 400/403 + モデレーションマーカー）はリトライされない。
+- ログにはモデル、カウント、コスト、失敗理由が記録され、プロンプトは含まれません（メンバーを引用する可能性があるため）。
+- ドライランでは完全なイメージプロンプト（プロンプトファイル + ペルソナのリクエスト）がログとミラーに記録されますが、何も生成されません。

@@ -37,6 +37,8 @@
 | `lookup.md` | 否 | 分类器：角色是否需要搜索网络来回答这条消息（`features.webLookup`）。接收一段短对话记录和一个 `<candidate>` 块。输出为一行：一个搜索查询（纯文字，最多 12 个词）或 `none` | `{{name}}` |
 | `read-link.md` | 否 | 角色外提示，用于链接阅读器（`features.webLookup`，`web.links.enabled`）：将获取的页面浓缩为一个段落。接收页面标题和正文。不接收角色卡 | `{{maxChars}}` |
 | `search-summary.md` | 否 | 角色外提示，用于搜索浓缩器（`features.webLookup`，`web.search.enabled`）：将编号的搜索结果浓缩为带内联来源的笔记。不接收角色卡 | `{{query}}` `{{maxChars}}` |
+| `draw.md` | 是 | 绘画子进程的角色外提示（`features.imageGeneration`）：根据场景描述生成一张图片。仅接收外貌和请求，不接收角色卡 | `{{name}}` `{{appearance}}` `{{request}}` |
+| `appearance.md` | 否 | 角色的视觉外貌，在 `self="yes"` 时插入 `draw.md`。一段话，无性格，无背景故事 | `{{name}}` |
 | `labels.json` | 是 | 代码插入提示中的所有字符串。键在下方固定，值由编写者决定 | 见下文 |
 
 `{{name}}` 机器人的显示名称 · `{{author}}` 呼叫者的显示名称 · `{{trigger}}` `labels.triggers.*` 之一 ·
@@ -44,7 +46,7 @@
 系统消息 = `system-prompt` + `character-card` + `rules` + `format`。分析器则单独使用 `memory.md`。
 在强制回合（`/nep interject`、`/nep initiate`）中，如果 `forced.md` 存在，则追加在模式提示之后。
 分析器和预热的 `profile.md`、`server.md` 在用户消息中以 `<character>` 块接收角色卡和 `rules.md`。
-`channel.md`、`describe.md`、`describe-video.md`、`rewatch.md`、`rewatch-answer.md`、`address.md`、`lookup.md`、`read-link.md` 和 `search-summary.md` 不接收角色卡。
+`channel.md`、`describe.md`、`describe-video.md`、`draw.md`、`rewatch.md`、`rewatch-answer.md`、`address.md`、`lookup.md`、`read-link.md` 和 `search-summary.md` 不接收角色卡。
 
 `{{guildFieldChars}}` 等于 `fieldChars * 2`，是代码对服务器级规律和开场白进行截断的上限。
 `{{maxEpisodes}}` 是每人保留的回忆总数上限。两者均从配置填充，但默认提示未使用；自定义的 `memory.md`
@@ -158,6 +160,9 @@ senses.voice | links | files
 senses.linksWatch                        replaces links when features.videoDescriptions is on; adds that a linked video may come watched or not watched with the reason
 senses.linksRead                         shown after the links line when features.webLookup is on and web.links.enabled is not false; tells the persona that a link may come with a read excerpt, first-hand
 senses.search                            shown when features.webLookup is on, web.search.enabled is not false AND a Brave Search key is configured; tells the persona that a `<lookup>` block may appear with web results
+senses.draw                              shown when features.imageGeneration is on and an image client is wired; tells the persona it can draw
+senses.drawSpent                         replaces draw when the daily picture quota is spent
+senses.drawSpentUser                     replaces draw when this member's daily quota is spent
 lookup.header                            {query}: heading of the `<lookup>` block
 lookup.sources                           {list}: site names, comma-separated by code
 lookup.none                              shown in `<lookup>` when the search found nothing useful
@@ -194,6 +199,8 @@ server.activity                          {activity} = server.activityLive | acti
 server.lastMessage                       {when}: humanised age of the channel's newest message
 server.topWriters                        {names}: current names of the members who write there most
 triggers.mention | reply | name | followUp   followUp = an untagged message the address classifier judged to be for the persona; such a turn posts plain, never as a Discord reply
+triggers.drawFailed                      {reason}: the drawing sub-process failed; reason is the human phrase from draw.reasons.*
+draw.reasons.moderation | daily | userDaily | timeout | error    human phrases for the five failure reasons
 warmup.ownMark                           prefixed to a member's own lines in the profile.md transcript
 warmup.contextMark                       prefixed to context lines in the profile.md transcript
 ```
@@ -205,10 +212,12 @@ warmup.contextMark                       prefixed to context lines in the profil
 - `<think>…</think>` 可选，位于最前，1–4 行隐藏的思考过程；未闭合表示保持沉默。
 - `<msg>text</msg>` 一条聊天消息，连续最多 3 条；`reply="#87"` 使其成为对对话记录中某行的 Discord 回复。
 - `<react to="#87">💀</react>` 一个 unicode 表情；可单独使用，也可与 `<msg>` 一起使用。
+- `<draw self="yes" reply="#87">scene</draw>` 提交给绘画子进程的图片。每回合一个，首个非空优先，截断至 800 字符。`self="yes"` 添加角色外貌；`reply="#87"` 与 `<msg>` 用法相同。可与 `<msg>` 和 `<react>` 同时出现。
 - `<skip/>` 保持沉默。
 - `@nick` 与对话记录中完全一致时转换为真实的提及。
 
-`features.reactions: false` 移除 `<react>`，`features.multiMessage: false` 仅保留第一个 `<msg>`；提示无需知道这些。
+`features.reactions: false` 移除 `<react>`，`features.multiMessage: false` 仅保留第一个 `<msg>`；
+`features.imageGeneration: false` 或无图像客户端时移除 `<draw>`；`drawFailed` 回合中 `<draw>` 也被移除。提示无需知道这些。
 
 ## 分析器
 
@@ -476,3 +485,57 @@ warmup.contextMark                       prefixed to context lines in the profil
 限制：每回合最多一次搜索；分类器和浓缩器各自计入 `llm.maxRequestsPerDay`；搜索本身计入 `web.maxPerDay`
 （与链接阅读共享）。结果按规范化查询缓存 `web.search.cacheHours`（默认 24）小时。开关 `features.webLookup`
 （缺失 = 关闭）。
+
+## 绘画
+
+角色可以通过绘画子进程（`features.imageGeneration`，默认开启）生成图片。当模型输出 `<draw>` 标签时，
+`src/behavior/turn.js` 从 `draw.md` 组装图像提示，通过 OpenRouter Images API（`src/llm/images.js`）生成一张图片。
+图片作为独立消息发布在角色的文本消息之后，不会内联。
+
+### 提示组装
+
+`buildDrawPrompt`（`src/behavior/prompt.js`）用三个占位符填充 `draw.md`：
+
+- `{{name}}` — 机器人的显示名称。
+- `{{appearance}}` — 填充了 `{{name}}` 的 `appearance.md`，仅在 `self="yes"` 时包含。否则为空。
+- `{{request}}` — `<draw>` 标签的场景文本，截断至 `image.maxPromptChars`（默认 800）。
+
+绘画子进程不接收角色卡、`rules.md` 或系统提示。它遵循 `draw.md` 内的独立风格部分。
+
+### 参考图
+
+当角色出现在图片中（`self="yes"`）且 `image.reference` 为 `'avatar'`（默认）时，机器人的 Discord 头像被下载并作为
+`input_references` 条目发送，使图像模型能看到角色的外观。如果无法获取头像，则不带参考图继续生成。
+
+### 感知
+
+当图像客户端已连接且 `features.imageGeneration` 不为 false 时，`<senses>` 块包含一行绘画信息：
+
+- `senses.draw` — 角色可以绘画。
+- `senses.drawSpent` — 每日配额（`image.maxPerDay`）已用完。
+- `senses.drawSpentUser` — 该成员的每日配额（`image.maxPerUserPerDay`）已用完。
+
+没有 `senses.draw` 的旧版 `labels.json` 不会显示任何内容。
+
+### 失败回合
+
+当回复回合中生成失败时（有人请求了图片），自动触发第二个回合：
+
+- `triggerKind: 'drawFailed'`，失败原因通过 `labels.draw.reasons.*` 渲染到 `labels.triggers.drawFailed` 的
+  `{reason}` 占位符中。
+- 模式为 `reply`，同一触发消息，允许回复。
+- 第二个回合自身的 `<draw>` 被移除，因此模型无法重试生成。
+- 频道的空闲通知被保留到第二个回合结束。
+
+自发回合（无人请求）中，失败仅记录日志，不触发后续回合。
+
+### 限制
+
+- 每回合一个 `<draw>`；首个非空优先，截断至 `image.maxPromptChars`（默认 800）。
+- `image.maxPerDay`（默认 50）和 `image.maxPerUserPerDay`（默认 50）在请求前检查和计数；超限抛出 `ImageCapError`（原因 `daily` 或 `userDaily`）。
+- 不支持的模型系列（非 `openai/*` 或 `google/*`）以 `UnsupportedImageModelError` 拒绝。
+- 生成失败抛出 `ImageGenError`（原因 `moderation`、`timeout`、`error` 或 `empty`）。
+- 瞬态 HTTP 错误（408、429、5xx）和网络故障重试最多 `image.retries`（默认 1）次。
+- 内容审核拒绝（HTTP 400/403 带审核标记）不重试。
+- 日志记录模型、计数、费用和失败原因，不记录提示（因为可能引用成员）。
+- 试运行中，完整的图像提示（提示文件 + 角色的请求）被记录并镜像，但不生成任何图片。

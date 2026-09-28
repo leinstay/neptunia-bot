@@ -23,6 +23,7 @@ Every key in `config.json` with its default, grouped by section.
 | `videoDescriptions` | `false` | Watch short video clips through a video-capable model; needs `mediaDescriptions` on as well. Turn on in `config.local.json`; still needs a video-capable model and, for site links, `yt-dlp`/`ffmpeg` |
 | `videoRewatch` | `true` | When addressed, re-watch a video to answer a question about it; needs `videoDescriptions` on |
 | `webLookup` | `false` | Read links posted in chat and search the web when asked a factual question. Unlike other features, a missing key counts as OFF. Needs `BRAVE_SEARCH_API_KEY` in `.env` for search; without it only link reading works. See [Media: Links and search](media.md#links) |
+| `imageGeneration` | `true` | Let the persona draw pictures through a drawing sub-process. A missing key counts as on. Needs an image-capable model in `image.model`. See [Media: Drawing](media.md#drawing) |
 | `followUp` | `true` | Classify untagged messages after the persona answers to continue a conversation |
 | `typingSimulation` | `true` | Simulate typing speed |
 | `adminCommands` | `true` | Owner slash commands; `false` unregisters them |
@@ -314,6 +315,43 @@ Settings for the web lookup (`features.webLookup`). Both link reading and search
 | `contextMessages` | `50` | Recent channel messages rendered as a `<transcript>` for the search classifier |
 | `timeoutMs` | `10000` | Brave Search request timeout (ms) |
 
+## `image`
+
+Settings for the drawing sub-process (`features.imageGeneration`). The persona emits a `<draw>` tag; code generates one picture through OpenRouter's Images API and posts it as its own message. Generation and daily counts are stored in `data/state.json` (`imageDay`, `imageCount`, `imageUsers`). All pictures go through `image.model`, not the chat or classifier models.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `model` | `"openai/gpt-image-2.5-flare"` | Image model ID. Only `openai/*` and `google/*` families are supported; anything else is refused before any request |
+| `maxPerDay` | `50` | Daily generation cap for the whole instance |
+| `maxPerUserPerDay` | `50` | Daily generation cap per member; spontaneous turns and `/nep draw` do not count against a member |
+| `maxPerTurn` | `1` | Max pictures per turn |
+| `maxPromptChars` | `800` | Scene text from the `<draw>` tag is clamped to this length |
+| `reference` | `"avatar"` | What to send as a visual reference when the persona is in the picture (`self="yes"`). `"avatar"` downloads the bot's Discord avatar; any other value or `null` sends nothing |
+| `referenceMaxBytes` | `4000000` | Max avatar file size (bytes); a larger avatar is skipped |
+| `outputFormat` | `"png"` | Requested output format (`png`, `jpeg`, `webp`) |
+| `aspectRatio` | `"auto"` | Aspect ratio (`auto`, `1:1`, `16:9`, `9:16`, etc.). For Google models, `auto` is omitted from the request |
+| `timeoutMs` | `120000` | Request timeout (ms) |
+| `retries` | `1` | Retries on transient failures (HTTP 408/429/5xx, network errors) |
+| `provider` | `null` | OpenRouter `provider` routing object for image requests; `null` sends nothing. Family-specific provider options (e.g. `openai.moderation`) are merged over this |
+
+### `image.openai`
+
+Provider-specific options for `openai/*` image models.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `quality` | `"medium"` | Image quality (`auto`, `low`, `medium`, `high`; 2.5 models also accept `xhigh`, `max`) |
+| `background` | `"auto"` | Background mode (`auto`, `opaque`; 2.5 models also accept `transparent`) |
+| `moderation` | `"low"` | Sent as a provider passthrough under `provider.options.openai.moderation` |
+
+### `image.google`
+
+Provider-specific options for `google/*` image models.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `resolution` | `"1K"` | Output resolution (`512`, `1K`, `2K`, `4K`; support varies by model). `gemini-2.5-flash-image` has no resolution knob |
+
 ## `warmup`
 
 | Key | Default | Meaning |
@@ -376,3 +414,27 @@ Cost per one-minute clip, USD, from OpenRouter prices on 2026-09-23:
 | `google/gemini-3.8-flash` (default) | 0.014 |
 
 `qwen/qwen3.8-omni-flash` also accepts video and audio. Prices change; the table is a snapshot as of the date above.
+
+### Pictures out (`image.model`)
+
+Separate from `classifier.media` (which describes pictures IN). This model generates pictures through OpenRouter's Images API (`POST /api/v1/images`). Only two families are supported: `openai/*` and `google/*`. An unsupported family is refused before any request or count.
+
+**OpenAI models.** Honour `image.openai.quality`, `image.openai.background`, `image.openai.moderation`, `image.aspectRatio`, `image.outputFormat` and `input_references`.
+
+| Model | Notes |
+|---|---|
+| `openai/gpt-image-2.5-flare` (default) | Fast tier |
+| `openai/gpt-image-2.5-sunburst` | Editing-precision tier |
+| `openai/gpt-image-2` | |
+| `openai/gpt-image-1` | |
+| `openai/gpt-image-1-mini` | |
+
+**Google models.** Honour `image.google.resolution`, `image.aspectRatio`, `image.outputFormat` and `input_references`. `image.aspectRatio` of `auto` is omitted from the Google request.
+
+| Model | Notes |
+|---|---|
+| `google/gemini-3.1-flash-image` | Nano Banana 2 |
+| `google/gemini-3-pro-image-preview` | |
+| `google/gemini-2.5-flash-image` | No resolution knob |
+
+Pricing is per output token, not per picture; the provider's `usage.cost` is reported by `/nep draw` and logged. A failed generation is not billed.

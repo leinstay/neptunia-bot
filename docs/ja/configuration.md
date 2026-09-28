@@ -23,6 +23,7 @@
 | `videoDescriptions` | `false` | 動画対応モデルで短い動画クリップを視聴。`mediaDescriptions` も有効にする必要がある。`config.local.json` で有効化。動画対応モデルが必要で、サイトリンクには `yt-dlp`/`ffmpeg` も必要 |
 | `videoRewatch` | `true` | 話しかけられた時に動画を再視聴して質問に回答。`videoDescriptions` が必要 |
 | `webLookup` | `false` | チャットに投稿されたリンクを読み取り、事実に関する質問にウェブ検索で回答。他の機能と異なり、キーが存在しない場合はオフとして扱われる。検索には `.env` に `BRAVE_SEARCH_API_KEY` が必要。キーがない場合はリンク読み取りのみ動作する。[メディア: リンクと検索](media.md#リンク)を参照 |
+| `imageGeneration` | `true` | ペルソナが描画サブプロセスを通じて画像を描くことを許可。キーが存在しない場合はオンとして扱われる。`image.model` に画像生成対応モデルが必要。[メディア: 描画](media.md#描画)を参照 |
 | `followUp` | `true` | ペルソナの応答後、タグなしメッセージを分類して会話を継続 |
 | `typingSimulation` | `true` | タイピング速度をシミュレート |
 | `adminCommands` | `true` | オーナースラッシュコマンド。`false` でコマンド登録を解除 |
@@ -314,6 +315,43 @@ YouTube リンクの再生時間は次の順序で取得されます: まず yt-
 | `contextMessages` | `50` | 検索分類器に `<transcript>` として渡す直近のチャンネルメッセージ数 |
 | `timeoutMs` | `10000` | Brave Search リクエストのタイムアウト（ミリ秒） |
 
+## `image`
+
+描画サブプロセス（`features.imageGeneration`）の設定。ペルソナが `<draw>` タグを出力すると、コードが OpenRouter Images API を通じて 1 枚の画像を生成し、独立したメッセージとして投稿します。生成回数と日次カウンターは `data/state.json`（`imageDay`、`imageCount`、`imageUsers`）に保存されます。すべての画像は `image.model` を使用し、チャットモデルや分類器モデルは使用しません。
+
+| キー | デフォルト | 説明 |
+|---|---|---|
+| `model` | `"openai/gpt-image-2.5-flare"` | 画像モデル ID。`openai/*` と `google/*` ファミリーのみサポート。それ以外はリクエスト前に拒否 |
+| `maxPerDay` | `50` | インスタンス全体の日次生成上限 |
+| `maxPerUserPerDay` | `50` | メンバーあたりの日次生成上限。自発的ターンと `/nep draw` はメンバーのカウントに含まれない |
+| `maxPerTurn` | `1` | ターンあたりの最大画像数 |
+| `maxPromptChars` | `800` | `<draw>` タグのシーンテキストはこの長さにクランプされる |
+| `reference` | `"avatar"` | ペルソナが画像に含まれるとき（`self="yes"`）に送信するビジュアルリファレンス。`"avatar"` はボットの Discord アバターをダウンロード。他の値や `null` は何も送信しない |
+| `referenceMaxBytes` | `4000000` | アバターの最大ファイルサイズ（バイト）。超過するとスキップ |
+| `outputFormat` | `"png"` | 要求する出力フォーマット（`png`、`jpeg`、`webp`） |
+| `aspectRatio` | `"auto"` | アスペクト比（`auto`、`1:1`、`16:9`、`9:16` など）。Google モデルの場合、`auto` はリクエストから省略される |
+| `timeoutMs` | `120000` | リクエストタイムアウト（ミリ秒） |
+| `retries` | `1` | 一時的エラー（HTTP 408/429/5xx、ネットワークエラー）時のリトライ回数 |
+| `provider` | `null` | 画像リクエスト用の OpenRouter `provider` ルーティングオブジェクト。`null` は何も送信しない。ファミリー固有のプロバイダーオプション（例: `openai.moderation`）はこの上にマージされる |
+
+### `image.openai`
+
+`openai/*` 画像モデル固有のオプション。
+
+| キー | デフォルト | 説明 |
+|---|---|---|
+| `quality` | `"medium"` | 画像品質（`auto`、`low`、`medium`、`high`。2.5 モデルは `xhigh`、`max` も受け付ける） |
+| `background` | `"auto"` | 背景モード（`auto`、`opaque`。2.5 モデルは `transparent` も受け付ける） |
+| `moderation` | `"low"` | `provider.options.openai.moderation` としてプロバイダーパススルーで送信 |
+
+### `image.google`
+
+`google/*` 画像モデル固有のオプション。
+
+| キー | デフォルト | 説明 |
+|---|---|---|
+| `resolution` | `"1K"` | 出力解像度（`512`、`1K`、`2K`、`4K`。サポートはモデルにより異なる）。`gemini-2.5-flash-image` には解像度の設定なし |
+
 ## `warmup`
 
 | キー | デフォルト | 説明 |
@@ -376,3 +414,27 @@ OpenRouter を通じて動画と音声の両方の入力を受け付けるモデ
 | `google/gemini-3.8-flash` (default) | 0.014 |
 
 `qwen/qwen3.8-omni-flash` も動画と音声を受け付けます。価格は変動します。上の表は記載日時点のスナップショットです。
+
+### 画像出力（`image.model`）
+
+`classifier.media`（画像の説明を書くモデル）とは別です。このモデルは OpenRouter Images API（`POST /api/v1/images`）を通じて画像を生成します。サポートされるファミリーは `openai/*` と `google/*` の 2 つのみ。サポートされないファミリーはリクエストやカウントの前に拒否されます。
+
+**OpenAI モデル。** `image.openai.quality`、`image.openai.background`、`image.openai.moderation`、`image.aspectRatio`、`image.outputFormat`、`input_references` を使用。
+
+| モデル | 備考 |
+|---|---|
+| `openai/gpt-image-2.5-flare` (default) | 高速ティア |
+| `openai/gpt-image-2.5-sunburst` | 高精度ティア |
+| `openai/gpt-image-2` | |
+| `openai/gpt-image-1` | |
+| `openai/gpt-image-1-mini` | |
+
+**Google モデル。** `image.google.resolution`、`image.aspectRatio`、`image.outputFormat`、`input_references` を使用。`image.aspectRatio` が `auto` の場合、Google リクエストから省略されます。
+
+| モデル | 備考 |
+|---|---|
+| `google/gemini-3.1-flash-image` | Nano Banana 2 |
+| `google/gemini-3-pro-image-preview` | |
+| `google/gemini-2.5-flash-image` | 解像度設定なし |
+
+課金は画像単位ではなく出力トークン単位です。プロバイダーの `usage.cost` は `/nep draw` で報告されログに記録されます。失敗した生成には課金されません。

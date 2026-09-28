@@ -6,13 +6,14 @@ Channels, roles and users are picked from Discord's own pickers; `set`/`unset` a
 
 | Command | What it does |
 |---|---|
-| `/nep status` | Model, calibration, quotas and per-guild memory status |
+| `/nep status` | Model, calibration, quotas (including image count and image model), and per-guild memory status |
 | `/nep reload` | Reload config and prompts now |
 | `/nep ping [role]` | Send a minimal request to one or all model roles (`talk`, `analyzer`, `classifier.text`, `classifier.media`, `classifier.video`) and report model, latency, provider, tokens or the error; `/nep ping classifier` pings all three classifier roles. After `classifier.video`, reports `youtube: API key — {status}` (e.g. `ok`, `not needed (yt-dlp ok)`, `missing (blocked)`); after `classifier.text`, reports `web: API key — {status}` (`ok`, `missing` or `off`). Does not count against `llm.maxRequestsPerDay` and works while paused or warming up |
 | `/nep pause` | Stop all activity, flush memory to disk and unload it; `data/` is safe to edit while paused |
 | `/nep resume` | Reload memory from `data/` and continue; refuses if any JSON file does not parse, naming the broken ones |
 | `/nep interject [channel]` | Jump into the current conversation in this channel now |
 | `/nep initiate [channel]` | Start a topic in this channel now |
+| `/nep draw <text> [self]` | Draw one picture through the drawing prompt. Answered only to you (ephemeral with the picture attached). Spends balance against `image.maxPerDay` but not against a member's quota. Refused while paused. NOT gated by `features.imageGeneration` |
 | `/nep set <path> <value>` | Override a config value (writes to `config.local.json`) |
 | `/nep unset <path>` | Remove a config override |
 | `/nep rule add <text>` | Append a rule to `prompts.local/rules.md` |
