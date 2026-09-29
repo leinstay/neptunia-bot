@@ -1503,3 +1503,287 @@ test('validate: a non-json file under dataDir is never checked', () => {
   fs.writeFileSync(path.join(dir, 'notes.txt'), 'not json at all, but not a .json file either');
   assert.deepEqual(store.validate(), []);
 });
+
+// --- private memory layer (data/guilds/<id>/private/<userId>.json) -----------
+
+const EMPTY_PRIVATE = {
+  relationship: '',
+  interests: [],
+  details: [],
+  detailsSeq: 1,
+  episodes: [],
+  affinity: { score: 0, reason: '', history: [] },
+  firstSeen: '',
+  lastSeen: '',
+  replies: { day: '', count: 0, noticedDay: '' },
+  buffer: [],
+};
+
+function privateFile(dir, guildId, userId) {
+  return path.join(dir, 'guilds', guildId, 'private', `${userId}.json`);
+}
+
+test('getPrivate: null when no private file exists, and nothing is created', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  assert.equal(store.getPrivate('g1', 'u1'), null);
+  store.flush();
+  assert.equal(fs.existsSync(privateFile(dir, 'g1', 'u1')), false);
+  assert.deepEqual(store.listPrivate('g1'), []);
+});
+
+test('ensurePrivate: creates the empty shape, persists it on flush and survives a restart', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  assert.deepEqual(store.ensurePrivate('g1', 'u1'), EMPTY_PRIVATE);
+  store.flush();
+  assert.equal(fs.existsSync(privateFile(dir, 'g1', 'u1')), true);
+
+  const storeB = createStore({ dataDir: dir });
+  assert.deepEqual(storeB.getPrivate('g1', 'u1'), EMPTY_PRIVATE);
+  assert.deepEqual(storeB.listPrivate('g1'), ['u1']);
+});
+
+test('ensurePrivate: returns the existing file untouched', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  store.applyPrivateOps('g1', 'u1', { relationship: 'Trusts the persona' }, { fieldChars: 300 });
+  assert.equal(store.ensurePrivate('g1', 'u1').relationship, 'Trusts the persona');
+});
+
+test('getPrivate: a hand-edited file is normalised on read: defaults filled, detail ids assigned', () => {
+  const dir = tmpDataDir();
+  const file = privateFile(dir, 'g1', 'u1');
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(
+    file,
+    JSON.stringify({
+      relationship: 'Κάτι μυστικό',
+      interests: 'not a list',
+      details: [{ text: 'Owns a cat' }, { text: 'Plays guitar' }],
+      affinity: { score: 12 },
+      replies: { day: '2026-09-29' },
+      buffer: 'garbage',
+      episodes: null,
+    }),
+  );
+
+  const store = createStore({ dataDir: dir });
+  const priv = store.getPrivate('g1', 'u1');
+  assert.equal(priv.relationship, 'Κάτι μυστικό');
+  assert.deepEqual(priv.interests, []);
+  assert.deepEqual(priv.details, [
+    { id: 1, text: 'Owns a cat', weight: 1, firstSeen: null, lastSeen: null },
+    { id: 2, text: 'Plays guitar', weight: 1, firstSeen: null, lastSeen: null },
+  ]);
+  assert.equal(priv.detailsSeq, 3);
+  assert.deepEqual(priv.affinity, { score: 12, reason: '', history: [] });
+  assert.deepEqual(priv.replies, { day: '2026-09-29', count: 0, noticedDay: '' });
+  assert.deepEqual(priv.buffer, []);
+  assert.deepEqual(priv.episodes, []);
+  assert.equal(priv.firstSeen, '');
+  assert.equal(priv.lastSeen, '');
+});
+
+test('applyPrivateOps: relationship, interests and details land in the private file; character/style/aliases/portrait are ignored', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  store.touchUser('g1', 'u1', 'Alice', 1000);
+  const priv = store.applyPrivateOps(
+    'g1',
+    'u1',
+    {
+      relationship: 'Confides in the persona',
+      character: 'should not land',
+      style: 'should not land',
+      aliases: { add: ['Ally'] },
+      portrait: 'should not land',
+      interests: { add: [{ topic: 'Chess', note: 'plays weekly' }] },
+      details: { add: ['Owns a cat', 'Plays guitar'] },
+    },
+    { fieldChars: 300, maxInterests: 12, topicChars: 40, noteChars: 120, maxDetails: 15, now: 1000 },
+  );
+
+  assert.equal(priv.relationship, 'Confides in the persona');
+  assert.equal(priv.interests.length, 1);
+  assert.equal(priv.interests[0].topic, 'Chess');
+  assert.deepEqual(priv.details.map((d) => d.id), [1, 2]);
+  assert.equal(priv.detailsSeq, 3);
+  for (const key of ['character', 'style', 'aliases', 'portrait']) assert.equal(key in priv, false, key);
+
+  // the public profile is never touched by private ops
+  const pub = store.getUser('g1', 'u1');
+  assert.equal(pub.relationship, '');
+  assert.deepEqual(pub.interests, []);
+  assert.deepEqual(pub.details, []);
+  assert.deepEqual(pub.aliases, []);
+
+  store.flush();
+  const storeB = createStore({ dataDir: dir });
+  assert.equal(storeB.getPrivate('g1', 'u1').relationship, 'Confides in the persona');
+});
+
+test('applyPrivateOps: an empty relationship never blanks the stored one; garbage ops never throw', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  store.applyPrivateOps('g1', 'u1', { relationship: 'Old friend' }, { fieldChars: 300 });
+  store.applyPrivateOps('g1', 'u1', { relationship: '   ' }, { fieldChars: 300 });
+  assert.doesNotThrow(() => store.applyPrivateOps('g1', 'u1', null, {}));
+  assert.doesNotThrow(() => store.applyPrivateOps('g1', 'u1', { interests: [], details: 'x' }));
+  assert.equal(store.getPrivate('g1', 'u1').relationship, 'Old friend');
+});
+
+test('adjustPrivateAffinity: starts at 0, clamps the delta and the score, never touches the public affinity', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  store.touchUser('g1', 'u1', 'Alice', 1000);
+  store.adjustAffinity('g1', 'u1', 4, 'public reason', { maxDelta: 5, historySize: 5, now: 1000 });
+
+  const first = store.adjustPrivateAffinity('g1', 'u1', 50, 'shared a secret', { maxDelta: 5, historySize: 5, now: 2000 });
+  assert.equal(first.score, 5);
+  assert.equal(first.reason, 'shared a secret');
+  assert.equal(first.history.length, 1);
+
+  let last;
+  for (let i = 0; i < 30; i += 1) {
+    last = store.adjustPrivateAffinity('g1', 'u1', 5, 'again', { maxDelta: 5, historySize: 5, now: 3000 + i });
+  }
+  assert.equal(last.score, 100);
+  assert.equal(last.history.length, 5);
+  assert.deepEqual(store.getPrivate('g1', 'u1').affinity, last);
+
+  assert.equal(store.getUser('g1', 'u1').affinity.score, 4);
+});
+
+test('addPrivateEpisodes: appends via mergeEpisodes to the private file only', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  store.touchUser('g1', 'u1', 'Alice', 1000);
+  const added = store.addPrivateEpisodes('g1', 'u1', [{ what: 'told the persona a secret' }], {
+    maxEpisodes: 20,
+    maxNew: 3,
+    now: 1000,
+  });
+  assert.equal(added, 1);
+  assert.equal(store.getPrivate('g1', 'u1').episodes[0].what, 'told the persona a secret');
+  assert.deepEqual(store.getUser('g1', 'u1').episodes, []);
+  assert.equal(store.addPrivateEpisodes('g1', 'u1', [], { maxEpisodes: 20, now: 2000 }), 0);
+});
+
+test('bumpPrivateReplies: counts within a day, rolls over on a new day, persists', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  assert.deepEqual(store.bumpPrivateReplies('g1', 'u1', '2026-09-29'), { day: '2026-09-29', count: 1 });
+  assert.deepEqual(store.bumpPrivateReplies('g1', 'u1', '2026-09-29'), { day: '2026-09-29', count: 2 });
+  assert.deepEqual(store.bumpPrivateReplies('g1', 'u1', '2026-09-30'), { day: '2026-09-30', count: 1 });
+  store.flush();
+  const storeB = createStore({ dataDir: dir });
+  assert.deepEqual(storeB.getPrivate('g1', 'u1').replies, { day: '2026-09-30', count: 1, noticedDay: '' });
+});
+
+test('markPrivateNoticed: records the day the cap notice was posted, keeps the reply count', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  store.bumpPrivateReplies('g1', 'u1', '2026-09-29');
+  store.markPrivateNoticed('g1', 'u1', '2026-09-29');
+  assert.deepEqual(store.getPrivate('g1', 'u1').replies, { day: '2026-09-29', count: 1, noticedDay: '2026-09-29' });
+  store.flush();
+  const storeB = createStore({ dataDir: dir });
+  assert.equal(storeB.getPrivate('g1', 'u1').replies.noticedDay, '2026-09-29');
+});
+
+test('private buffer: push, info, take empties it; info on a missing file creates nothing', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  assert.deepEqual(store.privateBufferInfo('g1', 'u1'), { size: 0, oldestTs: null });
+  assert.deepEqual(store.takePrivateBuffer('g1', 'u1'), []);
+  assert.equal(store.getPrivate('g1', 'u1'), null);
+
+  store.pushPrivateBuffer('g1', 'u1', { id: 'm1', content: 'γεια', ts: 1000 });
+  store.pushPrivateBuffer('g1', 'u1', { id: 'm2', content: 'hello', ts: 2000 });
+  assert.deepEqual(store.privateBufferInfo('g1', 'u1'), { size: 2, oldestTs: 1000 });
+
+  store.flush();
+  const storeB = createStore({ dataDir: dir });
+  const taken = storeB.takePrivateBuffer('g1', 'u1');
+  assert.deepEqual(taken.map((m) => m.id), ['m1', 'm2']);
+  assert.deepEqual(storeB.privateBufferInfo('g1', 'u1'), { size: 0, oldestTs: null });
+  storeB.flush();
+  assert.deepEqual(createStore({ dataDir: dir }).getPrivate('g1', 'u1').buffer, []);
+});
+
+test('pushPrivateBuffer: an optional maxLength drops the oldest entries', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  for (let i = 1; i <= 5; i += 1) store.pushPrivateBuffer('g1', 'u1', { id: `m${i}`, ts: i }, 3);
+  assert.deepEqual(store.getPrivate('g1', 'u1').buffer.map((m) => m.id), ['m3', 'm4', 'm5']);
+});
+
+test('listPrivate: ids with a private file, on disk or only cached', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  store.ensurePrivate('g1', 'u1');
+  store.flush();
+  store.ensurePrivate('g1', 'u2');
+  assert.deepEqual(store.listPrivate('g1').sort(), ['u1', 'u2']);
+  assert.deepEqual(store.listPrivate('g2'), []);
+});
+
+test('forgetPrivate: deletes the private file from cache and disk, the public profile stays', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  store.touchUser('g1', 'u1', 'Alice', 1000);
+  store.applyPrivateOps('g1', 'u1', { relationship: 'secret' }, { fieldChars: 300 });
+  store.flush();
+  store.forgetPrivate('g1', 'u1');
+  assert.equal(store.getPrivate('g1', 'u1'), null);
+  assert.equal(fs.existsSync(privateFile(dir, 'g1', 'u1')), false);
+  assert.notEqual(store.getUser('g1', 'u1'), null);
+  assert.doesNotThrow(() => store.forgetPrivate('g1', 'never'));
+});
+
+test('forgetUser: also deletes the private file', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  store.touchUser('g1', 'u1', 'Alice', 1000);
+  store.applyPrivateOps('g1', 'u1', { relationship: 'secret' }, { fieldChars: 300 });
+  store.ensurePrivate('g1', 'u2');
+  store.flush();
+  store.forgetUser('g1', 'u1');
+  assert.equal(store.getUser('g1', 'u1'), null);
+  assert.equal(store.getPrivate('g1', 'u1'), null);
+  assert.equal(fs.existsSync(privateFile(dir, 'g1', 'u1')), false);
+  assert.deepEqual(store.listPrivate('g1'), ['u2']);
+});
+
+test('wipeGuild: removes the private directory, cache and disk, leaves other guilds alone', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  seedGuild(store);
+  store.applyPrivateOps('g1', 'u1', { relationship: 'secret' }, { fieldChars: 300 });
+  store.flush();
+  store.pushPrivateBuffer('g1', 'u2', { id: 'm1', ts: 1000 }); // only cached, never flushed
+  store.ensurePrivate('g2', 'u9');
+
+  const counts = store.wipeGuild('g1');
+  assert.deepEqual(counts, { users: 2, channels: 2, loreRemoved: 1, loreKept: 1, bufferMessages: 2 });
+  assert.equal(fs.existsSync(path.join(dir, 'guilds', 'g1', 'private')), false);
+  assert.equal(store.getPrivate('g1', 'u1'), null);
+  assert.equal(store.getPrivate('g1', 'u2'), null);
+  assert.deepEqual(store.listPrivate('g1'), []);
+  assert.notEqual(store.getPrivate('g2', 'u9'), null);
+
+  store.flush();
+  assert.equal(fs.existsSync(path.join(dir, 'guilds', 'g1', 'private')), false);
+  assert.deepEqual(createStore({ dataDir: dir }).listPrivate('g1'), []);
+  assert.deepEqual(createStore({ dataDir: dir }).listPrivate('g2'), ['u9']);
+});
+
+test('validate: reports an unparsable private file like a broken profile', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  store.ensurePrivate('g1', 'u1');
+  store.flush();
+  fs.writeFileSync(privateFile(dir, 'g1', 'u1'), '{ not json');
+  assert.deepEqual(store.validate(), ['guilds/g1/private/u1.json']);
+});

@@ -6,6 +6,8 @@
 //                                            what people taught it (`learned`)
 //   data/guilds/<guildId>/buffer.json        messages observed since the last memory update
 //   data/guilds/<guildId>/users/<userId>.json  one profile per active member
+//   data/guilds/<guildId>/private/<userId>.json  what the persona learned from one member in direct
+//                                            messages: never shown anywhere but that member's DM
 //   data/guilds/<guildId>/channels/<channelId>.json  one entry per channel the persona has seen (the server map)
 //   data/guilds/<guildId>/lore.json           the guild's lorebook
 //   data/guilds/<guildId>/media.json          the media description cache
@@ -14,9 +16,10 @@
 // timer and on shutdown. Writes are atomic (temp file + rename) so a crash
 // mid-write never corrupts a profile.
 //
-// `forgetUser` and `wipeGuild` are the only two functions in the whole
-// project allowed to delete stored memory (see src/admin.js, the owner-only
-// `/nep memory forget` and `/nep memory wipe` commands).
+// `forgetUser`, `forgetPrivate` and `wipeGuild` are the only functions in the
+// whole project allowed to delete stored memory (see src/admin.js, the
+// owner-only `/nep memory forget`, `/nep private forget` and `/nep memory wipe`
+// commands).
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -160,6 +163,65 @@ function normalizeProfile(profile) {
   if (!Array.isArray(profile.aliases)) profile.aliases = [];
 }
 
+/**
+ * A member's private layer before anything was said in a direct message:
+ * no id or names (those live in the public profile), its own affinity
+ * starting at 0, the daily DM reply counter and its own observation buffer.
+ * @returns {object}
+ */
+export function emptyPrivate() {
+  return {
+    relationship: '',
+    interests: [],
+    details: [],
+    detailsSeq: 1,
+    episodes: [],
+    affinity: emptyAffinity(),
+    firstSeen: '',
+    lastSeen: '',
+    replies: { day: '', count: 0, noticedDay: '' },
+    buffer: [],
+  };
+}
+
+/** Normalize a private file in place: `interests`/`details`/`detailsSeq`
+ * exactly as `normalizeProfile`, plus the defaults of `emptyPrivate` for
+ * every field that is missing or of the wrong type (the file is untrusted,
+ * possibly hand-edited while paused). Never marks anything dirty -- same
+ * contract as `normalizeProfile`. */
+function normalizePrivate(priv) {
+  priv.interests = normalizeInterests(priv.interests);
+
+  if (!Number.isInteger(priv.detailsSeq) || priv.detailsSeq < 1) priv.detailsSeq = 1;
+  const { items, nextId } = normalizeDetails(priv.details, priv.detailsSeq);
+  priv.details = items;
+  priv.detailsSeq = nextId;
+
+  if (typeof priv.relationship !== 'string') priv.relationship = '';
+  if (!Array.isArray(priv.episodes)) priv.episodes = [];
+
+  const affinity = priv.affinity && typeof priv.affinity === 'object' && !Array.isArray(priv.affinity) ? priv.affinity : {};
+  priv.affinity = {
+    ...affinity,
+    score: Number.isFinite(affinity.score) ? affinity.score : 0,
+    reason: typeof affinity.reason === 'string' ? affinity.reason : '',
+    history: Array.isArray(affinity.history) ? affinity.history : [],
+  };
+
+  for (const key of ['firstSeen', 'lastSeen']) {
+    if (typeof priv[key] !== 'string') priv[key] = '';
+  }
+
+  const replies = priv.replies && typeof priv.replies === 'object' && !Array.isArray(priv.replies) ? priv.replies : {};
+  priv.replies = {
+    day: typeof replies.day === 'string' ? replies.day : '',
+    count: Number.isInteger(replies.count) && replies.count >= 0 ? replies.count : 0,
+    noticedDay: typeof replies.noticedDay === 'string' ? replies.noticedDay : '',
+  };
+
+  if (!Array.isArray(priv.buffer)) priv.buffer = [];
+}
+
 /** Normalize a guild's `learned`/`learnedNextId` fields in place: a
  * guild.json written before this list existed loads it as empty, a
  * hand-edited one is validated via src/memory/details.js#normalizeDetails
@@ -244,9 +306,24 @@ export function createStore({ dataDir }) {
   const channelFile = (guildId, channelId) => path.join(channelsDir(guildId), `${channelId}.json`);
   const mediaCacheFile = (guildId) => path.join(guildDir(guildId), 'media.json');
   const loreFile = (guildId) => path.join(guildDir(guildId), 'lore.json');
+  const privateDir = (guildId) => path.join(guildDir(guildId), 'private');
+  const privateFile = (guildId, userId) => path.join(privateDir(guildId), `${userId}.json`);
   const stateFile = path.join(dataDir, 'state.json');
 
   const stateEntry = entry(stateFile, () => ({}));
+
+  /** The cache entry of a member's private file, created empty when missing, normalised. */
+  function privateEntry(guildId, userId) {
+    const item = entry(privateFile(guildId, userId), emptyPrivate);
+    normalizePrivate(item.value);
+    return item;
+  }
+
+  /** Whether a member has a private file, cached or on disk (no side effects on the cache). */
+  function hasPrivate(guildId, userId) {
+    const file = privateFile(guildId, userId);
+    return entries.has(file) || fs.existsSync(file);
+  }
 
   const store = {
     state: {
@@ -443,9 +520,244 @@ export function createStore({ dataDir }) {
       return next;
     },
 
-    /** Delete one member's profile, cache and disk alike. See also `wipeGuild` below. */
+    /**
+     * Delete one member's profile AND their private layer (`forgetPrivate`),
+     * cache and disk alike: removing a person removes all of them. See also
+     * `wipeGuild` below.
+     */
     forgetUser(guildId, userId) {
       const file = userFile(guildId, userId);
+      entries.delete(file);
+      fs.rmSync(file, { force: true });
+      store.forgetPrivate(guildId, userId);
+    },
+
+    // ---- the private layer: what one member said to the persona in direct messages ----
+
+    /**
+     * A member's private layer (data/guilds/<id>/private/<userId>.json), or
+     * null when there is none. Normalised on read (see `normalizePrivate`),
+     * persisted the next time anything writes the file.
+     * @param {string} guildId
+     * @param {string} userId
+     * @returns {object|null}
+     */
+    getPrivate(guildId, userId) {
+      if (!hasPrivate(guildId, userId)) return null;
+      return privateEntry(guildId, userId).value;
+    },
+
+    /**
+     * A member's private layer, created with the empty shape (see
+     * `emptyPrivate`) and marked dirty when it did not exist yet; an existing
+     * one is returned untouched.
+     * @param {string} guildId
+     * @param {string} userId
+     * @returns {object}
+     */
+    ensurePrivate(guildId, userId) {
+      const existed = hasPrivate(guildId, userId);
+      const item = privateEntry(guildId, userId);
+      if (!existed) item.dirty = true;
+      return item.value;
+    },
+
+    /**
+     * Apply one private analyzer batch to a member's private layer: the same
+     * `relationship`/`interests`/`details` op shapes and `opts` as
+     * `applyProfileOps` (an absent or empty `relationship` never blanks the
+     * stored one). `character`, `style`, `aliases` and `portrait` are public
+     * only and ignored here. Creates the file. Tolerates garbage `ops`, never throws.
+     * @param {string} guildId
+     * @param {string} userId
+     * @param {{ relationship?: string,
+     *   interests?: { add?: object[], update?: object[], seen?: string[], remove?: string[] },
+     *   details?: { add?: unknown[], seen?: unknown[], remove?: unknown[] } }} ops
+     * @param {object} [opts]  As for `applyProfileOps`.
+     * @returns {object} The updated private layer.
+     */
+    applyPrivateOps(guildId, userId, ops, opts = {}) {
+      const item = privateEntry(guildId, userId);
+      const priv = item.value;
+
+      const seenAt = Number.isFinite(opts.seenAt) ? opts.seenAt : Number.isFinite(opts.now) ? opts.now : Date.now();
+
+      const relationship = ops?.relationship;
+      if (typeof relationship === 'string' && relationship.trim()) {
+        priv.relationship = clampText(relationship, opts.fieldChars, { tolerance: opts.clampTolerance });
+      }
+
+      if (ops?.interests && typeof ops.interests === 'object' && !Array.isArray(ops.interests)) {
+        priv.interests = applyInterestOps(priv.interests, ops.interests, {
+          maxInterests: opts.maxInterests,
+          maxInterestsStored: opts.maxInterestsStored,
+          topicChars: opts.topicChars,
+          noteChars: opts.noteChars,
+          confirmGapHours: opts.confirmGapHours,
+          halfLifeDays: opts.interestHalfLifeDays,
+          clampTolerance: opts.clampTolerance,
+          seenAt,
+        });
+      }
+
+      if (ops?.details && typeof ops.details === 'object' && !Array.isArray(ops.details)) {
+        const { items, nextId } = applyDetailOps(priv.details, ops.details, {
+          maxDetails: opts.maxDetails,
+          maxDetailsStored: opts.maxDetailsStored,
+          fieldChars: opts.fieldChars,
+          confirmGapHours: opts.confirmGapHours,
+          halfLifeDays: opts.detailHalfLifeDays,
+          clampTolerance: opts.clampTolerance,
+          seenAt,
+          nextId: priv.detailsSeq,
+        });
+        priv.details = items;
+        priv.detailsSeq = nextId;
+      }
+
+      item.dirty = true;
+      return priv;
+    },
+
+    /**
+     * Fold one delta into a member's PRIVATE affinity (see
+     * src/memory/affinity.js#applyDelta; same `opts` as `adjustAffinity`).
+     * The public affinity is never touched. Creates the file.
+     * @param {string} guildId
+     * @param {string} userId
+     * @param {number} delta
+     * @param {string} reason
+     * @param {object} [opts]
+     * @returns {{ score: number, reason: string, history: object[] }}
+     */
+    adjustPrivateAffinity(guildId, userId, delta, reason, opts) {
+      const item = privateEntry(guildId, userId);
+      const next = applyDelta(item.value.affinity, delta, reason, opts);
+      item.value.affinity = next;
+      item.dirty = true;
+      return next;
+    },
+
+    /**
+     * Append episodes to a member's private layer via
+     * src/memory/episodes.js#mergeEpisodes (same `opts` as `addEpisodes`).
+     * Creates the file. Returns how many were added.
+     * @param {string} guildId
+     * @param {string} userId
+     * @param {unknown} incoming
+     * @param {object} [opts]
+     * @returns {number}
+     */
+    addPrivateEpisodes(guildId, userId, incoming, opts) {
+      const item = privateEntry(guildId, userId);
+      const { episodes, added } = mergeEpisodes(item.value.episodes, incoming, opts);
+      if (added > 0) {
+        item.value.episodes = episodes;
+        item.dirty = true;
+      }
+      return added;
+    },
+
+    /**
+     * Count one direct-message reply of the persona to a member for `today`
+     * (a UTC date key): the counter restarts at 0 when the stored day is
+     * another one. Creates the file.
+     * @param {string} guildId
+     * @param {string} userId
+     * @param {string} today
+     * @returns {{ day: string, count: number }}
+     */
+    bumpPrivateReplies(guildId, userId, today) {
+      const item = privateEntry(guildId, userId);
+      const replies = item.value.replies;
+      if (replies.day !== today) {
+        replies.day = today;
+        replies.count = 0;
+      }
+      replies.count += 1;
+      item.dirty = true;
+      return { day: replies.day, count: replies.count };
+    },
+
+    /**
+     * Remember that the daily-cap notice was posted to a member on `today`,
+     * so it is posted at most once a day. Creates the file.
+     * @param {string} guildId
+     * @param {string} userId
+     * @param {string} today
+     */
+    markPrivateNoticed(guildId, userId, today) {
+      const item = privateEntry(guildId, userId);
+      item.value.replies.noticedDay = today;
+      item.dirty = true;
+    },
+
+    /**
+     * Buffer one observed direct message for the next private analyzer
+     * batch; an optional `maxLength` drops the oldest entries past it (as
+     * `pushBuffer`). Creates the file.
+     * @param {string} guildId
+     * @param {string} userId
+     * @param {object} message
+     * @param {number} [maxLength]
+     */
+    pushPrivateBuffer(guildId, userId, message, maxLength = Infinity) {
+      const item = privateEntry(guildId, userId);
+      const buffer = item.value.buffer;
+      buffer.push(message);
+      if (buffer.length > maxLength) buffer.splice(0, buffer.length - maxLength);
+      item.dirty = true;
+    },
+
+    /**
+     * Every buffered direct message of a member, oldest first, leaving the
+     * buffer empty. `[]` (and no file created) when there is no private layer.
+     * @param {string} guildId
+     * @param {string} userId
+     * @returns {object[]}
+     */
+    takePrivateBuffer(guildId, userId) {
+      if (!hasPrivate(guildId, userId)) return [];
+      const item = privateEntry(guildId, userId);
+      const taken = item.value.buffer;
+      if (taken.length === 0) return [];
+      item.value.buffer = [];
+      item.dirty = true;
+      return taken;
+    },
+
+    /**
+     * How many direct messages are buffered for a member and the `ts` of the
+     * oldest (null when the buffer is empty or there is no private layer).
+     * Creates nothing.
+     * @param {string} guildId
+     * @param {string} userId
+     * @returns {{ size: number, oldestTs: number|null }}
+     */
+    privateBufferInfo(guildId, userId) {
+      if (!hasPrivate(guildId, userId)) return { size: 0, oldestTs: null };
+      const buffer = privateEntry(guildId, userId).value.buffer;
+      const oldestTs = Number.isFinite(buffer[0]?.ts) ? buffer[0].ts : null;
+      return { size: buffer.length, oldestTs };
+    },
+
+    /**
+     * Ids of every member with a private layer in a guild, cached or on disk.
+     * @param {string} guildId
+     * @returns {string[]}
+     */
+    listPrivate(guildId) {
+      return idsUnder(privateDir(guildId));
+    },
+
+    /**
+     * Delete one member's private layer, cache and disk alike; the public
+     * profile stays. Safe when there is none.
+     * @param {string} guildId
+     * @param {string} userId
+     */
+    forgetPrivate(guildId, userId) {
+      const file = privateFile(guildId, userId);
       entries.delete(file);
       fs.rmSync(file, { force: true });
     },
@@ -728,10 +1040,11 @@ export function createStore({ dataDir }) {
 
     /**
      * A deliberate, owner-only clean start for one guild's memory (see
-     * src/admin.js `/nep memory wipe`). Together with `forgetUser` above,
-     * this is the ONLY other place in the project allowed to delete stored
+     * src/admin.js `/nep memory wipe`). Together with `forgetUser` and
+     * `forgetPrivate` above, this is the ONLY other place in the project allowed to delete stored
      * memory. Removes, from both the cache and disk: every user profile
-     * (affinity and episodes included), `guild.json`, every channel entry,
+     * (affinity and episodes included), the whole `private/` directory (every
+     * member's private layer), `guild.json`, every channel entry,
      * the live observation buffer, and lorebook entries whose `source` is
      * `'analyzer'` (every entry, owner included, when `keepOwnerLore` is
      * false). Keeps, by default, owner lore (`source: 'owner'`) and the
@@ -764,6 +1077,15 @@ export function createStore({ dataDir }) {
         const file = guildFile(guildId);
         entries.delete(file);
         fs.rmSync(file, { force: true });
+      }
+
+      {
+        const dir = privateDir(guildId);
+        const prefix = dir + path.sep;
+        for (const file of [...entries.keys()]) {
+          if (file.startsWith(prefix)) entries.delete(file);
+        }
+        fs.rmSync(dir, { recursive: true, force: true });
       }
 
       const bufferFileName = bufferFile(guildId);
