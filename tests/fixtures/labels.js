@@ -48,6 +48,9 @@ export const labels = {
     linkNotWatchedFrame: '[not watched: {reason}; thumbnail: {text}]',
     videoAnswered: '[looked again for "{question}": {text}]',
     linkRead: '[page read: {text}]',
+    reactions: '[reactions: {list}]',
+    reactionItem: '{emoji} x{count}',
+    reactionMine: '{emoji} x{count} (yours too)',
     videoReason: {
       length: 'too long',
       size: 'too big',

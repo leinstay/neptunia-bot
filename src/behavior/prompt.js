@@ -816,6 +816,8 @@ export function buildRequest(input) {
     maxChars: config.context.maxMessageChars,
     selfName,
     labels,
+    seeReactions: config.features?.seeReactions !== false,
+    reactionsPerMessage: config.context.reactionsPerMessage,
     attachedIndex,
     descriptions,
     videos,

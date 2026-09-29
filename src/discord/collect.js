@@ -54,6 +54,23 @@ function normalizeStickers(stickers) {
   }));
 }
 
+/**
+ * The reactions on a message: a custom emoji reads as `:name:`, a unicode one
+ * as itself; `mine` is the bot's own. Sorted by count descending, ties keep
+ * the collection's order; a count that is not a positive integer is skipped.
+ * @returns {{ emoji: string, count: number, mine: boolean }[]}
+ */
+function normalizeReactions(reactions) {
+  return [...(reactions?.cache?.values?.() ?? [])]
+    .filter((reaction) => Number.isInteger(reaction?.count) && reaction.count > 0 && reaction.emoji?.name)
+    .map((reaction) => ({
+      emoji: reaction.emoji.id ? `:${reaction.emoji.name}:` : reaction.emoji.name,
+      count: reaction.count,
+      mine: Boolean(reaction.me),
+    }))
+    .sort((a, b) => b.count - a.count);
+}
+
 /** Whether the message carries Discord's voice-message flag (the whole message is flagged, not the attachment). */
 function isVoiceMessageFlag(message) {
   try {
@@ -236,6 +253,8 @@ function normalizeSnapshot(snapshot, embedTextChars, videoSites) {
  * video attachment (embedded or typed) becomes a `video` attachment after the
  * real ones, not a link, with its URL stripped from `content` (see
  * cdnVideoAttachments), so it is labelled, watched and cached like an upload.
+ * `reactions` lists the message's reactions (see normalizeReactions), `[]`
+ * when it has none.
  * @param {object} message  A discord.js Message.
  * @param {string} selfId
  * @param {{ embedTextChars?: number, videoSites?: string[] }} [options]
@@ -288,6 +307,9 @@ export function normalizeMessage(message, selfId, options = {}) {
     forwarded,
     stickers: normalizeStickers(message.stickers),
     emojis,
+    // Fresh on every history fetch (a REST call); a message straight from
+    // messageCreate has none yet. Forwarded snapshots carry none.
+    reactions: normalizeReactions(message.reactions),
   };
 }
 

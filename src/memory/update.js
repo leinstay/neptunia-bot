@@ -440,6 +440,8 @@ export function buildMemoryRequest({ prompts, config, calibrator, profiles, guil
     selfName,
     mode: 'memory',
     labels,
+    seeReactions: config.features?.seeReactions !== false,
+    reactionsPerMessage: config.context.reactionsPerMessage,
     descriptions,
     videos,
     reads,

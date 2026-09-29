@@ -1251,3 +1251,69 @@ test('formatTranscript: reads apply inside a forwarded snapshot too', () => {
   const items = formatTranscript(messages, { timezone: TZ, gapMinutes: 20, maxChars: 100, selfName: 'Nept', labels, reads: new Map([['f#e0', 'résumé']]) });
   assert.ok(items[0].text.includes('[link: example.org — Á] [page read: résumé]'), items[0].text);
 });
+
+// --- formatTranscript: reactions ---------------------------------------
+
+function reactionTranscript(messages, extra = {}) {
+  return formatTranscript(messages, { timezone: TZ, gapMinutes: 20, maxChars: 100, selfName: 'Nept', labels, ...extra });
+}
+
+test('formatTranscript: reactions are rendered after the text', () => {
+  const T = Date.UTC(2026, 8, 20, 10, 0, 0);
+  const items = reactionTranscript([msg('1', T, { reactions: [{ emoji: '🍣', count: 2, mine: false }] })]);
+  assert.ok(items[0].text.endsWith('text [reactions: 🍣 x2]'), items[0].text);
+});
+
+test('formatTranscript: reactions follow the media tags, in both modes', () => {
+  const T = Date.UTC(2026, 8, 20, 10, 0, 0);
+  const messages = [
+    msg('1', T, {
+      attachments: [{ id: 'p1', kind: 'image', name: 'a.png' }],
+      reactions: [{ emoji: ':κάτι:', count: 3, mine: false }, { emoji: '🍣', count: 1, mine: false }],
+    }),
+  ];
+  for (const mode of ['chat', 'memory']) {
+    const items = reactionTranscript(messages, { mode });
+    assert.ok(items[0].text.endsWith('text [image] [reactions: :κάτι: x3, 🍣 x1]'), items[0].text);
+  }
+});
+
+test('formatTranscript: the bot\'s own reaction uses reactionMine', () => {
+  const T = Date.UTC(2026, 8, 20, 10, 0, 0);
+  const items = reactionTranscript([
+    msg('1', T, { reactions: [{ emoji: '👍', count: 3, mine: true }, { emoji: '🍣', count: 1, mine: false }] }),
+  ]);
+  assert.ok(items[0].text.endsWith('[reactions: 👍 x3 (yours too), 🍣 x1]'), items[0].text);
+});
+
+test('formatTranscript: at most reactionsPerMessage items', () => {
+  const T = Date.UTC(2026, 8, 20, 10, 0, 0);
+  const reactions = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'].map((name, i) => ({ emoji: `:${name}:`, count: 8 - i, mine: false }));
+  const capped = reactionTranscript([msg('1', T, { reactions })], { reactionsPerMessage: 2 });
+  assert.ok(capped[0].text.endsWith('[reactions: :a: x8, :b: x7]'), capped[0].text);
+  const byDefault = reactionTranscript([msg('1', T, { reactions })]);
+  assert.ok(byDefault[0].text.endsWith('[reactions: :a: x8, :b: x7, :c: x6, :d: x5, :e: x4, :f: x3]'), byDefault[0].text);
+});
+
+test('formatTranscript: seeReactions=false renders none', () => {
+  const T = Date.UTC(2026, 8, 20, 10, 0, 0);
+  const items = reactionTranscript([msg('1', T, { reactions: [{ emoji: '🍣', count: 2, mine: false }] })], { seeReactions: false });
+  assert.ok(items[0].text.endsWith(': text'), items[0].text);
+  assert.ok(!items[0].text.includes('🍣'));
+});
+
+test('formatTranscript: labels without transcript.reactions render none', () => {
+  const T = Date.UTC(2026, 8, 20, 10, 0, 0);
+  const oldLabels = {
+    ...labels,
+    transcript: { ...labels.transcript, reactions: undefined, reactionItem: undefined, reactionMine: undefined },
+  };
+  const items = reactionTranscript([msg('1', T, { reactions: [{ emoji: '🍣', count: 2, mine: true }] })], { labels: oldLabels });
+  assert.ok(items[0].text.endsWith(': text'), items[0].text);
+});
+
+test('formatTranscript: an empty or missing reactions list renders no tag', () => {
+  const T = Date.UTC(2026, 8, 20, 10, 0, 0);
+  const items = reactionTranscript([msg('1', T, { reactions: [] }), msg('2', T)]);
+  assert.ok(items.every((item) => item.text.endsWith(': text')), items.map((item) => item.text).join('\n'));
+});

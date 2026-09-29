@@ -617,6 +617,8 @@ export function createTurnRunner({
         maxChars: config.context.maxMessageChars,
         selfName,
         labels,
+        seeReactions: config.features?.seeReactions !== false,
+        reactionsPerMessage: config.context.reactionsPerMessage,
         descriptions,
         videos,
       });
@@ -708,6 +710,8 @@ export function createTurnRunner({
         maxChars: config.context.maxMessageChars,
         selfName,
         labels,
+        seeReactions: config.features?.seeReactions !== false,
+        reactionsPerMessage: config.context.reactionsPerMessage,
         descriptions,
         videos,
         reads,

@@ -437,6 +437,8 @@ export function buildChannelRequest({ prompts, config, calibrator, channel, mess
     selfName,
     mode: 'memory',
     labels,
+    seeReactions: config?.features?.seeReactions !== false,
+    reactionsPerMessage: config?.context?.reactionsPerMessage,
   };
   const items = formatTranscript(channelMessages, formatOptions);
   const transcriptTexts = items.map((item) => item.text);
@@ -1217,6 +1219,8 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
       selfName,
       mode: 'memory',
       labels,
+      seeReactions: hot.config.features?.seeReactions !== false,
+      reactionsPerMessage: hot.config.context?.reactionsPerMessage,
     };
     const items = markOwnContext(formatTranscript(sample.messages, formatOptions), sample.ownIds, labels);
 
@@ -1354,6 +1358,8 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
       selfName,
       mode: 'memory',
       labels,
+      seeReactions: hot.config.features?.seeReactions !== false,
+      reactionsPerMessage: hot.config.context?.reactionsPerMessage,
     };
     const items = formatTranscript(newest, formatOptions);
     const messagesBlock = block('messages', renderTranscript(items, timezone, labels));
@@ -1742,6 +1748,8 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
       selfName,
       mode: 'memory',
       labels,
+      seeReactions: hot.config.features?.seeReactions !== false,
+      reactionsPerMessage: hot.config.context?.reactionsPerMessage,
     };
     const items = markOwnContext(formatTranscript(sample.messages, formatOptions), sample.ownIds, labels);
 

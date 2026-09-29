@@ -195,6 +195,24 @@ function mediaTags(message, labels, context = {}) {
 }
 
 /**
+ * The reactions tag of a message (`transcript.reactions` over at most `max`
+ * items, `reactionMine` for the bot's own, else `reactionItem`), or '' when
+ * the list is empty or the labels have no `transcript.reactions` key.
+ */
+function reactionsTag(message, labels, max) {
+  const template = labels.transcript.reactions;
+  const reactions = Array.isArray(message.reactions) ? message.reactions.slice(0, Math.max(0, max)) : [];
+  if (!template || reactions.length === 0) return '';
+  const list = reactions
+    .map(({ emoji, count, mine }) =>
+      fill(mine ? (labels.transcript.reactionMine ?? labels.transcript.reactionItem) : labels.transcript.reactionItem, { emoji, count }),
+    )
+    .filter(Boolean)
+    .join(', ');
+  return list ? fill(template, { list }) : '';
+}
+
+/**
  * One forwarded message-snapshot, wrapped in `labels.transcript.forwardedFrom`
  * when the source channel's name is known AND the labels file has that key
  * (an older labels.json falls back gracefully); otherwise the plain
@@ -238,6 +256,10 @@ function renderForwarded(snapshot, labels, context, maxChars, channelName) {
  * @param {Map<string, string>} [options.reads]  Link id -> the excerpt the web lookup read from
  *   that page (src/web/lookup.js); renders `transcript.linkRead`. Ignored when the labels have
  *   no `transcript.linkRead` key.
+ * @param {boolean} [options.seeReactions]  Default true: a message's `reactions` render as
+ *   `transcript.reactions` at the end of its line. Ignored when the labels have no
+ *   `transcript.reactions` key.
+ * @param {number} [options.reactionsPerMessage]  Default 6: at most this many reactions per message.
  * @returns {{ id: string, index: number, ts: number, text: string }[]}
  *
  * In `mode: 'memory'`, messages come from possibly several channels (see
@@ -249,6 +271,8 @@ function renderForwarded(snapshot, labels, context, maxChars, channelName) {
  */
 export function formatTranscript(messages, options) {
   const { timezone, gapMinutes, maxChars, selfName, labels, mode = 'chat', attachedIndex, descriptions, videos, reads } = options;
+  const seeReactions = options.seeReactions ?? true;
+  const reactionsPerMessage = options.reactionsPerMessage ?? 6;
   const mediaContext = { attachedIndex, descriptions, videos, reads };
   const locale = labels.locale;
   const selfLabel = fill(labels.self, { name: selfName });
@@ -293,6 +317,7 @@ export function formatTranscript(messages, options) {
     for (const snapshot of message.forwarded ?? []) {
       body.push(renderForwarded(snapshot, labels, mediaContext, maxChars, message.forwardedFrom));
     }
+    if (seeReactions) body.push(reactionsTag(message, labels, reactionsPerMessage));
 
     const marker = mode === 'memory' && message.direct ? DIRECT_MARKER : '';
     parts.push(`${marker}${head} ${who}: ${body.filter(Boolean).join(' ')}`.trimEnd());

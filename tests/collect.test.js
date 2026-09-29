@@ -197,6 +197,47 @@ test('normalizeMessage: no custom emoji means an empty emojis array', () => {
   assert.deepEqual(m.emojis, []);
 });
 
+test('normalizeMessage: reactions are read with count and the bot\'s own mark', () => {
+  const raw = rawMessage({
+    reactions: {
+      cache: new Map([
+        ['a', { emoji: { id: null, name: '🍣' }, count: 2, me: false }],
+        ['b', { emoji: { id: null, name: '👍' }, count: 5, me: true }],
+        ['c', { emoji: { id: null, name: '🔥' }, count: 2, me: false }],
+        ['d', { emoji: { id: null, name: '❓' }, count: 0, me: false }],
+      ]),
+    },
+  });
+  const m = normalizeMessage(raw, 'self');
+  assert.deepEqual(m.reactions, [
+    { emoji: '👍', count: 5, mine: true },
+    { emoji: '🍣', count: 2, mine: false },
+    { emoji: '🔥', count: 2, mine: false },
+  ]);
+});
+
+test('normalizeMessage: a custom emoji reaction is named :name:', () => {
+  const raw = rawMessage({
+    reactions: { cache: new Map([['123', { emoji: { id: '123', name: 'κάτι' }, count: 1, me: false }]]) },
+  });
+  const m = normalizeMessage(raw, 'self');
+  assert.deepEqual(m.reactions, [{ emoji: ':κάτι:', count: 1, mine: false }]);
+});
+
+test('normalizeMessage: no reactions gives an empty list', () => {
+  assert.deepEqual(normalizeMessage(rawMessage(), 'self').reactions, []);
+  assert.deepEqual(normalizeMessage(rawMessage({ reactions: { cache: new Map() } }), 'self').reactions, []);
+});
+
+test('normalizeMessage: a forwarded snapshot carries no reactions', () => {
+  const raw = rawMessage({
+    reactions: { cache: new Map([['a', { emoji: { id: null, name: '🍣' }, count: 2, me: false }]]) },
+    messageSnapshots: new Map([['s', { cleanContent: 'fwd', attachments: new Map(), stickers: new Map(), embeds: [] }]]),
+  });
+  const m = normalizeMessage(raw, 'self');
+  assert.equal(m.forwarded[0].reactions, undefined);
+});
+
 test('normalizeMessage: a forwarded snapshot also carries its own stickers and emoji', () => {
   const raw = rawMessage({
     cleanContent: '',

@@ -303,6 +303,8 @@ export function createMessageHandler({
       maxChars: config.context.maxMessageChars,
       selfName,
       labels,
+      seeReactions: config.features?.seeReactions !== false,
+      reactionsPerMessage: config.context.reactionsPerMessage,
     });
     const candidateItem = items[items.length - 1];
     const transcript = renderTranscript(items.slice(0, -1), config.bot.timezone, labels);
