@@ -1,0 +1,667 @@
+// The mentor's run: the manual sub-process that measures one behaviour the
+// owner wants from the persona (a "case"). The mentor model invents chat
+// situations that put the case to the test; the persona answers each in a
+// sandbox (live prompts, rules and memory; nothing posted, nothing stored);
+// the mentor model scores every answer on several axes against a reference
+// of how the people in the chat really write; the run is saved with the case
+// and a report goes to the owner's admin channel. In this stage the mentor
+// only measures: it changes nothing.
+//
+// Everything expensive is bounded: the mentor's own daily token budget is
+// checked before every request and charged after every completion, the
+// per-request token cap of the llm client stays in force, and nothing counts
+// against the chat's daily request cap. One run at a time; `stop()` aborts
+// the request in flight. Nothing here runs on a timer.
+//
+// What a model reads comes from the prompt files (`mentor-*`) and labels;
+// this module only fills their `{{name}}`-style placeholders and wraps data in
+// tagged blocks (tag names documented in the prompt contract).
+
+import { fillPromptTemplate, learnedConfig, learnedText } from '../behavior/prompt.js';
+import { fill, formatTranscript, renderTranscript } from '../discord/format.js';
+import { TokenLimitError } from '../llm/openrouter.js';
+import { estimateMessages } from '../llm/tokens.js';
+import { log } from '../log.js';
+import { MentorBudgetError } from './budget.js';
+import { parseScores, parseSituations, verdict } from './judge.js';
+import { answerFacts, repeatedPhrases, sampleLines, styleProfile } from './reference.js';
+import { renderCard, renderCheckCard, renderCheckFile, renderFile } from './report.js';
+import { answerMemory, answerReply, liveView, situationToHistory } from './sandbox.js';
+
+const DAY_MS = 86_400_000;
+const ERROR_MAX = 200;
+
+/** The prompt files of each target. */
+const PROMPTS = {
+  reply: { situations: 'mentor-situations', score: 'mentor-score' },
+  memory: { situations: 'mentor-situations-memory', score: 'mentor-score-memory' },
+};
+
+/** Wrap `body` in `<tag>`; '' for an empty body (the same helper the request builders use). */
+function block(tag, body) {
+  return body ? `<${tag}>\n${body}\n</${tag}>` : '';
+}
+
+/** A positive number from the config, else `fallback` (the config.json default). */
+function positive(value, fallback) {
+  return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+/** How a run ended early: `kind` 'stopped' ('budget' | 'owner') or 'error' (a short reason). */
+class RunEnd extends Error {
+  constructor(kind, reason) {
+    super(reason);
+    this.kind = kind;
+    this.reason = reason;
+  }
+}
+
+/** Any failure as a RunEnd; `null` for one that must be reported as unexpected. */
+function endOf(err) {
+  if (err instanceof RunEnd) return err;
+  if (err instanceof TokenLimitError || err?.key === 'llm.maxRequestTokens') return new RunEnd('error', 'request over the token cap');
+  if (Number.isInteger(err?.statusCode)) return new RunEnd('error', `a model request failed: HTTP ${err.statusCode}`);
+  const message = String(err?.message ?? err ?? 'unexpected failure');
+  return new RunEnd('error', message.length > ERROR_MAX ? `${message.slice(0, ERROR_MAX - 3)}...` : message);
+}
+
+function emptyMedians() {
+  return { human: null, character: null, rules: null, goal: null, overall: null };
+}
+
+/**
+ * The mentor for one bot. Every value is read at the moment of use:
+ * `hot.config.mentor` (`model`, `maxOutputTokens`, `timeoutMs`, `situations`,
+ * `situationLines`, `samples`, `check.samples`, `pass`, `reference`,
+ * `feedbackExamples`), `hot.config.features.mentor` (must be exactly true),
+ * `hot.config.memory.mainChannelIds`, `hot.config.bot.dryRunChannelId`, and
+ * the `mentor-*` prompts.
+ * @param {object} deps
+ * @param {{ config: object, prompts: object }} deps.hot
+ * @param {object} deps.store             The memory store (read only, through `liveView`).
+ * @param {{ complete: Function }} deps.llm
+ * @param {{ channels: { fetch: (id: string) => Promise<object|null> } }} deps.client
+ * @param {object} deps.cases             From `createCaseStore`.
+ * @param {object} deps.budget            From `createMentorBudget`.
+ * @param {() => (string|null)} deps.getGuildId
+ * @param {() => ({ id: string, name: string }|null)} deps.getSelf  The persona's user id and display name.
+ * @param {Function} deps.fetchHistoryWindow  src/discord/collect.js#fetchHistoryWindow.
+ * @param {() => number} [deps.now]
+ * @param {() => number} [deps.rng]
+ * @returns {{ run: (caseId: number) => Promise<{ started: true, done: Promise<object> }>,
+ *   check: () => Promise<{ started: true, cases: number, done: Promise<object[]> }>,
+ *   stop: () => { ok: boolean }, status: () => object, isRunning: () => boolean }}
+ *   `run` / `check` reject with an operator-facing Error before anything is spent when the mentor is
+ *   off, has no model, the case or a prompt is missing, a run is in flight or the budget is spent.
+ *   `done` never rejects: a failure ends the run with `error`, which is saved and reported.
+ */
+export function createMentor({ hot, store, llm, client, cases, budget, getGuildId, getSelf, fetchHistoryWindow, now = Date.now, rng = Math.random }) {
+  let current = null;
+
+  // ---- guards ----------------------------------------------------------------
+
+  function guard(guildId) {
+    const config = hot.config;
+    if (config.features?.mentor !== true) throw new Error('the mentor is not enabled (features.mentor)');
+    if (!config.mentor?.model) throw new Error('no mentor model is set (mentor.model)');
+    if (current) throw new Error('a mentor run is already in flight');
+    if (!guildId) throw new Error('the bot serves no guild yet');
+  }
+
+  function guardBudget() {
+    if (!budget.canSpend(1)) {
+      const { used, cap } = budget.snapshot();
+      throw new MentorBudgetError(undefined, { used, cap });
+    }
+  }
+
+  function requirePrompt(name) {
+    if (!hot.prompts?.[name]) throw new Error(`mentor prompt missing: ${name}`);
+  }
+
+  // ---- the run context -------------------------------------------------------
+
+  function begin(kind, caseIds) {
+    const controller = new AbortController();
+    current = { kind, caseIds, caseId: caseIds[0] ?? null, controller, signal: controller.signal, spent: 0, phase: 'starting', startedAt: now() };
+    return current;
+  }
+
+  function checkAborted(ctx) {
+    if (ctx.signal.aborted) throw new RunEnd('stopped', 'owner');
+  }
+
+  function charge(ctx, usage, estimated) {
+    const amount = budget.charge(usage, estimated);
+    ctx.spent += amount;
+    return amount;
+  }
+
+  /** One request to the mentor model: budget first, charged after; an abort ends the run. */
+  async function askMentor(ctx, system, user) {
+    const cfg = hot.config.mentor ?? {};
+    const messages = [
+      { role: 'system', content: system },
+      { role: 'user', content: user },
+    ];
+    const estimate = estimateMessages(messages);
+    if (!budget.canSpend(estimate)) throw new RunEnd('stopped', 'budget');
+    checkAborted(ctx);
+    let completion;
+    try {
+      completion = await llm.complete(messages, {
+        model: cfg.model,
+        maxOutputTokens: cfg.maxOutputTokens,
+        timeoutMs: cfg.timeoutMs,
+        countAgainstDailyCap: false,
+        skipCalibration: true,
+        signal: ctx.signal,
+      });
+    } catch (err) {
+      if (ctx.signal.aborted) throw new RunEnd('stopped', 'owner');
+      throw err;
+    }
+    charge(ctx, completion?.usage ?? null, completion?.estimated ?? estimate);
+    return completion?.text ?? '';
+  }
+
+  // ---- the reference ---------------------------------------------------------
+
+  /** Ids of the channels to read: `memory.mainChannelIds`, else the stored channel with the most messages. */
+  function referenceChannelIds(view) {
+    const main = hot.config.memory?.mainChannelIds;
+    if (Array.isArray(main) && main.length > 0) return main.map(String);
+    const busiest = [...view.memory.listChannels()].sort((a, b) => (b?.messageCount ?? 0) - (a?.messageCount ?? 0))[0];
+    return busiest ? [String(busiest.id)] : [];
+  }
+
+  /** The channel the situations are set in: the first reference channel, as stored. */
+  function sandboxChannel(view, id) {
+    const entry = view.memory.listChannels().find((c) => String(c?.id) === id);
+    return { id, name: entry?.name || null, category: entry?.category ?? null, topic: entry?.topic ?? null };
+  }
+
+  /** The people's messages of the reference channels, measured and sampled. */
+  async function readReference(ctx, view, selfId) {
+    const config = hot.config;
+    const refCfg = config.mentor?.reference ?? {};
+    const ids = referenceChannelIds(view);
+    if (ids.length === 0) throw new RunEnd('error', 'no readable channel for the reference');
+    const limit = Math.max(1, Math.floor(positive(refCfg.maxMessages, 3000) / ids.length));
+    const minTs = now() - positive(refCfg.days, 7) * DAY_MS;
+    const messages = [];
+    let readable = 0;
+    for (const id of ids) {
+      checkAborted(ctx);
+      let channel = null;
+      try {
+        channel = await client.channels.fetch(id);
+      } catch {
+        channel = null;
+      }
+      if (!channel) {
+        log.warn('mentor: a reference channel cannot be read', { channel: id });
+        continue;
+      }
+      let window;
+      try {
+        window = await fetchHistoryWindow(channel, {
+          limit,
+          minTs,
+          selfId,
+          embedTextChars: config.media?.embedTextChars,
+          videoSites: config.media?.video?.sites,
+        });
+      } catch (err) {
+        log.warn('mentor: a reference channel cannot be read', { channel: id, errorName: err?.name });
+        continue;
+      }
+      readable += 1;
+      for (const message of window ?? []) if (!message?.self && !message?.bot) messages.push(message);
+    }
+    if (readable === 0) throw new RunEnd('error', 'no readable channel for the reference');
+    const samples = sampleLines(messages, Math.max(0, Math.floor(Number(refCfg.samples ?? 40)) || 0), rng);
+    log.info('mentor: reference read', { channels: readable, messages: messages.length, samples: samples.length });
+    return { profile: styleProfile(messages), samples, channel: sandboxChannel(view, ids[0]) };
+  }
+
+  // ---- request blocks --------------------------------------------------------
+
+  function feedbackText(guildId) {
+    const n = hot.config.mentor?.feedbackExamples ?? 10;
+    const list = cases.recentFeedback(guildId, n).map((f) => ({ case: f.caseText, reason: f.reason }));
+    return list.length ? JSON.stringify(list) : '';
+  }
+
+  function commonBlocks(item, reference, feedback) {
+    return {
+      case: block('case', item.text),
+      reference: block('reference', JSON.stringify(reference.profile, null, 1)),
+      // One sample per line: a line break inside a sample would read as two samples.
+      samples: block('samples', reference.samples.map((s) => s.replace(/\s*\n\s*/g, ' ')).join('\n')),
+      feedback: block('feedback', feedback),
+    };
+  }
+
+  function templateValues(selfName) {
+    const cfg = hot.config.mentor ?? {};
+    const [minLines, maxLines] = Array.isArray(cfg.situationLines) ? cfg.situationLines : [];
+    return { name: selfName, count: cfg.situations, minLines, maxLines };
+  }
+
+  function nameOfIn(view) {
+    return (id) => view.memory.getUser(id)?.names?.[0] ?? null;
+  }
+
+  /** The learned items as the persona sees them in `<about_chat>`, or ''. */
+  function learnedLine(view) {
+    if (view.config.features?.memory === false) return '';
+    const a = view.prompts.labels?.aboutChat;
+    if (!a?.learned) return '';
+    const text = learnedText(view.memory.getGuild()?.learned, a, learnedConfig(view.config), nameOfIn(view));
+    return text ? fill(a.learned, { text }) : '';
+  }
+
+  // ---- steps -----------------------------------------------------------------
+
+  async function inventSituations(ctx, { item, view, reference, feedback, self }) {
+    const cfg = hot.config.mentor ?? {};
+    const profiles = view.memory.listUserProfiles().filter((p) => p?.id);
+    const members = profiles.map((p) => `${p.names?.[0] ?? p.id} (id:${p.id})`).join('\n');
+    const blocks = commonBlocks(item, reference, feedback);
+    const system = fillPromptTemplate(hot.prompts[PROMPTS[item.target].situations], templateValues(self.name));
+    const user = [blocks.case, block('members', members), blocks.reference, blocks.samples, blocks.feedback].filter(Boolean).join('\n\n');
+    ctx.phase = 'situations';
+    const text = await askMentor(ctx, system, user);
+    const lines = Array.isArray(cfg.situationLines) ? cfg.situationLines : [6, 15];
+    const parsed = parseSituations(text, { knownIds: profiles.map((p) => String(p.id)), lines, count: positive(cfg.situations, 5) });
+    const names = new Map(profiles.map((p) => [String(p.id), p.names?.[0] ?? null]));
+    // A line without a name gets the member's stored name, as a real message would carry it.
+    const situations = parsed.situations.map((s) => ({
+      ...s,
+      lines: s.lines.map((line) => (line.authorId === 'self' || line.authorName ? line : { ...line, authorName: names.get(line.authorId) ?? line.authorId })),
+    }));
+    log.info('mentor: situations', { caseId: item.id, kept: situations.length, dropped: parsed.dropped });
+    return { situations, dropped: parsed.dropped };
+  }
+
+  function transcriptOf(history, selfName) {
+    const config = hot.config;
+    const labels = hot.prompts.labels;
+    const timezone = config.bot?.timezone;
+    const items = formatTranscript(history, {
+      timezone,
+      gapMinutes: config.context?.gapMarkerMinutes,
+      maxChars: config.context?.maxMessageChars,
+      selfName,
+      labels,
+      mode: 'chat',
+      seeReactions: config.features?.seeReactions !== false,
+      reactionsPerMessage: config.context?.reactionsPerMessage,
+    });
+    return renderTranscript(items, timezone, labels);
+  }
+
+  /** One sandbox answer as the run stores it, with its facts. */
+  function answerRecord(answer, id, target, profile) {
+    if (target === 'memory') {
+      const texts = answer.texts ?? [];
+      const facts = answerFacts({ messages: texts.map((t) => ({ text: t.text })) }, profile);
+      return { id, texts, parseOk: answer.parseOk === true, facts, score: null };
+    }
+    const facts = answerFacts({ messages: answer.messages ?? [] }, profile);
+    return {
+      id,
+      messages: (answer.messages ?? []).map((m) => m.text),
+      reactions: (answer.reactions ?? []).map((r) => r.emoji),
+      silent: Boolean(answer.skip),
+      facts,
+      score: null,
+    };
+  }
+
+  async function answerAll(ctx, { run, prepared, view, self, reference, samples }) {
+    let previous = 1;
+    for (const { situation, record, history, at } of prepared) {
+      if (!budget.canSpend(previous)) throw new RunEnd('stopped', 'budget');
+      checkAborted(ctx);
+      ctx.phase = `answers ${record.n}/${prepared.length}`;
+      let charged = 0;
+      const onUsage = (usage, estimated) => {
+        charged += charge(ctx, usage, estimated);
+      };
+      const result =
+        run.target === 'memory'
+          ? await answerMemory({ view, batch: history, selfName: self.name, llm, samples, now: at, signal: ctx.signal, onUsage })
+          : await answerReply({
+              view,
+              situation,
+              selfId: self.id,
+              selfName: self.name,
+              channel: reference.channel,
+              llm,
+              samples,
+              now: at,
+              signal: ctx.signal,
+              onUsage,
+            });
+      record.answers = result.answers.map((answer, i) => answerRecord(answer, `s${record.n}a${i + 1}`, run.target, reference.profile));
+      if (result.stopped || ctx.signal.aborted) throw new RunEnd('stopped', 'owner');
+      previous = Math.max(1, charged);
+    }
+  }
+
+  async function scoreAll(ctx, { run, item, view, self, reference, feedback }) {
+    const labels = view.prompts.labels ?? {};
+    const intended = Array.isArray(labels.mentor?.intended) ? labels.mentor.intended.filter((s) => typeof s === 'string' && s.trim()) : [];
+    const blocks = commonBlocks(item, reference, feedback);
+    const character = run.target === 'reply' ? block('character', fillPromptTemplate(view.prompts['character-card'], { name: self.name })) : '';
+    const rules = block('rules', fillPromptTemplate(view.prompts.rules, { name: self.name }));
+    const learned = block('learned', learnedLine(view));
+    const system = fillPromptTemplate(hot.prompts[PROMPTS[item.target].score], templateValues(self.name));
+    const answersTag = run.target === 'memory' ? 'stored' : 'answers';
+
+    for (const situation of run.situations) {
+      if (situation.answers.length === 0) continue;
+      let pending = situation.answers.map((a) => a.id);
+      // One request with every answer, then once more for the ones the reply left out.
+      for (let attempt = 0; attempt < 2 && pending.length > 0; attempt += 1) {
+        ctx.phase = `scores ${situation.n}/${run.situations.length}`;
+        const asked = situation.answers.filter((a) => pending.includes(a.id));
+        const shown =
+          run.target === 'memory'
+            ? asked.map((a) => ({ id: a.id, texts: a.texts }))
+            : asked.map((a) => ({ id: a.id, messages: a.messages, reactions: a.reactions, silent: a.silent }));
+        const facts = Object.fromEntries(asked.map((a) => [a.id, a.facts]));
+        facts.repeated = run.repeated;
+        const user = [
+          blocks.case,
+          blocks.reference,
+          blocks.samples,
+          block('intended', intended.join('\n')),
+          blocks.feedback,
+          character,
+          rules,
+          learned,
+          block('situation', situation.transcript),
+          block(answersTag, JSON.stringify(shown)),
+          block('facts', JSON.stringify(facts)),
+        ]
+          .filter(Boolean)
+          .join('\n\n');
+        const text = await askMentor(ctx, system, user);
+        const { scores, missing } = parseScores(text, pending);
+        for (const answer of asked) if (scores.has(answer.id)) answer.score = scores.get(answer.id);
+        pending = missing;
+      }
+    }
+  }
+
+  // ---- one case --------------------------------------------------------------
+
+  /**
+   * One case measured from start to end; never throws. `shared` carries what
+   * a check reuses across its cases (the reference). `stored` holds the
+   * situations a check replays; a run invents new ones.
+   */
+  async function measure(ctx, guildId, item, { kind, samples, stored, shared }) {
+    const config = hot.config;
+    const startedMs = now();
+    const spentBefore = ctx.spent;
+    ctx.caseId = item.id;
+    const run = {
+      caseId: item.id,
+      caseText: item.text,
+      target: item.target,
+      kind,
+      startedAt: new Date(startedMs).toISOString(),
+      finishedAt: null,
+      models: {
+        mentor: config.mentor?.model ?? null,
+        talk: config.llm?.model ?? null,
+        analyzer: config.memory?.model ?? config.llm?.model ?? null,
+      },
+      reference: { profile: null, samples: 0 },
+      situations: [],
+      dropped: 0,
+      repeated: [],
+      medians: emptyMedians(),
+      passed: false,
+      reasons: [],
+      tokens: { spent: 0, left: 0 },
+    };
+    log.info('mentor: run started', { kind, caseId: item.id, target: item.target });
+
+    try {
+      const self = getSelf();
+      if (!self?.id) throw new RunEnd('error', 'the bot user is not ready');
+      const view = liveView({ hot, store, guildId });
+      if (!shared.reference) {
+        ctx.phase = 'reference';
+        shared.reference = await readReference(ctx, view, self.id);
+      }
+      const reference = shared.reference;
+      run.reference = { profile: reference.profile, samples: reference.samples.length };
+      const feedback = feedbackText(guildId);
+
+      let situations = stored;
+      if (kind === 'run') {
+        const invented = await inventSituations(ctx, { item, view, reference, feedback, self });
+        run.dropped = invented.dropped;
+        situations = invented.situations;
+        if (situations.length === 0) throw new RunEnd('error', 'no valid situation');
+      }
+
+      const prepared = situations.map((situation, i) => {
+        const at = now();
+        const { history } = situationToHistory(situation, { selfId: self.id, selfName: self.name, now: at, channel: reference.channel });
+        const record = { n: i + 1, title: situation.title ?? '', lines: situation.lines, transcript: transcriptOf(history, self.name), answers: [] };
+        return { situation, record, history, at };
+      });
+      run.situations = prepared.map((p) => p.record);
+
+      await answerAll(ctx, { run, prepared, view, self, reference, samples });
+      if (run.target === 'reply') {
+        const all = run.situations.flatMap((s) => s.answers);
+        run.repeated = repeatedPhrases(all.map((a) => ({ messages: a.messages.map((text) => ({ text })) })));
+      }
+      await scoreAll(ctx, { run, item, view, self, reference, feedback });
+      if (!run.situations.some((s) => s.answers.some((a) => a.score))) throw new RunEnd('error', 'no answer was scored');
+    } catch (err) {
+      const end = endOf(err);
+      if (!(err instanceof RunEnd)) log.warn('mentor: the run failed', { caseId: item.id, errorName: err?.name, statusCode: err?.statusCode });
+      if (end.kind === 'stopped') run.stopped = end.reason;
+      else run.error = end.reason;
+    }
+
+    const scores = run.situations.flatMap((s) => s.answers.map((a) => a.score)).filter(Boolean);
+    const result = verdict(scores, hot.config.mentor?.pass);
+    run.medians = result.medians;
+    run.reasons = result.reasons;
+    run.passed = !run.stopped && !run.error && result.passed;
+    run.finishedAt = new Date(now()).toISOString();
+    run.tokens = { spent: ctx.spent - spentBefore, left: budget.left() };
+
+    let saved = run;
+    try {
+      saved = cases.saveRun(guildId, run);
+    } catch (err) {
+      log.error('mentor: the run could not be saved', { caseId: item.id, errorName: err?.name });
+    }
+    const answers = run.situations.reduce((n, s) => n + s.answers.length, 0);
+    log.info('mentor: run finished', {
+      kind,
+      caseId: item.id,
+      runId: saved.id ?? null,
+      passed: run.passed,
+      stopped: run.stopped ?? null,
+      failed: Boolean(run.error),
+      situations: run.situations.length,
+      dropped: run.dropped,
+      answers,
+      scored: scores.length,
+      tokens: run.tokens.spent,
+      tokensLeft: run.tokens.left,
+      durationMs: now() - startedMs,
+    });
+    return saved;
+  }
+
+  // ---- the report ------------------------------------------------------------
+
+  async function post(content, file, meta) {
+    const channelId = hot.config.bot?.dryRunChannelId || '';
+    if (!channelId) {
+      log.warn('mentor: no admin channel is configured, the report was not posted', meta);
+      return;
+    }
+    try {
+      const channel = await client.channels.fetch(channelId);
+      if (!channel) throw new Error('the admin channel was not found');
+      await channel.send({
+        content,
+        files: [{ attachment: Buffer.from(file.text, 'utf8'), name: file.name }],
+        allowedMentions: { parse: [] },
+      });
+    } catch (err) {
+      log.warn('mentor: the report could not be posted', { ...meta, errorName: err?.name, statusCode: err?.statusCode });
+    }
+  }
+
+  /** Runs `work` in the background; `current` is released whatever happens. */
+  function background(ctx, work, fallback) {
+    return (async () => {
+      try {
+        return await work();
+      } catch (err) {
+        log.error('mentor: unexpected failure', { kind: ctx.kind, errorName: err?.name });
+        return fallback;
+      } finally {
+        if (current === ctx) current = null;
+      }
+    })();
+  }
+
+  // ---- the API ---------------------------------------------------------------
+
+  /**
+   * Measure one case: invent situations, answer them in the sandbox, score,
+   * save, report. Resolves at once with `{ started: true, done }`.
+   * @param {number} caseId
+   */
+  async function run(caseId) {
+    const guildId = getGuildId();
+    guard(guildId);
+    const item = cases.get(guildId, caseId);
+    if (!item) throw new Error(`no case ${caseId}`);
+    if (item.state === 'retired') throw new Error(`case ${item.id} is retired`);
+    const prompts = PROMPTS[item.target];
+    if (!prompts) throw new Error(`case ${item.id} has an unknown target`);
+    requirePrompt(prompts.situations);
+    requirePrompt(prompts.score);
+    guardBudget();
+
+    const ctx = begin('run', [item.id]);
+    const done = background(
+      ctx,
+      async () => {
+        const samples = positive(hot.config.mentor?.samples, 3);
+        const saved = await measure(ctx, guildId, item, { kind: 'run', samples, stored: [], shared: {} });
+        await post(renderCard(saved), renderFile(saved), { caseId: item.id });
+        return saved;
+      },
+      null,
+    );
+    return { started: true, done };
+  }
+
+  /**
+   * Replay every active case's stored situations (from its last run) with
+   * `mentor.check.samples` samples, no new situations; one run of kind
+   * 'check' saved per case and one combined card. Resolves at once with
+   * `{ started: true, cases, done }`.
+   */
+  async function check() {
+    const guildId = getGuildId();
+    guard(guildId);
+    const plan = [];
+    const skipped = [];
+    for (const item of cases.list(guildId)) {
+      let last = null;
+      try {
+        last = cases.lastRun(guildId, item.id);
+      } catch {
+        skipped.push({ caseId: item.id, reason: 'its last run cannot be read' });
+        continue;
+      }
+      if (!last) {
+        skipped.push({ caseId: item.id, reason: 'never run' });
+        continue;
+      }
+      const situations = (Array.isArray(last.situations) ? last.situations : [])
+        .filter((s) => Array.isArray(s?.lines) && s.lines.length > 0)
+        .map((s) => ({ title: s.title ?? '', lines: s.lines }));
+      if (situations.length === 0) {
+        skipped.push({ caseId: item.id, reason: 'no stored situations' });
+        continue;
+      }
+      plan.push({ item, situations });
+    }
+    if (plan.length === 0) throw new Error('no case has a run to check');
+    for (const { item } of plan) {
+      if (!PROMPTS[item.target]) throw new Error(`case ${item.id} has an unknown target`);
+      requirePrompt(PROMPTS[item.target].score);
+    }
+    guardBudget();
+
+    const ctx = begin('check', plan.map((p) => p.item.id));
+    const done = background(
+      ctx,
+      async () => {
+        const runs = [];
+        const shared = {};
+        for (const { item, situations } of plan) {
+          const last = runs[runs.length - 1];
+          if (last?.stopped === 'owner' || ctx.signal.aborted) {
+            skipped.push({ caseId: item.id, reason: 'stopped by the owner' });
+            continue;
+          }
+          if (last?.stopped === 'budget') {
+            skipped.push({ caseId: item.id, reason: 'budget' });
+            continue;
+          }
+          const samples = positive(hot.config.mentor?.check?.samples, 1);
+          runs.push(await measure(ctx, guildId, item, { kind: 'check', samples, stored: situations, shared }));
+        }
+        await post(renderCheckCard(runs, skipped), renderCheckFile(runs, now()), { cases: runs.length, skipped: skipped.length });
+        return runs;
+      },
+      [],
+    );
+    return { started: true, cases: plan.length, done };
+  }
+
+  /** Abort the request in flight; the run ends as `stopped: 'owner'`. */
+  function stop() {
+    if (!current) return { ok: false };
+    current.controller.abort();
+    return { ok: true };
+  }
+
+  /** What is running right now, for `/nep mentor status`. */
+  function status() {
+    if (!current) return { running: false };
+    return {
+      running: true,
+      kind: current.kind,
+      caseId: current.caseId,
+      caseIds: [...current.caseIds],
+      phase: current.phase,
+      startedAt: new Date(current.startedAt).toISOString(),
+      tokens: current.spent,
+      stopping: current.signal.aborted,
+    };
+  }
+
+  return { run, check, stop, status, isRunning: () => current !== null };
+}

@@ -190,4 +190,7 @@ export const labels = {
   limits: {
     notice: 'limit reached ({limit}, {used}/{cap})',
   },
+  mentor: {
+    intended: ['a limit notice is a feature'],
+  },
 };

@@ -380,6 +380,21 @@ function teacherId(from) {
 }
 
 /**
+ * The `learnedCfg` of `learnedText` read from the live config at the moment
+ * of use: `memory.maxLearned` (default 20), `memory.learnedHalfLifeDays`
+ * (default 720), `memory.confirmAfter` (unset when absent).
+ * @param {object} config  The live config.
+ * @returns {{ max: number, halfLifeDays: number, confirmAfter: number|undefined }}
+ */
+export function learnedConfig(config) {
+  return {
+    max: Number.isInteger(config.memory?.maxLearned) ? config.memory.maxLearned : 20,
+    halfLifeDays: typeof config.memory?.learnedHalfLifeDays === 'number' ? config.memory.learnedHalfLifeDays : 720,
+    confirmAfter: typeof config.memory?.confirmAfter === 'number' ? config.memory.confirmAfter : undefined,
+  };
+}
+
+/**
  * The `labels.aboutChat.learned` line's `{text}`: the top `learnedCfg.max`
  * stored guild items (`{ id, text, from?, weight, firstSeen, lastSeen }`, the
  * same atomic items as a member's details) by RANK (decayed with
@@ -389,8 +404,15 @@ function teacherId(from) {
  * item label falls back to the next simpler form, then to the bare text. An
  * item below `learnedCfg.confirmAfter` gets `aboutChat.unsureMark` appended
  * when that label exists. `''` when there is nothing to show.
+ * Exported for the mentor (src/mentor/mentor.js), which shows its judge the
+ * learned items exactly as the persona sees them.
+ * @param {object[]} learned      `guild.learned`.
+ * @param {object} a              `labels.aboutChat`.
+ * @param {{ max?: number, halfLifeDays?: number, confirmAfter?: number }} learnedCfg  See `learnedConfig`.
+ * @param {(id: string) => (string|null)} [nameOf]
+ * @returns {string}
  */
-function learnedText(learned, a, learnedCfg, nameOf) {
+export function learnedText(learned, a, learnedCfg, nameOf) {
   if (!Array.isArray(learned) || learned.length === 0) return '';
   return topByRank(learned, learnedCfg.max, learnedCfg.halfLifeDays)
     .map((item) => {
@@ -927,11 +949,7 @@ export function buildRequest(input) {
       {
         name: 'aboutChat',
         cap: caps.aboutChat,
-        items: aboutChatItems(input.guildMemory, labels, nameOf, {
-          max: Number.isInteger(config.memory?.maxLearned) ? config.memory.maxLearned : 20,
-          halfLifeDays: typeof config.memory?.learnedHalfLifeDays === 'number' ? config.memory.learnedHalfLifeDays : 720,
-          confirmAfter: typeof config.memory?.confirmAfter === 'number' ? config.memory.confirmAfter : undefined,
-        }),
+        items: aboutChatItems(input.guildMemory, labels, nameOf, learnedConfig(config)),
       },
       {
         name: 'self',
