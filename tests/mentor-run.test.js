@@ -84,6 +84,7 @@ function fakePrompts(overrides = {}) {
     'mentor-situations-memory': 'SITUATIONS-MEMORY for {{name}}: {{count}}',
     'mentor-score': 'SCORE for {{name}}',
     'mentor-score-memory': 'SCORE-MEMORY for {{name}}',
+    'mentor-signs': 'SIGNS FOR {{name}}',
     labels,
     ...overrides,
   };
@@ -574,6 +575,69 @@ test('run: a memory case goes through answerMemory', () =>
     assert.equal(answer.messages, undefined);
     assert.deepEqual(run.repeated, []);
     assert.equal(run.passed, true);
+  }));
+
+// ---- the signs block -----------------------------------------------------------
+
+/** The `<signs>` block as the fake prompts fill it, directly after `<samples>`. */
+const SIGNS_AFTER_SAMPLES = '</samples>\n\n<signs>\nSIGNS FOR Zoë\n</signs>';
+
+test('run: the situations request carries <signs> when the prompt exists', () =>
+  withSetup({}, async ({ mentor, cases, llm }) => {
+    const item = cases.add(GUILD, { text: CASE_TEXT, target: 'reply' });
+    await (await mentor.run(item.id)).done;
+    const situations = llm.calls.find((c) => c.kind === 'situations');
+    assert.ok(situations.user.includes(SIGNS_AFTER_SAMPLES), situations.user);
+    assert.equal(situations.user.split('<signs>').length, 2);
+  }));
+
+test('run: every score request carries <signs> after <samples>', () =>
+  withSetup(
+    { llm: fakeLlm({ scoreFor: (id) => (id === 's1a2' ? null : score()) }) },
+    async ({ mentor, cases, llm }) => {
+      const item = cases.add(GUILD, { text: CASE_TEXT, target: 'reply' });
+      await (await mentor.run(item.id)).done;
+      const scoreCalls = llm.calls.filter((c) => c.kind === 'score');
+      // The re-ask for the missing score is one of them.
+      assert.deepEqual(scoreCalls.map((c) => idsIn(c.user)), [['s1a1', 's1a2'], ['s1a2'], ['s2a1', 's2a2']]);
+      for (const call of scoreCalls) {
+        assert.ok(call.user.includes(SIGNS_AFTER_SAMPLES), call.user);
+        assert.ok(call.user.indexOf('<signs>') < call.user.indexOf('<intended>'));
+      }
+      // A check builds its score requests the same way.
+      llm.calls.length = 0;
+      await (await mentor.check()).done;
+      const checkScores = llm.calls.filter((c) => c.kind === 'score');
+      assert.ok(checkScores.length > 0);
+      for (const call of checkScores) assert.ok(call.user.includes(SIGNS_AFTER_SAMPLES), call.user);
+    },
+  ));
+
+test('run: a missing mentor-signs prompt omits the block and the run still completes', async () => {
+  for (const signs of [undefined, '', '  \n  ']) {
+    await withSetup({ prompts: { 'mentor-signs': signs } }, async ({ mentor, cases, llm }) => {
+      const item = cases.add(GUILD, { text: CASE_TEXT, target: 'reply' });
+      const run = await (await mentor.run(item.id)).done;
+      assert.equal(run.error, undefined);
+      assert.equal(run.passed, true);
+      const mentorCalls = llm.calls.filter((c) => c.kind === 'situations' || c.kind === 'score');
+      assert.equal(mentorCalls.length, 3);
+      for (const call of mentorCalls) assert.doesNotMatch(call.user, /<signs>/);
+      const checked = await (await mentor.check()).done;
+      assert.equal(checked.length, 1);
+      assert.equal(checked[0].error, undefined);
+    });
+  }
+});
+
+test('run: a memory case carries <signs> in both of its requests', () =>
+  withSetup({}, async ({ mentor, cases, llm }) => {
+    const item = cases.add(GUILD, { text: CASE_TEXT, target: 'memory' });
+    await (await mentor.run(item.id)).done;
+    const situations = llm.calls.find((c) => c.kind === 'situations');
+    const scoreCall = llm.calls.find((c) => c.kind === 'score');
+    assert.ok(situations.user.includes(SIGNS_AFTER_SAMPLES), situations.user);
+    assert.ok(scoreCall.user.includes(SIGNS_AFTER_SAMPLES), scoreCall.user);
   }));
 
 // ---- stop, status and check --------------------------------------------------

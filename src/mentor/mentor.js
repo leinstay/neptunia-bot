@@ -15,7 +15,10 @@
 //
 // What a model reads comes from the prompt files (`mentor-*`) and labels;
 // this module only fills their `{{name}}`-style placeholders and wraps data in
-// tagged blocks (tag names documented in the prompt contract).
+// tagged blocks (tag names documented in the prompt contract). One of those
+// prompts, `mentor-signs` (the known signs of model-written text), is not a
+// system prompt: it travels as the `<signs>` block of every mentor request,
+// right after `<samples>`, and is simply left out when missing or empty.
 
 import { fillPromptTemplate, learnedConfig, learnedText } from '../behavior/prompt.js';
 import { fill, formatTranscript, renderTranscript } from '../discord/format.js';
@@ -75,7 +78,8 @@ function emptyMedians() {
  * `situationLines`, `samples`, `check.samples`, `pass`, `reference`,
  * `feedbackExamples`), `hot.config.features.mentor` (must be exactly true),
  * `hot.config.memory.mainChannelIds`, `hot.config.bot.dryRunChannelId`, and
- * the `mentor-*` prompts.
+ * the `mentor-*` prompts (`mentor-signs` optional: the `<signs>` block of
+ * every mentor request, omitted when missing or empty).
  * @param {object} deps
  * @param {{ config: object, prompts: object }} deps.hot
  * @param {object} deps.store             The memory store (read only, through `liveView`).
@@ -92,7 +96,7 @@ function emptyMedians() {
  *   check: () => Promise<{ started: true, cases: number, done: Promise<object[]> }>,
  *   stop: () => { ok: boolean }, status: () => object, isRunning: () => boolean }}
  *   `run` / `check` reject with an operator-facing Error before anything is spent when the mentor is
- *   off, has no model, the case or a prompt is missing, a run is in flight or the budget is spent.
+ *   off, has no model, the case or a required prompt is missing, a run is in flight or the budget is spent.
  *   `done` never rejects: a failure ends the run with `error`, which is saved and reported.
  */
 export function createMentor({ hot, store, llm, client, cases, budget, getGuildId, getSelf, fetchHistoryWindow, now = Date.now, rng = Math.random }) {
@@ -234,12 +238,17 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
     return list.length ? JSON.stringify(list) : '';
   }
 
-  function commonBlocks(item, reference, feedback) {
+  /**
+   * The blocks every mentor request shares. `signs` is the `mentor-signs`
+   * prompt, read now and filled; a missing or empty prompt leaves it out.
+   */
+  function commonBlocks(item, reference, feedback, selfName) {
     return {
       case: block('case', item.text),
       reference: block('reference', JSON.stringify(reference.profile, null, 1)),
       // One sample per line: a line break inside a sample would read as two samples.
       samples: block('samples', reference.samples.map((s) => s.replace(/\s*\n\s*/g, ' ')).join('\n')),
+      signs: block('signs', fillPromptTemplate(hot.prompts?.['mentor-signs'], templateValues(selfName)).trim()),
       feedback: block('feedback', feedback),
     };
   }
@@ -269,9 +278,9 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
     const cfg = hot.config.mentor ?? {};
     const profiles = view.memory.listUserProfiles().filter((p) => p?.id);
     const members = profiles.map((p) => `${p.names?.[0] ?? p.id} (id:${p.id})`).join('\n');
-    const blocks = commonBlocks(item, reference, feedback);
+    const blocks = commonBlocks(item, reference, feedback, self.name);
     const system = fillPromptTemplate(hot.prompts[PROMPTS[item.target].situations], templateValues(self.name));
-    const user = [blocks.case, block('members', members), blocks.reference, blocks.samples, blocks.feedback].filter(Boolean).join('\n\n');
+    const user = [blocks.case, block('members', members), blocks.reference, blocks.samples, blocks.signs, blocks.feedback].filter(Boolean).join('\n\n');
     ctx.phase = 'situations';
     const text = await askMentor(ctx, system, user);
     const lines = Array.isArray(cfg.situationLines) ? cfg.situationLines : [6, 15];
@@ -355,7 +364,6 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
   async function scoreAll(ctx, { run, item, view, self, reference, feedback }) {
     const labels = view.prompts.labels ?? {};
     const intended = Array.isArray(labels.mentor?.intended) ? labels.mentor.intended.filter((s) => typeof s === 'string' && s.trim()) : [];
-    const blocks = commonBlocks(item, reference, feedback);
     const character = run.target === 'reply' ? block('character', fillPromptTemplate(view.prompts['character-card'], { name: self.name })) : '';
     const rules = block('rules', fillPromptTemplate(view.prompts.rules, { name: self.name }));
     const learned = block('learned', learnedLine(view));
@@ -375,10 +383,13 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
             : asked.map((a) => ({ id: a.id, messages: a.messages, reactions: a.reactions, silent: a.silent }));
         const facts = Object.fromEntries(asked.map((a) => [a.id, a.facts]));
         facts.repeated = run.repeated;
+        // Built per request, the re-ask included, so a prompt edited mid-run is read at once.
+        const blocks = commonBlocks(item, reference, feedback, self.name);
         const user = [
           blocks.case,
           blocks.reference,
           blocks.samples,
+          blocks.signs,
           block('intended', intended.join('\n')),
           blocks.feedback,
           character,
