@@ -1,6 +1,7 @@
 // The mentor's report to the owner: a short card for the admin channel and a
 // text file with everything behind it (every situation, every answer, the
-// facts measured by code, the points per axis and the mentor's comment). The
+// facts measured by code, the points per axis and the mentor's comment), and
+// the one-line summary of the latest run for `/nep mentor status`. The
 // card and the file are operator-facing English, like the other command
 // replies of the bot; the mentor model's comments are shown verbatim. Pure:
 // a stored run object in, text out.
@@ -177,6 +178,39 @@ export function renderCheckCard(runs, skipped) {
   }
   if (shown.length < body.length) shown.push(`... and ${body.length - shown.length} more`);
   return clip([head, ...shown, ...tail].join('\n'), CARD_MAX);
+}
+
+/** How a run ended, for the `last:` line of `/nep mentor status`. */
+function lastOutcome(run) {
+  if (run.error) return `error (${clip(String(run.error).replace(/\s+/g, ' '), 60)})`;
+  if (run.stopped) return `stopped (${clip(run.stopped, 20)})`;
+  return run.passed ? 'passed' : 'failed';
+}
+
+/** An ISO time as `YYYY-MM-DD HH:MM` in UTC; '-' when it does not parse. */
+function minuteUtc(value) {
+  const ms = Date.parse(value ?? '');
+  if (!Number.isFinite(ms)) return '-';
+  const iso = new Date(ms).toISOString();
+  return `${iso.slice(0, 10)} ${iso.slice(11, 16)}`;
+}
+
+/**
+ * The last line of `/nep mentor status`: the most recent finished run in one
+ * line -- its case, how it ended (`passed`, `failed`, `stopped (<reason>)` or
+ * `error (<reason clipped to 60 characters>)`), the median overall, how many
+ * answers were scored, the tokens it spent and when it finished (UTC).
+ * @param {object|null|undefined} run  A run object as stored by `cases.saveRun`; nothing for no run.
+ * @returns {string}
+ */
+export function renderLastRun(run) {
+  if (!run) return 'last: no run yet';
+  const answers = answersOf(run);
+  const scored = answers.filter((a) => a?.score).length;
+  return (
+    `last: case ${run.caseId}, ${lastOutcome(run)}, overall ${num(run.medians?.overall)}, ` +
+    `${scored} of ${answers.length} answers scored, ${num(run.tokens?.spent)} tokens, finished ${minuteUtc(run.finishedAt)} UTC`
+  );
 }
 
 /**

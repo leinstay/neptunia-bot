@@ -4,7 +4,8 @@
 // sandbox (live prompts, rules and memory; nothing posted, nothing stored);
 // the mentor model scores every answer on several axes against a reference
 // of how the people in the chat really write; the run is saved with the case
-// and a report goes to the owner's admin channel. In this stage the mentor
+// and a report goes to the owner's admin channel when one is configured (the
+// owner commands `status` and `show` read it without one). In this stage the mentor
 // only measures: it changes nothing.
 //
 // Everything expensive is bounded: the mentor's own daily token budget is
@@ -556,10 +557,16 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
 
   // ---- the report ------------------------------------------------------------
 
+  /**
+   * Posts the report to the admin channel when one is configured. Without one
+   * this is the normal state: the run is already saved and the owner reads it
+   * through `/nep mentor status` and `/nep mentor show`, so nothing is posted
+   * and nothing is warned about. Only a configured channel that fails warns.
+   */
   async function post(content, file, meta) {
     const channelId = hot.config.bot?.dryRunChannelId || '';
     if (!channelId) {
-      log.warn('mentor: no admin channel is configured, the report was not posted', meta);
+      log.info('mentor: report saved', meta);
       return;
     }
     try {

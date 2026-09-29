@@ -12,6 +12,7 @@ import { createCaseStore } from '../src/mentor/cases.js';
 import { createMentorBudget } from '../src/mentor/budget.js';
 import { TokenLimitError } from '../src/llm/openrouter.js';
 import { labels } from './fixtures/labels.js';
+import { withCapturedLogs } from './fixtures/capture-logs.js';
 
 const NOW = Date.UTC(2026, 8, 30, 12, 0, 0);
 const GUILD = 'g1';
@@ -895,3 +896,47 @@ test('run: labels without mentor.intended leave the intended block out', () => {
     assert.match(scoreCall.user, /<rules>/);
   });
 });
+
+// ---- no admin channel ----------------------------------------------------------
+
+test('run: without an admin channel nothing is posted and no warning is logged', () =>
+  withSetup({ config: { bot: { dryRunChannelId: '' } } }, async ({ mentor, cases, sent, fetched }) => {
+    const item = cases.add(GUILD, { text: CASE_TEXT, target: 'reply' });
+    const { result: run, logs } = await withCapturedLogs(async () => (await mentor.run(item.id)).done);
+    assert.equal(sent.length, 0);
+    assert.equal(fetched.includes(ADMIN), false);
+    assert.equal(cases.lastRun(GUILD, item.id).id, run.id);
+    assert.deepEqual(logs.filter((l) => l.level === 'warn' || l.level === 'error'), []);
+    const saved = logs.filter((l) => l.msg === 'mentor: report saved');
+    assert.equal(saved.length, 1);
+    assert.equal(saved[0].level, 'info');
+    assert.equal(saved[0].caseId, item.id);
+
+    // A check ends the same way: saved, nothing posted, no warning.
+    const checked = await withCapturedLogs(async () => (await mentor.check()).done);
+    assert.equal(checked.result.length, 1);
+    assert.equal(sent.length, 0);
+    assert.deepEqual(checked.logs.filter((l) => l.level === 'warn' || l.level === 'error'), []);
+    const checkSaved = checked.logs.filter((l) => l.msg === 'mentor: report saved');
+    assert.equal(checkSaved.length, 1);
+    assert.equal(checkSaved[0].level, 'info');
+    assert.equal(checkSaved[0].cases, 1);
+    assert.equal(checkSaved[0].skipped, 0);
+  }));
+
+test('run: a configured channel that cannot be fetched still logs a warning', () =>
+  withSetup(
+    { fetchChannel: (id) => (id === ADMIN ? null : id === CHANNEL.id || id === OTHER_CHANNEL.id ? { id } : null) },
+    async ({ mentor, cases, sent, fetched }) => {
+      const item = cases.add(GUILD, { text: CASE_TEXT, target: 'reply' });
+      const { result: run, logs } = await withCapturedLogs(async () => (await mentor.run(item.id)).done);
+      assert.equal(sent.length, 0);
+      assert.ok(fetched.includes(ADMIN));
+      assert.equal(cases.lastRun(GUILD, item.id).id, run.id);
+      const warned = logs.filter((l) => l.msg === 'mentor: the report could not be posted');
+      assert.equal(warned.length, 1);
+      assert.equal(warned[0].level, 'warn');
+      assert.equal(warned[0].caseId, item.id);
+      assert.equal(logs.some((l) => l.msg === 'mentor: report saved'), false);
+    },
+  ));

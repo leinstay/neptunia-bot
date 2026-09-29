@@ -4906,7 +4906,8 @@ test('run: mentor.remove retires a case; an unknown id is refused', async () => 
 });
 
 test('run: mentor.run starts the run and replies at once, without waiting for it to finish', async () => {
-  const { admin, mentor } = makeMentorAdmin();
+  const { admin, mentor, hot } = makeMentorAdmin();
+  hot.config.bot.dryRunChannelId = '700000000000000001';
   const reply = await admin.run('mentor.run', { id: 3 }, { guildId: 'g1' });
   assert.equal(reply, 'run started for case 3; the report will come to the admin channel');
   assert.deepEqual(mentor.calls, [['run', 3]]);
@@ -4923,9 +4924,43 @@ test('run: mentor.run turns a refusal of the mentor into the error', async () =>
 });
 
 test('run: mentor.check replies with the number of cases it checks', async () => {
-  const { admin, mentor } = makeMentorAdmin();
+  const { admin, mentor, hot } = makeMentorAdmin();
+  hot.config.bot.dryRunChannelId = '700000000000000001';
   assert.equal(await admin.run('mentor.check', {}, { guildId: 'g1' }), 'check started for 2 cases');
   assert.deepEqual(mentor.calls, [['check']]);
+});
+
+test('mentor.run: the reply names status and show when there is no admin channel', async () => {
+  const { admin, mentor, hot } = makeMentorAdmin();
+  for (const empty of [undefined, '']) {
+    hot.config.bot.dryRunChannelId = empty;
+    assert.equal(
+      await admin.run('mentor.run', { id: 3 }, { guildId: 'g1' }),
+      'run started for case 3; follow it with /nep mentor status, read the report with /nep mentor show 3',
+    );
+  }
+  assert.deepEqual(mentor.calls, [['run', 3], ['run', 3]]);
+});
+
+test('mentor.run: the reply names the admin channel when one is configured', async () => {
+  const { admin, hot } = makeMentorAdmin();
+  hot.config.bot.dryRunChannelId = '700000000000000001';
+  assert.equal(await admin.run('mentor.run', { id: 5 }, { guildId: 'g1' }), 'run started for case 5; the report will come to the admin channel');
+});
+
+test('mentor.check: the reply names status and show when there is no admin channel', async () => {
+  const { admin, mentor } = makeMentorAdmin();
+  assert.equal(
+    await admin.run('mentor.check', {}, { guildId: 'g1' }),
+    'check started for 2 cases; follow it with /nep mentor status, read each report with /nep mentor show <id>',
+  );
+  assert.deepEqual(mentor.calls, [['check']]);
+});
+
+test('mentor.check: the reply names the admin channel when one is configured', async () => {
+  const { admin, hot } = makeMentorAdmin();
+  hot.config.bot.dryRunChannelId = '700000000000000001';
+  assert.equal(await admin.run('mentor.check', {}, { guildId: 'g1' }), 'check started for 2 cases');
 });
 
 test('run: mentor.check turns a refusal of the mentor into the error', async () => {
@@ -5015,7 +5050,7 @@ test('run: mentor.status reports the switch, model, tokens today, cases by state
     mentorCases.add('g1', { text, target: 'reply' });
   }
   mentorCases.saveRun('g1', sampleMentorRun(2, { passed: true }));
-  mentorCases.saveRun('g1', sampleMentorRun(3, { passed: false, overall: 3 }));
+  mentorCases.saveRun('g1', { ...sampleMentorRun(3, { passed: false, overall: 3 }), finishedAt: '2026-09-30T11:10:00.000Z' });
   mentorCases.retire('g1', 4);
   mentorBudget.charge({ prompt_tokens: 100, completion_tokens: 0 }, 0);
 
@@ -5026,6 +5061,7 @@ test('run: mentor.status reports the switch, model, tokens today, cases by state
     'tokens today: 100 / 1000 (900 left)',
     'cases: 1 new, 1 passing, 1 failing, 1 retired',
     'running: no',
+    'last: case 3, failed, overall 3, 0 of 0 answers scored, 120 tokens, finished 2026-09-30 11:10 UTC',
   ]);
 });
 
@@ -5035,7 +5071,8 @@ test('run: mentor.status shows the run in flight', async () => {
   });
   const { admin } = makeMentorAdmin({ mentor });
   const lines = (await admin.run('mentor.status', {}, { guildId: 'g1' })).split('\n');
-  assert.equal(lines.at(-1), 'running: check case 2, scores 1/5, 340 tokens so far');
+  assert.equal(lines.at(-2), 'running: check case 2, scores 1/5, 340 tokens so far');
+  assert.equal(lines.at(-1), 'last: no run yet');
 });
 
 test('run: mentor.status shows a pending stop on the running line', async () => {
@@ -5044,7 +5081,7 @@ test('run: mentor.status shows a pending stop on the running line', async () => 
   });
   const { admin } = makeMentorAdmin({ mentor });
   const lines = (await admin.run('mentor.status', {}, { guildId: 'g1' })).split('\n');
-  assert.equal(lines.at(-1), 'running: run case 4, answers 2/5, 910 tokens so far, stopping');
+  assert.equal(lines.at(-2), 'running: run case 4, answers 2/5, 910 tokens so far, stopping');
 });
 
 test('run: mentor.status works with the mentor disabled, no model set, and while paused', async () => {
@@ -5058,6 +5095,59 @@ test('run: mentor.status works with the mentor disabled, no model set, and while
   assert.equal(lines[1], 'model: -');
   assert.equal(lines[2], 'tokens today: 0 / 1000 (1000 left)');
   assert.equal(lines[3], 'cases: 0 new, 0 passing, 0 failing, 0 retired');
+});
+
+/** A saved run with its own outcome and finish time; one scored answer of two. */
+function finishedMentorRun(caseId, finishedAt, extra = {}) {
+  return {
+    ...sampleMentorRun(caseId, { passed: false, overall: 5 }),
+    situations: [{ n: 1, title: 't', lines: [], transcript: '', answers: [{ id: 's1a1', score: { overall: 5 } }, { id: 's1a2', score: null }] }],
+    tokens: { spent: 450, left: 550 },
+    finishedAt,
+    ...extra,
+  };
+}
+
+test('mentor.status: the last line reports the most recent finished run', async () => {
+  const { admin, hot, mentorCases } = makeMentorAdmin();
+  for (const text of ['First case text here.', 'Second case text here.', 'Third case text here.']) {
+    mentorCases.add('g1', { text, target: 'reply' });
+  }
+  mentorCases.saveRun('g1', finishedMentorRun(1, '2026-09-30T11:05:00.000Z', { passed: true, medians: { overall: 8 } }));
+  mentorCases.saveRun('g1', finishedMentorRun(2, '2026-09-30T11:20:00.000Z', { stopped: 'budget' }));
+  mentorCases.saveRun('g1', finishedMentorRun(3, '2026-09-30T11:10:00.000Z', { error: 'no valid situation' }));
+  // A retired case still counts: its run is the newest one.
+  mentorCases.retire('g1', 2);
+  // The line does not depend on the switch or the model.
+  hot.config.features = { mentor: false };
+  delete hot.config.mentor.model;
+
+  const lines = (await admin.run('mentor.status', {}, { guildId: 'g1' })).split('\n');
+  assert.equal(lines.at(-1), 'last: case 2, stopped (budget), overall 5, 1 of 2 answers scored, 450 tokens, finished 2026-09-30 11:20 UTC');
+
+  mentorCases.saveRun('g1', finishedMentorRun(1, '2026-09-30T11:30:00.000Z', { passed: true, medians: { overall: 8 } }));
+  const after = (await admin.run('mentor.status', {}, { guildId: 'g1' })).split('\n');
+  assert.equal(after.at(-1), 'last: case 1, passed, overall 8, 1 of 2 answers scored, 450 tokens, finished 2026-09-30 11:30 UTC');
+});
+
+test('mentor.status: an unreadable run file gives "last: cannot be read"', async () => {
+  const { admin, mentorCases, rootDir } = makeMentorAdmin();
+  mentorCases.add('g1', { text: 'First case text here.', target: 'reply' });
+  mentorCases.add('g1', { text: 'Second case text here.', target: 'reply' });
+  mentorCases.saveRun('g1', finishedMentorRun(1, '2026-09-30T11:05:00.000Z'));
+  const broken = mentorCases.saveRun('g1', finishedMentorRun(2, '2026-09-30T11:10:00.000Z'));
+  fs.writeFileSync(path.join(rootDir, 'data', 'guilds', 'g1', 'mentor', 'runs', '2', `${broken.id}.json`),'{ not json');
+
+  const lines = (await admin.run('mentor.status', {}, { guildId: 'g1' })).split('\n');
+  assert.equal(lines.at(-2), 'running: no');
+  assert.equal(lines.at(-1), 'last: cannot be read');
+});
+
+test('mentor.status: no run yet', async () => {
+  const { admin, mentorCases } = makeMentorAdmin();
+  assert.equal((await admin.run('mentor.status', {}, { guildId: 'g1' })).split('\n').at(-1), 'last: no run yet');
+  mentorCases.add('g1', { text: 'First case text here.', target: 'reply' });
+  assert.equal((await admin.run('mentor.status', {}, { guildId: 'g1' })).split('\n').at(-1), 'last: no run yet');
 });
 
 test('run: mentor add/remove/run/check/wrong are refused while paused; cases/show/status/stop are not', async () => {

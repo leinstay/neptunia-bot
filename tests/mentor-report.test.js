@@ -2,7 +2,7 @@
 // and the full text file attached to it.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { renderCard, renderFile, renderCheckCard, renderCheckFile } from '../src/mentor/report.js';
+import { renderCard, renderFile, renderCheckCard, renderCheckFile, renderLastRun } from '../src/mentor/report.js';
 
 const ALICE = '111111111111111111';
 
@@ -155,4 +155,46 @@ test('renderCheckFile: holds every run of the check', () => {
   assert.equal(file.name, 'mentor-check-1790000000000.txt');
   assert.match(file.text, /case 1/);
   assert.match(file.text, /case 2/);
+});
+
+test('renderLastRun: a passed run', () => {
+  assert.equal(
+    renderLastRun(fakeRun()),
+    'last: case 3, passed, overall 7, 15 of 15 answers scored, 123456 tokens, finished 2026-09-30 10:05 UTC',
+  );
+});
+
+test('renderLastRun: a failed run, with an unscored answer and no median', () => {
+  const run = fakeRun({ passed: false, medians: { human: null, character: null, rules: null, goal: null, overall: null } });
+  run.situations[0].answers[0].score = null;
+  assert.equal(renderLastRun(run), 'last: case 3, failed, overall -, 14 of 15 answers scored, 123456 tokens, finished 2026-09-30 10:05 UTC');
+});
+
+test('renderLastRun: a run stopped by the budget', () => {
+  const run = fakeRun({ passed: false, stopped: 'budget', situations: [], tokens: { spent: 900, left: 0 } });
+  assert.equal(renderLastRun(run), 'last: case 3, stopped (budget), overall 7, 0 of 0 answers scored, 900 tokens, finished 2026-09-30 10:05 UTC');
+});
+
+test('renderLastRun: a run stopped by the owner', () => {
+  assert.match(renderLastRun(fakeRun({ passed: false, stopped: 'owner' })), /^last: case 3, stopped \(owner\), overall 7, /);
+});
+
+test('renderLastRun: a run stopped because the mentor was disabled', () => {
+  assert.match(renderLastRun(fakeRun({ passed: false, stopped: 'disabled' })), /^last: case 3, stopped \(disabled\), overall 7, /);
+});
+
+test('renderLastRun: an error, its reason clipped to 60 characters', () => {
+  const reason = `a model request failed ${'ναι '.repeat(40)}`;
+  const line = renderLastRun(fakeRun({ passed: false, error: reason, finishedAt: '2026-01-05T08:09:59.999Z' }));
+  const shown = /^last: case 3, error \((.*)\), overall 7, 15 of 15 answers scored, 123456 tokens, finished 2026-01-05 08:09 UTC$/.exec(line);
+  assert.ok(shown, line);
+  assert.equal(shown[1].length, 60);
+  assert.ok(shown[1].startsWith('a model request failed ναι'));
+  assert.ok(shown[1].endsWith('...'));
+  assert.match(renderLastRun(fakeRun({ passed: false, error: 'no valid situation' })), /, error \(no valid situation\), /);
+});
+
+test('renderLastRun: no run yet', () => {
+  assert.equal(renderLastRun(null), 'last: no run yet');
+  assert.equal(renderLastRun(undefined), 'last: no run yet');
 });

@@ -37,7 +37,7 @@ import { classifierTextModel, classifierMediaModel, classifierVideoModel } from 
 import { buildDrawPrompt } from './behavior/prompt.js';
 import { effectiveAffinity } from './behavior/private.js';
 import { ImageCapError, ImageGenError, UnsupportedImageModelError, familyOf as imageFamilyOf } from './llm/images.js';
-import { renderCard, renderFile } from './mentor/report.js';
+import { renderCard, renderFile, renderLastRun } from './mentor/report.js';
 import { log } from './log.js';
 
 /** `/nep access grant/revoke`'s command keys that ONLY read — everything else (including every
@@ -2327,20 +2327,24 @@ async function cmdPing(args) {
     return `case ${item.id} retired`;
   }
 
-  /** Starts the run and answers at once: the mentor posts its report to the admin channel when
-   * `done` settles, far beyond an interaction's lifetime. A guard of the mentor rejects here. */
+  /** Starts the run and answers at once: the run ends far beyond an interaction's lifetime. With an
+   * admin channel (`bot.dryRunChannelId`, read now) the mentor posts its report there; without one
+   * the reply points at `status` and `show`. A guard of the mentor rejects here. */
   async function cmdMentorRun(args) {
     assertNotPaused();
     const id = mentorCaseId(args);
     await mentor.run(id);
-    return `run started for case ${id}; the report will come to the admin channel`;
+    if (hot.config.bot?.dryRunChannelId) return `run started for case ${id}; the report will come to the admin channel`;
+    return `run started for case ${id}; follow it with /nep mentor status, read the report with /nep mentor show ${id}`;
   }
 
-  /** Starts a check of every case with a run; answers at once, like `run`. */
+  /** Starts a check of every case with a run; answers at once, like `run`, and the same way
+   * points at `status` and `show` when there is no admin channel. */
   async function cmdMentorCheck() {
     assertNotPaused();
     const { cases } = await mentor.check();
-    return `check started for ${cases} cases`;
+    if (hot.config.bot?.dryRunChannelId) return `check started for ${cases} cases`;
+    return `check started for ${cases} cases; follow it with /nep mentor status, read each report with /nep mentor show <id>`;
   }
 
   /** Aborts the run in flight; reads no `data/` itself, so not guarded by assertNotPaused(). */
@@ -2367,7 +2371,30 @@ async function cmdPing(args) {
     return `noted for case ${id}`;
   }
 
-  /** Works with the mentor off or without a model -- it is how the owner sees why nothing runs. */
+  /** The `last:` line: the newest `finishedAt` among the last runs of every case, retired ones
+   * included. A run file or case list that cannot be read gives `last: cannot be read`, never a throw. */
+  function mentorLastLine(guildId) {
+    let latest = null;
+    let latestMs = -Infinity;
+    try {
+      for (const item of mentorCases.list(guildId, { includeRetired: true })) {
+        const run = mentorCases.lastRun(guildId, item.id);
+        if (!run) continue;
+        const ms = Date.parse(run.finishedAt ?? '');
+        const rank = Number.isFinite(ms) ? ms : -Infinity;
+        if (!latest || rank > latestMs) {
+          latest = run;
+          latestMs = rank;
+        }
+      }
+    } catch {
+      return 'last: cannot be read';
+    }
+    return renderLastRun(latest);
+  }
+
+  /** Works with the mentor off or without a model -- it is how the owner sees why nothing runs.
+   * The last line is always the most recent finished run (`last:`). */
   function cmdMentorStatus(_args, context) {
     const lines = [
       `enabled: ${hot.config.features?.mentor === true ? 'yes' : 'no'}`,
@@ -2391,6 +2418,7 @@ async function cmdPing(args) {
     }
     const s = mentor.status();
     lines.push(s?.running ? `running: ${s.kind} case ${s.caseId}, ${s.phase}, ${s.tokens} tokens so far${s.stopping ? ', stopping' : ''}` : 'running: no');
+    lines.push(guildId ? mentorLastLine(guildId) : 'last: -');
     return lines.join('\n');
   }
 
