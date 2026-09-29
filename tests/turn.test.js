@@ -13,6 +13,7 @@ import { fill } from '../src/discord/format.js';
 import { labels } from './fixtures/labels.js';
 import { withCapturedLogs } from './fixtures/capture-logs.js';
 import { ImageCapError, ImageGenError } from '../src/llm/images.js';
+import { DailyCapError, TokenLimitError } from '../src/llm/openrouter.js';
 
 function rngReturning(value) {
   return () => value;
@@ -156,18 +157,23 @@ function normalizedTrigger(raw) {
   };
 }
 
-function fakeTurnChannel({ id = 'c1', name = 'general', guildId = 'g1', historyMessages = [], attachFiles = true } = {}) {
-  const guild = { id: guildId, members: { me: { displayName: 'Bot' } }, channels: { cache: new Map() } };
+/** `dm: true` is a private (DM) channel: no guild, no name, no member permissions. */
+function fakeTurnChannel({ id = 'c1', name = 'general', guildId = 'g1', historyMessages = [], attachFiles = true, dm = false } = {}) {
+  const guild = dm ? null : { id: guildId, members: { me: { displayName: 'Bot' } }, channels: { cache: new Map() } };
   const sent = [];
   const typingCalls = [];
   const reactCalls = [];
   const channel = {
     id,
-    name,
+    name: dm ? null : name,
     guild,
     viewable: true,
-    // Every permission is granted, Attach Files only when `attachFiles`.
-    permissionsFor: () => ({ has: (flag) => attachFiles || flag !== PermissionFlagsBits.AttachFiles }),
+    // Every permission is granted, Attach Files only when `attachFiles`; a DM has no permissions to resolve.
+    permissionsFor: dm
+      ? () => {
+          throw new Error('a DM channel has no member permissions');
+        }
+      : () => ({ has: (flag) => attachFiles || flag !== PermissionFlagsBits.AttachFiles }),
     sendTyping: async () => {
       typingCalls.push(Date.now());
     },
@@ -204,10 +210,21 @@ function fakeLlm(responseText) {
   };
 }
 
-function fakeStore({ guildMemory = {}, userProfiles = {}, channels = [], loreEntries = [] } = {}) {
+function fakeStore({ guildMemory = {}, userProfiles = {}, channels = [], loreEntries = [], privateProfiles = {} } = {}) {
+  const guildCalls = [];
+  const privateCalls = [];
   return {
-    getGuild: () => guildMemory,
+    guildCalls,
+    privateCalls,
+    getGuild: (guildId) => {
+      guildCalls.push(guildId);
+      return guildMemory;
+    },
     getUser: (guildId, userId) => userProfiles[userId] ?? null,
+    getPrivate: (guildId, userId) => {
+      privateCalls.push({ guildId, userId });
+      return privateProfiles[userId] ?? null;
+    },
     listChannels: () => channels,
     listUserProfiles: () => Object.values(userProfiles),
     getLore: () => loreEntries,
@@ -2153,15 +2170,11 @@ test('runTurn: a failed generation runs a second turn with triggerKind drawFaile
   assert.equal(answered.outcome, 'spoke');
 });
 
-test('runTurn: a cap refusal and an empty picture reach the second turn as their reason labels', async () => {
-  for (const [error, reason] of [
-    [new ImageCapError('userDaily'), 'userDaily'],
-    [new ImageGenError('empty'), 'error'],
-  ]) {
-    const { result, llm } = await runDrawTurn({ answers: ['<draw>a cat</draw>', '<msg>no</msg>'], images: fakeImages({ error }) });
-    assert.equal(result.drawFailed, reason);
-    assert.ok(userTextOf(llm.calls[1]).includes(fill(labels.triggers.drawFailed, { reason: labels.draw.reasons[reason] })));
-  }
+// A cap refusal no longer reaches a second turn: it posts the limit notice (see the limit tests below).
+test('runTurn: an empty picture reaches the second turn as the error reason label', async () => {
+  const { result, llm } = await runDrawTurn({ answers: ['<draw>a cat</draw>', '<msg>no</msg>'], images: fakeImages({ error: new ImageGenError('empty') }) });
+  assert.equal(result.drawFailed, 'error');
+  assert.ok(userTextOf(llm.calls[1]).includes(fill(labels.triggers.drawFailed, { reason: labels.draw.reasons.error })));
 });
 
 test('runTurn: an upload failure counts as a failed drawing', async () => {
@@ -2376,4 +2389,278 @@ test('runTurn: a failed drawing without a trigger fires onIdle once, right away'
   await new Promise((resolve) => setTimeout(resolve, 0));
 
   assert.equal(idle, 1);
+});
+
+// --- private (DM) turns --------------------------------------------------------
+
+function privateHot(features = {}) {
+  const hot = drawHot(features);
+  hot.prompts.reply = 'Someone called you: {{author}}, they {{trigger}}. You are {{name}}.';
+  hot.prompts.private = 'PRIVATE_TASK with {{author}} as {{name}}';
+  return hot;
+}
+
+function privateStore() {
+  return fakeStore({
+    userProfiles: { u1: { id: 'u1', names: ['Alice'], relationship: 'PUBLIC_REL', affinity: { score: 10, reason: 'public reason', history: [] } } },
+    privateProfiles: { u1: { relationship: 'PRIVATE_REL', details: [{ id: 1, text: 'PRIVATE_DETAIL', weight: 1 }], affinity: { score: 5, reason: '', history: [] } } },
+    channels: [{ id: 'dm1', name: 'dm', lastMessageAt: NOW, days: {} }],
+  });
+}
+
+/** The client of a bot serving guild g1, where its display name is `GuildBot`. */
+function guildClient() {
+  return fakeClient({ guilds: { cache: new Map([['g1', { id: 'g1', members: { me: { displayName: 'GuildBot' } } }]]) } });
+}
+
+async function runPrivateTurn({ answers = ['<msg reply="#1">hi</msg>'], hot = privateHot(), store = privateStore(), images = fakeImages(), client = guildClient(), guildId = 'g1' } = {}) {
+  const raw = rawMessage({ id: 'm1', authorId: 'u1', authorName: 'Alice', content: 'hey' });
+  const channel = fakeTurnChannel({ id: 'dm1', dm: true, historyMessages: [raw] });
+  const llm = sequenceLlm(answers);
+  const turns = createTurnRunner({ hot, store, llm, calibrator: identityCalibrator(), client, images });
+  const { result, logs } = await withCapturedLogs(() =>
+    turns.runTurn({ channel, guildId, mode: 'reply', trigger: normalizedTrigger(raw), triggerKind: 'private' }),
+  );
+  return { result, logs, channel, llm, store, images, turns };
+}
+
+test('runTurn: a private turn takes guildId from params and reads the private layer of the trigger author', async () => {
+  const { result, channel, store } = await runPrivateTurn();
+
+  assert.equal(result.outcome, 'spoke');
+  assert.deepEqual(store.guildCalls, ['g1']);
+  assert.deepEqual(store.privateCalls, [{ guildId: 'g1', userId: 'u1' }]);
+  assert.equal(channel.sent.length, 1);
+  assert.equal(channel.sent[0].content, 'hi');
+  assert.deepEqual(channel.sent[0].reply, { messageReference: 'm1', failIfNotExists: false }, 'a private reply may quote the trigger');
+});
+
+test('runTurn: a private request carries the private prompt, the private trigger label and the merged profile, no server or neighbours', async () => {
+  const { llm } = await runPrivateTurn();
+  const user = userTextOf(llm.calls[0]);
+
+  assert.ok(user.includes(`Someone called you: Alice, they ${labels.triggers.private}. You are GuildBot.`), 'selfName comes from the served guild');
+  assert.ok(user.includes('PRIVATE_TASK with Alice as GuildBot'));
+  assert.ok(user.includes('PUBLIC_REL') && user.includes('PRIVATE_REL') && user.includes('PRIVATE_DETAIL'));
+  assert.ok(user.includes('attitude: 15 '), 'the attitude is the public and private scores added');
+  assert.ok(user.includes(labels.senses.privateChat));
+  assert.ok(!user.includes('<server>'));
+  assert.ok(!user.includes('<other_channels>'));
+});
+
+test('runTurn: a private turn falls back to the bot user name when the served guild is not cached', async () => {
+  const { llm } = await runPrivateTurn({ client: fakeClient({ guilds: { cache: new Map() } }) });
+  assert.ok(userTextOf(llm.calls[0]).includes('You are Bot.'));
+});
+
+test('runTurn: a private turn may draw (no Attach Files check in a DM), counted for the DM partner', async () => {
+  const { result, channel, images } = await runPrivateTurn({ answers: ['<msg>sure</msg><draw>a cat</draw>'] });
+
+  assert.equal(result.outcome, 'spoke');
+  assert.equal(images.generateCalls.length, 1);
+  assert.equal(images.generateCalls[0].userId, 'u1');
+  assert.equal(images.generateCalls[0].prompt, 'Drawing for GuildBot.\n\na cat');
+  assert.equal(channel.sent.length, 2);
+  assert.equal(channel.sent[1].files.length, 1);
+});
+
+test('runTurn: a guild channel keeps its own guild id even when a guildId param is passed', async () => {
+  const raw = rawMessage({ id: 'm1' });
+  const channel = fakeTurnChannel({ guildId: 'g1', historyMessages: [raw] });
+  const store = fakeStore();
+  const hot = fakeHot();
+  hot.prompts.private = 'PRIVATE_TASK';
+  const turns = createTurnRunner({ hot, store, llm: fakeLlm('<skip/>'), calibrator: identityCalibrator(), client: fakeClient() });
+
+  await turns.runTurn({ channel, guildId: 'other', mode: 'reply', trigger: normalizedTrigger(raw), triggerKind: 'mention' });
+
+  assert.deepEqual(store.guildCalls, ['g1']);
+  assert.equal(store.privateCalls.length, 0, 'a guild turn never reads the private layer');
+});
+
+test('runTurn: a guild turn never carries the private prompt or the private senses line', async () => {
+  const raw = rawMessage({ id: 'm1' });
+  const channel = fakeTurnChannel({ historyMessages: [raw] });
+  const llm = fakeLlm('<skip/>');
+  const hot = fakeHot({ privateMessages: true });
+  hot.prompts.private = 'PRIVATE_TASK';
+  const turns = createTurnRunner({ hot, store: fakeStore(), llm, calibrator: identityCalibrator(), client: fakeClient() });
+
+  await turns.runTurn({ channel, mode: 'reply', trigger: normalizedTrigger(raw), triggerKind: 'mention' });
+
+  const user = llm.calls[0][1].content;
+  assert.ok(!user.includes('PRIVATE_TASK'));
+  assert.ok(!user.includes(labels.senses.privateChat));
+  assert.ok(user.includes(labels.senses.privateAware));
+});
+
+test('runTurn: a channel without a guild and no guildId param throws a clear error and leaves nothing busy', async () => {
+  const raw = rawMessage({ id: 'm1' });
+  const channel = fakeTurnChannel({ id: 'dm1', dm: true, historyMessages: [raw] });
+  const llm = fakeLlm('<msg>hi</msg>');
+  const turns = createTurnRunner({ hot: fakeHot(), store: fakeStore(), llm, calibrator: identityCalibrator(), client: fakeClient() });
+
+  await assert.rejects(
+    turns.runTurn({ channel, mode: 'reply', trigger: normalizedTrigger(raw), triggerKind: 'private' }),
+    /guildId/,
+  );
+  assert.equal(llm.calls.length, 0);
+  assert.equal(turns.isAnyBusy(), false);
+});
+
+// --- limits --------------------------------------------------------------------
+
+function throwingLlm(error) {
+  const calls = [];
+  return {
+    calls,
+    complete: async (messages) => {
+      calls.push(messages);
+      throw error;
+    },
+  };
+}
+
+test('runTurn: a daily request cap or a token cap refusal returns outcome refused with the limit', async () => {
+  for (const [error, limit] of [
+    [Object.assign(new DailyCapError('cap'), { key: 'llm.maxRequestsPerDay', used: 300, cap: 300 }), { key: 'llm.maxRequestsPerDay', used: 300, cap: 300 }],
+    [Object.assign(new TokenLimitError('tokens'), { key: 'llm.maxRequestTokens', used: 51000, cap: 50000 }), { key: 'llm.maxRequestTokens', used: 51000, cap: 50000 }],
+  ]) {
+    const raw = rawMessage({ id: 'm1' });
+    const channel = fakeTurnChannel({ historyMessages: [raw] });
+    const turns = createTurnRunner({ hot: fakeHot(), store: fakeStore(), llm: throwingLlm(error), calibrator: identityCalibrator(), client: fakeClient() });
+    const { result } = await withCapturedLogs(() => turns.runTurn({ channel, mode: 'reply', trigger: normalizedTrigger(raw), triggerKind: 'mention' }));
+
+    assert.deepEqual(result, { outcome: 'refused', limit });
+    assert.equal(channel.sent.length, 0, 'the turn itself posts nothing; the caller decides on the notice');
+  }
+});
+
+test('runTurn: a rail error without limit fields still returns refused, with a null limit', async () => {
+  const raw = rawMessage({ id: 'm1' });
+  const channel = fakeTurnChannel({ historyMessages: [raw] });
+  const turns = createTurnRunner({ hot: fakeHot(), store: fakeStore(), llm: throwingLlm(new DailyCapError('cap')), calibrator: identityCalibrator(), client: fakeClient() });
+  const { result } = await withCapturedLogs(() => turns.runTurn({ channel, mode: 'reply', trigger: normalizedTrigger(raw), triggerKind: 'mention' }));
+
+  assert.deepEqual(result, { outcome: 'refused', limit: null });
+});
+
+function imageCap(reason, key, used, cap) {
+  return Object.assign(new ImageCapError(reason), { key, used, cap });
+}
+
+test('runTurn: a drawing refused by an image cap posts the limit notice as a plain reply and runs no second turn', async () => {
+  for (const [reason, key] of [['daily', 'image.maxPerDay'], ['userDaily', 'image.maxPerUserPerDay']]) {
+    const { result, llm, channel, logs } = await runDrawTurn({
+      answers: ['<msg>on it</msg><draw reply="#1">a cat</draw>', '<msg>should never be asked</msg>'],
+      images: fakeImages({ error: imageCap(reason, key, 3, 3) }),
+    });
+
+    assert.equal(result.outcome, 'spoke');
+    assert.equal(result.drawFailed, undefined);
+    assert.equal(llm.calls.length, 1, 'no drawFailed turn');
+    assert.equal(channel.sent.length, 2);
+    assert.equal(channel.sent[0].content, 'on it');
+    assert.deepEqual(channel.sent[1], {
+      content: fill(labels.limits.notice, { limit: key, used: 3, cap: 3 }),
+      reply: { messageReference: 'm1', failIfNotExists: false },
+      allowedMentions: { parse: [] },
+    });
+    const line = logs.find((l) => l.msg === 'turn: draw refused by a limit');
+    assert.ok(line);
+    assert.equal(line.key, key);
+    assert.equal(logs.some((l) => l.msg === 'turn: draw failed'), false);
+  }
+});
+
+test('runTurn: an image cap notice in a private chat replies to the trigger too', async () => {
+  const { result, llm, channel } = await runPrivateTurn({
+    answers: ['<draw>a cat</draw>'],
+    images: fakeImages({ error: imageCap('userDaily', 'image.maxPerUserPerDay', 2, 2) }),
+  });
+
+  assert.equal(result.drawFailed, undefined);
+  assert.equal(llm.calls.length, 1);
+  assert.equal(channel.sent.length, 1);
+  assert.equal(channel.sent[0].content, fill(labels.limits.notice, { limit: 'image.maxPerUserPerDay', used: 2, cap: 2 }));
+  assert.deepEqual(channel.sent[0].reply, { messageReference: 'm1', failIfNotExists: false });
+  assert.deepEqual(channel.sent[0].allowedMentions, { parse: [] });
+});
+
+test('runTurn: an image cap with no limits.notice label posts nothing and still runs no second turn', async () => {
+  const hot = drawHot();
+  hot.prompts.labels = { ...labels, limits: undefined };
+  const { result, llm, channel } = await runDrawTurn({
+    answers: ['<msg>on it</msg><draw>a cat</draw>', '<msg>no</msg>'],
+    hot,
+    images: fakeImages({ error: imageCap('daily', 'image.maxPerDay', 5, 5) }),
+  });
+
+  assert.equal(result.drawFailed, undefined);
+  assert.equal(llm.calls.length, 1);
+  assert.deepEqual(channel.sent.map((p) => p.content), ['on it']);
+});
+
+test('runTurn: an image cap on a follow-up turn posts the notice without quoting the trigger', async () => {
+  const raw = rawMessage({ id: 'm1' });
+  const channel = fakeTurnChannel({ historyMessages: [raw] });
+  const turns = createTurnRunner({
+    hot: drawHot(),
+    store: fakeStore(),
+    llm: sequenceLlm(['<draw reply="#1">a cat</draw>']),
+    calibrator: identityCalibrator(),
+    client: fakeClient(),
+    images: fakeImages({ error: imageCap('daily', 'image.maxPerDay', 5, 5) }),
+  });
+  await withCapturedLogs(() => turns.runTurn({ channel, mode: 'reply', trigger: normalizedTrigger(raw), triggerKind: 'followUp' }));
+
+  assert.equal(channel.sent.length, 1);
+  assert.equal(channel.sent[0].reply, undefined);
+});
+
+test('runTurn: an image cap notice while dry-run is on is logged and mirrored, never sent', async () => {
+  const mirrorSent = [];
+  const client = fakeClient({ channels: { fetch: async () => ({ send: async (payload) => mirrorSent.push(payload) }) } });
+  const hot = drawHot({}, {}, { dryRunChannelId: 'mirror1' });
+  const images = fakeImages();
+  // The owner switches dry-run on while the picture is being made: read at the moment of use.
+  images.generate = async () => {
+    hot.config.features.dryRun = true;
+    throw imageCap('daily', 'image.maxPerDay', 5, 5);
+  };
+  const { result, channel, logs } = await runDrawTurn({ answers: ['<msg>on it</msg><draw>a cat</draw>'], hot, images, client });
+
+  assert.equal(result.drawFailed, undefined);
+  assert.deepEqual(channel.sent.map((p) => p.content), ['on it'], 'the notice is never sent to the channel');
+  const line = logs.find((l) => l.msg === 'dry-run: would notify limit');
+  assert.ok(line);
+  assert.equal(line.key, 'image.maxPerDay');
+  assert.equal(line.used, 5);
+  assert.equal(line.cap, 5);
+  assert.equal(mirrorSent.length, 1);
+  assert.ok(mirrorSent[0].content.endsWith(fill(labels.limits.notice, { limit: 'image.maxPerDay', used: 5, cap: 5 })));
+  assert.deepEqual(mirrorSent[0].allowedMentions, { parse: [] });
+});
+
+test('runTurn: a generation failure (not a cap) still hands off to the drawFailed turn', async () => {
+  const { result, llm, channel } = await runDrawTurn({
+    answers: ['<draw>a cat</draw>', '<msg>it failed</msg>'],
+    images: fakeImages({ error: new ImageGenError('timeout') }),
+  });
+
+  assert.equal(result.drawFailed, 'timeout');
+  assert.equal(llm.calls.length, 2);
+  assert.deepEqual(channel.sent.map((p) => p.content), ['it failed']);
+});
+
+test('runTurn: the drawFailed turn of a private chat keeps the guildId', async () => {
+  const { result, llm, store } = await runPrivateTurn({
+    answers: ['<draw>a cat</draw>', '<msg>it failed</msg>'],
+    images: fakeImages({ error: new ImageGenError('moderation') }),
+  });
+
+  assert.equal(result.drawFailed, 'moderation');
+  assert.equal(llm.calls.length, 2);
+  assert.deepEqual(store.guildCalls, ['g1', 'g1']);
+  assert.ok(userTextOf(llm.calls[1]).includes(fill(labels.triggers.drawFailed, { reason: labels.draw.reasons.moderation })));
 });

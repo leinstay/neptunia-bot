@@ -4,7 +4,7 @@
 // fixtures shaped just enough for normalizeMessage to read.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { normalizeMessage, fetchTextPreview, withTextPreviews, fetchHistory, fetchHistoryWindow, canAttach } from '../src/discord/collect.js';
+import { normalizeMessage, fetchTextPreview, withTextPreviews, fetchHistory, fetchHistoryWindow, canAttach, canSend, fetchNeighbors } from '../src/discord/collect.js';
 import { MessageReferenceType, PermissionFlagsBits } from 'discord.js';
 import { videoUrlCacheKey } from '../src/discord/video-sites.js';
 
@@ -598,4 +598,34 @@ test('canAttach: false without the bot member, in a channel it cannot view, or w
   assert.equal(canAttach(permChannel({ granted: all, me: null })), false);
   assert.equal(canAttach(permChannel({ granted: all, viewable: false })), false);
   assert.equal(canAttach(permChannel({ granted: all, permissionsFor: () => null })), false);
+});
+
+// A private (DM) channel has no guild: no member permissions to resolve, no neighbours.
+function dmChannel() {
+  return {
+    id: 'dm1',
+    guild: null,
+    permissionsFor: () => {
+      throw new Error('a DM channel has no member permissions');
+    },
+  };
+}
+
+test('canSend: true for a channel without a guild (a DM)', () => {
+  assert.equal(canSend(dmChannel()), true);
+});
+
+test('canAttach: true for a channel without a guild (a DM)', () => {
+  assert.equal(canAttach(dmChannel()), true);
+});
+
+test('canSend: still resolved through the bot member in a guild channel', () => {
+  assert.equal(canSend(permChannel({ granted: [PermissionFlagsBits.SendMessages] })), true);
+  assert.equal(canSend(permChannel({ granted: [] })), false);
+  assert.equal(canSend(permChannel({ granted: [PermissionFlagsBits.SendMessages], me: null })), false);
+});
+
+test('fetchNeighbors: a channel without a guild (a DM) has no neighbours', async () => {
+  const config = { context: { neighborMessages: 5, neighborMaxAgeMinutes: 60, neighborMaxChannels: 8 }, bot: {} };
+  assert.deepEqual(await fetchNeighbors(dmChannel(), config, 'self-id', 1000), []);
 });

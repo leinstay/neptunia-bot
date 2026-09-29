@@ -1891,3 +1891,116 @@ test('buildRequest: a drawFailed reason without a label is passed through as is'
   const request = buildRequest(baseInput({ history: [trigger], trigger, triggerKind: 'drawFailed', drawReason: 'quux' }));
   assert.ok(request.messages[1].content.includes(fill(labels.triggers.drawFailed, { reason: 'quux' })));
 });
+
+// --- private chat (privateChat) ------------------------------------------------
+
+function privateScene(overrides = {}) {
+  const trigger = makeMessage(1, NOW - MIN, { authorId: 'u1', authorName: 'Alice' });
+  return baseInput({
+    history: [trigger],
+    trigger,
+    triggerKind: 'private',
+    prompts: fakePrompts({ private: 'PRIVATE_TASK for {{name}} with {{author}}' }),
+    privateChat: { userId: 'u1' },
+    interlocutor: {
+      id: 'u1',
+      names: ['Alice'],
+      relationship: 'PUBLIC_REL',
+      details: [{ id: 1, text: 'PUBLIC_DETAIL', weight: 1 }],
+      affinity: { score: 10, reason: 'public reason', history: [] },
+    },
+    privateProfile: {
+      relationship: 'PRIVATE_REL',
+      details: [{ id: 1, text: 'PRIVATE_DETAIL', weight: 1 }],
+      affinity: { score: 5, reason: 'private reason', history: [] },
+    },
+    channels: [{ id: 'c1', name: 'general', lastMessageAt: NOW, days: {} }],
+    currentChannelId: 'c1',
+    neighbors: [{ channelId: 'c1', channelName: 'general', messages: [makeMessage(9, NOW - 5 * MIN)] }],
+    ...overrides,
+  });
+}
+
+test('buildRequest: privateChat omits <server> and <other_channels>, even with channels and neighbours given', () => {
+  const user = buildRequest(privateScene()).messages[1].content;
+  assert.ok(!user.includes('<server>'));
+  assert.ok(!user.includes('<other_channels>'));
+  // The same input without privateChat renders both.
+  const publicUser = buildRequest(privateScene({ privateChat: null })).messages[1].content;
+  assert.ok(publicUser.includes('<server>'));
+  assert.ok(publicUser.includes('<other_channels>'));
+});
+
+test('buildRequest: privateChat appends the filled prompts.private after the mode prompt', () => {
+  const user = buildRequest(privateScene()).messages[1].content;
+  const task = user.slice(user.indexOf('<task>'));
+  assert.ok(task.includes(`Called by Alice, they ${labels.triggers.private}.`), '{{trigger}} comes from labels.triggers.private');
+  assert.ok(task.includes('PRIVATE_TASK for Nept with Alice'));
+  assert.ok(task.indexOf('Called by Alice') < task.indexOf('PRIVATE_TASK'));
+});
+
+test('buildRequest: without privateChat prompts.private is never appended', () => {
+  const user = buildRequest(privateScene({ privateChat: null })).messages[1].content;
+  assert.ok(!user.includes('PRIVATE_TASK'));
+});
+
+test('buildRequest: privateChat with no prompts.private leaves the task as the mode prompt alone', () => {
+  const prompts = fakePrompts();
+  const user = buildRequest(privateScene({ prompts })).messages[1].content;
+  const task = /<task>\n([\s\S]*?)\n<\/task>/.exec(user)[1];
+  assert.equal(task, `Called by Alice, they ${labels.triggers.private}. Answer #1 as Nept. Target: #1.`);
+});
+
+test('buildRequest: privateChat renders the interlocutor as the public and private profiles merged', () => {
+  const user = buildRequest(privateScene()).messages[1].content;
+  const people = user.slice(user.indexOf('<people>'), user.indexOf('</people>'));
+  assert.ok(people.includes('PUBLIC_REL'));
+  assert.ok(people.includes('PRIVATE_REL'));
+  assert.ok(people.includes('PUBLIC_DETAIL'));
+  assert.ok(people.includes('PRIVATE_DETAIL'), 'colliding detail ids of the two layers both render');
+  assert.ok(people.includes('attitude: 15 '), 'the attitude is the public and private scores added');
+  assert.ok(people.includes('private reason'));
+});
+
+test('buildRequest: without privateChat a passed privateProfile is ignored -- the interlocutor stays public', () => {
+  const user = buildRequest(privateScene({ privateChat: null })).messages[1].content;
+  assert.ok(user.includes('PUBLIC_REL'));
+  assert.ok(!user.includes('PRIVATE_REL'));
+  assert.ok(!user.includes('PRIVATE_DETAIL'));
+  assert.ok(user.includes('attitude: 10 '));
+});
+
+test('buildRequest: privateChat keeps other profiles public-only', () => {
+  const other = { id: 'u2', names: ['Bob'], character: 'BOB_CHARACTER', relationship: 'BOB_REL' };
+  const history = [makeMessage(2, NOW - 2 * MIN, { authorId: 'u2', authorName: 'Bob' }), makeMessage(1, NOW - MIN, { authorId: 'u1', authorName: 'Alice' })];
+  const user = buildRequest(privateScene({ history, trigger: history[1], otherProfiles: [other] })).messages[1].content;
+  assert.ok(user.includes('BOB_CHARACTER'));
+  assert.ok(!user.slice(user.indexOf('## Bob')).split('\n\n')[0].includes('PRIVATE_REL'));
+});
+
+test('buildRequest: <senses> carries senses.privateChat in a private chat, never senses.privateAware', () => {
+  for (const privateMessages of [true, false, undefined]) {
+    const config = fakeConfig({ features: { privateMessages } });
+    const senses = sensesOf(buildRequest(privateScene({ config })));
+    assert.ok(senses.includes(labels.senses.privateChat));
+    assert.ok(!senses.includes(labels.senses.privateAware));
+  }
+});
+
+test('buildRequest: <senses> carries senses.privateAware outside a private chat only when features.privateMessages is true', () => {
+  const on = sensesOf(buildRequest(baseInput({ config: fakeConfig({ features: { privateMessages: true } }) })));
+  assert.ok(on.includes(labels.senses.privateAware));
+  assert.ok(!on.includes(labels.senses.privateChat));
+  for (const privateMessages of [false, undefined, 'yes']) {
+    const senses = sensesOf(buildRequest(baseInput({ config: fakeConfig({ features: { privateMessages } }) })));
+    assert.ok(!senses.includes(labels.senses.privateAware));
+    assert.ok(!senses.includes(labels.senses.privateChat));
+  }
+});
+
+test('buildRequest: an older labels.json without the private senses keys renders no extra line', () => {
+  const olderLabels = { ...labels, senses: { ...labels.senses, privateChat: undefined, privateAware: undefined } };
+  const senses = sensesOf(buildRequest(privateScene({ prompts: fakePrompts({ labels: olderLabels, private: 'P' }) })));
+  assert.ok(!senses.includes('undefined'));
+  assert.equal(senses, sensesOf(buildRequest(baseInput({ prompts: fakePrompts({ labels: olderLabels }) }))));
+});

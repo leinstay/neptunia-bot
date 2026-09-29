@@ -10,7 +10,9 @@
 //   6. memory about other people present in the transcript
 //   7. neighbouring channels
 // The rendered order is different: reference material first, the chat and the
-// task last, where the model attends best.
+// task last, where the model attends best. A private chat (`privateChat`)
+// drops the server map and the neighbouring channels and sees its partner
+// through the public and private profiles merged (src/behavior/private.js).
 
 import { fitSections } from '../llm/budget.js';
 import { estimateTokens } from '../llm/tokens.js';
@@ -23,6 +25,7 @@ import { matchLore } from '../memory/lore.js';
 import { channelActivity, renderChannel } from '../memory/channels.js';
 import { selectPictures, mediaProxyUrl } from '../discord/media.js';
 import { fromTokens, occursAsWholeWord } from '../memory/mentions.js';
+import { mergeProfiles } from './private.js';
 
 const TAG_OVERHEAD = 60;
 
@@ -552,8 +555,10 @@ function renderLookup(lookup, labels) {
  * deployment's labels.json never breaks — the block is simply omitted.
  * `drawQuota` (`{ spent, userSpent }` from the image client's quota(), or
  * undefined when no image client is wired) picks the drawing line.
+ * `privateChat` adds `senses.privateChat`; outside a private chat,
+ * `features.privateMessages === true` adds `senses.privateAware` instead.
  */
-function renderSenses(config, labels, { searchAvailable = false, drawQuota } = {}) {
+function renderSenses(config, labels, { searchAvailable = false, drawQuota, privateChat = false } = {}) {
   const senses = labels.senses;
   if (!senses) return '';
   const visionOn = config.features?.vision !== false;
@@ -599,6 +604,10 @@ function renderSenses(config, labels, { searchAvailable = false, drawQuota } = {
     lines.push(drawQuota.spent ? senses.drawSpent : drawQuota.userSpent ? senses.drawSpentUser : senses.draw);
   }
   lines.push(senses.files);
+  // Private chat: the one line for this conversation, or -- on the server,
+  // with the feature on -- the rule about what was said in private.
+  if (privateChat) lines.push(senses.privateChat);
+  else if (config.features?.privateMessages === true) lines.push(senses.privateAware);
   return lines.filter(Boolean).join('\n');
 }
 
@@ -752,7 +761,13 @@ function splitPeople(otherProfiles, candidateProfiles, history, trigger, exclude
  * @param {object|null} input.trigger      Normalized message that called the persona (reply mode).
  * @param {string|null} input.triggerKind
  * @param {object} input.guildMemory
- * @param {object|null} input.interlocutor Profile of the trigger's author.
+ * @param {object|null} input.interlocutor Profile of the trigger's author (the public one).
+ * @param {{ userId: string }|null} [input.privateChat]  Set for a private (DM) turn: the
+ *   interlocutor renders as `mergeProfiles(interlocutor, privateProfile)`, `<server>` and
+ *   `<other_channels>` are omitted, `prompts.private` (when present) is appended to the task
+ *   text (same placeholders as `prompts[mode]`), and `<senses>` carries `senses.privateChat`.
+ * @param {object|null} [input.privateProfile]  The DM partner's private layer
+ *   (store.getPrivate); read only when `privateChat` is set.
  * @param {object[]} input.otherProfiles   Profiles of other people in the transcript, most relevant first.
  * @param {object[]} [input.candidateProfiles]  Every member profile known in the guild
  *   (store.listUserProfiles), scanned to pull a silent member into `<people>` by a
@@ -784,6 +799,8 @@ function splitPeople(otherProfiles, candidateProfiles, history, trigger, exclude
 export function buildRequest(input) {
   const { config, prompts, calibrator, mode, forced = false, now, selfName, history, neighbors, trigger, triggerKind, channels = [], currentChannelId = null, descriptions, videos, reads, lookup = null } = input;
   const labels = requireLabels(prompts);
+  const privateChat = Boolean(input.privateChat);
+  const interlocutor = privateChat ? mergeProfiles(input.interlocutor, input.privateProfile) : input.interlocutor;
   const nameOf = typeof input.nameOf === 'function' ? input.nameOf : () => null;
   const { timezone } = config.bot;
   const relationships = config.features?.relationships !== false;
@@ -836,11 +853,19 @@ export function buildRequest(input) {
   // `<skip/>` is not the expected outcome this time -- optional, missing
   // prompts.forced (an older/undeployed labels layer) leaves the task as-is.
   const forcedText = forced && typeof prompts.forced === 'string' && prompts.forced.trim() ? fillPromptTemplate(prompts.forced, taskValues) : '';
-  const task = forcedText ? `${baseTask}\n\n${forcedText}` : baseTask;
+  // Private chat: prompts.private follows the mode prompt; a missing file adds nothing.
+  const privateText =
+    privateChat && typeof prompts.private === 'string' && prompts.private.trim() ? fillPromptTemplate(prompts.private, taskValues) : '';
+  const task = [baseTask, privateText, forcedText].filter(Boolean).join('\n\n');
 
-  const sensesText = renderSenses(config, labels, { searchAvailable: input.searchAvailable === true, drawQuota: input.drawQuota });
+  const sensesText = renderSenses(config, labels, {
+    searchAvailable: input.searchAvailable === true,
+    drawQuota: input.drawQuota,
+    privateChat,
+  });
 
-  const neighborItems = neighbors.map(
+  // A private chat has no neighbouring channels (and no server map, below).
+  const neighborItems = (privateChat ? [] : neighbors).map(
     ({ channelName, messages }) =>
       `# ${channelName}\n${formatTranscript(messages, { ...formatOptions, maxChars: 300 })
         .map((item) => item.text.replace(/^#\d+ /gm, ''))
@@ -863,7 +888,7 @@ export function buildRequest(input) {
     input.candidateProfiles,
     history,
     trigger,
-    input.interlocutor?.id,
+    interlocutor?.id,
     config.context.askedAboutProfiles,
     config.memory?.maxAliases,
     config.memory?.aliasHalfLifeDays,
@@ -877,7 +902,7 @@ export function buildRequest(input) {
         name: 'interlocutor',
         cap: caps.interlocutor,
         items: [
-          renderProfile(input.interlocutor, labels, {
+          renderProfile(interlocutor, labels, {
             interlocutor: true,
             relationships,
             episodes: episodesOpt,
@@ -921,16 +946,18 @@ export function buildRequest(input) {
         name: 'server',
         cap: caps.server ?? 2500,
         keep: 'first',
-        items: serverItems(
-          channels,
-          currentChannelId,
-          neighbors.map((n) => n.channelId).filter(Boolean),
-          history,
-          now,
-          config.context.channelActivity,
-          labels,
-          nameOf,
-        ),
+        items: privateChat
+          ? []
+          : serverItems(
+              channels,
+              currentChannelId,
+              neighbors.map((n) => n.channelId).filter(Boolean),
+              history,
+              now,
+              config.context.channelActivity,
+              labels,
+              nameOf,
+            ),
       },
       { name: 'chat', keep: 'newest', items: chatItems.map((item) => item.text) },
       {

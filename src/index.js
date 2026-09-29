@@ -5,7 +5,7 @@
 // src/behavior, src/memory, src/llm and src/discord.
 
 import path from 'node:path';
-import { Client, Events, GatewayIntentBits } from 'discord.js';
+import { Client, Events, GatewayIntentBits, Partials } from 'discord.js';
 
 import { ROOT_DIR, env, loadDotEnv, need } from './config.js';
 import { createHot } from './hot.js';
@@ -89,8 +89,17 @@ const llm = createLlm({ apiKey: openrouterKey, getConfig: () => hot.config, cali
 // The persona's drawings (features.imageGeneration): its own daily rails, counted on the same state.
 const images = createImageGen({ apiKey: openrouterKey, getConfig: () => hot.config, state: store.state });
 
+// Direct messages are received regardless of features.privateMessages (the
+// switch is hot, intents are not); a DM channel arrives uncached, hence the
+// Channel partial.
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent],
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent,
+    GatewayIntentBits.DirectMessages,
+  ],
+  partials: [Partials.Channel],
 });
 
 // This instance serves exactly one Discord server. `instance.guildId` is set

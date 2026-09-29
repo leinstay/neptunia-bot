@@ -289,7 +289,13 @@ function canRead(channel) {
   return channel.permissionsFor(me)?.has(PermissionFlagsBits.ReadMessageHistory) ?? false;
 }
 
+/**
+ * Whether the bot may send messages in `channel`. A channel without a guild
+ * (a private chat) has no member permissions: always yes.
+ * @returns {boolean}
+ */
 export function canSend(channel) {
+  if (!channel.guild) return true;
   const me = channel.guild.members.me;
   if (!me || !channel.viewable) return false;
   return channel.permissionsFor(me)?.has(PermissionFlagsBits.SendMessages) ?? false;
@@ -298,10 +304,12 @@ export function canSend(channel) {
 /**
  * Whether the bot may attach files in `channel` (a drawing is posted as one).
  * Resolved like canSend: no bot member, an unviewable channel or no
- * permissions for the member count as no.
+ * permissions for the member count as no; a channel without a guild (a
+ * private chat) is always yes.
  * @returns {boolean}
  */
 export function canAttach(channel) {
+  if (!channel.guild) return true;
   const me = channel.guild.members.me;
   if (!me || !channel.viewable) return false;
   return channel.permissionsFor(me)?.has(PermissionFlagsBits.AttachFiles) ?? false;
@@ -389,10 +397,12 @@ export function lastActivity(channel) {
 /**
  * Up to `neighborMessages` recent messages from each neighbouring channel that
  * saw activity within `neighborMaxAgeMinutes`. Channels are pre-filtered by the
- * snowflake of their last message, so quiet channels cost no API calls.
+ * snowflake of their last message, so quiet channels cost no API calls. A
+ * channel without a guild (a private chat) has no neighbours.
  * @returns {Promise<{ channelId: string, channelName: string, messages: object[] }[]>}
  */
 export async function fetchNeighbors(channel, config, selfId, now = Date.now()) {
+  if (!channel.guild) return [];
   const { neighborMessages, neighborMaxAgeMinutes, neighborMaxChannels } = config.context;
   const minTs = now - neighborMaxAgeMinutes * 60_000;
 

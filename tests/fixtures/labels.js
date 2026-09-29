@@ -78,6 +78,8 @@ export const labels = {
     draw: 'you can hand a scene to a drawing sub-process; the picture is posted after your words',
     drawSpent: 'the daily picture quota is spent, no drawing until tomorrow',
     drawSpentUser: 'this person has used up their pictures for today',
+    privateChat: 'this is a private chat with one person, it stays here',
+    privateAware: 'some people write to you privately; never repeat any of it here',
   },
   tempo: {
     counts: 'messages in the last 10 min: {last10min}, last hour: {lastHour}, last day: {lastDay}',
@@ -160,6 +162,7 @@ export const labels = {
     name: 'mentioned you by name, without a tag',
     followUp: 'continued the conversation with you without tagging you',
     drawFailed: 'asked for a picture, the drawing failed: {reason}',
+    private: 'wrote to you privately',
   },
   draw: {
     reasons: {
@@ -176,5 +179,8 @@ export const labels = {
   warmup: {
     ownMark: '[own] ',
     contextMark: '[ctx] ',
+  },
+  limits: {
+    notice: 'limit reached ({limit}, {used}/{cap})',
   },
 };

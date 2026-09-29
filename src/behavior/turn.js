@@ -2,7 +2,8 @@
 // the model → act in Discord like a person would (pause, typing indicator
 // proportional to the text, several short messages in a row, reactions).
 // Used for answering a call ('reply') and for spontaneous turns
-// ('interject' / 'initiate').
+// ('interject' / 'initiate'), in a server channel or in a private chat (a
+// channel without a guild, served on behalf of the one pinned guild).
 
 import { canAttach, fetchHistory, fetchNeighbors, withTextPreviews } from '../discord/collect.js';
 import { buildDrawPrompt, buildRequest } from './prompt.js';
@@ -10,6 +11,7 @@ import { classifierTextModel } from './mention.js';
 import { parseOutput } from '../llm/parse.js';
 import { DailyCapError, TokenLimitError } from '../llm/openrouter.js';
 import { ImageCapError, ImageGenError } from '../llm/images.js';
+import { limitNotice, limitOf } from './limits.js';
 import {
   collectPictures,
   collectEmojiItems,
@@ -307,7 +309,7 @@ export function createTurnRunner({
    * react, no artificial timing. Logs one line per would-be action and, when
    * `bot.dryRunChannelId` is configured, mirrors it there in plain language.
    */
-  async function dryAct(channel, parsed, idByIndex, history, mode, triggerKind = null) {
+  async function dryAct(channel, parsed, idByIndex, history, mode, triggerKind = null, selfName = client.user.username) {
     const channelName = channel.name ?? null;
     const dryRunChannelId = hot.config.bot?.dryRunChannelId || '';
     // A follow-up turn never posts as a Discord reply, in this mirror
@@ -350,7 +352,7 @@ export function createTurnRunner({
       // The FULL image prompt (prompt files + the persona's request), so the
       // owner can check the prompt files in dry-run. Same deliberate exception:
       // the persona's own output, dry-run only. Nothing is generated.
-      const prompt = drawPromptFor(channel, parsed.draw);
+      const prompt = drawPromptFor(selfName, parsed.draw);
       log.info('dry-run: would draw', { channel: channel.id, channelName, mode, self, prompt });
       // A full prompt outgrows one Discord message: mirrored in numbered parts.
       const header = `[dry-run] #${channelName} · ${mode} · draw${self ? ' (self)' : ''}`;
@@ -362,14 +364,47 @@ export function createTurnRunner({
     }
   }
 
+  /**
+   * The persona's display name in the served guild: `channel.guild` for a
+   * server channel, the pinned guild (`guildId`) for a private chat, the bot
+   * user's name when neither resolves.
+   */
+  function selfNameFor(channel, guildId) {
+    const guild = channel.guild ?? client.guilds?.cache?.get(guildId);
+    return guild?.members?.me?.displayName ?? client.user.username;
+  }
+
   /** The image prompt for `draw` (parsed.draw): prompts read now, the request clamped to image.maxPromptChars. */
-  function drawPromptFor(channel, draw) {
+  function drawPromptFor(selfName, draw) {
     return buildDrawPrompt({
       prompts: hot.prompts,
-      selfName: channel.guild.members.me?.displayName ?? client.user.username,
+      selfName,
       request: clampChars(draw.text, hot.config.image?.maxPromptChars),
       self: draw.self === true,
     });
+  }
+
+  /**
+   * The limit notice for a refused drawing (`labels.limits.notice`, read now):
+   * one plain message, no mentions, quoting the trigger unless this is a
+   * follow-up (which never posts as a Discord reply). In dry-run (read now)
+   * it is logged and mirrored instead. A missing label sends nothing.
+   */
+  async function notifyLimit(channel, limit, trigger, isFollowUp) {
+    const text = limit ? limitNotice(hot.prompts.labels, limit) : '';
+    if (!text) return;
+    if (hot.config.features?.dryRun === true) {
+      log.info('dry-run: would notify limit', { channel: channel.id, key: limit.key, used: limit.used, cap: limit.cap });
+      await mirrorDryRun(hot.config.bot?.dryRunChannelId || '', `[dry-run] #${channel.name ?? null} · limit`, text);
+      return;
+    }
+    const replyId = !isFollowUp ? (trigger?.id ?? null) : null;
+    await channel.send({
+      content: text,
+      reply: replyId ? { messageReference: replyId, failIfNotExists: false } : undefined,
+      allowedMentions: { parse: [] },
+    });
+    lastPostAt.set(channel.id, Date.now());
   }
 
   /**
@@ -377,14 +412,16 @@ export function createTurnRunner({
    * read now) with the request clamped to `image.maxPromptChars`, the avatar as
    * reference for a picture the persona is in (`image.reference: 'avatar'`),
    * then one generation and one upload. No typing indicator while it works.
-   * Resolves `{}` when posted, `{ drawFailed: reason }` otherwise (a rail or
+   * Resolves `{}` when posted, `{ drawFailed: reason }` otherwise (a
    * generation failure keeps its reason, `empty` counts as `error`; anything
-   * else, the upload included, is `error`).
+   * else, the upload included, is `error`). A refusal by an image cap
+   * (`ImageCapError`) posts the limit notice instead and resolves `{}`: the
+   * senses line already told the persona, the notice tells the requester.
    */
-  async function draw(channel, parsed, idByIndex, trigger, isFollowUp) {
+  async function draw(channel, parsed, idByIndex, trigger, isFollowUp, selfName = client.user.username) {
     const imageCfg = hot.config.image ?? {};
     const self = parsed.draw.self === true;
-    const prompt = drawPromptFor(channel, parsed.draw);
+    const prompt = drawPromptFor(selfName, parsed.draw);
     try {
       let reference = null;
       if (self && imageCfg.reference === 'avatar') {
@@ -424,7 +461,17 @@ export function createTurnRunner({
       });
       return {};
     } catch (err) {
-      if (err instanceof ImageCapError || err instanceof ImageGenError) {
+      if (err instanceof ImageCapError) {
+        const limit = limitOf(err);
+        log.info('turn: draw refused by a limit', { channel: channel.id, key: limit?.key ?? null, used: limit?.used ?? null, cap: limit?.cap ?? null });
+        try {
+          await notifyLimit(channel, limit, trigger, isFollowUp);
+        } catch (sendErr) {
+          log.warn('turn: limit notice failed', { channel: channel.id, error: sendErr });
+        }
+        return {};
+      }
+      if (err instanceof ImageGenError) {
         return { drawFailed: err.reason === 'empty' ? 'error' : err.reason };
       }
       log.warn('turn: draw error', { channel: channel.id, error: err });
@@ -436,7 +483,7 @@ export function createTurnRunner({
    * Post the turn for real. Resolves `{ drawFailed }` from draw() when the
    * persona's picture could not be posted, `{}` otherwise.
    */
-  async function act(channel, parsed, idByIndex, history, startedAt = Date.now(), triggerKind = null, trigger = null) {
+  async function act(channel, parsed, idByIndex, history, startedAt = Date.now(), triggerKind = null, trigger = null, selfName = client.user.username) {
     const cfg = hot.config.typing;
     const typingOn = hot.config.features?.typingSimulation !== false;
     // A follow-up turn (triggerKind: 'followUp') is its own trigger kind
@@ -483,7 +530,7 @@ export function createTurnRunner({
     }
 
     // The picture comes last, once every message is out.
-    if (parsed.draw) return draw(channel, parsed, idByIndex, trigger, isFollowUp);
+    if (parsed.draw) return draw(channel, parsed, idByIndex, trigger, isFollowUp, selfName);
     return {};
   }
 
@@ -690,6 +737,8 @@ export function createTurnRunner({
   /**
    * @param {object} params
    * @param {import('discord.js').TextBasedChannel} params.channel
+   * @param {string} [params.guildId]  The served guild, used when `channel` has no guild (a
+   *   private chat); a server channel always uses its own guild. Neither -> throws.
    * @param {'reply'|'interject'|'initiate'|'auto'} params.mode  'auto' lets `chooseMode` pick
    *   between interject/initiate/nothing once the history is known (spontaneous turns).
    * @param {object} [params.trigger]      Normalized message that called the persona.
@@ -698,13 +747,15 @@ export function createTurnRunner({
    * @param {boolean} [params.forced]  True for an owner-forced turn (`/nep interject`, `/nep
    *   initiate`) -- passed straight through to buildRequest, which appends prompts.forced (when
    *   present) to the task text so the model knows `<skip/>` is not the expected outcome this time.
-   * @returns {Promise<{ outcome: string, mode?: string, dryRun?: boolean, drawFailed?: string }>}
-   *   `drawFailed` (the reason) when the persona's picture could not be posted.
+   * @returns {Promise<{ outcome: string, mode?: string, dryRun?: boolean, drawFailed?: string,
+   *   limit?: { key: string, used: number, cap: number }|null }>}
+   *   `drawFailed` (the reason) when the persona's picture could not be posted; `limit` on
+   *   `outcome: 'refused'` (a request or token cap), for the caller's limit notice.
    */
   async function runTurn(params) {
     const first = await runTurnOnce(params);
     if (!first.drawFailed) return first;
-    const { channel, trigger = null } = params;
+    const { channel, guildId, trigger = null } = params;
     // A failed picture someone asked for gets its own turn, started only once
     // the first one has fully returned (and freed the channel), with the
     // reason in the trigger label; its own <draw> is dropped. The first turn
@@ -715,6 +766,7 @@ export function createTurnRunner({
       try {
         const second = await runTurnOnce({
           channel,
+          guildId,
           mode: 'reply',
           trigger,
           triggerKind: 'drawFailed',
@@ -756,7 +808,11 @@ export function createTurnRunner({
    * `drawReason`, and `holdIdle` -- leave the idle notifications to the
    * caller (runTurn fires them once the second turn is over).
    */
-  async function runTurnOnce({ channel, mode, trigger = null, triggerKind = null, chooseMode = null, forced = false, drawReason = null, holdIdle = false }) {
+  async function runTurnOnce({ channel, guildId: guildIdParam = null, mode, trigger = null, triggerKind = null, chooseMode = null, forced = false, drawReason = null, holdIdle = false }) {
+    // A server channel carries its guild; a private chat is served on behalf of the pinned one.
+    const guildId = channel.guild?.id ?? guildIdParam;
+    if (!guildId) throw new Error('runTurn: a channel without a guild needs a guildId');
+    const isPrivate = !channel.guild;
     // Set when this turn hands off to a drawFailed turn: runTurn notifies after it.
     let handOff = false;
     // /nep pause: the owner is editing data/ by hand -- no new turn may
@@ -779,7 +835,7 @@ export function createTurnRunner({
       const features = config.features ?? {};
       const memoryOn = features.memory !== false;
       const selfId = client.user.id;
-      const guildId = channel.guild.id;
+      const selfName = selfNameFor(channel, guildId);
       const now = Date.now();
       const startedAt = now;
 
@@ -841,7 +897,6 @@ export function createTurnRunner({
         // features.videoRewatch (a missing key counts as on).
         if (trigger && features.videoRewatch !== false && typeof describer.rewatchVideo === 'function') {
           try {
-            const selfName = channel.guild.members.me?.displayName ?? client.user.username;
             await maybeRewatch({
               config,
               guildId,
@@ -883,7 +938,7 @@ export function createTurnRunner({
               config,
               guildId,
               channelId: channel.id,
-              selfName: channel.guild.members.me?.displayName ?? client.user.username,
+              selfName,
               history,
               trigger,
               descriptions,
@@ -896,7 +951,8 @@ export function createTurnRunner({
         }
       }
 
-      const neighbors = await fetchNeighbors(channel, config, selfId, now);
+      // A private chat has no neighbouring channels.
+      const neighbors = isPrivate ? [] : await fetchNeighbors(channel, config, selfId, now);
       // Drawing (features.imageGeneration, a missing key counts as on) needs the image client
       // and Attach Files here; a drawFailed turn answers the failure and never draws again.
       const drawOn = Boolean(images) && features.imageGeneration !== false && triggerKind !== 'drawFailed' && canAttach(channel);
@@ -908,13 +964,16 @@ export function createTurnRunner({
         mode: finalMode,
         forced,
         now,
-        selfName: channel.guild.members.me?.displayName ?? client.user.username,
+        selfName,
         history,
         neighbors,
         trigger,
         triggerKind,
         guildMemory: memoryOn ? store.getGuild(guildId) : {},
         interlocutor: memoryOn && trigger ? store.getUser(guildId, trigger.authorId) : null,
+        // A private chat: the partner's private layer joins their public profile (only there).
+        privateChat: isPrivate ? { userId: trigger?.authorId ?? null } : null,
+        privateProfile: isPrivate && memoryOn && trigger ? store.getPrivate(guildId, trigger.authorId) : null,
         otherProfiles: memoryOn
           ? pickOtherProfiles(store, guildId, history, trigger?.authorId, config.context.otherProfiles)
           : [],
@@ -1012,17 +1071,17 @@ export function createTurnRunner({
       // top of this turn: unlike the other switches this one defaults to OFF,
       // and whether to actually post is the very last decision of a turn.
       if (hot.config.features?.dryRun === true) {
-        await dryAct(channel, parsed, request.idByIndex, history, finalMode, triggerKind);
+        await dryAct(channel, parsed, request.idByIndex, history, finalMode, triggerKind, selfName);
         return { outcome: 'spoke', mode: finalMode, dryRun: true };
       }
-      const acted = await act(channel, parsed, request.idByIndex, history, startedAt, triggerKind, trigger);
+      const acted = await act(channel, parsed, request.idByIndex, history, startedAt, triggerKind, trigger, selfName);
       if (!acted.drawFailed) return { outcome: 'spoke', mode: finalMode };
       handOff = Boolean(trigger);
       return { outcome: 'spoke', mode: finalMode, drawFailed: acted.drawFailed };
     } catch (err) {
       if (err instanceof DailyCapError || err instanceof TokenLimitError) {
         log.warn('turn: refused by a safety rail', { error: err });
-        return { outcome: 'refused' };
+        return { outcome: 'refused', limit: limitOf(err) };
       }
       log.error('turn: failed', { channel: channel.id, error: err });
       return { outcome: 'error' };
