@@ -727,6 +727,22 @@ test('interaction handler: a non-owner with a grant on a DIFFERENT key is still 
   assert.match(interaction.replies[0].content, /not allowed/i);
 });
 
+test('interaction handler: /nep private stays owner-only even with a grant on it, its group or *', async () => {
+  const open = { everyone: true, roles: [], users: [] };
+  const admin = fakeAdmin({ owners: ['owner1'], access: { '*': open, private: open, 'private.show': open, 'private.forget': open } });
+  const handler = createInteractionHandler({ hot: baseHot(), admin, getGuildId: () => 'g1' });
+
+  for (const subcommand of ['show', 'forget']) {
+    const interaction = fakeInteraction({ user: { id: 'helper1' }, group: 'private', subcommand, optionValues: { user: { id: 'target1' } } });
+    await handler(interaction);
+    assert.match(interaction.replies[0].content, /not allowed/i, subcommand);
+  }
+  assert.equal(admin.runCalls.length, 0);
+
+  await handler(fakeInteraction({ group: 'private', subcommand: 'show', optionValues: { user: { id: 'target1' } } }));
+  assert.equal(admin.runCalls.length, 1, 'the owner still runs it');
+});
+
 test('interaction handler: access.grant/revoke map command/role/user straight through', async () => {
   const admin = fakeAdmin();
   const handler = createInteractionHandler({ hot: baseHot(), admin, getGuildId: () => 'g1' });
@@ -1225,6 +1241,18 @@ test('autocomplete: command-option choices for /nep access grant|revoke -- every
   assert.ok(choices.every((c) => c.name.toLowerCase().includes('mem')));
   assert.ok(choices.some((c) => c.name === 'memory'));
   assert.ok(choices.some((c) => c.name === 'memory.show'));
+});
+
+test('autocomplete: command-option choices never offer the owner-only private commands', async () => {
+  const admin = fakeAdmin();
+  const handler = createInteractionHandler({ hot: baseHot(), admin, getGuildId: () => 'g1' });
+
+  for (const [subcommand, value] of [['grant', 'priv'], ['revoke', 'priv'], ['grant', '']]) {
+    const interaction = fakeInteraction({ kind: 'autocomplete', group: 'access', subcommand, focused: { name: 'command', value } });
+    await handler(interaction);
+    const names = interaction.respondCalls[0].map((c) => c.name);
+    assert.ok(!names.some((name) => name === 'private' || name.startsWith('private.')), `${subcommand} "${value}"`);
+  }
 });
 
 test('autocomplete: an allowed non-owner (granted access.* by role) gets command-key choices too', async () => {

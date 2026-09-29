@@ -8,11 +8,27 @@
 // left with nothing set is dropped entirely. Validating that a command key is
 // one commands.js actually knows about is the caller's job (see
 // src/discord/commands.js#commandKeys), not this module's — it only shapes
-// and reads the grants it is given.
+// and reads the grants it is given. The groups in OWNER_ONLY_GROUPS (private
+// memory) are never opened by any grant, the `*` wildcard included.
+
+/** Command groups only an owner may ever run: no `bot.access` grant opens them. */
+export const OWNER_ONLY_GROUPS = Object.freeze(['private']);
+
+/** True when `key` is an owner-only group (`private`) or a command in one (`private.show`).
+ * @param {unknown} key
+ * @returns {boolean}
+ */
+export function isOwnerOnly(key) {
+  if (typeof key !== 'string' || !key) return false;
+  const group = key.includes('.') ? key.split('.')[0] : key;
+  return OWNER_ONLY_GROUPS.includes(group);
+}
 
 /** True when `userId` (an owner, or matched by a grant on the exact command
  * key, its group, or `*`) may run `commandKey`. Owners always pass, even with
- * no `access` at all. A missing/invalid `access` denies everyone else.
+ * no `access` at all. A missing/invalid `access` denies everyone else, and
+ * an owner-only command (see `isOwnerOnly`) denies everyone else whatever
+ * `access` says.
  * @param {{ commandKey: string, userId: string, roleIds?: (string|number)[],
  *   owners?: (string|number)[], access?: object }} args
  * @returns {boolean}
@@ -21,6 +37,7 @@ export function isAllowed({ commandKey, userId, roleIds, owners, access }) {
   const ownerIds = (Array.isArray(owners) ? owners : []).map(String);
   if (ownerIds.includes(String(userId))) return true;
 
+  if (isOwnerOnly(commandKey)) return false;
   if (!access || typeof access !== 'object') return false;
 
   const group = typeof commandKey === 'string' && commandKey.includes('.') ? commandKey.split('.')[0] : null;

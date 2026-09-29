@@ -27,7 +27,7 @@ import { addPending, isExpired, popOldest } from '../behavior/pending.js';
 import { between } from '../behavior/turn.js';
 import { fillPromptTemplate } from '../behavior/prompt.js';
 import { privateGate } from '../behavior/private.js';
-import { limitNotice } from '../behavior/limits.js';
+import { limitNotice, isLimitNotice } from '../behavior/limits.js';
 import { log } from '../log.js';
 
 // The most pictures one observed message warms the describer cache for --
@@ -468,10 +468,55 @@ export function createMessageHandler({
     await notifyLimit(channel, trigger, result.limit);
   }
 
-  /** After a private turn: a reply that spoke counts toward today's cap; a refusal is announced. */
+  /**
+   * After a private turn: every turn that reached the model (it spoke, or it
+   * chose to stay silent -- `skip`) counts toward today's cap; a refusal is
+   * announced. A refused, busy, paused, failed or not-now turn is not counted.
+   */
   async function afterPrivateTurn(channel, guildId, trigger, result) {
-    if (result?.outcome === 'spoke') store.bumpPrivateReplies(guildId, trigger.authorId, todayUtc());
+    if (result?.outcome === 'spoke' || result?.outcome === 'skip') {
+      store.bumpPrivateReplies(guildId, trigger.authorId, todayUtc());
+    }
     await announceRefusal(channel, trigger, result);
+  }
+
+  /**
+   * The private-chat gate for one DM author (src/behavior/private.js#privateGate),
+   * shared by a live DM and a queued one at drain time. The free checks (a
+   * stored profile, the owner flag, the attitude threshold) run before any
+   * REST call: the served guild's member cache is read first, and
+   * `members.fetch` is only reached when those checks would let the author
+   * through. `config` is the caller's `hot.config`, read at the moment of use.
+   * @returns {Promise<{ gate: object, isOwner: boolean, replies: object|null, today: string }>}
+   */
+  async function checkPrivateGate(config, guildId, authorId) {
+    const profile = store.getUser(guildId, authorId);
+    const isOwner = (config.bot?.owners ?? []).map(String).includes(String(authorId));
+    const replies = store.getPrivate(guildId, authorId)?.replies ?? null;
+    const today = todayUtc();
+    const input = { config, profile, isOwner, replies, today };
+
+    const guild = client.guilds?.cache?.get(guildId);
+    let isMember = Boolean(guild?.members?.cache?.get(authorId));
+    if (guild && !isMember) {
+      const free = privateGate({ ...input, isMember: true });
+      if (!free.ok && free.reason !== 'cap') return { gate: free, isOwner, replies, today };
+      isMember = Boolean(await guild.members.fetch(authorId).catch(() => null));
+    }
+    return { gate: privateGate({ ...input, isMember }), isOwner, replies, today };
+  }
+
+  /**
+   * A DM the gate refused: dropped silently (the reason is logged), except
+   * the daily-cap notice, posted at most once a day per person.
+   */
+  async function dropPrivate(channel, guildId, authorId, trigger, { gate, isOwner, replies, today }) {
+    log.info('private: dropped', { reason: gate.reason });
+    if (gate.reason === 'cap' && replies?.noticedDay !== today) {
+      store.markPrivateNoticed(guildId, authorId, today);
+      const key = isOwner ? 'private.maxPerOwnerPerDay' : 'private.maxPerUserPerDay';
+      await notifyLimit(channel, trigger, { key, used: gate.used, cap: gate.cap });
+    }
   }
 
   // --- One attention (mention.oneAtATime): pending direct pings ------------
@@ -543,10 +588,18 @@ export function createMessageHandler({
 
         // A private message is answered like a direct ping, without the
         // ignore roll; the channel has no guild, so the pinned one is passed.
+        // The gate is checked again here: the switch, the profile or today's
+        // cap may have changed while the ping waited.
         if (ping.kind === 'private') {
           const privateGuildId = getGuildId();
-          if (features.privateMessages !== true || !privateGuildId) continue;
+          if (!privateGuildId) continue;
           try {
+            const authorId = ping.trigger.authorId;
+            const check = await checkPrivateGate(config, privateGuildId, authorId);
+            if (!check.gate.ok) {
+              await dropPrivate(ping.channel, privateGuildId, authorId, ping.trigger, check);
+              continue;
+            }
             const result = await turns.runTurn({
               channel: ping.channel,
               guildId: privateGuildId,
@@ -621,31 +674,22 @@ export function createMessageHandler({
     const channel = message.channel;
     const normalized = normalizeMessage(message, selfId, { videoSites: config.media?.video?.sites });
 
-    // The persona's own DM message: bookkeeping, remembered under the partner's id.
+    // The persona's own DM message: bookkeeping, remembered under the
+    // partner's id. Without a usable partner id, or for a limit notice (not
+    // the persona's speech), only the post is noted.
     if (normalized.self) {
       turns.notePost(normalized.channelId, normalized.ts);
       const partnerId = channel.recipientId ?? channel.recipient?.id;
-      if (memoryOn && partnerId) memory.observe(guildId, normalized, { private: partnerId });
+      if (!partnerId || String(partnerId) === String(selfId)) return;
+      if (isLimitNotice(hot.prompts?.labels, normalized.content)) return;
+      if (memoryOn) memory.observe(guildId, normalized, { private: partnerId });
       return;
     }
 
     const authorId = message.author.id;
-    const guild = client.guilds?.cache?.get(guildId);
-    const member = guild
-      ? (guild.members.cache.get(authorId) ?? (await guild.members.fetch(authorId).catch(() => null)))
-      : null;
-    const profile = store.getUser(guildId, authorId);
-    const isOwner = (config.bot?.owners ?? []).map(String).includes(String(authorId));
-    const replies = store.getPrivate(guildId, authorId)?.replies ?? null;
-    const today = todayUtc();
-    const gate = privateGate({ config, isMember: Boolean(member), profile, isOwner, replies, today });
-    if (!gate.ok) {
-      log.info('private: dropped', { reason: gate.reason });
-      if (gate.reason === 'cap' && replies?.noticedDay !== today) {
-        store.markPrivateNoticed(guildId, authorId, today);
-        const key = isOwner ? 'private.maxPerOwnerPerDay' : 'private.maxPerUserPerDay';
-        await notifyLimit(channel, normalized, { key, used: gate.used, cap: gate.cap });
-      }
+    const check = await checkPrivateGate(config, guildId, authorId);
+    if (!check.gate.ok) {
+      await dropPrivate(channel, guildId, authorId, normalized, check);
       return;
     }
 
@@ -708,9 +752,12 @@ export function createMessageHandler({
       const guildId = message.guild.id;
 
       // 5. Its own message: only bookkeeping. Also (re)opens/extends the
-      // follow-up window for this channel -- see noteFollowUpSend above.
+      // follow-up window for this channel -- see noteFollowUpSend above. A
+      // limit notice is not the persona's speech: the post is noted, but it
+      // never opens a window or reaches memory.
       if (normalized.self) {
         turns.notePost(normalized.channelId, normalized.ts);
+        if (isLimitNotice(hot.prompts?.labels, normalized.content)) return;
         noteFollowUpSend(normalized.channelId, normalized.ts);
         if (memoryOn) memory.observe(guildId, normalized);
         return;

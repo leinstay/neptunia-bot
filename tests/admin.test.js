@@ -675,6 +675,19 @@ test('isAllowed: a non-owner reads bot.access off the live hot.config, role gran
   assert.equal(admin.isAllowed('status', { userId: '999', roleIds: ['other'] }), false);
 });
 
+test('isAllowed: private commands stay owner-only even when bot.access grants them or *', async () => {
+  const rootDir = makeRoot();
+  const hot = makeHot(rootDir);
+  const open = { everyone: true, roles: ['staff'], users: ['999'] };
+  hot.config.bot.access = { '*': open, private: open, 'private.show': open, 'private.forget': open };
+  const { admin } = makeAdmin(rootDir, { hot });
+
+  assert.equal(admin.isAllowed('private.show', { userId: '999', roleIds: ['staff'] }), false);
+  assert.equal(admin.isAllowed('private.forget', { userId: '999', roleIds: ['staff'] }), false);
+  assert.equal(admin.isAllowed('private.show', { userId: '42', roleIds: [] }), true, 'the owner still passes');
+  assert.equal(admin.isAllowed('memory.show', { userId: '999', roleIds: [] }), true, '* still opens the rest');
+});
+
 // ---------------------------------------------------------------------------
 // access.grant / access.revoke / access.list
 // ---------------------------------------------------------------------------
@@ -744,6 +757,20 @@ test('run: access.grant rejects an unknown command key, writing nothing', async 
 
   await assert.rejects(() => admin.run('access.grant', { command: 'nonsense' }, {}), /unknown command key: nonsense/);
   assert.equal(fs.existsSync(path.join(rootDir, 'config.local.json')), false);
+});
+
+test('run: access.list leaves out stale grants on owner-only private commands', async () => {
+  const rootDir = makeRoot();
+  const { admin } = makeAdmin(rootDir);
+  const open = { everyone: true, roles: [], users: [] };
+  fs.writeFileSync(
+    path.join(rootDir, 'config.local.json'),
+    JSON.stringify({ bot: { access: { private: open, 'private.show': open, status: open } } }),
+  );
+  assert.equal(await admin.run('access.list', {}, {}), 'status: everyone');
+
+  fs.writeFileSync(path.join(rootDir, 'config.local.json'), JSON.stringify({ bot: { access: { 'private.show': open } } }));
+  assert.equal(await admin.run('access.list', {}, {}), 'No grants');
 });
 
 test('run: access.grant accepts known top-level keys, group names and *', async () => {
@@ -1454,16 +1481,16 @@ test('run: status has no private file count before the guild is resolved', async
   assert.ok(body.split('\n').includes('private chat: off'), body);
 });
 
-test('run: access.grant on private.show is read-only; private.forget and the private group open writes', async () => {
+test('run: access.grant refuses private.show, private.forget and the private group (owner-only), writing nothing', async () => {
   const rootDir = makeRoot();
   const { admin } = makeAdmin(rootDir);
 
-  const show = await admin.run('access.grant', { command: 'private.show' }, {});
-  assert.doesNotMatch(show, /Note: this opens/);
-  const forget = await admin.run('access.grant', { command: 'private.forget' }, {});
-  assert.match(forget, /Note: this opens commands that change memory or config\./);
-  const group = await admin.run('access.grant', { command: 'private' }, {});
-  assert.match(group, /Note: this opens commands that change memory or config\./);
+  for (const command of ['private.show', 'private.forget', 'private']) {
+    await assert.rejects(() => admin.run('access.grant', { command }, {}), /private memory is owner-only/, command);
+    await assert.rejects(() => admin.run('access.grant', { command, roleId: '1' }, {}), /private memory is owner-only/, command);
+    await assert.rejects(() => admin.run('access.grant', { command, userId: '2' }, {}), /private memory is owner-only/, command);
+  }
+  assert.equal(fs.existsSync(path.join(rootDir, 'config.local.json')), false);
 });
 
 test('run: private.show / private.forget / memory.forget against the real store', async () => {

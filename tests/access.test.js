@@ -3,7 +3,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { isAllowed, grant, revoke } from '../src/discord/access.js';
+import { isAllowed, grant, revoke, isOwnerOnly, OWNER_ONLY_GROUPS } from '../src/discord/access.js';
 
 // ---------------------------------------------------------------------------
 // isAllowed
@@ -99,6 +99,28 @@ test('isAllowed: a malformed entry (not an object) on a matching key is skipped,
   const access = { status: 'not an object', '*': { everyone: true, roles: [], users: [] } };
   const allowed = isAllowed({ commandKey: 'status', userId: '2', roleIds: [], owners: ['1'], access });
   assert.equal(allowed, true);
+});
+
+test('isOwnerOnly: the private group and every key in it, nothing else', () => {
+  assert.deepEqual(OWNER_ONLY_GROUPS, ['private']);
+  assert.equal(isOwnerOnly('private'), true);
+  assert.equal(isOwnerOnly('private.show'), true);
+  assert.equal(isOwnerOnly('private.forget'), true);
+  assert.equal(isOwnerOnly('memory.show'), false);
+  assert.equal(isOwnerOnly('privateer'), false);
+  assert.equal(isOwnerOnly('*'), false);
+  assert.equal(isOwnerOnly(undefined), false);
+});
+
+test('isAllowed: private commands refuse every non-owner, whatever bot.access grants', () => {
+  const everyone = { everyone: true, roles: ['staff'], users: ['2'] };
+  const access = { 'private.show': everyone, 'private.forget': everyone, private: everyone, '*': everyone };
+  for (const commandKey of ['private.show', 'private.forget', 'private']) {
+    assert.equal(isAllowed({ commandKey, userId: '2', roleIds: ['staff'], owners: ['1'], access }), false, commandKey);
+    assert.equal(isAllowed({ commandKey, userId: '1', roleIds: [], owners: ['1'], access: {} }), true, `${commandKey}: owner`);
+  }
+  // the same wildcard still opens everything else
+  assert.equal(isAllowed({ commandKey: 'memory.show', userId: '2', roleIds: [], owners: ['1'], access }), true);
 });
 
 // ---------------------------------------------------------------------------

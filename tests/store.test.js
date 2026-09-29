@@ -7,6 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { createStore } from '../src/memory/store.js';
 import { emptyAffinity } from '../src/memory/affinity.js';
+import { withCapturedLogs } from './fixtures/capture-logs.js';
 
 function tmpDataDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'nep-store-'));
@@ -1583,6 +1584,38 @@ test('getPrivate: a hand-edited file is normalised on read: defaults filled, det
   assert.deepEqual(priv.episodes, []);
   assert.equal(priv.firstSeen, '');
   assert.equal(priv.lastSeen, '');
+});
+
+test('getPrivate: a private file that parses to a non-object is replaced by the empty shape, with a count-only warning', async () => {
+  for (const [label, raw] of [
+    ['null', 'null'],
+    ['array', '[1, 2]'],
+    ['string', '"ψίθυρος"'],
+    ['number', '42'],
+  ]) {
+    const dir = tmpDataDir();
+    const file = privateFile(dir, 'g1', 'u1');
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, raw);
+
+    const store = createStore({ dataDir: dir });
+    const { result, logs } = await withCapturedLogs(() => {
+      const priv = structuredClone(store.getPrivate('g1', 'u1'));
+      // every private operation works on the replacement, none throws
+      store.bumpPrivateReplies('g1', 'u1', '2026-09-29');
+      store.pushPrivateBuffer('g1', 'u1', { id: 'm1', content: 'γεια' });
+      return priv;
+    });
+    assert.deepEqual(result, EMPTY_PRIVATE, label);
+    assert.deepEqual(store.takePrivateBuffer('g1', 'u1').map((m) => m.id), ['m1'], label);
+
+    const warnings = logs.filter((l) => l.msg === 'store: private file replaced');
+    assert.equal(warnings.length, 1, `${label}: warned once`);
+    assert.equal(warnings[0].guildId, 'g1');
+    assert.equal(warnings[0].reason, 'malformed');
+    assert.equal(warnings[0].userId, undefined, `${label}: no member id in the log`);
+    assert.deepEqual(store.validate(), [], `${label}: still valid JSON, validate() unchanged`);
+  }
 });
 
 test('applyPrivateOps: relationship, interests and details land in the private file; character/style/aliases/portrait are ignored', () => {

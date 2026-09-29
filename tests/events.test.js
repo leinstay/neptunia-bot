@@ -371,6 +371,28 @@ test('events: its own message notes the post and is observed, never turned into 
   assert.equal(memory.observeCalls[0][1].self, true);
 });
 
+test('events: its own limit notice notes the post but never reaches memory or opens a follow-up window', async () => {
+  const turns = fakeTurns();
+  const memory = fakeMemory();
+  const store = fakeStateStore({});
+  const handler = makeHandler({ turns, memory, store, prompts: { labels } });
+
+  const message = fakeMessage({
+    author: { id: 'self1', bot: true, globalName: 'Neptunia', username: 'neptunia' },
+    cleanContent: 'limit reached (llm.maxRequestsPerDay, 800/800)',
+  });
+  await handler(message);
+
+  assert.deepEqual(turns.notePostCalls, [['c1', message.createdTimestamp]]);
+  assert.equal(memory.observeCalls.length, 0);
+  assert.equal(store.state.data.followUpWindows, undefined, 'no follow-up window opened');
+
+  // An ordinary message of its own still does both.
+  await handler(fakeMessage({ author: { id: 'self1', bot: true, globalName: 'Neptunia', username: 'neptunia' }, cleanContent: 'τι νέα;' }));
+  assert.equal(memory.observeCalls.length, 1);
+  assert.ok(store.state.data.followUpWindows?.c1, 'window opened by real speech');
+});
+
 test('events: another bot is ignored entirely', async () => {
   const turns = fakeTurns();
   const memory = fakeMemory();
@@ -2365,6 +2387,38 @@ test('private: a member missing from the cache is fetched; a fetched member pass
   assert.equal(turns.calls.length, 1);
 });
 
+test('private: an unknown author or one below minAffinity never triggers a member fetch', async () => {
+  const cases = [
+    { reason: 'unknown', store: fakePrivateStore({ profiles: {} }) },
+    { reason: 'affinity', store: fakePrivateStore({ profiles: { u1: { affinity: { score: 4 } } } }) },
+  ];
+  for (const { reason, store } of cases) {
+    const client = fakeDmClient({ members: [], fetchable: ['u1'] });
+    const turns = recordingTurns();
+    const handler = makeDmHandler({ client, turns, store });
+    const { logs } = await withCapturedLogs(async () => {
+      await handler(fakeDmMessage());
+      await settle();
+    });
+    assert.deepEqual(client.fetchCalls, [], `${reason}: no REST call`);
+    assert.equal(turns.calls.length, 0, `${reason}: no turn`);
+    assert.equal(logs.find((l) => l.msg === 'private: dropped')?.reason, reason);
+  }
+});
+
+test('private: a non-member missing from the cache is fetched, then dropped as notMember', async () => {
+  const client = fakeDmClient({ members: [] });
+  const turns = recordingTurns();
+  const handler = makeDmHandler({ client, turns });
+  const { logs } = await withCapturedLogs(async () => {
+    await handler(fakeDmMessage());
+    await settle();
+  });
+  assert.deepEqual(client.fetchCalls, ['u1']);
+  assert.equal(turns.calls.length, 0);
+  assert.equal(logs.find((l) => l.msg === 'private: dropped')?.reason, 'notMember');
+});
+
 test('private: an owner below minAffinity is still answered (owners bypass the threshold)', async () => {
   const turns = recordingTurns();
   const handler = makeDmHandler({ turns });
@@ -2431,14 +2485,22 @@ test('private: a DM that passes is observed privately, answered with the pinned 
   assert.equal(channel.sent.length, 0);
 });
 
-test('private: a turn that did not speak is not counted against the daily cap', async () => {
-  for (const outcome of ['skip', 'busy', 'error']) {
+test('private: a turn that never reached the model is not counted against the daily cap', async () => {
+  for (const outcome of ['refused', 'busy', 'paused', 'error', 'not-now']) {
     const store = fakePrivateStore();
     const handler = makeDmHandler({ store, turns: recordingTurns({ outcome }) });
     await handler(fakeDmMessage());
     await settle();
     assert.deepEqual(store.bumps, [], outcome);
   }
+});
+
+test('private: a turn that reached the model and chose silence (skip) counts against the daily cap', async () => {
+  const store = fakePrivateStore();
+  const handler = makeDmHandler({ store, turns: recordingTurns({ outcome: 'skip' }) });
+  await handler(fakeDmMessage());
+  await settle();
+  assert.deepEqual(store.bumps, [['g1', 'u1', TODAY]]);
 });
 
 test('private: a DM refused by a rail posts the limit notice', async () => {
@@ -2482,6 +2544,67 @@ test('private: while busy elsewhere the DM is pending as "private"; the drain pa
   assert.deepEqual(store.bumps, [['g1', 'u1', TODAY]]);
 });
 
+/** A DM queued while busy elsewhere; `change` runs before the drain. Returns what the drain did. */
+async function drainAfter(change, { privates = {} } = {}) {
+  let busy = true;
+  const turns = recordingTurns({ outcome: 'spoke' }, { isAnyBusy: () => busy });
+  const profiles = { u1: { affinity: { score: 10 } } };
+  const store = fakePrivateStore({ profiles, privates });
+  const config = privateConfig();
+  const channel = fakeDmChannel();
+  const handler = makeDmHandler({ turns, store, config, sleep: async () => {} });
+  await handler(fakeDmMessage({ channel }));
+  await settle();
+  assert.equal(turns.calls.length, 0, 'queued, not answered');
+
+  change({ profiles, privates, config });
+  busy = false;
+  const { logs } = await withCapturedLogs(() => handler.drainPending());
+  return { turns, store, channel, logs };
+}
+
+test('private: a queued DM whose author was forgotten meanwhile is dropped at drain time', async () => {
+  const { turns, store, channel, logs } = await drainAfter(({ profiles }) => {
+    delete profiles.u1; // /nep memory forget
+  });
+  assert.equal(turns.calls.length, 0);
+  assert.deepEqual(store.bumps, []);
+  assert.equal(channel.sent.length, 0);
+  assert.equal(logs.find((l) => l.msg === 'private: dropped')?.reason, 'unknown');
+});
+
+test('private: a queued DM is dropped at drain time once the previous turn hit the cap, with the once-a-day notice', async () => {
+  const { turns, store, channel, logs } = await drainAfter(({ privates }) => {
+    privates.u1 = { replies: { day: TODAY, count: 100, noticedDay: '' } };
+  });
+  assert.equal(turns.calls.length, 0);
+  assert.deepEqual(store.bumps, []);
+  assert.equal(logs.find((l) => l.msg === 'private: dropped')?.reason, 'cap');
+  assert.deepEqual(store.noticed, [['g1', 'u1', TODAY]]);
+  assert.equal(channel.sent.length, 1);
+  assert.equal(channel.sent[0].content, 'limit reached (private.maxPerUserPerDay, 100/100)');
+  assert.equal(channel.sent[0].reply.messageReference, 'dm-m1');
+});
+
+test('private: a queued DM past the cap already noticed today is dropped without a second notice', async () => {
+  const { turns, store, channel } = await drainAfter(({ privates }) => {
+    privates.u1 = { replies: { day: TODAY, count: 100, noticedDay: TODAY } };
+  });
+  assert.equal(turns.calls.length, 0);
+  assert.deepEqual(store.noticed, []);
+  assert.equal(channel.sent.length, 0);
+});
+
+test('private: a queued DM is dropped at drain time when features.privateMessages was switched off', async () => {
+  const { turns, store, channel, logs } = await drainAfter(({ config }) => {
+    config.features.privateMessages = false;
+  });
+  assert.equal(turns.calls.length, 0);
+  assert.deepEqual(store.bumps, []);
+  assert.equal(channel.sent.length, 0);
+  assert.equal(logs.find((l) => l.msg === 'private: dropped')?.reason, 'off');
+});
+
 test("private: the persona's own DM message is noted and observed privately under the partner's id", async () => {
   const turns = recordingTurns();
   const memory = fakeMemory();
@@ -2497,6 +2620,38 @@ test("private: the persona's own DM message is noted and observed privately unde
   assert.equal(memory.observeCalls[0][1].self, true);
   assert.deepEqual(memory.observeCalls[0][2], { private: 'u1' });
   assert.equal(turns.calls.length, 0);
+});
+
+test("private: the persona's own DM message without a usable partner id is only noted", async () => {
+  for (const [label, channel] of [
+    ['missing', fakeDmChannel('dm1', 'u1', { recipientId: undefined })],
+    ['self', fakeDmChannel('dm1', 'self1')],
+  ]) {
+    const turns = recordingTurns();
+    const memory = fakeMemory();
+    const handler = makeDmHandler({ turns, memory });
+    const message = fakeDmMessage({ channel, author: { id: 'self1', bot: true, globalName: 'Neptunia', username: 'neptunia' } });
+    await handler(message);
+    await settle();
+    assert.deepEqual(turns.notePostCalls, [['dm1', message.createdTimestamp]], label);
+    assert.equal(memory.observeCalls.length, 0, label);
+  }
+});
+
+test("private: the persona's own limit notice in a DM is noted but never observed", async () => {
+  const turns = recordingTurns();
+  const memory = fakeMemory();
+  const channel = fakeDmChannel('dm1', 'u1');
+  const handler = makeDmHandler({ turns, memory });
+  const message = fakeDmMessage({
+    channel,
+    author: { id: 'self1', bot: true, globalName: 'Neptunia', username: 'neptunia' },
+    cleanContent: 'limit reached (private.maxPerUserPerDay, 100/100)',
+  });
+  await handler(message);
+  await settle();
+  assert.deepEqual(turns.notePostCalls, [['dm1', message.createdTimestamp]]);
+  assert.equal(memory.observeCalls.length, 0);
 });
 
 test('private: another bot in a DM is ignored', async () => {

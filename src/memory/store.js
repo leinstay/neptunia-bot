@@ -312,9 +312,16 @@ export function createStore({ dataDir }) {
 
   const stateEntry = entry(stateFile, () => ({}));
 
-  /** The cache entry of a member's private file, created empty when missing, normalised. */
+  /** The cache entry of a member's private file, created empty when missing, normalised. A file
+   * that parses to something other than an object (null, an array, a string -- a hand edit gone
+   * wrong) is replaced by the empty shape in the cache, so the private pass never stalls on it;
+   * the disk copy is only rewritten by the next change, like any other entry. */
   function privateEntry(guildId, userId) {
     const item = entry(privateFile(guildId, userId), emptyPrivate);
+    if (!item.value || typeof item.value !== 'object' || Array.isArray(item.value)) {
+      log.warn('store: private file replaced', { guildId, reason: 'malformed' });
+      item.value = emptyPrivate();
+    }
     normalizePrivate(item.value);
     return item;
   }

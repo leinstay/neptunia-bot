@@ -9,6 +9,7 @@
 // Every option → args mapping lives in one place (OPTION_MAPPERS) so adding a
 // command means adding one tree entry and one mapper, nothing else.
 
+import { isOwnerOnly } from './access.js';
 import { log } from '../log.js';
 
 // Raw Discord API option-type numbers (application-command-option-type):
@@ -704,10 +705,11 @@ function roleIdsFor(interaction) {
 }
 
 /** `command`-option autocomplete choices for `/nep access grant|revoke`: every known command key,
- * every group name, and `*`, filtered by the typed text. */
+ * every group name, and `*`, filtered by the typed text. The owner-only commands
+ * (src/discord/access.js#isOwnerOnly) are never offered: no grant can open them. */
 function accessKeyChoices(typed) {
   const { keys, groups } = commandKeys();
-  const all = ['*', ...groups, ...keys];
+  const all = ['*', ...groups, ...keys].filter((key) => !isOwnerOnly(key));
   return all
     .filter((key) => key.toLowerCase().includes(typed))
     .slice(0, MAX_AUTOCOMPLETE_CHOICES)

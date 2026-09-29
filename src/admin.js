@@ -30,7 +30,7 @@ import { fromTokens } from './memory/mentions.js';
 import { sortEpisodesForDisplay } from './memory/episodes.js';
 import { channelActivity } from './memory/channels.js';
 import { commandKeys } from './discord/commands.js';
-import { isAllowed as accessIsAllowed, grant as accessGrant, revoke as accessRevoke } from './discord/access.js';
+import { isAllowed as accessIsAllowed, isOwnerOnly, grant as accessGrant, revoke as accessRevoke } from './discord/access.js';
 import { classifierTextModel, classifierMediaModel, classifierVideoModel } from './behavior/mention.js';
 import { buildDrawPrompt } from './behavior/prompt.js';
 import { effectiveAffinity } from './behavior/private.js';
@@ -39,7 +39,8 @@ import { log } from './log.js';
 
 /** `/nep access grant/revoke`'s command keys that ONLY read — everything else (including every
  * group and `*`) is treated as opening a write command, and gets the "changes memory or config"
- * note in the grant reply. Kept in sync by hand with the read-only command list in AGENTS/README;
+ * note in the grant reply. The owner-only `private` commands are never grantable at all
+ * (src/discord/access.js#isOwnerOnly), so they are not listed here. Kept in sync by hand with the read-only command list in AGENTS/README;
  * a new read-only command is simply added here. */
 const READ_ONLY_ACCESS_KEYS = new Set([
   'status',
@@ -47,7 +48,6 @@ const READ_ONLY_ACCESS_KEYS = new Set([
   'memory.show',
   'memory.channel',
   'memory.server',
-  'private.show',
   'rule.list',
   'lore.list',
   'lore.show',
@@ -2144,6 +2144,7 @@ async function cmdPing(args) {
     const key = String(args?.command ?? '').trim();
     if (!key) throw new Error('a command key is required');
     if (!isKnownAccessKey(key)) throw new Error(`unknown command key: ${key}`);
+    if (isOwnerOnly(key)) throw new Error(`private memory is owner-only and cannot be granted: ${key}`);
 
     const target = accessTargetArgs(args);
     const what = target.kind === 'role' ? { roleId: target.id } : target.kind === 'user' ? { userId: target.id } : { everyone: true };
@@ -2174,9 +2175,11 @@ async function cmdPing(args) {
     return `Revoked ${key} from ${target.label}`;
   }
 
+  /** Every grant, one line each; a stale grant on an owner-only command (it opens nothing, see
+   * src/discord/access.js#isOwnerOnly) is left out. */
   function cmdAccessList() {
     const access = effectiveAccess();
-    const keys = Object.keys(access);
+    const keys = Object.keys(access).filter((key) => !isOwnerOnly(key));
     if (keys.length === 0) return 'No grants';
 
     return keys
