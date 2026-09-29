@@ -220,9 +220,10 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
       for (const message of window ?? []) if (!message?.self && !message?.bot) messages.push(message);
     }
     if (readable === 0) throw new RunEnd('error', 'no readable channel for the reference');
-    const samples = sampleLines(messages, Math.max(0, Math.floor(Number(refCfg.samples ?? 40)) || 0), rng);
+    const samples = sampleLines(messages, Math.max(0, Math.floor(Number(refCfg.samples ?? 60)) || 0), rng);
     log.info('mentor: reference read', { channels: readable, messages: messages.length, samples: samples.length });
-    return { profile: styleProfile(messages), samples, channel: sandboxChannel(view, ids[0]) };
+    const profile = styleProfile(messages, { rarePer1000: refCfg.rarePer1000, rareMinAuthors: refCfg.rareMinAuthors });
+    return { profile, samples, channel: sandboxChannel(view, ids[0]) };
   }
 
   // ---- request blocks --------------------------------------------------------

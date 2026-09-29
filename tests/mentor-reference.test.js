@@ -138,6 +138,72 @@ test('styleProfile: no messages gives zeros and no division by zero', () => {
   });
 });
 
+test('styleProfile: a mark used by one author only is rare', () => {
+  // Plenty of commas from both authors; the dash (rate 10 per 1000, far above 0.5) only from A.
+  const profile = styleProfile([
+    msg(pad('Ναι — εντάξει, καλά ', 100), { authorId: 'A' }),
+    msg(pad('Oui, très bien ', 100), { authorId: 'B' }),
+  ]);
+  assert.equal(profile.authors, 2);
+  assert.equal(profile.markAuthors.dash, 1);
+  assert.equal(profile.markAuthors.comma, 2);
+  assert.equal(profile.markAuthors.period, 0);
+  assert.ok(profile.per1000.dash >= 0.5);
+  assert.ok(profile.rare.includes('dash'));
+  assert.ok(!profile.rare.includes('comma'));
+});
+
+test('styleProfile: a mark under the rate threshold is rare even with several authors', () => {
+  // Two semicolons from two authors in 4444 characters: 0.450... per 1000, shown rounded as 0.5.
+  // The threshold is compared on the unrounded rate, so it is still rare.
+  const profile = styleProfile([
+    msg(pad(`Ναι; ${'καλά, '.repeat(10)}`, 2222), { authorId: 'A' }),
+    msg(pad(`Oui; ${'bien, '.repeat(10)}`, 2222), { authorId: 'B' }),
+  ]);
+  assert.equal(profile.markAuthors.semicolon, 2);
+  assert.equal(profile.per1000.semicolon, 0.5);
+  assert.ok(profile.rare.includes('semicolon'));
+  // 20 commas in 4444 characters from both authors: not rare.
+  assert.ok(!profile.rare.includes('comma'));
+});
+
+test('styleProfile: an unused mark is not also rare', () => {
+  const profile = styleProfile([
+    msg('Καλημέρα, τι κάνεις?', { authorId: 'A' }),
+    msg('Très bien, merci?', { authorId: 'B' }),
+  ]);
+  assert.ok(profile.unused.includes('dash'));
+  for (const mark of profile.unused) assert.ok(!profile.rare.includes(mark), mark);
+  assert.deepEqual(profile.rare, []);
+});
+
+test('styleProfile: no messages gives no rare marks', () => {
+  const profile = styleProfile([]);
+  assert.equal(profile.authors, 0);
+  assert.deepEqual(profile.rare, []);
+  for (const mark of ALL_MARKS) assert.equal(profile.markAuthors[mark], 0, mark);
+});
+
+test('styleProfile: options change both thresholds', () => {
+  const messages = [
+    msg(pad('Ναι — εντάξει, καλά ', 100), { authorId: 'A' }),
+    msg(pad('Oui, très bien ', 100), { authorId: 'B' }),
+    // No authorId: counted in the rates, toward no author.
+    msg(pad('Ίσως, ίσως ', 100), { authorId: undefined }),
+  ];
+  const loose = styleProfile(messages, { rarePer1000: 0, rareMinAuthors: 1 });
+  assert.equal(loose.authors, 2);
+  assert.deepEqual(loose.rare, []);
+  // comma: 3 per 300 characters = 10 per 1000, used by 2 authors.
+  const strict = styleProfile(messages, { rarePer1000: 20, rareMinAuthors: 3 });
+  assert.ok(strict.rare.includes('comma'));
+  assert.ok(strict.rare.includes('dash'));
+  const rateOnly = styleProfile(messages, { rarePer1000: 20, rareMinAuthors: 1 });
+  assert.ok(rateOnly.rare.includes('comma'));
+  const authorsOnly = styleProfile(messages, { rarePer1000: 0, rareMinAuthors: 3 });
+  assert.ok(authorsOnly.rare.includes('comma'));
+});
+
 // ---- sampleLines -----------------------------------------------------------
 
 function sampleSource() {
@@ -148,6 +214,7 @@ function sampleSource() {
     msg('Une ligne écrite par C', { authorId: 'C' }),
     msg('κοντό', { authorId: 'B' }),
     msg(pad('Πολύ μεγάλο ', 201), { authorId: 'C' }),
+    msg('ω', { authorId: 'C' }),
   ];
 }
 
@@ -163,17 +230,28 @@ test('sampleLines: is deterministic for a fixed rng', () => {
   ]);
 });
 
-test('sampleLines: keeps lines of 15..200 characters, no author twice in a row, no line twice', () => {
+test('sampleLines: keeps lines of 2..200 characters, no author twice in a row, no line twice', () => {
   const source = sampleSource();
   const lines = sampleLines(source, 10, seq([0.9, 0.1, 0.5, 0.3]));
-  assert.equal(lines.length, 4);
-  assert.equal(new Set(lines).size, 4);
+  assert.equal(lines.length, 5);
+  assert.equal(new Set(lines).size, 5);
   const authorOf = new Map(source.map((m) => [m.content, m.authorId]));
   for (let i = 0; i < lines.length; i++) {
     const length = [...lines[i]].length;
-    assert.ok(length >= 15 && length <= 200, lines[i]);
+    assert.ok(length >= 2 && length <= 200, lines[i]);
     if (i > 0) assert.notEqual(authorOf.get(lines[i]), authorOf.get(lines[i - 1]));
   }
+  assert.ok(lines.includes('κοντό'));
+  assert.ok(!lines.includes('ω'));
+});
+
+test('sampleLines: keeps a two-character line', () => {
+  const source = [
+    msg('ok', { authorId: 'A' }),
+    msg('ά', { authorId: 'B' }),
+    msg('', { authorId: 'C' }),
+  ];
+  assert.deepEqual(sampleLines(source, 5, seq([0])), ['ok']);
 });
 
 test('sampleLines: one author left still gives lines, and n caps the count', () => {
@@ -215,6 +293,26 @@ test('answerFacts: no reply, short lines and an empty reference p75 are all fals
   assert.deepEqual(short.unusedMarks, {});
   const empty = answerFacts(answer, { unused: [], length: { median: 0, p75: 0 } });
   assert.equal(empty.lengthOverP75, false);
+});
+
+test('answerFacts: counts the rare marks the answer contains', () => {
+  const profile = { unused: ['semicolon'], rare: ['dash', 'colon', 'quote'], length: { median: 8, p75: 40 } };
+  const answer = {
+    messages: [
+      { text: 'Ναι — φυσικά — πάμε' },
+      { text: 'Σημείωση: στις 12:30; ναι' },
+    ],
+  };
+  const facts = answerFacts(answer, profile);
+  assert.deepEqual(facts.rareMarks, { dash: 2, colon: 1 });
+  assert.deepEqual(facts.unusedMarks, { semicolon: 1 });
+});
+
+test('answerFacts: a profile without rare gives none', () => {
+  const answer = { messages: [{ text: 'Ναι — φυσικά' }] };
+  const facts = answerFacts(answer, { unused: [], length: { median: 8, p75: 40 } });
+  assert.deepEqual(facts.rareMarks, {});
+  assert.deepEqual(answerFacts(answer, null).rareMarks, {});
 });
 
 // ---- repeatedPhrases -------------------------------------------------------

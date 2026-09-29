@@ -226,7 +226,7 @@
     "samples": 3,
     "check": { "samples": 1 },
     "pass": { "score": 7, "floor": 5 },
-    "reference": { "days": 7, "samples": 40, "maxMessages": 3000 },
+    "reference": { "days": 7, "samples": 60, "maxMessages": 3000, "rarePer1000": 0.5, "rareMinAuthors": 2 },
     "feedbackExamples": 10
   },
   "warmup": {

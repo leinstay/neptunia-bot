@@ -13,6 +13,12 @@
 // Discord tokens (mentions, channel links, custom emoji), URLs and `:name:`
 // custom-emoji names taken out, then trimmed; a message with nothing left is
 // not counted at all. Lengths are in Unicode code points.
+//
+// Two kinds of marks stand out against an answer: `unused` ones nobody in the
+// reference ever writes, and `rare` ones that do occur but seldom (under a
+// rate per 1000 characters) or only from too few people (one member's habit
+// is not the chat's). Sample lines go down to two characters, because the
+// people's short lines are exactly what the persona needs to see.
 
 /** The punctuation marks the reference counts, in report order. */
 const MARKS = [
@@ -38,7 +44,9 @@ const COUNTERS = {
 };
 
 const LONG_LINE_CHARS = 60;
-const SAMPLE_MIN_CHARS = 15;
+const SAMPLE_MIN_CHARS = 2;
+const RARE_PER_1000 = 0.5;
+const RARE_MIN_AUTHORS = 2;
 const SAMPLE_MAX_CHARS = 200;
 const MAX_PHRASES = 10;
 
@@ -92,19 +100,31 @@ function markCounts(text) {
 /**
  * How the people in the chat write, measured over their messages.
  * @param {object[]} messages  Normalized messages of people (the persona and bots already removed).
+ * @param {{ rarePer1000?: number, rareMinAuthors?: number }} [options]  Thresholds for `rare`
+ *   (defaults 0.5 and 2); a value that is not a finite number falls back to its default.
  * @returns {{
- *   messages: number, chars: number,
+ *   messages: number, chars: number, authors: number,
  *   per1000: Record<string, number>,
+ *   markAuthors: Record<string, number>,
  *   unused: string[],
+ *   rare: string[],
  *   length: { median: number, p75: number },
  *   shares: { replyQuote: number, question: number, unicodeEmoji: number, stretched: number, noCommaLong: number },
  * }}
- *   `per1000`: occurrences of each mark per 1000 characters, one decimal. `unused`: marks with zero
- *   occurrences (empty when there are no messages -- no evidence is not evidence of absence).
- *   `shares`: fractions of the counted messages, two decimals; `noCommaLong` is among lines of 60+ characters.
+ *   `authors`: distinct `authorId` values among the counted messages (a message without one counts toward
+ *   no author). `per1000`: occurrences of each mark per 1000 characters, one decimal. `markAuthors`: how
+ *   many distinct authors used each mark at least once. `unused`: marks with zero occurrences (empty when
+ *   there are no messages -- no evidence is not evidence of absence). `rare`: marks not in `unused` whose
+ *   unrounded rate is under `rarePer1000` or that fewer than `rareMinAuthors` authors used (empty when there
+ *   are no messages). `shares`: fractions of the counted messages, two decimals; `noCommaLong` is among
+ *   lines of 60+ characters.
  */
-export function styleProfile(messages) {
+export function styleProfile(messages, options = {}) {
+  const rarePer1000 = Number.isFinite(options?.rarePer1000) ? options.rarePer1000 : RARE_PER_1000;
+  const rareMinAuthors = Number.isFinite(options?.rareMinAuthors) ? options.rareMinAuthors : RARE_MIN_AUTHORS;
   const totals = Object.fromEntries(MARKS.map((mark) => [mark, 0]));
+  const users = Object.fromEntries(MARKS.map((mark) => [mark, new Set()]));
+  const authors = new Set();
   const lengths = [];
   let chars = 0;
   let replyQuote = 0;
@@ -120,6 +140,11 @@ export function styleProfile(messages) {
     const length = charCount(text);
     const counts = markCounts(text);
     for (const mark of MARKS) totals[mark] += counts[mark];
+    const authorId = message.authorId;
+    if (authorId != null && authorId !== '') {
+      authors.add(authorId);
+      for (const mark of MARKS) if (counts[mark] > 0) users[mark].add(authorId);
+    }
     lengths.push(length);
     chars += length;
     if (message.replyToId) replyQuote++;
@@ -136,12 +161,20 @@ export function styleProfile(messages) {
   const per1000 = {};
   for (const mark of MARKS) per1000[mark] = chars > 0 ? round((totals[mark] * 1000) / chars, 1) : 0;
   lengths.sort((a, b) => a - b);
+  const markAuthors = Object.fromEntries(MARKS.map((mark) => [mark, users[mark].size]));
+  const rare = count > 0
+    ? MARKS.filter((mark) => totals[mark] > 0
+      && ((totals[mark] * 1000) / chars < rarePer1000 || markAuthors[mark] < rareMinAuthors))
+    : [];
 
   return {
     messages: count,
     chars,
+    authors: authors.size,
     per1000,
+    markAuthors,
     unused: count > 0 ? MARKS.filter((mark) => totals[mark] === 0) : [],
+    rare,
     length: { median: percentile(lengths, 0.5), p75: percentile(lengths, 0.75) },
     shares: {
       replyQuote: share(replyQuote, count),
@@ -154,7 +187,7 @@ export function styleProfile(messages) {
 }
 
 /**
- * Up to `n` real lines from the chat for the mentor to read as examples: measured texts of 15..200
+ * Up to `n` real lines from the chat for the mentor to read as examples: measured texts of 2..200
  * characters, drawn with `rng`, never the same message twice and never the same author twice in a row
  * while another author is still available.
  * @param {object[]} messages  Normalized messages of people.
@@ -189,10 +222,13 @@ export function sampleLines(messages, n, rng) {
 /**
  * The code-measured facts of one sandbox answer against the chat's reference.
  * @param {{ messages: { text: string, replyTo?: string|null }[] }} answer
- * @param {{ unused: string[], length: { p75: number } }} profile  A styleProfile result.
+ * @param {{ unused: string[], rare?: string[], length: { p75: number } }} profile  A styleProfile result.
  * @returns {{ chars: number, messages: number, unusedMarks: Record<string, number>,
+ *   rareMarks: Record<string, number>,
  *   commaPer1000: number, lengthOverP75: boolean, replyQuoted: boolean }}
  *   `unusedMarks`: the marks people never use that the answer contains, with their counts.
+ *   `rareMarks`: the marks listed in the profile's `rare` that the answer contains, with their counts
+ *   (empty for a profile without `rare`).
  *   `lengthOverP75`: the answer's longest message is longer than the people's 75th percentile.
  */
 export function answerFacts(answer, profile) {
@@ -204,12 +240,17 @@ export function answerFacts(answer, profile) {
   for (const mark of profile?.unused ?? []) {
     if (counts[mark] > 0) unusedMarks[mark] = counts[mark];
   }
+  const rareMarks = {};
+  for (const mark of profile?.rare ?? []) {
+    if (counts[mark] > 0) rareMarks[mark] = counts[mark];
+  }
   const p75 = profile?.length?.p75 ?? 0;
   const longest = lines.reduce((max, line) => Math.max(max, charCount(line)), 0);
   return {
     chars,
     messages: answer?.messages?.length ?? 0,
     unusedMarks,
+    rareMarks,
     commaPer1000: chars > 0 ? round((counts.comma * 1000) / chars, 1) : 0,
     lengthOverP75: p75 > 0 && longest > p75,
     replyQuoted: (answer?.messages ?? []).some((message) => message?.replyTo != null),
