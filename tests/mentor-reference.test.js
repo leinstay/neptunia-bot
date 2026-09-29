@@ -280,7 +280,9 @@ test('answerFacts: counts the marks people never use', () => {
   assert.equal(facts.messages, 2);
   // 13 + newline + 15 code points
   assert.equal(facts.chars, 29);
-  assert.equal(facts.commaPer1000, 34.5);
+  assert.equal(facts.commas, 1);
+  // Too short for a density to mean anything.
+  assert.equal(facts.commaPer1000, null);
   assert.equal(facts.lengthOverP75, true);
   assert.equal(facts.replyQuoted, true);
 });
@@ -315,6 +317,33 @@ test('answerFacts: a profile without rare gives none', () => {
   assert.deepEqual(answerFacts(answer, null).rareMarks, {});
 });
 
+test('answerFacts: reports the comma count', () => {
+  const facts = answerFacts({ messages: [{ text: 'Ναι, ναι, όχι' }, { text: 'Λοιπόν, καλά' }] }, { unused: [], length: { p75: 40 } });
+  assert.equal(facts.commas, 3);
+  assert.equal(answerFacts({ messages: [] }, null).commas, 0);
+});
+
+test('answerFacts: no density under 150 characters', () => {
+  const profile = { unused: [], length: { p75: 400 } };
+  const facts = answerFacts({ messages: [{ text: pad('Ναι, ναι, ', 149) }] }, profile);
+  assert.equal(facts.chars, 149);
+  assert.equal(facts.commas, 2);
+  assert.equal(facts.commaPer1000, null);
+  assert.equal(answerFacts({ messages: [] }, profile).commaPer1000, null);
+});
+
+test('answerFacts: density from 150 characters on', () => {
+  const profile = { unused: [], length: { p75: 400 } };
+  const facts = answerFacts({ messages: [{ text: pad('Ναι, ναι, όχι, ', 150) }] }, profile);
+  assert.equal(facts.chars, 150);
+  assert.equal(facts.commas, 3);
+  assert.equal(facts.commaPer1000, 20);
+  // Two messages count together, the line break included.
+  const split = answerFacts({ messages: [{ text: pad('Ναι, ', 100) }, { text: pad('όχι, ', 99) }] }, profile);
+  assert.equal(split.chars, 200);
+  assert.equal(split.commaPer1000, 10);
+});
+
 // ---- repeatedPhrases -------------------------------------------------------
 
 function answerOf(...texts) {
@@ -344,4 +373,39 @@ test('repeatedPhrases: respects minWords and returns at most 10', () => {
   const found = repeatedPhrases(pairs, 2);
   assert.equal(found.length, 10);
   for (const item of found) assert.equal(item.count, 2);
+});
+
+function inSituation(situation, ...texts) {
+  return { situation, ...answerOf(...texts) };
+}
+
+test('repeatedPhrases: a phrase shared by the samples of one situation is not reported', () => {
+  const found = repeatedPhrases([
+    inSituation(1, 'όπως πάντα είμαι εδώ'),
+    inSituation(1, 'ναι, όπως πάντα είμαι εδώ'),
+    inSituation(1, 'όπως πάντα είμαι εδώ, φυσικά'),
+    inSituation(2, 'κάτι εντελώς άλλο εδώ'),
+  ]);
+  assert.deepEqual(found, []);
+});
+
+test('repeatedPhrases: a phrase in two situations is reported with the number of situations', () => {
+  const found = repeatedPhrases([
+    inSituation(1, 'όπως πάντα είμαι εδώ'),
+    inSituation(1, 'ναι, όπως πάντα είμαι εδώ'),
+    inSituation(1, 'όπως πάντα είμαι εδώ, φυσικά'),
+    inSituation(2, 'τίποτα, όπως πάντα είμαι εδώ'),
+    inSituation(2, 'όπως πάντα είμαι εδώ'),
+    inSituation(3, 'κάτι εντελώς άλλο'),
+  ]);
+  assert.deepEqual(found, [{ phrase: 'όπως πάντα είμαι εδώ', count: 2 }]);
+});
+
+test('repeatedPhrases: answers without a situation keep the old behaviour', () => {
+  const same = ['όπως πάντα είμαι εδώ', 'ναι, όπως πάντα είμαι εδώ', 'όπως πάντα είμαι εδώ, φυσικά'];
+  // No answer carries a situation: counted once per answer, as before.
+  assert.deepEqual(repeatedPhrases(same.map((text) => answerOf(text))), [{ phrase: 'όπως πάντα είμαι εδώ', count: 3 }]);
+  // Next to answers that carry one, each answer without it is a situation of its own.
+  const mixed = repeatedPhrases([inSituation('a', same[0]), inSituation('a', same[1]), answerOf(same[2]), answerOf(same[0])]);
+  assert.deepEqual(mixed, [{ phrase: 'όπως πάντα είμαι εδώ', count: 3 }]);
 });

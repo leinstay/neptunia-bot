@@ -31,6 +31,24 @@ function axesLine(values) {
   return AXES.map((axis) => `${axis} ${num(values?.[axis])}`).join(' · ');
 }
 
+/**
+ * The medians of situation `n` from a run's `situationMedians`; null when the
+ * situation had no scored answer.
+ */
+function situationMedian(run, n) {
+  return run.situationMedians.find((m) => m?.n === n) ?? null;
+}
+
+/**
+ * `by situation: 1: 9 · 2: 3 · 3: -`, the median overall of every situation;
+ * null for a run stored before the medians by situation or with none of them.
+ */
+function bySituationLine(run) {
+  if (!Array.isArray(run?.situationMedians) || run.situationMedians.length === 0) return null;
+  const parts = (run.situations ?? []).map((s) => `${s?.n}: ${num(situationMedian(run, s?.n)?.overall)}`);
+  return parts.length ? `by situation: ${parts.join(' · ')}` : null;
+}
+
 /** Every answer of a run, flat. */
 function answersOf(run) {
   return (run?.situations ?? []).flatMap((s) => s?.answers ?? []);
@@ -55,9 +73,11 @@ function checkOutcome(run) {
 
 /**
  * The card posted to the admin channel after a run: the case (clipped to 300
- * characters), its target, the verdict or how the run ended, the medians, how
- * many answers were scored, situations kept and dropped, repeated phrases,
- * tokens spent and the budget left, and the command that shows the details.
+ * characters), its target, the verdict or how the run ended, the medians, the
+ * median overall of every situation (`-` for one with no scored answer; the
+ * line is left out for a run stored without them), how many answers were
+ * scored, situations kept and dropped, repeated phrases, tokens spent and the
+ * budget left, and the command that shows the details.
  * Never longer than 1800 characters.
  * @param {object} run  A run object as stored by `cases.saveRun`.
  * @returns {string}
@@ -70,12 +90,14 @@ export function renderCard(run) {
     `> ${clip(run?.caseText, CASE_TEXT_MAX).replace(/\n/g, ' ')}`,
     `medians: ${axesLine(run?.medians)}`,
   ];
+  const bySituation = bySituationLine(run);
+  if (bySituation) lines.push(bySituation);
   if (!run?.passed && Array.isArray(run?.reasons) && run.reasons.length > 0) {
     lines.push(`why: ${clip(run.reasons.join('; '), REASONS_MAX)}`);
   }
   lines.push(`answers scored: ${scored} of ${answers.length} · situations: ${run?.situations?.length ?? 0} kept, ${run?.dropped ?? 0} dropped`);
   if (Array.isArray(run?.repeated) && run.repeated.length > 0) {
-    lines.push(`repeated phrases across answers: ${run.repeated.length}`);
+    lines.push(`phrases repeated across situations: ${run.repeated.length}`);
   }
   lines.push(`tokens: ${num(run?.tokens?.spent)} spent, ${num(run?.tokens?.left)} left today`);
   lines.push(`details: /nep mentor show ${run?.caseId}`);
@@ -114,8 +136,9 @@ function answerLines(answer, target) {
 
 /**
  * The file attached to the card: the case, the verdict, the reference, every
- * situation with its transcript and every answer with its facts, points per
- * axis and the mentor's comment.
+ * situation with its transcript (its header carries its median overall and
+ * goal, `-` for none, unless the run was stored without them) and every
+ * answer with its facts, points per axis and the mentor's comment.
  * @param {object} run  A run object as stored by `cases.saveRun` (with its `id`).
  * @returns {{ name: string, text: string }}
  */
@@ -137,8 +160,14 @@ export function renderFile(run) {
     for (const { phrase, count } of run.repeated) lines.push(`- "${phrase}" x${count}`);
   }
   lines.push('', `Situations: ${run?.situations?.length ?? 0} kept, ${run?.dropped ?? 0} dropped`);
+  const hasMedians = Array.isArray(run?.situationMedians);
   for (const situation of run?.situations ?? []) {
-    lines.push('', `${RULE}`, `Situation ${situation.n}: ${situation.title ?? ''}`, RULE, String(situation.transcript ?? ''));
+    lines.push('', `${RULE}`, `Situation ${situation.n}: ${situation.title ?? ''}`);
+    if (hasMedians) {
+      const medians = situationMedian(run, situation.n);
+      lines.push(`medians: overall ${num(medians?.overall)} · goal ${num(medians?.goal)}`);
+    }
+    lines.push(RULE, String(situation.transcript ?? ''));
     if (!situation.answers?.length) {
       lines.push('', '(no answers)');
       continue;

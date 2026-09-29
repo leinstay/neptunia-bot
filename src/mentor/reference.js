@@ -49,6 +49,8 @@ const RARE_PER_1000 = 0.5;
 const RARE_MIN_AUTHORS = 2;
 const SAMPLE_MAX_CHARS = 200;
 const MAX_PHRASES = 10;
+/** Under this many measured characters an answer's comma rate is not reported. */
+const DENSITY_MIN_CHARS = 150;
 
 function countOf(text, re) {
   return (text.match(re) ?? []).length;
@@ -224,8 +226,11 @@ export function sampleLines(messages, n, rng) {
  * @param {{ messages: { text: string, replyTo?: string|null }[] }} answer
  * @param {{ unused: string[], rare?: string[], length: { p75: number } }} profile  A styleProfile result.
  * @returns {{ chars: number, messages: number, unusedMarks: Record<string, number>,
- *   rareMarks: Record<string, number>,
- *   commaPer1000: number, lengthOverP75: boolean, replyQuoted: boolean }}
+ *   rareMarks: Record<string, number>, commas: number,
+ *   commaPer1000: number|null, lengthOverP75: boolean, replyQuoted: boolean }}
+ *   `commas`: how many commas the measured text has. `commaPer1000`: commas per 1000 characters, one
+ *   decimal, only when the measured text has at least 150 characters; null for a shorter one, where one
+ *   comma more or less swings the rate too far to mean anything.
  *   `unusedMarks`: the marks people never use that the answer contains, with their counts.
  *   `rareMarks`: the marks listed in the profile's `rare` that the answer contains, with their counts
  *   (empty for a profile without `rare`).
@@ -251,7 +256,8 @@ export function answerFacts(answer, profile) {
     messages: answer?.messages?.length ?? 0,
     unusedMarks,
     rareMarks,
-    commaPer1000: chars > 0 ? round((counts.comma * 1000) / chars, 1) : 0,
+    commas: counts.comma,
+    commaPer1000: chars >= DENSITY_MIN_CHARS ? round((counts.comma * 1000) / chars, 1) : null,
     lengthOverP75: p75 > 0 && longest > p75,
     replyQuoted: (answer?.messages ?? []).some((message) => message?.replyTo != null),
   };
@@ -259,20 +265,30 @@ export function answerFacts(answer, profile) {
 
 /**
  * Word phrases the persona repeats across answers -- a verbal tic the chat would notice.
- * Words are runs of letters/digits, lowercased; a phrase counts once per answer and never spans two
- * messages. A phrase inside a longer reported phrase with the same count is left out.
- * @param {{ messages: { text: string }[] }[]} answers
+ * Words are runs of letters/digits, lowercased; a phrase never spans two messages. A phrase inside a
+ * longer reported phrase with the same count is left out.
+ *
+ * Several answers to the same situation naturally share words, which says nothing about a habit; a
+ * habit comes back in different situations. So when at least one answer carries a `situation` (any
+ * value usable as a Map key), a phrase counts once per situation, and an answer without one counts as
+ * a situation of its own. When no answer carries one, a phrase counts once per answer.
+ * @param {{ situation?: *, messages: { text: string }[] }[]} answers
  * @param {number} [minWords]
- * @returns {{ phrase: string, count: number }[]}  Phrases of minWords+ words found in 2+ answers,
- *   longest first, at most 10.
+ * @returns {{ phrase: string, count: number }[]}  Phrases of minWords+ words found in 2+ situations
+ *   (or 2+ answers when no answer carries a situation), longest first, at most 10. `count` is the
+ *   number of distinct situations the phrase occurs in, or of answers when no answer carries a situation.
  */
 export function repeatedPhrases(answers, minWords = 3) {
   const min = Math.max(1, Math.floor(Number(minWords) || 1));
   const counts = new Map();
   const extensions = new Map();
+  // The phrases already counted for each situation; an answer without one is a key of its own.
+  const seenBy = new Map();
 
   for (const answer of answers ?? []) {
-    const seen = new Set();
+    const key = answer?.situation !== undefined ? answer.situation : Symbol('answer');
+    if (!seenBy.has(key)) seenBy.set(key, new Set());
+    const seen = seenBy.get(key);
     for (const message of answer?.messages ?? []) {
       const words = (String(message?.text ?? '').toLocaleLowerCase().match(/[\p{L}\p{N}]+/gu)) ?? [];
       for (let size = min; size <= words.length; size++) {

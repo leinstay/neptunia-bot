@@ -149,28 +149,58 @@ function median(values) {
   return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
 }
 
+/** The axes a single situation is held to. */
+const SITUATION_AXES = ['overall', 'goal'];
+
+/**
+ * The medians of `overall` and `goal` of every situation that has a scored
+ * answer; `n` is the situation's 1-based position in `groups`.
+ */
+function situationMedians(groups) {
+  if (!Array.isArray(groups)) return [];
+  const out = [];
+  groups.forEach((group, i) => {
+    const list = Array.isArray(group) ? group.filter(Boolean) : [];
+    if (list.length === 0) return;
+    const entry = { n: i + 1 };
+    for (const axis of SITUATION_AXES) entry[axis] = median(list.map((s) => s[axis]));
+    out.push(entry);
+  });
+  return out;
+}
+
 /**
  * The pass rule over the scored answers: the median of each axis (nulls
  * ignored; an axis with only nulls has a null median and is not checked). The
  * case passes when the median `overall` and the median `goal` are at least
- * `passCfg.score` and no median is under `passCfg.floor`. `reasons` says, in
- * operator English, what failed.
+ * `passCfg.score` and no median is under `passCfg.floor`. With `groups`, the
+ * scores of each situation, every situation is held to the floor as well: the
+ * case fails when the median `overall` or the median `goal` of any one
+ * situation is under `passCfg.floor`, whatever the medians over all answers.
+ * `reasons` says, in operator English, what failed: the rule over all answers
+ * first, then `situation <n>: <axis> <median> is under the floor <floor>` per
+ * failing situation and axis.
  * @param {{ human: number|null, character: number|null, rules: number|null, goal: number, overall: number }[]} scores
  * @param {{ score: number, floor: number }} passCfg  The `mentor.pass` config section.
+ * @param {object[][]} [groups]  One array of scores per situation, in order (a falsy score is left out; a
+ *   situation with no score left is left out of `situations` but keeps its place in the numbering).
  * @returns {{ passed: boolean, medians: { human: number|null, character: number|null, rules: number|null,
- *   goal: number|null, overall: number|null }, reasons: string[] }}
+ *   goal: number|null, overall: number|null }, situations: { n: number, overall: number|null, goal: number|null }[],
+ *   reasons: string[] }}  `situations`: the per-situation medians, `n` from 1 in the order of `groups`;
+ *   `[]` without `groups`.
  */
-export function verdict(scores, passCfg) {
+export function verdict(scores, passCfg, groups) {
   const list = (scores ?? []).filter(Boolean);
   const medians = {};
   for (const axis of AXES) medians[axis] = median(list.map((s) => s[axis]));
+  const situations = situationMedians(groups);
   // The config.json defaults when a value is missing: a missing number must never pass everything.
   const passScore = Number.isFinite(passCfg?.score) ? passCfg.score : 7;
   const floor = Number.isFinite(passCfg?.floor) ? passCfg.floor : 5;
   const reasons = [];
   if (medians.overall === null || medians.goal === null) {
     reasons.push('no answer was scored');
-    return { passed: false, medians, reasons };
+    return { passed: false, medians, situations, reasons };
   }
   for (const axis of ['overall', 'goal']) {
     if (medians[axis] < passScore) reasons.push(`${axis} ${medians[axis]} is under the pass score ${passScore}`);
@@ -182,5 +212,11 @@ export function verdict(scores, passCfg) {
     if ((axis === 'overall' || axis === 'goal') && value < passScore) continue;
     reasons.push(`${axis} ${value} is under the floor ${floor}`);
   }
-  return { passed: reasons.length === 0, medians, reasons };
+  for (const situation of situations) {
+    for (const axis of SITUATION_AXES) {
+      const value = situation[axis];
+      if (value !== null && value < floor) reasons.push(`situation ${situation.n}: ${axis} ${value} is under the floor ${floor}`);
+    }
+  }
+  return { passed: reasons.length === 0, medians, situations, reasons };
 }

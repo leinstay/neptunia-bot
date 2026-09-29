@@ -99,6 +99,39 @@ test('renderCard: shows unscored answers and null medians', () => {
   assert.match(card, /overall -/);
 });
 
+const BY_SITUATION = [
+  { n: 1, overall: 9, goal: 8 },
+  { n: 2, overall: 3, goal: 4 },
+  { n: 3, overall: 7, goal: 7 },
+  { n: 5, overall: 6.5, goal: 7 },
+];
+
+test('renderCard: shows the overall median of every situation', () => {
+  const card = renderCard(fakeRun({ situationMedians: BY_SITUATION }));
+  assert.ok(card.length <= 1800);
+  const lines = card.split('\n');
+  const at = lines.findIndex((l) => l.startsWith('medians: '));
+  // Situation 4 had no scored answer.
+  assert.equal(lines[at + 1], 'by situation: 1: 9 · 2: 3 · 3: 7 · 4: - · 5: 6.5');
+});
+
+test('renderCard: a run stored before the medians by situation has no such line', () => {
+  const run = fakeRun();
+  assert.equal('situationMedians' in run, false);
+  assert.doesNotMatch(renderCard(run), /by situation/);
+  assert.doesNotMatch(renderFile(run).text, /^medians: overall/m);
+  assert.doesNotMatch(renderCard(fakeRun({ situationMedians: [] })), /by situation/);
+});
+
+test('renderFile: prints both medians in the header of every situation', () => {
+  const text = renderFile(fakeRun({ situationMedians: BY_SITUATION })).text;
+  const header = (n) => new RegExp(`^Situation ${n}: situation ${n} [^\\n]*\\n(medians: [^\\n]*)$`, 'm').exec(text)?.[1];
+  assert.equal(header(1), 'medians: overall 9 · goal 8');
+  assert.equal(header(2), 'medians: overall 3 · goal 4');
+  assert.equal(header(4), 'medians: overall - · goal -');
+  assert.equal(header(5), 'medians: overall 6.5 · goal 7');
+});
+
 test('renderFile: lists every answer with its points', () => {
   const run = fakeRun();
   const file = renderFile(run);

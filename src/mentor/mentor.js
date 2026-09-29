@@ -474,6 +474,7 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
       dropped: 0,
       repeated: [],
       medians: emptyMedians(),
+      situationMedians: [],
       passed: false,
       reasons: [],
       tokens: { spent: 0, left: 0 },
@@ -510,8 +511,9 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
 
       await answerAll(ctx, { run, prepared, view, self, reference, samples });
       if (run.target === 'reply') {
-        const all = run.situations.flatMap((s) => s.answers);
-        run.repeated = repeatedPhrases(all.map((a) => ({ messages: a.messages.map((text) => ({ text })) })));
+        // Tagged with their situation: a phrase shared only by the samples of one situation is no habit.
+        const all = run.situations.flatMap((s) => s.answers.map((a) => ({ situation: s.n, messages: a.messages.map((text) => ({ text })) })));
+        run.repeated = repeatedPhrases(all);
       }
       await scoreAll(ctx, { run, item, view, self, reference, feedback });
       if (!run.situations.some((s) => s.answers.some((a) => a.score))) throw new RunEnd('error', 'no answer was scored');
@@ -522,9 +524,12 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
       else run.error = end.reason;
     }
 
-    const scores = run.situations.flatMap((s) => s.answers.map((a) => a.score)).filter(Boolean);
-    const result = verdict(scores, hot.config.mentor?.pass);
+    // One group per situation, in order, so a situation's place in the verdict is its `n`.
+    const groups = run.situations.map((s) => s.answers.map((a) => a.score).filter(Boolean));
+    const scores = groups.flat();
+    const result = verdict(scores, hot.config.mentor?.pass, groups);
     run.medians = result.medians;
+    run.situationMedians = result.situations;
     run.reasons = result.reasons;
     run.passed = !run.stopped && !run.error && result.passed;
     run.finishedAt = new Date(now()).toISOString();

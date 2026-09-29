@@ -350,7 +350,8 @@ test('run: the run object carries situations, answers, scores and the verdict', 
     assert.equal(first.answers[0].silent, false);
     assert.equal(first.answers[0].facts.messages, 1);
     assert.deepEqual(first.answers[0].score, score());
-    assert.deepEqual(run.repeated.map((r) => r.count), [4]);
+    // The same answer in both situations: counted once per situation, not once per answer.
+    assert.deepEqual(run.repeated.map((r) => r.count), [2]);
     assert.deepEqual(run.medians, { human: 8, character: 8, rules: 8, goal: 8, overall: 8 });
     assert.equal(run.passed, true);
     assert.equal(run.stopped, undefined);
@@ -362,6 +363,39 @@ test('run: the run object carries situations, answers, scores and the verdict', 
     assert.equal(windows[0].options.embedTextChars, 300);
     assert.ok(windows[0].options.minTs < NOW - 6 * 86400000 && windows[0].options.minTs > NOW - 8 * 86400000);
   }));
+
+test('run: a failing situation fails the run and is named in the reasons', () => {
+  const [first, second] = SITUATIONS.situations;
+  const situations = { situations: [first, second, { ...first, title: 'third question' }] };
+  const low = { human: 8, character: 8, rules: 8, goal: 8, overall: 3, comment: 'misses the point' };
+  const llm = fakeLlm({ situations, scoreFor: (id) => (id.startsWith('s2') ? low : score(9)) });
+  return withSetup({ config: { mentor: { situations: 3 } }, llm }, async ({ mentor, cases }) => {
+    const item = cases.add(GUILD, { text: CASE_TEXT, target: 'reply' });
+    const run = await (await mentor.run(item.id)).done;
+    assert.equal(run.situations.length, 3);
+    // Over all six answers the medians pass: only the situation fails.
+    assert.equal(run.medians.overall, 9);
+    assert.equal(run.passed, false);
+    assert.deepEqual(run.reasons, ['situation 2: overall 3 is under the floor 5']);
+    assert.equal(cases.get(GUILD, item.id).state, 'failing');
+  });
+});
+
+test('run: the run stores the medians by situation', () =>
+  withSetup(
+    { llm: fakeLlm({ scoreFor: (id) => (id === 's2a1' ? null : id.startsWith('s1') ? score(9) : score(7)) }) },
+    async ({ mentor, cases }) => {
+      const item = cases.add(GUILD, { text: CASE_TEXT, target: 'reply' });
+      const run = await (await mentor.run(item.id)).done;
+      const expected = [
+        { n: 1, overall: 9, goal: 8 },
+        { n: 2, overall: 7, goal: 8 },
+      ];
+      assert.deepEqual(run.situationMedians, expected);
+      assert.equal(run.passed, true);
+      assert.deepEqual(cases.lastRun(GUILD, item.id).situationMedians, expected);
+    },
+  ));
 
 test('run: saves the run and the case state', () =>
   withSetup({}, async ({ mentor, cases }) => {
@@ -425,7 +459,7 @@ test('run: the situations and score requests carry their blocks', () =>
     assert.deepEqual(answers[0], { id: 's1a1', messages: ['ναι, the limit is reached'], reactions: [], silent: false });
     const facts = JSON.parse(/<facts>\n([\s\S]*?)\n<\/facts>/.exec(scoreCall.user)[1]);
     assert.deepEqual(Object.keys(facts), ['s1a1', 's1a2', 'repeated']);
-    assert.equal(facts.repeated[0].count, 4);
+    assert.equal(facts.repeated[0].count, 2);
   }));
 
 test('run: the owner feedback reaches the requests, newest first', () =>
