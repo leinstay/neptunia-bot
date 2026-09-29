@@ -562,6 +562,8 @@ export function createAdmin({
   mentor,
   mentorCases,
   mentorBudget,
+  fetchImpl = fetch,
+  getApiKey,
 }) {
   function isOwner(userId) {
     const owners = hot.config?.bot?.owners ?? [];
@@ -1777,16 +1779,24 @@ function cmdModelSet(args) {
 // Never touches the daily request cap or token calibration
 // (src/llm/openrouter.js#complete's `countAgainstDailyCap`
 // / `skipCalibration` options), never writes under data/.
+// The drawing model cannot take a chat completion and a generation costs
+// money and counts against the image caps, so the `image` role is checked
+// against the provider's public model listing instead: one free GET.
 // ---------------------------------------------------------------------
 
 /** `/nep ping classifier` pings the three classifier roles together. */
 const PING_GROUPS = { classifier: ['classifier.text', 'classifier.media', 'classifier.video'] };
 
-/** The roles one `/nep ping` argument stands for: one role, a group, or (anything else) all of them. */
+/** The pseudo-role of `/nep ping` that checks `image.model` against the listing; never a MODEL_ROLES entry. */
+const PING_IMAGE_ROLE = 'image';
+
+/** The roles one `/nep ping` argument stands for: one role, a group, the image check, or (anything else)
+ * all of them, the image check last. */
 function pingRolesFor(role) {
   if (MODEL_ROLES.includes(role)) return [role];
   if (PING_GROUPS[role]) return PING_GROUPS[role];
-  return MODEL_ROLES;
+  if (role === PING_IMAGE_ROLE) return [PING_IMAGE_ROLE];
+  return [...MODEL_ROLES, PING_IMAGE_ROLE];
 }
 
 /** The model id one role resolves to right now — used by model show and ping alike. */
@@ -1910,19 +1920,79 @@ function withWebLine(lines, requested) {
   return [...lines, line];
 }
 
+/** `${baseUrl}/models/<model>/endpoints`, tolerating trailing slashes on `baseUrl` like the llm
+ * and image clients do; the model id goes in as is, its slash is a path separator. */
+function modelEndpointsUrl(baseUrl, model) {
+  return `${String(baseUrl).replace(/\/+$/, '')}/models/${model}/endpoints`;
+}
+
+/** The image line before the drawing switch note: one GET against the provider's public
+ * listing, or none at all when no model is set or its family is refused. Never rejects;
+ * never generates, never counts against a cap, never writes state, never shows the key. */
+async function checkImageListing(cfg) {
+  const model = cfg?.image?.model;
+  if (!model) return `${PING_IMAGE_ROLE}: (no model configured)`;
+  if (!(images?.familyOf ?? imageFamilyOf)(model)) return `${PING_IMAGE_ROLE}: ${model} — unsupported family`;
+
+  const start = Date.now();
+  const apiKey = typeof getApiKey === 'function' ? getApiKey() : undefined;
+  let response;
+  try {
+    response = await fetchImpl(modelEndpointsUrl(cfg?.llm?.baseUrl, model), {
+      method: 'GET',
+      headers: {
+        ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
+        'X-Title': 'neptunia-bot',
+      },
+      signal: AbortSignal.timeout(cfg?.llm?.pingTimeoutMs ?? 30000),
+    });
+  } catch (err) {
+    const reason = err?.name === 'TimeoutError' || err?.name === 'AbortError' ? 'timeout' : 'network';
+    return `${PING_IMAGE_ROLE}: ${model} — failed: ${reason}`;
+  }
+  if (response.status === 404) return `${PING_IMAGE_ROLE}: ${model} — not listed (HTTP 404)`;
+  if (!response.ok) return `${PING_IMAGE_ROLE}: ${model} — failed: HTTP ${response.status}`;
+
+  const json = await Promise.resolve()
+    .then(() => response.json())
+    .catch(() => null);
+  const modalities = json?.data?.architecture?.output_modalities;
+  if (!Array.isArray(modalities) || !modalities.includes('image')) {
+    return `${PING_IMAGE_ROLE}: ${model} — listed, but no image output`;
+  }
+  const endpoints = Array.isArray(json.data.endpoints) ? json.data.endpoints.length : 0;
+  return `${PING_IMAGE_ROLE}: ${model} — listed, image output, ${endpoints} endpoint(s), ${Date.now() - start} ms`;
+}
+
+/** Start the image check when the image role is requested; never rejects. The line notes when
+ * drawing is switched off (features.imageGeneration false; a missing key counts as on). */
+function startPingImage(requested, cfg) {
+  if (!requested.includes(PING_IMAGE_ROLE)) return null;
+  const off = cfg?.features?.imageGeneration === false;
+  return checkImageListing(cfg).then((line) => (off ? `${line} (features.imageGeneration is off)` : line));
+}
+
+/** `lines` with the image line appended last, after every model line and the lines that follow them. */
+function withImageLine(lines, imageLine) {
+  if (imageLine == null) return lines;
+  return [...lines, imageLine];
+}
+
 async function cmdPing(args) {
   if (!llm) throw new Error('ping is not available (no llm client configured)');
 
   const requested = pingRolesFor(args?.role);
+  const modelRoles = requested.filter((role) => role !== PING_IMAGE_ROLE);
   const cfg = hot.config;
-  const roleModel = new Map(requested.map((role) => [role, modelForRole(role, cfg)]));
+  const roleModel = new Map(modelRoles.map((role) => [role, modelForRole(role, cfg)]));
 
-  const youtube = startPingYoutube(requested);
+  const youtube = startPingYoutube(modelRoles);
+  const image = startPingImage(requested, cfg);
 
   const promptText = hot.prompts?.labels?.ping?.prompt;
   if (!promptText) {
-    const skipped = requested.map((role) => `${role}: ${roleModel.get(role) ?? '(no model configured)'} — skipped: label missing`);
-    return withWebLine(withYoutubeLine(skipped, requested, await youtube), requested).join('\n');
+    const skipped = modelRoles.map((role) => `${role}: ${roleModel.get(role) ?? '(no model configured)'} — skipped: label missing`);
+    return withImageLine(withWebLine(withYoutubeLine(skipped, modelRoles, await youtube), modelRoles), await image).join('\n');
   }
 
   const uniqueModels = [...new Set([...roleModel.values()].filter(Boolean))];
@@ -1946,7 +2016,7 @@ async function cmdPing(args) {
     }),
   );
 
-  const lines = requested.map((role) => {
+  const lines = modelRoles.map((role) => {
     const model = roleModel.get(role);
     if (!model) return `${role}: (no model configured)`;
     const outcome = results.get(model);
@@ -1954,7 +2024,7 @@ async function cmdPing(args) {
       ? formatPingSuccess(role, model, outcome.result, outcome.ms)
       : formatPingFailure(role, model, outcome.err, outcome.ms);
   });
-  return withWebLine(withYoutubeLine(lines, requested, await youtube), requested).join('\n');
+  return withImageLine(withWebLine(withYoutubeLine(lines, modelRoles, await youtube), modelRoles), await image).join('\n');
 }
 
   // ---------------------------------------------------------------------

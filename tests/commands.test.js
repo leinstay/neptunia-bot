@@ -49,7 +49,7 @@ test('buildCommandTree: top-level leaves (status, ping, reload, pause, resume, i
   const pingRole = findOption(ping.options, 'role');
   assert.equal(pingRole.type, 3); // STRING
   assert.equal(pingRole.required, false);
-  assert.deepEqual(pingRole.choices.map((c) => c.value), ['talk', 'analyzer', 'classifier.text', 'classifier.media', 'classifier.video', 'mentor', 'classifier']);
+  assert.deepEqual(pingRole.choices.map((c) => c.value), ['talk', 'analyzer', 'classifier.text', 'classifier.media', 'classifier.video', 'mentor', 'image', 'classifier']);
 
   const pause = findOption(command.options, 'pause');
   assert.equal(pause.type, 1); // SUBCOMMAND
@@ -299,6 +299,16 @@ test('buildCommandTree: model group (show/set) role choices are talk/analyzer/cl
   assert.equal(role.type, 3); // STRING
   assert.equal(role.required, true);
   assert.deepEqual(role.choices.map((c) => c.value), ['talk', 'analyzer', 'classifier.text', 'classifier.media', 'classifier.video', 'mentor']);
+});
+
+test('buildCommandTree: the ping role choices contain image, the model-set choices do not', () => {
+  const [command] = buildCommandTree('nep');
+  const pingRole = findOption(findOption(command.options, 'ping').options, 'role');
+  assert.ok(pingRole.choices.some((c) => c.value === 'image' && c.name === 'image'));
+
+  const set = findOption(findOption(command.options, 'model').options, 'set');
+  const setRole = findOption(set.options, 'role');
+  assert.ok(!setRole.choices.some((c) => c.value === 'image'));
 });
 
 test('buildCommandTree: warmup group (people, run, stop, users, channels, server, status, reset)', () => {

@@ -364,6 +364,8 @@ function makeAdmin(rootDir, extra = {}) {
     mentor: extra.mentor,
     mentorCases: extra.mentorCases,
     mentorBudget: extra.mentorBudget,
+    fetchImpl: extra.fetchImpl,
+    getApiKey: extra.getApiKey,
   });
   return { admin, hot, store };
 }
@@ -942,7 +944,7 @@ test('run: ping pings the six roles in parallel and reports latency, provider an
   const lines = body.split('\n');
 
   assert.equal(llm.calls.length, 4, 'talk, analyzer, media and video are four distinct models here; classifier.text falls back to classifier.media; mentor is unset');
-  assert.equal(lines.length, 6);
+  assert.equal(lines.length, 7);
   assert.ok(lines.some((l) => l.startsWith('talk: anthropic/claude-opus-4.6 — ok,') && l.includes('provider=provider-for-anthropic/claude-opus-4.6') && l.includes('tokens 5/1')));
   assert.ok(lines.some((l) => l.startsWith('analyzer: openrouter/analyzer-model — ok,')));
   assert.ok(lines.some((l) => l.startsWith('classifier.media: anthropic/claude-haiku-4.5 — ok,')));
@@ -1065,7 +1067,7 @@ test('run: ping de-duplicates identical models: one call, reported for every rol
   const lines = body.split('\n');
 
   assert.equal(llm.calls.length, 2, 'talk+analyzer share one model, classifier.media (and classifier.text, which falls back to it) share another: two calls');
-  assert.equal(lines.length, 6, 'still one line per requested role');
+  assert.equal(lines.length, 7, 'still one line per requested role');
   assert.ok(lines.some((l) => l.startsWith('talk: anthropic/claude-opus-4.6 — ok,')));
   assert.ok(lines.some((l) => l.startsWith('analyzer: anthropic/claude-opus-4.6 — ok,')));
   assert.ok(lines.some((l) => l.startsWith('classifier.text: anthropic/claude-haiku-4.5 — ok,')));
@@ -1182,8 +1184,9 @@ test('run: ping reports every role skipped when labels.ping.prompt is missing, w
 
   assert.equal(llm.calls.length, 0);
   const lines = body.split('\n');
-  assert.equal(lines.length, 6);
-  assert.ok(lines.every((l) => l.includes('skipped: label missing')));
+  assert.equal(lines.length, 7);
+  assert.ok(lines.slice(0, 6).every((l) => l.includes('skipped: label missing')));
+  assert.equal(lines[6], 'image: (no model configured)', 'the image check needs no label');
 });
 
 test('run: ping reports it is not available when no llm dependency was injected', async () => {
@@ -4232,7 +4235,7 @@ test('run: full ping appends the web line too; a talk-only ping or no lookup wir
   const llm = fakeLlm(() => ({ text: 'pong', usage: {}, estimated: 1 }));
   const { admin } = makeAdmin(rootDir, { hot, llm, lookup: fakeWebLookup(true) });
 
-  assert.equal((await admin.run('ping', {}, {})).split('\n').at(-1), 'web: API key — ok');
+  assert.equal((await admin.run('ping', {}, {})).split('\n').at(-2), 'web: API key — ok');
   assert.ok(!(await admin.run('ping', { role: 'talk' }, {})).includes('web:'));
 
   const { admin: bare } = makeAdmin(rootDir, { hot, llm });
@@ -4249,6 +4252,243 @@ test('run: ping classifier with the ping label missing still appends the web lin
   const lines = (await admin.run('ping', { role: 'classifier' }, {})).split('\n');
   assert.equal(llm.calls.length, 0);
   assert.equal(lines.at(-1), 'web: API key — missing');
+});
+
+// ---------------------------------------------------------------------------
+// ping: the image line, checked against the provider's public model listing
+// ---------------------------------------------------------------------------
+
+const IMAGE_MODEL = 'openai/gpt-image-2.5-flare';
+const FAKE_KEY = 'sk-or-v1-fakekeyfortests0000';
+
+/** A fake fetch: records every call and answers with `respond(url, init)`. */
+function fakeListingFetch(respond) {
+  const calls = [];
+  const impl = async (url, init) => {
+    calls.push({ url: String(url), init });
+    return respond(url, init);
+  };
+  impl.calls = calls;
+  return impl;
+}
+
+function listing(status, body) {
+  return { ok: status >= 200 && status < 300, status, json: async () => body };
+}
+
+function listedBody(modalities, endpoints) {
+  return { data: { id: IMAGE_MODEL, architecture: { output_modalities: modalities }, endpoints } };
+}
+
+/** A ping-ready hot config with the image model set, drawing on, and a base URL with a trailing slash. */
+function hotForImagePing(rootDir, { model = IMAGE_MODEL, imageGeneration = true } = {}) {
+  const hot = hotForPing(rootDir);
+  hot.config.llm.baseUrl = 'https://openrouter.ai/api/v1/';
+  hot.config.image = { model };
+  hot.config.features = { ...hot.config.features, imageGeneration };
+  return hot;
+}
+
+function imageAdmin(rootDir, { hot, fetchImpl, llm } = {}) {
+  return makeAdmin(rootDir, {
+    hot: hot ?? hotForImagePing(rootDir),
+    llm: llm ?? fakeLlm(() => ({ text: 'pong', usage: {}, estimated: 1 })),
+    fetchImpl,
+    getApiKey: () => FAKE_KEY,
+  });
+}
+
+test('ping: image listed with image output reports the endpoint count and latency', async () => {
+  const rootDir = makeRoot();
+  const fetchImpl = fakeListingFetch(() => listing(200, listedBody(['image', 'text'], [{}, {}])));
+  const { admin } = imageAdmin(rootDir, { fetchImpl });
+
+  const body = await admin.run('ping', { role: 'image' }, {});
+
+  assert.match(body, /^image: openai\/gpt-image-2\.5-flare — listed, image output, 2 endpoint\(s\), \d+ ms$/);
+  assert.equal(fetchImpl.calls.length, 1);
+  const [{ url, init }] = fetchImpl.calls;
+  assert.equal(url, 'https://openrouter.ai/api/v1/models/openai/gpt-image-2.5-flare/endpoints');
+  assert.equal(init.method, 'GET');
+  assert.equal(init.headers.Authorization, `Bearer ${FAKE_KEY}`);
+  assert.ok(init.signal instanceof AbortSignal, 'the request carries a timeout signal');
+});
+
+test('ping: image listed without the image modality says so', async () => {
+  const rootDir = makeRoot();
+  const fetchImpl = fakeListingFetch(() => listing(200, listedBody(['text'], [{}])));
+  const { admin } = imageAdmin(rootDir, { fetchImpl });
+
+  assert.equal(await admin.run('ping', { role: 'image' }, {}), `image: ${IMAGE_MODEL} — listed, but no image output`);
+});
+
+test('ping: image not listed on 404', async () => {
+  const rootDir = makeRoot();
+  const fetchImpl = fakeListingFetch(() => listing(404, { error: { message: 'not found' } }));
+  const { admin } = imageAdmin(rootDir, { fetchImpl });
+
+  assert.equal(await admin.run('ping', { role: 'image' }, {}), `image: ${IMAGE_MODEL} — not listed (HTTP 404)`);
+});
+
+test('ping: image failed with the HTTP status on any other error status', async () => {
+  const rootDir = makeRoot();
+  const fetchImpl = fakeListingFetch(() => listing(503, null));
+  const { admin } = imageAdmin(rootDir, { fetchImpl });
+
+  assert.equal(await admin.run('ping', { role: 'image' }, {}), `image: ${IMAGE_MODEL} — failed: HTTP 503`);
+});
+
+test('ping: image failed with timeout or network on a thrown error', async () => {
+  const cases = [
+    [new DOMException('The operation was aborted due to timeout', 'TimeoutError'), 'timeout'],
+    [new DOMException('This operation was aborted', 'AbortError'), 'timeout'],
+    [new TypeError('fetch failed'), 'network'],
+  ];
+  for (const [error, reason] of cases) {
+    const rootDir = makeRoot();
+    const fetchImpl = fakeListingFetch(() => {
+      throw error;
+    });
+    const { admin } = imageAdmin(rootDir, { fetchImpl });
+
+    assert.equal(await admin.run('ping', { role: 'image' }, {}), `image: ${IMAGE_MODEL} — failed: ${reason}`);
+  }
+});
+
+test('ping: image reports no model configured without a request', async () => {
+  const rootDir = makeRoot();
+  const fetchImpl = fakeListingFetch(() => listing(200, listedBody(['image'], [])));
+  const { admin } = imageAdmin(rootDir, { hot: hotForImagePing(rootDir, { model: '' }), fetchImpl });
+
+  assert.equal(await admin.run('ping', { role: 'image' }, {}), 'image: (no model configured)');
+  assert.equal(fetchImpl.calls.length, 0);
+});
+
+test('ping: image reports an unsupported family without a request', async () => {
+  const rootDir = makeRoot();
+  const fetchImpl = fakeListingFetch(() => listing(200, listedBody(['image'], [])));
+  const { admin } = imageAdmin(rootDir, { hot: hotForImagePing(rootDir, { model: 'acme/painter-1' }), fetchImpl });
+
+  assert.equal(await admin.run('ping', { role: 'image' }, {}), 'image: acme/painter-1 — unsupported family');
+  assert.equal(fetchImpl.calls.length, 0);
+});
+
+test('ping: image is still checked with features.imageGeneration off, and the line says so', async () => {
+  const rootDir = makeRoot();
+  const fetchImpl = fakeListingFetch(() => listing(200, listedBody(['image'], [{}])));
+  const { admin } = imageAdmin(rootDir, { hot: hotForImagePing(rootDir, { imageGeneration: false }), fetchImpl });
+
+  const body = await admin.run('ping', { role: 'image' }, {});
+  assert.equal(fetchImpl.calls.length, 1);
+  assert.match(body, /^image: openai\/gpt-image-2\.5-flare — listed, image output, 1 endpoint\(s\), \d+ ms \(features\.imageGeneration is off\)$/);
+});
+
+test('ping: the image check sends no chat completion and leaves state untouched', async () => {
+  const rootDir = makeRoot();
+  const fetchImpl = fakeListingFetch(() => listing(200, listedBody(['image'], [{}])));
+  const llm = fakeLlm(() => ({ text: 'pong', usage: {}, estimated: 1 }));
+  const calibrator = { ratio: 1 };
+  const images = { familyOf, quota: () => { throw new Error('the image caps must not be read'); }, generate: async () => { throw new Error('no generation'); } };
+  const hot = hotForImagePing(rootDir);
+  const { admin, store } = makeAdmin(rootDir, { hot, llm, fetchImpl, getApiKey: () => FAKE_KEY, calibrator, images });
+  const before = structuredClone(store.state.data);
+  let dirtied = 0;
+  store.state.markDirty = () => {
+    dirtied += 1;
+  };
+
+  const body = await admin.run('ping', { role: 'image' }, {});
+
+  assert.equal(llm.calls.length, 0, 'no chat completion');
+  assert.equal(fetchImpl.calls.length, 1);
+  assert.deepEqual(store.state.data, before);
+  assert.equal(dirtied, 0);
+  assert.deepEqual(calibrator, { ratio: 1 });
+  assert.ok(!body.includes(FAKE_KEY), 'the key never reaches the reply');
+  assert.ok(!body.includes('Bearer'));
+});
+
+test('ping: role image checks only the image model', async () => {
+  const rootDir = makeRoot();
+  const fetchImpl = fakeListingFetch(() => listing(200, listedBody(['image'], [{}])));
+  const llm = fakeLlm(() => ({ text: 'pong', usage: {}, estimated: 1 }));
+  const { admin } = makeAdmin(rootDir, {
+    hot: hotForImagePing(rootDir),
+    llm,
+    fetchImpl,
+    getApiKey: () => FAKE_KEY,
+    describer: fakeYoutubeDescriber({ status: 'ytdlp', detail: '', keySet: false }),
+    lookup: fakeWebLookup(true),
+  });
+
+  const lines = (await admin.run('ping', { role: 'image' }, {})).split('\n');
+  assert.equal(lines.length, 1);
+  assert.ok(lines[0].startsWith(`image: ${IMAGE_MODEL} — listed, image output,`));
+  assert.equal(llm.calls.length, 0);
+});
+
+test('ping: a model role alone never checks the image model', async () => {
+  const rootDir = makeRoot();
+  const fetchImpl = fakeListingFetch(() => listing(200, listedBody(['image'], [{}])));
+  const { admin } = imageAdmin(rootDir, { fetchImpl });
+
+  const body = await admin.run('ping', { role: 'talk' }, {});
+  assert.ok(!body.includes('image:'));
+  assert.equal(fetchImpl.calls.length, 0);
+});
+
+test('ping: without a role the image line comes last', async () => {
+  const rootDir = makeRoot();
+  const hot = hotForImagePing(rootDir);
+  hot.config.classifier.video = 'openrouter/video-model';
+  hot.config.features.webLookup = true;
+  const fetchImpl = fakeListingFetch(() => listing(404, null));
+  const { admin } = makeAdmin(rootDir, {
+    hot,
+    llm: fakeLlm(() => ({ text: 'pong', usage: {}, estimated: 1 })),
+    fetchImpl,
+    getApiKey: () => FAKE_KEY,
+    describer: fakeYoutubeDescriber({ status: 'ytdlp', detail: '', keySet: false }),
+    lookup: fakeWebLookup(true),
+  });
+
+  const lines = (await admin.run('ping', {}, {})).split('\n');
+  assert.equal(lines.at(-1), `image: ${IMAGE_MODEL} — not listed (HTTP 404)`);
+  assert.equal(lines.filter((l) => l.startsWith('image:')).length, 1);
+  assert.ok(lines.findIndex((l) => l.startsWith('mentor:')) < lines.length - 1);
+});
+
+test('ping: the image check runs in parallel with the model pings', async () => {
+  const rootDir = makeRoot();
+  let fetchStarted;
+  const started = new Promise((resolve) => {
+    fetchStarted = resolve;
+  });
+  const fetchImpl = fakeListingFetch(() => {
+    fetchStarted();
+    return listing(200, listedBody(['image'], [{}]));
+  });
+  // Every model ping waits for the image request to have started: a sequential check would never get there.
+  const llm = {
+    calls: [],
+    complete: async (messages, options) => {
+      llm.calls.push({ messages, options });
+      await started;
+      return { text: 'pong', usage: {}, estimated: 1 };
+    },
+  };
+  const { admin } = imageAdmin(rootDir, { fetchImpl, llm });
+
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error('the image check waited for the model pings')), 2000);
+  });
+  try {
+    const body = await Promise.race([admin.run('ping', {}, {}), timeout]);
+    assert.ok(body.split('\n').at(-1).startsWith(`image: ${IMAGE_MODEL} — listed, image output,`));
+  } finally {
+    clearTimeout(timer);
+  }
 });
 
 // ---------------------------------------------------------------------------

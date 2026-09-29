@@ -220,6 +220,8 @@ const admin = createAdmin({
   mentor,
   mentorCases,
   mentorBudget,
+  // /nep ping image: the key the llm client sends, for the free model-listing check; never shown.
+  getApiKey: () => openrouterKey,
 });
 const onInteraction = createInteractionHandler({ hot, admin, getGuildId });
 

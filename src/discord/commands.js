@@ -95,6 +95,7 @@ export function buildCommandTree(commandName) {
                 { name: 'classifier.media', value: 'classifier.media' },
                 { name: 'classifier.video', value: 'classifier.video' },
                 { name: 'mentor', value: 'mentor' },
+                { name: 'image', value: 'image' },
                 { name: 'classifier', value: 'classifier' },
               ],
             },
