@@ -8,7 +8,7 @@
 |---|---|
 | `/nep status` | 模型、校准、配额（包括图片计数和图像模型）、每服务器记忆状态、私聊开关和私有文件数 |
 | `/nep reload` | 立即重新加载配置和提示 |
-| `/nep ping [role]` | 向一个或所有模型角色（`talk`、`analyzer`、`classifier.text`、`classifier.media`、`classifier.video`、`mentor`）发送最小请求并报告模型、延迟、provider、token 或错误；`classifier.video` 之后报告 `youtube: API key — {status}`（如 `ok`、`not needed (yt-dlp ok)`、`missing (blocked)`）；`classifier.text` 之后报告 `web: API key — {status}`（`ok`、`missing` 或 `off`）。不计入 `llm.maxRequestsPerDay`，在暂停或预热期间均可使用 |
+| `/nep ping [role]` | 向一个或所有模型角色（`talk`、`analyzer`、`classifier.text`、`classifier.media`、`classifier.video`、`mentor`）发送最小请求并报告模型、延迟、provider、token 或错误；`classifier.video` 之后报告 `youtube: API key — {status}`（如 `ok`、`not needed (yt-dlp ok)`、`missing (blocked)`）；`classifier.text` 之后报告 `web: API key — {status}`（`ok`、`missing` 或 `off`）。`role:image` 检查 `image.model` 是否在 provider 的公开模型列表中且支持图片输出（一次免费 GET，不进行生成）；检查通过不代表生成一定成功。不指定 role 时 image 检查排在最后。不计入 `llm.maxRequestsPerDay`，在暂停或预热期间均可使用 |
 | `/nep pause` | 停止所有活动，将记忆刷入磁盘并卸载；进行中的 mentor 运行会被停止，其报告在刷盘前发布。暂停期间可安全编辑 `data/` |
 | `/nep resume` | 从 `data/` 重新加载记忆并继续；如有 JSON 文件无法解析则拒绝并指出问题文件 |
 | `/nep interject [channel]` | 立即插入该频道的当前对话 |

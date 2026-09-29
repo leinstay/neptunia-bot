@@ -8,7 +8,7 @@
 |---|---|
 | `/nep status` | モデル、キャリブレーション、クォータ（画像カウントと画像モデルを含む）、ギルドごとのメモリ状況、プライベートチャットのオン/オフとプライベートファイル数を表示 |
 | `/nep reload` | 設定とプロンプトを即時リロード |
-| `/nep ping [role]` | 一つまたはすべてのモデルロール（`talk`、`analyzer`、`classifier.text`、`classifier.media`、`classifier.video`、`mentor`）にミニマルリクエストを送信し、モデル、レイテンシ、プロバイダー、トークン数またはエラーを報告。`classifier.video` の後に `youtube: API key — {status}`（例: `ok`、`not needed (yt-dlp ok)`、`missing (blocked)`）を報告。`classifier.text` の後に `web: API key — {status}`（`ok`、`missing`、`off`）を報告。`llm.maxRequestsPerDay` にカウントされず、一時停止中やウォームアップ中でも動作 |
+| `/nep ping [role]` | 一つまたはすべてのモデルロール（`talk`、`analyzer`、`classifier.text`、`classifier.media`、`classifier.video`、`mentor`）にミニマルリクエストを送信し、モデル、レイテンシ、プロバイダー、トークン数またはエラーを報告。`classifier.video` の後に `youtube: API key — {status}`（例: `ok`、`not needed (yt-dlp ok)`、`missing (blocked)`）を報告。`classifier.text` の後に `web: API key — {status}`（`ok`、`missing`、`off`）を報告。`role:image` はプロバイダーの公開モデルリストで `image.model` を検証し（無料の GET 1 回、生成なし）、モデルが登録済みで画像出力に対応していることを確認するが、生成の成功は保証しない。ロール指定なしの場合 image の検査は最後に実行される。`llm.maxRequestsPerDay` にカウントされず、一時停止中やウォームアップ中でも動作 |
 | `/nep pause` | すべてのアクティビティを停止し、メモリをディスクにフラッシュしてアンロード。実行中の mentor ランは停止され、フラッシュ前にレポートが投稿される。一時停止中は `data/` を安全に編集可能 |
 | `/nep resume` | `data/` からメモリをリロードして再開。JSON ファイルがパースできない場合は拒否し、壊れたファイル名を表示 |
 | `/nep interject [channel]` | そのチャンネルの会話に今すぐ割り込む |
