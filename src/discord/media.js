@@ -2,7 +2,8 @@
 // src/discord/format.js (transcript rendering) and src/behavior/prompt.js
 // (vision selection): classifying an attachment/embed into a kind, choosing
 // which label form a media item takes in a transcript line, rewriting a
-// Discord CDN URL through the media proxy for resizing, and picking which
+// Discord CDN URL through the media proxy for resizing, recognising a pasted
+// link to a Discord CDN video attachment (discordCdnVideo), and picking which
 // pictures of a channel a live turn may see, and listing the video
 // candidates of a message (attached videos, video-site links) for the video
 // describer. No network I/O, no discord.js
@@ -105,6 +106,52 @@ export function classifyAttachment({ contentType, name, isVoice = false } = {}) 
   const ext = extOf(name);
   if (ext && EXT_KIND[ext]) return EXT_KIND[ext];
   return 'file';
+}
+
+// `/attachments/<channel id>/<attachment id>/<file name>` (or the
+// `ephemeral-attachments` prefix): the path of a file uploaded to Discord.
+const CDN_ATTACHMENT_PATH_RE = /^\/(?:ephemeral-)?attachments\/(\d+)\/(\d+)\/([^/]+)$/;
+
+/**
+ * The Discord CDN hosts (`cdn.discordapp.com`, `media.discordapp.net`) as a
+ * site list for extractVideoUrls (src/discord/video-sites.js), so a typed CDN
+ * link is found by the same URL extraction as a video-site link.
+ */
+export const DISCORD_CDN_SITES = Object.freeze([...DISCORD_CDN_HOSTS]);
+
+/**
+ * The attachment a Discord CDN link points at, when that attachment is a
+ * video: `{ id, name }`, else null. A member may paste the link of a file
+ * uploaded elsewhere instead of uploading it again; Discord then plays it,
+ * but the message carries no attachment. Non-null only for an http(s) URL on
+ * a DISCORD_CDN_HOSTS host whose path is `/attachments/<digits>/<digits>/<file>`
+ * or `/ephemeral-attachments/<digits>/<digits>/<file>` and whose file name
+ * classifies as `video` (see classifyAttachment). `id` is the second numeric
+ * segment -- the attachment's own snowflake, so the link shares the
+ * describer's cache entry with the original upload; `name` is the decoded
+ * file name.
+ * @param {string} url
+ * @returns {{ id: string, name: string }|null}
+ */
+export function discordCdnVideo(url) {
+  let parsed;
+  try {
+    parsed = new URL(String(url ?? ''));
+  } catch {
+    return null;
+  }
+  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return null;
+  if (!DISCORD_CDN_HOSTS.has(parsed.hostname.toLowerCase())) return null;
+  const match = CDN_ATTACHMENT_PATH_RE.exec(parsed.pathname);
+  if (!match) return null;
+  let name;
+  try {
+    name = decodeURIComponent(match[3]);
+  } catch {
+    return null;
+  }
+  if (classifyAttachment({ name }) !== 'video') return null;
+  return { id: match[2], name };
 }
 
 /**

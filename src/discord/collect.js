@@ -4,7 +4,15 @@
 
 import { PermissionFlagsBits, SnowflakeUtil, MessageReferenceType } from 'discord.js';
 import { log } from '../log.js';
-import { classifyAttachment, classifyEmbed, stickerUrl, emojiUrl, linkThumbnailCacheKey } from './media.js';
+import {
+  classifyAttachment,
+  classifyEmbed,
+  stickerUrl,
+  emojiUrl,
+  linkThumbnailCacheKey,
+  discordCdnVideo,
+  DISCORD_CDN_SITES,
+} from './media.js';
 import { extractVideoUrls, videoSiteFor, videoUrlCacheKey } from './video-sites.js';
 
 const TEXT_PREVIEW_SIZE_GUARD = 256 * 1024; // 256 KB — never fetch a bigger "text" attachment
@@ -135,6 +143,57 @@ function normalizeLinks(idPrefix, embeds, embedTextChars, rawContent, videoSites
   return { embedLinks, links };
 }
 
+/**
+ * Video attachments that arrive as a LINK to a Discord CDN attachment (see
+ * discordCdnVideo) instead of an upload: taken from the embeds whose `url` is
+ * one, then from such URLs typed in the text (found by extractVideoUrls over
+ * the CDN hosts, the same extraction as a video-site link). Each becomes a
+ * normal attachment entry `{ id, kind: 'video', name, url, size: null,
+ * durationSec: null }`, the embed's URL preferred over a typed one of the same
+ * id, de-duplicated by id against `attachments` (the real ones) and each
+ * other. `embedUrls` are the embeds to drop from the links; `urls` every
+ * matched URL, to strip from the text like a rendered embed's.
+ * @returns {{ videos: object[], embedUrls: Set<string>, urls: string[] }}
+ */
+function cdnVideoAttachments(embeds, rawContent, attachments) {
+  const known = new Set(attachments.map((attachment) => attachment.id));
+  const byId = new Map();
+  const embedUrls = new Set();
+  const urls = [];
+  const take = (url) => {
+    const video = discordCdnVideo(url);
+    if (!video) return false;
+    urls.push(url);
+    if (!known.has(video.id) && !byId.has(video.id)) {
+      byId.set(video.id, { id: video.id, kind: 'video', name: video.name, url, size: null, durationSec: null });
+    }
+    return true;
+  };
+  for (const embed of embeds ?? []) {
+    if (embed?.url && take(embed.url)) embedUrls.add(embed.url);
+  }
+  for (const url of extractVideoUrls(rawContent, DISCORD_CDN_SITES)) take(url);
+  return { videos: [...byId.values()], embedUrls, urls };
+}
+
+/**
+ * The media of a message or a snapshot: its real attachments followed by the
+ * Discord CDN video links (see cdnVideoAttachments), the links without the
+ * embeds of those videos, and the text with every rendered embed URL and
+ * every CDN video URL stripped (an `<url>` form included).
+ */
+function normalizeMedia(idPrefix, source, isVoice, rawContent, embedTextChars, videoSites) {
+  const real = normalizeAttachments(source.attachments, isVoice);
+  const { embedLinks, links } = normalizeLinks(idPrefix, source.embeds, embedTextChars, rawContent, videoSites);
+  const cdn = cdnVideoAttachments(source.embeds, rawContent, real);
+  const stripped = cdn.urls.flatMap((url) => [{ url: `<${url}>` }, { url }]);
+  return {
+    attachments: [...real, ...cdn.videos],
+    links: links.filter((link) => !cdn.embedUrls.has(link.url)),
+    content: stripEmbedUrls(rawContent, [...stripped, ...embedLinks]),
+  };
+}
+
 /** Remove the raw URL of every rendered link/gif embed from the message text, so it never appears twice. */
 function stripEmbedUrls(content, links) {
   let result = content;
@@ -145,16 +204,21 @@ function stripEmbedUrls(content, links) {
   return result.replace(/[ \t]{2,}/g, ' ').trim();
 }
 
-/** A forwarded message (message snapshot): its own content, media and stickers, no id/channel/author. */
+/**
+ * A forwarded message (message snapshot): its own content, media and stickers,
+ * no id/channel/author. A Discord CDN video link in it becomes a video
+ * attachment, as in the message itself (see normalizeMedia).
+ */
 function normalizeSnapshot(snapshot, embedTextChars, videoSites) {
   const isVoice = isVoiceMessageFlag(snapshot);
-  const attachments = normalizeAttachments(snapshot.attachments, isVoice);
   const cleanContent = snapshot.cleanContent ?? snapshot.content ?? '';
   const emojis = extractEmojis(cleanContent);
   const rawContent = cleanEmoji(cleanContent).trim();
-  const { embedLinks, links } = normalizeLinks(snapshot.id ?? 'fwd', snapshot.embeds, embedTextChars, rawContent, videoSites);
+  const { attachments, links, content } = normalizeMedia(
+    snapshot.id ?? 'fwd', snapshot, isVoice, rawContent, embedTextChars, videoSites,
+  );
   return {
-    content: stripEmbedUrls(rawContent, embedLinks),
+    content,
     attachments,
     links,
     stickers: normalizeStickers(snapshot.stickers),
@@ -168,7 +232,10 @@ function normalizeSnapshot(snapshot, embedTextChars, videoSites) {
  * (default `config.media.embedTextChars`, see config.json).
  * `options.videoSites` (default `[]`) lists the video-site hosts whose URLs
  * typed in the text become synthetic `link` items (see normalizeLinks), in
- * the message and its forwarded snapshots alike.
+ * the message and its forwarded snapshots alike. A link to a Discord CDN
+ * video attachment (embedded or typed) becomes a `video` attachment after the
+ * real ones, not a link, with its URL stripped from `content` (see
+ * cdnVideoAttachments), so it is labelled, watched and cached like an upload.
  * @param {object} message  A discord.js Message.
  * @param {string} selfId
  * @param {{ embedTextChars?: number, videoSites?: string[] }} [options]
@@ -177,11 +244,12 @@ export function normalizeMessage(message, selfId, options = {}) {
   const embedTextChars = options.embedTextChars ?? 200;
   const videoSites = options.videoSites ?? [];
   const isVoice = isVoiceMessageFlag(message);
-  const attachments = normalizeAttachments(message.attachments, isVoice);
   const cleanContent = message.cleanContent ?? '';
   const emojis = extractEmojis(cleanContent);
   const rawContent = cleanEmoji(cleanContent).trim();
-  const { embedLinks, links } = normalizeLinks(message.id, message.embeds, embedTextChars, rawContent, videoSites);
+  const { attachments, links, content } = normalizeMedia(
+    message.id, message, isVoice, rawContent, embedTextChars, videoSites,
+  );
   const forwarded = [...(message.messageSnapshots?.values?.() ?? [])].map((snapshot) =>
     normalizeSnapshot(snapshot, embedTextChars, videoSites),
   );
@@ -204,7 +272,7 @@ export function normalizeMessage(message, selfId, options = {}) {
     authorName: message.member?.displayName ?? message.author.globalName ?? message.author.username,
     self: message.author.id === selfId,
     bot: message.author.bot && message.author.id !== selfId,
-    content: stripEmbedUrls(rawContent, embedLinks),
+    content,
     ts: message.createdTimestamp,
     // Real mentions -- the strongest signal for who this message names, see
     // src/behavior/prompt.js's <people> "asked about" window. `content`

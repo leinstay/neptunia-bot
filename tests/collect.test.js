@@ -7,6 +7,7 @@ import assert from 'node:assert/strict';
 import { normalizeMessage, fetchTextPreview, withTextPreviews, fetchHistory, fetchHistoryWindow, canAttach, canSend, fetchNeighbors } from '../src/discord/collect.js';
 import { MessageReferenceType, PermissionFlagsBits } from 'discord.js';
 import { videoUrlCacheKey } from '../src/discord/video-sites.js';
+import { collectVideos } from '../src/discord/media.js';
 
 function flagsWith(names) {
   const set = new Set(names);
@@ -628,4 +629,91 @@ test('canSend: still resolved through the bot member in a guild channel', () => 
 test('fetchNeighbors: a channel without a guild (a DM) has no neighbours', async () => {
   const config = { context: { neighborMessages: 5, neighborMaxAgeMinutes: 60, neighborMaxChannels: 8 }, bot: {} };
   assert.deepEqual(await fetchNeighbors(dmChannel(), config, 'self-id', 1000), []);
+});
+
+// --- normalizeMessage: links to Discord CDN video attachments ------------------
+
+const CDN_VIDEO_URL = 'https://cdn.discordapp.com/attachments/111/222/clip.mp4?ex=aa&is=bb&hm=cc';
+const CDN_VIDEO_ENTRY = { id: '222', kind: 'video', name: 'clip.mp4', url: CDN_VIDEO_URL, size: null, durationSec: null };
+
+test('normalizeMessage: an embedded Discord CDN video link becomes a video attachment, not a link', () => {
+  const raw = rawMessage({
+    cleanContent: `mirad ${CDN_VIDEO_URL} jajá`,
+    embeds: [{ url: CDN_VIDEO_URL, provider: null }],
+  });
+  const m = normalizeMessage(raw, 'self');
+  assert.deepEqual(m.attachments, [CDN_VIDEO_ENTRY]);
+  assert.deepEqual(m.links, []);
+  assert.equal(m.content, 'mirad jajá');
+});
+
+test('normalizeMessage: a typed Discord CDN video link without an embed becomes a video attachment', () => {
+  const raw = rawMessage({ cleanContent: `mirad <${CDN_VIDEO_URL}>.` });
+  const m = normalizeMessage(raw, 'self');
+  assert.deepEqual(m.attachments, [CDN_VIDEO_ENTRY]);
+  assert.deepEqual(m.links, []);
+  assert.equal(m.content, 'mirad .');
+});
+
+test('normalizeMessage: the embed URL of a CDN video is preferred over a typed one of the same id', () => {
+  const typed = 'https://media.discordapp.net/attachments/111/222/clip.mp4';
+  const raw = rawMessage({ cleanContent: `${typed} ${CDN_VIDEO_URL}`, embeds: [{ url: CDN_VIDEO_URL }] });
+  const m = normalizeMessage(raw, 'self');
+  assert.deepEqual(m.attachments, [CDN_VIDEO_ENTRY]);
+  assert.equal(m.content, '');
+});
+
+test('normalizeMessage: a CDN video link of an attachment already on the message is not duplicated', () => {
+  const raw = rawMessage({
+    cleanContent: CDN_VIDEO_URL,
+    attachments: new Map([['222', { id: '222', contentType: 'video/mp4', name: 'clip.mp4', url: 'https://cdn/real.mp4', size: 9, duration: 4 }]]),
+    embeds: [{ url: CDN_VIDEO_URL }],
+  });
+  const m = normalizeMessage(raw, 'self');
+  assert.equal(m.attachments.length, 1);
+  assert.equal(m.attachments[0].url, 'https://cdn/real.mp4');
+  assert.deepEqual(m.links, []);
+  assert.equal(m.content, '');
+});
+
+test('normalizeMessage: CDN video links follow the real attachments', () => {
+  const raw = rawMessage({
+    cleanContent: CDN_VIDEO_URL,
+    attachments: new Map([['a1', { id: 'a1', contentType: 'image/png', name: 'pic.png', url: 'https://cdn/pic.png' }]]),
+  });
+  const m = normalizeMessage(raw, 'self');
+  assert.deepEqual(m.attachments.map((a) => a.id), ['a1', '222']);
+});
+
+test('normalizeMessage: a forwarded snapshot carrying a CDN video link gets a video attachment', () => {
+  const raw = rawMessage({
+    cleanContent: '',
+    messageSnapshots: new Map([
+      ['snap1', { id: 'snap1', cleanContent: CDN_VIDEO_URL, attachments: new Map(), embeds: [{ url: CDN_VIDEO_URL }], stickers: new Map(), flags: flagsWith([]) }],
+    ]),
+  });
+  const m = normalizeMessage(raw, 'self');
+  assert.deepEqual(m.forwarded[0].attachments, [CDN_VIDEO_ENTRY]);
+  assert.deepEqual(m.forwarded[0].links, []);
+  assert.equal(m.forwarded[0].content, '');
+  assert.deepEqual(m.attachments, []);
+});
+
+test('normalizeMessage: a Discord CDN picture link stays a link', () => {
+  const url = 'https://cdn.discordapp.com/attachments/111/222/pic.png?ex=aa&is=bb&hm=cc';
+  const raw = rawMessage({ cleanContent: url, embeds: [{ url }] });
+  const m = normalizeMessage(raw, 'self');
+  assert.deepEqual(m.attachments, []);
+  assert.equal(m.links.length, 1);
+  assert.equal(m.links[0].site, 'cdn.discordapp.com');
+});
+
+test('normalizeMessage: collectVideos sees a CDN video link as one attachment video', () => {
+  const raw = rawMessage({ cleanContent: CDN_VIDEO_URL, embeds: [{ url: CDN_VIDEO_URL }] });
+  const videos = collectVideos(normalizeMessage(raw, 'self'), { sites: ['youtube.com'] });
+  assert.equal(videos.length, 1);
+  assert.equal(videos[0].source, 'attachment');
+  assert.equal(videos[0].itemId, '222');
+  assert.equal(videos[0].url, CDN_VIDEO_URL);
+  assert.equal(videos[0].durationSec, null);
 });

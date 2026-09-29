@@ -18,6 +18,7 @@ import {
   collectReadableLinks,
   isDescribable,
   selectPictures,
+  discordCdnVideo,
 } from '../src/discord/media.js';
 
 // --- classifyAttachment ------------------------------------------------------
@@ -1019,4 +1020,51 @@ test('selectPictures: a forwarded picture on the trigger is eligible and sorted 
   };
   const picked = selectPictures({ trigger, history: [trigger], visionCfg: { maxImages: 4, recentImages: 3, recentImageMinutes: 30 }, now });
   assert.deepEqual(picked.map((p) => [p.itemId, p.messageId]), [['fa', 't']]);
+});
+
+// --- discordCdnVideo ---------------------------------------------------------
+
+const CDN_QUERY = '?ex=aa&is=bb&hm=cc';
+
+test('discordCdnVideo: a cdn.discordapp.com attachment video gives the attachment id and file name', () => {
+  assert.deepEqual(discordCdnVideo(`https://cdn.discordapp.com/attachments/111/222/clip.mp4${CDN_QUERY}`), {
+    id: '222',
+    name: 'clip.mp4',
+  });
+});
+
+test('discordCdnVideo: the media.discordapp.net host and the ephemeral-attachments prefix are accepted', () => {
+  assert.deepEqual(discordCdnVideo(`https://media.discordapp.net/attachments/111/333/a.webm${CDN_QUERY}`), {
+    id: '333',
+    name: 'a.webm',
+  });
+  assert.deepEqual(discordCdnVideo(`https://cdn.discordapp.com/ephemeral-attachments/111/444/b.MOV${CDN_QUERY}`), {
+    id: '444',
+    name: 'b.MOV',
+  });
+});
+
+test('discordCdnVideo: the file name is decoded', () => {
+  assert.equal(discordCdnVideo('https://cdn.discordapp.com/attachments/1/2/%CE%B1%CE%B2%20c.mp4').name, 'αβ c.mp4');
+});
+
+test('discordCdnVideo: another host is rejected', () => {
+  assert.equal(discordCdnVideo('https://example.com/attachments/111/222/clip.mp4'), null);
+  assert.equal(discordCdnVideo('https://images-ext-1.discordapp.net/attachments/111/222/clip.mp4'), null);
+});
+
+test('discordCdnVideo: a non-video extension is rejected', () => {
+  assert.equal(discordCdnVideo(`https://cdn.discordapp.com/attachments/111/222/pic.png${CDN_QUERY}`), null);
+  assert.equal(discordCdnVideo('https://cdn.discordapp.com/attachments/111/222/notes.txt'), null);
+  assert.equal(discordCdnVideo('https://cdn.discordapp.com/attachments/111/222/noext'), null);
+});
+
+test('discordCdnVideo: a malformed path, protocol or URL is rejected', () => {
+  assert.equal(discordCdnVideo('https://cdn.discordapp.com/attachments/111/clip.mp4'), null);
+  assert.equal(discordCdnVideo('https://cdn.discordapp.com/attachments/abc/222/clip.mp4'), null);
+  assert.equal(discordCdnVideo('https://cdn.discordapp.com/attachments/111/222/x/clip.mp4'), null);
+  assert.equal(discordCdnVideo('https://cdn.discordapp.com/emojis/111/222/clip.mp4'), null);
+  assert.equal(discordCdnVideo('ftp://cdn.discordapp.com/attachments/111/222/clip.mp4'), null);
+  assert.equal(discordCdnVideo('not a url'), null);
+  assert.equal(discordCdnVideo(null), null);
 });
