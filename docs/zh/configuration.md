@@ -359,8 +359,10 @@ YouTube 链接的时长通过以下链式探测获取：首先尝试 yt-dlp，�
 | 键 | 默认值 | 说明 |
 |---|---|---|
 | `minAffinity` | `5` | 回复私信所需的最低公共好感度分数；所有者跳过此检查 |
-| `maxPerUserPerDay` | `100` | 每成员每日回复上限；达到时每天发送一次限制通知 |
-| `maxPerOwnerPerDay` | `200` | 机器人所有者每日回复上限 |
+| `maxPerUserPerDay` | `100` | 每成员每日到达模型的私信回合数（无论回复或沉默）；达到时每天发送一次限制通知 |
+| `maxPerOwnerPerDay` | `200` | 所有者每日到达模型的私信回合数（无论回复或沉默） |
+
+当 `features.relationships` 关闭时，公共分数保持为 0，因此在默认 `minAffinity` 下只有所有者可以发送私信。
 
 ## `warmup`
 

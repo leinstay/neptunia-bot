@@ -59,6 +59,8 @@
 
 当 `features.privateMessages` 开启时，通过门控（公会成员身份、已存储档案、公共好感度不低于 `private.minAffinity`、今日回复数未超限）的成员可以在 Discord 私信中与角色交谈。角色不变，公共记忆不变；私信中说的话存储在每成员的私有层中。
 
+只有机器人所有者可以查看成员的私有层（`/nep private show`）；此命令不可授权给其他用户。
+
 私有文件 `data/guilds/<guildId>/private/<userId>.json` 存储自己的 `relationship`、`interests`、`details`、`episodes`、`affinity`（初始分数 0）、每日回复计数器和观察缓冲区。不显示给其他对话，不由服务器批次写入，不在磁盘上混入公共档案。
 
 私信中角色看到公共和私有数据的合并：兴趣按主题合并（私有笔记优先），细节连接，回忆按日期排序。有效好感度为 `clamp(公共 + 私有, -100, 100)`。服务器上仅有公共分数。

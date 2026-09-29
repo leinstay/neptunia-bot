@@ -359,8 +359,10 @@ Settings for private chat (`features.privateMessages`). All hot-reloaded. The ga
 | Key | Default | Meaning |
 |---|---|---|
 | `minAffinity` | `5` | Minimum public attitude score to answer a DM; owners bypass this check |
-| `maxPerUserPerDay` | `100` | Daily reply cap per member; a cap hit posts a limit notice once per day |
-| `maxPerOwnerPerDay` | `200` | Daily reply cap for bot owners |
+| `maxPerUserPerDay` | `100` | DM turns per member per day that reached the model (answered or silent); a cap hit posts a limit notice once per day |
+| `maxPerOwnerPerDay` | `200` | DM turns per day for bot owners that reached the model (answered or silent) |
+
+With `features.relationships` off, public scores stay at 0, so with the default `minAffinity` only owners can DM.
 
 ## `warmup`
 

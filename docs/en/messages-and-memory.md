@@ -59,6 +59,8 @@ The analyzer also records things people taught the persona directly — words an
 
 When `features.privateMessages` is on, members who pass the gate (guild membership, a stored profile, public affinity at or above `private.minAffinity`, today's reply count under the cap) can write to the persona in Discord DMs. The persona is the same character with the same public memory; what is said in a DM stays in a per-member private layer.
 
+Only bot owners can inspect a member's private layer (`/nep private show`); this command cannot be granted to other users.
+
 The private file `data/guilds/<guildId>/private/<userId>.json` stores its own `relationship`, `interests`, `details`, `episodes`, `affinity` (score starting at 0), the daily reply counter and an observation buffer. It is never shown to any other conversation, never written by a server batch, and never mixed into the public profile on disk. The public profile is never changed by a DM.
 
 In a DM the persona sees public and private data merged: interests unioned by topic (the private note wins), details concatenated, episodes sorted by date, relationship paragraphs joined. The effective affinity is `clamp(public + private, -100, 100)`. On the server the persona sees only the public score.
