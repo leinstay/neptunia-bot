@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { deepMerge } from '../src/config.js';
 import { DailyCapError } from '../src/llm/openrouter.js';
 import { labels } from './fixtures/labels.js';
+import { withCapturedLogs } from './fixtures/capture-logs.js';
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -2227,4 +2228,455 @@ test('events: a message with no readable link never calls readLinks; a lookup fa
   const failing = { readLinks: async () => { throw new Error('boom'); } };
   await makeHandler({ config: webConfig(), lookup: failing })(fakeMessage({ id: 'm2', cleanContent: 'κοίτα', embeds: LINK_EMBEDS }));
   await new Promise((resolve) => setImmediate(resolve));
+});
+
+// ---------------------------------------------------------------------------
+// Private chat (features.privateMessages): a DM from a member of the served
+// guild runs through privateGate (src/behavior/private.js) and, when it
+// passes, a reply turn with the pinned guildId. Limit notices: a triggered
+// turn refused by a rail gets one plain line naming the limit.
+
+const TODAY = '2026-09-29';
+const TODAY_MS = Date.parse(`${TODAY}T12:00:00Z`);
+
+function privateConfig(overrides = {}) {
+  return baseConfig(deepMerge({ features: { privateMessages: true }, bot: { owners: ['owner1'] } }, overrides));
+}
+
+function fakeDmChannel(id = 'dm1', recipientId = 'u1', overrides = {}) {
+  const sent = [];
+  return {
+    id,
+    type: 'DM',
+    guild: null,
+    recipientId,
+    sent,
+    send: async (payload) => {
+      sent.push(payload);
+      return { id: `sent${sent.length}` };
+    },
+    messages: { cache: new Map([['dm-m1', {}]]), fetch: async () => ({}) },
+    ...overrides,
+  };
+}
+
+function fakeDmMessage(overrides = {}) {
+  const channel = overrides.channel ?? fakeDmChannel();
+  return fakeMessage({ id: 'dm-m1', guild: null, member: null, channel, channelId: channel.id, cleanContent: 'γεια σου', ...overrides });
+}
+
+/** A client whose served guild knows `members` (cache) and can fetch `fetchable` ones. */
+function fakeDmClient({ members = ['u1', 'owner1'], fetchable = [] } = {}) {
+  const fetchCalls = [];
+  const guild = {
+    id: 'g1',
+    members: {
+      me: { displayName: 'Ζωή' },
+      cache: new Map(members.map((id) => [id, { id }])),
+      fetch: async (id) => {
+        fetchCalls.push(id);
+        if (fetchable.includes(id)) return { id };
+        throw new Error('Unknown Member');
+      },
+    },
+  };
+  return { user: { id: 'self1', username: 'Neptunia' }, guilds: { cache: new Map([['g1', guild]]) }, fetchCalls };
+}
+
+/** A store with public profiles and private files; records the private bookkeeping calls. */
+function fakePrivateStore({ profiles = { u1: { affinity: { score: 10 } }, owner1: { affinity: { score: -50 } } }, privates = {} } = {}) {
+  const bumps = [];
+  const noticed = [];
+  return {
+    state: { data: {} },
+    getUser: (guildId, userId) => profiles[userId] ?? null,
+    getPrivate: (guildId, userId) => privates[userId] ?? null,
+    bumpPrivateReplies: (guildId, userId, today) => {
+      bumps.push([guildId, userId, today]);
+    },
+    markPrivateNoticed: (guildId, userId, today) => {
+      noticed.push([guildId, userId, today]);
+      privates[userId] = { ...(privates[userId] ?? {}), replies: { ...(privates[userId]?.replies ?? {}), noticedDay: today } };
+    },
+    bumps,
+    noticed,
+  };
+}
+
+function recordingTurns(result = { outcome: 'spoke' }, extra = {}) {
+  const calls = [];
+  const turns = fakeTurns({
+    runTurn: async (args) => {
+      calls.push(args);
+      return result;
+    },
+    ...extra,
+  });
+  turns.calls = calls;
+  return turns;
+}
+
+function makeDmHandler({ config, store, client, turns, memory, ...rest } = {}) {
+  return makeHandler({
+    config: config ?? privateConfig(),
+    store: store ?? fakePrivateStore(),
+    client: client ?? fakeDmClient(),
+    turns: turns ?? recordingTurns(),
+    memory: memory ?? fakeMemory(),
+    prompts: { labels },
+    now: () => TODAY_MS,
+    ...rest,
+  });
+}
+
+test('private: every gate reason drops the DM without a turn or an observe', async () => {
+  const cases = [
+    { reason: 'off', config: baseConfig({ bot: { owners: ['owner1'] } }) },
+    { reason: 'notMember', client: fakeDmClient({ members: [] }) },
+    { reason: 'unknown', store: fakePrivateStore({ profiles: {} }) },
+    { reason: 'affinity', store: fakePrivateStore({ profiles: { u1: { affinity: { score: 4 } } } }) },
+    {
+      reason: 'cap',
+      store: fakePrivateStore({ privates: { u1: { replies: { day: TODAY, count: 100, noticedDay: TODAY } } } }),
+    },
+  ];
+  for (const { reason, ...deps } of cases) {
+    const turns = recordingTurns();
+    const memory = fakeMemory();
+    const spontaneous = fakeSpontaneous();
+    const handler = makeDmHandler({ turns, memory, spontaneous, ...deps });
+    const message = fakeDmMessage();
+    await handler(message);
+    await settle();
+    assert.equal(turns.calls.length, 0, `${reason}: no turn`);
+    assert.equal(memory.observeCalls.length, 0, `${reason}: no observe`);
+    assert.equal(spontaneous.onMessageCalls.length, 0, `${reason}: no eavesdrop`);
+    assert.equal(message.channel.sent.length, 0, `${reason}: nothing sent`);
+  }
+});
+
+test('private: a member missing from the cache is fetched; a fetched member passes', async () => {
+  const client = fakeDmClient({ members: [], fetchable: ['u1'] });
+  const turns = recordingTurns();
+  const handler = makeDmHandler({ client, turns });
+  await handler(fakeDmMessage());
+  await settle();
+  assert.deepEqual(client.fetchCalls, ['u1']);
+  assert.equal(turns.calls.length, 1);
+});
+
+test('private: an owner below minAffinity is still answered (owners bypass the threshold)', async () => {
+  const turns = recordingTurns();
+  const handler = makeDmHandler({ turns });
+  await handler(fakeDmMessage({ author: { id: 'owner1', bot: false, globalName: 'Owner', username: 'owner' } }));
+  await settle();
+  assert.equal(turns.calls.length, 1);
+});
+
+test('private: the daily cap posts the limit notice once a day and marks it noticed', async () => {
+  const store = fakePrivateStore({ privates: { u1: { replies: { day: TODAY, count: 100, noticedDay: '2026-09-28' } } } });
+  const turns = recordingTurns();
+  const memory = fakeMemory();
+  const channel = fakeDmChannel();
+  const handler = makeDmHandler({ store, turns, memory });
+
+  await handler(fakeDmMessage({ channel }));
+  await settle();
+  await handler(fakeDmMessage({ channel, id: 'dm-m2' }));
+  await settle();
+
+  assert.equal(channel.sent.length, 1, 'one notice, not one per message');
+  assert.equal(channel.sent[0].content, 'limit reached (private.maxPerUserPerDay, 100/100)');
+  assert.deepEqual(channel.sent[0].allowedMentions, { parse: [] });
+  assert.equal(channel.sent[0].reply.messageReference, 'dm-m1');
+  assert.deepEqual(store.noticed, [['g1', 'u1', TODAY]]);
+  assert.equal(turns.calls.length, 0);
+  assert.equal(memory.observeCalls.length, 0);
+});
+
+test("private: an owner's cap notice names private.maxPerOwnerPerDay", async () => {
+  const store = fakePrivateStore({ privates: { owner1: { replies: { day: TODAY, count: 200, noticedDay: '' } } } });
+  const channel = fakeDmChannel('dm2', 'owner1');
+  const handler = makeDmHandler({ store });
+  await handler(fakeDmMessage({ channel, author: { id: 'owner1', bot: false, globalName: 'Owner', username: 'owner' } }));
+  await settle();
+  assert.equal(channel.sent.length, 1);
+  assert.equal(channel.sent[0].content, 'limit reached (private.maxPerOwnerPerDay, 200/200)');
+});
+
+test('private: a DM that passes is observed privately, answered with the pinned guildId, then counted', async () => {
+  const store = fakePrivateStore();
+  const turns = recordingTurns();
+  const memory = fakeMemory();
+  const spontaneous = fakeSpontaneous();
+  const channel = fakeDmChannel();
+  const handler = makeDmHandler({ store, turns, memory, spontaneous });
+
+  await handler(fakeDmMessage({ channel }));
+  await settle();
+
+  assert.equal(memory.observeCalls.length, 1);
+  assert.equal(memory.observeCalls[0][0], 'g1');
+  assert.equal(memory.observeCalls[0][1].content, 'γεια σου');
+  assert.deepEqual(memory.observeCalls[0][2], { direct: true, private: 'u1' });
+  assert.equal(turns.calls.length, 1);
+  const args = turns.calls[0];
+  assert.equal(args.channel, channel);
+  assert.equal(args.guildId, 'g1');
+  assert.equal(args.mode, 'reply');
+  assert.equal(args.triggerKind, 'private');
+  assert.equal(args.trigger.id, 'dm-m1');
+  assert.deepEqual(store.bumps, [['g1', 'u1', TODAY]]);
+  assert.equal(spontaneous.onMessageCalls.length, 0);
+  assert.equal(channel.sent.length, 0);
+});
+
+test('private: a turn that did not speak is not counted against the daily cap', async () => {
+  for (const outcome of ['skip', 'busy', 'error']) {
+    const store = fakePrivateStore();
+    const handler = makeDmHandler({ store, turns: recordingTurns({ outcome }) });
+    await handler(fakeDmMessage());
+    await settle();
+    assert.deepEqual(store.bumps, [], outcome);
+  }
+});
+
+test('private: a DM refused by a rail posts the limit notice', async () => {
+  const channel = fakeDmChannel();
+  const turns = recordingTurns({ outcome: 'refused', limit: { key: 'llm.maxRequestsPerDay', used: 800, cap: 800 } });
+  const store = fakePrivateStore();
+  const handler = makeDmHandler({ turns, store });
+  await handler(fakeDmMessage({ channel }));
+  await settle();
+  assert.equal(channel.sent.length, 1);
+  assert.equal(channel.sent[0].content, 'limit reached (llm.maxRequestsPerDay, 800/800)');
+  assert.deepEqual(store.bumps, []);
+});
+
+test('private: while busy elsewhere the DM is pending as "private"; the drain passes guildId and counts the reply', async () => {
+  let busy = true;
+  const turns = recordingTurns({ outcome: 'spoke' }, { isAnyBusy: () => busy });
+  const store = fakePrivateStore();
+  const memory = fakeMemory();
+  const channel = fakeDmChannel();
+  // A private ping is never rolled for the ignore chance: an rng that would ignore any ping.
+  const handler = makeDmHandler({ turns, store, memory, sleep: async () => {}, rng: () => 0 });
+
+  const { logs } = await withCapturedLogs(async () => {
+    await handler(fakeDmMessage({ channel }));
+    await settle();
+  });
+  const deferred = logs.find((l) => l.msg === 'mention: deferred');
+  assert.ok(deferred);
+  assert.equal(deferred.kind, 'private');
+  assert.equal(turns.calls.length, 0);
+  assert.equal(memory.observeCalls.length, 1, 'observed on arrival');
+
+  busy = false;
+  await handler.drainPending();
+
+  assert.equal(turns.calls.length, 1);
+  assert.equal(turns.calls[0].guildId, 'g1');
+  assert.equal(turns.calls[0].triggerKind, 'private');
+  assert.equal(turns.calls[0].channel, channel);
+  assert.deepEqual(store.bumps, [['g1', 'u1', TODAY]]);
+});
+
+test("private: the persona's own DM message is noted and observed privately under the partner's id", async () => {
+  const turns = recordingTurns();
+  const memory = fakeMemory();
+  const channel = fakeDmChannel('dm1', 'u1');
+  const handler = makeDmHandler({ turns, memory });
+  const message = fakeDmMessage({ channel, author: { id: 'self1', bot: true, globalName: 'Neptunia', username: 'neptunia' } });
+  await handler(message);
+  await settle();
+
+  assert.deepEqual(turns.notePostCalls, [['dm1', message.createdTimestamp]]);
+  assert.equal(memory.observeCalls.length, 1);
+  assert.equal(memory.observeCalls[0][0], 'g1');
+  assert.equal(memory.observeCalls[0][1].self, true);
+  assert.deepEqual(memory.observeCalls[0][2], { private: 'u1' });
+  assert.equal(turns.calls.length, 0);
+});
+
+test('private: another bot in a DM is ignored', async () => {
+  const turns = recordingTurns();
+  const memory = fakeMemory();
+  const handler = makeDmHandler({ turns, memory });
+  await handler(fakeDmMessage({ author: { id: 'otherbot', bot: true, globalName: 'Other', username: 'other' } }));
+  await settle();
+  assert.equal(turns.calls.length, 0);
+  assert.equal(memory.observeCalls.length, 0);
+  assert.equal(turns.notePostCalls.length, 0);
+});
+
+test('private: while warming up a DM is observed privately but never answered', async () => {
+  const turns = recordingTurns();
+  const memory = fakeMemory();
+  const handler = makeDmHandler({ turns, memory, isWarmingUp: () => true });
+  await handler(fakeDmMessage());
+  await settle();
+  assert.equal(turns.calls.length, 0);
+  assert.equal(memory.observeCalls.length, 1);
+  assert.deepEqual(memory.observeCalls[0][2], { direct: true, private: 'u1' });
+});
+
+test('private: while paused a DM does nothing at all', async () => {
+  const turns = recordingTurns();
+  const memory = fakeMemory();
+  const store = fakePrivateStore();
+  store.state.data.paused = true;
+  const handler = makeDmHandler({ turns, memory, store });
+  await handler(fakeDmMessage());
+  await settle();
+  assert.equal(turns.calls.length, 0);
+  assert.equal(memory.observeCalls.length, 0);
+});
+
+// --- Limit notices on triggered guild turns ---------------------------------
+
+function refusedTurns() {
+  return recordingTurns({ outcome: 'refused', limit: { key: 'llm.maxRequestsPerDay', used: 800, cap: 800 } });
+}
+
+function sendingChannel(id = 'c1', guild = fakeGuild()) {
+  const sent = [];
+  const channel = fakeChannelWithMessage(id, guild, 'm1', {
+    send: async (payload) => {
+      sent.push(payload);
+      return { id: 'notice1' };
+    },
+  });
+  channel.sent = sent;
+  return channel;
+}
+
+test('limits: a mention refused by a rail posts the notice as a plain reply to the trigger', async () => {
+  const turns = refusedTurns();
+  const guild = fakeGuild();
+  const channel = sendingChannel('c1', guild);
+  const handler = makeHandler({ turns, rng: scripted([0.99]), prompts: { labels } });
+  await handler(directPingMessage({ guild, channel, channelId: 'c1' }));
+  await settle();
+
+  assert.equal(turns.calls.length, 1);
+  assert.equal(channel.sent.length, 1);
+  assert.equal(channel.sent[0].content, 'limit reached (llm.maxRequestsPerDay, 800/800)');
+  assert.deepEqual(channel.sent[0].allowedMentions, { parse: [] });
+  assert.equal(channel.sent[0].reply.messageReference, 'm1');
+});
+
+test('limits: a pending mention refused at drain time posts the notice', async () => {
+  let busy = true;
+  const turns = recordingTurns(
+    { outcome: 'refused', limit: { key: 'llm.maxRequestTokens', used: 51000, cap: 50000 } },
+    { isAnyBusy: () => busy },
+  );
+  const guild = fakeGuild();
+  const channel = sendingChannel('c1', guild);
+  const handler = makeHandler({ turns, rng: scripted([0.5, 0.99]), sleep: async () => {}, prompts: { labels } });
+  await handler(directPingMessage({ guild, channel, channelId: 'c1' }));
+  busy = false;
+  await handler.drainPending();
+
+  assert.equal(turns.calls.length, 1);
+  assert.equal(channel.sent.length, 1);
+  assert.equal(channel.sent[0].content, 'limit reached (llm.maxRequestTokens, 51000/50000)');
+});
+
+test('limits: a refusal with no limit, or another outcome, posts nothing', async () => {
+  for (const result of [{ outcome: 'refused', limit: null }, { outcome: 'error' }, { outcome: 'skip' }]) {
+    const guild = fakeGuild();
+    const channel = sendingChannel('c1', guild);
+    const handler = makeHandler({ turns: recordingTurns(result), rng: scripted([0.99]), prompts: { labels } });
+    await handler(directPingMessage({ guild, channel, channelId: 'c1' }));
+    await settle();
+    assert.equal(channel.sent.length, 0, JSON.stringify(result));
+  }
+});
+
+test('limits: a missing limits.notice label sends nothing', async () => {
+  const guild = fakeGuild();
+  const channel = sendingChannel('c1', guild);
+  const handler = makeHandler({ turns: refusedTurns(), rng: scripted([0.99]), prompts: { labels: {} } });
+  await handler(directPingMessage({ guild, channel, channelId: 'c1' }));
+  await settle();
+  assert.equal(channel.sent.length, 0);
+});
+
+test('limits: in dry-run the notice is logged and mirrored, never sent to the channel', async () => {
+  const guild = fakeGuild();
+  const channel = sendingChannel('c1', guild);
+  const mirrored = [];
+  const client = { ...fakeClient(), channels: { fetch: async () => ({ send: async (payload) => mirrored.push(payload) }) } };
+  const config = baseConfig({ features: { dryRun: true }, bot: { dryRunChannelId: 'mirror1' } });
+  const handler = makeHandler({ config, client, turns: refusedTurns(), rng: scripted([0.99]), prompts: { labels } });
+  const { logs } = await withCapturedLogs(async () => {
+    await handler(directPingMessage({ guild, channel, channelId: 'c1' }));
+    await settle();
+  });
+  assert.equal(channel.sent.length, 0);
+  const line = logs.find((l) => l.msg === 'dry-run: would notify limit');
+  assert.ok(line);
+  assert.equal(line.key, 'llm.maxRequestsPerDay');
+  assert.equal(line.used, 800);
+  assert.equal(line.cap, 800);
+  assert.equal(mirrored.length, 1);
+  assert.deepEqual(mirrored[0].allowedMentions, { parse: [] });
+});
+
+test('limits: a failing notice send never escapes the handler', async () => {
+  const guild = fakeGuild();
+  const channel = fakeChannelWithMessage('c1', guild, 'm1', {
+    send: async () => {
+      throw new Error('Missing Permissions');
+    },
+  });
+  const handler = makeHandler({ turns: refusedTurns(), rng: scripted([0.99]), prompts: { labels } });
+  const { logs } = await withCapturedLogs(async () => {
+    await handler(directPingMessage({ guild, channel, channelId: 'c1' }));
+    await settle();
+  });
+  assert.ok(logs.some((l) => l.msg === 'events: limit notice failed'));
+});
+
+test('limits: a follow-up turn refused by a rail posts the notice', async () => {
+  const llm = fakeFollowUpLlm();
+  const turns = refusedTurns();
+  const guild = fakeGuild();
+  const sent = [];
+  const channel = fakeChannelWithHistory('c1', guild, [], {
+    send: async (payload) => {
+      sent.push(payload);
+      return { id: 'notice1' };
+    },
+  });
+  const handler = makeHandler({ turns, llm, prompts: fakeAddressPrompts() });
+  await openFollowUpWindow(handler, { guild, channel, ts: Date.now() });
+
+  const p = handler(fakeMessage({ id: 'm-candidate', guild, channel, channelId: 'c1', cleanContent: 'so what do you think' }));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  llm.respond('yes');
+  await p;
+  await settle();
+
+  assert.equal(turns.calls.length, 1);
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].content, 'limit reached (llm.maxRequestsPerDay, 800/800)');
+  assert.deepEqual(sent[0].allowedMentions, { parse: [] });
+});
+
+test('limits: a message without a trigger runs no turn here, so nothing is ever announced', async () => {
+  const turns = refusedTurns();
+  const spontaneous = fakeSpontaneous();
+  const guild = fakeGuild();
+  const channel = sendingChannel('c1', guild);
+  const config = baseConfig({ bot: { nameTriggers: [] } });
+  const handler = makeHandler({ config, turns, spontaneous, prompts: { labels } });
+  await handler(fakeMessage({ id: 'm1', guild, channel, channelId: 'c1', cleanContent: 'ένα απλό μήνυμα' }));
+  await settle();
+
+  assert.equal(spontaneous.onMessageCalls.length, 1, 'handed to the spontaneous scheduler, whose refusals stay silent');
+  assert.equal(turns.calls.length, 0);
+  assert.equal(channel.sent.length, 0);
 });

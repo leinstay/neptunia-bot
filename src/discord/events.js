@@ -1,6 +1,9 @@
 // The message pipeline: turns a raw discord.js `messageCreate` event into one
 // of a handful of outcomes (ignore, observe into memory, let the spontaneous
 // scheduler eavesdrop, or run a turn) without ever throwing into discord.js.
+// A direct message goes through the private-chat gate instead
+// (features.privateMessages, src/behavior/private.js). A triggered turn
+// refused by a rail gets one plain limit notice (src/behavior/limits.js).
 // Owner commands are a separate pipeline entirely (src/discord/commands.js,
 // driven by `interactionCreate`, not `messageCreate`). Kept free of
 // discord.js-specific assumptions beyond the shape already used by
@@ -23,6 +26,8 @@ import { formatTranscript, renderTranscript } from './format.js';
 import { addPending, isExpired, popOldest } from '../behavior/pending.js';
 import { between } from '../behavior/turn.js';
 import { fillPromptTemplate } from '../behavior/prompt.js';
+import { privateGate } from '../behavior/private.js';
+import { limitNotice } from '../behavior/limits.js';
 import { log } from '../log.js';
 
 // The most pictures one observed message warms the describer cache for --
@@ -397,6 +402,7 @@ export function createMessageHandler({
         tagHistory.hit(normalized.authorId, now(), repeatWindowMs(mentionCfg));
         turns
           .runTurn({ channel, mode: 'reply', trigger: normalized, triggerKind: 'followUp' })
+          .then((result) => announceRefusal(channel, normalized, result))
           .catch((err) => log.error('events: follow-up reply turn failed', { channel: channelId, error: err }));
       } else {
         bumpFollowUpNoStreak(channelId, state, mentionCfg);
@@ -405,6 +411,67 @@ export function createMessageHandler({
     } finally {
       followUpInFlight.delete(channelId);
     }
+  }
+
+  // --- Limit notices ----------------------------------------------------------
+  // A turn someone asked for (a mention, reply, name, follow-up or private
+  // message) that a rail refused gets one plain line naming the limit and the
+  // numbers (labels.limits.notice), so the requester knows it was a limit and
+  // not silence in character. Spontaneous turns never come through here.
+
+  /** Today's UTC date, the day key the store uses for the private reply counts. */
+  function todayUtc() {
+    return new Date(now()).toISOString().slice(0, 10);
+  }
+
+  /** The dry-run mirror (`bot.dryRunChannelId`, read now); failures are logged and swallowed. */
+  async function mirrorDryRun(header, body) {
+    const dryRunChannelId = hot.config.bot?.dryRunChannelId || '';
+    if (!dryRunChannelId) return;
+    try {
+      const mirror = await client.channels.fetch(dryRunChannelId);
+      if (!mirror) return;
+      await mirror.send({ content: `${header}\n${body}`, allowedMentions: { parse: [] } });
+    } catch (err) {
+      log.warn('events: dry-run mirror failed', { dryRunChannelId, error: err });
+    }
+  }
+
+  /**
+   * Post the limit notice as a plain reply to the trigger, no mentions. A
+   * missing label sends nothing; in dry-run (read now) it is logged and
+   * mirrored instead. Never throws.
+   */
+  async function notifyLimit(channel, trigger, limit) {
+    const text = limit ? limitNotice(hot.prompts?.labels, limit) : '';
+    if (!text) return;
+    try {
+      if (hot.config.features?.dryRun === true) {
+        log.info('dry-run: would notify limit', { channel: channel.id, key: limit.key, used: limit.used, cap: limit.cap });
+        await mirrorDryRun(`[dry-run] #${channel.name ?? null} · limit`, text);
+        return;
+      }
+      await channel.send({
+        content: text,
+        reply: trigger?.id ? { messageReference: trigger.id, failIfNotExists: false } : undefined,
+        allowedMentions: { parse: [] },
+      });
+      log.info('events: limit notice sent', { channel: channel.id, key: limit.key });
+    } catch (err) {
+      log.warn('events: limit notice failed', { channel: channel.id, error: err });
+    }
+  }
+
+  /** After a triggered turn: a rail refusal that carries its limit gets the notice. */
+  async function announceRefusal(channel, trigger, result) {
+    if (result?.outcome !== 'refused' || !result.limit) return;
+    await notifyLimit(channel, trigger, result.limit);
+  }
+
+  /** After a private turn: a reply that spoke counts toward today's cap; a refusal is announced. */
+  async function afterPrivateTurn(channel, guildId, trigger, result) {
+    if (result?.outcome === 'spoke') store.bumpPrivateReplies(guildId, trigger.authorId, todayUtc());
+    await announceRefusal(channel, trigger, result);
   }
 
   // --- One attention (mention.oneAtATime): pending direct pings ------------
@@ -423,7 +490,7 @@ export function createMessageHandler({
   }
 
   /**
-   * Remember a direct ping (mention/reply) that arrived while the persona's
+   * Remember a direct ping (mention/reply/private message) that arrived while the persona's
    * one attention is busy elsewhere. At most one per channel -- a newer ping
    * replaces an older one already queued for the same channel -- and at most
    * mention.maxPending channels; the oldest is evicted when full.
@@ -473,6 +540,27 @@ export function createMessageHandler({
 
         const config = hot.config;
         const features = config.features ?? {};
+
+        // A private message is answered like a direct ping, without the
+        // ignore roll; the channel has no guild, so the pinned one is passed.
+        if (ping.kind === 'private') {
+          const privateGuildId = getGuildId();
+          if (features.privateMessages !== true || !privateGuildId) continue;
+          try {
+            const result = await turns.runTurn({
+              channel: ping.channel,
+              guildId: privateGuildId,
+              mode: 'reply',
+              trigger: ping.trigger,
+              triggerKind: 'private',
+            });
+            await afterPrivateTurn(ping.channel, privateGuildId, ping.trigger, result);
+          } catch (err) {
+            log.error('events: deferred private turn failed', { channel: ping.channelId, error: err });
+          }
+          continue;
+        }
+
         const memoryOn = features.memory !== false;
         const relationshipsOn = features.relationships !== false;
         const guildId = ping.channel.guild.id;
@@ -502,7 +590,8 @@ export function createMessageHandler({
 
         if (decision.respond) {
           try {
-            await turns.runTurn({ channel: ping.channel, mode: 'reply', trigger: ping.trigger, triggerKind: ping.kind });
+            const result = await turns.runTurn({ channel: ping.channel, mode: 'reply', trigger: ping.trigger, triggerKind: ping.kind });
+            await announceRefusal(ping.channel, ping.trigger, result);
           } catch (err) {
             log.error('events: deferred reply turn failed', { channel: ping.channelId, error: err });
           }
@@ -511,6 +600,72 @@ export function createMessageHandler({
     } finally {
       draining = false;
     }
+  }
+
+  /**
+   * A direct message (private chat). Checked locally with zero tokens: the
+   * switch, other bots, the served guild, membership, a stored profile, the
+   * public attitude and today's reply cap (privateGate). A refused DM is
+   * dropped silently, except the daily-cap notice once a day per person. No
+   * ignore roll, follow-up window, eavesdrop or address classifier here.
+   */
+  async function onPrivateMessage(message, config) {
+    const features = config.features ?? {};
+    if (features.privateMessages !== true) return;
+    const selfId = client.user.id;
+    if (message.author.bot && message.author.id !== selfId) return;
+
+    const guildId = getGuildId();
+    if (!guildId) return;
+    const memoryOn = features.memory !== false;
+    const channel = message.channel;
+    const normalized = normalizeMessage(message, selfId, { videoSites: config.media?.video?.sites });
+
+    // The persona's own DM message: bookkeeping, remembered under the partner's id.
+    if (normalized.self) {
+      turns.notePost(normalized.channelId, normalized.ts);
+      const partnerId = channel.recipientId ?? channel.recipient?.id;
+      if (memoryOn && partnerId) memory.observe(guildId, normalized, { private: partnerId });
+      return;
+    }
+
+    const authorId = message.author.id;
+    const guild = client.guilds?.cache?.get(guildId);
+    const member = guild
+      ? (guild.members.cache.get(authorId) ?? (await guild.members.fetch(authorId).catch(() => null)))
+      : null;
+    const profile = store.getUser(guildId, authorId);
+    const isOwner = (config.bot?.owners ?? []).map(String).includes(String(authorId));
+    const replies = store.getPrivate(guildId, authorId)?.replies ?? null;
+    const today = todayUtc();
+    const gate = privateGate({ config, isMember: Boolean(member), profile, isOwner, replies, today });
+    if (!gate.ok) {
+      log.info('private: dropped', { reason: gate.reason });
+      if (gate.reason === 'cap' && replies?.noticedDay !== today) {
+        store.markPrivateNoticed(guildId, authorId, today);
+        const key = isOwner ? 'private.maxPerOwnerPerDay' : 'private.maxPerUserPerDay';
+        await notifyLimit(channel, normalized, { key, used: gate.used, cap: gate.cap });
+      }
+      return;
+    }
+
+    // Observed like a direct call; during a memory warmup run, never answered.
+    if (memoryOn) memory.observe(guildId, normalized, { direct: true, private: authorId });
+    if (isWarmingUp()) return;
+
+    // One attention: busy anywhere (or, with oneAtATime off, in this very
+    // chat) -> pending, answered by drainPending once the turn frees up.
+    const oneAtATime = config.mention.oneAtATime !== false;
+    const busy = oneAtATime ? turns.isAnyBusy() : turns.isBusy(channel.id);
+    if (busy) {
+      enqueuePending(channel, normalized, 'private');
+      return;
+    }
+
+    turns
+      .runTurn({ channel, guildId, mode: 'reply', trigger: normalized, triggerKind: 'private' })
+      .then((result) => afterPrivateTurn(channel, guildId, normalized, result))
+      .catch((err) => log.error('events: private turn failed', { channel: channel.id, error: err }));
   }
 
   async function onMessage(message) {
@@ -527,10 +682,13 @@ export function createMessageHandler({
       const features = config.features ?? {};
       const memoryOn = features.memory !== false;
 
-      // 2. DMs: the persona never chats in DMs, and owner commands are slash
-      // commands now (src/discord/commands.js, interactionCreate) — a DM
-      // carries nothing this pipeline needs to see.
-      if (!message.guild) return;
+      // 2. DMs: private chat (features.privateMessages, off by default) --
+      // see onPrivateMessage. Owner commands are slash commands
+      // (src/discord/commands.js, interactionCreate), never DMs.
+      if (!message.guild) {
+        await onPrivateMessage(message, config);
+        return;
+      }
 
       // 3. This instance serves exactly one guild; channel allowlist/denylist, no threads.
       if (message.guild.id !== getGuildId()) return;
@@ -646,6 +804,7 @@ export function createMessageHandler({
       if (decision.respond) {
         turns
           .runTurn({ channel: message.channel, mode: 'reply', trigger: normalized, triggerKind: kind })
+          .then((result) => announceRefusal(message.channel, normalized, result))
           .catch((err) => log.error('events: reply turn failed', { channel: message.channel.id, error: err }));
       }
     } catch (err) {
