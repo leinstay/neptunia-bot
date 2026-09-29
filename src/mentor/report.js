@@ -156,7 +156,7 @@ export function renderFile(run) {
   lines.push('', `Reference: ${run?.reference?.profile?.messages ?? 0} messages measured, ${run?.reference?.samples ?? 0} sample lines given`);
   lines.push(JSON.stringify(run?.reference?.profile ?? {}, null, 1));
   if (Array.isArray(run?.repeated) && run.repeated.length > 0) {
-    lines.push('', 'Repeated phrases across answers:');
+    lines.push('', 'Phrases repeated across situations:');
     for (const { phrase, count } of run.repeated) lines.push(`- "${phrase}" x${count}`);
   }
   lines.push('', `Situations: ${run?.situations?.length ?? 0} kept, ${run?.dropped ?? 0} dropped`);
