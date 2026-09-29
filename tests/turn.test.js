@@ -2664,3 +2664,24 @@ test('runTurn: the drawFailed turn of a private chat keeps the guildId', async (
   assert.deepEqual(store.guildCalls, ['g1', 'g1']);
   assert.ok(userTextOf(llm.calls[1]).includes(fill(labels.triggers.drawFailed, { reason: labels.draw.reasons.moderation })));
 });
+
+test('runTurn: an image cap on a spontaneous turn stays silent -- no notice, no file, only a log line', async () => {
+  const { result, llm, channel, logs } = await runDrawTurn({
+    answers: ['<msg>look at this sunset</msg><draw>a sunset</draw>', '<msg>should never be asked</msg>'],
+    images: fakeImages({ error: imageCap('daily', 'image.maxPerDay', 5, 5) }),
+    withTrigger: false,
+  });
+
+  assert.equal(result.outcome, 'spoke');
+  assert.equal(result.drawFailed, undefined);
+  assert.equal(llm.calls.length, 1, 'no drawFailed turn');
+  assert.deepEqual(channel.sent.map((p) => p.content), ['look at this sunset'], 'nobody asked: no notice');
+  assert.ok(channel.sent.every((p) => p.files === undefined), 'no file');
+  const line = logs.find((l) => l.msg === 'turn: draw refused by a limit');
+  assert.ok(line);
+  assert.equal(line.key, 'image.maxPerDay');
+  assert.equal(line.used, 5);
+  assert.equal(line.cap, 5);
+  assert.equal(line.spontaneous, true);
+  assert.equal(logs.some((l) => l.msg === 'dry-run: would notify limit'), false);
+});

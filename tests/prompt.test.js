@@ -1971,11 +1971,34 @@ test('buildRequest: without privateChat a passed privateProfile is ignored -- th
 });
 
 test('buildRequest: privateChat keeps other profiles public-only', () => {
-  const other = { id: 'u2', names: ['Bob'], character: 'BOB_CHARACTER', relationship: 'BOB_REL' };
-  const history = [makeMessage(2, NOW - 2 * MIN, { authorId: 'u2', authorName: 'Bob' }), makeMessage(1, NOW - MIN, { authorId: 'u1', authorName: 'Alice' })];
-  const user = buildRequest(privateScene({ history, trigger: history[1], otherProfiles: [other] })).messages[1].content;
-  assert.ok(user.includes('BOB_CHARACTER'));
-  assert.ok(!user.slice(user.indexOf('## Bob')).split('\n\n')[0].includes('PRIVATE_REL'));
+  // Carl is named in the trigger (rendered in full), Bob only took part (rendered compact).
+  const bob = { id: 'u2', names: ['Bob'], character: 'BOB_CHARACTER', relationship: 'BOB_REL' };
+  const carl = { id: 'u3', names: ['Carl'], character: 'CARL_CHARACTER', relationship: 'CARL_REL', details: [{ id: 1, text: 'CARL_DETAIL', weight: 1 }] };
+  const history = [
+    makeMessage(2, NOW - 2 * MIN, { authorId: 'u2', authorName: 'Bob' }),
+    makeMessage(1, NOW - MIN, { authorId: 'u1', authorName: 'Alice', content: 'what does Carl think' }),
+  ];
+  const privateProfile = {
+    relationship: 'PRIVATE_MARKER_REL',
+    details: [{ id: 1, text: 'PRIVATE_MARKER_DETAIL', weight: 1 }],
+    affinity: { score: 5, reason: 'PRIVATE_MARKER_REASON', history: [] },
+  };
+  const user = buildRequest(
+    privateScene({ history, trigger: history[1], otherProfiles: [bob], candidateProfiles: [bob, carl], privateProfile }),
+  ).messages[1].content;
+  const people = /<people>\n([\s\S]*?)\n<\/people>/.exec(user)[1];
+  // The merged relationship holds a blank line itself: split on the headings only.
+  const sections = people.split(/\n\n(?=## )/);
+  const own = sections.filter((s) => s.startsWith('## Alice'));
+  const others = sections.filter((s) => !s.startsWith('## Alice'));
+  assert.equal(own.length, 1);
+  assert.ok(others.some((s) => s.startsWith('## Bob') && s.includes('BOB_CHARACTER')));
+  assert.ok(others.some((s) => s.startsWith('## Carl') && s.includes('CARL_DETAIL')));
+  for (const marker of ['PRIVATE_MARKER_REL', 'PRIVATE_MARKER_DETAIL', 'PRIVATE_MARKER_REASON']) {
+    assert.ok(own[0].includes(marker), `${marker} is in the interlocutor's section`);
+    for (const section of others) assert.ok(!section.includes(marker), `${marker} never reaches another profile`);
+    assert.equal(user.split(marker).length - 1, 1, `${marker} appears exactly once in the request`);
+  }
 });
 
 test('buildRequest: <senses> carries senses.privateChat in a private chat, never senses.privateAware', () => {

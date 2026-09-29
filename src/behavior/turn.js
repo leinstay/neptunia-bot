@@ -415,8 +415,9 @@ export function createTurnRunner({
    * Resolves `{}` when posted, `{ drawFailed: reason }` otherwise (a
    * generation failure keeps its reason, `empty` counts as `error`; anything
    * else, the upload included, is `error`). A refusal by an image cap
-   * (`ImageCapError`) posts the limit notice instead and resolves `{}`: the
-   * senses line already told the persona, the notice tells the requester.
+   * (`ImageCapError`) resolves `{}`: the senses line already told the
+   * persona; on a triggered turn the limit notice tells the requester, a
+   * spontaneous turn (nobody asked) stays silent and only logs it.
    */
   async function draw(channel, parsed, idByIndex, trigger, isFollowUp, selfName = client.user.username) {
     const imageCfg = hot.config.image ?? {};
@@ -463,7 +464,14 @@ export function createTurnRunner({
     } catch (err) {
       if (err instanceof ImageCapError) {
         const limit = limitOf(err);
-        log.info('turn: draw refused by a limit', { channel: channel.id, key: limit?.key ?? null, used: limit?.used ?? null, cap: limit?.cap ?? null });
+        log.info('turn: draw refused by a limit', {
+          channel: channel.id,
+          key: limit?.key ?? null,
+          used: limit?.used ?? null,
+          cap: limit?.cap ?? null,
+          spontaneous: !trigger,
+        });
+        if (!trigger) return {};
         try {
           await notifyLimit(channel, limit, trigger, isFollowUp);
         } catch (sendErr) {
