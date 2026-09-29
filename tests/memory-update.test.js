@@ -4042,3 +4042,365 @@ test('run: the "memory: update applied" log line carries the learned add count',
     assert.equal(store.getGuild(guildId).learned.length, 2);
   });
 });
+
+// ---- private chat (Discord DMs) -------------------------------------------
+
+function privateHot(memoryOverrides = {}, configOverrides = {}) {
+  return {
+    config: makeConfig({ memory: { ...makeConfig().memory, ...memoryOverrides }, ...configOverrides }),
+    prompts: { memory: 'memory system prompt', labels },
+  };
+}
+
+function dmMessage(overrides) {
+  return slimMessage({ channelId: 'dm1', channelName: 'Zoé', authorId: 'u1', authorName: 'Zoé', ...overrides });
+}
+
+/** A public profile for u1 plus a private layer with one detail, one interest and a private score. */
+function seedPrivate(store, guildId) {
+  store.touchUser(guildId, 'u1', 'Zoé', Date.UTC(2026, 0, 1));
+  store.applyProfileOps(guildId, 'u1', { character: 'Public character note.', details: { add: ['public detail'] } }, { fieldChars: 400 });
+  store.adjustAffinity(guildId, 'u1', 10, 'public reason', { maxDelta: 15, damping: false });
+  store.applyPrivateOps(
+    guildId,
+    'u1',
+    { interests: { add: [{ topic: 'κιθάρα', note: 'plays at night' }] }, details: { add: ['private detail'] } },
+    { fieldChars: 400 },
+  );
+  store.adjustPrivateAffinity(guildId, 'u1', 4, 'private reason', { maxDelta: 15, damping: false });
+}
+
+/** The body of one `<tag>` block of a request's user message, or null when absent. */
+function blockBody(content, tag) {
+  const match = new RegExp(`<${tag}>\\n([\\s\\S]*?)\\n</${tag}>`).exec(content);
+  return match ? match[1] : null;
+}
+
+test('observe: a private message goes to the private buffer only, never the guild buffer or the public counters', () => {
+  withStore((store) => {
+    const updater = createMemoryUpdater({ hot: privateHot({ batchMessages: 2 }), store, llm: {}, calibrator: createCalibrator(), getSelfName: () => 'Nept' });
+    for (let i = 1; i <= 8; i += 1) updater.observe('g1', dmMessage({ id: `m${i}`, ts: i }), { direct: true, private: 'u1' });
+
+    assert.deepEqual(store.getBuffer('g1'), []);
+    assert.equal(store.getUser('g1', 'u1'), null, 'no public profile is created or touched');
+    assert.equal(store.getChannel('g1', 'dm1'), null, 'the DM channel never enters the channel map');
+    const buffer = store.getPrivateBuffer('g1', 'u1');
+    assert.deepEqual(buffer.map((m) => m.id), ['m3', 'm4', 'm5', 'm6', 'm7', 'm8'], 'capped at batchMessages * 3, like the guild buffer');
+    assert.equal(buffer[0].direct, true);
+  });
+});
+
+test('observe: the persona own DM line is buffered under the partner, not directed; paused -> nothing', () => {
+  withStore((store) => {
+    const updater = createMemoryUpdater({ hot: privateHot(), store, llm: {}, calibrator: createCalibrator(), getSelfName: () => 'Nept' });
+    updater.observe('g1', dmMessage({ id: 's1', self: true, authorId: 'bot', authorName: 'Nept' }), { private: 'u1' });
+    const [line] = store.getPrivateBuffer('g1', 'u1');
+    assert.equal(line.self, true);
+    assert.equal(line.direct, false);
+
+    store.state.data.paused = true;
+    updater.observe('g1', dmMessage({ id: 'm2' }), { direct: true, private: 'u1' });
+    assert.equal(store.getPrivateBuffer('g1', 'u1').length, 1);
+  });
+});
+
+test('analyzePrivate: the request carries <private>, only this user private profile with the effective affinity, <public_profile>, no channels', async () => {
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    seedPrivate(store, guildId);
+    store.touchUser(guildId, 'u2', 'Ander', 1000);
+    store.updateGuild(guildId, { patterns: 'guild pattern' });
+    let sent = null;
+    const llm = {
+      complete: async (messages, opts) => {
+        sent = { messages, opts };
+        return { text: '{}' };
+      },
+    };
+    const hot = privateHot({ maxOutputTokens: 1234, timeoutMs: 777 });
+    const updater = createMemoryUpdater({ hot, store, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept' });
+
+    const outcome = await updater.analyzePrivate(guildId, 'u1', [
+      dmMessage({ id: 'm1', content: 'γεια σου', direct: true, ts: Date.UTC(2026, 0, 2, 10) }),
+      dmMessage({ id: 'm2', self: true, authorId: 'bot', authorName: 'Nept', content: 'hi', ts: Date.UTC(2026, 0, 2, 10, 1) }),
+    ]);
+    assert.equal(outcome.ok, true);
+
+    assert.equal(sent.messages[0].content, 'memory system prompt');
+    assert.equal(sent.opts.maxOutputTokens, 1234);
+    assert.equal(sent.opts.timeoutMs, 777);
+    assert.equal(sent.opts.temperature, 0.3);
+    const user = sent.messages[1].content;
+
+    assert.equal(blockBody(user, 'private'), labels.memory.privateNote);
+
+    const profiles = JSON.parse(blockBody(user, 'existing_profiles'));
+    assert.deepEqual(Object.keys(profiles), ['u1']);
+    const mine = profiles.u1;
+    assert.deepEqual(mine.details.map((d) => d.text), ['private detail']);
+    assert.equal(mine.details[0].id, 1);
+    assert.deepEqual(mine.interests.map((i) => i.topic), ['κιθάρα']);
+    assert.equal(mine.affinity.score, 14, 'public 10 + private 4');
+    assert.equal(mine.affinity.reason, 'private reason');
+    assert.equal(mine.character, undefined, 'the public portrait is not offered for editing');
+    assert.equal(mine.style, undefined);
+    assert.equal(mine.names, undefined);
+
+    const publicProfile = blockBody(user, 'public_profile');
+    assert.ok(publicProfile.includes('Public character note.'));
+    assert.ok(publicProfile.includes('public detail'));
+    assert.ok(!publicProfile.includes('private detail'));
+
+    assert.ok(JSON.parse(blockBody(user, 'existing_guild')).patterns.includes('guild pattern'));
+    assert.equal(blockBody(user, 'existing_channels'), null);
+    assert.ok(!user.includes('Ander'), 'no other member profile is sent');
+
+    const transcript = blockBody(user, 'new_messages');
+    assert.ok(transcript.includes(`## #${labels.memory.privateChannel} (id:dm1)`));
+    assert.ok(!transcript.includes('## #Zoé'));
+    assert.ok(transcript.includes('γεια σου'));
+  });
+});
+
+test('analyzePrivate: applies only users[userId] to the private layer and reports every dropped section as counts', async () => {
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    seedPrivate(store, guildId);
+    store.touchUser(guildId, 'u2', 'Ander', 1000);
+    store.updateGuild(guildId, { patterns: 'guild pattern' });
+    store.flush();
+    const publicBefore = JSON.stringify(store.getUser(guildId, 'u1'));
+    const otherBefore = JSON.stringify(store.getUser(guildId, 'u2'));
+    const answer = {
+      users: {
+        u1: {
+          relationship: 'private relationship note',
+          character: 'rewritten character',
+          style: 'rewritten style',
+          portrait: 'refresh please',
+          aliases: { add: ['Zo'] },
+          interests: { add: [{ topic: 'θάλασσα', note: 'swims' }] },
+          details: { add: ['second private detail'] },
+          affinity: { delta: 50, reason: 'was kind' },
+          episodes: [{ what: 'shared a secret', weight: 3 }],
+        },
+        u2: { relationship: 'must not land' },
+        u3: { relationship: 'must not land either' },
+      },
+      guild: { patterns: 'must not land' },
+      channels: { dm1: { purpose: 'must not land' } },
+      lore: [{ title: 'secret', keys: ['secret'], text: 'must not land' }],
+      self: ['must not land'],
+    };
+    const llm = { complete: async () => ({ text: JSON.stringify(answer) }) };
+    const portraits = [];
+    const updater = createMemoryUpdater({
+      hot: privateHot({}, { relationships: { damping: false } }),
+      store,
+      llm,
+      calibrator: createCalibrator(),
+      getSelfName: () => 'Nept',
+      now: () => Date.UTC(2026, 0, 3),
+      onPortraitRequest: (...args) => portraits.push(args),
+    });
+
+    const outcome = await updater.analyzePrivate(guildId, 'u1', [dmMessage({ id: 'm1', direct: true, ts: Date.UTC(2026, 0, 2) })]);
+    assert.equal(outcome.ok, true);
+    assert.deepEqual(outcome.result.dropped, { users: 2, guild: true, channels: 1, lore: 1, self: 1 });
+    assert.equal(outcome.result.users, 1);
+
+    const priv = store.getPrivate(guildId, 'u1');
+    assert.equal(priv.relationship, 'private relationship note');
+    assert.deepEqual(priv.interests.map((i) => i.topic).sort(), ['θάλασσα', 'κιθάρα'].sort());
+    assert.deepEqual(priv.details.map((d) => d.text), ['private detail', 'second private detail']);
+    assert.equal(priv.affinity.score, 4 + 15, 'the delta is clamped to maxDeltaPerUpdate (15 by default), undamped here');
+    assert.equal(priv.affinity.reason, 'was kind');
+    assert.equal(priv.episodes.length, 1);
+    assert.equal(priv.episodes[0].what, 'shared a secret');
+    assert.equal(priv.character, undefined);
+    assert.equal(priv.aliases, undefined);
+    assert.equal(priv.lastSeen, new Date(Date.UTC(2026, 0, 3)).toISOString());
+    assert.equal(priv.firstSeen, new Date(Date.UTC(2026, 0, 3)).toISOString());
+
+    assert.equal(JSON.stringify(store.getUser(guildId, 'u1')), publicBefore, 'the public profile is never changed by a DM');
+    assert.equal(JSON.stringify(store.getUser(guildId, 'u2')), otherBefore);
+    assert.equal(store.getPrivate(guildId, 'u2'), null);
+    assert.equal(store.getUser(guildId, 'u3'), null);
+    assert.equal(store.getGuild(guildId).patterns, 'guild pattern');
+    assert.deepEqual(store.getGuild(guildId).self ?? [], []);
+    assert.equal(store.getChannel(guildId, 'dm1'), null);
+    assert.deepEqual(store.getLore(guildId), []);
+    assert.deepEqual(portraits, [], 'a portrait cue from a DM is ignored');
+  });
+});
+
+test('analyzePrivate: firstSeen is kept once set, lastSeen moves', async () => {
+  await withStoreAsync(async (store) => {
+    let nowValue = Date.UTC(2026, 0, 3);
+    const updater = createMemoryUpdater({
+      hot: privateHot(),
+      store,
+      llm: { complete: async () => ({ text: '{}' }) },
+      calibrator: createCalibrator(),
+      getSelfName: () => 'Nept',
+      now: () => nowValue,
+    });
+    await updater.analyzePrivate('g1', 'u1', [dmMessage({ id: 'm1' })]);
+    nowValue = Date.UTC(2026, 0, 9);
+    await updater.analyzePrivate('g1', 'u1', [dmMessage({ id: 'm2' })]);
+    const priv = store.getPrivate('g1', 'u1');
+    assert.equal(priv.firstSeen, new Date(Date.UTC(2026, 0, 3)).toISOString());
+    assert.equal(priv.lastSeen, new Date(Date.UTC(2026, 0, 9)).toISOString());
+  });
+});
+
+test('analyzePrivate: relationships and episodes switched off -> affinity and episodes are ignored', async () => {
+  await withStoreAsync(async (store) => {
+    const answer = { users: { u1: { affinity: { delta: 5, reason: 'x' }, episodes: [{ what: 'moment', weight: 2 }] } } };
+    const updater = createMemoryUpdater({
+      hot: privateHot({}, { features: { relationships: false, episodes: false } }),
+      store,
+      llm: { complete: async () => ({ text: JSON.stringify(answer) }) },
+      calibrator: createCalibrator(),
+      getSelfName: () => 'Nept',
+    });
+    const outcome = await updater.analyzePrivate('g1', 'u1', [dmMessage({ id: 'm1' })]);
+    assert.equal(outcome.ok, true);
+    const priv = store.getPrivate('g1', 'u1');
+    assert.equal(priv.affinity.score, 0);
+    assert.deepEqual(priv.episodes, []);
+  });
+});
+
+test('tick: a due private buffer is analyzed, shifted after success and logged with counts only', async () => {
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    store.touchUser(guildId, '99999', 'Ander', 1000);
+    const llmCalls = [];
+    const answer = { users: { u1: { relationship: 'note' }, 99999: { relationship: 'x' } }, self: ['x'] };
+    const llm = {
+      complete: async (messages) => {
+        llmCalls.push(messages);
+        return { text: JSON.stringify(answer) };
+      },
+    };
+    const hot = privateHot({ batchMessages: 3, minBatchMessages: 2 });
+    const updater = createMemoryUpdater({ hot, store, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept' });
+
+    const base = Date.now();
+    for (let i = 0; i < 2; i += 1) updater.observe(guildId, dmMessage({ id: `a${i}`, ts: base + i }), { private: 'u1' });
+    await updater.tick();
+    assert.equal(llmCalls.length, 0, 'not due yet: below batchMessages and still fresh');
+
+    for (let i = 2; i < 7; i += 1) updater.observe(guildId, dmMessage({ id: `a${i}`, ts: base + i }), { private: 'u1' });
+    const { logs } = await withCapturedLogs(() => updater.tick());
+    assert.equal(llmCalls.length, 1);
+    assert.deepEqual(store.getPrivateBuffer(guildId, 'u1').map((m) => m.id), ['a6'], 'batchMessages * 2 consumed, the rest kept');
+    assert.deepEqual(store.getBuffer(guildId), []);
+    assert.equal(store.getPrivate(guildId, 'u1').relationship, 'note');
+
+    const applied = logs.find((entry) => entry.msg === 'memory: private update applied');
+    assert.ok(applied);
+    assert.equal(applied.users, 1);
+    assert.equal(applied.consumed, 6);
+    assert.deepEqual(applied.dropped, { users: 1, guild: false, channels: 0, lore: 0, self: 1 });
+    const text = JSON.stringify(logs);
+    assert.ok(!text.includes('99999'), 'never another member id');
+    assert.ok(!text.includes('"u1"'), 'not even the partner id');
+  });
+});
+
+test('tick: a failed private update keeps the buffer, logs a warning and backs off', async () => {
+  await withStoreAsync(async (store) => {
+    let calls = 0;
+    const llm = {
+      complete: async () => {
+        calls += 1;
+        throw new Error('boom');
+      },
+    };
+    let nowValue = Date.now();
+    const updater = createMemoryUpdater({
+      hot: privateHot({ batchMessages: 2, minBatchMessages: 1 }),
+      store,
+      llm,
+      calibrator: createCalibrator(),
+      getSelfName: () => 'Nept',
+      now: () => nowValue,
+    });
+    for (let i = 0; i < 2; i += 1) updater.observe('g1', dmMessage({ id: `m${i}`, ts: nowValue + i }), { private: 'u1' });
+
+    const { logs } = await withCapturedLogs(() => updater.tick());
+    assert.equal(calls, 1);
+    assert.equal(store.getPrivateBuffer('g1', 'u1').length, 2, 'the buffer is kept');
+    assert.ok(logs.some((entry) => entry.level === 'warn' && entry.msg.startsWith('memory: private update failed')));
+    assert.equal(store.getPrivate('g1', 'u1').lastSeen, '', 'nothing stamped on a failure');
+
+    await updater.tick();
+    assert.equal(calls, 1, 'backed off');
+    nowValue += 16 * 60_000;
+    await updater.tick();
+    assert.equal(calls, 2, 'retried after the back-off');
+  });
+});
+
+test('tick: never runs the same private buffer twice at once; waitIdle waits for a private run', async () => {
+  await withStoreAsync(async (store) => {
+    let calls = 0;
+    let release;
+    const gate = new Promise((resolve) => {
+      release = resolve;
+    });
+    const llm = {
+      complete: async () => {
+        calls += 1;
+        await gate;
+        return { text: '{}' };
+      },
+    };
+    const updater = createMemoryUpdater({
+      hot: privateHot({ batchMessages: 2, minBatchMessages: 1 }),
+      store,
+      llm,
+      calibrator: createCalibrator(),
+      getSelfName: () => 'Nept',
+    });
+    for (let i = 0; i < 2; i += 1) updater.observe('g1', dmMessage({ id: `m${i}`, ts: Date.now() + i }), { private: 'u1' });
+
+    const first = updater.tick();
+    await new Promise((resolve) => setImmediate(resolve));
+    await updater.tick();
+    assert.equal(calls, 1, 'the second tick skips a buffer that is already being analyzed');
+
+    let idle = false;
+    const waiting = updater.waitIdle().then(() => {
+      idle = true;
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(idle, false);
+    release();
+    await first;
+    await waiting;
+    assert.equal(idle, true);
+    assert.equal(store.getPrivateBuffer('g1', 'u1').length, 0);
+  });
+});
+
+test('buildMemoryRequest: a private batch without the memory labels fails loudly', () => {
+  const { memory, ...withoutMemory } = labels;
+  assert.ok(memory);
+  assert.throws(
+    () =>
+      buildMemoryRequest({
+        prompts: { memory: 'sys', labels: withoutMemory },
+        config: makeConfig(),
+        calibrator: createCalibrator(),
+        profiles: {},
+        guildMemory: {},
+        messages: [slimMessage()],
+        selfName: 'Nept',
+        privateChat: { publicProfile: null },
+      }),
+    /privateNote/,
+  );
+});

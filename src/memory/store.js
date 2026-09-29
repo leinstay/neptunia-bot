@@ -742,6 +742,52 @@ export function createStore({ dataDir }) {
     },
 
     /**
+     * A copy of a member's buffered direct messages, oldest first, leaving
+     * the buffer as it is (the analyzer shifts it only after a successful
+     * update, see `shiftPrivateBuffer`). `[]` (and no file created) when
+     * there is no private layer.
+     * @param {string} guildId
+     * @param {string} userId
+     * @returns {object[]}
+     */
+    getPrivateBuffer(guildId, userId) {
+      if (!hasPrivate(guildId, userId)) return [];
+      return [...privateEntry(guildId, userId).value.buffer];
+    },
+
+    /**
+     * Drop the first `count` buffered direct messages of a member (the ones a
+     * private update consumed). Nothing happens, and no file is created,
+     * when there is no private layer.
+     * @param {string} guildId
+     * @param {string} userId
+     * @param {number} count
+     */
+    shiftPrivateBuffer(guildId, userId, count) {
+      if (!hasPrivate(guildId, userId)) return;
+      const item = privateEntry(guildId, userId);
+      item.value.buffer.splice(0, count);
+      item.dirty = true;
+    },
+
+    /**
+     * Stamp a successful private update on a member's private layer:
+     * `lastSeen` always, `firstSeen` only while it is empty (ISO strings,
+     * like a public profile's). The public profile is never touched.
+     * Creates the file.
+     * @param {string} guildId
+     * @param {string} userId
+     * @param {number} now  Epoch milliseconds.
+     */
+    touchPrivateSeen(guildId, userId, now) {
+      const item = privateEntry(guildId, userId);
+      const iso = new Date(now).toISOString();
+      if (!item.value.firstSeen) item.value.firstSeen = iso;
+      item.value.lastSeen = iso;
+      item.dirty = true;
+    },
+
+    /**
      * Ids of every member with a private layer in a guild, cached or on disk.
      * @param {string} guildId
      * @returns {string[]}

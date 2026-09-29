@@ -173,6 +173,10 @@ export const labels = {
       error: 'failed',
     },
   },
+  memory: {
+    privateNote: 'Private batch: judge only this person.',
+    privateChannel: 'direct chat',
+  },
   ping: {
     prompt: 'Reply with one word: pong',
   },

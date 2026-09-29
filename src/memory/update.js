@@ -3,8 +3,12 @@
 // (`isDue`), a periodic tick (`tick`, called by index.js every 60s) asks the
 // LLM to merge what happened into per-user profiles, server-wide patterns and
 // facts the persona has claimed about itself (`run`, via `buildMemoryRequest`
-// + `applyMemoryUpdate`). Memory is persistent: nothing here ever wipes it —
-// a failed update just leaves the buffer alone and backs off for a while.
+// + `applyMemoryUpdate`). Direct messages (private chat) go to a per-member
+// private buffer instead and are analyzed into that member's private layer
+// only (`runPrivate`/`analyzePrivate`, via `applyPrivateUpdate`): nothing said
+// in private ever reaches the public profile, the server notes or the lore.
+// Memory is persistent: nothing here ever wipes it — a failed update just
+// leaves the buffer alone and backs off for a while.
 
 import { fitSections, SectionsTooLargeError } from '../llm/budget.js';
 import { estimateTokens } from '../llm/tokens.js';
@@ -20,6 +24,8 @@ import { normalizeDetails } from './details.js';
 import { topByRank } from './ranking.js';
 import { toTokens, fromTokens } from './mentions.js';
 import { clampText } from './clamp.js';
+import { renderProfile } from '../behavior/prompt.js';
+import { effectiveAffinity } from '../behavior/private.js';
 
 const BACKOFF_MS = 15 * 60_000;
 const MIN_LIVE_BATCH = 20; // the live analyzer never shrinks below this many messages
@@ -339,11 +345,21 @@ export function characterText(prompts, selfName) {
  *   docs/prompt-contract.md, "Members are referred to by id, never by
  *   nickname". Omitted -> every token is left exactly as stored (no I/O of its own;
  *   the caller, src/memory/update.js#analyze, injects a store-backed lookup).
+ * @param {{ publicProfile: object|null, now?: number }} [input.privateChat]  A private-chat
+ *   batch (see `analyzePrivate`): `profiles` then holds ONLY the partner's private layer (its
+ *   `affinity` already the effective view), rendered without names/character/style/aliases;
+ *   `labels.memory.privateNote` goes in a `<private>` block, `publicProfile` is rendered
+ *   read-only into `<public_profile>` (src/behavior/prompt.js#renderProfile, `now` drives its
+ *   unsure/stale marks), `<existing_channels>` is left out and every transcript line sits under
+ *   `labels.memory.privateChannel` instead of a channel name. Omitted -> the guild request.
  * @returns {{ messages: object[], consumed: number }}
  */
-export function buildMemoryRequest({ prompts, config, calibrator, profiles, guildMemory, channels, messages, selfName, loreEntries, descriptions, videos, reads, nameOf }) {
+export function buildMemoryRequest({ prompts, config, calibrator, profiles, guildMemory, channels, messages, selfName, loreEntries, descriptions, videos, reads, nameOf, privateChat }) {
   const { timezone } = config.bot;
   const labels = requireLabels(prompts);
+  if (privateChat && (!labels.memory?.privateNote || !labels.memory?.privateChannel)) {
+    throw new Error('prompts.labels is incomplete: memory.privateNote and memory.privateChannel are required for a private batch');
+  }
   const relationships = config.features?.relationships !== false;
   const episodesOn = config.features?.episodes !== false;
   const loreOn = config.features?.lore !== false;
@@ -354,12 +370,20 @@ export function buildMemoryRequest({ prompts, config, calibrator, profiles, guil
   const existingProfiles = {};
   for (const [id, profile] of Object.entries(profiles ?? {})) {
     const fields = pickProfileFields(profile);
-    fields.character = resolveText(fields.character, resolveName);
-    fields.style = resolveText(fields.style, resolveName);
+    if (privateChat) {
+      // The private layer has no names or portrait of its own (they live in the public
+      // profile, shown read-only in <public_profile>): nothing to offer for editing here.
+      delete fields.names;
+      delete fields.character;
+      delete fields.style;
+    } else {
+      fields.character = resolveText(fields.character, resolveName);
+      fields.style = resolveText(fields.style, resolveName);
+    }
     fields.relationship = resolveText(fields.relationship, resolveName);
     fields.interests = existingInterestsView(fields.interests, config.memory?.maxInterests, config.memory?.interestHalfLifeDays, resolveName);
     fields.details = existingDetailsView(fields.details, config.memory?.maxDetails, config.memory?.detailHalfLifeDays, resolveName);
-    if (Array.isArray(profile?.aliases) && profile.aliases.length > 0) {
+    if (!privateChat && Array.isArray(profile?.aliases) && profile.aliases.length > 0) {
       const aliases = existingAliasesView(profile.aliases, config.memory?.maxAliases, config.memory?.aliasHalfLifeDays);
       if (aliases.length > 0) fields.aliases = aliases;
     }
@@ -385,7 +409,29 @@ export function buildMemoryRequest({ prompts, config, calibrator, profiles, guil
     if (mainChannels.has(String(id))) fields.main = true;
     existingChannels[id] = fields;
   }
-  const channelsBlock = block('existing_channels', JSON.stringify(existingChannels));
+  const channelsBlock = privateChat ? '' : block('existing_channels', JSON.stringify(existingChannels));
+
+  const privateBlock = privateChat ? block('private', labels.memory.privateNote) : '';
+  const publicProfileBlock = privateChat
+    ? block(
+        'public_profile',
+        renderProfile(privateChat.publicProfile, labels, {
+          interlocutor: true,
+          episodes: { enabled: episodesOn },
+          maxInterests: config.memory?.maxInterests,
+          maxDetails: config.memory?.maxDetails,
+          maxAliases: config.memory?.maxAliases,
+          aliasHalfLifeDays: config.memory?.aliasHalfLifeDays,
+          interestHalfLifeDays: config.memory?.interestHalfLifeDays,
+          detailHalfLifeDays: config.memory?.detailHalfLifeDays,
+          confirmAfter: config.memory?.confirmAfter,
+          staleDays: config.memory?.interestStaleDays,
+          now: privateChat.now,
+          nameOf: resolveName,
+        }),
+      )
+    : '';
+  const fixedBlocks = [privateBlock, characterBlock, profilesBlock, publicProfileBlock, loreBlock, guildBlock, channelsBlock].filter(Boolean);
 
   const formatOptions = {
     timezone,
@@ -398,7 +444,10 @@ export function buildMemoryRequest({ prompts, config, calibrator, profiles, guil
     videos,
     reads,
   };
-  const transcriptItems = formatTranscript(messages, formatOptions);
+  // A direct-message channel has no name worth showing: the whole private batch sits under
+  // one `labels.memory.privateChannel` heading, same line format as a guild channel.
+  const transcriptMessages = privateChat ? messages.map((m) => ({ ...m, channelName: labels.memory.privateChannel })) : messages;
+  const transcriptItems = formatTranscript(transcriptMessages, formatOptions);
   const transcriptTexts = transcriptItems.map((item) => item.text);
 
   const cost = (text) => calibrator.apply(estimateTokens(text)) + 2;
@@ -409,7 +458,7 @@ export function buildMemoryRequest({ prompts, config, calibrator, profiles, guil
       {
         name: 'fixed',
         required: true,
-        items: [system, characterBlock, profilesBlock, loreBlock, guildBlock, channelsBlock].filter(Boolean),
+        items: [system, ...fixedBlocks].filter(Boolean),
       },
       { name: 'transcript', keep: 'newest', items: transcriptTexts },
     ],
@@ -420,7 +469,7 @@ export function buildMemoryRequest({ prompts, config, calibrator, profiles, guil
   const keptTranscriptItems = transcriptItems.slice(transcriptItems.length - kept.transcript.length);
   const newMessagesBlock = block('new_messages', renderTranscript(keptTranscriptItems, timezone, labels));
 
-  const user = [characterBlock, profilesBlock, loreBlock, guildBlock, channelsBlock, newMessagesBlock].filter(Boolean).join('\n\n');
+  const user = [...fixedBlocks, newMessagesBlock].filter(Boolean).join('\n\n');
 
   return {
     messages: [
@@ -536,6 +585,113 @@ export function batchAuthorNamesMap(messages) {
 }
 
 /**
+ * The token helpers every analyzer answer goes through before it is stored.
+ * A member is written as `<@id>` in every free-text field the analyzer
+ * returns (see docs/prompt-contract.md, "Members are referred to by id, never
+ * by nickname"); `tokenize` normalizes the fallback shape the model sometimes
+ * writes instead, `Name (id:123...)`, into the token -- but only for an id
+ * this guild actually knows (one of `knownUserIds`, or an existing stored
+ * profile), an unrecognised id is left exactly as written.
+ * @param {object} store
+ * @param {string} guildId
+ * @param {Set<string>} knownUserIds
+ * @param {Map<string, string>} [batchAuthorNames]  See `batchAuthorNamesMap`.
+ */
+function makeTokenizers(store, guildId, knownUserIds, batchAuthorNames) {
+  const isKnownId = (id) => {
+    const key = String(id);
+    return knownUserIds.has(key) || store.getUser(guildId, key) != null;
+  };
+  // The known names for one id, stored profile names first, the batch's own
+  // nick for them appended -- see toTokens' name-aware matching, which needs
+  // the FULL name (however many words) to convert e.g. "Al Sus (id:...)"
+  // correctly instead of guessing a word count.
+  const namesOf = (id) => {
+    const key = String(id);
+    const stored = store.getUser(guildId, key)?.names ?? [];
+    const batchNick = batchAuthorNames?.get?.(key);
+    return batchNick ? [...stored, batchNick] : stored;
+  };
+  const tokenize = (text) => (typeof text === 'string' ? toTokens(text, isKnownId, namesOf) : text);
+  const tokenizeArray = (values) => (Array.isArray(values) ? values.map(tokenize) : values);
+  /** `ops.add`/`ops.update` items' `note` field, tokenized in place. */
+  const tokenizeNoted = (items) =>
+    Array.isArray(items)
+      ? items.map((item) => (item && typeof item === 'object' && !Array.isArray(item) ? { ...item, note: tokenize(item.note) } : item))
+      : items;
+  /** A `details.add` entry, a bare string or `{ text, sure? }`, `text` tokenized. */
+  const tokenizeDetail = (item) => {
+    if (typeof item === 'string') return tokenize(item);
+    if (item && typeof item === 'object' && !Array.isArray(item)) return { ...item, text: tokenize(item.text) };
+    return item;
+  };
+  /** `raw.interests`/`raw.details` (ops objects, the only shape accepted) into store ops, tokenized. */
+  const tokenizeItemOps = (raw, ops) => {
+    if (raw.interests && typeof raw.interests === 'object' && !Array.isArray(raw.interests)) {
+      ops.interests = {
+        ...raw.interests,
+        add: tokenizeNoted(raw.interests.add),
+        update: tokenizeNoted(raw.interests.update),
+      };
+    }
+    if (raw.details && typeof raw.details === 'object' && !Array.isArray(raw.details)) {
+      ops.details = { ...raw.details, add: Array.isArray(raw.details.add) ? raw.details.add.map(tokenizeDetail) : raw.details.add };
+    }
+  };
+  /** `raw.episodes` with `what`/`feeling` tokenized; `quote` is the person's own words verbatim, never. */
+  const tokenizeEpisodes = (episodes) =>
+    episodes.map((ep) => (ep && typeof ep === 'object' && !Array.isArray(ep) ? { ...ep, what: tokenize(ep.what), feeling: tokenize(ep.feeling) } : ep));
+  return { isKnownId, tokenize, tokenizeArray, tokenizeNoted, tokenizeDetail, tokenizeItemOps, tokenizeEpisodes };
+}
+
+/** `applyProfileOps` / `applyPrivateOps` options from `config.memory`. */
+function profileOpsOptions(cfg, now, seenAt) {
+  return {
+    fieldChars: cfg.fieldChars,
+    maxInterests: cfg.maxInterests,
+    maxInterestsStored: cfg.maxInterestsStored,
+    topicChars: cfg.interestTopicChars,
+    noteChars: cfg.interestNoteChars,
+    interestHalfLifeDays: cfg.interestHalfLifeDays,
+    maxDetails: cfg.maxDetails,
+    maxDetailsStored: cfg.maxDetailsStored,
+    detailHalfLifeDays: cfg.detailHalfLifeDays,
+    maxAliases: cfg.maxAliases,
+    maxAliasesStored: cfg.maxAliasesStored,
+    aliasHalfLifeDays: cfg.aliasHalfLifeDays,
+    confirmGapHours: cfg.confirmGapHours,
+    clampTolerance: cfg.clampTolerance,
+    now,
+    seenAt,
+  };
+}
+
+/** `adjustAffinity` / `adjustPrivateAffinity` options from the `relationships` argument. */
+function affinityOptions(relationships, cfg) {
+  return {
+    // The model's verdict is never applied unclamped, even if the config block is missing.
+    maxDelta: relationships.maxDeltaPerUpdate ?? 15,
+    historySize: relationships.historySize ?? 10,
+    now: relationships.now,
+    clampTolerance: cfg.clampTolerance,
+    // relationships.damping: a missing key counts as on, like features.*.
+    damping: relationships.damping !== false,
+    // relationships.dampingPower: garbage/absent falls back to 1 inside applyDelta itself.
+    dampingPower: relationships.dampingPower,
+  };
+}
+
+/** `addEpisodes` / `addPrivateEpisodes` options from the `episodes` argument. */
+function episodeOptions(episodes, cfg) {
+  return {
+    maxEpisodes: episodes.maxEpisodes,
+    maxNew: episodes.maxNew,
+    now: episodes.now,
+    clampTolerance: cfg.clampTolerance,
+  };
+}
+
+/**
  * Validate and store the model's memory-update JSON. Never throws on garbage
  * input, never accepts a user id outside `knownUserIds`, never drops a field
  * that was not part of the update.
@@ -586,39 +742,7 @@ export function applyMemoryUpdate(store, guildId, update, cfg, knownUserIds, kno
   };
   if (!update || typeof update !== 'object' || Array.isArray(update)) return result;
 
-  // A member is written as `<@id>` in every free-text field the analyzer
-  // returns (see docs/prompt-contract.md, "Members are referred to
-  // by id, never by nickname"); this normalizes the fallback shape the model
-  // sometimes writes instead, `Name (id:123...)`, into the token -- but only
-  // for an id this guild actually knows (an author of the batch, or an
-  // existing stored profile), an unrecognised id is left exactly as written.
-  const isKnownId = (id) => {
-    const key = String(id);
-    return knownUserIds.has(key) || store.getUser(guildId, key) != null;
-  };
-  // The known names for one id, stored profile names first, the batch's own
-  // nick for them appended -- see toTokens' name-aware matching, which needs
-  // the FULL name (however many words) to convert e.g. "Al Sus (id:...)"
-  // correctly instead of guessing a word count.
-  const namesOf = (id) => {
-    const key = String(id);
-    const stored = store.getUser(guildId, key)?.names ?? [];
-    const batchNick = batchAuthorNames?.get?.(key);
-    return batchNick ? [...stored, batchNick] : stored;
-  };
-  const tokenize = (text) => (typeof text === 'string' ? toTokens(text, isKnownId, namesOf) : text);
-  const tokenizeArray = (values) => (Array.isArray(values) ? values.map(tokenize) : values);
-  /** `ops.add`/`ops.update` items' `note` field, tokenized in place. */
-  const tokenizeNoted = (items) =>
-    Array.isArray(items)
-      ? items.map((item) => (item && typeof item === 'object' && !Array.isArray(item) ? { ...item, note: tokenize(item.note) } : item))
-      : items;
-  /** A `details.add` entry, a bare string or `{ text, sure? }`, `text` tokenized. */
-  const tokenizeDetail = (item) => {
-    if (typeof item === 'string') return tokenize(item);
-    if (item && typeof item === 'object' && !Array.isArray(item)) return { ...item, text: tokenize(item.text) };
-    return item;
-  };
+  const { isKnownId, tokenize, tokenizeArray, tokenizeItemOps, tokenizeEpisodes } = makeTokenizers(store, guildId, knownUserIds, batchAuthorNames);
 
   if (update.users && typeof update.users === 'object' && !Array.isArray(update.users)) {
     for (const [userId, raw] of Object.entries(update.users)) {
@@ -649,17 +773,7 @@ export function applyMemoryUpdate(store, guildId, update, cfg, knownUserIds, kno
         if (reason) result.portraitRequests.push({ userId: String(userId), reason });
       }
 
-      if (raw.interests && typeof raw.interests === 'object' && !Array.isArray(raw.interests)) {
-        ops.interests = {
-          ...raw.interests,
-          add: tokenizeNoted(raw.interests.add),
-          update: tokenizeNoted(raw.interests.update),
-        };
-      }
-
-      if (raw.details && typeof raw.details === 'object' && !Array.isArray(raw.details)) {
-        ops.details = { ...raw.details, add: Array.isArray(raw.details.add) ? raw.details.add.map(tokenizeDetail) : raw.details.add };
-      }
+      tokenizeItemOps(raw, ops);
 
       // Aliases are literal nicknames, never a `<@id>` reference to someone
       // else -- passed through untouched, see docs/prompt-contract.md,
@@ -673,24 +787,7 @@ export function applyMemoryUpdate(store, guildId, update, cfg, knownUserIds, kno
       const beforeInterests = JSON.stringify(store.getUser(guildId, userId)?.interests ?? []);
       const beforeRelationship = store.getUser(guildId, userId)?.relationship ?? '';
 
-      store.applyProfileOps(guildId, userId, ops, {
-        fieldChars: cfg.fieldChars,
-        maxInterests: cfg.maxInterests,
-        maxInterestsStored: cfg.maxInterestsStored,
-        topicChars: cfg.interestTopicChars,
-        noteChars: cfg.interestNoteChars,
-        interestHalfLifeDays: cfg.interestHalfLifeDays,
-        maxDetails: cfg.maxDetails,
-        maxDetailsStored: cfg.maxDetailsStored,
-        detailHalfLifeDays: cfg.detailHalfLifeDays,
-        maxAliases: cfg.maxAliases,
-        maxAliasesStored: cfg.maxAliasesStored,
-        aliasHalfLifeDays: cfg.aliasHalfLifeDays,
-        confirmGapHours: cfg.confirmGapHours,
-        clampTolerance: cfg.clampTolerance,
-        now: profileOpsNow,
-        seenAt,
-      });
+      store.applyProfileOps(guildId, userId, ops, profileOpsOptions(cfg, profileOpsNow, seenAt));
       result.users += 1;
 
       const afterInterests = JSON.stringify(store.getUser(guildId, userId)?.interests ?? []);
@@ -700,31 +797,12 @@ export function applyMemoryUpdate(store, guildId, update, cfg, knownUserIds, kno
 
       if (relationships?.enabled && raw.affinity && typeof raw.affinity === 'object' && !Array.isArray(raw.affinity)) {
         const before = store.getUser(guildId, userId)?.affinity?.score ?? 0;
-        const after = store.adjustAffinity(guildId, userId, raw.affinity.delta, tokenize(raw.affinity.reason), {
-          // The model's verdict is never applied unclamped, even if the config block is missing.
-          maxDelta: relationships.maxDeltaPerUpdate ?? 15,
-          historySize: relationships.historySize ?? 10,
-          now: relationships.now,
-          clampTolerance: cfg.clampTolerance,
-          // relationships.damping: a missing key counts as on, like features.*.
-          damping: relationships.damping !== false,
-          // relationships.dampingPower: garbage/absent falls back to 1 inside applyDelta itself.
-          dampingPower: relationships.dampingPower,
-        });
+        const after = store.adjustAffinity(guildId, userId, raw.affinity.delta, tokenize(raw.affinity.reason), affinityOptions(relationships, cfg));
         if (after.score !== before) result.affinity += 1;
       }
 
       if (episodes?.enabled && Array.isArray(raw.episodes) && raw.episodes.length > 0) {
-        // `quote` is the person's own words verbatim -- never tokenized.
-        const tokenizedEpisodes = raw.episodes.map((ep) =>
-          ep && typeof ep === 'object' && !Array.isArray(ep) ? { ...ep, what: tokenize(ep.what), feeling: tokenize(ep.feeling) } : ep,
-        );
-        const added = store.addEpisodes(guildId, userId, tokenizedEpisodes, {
-          maxEpisodes: episodes.maxEpisodes,
-          maxNew: episodes.maxNew,
-          now: episodes.now,
-          clampTolerance: cfg.clampTolerance,
-        });
+        const added = store.addEpisodes(guildId, userId, tokenizeEpisodes(raw.episodes), episodeOptions(episodes, cfg));
         result.episodes += added;
       }
     }
@@ -807,6 +885,90 @@ export function applyMemoryUpdate(store, guildId, update, cfg, knownUserIds, kno
       store.updateGuild(guildId, { self });
       result.self = true;
     }
+  }
+
+  return result;
+}
+
+function isPlainObject(value) {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+/** Whether an analyzer value says anything: a non-blank string, a non-empty array or object. */
+function hasContent(value) {
+  if (typeof value === 'string') return value.trim() !== '';
+  if (Array.isArray(value)) return value.length > 0;
+  if (isPlainObject(value)) return Object.values(value).some(hasContent);
+  return value != null && value !== false;
+}
+
+/**
+ * Validate and store a PRIVATE batch's answer (see `analyzePrivate`): only
+ * `update.users[userId]` is applied, and only to that member's private layer
+ * -- `relationship`/`interests`/`details` via `store.applyPrivateOps`,
+ * `affinity` via `store.adjustPrivateAffinity`, `episodes` via
+ * `store.addPrivateEpisodes`, with the same options `applyMemoryUpdate` uses.
+ * `character`, `style`, `aliases` and `portrait` are public-only and ignored.
+ * Every other user, `guild`, `channels`, `lore` and `self` is dropped and
+ * only counted in `dropped` (never an id). Never throws on garbage input.
+ * @param {object} store
+ * @param {string} guildId
+ * @param {string} userId       The DM partner.
+ * @param {unknown} update      Parsed model output; untrusted.
+ * @param {object} cfg          `config.memory`.
+ * @param {object} [relationships]  As for `applyMemoryUpdate`.
+ * @param {object} [episodes]       As for `applyMemoryUpdate`.
+ * @param {{ seenAtByUser?: Map<string, number>, seenAt?: number }} [timing]  From `computeSeenAt`.
+ * @param {Map<string, string>} [batchAuthorNames]  From `batchAuthorNamesMap`.
+ * @returns {{ users: number, affinity: number, relationships: number, episodes: number, interestsChanged: number,
+ *   dropped: { users: number, guild: boolean, channels: number, lore: number, self: number } }}
+ */
+export function applyPrivateUpdate(store, guildId, userId, update, cfg, relationships, episodes, timing, batchAuthorNames) {
+  const id = String(userId);
+  const result = {
+    users: 0,
+    affinity: 0,
+    relationships: 0,
+    episodes: 0,
+    interestsChanged: 0,
+    dropped: { users: 0, guild: false, channels: 0, lore: 0, self: 0 },
+  };
+  if (!isPlainObject(update)) return result;
+
+  const users = isPlainObject(update.users) ? update.users : {};
+  result.dropped.users = Object.keys(users).filter((key) => key !== id).length;
+  result.dropped.guild = hasContent(update.guild);
+  result.dropped.channels = isPlainObject(update.channels) ? Object.keys(update.channels).length : 0;
+  result.dropped.lore = Array.isArray(update.lore) ? update.lore.length : 0;
+  result.dropped.self = Array.isArray(update.self) ? update.self.length : 0;
+
+  const raw = users[id];
+  if (!isPlainObject(raw)) return result;
+
+  const { tokenize, tokenizeItemOps, tokenizeEpisodes } = makeTokenizers(store, guildId, new Set([id]), batchAuthorNames);
+  const ops = {};
+  if (typeof raw.relationship === 'string') ops.relationship = tokenize(raw.relationship);
+  tokenizeItemOps(raw, ops);
+
+  const opsNow = relationships?.now ?? episodes?.now ?? Date.now();
+  const seenAt = timing?.seenAtByUser?.get(id) ?? timing?.seenAt ?? opsNow;
+  const before = store.getPrivate(guildId, id);
+  const beforeInterests = JSON.stringify(before?.interests ?? []);
+  const beforeRelationship = before?.relationship ?? '';
+
+  const after = store.applyPrivateOps(guildId, id, ops, profileOpsOptions(cfg, opsNow, seenAt));
+  result.users = 1;
+  if (JSON.stringify(after.interests) !== beforeInterests) result.interestsChanged = 1;
+  if (after.relationship !== beforeRelationship) result.relationships = 1;
+
+  if (relationships?.enabled && isPlainObject(raw.affinity)) {
+    const scoreBefore = store.getPrivate(guildId, id)?.affinity?.score ?? 0;
+    const next = store.adjustPrivateAffinity(guildId, id, raw.affinity.delta, tokenize(raw.affinity.reason), affinityOptions(relationships, cfg));
+    if (next.score !== scoreBefore) result.affinity = 1;
+  }
+
+  if (episodes?.enabled && Array.isArray(raw.episodes) && raw.episodes.length > 0) {
+    result.episodes = store.addPrivateEpisodes(guildId, id, tokenizeEpisodes(raw.episodes), episodeOptions(episodes, cfg));
   }
 
   return result;
@@ -902,12 +1064,15 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
    * Called for every guild message the persona sees, including its own.
    * `direct` marks a message addressed to the persona (a trigger), so the
    * analyzer can tell how people talk TO it apart from general chatter.
+   * `private` (the DM partner's id, also for the persona's own DM lines)
+   * routes the message into that member's private buffer instead: no public
+   * counters, no channel map entry, no guild buffer.
    */
-  function observe(guildId, normalized, { direct = false } = {}) {
+  function observe(guildId, normalized, { direct = false, private: privateUserId = null } = {}) {
     // /nep pause: nothing may make the store dirty while paused.
     if (store.state.data.paused) return;
     if (normalized.bot) return;
-    touchMemory(store, guildId, normalized);
+    if (!privateUserId) touchMemory(store, guildId, normalized);
 
     const forwarded = (normalized.forwarded ?? []).map((snapshot) => ({
       content: snapshot.content ?? '',
@@ -933,7 +1098,8 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
       direct: Boolean(direct),
     };
     const cfg = hot.config.memory;
-    store.pushBuffer(guildId, slim, cfg.batchMessages * 3);
+    if (privateUserId) store.pushPrivateBuffer(guildId, String(privateUserId), slim, cfg.batchMessages * 3);
+    else store.pushBuffer(guildId, slim, cfg.batchMessages * 3);
   }
 
   /**
@@ -980,15 +1146,89 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
    * @returns {Promise<{ ok: boolean, usage: object|null, estimated: number, result: object|null, error?: Error }>}
    */
   async function analyze(guildId, messages) {
-    const cfg = hot.config.memory;
-    const promptText = hot.prompts.memory;
-    if (!promptText) {
-      log.warn('memory: no memory prompt configured, skipping', { guildId });
-      return { ok: false, usage: null, estimated: 0, result: null, reason: 'no-prompt' };
-    }
+    let context;
+    return analyzeBatch(
+      guildId,
+      messages,
+      () => {
+        context = collectContext(guildId, messages);
+        return { profiles: context.profiles, channels: context.channels };
+      },
+      (update, { relationships, episodes, lore }) => {
+        const cfg = hot.config.memory;
+        const knownUserIds = new Set(context.authorIds.map(String));
+        const knownChannelIds = new Set(context.channelIds.map(String));
+        const result = applyMemoryUpdate(
+          store,
+          guildId,
+          update,
+          cfg,
+          knownUserIds,
+          knownChannelIds,
+          relationships,
+          episodes,
+          lore,
+          computeSeenAt(messages),
+          batchAuthorNamesMap(messages),
+        );
 
-    const { authorIds, profiles, channelIds, channels } = collectContext(guildId, messages);
+        if (typeof onPortraitRequest === 'function') {
+          for (const { userId, reason } of result.portraitRequests) onPortraitRequest(guildId, userId, reason);
+        }
+        return result;
+      },
+    );
+  }
 
+  /**
+   * The private-chat analyzer path, same shape and same guarantees as
+   * `analyze()` (never throws, never touches a buffer, same LLM options):
+   * `messages` are one member's direct messages with the persona. The request
+   * (see `buildMemoryRequest`'s `privateChat`) carries ONLY that member's
+   * private layer, with the effective affinity (src/behavior/private.js
+   * #effectiveAffinity), plus their public profile as read-only prose and the
+   * usual read-only guild/lore context; only `users[userId]` of the answer is
+   * applied, to the private layer (`applyPrivateUpdate`). A success stamps the
+   * private layer's `lastSeen` (and `firstSeen` the first time).
+   * @param {string} guildId
+   * @param {string} userId  The DM partner.
+   * @param {object[]} messages  Slim buffered direct messages, oldest first.
+   * @returns {Promise<{ ok: boolean, usage: object|null, estimated: number, result: object|null, error?: Error }>}
+   */
+  async function analyzePrivate(guildId, userId, messages) {
+    const id = String(userId);
+    return analyzeBatch(
+      guildId,
+      messages,
+      () => {
+        const publicProfile = store.getUser(guildId, id);
+        const privateProfile = store.getPrivate(guildId, id) ?? {};
+        const view = { ...privateProfile, affinity: effectiveAffinity(publicProfile?.affinity, privateProfile.affinity) };
+        return { profiles: { [id]: view }, channels: {}, privateChat: { publicProfile, now: now() } };
+      },
+      (update, { relationships, episodes }) => {
+        const result = applyPrivateUpdate(
+          store,
+          guildId,
+          id,
+          update,
+          hot.config.memory,
+          relationships,
+          episodes,
+          computeSeenAt(messages),
+          batchAuthorNamesMap(messages),
+        );
+        store.touchPrivateSeen(guildId, id, now());
+        return result;
+      },
+    );
+  }
+
+  /**
+   * The picture/video/page captions the media cache already holds for the
+   * items of `messages` (see `analyze()`), each `null` when its switch is off.
+   */
+  function cachedMedia(guildId, messages) {
     // The live analyzer never triggers a NEW description request itself --
     // the buffered messages carry no URL to describe from anyway (see
     // observe() above). It only reads whatever src/discord/events.js has
@@ -1063,6 +1303,40 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
         }
       }
     }
+    return { descriptions, videos, reads };
+  }
+
+  /** The `relationships`/`episodes`/`lore` arguments of the apply functions, from the live config. */
+  function applySwitches() {
+    const cfg = hot.config.memory;
+    const relationshipsOn = hot.config.features?.relationships !== false;
+    const relationships = relationshipsOn ? { enabled: true, ...hot.config.relationships, now: now() } : undefined;
+    const episodesOn = hot.config.features?.episodes !== false;
+    const episodes = episodesOn ? { enabled: true, maxEpisodes: cfg.maxEpisodes, maxNew: cfg.maxNewEpisodes, now: now() } : undefined;
+    const loreOn = hot.config.features?.lore !== false;
+    const lore = loreOn
+      ? { enabled: true, maxEntries: hot.config.lore?.maxEntries ?? Infinity, textChars: hot.config.lore?.textChars, now: now() }
+      : undefined;
+    return { relationships, episodes, lore };
+  }
+
+  /**
+   * Build, send, parse, apply: the body shared by `analyze()` and
+   * `analyzePrivate()`. `requestInput()` (called only once a memory prompt is
+   * configured) returns the mode-specific `buildMemoryRequest` fields;
+   * `applyUpdate(update, switches)` stores the parsed answer and returns the
+   * result to report.
+   */
+  async function analyzeBatch(guildId, messages, requestInput, applyUpdate) {
+    const cfg = hot.config.memory;
+    const promptText = hot.prompts.memory;
+    if (!promptText) {
+      log.warn('memory: no memory prompt configured, skipping', { guildId });
+      return { ok: false, usage: null, estimated: 0, result: null, reason: 'no-prompt' };
+    }
+
+    const input = requestInput();
+    const { descriptions, videos, reads } = cachedMedia(guildId, messages);
 
     let completion;
     try {
@@ -1070,9 +1344,7 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
         prompts: hot.prompts,
         config: hot.config,
         calibrator,
-        profiles,
         guildMemory: store.getGuild(guildId),
-        channels,
         messages,
         selfName: getSelfName(guildId),
         loreEntries: store.getLore(guildId),
@@ -1080,6 +1352,7 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
         videos,
         reads,
         nameOf: storeNameOf(store, guildId),
+        ...input,
       });
 
       completion = await llm.complete(llmMessages, {
@@ -1108,39 +1381,7 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
 
     try {
       const update = parseJsonObject(completion.text);
-      const knownUserIds = new Set(authorIds.map(String));
-      const knownChannelIds = new Set(channelIds.map(String));
-      const relationshipsOn = hot.config.features?.relationships !== false;
-      const relationships = relationshipsOn
-        ? { enabled: true, ...hot.config.relationships, now: now() }
-        : undefined;
-      const episodesOn = hot.config.features?.episodes !== false;
-      const episodes = episodesOn
-        ? { enabled: true, maxEpisodes: cfg.maxEpisodes, maxNew: cfg.maxNewEpisodes, now: now() }
-        : undefined;
-      const loreOn = hot.config.features?.lore !== false;
-      const lore = loreOn
-        ? { enabled: true, maxEntries: hot.config.lore?.maxEntries ?? Infinity, textChars: hot.config.lore?.textChars, now: now() }
-        : undefined;
-      const timing = computeSeenAt(messages);
-      const result = applyMemoryUpdate(
-        store,
-        guildId,
-        update,
-        cfg,
-        knownUserIds,
-        knownChannelIds,
-        relationships,
-        episodes,
-        lore,
-        timing,
-        batchAuthorNamesMap(messages),
-      );
-
-      if (typeof onPortraitRequest === 'function') {
-        for (const { userId, reason } of result.portraitRequests) onPortraitRequest(guildId, userId, reason);
-      }
-
+      const result = applyUpdate(update, applySwitches());
       return { ok: true, usage: completion.usage ?? null, estimated: completion.estimated ?? 0, result };
     } catch (err) {
       // The completion arrived (and was billed) but its answer was garbage:
@@ -1160,19 +1401,70 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
     }
   }
 
+  /**
+   * Resolve the waiters of `waitIdle()` once nothing is in flight any more.
+   * @param {string} key  A guild id, or a `privateKey`.
+   */
+  function settle(key) {
+    running.delete(key);
+    if (running.size === 0 && idleWaiters.length > 0) {
+      const waiters = idleWaiters;
+      idleWaiters = [];
+      for (const resolve of waiters) resolve();
+    }
+  }
+
+  /** How many buffered messages the next batch for `key` takes (see `sizeFactors`). */
+  function batchTake(key, bufferLength) {
+    const cfg = hot.config.memory;
+    const factor = sizeFactors.get(key) ?? 1;
+    const normalTake = cfg.batchMessages * 2;
+    // Only the degraded (factor < 1) path is floored at MIN_LIVE_BATCH; the
+    // normal size is left exactly as configured either way.
+    const desired = factor === 1 ? normalTake : Math.max(MIN_LIVE_BATCH, Math.floor(normalTake * factor));
+    return Math.min(bufferLength, desired);
+  }
+
+  /**
+   * A failed batch for `key`: halve the next batch or back off, and log it.
+   * @param {string} key
+   * @param {object} outcome  From `analyze()` / `analyzePrivate()`.
+   * @param {string} what     The log message prefix.
+   * @param {object} fields   Extra log fields (counts and the guild id only).
+   */
+  function recordFailure(key, outcome, what, fields) {
+    if (outcome.reason === 'truncated' || outcome.reason === 'bad-json' || outcome.reason === 'token-limit') {
+      // Retrying the same-size batch can never succeed: 'truncated'/'bad-json'
+      // means the completion is being cut by the output cap, and 'token-limit'
+      // means the request itself (stored profiles included) does not fit the
+      // per-request cap -- neither is transient bad luck. A plain back-off
+      // would just retry the exact same buffer forever: halve the
+      // batch size for next time instead, same as the output-cap case, so
+      // the following attempt asks for fewer messages and pulls in fewer
+      // distinct authors' profiles.
+      sizeFactors.set(key, (sizeFactors.get(key) ?? 1) / 2);
+      log.warn(`${what} failed, halving the batch size for next time`, {
+        ...fields,
+        reason: outcome.reason,
+        detail: outcome.detail,
+      });
+    } else {
+      backoffUntil.set(key, now() + BACKOFF_MS);
+      log.warn(`${what} failed, backing off`, {
+        ...fields,
+        reason: outcome.reason,
+        detail: outcome.detail,
+        error: outcome.error,
+      });
+    }
+  }
+
   /** Run a memory update for one guild if its buffer is due and it is not busy/backed off. */
   async function run(guildId) {
     running.add(guildId);
     try {
-      const cfg = hot.config.memory;
       const buffer = store.getBuffer(guildId);
-      const factor = sizeFactors.get(guildId) ?? 1;
-      const normalTake = cfg.batchMessages * 2;
-      // Only the degraded (factor < 1) path is floored at MIN_LIVE_BATCH; the
-      // normal size is left exactly as configured either way.
-      const desired = factor === 1 ? normalTake : Math.max(MIN_LIVE_BATCH, Math.floor(normalTake * factor));
-      const take = Math.min(buffer.length, desired);
-      const messages = buffer.slice(0, take);
+      const messages = buffer.slice(0, batchTake(guildId, buffer.length));
 
       const outcome = await analyze(guildId, messages);
       if (outcome.ok) {
@@ -1182,42 +1474,76 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
         log.info('memory: update applied', { guildId, consumed: messages.length, ...outcome.result });
         return;
       }
-
-      if (outcome.reason === 'truncated' || outcome.reason === 'bad-json' || outcome.reason === 'token-limit') {
-        // Retrying the same-size batch can never succeed: 'truncated'/'bad-json'
-        // means the completion is being cut by the output cap, and 'token-limit'
-        // means the request itself (stored profiles included) does not fit the
-        // per-request cap -- neither is transient bad luck. A plain back-off
-        // would just retry the exact same buffer forever: halve the
-        // batch size for next time instead, same as the output-cap case, so
-        // the following attempt asks for fewer messages and pulls in fewer
-        // distinct authors' profiles.
-        sizeFactors.set(guildId, factor / 2);
-        log.warn('memory: update failed, halving the batch size for next time', {
-          guildId,
-          reason: outcome.reason,
-          detail: outcome.detail,
-        });
-      } else {
-        backoffUntil.set(guildId, now() + BACKOFF_MS);
-        log.warn('memory: update failed, backing off', {
-          guildId,
-          reason: outcome.reason,
-          detail: outcome.detail,
-          error: outcome.error,
-        });
-      }
+      recordFailure(guildId, outcome, 'memory: update', { guildId });
     } finally {
-      running.delete(guildId);
-      if (running.size === 0 && idleWaiters.length > 0) {
-        const waiters = idleWaiters;
-        idleWaiters = [];
-        for (const resolve of waiters) resolve();
-      }
+      settle(guildId);
     }
   }
 
-  /** Check every guild and kick off a memory update for the ones that are due. */
+  /** The `running`/`backoffUntil`/`sizeFactors` key of one member's private buffer. */
+  const privateKey = (guildId, userId) => `private:${guildId}:${userId}`;
+
+  /**
+   * Run a private update for one member's buffered direct messages. The
+   * buffer is shifted only after a success; a failure keeps it and backs off
+   * or halves the next batch, exactly like `run()`. Never runs twice at once
+   * for the same member. Logs carry counts only, never a member id.
+   * @param {string} guildId
+   * @param {string} userId
+   */
+  async function runPrivate(guildId, userId) {
+    const key = privateKey(guildId, userId);
+    if (running.has(key)) return;
+    running.add(key);
+    try {
+      const buffer = store.getPrivateBuffer(guildId, userId);
+      const messages = buffer.slice(0, batchTake(key, buffer.length));
+      if (messages.length === 0) return;
+
+      const outcome = await analyzePrivate(guildId, userId, messages);
+      if (outcome.ok) {
+        sizeFactors.delete(key);
+        store.shiftPrivateBuffer(guildId, userId, messages.length);
+        store.flush();
+        log.info('memory: private update applied', { guildId, consumed: messages.length, ...outcome.result });
+        return;
+      }
+      recordFailure(key, outcome, 'memory: private update', { guildId });
+    } finally {
+      settle(key);
+    }
+  }
+
+  let privatePass = false; // true while a tick is working through the private buffers
+
+  /**
+   * Every due private buffer of every guild, one at a time (a DM batch is
+   * small; the private pass never runs concurrently with itself, even across
+   * ticks). Stops as soon as the persona is paused.
+   */
+  async function runDuePrivate() {
+    if (privatePass) return;
+    privatePass = true;
+    try {
+      for (const guildId of store.listGuilds()) {
+        for (const userId of store.listPrivate(guildId)) {
+          if (store.state.data.paused) return;
+          const key = privateKey(guildId, userId);
+          if (running.has(key)) continue;
+          const nowMs = now();
+          if (nowMs < (backoffUntil.get(key) ?? 0)) continue;
+          if (store.privateBufferInfo(guildId, userId).size === 0) continue;
+          const relationshipsCfg = hot.config.features?.relationships !== false ? hot.config.relationships : undefined;
+          if (!isDue(store.getPrivateBuffer(guildId, userId), nowMs, hot.config.memory, relationshipsCfg)) continue;
+          await runPrivate(guildId, userId);
+        }
+      }
+    } finally {
+      privatePass = false;
+    }
+  }
+
+  /** Check every guild and every private buffer, and kick off a memory update for the ones that are due. */
   async function tick() {
     // /nep pause: the live analyzer never runs while paused.
     if (store.state.data.paused) return;
@@ -1231,11 +1557,12 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
       if (!isDue(store.getBuffer(guildId), nowMs, cfg, relationshipsCfg)) continue;
       jobs.push(run(guildId));
     }
+    jobs.push(runDuePrivate());
     await Promise.all(jobs);
   }
 
   /**
-   * Resolves once no `run()` is in flight for any guild -- immediately if
+   * Resolves once no `run()` / `runPrivate()` is in flight -- immediately if
    * that is already true. Never starts a new run itself. Used by admin.js's
    * `/nep pause` to wait out a live-analyzer run that was already in
    * flight when the pause was requested (an LLM call can take 30-90s): its
@@ -1249,5 +1576,5 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
     return running.size === 0 ? Promise.resolve() : new Promise((resolve) => idleWaiters.push(resolve));
   }
 
-  return { observe, tick, run, analyze, waitIdle };
+  return { observe, tick, run, runPrivate, analyze, analyzePrivate, waitIdle };
 }

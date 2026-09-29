@@ -1787,3 +1787,43 @@ test('validate: reports an unparsable private file like a broken profile', () =>
   fs.writeFileSync(privateFile(dir, 'g1', 'u1'), '{ not json');
   assert.deepEqual(store.validate(), ['guilds/g1/private/u1.json']);
 });
+
+test('getPrivateBuffer: a copy of the buffer, oldest first; [] and no file when there is no private layer', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  assert.deepEqual(store.getPrivateBuffer('g1', 'u1'), []);
+  assert.equal(store.getPrivate('g1', 'u1'), null);
+
+  store.pushPrivateBuffer('g1', 'u1', { id: 'm1', ts: 1000 });
+  store.pushPrivateBuffer('g1', 'u1', { id: 'm2', ts: 2000 });
+  const copy = store.getPrivateBuffer('g1', 'u1');
+  assert.deepEqual(copy.map((m) => m.id), ['m1', 'm2']);
+  copy.pop();
+  assert.equal(store.privateBufferInfo('g1', 'u1').size, 2, 'mutating the copy never touches the stored buffer');
+});
+
+test('shiftPrivateBuffer: drops the first count entries and persists; a missing layer is left alone', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  store.shiftPrivateBuffer('g1', 'nobody', 2);
+  assert.equal(store.getPrivate('g1', 'nobody'), null, 'no file is created');
+
+  for (let i = 1; i <= 4; i += 1) store.pushPrivateBuffer('g1', 'u1', { id: `m${i}`, ts: i });
+  store.flush();
+  store.shiftPrivateBuffer('g1', 'u1', 3);
+  store.flush();
+  assert.deepEqual(createStore({ dataDir: dir }).getPrivateBuffer('g1', 'u1').map((m) => m.id), ['m4']);
+});
+
+test('touchPrivateSeen: stamps lastSeen every time, firstSeen only while empty; never touches the public profile', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  store.touchUser('g1', 'u1', 'Zoé', 500);
+  store.touchPrivateSeen('g1', 'u1', Date.UTC(2026, 0, 1));
+  store.touchPrivateSeen('g1', 'u1', Date.UTC(2026, 0, 5));
+  store.flush();
+  const priv = createStore({ dataDir: dir }).getPrivate('g1', 'u1');
+  assert.equal(priv.firstSeen, new Date(Date.UTC(2026, 0, 1)).toISOString());
+  assert.equal(priv.lastSeen, new Date(Date.UTC(2026, 0, 5)).toISOString());
+  assert.equal(store.getUser('g1', 'u1').lastSeen, new Date(500).toISOString());
+});
