@@ -50,7 +50,11 @@ function positive(value, fallback) {
   return Number.isFinite(value) && value > 0 ? value : fallback;
 }
 
-/** How a run ended early: `kind` 'stopped' ('budget' | 'owner') or 'error' (a short reason). */
+/**
+ * How a run ended early: `kind` 'stopped' ('budget' | 'owner' | 'disabled':
+ * `features.mentor` or `mentor.model` was turned off during the run) or
+ * 'error' (a short reason).
+ */
 class RunEnd extends Error {
   constructor(kind, reason) {
     super(reason);
@@ -74,9 +78,12 @@ function emptyMedians() {
 
 /**
  * The mentor for one bot. Every value is read at the moment of use:
- * `hot.config.mentor` (`model`, `maxOutputTokens`, `timeoutMs`, `situations`,
- * `situationLines`, `samples`, `check.samples`, `pass`, `reference`,
- * `feedbackExamples`), `hot.config.features.mentor` (must be exactly true),
+ * `hot.config.mentor` (`model`, `maxOutputTokens`, `outputTokenWeight`,
+ * `timeoutMs`, `situations`, `situationLines`, `samples`, `check.samples`,
+ * `pass`, `reference`, `feedbackExamples`), `hot.config.features.mentor`
+ * (must be exactly true; checked at the start, then again before every
+ * situation and every mentor request together with `mentor.model`: either
+ * one turned off ends the run as `stopped: 'disabled'`),
  * `hot.config.memory.mainChannelIds`, `hot.config.bot.dryRunChannelId`, and
  * the `mentor-*` prompts (`mentor-signs` optional: the `<signs>` block of
  * every mentor request, omitted when missing or empty).
@@ -90,16 +97,20 @@ function emptyMedians() {
  * @param {() => (string|null)} deps.getGuildId
  * @param {() => ({ id: string, name: string }|null)} deps.getSelf  The persona's user id and display name.
  * @param {Function} deps.fetchHistoryWindow  src/discord/collect.js#fetchHistoryWindow.
+ * @param {{ ratio: number, apply: (n: number) => number }} [deps.calibrator]  The live calibrator: the
+ *   sandboxes measure tokens with its ratio (read at the moment of use) and never feed it.
+ *   Without it, tokens are measured as they are.
  * @param {() => number} [deps.now]
  * @param {() => number} [deps.rng]
  * @returns {{ run: (caseId: number) => Promise<{ started: true, done: Promise<object> }>,
  *   check: () => Promise<{ started: true, cases: number, done: Promise<object[]> }>,
- *   stop: () => { ok: boolean }, status: () => object, isRunning: () => boolean }}
+ *   stop: () => { ok: boolean }, status: () => object, isRunning: () => boolean,
+ *   waitIdle: () => Promise<void> }}
  *   `run` / `check` reject with an operator-facing Error before anything is spent when the mentor is
  *   off, has no model, the case or a required prompt is missing, a run is in flight or the budget is spent.
  *   `done` never rejects: a failure ends the run with `error`, which is saved and reported.
  */
-export function createMentor({ hot, store, llm, client, cases, budget, getGuildId, getSelf, fetchHistoryWindow, now = Date.now, rng = Math.random }) {
+export function createMentor({ hot, store, llm, client, cases, budget, getGuildId, getSelf, fetchHistoryWindow, calibrator, now = Date.now, rng = Math.random }) {
   let current = null;
 
   // ---- guards ----------------------------------------------------------------
@@ -135,21 +146,34 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
     if (ctx.signal.aborted) throw new RunEnd('stopped', 'owner');
   }
 
+  /** The switches, read now: the mentor turned off or its model cleared ends the run. */
+  function checkEnabled(config = hot.config) {
+    if (config.features?.mentor !== true || !config.mentor?.model) throw new RunEnd('stopped', 'disabled');
+  }
+
   function charge(ctx, usage, estimated) {
     const amount = budget.charge(usage, estimated);
     ctx.spent += amount;
     return amount;
   }
 
-  /** One request to the mentor model: budget first, charged after; an abort ends the run. */
+  /**
+   * One request to the mentor model: the switches and the budget first (the
+   * prompt plus the most the answer may cost, `maxOutputTokens` at
+   * `outputTokenWeight`), charged after; an abort ends the run.
+   */
   async function askMentor(ctx, system, user) {
-    const cfg = hot.config.mentor ?? {};
+    const config = hot.config;
+    checkEnabled(config);
+    const cfg = config.mentor ?? {};
     const messages = [
       { role: 'system', content: system },
       { role: 'user', content: user },
     ];
     const estimate = estimateMessages(messages);
-    if (!budget.canSpend(estimate)) throw new RunEnd('stopped', 'budget');
+    const outputWeight = Number.isFinite(cfg.outputTokenWeight) && cfg.outputTokenWeight >= 0 ? cfg.outputTokenWeight : 5;
+    const possibleOutput = positive(cfg.maxOutputTokens, 6000) * outputWeight;
+    if (!budget.canSpend(estimate + possibleOutput)) throw new RunEnd('stopped', 'budget');
     checkAborted(ctx);
     let completion;
     try {
@@ -185,7 +209,11 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
     return { id, name: entry?.name || null, category: entry?.category ?? null, topic: entry?.topic ?? null };
   }
 
-  /** The people's messages of the reference channels, measured and sampled. */
+  /**
+   * The people's messages of the reference channels, measured and sampled. A
+   * channel whose window came back empty does not count as readable; no
+   * message of people at all ends the run before any request.
+   */
   async function readReference(ctx, view, selfId) {
     const config = hot.config;
     const refCfg = config.mentor?.reference ?? {};
@@ -220,10 +248,16 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
         log.warn('mentor: a reference channel cannot be read', { channel: id, errorName: err?.name });
         continue;
       }
+      // fetchHistoryWindow logs a failed page and returns [] rather than throwing.
+      if (!Array.isArray(window) || window.length === 0) {
+        log.warn('mentor: a reference channel gave no messages', { channel: id });
+        continue;
+      }
       readable += 1;
-      for (const message of window ?? []) if (!message?.self && !message?.bot) messages.push(message);
+      for (const message of window) if (!message?.self && !message?.bot) messages.push(message);
     }
     if (readable === 0) throw new RunEnd('error', 'no readable channel for the reference');
+    if (messages.length === 0) throw new RunEnd('error', 'the reference is empty');
     const samples = sampleLines(messages, Math.max(0, Math.floor(Number(refCfg.samples ?? 60)) || 0), rng);
     log.info('mentor: reference read', { channels: readable, messages: messages.length, samples: samples.length });
     const profile = styleProfile(messages, { rarePer1000: refCfg.rarePer1000, rareMinAuthors: refCfg.rareMinAuthors });
@@ -333,6 +367,7 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
   async function answerAll(ctx, { run, prepared, view, self, reference, samples }) {
     let previous = 1;
     for (const { situation, record, history, at } of prepared) {
+      checkEnabled();
       if (!budget.canSpend(previous)) throw new RunEnd('stopped', 'budget');
       checkAborted(ctx);
       ctx.phase = `answers ${record.n}/${prepared.length}`;
@@ -379,7 +414,7 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
         const asked = situation.answers.filter((a) => pending.includes(a.id));
         const shown =
           run.target === 'memory'
-            ? asked.map((a) => ({ id: a.id, texts: a.texts }))
+            ? asked.map((a) => ({ id: a.id, texts: a.texts, parseOk: a.parseOk }))
             : asked.map((a) => ({ id: a.id, messages: a.messages, reactions: a.reactions, silent: a.silent }));
         const facts = Object.fromEntries(asked.map((a) => [a.id, a.facts]));
         facts.repeated = run.repeated;
@@ -447,7 +482,7 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
     try {
       const self = getSelf();
       if (!self?.id) throw new RunEnd('error', 'the bot user is not ready');
-      const view = liveView({ hot, store, guildId });
+      const view = liveView({ hot, store, guildId, calibrator });
       if (!shared.reference) {
         ctx.phase = 'reference';
         shared.reference = await readReference(ctx, view, self.id);
@@ -540,9 +575,9 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
     }
   }
 
-  /** Runs `work` in the background; `current` is released whatever happens. */
+  /** Runs `work` in the background; `current` is released whatever happens. Kept as `ctx.done`. */
   function background(ctx, work, fallback) {
-    return (async () => {
+    ctx.done = (async () => {
       try {
         return await work();
       } catch (err) {
@@ -552,6 +587,7 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
         if (current === ctx) current = null;
       }
     })();
+    return ctx.done;
   }
 
   // ---- the API ---------------------------------------------------------------
@@ -638,6 +674,10 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
             skipped.push({ caseId: item.id, reason: 'stopped by the owner' });
             continue;
           }
+          if (last?.stopped === 'disabled') {
+            skipped.push({ caseId: item.id, reason: 'the mentor was disabled' });
+            continue;
+          }
           if (last?.stopped === 'budget') {
             skipped.push({ caseId: item.id, reason: 'budget' });
             continue;
@@ -660,6 +700,16 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
     return { ok: true };
   }
 
+  /**
+   * Resolves once nothing runs: at once when idle, else when the run in
+   * flight has ended (saved and reported). Never rejects. `/nep pause` calls
+   * it after `stop()`.
+   * @returns {Promise<void>}
+   */
+  function waitIdle() {
+    return current ? current.done.then(() => undefined) : Promise.resolve();
+  }
+
   /** What is running right now, for `/nep mentor status`. */
   function status() {
     if (!current) return { running: false };
@@ -675,5 +725,5 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
     };
   }
 
-  return { run, check, stop, status, isRunning: () => current !== null };
+  return { run, check, stop, status, waitIdle, isRunning: () => current !== null };
 }

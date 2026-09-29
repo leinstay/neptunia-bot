@@ -167,6 +167,8 @@ const mentor = createMentor({
   // The persona as a turn names it; null until the client is ready.
   getSelf: () => (client.user ? { id: client.user.id, name: getSelfName(getGuildId()) } : null),
   fetchHistoryWindow,
+  // Read only: the sandboxes measure tokens as a real turn does and never feed it.
+  calibrator,
 });
 
 const onMessage = createMessageHandler({

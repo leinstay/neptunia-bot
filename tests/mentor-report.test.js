@@ -80,6 +80,12 @@ test('renderCard: says when the budget stopped the run', () => {
   assert.doesNotMatch(card, /\bpassed\b/i);
 });
 
+test('renderCard: says when the mentor was disabled during the run', () => {
+  const run = fakeRun({ passed: false, stopped: 'disabled' });
+  assert.match(renderCard(run), /stopped: the mentor was disabled during the run/);
+  assert.match(renderFile(run).text, /outcome: stopped: the mentor was disabled during the run/);
+});
+
 test('renderCard: says when the owner stopped the run or it failed', () => {
   assert.match(renderCard(fakeRun({ passed: false, stopped: 'owner' })), /owner/i);
   assert.match(renderCard(fakeRun({ passed: false, error: 'no valid situation' })), /no valid situation/);

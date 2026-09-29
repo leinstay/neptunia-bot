@@ -40,6 +40,7 @@ function outcome(run) {
   if (run?.error) return `error: ${clip(run.error, ERROR_MAX)}`;
   if (run?.stopped === 'budget') return 'stopped: the mentor daily token budget ran out';
   if (run?.stopped === 'owner') return 'stopped by the owner';
+  if (run?.stopped === 'disabled') return 'stopped: the mentor was disabled during the run';
   if (run?.stopped) return `stopped: ${clip(run.stopped, ERROR_MAX)}`;
   return run?.passed ? 'passed' : 'failed';
 }

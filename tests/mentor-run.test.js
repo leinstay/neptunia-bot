@@ -198,7 +198,7 @@ function reference() {
   ];
 }
 
-function setup({ config = {}, prompts = {}, llm = fakeLlm(), sendFails = false, fetchChannel } = {}) {
+function setup({ config = {}, prompts = {}, llm = fakeLlm(), sendFails = false, fetchChannel, windowFor } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'nep-mentor-run-'));
   let clock = NOW;
   const now = () => (clock += 1000);
@@ -229,7 +229,7 @@ function setup({ config = {}, prompts = {}, llm = fakeLlm(), sendFails = false, 
   const windows = [];
   const fetchHistoryWindow = async (channel, options) => {
     windows.push({ channel, options });
-    return reference();
+    return windowFor ? windowFor(channel) : reference();
   };
   const mentor = createMentor({
     hot,
@@ -513,6 +513,37 @@ test('run: no readable channel for the reference ends the run as an error', () =
     },
   ));
 
+test('run: an empty reference ends the run before any request', async () => {
+  const onlyPersonaAndBots = () => reference().filter((m) => m.self || m.bot);
+  // Windows with lines of the persona and of bots only: nothing of people was measured.
+  await withSetup({ windowFor: onlyPersonaAndBots }, async ({ mentor, cases, llm, sent }) => {
+    const item = cases.add(GUILD, { text: CASE_TEXT, target: 'reply' });
+    const run = await (await mentor.run(item.id)).done;
+    assert.equal(run.error, 'the reference is empty');
+    assert.equal(run.passed, false);
+    assert.equal(llm.calls.length, 0);
+    assert.equal(sent.length, 1);
+    assert.equal(cases.lastRun(GUILD, item.id).error, 'the reference is empty');
+  });
+  // A window that came back empty (a quiet week, or a history the bot cannot read) is not a readable channel.
+  await withSetup({ windowFor: () => [] }, async ({ mentor, cases, llm }) => {
+    const item = cases.add(GUILD, { text: CASE_TEXT, target: 'reply' });
+    const run = await (await mentor.run(item.id)).done;
+    assert.equal(run.error, 'no readable channel for the reference');
+    assert.equal(llm.calls.length, 0);
+  });
+  // One empty channel next to a readable one: the run goes ahead on the readable one.
+  await withSetup(
+    { config: { memory: { mainChannelIds: [CHANNEL.id, OTHER_CHANNEL.id] } }, windowFor: (channel) => (channel.id === CHANNEL.id ? [] : reference()) },
+    async ({ mentor, cases }) => {
+      const item = cases.add(GUILD, { text: CASE_TEXT, target: 'reply' });
+      const run = await (await mentor.run(item.id)).done;
+      assert.equal(run.error, undefined);
+      assert.equal(run.reference.profile.messages, 2);
+    },
+  );
+});
+
 test('run: without main channels the busiest stored channel is read', () =>
   withSetup({ config: { memory: { mainChannelIds: [] } } }, async ({ mentor, cases, windows, llm }) => {
     const item = cases.add(GUILD, { text: CASE_TEXT, target: 'reply' });
@@ -534,7 +565,8 @@ test('run: the report is still saved when the admin channel fails', () =>
 test('run: stops with what it has when the budget runs out', () =>
   withSetup(
     {
-      config: { mentor: { maxTokensPerDay: 12000 } },
+      // A small maxOutputTokens keeps the pre-flight check of the situations request under this budget.
+      config: { mentor: { maxTokensPerDay: 12000, maxOutputTokens: 10 } },
       llm: fakeLlm({ usageFor: (kind) => (kind === 'talk' ? { prompt_tokens: 5000, completion_tokens: 10 } : USAGE) }),
     },
     async ({ mentor, cases, llm, sent, budget }) => {
@@ -557,6 +589,102 @@ test('run: stops with what it has when the budget runs out', () =>
     },
   ));
 
+test('run: a mentor request is refused when its possible output does not fit the budget', () =>
+  withSetup({ config: { mentor: { maxTokensPerDay: 20000 } } }, async ({ mentor, cases, llm, hot, sent }) => {
+    const item = cases.add(GUILD, { text: CASE_TEXT, target: 'reply' });
+    // The prompt fits, but 6000 output tokens at weight 5 (30000) do not.
+    const refused = await (await mentor.run(item.id)).done;
+    assert.equal(refused.stopped, 'budget');
+    assert.equal(llm.calls.length, 0);
+    assert.match(sent[0].content, /budget/i);
+
+    // The live values are read at the moment of the request.
+    hot.config.mentor.maxOutputTokens = 1000;
+    hot.config.mentor.outputTokenWeight = 2;
+    const ran = await (await mentor.run(item.id)).done;
+    assert.equal(ran.stopped, undefined);
+    assert.equal(ran.passed, true);
+    assert.equal(llm.calls[0].kind, 'situations');
+  }));
+
+test('run: turning features.mentor off ends the run as stopped', () => {
+  let hot;
+  const llm = fakeLlm({
+    hook: (call) => {
+      if (call.kind === 'talk') hot.config.features.mentor = false;
+      return undefined;
+    },
+  });
+  return withSetup({ llm }, async (env) => {
+    hot = env.hot;
+    const item = env.cases.add(GUILD, { text: CASE_TEXT, target: 'reply' });
+    const run = await (await env.mentor.run(item.id)).done;
+    // Situation 1 is answered (both samples were already under way); situation 2 never starts.
+    assert.deepEqual(llm.kinds(), ['situations', 'talk', 'talk']);
+    assert.equal(run.stopped, 'disabled');
+    assert.equal(run.error, undefined);
+    assert.equal(run.passed, false);
+    assert.equal(run.situations[0].answers.length, 2);
+    assert.deepEqual(run.situations[1].answers, []);
+    assert.equal(env.sent.length, 1);
+    assert.match(env.sent[0].content, /stopped: the mentor was disabled during the run/);
+    assert.equal(env.cases.lastRun(GUILD, item.id).stopped, 'disabled');
+    assert.equal(env.cases.get(GUILD, item.id).state, 'new');
+    assert.equal(env.mentor.isRunning(), false);
+  });
+});
+
+test('run: clearing mentor.model never sends a request to the talk model', () => {
+  let hot;
+  let talks = 0;
+  const llm = fakeLlm({
+    hook: (call) => {
+      // The last answer of the last situation: the next request would be a score request.
+      if (call.kind === 'talk' && (talks += 1) === 4) hot.config.mentor.model = null;
+      return undefined;
+    },
+  });
+  return withSetup({ llm }, async (env) => {
+    hot = env.hot;
+    const item = env.cases.add(GUILD, { text: CASE_TEXT, target: 'reply' });
+    const run = await (await env.mentor.run(item.id)).done;
+    assert.deepEqual(llm.kinds(), ['situations', 'talk', 'talk', 'talk', 'talk']);
+    // No request with the mentor's output size ever went out without the mentor model.
+    for (const { options } of llm.calls) {
+      if (options.maxOutputTokens === 6000) assert.equal(options.model, 'x/mentor');
+    }
+    assert.equal(run.stopped, 'disabled');
+    assert.equal(run.passed, false);
+  });
+});
+
+test('check: a run ended by the switches skips the remaining cases', () => {
+  let hot;
+  let armed = false;
+  const llm = fakeLlm({
+    hook: (call) => {
+      if (armed && call.kind === 'talk') hot.config.features.mentor = false;
+      return undefined;
+    },
+  });
+  return withSetup({ llm }, async (env) => {
+    hot = env.hot;
+    const first = env.cases.add(GUILD, { text: CASE_TEXT, target: 'reply' });
+    const second = env.cases.add(GUILD, { text: 'The persona never repeats itself.', target: 'reply' });
+    await (await env.mentor.run(first.id)).done;
+    await (await env.mentor.run(second.id)).done;
+    llm.calls.length = 0;
+    armed = true;
+    const runs = await (await env.mentor.check()).done;
+    assert.equal(runs.length, 1);
+    assert.equal(runs[0].stopped, 'disabled');
+    assert.deepEqual(llm.kinds(), ['talk']);
+    const card = env.sent.at(-1).content;
+    assert.match(card, new RegExp(`case ${first.id}: stopped \\(disabled\\)`));
+    assert.match(card, new RegExp(`case ${second.id}: skipped \\(the mentor was disabled\\)`));
+  });
+});
+
 test('run: a memory case goes through answerMemory', () =>
   withSetup({}, async ({ mentor, cases, llm }) => {
     const item = cases.add(GUILD, { text: CASE_TEXT, target: 'memory' });
@@ -576,6 +704,26 @@ test('run: a memory case goes through answerMemory', () =>
     assert.deepEqual(run.repeated, []);
     assert.equal(run.passed, true);
   }));
+
+test('run: <stored> tells the judge when an analyzer answer did not parse', () => {
+  let memoryCalls = 0;
+  const llm = fakeLlm({
+    hook: (call) => {
+      if (call.kind === 'memory' && (memoryCalls += 1) === 1) return { text: 'I would store nothing here.', usage: USAGE, estimated: 90 };
+      return undefined;
+    },
+  });
+  return withSetup({ llm }, async ({ mentor, cases }) => {
+    const item = cases.add(GUILD, { text: CASE_TEXT, target: 'memory' });
+    await (await mentor.run(item.id)).done;
+    const scoreCall = llm.calls.find((c) => c.kind === 'score');
+    const stored = JSON.parse(/<stored>\n([\s\S]*?)\n<\/stored>/.exec(scoreCall.user)[1]);
+    assert.deepEqual(stored[0], { id: 's1a1', texts: [], parseOk: false });
+    assert.equal(stored[1].id, 's1a2');
+    assert.equal(stored[1].parseOk, true);
+    assert.ok(stored[1].texts.length > 0);
+  });
+});
 
 // ---- the signs block -----------------------------------------------------------
 
@@ -669,6 +817,39 @@ test('stop: aborts the request in flight', () => {
     assert.equal(cases.lastRun(GUILD, item.id).stopped, 'owner');
     assert.equal(mentor.isRunning(), false);
     assert.equal(mentor.status().running, false);
+  });
+});
+
+test('waitIdle: resolves when the run ends', () => {
+  let reached;
+  const inFlight = new Promise((resolve) => (reached = resolve));
+  let release;
+  const held = new Promise((resolve) => (release = resolve));
+  const llm = fakeLlm({
+    hook: async (call) => {
+      if (call.kind !== 'talk') return undefined;
+      reached();
+      await held;
+      return undefined;
+    },
+  });
+  return withSetup({ llm }, async ({ mentor, cases }) => {
+    // Nothing runs: resolves at once.
+    await mentor.waitIdle();
+
+    const item = cases.add(GUILD, { text: CASE_TEXT, target: 'reply' });
+    const { done } = await mentor.run(item.id);
+    await inFlight;
+    let idle = false;
+    const waiting = mentor.waitIdle().then(() => (idle = true));
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(idle, false, 'a run is still in flight');
+
+    release();
+    await waiting;
+    assert.equal(mentor.isRunning(), false);
+    const run = await done;
+    assert.equal(run.passed, true);
   });
 });
 

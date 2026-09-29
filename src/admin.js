@@ -531,7 +531,8 @@ function imageFileName(mediaType) {
  * `imageFetcher` — from createImageFetcher() (src/discord/fetch-image.js), optional: downloads the
  *   bot's avatar as the reference of a `/nep draw self` picture. Absent -> no reference is sent.
  * `mentor` — from createMentor() (src/mentor/mentor.js), optional: `run`/`check` (started by
- *   `/nep mentor run|check`, never awaited to the end), `stop`, `status`. Absent -> every `mentor.*`
+ *   `/nep mentor run|check`, never awaited to the end), `stop`, `status`; `isRunning` and
+ *   `waitIdle` let `/nep pause` stop a run in flight and wait for it. Absent -> every `mentor.*`
  *   command reports it is not available.
  * `mentorCases` — from createCaseStore() (src/mentor/cases.js), optional: the cases, their runs and
  *   the owner's feedback. Absent -> every `mentor.*` command reports it is not available.
@@ -704,7 +705,9 @@ export function createAdmin({
    * a live-analyzer `run()` already in flight (its LLM call can take
    * 30-90s; `tick()`/`observe()` are already no-ops from the moment `paused`
    * is set, so no NEW run can start -- this only waits out one that started
-   * before the pause). Only once both are idle does it clear the pending-ping
+   * before the pause), a warmup run, and a mentor run in flight (stopped
+   * first, then waited for until it has saved and reported; the reply says
+   * so). Only once all are idle does it clear the pending-ping
    * queue, flush everything and drop every cache except state.json itself, so
    * nothing stale (or a late in-flight write) can land in data/ after the
    * owner starts editing it. Idempotent: a second call just reports the
@@ -740,6 +743,16 @@ export function createAdmin({
       await warmup.waitIdle();
     }
 
+    // A mentor run in flight saves its run and charges state.json: stop it
+    // (the request in flight is aborted) and wait until it has saved and
+    // reported. `/nep mentor run|check` are refused from here on.
+    let mentorStopped = false;
+    if (mentor && typeof mentor.isRunning === 'function' && mentor.isRunning()) {
+      mentor.stop();
+      mentorStopped = true;
+      if (typeof mentor.waitIdle === 'function') await mentor.waitIdle();
+    }
+
     if (pending && typeof pending.clear === 'function') {
       pending.clear();
     }
@@ -747,10 +760,11 @@ export function createAdmin({
     store.flush();
     const dropped = typeof store.dropCaches === 'function' ? store.dropCaches() : 0;
 
-    log.info('admin: paused', { dropped });
+    log.info('admin: paused', { dropped, mentorStopped });
 
     return [
       'Paused. Memory is flushed to disk -- files under data/ can be edited safely now.',
+      ...(mentorStopped ? ['A mentor run in flight was stopped.'] : []),
       'Run /nep resume when done.',
     ].join('\n');
   }
@@ -2306,7 +2320,7 @@ async function cmdPing(args) {
       lines.push('cases: -');
     }
     const s = mentor.status();
-    lines.push(s?.running ? `running: ${s.kind} case ${s.caseId}, ${s.phase}, ${s.tokens} tokens so far` : 'running: no');
+    lines.push(s?.running ? `running: ${s.kind} case ${s.caseId}, ${s.phase}, ${s.tokens} tokens so far${s.stopping ? ', stopping' : ''}` : 'running: no');
     return lines.join('\n');
   }
 

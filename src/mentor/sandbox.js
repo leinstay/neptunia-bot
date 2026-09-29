@@ -24,8 +24,8 @@ import {
   memorySwitches,
 } from '../memory/update.js';
 
-// Token estimates are taken as they are: a sandbox request never feeds the calibrator.
-const CALIBRATOR = { ratio: 1, apply: (n) => n, observe: () => 1 };
+// Token estimates taken as they are: the calibrator of a view built without a live one.
+const IDENTITY_CALIBRATOR = Object.freeze({ ratio: 1, apply: (n) => n, observe: () => 1 });
 // The captured store ignores guild ids (reads go to the view's one guild); this only fills the argument.
 const SANDBOX_GUILD = 'sandbox';
 const MINUTE_MS = 60_000;
@@ -33,15 +33,38 @@ const MINUTE_MS = 60_000;
 const MEMORY_TEMPERATURE = 0.3;
 
 /**
+ * A read-only view of the live calibrator: `ratio` and `apply` read the live
+ * one at the moment of use (its ratio moves while the bot runs), `observe`
+ * feeds nothing and returns the live ratio. Without a live calibrator, the
+ * identity one (ratio 1).
+ */
+function readOnlyCalibrator(live) {
+  if (!live) return IDENTITY_CALIBRATOR;
+  return {
+    get ratio() {
+      return live.ratio;
+    },
+    apply: (n) => live.apply(n),
+    observe: () => live.ratio,
+  };
+}
+
+/**
  * A view over the live state of one guild: prompts and config are getters
  * that read `hot` at call time, memory accessors read the store at call time.
- * Nothing is copied. An overlay passed instead must offer the same shape.
- * @param {{ hot: { prompts: object, config: object }, store: object, guildId: string }} deps
- * @returns {{ readonly prompts: object, readonly config: object, memory: {
+ * Nothing is copied. `calibrator` measures tokens the way a real turn does
+ * (the live ratio, read at call time) and never feeds the live calibrator;
+ * without a live `calibrator` it is the identity one (ratio 1). An overlay
+ * passed instead must offer the same shape (a missing `calibrator` counts as
+ * the identity one).
+ * @param {{ hot: { prompts: object, config: object }, store: object, guildId: string,
+ *   calibrator?: { ratio: number, apply: (n: number) => number } }} deps
+ * @returns {{ readonly prompts: object, readonly config: object,
+ *   calibrator: { readonly ratio: number, apply: (n: number) => number, observe: () => number }, memory: {
  *   getGuild: () => object, getUser: (id: string) => (object|null), listUserProfiles: () => object[],
  *   listChannels: () => object[], getLore: () => object[] } }}
  */
-export function liveView({ hot, store, guildId }) {
+export function liveView({ hot, store, guildId, calibrator }) {
   return {
     get prompts() {
       return hot.prompts;
@@ -49,6 +72,7 @@ export function liveView({ hot, store, guildId }) {
     get config() {
       return hot.config;
     },
+    calibrator: readOnlyCalibrator(calibrator),
     memory: {
       getGuild: () => store.getGuild(guildId),
       getUser: (id) => store.getUser(guildId, id),
@@ -184,7 +208,8 @@ async function sample({ llm, messages, options, samples, signal, onUsage, read }
 /**
  * The reply sandbox: the request a real reply turn would send for
  * `situation` (buildRequest, mode 'reply', memory through `view.memory` as in
- * a real turn -- `features.memory` off leaves it out), `samples` completions,
+ * a real turn -- `features.memory` off leaves it out -- and tokens measured
+ * with `view.calibrator`, so the caps trim what a real turn trims), `samples` completions,
  * each parsed with parseOutput and trimmed by `features.reactions` /
  * `features.multiMessage` like a real turn. No neighbours, no media, no web
  * lookup, no drawing, no pictures, never a private chat; nothing is sent and
@@ -218,7 +243,7 @@ export async function answerReply({ view, situation, selfId, selfName, channel, 
   const request = buildRequest({
     config,
     prompts: view.prompts,
-    calibrator: CALIBRATOR,
+    calibrator: view.calibrator ?? IDENTITY_CALIBRATOR,
     mode: 'reply',
     forced: false,
     now,
@@ -398,7 +423,8 @@ function textsOf(writes) {
 /**
  * The memory sandbox: the request the live analyzer would send for `batch`
  * (buildMemoryRequest over `view`: the batch authors' profiles, the batch
- * channels' entries, the guild memory and the lorebook; no media captions),
+ * channels' entries, the guild memory and the lorebook; no media captions;
+ * tokens measured with `view.calibrator`),
  * `samples` completions on `memory.model` (else `llm.model`) with
  * `memory.maxOutputTokens` / `memory.timeoutMs` and the analyzer's
  * temperature, `countAgainstDailyCap: false`, `skipCalibration: true`. Each
@@ -431,7 +457,7 @@ export async function answerMemory({ view, batch, selfName, llm, samples, now = 
   const { messages } = buildMemoryRequest({
     prompts: view.prompts,
     config,
-    calibrator: CALIBRATOR,
+    calibrator: view.calibrator ?? IDENTITY_CALIBRATOR,
     profiles: context.profiles,
     channels: context.channels,
     guildMemory: memory.getGuild(),

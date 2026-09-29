@@ -3152,6 +3152,55 @@ test('run: pause waits for an in-flight warmup run before dropping caches', asyn
   assert.equal(store.dropCachesCalls, 1);
 });
 
+test('pause: stops a mentor run and waits for it before flushing', async () => {
+  const rootDir = makeRoot();
+  let resolveIdle;
+  const idlePromise = new Promise((resolve) => {
+    resolveIdle = resolve;
+  });
+  const calls = [];
+  let running = true;
+  const mentor = {
+    isRunning: () => running,
+    stop: () => {
+      calls.push('stop');
+      return { ok: true };
+    },
+    waitIdle: () => {
+      calls.push('waitIdle');
+      return idlePromise;
+    },
+  };
+  const { admin, store } = makeAdmin(rootDir, { mentor });
+
+  const pausePromise = admin.run('pause', {}, {});
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.deepEqual(calls, ['stop', 'waitIdle'], 'the run is stopped first, then waited for');
+  assert.equal(store.dropCachesCalls, 0, 'must not drop caches before the mentor run ended');
+  const flushesBefore = store.flushCalls;
+
+  running = false;
+  resolveIdle();
+  const result = await pausePromise;
+  assert.equal(store.dropCachesCalls, 1);
+  assert.ok(store.flushCalls > flushesBefore, 'flushed after the mentor run ended');
+  assert.match(result, /mentor run .*stopped/i);
+  assert.match(result, /resume/i);
+
+  // Nothing runs: no stop, and the reply says nothing about the mentor.
+  const idleCalls = [];
+  const idleMentor = {
+    isRunning: () => false,
+    stop: () => idleCalls.push('stop'),
+    waitIdle: () => (idleCalls.push('waitIdle'), Promise.resolve()),
+  };
+  const { admin: idleAdmin } = makeAdmin(makeRoot(), { mentor: idleMentor });
+  const idleResult = await idleAdmin.run('pause', {}, {});
+  assert.deepEqual(idleCalls, []);
+  assert.doesNotMatch(idleResult, /mentor/i);
+});
+
 // /nep pause: a live-analyzer run() already in flight when the pause
 // arrives (an LLM call can take 30-90s) must be allowed to finish and apply
 // normally -- its result must land on disk BEFORE the flush + dropCaches, or
@@ -4747,6 +4796,15 @@ test('run: mentor.status shows the run in flight', async () => {
   const { admin } = makeMentorAdmin({ mentor });
   const lines = (await admin.run('mentor.status', {}, { guildId: 'g1' })).split('\n');
   assert.equal(lines.at(-1), 'running: check case 2, scores 1/5, 340 tokens so far');
+});
+
+test('run: mentor.status shows a pending stop on the running line', async () => {
+  const mentor = fakeMentor({
+    status: () => ({ running: true, kind: 'run', caseId: 4, caseIds: [4], phase: 'answers 2/5', startedAt: '2026-09-30T11:59:00.000Z', tokens: 910, stopping: true }),
+  });
+  const { admin } = makeMentorAdmin({ mentor });
+  const lines = (await admin.run('mentor.status', {}, { guildId: 'g1' })).split('\n');
+  assert.equal(lines.at(-1), 'running: run case 4, answers 2/5, 910 tokens so far, stopping');
 });
 
 test('run: mentor.status works with the mentor disabled, no model set, and while paused', async () => {

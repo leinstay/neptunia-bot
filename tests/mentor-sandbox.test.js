@@ -9,6 +9,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { liveView, situationToHistory, answerReply, captureStore, answerMemory } from '../src/mentor/sandbox.js';
 import { createStore } from '../src/memory/store.js';
+import { createCalibrator } from '../src/llm/tokens.js';
 import { labels } from './fixtures/labels.js';
 
 const NOW = Date.UTC(2026, 8, 20, 12, 0, 0);
@@ -271,6 +272,29 @@ test('liveView: memory reads go to the store for the one guild', () => {
   assert.equal('getPrivate' in view.memory, false);
 });
 
+test('liveView: the calibrator follows the live ratio and never feeds it', () => {
+  const live = createCalibrator(0.8);
+  const view = liveView({ hot: fakeHot(), store: fakeStore(), guildId: 'g1', calibrator: live });
+  assert.equal(view.calibrator.ratio, 0.8);
+  assert.equal(view.calibrator.apply(1000), live.apply(1000));
+
+  // The sandbox observes nothing: the live ratio stays where it was.
+  assert.equal(view.calibrator.observe(1000, 1500), 0.8);
+  assert.equal(live.ratio, 0.8);
+
+  // A real turn moves the live ratio; the view reads it at the moment of use.
+  live.observe(1000, 1500);
+  assert.notEqual(live.ratio, 0.8);
+  assert.equal(view.calibrator.ratio, live.ratio);
+  assert.equal(view.calibrator.apply(1000), live.apply(1000));
+
+  // Without a live calibrator the view measures tokens as they are.
+  const plain = liveView({ hot: fakeHot(), store: fakeStore(), guildId: 'g1' });
+  assert.equal(plain.calibrator.ratio, 1);
+  assert.equal(plain.calibrator.apply(123), 123);
+  assert.equal(plain.calibrator.observe(1000, 1500), 1);
+});
+
 // ---- answerReply -------------------------------------------------------------
 
 test('answerReply: sends the live system prompt and renders the member\'s profile', async () => {
@@ -309,6 +333,24 @@ test('answerReply: makes samples requests, none counted against the daily cap', 
   }
   assert.deepEqual(result.answers.map((a) => a.messages.map((m) => m.text)), [['a'], ['b'], []]);
   assert.equal(result.answers[2].skip, true);
+});
+
+test('answerReply: a ratio under 1 lets a capped section keep more', async () => {
+  // Enough self notes to go well past a small aboutChat cap.
+  const self = Array.from({ length: 80 }, (_, i) => `note ${i + 1}: the persona likes the café on the corner and tea with honey`);
+  const userTextAt = async (ratio) => {
+    const hot = fakeHot();
+    hot.config.context.caps.aboutChat = 300;
+    const view = liveView({ hot, store: fakeStore({ guildMemory: { self } }), guildId: 'g1', calibrator: createCalibrator(ratio) });
+    const llm = fakeLlm('<skip/>');
+    const result = await answerReply({ view, situation: twoLines(), selfId: SELF_ID, selfName: 'Zoë', channel: CHANNEL, llm, samples: 1, now: NOW });
+    return result.request.user;
+  };
+  const atOne = await userTextAt(1);
+  const atLow = await userTextAt(0.7);
+  assert.ok(atOne.includes('note 1:'), 'the cap keeps some notes');
+  assert.equal(atOne.includes('note 80:'), false, 'the cap is reached at ratio 1');
+  assert.ok(atLow.length > atOne.length, `${atLow.length} > ${atOne.length}`);
 });
 
 test('answerReply: the feature switches trim the answer as in a real turn', async () => {
