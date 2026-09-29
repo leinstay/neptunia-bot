@@ -250,7 +250,7 @@ export function buildCommandTree(commandName) {
             {
               type: SUBCOMMAND,
               name: 'forget',
-              description: "Delete a member's stored profile.",
+              description: "Delete a member's stored profile and their private memory.",
               options: [{ type: USER, name: 'user', description: 'Member.', required: true }],
             },
             {
@@ -287,6 +287,25 @@ export function buildCommandTree(commandName) {
               type: SUBCOMMAND,
               name: 'refresh',
               description: "Force a member's portrait (character/style) to be rewritten now, ignoring the refresh-hours rail.",
+              options: [{ type: USER, name: 'user', description: 'Member.', required: true }],
+            },
+          ],
+        },
+        {
+          type: SUBCOMMAND_GROUP,
+          name: 'private',
+          description: "Inspect or delete a member's private memory (what they said in direct messages).",
+          options: [
+            {
+              type: SUBCOMMAND,
+              name: 'show',
+              description: "Show a member's private memory, private and effective attitude, and today's DM replies.",
+              options: [{ type: USER, name: 'user', description: 'Member.', required: true }],
+            },
+            {
+              type: SUBCOMMAND,
+              name: 'forget',
+              description: "Delete a member's private memory only; the public profile is kept.",
               options: [{ type: USER, name: 'user', description: 'Member.', required: true }],
             },
           ],
@@ -590,6 +609,8 @@ const OPTION_MAPPERS = {
     score: options.getInteger('score') ?? undefined,
     reason: options.getString('reason') ?? undefined,
   }),
+  'private.show': (options) => ({ userId: options.getUser('user', true).id }),
+  'private.forget': (options) => ({ userId: options.getUser('user', true).id }),
   'alias.add': (options) => ({ userId: options.getUser('user', true).id, name: options.getString('name', true) }),
   'alias.remove': (options) => ({ userId: options.getUser('user', true).id, name: options.getString('name', true) }),
   'lore.add': (options) => ({

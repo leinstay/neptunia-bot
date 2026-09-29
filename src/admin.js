@@ -4,8 +4,10 @@
 // from prompts/rules.md), config overrides (config.local.json, hot-reloaded),
 // status, a manual interject/initiate of the spontaneous scheduler, and
 // profile inspection/deletion. This is the ONLY place in the project that ever
-// deletes stored memory, through the two functions store.js allows for it:
-// store.forgetUser (one profile) and store.wipeGuild (a whole guild's memory,
+// deletes stored memory, through the three functions store.js allows for it:
+// store.forgetUser (one profile, private layer included), store.forgetPrivate
+// (one member's private layer only, `/nep private forget`) and
+// store.wipeGuild (a whole guild's memory,
 // `/nep memory wipe`, gated by the served guild's exact name). The tracked
 // prompts/ layer is never written at runtime — live corrections always land
 // in the untracked prompts.local/ layer.
@@ -31,6 +33,7 @@ import { commandKeys } from './discord/commands.js';
 import { isAllowed as accessIsAllowed, grant as accessGrant, revoke as accessRevoke } from './discord/access.js';
 import { classifierTextModel, classifierMediaModel, classifierVideoModel } from './behavior/mention.js';
 import { buildDrawPrompt } from './behavior/prompt.js';
+import { effectiveAffinity } from './behavior/private.js';
 import { ImageCapError, ImageGenError, UnsupportedImageModelError, familyOf as imageFamilyOf } from './llm/images.js';
 import { log } from './log.js';
 
@@ -44,6 +47,7 @@ const READ_ONLY_ACCESS_KEYS = new Set([
   'memory.show',
   'memory.channel',
   'memory.server',
+  'private.show',
   'rule.list',
   'lore.list',
   'lore.show',
@@ -391,6 +395,24 @@ function rawMemoryShowView(profile, memoryCfg) {
   return lines.join('\n');
 }
 
+/** One interest line of `/nep memory show` and `/nep private show`; `resolve` turns `<@id>` tokens into names. */
+function interestLine(it, resolve) {
+  const note = resolve(it.note);
+  const suffix = `[seen ${it.weight}${lastDateSuffix(it.lastSeen)}]`;
+  return note ? `${it.topic} — ${note} ${suffix}` : `${it.topic} ${suffix}`;
+}
+
+/** One detail line of `/nep memory show` and `/nep private show`. */
+function detailLine(d, resolve) {
+  return `#${d.id} ${resolve(d.text)} [seen ${d.weight}${lastDateSuffix(d.lastSeen)}]`;
+}
+
+/** One episode line of `/nep memory show` and `/nep private show`. */
+function episodeLine(ep, resolve) {
+  const quote = ep.quote ? ` "${ep.quote}"` : '';
+  return `${ep.date} [weight ${ep.weight}] ${resolve(ep.what)}${quote}`;
+}
+
 /** `[weight N, last DATE] name`, or just `[weight N] name`, used by
  * both the `raw` view (via `rawMemoryShowView`) and the `aliases` section, and by `/nep alias
  * add`/`remove`'s "resulting alias list" reply. */
@@ -531,7 +553,7 @@ export function createAdmin({
   /**
    * `/nep pause`: refuse a command that would write under `data/` while
    * paused, with a hint to resume first. Guards interject, initiate,
-   * alias.add, alias.remove, memory.forget, memory.wipe, memory.affinity (when
+   * alias.add, alias.remove, memory.forget, private.forget, memory.wipe, memory.affinity (when
    * setting a score), memory.refresh, lore.add, lore.remove, learned.add,
    * learned.remove, warmup.run, warmup.users, warmup.channels, warmup.server,
    * warmup.reset and draw (it counts against the image rail in state.json).
@@ -796,6 +818,9 @@ export function createAdmin({
       lines.push('guild: not resolved yet');
     }
 
+    const privateChat = cfg?.features?.privateMessages === true ? 'on' : 'off';
+    lines.push(guildId ? `private chat: ${privateChat} · ${store.listPrivate(guildId).length} private files` : `private chat: ${privateChat}`);
+
     const prompts = hot.prompts ?? {};
     const sources = hot.promptSources ?? {};
     for (const name of Object.keys(prompts)) {
@@ -977,11 +1002,7 @@ export function createAdmin({
         limit,
         halfLifeDays: memoryCfg.interestHalfLifeDays,
         maxShown: memoryCfg.maxInterests,
-        formatLine: (it) => {
-          const note = resolve(it.note);
-          const suffix = `[seen ${it.weight}${lastDateSuffix(it.lastSeen)}]`;
-          return note ? `${it.topic} — ${note} ${suffix}` : `${it.topic} ${suffix}`;
-        },
+        formatLine: (it) => interestLine(it, resolve),
         dateOf: (it) => dateMs(it.lastSeen ?? it.firstSeen),
       });
       return lines.length ? lines.join('\n') : 'No interests stored.';
@@ -993,7 +1014,7 @@ export function createAdmin({
         limit,
         halfLifeDays: memoryCfg.detailHalfLifeDays,
         maxShown: memoryCfg.maxDetails,
-        formatLine: (d) => `#${d.id} ${resolve(d.text)} [seen ${d.weight}${lastDateSuffix(d.lastSeen)}]`,
+        formatLine: (d) => detailLine(d, resolve),
         dateOf: (d) => dateMs(d.lastSeen ?? d.firstSeen),
       });
       return lines.length ? lines.join('\n') : 'No details stored.';
@@ -1008,10 +1029,7 @@ export function createAdmin({
           : sortEpisodesForDisplay(episodes);
       return ordered
         .slice(0, limit)
-        .map((ep) => {
-          const quote = ep.quote ? ` "${ep.quote}"` : '';
-          return `${ep.date} [weight ${ep.weight}] ${resolve(ep.what)}${quote}`;
-        })
+        .map((ep) => episodeLine(ep, resolve))
         .join('\n');
     }
 
@@ -1233,8 +1251,110 @@ export function createAdmin({
     const guildId = resolvedGuildId(context);
     if (!guildId) throw new Error('no guild resolved yet');
 
-    store.forgetUser(guildId, userId);
-    return `Forgot ${userId}.`;
+    store.forgetUser(guildId, userId); // cascades to the member's private layer
+    return `Forgot ${userId} (public profile and private memory).`;
+  }
+
+  // ---------------------------------------------------------------------
+  // private: a member's private layer (what they said in direct messages)
+  // ---------------------------------------------------------------------
+
+  /**
+   * `/nep private show`: one member's private layer, with the same line
+   * formats as `memory show`'s sections, under the public profile's current
+   * name (the user id when there is none). Adds the private and the effective
+   * attitude (src/behavior/private.js#effectiveAffinity -- what the persona
+   * feels in the DM), today's DM reply count against the member's cap and the
+   * buffer SIZE -- never the buffered messages themselves. No "shown cap"
+   * divider: in a DM the private items are ranked together with the public
+   * ones. No private layer -> a plain answer, not an error.
+   */
+  function cmdPrivateShow(args, context) {
+    freshenIfPaused();
+    const userId = args?.userId;
+    if (!userId) throw new Error('a user is required');
+
+    const guildId = resolvedGuildId(context);
+    if (!guildId) throw new Error('no guild resolved yet');
+
+    const publicProfile = store.getUser(guildId, userId);
+    const name = publicProfile?.names?.[0];
+    const label = name ? `${name} (id:${userId})` : String(userId);
+
+    const priv = store.getPrivate(guildId, userId);
+    if (!priv) return `No private memory for this member: ${label}.`;
+
+    const memoryCfg = hot.config?.memory ?? {};
+    const privateCfg = hot.config?.private ?? {};
+    const nameOf = (id) => store.getUser(guildId, id)?.names?.[0] ?? null;
+    const resolve = (text) => fromTokens(typeof text === 'string' ? text : '', nameOf, 'analyzer');
+
+    const privateAffinity = priv.affinity ?? emptyAffinity();
+    const effective = effectiveAffinity(publicProfile?.affinity, privateAffinity);
+    const privateReason = resolve(privateAffinity.reason);
+
+    const today = new Date().toISOString().slice(0, 10);
+    const replies = priv.replies?.day === today && Number.isFinite(priv.replies.count) ? priv.replies.count : 0;
+    const cap = isOwner(userId) ? privateCfg.maxPerOwnerPerDay : privateCfg.maxPerUserPerDay;
+    const bufferSize = Array.isArray(priv.buffer) ? priv.buffer.length : 0;
+
+    const section = (title, items, lines) => [`${title} (${items.length} stored):`, ...lines.map((line) => `  ${line}`)];
+    const interests = priv.interests ?? [];
+    const details = priv.details ?? [];
+    const episodes = priv.episodes ?? [];
+
+    return [
+      `private memory: ${label}`,
+      `private affinity: ${roundScore(privateAffinity.score ?? 0)} (${affinityBand(privateAffinity.score ?? 0)})${privateReason ? ` — ${privateReason}` : ''}`,
+      `effective affinity: ${roundScore(effective.score)} (${affinityBand(effective.score)})`,
+      `replies today: ${replies} / ${Number.isFinite(cap) ? cap : '-'}`,
+      `buffer: ${bufferSize} messages`,
+      `first seen: ${priv.firstSeen ? priv.firstSeen.slice(0, 10) : '-'} · last seen: ${priv.lastSeen ? priv.lastSeen.slice(0, 10) : '-'}`,
+      `relationship: ${resolve(priv.relationship) || '(empty)'}`,
+      ...section(
+        'interests',
+        interests,
+        orderedSectionLines(interests, {
+          order: 'rank',
+          limit: MEMORY_SHOW_DEFAULT_LIMIT,
+          halfLifeDays: memoryCfg.interestHalfLifeDays,
+          formatLine: (it) => interestLine(it, resolve),
+          dateOf: (it) => dateMs(it.lastSeen ?? it.firstSeen),
+        }),
+      ),
+      ...section(
+        'details',
+        details,
+        orderedSectionLines(details, {
+          order: 'rank',
+          limit: MEMORY_SHOW_DEFAULT_LIMIT,
+          halfLifeDays: memoryCfg.detailHalfLifeDays,
+          formatLine: (d) => detailLine(d, resolve),
+          dateOf: (d) => dateMs(d.lastSeen ?? d.firstSeen),
+        }),
+      ),
+      ...section(
+        'episodes',
+        episodes,
+        sortEpisodesForDisplay(episodes)
+          .slice(0, MEMORY_SHOW_DEFAULT_LIMIT)
+          .map((ep) => episodeLine(ep, resolve)),
+      ),
+    ].join('\n');
+  }
+
+  /** `/nep private forget`: deletes one member's private layer only (store.forgetPrivate); the
+   * public profile stays. Refused while paused, like `memory forget`. */
+  function cmdPrivateForget(args, context) {
+    assertNotPaused();
+    const userId = args?.userId;
+    if (!userId) throw new Error('a user is required');
+
+    const guildId = resolvedGuildId(context);
+    if (!guildId) throw new Error('no guild resolved yet');
+
+    store.forgetPrivate(guildId, userId);
+    return `Forgot the private memory of ${userId}; the public profile is kept.`;
   }
 
   /**
@@ -2100,6 +2220,8 @@ async function cmdPing(args) {
     'memory.wipe': (args, context) => cmdMemoryWipe(args, context),
     'memory.affinity': (args, context) => cmdMemoryAffinity(args, context),
     'memory.refresh': (args, context) => cmdMemoryRefresh(args, context),
+    'private.show': (args, context) => cmdPrivateShow(args, context),
+    'private.forget': (args, context) => cmdPrivateForget(args, context),
     'alias.add': (args, context) => cmdAliasAdd(args, context),
     'alias.remove': (args, context) => cmdAliasRemove(args, context),
     'lore.add': (args, context) => cmdLoreAdd(args, context),

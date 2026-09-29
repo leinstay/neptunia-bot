@@ -39,7 +39,7 @@ test('buildCommandTree: never emits default_member_permissions -- always visible
 test('buildCommandTree: top-level leaves (status, ping, reload, pause, resume, interject, initiate, draw, set, unset)', () => {
   const [command] = buildCommandTree('nep');
   const names = command.options.map((o) => o.name);
-  assert.deepEqual(names, ['status', 'ping', 'reload', 'pause', 'resume', 'interject', 'initiate', 'draw', 'set', 'unset', 'rule', 'memory', 'alias', 'lore', 'learned', 'model', 'warmup', 'access']);
+  assert.deepEqual(names, ['status', 'ping', 'reload', 'pause', 'resume', 'interject', 'initiate', 'draw', 'set', 'unset', 'rule', 'memory', 'private', 'alias', 'lore', 'learned', 'model', 'warmup', 'access']);
 
   const status = findOption(command.options, 'status');
   assert.equal(status.type, 1); // SUBCOMMAND
@@ -172,6 +172,25 @@ test('buildCommandTree: memory group (show/channel/server/forget/affinity/wipe/r
   const refresh = findOption(memory.options, 'refresh');
   assert.equal(refresh.type, 1); // SUBCOMMAND
   assert.equal(findOption(refresh.options, 'user').required, true);
+});
+
+test('buildCommandTree: private group (show/forget), each with a required user', () => {
+  const [command] = buildCommandTree('nep');
+  const group = findOption(command.options, 'private');
+  assert.equal(group.type, 2); // SUBCOMMAND_GROUP
+  assert.ok(group.description.length <= 100);
+  assert.deepEqual(
+    group.options.map((o) => o.name),
+    ['show', 'forget'],
+  );
+  for (const sub of group.options) {
+    assert.equal(sub.type, 1); // SUBCOMMAND
+    assert.ok(sub.description.length <= 100, `${sub.name} description must be <= 100 chars`);
+    assert.equal(sub.options.length, 1);
+    const user = findOption(sub.options, 'user');
+    assert.equal(user.type, 6); // USER
+    assert.equal(user.required, true);
+  }
 });
 
 test('buildCommandTree: alias group (add/remove), each with a required user and name', () => {
@@ -383,7 +402,10 @@ test('commandKeys: every group and every leaf command key, derived from the tree
   assert.ok(groups.has('access'));
   assert.ok(groups.has('alias'));
   assert.ok(groups.has('learned'));
+  assert.ok(groups.has('private'));
   assert.ok(!groups.has('status'), 'a bare top-level command is not a group');
+  assert.ok(keys.has('private.show'));
+  assert.ok(keys.has('private.forget'));
 
   assert.ok(keys.has('status'));
   assert.ok(keys.has('memory.show'));
@@ -850,6 +872,19 @@ test('interaction handler: memory.wipe maps the confirm string option straight t
 
   assert.equal(admin.runCalls[0][0], 'memory.wipe');
   assert.deepEqual(admin.runCalls[0][1], { confirm: 'The Server' });
+});
+
+test('interaction handler: private.show/private.forget map the user option to userId', async () => {
+  const admin = fakeAdmin();
+  const handler = createInteractionHandler({ hot: baseHot(), admin, getGuildId: () => 'g1' });
+
+  await handler(fakeInteraction({ group: 'private', subcommand: 'show', optionValues: { user: { id: 'target1' } } }));
+  assert.equal(admin.runCalls[0][0], 'private.show');
+  assert.deepEqual(admin.runCalls[0][1], { userId: 'target1' });
+
+  await handler(fakeInteraction({ group: 'private', subcommand: 'forget', optionValues: { user: { id: 'target1' } } }));
+  assert.equal(admin.runCalls[1][0], 'private.forget');
+  assert.deepEqual(admin.runCalls[1][1], { userId: 'target1' });
 });
 
 test('interaction handler: lore.add maps title/keys/text/always straight through', async () => {

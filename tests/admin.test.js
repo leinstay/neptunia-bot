@@ -239,6 +239,8 @@ function makeHot(rootDir) {
 function makeStore() {
   const profiles = new Map();
   const forgotten = [];
+  const privates = new Map(); // `${guildId}:${userId}` -> private layer
+  const forgottenPrivate = [];
   const lore = new Map(); // guildId -> entries[]
   const channels = new Map(); // `${guildId}:${channelId}` -> channel entry
   const guilds = new Map(); // guildId -> guild notes
@@ -303,6 +305,20 @@ function makeStore() {
     forgetUser(guildId, userId) {
       forgotten.push([String(guildId), String(userId)]);
       profiles.delete(`${guildId}:${userId}`);
+      privates.delete(`${guildId}:${userId}`);
+    },
+    privates,
+    forgottenPrivate,
+    getPrivate(guildId, userId) {
+      return privates.get(`${guildId}:${userId}`) ?? null;
+    },
+    listPrivate(guildId) {
+      const prefix = `${guildId}:`;
+      return [...privates.keys()].filter((key) => key.startsWith(prefix)).map((key) => key.slice(prefix.length));
+    },
+    forgetPrivate(guildId, userId) {
+      forgottenPrivate.push([String(guildId), String(userId)]);
+      privates.delete(`${guildId}:${userId}`);
     },
     countUsers() {
       return profiles.size;
@@ -1247,6 +1263,239 @@ test('run: memory.show/memory.forget report an error before the guild has been r
   const { admin } = makeAdmin(rootDir, { getGuildId: () => null });
 
   await assert.rejects(() => admin.run('memory.show', { userId: '123' }, {}), /no guild resolved yet/);
+});
+
+// ---------------------------------------------------------------------------
+// private.show / private.forget and the private-aware memory commands
+// ---------------------------------------------------------------------------
+
+function utcToday() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function samplePrivate(overrides = {}) {
+  return {
+    relationship: 'trusts the persona with plans',
+    interests: [{ topic: 'astronomy', note: 'owns a telescope', weight: 3, firstSeen: '2026-09-01T00:00:00.000Z', lastSeen: '2026-09-20T00:00:00.000Z' }],
+    details: [{ id: 1, text: 'studies at night', weight: 2, firstSeen: '2026-09-01T00:00:00.000Z', lastSeen: '2026-09-10T00:00:00.000Z' }],
+    detailsSeq: 2,
+    episodes: [{ date: '2026-09-15', what: 'shared a café story', quote: 'crème brûlée', weight: 2, addedAt: '2026-09-15T00:00:00.000Z' }],
+    affinity: { score: 12, reason: 'kind in private', history: [] },
+    firstSeen: '2026-09-01T00:00:00.000Z',
+    lastSeen: '2026-09-20T00:00:00.000Z',
+    replies: { day: utcToday(), count: 7, noticedDay: '' },
+    buffer: [{ id: 'm1', content: 'SECRET-BUFFERED-TEXT', ts: 1 }, { id: 'm2', content: 'another buffered line', ts: 2 }],
+    ...overrides,
+  };
+}
+
+test('run: private.show renders the private layer under the public name, with both scores, replies and buffer size', async () => {
+  const rootDir = makeRoot();
+  const { admin, hot, store } = makeAdmin(rootDir);
+  hot.config.private = { maxPerUserPerDay: 100, maxPerOwnerPerDay: 200 };
+  store.profiles.set('g1:123', { id: '123', names: ['Zoé', 'old name'], affinity: { score: 50, reason: 'public reason', history: [] } });
+  store.privates.set('g1:123', samplePrivate());
+
+  const result = await admin.run('private.show', { userId: '123' }, { guildId: 'g1' });
+
+  assert.match(result.split('\n')[0], /Zoé/);
+  assert.match(result, /trusts the persona with plans/);
+  assert.match(result, /astronomy/);
+  assert.match(result, /owns a telescope/);
+  assert.match(result, /studies at night/);
+  assert.match(result, /shared a café story/);
+  assert.match(result, /private affinity: 12\b/);
+  assert.match(result, /kind in private/);
+  assert.match(result, /effective affinity: 62\b/);
+  assert.match(result, /replies today: 7 \/ 100/);
+  assert.match(result, /buffer: 2\b/);
+  assert.ok(!result.includes('SECRET-BUFFERED-TEXT'), 'the buffer contents are never shown');
+  assert.ok(!result.includes('another buffered line'), 'the buffer contents are never shown');
+  assert.ok(!result.includes('public reason'), 'the public affinity reason is not part of the private view');
+});
+
+test('run: private.show clamps the effective score and uses the owner cap for an owner', async () => {
+  const rootDir = makeRoot();
+  const { admin, hot, store } = makeAdmin(rootDir);
+  hot.config.private = { maxPerUserPerDay: 100, maxPerOwnerPerDay: 200 };
+  store.profiles.set('g1:42', { id: '42', names: ['Owner'], affinity: { score: 90, reason: '', history: [] } });
+  store.privates.set('g1:42', samplePrivate({ affinity: { score: 30, reason: '', history: [] } }));
+
+  const result = await admin.run('private.show', { userId: '42' }, { guildId: 'g1' });
+
+  assert.match(result, /effective affinity: 100\b/);
+  assert.match(result, /replies today: 7 \/ 200/);
+});
+
+test('run: private.show counts replies stored for another day as 0 today', async () => {
+  const rootDir = makeRoot();
+  const { admin, store } = makeAdmin(rootDir);
+  store.profiles.set('g1:123', { id: '123', names: ['Zoé'] });
+  store.privates.set('g1:123', samplePrivate({ replies: { day: '2000-01-01', count: 55, noticedDay: '' } }));
+
+  const result = await admin.run('private.show', { userId: '123' }, { guildId: 'g1' });
+
+  assert.match(result, /replies today: 0\b/);
+  assert.ok(!result.includes('55'));
+});
+
+test('run: private.show falls back to the user id when there is no public profile', async () => {
+  const rootDir = makeRoot();
+  const { admin, store } = makeAdmin(rootDir);
+  store.privates.set('g1:777', samplePrivate());
+
+  const result = await admin.run('private.show', { userId: '777' }, { guildId: 'g1' });
+
+  assert.match(result.split('\n')[0], /777/);
+  assert.match(result, /effective affinity: 12\b/);
+});
+
+test('run: private.show with no private file answers plainly instead of throwing', async () => {
+  const rootDir = makeRoot();
+  const { admin, store } = makeAdmin(rootDir);
+  store.profiles.set('g1:123', { id: '123', names: ['Zoé'] });
+
+  const result = await admin.run('private.show', { userId: '123' }, { guildId: 'g1' });
+
+  assert.match(result, /no private memory for this member/i);
+});
+
+test('run: private.show / private.forget need a user and a resolved guild', async () => {
+  const rootDir = makeRoot();
+  const { admin } = makeAdmin(rootDir);
+  await assert.rejects(() => admin.run('private.show', {}, { guildId: 'g1' }), /a user is required/);
+  await assert.rejects(() => admin.run('private.forget', {}, { guildId: 'g1' }), /a user is required/);
+
+  const { admin: unresolved } = makeAdmin(rootDir, { getGuildId: () => null });
+  await assert.rejects(() => unresolved.run('private.show', { userId: '123' }, {}), /no guild resolved yet/);
+  await assert.rejects(() => unresolved.run('private.forget', { userId: '123' }, {}), /no guild resolved yet/);
+});
+
+test('run: private.forget removes only the private layer and says so', async () => {
+  const rootDir = makeRoot();
+  const { admin, store } = makeAdmin(rootDir);
+  store.profiles.set('g1:123', { id: '123', names: ['Zoé'] });
+  store.privates.set('g1:123', samplePrivate());
+
+  const result = await admin.run('private.forget', { userId: '123' }, { guildId: 'g1' });
+
+  assert.deepEqual(store.forgottenPrivate, [['g1', '123']]);
+  assert.deepEqual(store.forgotten, [], 'the public profile is never forgotten');
+  assert.ok(store.getUser('g1', '123'), 'the public profile stays');
+  assert.equal(store.getPrivate('g1', '123'), null);
+  assert.match(result, /private memory/i);
+  assert.match(result, /123/);
+  assert.match(result, /public profile is kept/i);
+});
+
+test('run: private.forget is refused while paused; private.show keeps working', async () => {
+  const rootDir = makeRoot();
+  const { admin, store } = makeAdmin(rootDir);
+  store.profiles.set('g1:123', { id: '123', names: ['Zoé'] });
+  store.privates.set('g1:123', samplePrivate());
+
+  await admin.run('pause', {}, {});
+
+  await assert.rejects(() => admin.run('private.forget', { userId: '123' }, { guildId: 'g1' }), /paused.*resume/i);
+  assert.deepEqual(store.forgottenPrivate, []);
+  await assert.doesNotReject(() => admin.run('private.show', { userId: '123' }, { guildId: 'g1' }));
+});
+
+test('run: memory.forget says the private memory went too', async () => {
+  const rootDir = makeRoot();
+  const { admin, store } = makeAdmin(rootDir);
+  store.profiles.set('g1:123', { id: '123' });
+
+  const result = await admin.run('memory.forget', { userId: '123' }, { guildId: 'g1' });
+
+  assert.match(result, /Forgot 123/);
+  assert.match(result, /private memory/i);
+});
+
+test('run: memory.show never shows the private layer', async () => {
+  const rootDir = makeRoot();
+  const { admin, store } = makeAdmin(rootDir);
+  store.profiles.set('g1:123', { id: '123', names: ['Zoé'], relationship: 'public text', affinity: { score: 50, reason: '', history: [] } });
+  store.privates.set('g1:123', samplePrivate());
+
+  const summary = await admin.run('memory.show', { userId: '123' }, { guildId: 'g1' });
+  const raw = await admin.run('memory.show', { userId: '123', section: 'raw' }, { guildId: 'g1' });
+  for (const text of [summary, raw]) {
+    assert.ok(!text.includes('trusts the persona with plans'));
+    assert.ok(!text.includes('astronomy'));
+  }
+});
+
+test('run: status reports private chat off with the private file count by default', async () => {
+  const rootDir = makeRoot();
+  const { admin, store } = makeAdmin(rootDir);
+  store.privates.set('g1:1', samplePrivate());
+  store.privates.set('g1:2', samplePrivate());
+  store.privates.set('other:3', samplePrivate());
+
+  const body = await admin.run('status', {}, {});
+  assert.ok(body.split('\n').includes('private chat: off · 2 private files'), body);
+});
+
+test('run: status reports private chat on when features.privateMessages is true', async () => {
+  const rootDir = makeRoot();
+  const { admin, hot } = makeAdmin(rootDir);
+  hot.config.features = { privateMessages: true };
+
+  const body = await admin.run('status', {}, {});
+  assert.ok(body.split('\n').includes('private chat: on · 0 private files'), body);
+});
+
+test('run: status has no private file count before the guild is resolved', async () => {
+  const rootDir = makeRoot();
+  const { admin } = makeAdmin(rootDir, { getGuildId: () => null });
+
+  const body = await admin.run('status', {}, {});
+  assert.ok(body.split('\n').includes('private chat: off'), body);
+});
+
+test('run: access.grant on private.show is read-only; private.forget and the private group open writes', async () => {
+  const rootDir = makeRoot();
+  const { admin } = makeAdmin(rootDir);
+
+  const show = await admin.run('access.grant', { command: 'private.show' }, {});
+  assert.doesNotMatch(show, /Note: this opens/);
+  const forget = await admin.run('access.grant', { command: 'private.forget' }, {});
+  assert.match(forget, /Note: this opens commands that change memory or config\./);
+  const group = await admin.run('access.grant', { command: 'private' }, {});
+  assert.match(group, /Note: this opens commands that change memory or config\./);
+});
+
+test('run: private.show / private.forget / memory.forget against the real store', async () => {
+  const rootDir = makeRoot();
+  const { admin, store, dataDir } = makeRealStoreAdmin(rootDir);
+  try {
+    store.touchUser('g1', '123', 'Zoé', Date.parse('2026-09-01T00:00:00.000Z'));
+    store.ensurePrivate('g1', '123');
+    store.adjustPrivateAffinity('g1', '123', 8, 'nice in private', { maxDelta: Infinity, historySize: 10, now: 1 });
+    store.pushPrivateBuffer('g1', '123', { id: 'm1', content: 'SECRET-BUFFERED-TEXT', ts: 1 });
+    store.bumpPrivateReplies('g1', '123', utcToday());
+    store.flush();
+
+    const shown = await admin.run('private.show', { userId: '123' }, { guildId: 'g1' });
+    assert.match(shown.split('\n')[0], /Zoé/);
+    assert.match(shown, /private affinity: 8\b/);
+    assert.match(shown, /replies today: 1\b/);
+    assert.match(shown, /buffer: 1\b/);
+    assert.ok(!shown.includes('SECRET-BUFFERED-TEXT'));
+
+    await admin.run('private.forget', { userId: '123' }, { guildId: 'g1' });
+    assert.equal(store.getPrivate('g1', '123'), null);
+    assert.ok(store.getUser('g1', '123'), 'the public profile stays');
+
+    store.ensurePrivate('g1', '123');
+    store.flush();
+    await admin.run('memory.forget', { userId: '123' }, { guildId: 'g1' });
+    assert.equal(store.getUser('g1', '123'), null);
+    assert.equal(store.getPrivate('g1', '123'), null, 'memory.forget removes the private layer too');
+  } finally {
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  }
 });
 
 // ---------------------------------------------------------------------------
