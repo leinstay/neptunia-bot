@@ -37,6 +37,7 @@
 | `lookup.md` | 否 | 分类器：角色是否需要搜索网络来回答这条消息（`features.webLookup`）。接收一段短对话记录和一个 `<candidate>` 块。输出为一行：一个搜索查询（纯文字，最多 12 个词）或 `none` | `{{name}}` |
 | `read-link.md` | 否 | 角色外提示，用于链接阅读器（`features.webLookup`，`web.links.enabled`）：将获取的页面浓缩为一个段落。接收页面标题和正文。不接收角色卡 | `{{maxChars}}` |
 | `search-summary.md` | 否 | 角色外提示，用于搜索浓缩器（`features.webLookup`，`web.search.enabled`）：将编号的搜索结果浓缩为带内联来源的笔记。不接收角色卡 | `{{query}}` `{{maxChars}}` |
+| `private.md` | 否 | 追加在模式提示（`reply.md`）之后、`forced.md` 之前，仅在 DM 中使用（`features.privateMessages`）。这是一段私聊：此处所说的一切留在此处；角色保留其公共知识。文件不存在则不追加任何内容 | `{{name}}` `{{author}}` |
 | `draw.md` | 是 | 绘画子进程的角色外提示（`features.imageGeneration`）：根据场景描述生成一张图片。仅接收外貌和请求，不接收角色卡 | `{{name}}` `{{appearance}}` `{{request}}` |
 | `appearance.md` | 否 | 角色的视觉外貌，在 `self="yes"` 时插入 `draw.md`。一段话，无性格，无背景故事 | `{{name}}` |
 | `labels.json` | 是 | 代码插入提示中的所有字符串。键在下方固定，值由编写者决定 | 见下文 |
@@ -45,6 +46,7 @@
 `{{target}}` 呼叫消息的索引（`#87`）。
 系统消息 = `system-prompt` + `character-card` + `rules` + `format`。分析器则单独使用 `memory.md`。
 在强制回合（`/nep interject`、`/nep initiate`）中，如果 `forced.md` 存在，则追加在模式提示之后。
+在私聊中，`private.md` 追加在模式提示之后（`forced.md` 之前），使用相同的 `{{name}}` 和 `{{author}}` 占位符。
 分析器和预热的 `profile.md`、`server.md` 在用户消息中以 `<character>` 块接收角色卡和 `rules.md`。
 `channel.md`、`describe.md`、`describe-video.md`、`draw.md`、`rewatch.md`、`rewatch-answer.md`、`address.md`、`lookup.md`、`read-link.md` 和 `search-summary.md` 不接收角色卡。
 
@@ -163,6 +165,8 @@ senses.search                            shown when features.webLookup is on, we
 senses.draw                              shown when features.imageGeneration is on and an image client is wired; tells the persona it can draw
 senses.drawSpent                         replaces draw when the daily picture quota is spent
 senses.drawSpentUser                     replaces draw when this member's daily quota is spent
+senses.privateChat                       shown in a DM turn: this is a one-on-one conversation, what is said here stays between the two of them
+senses.privateAware                      shown on a server turn when features.privateMessages is on: the persona knows it has private chats and never repeats or hints at anything from them
 lookup.header                            {query}: heading of the `<lookup>` block
 lookup.sources                           {list}: site names, comma-separated by code
 lookup.none                              shown in `<lookup>` when the search found nothing useful
@@ -199,8 +203,12 @@ server.activity                          {activity} = server.activityLive | acti
 server.lastMessage                       {when}: humanised age of the channel's newest message
 server.topWriters                        {names}: current names of the members who write there most
 triggers.mention | reply | name | followUp   followUp = an untagged message the address classifier judged to be for the persona; such a turn posts plain, never as a Discord reply
+triggers.private                         the trigger for a private (DM) message
 triggers.drawFailed                      {reason}: the drawing sub-process failed; reason is the human phrase from draw.reasons.*
-draw.reasons.moderation | daily | userDaily | timeout | error    human phrases for the five failure reasons
+draw.reasons.moderation | daily | userDaily | timeout | error    human phrases for the five failure reasons; daily and userDaily are reserved but no longer reached by triggers.drawFailed — an image cap now posts limits.notice instead of a follow-up turn
+memory.privateNote                       the <private> block content in a private analyzer batch: marks the batch as a private conversation, constrains output to users for the partner's id only
+memory.privateChannel                    heading used in place of a channel name for the <new_messages> section in a private batch
+limits.notice                            {limit} {used} {cap}: posted as a plain reply when a rail refuses a triggered action; limit is the config key, used/cap are the numbers
 warmup.ownMark                           prefixed to a member's own lines in the profile.md transcript
 warmup.contextMark                       prefixed to context lines in the profile.md transcript
 ```
@@ -529,6 +537,8 @@ warmup.contextMark                       prefixed to context lines in the profil
 
 自发回合（无人请求）中，失败仅记录日志，不触发后续回合。
 
+图片配额超限（`ImageCapError`，原因 `daily` 或 `userDaily`）不会触发失败回合。代之以限制通知（`labels.limits.notice`）作为普通回复发布。`draw.reasons.daily` 和 `draw.reasons.userDaily` 保留在 `labels.json` 中，但不再通过 `triggers.drawFailed` 到达。
+
 ### 限制
 
 - 每回合一个 `<draw>`；首个非空优先，截断至 `image.maxPromptChars`（默认 800）。
@@ -539,3 +549,46 @@ warmup.contextMark                       prefixed to context lines in the profil
 - 内容审核拒绝（HTTP 400/403 带审核标记）不重试。
 - 日志记录模型、计数、费用和失败原因，不记录提示（因为可能引用成员）。
 - 试运行中，完整的图像提示（提示文件 + 角色的请求）被记录并镜像，但不生成任何图片。
+
+## 私聊
+
+`features.privateMessages`（默认关闭）允许所服务公会的成员通过 Discord 私信与角色交谈。角色不变，公共记忆不变；私信中说的话存储在每个成员的私有层中，其他对话不可见。
+
+### 门控
+
+当以下所有条件均满足时（本地零 token 检查），私信才会得到回复：
+
+1. `features.privateMessages` 为 `true`。
+2. 发送者是所服务公会的成员。
+3. 角色拥有该发送者的公共档案。
+4. 公共 `affinity.score >= private.minAffinity`（默认 5）。机器人所有者跳过此检查。
+5. 今日回复数未超过上限（所有者使用 `private.maxPerOwnerPerDay`，其余使用 `private.maxPerUserPerDay`）。
+
+达到每日上限时（步骤 5），机器人每人每天发送一次限制通知（`labels.limits.notice`）。
+
+### DM 回合的内容和省略
+
+- `<server>`（频道地图）和 `<other_channels>` 被省略。
+- `prompts.private`（如果存在）追加在模式提示（`reply.md`）之后、`forced.md` 之前，填充 `{{name}}` 和 `{{author}}`。
+- `{{trigger}}` 取自 `labels.triggers.private`。
+- `<senses>` 包含 `senses.privateChat`。
+- 服务器回合中，当 `features.privateMessages` 开启时，`<senses>` 改为包含 `senses.privateAware`。
+- 对话伙伴的档案为 `mergeProfiles(publicProfile, privateProfile)`。其他档案仅公共。
+
+### 私有层
+
+`data/guilds/<guildId>/private/<userId>.json` 存储角色从私信中了解到的内容。拥有自己的 `relationship`、`interests`、`details`、`episodes` 和 `affinity`（初始分数 0）。私信中角色看到公共和私有数据的合并：兴趣按主题合并（私有笔记优先），细节连接，回忆按日期排序，`relationship` 段落拼接。
+
+### DM 中的好感度
+
+公共分数仅由服务器批次改变。私有层有自己的分数（初始 0），仅由 DM 批次改变。DM 中角色感受到 `clamp(公共 + 私有, -100, 100)`；服务器上仅有公共分数。门控仅使用公共分数。
+
+### 私有模式的分析器
+
+`analyzePrivate` 构建与相同 `memory.md` 格式的请求，加上 `<private>` 块（`labels.memory.privateNote`）。`<existing_profiles>` 仅包含伙伴。回答中仅 `users[<partnerId>]` 通过私有存储方法应用。`portrait`、`aliases`、`guild`、`channels`、`lore`、`self` 被丢弃。
+
+## 限制通知
+
+当限制（rail）拒绝了被触发的操作（提及、回复、名字触发、follow-up 或私信）时，机器人发布 `labels.limits.notice` 的一行，填充 `{limit}`（配置键）、`{used}` 和 `{cap}`。自发回合保持沉默。试运行中通知被记录并镜像。
+
+`{limit}` 中可能出现的配置键：`llm.maxRequestsPerDay`、`llm.maxRequestTokens`、`image.maxPerDay`、`image.maxPerUserPerDay`、`private.maxPerUserPerDay`、`private.maxPerOwnerPerDay`。

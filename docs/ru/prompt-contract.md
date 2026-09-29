@@ -37,6 +37,7 @@
 | `lookup.md` | нет | Классификатор: нужно ли персонажу искать в интернете, чтобы ответить на сообщение (`features.webLookup`). Получает короткий транскрипт и блок `<candidate>`. Выход: ОДНА строка: поисковый запрос (обычные слова, не более 12) или `none` | `{{name}}` |
 | `read-link.md` | нет | Внеролевой промпт для чтения ссылок (`features.webLookup`, `web.links.enabled`): сжать загруженную страницу в один абзац. Получает заголовок и тело страницы. Без карточки персонажа | `{{maxChars}}` |
 | `search-summary.md` | нет | Внеролевой промпт для конденсатора поиска (`features.webLookup`, `web.search.enabled`): сжать нумерованные результаты поиска в одну заметку со встроенными ссылками на источники. Без карточки персонажа | `{{query}}` `{{maxChars}}` |
+| `private.md` | нет | Добавляется после промпта режима (`reply.md`), перед `forced.md`, только в личном сообщении (`features.privateMessages`). Приватный разговор: сказанное здесь остаётся здесь; персонаж сохраняет публичные знания. Отсутствующий файл ничего не добавляет | `{{name}}` `{{author}}` |
 | `draw.md` | да | Внеролевой промпт подпроцесса рисования (`features.imageGeneration`): создаёт одну картинку по описанию сцены. Получает только внешность и запрос — никогда карточку персонажа | `{{name}}` `{{appearance}}` `{{request}}` |
 | `appearance.md` | нет | Внешний вид персонажа, вставляется в `draw.md` при `self="yes"`. Один абзац, без личности, без предыстории | `{{name}}` |
 | `labels.json` | да | Все строки, которые КОД вставляет в промпт. Ключи фиксированы ниже, формулировки определяет автор текстов | см. ниже |
@@ -45,6 +46,7 @@
 `{{target}}` индекс вызвавшего сообщения (`#87`).
 Системное сообщение = `system-prompt` + `character-card` + `rules` + `format`. Для анализатора: только `memory.md`.
 При принудительном ходе (`/nep interject`, `/nep initiate`) `forced.md` добавляется после промпта режима, если файл существует.
+В приватном чате `private.md` добавляется после промпта режима (перед `forced.md`) с теми же плейсхолдерами `{{name}}` и `{{author}}`.
 Анализатор и промпты прогрева `profile.md` и `server.md` получают карточку персонажа и `rules.md` как блок
 `<character>` в пользовательском сообщении. `channel.md`, `describe.md`, `describe-video.md`, `draw.md`, `rewatch.md`, `rewatch-answer.md`, `address.md`, `lookup.md`, `read-link.md` и `search-summary.md` карточку не получают.
 
@@ -164,6 +166,8 @@ senses.search                            shown when features.webLookup is on, we
 senses.draw                              shown when features.imageGeneration is on and an image client is wired; tells the persona it can draw
 senses.drawSpent                         replaces draw when the daily picture quota is spent
 senses.drawSpentUser                     replaces draw when this member's daily quota is spent
+senses.privateChat                       shown in a DM turn: this is a one-on-one conversation, what is said here stays between the two of them
+senses.privateAware                      shown on a server turn when features.privateMessages is on: the persona knows it has private chats and never repeats or hints at anything from them
 lookup.header                            {query}: heading of the `<lookup>` block
 lookup.sources                           {list}: site names, comma-separated by code
 lookup.none                              shown in `<lookup>` when the search found nothing useful
@@ -200,8 +204,12 @@ server.activity                          {activity} = server.activityLive | acti
 server.lastMessage                       {when}: humanised age of the channel's newest message
 server.topWriters                        {names}: current names of the members who write there most
 triggers.mention | reply | name | followUp   followUp = an untagged message the address classifier judged to be for the persona; such a turn posts plain, never as a Discord reply
+triggers.private                         the trigger for a private (DM) message
 triggers.drawFailed                      {reason}: the drawing sub-process failed; reason is the human phrase from draw.reasons.*
-draw.reasons.moderation | daily | userDaily | timeout | error    human phrases for the five failure reasons
+draw.reasons.moderation | daily | userDaily | timeout | error    human phrases for the five failure reasons; daily and userDaily are reserved but no longer reached by triggers.drawFailed — an image cap now posts limits.notice instead of a follow-up turn
+memory.privateNote                       the <private> block content in a private analyzer batch: marks the batch as a private conversation, constrains output to users for the partner's id only
+memory.privateChannel                    heading used in place of a channel name for the <new_messages> section in a private batch
+limits.notice                            {limit} {used} {cap}: posted as a plain reply when a rail refuses a triggered action; limit is the config key, used/cap are the numbers
 warmup.ownMark                           prefixed to a member's own lines in the profile.md transcript
 warmup.contextMark                       prefixed to context lines in the profile.md transcript
 ```
@@ -578,6 +586,11 @@ Discord загружается и отправляется как элемент
 
 На спонтанном ходе (никто не просил) неудачная генерация только логируется, второй ход не запускается.
 
+Превышение лимита картинок (`ImageCapError`, причина `daily` или `userDaily`) НЕ запускает ход при ошибке. Вместо этого
+ход публикует уведомление о лимите (`labels.limits.notice`) как обычный ответ. Строка восприятия уже сообщила персонажу,
+что квота исчерпана; уведомление сообщает просившему, какой лимит и числа. `draw.reasons.daily` и `draw.reasons.userDaily`
+зарезервированы в `labels.json`, но больше не достигаются через `triggers.drawFailed`.
+
 ### Ограничения
 
 - Один `<draw>` на ход; первый непустой побеждает, обрезается до `image.maxPromptChars` (по умолчанию 800).
@@ -590,3 +603,77 @@ Discord загружается и отправляется как элемент
 - Логи содержат модель, счётчики, стоимость и причины ошибок — никогда промпт, потому что он может цитировать участников.
 - В сухом прогоне полный промпт изображения (файлы промптов + запрос персонажа) логируется и зеркалируется, но ничего не
   генерируется.
+
+## Приватный чат
+
+`features.privateMessages` (выключен по умолчанию) позволяет участникам обслуживаемого сервера писать персонажу в личные
+сообщения Discord. Персонаж остаётся тем же с той же публичной памятью; сказанное в ЛС хранится в приватном слое для
+каждого участника, невидимом другим разговорам.
+
+### Шлюз
+
+ЛС получает ответ, когда ВСЕ условия выполнены (проверяется локально, без токенов):
+
+1. `features.privateMessages` равен `true`.
+2. Автор является участником обслуживаемого сервера.
+3. У персонажа есть сохранённый публичный профиль автора.
+4. Публичный `affinity.score >= private.minAffinity` (по умолчанию 5). Владельцы бота обходят эту проверку.
+5. Сегодняшнее количество ответов не превышает лимит (`private.maxPerOwnerPerDay` для владельцев,
+   `private.maxPerUserPerDay` для остальных).
+
+Всё, что не проходит, отбрасывается молча, кроме шага 5: при достижении дневного лимита бот публикует уведомление
+(`labels.limits.notice` с ключом конфигурации) раз в день на человека.
+
+### Что содержит и что опускает ход в ЛС
+
+- Блок `<server>` (карта каналов) и `<other_channels>` опускаются.
+- `prompts.private` (если существует) добавляется после промпта режима (`reply.md`), перед `forced.md`, с заполненными
+  `{{name}}` и `{{author}}`.
+- `{{trigger}}` берётся из `labels.triggers.private`.
+- `<senses>` содержит `senses.privateChat`.
+- На серверном ходе, когда `features.privateMessages` включён, `<senses>` содержит `senses.privateAware` (правило
+  о неразглашении приватного).
+- Профиль собеседника строится как `mergeProfiles(publicProfile, privateProfile)` из `src/behavior/private.js`.
+  Остальные профили (`askedAbout`, участники) остаются только публичными.
+- Без шанса игнорирования, без окна follow-up, без подслушивания, без классификатора обращений.
+- Правило одного внимания действует: ЛС, пришедшее, пока персонаж занят, откладывается как отложенный пинг.
+
+### Приватный слой
+
+`data/guilds/<guildId>/private/<userId>.json` хранит то, что персонаж узнал от участника в ЛС. Содержит собственные
+`relationship`, `interests`, `details`, `episodes` и `affinity` (начальный балл 0). Никогда не показывается другим
+разговорам, никогда не записывается серверным батчем, никогда не смешивается с публичным профилем на диске.
+
+В ЛС персонаж видит публичные и приватные данные объединёнными (только для отображения): интересы объединяются по теме
+(приватная заметка побеждает), детали конкатенируются, эпизоды сортируются по дате, тексты `relationship` соединяются.
+
+### Отношение в ЛС
+
+Публичный балл меняется только от серверных батчей. Приватный слой имеет собственный балл, начинающийся с 0, изменяемый
+только батчами ЛС. В ЛС персонаж ощущает `clamp(публичный + приватный, -100, 100)`; на сервере — только публичный.
+Шлюз использует только публичный балл.
+
+### Анализатор в приватном режиме
+
+`analyzePrivate` строит запрос `memory.md` с тем же форматом и блоком `<private>` (`labels.memory.privateNote`).
+`<existing_profiles>` содержит ТОЛЬКО партнёра, отрендеренного как приватный профиль (приватные детали с id, приватные
+интересы, приватные эпизоды, эффективное отношение). `<public_profile>` показывает публичный профиль партнёра (только
+для чтения). `<existing_guild>`, `<existing_lore>` как обычно (только для чтения). `<new_messages>` озаглавлены
+`labels.memory.privateChannel`.
+
+Из ответа применяется только `users[<partnerId>]` через методы приватного хранилища. `portrait` и `aliases`
+игнорируются. `guild`, `channels`, `lore`, `self` и другие id отбрасываются и логируются как счётчики.
+
+## Уведомления о лимитах
+
+Когда ограничение отклоняет запрошенное действие (упоминание, ответ, триггер по имени, follow-up или личное сообщение),
+бот публикует одну строку из `labels.limits.notice` с заполненными `{limit}` (ключ конфигурации), `{used}` и `{cap}`.
+Спонтанные ходы, попавшие в ограничение, молчат. В сухом прогоне уведомление логируется и зеркалируется.
+
+Ключи конфигурации, которые могут появиться в `{limit}`: `llm.maxRequestsPerDay`, `llm.maxRequestTokens`,
+`image.maxPerDay`, `image.maxPerUserPerDay`, `private.maxPerUserPerDay`, `private.maxPerOwnerPerDay`.
+
+Приватные лимиты ЛС публикуют уведомление раз в день на человека (отслеживается через `replies.noticedDay`).
+Лимиты картинок публикуют уведомление вместо хода `drawFailed` (строка восприятия уже сообщила персонажу;
+уведомление — технический маркер для просившего). Лимиты видео и веба не блокируют ответ и сохраняют свои
+состояния в транскрипте; уведомления нет.

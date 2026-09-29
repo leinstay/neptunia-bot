@@ -54,7 +54,7 @@ Settings live under `web`. See [Configuration](configuration.md#web) for every k
 
 ## Drawing
 
-`features.imageGeneration` (on by default) lets the persona draw pictures. When the model emits a `<draw>` tag, the engine generates one picture through OpenRouter's Images API (`image.model`, default `openai/gpt-image-2.5-flare`) and posts it as a separate message after the persona's words. Whether to draw is the model's own decision; it can refuse. In a channel where the bot lacks Attach Files permission, the drawing sense is not shown and a `<draw>` tag is dropped, so nothing is generated or billed.
+`features.imageGeneration` (off by default; a missing key counts as on) lets the persona draw pictures. Turn it on in `config.local.json`. When the model emits a `<draw>` tag, the engine generates one picture through OpenRouter's Images API (`image.model`, default `openai/gpt-image-2.5-flare`) and posts it as a separate message after the persona's words. Whether to draw is the model's own decision; it can refuse. In a channel where the bot lacks Attach Files permission, the drawing sense is not shown and a `<draw>` tag is dropped, so nothing is generated or billed.
 
 ### Caps
 
@@ -70,7 +70,7 @@ The drawing prompt may quote members (it includes the scene text the model wrote
 
 ### Failure
 
-When the drawing fails on a reply turn, a second turn fires with the failure reason in the trigger label, so the persona can tell the requester what happened. The second turn's own `<draw>` is dropped. On a spontaneous turn, a failure is only logged.
+When the drawing fails on a reply turn, a second turn fires with the failure reason in the trigger label, so the persona can tell the requester what happened. The second turn's own `<draw>` is dropped. On a spontaneous turn, a failure is only logged. An image cap (daily or per-member) does not fire the failure turn; it posts a limit notice (`labels.limits.notice`) instead, naming the limit and the numbers.
 
 Settings live under `image`. See [Configuration](configuration.md#image) for every key and [Configuration: Pictures out](configuration.md#pictures-out-imagemodel) for the supported models.
 

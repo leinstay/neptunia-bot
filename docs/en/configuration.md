@@ -23,7 +23,8 @@ Every key in `config.json` with its default, grouped by section.
 | `videoDescriptions` | `false` | Watch short video clips through a video-capable model; needs `mediaDescriptions` on as well. Turn on in `config.local.json`; still needs a video-capable model and, for site links, `yt-dlp`/`ffmpeg` |
 | `videoRewatch` | `true` | When addressed, re-watch a video to answer a question about it; needs `videoDescriptions` on |
 | `webLookup` | `false` | Read links posted in chat and search the web when asked a factual question. Unlike other features, a missing key counts as OFF. Needs `BRAVE_SEARCH_API_KEY` in `.env` for search; without it only link reading works. See [Media: Links and search](media.md#links) |
-| `imageGeneration` | `true` | Let the persona draw pictures through a drawing sub-process. A missing key counts as on. Needs an image-capable model in `image.model`. See [Media: Drawing](media.md#drawing) |
+| `imageGeneration` | `false` | Let the persona draw pictures through a drawing sub-process. A missing key counts as on. Turn on in `config.local.json`; needs an image-capable model in `image.model`. See [Media: Drawing](media.md#drawing) |
+| `privateMessages` | `false` | Answer direct messages from guild members. Needs a stored public profile and `affinity.score >= private.minAffinity`. See [Messages and memory: Private layer](messages-and-memory.md#private-layer) |
 | `followUp` | `true` | Classify untagged messages after the persona answers to continue a conversation |
 | `typingSimulation` | `true` | Simulate typing speed |
 | `adminCommands` | `true` | Owner slash commands; `false` unregisters them |
@@ -350,6 +351,16 @@ Provider-specific options for `google/*` image models.
 | Key | Default | Meaning |
 |---|---|---|
 | `resolution` | `"1K"` | Output resolution (`512`, `1K`, `2K`, `4K`; support varies by model). `gemini-2.5-flash-image` has no resolution knob |
+
+## `private`
+
+Settings for private chat (`features.privateMessages`). All hot-reloaded. The gate checks these locally with zero tokens before any LLM request.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `minAffinity` | `5` | Minimum public attitude score to answer a DM; owners bypass this check |
+| `maxPerUserPerDay` | `100` | Daily reply cap per member; a cap hit posts a limit notice once per day |
+| `maxPerOwnerPerDay` | `200` | Daily reply cap for bot owners |
 
 ## `warmup`
 

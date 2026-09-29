@@ -23,7 +23,8 @@
 | `videoDescriptions` | `false` | 動画対応モデルで短い動画クリップを視聴。`mediaDescriptions` も有効にする必要がある。`config.local.json` で有効化。動画対応モデルが必要で、サイトリンクには `yt-dlp`/`ffmpeg` も必要 |
 | `videoRewatch` | `true` | 話しかけられた時に動画を再視聴して質問に回答。`videoDescriptions` が必要 |
 | `webLookup` | `false` | チャットに投稿されたリンクを読み取り、事実に関する質問にウェブ検索で回答。他の機能と異なり、キーが存在しない場合はオフとして扱われる。検索には `.env` に `BRAVE_SEARCH_API_KEY` が必要。キーがない場合はリンク読み取りのみ動作する。[メディア: リンクと検索](media.md#リンク)を参照 |
-| `imageGeneration` | `true` | ペルソナが描画サブプロセスを通じて画像を描くことを許可。キーが存在しない場合はオンとして扱われる。`image.model` に画像生成対応モデルが必要。[メディア: 描画](media.md#描画)を参照 |
+| `imageGeneration` | `false` | ペルソナが描画サブプロセスを通じて画像を描くことを許可。キーが存在しない場合はオンとして扱われる。`config.local.json` で有効化。`image.model` に画像生成対応モデルが必要。[メディア: 描画](media.md#描画)を参照 |
+| `privateMessages` | `false` | ギルドメンバーのダイレクトメッセージに応答。保存された公開プロファイルと `affinity.score >= private.minAffinity` が必要。[メッセージとメモリ: プライベートレイヤー](messages-and-memory.md#プライベートレイヤー)を参照 |
 | `followUp` | `true` | ペルソナの応答後、タグなしメッセージを分類して会話を継続 |
 | `typingSimulation` | `true` | タイピング速度をシミュレート |
 | `adminCommands` | `true` | オーナースラッシュコマンド。`false` でコマンド登録を解除 |
@@ -350,6 +351,16 @@ YouTube リンクの再生時間は次の順序で取得されます: まず yt-
 | キー | デフォルト | 説明 |
 |---|---|---|
 | `resolution` | `"1K"` | 出力解像度（`512`、`1K`、`2K`、`4K`。サポートはモデルにより異なる）。`gemini-2.5-flash-image` には解像度の設定なし |
+
+## `private`
+
+プライベートチャット（`features.privateMessages`）の設定。すべてホットリロード。ゲートは LLM リクエストなしでローカルチェック。
+
+| キー | デフォルト | 説明 |
+|---|---|---|
+| `minAffinity` | `5` | DM に応答するための最低公開アティチュードスコア。オーナーはこのチェックをバイパス |
+| `maxPerUserPerDay` | `100` | メンバーごとの日次リプライキャップ。到達時は 1 日 1 回のリミット通知を投稿 |
+| `maxPerOwnerPerDay` | `200` | ボットオーナーの日次リプライキャップ |
 
 ## `warmup`
 

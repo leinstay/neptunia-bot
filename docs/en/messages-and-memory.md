@@ -55,6 +55,18 @@ The analyzer adds and updates lorebook entries on its own but never touches entr
 
 The analyzer also records things people taught the persona directly — words and expressions, facts about the server, requests about its behaviour — as server-level learned items that are always present in the prompt.
 
+## Private layer
+
+When `features.privateMessages` is on, members who pass the gate (guild membership, a stored profile, public affinity at or above `private.minAffinity`, today's reply count under the cap) can write to the persona in Discord DMs. The persona is the same character with the same public memory; what is said in a DM stays in a per-member private layer.
+
+The private file `data/guilds/<guildId>/private/<userId>.json` stores its own `relationship`, `interests`, `details`, `episodes`, `affinity` (score starting at 0), the daily reply counter and an observation buffer. It is never shown to any other conversation, never written by a server batch, and never mixed into the public profile on disk. The public profile is never changed by a DM.
+
+In a DM the persona sees public and private data merged: interests unioned by topic (the private note wins), details concatenated, episodes sorted by date, relationship paragraphs joined. The effective affinity is `clamp(public + private, -100, 100)`. On the server the persona sees only the public score.
+
+The private analyzer (`analyzePrivate`) runs the same `memory.md` prompt with a `<private>` block. Only `users[<partnerId>]` from the answer is applied through the private store; `portrait`, `aliases`, `guild`, `channels`, `lore`, `self` and other user ids are dropped.
+
+`/nep memory forget <user>` deletes both the public profile and the private file. `/nep memory wipe` removes the entire `private/` directory for the server. `/nep private forget <user>` deletes only the private file; the public profile is kept.
+
 ## Commands
 
 The full command list is in [Commands](owner-commands.md). The most relevant for memory:
@@ -65,8 +77,10 @@ The full command list is in [Commands](owner-commands.md). The most relevant for
 | `/nep memory channel` | Stored channel notes and code-maintained facts |
 | `/nep memory server` | Server-wide habits, in-jokes, self-facts |
 | `/nep memory refresh <user>` | Force a portrait refresh for one member |
-| `/nep memory forget <user>` | Delete a stored profile entirely |
+| `/nep memory forget <user>` | Delete a stored profile and private memory |
 | `/nep memory affinity <user>` | Show or set attitude |
-| `/nep memory wipe` | Wipe all analyzer memory for the server |
+| `/nep memory wipe` | Wipe all analyzer memory for the server, including private files |
+| `/nep private show <user>` | Show a member's private memory |
+| `/nep private forget <user>` | Delete only the private file; the public profile is kept |
 | `/nep lore add` | Add or overwrite a lorebook entry |
 | `/nep pause` / `/nep resume` | Stop activity and flush memory to disk for safe manual editing |

@@ -23,7 +23,8 @@
 | `videoDescriptions` | `false` | 通过支持视频的模型观看短视频片段；需同时开启 `mediaDescriptions`。在 `config.local.json` 中开启；还需要支持视频的模型，以及站点链接需要 `yt-dlp`/`ffmpeg` |
 | `videoRewatch` | `true` | 被呼叫时重看视频以回答相关问题；需要 `videoDescriptions` |
 | `webLookup` | `false` | 阅读聊天中发布的链接并在被问到事实性问题时搜索网络。与其他功能不同，缺失的键视为关闭。搜索需要 `.env` 中的 `BRAVE_SEARCH_API_KEY`；没有密钥时只有链接阅读可用。参见[媒体：链接与搜索](media.md#链接) |
-| `imageGeneration` | `true` | 允许角色通过绘画子进程绘制图片。缺失的键视为开启。需要 `image.model` 中配置支持图像生成的模型。参见[媒体：绘画](media.md#绘画) |
+| `imageGeneration` | `false` | 允许角色通过绘画子进程绘制图片。缺失的键视为开启。在 `config.local.json` 中启用；需要 `image.model` 中配置支持图像生成的模型。参见[媒体：绘画](media.md#绘画) |
+| `privateMessages` | `false` | 回复公会成员的私信。需要已存储的公共档案且 `affinity.score >= private.minAffinity`。参见[消息与记忆：私有层](messages-and-memory.md#私有层) |
 | `followUp` | `true` | 角色回复后对未标记消息进行分类以延续对话 |
 | `typingSimulation` | `true` | 模拟输入速度 |
 | `adminCommands` | `true` | 所有者斜杠命令；设为 `false` 时注销命令 |
@@ -350,6 +351,16 @@ YouTube 链接的时长通过以下链式探测获取：首先尝试 yt-dlp，�
 | 键 | 默认值 | 说明 |
 |---|---|---|
 | `resolution` | `"1K"` | 输出分辨率（`512`、`1K`、`2K`、`4K`；支持因模型而异）。`gemini-2.5-flash-image` 无分辨率设置 |
+
+## `private`
+
+私聊设置（`features.privateMessages`）。全部热重载。门控在无 LLM 请求的情况下本地检查。
+
+| 键 | 默认值 | 说明 |
+|---|---|---|
+| `minAffinity` | `5` | 回复私信所需的最低公共好感度分数；所有者跳过此检查 |
+| `maxPerUserPerDay` | `100` | 每成员每日回复上限；达到时每天发送一次限制通知 |
+| `maxPerOwnerPerDay` | `200` | 机器人所有者每日回复上限 |
 
 ## `warmup`
 

@@ -1,12 +1,12 @@
 # コマンド
 
-チャンネル、ロール、ユーザーは Discord 標準のピッカーから選択します。`set`/`unset` と `access grant`/`access revoke` では `path`/`command` オプションがオートコンプリートされます。ボットはダイレクトメッセージを読みません。
+チャンネル、ロール、ユーザーは Discord 標準のピッカーから選択します。`set`/`unset` と `access grant`/`access revoke` では `path`/`command` オプションがオートコンプリートされます。
 
 `/nep` は最初からすべてのメンバーに表示されます。アクセスはコマンド実行時にコマンド単位でゲートされ、Discord 自体のコマンド表示設定は使いません。オーナー（`bot.owners`）はすべてのコマンドを常に実行できます。それ以外のユーザーにはグラントが必要です。`/nep access grant <command> [role] [user]` で一つのコマンドキー（例: `memory.show`）、グループ全体（例: `memory`）、またはすべてのコマンド（`*`）を、全員（ロール/ユーザー指定なし）、ロール、またはユーザーに開放します。`/nep access revoke` でグラントを取り消し、`/nep access list` で現在のグラント一覧を表示します。グラントのないオーナー以外のユーザーが `/nep` を実行すると、エフェメラルな「Not allowed」の応答が返ります。
 
 | コマンド | 説明 |
 |---|---|
-| `/nep status` | モデル、キャリブレーション、クォータ（画像カウントと画像モデルを含む）、ギルドごとのメモリ状況を表示 |
+| `/nep status` | モデル、キャリブレーション、クォータ（画像カウントと画像モデルを含む）、ギルドごとのメモリ状況、プライベートチャットのオン/オフとプライベートファイル数を表示 |
 | `/nep reload` | 設定とプロンプトを即時リロード |
 | `/nep ping [role]` | 一つまたはすべてのモデルロール（`talk`、`analyzer`、`classifier.text`、`classifier.media`、`classifier.video`）にミニマルリクエストを送信し、モデル、レイテンシ、プロバイダー、トークン数またはエラーを報告。`classifier.video` の後に `youtube: API key — {status}`（例: `ok`、`not needed (yt-dlp ok)`、`missing (blocked)`）を報告。`classifier.text` の後に `web: API key — {status}`（`ok`、`missing`、`off`）を報告。`llm.maxRequestsPerDay` にカウントされず、一時停止中やウォームアップ中でも動作 |
 | `/nep pause` | すべてのアクティビティを停止し、メモリをディスクにフラッシュしてアンロード。一時停止中は `data/` を安全に編集可能 |
@@ -25,9 +25,11 @@
 | `/nep memory channel [channel]` | チャンネル指定あり: 保存されたノートの全文（目的、トピック、トーン、メッセージ数、アクティビティ、トップライター）。指定なし: ペルソナが把握している全チャンネルの一覧（最終メッセージ順） |
 | `/nep memory server` | サーバー全体のノート: 会話のしかた、会話の始め方、内輪ネタ、自己言及、およびプロファイル・チャンネル・ロアブックエントリの件数 |
 | `/nep memory refresh <user>` | メンバーのポートレートを強制リフレッシュ |
-| `/nep memory forget <user>` | 保存されたプロファイルを削除 |
+| `/nep memory forget <user>` | 保存されたプロファイルとプライベートメモリを削除 |
 | `/nep memory affinity <user> [score] [reason]` | 態度を表示または設定（-100..100） |
-| `/nep memory wipe <confirm>` | このサーバーのアナライザーメモリをすべて消去。確認のためサーバー名を正確に入力 |
+| `/nep memory wipe <confirm>` | このサーバーのアナライザーメモリをすべて消去（プライベートファイル含む）。確認のためサーバー名を正確に入力 |
+| `/nep private show <user>` | メンバーのプライベートメモリを表示: リレーションシップ、インタレスト、ディテール、エピソード、プライベートと実効アティチュード、本日のリプライ数。プライベートレイヤーなしの場合はプレーン応答 |
+| `/nep private forget <user>` | メンバーのプライベートメモリのみを削除。公開プロファイルは保持 |
 | `/nep alias add <user> <name>` | チャット用エイリアスを追加（即時確定） |
 | `/nep alias remove <user> <name>` | チャット用エイリアスを削除 |
 | `/nep learned list` | レッスンの一覧を表示（ID、教えた人、観測回数付き） |

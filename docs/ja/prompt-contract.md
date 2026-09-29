@@ -37,6 +37,7 @@
 | `lookup.md` | いいえ | 分類器: ペルソナがこのメッセージに答えるためにウェブ検索が必要か（`features.webLookup`）。短いトランスクリプトと `<candidate>` ブロックを受け取る。出力は 1 行: 検索クエリ（プレーンワード、最大 12 語）または `none` | `{{name}}` |
 | `read-link.md` | いいえ | リンク読み取りのアウトオブキャラクタープロンプト（`features.webLookup`、`web.links.enabled`）: フェッチしたページを 1 段落に要約する。ページのタイトルと本文を受け取る。キャラクターカードなし | `{{maxChars}}` |
 | `search-summary.md` | いいえ | 検索要約のアウトオブキャラクタープロンプト（`features.webLookup`、`web.search.enabled`）: 番号付き検索結果をインラインソース付きの 1 つのノートに要約する。キャラクターカードなし | `{{query}}` `{{maxChars}}` |
+| `private.md` | いいえ | モードプロンプト（`reply.md`）の後、`forced.md` の前に追加。DM（`features.privateMessages`）のみ。プライベートな会話: ここで話されたことはここに留まる。ペルソナは公開知識を保持する。ファイルがなければ何も追加されない | `{{name}}` `{{author}}` |
 | `draw.md` | はい | 描画サブプロセスのアウトオブキャラクタープロンプト（`features.imageGeneration`）: シーン説明から画像 1 枚を生成する。外見とリクエストのみを受け取り、キャラクターカードは受け取らない | `{{name}}` `{{appearance}}` `{{request}}` |
 | `appearance.md` | いいえ | ペルソナのビジュアル外見。`self="yes"` 時に `draw.md` に挿入される。パーソナリティやバックストーリーなし、1 段落 | `{{name}}` |
 | `labels.json` | はい | コードがプロンプトに挿入するすべての文字列。キーは以下で固定、値はライターが記述する | 以下参照 |
@@ -45,6 +46,7 @@
 `{{target}}` 呼び出しメッセージのインデックス（`#87`）。
 システムメッセージ = `system-prompt` + `character-card` + `rules` + `format`。アナライザーの場合: `memory.md` のみ。
 強制ターン（`/nep interject`、`/nep initiate`）では、`forced.md` が存在する場合、モードプロンプトの後に追加されます。
+プライベートチャットでは、`private.md` がモードプロンプトの後（`forced.md` の前）に同じ `{{name}}` と `{{author}}` プレースホルダーで追加されます。
 アナライザーとウォームアップの `profile.md` および `server.md` はキャラクターカードと `rules.md` をユーザーメッセージ内の
 `<character>` ブロックとして受け取ります。`channel.md`、`describe.md`、`describe-video.md`、`draw.md`、`rewatch.md`、`rewatch-answer.md`、`address.md`、`lookup.md`、`read-link.md`、`search-summary.md` はカードを受け取りません。
 
@@ -163,6 +165,8 @@ senses.search                            shown when features.webLookup is on, we
 senses.draw                              shown when features.imageGeneration is on and an image client is wired; tells the persona it can draw
 senses.drawSpent                         replaces draw when the daily picture quota is spent
 senses.drawSpentUser                     replaces draw when this member's daily quota is spent
+senses.privateChat                       shown in a DM turn: this is a one-on-one conversation, what is said here stays between the two of them
+senses.privateAware                      shown on a server turn when features.privateMessages is on: the persona knows it has private chats and never repeats or hints at anything from them
 lookup.header                            {query}: heading of the `<lookup>` block
 lookup.sources                           {list}: site names, comma-separated by code
 lookup.none                              shown in `<lookup>` when the search found nothing useful
@@ -199,8 +203,12 @@ server.activity                          {activity} = server.activityLive | acti
 server.lastMessage                       {when}: humanised age of the channel's newest message
 server.topWriters                        {names}: current names of the members who write there most
 triggers.mention | reply | name | followUp   followUp = an untagged message the address classifier judged to be for the persona; such a turn posts plain, never as a Discord reply
+triggers.private                         the trigger for a private (DM) message
 triggers.drawFailed                      {reason}: the drawing sub-process failed; reason is the human phrase from draw.reasons.*
-draw.reasons.moderation | daily | userDaily | timeout | error    human phrases for the five failure reasons
+draw.reasons.moderation | daily | userDaily | timeout | error    human phrases for the five failure reasons; daily and userDaily are reserved but no longer reached by triggers.drawFailed — an image cap now posts limits.notice instead of a follow-up turn
+memory.privateNote                       the <private> block content in a private analyzer batch: marks the batch as a private conversation, constrains output to users for the partner's id only
+memory.privateChannel                    heading used in place of a channel name for the <new_messages> section in a private batch
+limits.notice                            {limit} {used} {cap}: posted as a plain reply when a rail refuses a triggered action; limit is the config key, used/cap are the numbers
 warmup.ownMark                           prefixed to a member's own lines in the profile.md transcript
 warmup.contextMark                       prefixed to context lines in the profile.md transcript
 ```
@@ -430,6 +438,8 @@ warmup.contextMark                       prefixed to context lines in the profil
 
 自発的ターン（誰も依頼していない）では、失敗はログに記録されるだけでフォローアップは実行されません。
 
+画像上限（`ImageCapError`、理由 `daily` または `userDaily`）は失敗ターンを発火しません。代わりにリミット通知（`labels.limits.notice`）をプレーンリプライとして投稿します。`draw.reasons.daily` と `draw.reasons.userDaily` は `labels.json` に予約されていますが、`triggers.drawFailed` 経由では到達しなくなりました。
+
 ### 制限
 
 - ターンあたり `<draw>` は 1 つ。最初の非空が優先、`image.maxPromptChars`（デフォルト 800）でクランプ。
@@ -440,3 +450,46 @@ warmup.contextMark                       prefixed to context lines in the profil
 - モデレーション拒否（HTTP 400/403 + モデレーションマーカー）はリトライされない。
 - ログにはモデル、カウント、コスト、失敗理由が記録され、プロンプトは含まれません（メンバーを引用する可能性があるため）。
 - ドライランでは完全なイメージプロンプト（プロンプトファイル + ペルソナのリクエスト）がログとミラーに記録されますが、何も生成されません。
+
+## プライベートチャット
+
+`features.privateMessages`（デフォルトオフ）で、サーブしているギルドのメンバーが Discord ダイレクトメッセージでペルソナと会話できます。ペルソナは同じキャラクター、同じ公開メモリ。DM で話された内容はメンバーごとのプライベートレイヤーに保存され、他の会話には一切見えません。
+
+### ゲート
+
+DM は以下のすべてが満たされた場合にのみ応答されます（トークンゼロでローカルチェック）:
+
+1. `features.privateMessages` が `true`。
+2. 送信者がサーブしているギルドのメンバー。
+3. ペルソナが送信者の公開プロファイルを保持している。
+4. 公開 `affinity.score >= private.minAffinity`（デフォルト 5）。ボットオーナーはこのチェックをバイパス。
+5. 本日のリプライ数がキャップ未満（オーナーは `private.maxPerOwnerPerDay`、それ以外は `private.maxPerUserPerDay`）。
+
+5 で日次キャップに達した場合のみ、1 日 1 人 1 回のリミット通知（`labels.limits.notice`）が投稿されます。
+
+### DM ターンの内容と省略
+
+- `<server>`（チャンネルマップ）と `<other_channels>` は省略。
+- `prompts.private`（存在する場合）がモードプロンプト（`reply.md`）の後、`forced.md` の前に追加。`{{name}}` と `{{author}}` が設定される。
+- `{{trigger}}` は `labels.triggers.private` から取得。
+- `<senses>` に `senses.privateChat` が含まれる。
+- サーバーターンでは、`features.privateMessages` がオンの場合、`<senses>` に `senses.privateAware` が代わりに含まれる。
+- 対話相手のプロファイルは `mergeProfiles(publicProfile, privateProfile)`。他のプロファイルは公開のみ。
+
+### プライベートレイヤー
+
+`data/guilds/<guildId>/private/<userId>.json` に DM で学んだ内容を保存。独自の `relationship`、`interests`、`details`、`episodes`、`affinity`（初期スコア 0）を持つ。DM でペルソナは公開とプライベートデータの結合を見る: インタレストはトピックで結合（プライベートノートが優先）、ディテールは連結、エピソードは日付順、`relationship` は段落結合。
+
+### DM でのアフィニティ
+
+公開スコアはサーバーバッチからのみ変化。プライベートレイヤーは独自のスコア（初期 0）を持ち、DM バッチからのみ変化。DM でペルソナが感じるのは `clamp(公開 + プライベート, -100, 100)`。サーバーでは公開スコアのみ。ゲートは公開スコアのみを使用。
+
+### プライベートモードのアナライザー
+
+`analyzePrivate` は同じ `memory.md` フォーマットに `<private>` ブロック（`labels.memory.privateNote`）を加えたリクエストを構築。`<existing_profiles>` にはパートナーのみ。回答からは `users[<partnerId>]` のみがプライベートストアメソッドで適用。`portrait`、`aliases`、`guild`、`channels`、`lore`、`self` は破棄。
+
+## リミット通知
+
+レールがトリガーされたアクション（メンション、リプライ、名前トリガー、フォローアップ、プライベートメッセージ）を拒否した場合、ボットは `labels.limits.notice` から 1 行を投稿。`{limit}`（config キー）、`{used}`、`{cap}` が設定される。自発的ターンはサイレント。ドライランではログとミラーに記録。
+
+`{limit}` に表示される config キー: `llm.maxRequestsPerDay`、`llm.maxRequestTokens`、`image.maxPerDay`、`image.maxPerUserPerDay`、`private.maxPerUserPerDay`、`private.maxPerOwnerPerDay`。

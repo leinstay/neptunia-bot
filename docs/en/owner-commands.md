@@ -1,12 +1,12 @@
 # Commands
 
-Channels, roles and users are picked from Discord's own pickers; `set`/`unset` and `access grant`/`access revoke` autocomplete their `path`/`command` options. The bot does not read direct messages.
+Channels, roles and users are picked from Discord's own pickers; `set`/`unset` and `access grant`/`access revoke` autocomplete their `path`/`command` options.
 
 `/nep` is visible to every member from the start; access is gated per command at the moment it runs, never through Discord's own command visibility. Owners (`bot.owners`) can always run every command. Everyone else needs a grant: `/nep access grant <command> [role] [user]` opens one command key (e.g. `memory.show`), a whole group (e.g. `memory`), or every command (`*`) to everyone (no role/user given), a role, or a user; `/nep access revoke` undoes one of those; `/nep access list` shows the current grants. Without a grant, a non-owner who runs `/nep` gets an ephemeral "Not allowed" reply.
 
 | Command | What it does |
 |---|---|
-| `/nep status` | Model, calibration, quotas (including image count and image model), and per-guild memory status |
+| `/nep status` | Model, calibration, quotas (including image count and image model), per-guild memory status, private chat on/off and private file count |
 | `/nep reload` | Reload config and prompts now |
 | `/nep ping [role]` | Send a minimal request to one or all model roles (`talk`, `analyzer`, `classifier.text`, `classifier.media`, `classifier.video`) and report model, latency, provider, tokens or the error; `/nep ping classifier` pings all three classifier roles. After `classifier.video`, reports `youtube: API key — {status}` (e.g. `ok`, `not needed (yt-dlp ok)`, `missing (blocked)`); after `classifier.text`, reports `web: API key — {status}` (`ok`, `missing` or `off`). Does not count against `llm.maxRequestsPerDay` and works while paused or warming up |
 | `/nep pause` | Stop all activity, flush memory to disk and unload it; `data/` is safe to edit while paused |
@@ -25,9 +25,11 @@ Channels, roles and users are picked from Discord's own pickers; `set`/`unset` a
 | `/nep memory channel [channel]` | With a channel: stored note in full (purpose, topics, tone, message count, activity, top writers). Without: a table of every channel the persona knows, sorted by last message |
 | `/nep memory server` | Server-wide notes: how people talk, how conversations start, in-jokes, self-facts, plus counts of profiles, channels and lore entries |
 | `/nep memory refresh <user>` | Force a portrait refresh for a member |
-| `/nep memory forget <user>` | Delete a stored profile |
+| `/nep memory forget <user>` | Delete a stored profile and its private memory |
 | `/nep memory affinity <user> [score] [reason]` | Show or set attitude (-100..100) |
-| `/nep memory wipe <confirm>` | Wipe all analyzer memory for this server; type the exact server name to confirm |
+| `/nep memory wipe <confirm>` | Wipe all analyzer memory for this server, including private files; type the exact server name to confirm |
+| `/nep private show <user>` | Show a member's private memory: relationship, interests, details, episodes, private and effective attitude, today's reply count. No private layer is a plain answer, not an error |
+| `/nep private forget <user>` | Delete only a member's private memory; the public profile is kept |
 | `/nep alias add <user> <name>` | Add a chat alias; confirmed at once |
 | `/nep alias remove <user> <name>` | Remove a chat alias |
 | `/nep learned list` | List lessons with ids, who taught each one, sightings |

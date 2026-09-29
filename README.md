@@ -16,7 +16,7 @@
 
 ---
 
-Neptunia is a locally run Discord bot that plays one configurable character through an LLM, behaving like an ordinary chat member. It runs on Node.js 20+ with a single dependency (discord.js) and talks to any OpenRouter-compatible endpoint. It comes with a pluggable character card written without touching code, hot-reloaded prompts and config, per-member memory with attitudes and episodes, a server-wide lorebook, vision for attached pictures, one-line media descriptions from a helper model, drawing on request through an image generation model, owner slash commands for live tuning, and a dry-run mode. A working example character is included; write your own card for a different persona.
+Neptunia is a locally run Discord bot that plays one configurable character through an LLM, behaving like an ordinary chat member. It runs on Node.js 20+ with a single dependency (discord.js) and talks to any OpenRouter-compatible endpoint. It comes with a pluggable character card written without touching code, hot-reloaded prompts and config, per-member memory with attitudes and episodes, a server-wide lorebook, vision for attached pictures, one-line media descriptions from a helper model, drawing on request through an image generation model, private chat in Discord DMs with a separate memory layer, owner slash commands for live tuning, and a dry-run mode. A working example character is included; write your own card for a different persona.
 
 The persona responds to mentions, replies and name triggers, sometimes ignoring them. It cuts into conversations at random intervals and starts topics in dead channels. It remembers people, tracks attitudes from -100 to 100, and uses them in replies. The score never appears in chat. All config and prompts are hot-reloaded; owner commands tune the bot live from Discord.
 
@@ -93,9 +93,13 @@ See [`docs/en/messages-and-memory.md`](docs/en/messages-and-memory.md) for the p
 
 The persona can see attached pictures, watch short video clips, read pages behind links, search the web for facts it does not have, and draw pictures on request through an image generation model. Each capability is a separate feature switch, off or capped by default, with its own daily limit. A `<senses>` block in each request tells the persona what is on; it never claims to have perceived anything beyond it. See [`docs/en/media.md`](docs/en/media.md) for pictures, video vision, link reading, search, drawing, tools, costs and privacy.
 
+## Private chat
+
+`features.privateMessages` (off by default) lets guild members talk to the persona in Discord DMs. The persona is the same character with the same public memory; what is said in a DM is remembered in a per-member private layer that no other conversation ever sees. DMs need the same server membership and no extra permission beyond what the invite URL already grants. See [`docs/en/messages-and-memory.md`](docs/en/messages-and-memory.md#private-layer) for the gate, the private memory layer and the owner commands.
+
 ## Costs
 
-Each turn is one LLM request; a memory update adds a second. Cost depends on the model and endpoint; `llm.model` and `llm.baseUrl` accept any compatible values. The daily cap (`llm.maxRequestsPerDay`) prevents runaway spending. Video descriptions add one request per watched clip to a separate, cheaper model (`media.video.maxPerDay` caps the daily count); `yt-dlp` and `ffmpeg` run locally and cost nothing beyond bandwidth. Link reads and searches (`features.webLookup`, off by default) add requests to the text classifier model, capped by `web.maxPerDay`; search additionally needs a Brave Search API key (free tier: 2,000 queries/month). Image generation (`features.imageGeneration`, on by default) bills per output token through `image.model`; `image.maxPerDay` caps the daily count separately from chat requests. With `features.webLookup` on, the bot makes outbound HTTP requests to fetch pages and to the Brave Search API; private addresses are refused.
+Each turn is one LLM request; a memory update adds a second. Cost depends on the model and endpoint; `llm.model` and `llm.baseUrl` accept any compatible values. The daily cap (`llm.maxRequestsPerDay`) prevents runaway spending. Video descriptions add one request per watched clip to a separate, cheaper model (`media.video.maxPerDay` caps the daily count); `yt-dlp` and `ffmpeg` run locally and cost nothing beyond bandwidth. Link reads and searches (`features.webLookup`, off by default) add requests to the text classifier model, capped by `web.maxPerDay`; search additionally needs a Brave Search API key (free tier: 2,000 queries/month). Image generation (`features.imageGeneration`, off by default) bills per output token through `image.model`; `image.maxPerDay` caps the daily count separately from chat requests. Private chat (`features.privateMessages`, off by default) uses the same LLM and caps; each DM reply is one request, each private analyzer batch is another. With `features.webLookup` on, the bot makes outbound HTTP requests to fetch pages and to the Brave Search API; private addresses are refused.
 
 `data/` holds per-member profiles, relationship scores, channel observations, server patterns, cached media descriptions and web excerpts. It stays on your machine, is gitignored, and is only sent to the LLM as context. The analyzer is instructed not to store sensitive details. `/nep memory forget` deletes a profile entirely.
 
@@ -147,6 +151,7 @@ prompts/
   interject.md             task: jump into a conversation
   initiate.md              task: start a topic
   forced.md                appended on a forced turn (/nep interject, /nep initiate)
+  private.md               appended in a DM turn (features.privateMessages)
   memory.md                prompt for the memory analyzer
   draw.md                  prompt for the drawing sub-process (image generation)
   appearance.md            the persona's visual look for self-portraits
@@ -228,6 +233,8 @@ src/
     turn.js                one turn: collect, build, call, act
     spontaneous.js         chaotic timer, eavesdrop
     pending.js             pending direct pings while the persona is busy
+    private.js             pure: DM gate, merged profiles, effective affinity
+    limits.js              pure: limit notice text from labels
   memory/
     store.js               JSON file persistence, atomic writes
     update.js              batch memory updates
@@ -253,6 +260,7 @@ data/                      persistent state (gitignored, created at runtime)
   guilds/<id>/buffer.json  messages observed since the last memory update
   guilds/<id>/media.json   media description cache
   guilds/<id>/users/       per-member profiles and relationships
+  guilds/<id>/private/     per-member private DM memory
   guilds/<id>/channels/    channel observations from the analyzer
   guilds/<id>/lore.json    lorebook entries
 ```

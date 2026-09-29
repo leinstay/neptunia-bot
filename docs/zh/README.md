@@ -16,7 +16,7 @@
 
 ---
 
-Neptunia 是一个本地运行的 Discord 机器人，用 LLM 扮演一个可配置的角色，看起来就像普通聊天成员。基于 Node.js 20+，唯一依赖是 discord.js，支持任何兼容 OpenRouter 的端点。角色卡无需改代码即可替换，提示词和配置热重载。具备按成员记忆（含态度和回忆）、服务器级世界书、附图识别、辅助模型的单行媒体描述、通过图像生成模型按需绘画、所有者斜杠命令和试运行模式。自带可用的示例角色；换角色只需写自己的角色卡。
+Neptunia 是一个本地运行的 Discord 机器人，用 LLM 扮演一个可配置的角色，看起来就像普通聊天成员。基于 Node.js 20+，唯一依赖是 discord.js，支持任何兼容 OpenRouter 的端点。角色卡无需改代码即可替换，提示词和配置热重载。具备按成员记忆（含态度和回忆）、服务器级世界书、附图识别、辅助模型的单行媒体描述、通过图像生成模型按需绘画、带独立记忆层的 Discord 私信聊天、所有者斜杠命令和试运行模式。自带可用的示例角色；换角色只需写自己的角色卡。
 
 角色响应 @提及、回复和名字触发，有时会选择无视。它会随机插入对话，在安静的频道发起话题。它记住每个人，追踪 -100 到 100 的态度分数并体现在回复中。分数不会出现在聊天里。配置和提示词全部热重载；所有者命令可在 Discord 中实时调整。
 
@@ -93,9 +93,13 @@ Discord 斜杠命令只有一个：`/nep`（名称来自 `bot.commandName`）。
 
 角色可以看到附加图片、观看短视频片段、阅读链接后的页面、搜索网络以获取它没有的事实，以及应请求通过图像生成模型绘制图片。每种能力是一个独立的功能开关，默认关闭或有上限，各自有每日限制。每个请求中的 `<senses>` 块告知角色当前什么是开启的；它不会声称感知了超出此块描述的任何东西。详见 [`media.md`](media.md)：图片、视频视觉、链接阅读、搜索、绘画、工具、成本和隐私。
 
+## 私聊
+
+`features.privateMessages`（默认关闭）允许公会成员通过 Discord 私信与角色交谈。角色不变，公共记忆不变；私信中说的话记忆在每成员的私有层中，其他对话不可见。私信需要同一服务器成员身份，无需邀请 URL 已授予权限之外的额外权限。门控、私有记忆层和所有者命令的详情参见 [`messages-and-memory.md`](messages-and-memory.md#私有层)。
+
 ## 成本
 
-每个回合消耗一次 LLM 请求；记忆更新再加一次。成本取决于模型和端点；`llm.model` 和 `llm.baseUrl` 接受任何兼容值。每日上限（`llm.maxRequestsPerDay`）防止超支。视频描述每个片段向更便宜的独立模型发一次请求（`media.video.maxPerDay` 限制每日数量）；`yt-dlp` 和 `ffmpeg` 在本地运行，只消耗带宽。链接阅读和搜索（`features.webLookup`，默认关闭）向文本分类器发请求，受 `web.maxPerDay` 限制；搜索还需要 Brave Search API 密钥（免费层：每月 2,000 次查询）。图像生成（`features.imageGeneration`，默认开启）通过 `image.model` 按输出 token 计费；`image.maxPerDay` 独立于聊天请求限制每日数量。启用 `features.webLookup` 后，机器人会发出 HTTP 请求获取页面和访问 Brave Search API；私有地址拒绝访问。
+每个回合消耗一次 LLM 请求；记忆更新再加一次。成本取决于模型和端点；`llm.model` 和 `llm.baseUrl` 接受任何兼容值。每日上限（`llm.maxRequestsPerDay`）防止超支。视频描述每个片段向更便宜的独立模型发一次请求（`media.video.maxPerDay` 限制每日数量）；`yt-dlp` 和 `ffmpeg` 在本地运行，只消耗带宽。链接阅读和搜索（`features.webLookup`，默认关闭）向文本分类器发请求，受 `web.maxPerDay` 限制；搜索还需要 Brave Search API 密钥（免费层：每月 2,000 次查询）。图像生成（`features.imageGeneration`，默认关闭）通过 `image.model` 按输出 token 计费；`image.maxPerDay` 独立于聊天请求限制每日数量。私聊（`features.privateMessages`，默认关闭）使用同样的 LLM 和上限；每条 DM 回复是一次请求，每个私有分析器批次是另一次。启用 `features.webLookup` 后，机器人会发出 HTTP 请求获取页面和访问 Brave Search API；私有地址拒绝访问。
 
 `data/` 存储成员档案、关系分数、频道观察、服务器规律、媒体描述和网页摘要的缓存。全部保留在你的机器上，已加入 gitignore，仅作为上下文发送给 LLM。分析器被指示不存储敏感信息。`/nep memory forget` 可完全删除某人的档案。
 

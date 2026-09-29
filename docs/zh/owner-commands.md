@@ -1,12 +1,12 @@
 # 命令
 
-频道、身份组和用户从 Discord 自带的选择器中选取；`set`/`unset` 和 `access grant`/`access revoke` 会自动补全其 `path`/`command` 选项。机器人不读取私信。
+频道、身份组和用户从 Discord 自带的选择器中选取；`set`/`unset` 和 `access grant`/`access revoke` 会自动补全其 `path`/`command` 选项。
 
 `/nep` 从一开始就对所有成员可见；访问权限在命令执行时按命令逐一检查，不通过 Discord 自身的命令可见性控制。所有者（`bot.owners`）始终可以运行所有命令。其他人需要授权：`/nep access grant <command> [role] [user]` 可开放一个命令键（如 `memory.show`）、一个完整组（如 `memory`）或所有命令（`*`）给所有人（不指定身份组/用户）、某个身份组或某个用户；`/nep access revoke` 撤销授权；`/nep access list` 显示当前授权。没有授权的非所有者运行 `/nep` 会收到一条仅自己可见的 “Not allowed” 回复。
 
 | 命令 | 说明 |
 |---|---|
-| `/nep status` | 模型、校准、配额（包括图片计数和图像模型）和每服务器记忆状态 |
+| `/nep status` | 模型、校准、配额（包括图片计数和图像模型）、每服务器记忆状态、私聊开关和私有文件数 |
 | `/nep reload` | 立即重新加载配置和提示 |
 | `/nep ping [role]` | 向一个或所有模型角色（`talk`、`analyzer`、`classifier.text`、`classifier.media`、`classifier.video`）发送最小请求并报告模型、延迟、provider、token 或错误；`classifier.video` 之后报告 `youtube: API key — {status}`（如 `ok`、`not needed (yt-dlp ok)`、`missing (blocked)`）；`classifier.text` 之后报告 `web: API key — {status}`（`ok`、`missing` 或 `off`）。不计入 `llm.maxRequestsPerDay`，在暂停或预热期间均可使用 |
 | `/nep pause` | 停止所有活动，将记忆刷入磁盘并卸载；暂停期间可安全编辑 `data/` |
@@ -25,9 +25,11 @@
 | `/nep memory channel [channel]` | 指定频道：完整的存储笔记（用途、话题、氛围、消息数、活跃度、最活跃作者）。不指定：角色已知的所有频道表格，按最后消息排序 |
 | `/nep memory server` | 服务器级笔记：人们如何交流、对话如何开始、内部梗、自述事实，以及档案、频道和世界书条目的计数 |
 | `/nep memory refresh <user>` | 强制刷新成员画像 |
-| `/nep memory forget <user>` | 删除存储的档案 |
+| `/nep memory forget <user>` | 删除存储的档案及其私有记忆 |
 | `/nep memory affinity <user> [score] [reason]` | 查看或设置态度（-100..100） |
-| `/nep memory wipe <confirm>` | 清除该服务器的所有分析器记忆；输入准确的服务器名称以确认 |
+| `/nep memory wipe <confirm>` | 清除该服务器的所有分析器记忆（包括私有文件）；输入准确的服务器名称以确认 |
+| `/nep private show <user>` | 显示成员的私有记忆：关系、兴趣、细节、回忆、私有和有效好感度、今日回复数。无私有层则为普通回答 |
+| `/nep private forget <user>` | 仅删除成员的私有记忆；公共档案保留 |
 | `/nep alias add <user> <name>` | 添加聊天别名；立即确认 |
 | `/nep alias remove <user> <name>` | 移除聊天别名 |
 | `/nep learned list` | 列出所学内容（含 ID、教授者、观察次数） |

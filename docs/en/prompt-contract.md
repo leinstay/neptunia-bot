@@ -37,6 +37,7 @@ All instructions are English in both layers; a character's speech samples may be
 | `lookup.md` | no | Classifier: does the persona need to search the web to answer this message (`features.webLookup`). Receives a short transcript and a `<candidate>` block. Output is ONE line: a search query (plain words, at most 12) or `none` | `{{name}}` |
 | `read-link.md` | no | Out-of-character prompt for the link reader (`features.webLookup`, `web.links.enabled`): condense a fetched page into one paragraph. Receives the page title and body. No character card | `{{maxChars}}` |
 | `search-summary.md` | no | Out-of-character prompt for the search condenser (`features.webLookup`, `web.search.enabled`): condense numbered search results into one note with inline sources. No character card | `{{query}}` `{{maxChars}}` |
+| `private.md` | no | Appended after the mode prompt (`reply.md`), before `forced.md`, only in a DM (`features.privateMessages`). This is a private conversation: what is said here stays here; the persona keeps its public knowledge. A missing file adds nothing | `{{name}}` `{{author}}` |
 | `draw.md` | yes | Out-of-character prompt of the drawing sub-process (`features.imageGeneration`): produces one picture from a scene description. Receives only the appearance and the request — never the character card | `{{name}}` `{{appearance}}` `{{request}}` |
 | `appearance.md` | no | The persona's visual look, inserted into `draw.md` when `self="yes"`. One paragraph, no personality, no backstory | `{{name}}` |
 | `labels.json` | yes | Every string the CODE inserts into a prompt. Keys fixed below, values are the writer's | see below |
@@ -45,6 +46,7 @@ All instructions are English in both layers; a character's speech samples may be
 `{{target}}` index of the calling message (`#87`).
 System message = `system-prompt` + `character-card` + `rules` + `format`. For the analyzer: `memory.md` alone.
 On a forced turn (`/nep interject`, `/nep initiate`), `forced.md` is appended after the mode prompt if the file exists.
+In a private chat, `private.md` is appended after the mode prompt (before `forced.md`) with the same `{{name}}` and `{{author}}` placeholders.
 The analyzer and the warmup's `profile.md` and `server.md` receive the character card and `rules.md` as a
 `<character>` block in the user message. `channel.md`, `describe.md`, `describe-video.md`, `draw.md`, `rewatch.md`, `rewatch-answer.md`, `address.md`, `lookup.md`, `read-link.md` and `search-summary.md` do not receive the card.
 
@@ -165,6 +167,8 @@ senses.search                            shown when features.webLookup is on, we
 senses.draw                              shown when features.imageGeneration is on and an image client is wired; tells the persona it can draw
 senses.drawSpent                         replaces draw when the daily picture quota is spent
 senses.drawSpentUser                     replaces draw when this member's daily quota is spent
+senses.privateChat                       shown in a DM turn: this is a one-on-one conversation, what is said here stays between the two of them
+senses.privateAware                      shown on a server turn when features.privateMessages is on: the persona knows it has private chats and never repeats or hints at anything from them
 lookup.header                            {query}: heading of the `<lookup>` block
 lookup.sources                           {list}: site names, comma-separated by code
 lookup.none                              shown in `<lookup>` when the search found nothing useful
@@ -201,8 +205,12 @@ server.activity                          {activity} = server.activityLive | acti
 server.lastMessage                       {when}: humanised age of the channel's newest message
 server.topWriters                        {names}: current names of the members who write there most
 triggers.mention | reply | name | followUp   followUp = an untagged message the address classifier judged to be for the persona; such a turn posts plain, never as a Discord reply
+triggers.private                         the trigger for a private (DM) message
 triggers.drawFailed                      {reason}: the drawing sub-process failed; reason is the human phrase from draw.reasons.*
-draw.reasons.moderation | daily | userDaily | timeout | error    human phrases for the five failure reasons
+draw.reasons.moderation | daily | userDaily | timeout | error    human phrases for the five failure reasons; daily and userDaily are reserved but no longer reached by triggers.drawFailed — an image cap now posts limits.notice instead of a follow-up turn
+memory.privateNote                       the <private> block content in a private analyzer batch: marks the batch as a private conversation, constrains output to users for the partner's id only
+memory.privateChannel                    heading used in place of a channel name for the <new_messages> section in a private batch
+limits.notice                            {limit} {used} {cap}: posted as a plain reply when a rail refuses a triggered action; limit is the config key, used/cap are the numbers
 warmup.ownMark                           prefixed to a member's own lines in the profile.md transcript
 warmup.contextMark                       prefixed to context lines in the profile.md transcript
 ```
@@ -572,6 +580,11 @@ When a generation fails on a reply turn (someone asked for the picture), a secon
 
 On a spontaneous turn (nobody asked), a failed generation is only logged and no follow-up runs.
 
+An image cap (`ImageCapError`, reason `daily` or `userDaily`) does NOT fire the failure turn. Instead, the turn posts a
+limit notice (`labels.limits.notice`) as a plain reply. The senses line already told the persona the quota was spent;
+the notice tells the requester which limit and the numbers. `draw.reasons.daily` and `draw.reasons.userDaily` are
+reserved in `labels.json` but no longer reached by `triggers.drawFailed`.
+
 ### Rails
 
 - One `<draw>` per turn; first non-empty wins, clamped to `image.maxPromptChars` (default 800).
@@ -584,3 +597,78 @@ On a spontaneous turn (nobody asked), a failed generation is only logged and no 
 - Logs carry the model, counts, cost and failure reasons — never the prompt, because it may quote members.
 - In dry-run, the full image prompt (prompt files + the persona's request) is logged and mirrored, but nothing is
   generated.
+
+## Private chat
+
+`features.privateMessages` (off by default) lets members of the served guild talk to the persona in Discord direct
+messages. The persona is the same character with the same public memory; what is said in a DM stays in a per-member
+private layer that no other conversation ever sees.
+
+### Gate
+
+A DM is answered when ALL of the following hold, checked locally with zero tokens:
+
+1. `features.privateMessages` is `true`.
+2. The author is a member of the served guild.
+3. The persona has a stored public profile for the author.
+4. The author's public `affinity.score >= private.minAffinity` (default 5). Bot owners bypass this check.
+5. Today's reply count for this person is under the cap (`private.maxPerOwnerPerDay` for owners,
+   `private.maxPerUserPerDay` otherwise).
+
+Anything that fails is dropped silently, except step 5: when the daily cap is reached, the bot posts a limit notice
+(`labels.limits.notice` with the config key) once per person per day.
+
+### What a DM turn contains and omits
+
+- The `<server>` block (channel map) and `<other_channels>` are omitted.
+- `prompts.private` (when present) is appended after the mode prompt (`reply.md`), before `forced.md`, with
+  `{{name}}` and `{{author}}` filled.
+- `{{trigger}}` comes from `labels.triggers.private`.
+- `<senses>` carries `senses.privateChat`.
+- On a server turn, when `features.privateMessages` is on, `<senses>` carries `senses.privateAware` instead (the
+  rule about never repeating anything from private).
+- The interlocutor's profile is `mergeProfiles(publicProfile, privateProfile)` from `src/behavior/private.js`.
+  Other profiles (`askedAbout`, participants) stay public-only.
+- No ignore chance, no follow-up window, no eavesdrop, no address classifier.
+- One attention applies: a DM that arrives while the persona is busy elsewhere is held as a pending ping.
+
+### The private layer
+
+`data/guilds/<guildId>/private/<userId>.json` stores what the persona learned from one member in DMs. It holds its own
+`relationship`, `interests`, `details`, `episodes` and `affinity` (score starting at 0). It is never shown to any
+other conversation, never written by a server batch, and never mixed into the public profile on disk.
+
+In a DM, the persona sees the public and private data merged (a view, never stored): interests are unioned by topic
+(the private note wins on a shared topic), details are concatenated, episodes are sorted by date, `relationship` is
+the public text followed by the private text as a second paragraph.
+
+### Affinity in a DM
+
+The public score changes only from server batches. The private layer has its own score starting at 0, changed only by
+DM batches. In the DM the persona feels `clamp(public + private, -100, 100)`; on the server only the public score.
+The gate uses the public score alone.
+
+### Analyzer in private mode
+
+`analyzePrivate` builds a `memory.md` request with the same format and a `<private>` block
+(`labels.memory.privateNote`). `<existing_profiles>` contains ONLY the partner, rendered as the private profile
+(private details with ids, private interests, private episodes, the effective affinity view). `<public_profile>`
+shows the partner's public profile (read-only, via `renderProfile`). `<existing_guild>`, `<existing_lore>` appear as
+usual (read-only context). `<new_messages>` is headed by `labels.memory.privateChannel`.
+
+From the answer, only `users[<partnerId>]` is applied through the private store methods. `portrait` and `aliases`
+are ignored. `guild`, `channels`, `lore`, `self` and any other user ids are dropped and logged as counts.
+
+## Limit notices
+
+When a rail refuses a directly requested action (a mention, reply, name trigger, follow-up or private message), the
+bot posts one plain line from `labels.limits.notice` with `{limit}` (the config key), `{used}` and `{cap}` filled.
+Spontaneous turns that hit a rail stay silent. In dry-run the notice is logged and mirrored, not sent.
+
+The config keys that can appear as `{limit}`: `llm.maxRequestsPerDay`, `llm.maxRequestTokens`, `image.maxPerDay`,
+`image.maxPerUserPerDay`, `private.maxPerUserPerDay`, `private.maxPerOwnerPerDay`.
+
+Private DM caps post the notice once per person per day (tracked by `replies.noticedDay` in the private file).
+Image caps post the notice instead of the `drawFailed` follow-up turn (the senses line already told the persona;
+the notice is the technical marker for the requester). Video and web daily caps do not block a reply and keep their
+in-transcript states; no notice.

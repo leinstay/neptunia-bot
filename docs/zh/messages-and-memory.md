@@ -55,6 +55,16 @@
 
 分析器还会记录人们直接教给角色的东西 — 词语和表达、关于服务器的事实、关于行为方式的请求 — 作为服务器级的所学条目，始终出现在提示中。
 
+## 私有层
+
+当 `features.privateMessages` 开启时，通过门控（公会成员身份、已存储档案、公共好感度不低于 `private.minAffinity`、今日回复数未超限）的成员可以在 Discord 私信中与角色交谈。角色不变，公共记忆不变；私信中说的话存储在每成员的私有层中。
+
+私有文件 `data/guilds/<guildId>/private/<userId>.json` 存储自己的 `relationship`、`interests`、`details`、`episodes`、`affinity`（初始分数 0）、每日回复计数器和观察缓冲区。不显示给其他对话，不由服务器批次写入，不在磁盘上混入公共档案。
+
+私信中角色看到公共和私有数据的合并：兴趣按主题合并（私有笔记优先），细节连接，回忆按日期排序。有效好感度为 `clamp(公共 + 私有, -100, 100)`。服务器上仅有公共分数。
+
+`/nep memory forget <user>` 同时删除公共档案和私有文件。`/nep memory wipe` 删除服务器的整个 `private/` 目录。`/nep private forget <user>` 仅删除私有文件，公共档案保留。
+
 ## 命令
 
 完整命令列表请参阅[命令](owner-commands.md)。与记忆最相关的命令：
@@ -65,8 +75,10 @@
 | `/nep memory channel` | 已存储的频道笔记和代码维护的数据 |
 | `/nep memory server` | 服务器级的习惯、内部梗、自述事实 |
 | `/nep memory refresh <user>` | 强制刷新某个成员的画像 |
-| `/nep memory forget <user>` | 完全删除一个已存储的档案 |
+| `/nep memory forget <user>` | 删除已存储的档案和私有记忆 |
 | `/nep memory affinity <user>` | 显示或设置态度 |
-| `/nep memory wipe` | 清除服务器的所有分析器记忆 |
+| `/nep memory wipe` | 清除服务器的所有分析器记忆（包括私有文件） |
+| `/nep private show <user>` | 显示成员的私有记忆 |
+| `/nep private forget <user>` | 仅删除私有文件；公共档案保留 |
 | `/nep lore add` | 添加或覆盖一个世界书条目 |
 | `/nep pause` / `/nep resume` | 停止活动并将记忆刷入磁盘，以便安全地手动编辑 |
