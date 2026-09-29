@@ -39,7 +39,7 @@ test('buildCommandTree: never emits default_member_permissions -- always visible
 test('buildCommandTree: top-level leaves (status, ping, reload, pause, resume, interject, initiate, draw, set, unset)', () => {
   const [command] = buildCommandTree('nep');
   const names = command.options.map((o) => o.name);
-  assert.deepEqual(names, ['status', 'ping', 'reload', 'pause', 'resume', 'interject', 'initiate', 'draw', 'set', 'unset', 'rule', 'memory', 'private', 'alias', 'lore', 'learned', 'model', 'warmup', 'access']);
+  assert.deepEqual(names, ['status', 'ping', 'reload', 'pause', 'resume', 'interject', 'initiate', 'draw', 'set', 'unset', 'rule', 'memory', 'private', 'alias', 'lore', 'learned', 'model', 'warmup', 'mentor', 'access']);
 
   const status = findOption(command.options, 'status');
   assert.equal(status.type, 1); // SUBCOMMAND
@@ -1414,4 +1414,125 @@ test('interaction handler: a failed draw is reported as an error text with no fi
   assert.equal(interaction.edits.length, 1);
   assert.match(interaction.edits[0].content, /Error: draw failed \(moderation, HTTP 400\)/);
   assert.equal(interaction.edits[0].files, undefined);
+});
+
+// ---------------------------------------------------------------------------
+// mentor: the owner-only group that measures the persona in a sandbox
+// ---------------------------------------------------------------------------
+
+const MENTOR_SUBCOMMANDS = ['add', 'cases', 'remove', 'run', 'check', 'stop', 'show', 'wrong', 'status'];
+
+test('buildCommandTree: mentor group (add/cases/remove/run/check/stop/show/wrong/status) with their options', () => {
+  const [command] = buildCommandTree('nep');
+  const mentor = findOption(command.options, 'mentor');
+  assert.equal(mentor.type, 2); // SUBCOMMAND_GROUP
+  assert.deepEqual(mentor.options.map((o) => o.name), MENTOR_SUBCOMMANDS);
+  for (const sub of mentor.options) assert.equal(sub.type, 1, sub.name); // SUBCOMMAND
+
+  const add = findOption(mentor.options, 'add');
+  assert.deepEqual(add.options.map((o) => o.name), ['text', 'target']);
+  const text = findOption(add.options, 'text');
+  assert.equal(text.type, 3); // STRING
+  assert.equal(text.required, true);
+  const target = findOption(add.options, 'target');
+  assert.equal(target.type, 3); // STRING
+  assert.equal(target.required, false);
+  assert.deepEqual(target.choices.map((c) => c.value), ['reply', 'memory']);
+
+  for (const name of ['remove', 'run', 'show', 'wrong']) {
+    const sub = findOption(mentor.options, name);
+    const id = findOption(sub.options, 'id');
+    assert.equal(id.type, 4, name); // INTEGER
+    assert.equal(id.required, true, name);
+    assert.equal(id.min_value, 1, name);
+  }
+  const wrong = findOption(mentor.options, 'wrong');
+  assert.deepEqual(wrong.options.map((o) => o.name), ['id', 'reason']);
+  const reason = findOption(wrong.options, 'reason');
+  assert.equal(reason.type, 3); // STRING
+  assert.equal(reason.required, true);
+
+  for (const name of ['cases', 'check', 'stop', 'status']) {
+    assert.equal(findOption(mentor.options, name).options, undefined, name);
+  }
+
+  const { keys, groups } = commandKeys();
+  assert.ok(groups.has('mentor'));
+  for (const name of MENTOR_SUBCOMMANDS) assert.ok(keys.has(`mentor.${name}`), name);
+});
+
+test('interaction handler: every mentor subcommand maps its options', async () => {
+  const admin = fakeAdmin();
+  const handler = createInteractionHandler({ hot: baseHot(), admin, getGuildId: () => 'g1' });
+  const cases = [
+    ['add', { text: 'answer a greeting briefly', target: 'memory' }, { text: 'answer a greeting briefly', target: 'memory' }],
+    ['add', { text: 'answer a greeting briefly' }, { text: 'answer a greeting briefly', target: undefined }],
+    ['cases', {}, {}],
+    ['remove', { id: 3 }, { id: 3 }],
+    ['run', { id: 2 }, { id: 2 }],
+    ['check', {}, {}],
+    ['stop', {}, {}],
+    ['show', { id: 4 }, { id: 4 }],
+    ['wrong', { id: 5, reason: 'the answer was fine' }, { id: 5, reason: 'the answer was fine' }],
+    ['status', {}, {}],
+  ];
+  for (const [i, [subcommand, optionValues, expected]] of cases.entries()) {
+    await handler(fakeInteraction({ group: 'mentor', subcommand, optionValues }));
+    assert.equal(admin.runCalls[i][0], `mentor.${subcommand}`);
+    assert.deepEqual(admin.runCalls[i][1], expected, subcommand);
+  }
+});
+
+test('interaction handler: mentor.run/check/show defer; the other mentor commands reply directly', async () => {
+  const admin = fakeAdmin({ runImpl: () => 'mentor result' });
+  const handler = createInteractionHandler({ hot: baseHot(), admin, getGuildId: () => 'g1' });
+  const slow = new Set(['run', 'check', 'show']);
+  for (const subcommand of MENTOR_SUBCOMMANDS) {
+    const interaction = fakeInteraction({ group: 'mentor', subcommand, optionValues: { id: 1, text: 'a case text', reason: 'why' } });
+    await handler(interaction);
+    assert.equal(interaction.deferred, slow.has(subcommand), subcommand);
+    if (slow.has(subcommand)) assert.equal(interaction.edits[0].content, 'mentor result', subcommand);
+    else assert.deepEqual(interaction.replies[0], { content: 'mentor result', ephemeral: true }, subcommand);
+  }
+});
+
+test('interaction handler: mentor.show edits the deferred reply with the card and the report file', async () => {
+  const attachment = Buffer.from('report', 'utf8');
+  const admin = fakeAdmin({ runImpl: () => ({ text: 'Mentor run: case 1', files: [{ attachment, name: 'mentor-case-1-7.txt' }] }) });
+  const handler = createInteractionHandler({ hot: baseHot(), admin, getGuildId: () => 'g1' });
+
+  const interaction = fakeInteraction({ group: 'mentor', subcommand: 'show', optionValues: { id: 1 } });
+  await handler(interaction);
+
+  assert.equal(interaction.edits[0].content, 'Mentor run: case 1');
+  assert.deepEqual(interaction.edits[0].files, [{ attachment, name: 'mentor-case-1-7.txt' }]);
+});
+
+test('interaction handler: /nep mentor stays owner-only even with a grant on it, its group or *', async () => {
+  const open = { everyone: true, roles: [], users: [] };
+  const access = { '*': open, mentor: open, ...Object.fromEntries(MENTOR_SUBCOMMANDS.map((name) => [`mentor.${name}`, open])) };
+  const admin = fakeAdmin({ owners: ['owner1'], access });
+  const handler = createInteractionHandler({ hot: baseHot(), admin, getGuildId: () => 'g1' });
+
+  for (const subcommand of MENTOR_SUBCOMMANDS) {
+    const interaction = fakeInteraction({ user: { id: 'helper1' }, group: 'mentor', subcommand, optionValues: { id: 1 } });
+    await handler(interaction);
+    assert.match(interaction.replies[0].content, /not allowed/i, subcommand);
+  }
+  assert.equal(admin.runCalls.length, 0);
+
+  await handler(fakeInteraction({ group: 'mentor', subcommand: 'status' }));
+  assert.equal(admin.runCalls.length, 1, 'the owner still runs it');
+});
+
+test('autocomplete: command-option choices never offer the owner-only mentor commands', async () => {
+  const admin = fakeAdmin();
+  const handler = createInteractionHandler({ hot: baseHot(), admin, getGuildId: () => 'g1' });
+
+  for (const [subcommand, value] of [['grant', 'ment'], ['revoke', 'ment'], ['grant', '']]) {
+    const interaction = fakeInteraction({ kind: 'autocomplete', group: 'access', subcommand, focused: { name: 'command', value } });
+    await handler(interaction);
+    const names = interaction.respondCalls[0].map((c) => c.name);
+    assert.ok(!names.some((name) => name === 'mentor' || name.startsWith('mentor.')), `${subcommand} "${value}"`);
+  }
 });

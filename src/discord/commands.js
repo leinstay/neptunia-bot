@@ -48,6 +48,9 @@ const SLOW_COMMANDS = new Set([
   'memory.refresh',
   'private.purge',
   'draw',
+  'mentor.run',
+  'mentor.check',
+  'mentor.show',
 ]);
 
 const DISABLED_MESSAGE = 'Owner commands are disabled (features.adminCommands is off).';
@@ -472,6 +475,62 @@ export function buildCommandTree(commandName) {
         },
         {
           type: SUBCOMMAND_GROUP,
+          name: 'mentor',
+          description: 'The mentor: cases of wanted behaviour, measured in a sandbox, reported to the admin channel.',
+          options: [
+            {
+              type: SUBCOMMAND,
+              name: 'add',
+              description: 'Add a case: a behaviour you want from the persona, in your words.',
+              options: [
+                { type: STRING, name: 'text', description: 'The behaviour, in your words (10 to 1000 characters).', required: true },
+                {
+                  type: STRING,
+                  name: 'target',
+                  description: 'What the case tests (default: reply).',
+                  required: false,
+                  choices: [
+                    { name: 'reply', value: 'reply' },
+                    { name: 'memory', value: 'memory' },
+                  ],
+                },
+              ],
+            },
+            { type: SUBCOMMAND, name: 'cases', description: 'List the active cases with their state and last score.' },
+            {
+              type: SUBCOMMAND,
+              name: 'remove',
+              description: 'Retire a case; its runs and feedback are kept.',
+              options: [{ type: INTEGER, name: 'id', description: 'Case id (the number in /nep mentor cases).', required: true, min_value: 1 }],
+            },
+            {
+              type: SUBCOMMAND,
+              name: 'run',
+              description: 'Measure one case now; the report comes to the admin channel. Spends balance.',
+              options: [{ type: INTEGER, name: 'id', description: 'Case id (the number in /nep mentor cases).', required: true, min_value: 1 }],
+            },
+            { type: SUBCOMMAND, name: 'check', description: 'Replay the stored situations of every case with a run. Spends balance.' },
+            { type: SUBCOMMAND, name: 'stop', description: 'Stop the mentor run in flight, including the model call in progress.' },
+            {
+              type: SUBCOMMAND,
+              name: 'show',
+              description: 'Show the last run of a case: the card and the full report file.',
+              options: [{ type: INTEGER, name: 'id', description: 'Case id (the number in /nep mentor cases).', required: true, min_value: 1 }],
+            },
+            {
+              type: SUBCOMMAND,
+              name: 'wrong',
+              description: 'Tell the mentor it judged a case wrongly; later runs read it as feedback.',
+              options: [
+                { type: INTEGER, name: 'id', description: 'Case id (the number in /nep mentor cases).', required: true, min_value: 1 },
+                { type: STRING, name: 'reason', description: 'Why the verdict was wrong (3 to 500 characters).', required: true },
+              ],
+            },
+            { type: SUBCOMMAND, name: 'status', description: 'Switch, model, tokens today, cases by state and the run in flight.' },
+          ],
+        },
+        {
+          type: SUBCOMMAND_GROUP,
           name: 'access',
           description: 'Who besides owners may run which commands.',
           options: [
@@ -646,6 +705,15 @@ const OPTION_MAPPERS = {
   'warmup.server': () => ({}),
   'warmup.status': () => ({}),
   'warmup.reset': () => ({}),
+  'mentor.add': (options) => ({ text: options.getString('text', true), target: options.getString('target') ?? undefined }),
+  'mentor.cases': () => ({}),
+  'mentor.remove': (options) => ({ id: options.getInteger('id', true) }),
+  'mentor.run': (options) => ({ id: options.getInteger('id', true) }),
+  'mentor.check': () => ({}),
+  'mentor.stop': () => ({}),
+  'mentor.show': (options) => ({ id: options.getInteger('id', true) }),
+  'mentor.wrong': (options) => ({ id: options.getInteger('id', true), reason: options.getString('reason', true) }),
+  'mentor.status': () => ({}),
   'access.grant': (options) => ({
     command: options.getString('command', true),
     roleId: options.getRole('role')?.id,

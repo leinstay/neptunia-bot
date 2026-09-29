@@ -9,12 +9,12 @@
 // one commands.js actually knows about is the caller's job (see
 // src/discord/commands.js#commandKeys), not this module's — it only shapes
 // and reads the grants it is given. The groups in OWNER_ONLY_GROUPS (private
-// memory) are never opened by any grant, the `*` wildcard included.
+// memory, the mentor) are never opened by any grant, the `*` wildcard included.
 
 /** Command groups only an owner may ever run: no `bot.access` grant opens them. */
-export const OWNER_ONLY_GROUPS = Object.freeze(['private']);
+export const OWNER_ONLY_GROUPS = Object.freeze(['private', 'mentor']);
 
-/** True when `key` is an owner-only group (`private`) or a command in one (`private.show`).
+/** True when `key` is an owner-only group (`private`, `mentor`) or a command in one (`private.show`).
  * @param {unknown} key
  * @returns {boolean}
  */

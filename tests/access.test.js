@@ -101,14 +101,18 @@ test('isAllowed: a malformed entry (not an object) on a matching key is skipped,
   assert.equal(allowed, true);
 });
 
-test('isOwnerOnly: the private group and every key in it, nothing else', () => {
-  assert.deepEqual(OWNER_ONLY_GROUPS, ['private']);
+test('isOwnerOnly: the private and mentor groups and every key in them, nothing else', () => {
+  assert.deepEqual(OWNER_ONLY_GROUPS, ['private', 'mentor']);
   assert.equal(isOwnerOnly('private'), true);
   assert.equal(isOwnerOnly('private.show'), true);
   assert.equal(isOwnerOnly('private.forget'), true);
   assert.equal(isOwnerOnly('private.purge'), true);
+  assert.equal(isOwnerOnly('mentor'), true);
+  assert.equal(isOwnerOnly('mentor.run'), true);
+  assert.equal(isOwnerOnly('mentor.status'), true);
   assert.equal(isOwnerOnly('memory.show'), false);
   assert.equal(isOwnerOnly('privateer'), false);
+  assert.equal(isOwnerOnly('mentors'), false);
   assert.equal(isOwnerOnly('*'), false);
   assert.equal(isOwnerOnly(undefined), false);
 });
@@ -122,6 +126,16 @@ test('isAllowed: private commands refuse every non-owner, whatever bot.access gr
   }
   // the same wildcard still opens everything else
   assert.equal(isAllowed({ commandKey: 'memory.show', userId: '2', roleIds: [], owners: ['1'], access }), true);
+});
+
+test('access: the mentor group is owner-only even with a * grant', () => {
+  const everyone = { everyone: true, roles: ['staff'], users: ['2'] };
+  const keys = ['mentor.add', 'mentor.cases', 'mentor.remove', 'mentor.run', 'mentor.check', 'mentor.stop', 'mentor.show', 'mentor.wrong', 'mentor.status'];
+  const access = { '*': everyone, mentor: everyone, ...Object.fromEntries(keys.map((key) => [key, everyone])) };
+  for (const commandKey of [...keys, 'mentor']) {
+    assert.equal(isAllowed({ commandKey, userId: '2', roleIds: ['staff'], owners: ['1'], access }), false, commandKey);
+    assert.equal(isAllowed({ commandKey, userId: '1', roleIds: [], owners: ['1'], access: {} }), true, `${commandKey}: owner`);
+  }
 });
 
 // ---------------------------------------------------------------------------

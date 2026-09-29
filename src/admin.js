@@ -16,7 +16,8 @@
 // This module knows nothing about discord.js: `createAdmin(deps).run` takes
 // a `commandKey` (e.g. `'memory.forget'`), a plain `args` object and a
 // `context` (`{ guildId, channelId, userId }`) and returns the reply text
-// (or, for `/nep draw`, `{ text, files }` with the picture), or throws an
+// (or, for `/nep draw` and `/nep mentor show`, `{ text, files }` with the
+// picture or the report file), or throws an
 // `Error` with an operator-facing message on bad input. Mapping a
 // discord.js interaction's options onto `args` is src/discord/commands.js's
 // job. Everything below the pure-function section is thin I/O glued around
@@ -36,11 +37,12 @@ import { classifierTextModel, classifierMediaModel, classifierVideoModel } from 
 import { buildDrawPrompt } from './behavior/prompt.js';
 import { effectiveAffinity } from './behavior/private.js';
 import { ImageCapError, ImageGenError, UnsupportedImageModelError, familyOf as imageFamilyOf } from './llm/images.js';
+import { renderCard, renderFile } from './mentor/report.js';
 import { log } from './log.js';
 
 /** `/nep access grant/revoke`'s command keys that ONLY read — everything else (including every
  * group and `*`) is treated as opening a write command, and gets the "changes memory or config"
- * note in the grant reply. The owner-only `private` commands are never grantable at all
+ * note in the grant reply. The owner-only `private` and `mentor` commands are never grantable at all
  * (src/discord/access.js#isOwnerOnly), so they are not listed here. Kept in sync by hand with the read-only command list in AGENTS/README;
  * a new read-only command is simply added here. */
 const READ_ONLY_ACCESS_KEYS = new Set([
@@ -58,6 +60,9 @@ const READ_ONLY_ACCESS_KEYS = new Set([
   'warmup.people',
   'access.list',
 ]);
+
+/** How `/nep access grant` names each owner-only group (src/discord/access.js#OWNER_ONLY_GROUPS) when it refuses it. */
+const OWNER_ONLY_NAMES = { private: 'private memory', mentor: 'the mentor' };
 
 const FORBIDDEN_SEGMENTS = new Set(['__proto__', 'constructor', 'prototype']);
 
@@ -525,6 +530,13 @@ function imageFileName(mediaType) {
  *   Absent -> `/nep draw` reports it is not available and `/nep status` has no image lines.
  * `imageFetcher` — from createImageFetcher() (src/discord/fetch-image.js), optional: downloads the
  *   bot's avatar as the reference of a `/nep draw self` picture. Absent -> no reference is sent.
+ * `mentor` — from createMentor() (src/mentor/mentor.js), optional: `run`/`check` (started by
+ *   `/nep mentor run|check`, never awaited to the end), `stop`, `status`. Absent -> every `mentor.*`
+ *   command reports it is not available.
+ * `mentorCases` — from createCaseStore() (src/mentor/cases.js), optional: the cases, their runs and
+ *   the owner's feedback. Absent -> every `mentor.*` command reports it is not available.
+ * `mentorBudget` — from createMentorBudget() (src/mentor/budget.js), optional: `snapshot()` for the
+ *   token line of `/nep mentor status`. Absent -> that line shows `-`.
  *
  * `run(commandKey, args, context)` throws a plain `Error` (operator-facing
  * message) on bad input; it never touches discord.js.
@@ -546,6 +558,9 @@ export function createAdmin({
   lookup,
   images,
   imageFetcher,
+  mentor,
+  mentorCases,
+  mentorBudget,
 }) {
   function isOwner(userId) {
     const owners = hot.config?.bot?.owners ?? [];
@@ -571,7 +586,8 @@ export function createAdmin({
    * alias.add, alias.remove, memory.forget, private.forget, private.purge, memory.wipe, memory.affinity (when
    * setting a score), memory.refresh, lore.add, lore.remove, learned.add,
    * learned.remove, warmup.run, warmup.users, warmup.channels, warmup.server,
-   * warmup.reset and draw (it counts against the image rail in state.json).
+   * warmup.reset, draw (it counts against the image rail in state.json) and
+   * mentor.add, mentor.remove, mentor.run, mentor.check, mentor.wrong.
    */
   function assertNotPaused() {
     if (store.state.data.paused) {
@@ -2176,6 +2192,125 @@ async function cmdPing(args) {
   }
 
   // ---------------------------------------------------------------------
+  // mentor: the manual mentor (src/mentor/*). Cases go through
+  // `mentorCases`, runs through `mentor`, numbers through `mentorBudget`.
+  // `cases`/`show`/`status`/`stop` only read or abort, so they are never
+  // guarded by assertNotPaused(); the rest write under data/ and are.
+  // ---------------------------------------------------------------------
+
+  const MENTOR_CASE_TEXT_SHOWN = 80;
+  const MENTOR_STATES = ['new', 'passing', 'failing', 'retired'];
+
+  /** The served guild, or an Error before it resolves. */
+  function mentorGuildId(context) {
+    const guildId = resolvedGuildId(context);
+    if (!guildId) throw new Error('no guild resolved yet');
+    return guildId;
+  }
+
+  /** The `id` option as a positive integer, or an Error. */
+  function mentorCaseId(args) {
+    const id = Number(args?.id);
+    if (!Number.isInteger(id) || id < 1) throw new Error('a case id is required');
+    return id;
+  }
+
+  function cmdMentorAdd(args, context) {
+    assertNotPaused();
+    const guildId = mentorGuildId(context);
+    const item = mentorCases.add(guildId, { text: args?.text, target: args?.target ?? 'reply' });
+    return `case ${item.id} added (${item.target})`;
+  }
+
+  /** One line per active case: `<id> [<state>] <target> <score or -> <text clipped to 80>`. */
+  function cmdMentorCases(_args, context) {
+    const list = mentorCases.list(mentorGuildId(context));
+    if (list.length === 0) return 'no cases yet';
+    return list
+      .map((item) => {
+        const score = typeof item.lastScore === 'number' && Number.isFinite(item.lastScore) ? String(item.lastScore) : '-';
+        const text = String(item.text ?? '').replace(/\s+/g, ' ');
+        const shown = text.length > MENTOR_CASE_TEXT_SHOWN ? `${text.slice(0, MENTOR_CASE_TEXT_SHOWN - 3)}...` : text;
+        return `${item.id} [${item.state}] ${item.target} ${score} ${shown}`;
+      })
+      .join('\n');
+  }
+
+  function cmdMentorRemove(args, context) {
+    assertNotPaused();
+    const id = mentorCaseId(args);
+    const item = mentorCases.retire(mentorGuildId(context), id);
+    return `case ${item.id} retired`;
+  }
+
+  /** Starts the run and answers at once: the mentor posts its report to the admin channel when
+   * `done` settles, far beyond an interaction's lifetime. A guard of the mentor rejects here. */
+  async function cmdMentorRun(args) {
+    assertNotPaused();
+    const id = mentorCaseId(args);
+    await mentor.run(id);
+    return `run started for case ${id}; the report will come to the admin channel`;
+  }
+
+  /** Starts a check of every case with a run; answers at once, like `run`. */
+  async function cmdMentorCheck() {
+    assertNotPaused();
+    const { cases } = await mentor.check();
+    return `check started for ${cases} cases`;
+  }
+
+  /** Aborts the run in flight; reads no `data/` itself, so not guarded by assertNotPaused(). */
+  function cmdMentorStop() {
+    return mentor.stop().ok ? 'stopping' : 'nothing is running';
+  }
+
+  /** The case's last run (a `check` run the same way): the card, with the full report attached. */
+  function cmdMentorShow(args, context) {
+    const guildId = mentorGuildId(context);
+    const id = mentorCaseId(args);
+    if (!mentorCases.get(guildId, id)) throw new Error(`unknown case: ${id}`);
+    const run = mentorCases.lastRun(guildId, id);
+    if (!run) throw new Error(`case ${id} has no run yet`);
+    const file = renderFile(run);
+    return { text: renderCard(run), files: [{ attachment: Buffer.from(file.text, 'utf8'), name: file.name }] };
+  }
+
+  /** The owner says the mentor judged a case wrongly; the case store refuses a case without a run. */
+  function cmdMentorWrong(args, context) {
+    assertNotPaused();
+    const id = mentorCaseId(args);
+    mentorCases.addFeedback(mentorGuildId(context), { caseId: id, reason: args?.reason });
+    return `noted for case ${id}`;
+  }
+
+  /** Works with the mentor off or without a model -- it is how the owner sees why nothing runs. */
+  function cmdMentorStatus(_args, context) {
+    const lines = [
+      `enabled: ${hot.config.features?.mentor === true ? 'yes' : 'no'}`,
+      `model: ${hot.config.mentor?.model || '-'}`,
+    ];
+    if (mentorBudget) {
+      const { used, cap, left } = mentorBudget.snapshot();
+      lines.push(`tokens today: ${used} / ${cap} (${left} left)`);
+    } else {
+      lines.push('tokens today: -');
+    }
+    const guildId = resolvedGuildId(context);
+    if (guildId) {
+      const counts = Object.fromEntries(MENTOR_STATES.map((state) => [state, 0]));
+      for (const item of mentorCases.list(guildId, { includeRetired: true })) {
+        if (Object.hasOwn(counts, item.state)) counts[item.state] += 1;
+      }
+      lines.push(`cases: ${MENTOR_STATES.map((state) => `${counts[state]} ${state}`).join(', ')}`);
+    } else {
+      lines.push('cases: -');
+    }
+    const s = mentor.status();
+    lines.push(s?.running ? `running: ${s.kind} case ${s.caseId}, ${s.phase}, ${s.tokens} tokens so far` : 'running: no');
+    return lines.join('\n');
+  }
+
+  // ---------------------------------------------------------------------
   // access: who besides owners may run which commands (src/discord/access.js)
   // ---------------------------------------------------------------------
 
@@ -2239,7 +2374,10 @@ async function cmdPing(args) {
     const key = String(args?.command ?? '').trim();
     if (!key) throw new Error('a command key is required');
     if (!isKnownAccessKey(key)) throw new Error(`unknown command key: ${key}`);
-    if (isOwnerOnly(key)) throw new Error(`private memory is owner-only and cannot be granted: ${key}`);
+    if (isOwnerOnly(key)) {
+      const group = key.split('.')[0];
+      throw new Error(`${OWNER_ONLY_NAMES[group] ?? group} is owner-only and cannot be granted: ${key}`);
+    }
 
     const target = accessTargetArgs(args);
     const what = target.kind === 'role' ? { roleId: target.id } : target.kind === 'user' ? { userId: target.id } : { everyone: true };
@@ -2297,6 +2435,14 @@ async function cmdPing(args) {
     };
   }
 
+  /** Wraps a `mentor.*` handler so all of them report the same thing when a dependency is absent. */
+  function withMentor(fn) {
+    return (args, context) => {
+      if (!mentor || !mentorCases) return 'the mentor is not available';
+      return fn(args, context);
+    };
+  }
+
   const commands = {
     status: () => cmdStatus(),
     ping: (args) => cmdPing(args),
@@ -2340,6 +2486,15 @@ async function cmdPing(args) {
     'warmup.server': withWarmup((args, context) => cmdWarmupServer(args, context)),
     'warmup.status': withWarmup((args, context) => cmdWarmupStatus(args, context)),
     'warmup.reset': withWarmup(() => cmdWarmupReset()),
+    'mentor.add': withMentor((args, context) => cmdMentorAdd(args, context)),
+    'mentor.cases': withMentor((args, context) => cmdMentorCases(args, context)),
+    'mentor.remove': withMentor((args, context) => cmdMentorRemove(args, context)),
+    'mentor.run': withMentor((args) => cmdMentorRun(args)),
+    'mentor.check': withMentor(() => cmdMentorCheck()),
+    'mentor.stop': withMentor(() => cmdMentorStop()),
+    'mentor.show': withMentor((args, context) => cmdMentorShow(args, context)),
+    'mentor.wrong': withMentor((args, context) => cmdMentorWrong(args, context)),
+    'mentor.status': withMentor((args, context) => cmdMentorStatus(args, context)),
     'access.grant': (args) => cmdAccessGrant(args),
     'access.revoke': (args) => cmdAccessRevoke(args),
     'access.list': () => cmdAccessList(),

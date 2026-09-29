@@ -26,8 +26,12 @@ import { createPageFetcher } from './web/fetch-page.js';
 import { createBraveSearch } from './web/brave.js';
 import { createLookup } from './web/lookup.js';
 import { createAdmin } from './admin.js';
+import { createMentor } from './mentor/mentor.js';
+import { createCaseStore } from './mentor/cases.js';
+import { createMentorBudget } from './mentor/budget.js';
 import { createTagHistory, deprecatedModelKeys } from './behavior/mention.js';
 import { createMessageHandler } from './discord/events.js';
+import { fetchHistoryWindow } from './discord/collect.js';
 import { resolveGuild } from './discord/guild.js';
 import { isValidCommandName, registerCommands, createInteractionHandler } from './discord/commands.js';
 
@@ -82,7 +86,8 @@ if (!isValidCommandName(hot.config.bot.commandName)) {
 // say so once, key names only, never a value.
 for (const { key, use } of deprecatedModelKeys(hot.config)) log.warn('config: deprecated model key ignored', { key, use });
 
-const store = createStore({ dataDir: path.join(ROOT_DIR, 'data') });
+const dataDir = path.join(ROOT_DIR, 'data');
+const store = createStore({ dataDir });
 
 const calibrator = createCalibrator(store.state.data.calibration);
 const llm = createLlm({ apiKey: openrouterKey, getConfig: () => hot.config, calibrator, state: store.state });
@@ -147,6 +152,23 @@ const memory = createMemoryUpdater({
 });
 const tagHistory = createTagHistory();
 
+// The mentor (features.mentor): a manual sub-process started only by /nep mentor run|check,
+// never by a timer. Its cases live under data/, its daily token budget in state.json.
+const mentorCases = createCaseStore({ dataDir });
+const mentorBudget = createMentorBudget({ state: store.state, getConfig: () => hot.config });
+const mentor = createMentor({
+  hot,
+  store,
+  llm,
+  client,
+  cases: mentorCases,
+  budget: mentorBudget,
+  getGuildId,
+  // The persona as a turn names it; null until the client is ready.
+  getSelf: () => (client.user ? { id: client.user.id, name: getSelfName(getGuildId()) } : null),
+  fetchHistoryWindow,
+});
+
 const onMessage = createMessageHandler({
   hot,
   store,
@@ -192,6 +214,10 @@ const admin = createAdmin({
   images,
   // /nep draw self: the avatar reference, fetched the same way a turn fetches it.
   imageFetcher,
+  // /nep mentor: cases, runs, the owner's feedback and the mentor's own token budget.
+  mentor,
+  mentorCases,
+  mentorBudget,
 });
 const onInteraction = createInteractionHandler({ hot, admin, getGuildId });
 

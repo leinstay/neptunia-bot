@@ -20,6 +20,9 @@ import { createMemoryUpdater } from '../src/memory/update.js';
 import { createSpontaneous } from '../src/behavior/spontaneous.js';
 import { buildDrawPrompt } from '../src/behavior/prompt.js';
 import { familyOf, ImageCapError, ImageGenError } from '../src/llm/images.js';
+import { createCaseStore } from '../src/mentor/cases.js';
+import { createMentorBudget } from '../src/mentor/budget.js';
+import { renderCard, renderFile } from '../src/mentor/report.js';
 import { labels } from './fixtures/labels.js';
 
 // ---------------------------------------------------------------------------
@@ -358,6 +361,9 @@ function makeAdmin(rootDir, extra = {}) {
     lookup: extra.lookup,
     images: extra.images,
     imageFetcher: extra.imageFetcher,
+    mentor: extra.mentor,
+    mentorCases: extra.mentorCases,
+    mentorBudget: extra.mentorBudget,
   });
   return { admin, hot, store };
 }
@@ -4480,4 +4486,319 @@ test('run: model.show lists the image model, flagging an unsupported family', as
 
   hot.config.image.model = 'someone/else-model';
   assert.ok((await admin.run('model.show', {}, {})).split('\n').includes('image: someone/else-model (unsupported family)'));
+});
+
+// ---------------------------------------------------------------------------
+// mentor: the owner's interface to the manual mentor (src/mentor/*)
+// ---------------------------------------------------------------------------
+
+const MENTOR_NOW = Date.parse('2026-09-30T12:00:00.000Z');
+
+/** A fake mentor: `run`/`check` resolve at once with a `done` that never settles, so a handler
+ * that awaited it would never finish. */
+function fakeMentor({ run, check, status, stopOk = false } = {}) {
+  const calls = [];
+  return {
+    calls,
+    async run(caseId) {
+      calls.push(['run', caseId]);
+      if (run) return run(caseId);
+      return { started: true, done: new Promise(() => {}) };
+    },
+    async check() {
+      calls.push(['check']);
+      if (check) return check();
+      return { started: true, cases: 2, done: new Promise(() => {}) };
+    },
+    stop() {
+      calls.push(['stop']);
+      return { ok: stopOk };
+    },
+    status() {
+      return status ? status() : { running: false };
+    },
+    isRunning: () => false,
+  };
+}
+
+/** An admin with a real case store on a temp dir, a real budget over the fake store's state and a fake mentor. */
+function makeMentorAdmin(extra = {}) {
+  const rootDir = makeRoot();
+  const hot = makeHot(rootDir);
+  hot.config.features = { mentor: true };
+  hot.config.mentor = { model: 'mentor/model-a', maxTokensPerDay: 1000 };
+  const store = makeStore();
+  const now = () => MENTOR_NOW;
+  const mentorCases = createCaseStore({ dataDir: path.join(rootDir, 'data'), now });
+  const mentorBudget = createMentorBudget({ state: store.state, getConfig: () => hot.config, now });
+  const mentor = extra.mentor ?? fakeMentor();
+  const { admin } = makeAdmin(rootDir, { hot, store, mentor, mentorCases, mentorBudget });
+  return { admin, hot, store, mentor, mentorCases, mentorBudget, rootDir };
+}
+
+/** A finished run as the mentor saves it, trimmed to what the report reads. */
+function sampleMentorRun(caseId, { passed = true, overall = 7, target = 'reply' } = {}) {
+  return {
+    caseId,
+    caseText: 'Answer a greeting with one short line.',
+    target,
+    kind: 'run',
+    startedAt: '2026-09-30T11:00:00.000Z',
+    finishedAt: '2026-09-30T11:05:00.000Z',
+    models: { mentor: 'mentor/model-a', talk: 'talk/model', analyzer: 'talk/model' },
+    reference: { profile: null, samples: 0 },
+    situations: [],
+    dropped: 0,
+    repeated: [],
+    medians: { human: overall, character: overall, rules: overall, goal: overall, overall },
+    passed,
+    reasons: passed ? [] : ['human below the bar'],
+    tokens: { spent: 120, left: 880 },
+  };
+}
+
+const MENTOR_KEYS = ['mentor.add', 'mentor.cases', 'mentor.remove', 'mentor.run', 'mentor.check', 'mentor.stop', 'mentor.show', 'mentor.wrong', 'mentor.status'];
+const MENTOR_ARGS = { text: 'Answer a greeting with one short line.', id: 1, reason: 'it was fine' };
+
+test('run: every mentor command replies "the mentor is not available" without a mentor or a case store', async () => {
+  const rootDir = makeRoot();
+  const mentorCases = createCaseStore({ dataDir: path.join(rootDir, 'data'), now: () => MENTOR_NOW });
+  const { admin: noMentor } = makeAdmin(rootDir, { mentorCases });
+  const { admin: noCases } = makeAdmin(rootDir, { mentor: fakeMentor() });
+  for (const key of MENTOR_KEYS) {
+    assert.equal(await noMentor.run(key, MENTOR_ARGS, { guildId: 'g1' }), 'the mentor is not available', key);
+    assert.equal(await noCases.run(key, MENTOR_ARGS, { guildId: 'g1' }), 'the mentor is not available', key);
+  }
+  assert.equal(fs.existsSync(path.join(rootDir, 'data')), false, 'nothing was written');
+});
+
+test('run: mentor.add stores a case and replies with its id and target, reply by default', async () => {
+  const { admin, mentorCases } = makeMentorAdmin();
+
+  assert.equal(await admin.run('mentor.add', { text: 'Answer a greeting with one short line.' }, { guildId: 'g1' }), 'case 1 added (reply)');
+  assert.equal(await admin.run('mentor.add', { text: 'Remember the pet named Héloïse.', target: 'memory' }, { guildId: 'g1' }), 'case 2 added (memory)');
+
+  const stored = mentorCases.list('g1');
+  assert.deepEqual(stored.map((c) => [c.id, c.target, c.state]), [[1, 'reply', 'new'], [2, 'memory', 'new']]);
+  assert.equal(stored[1].text, 'Remember the pet named Héloïse.');
+});
+
+test('run: mentor.add passes the case store refusal through as the error', async () => {
+  const { admin, mentorCases } = makeMentorAdmin();
+  await assert.rejects(() => admin.run('mentor.add', { text: 'short' }, { guildId: 'g1' }), /case text must be 10 to 1000 characters/);
+  assert.deepEqual(mentorCases.list('g1'), []);
+});
+
+test('run: mentor.cases says so when there is no case', async () => {
+  const { admin } = makeMentorAdmin();
+  assert.equal(await admin.run('mentor.cases', {}, { guildId: 'g1' }), 'no cases yet');
+});
+
+test('run: mentor.cases lists the active cases, one line each, with the last score or - and the text clipped to 80', async () => {
+  const { admin, mentorCases } = makeMentorAdmin();
+  const long = `Keep replies short in the evening; ${'every message stays under a dozen words '.repeat(3)}`.trim();
+  mentorCases.add('g1', { text: long, target: 'reply' });
+  mentorCases.add('g1', { text: 'Remember the pet named Héloïse.', target: 'memory' });
+  mentorCases.add('g1', { text: 'A retired case that is not listed.', target: 'reply' });
+  mentorCases.saveRun('g1', sampleMentorRun(2, { passed: true, overall: 7, target: 'memory' }));
+  mentorCases.retire('g1', 3);
+
+  const lines = (await admin.run('mentor.cases', {}, { guildId: 'g1' })).split('\n');
+  assert.deepEqual(lines, [`1 [new] reply - ${long.slice(0, 77)}...`, '2 [passing] memory 7 Remember the pet named Héloïse.']);
+});
+
+test('run: mentor.remove retires a case; an unknown id is refused', async () => {
+  const { admin, mentorCases } = makeMentorAdmin();
+  mentorCases.add('g1', { text: 'Answer a greeting with one short line.', target: 'reply' });
+
+  assert.equal(await admin.run('mentor.remove', { id: 1 }, { guildId: 'g1' }), 'case 1 retired');
+  assert.equal(mentorCases.get('g1', 1).state, 'retired');
+  await assert.rejects(() => admin.run('mentor.remove', { id: 9 }, { guildId: 'g1' }), /unknown case: 9/);
+});
+
+test('run: mentor.run starts the run and replies at once, without waiting for it to finish', async () => {
+  const { admin, mentor } = makeMentorAdmin();
+  const reply = await admin.run('mentor.run', { id: 3 }, { guildId: 'g1' });
+  assert.equal(reply, 'run started for case 3; the report will come to the admin channel');
+  assert.deepEqual(mentor.calls, [['run', 3]]);
+});
+
+test('run: mentor.run turns a refusal of the mentor into the error', async () => {
+  const mentor = fakeMentor({
+    run: async () => {
+      throw new Error('the mentor is not enabled (features.mentor)');
+    },
+  });
+  const { admin } = makeMentorAdmin({ mentor });
+  await assert.rejects(() => admin.run('mentor.run', { id: 1 }, { guildId: 'g1' }), /the mentor is not enabled \(features\.mentor\)/);
+});
+
+test('run: mentor.check replies with the number of cases it checks', async () => {
+  const { admin, mentor } = makeMentorAdmin();
+  assert.equal(await admin.run('mentor.check', {}, { guildId: 'g1' }), 'check started for 2 cases');
+  assert.deepEqual(mentor.calls, [['check']]);
+});
+
+test('run: mentor.check turns a refusal of the mentor into the error', async () => {
+  const mentor = fakeMentor({
+    check: async () => {
+      throw new Error('no case has a run to check');
+    },
+  });
+  const { admin } = makeMentorAdmin({ mentor });
+  await assert.rejects(() => admin.run('mentor.check', {}, { guildId: 'g1' }), /no case has a run to check/);
+});
+
+test('run: mentor.stop replies "stopping" with a run in flight and "nothing is running" without', async () => {
+  const { admin: idle } = makeMentorAdmin();
+  assert.equal(await idle.run('mentor.stop', {}, { guildId: 'g1' }), 'nothing is running');
+
+  const { admin: busy, mentor } = makeMentorAdmin({ mentor: fakeMentor({ stopOk: true }) });
+  assert.equal(await busy.run('mentor.stop', {}, { guildId: 'g1' }), 'stopping');
+  assert.deepEqual(mentor.calls, [['stop']]);
+});
+
+test('mentor.show: replies with the file attached', async () => {
+  const { admin, mentorCases } = makeMentorAdmin();
+  mentorCases.add('g1', { text: 'Answer a greeting with one short line.', target: 'reply' });
+  mentorCases.saveRun('g1', sampleMentorRun(1, { passed: false, overall: 4 }));
+  const run = mentorCases.lastRun('g1', 1);
+  const file = renderFile(run);
+
+  const reply = await admin.run('mentor.show', { id: 1 }, { guildId: 'g1' });
+
+  assert.equal(reply.text, renderCard(run));
+  assert.equal(reply.files.length, 1);
+  assert.equal(reply.files[0].name, file.name);
+  assert.ok(Buffer.isBuffer(reply.files[0].attachment));
+  assert.equal(reply.files[0].attachment.toString('utf8'), file.text);
+});
+
+test('mentor.show: a check run is shown the same way', async () => {
+  const { admin, mentorCases } = makeMentorAdmin();
+  mentorCases.add('g1', { text: 'Answer a greeting with one short line.', target: 'reply' });
+  mentorCases.saveRun('g1', { ...sampleMentorRun(1), kind: 'check' });
+  const run = mentorCases.lastRun('g1', 1);
+
+  const reply = await admin.run('mentor.show', { id: 1 }, { guildId: 'g1' });
+  assert.equal(reply.text, renderCard(run));
+  assert.match(reply.text, /^Mentor check: case 1/);
+  assert.equal(reply.files[0].name, renderFile(run).name);
+});
+
+test('mentor.show: a case without a run, or no case at all, is refused', async () => {
+  const { admin, mentorCases } = makeMentorAdmin();
+  mentorCases.add('g1', { text: 'Answer a greeting with one short line.', target: 'reply' });
+  await assert.rejects(() => admin.run('mentor.show', { id: 1 }, { guildId: 'g1' }), /case 1 has no run yet/);
+  await assert.rejects(() => admin.run('mentor.show', { id: 7 }, { guildId: 'g1' }), /unknown case: 7/);
+});
+
+test('run: mentor.wrong records the owner feedback on the last run', async () => {
+  const { admin, mentorCases } = makeMentorAdmin();
+  mentorCases.add('g1', { text: 'Answer a greeting with one short line.', target: 'reply' });
+  const saved = mentorCases.saveRun('g1', sampleMentorRun(1));
+
+  assert.equal(await admin.run('mentor.wrong', { id: 1, reason: 'the second answer was the natural one' }, { guildId: 'g1' }), 'noted for case 1');
+  const [entry] = mentorCases.recentFeedback('g1', 5);
+  assert.equal(entry.caseId, 1);
+  assert.equal(entry.runId, saved.id);
+  assert.equal(entry.reason, 'the second answer was the natural one');
+});
+
+test('mentor.wrong: a case without a run is refused', async () => {
+  const { admin, mentorCases } = makeMentorAdmin();
+  mentorCases.add('g1', { text: 'Answer a greeting with one short line.', target: 'reply' });
+  await assert.rejects(() => admin.run('mentor.wrong', { id: 1, reason: 'it was fine' }, { guildId: 'g1' }), /case 1 has no run yet/);
+  assert.deepEqual(mentorCases.recentFeedback('g1', 5), []);
+});
+
+test('run: a mentor command that needs a case id refuses a missing one', async () => {
+  const { admin, mentor } = makeMentorAdmin();
+  for (const key of ['mentor.remove', 'mentor.run', 'mentor.show', 'mentor.wrong']) {
+    await assert.rejects(() => admin.run(key, { reason: 'it was fine' }, { guildId: 'g1' }), /a case id is required/, key);
+  }
+  assert.deepEqual(mentor.calls, []);
+});
+
+test('run: mentor.status reports the switch, model, tokens today, cases by state and no run', async () => {
+  const { admin, mentorCases, mentorBudget } = makeMentorAdmin();
+  for (const text of ['First case text here.', 'Second case text here.', 'Third case text here.', 'Fourth case text here.']) {
+    mentorCases.add('g1', { text, target: 'reply' });
+  }
+  mentorCases.saveRun('g1', sampleMentorRun(2, { passed: true }));
+  mentorCases.saveRun('g1', sampleMentorRun(3, { passed: false, overall: 3 }));
+  mentorCases.retire('g1', 4);
+  mentorBudget.charge({ prompt_tokens: 100, completion_tokens: 0 }, 0);
+
+  const lines = (await admin.run('mentor.status', {}, { guildId: 'g1' })).split('\n');
+  assert.deepEqual(lines, [
+    'enabled: yes',
+    'model: mentor/model-a',
+    'tokens today: 100 / 1000 (900 left)',
+    'cases: 1 new, 1 passing, 1 failing, 1 retired',
+    'running: no',
+  ]);
+});
+
+test('run: mentor.status shows the run in flight', async () => {
+  const mentor = fakeMentor({
+    status: () => ({ running: true, kind: 'check', caseId: 2, caseIds: [1, 2], phase: 'scores 1/5', startedAt: '2026-09-30T11:59:00.000Z', tokens: 340, stopping: false }),
+  });
+  const { admin } = makeMentorAdmin({ mentor });
+  const lines = (await admin.run('mentor.status', {}, { guildId: 'g1' })).split('\n');
+  assert.equal(lines.at(-1), 'running: check case 2, scores 1/5, 340 tokens so far');
+});
+
+test('run: mentor.status works with the mentor disabled, no model set, and while paused', async () => {
+  const { admin, hot, store } = makeMentorAdmin();
+  hot.config.features = { mentor: false };
+  delete hot.config.mentor.model;
+  store.state.data.paused = true;
+
+  const lines = (await admin.run('mentor.status', {}, { guildId: 'g1' })).split('\n');
+  assert.equal(lines[0], 'enabled: no');
+  assert.equal(lines[1], 'model: -');
+  assert.equal(lines[2], 'tokens today: 0 / 1000 (1000 left)');
+  assert.equal(lines[3], 'cases: 0 new, 0 passing, 0 failing, 0 retired');
+});
+
+test('run: mentor add/remove/run/check/wrong are refused while paused; cases/show/status/stop are not', async () => {
+  const { admin, mentor, mentorCases, store } = makeMentorAdmin();
+  mentorCases.add('g1', { text: 'Answer a greeting with one short line.', target: 'reply' });
+  mentorCases.saveRun('g1', sampleMentorRun(1));
+  store.state.data.paused = true;
+
+  for (const key of ['mentor.add', 'mentor.remove', 'mentor.run', 'mentor.check', 'mentor.wrong']) {
+    await assert.rejects(() => admin.run(key, MENTOR_ARGS, { guildId: 'g1' }), /paused.*resume/i, key);
+  }
+  assert.deepEqual(mentor.calls, [], 'the mentor is never started while paused');
+  assert.equal(mentorCases.list('g1').length, 1);
+  assert.equal(mentorCases.get('g1', 1).state, 'passing');
+  assert.deepEqual(mentorCases.recentFeedback('g1', 5), []);
+
+  for (const key of ['mentor.cases', 'mentor.show', 'mentor.status', 'mentor.stop']) {
+    await assert.doesNotReject(() => admin.run(key, MENTOR_ARGS, { guildId: 'g1' }), key);
+  }
+});
+
+test('run: access.grant refuses the mentor group and its commands (owner-only), writing nothing', async () => {
+  const rootDir = makeRoot();
+  const { admin } = makeAdmin(rootDir);
+
+  for (const command of ['mentor', ...MENTOR_KEYS]) {
+    await assert.rejects(() => admin.run('access.grant', { command }, {}), /the mentor is owner-only/, command);
+    await assert.rejects(() => admin.run('access.grant', { command, roleId: '1' }, {}), /the mentor is owner-only/, command);
+    await assert.rejects(() => admin.run('access.grant', { command, userId: '2' }, {}), /the mentor is owner-only/, command);
+  }
+  assert.equal(fs.existsSync(path.join(rootDir, 'config.local.json')), false);
+});
+
+test('isAllowed: mentor commands stay owner-only even when bot.access grants them, their group or *', () => {
+  const rootDir = makeRoot();
+  const { admin, hot } = makeAdmin(rootDir);
+  const open = { everyone: true, roles: [], users: [] };
+  hot.config.bot.access = { '*': open, mentor: open, 'mentor.run': open };
+  assert.equal(admin.isAllowed('mentor.run', { userId: '999', roleIds: ['staff'] }), false);
+  assert.equal(admin.isAllowed('mentor.status', { userId: '999', roleIds: [] }), false);
+  assert.equal(admin.isAllowed('mentor.run', { userId: '42', roleIds: [] }), true, 'the owner still passes');
 });
