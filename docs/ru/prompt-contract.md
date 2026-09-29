@@ -87,7 +87,11 @@
 сохраняют свой базовый тег (`link` / `linkText`) и получают видеодополнение: `linkWatched`, `linkNotWatchedFrame` или
 `linkNotWatched`. Если стоп-кадр прикреплён как картинка, добавляется также `frameAttached`. Ссылки используют
 `link` / `linkText`, построенные из эмбеда Discord (сайт, заголовок, фрагмент); когда `features.webLookup` включён и ссылка была прочитана, `linkRead` добавляется после остальных дополнений ссылки (видео, превью). Текстовые файлы показывают начало через
-`filePreview`; пересланное сообщение обёрнуто в `forwarded`.
+`filePreview`; пересланное сообщение обёрнуто в `forwarded`. Когда `features.seeReactions` включён (по
+умолчанию), тег реакций добавляется в самый конец строки, после медиатегов и пересланных сообщений. Он содержит не
+более `context.reactionsPerMessage` реакций на сообщение, самые частые первыми; каждый элемент использует
+`transcript.reactionItem` или `transcript.reactionMine` (когда персонаж среди поставивших реакцию), соединённые
+через ", " и обёрнутые в `transcript.reactions`. Файл меток без `transcript.reactions` ничего не рендерит.
 
 Результаты просмотра видео кэшируются по вложению или ссылке в `data/guilds/<id>/media.json` под ключом
 `video:<itemId>` (id вложения или стабильный хэш URL ссылки). Записи кэша:
@@ -106,7 +110,7 @@
 - Чтение ссылки: `read:<link.id>` хранит `{ text, ts }` (сжатую выдержку, постоянную) или `{ miss, ts, reason }` (промах, пропускаемый 6 часов; причины: `scheme`, `private`, `redirects`, `type`, `size`, `timeout`, `http`, `network`, `empty`, `unreadable`, `llm`). `TokenLimitError` или `DailyCapError` никогда не кэшируются.
 - Поиск: `search:<первые 16 hex-цифр SHA-1 нормализованного запроса>` хранит `{ query, text, sources, ts }`, отдаётся, пока моложе `web.search.cacheHours` (по умолчанию 24). Пустой `text` означает отсутствие результатов (рендерится `labels.lookup.none`). Ошибки не кэшируются.
 
-Строка транскрипта: `#87 [14:32] nick: text <replyTo> <media…> <sticker>`; собственные строки используют `labels.self`; между
+Строка транскрипта: `#87 [14:32] nick: text <replyTo> <media…> <sticker> <reactions>`; собственные строки используют `labels.self`; между
 строками `labels.transcript.gap` / `gapWithDate` / `date`; блок начинается с `labels.transcript.header`. Соседние
 каналы: те же строки без `#n`, под `# channel-name`.
 
@@ -151,6 +155,9 @@ transcript.filePreview                   {name} {text}
 transcript.forwarded                     {text}
 transcript.forwardedFrom                 {channel} {text}: used when the source channel is known; falls back to `forwarded`
 transcript.frameAttached                 {n}: follows a video/gif item whose still frame is attached picture n
+transcript.reactions                     OPTIONAL {list}: appended at the end of a line after all media and forwarded tags; list is items joined with ", ". A labels file without this key renders nothing
+transcript.reactionItem                  {emoji} {count}: one reaction; emoji is unicode or :name: for custom
+transcript.reactionMine                  {emoji} {count}: used instead of reactionItem when the persona is among the reactors; reads correctly whether count is 1 or more
 transcript.unknownDuration               shown in place of {duration} when Discord gave none
 senses.imageSee | imageDescribed | imageBlind        one line each; code picks the ones true under the live config
 senses.gifDescribed | gifBlind

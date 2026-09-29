@@ -16,7 +16,8 @@
 | `relationships` | `true` | メンバーごとの態度スコア（-100..100） |
 | `episodes` | `true` | メンバーごとの長期記憶（出来事、引用、恨み） |
 | `lore` | `true` | サーバー全体のロアブック |
-| `reactions` | `true` | 絵文字リアクション |
+| `reactions` | `true` | 絵文字リアクション（ペルソナがリアクションを付ける） |
+| `seeReactions` | `true` | トランスクリプト内のメッセージにリアクションを表示。キーが存在しない場合はオンとして扱われる。`reactions`（ペルソナがリアクションを付けるかどうか）とは異なり、こちらはリアクションを見るかどうかを制御する |
 | `multiMessage` | `true` | 2〜3 件の連続メッセージを許可 |
 | `vision` | `true` | 添付画像を処理 |
 | `mediaDescriptions` | `true` | 画像、GIF、動画フレーム、リンクサムネイルの一行説明文 |
@@ -83,6 +84,7 @@
 | `neighborMaxChannels` | `8` | 隣接チャンネルの最大数 |
 | `maxMessageChars` | `800` | この文字数を超えるメッセージを切り詰め（文字） |
 | `gapMarkerMinutes` | `20` | タイムギャップマーカーの閾値（分） |
+| `reactionsPerMessage` | `6` | トランスクリプト内の 1 メッセージあたりの最大リアクション数（頻度降順） |
 | `otherProfiles` | `6` | 表示する他のプロファイルの最大数 |
 | `askedAboutProfiles` | `3` | 最近のメッセージで言及されたメンバーを他の参加者より先にフル表示する最大数 |
 | `tempo.liveMessages10min` | `4` | 10 分間のメッセージ数がこの値で「ライブ」 |

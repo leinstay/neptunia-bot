@@ -16,7 +16,8 @@ Every key in `config.json` with its default, grouped by section.
 | `relationships` | `true` | Per-member attitude scores (-100..100) |
 | `episodes` | `true` | Per-person long-term memories (moments, quotes, grudges) |
 | `lore` | `true` | Server-wide lorebook |
-| `reactions` | `true` | Emoji reactions |
+| `reactions` | `true` | Emoji reactions (the persona places them) |
+| `seeReactions` | `true` | Show reactions on messages in the transcript. A missing key counts as on. Distinct from `reactions`, which controls whether the persona PLACES reactions; this one controls whether it SEES them |
 | `multiMessage` | `true` | Allow 2–3 messages in a row |
 | `vision` | `true` | Process attached images |
 | `mediaDescriptions` | `true` | One-line descriptions for pictures, GIFs, video frames and link thumbnails |
@@ -83,6 +84,7 @@ The three helper model roles, grouped under one key. Each is set independently, 
 | `neighborMaxChannels` | `8` | Max neighbour channels |
 | `maxMessageChars` | `800` | Truncate messages beyond this (chars) |
 | `gapMarkerMinutes` | `20` | Time-gap marker threshold (min) |
+| `reactionsPerMessage` | `6` | Max reactions listed per message in the transcript, most frequent first |
 | `otherProfiles` | `6` | Max other profiles shown |
 | `askedAboutProfiles` | `3` | Members named in recent messages whose profiles are shown in full, ahead of the other participants |
 | `tempo.liveMessages10min` | `4` | Messages in 10 min = "live" |

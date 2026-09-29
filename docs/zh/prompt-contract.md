@@ -86,7 +86,10 @@
 为 `transcript.videoReason.*` 中的人类可读短语。链接保留其基础标签（`link` / `linkText`）并添加视频附加标签：
 `linkWatched`、`linkNotWatchedFrame` 或 `linkNotWatched`。当静帧作为图片附加时，还会添加 `frameAttached`。
 链接使用 `link` / `linkText`，取自 Discord 的嵌入（站点、标题、摘要）；当 `features.webLookup` 开启且链接已被阅读时，`linkRead` 追加在链接的其他附加标签（视频、缩略图）之后。文本文件通过 `filePreview` 显示开头
-内容；转发消息用 `forwarded` 包裹。
+内容；转发消息用 `forwarded` 包裹。当 `features.seeReactions` 开启（默认）时，反应标签追加在行的
+最末尾，位于媒体标签和转发包裹之后。每条消息最多列出 `context.reactionsPerMessage` 个反应，按频率降序排列；
+每个条目使用 `transcript.reactionItem` 或 `transcript.reactionMine`（当角色是反应者之一时），以 ", " 连接
+并包裹在 `transcript.reactions` 中。缺少 `transcript.reactions` 键的标签文件不渲染任何内容。
 
 视频结果按附件或链接缓存在 `data/guilds/<id>/media.json` 中，键为 `video:<itemId>`（附件 id 或链接 URL 的稳定
 哈希）。缓存条目：
@@ -105,7 +108,7 @@
 - 链接阅读：`read:<link.id>` 保存 `{ text, ts }`（浓缩摘要，永久）或 `{ miss, ts, reason }`（未命中跳过 6 小时；原因：`scheme`、`private`、`redirects`、`type`、`size`、`timeout`、`http`、`network`、`empty`、`unreadable`、`llm`）。`TokenLimitError` 或 `DailyCapError` 不缓存。
 - 搜索：`search:<规范化查询 SHA-1 前缀，16 位十六进制>` 保存 `{ query, text, sources, ts }`，在 `web.search.cacheHours`（默认 24）小时内从缓存提供。空 `text` 表示无结果（渲染 `labels.lookup.none`）。失败不缓存。
 
-对话记录行：`#87 [14:32] nick: text <replyTo> <media…> <sticker>`；角色自身的行使用 `labels.self`；行间使用
+对话记录行：`#87 [14:32] nick: text <replyTo> <media…> <sticker> <reactions>`；角色自身的行使用 `labels.self`；行间使用
 `labels.transcript.gap` / `gapWithDate` / `date`；区块以 `labels.transcript.header` 开头。相邻频道：相同的行
 格式但不含 `#n`，位于 `# channel-name` 之下。
 
@@ -150,6 +153,9 @@ transcript.filePreview                   {name} {text}
 transcript.forwarded                     {text}
 transcript.forwardedFrom                 {channel} {text}: used when the source channel is known; falls back to `forwarded`
 transcript.frameAttached                 {n}: follows a video/gif item whose still frame is attached picture n
+transcript.reactions                     OPTIONAL {list}: appended at the end of a line after all media and forwarded tags; list is items joined with ", ". A labels file without this key renders nothing
+transcript.reactionItem                  {emoji} {count}: one reaction; emoji is unicode or :name: for custom
+transcript.reactionMine                  {emoji} {count}: used instead of reactionItem when the persona is among the reactors; reads correctly whether count is 1 or more
 transcript.unknownDuration               shown in place of {duration} when Discord gave none
 senses.imageSee | imageDescribed | imageBlind        one line each; code picks the ones true under the live config
 senses.gifDescribed | gifBlind

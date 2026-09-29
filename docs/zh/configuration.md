@@ -16,7 +16,8 @@
 | `relationships` | `true` | 每成员态度分数（-100..100） |
 | `episodes` | `true` | 每人的长期回忆（时刻、引言、恩怨） |
 | `lore` | `true` | 服务器级世界书 |
-| `reactions` | `true` | 表情反应 |
+| `reactions` | `true` | 表情反应（角色放置反应） |
+| `seeReactions` | `true` | 在对话记录中显示消息上的反应。缺失的键视为开启。与 `reactions`（控制角色是否放置反应）不同，此项控制角色是否看到反应 |
 | `multiMessage` | `true` | 允许连续发 2–3 条消息 |
 | `vision` | `true` | 处理附加图片 |
 | `mediaDescriptions` | `true` | 为图片、GIF、视频帧和链接缩略图生成单行描述 |
@@ -83,6 +84,7 @@
 | `neighborMaxChannels` | `8` | 最大相邻频道数 |
 | `maxMessageChars` | `800` | 超出此长度的消息会被截断（字符） |
 | `gapMarkerMinutes` | `20` | 时间间隔标记阈值（分钟） |
+| `reactionsPerMessage` | `6` | 对话记录中每条消息列出的最大反应数，按频率降序 |
 | `otherProfiles` | `6` | 显示的其他档案最大数量 |
 | `askedAboutProfiles` | `3` | 在近期消息中被提及的成员以完整档案显示，排在其他参与者之前 |
 | `tempo.liveMessages10min` | `4` | 10 分钟内的消息数 = “活跃” |

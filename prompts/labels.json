@@ -49,7 +49,10 @@
     "file": "[file: {name}]",
     "sticker": "[sticker: {name}]",
     "stickerDescribed": "[sticker: {name} — {text}]",
-    "emojiDescribed": "[:{name}: {text}]"
+    "emojiDescribed": "[:{name}: {text}]",
+    "reactions": "[reactions: {list}]",
+    "reactionItem": "{emoji} x{count}",
+    "reactionMine": "{emoji} x{count} (you)"
   },
   "senses": {
     "imageSee": "Pictures marked as attached you see yourself.",

@@ -88,7 +88,11 @@ tag (`link` / `linkText`) and add a video extra: `linkWatched`, `linkNotWatchedF
 frame is attached as a picture, `frameAttached` is added as well. Links use `link` / `linkText` built from Discord's
 embed (site, title, snippet); when `features.webLookup` is on and the link was read, `linkRead` is appended after the
 link's other extras (video, thumbnail). Text files show their beginning via `filePreview`; a forwarded message is
-wrapped in `forwarded`.
+wrapped in `forwarded`. When `features.seeReactions` is on (the default), a reactions tag is appended at the very
+end of a line, after media tags and forwarded wrappers. It lists at most `context.reactionsPerMessage` reactions per
+message, most frequent first; each item uses `transcript.reactionItem` or `transcript.reactionMine` (when the persona
+is among the reactors), joined with ", " and wrapped in `transcript.reactions`. A labels file without
+`transcript.reactions` renders nothing.
 
 Video results are cached per attachment or per link in `data/guilds/<id>/media.json` under the key
 `video:<itemId>` (the attachment id, or a stable hash of the link URL). Cache entries:
@@ -107,7 +111,7 @@ Web lookup results are cached in the same `data/guilds/<id>/media.json` alongsid
 - Read link: `read:<link.id>` holds `{ text, ts }` (the condensed excerpt, permanent) or `{ miss, ts, reason }` (a miss skipped for 6 hours; reasons: `scheme`, `private`, `redirects`, `type`, `size`, `timeout`, `http`, `network`, `empty`, `unreadable`, `llm`). A `TokenLimitError` or `DailyCapError` is never cached.
 - Search: `search:<sha1 prefix of the normalised query, 16 hex>` holds `{ query, text, sources, ts }`, served while younger than `web.search.cacheHours` (default 24). An empty `text` means no results (renders `labels.lookup.none`). Failures are never cached.
 
-Transcript line: `#87 [14:32] nick: text <replyTo> <media…> <sticker>`; own lines use `labels.self`; between
+Transcript line: `#87 [14:32] nick: text <replyTo> <media…> <sticker> <reactions>`; own lines use `labels.self`; between
 lines `labels.transcript.gap` / `gapWithDate` / `date`; the block opens with `labels.transcript.header`. Neighbour
 channels: same lines without `#n`, under `# channel-name`.
 
@@ -152,6 +156,9 @@ transcript.filePreview                   {name} {text}
 transcript.forwarded                     {text}
 transcript.forwardedFrom                 {channel} {text}: used when the source channel is known; falls back to `forwarded`
 transcript.frameAttached                 {n}: follows a video/gif item whose still frame is attached picture n
+transcript.reactions                     OPTIONAL {list}: appended at the end of a line after all media and forwarded tags; list is items joined with ", ". A labels file without this key renders nothing
+transcript.reactionItem                  {emoji} {count}: one reaction; emoji is unicode or :name: for custom
+transcript.reactionMine                  {emoji} {count}: used instead of reactionItem when the persona is among the reactors; reads correctly whether count is 1 or more
 transcript.unknownDuration               shown in place of {duration} when Discord gave none
 senses.imageSee | imageDescribed | imageBlind        one line each; code picks the ones true under the live config
 senses.gifDescribed | gifBlind
