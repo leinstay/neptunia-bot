@@ -2,7 +2,7 @@
 
 频道、身份组和用户从 Discord 自带的选择器中选取；`set`/`unset` 和 `access grant`/`access revoke` 会自动补全其 `path`/`command` 选项。
 
-`/nep` 从一开始就对所有成员可见；访问权限在命令执行时按命令逐一检查，不通过 Discord 自身的命令可见性控制。所有者（`bot.owners`）始终可以运行所有命令。其他人需要授权：`/nep access grant <command> [role] [user]` 可开放一个命令键（如 `memory.show`）、一个完整组（如 `memory`）或所有命令（`*`）给所有人（不指定身份组/用户）、某个身份组或某个用户；`/nep access revoke` 撤销授权；`/nep access list` 显示当前授权。没有授权的非所有者运行 `/nep` 会收到一条仅自己可见的 “Not allowed” 回复。`private.show` 和 `private.forget` 仅限所有者使用，不可通过任何授权方式开放；`access grant` 会拒绝它们，`access list` 也不会显示。
+`/nep` 从一开始就对所有成员可见；访问权限在命令执行时按命令逐一检查，不通过 Discord 自身的命令可见性控制。所有者（`bot.owners`）始终可以运行所有命令。其他人需要授权：`/nep access grant <command> [role] [user]` 可开放一个命令键（如 `memory.show`）、一个完整组（如 `memory`）或所有命令（`*`）给所有人（不指定身份组/用户）、某个身份组或某个用户；`/nep access revoke` 撤销授权；`/nep access list` 显示当前授权。没有授权的非所有者运行 `/nep` 会收到一条仅自己可见的 “Not allowed” 回复。`private.show`、`private.forget` 和 `private.purge` 仅限所有者使用，不可通过任何授权方式开放；`access grant` 会拒绝它们，`access list` 也不会显示。
 
 | 命令 | 说明 |
 |---|---|
@@ -30,6 +30,7 @@
 | `/nep memory wipe <confirm>` | 清除该服务器的所有分析器记忆（包括私有文件）；输入准确的服务器名称以确认 |
 | `/nep private show <user>` | 显示成员的私有记忆：关系、兴趣、细节、回忆、私有和有效好感度、今日回复数。无私有层则为普通回答。仅限所有者；不可授权 |
 | `/nep private forget <user>` | 仅删除成员的私有记忆；公共档案保留。仅限所有者；不可授权 |
+| `/nep private purge <user>` | 删除机器人在与成员的私信对话中发送的消息（扫描最多 `private.purgeMaxMessages` 条），然后删除该成员的私有记忆。成员自己的消息保留。暂停时拒绝。仅限所有者；不可授权 |
 | `/nep alias add <user> <name>` | 添加聊天别名；立即确认 |
 | `/nep alias remove <user> <name>` | 移除聊天别名 |
 | `/nep learned list` | 列出所学内容（含 ID、教授者、观察次数） |
