@@ -515,7 +515,7 @@ function makeHotWithMedia(rootDir) {
   return hot;
 }
 
-test('run: model.show lists the five roles in order, the image model, then whether mediaDescriptions is on', async () => {
+test('run: model.show lists the six roles in order, the image model, then whether mediaDescriptions is on', async () => {
   const rootDir = makeRoot();
   const hot = makeHotWithMedia(rootDir);
   hot.config.classifier.text = 'openrouter/text-model';
@@ -529,6 +529,7 @@ test('run: model.show lists the five roles in order, the image model, then wheth
     'classifier.text: openrouter/text-model',
     'classifier.media: anthropic/claude-haiku-4.5',
     'classifier.video: -',
+    'mentor: -',
     'image: -',
     'mediaDescriptions: off',
   ]);
@@ -615,7 +616,7 @@ test('run: model.set rejects an unknown role and writes nothing', async () => {
   const rootDir = makeRoot();
   const { admin } = makeAdmin(rootDir, { hot: makeHotWithMedia(rootDir) });
 
-  await assert.rejects(() => admin.run('model.set', { role: 'bogus', id: 'x/y' }, {}), /unknown role: bogus \(talk, analyzer, classifier\.text, classifier\.media, classifier\.video\)/);
+  await assert.rejects(() => admin.run('model.set', { role: 'bogus', id: 'x/y' }, {}), /unknown role: bogus \(talk, analyzer, classifier\.text, classifier\.media, classifier\.video, mentor\)/);
   assert.equal(fs.existsSync(path.join(rootDir, 'config.local.json')), false);
 });
 
@@ -626,7 +627,7 @@ test('run: model.set rejects the old role names and the classifier group, and wr
   for (const role of ['followup', 'media', 'video', 'classifier']) {
     await assert.rejects(
       () => admin.run('model.set', { role, id: 'x/y' }, {}),
-      new RegExp(`unknown role: ${role} \\(talk, analyzer, classifier\\.text, classifier\\.media, classifier\\.video\\)`),
+      new RegExp(`unknown role: ${role} \\(talk, analyzer, classifier\\.text, classifier\\.media, classifier\\.video, mentor\\)`),
     );
   }
   assert.equal(fs.existsSync(path.join(rootDir, 'config.local.json')), false);
@@ -647,6 +648,30 @@ test('run: model.set accepts a loosely-valid id (letters, digits, dot, colon, sl
 
   await admin.run('model.set', { role: 'classifier.media', id: 'anthropic/claude-haiku-4.5:beta' }, {});
   assert.deepEqual(readLocal(rootDir), { classifier: { media: 'anthropic/claude-haiku-4.5:beta' } });
+});
+
+test('model set: role mentor writes mentor.model', async () => {
+  const rootDir = makeRoot();
+  const hot = makeHotWithMedia(rootDir);
+  const { admin } = makeAdmin(rootDir, { hot });
+
+  const result = await admin.run('model.set', { role: 'mentor', id: 'openrouter/mentor-model' }, {});
+  assert.match(result, /^Set mentor model to openrouter\/mentor-model/);
+  assert.deepEqual(readLocal(rootDir), { mentor: { model: 'openrouter/mentor-model' } });
+  assert.equal(hot.reloadConfigCalls, 1);
+});
+
+test('model show: lists the mentor role', async () => {
+  const rootDir = makeRoot();
+  const hot = makeHotWithMedia(rootDir);
+  const { admin } = makeAdmin(rootDir, { hot });
+
+  const unset = (await admin.run('model.show', {}, {})).split('\n');
+  assert.ok(unset.includes('mentor: -'), 'an unset mentor model does not fall back to the talk model');
+
+  hot.config.mentor = { model: 'openrouter/mentor-model' };
+  const set = (await admin.run('model.show', {}, {})).split('\n');
+  assert.ok(set.includes('mentor: openrouter/mentor-model'));
 });
 
 // ---------------------------------------------------------------------------
@@ -893,7 +918,7 @@ function hotForPing(rootDir, { label = true } = {}) {
   return hot;
 }
 
-test('run: ping pings the five roles in parallel and reports latency, provider and tokens', async () => {
+test('run: ping pings the six roles in parallel and reports latency, provider and tokens', async () => {
   const rootDir = makeRoot();
   const hot = hotForPing(rootDir);
   hot.config.memory.model = 'openrouter/analyzer-model'; // distinct from talk, so every role gets its own call
@@ -910,14 +935,15 @@ test('run: ping pings the five roles in parallel and reports latency, provider a
   const body = await admin.run('ping', {}, {});
   const lines = body.split('\n');
 
-  assert.equal(llm.calls.length, 4, 'talk, analyzer, media and video are four distinct models here; classifier.text falls back to classifier.media');
-  assert.equal(lines.length, 5);
+  assert.equal(llm.calls.length, 4, 'talk, analyzer, media and video are four distinct models here; classifier.text falls back to classifier.media; mentor is unset');
+  assert.equal(lines.length, 6);
   assert.ok(lines.some((l) => l.startsWith('talk: anthropic/claude-opus-4.6 — ok,') && l.includes('provider=provider-for-anthropic/claude-opus-4.6') && l.includes('tokens 5/1')));
   assert.ok(lines.some((l) => l.startsWith('analyzer: openrouter/analyzer-model — ok,')));
   assert.ok(lines.some((l) => l.startsWith('classifier.media: anthropic/claude-haiku-4.5 — ok,')));
   assert.ok(lines.some((l) => l.startsWith('classifier.text: anthropic/claude-haiku-4.5 — ok,')));
   assert.ok(lines.some((l) => l.startsWith('classifier.video: openrouter/video-model — ok,')));
   assert.ok(llm.calls.some((c) => c.options.model === 'openrouter/video-model'));
+  assert.ok(lines.includes('mentor: (no model configured)'), 'an unset mentor model never falls back to the talk model');
 });
 
 test('run: ping single-role classifier.video form pings classifier.video, and reports no model when it is unset', async () => {
@@ -1033,11 +1059,31 @@ test('run: ping de-duplicates identical models: one call, reported for every rol
   const lines = body.split('\n');
 
   assert.equal(llm.calls.length, 2, 'talk+analyzer share one model, classifier.media (and classifier.text, which falls back to it) share another: two calls');
-  assert.equal(lines.length, 5, 'still one line per requested role');
+  assert.equal(lines.length, 6, 'still one line per requested role');
   assert.ok(lines.some((l) => l.startsWith('talk: anthropic/claude-opus-4.6 — ok,')));
   assert.ok(lines.some((l) => l.startsWith('analyzer: anthropic/claude-opus-4.6 — ok,')));
   assert.ok(lines.some((l) => l.startsWith('classifier.text: anthropic/claude-haiku-4.5 — ok,')));
   assert.ok(lines.includes('classifier.video: (no model configured)'), 'no classifier.video -> skipped, like any role without a model');
+});
+
+test('ping: role mentor pings mentor.model', async () => {
+  const rootDir = makeRoot();
+  const hot = hotForPing(rootDir);
+  hot.config.mentor = { model: 'openrouter/mentor-model' };
+  const llm = fakeLlm(() => ({ text: 'pong', usage: {}, estimated: 1 }));
+  const { admin } = makeAdmin(rootDir, { hot, llm });
+
+  const body = await admin.run('ping', { role: 'mentor' }, {});
+  assert.equal(llm.calls.length, 1);
+  assert.equal(llm.calls[0].options.model, 'openrouter/mentor-model');
+  assert.ok(body.startsWith('mentor: openrouter/mentor-model — ok,'));
+
+  const hotUnset = hotForPing(rootDir);
+  const llm2 = fakeLlm(() => ({ text: 'pong', usage: {}, estimated: 1 }));
+  const { admin: adminUnset } = makeAdmin(rootDir, { hot: hotUnset, llm: llm2 });
+
+  assert.equal(await adminUnset.run('ping', { role: 'mentor' }, {}), 'mentor: (no model configured)');
+  assert.equal(llm2.calls.length, 0);
 });
 
 // A real "wrong provider keys" 404 body captured from OpenRouter, verbatim -- see the
@@ -1130,7 +1176,7 @@ test('run: ping reports every role skipped when labels.ping.prompt is missing, w
 
   assert.equal(llm.calls.length, 0);
   const lines = body.split('\n');
-  assert.equal(lines.length, 5);
+  assert.equal(lines.length, 6);
   assert.ok(lines.every((l) => l.includes('skipped: label missing')));
 });
 

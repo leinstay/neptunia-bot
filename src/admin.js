@@ -1703,6 +1703,7 @@ const MODEL_ROLE_PATHS = {
   'classifier.text': 'classifier.text',
   'classifier.media': 'classifier.media',
   'classifier.video': 'classifier.video',
+  mentor: 'mentor.model',
 };
 const MODEL_ROLES = Object.keys(MODEL_ROLE_PATHS);
 
@@ -1765,6 +1766,8 @@ function modelForRole(role, cfg) {
   if (role === 'classifier.text') return classifierTextModel(cfg);
   if (role === 'classifier.media') return classifierMediaModel(cfg);
   if (role === 'classifier.video') return classifierVideoModel(cfg);
+  // No fallback to the talk model: an unset mentor model means the mentor is not configured.
+  if (role === 'mentor') return cfg?.mentor?.model || undefined;
   return undefined;
 }
 

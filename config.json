@@ -21,6 +21,7 @@
     "webLookup": false,
     "imageGeneration": false,
     "privateMessages": false,
+    "mentor": false,
     "typingSimulation": true,
     "adminCommands": true
   },
@@ -213,6 +214,21 @@
     "google": { "resolution": "1K" }
   },
   "private": { "minAffinity": 5, "maxPerUserPerDay": 100, "maxPerOwnerPerDay": 200, "purgeMaxMessages": 5000 },
+  "mentor": {
+    "model": null,
+    "maxTokensPerDay": 400000,
+    "outputTokenWeight": 5,
+    "cachedTokenWeight": 0.1,
+    "maxOutputTokens": 6000,
+    "timeoutMs": 300000,
+    "situations": 5,
+    "situationLines": [6, 15],
+    "samples": 3,
+    "check": { "samples": 1 },
+    "pass": { "score": 7, "floor": 5 },
+    "reference": { "days": 7, "samples": 40, "maxMessages": 3000 },
+    "feedbackExamples": 10
+  },
   "warmup": {
     "enabled": true,
     "lookbackDays": 60,
