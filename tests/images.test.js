@@ -218,6 +218,29 @@ test('images: per-member cap refuses with reason userDaily and userId null skips
   assert.deepEqual(state.data.imageUsers.counts, { u1: 1, u2: 1 });
 });
 
+test('images: ImageCapError carries the limit key, the used count and the cap', async () => {
+  const state = fakeState();
+  const { gen } = makeGen({ config: baseConfig({ maxPerDay: 2, maxPerUserPerDay: 1 }), state });
+  await gen.generate({ prompt: 'one', userId: 'u1' });
+  await assert.rejects(gen.generate({ prompt: 'two', userId: 'u1' }), (err) => {
+    assert.ok(err instanceof ImageCapError);
+    assert.equal(err.message, 'daily per-member image cap reached (1)');
+    assert.equal(err.key, 'image.maxPerUserPerDay');
+    assert.equal(err.used, 1);
+    assert.equal(err.cap, 1);
+    return true;
+  });
+  await gen.generate({ prompt: 'three', userId: 'u2' });
+  await assert.rejects(gen.generate({ prompt: 'four', userId: 'u3' }), (err) => {
+    assert.ok(err instanceof ImageCapError);
+    assert.equal(err.message, 'daily image cap reached (2)');
+    assert.equal(err.key, 'image.maxPerDay');
+    assert.equal(err.used, 2);
+    assert.equal(err.cap, 2);
+    return true;
+  });
+});
+
 test('images: counters roll over on a new day', async () => {
   const state = fakeState({
     imageDay: '2026-09-27',

@@ -98,6 +98,45 @@ test('complete: DailyCapError once the daily cap is reached, without calling fet
   assert.equal(calls, 0);
 });
 
+test('complete: DailyCapError carries the limit key, the used count and the cap', async () => {
+  const state = fakeState();
+  state.data.llmDay = new Date().toISOString().slice(0, 10);
+  state.data.llmCount = 3;
+  const llm = createLlm({
+    apiKey: 'k',
+    getConfig: () => baseConfig({ maxRequestsPerDay: 3 }),
+    calibrator: fakeCalibrator(),
+    state,
+    fetchImpl: async () => okResponse('x'),
+  });
+  await assert.rejects(llm.complete([{ role: 'user', content: 'hi' }]), (err) => {
+    assert.ok(err instanceof DailyCapError);
+    assert.equal(err.message, 'daily LLM request cap reached (3)');
+    assert.equal(err.key, 'llm.maxRequestsPerDay');
+    assert.equal(err.used, 3);
+    assert.equal(err.cap, 3);
+    return true;
+  });
+});
+
+test('complete: TokenLimitError carries the limit key, the estimate as used and the cap', async () => {
+  const llm = createLlm({
+    apiKey: 'k',
+    getConfig: () => baseConfig({ maxRequestTokens: 50 }),
+    calibrator: fakeCalibrator(),
+    state: fakeState(),
+    fetchImpl: async () => okResponse('x'),
+  });
+  await assert.rejects(llm.complete([{ role: 'user', content: 'a'.repeat(2000) }]), (err) => {
+    assert.ok(err instanceof TokenLimitError);
+    assert.equal(err.key, 'llm.maxRequestTokens');
+    assert.equal(err.cap, 50);
+    assert.ok(Number.isFinite(err.used) && err.used > 50);
+    assert.equal(err.message, `request estimated at ${err.used} tokens, cap is 50`);
+    return true;
+  });
+});
+
 test('complete: a day rollover resets the counter and lets a new request through', async () => {
   const state = fakeState();
   state.data.llmDay = '2000-01-01'; // long past day, at/over the old cap

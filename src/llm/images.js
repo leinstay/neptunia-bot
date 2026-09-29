@@ -147,10 +147,12 @@ export function createImageGen({ apiKey, getConfig, state, fetchImpl = fetch, no
     }
     const counts = state.data.imageUsers.counts;
     if (state.data.imageCount >= cfg.maxPerDay) {
-      throw new ImageCapError('daily', `daily image cap reached (${cfg.maxPerDay})`);
+      const err = new ImageCapError('daily', `daily image cap reached (${cfg.maxPerDay})`);
+      throw Object.assign(err, { key: 'image.maxPerDay', used: state.data.imageCount, cap: cfg.maxPerDay });
     }
     if (userId != null && (counts[userId] ?? 0) >= cfg.maxPerUserPerDay) {
-      throw new ImageCapError('userDaily', `daily per-member image cap reached (${cfg.maxPerUserPerDay})`);
+      const err = new ImageCapError('userDaily', `daily per-member image cap reached (${cfg.maxPerUserPerDay})`);
+      throw Object.assign(err, { key: 'image.maxPerUserPerDay', used: counts[userId] ?? 0, cap: cfg.maxPerUserPerDay });
     }
     state.data.imageCount += 1;
     if (userId != null) counts[userId] = (counts[userId] ?? 0) + 1;

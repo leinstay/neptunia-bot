@@ -18,7 +18,8 @@
     "videoDescriptions": false,
     "videoRewatch": true,
     "webLookup": false,
-    "imageGeneration": true,
+    "imageGeneration": false,
+    "privateMessages": false,
     "typingSimulation": true,
     "adminCommands": true
   },
@@ -209,6 +210,7 @@
     "openai": { "quality": "medium", "background": "auto", "moderation": "low" },
     "google": { "resolution": "1K" }
   },
+  "private": { "minAffinity": 5, "maxPerUserPerDay": 100, "maxPerOwnerPerDay": 200 },
   "warmup": {
     "enabled": true,
     "lookbackDays": 60,

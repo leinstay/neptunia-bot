@@ -42,7 +42,10 @@ export function createLlm({ apiKey, getConfig, calibrator, state, fetchImpl = fe
       state.data.llmDay = today;
       state.data.llmCount = 0;
     }
-    if (state.data.llmCount >= cap) throw new DailyCapError(`daily LLM request cap reached (${cap})`);
+    if (state.data.llmCount >= cap) {
+      const err = new DailyCapError(`daily LLM request cap reached (${cap})`);
+      throw Object.assign(err, { key: 'llm.maxRequestsPerDay', used: state.data.llmCount, cap });
+    }
     state.data.llmCount += 1;
     state.markDirty();
   }
@@ -110,7 +113,8 @@ export function createLlm({ apiKey, getConfig, calibrator, state, fetchImpl = fe
     const estimated = calibrator.apply(raw);
     const requestTokenCap = Number.isFinite(options.maxRequestTokens) ? options.maxRequestTokens : cfg.maxRequestTokens;
     if (estimated > requestTokenCap) {
-      throw new TokenLimitError(`request estimated at ${estimated} tokens, cap is ${requestTokenCap}`);
+      const err = new TokenLimitError(`request estimated at ${estimated} tokens, cap is ${requestTokenCap}`);
+      throw Object.assign(err, { key: 'llm.maxRequestTokens', used: estimated, cap: requestTokenCap });
     }
     if (options.countAgainstDailyCap !== false) {
       countRequest(cfg.maxRequestsPerDay);
