@@ -97,6 +97,12 @@ Discord スラッシュコマンドは `/nep` の一つだけ（名前は `bot.c
 
 `features.privateMessages`（デフォルトオフ）で、ギルドメンバーが Discord DM でペルソナと会話できます。ペルソナは同じキャラクター、同じ公開メモリ。DM で話された内容はメンバーごとのプライベートレイヤーに記憶され、他の会話には見えません。DM には同じサーバーメンバーシップが必要で、招待 URL が付与する権限以外の追加権限は不要です。ゲート、プライベートメモリレイヤー、オーナーコマンドの詳細は[メッセージとメモリ](messages-and-memory.md#プライベートレイヤー)を参照してください。
 
+## Mentor
+
+`features.mentor`（デフォルトオフ）は独自モデルを使用する手動テストサブプロセスを追加します。オーナーがペルソナに期待する行動を自分の言葉で記述し（「ケース」）、mentor がそれをテストするチャット状況を作成、ライブプロンプトとメモリを持つサンドボックスでペルソナに回答させ、5 つの軸で各回答をスコアリング（0–10）します。どのチャンネルにも投稿されません。すべての作業は `data/` と管理チャンネルに留まります。第一段階では mentor は測定と報告のみ行い、編集は行いません。
+
+ケースはペルソナの返答方法またはメモリアナライザーの書き込み方法のいずれかを対象とします。mentor のモデル、予算、コマンドはペルソナとは独立しています。設定キーは [`configuration.md`](configuration.md#mentor)、`/nep mentor` サブコマンドは [`owner-commands.md`](owner-commands.md) を参照してください。
+
 ## コスト
 
 各ターンは LLM リクエスト 1 回分。メモリ更新で 2 回目が加わります。コストはモデルとエンドポイント次第。`llm.model` と `llm.baseUrl` は互換なら何でも指定できます。1 日の上限（`llm.maxRequestsPerDay`）で使いすぎを防止します。動画説明はクリップごとに別の安価なモデルへ 1 リクエスト（`media.video.maxPerDay` で 1 日の件数制限）。`yt-dlp` と `ffmpeg` はローカル実行で帯域幅以外かかりません。リンク読み取りと検索（`features.webLookup`、デフォルトオフ）はテキスト分類器へのリクエストを追加、`web.maxPerDay` で制限。検索には Brave Search API キー（無料枠: 月 2,000 クエリ）も必要です。画像生成（`features.imageGeneration`、デフォルトオフ）は `image.model` を通じて出力トークン単位で課金、`image.maxPerDay` でチャットリクエストとは別に日次件数を制限します。プライベートチャット（`features.privateMessages`、デフォルトオフ）は同じ LLM と上限を使用。各 DM リプライは 1 リクエスト、各プライベートアナライザーバッチはもう 1 つです。`features.webLookup` 有効時、ボットはページ取得と Brave Search API への HTTP リクエストを行います。プライベートアドレスは拒否します。
@@ -162,6 +168,10 @@ prompts/
   lookup.md                分類器: 質問にウェブ検索が必要か
   read-link.md             フェッチしたページの要約
   search-summary.md        検索結果の要約
+  mentor-situations.md     mentor: テスト状況を作成（reply ターゲット）
+  mentor-situations-memory.md  mentor: テスト状況を作成（memory ターゲット）
+  mentor-score.md          mentor: ペルソナの回答をスコアリング
+  mentor-score-memory.md   mentor: アナライザーの保存テキストをスコアリング
   profile.md               ウォームアップ: メッセージサンプルからメンバーのプロファイルを作成
   channel.md               ウォームアップ: メッセージサンプルからチャンネルノートを作成
   server.md                ウォームアップ: チャンネルノートとメンバーの要約からサーバーレベルのノートを作成

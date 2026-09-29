@@ -97,6 +97,12 @@ Discord 斜杠命令只有一个：`/nep`（名称来自 `bot.commandName`）。
 
 `features.privateMessages`（默认关闭）允许公会成员通过 Discord 私信与角色交谈。角色不变，公共记忆不变；私信中说的话记忆在每成员的私有层中，其他对话不可见。私信需要同一服务器成员身份，无需邀请 URL 已授予权限之外的额外权限。门控、私有记忆层和所有者命令的详情参见 [`messages-and-memory.md`](messages-and-memory.md#私有层)。
 
+## Mentor
+
+`features.mentor`（默认关闭）添加一个手动测试子进程，使用独立模型。所有者用自己的话描述角色应有的行为（"案例"），mentor 构造聊天场景来测试它，在沙盒中使用实时提示和记忆让角色作答，并对每个回答按五个维度评分（0–10）。不会向任何频道发布内容；所有工作留在 `data/` 和管理频道中。在第一阶段 mentor 仅测量和报告，不进行任何编辑。
+
+案例的目标可以是角色的回复方式，也可以是记忆分析器的写入方式。Mentor 的模型、预算和命令独立于角色。配置键参见 [`configuration.md`](configuration.md#mentor)；`/nep mentor` 子命令参见 [`owner-commands.md`](owner-commands.md)。
+
 ## 成本
 
 每个回合消耗一次 LLM 请求；记忆更新再加一次。成本取决于模型和端点；`llm.model` 和 `llm.baseUrl` 接受任何兼容值。每日上限（`llm.maxRequestsPerDay`）防止超支。视频描述每个片段向更便宜的独立模型发一次请求（`media.video.maxPerDay` 限制每日数量）；`yt-dlp` 和 `ffmpeg` 在本地运行，只消耗带宽。链接阅读和搜索（`features.webLookup`，默认关闭）向文本分类器发请求，受 `web.maxPerDay` 限制；搜索还需要 Brave Search API 密钥（免费层：每月 2,000 次查询）。图像生成（`features.imageGeneration`，默认关闭）通过 `image.model` 按输出 token 计费；`image.maxPerDay` 独立于聊天请求限制每日数量。私聊（`features.privateMessages`，默认关闭）使用同样的 LLM 和上限；每条 DM 回复是一次请求，每个私有分析器批次是另一次。启用 `features.webLookup` 后，机器人会发出 HTTP 请求获取页面和访问 Brave Search API；私有地址拒绝访问。
@@ -162,6 +168,10 @@ prompts/
   lookup.md                分类器：问题是否需要网络搜索
   read-link.md             浓缩获取的页面
   search-summary.md        浓缩搜索结果
+  mentor-situations.md     mentor：构造测试场景（reply 目标）
+  mentor-situations-memory.md  mentor：构造测试场景（memory 目标）
+  mentor-score.md          mentor：评分角色的回答
+  mentor-score-memory.md   mentor：评分分析器存储的文本
   profile.md               预热：从消息样本生成一个成员的档案
   channel.md               预热：从消息样本生成频道笔记
   server.md                预热：从频道笔记和成员摘要生成服务器级笔记
