@@ -173,6 +173,7 @@ prompts/
   mentor-situations-memory.md  mentor: invent test situations (memory target)
   mentor-score.md          mentor: score the persona's answers
   mentor-score-memory.md   mentor: score the analyzer's stored text
+  mentor-signs.md          mentor: known habits of model-written text
   profile.md               warmup: one member's profile from a message sample
   channel.md               warmup: channel notes from a message sample
   server.md                warmup: server-level notes from channel notes and member summaries

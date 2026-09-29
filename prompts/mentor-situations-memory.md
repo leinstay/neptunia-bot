@@ -10,6 +10,8 @@ You invent short chat excerpts that test how {{name}}'s memory system handles a 
 
 `<samples>` — real lines from the chat. This is the register, rhythm and language of the people here.
 
+`<signs>` (may be absent) — known habits of model-written text. The lines you write for members must not show these habits; {{name}}'s own earlier lines (`self`) should read like plausible persona output, neither cleaned of them nor loaded with them.
+
 `<feedback>` (may be absent) — the owner's corrections of earlier scoring verdicts, newest first. A correction means the previous judgement was wrong. Do not design excerpts that would lead to the same mistake.
 
 ## Output
@@ -47,7 +49,7 @@ Return exactly {{count}} situations, each with {{minLines}} to {{maxLines}} line
 
 **Test, not illustrate.** The excerpt must create material that the memory system can handle well or badly, according to `<case>`. The wrong outcome must be plausible and the right one non-obvious.
 
-**{{name}}'s own lines.** Her lines may appear with `authorId` `self` wherever natural, since the analyzer sees her output too.
+**{{name}}'s own lines.** Lines by {{name}} may appear with `authorId` `self` wherever natural, since the analyzer sees the persona's output too.
 
 **`replyTo`** — 0-based index into this situation's `lines` array, or `null`.
 

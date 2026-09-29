@@ -44,6 +44,7 @@
 | `mentor-situations-memory.md` | いいえ | Mentor: memory ターゲットケースのテスト状況を作成（`features.mentor`）。JSON のみを返す | `{{name}}` `{{count}}` `{{minLines}}` `{{maxLines}}` |
 | `mentor-score.md` | いいえ | Mentor: ペルソナの回答をスコアリング（`features.mentor`）。キャラクターカードを受け取る。JSON のみを返す | `{{name}}` |
 | `mentor-score-memory.md` | いいえ | Mentor: アナライザーが保存するテキストをスコアリング（`features.mentor`）。キャラクターカードなし。`character` 軸は常に `null`。JSON のみを返す | `{{name}}` |
+| `mentor-signs.md` | いいえ | Mentor: モデル文の既知の癖。すべての mentor リクエストで `<signs>` ブロックとして送信（`features.mentor`）。ファイルがないか空の場合は省略 | `{{name}}` |
 | `labels.json` | はい | コードがプロンプトに挿入するすべての文字列。キーは以下で固定、値はライターが記述する | 以下参照 |
 
 `{{name}}` ボットの表示名 · `{{author}}` 発話者の表示名 · `{{trigger}}` `labels.triggers.*` のいずれか ·
@@ -504,9 +505,20 @@ DM は以下のすべてが満たされた場合にのみ応答されます（�
 
 Mentor モデルはレンダリングされたサンドボックスリクエストを読み取るため、ペルソナが実際の人物について記憶している内容を読み取ります。ダイレクトメッセージとプライベートメモリレイヤーはサンドボックスリクエストに含まれません。
 
+### ランの終了方法
+
+ランは通常、判定とレポートで正常終了します。早期終了もあります:
+
+- **停止** (`budget`): 日次トークン予算が枯渇。スイッチと予算は各状況の前と各 mentor リクエストの前にチェックされます。
+- **停止** (`owner`): オーナーが `/nep mentor stop` または `/nep pause` を実行。
+- **停止** (`disabled`): ラン中に `features.mentor` または `mentor.model` がオフにされた。
+- **エラー** (`the reference is empty`): リファレンスウィンドウ内のリファレンスチャンネルから人々のメッセージを読み取れなかった。モデルリクエスト前にランを終了。
+
+停止されたランは既に得られたスコアを保持し、レポートに含めます。
+
 ### プロンプト
 
-Mentor は 4 つのプロンプトファイルを使用し、ターゲットごとに 1 ペア:
+Mentor は 5 つのプロンプトファイルを使用し、ターゲットごとに 1 ペアと特徴ファイル:
 
 - **Reply ターゲット**: `mentor-situations.md`（状況を作成）と `mentor-score.md`（回答をスコアリング）。
 - **Memory ターゲット**: `mentor-situations-memory.md`（状況を作成）と `mentor-score-memory.md`（保存テキストをスコアリング）。
@@ -523,6 +535,7 @@ Mentor は 4 つのプロンプトファイルを使用し、ターゲットご�
 | `<members>` | 保存されたプロファイル 1 行ずつ: `name (id:123)` | 状況 |
 | `<reference>` | スタイルプロファイル JSON: 句読点の頻度、長さ、返信頻度、未使用文字 | すべて |
 | `<samples>` | チャットからのランダムな行、1 行ずつ | すべて |
+| `<signs>` | `{{name}}` を埋めた `mentor-signs.md`: モデル文の既知の癖。ファイルがないか空の場合は省略 | すべて |
 | `<intended>` | `labels.mentor.intended`、1 項目ずつ | スコアリング |
 | `<feedback>` | オーナーの修正の JSON 配列: `[{ "case": "...", "reason": "..." }]`、新しい順。空の場合省略 | すべて |
 | `<character>` | `{{name}}` を埋めたキャラクターカード | スコアリング（reply のみ） |
@@ -530,7 +543,7 @@ Mentor は 4 つのプロンプトファイルを使用し、ターゲットご�
 | `<learned>` | ペルソナが見ている指示的な学習項目 | スコアリング |
 | `<situation>` | チャットトランスクリプトとしてレンダリングされた状況（ペルソナの視点） | スコアリング |
 | `<answers>` | JSON 配列: `[{ "id": "s1a1", "messages": ["..."], "reactions": ["..."], "silent": false }]` | スコアリング（reply） |
-| `<stored>` | JSON 配列: `[{ "id": "s1a1", "texts": [{ "path": "...", "text": "..." }] }]` | スコアリング（memory） |
+| `<stored>` | JSON 配列: `[{ "id": "s1a1", "texts": [{ "path": "...", "text": "..." }], "parseOk": true }]`。`parseOk` が false の場合、アナライザーが無効な JSON を返し何も保存されない | スコアリング（memory） |
 | `<facts>` | 回答 id をキーとした JSON オブジェクト。確定的測定結果（未使用マーク、レアマーク、コンマ密度、長さ）と、回答間で見つかったフレーズ `"repeated"` を含む | スコアリング |
 
 ### 回答 ID
@@ -602,7 +615,12 @@ Memory ターゲットスコアリングでは `character` は常に `null`、`h
 
 1. `<feedback>` 内のオーナーの修正。Mentor の好みに優先する。
 2. 測定されたリファレンス（`<reference>`、`<samples>`）と確定的事実（`<facts>`）。
-3. Mentor 自身の好み。提案のみ行い、上記 2 つに優先しない。
+3. モデル文の既知の特徴（`<signs>`）。測定結果やリファレンスに優先しない。
+4. Mentor 自身の好み。提案のみ行い、上記 3 つに優先しない。
+
+### 出典
+
+`mentor-signs.md` の既知の特徴リストは、Wikipedia の "Signs of AI writing" と humanizer skill (MIT) を参考に作成されました。
 
 ## リミット通知
 

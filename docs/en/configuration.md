@@ -393,7 +393,7 @@ Settings for the manual testing sub-process (`features.mentor`). The mentor inve
 | `reference.rareMinAuthors` | `2` | A mark used by fewer authors than this counts as rare |
 | `feedbackExamples` | `10` | Latest owner corrections (`/nep mentor wrong`) included in every scoring request |
 
-`llm.maxRequestTokens` (50k per request) applies to every request the mentor makes or causes, including sandbox answers. Before each request the estimated cost is checked against the remaining daily budget; when the budget runs out the run stops and reports what it has.
+`llm.maxRequestTokens` (50k per request) applies to every request the mentor makes or causes, including sandbox answers. Before each mentor request the budget check counts the prompt plus the most the answer may cost (`mentor.maxOutputTokens` at `mentor.outputTokenWeight`), so a request is refused when its possible output does not fit what is left. When the budget runs out the run stops and reports what it has. A run also stops when `features.mentor` or `mentor.model` is turned off during it, or when the reference channels hold no messages of people in the reference window.
 
 ## `warmup`
 

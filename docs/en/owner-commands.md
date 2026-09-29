@@ -9,7 +9,7 @@ Channels, roles and users are picked from Discord's own pickers; `set`/`unset` a
 | `/nep status` | Model, calibration, quotas (including image count and image model), per-guild memory status, private chat on/off and private file count |
 | `/nep reload` | Reload config and prompts now |
 | `/nep ping [role]` | Send a minimal request to one or all model roles (`talk`, `analyzer`, `classifier.text`, `classifier.media`, `classifier.video`, `mentor`) and report model, latency, provider, tokens or the error; `/nep ping classifier` pings all three classifier roles. After `classifier.video`, reports `youtube: API key — {status}` (e.g. `ok`, `not needed (yt-dlp ok)`, `missing (blocked)`); after `classifier.text`, reports `web: API key — {status}` (`ok`, `missing` or `off`). Does not count against `llm.maxRequestsPerDay` and works while paused or warming up |
-| `/nep pause` | Stop all activity, flush memory to disk and unload it; `data/` is safe to edit while paused |
+| `/nep pause` | Stop all activity, flush memory to disk and unload it; a mentor run in flight is stopped and its report posted before the flush. `data/` is safe to edit while paused |
 | `/nep resume` | Reload memory from `data/` and continue; refuses if any JSON file does not parse, naming the broken ones |
 | `/nep interject [channel]` | Jump into the current conversation in this channel now |
 | `/nep initiate [channel]` | Start a topic in this channel now |
@@ -56,7 +56,7 @@ Channels, roles and users are picked from Discord's own pickers; `set`/`unset` a
 | `/nep mentor stop` | Cancel the run in flight, including the model call in progress |
 | `/nep mentor show <id>` | The report of the last run: situations, answers, scores and comments |
 | `/nep mentor wrong <id> <reason>` | Tell the mentor it judged that case wrongly and why; kept as a counter-example for future scoring |
-| `/nep mentor status` | Model, enabled or not, tokens used today / cap, cases by state, the run in flight |
+| `/nep mentor status` | Model, enabled or not, tokens used today / cap, cases by state, the run in flight (shows `, stopping` while a stop is pending) |
 | `/nep access grant <command> [role] [user]` | Open a command, group or `*` to everyone (default), a role, or a user. `private.*` and `mentor.*` are excluded; see above |
 | `/nep access revoke <command> [role] [user]` | Revoke a previous grant from everyone (default), a role, or a user |
 | `/nep access list` | List every current access grant |

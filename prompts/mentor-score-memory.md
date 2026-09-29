@@ -8,6 +8,8 @@ You score the text that {{name}}'s memory analyzer would store after observing a
 
 `<samples>` — real lines from the chat, showing register, rhythm and language.
 
+`<signs>` (may be absent) — known habits of model-written text. These count against the `human` axis when they appear in stored text.
+
 `<rules>` — the owner's corrections and instructions for {{name}}.
 
 `<learned>` — things people taught {{name}} directly.
@@ -18,7 +20,7 @@ You score the text that {{name}}'s memory analyzer would store after observing a
 
 `<situation>` — the chat that was observed, rendered as a transcript.
 
-`<stored>` — the text the analyzer would write into memory, as JSON: `[{ "id": "s1a1", "texts": [{ "path": "...", "text": "..." }] }]`. Each entry has a path (the memory field being written) and the text it would store.
+`<stored>` — the text the analyzer would write into memory, as JSON: `[{ "id": "s1a1", "texts": [{ "path": "...", "text": "..." }], "parseOk": true }]`. Each entry has a path (the memory field being written) and the text it would store. When `parseOk` is false the analyzer returned invalid JSON and nothing would have been stored; score that as a failure on `goal` and `overall`.
 
 `<facts>` — deterministic measurements of each stored text, keyed by answer id: characters never used and characters rare in the chat (a mark only one person uses is that person's habit, not the chat's). Also a `"repeated"` key with patterns that appear across multiple samples of this run.
 
@@ -28,7 +30,9 @@ You score the text that {{name}}'s memory analyzer would store after observing a
 
 2. **The measured reference and the facts** (`<reference>`, `<samples>`, `<facts>`). Numbers and real text. A fact is not a matter of opinion.
 
-3. **Your own taste**. Proposes; never overrules the first two.
+3. **The known signs** (`<signs>`). Named habits of model writing. A sign never outranks a measurement or the reference.
+
+4. **Your own taste**. Proposes; never overrules the first three.
 
 ## Axes
 
@@ -38,6 +42,8 @@ Score each axis as an integer 0 to 10, where 10 is ideal. Use `null` when you ha
 - 0: register, structure or vocabulary far from how someone who knows these people would write for themselves.
 - 5: functional notes that could go either way.
 - 10: reads like a person's own jotted notes — natural phrasing, the voice of someone who knows these people.
+
+The known signs in `<signs>` count against this axis when they appear.
 
 **`character`** — always `null`.
 

@@ -44,6 +44,7 @@ All instructions are English in both layers; a character's speech samples may be
 | `mentor-situations-memory.md` | no | Mentor: invent test chat excerpts for a memory-target case (`features.mentor`). Returns JSON only | `{{name}}` `{{count}}` `{{minLines}}` `{{maxLines}}` |
 | `mentor-score.md` | no | Mentor: score the persona's answers to a situation (`features.mentor`). Receives the character card. Returns JSON only | `{{name}}` |
 | `mentor-score-memory.md` | no | Mentor: score the text the analyzer would store (`features.mentor`). No character card. `character` axis is always `null`. Returns JSON only | `{{name}}` |
+| `mentor-signs.md` | no | Mentor: known habits of model-written text, sent as the `<signs>` block in every mentor request (`features.mentor`). Omitted when missing or empty | `{{name}}` |
 | `labels.json` | yes | Every string the CODE inserts into a prompt. Keys fixed below, values are the writer's | see below |
 
 `{{name}}` bot's display name · `{{author}}` caller's display name · `{{trigger}}` one of `labels.triggers.*` ·
@@ -679,9 +680,20 @@ A manual sub-process (`features.mentor`) with its own model (`mentor.model`). Th
 
 The mentor model reads the rendered sandbox request, so it reads what the persona remembers about real people. Direct messages and the private memory layer are never part of a sandbox request.
 
+### How a run ends
+
+A run ends normally with a verdict and a report. It can also end early:
+
+- **Stopped** (`budget`): the daily token budget is exhausted. The switches and the budget are checked before every situation and before every mentor request.
+- **Stopped** (`owner`): the owner ran `/nep mentor stop` or `/nep pause`.
+- **Stopped** (`disabled`): `features.mentor` or `mentor.model` was turned off during the run.
+- **Error** (`the reference is empty`): no message of people could be read from the reference channels in the reference window. This ends the run before any model request.
+
+A stopped run keeps the scores it already has and reports them.
+
 ### Prompts
 
-The mentor uses four prompt files, one pair per target:
+The mentor uses five prompt files, one pair per target plus the signs file:
 
 - **Reply target**: `mentor-situations.md` (invent situations) and `mentor-score.md` (score answers).
 - **Memory target**: `mentor-situations-memory.md` (invent situations) and `mentor-score-memory.md` (score stored text).
@@ -698,6 +710,7 @@ Placeholders filled by code: `{{name}}` in all four; `{{count}}`, `{{minLines}}`
 | `<members>` | One line per stored profile: `name (id:123)` | situations |
 | `<reference>` | Style profile as JSON: punctuation rates, lengths, reply frequency, characters never used | all |
 | `<samples>` | Random lines from the chat, one per line | all |
+| `<signs>` | `mentor-signs.md` with `{{name}}` filled: known habits of model-written text. Omitted when the file is missing or empty | all |
 | `<intended>` | `labels.mentor.intended`, one line per item | score |
 | `<feedback>` | JSON array of the owner's corrections: `[{ "case": "...", "reason": "..." }]`, newest first; omitted when empty | all |
 | `<character>` | The character card with `{{name}}` filled | score (reply target only) |
@@ -705,7 +718,7 @@ Placeholders filled by code: `{{name}}` in all four; `{{count}}`, `{{minLines}}`
 | `<learned>` | Instruction-like learned items as the persona sees them | score |
 | `<situation>` | The situation rendered as a chat transcript, the way the persona saw it | score |
 | `<answers>` | JSON array: `[{ "id": "s1a1", "messages": ["..."], "reactions": ["..."], "silent": false }]` | score (reply target) |
-| `<stored>` | JSON array: `[{ "id": "s1a1", "texts": [{ "path": "...", "text": "..." }] }]` | score (memory target) |
+| `<stored>` | JSON array: `[{ "id": "s1a1", "texts": [{ "path": "...", "text": "..." }], "parseOk": true }]`. When `parseOk` is false the analyzer returned invalid JSON and nothing would have been stored | score (memory target) |
 | `<facts>` | JSON object keyed by answer id with deterministic measurements (unused marks, rare marks, comma density, length), plus `"repeated"` with phrases found across answers | score |
 
 ### Answer ids
@@ -777,7 +790,12 @@ A case passes when the median of `overall` >= `mentor.pass.score` (default 7) AN
 
 1. The owner's corrections in `<feedback>`, which overrule the mentor's taste.
 2. The measured reference (`<reference>`, `<samples>`) and the deterministic facts (`<facts>`).
-3. The mentor's own taste, which proposes but never overrules the first two.
+3. The known signs of model writing (`<signs>`). A sign never outranks a measurement or the reference.
+4. The mentor's own taste, which proposes but never overrules the first three.
+
+### Sources
+
+The list of known signs in `mentor-signs.md` was informed by Wikipedia's "Signs of AI writing" and the humanizer skill (MIT).
 
 ## Limit notices
 

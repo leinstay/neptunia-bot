@@ -172,6 +172,7 @@ prompts/
   mentor-situations-memory.md  mentor: テスト状況を作成（memory ターゲット）
   mentor-score.md          mentor: ペルソナの回答をスコアリング
   mentor-score-memory.md   mentor: アナライザーの保存テキストをスコアリング
+  mentor-signs.md          mentor: モデル文の既知の癖
   profile.md               ウォームアップ: メッセージサンプルからメンバーのプロファイルを作成
   channel.md               ウォームアップ: メッセージサンプルからチャンネルノートを作成
   server.md                ウォームアップ: チャンネルノートとメンバーの要約からサーバーレベルのノートを作成

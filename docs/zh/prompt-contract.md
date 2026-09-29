@@ -44,6 +44,7 @@
 | `mentor-situations-memory.md` | 否 | Mentor：为 memory 目标案例构造测试场景（`features.mentor`）。仅返回 JSON | `{{name}}` `{{count}}` `{{minLines}}` `{{maxLines}}` |
 | `mentor-score.md` | 否 | Mentor：对角色的回答进行评分（`features.mentor`）。接收角色卡。仅返回 JSON | `{{name}}` |
 | `mentor-score-memory.md` | 否 | Mentor：对分析器将存储的文本进行评分（`features.mentor`）。无角色卡。`character` 轴始终为 `null`。仅返回 JSON | `{{name}}` |
+| `mentor-signs.md` | 否 | Mentor：已知的模型文本习惯，作为 `<signs>` 块在每次 mentor 请求中发送（`features.mentor`）。文件缺失或为空时省略 | `{{name}}` |
 | `labels.json` | 是 | 代码插入提示中的所有字符串。键在下方固定，值由编写者决定 | 见下文 |
 
 `{{name}}` 机器人的显示名称 · `{{author}}` 呼叫者的显示名称 · `{{trigger}}` `labels.triggers.*` 之一 ·
@@ -606,9 +607,20 @@ mentor.intended                          array of short strings: engine behaviou
 
 Mentor 模型读取渲染后的沙盒请求，因此可以读取角色记忆中关于真实用户的内容。私信和私有记忆层永远不会出现在沙盒请求中。
 
+### 运行如何结束
+
+运行正常结束时会产生判定和报告。也可能提前结束：
+
+- **停止** (`budget`)：每日 token 预算耗尽。开关和预算在每个场景前和每个 mentor 请求前检查。
+- **停止** (`owner`)：所有者执行了 `/nep mentor stop` 或 `/nep pause`。
+- **停止** (`disabled`)：运行期间 `features.mentor` 或 `mentor.model` 被关闭。
+- **错误** (`the reference is empty`)：参考窗口内无法从参考频道读取任何人的消息。在任何模型请求之前结束运行。
+
+停止的运行保留已有的分数并在报告中包含它们。
+
 ### 提示
 
-Mentor 使用四个提示文件，每个目标一对：
+Mentor 使用五个提示文件，每个目标一对加上特征文件：
 
 - **Reply 目标**：`mentor-situations.md`（构造场景）和 `mentor-score.md`（评分回答）。
 - **Memory 目标**：`mentor-situations-memory.md`（构造场景）和 `mentor-score-memory.md`（评分存储文本）。
@@ -625,6 +637,7 @@ Mentor 使用四个提示文件，每个目标一对：
 | `<members>` | 每行一个存储的档案：`name (id:123)` | 场景 |
 | `<reference>` | 风格档案 JSON：标点频率、长度、回复频率、未使用的字符 | 全部 |
 | `<samples>` | 聊天中的随机行，每行一条 | 全部 |
+| `<signs>` | 填充了 `{{name}}` 的 `mentor-signs.md`：已知的模型文本习惯。文件缺失或为空时省略 | 全部 |
 | `<intended>` | `labels.mentor.intended`，每项一行 | 评分 |
 | `<feedback>` | 所有者修正的 JSON 数组：`[{ "case": "...", "reason": "..." }]`，从新到旧；空时省略 | 全部 |
 | `<character>` | 填充了 `{{name}}` 的角色卡 | 评分（仅 reply） |
@@ -632,7 +645,7 @@ Mentor 使用四个提示文件，每个目标一对：
 | `<learned>` | 角色看到的指令式已学内容 | 评分 |
 | `<situation>` | 渲染为聊天记录的场景，角色所见 | 评分 |
 | `<answers>` | JSON 数组：`[{ "id": "s1a1", "messages": ["..."], "reactions": ["..."], "silent": false }]` | 评分（reply） |
-| `<stored>` | JSON 数组：`[{ "id": "s1a1", "texts": [{ "path": "...", "text": "..." }] }]` | 评分（memory） |
+| `<stored>` | JSON 数组：`[{ "id": "s1a1", "texts": [{ "path": "...", "text": "..." }], "parseOk": true }]`。当 `parseOk` 为 false 时分析器返回了无效 JSON，不会存储任何内容 | 评分（memory） |
 | `<facts>` | 按回答 id 索引的 JSON 对象，包含确定性测量结果（未使用标记、稀有标记、逗号密度、长度），以及跨回答出现的短语 `"repeated"` | 评分 |
 
 ### 回答 ID
@@ -704,7 +717,12 @@ Memory 评分中 `character` 始终为 `null`，`human` 衡量文本是否读起
 
 1. `<feedback>` 中所有者的修正，优先于 mentor 的品味。
 2. 测量的参考（`<reference>`、`<samples>`）和确定性事实（`<facts>`）。
-3. Mentor 自身的品味，提出建议但绝不凌驾于前两者。
+3. 已知的模型文本特征（`<signs>`）。特征绝不凌驾于测量结果或参考。
+4. Mentor 自身的品味，提出建议但绝不凌驾于前三者。
+
+### 来源
+
+`mentor-signs.md` 中的已知特征列表参考了维基百科的 "Signs of AI writing" 和 humanizer skill (MIT)。
 
 ## 限制通知
 
