@@ -674,7 +674,7 @@ are ignored. `guild`, `channels`, `lore`, `self` and any other user ids are drop
 
 ## Mentor
 
-A manual sub-process (`features.mentor`) with its own model (`mentor.model`). The owner adds a case (a behaviour he wants from the persona), and the mentor invents chat situations, runs the persona through them in a sandbox, and scores the answers. In this first stage the mentor only measures and reports; it does not edit anything. One run at a time.
+A manual sub-process (`features.mentor`) with its own model (`mentor.model`). The owner adds a case (a behaviour he wants from the persona), and the mentor invents chat situations, runs the persona through them in a sandbox, and scores the answers. In this first stage the mentor only measures and reports; it does not edit anything. One run at a time. All work stays in `data/`; when `bot.dryRunChannelId` is set, a finished run is posted there as well. Without an admin channel the owner follows a run with `/nep mentor status` and reads the report with `/nep mentor show <id>`.
 
 ### Privacy
 
@@ -719,7 +719,7 @@ Placeholders filled by code: `{{name}}` in all four; `{{count}}`, `{{minLines}}`
 | `<situation>` | The situation rendered as a chat transcript, the way the persona saw it | score |
 | `<answers>` | JSON array: `[{ "id": "s1a1", "messages": ["..."], "reactions": ["..."], "silent": false }]` | score (reply target) |
 | `<stored>` | JSON array: `[{ "id": "s1a1", "texts": [{ "path": "...", "text": "..." }], "parseOk": true }]`. When `parseOk` is false the analyzer returned invalid JSON and nothing would have been stored | score (memory target) |
-| `<facts>` | JSON object keyed by answer id with deterministic measurements (unused marks, rare marks, comma density, length), plus `"repeated"` with phrases found across answers | score |
+| `<facts>` | JSON object keyed by answer id with deterministic measurements (unused marks, rare marks, comma count, comma density, length), plus `"repeated"` with phrases found in two or more different situations. Per answer: `commas` is a count; `commaPer1000` is a number only when the measured text has at least 150 characters, `null` for a shorter one (too short to measure; the mentor judges the count, never infers a density). `repeated` lists phrases that recurred across different situations, and `count` is the number of situations | score |
 
 ### Answer ids
 
@@ -784,7 +784,7 @@ For memory-target scoring `character` is always `null` and `human` measures whet
 
 ### Pass rule
 
-A case passes when the median of `overall` >= `mentor.pass.score` (default 7) AND the median of `goal` >= `mentor.pass.score` AND no axis has a median below `mentor.pass.floor` (default 5). An axis where every score is `null` has median `null` and is not checked.
+A case passes when the median of `overall` >= `mentor.pass.score` (default 7) AND the median of `goal` >= `mentor.pass.score` AND no axis has a median below `mentor.pass.floor` (default 5). Every situation is held to the floor as well: when the median `overall` or the median `goal` of any one situation is under `mentor.pass.floor`, the case fails, whatever the medians over all answers. The report shows the median `overall` and `goal` of every situation. An axis where every score is `null` has median `null` and is not checked.
 
 ### Evidence order for scoring
 

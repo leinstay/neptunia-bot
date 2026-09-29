@@ -385,7 +385,7 @@ YouTube 链接的时长通过以下链式探测获取：首先尝试 yt-dlp，�
 | `samples` | `3` | 每个场景的角色回答数 |
 | `check.samples` | `1` | `/nep mentor check` 时每个场景的角色回答数 |
 | `pass.score` | `7` | `overall` 和 `goal` 的中位数达到此阈值时案例通过 |
-| `pass.floor` | `5` | 任一轴的中位数低于此下限时案例失败 |
+| `pass.floor` | `5` | 任一轴的中位数低于此下限时案例失败。每个场景也受此下限约束：当任一场景的 `overall` 中位数或 `goal` 中位数低于此值时案例失败，无论所有回答的中位数如何 |
 | `reference.days` | `7` | 用于构建风格参考的聊天历史天数 |
 | `reference.samples` | `60` | 从参考窗口中随机选取的风格示例行数（2–200 字符） |
 | `reference.maxMessages` | `3000` | 从参考频道读取的最大消息数 |

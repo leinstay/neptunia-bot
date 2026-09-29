@@ -51,12 +51,12 @@
 | `/nep mentor add <text> [target]` | ケースを追加: ペルソナに期待する行動を自分の言葉で。`target` は `reply`（デフォルト）または `memory`。ケース id を返答 |
 | `/nep mentor cases` | ケース一覧: id、状態（`new`、`passing`、`failing`）、ターゲット、前回スコア、80 文字までのテキスト |
 | `/nep mentor remove <id>` | ケースを削除 |
-| `/nep mentor run <id>` | 1 つのケースのフルサイクルを実行。開始した旨を即時応答。レポートは管理チャンネルに送信 |
-| `/nep mentor check` | 実行記録のあるすべてのアクティブケースの保存済み状況を再プレイし、状況ごとに `mentor.check.samples` サンプルで、1 つの統合レポートを投稿 |
+| `/nep mentor run <id>` | 1 つのケースのフルサイクルを実行。開始した旨を即時応答。管理チャンネル（`bot.dryRunChannelId`）がある場合はそこにレポートを投稿。ない場合は `/nep mentor status` と `/nep mentor show <id>` を案内 |
+| `/nep mentor check` | 実行記録のあるすべてのアクティブケースの保存済み状況を再プレイし、状況ごとに `mentor.check.samples` サンプル。管理チャンネルがある場合は統合レポートを投稿。ない場合は `/nep mentor status` と `/nep mentor show <id>` を案内 |
 | `/nep mentor stop` | 実行中のランをキャンセル（進行中のモデル呼び出しを含む） |
 | `/nep mentor show <id>` | 前回ランのレポート: 状況、回答、スコアとコメント |
 | `/nep mentor wrong <id> <reason>` | そのケースの判定が誤っていたことと理由を mentor に伝える。今後のスコアリングの反例として保存 |
-| `/nep mentor status` | モデル、有効/無効、本日のトークン使用量/上限、状態別ケース数、実行中のラン（停止保留中は `, stopping` を表示） |
+| `/nep mentor status` | モデル、有効/無効、本日のトークン使用量/上限、状態別ケース数、実行中のラン（停止保留中は `, stopping` を表示）、最近完了したラン: ケース、結果、overall 中央値、スコアリング済み回答数、トークン数、完了時刻 |
 | `/nep access grant <command> [role] [user]` | コマンド、グループ、または `*` を全員（デフォルト）、ロール、またはユーザーに開放。`private.*` と `mentor.*` は除外; 上記参照 |
 | `/nep access revoke <command> [role] [user]` | 以前のグラントを全員（デフォルト）、ロール、またはユーザーから取り消し |
 | `/nep access list` | 現在のアクセスグラント一覧を表示 |

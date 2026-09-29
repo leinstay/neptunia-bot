@@ -601,7 +601,7 @@ mentor.intended                          array of short strings: engine behaviou
 
 ## Mentor
 
-手动子进程（`features.mentor`），使用独立模型（`mentor.model`）。所有者添加案例（角色应有的行为），mentor 构造聊天场景，在沙盒中让角色作答并评分。第一阶段仅测量和报告，不进行任何编辑。一次只运行一个。
+手动子进程（`features.mentor`），使用独立模型（`mentor.model`）。所有者添加案例（角色应有的行为），mentor 构造聊天场景，在沙盒中让角色作答并评分。第一阶段仅测量和报告，不进行任何编辑。一次只运行一个。所有工作留在 `data/`；设置了 `bot.dryRunChannelId` 时，完成的运行也会发布到该频道。没有管理频道时，所有者通过 `/nep mentor status` 跟踪运行，通过 `/nep mentor show <id>` 读取报告。
 
 ### 隐私
 
@@ -646,7 +646,7 @@ Mentor 使用五个提示文件，每个目标一对加上特征文件：
 | `<situation>` | 渲染为聊天记录的场景，角色所见 | 评分 |
 | `<answers>` | JSON 数组：`[{ "id": "s1a1", "messages": ["..."], "reactions": ["..."], "silent": false }]` | 评分（reply） |
 | `<stored>` | JSON 数组：`[{ "id": "s1a1", "texts": [{ "path": "...", "text": "..." }], "parseOk": true }]`。当 `parseOk` 为 false 时分析器返回了无效 JSON，不会存储任何内容 | 评分（memory） |
-| `<facts>` | 按回答 id 索引的 JSON 对象，包含确定性测量结果（未使用标记、稀有标记、逗号密度、长度），以及跨回答出现的短语 `"repeated"` | 评分 |
+| `<facts>` | 按回答 id 索引的 JSON 对象，包含确定性测量结果（未使用标记、稀有标记、逗号计数、逗号密度、长度），以及在两个或更多不同场景中出现的短语 `"repeated"`。每个回答：`commas` 为计数；`commaPer1000` 仅在测量文本至少 150 字符时为数字，更短时为 `null`（太短无法测量；mentor 根据计数评判，不推断密度）。`repeated` 列出在不同场景中重复出现的短语，`count` 为场景数 | 评分 |
 
 ### 回答 ID
 
@@ -711,7 +711,7 @@ Memory 评分中 `character` 始终为 `null`，`human` 衡量文本是否读起
 
 ### 通过规则
 
-案例通过条件：`overall` 中位数 >= `mentor.pass.score`（默认 7）且 `goal` 中位数 >= `mentor.pass.score` 且没有任何轴的中位数低于 `mentor.pass.floor`（默认 5）。所有分数均为 `null` 的轴中位数为 `null`，不参与检查。
+案例通过条件：`overall` 中位数 >= `mentor.pass.score`（默认 7）且 `goal` 中位数 >= `mentor.pass.score` 且没有任何轴的中位数低于 `mentor.pass.floor`（默认 5）。每个场景也受下限约束：当任一场景的 `overall` 中位数或 `goal` 中位数低于 `mentor.pass.floor` 时案例失败，无论所有回答的中位数如何。报告显示每个场景的 `overall` 和 `goal` 中位数。所有分数均为 `null` 的轴中位数为 `null`，不参与检查。
 
 ### 评分证据顺序
 

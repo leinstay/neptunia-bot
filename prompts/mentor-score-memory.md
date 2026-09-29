@@ -22,7 +22,7 @@ You score the text that {{name}}'s memory analyzer would store after observing a
 
 `<stored>` — the text the analyzer would write into memory, as JSON: `[{ "id": "s1a1", "texts": [{ "path": "...", "text": "..." }], "parseOk": true }]`. Each entry has a path (the memory field being written) and the text it would store. When `parseOk` is false the analyzer returned invalid JSON and nothing would have been stored; score that as a failure on `goal` and `overall`.
 
-`<facts>` — deterministic measurements of each stored text, keyed by answer id: characters never used and characters rare in the chat (a mark only one person uses is that person's habit, not the chat's). Also a `"repeated"` key with patterns that appear across multiple samples of this run.
+`<facts>` — deterministic measurements of each stored text, keyed by answer id: characters never used and characters rare in the chat (a mark only one person uses is that person's habit, not the chat's), comma count and comma density. `commaPer1000` is a number only when the measured text has at least 150 characters; for a shorter text it is `null` because one comma more or less swings the rate too far to mean anything. When it is `null`, judge `commas` (the raw count) and never infer a density. Also a `"repeated"` key with phrases that recurred in two or more different situations, and `count` is the number of situations; a phrase shared only by samples of one situation is not listed.
 
 ## Evidence order
 

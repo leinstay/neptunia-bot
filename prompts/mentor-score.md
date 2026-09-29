@@ -24,7 +24,7 @@ You score {{name}}'s answers to a chat situation, measuring how well each one ha
 
 `<answers>` — the persona's answers as JSON: `[{ "id": "s1a1", "messages": [...], "reactions": [...], "silent": false }]`. `silent: true` means the persona chose to stay silent.
 
-`<facts>` — deterministic measurements of each answer, keyed by answer id: characters that people in the chat never use but the answer does, characters that are rare in the chat (used by only one person or at a negligible rate — a mark only one person uses is that person's habit, not the chat's, and an answer that uses it is further from how the chat writes), comma density and length against the reference. Also a `"repeated"` key with phrases that appear across multiple answers of this run.
+`<facts>` — deterministic measurements of each answer, keyed by answer id: characters that people in the chat never use but the answer does, characters that are rare in the chat (used by only one person or at a negligible rate; a mark only one person uses is that person's habit, not the chat's, and an answer that uses it is further from how the chat writes), comma count, comma density and length against the reference. `commaPer1000` is a number only when the measured text has at least 150 characters; for a shorter answer it is `null` because one comma more or less swings the rate too far to mean anything. When it is `null`, judge `commas` (the raw count) and never infer a density. Also a `"repeated"` key with phrases that recurred in two or more different situations, and `count` is the number of situations; a phrase shared only by samples of one situation is not listed, because the situation itself explains the overlap.
 
 ## Evidence order
 
