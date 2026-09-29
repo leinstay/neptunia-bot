@@ -361,6 +361,7 @@ Settings for private chat (`features.privateMessages`). All hot-reloaded. The ga
 | `minAffinity` | `5` | Minimum public attitude score to answer a DM; owners bypass this check |
 | `maxPerUserPerDay` | `100` | DM turns per member per day that reached the model (answered or silent); a cap hit posts a limit notice once per day |
 | `maxPerOwnerPerDay` | `200` | DM turns per day for bot owners that reached the model (answered or silent) |
+| `purgeMaxMessages` | `5000` | Max DM messages `/nep private purge` scans (newest first) in one run |
 
 With `features.relationships` off, public scores stay at 0, so with the default `minAffinity` only owners can DM.
 

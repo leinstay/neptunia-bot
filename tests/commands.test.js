@@ -174,14 +174,14 @@ test('buildCommandTree: memory group (show/channel/server/forget/affinity/wipe/r
   assert.equal(findOption(refresh.options, 'user').required, true);
 });
 
-test('buildCommandTree: private group (show/forget), each with a required user', () => {
+test('buildCommandTree: private group (show/forget/purge), each with a required user', () => {
   const [command] = buildCommandTree('nep');
   const group = findOption(command.options, 'private');
   assert.equal(group.type, 2); // SUBCOMMAND_GROUP
   assert.ok(group.description.length <= 100);
   assert.deepEqual(
     group.options.map((o) => o.name),
-    ['show', 'forget'],
+    ['show', 'forget', 'purge'],
   );
   for (const sub of group.options) {
     assert.equal(sub.type, 1); // SUBCOMMAND
@@ -406,6 +406,7 @@ test('commandKeys: every group and every leaf command key, derived from the tree
   assert.ok(!groups.has('status'), 'a bare top-level command is not a group');
   assert.ok(keys.has('private.show'));
   assert.ok(keys.has('private.forget'));
+  assert.ok(keys.has('private.purge'));
 
   assert.ok(keys.has('status'));
   assert.ok(keys.has('memory.show'));
@@ -729,10 +730,10 @@ test('interaction handler: a non-owner with a grant on a DIFFERENT key is still 
 
 test('interaction handler: /nep private stays owner-only even with a grant on it, its group or *', async () => {
   const open = { everyone: true, roles: [], users: [] };
-  const admin = fakeAdmin({ owners: ['owner1'], access: { '*': open, private: open, 'private.show': open, 'private.forget': open } });
+  const admin = fakeAdmin({ owners: ['owner1'], access: { '*': open, private: open, 'private.show': open, 'private.forget': open, 'private.purge': open } });
   const handler = createInteractionHandler({ hot: baseHot(), admin, getGuildId: () => 'g1' });
 
-  for (const subcommand of ['show', 'forget']) {
+  for (const subcommand of ['show', 'forget', 'purge']) {
     const interaction = fakeInteraction({ user: { id: 'helper1' }, group: 'private', subcommand, optionValues: { user: { id: 'target1' } } });
     await handler(interaction);
     assert.match(interaction.replies[0].content, /not allowed/i, subcommand);
@@ -901,6 +902,20 @@ test('interaction handler: private.show/private.forget map the user option to us
   await handler(fakeInteraction({ group: 'private', subcommand: 'forget', optionValues: { user: { id: 'target1' } } }));
   assert.equal(admin.runCalls[1][0], 'private.forget');
   assert.deepEqual(admin.runCalls[1][1], { userId: 'target1' });
+});
+
+test('interaction handler: private.purge defers, maps the user option to userId and edits the reply', async () => {
+  const admin = fakeAdmin({ runImpl: () => 'purged' });
+  const handler = createInteractionHandler({ hot: baseHot(), admin, getGuildId: () => 'g1' });
+
+  const interaction = fakeInteraction({ group: 'private', subcommand: 'purge', optionValues: { user: { id: 'target1' } } });
+  await handler(interaction);
+
+  assert.equal(admin.runCalls[0][0], 'private.purge');
+  assert.deepEqual(admin.runCalls[0][1], { userId: 'target1' });
+  assert.equal(interaction.deferred, true);
+  assert.deepEqual(interaction.replies[0], { deferred: true, opts: { ephemeral: true } });
+  assert.equal(interaction.edits[0].content, 'purged');
 });
 
 test('interaction handler: lore.add maps title/keys/text/always straight through', async () => {

@@ -46,6 +46,7 @@ const SLOW_COMMANDS = new Set([
   'warmup.status',
   'warmup.reset',
   'memory.refresh',
+  'private.purge',
   'draw',
 ]);
 
@@ -307,6 +308,12 @@ export function buildCommandTree(commandName) {
               type: SUBCOMMAND,
               name: 'forget',
               description: "Delete a member's private memory only; the public profile is kept.",
+              options: [{ type: USER, name: 'user', description: 'Member.', required: true }],
+            },
+            {
+              type: SUBCOMMAND,
+              name: 'purge',
+              description: "Delete the bot's own messages in a member's DM chat, then their private memory.",
               options: [{ type: USER, name: 'user', description: 'Member.', required: true }],
             },
           ],
@@ -612,6 +619,7 @@ const OPTION_MAPPERS = {
   }),
   'private.show': (options) => ({ userId: options.getUser('user', true).id }),
   'private.forget': (options) => ({ userId: options.getUser('user', true).id }),
+  'private.purge': (options) => ({ userId: options.getUser('user', true).id }),
   'alias.add': (options) => ({ userId: options.getUser('user', true).id, name: options.getString('name', true) }),
   'alias.remove': (options) => ({ userId: options.getUser('user', true).id, name: options.getString('name', true) }),
   'lore.add': (options) => ({

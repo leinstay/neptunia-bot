@@ -6,7 +6,8 @@
 // profile inspection/deletion. This is the ONLY place in the project that ever
 // deletes stored memory, through the three functions store.js allows for it:
 // store.forgetUser (one profile, private layer included), store.forgetPrivate
-// (one member's private layer only, `/nep private forget`) and
+// (one member's private layer only, `/nep private forget` and
+// `/nep private purge`) and
 // store.wipeGuild (a whole guild's memory,
 // `/nep memory wipe`, gated by the served guild's exact name). The tracked
 // prompts/ layer is never written at runtime — live corrections always land
@@ -466,6 +467,19 @@ function clampChars(text, max) {
   return Number.isFinite(max) && max >= 0 ? [...value].slice(0, Math.floor(max)).join('') : value;
 }
 
+/** The oldest id of a page of messages, by snowflake order (the next page's `before`). */
+function oldestMessageId(batch) {
+  let oldest = batch[batch.length - 1].id;
+  for (const message of batch) {
+    try {
+      if (BigInt(message.id) < BigInt(oldest)) oldest = message.id;
+    } catch {
+      return batch[batch.length - 1].id;
+    }
+  }
+  return oldest;
+}
+
 /** Upload file name for a generated picture: `image/jpeg` -> `image.jpg`, else `image.<subtype>`. */
 function imageFileName(mediaType) {
   const subtype = String(mediaType ?? '').split('/')[1]?.split(';')[0]?.trim().toLowerCase() || 'png';
@@ -478,7 +492,8 @@ function imageFileName(mediaType) {
 
 /**
  * `hot`, `store` — see src/hot.js, src/memory/store.js.
- * `client` — a discord.js Client (used for channels.fetch and guilds.cache).
+ * `client` — a discord.js Client (used for channels.fetch, guilds.cache, and users.fetch +
+ *   createDM for `/nep private purge`).
  * `spontaneous` — the spontaneous scheduler: `force(channel, mode)` and `status()`.
  * `calibrator` — token calibrator (src/llm/tokens.js), read for `.ratio`.
  * `getGuildId` — the single guild this instance serves, or null before it resolves.
@@ -553,7 +568,7 @@ export function createAdmin({
   /**
    * `/nep pause`: refuse a command that would write under `data/` while
    * paused, with a hint to resume first. Guards interject, initiate,
-   * alias.add, alias.remove, memory.forget, private.forget, memory.wipe, memory.affinity (when
+   * alias.add, alias.remove, memory.forget, private.forget, private.purge, memory.wipe, memory.affinity (when
    * setting a score), memory.refresh, lore.add, lore.remove, learned.add,
    * learned.remove, warmup.run, warmup.users, warmup.channels, warmup.server,
    * warmup.reset and draw (it counts against the image rail in state.json).
@@ -1355,6 +1370,83 @@ export function createAdmin({
 
     store.forgetPrivate(guildId, userId);
     return `Forgot the private memory of ${userId}; the public profile is kept.`;
+  }
+
+  /**
+   * `/nep private purge`: deletes the bot's own messages in the direct-message chat with one
+   * member, then that member's private layer (store.forgetPrivate). Pages back through the DM
+   * 100 at a time until a short page or `private.purgeMaxMessages` scanned messages (default
+   * 5000), deleting sequentially; a failed delete is counted, never thrown. The member's own
+   * messages cannot be deleted by a bot and stay. A user that cannot be fetched or a DM that
+   * cannot be opened, or a first history page that cannot be read, throws before anything is
+   * deleted; a later page fetch that fails stops the scan and the purge finishes with what it
+   * had. Refused while paused; a pause that lands mid-run keeps the private layer.
+   */
+  async function cmdPrivatePurge(args, context) {
+    assertNotPaused();
+    const userId = args?.userId;
+    if (!userId) throw new Error('a user is required');
+
+    const guildId = resolvedGuildId(context);
+    if (!guildId) throw new Error('no guild resolved yet');
+
+    const selfId = client?.user?.id;
+    if (!selfId) throw new Error('the bot is not logged in yet');
+
+    let dm;
+    try {
+      const user = await client.users.fetch(userId);
+      dm = await user.createDM();
+    } catch (err) {
+      log.warn('admin: private purge could not open the DM', { error: err });
+      throw new Error(`cannot open the private chat with ${userId}; nothing was deleted`);
+    }
+
+    const configured = hot.config?.private?.purgeMaxMessages;
+    const maxScanned = Number.isFinite(configured) && configured > 0 ? Math.floor(configured) : 5000;
+
+    let scanned = 0;
+    let deleted = 0;
+    let failed = 0;
+    let before;
+    while (scanned < maxScanned) {
+      let page;
+      try {
+        page = await dm.messages.fetch(before ? { limit: 100, before } : { limit: 100 });
+      } catch (err) {
+        log.warn('admin: private purge page fetch failed', { scanned, error: err });
+        if (!before) throw new Error(`cannot read the private chat with ${userId}; nothing was deleted`);
+        break;
+      }
+      const batch = [...page.values()];
+      if (batch.length === 0) break;
+
+      for (const message of batch) {
+        if (scanned >= maxScanned) break;
+        scanned += 1;
+        if (message.author?.id !== selfId) continue;
+        try {
+          await message.delete();
+          deleted += 1;
+        } catch {
+          failed += 1;
+        }
+      }
+
+      before = oldestMessageId(batch);
+      if (batch.length < 100) break;
+    }
+
+    // A `/nep pause` that landed during a long purge: data/ must not be written any more.
+    const pausedMidway = Boolean(store.state.data.paused);
+    if (!pausedMidway) store.forgetPrivate(guildId, userId);
+    log.info('admin: private purged', { deleted, failed, scanned });
+    const capped = scanned >= maxScanned ? `; stopped at the ${maxScanned}-message scan cap, run again for older ones` : '';
+    const memoryPart = pausedMidway ? 'private memory kept (paused meanwhile, run again after /nep resume)' : 'private memory removed';
+    return [
+      `Purged ${deleted} own messages in the private chat (${failed} failed, ${scanned} scanned${capped}); ${memoryPart}.`,
+      "The member's own messages stay; only they can delete those.",
+    ].join('\n');
   }
 
   /**
@@ -2225,6 +2317,7 @@ async function cmdPing(args) {
     'memory.refresh': (args, context) => cmdMemoryRefresh(args, context),
     'private.show': (args, context) => cmdPrivateShow(args, context),
     'private.forget': (args, context) => cmdPrivateForget(args, context),
+    'private.purge': (args, context) => cmdPrivatePurge(args, context),
     'alias.add': (args, context) => cmdAliasAdd(args, context),
     'alias.remove': (args, context) => cmdAliasRemove(args, context),
     'lore.add': (args, context) => cmdLoreAdd(args, context),

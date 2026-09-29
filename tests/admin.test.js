@@ -1428,6 +1428,219 @@ test('run: private.forget is refused while paused; private.show keeps working', 
   await assert.doesNotReject(() => admin.run('private.show', { userId: '123' }, { guildId: 'g1' }));
 });
 
+// ---------------------------------------------------------------------------
+// private.purge
+// ---------------------------------------------------------------------------
+
+const BOT_ID = '900';
+
+/** A fake DM channel over `messages` (newest first, numeric snowflake ids): `messages.fetch`
+ * pages like discord.js (`{ limit, before }` -> a Map, newest first) and records every call. */
+function fakeDmChannel(messages) {
+  const fetchCalls = [];
+  return {
+    fetchCalls,
+    messages: {
+      async fetch(options) {
+        fetchCalls.push({ ...options });
+        const older = options.before ? messages.filter((m) => BigInt(m.id) < BigInt(options.before)) : messages;
+        return new Map(older.slice(0, options.limit).map((m) => [m.id, m]));
+      },
+    },
+  };
+}
+
+/** `count` fake messages, newest first; `isBot(i)` picks the persona's own. Each records its delete. */
+function fakeDmMessages(count, isBot, { failDelete = () => false } = {}) {
+  const deleted = [];
+  const messages = [];
+  for (let i = 0; i < count; i += 1) {
+    const id = String(100000 + count - i); // descending ids: newest first
+    messages.push({
+      id,
+      author: { id: isBot(i) ? BOT_ID : '123' },
+      async delete() {
+        if (failDelete(i)) throw new Error('delete failed');
+        deleted.push(id);
+      },
+    });
+  }
+  return { messages, deleted };
+}
+
+function fakeDmClient(channel, { fetchUser, createDM } = {}) {
+  const userFetches = [];
+  return {
+    userFetches,
+    user: { id: BOT_ID },
+    users: {
+      async fetch(userId) {
+        userFetches.push(userId);
+        if (fetchUser) return fetchUser(userId);
+        return { id: userId, createDM: createDM ?? (async () => channel) };
+      },
+    },
+  };
+}
+
+test('run: private.purge pages through the DM, deletes only its own messages and forgets the private layer', async () => {
+  const rootDir = makeRoot();
+  // 150 messages, 60 of them the persona's (every i % 5 < 2), spread over both pages
+  const { messages, deleted } = fakeDmMessages(150, (i) => i % 5 < 2);
+  const channel = fakeDmChannel(messages);
+  const client = fakeDmClient(channel);
+  const { admin, store } = makeAdmin(rootDir, { client });
+  store.profiles.set('g1:123', { id: '123', names: ['Zoé'] });
+  store.privates.set('g1:123', samplePrivate());
+
+  const result = await admin.run('private.purge', { userId: '123' }, { guildId: 'g1' });
+
+  assert.deepEqual(client.userFetches, ['123']);
+  assert.equal(channel.fetchCalls.length, 2, 'a full page of 100, then a short page of 50');
+  assert.equal(channel.fetchCalls[0].limit, 100);
+  assert.equal(channel.fetchCalls[0].before, undefined);
+  assert.equal(channel.fetchCalls[1].before, messages[99].id, 'the second page starts before the oldest of the first');
+  assert.equal(deleted.length, 60);
+  const ownIds = messages.filter((m) => m.author.id === BOT_ID).map((m) => m.id);
+  assert.deepEqual(deleted, ownIds, 'every own message deleted, in order, and nothing else');
+  assert.deepEqual(store.forgottenPrivate, [['g1', '123']]);
+  assert.ok(store.getUser('g1', '123'), 'the public profile stays');
+  assert.match(result, /\b60\b/);
+  assert.match(result, /\b0 failed\b/);
+  assert.ok(result.split('\n').length <= 2, 'two lines at most');
+});
+
+test('run: private.purge counts a failing delete and carries on', async () => {
+  const rootDir = makeRoot();
+  const { messages, deleted } = fakeDmMessages(10, () => true, { failDelete: (i) => i === 3 || i === 7 });
+  const client = fakeDmClient(fakeDmChannel(messages));
+  const { admin, store } = makeAdmin(rootDir, { client });
+  store.privates.set('g1:123', samplePrivate());
+
+  const result = await admin.run('private.purge', { userId: '123' }, { guildId: 'g1' });
+
+  assert.equal(deleted.length, 8);
+  assert.match(result, /\b8\b/);
+  assert.match(result, /\b2 failed\b/);
+  assert.deepEqual(store.forgottenPrivate, [['g1', '123']]);
+});
+
+test('run: private.purge stops scanning at private.purgeMaxMessages', async () => {
+  const rootDir = makeRoot();
+  const { messages, deleted } = fakeDmMessages(350, () => true);
+  const channel = fakeDmChannel(messages);
+  const { admin, hot } = makeAdmin(rootDir, { client: fakeDmClient(channel) });
+  hot.config.private = { purgeMaxMessages: 150 };
+
+  await admin.run('private.purge', { userId: '123' }, { guildId: 'g1' });
+
+  assert.equal(deleted.length, 150);
+  assert.equal(channel.fetchCalls.length, 2);
+});
+
+test('run: private.purge with a user that cannot be fetched or a DM that cannot be opened deletes nothing', async () => {
+  const rootDir = makeRoot();
+  const { messages, deleted } = fakeDmMessages(5, () => true);
+  const channel = fakeDmChannel(messages);
+
+  const unknown = fakeDmClient(channel, { fetchUser: async () => { throw new Error('Unknown User'); } });
+  const { admin, store } = makeAdmin(rootDir, { client: unknown });
+  store.privates.set('g1:123', samplePrivate());
+  await assert.rejects(() => admin.run('private.purge', { userId: '123' }, { guildId: 'g1' }), /nothing was deleted/i);
+
+  const closed = fakeDmClient(channel, { createDM: async () => { throw new Error('Cannot open a DM'); } });
+  const { admin: admin2 } = makeAdmin(rootDir, { client: closed, store });
+  await assert.rejects(() => admin2.run('private.purge', { userId: '123' }, { guildId: 'g1' }), /nothing was deleted/i);
+
+  assert.equal(channel.fetchCalls.length, 0);
+  assert.deepEqual(deleted, []);
+  assert.deepEqual(store.forgottenPrivate, [], 'the private memory stays');
+});
+
+test('run: private.purge whose first history page fails deletes nothing; a later failure keeps what was done', async () => {
+  const rootDir = makeRoot();
+  const { messages, deleted } = fakeDmMessages(150, () => true);
+
+  const broken = fakeDmChannel(messages);
+  broken.messages.fetch = async () => { throw new Error('Missing Access'); };
+  const { admin, store } = makeAdmin(rootDir, { client: fakeDmClient(broken) });
+  store.privates.set('g1:123', samplePrivate());
+  await assert.rejects(() => admin.run('private.purge', { userId: '123' }, { guildId: 'g1' }), /nothing was deleted/i);
+  assert.deepEqual(deleted, []);
+  assert.deepEqual(store.forgottenPrivate, [], 'the private memory stays');
+
+  const flaky = fakeDmChannel(messages);
+  const pageOf = flaky.messages.fetch;
+  flaky.messages.fetch = async (options) => {
+    if (options.before) throw new Error('page fetch failed');
+    return pageOf(options);
+  };
+  const { admin: admin2 } = makeAdmin(rootDir, { client: fakeDmClient(flaky), store });
+  const result = await admin2.run('private.purge', { userId: '123' }, { guildId: 'g1' });
+  assert.equal(deleted.length, 100, 'the first page was purged');
+  assert.deepEqual(store.forgottenPrivate, [['g1', '123']]);
+  assert.match(result, /\b100\b/);
+});
+
+test('run: private.purge keeps the private memory when a pause lands while it is deleting', async () => {
+  const rootDir = makeRoot();
+  const { messages, deleted } = fakeDmMessages(3, () => true);
+  const { admin, store } = makeAdmin(rootDir, { client: fakeDmClient(fakeDmChannel(messages)) });
+  store.privates.set('g1:123', samplePrivate());
+  const firstDelete = messages[0].delete;
+  messages[0].delete = async () => {
+    store.state.data.paused = true;
+    return firstDelete();
+  };
+
+  const result = await admin.run('private.purge', { userId: '123' }, { guildId: 'g1' });
+
+  assert.equal(deleted.length, 3);
+  assert.deepEqual(store.forgottenPrivate, [], 'nothing under data/ is written while paused');
+  assert.match(result, /paused/i);
+  assert.ok(result.split('\n').length <= 2, 'two lines at most');
+});
+
+test('run: private.purge is refused while paused, with the same message as private.forget', async () => {
+  const rootDir = makeRoot();
+  const { messages, deleted } = fakeDmMessages(5, () => true);
+  const client = fakeDmClient(fakeDmChannel(messages));
+  const { admin, store } = makeAdmin(rootDir, { client });
+  store.privates.set('g1:123', samplePrivate());
+
+  await admin.run('pause', {}, {});
+
+  let purgeError;
+  let forgetError;
+  await admin.run('private.purge', { userId: '123' }, { guildId: 'g1' }).catch((err) => { purgeError = err; });
+  await admin.run('private.forget', { userId: '123' }, { guildId: 'g1' }).catch((err) => { forgetError = err; });
+  assert.ok(purgeError && forgetError);
+  assert.equal(purgeError.message, forgetError.message);
+  assert.deepEqual(client.userFetches, []);
+  assert.deepEqual(deleted, []);
+  assert.deepEqual(store.forgottenPrivate, []);
+});
+
+test('run: private.purge needs a user and a resolved guild', async () => {
+  const rootDir = makeRoot();
+  const client = fakeDmClient(fakeDmChannel([]));
+  const { admin } = makeAdmin(rootDir, { client });
+  await assert.rejects(() => admin.run('private.purge', {}, { guildId: 'g1' }), /a user is required/);
+
+  const { admin: unresolved } = makeAdmin(rootDir, { client, getGuildId: () => null });
+  await assert.rejects(() => unresolved.run('private.purge', { userId: '123' }, {}), /no guild resolved yet/);
+  assert.deepEqual(client.userFetches, []);
+});
+
+test('isAllowed: private.purge stays owner-only even when bot.access grants it, its group or *', () => {
+  const rootDir = makeRoot();
+  const { admin, hot } = makeAdmin(rootDir);
+  const open = { everyone: true, roles: [], users: [] };
+  hot.config.bot.access = { '*': open, private: open, 'private.purge': open };
+  assert.equal(admin.isAllowed('private.purge', { userId: '999', roleIds: ['staff'] }), false);
+  assert.equal(admin.isAllowed('private.purge', { userId: '42', roleIds: [] }), true, 'the owner still passes');
+});
+
 test('run: memory.forget says the private memory went too', async () => {
   const rootDir = makeRoot();
   const { admin, store } = makeAdmin(rootDir);

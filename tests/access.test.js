@@ -106,6 +106,7 @@ test('isOwnerOnly: the private group and every key in it, nothing else', () => {
   assert.equal(isOwnerOnly('private'), true);
   assert.equal(isOwnerOnly('private.show'), true);
   assert.equal(isOwnerOnly('private.forget'), true);
+  assert.equal(isOwnerOnly('private.purge'), true);
   assert.equal(isOwnerOnly('memory.show'), false);
   assert.equal(isOwnerOnly('privateer'), false);
   assert.equal(isOwnerOnly('*'), false);
@@ -114,8 +115,8 @@ test('isOwnerOnly: the private group and every key in it, nothing else', () => {
 
 test('isAllowed: private commands refuse every non-owner, whatever bot.access grants', () => {
   const everyone = { everyone: true, roles: ['staff'], users: ['2'] };
-  const access = { 'private.show': everyone, 'private.forget': everyone, private: everyone, '*': everyone };
-  for (const commandKey of ['private.show', 'private.forget', 'private']) {
+  const access = { 'private.show': everyone, 'private.forget': everyone, 'private.purge': everyone, private: everyone, '*': everyone };
+  for (const commandKey of ['private.show', 'private.forget', 'private.purge', 'private']) {
     assert.equal(isAllowed({ commandKey, userId: '2', roleIds: ['staff'], owners: ['1'], access }), false, commandKey);
     assert.equal(isAllowed({ commandKey, userId: '1', roleIds: [], owners: ['1'], access: {} }), true, `${commandKey}: owner`);
   }

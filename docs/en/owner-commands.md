@@ -2,7 +2,7 @@
 
 Channels, roles and users are picked from Discord's own pickers; `set`/`unset` and `access grant`/`access revoke` autocomplete their `path`/`command` options.
 
-`/nep` is visible to every member from the start; access is gated per command at the moment it runs, never through Discord's own command visibility. Owners (`bot.owners`) can always run every command. Everyone else needs a grant: `/nep access grant <command> [role] [user]` opens one command key (e.g. `memory.show`), a whole group (e.g. `memory`), or every command (`*`) to everyone (no role/user given), a role, or a user; `/nep access revoke` undoes one of those; `/nep access list` shows the current grants. Without a grant, a non-owner who runs `/nep` gets an ephemeral "Not allowed" reply. `private.show` and `private.forget` are owner-only and excluded from all grants; `access grant` refuses them, and `access list` does not offer them.
+`/nep` is visible to every member from the start; access is gated per command at the moment it runs, never through Discord's own command visibility. Owners (`bot.owners`) can always run every command. Everyone else needs a grant: `/nep access grant <command> [role] [user]` opens one command key (e.g. `memory.show`), a whole group (e.g. `memory`), or every command (`*`) to everyone (no role/user given), a role, or a user; `/nep access revoke` undoes one of those; `/nep access list` shows the current grants. Without a grant, a non-owner who runs `/nep` gets an ephemeral "Not allowed" reply. `private.show`, `private.forget` and `private.purge` are owner-only and excluded from all grants; `access grant` refuses them, and `access list` does not offer them.
 
 | Command | What it does |
 |---|---|
@@ -30,6 +30,7 @@ Channels, roles and users are picked from Discord's own pickers; `set`/`unset` a
 | `/nep memory wipe <confirm>` | Wipe all analyzer memory for this server, including private files; type the exact server name to confirm |
 | `/nep private show <user>` | Show a member's private memory: relationship, interests, details, episodes, private and effective attitude, today's reply count. No private layer is a plain answer, not an error. Owner-only; cannot be granted |
 | `/nep private forget <user>` | Delete only a member's private memory; the public profile is kept. Owner-only; cannot be granted |
+| `/nep private purge <user>` | Delete the bot's own messages in the DM chat with a member (scans up to `private.purgeMaxMessages`), then their private memory. The member's own messages stay. Refused while paused. Owner-only; cannot be granted |
 | `/nep alias add <user> <name>` | Add a chat alias; confirmed at once |
 | `/nep alias remove <user> <name>` | Remove a chat alias |
 | `/nep learned list` | List lessons with ids, who taught each one, sightings |

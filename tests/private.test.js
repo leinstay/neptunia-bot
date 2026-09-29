@@ -284,5 +284,5 @@ test('config.json: private chat and drawing ship off, with the private.* default
   const shipped = JSON.parse(fs.readFileSync(new URL('../config.json', import.meta.url), 'utf8'));
   assert.equal(shipped.features.privateMessages, false);
   assert.equal(shipped.features.imageGeneration, false);
-  assert.deepEqual(shipped.private, { minAffinity: 5, maxPerUserPerDay: 100, maxPerOwnerPerDay: 200 });
+  assert.deepEqual(shipped.private, { minAffinity: 5, maxPerUserPerDay: 100, maxPerOwnerPerDay: 200, purgeMaxMessages: 5000 });
 });
