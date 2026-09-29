@@ -16,7 +16,7 @@ Settings: `context.vision.*` for direct vision, `media.*` for the describer. See
 
 ## Video
 
-`features.videoDescriptions` is off by default; turn it on in `config.local.json`, with `mediaDescriptions` on as well. It adds the `classifier.video` model, which watches short clips: Discord video attachments and links to known video sites (YouTube, TikTok, VK, X, Reddit, Twitch). The model must accept both video and audio input through OpenRouter.
+`features.videoDescriptions` is off by default; turn it on in `config.local.json`, with `mediaDescriptions` on as well. It adds the `classifier.video` model, which watches short clips: Discord video attachments, video links pasted from the Discord CDN, and links to known video sites (YouTube, TikTok, VK, X, Reddit, Twitch). The model must accept both video and audio input through OpenRouter.
 
 ### Caps
 
@@ -24,7 +24,7 @@ Attachments and downloaded site videos are capped at `media.video.maxSeconds` (d
 
 ### Tools
 
-Everything beyond attachments within the caps is downloaded with `yt-dlp` and trimmed with `ffmpeg`, both optional system binaries. Without them, attachments within the caps still work (sent as-is). Longer attachments and all site links fall back to a still frame. For YouTube, when `yt-dlp` cannot probe the duration, an optional `YOUTUBE_API_KEY` in `.env` (free, from the Google Cloud console's YouTube Data API v3) or a watch-page scrape provides it. `/nep ping classifier.video` reports the API key status.
+Everything beyond attachments within the caps is downloaded with `yt-dlp` and trimmed with `ffmpeg`, both optional system binaries. Without them, attachments within the caps still work (sent as-is). Longer attachments and all site links fall back to a still frame. A video link from the Discord CDN has no duration metadata, so it always goes through ffmpeg; without ffmpeg it falls back to a still frame. For YouTube, when `yt-dlp` cannot probe the duration, an optional `YOUTUBE_API_KEY` in `.env` (free, from the Google Cloud console's YouTube Data API v3) or a watch-page scrape provides it. `/nep ping classifier.video` reports the API key status.
 
 ### Re-watch
 

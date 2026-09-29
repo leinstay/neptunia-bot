@@ -16,7 +16,7 @@
 
 ## 動画
 
-`features.videoDescriptions` はデフォルトで無効です。`config.local.json` で `mediaDescriptions` と合わせて有効にしてください。有効にすると `classifier.video` モデルが追加され、短いクリップを視聴します。対象は Discord の動画添付ファイルと既知の動画サイトへのリンク（YouTube、TikTok、VK、X、Reddit、Twitch）です。モデルは OpenRouter を通じて動画と音声の両方の入力を受け付ける必要があります。
+`features.videoDescriptions` はデフォルトで無効です。`config.local.json` で `mediaDescriptions` と合わせて有効にしてください。有効にすると `classifier.video` モデルが追加され、短いクリップを視聴します。対象は Discord の動画添付ファイル、Discord CDN から貼り付けた動画リンク、既知の動画サイトへのリンク（YouTube、TikTok、VK、X、Reddit、Twitch）です。モデルは OpenRouter を通じて動画と音声の両方の入力を受け付ける必要があります。
 
 ### 上限
 
@@ -24,7 +24,7 @@
 
 ### ツール
 
-上限内の添付ファイル以外はすべて `yt-dlp` でダウンロードされ `ffmpeg` でトリムされます。どちらもオプションのシステムバイナリです。これらがなくても上限内の添付ファイルはそのまま動作します（そのまま送信されます）。長い添付ファイルとすべてのサイトリンクは静止フレームにフォールバックします。YouTube の場合、`yt-dlp` が再生時間を取得できないときは、`.env` のオプションの `YOUTUBE_API_KEY`（無料、Google Cloud コンソールの YouTube Data API v3）またはウォッチページのスクレイプが補完します。`/nep ping classifier.video` は API key のステータスを報告します。
+上限内の添付ファイル以外はすべて `yt-dlp` でダウンロードされ `ffmpeg` でトリムされます。どちらもオプションのシステムバイナリです。これらがなくても上限内の添付ファイルはそのまま動作します（そのまま送信されます）。長い添付ファイルとすべてのサイトリンクは静止フレームにフォールバックします。Discord CDN からの動画リンクには再生時間のメタデータがないため、常に ffmpeg を経由します。ffmpeg がない場合は静止フレームにフォールバックします。YouTube の場合、`yt-dlp` が再生時間を取得できないときは、`.env` のオプションの `YOUTUBE_API_KEY`（無料、Google Cloud コンソールの YouTube Data API v3）またはウォッチページのスクレイプが補完します。`/nep ping classifier.video` は API key のステータスを報告します。
 
 ### 再視聴
 

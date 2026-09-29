@@ -16,7 +16,7 @@
 
 ## 视频
 
-`features.videoDescriptions` 默认关闭；在 `config.local.json` 中开启，并同时开启 `mediaDescriptions`。开启后会添加 `classifier.video` 模型，可观看短视频片段：Discord 视频附件和已知视频站点的链接（YouTube、TikTok、VK、X、Reddit、Twitch）。模型必须通过 OpenRouter 同时接受视频和音频输入。
+`features.videoDescriptions` 默认关闭；在 `config.local.json` 中开启，并同时开启 `mediaDescriptions`。开启后会添加 `classifier.video` 模型，可观看短视频片段：Discord 视频附件、从 Discord CDN 粘贴的视频链接以及已知视频站点的链接（YouTube、TikTok、VK、X、Reddit、Twitch）。模型必须通过 OpenRouter 同时接受视频和音频输入。
 
 ### 限制
 
@@ -24,7 +24,7 @@
 
 ### 工具
 
-超出限制的所有内容通过 `yt-dlp` 下载并使用 `ffmpeg` 裁剪，两者均为可选的系统二进制文件。没有它们时，在限制内的附件仍然可用（直接发送）。更长的附件和所有站点链接会回退到静帧。对于 YouTube，当 `yt-dlp` 无法探测时长时，`.env` 中的可选 `YOUTUBE_API_KEY`（免费，Google Cloud 控制台，YouTube Data API v3）或观看页面抓取可以提供时长信息。`/nep ping classifier.video` 报告 API key 状态。
+超出限制的所有内容通过 `yt-dlp` 下载并使用 `ffmpeg` 裁剪，两者均为可选的系统二进制文件。没有它们时，在限制内的附件仍然可用（直接发送）。更长的附件和所有站点链接会回退到静帧。来自 Discord CDN 的视频链接没有时长元数据，因此始终经过 ffmpeg 处理；没有 ffmpeg 时会回退到静帧。对于 YouTube，当 `yt-dlp` 无法探测时长时，`.env` 中的可选 `YOUTUBE_API_KEY`（免费，Google Cloud 控制台，YouTube Data API v3）或观看页面抓取可以提供时长信息。`/nep ping classifier.video` 报告 API key 状态。
 
 ### 重看
 
