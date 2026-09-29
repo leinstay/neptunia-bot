@@ -82,7 +82,13 @@ export function findInvalidJsonFiles(dataDir) {
   return bad;
 }
 
-function writeJsonAtomic(file, value) {
+/**
+ * Write `value` as pretty JSON to `file` through a temp file and a rename, so a
+ * crash mid-write never leaves a half-written file; creates missing directories.
+ * @param {string} file
+ * @param {unknown} value
+ */
+export function writeJsonAtomic(file, value) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const tmp = `${file}.${process.pid}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(value, null, 2));
