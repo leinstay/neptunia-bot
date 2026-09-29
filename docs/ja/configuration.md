@@ -26,6 +26,7 @@
 | `webLookup` | `false` | チャットに投稿されたリンクを読み取り、事実に関する質問にウェブ検索で回答。他の機能と異なり、キーが存在しない場合はオフとして扱われる。検索には `.env` に `BRAVE_SEARCH_API_KEY` が必要。キーがない場合はリンク読み取りのみ動作する。[メディア: リンクと検索](media.md#リンク)を参照 |
 | `imageGeneration` | `false` | ペルソナが描画サブプロセスを通じて画像を描くことを許可。キーが存在しない場合はオンとして扱われる。`config.local.json` で有効化。`image.model` に画像生成対応モデルが必要。[メディア: 描画](media.md#描画)を参照 |
 | `privateMessages` | `false` | ギルドメンバーのダイレクトメッセージに応答。保存された公開プロファイルと `affinity.score >= private.minAffinity` が必要。[メッセージとメモリ: プライベートレイヤー](messages-and-memory.md#プライベートレイヤー)を参照 |
+| `mentor` | `false` | 独自モデルを使用する手動テストサブプロセス。有効にするには厳密に `true` にする必要がある。キーが存在しない場合はオフ。[Mentor](#mentor) を参照 |
 | `followUp` | `true` | ペルソナの応答後、タグなしメッセージを分類して会話を継続 |
 | `typingSimulation` | `true` | タイピング速度をシミュレート |
 | `adminCommands` | `true` | オーナースラッシュコマンド。`false` でコマンド登録を解除 |
@@ -367,6 +368,33 @@ YouTube リンクの再生時間は次の順序で取得されます: まず yt-
 
 `features.relationships` がオフの場合、公開スコアは 0 のままになるため、デフォルトの `minAffinity` ではオーナーのみが DM できます。
 
+## `mentor`
+
+手動テストサブプロセス（`features.mentor`）の設定。Mentor はチャット状況を作成し、サンドボックスでペルソナに回答させ、スコアリングします。独自のモデルと日次トークン予算を使用し、`llm.maxRequestsPerDay` にはカウントされません。すべてホットリロード。
+
+| キー | デフォルト | 説明 |
+|---|---|---|
+| `model` | `null` | Mentor モデル ID。`null` または未設定の場合、モデルが必要なすべてのコマンドはその旨を報告 |
+| `maxTokensPerDay` | `400000` | 日次トークン予算。実使用量から計算: プロンプトトークン x1、キャッシュプロンプトトークン x`cachedTokenWeight`、出力トークン x`outputTokenWeight`。サンドボックスでのペルソナモデルの回答も同様に計算 |
+| `outputTokenWeight` | `5` | 予算における出力トークンの重み。生成トークンの高コストを反映 |
+| `cachedTokenWeight` | `0.1` | 予算におけるキャッシュプロンプトトークンの重み |
+| `maxOutputTokens` | `6000` | Mentor リクエストあたりの最大出力トークン |
+| `timeoutMs` | `300000` | Mentor リクエストのタイムアウト（ミリ秒） |
+| `situations` | `5` | 1 回の実行で作成するチャット状況の数 |
+| `situationLines` | `[6, 15]` | 状況あたりの最小・最大行数 |
+| `samples` | `3` | 状況あたりのペルソナの回答数 |
+| `check.samples` | `1` | `/nep mentor check` 時の状況あたりのペルソナの回答数 |
+| `pass.score` | `7` | `overall` と `goal` の中央値がこの閾値に達した場合にケースが合格 |
+| `pass.floor` | `5` | いずれかの軸の中央値がこの下限を下回る場合にケースが不合格 |
+| `reference.days` | `7` | スタイルリファレンス構築に使用するチャット履歴の日数 |
+| `reference.samples` | `60` | リファレンスウィンドウからランダムに選択するスタイル例の行数（2〜200 文字） |
+| `reference.maxMessages` | `3000` | リファレンスチャンネルから読み取る最大メッセージ数 |
+| `reference.rarePer1000` | `0.5` | 1000 文字あたりの使用回数がこの値未満のマークはレアとみなす |
+| `reference.rareMinAuthors` | `2` | 使用する著者数がこの値未満のマークはレアとみなす |
+| `feedbackExamples` | `10` | すべてのスコアリングリクエストに含める最新のオーナー修正（`/nep mentor wrong`）の数 |
+
+`llm.maxRequestTokens`（リクエストあたり 50k）は、mentor が発行または引き起こすすべてのリクエスト（サンドボックス回答を含む）に適用されます。各リクエスト前に推定コストが残り日次予算と照合され、予算が尽きると実行が停止し、得られた結果を報告します。
+
 ## `warmup`
 
 | キー | デフォルト | 説明 |
@@ -429,6 +457,10 @@ OpenRouter を通じて動画と音声の両方の入力を受け付けるモデ
 | `google/gemini-3.8-flash` (default) | 0.014 |
 
 `qwen/qwen3.8-omni-flash` も動画と音声を受け付けます。価格は変動します。上の表は記載日時点のスナップショットです。
+
+### Mentor（`mentor.model`）
+
+ロール `mentor`。ペルソナの回答をスコアリングし、テスト状況を作成します。会話モデルとは異なるファミリーのモデルを推奨: モデルは自身のファミリーの癖に気づけません。`null`（デフォルト）は mentor を無効のまま保持。モデルが必要な `/nep mentor` コマンドはその旨を報告します。
 
 ### 画像出力（`image.model`）
 

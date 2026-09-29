@@ -2,13 +2,13 @@
 
 频道、身份组和用户从 Discord 自带的选择器中选取；`set`/`unset` 和 `access grant`/`access revoke` 会自动补全其 `path`/`command` 选项。
 
-`/nep` 从一开始就对所有成员可见；访问权限在命令执行时按命令逐一检查，不通过 Discord 自身的命令可见性控制。所有者（`bot.owners`）始终可以运行所有命令。其他人需要授权：`/nep access grant <command> [role] [user]` 可开放一个命令键（如 `memory.show`）、一个完整组（如 `memory`）或所有命令（`*`）给所有人（不指定身份组/用户）、某个身份组或某个用户；`/nep access revoke` 撤销授权；`/nep access list` 显示当前授权。没有授权的非所有者运行 `/nep` 会收到一条仅自己可见的 “Not allowed” 回复。`private.show`、`private.forget` 和 `private.purge` 仅限所有者使用，不可通过任何授权方式开放；`access grant` 会拒绝它们，`access list` 也不会显示。
+`/nep` 从一开始就对所有成员可见；访问权限在命令执行时按命令逐一检查，不通过 Discord 自身的命令可见性控制。所有者（`bot.owners`）始终可以运行所有命令。其他人需要授权：`/nep access grant <command> [role] [user]` 可开放一个命令键（如 `memory.show`）、一个完整组（如 `memory`）或所有命令（`*`）给所有人（不指定身份组/用户）、某个身份组或某个用户；`/nep access revoke` 撤销授权；`/nep access list` 显示当前授权。没有授权的非所有者运行 `/nep` 会收到一条仅自己可见的 “Not allowed” 回复。`private.show`、`private.forget` 和 `private.purge` 仅限所有者使用，不可通过任何授权方式开放；`access grant` 会拒绝它们，`access list` 也不会显示。`mentor` 组同样仅限所有者使用，不可授权。
 
 | 命令 | 说明 |
 |---|---|
 | `/nep status` | 模型、校准、配额（包括图片计数和图像模型）、每服务器记忆状态、私聊开关和私有文件数 |
 | `/nep reload` | 立即重新加载配置和提示 |
-| `/nep ping [role]` | 向一个或所有模型角色（`talk`、`analyzer`、`classifier.text`、`classifier.media`、`classifier.video`）发送最小请求并报告模型、延迟、provider、token 或错误；`classifier.video` 之后报告 `youtube: API key — {status}`（如 `ok`、`not needed (yt-dlp ok)`、`missing (blocked)`）；`classifier.text` 之后报告 `web: API key — {status}`（`ok`、`missing` 或 `off`）。不计入 `llm.maxRequestsPerDay`，在暂停或预热期间均可使用 |
+| `/nep ping [role]` | 向一个或所有模型角色（`talk`、`analyzer`、`classifier.text`、`classifier.media`、`classifier.video`、`mentor`）发送最小请求并报告模型、延迟、provider、token 或错误；`classifier.video` 之后报告 `youtube: API key — {status}`（如 `ok`、`not needed (yt-dlp ok)`、`missing (blocked)`）；`classifier.text` 之后报告 `web: API key — {status}`（`ok`、`missing` 或 `off`）。不计入 `llm.maxRequestsPerDay`，在暂停或预热期间均可使用 |
 | `/nep pause` | 停止所有活动，将记忆刷入磁盘并卸载；暂停期间可安全编辑 `data/` |
 | `/nep resume` | 从 `data/` 重新加载记忆并继续；如有 JSON 文件无法解析则拒绝并指出问题文件 |
 | `/nep interject [channel]` | 立即插入该频道的当前对话 |
@@ -19,8 +19,8 @@
 | `/nep rule add <text>` | 向 `prompts.local/rules.md` 追加规则 |
 | `/nep rule list` | 列出编号的规则 |
 | `/nep rule remove <number>` | 按编号移除规则 |
-| `/nep model show` | 显示每个角色（`talk`、`analyzer`、`classifier.text`、`classifier.media`、`classifier.video`）的当前模型 |
-| `/nep model set <role> <id>` | 设置某个角色（`talk`、`analyzer`、`classifier.text`、`classifier.media`、`classifier.video`）的模型 |
+| `/nep model show` | 显示每个角色（`talk`、`analyzer`、`classifier.text`、`classifier.media`、`classifier.video`、`mentor`）的当前模型 |
+| `/nep model set <role> <id>` | 设置某个角色（`talk`、`analyzer`、`classifier.text`、`classifier.media`、`classifier.video`、`mentor`）的模型 |
 | `/nep memory show <user> [section] [limit] [order]` | 不指定 section：紧凑摘要。可选 section：`character`、`style`、`relationship`、`affinity`、`aliases`、`interests`、`details`、`episodes`、`raw`（存储的 JSON）。列表 section 接受 `limit` 1..100（默认 25）和 `order`：`rank`（默认，在可见性截止处有分隔线）或 `recent`。存储的成员引用解析为当前名称，`raw` 除外 |
 | `/nep memory channel [channel]` | 指定频道：完整的存储笔记（用途、话题、氛围、消息数、活跃度、最活跃作者）。不指定：角色已知的所有频道表格，按最后消息排序 |
 | `/nep memory server` | 服务器级笔记：人们如何交流、对话如何开始、内部梗、自述事实，以及档案、频道和世界书条目的计数 |
@@ -48,6 +48,15 @@
 | `/nep warmup status` | 显示预热进度和 token 使用量 |
 | `/nep warmup stop` | 立即终止所有预热工作；进行中的请求被取消，进度保留以便 `run` 恢复 |
 | `/nep warmup reset` | 清除预热进度，不清除已存储的记忆 |
-| `/nep access grant <command> [role] [user]` | 将命令、命令组或 `*` 开放给所有人（默认）、某个身份组或某个用户。`private.*` 被排除；见上文 |
+| `/nep mentor add <text> [target]` | 添加案例：用你自己的话描述角色应有的行为。`target` 为 `reply`（默认）或 `memory`。返回案例 id |
+| `/nep mentor cases` | 列出案例：id、状态（`new`、`passing`、`failing`）、目标、上次分数、文本截至 80 字符 |
+| `/nep mentor remove <id>` | 移除案例 |
+| `/nep mentor run <id>` | 为一个案例运行完整周期。立即回复已启动；报告发送到管理频道 |
+| `/nep mentor check` | 重放每个有过运行记录的活跃案例的已存储场景，每个场景 `mentor.check.samples` 个样本，发布一份合并报告 |
+| `/nep mentor stop` | 取消进行中的运行，包括正在进行的模型调用 |
+| `/nep mentor show <id>` | 上次运行的报告：场景、回答、分数和评论 |
+| `/nep mentor wrong <id> <reason>` | 告知 mentor 对该案例判断有误以及原因；作为反例保存供未来评分 |
+| `/nep mentor status` | 模型、是否启用、今日 token 使用量/上限、各状态的案例数、进行中的运行 |
+| `/nep access grant <command> [role] [user]` | 将命令、命令组或 `*` 开放给所有人（默认）、某个身份组或某个用户。`private.*` 和 `mentor.*` 被排除；见上文 |
 | `/nep access revoke <command> [role] [user]` | 从所有人（默认）、某个身份组或某个用户撤销授权 |
 | `/nep access list` | 列出所有当前访问授权 |

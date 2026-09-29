@@ -2,13 +2,13 @@
 
 Channels, roles and users are picked from Discord's own pickers; `set`/`unset` and `access grant`/`access revoke` autocomplete their `path`/`command` options.
 
-`/nep` is visible to every member from the start; access is gated per command at the moment it runs, never through Discord's own command visibility. Owners (`bot.owners`) can always run every command. Everyone else needs a grant: `/nep access grant <command> [role] [user]` opens one command key (e.g. `memory.show`), a whole group (e.g. `memory`), or every command (`*`) to everyone (no role/user given), a role, or a user; `/nep access revoke` undoes one of those; `/nep access list` shows the current grants. Without a grant, a non-owner who runs `/nep` gets an ephemeral "Not allowed" reply. `private.show`, `private.forget` and `private.purge` are owner-only and excluded from all grants; `access grant` refuses them, and `access list` does not offer them.
+`/nep` is visible to every member from the start; access is gated per command at the moment it runs, never through Discord's own command visibility. Owners (`bot.owners`) can always run every command. Everyone else needs a grant: `/nep access grant <command> [role] [user]` opens one command key (e.g. `memory.show`), a whole group (e.g. `memory`), or every command (`*`) to everyone (no role/user given), a role, or a user; `/nep access revoke` undoes one of those; `/nep access list` shows the current grants. Without a grant, a non-owner who runs `/nep` gets an ephemeral "Not allowed" reply. `private.show`, `private.forget` and `private.purge` are owner-only and excluded from all grants; `access grant` refuses them, and `access list` does not offer them. The `mentor` group is owner-only the same way and cannot be granted.
 
 | Command | What it does |
 |---|---|
 | `/nep status` | Model, calibration, quotas (including image count and image model), per-guild memory status, private chat on/off and private file count |
 | `/nep reload` | Reload config and prompts now |
-| `/nep ping [role]` | Send a minimal request to one or all model roles (`talk`, `analyzer`, `classifier.text`, `classifier.media`, `classifier.video`) and report model, latency, provider, tokens or the error; `/nep ping classifier` pings all three classifier roles. After `classifier.video`, reports `youtube: API key — {status}` (e.g. `ok`, `not needed (yt-dlp ok)`, `missing (blocked)`); after `classifier.text`, reports `web: API key — {status}` (`ok`, `missing` or `off`). Does not count against `llm.maxRequestsPerDay` and works while paused or warming up |
+| `/nep ping [role]` | Send a minimal request to one or all model roles (`talk`, `analyzer`, `classifier.text`, `classifier.media`, `classifier.video`, `mentor`) and report model, latency, provider, tokens or the error; `/nep ping classifier` pings all three classifier roles. After `classifier.video`, reports `youtube: API key — {status}` (e.g. `ok`, `not needed (yt-dlp ok)`, `missing (blocked)`); after `classifier.text`, reports `web: API key — {status}` (`ok`, `missing` or `off`). Does not count against `llm.maxRequestsPerDay` and works while paused or warming up |
 | `/nep pause` | Stop all activity, flush memory to disk and unload it; `data/` is safe to edit while paused |
 | `/nep resume` | Reload memory from `data/` and continue; refuses if any JSON file does not parse, naming the broken ones |
 | `/nep interject [channel]` | Jump into the current conversation in this channel now |
@@ -19,8 +19,8 @@ Channels, roles and users are picked from Discord's own pickers; `set`/`unset` a
 | `/nep rule add <text>` | Append a rule to `prompts.local/rules.md` |
 | `/nep rule list` | List the rules, numbered |
 | `/nep rule remove <number>` | Remove a rule by number |
-| `/nep model show` | Show active models for each role (`talk`, `analyzer`, `classifier.text`, `classifier.media`, `classifier.video`) |
-| `/nep model set <role> <id>` | Set the model for a role (`talk`, `analyzer`, `classifier.text`, `classifier.media`, `classifier.video`) |
+| `/nep model show` | Show active models for each role (`talk`, `analyzer`, `classifier.text`, `classifier.media`, `classifier.video`, `mentor`) |
+| `/nep model set <role> <id>` | Set the model for a role (`talk`, `analyzer`, `classifier.text`, `classifier.media`, `classifier.video`, `mentor`) |
 | `/nep memory show <user> [section] [limit] [order]` | Without a section: compact summary. Sections: `character`, `style`, `relationship`, `affinity`, `aliases`, `interests`, `details`, `episodes`, `raw` (stored JSON). List sections take `limit` 1..100 (default 25) and `order`: `rank` (default, divider at the visibility cutoff) or `recent`. Stored member references resolve to the current name, except in `raw` |
 | `/nep memory channel [channel]` | With a channel: stored note in full (purpose, topics, tone, message count, activity, top writers). Without: a table of every channel the persona knows, sorted by last message |
 | `/nep memory server` | Server-wide notes: how people talk, how conversations start, in-jokes, self-facts, plus counts of profiles, channels and lore entries |
@@ -48,6 +48,15 @@ Channels, roles and users are picked from Discord's own pickers; `set`/`unset` a
 | `/nep warmup status` | Show warmup progress and token usage |
 | `/nep warmup stop` | End any warmup work at once; the request in flight is cancelled, progress is kept so `run` can resume |
 | `/nep warmup reset` | Clear warmup progress, not stored memory |
-| `/nep access grant <command> [role] [user]` | Open a command, group or `*` to everyone (default), a role, or a user. `private.*` is excluded; see above |
+| `/nep mentor add <text> [target]` | Add a case: what you want the persona to do, in your words. `target` is `reply` (default) or `memory`. Answers with the case id |
+| `/nep mentor cases` | List cases: id, state (`new`, `passing`, `failing`), target, last score, text clipped to 80 chars |
+| `/nep mentor remove <id>` | Retire a case |
+| `/nep mentor run <id>` | Run the full cycle for one case. Answers at once that it started; the report goes to the admin channel |
+| `/nep mentor check` | Replay the stored situations of every active case that has a run, with `mentor.check.samples` samples each, and post one combined report |
+| `/nep mentor stop` | Cancel the run in flight, including the model call in progress |
+| `/nep mentor show <id>` | The report of the last run: situations, answers, scores and comments |
+| `/nep mentor wrong <id> <reason>` | Tell the mentor it judged that case wrongly and why; kept as a counter-example for future scoring |
+| `/nep mentor status` | Model, enabled or not, tokens used today / cap, cases by state, the run in flight |
+| `/nep access grant <command> [role] [user]` | Open a command, group or `*` to everyone (default), a role, or a user. `private.*` and `mentor.*` are excluded; see above |
 | `/nep access revoke <command> [role] [user]` | Revoke a previous grant from everyone (default), a role, or a user |
 | `/nep access list` | List every current access grant |

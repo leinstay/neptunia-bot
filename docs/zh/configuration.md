@@ -26,6 +26,7 @@
 | `webLookup` | `false` | 阅读聊天中发布的链接并在被问到事实性问题时搜索网络。与其他功能不同，缺失的键视为关闭。搜索需要 `.env` 中的 `BRAVE_SEARCH_API_KEY`；没有密钥时只有链接阅读可用。参见[媒体：链接与搜索](media.md#链接) |
 | `imageGeneration` | `false` | 允许角色通过绘画子进程绘制图片。缺失的键视为开启。在 `config.local.json` 中启用；需要 `image.model` 中配置支持图像生成的模型。参见[媒体：绘画](media.md#绘画) |
 | `privateMessages` | `false` | 回复公会成员的私信。需要已存储的公共档案且 `affinity.score >= private.minAffinity`。参见[消息与记忆：私有层](messages-and-memory.md#私有层) |
+| `mentor` | `false` | 手动测试子进程，使用独立模型。必须严格为 `true` 才能启用；缺失的键视为关闭。参见 [Mentor](#mentor) |
 | `followUp` | `true` | 角色回复后对未标记消息进行分类以延续对话 |
 | `typingSimulation` | `true` | 模拟输入速度 |
 | `adminCommands` | `true` | 所有者斜杠命令；设为 `false` 时注销命令 |
@@ -367,6 +368,33 @@ YouTube 链接的时长通过以下链式探测获取：首先尝试 yt-dlp，�
 
 当 `features.relationships` 关闭时，公共分数保持为 0，因此在默认 `minAffinity` 下只有所有者可以发送私信。
 
+## `mentor`
+
+手动测试子进程的设置（`features.mentor`）。Mentor 构造聊天场景，在沙盒中让角色作答并评分。使用独立的模型和独立的每日 token 预算；其操作不计入 `llm.maxRequestsPerDay`。全部热重载。
+
+| 键 | 默认值 | 说明 |
+|---|---|---|
+| `model` | `null` | Mentor 模型 ID。`null` 或缺失时，所有需要模型的命令会提示未配置 |
+| `maxTokensPerDay` | `400000` | 每日 token 预算。按实际用量计算：提示 token x1、缓存提示 token x`cachedTokenWeight`、输出 token x`outputTokenWeight`。沙盒中角色模型的回答以相同方式计算 |
+| `outputTokenWeight` | `5` | 输出 token 在预算中的权重，反映生成 token 的较高成本 |
+| `cachedTokenWeight` | `0.1` | 缓存提示 token 在预算中的权重 |
+| `maxOutputTokens` | `6000` | 每次 mentor 请求的最大输出 token |
+| `timeoutMs` | `300000` | Mentor 请求超时（毫秒） |
+| `situations` | `5` | 每次运行构造的聊天场景数 |
+| `situationLines` | `[6, 15]` | 每个场景的最小和最大行数 |
+| `samples` | `3` | 每个场景的角色回答数 |
+| `check.samples` | `1` | `/nep mentor check` 时每个场景的角色回答数 |
+| `pass.score` | `7` | `overall` 和 `goal` 的中位数达到此阈值时案例通过 |
+| `pass.floor` | `5` | 任一轴的中位数低于此下限时案例失败 |
+| `reference.days` | `7` | 用于构建风格参考的聊天历史天数 |
+| `reference.samples` | `60` | 从参考窗口中随机选取的风格示例行数（2–200 字符） |
+| `reference.maxMessages` | `3000` | 从参考频道读取的最大消息数 |
+| `reference.rarePer1000` | `0.5` | 每 1000 字符中使用次数低于此值的标点视为稀有 |
+| `reference.rareMinAuthors` | `2` | 使用该标点的作者数少于此值时视为稀有 |
+| `feedbackExamples` | `10` | 在每次评分请求中包含的最新所有者修正（`/nep mentor wrong`）数 |
+
+`llm.maxRequestTokens`（每次请求 50k）适用于 mentor 发出或引起的每个请求，包括沙盒回答。每次请求前，估算成本与剩余每日预算进行对比；预算耗尽时运行停止并报告已有结果。
+
 ## `warmup`
 
 | 键 | 默认值 | 说明 |
@@ -429,6 +457,10 @@ YouTube 链接的时长通过以下链式探测获取：首先尝试 yt-dlp，�
 | `google/gemini-3.8-flash` (default) | 0.014 |
 
 `qwen/qwen3.8-omni-flash` 同样接受视频和音频。价格会变化；上表是截至上述日期的快照。
+
+### Mentor（`mentor.model`）
+
+`mentor` 角色。对角色的回答进行评分并构造测试场景。建议使用与对话模型不同家族的模型：模型看不到自身家族的习惯。`null`（默认）保持 mentor 禁用；需要模型的 `/nep mentor` 命令会提示。
 
 ### 图片输出（`image.model`）
 

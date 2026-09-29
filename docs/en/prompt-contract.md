@@ -40,6 +40,10 @@ All instructions are English in both layers; a character's speech samples may be
 | `private.md` | no | Appended after the mode prompt (`reply.md`), before `forced.md`, only in a DM (`features.privateMessages`). This is a private conversation: what is said here stays here; the persona keeps its public knowledge. A missing file adds nothing | `{{name}}` `{{author}}` |
 | `draw.md` | yes | Out-of-character prompt of the drawing sub-process (`features.imageGeneration`): produces one picture from a scene description. Receives only the appearance and the request — never the character card | `{{name}}` `{{appearance}}` `{{request}}` |
 | `appearance.md` | no | The persona's visual look, inserted into `draw.md` when `self="yes"`. One paragraph, no personality, no backstory | `{{name}}` |
+| `mentor-situations.md` | no | Mentor: invent test chat situations for a reply-target case (`features.mentor`). Returns JSON only | `{{name}}` `{{count}}` `{{minLines}}` `{{maxLines}}` |
+| `mentor-situations-memory.md` | no | Mentor: invent test chat excerpts for a memory-target case (`features.mentor`). Returns JSON only | `{{name}}` `{{count}}` `{{minLines}}` `{{maxLines}}` |
+| `mentor-score.md` | no | Mentor: score the persona's answers to a situation (`features.mentor`). Receives the character card. Returns JSON only | `{{name}}` |
+| `mentor-score-memory.md` | no | Mentor: score the text the analyzer would store (`features.mentor`). No character card. `character` axis is always `null`. Returns JSON only | `{{name}}` |
 | `labels.json` | yes | Every string the CODE inserts into a prompt. Keys fixed below, values are the writer's | see below |
 
 `{{name}}` bot's display name · `{{author}}` caller's display name · `{{trigger}}` one of `labels.triggers.*` ·
@@ -220,6 +224,7 @@ memory.privateChannel                    heading used in place of a channel name
 limits.notice                            {limit} {used} {cap}: posted as a plain reply when a rail refuses a triggered action; limit is the config key, used/cap are the numbers
 warmup.ownMark                           prefixed to a member's own lines in the profile.md transcript
 warmup.contextMark                       prefixed to context lines in the profile.md transcript
+mentor.intended                          array of short strings: engine behaviours that must not cost points in the mentor's scoring
 ```
 
 ## Output
@@ -665,6 +670,114 @@ usual (read-only context). `<new_messages>` is headed by `labels.memory.privateC
 
 From the answer, only `users[<partnerId>]` is applied through the private store methods. `portrait` and `aliases`
 are ignored. `guild`, `channels`, `lore`, `self` and any other user ids are dropped and logged as counts.
+
+## Mentor
+
+A manual sub-process (`features.mentor`) with its own model (`mentor.model`). The owner adds a case (a behaviour he wants from the persona), and the mentor invents chat situations, runs the persona through them in a sandbox, and scores the answers. In this first stage the mentor only measures and reports; it does not edit anything. One run at a time.
+
+### Privacy
+
+The mentor model reads the rendered sandbox request, so it reads what the persona remembers about real people. Direct messages and the private memory layer are never part of a sandbox request.
+
+### Prompts
+
+The mentor uses four prompt files, one pair per target:
+
+- **Reply target**: `mentor-situations.md` (invent situations) and `mentor-score.md` (score answers).
+- **Memory target**: `mentor-situations-memory.md` (invent situations) and `mentor-score-memory.md` (score stored text).
+
+Each prompt file is the system message of one mentor request. The blocks arrive in the user message.
+
+Placeholders filled by code: `{{name}}` in all four; `{{count}}`, `{{minLines}}`, `{{maxLines}}` in the two situations prompts.
+
+### Blocks
+
+| Block | Content | In which request |
+|---|---|---|
+| `<case>` | The owner's case text, verbatim | all |
+| `<members>` | One line per stored profile: `name (id:123)` | situations |
+| `<reference>` | Style profile as JSON: punctuation rates, lengths, reply frequency, characters never used | all |
+| `<samples>` | Random lines from the chat, one per line | all |
+| `<intended>` | `labels.mentor.intended`, one line per item | score |
+| `<feedback>` | JSON array of the owner's corrections: `[{ "case": "...", "reason": "..." }]`, newest first; omitted when empty | all |
+| `<character>` | The character card with `{{name}}` filled | score (reply target only) |
+| `<rules>` | The rules prompt | score |
+| `<learned>` | Instruction-like learned items as the persona sees them | score |
+| `<situation>` | The situation rendered as a chat transcript, the way the persona saw it | score |
+| `<answers>` | JSON array: `[{ "id": "s1a1", "messages": ["..."], "reactions": ["..."], "silent": false }]` | score (reply target) |
+| `<stored>` | JSON array: `[{ "id": "s1a1", "texts": [{ "path": "...", "text": "..." }] }]` | score (memory target) |
+| `<facts>` | JSON object keyed by answer id with deterministic measurements (unused marks, rare marks, comma density, length), plus `"repeated"` with phrases found across answers | score |
+
+### Answer ids
+
+`s<situation>a<sample>`, both counting from 1. Example: `s2a3` is the third sample of the second situation.
+
+### Situations schema
+
+```json
+{
+  "situations": [
+    {
+      "title": "short label",
+      "lines": [
+        {
+          "authorId": "123456789 or self",
+          "authorName": "display name",
+          "text": "the message",
+          "replyTo": null,
+          "minutesBefore": 5
+        }
+      ]
+    }
+  ]
+}
+```
+
+`authorId` is a member id from `<members>` or `self` for the persona's own earlier line. `replyTo` is a 0-based index into the same situation's `lines` array, or `null`. For both targets the last line is never by `self`. For reply-target situations it addresses the persona. For memory-target situations no line is required to address the persona; the persona's own lines may appear anywhere before the last line.
+
+### Scores schema
+
+```json
+{
+  "answers": [
+    {
+      "id": "s1a1",
+      "human": 7,
+      "character": 8,
+      "rules": 9,
+      "goal": 6,
+      "overall": 7,
+      "comment": "One or two sentences."
+    }
+  ]
+}
+```
+
+Each score is an integer 0–10 or `null`. `overall` and `goal` are always numbers. For memory-target scoring `character` is always `null`.
+
+### Axes
+
+All integers 0–10, 10 ideal, `null` when there is nothing to judge (never 5 as a stand-in for unknown).
+
+| Axis | What it measures | 0 | 5 | 10 |
+|---|---|---|---|---|
+| `human` | How little it reads as AI | Far from how the people of this chat write | Could be either | Matches how people in the reference write |
+| `character` | Fit to the character card | Completely out of character | Recognizable with slips | Exactly the card's voice |
+| `rules` | Compliance with rules and learned items | Breaks every applicable rule | Follows some, breaks others | Follows every applicable rule |
+| `goal` | Does what `<case>` asks | Does the opposite | Partly achieves, partly misses | Handles the behaviour exactly |
+| `overall` | The mentor's verdict | Fails across the board | Acceptable with clear weaknesses | Excellent on every front |
+
+For memory-target scoring `character` is always `null` and `human` measures whether the text reads like someone's own notes about people they know (10) or far from how such a person would write for themselves (0).
+
+### Pass rule
+
+A case passes when the median of `overall` >= `mentor.pass.score` (default 7) AND the median of `goal` >= `mentor.pass.score` AND no axis has a median below `mentor.pass.floor` (default 5). An axis where every score is `null` has median `null` and is not checked.
+
+### Evidence order for scoring
+
+1. The owner's corrections in `<feedback>`, which overrule the mentor's taste.
+2. The measured reference (`<reference>`, `<samples>`) and the deterministic facts (`<facts>`).
+3. The mentor's own taste, which proposes but never overrules the first two.
 
 ## Limit notices
 

@@ -185,5 +185,14 @@
   },
   "limits": {
     "notice": "...but nobody came ({limit}, {used}/{cap})"
+  },
+  "mentor": {
+    "intended": [
+      "May stay silent when silence fits the situation",
+      "May react with an emoji instead of a text reply",
+      "May request a picture through the drawing sub-process",
+      "Posts a limit notice when a daily cap is reached",
+      "Knows what it can and cannot perceive (pictures, video, links, search)"
+    ]
   }
 }

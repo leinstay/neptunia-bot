@@ -40,6 +40,10 @@
 | `private.md` | いいえ | モードプロンプト（`reply.md`）の後、`forced.md` の前に追加。DM（`features.privateMessages`）のみ。プライベートな会話: ここで話されたことはここに留まる。ペルソナは公開知識を保持する。ファイルがなければ何も追加されない | `{{name}}` `{{author}}` |
 | `draw.md` | はい | 描画サブプロセスのアウトオブキャラクタープロンプト（`features.imageGeneration`）: シーン説明から画像 1 枚を生成する。外見とリクエストのみを受け取り、キャラクターカードは受け取らない | `{{name}}` `{{appearance}}` `{{request}}` |
 | `appearance.md` | いいえ | ペルソナのビジュアル外見。`self="yes"` 時に `draw.md` に挿入される。パーソナリティやバックストーリーなし、1 段落 | `{{name}}` |
+| `mentor-situations.md` | いいえ | Mentor: reply ターゲットケースのテスト状況を作成（`features.mentor`）。JSON のみを返す | `{{name}}` `{{count}}` `{{minLines}}` `{{maxLines}}` |
+| `mentor-situations-memory.md` | いいえ | Mentor: memory ターゲットケースのテスト状況を作成（`features.mentor`）。JSON のみを返す | `{{name}}` `{{count}}` `{{minLines}}` `{{maxLines}}` |
+| `mentor-score.md` | いいえ | Mentor: ペルソナの回答をスコアリング（`features.mentor`）。キャラクターカードを受け取る。JSON のみを返す | `{{name}}` |
+| `mentor-score-memory.md` | いいえ | Mentor: アナライザーが保存するテキストをスコアリング（`features.mentor`）。キャラクターカードなし。`character` 軸は常に `null`。JSON のみを返す | `{{name}}` |
 | `labels.json` | はい | コードがプロンプトに挿入するすべての文字列。キーは以下で固定、値はライターが記述する | 以下参照 |
 
 `{{name}}` ボットの表示名 · `{{author}}` 発話者の表示名 · `{{trigger}}` `labels.triggers.*` のいずれか ·
@@ -214,6 +218,7 @@ memory.privateChannel                    heading used in place of a channel name
 limits.notice                            {limit} {used} {cap}: posted as a plain reply when a rail refuses a triggered action; limit is the config key, used/cap are the numbers
 warmup.ownMark                           prefixed to a member's own lines in the profile.md transcript
 warmup.contextMark                       prefixed to context lines in the profile.md transcript
+mentor.intended                          array of short strings: engine behaviours that must not cost points in the mentor's scoring
 ```
 
 ## 出力
@@ -490,6 +495,114 @@ DM は以下のすべてが満たされた場合にのみ応答されます（�
 ### プライベートモードのアナライザー
 
 `analyzePrivate` は同じ `memory.md` フォーマットに `<private>` ブロック（`labels.memory.privateNote`）を加えたリクエストを構築。`<existing_profiles>` にはパートナーのみ。回答からは `users[<partnerId>]` のみがプライベートストアメソッドで適用。`portrait`、`aliases`、`guild`、`channels`、`lore`、`self` は破棄。
+
+## Mentor
+
+手動サブプロセス（`features.mentor`）で、独自モデル（`mentor.model`）を使用します。オーナーがケース（ペルソナに期待する行動）を追加し、mentor がチャット状況を作成、サンドボックスでペルソナに回答させ、スコアリングします。第一段階では測定と報告のみ行い、編集は行いません。同時実行は 1 つのみ。
+
+### プライバシー
+
+Mentor モデルはレンダリングされたサンドボックスリクエストを読み取るため、ペルソナが実際の人物について記憶している内容を読み取ります。ダイレクトメッセージとプライベートメモリレイヤーはサンドボックスリクエストに含まれません。
+
+### プロンプト
+
+Mentor は 4 つのプロンプトファイルを使用し、ターゲットごとに 1 ペア:
+
+- **Reply ターゲット**: `mentor-situations.md`（状況を作成）と `mentor-score.md`（回答をスコアリング）。
+- **Memory ターゲット**: `mentor-situations-memory.md`（状況を作成）と `mentor-score-memory.md`（保存テキストをスコアリング）。
+
+各プロンプトファイルは 1 つの mentor リクエストのシステムメッセージです。ブロックはユーザーメッセージで送信されます。
+
+コードが埋めるプレースホルダー: 4 つすべてに `{{name}}`。2 つの状況プロンプトに `{{count}}`、`{{minLines}}`、`{{maxLines}}`。
+
+### ブロック
+
+| ブロック | 内容 | どのリクエストで |
+|---|---|---|
+| `<case>` | オーナーのケーステキスト、逐語 | すべて |
+| `<members>` | 保存されたプロファイル 1 行ずつ: `name (id:123)` | 状況 |
+| `<reference>` | スタイルプロファイル JSON: 句読点の頻度、長さ、返信頻度、未使用文字 | すべて |
+| `<samples>` | チャットからのランダムな行、1 行ずつ | すべて |
+| `<intended>` | `labels.mentor.intended`、1 項目ずつ | スコアリング |
+| `<feedback>` | オーナーの修正の JSON 配列: `[{ "case": "...", "reason": "..." }]`、新しい順。空の場合省略 | すべて |
+| `<character>` | `{{name}}` を埋めたキャラクターカード | スコアリング（reply のみ） |
+| `<rules>` | ルールプロンプト | スコアリング |
+| `<learned>` | ペルソナが見ている指示的な学習項目 | スコアリング |
+| `<situation>` | チャットトランスクリプトとしてレンダリングされた状況（ペルソナの視点） | スコアリング |
+| `<answers>` | JSON 配列: `[{ "id": "s1a1", "messages": ["..."], "reactions": ["..."], "silent": false }]` | スコアリング（reply） |
+| `<stored>` | JSON 配列: `[{ "id": "s1a1", "texts": [{ "path": "...", "text": "..." }] }]` | スコアリング（memory） |
+| `<facts>` | 回答 id をキーとした JSON オブジェクト。確定的測定結果（未使用マーク、レアマーク、コンマ密度、長さ）と、回答間で見つかったフレーズ `"repeated"` を含む | スコアリング |
+
+### 回答 ID
+
+`s<状況>a<サンプル>`、どちらも 1 から。例: `s2a3` は 2 番目の状況の 3 番目のサンプル。
+
+### 状況スキーマ
+
+```json
+{
+  "situations": [
+    {
+      "title": "短いラベル",
+      "lines": [
+        {
+          "authorId": "123456789 or self",
+          "authorName": "表示名",
+          "text": "メッセージ",
+          "replyTo": null,
+          "minutesBefore": 5
+        }
+      ]
+    }
+  ]
+}
+```
+
+`authorId` は `<members>` のメンバー id または `self`（ペルソナ自身の行）。`replyTo` はこの状況の `lines` 配列内の 0 ベースインデックス、または `null`。両ターゲットとも最後の行は `self` であってはなりません。Reply ターゲット状況では最後の行がペルソナに話しかけます。Memory ターゲット状況ではペルソナへの呼びかけは不要です。ペルソナ自身の行は最後の行より前のどこにでも置けます。
+
+### スコアスキーマ
+
+```json
+{
+  "answers": [
+    {
+      "id": "s1a1",
+      "human": 7,
+      "character": 8,
+      "rules": 9,
+      "goal": 6,
+      "overall": 7,
+      "comment": "1～2 文。"
+    }
+  ]
+}
+```
+
+各スコアは 0–10 の整数または `null`。`overall` と `goal` は常に数値。Memory ターゲットスコアリングでは `character` は常に `null`。
+
+### 軸
+
+すべて 0–10 の整数、10 が理想、`null` は判定不能時（5 を「不明」の代用にしない）。
+
+| 軸 | 測定内容 | 0 | 5 | 10 |
+|---|---|---|---|---|
+| `human` | AI らしさの低さ | このチャットの人々の書き方から遠い | どちらとも言えない | リファレンスの実際の人の書き方と一致 |
+| `character` | キャラクターカードへの適合度 | 完全にキャラクター外 | 認識できるが滑りあり | カードの声そのもの |
+| `rules` | ルールと学習項目の遵守 | すべての適用ルールに違反 | 一部遵守、一部違反 | すべての適用ルールを遵守 |
+| `goal` | `<case>` の要求を満たしているか | 逆のことをしている | 部分的に達成、部分的に未達 | 記述通りに行動を処理 |
+| `overall` | Mentor の総合判定 | 全面的に不合格 | 明確な弱点はあるが許容範囲 | 全面的に優秀 |
+
+Memory ターゲットスコアリングでは `character` は常に `null`、`human` はテキストが知り合いについての個人的なメモ（10）か、そのような人が自分用に書く文体から遠い（0）かを測定します。
+
+### 合格ルール
+
+ケースが合格する条件: `overall` の中央値 >= `mentor.pass.score`（デフォルト 7）かつ `goal` の中央値 >= `mentor.pass.score` かつ、いずれの軸の中央値も `mentor.pass.floor`（デフォルト 5）を下回らないこと。すべてのスコアが `null` の軸は中央値が `null` となり、チェックされません。
+
+### スコアリングのエビデンス順序
+
+1. `<feedback>` 内のオーナーの修正。Mentor の好みに優先する。
+2. 測定されたリファレンス（`<reference>`、`<samples>`）と確定的事実（`<facts>`）。
+3. Mentor 自身の好み。提案のみ行い、上記 2 つに優先しない。
 
 ## リミット通知
 

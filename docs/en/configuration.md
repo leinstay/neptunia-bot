@@ -26,6 +26,7 @@ Every key in `config.json` with its default, grouped by section.
 | `webLookup` | `false` | Read links posted in chat and search the web when asked a factual question. Unlike other features, a missing key counts as OFF. Needs `BRAVE_SEARCH_API_KEY` in `.env` for search; without it only link reading works. See [Media: Links and search](media.md#links) |
 | `imageGeneration` | `false` | Let the persona draw pictures through a drawing sub-process. A missing key counts as on. Turn on in `config.local.json`; needs an image-capable model in `image.model`. See [Media: Drawing](media.md#drawing) |
 | `privateMessages` | `false` | Answer direct messages from guild members. Needs a stored public profile and `affinity.score >= private.minAffinity`. See [Messages and memory: Private layer](messages-and-memory.md#private-layer) |
+| `mentor` | `false` | Manual testing sub-process with its own model. Must be exactly `true` to enable; a missing key counts as off. See [Mentor](#mentor) |
 | `followUp` | `true` | Classify untagged messages after the persona answers to continue a conversation |
 | `typingSimulation` | `true` | Simulate typing speed |
 | `adminCommands` | `true` | Owner slash commands; `false` unregisters them |
@@ -367,6 +368,33 @@ Settings for private chat (`features.privateMessages`). All hot-reloaded. The ga
 
 With `features.relationships` off, public scores stay at 0, so with the default `minAffinity` only owners can DM.
 
+## `mentor`
+
+Settings for the manual testing sub-process (`features.mentor`). The mentor invents chat situations, runs the persona through them in a sandbox, and scores the answers. It uses its own model and its own daily token budget; nothing it does counts against `llm.maxRequestsPerDay`. All hot-reloaded.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `model` | `null` | Mentor model ID. `null` or missing disables all commands that need the model |
+| `maxTokensPerDay` | `400000` | Daily token budget. Counted from real usage: prompt tokens x1, cached prompt tokens x`cachedTokenWeight`, output tokens x`outputTokenWeight`. Sandbox answers of the persona's talk model are counted the same way |
+| `outputTokenWeight` | `5` | Weight of output tokens in the budget. Accounts for the higher cost of generated tokens |
+| `cachedTokenWeight` | `0.1` | Weight of cached prompt tokens in the budget |
+| `maxOutputTokens` | `6000` | Max output tokens per mentor request |
+| `timeoutMs` | `300000` | Request timeout for mentor requests (ms) |
+| `situations` | `5` | Chat situations invented per run |
+| `situationLines` | `[6, 15]` | Min and max lines per situation |
+| `samples` | `3` | Persona completions per situation |
+| `check.samples` | `1` | Persona completions per situation during `/nep mentor check` |
+| `pass.score` | `7` | A case passes when the median of `overall` and the median of `goal` reach this threshold |
+| `pass.floor` | `5` | A case fails when any axis has a median below this floor |
+| `reference.days` | `7` | Days of chat history used to build the style reference |
+| `reference.samples` | `60` | Random lines (2–200 characters) picked from the reference window as style examples |
+| `reference.maxMessages` | `3000` | Max messages read from the reference channels |
+| `reference.rarePer1000` | `0.5` | A mark used less often than this many times per 1000 characters counts as rare |
+| `reference.rareMinAuthors` | `2` | A mark used by fewer authors than this counts as rare |
+| `feedbackExamples` | `10` | Latest owner corrections (`/nep mentor wrong`) included in every scoring request |
+
+`llm.maxRequestTokens` (50k per request) applies to every request the mentor makes or causes, including sandbox answers. Before each request the estimated cost is checked against the remaining daily budget; when the budget runs out the run stops and reports what it has.
+
 ## `warmup`
 
 | Key | Default | Meaning |
@@ -429,6 +457,10 @@ Cost per one-minute clip, USD, from OpenRouter prices on 2026-09-23:
 | `google/gemini-3.8-flash` (default) | 0.014 |
 
 `qwen/qwen3.8-omni-flash` also accepts video and audio. Prices change; the table is a snapshot as of the date above.
+
+### Mentor (`mentor.model`)
+
+Role `mentor`. Scores the persona's answers and invents test situations. A model from a different family than the talk model is recommended: a model is blind to the habits of its own family. `null` (default) leaves the mentor disabled; `/nep mentor` commands that need the model say so.
 
 ### Pictures out (`image.model`)
 

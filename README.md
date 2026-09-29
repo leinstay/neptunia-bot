@@ -97,6 +97,12 @@ The persona can see attached pictures, watch short video clips, read pages behin
 
 `features.privateMessages` (off by default) lets guild members talk to the persona in Discord DMs. The persona is the same character with the same public memory; what is said in a DM is remembered in a per-member private layer that no other conversation ever sees. DMs need the same server membership and no extra permission beyond what the invite URL already grants. See [`docs/en/messages-and-memory.md`](docs/en/messages-and-memory.md#private-layer) for the gate, the private memory layer and the owner commands.
 
+## Mentor
+
+`features.mentor` (off by default) adds a manual testing sub-process with its own model. The owner names a behaviour he wants from the persona (a "case"), and the mentor invents chat situations to test it, runs the persona through them in a sandbox with the live prompts and memory, and scores every answer on five axes (0–10). Nothing is posted to any channel; all work stays in `data/` and the admin channel. In this first stage the mentor only measures and reports; it does not edit anything.
+
+A case targets either how the persona replies or how the memory analyzer writes. The mentor model, budget and commands are independent from the persona's. See [`docs/en/configuration.md`](docs/en/configuration.md#mentor) for the config keys and [`docs/en/owner-commands.md`](docs/en/owner-commands.md) for the `/nep mentor` subcommands.
+
 ## Costs
 
 Each turn is one LLM request; a memory update adds a second. Cost depends on the model and endpoint; `llm.model` and `llm.baseUrl` accept any compatible values. The daily cap (`llm.maxRequestsPerDay`) prevents runaway spending. Video descriptions add one request per watched clip to a separate, cheaper model (`media.video.maxPerDay` caps the daily count); `yt-dlp` and `ffmpeg` run locally and cost nothing beyond bandwidth. Link reads and searches (`features.webLookup`, off by default) add requests to the text classifier model, capped by `web.maxPerDay`; search additionally needs a Brave Search API key (free tier: 2,000 queries/month). Image generation (`features.imageGeneration`, off by default) bills per output token through `image.model`; `image.maxPerDay` caps the daily count separately from chat requests. Private chat (`features.privateMessages`, off by default) uses the same LLM and caps; each DM reply is one request, each private analyzer batch is another. With `features.webLookup` on, the bot makes outbound HTTP requests to fetch pages and to the Brave Search API; private addresses are refused.
@@ -163,6 +169,10 @@ prompts/
   lookup.md                classifier: does a question need a web search
   read-link.md             condense a fetched page
   search-summary.md        condense search results
+  mentor-situations.md     mentor: invent test situations (reply target)
+  mentor-situations-memory.md  mentor: invent test situations (memory target)
+  mentor-score.md          mentor: score the persona's answers
+  mentor-score-memory.md   mentor: score the analyzer's stored text
   profile.md               warmup: one member's profile from a message sample
   channel.md               warmup: channel notes from a message sample
   server.md                warmup: server-level notes from channel notes and member summaries

@@ -40,6 +40,10 @@
 | `private.md` | 否 | 追加在模式提示（`reply.md`）之后、`forced.md` 之前，仅在 DM 中使用（`features.privateMessages`）。这是一段私聊：此处所说的一切留在此处；角色保留其公共知识。文件不存在则不追加任何内容 | `{{name}}` `{{author}}` |
 | `draw.md` | 是 | 绘画子进程的角色外提示（`features.imageGeneration`）：根据场景描述生成一张图片。仅接收外貌和请求，不接收角色卡 | `{{name}}` `{{appearance}}` `{{request}}` |
 | `appearance.md` | 否 | 角色的视觉外貌，在 `self="yes"` 时插入 `draw.md`。一段话，无性格，无背景故事 | `{{name}}` |
+| `mentor-situations.md` | 否 | Mentor：为 reply 目标案例构造测试场景（`features.mentor`）。仅返回 JSON | `{{name}}` `{{count}}` `{{minLines}}` `{{maxLines}}` |
+| `mentor-situations-memory.md` | 否 | Mentor：为 memory 目标案例构造测试场景（`features.mentor`）。仅返回 JSON | `{{name}}` `{{count}}` `{{minLines}}` `{{maxLines}}` |
+| `mentor-score.md` | 否 | Mentor：对角色的回答进行评分（`features.mentor`）。接收角色卡。仅返回 JSON | `{{name}}` |
+| `mentor-score-memory.md` | 否 | Mentor：对分析器将存储的文本进行评分（`features.mentor`）。无角色卡。`character` 轴始终为 `null`。仅返回 JSON | `{{name}}` |
 | `labels.json` | 是 | 代码插入提示中的所有字符串。键在下方固定，值由编写者决定 | 见下文 |
 
 `{{name}}` 机器人的显示名称 · `{{author}}` 呼叫者的显示名称 · `{{trigger}}` `labels.triggers.*` 之一 ·
@@ -217,6 +221,7 @@ memory.privateChannel                    heading used in place of a channel name
 limits.notice                            {limit} {used} {cap}: posted as a plain reply when a rail refuses a triggered action; limit is the config key, used/cap are the numbers
 warmup.ownMark                           prefixed to a member's own lines in the profile.md transcript
 warmup.contextMark                       prefixed to context lines in the profile.md transcript
+mentor.intended                          array of short strings: engine behaviours that must not cost points in the mentor's scoring
 ```
 
 ## 输出
@@ -592,6 +597,114 @@ warmup.contextMark                       prefixed to context lines in the profil
 ### 私有模式的分析器
 
 `analyzePrivate` 构建与相同 `memory.md` 格式的请求，加上 `<private>` 块（`labels.memory.privateNote`）。`<existing_profiles>` 仅包含伙伴。回答中仅 `users[<partnerId>]` 通过私有存储方法应用。`portrait`、`aliases`、`guild`、`channels`、`lore`、`self` 被丢弃。
+
+## Mentor
+
+手动子进程（`features.mentor`），使用独立模型（`mentor.model`）。所有者添加案例（角色应有的行为），mentor 构造聊天场景，在沙盒中让角色作答并评分。第一阶段仅测量和报告，不进行任何编辑。一次只运行一个。
+
+### 隐私
+
+Mentor 模型读取渲染后的沙盒请求，因此可以读取角色记忆中关于真实用户的内容。私信和私有记忆层永远不会出现在沙盒请求中。
+
+### 提示
+
+Mentor 使用四个提示文件，每个目标一对：
+
+- **Reply 目标**：`mentor-situations.md`（构造场景）和 `mentor-score.md`（评分回答）。
+- **Memory 目标**：`mentor-situations-memory.md`（构造场景）和 `mentor-score-memory.md`（评分存储文本）。
+
+每个提示文件是一次 mentor 请求的系统消息。块在用户消息中传递。
+
+代码填充的占位符：所有四个文件中的 `{{name}}`；两个场景提示中的 `{{count}}`、`{{minLines}}`、`{{maxLines}}`。
+
+### 块
+
+| 块 | 内容 | 在哪个请求中 |
+|---|---|---|
+| `<case>` | 所有者的案例文本，逐字 | 全部 |
+| `<members>` | 每行一个存储的档案：`name (id:123)` | 场景 |
+| `<reference>` | 风格档案 JSON：标点频率、长度、回复频率、未使用的字符 | 全部 |
+| `<samples>` | 聊天中的随机行，每行一条 | 全部 |
+| `<intended>` | `labels.mentor.intended`，每项一行 | 评分 |
+| `<feedback>` | 所有者修正的 JSON 数组：`[{ "case": "...", "reason": "..." }]`，从新到旧；空时省略 | 全部 |
+| `<character>` | 填充了 `{{name}}` 的角色卡 | 评分（仅 reply） |
+| `<rules>` | 规则提示 | 评分 |
+| `<learned>` | 角色看到的指令式已学内容 | 评分 |
+| `<situation>` | 渲染为聊天记录的场景，角色所见 | 评分 |
+| `<answers>` | JSON 数组：`[{ "id": "s1a1", "messages": ["..."], "reactions": ["..."], "silent": false }]` | 评分（reply） |
+| `<stored>` | JSON 数组：`[{ "id": "s1a1", "texts": [{ "path": "...", "text": "..." }] }]` | 评分（memory） |
+| `<facts>` | 按回答 id 索引的 JSON 对象，包含确定性测量结果（未使用标记、稀有标记、逗号密度、长度），以及跨回答出现的短语 `"repeated"` | 评分 |
+
+### 回答 ID
+
+`s<场景>a<样本>`，均从 1 开始。示例：`s2a3` 是第二个场景的第三个样本。
+
+### 场景 schema
+
+```json
+{
+  "situations": [
+    {
+      "title": "简短标签",
+      "lines": [
+        {
+          "authorId": "123456789 or self",
+          "authorName": "显示名称",
+          "text": "消息内容",
+          "replyTo": null,
+          "minutesBefore": 5
+        }
+      ]
+    }
+  ]
+}
+```
+
+`authorId` 是 `<members>` 中的成员 id 或 `self`（角色自己的行）。`replyTo` 是该场景 `lines` 数组中的 0 索引，或 `null`。两种目标的最后一行都不能是 `self`。Reply 场景的最后一行必须对角色说话。Memory 场景不要求对角色说话；角色自己的行可以出现在最后一行之前的任何位置。
+
+### 评分 schema
+
+```json
+{
+  "answers": [
+    {
+      "id": "s1a1",
+      "human": 7,
+      "character": 8,
+      "rules": 9,
+      "goal": 6,
+      "overall": 7,
+      "comment": "一两句话。"
+    }
+  ]
+}
+```
+
+每个分数为 0–10 的整数或 `null`。`overall` 和 `goal` 始终为数字。Memory 评分中 `character` 始终为 `null`。
+
+### 轴
+
+均为 0–10 整数，10 为理想，`null` 表示无法评判（绝不用 5 代替"未知"）。
+
+| 轴 | 测量内容 | 0 | 5 | 10 |
+|---|---|---|---|---|
+| `human` | 多大程度上不像 AI 写的 | 与聊天中真人的写法相差甚远 | 可能是人也可能是 AI | 与参考中的真人写法一致 |
+| `character` | 与角色卡的匹配度 | 完全不符 | 可识别但有偏差 | 完全符合卡的声音 |
+| `rules` | 遵守规则和已学内容 | 违反所有适用规则 | 部分遵守部分违反 | 遵守每条适用规则 |
+| `goal` | 是否做到 `<case>` 要求的 | 做了相反的事 | 部分达成部分遗漏 | 完全按描述处理 |
+| `overall` | Mentor 的综合判断 | 全面失败 | 尚可但有明显弱点 | 全面优秀 |
+
+Memory 评分中 `character` 始终为 `null`，`human` 衡量文本是否读起来像某人关于熟悉的人的个人笔记（10），还是与这种人为自己写笔记的方式相差甚远（0）。
+
+### 通过规则
+
+案例通过条件：`overall` 中位数 >= `mentor.pass.score`（默认 7）且 `goal` 中位数 >= `mentor.pass.score` 且没有任何轴的中位数低于 `mentor.pass.floor`（默认 5）。所有分数均为 `null` 的轴中位数为 `null`，不参与检查。
+
+### 评分证据顺序
+
+1. `<feedback>` 中所有者的修正，优先于 mentor 的品味。
+2. 测量的参考（`<reference>`、`<samples>`）和确定性事实（`<facts>`）。
+3. Mentor 自身的品味，提出建议但绝不凌驾于前两者。
 
 ## 限制通知
 
