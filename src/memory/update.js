@@ -1030,6 +1030,57 @@ function mediaParts(message) {
 }
 
 /**
+ * The stored profiles/channels an analyzer batch needs, plus the distinct
+ * non-self author ids and channel ids of `messages` (the `knownUserIds` /
+ * `knownChannelIds` of `applyMemoryUpdate`). Shared by the live analyzer and
+ * the mentor's memory sandbox (src/mentor/sandbox.js), which reads through
+ * its own view instead of the store.
+ * @param {object[]} messages  Slim or normalized messages; `self`/`authorId`/`channelId` read.
+ * @param {(id: string) => (object|null)} getUser     A stored profile, null when none.
+ * @param {(id: string) => (object|null)} getChannel  A stored channel entry, null when none.
+ * @returns {{ authorIds: string[], profiles: object, channelIds: string[], channels: object }}
+ */
+export function batchContext(messages, getUser, getChannel) {
+  const authorIds = [...new Set(messages.filter((m) => !m.self).map((m) => m.authorId))];
+  const profiles = {};
+  for (const id of authorIds) {
+    const profile = getUser(id);
+    if (profile) profiles[id] = profile;
+  }
+
+  const channelIds = [...new Set(messages.map((m) => m.channelId).filter((id) => id != null))];
+  const channels = {};
+  for (const id of channelIds) {
+    const channel = getChannel(id);
+    if (channel) channels[id] = channel;
+  }
+
+  return { authorIds, profiles, channelIds, channels };
+}
+
+/**
+ * The `relationships`/`episodes`/`lore` arguments of the apply functions,
+ * from `config` (read by the caller at the moment of use). `now` is the clock
+ * (a function), read once per enabled switch. Shared by the live analyzer and
+ * the mentor's memory sandbox (src/mentor/sandbox.js).
+ * @param {object} config
+ * @param {() => number} now
+ * @returns {{ relationships?: object, episodes?: object, lore?: object }}
+ */
+export function memorySwitches(config, now) {
+  const cfg = config.memory;
+  const relationshipsOn = config.features?.relationships !== false;
+  const relationships = relationshipsOn ? { enabled: true, ...config.relationships, now: now() } : undefined;
+  const episodesOn = config.features?.episodes !== false;
+  const episodes = episodesOn ? { enabled: true, maxEpisodes: cfg.maxEpisodes, maxNew: cfg.maxNewEpisodes, now: now() } : undefined;
+  const loreOn = config.features?.lore !== false;
+  const lore = loreOn
+    ? { enabled: true, maxEntries: config.lore?.maxEntries ?? Infinity, textChars: config.lore?.textChars, now: now() }
+    : undefined;
+  return { relationships, episodes, lore };
+}
+
+/**
  * @param {object} deps
  * @param {object} deps.hot          Live config + prompts; read at the moment of use.
  * @param {object} deps.store
@@ -1110,21 +1161,11 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
    * strings-to-be via `knownUserIds`/`knownChannelIds` downstream).
    */
   function collectContext(guildId, messages) {
-    const authorIds = [...new Set(messages.filter((m) => !m.self).map((m) => m.authorId))];
-    const profiles = {};
-    for (const id of authorIds) {
-      const profile = store.getUser(guildId, id);
-      if (profile) profiles[id] = profile;
-    }
-
-    const channelIds = [...new Set(messages.map((m) => m.channelId).filter((id) => id != null))];
-    const channels = {};
-    for (const id of channelIds) {
-      const channel = store.getChannel(guildId, id);
-      if (channel) channels[id] = channel;
-    }
-
-    return { authorIds, profiles, channelIds, channels };
+    return batchContext(
+      messages,
+      (id) => store.getUser(guildId, id),
+      (id) => store.getChannel(guildId, id),
+    );
   }
 
   /**
@@ -1310,16 +1351,7 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
 
   /** The `relationships`/`episodes`/`lore` arguments of the apply functions, from the live config. */
   function applySwitches() {
-    const cfg = hot.config.memory;
-    const relationshipsOn = hot.config.features?.relationships !== false;
-    const relationships = relationshipsOn ? { enabled: true, ...hot.config.relationships, now: now() } : undefined;
-    const episodesOn = hot.config.features?.episodes !== false;
-    const episodes = episodesOn ? { enabled: true, maxEpisodes: cfg.maxEpisodes, maxNew: cfg.maxNewEpisodes, now: now() } : undefined;
-    const loreOn = hot.config.features?.lore !== false;
-    const lore = loreOn
-      ? { enabled: true, maxEntries: hot.config.lore?.maxEntries ?? Infinity, textChars: hot.config.lore?.textChars, now: now() }
-      : undefined;
-    return { relationships, episodes, lore };
+    return memorySwitches(hot.config, now);
   }
 
   /**

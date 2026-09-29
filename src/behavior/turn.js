@@ -56,8 +56,17 @@ export function resolveMentions(text, history) {
   return { text: resolved, userIds: [...userIds] };
 }
 
-/** Profiles of the people most recently active in the transcript, excluding `exceptId`. */
-function pickOtherProfiles(store, guildId, history, exceptId, count) {
+/**
+ * Profiles of the people most recently active in the transcript, excluding `exceptId`.
+ * Also used by the mentor's reply sandbox (src/mentor/sandbox.js) with a store-shaped reader.
+ * @param {{ getUser: (guildId: string, userId: string) => (object|null) }} store
+ * @param {string} guildId
+ * @param {object[]} history
+ * @param {string|undefined} exceptId
+ * @param {number} count
+ * @returns {object[]}
+ */
+export function pickOtherProfiles(store, guildId, history, exceptId, count) {
   const seen = new Set();
   const profiles = [];
   for (const message of [...history].reverse()) {
