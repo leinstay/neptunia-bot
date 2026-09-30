@@ -40,6 +40,8 @@ Channels, roles and users are picked from Discord's own pickers; `set`/`unset` a
 | `/nep lore list [query]` | List lorebook entries |
 | `/nep lore show <id>` | Show a lorebook entry |
 | `/nep lore remove <id>` | Remove a lorebook entry |
+| `/nep emoji status` | Show the emoji ranking: size, top 10 names with counts, when the backfill ran |
+| `/nep emoji rescan` | Clear the usage ranking and recount from channel history |
 | `/nep warmup run` | Start or resume a full run: channels, then people, then server |
 | `/nep warmup users [member]` | With a member: profile or re-profile that one now; without: re-profile every qualifying member |
 | `/nep warmup channels [channel]` | With a channel: describe or re-describe that one now; without: every readable channel |

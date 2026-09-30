@@ -39,7 +39,7 @@ test('buildCommandTree: never emits default_member_permissions -- always visible
 test('buildCommandTree: top-level leaves (status, ping, reload, pause, resume, interject, initiate, draw, set, unset)', () => {
   const [command] = buildCommandTree('nep');
   const names = command.options.map((o) => o.name);
-  assert.deepEqual(names, ['status', 'ping', 'reload', 'pause', 'resume', 'interject', 'initiate', 'draw', 'set', 'unset', 'rule', 'memory', 'private', 'alias', 'lore', 'learned', 'model', 'warmup', 'mentor', 'access']);
+  assert.deepEqual(names, ['status', 'ping', 'reload', 'pause', 'resume', 'interject', 'initiate', 'draw', 'set', 'unset', 'rule', 'memory', 'private', 'alias', 'lore', 'learned', 'emoji', 'model', 'warmup', 'mentor', 'access']);
 
   const status = findOption(command.options, 'status');
   assert.equal(status.type, 1); // SUBCOMMAND
@@ -211,6 +211,22 @@ test('buildCommandTree: alias group (add/remove), each with a required user and 
     assert.equal(name.type, 3); // STRING
     assert.equal(name.required, true);
   }
+});
+
+test('buildCommandTree: emoji group (status/rescan), no options', () => {
+  const [command] = buildCommandTree('nep');
+  const emoji = findOption(command.options, 'emoji');
+  assert.equal(emoji.type, 2); // SUBCOMMAND_GROUP
+  assert.ok(emoji.description.length <= 100);
+  assert.deepEqual(emoji.options.map((o) => o.name), ['status', 'rescan']);
+  for (const sub of emoji.options) {
+    assert.equal(sub.type, 1); // SUBCOMMAND
+    assert.ok(sub.description.length <= 100, `${sub.name} description must be <= 100 chars`);
+    assert.equal(sub.options, undefined);
+  }
+  const { keys } = commandKeys();
+  assert.ok(keys.has('emoji.status'));
+  assert.ok(keys.has('emoji.rescan'));
 });
 
 test('buildCommandTree: learned group (list/add/remove)', () => {
@@ -846,6 +862,24 @@ test('interaction handler: alias.add/alias.remove map user/name straight through
   }));
   assert.equal(admin.runCalls[1][0], 'alias.remove');
   assert.deepEqual(admin.runCalls[1][1], { userId: 'target1', name: 'Ari' });
+});
+
+test('interaction handler: emoji.status replies at once, emoji.rescan is deferred', async () => {
+  const admin = fakeAdmin();
+  const handler = createInteractionHandler({ hot: baseHot(), admin, getGuildId: () => 'g1' });
+
+  const status = fakeInteraction({ group: 'emoji', subcommand: 'status' });
+  await handler(status);
+  assert.equal(admin.runCalls[0][0], 'emoji.status');
+  assert.deepEqual(admin.runCalls[0][1], {});
+  assert.ok(!status.replies.some((r) => r.deferred));
+
+  const rescan = fakeInteraction({ group: 'emoji', subcommand: 'rescan' });
+  await handler(rescan);
+  assert.equal(admin.runCalls[1][0], 'emoji.rescan');
+  assert.deepEqual(admin.runCalls[1][1], {});
+  assert.ok(rescan.replies.some((r) => r.deferred));
+  assert.equal(rescan.edits.length, 1);
 });
 
 test('interaction handler: learned.list/add/remove map their options straight through', async () => {

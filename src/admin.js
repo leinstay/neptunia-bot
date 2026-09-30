@@ -31,6 +31,7 @@ import { topByRank, sortByRank } from './memory/ranking.js';
 import { fromTokens } from './memory/mentions.js';
 import { sortEpisodesForDisplay } from './memory/episodes.js';
 import { channelActivity } from './memory/channels.js';
+import { rankEmojiUsage } from './memory/emoji-usage.js';
 import { commandKeys } from './discord/commands.js';
 import { isAllowed as accessIsAllowed, isOwnerOnly, grant as accessGrant, revoke as accessRevoke } from './discord/access.js';
 import { classifierTextModel, classifierMediaModel, classifierVideoModel } from './behavior/mention.js';
@@ -57,6 +58,7 @@ const READ_ONLY_ACCESS_KEYS = new Set([
   'lore.show',
   'learned.list',
   'model.show',
+  'emoji.status',
   'warmup.status',
   'warmup.people',
   'access.list',
@@ -531,6 +533,9 @@ function imageFileName(mediaType) {
  *   Absent -> `/nep draw` reports it is not available and `/nep status` has no image lines.
  * `imageFetcher` — from createImageFetcher() (src/discord/fetch-image.js), optional: downloads the
  *   bot's avatar as the reference of a `/nep draw self` picture. Absent -> no reference is sent.
+ * `emojiBackfill` — from createEmojiBackfill() (src/memory/emoji-backfill.js), optional: `run` (with
+ *   `force`, awaited by `/nep emoji rescan`) and `isRunning` (a note in `/nep emoji status`).
+ *   Absent -> `/nep emoji rescan` reports it is not available; `/nep emoji status` still works.
  * `mentor` — from createMentor() (src/mentor/mentor.js), optional: `run`/`check` (started by
  *   `/nep mentor run|check`, never awaited to the end), `resolveAnchor` (reads the moment of a
  *   message for `/nep mentor add|anchor`), `stop`, `status`; `isRunning` and
@@ -565,6 +570,7 @@ export function createAdmin({
   lookup,
   images,
   imageFetcher,
+  emojiBackfill,
   mentor,
   mentorCases,
   mentorBudget,
@@ -596,7 +602,7 @@ export function createAdmin({
    * alias.add, alias.remove, memory.forget, private.forget, private.purge, memory.wipe, memory.affinity (when
    * setting a score), memory.refresh, lore.add, lore.remove, learned.add,
    * learned.remove, warmup.run, warmup.users, warmup.channels, warmup.server,
-   * warmup.reset, draw (it counts against the image rail in state.json) and
+   * warmup.reset, emoji.rescan, draw (it counts against the image rail in state.json) and
    * mentor.add, mentor.anchor, mentor.remove, mentor.run, mentor.check, mentor.wrong,
    * mentor.undo (it writes prompts.local/ or memory) and mentor.rebase (prompts.local/).
    */
@@ -2640,6 +2646,47 @@ async function cmdPing(args) {
       .join('\n');
   }
 
+  /** `/nep emoji status`: how many emoji the ranking holds, the top 10 (rank order,
+   * `context.customEmoji.halfLifeDays`) with their counts, and the history backfill stamp. */
+  function cmdEmojiStatus(_args, context) {
+    freshenIfPaused();
+    const guildId = resolvedGuildId(context);
+    if (!guildId) throw new Error('no guild resolved yet');
+
+    const guild = store.getGuild(guildId);
+    const ranked = rankEmojiUsage(guild.emojiUsage, hot.config?.context?.customEmoji?.halfLifeDays ?? 30);
+    const stamp = guild.emojiBackfill;
+    const running = emojiBackfill?.isRunning?.() ? ' (running now)' : '';
+    const backfill = stamp?.at ? `${stamp.at}, ${stamp.channels} channels, ${stamp.messages} messages` : 'never';
+    return [
+      `ranking: ${ranked.length} emoji`,
+      ranked.length > 0 ? 'top 10:' : 'top 10: (none)',
+      ...ranked.slice(0, 10).map((entry) => `  :${entry.name}: x${entry.count}`),
+      `backfill: ${backfill}${running}`,
+    ].join('\n');
+  }
+
+  /** Why `/nep emoji rescan` did not run, by src/memory/emoji-backfill.js's skip reason. */
+  const EMOJI_RESCAN_SKIPS = {
+    running: 'An emoji backfill is already running.',
+    disabled: 'The emoji backfill is off (context.customEmoji.backfillMessages is 0).',
+    paused: 'paused -- run /nep resume first',
+    'no-guild': 'no guild resolved yet',
+  };
+
+  /** `/nep emoji rescan`: clears `emojiUsage` and recounts it from channel history (the backfill
+   * with `force`), awaited to the end. Writes under data/, so refused while paused. */
+  async function cmdEmojiRescan(_args, context) {
+    if (!emojiBackfill) return 'the emoji backfill is not available';
+    assertNotPaused();
+    const guildId = resolvedGuildId(context);
+    if (!guildId) throw new Error('no guild resolved yet');
+
+    const result = await emojiBackfill.run(guildId, { force: true });
+    if (!result.ok) return EMOJI_RESCAN_SKIPS[result.reason] ?? `not done (${result.reason})`;
+    return `Emoji rescan done: ${result.channels} channels, ${result.messages} messages read, ${result.emoji} emoji uses counted.`;
+  }
+
   /** Wraps a `warmup.*` handler so both report the same thing when the dependency is absent. */
   function withWarmup(fn) {
     return (args, context) => {
@@ -2697,6 +2744,8 @@ async function cmdPing(args) {
     'learned.list': (args, context) => cmdLearnedList(args, context),
     'learned.add': (args, context) => cmdLearnedAdd(args, context),
     'learned.remove': (args, context) => cmdLearnedRemove(args, context),
+    'emoji.status': (args, context) => cmdEmojiStatus(args, context),
+    'emoji.rescan': (args, context) => cmdEmojiRescan(args, context),
     'model.show': () => cmdModelShow(),
     'model.set': (args) => cmdModelSet(args),
     'warmup.people': withWarmup((args, context) => cmdWarmupPeople(args, context)),

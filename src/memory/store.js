@@ -131,6 +131,7 @@ export function emptyGuild() {
     learned: [], // things people taught the persona: detail-shaped items plus an optional `from` -- see applyLearnedOps
     learnedNextId: 1, // the next id a learned item gets -- never reused, even after a remove
     emojiUsage: {}, // { [emojiId]: { name, count, last } } -- members' custom emoji uses, see recordEmojiUsage
+    emojiBackfill: null, // { at, channels, messages } once src/memory/emoji-backfill.js has read the history
     updatedAt: null,
   };
 }
@@ -230,7 +231,17 @@ function normalizePrivate(priv) {
   if (!Array.isArray(priv.buffer)) priv.buffer = [];
 }
 
-/** Normalize a guild's `learned`/`learnedNextId`/`emojiUsage` fields in place: a
+/** A stored `emojiBackfill` stamp made safe to read: `{ at, channels, messages }` with
+ * `at` a non-empty string and the counts non-negative integers (floored, a bad one
+ * becomes 0); anything without a string `at` becomes null (never backfilled). */
+function normalizeEmojiBackfill(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  if (typeof value.at !== 'string' || !value.at) return null;
+  const count = (n) => (Number.isFinite(n) && n > 0 ? Math.floor(n) : 0);
+  return { at: value.at, channels: count(value.channels), messages: count(value.messages) };
+}
+
+/** Normalize a guild's `learned`/`learnedNextId`/`emojiUsage`/`emojiBackfill` fields in place: a
  * guild.json written before this list existed loads it as empty, a
  * hand-edited one is validated via src/memory/details.js#normalizeDetails
  * (fresh ids off `learnedNextId` when needed). Every other field is left
@@ -244,6 +255,8 @@ function normalizeGuild(guild) {
   guild.learnedNextId = nextId;
   // Missing or hand-broken -> {} (src/memory/emoji-usage.js#normalizeEmojiUsage).
   guild.emojiUsage = normalizeEmojiUsage(guild.emojiUsage);
+  // Missing or hand-broken -> null: the history backfill has not run.
+  guild.emojiBackfill = normalizeEmojiBackfill(guild.emojiBackfill);
 }
 
 /** Keep only the newest `max` UTC-date keys of a `days` counter map. */
@@ -875,12 +888,13 @@ export function createStore({ dataDir }) {
      * `learnedNextId` are never taken from here -- they only ever change
      * through `applyLearnedOps`, which merges incrementally instead of
      * overwriting wholesale (mirrors `updateUser`); `emojiUsage` likewise
-     * only through `recordEmojiUsage`.
+     * only through `recordEmojiUsage`/`clearEmojiUsage`, `emojiBackfill` only
+     * through `setEmojiBackfill`.
      */
     updateGuild(guildId, fields) {
       const item = entry(guildFile(guildId), emptyGuild);
       normalizeGuild(item.value);
-      const { learned, learnedNextId, emojiUsage, ...safeFields } = fields ?? {};
+      const { learned, learnedNextId, emojiUsage, emojiBackfill, ...safeFields } = fields ?? {};
       Object.assign(item.value, safeFields, { updatedAt: new Date().toISOString() });
       item.dirty = true;
       return item.value;
@@ -906,6 +920,35 @@ export function createStore({ dataDir }) {
         item.dirty = true;
       }
       return counted;
+    },
+
+    /**
+     * Empty the guild's `emojiUsage` -- only for the emoji history backfill
+     * (src/memory/emoji-backfill.js: its one first run, or the owner's
+     * `/nep emoji rescan`), which recounts it from history right after.
+     * Nothing else is touched; never stamps `updatedAt`.
+     * @param {string} guildId
+     */
+    clearEmojiUsage(guildId) {
+      const item = entry(guildFile(guildId), emptyGuild);
+      normalizeGuild(item.value);
+      item.value.emojiUsage = {};
+      item.dirty = true;
+    },
+
+    /**
+     * Stamp the guild's `emojiBackfill` (`{ at, channels, messages }`,
+     * normalised like on read) after a history backfill. Never stamps `updatedAt`.
+     * @param {string} guildId
+     * @param {{ at: string, channels: number, messages: number }} stamp
+     * @returns {{ at: string, channels: number, messages: number } | null} The stored stamp.
+     */
+    setEmojiBackfill(guildId, stamp) {
+      const item = entry(guildFile(guildId), emptyGuild);
+      normalizeGuild(item.value);
+      item.value.emojiBackfill = normalizeEmojiBackfill(stamp);
+      item.dirty = true;
+      return item.value.emojiBackfill;
     },
 
     /**

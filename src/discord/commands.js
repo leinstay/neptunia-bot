@@ -46,6 +46,7 @@ const SLOW_COMMANDS = new Set([
   'warmup.status',
   'warmup.reset',
   'memory.refresh',
+  'emoji.rescan',
   'private.purge',
   'draw',
   'mentor.add',
@@ -408,6 +409,19 @@ export function buildCommandTree(commandName) {
         },
         {
           type: SUBCOMMAND_GROUP,
+          name: 'emoji',
+          description: "Which of the server's custom emoji the members use, counted without the model.",
+          options: [
+            { type: SUBCOMMAND, name: 'status', description: 'Ranking size, the top 10 with their counts, and the history backfill stamp.' },
+            {
+              type: SUBCOMMAND,
+              name: 'rescan',
+              description: 'Clear the emoji ranking and recount it from recent channel history (Discord reads only).',
+            },
+          ],
+        },
+        {
+          type: SUBCOMMAND_GROUP,
           name: 'model',
           description: 'Which model talks, analyzes memory, describes pictures and videos, and classifies.',
           options: [
@@ -711,6 +725,8 @@ const OPTION_MAPPERS = {
   'learned.list': () => ({}),
   'learned.add': (options) => ({ text: options.getString('text', true) }),
   'learned.remove': (options) => ({ id: options.getInteger('id', true) }),
+  'emoji.status': () => ({}),
+  'emoji.rescan': () => ({}),
   'model.show': () => ({}),
   'model.set': (options) => ({ role: options.getString('role', true), id: options.getString('id', true) }),
   'warmup.people': () => ({}),

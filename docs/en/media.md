@@ -14,7 +14,7 @@ When `features.attachedDescriptions` is on (the default), the describer also run
 
 Stickers and custom emoji recur constantly, so they are cached by id and cost nearly nothing after the first description. With `features.vision`, the sticker of the calling message is attached as a picture. Discord's built-in animated stickers are Lottie animations, not images, so they are never more than a name.
 
-When `features.customEmoji` is on (the default), an `<emoji>` block lists the server's most-used custom emoji ranked by how often members use them (at most `context.customEmoji.max`, default 30). The persona can write `:name:` in a message or a reaction, and the engine turns known names into real emoji. Unknown names stay as plain text.
+When `features.customEmoji` is on (the default), an `<emoji>` block lists the server's most-used custom emoji ranked by how often members use them (at most `context.customEmoji.max`, default 30). The persona can write `:name:` in a message or a reaction, and the engine turns known names into real emoji. Unknown names stay as plain text. At first startup the engine seeds the ranking by reading the last `context.customEmoji.backfillMessages` (default 500) messages of every readable channel (no model calls); `/nep emoji rescan` clears the ranking and recounts from scratch.
 
 Settings: `context.vision.*` for direct vision, `media.*` for the describer. See [Configuration](configuration.md#media) for every key.
 

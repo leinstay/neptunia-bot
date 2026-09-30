@@ -362,6 +362,7 @@ function makeAdmin(rootDir, extra = {}) {
     lookup: extra.lookup,
     images: extra.images,
     imageFetcher: extra.imageFetcher,
+    emojiBackfill: extra.emojiBackfill,
     mentor: extra.mentor,
     mentorCases: extra.mentorCases,
     mentorBudget: extra.mentorBudget,
@@ -5486,4 +5487,98 @@ test('isAllowed: mentor commands stay owner-only even when bot.access grants the
   assert.equal(admin.isAllowed('mentor.run', { userId: '999', roleIds: ['staff'] }), false);
   assert.equal(admin.isAllowed('mentor.status', { userId: '999', roleIds: [] }), false);
   assert.equal(admin.isAllowed('mentor.run', { userId: '42', roleIds: [] }), true, 'the owner still passes');
+});
+
+// ---------------------------------------------------------------------------
+// emoji.status / emoji.rescan -- the custom emoji ranking and its history backfill
+// ---------------------------------------------------------------------------
+
+function fakeEmojiBackfill(result = { ok: true, channels: 3, messages: 120, emoji: 17 }, { running = false } = {}) {
+  return {
+    calls: [],
+    async run(guildId, opts) {
+      this.calls.push([guildId, opts]);
+      return result;
+    },
+    isRunning: () => running,
+  };
+}
+
+test('run: emoji.status shows the ranking size, the top 10 with counts and the backfill stamp', async () => {
+  const rootDir = makeRoot();
+  const { admin, store, dataDir } = makeRealStoreAdmin(rootDir);
+  try {
+    const now = Date.now();
+    const messages = [];
+    for (let i = 0; i < 12; i += 1) {
+      for (let k = 0; k <= i; k += 1) messages.push({ id: `${i}-${k}`, ts: now, emojis: [{ id: String(100 + i), name: `e${i}` }] });
+    }
+    store.recordEmojiUsage('g1', messages);
+    store.setEmojiBackfill('g1', { at: '2026-09-30T10:00:00.000Z', channels: 4, messages: 900 });
+
+    const body = await admin.run('emoji.status', {}, { guildId: 'g1' });
+    const lines = body.split('\n');
+    assert.equal(lines[0], 'ranking: 12 emoji');
+    assert.equal(lines[1], 'top 10:');
+    assert.equal(lines[2], '  :e11: x12');
+    assert.equal(lines[11], '  :e2: x3');
+    assert.ok(!body.includes(':e1:'), 'only the top 10');
+    assert.equal(lines[12], 'backfill: 2026-09-30T10:00:00.000Z, 4 channels, 900 messages');
+  } finally {
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test('run: emoji.status with nothing counted and no backfill says so', async () => {
+  const rootDir = makeRoot();
+  const { admin, dataDir } = makeRealStoreAdmin(rootDir, { emojiBackfill: fakeEmojiBackfill(undefined, { running: true }) });
+  try {
+    const body = await admin.run('emoji.status', {}, { guildId: 'g1' });
+    assert.equal(body, ['ranking: 0 emoji', 'top 10: (none)', 'backfill: never (running now)'].join('\n'));
+  } finally {
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test('run: emoji.rescan runs the backfill forced and replies with the counts', async () => {
+  const rootDir = makeRoot();
+  const emojiBackfill = fakeEmojiBackfill();
+  const { admin } = makeAdmin(rootDir, { emojiBackfill });
+
+  const body = await admin.run('emoji.rescan', {}, { guildId: 'g1' });
+  assert.deepEqual(emojiBackfill.calls, [['g1', { force: true }]]);
+  assert.equal(body, 'Emoji rescan done: 3 channels, 120 messages read, 17 emoji uses counted.');
+});
+
+test('run: emoji.rescan relays why the backfill did not run', async () => {
+  const rootDir = makeRoot();
+  const { admin: busy } = makeAdmin(rootDir, { emojiBackfill: fakeEmojiBackfill({ ok: false, reason: 'running' }) });
+  assert.equal(await busy.run('emoji.rescan', {}, { guildId: 'g1' }), 'An emoji backfill is already running.');
+
+  const { admin: off } = makeAdmin(rootDir, { emojiBackfill: fakeEmojiBackfill({ ok: false, reason: 'disabled' }) });
+  assert.equal(
+    await off.run('emoji.rescan', {}, { guildId: 'g1' }),
+    'The emoji backfill is off (context.customEmoji.backfillMessages is 0).',
+  );
+});
+
+test('run: emoji.rescan is refused while paused and without the backfill', async () => {
+  const rootDir = makeRoot();
+  const emojiBackfill = fakeEmojiBackfill();
+  const { admin } = makeAdmin(rootDir, { emojiBackfill });
+  await admin.run('pause', {}, {});
+  await assert.rejects(() => admin.run('emoji.rescan', {}, { guildId: 'g1' }), /paused/);
+  assert.equal(emojiBackfill.calls.length, 0);
+
+  const { admin: bare } = makeAdmin(rootDir);
+  assert.equal(await bare.run('emoji.rescan', {}, { guildId: 'g1' }), 'the emoji backfill is not available');
+});
+
+test('run: access.grant on emoji.status adds no write note, on emoji.rescan it does', async () => {
+  const rootDir = makeRoot();
+  const { admin } = makeAdmin(rootDir);
+  const status = await admin.run('access.grant', { command: 'emoji.status', roleId: 'staff' }, {});
+  const rescan = await admin.run('access.grant', { command: 'emoji.rescan', roleId: 'staff' }, {});
+  assert.doesNotMatch(status, /change memory or config/);
+  assert.match(rescan, /change memory or config/);
 });

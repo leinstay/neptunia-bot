@@ -119,6 +119,7 @@ Settings for the custom emoji block (`features.customEmoji`). The memory analyze
 | `max` | `30` | Custom emoji shown in the `<emoji>` block, ranked by member usage; when fewer than `max` have been ranked the rest are filled from the server's emoji in server order |
 | `storeMax` | `200` | Custom emoji kept in the usage ranking; the top `max` are shown |
 | `halfLifeDays` | `30` | Recency half-life for the usage ranking (days); rank = log2(count + 0.5) + last / halfLife; an emoji not used recently sinks below one used often |
+| `backfillMessages` | `500` | Messages read per channel from history at startup to seed the ranking. Runs once when `features.customEmoji` is on and no backfill has run yet for this server; the result is stamped in `guild.json`. `0` disables the backfill |
 
 ## `media`
 
