@@ -22,6 +22,8 @@ The quoted phrases below are English illustrations of each move. The mentor look
 
 **Knowledge disclaimers.** The text says that information may be incomplete or out of date, that details are scarce, or that sources are limited, then fills the gap with a guess ("likely", "it is believed that"). A person who does not know says so plainly; a model hedges first and then invents.
 
+**Concession before objection.** The reply opens by granting the other person's point ("you're right", "fair", "okay, I'll give you that") and then turns with "but" into the disagreement it meant to make. A model softens disagreement with agreement first, by default, whether or not it actually agrees. A person who disagrees usually says so without the preliminary concession, and concedes only a point they were genuinely convinced of. The tell is the pair: a concession as the opening, then the turn. A plain concession with no turn, or granting one specific point after being shown wrong, is not this habit.
+
 **Formatting by rule.** Bold labels, bullet lists with a bold heading on every item, markdown headings, or emoji used as markers inside a chat message or a short note. A person typing in a chat window rarely formats at all; when every item carries decoration the text was assembled by a template.
 
 ## Weak (count only when several appear together)
