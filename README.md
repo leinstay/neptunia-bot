@@ -99,11 +99,11 @@ The persona can see attached pictures, watch short video clips, read pages behin
 
 ## Mentor
 
-`features.mentor` (off by default) adds a manual testing sub-process with its own model. The owner names a behaviour he wants from the persona (a "case"), and the mentor invents chat situations to test it, runs the persona through them in a sandbox with the live prompts and memory, and scores every answer on five axes (0–10). All work stays in `data/`. When `bot.dryRunChannelId` is set, a finished run is posted there as well; without an admin channel the owner follows a run with `/nep mentor status` and reads the report with `/nep mentor show <id>`.
+`features.mentor` (off by default) adds a manual testing sub-process with its own model. A case is a real message of the persona plus one sentence about what is wrong with it. The mentor stores the chat that led to the message, invents more situations of the same kind, runs the persona through all of them in a sandbox with the live prompts and memory, and scores every answer on five axes (0–10). All work stays in `data/`. When `bot.dryRunChannelId` is set, a finished run is posted there as well; without an admin channel the owner follows a run with `/nep mentor status` and reads the report with `/nep mentor show <id>`.
 
 With `features.mentorAutoFix` on (off by default), a failed run continues into a repair loop that re-measures the weak situations first (a control run to confirm the failure reproduces), then proves a cause by ablation, writes one edit that targets the proven piece, verifies it on fresh situations and checks it against every other case, and applies it only then, with a record the owner can undo. Every change is recorded in `data/` and can be listed, undone, or rebased after a deploy.
 
-A case targets either how the persona replies or how the memory analyzer writes. The mentor model, budget and commands are independent from the persona's. See [`docs/en/configuration.md`](docs/en/configuration.md#mentor) for the config keys and [`docs/en/owner-commands.md`](docs/en/owner-commands.md) for the `/nep mentor` subcommands.
+The mentor model, budget and commands are independent from the persona's. See [`docs/en/configuration.md`](docs/en/configuration.md#mentor) for the config keys and [`docs/en/owner-commands.md`](docs/en/owner-commands.md) for the `/nep mentor` subcommands.
 
 ## Costs
 

@@ -22,6 +22,8 @@ You score {{name}}'s answers to a chat situation, measuring how well each one ha
 
 `<situation>` — the chat transcript as the persona saw it.
 
+`<original>` (may be absent) — the answer the persona gave in the real chat when this situation happened. The owner rejected it. This is what prompted the case: treat it as a known-bad reference. It is never one of the answers to score. When it shows the same weaknesses as a scored answer, that tells you the scored answer repeated a proven mistake.
+
 `<answers>` — the persona's answers as JSON: `[{ "id": "s1a1", "messages": [...], "reactions": [...], "silent": false }]`. `silent: true` means the persona chose to stay silent.
 
 `<facts>` — deterministic measurements of each answer, keyed by answer id: characters that people in the chat never use but the answer does, characters that are rare in the chat (used by only one person or at a negligible rate; a mark only one person uses is that person's habit, not the chat's, and an answer that uses it is further from how the chat writes), comma count, comma density and length against the reference. `commaPer1000` is a number only when the measured text has at least 150 characters; for a shorter answer it is `null` because one comma more or less swings the rate too far to mean anything. When it is `null`, judge `commas` (the raw count) and never infer a density. Also a `"repeated"` key with phrases that recurred in two or more different situations, and `count` is the number of situations; a phrase shared only by samples of one situation is not listed, because the situation itself explains the overlap.

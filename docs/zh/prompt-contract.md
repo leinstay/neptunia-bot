@@ -225,6 +225,8 @@ limits.notice                            {limit} {used} {cap}: posted as a plain
 warmup.ownMark                           prefixed to a member's own lines in the profile.md transcript
 warmup.contextMark                       prefixed to context lines in the profile.md transcript
 mentor.intended                          array of short strings: engine behaviours that must not cost points in the mentor's scoring
+mentor.examples                          first line inside the `<examples>` block in a situations request: introduces the real moments
+mentor.original                          first line inside the `<original>` block in a score request: introduces the persona's rejected answer
 ```
 
 ## 输出
@@ -620,6 +622,27 @@ Mentor 模型读取渲染后的沙盒请求，因此可以读取角色记忆中�
 
 停止的运行保留已有的分数并在报告中包含它们。
 
+### 真实 moment（anchors）
+
+案例可包含来自聊天的真实 moment。每个 moment 是所有者拒绝的角色的一条消息。解析过程：机器人获取该消息，找到触发消息（该消息回复的消息，或其之前最后一条非角色消息），收集该频道直到触发消息的最多 `mentor.anchor.contextMessages`（默认 30）条消息，并将角色的整个连续消息（从指定消息开始的连续消息）存储为原始回答。存储的历史与常规转录的规范化方式相同（媒体标签、反应），但不下载任何内容。名称和反应保持获取时的状态。存储后，moment 从其存储的消息重放，即使频道继续或消息被删除。
+
+案例将 moment 存储为 `anchors`：
+
+```json
+[{ "id": 1, "channelId": "...", "messageId": "...", "triggerId": "...",
+   "addedAt": "...", "history": [/* 规范化消息 */], "original": ["text", "..."] }]
+```
+
+在运行中，每个可用的 anchor 成为独立的场景，编号在构造的场景之前。场景记录携带 `anchor: <id>`（构造的场景没有此字段）。重放使用存储的历史，在角色原始消息的时间点，在 anchor 自己的频道中。
+
+在场景请求中，案例的 anchor 以 `<examples>`（最后一个块）的形式展示给 mentor 模型。每个 `<example>` 包含存储转录的 `<situation>` 和角色消息的 `<original>`。每个示例的最旧消息可能被裁剪以适应请求预算；触发消息不会被删除。Mentor 构造同类场景：匹配消息长度、回合数和压力程度。
+
+在真实 moment 的评分请求中，`<original>` 出现在 `<situation>` 和 `<answers>` 之间，携带角色被拒绝的回答作为已知的差参考。
+
+验证器对构造场景单行的上限为 2000 字符（原先为 500），使 mentor 能够匹配示例中的消息长度。
+
+诊断在弱场景中优先选择真实 moment 作为 `<worst>`。
+
 ### 提示
 
 Mentor 使用六个提示文件：每个目标一对，加上特征文件和诊断文件：
@@ -643,15 +666,17 @@ Mentor 使用六个提示文件：每个目标一对，加上特征文件和诊�
 | `<signs>` | 填充了 `{{name}}` 的 `mentor-signs.md`：已知的模型文本习惯。文件缺失或为空时省略 | 全部 |
 | `<intended>` | `labels.mentor.intended`，每项一行 | 评分 |
 | `<feedback>` | 所有者修正的 JSON 数组：`[{ "case": "...", "reason": "..." }]`，从新到旧；空时省略 | 全部 |
+| `<examples>` | 聊天中的真实 moment：`labels.mentor.examples` 为首行，然后每个 moment 一个 `<example>`。每个 `<example>` 包含 `<situation>`（存储的转录，最旧消息可裁剪以适应请求预算）和 `<original>`（角色的消息）。案例无 moment 时省略 | 场景 |
+| `<original>` | 角色当时的回答（在真实 moment 的评分请求中）。`labels.mentor.original` 为首行，然后是角色的消息。已知的差参考，不是待评分的回答。构造的场景省略此块 | 评分（reply，仅真实 moment） |
 | `<character>` | 填充了 `{{name}}` 的角色卡 | 评分（仅 reply） |
 | `<rules>` | 规则提示 | 评分 |
 | `<learned>` | 角色看到的指令式已学内容 | 评分 |
-| `<situation>` | 渲染为聊天记录的场景，角色所见 | 评分 |
+| `<situation>` | 渲染为聊天记录的场景，角色所见。真实 moment 的最旧消息可能被裁剪以适应请求预算；触发消息不会被删除 | 评分 |
 | `<answers>` | JSON 数组：`[{ "id": "s1a1", "messages": ["..."], "reactions": ["..."], "silent": false }]` | 评分（reply） |
 | `<stored>` | JSON 数组：`[{ "id": "s1a1", "texts": [{ "path": "...", "text": "..." }], "parseOk": true }]`。当 `parseOk` 为 false 时分析器返回了无效 JSON，不会存储任何内容 | 评分（memory） |
 | `<facts>` | 按回答 id 索引的 JSON 对象，包含确定性测量结果（未使用标记、稀有标记、逗号计数、逗号密度、长度），以及在两个或更多不同场景中出现的短语 `"repeated"`。每个回答：`commas` 为计数；`commaPer1000` 仅在测量文本至少 150 字符时为数字，更短时为 `null`（太短无法测量；mentor 根据计数评判，不推断密度）。`repeated` 列出在不同场景中重复出现的短语，`count` 为场景数 | 评分 |
 | `<verdict>` | JSON：`{ passed, medians, situations, reasons }`，包含通过/失败结果、各轴中位数、各场景中位数和诊断原因 | 诊断 |
-| `<worst>` | JSON：`overall` 中位数最低的场景（平局时取最小 `n`）：`{ n, title, transcript, answers }`，每个回答包含 id、messages/reactions/silent（memory 目标为 `texts`/`parseOk`）、`facts` 和 `score` | 诊断 |
+| `<worst>` | JSON：`overall` 中位数最低的场景（平局时取最小 `n`；同等候选中真实 moment 优先于构造场景）：`{ n, title, transcript, answers }`，每个回答包含 id、messages/reactions/silent（memory 目标为 `texts`/`parseOk`）、`facts` 和 `score`。转录可能被裁剪以适应请求预算 | 诊断 |
 | `<seen>` | 角色（或 memory 案例中的分析器）在该场景中收到的完整请求，分两个子块：`<system>`（系统提示含角色卡、规则和格式）和 `<user>`（聊天记录、记忆块和任务） | 诊断 |
 
 ### 回答 ID
@@ -680,6 +705,8 @@ Mentor 使用六个提示文件：每个目标一对，加上特征文件和诊�
 ```
 
 `authorId` 是 `<members>` 中的成员 id 或 `self`（角色自己的行）。`replyTo` 是该场景 `lines` 数组中的 0 索引，或 `null`。两种目标的最后一行都不能是 `self`。Reply 场景的最后一行必须对角色说话。Memory 场景不要求对角色说话；角色自己的行可以出现在最后一行之前的任何位置。
+
+来自真实 moment 的场景记录携带 `anchor: <id>` 而非 `lines`。其转录从存储的历史构建；记录还包含 `original`（角色的消息）和 `at`（角色回答的时间）。
 
 ### 评分 schema
 

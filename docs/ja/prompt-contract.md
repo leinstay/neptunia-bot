@@ -222,6 +222,8 @@ limits.notice                            {limit} {used} {cap}: posted as a plain
 warmup.ownMark                           prefixed to a member's own lines in the profile.md transcript
 warmup.contextMark                       prefixed to context lines in the profile.md transcript
 mentor.intended                          array of short strings: engine behaviours that must not cost points in the mentor's scoring
+mentor.examples                          first line inside the `<examples>` block in a situations request: introduces the real moments
+mentor.original                          first line inside the `<original>` block in a score request: introduces the persona's rejected answer
 ```
 
 ## 出力
@@ -518,6 +520,27 @@ Mentor モデルはレンダリングされたサンドボックスリクエス�
 
 停止されたランは既に得られたスコアを保持し、レポートに含めます。
 
+### 実際の moment（anchors）
+
+ケースはチャットからの実際の moment を含むことができます。各 moment はオーナーが拒否したペルソナの 1 つのメッセージです。解決プロセス: ボットはメッセージを取得し、トリガー（リプライ先のメッセージ、またはその前のペルソナ以外の最後のメッセージ）を見つけ、そのチャンネルのトリガーまでの最大 `mentor.anchor.contextMessages`（デフォルト 30）件のメッセージを収集し、ペルソナのバースト全体（指定メッセージから始まる連続メッセージ）をオリジナルの回答として保存します。保存された履歴は通常のトランスクリプトと同じ方法で正規化され（メディアラベル、リアクション）、ダウンロードは行いません。名前とリアクションは取得時のまま保持されます。保存後、チャンネルが進んだりメッセージが削除されても、moment は保存されたメッセージから再生されます。
+
+ケースは moment を `anchors` として保存します:
+
+```json
+[{ "id": 1, "channelId": "...", "messageId": "...", "triggerId": "...",
+   "addedAt": "...", "history": [/* 正規化されたメッセージ */], "original": ["text", "..."] }]
+```
+
+ラン中、各使用可能な anchor は独立した状況になり、作成された状況の前に番号が付けられます。状況レコードは `anchor: <id>` を持ちます（作成された状況にはありません）。再生は保存された履歴を使用し、ペルソナのオリジナルメッセージの時点で、anchor 自身のチャンネルで行われます。
+
+状況リクエストでは、ケースの anchor が `<examples>`（最後のブロック）として mentor モデルに提示されます。各 `<example>` には保存されたトランスクリプトの `<situation>` とペルソナのメッセージの `<original>` が含まれます。各例の最も古いメッセージはリクエスト予算に収まるようにトリミングされる場合があります。トリガーは削除されません。Mentor は同種の状況を作成します: メッセージの長さ、ターン数、圧力の程度を合わせます。
+
+実際の moment のスコアリングリクエストでは、`<original>` が `<situation>` と `<answers>` の間に配置され、ペルソナの拒否された回答を既知の悪い参照として含みます。
+
+バリデーターの作成された状況の 1 行あたりの上限は 2000 文字（旧 500）になり、mentor が例のメッセージの長さに合わせられます。
+
+診断は弱い状況の中に実際の moment がある場合、それを `<worst>` として優先します。
+
 ### プロンプト
 
 Mentor は 6 つのプロンプトファイルを使用します。ターゲットごとに 1 ペア、特徴ファイルと診断ファイル:
@@ -541,15 +564,17 @@ Mentor は 6 つのプロンプトファイルを使用します。ターゲッ�
 | `<signs>` | `{{name}}` を埋めた `mentor-signs.md`: モデル文の既知の癖。ファイルがないか空の場合は省略 | すべて |
 | `<intended>` | `labels.mentor.intended`、1 項目ずつ | スコアリング |
 | `<feedback>` | オーナーの修正の JSON 配列: `[{ "case": "...", "reason": "..." }]`、新しい順。空の場合省略 | すべて |
+| `<examples>` | チャットからの実際の moment: `labels.mentor.examples` を先頭行とし、moment ごとに 1 つの `<example>`。各 `<example>` には `<situation>`（保存されたトランスクリプト、最も古いメッセージはリクエスト予算に合わせてトリミングされる場合あり）と `<original>`（ペルソナのメッセージ）が含まれる。ケースに moment がない場合は省略 | 状況 |
+| `<original>` | その時のペルソナの回答（実際の moment のスコアリングリクエスト内）。`labels.mentor.original` を先頭行とし、ペルソナのメッセージが続く。既知の悪い参照であり、スコアリング対象の回答ではない。作成された状況では省略 | スコアリング（reply、実際の moment のみ） |
 | `<character>` | `{{name}}` を埋めたキャラクターカード | スコアリング（reply のみ） |
 | `<rules>` | ルールプロンプト | スコアリング |
 | `<learned>` | ペルソナが見ている指示的な学習項目 | スコアリング |
-| `<situation>` | チャットトランスクリプトとしてレンダリングされた状況（ペルソナの視点） | スコアリング |
+| `<situation>` | チャットトランスクリプトとしてレンダリングされた状況（ペルソナの視点）。実際の moment では、最も古いメッセージがリクエスト予算に合わせてトリミングされる場合があり、トリガーは削除されない | スコアリング |
 | `<answers>` | JSON 配列: `[{ "id": "s1a1", "messages": ["..."], "reactions": ["..."], "silent": false }]` | スコアリング（reply） |
 | `<stored>` | JSON 配列: `[{ "id": "s1a1", "texts": [{ "path": "...", "text": "..." }], "parseOk": true }]`。`parseOk` が false の場合、アナライザーが無効な JSON を返し何も保存されない | スコアリング（memory） |
 | `<facts>` | 回答 id をキーとした JSON オブジェクト。確定的測定結果（未使用マーク、レアマーク、コンマ数、コンマ密度、長さ）と、2 つ以上の異なる状況で見つかったフレーズ `"repeated"` を含む。回答ごと: `commas` はカウント、`commaPer1000` は測定テキストが 150 文字以上の場合のみ数値で、短い場合は `null`（短すぎて測定不能、mentor はカウントで判断し密度を推定しない）。`repeated` は異なる状況で繰り返されたフレーズを列挙し、`count` は状況の数 | スコアリング |
 | `<verdict>` | JSON: `{ passed, medians, situations, reasons }`。合否結果、各軸の中央値、状況ごとの中央値、診断の理由 | 診断 |
-| `<worst>` | JSON: `overall` 中央値が最低の状況（同率の場合は最小の `n`）: `{ n, title, transcript, answers }`。各回答は id、messages/reactions/silent（memory の場合は `texts`/`parseOk`）、`facts`、`score` を含む | 診断 |
+| `<worst>` | JSON: `overall` 中央値が最低の状況（同率の場合は最小の `n`。同等の候補では実際の moment が作成された状況より優先）: `{ n, title, transcript, answers }`。各回答は id、messages/reactions/silent（memory の場合は `texts`/`parseOk`）、`facts`、`score` を含む。トランスクリプトはリクエスト予算に合わせてトリミングされる場合がある | 診断 |
 | `<seen>` | その状況でペルソナ（memory ケースの場合はアナライザー）に渡された完全なリクエスト。2 つのサブブロック: `<system>`（キャラクターカード、ルール、フォーマットを含むシステムプロンプト）と `<user>`（トランスクリプト、メモリブロック、タスク） | 診断 |
 
 ### 回答 ID
@@ -578,6 +603,8 @@ Mentor は 6 つのプロンプトファイルを使用します。ターゲッ�
 ```
 
 `authorId` は `<members>` のメンバー id または `self`（ペルソナ自身の行）。`replyTo` はこの状況の `lines` 配列内の 0 ベースインデックス、または `null`。両ターゲットとも最後の行は `self` であってはなりません。Reply ターゲット状況では最後の行がペルソナに話しかけます。Memory ターゲット状況ではペルソナへの呼びかけは不要です。ペルソナ自身の行は最後の行より前のどこにでも置けます。
+
+実際の moment からの状況レコードは `lines` の代わりに `anchor: <id>` を持ちます。そのトランスクリプトは保存された履歴から構築されます。レコードには `original`（ペルソナのメッセージ）と `at`（ペルソナが回答した時間）も含まれます。
 
 ### スコアスキーマ
 

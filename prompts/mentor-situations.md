@@ -14,6 +14,8 @@ You invent short chat situations that test whether {{name}} handles a specific b
 
 `<feedback>` (may be absent) — the owner's corrections of earlier scoring verdicts, newest first. A correction means the previous judgement was wrong. Do not design situations that would lead to the same mistake.
 
+`<examples>` (may be absent) — real moments from this chat where the persona answered and the owner rejected the answer. Each `<example>` holds a `<situation>` (the transcript up to the trigger) and an `<original>` (the answer the persona gave). These are the kind of moment the owner cares about. Match them: the same message lengths, the same number of turns, the same weight behind the last line. When an example has long messages, your invented situations should have long messages too. Do not copy the examples; invent new situations that create the same conditions.
+
 ## Output
 
 A single bare JSON object. No markdown fencing, no commentary, nothing outside the JSON.
@@ -43,7 +45,7 @@ Return exactly {{count}} situations, each with {{minLines}} to {{maxLines}} line
 
 **Speakers.** Every `authorId` is an id from `<members>` or `self` (for {{name}}'s own earlier line). `authorName` must match the member's name. Use different speakers across situations.
 
-**Write like the chat.** Lines must read like the people in `<samples>` wrote them — same language, same length, same punctuation habits, same register. Match the numbers in `<reference>`. A line that reads like it was written for a test is a bad line.
+**Write like the chat.** Lines must read like the people in `<samples>` wrote them — same language, same length, same punctuation habits, same register. Match the numbers in `<reference>`. A line that reads like it was written for a test is a bad line. A single line may be up to 2000 characters when the `<examples>` show messages that long.
 
 **The last line.** It is never by `self`. It addresses {{name}} by name or replies to one of {{name}}'s lines (`replyTo` set to the 0-based index of that line in this situation). This is the line that gives the persona a real chance to fail.
 

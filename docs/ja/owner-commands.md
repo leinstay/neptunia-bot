@@ -48,8 +48,9 @@
 | `/nep warmup status` | ウォームアップの進捗とトークン使用量を表示 |
 | `/nep warmup stop` | 実行中のウォームアップ作業を即時終了。進行中のリクエストはキャンセルされ、進捗は保持されるため `run` で再開可能 |
 | `/nep warmup reset` | ウォームアップの進捗のみをクリア（保存されたメモリは消去しない） |
-| `/nep mentor add <text> [target]` | ケースを追加: ペルソナに期待する行動を自分の言葉で。`target` は `reply`（デフォルト）または `memory`。ケース id を返答 |
-| `/nep mentor cases` | ケース一覧: id、状態（`new`、`passing`、`failing`）、ターゲット、前回スコア、80 文字までのテキスト |
+| `/nep mentor add message:<link or id> text:<comment>` | ケースを追加: 拒否したペルソナのメッセージと、何が問題かの一文。両方とも必須。メッセージはペルソナのものである必要があります。他のサーバーへのリンク、DM、ボットが読めないチャンネル、削除されたリプライ先、ペルソナ以外のメッセージは拒否されます |
+| `/nep mentor anchor id:<case> message:<link or id>` | 既存のケースに別の moment を追加。`add` と同じ拒否条件に加え、不明なケース、削除済みケース、非 reply ケース、同じメッセージの重複、履歴が空かペルソナのメッセージで終わる moment、`mentor.anchor.max` 超過も拒否されます |
+| `/nep mentor cases` | ケース一覧: id、状態（`new`、`passing`、`failing`）、ターゲット、前回スコア、moment 数（ある場合）、80 文字までのテキスト |
 | `/nep mentor remove <id>` | ケースを削除 |
 | `/nep mentor run <id>` | 1 つのケースのフルサイクルを実行。開始した旨を即時応答。`features.mentorAutoFix` 有効時、不合格のランは修復ループに進む。管理チャンネル（`bot.dryRunChannelId`）がある場合はそこにレポートを投稿。ない場合は `/nep mentor status` と `/nep mentor show <id>` を案内 |
 | `/nep mentor check` | 実行記録のあるすべてのアクティブケースの保存済み状況を再プレイし、状況ごとに `mentor.check.samples` サンプル。管理チャンネルがある場合は統合レポートを投稿。ない場合は `/nep mentor status` と `/nep mentor show <id>` を案内 |

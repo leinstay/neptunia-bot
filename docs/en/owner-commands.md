@@ -48,8 +48,9 @@ Channels, roles and users are picked from Discord's own pickers; `set`/`unset` a
 | `/nep warmup status` | Show warmup progress and token usage |
 | `/nep warmup stop` | End any warmup work at once; the request in flight is cancelled, progress is kept so `run` can resume |
 | `/nep warmup reset` | Clear warmup progress, not stored memory |
-| `/nep mentor add <text> [target]` | Add a case: what you want the persona to do, in your words. `target` is `reply` (default) or `memory`. Answers with the case id |
-| `/nep mentor cases` | List cases: id, state (`new`, `passing`, `failing`), target, last score, text clipped to 80 chars |
+| `/nep mentor add message:<link or id> text:<comment>` | Add a case: a message of the persona you rejected, plus one sentence about what is wrong with it. Both are required. The message must be the persona's; a link into another server, a direct message, a channel the bot cannot read, a deleted reply target and a message that is not the persona's are all refused. Answers with the case id and the resolved moment |
+| `/nep mentor anchor id:<case> message:<link or id>` | Add another moment to an existing case. Same refusals as `add`, plus: unknown case, retired case, a non-reply case, the same message twice, a moment whose chat is empty or ends with the persona, and more than `mentor.anchor.max` moments |
+| `/nep mentor cases` | List cases: id, state (`new`, `passing`, `failing`), target, last score, number of moments (when any), text clipped to 80 chars |
 | `/nep mentor remove <id>` | Retire a case |
 | `/nep mentor run <id>` | Run the full cycle for one case. Answers at once that it started. With `features.mentorAutoFix` on, a failed run continues into the repair loop. With an admin channel (`bot.dryRunChannelId`), the report is posted there; without one, the reply points at `/nep mentor status` and `/nep mentor show <id>` |
 | `/nep mentor check` | Replay the stored situations of every active case that has a run, with `mentor.check.samples` samples each. With an admin channel, posts one combined report; without one, the reply points at `/nep mentor status` and `/nep mentor show <id>` |

@@ -48,8 +48,9 @@
 | `/nep warmup status` | 显示预热进度和 token 使用量 |
 | `/nep warmup stop` | 立即终止所有预热工作；进行中的请求被取消，进度保留以便 `run` 恢复 |
 | `/nep warmup reset` | 清除预热进度，不清除已存储的记忆 |
-| `/nep mentor add <text> [target]` | 添加案例：用你自己的话描述角色应有的行为。`target` 为 `reply`（默认）或 `memory`。返回案例 id |
-| `/nep mentor cases` | 列出案例：id、状态（`new`、`passing`、`failing`）、目标、上次分数、文本截至 80 字符 |
+| `/nep mentor add message:<link or id> text:<comment>` | 添加案例：一条你拒绝的角色消息，加上一句说明问题所在。两个参数均必填。消息必须是角色的；指向其他服务器的链接、私信、机器人无法读取的频道、已删除的回复目标以及非角色的消息均被拒绝 |
+| `/nep mentor anchor id:<case> message:<link or id>` | 向现有案例添加另一个 moment。与 `add` 相同的拒绝条件，另加：未知案例、已退役案例、非 reply 案例、重复的消息、历史为空或以角色消息结尾的 moment，以及超过 `mentor.anchor.max` 个 moment |
+| `/nep mentor cases` | 列出案例：id、状态（`new`、`passing`、`failing`）、目标、上次分数、moment 数量（如有）、文本截至 80 字符 |
 | `/nep mentor remove <id>` | 移除案例 |
 | `/nep mentor run <id>` | 为一个案例运行完整周期。立即回复已启动。启用 `features.mentorAutoFix` 时，失败的运行会进入修复循环。有管理频道（`bot.dryRunChannelId`）时报告发布到该频道；没有时回复指向 `/nep mentor status` 和 `/nep mentor show <id>` |
 | `/nep mentor check` | 重放每个有过运行记录的活跃案例的已存储场景，每个场景 `mentor.check.samples` 个样本。有管理频道时发布一份合并报告；没有时回复指向 `/nep mentor status` 和 `/nep mentor show <id>` |

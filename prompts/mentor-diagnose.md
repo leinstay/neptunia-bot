@@ -10,7 +10,7 @@ You explain what in {{name}}'s context produced the weak answers of a run, point
 
 `<feedback>` (may be absent) contains the owner's corrections of earlier verdicts, newest first. A correction means the mentor judged wrongly before.
 
-`<worst>` is JSON: the situation with the lowest median `overall`, with every scored answer and the deterministic facts about each one.
+`<worst>` is JSON: the situation with the lowest median `overall`, with every scored answer and the deterministic facts about each one. It may be a real moment from the chat (a stored transcript rather than an invented situation).
 
 `<seen>` is the full request {{name}} was given for that situation. Inside it, `<system>` holds the system prompt with the character card, the rules and the format; `<user>` holds the transcript, memory blocks and the task. That is everything the persona read before answering.
 

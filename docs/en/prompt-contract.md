@@ -228,6 +228,8 @@ limits.notice                            {limit} {used} {cap}: posted as a plain
 warmup.ownMark                           prefixed to a member's own lines in the profile.md transcript
 warmup.contextMark                       prefixed to context lines in the profile.md transcript
 mentor.intended                          array of short strings: engine behaviours that must not cost points in the mentor's scoring
+mentor.examples                          first line inside the `<examples>` block in a situations request: introduces the real moments
+mentor.original                          first line inside the `<original>` block in a score request: introduces the persona's rejected answer
 ```
 
 ## Output
@@ -693,6 +695,27 @@ A run ends normally with a verdict and a report. It can also end early:
 
 A stopped run keeps the scores it already has and reports them.
 
+### Real moments (anchors)
+
+A case may carry real moments from the chat. Each moment is one message of the persona that the owner rejected. Resolving: the bot fetches the message, finds the trigger (the message it replies to, or the last message before it that is not the persona's), collects up to `mentor.anchor.contextMessages` (default 30) messages of that channel ending at the trigger, and stores the persona's whole burst (consecutive messages starting at the linked one) as the original answer. The stored history is normalized the same way the regular transcript is (media labels, reactions) but nothing is downloaded. Names and reactions stay as they were at fetch time. Once stored, a moment is replayed from its stored messages even after the channel moves on or a message is deleted.
+
+A case stores its moments as `anchors`:
+
+```json
+[{ "id": 1, "channelId": "...", "messageId": "...", "triggerId": "...",
+   "addedAt": "...", "history": [/* normalized messages */], "original": ["text", "..."] }]
+```
+
+In a run, each usable anchor becomes a situation of its own, numbered before the invented ones. The situation record carries `anchor: <id>` (absent on invented situations). The replay uses the stored history at the time of the persona's original message, in the anchor's own channel.
+
+In the situations request, the case's anchors are shown to the mentor model as `<examples>` (the last block). Each `<example>` holds a `<situation>` with the stored transcript and an `<original>` with the persona's messages. The oldest messages of each example may be trimmed so the block fits the request budget; the trigger is never dropped. The mentor invents situations of the same kind: matching message lengths, turn count and pressure.
+
+In the score request for a real moment, `<original>` appears between `<situation>` and `<answers>`, carrying the persona's rejected answer as a known-bad reference.
+
+The validator's cap on a single line of an invented situation is 2000 characters (not the former 500), so the mentor can match the length of messages in the examples.
+
+The diagnosis prefers a real moment as `<worst>` when one is among the weak situations.
+
 ### Prompts
 
 The mentor uses six prompt files, one pair per target, the signs file and the diagnosis file:
@@ -716,15 +739,17 @@ Placeholders filled by code: `{{name}}` in all six; `{{count}}`, `{{minLines}}`,
 | `<signs>` | `mentor-signs.md` with `{{name}}` filled: known habits of model-written text. Omitted when the file is missing or empty | all |
 | `<intended>` | `labels.mentor.intended`, one line per item | score |
 | `<feedback>` | JSON array of the owner's corrections: `[{ "case": "...", "reason": "..." }]`, newest first; omitted when empty | all |
+| `<examples>` | Real moments from the chat: `labels.mentor.examples` as the first line, then one `<example>` per moment. Each `<example>` holds a `<situation>` (the stored transcript, oldest messages trimmed to the request budget) and an `<original>` (the persona's messages). Omitted when the case has no moments | situations |
+| `<original>` | The persona's answer at the time (in a score request for a real moment). `labels.mentor.original` as the first line, then the persona's messages. A known-bad reference, never an answer to score. Omitted for invented situations | score (reply target, real moments only) |
 | `<character>` | The character card with `{{name}}` filled | score (reply target only) |
 | `<rules>` | The rules prompt | score |
 | `<learned>` | Instruction-like learned items as the persona sees them | score |
-| `<situation>` | The situation rendered as a chat transcript, the way the persona saw it | score |
+| `<situation>` | The situation rendered as a chat transcript, the way the persona saw it. For a real moment, the oldest messages may be trimmed to fit the request budget; the trigger is never dropped | score |
 | `<answers>` | JSON array: `[{ "id": "s1a1", "messages": ["..."], "reactions": ["..."], "silent": false }]` | score (reply target) |
 | `<stored>` | JSON array: `[{ "id": "s1a1", "texts": [{ "path": "...", "text": "..." }], "parseOk": true }]`. When `parseOk` is false the analyzer returned invalid JSON and nothing would have been stored | score (memory target) |
 | `<facts>` | JSON object keyed by answer id with deterministic measurements (unused marks, rare marks, comma count, comma density, length), plus `"repeated"` with phrases found in two or more different situations. Per answer: `commas` is a count; `commaPer1000` is a number only when the measured text has at least 150 characters, `null` for a shorter one (too short to measure; the mentor judges the count, never infers a density). `repeated` lists phrases that recurred across different situations, and `count` is the number of situations | score |
 | `<verdict>` | JSON: `{ passed, medians, situations, reasons }` with the pass/fail result, medians of each axis, per-situation medians and the reasons the case was brought to diagnosis | diagnosis |
-| `<worst>` | JSON: the situation with the lowest median `overall` (ties: the lowest `n`): `{ n, title, transcript, answers }` where each answer carries its id, messages/reactions/silent (or `texts`/`parseOk` for memory), `facts` and `score` | diagnosis |
+| `<worst>` | JSON: the situation with the lowest median `overall` (ties: the lowest `n`; a real moment is preferred over an invented one among equal candidates): `{ n, title, transcript, answers }` where each answer carries its id, messages/reactions/silent (or `texts`/`parseOk` for memory), `facts` and `score`. The transcript may be trimmed to the request budget | diagnosis |
 | `<seen>` | The full request the persona (or the analyzer for a memory case) was given for that situation, as two sub-blocks: `<system>` (the system prompt with the character card, rules and format) and `<user>` (the transcript, memory blocks and task) | diagnosis |
 
 ### Answer ids
@@ -753,6 +778,8 @@ Placeholders filled by code: `{{name}}` in all six; `{{count}}`, `{{minLines}}`,
 ```
 
 `authorId` is a member id from `<members>` or `self` for the persona's own earlier line. `replyTo` is a 0-based index into the same situation's `lines` array, or `null`. For both targets the last line is never by `self`. For reply-target situations it addresses the persona. For memory-target situations no line is required to address the persona; the persona's own lines may appear anywhere before the last line.
+
+A situation record from a real moment has `anchor: <id>` instead of `lines`. Its transcript is rendered from the stored history; its record also carries `original` (the persona's messages) and `at` (the time the persona answered).
 
 ### Scores schema
 
