@@ -406,6 +406,24 @@ test('search: the cache is keyed by the normalised query and served while younge
   assert.equal(braveSearch.calls.length, 2);
 });
 
+test('search: {{today}} in the summary prompt is the injected clock\'s UTC date', async () => {
+  const { lookup, llm } = setup({
+    now: () => Date.UTC(2031, 11, 31, 23, 30, 0),
+    hotOptions: { prompts: { 'search-summary': 'Today is {{today}}. The query: {{query}}. Up to {{maxChars}} characters.' } },
+  });
+  await lookup.search('g1', 'la finale');
+  assert.equal(llm.calls[0].messages[0].content, 'Today is 2031-12-31. The query: la finale. Up to 900 characters.');
+});
+
+test('readLink: {{today}} in the read-link prompt is the injected clock\'s UTC date', async () => {
+  const { lookup, llm } = setup({
+    now: () => Date.UTC(2031, 0, 2, 3, 4, 5),
+    hotOptions: { prompts: { 'read-link': 'Today is {{today}}. Condense this page, up to {{maxChars}} characters.' } },
+  });
+  await lookup.readLink('g1', LINK);
+  assert.equal(llm.calls[0].messages[0].content, 'Today is 2031-01-02. Condense this page, up to 700 characters.');
+});
+
 test('cleanQuery: one line, no angle brackets, no control characters, at most 200 characters', () => {
   assert.equal(cleanQuery('  Qui a gagné  la finale ?  '), 'Qui a gagné  la finale ?');
   assert.equal(cleanQuery('first\nsecond\r\nthird\u2028fourth'), 'first second third fourth');

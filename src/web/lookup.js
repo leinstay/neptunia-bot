@@ -183,9 +183,14 @@ export function createLookup({ hot, store, llm, state = memoryState(), pageFetch
     store.markMediaCacheDirty(guildId);
   }
 
+  /** Today's UTC date `YYYY-MM-DD` on the injected clock (the daily counter and `{{today}}`). */
+  function todayDate() {
+    return new Date(now()).toISOString().slice(0, 10);
+  }
+
   /** Reserve one slot of the shared daily web counter; false when `web.maxPerDay` is spent. */
   function reserveDaily() {
-    const today = new Date(now()).toISOString().slice(0, 10);
+    const today = todayDate();
     if (state.data.webDay !== today) {
       state.data.webDay = today;
       state.data.webCount = 0;
@@ -261,7 +266,7 @@ export function createLookup({ hot, store, llm, state = memoryState(), pageFetch
     try {
       completion = await llm.complete(
         [
-          { role: 'system', content: fillTemplate(hot.prompts['read-link'], { maxChars: summaryChars }) },
+          { role: 'system', content: fillTemplate(hot.prompts['read-link'], { maxChars: summaryChars, today: todayDate() }) },
           { role: 'user', content: title ? `${title}\n\n${body}` : body },
         ],
         {
@@ -402,7 +407,7 @@ export function createLookup({ hot, store, llm, state = memoryState(), pageFetch
       try {
         completion = await llm.complete(
           [
-            { role: 'system', content: fillTemplate(promptText, { query: asked, maxChars: summaryChars }) },
+            { role: 'system', content: fillTemplate(promptText, { query: asked, maxChars: summaryChars, today: todayDate() }) },
             { role: 'user', content: renderResults(found.results) },
           ],
           {

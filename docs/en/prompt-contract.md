@@ -34,9 +34,9 @@ All instructions are English in both layers; a character's speech samples may be
 | `rewatch.md` | yes | Classifier: does this message need the persona to re-watch a video or retry one that did not load (`features.videoRewatch`). Receives a numbered list of recent videos with their status and the new message. Output is ONE line: `<number> \| <question>`, `<number> \| retry` or `none` | `{{name}}` |
 | `rewatch-answer.md` | yes | Out-of-character prompt for the re-watch answer: the video model watches a clip again and answers one question in the language of the question. No character card | `{{today}}` `{{question}}` `{{maxChars}}` |
 | `address.md` | yes | Classifier: is this untagged message addressed to the persona | `{{name}}` |
-| `lookup.md` | no | Classifier: does the persona need to search the web to answer this message (`features.webLookup`). Receives a short transcript and a `<candidate>` block. Output is ONE line: a search query (plain words, at most 12) or `none` | `{{name}}` |
-| `read-link.md` | no | Out-of-character prompt for the link reader (`features.webLookup`, `web.links.enabled`): condense a fetched page into one paragraph. Receives the page title and body. No character card | `{{maxChars}}` |
-| `search-summary.md` | no | Out-of-character prompt for the search condenser (`features.webLookup`, `web.search.enabled`): condense numbered search results into one note with inline sources. No character card | `{{query}}` `{{maxChars}}` |
+| `lookup.md` | no | Classifier: does the persona need to search the web to answer this message (`features.webLookup`). Receives a short transcript and a `<candidate>` block. Output is ONE line: a search query (plain words, at most 12) or `none` | `{{name}}` `{{today}}` |
+| `read-link.md` | no | Out-of-character prompt for the link reader (`features.webLookup`, `web.links.enabled`): condense a fetched page into one paragraph. Receives the page title and body. No character card | `{{today}}` `{{maxChars}}` |
+| `search-summary.md` | no | Out-of-character prompt for the search condenser (`features.webLookup`, `web.search.enabled`): condense numbered search results into one note with inline sources. No character card | `{{today}}` `{{query}}` `{{maxChars}}` |
 | `private.md` | no | Appended after the mode prompt (`reply.md`), before `forced.md`, only in a DM (`features.privateMessages`). This is a private conversation: what is said here stays here; the persona keeps its public knowledge. A missing file adds nothing | `{{name}}` `{{author}}` |
 | `draw.md` | yes | Out-of-character prompt of the drawing sub-process (`features.imageGeneration`): produces one picture from a scene description. Receives only the appearance and the request — never the character card | `{{name}}` `{{appearance}}` `{{request}}` |
 | `appearance.md` | no | The persona's visual look, inserted into `draw.md` when `self="yes"`. One paragraph, no personality, no backstory | `{{name}}` |
@@ -542,7 +542,7 @@ The transcript carries descriptions, video summaries and link reads when availab
 - `none` for everything else.
 
 On a query hit, Brave Search runs the query (`web.search.results` results, default 5), the numbered results are
-condensed by `classifier.text` through `search-summary.md` (`{{query}}`, `{{maxChars}}` = `web.search.summaryChars`,
+condensed by `classifier.text` through `search-summary.md` (`{{today}}`, `{{query}}`, `{{maxChars}}` = `web.search.summaryChars`,
 default 900), and the answer is rendered as a `<lookup>` block right before `<chat>`: `labels.lookup.header` with
 the query, the condensed text, and `labels.lookup.sources` with the distinct site names. When the search returned
 nothing or the condenser found nothing useful, `labels.lookup.none` appears instead.

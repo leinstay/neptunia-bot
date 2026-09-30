@@ -195,9 +195,15 @@ function readableLinkCandidates(history, sites) {
   return out;
 }
 
-/** Fill the `{{name}}` placeholder of a prompt file with the persona's display name (as src/behavior/prompt.js does). */
-function fillName(template, name) {
-  return String(template ?? '').replace(/\{\{name\}\}/g, () => String(name ?? ''));
+/**
+ * Fill the `{{name}}` placeholder of a prompt file with the persona's display name (as src/behavior/prompt.js does),
+ * plus any `{{key}}` of `values`; an unknown key is left as it is.
+ */
+function fillName(template, name, values = {}) {
+  const all = { ...values, name: name ?? '' };
+  return String(template ?? '').replace(/\{\{(\w+)\}\}/g, (placeholder, key) =>
+    Object.prototype.hasOwnProperty.call(all, key) ? String(all[key]) : placeholder,
+  );
 }
 
 /** Upload file name for a generated picture: `image/jpeg` -> `image.jpg`, else `image.<subtype>`. */
@@ -275,6 +281,9 @@ function describableCandidates(history, picked, { includePicked = false } = {}) 
  * `lookup` (src/web/lookup.js#createLookup) is optional too: absent, or
  * `features.webLookup` not true, no link is read and no search is made.
  *
+ * `now` (default Date.now) is the clock behind the search classifier's
+ * `{{today}}`.
+ *
  * `describer` (src/memory/describe.js#createDescriber) is optional: when
  * absent, or `features.mediaDescriptions` is off, no description request is
  * ever made — buildRequest simply renders every un-attached picture blind
@@ -295,6 +304,7 @@ export function createTurnRunner({
   imageFetcher = createImageFetcher(),
   lookup,
   images,
+  now: clock = Date.now,
 }) {
   const busy = new Set();
   const lastPostAt = new Map(); // channelId -> ts of the persona's last message
@@ -692,7 +702,8 @@ export function createTurnRunner({
   /**
    * The search on a question (features.webLookup, web.search.enabled): one
    * cheap classifier call (prompts.lookup, `{{name}}` = the persona's display
-   * name, on classifierTextModel) reads the last `web.search.contextMessages`
+   * name, `{{today}}` = the injected clock's UTC date `YYYY-MM-DD`, on
+   * classifierTextModel) reads the last `web.search.contextMessages`
    * messages before the trigger (with the pictures' captions, the video
    * states and the read links this turn already has) and the trigger itself,
    * and answers `none` or a query (parseLookupQuery); a query goes to
@@ -740,7 +751,7 @@ export function createTurnRunner({
     try {
       completion = await llm.complete(
         [
-          { role: 'system', content: fillName(prompt, selfName) },
+          { role: 'system', content: fillName(prompt, selfName, { today: new Date(clock()).toISOString().slice(0, 10) }) },
           { role: 'user', content: user },
         ],
         {

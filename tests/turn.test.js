@@ -1895,7 +1895,7 @@ function lookupHot(features = {}, web = {}, config = {}) {
   return hot;
 }
 
-async function runLookupTurn({ hot = lookupHot(), llm = lookupLlm(), lookup = fakeLookup(), history, trigger = true } = {}) {
+async function runLookupTurn({ hot = lookupHot(), llm = lookupLlm(), lookup = fakeLookup(), history, trigger = true, now } = {}) {
   const messages = history ?? [
     linkRaw('m1', NOW - 5000, [
       PAGE_EMBED,
@@ -1905,7 +1905,7 @@ async function runLookupTurn({ hot = lookupHot(), llm = lookupLlm(), lookup = fa
     rawMessage({ id: 'm2', ts: NOW - 1000, authorName: 'Zoë', content: 'ποιος κέρδισε τον τελικό;' }),
   ];
   const channel = fakeTurnChannel({ historyMessages: messages });
-  const turns = createTurnRunner({ hot, store: fakeStore(), llm, calibrator: identityCalibrator(), client: fakeClient(), lookup });
+  const turns = createTurnRunner({ hot, store: fakeStore(), llm, calibrator: identityCalibrator(), client: fakeClient(), lookup, ...(now ? { now } : {}) });
   const last = messages[messages.length - 1];
   const turn = trigger
     ? { channel, mode: 'reply', trigger: normalizedTrigger(last), triggerKind: 'mention' }
@@ -1966,6 +1966,23 @@ test('createTurnRunner: lookup -- the classifier gets the transcript and the can
     fill(labels.lookup.sources, { list: 'example.com' }),
   ].join('\n');
   assert.ok(turnUser.includes(`<lookup>\n${block}\n</lookup>`), turnUser);
+});
+
+test('createTurnRunner: lookup -- {{today}} in the classifier prompt is the injected clock\'s UTC date, {{name}} still filled', async () => {
+  const hot = lookupHot();
+  hot.prompts.lookup = 'Decide whether {{name}} needs to look something up. Today is {{today}}; {{name}} again.';
+  const llm = lookupLlm('none');
+  // 23:30 UTC on the last day of the year: the UTC date, not a local one.
+  await runLookupTurn({ hot, llm, now: () => Date.UTC(2031, 11, 31, 23, 30, 0) });
+  assert.equal(llm.classifierCalls[0].messages[0].content, 'Decide whether Bot needs to look something up. Today is 2031-12-31; Bot again.');
+});
+
+test('createTurnRunner: lookup -- a classifier prompt without {{today}} passes through unchanged apart from {{name}}', async () => {
+  const hot = lookupHot();
+  hot.prompts.lookup = 'Decide whether {{name}} should search; keep {{other}} as it is.';
+  const llm = lookupLlm('none');
+  await runLookupTurn({ hot, llm, now: () => Date.UTC(2031, 0, 2, 3, 4, 5) });
+  assert.equal(llm.classifierCalls[0].messages[0].content, 'Decide whether Bot should search; keep {{other}} as it is.');
 });
 
 test('createTurnRunner: lookup -- contextMessages 0 omits the <transcript> block', async () => {
