@@ -1330,7 +1330,7 @@ test('attempt: every replay of a real moment hides the memory written after its 
     assert.equal(run.repair.reason, 'applied');
     const text = (call) => `${call.system}\n${call.user}`;
     // The control, the ablation and the regression replay moments: the persona and the judge see the older item only.
-    for (const phase of ['repair: control', 'repair 1: ablation', 'repair 1: regression']) {
+    for (const phase of ['repair: control', 'repair 1: ablation', 'repair 1: verify anchors', 'repair 1: regression']) {
       const calls = env.llm.inPhase(phase);
       const talks = calls.filter((c) => c.kind === 'talk');
       assert.ok(talks.length > 0, phase);
@@ -1378,6 +1378,140 @@ test("attempt: the regression replays another case's moments from their stored h
     assert.match(scored.user, /<original>\n[^\n]*\nOTHER_MOMENT you are right, but\n<\/original>/);
     assert.deepEqual(run.repair.attempts[0].verify.regression, [{ caseId: other.id, held: true, situations: [{ n: 1, before: 8, after: 9 }] }]);
   }));
+
+// ---- the verification replays the case's own real moments ---------------------
+
+const VERIFY_ANCHORS = 'repair 1: verify anchors';
+
+/** A case with two real moments: ANCHOR_TRIGGER (anchor 1) and SECOND_MOMENT (anchor 2). */
+function anchoredCase(env) {
+  const item = env.cases.add(GUILD, { text: CASE_TEXT, target: 'reply', anchor: moment('ANCHOR_TRIGGER') });
+  env.cases.addAnchor(GUILD, item.id, moment('SECOND_MOMENT', '800000000000000030'), { max: 5 });
+  return item;
+}
+
+/**
+ * GOOD answers 9, a BAD one 3 on the first moment and 8 elsewhere; on the
+ * anchor replay of the verification `verifyScore(call)` when it gives a value.
+ */
+function verifyScoring(verifyScore) {
+  return (a, call) => {
+    const value = call.phase === VERIFY_ANCHORS ? verifyScore(call) : undefined;
+    if (value !== undefined) return value;
+    return a.messages.join(' ').includes('GOOD') ? 9 : call.user.includes('ANCHOR_TRIGGER') ? 3 : 8;
+  };
+}
+
+test('verify: an edit whose real moments still fail on the edited view is not accepted and nothing is written', () =>
+  withSetup({ llm: fakeLlm({ scoreFor: verifyScoring((call) => (call.user.includes('SECOND_MOMENT') ? pair(8, 6) : undefined)) }) }, async (env) => {
+    storedCase(env);
+    const item = anchoredCase(env);
+    const run = await (await env.mentor.run(item.id)).done;
+    assert.equal(run.repair.attempts.length, 1);
+    const [attempt] = run.repair.attempts;
+    assert.equal(attempt.suspects[0].confirmed, true);
+    assert.deepEqual(attempt.edit, FIX);
+    assert.deepEqual(attempt.verify.anchors, { passed: false, situations: [{ anchor: 1, overall: 9, goal: 9 }, { anchor: 2, overall: 8, goal: 6 }] });
+    assert.equal(attempt.accepted, false);
+    assert.equal(attempt.refused, null);
+    // The fresh situations and the regression are skipped.
+    assert.equal(attempt.verify.fresh, null);
+    assert.deepEqual(attempt.verify.regression, []);
+    assert.equal(env.llm.inPhase('repair 1: verify').length, 0);
+    assert.equal(env.llm.inPhase('repair 1: regression').length, 0);
+    assert.equal(env.changes.calls.length, 0);
+    assert.equal(run.repair.applied, null);
+    assert.equal(run.repair.reason, 'no suspect left');
+  }));
+
+test('verify: a real moment is held to mentor.pass.anchorScore, else to the pass score', async () => {
+  const sevens = verifyScoring(() => pair(7, 7));
+  // 7/7 reaches the pass score 7.
+  await withSetup({ llm: fakeLlm({ scoreFor: sevens }) }, async (env) => {
+    const run = await (await env.mentor.run(anchoredCase(env).id)).done;
+    assert.equal(run.repair.attempts[0].verify.anchors.passed, true);
+    assert.equal(run.repair.reason, 'applied');
+  });
+  // 7/7 is under the anchor score 8.
+  await withSetup({ config: { mentor: { pass: { score: 7, floor: 5, anchorScore: 8 } } }, llm: fakeLlm({ scoreFor: sevens }) }, async (env) => {
+    const run = await (await env.mentor.run(anchoredCase(env).id)).done;
+    const [attempt] = run.repair.attempts;
+    assert.deepEqual(attempt.verify.anchors, { passed: false, situations: [{ anchor: 1, overall: 7, goal: 7 }, { anchor: 2, overall: 7, goal: 7 }] });
+    assert.equal(attempt.accepted, false);
+    assert.equal(env.changes.calls.length, 0);
+  });
+});
+
+test('verify: real moments passing and fresh situations passing are accepted; the moments are replayed first, verify.anchorSamples times', async () => {
+  for (const [config, samples] of [[{}, 3], [{ mentor: { verify: { situations: 3, samples: 2, anchorSamples: 4 } } }, 4]]) {
+    await withSetup({ config, llm: fakeLlm({ scoreFor: verifyScoring(() => undefined) }) }, async (env) => {
+      storedCase(env);
+      const item = anchoredCase(env);
+      const run = await (await env.mentor.run(item.id)).done;
+      const [attempt] = run.repair.attempts;
+      assert.deepEqual(attempt.verify.anchors, { passed: true, situations: [{ anchor: 1, overall: 9, goal: 9 }, { anchor: 2, overall: 9, goal: 9 }] });
+      assert.equal(attempt.verify.fresh.passed, true);
+      assert.equal(attempt.verify.regression.length, 1);
+      assert.equal(attempt.accepted, true);
+      assert.equal(env.changes.calls.length, 1);
+      assert.equal(run.repair.reason, 'applied');
+      // Every moment answered `samples` times on the edited view, from its stored history.
+      const talks = env.llm.inPhase(VERIFY_ANCHORS).filter((c) => c.kind === 'talk');
+      assert.equal(talks.length, 2 * samples);
+      assert.equal(talks.filter((c) => c.user.includes('ANCHOR_TRIGGER opening')).length, samples);
+      assert.equal(talks.filter((c) => c.user.includes('SECOND_MOMENT opening')).length, samples);
+      for (const call of talks) assert.equal(call.system.includes(BAD_RULE), false);
+      // Judged on the live view: the judge still reads the rule the edit removes.
+      for (const call of env.llm.inPhase(VERIFY_ANCHORS).filter((c) => c.kind === 'score')) assert.ok(blockBody(call.user, 'rules').includes(BAD_RULE));
+      // The moments come before the fresh situations, which come before the regression.
+      const phases = env.llm.calls.map((c) => c.phase);
+      const lastAnchor = phases.lastIndexOf(VERIFY_ANCHORS);
+      assert.ok(lastAnchor > phases.indexOf('repair 1: edit'));
+      assert.ok(lastAnchor < phases.indexOf('repair 1: verify'));
+      assert.ok(phases.lastIndexOf('repair 1: verify') < phases.indexOf('repair 1: regression'));
+    });
+  }
+});
+
+test('verify: a case without real moments verifies as before', () =>
+  withSetup({}, async (env) => {
+    const { run } = await runCase(env);
+    const [attempt] = run.repair.attempts;
+    assert.equal(attempt.accepted, true);
+    assert.equal('anchors' in attempt.verify, false);
+    assert.equal(env.llm.inPhase(VERIFY_ANCHORS).length, 0);
+    assert.deepEqual(env.llm.inPhase('repair 1: verify').map((c) => c.kind), ['situations', 'talk', 'talk', 'talk', 'talk', 'score', 'score']);
+  }));
+
+test('verify: turning the repair switch off stops before the replay of the real moments and before the fresh situations', async () => {
+  const variants = [
+    { name: 'during the edit request', when: (call) => call.kind === 'fix', none: [VERIFY_ANCHORS, 'repair 1: verify'] },
+    { name: 'during the replay of the moments', when: (call) => call.phase === VERIFY_ANCHORS, none: ['repair 1: verify', 'repair 1: regression'] },
+  ];
+  for (const { name, when, none } of variants) {
+    let hot;
+    const llm = fakeLlm({
+      scoreFor: verifyScoring(() => undefined),
+      hook: (call) => {
+        if (when(call)) hot.config.features.mentorAutoFix = false;
+        return undefined;
+      },
+    });
+    await withSetup({ llm }, async (env) => {
+      hot = env.hot;
+      storedCase(env);
+      const run = await (await env.mentor.run(anchoredCase(env).id)).done;
+      assert.equal(run.repair.reason, 'disabled', name);
+      for (const phase of none) assert.equal(env.llm.inPhase(phase).length, 0, `${name}: ${phase}`);
+      assert.equal(env.changes.calls.length, 0, name);
+    });
+  }
+});
+
+test('config: the verification replays each real moment three times by default', () => {
+  const config = JSON.parse(fs.readFileSync(new URL('../config.json', import.meta.url), 'utf8'));
+  assert.equal(config.mentor.verify.anchorSamples, 3);
+});
 
 // ---- the missing fallback: one added rule when no suspect was proven --------------
 

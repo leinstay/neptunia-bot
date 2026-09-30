@@ -15,15 +15,19 @@
 //      (the `mentor-fix` prompt), checked against what an edit may touch and
 //      against the proven cause itself: the same piece, or for a cause in a
 //      closed layer (the card) or a `missing` one, only an added rule;
-//   3. verification -- the edit, again only on an overlay, must pass fresh
-//      situations of the same case (at least `mentor.verify.minSituations`)
-//      and must not drop any other case's stored situations by more than the
-//      tolerance;
+//   3. verification -- the edit, again only on an overlay, must first hold
+//      every real moment of the case (each replayed
+//      `mentor.verify.anchorSamples` times, held to the anchor threshold, as
+//      in a run), then pass fresh situations of the same case (at least
+//      `mentor.verify.minSituations`) and must not drop any other case's
+//      stored situations by more than the tolerance; a failing step skips
+//      the ones after it;
 //   4. apply -- only then the change store writes it, recorded for undo.
 //
 // A weak real moment of the chat (an anchor, src/mentor/anchor.js) is
-// replayed from its stored messages in the control and every ablation, as is
-// another case's moment in the regression, each with the memory as it stood
+// replayed from its stored messages in the control, every ablation and the
+// verification, as is another case's moment in the regression, each with the
+// memory as it stood
 // before its trigger (mentor.js#measureOn, src/mentor/moment.js); the fresh
 // situations of the verification are invented with the case's moments in
 // view (`<examples>`).
@@ -40,15 +44,16 @@
 // the mentor budget, the owner's stop and the charging are the run's; a stop
 // ends the loop with what it has and never touches the measured run.
 // `features.mentorAutoFix` is checked before every step that spends (the
-// control, each ablation, the edit request, the verification, each case of
-// the regression) and again right before the write; nothing is written
+// control, each ablation, the edit request, the replay of the case's moments,
+// the fresh situations, each case of the regression) and again right before
+// the write; nothing is written
 // unless it is exactly true at that moment.
 
 import { listRules } from '../admin.js';
 import { fillPromptTemplate } from '../behavior/prompt.js';
 import { log } from '../log.js';
 import { ablationEdits, gainOf, locateSuspect } from './ablate.js';
-import { anchorSituation, isUsableAnchor } from './anchor.js';
+import { anchorSituation, anchorSituations, isUsableAnchor } from './anchor.js';
 import { parseEdit, verdict } from './judge.js';
 import { editToOverlay, overlayView } from './overlay.js';
 
@@ -143,6 +148,7 @@ function settings(config, target) {
     verifySituations: count(mentor.verify?.situations, 3),
     verifySamples: count(mentor.verify?.samples, 2),
     verifyMinSituations: count(mentor.verify?.minSituations, 2),
+    verifyAnchorSamples: count(mentor.verify?.anchorSamples, 3),
     regressionSituations: count(mentor.regression?.situations, 2),
     tolerance: amount(mentor.regression?.tolerance, 1),
     passScore,
@@ -223,6 +229,16 @@ function isAnchorRecord(record) {
 function isWeak(medians, anchor, cfg) {
   const threshold = anchor ? cfg.anchorScore : cfg.passScore;
   return ['overall', 'goal'].some((axis) => typeof medians?.[axis] === 'number' && medians[axis] < threshold);
+}
+
+/**
+ * Whether a real moment held on the edited view: it has a median `overall`
+ * and is not weak against the anchor threshold (`isWeak`, the rule
+ * src/mentor/judge.js#verdict holds a real moment to). A moment left
+ * unscored does not hold.
+ */
+function anchorHeld(medians, cfg) {
+  return typeof medians?.overall === 'number' && !isWeak(medians, true, cfg);
 }
 
 /**
@@ -352,8 +368,8 @@ function causeRefusal(edit, chosen, view, cfg) {
 /**
  * The repair loop for one mentor. Every value is read at the moment of use:
  * `hot.config.features.mentorAutoFix` (checked before the control, every
- * ablation, the edit request, the verification, each case of the regression
- * and the write), `hot.config.mentor` (`suspects`, `ablationGain`,
+ * ablation, the edit request, the replay of the case's moments, the fresh
+ * situations, each case of the regression and the write), `hot.config.mentor` (`suspects`, `ablationGain`,
  * `ablationSamples` -- the samples of the control and of each ablation --,
  * `fix.maxAttempts`, `fix.tryMissing` -- the synthetic `missing` attempt,
  * off only when exactly false --, `fix.maxGrowthChars`, `fix.layers` -- the card is never
@@ -362,7 +378,8 @@ function causeRefusal(edit, chosen, view, cfg) {
  * a memory case only the memory writer's prompts (`memory`, `profile`,
  * `server`, `channel`) and only through the `prompt` layer --,
  * `verify.situations`, `verify.samples`, `verify.minSituations`,
- * `regression.situations`, `regression.tolerance`, `pass`),
+ * `verify.anchorSamples`, `regression.situations`, `regression.tolerance`,
+ * `pass`),
  * `hot.config.memory.learnedChars` and the `mentor-fix` prompt.
  * @param {object} deps
  * @param {{ config: object, prompts: object }} deps.hot
@@ -381,10 +398,12 @@ function causeRefusal(edit, chosen, view, cfg) {
  *   feedback: string, self: { id: string, name: string }, seen: string }) => Promise<object> }}
  *   `attempt` runs the whole loop for a failed run and resolves with its record (never rejects):
  *   `{ attempts: [{ n, suspects: [{ layer, excerpt, located, gain, confirmed, synthetic? }], edit, refused,
- *   verify: { fresh: { passed, kept, medians, situations }, regression: [{ caseId, held, situations: [{ n, before, after }] }],
- *   skipped } | null, accepted }], applied: { changeId, layer, target, summary } | null, reason, tokens }`,
+ *   verify: { anchors?: { passed, situations: [{ anchor, overall, goal }] }, fresh: { passed, kept, medians, situations } | null,
+ *   regression: [{ caseId, held, situations: [{ n, before, after }] }], skipped } | null, accepted }],
+ *   applied: { changeId, layer, target, summary } | null, reason, tokens }`,
  *   plus `control: { medians, situations }` once the control was measured. `synthetic: true` marks the
- *   missing cause the loop made up itself (see `fallbackDue`). `reason` 'not reproduced':
+ *   missing cause the loop made up itself (see `fallbackDue`). `verify.anchors` only for a case with usable
+ *   real moments; when it failed, `fresh` stays null and the regression is empty. `reason` 'not reproduced':
  *   on the control every replayed situation reached its threshold on `overall` and `goal` (see `isWeak`).
  */
 export function createRepair({ hot, cases, changes, baseView, measureOn, askMentor, inventSituations, commonBlocks, templateValues, canScore, failureOf }) {
@@ -495,12 +514,51 @@ export function createRepair({ hot, cases, changes, baseView, measureOn, askMent
   }
 
   /**
-   * Fresh situations of the case, then every other case's stored ones, on the
-   * edited view, scored against `judgeView` (the live view). Accepted when
-   * both hold; refused when fewer fresh situations than
-   * `mentor.verify.minSituations` were kept (nothing is answered then).
+   * The case's own real moments replayed on the edited view, each
+   * `mentor.verify.anchorSamples` times, judged against `judgeView`; records
+   * `verify.anchors` and resolves whether every moment held (see `anchorHeld`).
+   */
+  async function verifyAnchors(ctx, { item, view, judgeView, input, cfg, n, verify, anchored }) {
+    checkSwitch();
+    const phase = `repair ${n}: verify anchors`;
+    ctx.phase = phase;
+    const measured = await measureOn(ctx, {
+      item,
+      view,
+      judgeView,
+      situations: anchored,
+      samples: cfg.verifyAnchorSamples,
+      anchorSamples: cfg.verifyAnchorSamples,
+      reference: input.reference,
+      feedback: input.feedback,
+      self: input.self,
+      phase,
+    });
+    const situations = anchored.map((situation, i) => {
+      const medians = measured.verdict.situations.find((m) => m.n === i + 1);
+      return {
+        anchor: situation.anchor,
+        overall: typeof medians?.overall === 'number' ? medians.overall : null,
+        goal: typeof medians?.goal === 'number' ? medians.goal : null,
+      };
+    });
+    const passed = situations.every((s) => anchorHeld(s, cfg));
+    verify.anchors = { passed, situations };
+    return passed;
+  }
+
+  /**
+   * The case's real moments first (when it has any), then fresh situations of
+   * the case, then every other case's stored ones, on the edited view, scored
+   * against `judgeView` (the live view). Accepted when all hold; a failing
+   * moment skips the rest. Refused when fewer fresh situations than
+   * `mentor.verify.minSituations` were kept (nothing fresh is answered then).
    */
   async function verifyEdit(ctx, { guildId, item, view, judgeView, input, cfg, n, verify }) {
+    const anchored = anchorSituations(item);
+    if (anchored.length > 0 && !(await verifyAnchors(ctx, { item, view, judgeView, input, cfg, n, verify, anchored }))) {
+      return { accepted: false, refused: null };
+    }
     checkSwitch();
     const phase = `repair ${n}: verify`;
     ctx.phase = phase;
