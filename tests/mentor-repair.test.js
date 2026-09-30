@@ -142,10 +142,10 @@ function score(overall) {
   return { human: 8, character: 8, rules: 8, goal: overall, overall, comment: 'judged' };
 }
 
-/** The answers listed in the `<answers>` block of a score request. */
+/** The answers listed in the `<answers>` block (a memory case: `<stored>`) of a score request. */
 function answersIn(user) {
-  const match = /<answers>\n([\s\S]*?)\n<\/answers>/.exec(user);
-  return match ? JSON.parse(match[1]) : [];
+  const match = /<(answers|stored)>\n([\s\S]*?)\n<\/\1>/.exec(user);
+  return match ? JSON.parse(match[2]) : [];
 }
 
 /** The body of the first `<tag>` block of `text`, or null. */
@@ -191,7 +191,7 @@ function fakeLlm({ situationsFor, diagnosis = JSON.stringify(DIAGNOSIS), fix = J
       else if (kind === 'fix') text = typeof fix === 'function' ? fix(call) : fix;
       else if (kind === 'score') {
         const answers = answersIn(user).map((a) => {
-          const value = scoreFor ? scoreFor(a, call) : a.messages.join(' ').includes('BAD') ? 3 : 9;
+          const value = scoreFor ? scoreFor(a, call) : (a.messages ?? []).join(' ').includes('BAD') ? 3 : 9;
           return { id: a.id, ...score(value) };
         });
         text = JSON.stringify({ answers });
@@ -271,8 +271,8 @@ async function withSetup(options, fn) {
 }
 
 /** Runs a new case to the end and returns the saved run. */
-async function runCase(env, text = CASE_TEXT) {
-  const item = env.cases.add(GUILD, { text, target: 'reply' });
+async function runCase(env, text = CASE_TEXT, target = 'reply') {
+  const item = env.cases.add(GUILD, { text, target });
   const run = await (await env.mentor.run(item.id)).done;
   return { item, run };
 }
@@ -520,6 +520,78 @@ test('attempt: the other refusals end the attempt with their reason', async () =
       assert.equal(run.repair.reason, 'no suspect left', name);
     });
   }
+});
+
+/** The memory writer's prompts, and a config that lists them with the persona's own. */
+const WRITER_FILES = ['memory', 'profile', 'server', 'channel'];
+const ALL_FILES = { mentor: { fix: { files: ['rules', 'system-prompt', 'format', 'reply', ...WRITER_FILES] } } };
+const MISSING = JSON.stringify({ ...DIAGNOSIS, causes: [{ layer: 'missing', excerpt: '', why: 'Nothing says it.' }] });
+const MEMORY_CASE = 'The persona remembers the pet named Héloïse.';
+
+test("attempt: a reply case may not edit the memory writer's prompts", async () => {
+  for (const target of WRITER_FILES) {
+    const fix = JSON.stringify({ layer: 'prompt', target, from: '', to: 'Keep the notes short.', why: 'x' });
+    await withSetup({ config: ALL_FILES, llm: fakeLlm({ diagnosis: MISSING, fix }) }, async (env) => {
+      const { run } = await runCase(env);
+      const [attempt] = run.repair.attempts;
+      assert.equal(attempt.refused, 'file not allowed', target);
+      assert.equal(attempt.verify, null, target);
+      assert.equal(env.changes.calls.length, 0, target);
+    });
+  }
+  // A prompt of the persona itself is still open to a reply case.
+  const fix = JSON.stringify({ layer: 'prompt', target: 'format', from: '', to: 'One idea per message.', why: 'x' });
+  await withSetup({ config: ALL_FILES, llm: fakeLlm({ diagnosis: MISSING, fix }) }, async (env) => {
+    const { run } = await runCase(env);
+    assert.equal(run.repair.attempts[0].refused, null);
+  });
+});
+
+test("attempt: a memory case may edit only the memory writer's prompts", async () => {
+  const variants = [
+    { fix: { layer: 'prompt', target: 'format', from: '', to: 'One idea per message.', why: 'x' }, reason: 'file not allowed' },
+    { fix: { layer: 'prompt', target: 'system-prompt', from: '', to: 'One idea per message.', why: 'x' }, reason: 'file not allowed' },
+    { fix: FIX, reason: 'layer not allowed' },
+    { fix: { layer: 'learned', target: '', from: 'x', to: 'y', why: 'x' }, reason: 'layer not allowed' },
+    { fix: { layer: 'profile', target: `${ALICE}.character`, from: 'x', to: 'y', why: 'x' }, reason: 'layer not allowed' },
+    { fix: { layer: 'prompt', target: 'memory', from: '', to: 'Keep the notes short.', why: 'x' }, reason: null },
+  ];
+  for (const { fix, reason } of variants) {
+    const llm = fakeLlm({ diagnosis: MISSING, fix: JSON.stringify(fix), scoreFor: () => 3 });
+    await withSetup({ config: ALL_FILES, llm }, async (env) => {
+      const { run } = await runCase(env, MEMORY_CASE, 'memory');
+      assert.equal(run.target, 'memory');
+      const [attempt] = run.repair.attempts;
+      assert.equal(attempt.refused, reason, `${fix.layer} ${fix.target}`);
+      if (reason) assert.equal(attempt.verify, null);
+      else assert.ok(attempt.verify, 'an allowed edit is verified');
+    });
+  }
+});
+
+test("attempt: the allowed block carries the files of the case's target", async () => {
+  await withSetup({ config: ALL_FILES, llm: fakeLlm({ diagnosis: MISSING }) }, async (env) => {
+    await runCase(env);
+    assert.deepEqual(JSON.parse(blockBody(env.llm.ofKind('fix')[0].user, 'allowed')), {
+      layers: ['rules', 'prompt', 'self', 'learned', 'guild', 'profile'],
+      files: ['rules', 'system-prompt', 'format', 'reply'],
+      maxGrowthChars: 300,
+    });
+  });
+  await withSetup({ config: ALL_FILES, llm: fakeLlm({ diagnosis: MISSING, scoreFor: () => 3 }) }, async (env) => {
+    await runCase(env, MEMORY_CASE, 'memory');
+    assert.deepEqual(JSON.parse(blockBody(env.llm.ofKind('fix')[0].user, 'allowed')), {
+      layers: ['prompt'],
+      files: WRITER_FILES,
+      maxGrowthChars: 300,
+    });
+  });
+  // A config that closes the prompt layer leaves a memory case no layer at all.
+  const closed = { mentor: { fix: { layers: ['rules', 'self'], files: ALL_FILES.mentor.fix.files } } };
+  await withSetup({ config: closed, llm: fakeLlm({ diagnosis: MISSING, scoreFor: () => 3 }) }, async (env) => {
+    await runCase(env, MEMORY_CASE, 'memory');
+    assert.deepEqual(JSON.parse(blockBody(env.llm.ofKind('fix')[0].user, 'allowed')).layers, []);
+  });
 });
 
 test('attempt: a prompt that grows past the cap is refused', () => {

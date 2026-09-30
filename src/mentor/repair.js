@@ -33,6 +33,12 @@ const EDIT_LAYERS = ['rules', 'prompt', 'card', 'self', 'learned', 'guild', 'pro
 /** The layers an edit may touch at most (never the card), and the config.json default. */
 const OPEN_LAYERS = ['rules', 'prompt', 'self', 'learned', 'guild', 'profile'];
 const DEFAULT_FILES = ['rules', 'system-prompt', 'format', 'reply', 'interject', 'initiate', 'address', 'memory', 'profile'];
+/**
+ * The memory writer's prompts. An edit there cannot change a reply (no reply
+ * situation could verify it), and a memory case can be verified only by an
+ * edit there.
+ */
+const WRITER_FILES = new Set(['memory', 'profile', 'server', 'channel']);
 /** Layers whose pieces an edit may rewrite but never delete. */
 const NO_DELETION = new Set(['rules', 'prompt', 'profile']);
 /** Layers held to `mentor.fix.maxGrowthChars`. */
@@ -67,12 +73,23 @@ function length(text) {
   return [...String(text ?? '')].length;
 }
 
-/** The loop's settings, read now from the live config. */
-function settings(config) {
+/**
+ * The loop's settings, read now from the live config. What an edit may touch
+ * depends on the case's `target`: a memory case only the `prompt` layer and
+ * only the memory writer's files of `mentor.fix.files`; any other case every
+ * allowed layer and the files that are not the memory writer's.
+ */
+function settings(config, target) {
   const mentor = config.mentor ?? {};
   const fix = mentor.fix ?? {};
-  const layers = Array.isArray(fix.layers) ? fix.layers.filter((layer) => OPEN_LAYERS.includes(layer)) : OPEN_LAYERS;
-  const files = (Array.isArray(fix.files) ? fix.files : DEFAULT_FILES).map(promptName).filter(Boolean);
+  let layers = Array.isArray(fix.layers) ? fix.layers.filter((layer) => OPEN_LAYERS.includes(layer)) : OPEN_LAYERS;
+  let files = (Array.isArray(fix.files) ? fix.files : DEFAULT_FILES).map(promptName).filter(Boolean);
+  if (target === 'memory') {
+    layers = layers.filter((layer) => layer === 'prompt');
+    files = files.filter((file) => WRITER_FILES.has(file));
+  } else {
+    files = files.filter((file) => !WRITER_FILES.has(file));
+  }
   return {
     suspects: count(mentor.suspects, 2),
     ablationGain: Number.isFinite(mentor.ablationGain) ? mentor.ablationGain : 1,
@@ -146,7 +163,10 @@ function refusalOf(edit, cfg) {
  * `hot.config.features.mentorAutoFix` (checked before every attempt and
  * before the write), `hot.config.mentor` (`suspects`, `ablationGain`,
  * `ablationSamples`, `fix.maxAttempts`, `fix.maxGrowthChars`, `fix.layers`
- * -- the card is never allowed --, `fix.files`, `verify.situations`,
+ * -- the card is never allowed --, `fix.files` -- narrowed by the case's
+ * target: a reply case never edits the memory writer's prompts (`memory`,
+ * `profile`, `server`, `channel`), a memory case edits only those and only
+ * through the `prompt` layer --, `verify.situations`,
  * `verify.samples`, `regression.situations`, `regression.tolerance`,
  * `pass`), `hot.config.memory.learnedChars` and the `mentor-fix` prompt.
  * @param {object} deps
@@ -313,11 +333,11 @@ export function createRepair({ hot, cases, changes, baseView, measureOn, askMent
     if (typeof fixPrompt !== 'string' || !fixPrompt.trim()) return finish('prompt missing');
     // Per suspect: `done` once it was not proven or an edit was asked for it; `result` once measured.
     const state = suspects.map((suspect) => ({ suspect, done: false, result: null }));
-    const weak = weakOf(run, settings(hot.config).passScore, hot.config.mentor?.pass);
+    const weak = weakOf(run, settings(hot.config, item.target).passScore, hot.config.mentor?.pass);
 
     try {
       for (;;) {
-        const cfg = settings(hot.config);
+        const cfg = settings(hot.config, item.target);
         const candidates = state.filter((s) => !s.done).slice(0, cfg.suspects);
         if (candidates.length === 0) return finish('no suspect left');
         if (record.attempts.length >= cfg.maxAttempts) return finish('max attempts');

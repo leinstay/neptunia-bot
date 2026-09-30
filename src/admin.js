@@ -538,6 +538,10 @@ function imageFileName(mediaType) {
  *   the owner's feedback. Absent -> every `mentor.*` command reports it is not available.
  * `mentorBudget` — from createMentorBudget() (src/mentor/budget.js), optional: `snapshot()` for the
  *   token line of `/nep mentor status`. Absent -> that line shows `-`.
+ * `mentorChanges` — from createChangeStore() (src/mentor/changes.js), optional: `list`, `undo`,
+ *   `rebaseStatus` and `rebase` behind `/nep mentor log|undo|rebase` and the changes line of
+ *   `/nep mentor status`. Absent -> those three commands report the mentor is not available and
+ *   the status line shows `changes: -`.
  *
  * `run(commandKey, args, context)` throws a plain `Error` (operator-facing
  * message) on bad input; it never touches discord.js.
@@ -562,6 +566,7 @@ export function createAdmin({
   mentor,
   mentorCases,
   mentorBudget,
+  mentorChanges,
   fetchImpl = fetch,
   getApiKey,
 }) {
@@ -590,7 +595,8 @@ export function createAdmin({
    * setting a score), memory.refresh, lore.add, lore.remove, learned.add,
    * learned.remove, warmup.run, warmup.users, warmup.channels, warmup.server,
    * warmup.reset, draw (it counts against the image rail in state.json) and
-   * mentor.add, mentor.remove, mentor.run, mentor.check, mentor.wrong.
+   * mentor.add, mentor.remove, mentor.run, mentor.check, mentor.wrong,
+   * mentor.undo (it writes prompts.local/ or memory) and mentor.rebase (prompts.local/).
    */
   function assertNotPaused() {
     if (store.state.data.paused) {
@@ -2277,9 +2283,10 @@ async function cmdPing(args) {
 
   // ---------------------------------------------------------------------
   // mentor: the manual mentor (src/mentor/*). Cases go through
-  // `mentorCases`, runs through `mentor`, numbers through `mentorBudget`.
-  // `cases`/`show`/`status`/`stop` only read or abort, so they are never
-  // guarded by assertNotPaused(); the rest write under data/ and are.
+  // `mentorCases`, runs through `mentor`, numbers through `mentorBudget`,
+  // the changes it made through `mentorChanges`.
+  // `cases`/`show`/`status`/`stop`/`log` only read or abort, so they are never
+  // guarded by assertNotPaused(); the rest write under data/ or prompts.local/ and are.
   // ---------------------------------------------------------------------
 
   const MENTOR_CASE_TEXT_SHOWN = 80;
@@ -2371,6 +2378,59 @@ async function cmdPing(args) {
     return `noted for case ${id}`;
   }
 
+  /** An ISO time as `YYYY-MM-DD HH:MM UTC`, or `-` when it does not parse. */
+  function mentorTime(iso) {
+    const ms = Date.parse(iso ?? '');
+    return Number.isFinite(ms) ? `${new Date(ms).toISOString().slice(0, 16).replace('T', ' ')} UTC` : '-';
+  }
+
+  /** One line per change, newest first: `<id> case <caseId> <layer> <target or -> <time> UTC <summary>`,
+   * ` (undone)` after an undone one. */
+  function cmdMentorLog(_args, context) {
+    const list = mentorChanges.list(mentorGuildId(context));
+    if (list.length === 0) return 'no changes yet';
+    return list
+      .map((change) => {
+        const line = `${change.id} case ${change.caseId ?? '-'} ${change.layer} ${change.target || '-'} ${mentorTime(change.at)} ${change.summary ?? ''}`;
+        return change.undoneAt ? `${line} (undone)` : line;
+      })
+      .join('\n');
+  }
+
+  /** Puts back what one change replaced; the store refuses when the piece changed since. */
+  function cmdMentorUndo(args, context) {
+    assertNotPaused();
+    const id = Number(args?.id);
+    if (!Number.isInteger(id) || id < 1) throw new Error('a change id is required');
+    const result = mentorChanges.undo(mentorGuildId(context), id);
+    return result.ok ? `change ${id} undone` : `change ${id} cannot be undone: ${result.reason}`;
+  }
+
+  /** Rebuilds one local prompt override from the tracked file as it is now and the recorded patches. */
+  function cmdMentorRebase(args, context) {
+    assertNotPaused();
+    const name = String(args?.name ?? '').trim();
+    if (!name) throw new Error('a prompt name is required');
+    const result = mentorChanges.rebase(mentorGuildId(context), name);
+    if (!result.ok) return `override ${name} cannot be rebuilt: ${result.reason}`;
+    return `override ${name} rebuilt: ${result.applied.length} patches applied, ${result.dropped.length} dropped`;
+  }
+
+  /** The `changes:` line of the status: changes (undone ones) and prompt overrides (stale ones).
+   * A change or override file that cannot be read gives `changes: cannot be read`, never a throw. */
+  function mentorChangesLine(guildId) {
+    if (!mentorChanges || !guildId) return 'changes: -';
+    try {
+      const changes = mentorChanges.list(guildId);
+      const overrides = mentorChanges.rebaseStatus(guildId);
+      const undone = changes.filter((change) => change.undoneAt).length;
+      const stale = overrides.filter((entry) => entry.status === 'stale').length;
+      return `changes: ${changes.length} (${undone} undone), overrides: ${overrides.length} (${stale} stale)`;
+    } catch {
+      return 'changes: cannot be read';
+    }
+  }
+
   /** The `last:` line: the newest `finishedAt` among the last runs of every case, retired ones
    * included. A run file or case list that cannot be read gives `last: cannot be read`, never a throw. */
   function mentorLastLine(guildId) {
@@ -2394,7 +2454,8 @@ async function cmdPing(args) {
   }
 
   /** Works with the mentor off or without a model -- it is how the owner sees why nothing runs.
-   * The last line is always the most recent finished run (`last:`). */
+   * Before the last line: `autofix: on|off` (on only when `features.mentorAutoFix` is exactly
+   * true) and the changes line. The last line is always the most recent finished run (`last:`). */
   function cmdMentorStatus(_args, context) {
     const lines = [
       `enabled: ${hot.config.features?.mentor === true ? 'yes' : 'no'}`,
@@ -2418,6 +2479,8 @@ async function cmdPing(args) {
     }
     const s = mentor.status();
     lines.push(s?.running ? `running: ${s.kind} case ${s.caseId}, ${s.phase}, ${s.tokens} tokens so far${s.stopping ? ', stopping' : ''}` : 'running: no');
+    lines.push(`autofix: ${hot.config.features?.mentorAutoFix === true ? 'on' : 'off'}`);
+    lines.push(mentorChangesLine(guildId));
     lines.push(guildId ? mentorLastLine(guildId) : 'last: -');
     return lines.join('\n');
   }
@@ -2555,6 +2618,14 @@ async function cmdPing(args) {
     };
   }
 
+  /** `withMentor` for the commands over the mentor's changes: they also need the change store. */
+  function withMentorChanges(fn) {
+    return withMentor((args, context) => {
+      if (!mentorChanges) return 'the mentor is not available';
+      return fn(args, context);
+    });
+  }
+
   const commands = {
     status: () => cmdStatus(),
     ping: (args) => cmdPing(args),
@@ -2607,6 +2678,9 @@ async function cmdPing(args) {
     'mentor.show': withMentor((args, context) => cmdMentorShow(args, context)),
     'mentor.wrong': withMentor((args, context) => cmdMentorWrong(args, context)),
     'mentor.status': withMentor((args, context) => cmdMentorStatus(args, context)),
+    'mentor.log': withMentorChanges((args, context) => cmdMentorLog(args, context)),
+    'mentor.undo': withMentorChanges((args, context) => cmdMentorUndo(args, context)),
+    'mentor.rebase': withMentorChanges((args, context) => cmdMentorRebase(args, context)),
     'access.grant': (args) => cmdAccessGrant(args),
     'access.revoke': (args) => cmdAccessRevoke(args),
     'access.list': () => cmdAccessList(),
