@@ -6,7 +6,10 @@
 // of how the people in the chat really write; the run is saved with the case
 // and a report goes to the owner's admin channel when one is configured (the
 // owner commands `status` and `show` read it without one). In this stage the mentor
-// only measures: it changes nothing.
+// only measures: it changes nothing. When a run fails, or one of its
+// situations scores under the pass score, the mentor model is asked once more
+// for its opinion of the cause and of what it would change (the diagnosis,
+// saved with the run and marked as unverified); that step never fails a run.
 //
 // Everything expensive is bounded: the mentor's own daily token budget is
 // checked before every request and charged after every completion, the
@@ -27,13 +30,16 @@ import { TokenLimitError } from '../llm/openrouter.js';
 import { estimateMessages } from '../llm/tokens.js';
 import { log } from '../log.js';
 import { MentorBudgetError } from './budget.js';
-import { parseScores, parseSituations, verdict } from './judge.js';
+import { parseDiagnosis, parseScores, parseSituations, verdict } from './judge.js';
 import { answerFacts, repeatedPhrases, sampleLines, styleProfile } from './reference.js';
 import { renderCard, renderCheckCard, renderCheckFile, renderFile } from './report.js';
 import { answerMemory, answerReply, liveView, situationToHistory } from './sandbox.js';
 
 const DAY_MS = 86_400_000;
 const ERROR_MAX = 200;
+
+/** The system prompt of the diagnosis; optional (without it a run is saved without a diagnosis). */
+const DIAGNOSE_PROMPT = 'mentor-diagnose';
 
 /** The prompt files of each target. */
 const PROMPTS = {
@@ -73,6 +79,36 @@ function endOf(err) {
   return new RunEnd('error', message.length > ERROR_MAX ? `${message.slice(0, ERROR_MAX - 3)}...` : message);
 }
 
+/** Why a diagnosis request failed, as a short fixed reason (never an error's own text). */
+function diagnosisFailure(err) {
+  if (err instanceof RunEnd && err.kind === 'stopped') {
+    if (err.reason === 'owner') return 'stopped by the owner';
+    return err.reason === 'budget' ? 'budget' : 'disabled';
+  }
+  if (err instanceof TokenLimitError || err?.key === 'llm.maxRequestTokens') return 'request over the token cap';
+  return 'request failed';
+}
+
+/** The situation with the lowest median `overall` (ties: the lowest `n`), or null. */
+function worstSituation(situationMedians) {
+  let worst = null;
+  for (const entry of situationMedians ?? []) {
+    if (typeof entry?.overall !== 'number') continue;
+    if (!worst || entry.overall < worst.overall || (entry.overall === worst.overall && entry.n < worst.n)) worst = entry;
+  }
+  return worst;
+}
+
+/** A stored situation as the diagnosis request shows it. */
+function worstRecord(record, target) {
+  const answers = record.answers.map((a) =>
+    target === 'memory'
+      ? { id: a.id, texts: a.texts, parseOk: a.parseOk, facts: a.facts, score: a.score }
+      : { id: a.id, messages: a.messages, reactions: a.reactions, silent: a.silent, facts: a.facts, score: a.score },
+  );
+  return { n: record.n, title: record.title, transcript: record.transcript, answers };
+}
+
 function emptyMedians() {
   return { human: null, character: null, rules: null, goal: null, overall: null };
 }
@@ -81,13 +117,14 @@ function emptyMedians() {
  * The mentor for one bot. Every value is read at the moment of use:
  * `hot.config.mentor` (`model`, `maxOutputTokens`, `outputTokenWeight`,
  * `timeoutMs`, `situations`, `situationLines`, `samples`, `check.samples`,
- * `pass`, `reference`, `feedbackExamples`), `hot.config.features.mentor`
+ * `pass`, `reference`, `feedbackExamples`, `diagnose`), `hot.config.features.mentor`
  * (must be exactly true; checked at the start, then again before every
  * situation and every mentor request together with `mentor.model`: either
  * one turned off ends the run as `stopped: 'disabled'`),
  * `hot.config.memory.mainChannelIds`, `hot.config.bot.dryRunChannelId`, and
  * the `mentor-*` prompts (`mentor-signs` optional: the `<signs>` block of
- * every mentor request, omitted when missing or empty).
+ * every mentor request, omitted when missing or empty; `mentor-diagnose`
+ * optional: without it a run that needs a diagnosis is saved without one).
  * @param {object} deps
  * @param {{ config: object, prompts: object }} deps.hot
  * @param {object} deps.store             The memory store (read only, through `liveView`).
@@ -367,7 +404,8 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
 
   async function answerAll(ctx, { run, prepared, view, self, reference, samples }) {
     let previous = 1;
-    for (const { situation, record, history, at } of prepared) {
+    for (const entry of prepared) {
+      const { situation, record, history, at } = entry;
       checkEnabled();
       if (!budget.canSpend(previous)) throw new RunEnd('stopped', 'budget');
       checkAborted(ctx);
@@ -392,6 +430,8 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
               onUsage,
             });
       record.answers = result.answers.map((answer, i) => answerRecord(answer, `s${record.n}a${i + 1}`, run.target, reference.profile));
+      // What the persona (or the analyzer) was given, for the diagnosis; kept off the run: it is large.
+      entry.request = result.request;
       if (result.stopped || ctx.signal.aborted) throw new RunEnd('stopped', 'owner');
       previous = Math.max(1, charged);
     }
@@ -445,6 +485,64 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
     }
   }
 
+  // ---- the diagnosis ---------------------------------------------------------
+
+  /**
+   * Whether a finished run gets a diagnosis: a run (not a check) that ended
+   * normally, with `mentor.diagnose` on (a missing key counts as on), that
+   * failed or has a situation whose median `overall` is under the pass score.
+   */
+  function needsDiagnosis(run) {
+    if (run.kind !== 'run' || run.stopped || run.error) return false;
+    const cfg = hot.config.mentor ?? {};
+    if (cfg.diagnose === false) return false;
+    const passScore = Number.isFinite(cfg.pass?.score) ? cfg.pass.score : 7;
+    return !run.passed || run.situationMedians.some((m) => typeof m?.overall === 'number' && m.overall < passScore);
+  }
+
+  /**
+   * One mentor request for its opinion of the worst situation: what it thinks
+   * caused the failure and what it would change. Sets `run.diagnosis`; on any
+   * failure `run.diagnosis` is null and `run.diagnosisError` a short reason.
+   * Never throws: the run is measured already.
+   */
+  async function diagnose(ctx, run, item, { reference, feedback, self, prepared }) {
+    const fail = (reason) => {
+      run.diagnosis = null;
+      run.diagnosisError = reason;
+      log.warn('mentor: diagnosis failed', { caseId: item.id, reason });
+    };
+    const template = hot.prompts?.[DIAGNOSE_PROMPT];
+    if (typeof template !== 'string' || !template.trim()) return fail('prompt missing');
+    const worst = worstSituation(run.situationMedians);
+    const entry = worst ? prepared.find((p) => p.record.n === worst.n) : null;
+    if (!entry?.request) return fail('no situation to diagnose');
+    let text;
+    try {
+      const blocks = commonBlocks(item, reference, feedback, self.name);
+      const verdictJson = { passed: run.passed, medians: run.medians, situations: run.situationMedians, reasons: run.reasons };
+      const seen = [block('system', entry.request.system), block('user', entry.request.user)].filter(Boolean).join('\n');
+      const user = [
+        blocks.case,
+        block('verdict', JSON.stringify(verdictJson)),
+        blocks.signs,
+        blocks.feedback,
+        block('worst', JSON.stringify(worstRecord(entry.record, run.target))),
+        block('seen', seen),
+      ]
+        .filter(Boolean)
+        .join('\n\n');
+      ctx.phase = 'diagnosis';
+      text = await askMentor(ctx, fillPromptTemplate(template, templateValues(self.name)), user);
+    } catch (err) {
+      return fail(diagnosisFailure(err));
+    }
+    const diagnosis = parseDiagnosis(text);
+    if (!diagnosis) return fail('invalid answer');
+    run.diagnosis = diagnosis;
+    log.info('mentor: diagnosis', { caseId: item.id, causes: diagnosis.causes.length, changes: diagnosis.changes.length });
+  }
+
   // ---- one case --------------------------------------------------------------
 
   /**
@@ -480,6 +578,8 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
       tokens: { spent: 0, left: 0 },
     };
     log.info('mentor: run started', { kind, caseId: item.id, target: item.target });
+    // What the diagnosis needs once the run is measured; set only when scoring finished.
+    let measured = null;
 
     try {
       const self = getSelf();
@@ -517,6 +617,7 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
       }
       await scoreAll(ctx, { run, item, view, self, reference, feedback });
       if (!run.situations.some((s) => s.answers.some((a) => a.score))) throw new RunEnd('error', 'no answer was scored');
+      measured = { reference, feedback, self, prepared };
     } catch (err) {
       const end = endOf(err);
       if (!(err instanceof RunEnd)) log.warn('mentor: the run failed', { caseId: item.id, errorName: err?.name, statusCode: err?.statusCode });
@@ -532,6 +633,7 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
     run.situationMedians = result.situations;
     run.reasons = result.reasons;
     run.passed = !run.stopped && !run.error && result.passed;
+    if (measured && needsDiagnosis(run)) await diagnose(ctx, run, item, measured);
     run.finishedAt = new Date(now()).toISOString();
     run.tokens = { spent: ctx.spent - spentBefore, left: budget.left() };
 

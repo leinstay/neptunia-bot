@@ -1,10 +1,11 @@
 // The mentor's report to the owner: a short card for the admin channel and a
 // text file with everything behind it (every situation, every answer, the
-// facts measured by code, the points per axis and the mentor's comment), and
-// the one-line summary of the latest run for `/nep mentor status`. The
-// card and the file are operator-facing English, like the other command
-// replies of the bot; the mentor model's comments are shown verbatim. Pure:
-// a stored run object in, text out.
+// facts measured by code, the points per axis, the mentor's comment and its
+// diagnosis when a run has one), and the one-line summary of the latest run
+// for `/nep mentor status`. The card and the file are operator-facing
+// English, like the other command replies of the bot; the mentor model's
+// comments and diagnosis are shown verbatim. Pure: a stored run object in,
+// text out.
 
 import { AXES } from './judge.js';
 
@@ -13,6 +14,8 @@ const CARD_MAX = 1800;
 const CASE_TEXT_MAX = 300;
 const REASONS_MAX = 300;
 const ERROR_MAX = 200;
+const DIAGNOSIS_CARD_MAX = 300;
+const DIAGNOSIS_PREFIX = 'diagnosis: ';
 const RULE = '='.repeat(60);
 
 /** `text` cut to `max` characters with an ellipsis when it was longer. */
@@ -75,8 +78,9 @@ function checkOutcome(run) {
  * The card posted to the admin channel after a run: the case (clipped to 300
  * characters), its target, the verdict or how the run ended, the medians, the
  * median overall of every situation (`-` for one with no scored answer; the
- * line is left out for a run stored without them), how many answers were
- * scored, situations kept and dropped, repeated phrases, tokens spent and the
+ * line is left out for a run stored without them), the mentor's diagnosis
+ * summary when the run has one (clipped to 300 characters, or to the room the
+ * other lines leave), how many answers were scored, situations kept and dropped, repeated phrases, tokens spent and the
  * budget left, and the command that shows the details.
  * Never longer than 1800 characters.
  * @param {object} run  A run object as stored by `cases.saveRun`.
@@ -92,6 +96,8 @@ export function renderCard(run) {
   ];
   const bySituation = bySituationLine(run);
   if (bySituation) lines.push(bySituation);
+  const summary = diagnosisSummary(run);
+  const diagnosisAt = summary ? lines.length : -1;
   if (!run?.passed && Array.isArray(run?.reasons) && run.reasons.length > 0) {
     lines.push(`why: ${clip(run.reasons.join('; '), REASONS_MAX)}`);
   }
@@ -101,7 +107,18 @@ export function renderCard(run) {
   }
   lines.push(`tokens: ${num(run?.tokens?.spent)} spent, ${num(run?.tokens?.left)} left today`);
   lines.push(`details: /nep mentor show ${run?.caseId}`);
+  if (diagnosisAt >= 0) {
+    // The summary takes what room the other lines leave, at most its own limit; none left, no line.
+    const room = CARD_MAX - lines.join('\n').length - 1 - DIAGNOSIS_PREFIX.length;
+    if (room > 3) lines.splice(diagnosisAt, 0, `${DIAGNOSIS_PREFIX}${clip(summary, Math.min(DIAGNOSIS_CARD_MAX, room))}`);
+  }
   return clip(lines.join('\n'), CARD_MAX);
+}
+
+/** The diagnosis summary of a run on one line, or '' when it has none. */
+function diagnosisSummary(run) {
+  const summary = run?.diagnosis?.summary;
+  return typeof summary === 'string' ? summary.replace(/\s*\n\s*/g, ' ').trim() : '';
 }
 
 /** The lines of one answer in the file. */
@@ -134,11 +151,39 @@ function answerLines(answer, target) {
   return lines;
 }
 
+/** A multi-line text indented under a list item. */
+function indented(text) {
+  return String(text ?? '').replace(/\n/g, '\n    ');
+}
+
+/** The lines of the mentor's diagnosis in the file: its summary, the causes, the proposed changes. */
+function diagnosisLines(diagnosis) {
+  const lines = ["Diagnosis (the mentor's opinion, not verified):", String(diagnosis.summary ?? '')];
+  const causes = Array.isArray(diagnosis.causes) ? diagnosis.causes : [];
+  const changes = Array.isArray(diagnosis.changes) ? diagnosis.changes : [];
+  lines.push('', causes.length ? 'Causes:' : 'Causes: none named');
+  for (const cause of causes) {
+    lines.push(`- ${cause.layer}${cause.excerpt ? `: "${indented(cause.excerpt)}"` : ''}`);
+    lines.push(`  why: ${indented(cause.why)}`);
+  }
+  lines.push('', changes.length ? 'Proposed changes:' : 'Proposed changes: none');
+  for (const change of changes) {
+    lines.push(`- ${change.layer}${change.target ? `, ${change.target}` : ''}`);
+    lines.push(`  from: ${change.from ? `"${indented(change.from)}"` : '(an addition)'}`);
+    lines.push(`  to: "${indented(change.to)}"`);
+    lines.push(`  why: ${indented(change.why)}`);
+  }
+  return lines;
+}
+
 /**
  * The file attached to the card: the case, the verdict, the reference, every
  * situation with its transcript (its header carries its median overall and
  * goal, `-` for none, unless the run was stored without them) and every
- * answer with its facts, points per axis and the mentor's comment.
+ * answer with its facts, points per axis and the mentor's comment. A run with
+ * a diagnosis gets its section after the case (summary, causes, proposed
+ * changes, marked as the mentor's unverified opinion); a diagnosis that
+ * failed is named with its reason in the header.
  * @param {object} run  A run object as stored by `cases.saveRun` (with its `id`).
  * @returns {{ name: string, text: string }}
  */
@@ -152,7 +197,9 @@ export function renderFile(run) {
   if (Array.isArray(run?.reasons) && run.reasons.length > 0) lines.push(`reasons: ${run.reasons.join('; ')}`);
   lines.push(`medians: ${axesLine(run?.medians)}`);
   lines.push(`tokens: ${num(run?.tokens?.spent)} spent, ${num(run?.tokens?.left)} left today`);
+  if (!run?.diagnosis && run?.diagnosisError) lines.push(`diagnosis: not available (${clip(run.diagnosisError, ERROR_MAX)})`);
   lines.push('', 'Case:', String(run?.caseText ?? ''));
+  if (run?.diagnosis) lines.push('', ...diagnosisLines(run.diagnosis));
   lines.push('', `Reference: ${run?.reference?.profile?.messages ?? 0} messages measured, ${run?.reference?.samples ?? 0} sample lines given`);
   lines.push(JSON.stringify(run?.reference?.profile ?? {}, null, 1));
   if (Array.isArray(run?.repeated) && run.repeated.length > 0) {

@@ -86,6 +86,7 @@ function fakePrompts(overrides = {}) {
     'mentor-score': 'SCORE for {{name}}',
     'mentor-score-memory': 'SCORE-MEMORY for {{name}}',
     'mentor-signs': 'SIGNS FOR {{name}}',
+    'mentor-diagnose': 'DIAGNOSE {{name}}',
     labels,
     ...overrides,
   };
@@ -140,6 +141,12 @@ const SITUATIONS = {
   ],
 };
 
+const DIAGNOSIS = {
+  summary: 'The persona explains the limit at length; the rules ask for an explanation of every refusal.',
+  causes: [{ layer: 'rules', excerpt: 'never use semicolons', why: 'The rule is read as a style of long answers.' }],
+  changes: [{ layer: 'rules', target: 'rules.md', from: '', to: 'say a limit once, in one line', why: 'Shorter notices.' }],
+};
+
 const MEMORY_ANSWER = JSON.stringify({ users: { [ALICE]: { character: 'Asks about limits.' } }, guild: { patterns: 'Short greetings.' } });
 
 /** The answer ids listed in the `<answers>` or `<stored>` block of a score request. */
@@ -154,10 +161,19 @@ function score(overall = 8) {
 
 /**
  * A fake llm that answers by looking at the request: the mentor model by its
- * system text (situations or score), the analyzer by its model, else the talk
- * model. `hook` may return a result (or a promise) to answer a call itself.
+ * system text (situations, diagnose or score), the analyzer by its model,
+ * else the talk model. `hook` may return a result (or a promise) to answer a
+ * call itself.
  */
-function fakeLlm({ situations = SITUATIONS, scoreFor = () => score(), talk = '<msg>ναι, the limit is reached</msg>', usage = USAGE, usageFor, hook } = {}) {
+function fakeLlm({
+  situations = SITUATIONS,
+  scoreFor = () => score(),
+  talk = '<msg>ναι, the limit is reached</msg>',
+  diagnosis = JSON.stringify(DIAGNOSIS),
+  usage = USAGE,
+  usageFor,
+  hook,
+} = {}) {
   const calls = [];
   return {
     calls,
@@ -166,7 +182,7 @@ function fakeLlm({ situations = SITUATIONS, scoreFor = () => score(), talk = '<m
       const system = messages[0].content;
       const user = messages[1].content;
       let kind = 'talk';
-      if (options.model === 'x/mentor') kind = system.startsWith('SITUATIONS') ? 'situations' : 'score';
+      if (options.model === 'x/mentor') kind = system.startsWith('SITUATIONS') ? 'situations' : system.startsWith('DIAGNOSE') ? 'diagnose' : 'score';
       else if (options.model === 'x/memory') kind = 'memory';
       const call = { kind, messages, options, system, user };
       calls.push(call);
@@ -182,7 +198,8 @@ function fakeLlm({ situations = SITUATIONS, scoreFor = () => score(), talk = '<m
           .filter((a) => a.value)
           .map(({ id, value }) => ({ id, ...value }));
         text = JSON.stringify({ answers });
-      } else if (kind === 'memory') text = MEMORY_ANSWER;
+      } else if (kind === 'diagnose') text = diagnosis;
+      else if (kind === 'memory') text = MEMORY_ANSWER;
       else text = talk;
       return { text, usage: usageFor ? usageFor(kind) : usage, estimated: 90 };
     },
@@ -822,6 +839,304 @@ test('run: a memory case carries <signs> in both of its requests', () =>
     assert.ok(situations.user.includes(SIGNS_AFTER_SAMPLES), situations.user);
     assert.ok(scoreCall.user.includes(SIGNS_AFTER_SAMPLES), scoreCall.user);
   }));
+
+// ---- the diagnosis -------------------------------------------------------------
+
+/** The body of the first `<tag>` block of `text`, or null. */
+function blockBody(text, tag) {
+  const match = new RegExp(`<${tag}>\\n([\\s\\S]*?)\\n</${tag}>`).exec(text);
+  return match ? match[1] : null;
+}
+
+/** A score function: situation n gets `overalls[n - 1]` on overall, every other axis 8. */
+function overallBySituation(...overalls) {
+  return (id) => score(overalls[Number(/^s(\d+)/.exec(id)[1]) - 1]);
+}
+
+const THREE = { situations: [SITUATIONS.situations[0], SITUATIONS.situations[1], { ...SITUATIONS.situations[0], title: 'third question' }] };
+
+test('run: a failing run asks for a diagnosis and stores it', () => {
+  let env;
+  let phase;
+  const llm = fakeLlm({
+    scoreFor: overallBySituation(9, 3),
+    hook: (call) => {
+      if (call.kind === 'diagnose') phase = env.mentor.status().phase;
+      return undefined;
+    },
+  });
+  return withSetup({ llm }, async (e) => {
+    env = e;
+    const item = e.cases.add(GUILD, { text: CASE_TEXT, target: 'reply' });
+    const { result: run, logs } = await withCapturedLogs(async () => (await e.mentor.run(item.id)).done);
+    assert.deepEqual(llm.kinds(), ['situations', 'talk', 'talk', 'talk', 'talk', 'score', 'score', 'diagnose']);
+    assert.equal(phase, 'diagnosis');
+    assert.equal(run.passed, false);
+    assert.equal(run.error, undefined);
+    assert.equal(run.stopped, undefined);
+    assert.deepEqual(run.diagnosis, DIAGNOSIS);
+    assert.equal('diagnosisError' in run, false);
+
+    const call = llm.calls.at(-1);
+    assert.equal(call.system, 'DIAGNOSE Zoë');
+    assert.equal(call.options.model, 'x/mentor');
+    assert.equal(call.options.maxOutputTokens, 6000);
+    assert.equal(call.options.countAgainstDailyCap, false);
+    assert.equal(call.options.skipCalibration, true);
+    assert.ok(call.options.signal instanceof AbortSignal);
+    assert.equal('maxRequestTokens' in call.options, false);
+    // Charged like every other request, and counted in the run's tokens.
+    assert.equal(e.budget.used(), 8 * 150);
+    assert.equal(run.tokens.spent, 8 * 150);
+
+    const stored = e.cases.lastRun(GUILD, item.id);
+    assert.deepEqual(stored.diagnosis, DIAGNOSIS);
+    // What the persona was given stays in memory: never in the saved run.
+    assert.doesNotMatch(JSON.stringify(stored), /"request":/);
+    assert.match(e.sent[0].content, /^diagnosis: The persona explains the limit at length/m);
+    assert.ok(e.sent[0].files[0].attachment.toString('utf8').includes("Diagnosis (the mentor's opinion, not verified)"));
+
+    const logged = logs.filter((l) => l.msg === 'mentor: diagnosis');
+    assert.equal(logged.length, 1);
+    assert.equal(logged[0].caseId, item.id);
+    assert.equal(logged[0].causes, 1);
+    assert.equal(logged[0].changes, 1);
+    assert.doesNotMatch(JSON.stringify(logs), /explains the limit|say a limit once/);
+  });
+});
+
+test('run: a passing run with every situation at or above the pass score asks for none', () =>
+  withSetup({ llm: fakeLlm({ scoreFor: overallBySituation(9, 7) }) }, async ({ mentor, cases, llm }) => {
+    const item = cases.add(GUILD, { text: CASE_TEXT, target: 'reply' });
+    const run = await (await mentor.run(item.id)).done;
+    assert.equal(run.passed, true);
+    assert.equal(llm.kinds().includes('diagnose'), false);
+    assert.equal('diagnosis' in run, false);
+    assert.equal('diagnosisError' in run, false);
+  }));
+
+test('run: a passing run with one weak situation asks for one', () =>
+  withSetup({ llm: fakeLlm({ scoreFor: overallBySituation(9, 6) }) }, async ({ mentor, cases, llm }) => {
+    const item = cases.add(GUILD, { text: CASE_TEXT, target: 'reply' });
+    const run = await (await mentor.run(item.id)).done;
+    // Over all answers the median overall is 7.5 and situation 2 is above the floor: the case passes.
+    assert.equal(run.passed, true);
+    assert.equal(llm.kinds().filter((k) => k === 'diagnose').length, 1);
+    const worst = JSON.parse(blockBody(llm.calls.at(-1).user, 'worst'));
+    assert.equal(worst.n, 2);
+    assert.deepEqual(run.diagnosis, DIAGNOSIS);
+  }));
+
+test('run: <worst> is the situation with the lowest median and <seen> carries its system and user text', async () => {
+  await withSetup(
+    { config: { mentor: { situations: 3 } }, llm: fakeLlm({ situations: THREE, scoreFor: overallBySituation(9, 6, 4) }) },
+    async ({ mentor, cases, llm }) => {
+      const item = cases.add(GUILD, { text: CASE_TEXT, target: 'reply' });
+      await (await mentor.run(item.id)).done;
+      cases.addFeedback(GUILD, { caseId: item.id, reason: 'too strict on length' });
+      llm.calls.length = 0;
+      const run = await (await mentor.run(item.id)).done;
+      const { user } = llm.calls.at(-1);
+      assert.equal(llm.calls.at(-1).kind, 'diagnose');
+
+      const order = ['case', 'verdict', 'signs', 'feedback', 'worst', 'seen'];
+      const positions = order.map((tag) => user.indexOf(`<${tag}>`));
+      assert.ok(positions.every((p) => p >= 0), JSON.stringify(positions));
+      assert.deepEqual([...positions].sort((a, b) => a - b), positions);
+      assert.ok(user.startsWith(`<case>\n${CASE_TEXT}\n</case>`));
+      assert.doesNotMatch(user, /<reference>|<samples>|<members>|<intended>|<answers>/);
+
+      assert.deepEqual(JSON.parse(blockBody(user, 'verdict')), {
+        passed: run.passed,
+        medians: run.medians,
+        situations: run.situationMedians,
+        reasons: run.reasons,
+      });
+      assert.deepEqual(JSON.parse(blockBody(user, 'feedback')), [{ case: CASE_TEXT, reason: 'too strict on length' }]);
+
+      const worst = JSON.parse(blockBody(user, 'worst'));
+      const third = run.situations[2];
+      assert.deepEqual(worst, { n: 3, title: 'third question', transcript: third.transcript, answers: third.answers });
+      assert.deepEqual(Object.keys(worst.answers[0]), ['id', 'messages', 'reactions', 'silent', 'facts', 'score']);
+
+      // The talk requests of situation 3 (both samples see the same request).
+      const talk = llm.calls.filter((c) => c.kind === 'talk')[4];
+      const seen = blockBody(user, 'seen');
+      assert.ok(seen.startsWith(`<system>\n${talk.system}\n</system>`), seen.slice(0, 200));
+      assert.ok(seen.endsWith(`<user>\n${talk.user}\n</user>`), seen.slice(-200));
+      assert.ok(user.endsWith('</seen>'));
+    },
+  );
+  // A tie goes to the lowest n.
+  await withSetup(
+    { config: { mentor: { situations: 3 } }, llm: fakeLlm({ situations: THREE, scoreFor: overallBySituation(9, 4, 4) }) },
+    async ({ mentor, cases, llm }) => {
+      const item = cases.add(GUILD, { text: CASE_TEXT, target: 'reply' });
+      await (await mentor.run(item.id)).done;
+      assert.equal(JSON.parse(blockBody(llm.calls.at(-1).user, 'worst')).n, 2);
+      const talk = llm.calls.filter((c) => c.kind === 'talk')[2];
+      assert.ok(blockBody(llm.calls.at(-1).user, 'seen').includes(`<user>\n${talk.user}\n</user>`));
+    },
+  );
+});
+
+test("run: a memory case's <worst> carries texts and parseOk", () =>
+  withSetup({ llm: fakeLlm({ scoreFor: overallBySituation(4, 9) }) }, async ({ mentor, cases, llm }) => {
+    const item = cases.add(GUILD, { text: CASE_TEXT, target: 'memory' });
+    const run = await (await mentor.run(item.id)).done;
+    assert.equal(run.passed, false);
+    const call = llm.calls.at(-1);
+    assert.equal(call.kind, 'diagnose');
+    const worst = JSON.parse(blockBody(call.user, 'worst'));
+    assert.equal(worst.n, 1);
+    assert.deepEqual(Object.keys(worst.answers[0]), ['id', 'texts', 'parseOk', 'facts', 'score']);
+    assert.equal(worst.answers[0].parseOk, true);
+    assert.ok(worst.answers[0].texts.some((t) => t.text === 'Asks about limits.'));
+    // What the analyzer was given for situation 1.
+    const analyzer = llm.calls.find((c) => c.kind === 'memory');
+    const seen = blockBody(call.user, 'seen');
+    assert.ok(seen.startsWith(`<system>\n${analyzer.system}\n</system>`));
+    assert.ok(seen.endsWith(`<user>\n${analyzer.user}\n</user>`));
+    assert.deepEqual(run.diagnosis, DIAGNOSIS);
+  }));
+
+test('run: mentor.diagnose false skips the step', () =>
+  withSetup({ config: { mentor: { diagnose: false } }, llm: fakeLlm({ scoreFor: overallBySituation(9, 3) }) }, async ({ mentor, cases, llm }) => {
+    const item = cases.add(GUILD, { text: CASE_TEXT, target: 'reply' });
+    const run = await (await mentor.run(item.id)).done;
+    assert.equal(run.passed, false);
+    assert.equal(llm.kinds().includes('diagnose'), false);
+    assert.equal('diagnosis' in run, false);
+    assert.equal('diagnosisError' in run, false);
+  }));
+
+test('run: a diagnosis request that fails leaves diagnosisError and the run is still saved', async () => {
+  const failing = overallBySituation(9, 3);
+  const variants = [
+    {
+      name: 'an HTTP error',
+      options: {
+        llm: fakeLlm({
+          scoreFor: failing,
+          hook: (call) => {
+            if (call.kind === 'diagnose') throw Object.assign(new Error('upstream said something private'), { statusCode: 502 });
+            return undefined;
+          },
+        }),
+      },
+      reason: 'request failed',
+      asked: true,
+    },
+    { name: 'an answer that is not a diagnosis', options: { llm: fakeLlm({ scoreFor: failing, diagnosis: 'I think the rules are to blame.' }) }, reason: 'invalid answer', asked: true },
+    { name: 'a missing prompt', options: { prompts: { 'mentor-diagnose': undefined }, llm: fakeLlm({ scoreFor: failing }) }, reason: 'prompt missing', asked: false },
+  ];
+  for (const { name, options, reason, asked } of variants) {
+    await withSetup(options, async (env) => {
+      const item = env.cases.add(GUILD, { text: CASE_TEXT, target: 'reply' });
+      const { result: run, logs } = await withCapturedLogs(async () => (await env.mentor.run(item.id)).done);
+      assert.equal(env.llm.kinds().includes('diagnose'), asked, name);
+      assert.equal(run.diagnosis, null, name);
+      assert.equal(run.diagnosisError, reason, name);
+      assert.equal(run.error, undefined, name);
+      assert.equal(run.stopped, undefined, name);
+      assert.equal(run.passed, false, name);
+      const stored = env.cases.lastRun(GUILD, item.id);
+      assert.equal(stored.id, run.id, name);
+      assert.equal(stored.diagnosisError, reason, name);
+      assert.equal(env.cases.get(GUILD, item.id).state, 'failing', name);
+      assert.equal(env.sent.length, 1, name);
+      const failed = logs.filter((l) => l.msg === 'mentor: diagnosis failed');
+      assert.equal(failed.length, 1, name);
+      assert.equal(failed[0].reason, reason, name);
+      assert.equal(failed[0].caseId, item.id, name);
+      assert.doesNotMatch(JSON.stringify(logs), /something private|rules are to blame/, name);
+      assert.equal(env.mentor.isRunning(), false, name);
+    });
+  }
+});
+
+test('run: the owner stopping the diagnosis leaves the measured run as it is', () => {
+  let env;
+  const llm = fakeLlm({
+    scoreFor: overallBySituation(9, 3),
+    hook: (call) => {
+      if (call.kind !== 'diagnose') return undefined;
+      env.mentor.stop();
+      return Promise.reject(new Error('aborted'));
+    },
+  });
+  return withSetup({ llm }, async (e) => {
+    env = e;
+    const item = e.cases.add(GUILD, { text: CASE_TEXT, target: 'reply' });
+    const run = await (await e.mentor.run(item.id)).done;
+    assert.equal(run.stopped, undefined);
+    assert.equal(run.diagnosis, null);
+    assert.equal(run.diagnosisError, 'stopped by the owner');
+    assert.equal(e.cases.get(GUILD, item.id).state, 'failing');
+  });
+});
+
+test('run: a stopped or failed run asks for no diagnosis', async () => {
+  // Nothing scored: an error.
+  await withSetup({ llm: fakeLlm({ scoreFor: () => null }) }, async ({ mentor, cases, llm }) => {
+    const item = cases.add(GUILD, { text: CASE_TEXT, target: 'reply' });
+    const run = await (await mentor.run(item.id)).done;
+    assert.equal(run.error, 'no answer was scored');
+    assert.equal(llm.kinds().includes('diagnose'), false);
+    assert.equal('diagnosis' in run, false);
+    assert.equal('diagnosisError' in run, false);
+  });
+  // Stopped by the owner during scoring, with a failing situation already scored.
+  let env;
+  const stopping = fakeLlm({
+    scoreFor: overallBySituation(3, 3),
+    hook: (call) => {
+      if (call.kind === 'score') env.mentor.stop();
+      return undefined;
+    },
+  });
+  await withSetup({ llm: stopping }, async (e) => {
+    env = e;
+    const item = e.cases.add(GUILD, { text: CASE_TEXT, target: 'reply' });
+    const run = await (await e.mentor.run(item.id)).done;
+    assert.equal(run.stopped, 'owner');
+    assert.ok(run.situations[0].answers[0].score);
+    assert.equal(stopping.kinds().includes('diagnose'), false);
+    assert.equal('diagnosis' in run, false);
+    assert.equal('diagnosisError' in run, false);
+  });
+  // Out of budget during scoring.
+  await withSetup(
+    {
+      config: { mentor: { maxTokensPerDay: 12000, maxOutputTokens: 10 } },
+      llm: fakeLlm({ scoreFor: overallBySituation(3, 3), usageFor: (kind) => (kind === 'score' ? { prompt_tokens: 11000, completion_tokens: 0 } : USAGE) }),
+    },
+    async ({ mentor, cases, llm }) => {
+      const item = cases.add(GUILD, { text: CASE_TEXT, target: 'reply' });
+      const run = await (await mentor.run(item.id)).done;
+      assert.equal(run.stopped, 'budget');
+      assert.equal(llm.kinds().includes('diagnose'), false);
+      assert.equal('diagnosisError' in run, false);
+    },
+  );
+});
+
+test('check: never asks for a diagnosis', () => {
+  let failing = false;
+  const llm = fakeLlm({ scoreFor: () => (failing ? score(3) : score(9)) });
+  return withSetup({ llm }, async ({ mentor, cases }) => {
+    const item = cases.add(GUILD, { text: CASE_TEXT, target: 'reply' });
+    await (await mentor.run(item.id)).done;
+    failing = true;
+    llm.calls.length = 0;
+    const runs = await (await mentor.check()).done;
+    assert.equal(runs.length, 1);
+    assert.equal(runs[0].passed, false);
+    assert.deepEqual(llm.kinds(), ['talk', 'talk', 'score', 'score']);
+    assert.equal('diagnosis' in runs[0], false);
+    assert.equal('diagnosisError' in runs[0], false);
+  });
+});
 
 // ---- stop, status and check --------------------------------------------------
 

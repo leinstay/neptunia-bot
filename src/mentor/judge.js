@@ -1,8 +1,9 @@
 // The mentor's judge: what the mentor model says is data, never trusted as
-// is. Its invented situations and its points come back as JSON; this module
-// keeps only what has the shape the rest of the run relies on (a situation
-// the sandboxes can replay, a score on every axis within 0..10) and applies
-// the pass rule to what survives. Pure: text in, values out.
+// is. Its invented situations, its points and its diagnosis come back as
+// JSON; this module keeps only what has the shape the rest of the run relies
+// on (a situation the sandboxes can replay, a score on every axis within
+// 0..10, causes and changes on a known layer) and applies the pass rule to
+// what survives. Pure: text in, values out.
 
 import { parseJsonObject } from '../llm/parse.js';
 
@@ -219,4 +220,57 @@ export function verdict(scores, passCfg, groups) {
     }
   }
   return { passed: reasons.length === 0, medians, situations, reasons };
+}
+
+/** Where a proposed change may land. */
+const CHANGE_LAYERS = new Set(['rules', 'prompt', 'card', 'self', 'learned', 'guild', 'profile']);
+/** Where a cause may lie: a change layer, or something no layer says ('missing'). */
+const CAUSE_LAYERS = new Set([...CHANGE_LAYERS, 'missing']);
+const DIAGNOSIS_ITEMS = 5;
+const DIAGNOSIS_CHARS = { summary: 1500, excerpt: 300, target: 200, from: 1000, to: 1000, why: 500 };
+
+/** `value` as a string of at most `max` characters (code points); '' for a non-string. */
+function clipped(value, max) {
+  if (typeof value !== 'string') return '';
+  const chars = [...value];
+  return chars.length > max ? chars.slice(0, max).join('') : value;
+}
+
+/** The items of `list` with a known layer and a non-empty `why`, cleaned by `keys`, at most five. */
+function diagnosisItems(list, layers, keys) {
+  const out = [];
+  for (const value of list) {
+    const item = objectOf(value);
+    if (!item || !layers.has(item.layer)) continue;
+    if (typeof item.why !== 'string' || !item.why.trim()) continue;
+    const clean = { layer: item.layer };
+    for (const key of keys) clean[key] = clipped(item[key], DIAGNOSIS_CHARS[key]);
+    out.push(clean);
+    if (out.length === DIAGNOSIS_ITEMS) break;
+  }
+  return out;
+}
+
+/**
+ * The mentor model's opinion of why a case failed, validated. `summary` must
+ * be a non-empty string (clipped to 1500 characters); `causes` and `changes`
+ * must be arrays. A cause's `layer` is one of rules, prompt, card, self,
+ * learned, guild, profile or missing; a change's the same without missing.
+ * An item with another layer or without a non-empty `why` is dropped; at most
+ * five of each are kept, in the order given. Strings are clipped (excerpt 300,
+ * target 200, from and to 1000, why 500); a missing one becomes ''.
+ * @param {string} raw  The mentor model's text.
+ * @returns {{ summary: string, causes: { layer: string, excerpt: string, why: string }[],
+ *   changes: { layer: string, target: string, from: string, to: string, why: string }[] }|null}
+ *   null when the reply is not of that shape.
+ */
+export function parseDiagnosis(raw) {
+  const value = jsonOf(raw ?? '');
+  if (!value || typeof value.summary !== 'string' || !value.summary.trim()) return null;
+  if (!Array.isArray(value.causes) || !Array.isArray(value.changes)) return null;
+  return {
+    summary: clipped(value.summary, DIAGNOSIS_CHARS.summary),
+    causes: diagnosisItems(value.causes, CAUSE_LAYERS, ['excerpt', 'why']),
+    changes: diagnosisItems(value.changes, CHANGE_LAYERS, ['target', 'from', 'to', 'why']),
+  };
 }

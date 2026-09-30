@@ -1,8 +1,8 @@
 // Tests for src/mentor/judge.js: validation of the mentor model's JSON
-// (situations and scores) and the pass rule over the medians.
+// (situations, scores and the diagnosis) and the pass rule over the medians.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseSituations, parseScores, verdict } from '../src/mentor/judge.js';
+import { parseDiagnosis, parseSituations, parseScores, verdict } from '../src/mentor/judge.js';
 
 const ALICE = '111111111111111111';
 const BRUNO = '222222222222222222';
@@ -247,4 +247,88 @@ test('verdict: reports the medians of every situation', () => {
   ]);
   assert.deepEqual(result.reasons.slice(-2), ['situation 2: overall 4 is under the floor 5', 'situation 2: goal 3 is under the floor 5']);
   assert.equal(result.passed, false);
+});
+
+// ---- parseDiagnosis ----------------------------------------------------------
+
+function diagnosis(overrides = {}) {
+  return {
+    summary: 'The persona explains the limit at length instead of saying it once.',
+    causes: [
+      { layer: 'rules', excerpt: 'explain every refusal', why: 'The rule asks for an explanation.' },
+      { layer: 'missing', excerpt: '', why: 'Nothing says a limit notice is short.' },
+    ],
+    changes: [{ layer: 'rules', target: 'rules.md', from: 'explain every refusal', to: 'say a refusal once', why: 'Shorter notices.' }],
+    ...overrides,
+  };
+}
+
+test('parseDiagnosis: keeps a valid diagnosis', () => {
+  const value = diagnosis();
+  const parsed = parseDiagnosis(`Here it is:\n\`\`\`json\n${JSON.stringify(value)}\n\`\`\``);
+  assert.deepEqual(parsed, value);
+  // Missing optional strings become empty.
+  const bare = parseDiagnosis(JSON.stringify(diagnosis({ causes: [{ layer: 'card', why: 'too formal' }], changes: [{ layer: 'self', why: 'café talk' }] })));
+  assert.deepEqual(bare.causes, [{ layer: 'card', excerpt: '', why: 'too formal' }]);
+  assert.deepEqual(bare.changes, [{ layer: 'self', target: '', from: '', to: '', why: 'café talk' }]);
+});
+
+test('parseDiagnosis: a missing summary or a reply that is not the shape gives null', () => {
+  assert.equal(parseDiagnosis(JSON.stringify(diagnosis({ summary: undefined }))), null);
+  assert.equal(parseDiagnosis(JSON.stringify(diagnosis({ summary: '   ' }))), null);
+  assert.equal(parseDiagnosis(JSON.stringify(diagnosis({ summary: 42 }))), null);
+  assert.equal(parseDiagnosis(JSON.stringify(diagnosis({ causes: 'none' }))), null);
+  assert.equal(parseDiagnosis(JSON.stringify(diagnosis({ changes: undefined }))), null);
+  assert.equal(parseDiagnosis('I think the rules are to blame.'), null);
+  assert.equal(parseDiagnosis(''), null);
+  assert.equal(parseDiagnosis(null), null);
+});
+
+test('parseDiagnosis: an item with an unknown layer or without why is dropped', () => {
+  const parsed = parseDiagnosis(
+    JSON.stringify(
+      diagnosis({
+        causes: [
+          { layer: 'weather', excerpt: 'x', why: 'no such layer' },
+          { layer: 'guild', excerpt: 'x' },
+          { layer: 'profile', excerpt: 'x', why: '  ' },
+          'rules',
+          { layer: 'learned', excerpt: 'answer in one line', why: 'kept' },
+        ],
+        changes: [
+          { layer: 'missing', target: 'x', to: 'y', why: 'missing is not a change layer' },
+          { layer: 'prompt', target: 'reply.md', to: 'y' },
+          { layer: 'guild', target: 'patterns', from: '', to: 'short greetings', why: 'kept' },
+        ],
+      }),
+    ),
+  );
+  assert.deepEqual(parsed.causes, [{ layer: 'learned', excerpt: 'answer in one line', why: 'kept' }]);
+  assert.deepEqual(parsed.changes, [{ layer: 'guild', target: 'patterns', from: '', to: 'short greetings', why: 'kept' }]);
+});
+
+test('parseDiagnosis: at most five causes and five changes', () => {
+  const causes = Array.from({ length: 8 }, (_, i) => ({ layer: 'rules', excerpt: `rule ${i}`, why: `why ${i}` }));
+  const changes = Array.from({ length: 7 }, (_, i) => ({ layer: 'card', target: 'card', from: '', to: `line ${i}`, why: `why ${i}` }));
+  const parsed = parseDiagnosis(JSON.stringify(diagnosis({ causes, changes })));
+  assert.deepEqual(parsed.causes.map((c) => c.excerpt), ['rule 0', 'rule 1', 'rule 2', 'rule 3', 'rule 4']);
+  assert.deepEqual(parsed.changes.map((c) => c.to), ['line 0', 'line 1', 'line 2', 'line 3', 'line 4']);
+});
+
+test('parseDiagnosis: long strings are clipped', () => {
+  const parsed = parseDiagnosis(
+    JSON.stringify({
+      summary: 's'.repeat(2000),
+      causes: [{ layer: 'prompt', excerpt: 'e'.repeat(400), why: 'w'.repeat(600) }],
+      changes: [{ layer: 'profile', target: 't'.repeat(300), from: 'f'.repeat(1200), to: 'τ'.repeat(1200), why: 'y'.repeat(600) }],
+    }),
+  );
+  assert.equal(parsed.summary.length, 1500);
+  assert.equal(parsed.causes[0].excerpt.length, 300);
+  assert.equal(parsed.causes[0].why.length, 500);
+  const [change] = parsed.changes;
+  assert.equal(change.target.length, 200);
+  assert.equal(change.from.length, 1000);
+  assert.equal([...change.to].length, 1000);
+  assert.equal(change.why.length, 500);
 });

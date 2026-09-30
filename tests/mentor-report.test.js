@@ -123,6 +123,68 @@ test('renderCard: a run stored before the medians by situation has no such line'
   assert.doesNotMatch(renderCard(fakeRun({ situationMedians: [] })), /by situation/);
 });
 
+const DIAGNOSIS = {
+  summary: 'The persona explains the limit at length; the rules ask for an explanation of every refusal.',
+  causes: [
+    { layer: 'rules', excerpt: 'explain every refusal', why: 'The rule asks for an explanation.' },
+    { layer: 'missing', excerpt: '', why: 'Nothing says a limit notice is short, café style.' },
+  ],
+  changes: [
+    { layer: 'rules', target: 'rules.md', from: 'explain every refusal', to: 'say a refusal once', why: 'Shorter notices.' },
+    { layer: 'learned', target: 'learned item 4', from: '', to: 'a limit is said in one line', why: 'An addition.' },
+  ],
+};
+
+test('renderCard: shows the diagnosis summary', () => {
+  const card = renderCard(fakeRun({ passed: false, situationMedians: BY_SITUATION, diagnosis: DIAGNOSIS }));
+  const lines = card.split('\n');
+  const at = lines.findIndex((l) => l.startsWith('by situation: '));
+  assert.equal(lines[at + 1], `diagnosis: ${DIAGNOSIS.summary}`);
+  // A long summary is clipped to 300 characters.
+  const long = renderCard(fakeRun({ diagnosis: { ...DIAGNOSIS, summary: `ναι ${'x'.repeat(1400)}` } }));
+  const line = long.split('\n').find((l) => l.startsWith('diagnosis: '));
+  assert.equal(line.length, 'diagnosis: '.length + 300);
+  assert.ok(line.endsWith('...'));
+  // A crowded card clips the summary further and keeps its last line.
+  const crowded = fakeRun({
+    passed: false,
+    reasons: Array(50).fill('overall 3 is under 7'),
+    situations: Array.from({ length: 80 }, (_, i) => ({ n: i + 1, title: '', transcript: '', answers: [] })),
+    situationMedians: Array.from({ length: 80 }, (_, i) => ({ n: i + 1, overall: 6.5, goal: 7 })),
+    diagnosis: { ...DIAGNOSIS, summary: 'y'.repeat(1500) },
+  });
+  const full = renderCard(crowded);
+  assert.ok(full.length <= 1800, `card is ${full.length} characters`);
+  assert.match(full, /details: \/nep mentor show 3$/);
+  const clipped = full.split('\n').find((l) => l.startsWith('diagnosis: '));
+  assert.ok(clipped && clipped.length < 'diagnosis: '.length + 300, clipped);
+  // No diagnosis, no line.
+  assert.doesNotMatch(renderCard(fakeRun()), /diagnosis/);
+  assert.doesNotMatch(renderCard(fakeRun({ diagnosis: null, diagnosisError: 'invalid answer' })), /^diagnosis:/m);
+});
+
+test('renderFile: prints causes and changes', () => {
+  const text = renderFile(fakeRun({ passed: false, diagnosis: DIAGNOSIS })).text;
+  const at = text.indexOf("Diagnosis (the mentor's opinion, not verified)");
+  assert.ok(at >= 0, text);
+  const section = text.slice(at);
+  assert.ok(section.includes(DIAGNOSIS.summary));
+  for (const cause of DIAGNOSIS.causes) {
+    assert.ok(section.includes(cause.layer));
+    assert.ok(section.includes(cause.why));
+  }
+  assert.ok(section.includes('"explain every refusal"'));
+  for (const change of DIAGNOSIS.changes) {
+    assert.ok(section.includes(change.target));
+    assert.ok(section.includes(change.to));
+    assert.ok(section.includes(change.why));
+  }
+  assert.match(section, /from: "explain every refusal"\n\s*to: "say a refusal once"/);
+  // Without a diagnosis the section is left out; a failed diagnosis says why.
+  assert.doesNotMatch(renderFile(fakeRun()).text, /Diagnosis/);
+  assert.match(renderFile(fakeRun({ diagnosis: null, diagnosisError: 'invalid answer' })).text, /^diagnosis: not available \(invalid answer\)$/m);
+});
+
 test('renderFile: prints both medians in the header of every situation', () => {
   const text = renderFile(fakeRun({ situationMedians: BY_SITUATION })).text;
   const header = (n) => new RegExp(`^Situation ${n}: situation ${n} [^\\n]*\\n(medians: [^\\n]*)$`, 'm').exec(text)?.[1];
