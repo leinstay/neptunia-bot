@@ -56,6 +56,10 @@ Something dropped long ago is at most a detail.
 
 **`aliases`** — what others call this member in chat: a stable nickname, shortened or translated name, NOT Discord display names. Read them from context lines (`(ctx)`) addressed to or about the member; the own-lines attribution rule does not apply to aliases. Only names used more than in passing.
 
+## Writing quality
+
+Everything you write is shown to the persona as its memory. Write as a person writes notes for themselves. One fact per sentence, plain words, few commas. No "not X but Y" contrasts, no groups of three for completeness, no sentence restating the one before it, no heavy vocabulary (pivotal, crucial, testament, showcase, underscore, or equivalents in whatever language the notes use), no trailing clauses commenting on significance ("highlighting…", "reflecting…"). No dash or semicolon between clauses, no ellipsis, no guillemets, no parenthetical asides. Quotes only around a member's verbatim words. `character` and `feeling` go to the persona's voice with no buffer and must read as a person's own thoughts.
+
 ## Rules
 
 Something is this person's only when their OWN lines (marked `>> `) show it — they bring it up, return to it, or speak about it with substance. Replying to someone else's topic does not make it theirs. Exception: aliases come from OTHER people's lines.

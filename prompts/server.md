@@ -31,6 +31,10 @@ A single bare JSON object. No markdown fencing, no commentary, nothing before or
 
 `lore` — things that outlive a conversation: events, recurring characters, long-running stories, feuds, traditions. Not one-off jokes, not one person's facts. `title` is the identity. `keys` — 2 to 6 words or short phrases people type when the thing comes up, lowercase, in the chat's language. `text` ≤ {{loreTextChars}} chars.
 
+## Writing quality
+
+Everything you write is shown to the persona as its memory. Write as a person writes notes for themselves. One fact per sentence, plain words, few commas. No "not X but Y" contrasts, no groups of three for completeness, no sentence restating the one before it, no heavy vocabulary (pivotal, crucial, testament, showcase, underscore, or equivalents in whatever language the notes use), no trailing clauses about significance. No dash or semicolon between clauses, no ellipsis, no guillemets, no parenthetical asides. Quotes only around a member's verbatim words.
+
 Members: write as `<@id>` (from the member list or the transcript's `nick (id:123)`) only when sure who is meant. Never invent an id.
 
 Write notes in the language the chat speaks. Record observed facts only. Never store sensitive information: addresses, phone numbers, identity documents, health conditions, financial details, real full names.

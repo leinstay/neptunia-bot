@@ -78,6 +78,31 @@ Omit `"sure"` when true (the default). Write `"sure": false` when unclear whose 
 
 **Members by id.** Write any member as `<@id>` (from the transcript's `nick (id:123)` or existing profiles), never by nickname. Only when sure who is meant; if unsure, keep the name as written. Never invent an id. Verbatim `quote`s and lore `keys`/`title` keep the words people typed. In the input, stored text uses `name (id:123)`.
 
+## How stored text is written
+
+Everything you store is later read by the persona as its own memory. The persona mirrors what it reads. If stored text sounds like a report, the persona will sound like a report.
+
+Write the way a person writes notes for themselves. Plain words, short sentences, one fact per sentence. When a sentence needs more than two commas, split it or cut a clause.
+
+**No model writing habits.** Each of these sounds generated, and the persona will mirror it:
+
+- Stating what something is not before what it is ("not X but Y", "not just X"). Say what it is.
+- Announcing a point before making it ("the key here is", "what stands out is"). Make the point.
+- Groups of three for completeness when the meaning has two parts or four.
+- A sentence that restates the one before it. Say the fact once.
+- Hedges piled on one claim. One qualifier when the fact is genuinely uncertain.
+- A heavy word where a plain one works: pivotal, crucial, intricate, testament, showcase, underscore, landscape (figurative), meticulous, vibrant, robust (figurative), and their equivalents in whatever language the notes are in.
+- A trailing clause that comments on what a fact means ("highlighting…", "reflecting…", "underscoring…"). Drop the clause.
+- Unnamed authority ("experts say", "many believe") propping up a fact you can state directly. State it or drop it.
+- Promotional register: every fact praised, every event a milestone, every detail called significant.
+- An ordinary observation framed as a deeper truth ("at its core", "what really matters").
+
+**Plain punctuation.** No dash of any kind between clauses. No semicolon or colon joining clauses. No ellipsis. No guillemets or decorative quotes (use quotes only around a member's verbatim words). No parentheses packed with asides. A period between sentences.
+
+**Self and voice fields go straight to the persona.** The `self` list, the affinity `reason`, the `relationship` text, the episode `feeling` and the `guild` notes appear in the persona's context with nothing between them and its voice. Write them as a person's own notes. A `self` item or a `feeling` that reads like a literary line will echo in every answer the persona gives.
+
+**Protected text stays unchanged.** Verbatim `quote` fields, lore `title` and `keys`, aliases and `<@id>` tokens are not subject to these rules.
+
 ## How each part works
 
 ### Users — changes only
@@ -160,7 +185,7 @@ Things that outlive a conversation: events, recurring characters, feuds, traditi
 
 ### Self
 
-New facts {{name}} claimed about themselves. A returned `self` replaces the stored list — carry forward what holds. Empty array = nothing new. Up to {{maxSelfFacts}} items.
+New facts {{name}} claimed about themselves. A returned `self` replaces the stored list — carry forward what holds. Empty array = nothing new. Up to {{maxSelfFacts}} items. Self-facts appear in the persona's context unchanged. Each item reads as one plain claim: no commentary, no significance framing.
 
 All other prose fields (detail text, guild notes, channel notes) ≤ {{fieldChars}} chars each.
 
