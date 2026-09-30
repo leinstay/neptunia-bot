@@ -4,7 +4,7 @@
 // the edits objects are never mutated.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { overlayView, overlayEdits, editPrompt, removeRule, removeExcerpt } from '../src/mentor/overlay.js';
+import { overlayView, overlayEdits, editPrompt, editToOverlay, removeRule, removeExcerpt } from '../src/mentor/overlay.js';
 import { liveView, situationToHistory } from '../src/mentor/sandbox.js';
 import { buildRequest } from '../src/behavior/prompt.js';
 import { labels } from './fixtures/labels.js';
@@ -375,4 +375,120 @@ test('overlayEdits: merges left to right, later wins per key', () => {
   });
   assert.deepEqual([ablation, repair], before, 'the inputs are not mutated');
   assert.deepEqual(overlayEdits(), { prompts: {}, guild: {}, users: {} });
+});
+
+// ---- editToOverlay -------------------------------------------------------------
+
+/** The base memory with two learned items, for the learned layer. */
+function memoryWithLearned() {
+  const memory = baseMemory();
+  memory.guild.learned = [
+    { id: 4, text: 'LEARNED_ONE the kettle is off limits', weight: 3, firstSeen: '2026-09-01', lastSeen: '2026-09-20' },
+    { id: 7, text: 'LEARNED_TWO greet with καλημέρα', weight: 1, firstSeen: '2026-09-02', lastSeen: '2026-09-02' },
+  ];
+  return memory;
+}
+
+/** `edit` turned into edits and read back through an overlay of `base`; the base is checked untouched. */
+function throughOverlay(edit, base = baseView(fakeHot(), memoryWithLearned())) {
+  const before = snapshot(base);
+  const edits = editToOverlay(edit, base);
+  assert.deepEqual(snapshot(base), before, 'the base view is not mutated');
+  return { edits, view: edits.error ? null : overlayView(base, edits) };
+}
+
+test('editToOverlay rules: replaces the first exact occurrence in the rules text', () => {
+  const { edits, view } = throughOverlay({ layer: 'rules', target: 'rules', from: 'second rule', to: 'second rule, reworded', why: 'x' });
+  assert.deepEqual(Object.keys(edits), ['prompts']);
+  assert.equal(view.prompts.rules, RULES.replace('second rule', 'second rule, reworded'));
+});
+
+test('editToOverlay prompt: replaces text, or appends a paragraph for an empty from', () => {
+  const replaced = throughOverlay({ layer: 'prompt', target: 'format', from: '<react>', to: '<react> (rarely)', why: 'x' });
+  assert.equal(replaced.view.prompts.format, 'Use <msg> and <react> (rarely) tags.');
+  const appended = throughOverlay({ layer: 'prompt', target: 'format', from: '', to: '  One idea per message.  ', why: 'x' });
+  assert.equal(appended.view.prompts.format, 'Use <msg> and <react> tags.\n\nOne idea per message.\n');
+});
+
+test('editToOverlay self: rewrites or removes the item matched by its exact text', () => {
+  const rewritten = throughOverlay({ layer: 'self', target: '', from: ' SELF_ONE likes tea with honey ', to: 'SELF_ONE likes tea, no sugar', why: 'x' });
+  assert.deepEqual(rewritten.view.memory.getGuild().self, ['SELF_ONE likes tea, no sugar', 'SELF_TWO dislikes early mornings']);
+  const removed = throughOverlay({ layer: 'self', target: '', from: 'SELF_TWO dislikes early mornings', to: '', why: 'x' });
+  assert.deepEqual(removed.view.memory.getGuild().self, ['SELF_ONE likes tea with honey']);
+});
+
+test('editToOverlay learned: a rewrite keeps the item, a removal drops it', () => {
+  const rewritten = throughOverlay({ layer: 'learned', target: '', from: 'LEARNED_ONE the kettle is off limits', to: 'LEARNED_ONE nobody touches the kettle', why: 'x' });
+  const [first, second] = rewritten.view.memory.getGuild().learned;
+  assert.deepEqual(first, { id: 4, text: 'LEARNED_ONE nobody touches the kettle', weight: 3, firstSeen: '2026-09-01', lastSeen: '2026-09-20' });
+  assert.equal(second.id, 7);
+  const removed = throughOverlay({ layer: 'learned', target: '', from: 'LEARNED_TWO greet with καλημέρα', to: '', why: 'x' });
+  assert.deepEqual(removed.view.memory.getGuild().learned.map((i) => i.id), [4]);
+});
+
+test('editToOverlay guild: a string field is edited in place, an in-joke by its exact text', () => {
+  const patterns = throughOverlay({ layer: 'guild', target: 'patterns', from: 'short lines', to: 'short lines, few emoji', why: 'x' });
+  assert.equal(patterns.view.memory.getGuild().patterns, 'PATTERNS_MARKER short lines, few emoji');
+  assert.equal(patterns.view.memory.getGuild().starters, 'STARTERS_MARKER a greeting');
+  const injoke = throughOverlay({ layer: 'guild', target: 'injokes', from: 'INJOKE_MARKER the broken kettle', to: 'INJOKE_MARKER the kettle, again', why: 'x' });
+  assert.deepEqual(injoke.view.memory.getGuild().injokes, ['INJOKE_MARKER the kettle, again']);
+});
+
+test('editToOverlay profile: rewrites one field of one member', () => {
+  const { edits, view } = throughOverlay({ layer: 'profile', target: `${ALICE}.character`, from: 'solves chess problems', to: 'likes chess puzzles', why: 'x' });
+  assert.deepEqual(edits, { users: { [ALICE]: { character: 'ALICE_CHARACTER likes chess puzzles' } } });
+  assert.equal(view.memory.getUser(ALICE).character, 'ALICE_CHARACTER likes chess puzzles');
+  assert.equal(view.memory.getUser(ALICE).style, 'ALICE_STYLE lowercase');
+  assert.equal(view.memory.getUser(BRUNO).character, 'BRUNO_CHARACTER bakes bread');
+});
+
+test('editToOverlay: a layer no edit may touch is refused', () => {
+  for (const layer of ['card', 'missing', 'lore', undefined]) {
+    assert.deepEqual(throughOverlay({ layer, target: 'character-card', from: 'friendly', to: 'kind', why: 'x' }).edits, { error: 'layer not allowed' }, String(layer));
+  }
+  assert.deepEqual(editToOverlay(null, baseView()), { error: 'layer not allowed' });
+});
+
+test('editToOverlay: a target that is not allowed is refused', () => {
+  const refused = (edit) => throughOverlay({ from: 'x', to: 'y', why: 'x', ...edit }).edits;
+  for (const target of ['character-card', 'rules', 'Format', '../rules', '']) {
+    assert.deepEqual(refused({ layer: 'prompt', target }), { error: 'target not allowed' }, target);
+  }
+  assert.deepEqual(refused({ layer: 'guild', target: 'lore' }), { error: 'target not allowed' });
+  assert.deepEqual(refused({ layer: 'profile', target: `${ALICE}.names` }), { error: 'target not allowed' });
+  assert.deepEqual(refused({ layer: 'profile', target: 'alice.character' }), { error: 'target not allowed' });
+});
+
+test('editToOverlay: an unknown prompt or member is refused', () => {
+  const refused = (edit) => throughOverlay({ from: 'x', to: 'y', why: 'x', ...edit }).edits;
+  assert.deepEqual(refused({ layer: 'prompt', target: 'nosuch' }), { error: 'unknown prompt' });
+  assert.deepEqual(refused({ layer: 'prompt', target: 'labels' }), { error: 'unknown prompt' });
+  assert.deepEqual(refused({ layer: 'profile', target: '333333333333333333.character' }), { error: 'unknown member' });
+});
+
+test('editToOverlay: text that is not in the current piece is refused', () => {
+  const refused = (edit) => throughOverlay({ to: 'y', why: 'x', ...edit }).edits;
+  assert.deepEqual(refused({ layer: 'rules', from: 'no such rule' }), { error: 'text not found' });
+  // Only a prompt may take an addition.
+  assert.deepEqual(refused({ layer: 'rules', from: '' }), { error: 'text not found' });
+  assert.deepEqual(refused({ layer: 'prompt', target: 'format', from: 'Use <msg> and <REACT>' }), { error: 'text not found' });
+  // A list item is matched by its whole text, never a part of it.
+  assert.deepEqual(refused({ layer: 'self', from: 'SELF_ONE likes tea' }), { error: 'text not found' });
+  assert.deepEqual(refused({ layer: 'self', from: '' }), { error: 'text not found' });
+  assert.deepEqual(refused({ layer: 'learned', from: 'LEARNED_ONE' }), { error: 'text not found' });
+  assert.deepEqual(refused({ layer: 'guild', target: 'starters', from: 'farewell' }), { error: 'text not found' });
+  assert.deepEqual(refused({ layer: 'guild', target: 'injokes', from: 'the broken kettle' }), { error: 'text not found' });
+  assert.deepEqual(refused({ layer: 'profile', target: `${ALICE}.style`, from: 'uppercase' }), { error: 'text not found' });
+});
+
+test('editToOverlay: a learned rewrite onto another item is refused', () => {
+  const edit = { layer: 'learned', from: 'LEARNED_ONE the kettle is off limits', to: 'LEARNED_TWO greet with καλημέρα', why: 'x' };
+  assert.deepEqual(throughOverlay(edit).edits, { error: 'duplicate item' });
+});
+
+test('editToOverlay: a profile rewrite that loses a fact is refused', () => {
+  const refused = (from, to) => throughOverlay({ layer: 'profile', target: `${ALICE}.character`, from, to, why: 'x' }).edits;
+  assert.deepEqual(refused('ALICE_CHARACTER solves', 'solves'), { error: 'names changed' });
+  assert.deepEqual(refused('chess problems', 'chess problems since 2019'), { error: 'numbers changed' });
+  assert.deepEqual(refused('ALICE_CHARACTER solves chess problems', ''), { error: 'field emptied' });
 });

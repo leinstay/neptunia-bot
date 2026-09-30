@@ -5,9 +5,11 @@
 // a member's profile read differently -- so the mentor can ask "what if" and
 // measure it without writing anything anywhere. Everything here is pure: the
 // base view is the only source, it is read at call time and never mutated,
-// and every helper returns a new edits object.
+// and every helper returns a new edits object. The repair loop also uses it
+// to show an edit before the change store writes it (`editToOverlay`).
 
 import { removeRule as removeRuleEntry } from '../admin.js';
+import { profileGuard } from './changes.js';
 
 // Keys an edit may never set: they would reach an object's prototype.
 const FORBIDDEN_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
@@ -158,6 +160,139 @@ export function removeRule(rulesText, n) {
   const result = removeRuleEntry(rulesText, n);
   if (!result) throw new Error('rule not found');
   return result.text;
+}
+
+// ---- an edit as the change store would apply it -------------------------------
+//
+// These mirror src/mentor/changes.js (`plan` and its helpers): the repair loop
+// verifies an edit on an overlay built here, then the change store writes the
+// same edit, so both must read an edit the same way. Change one, change both.
+
+const GUILD_STRINGS = ['patterns', 'starters'];
+const PROFILE_FIELDS = ['character', 'style', 'relationship'];
+// Prompts the `prompt` layer may not touch: the card is the owner's, the rules have their own layer.
+const REFUSED_PROMPTS = new Set(['character-card', 'rules']);
+const PROMPT_NAME = /^[a-z0-9][a-z0-9-]*$/;
+
+/** `text` with the first exact occurrence of `from` replaced literally by `to`. */
+function replaceFirst(text, from, to) {
+  const at = text.indexOf(from);
+  return text.slice(0, at) + to + text.slice(at + from.length);
+}
+
+/** `text` with `to` appended as a new paragraph. */
+function appendParagraph(text, to) {
+  const head = text.replace(/\s+$/, '');
+  return head ? `${head}\n\n${to.trim()}\n` : `${to.trim()}\n`;
+}
+
+/** A prompt file's text after the edit: `from` replaced, or (`allowAppend`) `to` appended for an empty `from`. */
+function editedFile(text, from, to, allowAppend) {
+  if (!from) return allowAppend ? { text: appendParagraph(text, to) } : { error: 'text not found' };
+  return text.includes(from) ? { text: replaceFirst(text, from, to) } : { error: 'text not found' };
+}
+
+/** The guild list `key` after the edit: the item whose trimmed text is `from` rewritten to `to`, or removed. */
+function editedList(list, from, to) {
+  const items = Array.isArray(list) ? list.map((item) => String(item)) : [];
+  const want = from.trim();
+  const index = want ? items.findIndex((item) => item.trim() === want) : -1;
+  if (index === -1) return { error: 'text not found' };
+  const next = [...items];
+  if (to.trim()) next[index] = to.trim();
+  else next.splice(index, 1);
+  return { list: next };
+}
+
+/** The learned list after the edit: a rewrite keeps the item (id, weight, dates), a removal drops it. */
+function editedLearned(items, from, to) {
+  const list = Array.isArray(items) ? items : [];
+  const want = from.trim();
+  const item = want ? list.find((i) => String(i?.text).trim() === want) : undefined;
+  if (!item) return { error: 'text not found' };
+  const text = to.trim();
+  if (!text) return { list: list.filter((i) => i !== item) };
+  if (list.some((i) => i !== item && i?.text === text)) return { error: 'duplicate item' };
+  return { list: list.map((i) => (i === item ? { ...i, text } : i)) };
+}
+
+/** A profile field after the edit, held to `profileGuard`. */
+function editedProfile(view, target, from, to) {
+  const dot = typeof target === 'string' ? target.lastIndexOf('.') : -1;
+  const userId = dot > 0 ? target.slice(0, dot) : '';
+  const field = dot > 0 ? target.slice(dot + 1) : '';
+  if (!PROFILE_FIELDS.includes(field) || !/^\d+$/.test(userId)) return { error: 'target not allowed' };
+  const user = view.memory.getUser(userId);
+  if (!user) return { error: 'unknown member' };
+  const text = typeof user[field] === 'string' ? user[field] : '';
+  if (!from || !text.includes(from)) return { error: 'text not found' };
+  const after = replaceFirst(text, from, to);
+  const guard = profileGuard(text, after);
+  if (!guard.ok) return { error: guard.reason };
+  return { edits: { users: { [userId]: { [field]: after } } } };
+}
+
+/**
+ * The edits (the overlay's shape) that show `view` as if `edit` had been
+ * applied by the change store (src/mentor/changes.js#apply), or `{ error }`
+ * with the reason the store would refuse it for. Per layer, read from the
+ * view at call time: `rules` -- the first exact occurrence of `from` in the
+ * rules text replaced by `to` (`from` must be non-empty); `prompt` -- the same
+ * in prompt `target` (a lowercase name, never the character card or the
+ * rules), an empty `from` appends `to` as a new paragraph; `self` / an in-joke
+ * (`guild`, target `injokes`) -- the item whose trimmed text equals the
+ * trimmed `from` rewritten to the trimmed `to`, or removed for an empty `to`;
+ * `learned` -- the same, a rewrite keeping the item's id, weight and dates;
+ * `guild` `patterns` / `starters` -- `from` replaced in the string; `profile`
+ * -- `from` replaced in field `character`, `style` or `relationship` of
+ * member `<userId>.<field>`, held to `profileGuard`. Reasons: 'layer not
+ * allowed', 'target not allowed', 'unknown prompt', 'unknown member', 'text
+ * not found', 'duplicate item', or a `profileGuard` reason. The view is never
+ * mutated. Pure.
+ * @param {{ layer: string, target?: string, from?: string, to?: string }} edit
+ * @param {object} view  From `liveView` (or an overlay of the same shape).
+ * @returns {{ prompts?: object, guild?: object, users?: object }|{ error: string }}
+ */
+export function editToOverlay(edit, view) {
+  if (!edit || typeof edit !== 'object') return { error: 'layer not allowed' };
+  const from = typeof edit.from === 'string' ? edit.from : '';
+  const to = typeof edit.to === 'string' ? edit.to : '';
+  const guild = () => view.memory.getGuild() ?? {};
+  const asGuild = (key, result) => (result.error ? result : { guild: { [key]: result.list } });
+  switch (edit.layer) {
+    case 'rules': {
+      const text = view.prompts?.rules;
+      if (typeof text !== 'string') return { error: 'unknown prompt' };
+      const result = editedFile(text, from, to, false);
+      return result.error ? result : { prompts: { rules: result.text } };
+    }
+    case 'prompt': {
+      const name = edit.target;
+      if (typeof name !== 'string' || !PROMPT_NAME.test(name) || REFUSED_PROMPTS.has(name)) return { error: 'target not allowed' };
+      const text = view.prompts?.[name];
+      if (typeof text !== 'string') return { error: 'unknown prompt' };
+      const result = editedFile(text, from, to, true);
+      return result.error ? result : { prompts: { [name]: result.text } };
+    }
+    case 'self':
+      return asGuild('self', editedList(guild().self, from, to));
+    case 'learned':
+      return asGuild('learned', editedLearned(guild().learned, from, to));
+    case 'guild': {
+      if (edit.target === 'injokes') return asGuild('injokes', editedList(guild().injokes, from, to));
+      if (!GUILD_STRINGS.includes(edit.target)) return { error: 'target not allowed' };
+      const value = guild()[edit.target];
+      const text = typeof value === 'string' ? value : '';
+      if (!from || !text.includes(from)) return { error: 'text not found' };
+      return { guild: { [edit.target]: replaceFirst(text, from, to) } };
+    }
+    case 'profile': {
+      const result = editedProfile(view, edit.target, from, to);
+      return result.error ? result : result.edits;
+    }
+    default:
+      return { error: 'layer not allowed' };
+  }
 }
 
 /** How many times `char` repeats at the end (`fromEnd`) or the start of `text`. */

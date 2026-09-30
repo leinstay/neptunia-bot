@@ -293,3 +293,108 @@ test('renderLastRun: no run yet', () => {
   assert.equal(renderLastRun(null), 'last: no run yet');
   assert.equal(renderLastRun(undefined), 'last: no run yet');
 });
+
+// ---- the repair loop -------------------------------------------------------------
+
+const FRESH = { passed: true, medians: { human: 8, character: 8, rules: 8, goal: 8, overall: 8.5 }, situations: [{ n: 1, overall: 8, goal: 8 }, { n: 2, overall: 9, goal: 8 }] };
+
+const REPAIR = {
+  attempts: [
+    {
+      n: 1,
+      suspects: [
+        { layer: 'rules', excerpt: 'explain every refusal', located: true, gain: 0.5, confirmed: false },
+        { layer: 'card', excerpt: 'talks a lot', located: false, gain: null, confirmed: false },
+      ],
+      edit: null,
+      refused: null,
+      verify: null,
+      accepted: false,
+    },
+    {
+      n: 2,
+      suspects: [{ layer: 'missing', excerpt: '', located: null, gain: null, confirmed: true }],
+      edit: { layer: 'prompt', target: 'format', from: '', to: 'One idea per message.', why: 'Shorter, café style.' },
+      refused: 'growth over the cap',
+      verify: null,
+      accepted: false,
+    },
+    {
+      n: 3,
+      suspects: [{ layer: 'rules', excerpt: 'say everything twice', located: true, gain: 2.5, confirmed: true }],
+      edit: { layer: 'rules', target: 'rules', from: 'say everything twice', to: 'say it once', why: 'Repeats are noise.' },
+      refused: null,
+      verify: {
+        fresh: FRESH,
+        regression: [{ caseId: 5, held: true, situations: [{ n: 1, before: 8, after: 7 }, { n: 2, before: 9, after: 9 }] }],
+        skipped: [6],
+      },
+      accepted: true,
+    },
+  ],
+  applied: { changeId: 12, layer: 'rules', target: 'rules', summary: 'rules rules: say everything twice -> say it once' },
+  reason: 'applied',
+  tokens: 45678,
+};
+
+test('renderCard: shows the applied change and its undo', () => {
+  const card = renderCard(fakeRun({ passed: false, situationMedians: BY_SITUATION, diagnosis: DIAGNOSIS, repair: REPAIR }));
+  assert.ok(card.length <= 1800);
+  const lines = card.split('\n');
+  const at = lines.findIndex((l) => l.startsWith('diagnosis: '));
+  assert.equal(lines[at + 1], 'repair: change 12 applied, rules rules, gain 2.5, fresh overall 8.5');
+  assert.equal(lines[at + 2], 'undo: /nep mentor undo 12');
+  // A change without a target (a learned item) and a cause without a gain (missing).
+  const learned = structuredClone(REPAIR);
+  learned.attempts[2].suspects[0] = { layer: 'missing', excerpt: '', located: null, gain: null, confirmed: true };
+  learned.applied = { changeId: 13, layer: 'learned', target: null, summary: 'learned: a -> b' };
+  assert.match(renderCard(fakeRun({ passed: false, repair: learned })), /^repair: change 13 applied, learned, gain -, fresh overall 8\.5$/m);
+});
+
+test('renderCard: says why nothing was applied', () => {
+  const card = renderCard(fakeRun({ passed: false, diagnosis: DIAGNOSIS, repair: { ...REPAIR, applied: null, reason: 'max attempts' } }));
+  assert.match(card, /^repair: nothing applied \(max attempts\)$/m);
+  assert.doesNotMatch(card, /undo:/);
+  // Without a diagnosis the line takes its place; without a repair there is no line.
+  assert.match(renderCard(fakeRun({ passed: false, repair: { attempts: [], applied: null, reason: 'no diagnosis', tokens: 0 } })), /^repair: nothing applied \(no diagnosis\)$/m);
+  assert.doesNotMatch(renderCard(fakeRun({ passed: false, diagnosis: DIAGNOSIS })), /repair/);
+  // A crowded card keeps the repair lines and stays under the limit.
+  const crowded = fakeRun({
+    passed: false,
+    reasons: Array(50).fill('overall 3 is under 7'),
+    situations: Array.from({ length: 80 }, (_, i) => ({ n: i + 1, title: '', transcript: '', answers: [] })),
+    situationMedians: Array.from({ length: 80 }, (_, i) => ({ n: i + 1, overall: 6.5, goal: 7 })),
+    diagnosis: { ...DIAGNOSIS, summary: 'y'.repeat(1500) },
+    repair: { ...REPAIR, applied: { ...REPAIR.applied, target: 't'.repeat(200) } },
+  });
+  const full = renderCard(crowded);
+  assert.ok(full.length <= 1800, `card is ${full.length} characters`);
+  assert.match(full, /^undo: \/nep mentor undo 12$/m);
+  assert.match(full, /details: \/nep mentor show 3$/);
+});
+
+test('renderFile: prints the attempts', () => {
+  const text = renderFile(fakeRun({ passed: false, diagnosis: DIAGNOSIS, repair: REPAIR })).text;
+  const at = text.indexOf('\nRepair:');
+  assert.ok(at >= 0, text);
+  assert.ok(at > text.indexOf("Diagnosis (the mentor's opinion, not verified)"));
+  const section = text.slice(at, text.indexOf('\nReference:'));
+  assert.match(section, /applied: change 12, rules rules: say everything twice -> say it once/);
+  assert.match(section, /ended: applied · tokens 45678/);
+  for (const n of [1, 2, 3]) assert.match(section, new RegExp(`^Attempt ${n}:`, 'm'));
+  assert.match(section, /- rules: "explain every refusal" -- gain 0\.5, not confirmed/);
+  assert.match(section, /- card: "talks a lot" -- not located/);
+  assert.match(section, /- missing -- confirmed without ablation/);
+  assert.match(section, /- rules: "say everything twice" -- gain 2\.5, confirmed/);
+  assert.match(section, /edit: prompt, format\n\s+from: \(an addition\)\n\s+to: "One idea per message\."\n\s+why: Shorter, café style\./);
+  assert.match(section, /refused: growth over the cap/);
+  assert.match(section, /from: "say everything twice"\n\s+to: "say it once"/);
+  assert.match(section, /fresh: passed, overall 8\.5 · goal 8, by situation 1: 8 · 2: 9/);
+  assert.match(section, /regression: case 5 held \(1: 8 -> 7 · 2: 9 -> 9\)/);
+  assert.match(section, /regression skipped: case 6/);
+  assert.match(section, /accepted: yes/);
+  assert.match(section, /accepted: no/);
+  // Nothing applied: the reason; no repair, no section.
+  assert.match(renderFile(fakeRun({ repair: { attempts: [], applied: null, reason: 'no diagnosis', tokens: 0 } })).text, /^Repair:\nnothing applied \(no diagnosis\)$/m);
+  assert.doesNotMatch(renderFile(fakeRun()).text, /^Repair:/m);
+});

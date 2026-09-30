@@ -22,6 +22,7 @@
     "imageGeneration": false,
     "privateMessages": false,
     "mentor": false,
+    "mentorAutoFix": false,
     "typingSimulation": true,
     "adminCommands": true
   },
@@ -228,7 +229,18 @@
     "pass": { "score": 7, "floor": 5 },
     "reference": { "days": 7, "samples": 60, "maxMessages": 3000, "rarePer1000": 0.5, "rareMinAuthors": 2 },
     "feedbackExamples": 10,
-    "diagnose": true
+    "diagnose": true,
+    "suspects": 2,
+    "ablationGain": 1,
+    "ablationSamples": 2,
+    "fix": {
+      "maxAttempts": 3,
+      "maxGrowthChars": 300,
+      "layers": ["rules", "prompt", "self", "learned", "guild", "profile"],
+      "files": ["rules", "system-prompt", "format", "reply", "interject", "initiate", "address", "memory", "profile"]
+    },
+    "regression": { "situations": 2, "tolerance": 1 },
+    "verify": { "situations": 3, "samples": 2 }
   },
   "warmup": {
     "enabled": true,

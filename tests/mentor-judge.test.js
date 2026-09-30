@@ -2,7 +2,7 @@
 // (situations, scores and the diagnosis) and the pass rule over the medians.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseDiagnosis, parseSituations, parseScores, verdict } from '../src/mentor/judge.js';
+import { parseDiagnosis, parseEdit, parseSituations, parseScores, verdict } from '../src/mentor/judge.js';
 
 const ALICE = '111111111111111111';
 const BRUNO = '222222222222222222';
@@ -331,4 +331,60 @@ test('parseDiagnosis: long strings are clipped', () => {
   assert.equal(change.from.length, 1000);
   assert.equal([...change.to].length, 1000);
   assert.equal(change.why.length, 500);
+});
+
+// ---- parseEdit -----------------------------------------------------------------
+
+const EDIT_LAYERS = ['rules', 'prompt', 'self', 'learned', 'guild', 'profile'];
+
+function edit(overrides = {}) {
+  return { layer: 'rules', target: 'rules', from: 'explain every refusal', to: 'say a refusal once', why: 'Shorter notices, café style.', ...overrides };
+}
+
+test('parseEdit: keeps a valid edit', () => {
+  const parsed = parseEdit(`Here:\n\`\`\`json\n${JSON.stringify(edit())}\n\`\`\``, EDIT_LAYERS);
+  assert.deepEqual(parsed, edit());
+  // An addition (empty from) and a deletion (empty to) are both edits.
+  assert.deepEqual(parseEdit(JSON.stringify(edit({ layer: 'prompt', target: 'format', from: '' })), EDIT_LAYERS).from, '');
+  assert.deepEqual(parseEdit(JSON.stringify(edit({ layer: 'self', target: '', to: '' })), EDIT_LAYERS).to, '');
+  // A missing target becomes ''.
+  const { target: _omit, ...noTarget } = edit({ layer: 'learned' });
+  assert.equal(parseEdit(JSON.stringify(noTarget), EDIT_LAYERS).target, '');
+});
+
+test('parseEdit: a layer outside the allowed ones gives null', () => {
+  assert.equal(parseEdit(JSON.stringify(edit({ layer: 'card' })), EDIT_LAYERS), null);
+  assert.equal(parseEdit(JSON.stringify(edit({ layer: 'missing' })), EDIT_LAYERS), null);
+  assert.equal(parseEdit(JSON.stringify(edit({ layer: 'rules' })), ['prompt']), null);
+  assert.equal(parseEdit(JSON.stringify(edit()), undefined), null);
+  // Not an object, or no why.
+  assert.equal(parseEdit('I would rewrite the rule.', EDIT_LAYERS), null);
+  assert.equal(parseEdit(JSON.stringify(edit({ why: '  ' })), EDIT_LAYERS), null);
+  assert.equal(parseEdit(JSON.stringify(edit({ why: 3 })), EDIT_LAYERS), null);
+});
+
+test('parseEdit: both from and to empty gives null', () => {
+  assert.equal(parseEdit(JSON.stringify(edit({ from: '', to: '' })), EDIT_LAYERS), null);
+  assert.equal(parseEdit(JSON.stringify(edit({ from: ' ', to: '\n' })), EDIT_LAYERS), null);
+  assert.equal(parseEdit(JSON.stringify(edit({ from: undefined, to: null })), EDIT_LAYERS), null);
+});
+
+test('parseEdit: a long target or why is clipped', () => {
+  const parsed = parseEdit(
+    JSON.stringify(edit({ layer: 'profile', target: 't'.repeat(300), from: 'f'.repeat(1000), to: 'τ'.repeat(1000), why: 'y'.repeat(600) })),
+    EDIT_LAYERS,
+  );
+  assert.equal(parsed.target.length, 200);
+  assert.equal(parsed.from.length, 1000);
+  assert.equal([...parsed.to].length, 1000);
+  assert.equal(parsed.why.length, 500);
+});
+
+test('parseEdit: an over-long from or to is no edit', () => {
+  // A clipped from would be only the start of the text: the change store would replace that start and keep the rest.
+  assert.equal(parseEdit(JSON.stringify(edit({ from: 'f'.repeat(1001) })), EDIT_LAYERS), null);
+  assert.equal(parseEdit(JSON.stringify(edit({ to: 'τ'.repeat(1001) })), EDIT_LAYERS), null);
+  assert.equal(parseEdit(JSON.stringify(edit({ from: '', to: 'é'.repeat(1001) })), EDIT_LAYERS), null);
+  // Counted in characters: 1000 Greek letters are within the limit.
+  assert.equal([...parseEdit(JSON.stringify(edit({ to: 'τ'.repeat(1000) })), EDIT_LAYERS).to].length, 1000);
 });
