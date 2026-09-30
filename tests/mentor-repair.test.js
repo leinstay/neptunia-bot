@@ -15,6 +15,7 @@ import { createMentor } from '../src/mentor/mentor.js';
 import { createCaseStore } from '../src/mentor/cases.js';
 import { createChangeStore } from '../src/mentor/changes.js';
 import { createMentorBudget } from '../src/mentor/budget.js';
+import { createRepair } from '../src/mentor/repair.js';
 import { labels } from './fixtures/labels.js';
 import { withCapturedLogs } from './fixtures/capture-logs.js';
 
@@ -79,6 +80,9 @@ function fakeConfig({ features = {}, mentor = {} } = {}) {
     },
   };
 }
+
+/** A config whose loop never tries the missing fallback (`mentor.fix.tryMissing: false`): the loop as it was before it. */
+const NO_FALLBACK = { mentor: { fix: { ...fakeConfig().mentor.fix, tryMissing: false } } };
 
 function fakePrompts(overrides = {}) {
   return {
@@ -374,7 +378,7 @@ test('run: a missing mentor-fix prompt ends the loop before anything is spent', 
 
 test('attempt: an ablation under the gain is not confirmed', () =>
   // The persona answers badly whatever its rules say: removing the rule gains nothing.
-  withSetup({ llm: fakeLlm({ talkFor: () => '<msg>BAD always</msg>' }) }, async (env) => {
+  withSetup({ config: NO_FALLBACK, llm: fakeLlm({ talkFor: () => '<msg>BAD always</msg>' }) }, async (env) => {
     const { run } = await runCase(env);
     const [attempt] = run.repair.attempts;
     assert.deepEqual(attempt.suspects, [{ layer: 'rules', excerpt: BAD_RULE, located: true, gain: 0, confirmed: false }]);
@@ -408,7 +412,7 @@ test('attempt: ablation replays only the situations under the pass score', () =>
 
 test('attempt: an excerpt that cannot be located is not confirmed', () => {
   const diagnosis = JSON.stringify({ ...DIAGNOSIS, causes: [{ layer: 'rules', excerpt: 'a rule nobody wrote', why: 'x' }] });
-  return withSetup({ llm: fakeLlm({ diagnosis }) }, async (env) => {
+  return withSetup({ config: NO_FALLBACK, llm: fakeLlm({ diagnosis }) }, async (env) => {
     const { run } = await runCase(env);
     assert.deepEqual(run.repair.attempts[0].suspects, [{ layer: 'rules', excerpt: 'a rule nobody wrote', located: false, gain: null, confirmed: false }]);
     assert.equal(run.repair.reason, 'no suspect left');
@@ -932,7 +936,7 @@ test('attempt: an accepted rules edit lands in the local rules file through the 
 test("attempt: the gain is measured against a control run, not against the run's own scores", () => {
   // The persona is equally bad with or without the rule; the run happened to score 3, any later measure 6.
   const llm = fakeLlm({ talkFor: () => '<msg>BAD always</msg>', scoreFor: (a, call) => (String(call.phase).startsWith('repair') ? 6 : 3) });
-  return withSetup({ llm }, async (env) => {
+  return withSetup({ config: NO_FALLBACK, llm }, async (env) => {
     const { run } = await runCase(env);
     // The weak situations measured again on the unchanged view, with ablationSamples samples.
     const control = env.llm.inPhase('repair: control');
@@ -1374,3 +1378,232 @@ test("attempt: the regression replays another case's moments from their stored h
     assert.match(scored.user, /<original>\n[^\n]*\nOTHER_MOMENT you are right, but\n<\/original>/);
     assert.deepEqual(run.repair.attempts[0].verify.regression, [{ caseId: other.id, held: true, situations: [{ n: 1, before: 8, after: 9 }] }]);
   }));
+
+// ---- the missing fallback: one added rule when no suspect was proven --------------
+
+const ADDED_RULE = 'Say a limit once.';
+const ADDED = { layer: 'rules', target: 'rules', from: '', to: ADDED_RULE, why: 'An addition.' };
+/** The persona is short only with the added rule: removing the diagnosed rule proves nothing. */
+const addedTalk = (call) => (call.system.includes(ADDED_RULE) ? '<msg>GOOD short</msg>' : '<msg>BAD long</msg>');
+const FALLBACK_LOG = 'mentor: repair tries a missing cause';
+
+test('attempt: with no suspect proven the loop tries one added rule as a missing cause', () =>
+  withSetup({ llm: fakeLlm({ fix: JSON.stringify(ADDED), talkFor: addedTalk }) }, async (env) => {
+    const { result, logs } = await withCapturedLogs(() => runCase(env));
+    const { item, run } = result;
+    const [first, second] = run.repair.attempts;
+    assert.equal(run.repair.attempts.length, 2);
+    assert.deepEqual(first.suspects, [{ layer: 'rules', excerpt: BAD_RULE, located: true, gain: 0, confirmed: false }]);
+    assert.equal(first.edit, null);
+    // Attempt 2: the synthetic missing cause, with no ablation and no second control.
+    assert.deepEqual(second.suspects, [{ layer: 'missing', excerpt: '', located: null, gain: null, confirmed: true, synthetic: true }]);
+    assert.equal(env.llm.inPhase('repair 2: ablation').length, 0);
+    assert.equal(env.llm.inPhase('repair: control').filter((c) => c.kind === 'talk').length, 4);
+    // The fix request carries the diagnosis summary as the cause's why.
+    const fixes = env.llm.ofKind('fix');
+    assert.equal(fixes.length, 1);
+    assert.equal(fixes[0].phase, 'repair 2: edit');
+    assert.deepEqual(JSON.parse(blockBody(fixes[0].user, 'cause')), { layer: 'missing', excerpt: '', why: DIAGNOSIS.summary, gain: null });
+    // Verified like any edit, then applied through the change store.
+    assert.equal(second.refused, null);
+    assert.equal(second.verify.fresh.passed, true);
+    assert.equal(second.accepted, true);
+    assert.deepEqual(env.changes.calls, [{ guildId: GUILD, edit: ADDED, meta: { caseId: item.id } }]);
+    assert.equal(run.repair.applied.layer, 'rules');
+    assert.equal(run.repair.reason, 'applied');
+    // One line when the synthetic attempt starts, counts and ids only.
+    const started = logs.filter((l) => l.msg === FALLBACK_LOG);
+    assert.deepEqual(started.map(({ caseId, n, suspects }) => ({ caseId, n, suspects })), [{ caseId: item.id, n: 2, suspects: 1 }]);
+    assert.doesNotMatch(JSON.stringify(logs), new RegExp(`${BAD_RULE}|${ADDED_RULE}|${DIAGNOSIS.summary}`));
+  }));
+
+test('attempt: the added rule of the missing fallback lands in the local rules file with a record', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'nep-mentor-repair-fallback-'));
+  const promptsDir = path.join(root, 'prompts');
+  const localPromptsDir = path.join(root, 'prompts.local');
+  fs.mkdirSync(promptsDir, { recursive: true });
+  fs.writeFileSync(path.join(promptsDir, 'rules.md'), RULES);
+  const dataDir = path.join(root, 'data');
+  const memory = fakeMemoryStore();
+  const changes = (hot) => createChangeStore({ dataDir, promptsDir, localPromptsDir, store: memory, getConfig: () => hot.config, now: () => NOW });
+  return withSetup({ changes, dir: dataDir, llm: fakeLlm({ fix: JSON.stringify(ADDED), talkFor: addedTalk }) }, async (env) => {
+    const { item, run } = await runCase(env);
+    assert.equal(run.repair.reason, 'applied');
+    assert.equal(run.repair.applied.layer, 'rules');
+    const local = fs.readFileSync(path.join(localPromptsDir, 'rules.md'), 'utf8');
+    assert.ok(local.includes(ADDED_RULE));
+    assert.ok(local.includes(BAD_RULE), 'the unproven rule is left as it was');
+    assert.equal(fs.readFileSync(path.join(promptsDir, 'rules.md'), 'utf8'), RULES);
+    const store = createChangeStore({ dataDir, promptsDir, localPromptsDir, store: memory, getConfig: () => env.hot.config });
+    const [change] = store.list(GUILD);
+    assert.equal(change.id, run.repair.applied.changeId);
+    assert.equal(change.caseId, item.id);
+    assert.equal(change.layer, 'rules');
+  }).finally(() => fs.rmSync(root, { recursive: true, force: true }));
+});
+
+test('attempt: the missing fallback refuses an edit of another shape and ends the loop', async () => {
+  const variants = [
+    { name: 'a rewrite of the diagnosed rule', fix: FIX },
+    { name: 'a prompt addition', fix: { layer: 'prompt', target: 'format', from: '', to: ADDED_RULE, why: 'x' } },
+  ];
+  for (const { name, fix } of variants) {
+    await withSetup({ llm: fakeLlm({ fix: JSON.stringify(fix), talkFor: addedTalk }) }, async (env) => {
+      const { run } = await runCase(env);
+      assert.equal(run.repair.attempts.length, 2, name);
+      const second = run.repair.attempts[1];
+      assert.equal(second.suspects[0].synthetic, true, name);
+      assert.equal(second.refused, 'not the proven cause', name);
+      assert.equal(second.verify, null, name);
+      assert.equal(env.llm.inPhase('repair 2: verify').length, 0, name);
+      assert.equal(env.llm.ofKind('fix').length, 1, name);
+      assert.equal(env.changes.calls.length, 0, name);
+      assert.equal(run.repair.applied, null, name);
+      assert.equal(run.repair.reason, 'no suspect left', name);
+    });
+  }
+});
+
+test('attempt: a missing fallback that fails its verification ends the loop with no suspect left', () =>
+  // The persona stays bad whatever is added: the fresh situations fail.
+  withSetup({ llm: fakeLlm({ fix: JSON.stringify(ADDED), talkFor: () => '<msg>BAD always</msg>' }) }, async (env) => {
+    const { run } = await runCase(env);
+    assert.equal(run.repair.attempts.length, 2);
+    const second = run.repair.attempts[1];
+    assert.equal(second.suspects[0].synthetic, true);
+    assert.equal(second.refused, null);
+    assert.equal(second.verify.fresh.passed, false);
+    assert.equal(second.accepted, false);
+    assert.equal(env.llm.ofKind('fix').length, 1);
+    assert.equal(env.changes.calls.length, 0);
+    assert.equal(run.repair.reason, 'no suspect left');
+  }));
+
+test('attempt: the missing fallback is not tried with mentor.fix.tryMissing false', async () => {
+  await withSetup({ config: NO_FALLBACK, llm: fakeLlm({ fix: JSON.stringify(ADDED), talkFor: addedTalk }) }, async (env) => {
+    const { result, logs } = await withCapturedLogs(() => runCase(env));
+    const { run } = result;
+    assert.equal(run.repair.attempts.length, 1);
+    assert.equal(env.llm.ofKind('fix').length, 0);
+    assert.equal(env.changes.calls.length, 0);
+    assert.equal(run.repair.reason, 'no suspect left');
+    assert.equal(logs.some((l) => l.msg === FALLBACK_LOG), false);
+  });
+  // Read at the moment of use: switched off during the loop, before it reaches the fallback.
+  let hot;
+  const llm = fakeLlm({
+    fix: JSON.stringify(ADDED),
+    talkFor: addedTalk,
+    hook: (call) => {
+      if (call.phase === 'repair 1: ablation') hot.config.mentor.fix.tryMissing = false;
+      return undefined;
+    },
+  });
+  await withSetup({ llm }, async (env) => {
+    hot = env.hot;
+    const { run } = await runCase(env);
+    assert.equal(run.repair.attempts.length, 1);
+    assert.equal(env.llm.ofKind('fix').length, 0);
+    assert.equal(run.repair.reason, 'no suspect left');
+  });
+});
+
+test('attempt: the missing fallback is not tried when the attempts are used up', () =>
+  withSetup({ config: { mentor: { fix: { ...fakeConfig().mentor.fix, maxAttempts: 1 } } }, llm: fakeLlm({ fix: JSON.stringify(ADDED), talkFor: addedTalk }) }, async (env) => {
+    const { run } = await runCase(env);
+    assert.equal(run.repair.attempts.length, 1);
+    assert.equal(env.llm.ofKind('fix').length, 0);
+    assert.equal(env.changes.calls.length, 0);
+    assert.equal(run.repair.reason, 'no suspect left');
+  }));
+
+test('attempt: the missing fallback is not tried after a missing cause or a proven suspect', async () => {
+  const card = { layer: 'card', target: 'character-card', from: 'talks a lot', to: 'talks little', why: 'x' };
+  const variants = [
+    // The diagnosis named a missing cause: it was tried, its edit refused.
+    { name: 'a missing cause refused', diagnosis: MISSING, fix: card },
+    // The diagnosis named a missing cause: its added rule failed the verification.
+    { name: 'a missing cause not verified', diagnosis: MISSING, fix: ADDED, talkFor: () => '<msg>BAD always</msg>' },
+    // The diagnosed rule was proven by its ablation; its edit was refused.
+    { name: 'a proven suspect refused', diagnosis: JSON.stringify(DIAGNOSIS), fix: card },
+  ];
+  for (const { name, diagnosis, fix, talkFor } of variants) {
+    await withSetup({ llm: fakeLlm({ diagnosis, fix: JSON.stringify(fix), talkFor }) }, async (env) => {
+      const { run } = await runCase(env);
+      assert.equal(run.repair.attempts.length, 1, name);
+      assert.equal(run.repair.attempts[0].suspects[0].confirmed, true, name);
+      assert.equal(env.llm.ofKind('fix').length, 1, name);
+      assert.equal(run.repair.attempts.some((a) => a.suspects.some((s) => s.synthetic)), false, name);
+      assert.equal(env.changes.calls.length, 0, name);
+      assert.equal(run.repair.reason, 'no suspect left', name);
+    });
+  }
+});
+
+test('attempt: turning the repair switch off stops before the missing fallback', () => {
+  let hot;
+  const llm = fakeLlm({
+    fix: JSON.stringify(ADDED),
+    talkFor: addedTalk,
+    hook: (call) => {
+      if (call.phase === 'repair 1: ablation') hot.config.features.mentorAutoFix = false;
+      return undefined;
+    },
+  });
+  return withSetup({ llm }, async (env) => {
+    hot = env.hot;
+    const { result, logs } = await withCapturedLogs(() => runCase(env));
+    const { run } = result;
+    assert.equal(run.repair.reason, 'disabled');
+    assert.equal(run.repair.attempts.length, 1);
+    assert.equal(env.llm.ofKind('fix').length, 0);
+    assert.equal(env.changes.calls.length, 0);
+    assert.equal(logs.some((l) => l.msg === FALLBACK_LOG), false);
+  });
+});
+
+test('attempt: the missing fallback takes the case text as its why when the diagnosis has no summary', async () => {
+  // Driven through createRepair directly: a parsed diagnosis always carries a summary.
+  const hot = { config: fakeConfig(), prompts: fakePrompts() };
+  const view = { prompts: { ...hot.prompts }, memory: fakeMemoryStore() };
+  const asked = [];
+  const applied = [];
+  const passing = { passed: true, medians: { overall: 9, goal: 9 }, situations: [{ n: 1, overall: 9, goal: 9 }, { n: 2, overall: 9, goal: 9 }] };
+  const repair = createRepair({
+    hot,
+    cases: { list: () => [], lastRun: () => null },
+    changes: {
+      apply: (guildId, edit) => {
+        applied.push(edit);
+        return { ok: true, change: { id: 1, layer: edit.layer, target: 'rules', summary: 'rules: changed' } };
+      },
+    },
+    baseView: () => view,
+    measureOn: async () => ({ verdict: passing }),
+    askMentor: async (ctx, system, user) => {
+      asked.push(user);
+      return JSON.stringify(ADDED);
+    },
+    inventSituations: async () => FRESH,
+    commonBlocks: () => ({ case: `<case>\n${CASE_TEXT}\n</case>`, signs: '', feedback: '' }),
+    templateValues: (name) => ({ name }),
+    canScore: () => true,
+    failureOf: () => 'failed',
+  });
+  const item = { id: 1, text: CASE_TEXT, target: 'reply' };
+  for (const summary of [undefined, '  ']) {
+    asked.length = 0;
+    applied.length = 0;
+    const diagnosis = { summary, causes: [{ layer: 'rules', excerpt: 'a rule nobody wrote', why: 'x' }], changes: [] };
+    const run = { diagnosis, passed: false, medians: {}, situations: [], situationMedians: [], reasons: [] };
+    const record = await repair.attempt({ spent: 0, phase: null }, run, { guildId: GUILD, item, reference: {}, feedback: '', self: { id: SELF_ID, name: 'Zoë' }, seen: '' });
+    assert.equal(record.reason, 'applied', String(summary));
+    assert.deepEqual(JSON.parse(blockBody(asked[0], 'cause')), { layer: 'missing', excerpt: '', why: CASE_TEXT, gain: null }, String(summary));
+    assert.deepEqual(applied, [ADDED], String(summary));
+  }
+});
+
+test('config: the missing fallback is on by default', () => {
+  const config = JSON.parse(fs.readFileSync(new URL('../config.json', import.meta.url), 'utf8'));
+  assert.equal(config.mentor.fix.tryMissing, true);
+});

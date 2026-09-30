@@ -31,7 +31,11 @@
 // Every measure is scored by a judge reading the LIVE rules, card and learned
 // items, so an edit never moves the yardstick it is measured by. An attempt
 // that proves nothing, whose edit is refused, or that fails its verification
-// moves on to the next suspects, up to `mentor.fix.maxAttempts`. Every request
+// moves on to the next suspects, up to `mentor.fix.maxAttempts`. When the
+// suspects run out and none was proven (and the diagnosis named no `missing`
+// cause), the loop makes one more attempt with a synthetic `missing` cause,
+// the diagnosis summary as its `why`: the one repair such a cause allows, an
+// added rule, verified like any edit (`mentor.fix.tryMissing`). Every request
 // goes through the run's own helpers (src/mentor/mentor.js), so the switches,
 // the mentor budget, the owner's stop and the charging are the run's; a stop
 // ends the loop with what it has and never touches the measured run.
@@ -131,6 +135,8 @@ function settings(config, target) {
     ablationGain: Number.isFinite(mentor.ablationGain) ? mentor.ablationGain : 1,
     ablationSamples: count(mentor.ablationSamples, 2),
     maxAttempts: count(fix.maxAttempts, 3),
+    // Only an explicit false turns the missing fallback off.
+    tryMissing: fix.tryMissing !== false,
     maxGrowthChars: amount(fix.maxGrowthChars, 300),
     layers: [...new Set(layers)],
     files: [...new Set(files)],
@@ -171,6 +177,22 @@ function suspectsOf(diagnosis) {
     }
     return suspect;
   });
+}
+
+/**
+ * Whether the loop, out of suspects, makes its one synthetic `missing`
+ * attempt: the setting is on, an attempt is left, no suspect was proven and
+ * no `missing` one (named by the diagnosis or synthetic) was tried.
+ */
+function fallbackDue(state, attempts, cfg) {
+  if (!cfg.tryMissing || attempts >= cfg.maxAttempts) return false;
+  return !state.some((s) => s.result?.confirmed || s.suspect.layer === 'missing');
+}
+
+/** The synthetic `missing` cause: its `why` is the diagnosis summary, or the case text when there is none. */
+function syntheticMissing(diagnosis, item) {
+  const summary = typeof diagnosis?.summary === 'string' ? diagnosis.summary.trim() : '';
+  return { layer: 'missing', excerpt: '', why: summary || String(item?.text ?? ''), synthetic: true };
 }
 
 /**
@@ -333,7 +355,8 @@ function causeRefusal(edit, chosen, view, cfg) {
  * ablation, the edit request, the verification, each case of the regression
  * and the write), `hot.config.mentor` (`suspects`, `ablationGain`,
  * `ablationSamples` -- the samples of the control and of each ablation --,
- * `fix.maxAttempts`, `fix.maxGrowthChars`, `fix.layers` -- the card is never
+ * `fix.maxAttempts`, `fix.tryMissing` -- the synthetic `missing` attempt,
+ * off only when exactly false --, `fix.maxGrowthChars`, `fix.layers` -- the card is never
  * allowed, the default leaves `profile` out --, `fix.files` -- narrowed by
  * the case's target: a reply case only `system-prompt`, `format` and `reply`,
  * a memory case only the memory writer's prompts (`memory`, `profile`,
@@ -357,10 +380,11 @@ function causeRefusal(edit, chosen, view, cfg) {
  * @returns {{ attempt: (ctx: object, run: object, input: { guildId: string, item: object, reference: object,
  *   feedback: string, self: { id: string, name: string }, seen: string }) => Promise<object> }}
  *   `attempt` runs the whole loop for a failed run and resolves with its record (never rejects):
- *   `{ attempts: [{ n, suspects: [{ layer, excerpt, located, gain, confirmed }], edit, refused,
+ *   `{ attempts: [{ n, suspects: [{ layer, excerpt, located, gain, confirmed, synthetic? }], edit, refused,
  *   verify: { fresh: { passed, kept, medians, situations }, regression: [{ caseId, held, situations: [{ n, before, after }] }],
  *   skipped } | null, accepted }], applied: { changeId, layer, target, summary } | null, reason, tokens }`,
- *   plus `control: { medians, situations }` once the control was measured. `reason` 'not reproduced':
+ *   plus `control: { medians, situations }` once the control was measured. `synthetic: true` marks the
+ *   missing cause the loop made up itself (see `fallbackDue`). `reason` 'not reproduced':
  *   on the control every replayed situation reached its threshold on `overall` and `goal` (see `isWeak`).
  */
 export function createRepair({ hot, cases, changes, baseView, measureOn, askMentor, inventSituations, commonBlocks, templateValues, canScore, failureOf }) {
@@ -382,7 +406,10 @@ export function createRepair({ hot, cases, changes, baseView, measureOn, askMent
    */
   async function ablate(ctx, suspect, { base, item, weak, input, cfg, n, control }) {
     const shown = { layer: suspect.layer, excerpt: suspect.excerpt };
-    if (suspect.layer === 'missing') return { shown: { ...shown, located: null, gain: null, confirmed: true }, where: null };
+    if (suspect.layer === 'missing') {
+      const synthetic = suspect.synthetic ? { synthetic: true } : {};
+      return { shown: { ...shown, located: null, gain: null, confirmed: true, ...synthetic }, where: null };
+    }
     const found = locate(suspect, base);
     if (!found) return { shown: { ...shown, located: false, gain: null, confirmed: false }, where: null };
     const before = await control(base, cfg);
@@ -562,7 +589,14 @@ export function createRepair({ hot, cases, changes, baseView, measureOn, askMent
       for (;;) {
         const cfg = settings(hot.config, item.target);
         const candidates = state.filter((s) => !s.done).slice(0, cfg.suspects);
-        if (candidates.length === 0) return finish('no suspect left');
+        if (candidates.length === 0) {
+          // Nothing proven: one more attempt with a synthetic missing cause, then the loop ends as before.
+          if (!fallbackDue(state, record.attempts.length, cfg)) return finish('no suspect left');
+          checkSwitch();
+          log.info('mentor: repair tries a missing cause', { caseId: item.id, n: record.attempts.length + 1, suspects: state.length });
+          state.push({ suspect: syntheticMissing(run.diagnosis, item), done: false, result: null, where: null });
+          continue;
+        }
         if (record.attempts.length >= cfg.maxAttempts) return finish('max attempts');
         checkSwitch();
         const n = record.attempts.length + 1;

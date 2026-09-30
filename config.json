@@ -241,6 +241,7 @@
     "ablationSamples": 2,
     "fix": {
       "maxAttempts": 3,
+      "tryMissing": true,
       "maxGrowthChars": 300,
       "layers": ["rules", "prompt", "self", "learned", "guild"],
       "files": ["system-prompt", "format", "reply", "memory", "profile"]
