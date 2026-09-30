@@ -159,7 +159,7 @@ function blockBody(text, tag) {
  * its model) is told apart by its system text: situations, diagnosis, fix,
  * else a score request. The persona answers BAD while its system prompt
  * carries BAD_RULE, else GOOD; the judge gives a BAD answer 3 and a GOOD one
- * 9. Every call records the mentor's phase at that moment.
+ * 9 (`scoreFor` may return a number or a whole score). Every call records the mentor's phase at that moment.
  */
 function fakeLlm({ situationsFor, diagnosis = JSON.stringify(DIAGNOSIS), fix = JSON.stringify(FIX), talkFor, scoreFor, usageFor, hook } = {}) {
   const calls = [];
@@ -192,7 +192,8 @@ function fakeLlm({ situationsFor, diagnosis = JSON.stringify(DIAGNOSIS), fix = J
       else if (kind === 'score') {
         const answers = answersIn(user).map((a) => {
           const value = scoreFor ? scoreFor(a, call) : (a.messages ?? []).join(' ').includes('BAD') ? 3 : 9;
-          return { id: a.id, ...score(value) };
+          // A number is both overall and goal; an object is the score as it is.
+          return { id: a.id, ...(typeof value === 'object' ? value : score(value)) };
         });
         text = JSON.stringify({ answers });
       } else text = talkFor ? talkFor(call) : system.includes(BAD_RULE) ? '<msg>BAD a long explanation</msg>' : '<msg>GOOD short</msg>';
@@ -1226,6 +1227,77 @@ test('attempt: a weak anchor is replayed from its stored history; the fresh situ
       const fresh = env.llm.inPhase('repair 1: verify').find((c) => c.kind === 'situations');
       assert.match(fresh.user, /<examples>[\s\S]*ANCHOR_TRIGGER opening[\s\S]*<original>\nANCHOR_TRIGGER you are right, but\n<\/original>/);
       assert.equal(run.repair.reason, 'applied');
+    },
+  ));
+
+test('attempt: a run answers a real moment mentor.anchor.samples times; the control and the ablation keep ablationSamples', () =>
+  withSetup(
+    {
+      config: { mentor: { anchor: { samples: 4 } } },
+      llm: fakeLlm({ scoreFor: (a, call) => (a.messages.join(' ').includes('GOOD') ? 9 : call.user.includes('ANCHOR_TRIGGER') ? 3 : 8) }),
+    },
+    async (env) => {
+      const item = env.cases.add(GUILD, { text: CASE_TEXT, target: 'reply', anchor: moment('ANCHOR_TRIGGER') });
+      const run = await (await env.mentor.run(item.id)).done;
+      assert.deepEqual(run.situations.map((s) => s.answers.length), [4, 2, 2]);
+      assert.deepEqual(run.reasons.slice(-2), ['real moment 1: overall 3 is under the pass score 7', 'real moment 1: goal 3 is under the pass score 7']);
+      for (const phase of ['repair: control', 'repair 1: ablation']) {
+        const talks = env.llm.inPhase(phase).filter((c) => c.kind === 'talk');
+        assert.equal(talks.length, 2, phase);
+      }
+    },
+  ));
+
+/** A whole score with its own `overall` and `goal`. */
+function pair(overall, goal) {
+  return { ...score(overall), goal };
+}
+
+/** The anchor scores `anchorScore(call)`, every invented situation 9/9. */
+function anchorScoring(anchorScore) {
+  return (a, call) => (call.user.includes('ANCHOR_TRIGGER') ? anchorScore(call) : pair(9, 9));
+}
+
+test('attempt: a run failing on goal only makes that real moment the weak situation; the same 7/6 in the control is reproduced', () =>
+  withSetup({ config: { mentor: { anchor: { samples: 2 } } }, llm: fakeLlm({ scoreFor: anchorScoring(() => pair(7, 6)) }) }, async (env) => {
+    const item = env.cases.add(GUILD, { text: CASE_TEXT, target: 'reply', anchor: moment('ANCHOR_TRIGGER') });
+    const run = await (await env.mentor.run(item.id)).done;
+    assert.deepEqual(run.reasons, ['real moment 1: goal 6 is under the pass score 7']);
+    assert.deepEqual(run.situationMedians[0], { n: 1, overall: 7, goal: 6 });
+    // Only the moment is replayed in the control, and it is still weak there.
+    const control = env.llm.inPhase('repair: control').filter((c) => c.kind === 'talk');
+    assert.equal(control.length, 2);
+    for (const call of control) assert.ok(call.user.includes('ANCHOR_TRIGGER opening'));
+    assert.deepEqual(run.repair.control.situations, [{ n: 1, overall: 7, goal: 6 }]);
+    assert.notEqual(run.repair.reason, 'not reproduced');
+    assert.ok(env.llm.inPhase('repair 1: ablation').length > 0);
+  }));
+
+test('attempt: a control where every weak situation reaches the pass score on both axes is not reproduced', () =>
+  withSetup(
+    { config: { mentor: { anchor: { samples: 2 } } }, llm: fakeLlm({ scoreFor: anchorScoring((call) => (call.phase === 'repair: control' ? pair(7, 7) : pair(7, 6))) }) },
+    async (env) => {
+      const item = env.cases.add(GUILD, { text: CASE_TEXT, target: 'reply', anchor: moment('ANCHOR_TRIGGER') });
+      const run = await (await env.mentor.run(item.id)).done;
+      assert.equal(run.passed, false);
+      assert.deepEqual(run.repair.control.situations, [{ n: 1, overall: 7, goal: 7 }]);
+      assert.equal(run.repair.reason, 'not reproduced');
+      assert.equal(env.llm.inPhase('repair 1: ablation').length, 0);
+      assert.equal(env.changes.calls.length, 0);
+    },
+  ));
+
+test('attempt: a real moment is weak against mentor.pass.anchorScore, in the run and in the control', () =>
+  withSetup(
+    { config: { mentor: { anchor: { samples: 2 }, pass: { score: 7, floor: 5, anchorScore: 8 } } }, llm: fakeLlm({ scoreFor: anchorScoring(() => pair(7, 7)) }) },
+    async (env) => {
+      const item = env.cases.add(GUILD, { text: CASE_TEXT, target: 'reply', anchor: moment('ANCHOR_TRIGGER') });
+      const run = await (await env.mentor.run(item.id)).done;
+      assert.deepEqual(run.reasons, ['real moment 1: overall 7 is under the anchor score 8', 'real moment 1: goal 7 is under the anchor score 8']);
+      const control = env.llm.inPhase('repair: control').filter((c) => c.kind === 'talk');
+      assert.equal(control.length, 2);
+      for (const call of control) assert.ok(call.user.includes('ANCHOR_TRIGGER opening'));
+      assert.notEqual(run.repair.reason, 'not reproduced');
     },
   ));
 

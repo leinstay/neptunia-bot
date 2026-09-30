@@ -70,6 +70,8 @@ function fakeConfig({ features = { mentor: true }, mentor = {}, bot = {}, memory
       reference: { days: 7, samples: 5, maxMessages: 300 },
       feedbackExamples: 10,
       ...mentor,
+      // A real moment is answered as often as an invented situation here, unless a test says otherwise.
+      anchor: { samples: 2, ...mentor.anchor },
     },
   };
 }
@@ -1421,13 +1423,84 @@ test('run: the score request of an anchor carries <original>, the invented ones 
     assert.ok(!llm.calls.find((c) => c.kind === 'situations').user.includes(labels.mentor.original));
   }));
 
-test('run: the per-situation floor applies to an anchor', () =>
+test('run: an anchor is held to the pass score, not the floor', () =>
   withSetup({ llm: fakeLlm({ scoreFor: overallBySituation(3, 9, 9) }) }, async ({ mentor, cases }) => {
     const item = anchoredCase(cases, ['A1']);
     const run = await (await mentor.run(item.id)).done;
     assert.equal(run.medians.overall, 9);
     assert.equal(run.passed, false);
-    assert.deepEqual(run.reasons, ['situation 1: overall 3 is under the floor 5']);
+    assert.deepEqual(run.reasons, ['real moment 1: overall 3 is under the pass score 7']);
+  }));
+
+/** Scores with the `[overall, goal]` pair of the answer's situation. */
+function pairsBySituation(...pairs) {
+  return (id) => {
+    const [overall, goal] = pairs[Number(/^s(\d+)/.exec(id)[1]) - 1];
+    return { ...score(overall), goal };
+  };
+}
+
+test('run: an anchor at 6/6 fails the run; an invented situation at 6/6 passes the floor', () =>
+  withSetup(
+    { config: { mentor: { situations: 3 } }, llm: fakeLlm({ situations: THREE, scoreFor: pairsBySituation([6, 6], [6, 6], [9, 9], [9, 9]) }) },
+    async ({ mentor, cases }) => {
+      const item = anchoredCase(cases, ['A1']);
+      const run = await (await mentor.run(item.id)).done;
+      assert.deepEqual(run.situations.map((s) => s.anchor), [1, undefined, undefined, undefined]);
+      // Over all answers the medians pass: only the real moment fails the run.
+      assert.equal(run.medians.overall, 7.5);
+      assert.equal(run.medians.goal, 7.5);
+      assert.deepEqual(run.situationMedians[1], { n: 2, overall: 6, goal: 6 });
+      assert.equal(run.passed, false);
+      assert.deepEqual(run.reasons, ['real moment 1: overall 6 is under the pass score 7', 'real moment 1: goal 6 is under the pass score 7']);
+    },
+  ));
+
+test('run: mentor.pass.anchorScore overrides the pass score for anchors, read at the moment of use', () =>
+  withSetup(
+    { config: { mentor: { pass: { score: 7, floor: 5, anchorScore: 8 } } }, llm: fakeLlm({ scoreFor: pairsBySituation([7, 8], [9, 9], [9, 9]) }) },
+    async ({ mentor, cases, hot }) => {
+      const item = anchoredCase(cases, ['A1']);
+      const strict = await (await mentor.run(item.id)).done;
+      assert.equal(strict.passed, false);
+      assert.deepEqual(strict.reasons, ['real moment 1: overall 7 is under the anchor score 8']);
+      hot.config.mentor.pass.anchorScore = null;
+      const same = await (await mentor.run(item.id)).done;
+      assert.equal(same.passed, true);
+      assert.deepEqual(same.reasons, []);
+    },
+  ));
+
+test('run: an anchor is answered mentor.anchor.samples times, an invented situation mentor.samples times', () =>
+  withSetup({ config: { mentor: { samples: 2, anchor: { samples: 3 } } } }, async ({ mentor, cases, llm }) => {
+    const item = anchoredCase(cases, ['A1']);
+    const run = await (await mentor.run(item.id)).done;
+    assert.deepEqual(
+      run.situations.map((s) => s.answers.map((a) => a.id)),
+      [['s1a1', 's1a2', 's1a3'], ['s2a1', 's2a2'], ['s3a1', 's3a2']],
+    );
+    const talk = llm.calls.filter((c) => c.kind === 'talk');
+    assert.equal(talk.length, 7);
+    for (const call of talk.slice(0, 3)) assert.match(call.user, /A1 TRIGGER/);
+    for (const call of talk.slice(3)) assert.doesNotMatch(call.user, /A1 TRIGGER/);
+  }));
+
+test('run: without mentor.anchor.samples an anchor is answered five times', () =>
+  withSetup({ config: { mentor: { anchor: { samples: undefined } } } }, async ({ mentor, cases }) => {
+    const item = anchoredCase(cases, ['A1']);
+    const run = await (await mentor.run(item.id)).done;
+    assert.deepEqual(run.situations.map((s) => s.answers.length), [5, 2, 2]);
+  }));
+
+test('check: an anchor is answered mentor.anchor.samples times, an invented situation mentor.check.samples times', () =>
+  withSetup({ config: { mentor: { check: { samples: 1 }, anchor: { samples: 3 } } } }, async ({ mentor, cases, hot }) => {
+    const item = anchoredCase(cases, ['A1']);
+    await (await mentor.run(item.id)).done;
+    // Read at the moment of use.
+    hot.config.mentor.anchor.samples = 4;
+    const [checked] = await (await mentor.check()).done;
+    assert.equal(checked.caseId, item.id);
+    assert.deepEqual(checked.situations.map((s) => s.answers.length), [4, 1, 1]);
   }));
 
 test('run: a case with anchors still runs when no invented situation is valid', () =>
@@ -1854,5 +1927,7 @@ test('check: a real moment is replayed without the memory written after it', () 
     const talk = llm.calls.filter((c) => c.kind === 'talk');
     assert.match(requestText(talk[0]), /A1 TRIGGER/);
     for (const mark of LATER_MARKS) assert.ok(!requestText(talk[0]).includes(mark), mark);
-    assert.ok(requestText(talk[1]).includes('EP_AFTER'));
+    // The moment's two samples (mentor.anchor.samples), then the invented situation (mentor.check.samples 1).
+    assert.match(requestText(talk[1]), /A1 TRIGGER/);
+    assert.ok(requestText(talk[2]).includes('EP_AFTER'));
   }));

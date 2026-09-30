@@ -232,7 +232,7 @@
     "situationLines": [6, 15],
     "samples": 3,
     "check": { "samples": 1 },
-    "pass": { "score": 7, "floor": 5 },
+    "pass": { "score": 7, "floor": 5, "anchorScore": null },
     "reference": { "days": 7, "samples": 60, "maxMessages": 3000, "rarePer1000": 0.5, "rareMinAuthors": 2 },
     "feedbackExamples": 10,
     "diagnose": true,
@@ -247,7 +247,7 @@
     },
     "regression": { "situations": 2, "tolerance": 1 },
     "verify": { "situations": 3, "samples": 2, "minSituations": 2 },
-    "anchor": { "max": 5, "contextMessages": 30, "hideLaterMemory": true }
+    "anchor": { "max": 5, "contextMessages": 30, "hideLaterMemory": true, "samples": 5 }
   },
   "warmup": {
     "enabled": true,

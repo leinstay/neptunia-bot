@@ -165,7 +165,7 @@ function emptyMedians() {
  * The mentor for one bot. Every value is read at the moment of use:
  * `hot.config.mentor` (`model`, `maxOutputTokens`, `outputTokenWeight`,
  * `timeoutMs`, `situations`, `situationLines`, `samples`, `check.samples`,
- * `pass`, `reference`, `feedbackExamples`, `diagnose`, `anchor.hideLaterMemory`), `hot.config.features.mentorAutoFix`,
+ * `pass`, `reference`, `feedbackExamples`, `diagnose`, `anchor.samples`, `anchor.hideLaterMemory`), `hot.config.features.mentorAutoFix`,
  * `hot.config.features.mentor`
  * (must be exactly true; checked at the start, then again before every
  * situation and every mentor request together with `mentor.model`: either
@@ -602,10 +602,10 @@ export function createMentor({ hot, store, llm, client, cases, budget, changes, 
   }
 
   /** Answers every prepared situation on its own view (`entry.view`: a real moment's is filtered to its time). */
-  async function answerAll(ctx, { target, prepared, self, reference, samples, phase }) {
+  async function answerAll(ctx, { target, prepared, self, reference, phase }) {
     let previous = 1;
     for (const entry of prepared) {
-      const { situation, record, history, at, channel, view, media } = entry;
+      const { situation, record, history, at, channel, view, media, samples } = entry;
       checkEnabled();
       if (!budget.canSpend(previous)) throw new RunEnd('stopped', 'budget');
       checkAborted(ctx);
@@ -697,18 +697,22 @@ export function createMentor({ hot, store, llm, client, cases, budget, changes, 
     }
   }
 
-  /** The scores of `records` grouped by situation, and the verdict over them. */
+  /** The scores of `records` grouped by situation, and the verdict over them (a real moment held to the pass score). */
   function verdictOf(records) {
     // One group per situation, in order, so a situation's place in the verdict is its `n`.
     const groups = records.map((s) => s.answers.map((a) => a.score).filter(Boolean));
     const scores = groups.flat();
-    return { scores, groups, verdict: verdict(scores, hot.config.mentor?.pass, groups) };
+    const anchorNs = records.flatMap((s, i) => (isAnchorRecord(s) ? [i + 1] : []));
+    return { scores, groups, verdict: verdict(scores, hot.config.mentor?.pass, groups, anchorNs) };
   }
 
   /**
    * Answer `situations` (invented lines, or anchors from
-   * src/mentor/anchor.js#anchorSituations) on `view` with `samples` samples each (as `item`'s
-   * target: the reply or the memory sandbox), then score every answer: the
+   * src/mentor/anchor.js#anchorSituations) on `view` (as `item`'s target: the
+   * reply or the memory sandbox) with `samples` samples each, a real moment with
+   * `anchorSamples` (default: `samples`; a run and a check pass
+   * `mentor.anchor.samples`, the repair loop's replays pass nothing, so they
+   * keep their own sample settings), then score every answer: the
    * one measuring step of a run, a check, an ablation and a verification.
    * `judgeView` (default: `view`) is the view the judge's `<character>`,
    * `<rules>` and `<learned>` blocks are built from: the repair loop passes
@@ -726,7 +730,7 @@ export function createMentor({ hot, store, llm, client, cases, budget, changes, 
    * @returns {Promise<{ records: object[], scores: object[], groups: object[][], verdict: object,
    *   repeated: object[], prepared: object[], hidden: object }>}
    */
-  async function measureOn(ctx, { item, view, judgeView = view, situations, samples, reference, feedback, self, phase, into = {} }) {
+  async function measureOn(ctx, { item, view, judgeView = view, situations, samples, anchorSamples = samples, reference, feedback, self, phase, into = {} }) {
     const timezone = hot.config.bot?.timezone;
     const hideLater = hot.config.mentor?.anchor?.hideLaterMemory !== false;
     const hidden = { situations: 0 };
@@ -744,7 +748,18 @@ export function createMentor({ hot, store, llm, client, cases, budget, changes, 
         : { n: i + 1, title: situation.title ?? '', lines: situation.lines, transcript, answers: [] };
       // A real moment sees the memory as it stood before its trigger (src/mentor/moment.js), the judge too.
       const cutoff = anchored && hideLater ? momentCutoff(situation) : null;
-      const entry = { situation, record, history, items, media, at, channel: anchored ? anchorChannel(view, history) : reference.channel, view, judgeView };
+      const entry = {
+        situation,
+        record,
+        history,
+        items,
+        media,
+        at,
+        samples: anchored ? anchorSamples : samples,
+        channel: anchored ? anchorChannel(view, history) : reference.channel,
+        view,
+        judgeView,
+      };
       if (cutoff !== null) {
         entry.view = momentView(view, cutoff);
         entry.judgeView = momentView(judgeView, cutoff);
@@ -757,7 +772,7 @@ export function createMentor({ hot, store, llm, client, cases, budget, changes, 
     into.prepared = prepared;
     into.records = records;
     into.hidden = hidden;
-    await answerAll(ctx, { target: item.target, prepared, self, reference, samples, phase });
+    await answerAll(ctx, { target: item.target, prepared, self, reference, phase });
     let repeated = [];
     if (item.target === 'reply') {
       // Tagged with their situation: a phrase shared only by the samples of one situation is no habit.
@@ -851,7 +866,7 @@ export function createMentor({ hot, store, llm, client, cases, budget, changes, 
    * a check reuses across its cases (the reference). `stored` holds the
    * situations a check replays; a run invents new ones.
    */
-  async function measure(ctx, guildId, item, { kind, samples, stored, shared }) {
+  async function measure(ctx, guildId, item, { kind, samples, anchorSamples, stored, shared }) {
     const config = hot.config;
     const startedMs = now();
     const spentBefore = ctx.spent;
@@ -906,7 +921,7 @@ export function createMentor({ hot, store, llm, client, cases, budget, changes, 
         if (situations.length === 0) throw new RunEnd('error', 'no valid situation');
       }
 
-      const done = await measureOn(ctx, { item, view, situations, samples, reference, feedback, self, into });
+      const done = await measureOn(ctx, { item, view, situations, samples, anchorSamples, reference, feedback, self, into });
       if (!done.records.some((s) => s.answers.some((a) => a.score))) throw new RunEnd('error', 'no answer was scored');
       measured = { reference, feedback, self, prepared: done.prepared, seen: '' };
     } catch (err) {
@@ -1021,7 +1036,8 @@ export function createMentor({ hot, store, llm, client, cases, budget, changes, 
       ctx,
       async () => {
         const samples = positive(hot.config.mentor?.samples, 3);
-        const saved = await measure(ctx, guildId, item, { kind: 'run', samples, stored: [], shared: {} });
+        const anchorSamples = positive(hot.config.mentor?.anchor?.samples, 5);
+        const saved = await measure(ctx, guildId, item, { kind: 'run', samples, anchorSamples, stored: [], shared: {} });
         await post(renderCard(saved), renderFile(saved), { caseId: item.id });
         return saved;
       },
@@ -1033,7 +1049,7 @@ export function createMentor({ hot, store, llm, client, cases, budget, changes, 
   /**
    * Replay every active case's anchors (as the case holds them now) and the
    * invented situations of its last run with
-   * `mentor.check.samples` samples, no new situations; one run of kind
+   * `mentor.check.samples` samples (a real moment with `mentor.anchor.samples`), no new situations; one run of kind
    * 'check' saved per case and one combined card. Resolves at once with
    * `{ started: true, cases, done }`.
    */
@@ -1094,7 +1110,8 @@ export function createMentor({ hot, store, llm, client, cases, budget, changes, 
             continue;
           }
           const samples = positive(hot.config.mentor?.check?.samples, 1);
-          runs.push(await measure(ctx, guildId, item, { kind: 'check', samples, stored: situations, shared }));
+          const anchorSamples = positive(hot.config.mentor?.anchor?.samples, 5);
+          runs.push(await measure(ctx, guildId, item, { kind: 'check', samples, anchorSamples, stored: situations, shared }));
         }
         await post(renderCheckCard(runs, skipped), renderCheckFile(runs, now()), { cases: runs.length, skipped: skipped.length });
         return runs;

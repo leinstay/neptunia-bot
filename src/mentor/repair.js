@@ -116,6 +116,7 @@ function length(text) {
  */
 function settings(config, target) {
   const mentor = config.mentor ?? {};
+  const passScore = Number.isFinite(mentor.pass?.score) ? mentor.pass.score : 7;
   const fix = mentor.fix ?? {};
   let layers = Array.isArray(fix.layers) ? fix.layers.filter((layer) => OPEN_LAYERS.includes(layer)) : DEFAULT_LAYERS;
   let files = (Array.isArray(fix.files) ? fix.files : DEFAULT_FILES).map(promptName).filter(Boolean);
@@ -138,7 +139,9 @@ function settings(config, target) {
     verifyMinSituations: count(mentor.verify?.minSituations, 2),
     regressionSituations: count(mentor.regression?.situations, 2),
     tolerance: amount(mentor.regression?.tolerance, 1),
-    passScore: Number.isFinite(mentor.pass?.score) ? mentor.pass.score : 7,
+    passScore,
+    // A real moment's threshold, as src/mentor/judge.js#verdict holds it: `pass.anchorScore` when it is a number.
+    anchorScore: Number.isFinite(mentor.pass?.anchorScore) ? mentor.pass.anchorScore : passScore,
     learnedChars: count(config.memory?.learnedChars, 160),
   };
 }
@@ -184,15 +187,51 @@ function replayOf(record, item) {
   return Array.isArray(record?.lines) && record.lines.length > 0 ? { title: record.title ?? '', lines: record.lines } : null;
 }
 
+/** Whether a stored situation record is a real moment of the chat (it carries its anchor id). */
+function isAnchorRecord(record) {
+  return record?.anchor !== undefined && record?.anchor !== null;
+}
+
 /**
- * The situations an ablation (and its control) replays: those of the run
- * whose median `overall` is under the pass score, all of them when none is;
- * a weak real moment is replayed from its stored history (see `replayOf`).
+ * Whether a situation's medians are weak: its median `overall` or its median
+ * `goal` is under its threshold -- `cfg.anchorScore` for a real moment,
+ * `cfg.passScore` for an invented situation. A missing median is not weak on
+ * its axis.
  */
-function weakOf(run, passScore, item) {
-  const weak = new Set((run.situationMedians ?? []).filter((m) => typeof m?.overall === 'number' && m.overall < passScore).map((m) => m.n));
-  const records = (run.situations ?? []).filter((s) => weak.size === 0 || weak.has(s.n));
-  return { situations: records.map((s) => replayOf(s, item)).filter(Boolean) };
+function isWeak(medians, anchor, cfg) {
+  const threshold = anchor ? cfg.anchorScore : cfg.passScore;
+  return ['overall', 'goal'].some((axis) => typeof medians?.[axis] === 'number' && medians[axis] < threshold);
+}
+
+/**
+ * The situations an ablation (and its control) replays: the weak ones of the
+ * run (`isWeak`), all of them when none is; a real moment is replayed from
+ * its stored history (see `replayOf`). `anchors` says, in the same order,
+ * which replayed situation is a real moment.
+ */
+function weakOf(run, cfg, item) {
+  const records = run.situations ?? [];
+  const anchorNs = new Set(records.filter(isAnchorRecord).map((s) => s.n));
+  const weak = new Set((run.situationMedians ?? []).filter((m) => isWeak(m, anchorNs.has(m?.n), cfg)).map((m) => m.n));
+  const replays = records
+    .filter((s) => weak.size === 0 || weak.has(s.n))
+    .map((s) => ({ situation: replayOf(s, item), anchor: isAnchorRecord(s) }))
+    .filter((r) => r.situation);
+  return { situations: replays.map((r) => r.situation), anchors: replays.map((r) => r.anchor) };
+}
+
+/**
+ * Whether the control reproduced the failure: at least one replayed situation
+ * is still weak on it (`isWeak`). A replayed situation the control left
+ * without a median `overall` cannot show it recovered and counts as still
+ * weak; with nothing to replay the failure counts as reproduced.
+ */
+function reproducedOn(controlVerdict, weak, cfg) {
+  if (weak.situations.length === 0) return true;
+  return weak.situations.some((_, i) => {
+    const medians = controlVerdict.situations.find((m) => m.n === i + 1);
+    return typeof medians?.overall !== 'number' || isWeak(medians, weak.anchors[i], cfg);
+  });
 }
 
 /** Why an edit may not be made, by the loop's own limits; null when it may. */
@@ -322,7 +361,7 @@ function causeRefusal(edit, chosen, view, cfg) {
  *   verify: { fresh: { passed, kept, medians, situations }, regression: [{ caseId, held, situations: [{ n, before, after }] }],
  *   skipped } | null, accepted }], applied: { changeId, layer, target, summary } | null, reason, tokens }`,
  *   plus `control: { medians, situations }` once the control was measured. `reason` 'not reproduced':
- *   the control passed on every weak situation.
+ *   on the control every replayed situation reached its threshold on `overall` and `goal` (see `isWeak`).
  */
 export function createRepair({ hot, cases, changes, baseView, measureOn, askMentor, inventSituations, commonBlocks, templateValues, canScore, failureOf }) {
   /** Stop when the switch of the loop (or of the mentor) is off now. */
@@ -492,7 +531,7 @@ export function createRepair({ hot, cases, changes, baseView, measureOn, askMent
     if (typeof fixPrompt !== 'string' || !fixPrompt.trim()) return finish('prompt missing');
     // Per suspect: `done` once it was not proven or an edit was asked for it; `result` once measured.
     const state = suspects.map((suspect) => ({ suspect, done: false, result: null, where: null }));
-    const weak = weakOf(run, settings(hot.config, item.target).passScore, item);
+    const weak = weakOf(run, settings(hot.config, item.target), item);
 
     // The control: measured the first time an ablation needs it, then reused for every suspect.
     let controlVerdict = null;
@@ -513,11 +552,7 @@ export function createRepair({ hot, cases, changes, baseView, measureOn, askMent
       });
       controlVerdict = measured.verdict;
       record.control = { medians: controlVerdict.medians, situations: controlVerdict.situations };
-      const reproduced = !(
-        weak.situations.length > 0 &&
-        controlVerdict.situations.length === weak.situations.length &&
-        controlVerdict.situations.every((s) => typeof s.overall === 'number' && s.overall >= cfg.passScore)
-      );
+      const reproduced = reproducedOn(controlVerdict, weak, cfg);
       log.info('mentor: repair control', { caseId: item.id, situations: weak.situations.length, reproduced });
       if (!reproduced) throw new LoopEnd('not reproduced');
       return controlVerdict;

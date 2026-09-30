@@ -178,19 +178,24 @@ function situationMedians(groups) {
  * scores of each situation, every situation is held to the floor as well: the
  * case fails when the median `overall` or the median `goal` of any one
  * situation is under `passCfg.floor`, whatever the medians over all answers.
- * `reasons` says, in operator English, what failed: the rule over all answers
- * first, then `situation <n>: <axis> <median> is under the floor <floor>` per
- * failing situation and axis.
+ * A real moment of the chat (its `n` in `anchorNs`) is held to the pass score
+ * instead of the floor: `passCfg.anchorScore` when it is a number, else
+ * `passCfg.score`. `reasons` says, in operator English, what failed: the rule
+ * over all answers first, then per failing situation and axis
+ * `situation <n>: <axis> <median> is under the floor <floor>`, or for a real
+ * moment `real moment <n>: <axis> <median> is under the pass score <score>`
+ * (`the anchor score <anchorScore>` when that is set).
  * @param {{ human: number|null, character: number|null, rules: number|null, goal: number, overall: number }[]} scores
- * @param {{ score: number, floor: number }} passCfg  The `mentor.pass` config section.
+ * @param {{ score: number, floor: number, anchorScore?: number|null }} passCfg  The `mentor.pass` config section.
  * @param {object[][]} [groups]  One array of scores per situation, in order (a falsy score is left out; a
  *   situation with no score left is left out of `situations` but keeps its place in the numbering).
+ * @param {Iterable<number>} [anchorNs]  The 1-based places in `groups` of the situations that are real moments.
  * @returns {{ passed: boolean, medians: { human: number|null, character: number|null, rules: number|null,
  *   goal: number|null, overall: number|null }, situations: { n: number, overall: number|null, goal: number|null }[],
  *   reasons: string[] }}  `situations`: the per-situation medians, `n` from 1 in the order of `groups`;
  *   `[]` without `groups`.
  */
-export function verdict(scores, passCfg, groups) {
+export function verdict(scores, passCfg, groups, anchorNs) {
   const list = (scores ?? []).filter(Boolean);
   const medians = {};
   for (const axis of AXES) medians[axis] = median(list.map((s) => s[axis]));
@@ -213,10 +218,21 @@ export function verdict(scores, passCfg, groups) {
     if ((axis === 'overall' || axis === 'goal') && value < passScore) continue;
     reasons.push(`${axis} ${value} is under the floor ${floor}`);
   }
+  // A real moment is held to the pass score: it is what the chat actually saw.
+  const anchors = new Set(anchorNs ?? []);
+  const anchorSet = Number.isFinite(passCfg?.anchorScore);
+  const anchorScore = anchorSet ? passCfg.anchorScore : passScore;
+  const anchorName = anchorSet ? 'anchor score' : 'pass score';
   for (const situation of situations) {
+    const anchor = anchors.has(situation.n);
     for (const axis of SITUATION_AXES) {
       const value = situation[axis];
-      if (value !== null && value < floor) reasons.push(`situation ${situation.n}: ${axis} ${value} is under the floor ${floor}`);
+      if (value === null) continue;
+      if (anchor) {
+        if (value < anchorScore) reasons.push(`real moment ${situation.n}: ${axis} ${value} is under the ${anchorName} ${anchorScore}`);
+      } else if (value < floor) {
+        reasons.push(`situation ${situation.n}: ${axis} ${value} is under the floor ${floor}`);
+      }
     }
   }
   return { passed: reasons.length === 0, medians, situations, reasons };

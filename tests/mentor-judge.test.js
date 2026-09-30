@@ -255,6 +255,66 @@ test('verdict: reports the medians of every situation', () => {
   assert.equal(result.passed, false);
 });
 
+// ---- verdict: real moments are held to the pass score --------------------------
+
+/** Three situations: 1 and 2 at 6/6 (over the floor, under the pass score), 3 well over. */
+function sixes() {
+  const six = () => [score({ overall: 6, goal: 6 }), score({ overall: 6, goal: 6 }), score({ overall: 6, goal: 6 })];
+  const high = [score({ overall: 9, goal: 9 }), score({ overall: 9, goal: 9 }), score({ overall: 9, goal: 9 })];
+  return [six(), six(), high];
+}
+
+test('verdict: a real moment under the pass score fails the case, an invented one at the same score passes the floor', () => {
+  const groups = sixes();
+  // Medians over all answers held at 9 so that only the per-situation rule can fail.
+  const lifted = [...groups.flat(), ...Array.from({ length: 9 }, () => score({ overall: 9, goal: 9 }))];
+  const plain = verdict(lifted, PASS, groups);
+  assert.equal(plain.passed, true);
+  assert.deepEqual(plain.reasons, []);
+  const anchored = verdict(lifted, PASS, groups, new Set([1]));
+  assert.equal(anchored.passed, false);
+  assert.deepEqual(anchored.reasons, ['real moment 1: overall 6 is under the pass score 7', 'real moment 1: goal 6 is under the pass score 7']);
+  // The situations are reported the same way whatever their kind.
+  assert.deepEqual(anchored.situations, plain.situations);
+});
+
+test('verdict: a real moment at the pass score passes; one under it on goal alone fails on goal', () => {
+  const at = [[score({ overall: 7, goal: 7 })], [score({ overall: 9, goal: 9 })]];
+  assert.equal(verdict(at.flat(), PASS, at, new Set([1])).passed, true);
+  const goal = [[score({ overall: 8, goal: 6 })], [score({ overall: 9, goal: 9 })], [score({ overall: 9, goal: 9 })]];
+  const result = verdict(goal.flat(), PASS, goal, new Set([1]));
+  assert.deepEqual(result.reasons, ['real moment 1: goal 6 is under the pass score 7']);
+});
+
+test('verdict: mentor.pass.anchorScore overrides the pass score for real moments; null means the pass score', () => {
+  const groups = [[score({ overall: 7, goal: 8 })], [score({ overall: 9, goal: 9 })], [score({ overall: 9, goal: 9 })]];
+  const higher = verdict(groups.flat(), { ...PASS, anchorScore: 8 }, groups, new Set([1]));
+  assert.equal(higher.passed, false);
+  assert.deepEqual(higher.reasons, ['real moment 1: overall 7 is under the anchor score 8']);
+  const lower = verdict(groups.flat(), { ...PASS, anchorScore: 6 }, [[score({ overall: 6, goal: 6 })], ...groups.slice(1)], new Set([1]));
+  assert.equal(lower.passed, true);
+  const same = verdict(groups.flat(), { ...PASS, anchorScore: null }, groups, new Set([1]));
+  assert.equal(same.passed, true);
+  const unusable = verdict(groups.flat(), { ...PASS, anchorScore: '9' }, groups, new Set([1]));
+  assert.equal(unusable.passed, true, 'a value that is not a number is the pass score');
+});
+
+test('verdict: the real moments are named by their place in groups; without groups nothing is held per situation', () => {
+  const groups = sixes();
+  const lifted = [...groups.flat(), ...Array.from({ length: 9 }, () => score({ overall: 9, goal: 9 }))];
+  const second = verdict(lifted, PASS, groups, new Set([2]));
+  assert.deepEqual(second.reasons, ['real moment 2: overall 6 is under the pass score 7', 'real moment 2: goal 6 is under the pass score 7']);
+  const none = verdict(lifted, PASS, undefined, new Set([1]));
+  assert.equal(none.passed, true);
+  assert.deepEqual(none.situations, []);
+});
+
+test('verdict: a real moment under the floor is reported once, against the pass score', () => {
+  const groups = [[score({ overall: 3, goal: 9 })], [score({ overall: 9, goal: 9 })], [score({ overall: 9, goal: 9 })]];
+  const result = verdict(groups.flat(), PASS, groups, [1]);
+  assert.deepEqual(result.reasons, ['real moment 1: overall 3 is under the pass score 7']);
+});
+
 // ---- parseDiagnosis ----------------------------------------------------------
 
 function diagnosis(overrides = {}) {
