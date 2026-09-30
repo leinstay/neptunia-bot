@@ -8,7 +8,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { createChangeStore, profileGuard } from '../src/mentor/changes.js';
+import { createChangeStore, profileGuard, promptStartText } from '../src/mentor/changes.js';
 import { applyDetailOps } from '../src/memory/details.js';
 
 const RULES = '# Rules\n\n- Keep replies short.\n- Never use lists.\n';
@@ -218,7 +218,11 @@ test('apply prompt: creates the override from the tracked file with its base has
     assert.equal(result.change.baseHash, sha256(FORMAT));
     assert.equal(result.change.target, 'format');
     assert.deepEqual(env.overrides(), {
-      format: { baseHash: sha256(FORMAT), patches: [{ changeId: 1, from: 'plain text', to: 'lowercase text' }] },
+      format: {
+        baseHash: sha256(FORMAT),
+        patches: [{ changeId: 1, from: 'plain text', to: 'lowercase text' }],
+        writtenHash: sha256('Write lowercase text.\n\nOne message per line.\n'),
+      },
     });
     env.assertTrackedUntouched();
     assert.deepEqual(fs.readdirSync(env.localPromptsDir), ['format.md']);
@@ -502,7 +506,9 @@ test('rebaseStatus: current until the tracked file changes, then stale', () => {
   try {
     assert.deepEqual(env.changes.rebaseStatus('g1'), []);
     env.changes.apply('g1', { layer: 'prompt', target: 'format', from: 'plain text', to: 'lowercase text' }, META);
-    assert.deepEqual(env.changes.rebaseStatus('g1'), [{ name: 'format', status: 'current', baseHash: sha256(FORMAT), trackedHash: sha256(FORMAT), patches: 1 }]);
+    assert.deepEqual(env.changes.rebaseStatus('g1'), [
+      { name: 'format', status: 'current', baseHash: sha256(FORMAT), trackedHash: sha256(FORMAT), patches: 1, handEdited: false },
+    ]);
     fs.writeFileSync(path.join(env.promptsDir, 'format.md'), 'Write plain text always.\n');
     const [status] = env.changes.rebaseStatus('g1');
     assert.equal(status.status, 'stale');
@@ -530,12 +536,294 @@ test('rebase: rebuilds from the tracked file, re-applies the patches found and d
     assert.equal(env.local('format.md'), 'Write lowercase text, always.\n\nNo emoji.\n\nKeep it brief.\n');
     assert.deepEqual(env.overrides().format, {
       baseHash: sha256(newTracked),
+      writtenHash: sha256('Write lowercase text, always.\n\nNo emoji.\n\nKeep it brief.\n'),
       patches: [{ changeId: 1, from: 'plain text', to: 'lowercase text' }, { changeId: 3, from: '', to: 'Keep it brief.' }],
     });
     assert.equal(env.changes.rebaseStatus('g1')[0].status, 'current');
+    assert.equal(env.changes.rebaseStatus('g1')[0].handEdited, false);
     assert.deepEqual(snapshot(env.promptsDir), trackedNow);
     assert.deepEqual(fs.readdirSync(env.localPromptsDir), ['format.md']);
     assert.deepEqual(env.changes.rebase('g1', 'reply'), { ok: false, reason: 'no override' });
+  } finally {
+    env.cleanup();
+  }
+});
+
+// ---- the start text of a prompt edit -------------------------------------------------
+
+test('promptStartText: a blank or whitespace local file counts as absent', () => {
+  assert.deepEqual(promptStartText('Local text.\n', 'Tracked text.\n'), { text: 'Local text.\n', source: 'local', exists: true });
+  assert.deepEqual(promptStartText(null, 'Tracked text.\n'), { text: 'Tracked text.\n', source: 'tracked', exists: false });
+  for (const blank of ['', '\n', '  \r\n\t\n', '\uFEFF\n']) {
+    assert.deepEqual(promptStartText(blank, 'Tracked text.\n'), { text: 'Tracked text.\n', source: 'tracked', exists: true }, JSON.stringify(blank));
+  }
+  // Both layers read as edits see them: no BOM, LF line ends.
+  assert.deepEqual(promptStartText('\uFEFFLocal\r\ntext.\r\n', null), { text: 'Local\ntext.\n', source: 'local', exists: true });
+  assert.equal(promptStartText(null, null), null);
+  assert.equal(promptStartText('  \n', null), null);
+});
+
+test('changes: a blank local prompt counts as absent on apply', () => {
+  const blank = '\n  \n';
+  const env = setup({ local: { 'format.md': blank } });
+  try {
+    const appended = env.changes.apply('g1', { layer: 'prompt', target: 'format', from: '', to: 'Keep it brief.' }, META);
+    assert.equal(appended.ok, true);
+    // The append starts from the tracked text, as the live prompts do, never from the blank file.
+    assert.equal(env.local('format.md'), `${FORMAT}\nKeep it brief.\n`);
+    assert.equal(appended.change.created, true);
+    assert.equal(appended.change.blank, true);
+    assert.equal(appended.change.baseHash, sha256(FORMAT));
+    // The blank file's bytes are kept as the piece before, so undo puts it back exactly.
+    assert.equal(env.changes.get('g1', 1).before, blank);
+    assert.equal(env.changes.undo('g1', 1).ok, true);
+    assert.equal(env.local('format.md'), blank);
+    assert.deepEqual(env.overrides(), {});
+    // A replacement finds its text in the tracked file too.
+    const replaced = env.changes.apply('g1', { layer: 'prompt', target: 'format', from: 'plain text', to: 'lowercase text' }, META);
+    assert.equal(replaced.ok, true);
+    assert.equal(env.local('format.md'), 'Write lowercase text.\n\nOne message per line.\n');
+    env.assertTrackedUntouched();
+  } finally {
+    env.cleanup();
+  }
+});
+
+test('changes: promptLayers reads both layers raw, and only safe names', () => {
+  const env = setup({ local: { 'format.md': '\n' } });
+  try {
+    assert.deepEqual(env.changes.promptLayers('format'), { local: '\n', tracked: FORMAT });
+    assert.deepEqual(env.changes.promptLayers('rules'), { local: null, tracked: RULES });
+    for (const name of ['../prompts/format', 'Format', '', null]) assert.deepEqual(env.changes.promptLayers(name), { local: null, tracked: null }, String(name));
+  } finally {
+    env.cleanup();
+  }
+});
+
+// ---- rebase and hand edits -----------------------------------------------------------
+
+test('rebase: refuses a hand-edited override', () => {
+  const env = setup();
+  try {
+    env.changes.apply('g1', { layer: 'prompt', target: 'format', from: 'plain text', to: 'lowercase text' }, META);
+    assert.equal(env.overrides().format.writtenHash, sha256(env.local('format.md')));
+    const handEdited = `${env.local('format.md')}A line added by hand.\n`;
+    fs.writeFileSync(path.join(env.localPromptsDir, 'format.md'), handEdited);
+    fs.writeFileSync(path.join(env.promptsDir, 'format.md'), 'Write plain text always.\n');
+    assert.equal(env.changes.rebaseStatus('g1')[0].handEdited, true);
+    const overridesBefore = env.overrides();
+    assert.deepEqual(env.changes.rebase('g1', 'format'), { ok: false, reason: 'edited by hand' });
+    assert.equal(env.local('format.md'), handEdited);
+    assert.deepEqual(env.overrides(), overridesBefore);
+    // A local file removed by hand is a hand edit too.
+    fs.rmSync(path.join(env.localPromptsDir, 'format.md'));
+    assert.deepEqual(env.changes.rebase('g1', 'format'), { ok: false, reason: 'edited by hand' });
+    assert.equal(env.hasLocal('format.md'), false);
+  } finally {
+    env.cleanup();
+  }
+});
+
+test('rebase: an override recorded without writtenHash counts as hand-edited', () => {
+  const env = setup();
+  try {
+    env.changes.apply('g1', { layer: 'prompt', target: 'format', from: 'plain text', to: 'lowercase text' }, META);
+    const legacy = env.overrides();
+    delete legacy.format.writtenHash;
+    fs.writeFileSync(path.join(env.dataDir, 'guilds', 'g1', 'mentor', 'overrides.json'), JSON.stringify(legacy));
+    fs.writeFileSync(path.join(env.promptsDir, 'format.md'), 'Write plain text always.\n');
+    assert.equal(env.changes.rebaseStatus('g1')[0].handEdited, true);
+    assert.deepEqual(env.changes.rebase('g1', 'format'), { ok: false, reason: 'edited by hand' });
+  } finally {
+    env.cleanup();
+  }
+});
+
+test('rebase: refuses when the base is current', () => {
+  const env = setup();
+  try {
+    env.changes.apply('g1', { layer: 'prompt', target: 'format', from: 'plain text', to: 'lowercase text' }, META);
+    const local = env.local('format.md');
+    assert.deepEqual(env.changes.rebase('g1', 'format'), { ok: false, reason: 'already current' });
+    assert.equal(env.local('format.md'), local);
+  } finally {
+    env.cleanup();
+  }
+});
+
+test('undo: moves writtenHash to the text it leaves', () => {
+  const env = setup();
+  try {
+    env.changes.apply('g1', { layer: 'prompt', target: 'format', from: 'plain text', to: 'lowercase text' }, META);
+    env.changes.apply('g1', { layer: 'prompt', target: 'format', from: 'One message', to: 'A message' }, META);
+    assert.equal(env.changes.undo('g1', 2).ok, true);
+    assert.equal(env.overrides().format.writtenHash, sha256(env.local('format.md')));
+    assert.equal(env.changes.rebaseStatus('g1')[0].handEdited, false);
+  } finally {
+    env.cleanup();
+  }
+});
+
+// ---- limits on guild strings and profile fields -----------------------------------------
+
+test('apply: patterns and starters may be rewritten, never emptied', () => {
+  const store = fakeStore({ guild: { patterns: 'Habit one. Habit two.', starters: 'Someone asks about games.' } });
+  const env = setup({ store });
+  try {
+    assert.deepEqual(env.changes.apply('g1', { layer: 'guild', target: 'patterns', from: 'Habit one. Habit two.', to: '' }, META), { ok: false, reason: 'deletion not allowed' });
+    assert.deepEqual(env.changes.apply('g1', { layer: 'guild', target: 'starters', from: 'Someone asks about games.', to: '  ' }, META), { ok: false, reason: 'deletion not allowed' });
+    assert.equal(store.getGuild('g1').patterns, 'Habit one. Habit two.');
+    assert.equal(env.changes.apply('g1', { layer: 'guild', target: 'patterns', from: 'Habit one.', to: 'Habit uno.' }, META).ok, true);
+    assert.equal(env.changes.list('g1').length, 1);
+  } finally {
+    env.cleanup();
+  }
+});
+
+test('apply: a guild string over the limit is refused', () => {
+  // memory.fieldChars 10: a guild string may hold 20 characters, a profile field 10.
+  const store = fakeStore({ guild: { patterns: 'Short.' }, users: { 42: { id: '42', character: 'Calm.', style: '', relationship: '' } } });
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'nep-changes-'));
+  const changes = createChangeStore({
+    dataDir: path.join(root, 'data'),
+    promptsDir: path.join(root, 'prompts'),
+    localPromptsDir: path.join(root, 'prompts.local'),
+    store,
+    getConfig: () => ({ memory: { ...MEMORY_CONFIG, fieldChars: 10 } }),
+  });
+  try {
+    assert.deepEqual(changes.apply('g1', { layer: 'guild', target: 'patterns', from: 'Short.', to: 'ά'.repeat(21) }, META), { ok: false, reason: 'text too long' });
+    assert.equal(store.getGuild('g1').patterns, 'Short.');
+    assert.equal(changes.apply('g1', { layer: 'guild', target: 'patterns', from: 'Short.', to: 'ά'.repeat(20) }, META).ok, true);
+    assert.deepEqual(changes.apply('g1', { layer: 'profile', target: '42.character', from: 'Calm.', to: 'Calm, kind.' }, META), { ok: false, reason: 'text too long' });
+    assert.equal(changes.apply('g1', { layer: 'profile', target: '42.character', from: 'Calm.', to: 'Calm, kín.' }, META).ok, true);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// ---- the record before the piece -------------------------------------------------------
+
+test('apply: the record exists before the piece is written', () => {
+  const store = fakeStore({ guild: { patterns: 'People post memes at night.' } });
+  const updateGuild = store.updateGuild;
+  store.updateGuild = () => {
+    throw new Error('disk full');
+  };
+  const env = setup({ store });
+  try {
+    assert.throws(() => env.changes.apply('g1', { layer: 'guild', target: 'patterns', from: 'at night', to: 'after midnight' }, META), /disk full/);
+    const [record] = env.changes.list('g1');
+    assert.equal(record.id, 1);
+    assert.equal(record.pending, true);
+    assert.equal(env.changes.get('g1', 1).before, 'People post memes at night.');
+    assert.equal(env.changes.get('g1', 1).after, 'People post memes after midnight.');
+    // The piece was never written: undo only clears the record.
+    store.updateGuild = updateGuild;
+    const calls = store.calls.length;
+    assert.equal(env.changes.undo('g1', 1).ok, true);
+    assert.equal(store.calls.slice(calls).some((c) => c[0] === 'updateGuild'), false);
+    assert.equal(store.getGuild('g1').patterns, 'People post memes at night.');
+    const [cleared] = env.changes.list('g1');
+    assert.equal(cleared.pending, undefined);
+    assert.ok(cleared.undoneAt);
+  } finally {
+    env.cleanup();
+  }
+});
+
+test('apply: a prompt write that fails leaves a pending record and no override', () => {
+  const env = setup();
+  try {
+    // A file where the local directory should be: the prompt cannot be written.
+    fs.writeFileSync(env.localPromptsDir, 'not a directory');
+    assert.throws(() => env.changes.apply('g1', { layer: 'prompt', target: 'format', from: 'plain text', to: 'lowercase text' }, META));
+    const [record] = env.changes.list('g1');
+    assert.equal(record.pending, true);
+    assert.equal(fs.existsSync(path.join(env.dataDir, 'guilds', 'g1', 'mentor', 'overrides.json')), false);
+    fs.rmSync(env.localPromptsDir);
+    assert.equal(env.changes.undo('g1', 1).ok, true);
+    assert.equal(env.hasLocal('format.md'), false);
+    env.assertTrackedUntouched();
+  } finally {
+    env.cleanup();
+  }
+});
+
+test('apply: a successful apply leaves no pending mark and returns the same change as before', () => {
+  const env = setup();
+  try {
+    const result = env.changes.apply('g1', { layer: 'rules', from: 'Never use lists.', to: 'Avoid lists.' }, META);
+    assert.equal('pending' in result.change, false);
+    assert.equal('pending' in env.changes.list('g1')[0], false);
+  } finally {
+    env.cleanup();
+  }
+});
+
+test('undo: a pending record whose piece was written is undone', () => {
+  const store = fakeStore({ guild: { patterns: 'People post memes at night.' } });
+  const env = setup({ store });
+  try {
+    env.changes.apply('g1', { layer: 'guild', target: 'patterns', from: 'at night', to: 'after midnight' }, META);
+    // As if the process died after the piece was written, before the record was cleared.
+    const file = path.join(env.dataDir, 'guilds', 'g1', 'mentor', 'changes.json');
+    const data = JSON.parse(fs.readFileSync(file, 'utf8'));
+    data.changes[0].pending = true;
+    fs.writeFileSync(file, JSON.stringify(data));
+    assert.equal(env.changes.list('g1')[0].pending, true);
+    assert.equal(env.changes.undo('g1', 1).ok, true);
+    assert.equal(store.getGuild('g1').patterns, 'People post memes at night.');
+    assert.equal(env.changes.list('g1')[0].pending, undefined);
+    // A pending record whose piece is neither before nor after is left alone.
+    env.changes.apply('g1', { layer: 'guild', target: 'patterns', from: 'at night', to: 'at dawn' }, META);
+    const again = JSON.parse(fs.readFileSync(file, 'utf8'));
+    again.changes[1].pending = true;
+    fs.writeFileSync(file, JSON.stringify(again));
+    store.updateGuild('g1', { patterns: 'Something else entirely.' });
+    assert.deepEqual(env.changes.undo('g1', 2), { ok: false, reason: 'changed since' });
+    assert.equal(store.getGuild('g1').patterns, 'Something else entirely.');
+  } finally {
+    env.cleanup();
+  }
+});
+
+test('undo: the record is marked before the piece is written', () => {
+  const store = fakeStore({ guild: { patterns: 'People post memes at night.' } });
+  const env = setup({ store });
+  try {
+    env.changes.apply('g1', { layer: 'guild', target: 'patterns', from: 'at night', to: 'after midnight' }, META);
+    const updateGuild = store.updateGuild;
+    store.updateGuild = () => {
+      throw new Error('disk full');
+    };
+    assert.throws(() => env.changes.undo('g1', 1), /disk full/);
+    const [record] = env.changes.list('g1');
+    assert.equal(record.pending, true);
+    assert.ok(record.undoneAt);
+    // Once the disk is back, the unfinished undo is finished.
+    store.updateGuild = updateGuild;
+    assert.equal(env.changes.undo('g1', 1).ok, true);
+    assert.equal(store.getGuild('g1').patterns, 'People post memes at night.');
+    assert.equal(env.changes.list('g1')[0].pending, undefined);
+    assert.deepEqual(env.changes.undo('g1', 1), { ok: false, reason: 'already undone' });
+  } finally {
+    env.cleanup();
+  }
+});
+
+// ---- an added rule -------------------------------------------------------------------
+
+test('apply rules: an empty from adds the text as the last rule', () => {
+  const live = '# Rules\n\n## Live rules\n\n- Keep replies short.\n';
+  const env = setup({ tracked: { 'rules.md': live } });
+  try {
+    const result = env.changes.apply('g1', { layer: 'rules', target: 'rules', from: '', to: 'Answer\nin one line.' }, META);
+    assert.equal(result.ok, true);
+    // The rule is added the way /nep rule add adds one: a bullet on one line under the last heading.
+    assert.equal(env.local('rules.md'), `${live}- Answer in one line.\n`);
+    assert.equal(env.changes.undo('g1', 1).ok, true);
+    assert.equal(env.hasLocal('rules.md'), false);
   } finally {
     env.cleanup();
   }

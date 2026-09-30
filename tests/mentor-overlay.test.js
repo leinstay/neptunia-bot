@@ -4,9 +4,13 @@
 // the edits objects are never mutated.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { overlayView, overlayEdits, editPrompt, editToOverlay, removeRule, removeExcerpt } from '../src/mentor/overlay.js';
 import { liveView, situationToHistory } from '../src/mentor/sandbox.js';
 import { buildRequest } from '../src/behavior/prompt.js';
+import { createChangeStore } from '../src/mentor/changes.js';
 import { labels } from './fixtures/labels.js';
 
 const NOW = Date.UTC(2026, 8, 20, 12, 0, 0);
@@ -469,8 +473,9 @@ test('editToOverlay: an unknown prompt or member is refused', () => {
 test('editToOverlay: text that is not in the current piece is refused', () => {
   const refused = (edit) => throughOverlay({ to: 'y', why: 'x', ...edit }).edits;
   assert.deepEqual(refused({ layer: 'rules', from: 'no such rule' }), { error: 'text not found' });
-  // Only a prompt may take an addition.
-  assert.deepEqual(refused({ layer: 'rules', from: '' }), { error: 'text not found' });
+  // An addition needs text to add.
+  assert.deepEqual(refused({ layer: 'rules', from: '', to: '  ' }), { error: 'text not found' });
+  assert.deepEqual(refused({ layer: 'prompt', target: 'format', from: '', to: '' }), { error: 'text not found' });
   assert.deepEqual(refused({ layer: 'prompt', target: 'format', from: 'Use <msg> and <REACT>' }), { error: 'text not found' });
   // A list item is matched by its whole text, never a part of it.
   assert.deepEqual(refused({ layer: 'self', from: 'SELF_ONE likes tea' }), { error: 'text not found' });
@@ -491,4 +496,58 @@ test('editToOverlay: a profile rewrite that loses a fact is refused', () => {
   assert.deepEqual(refused('ALICE_CHARACTER solves', 'solves'), { error: 'names changed' });
   assert.deepEqual(refused('chess problems', 'chess problems since 2019'), { error: 'numbers changed' });
   assert.deepEqual(refused('ALICE_CHARACTER solves chess problems', ''), { error: 'field emptied' });
+});
+
+test('editToOverlay rules: an empty from adds a rule as the last bullet', () => {
+  const { edits, view } = throughOverlay({ layer: 'rules', target: 'rules', from: '', to: 'fourth\nrule', why: 'x' });
+  assert.deepEqual(Object.keys(edits), ['prompts']);
+  assert.equal(view.prompts.rules, `${RULES}- fourth rule\n`);
+});
+
+test('editToOverlay: a blank local prompt starts from the tracked text', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'nep-overlay-'));
+  const promptsDir = path.join(root, 'prompts');
+  const localPromptsDir = path.join(root, 'prompts.local');
+  fs.mkdirSync(promptsDir, { recursive: true });
+  fs.mkdirSync(localPromptsDir, { recursive: true });
+  const tracked = 'Use <msg> and <react> tags.\n\nOne message per line.\n';
+  fs.writeFileSync(path.join(promptsDir, 'format.md'), tracked);
+  fs.writeFileSync(path.join(localPromptsDir, 'format.md'), ' \n\n');
+  const changes = createChangeStore({ dataDir: path.join(root, 'data'), promptsDir, localPromptsDir, store: fakeStore(baseMemory()), getConfig: () => ({}) });
+  // A view whose own format text is blank: the start text comes from the layers, not from it.
+  const hot = fakeHot();
+  hot.prompts.format = '';
+  const view = baseView(hot);
+  try {
+    let id = 0;
+    for (const edit of [
+      { layer: 'prompt', target: 'format', from: '', to: 'One idea per message.', why: 'x' },
+      { layer: 'prompt', target: 'format', from: '<react>', to: '<react> (rarely)', why: 'x' },
+    ]) {
+      const edits = editToOverlay(edit, view, { promptLayers: (name) => changes.promptLayers(name) });
+      const applied = changes.apply('g1', edit);
+      assert.equal(applied.ok, true);
+      id = applied.change.id;
+      const written = fs.readFileSync(path.join(localPromptsDir, 'format.md'), 'utf8');
+      // The verified text is the written text.
+      assert.equal(edits.prompts.format, written);
+      assert.ok(written.startsWith('Use <msg> and <react>'));
+      assert.equal(changes.undo('g1', id).ok, true);
+    }
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('editToOverlay guild: patterns may not be emptied, a string or a profile field not grow past the limit', () => {
+  assert.deepEqual(throughOverlay({ layer: 'guild', target: 'patterns', from: 'PATTERNS_MARKER short lines', to: ' ', why: 'x' }).edits, { error: 'deletion not allowed' });
+  // memory.fieldChars 20: a guild string may hold 40 characters, a profile field 20.
+  const hot = fakeHot();
+  hot.config.memory.fieldChars = 20;
+  const base = baseView(hot, memoryWithLearned());
+  const long = (edit) => throughOverlay({ why: 'x', ...edit }, base).edits;
+  assert.deepEqual(long({ layer: 'guild', target: 'starters', from: 'a greeting', to: 'ώ'.repeat(25) }), { error: 'text too long' });
+  assert.ok(long({ layer: 'guild', target: 'starters', from: 'a greeting', to: 'ώ'.repeat(24) }).guild);
+  assert.deepEqual(long({ layer: 'profile', target: `${ALICE}.style`, from: 'lowercase', to: 'lowercase, rarely' }), { error: 'text too long' });
+  assert.ok(long({ layer: 'profile', target: `${ALICE}.style`, from: 'lowercase', to: 'lower' }).users);
 });

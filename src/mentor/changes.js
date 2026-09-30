@@ -8,15 +8,20 @@
 //   data/guilds/<guildId>/mentor/changes.json                  { nextId, changes: [...] }
 //   data/guilds/<guildId>/mentor/changes/<id>/before.json      the piece before the change
 //   data/guilds/<guildId>/mentor/changes/<id>/after.json       the piece after it
-//   data/guilds/<guildId>/mentor/overrides.json                { [prompt]: { baseHash, patches: [{ changeId, from, to }] } }
+//   data/guilds/<guildId>/mentor/overrides.json                { [prompt]: { baseHash, writtenHash, patches: [{ changeId, from, to }] } }
 //
 // A "piece" is the whole thing an edit touched: a prompt file's text, one
 // list item's text (null when absent), one string field. Undo restores the
 // piece only while it still equals what the change left, so nothing written
 // since is ever overwritten. A local prompt override remembers the sha256 of
-// the tracked file it was copied from and the patches made to it; after a
-// deploy changes that file, `rebase` rebuilds the override from the new
-// tracked text and re-applies the patches that still fit.
+// the tracked file it was copied from, the sha256 of the file as the mentor
+// last wrote it and the patches made to it; after a deploy changes the
+// tracked file, `rebase` rebuilds the override from the new tracked text and
+// re-applies the patches that still fit, unless someone edited it by hand.
+//
+// The records come before the piece: `apply` and `undo` store the change
+// (marked `pending`) before they write, and clear the mark after, so a write
+// that fails half way is never a change nobody knows about.
 //
 // Tracked prompts are only ever read. Prompt files are written atomically
 // (temp file in the same directory, then a rename) so the live reloader never
@@ -27,6 +32,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { appendRule } from '../admin.js';
 import { writeJsonAtomic } from '../memory/store.js';
 import { normalizeTopic } from '../memory/interests.js';
 
@@ -77,6 +83,32 @@ function normalizeText(raw) {
 
 function sha256(text) {
   return crypto.createHash('sha256').update(text).digest('hex');
+}
+
+/** Length in characters (code points), as the memory store counts them. */
+function length(text) {
+  return [...String(text ?? '')].length;
+}
+
+/**
+ * The text an edit of a prompt file starts from, read the way src/hot.js
+ * reads the two layers: the local file when it holds anything but
+ * whitespace, else the tracked file (a blank local file counts as absent).
+ * Both are read as edits see them: no BOM, LF line ends. The one rule for
+ * both the change store and the repair loop's what-if view
+ * (src/mentor/overlay.js#editToOverlay), so the text verified and the text
+ * written start from the same string. Pure.
+ * @param {string|null} localRaw    The local file's raw text, null when it does not exist.
+ * @param {string|null} trackedRaw  The tracked file's raw text, null when it does not exist.
+ * @returns {{ text: string, source: 'local'|'tracked', exists: boolean }|null}  `exists`: whether a
+ *   local file exists at all (blank or not); null when neither layer gives a text.
+ */
+export function promptStartText(localRaw, trackedRaw) {
+  const exists = typeof localRaw === 'string';
+  const local = exists ? normalizeText(localRaw) : null;
+  if (local !== null && local.trim()) return { text: local, source: 'local', exists };
+  if (typeof trackedRaw !== 'string') return null;
+  return { text: normalizeText(trackedRaw), source: 'tracked', exists };
 }
 
 /** Write `text` through a temp file in the same directory and a rename; creates the directory. */
@@ -156,7 +188,9 @@ export function profileGuard(before, after) {
  *   store: { getGuild: Function, updateGuild: Function, applyLearnedOps: Function, rewriteLearned: Function, getUser: Function, updateUser: Function },
  *   getConfig: () => { memory?: object }, now?: () => number }} opts
  *   `promptsDir` is only ever read; `localPromptsDir` is created when missing.
- *   `getConfig` is read at the moment of use (the learned-list limits).
+ *   `getConfig` is read at the moment of use (the learned-list limits and
+ *   `memory.fieldChars`, default 400: a profile field may hold that many
+ *   characters, a guild string twice as many).
  */
 export function createChangeStore({ dataDir, promptsDir, localPromptsDir, store, getConfig, now = Date.now }) {
   const mentorDir = (guildId) => path.join(dataDir, 'guilds', String(guildId), 'mentor');
@@ -188,6 +222,12 @@ export function createChangeStore({ dataDir, promptsDir, localPromptsDir, store,
     return { ...(getConfig?.()?.memory ?? {}), seenAt: now() };
   }
 
+  /** `memory.fieldChars` now, else the config.json default. */
+  function fieldChars() {
+    const value = getConfig?.()?.memory?.fieldChars;
+    return Number.isFinite(value) && value >= 1 ? Math.floor(value) : 400;
+  }
+
   /** The guild's list stored under `key` as trimmed strings (a copy). */
   function guildList(guildId, key) {
     const list = store.getGuild(guildId)?.[key];
@@ -196,34 +236,40 @@ export function createChangeStore({ dataDir, promptsDir, localPromptsDir, store,
 
   // ---- prompt files (rules and prompt layers) ----
 
-  /** The text a local file edit starts from: the local file, else a copy of the tracked one. */
-  function promptStart(name) {
-    const local = normalizeText(readRaw(localFile(name)));
-    if (local !== null) return { text: local, created: false, trackedRaw: null };
-    const trackedRaw = readRaw(trackedFile(name));
-    if (trackedRaw === null) return null;
-    return { text: normalizeText(trackedRaw), created: true, trackedRaw };
+  /** Both layers of one prompt, raw; nulls for a name that is not a safe prompt name or is the card. */
+  function promptLayers(name) {
+    if (typeof name !== 'string' || !PROMPT_NAME.test(name) || name === 'character-card') return { local: null, tracked: null };
+    return { local: readRaw(localFile(name)), tracked: readRaw(trackedFile(name)) };
   }
 
   // ---- apply per layer: each returns a refusal or { target, before, after, write, extra } ----
 
-  function planFile(name, edit, { allowAppend }) {
-    const start = promptStart(name);
+  /**
+   * A local prompt file edit, from the text `promptStartText` gives. A file
+   * started from the tracked text is `created`; when a blank local file was
+   * there, it is `blank` and its bytes are the piece before (undo writes them back).
+   */
+  function planFile(name, edit, { append }) {
+    const layers = promptLayers(name);
+    const start = promptStartText(layers.local, layers.tracked);
     if (!start) return refuse('unknown prompt');
     const { from, to } = edit;
     let after;
     if (!from) {
-      if (!allowAppend) return refuse('text not found');
-      after = appendParagraph(start.text, to);
+      if (!append || !to.trim()) return refuse('text not found');
+      after = append(start.text, to);
     } else {
       if (!start.text.includes(from)) return refuse('text not found');
       after = replaceFirst(start.text, from, to);
     }
+    const created = start.source === 'tracked';
+    const blank = created && start.exists;
     return {
-      before: start.text,
+      before: blank ? layers.local : start.text,
       after,
-      created: start.created,
-      trackedRaw: start.trackedRaw,
+      created,
+      blank,
+      trackedRaw: created ? layers.tracked : null,
       write: () => writeTextAtomic(localFile(name), after),
     };
   }
@@ -245,11 +291,14 @@ export function createChangeStore({ dataDir, promptsDir, localPromptsDir, store,
     };
   }
 
+  /** `patterns` / `starters`: rewritten, never emptied, at most twice `memory.fieldChars` long. */
   function planGuildString(guildId, key, edit) {
     const value = store.getGuild(guildId)?.[key];
     const text = typeof value === 'string' ? value : '';
     if (!edit.from || !text.includes(edit.from)) return refuse('text not found');
+    if (!edit.to.trim()) return refuse('deletion not allowed');
     const after = replaceFirst(text, edit.from, edit.to);
+    if (length(after) > fieldChars() * 2) return refuse('text too long');
     return { before: text, after, write: () => store.updateGuild(guildId, { [key]: after }) };
   }
 
@@ -294,6 +343,7 @@ export function createChangeStore({ dataDir, promptsDir, localPromptsDir, store,
     const after = replaceFirst(text, edit.from, edit.to);
     const guard = profileGuard(text, after);
     if (!guard.ok) return guard;
+    if (length(after) > fieldChars()) return refuse('text too long');
     return { target: `${userId}.${field}`, before: text, after, write: () => store.updateUser(guildId, userId, { [field]: after }) };
   }
 
@@ -302,13 +352,14 @@ export function createChangeStore({ dataDir, promptsDir, localPromptsDir, store,
     const layer = edit.layer;
     switch (layer) {
       case 'rules': {
-        const p = planFile('rules', edit, { allowAppend: false });
+        // An addition is a new rule, added as `/nep rule add` adds one.
+        const p = planFile('rules', edit, { append: appendRule });
         return p.ok === false ? p : { target: 'rules', ...p };
       }
       case 'prompt': {
         const name = edit.target;
         if (typeof name !== 'string' || !PROMPT_NAME.test(name) || REFUSED_PROMPTS.has(name)) return refuse('target not allowed');
-        const p = planFile(name, edit, { allowAppend: true });
+        const p = planFile(name, edit, { append: appendParagraph });
         return p.ok === false ? p : { target: name, ...p };
       }
       case 'self': {
@@ -338,10 +389,11 @@ export function createChangeStore({ dataDir, promptsDir, localPromptsDir, store,
   function undoFile(name, change, before, after) {
     const file = localFile(name);
     if (normalizeText(readRaw(file)) !== after) return refuse('changed since');
-    // A file the change created is removed again, so the tracked text takes over as before.
+    // A file the change created is removed again, so the tracked text takes over as before;
+    // a blank file that was there gets its bytes back (the tracked text is live again either way).
     return {
       write: () => {
-        if (change.created) fs.rmSync(file, { force: true });
+        if (change.created && !change.blank) fs.rmSync(file, { force: true });
         else writeTextAtomic(file, before);
       },
     };
@@ -428,11 +480,84 @@ export function createChangeStore({ dataDir, promptsDir, localPromptsDir, store,
     }
   }
 
+  /**
+   * Whether the piece a change touched is as it was before the change: for a
+   * record left `pending` by a write that did not finish, this is how undo
+   * tells a write that never happened (or an undo that did) from one that did.
+   */
+  function pieceIsBefore(guildId, change, before, after) {
+    const current = (read) => {
+      const value = read();
+      return typeof value === 'string' ? value : '';
+    };
+    switch (change.layer) {
+      case 'rules':
+      case 'prompt': {
+        const raw = readRaw(localFile(change.layer === 'rules' ? 'rules' : change.target));
+        if (change.blank) return raw === before;
+        if (change.created) return raw === null;
+        return normalizeText(raw) === before;
+      }
+      case 'self':
+      case 'guild': {
+        if (change.layer === 'guild' && change.target !== 'injokes') return current(() => store.getGuild(guildId)?.[change.target]) === before;
+        const list = guildList(guildId, change.layer === 'self' ? 'self' : 'injokes');
+        const has = (text) => list.some((item) => item.trim() === String(text).trim());
+        return has(before) && (after === null || !has(after));
+      }
+      case 'learned': {
+        const items = store.getGuild(guildId)?.learned ?? [];
+        if (after === null) return items.some((i) => normalizeTopic(i.text) === normalizeTopic(before));
+        return items.some((i) => i.id === change.itemId && i.text === before);
+      }
+      case 'profile': {
+        const dot = change.target.lastIndexOf('.');
+        return current(() => store.getUser(guildId, change.target.slice(0, dot))?.[change.target.slice(dot + 1)]) === before;
+      }
+      default:
+        return false;
+    }
+  }
+
+  /** The sha256 of a local prompt file as it is now, or null when it does not exist. */
+  function localHash(name) {
+    const raw = readRaw(localFile(name));
+    return raw === null ? null : sha256(raw);
+  }
+
+  /** Whether a local override differs from what the mentor last wrote (an override without `writtenHash` always does). */
+  function handEdited(name, entry) {
+    return typeof entry?.writtenHash !== 'string' || localHash(name) !== entry.writtenHash;
+  }
+
   return {
     /**
+     * Both layers of one prompt as they are on disk now, raw: what
+     * `promptStartText` takes. The repair loop hands this to
+     * src/mentor/overlay.js#editToOverlay, so the text it verifies starts
+     * from the same files `apply` writes. A name that is not a safe prompt
+     * name, or the character card, reads as `{ local: null, tracked: null }`.
+     * @param {string} name  A prompt name without `.md`.
+     * @returns {{ local: string|null, tracked: string|null }}
+     */
+    promptLayers(name) {
+      return promptLayers(name);
+    },
+
+    /**
      * Apply one edit to the private layer and record it. Reads the current
-     * piece, refuses when `from` is not in it, writes, then stores the change
-     * with the piece before and after.
+     * piece and refuses when `from` is not in it (and, for `patterns` /
+     * `starters`, an emptied string or one over twice `memory.fieldChars`, for
+     * a profile field one over `memory.fieldChars`). Then the records come
+     * first: the pieces before and after and the change, marked `pending`;
+     * then the piece is written; then the mark is cleared and the prompt
+     * override (with the `writtenHash` of the file written) is stored. A
+     * write that throws propagates and leaves the record `pending`. An empty
+     * `from` appends: a new rule on the `rules` layer (as `/nep rule add`
+     * adds one), a new paragraph on the `prompt` layer. A prompt file is
+     * started from `promptStartText` (a blank local file counts as absent;
+     * the change is then `created` and `blank`, its before piece the blank
+     * file's bytes).
      * @param {string} guildId
      * @param {{ layer: 'rules'|'prompt'|'self'|'learned'|'guild'|'profile', target?: string, from?: string, to?: string, why?: string }} edit
      * @param {{ caseId?: number, runId?: string }} [meta]
@@ -452,7 +577,6 @@ export function createChangeStore({ dataDir, promptsDir, localPromptsDir, store,
       const p = plan(guildId, clean);
       if (p.ok === false) return p;
 
-      p.write();
       const id = data.nextId;
       const change = {
         id,
@@ -465,25 +589,38 @@ export function createChangeStore({ dataDir, promptsDir, localPromptsDir, store,
         ...(p.extra ?? {}),
       };
       if (p.created !== undefined) change.created = p.created;
+      if (p.blank) change.blank = true;
+      let entry = null;
       if (clean.layer === 'prompt') {
-        const entry = p.created || !overrides[p.target]
+        entry = p.created || !overrides[p.target]
           ? { baseHash: p.trackedRaw === null ? null : sha256(p.trackedRaw), patches: [] }
-          : overrides[p.target];
+          : { ...overrides[p.target], patches: [...(overrides[p.target].patches ?? [])] };
         entry.patches.push({ changeId: id, from: clean.from, to: clean.to });
-        overrides[p.target] = entry;
+        entry.writtenHash = sha256(p.after);
         change.baseHash = entry.baseHash;
       }
+      // The records before the piece: a piece written without its record could never be undone.
       writeJsonAtomic(pieceFile(guildId, id, 'before'), p.before);
       writeJsonAtomic(pieceFile(guildId, id, 'after'), p.after);
-      data.changes.push(change);
+      const record = { ...change, pending: true };
+      data.changes.push(record);
       data.nextId += 1;
       writeJsonAtomic(changesFile(guildId), data);
-      if (overrides) writeJsonAtomic(overridesFile(guildId), overrides);
+
+      p.write();
+      delete record.pending;
+      writeJsonAtomic(changesFile(guildId), data);
+      if (entry) {
+        overrides[p.target] = entry;
+        writeJsonAtomic(overridesFile(guildId), overrides);
+      }
       return { ok: true, change: { ...change, before: p.before, after: p.after } };
     },
 
     /**
-     * The recorded changes, newest first, without their pieces.
+     * The recorded changes, newest first, without their pieces. A record
+     * still carrying `pending: true` is one whose write (by `apply` or by
+     * `undo`, when it also has `undoneAt`) did not finish; `undo` settles it.
      * @param {string} guildId
      * @returns {object[]}
      */
@@ -505,6 +642,14 @@ export function createChangeStore({ dataDir, promptsDir, localPromptsDir, store,
     /**
      * Put the piece a change touched back as it was. Refuses when the piece
      * no longer equals what the change left (a later change or a hand edit).
+     * The record is marked (`undoneAt`, `pending`) before the piece is
+     * written and the mark cleared after; a write that throws propagates and
+     * leaves the record `pending`. A `pending` record (an apply or an undo
+     * that did not finish) is settled by what the piece is now: equal to
+     * `after`, it is restored; equal to `before`, only the record is
+     * finished; anything else is 'changed since'. A prompt override loses the
+     * change's patch (a created override is dropped) and its `writtenHash`
+     * moves to the file as the undo left it.
      * @param {string} guildId
      * @param {number} id
      * @returns {{ ok: true, change: object } | { ok: false, reason: string }}
@@ -513,20 +658,30 @@ export function createChangeStore({ dataDir, promptsDir, localPromptsDir, store,
       const data = readChanges(guildId);
       const change = data.changes.find((c) => c.id === Number(id));
       if (!change) return refuse('unknown change');
-      if (change.undoneAt) return refuse('already undone');
+      if (change.undoneAt && !change.pending) return refuse('already undone');
       const overrides = change.layer === 'prompt' ? readOverrides(guildId) : null;
       const before = readPiece(guildId, change.id, 'before');
       const after = readPiece(guildId, change.id, 'after');
-      const p = undoPlan(guildId, change, before, after);
-      if (p.ok === false) return p;
+      let p = undoPlan(guildId, change, before, after);
+      if (p.ok === false) {
+        if (!change.pending || !pieceIsBefore(guildId, change, before, after)) return p;
+        // The piece is as it was before the change: nothing to write, only the record to finish.
+        p = { write: () => {} };
+      }
 
-      p.write();
       Object.assign(change, p.mark ?? {});
       change.undoneAt = new Date(now()).toISOString();
+      change.pending = true;
+      writeJsonAtomic(changesFile(guildId), data);
+      p.write();
+      delete change.pending;
       writeJsonAtomic(changesFile(guildId), data);
       if (overrides && overrides[change.target]) {
         if (change.created) delete overrides[change.target];
-        else overrides[change.target].patches = overrides[change.target].patches.filter((x) => x.changeId !== change.id);
+        else {
+          overrides[change.target].patches = (overrides[change.target].patches ?? []).filter((x) => x.changeId !== change.id);
+          overrides[change.target].writtenHash = localHash(change.target);
+        }
         writeJsonAtomic(overridesFile(guildId), overrides);
       }
       return { ok: true, change: { ...change, before, after } };
@@ -535,10 +690,12 @@ export function createChangeStore({ dataDir, promptsDir, localPromptsDir, store,
     /**
      * For every local prompt override: whether the tracked file is still the
      * one it was made from. `unknown` when the override predates the mentor
-     * (no base hash), `missing` when the tracked file is gone.
+     * (no base hash), `missing` when the tracked file is gone. `handEdited`:
+     * the local file is not what the mentor last wrote (always true for an
+     * override recorded without `writtenHash`).
      * @param {string} guildId
      * @returns {{ name: string, status: 'current'|'stale'|'unknown'|'missing', baseHash: string|null,
-     *   trackedHash: string|null, patches: number }[]}
+     *   trackedHash: string|null, patches: number, handEdited: boolean }[]}
      */
     rebaseStatus(guildId) {
       const overrides = readOverrides(guildId);
@@ -551,7 +708,14 @@ export function createChangeStore({ dataDir, promptsDir, localPromptsDir, store,
         if (trackedHash === null) status = 'missing';
         else if (baseHash === null) status = 'unknown';
         else status = trackedHash === baseHash ? 'current' : 'stale';
-        return { name, status, baseHash, trackedHash, patches: Array.isArray(entry.patches) ? entry.patches.length : 0 };
+        return {
+          name,
+          status,
+          baseHash,
+          trackedHash,
+          patches: Array.isArray(entry.patches) ? entry.patches.length : 0,
+          handEdited: handEdited(name, entry),
+        };
       });
     },
 
@@ -559,7 +723,11 @@ export function createChangeStore({ dataDir, promptsDir, localPromptsDir, store,
      * Rebuild a local prompt override from the tracked file as it is now:
      * each recorded patch whose `from` is found is applied again, in order
      * (an empty `from` appends); the others are dropped from the override
-     * and reported. The base hash moves to the tracked file's.
+     * and reported. The base hash moves to the tracked file's, the written
+     * hash to the rebuilt file's. Refuses, writing nothing: 'no override',
+     * 'unknown base', 'tracked file missing', 'edited by hand' (the local
+     * file is not what the mentor last wrote: rebuilding would lose that
+     * edit) and 'already current' (the tracked file is still the base).
      * @param {string} guildId
      * @param {string} name
      * @returns {{ ok: true, applied: number[], dropped: { changeId: number, from: string, to: string }[] }
@@ -572,6 +740,8 @@ export function createChangeStore({ dataDir, promptsDir, localPromptsDir, store,
       if (!entry.baseHash) return refuse('unknown base');
       const raw = readRaw(trackedFile(name));
       if (raw === null) return refuse('tracked file missing');
+      if (handEdited(name, entry)) return refuse('edited by hand');
+      if (sha256(raw) === entry.baseHash) return refuse('already current');
       let text = normalizeText(raw);
       const applied = [];
       const kept = [];
@@ -589,7 +759,7 @@ export function createChangeStore({ dataDir, promptsDir, localPromptsDir, store,
         kept.push(patch);
       }
       writeTextAtomic(localFile(name), text);
-      overrides[name] = { baseHash: sha256(raw), patches: kept };
+      overrides[name] = { baseHash: sha256(raw), writtenHash: sha256(text), patches: kept };
       writeJsonAtomic(overridesFile(guildId), overrides);
       return { ok: true, applied, dropped };
     },

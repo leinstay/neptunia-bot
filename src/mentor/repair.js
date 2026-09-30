@@ -3,50 +3,76 @@
 // the weak answers. This loop turns that opinion into at most one change,
 // and only one that was measured to help:
 //
+//   0. control -- the weak situations are answered again on the UNCHANGED
+//      view, once per loop: re-sampling alone moves a low score up, so a gain
+//      is measured against this, never against the run's own low scores; a
+//      control that passes means the failure did not reproduce;
 //   1. ablation -- a suspect is proven by answering the weak situations again
 //      WITHOUT that piece (an overlay view, nothing written) and measuring the
-//      gain; a `missing` cause has nothing to remove and counts as proven;
+//      gain over the control; a `missing` cause has nothing to remove and
+//      counts as proven;
 //   2. edit -- the mentor model is asked for ONE edit against the proven cause
-//      (the `mentor-fix` prompt), checked against what an edit may touch;
+//      (the `mentor-fix` prompt), checked against what an edit may touch and
+//      against the proven cause itself: the same piece, or for a cause in a
+//      closed layer (the card) or a `missing` one, only an added rule;
 //   3. verification -- the edit, again only on an overlay, must pass fresh
-//      situations of the same case and must not drop any other case's stored
-//      situations by more than the tolerance;
+//      situations of the same case (at least `mentor.verify.minSituations`)
+//      and must not drop any other case's stored situations by more than the
+//      tolerance;
 //   4. apply -- only then the change store writes it, recorded for undo.
 //
-// An attempt that proves nothing, whose edit is refused, or that fails its
-// verification moves on to the next suspects, up to `mentor.fix.maxAttempts`.
-// Every request goes through the run's own helpers (src/mentor/mentor.js), so
-// the switches, the mentor budget, the owner's stop and the charging are the
-// run's; a stop ends the loop with what it has and never touches the measured
-// run. Nothing is written unless `features.mentorAutoFix` is exactly true at
-// the moment of the write.
+// Every measure is scored by a judge reading the LIVE rules, card and learned
+// items, so an edit never moves the yardstick it is measured by. An attempt
+// that proves nothing, whose edit is refused, or that fails its verification
+// moves on to the next suspects, up to `mentor.fix.maxAttempts`. Every request
+// goes through the run's own helpers (src/mentor/mentor.js), so the switches,
+// the mentor budget, the owner's stop and the charging are the run's; a stop
+// ends the loop with what it has and never touches the measured run.
+// `features.mentorAutoFix` is checked before every step that spends (the
+// control, each ablation, the edit request, the verification, each case of
+// the regression) and again right before the write; nothing is written
+// unless it is exactly true at that moment.
 
+import { listRules } from '../admin.js';
 import { fillPromptTemplate } from '../behavior/prompt.js';
 import { log } from '../log.js';
-import { ablationEdits, gainOf } from './ablate.js';
+import { ablationEdits, gainOf, locateSuspect } from './ablate.js';
 import { parseEdit, verdict } from './judge.js';
 import { editToOverlay, overlayView } from './overlay.js';
 
 const FIX_PROMPT = 'mentor-fix';
 /** Every layer an answer may name: parsed with all of them so a closed layer is refused with its reason. */
 const EDIT_LAYERS = ['rules', 'prompt', 'card', 'self', 'learned', 'guild', 'profile'];
-/** The layers an edit may touch at most (never the card), and the config.json default. */
+/** The layers an edit may touch at most (never the card). */
 const OPEN_LAYERS = ['rules', 'prompt', 'self', 'learned', 'guild', 'profile'];
-const DEFAULT_FILES = ['rules', 'system-prompt', 'format', 'reply', 'interject', 'initiate', 'address', 'memory', 'profile'];
+/** The config.json defaults: the profile layer is open only where a deployment lists it. */
+const DEFAULT_LAYERS = ['rules', 'prompt', 'self', 'learned', 'guild'];
+const DEFAULT_FILES = ['system-prompt', 'format', 'reply', 'memory', 'profile'];
 /**
  * The memory writer's prompts. An edit there cannot change a reply (no reply
  * situation could verify it), and a memory case can be verified only by an
  * edit there.
  */
 const WRITER_FILES = new Set(['memory', 'profile', 'server', 'channel']);
+/**
+ * The prompts the reply sandbox renders: an edit anywhere else (`interject`,
+ * `initiate`, `address`, ...) changes nothing a reply case could verify.
+ */
+const REPLY_FILES = new Set(['system-prompt', 'format', 'reply']);
 /** Layers whose pieces an edit may rewrite but never delete. */
 const NO_DELETION = new Set(['rules', 'prompt', 'profile']);
+/** The guild strings: rewritten, never emptied. */
+const GUILD_STRINGS = new Set(['patterns', 'starters']);
 /** Layers held to `mentor.fix.maxGrowthChars`. */
 const GROWTH_CAPPED = new Set(['rules', 'prompt']);
 /** The longest note about the persona or in-joke an edit may write. */
 const ITEM_MAX = 200;
 /** How `failureOf` names a stop (the switches, the budget, the owner): not a failure worth a warning. */
 const STOPS = new Set(['budget', 'disabled', 'stopped by the owner']);
+const CONTROL_PHASE = 'repair: control';
+const NOT_THE_CAUSE = 'not the proven cause';
+/** Put after an edit's `from` to see which rule it falls in; never part of a prompt. */
+const MARK = '\u0000';
 
 /** Wrap `body` in `<tag>`; '' for an empty body (the run's request builders do the same). */
 function block(tag, body) {
@@ -77,18 +103,19 @@ function length(text) {
  * The loop's settings, read now from the live config. What an edit may touch
  * depends on the case's `target`: a memory case only the `prompt` layer and
  * only the memory writer's files of `mentor.fix.files`; any other case every
- * allowed layer and the files that are not the memory writer's.
+ * allowed layer and, of `mentor.fix.files`, only the prompts the reply
+ * sandbox renders (`REPLY_FILES`).
  */
 function settings(config, target) {
   const mentor = config.mentor ?? {};
   const fix = mentor.fix ?? {};
-  let layers = Array.isArray(fix.layers) ? fix.layers.filter((layer) => OPEN_LAYERS.includes(layer)) : OPEN_LAYERS;
+  let layers = Array.isArray(fix.layers) ? fix.layers.filter((layer) => OPEN_LAYERS.includes(layer)) : DEFAULT_LAYERS;
   let files = (Array.isArray(fix.files) ? fix.files : DEFAULT_FILES).map(promptName).filter(Boolean);
   if (target === 'memory') {
     layers = layers.filter((layer) => layer === 'prompt');
     files = files.filter((file) => WRITER_FILES.has(file));
   } else {
-    files = files.filter((file) => !WRITER_FILES.has(file));
+    files = files.filter((file) => REPLY_FILES.has(file));
   }
   return {
     suspects: count(mentor.suspects, 2),
@@ -100,6 +127,7 @@ function settings(config, target) {
     files: [...new Set(files)],
     verifySituations: count(mentor.verify?.situations, 3),
     verifySamples: count(mentor.verify?.samples, 2),
+    verifyMinSituations: count(mentor.verify?.minSituations, 2),
     regressionSituations: count(mentor.regression?.situations, 2),
     tolerance: amount(mentor.regression?.tolerance, 1),
     passScore: Number.isFinite(mentor.pass?.score) ? mentor.pass.score : 7,
@@ -135,15 +163,13 @@ function suspectsOf(diagnosis) {
 }
 
 /**
- * The situations an ablation replays: those of the run whose median
- * `overall` is under the pass score, all of them when none is; and the
- * verdict of the run's own scores over exactly those ("before").
+ * The situations an ablation (and its control) replays: those of the run
+ * whose median `overall` is under the pass score, all of them when none is.
  */
-function weakOf(run, passScore, passCfg) {
+function weakOf(run, passScore) {
   const weak = new Set((run.situationMedians ?? []).filter((m) => typeof m?.overall === 'number' && m.overall < passScore).map((m) => m.n));
   const records = (run.situations ?? []).filter((s) => (weak.size === 0 || weak.has(s.n)) && Array.isArray(s.lines) && s.lines.length > 0);
-  const groups = records.map((s) => (s.answers ?? []).map((a) => a.score).filter(Boolean));
-  return { situations: records.map((s) => ({ title: s.title ?? '', lines: s.lines })), before: verdict(groups.flat(), passCfg, groups) };
+  return { situations: records.map((s) => ({ title: s.title ?? '', lines: s.lines })) };
 }
 
 /** Why an edit may not be made, by the loop's own limits; null when it may. */
@@ -151,6 +177,7 @@ function refusalOf(edit, cfg) {
   if (!cfg.layers.includes(edit.layer)) return 'layer not allowed';
   if (edit.layer === 'prompt' && !cfg.files.includes(edit.target)) return 'file not allowed';
   if (NO_DELETION.has(edit.layer) && !edit.to.trim()) return 'deletion not allowed';
+  if (edit.layer === 'guild' && GUILD_STRINGS.has(edit.target) && !edit.to.trim()) return 'deletion not allowed';
   if (GROWTH_CAPPED.has(edit.layer) && length(edit.to) - length(edit.from) > cfg.maxGrowthChars) return 'growth over the cap';
   if (edit.layer === 'learned' && length(edit.to.trim()) > cfg.learnedChars) return 'text too long';
   const item = edit.layer === 'self' || (edit.layer === 'guild' && edit.target === 'injokes');
@@ -159,22 +186,106 @@ function refusalOf(edit, cfg) {
 }
 
 /**
+ * Where a suspect lies in `view` (src/mentor/ablate.js#locateSuspect, with
+ * the `ref` dropped when it hides the excerpt) and the edits that remove it;
+ * `where` carries the text of the piece for a rule or a list item.
+ */
+function locate(suspect, view) {
+  const variants = suspect.ref ? [suspect, { ...suspect, ref: undefined }] : [suspect];
+  for (const variant of variants) {
+    const found = locateSuspect(variant, view);
+    if (!found) continue;
+    const edits = ablationEdits(variant, view);
+    if (!edits) return null;
+    const where = { ...found };
+    const guild = view.memory?.getGuild?.() ?? {};
+    if (found.layer === 'rules') where.text = listRules(view.prompts?.rules)[found.index];
+    else if (found.layer === 'self') where.text = String(guild.self?.[found.index] ?? '');
+    else if (found.layer === 'learned') where.text = String(guild.learned?.[found.index]?.text ?? '');
+    else if (found.layer === 'guild' && found.field === 'injokes') where.text = String(guild.injokes?.[found.index] ?? '');
+    return { where, edits };
+  }
+  return null;
+}
+
+/**
+ * Whether the store would apply `from` inside rule `where.index`: the rule
+ * is still the one proven there, `from` is on one line, and its first
+ * occurrence in the rules text (the one the change store replaces) ends
+ * inside that rule's bullet.
+ */
+function inRule(rulesText, from, where) {
+  if (typeof rulesText !== 'string' || from.includes('\n')) return false;
+  const rules = listRules(rulesText);
+  if (rules[where.index] !== where.text) return false;
+  const at = rulesText.indexOf(from);
+  if (at === -1) return false;
+  const end = at + from.length;
+  const marked = listRules(rulesText.slice(0, end) + MARK + rulesText.slice(end));
+  return marked.length === rules.length && marked.findIndex((rule) => rule.includes(MARK)) === where.index;
+}
+
+/**
+ * Why an edit does not touch the proven cause; null when it does. A cause
+ * that is `missing`, or lies in a layer the loop may not edit (the card, or
+ * one the config closes), allows only an added rule (layer `rules`, empty
+ * `from`). Any other cause allows only an edit of the very piece proven, with
+ * a non-empty `from`: the same prompt; the same rule (`from` first found
+ * inside its bullet); the same list item (`from` equal to or inside its text);
+ * the same guild field; the same member and field.
+ */
+function causeRefusal(edit, chosen, view, cfg) {
+  const where = chosen.where;
+  const layer = chosen.suspect.layer === 'missing' ? 'missing' : where?.layer;
+  if (!layer) return NOT_THE_CAUSE;
+  if (layer === 'missing' || !cfg.layers.includes(layer)) return edit.layer === 'rules' && edit.from === '' ? null : NOT_THE_CAUSE;
+  const from = edit.from.trim();
+  if (edit.layer !== layer || !from) return NOT_THE_CAUSE;
+  let same;
+  switch (layer) {
+    case 'rules':
+      same = inRule(view.prompts?.rules, edit.from, where);
+      break;
+    case 'prompt':
+      same = edit.target === where.name;
+      break;
+    case 'self':
+    case 'learned':
+      same = where.text.includes(from);
+      break;
+    case 'guild':
+      same = edit.target === where.field && (where.field !== 'injokes' || where.text.includes(from));
+      break;
+    case 'profile':
+      same = edit.target === `${where.userId}.${where.field}`;
+      break;
+    default:
+      same = false;
+  }
+  return same ? null : NOT_THE_CAUSE;
+}
+
+/**
  * The repair loop for one mentor. Every value is read at the moment of use:
- * `hot.config.features.mentorAutoFix` (checked before every attempt and
- * before the write), `hot.config.mentor` (`suspects`, `ablationGain`,
- * `ablationSamples`, `fix.maxAttempts`, `fix.maxGrowthChars`, `fix.layers`
- * -- the card is never allowed --, `fix.files` -- narrowed by the case's
- * target: a reply case never edits the memory writer's prompts (`memory`,
- * `profile`, `server`, `channel`), a memory case edits only those and only
- * through the `prompt` layer --, `verify.situations`,
- * `verify.samples`, `regression.situations`, `regression.tolerance`,
- * `pass`), `hot.config.memory.learnedChars` and the `mentor-fix` prompt.
+ * `hot.config.features.mentorAutoFix` (checked before the control, every
+ * ablation, the edit request, the verification, each case of the regression
+ * and the write), `hot.config.mentor` (`suspects`, `ablationGain`,
+ * `ablationSamples` -- the samples of the control and of each ablation --,
+ * `fix.maxAttempts`, `fix.maxGrowthChars`, `fix.layers` -- the card is never
+ * allowed, the default leaves `profile` out --, `fix.files` -- narrowed by
+ * the case's target: a reply case only `system-prompt`, `format` and `reply`,
+ * a memory case only the memory writer's prompts (`memory`, `profile`,
+ * `server`, `channel`) and only through the `prompt` layer --,
+ * `verify.situations`, `verify.samples`, `verify.minSituations`,
+ * `regression.situations`, `regression.tolerance`, `pass`),
+ * `hot.config.memory.learnedChars` and the `mentor-fix` prompt.
  * @param {object} deps
  * @param {{ config: object, prompts: object }} deps.hot
  * @param {object} deps.cases              From `createCaseStore` (other cases and their last runs, read only).
- * @param {{ apply: Function }} deps.changes  From `createChangeStore`.
+ * @param {{ apply: Function, promptLayers?: Function }} deps.changes  From `createChangeStore`; with
+ *   `promptLayers`, an edit of a prompt file is verified on the text `apply` will start from.
  * @param {(guildId: string) => object} deps.baseView  The live view of the guild (src/mentor/sandbox.js#liveView).
- * @param {Function} deps.measureOn        mentor.js: answer situations on a view and score them.
+ * @param {Function} deps.measureOn        mentor.js: answer situations on a view and score them (with `judgeView`).
  * @param {Function} deps.askMentor        mentor.js: one checked, charged request to the mentor model.
  * @param {Function} deps.inventSituations mentor.js: one situations request.
  * @param {Function} deps.commonBlocks     mentor.js: the blocks every mentor request shares.
@@ -185,8 +296,10 @@ function refusalOf(edit, cfg) {
  *   feedback: string, self: { id: string, name: string }, seen: string }) => Promise<object> }}
  *   `attempt` runs the whole loop for a failed run and resolves with its record (never rejects):
  *   `{ attempts: [{ n, suspects: [{ layer, excerpt, located, gain, confirmed }], edit, refused,
- *   verify: { fresh, regression: [{ caseId, held, situations: [{ n, before, after }] }], skipped } | null,
- *   accepted }], applied: { changeId, layer, target, summary } | null, reason, tokens }`.
+ *   verify: { fresh: { passed, kept, medians, situations }, regression: [{ caseId, held, situations: [{ n, before, after }] }],
+ *   skipped } | null, accepted }], applied: { changeId, layer, target, summary } | null, reason, tokens }`,
+ *   plus `control: { medians, situations }` once the control was measured. `reason` 'not reproduced':
+ *   the control passed on every weak situation.
  */
 export function createRepair({ hot, cases, changes, baseView, measureOn, askMentor, inventSituations, commonBlocks, templateValues, canScore, failureOf }) {
   /** Stop when the switch of the loop (or of the mentor) is off now. */
@@ -195,18 +308,29 @@ export function createRepair({ hot, cases, changes, baseView, measureOn, askMent
     if (features.mentorAutoFix !== true || features.mentor !== true) throw new LoopEnd('disabled');
   }
 
-  /** One suspect removed and measured; a `missing` cause is proven without it. */
-  async function ablate(ctx, suspect, { base, item, weak, input, cfg, n }) {
+  /** What `editToOverlay` reads a prompt file's start text through: the change store's own reader, when it has one. */
+  function overlayOptions() {
+    return typeof changes?.promptLayers === 'function' ? { promptLayers: (name) => changes.promptLayers(name) } : {};
+  }
+
+  /**
+   * One suspect removed and measured against the control; a `missing` cause
+   * is proven without it. Resolves with the suspect as the record shows it
+   * and where it was found.
+   */
+  async function ablate(ctx, suspect, { base, item, weak, input, cfg, n, control }) {
     const shown = { layer: suspect.layer, excerpt: suspect.excerpt };
-    if (suspect.layer === 'missing') return { ...shown, located: null, gain: null, confirmed: true };
-    // A `ref` taken from a change aimed at another cause of the same layer must not hide the excerpt.
-    const edits = ablationEdits(suspect, base) ?? (suspect.ref ? ablationEdits({ ...suspect, ref: undefined }, base) : null);
-    if (!edits) return { ...shown, located: false, gain: null, confirmed: false };
+    if (suspect.layer === 'missing') return { shown: { ...shown, located: null, gain: null, confirmed: true }, where: null };
+    const found = locate(suspect, base);
+    if (!found) return { shown: { ...shown, located: false, gain: null, confirmed: false }, where: null };
+    const before = await control(base, cfg);
+    checkSwitch();
     const phase = `repair ${n}: ablation`;
     ctx.phase = phase;
     const measured = await measureOn(ctx, {
       item,
-      view: overlayView(base, edits),
+      view: overlayView(base, found.edits),
+      judgeView: base,
       situations: weak.situations,
       samples: cfg.ablationSamples,
       reference: input.reference,
@@ -214,8 +338,8 @@ export function createRepair({ hot, cases, changes, baseView, measureOn, askMent
       self: input.self,
       phase,
     });
-    const gain = gainOf(weak.before, measured.verdict);
-    return { ...shown, located: true, gain, confirmed: typeof gain === 'number' && gain >= cfg.ablationGain };
+    const gain = gainOf(before, measured.verdict);
+    return { shown: { ...shown, located: true, gain, confirmed: typeof gain === 'number' && gain >= cfg.ablationGain }, where: found.where };
   }
 
   /** The mentor's one edit against a proven cause, parsed; null for an answer that is no edit. */
@@ -245,7 +369,7 @@ export function createRepair({ hot, cases, changes, baseView, measureOn, askMent
   }
 
   /** The regression of one other case on the edited view, or a reason to skip it (null: not in scope). */
-  async function regressionOf(ctx, other, { guildId, view, input, cfg, phase }) {
+  async function regressionOf(ctx, other, { guildId, view, judgeView, input, cfg, phase }) {
     let last;
     try {
       last = cases.lastRun(guildId, other.id);
@@ -257,9 +381,11 @@ export function createRepair({ hot, cases, changes, baseView, measureOn, askMent
     const medians = Array.isArray(last.situationMedians) ? last.situationMedians : [];
     if (medians.length === 0 || !canScore(other.target)) return { skipped: true };
     const replay = stored.slice(0, cfg.regressionSituations);
+    checkSwitch();
     const measured = await measureOn(ctx, {
       item: other,
       view,
+      judgeView,
       situations: replay.map((s) => ({ title: s.title ?? '', lines: s.lines })),
       samples: 1,
       reference: input.reference,
@@ -278,32 +404,41 @@ export function createRepair({ hot, cases, changes, baseView, measureOn, askMent
     return { entry: { caseId: other.id, held, situations } };
   }
 
-  /** Fresh situations of the case, then every other case's stored ones, on the edited view. True when both hold. */
-  async function verifyEdit(ctx, { guildId, item, view, input, cfg, n, verify }) {
+  /**
+   * Fresh situations of the case, then every other case's stored ones, on the
+   * edited view, scored against `judgeView` (the live view). Accepted when
+   * both hold; refused when fewer fresh situations than
+   * `mentor.verify.minSituations` were kept (nothing is answered then).
+   */
+  async function verifyEdit(ctx, { guildId, item, view, judgeView, input, cfg, n, verify }) {
+    checkSwitch();
     const phase = `repair ${n}: verify`;
     ctx.phase = phase;
     const invented = await inventSituations(ctx, { item, view, reference: input.reference, feedback: input.feedback, self: input.self, count: cfg.verifySituations, phase });
-    const fresh =
-      invented.situations.length > 0
-        ? (await measureOn(ctx, { item, view, situations: invented.situations, samples: cfg.verifySamples, reference: input.reference, feedback: input.feedback, self: input.self, phase })).verdict
-        : verdict([], hot.config.mentor?.pass, []);
-    verify.fresh = { passed: fresh.passed, medians: fresh.medians, situations: fresh.situations };
-    if (!fresh.passed) return false;
+    const kept = invented.situations.length;
+    if (kept < cfg.verifyMinSituations) {
+      const none = verdict([], hot.config.mentor?.pass, []);
+      verify.fresh = { passed: false, kept, medians: none.medians, situations: none.situations };
+      return { accepted: false, refused: 'too few fresh situations' };
+    }
+    const fresh = (await measureOn(ctx, { item, view, judgeView, situations: invented.situations, samples: cfg.verifySamples, reference: input.reference, feedback: input.feedback, self: input.self, phase })).verdict;
+    verify.fresh = { passed: fresh.passed, kept, medians: fresh.medians, situations: fresh.situations };
+    if (!fresh.passed) return { accepted: false, refused: null };
 
     const regressionPhase = `repair ${n}: regression`;
     ctx.phase = regressionPhase;
     for (const other of cases.list(guildId)) {
       if (other.id === item.id) continue;
-      const result = await regressionOf(ctx, other, { guildId, view, input, cfg, phase: regressionPhase });
+      const result = await regressionOf(ctx, other, { guildId, view, judgeView, input, cfg, phase: regressionPhase });
       if (!result) continue;
       if (result.skipped) {
         verify.skipped.push(other.id);
         continue;
       }
       verify.regression.push(result.entry);
-      if (!result.entry.held) return false;
+      if (!result.entry.held) return { accepted: false, refused: null };
     }
-    return true;
+    return { accepted: true, refused: null };
   }
 
   /**
@@ -332,8 +467,37 @@ export function createRepair({ hot, cases, changes, baseView, measureOn, askMent
     const fixPrompt = hot.prompts?.[FIX_PROMPT];
     if (typeof fixPrompt !== 'string' || !fixPrompt.trim()) return finish('prompt missing');
     // Per suspect: `done` once it was not proven or an edit was asked for it; `result` once measured.
-    const state = suspects.map((suspect) => ({ suspect, done: false, result: null }));
-    const weak = weakOf(run, settings(hot.config, item.target).passScore, hot.config.mentor?.pass);
+    const state = suspects.map((suspect) => ({ suspect, done: false, result: null, where: null }));
+    const weak = weakOf(run, settings(hot.config, item.target).passScore);
+
+    // The control: measured the first time an ablation needs it, then reused for every suspect.
+    let controlVerdict = null;
+    const control = async (base, cfg) => {
+      if (controlVerdict) return controlVerdict;
+      checkSwitch();
+      ctx.phase = CONTROL_PHASE;
+      const measured = await measureOn(ctx, {
+        item,
+        view: base,
+        judgeView: base,
+        situations: weak.situations,
+        samples: cfg.ablationSamples,
+        reference: input.reference,
+        feedback: input.feedback,
+        self: input.self,
+        phase: CONTROL_PHASE,
+      });
+      controlVerdict = measured.verdict;
+      record.control = { medians: controlVerdict.medians, situations: controlVerdict.situations };
+      const reproduced = !(
+        weak.situations.length > 0 &&
+        controlVerdict.situations.length === weak.situations.length &&
+        controlVerdict.situations.every((s) => typeof s.overall === 'number' && s.overall >= cfg.passScore)
+      );
+      log.info('mentor: repair control', { caseId: item.id, situations: weak.situations.length, reproduced });
+      if (!reproduced) throw new LoopEnd('not reproduced');
+      return controlVerdict;
+    };
 
     try {
       for (;;) {
@@ -352,7 +516,11 @@ export function createRepair({ hot, cases, changes, baseView, measureOn, askMent
         const base = baseView(guildId);
         let chosen = null;
         for (const candidate of candidates) {
-          candidate.result ??= await ablate(ctx, candidate.suspect, { base, item, weak, input, cfg, n });
+          if (!candidate.result) {
+            const measured = await ablate(ctx, candidate.suspect, { base, item, weak, input, cfg, n, control });
+            candidate.result = measured.shown;
+            candidate.where = measured.where;
+          }
           entry.suspects.push({ ...candidate.result });
           if (!candidate.result.confirmed) candidate.done = true;
           else chosen ??= candidate;
@@ -363,7 +531,8 @@ export function createRepair({ hot, cases, changes, baseView, measureOn, askMent
         }
         chosen.done = true;
 
-        // 2. One edit against it, within what an edit may touch.
+        // 2. One edit against it, within what an edit may touch and on the proven cause itself.
+        checkSwitch();
         const edit = await askEdit(ctx, run, { item, input, suspect: chosen.suspect, gain: chosen.result.gain, cfg, n });
         if (!edit) {
           entry.refused = 'invalid answer';
@@ -373,16 +542,18 @@ export function createRepair({ hot, cases, changes, baseView, measureOn, askMent
         entry.edit = { layer: edit.layer, target: edit.target, from: edit.from, to: edit.to, why: edit.why };
         const view = baseView(guildId);
         const refusal = refusalOf(edit, cfg);
-        const edits = refusal ? null : editToOverlay(edit, view);
-        entry.refused = refusal ?? edits.error ?? null;
+        const edits = refusal ? null : editToOverlay(edit, view, overlayOptions());
+        entry.refused = refusal ?? edits.error ?? causeRefusal(edit, chosen, view, cfg);
         if (entry.refused) {
           logAttempt();
           continue;
         }
 
-        // 3. Verification on the edited view.
+        // 3. Verification on the edited view, judged against the live one.
         entry.verify = { fresh: null, regression: [], skipped: [] };
-        entry.accepted = await verifyEdit(ctx, { guildId, item, view: overlayView(view, edits), input, cfg, n, verify: entry.verify });
+        const verified = await verifyEdit(ctx, { guildId, item, view: overlayView(view, edits), judgeView: view, input, cfg, n, verify: entry.verify });
+        entry.accepted = verified.accepted;
+        entry.refused = verified.refused;
         if (!entry.accepted) {
           logAttempt();
           continue;

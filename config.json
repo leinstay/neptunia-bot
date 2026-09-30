@@ -236,11 +236,11 @@
     "fix": {
       "maxAttempts": 3,
       "maxGrowthChars": 300,
-      "layers": ["rules", "prompt", "self", "learned", "guild", "profile"],
-      "files": ["rules", "system-prompt", "format", "reply", "interject", "initiate", "address", "memory", "profile"]
+      "layers": ["rules", "prompt", "self", "learned", "guild"],
+      "files": ["system-prompt", "format", "reply", "memory", "profile"]
     },
     "regression": { "situations": 2, "tolerance": 1 },
-    "verify": { "situations": 3, "samples": 2 }
+    "verify": { "situations": 3, "samples": 2, "minSituations": 2 }
   },
   "warmup": {
     "enabled": true,

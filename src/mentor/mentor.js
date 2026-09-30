@@ -469,12 +469,18 @@ export function createMentor({ hot, store, llm, client, cases, budget, changes, 
     }
   }
 
-  async function scoreAll(ctx, { target, records, repeated, item, view, self, reference, feedback, phase }) {
+  /**
+   * Scores every answer of `records`. The judge's yardstick -- the
+   * `<character>`, `<rules>` and `<learned>` blocks -- comes from `judgeView`
+   * (default: `view`, the view the answers were made on), so a what-if run is
+   * scored against the live rules while the persona answered without them.
+   */
+  async function scoreAll(ctx, { target, records, repeated, item, view, judgeView = view, self, reference, feedback, phase }) {
     const labels = view.prompts.labels ?? {};
     const intended = Array.isArray(labels.mentor?.intended) ? labels.mentor.intended.filter((s) => typeof s === 'string' && s.trim()) : [];
-    const character = target === 'reply' ? block('character', fillPromptTemplate(view.prompts['character-card'], { name: self.name })) : '';
-    const rules = block('rules', fillPromptTemplate(view.prompts.rules, { name: self.name }));
-    const learned = block('learned', learnedLine(view));
+    const character = target === 'reply' ? block('character', fillPromptTemplate(judgeView.prompts['character-card'], { name: self.name })) : '';
+    const rules = block('rules', fillPromptTemplate(judgeView.prompts.rules, { name: self.name }));
+    const learned = block('learned', learnedLine(judgeView));
     const system = fillPromptTemplate(hot.prompts[PROMPTS[item.target].score], templateValues(self.name));
     const answersTag = target === 'memory' ? 'stored' : 'answers';
 
@@ -529,6 +535,9 @@ export function createMentor({ hot, store, llm, client, cases, budget, changes, 
    * Answer `situations` on `view` with `samples` samples each (as `item`'s
    * target: the reply or the memory sandbox), then score every answer: the
    * one measuring step of a run, a check, an ablation and a verification.
+   * `judgeView` (default: `view`) is the view the judge's `<character>`,
+   * `<rules>` and `<learned>` blocks are built from: the repair loop passes
+   * the live view, so an edit never moves the yardstick it is measured by.
    * `phase` replaces the status phases of the steps. Throws what the steps
    * throw (a stop, a failed request); `into` receives `records`, `prepared`
    * and `repeated` as soon as each exists, so a caller keeps what was
@@ -536,7 +545,7 @@ export function createMentor({ hot, store, llm, client, cases, budget, changes, 
    * @returns {Promise<{ records: object[], scores: object[], groups: object[][], verdict: object,
    *   repeated: object[], prepared: object[] }>}
    */
-  async function measureOn(ctx, { item, view, situations, samples, reference, feedback, self, phase, into = {} }) {
+  async function measureOn(ctx, { item, view, judgeView = view, situations, samples, reference, feedback, self, phase, into = {} }) {
     const prepared = situations.map((situation, i) => {
       const at = now();
       const { history } = situationToHistory(situation, { selfId: self.id, selfName: self.name, now: at, channel: reference.channel });
@@ -554,7 +563,7 @@ export function createMentor({ hot, store, llm, client, cases, budget, changes, 
       repeated = repeatedPhrases(all);
     }
     into.repeated = repeated;
-    await scoreAll(ctx, { target: item.target, records, repeated, item, view, self, reference, feedback, phase });
+    await scoreAll(ctx, { target: item.target, records, repeated, item, view, judgeView, self, reference, feedback, phase });
     return { records, ...verdictOf(records), repeated, prepared };
   }
 

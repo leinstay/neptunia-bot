@@ -100,13 +100,13 @@ function fakePrompts(overrides = {}) {
   };
 }
 
-function fakeMemoryStore() {
+function fakeMemoryStore(guild = {}) {
   const profiles = {
     [ALICE]: { id: ALICE, names: ['Alice'], interests: [], details: [], aliases: [], episodes: [], affinity: { score: 0, reason: '', history: [] } },
     [BRUNO]: { id: BRUNO, names: ['Bruno'], interests: [], details: [], aliases: [], episodes: [], affinity: { score: 0, reason: '', history: [] } },
   };
   return {
-    getGuild: () => ({ patterns: '', starters: '', injokes: [], self: [], learned: [] }),
+    getGuild: () => ({ patterns: '', starters: '', injokes: [], self: [], learned: [], ...guild }),
     getUser: (guildId, id) => profiles[id] ?? null,
     getPrivate: () => {
       throw new Error('the private layer is out of bounds for the mentor');
@@ -225,7 +225,7 @@ function reference() {
   ];
 }
 
-function setup({ config = {}, prompts = {}, llm = fakeLlm(), changes = fakeChanges(), withChanges = true, dir: givenDir } = {}) {
+function setup({ config = {}, prompts = {}, llm = fakeLlm(), changes = fakeChanges(), withChanges = true, dir: givenDir, guild = {} } = {}) {
   const dir = givenDir ?? fs.mkdtempSync(path.join(os.tmpdir(), 'nep-mentor-repair-'));
   let clock = NOW;
   const now = () => (clock += 1000);
@@ -244,7 +244,7 @@ function setup({ config = {}, prompts = {}, llm = fakeLlm(), changes = fakeChang
   };
   const mentor = createMentor({
     hot,
-    store: fakeMemoryStore(),
+    store: fakeMemoryStore(guild),
     llm,
     client,
     cases,
@@ -417,21 +417,36 @@ test('attempt: an excerpt that cannot be located is not confirmed', () => {
 
 test('attempt: a missing cause is confirmed without ablation', () => {
   const diagnosis = JSON.stringify({ ...DIAGNOSIS, causes: [{ layer: 'missing', excerpt: '', why: 'Nothing says a limit is short.' }] });
-  const fix = JSON.stringify({ layer: 'prompt', target: 'format.md', from: '', to: 'One idea per message.', why: 'An addition.' });
-  // The addition to the format prompt is what makes the persona short.
+  const fix = JSON.stringify({ layer: 'rules', target: 'rules.md', from: '', to: 'One idea per message.', why: 'An addition.' });
+  // The added rule is what makes the persona short.
   const talkFor = (call) => (call.system.includes('One idea per message.') ? '<msg>GOOD short</msg>' : '<msg>BAD long</msg>');
   return withSetup({ llm: fakeLlm({ diagnosis, fix, talkFor }) }, async (env) => {
     const { run } = await runCase(env);
     const [attempt] = run.repair.attempts;
     assert.deepEqual(attempt.suspects, [{ layer: 'missing', excerpt: '', located: null, gain: null, confirmed: true }]);
+    // Nothing is removed for a missing cause: no ablation, and no control either.
     assert.equal(env.llm.inPhase('repair 1: ablation').length, 0);
+    assert.equal(env.llm.inPhase('repair: control').length, 0);
+    assert.equal('control' in run.repair, false);
     const cause = JSON.parse(blockBody(env.llm.ofKind('fix')[0].user, 'cause'));
     assert.deepEqual(cause, { layer: 'missing', excerpt: '', why: 'Nothing says a limit is short.', gain: null });
-    // The prompt target is used without its .md.
-    assert.deepEqual(attempt.edit, { layer: 'prompt', target: 'format', from: '', to: 'One idea per message.', why: 'An addition.' });
+    assert.deepEqual(attempt.edit, { layer: 'rules', target: 'rules.md', from: '', to: 'One idea per message.', why: 'An addition.' });
+    assert.equal(attempt.accepted, true);
+    assert.equal(env.changes.calls[0].edit.from, '');
+    assert.equal(run.repair.reason, 'applied');
+  });
+});
+
+test('attempt: a prompt target is used without its .md', () => {
+  const diagnosis = JSON.stringify({ ...DIAGNOSIS, causes: [{ layer: 'prompt', excerpt: 'Use <msg> and <react> tags.', why: 'x' }] });
+  const fix = JSON.stringify({ layer: 'prompt', target: 'format.md', from: 'Use <msg> and <react> tags.', to: 'Use <msg> tags.', why: 'x' });
+  const talkFor = (call) => (call.system.includes('Use <msg> and <react> tags.') ? '<msg>BAD long</msg>' : '<msg>GOOD short</msg>');
+  return withSetup({ llm: fakeLlm({ diagnosis, fix, talkFor }) }, async (env) => {
+    const { run } = await runCase(env);
+    const [attempt] = run.repair.attempts;
+    assert.equal(attempt.edit.target, 'format');
     assert.equal(attempt.accepted, true);
     assert.equal(env.changes.calls[0].edit.target, 'format');
-    assert.equal(run.repair.reason, 'applied');
   });
 });
 
@@ -471,9 +486,10 @@ test('attempt: a confirmed suspect gets one edit request', () =>
     const seenStart = (text) => text.indexOf('<seen>');
     const seenOf = (text) => text.slice(seenStart(text), text.indexOf('</seen>') + '</seen>'.length);
     assert.equal(seenOf(call.user), seenOf(diagnose.user));
+    // Of the configured files a reply case gets only the prompts its sandbox renders.
     assert.deepEqual(JSON.parse(blockBody(call.user, 'allowed')), {
       layers: ['rules', 'prompt', 'self', 'learned', 'guild', 'profile'],
-      files: ['rules', 'system-prompt', 'format', 'reply'],
+      files: ['system-prompt', 'format', 'reply'],
       maxGrowthChars: 300,
     });
     assert.equal(run.repair.reason, 'applied');
@@ -527,6 +543,11 @@ const WRITER_FILES = ['memory', 'profile', 'server', 'channel'];
 const ALL_FILES = { mentor: { fix: { files: ['rules', 'system-prompt', 'format', 'reply', ...WRITER_FILES] } } };
 const MISSING = JSON.stringify({ ...DIAGNOSIS, causes: [{ layer: 'missing', excerpt: '', why: 'Nothing says it.' }] });
 const MEMORY_CASE = 'The persona remembers the pet named Héloïse.';
+const MEMORY_PROMPT_CAUSE = JSON.stringify({
+  ...DIAGNOSIS,
+  causes: [{ layer: 'prompt', excerpt: 'Summarize what happened.', why: 'x' }],
+  changes: [{ layer: 'prompt', target: 'memory.md', from: 'Summarize what happened.', to: 'Summarize briefly.', why: 'x' }],
+});
 
 test("attempt: a reply case may not edit the memory writer's prompts", async () => {
   for (const target of WRITER_FILES) {
@@ -539,9 +560,11 @@ test("attempt: a reply case may not edit the memory writer's prompts", async () 
       assert.equal(env.changes.calls.length, 0, target);
     });
   }
-  // A prompt of the persona itself is still open to a reply case.
-  const fix = JSON.stringify({ layer: 'prompt', target: 'format', from: '', to: 'One idea per message.', why: 'x' });
-  await withSetup({ config: ALL_FILES, llm: fakeLlm({ diagnosis: MISSING, fix }) }, async (env) => {
+  // A prompt of the persona itself is still open to a reply case (here the proven cause lies in it).
+  const diagnosis = JSON.stringify({ ...DIAGNOSIS, causes: [{ layer: 'prompt', excerpt: 'Use <msg> and <react> tags.', why: 'x' }] });
+  const fix = JSON.stringify({ layer: 'prompt', target: 'format', from: 'Use <msg> and <react> tags.', to: 'Use <msg> tags.', why: 'x' });
+  const talkFor = (call) => (call.system.includes('Use <msg> and <react> tags.') ? '<msg>BAD long</msg>' : '<msg>GOOD short</msg>');
+  await withSetup({ config: ALL_FILES, llm: fakeLlm({ diagnosis, fix, talkFor }) }, async (env) => {
     const { run } = await runCase(env);
     assert.equal(run.repair.attempts[0].refused, null);
   });
@@ -554,11 +577,16 @@ test("attempt: a memory case may edit only the memory writer's prompts", async (
     { fix: FIX, reason: 'layer not allowed' },
     { fix: { layer: 'learned', target: '', from: 'x', to: 'y', why: 'x' }, reason: 'layer not allowed' },
     { fix: { layer: 'profile', target: `${ALICE}.character`, from: 'x', to: 'y', why: 'x' }, reason: 'layer not allowed' },
-    { fix: { layer: 'prompt', target: 'memory', from: '', to: 'Keep the notes short.', why: 'x' }, reason: null },
+    // A missing cause allows only an added rule, which a memory case cannot make.
+    { fix: { layer: 'prompt', target: 'memory', from: '', to: 'Keep the notes short.', why: 'x' }, reason: 'not the proven cause' },
+    // A cause proven in the memory writer's prompt is edited there.
+    { fix: { layer: 'prompt', target: 'memory', from: 'Summarize what happened.', to: 'Summarize briefly.', why: 'x' }, reason: null, diagnosis: MEMORY_PROMPT_CAUSE },
   ];
-  for (const { fix, reason } of variants) {
-    const llm = fakeLlm({ diagnosis: MISSING, fix: JSON.stringify(fix), scoreFor: () => 3 });
-    await withSetup({ config: ALL_FILES, llm }, async (env) => {
+  // Only the ablation of the memory prompt's sentence helps.
+  const scoreFor = (a, call) => (call.phase === 'repair 1: ablation' ? 9 : 3);
+  for (const { fix, reason, diagnosis = MISSING } of variants) {
+    const llm = fakeLlm({ diagnosis, fix: JSON.stringify(fix), scoreFor });
+    await withSetup({ config: ALL_FILES, llm, prompts: { memory: 'Summarize what happened. Keep names.' } }, async (env) => {
       const { run } = await runCase(env, MEMORY_CASE, 'memory');
       assert.equal(run.target, 'memory');
       const [attempt] = run.repair.attempts;
@@ -570,11 +598,12 @@ test("attempt: a memory case may edit only the memory writer's prompts", async (
 });
 
 test("attempt: the allowed block carries the files of the case's target", async () => {
+  // ALL_FILES lists no layers: the default leaves the profile layer out.
   await withSetup({ config: ALL_FILES, llm: fakeLlm({ diagnosis: MISSING }) }, async (env) => {
     await runCase(env);
     assert.deepEqual(JSON.parse(blockBody(env.llm.ofKind('fix')[0].user, 'allowed')), {
-      layers: ['rules', 'prompt', 'self', 'learned', 'guild', 'profile'],
-      files: ['rules', 'system-prompt', 'format', 'reply'],
+      layers: ['rules', 'prompt', 'self', 'learned', 'guild'],
+      files: ['system-prompt', 'format', 'reply'],
       maxGrowthChars: 300,
     });
   });
@@ -597,7 +626,10 @@ test("attempt: the allowed block carries the files of the case's target", async 
 test('attempt: a prompt that grows past the cap is refused', () => {
   // 'Use' (3 characters) becomes 304 characters: the prompt grows by 301.
   const fix = JSON.stringify({ layer: 'prompt', target: 'format', from: 'Use', to: `Use ${'x'.repeat(300)}`, why: 'x' });
-  return withSetup({ llm: fakeLlm({ fix }) }, async (env) => {
+  // The proven cause lies in the format prompt, so an edit there is on the cause.
+  const diagnosis = JSON.stringify({ ...DIAGNOSIS, causes: [{ layer: 'prompt', excerpt: 'Use <msg> and <react> tags.', why: 'x' }] });
+  const talkFor = (call) => (call.system.includes('Use <msg> and <react> tags.') ? '<msg>BAD long</msg>' : '<msg>GOOD short</msg>');
+  return withSetup({ llm: fakeLlm({ fix, diagnosis, talkFor }) }, async (env) => {
     const { run } = await runCase(env);
     assert.equal(run.repair.attempts[0].refused, 'growth over the cap');
     assert.equal(env.llm.inPhase('repair 1: verify').length, 0);
@@ -627,6 +659,7 @@ test('attempt: fresh situations that fail end the attempt', () => {
     }
     assert.deepEqual(attempt.verify.fresh, {
       passed: false,
+      kept: 2,
       medians: { human: 8, character: 8, rules: 8, goal: 3, overall: 3 },
       situations: [{ n: 1, overall: 3, goal: 3 }, { n: 2, overall: 3, goal: 3 }],
     });
@@ -765,7 +798,7 @@ test('attempt: the phases of the loop show in the status', () =>
     storedCase(env);
     await runCase(env);
     const phases = [...new Set(env.llm.calls.map((c) => c.phase).filter((p) => String(p).startsWith('repair')))];
-    assert.deepEqual(phases, ['repair 1: ablation', 'repair 1: edit', 'repair 1: verify', 'repair 1: regression']);
+    assert.deepEqual(phases, ['repair: control', 'repair 1: ablation', 'repair 1: edit', 'repair 1: verify', 'repair 1: regression']);
   }));
 
 // ---- several attempts and the end of the loop -------------------------------------
@@ -891,4 +924,267 @@ test('attempt: an accepted rules edit lands in the local rules file through the 
     assert.equal(change.layer, 'rules');
     assert.equal(run.repair.applied.summary, change.summary);
   }).finally(() => fs.rmSync(root, { recursive: true, force: true }));
+});
+
+// ---- the control, the judge's yardstick, the proven cause -----------------------------
+
+test("attempt: the gain is measured against a control run, not against the run's own scores", () => {
+  // The persona is equally bad with or without the rule; the run happened to score 3, any later measure 6.
+  const llm = fakeLlm({ talkFor: () => '<msg>BAD always</msg>', scoreFor: (a, call) => (String(call.phase).startsWith('repair') ? 6 : 3) });
+  return withSetup({ llm }, async (env) => {
+    const { run } = await runCase(env);
+    // The weak situations measured again on the unchanged view, with ablationSamples samples.
+    const control = env.llm.inPhase('repair: control');
+    assert.deepEqual(control.map((c) => c.kind), ['talk', 'talk', 'talk', 'talk', 'score', 'score']);
+    for (const call of control.filter((c) => c.kind === 'talk')) assert.ok(call.system.includes(BAD_RULE));
+    assert.deepEqual(run.repair.control, {
+      medians: { human: 8, character: 8, rules: 8, goal: 6, overall: 6 },
+      situations: [{ n: 1, overall: 6, goal: 6 }, { n: 2, overall: 6, goal: 6 }],
+    });
+    // Against the run's own 3 this would be a gain of 3; against the control it is none.
+    assert.deepEqual(run.repair.attempts[0].suspects, [{ layer: 'rules', excerpt: BAD_RULE, located: true, gain: 0, confirmed: false }]);
+    assert.equal(env.llm.ofKind('fix').length, 0);
+    assert.equal(run.repair.reason, 'no suspect left');
+    // The control comes once, before the first ablation.
+    const phases = env.llm.calls.map((c) => c.phase).filter((p) => String(p).startsWith('repair'));
+    assert.equal(phases.indexOf('repair 1: ablation') > phases.lastIndexOf('repair: control'), true);
+  });
+});
+
+test('attempt: the control is measured once and reused for every suspect', () => {
+  const diagnosis = JSON.stringify({
+    ...DIAGNOSIS,
+    causes: [
+      { layer: 'rules', excerpt: 'never use semicolons', why: 'first' },
+      { layer: 'rules', excerpt: BAD_RULE, why: 'second' },
+    ],
+  });
+  return withSetup({ llm: fakeLlm({ diagnosis }) }, async (env) => {
+    const { run } = await runCase(env);
+    assert.equal(env.llm.inPhase('repair: control').filter((c) => c.kind === 'talk').length, 4);
+    assert.deepEqual(run.repair.attempts[0].suspects.map((s) => [s.excerpt, s.gain, s.confirmed]), [
+      ['never use semicolons', 0, false],
+      [BAD_RULE, 6, true],
+    ]);
+  });
+});
+
+test('attempt: a control that passes ends the loop as not reproduced', () => {
+  const scoreFor = (a, call) => (call.phase === 'repair: control' ? 9 : a.messages.join(' ').includes('BAD') ? 3 : 9);
+  return withSetup({ llm: fakeLlm({ scoreFor }) }, async (env) => {
+    const { run } = await runCase(env);
+    assert.equal(run.repair.reason, 'not reproduced');
+    assert.equal(run.repair.control.medians.overall, 9);
+    assert.equal(env.llm.inPhase('repair 1: ablation').length, 0);
+    assert.equal(env.llm.ofKind('fix').length, 0);
+    assert.equal(env.changes.calls.length, 0);
+    assert.equal(run.repair.applied, null);
+  });
+});
+
+test('attempt: a control that passes only some weak situations goes on', () => {
+  const scoreFor = (a, call) => (call.phase === 'repair: control' && call.user.includes('café closed?') ? 9 : a.messages.join(' ').includes('BAD') ? 3 : 9);
+  return withSetup({ llm: fakeLlm({ scoreFor }) }, async (env) => {
+    const { run } = await runCase(env);
+    assert.notEqual(run.repair.reason, 'not reproduced');
+    assert.ok(env.llm.inPhase('repair 1: ablation').length > 0);
+  });
+});
+
+test('attempt: the judge scores an ablation against the live rules', () =>
+  withSetup({}, async (env) => {
+    storedCase(env);
+    const { run } = await runCase(env);
+    assert.equal(run.repair.reason, 'applied');
+    for (const phase of ['repair: control', 'repair 1: ablation', 'repair 1: verify', 'repair 1: regression']) {
+      const calls = env.llm.inPhase(phase);
+      const scores = calls.filter((c) => c.kind === 'score');
+      assert.ok(scores.length > 0, phase);
+      // The judge reads the live rules and card, whatever the persona was given.
+      for (const call of scores) {
+        assert.ok(blockBody(call.user, 'rules').includes(BAD_RULE), phase);
+        assert.equal(blockBody(call.user, 'rules').includes(FIXED_RULE), false, phase);
+        assert.equal(blockBody(call.user, 'character'), 'CARD: Zoë is friendly and talks a lot.', phase);
+      }
+    }
+    // The persona itself answered on the view under test.
+    for (const call of env.llm.inPhase('repair 1: ablation').filter((c) => c.kind === 'talk')) assert.equal(call.system.includes(BAD_RULE), false);
+    for (const phase of ['repair 1: verify', 'repair 1: regression']) {
+      for (const call of env.llm.inPhase(phase).filter((c) => c.kind === 'talk')) assert.ok(call.system.includes(FIXED_RULE), phase);
+    }
+  }));
+
+test('attempt: an edit in another layer than the proven cause is refused', async () => {
+  const edits = [
+    { layer: 'prompt', target: 'format', from: 'Use <msg>', to: 'Use <msg> only', why: 'x' },
+    { layer: 'guild', target: 'patterns', from: 'People post memes', to: 'People post art', why: 'x' },
+  ];
+  for (const fix of edits) {
+    await withSetup({ llm: fakeLlm({ fix: JSON.stringify(fix) }), guild: { patterns: 'People post memes at night.' } }, async (env) => {
+      const { run } = await runCase(env);
+      const [attempt] = run.repair.attempts;
+      assert.equal(attempt.suspects[0].confirmed, true, fix.layer);
+      assert.equal(attempt.refused, 'not the proven cause', fix.layer);
+      assert.equal(attempt.verify, null, fix.layer);
+      assert.equal(env.llm.inPhase('repair 1: verify').length, 0, fix.layer);
+      assert.equal(env.changes.calls.length, 0, fix.layer);
+    });
+  }
+});
+
+test('attempt: an edit to another rule than the proven one is refused', async () => {
+  const variants = [
+    { name: 'another rule', fix: { ...FIX, from: 'never use semicolons', to: 'avoid semicolons' } },
+    // 'le' lies inside the proven rule ("at length"), but the store would replace it in the heading.
+    { name: 'text first found elsewhere', fix: { ...FIX, from: 'le', to: 'la' } },
+    { name: 'text over two rules', fix: { ...FIX, from: `${BAD_RULE}\n- never`, to: `${FIXED_RULE}\n- never` } },
+    { name: 'an addition next to the proven rule', fix: { ...FIX, from: '', to: 'Say limits once.' } },
+  ];
+  for (const { name, fix } of variants) {
+    await withSetup({ llm: fakeLlm({ fix: JSON.stringify(fix) }) }, async (env) => {
+      const { run } = await runCase(env);
+      assert.equal(run.repair.attempts[0].refused, 'not the proven cause', name);
+      assert.equal(env.changes.calls.length, 0, name);
+    });
+  }
+  // A part of the proven rule is the proven rule.
+  const part = { ...FIX, from: 'at length', to: 'once' };
+  await withSetup({ llm: fakeLlm({ fix: JSON.stringify(part) }) }, async (env) => {
+    const { run } = await runCase(env);
+    assert.equal(run.repair.attempts[0].refused, null);
+  });
+});
+
+test('attempt: a closed or missing cause allows only an added rule', async () => {
+  const added = { layer: 'rules', target: 'rules', from: '', to: 'Say a limit once.', why: 'An addition.' };
+  const talkFor = (call) => (call.system.includes('Say a limit once.') ? '<msg>GOOD short</msg>' : '<msg>BAD long</msg>');
+  const card = JSON.stringify({ ...DIAGNOSIS, causes: [{ layer: 'card', excerpt: 'talks a lot', why: 'The card makes it talk.' }] });
+  // With the card excerpt gone the persona is good too, so the card cause is proven.
+  const cardTalk = (call) => (call.system.includes('Say a limit once.') || !`${call.system} ${call.user}`.includes('talks a lot') ? '<msg>GOOD short</msg>' : '<msg>BAD long</msg>');
+  const variants = [
+    { name: 'missing, a rule added', diagnosis: MISSING, fix: added, talkFor, refused: null },
+    { name: 'missing, a rule rewritten', diagnosis: MISSING, fix: FIX, talkFor, refused: 'not the proven cause' },
+    { name: 'missing, a prompt addition', diagnosis: MISSING, fix: { layer: 'prompt', target: 'format', from: '', to: 'Say a limit once.', why: 'x' }, talkFor, refused: 'not the proven cause' },
+    { name: 'card, a rule added', diagnosis: card, fix: added, talkFor: cardTalk, refused: null },
+    { name: 'card, a prompt rewritten', diagnosis: card, fix: { layer: 'prompt', target: 'format', from: 'Use', to: 'Use only', why: 'x' }, talkFor: cardTalk, refused: 'not the proven cause' },
+  ];
+  for (const { name, diagnosis, fix, talkFor: talk, refused } of variants) {
+    await withSetup({ llm: fakeLlm({ diagnosis, fix: JSON.stringify(fix), talkFor: talk }) }, async (env) => {
+      const { run } = await runCase(env);
+      const [attempt] = run.repair.attempts;
+      assert.equal(attempt.suspects[0].confirmed, true, name);
+      assert.equal(attempt.refused, refused, name);
+      if (refused) assert.equal(env.changes.calls.length, 0, name);
+      else {
+        assert.equal(attempt.accepted, true, name);
+        assert.deepEqual(env.changes.calls[0].edit, fix, name);
+      }
+    });
+  }
+});
+
+test('attempt: a reply case may not edit interject, initiate or address', async () => {
+  const config = { mentor: { fix: { files: ['system-prompt', 'format', 'reply', 'interject', 'initiate', 'address'] } } };
+  for (const target of ['interject', 'initiate', 'address']) {
+    const fix = JSON.stringify({ layer: 'prompt', target, from: 'x', to: 'y', why: 'x' });
+    await withSetup({ config, llm: fakeLlm({ fix }) }, async (env) => {
+      const { run } = await runCase(env);
+      assert.equal(run.repair.attempts[0].refused, 'file not allowed', target);
+      assert.deepEqual(JSON.parse(blockBody(env.llm.ofKind('fix')[0].user, 'allowed')).files, ['system-prompt', 'format', 'reply'], target);
+      assert.equal(env.changes.calls.length, 0, target);
+    });
+  }
+});
+
+test('attempt: patterns may not be emptied', async () => {
+  const guild = { patterns: 'People post memes at night.', starters: 'Someone asks about games.' };
+  for (const target of ['patterns', 'starters']) {
+    const fix = JSON.stringify({ layer: 'guild', target, from: guild[target], to: '', why: 'x' });
+    await withSetup({ llm: fakeLlm({ fix }), guild }, async (env) => {
+      const { run } = await runCase(env);
+      assert.equal(run.repair.attempts[0].refused, 'deletion not allowed', target);
+      assert.equal(env.changes.calls.length, 0, target);
+    });
+  }
+});
+
+test('attempt: a guild string or a profile field over the limit is refused', async () => {
+  const guildCause = JSON.stringify({ ...DIAGNOSIS, causes: [{ layer: 'guild', excerpt: 'memes at night', why: 'x' }] });
+  const talkFor = (call) => (`${call.system} ${call.user}`.includes('memes at night') ? '<msg>BAD long</msg>' : '<msg>GOOD short</msg>');
+  // memory.fieldChars 10: the guild string may hold 20 characters.
+  const long = JSON.stringify({ layer: 'guild', target: 'patterns', from: 'memes at night', to: 'memes after midnight', why: 'x' });
+  await withSetup({ llm: fakeLlm({ diagnosis: guildCause, fix: long, talkFor }), guild: { patterns: 'People post memes at night.' } }, async (env) => {
+    env.hot.config.memory.fieldChars = 10;
+    const { run } = await runCase(env);
+    assert.equal(run.repair.attempts[0].suspects[0].confirmed, true);
+    assert.equal(run.repair.attempts[0].refused, 'text too long');
+    assert.equal(env.changes.calls.length, 0);
+  });
+});
+
+test('attempt: turning the repair switch off stops before the next request', async () => {
+  const variants = [
+    { name: 'during the control', when: (call) => call.phase === 'repair: control', none: ['repair 1: ablation', 'repair 1: edit'] },
+    { name: 'during the ablation', when: (call) => call.phase === 'repair 1: ablation', none: ['repair 1: edit'] },
+    { name: 'during the edit request', when: (call) => call.kind === 'fix', none: ['repair 1: verify'] },
+    { name: 'during the verification', when: (call) => call.phase === 'repair 1: verify', none: ['repair 1: regression'] },
+  ];
+  for (const { name, when, none } of variants) {
+    let hot;
+    const llm = fakeLlm({
+      hook: (call) => {
+        if (when(call)) hot.config.features.mentorAutoFix = false;
+        return undefined;
+      },
+    });
+    await withSetup({ llm }, async (env) => {
+      hot = env.hot;
+      storedCase(env);
+      const { run } = await runCase(env);
+      assert.equal(run.repair.reason, 'disabled', name);
+      for (const phase of none) assert.equal(env.llm.inPhase(phase).length, 0, `${name}: ${phase}`);
+      assert.equal(env.changes.calls.length, 0, name);
+    });
+  }
+});
+
+test('attempt: fewer than the minimum of fresh situations fails the verification', async () => {
+  const one = { situations: [FRESH.situations[0]] };
+  const situationsFor = (call) => (call.system.includes(': 3 of') ? one : SITUATIONS);
+  await withSetup({ llm: fakeLlm({ situationsFor }) }, async (env) => {
+    const { run } = await runCase(env);
+    const [attempt] = run.repair.attempts;
+    assert.equal(attempt.refused, 'too few fresh situations');
+    assert.equal(attempt.accepted, false);
+    assert.equal(attempt.verify.fresh.passed, false);
+    assert.equal(attempt.verify.fresh.kept, 1);
+    // Nothing was answered on so few situations.
+    assert.deepEqual(env.llm.inPhase('repair 1: verify').map((c) => c.kind), ['situations']);
+    assert.equal(env.changes.calls.length, 0);
+  });
+  // mentor.verify.minSituations lowers the bar.
+  await withSetup({ config: { mentor: { verify: { situations: 3, samples: 2, minSituations: 1 } } }, llm: fakeLlm({ situationsFor }) }, async (env) => {
+    const { run } = await runCase(env);
+    assert.equal(run.repair.attempts[0].accepted, true);
+    assert.equal(run.repair.attempts[0].verify.fresh.kept, 1);
+  });
+});
+
+test('config: the repair defaults leave profiles and unrendered prompts closed', () => {
+  const config = JSON.parse(fs.readFileSync(new URL('../config.json', import.meta.url), 'utf8'));
+  assert.deepEqual(config.mentor.fix.layers, ['rules', 'prompt', 'self', 'learned', 'guild']);
+  assert.deepEqual(config.mentor.fix.files, ['system-prompt', 'format', 'reply', 'memory', 'profile']);
+  assert.equal(config.mentor.verify.minSituations, 2);
+});
+
+test('attempt: with the config.json defaults a reply case may touch no profile and only rendered prompts', () => {
+  const defaults = JSON.parse(fs.readFileSync(new URL('../config.json', import.meta.url), 'utf8')).mentor.fix;
+  return withSetup({ config: { mentor: { fix: defaults } }, llm: fakeLlm({ diagnosis: MISSING }) }, async (env) => {
+    await runCase(env);
+    assert.deepEqual(JSON.parse(blockBody(env.llm.ofKind('fix')[0].user, 'allowed')), {
+      layers: ['rules', 'prompt', 'self', 'learned', 'guild'],
+      files: ['system-prompt', 'format', 'reply'],
+      maxGrowthChars: 300,
+    });
+  });
 });
