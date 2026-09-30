@@ -179,7 +179,7 @@ senses.lottie
 senses.voice | links | files
 senses.linksWatch                        replaces links when features.videoDescriptions is on; adds that a linked video may come watched or not watched with the reason
 senses.linksRead                         shown after the links line when features.webLookup is on and web.links.enabled is not false; tells the persona that a link may come with a read excerpt, first-hand
-senses.search                            shown when features.webLookup is on, web.search.enabled is not false AND a Brave Search key is configured; tells the persona that a `<lookup>` block may appear with web results
+senses.search                            shown when features.webLookup is on, web.search.enabled is not false AND a Brave Search key is configured; tells the persona that a `<lookup>` block may appear with web results and that no search can happen during the reply itself
 senses.draw                              shown when features.imageGeneration is on and an image client is wired; tells the persona it can draw
 senses.drawSpent                         replaces draw when the daily picture quota is spent
 senses.drawSpentUser                     replaces draw when this member's daily quota is spent
@@ -538,7 +538,7 @@ The transcript carries descriptions, video summaries and link reads when availab
 `context.maxMessageChars`. Output is ONE line:
 
 - A search query (plain words, no quotes, no operators, at most 12 words) when the message needs facts from
-  outside the chat.
+  outside the chat, or when it explicitly asks to search the web.
 - `none` for everything else.
 
 On a query hit, Brave Search runs the query (`web.search.results` results, default 5), the numbered results are

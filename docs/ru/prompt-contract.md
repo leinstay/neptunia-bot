@@ -178,7 +178,7 @@ senses.lottie
 senses.voice | links | files
 senses.linksWatch                        replaces links when features.videoDescriptions is on; adds that a linked video may come watched or not watched with the reason
 senses.linksRead                         shown after the links line when features.webLookup is on and web.links.enabled is not false; tells the persona that a link may come with a read excerpt, first-hand
-senses.search                            shown when features.webLookup is on, web.search.enabled is not false AND a Brave Search key is configured; tells the persona that a `<lookup>` block may appear with web results
+senses.search                            shown when features.webLookup is on, web.search.enabled is not false AND a Brave Search key is configured; tells the persona that a `<lookup>` block may appear with web results and that no search can happen during the reply itself
 senses.draw                              shown when features.imageGeneration is on and an image client is wired; tells the persona it can draw
 senses.drawSpent                         replaces draw when the daily picture quota is spent
 senses.drawSpentUser                     replaces draw when this member's daily quota is spent
@@ -544,7 +544,7 @@ mentor.original                          first line inside the `<original>` bloc
 `context.maxMessageChars`. Выход: ОДНА строка:
 
 - Поисковый запрос (обычные слова, без кавычек, без операторов, не более 12 слов), когда сообщение требует фактов
-  извне чата.
+  извне чата или явно просит поискать в интернете.
 - `none` во всех остальных случаях.
 
 При совпадении Brave Search выполняет запрос (`web.search.results` результатов, по умолчанию 5), нумерованные

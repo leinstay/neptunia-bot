@@ -69,7 +69,7 @@
     "links": "Links show the site, the title and sometimes a text snippet; a preview picture may come described — you cannot open the page.",
     "linksWatch": "Links show the site, the title and sometimes a text snippet; a preview picture may come described. A linked video may come watched (first-hand) or not watched with the reason — same rules as any video: a limit means this one, not all. You still cannot open the page itself.",
     "linksRead": "A link may come with a read excerpt — first-hand, you read that part of the page yourself, but nothing beyond it.",
-    "search": "When a question needs facts you do not have, you may get a <lookup> block with what you found online — you looked it up yourself; without one, answer from what you know or say you do not know.",
+    "search": "A search either ran before your reply or did not happen at all. A <lookup> block is what you found online, first-hand. No block means no search happened; never say you searched, are searching, or will search, and never invent results. Answer from what you know or say you did not look it up.",
     "files": "Text files show their beginning; other files show only a name.",
     "stickerSee": "A sticker marked as attached you see yourself.",
     "stickerDescribed": "Stickers and custom emoji come with a short description from a helper.",
