@@ -161,23 +161,62 @@ test('normalizeMessage: a Lottie sticker (format 3) has a null url, name only', 
 });
 
 // --- normalizeMessage: custom emoji extraction -------------------------
+// discord.js's Message#cleanContent already rewrites <:name:id> into :name:,
+// so the fixtures carry the raw markup in `content` and the cleaned text in
+// `cleanContent`, as discord.js really yields them.
+
+const PEPE_ID = '123456789012345678';
+
+test('normalizeMessage: custom emoji are read from the raw content, text from cleanContent', () => {
+  const raw = rawMessage({ content: `hi <:pepe:${PEPE_ID}>`, cleanContent: 'hi :pepe:' });
+  const m = normalizeMessage(raw, 'self');
+  assert.equal(m.content, 'hi :pepe:');
+  assert.deepEqual(m.emojis, [{ id: PEPE_ID, name: 'pepe', animated: false, url: `https://cdn.discordapp.com/emojis/${PEPE_ID}.webp?size=96` }]);
+});
+
+test('normalizeMessage: an animated custom emoji in the raw content is marked animated', () => {
+  const raw = rawMessage({ content: `hi <a:pepe:${PEPE_ID}>`, cleanContent: 'hi :pepe:' });
+  const m = normalizeMessage(raw, 'self');
+  assert.equal(m.content, 'hi :pepe:');
+  assert.deepEqual(m.emojis, [{ id: PEPE_ID, name: 'pepe', animated: true, url: `https://cdn.discordapp.com/emojis/${PEPE_ID}.webp?size=96` }]);
+});
+
+test('normalizeMessage: a forwarded snapshot reads its custom emoji from its raw content', () => {
+  const raw = rawMessage({
+    content: '',
+    cleanContent: '',
+    messageSnapshots: new Map([
+      ['snap1', { id: 'snap1', content: `hi <:pepe:${PEPE_ID}>`, cleanContent: 'hi :pepe:', attachments: new Map(), embeds: [], stickers: new Map(), flags: flagsWith([]) }],
+    ]),
+  });
+  const m = normalizeMessage(raw, 'self');
+  assert.equal(m.forwarded[0].content, 'hi :pepe:');
+  assert.deepEqual(m.forwarded[0].emojis, [{ id: PEPE_ID, name: 'pepe', animated: false, url: `https://cdn.discordapp.com/emojis/${PEPE_ID}.webp?size=96` }]);
+});
+
+test('normalizeMessage: without a raw content, custom emoji fall back to cleanContent', () => {
+  const raw = rawMessage({ content: undefined, cleanContent: `hi <:pepe:${PEPE_ID}>` });
+  const m = normalizeMessage(raw, 'self');
+  assert.equal(m.content, 'hi :pepe:');
+  assert.deepEqual(m.emojis.map((e) => e.name), ['pepe']);
+});
 
 test('normalizeMessage: a static custom emoji is extracted, text keeps reading as :name:', () => {
-  const raw = rawMessage({ cleanContent: 'nice <:pog:111> job' });
+  const raw = rawMessage({ content: 'nice <:pog:111> job', cleanContent: 'nice :pog: job' });
   const m = normalizeMessage(raw, 'self');
   assert.equal(m.content, 'nice :pog: job');
   assert.deepEqual(m.emojis, [{ id: '111', name: 'pog', animated: false, url: 'https://cdn.discordapp.com/emojis/111.webp?size=96' }]);
 });
 
 test('normalizeMessage: an animated custom emoji is marked animated, same webp URL pattern', () => {
-  const raw = rawMessage({ cleanContent: 'lol <a:kekw:222>' });
+  const raw = rawMessage({ content: 'lol <a:kekw:222>', cleanContent: 'lol :kekw:' });
   const m = normalizeMessage(raw, 'self');
   assert.equal(m.content, 'lol :kekw:');
   assert.deepEqual(m.emojis, [{ id: '222', name: 'kekw', animated: true, url: 'https://cdn.discordapp.com/emojis/222.webp?size=96' }]);
 });
 
 test('normalizeMessage: the same custom emoji repeated in one message is de-duplicated', () => {
-  const raw = rawMessage({ cleanContent: '<:pog:111> <:pog:111> <:pog:111>' });
+  const raw = rawMessage({ content: '<:pog:111> <:pog:111> <:pog:111>', cleanContent: ':pog: :pog: :pog:' });
   const m = normalizeMessage(raw, 'self');
   assert.equal(m.emojis.length, 1);
 });
@@ -185,7 +224,7 @@ test('normalizeMessage: the same custom emoji repeated in one message is de-dupl
 test('normalizeMessage: distinct custom emoji are capped at 5 per message, first-appearance order', () => {
   const ids = Array.from({ length: 8 }, (_, i) => i + 1);
   const content = ids.map((id) => `<:e${id}:${id}>`).join(' ');
-  const raw = rawMessage({ cleanContent: content });
+  const raw = rawMessage({ content, cleanContent: ids.map((id) => `:e${id}:`).join(' ') });
   const m = normalizeMessage(raw, 'self');
   assert.equal(m.emojis.length, 5);
   assert.deepEqual(m.emojis.map((e) => e.id), ['1', '2', '3', '4', '5']);
@@ -246,7 +285,8 @@ test('normalizeMessage: a forwarded snapshot also carries its own stickers and e
         'snap1',
         {
           id: 'snap1',
-          cleanContent: 'look <:pog:111>',
+          content: 'look <:pog:111>',
+          cleanContent: 'look :pog:',
           attachments: new Map(),
           embeds: [],
           stickers: new Map([['s1', sticker('s1', 'pepe', 1)]]),

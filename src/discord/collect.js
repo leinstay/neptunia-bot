@@ -19,7 +19,11 @@ const TEXT_PREVIEW_SIZE_GUARD = 256 * 1024; // 256 KB — never fetch a bigger "
 const MAX_EMOJIS_PER_MESSAGE = 5;
 const CUSTOM_EMOJI_RE = /<(a)?:(\w+):(\d+)>/g;
 
-/** Custom emoji markup `<:name:id>` / `<a:name:id>` reads better as `:name:`. */
+/**
+ * Custom emoji markup `<:name:id>` / `<a:name:id>` reads better as `:name:`.
+ * discord.js's cleanContent already does this for well-formed ids; this is a
+ * safety net for any markup it leaves behind.
+ */
 function cleanEmoji(text) {
   return text.replace(/<a?:(\w+):\d+>/g, ':$1:');
 }
@@ -28,7 +32,9 @@ function cleanEmoji(text) {
  * Custom emoji `<:name:id>` / `<a:name:id>` written in a message's text (the
  * text itself keeps reading as `:name:`, see cleanEmoji above): de-duplicated
  * by id, in first-appearance order, capped at MAX_EMOJIS_PER_MESSAGE.
- * @param {string} text  The same raw (pre-cleanEmoji) content cleanEmoji reads.
+ * @param {string} text  The RAW `content` (discord.js's cleanContent has already
+ *   rewritten the markup to `:name:`, dropping the id); cleanContent only as a
+ *   fallback when the raw content is missing.
  * @returns {{ id: string, name: string, animated: boolean, url: string }[]}
  */
 function extractEmojis(text) {
@@ -229,7 +235,7 @@ function stripEmbedUrls(content, links) {
 function normalizeSnapshot(snapshot, embedTextChars, videoSites) {
   const isVoice = isVoiceMessageFlag(snapshot);
   const cleanContent = snapshot.cleanContent ?? snapshot.content ?? '';
-  const emojis = extractEmojis(cleanContent);
+  const emojis = extractEmojis(snapshot.content ?? cleanContent);
   const rawContent = cleanEmoji(cleanContent).trim();
   const { attachments, links, content } = normalizeMedia(
     snapshot.id ?? 'fwd', snapshot, isVoice, rawContent, embedTextChars, videoSites,
@@ -264,7 +270,7 @@ export function normalizeMessage(message, selfId, options = {}) {
   const videoSites = options.videoSites ?? [];
   const isVoice = isVoiceMessageFlag(message);
   const cleanContent = message.cleanContent ?? '';
-  const emojis = extractEmojis(cleanContent);
+  const emojis = extractEmojis(message.content ?? cleanContent);
   const rawContent = cleanEmoji(cleanContent).trim();
   const { attachments, links, content } = normalizeMedia(
     message.id, message, isVoice, rawContent, embedTextChars, videoSites,
