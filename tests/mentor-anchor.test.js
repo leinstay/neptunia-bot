@@ -1,12 +1,17 @@
 // Tests for src/mentor/anchor.js and src/discord/collect.js#fetchMoment: a
 // real moment of the chat resolved from a message of the persona -- the
 // trigger it answered, her whole burst and the chat up to the trigger --
-// and every refusal. Discord objects are plain fakes shaped just enough for
+// and every refusal; and what the persona saw of the moment's media (the
+// describer's cached captions and watched summaries), stored with it and
+// replayed. Discord objects are plain fakes shaped just enough for
 // normalizeMessage; no network.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { anchorSituations, parseMessageRef, resolveAnchor, snowflakeTime } from '../src/mentor/anchor.js';
+import { anchorSituations, parseMessageRef, replayMedia, resolveAnchor, snowflakeTime, withSeenMedia } from '../src/mentor/anchor.js';
 import { fetchMoment } from '../src/discord/collect.js';
+import { formatTranscript } from '../src/discord/format.js';
+import { videoUrlCacheKey } from '../src/discord/video-sites.js';
+import { labels } from './fixtures/labels.js';
 
 const GUILD = '600000000000000001';
 const OTHER_GUILD = '600000000000000009';
@@ -99,7 +104,8 @@ function resolve(channel, ref, extra = {}) {
     fetchMoment,
     limit: extra.limit ?? 30,
     embedTextChars: 300,
-    videoSites: [],
+    videoSites: extra.videoSites ?? [],
+    mediaCache: extra.mediaCache,
   });
 }
 
@@ -219,4 +225,162 @@ test('anchorSituations: replays each usable anchor at the time she answered', as
   assert.equal(third.anchor, 3);
   assert.equal(third.at, START + 3 * 60_000 + 60_000);
   assert.deepEqual(anchorSituations({}), []);
+});
+
+// ---- what the persona saw of the moment's media ------------------------------------
+
+const VIDEO_ID = '810000000000000001';
+const IMAGE_ID = '810000000000000002';
+const BLANK_ID = '810000000000000003';
+const EMOJI_ID = '810000000000000004';
+const FORWARDED_ID = '810000000000000005';
+const SITES = ['youtube.com'];
+const YOUTUBE = 'https://www.youtube.com/watch?v=dQw4w9WgXcQ';
+/** Written by the describer before her answer (sf(4)), and after it. */
+const SEEN_TS = START + 3 * 60_000 + 30_000;
+const LATER_TS = START + 10 * 60_000;
+
+function deepFreeze(value) {
+  if (value && typeof value === 'object') {
+    for (const inner of Object.values(value)) deepFreeze(inner);
+    Object.freeze(value);
+  }
+  return value;
+}
+
+function attachmentsOf(...list) {
+  return new Map(list.map((a) => [a.id, { url: `https://cdn.discordapp.com/attachments/1/${a.id}/${a.name}`, size: 1000, ...a }]));
+}
+
+/** A chat with media: a clip, two pictures, a typed video-site link, a custom emoji in the trigger; her answer last. */
+function mediaChat() {
+  return [
+    raw(0, BRUNO, 'look', { attachments: attachmentsOf({ id: VIDEO_ID, contentType: 'video/mp4', name: 'clip.mp4', duration: 12 }) }),
+    raw(1, ALICE, 'and these', {
+      attachments: attachmentsOf({ id: IMAGE_ID, contentType: 'image/png', name: 'a.png' }, { id: BLANK_ID, contentType: 'image/png', name: 'b.png' }),
+    }),
+    raw(2, BRUNO, `this one too ${YOUTUBE}`),
+    raw(3, ALICE, 'what do you think :wave:', { content: `what do you think <:wave:${EMOJI_ID}>` }),
+    raw(4, SELF_ID, 'ha, the cup', replyTo(3)),
+  ];
+}
+
+/** The describer's cache (data/guilds/<id>/media.json) as the live turns left it; frozen, so a write throws. */
+function mediaCache(extra = {}) {
+  return deepFreeze({
+    [VIDEO_ID]: { text: 'a still of a cat', ts: SEEN_TS },
+    [`video:${VIDEO_ID}`]: { text: 'a cat knocks a cup off the table', ts: SEEN_TS, watched: true },
+    [IMAGE_ID]: { text: 'a café terrace at night', ts: SEEN_TS },
+    [BLANK_ID]: { miss: true, ts: SEEN_TS },
+    [`video:${videoUrlCacheKey(YOUTUBE)}`]: { text: 'a music video from the eighties', ts: SEEN_TS, watched: true },
+    // Described only after she answered: she never saw it.
+    [`emoji:${EMOJI_ID}`]: { text: 'a waving hand', ts: LATER_TS },
+    ...extra,
+  });
+}
+
+/** The chat transcript of `history` as a live turn renders it, with the given caption and video maps. */
+function rendered(history, { descriptions, videos } = {}) {
+  return formatTranscript(history, { timezone: 'UTC', gapMinutes: 60, maxChars: 2000, selfName: 'Zoë', labels, descriptions, videos })
+    .map((item) => item.text)
+    .join('\n');
+}
+
+/** The maps a live turn builds from the same cache: captions by item id, watched videos by item id. */
+function liveMaps() {
+  return {
+    descriptions: new Map([
+      [VIDEO_ID, 'a still of a cat'],
+      [IMAGE_ID, 'a café terrace at night'],
+    ]),
+    videos: new Map([
+      [VIDEO_ID, { state: 'watched', text: 'a cat knocks a cup off the table' }],
+      [videoUrlCacheKey(YOUTUBE), { state: 'watched', text: 'a music video from the eighties' }],
+    ]),
+  };
+}
+
+test('resolveAnchor: each message keeps the cached captions and watched summaries of its media; the rest keep none', async () => {
+  const cache = mediaCache();
+  const before = structuredClone(cache);
+  const anchor = await resolve(fakeChannel(mediaChat()), sf(4), { mediaCache: cache, videoSites: SITES });
+  assert.deepEqual(anchor.media, { described: 3, none: 2 });
+  const [clip, pictures, link, trigger] = anchor.history;
+  assert.deepEqual(clip.mediaSeen, {
+    captions: { [VIDEO_ID]: 'a still of a cat' },
+    watched: { [VIDEO_ID]: 'a cat knocks a cup off the table' },
+  });
+  // A cached miss is no description.
+  assert.deepEqual(pictures.mediaSeen, { captions: { [IMAGE_ID]: 'a café terrace at night' } });
+  assert.deepEqual(link.mediaSeen, { watched: { [videoUrlCacheKey(YOUTUBE)]: 'a music video from the eighties' } });
+  // Described after her answer: not what she saw.
+  assert.equal(trigger.mediaSeen, undefined);
+  assert.deepEqual(cache, before, 'the cache is read, never written');
+});
+
+test('resolveAnchor: without a cache the moment is stored as before', async () => {
+  const anchor = await resolve(fakeChannel(mediaChat()), sf(4), { videoSites: SITES });
+  assert.ok(anchor.history.every((message) => !('mediaSeen' in message)));
+  assert.deepEqual(anchor.media, { described: 0, none: 5 });
+});
+
+test('withSeenMedia: a forwarded picture counts for the outer message; the history is never changed', () => {
+  const message = {
+    id: 'm1',
+    content: '',
+    attachments: [],
+    links: [],
+    stickers: [],
+    emojis: [],
+    forwarded: [{ content: '', attachments: [{ id: FORWARDED_ID, kind: 'image', name: 'f.png', url: 'u' }], links: [], stickers: [], emojis: [] }],
+  };
+  const history = deepFreeze([message, { id: 'm2', content: 'plain', attachments: [], links: [], forwarded: [], stickers: [], emojis: [] }]);
+  // An entry without a time is taken; one with an empty text is not a description.
+  const cache = deepFreeze({ [FORWARDED_ID]: { text: 'a map of the old town' }, other: { text: '  ', ts: 1 } });
+  const result = withSeenMedia(history, cache, { before: SEEN_TS });
+  assert.deepEqual(result.history[0].mediaSeen, { captions: { [FORWARDED_ID]: 'a map of the old town' } });
+  assert.equal(result.history[1], history[1]);
+  assert.deepEqual({ described: result.described, none: result.none }, { described: 1, none: 0 });
+});
+
+test('replayMedia: the stored descriptions render exactly as the live transcript rendered the cache', async () => {
+  const anchor = await resolve(fakeChannel(mediaChat()), sf(4), { mediaCache: mediaCache(), videoSites: SITES });
+  const media = replayMedia(anchor.history, { sites: SITES, before: snowflakeTime(sf(4)) });
+  const live = liveMaps();
+  assert.deepEqual(media.descriptions, live.descriptions);
+  assert.deepEqual(media.videos, live.videos);
+  const text = rendered(anchor.history, media);
+  assert.equal(text, rendered(anchor.history, live));
+  assert.match(text, /\[video: clip\.mp4, 0:12, watched: a cat knocks a cup off the table\]/);
+  assert.match(text, /\[image: a café terrace at night\] \[image\]/);
+  assert.match(text, /\[watched: a music video from the eighties\]/);
+  assert.doesNotMatch(text, /a waving hand/);
+});
+
+test('replayMedia: an anchor stored without descriptions finds them in the cache, as they stood when she answered', async () => {
+  const anchor = await resolve(fakeChannel(mediaChat()), sf(4), { videoSites: SITES });
+  const cache = mediaCache();
+  const before = structuredClone(cache);
+  const media = replayMedia(anchor.history, { cache, sites: SITES, before: snowflakeTime(sf(4)) });
+  const live = liveMaps();
+  assert.deepEqual(media.descriptions, live.descriptions);
+  assert.deepEqual(media.videos, live.videos);
+  assert.deepEqual(cache, before, 'the cache is read, never written');
+  // A stored description wins over the cache; nothing written after her answer is taken.
+  const stored = structuredClone(anchor.history);
+  stored[1].mediaSeen = { captions: { [IMAGE_ID]: 'the stored caption' } };
+  const later = mediaCache({ [BLANK_ID]: { text: 'described a day later', ts: LATER_TS } });
+  const mixed = replayMedia(stored, { cache: later, sites: SITES, before: snowflakeTime(sf(4)) });
+  assert.equal(mixed.descriptions.get(IMAGE_ID), 'the stored caption');
+  assert.equal(mixed.descriptions.has(BLANK_ID), false);
+});
+
+test('replayMedia: an anchor without descriptions and nothing cached replays unchanged', async () => {
+  const anchor = await resolve(fakeChannel(mediaChat()), sf(4), { videoSites: SITES });
+  const media = replayMedia(anchor.history, { cache: null, sites: SITES, before: snowflakeTime(sf(4)) });
+  assert.equal(media.descriptions.size, 0);
+  assert.equal(media.videos.size, 0);
+  assert.equal(rendered(anchor.history, media), rendered(anchor.history));
+  assert.match(rendered(anchor.history, media), /\[video: clip\.mp4, 0:12\]/);
+  assert.equal(replayMedia(anchor.history, { cache: {}, sites: SITES }).descriptions.size, 0);
 });

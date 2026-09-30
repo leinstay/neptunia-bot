@@ -22,7 +22,11 @@
 // src/mentor/moment.js). The situations request shows them to the mentor model as
 // `<examples>`, and an anchor's score request carries the persona's original
 // answer as `<original>`. Wherever an anchor's chat does not fit a request,
-// its oldest messages give way; the trigger never does.
+// its oldest messages give way; the trigger never does. An anchor's media
+// render with what the persona saw of them then (the describer's captions and
+// watched summaries stored with it, else found in the describer's cache as it
+// stood when she answered; src/mentor/anchor.js#replayMedia), everywhere its
+// transcript appears; the cache is only read.
 //
 // Everything expensive is bounded: the mentor's own daily token budget is
 // checked before every request and charged after every completion, the
@@ -42,7 +46,7 @@ import { fill, formatTranscript, renderTranscript } from '../discord/format.js';
 import { TokenLimitError } from '../llm/openrouter.js';
 import { estimateMessages, estimateTokens } from '../llm/tokens.js';
 import { log } from '../log.js';
-import { anchorSituations, resolveAnchor } from './anchor.js';
+import { anchorSituations, replayMedia, resolveAnchor } from './anchor.js';
 import { MentorBudgetError } from './budget.js';
 import { parseDiagnosis, parseScores, parseSituations, verdict } from './judge.js';
 import { hiddenLater, momentCutoff, momentView } from './moment.js';
@@ -469,7 +473,7 @@ export function createMentor({ hot, store, llm, client, cases, budget, changes, 
     const examples = anchors.map((situation) => {
       const original = block('original', situation.original.join('\n'));
       const around = calibrated(estimateTokens(block('example', `${block('situation', ' ')}\n${original}`)));
-      const fitted = fittedTranscript(transcriptItems(situation.history, selfName), share - around);
+      const fitted = fittedTranscript(transcriptItems(situation.history, selfName, momentMedia(situation)), share - around);
       dropped += fitted.dropped;
       return block('example', [block('situation', fitted.text), original].filter(Boolean).join('\n'));
     });
@@ -524,8 +528,11 @@ export function createMentor({ hot, store, llm, client, cases, budget, changes, 
     return { situations, dropped: parsed.dropped };
   }
 
-  /** The transcript items of `history` as the persona's chat renders them (see `fittedTranscript`). */
-  function transcriptItems(history, selfName) {
+  /**
+   * The transcript items of `history` as the persona's chat renders them (see `fittedTranscript`);
+   * `media` (a real moment's, see `momentMedia`) renders its media as she saw them.
+   */
+  function transcriptItems(history, selfName, media = null) {
     const config = hot.config;
     return formatTranscript(history, {
       timezone: config.bot?.timezone,
@@ -536,6 +543,27 @@ export function createMentor({ hot, store, llm, client, cases, budget, changes, 
       mode: 'chat',
       seeReactions: config.features?.seeReactions !== false,
       reactionsPerMessage: config.context?.reactionsPerMessage,
+      descriptions: media?.descriptions,
+      videos: media?.videos,
+    });
+  }
+
+  /** The describer's cache of the guild, read only; null when the store or the guild has none. */
+  function mediaCacheOf(guildId) {
+    if (!guildId || typeof store?.getMediaCache !== 'function') return null;
+    return store.getMediaCache(guildId) ?? null;
+  }
+
+  /**
+   * What the persona saw of a real moment's media (src/mentor/anchor.js#replayMedia): the
+   * descriptions stored with its messages, else the describer's cache as it stood when she
+   * answered (`situation.at`), read now and never written. `media.video.sites` is read now.
+   */
+  function momentMedia(situation) {
+    return replayMedia(situation.history, {
+      cache: mediaCacheOf(getGuildId()),
+      sites: hot.config.media?.video?.sites,
+      before: Number.isFinite(situation.at) ? situation.at : null,
     });
   }
 
@@ -577,7 +605,7 @@ export function createMentor({ hot, store, llm, client, cases, budget, changes, 
   async function answerAll(ctx, { target, prepared, self, reference, samples, phase }) {
     let previous = 1;
     for (const entry of prepared) {
-      const { situation, record, history, at, channel, view } = entry;
+      const { situation, record, history, at, channel, view, media } = entry;
       checkEnabled();
       if (!budget.canSpend(previous)) throw new RunEnd('stopped', 'budget');
       checkAborted(ctx);
@@ -600,6 +628,8 @@ export function createMentor({ hot, store, llm, client, cases, budget, changes, 
               now: at,
               signal: ctx.signal,
               onUsage,
+              descriptions: media?.descriptions,
+              videos: media?.videos,
             });
       record.answers = result.answers.map((answer, i) => answerRecord(answer, `s${record.n}a${i + 1}`, target, reference.profile));
       // What the persona (or the analyzer) was given, for the diagnosis; kept off the run: it is large.
@@ -705,14 +735,16 @@ export function createMentor({ hot, store, llm, client, cases, budget, changes, 
       const anchored = Array.isArray(situation?.history);
       const at = anchored && Number.isFinite(situation.at) ? situation.at : now();
       const { history } = situationHistory(situation, { selfId: self.id, selfName: self.name, now: at, channel: reference.channel });
-      const items = transcriptItems(history, self.name);
+      // A real moment's media render as she saw them, in its transcript and in her request alike.
+      const media = anchored ? momentMedia(situation) : null;
+      const items = transcriptItems(history, self.name, media);
       const transcript = renderTranscript(items, timezone, hot.prompts.labels);
       const record = anchored
         ? { n: i + 1, title: situation.title ?? '', anchor: situation.anchor, original: situation.original ?? [], transcript, answers: [] }
         : { n: i + 1, title: situation.title ?? '', lines: situation.lines, transcript, answers: [] };
       // A real moment sees the memory as it stood before its trigger (src/mentor/moment.js), the judge too.
       const cutoff = anchored && hideLater ? momentCutoff(situation) : null;
-      const entry = { situation, record, history, items, at, channel: anchored ? anchorChannel(view, history) : reference.channel, view, judgeView };
+      const entry = { situation, record, history, items, media, at, channel: anchored ? anchorChannel(view, history) : reference.channel, view, judgeView };
       if (cutoff !== null) {
         entry.view = momentView(view, cutoff);
         entry.judgeView = momentView(judgeView, cutoff);
@@ -1076,11 +1108,15 @@ export function createMentor({ hot, store, llm, client, cases, budget, changes, 
    * Read one moment of the chat for a case (src/mentor/anchor.js#resolveAnchor):
    * `ref` is a message link or id (a bare id means `context.channelId`);
    * `mentor.anchor.contextMessages` and the media settings are read now.
-   * Spends no tokens and needs no switch; rejects with an operator-facing
-   * Error when the moment is refused.
+   * Each message keeps what the persona saw of its media: the describer's
+   * captions and watched summaries cached by the time she answered, read
+   * from the store's media cache and never written. Spends no tokens and
+   * needs no switch; rejects with an operator-facing Error when the moment
+   * is refused. Logs counts only.
    * @param {string} ref
    * @param {{ channelId?: string|null }} [context]
-   * @returns {Promise<{ channelId: string, messageId: string, triggerId: string, history: object[], original: string[] }>}
+   * @returns {Promise<{ channelId: string, messageId: string, triggerId: string, history: object[], original: string[],
+   *   media: { described: number, none: number } }>}
    */
   async function readAnchor(ref, { channelId } = {}) {
     const guildId = getGuildId();
@@ -1099,8 +1135,14 @@ export function createMentor({ hot, store, llm, client, cases, budget, changes, 
       limit: Math.floor(positive(config.mentor?.anchor?.contextMessages, 30)),
       embedTextChars: config.media?.embedTextChars,
       videoSites: config.media?.video?.sites,
+      mediaCache: mediaCacheOf(guildId),
     });
-    log.info('mentor: moment read', { messages: anchor.history.length, original: anchor.original.length });
+    log.info('mentor: moment read', {
+      messages: anchor.history.length,
+      original: anchor.original.length,
+      mediaDescribed: anchor.media.described,
+      mediaWithout: anchor.media.none,
+    });
     return anchor;
   }
 

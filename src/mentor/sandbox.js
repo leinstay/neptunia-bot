@@ -234,9 +234,12 @@ async function sample({ llm, messages, options, samples, signal, onUsage, read }
  * a real turn -- `features.memory` off leaves it out -- and tokens measured
  * with `view.calibrator`, so the caps trim what a real turn trims), `samples` completions,
  * each parsed with parseOutput and trimmed by `features.reactions` /
- * `features.multiMessage` like a real turn. No neighbours, no media, no web
- * lookup, no drawing, no pictures, never a private chat; nothing is sent and
- * nothing is stored. Every completion passes `countAgainstDailyCap: false`
+ * `features.multiMessage` like a real turn. No neighbours, no web lookup, no
+ * drawing, no pictures, never a private chat; nothing is sent and nothing is
+ * stored. Media render with their labels only, unless the caller hands in
+ * what the persona saw of them (a real moment's `descriptions` / `videos`,
+ * see src/mentor/anchor.js#replayMedia): nothing is described or watched
+ * here. Every completion passes `countAgainstDailyCap: false`
  * and `skipCalibration: true`; the per-request token cap stays in force.
  * `skip` is true when the model skipped or left nothing to do (as a real
  * turn treats it).
@@ -251,11 +254,13 @@ async function sample({ llm, messages, options, samples, signal, onUsage, read }
  * @param {number} input.now
  * @param {AbortSignal} [input.signal]
  * @param {(usage: object|null, estimated: number) => void} [input.onUsage]  Called after every completion.
+ * @param {Map<string, string>} [input.descriptions]  Item id -> caption, rendered as the live transcript does.
+ * @param {Map<string, object>} [input.videos]  Item id -> video state (`{ state: 'watched', text }`), likewise.
  * @returns {Promise<{ request: { system: string, user: string },
  *   answers: { messages: { text: string, replyTo: number|null }[], reactions: { to: number, emoji: string }[],
  *     skip: boolean, think: string }[], tokens: number, stopped: boolean }>}
  */
-export async function answerReply({ view, situation, selfId, selfName, channel, llm, samples, now, signal, onUsage }) {
+export async function answerReply({ view, situation, selfId, selfName, channel, llm, samples, now, signal, onUsage, descriptions, videos }) {
   const config = view.config;
   const memory = view.memory;
   const memoryOn = config.features?.memory !== false;
@@ -285,8 +290,8 @@ export async function answerReply({ view, situation, selfId, selfName, channel, 
     channels: memoryOn ? memory.listChannels() : [],
     loreEntries: memoryOn ? memory.getLore() : [],
     currentChannelId: channel.id,
-    descriptions: new Map(),
-    videos: new Map(),
+    descriptions: descriptions instanceof Map ? descriptions : new Map(),
+    videos: videos instanceof Map ? videos : new Map(),
     reads: new Map(),
     lookup: null,
     searchAvailable: false,

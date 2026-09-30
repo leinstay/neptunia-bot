@@ -9,6 +9,15 @@
 //
 // Parsing a message reference and shaping stored anchors is pure; the one
 // fetch goes through an injected client and src/discord/collect.js#fetchMoment.
+//
+// The persona saw more of the chat's media than its labels: the describer's
+// captions and watched summaries (src/memory/describe.js, cached in
+// data/guilds/<id>/media.json). When a moment is resolved, the ones cached
+// by the time she answered are stored with their message (`mediaSeen`), and
+// a replay renders them the way the live transcript did. The cache is only
+// read: nothing is downloaded, described or written.
+
+import { collectEmojiItems, collectPictures, collectVideos, isDescribable } from '../discord/media.js';
 
 const LINK = /^<?https?:\/\/(?:(?:ptb|canary)\.)?discord(?:app)?\.com\/channels\/(\d+|@me)\/(\d+)\/(\d+)\/?>?$/i;
 const SNOWFLAKE = /^\d{15,22}$/;
@@ -56,9 +65,13 @@ export function parseMessageRef(value, { channelId } = {}) {
  * @param {number} input.limit              `mentor.anchor.contextMessages`.
  * @param {number} [input.embedTextChars]
  * @param {string[]} [input.videoSites]
- * @returns {Promise<{ channelId: string, messageId: string, triggerId: string, history: object[], original: string[] }>}
+ * @param {object|null} [input.mediaCache]  The describer's cache of the guild, read only (see
+ *   `withSeenMedia`); without it the history carries no `mediaSeen`.
+ * @returns {Promise<{ channelId: string, messageId: string, triggerId: string, history: object[], original: string[],
+ *   media: { described: number, none: number } }>}  `media` counts the media items of the history
+ *   with and without a stored description, for the log.
  */
-export async function resolveAnchor({ ref, guildId, contextChannelId, selfId, client, fetchMoment, limit, embedTextChars, videoSites }) {
+export async function resolveAnchor({ ref, guildId, contextChannelId, selfId, client, fetchMoment, limit, embedTextChars, videoSites, mediaCache }) {
   const parsed = parseMessageRef(ref, { channelId: contextChannelId });
   if (parsed.dm) throw new Error('a direct message cannot be used');
   if (parsed.guildId && parsed.guildId !== String(guildId)) throw new Error('that message is in another server');
@@ -72,13 +85,134 @@ export async function resolveAnchor({ ref, guildId, contextChannelId, selfId, cl
   if (!channel.guild) throw new Error('a direct message cannot be used');
   if (String(channel.guild.id) !== String(guildId)) throw new Error('that message is in another server');
   const moment = await fetchMoment(channel, parsed.messageId, { selfId, limit, embedTextChars, videoSites });
+  const seen = withSeenMedia(moment.history, mediaCache ?? null, { sites: videoSites, before: snowflakeTime(moment.messageId) });
   return {
     channelId: String(channel.id),
     messageId: moment.messageId,
     triggerId: moment.triggerId,
-    history: moment.history,
+    history: seen.history,
     original: moment.burst.map((message) => message.content).filter((text) => typeof text === 'string' && text.trim()),
+    media: { described: seen.described, none: seen.none },
   };
+}
+
+/** `cache[key]` when it is the cache's own entry (never an inherited property), else undefined. */
+function entryOf(cache, key) {
+  return cache && typeof cache === 'object' && Object.prototype.hasOwnProperty.call(cache, key) ? cache[key] : undefined;
+}
+
+/**
+ * The text of a describer cache entry the persona could have seen: not a
+ * miss, a non-empty `text`, a watched video (`watched`) or a caption as asked,
+ * and written no later than `before` (an entry without a time is taken; a
+ * null `before` takes any time). Else null.
+ */
+function seenText(entry, { watched, before }) {
+  if (!entry || typeof entry !== 'object' || entry.miss) return null;
+  if ((entry.watched === true) !== watched) return null;
+  if (typeof entry.text !== 'string' || !entry.text.trim()) return null;
+  if (before !== null && Number.isFinite(entry.ts) && entry.ts > before) return null;
+  return entry.text;
+}
+
+/**
+ * The media items of one normalized message a live turn could have had
+ * described (its forwarded snapshots included), as the live turn collects
+ * them: `pictures` (src/discord/media.js#collectPictures and
+ * #collectEmojiItems, describable ones) and `videos` (#collectVideos over
+ * `sites`), each a list of distinct item ids.
+ */
+function mediaItemsOf(message, sites) {
+  const pictures = [...collectPictures(message), ...collectEmojiItems(message)].filter(isDescribable).map((item) => item.itemId);
+  const videos = collectVideos(message, { sites: Array.isArray(sites) ? sites : [] }).map((item) => item.itemId);
+  return { pictures: [...new Set(pictures)], videos: [...new Set(videos)] };
+}
+
+/** A plain `{ id: text }` object of the string values of a stored map; {} for anything else. */
+function storedTexts(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  return Object.fromEntries(Object.entries(value).filter(([, text]) => typeof text === 'string' && text.trim()));
+}
+
+/**
+ * What the describer's cache held for one message's media by `before`:
+ * `{ captions, watched }` (item id -> text) and its media item ids.
+ */
+function lookupSeen(message, cache, { sites, before }) {
+  const { pictures, videos } = mediaItemsOf(message, sites);
+  const captions = {};
+  const watched = {};
+  for (const id of pictures) {
+    const text = seenText(entryOf(cache, id), { watched: false, before });
+    if (text !== null) captions[id] = text;
+  }
+  for (const id of videos) {
+    const text = seenText(entryOf(cache, `video:${id}`), { watched: true, before });
+    if (text !== null) watched[id] = text;
+  }
+  return { captions, watched, ids: new Set([...pictures, ...videos]) };
+}
+
+/**
+ * The history of a resolved moment with what the persona saw of its media:
+ * each message whose media had a caption (a picture, a gif, a video's frame,
+ * a link's thumbnail, a sticker, a custom emoji) or a watched summary (an
+ * attached video, a video-site link over `sites`) in the describer's `cache`
+ * by `before` (her answer's time) gets `mediaSeen: { captions?: { <item id>:
+ * text }, watched?: { <item id>: text } }`, as a new object; every other
+ * message is returned as it is. A cached miss, a limit or error state and an
+ * entry written after `before` are no description. The cache and the history
+ * are never changed. `described` / `none` count the media items (per
+ * message) with and without one. Pure.
+ * @param {object[]} history  Normalized messages (src/discord/collect.js#normalizeMessage).
+ * @param {object|null} cache  The describer's cache (`store.getMediaCache(guildId)`), or null.
+ * @param {{ sites?: string[], before?: number|null }} [options]
+ * @returns {{ history: object[], described: number, none: number }}
+ */
+export function withSeenMedia(history, cache, { sites = [], before = null } = {}) {
+  let described = 0;
+  let none = 0;
+  const out = (Array.isArray(history) ? history : []).map((message) => {
+    if (!message || typeof message !== 'object') return message;
+    const { captions, watched, ids } = lookupSeen(message, cache, { sites, before });
+    for (const id of ids) {
+      if (Object.hasOwn(captions, id) || Object.hasOwn(watched, id)) described += 1;
+      else none += 1;
+    }
+    const mediaSeen = {};
+    if (Object.keys(captions).length > 0) mediaSeen.captions = captions;
+    if (Object.keys(watched).length > 0) mediaSeen.watched = watched;
+    return Object.keys(mediaSeen).length > 0 ? { ...message, mediaSeen } : message;
+  });
+  return { history: out, described, none };
+}
+
+/**
+ * The caption and video maps a replayed moment's transcript is rendered
+ * with (src/discord/format.js#formatTranscript's `descriptions` and
+ * `videos`, the same the live turn passes): every message's stored
+ * `mediaSeen` (see `withSeenMedia`), then, for a media item with none stored
+ * (an anchor stored before descriptions were kept, among others), the
+ * describer's `cache` as it stood by `before`, read only. A watched summary
+ * is the video state `{ state: 'watched', text }`. Without either, empty maps:
+ * the transcript renders as it always did. Pure.
+ * @param {object[]} history
+ * @param {{ cache?: object|null, sites?: string[], before?: number|null }} [options]
+ * @returns {{ descriptions: Map<string, string>, videos: Map<string, { state: 'watched', text: string }> }}
+ */
+export function replayMedia(history, { cache = null, sites = [], before = null } = {}) {
+  const descriptions = new Map();
+  const videos = new Map();
+  for (const message of Array.isArray(history) ? history : []) {
+    if (!message || typeof message !== 'object') continue;
+    const stored = message.mediaSeen && typeof message.mediaSeen === 'object' ? message.mediaSeen : {};
+    const captions = storedTexts(stored.captions);
+    const watched = storedTexts(stored.watched);
+    const found = cache ? lookupSeen(message, cache, { sites, before }) : { captions: {}, watched: {} };
+    for (const [id, text] of Object.entries({ ...found.captions, ...captions })) if (!descriptions.has(id)) descriptions.set(id, text);
+    for (const [id, text] of Object.entries({ ...found.watched, ...watched })) if (!videos.has(id)) videos.set(id, { state: 'watched', text });
+  }
+  return { descriptions, videos };
 }
 
 /** Whether a stored anchor can be replayed: a history that ends with a message not by the persona. */

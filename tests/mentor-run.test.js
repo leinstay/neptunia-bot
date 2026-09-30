@@ -1569,6 +1569,121 @@ test('resolveAnchor: without fetchMoment no moment can be read', () =>
     await assert.rejects(mentor.resolveAnchor(snowflakeAt(MOMENT_TS), { channelId: CHANNEL.id }), /not available/);
   }));
 
+// ---- a real moment shows the media as the persona saw them -------------------------
+
+const CLIP_ID = '810000000000000001';
+const PICTURE_ID = '810000000000000002';
+const CLIP_SUMMARY = 'a cat knocks a cup off the table';
+const WATCHED_LINE = /\[video: clip\.mp4, 0:12, watched: a cat knocks a cup off the table\]/;
+
+/**
+ * A moment whose opening message carries a clip and a picture; `seen` stores the clip's
+ * watched summary with it as resolveAnchor does, without it the anchor is an older one.
+ */
+function clipMoment(marker, { seen = true } = {}) {
+  const base = moment(marker);
+  const attachments = [
+    { id: CLIP_ID, kind: 'video', name: 'clip.mp4', url: `https://cdn.discordapp.com/attachments/1/${CLIP_ID}/clip.mp4`, size: 1000, durationSec: 12 },
+    { id: PICTURE_ID, kind: 'image', name: 'a.png', url: `https://cdn.discordapp.com/attachments/1/${PICTURE_ID}/a.png`, size: 1000, durationSec: null },
+  ];
+  const mediaSeen = seen ? { mediaSeen: { watched: { [CLIP_ID]: CLIP_SUMMARY } } } : {};
+  const history = base.history.map((m, i) => (i === 0 ? { ...m, attachments, ...mediaSeen } : m));
+  return { ...base, history };
+}
+
+/** The describer's cache as the live turn left it: the clip watched between the trigger and her answer. */
+function clipCache() {
+  return deepFreeze({ [`video:${CLIP_ID}`]: { text: CLIP_SUMMARY, ts: MOMENT_TS + 2 * 60_000 + 30_000, watched: true } });
+}
+
+/** The memory store with the describer's cache; any write to that cache throws. */
+function storeWithCache(cache, asked = []) {
+  return {
+    ...fakeMemoryStore(),
+    getMediaCache: (guildId) => {
+      asked.push(guildId);
+      return cache;
+    },
+    markMediaCacheDirty: () => {
+      throw new Error('the mentor never writes the media cache');
+    },
+  };
+}
+
+test('run: a replayed moment shows the media as she saw them, in the live transcript format', () =>
+  withSetup({}, async ({ mentor, cases, llm }) => {
+    const item = cases.add(GUILD, { text: CASE_TEXT, target: 'reply', anchor: clipMoment('V1') });
+    const run = await (await mentor.run(item.id)).done;
+    assert.equal(run.error, undefined);
+    const talk = llm.calls.filter((c) => c.kind === 'talk');
+    // The persona, the stored record, the mentor's examples and the judge all see the watched summary.
+    assert.match(talk[0].user, WATCHED_LINE);
+    assert.match(run.situations[0].transcript, WATCHED_LINE);
+    assert.match(blockBody(llm.calls.find((c) => c.kind === 'situations').user, 'examples'), WATCHED_LINE);
+    assert.match(blockBody(scoreCallOf(llm, 1).user, 'situation'), WATCHED_LINE);
+    // The picture had no description: its plain label, as before.
+    assert.match(talk[0].user, /\[image\]/);
+    // An invented situation carries no media.
+    assert.doesNotMatch(talk[2].user, /clip\.mp4/);
+  }));
+
+test("run: an anchor stored without descriptions finds them in the describer's cache at replay, read only", () => {
+  const asked = [];
+  const cache = clipCache();
+  const before = structuredClone(cache);
+  return withSetup({ store: storeWithCache(cache, asked) }, async ({ mentor, cases, llm }) => {
+    const item = cases.add(GUILD, { text: CASE_TEXT, target: 'reply', anchor: clipMoment('V2', { seen: false }) });
+    const run = await (await mentor.run(item.id)).done;
+    assert.equal(run.error, undefined);
+    assert.match(llm.calls.find((c) => c.kind === 'talk').user, WATCHED_LINE);
+    assert.match(run.situations[0].transcript, WATCHED_LINE);
+    assert.ok(asked.length > 0 && asked.every((g) => g === GUILD));
+    assert.deepEqual(cache, before, 'the cache is read, never written');
+    // No describer request: only the mentor's and the persona's.
+    assert.ok(llm.kinds().every((kind) => ['situations', 'talk', 'score', 'diagnose'].includes(kind)));
+  });
+});
+
+test('run: an anchor without descriptions and nothing cached replays as before', () =>
+  withSetup({}, async ({ mentor, cases, llm }) => {
+    const item = cases.add(GUILD, { text: CASE_TEXT, target: 'reply', anchor: clipMoment('V3', { seen: false }) });
+    const run = await (await mentor.run(item.id)).done;
+    const talk = llm.calls.find((c) => c.kind === 'talk').user;
+    assert.match(talk, /\[video: clip\.mp4, 0:12\] \[image\]/);
+    assert.doesNotMatch(talk, /watched/);
+    assert.doesNotMatch(run.situations[0].transcript, /watched/);
+  }));
+
+test('resolveAnchor: the moment keeps the cached media descriptions; the log counts them, never their text', () => {
+  const channel = { id: OTHER_CHANNEL.id, guild: { id: GUILD } };
+  const answered = snowflakeAt(MOMENT_TS + 3 * 60_000);
+  const fetchMoment = async () => ({
+    messageId: answered,
+    triggerId: 'x',
+    history: clipMoment('R1', { seen: false }).history,
+    burst: [{ content: 'R1 you are right, but' }],
+  });
+  const cache = clipCache();
+  const before = structuredClone(cache);
+  return withSetup(
+    { store: storeWithCache(cache), fetchChannel: (id) => (id === OTHER_CHANNEL.id ? channel : null), fetchMoment },
+    async ({ mentor, cases, llm }) => {
+      const { result: anchor, logs } = await withCapturedLogs(() => mentor.resolveAnchor(answered, { channelId: OTHER_CHANNEL.id }));
+      assert.deepEqual(anchor.history[0].mediaSeen, { watched: { [CLIP_ID]: CLIP_SUMMARY } });
+      assert.ok(anchor.history.slice(1).every((m) => !('mediaSeen' in m)));
+      const read = logs.find((l) => l.msg === 'mentor: moment read');
+      assert.equal(read.mediaDescribed, 1);
+      assert.equal(read.mediaWithout, 1);
+      assert.ok(!JSON.stringify(logs).includes(CLIP_SUMMARY), 'no description in the logs');
+      assert.deepEqual(cache, before, 'the cache is read, never written');
+      assert.equal(llm.calls.length, 0, 'reading a moment spends nothing');
+      // Stored with the case as it was resolved.
+      const item = cases.add(GUILD, { text: CASE_TEXT, target: 'reply', anchor });
+      assert.deepEqual(cases.get(GUILD, item.id).anchors[0].history[0].mediaSeen, { watched: { [CLIP_ID]: CLIP_SUMMARY } });
+    },
+  );
+});
+
 // ---- a real moment sees the memory as it stood at its time -----------------------
 
 const iso = (ms) => new Date(ms).toISOString();
