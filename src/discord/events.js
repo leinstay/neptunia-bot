@@ -62,11 +62,13 @@ const PREFILL_PER_USER_PER_DAY_FALLBACK = 10;
  * @param {object} [deps.describer]  From createDescriber() (src/memory/describe.js), optional: when
  *   absent, or features.mediaDescriptions is off, no description request is ever made from this
  *   pipeline. When present, every observed human message's pictures (up to
- *   MAX_WARM_PICTURES_PER_MESSAGE) are handed to it fire-and-forget -- never awaited here, errors
- *   swallowed -- so the cache is already warm by the time the live memory analyzer
- *   (src/memory/update.js#analyze) wants a caption for one of them; the analyzer itself never
- *   triggers a new request. With features.mediaDescriptions, features.videoDescriptions (a missing
- *   key counts as on) and media.video.prefill all on, the message's first video
+ *   MAX_WARM_PICTURES_PER_MESSAGE) are handed to it fire-and-forget -- errors swallowed -- so the
+ *   cache is already warm by the time the live memory analyzer (src/memory/update.js#analyze)
+ *   wants a caption for one of them; the analyzer itself never triggers a new request. Only the
+ *   address classifier awaits a message's own prefill, then reads captions from the cache alone
+ *   (`describer.cachedDescriptions` / `cachedVideos`), never a new request. With
+ *   features.mediaDescriptions, features.videoDescriptions (a missing key counts as on) and
+ *   media.video.prefill all on, the message's first video
  *   (MAX_WARM_VIDEOS_PER_MESSAGE) is handed to `describer.describeVideos` the same way.
  * @param {object} [deps.lookup]  From createLookup() (src/web/lookup.js), optional: with
  *   features.webLookup, web.links.enabled and web.links.prefill on, the message's first readable
@@ -109,22 +111,58 @@ export function createMessageHandler({
   }
 
   /**
-   * Fire-and-forget: never awaited from the message path (see the class
+   * Fire-and-forget: the message path never waits on it (see the class
    * doc). A no-op when the feature is off or no describer was wired in, so
-   * this pipeline makes zero describer calls in that case.
+   * this pipeline makes zero describer calls in that case. Returns the
+   * picture prefill's promise (it never rejects), or null when none started:
+   * only the address classifier awaits it, so a sticker- or picture-only
+   * follow-up reaches it with its caption (see cachedFollowUpMedia).
+   * @returns {Promise<void>|null}
    */
   function warmMediaCache(guildId, normalized) {
     warmLinkCache(guildId, normalized);
-    if (!describer) return;
+    if (!describer) return null;
     warmVideoCache(guildId, normalized);
-    if (hot.config.features?.mediaDescriptions !== true) return;
-    // Pictures (attachments/embeds/stickers) before the message's custom
-    // emoji, both filtered to what the describer can actually caption.
-    const candidates = [...collectPictures(normalized), ...collectEmojiItems(normalized)]
-      .filter(isDescribable)
-      .slice(0, MAX_WARM_PICTURES_PER_MESSAGE);
-    if (candidates.length === 0) return;
-    describer.describeMany(guildId, candidates).catch((err) => log.warn('events: media cache prefill failed', { error: err }));
+    if (hot.config.features?.mediaDescriptions !== true) return null;
+    const candidates = describableItems([normalized]).slice(0, MAX_WARM_PICTURES_PER_MESSAGE);
+    if (candidates.length === 0) return null;
+    return describer
+      .describeMany(guildId, candidates)
+      .then(() => {})
+      .catch((err) => log.warn('events: media cache prefill failed', { error: err }));
+  }
+
+  /**
+   * The describable items of `messages`, in order: each message's pictures
+   * (attachments/embeds/stickers) before its custom emoji, both filtered to
+   * what the describer can actually caption.
+   */
+  function describableItems(messages) {
+    return messages.flatMap((m) => [...collectPictures(m), ...collectEmojiItems(m)].filter(isDescribable));
+  }
+
+  /**
+   * What the address classifier's transcript shows of `messages`' media:
+   * `{ descriptions, videos }` read from the describer's cache only -- no
+   * new request, nothing counted. `ownPrefill` (the candidate's own picture
+   * prefill from warmMediaCache, already running) is awaited first, so the
+   * candidate's caption is in the cache when it can be; it is never started
+   * again here. Empty without a describer or with features.mediaDescriptions
+   * off (read now).
+   */
+  async function cachedFollowUpMedia(guildId, messages, config, ownPrefill) {
+    if (!describer || config.features?.mediaDescriptions !== true) return {};
+    if (ownPrefill) await ownPrefill;
+    const media = {};
+    if (typeof describer.cachedDescriptions === 'function') {
+      media.descriptions = describer.cachedDescriptions(guildId, describableItems(messages));
+    }
+    if (typeof describer.cachedVideos === 'function') {
+      const sites = config.media?.video?.sites;
+      const items = messages.flatMap((m) => collectVideos(m, { sites }));
+      if (items.length > 0) media.videos = await describer.cachedVideos(guildId, items);
+    }
+    return media;
   }
 
   /** Fire-and-forget like warmMediaCache: watch the message's first video now, not when a turn needs it. */
@@ -209,7 +247,7 @@ export function createMessageHandler({
   let missingAddressPromptLogged = false;
   const followUpWindows = new Map(); // channelId -> { openedAt, lastAnswerAt, noStreak }
   const followUpInFlight = new Set(); // channelIds with a classifier call running right now
-  const followUpHeld = new Map(); // channelId -> { message, normalized, selfId }: the latest message that arrived in flight
+  const followUpHeld = new Map(); // channelId -> { message, normalized, selfId, ownPrefill }: the latest message that arrived in flight
 
   /** Mirror one window into state.json (a fresh copy, numbers only). */
   function persistFollowUpWindow(channelId, window) {
@@ -288,17 +326,20 @@ export function createMessageHandler({
    * The classifier's request: system = address.md (`{{name}}` filled), user =
    * the last `mention.followUpContext` lines of the channel plus the new
    * message wrapped in a `<candidate>` block (structural, not model-facing
-   * wording). `null` when `prompts.address` is missing -- the caller treats
-   * that the same as a "no".
+   * wording). Pictures, stickers, emoji and videos carry the captions the
+   * describer already cached (cachedFollowUpMedia). `null` when
+   * `prompts.address` is missing -- the caller treats that the same as a "no".
    */
-  async function buildFollowUpRequest({ config, prompts, channel, selfId, selfName, normalized }) {
+  async function buildFollowUpRequest({ config, prompts, channel, selfId, selfName, normalized, ownPrefill }) {
     const addressPrompt = prompts?.address;
     if (!addressPrompt) return null;
     const labels = prompts.labels;
     const contextLines = Math.max(0, config.mention.followUpContext ?? 15);
     const raw = contextLines > 0 ? await fetchHistory(channel, contextLines, selfId, config.media?.embedTextChars, config.media?.video?.sites) : [];
     const history = raw.filter((m) => m.id !== normalized.id);
-    const items = formatTranscript([...history, normalized], {
+    const messages = [...history, normalized];
+    const { descriptions, videos } = await cachedFollowUpMedia(channel.guild.id, messages, config, ownPrefill);
+    const items = formatTranscript(messages, {
       timezone: config.bot.timezone,
       gapMinutes: config.context.gapMarkerMinutes,
       maxChars: config.context.maxMessageChars,
@@ -306,6 +347,8 @@ export function createMessageHandler({
       labels,
       seeReactions: config.features?.seeReactions !== false,
       reactionsPerMessage: config.context.reactionsPerMessage,
+      descriptions,
+      videos,
     });
     const candidateItem = items[items.length - 1];
     const transcript = renderTranscript(items.slice(0, -1), config.bot.timezone, labels);
@@ -355,9 +398,10 @@ export function createMessageHandler({
    * throws: an LLM/context-building error is treated as a "no" per the
    * contract. `false` means none of this applied (feature off, no open
    * window, busy in this channel) and the caller falls back to its usual
-   * handling.
+   * handling. `ownPrefill` is the message's picture prefill from
+   * warmMediaCache (or null), awaited before its classifier request is built.
    */
-  async function maybeFollowUp(message, normalized, selfId) {
+  async function maybeFollowUp(message, normalized, selfId, ownPrefill = null) {
     const gate = followUpGate(message, normalized, selfId);
     if (gate.kind === 'skip') return false;
     if (gate.kind === 'handled') return true;
@@ -372,7 +416,7 @@ export function createMessageHandler({
     const channelId = message.channel.id;
     if (followUpInFlight.has(channelId)) {
       const replaced = followUpHeld.has(channelId);
-      followUpHeld.set(channelId, { message, normalized, selfId });
+      followUpHeld.set(channelId, { message, normalized, selfId, ownPrefill });
       log.info('follow-up: held while a classifier call is in flight', { channel: channelId, message: normalized.id, replaced });
       return true;
     }
@@ -380,7 +424,7 @@ export function createMessageHandler({
     followUpInFlight.add(channelId);
     let startedTurn;
     try {
-      startedTurn = await classifyFollowUp(message, normalized, selfId, gate);
+      startedTurn = await classifyFollowUp(message, normalized, selfId, gate, ownPrefill);
     } catch (err) {
       followUpHeld.delete(channelId);
       followUpInFlight.delete(channelId);
@@ -420,7 +464,7 @@ export function createMessageHandler({
           return;
         }
         if (gate.kind === 'handled') return;
-        turnStarted = await classifyFollowUp(held.message, held.normalized, held.selfId, gate);
+        turnStarted = await classifyFollowUp(held.message, held.normalized, held.selfId, gate, held.ownPrefill);
       }
     } finally {
       followUpHeld.delete(channelId);
@@ -433,7 +477,7 @@ export function createMessageHandler({
    * verdict, starts a reply turn on "yes", bumps the no-streak otherwise.
    * Resolves to whether a turn was started. The caller owns the in-flight slot.
    */
-  async function classifyFollowUp(message, normalized, selfId, { config, state }) {
+  async function classifyFollowUp(message, normalized, selfId, { config, state }, ownPrefill = null) {
     const channel = message.channel;
     const channelId = channel.id;
     const mentionCfg = config.mention;
@@ -441,7 +485,7 @@ export function createMessageHandler({
     const selfName = channel.guild.members.me?.displayName ?? client.user.username;
     let request = null;
     try {
-      request = await buildFollowUpRequest({ config, prompts: hot.prompts, channel, selfId, selfName, normalized });
+      request = await buildFollowUpRequest({ config, prompts: hot.prompts, channel, selfId, selfName, normalized, ownPrefill });
     } catch (err) {
       log.warn('follow-up: building the classifier request failed', { channel: channelId, error: err });
     }
@@ -874,7 +918,7 @@ export function createMessageHandler({
 
       // 9. Everyone else feeds memory; a message addressed to the persona is
       // marked `direct` so the analyzer can weigh it separately.
-      warmMediaCache(guildId, normalized);
+      const ownPrefill = warmMediaCache(guildId, normalized);
       if (memoryOn) memory.observe(guildId, normalized, { direct: Boolean(kind) });
 
       // 10. No trigger: maybe a follow-up (features.followUp) inside a
@@ -883,7 +927,7 @@ export function createMessageHandler({
       // see its own header comment); otherwise let the spontaneous scheduler
       // eavesdrop, nothing more.
       if (!kind) {
-        const followedUp = await maybeFollowUp(message, normalized, selfId);
+        const followedUp = await maybeFollowUp(message, normalized, selfId, ownPrefill);
         if (!followedUp) spontaneous.onMessage(message.channel, normalized);
         return;
       }

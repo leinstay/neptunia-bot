@@ -3051,3 +3051,129 @@ test('limits: a message without a trigger runs no turn here, so nothing is ever 
   assert.equal(turns.calls.length, 0);
   assert.equal(channel.sent.length, 0);
 });
+
+// ---------------------------------------------------------------------------
+// The address classifier sees media captions the describer already cached:
+// a sticker- or picture-only answer is not a bare `[sticker: name]`.
+
+/** A describer fake with the cache-only accessor; `describeMany` (the prefill) waits on `gate` when given. */
+function fakeCachingDescriber(cached = new Map(), { gate } = {}) {
+  const calls = [];
+  const cachedCalls = [];
+  return {
+    calls,
+    cachedCalls,
+    describeMany: async (guildId, items) => {
+      calls.push({ guildId, items });
+      if (gate) await gate;
+      return { descriptions: new Map(), newCount: 0 };
+    },
+    cachedDescriptions: (guildId, items) => {
+      cachedCalls.push({ guildId, items });
+      return new Map(items.filter((item) => cached.has(item.itemId)).map((item) => [item.itemId, cached.get(item.itemId)]));
+    },
+  };
+}
+
+function stickerOnlyMessage({ guild, channel, id = 'm-sticker' }) {
+  return fakeMessage({
+    id,
+    guild,
+    channel,
+    channelId: channel.id,
+    cleanContent: '',
+    stickers: new Map([['s1', { id: 's1', name: 'pingo', format: 1 }]]),
+  });
+}
+
+test('follow-up: a sticker-only candidate with a cached caption reaches the classifier with the caption', async () => {
+  const llm = fakeFollowUpLlm();
+  const describer = fakeCachingDescriber(new Map([['sticker:s1', 'a penguin waving hello']]));
+  const config = baseConfig({ features: { mediaDescriptions: true } });
+  const handler = makeHandler({ config, llm, describer, prompts: fakeAddressPrompts() });
+  const guild = fakeGuild();
+  const channel = fakeChannelWithHistory('c1', guild, []);
+  await openFollowUpWindow(handler, { guild, channel, ts: Date.now() });
+
+  const p = handler(stickerOnlyMessage({ guild, channel }));
+  await tick();
+
+  assert.equal(llm.calls.length, 1, 'only the classifier call; the cache read makes none');
+  assert.match(llm.calls[0].messages[1].content, /<candidate>\n[^\n]*\[sticker: pingo: a penguin waving hello\]\n<\/candidate>/);
+  assert.equal(describer.cachedCalls.length, 1);
+  assert.equal(describer.cachedCalls[0].guildId, 'g1');
+  assert.ok(describer.cachedCalls[0].items.some((item) => item.itemId === 'sticker:s1'));
+
+  llm.respond('no');
+  await p;
+});
+
+test('follow-up: a sticker-only candidate with no cached caption renders as a bare sticker, as before', async () => {
+  const llm = fakeFollowUpLlm();
+  const describer = fakeCachingDescriber();
+  const config = baseConfig({ features: { mediaDescriptions: true } });
+  const handler = makeHandler({ config, llm, describer, prompts: fakeAddressPrompts() });
+  const guild = fakeGuild();
+  const channel = fakeChannelWithHistory('c1', guild, []);
+  await openFollowUpWindow(handler, { guild, channel, ts: Date.now() });
+
+  const p = handler(stickerOnlyMessage({ guild, channel }));
+  await tick();
+
+  assert.equal(llm.calls.length, 1);
+  assert.match(llm.calls[0].messages[1].content, /<candidate>\n[^\n]*\[sticker: pingo\]\n<\/candidate>/);
+
+  llm.respond('no');
+  await p;
+});
+
+test("follow-up: the classifier waits for the candidate's own picture prefill, with no second describe request", async () => {
+  const llm = fakeFollowUpLlm();
+  let release;
+  const gate = new Promise((resolve) => {
+    release = resolve;
+  });
+  const cached = new Map();
+  const describer = fakeCachingDescriber(cached, { gate });
+  const config = baseConfig({ features: { mediaDescriptions: true } });
+  const handler = makeHandler({ config, llm, describer, prompts: fakeAddressPrompts() });
+  const guild = fakeGuild();
+  const channel = fakeChannelWithHistory('c1', guild, []);
+  await openFollowUpWindow(handler, { guild, channel, ts: Date.now() });
+
+  const p = handler(stickerOnlyMessage({ guild, channel }));
+  await tick();
+  assert.equal(describer.calls.length, 1, 'the prefill started');
+  assert.equal(llm.calls.length, 0, 'the classifier is not asked while the prefill is in flight');
+
+  cached.set('sticker:s1', 'a penguin waving hello');
+  release();
+  await tick();
+
+  assert.equal(describer.calls.length, 1, 'the prefill is awaited, never repeated');
+  assert.equal(llm.calls.length, 1);
+  assert.match(llm.calls[0].messages[1].content, /\[sticker: pingo: a penguin waving hello\]/);
+
+  llm.respond('no');
+  await p;
+});
+
+test('follow-up: with mediaDescriptions off the describer is never consulted and the sticker stays bare', async () => {
+  const llm = fakeFollowUpLlm();
+  const describer = fakeCachingDescriber(new Map([['sticker:s1', 'a penguin waving hello']]));
+  const config = baseConfig({ features: { mediaDescriptions: false } });
+  const handler = makeHandler({ config, llm, describer, prompts: fakeAddressPrompts() });
+  const guild = fakeGuild();
+  const channel = fakeChannelWithHistory('c1', guild, []);
+  await openFollowUpWindow(handler, { guild, channel, ts: Date.now() });
+
+  const p = handler(stickerOnlyMessage({ guild, channel }));
+  await tick();
+
+  assert.equal(describer.calls.length, 0);
+  assert.equal(describer.cachedCalls.length, 0);
+  assert.match(llm.calls[0].messages[1].content, /\[sticker: pingo\]\n<\/candidate>/);
+
+  llm.respond('no');
+  await p;
+});

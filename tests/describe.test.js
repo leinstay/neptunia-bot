@@ -2054,3 +2054,54 @@ test('rewatchVideo: a re-watch prompt without placeholders is sent unchanged', a
   await describer.rewatchVideo('g1', videoAttachment(), 'Quelle date ?');
   assert.equal(llm.calls[0].messages[0].content, prompt);
 });
+
+// cachedDescriptions / cachedVideos: the cache-only accessors the address
+// classifier (src/discord/events.js) reads -- never a download, never a request.
+
+test('cachedDescriptions: returns only cached captions, skips misses and unknown items, makes no request', async () => {
+  const store = createStore({ dataDir: tmpDataDir() });
+  const llm = fakeLlm({ text: 'never asked' });
+  const imageFetcher = fakeImageFetcher();
+  const describer = createDescriber({ hot: fakeHot(), store, llm, imageFetcher });
+  const cache = store.getMediaCache('g1');
+  cache['sticker:s1'] = { text: 'a cat waving', ts: 1 };
+  cache.a2 = { miss: true, ts: Date.now() };
+
+  const descriptions = describer.cachedDescriptions('g1', [
+    pictureItem('sticker:s1', { kind: 'sticker' }),
+    pictureItem('a2'),
+    pictureItem('a3'),
+  ]);
+
+  assert.deepEqual([...descriptions], [['sticker:s1', 'a cat waving']]);
+  assert.equal(llm.calls.length, 0);
+  assert.equal(imageFetcher.calls.length, 0);
+  assert.equal(Object.keys(cache).at(-1), 'sticker:s1', 'a hit is LRU-touched like describe() does');
+});
+
+test('cachedDescriptions: empty when features.mediaDescriptions is off', async () => {
+  const store = createStore({ dataDir: tmpDataDir() });
+  const describer = createDescriber({
+    hot: fakeHot({ config: { features: { mediaDescriptions: false } } }),
+    store,
+    llm: fakeLlm({ text: 'x' }),
+    imageFetcher: fakeImageFetcher(),
+  });
+  store.getMediaCache('g1').a1 = { text: 'a cat', ts: 1 };
+
+  assert.equal(describer.cachedDescriptions('g1', [pictureItem('a1')]).size, 0);
+});
+
+test('cachedVideos: returns cached video states only, never fetches or spends a daily slot', async () => {
+  const { describer, store, llm, videoFetcher, state } = videoDescriber();
+  store.getMediaCache('g1')['video:v1'] = { text: 'someone dances', ts: 1, watched: true };
+
+  const videos = await describer.cachedVideos('g1', [videoAttachment('v1'), videoAttachment('v2')]);
+
+  assert.deepEqual([...videos.keys()], ['v1']);
+  assert.equal(videos.get('v1').state, 'watched');
+  assert.equal(videos.get('v1').text, 'someone dances');
+  assert.equal(llm.calls.length, 0);
+  assert.equal(videoFetcher.calls.length, 0);
+  assert.equal(state.data.videoCount, undefined, 'no daily video slot is reserved');
+});

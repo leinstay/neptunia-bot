@@ -466,7 +466,10 @@ After the persona answers someone, a conversation window opens in that channel (
 by every further answer). A message inside the window that carries no trigger (no mention, no reply to the persona,
 no name) is not answered blindly: code sends the last `mention.followUpContext` (default 15) lines of the channel, the
 persona's own lines marked with `labels.self`, plus the new message marked as `<candidate>`, to `address.md` on the
-`classifier.text` model role (default `anthropic/claude-sonnet-4.6`). Output is ONE line: `yes` when the candidate
+`classifier.text` model role (default `anthropic/claude-sonnet-4.6`). The transcript carries cached media captions
+(pictures, stickers, GIFs, custom emoji, watched videos) in the same label forms as the persona's transcript. Code
+makes no new describer requests for the history lines; it describes only the candidate's own media before running the
+classifier. Output is ONE line: `yes` when the candidate
 addresses the persona or continues the exchange with it, `no` when people talk among themselves or to someone else
 (a reply to another member or a mention of another member is always `no` before the model is asked). `yes` runs a
 normal reply turn (the model may still `<skip/>`); three `no` in a row (`mention.followUpNoStreak`, default 3) close

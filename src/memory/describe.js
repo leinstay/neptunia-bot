@@ -303,6 +303,34 @@ export function createDescriber({
     return { descriptions, newCount };
   }
 
+  /**
+   * The captions the media cache already holds for `items`, never a
+   * download or a request, never a daily count: `itemId` -> caption text,
+   * ready for formatTranscript's `descriptions` option. Misses and unknown
+   * items are left out; a hit is LRU-touched as describe() does. Empty
+   * when describe() would not run (features.mediaDescriptions off, no
+   * describe prompt). Used where a caption helps but may not cost a request
+   * (the address classifier, src/discord/events.js).
+   * @param {string} guildId
+   * @param {object[]} items
+   * @returns {Map<string, string>}
+   */
+  function cachedDescriptions(guildId, items) {
+    const descriptions = new Map();
+    if (hot.config.features?.mediaDescriptions !== true || !hot.prompts?.describe) return descriptions;
+    const cache = store.getMediaCache(guildId);
+    let touched = false;
+    for (const item of items ?? []) {
+      const entry = item?.itemId ? cache[item.itemId] : undefined;
+      if (!entry || entry.miss || typeof entry.text !== 'string' || !entry.text) continue;
+      touchKey(cache, item.itemId, entry);
+      touched = true;
+      descriptions.set(item.itemId, entry.text);
+    }
+    if (touched) store.markMediaCacheDirty(guildId);
+    return descriptions;
+  }
+
   // One in-flight watch per guild + video: a message prefill and a turn that
   // reach the same new video at once share one request.
   const inFlight = new Map();
@@ -699,6 +727,24 @@ export function createDescriber({
   }
 
   /**
+   * The video states the media cache already holds for `items` (the same
+   * lookup as describeVideos past its `maxNew`): never a fetch, a request or
+   * a daily video slot, and an in-flight watch is not waited for. `itemId`
+   * -> video state, ready for formatTranscript's `videos` option.
+   * @param {string} guildId
+   * @param {object[]} items  collectVideos candidates.
+   * @returns {Promise<Map<string, object>>}
+   */
+  async function cachedVideos(guildId, items) {
+    const videos = new Map();
+    for (const item of items ?? []) {
+      const { result } = await describeVideoCharged(guildId, item, { cacheOnly: true });
+      if (result) videos.set(item.itemId, result);
+    }
+    return videos;
+  }
+
+  /**
    * The second look on a question: fetch `item` again exactly like a watch
    * (fetchVideoMedia -- same probe chain, direct-URL rules, caps and pinned
    * provider) and ask the video model `question` through the
@@ -797,5 +843,14 @@ export function createDescriber({
   // the same fetcher and key as a real link, no LLM call, nothing cached.
   const checkYoutube = createYoutubeCheck({ hot, videoFetcher, youtubeApiKey });
 
-  return { describe, describeMany, describeVideo, describeVideos, rewatchVideo, checkYoutube };
+  return {
+    describe,
+    describeMany,
+    cachedDescriptions,
+    describeVideo,
+    describeVideos,
+    cachedVideos,
+    rewatchVideo,
+    checkYoutube,
+  };
 }
