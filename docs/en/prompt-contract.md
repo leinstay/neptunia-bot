@@ -710,13 +710,13 @@ A case stores its moments as `anchors`:
 
 In a run, each usable anchor becomes a situation of its own, numbered before the invented ones. The situation record carries `anchor: <id>` (absent on invented situations). The replay uses the stored history at the time of the persona's original message, in the anchor's own channel.
 
+When `mentor.anchor.hideLaterMemory` is not `false` (the default is `true`), a replayed moment is answered with the memory as it stood before its trigger. Items dated at or after the trigger's timestamp are hidden: episodes (by `addedAt`, falling back to `date` by UTC day), affinity history entries and the affinity reason (the score stays at its current value), details (by `firstSeen`), interests (by `firstSeen`), aliases (by `firstSeen`), learned items (by `firstSeen`) and lore entries (by `createdAt`). Items with no parseable date pass through. Undated fields (profile prose, guild patterns, starters, in-jokes, self-facts, channel entries) stay visible with their current values. The judge's `<learned>` block for a real moment is filtered the same way. Setting the switch to `false` replays the moment with all of today's memory.
+
 In the situations request, the case's anchors are shown to the mentor model as `<examples>` (the last block). Each `<example>` holds a `<situation>` with the stored transcript and an `<original>` with the persona's messages. The oldest messages of each example may be trimmed so the block fits the request budget; the trigger is never dropped. The mentor invents situations of the same kind: matching message lengths, turn count and pressure.
 
 In the score request for a real moment, `<original>` appears between `<situation>` and `<answers>`, carrying the persona's rejected answer as a known-bad reference.
 
 The validator's cap on a single line of an invented situation is 2000 characters (not the former 500), so the mentor can match the length of messages in the examples.
-
-The diagnosis prefers a real moment as `<worst>` when one is among the weak situations.
 
 ### Prompts
 
@@ -745,13 +745,13 @@ Placeholders filled by code: `{{name}}` in all six; `{{count}}`, `{{minLines}}`,
 | `<original>` | The persona's answer at the time (in a score request for a real moment). `labels.mentor.original` as the first line, then the persona's messages. A known-bad reference, never an answer to score. Omitted for invented situations | score (reply target, real moments only) |
 | `<character>` | The character card with `{{name}}` filled | score (reply target only) |
 | `<rules>` | The rules prompt | score |
-| `<learned>` | Instruction-like learned items as the persona sees them | score |
+| `<learned>` | Instruction-like learned items as the persona sees them. For a real moment with `mentor.anchor.hideLaterMemory` on, items written at or after the trigger are hidden | score |
 | `<situation>` | The situation rendered as a chat transcript, the way the persona saw it. For a real moment, the oldest messages may be trimmed to fit the request budget; the trigger is never dropped | score |
 | `<answers>` | JSON array: `[{ "id": "s1a1", "messages": ["..."], "reactions": ["..."], "silent": false }]` | score (reply target) |
 | `<stored>` | JSON array: `[{ "id": "s1a1", "texts": [{ "path": "...", "text": "..." }], "parseOk": true }]`. When `parseOk` is false the analyzer returned invalid JSON and nothing would have been stored | score (memory target) |
 | `<facts>` | JSON object keyed by answer id with deterministic measurements (unused marks, rare marks, comma count, comma density, length), plus `"repeated"` with phrases found in two or more different situations. Per answer: `commas` is a count; `commaPer1000` is a number only when the measured text has at least 150 characters, `null` for a shorter one (too short to measure; the mentor judges the count, never infers a density). `repeated` lists phrases that recurred across different situations, and `count` is the number of situations | score |
 | `<verdict>` | JSON: `{ passed, medians, situations, reasons }` with the pass/fail result, medians of each axis, per-situation medians and the reasons the case was brought to diagnosis | diagnosis |
-| `<worst>` | JSON: the situation with the lowest median `overall` (ties: the lowest `n`; a real moment is preferred over an invented one among equal candidates): `{ n, title, transcript, answers }` where each answer carries its id, messages/reactions/silent (or `texts`/`parseOk` for memory), `facts` and `score`. The transcript may be trimmed to the request budget | diagnosis |
+| `<worst>` | JSON: the situation with the lowest median `overall` of any kind (ties: the lower median `goal`, then a real moment before an invented situation, then the lower `n`): `{ n, title, transcript, answers }` where each answer carries its id, messages/reactions/silent (or `texts`/`parseOk` for memory), `facts` and `score`. The transcript may be trimmed to the request budget | diagnosis |
 | `<seen>` | The full request the persona (or the analyzer for a memory case) was given for that situation, as two sub-blocks: `<system>` (the system prompt with the character card, rules and format) and `<user>` (the transcript, memory blocks and task) | diagnosis |
 
 ### Answer ids

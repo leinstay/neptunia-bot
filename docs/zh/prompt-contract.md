@@ -635,13 +635,13 @@ Mentor 模型读取渲染后的沙盒请求，因此可以读取角色记忆中�
 
 在运行中，每个可用的 anchor 成为独立的场景，编号在构造的场景之前。场景记录携带 `anchor: <id>`（构造的场景没有此字段）。重放使用存储的历史，在角色原始消息的时间点，在 anchor 自己的频道中。
 
+当 `mentor.anchor.hideLaterMemory` 不为 `false` 时（默认 `true`），重放的 moment 使用触发消息之前的记忆状态回答。时间在触发消息时间点或之后的条目被隐藏：事件（按 `addedAt`，回退到 `date` 按 UTC 天）、态度历史记录和态度原因（分数保持当前值）、详情（按 `firstSeen`）、兴趣（按 `firstSeen`）、别名（按 `firstSeen`）、学到的内容（按 `firstSeen`）和知识库条目（按 `createdAt`）。没有可解析日期的条目不被过滤。无日期字段（档案文本字段、服务器模式、开场白、梗、自我事实、频道条目）保持可见并使用当前值。评分中真实 moment 的 `<learned>` 块也以相同方式过滤。设为 `false` 则使用当前全部记忆重放。
+
 在场景请求中，案例的 anchor 以 `<examples>`（最后一个块）的形式展示给 mentor 模型。每个 `<example>` 包含存储转录的 `<situation>` 和角色消息的 `<original>`。每个示例的最旧消息可能被裁剪以适应请求预算；触发消息不会被删除。Mentor 构造同类场景：匹配消息长度、回合数和压力程度。
 
 在真实 moment 的评分请求中，`<original>` 出现在 `<situation>` 和 `<answers>` 之间，携带角色被拒绝的回答作为已知的差参考。
 
 验证器对构造场景单行的上限为 2000 字符（原先为 500），使 mentor 能够匹配示例中的消息长度。
-
-诊断在弱场景中优先选择真实 moment 作为 `<worst>`。
 
 ### 提示
 
@@ -670,13 +670,13 @@ Mentor 使用六个提示文件：每个目标一对，加上特征文件和诊�
 | `<original>` | 角色当时的回答（在真实 moment 的评分请求中）。`labels.mentor.original` 为首行，然后是角色的消息。已知的差参考，不是待评分的回答。构造的场景省略此块 | 评分（reply，仅真实 moment） |
 | `<character>` | 填充了 `{{name}}` 的角色卡 | 评分（仅 reply） |
 | `<rules>` | 规则提示 | 评分 |
-| `<learned>` | 角色看到的指令式已学内容 | 评分 |
+| `<learned>` | 角色看到的指令式已学内容。对于启用了 `mentor.anchor.hideLaterMemory` 的真实 moment，在触发消息时间点或之后写入的内容被隐藏 | 评分 |
 | `<situation>` | 渲染为聊天记录的场景，角色所见。真实 moment 的最旧消息可能被裁剪以适应请求预算；触发消息不会被删除 | 评分 |
 | `<answers>` | JSON 数组：`[{ "id": "s1a1", "messages": ["..."], "reactions": ["..."], "silent": false }]` | 评分（reply） |
 | `<stored>` | JSON 数组：`[{ "id": "s1a1", "texts": [{ "path": "...", "text": "..." }], "parseOk": true }]`。当 `parseOk` 为 false 时分析器返回了无效 JSON，不会存储任何内容 | 评分（memory） |
 | `<facts>` | 按回答 id 索引的 JSON 对象，包含确定性测量结果（未使用标记、稀有标记、逗号计数、逗号密度、长度），以及在两个或更多不同场景中出现的短语 `"repeated"`。每个回答：`commas` 为计数；`commaPer1000` 仅在测量文本至少 150 字符时为数字，更短时为 `null`（太短无法测量；mentor 根据计数评判，不推断密度）。`repeated` 列出在不同场景中重复出现的短语，`count` 为场景数 | 评分 |
 | `<verdict>` | JSON：`{ passed, medians, situations, reasons }`，包含通过/失败结果、各轴中位数、各场景中位数和诊断原因 | 诊断 |
-| `<worst>` | JSON：`overall` 中位数最低的场景（平局时取最小 `n`；同等候选中真实 moment 优先于构造场景）：`{ n, title, transcript, answers }`，每个回答包含 id、messages/reactions/silent（memory 目标为 `texts`/`parseOk`）、`facts` 和 `score`。转录可能被裁剪以适应请求预算 | 诊断 |
+| `<worst>` | JSON：`overall` 中位数最低的任意类型场景（平局时取较小的 `goal` 中位数，然后真实 moment 优先于构造场景，再取较小的 `n`）：`{ n, title, transcript, answers }`，每个回答包含 id、messages/reactions/silent（memory 目标为 `texts`/`parseOk`）、`facts` 和 `score`。转录可能被裁剪以适应请求预算 | 诊断 |
 | `<seen>` | 角色（或 memory 案例中的分析器）在该场景中收到的完整请求，分两个子块：`<system>`（系统提示含角色卡、规则和格式）和 `<user>`（聊天记录、记忆块和任务） | 诊断 |
 
 ### 回答 ID

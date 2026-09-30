@@ -407,6 +407,7 @@ YouTube リンクの再生時間は次の順序で取得されます: まず yt-
 | `reference.rareMinAuthors` | `2` | 使用する著者数がこの値未満のマークはレアとみなす |
 | `anchor.max` | `5` | ケースあたりの実際の moment 数。各 moment はオーナーが拒否したペルソナのメッセージで、その前のチャットと共に保存 |
 | `anchor.contextMessages` | `30` | moment 解決時にチャンネルから取得するコンテキストメッセージ数（トリガーまで） |
+| `anchor.hideLaterMemory` | `true` | 実際の moment を再生する際、トリガーの時点以降に書き込まれた記憶を非表示にする（エピソード、態度変化、詳細、興味、エイリアス、学習項目、ロアエントリ）。`false` にすると現在の全記憶で再生 |
 | `feedbackExamples` | `10` | すべてのスコアリングリクエストに含める最新のオーナー修正（`/nep mentor wrong`）の数 |
 
 `llm.maxRequestTokens`（リクエストあたり 50k）は、mentor が発行または引き起こすすべてのリクエスト（サンドボックス回答を含む）に適用されます。各 mentor リクエスト前の予算チェックでは、プロンプトに加えて回答が最大でかかるコスト（`mentor.maxOutputTokens` を `mentor.outputTokenWeight` で乗算）を計上するため、可能な出力が残り予算に収まらない場合リクエストは拒否されます。予算が尽きると実行が停止し、得られた結果を報告します。ラン中に `features.mentor` や `mentor.model` がオフにされた場合、またはリファレンスウィンドウ内のリファレンスチャンネルに人々のメッセージがない場合も実行が停止します。
