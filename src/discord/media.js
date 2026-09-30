@@ -15,6 +15,7 @@ import { createHash } from 'node:crypto';
 import { videoSiteFor } from './video-sites.js';
 
 const DISCORD_CDN_HOSTS = new Set(['cdn.discordapp.com', 'media.discordapp.net']);
+const DISCORD_EXTERNAL_PROXY_HOST_RE = /^images-ext-\d+\.discordapp\.net$/;
 const GIF_PROVIDERS = new Set(['tenor', 'giphy']);
 const GIF_HOST_RE = /(^|\.)((tenor|giphy)\.com)$/i;
 
@@ -223,24 +224,30 @@ export function formatDurationShort(seconds) {
  * rewritten to the `media.discordapp.net` host, with `width` / `height` /
  * `format` set (or replaced, when already present) — every other existing
  * query parameter survives untouched, crucially the signed `ex`/`is`/`hm`
- * ones. Every other host is returned unchanged (its own thumbnail is already
- * a plain image, not a video needing frame extraction). Best-effort: an
- * unparsable URL is returned as-is.
+ * ones. Discord's external-content proxy (`images-ext-<n>.discordapp.net`,
+ * e.g. a tenor embed's thumbnail) accepts the same parameters and gets them
+ * the same way, but keeps its own host: its path is proxy-specific. Every
+ * other host is returned unchanged (its own thumbnail is already a plain
+ * image, not a video needing frame extraction). `animated` (when
+ * given) sets the proxy's `animated` param: `false` asks for one still frame
+ * of an animated GIF instead of an animated webp that can exceed the vision
+ * download limit. Best-effort: an unparsable URL is returned as-is.
  * @param {string} url
- * @param {{ width?: number, height?: number, format?: string }} [options]
+ * @param {{ width?: number, height?: number, format?: string, animated?: boolean }} [options]
  */
-export function mediaProxyUrl(url, { width, height, format } = {}) {
+export function mediaProxyUrl(url, { width, height, format, animated } = {}) {
   let parsed;
   try {
     parsed = new URL(String(url));
   } catch {
     return url;
   }
-  if (!DISCORD_CDN_HOSTS.has(parsed.hostname)) return url;
-  parsed.hostname = 'media.discordapp.net';
+  if (DISCORD_CDN_HOSTS.has(parsed.hostname)) parsed.hostname = 'media.discordapp.net';
+  else if (!DISCORD_EXTERNAL_PROXY_HOST_RE.test(parsed.hostname)) return url;
   if (width != null) parsed.searchParams.set('width', String(width));
   if (height != null) parsed.searchParams.set('height', String(height));
   if (format) parsed.searchParams.set('format', format);
+  if (typeof animated === 'boolean') parsed.searchParams.set('animated', String(animated));
   return parsed.toString();
 }
 

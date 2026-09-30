@@ -396,6 +396,46 @@ test('describe: an image request resizes through the media proxy at media.imageS
   assert.equal(new URL(fetchedUrl).searchParams.get('width'), '256');
 });
 
+test('describe: a gif item requests a single still png frame at media.imageSize, never an animated webp', async () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  const hot = fakeHot({ config: { features: { mediaDescriptions: true }, media: { imageSize: 256 } } });
+  const llm = fakeLlm({ text: 'a cat spins' });
+  const imageFetcher = fakeImageFetcher();
+  const describer = createDescriber({ hot, store, llm, imageFetcher });
+
+  await describer.describe('g1', pictureItem('gif1', { kind: 'gif', url: 'https://cdn.discordapp.com/attachments/1/2/anim.gif?ex=1' }));
+  assert.equal(
+    imageFetcher.calls[0].url,
+    'https://media.discordapp.net/attachments/1/2/anim.gif?ex=1&width=256&height=256&format=png&animated=false',
+  );
+});
+
+test('describe: a tenor gif embed on images-ext keeps its host and asks for a still png frame', async () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  const hot = fakeHot({ config: { features: { mediaDescriptions: true }, media: { imageSize: 512 } } });
+  const llm = fakeLlm({ text: 'a cat spins' });
+  const imageFetcher = fakeImageFetcher();
+  const describer = createDescriber({ hot, store, llm, imageFetcher });
+
+  const url = 'https://images-ext-1.discordapp.net/external/abc/https/media.tenor.com/x/anim.gif?ex=1';
+  await describer.describe('g1', pictureItem('link:t1', { kind: 'gif', url }));
+  assert.equal(imageFetcher.calls[0].url, `${url}&width=512&height=512&format=png&animated=false`);
+});
+
+test('describe: an image item keeps the resized webp proxy URL with no animated param', async () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  const hot = fakeHot({ config: { features: { mediaDescriptions: true }, media: { imageSize: 256 } } });
+  const llm = fakeLlm({ text: 'a cat' });
+  const imageFetcher = fakeImageFetcher();
+  const describer = createDescriber({ hot, store, llm, imageFetcher });
+
+  await describer.describe('g1', pictureItem('a1'));
+  assert.equal(imageFetcher.calls[0].url, 'https://media.discordapp.net/x/pic.png?width=256&height=256&format=webp');
+});
+
 // --- stickers, custom emoji, link thumbnails -------------------------
 
 test('describe: a sticker item is downloaded as-is, never through the media proxy (already sized via ?size=)', async () => {

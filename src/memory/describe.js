@@ -207,14 +207,18 @@ export function createDescriber({
     // (stickerUrl/emojiUrl -- `size=`, not width/height/format, and the
     // emoji CDN host is deliberately not media.discordapp.net): the proxy
     // must never touch either. Every other kind (image/gif/video/link) goes
-    // through it as before -- a no-op for a non-Discord host such as a
-    // YouTube thumbnail's i.ytimg.com.
+    // through it -- a no-op for a non-Discord host such as a YouTube
+    // thumbnail's i.ytimg.com. A gif asks for one still png frame: as webp
+    // the proxy serves the whole animation, often above context.vision.maxBytes.
     let imageUrl;
     if (item.kind === 'sticker' || item.kind === 'emoji') {
       imageUrl = item.url;
     } else {
-      const proxyOptions =
-        item.kind === 'video' ? { format: 'webp' } : { width: mediaCfg.imageSize, height: mediaCfg.imageSize, format: 'webp' };
+      const sized = { width: mediaCfg.imageSize, height: mediaCfg.imageSize };
+      let proxyOptions;
+      if (item.kind === 'video') proxyOptions = { format: 'webp' };
+      else if (item.kind === 'gif') proxyOptions = { ...sized, format: 'png', animated: false };
+      else proxyOptions = { ...sized, format: 'webp' };
       imageUrl = mediaProxyUrl(item.url, proxyOptions);
     }
 
