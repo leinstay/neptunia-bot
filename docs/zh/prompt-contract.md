@@ -624,16 +624,23 @@ Mentor 模型读取渲染后的沙盒请求，因此可以读取角色记忆中�
 
 ### 真实 moment（anchors）
 
-案例可包含来自聊天的真实 moment。每个 moment 是所有者拒绝的角色的一条消息。解析过程：机器人获取该消息，找到触发消息（该消息回复的消息，或其之前最后一条非角色消息），收集该频道直到触发消息的最多 `mentor.anchor.contextMessages`（默认 30）条消息，并将角色的整个连续消息（从指定消息开始的连续消息）存储为原始回答。存储的历史与常规转录的规范化方式相同（媒体标签、反应），但不下载任何内容。名称和反应保持获取时的状态。存储后，moment 从其存储的消息重放，即使频道继续或消息被删除。
+案例可包含来自聊天的真实 moment。每个 moment 是所有者拒绝的角色的一条消息。解析过程：机器人获取该消息，找到触发消息（该消息回复的消息，或其之前最后一条非角色消息），收集该频道直到触发消息的最多 `mentor.anchor.contextMessages`（默认 30）条消息，并将角色的整个连续消息（从指定消息开始的连续消息）存储为原始回答。存储的历史与常规转录的规范化方式相同（媒体标签、反应），但不下载或描述任何内容。解析同时存储角色所见的媒体：对每条消息，描述器在 `media.json` 中缓存的标注（图片、GIF、视频帧、链接缩略图、贴纸、自定义表情）和已观看视频摘要（写入时间不晚于角色消息的条目）成为 `mediaSeen: { captions?: { <itemId>: text }, watched?: { <itemId>: text } }`。不保留的内容：未观看状态（限制或错误）、二次查看回答（`videoAnswered`）、网页查询读取（`linkRead`）和附加图片标记。名称和反应保持获取时的状态。存储后，moment 从其存储的消息重放，即使频道继续或消息被删除。
 
 案例将 moment 存储为 `anchors`：
 
 ```json
 [{ "id": 1, "channelId": "...", "messageId": "...", "triggerId": "...",
-   "addedAt": "...", "history": [/* 规范化消息 */], "original": ["text", "..."] }]
+   "addedAt": "...",
+   "history": [
+     { "...规范化消息字段...",
+       "mediaSeen": { "captions": { "<itemId>": "text" }, "watched": { "<itemId>": "text" } } }
+   ],
+   "original": ["text", "..."] }]
 ```
 
 在运行中，每个可用的 anchor 成为独立的场景，编号在构造的场景之前。场景记录携带 `anchor: <id>`（构造的场景没有此字段）。重放使用存储的历史，在角色原始消息的时间点，在 anchor 自己的频道中。
+
+重放时，存储的 `mediaSeen` 使用当前转录标签（`imageDescribed`、`gifDescribed`、`videoDescribed`、`videoWatched`、`thumbnailDescribed`、`linkWatched`、`stickerDescribed`、`emojiDescribed`）在角色请求、`<examples>`、评分 `<situation>` 和 `<worst>` 中渲染。对于没有存储描述的项，在重放时以相同的时间限制（角色的回答）只读查询缓存。若缓存中也没有，项使用其原始标签渲染。
 
 当 `mentor.anchor.hideLaterMemory` 不为 `false` 时（默认 `true`），重放的 moment 使用触发消息之前的记忆状态回答。时间在触发消息时间点或之后的条目被隐藏：事件（按 `addedAt`，回退到 `date` 按 UTC 天）、态度历史记录和态度原因（分数保持当前值）、详情（按 `firstSeen`）、兴趣（按 `firstSeen`）、别名（按 `firstSeen`）、学到的内容（按 `firstSeen`）和知识库条目（按 `createdAt`）。没有可解析日期的条目不被过滤。无日期字段（档案文本字段、服务器模式、开场白、梗、自我事实、频道条目）保持可见并使用当前值。评分中真实 moment 的 `<learned>` 块也以相同方式过滤。设为 `false` 则使用当前全部记忆重放。
 

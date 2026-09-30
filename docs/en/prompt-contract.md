@@ -705,16 +705,23 @@ A stopped run keeps the scores it already has and reports them.
 
 ### Real moments (anchors)
 
-A case may carry real moments from the chat. Each moment is one message of the persona that the owner rejected. Resolving: the bot fetches the message, finds the trigger (the message it replies to, or the last message before it that is not the persona's), collects up to `mentor.anchor.contextMessages` (default 30) messages of that channel ending at the trigger, and stores the persona's whole burst (consecutive messages starting at the linked one) as the original answer. The stored history is normalized the same way the regular transcript is (media labels, reactions) but nothing is downloaded. Names and reactions stay as they were at fetch time. Once stored, a moment is replayed from its stored messages even after the channel moves on or a message is deleted.
+A case may carry real moments from the chat. Each moment is one message of the persona that the owner rejected. Resolving: the bot fetches the message, finds the trigger (the message it replies to, or the last message before it that is not the persona's), collects up to `mentor.anchor.contextMessages` (default 30) messages of that channel ending at the trigger, and stores the persona's whole burst (consecutive messages starting at the linked one) as the original answer. The stored history is normalized the same way the regular transcript is (media labels, reactions) but nothing is downloaded or described. Resolving stores what the persona saw of the media: for each message, the describer's captions (pictures, gifs, video frames, link thumbnails, stickers, custom emoji) and watched video summaries from `media.json` entries written no later than the persona's message become `mediaSeen: { captions?: { <itemId>: text }, watched?: { <itemId>: text } }`. Not-watched states (limit or error), second-look answers (`videoAnswered`), web lookup reads (`linkRead`) and attached-picture markers are not kept. Names and reactions stay as they were at fetch time. Once stored, a moment is replayed from its stored messages even after the channel moves on or a message is deleted.
 
 A case stores its moments as `anchors`:
 
 ```json
 [{ "id": 1, "channelId": "...", "messageId": "...", "triggerId": "...",
-   "addedAt": "...", "history": [/* normalized messages */], "original": ["text", "..."] }]
+   "addedAt": "...",
+   "history": [
+     { "...normalized message fields...",
+       "mediaSeen": { "captions": { "<itemId>": "text" }, "watched": { "<itemId>": "text" } } }
+   ],
+   "original": ["text", "..."] }]
 ```
 
 In a run, each usable anchor becomes a situation of its own, numbered before the invented ones. The situation record carries `anchor: <id>` (absent on invented situations). The replay uses the stored history at the time of the persona's original message, in the anchor's own channel.
+
+At replay, stored `mediaSeen` renders with the live transcript labels (`imageDescribed`, `gifDescribed`, `videoDescribed`, `videoWatched`, `thumbnailDescribed`, `linkWatched`, `stickerDescribed`, `emojiDescribed`) in the persona's request, in `<examples>`, in the score `<situation>` and in `<worst>`. For an item with nothing stored, the cache is read at replay time with the same time bound (the persona's answer). If the cache has nothing either, the item renders with its plain label.
 
 When `mentor.anchor.hideLaterMemory` is not `false` (the default is `true`), a replayed moment is answered with the memory as it stood before its trigger. Items dated at or after the trigger's timestamp are hidden: episodes (by `addedAt`, falling back to `date` by UTC day), affinity history entries and the affinity reason (the score stays at its current value), details (by `firstSeen`), interests (by `firstSeen`), aliases (by `firstSeen`), learned items (by `firstSeen`) and lore entries (by `createdAt`). Items with no parseable date pass through. Undated fields (profile prose, guild patterns, starters, in-jokes, self-facts, channel entries) stay visible with their current values. The judge's `<learned>` block for a real moment is filtered the same way. Setting the switch to `false` replays the moment with all of today's memory.
 
