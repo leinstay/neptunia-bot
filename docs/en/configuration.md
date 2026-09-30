@@ -113,7 +113,8 @@ Settings for the media describer (`features.mediaDescriptions`). The describer m
 
 | Key | Default | Meaning |
 |---|---|---|
-| `maxOutputTokens` | `120` | Max output tokens per description |
+| `maxOutputTokens` | `120` | Max output tokens per description; raise for a reasoning model whose thinking counts against this cap |
+| `descriptionChars` | `200` | Max characters for a picture description; the first line is kept and cut on a word boundary. Fills `{{maxChars}}` in `describe.md` when the placeholder is present |
 | `imageSize` | `512` | Downscale target in px |
 | `maxPerTurn` | `6` | Max descriptions generated per turn |
 | `cacheEntries` | `5000` | Description cache size, keyed by attachment |

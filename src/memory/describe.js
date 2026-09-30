@@ -6,7 +6,8 @@
 // attachment/embed id in data/guilds/<id>/media.json (src/memory/store.js),
 // LRU-trimmed to `media.cacheEntries`. A failure is cached as a miss for an
 // hour, so a broken picture is not retried on every turn/batch. Descriptions
-// are data: never logged.
+// are data: never logged. A caption is capped at `media.descriptionChars`
+// (the describe prompt may learn the cap through `{{maxChars}}`).
 //
 // The picture is downloaded first (src/discord/fetch-image.js) and sent to
 // the model as a data: URL, never as a bare Discord URL -- the provider's own
@@ -67,6 +68,8 @@ import { createYoutubeCheck } from './youtube-check.js';
 import { log } from '../log.js';
 
 const MISS_TTL_MS = 60 * 60_000;
+// Only when media.descriptionChars is missing or invalid (config.json always has it).
+const DESCRIPTION_CHARS_FALLBACK = 200;
 // Only when media.video.errorRetryMinutes is missing or invalid (config.json always has it).
 const VIDEO_ERROR_RETRY_MINUTES_FALLBACK = 60;
 // Only when media.video.urlProcessing is missing (config.json always has it; null omits the field).
@@ -182,6 +185,7 @@ export function createDescriber({
     if (!promptText) return null;
 
     const mediaCfg = hot.config.media ?? {};
+    const descriptionChars = positiveOr(mediaCfg.descriptionChars, DESCRIPTION_CHARS_FALLBACK);
     const cache = store.getMediaCache(guildId);
     const cached = cache[item.itemId];
     if (cached) {
@@ -230,7 +234,7 @@ export function createDescriber({
     try {
       completion = await llm.complete(
         [
-          { role: 'system', content: promptText },
+          { role: 'system', content: fillTemplate(promptText, { maxChars: descriptionChars }) },
           { role: 'user', content: [{ type: 'image_url', image_url: { url: downloaded.dataUrl } }] },
         ],
         {
@@ -248,10 +252,11 @@ export function createDescriber({
       return null;
     }
 
-    const text = String(completion.text ?? '')
+    // First line only, hard-capped on a word boundary (never mid-token).
+    const firstLine = String(completion.text ?? '')
       .trim()
-      .split('\n')[0]
-      .slice(0, 200);
+      .split('\n')[0];
+    const text = clampText(firstLine, descriptionChars, { tolerance: 1 });
 
     if (!text) {
       log.warn('describe: failed', { kind: item.kind, reason: 'empty' });

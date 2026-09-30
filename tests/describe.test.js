@@ -127,6 +127,67 @@ test('describe: the caption is trimmed to at most 200 characters', async () => {
   assert.equal(result.text.length, 200);
 });
 
+/** A prose line of `words` short words, sentence-free, so a cut can only land on a space. */
+function proseLine(words) {
+  return Array.from({ length: words }, (_, i) => `mot${i % 10}é`).join(' ');
+}
+
+async function describeWith(media, text, prompt) {
+  const store = createStore({ dataDir: tmpDataDir() });
+  const hot = fakeHot({
+    config: { media: { maxOutputTokens: 120, imageSize: 512, cacheEntries: 5000, ...media } },
+    ...(prompt === undefined ? {} : { prompts: { describe: prompt } }),
+  });
+  const llm = fakeLlm({ text });
+  const describer = createDescriber({ hot, store, llm, imageFetcher: fakeImageFetcher() });
+  const result = await describer.describe('g1', pictureItem('a1'));
+  return { result, llm };
+}
+
+test('describe: media.descriptionChars lets a longer line through intact', async () => {
+  const line = proseLine(70);
+  assert.ok(line.length > 350 && line.length < 500);
+  const { result } = await describeWith({ descriptionChars: 500 }, `${line}\nsecond line ignored`);
+  assert.equal(result.text, line);
+});
+
+test('describe: the default cap stays 200 and cuts on a word boundary', async () => {
+  const line = proseLine(70);
+  const { result } = await describeWith({}, line);
+  assert.ok(result.text.length <= 200, `length ${result.text.length}`);
+  assert.ok(result.text.length > 150);
+  assert.ok(line.startsWith(result.text));
+  assert.equal(line[result.text.length], ' ', 'the cut must fall on a space, never inside a word');
+});
+
+test('describe: an over-long line is cut at or under media.descriptionChars on a boundary', async () => {
+  const line = proseLine(70);
+  const { result } = await describeWith({ descriptionChars: 100 }, line);
+  assert.ok(result.text.length <= 100, `length ${result.text.length}`);
+  assert.ok(line.startsWith(result.text));
+  assert.equal(line[result.text.length], ' ');
+});
+
+test('describe: a bad media.descriptionChars (0, negative, string) falls back to 200', async () => {
+  const line = proseLine(70);
+  for (const bad of [0, -50, '500']) {
+    const { result, llm } = await describeWith({ descriptionChars: bad }, line, 'Describe in {{maxChars}} characters.');
+    assert.ok(result.text.length <= 200 && result.text.length > 150, `${bad}: length ${result.text.length}`);
+    assert.equal(llm.calls[0].messages[0].content, 'Describe in 200 characters.', `${bad}: prompt`);
+  }
+});
+
+test('describe: {{maxChars}} in the describe prompt is filled with media.descriptionChars', async () => {
+  const { llm } = await describeWith({ descriptionChars: 350 }, 'Une chatte grise.', 'Say it in at most {{maxChars}} characters. Keep {{other}}.');
+  assert.equal(llm.calls[0].messages[0].content, 'Say it in at most 350 characters. Keep {{other}}.');
+});
+
+test('describe: a describe prompt without the placeholder is sent unchanged', async () => {
+  const prompt = 'Describe this picture in one plain line.';
+  const { llm } = await describeWith({ descriptionChars: 350 }, 'Une chatte grise.', prompt);
+  assert.equal(llm.calls[0].messages[0].content, prompt);
+});
+
 test('describe: a cache hit is free -- no download, no LLM request, marked cached', async () => {
   const dir = tmpDataDir();
   const store = createStore({ dataDir: dir });

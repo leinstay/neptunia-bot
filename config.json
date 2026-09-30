@@ -162,6 +162,7 @@
   },
   "media": {
     "maxOutputTokens": 120,
+    "descriptionChars": 200,
     "imageSize": 512,
     "maxPerTurn": 6,
     "cacheEntries": 5000,
