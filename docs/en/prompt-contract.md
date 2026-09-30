@@ -85,7 +85,8 @@ Budget priority (sections are trimmed from the bottom of this list first): syste
 other profiles → other channels.
 
 Media in a transcript line, most informative form available: a picture attached to THIS request →
-`transcript.imageAttached` (numbered in the order the pictures follow the text); a described one →
+`transcript.imageAttached`, or `transcript.imageAttachedDescribed` when `features.attachedDescriptions` is on and
+the helper captioned it (numbered in the order the pictures follow the text); a described one →
 `imageDescribed` / `gifDescribed` / `videoDescribed`; otherwise the blind forms `image` / `gif` / `video`.
 When video vision is on (`features.mediaDescriptions` AND `features.videoDescriptions`), a video or video-site link
 gains a state: `videoWatched` (first-hand, seen and heard), `videoNotWatchedFrame` (not watched but a still frame was
@@ -140,6 +141,7 @@ transcript.file | sticker                {name}
 transcript.stickerDescribed              {name} {text}
 transcript.emojiDescribed                {name} {text}: appended to a line for a custom emoji; text keeps :name:
 transcript.imageAttached                 {n}: this picture is attached to the request, the persona sees it
+transcript.imageAttachedDescribed        {n} {text}: attached to the request and captioned by the helper (features.attachedDescriptions)
 transcript.imageDescribed                {text}
 transcript.gif                           {name}
 transcript.gifDescribed                  {text}
@@ -167,7 +169,7 @@ transcript.reactions                     OPTIONAL {list}: appended at the end of
 transcript.reactionItem                  {emoji} {count}: one reaction; emoji is unicode or :name: for custom
 transcript.reactionMine                  {emoji} {count}: used instead of reactionItem when the persona is among the reactors; reads correctly whether count is 1 or more
 transcript.unknownDuration               shown in place of {duration} when Discord gave none
-senses.imageSee | imageDescribed | imageBlind        one line each; code picks the ones true under the live config
+senses.imageSee | imageDescribed | imageBlind        one line each; code picks the ones true under the live config. imageSee also covers the helper's note when features.attachedDescriptions is on
 senses.gifDescribed | gifBlind
 senses.videoDescribed | videoBlind
 senses.videoWatch                        replaces videoDescribed when features.videoDescriptions is on (needs mediaDescriptions too); covers watched, still frame and not-watched states

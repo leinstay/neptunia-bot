@@ -152,11 +152,17 @@ function mediaTags(message, labels, context = {}) {
     pushTag({ key, values });
     for (const tag of Array.isArray(extra) ? extra : extra ? [extra] : []) pushTag(tag);
   };
+  // An attached picture's caption (imageAttachedDescribed) is a newer,
+  // optional key: without it the bare imageAttached renders as before.
+  const attachedCaptionOn = Boolean(labels.transcript.imageAttachedDescribed);
   for (const attachment of message.attachments ?? []) {
     const attachedIndex = context.attachedIndex?.get(attachment.id) ?? null;
     const description = context.descriptions?.get(attachment.id) ?? null;
     const video = videoOf(attachment.id);
-    pushLabel(mediaLabelFor(attachment, { attachedIndex, description, unknownDuration, video }));
+    const label = mediaLabelFor(attachment, { attachedIndex, description, unknownDuration, video });
+    pushLabel(
+      label.key === 'imageAttachedDescribed' && !attachedCaptionOn ? { key: 'imageAttached', values: { n: label.values.n } } : label,
+    );
   }
   for (const link of message.links ?? []) {
     const attachedIndex = context.attachedIndex?.get(link.id) ?? null;
@@ -246,7 +252,8 @@ function renderForwarded(snapshot, labels, context, maxChars, channelName) {
  *   it also groups by channel (see below).
  * @param {Map<string, number>} [options.attachedIndex]  Item id -> its 1-based
  *   position among this request's `image_url` parts (see
- *   src/behavior/prompt.js#selectPictures); renders `transcript.imageAttached`.
+ *   src/behavior/prompt.js#selectPictures); renders `transcript.imageAttached`, or
+ *   `transcript.imageAttachedDescribed` when `descriptions` also has a caption for it.
  * @param {Map<string, string>} [options.descriptions]  Item id -> a describer
  *   caption (src/memory/describe.js); renders the `*Described` label forms.
  * @param {Map<string, { state: 'watched'|'limit'|'error', text?: string, reason?: string }>} [options.videos]

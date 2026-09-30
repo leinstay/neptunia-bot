@@ -21,6 +21,7 @@ export const labels = {
     replyToOld: '(replying to an older message)',
     image: '[image]',
     imageAttached: '[picture #{n}, attached]',
+    imageAttachedDescribed: '[picture #{n}, attached; helper caption: {text}]',
     imageDescribed: '[image: {text}]',
     gif: '[gif: {name}]',
     gifDescribed: '[gif: {text}]',

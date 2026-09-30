@@ -8,6 +8,8 @@ Transcript lines carry media markers in brackets: pictures, GIFs, videos, sticke
 
 `features.vision` attaches pictures from the calling message, from the message it replies to, and the newest few in the channel to the LLM request as images, downscaled through Discord's media proxy. The bot downloads every picture itself and sends it inline as data, because Discord refuses downloads coming from the model provider. Pictures larger than `context.vision.maxBytes` or slower than `context.vision.fetchTimeoutMs` are skipped. The persona sees these directly.
 
+When `features.attachedDescriptions` is on (the default), the describer also runs for attached pictures. The persona still sees the picture itself; the helper's note catches what is easy to miss at a glance (who the characters are, what happened, what the joke is). The helper can be wrong, so the persona's own eyes come first. Needs both `vision` and `mediaDescriptions` on. Each attached picture costs one extra describer request within `media.maxPerTurn`.
+
 `features.mediaDescriptions` (on by default) runs the `classifier.media` model to write a one-line description for pictures, GIF frames, video posters, stickers, custom emoji and link thumbnails. Each attachment is described once and cached in `data/guilds/<id>/media.json`. Descriptions feed the chat transcript, the memory analyzer and the warmup. The describer's prompt is `prompts/describe.md`.
 
 Stickers and custom emoji recur constantly, so they are cached by id and cost nearly nothing after the first description. With `features.vision`, the sticker of the calling message is attached as a picture. Discord's built-in animated stickers are Lottie animations, not images, so they are never more than a name.

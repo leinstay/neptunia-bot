@@ -433,6 +433,26 @@ test('formatTranscript: an image attached to this request renders imageAttached 
   assert.ok(items[0].text.includes('[picture #2, attached]'));
 });
 
+test('formatTranscript: an attached image with a caption renders imageAttachedDescribed, marker and caption together', () => {
+  const t0 = Date.UTC(2026, 8, 20, 10, 0, 0);
+  const messages = [msg('a', t0, { content: '', attachments: [{ id: 'att1', kind: 'image', name: 'pic.png' }] })];
+  const attachedIndex = new Map([['att1', 2]]);
+  const descriptions = new Map([['att1', 'a grey cat sleeping']]);
+  const items = formatTranscript(messages, { timezone: TZ, gapMinutes: 20, maxChars: 100, selfName: 'Nept', labels, attachedIndex, descriptions });
+  assert.ok(items[0].text.includes('[picture #2, attached; helper caption: a grey cat sleeping]'));
+});
+
+test('formatTranscript: an older labels.json with no imageAttachedDescribed key falls back to the bare imageAttached', () => {
+  const t0 = Date.UTC(2026, 8, 20, 10, 0, 0);
+  const oldLabels = { ...labels, transcript: { ...labels.transcript, imageAttachedDescribed: undefined } };
+  const messages = [msg('a', t0, { content: '', attachments: [{ id: 'att1', kind: 'image', name: 'pic.png' }] })];
+  const attachedIndex = new Map([['att1', 1]]);
+  const descriptions = new Map([['att1', 'a grey cat sleeping']]);
+  const items = formatTranscript(messages, { timezone: TZ, gapMinutes: 20, maxChars: 100, selfName: 'Nept', labels: oldLabels, attachedIndex, descriptions });
+  assert.ok(items[0].text.includes('[picture #1, attached]'));
+  assert.ok(!items[0].text.includes('grey cat'));
+});
+
 test('formatTranscript: a described image (not attached) renders imageDescribed', () => {
   const t0 = Date.UTC(2026, 8, 20, 10, 0, 0);
   const messages = [msg('a', t0, { content: '', attachments: [{ id: 'att1', kind: 'image', name: 'pic.png' }] })];

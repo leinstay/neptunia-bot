@@ -181,6 +181,17 @@ test('mediaLabelFor: an attached plain image renders imageAttached with its 1-ba
   assert.deepEqual(mediaLabelFor({ kind: 'image' }, { attachedIndex: 1 }), { key: 'imageAttached', values: { n: 1 } });
 });
 
+test('mediaLabelFor: an attached plain image with a caption renders imageAttachedDescribed with n and text', () => {
+  assert.deepEqual(mediaLabelFor({ kind: 'image' }, { attachedIndex: 2, description: 'a grey cat' }), {
+    key: 'imageAttachedDescribed',
+    values: { n: 2, text: 'a grey cat' },
+  });
+});
+
+test('mediaLabelFor: an attached plain image with an empty caption keeps the bare imageAttached', () => {
+  assert.deepEqual(mediaLabelFor({ kind: 'image' }, { attachedIndex: 1, description: '' }), { key: 'imageAttached', values: { n: 1 } });
+});
+
 test('mediaLabelFor: an attached video/gif still frame keeps its normal (blind) form, plus an extra frameAttached tag', () => {
   assert.deepEqual(mediaLabelFor({ kind: 'gif', name: 'cat.gif' }, { attachedIndex: 2 }), {
     key: 'gif',

@@ -16,6 +16,7 @@
     "multiMessage": true,
     "vision": true,
     "mediaDescriptions": true,
+    "attachedDescriptions": true,
     "videoDescriptions": false,
     "videoRewatch": true,
     "webLookup": false,

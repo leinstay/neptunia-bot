@@ -803,7 +803,8 @@ function splitPeople(otherProfiles, candidateProfiles, history, trigger, exclude
  * @param {object[]} [input.loreEntries]   The guild's stored lorebook (store.getLore), [] when memory is off.
  * @param {string|null} [input.currentChannelId]  Id of the channel this turn happens in.
  * @param {Map<string, string>} [input.descriptions]  Item id -> describer caption, for pictures
- *   NOT selected to be attached (see src/behavior/turn.js, src/memory/describe.js).
+ *   NOT selected to be attached, and for attached ones too with features.attachedDescriptions
+ *   (see src/behavior/turn.js, src/memory/describe.js).
  * @param {Map<string, object>} [input.videos]  Item id -> video state from the video describer
  *   (src/memory/describe.js#describeVideos), passed to formatTranscript.
  * @param {Map<string, string>} [input.reads]  Link id -> the excerpt the web lookup read from that

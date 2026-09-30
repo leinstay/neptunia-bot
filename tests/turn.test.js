@@ -686,6 +686,105 @@ test('createTurnRunner: features.mediaDescriptions on describes an un-attached p
   assert.ok(userMessage.includes(labels.transcript.imageDescribed.replace('{text}', 'a grey cat')));
 });
 
+// features.attachedDescriptions -- a picture attached as image_url also gets the helper's caption.
+
+function attachedPictureTurn({ features, media, newer = false }) {
+  const pic = { id: 'i1', contentType: 'image/png', name: 'one.png', url: 'https://cdn.discordapp.com/x/one.png' };
+  const raw = rawMessage({ id: 'm2', attachments: new Map([['i1', pic]]) });
+  const history = [raw];
+  if (newer) {
+    // A picture posted right after the trigger: newer, but not attached (recentImages is 0).
+    const other = { id: 'o1', contentType: 'image/png', name: 'other.png', url: 'https://cdn.discordapp.com/x/other.png' };
+    history.push(rawMessage({ id: 'm3', ts: NOW - 500, attachments: new Map([['o1', other]]) }));
+  }
+  const channel = fakeTurnChannel({ historyMessages: history });
+  const llm = fakeLlm('<msg>ok</msg>');
+  const hot = fakeHot(features, {}, media ? { media } : {});
+  // Like fakeDescriber, but honours maxNew the way describeMany does (every caption here is new).
+  const captions = { i1: 'a grey cat', o1: 'a red fox' };
+  const describer = {
+    calls: [],
+    describeMany: async (guildId, items, options) => {
+      describer.calls.push({ guildId, items, options });
+      const descriptions = new Map();
+      for (const item of items) {
+        if (descriptions.size >= (options?.maxNew ?? Infinity)) break;
+        if (captions[item.itemId]) descriptions.set(item.itemId, captions[item.itemId]);
+      }
+      return { descriptions, newCount: descriptions.size };
+    },
+  };
+  const turns = createTurnRunner({
+    hot,
+    store: fakeStore(),
+    llm,
+    calibrator: identityCalibrator(),
+    client: fakeClient(),
+    describer,
+    imageFetcher: fakeImageFetcher(),
+  });
+  const trigger = {
+    ...normalizedTrigger(raw),
+    attachments: [{ id: 'i1', kind: 'image', url: pic.url, name: 'one.png' }],
+  };
+  return { channel, llm, describer, turns, trigger };
+}
+
+function userText(llm) {
+  const content = llm.calls[0][1].content;
+  return Array.isArray(content) ? content.filter((p) => p.type === 'text').map((p) => p.text).join('\n') : content;
+}
+
+test('createTurnRunner: features.attachedDescriptions on -- an attached picture is described and its caption sits with the marker', async () => {
+  const { channel, llm, describer, turns, trigger } = attachedPictureTurn({ features: { mediaDescriptions: true, attachedDescriptions: true } });
+
+  await turns.runTurn({ channel, mode: 'reply', trigger, triggerKind: 'mention' });
+
+  assert.equal(describer.calls.length, 1);
+  assert.deepEqual(describer.calls[0].items.map((item) => item.itemId), ['i1']);
+  assert.ok(Array.isArray(llm.calls[0][1].content), 'the picture is still attached as an image_url part');
+  const text = userText(llm);
+  assert.ok(text.includes(labels.transcript.imageAttachedDescribed.replace('{n}', '1').replace('{text}', 'a grey cat')));
+});
+
+test('createTurnRunner: features.attachedDescriptions missing counts as on', async () => {
+  const { channel, llm, describer, turns, trigger } = attachedPictureTurn({ features: { mediaDescriptions: true } });
+
+  await turns.runTurn({ channel, mode: 'reply', trigger, triggerKind: 'mention' });
+
+  assert.deepEqual(describer.calls[0].items.map((item) => item.itemId), ['i1']);
+  assert.ok(userText(llm).includes(labels.transcript.imageAttachedDescribed.replace('{n}', '1').replace('{text}', 'a grey cat')));
+});
+
+test('createTurnRunner: features.attachedDescriptions false -- the attached picture is never sent to the describer, today\'s line', async () => {
+  const { channel, llm, describer, turns, trigger } = attachedPictureTurn({ features: { mediaDescriptions: true, attachedDescriptions: false } });
+
+  await turns.runTurn({ channel, mode: 'reply', trigger, triggerKind: 'mention' });
+
+  const described = describer.calls.flatMap((call) => call.items.map((item) => item.itemId));
+  assert.ok(!described.includes('i1'));
+  const text = userText(llm);
+  assert.ok(text.includes(labels.transcript.imageAttached.replace('{n}', '1')));
+  assert.ok(!text.includes('a grey cat'));
+});
+
+test('createTurnRunner: features.attachedDescriptions on -- attached pictures come first, media.maxPerTurn still caps new captions', async () => {
+  const { channel, llm, describer, turns, trigger } = attachedPictureTurn({
+    features: { mediaDescriptions: true, attachedDescriptions: true },
+    media: { maxPerTurn: 1, filePreviewChars: 500 },
+    newer: true,
+  });
+
+  await turns.runTurn({ channel, mode: 'reply', trigger, triggerKind: 'mention' });
+
+  assert.equal(describer.calls.length, 1);
+  assert.deepEqual(describer.calls[0].items.map((item) => item.itemId), ['i1', 'o1'], 'the attached picture first, even ahead of a newer un-attached one');
+  assert.equal(describer.calls[0].options.maxNew, 1);
+  const text = userText(llm);
+  assert.ok(text.includes(labels.transcript.imageAttachedDescribed.replace('{n}', '1').replace('{text}', 'a grey cat')));
+  assert.ok(!text.includes('a red fox'), 'the one new caption of this turn went to the attached picture');
+});
+
 test('createTurnRunner: features.mediaDescriptions on describes a picture-format sticker via the same describer/cache path', async () => {
   const raw = rawMessage({
     id: 'm1',

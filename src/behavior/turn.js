@@ -245,12 +245,18 @@ function oneLine(text) {
 /**
  * Describable pictures (image/gif/video/sticker/link-thumbnail, plus custom
  * emoji — see src/discord/media.js#isDescribable) of `history` that are NOT
- * among `pickedIds` (the ones already attached as image_url parts), newest
+ * among `picked` (the ones already attached as image_url parts), newest
  * message first — so a per-turn cap spends its budget on what the persona
  * just saw. Pictures (collectPictures) come before that message's emoji.
+ *
+ * With `includePicked` (features.attachedDescriptions), the attached pictures
+ * are candidates too and come FIRST, newest first: they are what the turn is
+ * about. A picked `link` thumbnail stays out -- its attached form
+ * (frameAttached) never shows a caption, so one would be spent for nothing.
  */
-function describableCandidates(history, pickedIds) {
-  const out = [];
+function describableCandidates(history, picked, { includePicked = false } = {}) {
+  const pickedIds = new Set(picked.map((p) => p.itemId));
+  const out = includePicked ? [...picked].reverse().filter((item) => item.kind !== 'link' && isDescribable(item)) : [];
   for (let i = history.length - 1; i >= 0; i -= 1) {
     for (const item of [...collectPictures(history[i]), ...collectEmojiItems(history[i])]) {
       if (pickedIds.has(item.itemId) || !isDescribable(item)) continue;
@@ -271,7 +277,8 @@ function describableCandidates(history, pickedIds) {
  *
  * `describer` (src/memory/describe.js#createDescriber) is optional: when
  * absent, or `features.mediaDescriptions` is off, no description request is
- * ever made — buildRequest simply renders every un-attached picture blind.
+ * ever made — buildRequest simply renders every un-attached picture blind
+ * (and every attached one with its bare marker).
  * Likewise, videos are only watched when `features.mediaDescriptions` AND
  * `features.videoDescriptions` (a missing key counts as on) are on and the describer has
  * `describeVideos`; otherwise they render as before.
@@ -880,13 +887,16 @@ export function createTurnRunner({
 
       // Pictures NOT selected to be attached as image_url may still get a
       // helper's caption, newest first, capped at media.maxPerTurn; cached
-      // captions are free (see src/memory/describe.js).
+      // captions are free (see src/memory/describe.js). With
+      // features.attachedDescriptions (a missing key counts as on) the
+      // attached ones get one too, ahead of the rest, shown next to their
+      // attachment marker.
       let descriptions;
       if (hot.config.features?.mediaDescriptions === true && describer) {
         const visionCfg = config.context.vision ?? {};
         const picked = features.vision !== false ? selectPictures({ trigger, history, visionCfg, now }) : [];
-        const pickedIds = new Set(picked.map((p) => p.itemId));
-        const candidates = describableCandidates(history, pickedIds);
+        const includePicked = hot.config.features?.attachedDescriptions !== false;
+        const candidates = describableCandidates(history, picked, { includePicked });
         const described = await describer.describeMany(guildId, candidates, {
           maxNew: config.media?.maxPerTurn ?? Infinity,
           countAgainstDailyCap: true,

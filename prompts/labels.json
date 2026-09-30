@@ -17,6 +17,7 @@
     "replyToOld": "(replying to an older message)",
     "image": "[image]",
     "imageAttached": "[attached image {n}]",
+    "imageAttachedDescribed": "[attached image {n}, note: {text}]",
     "imageDescribed": "[image: {text}]",
     "gif": "[GIF: {name}]",
     "gifDescribed": "[GIF: {text}]",
@@ -55,8 +56,8 @@
     "reactionMine": "{emoji} x{count} (you)"
   },
   "senses": {
-    "imageSee": "Pictures marked as attached you see yourself.",
-    "imageDescribed": "Other pictures come with a short description from a helper — you did not see them yourself.",
+    "imageSee": "Pictures marked as attached you see yourself; they may also carry a helper's note on what is easy to miss (who is there, what the joke is), but the helper can be wrong.",
+    "imageDescribed": "Other pictures come with a short description from a helper; you did not see them yourself.",
     "imageBlind": "Pictures not marked as attached appear as a label — you cannot see what is on them.",
     "gifDescribed": "GIFs come with a one-line description of a frame — you did not watch them.",
     "gifBlind": "GIFs appear in the transcript but you cannot see them.",

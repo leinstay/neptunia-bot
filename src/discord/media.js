@@ -325,7 +325,10 @@ function extraOf(...extras) {
  * durationSec?, previewText? }`.
  *
  * A plain image/thumbnail attached to the request renders as a bare
- * `imageAttached`. A video or gif whose still frame is attached keeps its
+ * `imageAttached`, or as `imageAttachedDescribed` (`{ n, text }`: the marker
+ * and the helper's caption together) when a caption exists -- an older
+ * labels.json without that key falls back to `imageAttached` in
+ * src/discord/format.js. A video or gif whose still frame is attached keeps its
  * normal form (`video`/`videoDescribed`/`gif`/`gifDescribed` -- so the
  * persona still knows it WAS a video, its name, its duration) and carries a
  * second tag in `extra`: `frameAttached`, numbered the same way. A `link`
@@ -367,7 +370,9 @@ export function mediaLabelFor(item, { attachedIndex = null, description = null, 
       const base = mediaLabelFor(item, { description, unknownDuration, video });
       return { ...base, extra: extraOf({ key: 'frameAttached', values: { n: attachedIndex } }, base.extra) };
     }
-    return { key: 'imageAttached', values: { n: attachedIndex } };
+    return description
+      ? { key: 'imageAttachedDescribed', values: { n: attachedIndex, text: description } }
+      : { key: 'imageAttached', values: { n: attachedIndex } };
   }
 
   switch (item.kind) {
