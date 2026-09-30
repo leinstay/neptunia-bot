@@ -53,7 +53,7 @@
 | `/nep mentor cases` | ケース一覧: id、状態（`new`、`passing`、`failing`）、ターゲット、前回スコア、moment 数（ある場合）、80 文字までのテキスト |
 | `/nep mentor remove <id>` | ケースを削除 |
 | `/nep mentor run <id>` | 1 つのケースのフルサイクルを実行。開始した旨を即時応答。`features.mentorAutoFix` 有効時、不合格のランは修復ループに進む。管理チャンネル（`bot.dryRunChannelId`）がある場合はそこにレポートを投稿。ない場合は `/nep mentor status` と `/nep mentor show <id>` を案内 |
-| `/nep mentor check` | 実行記録のあるすべてのアクティブケースの保存済み状況を再プレイし、状況ごとに `mentor.check.samples` サンプル。管理チャンネルがある場合は統合レポートを投稿。ない場合は `/nep mentor status` と `/nep mentor show <id>` を案内 |
+| `/nep mentor check` | 実行記録のあるすべてのアクティブケースの保存済み状況を再プレイし、状況ごとに `mentor.check.samples` サンプル（実際の moment は `mentor.anchor.samples` を使用）。管理チャンネルがある場合は統合レポートを投稿。ない場合は `/nep mentor status` と `/nep mentor show <id>` を案内 |
 | `/nep mentor stop` | 実行中のランをキャンセル（進行中のモデル呼び出しを含む） |
 | `/nep mentor show <id>` | 前回ランのレポート: 状況、回答、スコア、コメント、診断（存在する場合）、各試行と取り消し可能な変更 id を含む修復セクション |
 | `/nep mentor wrong <id> <reason>` | そのケースの判定が誤っていたことと理由を mentor に伝える。今後のスコアリングの反例として保存 |

@@ -57,7 +57,7 @@ Channels, roles and users are picked from Discord's own pickers; `set`/`unset` a
 | `/nep mentor cases` | List cases: id, state (`new`, `passing`, `failing`), target, last score, number of moments (when any), text clipped to 80 chars |
 | `/nep mentor remove <id>` | Retire a case |
 | `/nep mentor run <id>` | Run the full cycle for one case. Answers at once that it started. With `features.mentorAutoFix` on, a failed run continues into the repair loop. With an admin channel (`bot.dryRunChannelId`), the report is posted there; without one, the reply points at `/nep mentor status` and `/nep mentor show <id>` |
-| `/nep mentor check` | Replay the stored situations of every active case that has a run, with `mentor.check.samples` samples each. With an admin channel, posts one combined report; without one, the reply points at `/nep mentor status` and `/nep mentor show <id>` |
+| `/nep mentor check` | Replay the stored situations of every active case that has a run, with `mentor.check.samples` samples each (real moments use `mentor.anchor.samples`). With an admin channel, posts one combined report; without one, the reply points at `/nep mentor status` and `/nep mentor show <id>` |
 | `/nep mentor stop` | Cancel the run in flight, including the model call in progress |
 | `/nep mentor show <id>` | The report of the last run: situations, answers, scores, comments, the diagnosis when present, and the repair section with every attempt and the undo id of the applied change |
 | `/nep mentor wrong <id> <reason>` | Tell the mentor it judged that case wrongly and why; kept as a counter-example for future scoring |

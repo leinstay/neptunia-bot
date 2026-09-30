@@ -383,10 +383,11 @@ YouTube リンクの再生時間は次の順序で取得されます: まず yt-
 | `timeoutMs` | `300000` | Mentor リクエストのタイムアウト（ミリ秒） |
 | `situations` | `5` | 1 回の実行で作成するチャット状況の数 |
 | `situationLines` | `[6, 15]` | 状況あたりの最小・最大行数 |
-| `samples` | `3` | 状況あたりのペルソナの回答数 |
-| `check.samples` | `1` | `/nep mentor check` 時の状況あたりのペルソナの回答数 |
+| `samples` | `3` | 状況あたりのペルソナの回答数。実際の moment は `anchor.samples` を使用 |
+| `check.samples` | `1` | `/nep mentor check` 時の状況あたりのペルソナの回答数。実際の moment は `anchor.samples` を使用 |
 | `pass.score` | `7` | `overall` と `goal` の中央値がこの閾値に達した場合にケースが合格 |
-| `pass.floor` | `5` | いずれかの軸の中央値がこの下限を下回る場合にケースが不合格。各状況もこの下限でチェックされ、いずれか 1 つの状況の `overall` 中央値または `goal` 中央値がこの値を下回る場合、全回答の中央値に関わらずケースは不合格 |
+| `pass.anchorScore` | `null` | 実際の moment の閾値。数値に設定すると、実際の moment の `overall` または `goal` 中央値がその値を下回る場合にケースが不合格。`null` は `pass.score` を使用 |
+| `pass.floor` | `5` | いずれかの軸の中央値がこの下限を下回る場合にケースが不合格。各作成された状況もこの下限でチェックされ、いずれか 1 つの作成された状況の `overall` 中央値または `goal` 中央値がこの値を下回る場合、全回答の中央値に関わらずケースは不合格。実際の moment はパススコア（`pass.anchorScore` が設定されている場合はその値、それ以外は `pass.score`）で判定 |
 | `diagnose` | `true` | 不合格または弱い状況のあるラン後に、mentor がコンテキスト内の弱い回答の原因を説明。ランの `diagnosis` として保存。check では要求しない |
 | `suspects` | `2` | 修復ループで試行ごとに診断からテストする原因の数 |
 | `ablationGain` | `1` | 容疑者を除去した際に `overall` 中央値が確認に必要な最低上昇幅 |
@@ -407,6 +408,7 @@ YouTube リンクの再生時間は次の順序で取得されます: まず yt-
 | `reference.rareMinAuthors` | `2` | 使用する著者数がこの値未満のマークはレアとみなす |
 | `anchor.max` | `5` | ケースあたりの実際の moment 数。各 moment はオーナーが拒否したペルソナのメッセージで、その前のチャットと共に保存 |
 | `anchor.contextMessages` | `30` | moment 解決時にチャンネルから取得するコンテキストメッセージ数（トリガーまで） |
+| `anchor.samples` | `5` | ランおよび `/nep mentor check` での実際の moment あたりのペルソナ回答数。修復ループのコントロールとアブレーションは `ablationSamples` を使用し、検証は `verify.samples` を使用 |
 | `anchor.hideLaterMemory` | `true` | 実際の moment を再生する際、トリガーの時点以降に書き込まれた記憶を非表示にする（エピソード、態度変化、詳細、興味、エイリアス、学習項目、ロアエントリ）。`false` にすると現在の全記憶で再生 |
 | `feedbackExamples` | `10` | すべてのスコアリングリクエストに含める最新のオーナー修正（`/nep mentor wrong`）の数 |
 

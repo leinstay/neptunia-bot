@@ -383,10 +383,11 @@ YouTube 链接的时长通过以下链式探测获取：首先尝试 yt-dlp，�
 | `timeoutMs` | `300000` | Mentor 请求超时（毫秒） |
 | `situations` | `5` | 每次运行构造的聊天场景数 |
 | `situationLines` | `[6, 15]` | 每个场景的最小和最大行数 |
-| `samples` | `3` | 每个场景的角色回答数 |
-| `check.samples` | `1` | `/nep mentor check` 时每个场景的角色回答数 |
+| `samples` | `3` | 每个场景的角色回答数。真实 moment 使用 `anchor.samples` |
+| `check.samples` | `1` | `/nep mentor check` 时每个场景的角色回答数。真实 moment 使用 `anchor.samples` |
 | `pass.score` | `7` | `overall` 和 `goal` 的中位数达到此阈值时案例通过 |
-| `pass.floor` | `5` | 任一轴的中位数低于此下限时案例失败。每个场景也受此下限约束：当任一场景的 `overall` 中位数或 `goal` 中位数低于此值时案例失败，无论所有回答的中位数如何 |
+| `pass.anchorScore` | `null` | 真实 moment 的阈值。设为数字时，真实 moment 的 `overall` 或 `goal` 中位数低于该值则案例失败。`null` 使用 `pass.score` |
+| `pass.floor` | `5` | 任一轴的中位数低于此下限时案例失败。每个构造场景也受此下限约束：当任一构造场景的 `overall` 中位数或 `goal` 中位数低于此值时案例失败，无论所有回答的中位数如何。真实 moment 以通过分（设置了 `pass.anchorScore` 时用其值，否则用 `pass.score`）为阈值 |
 | `diagnose` | `true` | 失败或存在弱场景的运行结束后，mentor 说明上下文中导致弱回答的原因。存储为运行中的 `diagnosis`；check 不请求 |
 | `suspects` | `2` | 修复循环中每次尝试从诊断中测试的原因数 |
 | `ablationGain` | `1` | 移除嫌疑项后 `overall` 中位数的最小上升幅度，达到即确认 |
@@ -407,6 +408,7 @@ YouTube 链接的时长通过以下链式探测获取：首先尝试 yt-dlp，�
 | `reference.rareMinAuthors` | `2` | 使用该标点的作者数少于此值时视为稀有 |
 | `anchor.max` | `5` | 每个案例的真实 moment 数。每个 moment 是所有者拒绝的角色消息，连同之前的聊天一起存储 |
 | `anchor.contextMessages` | `30` | 解析 moment 时从频道获取的上下文消息数，截止到触发消息 |
+| `anchor.samples` | `5` | 运行和 `/nep mentor check` 中每个真实 moment 的角色回答数。修复循环的控制和消融使用 `ablationSamples`，验证使用 `verify.samples` |
 | `anchor.hideLaterMemory` | `true` | 重放真实 moment 时，隐藏在触发消息时间点或之后写入的记忆（事件、态度变化、详情、兴趣、别名、学到的内容、知识库条目）。设为 `false` 则使用当前全部记忆重放 |
 | `feedbackExamples` | `10` | 在每次评分请求中包含的最新所有者修正（`/nep mentor wrong`）数 |
 

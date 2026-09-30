@@ -682,7 +682,7 @@ Mentor 使用六个提示文件：每个目标一对，加上特征文件和诊�
 | `<answers>` | JSON 数组：`[{ "id": "s1a1", "messages": ["..."], "reactions": ["..."], "silent": false }]` | 评分（reply） |
 | `<stored>` | JSON 数组：`[{ "id": "s1a1", "texts": [{ "path": "...", "text": "..." }], "parseOk": true }]`。当 `parseOk` 为 false 时分析器返回了无效 JSON，不会存储任何内容 | 评分（memory） |
 | `<facts>` | 按回答 id 索引的 JSON 对象，包含确定性测量结果（未使用标记、稀有标记、逗号计数、逗号密度、长度），以及在两个或更多不同场景中出现的短语 `"repeated"`。每个回答：`commas` 为计数；`commaPer1000` 仅在测量文本至少 150 字符时为数字，更短时为 `null`（太短无法测量；mentor 根据计数评判，不推断密度）。`repeated` 列出在不同场景中重复出现的短语，`count` 为场景数 | 评分 |
-| `<verdict>` | JSON：`{ passed, medians, situations, reasons }`，包含通过/失败结果、各轴中位数、各场景中位数和诊断原因 | 诊断 |
+| `<verdict>` | JSON：`{ passed, medians, situations, reasons }`，包含通过/失败结果、各轴中位数、各场景中位数和诊断原因。原因包括构造场景的 `situation <n>: <axis> <v> is under the floor <f>` 和真实 moment 的 `real moment <n>: <axis> <v> is under the pass score <s>` 或 `real moment <n>: <axis> <v> is under the anchor score <s>` | 诊断 |
 | `<worst>` | JSON：`overall` 中位数最低的任意类型场景（平局时取较小的 `goal` 中位数，然后真实 moment 优先于构造场景，再取较小的 `n`）：`{ n, title, transcript, answers }`，每个回答包含 id、messages/reactions/silent（memory 目标为 `texts`/`parseOk`）、`facts` 和 `score`。转录可能被裁剪以适应请求预算 | 诊断 |
 | `<seen>` | 角色（或 memory 案例中的分析器）在该场景中收到的完整请求，分两个子块：`<system>`（系统提示含角色卡、规则和格式）和 `<user>`（聊天记录、记忆块和任务） | 诊断 |
 
@@ -751,7 +751,7 @@ Memory 评分中 `character` 始终为 `null`，`human` 衡量文本是否读起
 
 ### 通过规则
 
-案例通过条件：`overall` 中位数 >= `mentor.pass.score`（默认 7）且 `goal` 中位数 >= `mentor.pass.score` 且没有任何轴的中位数低于 `mentor.pass.floor`（默认 5）。每个场景也受下限约束：当任一场景的 `overall` 中位数或 `goal` 中位数低于 `mentor.pass.floor` 时案例失败，无论所有回答的中位数如何。报告显示每个场景的 `overall` 和 `goal` 中位数。所有分数均为 `null` 的轴中位数为 `null`，不参与检查。
+案例通过条件：`overall` 中位数 >= `mentor.pass.score`（默认 7）且 `goal` 中位数 >= `mentor.pass.score` 且没有任何轴的中位数低于 `mentor.pass.floor`（默认 5）。构造场景受下限约束：当任一构造场景的 `overall` 中位数或 `goal` 中位数低于 `mentor.pass.floor` 时案例失败，无论所有回答的中位数如何。真实 moment 以通过分为阈值：当其 `overall` 或 `goal` 中位数低于 `mentor.pass.anchorScore`（设为数字时）或低于 `mentor.pass.score`（`anchorScore` 为 `null` 时）案例失败。原因字符串：`anchorScore` 未设置时为 `real moment <n>: <axis> <v> is under the pass score <s>`，设置时为 `real moment <n>: <axis> <v> is under the anchor score <s>`。报告显示每个场景的 `overall` 和 `goal` 中位数。所有分数均为 `null` 的轴中位数为 `null`，不参与检查。
 
 ### 评分证据顺序
 
@@ -804,7 +804,7 @@ Memory 评分中 `character` 始终为 `null`，`human` 衡量文本是否读起
 
 #### 六个步骤
 
-1. **控制。** 首次需要消融时，弱场景在未变更的视图上重新回答（每场景 `mentor.ablationSamples` 个回答，阶段 `repair: control`）。每次消融的增益相对于控制测量，而非运行本身的分数。重新采样本身就会提升低分，因此控制是基准线。当控制在每个弱场景上都达到通过分时，循环以 `reason: 'not reproduced'` 结束：失败未复现，无需编辑。控制只测量一次，所有嫌疑项和所有尝试复用。
+1. **控制。** 首次需要消融时，弱场景在未变更的视图上重新回答（每场景 `mentor.ablationSamples` 个回答，阶段 `repair: control`）。每次消融的增益相对于控制测量，而非运行本身的分数。重新采样本身就会提升低分，因此控制是基准线。场景在其 `overall` 中位数或 `goal` 中位数低于自身阈值时视为弱：真实 moment 的阈值为 `pass.anchorScore`（设定时，否则 `pass.score`），构造场景的阈值为 `pass.score`。仅当每个重放场景在 `overall` 和 `goal` 两个轴上都达到自身阈值时，循环才以 `not reproduced` 结束。控制只测量一次，所有嫌疑项和所有尝试复用。
 2. **嫌疑项。** 按顺序取诊断的原因，每次尝试最多 `mentor.suspects`（默认 2）个。
 3. **消融。** 在内存覆盖层上移除该片段后重新回答弱场景，测量相对于控制的增益。增益达到 `mentor.ablationGain`（默认 1）即确认。`ablationSamples`（默认 2）个回答每场景。`missing` 原因（应有的指令不存在）无需消融即确认，也不会为其测量控制。
 4. **编辑。** Mentor 模型通过 `mentor-fix.md` 为第一个确认的原因写入一项编辑。编辑须对准已确认的原因：对于在允许层中的原因，编辑须针对那个片段本身（同一提示文件、同一规则、同一列表项、同一公会字段、同一成员和字段），且 `from` 非空；编辑其他位置会被拒绝为 `not the proven cause`。对于 `missing` 原因或位于循环不可编辑层（角色卡或配置关闭的层）中的原因，仅接受添加规则（层 `rules`，`from` 为空）。公会 `patterns` 和 `starters` 可以重写但不可清空（`deletion not allowed`）。超过长度限制的 `learned` 项或 `self`/笑话项被拒绝（`text too long`）。层须在 `mentor.fix.layers` 中，提示文件须在 `mentor.fix.files` 中，增长在 `mentor.fix.maxGrowthChars` 内，档案编辑须保留数字、日期、名称和提及。
@@ -824,7 +824,7 @@ Memory 评分中 `character` 始终为 `null`，`human` 衡量文本是否读起
 | 块 | 内容 |
 |---|---|
 | `<case>` | 所有者的案例文本，逐字 |
-| `<verdict>` | JSON: `{ passed, medians, situations, reasons }` |
+| `<verdict>` | JSON: `{ passed, medians, situations, reasons }`。原因包括构造场景的 `situation <n>: <axis> <v> is under the floor <f>` 和真实 moment 的 `real moment <n>: <axis> <v> is under the pass score <s>` 或 `... the anchor score <s>` |
 | `<signs>` | 已知的模型文本习惯（可能不存在） |
 | `<feedback>` | 所有者的修正（可能不存在） |
 | `<cause>` | JSON: `{ layer, excerpt, why, gain }`，已确认嫌疑项 |

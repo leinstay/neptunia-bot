@@ -413,10 +413,11 @@ Settings for the manual testing sub-process (`features.mentor`). The mentor inve
 | `timeoutMs` | `300000` | Request timeout for mentor requests (ms) |
 | `situations` | `5` | Chat situations invented per run |
 | `situationLines` | `[6, 15]` | Min and max lines per situation |
-| `samples` | `3` | Persona completions per situation |
-| `check.samples` | `1` | Persona completions per situation during `/nep mentor check` |
+| `samples` | `3` | Persona completions per situation. Real moments use `anchor.samples` instead |
+| `check.samples` | `1` | Persona completions per situation during `/nep mentor check`. Real moments use `anchor.samples` instead |
 | `pass.score` | `7` | A case passes when the median of `overall` and the median of `goal` reach this threshold |
-| `pass.floor` | `5` | A case fails when any axis has a median below this floor. Every situation is held to this floor too: the case fails when the median `overall` or median `goal` of any one situation is under it, whatever the medians over all answers |
+| `pass.anchorScore` | `null` | Threshold for a real moment. When set to a number, a real moment fails the case when its median `overall` or `goal` is under that number. `null` uses `pass.score` |
+| `pass.floor` | `5` | A case fails when any axis has a median below this floor. Every invented situation is held to this floor too: the case fails when the median `overall` or median `goal` of any one invented situation is under it, whatever the medians over all answers. A real moment is held to the pass score (`pass.anchorScore` when set, otherwise `pass.score`) |
 | `diagnose` | `true` | After a failing or weak run, the mentor states what in the context caused the weak answers. Stored as `diagnosis` on the run; a check never asks |
 | `suspects` | `2` | Causes from the diagnosis tested per attempt in the repair loop |
 | `ablationGain` | `1` | Minimum rise in the median `overall` when a suspect is removed for the suspect to count as confirmed |
@@ -437,6 +438,7 @@ Settings for the manual testing sub-process (`features.mentor`). The mentor inve
 | `reference.rareMinAuthors` | `2` | A mark used by fewer authors than this counts as rare |
 | `anchor.max` | `5` | Real moments per case. Each moment is a message of the persona the owner rejected, stored with the chat that led to it |
 | `anchor.contextMessages` | `30` | Messages of the channel fetched as context when resolving a moment, ending at the trigger |
+| `anchor.samples` | `5` | Persona completions per real moment in a run and in `/nep mentor check`. The repair loop's control and ablation use `ablationSamples`, verification uses `verify.samples` |
 | `anchor.hideLaterMemory` | `true` | When replaying a real moment, hide memory written at or after its trigger (episodes, attitude changes, details, interests, aliases, learned items, lore entries). `false` replays it with all of today's memory |
 | `feedbackExamples` | `10` | Latest owner corrections (`/nep mentor wrong`) included in every scoring request |
 

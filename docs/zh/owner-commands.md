@@ -53,7 +53,7 @@
 | `/nep mentor cases` | 列出案例：id、状态（`new`、`passing`、`failing`）、目标、上次分数、moment 数量（如有）、文本截至 80 字符 |
 | `/nep mentor remove <id>` | 移除案例 |
 | `/nep mentor run <id>` | 为一个案例运行完整周期。立即回复已启动。启用 `features.mentorAutoFix` 时，失败的运行会进入修复循环。有管理频道（`bot.dryRunChannelId`）时报告发布到该频道；没有时回复指向 `/nep mentor status` 和 `/nep mentor show <id>` |
-| `/nep mentor check` | 重放每个有过运行记录的活跃案例的已存储场景，每个场景 `mentor.check.samples` 个样本。有管理频道时发布一份合并报告；没有时回复指向 `/nep mentor status` 和 `/nep mentor show <id>` |
+| `/nep mentor check` | 重放每个有过运行记录的活跃案例的已存储场景，每个场景 `mentor.check.samples` 个样本（真实 moment 使用 `mentor.anchor.samples`）。有管理频道时发布一份合并报告；没有时回复指向 `/nep mentor status` 和 `/nep mentor show <id>` |
 | `/nep mentor stop` | 取消进行中的运行，包括正在进行的模型调用 |
 | `/nep mentor show <id>` | 上次运行的报告：场景、回答、分数、评论、诊断（如有），以及修复部分（含每次尝试和可撤销的变更 id） |
 | `/nep mentor wrong <id> <reason>` | 告知 mentor 对该案例判断有误以及原因；作为反例保存供未来评分 |

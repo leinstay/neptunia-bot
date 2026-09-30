@@ -580,7 +580,7 @@ Mentor は 6 つのプロンプトファイルを使用します。ターゲッ�
 | `<answers>` | JSON 配列: `[{ "id": "s1a1", "messages": ["..."], "reactions": ["..."], "silent": false }]` | スコアリング（reply） |
 | `<stored>` | JSON 配列: `[{ "id": "s1a1", "texts": [{ "path": "...", "text": "..." }], "parseOk": true }]`。`parseOk` が false の場合、アナライザーが無効な JSON を返し何も保存されない | スコアリング（memory） |
 | `<facts>` | 回答 id をキーとした JSON オブジェクト。確定的測定結果（未使用マーク、レアマーク、コンマ数、コンマ密度、長さ）と、2 つ以上の異なる状況で見つかったフレーズ `"repeated"` を含む。回答ごと: `commas` はカウント、`commaPer1000` は測定テキストが 150 文字以上の場合のみ数値で、短い場合は `null`（短すぎて測定不能、mentor はカウントで判断し密度を推定しない）。`repeated` は異なる状況で繰り返されたフレーズを列挙し、`count` は状況の数 | スコアリング |
-| `<verdict>` | JSON: `{ passed, medians, situations, reasons }`。合否結果、各軸の中央値、状況ごとの中央値、診断の理由 | 診断 |
+| `<verdict>` | JSON: `{ passed, medians, situations, reasons }`。合否結果、各軸の中央値、状況ごとの中央値、診断の理由。理由には作成された状況の `situation <n>: <axis> <v> is under the floor <f>` と実際の moment の `real moment <n>: <axis> <v> is under the pass score <s>` または `real moment <n>: <axis> <v> is under the anchor score <s>` が含まれる | 診断 |
 | `<worst>` | JSON: 種類を問わず `overall` 中央値が最低の状況（同率の場合はより低い `goal` 中央値、次に実際の moment が作成された状況より優先、次により小さい `n`）: `{ n, title, transcript, answers }`。各回答は id、messages/reactions/silent（memory の場合は `texts`/`parseOk`）、`facts`、`score` を含む。トランスクリプトはリクエスト予算に合わせてトリミングされる場合がある | 診断 |
 | `<seen>` | その状況でペルソナ（memory ケースの場合はアナライザー）に渡された完全なリクエスト。2 つのサブブロック: `<system>`（キャラクターカード、ルール、フォーマットを含むシステムプロンプト）と `<user>`（トランスクリプト、メモリブロック、タスク） | 診断 |
 
@@ -649,7 +649,7 @@ Memory ターゲットスコアリングでは `character` は常に `null`、`h
 
 ### 合格ルール
 
-ケースが合格する条件: `overall` の中央値 >= `mentor.pass.score`（デフォルト 7）かつ `goal` の中央値 >= `mentor.pass.score` かつ、いずれの軸の中央値も `mentor.pass.floor`（デフォルト 5）を下回らないこと。各状況も下限でチェックされます: いずれか 1 つの状況の `overall` 中央値または `goal` 中央値が `mentor.pass.floor` を下回る場合、全回答の中央値に関わらずケースは不合格です。レポートには各状況の `overall` と `goal` の中央値が表示されます。すべてのスコアが `null` の軸は中央値が `null` となり、チェックされません。
+ケースが合格する条件: `overall` の中央値 >= `mentor.pass.score`（デフォルト 7）かつ `goal` の中央値 >= `mentor.pass.score` かつ、いずれの軸の中央値も `mentor.pass.floor`（デフォルト 5）を下回らないこと。作成された状況は下限でチェックされます: いずれか 1 つの作成された状況の `overall` 中央値または `goal` 中央値が `mentor.pass.floor` を下回る場合、全回答の中央値に関わらずケースは不合格です。実際の moment はパススコアで判定されます: `mentor.pass.anchorScore`（数値に設定時）または `mentor.pass.score`（`anchorScore` が `null` の場合）を下回ると不合格です。理由文字列: `anchorScore` 未設定時は `real moment <n>: <axis> <v> is under the pass score <s>`、設定時は `real moment <n>: <axis> <v> is under the anchor score <s>`。レポートには各状況の `overall` と `goal` の中央値が表示されます。すべてのスコアが `null` の軸は中央値が `null` となり、チェックされません。
 
 ### スコアリングのエビデンス順序
 
@@ -702,7 +702,7 @@ Memory ターゲットスコアリングでは `character` は常に `null`、`h
 
 #### 6 つのステップ
 
-1. **コントロール。** 最初にアブレーションが必要になった時点で、弱い状況を変更なしのビューで再回答します（状況あたり `mentor.ablationSamples` 回、フェーズ `repair: control`）。各アブレーションのゲインはラン自体のスコアではなく、このコントロールに対して測定されます。再サンプリング自体が低スコアを押し上げるため、コントロールがベースラインとなります。コントロールがすべての弱い状況でパススコアに達した場合、ループは `reason: 'not reproduced'` で終了します。失敗が再現されず、編集は不要です。コントロールは 1 回測定され、すべての容疑者と試行で再利用されます。
+1. **コントロール。** 最初にアブレーションが必要になった時点で、弱い状況を変更なしのビューで再回答します（状況あたり `mentor.ablationSamples` 回、フェーズ `repair: control`）。各アブレーションのゲインはラン自体のスコアではなく、このコントロールに対して測定されます。再サンプリング自体が低スコアを押し上げるため、コントロールがベースラインとなります。状況は `overall` 中央値または `goal` 中央値が自身の閾値を下回る場合に弱いと判定されます。閾値は実際の moment で `pass.anchorScore`（設定時、それ以外は `pass.score`）、作成された状況で `pass.score`。ループが `not reproduced` で終了するのは、再生されたすべての状況が `overall` と `goal` の両軸で自身の閾値に達した場合のみです。コントロールは 1 回測定され、すべての容疑者と試行で再利用されます。
 2. **容疑者。** 診断の原因を順に取得し、試行ごとに最大 `mentor.suspects`（デフォルト 2）件。
 3. **アブレーション。** メモリオーバーレイ上でその部分を除去して弱い状況を再回答し、コントロールに対するゲインを測定。ゲインが `mentor.ablationGain`（デフォルト 1）に達した場合に確認。`ablationSamples`（デフォルト 2）回の回答を状況ごとに取得。`missing` 原因（あるべき指示が存在しない）はアブレーションなしで確認され、コントロールも測定されません。
 4. **編集。** Mentor モデルが `mentor-fix.md` を使用して最初に確認された原因に対する編集を 1 つ書く。編集は確認された原因と照合される: 許可されたレイヤーの原因の場合、編集はその部分自体（同じプロンプトファイル、同じルール、同じリストアイテム、同じギルドフィールド、同じメンバーとフィールド）を非空の `from` で対象とする必要がある。別の場所への編集は `not the proven cause` として拒否。`missing` 原因またはループが編集できないレイヤー（カード、設定で閉じたレイヤー）の原因の場合、ルールの追加のみ受け入れ（レイヤー `rules`、空の `from`）。ギルドの `patterns` と `starters` は書き換え可能だが空にはできない（`deletion not allowed`）。長さ制限を超える `learned` アイテムや `self`/ジョークアイテムは拒否（`text too long`）。レイヤーが `mentor.fix.layers` に、プロンプトファイルが `mentor.fix.files` に含まれ、増分が `mentor.fix.maxGrowthChars` 以内である必要がある。プロファイル編集は数字、日付、名前、メンションを保持する必要がある。
@@ -722,7 +722,7 @@ Memory ターゲットスコアリングでは `character` は常に `null`、`h
 | ブロック | 内容 |
 |---|---|
 | `<case>` | オーナーのケーステキスト、逐語 |
-| `<verdict>` | JSON: `{ passed, medians, situations, reasons }` |
+| `<verdict>` | JSON: `{ passed, medians, situations, reasons }`。理由には作成された状況の `situation <n>: <axis> <v> is under the floor <f>` と実際の moment の `real moment <n>: <axis> <v> is under the pass score <s>` または `... the anchor score <s>` が含まれる |
 | `<signs>` | モデル文の既知の癖（存在しない場合あり） |
 | `<feedback>` | オーナーの修正（存在しない場合あり） |
 | `<cause>` | JSON: `{ layer, excerpt, why, gain }`、確認された容疑者 |
