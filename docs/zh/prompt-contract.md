@@ -45,6 +45,7 @@
 | `mentor-score.md` | 否 | Mentor：对角色的回答进行评分（`features.mentor`）。接收角色卡。仅返回 JSON | `{{name}}` |
 | `mentor-score-memory.md` | 否 | Mentor：对分析器将存储的文本进行评分（`features.mentor`）。无角色卡。`character` 轴始终为 `null`。仅返回 JSON | `{{name}}` |
 | `mentor-signs.md` | 否 | Mentor：已知的模型文本习惯，作为 `<signs>` 块在每次 mentor 请求中发送（`features.mentor`）。文件缺失或为空时省略 | `{{name}}` |
+| `mentor-diagnose.md` | 否 | Mentor：评分后解释弱回答，指出角色上下文中的具体文本（`features.mentor`）。结果为未验证的假设，存储为运行中的 `diagnosis`。`mentor.diagnose` 为 false 或文件缺失时省略 | `{{name}}` |
 | `labels.json` | 是 | 代码插入提示中的所有字符串。键在下方固定，值由编写者决定 | 见下文 |
 
 `{{name}}` 机器人的显示名称 · `{{author}}` 呼叫者的显示名称 · `{{trigger}}` `labels.triggers.*` 之一 ·
@@ -620,14 +621,15 @@ Mentor 模型读取渲染后的沙盒请求，因此可以读取角色记忆中�
 
 ### 提示
 
-Mentor 使用五个提示文件，每个目标一对加上特征文件：
+Mentor 使用六个提示文件：每个目标一对，加上特征文件和诊断文件：
 
 - **Reply 目标**：`mentor-situations.md`（构造场景）和 `mentor-score.md`（评分回答）。
 - **Memory 目标**：`mentor-situations-memory.md`（构造场景）和 `mentor-score-memory.md`（评分存储文本）。
+- **诊断**：`mentor-diagnose.md`（评分后解释弱回答）。
 
 每个提示文件是一次 mentor 请求的系统消息。块在用户消息中传递。
 
-代码填充的占位符：所有四个文件中的 `{{name}}`；两个场景提示中的 `{{count}}`、`{{minLines}}`、`{{maxLines}}`。
+代码填充的占位符：所有六个文件中的 `{{name}}`；两个场景提示中的 `{{count}}`、`{{minLines}}`、`{{maxLines}}`。
 
 ### 块
 
@@ -635,8 +637,8 @@ Mentor 使用五个提示文件，每个目标一对加上特征文件：
 |---|---|---|
 | `<case>` | 所有者的案例文本，逐字 | 全部 |
 | `<members>` | 每行一个存储的档案：`name (id:123)` | 场景 |
-| `<reference>` | 风格档案 JSON：标点频率、长度、回复频率、未使用的字符 | 全部 |
-| `<samples>` | 聊天中的随机行，每行一条 | 全部 |
+| `<reference>` | 风格档案 JSON：标点频率、长度、回复频率、未使用的字符 | 场景、评分 |
+| `<samples>` | 聊天中的随机行，每行一条 | 场景、评分 |
 | `<signs>` | 填充了 `{{name}}` 的 `mentor-signs.md`：已知的模型文本习惯。文件缺失或为空时省略 | 全部 |
 | `<intended>` | `labels.mentor.intended`，每项一行 | 评分 |
 | `<feedback>` | 所有者修正的 JSON 数组：`[{ "case": "...", "reason": "..." }]`，从新到旧；空时省略 | 全部 |
@@ -647,6 +649,9 @@ Mentor 使用五个提示文件，每个目标一对加上特征文件：
 | `<answers>` | JSON 数组：`[{ "id": "s1a1", "messages": ["..."], "reactions": ["..."], "silent": false }]` | 评分（reply） |
 | `<stored>` | JSON 数组：`[{ "id": "s1a1", "texts": [{ "path": "...", "text": "..." }], "parseOk": true }]`。当 `parseOk` 为 false 时分析器返回了无效 JSON，不会存储任何内容 | 评分（memory） |
 | `<facts>` | 按回答 id 索引的 JSON 对象，包含确定性测量结果（未使用标记、稀有标记、逗号计数、逗号密度、长度），以及在两个或更多不同场景中出现的短语 `"repeated"`。每个回答：`commas` 为计数；`commaPer1000` 仅在测量文本至少 150 字符时为数字，更短时为 `null`（太短无法测量；mentor 根据计数评判，不推断密度）。`repeated` 列出在不同场景中重复出现的短语，`count` 为场景数 | 评分 |
+| `<verdict>` | JSON：`{ passed, medians, situations, reasons }`，包含通过/失败结果、各轴中位数、各场景中位数和诊断原因 | 诊断 |
+| `<worst>` | JSON：`overall` 中位数最低的场景（平局时取最小 `n`）：`{ n, title, transcript, answers }`，每个回答包含 id、messages/reactions/silent（memory 目标为 `texts`/`parseOk`）、`facts` 和 `score` | 诊断 |
+| `<seen>` | 角色（或 memory 案例中的分析器）在该场景中收到的完整请求，分两个子块：`<system>`（系统提示含角色卡、规则和格式）和 `<user>`（聊天记录、记忆块和任务） | 诊断 |
 
 ### 回答 ID
 
@@ -723,6 +728,40 @@ Memory 评分中 `character` 始终为 `null`，`human` 衡量文本是否读起
 ### 来源
 
 `mentor-signs.md` 中的已知特征列表参考了维基百科的 "Signs of AI writing" 和 humanizer skill (MIT)。
+
+### 诊断
+
+评分后，当运行未提前结束且案例失败或任一场景的 `overall` 中位数低于 `mentor.pass.score` 时，mentor 再发起一次请求，解释角色上下文中导致弱回答的原因。开关 `mentor.diagnose`（默认 `true`）。通过 `/nep mentor check` 启动的运行不请求诊断。此步骤的失败不会导致运行失败：运行以 `diagnosis: null` 保存并记录错误。
+
+结果存储在运行中的 `diagnosis` 字段，并在报告中输出。这些是假设，尚未经过测量验证；后续阶段将测试并应用修改。
+
+原因可以指向的层：`rules`（规则块中的一条规则）、`prompt`（引擎系统提示、格式或任务）、`card`（角色卡）、`self`（角色关于自己的笔记）、`learned`（他人教会角色的内容）、`guild`（服务器习惯或梗）、`profile`（角色对某人的记忆）、`missing`（应当存在但缺失的指令）。
+
+#### 诊断 schema
+
+```json
+{
+  "summary": "一个段落",
+  "causes": [
+    {
+      "layer": "rules|prompt|card|self|learned|guild|profile|missing",
+      "excerpt": "逐字引自 <seen>，至多 300 字符；missing 时为空",
+      "why": "一两句话"
+    }
+  ],
+  "changes": [
+    {
+      "layer": "rules|prompt|card|self|learned|guild|profile",
+      "target": "哪个文件、规则或项目",
+      "from": "逐字引用要替换的文本；添加时为空",
+      "to": "新文本",
+      "why": "一句话"
+    }
+  ]
+}
+```
+
+最多 5 个原因和 5 个修改。`summary` 截断至 1500 字符；`excerpt` 至 300；`from`/`to` 至 1000；`target` 至 200；`why` 至 500。`layer` 未知或缺少 `why` 的项被丢弃。`summary` 和 `why` 使用聊天语言；`to` 使用目标层的语言。
 
 ## 限制通知
 

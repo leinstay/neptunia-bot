@@ -45,6 +45,7 @@
 | `mentor-score.md` | いいえ | Mentor: ペルソナの回答をスコアリング（`features.mentor`）。キャラクターカードを受け取る。JSON のみを返す | `{{name}}` |
 | `mentor-score-memory.md` | いいえ | Mentor: アナライザーが保存するテキストをスコアリング（`features.mentor`）。キャラクターカードなし。`character` 軸は常に `null`。JSON のみを返す | `{{name}}` |
 | `mentor-signs.md` | いいえ | Mentor: モデル文の既知の癖。すべての mentor リクエストで `<signs>` ブロックとして送信（`features.mentor`）。ファイルがないか空の場合は省略 | `{{name}}` |
+| `mentor-diagnose.md` | いいえ | Mentor: スコアリング後に弱い回答の原因をペルソナのコンテキスト内の具体的なテキストで説明（`features.mentor`）。結果は未検証の仮説としてランの `diagnosis` に保存。`mentor.diagnose` が false またはファイルがない場合は省略 | `{{name}}` |
 | `labels.json` | はい | コードがプロンプトに挿入するすべての文字列。キーは以下で固定、値はライターが記述する | 以下参照 |
 
 `{{name}}` ボットの表示名 · `{{author}}` 発話者の表示名 · `{{trigger}}` `labels.triggers.*` のいずれか ·
@@ -518,14 +519,15 @@ Mentor モデルはレンダリングされたサンドボックスリクエス�
 
 ### プロンプト
 
-Mentor は 5 つのプロンプトファイルを使用し、ターゲットごとに 1 ペアと特徴ファイル:
+Mentor は 6 つのプロンプトファイルを使用します。ターゲットごとに 1 ペア、特徴ファイルと診断ファイル:
 
 - **Reply ターゲット**: `mentor-situations.md`（状況を作成）と `mentor-score.md`（回答をスコアリング）。
 - **Memory ターゲット**: `mentor-situations-memory.md`（状況を作成）と `mentor-score-memory.md`（保存テキストをスコアリング）。
+- **診断**: `mentor-diagnose.md`（スコアリング後に弱い回答を説明）。
 
 各プロンプトファイルは 1 つの mentor リクエストのシステムメッセージです。ブロックはユーザーメッセージで送信されます。
 
-コードが埋めるプレースホルダー: 4 つすべてに `{{name}}`。2 つの状況プロンプトに `{{count}}`、`{{minLines}}`、`{{maxLines}}`。
+コードが埋めるプレースホルダー: 6 つすべてに `{{name}}`。2 つの状況プロンプトに `{{count}}`、`{{minLines}}`、`{{maxLines}}`。
 
 ### ブロック
 
@@ -533,8 +535,8 @@ Mentor は 5 つのプロンプトファイルを使用し、ターゲットご�
 |---|---|---|
 | `<case>` | オーナーのケーステキスト、逐語 | すべて |
 | `<members>` | 保存されたプロファイル 1 行ずつ: `name (id:123)` | 状況 |
-| `<reference>` | スタイルプロファイル JSON: 句読点の頻度、長さ、返信頻度、未使用文字 | すべて |
-| `<samples>` | チャットからのランダムな行、1 行ずつ | すべて |
+| `<reference>` | スタイルプロファイル JSON: 句読点の頻度、長さ、返信頻度、未使用文字 | 状況、スコアリング |
+| `<samples>` | チャットからのランダムな行、1 行ずつ | 状況、スコアリング |
 | `<signs>` | `{{name}}` を埋めた `mentor-signs.md`: モデル文の既知の癖。ファイルがないか空の場合は省略 | すべて |
 | `<intended>` | `labels.mentor.intended`、1 項目ずつ | スコアリング |
 | `<feedback>` | オーナーの修正の JSON 配列: `[{ "case": "...", "reason": "..." }]`、新しい順。空の場合省略 | すべて |
@@ -545,6 +547,9 @@ Mentor は 5 つのプロンプトファイルを使用し、ターゲットご�
 | `<answers>` | JSON 配列: `[{ "id": "s1a1", "messages": ["..."], "reactions": ["..."], "silent": false }]` | スコアリング（reply） |
 | `<stored>` | JSON 配列: `[{ "id": "s1a1", "texts": [{ "path": "...", "text": "..." }], "parseOk": true }]`。`parseOk` が false の場合、アナライザーが無効な JSON を返し何も保存されない | スコアリング（memory） |
 | `<facts>` | 回答 id をキーとした JSON オブジェクト。確定的測定結果（未使用マーク、レアマーク、コンマ数、コンマ密度、長さ）と、2 つ以上の異なる状況で見つかったフレーズ `"repeated"` を含む。回答ごと: `commas` はカウント、`commaPer1000` は測定テキストが 150 文字以上の場合のみ数値で、短い場合は `null`（短すぎて測定不能、mentor はカウントで判断し密度を推定しない）。`repeated` は異なる状況で繰り返されたフレーズを列挙し、`count` は状況の数 | スコアリング |
+| `<verdict>` | JSON: `{ passed, medians, situations, reasons }`。合否結果、各軸の中央値、状況ごとの中央値、診断の理由 | 診断 |
+| `<worst>` | JSON: `overall` 中央値が最低の状況（同率の場合は最小の `n`）: `{ n, title, transcript, answers }`。各回答は id、messages/reactions/silent（memory の場合は `texts`/`parseOk`）、`facts`、`score` を含む | 診断 |
+| `<seen>` | その状況でペルソナ（memory ケースの場合はアナライザー）に渡された完全なリクエスト。2 つのサブブロック: `<system>`（キャラクターカード、ルール、フォーマットを含むシステムプロンプト）と `<user>`（トランスクリプト、メモリブロック、タスク） | 診断 |
 
 ### 回答 ID
 
@@ -621,6 +626,40 @@ Memory ターゲットスコアリングでは `character` は常に `null`、`h
 ### 出典
 
 `mentor-signs.md` の既知の特徴リストは、Wikipedia の "Signs of AI writing" と humanizer skill (MIT) を参考に作成されました。
+
+### 診断
+
+スコアリング後、ランが早期終了せずケースが不合格または任意の状況の `overall` 中央値が `mentor.pass.score` を下回る場合、mentor はもう 1 つのリクエストを行い、ペルソナのコンテキストのどこが弱い回答を引き起こしたかを説明します。スイッチ `mentor.diagnose`（デフォルト `true`）。`/nep mentor check` で開始されたランは診断を要求しません。このステップの失敗はランを失敗させません。ランは `diagnosis: null` で保存され、エラーが記録されます。
+
+結果はランの `diagnosis` として保存され、レポートに出力されます。これらは仮説であり、後の段階で測定によりテストされ、編集が適用されます。
+
+原因が指すレイヤー: `rules`（ルールブロック内のルール）、`prompt`（エンジンのシステムプロンプト、フォーマット、タスク）、`card`（キャラクターカード）、`self`（ペルソナが自分について保持するメモ）、`learned`（他者が教えたこと）、`guild`（サーバーの習慣や内輪ネタ）、`profile`（ある人についての記憶）、`missing`（あるべき指示が存在しない）。
+
+#### 診断スキーマ
+
+```json
+{
+  "summary": "1 段落",
+  "causes": [
+    {
+      "layer": "rules|prompt|card|self|learned|guild|profile|missing",
+      "excerpt": "<seen> からの逐語引用、最大 300 文字。missing の場合は空",
+      "why": "1～2 文"
+    }
+  ],
+  "changes": [
+    {
+      "layer": "rules|prompt|card|self|learned|guild|profile",
+      "target": "どのファイル、ルール、または項目",
+      "from": "置換する逐語テキスト。追加の場合は空",
+      "to": "新しいテキスト",
+      "why": "1 文"
+    }
+  ]
+}
+```
+
+最大 5 個の原因と 5 個の変更。`summary` は 1500 文字に切り詰め、`excerpt` は 300、`from`/`to` は 1000、`target` は 200、`why` は 500。不明な `layer` または `why` のない項目は破棄。`summary` と `why` はチャットの言語で、`to` は対象レイヤーの言語で記述。
 
 ## リミット通知
 

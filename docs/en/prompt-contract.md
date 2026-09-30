@@ -45,6 +45,7 @@ All instructions are English in both layers; a character's speech samples may be
 | `mentor-score.md` | no | Mentor: score the persona's answers to a situation (`features.mentor`). Receives the character card. Returns JSON only | `{{name}}` |
 | `mentor-score-memory.md` | no | Mentor: score the text the analyzer would store (`features.mentor`). No character card. `character` axis is always `null`. Returns JSON only | `{{name}}` |
 | `mentor-signs.md` | no | Mentor: known habits of model-written text, sent as the `<signs>` block in every mentor request (`features.mentor`). Omitted when missing or empty | `{{name}}` |
+| `mentor-diagnose.md` | no | Mentor: explain weak answers after scoring by pointing at specific text in the persona's context (`features.mentor`). The result is an unverified opinion stored as `diagnosis` on the run. Omitted when `mentor.diagnose` is false or the file is missing | `{{name}}` |
 | `labels.json` | yes | Every string the CODE inserts into a prompt. Keys fixed below, values are the writer's | see below |
 
 `{{name}}` bot's display name · `{{author}}` caller's display name · `{{trigger}}` one of `labels.triggers.*` ·
@@ -693,14 +694,15 @@ A stopped run keeps the scores it already has and reports them.
 
 ### Prompts
 
-The mentor uses five prompt files, one pair per target plus the signs file:
+The mentor uses six prompt files, one pair per target, the signs file and the diagnosis file:
 
 - **Reply target**: `mentor-situations.md` (invent situations) and `mentor-score.md` (score answers).
 - **Memory target**: `mentor-situations-memory.md` (invent situations) and `mentor-score-memory.md` (score stored text).
+- **Diagnosis**: `mentor-diagnose.md` (explain weak answers after scoring).
 
 Each prompt file is the system message of one mentor request. The blocks arrive in the user message.
 
-Placeholders filled by code: `{{name}}` in all four; `{{count}}`, `{{minLines}}`, `{{maxLines}}` in the two situations prompts.
+Placeholders filled by code: `{{name}}` in all six; `{{count}}`, `{{minLines}}`, `{{maxLines}}` in the two situations prompts.
 
 ### Blocks
 
@@ -708,8 +710,8 @@ Placeholders filled by code: `{{name}}` in all four; `{{count}}`, `{{minLines}}`
 |---|---|---|
 | `<case>` | The owner's case text, verbatim | all |
 | `<members>` | One line per stored profile: `name (id:123)` | situations |
-| `<reference>` | Style profile as JSON: punctuation rates, lengths, reply frequency, characters never used | all |
-| `<samples>` | Random lines from the chat, one per line | all |
+| `<reference>` | Style profile as JSON: punctuation rates, lengths, reply frequency, characters never used | situations, score |
+| `<samples>` | Random lines from the chat, one per line | situations, score |
 | `<signs>` | `mentor-signs.md` with `{{name}}` filled: known habits of model-written text. Omitted when the file is missing or empty | all |
 | `<intended>` | `labels.mentor.intended`, one line per item | score |
 | `<feedback>` | JSON array of the owner's corrections: `[{ "case": "...", "reason": "..." }]`, newest first; omitted when empty | all |
@@ -720,6 +722,9 @@ Placeholders filled by code: `{{name}}` in all four; `{{count}}`, `{{minLines}}`
 | `<answers>` | JSON array: `[{ "id": "s1a1", "messages": ["..."], "reactions": ["..."], "silent": false }]` | score (reply target) |
 | `<stored>` | JSON array: `[{ "id": "s1a1", "texts": [{ "path": "...", "text": "..." }], "parseOk": true }]`. When `parseOk` is false the analyzer returned invalid JSON and nothing would have been stored | score (memory target) |
 | `<facts>` | JSON object keyed by answer id with deterministic measurements (unused marks, rare marks, comma count, comma density, length), plus `"repeated"` with phrases found in two or more different situations. Per answer: `commas` is a count; `commaPer1000` is a number only when the measured text has at least 150 characters, `null` for a shorter one (too short to measure; the mentor judges the count, never infers a density). `repeated` lists phrases that recurred across different situations, and `count` is the number of situations | score |
+| `<verdict>` | JSON: `{ passed, medians, situations, reasons }` with the pass/fail result, medians of each axis, per-situation medians and the reasons the case was brought to diagnosis | diagnosis |
+| `<worst>` | JSON: the situation with the lowest median `overall` (ties: the lowest `n`): `{ n, title, transcript, answers }` where each answer carries its id, messages/reactions/silent (or `texts`/`parseOk` for memory), `facts` and `score` | diagnosis |
+| `<seen>` | The full request the persona (or the analyzer for a memory case) was given for that situation, as two sub-blocks: `<system>` (the system prompt with the character card, rules and format) and `<user>` (the transcript, memory blocks and task) | diagnosis |
 
 ### Answer ids
 
@@ -796,6 +801,40 @@ A case passes when the median of `overall` >= `mentor.pass.score` (default 7) AN
 ### Sources
 
 The list of known signs in `mentor-signs.md` was informed by Wikipedia's "Signs of AI writing" and the humanizer skill (MIT).
+
+### Diagnosis
+
+After scoring, when the run did not end early and the case failed or any situation's median `overall` is under `mentor.pass.score`, the mentor makes one more request to explain what in the persona's context caused the weak answers. Switch `mentor.diagnose` (default `true`). A run started with `/nep mentor check` never asks for a diagnosis. A failure of this step never fails the run: the run is saved with `diagnosis: null` and the error noted.
+
+The result is stored on the run as `diagnosis` and printed in the report. These are hypotheses; a later stage will test them by measurement and apply the edits.
+
+Layers a cause may name: `rules` (a rule in the rules block), `prompt` (the engine's system prompt, format or task), `card` (the character card), `self` (a note the persona keeps about itself), `learned` (something people taught it), `guild` (a server habit or in-joke), `profile` (what it remembers about a person), `missing` (an instruction that should be there is absent).
+
+#### Diagnosis schema
+
+```json
+{
+  "summary": "one paragraph",
+  "causes": [
+    {
+      "layer": "rules|prompt|card|self|learned|guild|profile|missing",
+      "excerpt": "verbatim from <seen>, at most 300 chars; empty for missing",
+      "why": "one or two sentences"
+    }
+  ],
+  "changes": [
+    {
+      "layer": "rules|prompt|card|self|learned|guild|profile",
+      "target": "which file, rule or item",
+      "from": "verbatim text to replace; empty for an addition",
+      "to": "the new text",
+      "why": "one sentence"
+    }
+  ]
+}
+```
+
+At most 5 causes and 5 changes. `summary` clipped to 1500 characters; `excerpt` to 300; `from`/`to` to 1000; `target` to 200; `why` to 500. An item with an unknown `layer` or without `why` is dropped. `summary` and `why` are in the language of the chat; `to` is in the language of the layer it targets.
 
 ## Limit notices
 

@@ -173,6 +173,7 @@ prompts/
   mentor-score.md          mentor: ペルソナの回答をスコアリング
   mentor-score-memory.md   mentor: アナライザーの保存テキストをスコアリング
   mentor-signs.md          mentor: モデル文の既知の癖
+  mentor-diagnose.md       mentor: スコアリング後に弱い回答を説明
   profile.md               ウォームアップ: メッセージサンプルからメンバーのプロファイルを作成
   channel.md               ウォームアップ: メッセージサンプルからチャンネルノートを作成
   server.md                ウォームアップ: チャンネルノートとメンバーの要約からサーバーレベルのノートを作成

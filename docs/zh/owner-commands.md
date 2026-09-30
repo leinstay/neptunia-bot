@@ -54,7 +54,7 @@
 | `/nep mentor run <id>` | 为一个案例运行完整周期。立即回复已启动。有管理频道（`bot.dryRunChannelId`）时报告发布到该频道；没有时回复指向 `/nep mentor status` 和 `/nep mentor show <id>` |
 | `/nep mentor check` | 重放每个有过运行记录的活跃案例的已存储场景，每个场景 `mentor.check.samples` 个样本。有管理频道时发布一份合并报告；没有时回复指向 `/nep mentor status` 和 `/nep mentor show <id>` |
 | `/nep mentor stop` | 取消进行中的运行，包括正在进行的模型调用 |
-| `/nep mentor show <id>` | 上次运行的报告：场景、回答、分数和评论 |
+| `/nep mentor show <id>` | 上次运行的报告：场景、回答、分数、评论，以及诊断（如有） |
 | `/nep mentor wrong <id> <reason>` | 告知 mentor 对该案例判断有误以及原因；作为反例保存供未来评分 |
 | `/nep mentor status` | 模型、是否启用、今日 token 使用量/上限、各状态的案例数、进行中的运行（停止待处理时显示 `, stopping`）以及最近完成的运行：案例、结果、overall 中位数、已评分回答数、token 数和完成时间 |
 | `/nep access grant <command> [role] [user]` | 将命令、命令组或 `*` 开放给所有人（默认）、某个身份组或某个用户。`private.*` 和 `mentor.*` 被排除；见上文 |

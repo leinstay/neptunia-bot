@@ -54,7 +54,7 @@ Channels, roles and users are picked from Discord's own pickers; `set`/`unset` a
 | `/nep mentor run <id>` | Run the full cycle for one case. Answers at once that it started. With an admin channel (`bot.dryRunChannelId`), the report is posted there; without one, the reply points at `/nep mentor status` and `/nep mentor show <id>` |
 | `/nep mentor check` | Replay the stored situations of every active case that has a run, with `mentor.check.samples` samples each. With an admin channel, posts one combined report; without one, the reply points at `/nep mentor status` and `/nep mentor show <id>` |
 | `/nep mentor stop` | Cancel the run in flight, including the model call in progress |
-| `/nep mentor show <id>` | The report of the last run: situations, answers, scores and comments |
+| `/nep mentor show <id>` | The report of the last run: situations, answers, scores, comments, and the diagnosis when present |
 | `/nep mentor wrong <id> <reason>` | Tell the mentor it judged that case wrongly and why; kept as a counter-example for future scoring |
 | `/nep mentor status` | Model, enabled or not, tokens used today / cap, cases by state, the run in flight (shows `, stopping` while a stop is pending), and the most recent finished run: its case, outcome, median overall, scored answers, tokens and finish time |
 | `/nep access grant <command> [role] [user]` | Open a command, group or `*` to everyone (default), a role, or a user. `private.*` and `mentor.*` are excluded; see above |

@@ -386,6 +386,7 @@ Settings for the manual testing sub-process (`features.mentor`). The mentor inve
 | `check.samples` | `1` | Persona completions per situation during `/nep mentor check` |
 | `pass.score` | `7` | A case passes when the median of `overall` and the median of `goal` reach this threshold |
 | `pass.floor` | `5` | A case fails when any axis has a median below this floor. Every situation is held to this floor too: the case fails when the median `overall` or median `goal` of any one situation is under it, whatever the medians over all answers |
+| `diagnose` | `true` | After a failing or weak run, the mentor states what in the context caused the weak answers. Stored as `diagnosis` on the run; a check never asks |
 | `reference.days` | `7` | Days of chat history used to build the style reference |
 | `reference.samples` | `60` | Random lines (2–200 characters) picked from the reference window as style examples |
 | `reference.maxMessages` | `3000` | Max messages read from the reference channels |
