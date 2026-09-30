@@ -82,6 +82,22 @@ test('parseOutput: an emoji reaction longer than 16 chars is dropped', () => {
   assert.equal(result.skip, true);
 });
 
+test('parseOutput: a custom emoji reaction as :name: or markup is kept past 16 chars', () => {
+  const name = 'a_rather_long_custom_emoji_name';
+  const result = parseOutput(
+    `<react to="#1">:${name}:</react><react to="#2"><a:${name}:123456789012345678></react>`,
+  );
+  assert.deepEqual(result.reactions, [
+    { to: 1, emoji: `:${name}:` },
+    { to: 2, emoji: `<a:${name}:123456789012345678>` },
+  ]);
+});
+
+test('parseOutput: a long reaction body that is not a custom emoji is still dropped', () => {
+  const result = parseOutput('<react to="#1">:not a name at all, too long:</react>');
+  assert.deepEqual(result.reactions, []);
+});
+
 test('parseOutput: an empty <msg> is ignored, but a later non-empty one is kept', () => {
   const result = parseOutput('<msg>   </msg><msg>πραγματικό μήνυμα</msg>');
   assert.deepEqual(result.messages, [{ text: 'πραγματικό μήνυμα', replyTo: null }]);

@@ -18,6 +18,7 @@ Every key in `config.json` with its default, grouped by section.
 | `lore` | `true` | Server-wide lorebook |
 | `reactions` | `true` | Emoji reactions (the persona places them) |
 | `seeReactions` | `true` | Show reactions on messages in the transcript. A missing key counts as on. Distinct from `reactions`, which controls whether the persona PLACES reactions; this one controls whether it SEES them |
+| `customEmoji` | `true` | List the server's custom emoji ranked by usage so the persona can use them by `:name:`. A missing key counts as on |
 | `multiMessage` | `true` | Allow 2–3 messages in a row |
 | `vision` | `true` | Process attached images |
 | `mediaDescriptions` | `true` | One-line descriptions for pictures, GIFs, video frames and link thumbnails |
@@ -98,6 +99,7 @@ The three helper model roles, grouped under one key. Each is set independently, 
 | `caps.people` | `9000` | Token cap: other profiles |
 | `caps.neighbors` | `3000` | Token cap: neighbour channels |
 | `caps.server` | `4000` | Token cap: channel map |
+| `caps.emoji` | `800` | Token cap: custom emoji |
 | `channelActivity.liveMessagesPerDay` | `20` | Daily messages = "active" channel |
 | `channelActivity.deadAfterDays` | `7` | Days without messages = "dead" channel |
 | `vision.maxImages` | `4` | Max images per request |
@@ -107,6 +109,16 @@ The three helper model roles, grouped under one key. Each is set independently, 
 | `vision.recentImageMinutes` | `30` | Max age for recent images (min) |
 | `vision.maxBytes` | `1500000` | Max image file size (bytes); larger pictures are skipped |
 | `vision.fetchTimeoutMs` | `10000` | Download timeout per image (ms) |
+
+### `context.customEmoji`
+
+Settings for the custom emoji block (`features.customEmoji`). The memory analyzer tracks which custom emoji members use and how often.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `max` | `30` | Custom emoji shown in the `<emoji>` block, ranked by member usage; when fewer than `max` have been ranked the rest are filled from the server's emoji in server order |
+| `storeMax` | `200` | Custom emoji kept in the usage ranking; the top `max` are shown |
+| `halfLifeDays` | `30` | Recency half-life for the usage ranking (days); rank = log2(count + 0.5) + last / halfLife; an emoji not used recently sinks below one used often |
 
 ## `media`
 

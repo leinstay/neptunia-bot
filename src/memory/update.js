@@ -1503,9 +1503,15 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
       const outcome = await analyze(guildId, messages);
       if (outcome.ok) {
         sizeFactors.delete(guildId); // back to normal size after a success
+        // Counted only once the batch is consumed: a failed batch stays in the buffer and is retried.
+        const emojiCfg = hot.config.context?.customEmoji ?? {};
+        const emojiUsage = store.recordEmojiUsage(guildId, messages, {
+          storeMax: emojiCfg.storeMax ?? 200,
+          halfLifeDays: emojiCfg.halfLifeDays ?? 30,
+        });
         store.shiftBuffer(guildId, messages.length);
         store.flush();
-        log.info('memory: update applied', { guildId, consumed: messages.length, ...outcome.result });
+        log.info('memory: update applied', { guildId, consumed: messages.length, ...outcome.result, emojiUsage });
         return;
       }
       recordFailure(guildId, outcome, 'memory: update', { guildId });

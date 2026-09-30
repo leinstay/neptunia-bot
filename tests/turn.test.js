@@ -210,7 +210,7 @@ function fakeLlm(responseText) {
   };
 }
 
-function fakeStore({ guildMemory = {}, userProfiles = {}, channels = [], loreEntries = [], privateProfiles = {} } = {}) {
+function fakeStore({ guildMemory = {}, userProfiles = {}, channels = [], loreEntries = [], privateProfiles = {}, mediaCache = {} } = {}) {
   const guildCalls = [];
   const privateCalls = [];
   return {
@@ -228,6 +228,7 @@ function fakeStore({ guildMemory = {}, userProfiles = {}, channels = [], loreEnt
     listChannels: () => channels,
     listUserProfiles: () => Object.values(userProfiles),
     getLore: () => loreEntries,
+    getMediaCache: () => mediaCache,
     state: { data: {}, markDirty() {} },
   };
 }
@@ -2800,4 +2801,139 @@ test('runTurn: an image cap on a spontaneous turn stays silent -- no notice, no 
   assert.equal(line.cap, 5);
   assert.equal(line.spontaneous, true);
   assert.equal(logs.some((l) => l.msg === 'dry-run: would notify limit'), false);
+});
+
+// The server's custom emoji (features.customEmoji, src/discord/emoji.js).
+function fakeEmojiIndex() {
+  const emojis = [
+    { id: '111111111111111111', name: 'pepe_cry', animated: false },
+    { id: '222222222222222222', name: 'dance', animated: true },
+  ];
+  return { byName: (name) => emojis.find((e) => e.name === name) ?? null, list: () => emojis.map((e) => ({ ...e })) };
+}
+
+test('createTurnRunner: the request carries <emoji> ranked by guild.emojiUsage, with cached captions', async () => {
+  const raw = rawMessage({ id: 'm1' });
+  const channel = fakeTurnChannel({ historyMessages: [raw] });
+  const llm = fakeLlm('<skip/>');
+  const store = fakeStore({
+    guildMemory: { emojiUsage: { '222222222222222222': { name: 'dance', count: 4, last: Date.now() } } },
+    mediaCache: { 'emoji:222222222222222222': { text: 'a spinning figure', ts: 1 } },
+  });
+  const turns = createTurnRunner({
+    hot: fakeHot(),
+    store,
+    llm,
+    calibrator: identityCalibrator(),
+    client: fakeClient(),
+    emoji: fakeEmojiIndex(),
+  });
+
+  await turns.runTurn({ channel, mode: 'reply', trigger: normalizedTrigger(raw), triggerKind: 'mention' });
+
+  const user = llm.calls[0][1].content;
+  const text = Array.isArray(user) ? user.find((part) => part.type === 'text').text : user;
+  const block = /<emoji>\n([\s\S]*?)\n<\/emoji>/.exec(text);
+  assert.ok(block, 'an <emoji> block is sent');
+  assert.deepEqual(block[1].split('\n'), [labels.emoji.header, ':dance: -- a spinning figure', ':pepe_cry:']);
+  assert.ok(text.includes(labels.senses.customEmoji));
+});
+
+test('createTurnRunner: an outgoing :name: becomes the custom emoji, next to a resolved mention', async () => {
+  const raw = rawMessage({ id: 'm1', authorName: 'Zoé' });
+  const channel = fakeTurnChannel({ historyMessages: [raw] });
+  const llm = fakeLlm('<msg>@Zoé :dance: ok :unknown:</msg><react to="#1">:pepe_cry:</react>');
+  const turns = createTurnRunner({
+    hot: fakeHot(),
+    store: fakeStore(),
+    llm,
+    calibrator: identityCalibrator(),
+    client: fakeClient(),
+    emoji: fakeEmojiIndex(),
+  });
+
+  const result = await turns.runTurn({ channel, mode: 'reply', trigger: normalizedTrigger(raw), triggerKind: 'mention' });
+
+  assert.equal(result.outcome, 'spoke');
+  assert.equal(channel.sent[0].content, '<@u1> <a:dance:222222222222222222> ok :unknown:');
+  assert.deepEqual(channel.sent[0].allowedMentions.users, ['u1']);
+  assert.deepEqual(channel.reactCalls, [{ id: 'm1', emoji: '<:pepe_cry:111111111111111111>' }]);
+});
+
+test('createTurnRunner: an unknown custom emoji reaction is dropped, a unicode one still goes through', async () => {
+  const raw = rawMessage({ id: 'm1' });
+  const channel = fakeTurnChannel({ historyMessages: [raw] });
+  const llm = fakeLlm('<react to="#1">:nope:</react><react to="#1">🔥</react>');
+  const turns = createTurnRunner({
+    hot: fakeHot(),
+    store: fakeStore(),
+    llm,
+    calibrator: identityCalibrator(),
+    client: fakeClient(),
+    emoji: fakeEmojiIndex(),
+  });
+
+  await turns.runTurn({ channel, mode: 'reply', trigger: normalizedTrigger(raw), triggerKind: 'mention' });
+
+  assert.deepEqual(channel.reactCalls, [{ id: 'm1', emoji: '🔥' }]);
+});
+
+test('createTurnRunner: features.customEmoji=false leaves :name: as text and drops a custom reaction', async () => {
+  const raw = rawMessage({ id: 'm1' });
+  const channel = fakeTurnChannel({ historyMessages: [raw] });
+  const llm = fakeLlm('<msg>ok :dance:</msg><react to="#1">:pepe_cry:</react>');
+  const turns = createTurnRunner({
+    hot: fakeHot({ customEmoji: false }),
+    store: fakeStore(),
+    llm,
+    calibrator: identityCalibrator(),
+    client: fakeClient(),
+    emoji: fakeEmojiIndex(),
+  });
+
+  const result = await turns.runTurn({ channel, mode: 'reply', trigger: normalizedTrigger(raw), triggerKind: 'mention' });
+
+  assert.equal(result.outcome, 'spoke');
+  assert.equal(channel.sent[0].content, 'ok :dance:');
+  assert.equal(channel.reactCalls.length, 0);
+});
+
+test('createTurnRunner: only a custom reaction the index does not know means outcome "skip"', async () => {
+  const raw = rawMessage({ id: 'm1' });
+  const channel = fakeTurnChannel({ historyMessages: [raw] });
+  const turns = createTurnRunner({
+    hot: fakeHot(),
+    store: fakeStore(),
+    llm: fakeLlm('<react to="#1">:nope:</react>'),
+    calibrator: identityCalibrator(),
+    client: fakeClient(),
+    emoji: fakeEmojiIndex(),
+  });
+
+  const result = await turns.runTurn({ channel, mode: 'reply', trigger: normalizedTrigger(raw), triggerKind: 'mention' });
+
+  assert.equal(result.outcome, 'skip');
+  assert.equal(channel.reactCalls.length, 0);
+});
+
+test('createTurnRunner: in dry-run the logged text carries the rendered custom emoji', async () => {
+  const raw = rawMessage({ id: 'm1' });
+  const channel = fakeTurnChannel({ historyMessages: [raw] });
+  const turns = createTurnRunner({
+    hot: fakeHot({ dryRun: true }),
+    store: fakeStore(),
+    llm: fakeLlm('<msg>ok :dance:</msg>'),
+    calibrator: identityCalibrator(),
+    client: fakeClient(),
+    emoji: fakeEmojiIndex(),
+  });
+
+  const { result, logs } = await withCapturedLogs(() =>
+    turns.runTurn({ channel, mode: 'reply', trigger: normalizedTrigger(raw), triggerKind: 'mention' }),
+  );
+
+  assert.equal(result.dryRun, true);
+  assert.equal(channel.sent.length, 0);
+  const line = logs.find((l) => l.msg === 'dry-run: would send');
+  assert.equal(line.text, 'ok <a:dance:222222222222222222>');
 });

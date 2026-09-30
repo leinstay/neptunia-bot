@@ -75,6 +75,7 @@
     "stickerDescribed": "Stickers and custom emoji come with a short description from a helper.",
     "stickerBlind": "Stickers and custom emoji appear as a name — you cannot see what they depict.",
     "lottie": "Discord's built-in animated stickers are Lottie animations, not pictures — they are always only a name.",
+    "customEmoji": "You can use this server's custom emoji by writing :name: exactly as they appear in the chat or the emoji list. The engine turns a known name into the real emoji; an unknown name stays as plain text.",
     "draw": "You can draw — hand a scene to your drawing sub-process and it produces a picture. Whether to draw is your call; you can refuse. You never see the result while it works, and you barely control the look: the style is the sub-process's own. The sub-process already knows what you look like, so when you are in the picture just mark it in the format — do not describe your own appearance. A drawing takes a while and is posted on its own after your words.",
     "drawSpent": "Your daily picture quota is spent. You cannot draw until tomorrow.",
     "drawSpentUser": "This person has used up their pictures for today.",
@@ -116,6 +117,11 @@
   },
   "lore": {
     "entry": "{title} — {text}"
+  },
+  "emoji": {
+    "header": "Custom emoji on this server:",
+    "entry": ":{name}: — {text}",
+    "entryNoText": ":{name}:"
   },
   "lookup": {
     "header": "Looked up: {query}",

@@ -84,6 +84,7 @@ export const labels = {
     drawSpentUser: 'this person has used up their pictures for today',
     privateChat: 'this is a private chat with one person, it stays here',
     privateAware: 'some people write to you privately; never repeat any of it here',
+    customEmoji: 'this server has its own emoji, listed in <emoji>; write one as :name:',
   },
   tempo: {
     counts: 'messages in the last 10 min: {last10min}, last hour: {lastHour}, last day: {lastDay}',
@@ -120,6 +121,11 @@ export const labels = {
   },
   lore: {
     entry: '{title}: {text}',
+  },
+  emoji: {
+    header: 'custom emoji of this server, most used first:',
+    entry: ':{name}: -- {text}',
+    entryNoText: ':{name}:',
   },
   lookup: {
     header: 'searched for: {query}',

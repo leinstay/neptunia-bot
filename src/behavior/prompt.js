@@ -9,6 +9,7 @@
 //   5. the channel transcript, newest messages first
 //   6. memory about other people present in the transcript
 //   7. neighbouring channels
+//   8. the server's custom emoji (`<emoji>`)
 // The rendered order is different: reference material first, the chat and the
 // task last, where the model attends best. A private chat (`privateChat`)
 // drops the server map and the neighbouring channels and sees its partner
@@ -20,6 +21,7 @@ import { computeTempo, fill, formatNow, formatTranscript, renderTempo, renderTra
 import { affinityBand, roundScore } from '../memory/affinity.js';
 import { isConfirmed, isStale } from '../memory/interests.js';
 import { topByRank } from '../memory/ranking.js';
+import { rankEmojiUsage } from '../memory/emoji-usage.js';
 import { sortEpisodesForDisplay } from '../memory/episodes.js';
 import { matchLore } from '../memory/lore.js';
 import { channelActivity, renderChannel } from '../memory/channels.js';
@@ -474,6 +476,49 @@ function loreItems(loreEntries, history, trigger, labels, loreCfg, nameOf) {
 }
 
 /**
+ * The `<emoji>` section's items: `labels.emoji.header` first, then one line
+ * per custom emoji -- the top-ranked ids of `guild.emojiUsage` (see
+ * src/memory/emoji-usage.js#rankEmojiUsage) that the index still has, topped
+ * up with the rest of the index in its own order (a fresh install with no
+ * ranking yet shows the first `max` of the index), at most `max` lines. The
+ * name is the index's current one. A helper caption cached under
+ * `emoji:<id>` (the describer's cache; a `miss` entry has no text) renders
+ * through `labels.emoji.entry` (`{name}`/`{text}`), otherwise
+ * `labels.emoji.entryNoText` (`{name}`). `[]` when the index is empty or
+ * the labels lack `header`/`entryNoText` (an older labels.json).
+ * @param {{ id: string, name: string }[]} index  The index's emoji (createEmojiIndex().list()).
+ * @param {unknown} usage           `guild.emojiUsage`.
+ * @param {object|null} mediaCache  The describer cache (store.getMediaCache), read only.
+ * @param {object} labels
+ * @param {{ max?: number, halfLifeDays?: number }} [emojiCfg]  `context.customEmoji`.
+ * @returns {string[]}
+ */
+function emojiItems(index, usage, mediaCache, labels, emojiCfg) {
+  const e = labels.emoji;
+  if (!e?.header || !e.entryNoText) return [];
+  const list = Array.isArray(index) ? index.filter((emoji) => emoji?.id && emoji.name) : [];
+  if (list.length === 0) return [];
+  const max = Number.isInteger(emojiCfg?.max) && emojiCfg.max >= 0 ? emojiCfg.max : 30;
+  const byId = new Map(list.map((emoji) => [String(emoji.id), emoji]));
+  const chosen = [];
+  const taken = new Set();
+  const take = (emoji) => {
+    if (!emoji || taken.has(String(emoji.id)) || chosen.length >= max) return;
+    taken.add(String(emoji.id));
+    chosen.push(emoji);
+  };
+  for (const used of rankEmojiUsage(usage, emojiCfg?.halfLifeDays ?? 30)) take(byId.get(used.id));
+  for (const emoji of list) take(emoji);
+  if (chosen.length === 0) return [];
+  const lines = chosen.map((emoji) => {
+    const cached = mediaCache?.[`emoji:${emoji.id}`];
+    const text = cached && !cached.miss && typeof cached.text === 'string' ? cached.text.trim() : '';
+    return text && e.entry ? fill(e.entry, { name: emoji.name, text }) : fill(e.entryNoText, { name: emoji.name });
+  });
+  return [e.header, ...lines];
+}
+
+/**
  * Assemble the `<now>…<task>` user-message text from already-rendered parts.
  * Factored out so a fallback rendering (see `textFallback` below) can reuse
  * every block untouched except `<chat>`, which is the only one that can ever
@@ -484,6 +529,7 @@ function assembleUser({ now, timezone, labels, sensesText, kept, tempoText, task
     block('now', formatNow(now, timezone, labels.locale)),
     block('senses', sensesText),
     block('about_chat', kept.aboutChat.join('\n')),
+    block('emoji', (kept.emoji ?? []).join('\n')),
     block('server', kept.server.join('\n\n')),
     block('lore', kept.lore.join('\n\n')),
     block('self_facts', kept.self.join('\n')),
@@ -579,8 +625,9 @@ function renderLookup(lookup, labels) {
  * undefined when no image client is wired) picks the drawing line.
  * `privateChat` adds `senses.privateChat`; outside a private chat,
  * `features.privateMessages === true` adds `senses.privateAware` instead.
+ * `customEmoji` (the `<emoji>` block is possible) adds `senses.customEmoji`.
  */
-function renderSenses(config, labels, { searchAvailable = false, drawQuota, privateChat = false } = {}) {
+function renderSenses(config, labels, { searchAvailable = false, drawQuota, privateChat = false, customEmoji = false } = {}) {
   const senses = labels.senses;
   if (!senses) return '';
   const visionOn = config.features?.vision !== false;
@@ -607,6 +654,9 @@ function renderSenses(config, labels, { searchAvailable = false, drawQuota, priv
   const shownStickerLines = stickerLines.filter(Boolean);
   lines.push(...shownStickerLines);
   if (shownStickerLines.length > 0) lines.push(senses.lottie);
+  // The server's custom emoji (`customEmoji`: features.customEmoji on and a
+  // non-empty index); an older labels.json without the line shows nothing.
+  if (customEmoji && senses.customEmoji) lines.push(senses.customEmoji);
 
   // The web lookup (features.webLookup -- a missing key counts as OFF, it
   // costs money and needs a key): the links line stays as it is and the
@@ -817,6 +867,13 @@ function splitPeople(otherProfiles, candidateProfiles, history, trigger, exclude
  *   quota for this turn (src/llm/images.js#quota); omitted -> no drawing line in `<senses>`.
  * @param {string} [input.drawReason]  For `triggerKind: 'drawFailed'`: the failure reason,
  *   rendered through `labels.draw.reasons` into `labels.triggers.drawFailed`'s `{reason}`.
+ * @param {{ id: string, name: string, animated?: boolean }[]} [input.customEmoji]  The served
+ *   guild's custom emoji (src/discord/emoji.js#createEmojiIndex's `list()`). With
+ *   `features.customEmoji` on (a missing key counts as on) and a non-empty list, `<emoji>`
+ *   renders (ranked by `guildMemory.emojiUsage`, see `emojiItems`) and `<senses>` carries
+ *   `senses.customEmoji`. Omitted or [] -> neither.
+ * @param {object|null} [input.mediaCache]  The describer cache (store.getMediaCache), read only
+ *   for the `emoji:<id>` captions of `<emoji>`.
  * @returns {{ messages: object[], stats: object, idByIndex: Map<number, string>, tempo: object }}
  */
 export function buildRequest(input) {
@@ -883,10 +940,13 @@ export function buildRequest(input) {
     privateChat && typeof prompts.private === 'string' && prompts.private.trim() ? fillPromptTemplate(prompts.private, taskValues) : '';
   const task = [baseTask, privateText, forcedText].filter(Boolean).join('\n\n');
 
+  // The server's custom emoji: the switch (a missing key counts as on) and a non-empty index.
+  const customEmoji = config.features?.customEmoji !== false && Array.isArray(input.customEmoji) ? input.customEmoji : [];
   const sensesText = renderSenses(config, labels, {
     searchAvailable: input.searchAvailable === true,
     drawQuota: input.drawQuota,
     privateChat,
+    customEmoji: customEmoji.length > 0,
   });
 
   // A private chat has no neighbouring channels (and no server map, below).
@@ -1016,10 +1076,19 @@ export function buildRequest(input) {
         ].filter(Boolean),
       },
       { name: 'neighbors', cap: caps.neighbors, items: neighborItems },
+      // Lowest priority: a list to pick from, trimmed from the bottom (least used last).
+      {
+        name: 'emoji',
+        cap: caps.emoji ?? 800,
+        keep: 'first',
+        items: emojiItems(customEmoji, input.guildMemory?.emojiUsage, input.mediaCache ?? null, labels, config.context.customEmoji),
+      },
     ],
     limit,
     cost,
   );
+  // The header alone, or entries without their header, make no block.
+  if (kept.emoji.length < 2 || kept.emoji[0] !== labels.emoji?.header) kept.emoji = [];
 
   const keptChat = chatItems.slice(chatItems.length - kept.chat.length);
   const user = assembleUser({ now, timezone, labels, sensesText, kept, tempoText, task, chatItems: keptChat });

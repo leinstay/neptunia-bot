@@ -183,7 +183,7 @@ test('getGuild: returns the default empty guild memory when nothing is stored', 
   const dir = tmpDataDir();
   const store = createStore({ dataDir: dir });
   const guild = store.getGuild('g1');
-  assert.deepEqual(guild, { patterns: '', starters: '', injokes: [], self: [], learned: [], learnedNextId: 1, updatedAt: null });
+  assert.deepEqual(guild, { patterns: '', starters: '', injokes: [], self: [], learned: [], learnedNextId: 1, emojiUsage: {}, updatedAt: null });
 });
 
 // ---- guild.learned: things people taught the persona --------------------------
@@ -201,7 +201,7 @@ test('getGuild: an old guild.json without learned loads it as empty, every other
 
   const store = createStore({ dataDir: dir });
   const guild = store.getGuild('g1');
-  assert.deepEqual(guild, { ...old, learned: [], learnedNextId: 1 });
+  assert.deepEqual(guild, { ...old, learned: [], learnedNextId: 1, emojiUsage: {} });
   store.flush();
   assert.equal(fs.readFileSync(file, 'utf8'), raw, 'reading alone never rewrites the file');
 });
@@ -1253,7 +1253,7 @@ test('wipeGuild: removes profiles, guild memory, channels, buffer and analyzer l
   // cache is immediately usable
   assert.equal(storeA.getUser('g1', 'u1'), null);
   assert.equal(storeA.getUser('g1', 'u2'), null);
-  assert.deepEqual(storeA.getGuild('g1'), { patterns: '', starters: '', injokes: [], self: [], learned: [], learnedNextId: 1, updatedAt: null });
+  assert.deepEqual(storeA.getGuild('g1'), { patterns: '', starters: '', injokes: [], self: [], learned: [], learnedNextId: 1, emojiUsage: {}, updatedAt: null });
   assert.deepEqual(storeA.listChannels('g1'), []);
   assert.deepEqual(storeA.getBuffer('g1'), []);
   const lore = storeA.getLore('g1');
@@ -1269,7 +1269,7 @@ test('wipeGuild: removes profiles, guild memory, channels, buffer and analyzer l
   const storeB = createStore({ dataDir: dir });
   assert.equal(storeB.getUser('g1', 'u1'), null);
   assert.equal(storeB.getUser('g1', 'u2'), null);
-  assert.deepEqual(storeB.getGuild('g1'), { patterns: '', starters: '', injokes: [], self: [], learned: [], learnedNextId: 1, updatedAt: null });
+  assert.deepEqual(storeB.getGuild('g1'), { patterns: '', starters: '', injokes: [], self: [], learned: [], learnedNextId: 1, emojiUsage: {}, updatedAt: null });
   assert.deepEqual(storeB.listChannels('g1'), []);
   assert.deepEqual(storeB.getBuffer('g1'), []);
   const loreB = storeB.getLore('g1');

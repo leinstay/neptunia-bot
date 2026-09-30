@@ -70,6 +70,7 @@ The blocks of the user message. Empty ones are omitted; the order below is the o
 | `<now>` | Date, weekday, time in `config.bot.timezone`, formatted with `labels.locale` |
 | `<senses>` | What the persona can and cannot perceive RIGHT NOW, generated from the live config: which pictures it sees itself, which come as a helper's description, what it is blind and deaf to. So it never pretends to have watched a video and can joke about it in its own voice |
 | `<about_chat>` | How people talk here, how they start and cut into conversations, in-jokes, things people taught the persona |
+| `<emoji>` | Custom emoji the persona can use (`features.customEmoji`): at most `context.customEmoji.max` entries, ranked by member usage. Each carries `:name:` and the helper's caption when one is cached |
 | `<server>` | The CURRENT channel in full (Discord category and topic, purpose, what people write, tone, activity, last message, top writers; marked with `labels.server.currentMark`) plus only the neighbour channels that fed `<other_channels>` this turn; no other channel |
 | `<lore>` | Server lore entries whose keys occur in the recent messages (plus entries marked always): events, recurring characters, long-running stories. Like a lorebook: hundreds may exist, only the relevant few are shown |
 | `<self_facts>` | What the persona has claimed about itself |
@@ -82,7 +83,7 @@ The blocks of the user message. Empty ones are omitted; the order below is the o
 
 Budget priority (sections are trimmed from the bottom of this list first): system + task + clock + tempo + senses
 (never cut) → caller's profile with episodes → lookup (kept or dropped whole) → about_chat → self_facts → lore → server → chat (newest first) →
-other profiles → other channels.
+other profiles → other channels → emoji (entries from the bottom, then the whole block; `context.caps.emoji`).
 
 Media in a transcript line, most informative form available: a picture attached to THIS request →
 `transcript.imageAttached`, or `transcript.imageAttachedDescribed` when `features.attachedDescriptions` is on and
@@ -176,6 +177,7 @@ senses.videoWatch                        replaces videoDescribed when features.v
 senses.videoRewatch                      shown alongside videoWatch when features.videoRewatch is on; tells the persona that a second look at a watched video may appear, marked as first-hand
 senses.stickerSee | stickerDescribed | stickerBlind
 senses.lottie
+senses.customEmoji                       shown when features.customEmoji is on and the server has at least one custom emoji; tells the persona it can use server custom emoji by writing :name:
 senses.voice | links | files
 senses.linksWatch                        replaces links when features.videoDescriptions is on; adds that a linked video may come watched or not watched with the reason
 senses.linksRead                         shown after the links line when features.webLookup is on and web.links.enabled is not false; tells the persona that a link may come with a read excerpt, first-hand
@@ -208,6 +210,9 @@ profile.episodes                         heading line above the caller's episode
 profile.episode                          {date} {what} {quote} {feeling}: one remembered moment
 profile.episodeNoQuote                   {date} {what} {feeling}: the same without a quote
 lore.entry                               {title} {text}
+emoji.header                             introduces the custom emoji list
+emoji.entry                              {name} {text}: one emoji with a caption
+emoji.entryNoText                        {name}: one emoji without a caption
 affinity.bands.hostile | dislike | cool | neutral | warm | fond | devoted
                                          thresholds in code: ≤-60 · ≤-25 · ≤-8 · <8 · <25 · <60 · ≥60
 aboutChat.patterns | starters | injokes  {text}
@@ -240,10 +245,11 @@ Only these tags are acted on:
 
 - `<think>…</think>` optional, first, 1–4 lines of hidden planning; an unclosed one means silence.
 - `<msg>text</msg>` one chat message, up to 3 in a row; `reply="#87"` makes it a Discord reply.
-- `<react to="#87">💀</react>` one unicode emoji; alone or with `<msg>`.
+- `<react to="#87">💀</react>` one unicode emoji or one server custom emoji as `:name:`; alone or with `<msg>`.
 - `<draw self="yes" reply="#87">scene</draw>` a picture for the drawing sub-process. One per turn, first non-empty wins, clamped to 800 chars. `self="yes"` adds the persona's appearance; `reply="#87"` works like on `<msg>`. May appear alongside `<msg>` and `<react>`.
 - `<skip/>` stay silent.
 - `@nick` exactly as in the transcript becomes a real mention.
+- `:name:` of a known server custom emoji becomes the real emoji in `<msg>` and `<react>`; an unknown name stays as plain text.
 
 `features.reactions: false` drops `<react>`, `features.multiMessage: false` keeps the first `<msg>`;
 `features.imageGeneration: false` or no image client drops `<draw>`; on a `drawFailed` turn `<draw>` is dropped too. Prompts need not know.

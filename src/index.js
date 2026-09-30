@@ -15,6 +15,7 @@ import { createCalibrator } from './llm/tokens.js';
 import { createLlm } from './llm/openrouter.js';
 import { createImageGen } from './llm/images.js';
 import { createTurnRunner } from './behavior/turn.js';
+import { createEmojiIndex } from './discord/emoji.js';
 import { createSpontaneous } from './behavior/spontaneous.js';
 import { createMemoryUpdater } from './memory/update.js';
 import { createWarmup } from './memory/warmup.js';
@@ -97,13 +98,15 @@ const images = createImageGen({ apiKey: openrouterKey, getConfig: () => hot.conf
 
 // Direct messages are received regardless of features.privateMessages (the
 // switch is hot, intents are not); a DM channel arrives uncached, hence the
-// Channel partial.
+// Channel partial. GuildExpressions keeps the guild's custom emoji cache
+// current (emoji created, renamed, deleted) for the emoji index below.
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
     GatewayIntentBits.DirectMessages,
+    GatewayIntentBits.GuildExpressions,
   ],
   partials: [Partials.Channel],
 });
@@ -132,7 +135,9 @@ const lookup = createLookup({
   braveSearch: createBraveSearch(),
   braveApiKey,
 });
-const turns = createTurnRunner({ hot, store, llm, calibrator, client, describer, imageFetcher, lookup, images });
+// The served guild's custom emoji (features.customEmoji): a live view over discord.js's own cache.
+const emoji = createEmojiIndex(client, getGuildId);
+const turns = createTurnRunner({ hot, store, llm, calibrator, client, describer, imageFetcher, lookup, images, emoji });
 const getSelfName = (guildId) => client.guilds.cache.get(guildId)?.members.me?.displayName ?? client.user?.username ?? 'bot';
 // THE way memory starts (docs/prompt-contract.md, "The warmup"): sample-based,
 // resumable, mutes the persona while a run is in flight (see isWarmingUp below).

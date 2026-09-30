@@ -21,6 +21,7 @@ import {
   selectPictures,
 } from '../discord/media.js';
 import { createImageFetcher } from '../discord/fetch-image.js';
+import { renderCustomEmoji, resolveReactionEmoji } from '../discord/emoji.js';
 import { formatTranscript, renderTranscript } from '../discord/format.js';
 import { log } from '../log.js';
 
@@ -284,6 +285,10 @@ function describableCandidates(history, picked, { includePicked = false } = {}) 
  * `now` (default Date.now) is the clock behind the search classifier's
  * `{{today}}`.
  *
+ * `emoji` (src/discord/emoji.js#createEmojiIndex) is optional: absent, or
+ * `features.customEmoji` false (a missing key counts as on), no `:name:` is
+ * turned into a custom emoji and a `<react>` with a custom one is dropped.
+ *
  * `describer` (src/memory/describe.js#createDescriber) is optional: when
  * absent, or `features.mediaDescriptions` is off, no description request is
  * ever made — buildRequest simply renders every un-attached picture blind
@@ -304,12 +309,18 @@ export function createTurnRunner({
   imageFetcher = createImageFetcher(),
   lookup,
   images,
+  emoji,
   now: clock = Date.now,
 }) {
   const busy = new Set();
   const lastPostAt = new Map(); // channelId -> ts of the persona's last message
   let onIdle = null; // set via setOnIdle(); see the finally block of runTurn below
   let idleWaiters = []; // resolvers for waitIdle() (/nep pause), notified once busy.size hits 0
+
+  /** The custom emoji lookup, or null when there is no index or features.customEmoji is off (read now). */
+  function emojiLookup() {
+    return emoji && hot.config.features?.customEmoji !== false ? emoji.byName : null;
+  }
 
   /**
    * Post one readable mirror of a would-be action into `dryRunChannelId`, when
@@ -361,14 +372,14 @@ export function createTurnRunner({
       const replyId = !isFollowUp && message.replyTo !== null ? idByIndex.get(message.replyTo) : null;
       const authorName = replyId ? (authorNameFor(history, replyId) ?? '—') : '—';
       // Same deliberate exception as above: the persona's own output, dry-run only.
-      const { text } = resolveMentions(message.text, history);
+      const text = renderCustomEmoji(resolveMentions(message.text, history).text, emojiLookup());
       log.info('dry-run: would send', { channel: channel.id, channelName, mode, replyTo: replyId ?? null, text });
       // The mirror shows @name as the model wrote it: resolving it to a real
       // mention here would ping someone in a channel meant to be invisible to them.
       await mirrorDryRun(
         dryRunChannelId,
         `[dry-run] #${channelName} · ${mode} · reply to ${authorName}`,
-        message.text,
+        renderCustomEmoji(message.text, emojiLookup()),
       );
       lastPostAt.set(channel.id, Date.now());
     }
@@ -542,7 +553,10 @@ export function createTurnRunner({
       if (!first && typingOn) await sleep(between(cfg.betweenMessagesMs, rng));
       first = false;
 
-      const { text, userIds } = resolveMentions(message.text, history);
+      const mentioned = resolveMentions(message.text, history);
+      const { userIds } = mentioned;
+      // Custom emoji after the mentions: `<@id>` has no `:name:` in it to break.
+      const text = renderCustomEmoji(mentioned.text, emojiLookup());
       if (typingOn) {
         await channel.sendTyping().catch(() => {});
         await sleep(typingMs(text, cfg, rng));
@@ -1031,6 +1045,9 @@ export function createTurnRunner({
         searchAvailable: features.webLookup === true && typeof lookup?.hasSearch === 'function' && lookup.hasSearch() === true,
         drawQuota,
         drawReason,
+        // The `<emoji>` block: the index's emoji (ranked by guildMemory.emojiUsage) and their cached captions.
+        customEmoji: emoji ? emoji.list() : [],
+        mediaCache: emoji ? store.getMediaCache(guildId) : null,
       });
 
       // A Discord CDN image the provider cannot fetch must not cost the
@@ -1085,6 +1102,11 @@ export function createTurnRunner({
       const parsed = parseOutput(completion.text);
       // Feature switches drop parts of the model's output before it is acted on.
       if (features.reactions === false) parsed.reactions = [];
+      // A custom emoji reaction resolves through the index; an unknown one (or the switch off) is dropped.
+      const lookupEmoji = emojiLookup();
+      parsed.reactions = parsed.reactions
+        .map((reaction) => ({ ...reaction, emoji: resolveReactionEmoji(reaction.emoji, lookupEmoji) }))
+        .filter((reaction) => reaction.emoji);
       if (features.multiMessage === false) parsed.messages = parsed.messages.slice(0, 1);
       // No image client, drawing off, no Attach Files, or already answering a failed picture: the <draw> is dropped.
       if (!drawOn) parsed.draw = null;

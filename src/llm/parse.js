@@ -1,7 +1,7 @@
 // Parses the model's tagged output (contract: prompts/format.md) into actions.
 //   <think>…</think>          hidden planning, discarded
 //   <msg reply="#87">…</msg>   a chat message, optionally a reply to message #87
-//   <react to="#87">💀</react> a reaction on message #87
+//   <react to="#87">💀</react> a reaction on message #87 (a custom emoji as :name: too)
 //   <draw self="yes" reply="#87">…</draw>  a scene for the drawing sub-process (first one only)
 //   <skip/>                    stay silent
 // The parser is forgiving: a missing tag wrapper falls back to a single plain
@@ -12,6 +12,9 @@ const MAX_MESSAGE_CHARS = 1900;
 const MAX_FALLBACK_CHARS = 600;
 const MAX_DRAW_CHARS = 800;
 const SELF_YES = new Set(['yes', 'true', '1']);
+// A reaction body: a short unicode emoji, or a custom one as `:name:` / `<a:name:id>` (src/discord/emoji.js).
+const MAX_REACTION_CHARS = 16;
+const CUSTOM_REACTION_RE = /^(?::[A-Za-z0-9_]{2,32}:|<a?:[A-Za-z0-9_]{2,32}:\d{1,25}>)$/;
 
 function parseIndex(value) {
   const match = /(\d+)/.exec(value ?? '');
@@ -49,7 +52,8 @@ export function parseOutput(raw) {
   for (const match of text.matchAll(/<react\s+to\s*=\s*"([^"]*)"\s*>([\s\S]*?)<\/react>/gi)) {
     const to = parseIndex(match[1]);
     const emoji = match[2].trim();
-    if (to !== null && emoji && emoji.length <= 16) result.reactions.push({ to, emoji });
+    const fits = emoji.length <= MAX_REACTION_CHARS || CUSTOM_REACTION_RE.test(emoji);
+    if (to !== null && emoji && fits) result.reactions.push({ to, emoji });
   }
 
   for (const match of text.matchAll(/<draw(\s[^>]*)?>([\s\S]*?)<\/draw>/gi)) {

@@ -31,6 +31,7 @@ import { applyInterestOps, normalizeInterests } from './interests.js';
 import { applyDetailOps, normalizeDetails } from './details.js';
 import { applyAliasOps } from './aliases.js';
 import { clampText } from './clamp.js';
+import { mergeEmojiUsage, normalizeEmojiUsage } from './emoji-usage.js';
 
 function readJson(file, fallback) {
   try {
@@ -129,6 +130,7 @@ export function emptyGuild() {
     self: [],
     learned: [], // things people taught the persona: detail-shaped items plus an optional `from` -- see applyLearnedOps
     learnedNextId: 1, // the next id a learned item gets -- never reused, even after a remove
+    emojiUsage: {}, // { [emojiId]: { name, count, last } } -- members' custom emoji uses, see recordEmojiUsage
     updatedAt: null,
   };
 }
@@ -228,7 +230,7 @@ function normalizePrivate(priv) {
   if (!Array.isArray(priv.buffer)) priv.buffer = [];
 }
 
-/** Normalize a guild's `learned`/`learnedNextId` fields in place: a
+/** Normalize a guild's `learned`/`learnedNextId`/`emojiUsage` fields in place: a
  * guild.json written before this list existed loads it as empty, a
  * hand-edited one is validated via src/memory/details.js#normalizeDetails
  * (fresh ids off `learnedNextId` when needed). Every other field is left
@@ -240,6 +242,8 @@ function normalizeGuild(guild) {
   const { items, nextId } = normalizeDetails(guild.learned, guild.learnedNextId);
   guild.learned = items;
   guild.learnedNextId = nextId;
+  // Missing or hand-broken -> {} (src/memory/emoji-usage.js#normalizeEmojiUsage).
+  guild.emojiUsage = normalizeEmojiUsage(guild.emojiUsage);
 }
 
 /** Keep only the newest `max` UTC-date keys of a `days` counter map. */
@@ -870,15 +874,38 @@ export function createStore({ dataDir }) {
      * Merge fields into the guild's memory and stamp `updatedAt`. `learned`/
      * `learnedNextId` are never taken from here -- they only ever change
      * through `applyLearnedOps`, which merges incrementally instead of
-     * overwriting wholesale (mirrors `updateUser`).
+     * overwriting wholesale (mirrors `updateUser`); `emojiUsage` likewise
+     * only through `recordEmojiUsage`.
      */
     updateGuild(guildId, fields) {
       const item = entry(guildFile(guildId), emptyGuild);
       normalizeGuild(item.value);
-      const { learned, learnedNextId, ...safeFields } = fields ?? {};
+      const { learned, learnedNextId, emojiUsage, ...safeFields } = fields ?? {};
       Object.assign(item.value, safeFields, { updatedAt: new Date().toISOString() });
       item.dirty = true;
       return item.value;
+    },
+
+    /**
+     * Add the members' custom emoji uses of one consumed analyzer batch to
+     * the guild's `emojiUsage` (src/memory/emoji-usage.js#mergeEmojiUsage:
+     * counts accumulate, the lowest-ranked entries past `opts.storeMax` are
+     * evicted). Marks the guild dirty only when something was counted; never
+     * stamps `updatedAt` (a counter, like `touchUser`).
+     * @param {string} guildId
+     * @param {object[]} messages  Slim buffered messages; `self`/`bot`/`ts`/`emojis` read.
+     * @param {{ storeMax?: number, halfLifeDays?: number }} [opts]
+     * @returns {number} How many uses were counted.
+     */
+    recordEmojiUsage(guildId, messages, opts = {}) {
+      const item = entry(guildFile(guildId), emptyGuild);
+      normalizeGuild(item.value);
+      const { usage, counted } = mergeEmojiUsage(item.value.emojiUsage, messages, opts);
+      if (counted > 0) {
+        item.value.emojiUsage = usage;
+        item.dirty = true;
+      }
+      return counted;
     },
 
     /**
