@@ -172,6 +172,11 @@ export function createDescriber({
   state = memoryState(),
   youtubeApiKey = null,
 }) {
+  /** Today's UTC date as `YYYY-MM-DD` from the injected clock: the daily counters and the prompts' `{{today}}`. */
+  function todayDate() {
+    return new Date(now()).toISOString().slice(0, 10);
+  }
+
   /**
    * @param {string} guildId
    * @param {{ itemId: string, kind: string, url: string }} item  See
@@ -234,7 +239,7 @@ export function createDescriber({
     try {
       completion = await llm.complete(
         [
-          { role: 'system', content: fillTemplate(promptText, { maxChars: descriptionChars }) },
+          { role: 'system', content: fillTemplate(promptText, { maxChars: descriptionChars, today: todayDate() }) },
           { role: 'user', content: [{ type: 'image_url', image_url: { url: downloaded.dataUrl } }] },
         ],
         {
@@ -398,7 +403,7 @@ export function createDescriber({
    * resets it when the day changed (same day logic as the LLM client's).
    */
   function countToday(dayKey, countKey) {
-    const today = new Date(now()).toISOString().slice(0, 10);
+    const today = todayDate();
     if (state.data[dayKey] !== today) {
       state.data[dayKey] = today;
       state.data[countKey] = 0;
@@ -593,7 +598,7 @@ export function createDescriber({
     try {
       completion = await llm.complete(
         [
-          { role: 'system', content: fillTemplate(promptText, { maxChars: summaryChars }) },
+          { role: 'system', content: fillTemplate(promptText, { maxChars: summaryChars, today: todayDate() }) },
           { role: 'user', content: [videoPart(videoCfg, media)] },
         ],
         videoRequestOptions(videoCfg, media, { maxOutputTokens: videoCfg.maxOutputTokens, countAgainstDailyCap }),
@@ -767,7 +772,7 @@ export function createDescriber({
     try {
       completion = await llm.complete(
         [
-          { role: 'system', content: fillTemplate(promptText, { question: asked, maxChars: answerChars }) },
+          { role: 'system', content: fillTemplate(promptText, { question: asked, maxChars: answerChars, today: todayDate() }) },
           { role: 'user', content: [videoPart(videoCfg, media)] },
         ],
         videoRequestOptions(videoCfg, media, { maxOutputTokens: rewatchCfg.maxOutputTokens, countAgainstDailyCap: true }),

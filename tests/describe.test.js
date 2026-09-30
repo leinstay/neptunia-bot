@@ -2019,3 +2019,38 @@ test('rewatchVideo: logs one describe: rewatch line -- never the question, the a
   assert.ok(!all.includes('a secret question'));
   assert.ok(!all.includes('ex=secret'));
 });
+
+// --- {{today}}: the current date in every describer prompt --------------------
+
+const TODAY_NOW = Date.parse('2026-09-30T23:30:00Z');
+
+test('describe: {{today}} in the describe prompt is filled with the date of the injected now', async () => {
+  const store = createStore({ dataDir: tmpDataDir() });
+  const hot = fakeHot({ prompts: { describe: 'Today is {{today}}; at most {{maxChars}} characters.' } });
+  const llm = fakeLlm({ text: 'Une affiche datée.' });
+  const describer = createDescriber({ hot, store, llm, imageFetcher: fakeImageFetcher(), now: () => TODAY_NOW });
+  await describer.describe('g1', pictureItem('a1'));
+  assert.equal(llm.calls[0].messages[0].content, 'Today is 2026-09-30; at most 200 characters.');
+});
+
+test('describeVideo: {{today}} in the video prompt is filled with the date of the injected now', async () => {
+  const hot = videoHot({ prompts: { 'describe-video': 'Today is {{today}}. Say what happens.' } });
+  const { describer, llm } = videoDescriber({ hot, now: () => TODAY_NOW });
+  await describer.describeVideo('g1', videoAttachment());
+  assert.equal(llm.calls[0].messages[0].content, 'Today is 2026-09-30. Say what happens.');
+});
+
+test('rewatchVideo: {{today}} in the re-watch prompt is filled with the date of the injected now', async () => {
+  const hot = rewatchHot({ prompts: { 'rewatch-answer': 'Today is {{today}}. Question: {{question}}' } });
+  const { describer, llm } = videoDescriber({ hot, llm: fakeLlm({ text: 'rouge' }), now: () => TODAY_NOW });
+  await describer.rewatchVideo('g1', videoAttachment(), 'Quelle date ?');
+  assert.equal(llm.calls[0].messages[0].content, 'Today is 2026-09-30. Question: Quelle date ?');
+});
+
+test('rewatchVideo: a re-watch prompt without placeholders is sent unchanged', async () => {
+  const prompt = 'Answer the question about this video.';
+  const hot = rewatchHot({ prompts: { 'rewatch-answer': prompt } });
+  const { describer, llm } = videoDescriber({ hot, llm: fakeLlm({ text: 'rouge' }), now: () => TODAY_NOW });
+  await describer.rewatchVideo('g1', videoAttachment(), 'Quelle date ?');
+  assert.equal(llm.calls[0].messages[0].content, prompt);
+});
