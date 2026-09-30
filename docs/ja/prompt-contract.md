@@ -711,6 +711,8 @@ Memory ターゲットスコアリングでは `character` は常に `null`、`h
 
 容疑者が確認されなかった試行、編集が拒否された試行、検証に失敗した試行は残りの容疑者に進む。
 
+すべての容疑者が試行済みで確認されなかった場合、ループは合成 `missing` 原因でもう 1 回試行できます。条件: `mentor.fix.tryMissing` が `false` でないこと（デフォルト `true`）、`fix.maxAttempts` の範囲内に試行が残っていること、診断由来・過去の合成のいずれの `missing` 原因もまだ試行されていないこと。このステップの前に `features.mentorAutoFix` がチェックされます。合成原因は `{ layer: 'missing', excerpt: '', why: <診断サマリー、サマリーがなければケーステキスト>, gain: null }` です。`missing` 原因は除去すべき部分がないため、アブレーションもコントロール測定もなしに確認されます（上記ステップ 3）。受け入れられる編集はルールの追加のみ（レイヤー `rules`、空の `from`）で、他の編集と同様に検証・適用されます。終了理由は変更ありません。
+
 #### 編集が触れられる範囲
 
 `mentor.fix.layers` のレイヤー（デフォルト `["rules", "prompt", "self", "learned", "guild"]`）。キャラクターカードは編集不可。`mentor.fix.files` のプロンプトファイル（デフォルト `["system-prompt", "format", "reply", "memory", "profile"]`）。Reply ケースのファイルは設定リストと `system-prompt`、`format`、`reply` の共通部分: リプライサンドボックスでレンダリングされないプロンプト（`interject`、`initiate`、`address` およびメモリライターの `memory`、`profile`、`server`、`channel`）は編集不可。Memory ケースはメモリライターのプロンプトのみを編集し、`prompt` レイヤーのみ経由。`rules` レイヤーで `from` が空の場合はルールを追加（`/nep rule add` と同じパス）。メンバーのプロファイルでは言い回しのみ変更可能: 数字、日付、名前、`<@id>` メンションはコードがチェック（`profileGuard`）。
@@ -750,7 +752,7 @@ Memory ターゲットスコアリングでは `character` は常に `null`、`h
 ```
 {
   control: { medians, situations },
-  attempts: [{ n, suspects: [{ layer, excerpt, located, gain, confirmed }],
+  attempts: [{ n, suspects: [{ layer, excerpt, located, gain, confirmed, synthetic? }],
     edit, refused, verify: { fresh: { passed, kept, medians, situations },
     regression: [{ caseId, held, situations }], skipped } | null, accepted }],
   applied: { changeId, layer, target, summary } | null,
@@ -758,7 +760,7 @@ Memory ターゲットスコアリングでは `character` は常に `null`、`h
 }
 ```
 
-`control` はコントロール測定後に出現（ループがアブレーションに到達しなかった場合は不在、例: `missing` 原因）。`verify.fresh.kept` はフィルタリング後に残った新しい状況の数。
+`control` はコントロール測定後に出現（ループがアブレーションに到達しなかった場合は不在、例: `missing` 原因）。`verify.fresh.kept` はフィルタリング後に残った新しい状況の数。`synthetic: true` が付いた容疑者は、診断の容疑者がいずれも確認されなかった際にループが自ら作成した `missing` 原因です。
 
 `reason`: `applied`、`no diagnosis`、`no suspect left`、`max attempts`、`not reproduced`、`prompt missing`、`disabled`、`budget`、`stopped by the owner`、`apply failed`、またはエラー名。
 

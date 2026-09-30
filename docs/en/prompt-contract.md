@@ -905,6 +905,8 @@ Switch `features.mentorAutoFix` (default `false`). When a `/nep mentor run` fail
 
 An attempt that proves nothing, whose edit is refused, or that fails verification moves on to the remaining suspects.
 
+When all suspects have been tried and none was confirmed, the loop makes one more attempt with a synthetic `missing` cause if `mentor.fix.tryMissing` is not `false` (the default is `true`), an attempt is left under `fix.maxAttempts`, and no `missing` cause (from the diagnosis or a previous synthetic attempt) has been tried. `features.mentorAutoFix` is checked before this step. The synthetic cause is `{ layer: 'missing', excerpt: '', why: <the diagnosis summary, or the case text when there is no summary>, gain: null }`. Because a `missing` cause has nothing to remove, it counts as confirmed without ablation and without a control measurement (step 3 above). Only an added rule (layer `rules`, empty `from`) is accepted, verified and applied like any other edit. End reasons are unchanged.
+
 #### What an edit may touch
 
 The layers in `mentor.fix.layers` (default `["rules", "prompt", "self", "learned", "guild"]`). The character card is never editable regardless of this list. The prompt files in `mentor.fix.files` (default `["system-prompt", "format", "reply", "memory", "profile"]`). A reply case's files are the configured list intersected with `system-prompt`, `format`, `reply`: it never edits prompts not rendered in the reply sandbox (`interject`, `initiate`, `address` and the memory writer's `memory`, `profile`, `server`, `channel`). A memory case edits only the memory writer's prompts, only through the `prompt` layer. An empty `from` on the `rules` layer adds a rule (the same path as `/nep rule add`). In a member's profile, only the wording may change: numbers, dates, names and `<@id>` mentions are checked by code (`profileGuard`).
@@ -944,7 +946,7 @@ The run gains a `repair` object:
 ```
 {
   control: { medians, situations },
-  attempts: [{ n, suspects: [{ layer, excerpt, located, gain, confirmed }],
+  attempts: [{ n, suspects: [{ layer, excerpt, located, gain, confirmed, synthetic? }],
     edit, refused, verify: { fresh: { passed, kept, medians, situations },
     regression: [{ caseId, held, situations }], skipped } | null, accepted }],
   applied: { changeId, layer, target, summary } | null,
@@ -952,7 +954,7 @@ The run gains a `repair` object:
 }
 ```
 
-`control` appears once the control was measured (absent when the loop never reached an ablation, e.g. a `missing` cause). `verify.fresh.kept` is how many fresh situations survived filtering.
+`control` appears once the control was measured (absent when the loop never reached an ablation, e.g. a `missing` cause). `verify.fresh.kept` is how many fresh situations survived filtering. A suspect with `synthetic: true` is a `missing` cause the loop created when no diagnosed suspect was confirmed.
 
 `reason` is why the loop ended: `applied`, `no diagnosis`, `no suspect left`, `max attempts`, `not reproduced`, `prompt missing`, `disabled`, `budget`, `stopped by the owner`, `apply failed`, or a failure name.
 

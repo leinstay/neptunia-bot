@@ -813,6 +813,8 @@ Memory 评分中 `character` 始终为 `null`，`human` 衡量文本是否读起
 
 未确认嫌疑项、编辑被拒绝或验证失败的尝试继续处理剩余嫌疑项。
 
+当所有嫌疑项都已测试且均未确认时，循环可再进行一次尝试，使用合成的 `missing` 原因。条件：`mentor.fix.tryMissing` 不为 `false`（默认 `true`），`fix.maxAttempts` 内还有剩余尝试，且此前未测试过任何 `missing` 原因（无论来自诊断还是来自之前的合成尝试）。此步骤前会检查 `features.mentorAutoFix`。合成原因为 `{ layer: 'missing', excerpt: '', why: <诊断摘要，或无摘要时使用案例文本>, gain: null }`。`missing` 原因没有可移除的片段，因此无需消融和控制测量即可确认（上述步骤 3）。唯一接受的编辑是添加规则（层 `rules`，`from` 为空），验证和应用方式与其他编辑相同。结束原因不变。
+
 #### 编辑可触及的范围
 
 `mentor.fix.layers` 中的层（默认 `["rules", "prompt", "self", "learned", "guild"]`）。角色卡永远不可编辑。`mentor.fix.files` 中的提示文件（默认 `["system-prompt", "format", "reply", "memory", "profile"]`）。Reply 案例的文件为配置列表与 `system-prompt`、`format`、`reply` 的交集：不在回复沙盒中渲染的提示（`interject`、`initiate`、`address` 及记忆写入器的 `memory`、`profile`、`server`、`channel`）不可编辑。Memory 案例仅编辑记忆写入器的提示，仅通过 `prompt` 层。`rules` 层上 `from` 为空时添加规则（与 `/nep rule add` 相同）。成员档案中只有措辞可更改：数字、日期、名称和 `<@id>` 提及由代码检查（`profileGuard`）。
@@ -852,7 +854,7 @@ Memory 评分中 `character` 始终为 `null`，`human` 衡量文本是否读起
 ```
 {
   control: { medians, situations },
-  attempts: [{ n, suspects: [{ layer, excerpt, located, gain, confirmed }],
+  attempts: [{ n, suspects: [{ layer, excerpt, located, gain, confirmed, synthetic? }],
     edit, refused, verify: { fresh: { passed, kept, medians, situations },
     regression: [{ caseId, held, situations }], skipped } | null, accepted }],
   applied: { changeId, layer, target, summary } | null,
@@ -860,7 +862,7 @@ Memory 评分中 `character` 始终为 `null`，`human` 衡量文本是否读起
 }
 ```
 
-`control` 在控制测量后出现（循环未到达消融时不存在，如 `missing` 原因）。`verify.fresh.kept` 为过滤后保留的新场景数。
+`control` 在控制测量后出现（循环未到达消融时不存在，如 `missing` 原因）。`verify.fresh.kept` 为过滤后保留的新场景数。带有 `synthetic: true` 的嫌疑项表示循环在诊断的嫌疑项均未确认时自行创建的 `missing` 原因。
 
 `reason`：`applied`、`no diagnosis`、`no suspect left`、`max attempts`、`not reproduced`、`prompt missing`、`disabled`、`budget`、`stopped by the owner`、`apply failed` 或错误名称。
 

@@ -393,6 +393,7 @@ YouTube リンクの再生時間は次の順序で取得されます: まず yt-
 | `ablationGain` | `1` | 容疑者を除去した際に `overall` 中央値が確認に必要な最低上昇幅 |
 | `ablationSamples` | `2` | アブレーション測定時の状況あたりのペルソナ回答数 |
 | `fix.maxAttempts` | `3` | ランあたりの最大修復試行回数 |
+| `fix.tryMissing` | `true` | 診断の容疑者がアブレーションで確認されなかった場合、もう 1 回試行し、原因を欠落した指示として扱い、ルールの追加のみ可能 |
 | `fix.maxGrowthChars` | `300` | 1 回の編集でプロンプトファイルが増加できる最大文字数 |
 | `fix.layers` | `["rules", "prompt", "self", "learned", "guild"]` | 編集が触れられるレイヤー。キャラクターカードは編集不可。デプロイで `profile` をリストに追加可能 |
 | `fix.files` | `["system-prompt", "format", "reply", "memory", "profile"]` | ローカルオーバーライドを作成できるプロンプトファイル。Reply ケースのファイルは設定リストと `system-prompt`、`format`、`reply` の共通部分。Memory ケースはメモリライターのプロンプトのみを編集し、`prompt` レイヤーのみ経由 |

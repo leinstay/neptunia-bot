@@ -423,6 +423,7 @@ Settings for the manual testing sub-process (`features.mentor`). The mentor inve
 | `ablationGain` | `1` | Minimum rise in the median `overall` when a suspect is removed for the suspect to count as confirmed |
 | `ablationSamples` | `2` | Persona completions per situation during an ablation measurement |
 | `fix.maxAttempts` | `3` | Maximum repair attempts per run |
+| `fix.tryMissing` | `true` | When no diagnosed suspect is proven by ablation, one more attempt treats the cause as a missing instruction and may only add a rule |
 | `fix.maxGrowthChars` | `300` | Maximum characters a prompt file may grow by in one edit |
 | `fix.layers` | `["rules", "prompt", "self", "learned", "guild"]` | Layers an edit may touch. The character card is never editable regardless of this list. A deployment may add `profile` to the list |
 | `fix.files` | `["system-prompt", "format", "reply", "memory", "profile"]` | Prompt files that may receive a local override. A reply case's files are the configured list intersected with `system-prompt`, `format`, `reply`; a memory case edits only the memory writer's prompts, only through the `prompt` layer |

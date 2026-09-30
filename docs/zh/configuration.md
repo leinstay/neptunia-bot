@@ -393,6 +393,7 @@ YouTube 链接的时长通过以下链式探测获取：首先尝试 yt-dlp，�
 | `ablationGain` | `1` | 移除嫌疑项后 `overall` 中位数的最小上升幅度，达到即确认 |
 | `ablationSamples` | `2` | 消融测量中每个场景的角色回答数 |
 | `fix.maxAttempts` | `3` | 每次运行的最大修复尝试次数 |
+| `fix.tryMissing` | `true` | 当诊断中没有嫌疑项被消融确认时，再尝试一次，将原因视为缺失的指令，且仅可添加规则 |
 | `fix.maxGrowthChars` | `300` | 一次编辑中提示文件最多可增长的字符数 |
 | `fix.layers` | `["rules", "prompt", "self", "learned", "guild"]` | 编辑可触及的层。角色卡永远不可编辑。部署可向列表中添加 `profile` |
 | `fix.files` | `["system-prompt", "format", "reply", "memory", "profile"]` | 可创建本地覆盖的提示文件。Reply 案例的文件为配置列表与 `system-prompt`、`format`、`reply` 的交集；memory 案例仅编辑记忆写入器的提示，仅通过 `prompt` 层 |
