@@ -291,6 +291,47 @@ test('applyLearnedOps: leaves every other guild field alone', () => {
   assert.deepEqual(guild.injokes, ['ο βράχος']);
 });
 
+test('rewriteLearned: replaces the text and keeps id, weight and dates', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  store.applyLearnedOps('g1', { add: [{ text: 'Café closes at nine', from: '<@322222222222222222>' }, 'b fact'] }, { ...LEARNED_CFG, seenAt: TEACH_AT });
+  store.applyLearnedOps('g1', { seen: [1] }, { ...LEARNED_CFG, seenAt: TEACH_AT + 24 * 3_600_000 });
+  const before = structuredClone(store.getGuild('g1').learned[0]);
+  const item = store.rewriteLearned('g1', 1, '  Café closes at ten  ');
+  assert.deepEqual(item, { ...before, text: 'Café closes at ten' });
+  assert.equal(item.weight, 2);
+  assert.equal(store.getGuild('g1').learnedNextId, 3);
+  store.flush();
+  const again = createStore({ dataDir: dir }).getGuild('g1');
+  assert.deepEqual(again.learned.map((i) => [i.id, i.text, i.weight, i.from]), [
+    [1, 'Café closes at ten', 2, '<@322222222222222222>'],
+    [2, 'b fact', 1, undefined],
+  ]);
+});
+
+test('rewriteLearned: an unknown id or an empty text changes nothing', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  store.applyLearnedOps('g1', { add: ['a fact'] }, { ...LEARNED_CFG, seenAt: TEACH_AT });
+  store.flush();
+  const file = path.join(dir, 'guilds', 'g1', 'guild.json');
+  const raw = fs.readFileSync(file, 'utf8');
+  assert.equal(store.rewriteLearned('g1', 9, 'other fact'), null);
+  assert.equal(store.rewriteLearned('g1', 1, '   '), null);
+  assert.equal(store.rewriteLearned('g1', 1, ''), null);
+  assert.equal(store.rewriteLearned('g1', '1', 'other fact'), null);
+  store.flush();
+  assert.equal(fs.readFileSync(file, 'utf8'), raw);
+  assert.deepEqual(store.getGuild('g1').learned.map((i) => i.text), ['a fact']);
+});
+
+test('rewriteLearned: refuses a text another item already has', () => {
+  const store = createStore({ dataDir: tmpDataDir() });
+  store.applyLearnedOps('g1', { add: ['a fact', 'b fact'] }, { ...LEARNED_CFG, seenAt: TEACH_AT });
+  assert.equal(store.rewriteLearned('g1', 1, 'b fact'), null);
+  assert.deepEqual(store.getGuild('g1').learned.map((i) => [i.id, i.text]), [[1, 'a fact'], [2, 'b fact']]);
+});
+
 test('updateGuild: can never overwrite learned or learnedNextId wholesale', () => {
   const store = createStore({ dataDir: tmpDataDir() });
   store.applyLearnedOps('g1', { add: ['a fact'] }, { ...LEARNED_CFG, seenAt: TEACH_AT });
