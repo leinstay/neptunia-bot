@@ -168,7 +168,7 @@ test('gif backfill run: a second run without force is a no-op and never double-c
   });
 });
 
-test('gif backfill run: the first run clears what was recorded on arrival, never counting it twice', async () => {
+test('gif backfill run: the first run resets what was recorded on arrival, never counting it twice', async () => {
   await withStore(async (store) => {
     // Recorded on arrival: a message the history window also holds, and one gone from it.
     store.recordGifs('g1', [
@@ -178,23 +178,36 @@ test('gif backfill run: the first run clears what was recorded on arrival, never
     const backfill = createGifBackfill({ hot: fakeHot(), store, client: fakeClient(standardChannels()), log: fakeLog() });
 
     await backfill.startIfNeeded('g1');
-    assert.deepEqual(countsByUrl(store), { [TENOR_A]: 3, 555: 2, [TENOR_B]: 2 });
+    assert.deepEqual(countsByUrl(store), { [TENOR_A]: 3, 555: 2, [TENOR_B]: 2, 'https://tenor.com/view/gone-9': 0 });
+    assert.equal(store.getGifs('g1').entries['1001#e0'].id, 'g1', 'the arrival handle is kept');
+    assert.equal(store.getGifs('g1').entries['old#e0'].id, 'g2');
   });
 });
 
-test('gif backfill run: force clears the library, recounts, and never reuses a handle', async () => {
+test('gif backfill run: keep handles across a rescan', async () => {
   await withStore(async (store) => {
-    const backfill = createGifBackfill({ hot: fakeHot(), store, client: fakeClient(standardChannels()), log: fakeLog() });
+    const hot = fakeHot();
+    const backfill = createGifBackfill({ hot, store, client: fakeClient(standardChannels()), log: fakeLog() });
 
     await backfill.run('g1');
-    const firstHandles = new Set(Object.values(store.getGifs('g1').entries).map((entry) => entry.id));
+    const firstHandles = Object.fromEntries(Object.entries(store.getGifs('g1').entries).map(([key, entry]) => [key, entry.id]));
     store.recordGifs('g1', [{ id: 'x', ts: T0, channelId: 'c1', attachments: [{ id: '999', kind: 'gif', url: 'https://cdn.discordapp.com/x.gif' }] }]);
+    const staleHandle = store.getGifs('g1').entries['999'].id;
+    const nextId = store.getGifs('g1').nextId;
 
     const result = await backfill.run('g1', { force: true });
     assert.equal(result.ok, true);
     assert.equal(result.gifs, 7);
-    assert.deepEqual(countsByUrl(store), { [TENOR_A]: 3, 555: 2, [TENOR_B]: 2 }, 'recounted, the stale entry gone');
-    for (const entry of Object.values(store.getGifs('g1').entries)) assert.ok(!firstHandles.has(entry.id), `${entry.id} is fresh`);
+    assert.deepEqual(countsByUrl(store), { [TENOR_A]: 3, 555: 2, [TENOR_B]: 2, 999: 0 }, 'fresh counts, never added on top');
+    const entries = store.getGifs('g1').entries;
+    for (const [key, id] of Object.entries(firstHandles)) assert.equal(entries[key].id, id, `${key} keeps ${id}`);
+    assert.equal(entries['999'].id, staleHandle, 'an entry gone from history keeps its handle with count 0');
+    assert.equal(store.getGifs('g1').nextId, nextId, 'no handle was spent');
+
+    hot.config.gifs.storeMax = 3;
+    await backfill.run('g1', { force: true });
+    assert.deepEqual(countsByUrl(store), { [TENOR_A]: 3, 555: 2, [TENOR_B]: 2 }, 'the zero-count entry is the first evicted at storeMax');
+    for (const [key, id] of Object.entries(firstHandles)) assert.equal(store.getGifs('g1').entries[key].id, id);
   });
 });
 
@@ -322,7 +335,7 @@ test('gif backfill startIfNeeded: an error is logged, never thrown', async () =>
   });
 });
 
-test('store setGifBackfill / clearGifs: the stamp is normalised and persisted, a clear keeps nextId', async () => {
+test('store setGifBackfill / resetGifCounts: the stamp is normalised and persisted, a reset keeps entries and handles', async () => {
   await withStore(async (store, dir) => {
     store.recordGifs('g1', [{ id: 'm', ts: T0, channelId: 'c1', links: [{ id: 'm#e0', kind: 'gif', url: TENOR_A }] }]);
     assert.deepEqual(store.setGifBackfill('g1', { at: '2026-09-30T00:00:00.000Z', channels: 2.7, messages: -1 }), {
@@ -332,11 +345,15 @@ test('store setGifBackfill / clearGifs: the stamp is normalised and persisted, a
     });
     assert.equal(store.setGifBackfill('g2', { at: 5 }), null);
 
-    store.clearGifs('g1');
+    store.resetGifCounts('g1');
     store.flush();
     const onDisk = JSON.parse(fs.readFileSync(path.join(dir, 'guilds', 'g1', 'gifs.json'), 'utf8'));
-    assert.deepEqual(onDisk.entries, {});
+    assert.deepEqual(Object.keys(onDisk.entries), ['m#e0']);
+    assert.equal(onDisk.entries['m#e0'].id, 'g1');
+    assert.equal(onDisk.entries['m#e0'].count, 0);
+    assert.equal(onDisk.entries['m#e0'].last, T0);
     assert.equal(onDisk.nextId, 2);
+    assert.equal(createStore({ dataDir: dir }).getGifs('g1').entries['m#e0'].id, 'g1', 'a reset entry survives a restart');
     assert.deepEqual(onDisk.backfill, { at: '2026-09-30T00:00:00.000Z', channels: 2, messages: 0 });
   });
 });

@@ -43,7 +43,7 @@ Channels, roles and users are picked from Discord's own pickers; `set`/`unset` a
 | `/nep emoji status` | Show the emoji ranking: size, top 10 names with counts, when the backfill ran |
 | `/nep emoji rescan` | Clear the usage ranking and recount from channel history |
 | `/nep gifs status` | Show the GIF library: size, top 10 with handle, count and caption or name, when the backfill ran, posted today vs `gifs.maxPerDay` |
-| `/nep gifs rescan` | Clear the usage ranking and recount GIFs from channel history |
+| `/nep gifs rescan` | Reset use counts to zero and recount from channel history; handles stay stable, entries not found remain at zero until the size cap evicts them |
 | `/nep warmup run` | Start or resume a full run: channels, then people, then server |
 | `/nep warmup users [member]` | With a member: profile or re-profile that one now; without: re-profile every qualifying member |
 | `/nep warmup channels [channel]` | With a channel: describe or re-describe that one now; without: every readable channel |

@@ -9,7 +9,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-import { collectGifItems, findGif, mergeGifs, normalizeGifs, rankGifs } from '../src/memory/gifs.js';
+import { collectGifItems, findGif, mergeGifs, normalizeGifs, rankGifs, resetGifCounts } from '../src/memory/gifs.js';
 import { createStore } from '../src/memory/store.js';
 import { createMemoryUpdater } from '../src/memory/update.js';
 import { createCalibrator } from '../src/llm/tokens.js';
@@ -163,6 +163,77 @@ test('rankGifs: count and recency, best first; findGif by handle', () => {
   assert.equal(findGif(gifs, 'cat'), null);
 });
 
+test('resetGifCounts: every entry kept with count 0, handles, last and nextId untouched; never mutates', () => {
+  const { gifs } = mergeGifs(undefined, [
+    msg({ id: 'm1', ts: T0, attachments: [gifAttachment('a1')] }),
+    msg({ id: 'm2', ts: T0 + DAY, links: [gifLink('m2#e0')] }),
+  ]);
+  const reset = resetGifCounts({ ...gifs, backfill: { at: '2026-09-30T00:00:00.000Z', channels: 1, messages: 2 } });
+  assert.deepEqual(Object.keys(reset.entries), ['a1', 'm2#e0']);
+  assert.deepEqual(Object.values(reset.entries).map((entry) => entry.count), [0, 0]);
+  assert.equal(reset.entries.a1.id, 'g1');
+  assert.equal(reset.entries['m2#e0'].id, 'g2');
+  assert.equal(reset.entries['m2#e0'].last, T0 + DAY);
+  assert.equal(reset.nextId, 3);
+  assert.equal(reset.backfill.at, '2026-09-30T00:00:00.000Z');
+  assert.equal(gifs.entries.a1.count, 1, 'the input is never mutated');
+  assert.deepEqual(resetGifCounts(null), { nextId: 1, entries: {}, backfill: null });
+});
+
+test('mergeGifs: a reset entry seen again keeps its handle and counts afresh', () => {
+  const first = mergeGifs(undefined, [
+    msg({ id: 'm1', ts: T0, attachments: [gifAttachment('a1')] }),
+    msg({ id: 'm2', ts: T0, attachments: [gifAttachment('a1')] }),
+  ]).gifs;
+  const { gifs, counted } = mergeGifs(resetGifCounts(first), [msg({ id: 'm7', channelId: 'c2', ts: T0 + DAY, attachments: [gifAttachment('a1')] })]);
+  assert.equal(counted, 1);
+  assert.equal(gifs.entries.a1.id, 'g1');
+  assert.equal(gifs.entries.a1.count, 1);
+  assert.equal(gifs.entries.a1.last, T0 + DAY);
+  assert.equal(gifs.entries.a1.messageId, 'm7');
+  assert.equal(gifs.entries.a1.channelId, 'c2');
+  assert.equal(gifs.nextId, 2, 'no new handle');
+});
+
+test('mergeGifs: a reset link entry is matched by url under a new embed id and keeps its handle', () => {
+  const first = mergeGifs(undefined, [msg({ id: 'm1', ts: T0, links: [gifLink('m1#e0')] })]).gifs;
+  const { gifs } = mergeGifs(resetGifCounts(first), [msg({ id: 'm9', ts: T0 + DAY, links: [gifLink('m9#e0')] })]);
+  assert.deepEqual(Object.keys(gifs.entries), ['m1#e0']);
+  assert.equal(gifs.entries['m1#e0'].id, 'g1');
+  assert.equal(gifs.entries['m1#e0'].count, 1);
+  assert.equal(gifs.entries['m1#e0'].messageId, 'm9');
+  assert.equal(gifs.nextId, 2);
+});
+
+test('rankGifs: a zero count ranks below any positive count, however recent', () => {
+  const old = mergeGifs(undefined, [msg({ id: 'm1', ts: T0, attachments: [gifAttachment('a1')] })]).gifs;
+  const recent = mergeGifs(old, [msg({ id: 'm2', ts: T0 + 400 * DAY, attachments: [gifAttachment('a2')] })]).gifs;
+  const library = { ...recent, entries: { ...recent.entries, a2: { ...recent.entries.a2, count: 0 } } };
+  assert.deepEqual(rankGifs(library, 30).map((entry) => entry.key), ['a1', 'a2']);
+  assert.deepEqual(rankGifs(library, 0.01).map((entry) => entry.key), ['a1', 'a2']);
+  assert.deepEqual(rankGifs(library).map((entry) => entry.key), ['a1', 'a2']);
+});
+
+test('mergeGifs: past storeMax zero-count entries are evicted first, handles never reused', () => {
+  const first = mergeGifs(undefined, [
+    msg({ id: 'm1', ts: T0 + 5 * DAY, attachments: [gifAttachment('a1')] }),
+    msg({ id: 'm2', ts: T0 + 6 * DAY, attachments: [gifAttachment('a2')] }),
+  ]).gifs;
+  const { gifs } = mergeGifs(
+    resetGifCounts(first),
+    [
+      msg({ id: 'm3', ts: T0, attachments: [gifAttachment('a3')] }),
+      msg({ id: 'm4', ts: T0 + DAY, attachments: [gifAttachment('a1')] }),
+    ],
+    { storeMax: 2, halfLifeDays: 30 },
+  );
+  assert.deepEqual(Object.keys(gifs.entries).sort(), ['a1', 'a3'], 'the zero-count a2 goes, though its last is the newest');
+  assert.equal(gifs.entries.a1.id, 'g1');
+  assert.equal(gifs.entries.a3.id, 'g3');
+  const again = mergeGifs(gifs, [msg({ id: 'm5', ts: T0 + 7 * DAY, attachments: [gifAttachment('a2')] })]).gifs;
+  assert.equal(again.entries.a2.id, 'g4', 'an evicted handle is never reused');
+});
+
 test('normalizeGifs: garbage in -> the empty library; broken entries dropped; bad handles reassigned', () => {
   assert.deepEqual(normalizeGifs(null), { nextId: 1, entries: {}, backfill: null });
   assert.deepEqual(normalizeGifs([1, 2]), { nextId: 1, entries: {}, backfill: null });
@@ -173,12 +244,15 @@ test('normalizeGifs: garbage in -> the empty library; broken entries dropped; ba
       b: { id: 'g5', kind: 'attachment', url: 'https://cdn/x.gif', count: 1 },
       c: { id: 'g1', kind: 'video', url: TENOR, count: 1 },
       d: { id: 'g2', kind: 'link', url: '', count: 1 },
-      e: { id: 'g3', kind: 'link', url: GIPHY, count: 0 },
+      e: { id: 'g3', kind: 'link', url: GIPHY, count: -1 },
+      z: { id: 'g4', kind: 'link', url: GIPHY, count: 0, last: T0 },
       f: 'nope',
     },
     backfill: { at: '2026-09-30T00:00:00.000Z', channels: 2.7, messages: -1 },
   });
-  assert.deepEqual(Object.keys(out.entries), ['a', 'b']);
+  assert.deepEqual(Object.keys(out.entries), ['a', 'b', 'z']);
+  assert.equal(out.entries.z.count, 0, 'a reset entry (count 0) is kept');
+  assert.equal(out.entries.z.id, 'g4');
   assert.equal(out.entries.a.id, 'g5');
   assert.equal(out.entries.a.itemId, 'a');
   assert.equal(out.entries.a.firstSeen, T0);

@@ -3,8 +3,9 @@
 // block would stay empty until enough GIFs are posted again. This reads the
 // last `gifs.backfillMessages` messages of every readable channel over the
 // Discord API -- no LLM for the counting, no token budget -- and counts them
-// into gifs.json at once (src/memory/gifs.js), starting from a cleared
-// library, then stamps `backfill: { at, channels, messages }` so it never
+// into gifs.json at once (src/memory/gifs.js), starting from counts reset to
+// 0 (entries and handles kept, so a GIF keeps its handle across a recount),
+// then stamps `backfill: { at, channels, messages }` so it never
 // counts the same history twice. The top `gifs.backfillDescribe` GIFs without
 // a cached caption are then sent to the media describer (real requests,
 // counted against the daily cap), so the list the persona picks from says
@@ -70,17 +71,19 @@ export function createGifBackfill({ hot, store, client, describer = null, log = 
   }
 
   /**
-   * Read the history and rebuild the library from it. Every run that goes
-   * ahead CLEARS the library's entries and recounts them from the history
+   * Read the history and recount the library from it. Every run that goes
+   * ahead RESETS every entry's count to 0 and recounts from the history
    * window alone: the window already holds the GIFs recorded on arrival
    * since the feature went live, so adding on top would count them twice.
    * Without `force` that happens only on the first run -- it is a no-op once
    * `backfill.at` is set (the startup run). With `force` it ignores the
-   * stamp: the owner's explicit `/nep gifs rescan`. Handles are never reused
-   * (`nextId` survives the clear), so a recounted GIF gets a fresh one.
+   * stamp: the owner's explicit `/nep gifs rescan`. Entries survive the
+   * reset, so a GIF seen again keeps its handle; one no longer in the window
+   * stays at count 0, ranked below every counted one, until `storeMax`
+   * evicts it (src/memory/gifs.js#rankGifs). Handles are never reused.
    * Channels are read one after another, 100 messages per page (see
    * src/discord/collect.js#fetchHistoryWindow). Messages of bots and of the
-   * persona are skipped. Clearing, counting and stamping happen together
+   * persona are skipped. Resetting, counting and stamping happen together
    * after every channel is read; the describing comes after, and only while
    * not paused. Skips (never throws) when paused, when `backfillMessages` is
    * 0, when already stamped (no `force`), while another run is in flight, or
@@ -129,8 +132,8 @@ export function createGifBackfill({ hot, store, client, describer = null, log = 
       const gifCfg = hot.config.gifs ?? {};
       const opts = { storeMax: gifCfg.storeMax ?? DEFAULT_STORE_MAX, halfLifeDays: gifCfg.halfLifeDays ?? DEFAULT_HALF_LIFE_DAYS };
 
-      // Always from a cleared library: the window already holds what was recorded on arrival.
-      store.clearGifs(guildId);
+      // Always from zero counts: the window already holds what was recorded on arrival.
+      store.resetGifCounts(guildId);
       let gifs = 0;
       for (let i = 0; i < members.length; i += CHUNK) {
         gifs += store.recordGifs(guildId, members.slice(i, i + CHUNK), opts);

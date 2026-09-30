@@ -33,7 +33,7 @@ import { applyDetailOps, normalizeDetails } from './details.js';
 import { applyAliasOps } from './aliases.js';
 import { clampText } from './clamp.js';
 import { mergeEmojiUsage, normalizeEmojiUsage } from './emoji-usage.js';
-import { emptyGifs, findGif, mergeGifs, normalizeGifs } from './gifs.js';
+import { emptyGifs, findGif, mergeGifs, normalizeGifs, resetGifCounts } from './gifs.js';
 
 function readJson(file, fallback) {
   try {
@@ -1206,15 +1206,16 @@ export function createStore({ dataDir }) {
     },
 
     /**
-     * Empty the guild's GIF library entries -- only for the GIF history
-     * backfill (src/memory/gif-backfill.js: its one first run, or the owner's
-     * `/nep gifs rescan`), which recounts them from history right after.
-     * `nextId` is kept, so a handle is never reused; the backfill stamp stays.
+     * Set every GIF library entry's count to 0 (src/memory/gifs.js#resetGifCounts)
+     * -- only for the GIF history backfill (src/memory/gif-backfill.js: its one
+     * first run, or the owner's `/nep gifs rescan`), which recounts from
+     * history right after. Entries, handles, `nextId` and the backfill stamp
+     * are kept, so a recounted GIF keeps its handle.
      * @param {string} guildId
      */
-    clearGifs(guildId) {
+    resetGifCounts(guildId) {
       const item = gifsEntry(guildId);
-      item.value = { ...item.value, entries: {} };
+      item.value = resetGifCounts(item.value);
       item.dirty = true;
     },
 

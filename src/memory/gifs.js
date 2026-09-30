@@ -6,7 +6,9 @@
 // GIF, so its caption is found in the media cache under the same id; its
 // handle (`g<n>`, from `nextId`) never changes and is never reused. Rank is
 // the shared one of src/memory/ranking.js (as for custom emoji): `count` is
-// the weight, `last` (the ts of the latest use) drives the decay.
+// the weight, `last` (the ts of the latest use) drives the decay. A history
+// recount resets every count to 0 and counts again (resetGifCounts), so
+// handles survive it; an entry left at 0 ranks below every used one.
 //
 // Shape: `{ nextId, entries: { [key]: { id, kind: 'link'|'attachment', url,
 // site?, name?, itemId, messageId, channelId, count, last, firstSeen } },
@@ -42,7 +44,8 @@ export function emptyGifs() {
 /**
  * A stored gifs.json value made safe to read. Anything but a plain object
  * becomes the empty library. An entry without a known `kind`, a non-empty
- * `url` or a positive `count` is dropped; `last`/`firstSeen` default to 0 /
+ * `url` or a finite `count` of at least 0 is dropped (count 0 is a reset
+ * entry, see resetGifCounts); `last`/`firstSeen` default to 0 /
  * `last`; `itemId` defaults to the key; optional `site`/`name` are kept only
  * as strings. A missing, malformed or duplicate handle gets a fresh one;
  * `nextId` always ends above every handle in use. Never mutates `value`.
@@ -57,8 +60,9 @@ export function normalizeGifs(value) {
   for (const [key, entry] of Object.entries(raw)) {
     if (!key || !isPlainObject(entry) || !KINDS.has(entry.kind)) continue;
     if (typeof entry.url !== 'string' || !entry.url) continue;
-    const count = Number.isFinite(entry.count) ? Math.floor(entry.count) : 0;
-    if (count < 1) continue;
+    if (!Number.isFinite(entry.count)) continue;
+    const count = Math.floor(entry.count);
+    if (count < 0) continue;
     const last = Number.isFinite(entry.last) ? entry.last : 0;
     const out = {
       id: typeof entry.id === 'string' ? entry.id : '',
@@ -147,9 +151,26 @@ export function collectGifItems(message) {
 }
 
 /**
+ * `gifs` with every entry's `count` set to 0 -- keys, handles, `last`,
+ * `firstSeen`, the message pointer, `nextId` and the backfill stamp kept.
+ * The GIF history backfill recounts from here, so a GIF seen again keeps its
+ * handle (see mergeGifs) and one no longer in the history stays, ranked
+ * lowest, until storeMax evicts it. Never mutates `gifs`.
+ * @param {unknown} gifs  A stored library (normalised here).
+ * @returns {{ nextId: number, entries: Record<string, object>, backfill: object|null }}
+ */
+export function resetGifCounts(gifs) {
+  const next = normalizeGifs(gifs);
+  for (const entry of Object.values(next.entries)) entry.count = 0;
+  return next;
+}
+
+/**
  * The library's entries as `[{ key, ...entry }]`, best first (see
  * src/memory/ranking.js#sortByRank: `count` is the weight, `last` the date;
- * `halfLifeDays` not a positive number -> count alone).
+ * `halfLifeDays` not a positive number -> count alone). Every entry with a
+ * positive count comes before every entry at count 0 (a reset one not seen
+ * again), whatever their dates; each group is ordered by sortByRank.
  * @param {unknown} gifs  A stored library (normalised here).
  * @param {number} [halfLifeDays]
  * @returns {object[]}
@@ -161,7 +182,9 @@ export function rankGifs(gifs, halfLifeDays) {
     weight: entry.count,
     lastSeen: entry.last > 0 ? new Date(entry.last).toISOString() : null,
   }));
-  return sortByRank(items, halfLifeDays).map(({ weight, lastSeen, ...entry }) => entry);
+  const used = sortByRank(items.filter((item) => item.count > 0), halfLifeDays);
+  const unused = sortByRank(items.filter((item) => item.count <= 0), halfLifeDays);
+  return [...used, ...unused].map(({ weight, lastSeen, ...entry }) => entry);
 }
 
 /**
@@ -244,10 +267,12 @@ export function gifHandleOf(handles, item, kind) {
  * is matched by its key, a link GIF also by its URL (the same tenor/giphy
  * link reposted gets a new per-message embed id, but it is the same GIF: the
  * first entry, whose key a caption may already be cached under, keeps
- * counting). A new GIF gets the next handle. The latest use moves `last`,
- * `messageId`, `channelId` and `url`. Past `storeMax` entries the
- * lowest-ranked are evicted (`storeMax` not a non-negative integer -> no cap);
- * an evicted handle is never reused. Never mutates `gifs`.
+ * counting). A new GIF gets the next handle; a known one -- a reset entry at
+ * count 0 included (see resetGifCounts) -- keeps its handle. The latest use
+ * moves `last`, `messageId`, `channelId` and `url`. Past `storeMax` entries
+ * the lowest-ranked (rankGifs: count-0 entries first) are evicted (`storeMax`
+ * not a non-negative integer -> no cap); an evicted handle is never reused.
+ * Never mutates `gifs`.
  * @param {unknown} gifs
  * @param {object[]} messages  Normalized messages (URLs present); `self`/`bot`/`ts` read.
  * @param {{ storeMax?: number, halfLifeDays?: number }} [opts]
