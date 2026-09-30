@@ -51,12 +51,15 @@ Channels, roles and users are picked from Discord's own pickers; `set`/`unset` a
 | `/nep mentor add <text> [target]` | Add a case: what you want the persona to do, in your words. `target` is `reply` (default) or `memory`. Answers with the case id |
 | `/nep mentor cases` | List cases: id, state (`new`, `passing`, `failing`), target, last score, text clipped to 80 chars |
 | `/nep mentor remove <id>` | Retire a case |
-| `/nep mentor run <id>` | Run the full cycle for one case. Answers at once that it started. With an admin channel (`bot.dryRunChannelId`), the report is posted there; without one, the reply points at `/nep mentor status` and `/nep mentor show <id>` |
+| `/nep mentor run <id>` | Run the full cycle for one case. Answers at once that it started. With `features.mentorAutoFix` on, a failed run continues into the repair loop. With an admin channel (`bot.dryRunChannelId`), the report is posted there; without one, the reply points at `/nep mentor status` and `/nep mentor show <id>` |
 | `/nep mentor check` | Replay the stored situations of every active case that has a run, with `mentor.check.samples` samples each. With an admin channel, posts one combined report; without one, the reply points at `/nep mentor status` and `/nep mentor show <id>` |
 | `/nep mentor stop` | Cancel the run in flight, including the model call in progress |
-| `/nep mentor show <id>` | The report of the last run: situations, answers, scores, comments, and the diagnosis when present |
+| `/nep mentor show <id>` | The report of the last run: situations, answers, scores, comments, the diagnosis when present, and the repair section with every attempt and the undo id of the applied change |
 | `/nep mentor wrong <id> <reason>` | Tell the mentor it judged that case wrongly and why; kept as a counter-example for future scoring |
-| `/nep mentor status` | Model, enabled or not, tokens used today / cap, cases by state, the run in flight (shows `, stopping` while a stop is pending), and the most recent finished run: its case, outcome, median overall, scored answers, tokens and finish time |
+| `/nep mentor status` | Model, enabled or not, tokens used today / cap, cases by state, the run in flight (shows `, stopping` while a stop is pending), `autofix: on|off`, `changes:` count with undone and stale overrides, and the most recent finished run (`last:`): its case, outcome, median overall, scored answers, tokens and finish time |
+| `/nep mentor log` | One line per recorded change, newest first: id, case, layer, target, time, summary. Undone changes are marked `(undone)` |
+| `/nep mentor undo <id>` | Put back what one change replaced. Refuses when the piece has been modified since (`changed since`) or was already undone |
+| `/nep mentor rebase <name>` | Rebuild one local prompt override from the current tracked file, re-applying the recorded patches. Use after a deploy changes a tracked prompt file. Refuses `edited by hand` when the local file was changed outside the mentor (compares the file's hash against `writtenHash`), and `already current` when the tracked file has not changed |
 | `/nep access grant <command> [role] [user]` | Open a command, group or `*` to everyone (default), a role, or a user. `private.*` and `mentor.*` are excluded; see above |
 | `/nep access revoke <command> [role] [user]` | Revoke a previous grant from everyone (default), a role, or a user |
 | `/nep access list` | List every current access grant |

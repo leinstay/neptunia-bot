@@ -99,7 +99,9 @@ Discord 斜杠命令只有一个：`/nep`（名称来自 `bot.commandName`）。
 
 ## Mentor
 
-`features.mentor`（默认关闭）添加一个手动测试子进程，使用独立模型。所有者用自己的话描述角色应有的行为（"案例"），mentor 构造聊天场景来测试它，在沙盒中使用实时提示和记忆让角色作答，并对每个回答按五个维度评分（0–10）。所有工作留在 `data/`。设置了 `bot.dryRunChannelId` 时，完成的运行也会发布到该频道；没有管理频道时，所有者通过 `/nep mentor status` 跟踪运行，通过 `/nep mentor show <id>` 读取报告。在第一阶段 mentor 仅测量和报告，不进行任何编辑。
+`features.mentor`（默认关闭）添加一个手动测试子进程，使用独立模型。所有者用自己的话描述角色应有的行为（"案例"），mentor 构造聊天场景来测试它，在沙盒中使用实时提示和记忆让角色作答，并对每个回答按五个维度评分（0–10）。所有工作留在 `data/`。设置了 `bot.dryRunChannelId` 时，完成的运行也会发布到该频道；没有管理频道时，所有者通过 `/nep mentor status` 跟踪运行，通过 `/nep mentor show <id>` 读取报告。
+
+启用 `features.mentorAutoFix`（默认关闭）后，失败的运行会进入修复循环：先进行控制测量确认失败可复现，再通过消融证明原因，mentor 模型写入针对已确认片段的编辑，在新场景上验证并检查不影响其他案例，通过后才应用，留下记录供所有者撤销。所有变更记录在 `data/` 中，可以查看、撤销或在部署后 rebase。
 
 案例的目标可以是角色的回复方式，也可以是记忆分析器的写入方式。Mentor 的模型、预算和命令独立于角色。配置键参见 [`configuration.md`](configuration.md#mentor)；`/nep mentor` 子命令参见 [`owner-commands.md`](owner-commands.md)。
 
@@ -174,6 +176,7 @@ prompts/
   mentor-score-memory.md   mentor：评分分析器存储的文本
   mentor-signs.md          mentor：已知的模型文本习惯
   mentor-diagnose.md       mentor：评分后解释弱回答
+  mentor-fix.md            mentor：针对已确认原因写入一项编辑
   profile.md               预热：从消息样本生成一个成员的档案
   channel.md               预热：从消息样本生成频道笔记
   server.md                预热：从频道笔记和成员摘要生成服务器级笔记

@@ -27,6 +27,7 @@ Every key in `config.json` with its default, grouped by section.
 | `imageGeneration` | `false` | Let the persona draw pictures through a drawing sub-process. A missing key counts as on. Turn on in `config.local.json`; needs an image-capable model in `image.model`. See [Media: Drawing](media.md#drawing) |
 | `privateMessages` | `false` | Answer direct messages from guild members. Needs a stored public profile and `affinity.score >= private.minAffinity`. See [Messages and memory: Private layer](messages-and-memory.md#private-layer) |
 | `mentor` | `false` | Manual testing sub-process with its own model. Must be exactly `true` to enable; a missing key counts as off. See [Mentor](#mentor) |
+| `mentorAutoFix` | `false` | After a failed `/nep mentor run`, continue into a repair loop that proves the diagnosis by ablation, writes one verified edit and applies it. Must be exactly `true` to enable |
 | `followUp` | `true` | Classify untagged messages after the persona answers to continue a conversation |
 | `typingSimulation` | `true` | Simulate typing speed |
 | `adminCommands` | `true` | Owner slash commands; `false` unregisters them |
@@ -387,6 +388,18 @@ Settings for the manual testing sub-process (`features.mentor`). The mentor inve
 | `pass.score` | `7` | A case passes when the median of `overall` and the median of `goal` reach this threshold |
 | `pass.floor` | `5` | A case fails when any axis has a median below this floor. Every situation is held to this floor too: the case fails when the median `overall` or median `goal` of any one situation is under it, whatever the medians over all answers |
 | `diagnose` | `true` | After a failing or weak run, the mentor states what in the context caused the weak answers. Stored as `diagnosis` on the run; a check never asks |
+| `suspects` | `2` | Causes from the diagnosis tested per attempt in the repair loop |
+| `ablationGain` | `1` | Minimum rise in the median `overall` when a suspect is removed for the suspect to count as confirmed |
+| `ablationSamples` | `2` | Persona completions per situation during an ablation measurement |
+| `fix.maxAttempts` | `3` | Maximum repair attempts per run |
+| `fix.maxGrowthChars` | `300` | Maximum characters a prompt file may grow by in one edit |
+| `fix.layers` | `["rules", "prompt", "self", "learned", "guild"]` | Layers an edit may touch. The character card is never editable regardless of this list. A deployment may add `profile` to the list |
+| `fix.files` | `["system-prompt", "format", "reply", "memory", "profile"]` | Prompt files that may receive a local override. A reply case's files are the configured list intersected with `system-prompt`, `format`, `reply`; a memory case edits only the memory writer's prompts, only through the `prompt` layer |
+| `regression.situations` | `2` | Stored situations of each other active case replayed for the regression check |
+| `regression.tolerance` | `1` | Maximum allowed drop in a stored situation's median `overall` against its own recorded median |
+| `verify.situations` | `3` | Fresh situations invented for the verification of an edit |
+| `verify.samples` | `2` | Persona completions per situation during verification |
+| `verify.minSituations` | `2` | Minimum fresh situations that must survive filtering; fewer refuses the attempt as `too few fresh situations` |
 | `reference.days` | `7` | Days of chat history used to build the style reference |
 | `reference.samples` | `60` | Random lines (2–200 characters) picked from the reference window as style examples |
 | `reference.maxMessages` | `3000` | Max messages read from the reference channels |
@@ -395,6 +408,8 @@ Settings for the manual testing sub-process (`features.mentor`). The mentor inve
 | `feedbackExamples` | `10` | Latest owner corrections (`/nep mentor wrong`) included in every scoring request |
 
 `llm.maxRequestTokens` (50k per request) applies to every request the mentor makes or causes, including sandbox answers. Before each mentor request the budget check counts the prompt plus the most the answer may cost (`mentor.maxOutputTokens` at `mentor.outputTokenWeight`), so a request is refused when its possible output does not fit what is left. When the budget runs out the run stops and reports what it has. A run also stops when `features.mentor` or `mentor.model` is turned off during it, or when the reference channels hold no messages of people in the reference window.
+
+When a repair edits a member's profile (`profile` layer), code checks that numbers, dates, names and `<@id>` mentions in the field stay unchanged. Only the wording may change.
 
 ## `warmup`
 

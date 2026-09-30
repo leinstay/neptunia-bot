@@ -46,6 +46,7 @@ All instructions are English in both layers; a character's speech samples may be
 | `mentor-score-memory.md` | no | Mentor: score the text the analyzer would store (`features.mentor`). No character card. `character` axis is always `null`. Returns JSON only | `{{name}}` |
 | `mentor-signs.md` | no | Mentor: known habits of model-written text, sent as the `<signs>` block in every mentor request (`features.mentor`). Omitted when missing or empty | `{{name}}` |
 | `mentor-diagnose.md` | no | Mentor: explain weak answers after scoring by pointing at specific text in the persona's context (`features.mentor`). The result is an unverified opinion stored as `diagnosis` on the run. Omitted when `mentor.diagnose` is false or the file is missing | `{{name}}` |
+| `mentor-fix.md` | no | Mentor repair: write one edit against a confirmed cause (`features.mentorAutoFix`). Receives the confirmed suspect, the verdict and the full request the persona was given. Returns a JSON edit. Omitted when missing | `{{name}}` |
 | `labels.json` | yes | Every string the CODE inserts into a prompt. Keys fixed below, values are the writer's | see below |
 
 `{{name}}` bot's display name · `{{author}}` caller's display name · `{{trigger}}` one of `labels.triggers.*` ·
@@ -675,7 +676,7 @@ are ignored. `guild`, `channels`, `lore`, `self` and any other user ids are drop
 
 ## Mentor
 
-A manual sub-process (`features.mentor`) with its own model (`mentor.model`). The owner adds a case (a behaviour he wants from the persona), and the mentor invents chat situations, runs the persona through them in a sandbox, and scores the answers. In this first stage the mentor only measures and reports; it does not edit anything. One run at a time. All work stays in `data/`; when `bot.dryRunChannelId` is set, a finished run is posted there as well. Without an admin channel the owner follows a run with `/nep mentor status` and reads the report with `/nep mentor show <id>`.
+A manual sub-process (`features.mentor`) with its own model (`mentor.model`). The owner adds a case (a behaviour he wants from the persona), and the mentor invents chat situations, runs the persona through them in a sandbox, and scores the answers. With `features.mentorAutoFix` on, a failed run continues into a repair loop that proves, edits and verifies. One run at a time. All work stays in `data/`; when `bot.dryRunChannelId` is set, a finished run is posted there as well. Without an admin channel the owner follows a run with `/nep mentor status` and reads the report with `/nep mentor show <id>`.
 
 ### Privacy
 
@@ -835,6 +836,94 @@ Layers a cause may name: `rules` (a rule in the rules block), `prompt` (the engi
 ```
 
 At most 5 causes and 5 changes. `summary` clipped to 1500 characters; `excerpt` to 300; `from`/`to` to 1000; `target` to 200; `why` to 500. An item with an unknown `layer` or without `why` is dropped. `summary` and `why` are in the language of the chat; `to` is in the language of the layer it targets.
+
+### Repair
+
+Switch `features.mentorAutoFix` (default `false`). When a `/nep mentor run` fails and the diagnosis produced causes, the repair loop tries to turn one cause into a verified edit. The loop runs up to `mentor.fix.maxAttempts` (default 3) attempts. `features.mentorAutoFix` is checked before every step that spends (the control, each ablation, the edit request, the verification, each regression case and the write).
+
+#### The six steps
+
+1. **Control.** The first time an ablation is needed, the weak situations are answered again on the unchanged view (`mentor.ablationSamples` completions per situation, phase `repair: control`). Each ablation's gain is measured against this control, not against the run's own scores. Re-sampling alone moves a low score up, so the control is the baseline. When the control reaches the pass score on every weak situation, the loop ends with `reason: 'not reproduced'`: the failure did not reproduce and no edit is made. The control is measured once and reused for every suspect and every attempt.
+2. **Suspects.** The diagnosis's causes are taken in order, up to `mentor.suspects` (default 2) per attempt.
+3. **Ablation.** Each suspect is tested by answering the weak situations on an in-memory overlay with that piece removed and measuring the gain over the control. A suspect is confirmed when the gain reaches `mentor.ablationGain` (default 1). `ablationSamples` (default 2) completions per situation. A `missing` cause (an instruction that should be there is absent) has nothing to remove and counts as confirmed without ablation, and no control is measured for it.
+4. **Edit.** The mentor model writes one edit against the first confirmed cause, using `mentor-fix.md`. The edit is checked against the proven cause: for a cause in an allowed layer, the edit must target that very piece (same prompt file, same rule, same list item, same guild field, same member and field) with a non-empty `from`; an edit elsewhere is refused as `not the proven cause`. For a `missing` cause or one in a layer the loop may not edit (the card, or a layer the config closes), only an added rule is accepted (layer `rules`, empty `from`). Guild `patterns` and `starters` may be rewritten, never emptied (`deletion not allowed`). Learned items and self/in-joke items that exceed their length cap are refused (`text too long`). The layer must be in `mentor.fix.layers`, the prompt file in `mentor.fix.files`, the growth within `mentor.fix.maxGrowthChars`, and a profile edit must preserve numbers, dates, names and mentions.
+5. **Verification.** The edit is applied on an overlay. Fresh situations of the same case (from `mentor.verify.situations`, default 3, with `mentor.verify.samples`, default 2) must pass. At least `mentor.verify.minSituations` (default 2) fresh situations must survive filtering; fewer ends the attempt as `too few fresh situations`. The stored `kept` count appears on `verify.fresh`. The stored situations of every other active case must not drop by more than `mentor.regression.tolerance` (default 1) against their own stored medians, replaying up to `mentor.regression.situations` (default 2) per case. Every measurement in the loop (control, ablation, verification, regression) is scored by a judge reading the live rules, card and learned items, so an edit never moves the yardstick it is measured by.
+6. **Apply.** Only when the edit passed verification and `features.mentorAutoFix` is still `true`, the change store writes it with a record the owner can undo.
+
+An attempt that proves nothing, whose edit is refused, or that fails verification moves on to the remaining suspects.
+
+#### What an edit may touch
+
+The layers in `mentor.fix.layers` (default `["rules", "prompt", "self", "learned", "guild"]`). The character card is never editable regardless of this list. The prompt files in `mentor.fix.files` (default `["system-prompt", "format", "reply", "memory", "profile"]`). A reply case's files are the configured list intersected with `system-prompt`, `format`, `reply`: it never edits prompts not rendered in the reply sandbox (`interject`, `initiate`, `address` and the memory writer's `memory`, `profile`, `server`, `channel`). A memory case edits only the memory writer's prompts, only through the `prompt` layer. An empty `from` on the `rules` layer adds a rule (the same path as `/nep rule add`). In a member's profile, only the wording may change: numbers, dates, names and `<@id>` mentions are checked by code (`profileGuard`).
+
+#### Repair prompt
+
+`mentor-fix.md` with `{{name}}` filled. System message of one mentor request. Blocks in the user message:
+
+| Block | Content |
+|---|---|
+| `<case>` | The owner's case text, verbatim |
+| `<verdict>` | JSON: `{ passed, medians, situations, reasons }` |
+| `<signs>` | Known habits of model-written text (may be absent) |
+| `<feedback>` | Owner's corrections (may be absent) |
+| `<cause>` | JSON: `{ layer, excerpt, why, gain }` of the confirmed suspect |
+| `<seen>` | The full request the persona was given: `<system>` and `<user>` sub-blocks |
+| `<allowed>` | JSON: `{ layers, files, maxGrowthChars }` |
+
+The answer is a single bare JSON object:
+
+```json
+{
+  "layer": "rules|prompt|self|learned|guild|profile",
+  "target": "file name (prompt), patterns|starters|injokes (guild), <userId>.<field> (profile), empty (others)",
+  "from": "verbatim text to replace; empty for an addition",
+  "to": "the new text; empty to delete (self, learned, guild items only)",
+  "why": "one sentence, in the language of the chat"
+}
+```
+
+Validation: `layer` must be in `<allowed>`. Never `card`, never `missing`. `from` and `to` clipped to 1000 characters each, `target` to 200, `why` to 500. An answer without a valid `layer` or without `why` is treated as no edit.
+
+#### What is stored on a run
+
+The run gains a `repair` object:
+
+```
+{
+  control: { medians, situations },
+  attempts: [{ n, suspects: [{ layer, excerpt, located, gain, confirmed }],
+    edit, refused, verify: { fresh: { passed, kept, medians, situations },
+    regression: [{ caseId, held, situations }], skipped } | null, accepted }],
+  applied: { changeId, layer, target, summary } | null,
+  reason, tokens
+}
+```
+
+`control` appears once the control was measured (absent when the loop never reached an ablation, e.g. a `missing` cause). `verify.fresh.kept` is how many fresh situations survived filtering.
+
+`reason` is why the loop ended: `applied`, `no diagnosis`, `no suspect left`, `max attempts`, `not reproduced`, `prompt missing`, `disabled`, `budget`, `stopped by the owner`, `apply failed`, or a failure name.
+
+#### Change records
+
+`data/guilds/<id>/mentor/changes.json` holds the list of recorded changes with `{ nextId, changes: [...] }`. Each change stores its id, the case, the layer, the target, a timestamp and a summary. The pieces before and after the change are saved under `data/guilds/<id>/mentor/changes/<id>/before.json` and `after.json`. A change carries `pending: true` between the record being written and the piece being written (or undone); a crash during that window leaves a pending record that the next apply or undo settles.
+
+#### Local prompt overrides
+
+A tracked engine prompt is never written. When a repair edits a prompt file, the change store creates (or updates) a local override in `prompts.local/` copied from the tracked file, then applies the edit to the local copy. A blank or whitespace-only local file counts as absent: the override starts from the tracked text and the change records `blank: true`. The override records the SHA-256 hash of the tracked file it was made from, the SHA-256 of the file as the mentor last wrote it (`writtenHash`), and the patches applied.
+
+`data/guilds/<id>/mentor/overrides.json` maps each overridden prompt name to `{ baseHash, writtenHash, patches: [{ changeId, from, to }] }`.
+
+After a deploy changes the tracked file, `rebase` (`/nep mentor rebase <name>`) reads the new tracked text, re-applies each patch whose `from` is still found, drops the rest, and updates the base hash and `writtenHash`. `rebase` refuses `edited by hand` when the local file's current hash differs from `writtenHash` (or there is no `writtenHash`), and `already current` when the tracked hash has not changed. `rebaseStatus` reports `handEdited: true|false` for each override.
+
+#### Undo
+
+`/nep mentor undo <id>` restores the piece a change replaced. The store refuses when the piece no longer equals what the change left (`changed since`) or was already undone. For a local prompt file that the change created (no local file existed before), undo removes the file so the tracked text takes over again.
+
+#### How a repair ends
+
+The same stops that end a run also end the repair loop: `budget`, `disabled` (the mentor or the autofix switch turned off), `stopped by the owner`. The repair loop never changes the measured run: its record is stored alongside the verdict.
+
+The card posted to the admin channel shows the repair result: `repair: change <id> applied, <layer> <target>, gain <gain>, fresh overall <median>` and `undo: /nep mentor undo <id>`, or `repair: nothing applied (<reason>)`.
 
 ## Limit notices
 

@@ -46,6 +46,7 @@
 | `mentor-score-memory.md` | いいえ | Mentor: アナライザーが保存するテキストをスコアリング（`features.mentor`）。キャラクターカードなし。`character` 軸は常に `null`。JSON のみを返す | `{{name}}` |
 | `mentor-signs.md` | いいえ | Mentor: モデル文の既知の癖。すべての mentor リクエストで `<signs>` ブロックとして送信（`features.mentor`）。ファイルがないか空の場合は省略 | `{{name}}` |
 | `mentor-diagnose.md` | いいえ | Mentor: スコアリング後に弱い回答の原因をペルソナのコンテキスト内の具体的なテキストで説明（`features.mentor`）。結果は未検証の仮説としてランの `diagnosis` に保存。`mentor.diagnose` が false またはファイルがない場合は省略 | `{{name}}` |
+| `mentor-fix.md` | いいえ | Mentor 修復: 確認された原因に対して 1 つの編集を書く（`features.mentorAutoFix`）。確認された容疑者、判定、ペルソナに渡された完全なリクエストを受け取る。JSON 編集を返す。ファイルがない場合は省略 | `{{name}}` |
 | `labels.json` | はい | コードがプロンプトに挿入するすべての文字列。キーは以下で固定、値はライターが記述する | 以下参照 |
 
 `{{name}}` ボットの表示名 · `{{author}}` 発話者の表示名 · `{{trigger}}` `labels.triggers.*` のいずれか ·
@@ -500,7 +501,7 @@ DM は以下のすべてが満たされた場合にのみ応答されます（�
 
 ## Mentor
 
-手動サブプロセス（`features.mentor`）で、独自モデル（`mentor.model`）を使用します。オーナーがケース（ペルソナに期待する行動）を追加し、mentor がチャット状況を作成、サンドボックスでペルソナに回答させ、スコアリングします。第一段階では測定と報告のみ行い、編集は行いません。同時実行は 1 つのみ。すべての作業は `data/` に保存されます。`bot.dryRunChannelId` が設定されている場合、完了したランはそこにも投稿されます。管理チャンネルがない場合、オーナーは `/nep mentor status` でランを追跡し、`/nep mentor show <id>` でレポートを読みます。
+手動サブプロセス（`features.mentor`）で、独自モデル（`mentor.model`）を使用します。オーナーがケース（ペルソナに期待する行動）を追加し、mentor がチャット状況を作成、サンドボックスでペルソナに回答させ、スコアリングします。`features.mentorAutoFix` 有効時、不合格のランは修復ループに進みます: アブレーション、編集、検証。同時実行は 1 つのみ。すべての作業は `data/` に保存されます。`bot.dryRunChannelId` が設定されている場合、完了したランはそこにも投稿されます。管理チャンネルがない場合、オーナーは `/nep mentor status` でランを追跡し、`/nep mentor show <id>` でレポートを読みます。
 
 ### プライバシー
 
@@ -660,6 +661,94 @@ Memory ターゲットスコアリングでは `character` は常に `null`、`h
 ```
 
 最大 5 個の原因と 5 個の変更。`summary` は 1500 文字に切り詰め、`excerpt` は 300、`from`/`to` は 1000、`target` は 200、`why` は 500。不明な `layer` または `why` のない項目は破棄。`summary` と `why` はチャットの言語で、`to` は対象レイヤーの言語で記述。
+
+### 修復
+
+スイッチ `features.mentorAutoFix`（デフォルト `false`）。`/nep mentor run` が不合格で診断が原因を生成した場合、修復ループはその原因の 1 つを検証済みの編集に変換しようとします。最大 `mentor.fix.maxAttempts`（デフォルト 3）回の試行。`features.mentorAutoFix` はトークンを消費する各ステップ（コントロール、各アブレーション、編集リクエスト、検証、各リグレッションケースと書き込み）の前にチェックされます。
+
+#### 6 つのステップ
+
+1. **コントロール。** 最初にアブレーションが必要になった時点で、弱い状況を変更なしのビューで再回答します（状況あたり `mentor.ablationSamples` 回、フェーズ `repair: control`）。各アブレーションのゲインはラン自体のスコアではなく、このコントロールに対して測定されます。再サンプリング自体が低スコアを押し上げるため、コントロールがベースラインとなります。コントロールがすべての弱い状況でパススコアに達した場合、ループは `reason: 'not reproduced'` で終了します。失敗が再現されず、編集は不要です。コントロールは 1 回測定され、すべての容疑者と試行で再利用されます。
+2. **容疑者。** 診断の原因を順に取得し、試行ごとに最大 `mentor.suspects`（デフォルト 2）件。
+3. **アブレーション。** メモリオーバーレイ上でその部分を除去して弱い状況を再回答し、コントロールに対するゲインを測定。ゲインが `mentor.ablationGain`（デフォルト 1）に達した場合に確認。`ablationSamples`（デフォルト 2）回の回答を状況ごとに取得。`missing` 原因（あるべき指示が存在しない）はアブレーションなしで確認され、コントロールも測定されません。
+4. **編集。** Mentor モデルが `mentor-fix.md` を使用して最初に確認された原因に対する編集を 1 つ書く。編集は確認された原因と照合される: 許可されたレイヤーの原因の場合、編集はその部分自体（同じプロンプトファイル、同じルール、同じリストアイテム、同じギルドフィールド、同じメンバーとフィールド）を非空の `from` で対象とする必要がある。別の場所への編集は `not the proven cause` として拒否。`missing` 原因またはループが編集できないレイヤー（カード、設定で閉じたレイヤー）の原因の場合、ルールの追加のみ受け入れ（レイヤー `rules`、空の `from`）。ギルドの `patterns` と `starters` は書き換え可能だが空にはできない（`deletion not allowed`）。長さ制限を超える `learned` アイテムや `self`/ジョークアイテムは拒否（`text too long`）。レイヤーが `mentor.fix.layers` に、プロンプトファイルが `mentor.fix.files` に含まれ、増分が `mentor.fix.maxGrowthChars` 以内である必要がある。プロファイル編集は数字、日付、名前、メンションを保持する必要がある。
+5. **検証。** 編集をオーバーレイに適用。同じケースの新しい状況（`mentor.verify.situations`、デフォルト 3、`mentor.verify.samples`、デフォルト 2）が合格する必要がある。フィルタリング後の新しい状況が `mentor.verify.minSituations`（デフォルト 2）より少ない場合、`too few fresh situations` として拒否。保持数 `kept` は `verify.fresh` に記録。他のアクティブケースの保存済み状況は、記録された中央値に対して `mentor.regression.tolerance`（デフォルト 1）を超えて下落してはならない。ケースごとに最大 `mentor.regression.situations`（デフォルト 2）状況を再生。ループ内のすべての測定（コントロール、アブレーション、検証、リグレッション）はライブのルール、カード、学習済みアイテムを読む審査員がスコアリングするため、編集がそれを測る基準を動かすことはありません。
+6. **適用。** 編集が検証に合格し、`features.mentorAutoFix` がまだ `true` の場合のみ、変更ストアが取り消し可能な記録付きで書き込む。
+
+容疑者が確認されなかった試行、編集が拒否された試行、検証に失敗した試行は残りの容疑者に進む。
+
+#### 編集が触れられる範囲
+
+`mentor.fix.layers` のレイヤー（デフォルト `["rules", "prompt", "self", "learned", "guild"]`）。キャラクターカードは編集不可。`mentor.fix.files` のプロンプトファイル（デフォルト `["system-prompt", "format", "reply", "memory", "profile"]`）。Reply ケースのファイルは設定リストと `system-prompt`、`format`、`reply` の共通部分: リプライサンドボックスでレンダリングされないプロンプト（`interject`、`initiate`、`address` およびメモリライターの `memory`、`profile`、`server`、`channel`）は編集不可。Memory ケースはメモリライターのプロンプトのみを編集し、`prompt` レイヤーのみ経由。`rules` レイヤーで `from` が空の場合はルールを追加（`/nep rule add` と同じパス）。メンバーのプロファイルでは言い回しのみ変更可能: 数字、日付、名前、`<@id>` メンションはコードがチェック（`profileGuard`）。
+
+#### 修復プロンプト
+
+`mentor-fix.md`、`{{name}}` を埋める。1 回の mentor リクエストのシステムメッセージ。ユーザーメッセージ内のブロック:
+
+| ブロック | 内容 |
+|---|---|
+| `<case>` | オーナーのケーステキスト、逐語 |
+| `<verdict>` | JSON: `{ passed, medians, situations, reasons }` |
+| `<signs>` | モデル文の既知の癖（存在しない場合あり） |
+| `<feedback>` | オーナーの修正（存在しない場合あり） |
+| `<cause>` | JSON: `{ layer, excerpt, why, gain }`、確認された容疑者 |
+| `<seen>` | ペルソナに渡された完全なリクエスト: `<system>` と `<user>` のサブブロック |
+| `<allowed>` | JSON: `{ layers, files, maxGrowthChars }` |
+
+回答は単一の JSON オブジェクト:
+
+```json
+{
+  "layer": "rules|prompt|self|learned|guild|profile",
+  "target": "ファイル名 (prompt)、patterns|starters|injokes (guild)、<userId>.<field> (profile)、空 (その他)",
+  "from": "置換する逐語テキスト。追加の場合は空",
+  "to": "新しいテキスト。削除の場合は空 (self、learned、guild 項目のみ)",
+  "why": "1 文、チャットの言語で"
+}
+```
+
+バリデーション: `layer` は `<allowed>` に含まれる必要がある。`card` と `missing` は不可。`from` と `to` は 1000 文字に切り詰め、`target` は 200、`why` は 500。有効な `layer` がないか `why` がない回答は編集なしとして扱われる。
+
+#### ランに保存される内容
+
+ランに `repair` オブジェクトが追加:
+
+```
+{
+  control: { medians, situations },
+  attempts: [{ n, suspects: [{ layer, excerpt, located, gain, confirmed }],
+    edit, refused, verify: { fresh: { passed, kept, medians, situations },
+    regression: [{ caseId, held, situations }], skipped } | null, accepted }],
+  applied: { changeId, layer, target, summary } | null,
+  reason, tokens
+}
+```
+
+`control` はコントロール測定後に出現（ループがアブレーションに到達しなかった場合は不在、例: `missing` 原因）。`verify.fresh.kept` はフィルタリング後に残った新しい状況の数。
+
+`reason`: `applied`、`no diagnosis`、`no suspect left`、`max attempts`、`not reproduced`、`prompt missing`、`disabled`、`budget`、`stopped by the owner`、`apply failed`、またはエラー名。
+
+#### 変更記録
+
+`data/guilds/<id>/mentor/changes.json` に記録された変更のリストを保存: `{ nextId, changes: [...] }`。各変更は id、ケース、レイヤー、ターゲット、タイムスタンプ、サマリーを格納。変更前後の内容は `data/guilds/<id>/mentor/changes/<id>/before.json` と `after.json` に保存。レコードの書き込みとピースの書き込みの間、変更には `pending: true` が付く。このウィンドウ内でクラッシュした場合、次回の apply または undo が保留中のレコードを処理します。
+
+#### ローカルプロンプトオーバーライド
+
+トラッキングされたエンジンプロンプトは書き込まれない。修復がプロンプトファイルを編集する場合、変更ストアがトラッキングファイルから `prompts.local/` にローカルオーバーライドを作成（または更新）し、編集をローカルコピーに適用。空白またはスペースのみのローカルファイルは存在しないものとして扱われ、オーバーライドはトラッキングテキストから構築し、変更に `blank: true` が記録される。オーバーライドは基となったトラッキングファイルの SHA-256 ハッシュ、mentor が最後に書き込んだファイルの SHA-256（`writtenHash`）、適用されたパッチを記録。
+
+`data/guilds/<id>/mentor/overrides.json` は各オーバーライドされたプロンプト名を `{ baseHash, writtenHash, patches: [{ changeId, from, to }] }` にマッピング。
+
+デプロイでトラッキングファイルが変更された後、`rebase`（`/nep mentor rebase <name>`）が新しいトラッキングテキストを読み、`from` がまだ見つかるパッチを再適用し、残りを破棄してベースハッシュと `writtenHash` を更新。ローカルファイルの現在のハッシュが `writtenHash` と異なる場合（または `writtenHash` がない場合）、`rebase` は `edited by hand` として拒否。トラッキングファイルが変更されていない場合は `already current` として拒否。`rebaseStatus` は各オーバーライドの `handEdited: true|false` を報告。
+
+#### 取り消し
+
+`/nep mentor undo <id>` は変更が置き換えた内容を復元。内容が変更が残した状態と一致しない場合（`changed since`）や既に取り消されている場合は拒否。変更が作成したローカルプロンプトファイル（変更前にローカルファイルが存在しなかった）の場合、取り消しはファイルを削除し、トラッキングテキストが再び有効になる。
+
+#### 修復の終了方法
+
+ランを終了させる理由は修復ループも終了させる: `budget`、`disabled`（mentor または autofix スイッチがオフ）、`stopped by the owner`。修復ループは測定されたランを変更しない: 記録は判定と共に保存される。
+
+管理チャンネルに投稿されるカードに修復結果を表示: `repair: change <id> applied, <layer> <target>, gain <gain>, fresh overall <median>` と `undo: /nep mentor undo <id>`、または `repair: nothing applied (<reason>)`。
 
 ## リミット通知
 

@@ -27,6 +27,7 @@
 | `imageGeneration` | `false` | 允许角色通过绘画子进程绘制图片。缺失的键视为开启。在 `config.local.json` 中启用；需要 `image.model` 中配置支持图像生成的模型。参见[媒体：绘画](media.md#绘画) |
 | `privateMessages` | `false` | 回复公会成员的私信。需要已存储的公共档案且 `affinity.score >= private.minAffinity`。参见[消息与记忆：私有层](messages-and-memory.md#私有层) |
 | `mentor` | `false` | 手动测试子进程，使用独立模型。必须严格为 `true` 才能启用；缺失的键视为关闭。参见 [Mentor](#mentor) |
+| `mentorAutoFix` | `false` | `/nep mentor run` 失败后进入修复循环：通过消融证明诊断，写入经验证的编辑并应用。必须严格为 `true` 才能启用 |
 | `followUp` | `true` | 角色回复后对未标记消息进行分类以延续对话 |
 | `typingSimulation` | `true` | 模拟输入速度 |
 | `adminCommands` | `true` | 所有者斜杠命令；设为 `false` 时注销命令 |
@@ -387,6 +388,18 @@ YouTube 链接的时长通过以下链式探测获取：首先尝试 yt-dlp，�
 | `pass.score` | `7` | `overall` 和 `goal` 的中位数达到此阈值时案例通过 |
 | `pass.floor` | `5` | 任一轴的中位数低于此下限时案例失败。每个场景也受此下限约束：当任一场景的 `overall` 中位数或 `goal` 中位数低于此值时案例失败，无论所有回答的中位数如何 |
 | `diagnose` | `true` | 失败或存在弱场景的运行结束后，mentor 说明上下文中导致弱回答的原因。存储为运行中的 `diagnosis`；check 不请求 |
+| `suspects` | `2` | 修复循环中每次尝试从诊断中测试的原因数 |
+| `ablationGain` | `1` | 移除嫌疑项后 `overall` 中位数的最小上升幅度，达到即确认 |
+| `ablationSamples` | `2` | 消融测量中每个场景的角色回答数 |
+| `fix.maxAttempts` | `3` | 每次运行的最大修复尝试次数 |
+| `fix.maxGrowthChars` | `300` | 一次编辑中提示文件最多可增长的字符数 |
+| `fix.layers` | `["rules", "prompt", "self", "learned", "guild"]` | 编辑可触及的层。角色卡永远不可编辑。部署可向列表中添加 `profile` |
+| `fix.files` | `["system-prompt", "format", "reply", "memory", "profile"]` | 可创建本地覆盖的提示文件。Reply 案例的文件为配置列表与 `system-prompt`、`format`、`reply` 的交集；memory 案例仅编辑记忆写入器的提示，仅通过 `prompt` 层 |
+| `regression.situations` | `2` | 回归检查中重放的每个其他活跃案例的已存储场景数 |
+| `regression.tolerance` | `1` | 已存储场景的 `overall` 中位数相对其记录中位数的最大允许下降 |
+| `verify.situations` | `3` | 为验证编辑而构造的新场景数 |
+| `verify.samples` | `2` | 验证中每个场景的角色回答数 |
+| `verify.minSituations` | `2` | 过滤后所需的最少新场景数；不足时尝试被拒绝为 `too few fresh situations` |
 | `reference.days` | `7` | 用于构建风格参考的聊天历史天数 |
 | `reference.samples` | `60` | 从参考窗口中随机选取的风格示例行数（2–200 字符） |
 | `reference.maxMessages` | `3000` | 从参考频道读取的最大消息数 |
@@ -395,6 +408,8 @@ YouTube 链接的时长通过以下链式探测获取：首先尝试 yt-dlp，�
 | `feedbackExamples` | `10` | 在每次评分请求中包含的最新所有者修正（`/nep mentor wrong`）数 |
 
 `llm.maxRequestTokens`（每次请求 50k）适用于 mentor 发出或引起的每个请求，包括沙盒回答。每次 mentor 请求前，预算检查计入提示加上回答可能的最大成本（`mentor.maxOutputTokens` 乘以 `mentor.outputTokenWeight`），因此当可能的输出不适合剩余预算时请求被拒绝。预算耗尽时运行停止并报告已有结果。运行期间 `features.mentor` 或 `mentor.model` 被关闭时运行也会停止，参考窗口内参考频道中没有人的消息时同样停止。
+
+修复编辑成员档案（`profile` 层）时，代码检查字段中的数字、日期、名称和 `<@id>` 提及保持不变。只有措辞可以更改。
 
 ## `warmup`
 

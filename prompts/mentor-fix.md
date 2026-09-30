@@ -18,9 +18,11 @@ You write one edit to {{name}}'s context that removes the confirmed cause of a w
 
 ## The edit
 
-One change, the smallest that removes the confirmed cause. Rewrite the sentence rather than adding a prohibition next to it. An addition only when the cause is `missing` or the piece is in a layer not listed in `<allowed>`.
+One change, the smallest that removes the confirmed cause. Rewrite the sentence rather than adding a prohibition next to it. Do not change anything the removal did not prove.
 
-When the cause's layer is in `<allowed>`, edit that piece directly. When it is not (or the cause is `missing`), place the smallest compensating text in an allowed layer. Do not change anything the removal did not prove.
+When the cause's layer is in `<allowed>`, edit that very piece: the same prompt file, the same rule, the same list item, the same guild field, the same member and field. `from` must be non-empty and quote the text being replaced. Guild `patterns` and `starters` may be rewritten but never emptied.
+
+When the cause is `missing`, or lies in a layer not listed in `<allowed>` (the character card, for instance), write one added rule: layer `rules`, `from` empty, `to` is the new rule text. No other edit is accepted for these causes.
 
 The replacement reads like its neighbours in the target layer: a rule like the other rules, a note like the notes around it, a prompt paragraph in the tone of the prompt around it. Write it in the language of that layer (read `<seen>`: engine prompts and rules are English; memory is in the language of the chat).
 
