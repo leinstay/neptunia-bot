@@ -1959,6 +1959,222 @@ test('follow-up: at most one classifier call in flight per channel', async () =>
   await p1;
 });
 
+/** A plain untagged message in channel c1 from `authorId`. */
+function plainFollowUpMessage({ id, guild, channel, content, authorId = 'u2', authorName = 'Bob', ts = Date.now() }) {
+  return fakeMessage({
+    id,
+    guild,
+    channel,
+    channelId: channel.id,
+    cleanContent: content,
+    createdTimestamp: ts,
+    author: { id: authorId, bot: false, globalName: authorName, username: authorName.toLowerCase() },
+  });
+}
+
+const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+test('follow-up: a message arriving while a call is in flight is classified after a "no"', async () => {
+  const llm = fakeFollowUpLlm();
+  const spontaneous = fakeSpontaneous();
+  const handler = makeHandler({ spontaneous, llm, prompts: fakeAddressPrompts() });
+  const guild = fakeGuild();
+  const channel = fakeChannelWithHistory('c1', guild, []);
+  await openFollowUpWindow(handler, { guild, channel, ts: Date.now() });
+
+  const { logs } = await withCapturedLogs(async () => {
+    const p1 = handler(plainFollowUpMessage({ id: 'm1', guild, channel, content: 'forwarded picture', authorId: 'u1', authorName: 'Alice' }));
+    await tick();
+    assert.equal(llm.calls.length, 1);
+
+    const handled = await handler(plainFollowUpMessage({ id: 'm2', guild, channel, content: 'what do you make of this' }));
+    assert.equal(handled, undefined, 'onMessage itself returns nothing');
+    assert.equal(llm.calls.length, 1, 'no second call while the first is in flight');
+
+    llm.respond('no');
+    await p1;
+    await tick();
+
+    assert.equal(llm.calls.length, 2, 'the held message is classified once the "no" came back');
+    const user = llm.calls[1].messages[1].content;
+    assert.match(user, /<candidate>[\s\S]*what do you make of this[\s\S]*<\/candidate>/);
+
+    llm.respond('no');
+    await tick();
+  });
+
+  assert.equal(spontaneous.onMessageCalls.length, 0, 'neither message is handed to the spontaneous scheduler');
+  const verdicts = logs.filter((e) => e.msg === 'follow-up: verdict');
+  assert.deepEqual(
+    verdicts.map((e) => e.author),
+    ['u1', 'u2'],
+    'each classified message logs its own verdict',
+  );
+  const serialized = JSON.stringify(logs);
+  assert.ok(!serialized.includes('what do you make of this'), 'no message content in the logs');
+  assert.ok(!serialized.includes('forwarded picture'), 'no message content in the logs');
+});
+
+test('follow-up: a message held during the call is discarded after a "yes" (the turn reads it in the history)', async () => {
+  const llm = fakeFollowUpLlm();
+  const turnTargets = [];
+  const turns = fakeTurns({
+    runTurn: async (args) => {
+      turnTargets.push(args.trigger.id);
+      return { outcome: 'spoke' };
+    },
+  });
+  const spontaneous = fakeSpontaneous();
+  const handler = makeHandler({ turns, spontaneous, llm, prompts: fakeAddressPrompts() });
+  const guild = fakeGuild();
+  const channel = fakeChannelWithHistory('c1', guild, []);
+  await openFollowUpWindow(handler, { guild, channel, ts: Date.now() });
+
+  const p1 = handler(plainFollowUpMessage({ id: 'm1', guild, channel, content: 'first', authorId: 'u1', authorName: 'Alice' }));
+  await tick();
+  await handler(plainFollowUpMessage({ id: 'm2', guild, channel, content: 'second' }));
+
+  llm.respond('yes');
+  await p1;
+  await tick();
+
+  assert.equal(llm.calls.length, 1, 'the held message is not classified after a "yes"');
+  assert.deepEqual(turnTargets, ['m1'], 'one turn, for the message that got the "yes"');
+  assert.equal(spontaneous.onMessageCalls.length, 0);
+
+  // The slot is free again: the next plain message is classified as usual.
+  const p3 = handler(plainFollowUpMessage({ id: 'm3', guild, channel, content: 'third' }));
+  await tick();
+  assert.equal(llm.calls.length, 2);
+  llm.respond('no');
+  await p3;
+});
+
+test('follow-up: only the latest of several messages held during one call is classified', async () => {
+  const llm = fakeFollowUpLlm();
+  const spontaneous = fakeSpontaneous();
+  const handler = makeHandler({ spontaneous, llm, prompts: fakeAddressPrompts() });
+  const guild = fakeGuild();
+  const channel = fakeChannelWithHistory('c1', guild, []);
+  await openFollowUpWindow(handler, { guild, channel, ts: Date.now() });
+
+  const p1 = handler(plainFollowUpMessage({ id: 'm1', guild, channel, content: 'first', authorId: 'u1', authorName: 'Alice' }));
+  await tick();
+  await handler(plainFollowUpMessage({ id: 'm2', guild, channel, content: 'second' }));
+  await handler(plainFollowUpMessage({ id: 'm3', guild, channel, content: 'third', authorId: 'u3', authorName: 'Chloé' }));
+  assert.equal(llm.calls.length, 1);
+
+  llm.respond('no');
+  await p1;
+  await tick();
+
+  assert.equal(llm.calls.length, 2, 'one follow-up call, not one per held message');
+  const user = llm.calls[1].messages[1].content;
+  assert.match(user, /<candidate>[\s\S]*third[\s\S]*<\/candidate>/);
+  assert.doesNotMatch(user, /<candidate>[\s\S]*second[\s\S]*<\/candidate>/);
+
+  llm.respond('no');
+  await tick();
+  await tick();
+  assert.equal(llm.calls.length, 2, 'the replaced message is never classified');
+  assert.equal(spontaneous.onMessageCalls.length, 0);
+});
+
+test('follow-up: a held message is dropped when the window expired by the time the call ends', async () => {
+  const clock = mutableNow(0);
+  const llm = fakeFollowUpLlm();
+  const spontaneous = fakeSpontaneous();
+  const handler = makeHandler({ spontaneous, now: clock, llm, prompts: fakeAddressPrompts() });
+  const guild = fakeGuild();
+  const channel = fakeChannelWithHistory('c1', guild, []);
+  await openFollowUpWindow(handler, { guild, channel, ts: clock() });
+
+  const p1 = handler(plainFollowUpMessage({ id: 'm1', guild, channel, content: 'first', authorId: 'u1', authorName: 'Alice', ts: clock() }));
+  await tick();
+  await handler(plainFollowUpMessage({ id: 'm2', guild, channel, content: 'second', ts: clock() }));
+
+  clock.set(16 * 60_000); // past the default followUpMinutes=15
+  llm.respond('no');
+  await p1;
+  await tick();
+
+  assert.equal(llm.calls.length, 1, 'the window closed meanwhile: the held message is not classified');
+  assert.equal(spontaneous.onMessageCalls.length, 0);
+});
+
+test('follow-up: a held message is dropped when a "no" streak closed the window', async () => {
+  const config = baseConfig({ mention: { followUpNoStreak: 1 } });
+  const llm = fakeFollowUpLlm();
+  const handler = makeHandler({ config, llm, prompts: fakeAddressPrompts() });
+  const guild = fakeGuild();
+  const channel = fakeChannelWithHistory('c1', guild, []);
+  await openFollowUpWindow(handler, { guild, channel, ts: Date.now() });
+
+  const p1 = handler(plainFollowUpMessage({ id: 'm1', guild, channel, content: 'first', authorId: 'u1', authorName: 'Alice' }));
+  await tick();
+  await handler(plainFollowUpMessage({ id: 'm2', guild, channel, content: 'second' }));
+  llm.respond('no');
+  await p1;
+  await tick();
+
+  assert.equal(llm.calls.length, 1, 'the one "no" closed the window, nothing left to classify');
+});
+
+test('follow-up: a held message is dropped when the channel is busy by the time the call ends', async () => {
+  let busy = false;
+  const turns = fakeTurns({ isBusy: () => busy });
+  const llm = fakeFollowUpLlm();
+  const spontaneous = fakeSpontaneous();
+  const handler = makeHandler({ turns, spontaneous, llm, prompts: fakeAddressPrompts() });
+  const guild = fakeGuild();
+  const channel = fakeChannelWithHistory('c1', guild, []);
+  await openFollowUpWindow(handler, { guild, channel, ts: Date.now() });
+
+  const p1 = handler(plainFollowUpMessage({ id: 'm1', guild, channel, content: 'first', authorId: 'u1', authorName: 'Alice' }));
+  await tick();
+  await handler(plainFollowUpMessage({ id: 'm2', guild, channel, content: 'second' }));
+
+  busy = true;
+  llm.respond('no');
+  await p1;
+  await tick();
+
+  assert.equal(llm.calls.length, 1, 'a turn is running in the channel: the held message is not classified');
+  assert.equal(spontaneous.onMessageCalls.length, 0);
+
+  // Nothing stays held: once the channel is free, a new message is classified on its own.
+  busy = false;
+  const p3 = handler(plainFollowUpMessage({ id: 'm3', guild, channel, content: 'third' }));
+  await tick();
+  assert.equal(llm.calls.length, 2);
+  assert.match(llm.calls[1].messages[1].content, /<candidate>[\s\S]*third/);
+  llm.respond('no');
+  await p3;
+  await tick();
+  assert.equal(llm.calls.length, 2);
+});
+
+test('follow-up: a held message is dropped when the bot was paused meanwhile, nothing marked dirty', async () => {
+  const store = fakeStateStore();
+  const llm = fakeFollowUpLlm();
+  const handler = makeHandler({ store, llm, prompts: fakeAddressPrompts() });
+  const guild = fakeGuild();
+  const channel = fakeChannelWithHistory('c1', guild, []);
+  await openFollowUpWindow(handler, { guild, channel, ts: Date.now() });
+
+  const p1 = handler(plainFollowUpMessage({ id: 'm1', guild, channel, content: 'first', authorId: 'u1', authorName: 'Alice' }));
+  await tick();
+  await handler(plainFollowUpMessage({ id: 'm2', guild, channel, content: 'second' }));
+  llm.respond('no');
+  store.state.data.paused = true;
+  const dirtyBefore = store.dirtyCount;
+  await p1;
+  await tick();
+
+  assert.equal(llm.calls.length, 1, 'paused: the held message is not classified');
+  assert.equal(store.dirtyCount - dirtyBefore, 1, 'only the in-flight "no" bumped the streak, the held one did not');
+});
+
 test('follow-up: a hot change to mention.followUpMinutes is picked up without recreating the handler', async () => {
   const clock = mutableNow(0);
   const config = baseConfig();

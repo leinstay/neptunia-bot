@@ -209,6 +209,7 @@ export function createMessageHandler({
   let missingAddressPromptLogged = false;
   const followUpWindows = new Map(); // channelId -> { openedAt, lastAnswerAt, noStreak }
   const followUpInFlight = new Set(); // channelIds with a classifier call running right now
+  const followUpHeld = new Map(); // channelId -> { message, normalized, selfId }: the latest message that arrived in flight
 
   /** Mirror one window into state.json (a fresh copy, numbers only). */
   function persistFollowUpWindow(channelId, window) {
@@ -315,18 +316,16 @@ export function createMessageHandler({
   }
 
   /**
-   * Whether an untagged `normalized` message was fully handled by the address
-   * classifier (pre-filter or a real model verdict, "yes" or "no" alike) --
-   * the caller must then NOT also hand it to the spontaneous scheduler. Never
-   * throws: an LLM/context-building error is treated as a "no" per the
-   * contract. `false` means none of this applied (feature off, no open
-   * window, busy in this channel, or a classifier call already in flight for
-   * it) and the caller falls back to its usual handling.
+   * The checks in front of the classifier, read from the hot config now:
+   * `{ kind: 'skip', reason }` when the classifier does not apply (feature
+   * off, no open window, busy in this channel, cannot send), `{ kind:
+   * 'handled' }` when the pre-filter already gave a "no" (logged, streak
+   * bumped), `{ kind: 'classify', config, state }` when the model must be asked.
    */
-  async function maybeFollowUp(message, normalized, selfId) {
+  function followUpGate(message, normalized, selfId) {
     const config = hot.config;
     const features = config.features ?? {};
-    if (features.followUp === false || features.mentions === false) return false;
+    if (features.followUp === false || features.mentions === false) return { kind: 'skip', reason: 'off' };
 
     const channel = message.channel;
     const channelId = channel.id;
@@ -334,85 +333,168 @@ export function createMessageHandler({
     const state = followUpWindows.get(channelId);
     if (!isFollowUpOpen(state, now(), mentionCfg)) {
       if (state) closeFollowUpWindow(channelId); // expired: forget it here and in state.json
-      return false;
+      return { kind: 'skip', reason: 'closed' };
     }
-    if (turns.isBusy(channelId)) return false;
-    if (!canSend(channel)) return false;
+    if (turns.isBusy(channelId)) return { kind: 'skip', reason: 'busy' };
+    if (!canSend(channel)) return { kind: 'skip', reason: 'cannotSend' };
 
     const startedAt = now();
     if (followUpPreFilter(normalized, selfId)) {
       log.info('follow-up: verdict', { channel: channelId, author: normalized.authorId, verdict: 'no', ms: now() - startedAt });
       bumpFollowUpNoStreak(channelId, state, mentionCfg);
+      return { kind: 'handled' };
+    }
+    return { kind: 'classify', config, state };
+  }
+
+  /**
+   * Whether an untagged `normalized` message was fully handled by the address
+   * classifier (pre-filter or a real model verdict, "yes" or "no" alike, or
+   * held for a classifier call already in flight in its channel) -- the
+   * caller must then NOT also hand it to the spontaneous scheduler. Never
+   * throws: an LLM/context-building error is treated as a "no" per the
+   * contract. `false` means none of this applied (feature off, no open
+   * window, busy in this channel) and the caller falls back to its usual
+   * handling.
+   */
+  async function maybeFollowUp(message, normalized, selfId) {
+    const gate = followUpGate(message, normalized, selfId);
+    if (gate.kind === 'skip') return false;
+    if (gate.kind === 'handled') return true;
+
+    // At most one classifier call in flight per channel. A message landing
+    // while one is already running is held (only the latest per channel; an
+    // earlier held one is replaced) and returned as handled. When the call in
+    // flight ends without starting a turn, the held message goes through the
+    // gate and the classifier as if it had just arrived; after a "yes" it is
+    // dropped, since the turn reads it in the channel history anyway. The
+    // slot stays taken until the held messages are worked off, one at a time.
+    const channelId = message.channel.id;
+    if (followUpInFlight.has(channelId)) {
+      const replaced = followUpHeld.has(channelId);
+      followUpHeld.set(channelId, { message, normalized, selfId });
+      log.info('follow-up: held while a classifier call is in flight', { channel: channelId, message: normalized.id, replaced });
       return true;
     }
-
-    // At most one classifier call in flight per channel: a message landing
-    // while one is already running is left alone entirely -- no verdict, no
-    // streak change, nothing logged, exactly as if the window were closed.
-    if (followUpInFlight.has(channelId)) return true;
 
     followUpInFlight.add(channelId);
+    let startedTurn;
     try {
-      const selfName = channel.guild.members.me?.displayName ?? client.user.username;
-      let request = null;
-      try {
-        request = await buildFollowUpRequest({ config, prompts: hot.prompts, channel, selfId, selfName, normalized });
-      } catch (err) {
-        log.warn('follow-up: building the classifier request failed', { channel: channelId, error: err });
-      }
+      startedTurn = await classifyFollowUp(message, normalized, selfId, gate);
+    } catch (err) {
+      followUpHeld.delete(channelId);
+      followUpInFlight.delete(channelId);
+      throw err;
+    }
+    // Not awaited: this message is answered; a held one is classified in the
+    // background, still holding the slot. With nothing held the slot is
+    // released synchronously, before this returns.
+    classifyHeldFollowUps(channelId, startedTurn).catch((err) =>
+      log.error('follow-up: classifying a held message failed', { channel: channelId, error: err }),
+    );
+    return true;
+  }
 
-      if (!request) {
-        if (!missingAddressPromptLogged) {
-          missingAddressPromptLogged = true;
-          log.warn('follow-up: prompts.address is missing, every follow-up is treated as "no"', {});
+  /**
+   * Works off the messages held for `channelId` while its classifier slot was
+   * taken, one at a time, then frees the slot. `startedTurn` is the outcome
+   * of the call that just ended.
+   */
+  async function classifyHeldFollowUps(channelId, startedTurn) {
+    try {
+      let turnStarted = startedTurn;
+      for (;;) {
+        const held = followUpHeld.get(channelId);
+        if (!held) return;
+        followUpHeld.delete(channelId);
+        if (turnStarted) {
+          log.info('follow-up: held message dropped', { channel: channelId, message: held.normalized.id, reason: 'turn' });
+          return;
         }
-        log.info('follow-up: verdict', { channel: channelId, author: normalized.authorId, verdict: 'no', ms: now() - startedAt });
-        bumpFollowUpNoStreak(channelId, state, mentionCfg);
-        return true;
-      }
-
-      let verdict = 'no';
-      if (llm) {
-        try {
-          // A classifier call skipped by the daily cap (DailyCapError, thrown
-          // synchronously before any fetch) lands here exactly like any other
-          // error -- "no", logged, no request ever left the process.
-          const completion = await llm.complete(
-            [
-              { role: 'system', content: request.system },
-              { role: 'user', content: request.user },
-            ],
-            {
-              model: classifierTextModel(config),
-              maxOutputTokens: mentionCfg.followUpMaxOutputTokens,
-              countAgainstDailyCap: true,
-              skipCalibration: true,
-            },
-          );
-          verdict = parseFollowUpVerdict(completion.text);
-        } catch {
-          verdict = 'no';
+        // As if it had just arrived: paused or warming up, onMessage would
+        // never reach the classifier (and pause forbids marking the store dirty).
+        const muted = store?.state?.data?.paused ? 'paused' : isWarmingUp() ? 'warmup' : null;
+        const gate = muted ? { kind: 'skip', reason: muted } : followUpGate(held.message, held.normalized, held.selfId);
+        if (gate.kind === 'skip') {
+          log.info('follow-up: held message dropped', { channel: channelId, message: held.normalized.id, reason: gate.reason });
+          return;
         }
+        if (gate.kind === 'handled') return;
+        turnStarted = await classifyFollowUp(held.message, held.normalized, held.selfId, gate);
       }
-
-      log.info('follow-up: verdict', { channel: channelId, author: normalized.authorId, verdict, ms: now() - startedAt });
-
-      if (verdict === 'yes') {
-        // Still counted for spam (mention.spamThreshold, future explicit
-        // pings), just never rolled for the ignore chance -- a follow-up is a
-        // continuation, not a ping (see docs/prompt-contract.md).
-        tagHistory.hit(normalized.authorId, now(), repeatWindowMs(mentionCfg));
-        turns
-          .runTurn({ channel, mode: 'reply', trigger: normalized, triggerKind: 'followUp' })
-          .then((result) => announceRefusal(channel, normalized, result))
-          .catch((err) => log.error('events: follow-up reply turn failed', { channel: channelId, error: err }));
-      } else {
-        bumpFollowUpNoStreak(channelId, state, mentionCfg);
-      }
-      return true;
     } finally {
+      followUpHeld.delete(channelId);
       followUpInFlight.delete(channelId);
     }
+  }
+
+  /**
+   * One classifier call for `normalized` (the gate already passed): logs the
+   * verdict, starts a reply turn on "yes", bumps the no-streak otherwise.
+   * Resolves to whether a turn was started. The caller owns the in-flight slot.
+   */
+  async function classifyFollowUp(message, normalized, selfId, { config, state }) {
+    const channel = message.channel;
+    const channelId = channel.id;
+    const mentionCfg = config.mention;
+    const startedAt = now();
+    const selfName = channel.guild.members.me?.displayName ?? client.user.username;
+    let request = null;
+    try {
+      request = await buildFollowUpRequest({ config, prompts: hot.prompts, channel, selfId, selfName, normalized });
+    } catch (err) {
+      log.warn('follow-up: building the classifier request failed', { channel: channelId, error: err });
+    }
+
+    if (!request) {
+      if (!missingAddressPromptLogged) {
+        missingAddressPromptLogged = true;
+        log.warn('follow-up: prompts.address is missing, every follow-up is treated as "no"', {});
+      }
+      log.info('follow-up: verdict', { channel: channelId, author: normalized.authorId, verdict: 'no', ms: now() - startedAt });
+      bumpFollowUpNoStreak(channelId, state, mentionCfg);
+      return false;
+    }
+
+    let verdict = 'no';
+    if (llm) {
+      try {
+        // A classifier call skipped by the daily cap (DailyCapError, thrown
+        // synchronously before any fetch) lands here exactly like any other
+        // error -- "no", logged, no request ever left the process.
+        const completion = await llm.complete(
+          [
+            { role: 'system', content: request.system },
+            { role: 'user', content: request.user },
+          ],
+          {
+            model: classifierTextModel(config),
+            maxOutputTokens: mentionCfg.followUpMaxOutputTokens,
+            countAgainstDailyCap: true,
+            skipCalibration: true,
+          },
+        );
+        verdict = parseFollowUpVerdict(completion.text);
+      } catch {
+        verdict = 'no';
+      }
+    }
+
+    log.info('follow-up: verdict', { channel: channelId, author: normalized.authorId, verdict, ms: now() - startedAt });
+
+    if (verdict !== 'yes') {
+      bumpFollowUpNoStreak(channelId, state, mentionCfg);
+      return false;
+    }
+    // Still counted for spam (mention.spamThreshold, future explicit
+    // pings), just never rolled for the ignore chance -- a follow-up is a
+    // continuation, not a ping (see docs/prompt-contract.md).
+    tagHistory.hit(normalized.authorId, now(), repeatWindowMs(mentionCfg));
+    turns
+      .runTurn({ channel, mode: 'reply', trigger: normalized, triggerKind: 'followUp' })
+      .then((result) => announceRefusal(channel, normalized, result))
+      .catch((err) => log.error('events: follow-up reply turn failed', { channel: channelId, error: err }));
+    return true;
   }
 
   // --- Limit notices ----------------------------------------------------------
