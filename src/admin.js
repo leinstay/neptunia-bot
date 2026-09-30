@@ -32,6 +32,7 @@ import { fromTokens } from './memory/mentions.js';
 import { sortEpisodesForDisplay } from './memory/episodes.js';
 import { channelActivity } from './memory/channels.js';
 import { rankEmojiUsage } from './memory/emoji-usage.js';
+import { rankGifs } from './memory/gifs.js';
 import { commandKeys } from './discord/commands.js';
 import { isAllowed as accessIsAllowed, isOwnerOnly, grant as accessGrant, revoke as accessRevoke } from './discord/access.js';
 import { classifierTextModel, classifierMediaModel, classifierVideoModel } from './behavior/mention.js';
@@ -59,6 +60,7 @@ const READ_ONLY_ACCESS_KEYS = new Set([
   'learned.list',
   'model.show',
   'emoji.status',
+  'gifs.status',
   'warmup.status',
   'warmup.people',
   'access.list',
@@ -536,6 +538,9 @@ function imageFileName(mediaType) {
  * `emojiBackfill` — from createEmojiBackfill() (src/memory/emoji-backfill.js), optional: `run` (with
  *   `force`, awaited by `/nep emoji rescan`) and `isRunning` (a note in `/nep emoji status`).
  *   Absent -> `/nep emoji rescan` reports it is not available; `/nep emoji status` still works.
+ * `gifBackfill` — from createGifBackfill() (src/memory/gif-backfill.js), optional: `run` (with
+ *   `force`, awaited by `/nep gifs rescan`) and `isRunning` (a note in `/nep gifs status`).
+ *   Absent -> `/nep gifs rescan` reports it is not available; `/nep gifs status` still works.
  * `mentor` — from createMentor() (src/mentor/mentor.js), optional: `run`/`check` (started by
  *   `/nep mentor run|check`, never awaited to the end), `resolveAnchor` (reads the moment of a
  *   message for `/nep mentor add|anchor`), `stop`, `status`; `isRunning` and
@@ -571,6 +576,7 @@ export function createAdmin({
   images,
   imageFetcher,
   emojiBackfill,
+  gifBackfill,
   mentor,
   mentorCases,
   mentorBudget,
@@ -602,7 +608,7 @@ export function createAdmin({
    * alias.add, alias.remove, memory.forget, private.forget, private.purge, memory.wipe, memory.affinity (when
    * setting a score), memory.refresh, lore.add, lore.remove, learned.add,
    * learned.remove, warmup.run, warmup.users, warmup.channels, warmup.server,
-   * warmup.reset, emoji.rescan, draw (it counts against the image rail in state.json) and
+   * warmup.reset, emoji.rescan, gifs.rescan, draw (it counts against the image rail in state.json) and
    * mentor.add, mentor.anchor, mentor.remove, mentor.run, mentor.check, mentor.wrong,
    * mentor.undo (it writes prompts.local/ or memory) and mentor.rebase (prompts.local/).
    */
@@ -2687,6 +2693,61 @@ async function cmdPing(args) {
     return `Emoji rescan done: ${result.channels} channels, ${result.messages} messages read, ${result.emoji} emoji uses counted.`;
   }
 
+  /** `/nep gifs status`: how many GIFs the library holds, the top 10 (rank order,
+   * `gifs.halfLifeDays`) as `g<n> xCOUNT — caption or name`, the history backfill stamp, and
+   * how many GIFs the persona posted today (UTC) against `gifs.maxPerDay`. */
+  function cmdGifsStatus(_args, context) {
+    freshenIfPaused();
+    const guildId = resolvedGuildId(context);
+    if (!guildId) throw new Error('no guild resolved yet');
+
+    const library = store.getGifs(guildId);
+    const ranked = rankGifs(library, hot.config?.gifs?.halfLifeDays ?? 30);
+    const cache = store.getMediaCache(guildId);
+    const captionOf = (entry) => {
+      const cached = cache?.[entry.itemId];
+      return cached && !cached.miss && typeof cached.text === 'string' ? cached.text.trim() : '';
+    };
+    const stamp = library.backfill;
+    const running = gifBackfill?.isRunning?.() ? ' (running now)' : '';
+    const backfill = stamp?.at ? `${stamp.at}, ${stamp.channels} channels, ${stamp.messages} messages` : 'never';
+    const data = store.state.data;
+    const today = new Date().toISOString().slice(0, 10);
+    const postedToday = data.gifDay === today && Number.isFinite(data.gifCount) ? data.gifCount : 0;
+    const cap = hot.config?.gifs?.maxPerDay;
+    return [
+      `library: ${ranked.length} gifs`,
+      ranked.length > 0 ? 'top 10:' : 'top 10: (none)',
+      ...ranked
+        .slice(0, 10)
+        .map((entry) => `  ${entry.id} x${entry.count} — ${captionOf(entry) || entry.name || entry.site || entry.url}`),
+      `backfill: ${backfill}${running}`,
+      `posted today: ${postedToday}/${Number.isFinite(cap) ? cap : 40}`,
+    ].join('\n');
+  }
+
+  /** Why `/nep gifs rescan` did not run, by src/memory/gif-backfill.js's skip reason. */
+  const GIFS_RESCAN_SKIPS = {
+    running: 'A GIF backfill is already running.',
+    disabled: 'The GIF backfill is off (gifs.backfillMessages is 0).',
+    paused: 'paused -- run /nep resume first',
+    'no-guild': 'no guild resolved yet',
+  };
+
+  /** `/nep gifs rescan`: clears the GIF library and recounts it from channel history, then
+   * captions the top ones (the backfill with `force`), awaited to the end. Writes under data/,
+   * so refused while paused. */
+  async function cmdGifsRescan(_args, context) {
+    if (!gifBackfill) return 'the GIF backfill is not available';
+    assertNotPaused();
+    const guildId = resolvedGuildId(context);
+    if (!guildId) throw new Error('no guild resolved yet');
+
+    const result = await gifBackfill.run(guildId, { force: true });
+    if (!result.ok) return GIFS_RESCAN_SKIPS[result.reason] ?? `not done (${result.reason})`;
+    return `GIF rescan done: ${result.channels} channels, ${result.messages} messages read, ${result.gifs} GIF uses counted, ${result.described} described.`;
+  }
+
   /** Wraps a `warmup.*` handler so both report the same thing when the dependency is absent. */
   function withWarmup(fn) {
     return (args, context) => {
@@ -2746,6 +2807,8 @@ async function cmdPing(args) {
     'learned.remove': (args, context) => cmdLearnedRemove(args, context),
     'emoji.status': (args, context) => cmdEmojiStatus(args, context),
     'emoji.rescan': (args, context) => cmdEmojiRescan(args, context),
+    'gifs.status': (args, context) => cmdGifsStatus(args, context),
+    'gifs.rescan': (args, context) => cmdGifsRescan(args, context),
     'model.show': () => cmdModelShow(),
     'model.set': (args) => cmdModelSet(args),
     'warmup.people': withWarmup((args, context) => cmdWarmupPeople(args, context)),

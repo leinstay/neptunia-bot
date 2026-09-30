@@ -91,7 +91,7 @@ See [`docs/en/messages-and-memory.md`](docs/en/messages-and-memory.md) for the p
 
 ## Media
 
-The persona can see attached pictures, watch short video clips, read pages behind links, search the web for facts it does not have, and draw pictures on request through an image generation model. Each capability is a separate feature switch, off or capped by default, with its own daily limit. A `<senses>` block in each request tells the persona what is on; it never claims to have perceived anything beyond it. See [`docs/en/media.md`](docs/en/media.md) for pictures, video vision, link reading, search, drawing, tools, costs and privacy.
+The persona can see attached pictures, watch short video clips, read pages behind links, search the web for facts it does not have, draw pictures on request through an image generation model, and post GIFs from a library built from what the chat shares. Each capability is a separate feature switch, off or capped by default, with its own daily limit. A `<senses>` block in each request tells the persona what is on; it never claims to have perceived anything beyond it. See [`docs/en/media.md`](docs/en/media.md) for pictures, video vision, link reading, search, drawing, tools, costs and privacy.
 
 ## Private chat
 
@@ -274,6 +274,7 @@ data/                      persistent state (gitignored, created at runtime)
   guilds/<id>/guild.json   server habits, in-jokes, the persona's self-claims
   guilds/<id>/buffer.json  messages observed since the last memory update
   guilds/<id>/media.json   media description cache
+  guilds/<id>/gifs.json    GIF library: handles, URLs, use counts
   guilds/<id>/users/       per-member profiles and relationships
   guilds/<id>/private/     per-member private DM memory
   guilds/<id>/channels/    channel observations from the analyzer

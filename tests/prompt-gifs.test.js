@@ -1,0 +1,194 @@
+// The `<gifs>` block, the `senses.gifs` line and the transcript's GIF handles
+// of buildRequest (src/behavior/prompt.js).
+
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { buildRequest } from '../src/behavior/prompt.js';
+import { labels } from './fixtures/labels.js';
+
+const NOW = Date.UTC(2026, 8, 20, 10, 0, 0);
+const DAY = 86_400_000;
+
+function fakeConfig(overrides = {}) {
+  return {
+    bot: { timezone: 'UTC' },
+    context: {
+      gapMarkerMinutes: 20,
+      maxMessageChars: 800,
+      caps: { interlocutor: 2500, aboutChat: 2500, people: 4000, neighbors: 3000, server: 2500, lore: 1500, ...overrides.caps },
+      vision: { maxImages: 0, tokensPerImage: 400, imageSize: 512, recentImages: 0, recentImageMinutes: 0 },
+      customEmoji: { max: 30 },
+    },
+    features: { vision: false, ...overrides.features },
+    gifs: { max: 20, halfLifeDays: 30, ...overrides.gifs },
+    llm: { maxRequestTokens: 50000, safetyMargin: 0.9 },
+    lore: { scanMessages: 30 },
+    memory: {},
+  };
+}
+
+function baseInput(overrides = {}) {
+  return {
+    config: fakeConfig(),
+    prompts: {
+      'system-prompt': 'SYSTEM',
+      'character-card': 'CARD',
+      rules: 'RULES',
+      format: 'FORMAT',
+      reply: 'REPLY_TASK',
+      labels,
+    },
+    calibrator: { ratio: 1, apply: (n) => n },
+    mode: 'reply',
+    now: NOW,
+    selfName: 'Nept',
+    history: [{ id: '1', ts: NOW - 60_000, authorId: 'a', authorName: 'Zoé', self: false, content: 'hi', attachments: [], stickers: [], replyToId: null }],
+    neighbors: [],
+    trigger: null,
+    triggerKind: null,
+    guildMemory: {},
+    interlocutor: null,
+    otherProfiles: [],
+    ...overrides,
+  };
+}
+
+/** A library entry: a link GIF keyed `k<n>` with handle `g<n>`. */
+function linkEntry(n, count, last = NOW - DAY) {
+  return {
+    id: `g${n}`,
+    kind: 'link',
+    url: `https://tenor.com/view/gif-${n}`,
+    site: 'Tenor',
+    name: `Danse ${n}`,
+    itemId: `k${n}`,
+    messageId: `m${n}`,
+    channelId: 'c1',
+    count,
+    last,
+    firstSeen: last,
+  };
+}
+
+function library(entries, nextId = 100) {
+  return { nextId, entries: Object.fromEntries(entries.map((entry) => [entry.itemId, entry])), backfill: null };
+}
+
+function userText(request) {
+  const content = request.messages[1].content;
+  return Array.isArray(content) ? content.find((part) => part.type === 'text').text : content;
+}
+
+function gifsBlock(request) {
+  const match = /<gifs>\n([\s\S]*?)\n<\/gifs>/.exec(userText(request));
+  return match ? match[1].split('\n') : null;
+}
+
+function sensesOf(request) {
+  const match = /<senses>\n([\s\S]*?)\n<\/senses>/.exec(userText(request));
+  return match ? match[1] : '';
+}
+
+const THREE = library([linkEntry(1, 2), linkEntry(2, 9), linkEntry(3, 5)]);
+
+test('buildRequest: <gifs> lists the library by rank, header first, handles only without captions', () => {
+  const lines = gifsBlock(buildRequest(baseInput({ gifs: THREE })));
+  assert.deepEqual(lines, [labels.gifs.header, 'g2', 'g3', 'g1']);
+});
+
+test('buildRequest: <gifs> shows only the top gifs.max entries (read at use)', () => {
+  const config = fakeConfig({ gifs: { max: 2 } });
+  const lines = gifsBlock(buildRequest(baseInput({ config, gifs: THREE })));
+  assert.deepEqual(lines, [labels.gifs.header, 'g2', 'g3']);
+});
+
+test('buildRequest: <gifs> attaches the cached caption under the entry\'s itemId, entryNoText otherwise', () => {
+  const mediaCache = {
+    k2: { text: 'a cat dancing on a ὄρνις', ts: NOW },
+    k3: { miss: 'error', ts: NOW },
+  };
+  const lines = gifsBlock(buildRequest(baseInput({ gifs: THREE, mediaCache })));
+  assert.deepEqual(lines, [labels.gifs.header, 'g2 -- a cat dancing on a ὄρνις', 'g3', 'g1']);
+});
+
+test('buildRequest: features.gifs off -> no <gifs> block, no senses line, no handles in the chat', () => {
+  const config = fakeConfig({ features: { gifs: false } });
+  const history = [{ ...baseInput().history[0], links: [{ id: 'k2', kind: 'gif', url: 'https://tenor.com/view/gif-2', site: 'Tenor', title: 'Danse 2' }] }];
+  const request = buildRequest(baseInput({ config, gifs: THREE, history }));
+  assert.equal(gifsBlock(request), null);
+  assert.ok(!sensesOf(request).includes(labels.senses.gifs));
+  assert.ok(userText(request).includes('[gif: Danse 2]'));
+});
+
+test('buildRequest: an empty or missing library -> no <gifs> block and no senses line', () => {
+  const empty = buildRequest(baseInput({ gifs: library([]) }));
+  assert.equal(gifsBlock(empty), null);
+  assert.ok(!sensesOf(empty).includes(labels.senses.gifs));
+  const none = buildRequest(baseInput());
+  assert.equal(gifsBlock(none), null);
+  assert.ok(!sensesOf(none).includes(labels.senses.gifs));
+});
+
+test('buildRequest: senses.gifs shows when the feature is on and the library is non-empty', () => {
+  const request = buildRequest(baseInput({ gifs: THREE }));
+  assert.ok(sensesOf(request).split('\n').includes(labels.senses.gifs));
+});
+
+test('buildRequest: a labels.json without the gifs keys renders no block and no senses line', () => {
+  const older = { ...labels, gifs: undefined, senses: { ...labels.senses, gifs: undefined } };
+  const request = buildRequest(baseInput({ gifs: THREE, prompts: { ...baseInput().prompts, labels: older } }));
+  assert.equal(gifsBlock(request), null);
+  assert.ok(!userText(request).includes('undefined'));
+});
+
+test('buildRequest: context.caps.gifs trims entries from the bottom, a cap below the header drops the block', () => {
+  const many = library(Array.from({ length: 20 }, (_, i) => linkEntry(i + 1, 40 - i)));
+  const full = buildRequest(baseInput({ gifs: many }));
+  assert.equal(gifsBlock(full).length, 21);
+
+  const tight = buildRequest(baseInput({ gifs: many, config: fakeConfig({ caps: { gifs: 20 } }) }));
+  const lines = gifsBlock(tight);
+  assert.ok(lines.length > 1 && lines.length < 21);
+  assert.equal(lines[0], labels.gifs.header);
+  assert.deepEqual(lines.slice(1), Array.from({ length: lines.length - 1 }, (_, i) => `g${i + 1}`));
+  assert.ok(tight.stats.gifs.used <= 20);
+
+  const none = buildRequest(baseInput({ gifs: many, config: fakeConfig({ caps: { gifs: 1 } }) }));
+  assert.equal(gifsBlock(none), null);
+});
+
+test('buildRequest: <gifs> sits right after <emoji> and before <server>', () => {
+  const guildMemory = { patterns: 'short lines' };
+  const history = [{ ...baseInput().history[0], channelId: 'c1', channelName: 'general' }];
+  const customEmoji = [{ id: '1', name: 'alpha' }];
+  const text = userText(buildRequest(baseInput({ gifs: THREE, customEmoji, guildMemory, history, currentChannelId: 'c1' })));
+  const emojiIdx = text.indexOf('<emoji>\n');
+  const gifsIdx = text.indexOf('<gifs>\n');
+  const serverIdx = text.indexOf('<server>');
+  assert.ok(emojiIdx !== -1 && gifsIdx !== -1 && serverIdx !== -1);
+  assert.ok(emojiIdx < gifsIdx && gifsIdx < serverIdx);
+  assert.ok(text.indexOf('</emoji>') < gifsIdx);
+});
+
+test('buildRequest: senses.gifs follows senses.customEmoji', () => {
+  const lines = sensesOf(buildRequest(baseInput({ gifs: THREE, customEmoji: [{ id: '1', name: 'alpha' }] }))).split('\n');
+  assert.equal(lines[lines.indexOf(labels.senses.gifs) - 1], labels.senses.customEmoji);
+});
+
+test('buildRequest: a library gif in the chat carries its handle; a reposted link is matched by its url', () => {
+  const history = [
+    {
+      ...baseInput().history[0],
+      links: [{ id: 'k2', kind: 'gif', url: 'https://tenor.com/view/gif-2', site: 'Tenor', title: 'Danse 2' }],
+    },
+    {
+      ...baseInput().history[0],
+      id: '2',
+      links: [{ id: '2#e0', kind: 'gif', url: 'https://tenor.com/view/gif-3', site: 'Tenor', title: 'Danse 3' }],
+    },
+  ];
+  const descriptions = new Map([['k2', 'a cat dancing']]);
+  const text = userText(buildRequest(baseInput({ gifs: THREE, history, descriptions })));
+  assert.ok(text.includes('[gif g2: a cat dancing]'));
+  assert.ok(text.includes('[gif g3: Danse 3]'));
+});

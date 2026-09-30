@@ -39,7 +39,7 @@ test('buildCommandTree: never emits default_member_permissions -- always visible
 test('buildCommandTree: top-level leaves (status, ping, reload, pause, resume, interject, initiate, draw, set, unset)', () => {
   const [command] = buildCommandTree('nep');
   const names = command.options.map((o) => o.name);
-  assert.deepEqual(names, ['status', 'ping', 'reload', 'pause', 'resume', 'interject', 'initiate', 'draw', 'set', 'unset', 'rule', 'memory', 'private', 'alias', 'lore', 'learned', 'emoji', 'model', 'warmup', 'mentor', 'access']);
+  assert.deepEqual(names, ['status', 'ping', 'reload', 'pause', 'resume', 'interject', 'initiate', 'draw', 'set', 'unset', 'rule', 'memory', 'private', 'alias', 'lore', 'learned', 'emoji', 'gifs', 'model', 'warmup', 'mentor', 'access']);
 
   const status = findOption(command.options, 'status');
   assert.equal(status.type, 1); // SUBCOMMAND
@@ -227,6 +227,22 @@ test('buildCommandTree: emoji group (status/rescan), no options', () => {
   const { keys } = commandKeys();
   assert.ok(keys.has('emoji.status'));
   assert.ok(keys.has('emoji.rescan'));
+});
+
+test('buildCommandTree: gifs group (status/rescan), no options', () => {
+  const [command] = buildCommandTree('nep');
+  const gifs = findOption(command.options, 'gifs');
+  assert.equal(gifs.type, 2); // SUBCOMMAND_GROUP
+  assert.ok(gifs.description.length <= 100);
+  assert.deepEqual(gifs.options.map((o) => o.name), ['status', 'rescan']);
+  for (const sub of gifs.options) {
+    assert.equal(sub.type, 1); // SUBCOMMAND
+    assert.ok(sub.description.length <= 100, `${sub.name} description must be <= 100 chars`);
+    assert.equal(sub.options, undefined);
+  }
+  const { keys } = commandKeys();
+  assert.ok(keys.has('gifs.status'));
+  assert.ok(keys.has('gifs.rescan'));
 });
 
 test('buildCommandTree: learned group (list/add/remove)', () => {
@@ -877,6 +893,24 @@ test('interaction handler: emoji.status replies at once, emoji.rescan is deferre
   const rescan = fakeInteraction({ group: 'emoji', subcommand: 'rescan' });
   await handler(rescan);
   assert.equal(admin.runCalls[1][0], 'emoji.rescan');
+  assert.deepEqual(admin.runCalls[1][1], {});
+  assert.ok(rescan.replies.some((r) => r.deferred));
+  assert.equal(rescan.edits.length, 1);
+});
+
+test('interaction handler: gifs.status replies at once, gifs.rescan is deferred', async () => {
+  const admin = fakeAdmin();
+  const handler = createInteractionHandler({ hot: baseHot(), admin, getGuildId: () => 'g1' });
+
+  const status = fakeInteraction({ group: 'gifs', subcommand: 'status' });
+  await handler(status);
+  assert.equal(admin.runCalls[0][0], 'gifs.status');
+  assert.deepEqual(admin.runCalls[0][1], {});
+  assert.ok(!status.replies.some((r) => r.deferred));
+
+  const rescan = fakeInteraction({ group: 'gifs', subcommand: 'rescan' });
+  await handler(rescan);
+  assert.equal(admin.runCalls[1][0], 'gifs.rescan');
   assert.deepEqual(admin.runCalls[1][1], {});
   assert.ok(rescan.replies.some((r) => r.deferred));
   assert.equal(rescan.edits.length, 1);

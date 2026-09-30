@@ -356,18 +356,28 @@ function extraOf(...extras) {
  * (src/web/lookup.js#readLink): it appends `linkRead` after every other extra
  * of the link (frameAttached, the video extra, videoAnswered or
  * thumbnailDescribed). Every other kind ignores it.
+ *
+ * `context.gifHandle` is the library handle (`g12`, see
+ * src/memory/gifs.js#gifHandleOf) of a `gif` item the persona can post
+ * back: it renders `gifKnown` (`{ id, text }`) when a caption exists, else
+ * `gifKnownNoText` (`{ id, name }`), in place of `gifDescribed`/`gif` (an
+ * older labels.json without those keys falls back to them in
+ * src/discord/format.js). Every other kind ignores it.
  * @param {object} item
  * @param {{ attachedIndex?: number|null, description?: string|null, unknownDuration?: string,
  *   video?: { state: 'watched'|'limit'|'error', text?: string, reason?: string,
- *     answer?: { question: string, text: string } }|null, read?: string|null }} [context]
+ *     answer?: { question: string, text: string } }|null, read?: string|null, gifHandle?: string|null }} [context]
  * @returns {{ key: string, values: object,
  *   extra?: { key: string, values: object }|{ key: string, values: object }[] }}
  */
-export function mediaLabelFor(item, { attachedIndex = null, description = null, unknownDuration = '?', video = null, read = null } = {}) {
+export function mediaLabelFor(
+  item,
+  { attachedIndex = null, description = null, unknownDuration = '?', video = null, read = null, gifHandle = null } = {},
+) {
   const isPicture = PICTURE_ATTACHMENT_KINDS.has(item.kind) || (item.kind === 'link' && item.thumbnailUrl);
   if (attachedIndex != null && isPicture && item.kind !== 'link') {
     if (item.kind === 'video' || item.kind === 'gif') {
-      const base = mediaLabelFor(item, { description, unknownDuration, video });
+      const base = mediaLabelFor(item, { description, unknownDuration, video, gifHandle });
       return { ...base, extra: extraOf({ key: 'frameAttached', values: { n: attachedIndex } }, base.extra) };
     }
     return description
@@ -378,10 +388,15 @@ export function mediaLabelFor(item, { attachedIndex = null, description = null, 
   switch (item.kind) {
     case 'image':
       return description ? { key: 'imageDescribed', values: { text: description } } : { key: 'image', values: {} };
-    case 'gif':
-      return description
-        ? { key: 'gifDescribed', values: { text: description } }
-        : { key: 'gif', values: { name: item.name || item.title || item.site || '' } };
+    case 'gif': {
+      const name = item.name || item.title || item.site || '';
+      if (gifHandle) {
+        return description
+          ? { key: 'gifKnown', values: { id: gifHandle, text: description } }
+          : { key: 'gifKnownNoText', values: { id: gifHandle, name } };
+      }
+      return description ? { key: 'gifDescribed', values: { text: description } } : { key: 'gif', values: { name } };
+    }
     case 'video': {
       const name = item.name ?? '';
       const duration = durationOrUnknown(item.durationSec, unknownDuration);

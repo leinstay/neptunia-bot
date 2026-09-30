@@ -384,6 +384,15 @@ export function createTurnRunner({
       lastPostAt.set(channel.id, Date.now());
     }
 
+    if (parsed.gif) {
+      const replyId = !isFollowUp && parsed.gif.replyTo !== null ? idByIndex.get(parsed.gif.replyTo) : null;
+      const { entry } = parsed.gif;
+      // The persona's own pick from the library, dry-run only: the handle and the stored URL.
+      log.info('dry-run: would send gif', { channel: channel.id, channelName, mode, replyTo: replyId ?? null, gif: entry.id, kind: entry.kind, url: entry.url });
+      await mirrorDryRun(dryRunChannelId, `[dry-run] #${channelName} · ${mode} · gif ${entry.id}`, entry.url);
+      lastPostAt.set(channel.id, Date.now());
+    }
+
     if (parsed.draw) {
       const self = parsed.draw.self === true;
       // The FULL image prompt (prompt files + the persona's request), so the
@@ -524,6 +533,100 @@ export function createTurnRunner({
     }
   }
 
+  /** Today's UTC date `YYYY-MM-DD` on the injected clock (the daily GIF counter). */
+  function todayDate() {
+    return new Date(clock()).toISOString().slice(0, 10);
+  }
+
+  /** How many GIFs the persona posted today (`state.data.gifDay` / `gifCount`). */
+  function gifsToday() {
+    const data = store.state.data;
+    return data.gifDay === todayDate() ? (Number.isFinite(data.gifCount) ? data.gifCount : 0) : 0;
+  }
+
+  /** Count one posted GIF against `gifs.maxPerDay` (the counter restarts on a new UTC day). */
+  function countGif() {
+    const data = store.state.data;
+    const today = todayDate();
+    if (data.gifDay !== today) {
+      data.gifDay = today;
+      data.gifCount = 0;
+    }
+    data.gifCount = (Number.isFinite(data.gifCount) ? data.gifCount : 0) + 1;
+    store.state.markDirty();
+  }
+
+  /**
+   * The persona's `<gif>` resolved against the guild's library: `{ id,
+   * replyTo, entry }`, or null (logged with its reason, never a URL) when
+   * features.gifs is false, the handle is unknown, or `gifs.maxPerDay`
+   * (default 40, read now) is spent.
+   */
+  function resolveGif(guildId, gif, channelId) {
+    if (!gif) return null;
+    let reason = null;
+    let entry = null;
+    if (hot.config.features?.gifs === false) reason = 'off';
+    else {
+      entry = store.findGif(guildId, gif.id);
+      const cap = hot.config.gifs?.maxPerDay;
+      if (!entry) reason = 'unknown';
+      else if (gifsToday() >= (Number.isFinite(cap) ? cap : 40)) reason = 'daily';
+    }
+    if (reason) {
+      log.info('turn: gif dropped', { channel: channelId, reason, usedToday: gifsToday() });
+      return null;
+    }
+    return { ...gif, entry };
+  }
+
+  /**
+   * A fresh URL of an attached GIF: its original message is fetched again
+   * (Discord attachment URLs expire) and the attachment found by id, in the
+   * message itself or in a forwarded snapshot. Null when anything fails.
+   */
+  async function freshAttachmentUrl(channel, entry) {
+    if (!entry.messageId) return null;
+    try {
+      const source = entry.channelId && entry.channelId !== channel.id ? await client.channels.fetch(entry.channelId) : channel;
+      const message = await source?.messages?.fetch(entry.messageId);
+      const own = message?.attachments?.get?.(entry.itemId);
+      if (own?.url) return own.url;
+      for (const snapshot of message?.messageSnapshots?.values?.() ?? []) {
+        const forwarded = snapshot?.attachments?.get?.(entry.itemId);
+        if (forwarded?.url) return forwarded.url;
+      }
+      return null;
+    } catch (err) {
+      log.warn('turn: gif refetch failed', { channel: channel.id, gif: entry.id, error: err });
+      return null;
+    }
+  }
+
+  /**
+   * Post the persona's GIF (after its messages): a link GIF as its stored
+   * URL (Discord embeds tenor/giphy links), an attached one as a fresh URL of
+   * its attachment, the stored one when that fails. Counted against
+   * `gifs.maxPerDay` once sent. Never throws.
+   */
+  async function postGif(channel, gif, idByIndex, isFollowUp) {
+    const { entry } = gif;
+    try {
+      const fresh = entry.kind === 'attachment' ? await freshAttachmentUrl(channel, entry) : null;
+      const replyId = !isFollowUp && gif.replyTo !== null ? idByIndex.get(gif.replyTo) : null;
+      await channel.send({
+        content: fresh ?? entry.url,
+        reply: replyId ? { messageReference: replyId, failIfNotExists: false } : undefined,
+        allowedMentions: { parse: [] },
+      });
+      countGif();
+      lastPostAt.set(channel.id, Date.now());
+      log.info('turn: gif sent', { channel: channel.id, gif: entry.id, kind: entry.kind, fresh: Boolean(fresh) });
+    } catch (err) {
+      log.warn('turn: gif failed', { channel: channel.id, gif: entry.id, error: err });
+    }
+  }
+
   /**
    * Post the turn for real. Resolves `{ drawFailed }` from draw() when the
    * persona's picture could not be posted, `{}` otherwise.
@@ -575,6 +678,12 @@ export function createTurnRunner({
         secondsSinceTrigger: Math.round((Date.now() - startedAt) / 100) / 10,
         ...(isFollowUp ? { followUp: true } : {}),
       });
+    }
+
+    // The GIF right after the messages.
+    if (parsed.gif) {
+      if (parsed.messages.length > 0 && typingOn) await sleep(between(cfg.betweenMessagesMs, rng));
+      await postGif(channel, parsed.gif, idByIndex, isFollowUp);
     }
 
     // The picture comes last, once every message is out.
@@ -1047,7 +1156,11 @@ export function createTurnRunner({
         drawReason,
         // The `<emoji>` block: the index's emoji (ranked by guildMemory.emojiUsage) and their cached captions.
         customEmoji: emoji ? emoji.list() : [],
-        mediaCache: emoji ? store.getMediaCache(guildId) : null,
+        // The `<gifs>` block and the transcript's GIF handles: the guild's library (features.gifs).
+        gifs: features.gifs !== false && typeof store.getGifs === 'function' ? store.getGifs(guildId) : null,
+        // The cached captions of both lists.
+        mediaCache:
+          emoji || (features.gifs !== false && typeof store.getGifs === 'function') ? store.getMediaCache(guildId) : null,
       });
 
       // A Discord CDN image the provider cannot fetch must not cost the
@@ -1110,7 +1223,10 @@ export function createTurnRunner({
       if (features.multiMessage === false) parsed.messages = parsed.messages.slice(0, 1);
       // No image client, drawing off, no Attach Files, or already answering a failed picture: the <draw> is dropped.
       if (!drawOn) parsed.draw = null;
-      const nothingToDo = parsed.messages.length === 0 && parsed.reactions.length === 0 && parsed.draw === null;
+      // features.gifs off, an unknown handle or gifs.maxPerDay spent: the <gif> is dropped.
+      parsed.gif = resolveGif(guildId, parsed.gif, channel.id);
+      const nothingToDo =
+        parsed.messages.length === 0 && parsed.reactions.length === 0 && parsed.draw === null && parsed.gif === null;
 
       log.info('turn: model answered', {
         mode: finalMode,
@@ -1125,6 +1241,7 @@ export function createTurnRunner({
         messages: parsed.messages.length,
         reactions: parsed.reactions.length,
         draw: Boolean(parsed.draw),
+        gif: Boolean(parsed.gif),
       });
       store.state.data.calibration = calibrator.ratio;
       store.state.markDirty();

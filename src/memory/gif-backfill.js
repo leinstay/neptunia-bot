@@ -1,0 +1,186 @@
+// The GIF library history backfill: members' GIFs are recorded as they arrive
+// (src/memory/update.js), so on a server with a long history the `<gifs>`
+// block would stay empty until enough GIFs are posted again. This reads the
+// last `gifs.backfillMessages` messages of every readable channel over the
+// Discord API -- no LLM for the counting, no token budget -- and counts them
+// into gifs.json at once (src/memory/gifs.js), starting from a cleared
+// library, then stamps `backfill: { at, channels, messages }` so it never
+// counts the same history twice. The top `gifs.backfillDescribe` GIFs without
+// a cached caption are then sent to the media describer (real requests,
+// counted against the daily cap), so the list the persona picks from says
+// what each GIF shows. Runs once at startup (`startIfNeeded`) and again only
+// on the owner's `/nep gifs rescan` (`run` with `force`).
+
+import { readableChannels, fetchHistoryWindow } from '../discord/collect.js';
+import { collectPictures } from '../discord/media.js';
+import { rankGifs } from './gifs.js';
+import { log as defaultLog } from '../log.js';
+
+/** How many messages one `store.recordGifs` call takes. */
+const CHUNK = 500;
+
+/** Defaults of `gifs.*` when a key is missing (config.json carries the same). */
+const DEFAULT_BACKFILL_MESSAGES = 500;
+const DEFAULT_BACKFILL_DESCRIBE = 20;
+const DEFAULT_STORE_MAX = 300;
+const DEFAULT_HALF_LIFE_DAYS = 30;
+
+/**
+ * The GIF history backfill for the served guild.
+ * @param {object} deps
+ * @param {object} deps.hot        src/hot.js view; `config.gifs`, `config.bot`,
+ *   `config.media.embedTextChars`, `config.features.gifs` read at use.
+ * @param {object} deps.store      src/memory/store.js.
+ * @param {object} deps.client     The discord.js Client (`user.id`, `guilds.cache`).
+ * @param {object} [deps.describer]  From createDescriber() (src/memory/describe.js): `describeMany`.
+ *   Absent -> nothing is described.
+ * @param {object} [deps.log]      src/log.js-shaped logger.
+ */
+export function createGifBackfill({ hot, store, client, describer = null, log = defaultLog }) {
+  let running = false;
+
+  function skipped(reason) {
+    log.info('gif-backfill: skipped', { reason });
+    return { ok: false, reason };
+  }
+
+  /**
+   * Describe the top `limit` library entries (rank order) that have no
+   * cached caption: one describer item per entry (`kind: 'gif'`, its
+   * `itemId`, and the picture URL read this run -- an attachment's file, an
+   * embed's thumbnail; an entry without one is skipped). Returns how many got
+   * a caption.
+   */
+  async function describeTop(guildId, pictureUrls, limit) {
+    if (!describer || typeof describer.describeMany !== 'function' || limit <= 0) return 0;
+    const gifCfg = hot.config.gifs ?? {};
+    const cache = store.getMediaCache(guildId);
+    const items = [];
+    for (const entry of rankGifs(store.getGifs(guildId), gifCfg.halfLifeDays ?? DEFAULT_HALF_LIFE_DAYS)) {
+      if (items.length >= limit) break;
+      const cached = cache?.[entry.itemId];
+      if (cached && !cached.miss && typeof cached.text === 'string' && cached.text.trim()) continue;
+      const url = pictureUrls.get(entry.itemId);
+      if (!url) continue;
+      items.push({ itemId: entry.itemId, kind: 'gif', url, name: entry.name ?? '' });
+    }
+    if (items.length === 0) return 0;
+    const { descriptions } = await describer.describeMany(guildId, items, { countAgainstDailyCap: true });
+    return descriptions.size;
+  }
+
+  /**
+   * Read the history and rebuild the library from it. Every run that goes
+   * ahead CLEARS the library's entries and recounts them from the history
+   * window alone: the window already holds the GIFs recorded on arrival
+   * since the feature went live, so adding on top would count them twice.
+   * Without `force` that happens only on the first run -- it is a no-op once
+   * `backfill.at` is set (the startup run). With `force` it ignores the
+   * stamp: the owner's explicit `/nep gifs rescan`. Handles are never reused
+   * (`nextId` survives the clear), so a recounted GIF gets a fresh one.
+   * Channels are read one after another, 100 messages per page (see
+   * src/discord/collect.js#fetchHistoryWindow). Messages of bots and of the
+   * persona are skipped. Clearing, counting and stamping happen together
+   * after every channel is read; the describing comes after, and only while
+   * not paused. Skips (never throws) when paused, when `backfillMessages` is
+   * 0, when already stamped (no `force`), while another run is in flight, or
+   * when the guild is not in the client's cache; an unexpected error is thrown.
+   * @param {string} guildId
+   * @param {{ force?: boolean }} [opts]
+   * @returns {Promise<{ ok: true, channels: number, messages: number, gifs: number, described: number }
+   *   | { ok: false, reason: string }>}
+   */
+  async function run(guildId, { force = false } = {}) {
+    if (running) return skipped('running');
+    if (store.state?.data?.paused) return skipped('paused');
+    const limit = hot.config.gifs?.backfillMessages ?? DEFAULT_BACKFILL_MESSAGES;
+    if (!Number.isInteger(limit) || limit <= 0) return skipped('disabled');
+    if (!force && store.getGifs(guildId).backfill?.at) return skipped('done');
+
+    running = true;
+    try {
+      const guild = client.guilds.cache.get(guildId);
+      if (!guild) return skipped('no-guild');
+
+      const selfId = client.user?.id;
+      const channels = readableChannels(guild, hot.config.bot);
+      const collected = [];
+      for (const channel of channels) {
+        let messages = [];
+        try {
+          messages = await fetchHistoryWindow(channel, {
+            limit,
+            minTs: 0,
+            selfId,
+            embedTextChars: hot.config.media?.embedTextChars,
+          });
+        } catch (err) {
+          log.warn('gif-backfill: channel read failed', { channel: channel.id, error: err });
+        }
+        for (const message of messages) {
+          if (message.self || message.bot) continue;
+          collected.push(message);
+        }
+      }
+
+      // From here on nothing awaits until the stamp: no GIF can be recorded in between.
+      if (store.state?.data?.paused) return skipped('paused');
+      const members = collected.sort((a, b) => a.ts - b.ts);
+      const gifCfg = hot.config.gifs ?? {};
+      const opts = { storeMax: gifCfg.storeMax ?? DEFAULT_STORE_MAX, halfLifeDays: gifCfg.halfLifeDays ?? DEFAULT_HALF_LIFE_DAYS };
+
+      // Always from a cleared library: the window already holds what was recorded on arrival.
+      store.clearGifs(guildId);
+      let gifs = 0;
+      for (let i = 0; i < members.length; i += CHUNK) {
+        gifs += store.recordGifs(guildId, members.slice(i, i + CHUNK), opts);
+      }
+      store.setGifBackfill(guildId, { at: new Date().toISOString(), channels: channels.length, messages: members.length });
+      store.flush();
+
+      // The picture to describe per GIF item: an attachment's file, an embed's thumbnail frame.
+      const pictureUrls = new Map();
+      for (const message of members) {
+        for (const picture of collectPictures(message)) {
+          if (picture.kind === 'gif' && picture.url && !pictureUrls.has(picture.itemId)) pictureUrls.set(picture.itemId, picture.url);
+        }
+      }
+      const describeLimit = gifCfg.backfillDescribe ?? DEFAULT_BACKFILL_DESCRIBE;
+      const described =
+        store.state?.data?.paused || !Number.isInteger(describeLimit) ? 0 : await describeTop(guildId, pictureUrls, describeLimit);
+      if (described > 0) store.flush();
+
+      const counts = { channels: channels.length, messages: members.length, gifs, described };
+      log.info('gif-backfill: done', counts);
+      return { ok: true, ...counts };
+    } finally {
+      running = false;
+    }
+  }
+
+  /**
+   * The startup run: once, when `features.gifs` is on (a missing key counts
+   * as on) and the library has no `backfill` stamp yet. Meant to be called
+   * without awaiting; resolves either way, errors are logged, never thrown.
+   * @param {string} guildId
+   * @returns {Promise<void>}
+   */
+  async function startIfNeeded(guildId) {
+    try {
+      if (hot.config.features?.gifs === false) {
+        skipped('feature-off');
+        return;
+      }
+      await run(guildId);
+    } catch (err) {
+      log.error('gif-backfill: failed', { error: err });
+    }
+  }
+
+  /** Whether a backfill is reading history (or describing) right now. */
+  function isRunning() {
+    return running;
+  }
+
+  return { run, startIfNeeded, isRunning };
+}

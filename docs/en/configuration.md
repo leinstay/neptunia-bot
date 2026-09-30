@@ -19,6 +19,7 @@ Every key in `config.json` with its default, grouped by section.
 | `reactions` | `true` | Emoji reactions (the persona places them) |
 | `seeReactions` | `true` | Show reactions on messages in the transcript. A missing key counts as on. Distinct from `reactions`, which controls whether the persona PLACES reactions; this one controls whether it SEES them |
 | `customEmoji` | `true` | List the server's custom emoji ranked by usage so the persona can use them by `:name:`. A missing key counts as on |
+| `gifs` | `true` | Build a GIF library from what members share (Tenor, Giphy links and .gif attachments) and let the persona post from it by handle. A missing key counts as on |
 | `multiMessage` | `true` | Allow 2–3 messages in a row |
 | `vision` | `true` | Process attached images |
 | `mediaDescriptions` | `true` | One-line descriptions for pictures, GIFs, video frames and link thumbnails |
@@ -100,6 +101,7 @@ The three helper model roles, grouped under one key. Each is set independently, 
 | `caps.neighbors` | `3000` | Token cap: neighbour channels |
 | `caps.server` | `4000` | Token cap: channel map |
 | `caps.emoji` | `800` | Token cap: custom emoji |
+| `caps.gifs` | `600` | Token cap: GIF library |
 | `channelActivity.liveMessagesPerDay` | `20` | Daily messages = "active" channel |
 | `channelActivity.deadAfterDays` | `7` | Days without messages = "dead" channel |
 | `vision.maxImages` | `4` | Max images per request |
@@ -120,6 +122,19 @@ Settings for the custom emoji block (`features.customEmoji`). The memory analyze
 | `storeMax` | `200` | Custom emoji kept in the usage ranking; the top `max` are shown |
 | `halfLifeDays` | `30` | Recency half-life for the usage ranking (days); rank = log2(count + 0.5) + last / halfLife; an emoji not used recently sinks below one used often |
 | `backfillMessages` | `500` | Messages read per channel from history at startup to seed the ranking. Runs once when `features.customEmoji` is on and no backfill has run yet for this server; the result is stamped in `guild.json`. `0` disables the backfill |
+
+## `gifs`
+
+Settings for the GIF library (`features.gifs`). Uses are counted as each message arrives (members only, bots and the persona excluded). A one-time backfill from channel history seeds the ranking at startup.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `max` | `20` | GIFs shown in the `<gifs>` block, ranked by recency-weighted use |
+| `storeMax` | `300` | GIFs kept in the library; the top `max` are shown |
+| `halfLifeDays` | `30` | Recency half-life for the usage ranking (days); same formula as custom emoji |
+| `maxPerDay` | `40` | GIFs the persona may post per day |
+| `backfillMessages` | `500` | Messages read per channel from history at startup to seed the library. Runs once when `features.gifs` is on and no backfill has run yet for this server. `0` disables |
+| `backfillDescribe` | `20` | Top GIFs by rank that are sent to the describer for a caption right after the backfill; the rest get captions as the chat meets them |
 
 ## `media`
 

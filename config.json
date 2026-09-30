@@ -13,6 +13,7 @@
     "lore": true,
     "reactions": true,
     "customEmoji": true,
+    "gifs": true,
     "seeReactions": true,
     "multiMessage": true,
     "vision": true,
@@ -67,7 +68,7 @@
     "otherProfiles": 6,
     "askedAboutProfiles": 3,
     "tempo": { "liveMessages10min": 4, "deadSilenceMinutes": 45 },
-    "caps": { "interlocutor": 6000, "aboutChat": 2500, "people": 9000, "neighbors": 3000, "server": 4000, "lore": 1500, "emoji": 800 },
+    "caps": { "interlocutor": 6000, "aboutChat": 2500, "people": 9000, "neighbors": 3000, "server": 4000, "lore": 1500, "emoji": 800, "gifs": 600 },
     "customEmoji": { "max": 30, "storeMax": 200, "halfLifeDays": 30, "backfillMessages": 500 },
     "channelActivity": { "liveMessagesPerDay": 20, "deadAfterDays": 7 },
     "vision": { "maxImages": 4, "tokensPerImage": 400, "imageSize": 512, "recentImages": 3, "recentImageMinutes": 30, "maxBytes": 1500000, "fetchTimeoutMs": 10000 }
@@ -218,6 +219,7 @@
     "openai": { "quality": "medium", "background": "auto", "moderation": "low" },
     "google": { "resolution": "1K" }
   },
+  "gifs": { "max": 20, "storeMax": 300, "halfLifeDays": 30, "maxPerDay": 40, "backfillMessages": 500, "backfillDescribe": 20 },
   "private": { "minAffinity": 5, "maxPerUserPerDay": 100, "maxPerOwnerPerDay": 200, "purgeMaxMessages": 5000 },
   "mentor": {
     "model": null,

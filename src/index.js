@@ -20,6 +20,7 @@ import { createSpontaneous } from './behavior/spontaneous.js';
 import { createMemoryUpdater } from './memory/update.js';
 import { createWarmup } from './memory/warmup.js';
 import { createEmojiBackfill } from './memory/emoji-backfill.js';
+import { createGifBackfill } from './memory/gif-backfill.js';
 import { createDescriber } from './memory/describe.js';
 import { startYoutubeCheck } from './memory/youtube-check.js';
 import { createImageFetcher } from './discord/fetch-image.js';
@@ -160,6 +161,9 @@ const memory = createMemoryUpdater({
 const tagHistory = createTagHistory();
 // The custom emoji ranking read from history (Discord API only, no LLM): once at startup, again on /nep emoji rescan.
 const emojiBackfill = createEmojiBackfill({ hot, store, client, log });
+// The GIF library read from history (Discord API; the describer captions the top ones): once at
+// startup, again on /nep gifs rescan.
+const gifBackfill = createGifBackfill({ hot, store, client, describer, log });
 
 // The mentor (features.mentor): a manual sub-process started only by /nep mentor run|check,
 // never by a timer. Its cases live under data/, its daily token budget in state.json.
@@ -239,6 +243,8 @@ const admin = createAdmin({
   imageFetcher,
   // /nep emoji status|rescan: the emoji ranking and its history backfill.
   emojiBackfill,
+  // /nep gifs status|rescan: the GIF library and its history backfill.
+  gifBackfill,
   // /nep mentor: cases, runs, the owner's feedback, the mentor's own token budget and its changes.
   mentor,
   mentorCases,
@@ -301,6 +307,10 @@ client.once(Events.ClientReady, async () => {
   // The custom emoji ranking from history, once (features.customEmoji on, no emojiBackfill stamp,
   // context.customEmoji.backfillMessages > 0). Fire-and-forget: never blocks the persona, logs its errors.
   emojiBackfill.startIfNeeded(instance.guildId);
+
+  // The GIF library from history, once (features.gifs on, no backfill stamp in gifs.json,
+  // gifs.backfillMessages > 0). Fire-and-forget: never blocks the persona, logs its errors.
+  gifBackfill.startIfNeeded(instance.guildId);
 
   every(30_000, () => spontaneous.tick(), 'spontaneous.tick');
   // The tick still runs on schedule even with the switch off, so flipping it

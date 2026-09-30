@@ -3,6 +3,7 @@
 //   <msg reply="#87">…</msg>   a chat message, optionally a reply to message #87
 //   <react to="#87">💀</react> a reaction on message #87 (a custom emoji as :name: too)
 //   <draw self="yes" reply="#87">…</draw>  a scene for the drawing sub-process (first one only)
+//   <gif reply="#87">g12</gif> a GIF from the library by its handle (first valid one only)
 //   <skip/>                    stay silent
 // The parser is forgiving: a missing tag wrapper falls back to a single plain
 // message, an unterminated <think> (output cut by max_tokens) means silence.
@@ -15,6 +16,8 @@ const SELF_YES = new Set(['yes', 'true', '1']);
 // A reaction body: a short unicode emoji, or a custom one as `:name:` / `<a:name:id>` (src/discord/emoji.js).
 const MAX_REACTION_CHARS = 16;
 const CUSTOM_REACTION_RE = /^(?::[A-Za-z0-9_]{2,32}:|<a?:[A-Za-z0-9_]{2,32}:\d{1,25}>)$/;
+// A GIF handle (src/memory/gifs.js): `g` and digits, any case.
+const GIF_HANDLE_RE = /^g(\d{1,9})$/i;
 
 function parseIndex(value) {
   const match = /(\d+)/.exec(value ?? '');
@@ -24,10 +27,11 @@ function parseIndex(value) {
 /**
  * @returns {{ skip: boolean, messages: {text: string, replyTo: number|null}[],
  *             reactions: {to: number, emoji: string}[], think: string,
- *             draw: {text: string, self: boolean, replyTo: number|null}|null }}
+ *             draw: {text: string, self: boolean, replyTo: number|null}|null,
+ *             gif: {id: string, replyTo: number|null}|null }}
  */
 export function parseOutput(raw) {
-  const result = { skip: false, messages: [], reactions: [], think: '', draw: null };
+  const result = { skip: false, messages: [], reactions: [], think: '', draw: null, gif: null };
   let text = String(raw ?? '');
 
   text = text.replace(/<think>([\s\S]*?)<\/think>/gi, (all, inner) => {
@@ -70,11 +74,19 @@ export function parseOutput(raw) {
     break;
   }
 
+  for (const match of text.matchAll(/<gif(\s[^>]*)?>([\s\S]*?)<\/gif>/gi)) {
+    const handle = GIF_HANDLE_RE.exec(match[2].trim());
+    if (!handle) continue;
+    const reply = /reply\s*=\s*"([^"]*)"/i.exec(match[1] ?? '');
+    result.gif = { id: `g${Number(handle[1])}`, replyTo: reply ? parseIndex(reply[1]) : null };
+    break;
+  }
+
   result.messages = result.messages.slice(0, MAX_MESSAGES);
 
-  if (result.messages.length === 0 && result.reactions.length === 0 && !result.draw) {
+  if (result.messages.length === 0 && result.reactions.length === 0 && !result.draw && !result.gif) {
     const leftover = text.replace(/<skip\s*\/?>/gi, '').trim();
-    const hasTags = /<\/?(msg|react|skip|draw)\b/i.test(text);
+    const hasTags = /<\/?(msg|react|skip|draw|gif)\b/i.test(text);
     if (!hasTags && leftover && leftover.length <= MAX_FALLBACK_CHARS) {
       result.messages.push({ text: leftover, replyTo: null });
     } else {

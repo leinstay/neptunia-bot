@@ -11,6 +11,7 @@
 //   data/guilds/<guildId>/channels/<channelId>.json  one entry per channel the persona has seen (the server map)
 //   data/guilds/<guildId>/lore.json           the guild's lorebook
 //   data/guilds/<guildId>/media.json          the media description cache
+//   data/guilds/<guildId>/gifs.json           the GIF library the persona posts from (src/memory/gifs.js)
 //
 // Everything is cached in memory, marked dirty on change and flushed on a
 // timer and on shutdown. Writes are atomic (temp file + rename) so a crash
@@ -32,6 +33,7 @@ import { applyDetailOps, normalizeDetails } from './details.js';
 import { applyAliasOps } from './aliases.js';
 import { clampText } from './clamp.js';
 import { mergeEmojiUsage, normalizeEmojiUsage } from './emoji-usage.js';
+import { emptyGifs, findGif, mergeGifs, normalizeGifs } from './gifs.js';
 
 function readJson(file, fallback) {
   try {
@@ -329,6 +331,7 @@ export function createStore({ dataDir }) {
   const channelFile = (guildId, channelId) => path.join(channelsDir(guildId), `${channelId}.json`);
   const mediaCacheFile = (guildId) => path.join(guildDir(guildId), 'media.json');
   const loreFile = (guildId) => path.join(guildDir(guildId), 'lore.json');
+  const gifsFile = (guildId) => path.join(guildDir(guildId), 'gifs.json');
   const privateDir = (guildId) => path.join(guildDir(guildId), 'private');
   const privateFile = (guildId, userId) => path.join(privateDir(guildId), `${userId}.json`);
   const stateFile = path.join(dataDir, 'state.json');
@@ -346,6 +349,14 @@ export function createStore({ dataDir }) {
       item.value = emptyPrivate();
     }
     normalizePrivate(item.value);
+    return item;
+  }
+
+  /** The cache entry of a guild's GIF library, created empty when missing, normalised in place of
+   * the cached value (src/memory/gifs.js#normalizeGifs); never marked dirty by reading. */
+  function gifsEntry(guildId) {
+    const item = entry(gifsFile(guildId), emptyGifs);
+    item.value = normalizeGifs(item.value);
     return item;
   }
 
@@ -1149,6 +1160,76 @@ export function createStore({ dataDir }) {
     markMediaCacheDirty(guildId) {
       const item = entries.get(mediaCacheFile(guildId));
       if (item) item.dirty = true;
+    },
+
+    /**
+     * The guild's GIF library (data/guilds/<id>/gifs.json, see
+     * src/memory/gifs.js): `{ nextId, entries, backfill }`, the empty library
+     * when nothing is stored. Normalised on read, persisted the next time
+     * anything writes it, never reset implicitly.
+     * @param {string} guildId
+     * @returns {{ nextId: number, entries: Record<string, object>, backfill: object|null }}
+     */
+    getGifs(guildId) {
+      return gifsEntry(guildId).value;
+    },
+
+    /**
+     * The library entry whose handle is `handle` (`g12`), as `{ key, ...entry }`,
+     * or null (src/memory/gifs.js#findGif). Creates nothing on disk.
+     * @param {string} guildId
+     * @param {string} handle
+     * @returns {object|null}
+     */
+    findGif(guildId, handle) {
+      return findGif(gifsEntry(guildId).value, handle);
+    },
+
+    /**
+     * Add the members' GIFs of `messages` to the guild's library
+     * (src/memory/gifs.js#mergeGifs: counts accumulate, new GIFs get the next
+     * handle, the lowest-ranked entries past `opts.storeMax` are evicted).
+     * Marks the file dirty only when something was counted.
+     * @param {string} guildId
+     * @param {object[]} messages  Normalized messages (URLs present); `self`/`bot`/`ts` read.
+     * @param {{ storeMax?: number, halfLifeDays?: number }} [opts]
+     * @returns {number} How many uses were counted.
+     */
+    recordGifs(guildId, messages, opts = {}) {
+      const item = gifsEntry(guildId);
+      const { gifs, counted } = mergeGifs(item.value, messages, opts);
+      if (counted > 0) {
+        item.value = gifs;
+        item.dirty = true;
+      }
+      return counted;
+    },
+
+    /**
+     * Empty the guild's GIF library entries -- only for the GIF history
+     * backfill (src/memory/gif-backfill.js: its one first run, or the owner's
+     * `/nep gifs rescan`), which recounts them from history right after.
+     * `nextId` is kept, so a handle is never reused; the backfill stamp stays.
+     * @param {string} guildId
+     */
+    clearGifs(guildId) {
+      const item = gifsEntry(guildId);
+      item.value = { ...item.value, entries: {} };
+      item.dirty = true;
+    },
+
+    /**
+     * Stamp the guild's GIF library `backfill` (`{ at, channels, messages }`,
+     * normalised like on read) after a history backfill.
+     * @param {string} guildId
+     * @param {{ at: string, channels: number, messages: number }} stamp
+     * @returns {{ at: string, channels: number, messages: number } | null} The stored stamp.
+     */
+    setGifBackfill(guildId, stamp) {
+      const item = gifsEntry(guildId);
+      item.value = { ...item.value, backfill: normalizeGifs({ ...item.value, backfill: stamp }).backfill };
+      item.dirty = true;
+      return item.value.backfill;
     },
 
     /** Every stored lorebook entry of a guild (data/guilds/<id>/lore.json). Never auto-created empty on disk. */

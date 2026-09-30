@@ -47,6 +47,7 @@ const SLOW_COMMANDS = new Set([
   'warmup.reset',
   'memory.refresh',
   'emoji.rescan',
+  'gifs.rescan',
   'private.purge',
   'draw',
   'mentor.add',
@@ -422,6 +423,19 @@ export function buildCommandTree(commandName) {
         },
         {
           type: SUBCOMMAND_GROUP,
+          name: 'gifs',
+          description: 'The GIF library the persona posts from, built from the GIFs members share.',
+          options: [
+            { type: SUBCOMMAND, name: 'status', description: 'Library size, the top 10 with counts, the backfill stamp and GIFs posted today.' },
+            {
+              type: SUBCOMMAND,
+              name: 'rescan',
+              description: 'Clear the GIF library and recount it from recent channel history, then caption the top ones.',
+            },
+          ],
+        },
+        {
+          type: SUBCOMMAND_GROUP,
           name: 'model',
           description: 'Which model talks, analyzes memory, describes pictures and videos, and classifies.',
           options: [
@@ -727,6 +741,8 @@ const OPTION_MAPPERS = {
   'learned.remove': (options) => ({ id: options.getInteger('id', true) }),
   'emoji.status': () => ({}),
   'emoji.rescan': () => ({}),
+  'gifs.status': () => ({}),
+  'gifs.rescan': () => ({}),
   'model.show': () => ({}),
   'model.set': (options) => ({ role: options.getString('role', true), id: options.getString('id', true) }),
   'warmup.people': () => ({}),

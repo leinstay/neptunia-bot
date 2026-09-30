@@ -363,6 +363,7 @@ function makeAdmin(rootDir, extra = {}) {
     images: extra.images,
     imageFetcher: extra.imageFetcher,
     emojiBackfill: extra.emojiBackfill,
+    gifBackfill: extra.gifBackfill,
     mentor: extra.mentor,
     mentorCases: extra.mentorCases,
     mentorBudget: extra.mentorBudget,
@@ -5579,6 +5580,118 @@ test('run: access.grant on emoji.status adds no write note, on emoji.rescan it d
   const { admin } = makeAdmin(rootDir);
   const status = await admin.run('access.grant', { command: 'emoji.status', roleId: 'staff' }, {});
   const rescan = await admin.run('access.grant', { command: 'emoji.rescan', roleId: 'staff' }, {});
+  assert.doesNotMatch(status, /change memory or config/);
+  assert.match(rescan, /change memory or config/);
+});
+
+// ---------------------------------------------------------------------------
+// gifs.status / gifs.rescan -- the GIF library and its history backfill
+// ---------------------------------------------------------------------------
+
+function fakeGifBackfill(result = { ok: true, channels: 3, messages: 120, gifs: 9, described: 4 }, { running = false } = {}) {
+  return {
+    calls: [],
+    async run(guildId, opts) {
+      this.calls.push([guildId, opts]);
+      return result;
+    },
+    isRunning: () => running,
+  };
+}
+
+/** A member message carrying one gif embed `n` (its own tenor link) posted `times` times. */
+function gifMessages(n, times, ts) {
+  const out = [];
+  for (let k = 0; k < times; k += 1) {
+    out.push({
+      id: `m${n}-${k}`,
+      ts,
+      channelId: 'c1',
+      links: [{ id: `m${n}-0#e0`, kind: 'gif', url: `https://tenor.com/view/g-${n}`, site: 'Tenor', title: `Danse ${n}` }],
+    });
+  }
+  return out;
+}
+
+test('run: gifs.status shows the library size, the top 10 with counts and captions, the stamp and today\'s posts', async () => {
+  const rootDir = makeRoot();
+  const hot = makeHot(rootDir);
+  hot.config.gifs = { maxPerDay: 25 };
+  const { admin, store, dataDir } = makeRealStoreAdmin(rootDir, { hot });
+  try {
+    const now = Date.now();
+    const messages = [];
+    for (let i = 0; i < 12; i += 1) messages.push(...gifMessages(i, i + 1, now));
+    store.recordGifs('g1', messages);
+    const top = store.getGifs('g1').entries['m11-0#e0'];
+    store.getMediaCache('g1')[top.itemId] = { text: 'a cat dancing', ts: now };
+    store.setGifBackfill('g1', { at: '2026-09-30T10:00:00.000Z', channels: 4, messages: 900 });
+    store.state.data.gifDay = new Date().toISOString().slice(0, 10);
+    store.state.data.gifCount = 7;
+
+    const body = await admin.run('gifs.status', {}, { guildId: 'g1' });
+    const lines = body.split('\n');
+    assert.equal(lines[0], 'library: 12 gifs');
+    assert.equal(lines[1], 'top 10:');
+    assert.equal(lines[2], `  ${top.id} x12 — a cat dancing`);
+    assert.match(lines[3], /^ {2}g\d+ x11 — Danse 10$/);
+    assert.equal(lines.filter((line) => line.startsWith('  g')).length, 10, 'only the top 10');
+    assert.equal(lines[12], 'backfill: 2026-09-30T10:00:00.000Z, 4 channels, 900 messages');
+    assert.equal(lines[13], 'posted today: 7/25');
+  } finally {
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test('run: gifs.status with an empty library and no backfill says so; yesterday\'s posts do not count', async () => {
+  const rootDir = makeRoot();
+  const { admin, store, dataDir } = makeRealStoreAdmin(rootDir, { gifBackfill: fakeGifBackfill(undefined, { running: true }) });
+  try {
+    store.state.data.gifDay = '2000-01-01';
+    store.state.data.gifCount = 30;
+    const body = await admin.run('gifs.status', {}, { guildId: 'g1' });
+    assert.equal(body, ['library: 0 gifs', 'top 10: (none)', 'backfill: never (running now)', 'posted today: 0/40'].join('\n'));
+  } finally {
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test('run: gifs.rescan runs the backfill forced and replies with the counts', async () => {
+  const rootDir = makeRoot();
+  const gifBackfill = fakeGifBackfill();
+  const { admin } = makeAdmin(rootDir, { gifBackfill });
+
+  const body = await admin.run('gifs.rescan', {}, { guildId: 'g1' });
+  assert.deepEqual(gifBackfill.calls, [['g1', { force: true }]]);
+  assert.equal(body, 'GIF rescan done: 3 channels, 120 messages read, 9 GIF uses counted, 4 described.');
+});
+
+test('run: gifs.rescan relays why the backfill did not run', async () => {
+  const rootDir = makeRoot();
+  const { admin: busy } = makeAdmin(rootDir, { gifBackfill: fakeGifBackfill({ ok: false, reason: 'running' }) });
+  assert.equal(await busy.run('gifs.rescan', {}, { guildId: 'g1' }), 'A GIF backfill is already running.');
+
+  const { admin: off } = makeAdmin(rootDir, { gifBackfill: fakeGifBackfill({ ok: false, reason: 'disabled' }) });
+  assert.equal(await off.run('gifs.rescan', {}, { guildId: 'g1' }), 'The GIF backfill is off (gifs.backfillMessages is 0).');
+});
+
+test('run: gifs.rescan is refused while paused and without the backfill', async () => {
+  const rootDir = makeRoot();
+  const gifBackfill = fakeGifBackfill();
+  const { admin } = makeAdmin(rootDir, { gifBackfill });
+  await admin.run('pause', {}, {});
+  await assert.rejects(() => admin.run('gifs.rescan', {}, { guildId: 'g1' }), /paused/);
+  assert.equal(gifBackfill.calls.length, 0);
+
+  const { admin: bare } = makeAdmin(rootDir);
+  assert.equal(await bare.run('gifs.rescan', {}, { guildId: 'g1' }), 'the GIF backfill is not available');
+});
+
+test('run: access.grant on gifs.status adds no write note, on gifs.rescan it does', async () => {
+  const rootDir = makeRoot();
+  const { admin } = makeAdmin(rootDir);
+  const status = await admin.run('access.grant', { command: 'gifs.status', roleId: 'staff' }, {});
+  const rescan = await admin.run('access.grant', { command: 'gifs.rescan', roleId: 'staff' }, {});
   assert.doesNotMatch(status, /change memory or config/);
   assert.match(rescan, /change memory or config/);
 });

@@ -10,6 +10,7 @@
 //   6. memory about other people present in the transcript
 //   7. neighbouring channels
 //   8. the server's custom emoji (`<emoji>`)
+//   9. the GIF library (`<gifs>`)
 // The rendered order is different: reference material first, the chat and the
 // task last, where the model attends best. A private chat (`privateChat`)
 // drops the server map and the neighbouring channels and sees its partner
@@ -22,6 +23,7 @@ import { affinityBand, roundScore } from '../memory/affinity.js';
 import { isConfirmed, isStale } from '../memory/interests.js';
 import { topByRank } from '../memory/ranking.js';
 import { rankEmojiUsage } from '../memory/emoji-usage.js';
+import { gifHandleMap, normalizeGifs, rankGifs } from '../memory/gifs.js';
 import { sortEpisodesForDisplay } from '../memory/episodes.js';
 import { matchLore } from '../memory/lore.js';
 import { channelActivity, renderChannel } from '../memory/channels.js';
@@ -519,6 +521,34 @@ function emojiItems(index, usage, mediaCache, labels, emojiCfg) {
 }
 
 /**
+ * The `<gifs>` section's items: `labels.gifs.header` first, then one line
+ * per GIF of the library -- the top `gifsCfg.max` (default 20) by rank
+ * (src/memory/gifs.js#rankGifs, `gifsCfg.halfLifeDays`, default 30). A helper
+ * caption cached under the entry's `itemId` (the describer's cache; a `miss`
+ * entry has no text) renders through `labels.gifs.entry` (`{id}`/`{text}`),
+ * otherwise `labels.gifs.entryNoText` (`{id}`). `[]` when the library is
+ * empty or the labels lack `header`/`entryNoText` (an older labels.json).
+ * @param {unknown} gifs            The library (store.getGifs).
+ * @param {object|null} mediaCache  The describer cache (store.getMediaCache), read only.
+ * @param {object} labels
+ * @param {{ max?: number, halfLifeDays?: number }} [gifsCfg]  `config.gifs`.
+ * @returns {string[]}
+ */
+function gifItems(gifs, mediaCache, labels, gifsCfg) {
+  const g = labels.gifs;
+  if (!g?.header || !g.entryNoText) return [];
+  const max = Number.isInteger(gifsCfg?.max) && gifsCfg.max >= 0 ? gifsCfg.max : 20;
+  const chosen = rankGifs(gifs, gifsCfg?.halfLifeDays ?? 30).slice(0, max);
+  if (chosen.length === 0) return [];
+  const lines = chosen.map((entry) => {
+    const cached = mediaCache?.[entry.itemId];
+    const text = cached && !cached.miss && typeof cached.text === 'string' ? cached.text.trim() : '';
+    return text && g.entry ? fill(g.entry, { id: entry.id, text }) : fill(g.entryNoText, { id: entry.id });
+  });
+  return [g.header, ...lines];
+}
+
+/**
  * Assemble the `<now>…<task>` user-message text from already-rendered parts.
  * Factored out so a fallback rendering (see `textFallback` below) can reuse
  * every block untouched except `<chat>`, which is the only one that can ever
@@ -530,6 +560,7 @@ function assembleUser({ now, timezone, labels, sensesText, kept, tempoText, task
     block('senses', sensesText),
     block('about_chat', kept.aboutChat.join('\n')),
     block('emoji', (kept.emoji ?? []).join('\n')),
+    block('gifs', (kept.gifs ?? []).join('\n')),
     block('server', kept.server.join('\n\n')),
     block('lore', kept.lore.join('\n\n')),
     block('self_facts', kept.self.join('\n')),
@@ -625,9 +656,10 @@ function renderLookup(lookup, labels) {
  * undefined when no image client is wired) picks the drawing line.
  * `privateChat` adds `senses.privateChat`; outside a private chat,
  * `features.privateMessages === true` adds `senses.privateAware` instead.
- * `customEmoji` (the `<emoji>` block is possible) adds `senses.customEmoji`.
+ * `customEmoji` (the `<emoji>` block is possible) adds `senses.customEmoji`;
+ * `gifs` (features.gifs on and a non-empty library) adds `senses.gifs` right after it.
  */
-function renderSenses(config, labels, { searchAvailable = false, drawQuota, privateChat = false, customEmoji = false } = {}) {
+function renderSenses(config, labels, { searchAvailable = false, drawQuota, privateChat = false, customEmoji = false, gifs = false } = {}) {
   const senses = labels.senses;
   if (!senses) return '';
   const visionOn = config.features?.vision !== false;
@@ -657,6 +689,9 @@ function renderSenses(config, labels, { searchAvailable = false, drawQuota, priv
   // The server's custom emoji (`customEmoji`: features.customEmoji on and a
   // non-empty index); an older labels.json without the line shows nothing.
   if (customEmoji && senses.customEmoji) lines.push(senses.customEmoji);
+  // The GIF library (`gifs`: features.gifs on and a non-empty library); an
+  // older labels.json without the line shows nothing.
+  if (gifs && senses.gifs) lines.push(senses.gifs);
 
   // The web lookup (features.webLookup -- a missing key counts as OFF, it
   // costs money and needs a key): the links line stays as it is and the
@@ -873,7 +908,11 @@ function splitPeople(otherProfiles, candidateProfiles, history, trigger, exclude
  *   renders (ranked by `guildMemory.emojiUsage`, see `emojiItems`) and `<senses>` carries
  *   `senses.customEmoji`. Omitted or [] -> neither.
  * @param {object|null} [input.mediaCache]  The describer cache (store.getMediaCache), read only
- *   for the `emoji:<id>` captions of `<emoji>`.
+ *   for the `emoji:<id>` captions of `<emoji>` and the GIF captions of `<gifs>`.
+ * @param {object|null} [input.gifs]  The guild's GIF library (store.getGifs). With `features.gifs`
+ *   on (a missing key counts as on) and at least one entry, `<gifs>` renders (see `gifItems`),
+ *   `<senses>` carries `senses.gifs`, and a GIF of the library in the transcript carries its
+ *   handle (`transcript.gifKnown`/`gifKnownNoText`). Omitted or empty -> none of it.
  * @returns {{ messages: object[], stats: object, idByIndex: Map<number, string>, tempo: object }}
  */
 export function buildRequest(input) {
@@ -890,6 +929,9 @@ export function buildRequest(input) {
   const visionOn = config.features?.vision !== false;
   const pictures = visionOn ? selectPictures({ trigger, history, visionCfg, now }) : [];
   const attachedIndex = new Map(pictures.map((picture, i) => [picture.itemId, i + 1]));
+  // The GIF library: the switch (a missing key counts as on) and at least one entry.
+  const gifLibrary = config.features?.gifs !== false && input.gifs ? normalizeGifs(input.gifs) : null;
+  const gifsOn = Boolean(gifLibrary) && Object.keys(gifLibrary.entries).length > 0;
   const formatOptions = {
     timezone,
     gapMinutes: config.context.gapMarkerMinutes,
@@ -902,6 +944,8 @@ export function buildRequest(input) {
     descriptions,
     videos,
     reads,
+    // A GIF the library knows carries its handle in the transcript.
+    gifHandles: gifsOn ? gifHandleMap(gifLibrary) : undefined,
   };
 
   const nameFill = (text) => fillPromptTemplate(text, { name: selfName });
@@ -947,6 +991,7 @@ export function buildRequest(input) {
     drawQuota: input.drawQuota,
     privateChat,
     customEmoji: customEmoji.length > 0,
+    gifs: gifsOn,
   });
 
   // A private chat has no neighbouring channels (and no server map, below).
@@ -1083,12 +1128,20 @@ export function buildRequest(input) {
         keep: 'first',
         items: emojiItems(customEmoji, input.guildMemory?.emojiUsage, input.mediaCache ?? null, labels, config.context.customEmoji),
       },
+      // Below even the emoji: the GIF library, trimmed the same way (least used last).
+      {
+        name: 'gifs',
+        cap: caps.gifs ?? 600,
+        keep: 'first',
+        items: gifsOn ? gifItems(gifLibrary, input.mediaCache ?? null, labels, config.gifs) : [],
+      },
     ],
     limit,
     cost,
   );
   // The header alone, or entries without their header, make no block.
   if (kept.emoji.length < 2 || kept.emoji[0] !== labels.emoji?.header) kept.emoji = [];
+  if (kept.gifs.length < 2 || kept.gifs[0] !== labels.gifs?.header) kept.gifs = [];
 
   const keptChat = chatItems.slice(chatItems.length - kept.chat.length);
   const user = assembleUser({ now, timezone, labels, sensesText, kept, tempoText, task, chatItems: keptChat });

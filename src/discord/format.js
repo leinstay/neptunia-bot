@@ -9,6 +9,7 @@
 // live conversation from a dead chat that somebody has just poked.
 
 import { mediaLabelFor, stickerLabelFor, stickerUrl } from './media.js';
+import { gifHandleOf } from '../memory/gifs.js';
 
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
@@ -123,6 +124,10 @@ function truncate(text, maxChars) {
  * `context.reads` is an optional `Map` of link ids to the excerpt the web
  * lookup read from that page (src/web/lookup.js); it needs
  * `transcript.linkRead`, so an older labels.json renders exactly as before.
+ * `context.gifHandles` is an optional `Map` from src/memory/gifs.js#gifHandleMap:
+ * a GIF (attachment or embed) the library knows renders `transcript.gifKnown` /
+ * `gifKnownNoText` with its handle; an older labels.json without the key in
+ * question renders `gifDescribed` / `gif` exactly as before.
  */
 function mediaTags(message, labels, context = {}) {
   const unknownDuration = labels.transcript.unknownDuration ?? '?';
@@ -155,11 +160,24 @@ function mediaTags(message, labels, context = {}) {
   // An attached picture's caption (imageAttachedDescribed) is a newer,
   // optional key: without it the bare imageAttached renders as before.
   const attachedCaptionOn = Boolean(labels.transcript.imageAttachedDescribed);
+  // A library GIF's handle (gifKnown / gifKnownNoText) is a newer, optional
+  // pair of keys: without the one chosen, the plain GIF form renders as before.
+  const handleOf = (item, kind) => (item.kind === 'gif' ? gifHandleOf(context.gifHandles, item, kind) : null);
+  const withGifFallback = (label) => {
+    if (label.key === 'gifKnown' && !labels.transcript.gifKnown) {
+      return { ...label, key: 'gifDescribed', values: { text: label.values.text } };
+    }
+    if (label.key === 'gifKnownNoText' && !labels.transcript.gifKnownNoText) {
+      return { ...label, key: 'gif', values: { name: label.values.name } };
+    }
+    return label;
+  };
   for (const attachment of message.attachments ?? []) {
     const attachedIndex = context.attachedIndex?.get(attachment.id) ?? null;
     const description = context.descriptions?.get(attachment.id) ?? null;
     const video = videoOf(attachment.id);
-    const label = mediaLabelFor(attachment, { attachedIndex, description, unknownDuration, video });
+    const gifHandle = handleOf(attachment, 'attachment');
+    const label = withGifFallback(mediaLabelFor(attachment, { attachedIndex, description, unknownDuration, video, gifHandle }));
     pushLabel(
       label.key === 'imageAttachedDescribed' && !attachedCaptionOn ? { key: 'imageAttached', values: { n: label.values.n } } : label,
     );
@@ -174,7 +192,8 @@ function mediaTags(message, labels, context = {}) {
     const canDescribe = link.kind !== 'link' || Boolean(labels.transcript.thumbnailDescribed);
     const description = canDescribe ? (context.descriptions?.get(link.id) ?? null) : null;
     const read = readsOn ? (context.reads?.get(link.id) ?? null) : null;
-    pushLabel(mediaLabelFor(link, { attachedIndex, description, unknownDuration, video: videoOf(link.id), read }));
+    const gifHandle = handleOf(link, 'link');
+    pushLabel(withGifFallback(mediaLabelFor(link, { attachedIndex, description, unknownDuration, video: videoOf(link.id), read, gifHandle })));
   }
   for (const sticker of message.stickers ?? []) {
     const attachedIndex = context.attachedIndex?.get(`sticker:${sticker.id}`) ?? null;
@@ -263,6 +282,10 @@ function renderForwarded(snapshot, labels, context, maxChars, channelName) {
  * @param {Map<string, string>} [options.reads]  Link id -> the excerpt the web lookup read from
  *   that page (src/web/lookup.js); renders `transcript.linkRead`. Ignored when the labels have
  *   no `transcript.linkRead` key.
+ * @param {Map<string, string>} [options.gifHandles]  The GIF library's handles
+ *   (src/memory/gifs.js#gifHandleMap); a GIF it knows renders `transcript.gifKnown` /
+ *   `transcript.gifKnownNoText` with its handle, falling back to `gifDescribed` / `gif`
+ *   when the labels lack that key.
  * @param {boolean} [options.seeReactions]  Default true: a message's `reactions` render as
  *   `transcript.reactions` at the end of its line. Ignored when the labels have no
  *   `transcript.reactions` key.
@@ -277,10 +300,10 @@ function renderForwarded(snapshot, labels, context, maxChars, channelName) {
  * channel run, never across a channel switch.
  */
 export function formatTranscript(messages, options) {
-  const { timezone, gapMinutes, maxChars, selfName, labels, mode = 'chat', attachedIndex, descriptions, videos, reads } = options;
+  const { timezone, gapMinutes, maxChars, selfName, labels, mode = 'chat', attachedIndex, descriptions, videos, reads, gifHandles } = options;
   const seeReactions = options.seeReactions ?? true;
   const reactionsPerMessage = options.reactionsPerMessage ?? 6;
-  const mediaContext = { attachedIndex, descriptions, videos, reads };
+  const mediaContext = { attachedIndex, descriptions, videos, reads, gifHandles };
   const locale = labels.locale;
   const selfLabel = fill(labels.self, { name: selfName });
   const indexById = new Map(messages.map((message, i) => [message.id, i + 1]));

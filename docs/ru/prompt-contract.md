@@ -71,6 +71,7 @@
 | `<senses>` | Что персонаж может и чего не может воспринимать ПРЯМО СЕЙЧАС. Генерируется из текущей конфигурации: какие картинки он видит сам, какие приходят описанием от вспомогательной модели, к чему слеп и глух. Поэтому он никогда не притворяется, что посмотрел видео, и может пошутить об этом в своей манере |
 | `<about_chat>` | Как здесь общаются, как заводят и подхватывают разговоры, внутренние шутки, то, чему люди научили персонажа |
 | `<emoji>` | Пользовательские эмодзи, доступные персонажу (`features.customEmoji`): не более `context.customEmoji.max` записей, ранжированных по частоте использования участниками. Каждая содержит `:name:` и подпись от помощника, если она есть в кэше |
+| `<gifs>` | GIF, которые персонаж может отправить (`features.gifs`): не более `gifs.max` записей из библиотеки, ранжированных по частоте и новизне использования. Каждая содержит хэндл (`g1`, `g2`, …) и подпись от помощника, если она есть в кэше |
 | `<server>` | ТЕКУЩИЙ канал полностью (категория и тема Discord, назначение, о чём пишут, тон, активность, последнее сообщение, самые активные авторы; отмечен `labels.server.currentMark`), затем только те соседние каналы, которые дали сообщения в `<other_channels>` этого хода; никаких других каналов |
 | `<lore>` | Записи серверного лорбука, чьи ключевые слова встречаются в последних сообщениях (плюс записи с пометкой always): события, повторяющиеся персонажи, длительные истории. Как лорбук: записей могут быть сотни, показываются только подходящие |
 | `<self_facts>` | Что персонаж утверждал о себе |
@@ -83,7 +84,7 @@
 
 Приоритет бюджета (секции обрезаются с конца этого списка): системный промпт + задача + часы + темп + восприятие
 (никогда не обрезаются) → профиль вызвавшего с эпизодами → lookup (сохраняется или отбрасывается целиком) → серверные привычки → факты о себе → лорбук → карта каналов → транскрипт (новейшие сначала) →
-остальные профили → соседние каналы → эмодзи (записи с конца, затем весь блок; `context.caps.emoji`).
+остальные профили → соседние каналы → эмодзи (записи с конца, затем весь блок; `context.caps.emoji`) → GIF (та же обрезка; `context.caps.gifs`).
 
 Медиа в строке транскрипта, наиболее информативная доступная форма: картинка, прикреплённая к ЭТОМУ запросу →
 `transcript.imageAttached`, или `transcript.imageAttachedDescribed`, когда `features.attachedDescriptions` включён и
@@ -145,6 +146,8 @@ transcript.imageAttachedDescribed        {n} {text}: attached to the request and
 transcript.imageDescribed                {text}
 transcript.gif                           {name}
 transcript.gifDescribed                  {text}
+transcript.gifKnown                      {id} {text}: a GIF that is in the library; id is its handle, text is the caption
+transcript.gifKnownNoText                {id} {name}: a library GIF without a caption; id is the handle, name is the file or link name
 transcript.video                         {name} {duration}
 transcript.videoDescribed                {name} {duration} {text}: text describes ONE frame
 transcript.videoWatched                  {name} {duration} {text}: first-hand, the persona saw and heard the clip
@@ -177,6 +180,7 @@ senses.videoRewatch                      shown alongside videoWatch when feature
 senses.stickerSee | stickerDescribed | stickerBlind
 senses.lottie
 senses.customEmoji                       shown when features.customEmoji is on and the server has at least one custom emoji; tells the persona it can use server custom emoji by writing :name:
+senses.gifs                              shown when features.gifs is on and the library is not empty; tells the persona it can post one GIF per turn by handle from the list
 senses.voice | links | files
 senses.linksWatch                        replaces links when features.videoDescriptions is on; adds that a linked video may come watched or not watched with the reason
 senses.linksRead                         shown after the links line when features.webLookup is on and web.links.enabled is not false; tells the persona that a link may come with a read excerpt, first-hand
@@ -212,6 +216,9 @@ lore.entry                               {title} {text}
 emoji.header                             introduces the custom emoji list
 emoji.entry                              {name} {text}: one emoji with a caption
 emoji.entryNoText                        {name}: one emoji without a caption
+gifs.header                              introduces the GIF library list
+gifs.entry                               {id} {text}: one GIF with a caption
+gifs.entryNoText                         {id}: one GIF without a caption
 affinity.bands.hostile | dislike | cool | neutral | warm | fond | devoted
                                          thresholds in code: ≤-60 · ≤-25 · ≤-8 · <8 · <25 · <60 · ≥60
 aboutChat.patterns | starters | injokes  {text}
@@ -245,13 +252,14 @@ mentor.original                          first line inside the `<original>` bloc
 - `<think>…</think>` необязателен, первый, 1–4 строки скрытого планирования; незакрытый означает молчание.
 - `<msg>text</msg>` одно сообщение в чат, до 3 подряд; `reply="#87"` превращает его в ответ Discord.
 - `<react to="#87">💀</react>` один юникодный эмодзи или один серверный пользовательский эмодзи как `:name:`; отдельно или вместе с `<msg>`.
+- `<gif reply="#87">g12</gif>` отправляет GIF из библиотеки по хэндлу (тело = хэндл из блока `<gifs>` или из транскрипта, никогда URL). Один за ход; `reply` необязателен, как на `<msg>`. Может быть отдельно или вместе с `<msg>`, `<react>`, `<draw>`. Неизвестный хэндл = ничего не отправляется.
 - `<draw self="yes" reply="#87">scene</draw>` картинка для подпроцесса рисования. Один на ход, первый непустой побеждает, обрезается до 800 символов. `self="yes"` добавляет внешность персонажа; `reply="#87"` работает как на `<msg>`. Может быть вместе с `<msg>` и `<react>`.
 - `<skip/>` промолчать.
 - `@nick` в точности как в транскрипте становится реальным упоминанием.
 - `:name:` известного серверного пользовательского эмодзи становится реальным эмодзи в `<msg>` и `<react>`; неизвестное имя остаётся обычным текстом.
 
 `features.reactions: false` убирает `<react>`, `features.multiMessage: false` оставляет только первый `<msg>`;
-`features.imageGeneration: false` или отсутствие клиента изображений убирает `<draw>`; на ходе `drawFailed` тег `<draw>` тоже убирается. Промптам об этом знать не обязательно.
+`features.gifs: false` или пустая библиотека убирает `<gif>`; `features.imageGeneration: false` или отсутствие клиента изображений убирает `<draw>`; на ходе `drawFailed` тег `<draw>` тоже убирается. Промптам об этом знать не обязательно.
 
 ## Анализатор
 

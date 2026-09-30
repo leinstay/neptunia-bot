@@ -25,6 +25,8 @@ export const labels = {
     imageDescribed: '[image: {text}]',
     gif: '[gif: {name}]',
     gifDescribed: '[gif: {text}]',
+    gifKnown: '[gif {id}: {text}]',
+    gifKnownNoText: '[gif {id}: {name}]',
     video: '[video: {name}, {duration}]',
     videoDescribed: '[video: {name}, {duration}: {text}]',
     voice: '[voice message, {duration}]',
@@ -85,6 +87,7 @@ export const labels = {
     privateChat: 'this is a private chat with one person, it stays here',
     privateAware: 'some people write to you privately; never repeat any of it here',
     customEmoji: 'this server has its own emoji, listed in <emoji>; write one as :name:',
+    gifs: 'you can post one gif per turn from <gifs> by its handle',
   },
   tempo: {
     counts: 'messages in the last 10 min: {last10min}, last hour: {lastHour}, last day: {lastDay}',
@@ -126,6 +129,11 @@ export const labels = {
     header: 'custom emoji of this server, most used first:',
     entry: ':{name}: -- {text}',
     entryNoText: ':{name}:',
+  },
+  gifs: {
+    header: 'gifs of this server, most used first:',
+    entry: '{id} -- {text}',
+    entryNoText: '{id}',
   },
   lookup: {
     header: 'searched for: {query}',

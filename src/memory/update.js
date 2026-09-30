@@ -1126,6 +1126,17 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
     if (store.state.data.paused) return;
     if (normalized.bot) return;
     if (!privateUserId) touchMemory(store, guildId, normalized);
+    // The GIF library (src/memory/gifs.js) is fed here, not after the batch:
+    // it needs the GIF's URL, and no URL survives into the buffer below. A
+    // private chat never feeds it; the persona's own GIFs are skipped there.
+    if (!privateUserId && hot.config.features?.gifs !== false) {
+      const gifCfg = hot.config.gifs ?? {};
+      const gifs = store.recordGifs(guildId, [normalized], {
+        storeMax: gifCfg.storeMax ?? 300,
+        halfLifeDays: gifCfg.halfLifeDays ?? 30,
+      });
+      if (gifs > 0) log.info('memory: gifs recorded', { guildId, gifs });
+    }
 
     const forwarded = (normalized.forwarded ?? []).map((snapshot) => ({
       content: snapshot.content ?? '',
