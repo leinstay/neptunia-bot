@@ -1229,6 +1229,57 @@ test('attempt: a weak anchor is replayed from its stored history; the fresh situ
     },
   ));
 
+test('attempt: every replay of a real moment hides the memory written after its trigger', () => {
+  // The moments' triggers are a day before NOW; one learned item is older, one was learned an hour ago.
+  const learned = [
+    { id: 1, text: 'LEARNED_EARLY', weight: 3, firstSeen: new Date(NOW - 3 * 86_400_000).toISOString(), lastSeen: new Date(NOW - 3_600_000).toISOString() },
+    { id: 2, text: 'LEARNED_LATE', weight: 3, firstSeen: new Date(NOW - 3_600_000).toISOString(), lastSeen: new Date(NOW - 3_600_000).toISOString() },
+  ];
+  const scoreFor = (a, call) => (a.messages.join(' ').includes('GOOD') ? 9 : call.user.includes('ANCHOR_TRIGGER') ? 3 : 8);
+  return withSetup({ guild: { learned }, llm: fakeLlm({ scoreFor }) }, async (env) => {
+    const other = env.cases.add(GUILD, { text: OTHER_TEXT, target: 'reply', anchor: moment('OTHER_MOMENT', '800000000000000020') });
+    env.cases.saveRun(GUILD, {
+      caseId: other.id,
+      caseText: OTHER_TEXT,
+      target: 'reply',
+      kind: 'run',
+      situations: [{ n: 1, title: '', anchor: 1, original: ['OTHER_MOMENT you are right, but'], transcript: '', answers: [] }],
+      situationMedians: [{ n: 1, overall: 8, goal: 8 }],
+      medians: { human: 8, character: 8, rules: 8, goal: 8, overall: 8 },
+      passed: true,
+      reasons: [],
+    });
+    const item = env.cases.add(GUILD, { text: CASE_TEXT, target: 'reply', anchor: moment('ANCHOR_TRIGGER') });
+    const run = await (await env.mentor.run(item.id)).done;
+    assert.equal(run.repair.reason, 'applied');
+    const text = (call) => `${call.system}\n${call.user}`;
+    // The control, the ablation and the regression replay moments: the persona and the judge see the older item only.
+    for (const phase of ['repair: control', 'repair 1: ablation', 'repair 1: regression']) {
+      const calls = env.llm.inPhase(phase);
+      const talks = calls.filter((c) => c.kind === 'talk');
+      assert.ok(talks.length > 0, phase);
+      for (const call of talks) {
+        assert.match(text(call), /ANCHOR_TRIGGER opening|OTHER_MOMENT opening/, phase);
+        assert.ok(text(call).includes('LEARNED_EARLY'), phase);
+        assert.ok(!text(call).includes('LEARNED_LATE'), phase);
+      }
+      for (const call of calls.filter((c) => c.kind === 'score')) {
+        assert.match(blockBody(call.user, 'learned'), /LEARNED_EARLY/, phase);
+        assert.doesNotMatch(blockBody(call.user, 'learned'), /LEARNED_LATE/, phase);
+      }
+    }
+    // The fresh situations of the verification are invented: they see the whole memory.
+    const fresh = env.llm.inPhase('repair 1: verify').filter((c) => c.kind === 'talk');
+    assert.ok(fresh.length > 0);
+    for (const call of fresh) assert.ok(text(call).includes('LEARNED_LATE'));
+    // The diagnosis's <seen> (the weak moment) and the fix request's <seen> show what the persona saw.
+    const seen = blockBody(env.llm.ofKind('diagnose')[0].user, 'seen');
+    assert.match(seen, /ANCHOR_TRIGGER opening/);
+    assert.ok(seen.includes('LEARNED_EARLY') && !seen.includes('LEARNED_LATE'));
+    assert.equal(blockBody(env.llm.ofKind('fix')[0].user, 'seen'), seen);
+  });
+});
+
 test("attempt: the regression replays another case's moments from their stored history", () =>
   withSetup({}, async (env) => {
     const other = env.cases.add(GUILD, { text: OTHER_TEXT, target: 'reply', anchor: moment('OTHER_MOMENT', '800000000000000020') });

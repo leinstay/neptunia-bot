@@ -17,7 +17,9 @@
 // A case may carry real moments of the chat ("anchors", src/mentor/anchor.js):
 // each is a situation of its own, numbered before the invented ones and
 // replayed from its stored messages at its own time, with today's prompts and
-// memory. The situations request shows them to the mentor model as
+// today's memory minus what was written at or after its trigger (so the
+// persona cannot remember how the exchange ended; `mentor.anchor.hideLaterMemory`,
+// src/mentor/moment.js). The situations request shows them to the mentor model as
 // `<examples>`, and an anchor's score request carries the persona's original
 // answer as `<original>`. Wherever an anchor's chat does not fit a request,
 // its oldest messages give way; the trigger never does.
@@ -43,6 +45,7 @@ import { log } from '../log.js';
 import { anchorSituations, resolveAnchor } from './anchor.js';
 import { MentorBudgetError } from './budget.js';
 import { parseDiagnosis, parseScores, parseSituations, verdict } from './judge.js';
+import { hiddenLater, momentCutoff, momentView } from './moment.js';
 import { answerFacts, repeatedPhrases, sampleLines, styleProfile } from './reference.js';
 import { createRepair } from './repair.js';
 import { renderCard, renderCheckCard, renderCheckFile, renderFile } from './report.js';
@@ -104,17 +107,33 @@ function diagnosisFailure(err) {
   return 'request failed';
 }
 
+/** A median `goal` for comparison: a missing one counts as higher than any score. */
+function goalKey(entry) {
+  return typeof entry?.goal === 'number' ? entry.goal : Infinity;
+}
+
 /**
- * The situation with the lowest median `overall` (ties: the lowest `n`), or
- * null. When a real moment (`n` in `anchorNs`) is among the weak ones (median
- * `overall` under `passScore`), the worst of those weak moments is taken instead.
+ * The situation the diagnosis looks at: the one with the lowest median
+ * `overall`, whatever its kind (a real moment or an invented situation).
+ * Ties: the lower median `goal` (a missing goal counts as higher than any),
+ * then a real moment (`n` in `anchorNs`) before an invented one, then the
+ * lower `n`. Entries without a numeric `overall` are skipped; null when none
+ * is left. Pure.
+ * @param {{ n: number, overall: number|null, goal?: number|null }[]} situationMedians
+ * @param {Set<number>} [anchorNs]  The `n` of every situation that is a real moment.
+ * @returns {object|null}
  */
-function worstSituation(situationMedians, anchorNs = new Set(), passScore = 7) {
-  const scored = (situationMedians ?? []).filter((entry) => typeof entry?.overall === 'number');
-  const weakAnchors = scored.filter((entry) => anchorNs.has(entry.n) && entry.overall < passScore);
+export function worstSituation(situationMedians, anchorNs = new Set()) {
+  const scored = (Array.isArray(situationMedians) ? situationMedians : []).filter((entry) => typeof entry?.overall === 'number');
+  const kind = (entry) => (anchorNs.has(entry.n) ? 0 : 1);
   let worst = null;
-  for (const entry of weakAnchors.length > 0 ? weakAnchors : scored) {
-    if (!worst || entry.overall < worst.overall || (entry.overall === worst.overall && entry.n < worst.n)) worst = entry;
+  for (const entry of scored) {
+    if (!worst) {
+      worst = entry;
+      continue;
+    }
+    const order = entry.overall - worst.overall || goalKey(entry) - goalKey(worst) || kind(entry) - kind(worst) || entry.n - worst.n;
+    if (order < 0) worst = entry;
   }
   return worst;
 }
@@ -142,7 +161,7 @@ function emptyMedians() {
  * The mentor for one bot. Every value is read at the moment of use:
  * `hot.config.mentor` (`model`, `maxOutputTokens`, `outputTokenWeight`,
  * `timeoutMs`, `situations`, `situationLines`, `samples`, `check.samples`,
- * `pass`, `reference`, `feedbackExamples`, `diagnose`), `hot.config.features.mentorAutoFix`,
+ * `pass`, `reference`, `feedbackExamples`, `diagnose`, `anchor.hideLaterMemory`), `hot.config.features.mentorAutoFix`,
  * `hot.config.features.mentor`
  * (must be exactly true; checked at the start, then again before every
  * situation and every mentor request together with `mentor.model`: either
@@ -554,10 +573,11 @@ export function createMentor({ hot, store, llm, client, cases, budget, changes, 
     };
   }
 
-  async function answerAll(ctx, { target, prepared, view, self, reference, samples, phase }) {
+  /** Answers every prepared situation on its own view (`entry.view`: a real moment's is filtered to its time). */
+  async function answerAll(ctx, { target, prepared, self, reference, samples, phase }) {
     let previous = 1;
     for (const entry of prepared) {
-      const { situation, record, history, at, channel } = entry;
+      const { situation, record, history, at, channel, view } = entry;
       checkEnabled();
       if (!budget.canSpend(previous)) throw new RunEnd('stopped', 'budget');
       checkAborted(ctx);
@@ -598,18 +618,21 @@ export function createMentor({ hot, store, llm, client, cases, budget, changes, 
    * persona's original answer, introduced by `labels.mentor.original`. With
    * `items` (the transcript items of each record) a transcript over what the
    * request has room for loses its oldest messages, never the trigger.
+   * `judges` maps a record to its own judge view (a real moment's: the memory
+   * as it stood at its time, see src/mentor/moment.js); the `<learned>` block
+   * of that record is built from it.
    */
-  async function scoreAll(ctx, { target, records, repeated, item, view, judgeView = view, self, reference, feedback, phase, items = new Map() }) {
+  async function scoreAll(ctx, { target, records, repeated, item, view, judgeView = view, judges = new Map(), self, reference, feedback, phase, items = new Map() }) {
     const labels = view.prompts.labels ?? {};
     const intended = Array.isArray(labels.mentor?.intended) ? labels.mentor.intended.filter((s) => typeof s === 'string' && s.trim()) : [];
     const character = target === 'reply' ? block('character', fillPromptTemplate(judgeView.prompts['character-card'], { name: self.name })) : '';
     const rules = block('rules', fillPromptTemplate(judgeView.prompts.rules, { name: self.name }));
-    const learned = block('learned', learnedLine(judgeView));
     const system = fillPromptTemplate(hot.prompts[PROMPTS[item.target].score], templateValues(self.name));
     const answersTag = target === 'memory' ? 'stored' : 'answers';
 
     for (const situation of records) {
       if (situation.answers.length === 0) continue;
+      const learned = block('learned', learnedLine(judges.get(situation) ?? judgeView));
       let pending = situation.answers.map((a) => a.id);
       // One request with every answer, then once more for the ones the reply left out.
       for (let attempt = 0; attempt < 2 && pending.length > 0; attempt += 1) {
@@ -660,15 +683,23 @@ export function createMentor({ hot, store, llm, client, cases, budget, changes, 
    * `judgeView` (default: `view`) is the view the judge's `<character>`,
    * `<rules>` and `<learned>` blocks are built from: the repair loop passes
    * the live view, so an edit never moves the yardstick it is measured by.
-   * `phase` replaces the status phases of the steps. Throws what the steps
-   * throw (a stop, a failed request); `into` receives `records`, `prepared`
-   * and `repeated` as soon as each exists, so a caller keeps what was
-   * measured before the throw.
+   * `phase` replaces the status phases of the steps. A real moment is
+   * answered and judged on `view` / `judgeView` as they stood before its
+   * trigger (src/mentor/moment.js#momentView: memory written at or after it
+   * hidden) unless `mentor.anchor.hideLaterMemory` is false (read now); every
+   * caller -- a run, a check, the repair loop's control, ablations and
+   * regression -- goes through here. `hidden` counts what was hidden, by
+   * kind, and the moments it was hidden for (`situations`). Throws what the
+   * steps throw (a stop, a failed request); `into` receives `records`,
+   * `prepared`, `hidden` and `repeated` as soon as each exists, so a caller
+   * keeps what was measured before the throw.
    * @returns {Promise<{ records: object[], scores: object[], groups: object[][], verdict: object,
-   *   repeated: object[], prepared: object[] }>}
+   *   repeated: object[], prepared: object[], hidden: object }>}
    */
   async function measureOn(ctx, { item, view, judgeView = view, situations, samples, reference, feedback, self, phase, into = {} }) {
     const timezone = hot.config.bot?.timezone;
+    const hideLater = hot.config.mentor?.anchor?.hideLaterMemory !== false;
+    const hidden = { situations: 0 };
     const prepared = situations.map((situation, i) => {
       // A real moment (see src/mentor/anchor.js) is replayed from its stored history, at its own time and channel.
       const anchored = Array.isArray(situation?.history);
@@ -679,12 +710,22 @@ export function createMentor({ hot, store, llm, client, cases, budget, changes, 
       const record = anchored
         ? { n: i + 1, title: situation.title ?? '', anchor: situation.anchor, original: situation.original ?? [], transcript, answers: [] }
         : { n: i + 1, title: situation.title ?? '', lines: situation.lines, transcript, answers: [] };
-      return { situation, record, history, items, at, channel: anchored ? anchorChannel(view, history) : reference.channel };
+      // A real moment sees the memory as it stood before its trigger (src/mentor/moment.js), the judge too.
+      const cutoff = anchored && hideLater ? momentCutoff(situation) : null;
+      const entry = { situation, record, history, items, at, channel: anchored ? anchorChannel(view, history) : reference.channel, view, judgeView };
+      if (cutoff !== null) {
+        entry.view = momentView(view, cutoff);
+        entry.judgeView = momentView(judgeView, cutoff);
+        hidden.situations += 1;
+        for (const [kind, count] of Object.entries(hiddenLater(view, cutoff))) hidden[kind] = (hidden[kind] ?? 0) + count;
+      }
+      return entry;
     });
     const records = prepared.map((p) => p.record);
     into.prepared = prepared;
     into.records = records;
-    await answerAll(ctx, { target: item.target, prepared, view, self, reference, samples, phase });
+    into.hidden = hidden;
+    await answerAll(ctx, { target: item.target, prepared, self, reference, samples, phase });
     let repeated = [];
     if (item.target === 'reply') {
       // Tagged with their situation: a phrase shared only by the samples of one situation is no habit.
@@ -693,8 +734,9 @@ export function createMentor({ hot, store, llm, client, cases, budget, changes, 
     }
     into.repeated = repeated;
     const items = new Map(prepared.map((p) => [p.record, p.items]));
-    await scoreAll(ctx, { target: item.target, records, repeated, item, view, judgeView, self, reference, feedback, phase, items });
-    return { records, ...verdictOf(records), repeated, prepared };
+    const judges = new Map(prepared.map((p) => [p.record, p.judgeView]));
+    await scoreAll(ctx, { target: item.target, records, repeated, item, view, judgeView, judges, self, reference, feedback, phase, items });
+    return { records, ...verdictOf(records), repeated, prepared, hidden };
   }
 
   // ---- the diagnosis ---------------------------------------------------------
@@ -738,9 +780,8 @@ export function createMentor({ hot, store, llm, client, cases, budget, changes, 
     };
     const template = hot.prompts?.[DIAGNOSE_PROMPT];
     if (typeof template !== 'string' || !template.trim()) return fail('prompt missing');
-    const passScore = Number.isFinite(hot.config.mentor?.pass?.score) ? hot.config.mentor.pass.score : 7;
     const anchorNs = new Set(run.situations.filter(isAnchorRecord).map((s) => s.n));
-    const worst = worstSituation(run.situationMedians, anchorNs, passScore);
+    const worst = worstSituation(run.situationMedians, anchorNs);
     const entry = worst ? prepared.find((p) => p.record.n === worst.n) : null;
     if (!entry?.request) return fail('no situation to diagnose');
     let text;
@@ -844,6 +885,8 @@ export function createMentor({ hot, store, llm, client, cases, budget, changes, 
     }
     if (into.records) run.situations = into.records;
     if (into.repeated) run.repeated = into.repeated;
+    // Counts only: how much later memory the real moments were answered without.
+    if (into.hidden?.situations > 0) log.info('mentor: later memory hidden', { kind, caseId: item.id, ...into.hidden });
 
     const { scores, verdict: result } = verdictOf(run.situations);
     run.medians = result.medians;

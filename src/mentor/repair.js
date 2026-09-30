@@ -23,8 +23,10 @@
 //
 // A weak real moment of the chat (an anchor, src/mentor/anchor.js) is
 // replayed from its stored messages in the control and every ablation, as is
-// another case's moment in the regression; the fresh situations of the
-// verification are invented with the case's moments in view (`<examples>`).
+// another case's moment in the regression, each with the memory as it stood
+// before its trigger (mentor.js#measureOn, src/mentor/moment.js); the fresh
+// situations of the verification are invented with the case's moments in
+// view (`<examples>`).
 //
 // Every measure is scored by a judge reading the LIVE rules, card and learned
 // items, so an edit never moves the yardstick it is measured by. An attempt

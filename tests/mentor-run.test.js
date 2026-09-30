@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { createMentor } from '../src/mentor/mentor.js';
+import { createMentor, worstSituation } from '../src/mentor/mentor.js';
 import { createCaseStore } from '../src/mentor/cases.js';
 import { createMentorBudget } from '../src/mentor/budget.js';
 import { TokenLimitError } from '../src/llm/openrouter.js';
@@ -217,7 +217,7 @@ function reference() {
   ];
 }
 
-function setup({ config = {}, prompts = {}, llm = fakeLlm(), sendFails = false, fetchChannel, windowFor, fetchMoment } = {}) {
+function setup({ config = {}, prompts = {}, llm = fakeLlm(), sendFails = false, fetchChannel, windowFor, fetchMoment, store = fakeMemoryStore() } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'nep-mentor-run-'));
   let clock = NOW;
   const now = () => (clock += 1000);
@@ -252,7 +252,7 @@ function setup({ config = {}, prompts = {}, llm = fakeLlm(), sendFails = false, 
   };
   const mentor = createMentor({
     hot,
-    store: fakeMemoryStore(),
+    store,
     llm,
     client,
     cases,
@@ -265,7 +265,7 @@ function setup({ config = {}, prompts = {}, llm = fakeLlm(), sendFails = false, 
     rng: () => 0,
   });
   const cleanup = () => fs.rmSync(dir, { recursive: true, force: true });
-  return { mentor, cases, hot, llm, budget, state, sent, fetched, windows, cleanup };
+  return { mentor, cases, hot, llm, budget, state, sent, fetched, windows, store, cleanup };
 }
 
 async function withSetup(options, fn) {
@@ -1482,24 +1482,61 @@ test('check: replays the anchors of a case, then the invented situations of its 
     assert.match(scoreCallOf(llm, 1).user, /<original>/);
   }));
 
-test('run: the diagnosis prefers a weak anchor as <worst>', async () => {
-  await withSetup({ llm: fakeLlm({ scoreFor: overallBySituation(6, 3, 9) }) }, async ({ mentor, cases, llm }) => {
+test('run: <worst> is the lowest situation, even when a weak anchor scores higher', async () => {
+  // The anchor is weak (5) but an invented situation is worse (2, goal 0): the invented one is diagnosed.
+  const scoreFor = (id) => (id.startsWith('s2') ? { ...score(2), goal: 0 } : score(id.startsWith('s1') ? 5 : 9));
+  await withSetup({ llm: fakeLlm({ scoreFor }) }, async ({ mentor, cases, llm }) => {
     const item = anchoredCase(cases, ['A1']);
     await (await mentor.run(item.id)).done;
     const diagnose = llm.calls.at(-1);
     assert.equal(diagnose.kind, 'diagnose');
     const worst = JSON.parse(blockBody(diagnose.user, 'worst'));
-    assert.equal(worst.n, 1);
-    assert.match(worst.transcript, /A1 TRIGGER/);
-    const talk = llm.calls.filter((c) => c.kind === 'talk')[0];
+    assert.equal(worst.n, 2);
+    assert.doesNotMatch(worst.transcript, /A1 TRIGGER/);
+    const talk = llm.calls.filter((c) => c.kind === 'talk')[2];
     assert.ok(blockBody(diagnose.user, 'seen').includes(`<user>\n${talk.user}\n</user>`));
   });
-  // An anchor at or above the pass score leaves the lowest situation as <worst>.
-  await withSetup({ llm: fakeLlm({ scoreFor: overallBySituation(8, 3, 9) }) }, async ({ mentor, cases, llm }) => {
+  // The anchor is the lowest: it is diagnosed, from its stored messages.
+  await withSetup({ llm: fakeLlm({ scoreFor: overallBySituation(3, 6, 9) }) }, async ({ mentor, cases, llm }) => {
+    const item = anchoredCase(cases, ['A1']);
+    await (await mentor.run(item.id)).done;
+    const worst = JSON.parse(blockBody(llm.calls.at(-1).user, 'worst'));
+    assert.equal(worst.n, 1);
+    assert.match(worst.transcript, /A1 TRIGGER/);
+  });
+  // A tie on overall goes to the lower goal: here the invented situation, after the anchor.
+  const tied = (id) => (id.startsWith('s1') ? { ...score(4), goal: 5 } : id.startsWith('s2') ? { ...score(4), goal: 2 } : score(9));
+  await withSetup({ llm: fakeLlm({ scoreFor: tied }) }, async ({ mentor, cases, llm }) => {
     const item = anchoredCase(cases, ['A1']);
     await (await mentor.run(item.id)).done;
     assert.equal(JSON.parse(blockBody(llm.calls.at(-1).user, 'worst')).n, 2);
   });
+});
+
+test('worstSituation: the lowest median overall wins, whatever its kind', () => {
+  const medians = [
+    { n: 1, overall: 5, goal: 5 },
+    { n: 2, overall: 2, goal: 0 },
+    { n: 3, overall: 9, goal: 9 },
+  ];
+  assert.equal(worstSituation(medians, new Set([1])).n, 2);
+  assert.equal(worstSituation(medians, new Set([3])).n, 2);
+  assert.equal(worstSituation(medians).n, 2);
+  assert.equal(worstSituation([]), null);
+  assert.equal(worstSituation(undefined), null);
+  assert.equal(worstSituation([{ n: 1, overall: null, goal: 3 }]), null);
+});
+
+test('worstSituation: ties go to the lower goal, then to an anchor, then to the lower n', () => {
+  // The lower median goal first, whatever the kind and the order.
+  assert.equal(worstSituation([{ n: 1, overall: 4, goal: 6 }, { n: 2, overall: 4, goal: 3 }], new Set([1])).n, 2);
+  // A known goal is lower than a missing one.
+  assert.equal(worstSituation([{ n: 1, overall: 4, goal: null }, { n: 2, overall: 4, goal: 6 }]).n, 2);
+  // Same overall and goal: an anchor before an invented situation.
+  assert.equal(worstSituation([{ n: 1, overall: 4, goal: 3 }, { n: 2, overall: 4, goal: 3 }], new Set([2])).n, 2);
+  // Same overall, goal and kind: the lower n.
+  assert.equal(worstSituation([{ n: 2, overall: 4, goal: 3 }, { n: 1, overall: 4, goal: 3 }]).n, 1);
+  assert.equal(worstSituation([{ n: 3, overall: 4, goal: 3 }, { n: 2, overall: 4, goal: 3 }], new Set([2, 3])).n, 2);
 });
 
 test('resolveAnchor: reads mentor.anchor.contextMessages and the media settings at the moment of use', () => {
@@ -1530,4 +1567,177 @@ test('resolveAnchor: reads mentor.anchor.contextMessages and the media settings 
 test('resolveAnchor: without fetchMoment no moment can be read', () =>
   withSetup({}, async ({ mentor }) => {
     await assert.rejects(mentor.resolveAnchor(snowflakeAt(MOMENT_TS), { channelId: CHANNEL.id }), /not available/);
+  }));
+
+// ---- a real moment sees the memory as it stood at its time -----------------------
+
+const iso = (ms) => new Date(ms).toISOString();
+/** The moment's trigger is at MOMENT_TS + 2 minutes; these fall on either side of it. */
+const LONG_BEFORE = iso(MOMENT_TS - 86_400_000);
+const LATER = iso(MOMENT_TS + 10 * 60_000);
+
+function deepFreeze(value) {
+  if (value && typeof value === 'object') {
+    for (const item of Object.values(value)) deepFreeze(item);
+    Object.freeze(value);
+  }
+  return value;
+}
+
+/**
+ * A read-only memory store holding items written before the moment
+ * (`..._BEFORE`) and after it (`..._AFTER`): Alice's episodes, details,
+ * interests, aliases and attitude, the learned items and an `always` lore entry.
+ * Its data is deep-frozen and it has no write method: any write throws.
+ */
+function datedMemoryStore() {
+  const data = deepFreeze({
+    profiles: {
+      [ALICE]: {
+        id: ALICE,
+        names: ['Alice'],
+        character: 'CHARACTER_UNDATED',
+        interests: [
+          { topic: 'INT_BEFORE', note: '', weight: 3, firstSeen: LONG_BEFORE, lastSeen: LONG_BEFORE },
+          { topic: 'INT_AFTER', note: '', weight: 3, firstSeen: LATER, lastSeen: LATER },
+        ],
+        details: [
+          { id: 1, text: 'DET_BEFORE', weight: 3, firstSeen: LONG_BEFORE, lastSeen: LATER },
+          { id: 2, text: 'DET_AFTER', weight: 3, firstSeen: LATER, lastSeen: LATER },
+        ],
+        aliases: [
+          { name: 'ALIAS_BEFORE', weight: 3, firstSeen: LONG_BEFORE, lastSeen: LONG_BEFORE },
+          { name: 'ALIAS_AFTER', weight: 3, firstSeen: LATER, lastSeen: LATER },
+        ],
+        episodes: [
+          { date: '2026-09-20', what: 'EP_BEFORE', quote: '', feeling: 'fine', weight: 3, addedAt: LONG_BEFORE },
+          { date: '2026-09-29', what: 'EP_AFTER', quote: '', feeling: 'won the argument', weight: 5, addedAt: LATER },
+        ],
+        affinity: {
+          score: 30,
+          reason: 'REASON_AFTER',
+          history: [
+            { ts: LONG_BEFORE, delta: 20, appliedDelta: 20, score: 20, reason: 'REASON_BEFORE' },
+            { ts: LATER, delta: 10, appliedDelta: 10, score: 30, reason: 'REASON_AFTER' },
+          ],
+        },
+      },
+      [BRUNO]: { id: BRUNO, names: ['Bruno'], interests: [], details: [], aliases: [], episodes: [], affinity: { score: 0, reason: '', history: [] } },
+    },
+    guild: {
+      patterns: '',
+      starters: '',
+      injokes: [],
+      self: [],
+      learned: [
+        { id: 1, text: 'LEARNED_BEFORE', weight: 3, firstSeen: '2026-09-01T00:00:00.000Z', lastSeen: LATER },
+        { id: 2, text: 'LEARNED_AFTER', weight: 3, firstSeen: LATER, lastSeen: LATER },
+      ],
+    },
+    lore: [{ id: 'l1', title: 'LORE_AFTER', keys: ['lorekey'], text: 'LORE_AFTER how it ended', always: true, source: 'owner', createdAt: LATER, updatedAt: LATER }],
+  });
+  return {
+    data,
+    getGuild: () => data.guild,
+    getUser: (guildId, id) => data.profiles[id] ?? null,
+    getPrivate: () => {
+      throw new Error('the private layer is out of bounds for the mentor');
+    },
+    listUserProfiles: () => Object.values(data.profiles),
+    listChannels: () => [CHANNEL, OTHER_CHANNEL],
+    getLore: () => data.lore,
+  };
+}
+
+const LATER_MARKS = ['EP_AFTER', 'DET_AFTER', 'INT_AFTER', 'ALIAS_AFTER', 'REASON_AFTER', 'LEARNED_AFTER', 'LORE_AFTER'];
+/** Seen whatever the cutoff (the attitude's reason is not among them: only the current one is shown). */
+const EARLIER_MARKS = ['EP_BEFORE', 'DET_BEFORE', 'INT_BEFORE', 'ALIAS_BEFORE', 'LEARNED_BEFORE', 'CHARACTER_UNDATED'];
+
+/** The whole request of a talk call. */
+function requestText(call) {
+  return `${call.system}\n${call.user}`;
+}
+
+test('run: a real moment is answered without the memory written at or after its trigger; invented situations see it all', () =>
+  withSetup({ store: datedMemoryStore() }, async ({ mentor, cases, llm, store }) => {
+    const snapshot = JSON.stringify(store.data);
+    const item = anchoredCase(cases, ['A1']);
+    const { result: run, logs } = await withCapturedLogs(async () => (await mentor.run(item.id)).done);
+    assert.equal(run.error, undefined);
+    const talk = llm.calls.filter((c) => c.kind === 'talk');
+    // Both samples of the moment (Alice's trigger): only what was stored before it.
+    for (const call of talk.slice(0, 2)) {
+      const text = requestText(call);
+      assert.match(text, /A1 TRIGGER/);
+      for (const mark of EARLIER_MARKS) assert.ok(text.includes(mark), mark);
+      for (const mark of LATER_MARKS) assert.ok(!text.includes(mark), mark);
+      // The attitude's reason falls back to the last change before the trigger.
+      assert.ok(text.includes('REASON_BEFORE'));
+    }
+    // The first invented situation (Alice's trigger too) sees everything.
+    const invented = requestText(talk[2]);
+    assert.match(invented, /are you out of drawings/);
+    for (const mark of [...EARLIER_MARKS, ...LATER_MARKS]) assert.ok(invented.includes(mark), mark);
+    assert.ok(!invented.includes('REASON_BEFORE'));
+    // The judge's <learned> follows what the persona saw.
+    assert.equal(blockBody(scoreCallOf(llm, 1).user, 'learned').includes('LEARNED_AFTER'), false);
+    assert.match(blockBody(scoreCallOf(llm, 1).user, 'learned'), /LEARNED_BEFORE/);
+    assert.match(blockBody(scoreCallOf(llm, 2).user, 'learned'), /LEARNED_AFTER/);
+    // Nothing was written: the store is frozen, has no write method, and its data is unchanged.
+    assert.equal(JSON.stringify(store.data), snapshot);
+    // One line with counts, no contents.
+    const hidden = logs.filter((l) => l.msg === 'mentor: later memory hidden');
+    assert.equal(hidden.length, 1);
+    const { level, msg, time, ...counts } = hidden[0];
+    assert.deepEqual(counts, {
+      kind: 'run',
+      caseId: item.id,
+      situations: 1,
+      episodes: 1,
+      affinity: 1,
+      reasons: 1,
+      details: 1,
+      interests: 1,
+      aliases: 1,
+      learned: 1,
+      lore: 1,
+    });
+    assert.ok(!/_AFTER|_BEFORE/.test(JSON.stringify(logs)), 'no memory content in the logs');
+  }));
+
+test('run: mentor.anchor.hideLaterMemory false answers a real moment with the whole memory', () =>
+  withSetup({ store: datedMemoryStore(), config: { mentor: { anchor: { hideLaterMemory: false } } } }, async ({ mentor, cases, llm }) => {
+    const item = anchoredCase(cases, ['A1']);
+    const { logs } = await withCapturedLogs(async () => (await mentor.run(item.id)).done);
+    const text = requestText(llm.calls.find((c) => c.kind === 'talk'));
+    assert.match(text, /A1 TRIGGER/);
+    for (const mark of [...EARLIER_MARKS, ...LATER_MARKS]) assert.ok(text.includes(mark), mark);
+    assert.match(blockBody(scoreCallOf(llm, 1).user, 'learned'), /LEARNED_AFTER/);
+    assert.equal(logs.some((l) => l.msg === 'mentor: later memory hidden'), false);
+  }));
+
+test('run: the diagnosis of a real moment shows in <seen> the memory it was answered with', () =>
+  withSetup({ store: datedMemoryStore(), llm: fakeLlm({ scoreFor: overallBySituation(2, 9, 9) }) }, async ({ mentor, cases, llm }) => {
+    const item = anchoredCase(cases, ['A1']);
+    await (await mentor.run(item.id)).done;
+    const diagnose = llm.calls.at(-1);
+    assert.equal(diagnose.kind, 'diagnose');
+    assert.equal(JSON.parse(blockBody(diagnose.user, 'worst')).n, 1);
+    const seen = blockBody(diagnose.user, 'seen');
+    assert.match(seen, /A1 TRIGGER/);
+    for (const mark of EARLIER_MARKS) assert.ok(seen.includes(mark), mark);
+    for (const mark of LATER_MARKS) assert.ok(!seen.includes(mark), mark);
+  }));
+
+test('check: a real moment is replayed without the memory written after it', () =>
+  withSetup({ store: datedMemoryStore() }, async ({ mentor, cases, llm }) => {
+    const item = anchoredCase(cases, ['A1']);
+    await (await mentor.run(item.id)).done;
+    llm.calls.length = 0;
+    const [checked] = await (await mentor.check()).done;
+    assert.equal(checked.caseId, item.id);
+    const talk = llm.calls.filter((c) => c.kind === 'talk');
+    assert.match(requestText(talk[0]), /A1 TRIGGER/);
+    for (const mark of LATER_MARKS) assert.ok(!requestText(talk[0]).includes(mark), mark);
+    assert.ok(requestText(talk[1]).includes('EP_AFTER'));
   }));
