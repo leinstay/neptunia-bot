@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { liveView, situationToHistory, answerReply, captureStore, answerMemory } from '../src/mentor/sandbox.js';
+import { liveView, situationToHistory, situationHistory, answerReply, captureStore, answerMemory } from '../src/mentor/sandbox.js';
 import { createStore } from '../src/memory/store.js';
 import { createCalibrator } from '../src/llm/tokens.js';
 import { labels } from './fixtures/labels.js';
@@ -318,6 +318,67 @@ test('answerReply: sends the live system prompt and renders the member\'s profil
   ]);
   assert.equal(result.stopped, false);
   assert.deepEqual(store.writes, [], 'nothing is written to memory');
+});
+
+/** A real moment as stored with a case: normalized messages, the trigger last. */
+function storedMoment({ replyToSelf = false, mentions = [] } = {}) {
+  const base = { channelId: CHANNEL.id, channelName: 'general', channelCategory: 'Talk', channelTopic: null, bot: false, mentionedUserIds: [], replyToId: null, forwardedFrom: null, attachments: [], links: [], forwarded: [], stickers: [], emojis: [], reactions: [] };
+  return {
+    title: '',
+    anchor: 1,
+    history: [
+      { ...base, id: '800000000000000001', authorId: SELF_ID, authorName: 'Zoë', self: true, content: 'it opens at nine', ts: NOW - 120000 },
+      {
+        ...base,
+        id: '800000000000000002',
+        authorId: ALICE,
+        authorName: 'Alice',
+        self: false,
+        content: `REAL_MOMENT ${'é'.repeat(1500)}`,
+        ts: NOW - 60000,
+        replyToId: replyToSelf ? '800000000000000001' : null,
+        mentionedUserIds: mentions,
+        reactions: [{ emoji: '👍', count: 2, mine: false }],
+      },
+    ],
+    original: ['you are right, but'],
+  };
+}
+
+test('situationHistory: a stored moment is replayed as stored, the last message the trigger', () => {
+  const moment = storedMoment();
+  const { history, trigger, triggerKind } = situationHistory(moment, { selfId: SELF_ID, selfName: 'Zoë', now: NOW, channel: CHANNEL });
+  assert.equal(history, moment.history);
+  assert.equal(trigger, moment.history[1]);
+  assert.equal(triggerKind, 'mention');
+  assert.equal(situationHistory(storedMoment({ replyToSelf: true }), { selfId: SELF_ID }).triggerKind, 'reply');
+  assert.throws(() => situationHistory({ history: [] }, { selfId: SELF_ID }), /stored/);
+  assert.throws(() => situationHistory({ history: [moment.history[0]] }, { selfId: SELF_ID }), /self/);
+  // Invented lines still go through situationToHistory.
+  assert.equal(situationHistory(twoLines(), { selfId: SELF_ID, selfName: 'Zoë', now: NOW, channel: CHANNEL }).history[0].id, 'sb-1');
+});
+
+test('answerReply: a stored moment is answered from its own messages, reactions included', async () => {
+  const view = liveView({ hot: fakeHot(), store: fakeStore(), guildId: 'g1' });
+  const llm = fakeLlm('<msg>ok</msg>');
+  const result = await answerReply({ view, situation: storedMoment({ replyToSelf: true }), selfId: SELF_ID, selfName: 'Zoë', channel: CHANNEL, llm, samples: 1, now: NOW });
+  assert.ok(result.request.user.includes('REAL_MOMENT'));
+  assert.ok(result.request.user.includes('it opens at nine'));
+  assert.ok(result.request.user.includes('[reactions: '));
+  assert.equal(llm.calls[0].options.countAgainstDailyCap, false);
+  assert.equal(llm.calls[0].options.skipCalibration, true);
+});
+
+test('answerReply: a stored moment over the request budget loses its oldest messages, never the trigger', async () => {
+  const hot = fakeHot();
+  hot.config.llm.maxRequestTokens = 2500;
+  const moment = storedMoment();
+  const filler = Array.from({ length: 30 }, (_, i) => ({ ...moment.history[0], id: `70000000000000${1000 + i}`, self: false, authorId: BRUNO, authorName: 'Bruno', content: `OLD_${i} ${'x'.repeat(700)}`, ts: NOW - 3_600_000 + i * 1000 }));
+  const view = liveView({ hot, store: fakeStore(), guildId: 'g1' });
+  const llm = fakeLlm('<msg>ok</msg>');
+  const result = await answerReply({ view, situation: { ...moment, history: [...filler, ...moment.history] }, selfId: SELF_ID, selfName: 'Zoë', channel: CHANNEL, llm, samples: 1, now: NOW });
+  assert.ok(result.request.user.includes('REAL_MOMENT'));
+  assert.ok(!result.request.user.includes('OLD_0 '));
 });
 
 test('answerReply: makes samples requests, none counted against the daily cap', async () => {

@@ -7,7 +7,7 @@
 
 import { parseJsonObject } from '../llm/parse.js';
 
-const MAX_LINE_CHARS = 500;
+const MAX_LINE_CHARS = 2000;
 const MAX_TITLE_CHARS = 200;
 const SELF = 'self';
 /** The axes of a score, in report order. */
@@ -69,7 +69,7 @@ function cleanSituation(value, known, min, max) {
 /**
  * The situations the mentor model invented, validated. A line's `authorId` is
  * 'self' (the persona) or one of `knownIds`; its text is non-empty and at most
- * 500 characters; `replyTo` is null or the index of an earlier line;
+ * 2000 characters; `replyTo` is null or the index of an earlier line;
  * `minutesBefore` is kept when it is a non-negative number. A situation has
  * `min..max` lines and its last line is not by 'self'. A situation failing any
  * of this is dropped whole and counted; at most `count` valid ones are kept,

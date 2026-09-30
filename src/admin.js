@@ -37,6 +37,7 @@ import { classifierTextModel, classifierMediaModel, classifierVideoModel } from 
 import { buildDrawPrompt } from './behavior/prompt.js';
 import { effectiveAffinity } from './behavior/private.js';
 import { ImageCapError, ImageGenError, UnsupportedImageModelError, familyOf as imageFamilyOf } from './llm/images.js';
+import { anchorMax, checkCaseText } from './mentor/cases.js';
 import { renderCard, renderFile, renderLastRun } from './mentor/report.js';
 import { log } from './log.js';
 
@@ -531,7 +532,8 @@ function imageFileName(mediaType) {
  * `imageFetcher` — from createImageFetcher() (src/discord/fetch-image.js), optional: downloads the
  *   bot's avatar as the reference of a `/nep draw self` picture. Absent -> no reference is sent.
  * `mentor` — from createMentor() (src/mentor/mentor.js), optional: `run`/`check` (started by
- *   `/nep mentor run|check`, never awaited to the end), `stop`, `status`; `isRunning` and
+ *   `/nep mentor run|check`, never awaited to the end), `resolveAnchor` (reads the moment of a
+ *   message for `/nep mentor add|anchor`), `stop`, `status`; `isRunning` and
  *   `waitIdle` let `/nep pause` stop a run in flight and wait for it. Absent -> every `mentor.*`
  *   command reports it is not available.
  * `mentorCases` — from createCaseStore() (src/mentor/cases.js), optional: the cases, their runs and
@@ -595,7 +597,7 @@ export function createAdmin({
    * setting a score), memory.refresh, lore.add, lore.remove, learned.add,
    * learned.remove, warmup.run, warmup.users, warmup.channels, warmup.server,
    * warmup.reset, draw (it counts against the image rail in state.json) and
-   * mentor.add, mentor.remove, mentor.run, mentor.check, mentor.wrong,
+   * mentor.add, mentor.anchor, mentor.remove, mentor.run, mentor.check, mentor.wrong,
    * mentor.undo (it writes prompts.local/ or memory) and mentor.rebase (prompts.local/).
    */
   function assertNotPaused() {
@@ -2306,14 +2308,49 @@ async function cmdPing(args) {
     return id;
   }
 
-  function cmdMentorAdd(args, context) {
-    assertNotPaused();
-    const guildId = mentorGuildId(context);
-    const item = mentorCases.add(guildId, { text: args?.text, target: args?.target ?? 'reply' });
-    return `case ${item.id} added (${item.target})`;
+  /** The `message` option: a message link or id, or an Error. */
+  function mentorMessageRef(args) {
+    const ref = typeof args?.message === 'string' ? args.message.trim() : '';
+    if (!ref) throw new Error('a message link or id is required');
+    return ref;
   }
 
-  /** One line per active case: `<id> [<state>] <target> <score or -> <text clipped to 80>`. */
+  /** `moment <id>: <n> messages up to the trigger, an answer of <m> messages`. */
+  function momentLine(anchor) {
+    return `moment ${anchor.id}: ${anchor.history.length} messages up to the trigger, an answer of ${anchor.original.length} messages`;
+  }
+
+  /** A case is a message of the persona plus the owner's comment: both are required, the target is
+   * always `reply`. The comment is checked before the message is read; reading it spends no tokens. */
+  async function cmdMentorAdd(args, context) {
+    assertNotPaused();
+    const guildId = mentorGuildId(context);
+    const ref = mentorMessageRef(args);
+    const text = checkCaseText(args?.text);
+    const anchor = await mentor.resolveAnchor(ref, { channelId: context?.channelId ?? null });
+    const item = mentorCases.add(guildId, { text, target: 'reply', anchor });
+    return `case ${item.id} added (${item.target}), ${momentLine(item.anchors[0])}`;
+  }
+
+  /** Adds another moment to a case, at most `mentor.anchor.max` (read now); a case that cannot take
+   * one more is refused before the message is read. */
+  async function cmdMentorAnchor(args, context) {
+    assertNotPaused();
+    const guildId = mentorGuildId(context);
+    const id = mentorCaseId(args);
+    const ref = mentorMessageRef(args);
+    const item = mentorCases.get(guildId, id);
+    if (!item) throw new Error(`unknown case: ${id}`);
+    const max = anchorMax(hot.config.mentor?.anchor?.max);
+    const held = Array.isArray(item.anchors) ? item.anchors.length : 0;
+    if (held >= max) throw new Error(`case ${id} has ${held} moments; at most ${max} (mentor.anchor.max)`);
+    const anchor = await mentor.resolveAnchor(ref, { channelId: context?.channelId ?? null });
+    const { item: updated, anchor: added } = mentorCases.addAnchor(guildId, id, anchor, { max });
+    return `case ${id}: ${momentLine(added)} (${updated.anchors.length} of ${max})`;
+  }
+
+  /** One line per active case: `<id> [<state>] <target> <score or -> <text clipped to 80>`, with
+   * `moments <n>` before the text for a case that has any. */
   function cmdMentorCases(_args, context) {
     const list = mentorCases.list(mentorGuildId(context));
     if (list.length === 0) return 'no cases yet';
@@ -2322,7 +2359,8 @@ async function cmdPing(args) {
         const score = typeof item.lastScore === 'number' && Number.isFinite(item.lastScore) ? String(item.lastScore) : '-';
         const text = String(item.text ?? '').replace(/\s+/g, ' ');
         const shown = text.length > MENTOR_CASE_TEXT_SHOWN ? `${text.slice(0, MENTOR_CASE_TEXT_SHOWN - 3)}...` : text;
-        return `${item.id} [${item.state}] ${item.target} ${score} ${shown}`;
+        const moments = Array.isArray(item.anchors) && item.anchors.length > 0 ? `moments ${item.anchors.length} ` : '';
+        return `${item.id} [${item.state}] ${item.target} ${score} ${moments}${shown}`;
       })
       .join('\n');
   }
@@ -2670,6 +2708,7 @@ async function cmdPing(args) {
     'warmup.status': withWarmup((args, context) => cmdWarmupStatus(args, context)),
     'warmup.reset': withWarmup(() => cmdWarmupReset()),
     'mentor.add': withMentor((args, context) => cmdMentorAdd(args, context)),
+    'mentor.anchor': withMentor((args, context) => cmdMentorAnchor(args, context)),
     'mentor.cases': withMentor((args, context) => cmdMentorCases(args, context)),
     'mentor.remove': withMentor((args, context) => cmdMentorRemove(args, context)),
     'mentor.run': withMentor((args) => cmdMentorRun(args)),

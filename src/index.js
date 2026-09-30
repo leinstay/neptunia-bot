@@ -32,7 +32,7 @@ import { createMentorBudget } from './mentor/budget.js';
 import { createChangeStore } from './mentor/changes.js';
 import { createTagHistory, deprecatedModelKeys } from './behavior/mention.js';
 import { createMessageHandler } from './discord/events.js';
-import { fetchHistoryWindow } from './discord/collect.js';
+import { fetchHistoryWindow, fetchMoment } from './discord/collect.js';
 import { resolveGuild } from './discord/guild.js';
 import { isValidCommandName, registerCommands, createInteractionHandler } from './discord/commands.js';
 
@@ -178,6 +178,8 @@ const mentor = createMentor({
   // The persona as a turn names it; null until the client is ready.
   getSelf: () => (client.user ? { id: client.user.id, name: getSelfName(getGuildId()) } : null),
   fetchHistoryWindow,
+  // /nep mentor add|anchor: the moment of a message of the persona, read over REST.
+  fetchMoment,
   // Read only: the sandboxes measure tokens as a real turn does and never feed it.
   calibrator,
 });

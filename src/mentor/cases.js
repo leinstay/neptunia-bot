@@ -1,8 +1,11 @@
 // The mentor's own memory: the cases the owner gives it (a behaviour he wants
-// from the persona, in his words), the runs made from them and the owner's
-// feedback when he thinks the mentor judged a case wrongly.
+// from the persona, in his words, with the real moments of the chat that show
+// it -- "anchors", see src/mentor/anchor.js), the runs made from them and the
+// owner's feedback when he thinks the mentor judged a case wrongly.
 //
 //   data/guilds/<guildId>/mentor/cases.json               { nextId, cases: [...] }
+//     a case: { id, text, target, state, createdAt, lastRunId, lastScore,
+//       anchors?: [{ id, channelId, messageId, triggerId, addedAt, history, original }] }
 //   data/guilds/<guildId>/mentor/feedback.json            [{ caseId, runId, reason, at }]
 //   data/guilds/<guildId>/mentor/runs/<caseId>/<runId>.json  one run, stored whole
 //
@@ -51,6 +54,41 @@ function checkedText(value, field, min, max) {
   return text;
 }
 
+/** A case text, trimmed, or an Error when it is not 10 to 1000 characters (what `add` accepts). */
+export function checkCaseText(text) {
+  return checkedText(text, 'case text', TEXT_MIN, TEXT_MAX);
+}
+
+/** `mentor.anchor.max` as a positive integer; the config.json default (5) when unusable. */
+export function anchorMax(value) {
+  return Number.isFinite(value) && value >= 1 ? Math.floor(value) : 5;
+}
+
+/** A non-empty string id. */
+function isId(value) {
+  return typeof value === 'string' && value.trim() !== '';
+}
+
+/**
+ * A resolved moment (src/mentor/anchor.js#resolveAnchor) as it is stored,
+ * without its id and time; an Error when it cannot be replayed: its history
+ * must be a non-empty list of messages whose last one is not the persona's.
+ */
+function checkedAnchor(anchor) {
+  const history = anchor?.history;
+  const ok =
+    isId(anchor?.channelId) &&
+    isId(anchor?.messageId) &&
+    isId(anchor?.triggerId) &&
+    Array.isArray(history) &&
+    history.length > 0 &&
+    history.every((m) => m !== null && typeof m === 'object') &&
+    history[history.length - 1].self !== true;
+  if (!ok) throw new Error('the moment cannot be replayed: its chat is empty or ends with the persona');
+  const original = Array.isArray(anchor.original) ? anchor.original.filter((text) => typeof text === 'string') : [];
+  return { channelId: anchor.channelId, messageId: anchor.messageId, triggerId: anchor.triggerId, history, original };
+}
+
 /**
  * The mentor's case store for one data directory.
  * @param {{ dataDir: string, now?: () => number }} opts
@@ -96,23 +134,28 @@ export function createCaseStore({ dataDir, now = Date.now }) {
 
   return {
     /**
-     * Store a new case in state `new`.
+     * Store a new case in state `new`. With `anchor` (a resolved moment) the
+     * case starts with it as its anchor 1; only a `reply` case takes one.
      * @param {string} guildId
-     * @param {{ text: string, target: 'reply' | 'memory' }} input
+     * @param {{ text: string, target: 'reply' | 'memory', anchor?: object }} input
      */
-    add(guildId, { text, target } = {}) {
+    add(guildId, { text, target, anchor } = {}) {
       if (!TARGETS.includes(target)) throw new Error(`target must be one of: ${TARGETS.join(', ')}`);
-      const clean = checkedText(text, 'case text', TEXT_MIN, TEXT_MAX);
+      const clean = checkCaseText(text);
+      if (anchor !== undefined && target !== 'reply') throw new Error('only a reply case takes a moment');
+      const moment = anchor === undefined ? null : checkedAnchor(anchor);
       const data = readCases(guildId);
+      const createdAt = new Date(now()).toISOString();
       const item = {
         id: data.nextId,
         text: clean,
         target,
         state: 'new',
-        createdAt: new Date(now()).toISOString(),
+        createdAt,
         lastRunId: null,
         lastScore: null,
       };
+      if (moment) item.anchors = [{ id: 1, ...moment, addedAt: createdAt }];
       data.cases.push(item);
       data.nextId += 1;
       writeJsonAtomic(casesFile(guildId), data);
@@ -133,6 +176,33 @@ export function createCaseStore({ dataDir, now = Date.now }) {
     /** One case, or null when there is no such id. */
     get(guildId, id) {
       return readCases(guildId).cases.find((c) => c.id === Number(id)) ?? null;
+    },
+
+    /**
+     * Add a moment to a case as its next anchor. Refused: an unknown or
+     * retired case, a case that is not `reply`, a case that has `max` anchors
+     * already, a message the case already holds, a moment that cannot be replayed.
+     * @param {string} guildId
+     * @param {number} id
+     * @param {object} anchor  A resolved moment (src/mentor/anchor.js#resolveAnchor).
+     * @param {{ max: number }} options  `mentor.anchor.max`, read by the caller now.
+     * @returns {{ item: object, anchor: object }}
+     */
+    addAnchor(guildId, id, anchor, { max } = {}) {
+      const data = readCases(guildId);
+      const item = findCase(data, id);
+      if (item.state === 'retired') throw new Error(`case ${item.id} is retired`);
+      if (item.target !== 'reply') throw new Error(`case ${item.id} is not a reply case; only a reply case takes a moment`);
+      const anchors = Array.isArray(item.anchors) ? item.anchors : [];
+      const limit = anchorMax(max);
+      if (anchors.length >= limit) throw new Error(`case ${item.id} has ${anchors.length} moments; at most ${limit} (mentor.anchor.max)`);
+      const moment = checkedAnchor(anchor);
+      if (anchors.some((a) => a.messageId === moment.messageId)) throw new Error(`that message is already a moment of case ${item.id}`);
+      const nextId = anchors.reduce((top, a) => (Number.isInteger(a?.id) && a.id > top ? a.id : top), 0) + 1;
+      const added = { id: nextId, ...moment, addedAt: new Date(now()).toISOString() };
+      item.anchors = [...anchors, added];
+      writeJsonAtomic(casesFile(guildId), data);
+      return { item, anchor: added };
     },
 
     /** Mark a case retired; its runs and feedback stay on disk. Throws on an unknown id. */

@@ -1,5 +1,6 @@
 // The mentor's two sandboxes. A sandbox run takes an invented chat excerpt (a
-// "situation"), builds exactly the request a real turn or a real analyzer
+// "situation"; or a real moment of the chat stored with a case, replayed from
+// its normalized messages), builds exactly the request a real turn or a real analyzer
 // batch would build -- live prompts, live config, live stored memory -- asks
 // the model, parses the answer, and stops there: nothing reaches Discord and
 // nothing is written to memory. The reply sandbox reproduces the talk path
@@ -150,6 +151,28 @@ export function situationToHistory(situation, { selfId, selfName, now, channel }
   return { history, trigger, triggerKind };
 }
 
+/**
+ * The history a situation is answered from. A real moment of the chat (a
+ * situation with `history`, see src/mentor/anchor.js) is replayed from its
+ * stored normalized messages as they are, the last one the trigger:
+ * `triggerKind` 'reply' when it replies to a message of the persona in that
+ * history, else 'mention' (as an invented situation). Invented lines go
+ * through `situationToHistory`. Pure.
+ * @param {{ history?: object[], lines?: object[] }} situation
+ * @param {{ selfId: string, selfName?: string, now?: number, channel?: object }} options
+ * @returns {{ history: object[], trigger: object, triggerKind: 'reply'|'mention' }}
+ * @throws {Error} an empty stored history or one whose last message is the persona's; see `situationToHistory`.
+ */
+export function situationHistory(situation, options) {
+  if (!Array.isArray(situation?.history)) return situationToHistory(situation, options);
+  const history = situation.history;
+  if (history.length === 0) throw new Error('situation: the stored history is empty');
+  const trigger = history[history.length - 1];
+  if (!trigger || trigger.self === true) throw new Error('situation: the last stored message must not be by self');
+  const target = trigger.replyToId ? history.find((message) => message?.id === trigger.replyToId) : null;
+  return { history, trigger, triggerKind: target?.self === true ? 'reply' : 'mention' };
+}
+
 /** The text of a message's content: a string as is, an array of parts as its text parts joined. */
 function textOf(content) {
   if (Array.isArray(content)) {
@@ -219,7 +242,7 @@ async function sample({ llm, messages, options, samples, signal, onUsage, read }
  * turn treats it).
  * @param {object} input
  * @param {object} input.view        From `liveView` (or an overlay of the same shape).
- * @param {object} input.situation   See `situationToHistory`.
+ * @param {object} input.situation   Invented lines (see `situationToHistory`) or a stored moment (see `situationHistory`).
  * @param {string} input.selfId
  * @param {string} input.selfName
  * @param {{ id: string, name?: string, category?: string, topic?: string }} input.channel
@@ -236,7 +259,7 @@ export async function answerReply({ view, situation, selfId, selfName, channel, 
   const config = view.config;
   const memory = view.memory;
   const memoryOn = config.features?.memory !== false;
-  const { history, trigger, triggerKind } = situationToHistory(situation, { selfId, selfName, now, channel });
+  const { history, trigger, triggerKind } = situationHistory(situation, { selfId, selfName, now, channel });
   // pickOtherProfiles reads a store-shaped object; this one reads the view.
   const viewAsStore = { getUser: (guildId, id) => memory.getUser(id) };
 

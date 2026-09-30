@@ -115,6 +115,35 @@ test('renderCard: shows the overall median of every situation', () => {
   assert.equal(lines[at + 1], 'by situation: 1: 9 · 2: 3 · 3: 7 · 4: - · 5: 6.5');
 });
 
+/** A run whose first two situations are real moments (anchors 1 and 3). */
+function anchoredRun() {
+  const run = fakeRun({ situationMedians: BY_SITUATION });
+  run.situations = run.situations.map((s, i) => {
+    if (i > 1) return s;
+    const { lines: _lines, ...rest } = s;
+    return { ...rest, title: '', anchor: i === 0 ? 1 : 3, original: [`original ${i + 1} ναι`, 'second line'] };
+  });
+  return run;
+}
+
+test('renderCard: marks the anchor situations and counts them', () => {
+  const card = renderCard(anchoredRun());
+  assert.ok(card.length <= 1800);
+  assert.match(card, /^by situation: 1 \(anchor\): 9 · 2 \(anchor\): 3 · 3: 7 · 4: - · 5: 6\.5$/m);
+  assert.match(card, /situations: 5 kept \(2 anchors\), 1 dropped$/m);
+  // A run without anchors keeps its lines as they were.
+  assert.match(renderCard(fakeRun()), /situations: 5 kept, 1 dropped$/m);
+});
+
+test('renderFile: an anchor situation names its anchor and shows the original answer', () => {
+  const text = renderFile(anchoredRun()).text;
+  assert.match(text, /^Situation 1 \(anchor 1\): $/m);
+  assert.match(text, /^Situation 2 \(anchor 3\): $/m);
+  assert.match(text, /^Situation 3: situation 3 /m);
+  assert.match(text, /#2 Alice: what now\?\n\noriginal answer:\n {2}original 1 ναι\n {2}second line\n/);
+  assert.equal(text.match(/^original answer:$/gm).length, 2);
+});
+
 test('renderCard: a run stored before the medians by situation has no such line', () => {
   const run = fakeRun();
   assert.equal('situationMedians' in run, false);

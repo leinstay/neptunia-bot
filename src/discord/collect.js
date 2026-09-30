@@ -467,6 +467,81 @@ export async function fetchHistoryWindow(channel, { anchorId, limit, minTs = 0, 
   return collected.reverse();
 }
 
+/** Discord's REST page size for a message list. */
+const PAGE = 100;
+
+/** A message list page (newest first), or [] when the fetch fails. */
+async function pageOf(channel, query) {
+  try {
+    const page = await channel.messages.fetch({ limit: PAGE, ...query });
+    return [...page.values()].sort((a, b) => b.createdTimestamp - a.createdTimestamp);
+  } catch (err) {
+    log.warn('collect: moment page fetch failed', { channel: channel.id, error: err });
+    return [];
+  }
+}
+
+/** One message by id, or null when it cannot be fetched. */
+async function messageById(channel, id) {
+  try {
+    return (await channel.messages.fetch(id)) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * A moment of a guild channel around one message of the persona, for the
+ * mentor: the message that called for it (the TRIGGER: the message it
+ * replies to, else the newest earlier message that is not the persona's; a
+ * reply to one of her own messages counts as no reply), her whole burst (her
+ * consecutive messages starting at that one, oldest first) and the `limit`
+ * messages of the channel up to and including the trigger, normalized like
+ * any history (names and reactions as they are now; media labelled, nothing
+ * downloaded). Throws an Error with an operator-facing reason: a channel
+ * without a guild (a private chat), a channel the bot cannot read (no bot
+ * member, not viewable, no Read Message History), a message that cannot be
+ * fetched or is not the persona's, a reply target that is gone, no earlier
+ * message of anyone else, or a history window that does not end at the trigger.
+ * @param {import('discord.js').TextBasedChannel} channel
+ * @param {string} messageId
+ * @param {{ selfId: string, limit: number, embedTextChars?: number, videoSites?: string[] }} options
+ * @returns {Promise<{ messageId: string, triggerId: string, history: object[], burst: object[] }>}
+ */
+export async function fetchMoment(channel, messageId, { selfId, limit, embedTextChars, videoSites }) {
+  if (!channel?.guild) throw new Error('a direct message cannot be used');
+  if (!canRead(channel)) throw new Error('the bot cannot read that channel');
+  const own = await messageById(channel, messageId);
+  if (!own) throw new Error('that message was not found');
+  if (own.author?.id !== selfId) throw new Error("that message is not the persona's");
+  const normalize = (message) => normalizeMessage(message, selfId, { embedTextChars, videoSites });
+
+  const later = (await pageOf(channel, { after: own.id })).reverse();
+  const burst = [own];
+  for (const message of later) {
+    if (message.createdTimestamp < own.createdTimestamp) continue;
+    if (message.author?.id !== selfId) break;
+    burst.push(message);
+  }
+
+  const isForward = own.reference?.type === MessageReferenceType.Forward;
+  const repliedId = isForward ? null : (own.reference?.messageId ?? null);
+  let trigger = null;
+  if (repliedId) {
+    trigger = await messageById(channel, repliedId);
+    if (!trigger) throw new Error('the message it replies to is gone');
+    if (trigger.author?.id === selfId) trigger = null;
+  }
+  if (!trigger) {
+    trigger = (await pageOf(channel, { before: own.id })).find((message) => message.author?.id !== selfId) ?? null;
+    if (!trigger) throw new Error('no message of anyone else before it');
+  }
+
+  const history = await fetchHistoryWindow(channel, { anchorId: trigger.id, limit, selfId, embedTextChars, videoSites });
+  if (history.length === 0 || history[history.length - 1].id !== trigger.id) throw new Error('the chat before it cannot be read');
+  return { messageId: own.id, triggerId: trigger.id, history, burst: burst.map(normalize) };
+}
+
 /** Plain text channels of a guild the persona may read, excluding threads and `exceptId`. */
 export function readableChannels(guild, botConfig, exceptId = null) {
   return [...guild.channels.cache.values()].filter(

@@ -192,5 +192,7 @@ export const labels = {
   },
   mentor: {
     intended: ['a limit notice is a feature'],
+    examples: 'real moments, each with the rejected original answer',
+    original: 'the rejected original answer, a reference only',
   },
 };

@@ -4787,10 +4787,29 @@ const MENTOR_NOW = Date.parse('2026-09-30T12:00:00.000Z');
 
 /** A fake mentor: `run`/`check` resolve at once with a `done` that never settles, so a handler
  * that awaited it would never finish. */
-function fakeMentor({ run, check, status, stopOk = false } = {}) {
+/** A moment as the mentor's resolveAnchor returns it: two messages up to the trigger, an answer of two. */
+function sampleMoment(messageId = '800000000000000004') {
+  return {
+    channelId: '500000000000000001',
+    messageId,
+    triggerId: '800000000000000003',
+    history: [
+      { id: '800000000000000002', authorId: 'bot', self: true, content: 'ναι' },
+      { id: '800000000000000003', authorId: 'u1', self: false, content: 'é'.repeat(1580) },
+    ],
+    original: ['you are right, but', 'no'],
+  };
+}
+
+function fakeMentor({ run, check, status, stopOk = false, resolveAnchor } = {}) {
   const calls = [];
   return {
     calls,
+    async resolveAnchor(ref, context) {
+      calls.push(['resolveAnchor', ref, context]);
+      if (resolveAnchor) return resolveAnchor(ref, context);
+      return sampleMoment(/^\d+$/.test(ref) ? ref : '800000000000000004');
+    },
     async run(caseId) {
       calls.push(['run', caseId]);
       if (run) return run(caseId);
@@ -4893,6 +4912,7 @@ function sampleMentorRun(caseId, { passed = true, overall = 7, target = 'reply' 
 
 const MENTOR_KEYS = [
   'mentor.add',
+  'mentor.anchor',
   'mentor.cases',
   'mentor.remove',
   'mentor.run',
@@ -4905,7 +4925,7 @@ const MENTOR_KEYS = [
   'mentor.undo',
   'mentor.rebase',
 ];
-const MENTOR_ARGS = { text: 'Answer a greeting with one short line.', id: 1, reason: 'it was fine', name: 'format' };
+const MENTOR_ARGS = { text: 'Answer a greeting with one short line.', message: '800000000000000009', id: 1, reason: 'it was fine', name: 'format' };
 
 test('run: every mentor command replies "the mentor is not available" without a mentor or a case store', async () => {
   const rootDir = makeRoot();
@@ -4919,21 +4939,69 @@ test('run: every mentor command replies "the mentor is not available" without a 
   assert.equal(fs.existsSync(path.join(rootDir, 'data')), false, 'nothing was written');
 });
 
-test('run: mentor.add stores a case and replies with its id and target, reply by default', async () => {
-  const { admin, mentorCases } = makeMentorAdmin();
+test('run: mentor.add reads the moment of the message and stores a reply case with it as moment 1', async () => {
+  const { admin, mentor, mentorCases } = makeMentorAdmin();
+  const link = 'https://discord.com/channels/1/500000000000000001/800000000000000004';
 
-  assert.equal(await admin.run('mentor.add', { text: 'Answer a greeting with one short line.' }, { guildId: 'g1' }), 'case 1 added (reply)');
-  assert.equal(await admin.run('mentor.add', { text: 'Remember the pet named Héloïse.', target: 'memory' }, { guildId: 'g1' }), 'case 2 added (memory)');
-
-  const stored = mentorCases.list('g1');
-  assert.deepEqual(stored.map((c) => [c.id, c.target, c.state]), [[1, 'reply', 'new'], [2, 'memory', 'new']]);
-  assert.equal(stored[1].text, 'Remember the pet named Héloïse.');
+  assert.equal(
+    await admin.run('mentor.add', { message: ` ${link} `, text: 'Too quick to concede before objecting.' }, { guildId: 'g1', channelId: '500000000000000007' }),
+    'case 1 added (reply), moment 1: 2 messages up to the trigger, an answer of 2 messages',
+  );
+  // The link as given (trimmed), with the channel the command was typed in (for a bare id).
+  assert.deepEqual(mentor.calls, [['resolveAnchor', link, { channelId: '500000000000000007' }]]);
+  const [item] = mentorCases.list('g1');
+  assert.deepEqual([item.id, item.target, item.state, item.text], [1, 'reply', 'new', 'Too quick to concede before objecting.']);
+  assert.deepEqual(item.anchors, [{ id: 1, ...sampleMoment(), addedAt: new Date(MENTOR_NOW).toISOString() }]);
+  // A target given by an older client is ignored: every new case is a reply case.
+  await admin.run('mentor.add', { message: '800000000000000005', text: 'Remember the pet named Héloïse.', target: 'memory' }, { guildId: 'g1' });
+  assert.equal(mentorCases.get('g1', 2).target, 'reply');
 });
 
-test('run: mentor.add passes the case store refusal through as the error', async () => {
-  const { admin, mentorCases } = makeMentorAdmin();
-  await assert.rejects(() => admin.run('mentor.add', { text: 'short' }, { guildId: 'g1' }), /case text must be 10 to 1000 characters/);
+test('run: mentor.add requires both the message and the comment, checked before the message is read', async () => {
+  const { admin, mentor, mentorCases } = makeMentorAdmin();
+  await assert.rejects(() => admin.run('mentor.add', { text: 'Answer a greeting with one short line.' }, { guildId: 'g1' }), /message link or id is required/);
+  await assert.rejects(() => admin.run('mentor.add', { message: '  ', text: 'Answer a greeting with one short line.' }, { guildId: 'g1' }), /message link or id is required/);
+  await assert.rejects(() => admin.run('mentor.add', { message: '800000000000000004' }, { guildId: 'g1' }), /case text must be 10 to 1000 characters/);
+  await assert.rejects(() => admin.run('mentor.add', { message: '800000000000000004', text: 'short' }, { guildId: 'g1' }), /case text must be 10 to 1000 characters/);
+  assert.deepEqual(mentor.calls, [], 'no message was read');
   assert.deepEqual(mentorCases.list('g1'), []);
+});
+
+test('run: mentor.add passes a refused moment through as the error and stores nothing', async () => {
+  const mentor = fakeMentor({
+    resolveAnchor: () => {
+      throw new Error("that message is not the persona's");
+    },
+  });
+  const { admin, mentorCases } = makeMentorAdmin({ mentor });
+  await assert.rejects(() => admin.run('mentor.add', { message: '800000000000000004', text: 'Answer a greeting with one short line.' }, { guildId: 'g1' }), /not the persona's/);
+  assert.deepEqual(mentorCases.list('g1'), []);
+});
+
+test('run: mentor.anchor adds a moment to a case, up to mentor.anchor.max read now', async () => {
+  const { admin, mentor, mentorCases, hot } = makeMentorAdmin();
+  await admin.run('mentor.add', { message: '800000000000000004', text: 'Answer a greeting with one short line.' }, { guildId: 'g1' });
+  hot.config.mentor.anchor = { max: 2 };
+
+  assert.equal(
+    await admin.run('mentor.anchor', { id: 1, message: '800000000000000005' }, { guildId: 'g1', channelId: '500000000000000001' }),
+    'case 1: moment 2: 2 messages up to the trigger, an answer of 2 messages (2 of 2)',
+  );
+  assert.deepEqual(mentor.calls.at(-1), ['resolveAnchor', '800000000000000005', { channelId: '500000000000000001' }]);
+  assert.deepEqual(mentorCases.get('g1', 1).anchors.map((a) => [a.id, a.messageId]), [[1, '800000000000000004'], [2, '800000000000000005']]);
+
+  // Full: refused before the message is read.
+  const reads = mentor.calls.length;
+  await assert.rejects(() => admin.run('mentor.anchor', { id: 1, message: '800000000000000006' }, { guildId: 'g1' }), /at most 2 \(mentor\.anchor\.max\)/);
+  assert.equal(mentor.calls.length, reads);
+  // The same message twice is refused by the case store.
+  hot.config.mentor.anchor = { max: 5 };
+  await assert.rejects(() => admin.run('mentor.anchor', { id: 1, message: '800000000000000005' }, { guildId: 'g1' }), /already a moment of case 1/);
+  // An unknown case, or no message, is refused before anything is read.
+  await assert.rejects(() => admin.run('mentor.anchor', { id: 9, message: '800000000000000006' }, { guildId: 'g1' }), /unknown case: 9/);
+  await assert.rejects(() => admin.run('mentor.anchor', { id: 1 }, { guildId: 'g1' }), /message link or id is required/);
+  assert.equal(mentor.calls.length, reads + 1);
+  assert.equal(mentorCases.get('g1', 1).anchors.length, 2);
 });
 
 test('run: mentor.cases says so when there is no case', async () => {
@@ -4949,9 +5017,14 @@ test('run: mentor.cases lists the active cases, one line each, with the last sco
   mentorCases.add('g1', { text: 'A retired case that is not listed.', target: 'reply' });
   mentorCases.saveRun('g1', sampleMentorRun(2, { passed: true, overall: 7, target: 'memory' }));
   mentorCases.retire('g1', 3);
+  mentorCases.add('g1', { text: 'Too quick to concede before objecting.', target: 'reply', anchor: sampleMoment() });
 
   const lines = (await admin.run('mentor.cases', {}, { guildId: 'g1' })).split('\n');
-  assert.deepEqual(lines, [`1 [new] reply - ${long.slice(0, 77)}...`, '2 [passing] memory 7 Remember the pet named Héloïse.']);
+  assert.deepEqual(lines, [
+    `1 [new] reply - ${long.slice(0, 77)}...`,
+    '2 [passing] memory 7 Remember the pet named Héloïse.',
+    '4 [new] reply - moments 1 Too quick to concede before objecting.',
+  ]);
 });
 
 test('run: mentor.remove retires a case; an unknown id is refused', async () => {
@@ -5373,13 +5446,13 @@ test('mentor log/undo/rebase: through the real change store', async () => {
   assert.equal(await admin.run('mentor.rebase', { name: 'reply' }, { guildId: 'g1' }), 'override reply cannot be rebuilt: no override');
 });
 
-test('run: mentor add/remove/run/check/wrong/undo/rebase are refused while paused; cases/show/status/stop/log are not', async () => {
+test('run: mentor add/anchor/remove/run/check/wrong/undo/rebase are refused while paused; cases/show/status/stop/log are not', async () => {
   const { admin, mentor, mentorCases, mentorChanges, store } = makeMentorAdmin({ mentorChanges: fakeChangeStore({ changes: SAMPLE_CHANGES }) });
   mentorCases.add('g1', { text: 'Answer a greeting with one short line.', target: 'reply' });
   mentorCases.saveRun('g1', sampleMentorRun(1));
   store.state.data.paused = true;
 
-  for (const key of ['mentor.add', 'mentor.remove', 'mentor.run', 'mentor.check', 'mentor.wrong', 'mentor.undo', 'mentor.rebase']) {
+  for (const key of ['mentor.add', 'mentor.anchor', 'mentor.remove', 'mentor.run', 'mentor.check', 'mentor.wrong', 'mentor.undo', 'mentor.rebase']) {
     await assert.rejects(() => admin.run(key, MENTOR_ARGS, { guildId: 'g1' }), /paused.*resume/i, key);
   }
   assert.deepEqual(mentor.calls, [], 'the mentor is never started while paused');

@@ -1188,3 +1188,66 @@ test('attempt: with the config.json defaults a reply case may touch no profile a
     });
   });
 });
+
+// ---- anchors: real moments of the chat ---------------------------------------
+
+/** A resolved moment whose trigger carries `marker`, as src/mentor/anchor.js#resolveAnchor returns it. */
+function moment(marker, messageId = '800000000000000010') {
+  const base = { channelId: CHANNEL.id, channelName: 'general', channelCategory: 'Talk', channelTopic: null, bot: false, mentionedUserIds: [], replyToId: null, forwardedFrom: null, attachments: [], links: [], forwarded: [], stickers: [], emojis: [], reactions: [] };
+  const ts = NOW - 86_400_000;
+  return {
+    channelId: CHANNEL.id,
+    messageId,
+    triggerId: '800000000000000002',
+    history: [
+      { ...base, id: '800000000000000001', authorId: BRUNO, authorName: 'Bruno', self: false, content: `${marker} opening`, ts: ts - 60_000 },
+      { ...base, id: '800000000000000002', authorId: ALICE, authorName: 'Alice', self: false, content: `${marker} ${'é'.repeat(900)}`, ts },
+    ],
+    original: [`${marker} you are right, but`],
+  };
+}
+
+test('attempt: a weak anchor is replayed from its stored history; the fresh situations request shows the examples', () =>
+  withSetup(
+    { llm: fakeLlm({ scoreFor: (a, call) => (a.messages.join(' ').includes('GOOD') ? 9 : call.user.includes('ANCHOR_TRIGGER') ? 3 : 8) }) },
+    async (env) => {
+      const item = env.cases.add(GUILD, { text: CASE_TEXT, target: 'reply', anchor: moment('ANCHOR_TRIGGER') });
+      const run = await (await env.mentor.run(item.id)).done;
+      assert.equal(run.situations[0].anchor, 1);
+      assert.deepEqual(run.situationMedians.map((m) => m.overall), [3, 8, 8]);
+      // Only the anchor is weak: the control and the ablation replay it, from its stored messages.
+      for (const phase of ['repair: control', 'repair 1: ablation']) {
+        const talks = env.llm.inPhase(phase).filter((c) => c.kind === 'talk');
+        assert.equal(talks.length, 2, phase);
+        for (const call of talks) assert.ok(call.user.includes('ANCHOR_TRIGGER opening'), phase);
+      }
+      assert.equal(run.repair.attempts[0].suspects[0].gain, 6);
+      // The fresh situations of the verification are invented with the case's moments in view.
+      const fresh = env.llm.inPhase('repair 1: verify').find((c) => c.kind === 'situations');
+      assert.match(fresh.user, /<examples>[\s\S]*ANCHOR_TRIGGER opening[\s\S]*<original>\nANCHOR_TRIGGER you are right, but\n<\/original>/);
+      assert.equal(run.repair.reason, 'applied');
+    },
+  ));
+
+test("attempt: the regression replays another case's moments from their stored history", () =>
+  withSetup({}, async (env) => {
+    const other = env.cases.add(GUILD, { text: OTHER_TEXT, target: 'reply', anchor: moment('OTHER_MOMENT', '800000000000000020') });
+    env.cases.saveRun(GUILD, {
+      caseId: other.id,
+      caseText: OTHER_TEXT,
+      target: 'reply',
+      kind: 'run',
+      situations: [{ n: 1, title: '', anchor: 1, original: ['OTHER_MOMENT you are right, but'], transcript: '', answers: [] }],
+      situationMedians: [{ n: 1, overall: 8, goal: 8 }],
+      medians: { human: 8, character: 8, rules: 8, goal: 8, overall: 8 },
+      passed: true,
+      reasons: [],
+    });
+    const { run } = await runCase(env);
+    const talks = env.llm.inPhase('repair 1: regression').filter((c) => c.kind === 'talk');
+    assert.equal(talks.length, 1);
+    assert.ok(talks[0].user.includes('OTHER_MOMENT opening'));
+    const scored = env.llm.inPhase('repair 1: regression').find((c) => c.kind === 'score');
+    assert.match(scored.user, /<original>\n[^\n]*\nOTHER_MOMENT you are right, but\n<\/original>/);
+    assert.deepEqual(run.repair.attempts[0].verify.regression, [{ caseId: other.id, held: true, situations: [{ n: 1, before: 8, after: 9 }] }]);
+  }));

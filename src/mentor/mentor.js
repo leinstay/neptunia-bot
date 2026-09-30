@@ -14,6 +14,14 @@
 // proves a cause, verifies one edit and applies it; without them the mentor
 // only measures and changes nothing. A check never repairs.
 //
+// A case may carry real moments of the chat ("anchors", src/mentor/anchor.js):
+// each is a situation of its own, numbered before the invented ones and
+// replayed from its stored messages at its own time, with today's prompts and
+// memory. The situations request shows them to the mentor model as
+// `<examples>`, and an anchor's score request carries the persona's original
+// answer as `<original>`. Wherever an anchor's chat does not fit a request,
+// its oldest messages give way; the trigger never does.
+//
 // Everything expensive is bounded: the mentor's own daily token budget is
 // checked before every request and charged after every completion, the
 // per-request token cap of the llm client stays in force, and nothing counts
@@ -30,17 +38,20 @@
 import { fillPromptTemplate, learnedConfig, learnedText } from '../behavior/prompt.js';
 import { fill, formatTranscript, renderTranscript } from '../discord/format.js';
 import { TokenLimitError } from '../llm/openrouter.js';
-import { estimateMessages } from '../llm/tokens.js';
+import { estimateMessages, estimateTokens } from '../llm/tokens.js';
 import { log } from '../log.js';
+import { anchorSituations, resolveAnchor } from './anchor.js';
 import { MentorBudgetError } from './budget.js';
 import { parseDiagnosis, parseScores, parseSituations, verdict } from './judge.js';
 import { answerFacts, repeatedPhrases, sampleLines, styleProfile } from './reference.js';
 import { createRepair } from './repair.js';
 import { renderCard, renderCheckCard, renderCheckFile, renderFile } from './report.js';
-import { answerMemory, answerReply, liveView, situationToHistory } from './sandbox.js';
+import { answerMemory, answerReply, liveView, situationHistory } from './sandbox.js';
 
 const DAY_MS = 86_400_000;
 const ERROR_MAX = 200;
+/** Tokens kept free in a mentor request for the tags and separators around a fitted transcript. */
+const FIT_SLACK = 50;
 
 /** The system prompt of the diagnosis; optional (without it a run is saved without a diagnosis). */
 const DIAGNOSE_PROMPT = 'mentor-diagnose';
@@ -93,14 +104,24 @@ function diagnosisFailure(err) {
   return 'request failed';
 }
 
-/** The situation with the lowest median `overall` (ties: the lowest `n`), or null. */
-function worstSituation(situationMedians) {
+/**
+ * The situation with the lowest median `overall` (ties: the lowest `n`), or
+ * null. When a real moment (`n` in `anchorNs`) is among the weak ones (median
+ * `overall` under `passScore`), the worst of those weak moments is taken instead.
+ */
+function worstSituation(situationMedians, anchorNs = new Set(), passScore = 7) {
+  const scored = (situationMedians ?? []).filter((entry) => typeof entry?.overall === 'number');
+  const weakAnchors = scored.filter((entry) => anchorNs.has(entry.n) && entry.overall < passScore);
   let worst = null;
-  for (const entry of situationMedians ?? []) {
-    if (typeof entry?.overall !== 'number') continue;
+  for (const entry of weakAnchors.length > 0 ? weakAnchors : scored) {
     if (!worst || entry.overall < worst.overall || (entry.overall === worst.overall && entry.n < worst.n)) worst = entry;
   }
   return worst;
+}
+
+/** Whether a stored situation record is a real moment of the chat (it carries its anchor id). */
+function isAnchorRecord(record) {
+  return record?.anchor !== undefined && record?.anchor !== null;
 }
 
 /** A stored situation as the diagnosis request shows it. */
@@ -144,6 +165,8 @@ function emptyMedians() {
  * @param {() => (string|null)} deps.getGuildId
  * @param {() => ({ id: string, name: string }|null)} deps.getSelf  The persona's user id and display name.
  * @param {Function} deps.fetchHistoryWindow  src/discord/collect.js#fetchHistoryWindow.
+ * @param {Function} [deps.fetchMoment]  src/discord/collect.js#fetchMoment, for `resolveAnchor`.
+ *   Without it no moment can be read.
  * @param {{ ratio: number, apply: (n: number) => number }} [deps.calibrator]  The live calibrator: the
  *   sandboxes measure tokens with its ratio (read at the moment of use) and never feed it.
  *   Without it, tokens are measured as they are.
@@ -151,13 +174,17 @@ function emptyMedians() {
  * @param {() => number} [deps.rng]
  * @returns {{ run: (caseId: number) => Promise<{ started: true, done: Promise<object> }>,
  *   check: () => Promise<{ started: true, cases: number, done: Promise<object[]> }>,
+ *   resolveAnchor: (ref: string, context?: { channelId?: string }) => Promise<object>,
  *   stop: () => { ok: boolean }, status: () => object, isRunning: () => boolean,
  *   waitIdle: () => Promise<void> }}
+ *   A case's anchors (real moments, src/mentor/anchor.js) are situations of their own in a run and
+ *   a check: answered from their stored history, numbered first, scored with their `<original>`;
+ *   the situations request shows them as `<examples>`.
  *   `run` / `check` reject with an operator-facing Error before anything is spent when the mentor is
  *   off, has no model, the case or a required prompt is missing, a run is in flight or the budget is spent.
  *   `done` never rejects: a failure ends the run with `error`, which is saved and reported.
  */
-export function createMentor({ hot, store, llm, client, cases, budget, changes, getGuildId, getSelf, fetchHistoryWindow, calibrator, now = Date.now, rng = Math.random }) {
+export function createMentor({ hot, store, llm, client, cases, budget, changes, getGuildId, getSelf, fetchHistoryWindow, fetchMoment, calibrator, now = Date.now, rng = Math.random }) {
   let current = null;
   // The repair loop exists only with a change store to write through.
   const repair = changes
@@ -356,6 +383,81 @@ export function createMentor({ hot, store, llm, client, cases, budget, changes, 
     return { name: selfName, count: cfg.situations, minLines, maxLines };
   }
 
+  // ---- the request budget ----------------------------------------------------
+
+  /**
+   * What a mentor request may hold: the per-request token cap the llm client
+   * enforces (`llm.maxRequestTokens`) with the talk path's `llm.safetyMargin`.
+   */
+  function requestLimit() {
+    const cfg = hot.config.llm ?? {};
+    const margin = Number.isFinite(cfg.safetyMargin) && cfg.safetyMargin > 0 && cfg.safetyMargin <= 1 ? cfg.safetyMargin : 0.9;
+    return Math.floor(positive(cfg.maxRequestTokens, 50000) * margin);
+  }
+
+  /** A raw token estimate as the llm client's rail measures it (the live calibrator, read now). */
+  function calibrated(raw) {
+    return typeof calibrator?.apply === 'function' ? calibrator.apply(raw) : raw;
+  }
+
+  /** Tokens left in a request of `system` and `user` before `requestLimit`. */
+  function roomLeft(system, user) {
+    const used = calibrated(
+      estimateMessages([
+        { role: 'system', content: system },
+        { role: 'user', content: user },
+      ]),
+    );
+    return requestLimit() - used - FIT_SLACK;
+  }
+
+  /**
+   * The transcript of `items` within `room` tokens (as `measureText` counts
+   * them): the oldest messages are left out until it fits; the last one, the
+   * trigger, always stays. `dropped` counts what was left out.
+   */
+  function fittedTranscript(items, room, measureText = (text) => calibrated(estimateTokens(text))) {
+    const timezone = hot.config.bot?.timezone;
+    const labels = hot.prompts.labels;
+    let start = 0;
+    let text = renderTranscript(items, timezone, labels);
+    while (start < items.length - 1 && measureText(text) > room) {
+      start += 1;
+      text = renderTranscript(items.slice(start), timezone, labels);
+    }
+    return { text, dropped: start };
+  }
+
+  /** A label of `labels.mentor`, read now; '' when missing or empty. */
+  function mentorLabel(key) {
+    const value = hot.prompts.labels?.mentor?.[key];
+    return typeof value === 'string' ? value.trim() : '';
+  }
+
+  /**
+   * The `<examples>` block of a situations request: every anchor of the case
+   * as an `<example>` with its transcript (`<situation>`) and the persona's
+   * original answer (`<original>`, one message per line), introduced by
+   * `labels.mentor.examples`. Each example gets an equal share of `room`; a
+   * transcript over its share loses its oldest messages, never the trigger.
+   * '' for a case without anchors.
+   */
+  function examplesBlock(item, anchors, room, selfName) {
+    if (anchors.length === 0) return '';
+    const intro = mentorLabel('examples');
+    const share = Math.floor((room - calibrated(estimateTokens(intro))) / anchors.length);
+    let dropped = 0;
+    const examples = anchors.map((situation) => {
+      const original = block('original', situation.original.join('\n'));
+      const around = calibrated(estimateTokens(block('example', `${block('situation', ' ')}\n${original}`)));
+      const fitted = fittedTranscript(transcriptItems(situation.history, selfName), share - around);
+      dropped += fitted.dropped;
+      return block('example', [block('situation', fitted.text), original].filter(Boolean).join('\n'));
+    });
+    if (dropped > 0) log.info('mentor: examples trimmed to the request budget', { caseId: item.id, anchors: anchors.length, dropped });
+    return block('examples', [intro, ...examples].filter(Boolean).join('\n'));
+  }
+
   function nameOfIn(view) {
     return (id) => view.memory.getUser(id)?.names?.[0] ?? null;
   }
@@ -375,6 +477,8 @@ export function createMentor({ hot, store, llm, client, cases, budget, changes, 
    * One situations request for `item`. `count` (the repair loop's fresh
    * situations) replaces `mentor.situations` in the `{{count}}` placeholder
    * and as the number kept; `phase` replaces the status phase 'situations'.
+   * A case with anchors shows them last, as `<examples>`, fitted to what the
+   * request has room for.
    */
   async function inventSituations(ctx, { item, view, reference, feedback, self, count, phase }) {
     const cfg = hot.config.mentor ?? {};
@@ -383,7 +487,9 @@ export function createMentor({ hot, store, llm, client, cases, budget, changes, 
     const blocks = commonBlocks(item, reference, feedback, self.name);
     const values = count === undefined ? templateValues(self.name) : { ...templateValues(self.name), count };
     const system = fillPromptTemplate(hot.prompts[PROMPTS[item.target].situations], values);
-    const user = [blocks.case, block('members', members), blocks.reference, blocks.samples, blocks.signs, blocks.feedback].filter(Boolean).join('\n\n');
+    const parts = [blocks.case, block('members', members), blocks.reference, blocks.samples, blocks.signs, blocks.feedback].filter(Boolean);
+    const examples = examplesBlock(item, anchorSituations(item), roomLeft(system, parts.join('\n\n')), self.name);
+    const user = [...parts, examples].filter(Boolean).join('\n\n');
     ctx.phase = phase ?? 'situations';
     const text = await askMentor(ctx, system, user);
     const lines = Array.isArray(cfg.situationLines) ? cfg.situationLines : [6, 15];
@@ -399,21 +505,35 @@ export function createMentor({ hot, store, llm, client, cases, budget, changes, 
     return { situations, dropped: parsed.dropped };
   }
 
-  function transcriptOf(history, selfName) {
+  /** The transcript items of `history` as the persona's chat renders them (see `fittedTranscript`). */
+  function transcriptItems(history, selfName) {
     const config = hot.config;
-    const labels = hot.prompts.labels;
-    const timezone = config.bot?.timezone;
-    const items = formatTranscript(history, {
-      timezone,
+    return formatTranscript(history, {
+      timezone: config.bot?.timezone,
       gapMinutes: config.context?.gapMarkerMinutes,
       maxChars: config.context?.maxMessageChars,
       selfName,
-      labels,
+      labels: hot.prompts.labels,
       mode: 'chat',
       seeReactions: config.features?.seeReactions !== false,
       reactionsPerMessage: config.context?.reactionsPerMessage,
     });
-    return renderTranscript(items, timezone, labels);
+  }
+
+  /**
+   * The channel an anchor is replayed in: its stored entry, else what its
+   * trigger carries (the channel as it was at fetch time).
+   */
+  function anchorChannel(view, history) {
+    const trigger = history[history.length - 1] ?? {};
+    const id = String(trigger.channelId ?? '');
+    const entry = view.memory.listChannels().find((c) => String(c?.id) === id);
+    return {
+      id,
+      name: entry?.name || trigger.channelName || null,
+      category: entry?.category ?? trigger.channelCategory ?? null,
+      topic: entry?.topic ?? trigger.channelTopic ?? null,
+    };
   }
 
   /** One sandbox answer as the run stores it, with its facts. */
@@ -437,7 +557,7 @@ export function createMentor({ hot, store, llm, client, cases, budget, changes, 
   async function answerAll(ctx, { target, prepared, view, self, reference, samples, phase }) {
     let previous = 1;
     for (const entry of prepared) {
-      const { situation, record, history, at } = entry;
+      const { situation, record, history, at, channel } = entry;
       checkEnabled();
       if (!budget.canSpend(previous)) throw new RunEnd('stopped', 'budget');
       checkAborted(ctx);
@@ -454,7 +574,7 @@ export function createMentor({ hot, store, llm, client, cases, budget, changes, 
               situation,
               selfId: self.id,
               selfName: self.name,
-              channel: reference.channel,
+              channel: channel ?? reference.channel,
               llm,
               samples,
               now: at,
@@ -474,8 +594,12 @@ export function createMentor({ hot, store, llm, client, cases, budget, changes, 
    * `<character>`, `<rules>` and `<learned>` blocks -- comes from `judgeView`
    * (default: `view`, the view the answers were made on), so a what-if run is
    * scored against the live rules while the persona answered without them.
+   * A real moment (a record with `anchor`) also carries `<original>`: the
+   * persona's original answer, introduced by `labels.mentor.original`. With
+   * `items` (the transcript items of each record) a transcript over what the
+   * request has room for loses its oldest messages, never the trigger.
    */
-  async function scoreAll(ctx, { target, records, repeated, item, view, judgeView = view, self, reference, feedback, phase }) {
+  async function scoreAll(ctx, { target, records, repeated, item, view, judgeView = view, self, reference, feedback, phase, items = new Map() }) {
     const labels = view.prompts.labels ?? {};
     const intended = Array.isArray(labels.mentor?.intended) ? labels.mentor.intended.filter((s) => typeof s === 'string' && s.trim()) : [];
     const character = target === 'reply' ? block('character', fillPromptTemplate(judgeView.prompts['character-card'], { name: self.name })) : '';
@@ -499,22 +623,19 @@ export function createMentor({ hot, store, llm, client, cases, budget, changes, 
         facts.repeated = repeated;
         // Built per request, the re-ask included, so a prompt edited mid-run is read at once.
         const blocks = commonBlocks(item, reference, feedback, self.name);
-        const user = [
-          blocks.case,
-          blocks.reference,
-          blocks.samples,
-          blocks.signs,
-          block('intended', intended.join('\n')),
-          blocks.feedback,
-          character,
-          rules,
-          learned,
-          block('situation', situation.transcript),
-          block(answersTag, JSON.stringify(shown)),
-          block('facts', JSON.stringify(facts)),
-        ]
-          .filter(Boolean)
-          .join('\n\n');
+        const original = isAnchorRecord(situation)
+          ? block('original', [mentorLabel('original'), ...(situation.original ?? [])].filter(Boolean).join('\n'))
+          : '';
+        const before = [blocks.case, blocks.reference, blocks.samples, blocks.signs, block('intended', intended.join('\n')), blocks.feedback, character, rules, learned];
+        const after = [original, block(answersTag, JSON.stringify(shown)), block('facts', JSON.stringify(facts))];
+        const recordItems = items.get(situation);
+        let transcript = situation.transcript;
+        if (recordItems) {
+          const fitted = fittedTranscript(recordItems, roomLeft(system, [...before, ...after].filter(Boolean).join('\n\n')));
+          transcript = fitted.text;
+          if (fitted.dropped > 0) log.info('mentor: a situation trimmed to the request budget', { caseId: item.id, n: situation.n, dropped: fitted.dropped });
+        }
+        const user = [...before, block('situation', transcript), ...after].filter(Boolean).join('\n\n');
         const text = await askMentor(ctx, system, user);
         const { scores, missing } = parseScores(text, pending);
         for (const answer of asked) if (scores.has(answer.id)) answer.score = scores.get(answer.id);
@@ -532,7 +653,8 @@ export function createMentor({ hot, store, llm, client, cases, budget, changes, 
   }
 
   /**
-   * Answer `situations` on `view` with `samples` samples each (as `item`'s
+   * Answer `situations` (invented lines, or anchors from
+   * src/mentor/anchor.js#anchorSituations) on `view` with `samples` samples each (as `item`'s
    * target: the reply or the memory sandbox), then score every answer: the
    * one measuring step of a run, a check, an ablation and a verification.
    * `judgeView` (default: `view`) is the view the judge's `<character>`,
@@ -546,11 +668,18 @@ export function createMentor({ hot, store, llm, client, cases, budget, changes, 
    *   repeated: object[], prepared: object[] }>}
    */
   async function measureOn(ctx, { item, view, judgeView = view, situations, samples, reference, feedback, self, phase, into = {} }) {
+    const timezone = hot.config.bot?.timezone;
     const prepared = situations.map((situation, i) => {
-      const at = now();
-      const { history } = situationToHistory(situation, { selfId: self.id, selfName: self.name, now: at, channel: reference.channel });
-      const record = { n: i + 1, title: situation.title ?? '', lines: situation.lines, transcript: transcriptOf(history, self.name), answers: [] };
-      return { situation, record, history, at };
+      // A real moment (see src/mentor/anchor.js) is replayed from its stored history, at its own time and channel.
+      const anchored = Array.isArray(situation?.history);
+      const at = anchored && Number.isFinite(situation.at) ? situation.at : now();
+      const { history } = situationHistory(situation, { selfId: self.id, selfName: self.name, now: at, channel: reference.channel });
+      const items = transcriptItems(history, self.name);
+      const transcript = renderTranscript(items, timezone, hot.prompts.labels);
+      const record = anchored
+        ? { n: i + 1, title: situation.title ?? '', anchor: situation.anchor, original: situation.original ?? [], transcript, answers: [] }
+        : { n: i + 1, title: situation.title ?? '', lines: situation.lines, transcript, answers: [] };
+      return { situation, record, history, items, at, channel: anchored ? anchorChannel(view, history) : reference.channel };
     });
     const records = prepared.map((p) => p.record);
     into.prepared = prepared;
@@ -563,7 +692,8 @@ export function createMentor({ hot, store, llm, client, cases, budget, changes, 
       repeated = repeatedPhrases(all);
     }
     into.repeated = repeated;
-    await scoreAll(ctx, { target: item.target, records, repeated, item, view, judgeView, self, reference, feedback, phase });
+    const items = new Map(prepared.map((p) => [p.record, p.items]));
+    await scoreAll(ctx, { target: item.target, records, repeated, item, view, judgeView, self, reference, feedback, phase, items });
     return { records, ...verdictOf(records), repeated, prepared };
   }
 
@@ -608,7 +738,9 @@ export function createMentor({ hot, store, llm, client, cases, budget, changes, 
     };
     const template = hot.prompts?.[DIAGNOSE_PROMPT];
     if (typeof template !== 'string' || !template.trim()) return fail('prompt missing');
-    const worst = worstSituation(run.situationMedians);
+    const passScore = Number.isFinite(hot.config.mentor?.pass?.score) ? hot.config.mentor.pass.score : 7;
+    const anchorNs = new Set(run.situations.filter(isAnchorRecord).map((s) => s.n));
+    const worst = worstSituation(run.situationMedians, anchorNs, passScore);
     const entry = worst ? prepared.find((p) => p.record.n === worst.n) : null;
     if (!entry?.request) return fail('no situation to diagnose');
     let text;
@@ -618,18 +750,18 @@ export function createMentor({ hot, store, llm, client, cases, budget, changes, 
       const seen = [block('system', entry.request.system), block('user', entry.request.user)].filter(Boolean).join('\n');
       // The repair loop's fix request shows the same text.
       measured.seen = seen;
-      const user = [
-        blocks.case,
-        block('verdict', JSON.stringify(verdictJson)),
-        blocks.signs,
-        blocks.feedback,
-        block('worst', JSON.stringify(worstRecord(entry.record, run.target))),
-        block('seen', seen),
-      ]
-        .filter(Boolean)
-        .join('\n\n');
+      const system = fillPromptTemplate(template, templateValues(self.name));
+      const before = [blocks.case, block('verdict', JSON.stringify(verdictJson)), blocks.signs, blocks.feedback];
+      const after = [block('seen', seen)];
+      const shown = worstRecord(entry.record, run.target);
+      if (entry.items) {
+        // The transcript is the part of <worst> that grows with a real moment: it gives way first.
+        const room = roomLeft(system, [...before, ...after].filter(Boolean).join('\n\n')) - calibrated(estimateTokens(JSON.stringify({ ...shown, transcript: '' })));
+        shown.transcript = fittedTranscript(entry.items, room, (t) => calibrated(estimateTokens(JSON.stringify(t)))).text;
+      }
+      const user = [...before, block('worst', JSON.stringify(shown)), ...after].filter(Boolean).join('\n\n');
       ctx.phase = 'diagnosis';
-      text = await askMentor(ctx, fillPromptTemplate(template, templateValues(self.name)), user);
+      text = await askMentor(ctx, system, user);
     } catch (err) {
       return fail(diagnosisFailure(err));
     }
@@ -673,7 +805,7 @@ export function createMentor({ hot, store, llm, client, cases, budget, changes, 
       reasons: [],
       tokens: { spent: 0, left: 0 },
     };
-    log.info('mentor: run started', { kind, caseId: item.id, target: item.target });
+    log.info('mentor: run started', { kind, caseId: item.id, target: item.target, anchors: Array.isArray(item.anchors) ? item.anchors.length : 0 });
     // What the diagnosis needs once the run is measured; set only when scoring finished.
     let measured = null;
     // What measureOn built before a stop or a failure: the run keeps the situations answered so far.
@@ -693,9 +825,11 @@ export function createMentor({ hot, store, llm, client, cases, budget, changes, 
 
       let situations = stored;
       if (kind === 'run') {
+        // The case's real moments first, then the invented situations: `n` continues after the anchors.
+        const anchored = anchorSituations(item);
         const invented = await inventSituations(ctx, { item, view, reference, feedback, self });
         run.dropped = invented.dropped;
-        situations = invented.situations;
+        situations = [...anchored, ...invented.situations];
         if (situations.length === 0) throw new RunEnd('error', 'no valid situation');
       }
 
@@ -822,7 +956,8 @@ export function createMentor({ hot, store, llm, client, cases, budget, changes, 
   }
 
   /**
-   * Replay every active case's stored situations (from its last run) with
+   * Replay every active case's anchors (as the case holds them now) and the
+   * invented situations of its last run with
    * `mentor.check.samples` samples, no new situations; one run of kind
    * 'check' saved per case and one combined card. Resolves at once with
    * `{ started: true, cases, done }`.
@@ -833,6 +968,7 @@ export function createMentor({ hot, store, llm, client, cases, budget, changes, 
     const plan = [];
     const skipped = [];
     for (const item of cases.list(guildId)) {
+      const anchored = anchorSituations(item);
       let last = null;
       try {
         last = cases.lastRun(guildId, item.id);
@@ -840,13 +976,15 @@ export function createMentor({ hot, store, llm, client, cases, budget, changes, 
         skipped.push({ caseId: item.id, reason: 'its last run cannot be read' });
         continue;
       }
-      if (!last) {
+      if (!last && anchored.length === 0) {
         skipped.push({ caseId: item.id, reason: 'never run' });
         continue;
       }
-      const situations = (Array.isArray(last.situations) ? last.situations : [])
-        .filter((s) => Array.isArray(s?.lines) && s.lines.length > 0)
+      // The case's real moments as they are stored now, then the invented situations of its last run.
+      const invented = (Array.isArray(last?.situations) ? last.situations : [])
+        .filter((s) => !isAnchorRecord(s) && Array.isArray(s?.lines) && s.lines.length > 0)
         .map((s) => ({ title: s.title ?? '', lines: s.lines }));
+      const situations = [...anchored, ...invented];
       if (situations.length === 0) {
         skipped.push({ caseId: item.id, reason: 'no stored situations' });
         continue;
@@ -891,6 +1029,38 @@ export function createMentor({ hot, store, llm, client, cases, budget, changes, 
     return { started: true, cases: plan.length, done };
   }
 
+  /**
+   * Read one moment of the chat for a case (src/mentor/anchor.js#resolveAnchor):
+   * `ref` is a message link or id (a bare id means `context.channelId`);
+   * `mentor.anchor.contextMessages` and the media settings are read now.
+   * Spends no tokens and needs no switch; rejects with an operator-facing
+   * Error when the moment is refused.
+   * @param {string} ref
+   * @param {{ channelId?: string|null }} [context]
+   * @returns {Promise<{ channelId: string, messageId: string, triggerId: string, history: object[], original: string[] }>}
+   */
+  async function readAnchor(ref, { channelId } = {}) {
+    const guildId = getGuildId();
+    if (!guildId) throw new Error('the bot serves no guild yet');
+    const self = getSelf();
+    if (!self?.id) throw new Error('the bot user is not ready');
+    if (typeof fetchMoment !== 'function') throw new Error('reading a moment is not available');
+    const config = hot.config;
+    const anchor = await resolveAnchor({
+      ref,
+      guildId,
+      contextChannelId: channelId ?? null,
+      selfId: self.id,
+      client,
+      fetchMoment,
+      limit: Math.floor(positive(config.mentor?.anchor?.contextMessages, 30)),
+      embedTextChars: config.media?.embedTextChars,
+      videoSites: config.media?.video?.sites,
+    });
+    log.info('mentor: moment read', { messages: anchor.history.length, original: anchor.original.length });
+    return anchor;
+  }
+
   /** Abort the request in flight; the run ends as `stopped: 'owner'`. */
   function stop() {
     if (!current) return { ok: false };
@@ -923,5 +1093,5 @@ export function createMentor({ hot, store, llm, client, cases, budget, changes, 
     };
   }
 
-  return { run, check, stop, status, waitIdle, isRunning: () => current !== null };
+  return { run, check, resolveAnchor: readAnchor, stop, status, waitIdle, isRunning: () => current !== null };
 }

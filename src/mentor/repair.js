@@ -21,6 +21,11 @@
 //      tolerance;
 //   4. apply -- only then the change store writes it, recorded for undo.
 //
+// A weak real moment of the chat (an anchor, src/mentor/anchor.js) is
+// replayed from its stored messages in the control and every ablation, as is
+// another case's moment in the regression; the fresh situations of the
+// verification are invented with the case's moments in view (`<examples>`).
+//
 // Every measure is scored by a judge reading the LIVE rules, card and learned
 // items, so an edit never moves the yardstick it is measured by. An attempt
 // that proves nothing, whose edit is refused, or that fails its verification
@@ -37,6 +42,7 @@ import { listRules } from '../admin.js';
 import { fillPromptTemplate } from '../behavior/prompt.js';
 import { log } from '../log.js';
 import { ablationEdits, gainOf, locateSuspect } from './ablate.js';
+import { anchorSituation, isUsableAnchor } from './anchor.js';
 import { parseEdit, verdict } from './judge.js';
 import { editToOverlay, overlayView } from './overlay.js';
 
@@ -163,13 +169,28 @@ function suspectsOf(diagnosis) {
 }
 
 /**
- * The situations an ablation (and its control) replays: those of the run
- * whose median `overall` is under the pass score, all of them when none is.
+ * A stored situation record as a situation to replay: a real moment (a record
+ * with `anchor`) from the stored history of that anchor of `item`, invented
+ * lines as they are; null when it cannot be replayed (no lines, or an anchor
+ * the case no longer holds).
  */
-function weakOf(run, passScore) {
+function replayOf(record, item) {
+  if (record?.anchor !== undefined && record?.anchor !== null) {
+    const anchor = (Array.isArray(item?.anchors) ? item.anchors : []).find((a) => a?.id === record.anchor);
+    return anchor && isUsableAnchor(anchor) ? { ...anchorSituation(anchor), title: record.title ?? '' } : null;
+  }
+  return Array.isArray(record?.lines) && record.lines.length > 0 ? { title: record.title ?? '', lines: record.lines } : null;
+}
+
+/**
+ * The situations an ablation (and its control) replays: those of the run
+ * whose median `overall` is under the pass score, all of them when none is;
+ * a weak real moment is replayed from its stored history (see `replayOf`).
+ */
+function weakOf(run, passScore, item) {
   const weak = new Set((run.situationMedians ?? []).filter((m) => typeof m?.overall === 'number' && m.overall < passScore).map((m) => m.n));
-  const records = (run.situations ?? []).filter((s) => (weak.size === 0 || weak.has(s.n)) && Array.isArray(s.lines) && s.lines.length > 0);
-  return { situations: records.map((s) => ({ title: s.title ?? '', lines: s.lines })) };
+  const records = (run.situations ?? []).filter((s) => weak.size === 0 || weak.has(s.n));
+  return { situations: records.map((s) => replayOf(s, item)).filter(Boolean) };
 }
 
 /** Why an edit may not be made, by the loop's own limits; null when it may. */
@@ -376,7 +397,8 @@ export function createRepair({ hot, cases, changes, baseView, measureOn, askMent
     } catch {
       return { skipped: true };
     }
-    const stored = (Array.isArray(last?.situations) ? last.situations : []).filter((s) => Array.isArray(s?.lines) && s.lines.length > 0);
+    // A real moment of the other case is replayed from its stored history, as in its own run.
+    const stored = (Array.isArray(last?.situations) ? last.situations : []).map((s) => ({ record: s, situation: replayOf(s, other) })).filter((s) => s.situation);
     if (stored.length === 0) return null;
     const medians = Array.isArray(last.situationMedians) ? last.situationMedians : [];
     if (medians.length === 0 || !canScore(other.target)) return { skipped: true };
@@ -386,7 +408,7 @@ export function createRepair({ hot, cases, changes, baseView, measureOn, askMent
       item: other,
       view,
       judgeView,
-      situations: replay.map((s) => ({ title: s.title ?? '', lines: s.lines })),
+      situations: replay.map((s) => s.situation),
       samples: 1,
       reference: input.reference,
       feedback: input.feedback,
@@ -394,7 +416,7 @@ export function createRepair({ hot, cases, changes, baseView, measureOn, askMent
       phase,
     });
     const situations = replay.map((s, i) => {
-      const n = Number.isInteger(s.n) ? s.n : i + 1;
+      const n = Number.isInteger(s.record.n) ? s.record.n : i + 1;
       const before = medians.find((m) => m?.n === n)?.overall;
       const after = measured.verdict.situations.find((m) => m.n === i + 1)?.overall;
       return { n, before: typeof before === 'number' ? before : null, after: typeof after === 'number' ? after : null };
@@ -468,7 +490,7 @@ export function createRepair({ hot, cases, changes, baseView, measureOn, askMent
     if (typeof fixPrompt !== 'string' || !fixPrompt.trim()) return finish('prompt missing');
     // Per suspect: `done` once it was not proven or an edit was asked for it; `result` once measured.
     const state = suspects.map((suspect) => ({ suspect, done: false, result: null, where: null }));
-    const weak = weakOf(run, settings(hot.config, item.target).passScore);
+    const weak = weakOf(run, settings(hot.config, item.target).passScore, item);
 
     // The control: measured the first time an ablation needs it, then reused for every suspect.
     let controlVerdict = null;

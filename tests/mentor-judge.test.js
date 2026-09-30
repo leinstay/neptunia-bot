@@ -71,14 +71,20 @@ test('parseSituations: drops empty, overlong text and a replyTo that is not an e
   const { situations, dropped } = parseSituations(
     raw([
       situation([line(ALICE, '   '), line(BRUNO)]),
-      situation([line(ALICE, 'é'.repeat(501)), line(BRUNO)]),
+      situation([line(ALICE, 'é'.repeat(2001)), line(BRUNO)]),
       situation([line(ALICE), line(BRUNO, 'ok', { replyTo: 1 })]),
-      situation([line(ALICE, 'é'.repeat(500)), line(BRUNO)]),
+      situation([line(ALICE, 'é'.repeat(2000)), line(BRUNO)]),
     ]),
     OPTS,
   );
   assert.equal(dropped, 3);
   assert.equal(situations.length, 1);
+});
+
+test('parseSituations: a line of a real dispute length (up to 2000 characters) is kept', () => {
+  const { situations, dropped } = parseSituations(raw([situation([line(ALICE, 'é'.repeat(1932)), line(BRUNO, 'ô'.repeat(1580))])]), OPTS);
+  assert.equal(dropped, 0);
+  assert.equal(situations[0].lines[0].text.length, 1932);
 });
 
 test('parseSituations: keeps at most count', () => {

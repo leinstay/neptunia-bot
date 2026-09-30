@@ -11,6 +11,7 @@ import { createMentor } from '../src/mentor/mentor.js';
 import { createCaseStore } from '../src/mentor/cases.js';
 import { createMentorBudget } from '../src/mentor/budget.js';
 import { TokenLimitError } from '../src/llm/openrouter.js';
+import { estimateMessages } from '../src/llm/tokens.js';
 import { labels } from './fixtures/labels.js';
 import { withCapturedLogs } from './fixtures/capture-logs.js';
 
@@ -216,7 +217,7 @@ function reference() {
   ];
 }
 
-function setup({ config = {}, prompts = {}, llm = fakeLlm(), sendFails = false, fetchChannel, windowFor } = {}) {
+function setup({ config = {}, prompts = {}, llm = fakeLlm(), sendFails = false, fetchChannel, windowFor, fetchMoment } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'nep-mentor-run-'));
   let clock = NOW;
   const now = () => (clock += 1000);
@@ -259,6 +260,7 @@ function setup({ config = {}, prompts = {}, llm = fakeLlm(), sendFails = false, 
     getGuildId: () => GUILD,
     getSelf: () => ({ id: SELF_ID, name: 'Zoë' }),
     fetchHistoryWindow,
+    fetchMoment,
     now,
     rng: () => 0,
   });
@@ -1289,3 +1291,243 @@ test('run: a configured channel that cannot be fetched still logs a warning', ()
       assert.equal(logs.some((l) => l.msg === 'mentor: report saved'), false);
     },
   ));
+
+// ---- anchors: real moments of the chat ---------------------------------------
+
+const MOMENT_TS = Date.UTC(2026, 8, 29, 18, 0, 0);
+
+/** The snowflake of a message sent at `ts`. */
+function snowflakeAt(ts) {
+  return ((BigInt(ts) - 1420070400000n) << 22n).toString();
+}
+
+/** A stored message of a moment, normalized as src/discord/collect.js#normalizeMessage gives it. */
+function storedMessage(n, authorId, content, extra = {}) {
+  const names = { [SELF_ID]: 'Zoë', [ALICE]: 'Alice', [BRUNO]: 'Bruno' };
+  const ts = MOMENT_TS + n * 60_000;
+  return {
+    id: snowflakeAt(ts),
+    channelId: OTHER_CHANNEL.id,
+    channelName: 'games',
+    channelCategory: 'Talk',
+    channelTopic: null,
+    authorId,
+    authorName: names[authorId],
+    self: authorId === SELF_ID,
+    bot: false,
+    content,
+    ts,
+    mentionedUserIds: [],
+    replyToId: null,
+    forwardedFrom: null,
+    attachments: [],
+    links: [],
+    forwarded: [],
+    stickers: [],
+    emojis: [],
+    reactions: [],
+    ...extra,
+  };
+}
+
+let momentCount = 0;
+
+/** A resolved moment: Bruno opens, the persona says something, Alice argues back at length (the trigger); `older` long messages before. */
+function moment(marker, { older = 0 } = {}) {
+  const filler = Array.from({ length: older }, (_, i) => storedMessage(i - older - 3, BRUNO, `${marker} OLD_${i} ${'x'.repeat(700)}`));
+  const history = [
+    ...filler,
+    storedMessage(0, BRUNO, `${marker} opening`),
+    storedMessage(1, SELF_ID, `${marker} her earlier line`),
+    storedMessage(2, ALICE, `${marker} TRIGGER ${'é'.repeat(600)}`, { replyToId: snowflakeAt(MOMENT_TS + 60_000) }),
+  ];
+  return {
+    channelId: OTHER_CHANNEL.id,
+    // Each moment is its own message of the persona: never the same id twice.
+    messageId: snowflakeAt(MOMENT_TS + 3 * 60_000 + (momentCount += 1) * 1000),
+    triggerId: history.at(-1).id,
+    history,
+    original: [`${marker} you are right, but`, `${marker} no`],
+  };
+}
+
+/** A reply case with the given moments. */
+function anchoredCase(cases, markers, options) {
+  const [first, ...rest] = markers;
+  const item = cases.add(GUILD, { text: CASE_TEXT, target: 'reply', anchor: moment(first, options) });
+  for (const marker of rest) cases.addAnchor(GUILD, item.id, moment(marker, options), { max: 5 });
+  return cases.get(GUILD, item.id);
+}
+
+/** The score request whose `<answers>` belong to situation `n`. */
+function scoreCallOf(llm, n) {
+  return llm.calls.find((c) => c.kind === 'score' && idsIn(c.user)[0]?.startsWith(`s${n}a`));
+}
+
+test('run: every anchor is a situation of its own, numbered before the invented ones', () =>
+  withSetup({}, async ({ mentor, cases, llm }) => {
+    const item = anchoredCase(cases, ['A1', 'A2']);
+    const run = await (await mentor.run(item.id)).done;
+    assert.equal(run.error, undefined);
+    assert.deepEqual(run.situations.map((s) => s.n), [1, 2, 3, 4]);
+    assert.deepEqual(run.situations.map((s) => s.anchor), [1, 2, undefined, undefined]);
+    assert.deepEqual(run.situations[0].original, ['A1 you are right, but', 'A1 no']);
+    assert.equal(run.situations[0].lines, undefined);
+    assert.ok(Array.isArray(run.situations[2].lines));
+    assert.match(run.situations[0].transcript, /A1 TRIGGER/);
+    assert.match(run.situations[0].transcript, /A1 her earlier line/);
+    assert.deepEqual(run.situations[0].answers.map((a) => a.id), ['s1a1', 's1a2']);
+    // 1 situations request, 4 situations x 2 samples, 4 score requests.
+    assert.deepEqual(llm.kinds(), ['situations', ...Array(8).fill('talk'), 'score', 'score', 'score', 'score']);
+    // The anchor is answered from its stored messages.
+    const talk = llm.calls.filter((c) => c.kind === 'talk');
+    assert.match(talk[0].user, /A1 TRIGGER/);
+    assert.doesNotMatch(talk[0].user, /A2 TRIGGER|are you out of drawings/);
+    assert.match(talk[2].user, /A2 TRIGGER/);
+    assert.match(talk[4].user, /are you out of drawings today\?/);
+    assert.equal(run.situationMedians.length, 4);
+  }));
+
+test('run: the situations request shows the anchors as <examples>, last', () =>
+  withSetup({}, async ({ mentor, cases, llm }) => {
+    const item = anchoredCase(cases, ['A1', 'A2']);
+    await (await mentor.run(item.id)).done;
+    const { user } = llm.calls.find((c) => c.kind === 'situations');
+    assert.ok(user.endsWith('</examples>'));
+    const examples = blockBody(user, 'examples');
+    assert.ok(examples.startsWith(`${labels.mentor.examples}\n<example>\n`));
+    assert.equal(examples.match(/<example>/g).length, 2);
+    assert.match(examples, /<situation>\n[\s\S]*A1 TRIGGER[\s\S]*\n<\/situation>\n<original>\nA1 you are right, but\nA1 no\n<\/original>/);
+    assert.match(examples, /A2 TRIGGER[\s\S]*<original>\nA2 you are right, but\nA2 no\n<\/original>\n<\/example>$/);
+    // A case without anchors has no examples.
+    llm.calls.length = 0;
+    const plain = cases.add(GUILD, { text: CASE_TEXT, target: 'reply' });
+    await (await mentor.run(plain.id)).done;
+    assert.doesNotMatch(llm.calls.find((c) => c.kind === 'situations').user, /<examples>|<example>/);
+  }));
+
+test('run: the score request of an anchor carries <original>, the invented ones do not', () =>
+  withSetup({}, async ({ mentor, cases, llm }) => {
+    const item = anchoredCase(cases, ['A1']);
+    await (await mentor.run(item.id)).done;
+    const anchored = scoreCallOf(llm, 1).user;
+    assert.equal(blockBody(anchored, 'original'), `${labels.mentor.original}\nA1 you are right, but\nA1 no`);
+    const order = ['case', 'rules', 'situation', 'original', 'answers', 'facts'];
+    const positions = order.map((tag) => anchored.indexOf(`<${tag}>`));
+    assert.ok(positions.every((p) => p >= 0), JSON.stringify(positions));
+    assert.deepEqual([...positions].sort((a, b) => a - b), positions);
+    assert.match(blockBody(anchored, 'situation'), /A1 TRIGGER/);
+    for (const n of [2, 3]) assert.doesNotMatch(scoreCallOf(llm, n).user, /<original>/, `situation ${n}`);
+    assert.ok(!llm.calls.find((c) => c.kind === 'situations').user.includes(labels.mentor.original));
+  }));
+
+test('run: the per-situation floor applies to an anchor', () =>
+  withSetup({ llm: fakeLlm({ scoreFor: overallBySituation(3, 9, 9) }) }, async ({ mentor, cases }) => {
+    const item = anchoredCase(cases, ['A1']);
+    const run = await (await mentor.run(item.id)).done;
+    assert.equal(run.medians.overall, 9);
+    assert.equal(run.passed, false);
+    assert.deepEqual(run.reasons, ['situation 1: overall 3 is under the floor 5']);
+  }));
+
+test('run: a case with anchors still runs when no invented situation is valid', () =>
+  withSetup({ llm: fakeLlm({ situations: { situations: [] } }) }, async ({ mentor, cases }) => {
+    const item = anchoredCase(cases, ['A1']);
+    const run = await (await mentor.run(item.id)).done;
+    assert.equal(run.error, undefined);
+    assert.deepEqual(run.situations.map((s) => s.anchor), [1]);
+    assert.equal(run.passed, true);
+  }));
+
+test('run: an anchor over the request budget loses its oldest messages, never the trigger', () =>
+  withSetup({ config: { mentor: { situations: 1 } } }, async ({ mentor, cases, llm, hot }) => {
+    const item = anchoredCase(cases, ['A1'], { older: 30 });
+    hot.config.llm.maxRequestTokens = 4000;
+    const { result: run, logs } = await withCapturedLogs(async () => (await mentor.run(item.id)).done);
+    assert.equal(run.error, undefined);
+    const situations = llm.calls.find((c) => c.kind === 'situations');
+    const anchored = scoreCallOf(llm, 1);
+    for (const call of [situations, anchored]) {
+      assert.match(call.user, /A1 TRIGGER/);
+      assert.match(call.user, /A1 OLD_29 /);
+      assert.doesNotMatch(call.user, /A1 OLD_0 /);
+      assert.ok(estimateMessages(call.messages) <= 4000, `${call.kind}: ${estimateMessages(call.messages)}`);
+    }
+    // The stored transcript keeps every message; the logs carry counts only.
+    assert.match(run.situations[0].transcript, /A1 OLD_0 /);
+    const trimmed = logs.filter((l) => /trimmed to the request budget/.test(l.msg));
+    assert.ok(trimmed.length >= 2);
+    assert.ok(trimmed.every((l) => Number.isInteger(l.dropped) && l.dropped > 0));
+    assert.ok(!JSON.stringify(logs).includes('A1 OLD'), 'no message content in the logs');
+  }));
+
+test('check: replays the anchors of a case, then the invented situations of its last run', () =>
+  withSetup({}, async ({ mentor, cases, llm }) => {
+    const ran = anchoredCase(cases, ['A1']);
+    await (await mentor.run(ran.id)).done;
+    // A moment added after the run is replayed too; a case with a moment and no run is checked as well.
+    cases.addAnchor(GUILD, ran.id, moment('A2'), { max: 5 });
+    const fresh = anchoredCase(cases, ['B1']);
+    llm.calls.length = 0;
+    const started = await mentor.check();
+    assert.equal(started.cases, 2);
+    const runs = await started.done;
+    assert.equal(llm.kinds().includes('situations'), false);
+    const [first, second] = runs;
+    assert.equal(first.kind, 'check');
+    assert.deepEqual(first.situations.map((s) => s.anchor), [1, 2, undefined, undefined]);
+    assert.match(first.situations[1].transcript, /A2 TRIGGER/);
+    assert.equal(second.caseId, fresh.id);
+    assert.deepEqual(second.situations.map((s) => s.anchor), [1]);
+    assert.match(scoreCallOf(llm, 1).user, /<original>/);
+  }));
+
+test('run: the diagnosis prefers a weak anchor as <worst>', async () => {
+  await withSetup({ llm: fakeLlm({ scoreFor: overallBySituation(6, 3, 9) }) }, async ({ mentor, cases, llm }) => {
+    const item = anchoredCase(cases, ['A1']);
+    await (await mentor.run(item.id)).done;
+    const diagnose = llm.calls.at(-1);
+    assert.equal(diagnose.kind, 'diagnose');
+    const worst = JSON.parse(blockBody(diagnose.user, 'worst'));
+    assert.equal(worst.n, 1);
+    assert.match(worst.transcript, /A1 TRIGGER/);
+    const talk = llm.calls.filter((c) => c.kind === 'talk')[0];
+    assert.ok(blockBody(diagnose.user, 'seen').includes(`<user>\n${talk.user}\n</user>`));
+  });
+  // An anchor at or above the pass score leaves the lowest situation as <worst>.
+  await withSetup({ llm: fakeLlm({ scoreFor: overallBySituation(8, 3, 9) }) }, async ({ mentor, cases, llm }) => {
+    const item = anchoredCase(cases, ['A1']);
+    await (await mentor.run(item.id)).done;
+    assert.equal(JSON.parse(blockBody(llm.calls.at(-1).user, 'worst')).n, 2);
+  });
+});
+
+test('resolveAnchor: reads mentor.anchor.contextMessages and the media settings at the moment of use', () => {
+  const asked = [];
+  const channel = { id: OTHER_CHANNEL.id, guild: { id: GUILD } };
+  const fetchMoment = async (ch, messageId, options) => {
+    asked.push({ ch, messageId, options });
+    return { messageId, triggerId: 'x', history: moment('M').history, burst: [{ content: 'M you are right, but' }, { content: '' }] };
+  };
+  return withSetup(
+    { config: { mentor: { anchor: { contextMessages: 12 } } }, fetchChannel: (id) => (id === OTHER_CHANNEL.id ? channel : null), fetchMoment },
+    async ({ mentor, hot, llm }) => {
+      // A bare id is looked up in the channel the command was typed in.
+      const anchor = await mentor.resolveAnchor(snowflakeAt(MOMENT_TS), { channelId: OTHER_CHANNEL.id });
+      assert.equal(anchor.channelId, OTHER_CHANNEL.id);
+      assert.deepEqual(anchor.original, ['M you are right, but']);
+      assert.equal(asked[0].ch, channel);
+      assert.deepEqual(asked[0].options, { selfId: SELF_ID, limit: 12, embedTextChars: 300, videoSites: undefined });
+      hot.config.mentor.anchor.contextMessages = 7;
+      await mentor.resolveAnchor(snowflakeAt(MOMENT_TS), { channelId: OTHER_CHANNEL.id });
+      assert.equal(asked[1].options.limit, 7);
+      assert.equal(llm.calls.length, 0, 'reading a moment spends nothing');
+      await assert.rejects(mentor.resolveAnchor(`https://discord.com/channels/@me/${OTHER_CHANNEL.id}/${snowflakeAt(MOMENT_TS)}`), /direct message/);
+    },
+  );
+});
+
+test('resolveAnchor: without fetchMoment no moment can be read', () =>
+  withSetup({}, async ({ mentor }) => {
+    await assert.rejects(mentor.resolveAnchor(snowflakeAt(MOMENT_TS), { channelId: CHANNEL.id }), /not available/);
+  }));

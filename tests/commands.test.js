@@ -1430,26 +1430,29 @@ test('interaction handler: a failed draw is reported as an error text with no fi
 // mentor: the owner-only group that measures the persona in a sandbox
 // ---------------------------------------------------------------------------
 
-const MENTOR_SUBCOMMANDS = ['add', 'cases', 'remove', 'run', 'check', 'stop', 'show', 'wrong', 'status', 'log', 'undo', 'rebase'];
+const MENTOR_SUBCOMMANDS = ['add', 'anchor', 'cases', 'remove', 'run', 'check', 'stop', 'show', 'wrong', 'status', 'log', 'undo', 'rebase'];
 
-test('buildCommandTree: mentor group (add/cases/remove/run/check/stop/show/wrong/status/log/undo/rebase) with their options', () => {
+test('buildCommandTree: mentor group (add/anchor/cases/remove/run/check/stop/show/wrong/status/log/undo/rebase) with their options', () => {
   const [command] = buildCommandTree('nep');
   const mentor = findOption(command.options, 'mentor');
   assert.equal(mentor.type, 2); // SUBCOMMAND_GROUP
   assert.deepEqual(mentor.options.map((o) => o.name), MENTOR_SUBCOMMANDS);
   for (const sub of mentor.options) assert.equal(sub.type, 1, sub.name); // SUBCOMMAND
 
+  // A case is a message of the persona plus the owner's comment: both required, no target any more.
   const add = findOption(mentor.options, 'add');
-  assert.deepEqual(add.options.map((o) => o.name), ['text', 'target']);
-  const text = findOption(add.options, 'text');
-  assert.equal(text.type, 3); // STRING
-  assert.equal(text.required, true);
-  const target = findOption(add.options, 'target');
-  assert.equal(target.type, 3); // STRING
-  assert.equal(target.required, false);
-  assert.deepEqual(target.choices.map((c) => c.value), ['reply', 'memory']);
+  assert.deepEqual(add.options.map((o) => o.name), ['message', 'text']);
+  for (const option of add.options) {
+    assert.equal(option.type, 3, option.name); // STRING
+    assert.equal(option.required, true, option.name);
+  }
+  const anchor = findOption(mentor.options, 'anchor');
+  assert.deepEqual(anchor.options.map((o) => o.name), ['id', 'message']);
+  const message = findOption(anchor.options, 'message');
+  assert.equal(message.type, 3); // STRING
+  assert.equal(message.required, true);
 
-  for (const name of ['remove', 'run', 'show', 'wrong', 'undo']) {
+  for (const name of ['anchor', 'remove', 'run', 'show', 'wrong', 'undo']) {
     const sub = findOption(mentor.options, name);
     const id = findOption(sub.options, 'id');
     assert.equal(id.type, 4, name); // INTEGER
@@ -1481,8 +1484,8 @@ test('interaction handler: every mentor subcommand maps its options', async () =
   const admin = fakeAdmin();
   const handler = createInteractionHandler({ hot: baseHot(), admin, getGuildId: () => 'g1' });
   const cases = [
-    ['add', { text: 'answer a greeting briefly', target: 'memory' }, { text: 'answer a greeting briefly', target: 'memory' }],
-    ['add', { text: 'answer a greeting briefly' }, { text: 'answer a greeting briefly', target: undefined }],
+    ['add', { message: '800000000000000004', text: 'answer a greeting briefly' }, { message: '800000000000000004', text: 'answer a greeting briefly' }],
+    ['anchor', { id: 7, message: 'https://discord.com/channels/1/2/3' }, { id: 7, message: 'https://discord.com/channels/1/2/3' }],
     ['cases', {}, {}],
     ['remove', { id: 3 }, { id: 3 }],
     ['run', { id: 2 }, { id: 2 }],
@@ -1502,12 +1505,12 @@ test('interaction handler: every mentor subcommand maps its options', async () =
   }
 });
 
-test('interaction handler: mentor.run/check/show defer; the other mentor commands reply directly', async () => {
+test('interaction handler: mentor.add/anchor/run/check/show defer; the other mentor commands reply directly', async () => {
   const admin = fakeAdmin({ runImpl: () => 'mentor result' });
   const handler = createInteractionHandler({ hot: baseHot(), admin, getGuildId: () => 'g1' });
-  const slow = new Set(['run', 'check', 'show']);
+  const slow = new Set(['add', 'anchor', 'run', 'check', 'show']);
   for (const subcommand of MENTOR_SUBCOMMANDS) {
-    const interaction = fakeInteraction({ group: 'mentor', subcommand, optionValues: { id: 1, text: 'a case text', reason: 'why', name: 'format' } });
+    const interaction = fakeInteraction({ group: 'mentor', subcommand, optionValues: { id: 1, text: 'a case text', message: '800000000000000004', reason: 'why', name: 'format' } });
     await handler(interaction);
     assert.equal(interaction.deferred, slow.has(subcommand), subcommand);
     if (slow.has(subcommand)) assert.equal(interaction.edits[0].content, 'mentor result', subcommand);

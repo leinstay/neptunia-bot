@@ -97,6 +97,73 @@ test('add: refuses a text shorter than 10 characters', () => {
   }
 });
 
+/** A resolved moment as src/mentor/anchor.js#resolveAnchor returns it. */
+function moment(messageId = '800000000000000004') {
+  return {
+    channelId: '500000000000000001',
+    messageId,
+    triggerId: '800000000000000003',
+    history: [
+      { id: '800000000000000002', authorId: 'self-id', self: true, content: 'ναι' },
+      { id: '800000000000000003', authorId: '111', self: false, content: 'é'.repeat(1580) },
+    ],
+    original: ['you are right, but', 'no'],
+  };
+}
+
+test('add: a case may start with a moment, stored as its first anchor', () => {
+  const dir = tmpDataDir();
+  try {
+    const store = createCaseStore({ dataDir: dir, now: () => 5000 });
+    const item = store.add('g1', { text: TEXT_A, target: 'reply', anchor: moment() });
+    assert.deepEqual(item.anchors, [{ id: 1, ...moment(), addedAt: new Date(5000).toISOString() }]);
+    assert.deepEqual(createCaseStore({ dataDir: dir }).get('g1', item.id).anchors, item.anchors);
+    // A moment whose history ends with the persona, or has no history, is refused and nothing is stored.
+    const bad = { ...moment(), history: [moment().history[0]] };
+    assert.throws(() => store.add('g1', { text: TEXT_A, target: 'reply', anchor: bad }), /moment/);
+    assert.throws(() => store.add('g1', { text: TEXT_A, target: 'reply', anchor: { ...moment(), history: [] } }), /moment/);
+    assert.equal(store.list('g1').length, 1);
+  } finally {
+    cleanup(dir);
+  }
+});
+
+test('addAnchor: adds moments up to the max, never twice the same message', () => {
+  const dir = tmpDataDir();
+  try {
+    const store = createCaseStore({ dataDir: dir, now: clock(1000, 2000, 3000) });
+    const item = store.add('g1', { text: TEXT_A, target: 'reply', anchor: moment('800000000000000004') });
+    const { anchor, item: updated } = store.addAnchor('g1', item.id, moment('800000000000000005'), { max: 2 });
+    assert.equal(anchor.id, 2);
+    assert.equal(anchor.addedAt, new Date(2000).toISOString());
+    assert.deepEqual(updated.anchors.map((a) => a.id), [1, 2]);
+    assert.throws(() => store.addAnchor('g1', item.id, moment('800000000000000006'), { max: 2 }), /at most 2/);
+    assert.throws(() => store.addAnchor('g1', item.id, moment('800000000000000005'), { max: 5 }), /already/);
+    assert.throws(() => store.addAnchor('g1', 42, moment('800000000000000006'), { max: 5 }), /unknown case/);
+    assert.deepEqual(store.get('g1', item.id).anchors.map((a) => a.messageId), ['800000000000000004', '800000000000000005']);
+  } finally {
+    cleanup(dir);
+  }
+});
+
+test('addAnchor: a retired case or a memory case takes no moment', () => {
+  const dir = tmpDataDir();
+  try {
+    const store = createCaseStore({ dataDir: dir });
+    const retired = store.add('g1', { text: TEXT_A, target: 'reply' });
+    store.retire('g1', retired.id);
+    const memory = store.add('g1', { text: TEXT_B, target: 'memory' });
+    assert.throws(() => store.addAnchor('g1', retired.id, moment(), { max: 5 }), /retired/);
+    assert.throws(() => store.addAnchor('g1', memory.id, moment(), { max: 5 }), /reply/);
+    assert.throws(() => store.add('g1', { text: TEXT_B, target: 'memory', anchor: moment() }), /reply/);
+    // A case stored before anchors existed takes its first one.
+    const old = store.add('g1', { text: TEXT_A, target: 'reply' });
+    assert.equal(store.addAnchor('g1', old.id, moment(), { max: 5 }).anchor.id, 1);
+  } finally {
+    cleanup(dir);
+  }
+});
+
 test('retire: hides the case from list, keeps its runs', () => {
   const dir = tmpDataDir();
   try {

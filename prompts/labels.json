@@ -193,6 +193,8 @@
       "May request a picture through the drawing sub-process",
       "Posts a limit notice when a daily cap is reached",
       "Knows what it can and cannot perceive (pictures, video, links, search)"
-    ]
+    ],
+    "examples": "PLACEHOLDER (nep-writer): introduces <examples>: real moments of this chat, each a transcript and the persona's original answer, which the owner rejected.",
+    "original": "PLACEHOLDER (nep-writer): introduces <original>: what the persona actually answered in this real moment, the answer the owner rejected; a reference, not an answer to score."
   }
 }

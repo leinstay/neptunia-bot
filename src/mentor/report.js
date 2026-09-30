@@ -45,14 +45,27 @@ function situationMedian(run, n) {
   return run.situationMedians.find((m) => m?.n === n) ?? null;
 }
 
+/** Whether a stored situation is a real moment of the chat (it carries its anchor id). */
+function isAnchor(situation) {
+  return situation?.anchor !== undefined && situation?.anchor !== null;
+}
+
 /**
- * `by situation: 1: 9 · 2: 3 · 3: -`, the median overall of every situation;
- * null for a run stored before the medians by situation or with none of them.
+ * `by situation: 1 (anchor): 3 · 2: 9 · 3: -`, the median overall of every
+ * situation, a real moment marked; null for a run stored before the medians
+ * by situation or with none of them.
  */
 function bySituationLine(run) {
   if (!Array.isArray(run?.situationMedians) || run.situationMedians.length === 0) return null;
-  const parts = (run.situations ?? []).map((s) => `${s?.n}: ${num(situationMedian(run, s?.n)?.overall)}`);
+  const parts = (run.situations ?? []).map((s) => `${s?.n}${isAnchor(s) ? ' (anchor)' : ''}: ${num(situationMedian(run, s?.n)?.overall)}`);
   return parts.length ? `by situation: ${parts.join(' · ')}` : null;
+}
+
+/** `5 kept (2 anchors)`, or `3 kept` for a run without real moments. */
+function keptText(run) {
+  const situations = run?.situations ?? [];
+  const anchors = situations.filter(isAnchor).length;
+  return anchors ? `${situations.length} kept (${anchors} anchor${anchors === 1 ? '' : 's'})` : `${situations.length} kept`;
 }
 
 /** Every answer of a run, flat. */
@@ -80,7 +93,7 @@ function checkOutcome(run) {
 /**
  * The card posted to the admin channel after a run: the case (clipped to 300
  * characters), its target, the verdict or how the run ended, the medians, the
- * median overall of every situation (`-` for one with no scored answer; the
+ * median overall of every situation (a real moment marked `(anchor)`, `-` for one with no scored answer; the
  * line is left out for a run stored without them), the mentor's diagnosis
  * summary when the run has one (clipped to 300 characters, or to the room the
  * other lines leave), then for a run with a repair loop the change it applied
@@ -109,7 +122,7 @@ export function renderCard(run) {
   if (!run?.passed && Array.isArray(run?.reasons) && run.reasons.length > 0) {
     lines.push(`why: ${clip(run.reasons.join('; '), REASONS_MAX)}`);
   }
-  lines.push(`answers scored: ${scored} of ${answers.length} · situations: ${run?.situations?.length ?? 0} kept, ${run?.dropped ?? 0} dropped`);
+  lines.push(`answers scored: ${scored} of ${answers.length} · situations: ${keptText(run)}, ${run?.dropped ?? 0} dropped`);
   if (Array.isArray(run?.repeated) && run.repeated.length > 0) {
     lines.push(`phrases repeated across situations: ${run.repeated.length}`);
   }
@@ -265,8 +278,9 @@ function repairLines(repair) {
 
 /**
  * The file attached to the card: the case, the verdict, the reference, every
- * situation with its transcript (its header carries its median overall and
- * goal, `-` for none, unless the run was stored without them) and every
+ * situation with its transcript (its header carries its anchor id for a real moment, then its median overall and
+ * goal, `-` for none, unless the run was stored without them; a real moment
+ * shows the persona's original answer after its transcript) and every
  * answer with its facts, points per axis and the mentor's comment. A run with
  * a diagnosis gets its section after the case (summary, causes, proposed
  * changes, marked as the mentor's unverified opinion); a diagnosis that
@@ -298,15 +312,19 @@ export function renderFile(run) {
     lines.push('', 'Phrases repeated across situations:');
     for (const { phrase, count } of run.repeated) lines.push(`- "${phrase}" x${count}`);
   }
-  lines.push('', `Situations: ${run?.situations?.length ?? 0} kept, ${run?.dropped ?? 0} dropped`);
+  lines.push('', `Situations: ${keptText(run)}, ${run?.dropped ?? 0} dropped`);
   const hasMedians = Array.isArray(run?.situationMedians);
   for (const situation of run?.situations ?? []) {
-    lines.push('', `${RULE}`, `Situation ${situation.n}: ${situation.title ?? ''}`);
+    const marker = isAnchor(situation) ? ` (anchor ${situation.anchor})` : '';
+    lines.push('', `${RULE}`, `Situation ${situation.n}${marker}: ${situation.title ?? ''}`);
     if (hasMedians) {
       const medians = situationMedian(run, situation.n);
       lines.push(`medians: overall ${num(medians?.overall)} · goal ${num(medians?.goal)}`);
     }
     lines.push(RULE, String(situation.transcript ?? ''));
+    if (isAnchor(situation) && Array.isArray(situation.original) && situation.original.length > 0) {
+      lines.push('', 'original answer:', ...situation.original.map((text) => `  ${String(text).replace(/\n/g, '\n  ')}`));
+    }
     if (!situation.answers?.length) {
       lines.push('', '(no answers)');
       continue;

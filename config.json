@@ -240,7 +240,8 @@
       "files": ["system-prompt", "format", "reply", "memory", "profile"]
     },
     "regression": { "situations": 2, "tolerance": 1 },
-    "verify": { "situations": 3, "samples": 2, "minSituations": 2 }
+    "verify": { "situations": 3, "samples": 2, "minSituations": 2 },
+    "anchor": { "max": 5, "contextMessages": 30 }
   },
   "warmup": {
     "enabled": true,
