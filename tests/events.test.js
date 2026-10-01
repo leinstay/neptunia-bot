@@ -3178,3 +3178,130 @@ test('follow-up: with mediaDescriptions off the describer is never consulted and
   llm.respond('no');
   await p;
 });
+
+// ---------------------------------------------------------------------------
+// The address classifier -- the <author> block: who the candidate's author is
+// known as (stored aliases, ranked, capped by mention.followUpAliases), so the
+// classifier can connect a nickname in the persona's line to the member.
+
+/** A stored profile whose aliases rank in the listed order (equal dates: rank follows weight). */
+function profileWithAliases(id, names) {
+  const seen = '2026-01-01T00:00:00.000Z';
+  return {
+    id,
+    names: ['Ελένη'],
+    aliases: names.map((name, i) => ({ name, weight: names.length - i, firstSeen: seen, lastSeen: seen })),
+  };
+}
+
+/** The `<author>` line as `labels.address.author` renders it. */
+function authorLine(name, aliases) {
+  return labels.address.author.replace('{name}', name).replace('{aliases}', aliases);
+}
+
+/** Runs one candidate from `authorId` through an open window; resolves to the classifier's user message. */
+async function classifierUserMessage({ store, config, prompts = fakeAddressPrompts(), authorId = 'u7', authorName = 'Ελένη' }) {
+  const llm = fakeFollowUpLlm();
+  const handler = makeHandler({ llm, prompts, store, config });
+  const guild = fakeGuild('g1', 'Neptunia');
+  const t0 = Date.now();
+  const history = [rawHistoryMessage({ id: 'h1', authorId: 'u1', authorName: 'Alice', ts: t0, content: 'earlier message' })];
+  const channel = fakeChannelWithHistory('c1', guild, history);
+  await openFollowUpWindow(handler, { guild, channel, ts: t0 + 1000 });
+  const msg = fakeMessage({
+    id: 'm-candidate',
+    guild,
+    channel,
+    channelId: 'c1',
+    author: { id: authorId, bot: false, globalName: authorName, username: 'el' },
+    member: { displayName: authorName },
+    cleanContent: 'and you too',
+    createdTimestamp: t0 + 2000,
+  });
+  const p = handler(msg);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(llm.calls.length, 1, 'the classifier was asked');
+  const user = llm.calls[0].messages[1].content;
+  llm.respond('no');
+  await p;
+  return user;
+}
+
+test('follow-up author: the request carries an <author> block with the top-ranked aliases, capped at mention.followUpAliases', async () => {
+  const aliases = ['Λένα', 'Ελενάκι', 'Nélé', 'Lèna', 'Hélène', 'Éli', 'Nènè'];
+  const store = fakeStore({ u7: profileWithAliases('u7', aliases) });
+  const user = await classifierUserMessage({ store });
+
+  const line = authorLine('Ελένη', 'Λένα, Ελενάκι, Nélé, Lèna, Hélène');
+  assert.ok(user.includes(`<author>\n${line}\n</author>`), 'the default followUpAliases (5), best rank first');
+  assert.ok(!user.includes('Éli') && !user.includes('Nènè'), 'aliases past the cap are left out');
+  const authorAt = user.indexOf('<author>');
+  assert.ok(authorAt > user.indexOf('earlier message'), 'after the transcript');
+  assert.ok(authorAt < user.indexOf('<candidate>'), 'before the candidate');
+  assert.deepEqual(store.getUserCalls, [['g1', 'u7']], 'the candidate author profile, read once');
+});
+
+test('follow-up author: mention.followUpAliases is read live and caps the list', async () => {
+  const store = fakeStore({ u7: profileWithAliases('u7', ['Λένα', 'Ελενάκι', 'Nélé']) });
+  const user = await classifierUserMessage({ store, config: baseConfig({ mention: { followUpAliases: 2 } }) });
+  assert.ok(user.includes(`<author>\n${authorLine('Ελένη', 'Λένα, Ελενάκι')}\n</author>`));
+  assert.ok(!user.includes('Nélé'));
+});
+
+test('follow-up author: ranking decays with memory.aliasHalfLifeDays, like the persona request', async () => {
+  const profile = {
+    id: 'u7',
+    names: ['Ελένη'],
+    aliases: [
+      { name: 'Λένα', weight: 2, firstSeen: '2020-01-01T00:00:00.000Z', lastSeen: '2020-01-01T00:00:00.000Z' },
+      { name: 'Nélé', weight: 1, firstSeen: '2026-01-01T00:00:00.000Z', lastSeen: '2026-01-01T00:00:00.000Z' },
+    ],
+  };
+  const user = await classifierUserMessage({ store: fakeStore({ u7: profile }) });
+  assert.ok(user.includes(authorLine('Ελένη', 'Nélé, Λένα')),'the recent alias outranks the old heavier one');
+});
+
+test('follow-up author: a profile without aliases adds no <author> block', async () => {
+  const store = fakeStore({ u7: { id: 'u7', names: ['Ελένη'], aliases: [] } });
+  const user = await classifierUserMessage({ store });
+  assert.ok(!user.includes('<author>'));
+  assert.ok(user.includes('<candidate>') && user.includes('and you too'));
+});
+
+test('follow-up author: no stored profile adds no <author> block', async () => {
+  const store = fakeStore({});
+  const user = await classifierUserMessage({ store });
+  assert.ok(!user.includes('<author>'));
+  assert.deepEqual(store.getUserCalls, [['g1', 'u7']]);
+});
+
+test('follow-up author: followUpAliases 0 adds no <author> block', async () => {
+  const store = fakeStore({ u7: profileWithAliases('u7', ['Λένα']) });
+  const user = await classifierUserMessage({ store, config: baseConfig({ mention: { followUpAliases: 0 } }) });
+  assert.ok(!user.includes('<author>'));
+});
+
+test('follow-up author: without labels.address.author the block is omitted', async () => {
+  const store = fakeStore({ u7: profileWithAliases('u7', ['Λένα']) });
+  const prompts = { ...fakeAddressPrompts(), labels: { ...labels, address: undefined } };
+  const user = await classifierUserMessage({ store, prompts });
+  assert.ok(!user.includes('<author>'));
+  assert.ok(!user.includes('Λένα'));
+});
+
+test('follow-up author: reading the profile writes nothing', async () => {
+  const profile = profileWithAliases('u7', ['Λένα', 'Ελενάκι']);
+  const before = structuredClone(profile);
+  const touched = [];
+  const base = fakeStore({ u7: profile });
+  const store = new Proxy(base, {
+    get(target, key) {
+      if (key !== 'getUser' && key !== 'getUserCalls' && typeof key === 'string') touched.push(key);
+      return target[key];
+    },
+  });
+  const user = await classifierUserMessage({ store });
+  assert.ok(user.includes('<author>'));
+  assert.deepEqual(profile, before, 'the stored profile is unchanged');
+  assert.deepEqual(touched.filter((key) => key !== 'state' && key !== 'then'), [], 'no store method other than getUser');
+});

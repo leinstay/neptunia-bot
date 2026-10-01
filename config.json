@@ -92,7 +92,8 @@
     "followUpMinutes": 15,
     "followUpContext": 15,
     "followUpMaxOutputTokens": 8,
-    "followUpNoStreak": 3
+    "followUpNoStreak": 3,
+    "followUpAliases": 5
   },
   "typing": {
     "reactionDelayMs": [800, 4000],

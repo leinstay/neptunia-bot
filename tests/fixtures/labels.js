@@ -213,4 +213,7 @@ export const labels = {
     examples: 'real moments, each with the rejected original answer',
     original: 'the rejected original answer, a reference only',
   },
+  address: {
+    author: '{name} -- known as: {aliases}',
+  },
 };

@@ -22,7 +22,8 @@ import {
   parseFollowUpVerdict,
   classifierTextModel,
 } from '../behavior/mention.js';
-import { formatTranscript, renderTranscript } from './format.js';
+import { fill, formatTranscript, renderTranscript } from './format.js';
+import { topByRank } from '../memory/ranking.js';
 import { addPending, isExpired, popOldest } from '../behavior/pending.js';
 import { between } from '../behavior/turn.js';
 import { fillPromptTemplate } from '../behavior/prompt.js';
@@ -324,9 +325,10 @@ export function createMessageHandler({
 
   /**
    * The classifier's request: system = address.md (`{{name}}` filled), user =
-   * the last `mention.followUpContext` lines of the channel plus the new
-   * message wrapped in a `<candidate>` block (structural, not model-facing
-   * wording). Pictures, stickers, emoji and videos carry the captions the
+   * the last `mention.followUpContext` lines of the channel, then an
+   * `<author>` block when the new message's author has stored aliases
+   * (followUpAuthorLine), then the new message wrapped in a `<candidate>`
+   * block (tags structural, not model-facing wording). Pictures, stickers, emoji and videos carry the captions the
    * describer already cached (cachedFollowUpMedia). `null` when
    * `prompts.address` is missing -- the caller treats that the same as a "no".
    */
@@ -352,10 +354,33 @@ export function createMessageHandler({
     });
     const candidateItem = items[items.length - 1];
     const transcript = renderTranscript(items.slice(0, -1), config.bot.timezone, labels);
+    const author = followUpAuthorLine(channel.guild.id, normalized, config, labels);
+    const authorBlock = author ? `\n<author>\n${author}\n</author>` : '';
     return {
       system: fillPromptTemplate(addressPrompt, { name: selfName }),
-      user: `${transcript}\n<candidate>\n${candidateItem.text}\n</candidate>`,
+      user: `${transcript}${authorBlock}\n<candidate>\n${candidateItem.text}\n</candidate>`,
     };
+  }
+
+  /**
+   * The `<author>` block's one line: the candidate author's display name and
+   * the top `mention.followUpAliases` stored aliases by rank (decayed with
+   * `memory.aliasHalfLifeDays`, the same order the persona's own request
+   * shows), filled into `labels.address.author` (`{name}`, `{aliases}`) --
+   * so the classifier can tie a nickname in the persona's line to this
+   * member. Read-only (`store.getUser`). `''` (no block) with no profile, no
+   * aliases, a cap of 0 or no `labels.address.author`.
+   */
+  function followUpAuthorLine(guildId, normalized, config, labels) {
+    const template = labels?.address?.author;
+    if (!template) return '';
+    const cap = Math.max(0, Math.floor(config.mention?.followUpAliases ?? 5));
+    if (!(cap > 0)) return '';
+    const profile = store?.getUser?.(guildId, normalized.authorId);
+    const aliases = Array.isArray(profile?.aliases) ? profile.aliases : [];
+    const names = topByRank(aliases, cap, config.memory?.aliasHalfLifeDays).map((item) => item.name);
+    if (names.length === 0) return '';
+    return fill(template, { name: normalized.authorName, aliases: names.join(', ') });
   }
 
   /**

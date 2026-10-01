@@ -214,5 +214,8 @@
   },
   "variety": {
     "intro": "Turns of phrase and moves you've leaned on lately. They're spent for now; answer without them this time, and don't announce you're avoiding them."
+  },
+  "address": {
+    "author": "{name}, also called: {aliases}"
   }
 }
