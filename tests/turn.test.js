@@ -201,10 +201,13 @@ function fakeTurnChannel({ id = 'c1', name = 'general', guildId = 'g1', historyM
 
 function fakeLlm(responseText) {
   const calls = [];
+  const optionCalls = [];
   return {
     calls,
-    complete: async (messages) => {
+    optionCalls,
+    complete: async (messages, options) => {
       calls.push(messages);
+      optionCalls.push(options);
       return { text: responseText, usage: {}, estimated: 10 };
     },
   };
@@ -875,11 +878,14 @@ test('createTurnRunner: a text-attachment fetch failure falls back to the plain 
 
 function fakeLlmRejectingImagesOnce(statusCode, responseText) {
   const calls = [];
+  const optionCalls = [];
   let first = true;
   return {
     calls,
-    complete: async (messages) => {
+    optionCalls,
+    complete: async (messages, options) => {
       calls.push(messages);
+      optionCalls.push(options);
       if (first) {
         first = false;
         const err = new Error('bad request');
@@ -2936,4 +2942,42 @@ test('createTurnRunner: in dry-run the logged text carries the rendered custom e
   assert.equal(channel.sent.length, 0);
   const line = logs.find((l) => l.msg === 'dry-run: would send');
   assert.equal(line.text, 'ok <a:dance:222222222222222222>');
+});
+
+// ---------------------------------------------------------------------------
+// Provider routing: every request says which role makes it (llm.providerByModel
+// keys of the form "<prefix>@<role>").
+
+test('createTurnRunner: the persona turn is requested as the talk role', async () => {
+  const raw = rawMessage({ id: 'm1' });
+  const channel = fakeTurnChannel({ historyMessages: [raw] });
+  const llm = fakeLlm('<skip/>');
+  const turns = createTurnRunner({ hot: fakeHot(), store: fakeStore(), llm, calibrator: identityCalibrator(), client: fakeClient() });
+  await turns.runTurn({ channel, mode: 'interject' });
+  assert.equal(llm.optionCalls.length, 1);
+  assert.deepEqual(llm.optionCalls[0], { role: 'talk' }, 'only the role: the talk model and every other setting stay the defaults');
+});
+
+test('createTurnRunner: the text-only retry after a 4xx image error is requested as the talk role too', async () => {
+  const raw = rawMessage({
+    id: 'm1',
+    attachments: new Map([
+      ['v1', { id: 'v1', contentType: 'video/mp4', name: 'clip.mp4', url: 'https://cdn.discordapp.com/attachments/1/2/clip.mp4', duration: 34 }],
+    ]),
+  });
+  const channel = fakeTurnChannel({ historyMessages: [raw] });
+  const llm = fakeLlmRejectingImagesOnce(400, '<msg>ok</msg>');
+  const turns = createTurnRunner({ hot: fakeHot({}), store: fakeStore(), llm, calibrator: identityCalibrator(), client: fakeClient(), imageFetcher: fakeImageFetcher() });
+  await turns.runTurn({ channel, mode: 'reply', trigger: videoTrigger(raw), triggerKind: 'mention' });
+  assert.equal(llm.optionCalls.length, 2);
+  assert.deepEqual(llm.optionCalls.map((o) => o?.role), ['talk', 'talk']);
+});
+
+test('createTurnRunner: the rewatch and lookup classifiers are requested as classifier.text, the turn as talk', async () => {
+  const rewatch = await runRewatch();
+  assert.equal(rewatch.llm.classifierCalls[0].options.role, 'classifier.text');
+  assert.equal(rewatch.llm.turnCalls[0].options.role, 'talk');
+  const lookup = await runLookupTurn();
+  assert.equal(lookup.llm.classifierCalls[0].options.role, 'classifier.text');
+  assert.equal(lookup.llm.turnCalls[0].options.role, 'talk');
 });

@@ -39,7 +39,7 @@ test('buildCommandTree: never emits default_member_permissions -- always visible
 test('buildCommandTree: top-level leaves (status, ping, reload, pause, resume, interject, initiate, draw, set, unset)', () => {
   const [command] = buildCommandTree('nep');
   const names = command.options.map((o) => o.name);
-  assert.deepEqual(names, ['status', 'ping', 'reload', 'pause', 'resume', 'interject', 'initiate', 'draw', 'set', 'unset', 'rule', 'memory', 'private', 'alias', 'lore', 'learned', 'emoji', 'gifs', 'model', 'warmup', 'mentor', 'access']);
+  assert.deepEqual(names, ['status', 'ping', 'reload', 'pause', 'resume', 'interject', 'initiate', 'draw', 'set', 'unset', 'rule', 'memory', 'private', 'alias', 'lore', 'learned', 'emoji', 'gifs', 'model', 'route', 'warmup', 'mentor', 'access']);
 
   const status = findOption(command.options, 'status');
   assert.equal(status.type, 1); // SUBCOMMAND
@@ -1618,4 +1618,100 @@ test('autocomplete: command-option choices never offer the owner-only mentor com
     const names = interaction.respondCalls[0].map((c) => c.name);
     assert.ok(!names.some((name) => name === 'mentor' || name.startsWith('mentor.')), `${subcommand} "${value}"`);
   }
+});
+
+// ---------------------------------------------------------------------------
+// route: provider routing per model prefix and role (llm.providerByModel)
+// ---------------------------------------------------------------------------
+
+const ROUTE_ROLES = ['talk', 'analyzer', 'classifier.text', 'classifier.media', 'classifier.video', 'mentor', 'image'];
+
+test('buildCommandTree: route group (list/set/remove) with model, providers, role and fallbacks options', () => {
+  const [command] = buildCommandTree('nep');
+  const route = findOption(command.options, 'route');
+  assert.equal(route.type, 2); // SUBCOMMAND_GROUP
+  assert.deepEqual(route.options.map((o) => o.name), ['list', 'set', 'remove']);
+  assert.equal(findOption(route.options, 'list').options, undefined);
+
+  const set = findOption(route.options, 'set');
+  assert.deepEqual(set.options.map((o) => [o.name, o.type, o.required]), [
+    ['model', 3, true],
+    ['providers', 3, true],
+    ['role', 3, false],
+    ['fallbacks', 5, false],
+  ]);
+  assert.equal(findOption(set.options, 'model').autocomplete, true);
+  assert.deepEqual(findOption(set.options, 'role').choices.map((c) => c.value), ROUTE_ROLES);
+
+  const remove = findOption(route.options, 'remove');
+  assert.deepEqual(remove.options.map((o) => [o.name, o.type, o.required]), [
+    ['model', 3, true],
+    ['role', 3, false],
+  ]);
+  assert.equal(findOption(remove.options, 'model').autocomplete, true);
+  assert.deepEqual(findOption(remove.options, 'role').choices.map((c) => c.value), ROUTE_ROLES);
+});
+
+test('commandKeys: the route group and its three commands are grantable keys', () => {
+  const { keys, groups } = commandKeys();
+  assert.ok(groups.has('route'));
+  for (const key of ['route.list', 'route.set', 'route.remove']) assert.ok(keys.has(key), key);
+});
+
+test('interaction handler: route.set/remove/list map their options; role and fallbacks undefined when omitted', async () => {
+  const admin = fakeAdmin();
+  const handler = createInteractionHandler({ hot: baseHot(), admin, getGuildId: () => 'g1' });
+
+  await handler(fakeInteraction({ group: 'route', subcommand: 'set', optionValues: { model: 'google/', providers: 'google-vertex' } }));
+  await handler(fakeInteraction({
+    group: 'route',
+    subcommand: 'set',
+    optionValues: { model: 'google/', providers: 'google-ai-studio', role: 'classifier.video', fallbacks: true },
+  }));
+  await handler(fakeInteraction({ group: 'route', subcommand: 'remove', optionValues: { model: 'google/', role: 'classifier.video' } }));
+  await handler(fakeInteraction({ group: 'route', subcommand: 'list' }));
+
+  assert.deepEqual(admin.runCalls.map(([key, args]) => [key, args]), [
+    ['route.set', { model: 'google/', providers: 'google-vertex', role: undefined, fallbacks: undefined }],
+    ['route.set', { model: 'google/', providers: 'google-ai-studio', role: 'classifier.video', fallbacks: true }],
+    ['route.remove', { model: 'google/', role: 'classifier.video' }],
+    ['route.list', {}],
+  ]);
+});
+
+test('interaction handler: route.set is refused to a non-owner without a grant; a route.list grant opens only the list', async () => {
+  const admin = fakeAdmin({ access: { 'route.list': { roles: ['r1'] } } });
+  const handler = createInteractionHandler({ hot: baseHot(), admin, getGuildId: () => 'g1' });
+  const member = { roles: ['r1'] };
+
+  const set = fakeInteraction({ user: { id: 'u1' }, member, group: 'route', subcommand: 'set', optionValues: { model: 'google/', providers: 'x' } });
+  await handler(set);
+  const list = fakeInteraction({ user: { id: 'u1' }, member, group: 'route', subcommand: 'list' });
+  await handler(list);
+
+  assert.equal(set.replies[0].content, 'Not allowed');
+  assert.deepEqual(admin.runCalls.map(([key]) => key), ['route.list']);
+});
+
+test('autocomplete: the route model option offers the route prefixes and the models in use, filtered', async () => {
+  const admin = fakeAdmin();
+  const hot = {
+    config: {
+      bot: { commandName: 'nep', owners: ['owner1'] },
+      features: {},
+      llm: { model: 'anthropic/claude-opus-4.6', providerByModel: { 'google/': { only: ['google-vertex'] }, 'google/@classifier.video': { only: ['google-ai-studio'] } } },
+      memory: { model: null },
+      classifier: { text: null, media: 'google/gemini-3.8-flash', video: 'google/gemini-3.8-flash' },
+      image: { model: 'openai/gpt-image-x' },
+    },
+  };
+  const handler = createInteractionHandler({ hot, admin, getGuildId: () => 'g1' });
+
+  const all = fakeInteraction({ kind: 'autocomplete', group: 'route', subcommand: 'set', focused: { name: 'model', value: '' } });
+  await handler(all);
+  assert.deepEqual(all.respondCalls[0].map((c) => c.value), ['google/', 'anthropic/claude-opus-4.6', 'google/gemini-3.8-flash', 'openai/gpt-image-x']);
+
+  const typed = fakeInteraction({ kind: 'autocomplete', group: 'route', subcommand: 'remove', focused: { name: 'model', value: 'GOO' } });
+  await handler(typed);
+  assert.deepEqual(typed.respondCalls[0].map((c) => c.value), ['google/', 'google/gemini-3.8-flash']);
 });

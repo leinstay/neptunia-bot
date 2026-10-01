@@ -1402,6 +1402,7 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
 
       completion = await llm.complete(llmMessages, {
         model: cfg.model ?? undefined,
+        role: 'analyzer',
         maxOutputTokens: cfg.maxOutputTokens,
         temperature: 0.3,
         // A 150-message batch with an 8000-token answer on a large model can

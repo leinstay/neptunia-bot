@@ -2145,3 +2145,30 @@ test('cachedVideos: returns cached video states only, never fetches or spends a 
   assert.equal(videoFetcher.calls.length, 0);
   assert.equal(state.data.videoCount, undefined, 'no daily video slot is reserved');
 });
+
+// Provider routing: every request says which role makes it (llm.providerByModel
+// keys of the form "<prefix>@<role>").
+
+test('describe: a picture description is requested as the classifier.media role', async () => {
+  const hot = fakeHot({ config: { classifier: { media: 'x/vision' } } });
+  const llm = fakeLlm({ text: 'a cat' });
+  const describer = createDescriber({ hot, store: createStore({ dataDir: tmpDataDir() }), llm, imageFetcher: fakeImageFetcher() });
+  await describer.describe('g1', pictureItem('a1'));
+  assert.equal(llm.calls[0].options.role, 'classifier.media');
+});
+
+test('describeVideo: a watch is requested as the classifier.video role, a downloaded clip and a pinned URL alike', async () => {
+  const clip = videoDescriber();
+  await clip.describer.describeVideo('g1', videoAttachment());
+  assert.equal(clip.llm.calls[0].options.role, 'classifier.video');
+  const link = videoDescriber();
+  await link.describer.describeVideo('g1', videoLink());
+  assert.equal(link.llm.calls[0].options.role, 'classifier.video');
+  assert.deepEqual(link.llm.calls[0].options.provider, VIDEO_CFG.provider, 'the media.video.provider pin is kept');
+});
+
+test('rewatchVideo: the second look is requested as the classifier.video role', async () => {
+  const { describer, llm } = videoDescriber({ hot: rewatchHot(), llm: fakeLlm({ text: 'rouge' }), now: clock() });
+  await describer.rewatchVideo('g1', videoAttachment(), 'De quelle couleur ?');
+  assert.equal(llm.calls[0].options.role, 'classifier.video');
+});

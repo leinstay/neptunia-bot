@@ -33,28 +33,67 @@ function isRouting(value) {
 }
 
 /**
+ * One `llm.providerByModel` key split into its model prefix and its role:
+ * `"<prefix>@<role>"` applies to that role only, a key without `@` to any
+ * role (`role: null`). Split at the last `@`; model ids carry none.
+ * @param {string} key
+ * @returns {{ prefix: string, role: string|null }}
+ */
+export function parseRouteKey(key) {
+  const at = key.lastIndexOf('@');
+  if (at === -1) return { prefix: key, role: null };
+  return { prefix: key.slice(0, at), role: key.slice(at + 1) };
+}
+
+/**
+ * The `byModel` entry that routes `model` for `role`, or null: among the keys
+ * for exactly this role, the longest case-sensitive prefix of `model` (an
+ * exact id is simply the longest prefix); when none matches, the same among
+ * the role-less keys. A role-specific key beats a role-less one whatever their
+ * lengths. A non-string or empty `role` matches role-less keys only.
+ * Non-object entries and maps are ignored.
+ * @param {unknown} model
+ * @param {unknown} byModel
+ * @param {unknown} [role]
+ * @returns {{ key: string, prefix: string, role: string|null, value: object }|null}
+ */
+export function matchRoute(model, byModel, role) {
+  if (typeof model !== 'string' || !isRouting(byModel)) return null;
+  const wanted = typeof role === 'string' && role ? role : null;
+  let bestRole = null;
+  let bestAny = null;
+  for (const [key, value] of Object.entries(byModel)) {
+    if (!isRouting(value)) continue;
+    const parsed = parseRouteKey(key);
+    if (!model.startsWith(parsed.prefix)) continue;
+    const entry = { key, prefix: parsed.prefix, role: parsed.role, value };
+    if (parsed.role === null) {
+      if (bestAny === null || parsed.prefix.length > bestAny.prefix.length) bestAny = entry;
+    } else if (wanted !== null && parsed.role === wanted) {
+      if (bestRole === null || parsed.prefix.length > bestRole.prefix.length) bestRole = entry;
+    }
+  }
+  return bestRole ?? bestAny;
+}
+
+/**
  * The OpenRouter provider routing for one request, or undefined to send none.
  * Precedence: a plain-object `override` (a caller pinning its own route), then
- * the `byModel` entry whose key is the longest case-sensitive prefix of `model`
- * (an exact id is simply the longest prefix), then a plain-object `fallback`.
- * Non-object entries, maps and values are ignored. Exists because a provider
- * restriction (e.g. `only`) must differ per model family when the owner's own
- * provider keys are used: one routing object cannot fit every model.
- * The chosen object is returned as is, never copied or mutated.
+ * the `byModel` entry chosen by `matchRoute` for `model` and `role` (the
+ * longest matching prefix among the keys for this role, else among the
+ * role-less keys), then a plain-object `fallback`. Non-object entries, maps
+ * and values are ignored. Exists because a provider restriction (e.g. `only`)
+ * must differ per model family -- and per subprocess using the model -- when
+ * the owner's own provider keys are used: one routing object cannot fit every
+ * request. The chosen object is returned as is, never copied or mutated.
  * @param {unknown} model
- * @param {{ override?: unknown, byModel?: unknown, fallback?: unknown }} [sources]
+ * @param {{ override?: unknown, byModel?: unknown, fallback?: unknown, role?: unknown }} [sources]
  * @returns {object|undefined}
  */
-export function resolveProvider(model, { override, byModel, fallback } = {}) {
+export function resolveProvider(model, { override, byModel, fallback, role } = {}) {
   if (isRouting(override)) return override;
-  if (typeof model === 'string' && isRouting(byModel)) {
-    let bestKey = null;
-    for (const [key, value] of Object.entries(byModel)) {
-      if (!isRouting(value) || !model.startsWith(key)) continue;
-      if (bestKey === null || key.length > bestKey.length) bestKey = key;
-    }
-    if (bestKey !== null) return byModel[bestKey];
-  }
+  const route = matchRoute(model, byModel, role);
+  if (route) return route.value;
   return isRouting(fallback) ? fallback : undefined;
 }
 
@@ -115,6 +154,11 @@ export function createLlm({ apiKey, getConfig, calibrator, state, fetchImpl = fe
    * `llm.provider`; see `resolveProvider`); any other value leaves the
    * configured routing in charge. Exists for the video describer, which pins
    * the provider that can fetch a public video URL.
+   * `options.role` — which subprocess makes the request (`talk`, `analyzer`,
+   * `classifier.text`, `classifier.media`, `classifier.video`, `mentor`; the
+   * names of `/nep model`), so a `"<prefix>@<role>"` key of
+   * `llm.providerByModel` can route it; never sent. A call without a role
+   * matches only role-less keys.
    * `options.reasoning` — OpenRouter's reasoning settings for this one call
    * (e.g. `{ enabled: false }`); a plain object is sent verbatim as
    * `body.reasoning`, anything else omits the field. Exists for the video
@@ -160,13 +204,14 @@ export function createLlm({ apiKey, getConfig, calibrator, state, fetchImpl = fe
     };
     // OpenRouter's provider routing (e.g. `{ ignore: [...] }`, `{ only: [...] }`), sent
     // verbatim and read fresh on every call so it is hot-reloadable: a plain-object
-    // `options.provider`, else the longest-prefix `llm.providerByModel` entry for this
-    // request's model, else `llm.provider`. When none applies the field is omitted --
-    // OpenRouter then picks providers itself.
+    // `options.provider`, else the `llm.providerByModel` entry for this request's model
+    // and `options.role` (see `matchRoute`), else `llm.provider`. When none applies the
+    // field is omitted -- OpenRouter then picks providers itself.
     const provider = resolveProvider(body.model, {
       override: options.provider,
       byModel: cfg.providerByModel,
       fallback: cfg.provider,
+      role: options.role,
     });
     if (provider) body.provider = provider;
     if (isRouting(options.reasoning)) body.reasoning = options.reasoning;

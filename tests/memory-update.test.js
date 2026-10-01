@@ -4404,3 +4404,16 @@ test('buildMemoryRequest: a private batch without the memory labels fails loudly
     /privateNote/,
   );
 });
+
+test('analyze: the analyzer request is routed as the analyzer role', async () => {
+  await withStoreAsync(async (store) => {
+    const hot = { config: makeConfig(), prompts: { memory: 'Summarize.', labels } };
+    let seenOptions = null;
+    const llm = { complete: async (messages, options) => { seenOptions = options; return { text: '{}' }; } };
+    const updater = createMemoryUpdater({ hot, store, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept' });
+
+    await updater.analyze('g1', [slimMessage({ id: 'm1' })]);
+
+    assert.equal(seenOptions.role, 'analyzer');
+  });
+});

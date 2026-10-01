@@ -1953,3 +1953,16 @@ test('check: a real moment is replayed without the memory written after it', () 
     assert.match(requestText(talk[1]), /A1 TRIGGER/);
     assert.ok(requestText(talk[2]).includes('EP_AFTER'));
   }));
+
+// ---- provider routing ----------------------------------------------------------
+
+test('run: the mentor requests are routed as the mentor role, the sandbox persona answers as talk', () =>
+  withSetup({}, async ({ mentor, cases, llm }) => {
+    const item = cases.add(GUILD, { text: CASE_TEXT, target: 'reply' });
+    await (await mentor.run(item.id)).done;
+    const mentorCalls = llm.calls.filter((c) => c.kind === 'situations' || c.kind === 'score');
+    const talkCalls = llm.calls.filter((c) => c.kind === 'talk');
+    assert.ok(mentorCalls.length > 0 && talkCalls.length > 0);
+    for (const { options } of mentorCalls) assert.equal(options.role, 'mentor');
+    for (const { options } of talkCalls) assert.equal(options.role, 'talk');
+  }));

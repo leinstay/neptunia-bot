@@ -970,6 +970,7 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
       try {
         completion = await llm.complete(messages, {
           model: hot.config.memory?.model ?? hot.config.llm?.model,
+          role: 'analyzer',
           maxOutputTokens: cfg.maxOutputTokens ?? 6000,
           maxRequestTokens: warmupRequestCap(cfg),
           countAgainstDailyCap: false,
@@ -1770,6 +1771,7 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
     try {
       completion = await llm.complete(messages, {
         model: memoryCfg.model ?? hot.config.llm?.model,
+        role: 'analyzer',
         maxOutputTokens: cfg.maxOutputTokens ?? 6000,
         maxRequestTokens: warmupRequestCap(cfg),
       });

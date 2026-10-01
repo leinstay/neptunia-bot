@@ -784,6 +784,7 @@ export function createTurnRunner({
         ],
         {
           model: classifierTextModel(config),
+          role: 'classifier.text',
           maxOutputTokens: REWATCH_CLASSIFIER_MAX_TOKENS,
           timeoutMs: config.llm?.timeoutMs,
           countAgainstDailyCap: true,
@@ -879,6 +880,7 @@ export function createTurnRunner({
         ],
         {
           model: classifierTextModel(config),
+          role: 'classifier.text',
           maxOutputTokens: LOOKUP_CLASSIFIER_MAX_TOKENS,
           timeoutMs: config.llm?.timeoutMs,
           countAgainstDailyCap: true,
@@ -1195,7 +1197,7 @@ export function createTurnRunner({
 
       let completion;
       try {
-        completion = await llm.complete(messages);
+        completion = await llm.complete(messages, { role: 'talk' });
       } catch (err) {
         // Second line of defence: the picture downloaded fine on our end but
         // the provider still rejects the request for some 4xx reason.
@@ -1206,7 +1208,7 @@ export function createTurnRunner({
         // worse than the error itself.
         if (Array.isArray(messages[1]?.content) && err.statusCode >= 400 && err.statusCode < 500) {
           const textOnly = messages.map((m) => (Array.isArray(m.content) ? { ...m, content: request.textFallback } : m));
-          completion = await llm.complete(textOnly);
+          completion = await llm.complete(textOnly, { role: 'talk' });
         } else {
           throw err;
         }

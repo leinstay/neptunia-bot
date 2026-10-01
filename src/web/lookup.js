@@ -271,6 +271,7 @@ export function createLookup({ hot, store, llm, state = memoryState(), pageFetch
         ],
         {
           model: classifierTextModel(config),
+          role: 'classifier.text',
           maxOutputTokens: linksCfg.maxOutputTokens,
           timeoutMs: config.llm?.timeoutMs,
           countAgainstDailyCap: true,
@@ -412,6 +413,7 @@ export function createLookup({ hot, store, llm, state = memoryState(), pageFetch
           ],
           {
             model: classifierTextModel(config),
+            role: 'classifier.text',
             maxOutputTokens: searchCfg.maxOutputTokens,
             timeoutMs: config.llm?.timeoutMs,
             countAgainstDailyCap: true,

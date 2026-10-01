@@ -618,3 +618,20 @@ test('answerReply: reads everything through the view, so another view of the sam
   assert.ok(result.request.system.includes('OVERLAY_SYSTEM'));
   assert.ok(result.request.user.includes('OVERLAY_CHARACTER'));
 });
+
+// Provider routing: the sandbox answers route as the roles they stand in for.
+
+test('answerReply: the persona answer is routed as the talk role', async () => {
+  const view = liveView({ hot: fakeHot(), store: fakeStore(), guildId: 'g1' });
+  const llm = fakeLlm('<msg>ok</msg>');
+  await answerReply({ view, situation: twoLines(), selfId: SELF_ID, selfName: 'Zoë', channel: CHANNEL, llm, samples: 2, now: NOW });
+  assert.deepEqual(llm.calls.map((call) => call.options.role), ['talk', 'talk']);
+});
+
+test('answerMemory: the analyzer answer is routed as the analyzer role', async () => {
+  const view = liveView({ hot: fakeHot(), store: fakeStore(), guildId: 'g1' });
+  const { history } = situationToHistory(twoLines(), { selfId: SELF_ID, selfName: 'Zoë', now: NOW, channel: CHANNEL });
+  const llm = fakeLlm('{}');
+  await answerMemory({ view, batch: history, selfName: 'Zoë', llm, samples: 1, now: NOW });
+  assert.equal(llm.calls[0].options.role, 'analyzer');
+});

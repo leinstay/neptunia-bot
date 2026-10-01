@@ -15,6 +15,9 @@ const RETRY_STATUS = new Set([408, 429, 500, 502, 503, 504]);
 const MODERATION_STATUS = new Set([400, 403]);
 const MODERATION_MARKERS = /moderation|content_policy|safety/i;
 
+/** The role a generation routes as: `"<prefix>@image"` keys of `llm.providerByModel` apply to it. */
+export const IMAGE_ROLE = 'image';
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -93,9 +96,10 @@ function buildBody({ cfg, byModel, family, prompt, reference }) {
   if (cfg.aspectRatio != null && !(family === 'google' && cfg.aspectRatio === 'auto')) {
     body.aspect_ratio = cfg.aspectRatio;
   }
-  // Routing first (the longest-prefix `llm.providerByModel` entry for the model, else
-  // `image.provider`; copied, never mutated), then the family's own provider options over it.
-  const routing = resolveProvider(cfg.model, { byModel, fallback: cfg.provider });
+  // Routing first (the `llm.providerByModel` entry for the model and the `image` role, see
+  // `matchRoute`, else `image.provider`; copied, never mutated), then the family's own
+  // provider options over it.
+  const routing = resolveProvider(cfg.model, { byModel, fallback: cfg.provider, role: IMAGE_ROLE });
   const provider = routing ? { ...routing } : {};
   if (family === 'openai') {
     const openai = cfg.openai ?? {};

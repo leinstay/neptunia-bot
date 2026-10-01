@@ -123,6 +123,7 @@ test('readLink: fetches the page, condenses it on the text classifier model and 
   assert.equal(messages[0].content, 'Condense this page, up to 700 characters.');
   assert.equal(messages[1].content, 'Ricetta\n\nUna ricetta semplice con tre uova e farina.');
   assert.equal(options.model, 'x/text');
+  assert.equal(options.role, 'classifier.text', 'routed as the text classifier');
   assert.equal(options.maxOutputTokens, 300);
   assert.equal(options.skipCalibration, true);
   assert.equal(options.countAgainstDailyCap, true);
@@ -381,6 +382,7 @@ test('search: Brave results are condensed on the text classifier model; sources 
     '1. Résultat un\nhttps://www.example.com/one\npremier extrait\n2 days ago\n\n2. Résultat deux\nhttps://news.example.org/two\nsecond extrait',
   );
   assert.equal(options.model, 'x/text');
+  assert.equal(options.role, 'classifier.text', 'routed as the text classifier');
   assert.equal(options.maxOutputTokens, 400);
   assert.equal(options.skipCalibration, true);
   const key = Object.keys(store.getMediaCache('g1')).find((k) => k.startsWith('search:'));

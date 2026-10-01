@@ -307,7 +307,7 @@ export async function answerReply({ view, situation, selfId, selfName, channel, 
   const { answers, tokens, stopped } = await sample({
     llm,
     messages,
-    options: { countAgainstDailyCap: false, skipCalibration: true, signal },
+    options: { role: 'talk', countAgainstDailyCap: false, skipCalibration: true, signal },
     samples,
     signal,
     onUsage,
@@ -502,6 +502,7 @@ export async function answerMemory({ view, batch, selfName, llm, samples, now = 
     messages,
     options: {
       model: memoryCfg.model ?? config.llm?.model,
+      role: 'analyzer',
       maxOutputTokens: memoryCfg.maxOutputTokens,
       temperature: MEMORY_TEMPERATURE,
       timeoutMs: memoryCfg.timeoutMs ?? config.llm?.timeoutMs,

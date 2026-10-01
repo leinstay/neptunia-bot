@@ -2055,3 +2055,26 @@ test('status: next target skips the target currently in flight', async () => {
   release();
   await running;
 });
+
+// Provider routing: every warmup request is routed as the analyzer role.
+
+test('createWarmup: run() and refreshPortrait() route every request as the analyzer role', async () => {
+  const store = createStore({ dataDir: tmpDataDir() });
+  const history = [rawMessage(1000, { authorId: 'a' }), rawMessage(2000, { authorId: 'a' }), rawMessage(3000, { authorId: 'a' })];
+  const client = fakeClient(fakeGuild('g1', [fakeChannel('c1', history)]));
+  const hot = fakeHot();
+  const llm = scriptedLlm([
+    { purpose: 'p', topics: 't', tone: 'x' },
+    { character: 'c', style: 's', interests: [], details: [], episodes: [], aliases: [] },
+    { patterns: '', starters: '', injokes: [], lore: [] },
+    { character: 'c2', style: 's2', interests: [], details: [], episodes: [], aliases: [] },
+  ]);
+  const warmup = createWarmup({ hot, store, client, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => 10_000_000 });
+
+  await warmup.run('g1');
+  const refreshed = await warmup.refreshPortrait('g1', 'a', '');
+
+  assert.equal(refreshed.ok, true);
+  assert.equal(llm.calls.length, 4);
+  assert.deepEqual(llm.calls.map((call) => call.opts.role), ['analyzer', 'analyzer', 'analyzer', 'analyzer']);
+});

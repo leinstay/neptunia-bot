@@ -513,6 +513,7 @@ export function createMessageHandler({
           ],
           {
             model: classifierTextModel(config),
+            role: 'classifier.text',
             maxOutputTokens: mentionCfg.followUpMaxOutputTokens,
             countAgainstDailyCap: true,
             skipCalibration: true,

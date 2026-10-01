@@ -1593,6 +1593,7 @@ test('follow-up: the classifier request is address.md as system and a <candidate
   assert.ok(messages[1].content.includes('earlier message'), 'the channel context is included');
   assert.equal(options.maxOutputTokens, 8, 'mention.followUpMaxOutputTokens');
   assert.equal(options.model, 'anthropic/claude-sonnet-4.6', 'the shipped classifier.text');
+  assert.equal(options.role, 'classifier.text', 'routed as the text classifier');
   assert.equal(options.countAgainstDailyCap, true);
   assert.equal(options.skipCalibration, true);
 

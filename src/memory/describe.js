@@ -248,6 +248,7 @@ export function createDescriber({
         ],
         {
           model: classifierMediaModel(hot.config),
+          role: 'classifier.media',
           maxOutputTokens: mediaCfg.maxOutputTokens,
           countAgainstDailyCap,
           // A vision request has its own (usually cheap/fast) model, but still
@@ -496,6 +497,7 @@ export function createDescriber({
   function videoRequestOptions(videoCfg, media, { maxOutputTokens, countAgainstDailyCap }) {
     return {
       model: classifierVideoModel(hot.config),
+      role: 'classifier.video',
       maxOutputTokens,
       timeoutMs: videoCfg.timeoutMs,
       videoSeconds: media.seconds ?? videoCfg.maxSeconds,

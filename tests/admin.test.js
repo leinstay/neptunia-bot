@@ -5519,3 +5519,185 @@ test('run: access.grant on gifs.status adds no write note, on gifs.rescan it doe
   assert.doesNotMatch(status, /change memory or config/);
   assert.match(rescan, /change memory or config/);
 });
+
+// ---------------------------------------------------------------------------
+// route.list / route.set / route.remove: llm.providerByModel from Discord
+// ---------------------------------------------------------------------------
+
+test('run: route.set without a role writes { only, allow_fallbacks: false } under the bare prefix and reloads', async () => {
+  const rootDir = makeRoot();
+  fs.writeFileSync(path.join(rootDir, 'config.local.json'), JSON.stringify({ llm: { model: 'x/kept' } }));
+  const { admin, hot } = makeAdmin(rootDir);
+
+  const result = await admin.run('route.set', { model: 'google/', providers: 'google-vertex' }, {});
+
+  assert.deepEqual(readLocal(rootDir), {
+    llm: { model: 'x/kept', providerByModel: { 'google/': { only: ['google-vertex'], allow_fallbacks: false } } },
+  });
+  assert.equal(hot.reloadConfigCalls, 1);
+  assert.match(result, /google\//);
+});
+
+test('run: route.set with a role writes "<prefix>@<role>"; a dotted model id stays one key; fallbacks true is kept', async () => {
+  const rootDir = makeRoot();
+  const { admin } = makeAdmin(rootDir);
+
+  await admin.run('route.set', { model: 'google/', providers: 'google-vertex' }, {});
+  await admin.run('route.set', { model: 'google/', providers: ' google-ai-studio , google-vertex ,', role: 'classifier.video' }, {});
+  await admin.run('route.set', { model: 'anthropic/claude-sonnet-4.6', providers: 'amazon-bedrock', role: 'talk', fallbacks: true }, {});
+
+  assert.deepEqual(readLocal(rootDir).llm.providerByModel, {
+    'google/': { only: ['google-vertex'], allow_fallbacks: false },
+    'google/@classifier.video': { only: ['google-ai-studio', 'google-vertex'], allow_fallbacks: false },
+    'anthropic/claude-sonnet-4.6@talk': { only: ['amazon-bedrock'], allow_fallbacks: true },
+  });
+});
+
+test('run: route.set overwrites an existing route of the same key', async () => {
+  const rootDir = makeRoot();
+  const { admin } = makeAdmin(rootDir);
+  await admin.run('route.set', { model: 'google/', providers: 'google-vertex', role: 'image' }, {});
+  await admin.run('route.set', { model: 'google/', providers: 'google-ai-studio', role: 'image', fallbacks: true }, {});
+  assert.deepEqual(readLocal(rootDir).llm.providerByModel, { 'google/@image': { only: ['google-ai-studio'], allow_fallbacks: true } });
+});
+
+test('run: route.set validates the prefix, the providers and the role, writing nothing on an error', async () => {
+  const rootDir = makeRoot();
+  const { admin, hot } = makeAdmin(rootDir);
+  const bad = [
+    [{ model: '', providers: 'google-vertex' }, /model/],
+    [{ model: '   ', providers: 'google-vertex' }, /model/],
+    [{ model: 'google/@talk', providers: 'google-vertex' }, /@/],
+    [{ model: 'google /x', providers: 'google-vertex' }, /space/],
+    [{ model: '__proto__', providers: 'google-vertex' }, /model/],
+    [{ model: 'google/', providers: '' }, /provider/],
+    [{ model: 'google/', providers: ' , ' }, /provider/],
+    [{ model: 'google/', providers: 'Google-Vertex' }, /provider/],
+    [{ model: 'google/', providers: 'google_vertex' }, /provider/],
+    [{ model: 'google/', providers: 'google-vertex', role: 'bogus' }, /unknown role: bogus/],
+    [{ model: 'google/', providers: 'google-vertex', role: 'classifier' }, /unknown role/],
+  ];
+  for (const [args, message] of bad) {
+    await assert.rejects(() => admin.run('route.set', args, {}), message, JSON.stringify(args));
+  }
+  assert.equal(fs.existsSync(path.join(rootDir, 'config.local.json')), false);
+  assert.equal(hot.reloadConfigCalls, 0);
+});
+
+test('run: route.remove deletes only the named key; an unknown route is an error and writes nothing', async () => {
+  const rootDir = makeRoot();
+  const { admin, hot } = makeAdmin(rootDir);
+  await admin.run('route.set', { model: 'google/', providers: 'google-vertex' }, {});
+  await admin.run('route.set', { model: 'google/', providers: 'google-ai-studio', role: 'classifier.video' }, {});
+
+  const result = await admin.run('route.remove', { model: 'google/', role: 'classifier.video' }, {});
+  assert.match(result, /google\/@classifier\.video/);
+  assert.deepEqual(readLocal(rootDir).llm.providerByModel, { 'google/': { only: ['google-vertex'], allow_fallbacks: false } });
+  assert.equal(hot.reloadConfigCalls, 3);
+
+  const before = fs.readFileSync(path.join(rootDir, 'config.local.json'), 'utf8');
+  await assert.rejects(() => admin.run('route.remove', { model: 'google/', role: 'talk' }, {}), /no route: google\/@talk/);
+  await assert.rejects(() => admin.run('route.remove', { model: 'google/', role: 'bogus' }, {}), /unknown role/);
+  assert.equal(fs.readFileSync(path.join(rootDir, 'config.local.json'), 'utf8'), before);
+  assert.equal(hot.reloadConfigCalls, 3);
+
+  await admin.run('route.remove', { model: 'google/' }, {});
+  assert.deepEqual(readLocal(rootDir), {}, 'the emptied map and llm object are pruned');
+});
+
+function hotForRoutes(rootDir) {
+  const hot = makeHotWithMedia(rootDir);
+  hot.config.llm.provider = null;
+  hot.config.classifier = { text: null, media: 'google/gemini-3.8-flash', video: 'google/gemini-3.8-flash' };
+  hot.config.mentor = { model: null };
+  hot.config.image = { model: 'openai/gpt-image-x', provider: { only: ['openai'] } };
+  hot.config.media = { video: { provider: { order: ['google-ai-studio'], allow_fallbacks: false } } };
+  return hot;
+}
+
+test('run: route.list with no routes says so, then shows each role with its model and no route', async () => {
+  const rootDir = makeRoot();
+  const { admin } = makeAdmin(rootDir, { hot: hotForRoutes(rootDir) });
+
+  const lines = (await admin.run('route.list', {}, {})).split('\n');
+
+  assert.deepEqual(lines, [
+    'routes: none',
+    'by role:',
+    '  talk: anthropic/claude-opus-4.6 -> none',
+    '  analyzer: anthropic/claude-opus-4.6 -> none',
+    '  classifier.text: google/gemini-3.8-flash -> none',
+    '  classifier.media: google/gemini-3.8-flash -> none',
+    '  classifier.video: google/gemini-3.8-flash -> none; direct-URL videos: media.video.provider (order google-ai-studio, fallbacks: off)',
+    '  mentor: (no model configured)',
+    '  image: openai/gpt-image-x -> image.provider (only openai, fallbacks: on)',
+  ]);
+});
+
+test('run: route.list renders every route (prefix, role or any, providers, fallbacks) and the route each role gets', async () => {
+  const rootDir = makeRoot();
+  const hot = hotForRoutes(rootDir);
+  hot.config.llm.provider = { ignore: ['some-provider'] };
+  const { admin } = makeAdmin(rootDir, { hot });
+  await admin.run('route.set', { model: 'google/', providers: 'google-vertex' }, {});
+  await admin.run('route.set', { model: 'google/', providers: 'google-ai-studio', role: 'classifier.video' }, {});
+  await admin.run('route.set', { model: 'anthropic/', providers: 'amazon-bedrock,anthropic', role: 'analyzer', fallbacks: true }, {});
+
+  const lines = (await admin.run('route.list', {}, {})).split('\n');
+
+  assert.deepEqual(lines, [
+    'routes:',
+    '  anthropic/ | analyzer | only amazon-bedrock, anthropic | fallbacks: on',
+    '  google/ | any | only google-vertex | fallbacks: off',
+    '  google/ | classifier.video | only google-ai-studio | fallbacks: off',
+    'by role:',
+    '  talk: anthropic/claude-opus-4.6 -> llm.provider (ignore some-provider, fallbacks: on)',
+    '  analyzer: anthropic/claude-opus-4.6 -> anthropic/@analyzer (only amazon-bedrock, anthropic, fallbacks: on)',
+    '  classifier.text: google/gemini-3.8-flash -> google/ (only google-vertex, fallbacks: off)',
+    '  classifier.media: google/gemini-3.8-flash -> google/ (only google-vertex, fallbacks: off)',
+    '  classifier.video: google/gemini-3.8-flash -> google/@classifier.video (only google-ai-studio, fallbacks: off); direct-URL videos: media.video.provider (order google-ai-studio, fallbacks: off)',
+    '  mentor: (no model configured)',
+    '  image: openai/gpt-image-x -> image.provider (only openai, fallbacks: on)',
+  ]);
+});
+
+test('run: route.list shows a hand-written route that is not an only-list verbatim', async () => {
+  const rootDir = makeRoot();
+  const hot = hotForRoutes(rootDir);
+  hot.config.llm.providerByModel = { 'openai/@image': { sort: 'price' } };
+  const { admin } = makeAdmin(rootDir, { hot });
+  const lines = (await admin.run('route.list', {}, {})).split('\n');
+  assert.equal(lines[1], '  openai/ | image | {"sort":"price"} | fallbacks: on');
+  assert.equal(lines.at(-1), '  image: openai/gpt-image-x -> openai/@image ({"sort":"price"}, fallbacks: on)');
+});
+
+test('access: route.list is read-only, route.set and route.remove open a write; none is open to a non-owner by default', async () => {
+  const rootDir = makeRoot();
+  const { admin } = makeAdmin(rootDir);
+  for (const key of ['route.list', 'route.set', 'route.remove']) assert.equal(admin.isAllowed(key, { userId: '999' }), false, key);
+  assert.equal(admin.isAllowed('route.set', { userId: '42' }), true, 'the owner');
+
+  assert.ok(!(await admin.run('access.grant', { command: 'route.list' }, {})).includes('Note:'));
+  assert.ok((await admin.run('access.grant', { command: 'route.set', roleId: '7' }, {})).includes('Note:'));
+  assert.ok((await admin.run('access.grant', { command: 'route.remove', userId: '8' }, {})).includes('Note:'));
+  assert.ok((await admin.run('access.grant', { command: 'route' }, {})).includes('Note:'));
+});
+
+test('run: ping sends each role as its own role and pings a shared model once per distinct route', async () => {
+  const rootDir = makeRoot();
+  const hot = hotForPing(rootDir);
+  // memory.model null -> the analyzer shares the talk model; classifier.text falls back to classifier.media.
+  const llm = fakeLlm((options) => ({ text: 'pong', usage: {}, estimated: 1, provider: `served-${options.role}` }));
+  const { admin } = makeAdmin(rootDir, { hot, llm });
+
+  const plain = (await admin.run('ping', {}, {})).split('\n');
+  assert.deepEqual(llm.calls.map((c) => c.options.role), ['talk', 'classifier.text'], 'no routes: one call per model, as the first role using it');
+  assert.ok(plain.some((l) => l.startsWith('analyzer: anthropic/claude-opus-4.6 — ok,') && l.includes('provider=served-talk')));
+
+  hot.config.llm.providerByModel = { 'anthropic/@analyzer': { only: ['amazon-bedrock'] } };
+  llm.calls.length = 0;
+  const routed = (await admin.run('ping', {}, {})).split('\n');
+  assert.deepEqual(llm.calls.map((c) => c.options.role), ['talk', 'analyzer', 'classifier.text'], 'the analyzer route differs from talk: its own call');
+  assert.ok(routed.some((l) => l.startsWith('talk: anthropic/claude-opus-4.6 — ok,') && l.includes('provider=served-talk')));
+  assert.ok(routed.some((l) => l.startsWith('analyzer: anthropic/claude-opus-4.6 — ok,') && l.includes('provider=served-analyzer')));
+});

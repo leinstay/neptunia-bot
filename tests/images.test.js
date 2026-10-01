@@ -387,3 +387,21 @@ test('images: llm.providerByModel is read fresh on every generation', async () =
   assert.equal('provider' in fetchImpl.calls[0].body, false);
   assert.deepEqual(fetchImpl.calls[1].body.provider, { only: ['google-vertex'] });
 });
+
+test('images: a generation routes as the image role; an @image key beats a longer role-less one, other roles never apply', async () => {
+  const config = baseConfig({ model: 'google/test-image', provider: { ignore: ['some-provider'] } });
+  config.llm.providerByModel = {
+    'google/test-image': { only: ['google-vertex'] },
+    'google/@image': { only: ['google-ai-studio'], allow_fallbacks: false },
+    'google/test-image@talk': { only: ['other'] },
+  };
+  const { gen, fetchImpl } = makeGen({ config });
+  await gen.generate({ prompt: 'a small boat' });
+  assert.deepEqual(fetchImpl.calls[0].body.provider, { only: ['google-ai-studio'], allow_fallbacks: false });
+  delete config.llm.providerByModel['google/@image'];
+  await gen.generate({ prompt: 'a small boat' });
+  assert.deepEqual(fetchImpl.calls[1].body.provider, { only: ['google-vertex'] });
+  config.llm.providerByModel = { 'google/@talk': { only: ['other'] } };
+  await gen.generate({ prompt: 'a small boat' });
+  assert.deepEqual(fetchImpl.calls[2].body.provider, { ignore: ['some-provider'] });
+});

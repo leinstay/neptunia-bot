@@ -57,7 +57,12 @@ const SLOW_COMMANDS = new Set([
   'mentor.show',
 ]);
 
-const DISABLED_MESSAGE = 'Owner commands are disabled (features.adminCommands is off).';
+/** The roles a `/nep route` may name: the `/nep model` roles plus `image` (src/llm/images.js). */
+const ROUTE_ROLE_CHOICES = ['talk', 'analyzer', 'classifier.text', 'classifier.media', 'classifier.video', 'mentor', 'image'].map(
+  (role) => ({ name: role, value: role }),
+);
+
+const DISABLED_MESSAGE ='Owner commands are disabled (features.adminCommands is off).';
 const NOT_ALLOWED_MESSAGE = 'Not allowed';
 
 /** `^[a-z0-9_-]{1,32}$` — Discord's rule for a command name. */
@@ -466,6 +471,34 @@ export function buildCommandTree(commandName) {
         },
         {
           type: SUBCOMMAND_GROUP,
+          name: 'route',
+          description: 'Which providers serve each model, per role (llm.providerByModel).',
+          options: [
+            { type: SUBCOMMAND, name: 'list', description: 'Every route, then the model and route each role uses now.' },
+            {
+              type: SUBCOMMAND,
+              name: 'set',
+              description: 'Route a model prefix, for one role or any, to these providers only (config.local.json).',
+              options: [
+                { type: STRING, name: 'model', description: 'Model id or prefix, e.g. google/ (no @, no spaces).', required: true, autocomplete: true },
+                { type: STRING, name: 'providers', description: 'Comma-separated provider slugs, e.g. google-vertex.', required: true },
+                { type: STRING, name: 'role', description: 'Only for this role (default: any role).', required: false, choices: ROUTE_ROLE_CHOICES },
+                { type: BOOLEAN, name: 'fallbacks', description: 'Allow other providers when these fail (default: false).', required: false },
+              ],
+            },
+            {
+              type: SUBCOMMAND,
+              name: 'remove',
+              description: 'Remove the route of a model prefix, for one role or any.',
+              options: [
+                { type: STRING, name: 'model', description: 'Model id or prefix of the route.', required: true, autocomplete: true },
+                { type: STRING, name: 'role', description: 'The role of the route (default: the any-role route).', required: false, choices: ROUTE_ROLE_CHOICES },
+              ],
+            },
+          ],
+        },
+        {
+          type: SUBCOMMAND_GROUP,
           name: 'warmup',
           description: 'Memory warmup from a recent sample: channels, people, server.',
           options: [
@@ -732,6 +765,14 @@ const OPTION_MAPPERS = {
   'gifs.rescan': () => ({}),
   'model.show': () => ({}),
   'model.set': (options) => ({ role: options.getString('role', true), id: options.getString('id', true) }),
+  'route.list': () => ({}),
+  'route.set': (options) => ({
+    model: options.getString('model', true),
+    providers: options.getString('providers', true),
+    role: options.getString('role') ?? undefined,
+    fallbacks: options.getBoolean('fallbacks') ?? undefined,
+  }),
+  'route.remove': (options) => ({ model: options.getString('model', true), role: options.getString('role') ?? undefined }),
   'warmup.people': () => ({}),
   'warmup.run': () => ({}),
   'warmup.stop': () => ({}),
@@ -830,6 +871,30 @@ function accessKeyChoices(typed) {
     .map((key) => ({ name: key, value: key }));
 }
 
+/** `model`-option autocomplete choices for `/nep route set|remove`: the model prefixes of the
+ * routes in `llm.providerByModel` (the part before `@`), then the model ids the roles are
+ * configured with, each once, filtered by the typed text. */
+function routeModelChoices(config, typed) {
+  const byModel = config?.llm?.providerByModel;
+  const prefixes = byModel && typeof byModel === 'object' && !Array.isArray(byModel)
+    ? Object.keys(byModel).map((key) => (key.includes('@') ? key.slice(0, key.lastIndexOf('@')) : key))
+    : [];
+  const models = [
+    config?.llm?.model,
+    config?.memory?.model,
+    config?.classifier?.text,
+    config?.classifier?.media,
+    config?.classifier?.video,
+    config?.mentor?.model,
+    config?.image?.model,
+  ];
+  const all = [...new Set([...prefixes, ...models].filter((value) => typeof value === 'string' && value))];
+  return all
+    .filter((value) => value.toLowerCase().includes(typed))
+    .slice(0, MAX_AUTOCOMPLETE_CHOICES)
+    .map((value) => ({ name: value, value }));
+}
+
 /**
  * `hot`, `admin` — see src/hot.js, src/admin.js#createAdmin.
  * `getGuildId` — the single guild this instance serves, or null before it resolves.
@@ -865,6 +930,11 @@ export function createInteractionHandler({ hot, admin, getGuildId }) {
 
     if (focused.name === 'command') {
       await interaction.respond(accessKeyChoices(typed)).catch(() => {});
+      return;
+    }
+
+    if (focused.name === 'model') {
+      await interaction.respond(routeModelChoices(hot.config, typed)).catch(() => {});
       return;
     }
 

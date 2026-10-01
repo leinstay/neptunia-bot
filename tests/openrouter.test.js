@@ -4,7 +4,7 @@
 // (~1.5s) as instructed -- the backoff sleep in src is not touched.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createLlm, TokenLimitError, DailyCapError, resolveProvider } from '../src/llm/openrouter.js';
+import { createLlm, TokenLimitError, DailyCapError, resolveProvider, matchRoute, parseRouteKey } from '../src/llm/openrouter.js';
 
 function baseConfig(overrides = {}) {
   return {
@@ -910,4 +910,108 @@ test('complete: llm.providerByModel is read fresh on every call (hot-reloadable)
   assert.deepEqual(bodies[0].provider, BEDROCK);
   assert.deepEqual(bodies[1].provider, { only: ['anthropic'] });
   assert.equal('provider' in bodies[2], false);
+});
+
+// --- role-aware routes (`<prefix>@<role>` keys in llm.providerByModel) ---
+
+const STUDIO = { only: ['google-ai-studio'], allow_fallbacks: false };
+
+test('resolveProvider: a role key beats a role-less key, even when the role-less prefix is longer', () => {
+  const byModel = { 'google/gemini-3.8-flash': VERTEX, 'google/@classifier.video': STUDIO };
+  assert.equal(resolveProvider('google/gemini-3.8-flash', { byModel, role: 'classifier.video' }), STUDIO);
+  assert.equal(resolveProvider('google/gemini-3.8-flash', { byModel, role: 'talk' }), VERTEX);
+});
+
+test('resolveProvider: the longest prefix wins within the role group, regardless of key order', () => {
+  const exact = { only: ['google'] };
+  for (const byModel of [
+    { 'google/@talk': VERTEX, 'google/gemini-3.8-flash@talk': exact },
+    { 'google/gemini-3.8-flash@talk': exact, 'google/@talk': VERTEX },
+  ]) {
+    assert.equal(resolveProvider('google/gemini-3.8-flash', { byModel, role: 'talk' }), exact);
+    assert.equal(resolveProvider('google/gemini-3.8-pro', { byModel, role: 'talk' }), VERTEX);
+  }
+});
+
+test('resolveProvider: a role key whose prefix does not match falls to the role-less group', () => {
+  const byModel = { 'anthropic/@talk': BEDROCK, 'google/': VERTEX };
+  assert.equal(resolveProvider('google/gemini-3.8-flash', { byModel, role: 'talk' }), VERTEX);
+});
+
+test('resolveProvider: a key for another role never applies; the fallback does', () => {
+  const fallback = { ignore: ['some-provider'] };
+  const byModel = { 'google/@classifier.video': STUDIO };
+  assert.equal(resolveProvider('google/gemini-3.8-flash', { byModel, role: 'talk', fallback }), fallback);
+  assert.equal(resolveProvider('google/gemini-3.8-flash', { byModel, role: 'talk' }), undefined);
+});
+
+test('resolveProvider: without a role (or with a non-string one) only role-less keys match', () => {
+  const byModel = { 'google/@talk': STUDIO, 'google/': VERTEX };
+  assert.equal(resolveProvider('google/gemini-3.8-flash', { byModel }), VERTEX);
+  assert.equal(resolveProvider('google/gemini-3.8-flash', { byModel, role: 42 }), VERTEX);
+  assert.equal(resolveProvider('google/gemini-3.8-flash', { byModel: { 'google/@talk': STUDIO } }), undefined);
+});
+
+test('resolveProvider: the per-call override wins over a role key', () => {
+  const pinned = { order: ['google-ai-studio'], allow_fallbacks: false };
+  const byModel = { 'google/@classifier.video': VERTEX };
+  assert.equal(resolveProvider('google/gemini-3.8-flash', { override: pinned, byModel, role: 'classifier.video' }), pinned);
+});
+
+test('resolveProvider: a non-object role entry is ignored and the role-less group still applies', () => {
+  const byModel = { 'google/@talk': 'google-ai-studio', 'google/': VERTEX };
+  assert.equal(resolveProvider('google/gemini-3.8-flash', { byModel, role: 'talk' }), VERTEX);
+});
+
+test('resolveProvider: an empty prefix with a role matches every model for that role', () => {
+  const byModel = { '@mentor': STUDIO, 'google/': VERTEX };
+  assert.equal(resolveProvider('google/gemini-3.8-flash', { byModel, role: 'mentor' }), STUDIO);
+  assert.equal(resolveProvider('openai/gpt-x', { byModel, role: 'mentor' }), STUDIO);
+});
+
+test('matchRoute: names the matching key and its role, or null', () => {
+  const byModel = { 'google/': VERTEX, 'google/@classifier.video': STUDIO };
+  assert.deepEqual(matchRoute('google/gemini-3.8-flash', byModel, 'classifier.video'), {
+    key: 'google/@classifier.video', prefix: 'google/', role: 'classifier.video', value: STUDIO,
+  });
+  assert.deepEqual(matchRoute('google/gemini-3.8-flash', byModel, 'talk'), { key: 'google/', prefix: 'google/', role: null, value: VERTEX });
+  assert.equal(matchRoute('openai/gpt-x', byModel, 'talk'), null);
+});
+
+test('parseRouteKey: splits at the last @; a key without one has no role', () => {
+  assert.deepEqual(parseRouteKey('google/'), { prefix: 'google/', role: null });
+  assert.deepEqual(parseRouteKey('google/@classifier.video'), { prefix: 'google/', role: 'classifier.video' });
+  assert.deepEqual(parseRouteKey('@talk'), { prefix: '', role: 'talk' });
+});
+
+test('complete: options.role selects the role key; a call without a role uses the role-less key', async () => {
+  const fallback = { ignore: ['some-provider'] };
+  const { llm, bodies } = capturingLlm(() => baseConfig({
+    model: 'google/gemini-3.8-flash',
+    provider: fallback,
+    providerByModel: { 'google/gemini-3.8-flash': VERTEX, 'google/@classifier.video': STUDIO },
+  }));
+  const msgs = [{ role: 'user', content: 'hi' }];
+  await llm.complete(msgs, { role: 'classifier.video' });
+  await llm.complete(msgs, { role: 'talk' });
+  await llm.complete(msgs);
+  await llm.complete(msgs, { role: 'classifier.video', provider: { order: ['x'] } });
+  await llm.complete(msgs, { role: 'talk', model: 'openai/gpt-x' });
+  assert.deepEqual(bodies[0].provider, STUDIO);
+  assert.deepEqual(bodies[1].provider, VERTEX);
+  assert.deepEqual(bodies[2].provider, VERTEX);
+  assert.deepEqual(bodies[3].provider, { order: ['x'] });
+  assert.deepEqual(bodies[4].provider, fallback);
+  assert.equal('role' in bodies[0], false, 'the role is never sent to OpenRouter');
+});
+
+test('complete: without any route, a role changes nothing (llm.provider, else no field)', async () => {
+  let cfg = baseConfig({ model: 'google/gemini-3.8-flash', provider: VERTEX, providerByModel: {} });
+  const { llm, bodies } = capturingLlm(() => cfg);
+  const msgs = [{ role: 'user', content: 'hi' }];
+  await llm.complete(msgs, { role: 'talk' });
+  cfg = baseConfig({ model: 'google/gemini-3.8-flash', provider: null });
+  await llm.complete(msgs, { role: 'talk' });
+  assert.deepEqual(bodies[0].provider, VERTEX);
+  assert.equal('provider' in bodies[1], false);
 });

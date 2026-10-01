@@ -39,6 +39,7 @@ import { classifierTextModel, classifierMediaModel, classifierVideoModel } from 
 import { buildDrawPrompt } from './behavior/prompt.js';
 import { effectiveAffinity } from './behavior/private.js';
 import { ImageCapError, ImageGenError, UnsupportedImageModelError, familyOf as imageFamilyOf } from './llm/images.js';
+import { matchRoute, resolveProvider } from './llm/openrouter.js';
 import { anchorMax, checkCaseText } from './mentor/cases.js';
 import { renderCard, renderFile, renderLastRun } from './mentor/report.js';
 import { log } from './log.js';
@@ -64,6 +65,7 @@ const READ_ONLY_ACCESS_KEYS = new Set([
   'warmup.status',
   'warmup.people',
   'access.list',
+  'route.list',
 ]);
 
 /** How `/nep access grant` names each owner-only group (src/discord/access.js#OWNER_ONLY_GROUPS) when it refuses it. */
@@ -2009,23 +2011,36 @@ async function cmdPing(args) {
     return withImageLine(withWebLine(withYoutubeLine(skipped, modelRoles, await youtube), modelRoles), await image).join('\n');
   }
 
-  const uniqueModels = [...new Set([...roleModel.values()].filter(Boolean))];
+  // One request per distinct (model, route): roles sharing a model share a ping unless a
+  // role-specific `llm.providerByModel` key routes one of them elsewhere. Each request is
+  // sent as the first role that needs it, so it goes out exactly as that role's would.
+  const targetOf = (role) => {
+    const model = roleModel.get(role);
+    const route = resolveProvider(model, { byModel: cfg?.llm?.providerByModel, fallback: cfg?.llm?.provider, role });
+    return `${model}\n${JSON.stringify(route ?? null)}`;
+  };
+  const targets = new Map();
+  for (const role of modelRoles) {
+    const model = roleModel.get(role);
+    if (model && !targets.has(targetOf(role))) targets.set(targetOf(role), { model, role });
+  }
   const results = new Map();
 
   await Promise.all(
-    uniqueModels.map(async (model) => {
+    [...targets].map(async ([target, { model, role }]) => {
       const start = Date.now();
       try {
         const result = await llm.complete([{ role: 'user', content: promptText }], {
           model,
+          role,
           maxOutputTokens: 16,
           countAgainstDailyCap: false,
           skipCalibration: true,
           timeoutMs: cfg?.llm?.pingTimeoutMs ?? 30000,
         });
-        results.set(model, { ok: true, ms: Date.now() - start, result });
+        results.set(target, { ok: true, ms: Date.now() - start, result });
       } catch (err) {
-        results.set(model, { ok: false, ms: Date.now() - start, err });
+        results.set(target, { ok: false, ms: Date.now() - start, err });
       }
     }),
   );
@@ -2033,13 +2048,176 @@ async function cmdPing(args) {
   const lines = modelRoles.map((role) => {
     const model = roleModel.get(role);
     if (!model) return `${role}: (no model configured)`;
-    const outcome = results.get(model);
+    const outcome = results.get(targetOf(role));
     return outcome.ok
       ? formatPingSuccess(role, model, outcome.result, outcome.ms)
       : formatPingFailure(role, model, outcome.err, outcome.ms);
   });
   return withImageLine(withWebLine(withYoutubeLine(lines, modelRoles, await youtube), modelRoles), await image).join('\n');
 }
+
+  // ---------------------------------------------------------------------
+  // route: which providers serve each model, per role -- the keys of
+  // `llm.providerByModel` (`"<prefix>"` for any role, `"<prefix>@<role>"`
+  // for one; resolved by src/llm/openrouter.js#matchRoute), written to
+  // config.local.json like `/nep set`, never touching data/.
+  // ---------------------------------------------------------------------
+
+  /** Every role a route may name: the `/nep model` roles, then the drawing model's. */
+  const ROUTE_ROLES = [...MODEL_ROLES, PING_IMAGE_ROLE];
+
+  /** A provider slug as OpenRouter writes it: lowercase letters, digits and `-`. */
+  const PROVIDER_SLUG_RE = /^[a-z0-9-]+$/;
+
+  function isPlainRouting(value) {
+    return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+  }
+
+  /** `llm.providerByModel` as of the last write -- config.local.json's when it has one, else the
+   * live config's -- so a list right after a set or remove reads what was written even a moment
+   * before the reload lands (the same reasoning as `effectiveAccess`). */
+  function effectiveRoutes() {
+    const local = readLocalConfig(path.join(hot.rootDir, 'config.local.json'));
+    if (isPlainRouting(local?.llm) && Object.hasOwn(local.llm, 'providerByModel')) {
+      return isPlainRouting(local.llm.providerByModel) ? local.llm.providerByModel : {};
+    }
+    const live = hot.config?.llm?.providerByModel;
+    return isPlainRouting(live) ? live : {};
+  }
+
+  /** The providers part of a routing object: its `only`/`order`/`ignore` lists, or the object as
+   * JSON (without `allow_fallbacks`, shown on its own) when it holds anything else. */
+  function describeProviders(value) {
+    const lists = ['only', 'order', 'ignore'];
+    const known = new Set([...lists, 'allow_fallbacks']);
+    const parts = lists
+      .filter((field) => Array.isArray(value[field]) && value[field].length > 0)
+      .map((field) => `${field} ${value[field].join(', ')}`);
+    if (parts.length > 0 && Object.keys(value).every((field) => known.has(field))) return parts.join('; ');
+    const { allow_fallbacks: _ignored, ...rest } = value;
+    return JSON.stringify(rest).slice(0, 200);
+  }
+
+  /** `on` unless the routing object says `allow_fallbacks: false` (OpenRouter's default is on). */
+  function fallbacksText(value) {
+    return value.allow_fallbacks === false ? 'off' : 'on';
+  }
+
+  /** `(<providers>, fallbacks: on|off)` for the by-role lines. */
+  function routingSummary(value) {
+    return `(${describeProviders(value)}, fallbacks: ${fallbacksText(value)})`;
+  }
+
+  /** The prefix of a `/nep route` command: trimmed, required, no `@` (the role has its own
+   * option), no whitespace, never an object-prototype key. */
+  function routePrefixArg(args) {
+    const prefix = String(args?.model ?? '').trim();
+    if (!prefix) throw new Error('a model id or prefix is required');
+    if (prefix.includes('@')) throw new Error('the model prefix cannot contain @ (give the role in the role option)');
+    if (/\s/.test(prefix)) throw new Error('the model prefix cannot contain spaces');
+    if (prefix.length > 100) throw new Error('the model prefix is too long (100 chars max)');
+    if (FORBIDDEN_SEGMENTS.has(prefix)) throw new Error(`forbidden model prefix: ${prefix}`);
+    return prefix;
+  }
+
+  /** The role of a `/nep route` command, or null for any role. */
+  function routeRoleArg(args) {
+    const role = args?.role;
+    if (role === undefined || role === null || role === '') return null;
+    if (!ROUTE_ROLES.includes(String(role))) throw new Error(`unknown role: ${role} (${ROUTE_ROLES.join(', ')})`);
+    return String(role);
+  }
+
+  /** config.local.json with `llm.providerByModel` replaced by `edit(copyOfTheLocalMap)`'s result;
+   * an emptied map, then an emptied `llm`, are pruned. Reloads the config. */
+  function writeRoutes(edit) {
+    const localPath = path.join(hot.rootDir, 'config.local.json');
+    const next = structuredClone(readLocalConfig(localPath));
+    const llmCfg = isPlainRouting(next.llm) ? next.llm : {};
+    const map = edit(isPlainRouting(llmCfg.providerByModel) ? { ...llmCfg.providerByModel } : {});
+    if (Object.keys(map).length > 0) llmCfg.providerByModel = map;
+    else delete llmCfg.providerByModel;
+    if (Object.keys(llmCfg).length > 0) next.llm = llmCfg;
+    else delete next.llm;
+    writeLocalConfig(localPath, next);
+    return hot.reloadConfig();
+  }
+
+  /** The model one route role uses now: the `/nep model` roles as `modelForRole`, `image` as `image.model`. */
+  function modelForRouteRole(role, cfg) {
+    if (role === PING_IMAGE_ROLE) return cfg?.image?.model || undefined;
+    return modelForRole(role, cfg);
+  }
+
+  /** One by-role line of `/nep route list`: the model and the routing it gets now. */
+  function routeRoleLine(role, cfg, byModel) {
+    const model = modelForRouteRole(role, cfg);
+    if (!model) return `  ${role}: (no model configured)`;
+    const match = matchRoute(model, byModel, role);
+    const fallbackName = role === PING_IMAGE_ROLE ? 'image.provider' : 'llm.provider';
+    const fallback = role === PING_IMAGE_ROLE ? cfg?.image?.provider : cfg?.llm?.provider;
+    let applied = 'none';
+    if (match) applied = `${match.key} ${routingSummary(match.value)}`;
+    else if (isPlainRouting(fallback)) applied = `${fallbackName} ${routingSummary(fallback)}`;
+    const pin = cfg?.media?.video?.provider;
+    const pinned = role === 'classifier.video' && isPlainRouting(pin) ? `; direct-URL videos: media.video.provider ${routingSummary(pin)}` : '';
+    return `  ${role}: ${model} -> ${applied}${pinned}`;
+  }
+
+  /** `/nep route list`: every route, one line each (prefix | role or any | providers | fallbacks),
+   * then each role with the model it uses now and the routing that applies to it. */
+  function cmdRouteList() {
+    const cfg = hot.config;
+    const byModel = effectiveRoutes();
+    const roleRank = (role) => (role === null ? -1 : ROUTE_ROLES.includes(role) ? ROUTE_ROLES.indexOf(role) : ROUTE_ROLES.length);
+    const routes = Object.entries(byModel)
+      .filter(([, value]) => isPlainRouting(value))
+      .map(([key, value]) => {
+        const at = key.lastIndexOf('@');
+        return at === -1 ? { prefix: key, role: null, value } : { prefix: key.slice(0, at), role: key.slice(at + 1), value };
+      })
+      .sort((a, b) => (a.prefix === b.prefix ? roleRank(a.role) - roleRank(b.role) : a.prefix < b.prefix ? -1 : 1));
+    const lines = routes.length === 0 ? ['routes: none'] : ['routes:'];
+    for (const route of routes) {
+      lines.push(`  ${route.prefix} | ${route.role ?? 'any'} | ${describeProviders(route.value)} | fallbacks: ${fallbacksText(route.value)}`);
+    }
+    lines.push('by role:', ...ROUTE_ROLES.map((role) => routeRoleLine(role, cfg, byModel)));
+    return lines.join('\n');
+  }
+
+  /** `/nep route set`: `{ only: [providers], allow_fallbacks }` under `<prefix>` or `<prefix>@<role>`. */
+  function cmdRouteSet(args) {
+    const prefix = routePrefixArg(args);
+    const role = routeRoleArg(args);
+    const providers = [...new Set(String(args?.providers ?? '').split(',').map((slug) => slug.trim()).filter(Boolean))];
+    if (providers.length === 0) throw new Error('at least one provider slug is required, e.g. google-vertex');
+    const invalid = providers.find((slug) => !PROVIDER_SLUG_RE.test(slug));
+    if (invalid) throw new Error(`invalid provider slug: ${invalid} (lowercase letters, digits and -)`);
+    const allowFallbacks = args?.fallbacks === true;
+
+    const key = role ? `${prefix}@${role}` : prefix;
+    const ok = writeRoutes((map) => ({ ...map, [key]: { only: providers, allow_fallbacks: allowFallbacks } }));
+    return `Route ${key} (${role ?? 'any role'}): only ${providers.join(', ')}, fallbacks: ${allowFallbacks ? 'on' : 'off'} (reload ${ok ? 'ok' : 'FAILED'})`;
+  }
+
+  /** `/nep route remove`: drops the `<prefix>` or `<prefix>@<role>` key from config.local.json. */
+  function cmdRouteRemove(args) {
+    const prefix = routePrefixArg(args);
+    const role = routeRoleArg(args);
+    const key = role ? `${prefix}@${role}` : prefix;
+    const local = readLocalConfig(path.join(hot.rootDir, 'config.local.json'));
+    const localMap = isPlainRouting(local?.llm?.providerByModel) ? local.llm.providerByModel : {};
+    if (!Object.hasOwn(localMap, key)) {
+      const live = hot.config?.llm?.providerByModel;
+      const fromBase = isPlainRouting(live) && Object.hasOwn(live, key) ? ' in config.local.json (it is set in config.json)' : '';
+      throw new Error(`no route: ${key}${fromBase}`);
+    }
+    const ok = writeRoutes((map) => {
+      delete map[key];
+      return map;
+    });
+    return `Removed route ${key} (reload ${ok ? 'ok' : 'FAILED'})`;
+  }
 
   // ---------------------------------------------------------------------
   // warmup: the sample-based memory warmup -- see the module header of
@@ -2740,6 +2918,9 @@ async function cmdPing(args) {
     'gifs.rescan': (args, context) => cmdGifsRescan(args, context),
     'model.show': () => cmdModelShow(),
     'model.set': (args) => cmdModelSet(args),
+    'route.list': () => cmdRouteList(),
+    'route.set': (args) => cmdRouteSet(args),
+    'route.remove': (args) => cmdRouteRemove(args),
     'warmup.people': withWarmup((args, context) => cmdWarmupPeople(args, context)),
     'warmup.run': withWarmup((args, context) => cmdWarmupRun(args, context)),
     'warmup.stop': withWarmup(() => cmdWarmupStop()),

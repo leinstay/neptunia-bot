@@ -269,6 +269,7 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
     try {
       completion = await llm.complete(messages, {
         model: cfg.model,
+        role: 'mentor',
         maxOutputTokens: cfg.maxOutputTokens,
         timeoutMs: cfg.timeoutMs,
         countAgainstDailyCap: false,
