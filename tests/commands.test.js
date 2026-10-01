@@ -230,12 +230,12 @@ test('buildCommandTree: emoji group (status/rescan), no options', () => {
   assert.ok(keys.has('emoji.rescan'));
 });
 
-test('buildCommandTree: gifs group (status/rescan), no options', () => {
+test('buildCommandTree: gifs group (status/rescan/recache), no options', () => {
   const [command] = buildCommandTree('nep');
   const gifs = findOption(command.options, 'gifs');
   assert.equal(gifs.type, 2); // SUBCOMMAND_GROUP
   assert.ok(gifs.description.length <= 100);
-  assert.deepEqual(gifs.options.map((o) => o.name), ['status', 'rescan']);
+  assert.deepEqual(gifs.options.map((o) => o.name), ['status', 'rescan', 'recache']);
   for (const sub of gifs.options) {
     assert.equal(sub.type, 1); // SUBCOMMAND
     assert.ok(sub.description.length <= 100, `${sub.name} description must be <= 100 chars`);
@@ -244,6 +244,7 @@ test('buildCommandTree: gifs group (status/rescan), no options', () => {
   const { keys } = commandKeys();
   assert.ok(keys.has('gifs.status'));
   assert.ok(keys.has('gifs.rescan'));
+  assert.ok(keys.has('gifs.recache'));
 });
 
 test('buildCommandTree: learned group (list/add/remove)', () => {
@@ -937,6 +938,17 @@ test('interaction handler: gifs.status replies at once, gifs.rescan is deferred'
   assert.deepEqual(admin.runCalls[1][1], {});
   assert.ok(rescan.replies.some((r) => r.deferred));
   assert.equal(rescan.edits.length, 1);
+});
+
+test('interaction handler: gifs.recache replies at once, its work goes on in the background', async () => {
+  const admin = fakeAdmin();
+  const handler = createInteractionHandler({ hot: baseHot(), admin, getGuildId: () => 'g1' });
+
+  const recache = fakeInteraction({ group: 'gifs', subcommand: 'recache' });
+  await handler(recache);
+  assert.equal(admin.runCalls[0][0], 'gifs.recache');
+  assert.deepEqual(admin.runCalls[0][1], {});
+  assert.ok(!recache.replies.some((r) => r.deferred));
 });
 
 test('interaction handler: learned.list/add/remove map their options straight through', async () => {

@@ -47,12 +47,13 @@ export function createGifBackfill({ hot, store, client, describer = null, log = 
 
   /**
    * Describe the top `limit` library entries (rank order) that have no
-   * cached caption: one describer item per entry (`kind: 'gif'`, its
-   * `itemId`, and the picture URL read this run -- an attachment's file, an
-   * embed's thumbnail; an entry without one is skipped). Returns how many got
-   * a caption.
+   * cached caption: one describer item per entry -- the GIF's picture item
+   * read this run (src/discord/media.js#collectPictures: an attachment's
+   * file, an embed's thumbnail and its animation, so the describer can watch
+   * it), under the entry's `itemId`; an entry without one is skipped.
+   * Returns how many got a caption.
    */
-  async function describeTop(guildId, pictureUrls, limit) {
+  async function describeTop(guildId, pictures, limit) {
     if (!describer || typeof describer.describeMany !== 'function' || limit <= 0) return 0;
     const gifCfg = hot.config.gifs ?? {};
     const cache = store.getMediaCache(guildId);
@@ -61,9 +62,9 @@ export function createGifBackfill({ hot, store, client, describer = null, log = 
       if (items.length >= limit) break;
       const cached = cache?.[entry.itemId];
       if (cached && !cached.miss && typeof cached.text === 'string' && cached.text.trim()) continue;
-      const url = pictureUrls.get(entry.itemId);
-      if (!url) continue;
-      items.push({ itemId: entry.itemId, kind: 'gif', url, name: entry.name ?? '' });
+      const picture = pictures.get(entry.itemId);
+      if (!picture) continue;
+      items.push({ ...picture, itemId: entry.itemId, kind: 'gif', name: entry.name ?? '' });
     }
     if (items.length === 0) return 0;
     const { descriptions } = await describer.describeMany(guildId, items, { countAgainstDailyCap: true });
@@ -141,16 +142,16 @@ export function createGifBackfill({ hot, store, client, describer = null, log = 
       store.setGifBackfill(guildId, { at: new Date().toISOString(), channels: channels.length, messages: members.length });
       store.flush();
 
-      // The picture to describe per GIF item: an attachment's file, an embed's thumbnail frame.
-      const pictureUrls = new Map();
+      // The picture item to describe per GIF: an attachment's file, an embed's thumbnail and animation.
+      const pictures = new Map();
       for (const message of members) {
         for (const picture of collectPictures(message)) {
-          if (picture.kind === 'gif' && picture.url && !pictureUrls.has(picture.itemId)) pictureUrls.set(picture.itemId, picture.url);
+          if (picture.kind === 'gif' && picture.url && !pictures.has(picture.itemId)) pictures.set(picture.itemId, picture);
         }
       }
       const describeLimit = gifCfg.backfillDescribe ?? DEFAULT_BACKFILL_DESCRIBE;
       const described =
-        store.state?.data?.paused || !Number.isInteger(describeLimit) ? 0 : await describeTop(guildId, pictureUrls, describeLimit);
+        store.state?.data?.paused || !Number.isInteger(describeLimit) ? 0 : await describeTop(guildId, pictures, describeLimit);
       if (described > 0) store.flush();
 
       const counts = { channels: channels.length, messages: members.length, gifs, described };

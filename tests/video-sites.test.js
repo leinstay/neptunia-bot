@@ -12,6 +12,7 @@ import {
   ytdlpProbeArgs,
   ytdlpClipArgs,
   ffmpegTrimArgs,
+  ffmpegGifArgs,
   parseProbe,
   safeLocation,
   youtubeVideoId,
@@ -208,6 +209,30 @@ test('ffmpegTrimArgs: trim and re-encode arguments', () => {
       '/tmp/out.mp4',
     ],
   });
+});
+
+test('ffmpegGifArgs: a GIF becomes a short, even-sided, never upscaled yuv420p H.264 clip without audio', () => {
+  assert.deepEqual(ffmpegGifArgs('/tmp/in', '/tmp/out.mp4', { ffmpegPath: '/usr/bin/ffmpeg', maxSeconds: 8 }), {
+    command: '/usr/bin/ffmpeg',
+    args: [
+      '-y', '-hide_banner', '-loglevel', 'error',
+      '-i', '/tmp/in',
+      '-t', '8',
+      '-vf', "scale=-2:'min(360,trunc(ih/2)*2)'",
+      '-pix_fmt', 'yuv420p',
+      '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '28',
+      '-maxrate', '400k', '-bufsize', '800k',
+      '-an',
+      '-movflags', '+faststart',
+      '/tmp/out.mp4',
+    ],
+  });
+});
+
+test('ffmpegGifArgs: maxHeight sets the height ceiling', () => {
+  const { args } = ffmpegGifArgs('/tmp/in', '/tmp/out.mp4', { ffmpegPath: 'ffmpeg', maxSeconds: 5, maxHeight: 240 });
+  assert.equal(args[args.indexOf('-vf') + 1], "scale=-2:'min(240,trunc(ih/2)*2)'");
+  assert.equal(args[args.indexOf('-t') + 1], '5');
 });
 
 test('ffmpegTrimArgs: the capped bitrate keeps a shipped-length re-encode within the shipped maxBytes', () => {

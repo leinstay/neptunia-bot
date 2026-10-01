@@ -464,6 +464,7 @@ export function buildCommandTree(commandName) {
               name: 'rescan',
               description: 'Clear and recount the library from recent history, then caption the top ones.',
             },
+            { type: SUBCOMMAND, name: 'recache', description: 'Re-describe GIFs by watching them (background, per-run cap).' },
           ],
         },
         {
@@ -800,6 +801,7 @@ const OPTION_MAPPERS = {
   'emoji.rescan': () => ({}),
   'gifs.status': () => ({}),
   'gifs.rescan': () => ({}),
+  'gifs.recache': () => ({}),
   'model.show': () => ({}),
   'model.set': (options) => ({ role: options.getString('role', true), id: options.getString('id', true) }),
   'route.list': () => ({}),

@@ -33,6 +33,7 @@ import { sortEpisodesForDisplay } from './memory/episodes.js';
 import { channelActivity } from './memory/channels.js';
 import { rankEmojiUsage } from './memory/emoji-usage.js';
 import { rankGifs } from './memory/gifs.js';
+import { gifCaptionCounts } from './memory/gif-recache.js';
 import { commandKeys } from './discord/commands.js';
 import { isAllowed as accessIsAllowed, isOwnerOnly, grant as accessGrant, revoke as accessRevoke } from './discord/access.js';
 import { classifierTextModel, classifierMediaModel, classifierVideoModel } from './behavior/mention.js';
@@ -545,6 +546,10 @@ function imageFileName(mediaType) {
  * `gifBackfill` — from createGifBackfill() (src/memory/gif-backfill.js), optional: `run` (with
  *   `force`, awaited by `/nep gifs rescan`) and `isRunning` (a note in `/nep gifs status`).
  *   Absent -> `/nep gifs rescan` reports it is not available; `/nep gifs status` still works.
+ * `gifRecache` — from createGifRecache() (src/memory/gif-recache.js), optional: `start` (started by
+ *   `/nep gifs recache`, never awaited to the end), `isRunning` (a note in `/nep gifs status`) and
+ *   `waitIdle` (`/nep pause` waits for a run in flight). Absent -> `/nep gifs recache` reports it is
+ *   not available.
  * `mentor` — from createMentor() (src/mentor/mentor.js), optional: `run`/`check` (started by
  *   `/nep mentor run|check`, never awaited to the end), `resolveAnchor` (reads the moment of a
  *   message for `/nep mentor add|anchor`), `stop`, `status`; `isRunning` and
@@ -577,6 +582,7 @@ export function createAdmin({
   imageFetcher,
   emojiBackfill,
   gifBackfill,
+  gifRecache,
   mentor,
   mentorCases,
   mentorBudget,
@@ -607,7 +613,7 @@ export function createAdmin({
    * alias.add, alias.remove, memory.forget, private.forget, private.purge, memory.wipe, memory.affinity (when
    * setting a score), memory.refresh, lore.add, lore.remove, learned.add,
    * learned.remove, warmup.run, warmup.users, warmup.channels, warmup.server,
-   * warmup.reset, emoji.rescan, gifs.rescan, draw (it counts against the image rail in state.json) and
+   * warmup.reset, emoji.rescan, gifs.rescan, gifs.recache, draw (it counts against the image rail in state.json) and
    * mentor.add, mentor.anchor, mentor.remove, mentor.run, mentor.check and mentor.wrong.
    */
   function assertNotPaused() {
@@ -761,6 +767,12 @@ export function createAdmin({
     // loop already stops after the request in flight once `paused` is seen.
     if (warmup && typeof warmup.waitIdle === 'function') {
       await warmup.waitIdle();
+    }
+
+    // A GIF recache in flight writes the media cache: it stops before its
+    // next GIF once `paused` is seen; wait for the one in flight.
+    if (gifRecache && typeof gifRecache.waitIdle === 'function') {
+      await gifRecache.waitIdle();
     }
 
     // A mentor run in flight saves its run and charges state.json: stop it
@@ -2822,8 +2834,11 @@ async function cmdPing(args) {
   }
 
   /** `/nep gifs status`: how many GIFs the library holds, the top 10 (rank order,
-   * `gifs.halfLifeDays`) as `g<n> xCOUNT — caption or name`, the history backfill stamp, and
-   * how many GIFs the persona posted today (UTC) against `gifs.maxPerDay`. */
+   * `gifs.halfLifeDays`) as `g<n> xCOUNT — caption or name`, the history backfill stamp, how
+   * many GIFs the persona posted today (UTC) against `gifs.maxPerDay`, and -- last, unless the
+   * library is empty and no recache runs -- how the library's captions stand (watched /
+   * one-frame / failed watch / none, see src/memory/gif-recache.js#gifCaptionCounts) with a
+   * note while a recache runs. */
   function cmdGifsStatus(_args, context) {
     freshenIfPaused();
     const guildId = resolvedGuildId(context);
@@ -2843,6 +2858,8 @@ async function cmdPing(args) {
     const today = new Date().toISOString().slice(0, 10);
     const postedToday = data.gifDay === today && Number.isFinite(data.gifCount) ? data.gifCount : 0;
     const cap = hot.config?.gifs?.maxPerDay;
+    const captions = gifCaptionCounts(library, cache);
+    const recaching = gifRecache?.isRunning?.() ? ' (recache running now)' : '';
     return [
       `library: ${ranked.length} gifs`,
       ranked.length > 0 ? 'top 10:' : 'top 10: (none)',
@@ -2851,6 +2868,10 @@ async function cmdPing(args) {
         .map((entry) => `  ${entry.id} x${entry.count} — ${captionOf(entry) || entry.name || entry.site || entry.url}`),
       `backfill: ${backfill}${running}`,
       `posted today: ${postedToday}/${Number.isFinite(cap) ? cap : 40}`,
+      // Nothing to count in an empty library, unless a recache is running.
+      ...(ranked.length > 0 || recaching
+        ? [`captions: ${captions.watched} watched, ${captions.oneFrame} one-frame, ${captions.failed} failed, ${captions.none} none${recaching}`]
+        : []),
     ].join('\n');
   }
 
@@ -2874,6 +2895,34 @@ async function cmdPing(args) {
     const result = await gifBackfill.run(guildId, { force: true });
     if (!result.ok) return GIFS_RESCAN_SKIPS[result.reason] ?? `not done (${result.reason})`;
     return `GIF rescan done: ${result.channels} channels, ${result.messages} messages read, ${result.gifs} GIF uses counted, ${result.described} described.`;
+  }
+
+  /** Why `/nep gifs recache` did not start, by src/memory/gif-recache.js's skip reason. */
+  const GIFS_RECACHE_SKIPS = {
+    running: 'A GIF recache is already running: see /nep gifs status.',
+    paused: 'paused -- run /nep resume first',
+    warmup: 'a warmup is running: /nep warmup stop first',
+    unavailable: 'the GIF recache is not available',
+    off: 'GIFs are not watched (features.mediaDescriptions or media.gif.watch is off).',
+    'video-off': 'GIFs are not watched while video vision is off (features.videoDescriptions).',
+    prompt: 'GIFs are not watched: the describe-video prompt is missing.',
+  };
+
+  /** `/nep gifs recache`: drops the one-frame GIF captions outside the library at once, then
+   * re-describes up to `gifs.recachePerRun` library GIFs by watching them, in the background
+   * (src/memory/gif-recache.js). Replies at once. Writes under data/, so refused while paused. */
+  function cmdGifsRecache(_args, context) {
+    if (!gifRecache) return 'the GIF recache is not available';
+    assertNotPaused();
+    const guildId = resolvedGuildId(context);
+    if (!guildId) throw new Error('no guild resolved yet');
+
+    const result = gifRecache.start(guildId);
+    if (!result.ok) return GIFS_RECACHE_SKIPS[result.reason] ?? `not started (${result.reason})`;
+    return [
+      `GIF recache started: ${result.queued} library GIFs to watch, ${result.dropped} one-frame captions dropped from the media cache.`,
+      'Follow it with /nep gifs status.',
+    ].join('\n');
   }
 
   /** Wraps a `warmup.*` handler so both report the same thing when the dependency is absent. */
@@ -2929,6 +2978,7 @@ async function cmdPing(args) {
     'emoji.rescan': (args, context) => cmdEmojiRescan(args, context),
     'gifs.status': (args, context) => cmdGifsStatus(args, context),
     'gifs.rescan': (args, context) => cmdGifsRescan(args, context),
+    'gifs.recache': (args, context) => cmdGifsRecache(args, context),
     'model.show': () => cmdModelShow(),
     'model.set': (args) => cmdModelSet(args),
     'route.list': () => cmdRouteList(),

@@ -236,6 +236,23 @@ test('gif backfill run: describes the top backfillDescribe entries without a cac
   });
 });
 
+test('gif backfill run: the describer gets each GIF\'s whole picture item, so a library GIF is watched from its animation', async () => {
+  await withStore(async (store) => {
+    const describer = fakeDescriber();
+    const gifv = { ...tenorEmbed(TENOR_A), video: { url: `${TENOR_A}/loop.mp4`, proxyURL: `${TENOR_A}/proxy.mp4` } };
+    const channels = [fakeChannel('c1', [rawMessage(1, { embeds: [gifv] }), rawMessage(2, { authorId: 'b', gifFile: '555' })])];
+    const backfill = createGifBackfill({ hot: fakeHot(), store, client: fakeClient(channels), describer, log: fakeLog() });
+
+    await backfill.run('g1');
+    const byId = new Map(describer.calls[0].items.map((item) => [item.itemId, item]));
+    assert.equal(byId.get('1001#e0').animationUrl, `${TENOR_A}/proxy.mp4`, 'the gifv mp4 travels with the item');
+    assert.equal(byId.get('1001#e0').source, 'embed');
+    assert.equal(byId.get('1001#e0').url, `${TENOR_A}/proxy.png`, 'the still frame stays the fallback');
+    assert.equal(byId.get('555').source, 'attachment', 'an attached .gif is its own animation');
+    assert.equal(byId.get('555').url, 'https://cdn.discordapp.com/attachments/1/555/r.gif');
+  });
+});
+
 test('gif backfill run: backfillDescribe 0 or no describer describes nothing', async () => {
   await withStore(async (store) => {
     const describer = fakeDescriber();

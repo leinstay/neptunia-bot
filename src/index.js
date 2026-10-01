@@ -22,6 +22,7 @@ import { createMemoryUpdater } from './memory/update.js';
 import { createWarmup } from './memory/warmup.js';
 import { createEmojiBackfill } from './memory/emoji-backfill.js';
 import { createGifBackfill } from './memory/gif-backfill.js';
+import { createGifRecache } from './memory/gif-recache.js';
 import { createDescriber } from './memory/describe.js';
 import { startYoutubeCheck } from './memory/youtube-check.js';
 import { createImageFetcher } from './discord/fetch-image.js';
@@ -166,6 +167,8 @@ const emojiBackfill = createEmojiBackfill({ hot, store, client, log });
 // The GIF library read from history (Discord API; the describer captions the top ones): once at
 // startup, again on /nep gifs rescan.
 const gifBackfill = createGifBackfill({ hot, store, client, describer, log });
+// The GIF library re-described by watching (src/memory/gif-recache.js): only on /nep gifs recache.
+const gifRecache = createGifRecache({ hot, store, client, describer, isWarmingUp, log });
 
 // The mentor (features.mentor): a manual sub-process started only by /nep mentor run|check,
 // never by a timer. Its cases live under data/, its daily token budget in state.json.
@@ -237,6 +240,8 @@ const admin = createAdmin({
   emojiBackfill,
   // /nep gifs status|rescan: the GIF library and its history backfill.
   gifBackfill,
+  // /nep gifs recache: the library's captions re-described by watching; /nep pause waits for it.
+  gifRecache,
   // /nep mentor: cases, runs, the owner's feedback and the mentor's own token budget.
   mentor,
   mentorCases,

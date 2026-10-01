@@ -4,7 +4,9 @@
 // A video-site link goes through yt-dlp: a metadata-only probe (duration,
 // title) and a clip download of the first `maxSeconds` (whole when it is no
 // longer), capped at the same download ceiling as an attachment; a clip over
-// `maxBytes` is then re-encoded by ffmpeg the same way. Where yt-dlp cannot
+// `maxBytes` is then re-encoded by ffmpeg the same way. A GIF (a .gif file
+// or a GIF site's mp4/webm) is downloaded the same way and always converted
+// by ffmpeg into a short mp4, so it can be watched like a video. Where yt-dlp cannot
 // read YouTube (a bot check), probeYoutube learns the duration without it:
 // the YouTube Data API when a key is configured, else the watch page itself.
 // The argument arrays and parsers come from the pure
@@ -31,6 +33,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { log } from '../log.js';
 import {
+  ffmpegGifArgs,
   ffmpegTrimArgs,
   parseProbe,
   parseYoutubeDataApi,
@@ -55,6 +58,16 @@ const PAGE_HEADERS = {
 /** The loggable code of a thrown error: its errno-style `code`, else its class name. Never the message. */
 function errorCode(err) {
   return err?.code ?? err?.name ?? null;
+}
+
+/** Whether a bare content type is a video. */
+function isVideoType(type) {
+  return type.startsWith('video/');
+}
+
+/** Whether a bare content type is a GIF's animation: the .gif itself, or the mp4/webm a GIF site serves. */
+function isGifType(type) {
+  return type === 'image/gif' || isVideoType(type);
 }
 
 /** `type/subtype` in lowercase, parameters dropped. */
@@ -225,10 +238,11 @@ export function createVideoFetcher({
   }
 
   /**
-   * Stream `url` into `file`, stopping at `ceiling` bytes.
+   * Stream `url` into `file`, stopping at `ceiling` bytes. `accept` decides
+   * which content types count as media (a video by default).
    * @returns {Promise<{ ok: true, bytes: number, contentType: string } | { ok: false, reason: string, extra?: object }>}
    */
-  async function download(url, file, { ceiling, timeoutMs }) {
+  async function download(url, file, { ceiling, timeoutMs, accept = isVideoType }) {
     const controller = new AbortController();
     let timedOut = false;
     const timer = Number.isFinite(timeoutMs) && timeoutMs > 0
@@ -242,7 +256,7 @@ export function createVideoFetcher({
       const response = await fetchImpl(url, { method: 'GET', signal: controller.signal });
       if (!response?.ok) return { ok: false, reason: 'download', extra: { status: response?.status } };
       const contentType = bareContentType(response.headers?.get?.('content-type'));
-      if (!contentType.startsWith('video/')) return { ok: false, reason: 'download' };
+      if (!accept(contentType)) return { ok: false, reason: 'download' };
       const declared = Number(response.headers?.get?.('content-length'));
       if (Number.isFinite(declared) && declared > ceiling) return { ok: false, reason: 'size' };
       if (!response.body) return { ok: false, reason: 'download' };
@@ -328,6 +342,56 @@ export function createVideoFetcher({
       };
     } catch (err) {
       return fail('attachment', url, 'download', { code: errorCode(err) });
+    } finally {
+      await removeWorkDir(dir);
+    }
+  }
+
+  /**
+   * Download a GIF's animation -- a `.gif` file, or the mp4/webm a GIF site
+   * (tenor, giphy) serves for it -- and convert it with ffmpeg into a short
+   * mp4 (src/discord/video-sites.js#ffmpegGifArgs: the first `maxSeconds`, at
+   * most 360p, no audio), so the video describer can watch what happens in
+   * it. Always converted: a GIF's own length is unknown here, and a .gif is
+   * no video a model takes. The download is capped like an attachment's
+   * (`maxBytes * DOWNLOAD_CEILING_FACTOR`), the clip at `maxBytes`. A missing
+   * or failing ffmpeg is `tool`. `seconds` is `maxSeconds`, the upper bound
+   * the request is estimated at. Never rejects.
+   * @param {string} url
+   * @param {{ maxSeconds: number, maxBytes: number, toolTimeoutMs: number, ffmpegPath: string,
+   *   fetchTimeoutMs?: number }} options  `fetchTimeoutMs` falls back to `toolTimeoutMs`.
+   * @returns {Promise<{ ok: true, dataUrl: string, mimeType: string, seconds: number, bytes: number }
+   *   | { ok: false, reason: 'size'|'download'|'tool'|'timeout' }>}
+   */
+  async function fetchGif(url, { maxSeconds, maxBytes, toolTimeoutMs, ffmpegPath, fetchTimeoutMs } = {}) {
+    let dir = null;
+    try {
+      dir = await makeWorkDir();
+      const inPath = path.join(dir, 'in');
+      const outPath = path.join(dir, 'out.mp4');
+      const got = await download(url, inPath, {
+        ceiling: maxBytes * DOWNLOAD_CEILING_FACTOR,
+        timeoutMs: Number.isFinite(fetchTimeoutMs) ? fetchTimeoutMs : toolTimeoutMs,
+        accept: isGifType,
+      });
+      if (!got.ok) return fail('gif', url, got.reason, got.extra);
+
+      const run = await runTool(ffmpegGifArgs(inPath, outPath, { ffmpegPath, maxSeconds }), toolTimeoutMs);
+      if (run.timedOut) return fail('gif', url, 'timeout', { code: runCode(run) });
+      if (run.spawnError || run.code !== 0) return fail('gif', url, 'tool', { code: runCode(run) });
+
+      const bytes = await sizeOf(outPath);
+      if (bytes === null) return fail('gif', url, 'tool', { code: runCode(run) });
+      if (bytes > maxBytes) return fail('gif', url, 'size');
+      return {
+        ok: true,
+        dataUrl: await asDataUrl(outPath, 'video/mp4'),
+        mimeType: 'video/mp4',
+        seconds: maxSeconds,
+        bytes,
+      };
+    } catch (err) {
+      return fail('gif', url, 'download', { code: errorCode(err) });
     } finally {
       await removeWorkDir(dir);
     }
@@ -500,5 +564,5 @@ export function createVideoFetcher({
     }
   }
 
-  return { fetchAttachment, probeSite, fetchSiteClip, probeYoutube };
+  return { fetchAttachment, fetchGif, probeSite, fetchSiteClip, probeYoutube };
 }

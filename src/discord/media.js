@@ -155,6 +155,27 @@ export function discordCdnVideo(url) {
   return { id: match[2], name };
 }
 
+/** Whether `url` parses and its path ends in `.gif` (case-insensitive). */
+function isGifFileUrl(url) {
+  try {
+    return /\.gif$/i.test(new URL(String(url)).pathname);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The animation of a gif embed, for the GIF watch (src/memory/describe.js):
+ * the mp4/webm Discord plays for a tenor/giphy `gifv` embed
+ * (`video.proxyURL` preferred, like the thumbnail, else `video.url`), else
+ * the embed's own URL when it is a `.gif` file, else null.
+ */
+function gifAnimationUrl(embed, url) {
+  const video = embed?.video?.proxyURL || embed?.video?.url;
+  if (typeof video === 'string' && video) return video;
+  return url && isGifFileUrl(url) ? url : null;
+}
+
 /**
  * Classify one Discord embed into a link-ish item: `{ site, title, text,
  * thumbnailUrl, kind, url }`. `kind` is `'gif'` for a tenor/giphy embed (its
@@ -163,9 +184,12 @@ export function discordCdnVideo(url) {
  * `thumbnail.proxyURL` is preferred over `thumbnail.url` when discord.js
  * exposes one: Discord's own embed proxy (`media.discordapp.net` /
  * `images-ext-*.discordapp.net`) is reliably fetchable, unlike some
- * third-party thumbnail hosts.
+ * third-party thumbnail hosts. A gif embed that carries its animation (see
+ * gifAnimationUrl: the `gifv` video, or a `.gif` link) adds `animationUrl`,
+ * the file the GIF watch downloads; no other item ever has the key.
  * @param {{ url?: string|null, title?: string|null, description?: string|null,
  *   thumbnail?: { url?: string|null, proxyURL?: string|null }|null,
+ *   video?: { url?: string|null, proxyURL?: string|null }|null,
  *   provider?: { name?: string|null }|null }} embed
  * @param {{ embedTextChars?: number }} [options]
  */
@@ -175,6 +199,7 @@ export function classifyEmbed(embed, { embedTextChars = 200 } = {}) {
   const providerName = String(embed?.provider?.name ?? '');
   const isGif = GIF_PROVIDERS.has(providerName.toLowerCase()) || GIF_HOST_RE.test(host);
   const site = providerName || host || '';
+  const animationUrl = isGif ? gifAnimationUrl(embed, url) : null;
   return {
     site,
     title: truncateText(embed?.title ?? '', embedTextChars),
@@ -182,6 +207,7 @@ export function classifyEmbed(embed, { embedTextChars = 200 } = {}) {
     thumbnailUrl: embed?.thumbnail?.proxyURL ?? embed?.thumbnail?.url ?? null,
     kind: isGif ? 'gif' : 'link',
     url,
+    ...(animationUrl ? { animationUrl } : {}),
   };
 }
 
@@ -510,6 +536,8 @@ function partPictures(part, messageId) {
       kind: link.kind,
       url: link.thumbnailUrl,
       name: link.title || link.site,
+      // A gif embed's animation (see classifyEmbed), for the GIF watch.
+      ...(link.kind === 'gif' && link.animationUrl ? { animationUrl: link.animationUrl } : {}),
     });
   });
   for (const sticker of part.stickers ?? []) {
@@ -536,7 +564,9 @@ function partPictures(part, messageId) {
  * `itemId` (the attachment's Discord id, the message+embed-index for a link,
  * or `sticker:<id>`) so it can be looked up in a vision-selection or
  * description-cache map, and with the outer message's `messageId` (a
- * forwarded snapshot's item included). Custom emoji are never included here
+ * forwarded snapshot's item included). A gif embed's item also carries its
+ * `animationUrl` when the embed has one (see classifyEmbed): the file the
+ * GIF watch downloads, while `url` stays the still thumbnail. Custom emoji are never included here
  * -- see collectEmojiItems: they are never eligible to be attached as a vision
  * picture, only describable.
  * @param {object} message  A normalized message (see src/discord/collect.js).

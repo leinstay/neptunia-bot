@@ -87,6 +87,27 @@ test('normalizeMessage: a tenor embed becomes a gif link item, its URL also remo
   assert.equal(m.content, 'lol');
 });
 
+test('normalizeMessage: a tenor gifv embed keeps its mp4 as animationUrl, in the message and in a forward', () => {
+  const gifv = {
+    url: 'https://tenor.com/view/x',
+    provider: { name: 'Tenor' },
+    thumbnail: { url: 'https://media.tenor.com/x.png' },
+    video: { url: 'https://media.tenor.com/x.mp4', proxyURL: 'https://images-ext-1.discordapp.net/external/v/x.mp4' },
+  };
+  const raw = rawMessage({
+    cleanContent: 'https://tenor.com/view/x',
+    embeds: [gifv],
+    messageSnapshots: new Map([
+      ['snap1', { id: 'snap1', cleanContent: '', attachments: new Map(), embeds: [gifv], stickers: new Map(), flags: flagsWith([]) }],
+    ]),
+  });
+  const m = normalizeMessage(raw, 'self');
+  assert.equal(m.links[0].kind, 'gif');
+  assert.equal(m.links[0].animationUrl, 'https://images-ext-1.discordapp.net/external/v/x.mp4');
+  assert.equal(m.forwarded[0].links[0].id, 'snap1#e0');
+  assert.equal(m.forwarded[0].links[0].animationUrl, 'https://images-ext-1.discordapp.net/external/v/x.mp4');
+});
+
 test('normalizeMessage: an embed with no URL is skipped entirely (nothing to de-dupe or render)', () => {
   const raw = rawMessage({ embeds: [{ url: null, title: 'no url' }] });
   const m = normalizeMessage(raw, 'self');

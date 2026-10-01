@@ -55,6 +55,20 @@
 // (`state.data.rewatchDay` / `rewatchCount`, `media.video.rewatch.maxPerDay`)
 // on top of the ordinary video one; its answer is cached for an hour under
 // `video:<itemId>:q:<hash of the question>`, failures never.
+//
+// A GIF is watched, not described from one still frame (`media.gif.watch`,
+// a missing key counts as on, plus video vision on and the describe-video
+// prompt): its animation -- the mp4 of a tenor/giphy embed, an attached
+// .gif, a .gif link -- is converted to a short mp4 (the first
+// `media.gif.maxSeconds`) and summarised by the video model under every
+// video rail, the daily video count included. The caption is cached under the
+// GIF's own item id like a picture's (so the transcript, the analyzer and
+// the GIF library read it unchanged), marked `watched: true`. A GIF that
+// cannot be watched -- the switches, no animation, a spent daily rail, a
+// failed fetch, conversion or request -- gets the one-frame description as
+// before (marked `gif: true`, plus `watchFailed` when a watch failed). A
+// cached one-frame caption is served as it is; only `watchGif()` (the
+// owner's recache, src/memory/gif-recache.js) replaces it.
 
 import { createHash } from 'node:crypto';
 import { mediaProxyUrl } from '../discord/media.js';
@@ -81,6 +95,21 @@ const VIDEO_TEXT_CHARS_FALLBACK = 600;
 const REWATCH_ANSWER_CHARS_FALLBACK = 1200;
 const REWATCH_TTL_MS = 60 * 60_000;
 const PERMANENT_VIDEO_MISSES = new Set(['length', 'size']);
+// Only when media.gif.maxSeconds is missing or invalid (config.json always has it).
+const GIF_MAX_SECONDS_FALLBACK = 8;
+
+/**
+ * The file a GIF watch downloads: a gif embed's `animationUrl` (the mp4 of
+ * a tenor/giphy embed, or a `.gif` link, see src/discord/media.js#classifyEmbed),
+ * else an attached gif's own file. Null for anything else -- a gif embed
+ * with neither keeps the one-frame description.
+ */
+function gifAnimationSource(item) {
+  if (item?.kind !== 'gif') return null;
+  if (typeof item.animationUrl === 'string' && item.animationUrl) return item.animationUrl;
+  if (item.source === 'attachment' && typeof item.url === 'string' && item.url) return item.url;
+  return null;
+}
 
 /** Whether `item` is one collectVideos candidate (an attached video or a video-site link). */
 function isVideoCandidate(item) {
@@ -203,6 +232,18 @@ export function createDescriber({
       }
     }
 
+    // A GIF is watched like a short video first (see watchGifShared); one
+    // that cannot be watched, or whose watch fails, keeps the one-frame
+    // description below -- never nothing.
+    let watchFailed = false;
+    if (item.kind === 'gif') {
+      const watched = await watchGifShared(guildId, item, countAgainstDailyCap);
+      if (watched?.state === 'watched') {
+        return { text: watched.text, usage: watched.usage ?? null, estimated: watched.estimated ?? 0 };
+      }
+      watchFailed = watched?.state === 'failed';
+    }
+
     // A sticker/emoji URL is already fully sized by its own pure builder
     // (stickerUrl/emojiUrl -- `size=`, not width/height/format, and the
     // emoji CDN host is deliberately not media.discordapp.net): the proxy
@@ -274,10 +315,166 @@ export function createDescriber({
       return null;
     }
 
-    touchKey(cache, item.itemId, { text, ts: now() });
+    // A GIF's one-frame caption is marked (`gif`) so the recache can find it
+    // (src/memory/gif-recache.js), and `watchFailed` when a watch was tried.
+    const entry = { text, ts: now() };
+    if (item.kind === 'gif') entry.gif = true;
+    if (watchFailed) entry.watchFailed = entry.ts;
+    touchKey(cache, item.itemId, entry);
     trimCache(cache, mediaCfg.cacheEntries ?? Infinity);
     store.markMediaCacheDirty(guildId);
     return { text, usage: completion.usage ?? null, estimated: completion.estimated ?? 0 };
+  }
+
+  /**
+   * Why GIFs are not watched under the live config, or null when they are:
+   * `off` (features.mediaDescriptions not on, or `media.gif.watch` false --
+   * a missing key counts as on), `video-off` (features.videoDescriptions
+   * false: video vision off) or `prompt` (no describe-video prompt).
+   * @returns {'off'|'video-off'|'prompt'|null}
+   */
+  function gifWatchBlocker() {
+    const features = hot.config.features ?? {};
+    if (features.mediaDescriptions !== true || hot.config.media?.gif?.watch === false) return 'off';
+    if (features.videoDescriptions === false) return 'video-off';
+    if (!hot.prompts?.['describe-video']) return 'prompt';
+    return null;
+  }
+
+  /**
+   * One GIF watch, uncached: the animation at `source` is downloaded and
+   * converted to a short mp4 (src/discord/fetch-video.js#fetchGif, the first
+   * `media.gif.maxSeconds`, the video size and tool settings), then
+   * summarised by the video model through the `describe-video` prompt with
+   * `{{maxChars}}` = `media.descriptionChars` (a GIF caption keeps a picture
+   * caption's length) and every video rail: the video token cap and output
+   * budget, a slot of `media.video.maxPerDay` reserved before the fetch and
+   * kept on failure. A watched caption is cached under the GIF's own item id
+   * as `{ text, ts, watched: true, gif: true }`; nothing is cached otherwise.
+   * Resolves `{ state: 'watched', text, usage, estimated }`, `{ state:
+   * 'failed', reason }` (the fetch, the conversion, the request or an empty
+   * answer) or `{ state: 'unavailable', reason: 'daily'|'dailyCap' }` (a
+   * daily rail is spent: no failure of this GIF). One `describe: gif` log
+   * line, codes only.
+   */
+  async function watchGifNow(guildId, item, source, countAgainstDailyCap) {
+    const mediaCfg = hot.config.media ?? {};
+    const videoCfg = mediaCfg.video ?? {};
+    const maxSeconds = positiveOr(mediaCfg.gif?.maxSeconds, GIF_MAX_SECONDS_FALLBACK);
+    const descriptionChars = positiveOr(mediaCfg.descriptionChars, DESCRIPTION_CHARS_FALLBACK);
+    const report = (outcome, extra = {}) => {
+      log.info('describe: gif', {
+        state: outcome.state,
+        reason: outcome.reason ?? null,
+        seconds: extra.seconds ?? null,
+        bytes: extra.bytes ?? null,
+        status: extra.status,
+        location: safeLocation(source),
+      });
+      return outcome;
+    };
+
+    // The daily video slot, reserved synchronously like a video watch's.
+    const countToday = videoCountToday();
+    if (countToday >= (videoCfg.maxPerDay ?? Infinity)) return report({ state: 'unavailable', reason: 'daily' });
+    state.data.videoCount = countToday + 1;
+    state.markDirty();
+
+    const media = await videoFetcher.fetchGif(source, {
+      maxSeconds,
+      maxBytes: videoCfg.maxBytes,
+      toolTimeoutMs: videoCfg.toolTimeoutMs,
+      ffmpegPath: videoCfg.ffmpegPath,
+      fetchTimeoutMs: hot.config.context?.vision?.fetchTimeoutMs,
+    });
+    if (!media.ok) return report({ state: 'failed', reason: media.reason ?? 'download' });
+
+    const clip = { url: media.dataUrl, seconds: Math.min(media.seconds ?? maxSeconds, maxSeconds), pinned: false };
+    const sizes = { seconds: clip.seconds, bytes: media.bytes ?? null };
+    let completion;
+    try {
+      completion = await llm.complete(
+        [
+          {
+            role: 'system',
+            content: fillTemplate(hot.prompts?.['describe-video'], { maxChars: descriptionChars, today: todayDate() }),
+          },
+          { role: 'user', content: [videoPart(videoCfg, clip)] },
+        ],
+        videoRequestOptions(videoCfg, clip, { maxOutputTokens: videoCfg.maxOutputTokens, countAgainstDailyCap }),
+      );
+    } catch (err) {
+      if (err instanceof DailyCapError) return report({ state: 'unavailable', reason: 'dailyCap' }, sizes);
+      const reason = err instanceof TokenLimitError ? 'tokenLimit' : 'llm';
+      return report({ state: 'failed', reason }, { ...sizes, status: err.statusCode });
+    }
+
+    const text = cleanVideoText(completion.text, descriptionChars);
+    if (!text) return report({ state: 'failed', reason: 'empty' }, sizes);
+    putVideoEntry(guildId, item.itemId, { text, ts: now(), watched: true, gif: true });
+    report({ state: 'watched' }, sizes);
+    return { state: 'watched', text, usage: completion.usage ?? null, estimated: completion.estimated ?? 0 };
+  }
+
+  /**
+   * watchGifNow behind the switches and the in-flight guard: null when GIFs
+   * are not watched now (gifWatchBlocker) or the item has no animation to
+   * download (gifAnimationSource); otherwise the outcome, shared with any
+   * caller already watching the same GIF of the same guild.
+   */
+  function watchGifShared(guildId, item, countAgainstDailyCap) {
+    if (gifWatchBlocker() !== null) return null;
+    const source = gifAnimationSource(item);
+    if (!source) return null;
+    const flightKey = `${guildId}:gif:${item.itemId}`;
+    const running = inFlight.get(flightKey);
+    if (running) return running;
+    const promise = watchGifNow(guildId, item, source, countAgainstDailyCap).finally(() => inFlight.delete(flightKey));
+    inFlight.set(flightKey, promise);
+    return promise;
+  }
+
+  /** Mark a GIF's cache entry as a failed watch (`watchFailed`): its caption, if any, is kept. */
+  function markGifWatchFailed(guildId, itemId) {
+    const cache = store.getMediaCache(guildId);
+    const entry = cache[itemId];
+    const ts = now();
+    const next =
+      entry && !entry.miss && typeof entry.text === 'string' && entry.text
+        ? { ...entry, watchFailed: ts }
+        : { miss: true, ts, gif: true, watchFailed: ts };
+    putVideoEntry(guildId, itemId, next);
+  }
+
+  /**
+   * Re-describe one GIF by watching it, for the recache
+   * (src/memory/gif-recache.js): an entry already watched is served from the
+   * cache; any other cached caption (a one-frame one) is ignored and, when
+   * the watch succeeds, replaced -- under the same item id, so nothing else
+   * has to change. A failed watch never falls back to one frame here: the
+   * old caption stays and the entry is marked `watchFailed` (a GIF with no
+   * caption gets a miss so marked). Every rail of watchGifNow applies.
+   * @param {string} guildId
+   * @param {object} item  A gif picture item (src/discord/media.js#collectPictures).
+   * @param {{ countAgainstDailyCap?: boolean }} [options]
+   * @returns {Promise<{ state: 'watched', text: string, cached?: true }
+   *   | { state: 'failed', reason: string } | { state: 'unavailable', reason: string }>}
+   *   `unavailable`: GIFs are not watched now (see gifWatchBlocker) or a daily rail is spent.
+   */
+  async function watchGif(guildId, item, { countAgainstDailyCap = true } = {}) {
+    const blocker = gifWatchBlocker();
+    if (blocker !== null) return { state: 'unavailable', reason: blocker };
+    const cached = store.getMediaCache(guildId)[item.itemId];
+    if (cached?.watched && typeof cached.text === 'string') return { state: 'watched', text: cached.text, cached: true };
+    if (!gifAnimationSource(item)) {
+      markGifWatchFailed(guildId, item.itemId);
+      log.info('describe: gif', { state: 'failed', reason: 'source' });
+      return { state: 'failed', reason: 'source' };
+    }
+    const outcome = await watchGifShared(guildId, item, countAgainstDailyCap);
+    if (outcome.state === 'failed') markGifWatchFailed(guildId, item.itemId);
+    if (outcome.state === 'watched') return { state: 'watched', text: outcome.text };
+    return { state: outcome.state, reason: outcome.reason };
   }
 
   /**
@@ -857,6 +1054,8 @@ export function createDescriber({
     describeVideos,
     cachedVideos,
     rewatchVideo,
+    watchGif,
+    gifWatchBlocker,
     checkYoutube,
   };
 }

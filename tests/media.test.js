@@ -81,6 +81,35 @@ test('classifyEmbed: a video-site embed keeps kind "link" but carries the thumbn
   assert.equal(item.thumbnailUrl, 'https://i.ytimg.com/vi/xyz/hq.jpg');
 });
 
+test('classifyEmbed: a tenor gifv embed carries its video as animationUrl, the proxy URL preferred', () => {
+  const embed = {
+    url: 'https://tenor.com/view/x',
+    provider: { name: 'Tenor' },
+    thumbnail: { url: 'https://media.tenor.com/x/AAAAe/x.png', proxyURL: 'https://images-ext-1.discordapp.net/external/t/x.png' },
+    video: { url: 'https://media.tenor.com/x/AAAPo/x.mp4', proxyURL: 'https://images-ext-1.discordapp.net/external/v/x.mp4' },
+  };
+  assert.equal(classifyEmbed(embed).animationUrl, 'https://images-ext-1.discordapp.net/external/v/x.mp4');
+  const bare = classifyEmbed({ ...embed, video: { url: 'https://media.tenor.com/x/AAAPo/x.mp4' } });
+  assert.equal(bare.animationUrl, 'https://media.tenor.com/x/AAAPo/x.mp4');
+  assert.equal(bare.thumbnailUrl, 'https://images-ext-1.discordapp.net/external/t/x.png', 'the still thumbnail is unchanged');
+});
+
+test('classifyEmbed: a direct .gif link on a GIF host is its own animation; a gif embed without either has none', () => {
+  const direct = classifyEmbed({ url: 'https://media.giphy.com/media/abc/giphy.GIF?cid=1', thumbnail: { url: 'https://media.giphy.com/media/abc/giphy.gif' } });
+  assert.equal(direct.kind, 'gif');
+  assert.equal(direct.animationUrl, 'https://media.giphy.com/media/abc/giphy.GIF?cid=1');
+  const page = classifyEmbed({ url: 'https://tenor.com/view/x', provider: { name: 'Tenor' }, thumbnail: { url: 'https://t.tenor.com/x.png' } });
+  assert.equal('animationUrl' in page, false);
+});
+
+test('classifyEmbed: a link embed never carries animationUrl, even with a video or a .gif URL', () => {
+  const youtube = classifyEmbed({ url: 'https://www.youtube.com/watch?v=xyz', video: { url: 'https://www.youtube.com/embed/xyz' } });
+  assert.equal('animationUrl' in youtube, false);
+  const other = classifyEmbed({ url: 'https://example.com/a.gif', thumbnail: { url: 'https://example.com/a.gif' } });
+  assert.equal(other.kind, 'link');
+  assert.equal('animationUrl' in other, false);
+});
+
 test('classifyEmbed: falls back to the hostname when there is no provider name', () => {
   const embed = { url: 'https://example.com/article', title: 't' };
   const item = classifyEmbed(embed);
@@ -565,6 +594,25 @@ test('collectPictures: includes any embed with a thumbnail, gif or link kind ali
   });
   const pictures = collectPictures(m);
   assert.deepEqual(pictures.map((p) => p.itemId), ['m1#e0', 'm1#e1']);
+});
+
+test('collectPictures: a gif embed passes its animationUrl on, its url stays the thumbnail; other items never get one', () => {
+  const m = message('m1', {
+    attachments: [{ id: 'a1', kind: 'gif', url: 'https://cdn.discordapp.com/attachments/1/2/a.gif', name: 'a.gif' }],
+    links: [
+      { id: 'm1#e0', kind: 'gif', thumbnailUrl: 'https://t/x.png', animationUrl: 'https://t/x.mp4', title: 'cat', site: 'Tenor' },
+      { id: 'm1#e1', kind: 'gif', thumbnailUrl: 'https://t/y.png', title: 'dog', site: 'Tenor' },
+    ],
+    forwarded: [{ links: [{ id: 'f1#e0', kind: 'gif', thumbnailUrl: 'https://t/z.png', animationUrl: 'https://t/z.mp4', site: 'Tenor' }] }],
+  });
+  const pictures = collectPictures(m);
+  assert.deepEqual(pictures.map((p) => p.itemId), ['a1', 'm1#e0', 'm1#e1', 'f1#e0']);
+  assert.equal('animationUrl' in pictures[0], false, 'an attachment is its own file');
+  assert.equal(pictures[1].url, 'https://t/x.png');
+  assert.equal(pictures[1].animationUrl, 'https://t/x.mp4');
+  assert.equal('animationUrl' in pictures[2], false);
+  assert.equal(pictures[3].animationUrl, 'https://t/z.mp4', 'a forwarded GIF keeps its animation');
+  assert.equal(pictures[3].messageId, 'm1');
 });
 
 test('isDescribable: true for image/gif/video/sticker/emoji/link (a link thumbnail is describable)', () => {

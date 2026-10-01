@@ -246,6 +246,108 @@ test('fetchAttachment: a hung ffmpeg is killed after toolTimeoutMs -> timeout', 
   assert.deepEqual(await leftovers(), []);
 });
 
+// --- fetchGif --------------------------------------------------------------
+
+const GIF_URL = 'https://cdn.discordapp.com/attachments/1/2/anim.gif?ex=deadbeef&is=cafef00d&hm=abc';
+const GIF_OPTS = { ...OPTS, maxSeconds: 8, ffmpegPath: '/usr/bin/ffmpeg' };
+
+test('fetchGif: a .gif is downloaded and always converted by ffmpeg into a short mp4 of maxSeconds', async () => {
+  const { fetchImpl, calls: fetchCalls } = fakeFetch(fakeResponse({ contentType: 'image/gif' }));
+  const { spawnImpl, calls } = fakeSpawn(writesOutput(300));
+  const fetcher = makeFetcher({ fetchImpl, spawnImpl, tmpDir });
+
+  const result = await fetcher.fetchGif(GIF_URL, GIF_OPTS);
+
+  assert.equal(result.ok, true);
+  assert.equal(result.mimeType, 'video/mp4');
+  assert.equal(result.dataUrl, `data:video/mp4;base64,${Buffer.alloc(300, 7).toString('base64')}`);
+  assert.equal(result.seconds, 8);
+  assert.equal(result.bytes, 300);
+  assert.equal(fetchCalls[0].url, GIF_URL);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].command, '/usr/bin/ffmpeg', 'the configured ffmpeg path is the command');
+  const args = calls[0].args;
+  assert.equal(args[args.indexOf('-t') + 1], '8');
+  assert.ok(args.includes('-an'));
+  assert.equal(args[args.indexOf('-pix_fmt') + 1], 'yuv420p');
+  assert.deepEqual(await leftovers(), [], 'both temp files are removed');
+});
+
+test('fetchGif: the mp4 a GIF site serves is converted the same way', async () => {
+  const { fetchImpl } = fakeFetch(fakeResponse({ contentType: 'video/mp4' }));
+  const { spawnImpl, calls } = fakeSpawn(writesOutput(200));
+  const fetcher = makeFetcher({ fetchImpl, spawnImpl, tmpDir });
+
+  const result = await fetcher.fetchGif('https://media.tenor.com/abc/loop.mp4', GIF_OPTS);
+
+  assert.equal(result.ok, true);
+  assert.equal(result.bytes, 200);
+  assert.equal(calls.length, 1);
+});
+
+test('fetchGif: a content type that is neither a GIF nor a video -> download, no ffmpeg', async () => {
+  const { fetchImpl } = fakeFetch(fakeResponse({ contentType: 'text/html' }));
+  const { spawnImpl, calls } = fakeSpawn(() => assert.fail('ffmpeg must not run'));
+  const fetcher = makeFetcher({ fetchImpl, spawnImpl, tmpDir });
+
+  assert.deepEqual(await fetcher.fetchGif(GIF_URL, GIF_OPTS), { ok: false, reason: 'download' });
+  assert.equal(calls.length, 0);
+  assert.deepEqual(await leftovers(), []);
+});
+
+test('fetchGif: a download over the ceiling -> size; ffmpeg missing or failing -> tool; a clip over maxBytes -> size', async () => {
+  const big = fakeFetch(fakeResponse({ contentType: 'image/gif', contentLength: 4001 }));
+  const fetcherBig = makeFetcher({ fetchImpl: big.fetchImpl, spawnImpl: fakeSpawn(() => assert.fail('no ffmpeg')).spawnImpl, tmpDir });
+  assert.deepEqual(await fetcherBig.fetchGif(GIF_URL, GIF_OPTS), { ok: false, reason: 'size' });
+
+  const missing = makeFetcher({
+    fetchImpl: fakeFetch(fakeResponse({ contentType: 'image/gif' })).fetchImpl,
+    spawnImpl: fakeSpawn(enoent).spawnImpl,
+    tmpDir,
+  });
+  assert.deepEqual(await missing.fetchGif(GIF_URL, GIF_OPTS), { ok: false, reason: 'tool' });
+
+  const failing = makeFetcher({
+    fetchImpl: fakeFetch(fakeResponse({ contentType: 'image/gif' })).fetchImpl,
+    spawnImpl: fakeSpawn((child) => child.emit('close', 1, null)).spawnImpl,
+    tmpDir,
+  });
+  assert.deepEqual(await failing.fetchGif(GIF_URL, GIF_OPTS), { ok: false, reason: 'tool' });
+
+  const oversized = makeFetcher({
+    fetchImpl: fakeFetch(fakeResponse({ contentType: 'image/gif' })).fetchImpl,
+    spawnImpl: fakeSpawn(writesOutput(1001)).spawnImpl,
+    tmpDir,
+  });
+  assert.deepEqual(await oversized.fetchGif(GIF_URL, GIF_OPTS), { ok: false, reason: 'size' });
+  assert.deepEqual(await leftovers(), []);
+});
+
+test('fetchGif: a hung ffmpeg is killed after toolTimeoutMs -> timeout', async () => {
+  const { fetchImpl } = fakeFetch(fakeResponse({ contentType: 'image/gif' }));
+  const { spawnImpl, calls } = fakeSpawn(() => {});
+  const fetcher = makeFetcher({ fetchImpl, spawnImpl, tmpDir });
+
+  assert.deepEqual(await fetcher.fetchGif(GIF_URL, { ...GIF_OPTS, toolTimeoutMs: 20 }), { ok: false, reason: 'timeout' });
+  assert.equal(calls[0].child.killed, true);
+  assert.deepEqual(await leftovers(), []);
+});
+
+test('fetchGif: a failure logs source gif without the signed query string', async () => {
+  const { fetchImpl } = fakeFetch(fakeResponse({ ok: false, status: 404 }));
+  const fetcher = makeFetcher({ fetchImpl, spawnImpl: fakeSpawn(() => {}).spawnImpl, tmpDir });
+
+  const { result, logs } = await withCapturedLogs(() => fetcher.fetchGif(GIF_URL, GIF_OPTS));
+
+  assert.deepEqual(result, { ok: false, reason: 'download' });
+  const lines = logs.filter((l) => l.msg.startsWith('fetch-video:'));
+  assert.equal(lines.length, 1);
+  assert.equal(lines[0].source, 'gif');
+  assert.equal(lines[0].status, 404);
+  assert.equal(lines[0].location, 'cdn.discordapp.com/attachments/1/2/anim.gif');
+  assert.ok(!JSON.stringify(lines[0]).includes('deadbeef'));
+});
+
 // --- killing the tool process tree -------------------------------------------
 
 test('kill: on POSIX a tool is spawned detached and a timeout kills its whole process group', async () => {

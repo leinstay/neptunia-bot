@@ -1,7 +1,8 @@
 // Pure helpers for the persona's video vision: which links point at a video
 // site, a stable cache key for a video URL (so a repost of the same video
 // shares one cache entry), the exact yt-dlp / ffmpeg argument arrays the
-// fetcher (src/discord/fetch-video.js) runs, and the parsers behind the
+// fetcher (src/discord/fetch-video.js) runs (a GIF's conversion to a short
+// mp4 included), and the parsers behind the
 // YouTube duration probe that works without yt-dlp (the watch page, the
 // optional Data API). No I/O here -- the child processes and requests live at
 // the edge, these functions only decide what to run and read what came back.
@@ -227,6 +228,38 @@ export function ffmpegTrimArgs(inPath, outPath, { ffmpegPath, maxSeconds } = {})
       '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '28',
       '-maxrate', '400k', '-bufsize', '800k',
       '-c:a', 'aac', '-b:a', '96k',
+      '-movflags', '+faststart',
+      String(outPath),
+    ],
+  };
+}
+
+/**
+ * An ffmpeg run that turns a GIF -- a `.gif` file, or the mp4/webm a GIF
+ * site (tenor, giphy) serves for it -- into a short clip a video model can
+ * take: its first `maxSeconds` (a loop GIF is short; a longer animation is
+ * cut), at most `maxHeight` pixels high but never upscaled, both sides even
+ * (H.264 needs it), yuv420p H.264 (a GIF decodes to RGB, which libx264 would
+ * otherwise keep as a 4:4:4 stream many decoders refuse), no audio track, and
+ * the same bitrate cap as ffmpegTrimArgs. The height expression is quoted so
+ * its comma is not read as a filter separator.
+ * @param {string} inPath
+ * @param {string} outPath
+ * @param {{ ffmpegPath: string, maxSeconds: number, maxHeight?: number }} options
+ * @returns {{ command: string, args: string[] }}
+ */
+export function ffmpegGifArgs(inPath, outPath, { ffmpegPath, maxSeconds, maxHeight = 360 } = {}) {
+  return {
+    command: ffmpegPath,
+    args: [
+      '-y', '-hide_banner', '-loglevel', 'error',
+      '-i', String(inPath),
+      '-t', String(maxSeconds),
+      '-vf', `scale=-2:'min(${maxHeight},trunc(ih/2)*2)'`,
+      '-pix_fmt', 'yuv420p',
+      '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '28',
+      '-maxrate', '400k', '-bufsize', '800k',
+      '-an',
       '-movflags', '+faststart',
       String(outPath),
     ],

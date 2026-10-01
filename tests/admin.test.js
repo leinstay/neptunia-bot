@@ -363,6 +363,7 @@ function makeAdmin(rootDir, extra = {}) {
     imageFetcher: extra.imageFetcher,
     emojiBackfill: extra.emojiBackfill,
     gifBackfill: extra.gifBackfill,
+    gifRecache: extra.gifRecache,
     mentor: extra.mentor,
     mentorCases: extra.mentorCases,
     mentorBudget: extra.mentorBudget,
@@ -5509,6 +5510,89 @@ test('run: gifs.rescan is refused while paused and without the backfill', async 
 
   const { admin: bare } = makeAdmin(rootDir);
   assert.equal(await bare.run('gifs.rescan', {}, { guildId: 'g1' }), 'the GIF backfill is not available');
+});
+
+// gifs.recache -- the GIF library re-described by watching
+
+function fakeGifRecache(result = { ok: true, dropped: 4, queued: 50 }, { running = false } = {}) {
+  return {
+    calls: [],
+    idleWaits: 0,
+    start(guildId) {
+      this.calls.push(guildId);
+      return result;
+    },
+    isRunning: () => running,
+    async waitIdle() {
+      this.idleWaits += 1;
+    },
+  };
+}
+
+test('run: gifs.recache starts the recache and replies at once with what it queued and dropped', async () => {
+  const rootDir = makeRoot();
+  const gifRecache = fakeGifRecache();
+  const { admin } = makeAdmin(rootDir, { gifRecache });
+
+  const body = await admin.run('gifs.recache', {}, { guildId: 'g1' });
+  assert.deepEqual(gifRecache.calls, ['g1']);
+  assert.equal(
+    body,
+    ['GIF recache started: 50 library GIFs to watch, 4 one-frame captions dropped from the media cache.', 'Follow it with /nep gifs status.'].join('\n'),
+  );
+});
+
+test('run: gifs.recache relays why it did not start', async () => {
+  const rootDir = makeRoot();
+  const expected = {
+    running: 'A GIF recache is already running: see /nep gifs status.',
+    warmup: 'a warmup is running: /nep warmup stop first',
+    'video-off': 'GIFs are not watched while video vision is off (features.videoDescriptions).',
+    off: 'GIFs are not watched (features.mediaDescriptions or media.gif.watch is off).',
+    prompt: 'GIFs are not watched: the describe-video prompt is missing.',
+    other: 'not started (other)',
+  };
+  for (const [reason, reply] of Object.entries(expected)) {
+    const { admin } = makeAdmin(rootDir, { gifRecache: fakeGifRecache({ ok: false, reason }) });
+    assert.equal(await admin.run('gifs.recache', {}, { guildId: 'g1' }), reply);
+  }
+});
+
+test('run: gifs.recache is refused while paused and without the recache; pause waits for a run in flight', async () => {
+  const rootDir = makeRoot();
+  const gifRecache = fakeGifRecache();
+  const { admin } = makeAdmin(rootDir, { gifRecache });
+  await admin.run('pause', {}, {});
+  assert.equal(gifRecache.idleWaits, 1, '/nep pause waits for the recache');
+  await assert.rejects(() => admin.run('gifs.recache', {}, { guildId: 'g1' }), /paused/);
+  assert.equal(gifRecache.calls.length, 0);
+
+  const { admin: bare } = makeAdmin(rootDir);
+  assert.equal(await bare.run('gifs.recache', {}, { guildId: 'g1' }), 'the GIF recache is not available');
+});
+
+test('run: gifs.status ends with the caption counts of the library and notes a running recache', async () => {
+  const rootDir = makeRoot();
+  const { admin, store, dataDir } = makeRealStoreAdmin(rootDir, { gifRecache: fakeGifRecache(undefined, { running: true }) });
+  try {
+    const now = Date.now();
+    store.recordGifs('g1', [...gifMessages(1, 1, now), ...gifMessages(2, 1, now), ...gifMessages(3, 1, now), ...gifMessages(4, 1, now)]);
+    const cache = store.getMediaCache('g1');
+    cache['m1-0#e0'] = { text: 'a man pulls a child back', ts: now, watched: true, gif: true };
+    cache['m2-0#e0'] = { text: 'a sign', ts: now };
+    cache['m3-0#e0'] = { text: 'a sign', ts: now, watchFailed: now };
+    const lines = (await admin.run('gifs.status', {}, { guildId: 'g1' })).split('\n');
+    assert.equal(lines[lines.length - 1], 'captions: 1 watched, 1 one-frame, 1 failed, 1 none (recache running now)');
+    assert.match(lines[lines.length - 2], /^posted today: /);
+  } finally {
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test('run: access.grant on gifs.recache adds the write note', async () => {
+  const rootDir = makeRoot();
+  const { admin } = makeAdmin(rootDir);
+  assert.match(await admin.run('access.grant', { command: 'gifs.recache', roleId: 'staff' }, {}), /change memory or config/);
 });
 
 test('run: access.grant on gifs.status adds no write note, on gifs.rescan it does', async () => {

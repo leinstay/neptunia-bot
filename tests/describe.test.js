@@ -15,6 +15,7 @@ import path from 'node:path';
 import { createStore } from '../src/memory/store.js';
 import { createDescriber } from '../src/memory/describe.js';
 import { createLlm, TokenLimitError, DailyCapError } from '../src/llm/openrouter.js';
+import { collectPictures } from '../src/discord/media.js';
 import { withCapturedLogs } from './fixtures/capture-logs.js';
 
 function tmpDataDir() {
@@ -2171,4 +2172,327 @@ test('rewatchVideo: the second look is requested as the classifier.video role', 
   const { describer, llm } = videoDescriber({ hot: rewatchHot(), llm: fakeLlm({ text: 'rouge' }), now: clock() });
   await describer.rewatchVideo('g1', videoAttachment(), 'De quelle couleur ?');
   assert.equal(llm.calls[0].options.role, 'classifier.video');
+});
+
+// --- GIFs: watched like a short video --------------------------------------
+
+const GIF_CLIP_URL = 'data:video/mp4;base64,Z2lm';
+const GIF_VIDEO_PROMPT = 'Account of this clip, up to {{maxChars}} characters.';
+
+/** videoHot plus the GIF settings and a describe-video prompt that shows its cap. */
+function gifHot({ features = {}, gif = {}, video = {}, media = {}, prompts = {} } = {}) {
+  const hot = videoHot({ features, video, prompts: { 'describe-video': GIF_VIDEO_PROMPT, ...prompts } });
+  hot.config.media = { ...hot.config.media, imageSize: 512, descriptionChars: 200, gif: { watch: true, maxSeconds: 8, ...gif }, ...media };
+  return hot;
+}
+
+/** fakeVideoFetcher plus fetchGif; `gif` is its result, or a function `(url, options) => result`. */
+function gifFetcher(gif = (url, options) => ({ ok: true, dataUrl: GIF_CLIP_URL, mimeType: 'video/mp4', seconds: options.maxSeconds, bytes: 9 })) {
+  const fetcher = fakeVideoFetcher();
+  fetcher.fetchGif = async (url, options) => {
+    fetcher.calls.push({ fn: 'fetchGif', url, options });
+    return typeof gif === 'function' ? gif(url, options) : gif;
+  };
+  return fetcher;
+}
+
+function gifDescriber({ hot = gifHot(), llm = fakeLlm({ text: 'a man pulls a child back as a train rushes past' }), videoFetcher = gifFetcher(), imageFetcher = fakeImageFetcher(), state = fakeState() } = {}) {
+  const store = createStore({ dataDir: tmpDataDir() });
+  const describer = createDescriber({ hot, store, llm, imageFetcher, videoFetcher, state });
+  return { describer, store, llm, videoFetcher, imageFetcher, state, hot };
+}
+
+const TENOR_MP4 = 'https://images-ext-1.discordapp.net/external/v/https/media.tenor.com/x/AAAPo/loop.mp4';
+
+/** A tenor gifv embed's picture item (src/discord/media.js#collectPictures). */
+function gifEmbedItem(itemId = 'm1#e0', overrides = {}) {
+  return {
+    source: 'embed',
+    messageId: 'm1',
+    itemId,
+    kind: 'gif',
+    url: 'https://images-ext-1.discordapp.net/external/t/https/media.tenor.com/x/AAAAe/still.png',
+    animationUrl: TENOR_MP4,
+    name: 'Tenor',
+    ...overrides,
+  };
+}
+
+/** An attached .gif's picture item. */
+function gifAttachmentItem(itemId = 'a9', overrides = {}) {
+  return {
+    source: 'attachment',
+    messageId: 'm1',
+    itemId,
+    kind: 'gif',
+    url: 'https://cdn.discordapp.com/attachments/1/2/anim.gif?ex=secret',
+    name: 'anim.gif',
+    ...overrides,
+  };
+}
+
+test('describe: a gifv embed is watched from its mp4 by the video model, cached watched under its own id', async () => {
+  const { describer, store, llm, videoFetcher, imageFetcher, state } = gifDescriber();
+
+  const result = await describer.describe('g1', gifEmbedItem());
+
+  assert.equal(result.text, 'a man pulls a child back as a train rushes past');
+  assert.equal(result.cached, undefined);
+  assert.equal(imageFetcher.calls.length, 0, 'no still frame is fetched');
+  assert.deepEqual(videoFetcher.calls.map((c) => [c.fn, c.url]), [['fetchGif', TENOR_MP4]]);
+  assert.deepEqual(videoFetcher.calls[0].options, {
+    maxSeconds: 8,
+    maxBytes: 8_000_000,
+    toolTimeoutMs: 60_000,
+    ffmpegPath: 'ffmpeg-test',
+    fetchTimeoutMs: 10_000,
+  });
+  assert.equal(llm.calls.length, 1);
+  const [system, user] = llm.calls[0].messages;
+  assert.deepEqual(system, { role: 'system', content: 'Account of this clip, up to 200 characters.' });
+  assert.deepEqual(user.content, [{ type: 'video_url', video_url: { url: GIF_CLIP_URL } }]);
+  const options = llm.calls[0].options;
+  assert.equal(options.role, 'classifier.video');
+  assert.equal(options.model, 'x/video-model');
+  assert.equal(options.maxOutputTokens, 400);
+  assert.equal(options.maxRequestTokens, 60_000, 'the video token cap applies');
+  assert.equal(options.videoSeconds, 8);
+  assert.equal(options.provider, undefined);
+  assert.equal(options.skipCalibration, true);
+  assert.equal(state.data.videoCount, 1, 'a GIF watch takes a daily video slot');
+
+  const entry = store.getMediaCache('g1')['m1#e0'];
+  assert.equal(entry.text, 'a man pulls a child back as a train rushes past');
+  assert.equal(entry.watched, true);
+  assert.equal(entry.gif, true);
+  assert.equal(store.getMediaCache('g1')['video:m1#e0'], undefined, 'the key a GIF caption has always used, nothing else');
+
+  const again = await describer.describe('g1', gifEmbedItem());
+  assert.equal(again.cached, true);
+  assert.equal(llm.calls.length, 1);
+});
+
+test('describe: an attached .gif is downloaded and converted by the fetcher, then watched', async () => {
+  const { describer, videoFetcher, llm, store } = gifDescriber();
+
+  const result = await describer.describe('g1', gifAttachmentItem());
+
+  assert.equal(result.text, 'a man pulls a child back as a train rushes past');
+  assert.equal(videoFetcher.calls[0].fn, 'fetchGif');
+  assert.equal(videoFetcher.calls[0].url, 'https://cdn.discordapp.com/attachments/1/2/anim.gif?ex=secret', 'the file itself, never the proxy still');
+  assert.equal(llm.calls[0].options.role, 'classifier.video');
+  assert.equal(store.getMediaCache('g1').a9.watched, true);
+});
+
+test('describe: a GIF inside a forwarded message is watched like the message\'s own', async () => {
+  const message = {
+    id: 'm7',
+    ts: 0,
+    attachments: [],
+    links: [],
+    forwarded: [{ attachments: [], links: [{ id: 'o5#e0', kind: 'gif', thumbnailUrl: 'https://t/still.png', animationUrl: TENOR_MP4, site: 'Tenor' }] }],
+  };
+  const [item] = collectPictures(message);
+  const { describer, videoFetcher, store } = gifDescriber();
+
+  const result = await describer.describe('g1', item);
+
+  assert.equal(result.text, 'a man pulls a child back as a train rushes past');
+  assert.equal(videoFetcher.calls[0].url, TENOR_MP4);
+  assert.equal(store.getMediaCache('g1')['o5#e0'].watched, true);
+});
+
+test('describe: media.gif.maxSeconds caps the watched length; a missing or invalid value means 8', async () => {
+  const capped = gifDescriber({ hot: gifHot({ gif: { maxSeconds: 5 } }) });
+  await capped.describer.describe('g1', gifEmbedItem());
+  assert.equal(capped.videoFetcher.calls[0].options.maxSeconds, 5);
+  assert.equal(capped.llm.calls[0].options.videoSeconds, 5);
+
+  const fallback = gifDescriber({ hot: gifHot({ gif: { maxSeconds: 'long' } }) });
+  await fallback.describer.describe('g1', gifEmbedItem());
+  assert.equal(fallback.videoFetcher.calls[0].options.maxSeconds, 8);
+
+  // A fetcher reporting more than asked never raises the billed length.
+  const liar = gifDescriber({ videoFetcher: gifFetcher({ ok: true, dataUrl: GIF_CLIP_URL, mimeType: 'video/mp4', seconds: 600, bytes: 9 }) });
+  await liar.describer.describe('g1', gifEmbedItem());
+  assert.equal(liar.llm.calls[0].options.videoSeconds, 8);
+});
+
+test('describe: the watched caption keeps media.descriptionChars, collapsed to one line', async () => {
+  const words = Array.from({ length: 80 }, (_, i) => `mot${i % 10}é`).join(' ');
+  const { describer } = gifDescriber({ llm: fakeLlm({ text: `Première ligne.\n${words}` }) });
+  const result = await describer.describe('g1', gifEmbedItem());
+  assert.ok(result.text.length <= 200, `${result.text.length} chars`);
+  assert.ok(!result.text.includes('\n'));
+  assert.ok(result.text.startsWith('Première ligne. mot0é'));
+});
+
+/** Asserts the one-frame path ran: the still frame through the proxy, the picture model, a `gif` entry. */
+function assertOneFrame({ imageFetcher, llm, store }, itemId, { watchFailed = false } = {}) {
+  assert.equal(imageFetcher.calls.length, 1, 'the still frame is fetched');
+  assert.equal(new URL(imageFetcher.calls[0].url).searchParams.get('animated'), 'false');
+  const last = llm.calls[llm.calls.length - 1];
+  assert.equal(last.options.role, 'classifier.media');
+  assert.equal(last.messages[1].content[0].type, 'image_url');
+  const entry = store.getMediaCache('g1')[itemId];
+  assert.equal(typeof entry.text, 'string');
+  assert.equal(entry.watched, undefined);
+  assert.equal(entry.gif, true);
+  assert.equal(typeof entry.watchFailed === 'number', watchFailed);
+}
+
+test('describe: video vision off, media.gif.watch false or no describe-video prompt -> the one-frame description, no watch', async () => {
+  const setups = [
+    gifHot({ features: { videoDescriptions: false } }),
+    gifHot({ gif: { watch: false } }),
+    gifHot({ prompts: { 'describe-video': undefined } }),
+  ];
+  for (const hot of setups) {
+    const run = gifDescriber({ hot, llm: fakeLlm({ text: 'a sign by a railway crossing' }) });
+    const result = await run.describer.describe('g1', gifEmbedItem());
+    assert.equal(result.text, 'a sign by a railway crossing');
+    assert.equal(run.videoFetcher.calls.length, 0);
+    assert.equal(run.state.data.videoCount, undefined, 'no daily video slot');
+    assertOneFrame(run, 'm1#e0');
+  }
+});
+
+test('describe: media.gif.watch false describes a GIF exactly as before (the still png frame at media.imageSize)', async () => {
+  const run = gifDescriber({ hot: gifHot({ gif: { watch: false } }) });
+  await run.describer.describe('g1', gifAttachmentItem());
+  assert.equal(
+    run.imageFetcher.calls[0].url,
+    'https://media.discordapp.net/attachments/1/2/anim.gif?ex=secret&width=512&height=512&format=png&animated=false',
+  );
+});
+
+test('describe: a gif embed without an animation keeps the one-frame description', async () => {
+  const run = gifDescriber({ llm: fakeLlm({ text: 'a still' }) });
+  const item = gifEmbedItem();
+  delete item.animationUrl;
+  await run.describer.describe('g1', item);
+  assert.equal(run.videoFetcher.calls.length, 0);
+  assertOneFrame(run, 'm1#e0');
+});
+
+test('describe: a GIF that cannot be fetched or converted falls back to one frame, marked watchFailed, logging codes only', async () => {
+  for (const reason of ['download', 'tool', 'size', 'timeout']) {
+    const run = gifDescriber({ videoFetcher: gifFetcher({ ok: false, reason }), llm: fakeLlm({ text: 'a still' }) });
+    const { result, logs } = await withCapturedLogs(() => run.describer.describe('g1', gifAttachmentItem()));
+    assert.equal(result.text, 'a still');
+    assertOneFrame(run, 'a9', { watchFailed: true });
+    const line = logs.find((l) => l.msg === 'describe: gif');
+    assert.equal(line.state, 'failed');
+    assert.equal(line.reason, reason);
+    assert.equal(line.location, 'cdn.discordapp.com/attachments/1/2/anim.gif');
+    assert.ok(!JSON.stringify(logs).includes('secret'));
+    assert.equal(run.state.data.videoCount, 1, 'the attempt keeps its daily slot');
+  }
+});
+
+test('describe: a failed or empty watch request falls back to one frame, marked watchFailed', async () => {
+  const failing = gifDescriber({ llm: fakeLlm([Object.assign(new Error('boom'), { statusCode: 502 }), { text: 'a still' }]) });
+  assert.equal((await failing.describer.describe('g1', gifEmbedItem())).text, 'a still');
+  assertOneFrame(failing, 'm1#e0', { watchFailed: true });
+
+  const empty = gifDescriber({ llm: fakeLlm([{ text: '   ' }, { text: 'a still' }]) });
+  assert.equal((await empty.describer.describe('g1', gifEmbedItem())).text, 'a still');
+  assertOneFrame(empty, 'm1#e0', { watchFailed: true });
+});
+
+test('describe: a spent daily video cap or request cap falls back to one frame, not marked as a failed watch', async () => {
+  const daily = gifDescriber({ hot: gifHot({ video: { maxPerDay: 1 } }), state: fakeState({ videoDay: new Date().toISOString().slice(0, 10), videoCount: 1 }) });
+  await daily.describer.describe('g1', gifEmbedItem());
+  assert.equal(daily.videoFetcher.calls.length, 0);
+  assertOneFrame(daily, 'm1#e0');
+
+  const capped = gifDescriber({ llm: fakeLlm([new DailyCapError('cap'), { text: 'a still' }]) });
+  await capped.describer.describe('g1', gifEmbedItem());
+  assertOneFrame(capped, 'm1#e0');
+});
+
+test('describe: a cached one-frame GIF caption is served as it is, never re-watched automatically', async () => {
+  const run = gifDescriber();
+  run.store.getMediaCache('g1')['m1#e0'] = { text: 'a sign in a foreign script', ts: 1 };
+  const result = await run.describer.describe('g1', gifEmbedItem());
+  assert.equal(result.text, 'a sign in a foreign script');
+  assert.equal(result.cached, true);
+  assert.equal(run.videoFetcher.calls.length, 0);
+  assert.equal(run.llm.calls.length, 0);
+});
+
+test('describe: two callers reaching the same new GIF at once share one watch', async () => {
+  const run = gifDescriber();
+  const [a, b] = await Promise.all([run.describer.describe('g1', gifEmbedItem()), run.describer.describe('g1', gifEmbedItem())]);
+  assert.equal(a.text, b.text);
+  assert.equal(run.videoFetcher.calls.length, 1);
+  assert.equal(run.llm.calls.length, 1);
+});
+
+test('describe: pictures and videos are untouched by the GIF watch', async () => {
+  const run = gifDescriber({ llm: fakeLlm({ text: 'a cat' }) });
+  await run.describer.describe('g1', pictureItem('p1', { source: 'attachment' }));
+  await run.describer.describe('g1', pictureItem('v1', { source: 'attachment', kind: 'video', url: 'https://cdn.discordapp.com/x/clip.mp4' }));
+  assert.equal(run.videoFetcher.calls.length, 0);
+  assert.equal(run.imageFetcher.calls.length, 2);
+  assert.deepEqual(Object.keys(run.store.getMediaCache('g1').p1).sort(), ['text', 'ts']);
+  assert.deepEqual(Object.keys(run.store.getMediaCache('g1').v1).sort(), ['text', 'ts']);
+  assert.ok(run.llm.calls.every((c) => c.options.role === 'classifier.media'));
+
+  const video = await run.describer.describeVideo('g1', videoAttachment());
+  assert.equal(video.state, 'watched');
+  assert.equal(run.videoFetcher.calls[0].fn, 'fetchAttachment');
+});
+
+// --- watchGif: the recache's re-description ---------------------------------
+
+test('watchGif: replaces a one-frame caption with a watched one under the same key', async () => {
+  const run = gifDescriber();
+  run.store.getMediaCache('g1')['m1#e0'] = { text: 'a still', ts: 1, gif: true };
+  const result = await run.describer.watchGif('g1', gifEmbedItem());
+  assert.deepEqual(result, { state: 'watched', text: 'a man pulls a child back as a train rushes past' });
+  const entry = run.store.getMediaCache('g1')['m1#e0'];
+  assert.equal(entry.watched, true);
+  assert.equal(entry.text, 'a man pulls a child back as a train rushes past');
+});
+
+test('watchGif: an entry already watched is served from the cache, no fetch, no request', async () => {
+  const run = gifDescriber();
+  run.store.getMediaCache('g1')['m1#e0'] = { text: 'watched before', ts: 1, watched: true, gif: true };
+  assert.deepEqual(await run.describer.watchGif('g1', gifEmbedItem()), { state: 'watched', text: 'watched before', cached: true });
+  assert.equal(run.videoFetcher.calls.length, 0);
+});
+
+test('watchGif: a failed watch keeps the old caption and marks it watchFailed; never one frame', async () => {
+  const run = gifDescriber({ videoFetcher: gifFetcher({ ok: false, reason: 'tool' }) });
+  run.store.getMediaCache('g1')['m1#e0'] = { text: 'a still', ts: 1, gif: true };
+  assert.deepEqual(await run.describer.watchGif('g1', gifEmbedItem()), { state: 'failed', reason: 'tool' });
+  const entry = run.store.getMediaCache('g1')['m1#e0'];
+  assert.equal(entry.text, 'a still');
+  assert.equal(typeof entry.watchFailed, 'number');
+  assert.equal(run.imageFetcher.calls.length, 0);
+  assert.equal(run.llm.calls.length, 0);
+});
+
+test('watchGif: an item without an animation fails as source; an uncaptioned GIF gets a marked miss', async () => {
+  const run = gifDescriber();
+  const item = gifEmbedItem('m2#e0');
+  delete item.animationUrl;
+  assert.deepEqual(await run.describer.watchGif('g1', item), { state: 'failed', reason: 'source' });
+  const entry = run.store.getMediaCache('g1')['m2#e0'];
+  assert.equal(entry.miss, true);
+  assert.equal(typeof entry.watchFailed, 'number');
+});
+
+test('watchGif: unavailable while GIFs are not watched or a daily rail is spent, nothing marked', async () => {
+  const off = gifDescriber({ hot: gifHot({ features: { videoDescriptions: false } }) });
+  assert.deepEqual(await off.describer.watchGif('g1', gifEmbedItem()), { state: 'unavailable', reason: 'video-off' });
+  assert.equal(off.describer.gifWatchBlocker(), 'video-off');
+  const noWatch = gifDescriber({ hot: gifHot({ gif: { watch: false } }) });
+  assert.equal(noWatch.describer.gifWatchBlocker(), 'off');
+  assert.equal(gifDescriber().describer.gifWatchBlocker(), null);
+
+  const daily = gifDescriber({ hot: gifHot({ video: { maxPerDay: 0 } }) });
+  assert.deepEqual(await daily.describer.watchGif('g1', gifEmbedItem()), { state: 'unavailable', reason: 'daily' });
+  assert.equal(daily.store.getMediaCache('g1')['m1#e0'], undefined);
 });
