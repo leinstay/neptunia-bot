@@ -60,8 +60,15 @@
 | `retries` | `2` | 临时故障重试次数 |
 | `maxRequestsPerDay` | `300` | 每日请求上限 |
 | `provider` | `null` | OpenRouter `provider` 路由对象，原样传递；`null` 表示不发送该字段 |
+| `providerByModel` | `{}` | 按模型路由 provider；详见下文 |
 
-`llm.provider` 在每个请求上设置 OpenRouter 的 provider 路由字段，例如 `{ "ignore": ["some-provider"] }` 或 `{ "order": ["anthropic"], "allow_fallbacks": true }`。如果 OpenRouter 账户本身限制了允许的 provider，忽略仅剩的那个会导致每个请求失败并报错 "No endpoints found"。更改 provider 设置后，运行 `/nep ping` 验证每个模型角色是否可达。
+`llm.provider` 为聊天请求设置默认的 OpenRouter provider 路由字段，例如 `{ "ignore": ["some-provider"] }` 或 `{ "order": ["anthropic"], "allow_fallbacks": true }`。`llm.providerByModel` 按模型添加覆盖：每个键是模型 id 前缀（匹配任意角色）或 `<prefix>@<role>`（仅匹配一个角色），值为原样传递的 OpenRouter 路由对象。
+
+单个请求的 provider 按以下顺序解析：每次调用的固定路由（视频描述器的直接 URL 路径使用 `media.video.provider`），然后是 `providerByModel` 中与该请求角色匹配的最长前缀，然后是无角色键中匹配的最长前缀，然后是 `llm.provider`（图像请求使用 `image.provider`），最后是无路由（由 OpenRouter 选择）。角色专用键始终优先于同一模型的无角色键。角色名称：`talk`、`analyzer`、`classifier.text`、`classifier.media`、`classifier.video`、`mentor`、`image`。
+
+示例：`"google/": { "only": ["google-vertex"], "allow_fallbacks": false }` 将所有 Google 模型路由到 Vertex，而 `"google/@classifier.video": { "only": ["google-ai-studio"], "allow_fallbacks": false }` 将视频分类器发送到 AI Studio。包含点号的路由键（如 `google/@classifier.video`）无法通过 `/nep set` 编辑，因为它会按点号拆分路径；请使用 `/nep route set` 和 `/nep route remove`。
+
+如果 OpenRouter 账户本身限制了允许的 provider，忽略仅剩的那个会导致每个请求失败并报错 "No endpoints found"。更改 provider 设置后，运行 `/nep ping` 验证每个模型角色是否可达；每个角色遵循其 `llm.providerByModel` 路由，因此显示的 provider 就是该路由选定的。
 
 ## `classifier`
 
@@ -125,7 +132,7 @@
 
 | 键 | 默认值 | 说明 |
 |---|---|---|
-| `provider` | `{ "order": ["google-ai-studio"], "allow_fallbacks": false }` | 直接 URL 路径（在长度限制内的 YouTube）的 OpenRouter provider 路由；`null` 使用 `llm.provider` |
+| `provider` | `{ "order": ["google-ai-studio"], "allow_fallbacks": false }` | 直接 URL 路径（在长度限制内的 YouTube）的 OpenRouter provider 路由。覆盖 `llm.providerByModel` 和 `llm.provider`；`null` 按正常解析顺序处理 |
 | `maxOutputTokens` | `800` | 每个视频摘要的最大输出 token 数 |
 | `summaryChars` | `1500` | 视频描述的最大字符数；填充 `describe-video.md` 中的 `{{maxChars}}` |
 | `maxRequestTokens` | `60000` | 每次视频请求的 token 上限（输入 + 输出），替代 `llm.maxRequestTokens`。agentic 模式下公开 URL 视频使用 `directUrlTokensPerSecond`（10）估算: 一小时 YouTube 为 36 000 token。下载的片段使用 `tokensPerSecond`（120）估算: 三分钟为 21 600 token |
@@ -335,7 +342,7 @@ YouTube 链接的时长通过以下链式探测获取：首先尝试 yt-dlp，�
 | `aspectRatio` | `"auto"` | 宽高比（`auto`、`1:1`、`16:9`、`9:16` 等）。Google 模型中 `auto` 从请求中省略 |
 | `timeoutMs` | `120000` | 请求超时（毫秒） |
 | `retries` | `1` | 瞬态错误（HTTP 408/429/5xx、网络错误）的重试次数 |
-| `provider` | `null` | 图像请求的 OpenRouter `provider` 路由对象；`null` 不发送。系列特定的 provider 选项（如 `openai.moderation`）会合并在此之上 |
+| `provider` | `null` | 图像请求的 OpenRouter `provider` 路由，在 `llm.providerByModel` 无匹配时使用；`null` 不发送。系列特定的 provider 选项（如 `openai.moderation`）会合并在最终路由之上 |
 
 ### `image.openai`
 

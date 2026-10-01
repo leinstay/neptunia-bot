@@ -60,8 +60,15 @@
 | `retries` | `2` | 一時的な障害時のリトライ回数 |
 | `maxRequestsPerDay` | `300` | 1 日あたりのリクエスト上限 |
 | `provider` | `null` | OpenRouter の `provider` ルーティングオブジェクト（そのまま渡される）。`null` の場合は送信しない |
+| `providerByModel` | `{}` | モデルごとのプロバイダールーティング。詳細は下記 |
 
-`llm.provider` はすべてのリクエストで OpenRouter のプロバイダールーティングフィールドを設定します。例: `{ "ignore": ["some-provider"] }` や `{ "order": ["anthropic"], "allow_fallbacks": true }`。OpenRouter アカウント自体が許可プロバイダーを制限している場合、唯一残ったプロバイダーを除外するとすべてのリクエストが "No endpoints found" で失敗します。プロバイダー設定を変更した後は `/nep ping` を実行してすべてのモデルロールが到達可能か確認してください。
+`llm.provider` はチャットリクエストに対するデフォルトの OpenRouter プロバイダールーティングを設定します。例: `{ "ignore": ["some-provider"] }` や `{ "order": ["anthropic"], "allow_fallbacks": true }`。`llm.providerByModel` はモデルごとのオーバーライドを追加します。キーはモデル id のプレフィックス（任意のロールに一致）または `<prefix>@<role>`（1 つのロールのみ一致）で、値はそのまま渡される OpenRouter ルーティングオブジェクトです。
+
+1 つのリクエストに対するプロバイダーの解決順序: 呼び出しごとの固定ルート（動画説明モデルのダイレクト URL パスでは `media.video.provider`）、次にリクエストのロールに一致する `providerByModel` キーのうち最長プレフィックス、次にロールなしキーのうち最長プレフィックス、次に `llm.provider`（画像リクエストでは `image.provider`）、最後にルーティングなし。同じモデルに対してロール指定キーはロールなしキーより常に優先されます。ロール名: `talk`、`analyzer`、`classifier.text`、`classifier.media`、`classifier.video`、`mentor`、`image`。
+
+例: `"google/": { "only": ["google-vertex"], "allow_fallbacks": false }` はすべての Google モデルを Vertex 経由にし、`"google/@classifier.video": { "only": ["google-ai-studio"], "allow_fallbacks": false }` は動画分類器を AI Studio 経由にします。ドットを含むルートキー（例: `google/@classifier.video`）は `/nep set` では編集できません（ドットでパスを分割するため）。`/nep route set` と `/nep route remove` を使用してください。
+
+OpenRouter アカウント自体が許可プロバイダーを制限している場合、唯一残ったプロバイダーを除外するとすべてのリクエストが "No endpoints found" で失敗します。プロバイダー設定を変更した後は `/nep ping` を実行してすべてのモデルロールが到達可能か確認してください。各ロールは `llm.providerByModel` のルートに従うため、表示されるプロバイダーはそのルートが選択したものです。
 
 ## `classifier`
 
@@ -125,7 +132,7 @@
 
 | キー | デフォルト | 説明 |
 |---|---|---|
-| `provider` | `{ "order": ["google-ai-studio"], "allow_fallbacks": false }` | ダイレクト URL パス（上限内の YouTube）用の OpenRouter プロバイダールーティング。`null` の場合は `llm.provider` を使用 |
+| `provider` | `{ "order": ["google-ai-studio"], "allow_fallbacks": false }` | ダイレクト URL パス（上限内の YouTube）用の OpenRouter プロバイダールーティング。`llm.providerByModel` と `llm.provider` より優先。`null` の場合は通常の解決順序に従う |
 | `maxOutputTokens` | `800` | 動画サマリーあたりの最大出力トークン数 |
 | `summaryChars` | `1500` | 動画説明の最大文字数。`describe-video.md` の `{{maxChars}}` に使用 |
 | `maxRequestTokens` | `60000` | 動画リクエストあたりのトークン上限（入力 + 出力）、`llm.maxRequestTokens` の代わりに使用。agentic モードでは公開 URL 動画の推定に `directUrlTokensPerSecond`（10）を使用: 1 時間の YouTube で 36 000 トークン。ダウンロードしたクリップは `tokensPerSecond`（120）を使用: 3 分で 21 600 トークン |
@@ -335,7 +342,7 @@ YouTube リンクの再生時間は次の順序で取得されます: まず yt-
 | `aspectRatio` | `"auto"` | アスペクト比（`auto`、`1:1`、`16:9`、`9:16` など）。Google モデルの場合、`auto` はリクエストから省略される |
 | `timeoutMs` | `120000` | リクエストタイムアウト（ミリ秒） |
 | `retries` | `1` | 一時的エラー（HTTP 408/429/5xx、ネットワークエラー）時のリトライ回数 |
-| `provider` | `null` | 画像リクエスト用の OpenRouter `provider` ルーティングオブジェクト。`null` は何も送信しない。ファミリー固有のプロバイダーオプション（例: `openai.moderation`）はこの上にマージされる |
+| `provider` | `null` | 画像リクエスト用の OpenRouter `provider` ルーティング。`llm.providerByModel` に一致するエントリがない場合に使用。`null` は何も送信しない。ファミリー固有のプロバイダーオプション（例: `openai.moderation`）は最終ルーティングの上にマージされる |
 
 ### `image.openai`
 

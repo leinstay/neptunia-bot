@@ -8,7 +8,7 @@
 |---|---|
 | `/nep status` | モデル、キャリブレーション、クォータ（画像カウントと画像モデルを含む）、ギルドごとのメモリ状況、プライベートチャットのオン/オフとプライベートファイル数を表示 |
 | `/nep reload` | 設定とプロンプトを即時リロード |
-| `/nep ping [role]` | 一つまたはすべてのモデルロール（`talk`、`analyzer`、`classifier.text`、`classifier.media`、`classifier.video`、`mentor`）にミニマルリクエストを送信し、モデル、レイテンシ、プロバイダー、トークン数またはエラーを報告。`classifier.video` の後に `youtube: API key — {status}`（例: `ok`、`not needed (yt-dlp ok)`、`missing (blocked)`）を報告。`classifier.text` の後に `web: API key — {status}`（`ok`、`missing`、`off`）を報告。`role:image` はプロバイダーの公開モデルリストで `image.model` を検証し（無料の GET 1 回、生成なし）、モデルが登録済みで画像出力に対応していることを確認するが、生成の成功は保証しない。ロール指定なしの場合 image の検査は最後に実行される。`llm.maxRequestsPerDay` にカウントされず、一時停止中やウォームアップ中でも動作 |
+| `/nep ping [role]` | 一つまたはすべてのモデルロール（`talk`、`analyzer`、`classifier.text`、`classifier.media`、`classifier.video`、`mentor`）にミニマルリクエストを送信し、各ロールの `llm.providerByModel` ルートに従って、モデル、レイテンシ、プロバイダー、トークン数またはエラーを報告。`classifier.video` の後に `youtube: API key — {status}`（例: `ok`、`not needed (yt-dlp ok)`、`missing (blocked)`）を報告。`classifier.text` の後に `web: API key — {status}`（`ok`、`missing`、`off`）を報告。`role:image` はプロバイダーの公開モデルリストで `image.model` を検証し（無料の GET 1 回、生成なし）、モデルが登録済みで画像出力に対応していることを確認するが、生成の成功は保証しない。ロール指定なしの場合 image の検査は最後に実行される。`llm.maxRequestsPerDay` にカウントされず、一時停止中やウォームアップ中でも動作 |
 | `/nep pause` | すべてのアクティビティを停止し、メモリをディスクにフラッシュしてアンロード。実行中の mentor ランは停止され、フラッシュ前にレポートが投稿される。一時停止中は `data/` を安全に編集可能 |
 | `/nep resume` | `data/` からメモリをリロードして再開。JSON ファイルがパースできない場合は拒否し、壊れたファイル名を表示 |
 | `/nep interject [channel]` | そのチャンネルの会話に今すぐ割り込む |
@@ -21,6 +21,9 @@
 | `/nep rule remove <number>` | 番号指定でルールを削除 |
 | `/nep model show` | 各ロール（`talk`、`analyzer`、`classifier.text`、`classifier.media`、`classifier.video`、`mentor`）のアクティブなモデルを表示 |
 | `/nep model set <role> <id>` | ロール（`talk`、`analyzer`、`classifier.text`、`classifier.media`、`classifier.video`、`mentor`）のモデルを設定 |
+| `/nep route list` | `llm.providerByModel` のすべてのルート、各ロールの現在のモデルと適用されるルーティングを表示。アクセスキー `route.list`（読み取り専用） |
+| `/nep route set <model> <providers> [role] [fallbacks]` | モデルプレフィックスを指定のプロバイダーのみにルーティング。`model` はモデル id またはプレフィックス（例: `google/`、`@` やスペース不可）。`providers` はプロバイダー slug のカンマ区切りリスト（例: `google-vertex`、小文字、数字、ハイフン）。`role` はルートを 1 つのロールに限定（デフォルト: 任意）。`fallbacks` はこれらが利用不可の場合に他のプロバイダーを許可（デフォルト: false）。`config.local.json` の `llm.providerByModel` に `{ "only": [...], "allow_fallbacks": ... }` を書き込みリロード。アクセスキー `route.set` |
+| `/nep route remove <model> [role]` | ルートを削除。キーは `config.local.json` に存在する必要がある。`config.json` にのみ設定されたキーはこの方法では削除不可。アクセスキー `route.remove` |
 | `/nep memory show <user> [section] [limit] [order]` | セクション指定なし: コンパクトな要約。セクション: `character`、`style`、`relationship`、`affinity`、`aliases`、`interests`、`details`、`episodes`、`raw`（保存された JSON）。リスト系セクションは `limit` 1..100（デフォルト 25）と `order`: `rank`（デフォルト、表示上限で区切り線あり）または `recent` を指定可能。保存されたメンバー参照は現在の名前に解決されるが、`raw` では解決しない |
 | `/nep memory channel [channel]` | チャンネル指定あり: 保存されたノートの全文（目的、トピック、トーン、メッセージ数、アクティビティ、トップライター）。指定なし: ペルソナが把握している全チャンネルの一覧（最終メッセージ順） |
 | `/nep memory server` | サーバー全体のノート: 会話のしかた、会話の始め方、内輪ネタ、自己言及、およびプロファイル・チャンネル・ロアブックエントリの件数 |

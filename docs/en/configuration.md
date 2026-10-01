@@ -63,8 +63,15 @@ Every key in `config.json` with its default, grouped by section.
 | `retries` | `2` | Retries on transient failures |
 | `maxRequestsPerDay` | `300` | Daily request cap |
 | `provider` | `null` | OpenRouter `provider` routing object, passed verbatim; `null` sends nothing |
+| `providerByModel` | `{}` | Per-model provider routing; see below |
 
-`llm.provider` sets OpenRouter's provider routing field on every request, for example `{ "ignore": ["some-provider"] }` or `{ "order": ["anthropic"], "allow_fallbacks": true }`. If the OpenRouter account itself restricts allowed providers, ignoring the only one left makes every request fail with "No endpoints found". After changing provider settings, run `/nep ping` to verify that every model role is reachable.
+`llm.provider` sets a default OpenRouter provider routing on chat requests, for example `{ "ignore": ["some-provider"] }` or `{ "order": ["anthropic"], "allow_fallbacks": true }`. `llm.providerByModel` adds per-model overrides: each key is a model id prefix (matching any role) or `<prefix>@<role>` (matching one role only), and each value is an OpenRouter routing object sent verbatim.
+
+For one request the provider is resolved in order: a per-call pin (the video describer uses `media.video.provider` for the direct-URL path), then the longest matching prefix among `providerByModel` keys for the request's role, then the longest matching prefix among role-less keys, then `llm.provider` (for image requests `image.provider`), then nothing. A role-specific key always beats a role-less key for the same model. Role names: `talk`, `analyzer`, `classifier.text`, `classifier.media`, `classifier.video`, `mentor`, `image`.
+
+Example: `"google/": { "only": ["google-vertex"], "allow_fallbacks": false }` routes all Google models through Vertex, while `"google/@classifier.video": { "only": ["google-ai-studio"], "allow_fallbacks": false }` sends the video classifier through AI Studio. Route keys that contain dots (e.g. `google/@classifier.video`) cannot be edited through `/nep set` because it splits on dots; use `/nep route set` and `/nep route remove`.
+
+If the OpenRouter account itself restricts allowed providers, ignoring the only one left makes every request fail with "No endpoints found". After changing provider settings, run `/nep ping` to verify that every model role is reachable; each role follows its `llm.providerByModel` route, so the provider shown is the one that route selects.
 
 ## `classifier`
 
@@ -155,7 +162,7 @@ Settings for the video describer (`features.videoDescriptions`). Video vision ne
 
 | Key | Default | Meaning |
 |---|---|---|
-| `provider` | `{ "order": ["google-ai-studio"], "allow_fallbacks": false }` | OpenRouter provider routing for the direct-URL path (YouTube within the length cap); `null` uses `llm.provider` |
+| `provider` | `{ "order": ["google-ai-studio"], "allow_fallbacks": false }` | OpenRouter provider routing for the direct-URL path (YouTube within the length cap). Overrides `llm.providerByModel` and `llm.provider` for this path; `null` lets the normal resolution order apply |
 | `maxOutputTokens` | `800` | Max output tokens per video summary |
 | `summaryChars` | `1500` | Max characters for a video account; fills `{{maxChars}}` in `describe-video.md` |
 | `maxRequestTokens` | `60000` | Token cap per video request (input + output), used instead of `llm.maxRequestTokens`. A public-URL video in agentic mode uses `directUrlTokensPerSecond` (10) for the estimate: one hour of YouTube is 36 000 tokens. Downloaded clips use `tokensPerSecond` (120): three minutes is 21 600 tokens |
@@ -365,7 +372,7 @@ Settings for the drawing sub-process (`features.imageGeneration`). The persona e
 | `aspectRatio` | `"auto"` | Aspect ratio (`auto`, `1:1`, `16:9`, `9:16`, etc.). For Google models, `auto` is omitted from the request |
 | `timeoutMs` | `120000` | Request timeout (ms) |
 | `retries` | `1` | Retries on transient failures (HTTP 408/429/5xx, network errors) |
-| `provider` | `null` | OpenRouter `provider` routing object for image requests; `null` sends nothing. Family-specific provider options (e.g. `openai.moderation`) are merged over this |
+| `provider` | `null` | OpenRouter `provider` routing for image requests, used when no `llm.providerByModel` entry matches; `null` sends nothing. Family-specific provider options (e.g. `openai.moderation`) are merged over the resolved routing |
 
 ### `image.openai`
 
