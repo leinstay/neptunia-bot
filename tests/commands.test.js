@@ -12,6 +12,7 @@ import {
   createInteractionHandler,
   leafPaths,
   commandKeys,
+  commandSize,
 } from '../src/discord/commands.js';
 import { isAllowed as accessIsAllowed } from '../src/discord/access.js';
 import { withCapturedLogs } from './fixtures/capture-logs.js';
@@ -585,6 +586,28 @@ test('registerCommands: a registration failure (missing applications.commands sc
   assert.match(errorLog.msg, /applications\.commands/);
   assert.match(errorLog.msg, /scope=bot%20applications\.commands/);
   assert.match(errorLog.msg, /app999/);
+});
+
+test('registerCommands: a command-too-large refusal logs the tree size and the limit, not the re-invite hint', async () => {
+  const err = Object.assign(
+    new Error('Invalid Form Body\n0[APPLICATION_COMMAND_TOO_LARGE]: Command exceeds maximum size (8000)'),
+    { name: 'DiscordAPIError[50035]', code: 50035 },
+  );
+  const guild = fakeGuild({
+    setImpl: () => {
+      throw err;
+    },
+  });
+  const config = { bot: { commandName: 'nep' }, features: { adminCommands: true } };
+
+  const { result: ok, logs } = await withCapturedLogs(() => registerCommands(guild, config));
+
+  assert.equal(ok, false);
+  const errorLog = logs.find((l) => l.level === 'error');
+  assert.ok(errorLog, 'expected one error log line');
+  assert.equal(errorLog.size, commandSize(buildCommandTree('nep')[0]));
+  assert.equal(errorLog.limit, 8000);
+  assert.doesNotMatch(errorLog.msg, /re-invite/);
 });
 
 test('registerCommands: a failure while clearing commands (adminCommands off) is also swallowed', async () => {
@@ -1407,6 +1430,78 @@ test('buildCommandTree: every description fits Discord\'s 1..100 character limit
     for (const x of o.options || []) walk(x, `${path}/${x.name}`);
   };
   walk(top, top.name);
+});
+
+// ---------------------------------------------------------------------------
+// commandSize: Discord's 8000-character limit for one application command
+// ---------------------------------------------------------------------------
+
+test('commandSize: sums names, descriptions, choice names and values through every level', () => {
+  const command = {
+    name: 'abc', // 3
+    description: 'Top.', // 4
+    options: [
+      {
+        type: 2,
+        name: 'grp', // 3
+        description: 'Group.', // 6
+        options: [
+          {
+            type: 1,
+            name: 'sub', // 3
+            description: 'Sub.', // 4
+            options: [
+              {
+                type: 3,
+                name: 'pick', // 4
+                description: 'Pick.', // 5
+                choices: [{ name: 'Héllo', value: 'hé' }], // 5 + 2
+                min_length: 12345, // not counted
+              },
+              {
+                type: 4,
+                name: 'num', // 3
+                description: 'N.', // 2
+                choices: [{ name: 'ten', value: 10 }, { name: 'neg', value: -2.5 }], // 3 + 2, 3 + 4
+              },
+            ],
+          },
+        ],
+      },
+      { type: 1, name: 'x', description: 'Y.' }, // 1 + 2
+    ],
+  };
+  assert.equal(commandSize(command), 3 + 4 + 3 + 6 + 3 + 4 + 4 + 5 + 5 + 2 + 3 + 2 + 3 + 2 + 3 + 4 + 1 + 2);
+});
+
+test('commandSize: an empty or partial command counts only what it has', () => {
+  assert.equal(commandSize({ name: 'nep' }), 3);
+  assert.equal(commandSize({}), 0);
+});
+
+test('buildCommandTree: the whole command stays under 7600 characters (Discord refuses over 8000)', () => {
+  const [command] = buildCommandTree('nep');
+  const size = commandSize(command);
+  assert.ok(size <= 7600, `the command tree is ${size} characters`);
+  // The longest valid command name leaves the same margin.
+  assert.ok(commandSize(buildCommandTree('a'.repeat(32))[0]) <= 7600 + 29);
+});
+
+test('buildCommandTree: at most 25 options and 25 choices per level, valid names, choice names 1..100', () => {
+  const [command] = buildCommandTree('nep');
+  const walk = (o, path) => {
+    assert.ok((o.options ?? []).length <= 25, `${path}: ${(o.options ?? []).length} options`);
+    assert.ok((o.choices ?? []).length <= 25, `${path}: ${(o.choices ?? []).length} choices`);
+    for (const choice of o.choices ?? []) {
+      assert.ok(choice.name.length >= 1 && choice.name.length <= 100, `${path}: choice ${choice.name}`);
+      assert.ok(String(choice.value).length >= 1 && String(choice.value).length <= 100, `${path}: choice value ${choice.value}`);
+    }
+    for (const x of o.options ?? []) {
+      assert.ok(isValidCommandName(x.name), `${path}/${x.name}: invalid name`);
+      walk(x, `${path}/${x.name}`);
+    }
+  };
+  walk(command, command.name);
 });
 
 // ---------------------------------------------------------------------------

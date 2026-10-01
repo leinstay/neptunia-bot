@@ -65,6 +65,32 @@ const ROUTE_ROLE_CHOICES = ['talk', 'analyzer', 'classifier.text', 'classifier.m
 const DISABLED_MESSAGE ='Owner commands are disabled (features.adminCommands is off).';
 const NOT_ALLOWED_MESSAGE = 'Not allowed';
 
+/** Discord's cap on one application command's combined text (see `commandSize`). */
+const COMMAND_SIZE_LIMIT = 8000;
+
+/**
+ * The size Discord checks against its 8000-character limit for one
+ * application command: the length of every `name` and `description`, of the
+ * command and every group, subcommand and option below it, plus every choice's
+ * `name` and `value` (a number counted by its decimal form). Pure.
+ * @param {object} command  one entry of `buildCommandTree`
+ * @returns {number}
+ */
+export function commandSize(command) {
+  const text = (value) => (value === undefined || value === null ? 0 : String(value).length);
+  let size = text(command?.name) + text(command?.description);
+  for (const choice of command?.choices ?? []) size += text(choice.name) + text(choice.value);
+  for (const option of command?.options ?? []) size += commandSize(option);
+  return size;
+}
+
+/** Discord's "Invalid Form Body … APPLICATION_COMMAND_TOO_LARGE" refusal (error 50035). */
+function isCommandTooLarge(err) {
+  if (err?.code !== 50035) return false;
+  const raw = err.rawError ? JSON.stringify(err.rawError) : '';
+  return /APPLICATION_COMMAND_TOO_LARGE/.test(`${err.message ?? ''} ${raw}`);
+}
+
 /** `^[a-z0-9_-]{1,32}$` — Discord's rule for a command name. */
 export function isValidCommandName(name) {
   return typeof name === 'string' && /^[a-z0-9_-]{1,32}$/.test(name);
@@ -86,16 +112,16 @@ export function buildCommandTree(commandName) {
       name: commandName,
       description: 'Owner controls for the persona.',
       options: [
-        { type: SUBCOMMAND, name: 'status', description: 'Model, calibration, quotas and per-guild memory status.' },
+        { type: SUBCOMMAND, name: 'status', description: 'Model, calibration, quotas and memory status.' },
         {
           type: SUBCOMMAND,
           name: 'ping',
-          description: 'Check that each role\'s model is reachable right now (latency, provider, errors).',
+          description: "Check each role's model is reachable: latency, provider, errors.",
           options: [
             {
               type: STRING,
               name: 'role',
-              description: 'Which role to ping (default: all).',
+              description: 'Role to ping (default: all).',
               required: false,
               choices: [
                 { name: 'talk', value: 'talk' },
@@ -114,22 +140,22 @@ export function buildCommandTree(commandName) {
         {
           type: SUBCOMMAND,
           name: 'pause',
-          description: 'Pause the persona and flush memory so data/ can be edited safely by hand.',
+          description: 'Pause the persona and flush memory so data/ can be hand-edited.',
         },
         {
           type: SUBCOMMAND,
           name: 'resume',
-          description: 'Resume after a pause, refusing if data/ has an invalid file.',
+          description: 'Resume after a pause; refused if a data/ file is invalid.',
         },
         {
           type: SUBCOMMAND,
           name: 'interject',
-          description: 'Make the persona jump into the conversation now.',
+          description: 'Make the persona join the conversation now.',
           options: [
             {
               type: CHANNEL,
               name: 'channel',
-              description: 'Channel to interject in (defaults to the current one).',
+              description: 'Channel (default: this one).',
               required: false,
               channel_types: [GUILD_TEXT],
             },
@@ -143,7 +169,7 @@ export function buildCommandTree(commandName) {
             {
               type: CHANNEL,
               name: 'channel',
-              description: 'Channel to initiate in (defaults to the current one).',
+              description: 'Channel (default: this one).',
               required: false,
               channel_types: [GUILD_TEXT],
             },
@@ -152,19 +178,19 @@ export function buildCommandTree(commandName) {
         {
           type: SUBCOMMAND,
           name: 'draw',
-          description: 'Draw one picture through the drawing prompt, answered only to you. Spends balance.',
+          description: 'Draw one picture, shown only to you. Spends balance.',
           options: [
             { type: STRING, name: 'text', description: 'What to draw.', required: true },
-            { type: BOOLEAN, name: 'self', description: 'The persona is in the picture (adds the appearance prompt).', required: false },
+            { type: BOOLEAN, name: 'self', description: 'The persona is in it (adds the appearance prompt).', required: false },
           ],
         },
         {
           type: SUBCOMMAND,
           name: 'set',
-          description: 'Override a config.json value (written to config.local.json).',
+          description: 'Override a config value in config.local.json.',
           options: [
             { type: STRING, name: 'path', description: 'Dotted config path.', required: true, autocomplete: true },
-            { type: STRING, name: 'value', description: 'New value (JSON, or a plain string).', required: true },
+            { type: STRING, name: 'value', description: 'New value: JSON or a plain string.', required: true },
           ],
         },
         {
@@ -178,7 +204,7 @@ export function buildCommandTree(commandName) {
         {
           type: SUBCOMMAND_GROUP,
           name: 'rule',
-          description: "Owner's live corrections (prompts.local/rules.md).",
+          description: 'Live corrections in prompts.local/rules.md.',
           options: [
             {
               type: SUBCOMMAND,
@@ -191,14 +217,14 @@ export function buildCommandTree(commandName) {
               type: SUBCOMMAND,
               name: 'remove',
               description: 'Remove a rule by number.',
-              options: [{ type: INTEGER, name: 'number', description: 'Rule number to remove.', required: true, min_value: 1 }],
+              options: [{ type: INTEGER, name: 'number', description: 'Rule number.', required: true, min_value: 1 }],
             },
           ],
         },
         {
           type: SUBCOMMAND_GROUP,
           name: 'memory',
-          description: "Inspect or edit a member's stored profile.",
+          description: 'Inspect or edit stored memory.',
           options: [
             {
               type: SUBCOMMAND,
@@ -209,7 +235,7 @@ export function buildCommandTree(commandName) {
                 {
                   type: STRING,
                   name: 'section',
-                  description: 'Which part of the profile to show (default: summary).',
+                  description: 'Profile part (default: summary).',
                   required: false,
                   choices: [
                     { name: 'summary', value: 'summary' },
@@ -227,7 +253,7 @@ export function buildCommandTree(commandName) {
                 {
                   type: INTEGER,
                   name: 'limit',
-                  description: 'Max items to list, for a list section (1..100, default 25).',
+                  description: 'Max items for a list section (default 25).',
                   required: false,
                   min_value: 1,
                   max_value: 100,
@@ -235,7 +261,7 @@ export function buildCommandTree(commandName) {
                 {
                   type: STRING,
                   name: 'order',
-                  description: 'List order, for a list section (default: rank).',
+                  description: 'Order for a list section (default: rank).',
                   required: false,
                   choices: [
                     { name: 'rank', value: 'rank' },
@@ -247,12 +273,12 @@ export function buildCommandTree(commandName) {
             {
               type: SUBCOMMAND,
               name: 'channel',
-              description: "Show a channel's stored note, or a table of every stored channel.",
+              description: "Show a channel's note, or a table of all stored channels.",
               options: [
                 {
                   type: CHANNEL,
                   name: 'channel',
-                  description: 'Channel to show (omit for a table of every stored channel).',
+                  description: 'Channel to show (omit for the table).',
                   required: false,
                   channel_types: [GUILD_TEXT],
                 },
@@ -261,35 +287,35 @@ export function buildCommandTree(commandName) {
             {
               type: SUBCOMMAND,
               name: 'server',
-              description: 'Show the stored server notes: patterns, starters, in-jokes, self facts.',
+              description: 'Show server notes: patterns, starters, in-jokes, self facts.',
             },
             {
               type: SUBCOMMAND,
               name: 'forget',
-              description: "Delete a member's stored profile and their private memory.",
+              description: "Delete a member's profile and private memory.",
               options: [{ type: USER, name: 'user', description: 'Member.', required: true }],
             },
             {
               type: SUBCOMMAND,
               name: 'affinity',
-              description: "Show, or set, a member's attitude score.",
+              description: "Show or set a member's attitude score.",
               options: [
                 { type: USER, name: 'user', description: 'Member.', required: true },
                 {
                   type: INTEGER,
                   name: 'score',
-                  description: 'New score (-100..100); omit to just show the current one.',
+                  description: 'New score; omit to only show it.',
                   required: false,
                   min_value: -100,
                   max_value: 100,
                 },
-                { type: STRING, name: 'reason', description: 'Why (only used together with score).', required: false },
+                { type: STRING, name: 'reason', description: 'Why (only with score).', required: false },
               ],
             },
             {
               type: SUBCOMMAND,
               name: 'wipe',
-              description: 'Delete ALL remembered members, server habits, channel map and analyzer lore for this server.',
+              description: 'Delete ALL remembered members, server habits, channel map and analyzer lore.',
               options: [
                 {
                   type: STRING,
@@ -302,7 +328,7 @@ export function buildCommandTree(commandName) {
             {
               type: SUBCOMMAND,
               name: 'refresh',
-              description: "Force a member's portrait (character/style) to be rewritten now, ignoring the refresh-hours rail.",
+              description: "Rewrite a member's portrait (character/style) now, ignoring the refresh-hours rail.",
               options: [{ type: USER, name: 'user', description: 'Member.', required: true }],
             },
           ],
@@ -310,24 +336,24 @@ export function buildCommandTree(commandName) {
         {
           type: SUBCOMMAND_GROUP,
           name: 'private',
-          description: "Inspect or delete a member's private memory (what they said in direct messages).",
+          description: "A member's private memory: what they said in DMs.",
           options: [
             {
               type: SUBCOMMAND,
               name: 'show',
-              description: "Show a member's private memory, private and effective attitude, and today's DM replies.",
+              description: "Private memory, private and effective attitude, today's DM replies.",
               options: [{ type: USER, name: 'user', description: 'Member.', required: true }],
             },
             {
               type: SUBCOMMAND,
               name: 'forget',
-              description: "Delete a member's private memory only; the public profile is kept.",
+              description: 'Delete only the private memory; the profile stays.',
               options: [{ type: USER, name: 'user', description: 'Member.', required: true }],
             },
             {
               type: SUBCOMMAND,
               name: 'purge',
-              description: "Delete the bot's own messages in a member's DM chat, then their private memory.",
+              description: "Delete the bot's messages in the member's DMs, then their private memory.",
               options: [{ type: USER, name: 'user', description: 'Member.', required: true }],
             },
           ],
@@ -335,12 +361,12 @@ export function buildCommandTree(commandName) {
         {
           type: SUBCOMMAND_GROUP,
           name: 'alias',
-          description: "A member's aliases: nicknames others in chat call them.",
+          description: 'Nicknames others in chat call a member.',
           options: [
             {
               type: SUBCOMMAND,
               name: 'add',
-              description: "Add, or strengthen, a member's alias -- a nickname others in chat call them.",
+              description: "Add or strengthen a member's alias.",
               options: [
                 { type: USER, name: 'user', description: 'Member.', required: true },
                 { type: STRING, name: 'name', description: 'The alias.', required: true },
@@ -349,10 +375,10 @@ export function buildCommandTree(commandName) {
             {
               type: SUBCOMMAND,
               name: 'remove',
-              description: "Remove one of a member's stored aliases.",
+              description: "Remove a member's alias.",
               options: [
                 { type: USER, name: 'user', description: 'Member.', required: true },
-                { type: STRING, name: 'name', description: 'The alias to remove.', required: true },
+                { type: STRING, name: 'name', description: 'The alias.', required: true },
               ],
             },
           ],
@@ -360,35 +386,35 @@ export function buildCommandTree(commandName) {
         {
           type: SUBCOMMAND_GROUP,
           name: 'lore',
-          description: "The server's lorebook (events, recurring characters, running jokes).",
+          description: 'Lorebook: events, recurring characters, running jokes.',
           options: [
             {
               type: SUBCOMMAND,
               name: 'add',
-              description: 'Add or overwrite a lore entry (always an owner entry afterwards).',
+              description: 'Add or overwrite an entry (it becomes an owner entry).',
               options: [
                 { type: STRING, name: 'title', description: 'Entry title (its identity).', required: true },
                 { type: STRING, name: 'keys', description: 'Comma-separated keys/phrases people type.', required: true },
-                { type: STRING, name: 'text', description: 'The lore text, up to lore.textChars.', required: true },
-                { type: BOOLEAN, name: 'always', description: 'Always show this entry, regardless of a match.', required: false },
+                { type: STRING, name: 'text', description: 'Entry text, up to lore.textChars.', required: true },
+                { type: BOOLEAN, name: 'always', description: 'Show it even without a match.', required: false },
               ],
             },
             {
               type: SUBCOMMAND,
               name: 'list',
-              description: 'List lore entries, optionally filtered.',
-              options: [{ type: STRING, name: 'query', description: 'Filter by a substring of the title/keys.', required: false }],
+              description: 'List entries, optionally filtered.',
+              options: [{ type: STRING, name: 'query', description: 'Substring of the title or keys.', required: false }],
             },
             {
               type: SUBCOMMAND,
               name: 'show',
-              description: 'Show one lore entry in full.',
+              description: 'Show one entry in full.',
               options: [{ type: STRING, name: 'id', description: 'Entry id.', required: true }],
             },
             {
               type: SUBCOMMAND,
               name: 'remove',
-              description: 'Delete one lore entry.',
+              description: 'Delete one entry.',
               options: [{ type: STRING, name: 'id', description: 'Entry id.', required: true }],
             },
           ],
@@ -396,64 +422,64 @@ export function buildCommandTree(commandName) {
         {
           type: SUBCOMMAND_GROUP,
           name: 'learned',
-          description: 'Things people taught the persona on this server.',
+          description: 'What people taught the persona here.',
           options: [
-            { type: SUBCOMMAND, name: 'list', description: 'List every stored learned item, best ranked first.' },
+            { type: SUBCOMMAND, name: 'list', description: 'List learned items, best ranked first.' },
             {
               type: SUBCOMMAND,
               name: 'add',
-              description: 'Add, or strengthen, a learned item.',
+              description: 'Add or strengthen a learned item.',
               options: [{ type: STRING, name: 'text', description: 'What the persona should know.', required: true }],
             },
             {
               type: SUBCOMMAND,
               name: 'remove',
-              description: 'Delete one learned item by id.',
-              options: [{ type: INTEGER, name: 'id', description: 'Item id (the #number in the list).', required: true, min_value: 1 }],
+              description: 'Delete a learned item.',
+              options: [{ type: INTEGER, name: 'id', description: 'Item #number from the list.', required: true, min_value: 1 }],
             },
           ],
         },
         {
           type: SUBCOMMAND_GROUP,
           name: 'emoji',
-          description: "Which of the server's custom emoji the members use, counted without the model.",
+          description: 'Which custom emoji members use, counted without the model.',
           options: [
-            { type: SUBCOMMAND, name: 'status', description: 'Ranking size, the top 10 with their counts, and the history backfill stamp.' },
+            { type: SUBCOMMAND, name: 'status', description: 'Ranking size, top 10 with counts, backfill stamp.' },
             {
               type: SUBCOMMAND,
               name: 'rescan',
-              description: 'Clear the emoji ranking and recount it from recent channel history (Discord reads only).',
+              description: 'Clear and recount the ranking from recent history (Discord reads only).',
             },
           ],
         },
         {
           type: SUBCOMMAND_GROUP,
           name: 'gifs',
-          description: 'The GIF library the persona posts from, built from the GIFs members share.',
+          description: 'The GIF library the persona posts from, built from shared GIFs.',
           options: [
-            { type: SUBCOMMAND, name: 'status', description: 'Library size, the top 10 with counts, the backfill stamp and GIFs posted today.' },
+            { type: SUBCOMMAND, name: 'status', description: 'Library size, top 10 with counts, backfill stamp, GIFs posted today.' },
             {
               type: SUBCOMMAND,
               name: 'rescan',
-              description: 'Clear the GIF library and recount it from recent channel history, then caption the top ones.',
+              description: 'Clear and recount the library from recent history, then caption the top ones.',
             },
           ],
         },
         {
           type: SUBCOMMAND_GROUP,
           name: 'model',
-          description: 'Which model talks, analyzes memory, describes pictures and videos, and classifies.',
+          description: 'Which model serves each role.',
           options: [
-            { type: SUBCOMMAND, name: 'show', description: 'Show the model configured for each role.' },
+            { type: SUBCOMMAND, name: 'show', description: 'Show the model of each role.' },
             {
               type: SUBCOMMAND,
               name: 'set',
-              description: 'Set the model for one role (config.local.json).',
+              description: 'Set the model for one role.',
               options: [
                 {
                   type: STRING,
                   name: 'role',
-                  description: 'Which role to change.',
+                  description: 'Role to change.',
                   required: true,
                   choices: [
                     { name: 'talk', value: 'talk' },
@@ -472,27 +498,27 @@ export function buildCommandTree(commandName) {
         {
           type: SUBCOMMAND_GROUP,
           name: 'route',
-          description: 'Which providers serve each model, per role (llm.providerByModel).',
+          description: 'Providers per model and role (llm.providerByModel).',
           options: [
-            { type: SUBCOMMAND, name: 'list', description: 'Every route, then the model and route each role uses now.' },
+            { type: SUBCOMMAND, name: 'list', description: "Every route, then each role's current model and route." },
             {
               type: SUBCOMMAND,
               name: 'set',
-              description: 'Route a model prefix, for one role or any, to these providers only (config.local.json).',
+              description: 'Route a model prefix, for one role or any, to these providers only.',
               options: [
-                { type: STRING, name: 'model', description: 'Model id or prefix, e.g. google/ (no @, no spaces).', required: true, autocomplete: true },
+                { type: STRING, name: 'model', description: 'Model id or prefix, e.g. google/ (no @ or spaces).', required: true, autocomplete: true },
                 { type: STRING, name: 'providers', description: 'Comma-separated provider slugs, e.g. google-vertex.', required: true },
-                { type: STRING, name: 'role', description: 'Only for this role (default: any role).', required: false, choices: ROUTE_ROLE_CHOICES },
-                { type: BOOLEAN, name: 'fallbacks', description: 'Allow other providers when these fail (default: false).', required: false },
+                { type: STRING, name: 'role', description: 'Only for this role (default: any).', required: false, choices: ROUTE_ROLE_CHOICES },
+                { type: BOOLEAN, name: 'fallbacks', description: 'Allow other providers if these fail (default: false).', required: false },
               ],
             },
             {
               type: SUBCOMMAND,
               name: 'remove',
-              description: 'Remove the route of a model prefix, for one role or any.',
+              description: "Remove a model prefix's route, for one role or any.",
               options: [
                 { type: STRING, name: 'model', description: 'Model id or prefix of the route.', required: true, autocomplete: true },
-                { type: STRING, name: 'role', description: 'The role of the route (default: the any-role route).', required: false, choices: ROUTE_ROLE_CHOICES },
+                { type: STRING, name: 'role', description: "The route's role (default: any).", required: false, choices: ROUTE_ROLE_CHOICES },
               ],
             },
           ],
@@ -502,18 +528,18 @@ export function buildCommandTree(commandName) {
           name: 'warmup',
           description: 'Memory warmup from a recent sample: channels, people, server.',
           options: [
-            { type: SUBCOMMAND, name: 'people', description: 'Who currently qualifies for the warmup sample.' },
-            { type: SUBCOMMAND, name: 'run', description: 'Start or resume the whole run: channels, then people, then the server.' },
-            { type: SUBCOMMAND, name: 'stop', description: 'Cancel any warmup work in flight now, including the model call in progress.' },
+            { type: SUBCOMMAND, name: 'people', description: 'Who qualifies for the sample now.' },
+            { type: SUBCOMMAND, name: 'run', description: 'Start or resume the run: channels, people, then server.' },
+            { type: SUBCOMMAND, name: 'stop', description: 'Cancel warmup work in flight, the current model call included.' },
             {
               type: SUBCOMMAND,
               name: 'users',
-              description: '(Re)profile one member now, or every qualifying member in the background.',
+              description: '(Re)profile one member now, or all qualifying ones in the background.',
               options: [
                 {
                   type: USER,
                   name: 'user',
-                  description: 'Member to (re)profile now; omit to (re)profile everyone in the background.',
+                  description: 'Member (omit for everyone, in the background).',
                   required: false,
                 },
               ],
@@ -521,12 +547,12 @@ export function buildCommandTree(commandName) {
             {
               type: SUBCOMMAND,
               name: 'channels',
-              description: '(Re)describe one channel now, or every readable channel in the background.',
+              description: '(Re)describe one channel now, or all readable ones in the background.',
               options: [
                 {
                   type: CHANNEL,
                   name: 'channel',
-                  description: 'Channel to (re)describe now; omit to (re)describe every channel in the background.',
+                  description: 'Channel (omit for every channel, in the background).',
                   required: false,
                   channel_types: [GUILD_TEXT],
                 },
@@ -534,60 +560,60 @@ export function buildCommandTree(commandName) {
             },
             { type: SUBCOMMAND, name: 'server', description: '(Re)build the server-wide notes and lore now.' },
             { type: SUBCOMMAND, name: 'status', description: 'Phase, progress, tokens used and the next target.' },
-            { type: SUBCOMMAND, name: 'reset', description: 'Clear warmup progress only (never the memory already written); refused while running.' },
+            { type: SUBCOMMAND, name: 'reset', description: 'Clear warmup progress, never written memory; refused while running.' },
           ],
         },
         {
           type: SUBCOMMAND_GROUP,
           name: 'mentor',
-          description: 'The mentor: cases of wanted behaviour, measured in a sandbox, reported to the admin channel.',
+          description: 'Cases of wanted behaviour, measured in a sandbox, reported to the admin channel.',
           options: [
             {
               type: SUBCOMMAND,
               name: 'add',
-              description: 'Add a case: a message of the persona you did not like, and your comment on it.',
+              description: 'Add a case: a persona message you disliked, with your comment.',
               options: [
-                { type: STRING, name: 'message', description: 'Link to the message (or its id, in this channel).', required: true },
-                { type: STRING, name: 'text', description: 'Your comment, in one sentence (10 to 1000 characters).', required: true },
+                { type: STRING, name: 'message', description: 'Message link (or id, in this channel).', required: true },
+                { type: STRING, name: 'text', description: 'Your comment, one sentence (10-1000 chars).', required: true },
               ],
             },
             {
               type: SUBCOMMAND,
               name: 'anchor',
-              description: 'Add another message of the persona to a case, with the chat that led to it.',
+              description: 'Add another persona message to a case, with the chat before it.',
               options: [
-                { type: INTEGER, name: 'id', description: 'Case id (the number in /nep mentor cases).', required: true, min_value: 1 },
-                { type: STRING, name: 'message', description: 'Link to the message (or its id, in this channel).', required: true },
+                { type: INTEGER, name: 'id', description: 'Case id from /nep mentor cases.', required: true, min_value: 1 },
+                { type: STRING, name: 'message', description: 'Message link (or id, in this channel).', required: true },
               ],
             },
-            { type: SUBCOMMAND, name: 'cases', description: 'List the active cases with their state and last score.' },
+            { type: SUBCOMMAND, name: 'cases', description: 'Active cases with their state and last score.' },
             {
               type: SUBCOMMAND,
               name: 'remove',
               description: 'Retire a case; its runs and feedback are kept.',
-              options: [{ type: INTEGER, name: 'id', description: 'Case id (the number in /nep mentor cases).', required: true, min_value: 1 }],
+              options: [{ type: INTEGER, name: 'id', description: 'Case id from /nep mentor cases.', required: true, min_value: 1 }],
             },
             {
               type: SUBCOMMAND,
               name: 'run',
-              description: 'Measure one case now; the report comes to the admin channel. Spends balance.',
-              options: [{ type: INTEGER, name: 'id', description: 'Case id (the number in /nep mentor cases).', required: true, min_value: 1 }],
+              description: 'Measure one case now; report to the admin channel. Spends balance.',
+              options: [{ type: INTEGER, name: 'id', description: 'Case id from /nep mentor cases.', required: true, min_value: 1 }],
             },
-            { type: SUBCOMMAND, name: 'check', description: 'Replay the stored situations of every case with a run. Spends balance.' },
-            { type: SUBCOMMAND, name: 'stop', description: 'Stop the mentor run in flight, including the model call in progress.' },
+            { type: SUBCOMMAND, name: 'check', description: 'Replay stored situations of every case with a run. Spends balance.' },
+            { type: SUBCOMMAND, name: 'stop', description: 'Stop the mentor run in flight, the current model call included.' },
             {
               type: SUBCOMMAND,
               name: 'show',
-              description: 'Show the last run of a case: the card and the full report file.',
-              options: [{ type: INTEGER, name: 'id', description: 'Case id (the number in /nep mentor cases).', required: true, min_value: 1 }],
+              description: "A case's last run: the card and the full report file.",
+              options: [{ type: INTEGER, name: 'id', description: 'Case id from /nep mentor cases.', required: true, min_value: 1 }],
             },
             {
               type: SUBCOMMAND,
               name: 'wrong',
-              description: 'Tell the mentor it judged a case wrongly; later runs read it as feedback.',
+              description: 'Tell the mentor it misjudged a case; later runs read it as feedback.',
               options: [
-                { type: INTEGER, name: 'id', description: 'Case id (the number in /nep mentor cases).', required: true, min_value: 1 },
-                { type: STRING, name: 'reason', description: 'Why the verdict was wrong (3 to 500 characters).', required: true },
+                { type: INTEGER, name: 'id', description: 'Case id from /nep mentor cases.', required: true, min_value: 1 },
+                { type: STRING, name: 'reason', description: 'Why the verdict was wrong (3-500 chars).', required: true },
               ],
             },
             { type: SUBCOMMAND, name: 'status', description: 'Switch, model, tokens today, cases by state and the run in flight.' },
@@ -604,8 +630,8 @@ export function buildCommandTree(commandName) {
               description: 'Open a command, group or * to everyone, a role or a user.',
               options: [
                 { type: STRING, name: 'command', description: 'Command key, group name, or *.', required: true, autocomplete: true },
-                { type: ROLE, name: 'role', description: 'Role to grant (omit with user for everyone).', required: false },
-                { type: USER, name: 'user', description: 'User to grant (omit with role for everyone).', required: false },
+                { type: ROLE, name: 'role', description: 'Role (omit both for everyone).', required: false },
+                { type: USER, name: 'user', description: 'User (omit both for everyone).', required: false },
               ],
             },
             {
@@ -614,8 +640,8 @@ export function buildCommandTree(commandName) {
               description: 'Revoke a command, group or * from everyone, a role or a user.',
               options: [
                 { type: STRING, name: 'command', description: 'Command key, group name, or *.', required: true, autocomplete: true },
-                { type: ROLE, name: 'role', description: 'Role to revoke (omit with user to clear everyone).', required: false },
-                { type: USER, name: 'user', description: 'User to revoke (omit with role to clear everyone).', required: false },
+                { type: ROLE, name: 'role', description: 'Role (omit both to clear everyone).', required: false },
+                { type: USER, name: 'user', description: 'User (omit both to clear everyone).', required: false },
               ],
             },
             { type: SUBCOMMAND, name: 'list', description: 'List every access grant.' },
@@ -653,7 +679,8 @@ export function commandKeys() {
  * Register (or clear) the guild command tree for `guild`. Never throws:
  * a registration failure (e.g. the bot was invited without the
  * `applications.commands` scope, Discord error 50001) is logged once, with
- * the re-invite URL, and the bot carries on without commands.
+ * the re-invite URL — or, for a tree over Discord's size limit, with its size
+ * and the limit — and the bot carries on with whatever tree Discord still has.
  * @param {import('discord.js').Guild} guild
  * @param {object} config  the live merged config (hot.config)
  * @returns {Promise<boolean>} true when a command tree was successfully set
@@ -674,11 +701,20 @@ export async function registerCommands(guild, config) {
     return false;
   }
 
+  const tree = buildCommandTree(commandName);
   try {
-    await guild.commands.set(buildCommandTree(commandName));
+    await guild.commands.set(tree);
     log.info('commands: registered');
     return true;
   } catch (err) {
+    if (isCommandTooLarge(err)) {
+      log.error('commands: failed to register guild commands — the command tree is over the size limit', {
+        size: commandSize(tree[0]),
+        limit: COMMAND_SIZE_LIMIT,
+        error: err,
+      });
+      return false;
+    }
     const appId = guild.client?.application?.id ?? guild.client?.user?.id ?? 'YOUR_APPLICATION_ID';
     const inviteUrl = `https://discord.com/oauth2/authorize?client_id=${appId}&scope=bot%20applications.commands`;
     log.error(`commands: failed to register guild commands — re-invite the bot: ${inviteUrl}`, { error: err });
