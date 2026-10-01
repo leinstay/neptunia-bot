@@ -1,9 +1,9 @@
 // The mentor's judge: what the mentor model says is data, never trusted as
-// is. Its invented situations, its points, its diagnosis and its proposed
-// edit come back as JSON; this module keeps only what has the shape the rest
-// of the run relies on (a situation the sandboxes can replay, a score on
-// every axis within 0..10, causes, changes and an edit on a known layer) and
-// applies the pass rule to what survives. Pure: text in, values out.
+// is. Its invented situations, its points and its diagnosis come back as
+// JSON; this module keeps only what has the shape the rest of the run relies
+// on (a situation the sandboxes can replay, a score on every axis within
+// 0..10, causes and changes on a known layer) and applies the pass rule to
+// what survives. Pure: text in, values out.
 
 import { parseJsonObject } from '../llm/parse.js';
 
@@ -289,34 +289,4 @@ export function parseDiagnosis(raw) {
     causes: diagnosisItems(value.causes, CAUSE_LAYERS, ['excerpt', 'why']),
     changes: diagnosisItems(value.changes, CHANGE_LAYERS, ['target', 'from', 'to', 'why']),
   };
-}
-
-/**
- * The one edit the mentor model proposes in the repair loop, validated.
- * `layer` must be one of `allowedLayers`; `why` must be a non-empty string;
- * at least one of `from` and `to` must be non-empty (an empty `from` is an
- * addition, an empty `to` a deletion; whether the layer takes either is the
- * loop's decision). `from` and `to` longer than 1000 characters make the
- * reply no edit: they are never clipped, since a clipped `from` would be only
- * the start of the text and the change store would replace that start and
- * leave the rest. `target` is clipped to 200 characters and `why` to 500; a
- * missing string becomes ''.
- * @param {string} raw  The mentor model's text: `{ layer, target, from, to, why }`.
- * @param {Iterable<string>} allowedLayers
- * @returns {{ layer: string, target: string, from: string, to: string, why: string }|null}
- *   null when the reply is not of that shape.
- */
-export function parseEdit(raw, allowedLayers) {
-  const value = jsonOf(raw ?? '');
-  if (!value) return null;
-  const allowed = new Set(allowedLayers ?? []);
-  if (typeof value.layer !== 'string' || !allowed.has(value.layer)) return null;
-  if (typeof value.why !== 'string' || !value.why.trim()) return null;
-  for (const key of ['from', 'to']) {
-    if (typeof value[key] === 'string' && [...value[key]].length > DIAGNOSIS_CHARS[key]) return null;
-  }
-  const edit = { layer: value.layer };
-  for (const key of ['target', 'from', 'to', 'why']) edit[key] = clipped(value[key], DIAGNOSIS_CHARS[key]);
-  if (!edit.from.trim() && !edit.to.trim()) return null;
-  return edit;
 }

@@ -4,7 +4,7 @@
 // very argument being replayed, the attitude change it caused, what was
 // learned from it. Answering the moment with that memory would let the
 // persona "remember" how it ended. This module wraps a sandbox view
-// (src/mentor/sandbox.js#liveView, or an overlay of the same shape) in one
+// (src/mentor/sandbox.js#liveView, or another view of the same shape) in one
 // whose memory reads leave out every dated item written at or after the
 // moment's cutoff (the trigger's time). Items that carry no date cannot be
 // filtered and pass through as they are: a profile's `character`, `style`,
@@ -130,8 +130,8 @@ export function momentCutoff(situation) {
 }
 
 /**
- * A view of the same shape as `base` (src/mentor/sandbox.js#liveView or
- * src/mentor/overlay.js#overlayView) whose memory is the base memory as it
+ * A view of the same shape as `base` (src/mentor/sandbox.js#liveView)
+ * whose memory is the base memory as it
  * stood before `cutoff`: every dated item written at or after it is left out
  * -- a member's episodes (by `addedAt`; without one, those dated the cutoff's
  * day or later), affinity history entries (by `ts`; when the newest one goes,

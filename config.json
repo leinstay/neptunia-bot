@@ -25,7 +25,6 @@
     "imageGeneration": false,
     "privateMessages": false,
     "mentor": false,
-    "mentorAutoFix": false,
     "typingSimulation": true,
     "adminCommands": true
   },
@@ -236,18 +235,6 @@
     "reference": { "days": 7, "samples": 60, "maxMessages": 3000, "rarePer1000": 0.5, "rareMinAuthors": 2 },
     "feedbackExamples": 10,
     "diagnose": true,
-    "suspects": 2,
-    "ablationGain": 1,
-    "ablationSamples": 2,
-    "fix": {
-      "maxAttempts": 3,
-      "tryMissing": true,
-      "maxGrowthChars": 300,
-      "layers": ["rules", "prompt", "self", "learned", "guild"],
-      "files": ["system-prompt", "format", "reply", "memory", "profile"]
-    },
-    "regression": { "situations": 2, "tolerance": 1 },
-    "verify": { "situations": 3, "samples": 2, "minSituations": 2, "anchorSamples": 3 },
     "anchor": { "max": 5, "contextMessages": 30, "hideLaterMemory": true, "samples": 5 }
   },
   "warmup": {

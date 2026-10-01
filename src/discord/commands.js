@@ -558,19 +558,6 @@ export function buildCommandTree(commandName) {
               ],
             },
             { type: SUBCOMMAND, name: 'status', description: 'Switch, model, tokens today, cases by state and the run in flight.' },
-            { type: SUBCOMMAND, name: 'log', description: 'List the changes the mentor made, newest first.' },
-            {
-              type: SUBCOMMAND,
-              name: 'undo',
-              description: 'Undo one change of the mentor, if nothing changed that piece since.',
-              options: [{ type: INTEGER, name: 'id', description: 'Change id (the number in /nep mentor log).', required: true, min_value: 1 }],
-            },
-            {
-              type: SUBCOMMAND,
-              name: 'rebase',
-              description: "Rebuild a local prompt override from the current tracked file and the mentor's patches.",
-              options: [{ type: STRING, name: 'name', description: 'Prompt name without .md (e.g. format).', required: true }],
-            },
           ],
         },
         {
@@ -763,9 +750,6 @@ const OPTION_MAPPERS = {
   'mentor.show': (options) => ({ id: options.getInteger('id', true) }),
   'mentor.wrong': (options) => ({ id: options.getInteger('id', true), reason: options.getString('reason', true) }),
   'mentor.status': () => ({}),
-  'mentor.log': () => ({}),
-  'mentor.undo': (options) => ({ id: options.getInteger('id', true) }),
-  'mentor.rebase': (options) => ({ name: options.getString('name', true) }),
   'access.grant': (options) => ({
     command: options.getString('command', true),
     roleId: options.getRole('role')?.id,

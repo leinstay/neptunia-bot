@@ -8,11 +8,9 @@
 // owner commands `status` and `show` read it without one). When a run fails,
 // or one of its situations scores under the pass score, the mentor model is
 // asked once more for its opinion of the cause and of what it would change
-// (the diagnosis, saved with the run and marked as unverified); that step
-// never fails a run. Only with a change store and `features.mentorAutoFix`
-// does a failed run go on to the repair loop (src/mentor/repair.js), which
-// proves a cause, verifies one edit and applies it; without them the mentor
-// only measures and changes nothing. A check never repairs.
+// (the diagnosis, saved with the run and marked as unverified: advice for
+// the owner, never applied); that step never fails a run. The mentor only
+// measures: it changes nothing.
 //
 // A case may carry real moments of the chat ("anchors", src/mentor/anchor.js):
 // each is a situation of its own, numbered before the invented ones and
@@ -51,7 +49,6 @@ import { MentorBudgetError } from './budget.js';
 import { parseDiagnosis, parseScores, parseSituations, verdict } from './judge.js';
 import { hiddenLater, momentCutoff, momentView } from './moment.js';
 import { answerFacts, repeatedPhrases, sampleLines, styleProfile } from './reference.js';
-import { createRepair } from './repair.js';
 import { renderCard, renderCheckCard, renderCheckFile, renderFile } from './report.js';
 import { answerMemory, answerReply, liveView, situationHistory } from './sandbox.js';
 
@@ -165,7 +162,7 @@ function emptyMedians() {
  * The mentor for one bot. Every value is read at the moment of use:
  * `hot.config.mentor` (`model`, `maxOutputTokens`, `outputTokenWeight`,
  * `timeoutMs`, `situations`, `situationLines`, `samples`, `check.samples`,
- * `pass`, `reference`, `feedbackExamples`, `diagnose`, `anchor.samples`, `anchor.hideLaterMemory`), `hot.config.features.mentorAutoFix`,
+ * `pass`, `reference`, `feedbackExamples`, `diagnose`, `anchor.samples`, `anchor.hideLaterMemory`),
  * `hot.config.features.mentor`
  * (must be exactly true; checked at the start, then again before every
  * situation and every mentor request together with `mentor.model`: either
@@ -181,10 +178,6 @@ function emptyMedians() {
  * @param {{ channels: { fetch: (id: string) => Promise<object|null> } }} deps.client
  * @param {object} deps.cases             From `createCaseStore`.
  * @param {object} deps.budget            From `createMentorBudget`.
- * @param {object} [deps.changes]         From `createChangeStore`. Without it no run is ever repaired;
- *   with it, a run (not a check) that ended normally and failed goes through the repair loop when
- *   `features.mentorAutoFix` is exactly true, and its record is saved as `run.repair` (see
- *   src/mentor/repair.js for the loop's settings).
  * @param {() => (string|null)} deps.getGuildId
  * @param {() => ({ id: string, name: string }|null)} deps.getSelf  The persona's user id and display name.
  * @param {Function} deps.fetchHistoryWindow  src/discord/collect.js#fetchHistoryWindow.
@@ -207,24 +200,8 @@ function emptyMedians() {
  *   off, has no model, the case or a required prompt is missing, a run is in flight or the budget is spent.
  *   `done` never rejects: a failure ends the run with `error`, which is saved and reported.
  */
-export function createMentor({ hot, store, llm, client, cases, budget, changes, getGuildId, getSelf, fetchHistoryWindow, fetchMoment, calibrator, now = Date.now, rng = Math.random }) {
+export function createMentor({ hot, store, llm, client, cases, budget, getGuildId, getSelf, fetchHistoryWindow, fetchMoment, calibrator, now = Date.now, rng = Math.random }) {
   let current = null;
-  // The repair loop exists only with a change store to write through.
-  const repair = changes
-    ? createRepair({
-        hot,
-        cases,
-        changes,
-        baseView: (guildId) => liveView({ hot, store, guildId, calibrator }),
-        measureOn: (...args) => measureOn(...args),
-        askMentor: (...args) => askMentor(...args),
-        inventSituations: (...args) => inventSituations(...args),
-        commonBlocks: (...args) => commonBlocks(...args),
-        templateValues: (...args) => templateValues(...args),
-        canScore: (target) => Boolean(PROMPTS[target] && hot.prompts?.[PROMPTS[target].score]),
-        failureOf: (err) => diagnosisFailure(err),
-      })
-    : null;
 
   // ---- guards ----------------------------------------------------------------
 
@@ -497,27 +474,23 @@ export function createMentor({ hot, store, llm, client, cases, budget, changes, 
   // ---- steps -----------------------------------------------------------------
 
   /**
-   * One situations request for `item`. `count` (the repair loop's fresh
-   * situations) replaces `mentor.situations` in the `{{count}}` placeholder
-   * and as the number kept; `phase` replaces the status phase 'situations'.
+   * One situations request for `item`, `mentor.situations` of them.
    * A case with anchors shows them last, as `<examples>`, fitted to what the
    * request has room for.
    */
-  async function inventSituations(ctx, { item, view, reference, feedback, self, count, phase }) {
+  async function inventSituations(ctx, { item, view, reference, feedback, self }) {
     const cfg = hot.config.mentor ?? {};
     const profiles = view.memory.listUserProfiles().filter((p) => p?.id);
     const members = profiles.map((p) => `${p.names?.[0] ?? p.id} (id:${p.id})`).join('\n');
     const blocks = commonBlocks(item, reference, feedback, self.name);
-    const values = count === undefined ? templateValues(self.name) : { ...templateValues(self.name), count };
-    const system = fillPromptTemplate(hot.prompts[PROMPTS[item.target].situations], values);
+    const system = fillPromptTemplate(hot.prompts[PROMPTS[item.target].situations], templateValues(self.name));
     const parts = [blocks.case, block('members', members), blocks.reference, blocks.samples, blocks.signs, blocks.feedback].filter(Boolean);
     const examples = examplesBlock(item, anchorSituations(item), roomLeft(system, parts.join('\n\n')), self.name);
     const user = [...parts, examples].filter(Boolean).join('\n\n');
-    ctx.phase = phase ?? 'situations';
+    ctx.phase = 'situations';
     const text = await askMentor(ctx, system, user);
     const lines = Array.isArray(cfg.situationLines) ? cfg.situationLines : [6, 15];
-    const wanted = count === undefined ? positive(cfg.situations, 5) : count;
-    const parsed = parseSituations(text, { knownIds: profiles.map((p) => String(p.id)), lines, count: wanted });
+    const parsed = parseSituations(text, { knownIds: profiles.map((p) => String(p.id)), lines, count: positive(cfg.situations, 5) });
     const names = new Map(profiles.map((p) => [String(p.id), p.names?.[0] ?? null]));
     // A line without a name gets the member's stored name, as a real message would carry it.
     const situations = parsed.situations.map((s) => ({
@@ -602,14 +575,14 @@ export function createMentor({ hot, store, llm, client, cases, budget, changes, 
   }
 
   /** Answers every prepared situation on its own view (`entry.view`: a real moment's is filtered to its time). */
-  async function answerAll(ctx, { target, prepared, self, reference, phase }) {
+  async function answerAll(ctx, { target, prepared, self, reference }) {
     let previous = 1;
     for (const entry of prepared) {
       const { situation, record, history, at, channel, view, media, samples } = entry;
       checkEnabled();
       if (!budget.canSpend(previous)) throw new RunEnd('stopped', 'budget');
       checkAborted(ctx);
-      ctx.phase = phase ?? `answers ${record.n}/${prepared.length}`;
+      ctx.phase = `answers ${record.n}/${prepared.length}`;
       let charged = 0;
       const onUsage = (usage, estimated) => {
         charged += charge(ctx, usage, estimated);
@@ -641,32 +614,30 @@ export function createMentor({ hot, store, llm, client, cases, budget, changes, 
 
   /**
    * Scores every answer of `records`. The judge's yardstick -- the
-   * `<character>`, `<rules>` and `<learned>` blocks -- comes from `judgeView`
-   * (default: `view`, the view the answers were made on), so a what-if run is
-   * scored against the live rules while the persona answered without them.
-   * A real moment (a record with `anchor`) also carries `<original>`: the
+   * `<character>`, `<rules>` and `<learned>` blocks -- comes from `view`, the
+   * view the answers were made on. A real moment (a record with `anchor`) also carries `<original>`: the
    * persona's original answer, introduced by `labels.mentor.original`. With
    * `items` (the transcript items of each record) a transcript over what the
    * request has room for loses its oldest messages, never the trigger.
-   * `judges` maps a record to its own judge view (a real moment's: the memory
-   * as it stood at its time, see src/mentor/moment.js); the `<learned>` block
-   * of that record is built from it.
+   * `judges` maps a record to its own view (a real moment's: the memory as it
+   * stood at its time, see src/mentor/moment.js); the `<learned>` block of
+   * that record is built from it.
    */
-  async function scoreAll(ctx, { target, records, repeated, item, view, judgeView = view, judges = new Map(), self, reference, feedback, phase, items = new Map() }) {
+  async function scoreAll(ctx, { target, records, repeated, item, view, judges = new Map(), self, reference, feedback, items = new Map() }) {
     const labels = view.prompts.labels ?? {};
     const intended = Array.isArray(labels.mentor?.intended) ? labels.mentor.intended.filter((s) => typeof s === 'string' && s.trim()) : [];
-    const character = target === 'reply' ? block('character', fillPromptTemplate(judgeView.prompts['character-card'], { name: self.name })) : '';
-    const rules = block('rules', fillPromptTemplate(judgeView.prompts.rules, { name: self.name }));
+    const character = target === 'reply' ? block('character', fillPromptTemplate(view.prompts['character-card'], { name: self.name })) : '';
+    const rules = block('rules', fillPromptTemplate(view.prompts.rules, { name: self.name }));
     const system = fillPromptTemplate(hot.prompts[PROMPTS[item.target].score], templateValues(self.name));
     const answersTag = target === 'memory' ? 'stored' : 'answers';
 
     for (const situation of records) {
       if (situation.answers.length === 0) continue;
-      const learned = block('learned', learnedLine(judges.get(situation) ?? judgeView));
+      const learned = block('learned', learnedLine(judges.get(situation) ?? view));
       let pending = situation.answers.map((a) => a.id);
       // One request with every answer, then once more for the ones the reply left out.
       for (let attempt = 0; attempt < 2 && pending.length > 0; attempt += 1) {
-        ctx.phase = phase ?? `scores ${situation.n}/${records.length}`;
+        ctx.phase = `scores ${situation.n}/${records.length}`;
         const asked = situation.answers.filter((a) => pending.includes(a.id));
         const shown =
           target === 'memory'
@@ -711,18 +682,12 @@ export function createMentor({ hot, store, llm, client, cases, budget, changes, 
    * src/mentor/anchor.js#anchorSituations) on `view` (as `item`'s target: the
    * reply or the memory sandbox) with `samples` samples each, a real moment with
    * `anchorSamples` (default: `samples`; a run and a check pass
-   * `mentor.anchor.samples`, the repair loop's replays pass nothing, so they
-   * keep their own sample settings), then score every answer: the
-   * one measuring step of a run, a check, an ablation and a verification.
-   * `judgeView` (default: `view`) is the view the judge's `<character>`,
-   * `<rules>` and `<learned>` blocks are built from: the repair loop passes
-   * the live view, so an edit never moves the yardstick it is measured by.
-   * `phase` replaces the status phases of the steps. A real moment is
-   * answered and judged on `view` / `judgeView` as they stood before its
-   * trigger (src/mentor/moment.js#momentView: memory written at or after it
-   * hidden) unless `mentor.anchor.hideLaterMemory` is false (read now); every
-   * caller -- a run, a check, the repair loop's control, ablations and
-   * regression -- goes through here. `hidden` counts what was hidden, by
+   * `mentor.anchor.samples`), then score every answer: the one measuring
+   * step of a run and a check. A real moment is answered and judged on
+   * `view` as it stood before its trigger (src/mentor/moment.js#momentView:
+   * memory written at or after it hidden) unless
+   * `mentor.anchor.hideLaterMemory` is false (read now); a run and a check
+   * alike go through here. `hidden` counts what was hidden, by
    * kind, and the moments it was hidden for (`situations`). Throws what the
    * steps throw (a stop, a failed request); `into` receives `records`,
    * `prepared`, `hidden` and `repeated` as soon as each exists, so a caller
@@ -730,7 +695,7 @@ export function createMentor({ hot, store, llm, client, cases, budget, changes, 
    * @returns {Promise<{ records: object[], scores: object[], groups: object[][], verdict: object,
    *   repeated: object[], prepared: object[], hidden: object }>}
    */
-  async function measureOn(ctx, { item, view, judgeView = view, situations, samples, anchorSamples = samples, reference, feedback, self, phase, into = {} }) {
+  async function measureOn(ctx, { item, view, situations, samples, anchorSamples = samples, reference, feedback, self, into = {} }) {
     const timezone = hot.config.bot?.timezone;
     const hideLater = hot.config.mentor?.anchor?.hideLaterMemory !== false;
     const hidden = { situations: 0 };
@@ -758,11 +723,9 @@ export function createMentor({ hot, store, llm, client, cases, budget, changes, 
         samples: anchored ? anchorSamples : samples,
         channel: anchored ? anchorChannel(view, history) : reference.channel,
         view,
-        judgeView,
       };
       if (cutoff !== null) {
         entry.view = momentView(view, cutoff);
-        entry.judgeView = momentView(judgeView, cutoff);
         hidden.situations += 1;
         for (const [kind, count] of Object.entries(hiddenLater(view, cutoff))) hidden[kind] = (hidden[kind] ?? 0) + count;
       }
@@ -772,7 +735,7 @@ export function createMentor({ hot, store, llm, client, cases, budget, changes, 
     into.prepared = prepared;
     into.records = records;
     into.hidden = hidden;
-    await answerAll(ctx, { target: item.target, prepared, self, reference, phase });
+    await answerAll(ctx, { target: item.target, prepared, self, reference });
     let repeated = [];
     if (item.target === 'reply') {
       // Tagged with their situation: a phrase shared only by the samples of one situation is no habit.
@@ -781,8 +744,8 @@ export function createMentor({ hot, store, llm, client, cases, budget, changes, 
     }
     into.repeated = repeated;
     const items = new Map(prepared.map((p) => [p.record, p.items]));
-    const judges = new Map(prepared.map((p) => [p.record, p.judgeView]));
-    await scoreAll(ctx, { target: item.target, records, repeated, item, view, judgeView, judges, self, reference, feedback, phase, items });
+    const judges = new Map(prepared.map((p) => [p.record, p.view]));
+    await scoreAll(ctx, { target: item.target, records, repeated, item, view, judges, self, reference, feedback, items });
     return { records, ...verdictOf(records), repeated, prepared, hidden };
   }
 
@@ -799,17 +762,6 @@ export function createMentor({ hot, store, llm, client, cases, budget, changes, 
     if (cfg.diagnose === false) return false;
     const passScore = Number.isFinite(cfg.pass?.score) ? cfg.pass.score : 7;
     return !run.passed || run.situationMedians.some((m) => typeof m?.overall === 'number' && m.overall < passScore);
-  }
-
-  /**
-   * Whether a finished run goes through the repair loop: a change store was
-   * given, `features.mentorAutoFix` is exactly true, and the run (not a
-   * check) ended normally and failed. Without a diagnosis the loop only
-   * records 'no diagnosis'.
-   */
-  function needsRepair(run) {
-    if (!repair || run.kind !== 'run' || run.stopped || run.error || run.passed !== false) return false;
-    return hot.config.features?.mentorAutoFix === true;
   }
 
   /**
@@ -836,8 +788,6 @@ export function createMentor({ hot, store, llm, client, cases, budget, changes, 
       const blocks = commonBlocks(item, reference, feedback, self.name);
       const verdictJson = { passed: run.passed, medians: run.medians, situations: run.situationMedians, reasons: run.reasons };
       const seen = [block('system', entry.request.system), block('user', entry.request.user)].filter(Boolean).join('\n');
-      // The repair loop's fix request shows the same text.
-      measured.seen = seen;
       const system = fillPromptTemplate(template, templateValues(self.name));
       const before = [blocks.case, block('verdict', JSON.stringify(verdictJson)), blocks.signs, blocks.feedback];
       const after = [block('seen', seen)];
@@ -923,7 +873,7 @@ export function createMentor({ hot, store, llm, client, cases, budget, changes, 
 
       const done = await measureOn(ctx, { item, view, situations, samples, anchorSamples, reference, feedback, self, into });
       if (!done.records.some((s) => s.answers.some((a) => a.score))) throw new RunEnd('error', 'no answer was scored');
-      measured = { reference, feedback, self, prepared: done.prepared, seen: '' };
+      measured = { reference, feedback, self, prepared: done.prepared };
     } catch (err) {
       const end = endOf(err);
       if (!(err instanceof RunEnd)) log.warn('mentor: the run failed', { caseId: item.id, errorName: err?.name, statusCode: err?.statusCode });
@@ -941,7 +891,6 @@ export function createMentor({ hot, store, llm, client, cases, budget, changes, 
     run.reasons = result.reasons;
     run.passed = !run.stopped && !run.error && result.passed;
     if (measured && needsDiagnosis(run)) await diagnose(ctx, run, item, measured);
-    if (measured && needsRepair(run)) run.repair = await repair.attempt(ctx, run, { guildId, item, ...measured });
     run.finishedAt = new Date(now()).toISOString();
     run.tokens = { spent: ctx.spent - spentBefore, left: budget.left() };
 

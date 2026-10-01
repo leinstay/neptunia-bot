@@ -22,7 +22,6 @@ import { buildDrawPrompt } from '../src/behavior/prompt.js';
 import { familyOf, ImageCapError, ImageGenError } from '../src/llm/images.js';
 import { createCaseStore } from '../src/mentor/cases.js';
 import { createMentorBudget } from '../src/mentor/budget.js';
-import { createChangeStore } from '../src/mentor/changes.js';
 import { renderCard, renderFile } from '../src/mentor/report.js';
 import { labels } from './fixtures/labels.js';
 
@@ -367,7 +366,6 @@ function makeAdmin(rootDir, extra = {}) {
     mentor: extra.mentor,
     mentorCases: extra.mentorCases,
     mentorBudget: extra.mentorBudget,
-    mentorChanges: extra.mentorChanges,
     fetchImpl: extra.fetchImpl,
     getApiKey: extra.getApiKey,
   });
@@ -4844,51 +4842,8 @@ function makeMentorAdmin(extra = {}) {
   const mentorCases = createCaseStore({ dataDir: path.join(rootDir, 'data'), now });
   const mentorBudget = createMentorBudget({ state: store.state, getConfig: () => hot.config, now });
   const mentor = extra.mentor ?? fakeMentor();
-  const mentorChanges = extra.mentorChanges;
-  const { admin } = makeAdmin(rootDir, { hot, store, mentor, mentorCases, mentorBudget, mentorChanges });
-  return { admin, hot, store, mentor, mentorCases, mentorBudget, mentorChanges, rootDir };
-}
-
-/** Two changes as the change store lists them (newest first): a prompt edit, and a rules edit undone since. */
-const SAMPLE_CHANGES = [
-  { id: 2, caseId: 3, runId: null, layer: 'prompt', target: 'format', at: '2026-09-30T11:42:09.000Z', summary: 'prompt format: (empty) -> One idea per message.', created: true },
-  {
-    id: 1,
-    caseId: 1,
-    runId: null,
-    layer: 'self',
-    target: null,
-    at: '2026-09-29T08:05:00.000Z',
-    summary: 'self: likes the café -> likes the quiet café',
-    undoneAt: '2026-09-29T09:00:00.000Z',
-  },
-];
-
-/** A fake change store: `list`/`rebaseStatus` return what it was given (or throw when `broken`),
- * `undo`/`rebase` answer with the given functions and record every call. */
-function fakeChangeStore({ changes = [], overrides = [], broken = false, undo, rebase } = {}) {
-  const calls = [];
-  return {
-    calls,
-    list(guildId) {
-      calls.push(['list', guildId]);
-      if (broken) throw new Error('broken JSON in changes.json');
-      return changes;
-    },
-    rebaseStatus(guildId) {
-      calls.push(['rebaseStatus', guildId]);
-      if (broken) throw new Error('broken JSON in overrides.json');
-      return overrides;
-    },
-    undo(guildId, id) {
-      calls.push(['undo', guildId, id]);
-      return undo ? undo(id) : { ok: true, change: { id } };
-    },
-    rebase(guildId, name) {
-      calls.push(['rebase', guildId, name]);
-      return rebase ? rebase(name) : { ok: true, applied: [2, 4], dropped: [{ changeId: 3, from: 'x', to: 'y' }] };
-    },
-  };
+  const { admin } = makeAdmin(rootDir, { hot, store, mentor, mentorCases, mentorBudget });
+  return { admin, hot, store, mentor, mentorCases, mentorBudget, rootDir };
 }
 
 /** A finished run as the mentor saves it, trimmed to what the report reads. */
@@ -4923,11 +4878,8 @@ const MENTOR_KEYS = [
   'mentor.show',
   'mentor.wrong',
   'mentor.status',
-  'mentor.log',
-  'mentor.undo',
-  'mentor.rebase',
 ];
-const MENTOR_ARGS = { text: 'Answer a greeting with one short line.', message: '800000000000000009', id: 1, reason: 'it was fine', name: 'format' };
+const MENTOR_ARGS = { text: 'Answer a greeting with one short line.', message: '800000000000000009', id: 1, reason: 'it was fine' };
 
 test('run: every mentor command replies "the mentor is not available" without a mentor or a case store', async () => {
   const rootDir = makeRoot();
@@ -5194,8 +5146,6 @@ test('run: mentor.status reports the switch, model, tokens today, cases by state
     'tokens today: 100 / 1000 (900 left)',
     'cases: 1 new, 1 passing, 1 failing, 1 retired',
     'running: no',
-    'autofix: off',
-    'changes: -',
     'last: case 3, failed, overall 3, 0 of 0 answers scored, 120 tokens, finished 2026-09-30 11:10 UTC',
   ]);
 });
@@ -5206,7 +5156,7 @@ test('run: mentor.status shows the run in flight', async () => {
   });
   const { admin } = makeMentorAdmin({ mentor });
   const lines = (await admin.run('mentor.status', {}, { guildId: 'g1' })).split('\n');
-  assert.equal(lines.at(-4), 'running: check case 2, scores 1/5, 340 tokens so far');
+  assert.equal(lines.at(-2), 'running: check case 2, scores 1/5, 340 tokens so far');
   assert.equal(lines.at(-1), 'last: no run yet');
 });
 
@@ -5216,7 +5166,7 @@ test('run: mentor.status shows a pending stop on the running line', async () => 
   });
   const { admin } = makeMentorAdmin({ mentor });
   const lines = (await admin.run('mentor.status', {}, { guildId: 'g1' })).split('\n');
-  assert.equal(lines.at(-4), 'running: run case 4, answers 2/5, 910 tokens so far, stopping');
+  assert.equal(lines.at(-2), 'running: run case 4, answers 2/5, 910 tokens so far, stopping');
 });
 
 test('run: mentor.status works with the mentor disabled, no model set, and while paused', async () => {
@@ -5274,7 +5224,7 @@ test('mentor.status: an unreadable run file gives "last: cannot be read"', async
   fs.writeFileSync(path.join(rootDir, 'data', 'guilds', 'g1', 'mentor', 'runs', '2', `${broken.id}.json`),'{ not json');
 
   const lines = (await admin.run('mentor.status', {}, { guildId: 'g1' })).split('\n');
-  assert.equal(lines.at(-4), 'running: no');
+  assert.equal(lines.at(-2), 'running: no');
   assert.equal(lines.at(-1), 'last: cannot be read');
 });
 
@@ -5285,185 +5235,59 @@ test('mentor.status: no run yet', async () => {
   assert.equal((await admin.run('mentor.status', {}, { guildId: 'g1' })).split('\n').at(-1), 'last: no run yet');
 });
 
-// ---- the mentor's changes: log, undo, rebase, and their status lines ----
+// ---- the mentor only measures: no change commands, no repair ----
 
-test('run: mentor log/undo/rebase reply "the mentor is not available" without a change store', async () => {
+test('run: mentor log/undo/rebase are unknown commands', async () => {
   const { admin, rootDir } = makeMentorAdmin();
   for (const key of ['mentor.log', 'mentor.undo', 'mentor.rebase']) {
-    assert.equal(await admin.run(key, MENTOR_ARGS, { guildId: 'g1' }), 'the mentor is not available', key);
+    await assert.rejects(() => admin.run(key, { id: 1, name: 'format' }, { guildId: 'g1' }), new RegExp(`unknown command: ${key.replace('.', '\\.')}`), key);
   }
   assert.equal(fs.existsSync(path.join(rootDir, 'prompts.local')), false, 'nothing was written');
 });
 
-test('mentor.log: says so when there is no change', async () => {
-  const { admin } = makeMentorAdmin({ mentorChanges: fakeChangeStore() });
-  assert.equal(await admin.run('mentor.log', {}, { guildId: 'g1' }), 'no changes yet');
+test('mentor.status: a leftover mentorAutoFix or mentor.fix changes nothing and shows no autofix or changes line', async () => {
+  const { admin, hot } = makeMentorAdmin();
+  const before = await admin.run('mentor.status', {}, { guildId: 'g1' });
+  hot.config.features = { mentor: true, mentorAutoFix: true };
+  hot.config.mentor = { ...hot.config.mentor, fix: { maxAttempts: 3 }, verify: { situations: 3 } };
+  const after = await admin.run('mentor.status', {}, { guildId: 'g1' });
+  assert.equal(after, before);
+  assert.doesNotMatch(after, /autofix|changes:/);
 });
 
-test('mentor.log: one line per change, newest first, an undone one marked', async () => {
-  const { admin, mentorChanges } = makeMentorAdmin({ mentorChanges: fakeChangeStore({ changes: SAMPLE_CHANGES }) });
-  const lines = (await admin.run('mentor.log', {}, { guildId: 'g1' })).split('\n');
-  assert.deepEqual(lines, [
-    '2 case 3 prompt format 2026-09-30 11:42 UTC prompt format: (empty) -> One idea per message.',
-    '1 case 1 self - 2026-09-29 08:05 UTC self: likes the café -> likes the quiet café (undone)',
-  ]);
-  assert.deepEqual(mentorChanges.calls, [['list', 'g1']]);
-});
-
-test('mentor.undo: replies that the change was undone', async () => {
-  const { admin, mentorChanges } = makeMentorAdmin({ mentorChanges: fakeChangeStore() });
-  assert.equal(await admin.run('mentor.undo', { id: 4 }, { guildId: 'g1' }), 'change 4 undone');
-  assert.deepEqual(mentorChanges.calls, [['undo', 'g1', 4]]);
-});
-
-test("mentor.undo: a refusal carries the store's reason verbatim", async () => {
-  for (const reason of ['unknown change', 'already undone', 'changed since']) {
-    const { admin } = makeMentorAdmin({ mentorChanges: fakeChangeStore({ undo: () => ({ ok: false, reason }) }) });
-    assert.equal(await admin.run('mentor.undo', { id: 9 }, { guildId: 'g1' }), `change 9 cannot be undone: ${reason}`, reason);
-  }
-});
-
-test('mentor.undo: a change id is required', async () => {
-  const { admin, mentorChanges } = makeMentorAdmin({ mentorChanges: fakeChangeStore() });
-  for (const id of [undefined, 0, -1, 1.5, 'x']) {
-    await assert.rejects(() => admin.run('mentor.undo', { id }, { guildId: 'g1' }), /a change id is required/, String(id));
-  }
-  assert.deepEqual(mentorChanges.calls, []);
-});
-
-test('mentor.rebase: replies with the patches applied and dropped', async () => {
-  const { admin, mentorChanges } = makeMentorAdmin({ mentorChanges: fakeChangeStore() });
-  assert.equal(await admin.run('mentor.rebase', { name: 'format' }, { guildId: 'g1' }), 'override format rebuilt: 2 patches applied, 1 dropped');
-  assert.deepEqual(mentorChanges.calls, [['rebase', 'g1', 'format']]);
-});
-
-test("mentor.rebase: a refusal carries the store's reason", async () => {
-  for (const reason of ['no override', 'unknown base', 'tracked file missing']) {
-    const { admin } = makeMentorAdmin({ mentorChanges: fakeChangeStore({ rebase: () => ({ ok: false, reason }) }) });
-    assert.equal(await admin.run('mentor.rebase', { name: 'reply' }, { guildId: 'g1' }), `override reply cannot be rebuilt: ${reason}`, reason);
-  }
-});
-
-test('mentor.rebase: a prompt name is required', async () => {
-  const { admin, mentorChanges } = makeMentorAdmin({ mentorChanges: fakeChangeStore() });
-  for (const name of [undefined, '', '   ']) {
-    await assert.rejects(() => admin.run('mentor.rebase', { name }, { guildId: 'g1' }), /a prompt name is required/, String(name));
-  }
-  assert.deepEqual(mentorChanges.calls, []);
-});
-
-test('mentor.status: the autofix and changes lines come right before the last line', async () => {
-  const overrides = [
-    { name: 'format', status: 'stale', baseHash: 'a', trackedHash: 'b', patches: 1 },
-    { name: 'reply', status: 'current', baseHash: 'c', trackedHash: 'c', patches: 2 },
-    { name: 'system-prompt', status: 'unknown', baseHash: null, trackedHash: 'd', patches: 0 },
-  ];
-  const { admin, hot } = makeMentorAdmin({ mentorChanges: fakeChangeStore({ changes: SAMPLE_CHANGES, overrides }) });
-  let lines = (await admin.run('mentor.status', {}, { guildId: 'g1' })).split('\n');
-  assert.deepEqual(lines.slice(-4), ['running: no', 'autofix: off', 'changes: 2 (1 undone), overrides: 3 (1 stale)', 'last: no run yet']);
-
-  // On only when the switch is exactly true.
-  for (const [value, shown] of [[true, 'on'], ['yes', 'off'], [1, 'off'], [false, 'off']]) {
-    hot.config.features = { mentor: true, mentorAutoFix: value };
-    lines = (await admin.run('mentor.status', {}, { guildId: 'g1' })).split('\n');
-    assert.equal(lines.at(-3), `autofix: ${shown}`, String(value));
-  }
-});
-
-test('mentor.status: a change file that cannot be read gives "changes: cannot be read"', async () => {
-  const { admin } = makeMentorAdmin({ mentorChanges: fakeChangeStore({ broken: true }) });
-  const lines = (await admin.run('mentor.status', {}, { guildId: 'g1' })).split('\n');
-  assert.equal(lines.at(-2), 'changes: cannot be read');
-  assert.equal(lines.at(-1), 'last: no run yet');
-});
-
-test('mentor.status: without a resolved guild the changes line is "-"', async () => {
-  const rootDir = makeRoot();
-  const mentorCases = createCaseStore({ dataDir: path.join(rootDir, 'data'), now: () => MENTOR_NOW });
-  const mentorChanges = fakeChangeStore({ changes: SAMPLE_CHANGES });
-  const { admin } = makeAdmin(rootDir, { mentor: fakeMentor(), mentorCases, mentorChanges, getGuildId: () => null });
-  const lines = (await admin.run('mentor.status', {}, {})).split('\n');
-  assert.deepEqual(lines.slice(-2), ['changes: -', 'last: -']);
-  assert.deepEqual(mentorChanges.calls, []);
-});
-
-test('mentor.show: a run with an applied repair shows the repair and undo lines', async () => {
+test('mentor.show: a run stored with a repair block by an earlier version shows without it', async () => {
   const { admin, mentorCases } = makeMentorAdmin();
   mentorCases.add('g1', { text: 'Answer a greeting with one short line.', target: 'reply' });
   const repair = {
-    attempts: [
-      {
-        n: 1,
-        suspects: [{ layer: 'rules', excerpt: 'explain every limit', located: true, gain: 5, confirmed: true }],
-        edit: { layer: 'rules', target: 'rules', from: 'explain every limit', to: 'say a limit once', why: 'shorter' },
-        refused: null,
-        verify: { fresh: { passed: true, medians: { overall: 8, goal: 8 }, situations: [{ n: 1, overall: 8, goal: 8 }] }, regression: [], skipped: [] },
-        accepted: true,
-      },
-    ],
+    attempts: [{ n: 1, suspects: [{ layer: 'rules', excerpt: 'explain every limit', located: true, gain: 5, confirmed: true }], accepted: true }],
     applied: { changeId: 7, layer: 'rules', target: 'rules', summary: 'rules rules: explain every limit -> say a limit once' },
     reason: 'applied',
     tokens: 900,
   };
-  mentorCases.saveRun('g1', { ...sampleMentorRun(1, { passed: false, overall: 4 }), repair });
+  const saved = mentorCases.saveRun('g1', { ...sampleMentorRun(1, { passed: false, overall: 4 }), repair });
 
   const reply = await admin.run('mentor.show', { id: 1 }, { guildId: 'g1' });
-  assert.match(reply.text, /^repair: change 7 applied, rules rules, gain 5, fresh overall 8$/m);
-  assert.match(reply.text, /^undo: \/nep mentor undo 7$/m);
-  assert.match(reply.files[0].attachment.toString('utf8'), /^applied: change 7, rules rules: explain every limit -> say a limit once$/m);
+  const { repair: _ignored, ...plain } = saved;
+  assert.equal(reply.text, renderCard(plain));
+  assert.equal(reply.files[0].attachment.toString('utf8'), renderFile(plain).text);
+  assert.doesNotMatch(reply.text, /repair|undo/);
 });
 
-test('mentor log/undo/rebase: through the real change store', async () => {
-  const rootDir = makeRoot();
-  fs.writeFileSync(path.join(rootDir, 'prompts', 'format.md'), 'Use short messages.\n');
-  const mentorChanges = createChangeStore({
-    dataDir: path.join(rootDir, 'data'),
-    promptsDir: path.join(rootDir, 'prompts'),
-    localPromptsDir: path.join(rootDir, 'prompts.local'),
-    store: {},
-    getConfig: () => ({}),
-    now: () => MENTOR_NOW,
-  });
-  const { admin } = makeMentorAdmin({ mentorChanges });
-  assert.equal(mentorChanges.apply('g1', { layer: 'rules', from: '- be kind', to: '- be brief' }, { caseId: 2 }).ok, true);
-  assert.equal(mentorChanges.apply('g1', { layer: 'prompt', target: 'format', from: '', to: 'One idea per message.' }, { caseId: 2 }).ok, true);
-
-  assert.deepEqual((await admin.run('mentor.log', {}, { guildId: 'g1' })).split('\n'), [
-    '2 case 2 prompt format 2026-09-30 12:00 UTC prompt format: (empty) -> One idea per message.',
-    '1 case 2 rules rules 2026-09-30 12:00 UTC rules rules: - be kind -> - be brief',
-  ]);
-
-  assert.equal(await admin.run('mentor.undo', { id: 1 }, { guildId: 'g1' }), 'change 1 undone');
-  assert.equal(fs.existsSync(path.join(rootDir, 'prompts.local', 'rules.md')), false, 'the local file the change created is gone');
-  assert.equal(await admin.run('mentor.undo', { id: 1 }, { guildId: 'g1' }), 'change 1 cannot be undone: already undone');
-  assert.equal(await admin.run('mentor.undo', { id: 5 }, { guildId: 'g1' }), 'change 5 cannot be undone: unknown change');
-  assert.match((await admin.run('mentor.log', {}, { guildId: 'g1' })).split('\n')[1], / \(undone\)$/);
-
-  // A deploy changes the tracked file: the override is stale until it is rebuilt.
-  fs.writeFileSync(path.join(rootDir, 'prompts', 'format.md'), 'Use short messages, always.\n');
-  assert.equal((await admin.run('mentor.status', {}, { guildId: 'g1' })).split('\n').at(-2), 'changes: 2 (1 undone), overrides: 1 (1 stale)');
-  assert.equal(await admin.run('mentor.rebase', { name: 'format' }, { guildId: 'g1' }), 'override format rebuilt: 1 patches applied, 0 dropped');
-  assert.equal(fs.readFileSync(path.join(rootDir, 'prompts.local', 'format.md'), 'utf8'), 'Use short messages, always.\n\nOne idea per message.\n');
-  assert.equal((await admin.run('mentor.status', {}, { guildId: 'g1' })).split('\n').at(-2), 'changes: 2 (1 undone), overrides: 1 (0 stale)');
-  assert.equal(await admin.run('mentor.rebase', { name: 'reply' }, { guildId: 'g1' }), 'override reply cannot be rebuilt: no override');
-});
-
-test('run: mentor add/anchor/remove/run/check/wrong/undo/rebase are refused while paused; cases/show/status/stop/log are not', async () => {
-  const { admin, mentor, mentorCases, mentorChanges, store } = makeMentorAdmin({ mentorChanges: fakeChangeStore({ changes: SAMPLE_CHANGES }) });
+test('run: mentor add/anchor/remove/run/check/wrong are refused while paused; cases/show/status/stop are not', async () => {
+  const { admin, mentor, mentorCases, store } = makeMentorAdmin();
   mentorCases.add('g1', { text: 'Answer a greeting with one short line.', target: 'reply' });
   mentorCases.saveRun('g1', sampleMentorRun(1));
   store.state.data.paused = true;
 
-  for (const key of ['mentor.add', 'mentor.anchor', 'mentor.remove', 'mentor.run', 'mentor.check', 'mentor.wrong', 'mentor.undo', 'mentor.rebase']) {
+  for (const key of ['mentor.add', 'mentor.anchor', 'mentor.remove', 'mentor.run', 'mentor.check', 'mentor.wrong']) {
     await assert.rejects(() => admin.run(key, MENTOR_ARGS, { guildId: 'g1' }), /paused.*resume/i, key);
   }
   assert.deepEqual(mentor.calls, [], 'the mentor is never started while paused');
   assert.equal(mentorCases.list('g1').length, 1);
   assert.equal(mentorCases.get('g1', 1).state, 'passing');
   assert.deepEqual(mentorCases.recentFeedback('g1', 5), []);
-  assert.deepEqual(mentorChanges.calls.filter(([kind]) => kind === 'undo' || kind === 'rebase'), [], 'nothing is undone or rebuilt while paused');
 
-  for (const key of ['mentor.cases', 'mentor.show', 'mentor.status', 'mentor.stop', 'mentor.log']) {
+  for (const key of ['mentor.cases', 'mentor.show', 'mentor.status', 'mentor.stop']) {
     await assert.doesNotReject(() => admin.run(key, MENTOR_ARGS, { guildId: 'g1' }), key);
   }
 });

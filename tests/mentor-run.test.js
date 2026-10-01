@@ -909,6 +909,28 @@ test('run: a failing run asks for a diagnosis and stores it', () => {
   });
 });
 
+test('run: a leftover mentorAutoFix and mentor.fix change nothing: a failed run ends at the diagnosis', () =>
+  withSetup(
+    {
+      config: {
+        features: { mentor: true, mentorAutoFix: true },
+        mentor: { fix: { maxAttempts: 3 }, verify: { situations: 3 }, regression: { situations: 2 }, suspects: 2, ablationGain: 1 },
+      },
+      llm: fakeLlm({ scoreFor: overallBySituation(9, 3) }),
+    },
+    async ({ mentor, cases, llm }) => {
+      const item = cases.add(GUILD, { text: CASE_TEXT, target: 'reply' });
+      const run = await (await mentor.run(item.id)).done;
+      assert.equal(run.passed, false);
+      assert.equal(run.error, undefined);
+      // The same requests as without the leftovers: nothing after the diagnosis.
+      assert.deepEqual(llm.kinds(), ['situations', 'talk', 'talk', 'talk', 'talk', 'score', 'score', 'diagnose']);
+      assert.deepEqual(run.diagnosis, DIAGNOSIS);
+      assert.equal('repair' in run, false);
+      assert.equal('repair' in cases.lastRun(GUILD, item.id), false);
+    },
+  ));
+
 test('run: a passing run with every situation at or above the pass score asks for none', () =>
   withSetup({ llm: fakeLlm({ scoreFor: overallBySituation(9, 7) }) }, async ({ mentor, cases, llm }) => {
     const item = cases.add(GUILD, { text: CASE_TEXT, target: 'reply' });

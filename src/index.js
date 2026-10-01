@@ -32,7 +32,6 @@ import { createAdmin } from './admin.js';
 import { createMentor } from './mentor/mentor.js';
 import { createCaseStore } from './mentor/cases.js';
 import { createMentorBudget } from './mentor/budget.js';
-import { createChangeStore } from './mentor/changes.js';
 import { createTagHistory, deprecatedModelKeys } from './behavior/mention.js';
 import { createMessageHandler } from './discord/events.js';
 import { fetchHistoryWindow, fetchMoment } from './discord/collect.js';
@@ -169,15 +168,6 @@ const gifBackfill = createGifBackfill({ hot, store, client, describer, log });
 // never by a timer. Its cases live under data/, its daily token budget in state.json.
 const mentorCases = createCaseStore({ dataDir });
 const mentorBudget = createMentorBudget({ state: store.state, getConfig: () => hot.config });
-// The mentor's own edits to the private layer, recorded for /nep mentor log|undo|rebase. It writes
-// only when the owner runs one of those, or during a run with features.mentorAutoFix exactly true.
-const mentorChanges = createChangeStore({
-  dataDir,
-  promptsDir: hot.promptsDir,
-  localPromptsDir: hot.localPromptsDir,
-  store,
-  getConfig: () => hot.config,
-});
 const mentor = createMentor({
   hot,
   store,
@@ -185,7 +175,6 @@ const mentor = createMentor({
   client,
   cases: mentorCases,
   budget: mentorBudget,
-  changes: mentorChanges,
   getGuildId,
   // The persona as a turn names it; null until the client is ready.
   getSelf: () => (client.user ? { id: client.user.id, name: getSelfName(getGuildId()) } : null),
@@ -245,11 +234,10 @@ const admin = createAdmin({
   emojiBackfill,
   // /nep gifs status|rescan: the GIF library and its history backfill.
   gifBackfill,
-  // /nep mentor: cases, runs, the owner's feedback, the mentor's own token budget and its changes.
+  // /nep mentor: cases, runs, the owner's feedback and the mentor's own token budget.
   mentor,
   mentorCases,
   mentorBudget,
-  mentorChanges,
   // /nep ping image: the key the llm client sends, for the free model-listing check; never shown.
   getApiKey: () => openrouterKey,
 });

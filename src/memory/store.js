@@ -1006,39 +1006,6 @@ export function createStore({ dataDir }) {
       return guild.learned;
     },
 
-    /**
-     * Rewrite the text of one learned item in place (the mentor's repair,
-     * src/mentor/changes.js): only `text` changes, trimmed; `id`, `from`,
-     * `weight`, `firstSeen`, `lastSeen` and anything else on the item stay as
-     * they are, so a reworded item keeps the confidence it had earned --
-     * unlike a remove + add through `applyLearnedOps`, which would restart
-     * it at weight 1. The text is stored as given (no clamping). Refuses
-     * (returns null, changes nothing) for an id no item has (compared as a
-     * number, strictly), an empty text, or a text another item already has
-     * exactly. The guild is marked dirty and `updatedAt` stamped only when
-     * the text actually changed.
-     * @param {string} guildId
-     * @param {number} id
-     * @param {string} text
-     * @returns {object|null} The item after the rewrite, or null when refused.
-     */
-    rewriteLearned(guildId, id, text) {
-      const item = entry(guildFile(guildId), emptyGuild);
-      const guild = item.value;
-      normalizeGuild(guild);
-      const clean = typeof text === 'string' ? text.trim() : '';
-      if (!clean) return null;
-      const target = guild.learned.find((i) => i.id === id);
-      if (!target) return null;
-      if (guild.learned.some((i) => i !== target && i.text === clean)) return null;
-      if (target.text !== clean) {
-        target.text = clean;
-        guild.updatedAt = new Date().toISOString();
-        item.dirty = true;
-      }
-      return target;
-    },
-
     /** One channel's stored entry (the server map), or null when never seen. */
     getChannel(guildId, channelId) {
       const file = channelFile(guildId, channelId);

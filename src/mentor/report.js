@@ -1,7 +1,7 @@
 // The mentor's report to the owner: a short card for the admin channel and a
 // text file with everything behind it (every situation, every answer, the
 // facts measured by code, the points per axis, the mentor's comment and its
-// diagnosis and its repair loop when a run has them), and the one-line summary of the latest run
+// diagnosis when a run has one), and the one-line summary of the latest run
 // for `/nep mentor status`. The card and the file are operator-facing
 // English, like the other command replies of the bot; the mentor model's
 // comments and diagnosis are shown verbatim. Pure: a stored run object in,
@@ -16,8 +16,6 @@ const REASONS_MAX = 300;
 const ERROR_MAX = 200;
 const DIAGNOSIS_CARD_MAX = 300;
 const DIAGNOSIS_PREFIX = 'diagnosis: ';
-const REPAIR_REASON_MAX = 80;
-const REPAIR_TARGET_MAX = 60;
 const BY_SITUATION_MIN = 40;
 const RULE = '='.repeat(60);
 
@@ -96,12 +94,10 @@ function checkOutcome(run) {
  * median overall of every situation (a real moment marked `(anchor)`, `-` for one with no scored answer; the
  * line is left out for a run stored without them), the mentor's diagnosis
  * summary when the run has one (clipped to 300 characters, or to the room the
- * other lines leave), then for a run with a repair loop the change it applied
- * (`repair: change <id> applied, <layer> <target>, gain <gain>, fresh overall
- * <median>` and `undo: /nep mentor undo <id>`) or `repair: nothing applied
- * (<reason>)`, how many answers were scored, situations kept and dropped, repeated phrases, tokens spent and the
+ * other lines leave), how many answers were scored, situations kept and dropped, repeated phrases, tokens spent and the
  * budget left, and the command that shows the details. When the lines would
- * pass the limit the by-situation line is clipped first.
+ * pass the limit the by-situation line is clipped first. A `repair` block
+ * left on a run stored by an earlier version is ignored.
  * Never longer than 1800 characters.
  * @param {object} run  A run object as stored by `cases.saveRun`.
  * @returns {string}
@@ -118,7 +114,6 @@ export function renderCard(run) {
   if (bySituation) lines.push(bySituation);
   const summary = diagnosisSummary(run);
   const diagnosisAt = summary ? lines.length : -1;
-  lines.push(...repairCardLines(run?.repair));
   if (!run?.passed && Array.isArray(run?.reasons) && run.reasons.length > 0) {
     lines.push(`why: ${clip(run.reasons.join('; '), REASONS_MAX)}`);
   }
@@ -128,7 +123,7 @@ export function renderCard(run) {
   }
   lines.push(`tokens: ${num(run?.tokens?.spent)} spent, ${num(run?.tokens?.left)} left today`);
   lines.push(`details: /nep mentor show ${run?.caseId}`);
-  // The median of every situation grows with their number: it gives up room before the repair and undo lines do.
+  // The median of every situation grows with their number: it gives up room before the other lines do.
   const overflow = lines.join('\n').length - CARD_MAX;
   const bySituationAt = bySituation ? lines.indexOf(bySituation) : -1;
   if (overflow > 0 && bySituationAt >= 0) lines[bySituationAt] = clip(bySituation, Math.max(BY_SITUATION_MIN, bySituation.length - overflow));
@@ -138,29 +133,6 @@ export function renderCard(run) {
     if (room > 3) lines.splice(diagnosisAt, 0, `${DIAGNOSIS_PREFIX}${clip(summary, Math.min(DIAGNOSIS_CARD_MAX, room))}`);
   }
   return clip(lines.join('\n'), CARD_MAX);
-}
-
-/** The suspect an applied change repaired: the first confirmed one of the accepted attempt. */
-function repairedSuspect(repair) {
-  const attempt = [...(repair?.attempts ?? [])].reverse().find((a) => a?.accepted);
-  return { attempt, suspect: attempt?.suspects?.find((s) => s?.confirmed) ?? null };
-}
-
-/**
- * The card's repair lines: the applied change with its gain and fresh
- * overall median plus the undo command, or why nothing was applied; none
- * for a run without a repair loop.
- */
-function repairCardLines(repair) {
-  if (!repair || typeof repair !== 'object') return [];
-  const applied = repair.applied;
-  if (!applied) return [`repair: nothing applied (${clip(repair.reason ?? 'unknown', REPAIR_REASON_MAX)})`];
-  const { attempt, suspect } = repairedSuspect(repair);
-  const where = [applied.layer, applied.target].filter(Boolean).map((part) => clip(part, REPAIR_TARGET_MAX)).join(' ');
-  return [
-    `repair: change ${applied.changeId} applied, ${where}, gain ${num(suspect?.gain)}, fresh overall ${num(attempt?.verify?.fresh?.medians?.overall)}`,
-    `undo: /nep mentor undo ${applied.changeId}`,
-  ];
 }
 
 /** The diagnosis summary of a run on one line, or '' when it has none. */
@@ -224,58 +196,6 @@ function diagnosisLines(diagnosis) {
   return lines;
 }
 
-/** One suspect of a repair attempt: where it lies, its excerpt, and what its removal measured. */
-function suspectLine(suspect) {
-  const excerpt = suspect?.excerpt ? `: "${indented(suspect.excerpt)}"` : '';
-  let status;
-  if (suspect?.located === false) status = 'not located';
-  else if (suspect?.layer === 'missing') status = suspect.confirmed ? 'confirmed without ablation' : 'not confirmed';
-  else status = `gain ${num(suspect?.gain)}, ${suspect?.confirmed ? 'confirmed' : 'not confirmed'}`;
-  return `- ${suspect?.layer}${excerpt} -- ${status}`;
-}
-
-/** The lines of one repair attempt: its suspects, the edit, the refusal or the verification numbers. */
-function attemptLines(attempt) {
-  const lines = [`Attempt ${attempt?.n}:`];
-  for (const suspect of attempt?.suspects ?? []) lines.push(suspectLine(suspect));
-  const edit = attempt?.edit;
-  if (edit) {
-    lines.push(`edit: ${edit.layer}${edit.target ? `, ${edit.target}` : ''}`);
-    lines.push(`  from: ${edit.from ? `"${indented(edit.from)}"` : '(an addition)'}`);
-    lines.push(`  to: ${edit.to ? `"${indented(edit.to)}"` : '(a deletion)'}`);
-    lines.push(`  why: ${indented(edit.why)}`);
-  }
-  const fresh = attempt?.verify?.fresh;
-  if (fresh) {
-    const parts = (fresh.situations ?? []).map((s) => `${s?.n}: ${num(s?.overall)}`);
-    lines.push(
-      `fresh: ${fresh.passed ? 'passed' : 'failed'}, overall ${num(fresh.medians?.overall)} · goal ${num(fresh.medians?.goal)}, ` +
-        `by situation ${parts.length ? parts.join(' · ') : '-'}`,
-    );
-  }
-  for (const entry of attempt?.verify?.regression ?? []) {
-    const parts = (entry?.situations ?? []).map((s) => `${s?.n}: ${num(s?.before)} -> ${num(s?.after)}`);
-    lines.push(`regression: case ${entry?.caseId} ${entry?.held ? 'held' : 'failed'} (${parts.join(' · ')})`);
-  }
-  const skipped = attempt?.verify?.skipped ?? [];
-  if (skipped.length) lines.push(`regression skipped: ${skipped.map((id) => `case ${id}`).join(', ')}`);
-  if (attempt?.refused) lines.push(`refused: ${attempt.refused}`);
-  lines.push(`accepted: ${attempt?.accepted ? 'yes' : 'no'}`);
-  return lines;
-}
-
-/** The repair section of the file: what was applied or why nothing was, then every attempt. */
-function repairLines(repair) {
-  const applied = repair.applied;
-  const lines = [
-    'Repair:',
-    applied ? `applied: change ${applied.changeId}, ${applied.summary ?? ''}` : `nothing applied (${repair.reason ?? 'unknown'})`,
-    `ended: ${repair.reason ?? '-'} · tokens ${num(repair.tokens)}`,
-  ];
-  for (const attempt of repair.attempts ?? []) lines.push('', ...attemptLines(attempt));
-  return lines;
-}
-
 /**
  * The file attached to the card: the case, the verdict, the reference, every
  * situation with its transcript (its header carries its anchor id for a real moment, then its median overall and
@@ -284,11 +204,8 @@ function repairLines(repair) {
  * answer with its facts, points per axis and the mentor's comment. A run with
  * a diagnosis gets its section after the case (summary, causes, proposed
  * changes, marked as the mentor's unverified opinion); a diagnosis that
- * failed is named with its reason in the header. A run with a repair loop
- * gets a `Repair` section after it: the change applied or why nothing was,
- * the reason the loop ended and its tokens, then every attempt (its suspects
- * with their measured gain, the edit, the refusal, the fresh and regression
- * numbers, whether it was accepted).
+ * failed is named with its reason in the header. A `repair` block left on a
+ * run stored by an earlier version is ignored.
  * @param {object} run  A run object as stored by `cases.saveRun` (with its `id`).
  * @returns {{ name: string, text: string }}
  */
@@ -305,7 +222,6 @@ export function renderFile(run) {
   if (!run?.diagnosis && run?.diagnosisError) lines.push(`diagnosis: not available (${clip(run.diagnosisError, ERROR_MAX)})`);
   lines.push('', 'Case:', String(run?.caseText ?? ''));
   if (run?.diagnosis) lines.push('', ...diagnosisLines(run.diagnosis));
-  if (run?.repair && typeof run.repair === 'object') lines.push('', ...repairLines(run.repair));
   lines.push('', `Reference: ${run?.reference?.profile?.messages ?? 0} messages measured, ${run?.reference?.samples ?? 0} sample lines given`);
   lines.push(JSON.stringify(run?.reference?.profile ?? {}, null, 1));
   if (Array.isArray(run?.repeated) && run.repeated.length > 0) {

@@ -600,7 +600,7 @@ test('answerMemory: the model falls back to the chat model', async () => {
   assert.equal(llm.calls[0].options.model, 'x/chat');
 });
 
-test('answerReply: reads everything through the view, so an overlay needs no hot or store', async () => {
+test('answerReply: reads everything through the view, so another view of the same shape needs no hot or store', async () => {
   const hot = fakeHot();
   const overlay = {
     prompts: { ...hot.prompts, 'system-prompt': 'OVERLAY_SYSTEM' },

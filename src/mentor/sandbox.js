@@ -10,8 +10,9 @@
 //
 // Every read of prompts, config and memory goes through a `view` (see
 // `liveView`), never through `hot` or the store directly, so a caller can hand
-// in an overlay of edited copies with the same shape. The private layer is out
-// of bounds: a view has no accessor for it and no private chat is ever built.
+// in another view of the same shape (a real moment's, src/mentor/moment.js).
+// The private layer is out of bounds: a view has no accessor for it and no
+// private chat is ever built.
 
 import { buildRequest } from '../behavior/prompt.js';
 import { pickOtherProfiles } from '../behavior/turn.js';
@@ -55,7 +56,7 @@ function readOnlyCalibrator(live) {
  * that read `hot` at call time, memory accessors read the store at call time.
  * Nothing is copied. `calibrator` measures tokens the way a real turn does
  * (the live ratio, read at call time) and never feeds the live calibrator;
- * without a live `calibrator` it is the identity one (ratio 1). An overlay
+ * without a live `calibrator` it is the identity one (ratio 1). A view
  * passed instead must offer the same shape (a missing `calibrator` counts as
  * the identity one).
  * @param {{ hot: { prompts: object, config: object }, store: object, guildId: string,
@@ -244,7 +245,7 @@ async function sample({ llm, messages, options, samples, signal, onUsage, read }
  * `skip` is true when the model skipped or left nothing to do (as a real
  * turn treats it).
  * @param {object} input
- * @param {object} input.view        From `liveView` (or an overlay of the same shape).
+ * @param {object} input.view        From `liveView` (or a view of the same shape, e.g. src/mentor/moment.js#momentView).
  * @param {object} input.situation   Invented lines (see `situationToHistory`) or a stored moment (see `situationHistory`).
  * @param {string} input.selfId
  * @param {string} input.selfName
@@ -341,7 +342,7 @@ function channelFromView(view, id) {
  * `{ method, args }` in `writes` and changes nothing; its return value is
  * the unchanged current state (or 0 for a count). `state` is
  * `{ data: {}, markDirty() {} }`. There is no private-layer method.
- * @param {object} view  From `liveView` (or an overlay of the same shape).
+ * @param {object} view  From `liveView` (or a view of the same shape, e.g. src/mentor/moment.js#momentView).
  * @returns {{ store: object, writes: { method: string, args: unknown[] }[] }}
  */
 export function captureStore(view) {
@@ -462,7 +463,7 @@ function textsOf(writes) {
  * `parseOk` is false when the answer is not a JSON object (or applying it
  * failed); its `texts` are then empty. See `textsOf` for the paths.
  * @param {object} input
- * @param {object} input.view         From `liveView` (or an overlay of the same shape).
+ * @param {object} input.view         From `liveView` (or a view of the same shape, e.g. src/mentor/moment.js#momentView).
  * @param {object[]} input.batch      Normalized messages, e.g. `situationToHistory(...).history`.
  * @param {string} input.selfName
  * @param {{ complete: Function }} input.llm
