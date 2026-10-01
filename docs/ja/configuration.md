@@ -27,7 +27,6 @@
 | `imageGeneration` | `false` | ペルソナが描画サブプロセスを通じて画像を描くことを許可。キーが存在しない場合はオンとして扱われる。`config.local.json` で有効化。`image.model` に画像生成対応モデルが必要。[メディア: 描画](media.md#描画)を参照 |
 | `privateMessages` | `false` | ギルドメンバーのダイレクトメッセージに応答。保存された公開プロファイルと `affinity.score >= private.minAffinity` が必要。[メッセージとメモリ: プライベートレイヤー](messages-and-memory.md#プライベートレイヤー)を参照 |
 | `mentor` | `false` | 独自モデルを使用する手動テストサブプロセス。有効にするには厳密に `true` にする必要がある。キーが存在しない場合はオフ。[Mentor](#mentor) を参照 |
-| `mentorAutoFix` | `false` | `/nep mentor run` 不合格後、修復ループに進む: アブレーションで診断を証明し、検証済みの編集を書いて適用する。有効にするには厳密に `true` にする必要がある |
 | `followUp` | `true` | ペルソナの応答後、タグなしメッセージを分類して会話を継続 |
 | `typingSimulation` | `true` | タイピング速度をシミュレート |
 | `adminCommands` | `true` | オーナースラッシュコマンド。`false` でコマンド登録を解除 |
@@ -389,19 +388,6 @@ YouTube リンクの再生時間は次の順序で取得されます: まず yt-
 | `pass.anchorScore` | `null` | 実際の moment の閾値。数値に設定すると、実際の moment の `overall` または `goal` 中央値がその値を下回る場合にケースが不合格。`null` は `pass.score` を使用 |
 | `pass.floor` | `5` | いずれかの軸の中央値がこの下限を下回る場合にケースが不合格。各作成された状況もこの下限でチェックされ、いずれか 1 つの作成された状況の `overall` 中央値または `goal` 中央値がこの値を下回る場合、全回答の中央値に関わらずケースは不合格。実際の moment はパススコア（`pass.anchorScore` が設定されている場合はその値、それ以外は `pass.score`）で判定 |
 | `diagnose` | `true` | 不合格または弱い状況のあるラン後に、mentor がコンテキスト内の弱い回答の原因を説明。ランの `diagnosis` として保存。check では要求しない |
-| `suspects` | `2` | 修復ループで試行ごとに診断からテストする原因の数 |
-| `ablationGain` | `1` | 容疑者を除去した際に `overall` 中央値が確認に必要な最低上昇幅 |
-| `ablationSamples` | `2` | アブレーション測定時の状況あたりのペルソナ回答数 |
-| `fix.maxAttempts` | `3` | ランあたりの最大修復試行回数 |
-| `fix.tryMissing` | `true` | 診断の容疑者がアブレーションで確認されなかった場合、もう 1 回試行し、原因を欠落した指示として扱い、ルールの追加のみ可能 |
-| `fix.maxGrowthChars` | `300` | 1 回の編集でプロンプトファイルが増加できる最大文字数 |
-| `fix.layers` | `["rules", "prompt", "self", "learned", "guild"]` | 編集が触れられるレイヤー。キャラクターカードは編集不可。デプロイで `profile` をリストに追加可能 |
-| `fix.files` | `["system-prompt", "format", "reply", "memory", "profile"]` | ローカルオーバーライドを作成できるプロンプトファイル。Reply ケースのファイルは設定リストと `system-prompt`、`format`、`reply` の共通部分。Memory ケースはメモリライターのプロンプトのみを編集し、`prompt` レイヤーのみ経由 |
-| `regression.situations` | `2` | リグレッションチェックで再生する他のアクティブケースの保存済み状況数 |
-| `regression.tolerance` | `1` | 保存済み状況の `overall` 中央値が記録された中央値から許容される最大下落幅 |
-| `verify.situations` | `3` | 編集の検証のために作成する新しい状況の数 |
-| `verify.samples` | `2` | 検証時の状況あたりのペルソナ回答数 |
-| `verify.minSituations` | `2` | フィルタリング後に必要な新しい状況の最小数。不足時は `too few fresh situations` として拒否 |
 | `reference.days` | `7` | スタイルリファレンス構築に使用するチャット履歴の日数 |
 | `reference.samples` | `60` | リファレンスウィンドウからランダムに選択するスタイル例の行数（2〜200 文字） |
 | `reference.maxMessages` | `3000` | リファレンスチャンネルから読み取る最大メッセージ数 |
@@ -409,13 +395,11 @@ YouTube リンクの再生時間は次の順序で取得されます: まず yt-
 | `reference.rareMinAuthors` | `2` | 使用する著者数がこの値未満のマークはレアとみなす |
 | `anchor.max` | `5` | ケースあたりの実際の moment 数。各 moment はオーナーが拒否したペルソナのメッセージで、その前のチャットと共に保存 |
 | `anchor.contextMessages` | `30` | moment 解決時にチャンネルから取得するコンテキストメッセージ数（トリガーまで） |
-| `anchor.samples` | `5` | ランおよび `/nep mentor check` での実際の moment あたりのペルソナ回答数。修復ループのコントロールとアブレーションは `ablationSamples` を使用し、検証は `verify.samples` を使用 |
+| `anchor.samples` | `5` | ランおよび `/nep mentor check` での実際の moment あたりのペルソナ回答数 |
 | `anchor.hideLaterMemory` | `true` | 実際の moment を再生する際、トリガーの時点以降に書き込まれた記憶を非表示にする（エピソード、態度変化、詳細、興味、エイリアス、学習項目、ロアエントリ）。`false` にすると現在の全記憶で再生 |
 | `feedbackExamples` | `10` | すべてのスコアリングリクエストに含める最新のオーナー修正（`/nep mentor wrong`）の数 |
 
 `llm.maxRequestTokens`（リクエストあたり 50k）は、mentor が発行または引き起こすすべてのリクエスト（サンドボックス回答を含む）に適用されます。各 mentor リクエスト前の予算チェックでは、プロンプトに加えて回答が最大でかかるコスト（`mentor.maxOutputTokens` を `mentor.outputTokenWeight` で乗算）を計上するため、可能な出力が残り予算に収まらない場合リクエストは拒否されます。予算が尽きると実行が停止し、得られた結果を報告します。ラン中に `features.mentor` や `mentor.model` がオフにされた場合、またはリファレンスウィンドウ内のリファレンスチャンネルに人々のメッセージがない場合も実行が停止します。
-
-修復がメンバーのプロファイルを編集する場合（`profile` レイヤー）、コードはフィールド内の数字、日付、名前、`<@id>` メンションが変更されていないことをチェックします。変更できるのは言い回しのみです。
 
 ## `warmup`
 

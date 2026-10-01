@@ -46,7 +46,6 @@
 | `mentor-score-memory.md` | 否 | Mentor：对分析器将存储的文本进行评分（`features.mentor`）。无角色卡。`character` 轴始终为 `null`。仅返回 JSON | `{{name}}` |
 | `mentor-signs.md` | 否 | Mentor：已知的模型文本习惯，作为 `<signs>` 块在每次 mentor 请求中发送（`features.mentor`）。文件缺失或为空时省略 | `{{name}}` |
 | `mentor-diagnose.md` | 否 | Mentor：评分后解释弱回答，指出角色上下文中的具体文本（`features.mentor`）。结果为未验证的假设，存储为运行中的 `diagnosis`。`mentor.diagnose` 为 false 或文件缺失时省略 | `{{name}}` |
-| `mentor-fix.md` | 否 | Mentor 修复：针对已确认原因写入一项编辑（`features.mentorAutoFix`）。接收已确认的嫌疑项、判定和角色收到的完整请求。返回 JSON 编辑。文件缺失时省略 | `{{name}}` |
 | `labels.json` | 是 | 代码插入提示中的所有字符串。键在下方固定，值由编写者决定 | 见下文 |
 
 `{{name}}` 机器人的显示名称 · `{{author}}` 呼叫者的显示名称 · `{{trigger}}` `labels.triggers.*` 之一 ·
@@ -605,7 +604,7 @@ mentor.original                          first line inside the `<original>` bloc
 
 ## Mentor
 
-手动子进程（`features.mentor`），使用独立模型（`mentor.model`）。所有者添加案例（角色应有的行为），mentor 构造聊天场景，在沙盒中让角色作答并评分。启用 `features.mentorAutoFix` 后，失败的运行会进入修复循环：消融、编辑、验证。一次只运行一个。所有工作留在 `data/`；设置了 `bot.dryRunChannelId` 时，完成的运行也会发布到该频道。没有管理频道时，所有者通过 `/nep mentor status` 跟踪运行，通过 `/nep mentor show <id>` 读取报告。
+手动子进程（`features.mentor`），使用独立模型（`mentor.model`）。所有者添加案例（角色应有的行为），mentor 构造聊天场景，在沙盒中让角色作答并评分。运行失败或得分较低时，mentor 指出角色上下文中的可能原因，并将修改建议作为参考意见提交给所有者。一次只运行一个。所有工作留在 `data/`；设置了 `bot.dryRunChannelId` 时，完成的运行也会发布到该频道。没有管理频道时，所有者通过 `/nep mentor status` 跟踪运行，通过 `/nep mentor show <id>` 读取报告。
 
 ### 隐私
 
@@ -768,7 +767,7 @@ Memory 评分中 `character` 始终为 `null`，`human` 衡量文本是否读起
 
 评分后，当运行未提前结束且案例失败或任一场景的 `overall` 中位数低于 `mentor.pass.score` 时，mentor 再发起一次请求，解释角色上下文中导致弱回答的原因。开关 `mentor.diagnose`（默认 `true`）。通过 `/nep mentor check` 启动的运行不请求诊断。此步骤的失败不会导致运行失败：运行以 `diagnosis: null` 保存并记录错误。
 
-结果存储在运行中的 `diagnosis` 字段，并在报告中输出。这些是假设，尚未经过测量验证；后续阶段将测试并应用修改。
+结果存储在运行中的 `diagnosis` 字段，并在报告中输出。这些是供所有者审阅的假设，mentor 本身不进行任何修改。
 
 原因可以指向的层：`rules`（规则块中的一条规则）、`prompt`（引擎系统提示、格式或任务）、`card`（角色卡）、`self`（角色关于自己的笔记）、`learned`（他人教会角色的内容）、`guild`（服务器习惯或梗）、`profile`（角色对某人的记忆）、`missing`（应当存在但缺失的指令）。
 
@@ -797,96 +796,6 @@ Memory 评分中 `character` 始终为 `null`，`human` 衡量文本是否读起
 ```
 
 最多 5 个原因和 5 个修改。`summary` 截断至 1500 字符；`excerpt` 至 300；`from`/`to` 至 1000；`target` 至 200；`why` 至 500。`layer` 未知或缺少 `why` 的项被丢弃。`summary` 和 `why` 使用聊天语言；`to` 使用目标层的语言。
-
-### 修复
-
-开关 `features.mentorAutoFix`（默认 `false`）。当 `/nep mentor run` 失败且诊断产生了原因时，修复循环尝试将一个原因转化为经验证的编辑。最多 `mentor.fix.maxAttempts`（默认 3）次尝试。`features.mentorAutoFix` 在每个消耗 token 的步骤前检查（控制、每次消融、编辑请求、验证、每个回归案例和写入）。
-
-#### 六个步骤
-
-1. **控制。** 首次需要消融时，弱场景在未变更的视图上重新回答（每场景 `mentor.ablationSamples` 个回答，阶段 `repair: control`）。每次消融的增益相对于控制测量，而非运行本身的分数。重新采样本身就会提升低分，因此控制是基准线。场景在其 `overall` 中位数或 `goal` 中位数低于自身阈值时视为弱：真实 moment 的阈值为 `pass.anchorScore`（设定时，否则 `pass.score`），构造场景的阈值为 `pass.score`。仅当每个重放场景在 `overall` 和 `goal` 两个轴上都达到自身阈值时，循环才以 `not reproduced` 结束。控制只测量一次，所有嫌疑项和所有尝试复用。
-2. **嫌疑项。** 按顺序取诊断的原因，每次尝试最多 `mentor.suspects`（默认 2）个。
-3. **消融。** 在内存覆盖层上移除该片段后重新回答弱场景，测量相对于控制的增益。增益达到 `mentor.ablationGain`（默认 1）即确认。`ablationSamples`（默认 2）个回答每场景。`missing` 原因（应有的指令不存在）无需消融即确认，也不会为其测量控制。
-4. **编辑。** Mentor 模型通过 `mentor-fix.md` 为第一个确认的原因写入一项编辑。编辑须对准已确认的原因：对于在允许层中的原因，编辑须针对那个片段本身（同一提示文件、同一规则、同一列表项、同一公会字段、同一成员和字段），且 `from` 非空；编辑其他位置会被拒绝为 `not the proven cause`。对于 `missing` 原因或位于循环不可编辑层（角色卡或配置关闭的层）中的原因，仅接受添加规则（层 `rules`，`from` 为空）。公会 `patterns` 和 `starters` 可以重写但不可清空（`deletion not allowed`）。超过长度限制的 `learned` 项或 `self`/笑话项被拒绝（`text too long`）。层须在 `mentor.fix.layers` 中，提示文件须在 `mentor.fix.files` 中，增长在 `mentor.fix.maxGrowthChars` 内，档案编辑须保留数字、日期、名称和提及。
-5. **验证。** 编辑应用于覆盖层。同一案例的新场景（`mentor.verify.situations`，默认 3，`mentor.verify.samples`，默认 2）须通过。过滤后的新场景不少于 `mentor.verify.minSituations`（默认 2），否则尝试被拒绝为 `too few fresh situations`。保留数量 `kept` 记录在 `verify.fresh` 中。每个其他活跃案例的已存储场景不得下降超过 `mentor.regression.tolerance`（默认 1），每案例重放最多 `mentor.regression.situations`（默认 2）个场景。循环中的每次测量（控制、消融、验证、回归）都由评审按当前的规则、角色卡和已学习项评分，因此编辑不会移动评判它的标尺。
-6. **应用。** 仅当编辑通过验证且 `features.mentorAutoFix` 仍为 `true` 时，变更存储写入编辑并记录以供撤销。
-
-未确认嫌疑项、编辑被拒绝或验证失败的尝试继续处理剩余嫌疑项。
-
-当所有嫌疑项都已测试且均未确认时，循环可再进行一次尝试，使用合成的 `missing` 原因。条件：`mentor.fix.tryMissing` 不为 `false`（默认 `true`），`fix.maxAttempts` 内还有剩余尝试，且此前未测试过任何 `missing` 原因（无论来自诊断还是来自之前的合成尝试）。此步骤前会检查 `features.mentorAutoFix`。合成原因为 `{ layer: 'missing', excerpt: '', why: <诊断摘要，或无摘要时使用案例文本>, gain: null }`。`missing` 原因没有可移除的片段，因此无需消融和控制测量即可确认（上述步骤 3）。唯一接受的编辑是添加规则（层 `rules`，`from` 为空），验证和应用方式与其他编辑相同。结束原因不变。
-
-#### 编辑可触及的范围
-
-`mentor.fix.layers` 中的层（默认 `["rules", "prompt", "self", "learned", "guild"]`）。角色卡永远不可编辑。`mentor.fix.files` 中的提示文件（默认 `["system-prompt", "format", "reply", "memory", "profile"]`）。Reply 案例的文件为配置列表与 `system-prompt`、`format`、`reply` 的交集：不在回复沙盒中渲染的提示（`interject`、`initiate`、`address` 及记忆写入器的 `memory`、`profile`、`server`、`channel`）不可编辑。Memory 案例仅编辑记忆写入器的提示，仅通过 `prompt` 层。`rules` 层上 `from` 为空时添加规则（与 `/nep rule add` 相同）。成员档案中只有措辞可更改：数字、日期、名称和 `<@id>` 提及由代码检查（`profileGuard`）。
-
-#### 修复提示
-
-`mentor-fix.md`，填充 `{{name}}`。一次 mentor 请求的系统消息。用户消息中的块：
-
-| 块 | 内容 |
-|---|---|
-| `<case>` | 所有者的案例文本，逐字 |
-| `<verdict>` | JSON: `{ passed, medians, situations, reasons }`。原因包括构造场景的 `situation <n>: <axis> <v> is under the floor <f>` 和真实 moment 的 `real moment <n>: <axis> <v> is under the pass score <s>` 或 `... the anchor score <s>` |
-| `<signs>` | 已知的模型文本习惯（可能不存在） |
-| `<feedback>` | 所有者的修正（可能不存在） |
-| `<cause>` | JSON: `{ layer, excerpt, why, gain }`，已确认嫌疑项 |
-| `<seen>` | 角色收到的完整请求：`<system>` 和 `<user>` 子块 |
-| `<allowed>` | JSON: `{ layers, files, maxGrowthChars }` |
-
-回答为单个 JSON 对象：
-
-```json
-{
-  "layer": "rules|prompt|self|learned|guild|profile",
-  "target": "文件名（prompt）、patterns|starters|injokes（guild）、<userId>.<field>（profile）、空（其他）",
-  "from": "逐字引用要替换的文本；添加时为空",
-  "to": "新文本；删除时为空（仅 self、learned、guild 项目）",
-  "why": "一句话，使用聊天语言"
-}
-```
-
-验证：`layer` 必须在 `<allowed>` 中。永远不能是 `card` 或 `missing`。`from` 和 `to` 截断至 1000 字符，`target` 至 200，`why` 至 500。没有有效 `layer` 或没有 `why` 的回答视为无编辑。
-
-#### 运行中存储的内容
-
-运行获得 `repair` 对象：
-
-```
-{
-  control: { medians, situations },
-  attempts: [{ n, suspects: [{ layer, excerpt, located, gain, confirmed, synthetic? }],
-    edit, refused, verify: { fresh: { passed, kept, medians, situations },
-    regression: [{ caseId, held, situations }], skipped } | null, accepted }],
-  applied: { changeId, layer, target, summary } | null,
-  reason, tokens
-}
-```
-
-`control` 在控制测量后出现（循环未到达消融时不存在，如 `missing` 原因）。`verify.fresh.kept` 为过滤后保留的新场景数。带有 `synthetic: true` 的嫌疑项表示循环在诊断的嫌疑项均未确认时自行创建的 `missing` 原因。
-
-`reason`：`applied`、`no diagnosis`、`no suspect left`、`max attempts`、`not reproduced`、`prompt missing`、`disabled`、`budget`、`stopped by the owner`、`apply failed` 或错误名称。
-
-#### 变更记录
-
-`data/guilds/<id>/mentor/changes.json` 存储已记录变更的列表：`{ nextId, changes: [...] }`。每个变更存储 id、案例、层、目标、时间戳和摘要。变更前后的内容保存在 `data/guilds/<id>/mentor/changes/<id>/before.json` 和 `after.json` 中。变更记录在写入和实际执行之间带有 `pending: true`；若此窗口内崩溃，下次 apply 或 undo 会处理挂起的记录。
-
-#### 本地提示覆盖
-
-跟踪的引擎提示永远不会被写入。修复编辑提示文件时，变更存储从跟踪文件创建（或更新）`prompts.local/` 中的本地覆盖，然后将编辑应用于本地副本。空白或仅含空格的本地文件视为不存在：覆盖从跟踪文本开始构建，变更标记为 `blank: true`。覆盖记录跟踪文件的 SHA-256 哈希、mentor 最后写入时文件的 SHA-256（`writtenHash`）和已应用的补丁。
-
-`data/guilds/<id>/mentor/overrides.json` 将每个被覆盖的提示名称映射到 `{ baseHash, writtenHash, patches: [{ changeId, from, to }] }`。
-
-部署更改跟踪文件后，`rebase`（`/nep mentor rebase <name>`）读取新的跟踪文本，重新应用每个 `from` 仍可找到的补丁，丢弃其余的，并更新基础哈希和 `writtenHash`。本地文件的当前哈希与 `writtenHash` 不同（或没有 `writtenHash`）时 `rebase` 拒绝为 `edited by hand`；跟踪文件未变更时拒绝为 `already current`。`rebaseStatus` 报告每个覆盖的 `handEdited: true|false`。
-
-#### 撤销
-
-`/nep mentor undo <id>` 恢复变更替换的内容。内容不再等于变更留下的内容（`changed since`）或已被撤销时拒绝。对于变更创建的本地提示文件（之前没有本地文件），撤销会删除该文件，跟踪文本重新生效。
-
-#### 修复如何结束
-
-终止运行的原因同样终止修复循环：`budget`、`disabled`（mentor 或 autofix 开关被关闭）、`stopped by the owner`。修复循环不更改已测量的运行：其记录与判定一起保存。
-
-管理频道中发布的卡片显示修复结果：`repair: change <id> applied, <layer> <target>, gain <gain>, fresh overall <median>` 和 `undo: /nep mentor undo <id>`，或 `repair: nothing applied (<reason>)`。
 
 ## 限制通知
 

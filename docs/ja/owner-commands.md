@@ -52,15 +52,12 @@
 | `/nep mentor anchor id:<case> message:<link or id>` | 既存のケースに別の moment を追加。`add` と同じ拒否条件に加え、不明なケース、削除済みケース、非 reply ケース、同じメッセージの重複、履歴が空かペルソナのメッセージで終わる moment、`mentor.anchor.max` 超過も拒否されます |
 | `/nep mentor cases` | ケース一覧: id、状態（`new`、`passing`、`failing`）、ターゲット、前回スコア、moment 数（ある場合）、80 文字までのテキスト |
 | `/nep mentor remove <id>` | ケースを削除 |
-| `/nep mentor run <id>` | 1 つのケースのフルサイクルを実行。開始した旨を即時応答。`features.mentorAutoFix` 有効時、不合格のランは修復ループに進む。管理チャンネル（`bot.dryRunChannelId`）がある場合はそこにレポートを投稿。ない場合は `/nep mentor status` と `/nep mentor show <id>` を案内 |
+| `/nep mentor run <id>` | 1 つのケースのフルサイクルを実行。開始した旨を即時応答。管理チャンネル（`bot.dryRunChannelId`）がある場合はそこにレポートを投稿。ない場合は `/nep mentor status` と `/nep mentor show <id>` を案内 |
 | `/nep mentor check` | 実行記録のあるすべてのアクティブケースの保存済み状況を再プレイし、状況ごとに `mentor.check.samples` サンプル（実際の moment は `mentor.anchor.samples` を使用）。管理チャンネルがある場合は統合レポートを投稿。ない場合は `/nep mentor status` と `/nep mentor show <id>` を案内 |
 | `/nep mentor stop` | 実行中のランをキャンセル（進行中のモデル呼び出しを含む） |
-| `/nep mentor show <id>` | 前回ランのレポート: 状況、回答、スコア、コメント、診断（存在する場合）、各試行と取り消し可能な変更 id を含む修復セクション |
+| `/nep mentor show <id>` | 前回ランのレポート: 状況、回答、スコア、コメント、および診断（存在する場合） |
 | `/nep mentor wrong <id> <reason>` | そのケースの判定が誤っていたことと理由を mentor に伝える。今後のスコアリングの反例として保存 |
-| `/nep mentor status` | モデル、有効/無効、本日のトークン使用量/上限、状態別ケース数、実行中のラン（停止保留中は `, stopping` を表示）、`autofix: on|off`、`changes:` 件数（取り消し済みと古いオーバーライドを含む）、最近完了したラン（`last:`）: ケース、結果、overall 中央値、スコアリング済み回答数、トークン数、完了時刻 |
-| `/nep mentor log` | 記録された変更を 1 行ずつ、新しい順に: id、ケース、レイヤー、ターゲット、時刻、サマリー。取り消された変更は `(undone)` と表示 |
-| `/nep mentor undo <id>` | 変更が置き換えた内容を元に戻す。内容がその後変更されている場合（`changed since`）や既に取り消されている場合は拒否 |
-| `/nep mentor rebase <name>` | 現在のトラッキングファイルからローカルプロンプトオーバーライドを再構築し、記録されたパッチを再適用する。デプロイでトラッキングプロンプトファイルが変更された後に使用。ローカルファイルが mentor 以外で変更されている場合は `edited by hand` として拒否（ファイルハッシュを `writtenHash` と比較）、トラッキングファイルが変更されていない場合は `already current` として拒否 |
+| `/nep mentor status` | モデル、有効/無効、本日のトークン使用量/上限、状態別ケース数、実行中のラン（停止保留中は `, stopping` を表示）、および最近完了したラン（`last:`）: ケース、結果、overall 中央値、スコアリング済み回答数、トークン数、完了時刻 |
 | `/nep access grant <command> [role] [user]` | コマンド、グループ、または `*` を全員（デフォルト）、ロール、またはユーザーに開放。`private.*` と `mentor.*` は除外; 上記参照 |
 | `/nep access revoke <command> [role] [user]` | 以前のグラントを全員（デフォルト）、ロール、またはユーザーから取り消し |
 | `/nep access list` | 現在のアクセスグラント一覧を表示 |

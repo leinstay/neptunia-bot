@@ -27,7 +27,6 @@
 | `imageGeneration` | `false` | 允许角色通过绘画子进程绘制图片。缺失的键视为开启。在 `config.local.json` 中启用；需要 `image.model` 中配置支持图像生成的模型。参见[媒体：绘画](media.md#绘画) |
 | `privateMessages` | `false` | 回复公会成员的私信。需要已存储的公共档案且 `affinity.score >= private.minAffinity`。参见[消息与记忆：私有层](messages-and-memory.md#私有层) |
 | `mentor` | `false` | 手动测试子进程，使用独立模型。必须严格为 `true` 才能启用；缺失的键视为关闭。参见 [Mentor](#mentor) |
-| `mentorAutoFix` | `false` | `/nep mentor run` 失败后进入修复循环：通过消融证明诊断，写入经验证的编辑并应用。必须严格为 `true` 才能启用 |
 | `followUp` | `true` | 角色回复后对未标记消息进行分类以延续对话 |
 | `typingSimulation` | `true` | 模拟输入速度 |
 | `adminCommands` | `true` | 所有者斜杠命令；设为 `false` 时注销命令 |
@@ -389,19 +388,6 @@ YouTube 链接的时长通过以下链式探测获取：首先尝试 yt-dlp，�
 | `pass.anchorScore` | `null` | 真实 moment 的阈值。设为数字时，真实 moment 的 `overall` 或 `goal` 中位数低于该值则案例失败。`null` 使用 `pass.score` |
 | `pass.floor` | `5` | 任一轴的中位数低于此下限时案例失败。每个构造场景也受此下限约束：当任一构造场景的 `overall` 中位数或 `goal` 中位数低于此值时案例失败，无论所有回答的中位数如何。真实 moment 以通过分（设置了 `pass.anchorScore` 时用其值，否则用 `pass.score`）为阈值 |
 | `diagnose` | `true` | 失败或存在弱场景的运行结束后，mentor 说明上下文中导致弱回答的原因。存储为运行中的 `diagnosis`；check 不请求 |
-| `suspects` | `2` | 修复循环中每次尝试从诊断中测试的原因数 |
-| `ablationGain` | `1` | 移除嫌疑项后 `overall` 中位数的最小上升幅度，达到即确认 |
-| `ablationSamples` | `2` | 消融测量中每个场景的角色回答数 |
-| `fix.maxAttempts` | `3` | 每次运行的最大修复尝试次数 |
-| `fix.tryMissing` | `true` | 当诊断中没有嫌疑项被消融确认时，再尝试一次，将原因视为缺失的指令，且仅可添加规则 |
-| `fix.maxGrowthChars` | `300` | 一次编辑中提示文件最多可增长的字符数 |
-| `fix.layers` | `["rules", "prompt", "self", "learned", "guild"]` | 编辑可触及的层。角色卡永远不可编辑。部署可向列表中添加 `profile` |
-| `fix.files` | `["system-prompt", "format", "reply", "memory", "profile"]` | 可创建本地覆盖的提示文件。Reply 案例的文件为配置列表与 `system-prompt`、`format`、`reply` 的交集；memory 案例仅编辑记忆写入器的提示，仅通过 `prompt` 层 |
-| `regression.situations` | `2` | 回归检查中重放的每个其他活跃案例的已存储场景数 |
-| `regression.tolerance` | `1` | 已存储场景的 `overall` 中位数相对其记录中位数的最大允许下降 |
-| `verify.situations` | `3` | 为验证编辑而构造的新场景数 |
-| `verify.samples` | `2` | 验证中每个场景的角色回答数 |
-| `verify.minSituations` | `2` | 过滤后所需的最少新场景数；不足时尝试被拒绝为 `too few fresh situations` |
 | `reference.days` | `7` | 用于构建风格参考的聊天历史天数 |
 | `reference.samples` | `60` | 从参考窗口中随机选取的风格示例行数（2–200 字符） |
 | `reference.maxMessages` | `3000` | 从参考频道读取的最大消息数 |
@@ -409,13 +395,11 @@ YouTube 链接的时长通过以下链式探测获取：首先尝试 yt-dlp，�
 | `reference.rareMinAuthors` | `2` | 使用该标点的作者数少于此值时视为稀有 |
 | `anchor.max` | `5` | 每个案例的真实 moment 数。每个 moment 是所有者拒绝的角色消息，连同之前的聊天一起存储 |
 | `anchor.contextMessages` | `30` | 解析 moment 时从频道获取的上下文消息数，截止到触发消息 |
-| `anchor.samples` | `5` | 运行和 `/nep mentor check` 中每个真实 moment 的角色回答数。修复循环的控制和消融使用 `ablationSamples`，验证使用 `verify.samples` |
+| `anchor.samples` | `5` | 运行和 `/nep mentor check` 中每个真实 moment 的角色回答数 |
 | `anchor.hideLaterMemory` | `true` | 重放真实 moment 时，隐藏在触发消息时间点或之后写入的记忆（事件、态度变化、详情、兴趣、别名、学到的内容、知识库条目）。设为 `false` 则使用当前全部记忆重放 |
 | `feedbackExamples` | `10` | 在每次评分请求中包含的最新所有者修正（`/nep mentor wrong`）数 |
 
 `llm.maxRequestTokens`（每次请求 50k）适用于 mentor 发出或引起的每个请求，包括沙盒回答。每次 mentor 请求前，预算检查计入提示加上回答可能的最大成本（`mentor.maxOutputTokens` 乘以 `mentor.outputTokenWeight`），因此当可能的输出不适合剩余预算时请求被拒绝。预算耗尽时运行停止并报告已有结果。运行期间 `features.mentor` 或 `mentor.model` 被关闭时运行也会停止，参考窗口内参考频道中没有人的消息时同样停止。
-
-修复编辑成员档案（`profile` 层）时，代码检查字段中的数字、日期、名称和 `<@id>` 提及保持不变。只有措辞可以更改。
 
 ## `warmup`
 

@@ -99,9 +99,7 @@ The persona can see attached pictures, watch short video clips, read pages behin
 
 ## Mentor
 
-`features.mentor` (off by default) adds a manual testing sub-process with its own model. A case is a real message of the persona plus one sentence about what is wrong with it. The mentor stores the chat that led to the message, invents more situations of the same kind, runs the persona through all of them in a sandbox with the live prompts and memory, and scores every answer on five axes (0–10). All work stays in `data/`. When `bot.dryRunChannelId` is set, a finished run is posted there as well; without an admin channel the owner follows a run with `/nep mentor status` and reads the report with `/nep mentor show <id>`.
-
-With `features.mentorAutoFix` on (off by default), a failed run continues into a repair loop that re-measures the weak situations first (a control run to confirm the failure reproduces), then proves a cause by ablation, writes one edit that targets the proven piece, verifies it on fresh situations and checks it against every other case, and applies it only then, with a record the owner can undo. Every change is recorded in `data/` and can be listed, undone, or rebased after a deploy.
+`features.mentor` (off by default) adds a manual testing sub-process with its own model. A case is a real message of the persona plus one sentence about what is wrong with it. The mentor stores the chat that led to the message, invents more situations of the same kind, runs the persona through all of them in a sandbox with the live prompts and memory, and scores every answer on five axes (0–10). When a run fails or scores poorly, the mentor names likely causes in the persona's context and proposes changes as advice for the owner to review. All work stays in `data/`. When `bot.dryRunChannelId` is set, a finished run is posted there as well; without an admin channel the owner follows a run with `/nep mentor status` and reads the report with `/nep mentor show <id>`.
 
 The mentor model, budget and commands are independent from the persona's. See [`docs/en/configuration.md`](docs/en/configuration.md#mentor) for the config keys and [`docs/en/owner-commands.md`](docs/en/owner-commands.md) for the `/nep mentor` subcommands.
 
@@ -177,7 +175,6 @@ prompts/
   mentor-score-memory.md   mentor: score the analyzer's stored text
   mentor-signs.md          mentor: known habits of model-written text
   mentor-diagnose.md       mentor: explain weak answers after scoring
-  mentor-fix.md            mentor: write one edit against a confirmed cause
   profile.md               warmup: one member's profile from a message sample
   channel.md               warmup: channel notes from a message sample
   server.md                warmup: server-level notes from channel notes and member summaries
