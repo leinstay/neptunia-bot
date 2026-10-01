@@ -185,7 +185,11 @@ Things that outlive a conversation: events, recurring characters, feuds, traditi
 
 ### Self
 
-New facts {{name}} claimed about themselves. A returned `self` replaces the stored list — carry forward what holds. Empty array = nothing new. Up to {{maxSelfFacts}} items. Self-facts appear in the persona's context unchanged. Each item reads as one plain claim: no commentary, no significance framing.
+Claims {{name}} made about themselves that {{name}} would need to stay consistent with later: their life, history, tastes, a stance, a promise, an ability.
+
+Not self-facts: jokes or bits {{name}} performed, one-off quips, comparisons or definitions {{name}} coined, what {{name}} said about other people (those belong to the people's profiles), how {{name}} phrased something, descriptions of their own nature offered as humor. When carrying the list forward, drop these instead of keeping them.
+
+A returned `self` replaces the stored list. Carry forward what holds. Empty array = nothing new. Up to {{maxSelfFacts}} items. Self-facts appear in the persona's context unchanged. Each item reads as one plain claim: no commentary, no significance framing.
 
 All other prose fields (detail text, guild notes, channel notes) ≤ {{fieldChars}} chars each.
 
