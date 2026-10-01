@@ -5701,3 +5701,49 @@ test('run: ping sends each role as its own role and pings a shared model once pe
   assert.ok(routed.some((l) => l.startsWith('talk: anthropic/claude-opus-4.6 — ok,') && l.includes('provider=served-talk')));
   assert.ok(routed.some((l) => l.startsWith('analyzer: anthropic/claude-opus-4.6 — ok,') && l.includes('provider=served-analyzer')));
 });
+
+// ---------------------------------------------------------------------------
+// The variety pass: the /nep status line and /nep variety
+// ---------------------------------------------------------------------------
+
+const VARIETY_PATTERNS = [{ shape: 'mock promise ending in (no)', examples: ['fix it (no)'], count: 3 }];
+
+test('run: status carries one variety line with counts only', async () => {
+  const rootDir = makeRoot();
+  const { admin, store, hot } = makeAdmin(rootDir);
+  const at = Date.now() - 2 * 3_600_000;
+  store.guilds.set('g1', { patterns: '', starters: '', injokes: [], self: [], worn: { at, key: 'k', lines: 6, patterns: VARIETY_PATTERNS } });
+
+  const body = await admin.run('status', {}, {});
+  assert.ok(body.split('\n').includes('variety: on · 1 patterns from 6 lines · 2h old'), body);
+  assert.ok(!body.includes('fix it'), 'no example in the status');
+
+  hot.config.features = { variety: false };
+  assert.ok((await admin.run('status', {}, {})).split('\n').includes('variety: off'));
+});
+
+test('run: variety shows the latest list with examples and the history newest first', async () => {
+  const rootDir = makeRoot();
+  const { admin, store } = makeAdmin(rootDir);
+  const at = Date.UTC(2026, 9, 1, 9, 30, 0);
+  store.guilds.set('g1', {
+    worn: { at, key: 'k', lines: 6, patterns: VARIETY_PATTERNS },
+    wornHistory: [
+      { at: at - 3_600_000, channelId: 'c1', lines: 4, patterns: [{ shape: 'names what was said', count: 2 }] },
+      { at, channelId: 'c1', lines: 6, patterns: [{ shape: 'mock promise ending in (no)', count: 3 }] },
+    ],
+  });
+
+  const lines = (await admin.run('variety', {}, {})).split('\n');
+  assert.equal(lines[1], 'latest (2026-10-01 09:30 UTC):');
+  assert.equal(lines[2], '  - mock promise ending in (no) x3: "fix it (no)"');
+  assert.equal(lines[3], 'history (2, newest first):');
+  assert.equal(lines[4], '  2026-10-01 09:30 · 6 lines · mock promise ending in (no) x3');
+  assert.equal(lines[5], '  2026-10-01 08:30 · 4 lines · names what was said x2');
+});
+
+test('run: access.grant of variety is read-only (no write note)', async () => {
+  const rootDir = makeRoot();
+  const { admin } = makeAdmin(rootDir);
+  assert.equal(await admin.run('access.grant', { command: 'variety' }, {}), 'Granted variety to everyone');
+});

@@ -3,7 +3,8 @@
 //
 //   data/state.json                          scheduler times, token calibration, daily LLM counter
 //   data/guilds/<guildId>/guild.json         how this server talks, in-jokes, what the persona said about itself,
-//                                            what people taught it (`learned`)
+//                                            what people taught it (`learned`), the persona's own recent lines and
+//                                            the variety pass's latest list and history (src/behavior/variety.js)
 //   data/guilds/<guildId>/buffer.json        messages observed since the last memory update
 //   data/guilds/<guildId>/users/<userId>.json  one profile per active member
 //   data/guilds/<guildId>/private/<userId>.json  what the persona learned from one member in direct
@@ -34,6 +35,7 @@ import { applyAliasOps } from './aliases.js';
 import { clampText } from './clamp.js';
 import { mergeEmojiUsage, normalizeEmojiUsage } from './emoji-usage.js';
 import { emptyGifs, findGif, mergeGifs, normalizeGifs, resetGifCounts } from './gifs.js';
+import { appendOwnLine, appendWornHistory, normalizeOwnLines, normalizeWorn, normalizeWornHistory } from '../behavior/variety.js';
 
 function readJson(file, fallback) {
   try {
@@ -134,6 +136,9 @@ export function emptyGuild() {
     learnedNextId: 1, // the next id a learned item gets -- never reused, even after a remove
     emojiUsage: {}, // { [emojiId]: { name, count, last } } -- members' custom emoji uses, see recordEmojiUsage
     emojiBackfill: null, // { at, channels, messages } once src/memory/emoji-backfill.js has read the history
+    ownLines: [], // the persona's own recent lines in server channels, a ring -- see pushOwnLine
+    worn: null, // { at, key, channelId, lines, patterns } -- the variety pass's latest list, see setWorn
+    wornHistory: [], // { at, channelId, lines, patterns: [{ shape, count }] } per pass -- see appendWornHistory
     updatedAt: null,
   };
 }
@@ -243,7 +248,7 @@ function normalizeEmojiBackfill(value) {
   return { at: value.at, channels: count(value.channels), messages: count(value.messages) };
 }
 
-/** Normalize a guild's `learned`/`learnedNextId`/`emojiUsage`/`emojiBackfill` fields in place: a
+/** Normalize a guild's `learned`/`learnedNextId`/`emojiUsage`/`emojiBackfill`/`ownLines`/`worn`/`wornHistory` fields in place: a
  * guild.json written before this list existed loads it as empty, a
  * hand-edited one is validated via src/memory/details.js#normalizeDetails
  * (fresh ids off `learnedNextId` when needed). Every other field is left
@@ -259,6 +264,10 @@ function normalizeGuild(guild) {
   guild.emojiUsage = normalizeEmojiUsage(guild.emojiUsage);
   // Missing or hand-broken -> null: the history backfill has not run.
   guild.emojiBackfill = normalizeEmojiBackfill(guild.emojiBackfill);
+  // The variety pass's fields (src/behavior/variety.js): missing or hand-broken -> empty.
+  guild.ownLines = normalizeOwnLines(guild.ownLines);
+  guild.worn = normalizeWorn(guild.worn);
+  guild.wornHistory = normalizeWornHistory(guild.wornHistory);
 }
 
 /** Keep only the newest `max` UTC-date keys of a `days` counter map. */
@@ -900,12 +909,13 @@ export function createStore({ dataDir }) {
      * through `applyLearnedOps`, which merges incrementally instead of
      * overwriting wholesale (mirrors `updateUser`); `emojiUsage` likewise
      * only through `recordEmojiUsage`/`clearEmojiUsage`, `emojiBackfill` only
-     * through `setEmojiBackfill`.
+     * through `setEmojiBackfill`, `ownLines`/`worn`/`wornHistory` only through
+     * `pushOwnLine`/`setWorn`/`appendWornHistory`.
      */
     updateGuild(guildId, fields) {
       const item = entry(guildFile(guildId), emptyGuild);
       normalizeGuild(item.value);
-      const { learned, learnedNextId, emojiUsage, emojiBackfill, ...safeFields } = fields ?? {};
+      const { learned, learnedNextId, emojiUsage, emojiBackfill, ownLines, worn, wornHistory, ...safeFields } = fields ?? {};
       Object.assign(item.value, safeFields, { updatedAt: new Date().toISOString() });
       item.dirty = true;
       return item.value;
@@ -960,6 +970,58 @@ export function createStore({ dataDir }) {
       item.value.emojiBackfill = normalizeEmojiBackfill(stamp);
       item.dirty = true;
       return item.value.emojiBackfill;
+    },
+
+    /**
+     * Remember one message the persona posted in a server channel: appended
+     * to the guild's `ownLines` ring (src/behavior/variety.js#appendOwnLine,
+     * capped from `window`, `variety.window`). A line without text or time
+     * changes nothing. Never stamps `updatedAt` (a counter, like `touchUser`).
+     * @param {string} guildId
+     * @param {{ id?: string, ts: number, channelId?: string, text: string, to?: string }} line
+     * @param {number} window
+     * @returns {boolean} whether the line was stored
+     */
+    pushOwnLine(guildId, line, window) {
+      const item = entry(guildFile(guildId), emptyGuild);
+      normalizeGuild(item.value);
+      const usable = typeof line?.text === 'string' && line.text.trim() !== '' && Number.isFinite(line?.ts);
+      if (!usable) return false;
+      item.value.ownLines = appendOwnLine(item.value.ownLines, line, window);
+      item.dirty = true;
+      return true;
+    },
+
+    /**
+     * Store the variety pass's latest list (`worn`: `{ at, key, channelId,
+     * lines, patterns }`, normalised like on read). Never stamps `updatedAt`.
+     * @param {string} guildId
+     * @param {object} worn
+     * @returns {object|null} The stored value.
+     */
+    setWorn(guildId, worn) {
+      const item = entry(guildFile(guildId), emptyGuild);
+      normalizeGuild(item.value);
+      item.value.worn = normalizeWorn(worn);
+      item.dirty = true;
+      return item.value.worn;
+    },
+
+    /**
+     * Append one pass to the guild's `wornHistory` (shapes and counts only,
+     * src/behavior/variety.js#appendWornHistory), the oldest dropped past
+     * `max` (`variety.history`). Never stamps `updatedAt`.
+     * @param {string} guildId
+     * @param {{ at: number, channelId?: string|null, lines: number, patterns: object[] }} pass
+     * @param {number} max
+     * @returns {object[]} The stored history.
+     */
+    appendWornHistory(guildId, pass, max) {
+      const item = entry(guildFile(guildId), emptyGuild);
+      normalizeGuild(item.value);
+      item.value.wornHistory = appendWornHistory(item.value.wornHistory, pass, max);
+      item.dirty = true;
+      return item.value.wornHistory;
     },
 
     /**

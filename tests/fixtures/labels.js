@@ -205,6 +205,9 @@ export const labels = {
   limits: {
     notice: 'limit reached ({limit}, {used}/{cap})',
   },
+  variety: {
+    intro: 'devices you used in your last lines, do not repeat them:',
+  },
   mentor: {
     intended: ['a limit notice is a feature'],
     examples: 'real moments, each with the rejected original answer',

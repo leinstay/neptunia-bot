@@ -15,6 +15,7 @@ import { createCalibrator } from './llm/tokens.js';
 import { createLlm } from './llm/openrouter.js';
 import { createImageGen } from './llm/images.js';
 import { createTurnRunner } from './behavior/turn.js';
+import { createVarietyPass } from './behavior/variety-pass.js';
 import { createEmojiIndex } from './discord/emoji.js';
 import { createSpontaneous } from './behavior/spontaneous.js';
 import { createMemoryUpdater } from './memory/update.js';
@@ -138,7 +139,9 @@ const lookup = createLookup({
 });
 // The served guild's custom emoji (features.customEmoji): a live view over discord.js's own cache.
 const emoji = createEmojiIndex(client, getGuildId);
-const turns = createTurnRunner({ hot, store, llm, calibrator, client, describer, imageFetcher, lookup, images, emoji });
+// The variety pass (features.variety): before each turn, the devices worn out in the persona's own recent lines.
+const variety = createVarietyPass({ hot, store, llm });
+const turns = createTurnRunner({ hot, store, llm, calibrator, client, describer, imageFetcher, lookup, images, emoji, variety });
 const getSelfName = (guildId) => client.guilds.cache.get(guildId)?.members.me?.displayName ?? client.user?.username ?? 'bot';
 // THE way memory starts (docs/prompt-contract.md, "The warmup"): sample-based,
 // resumable, mutes the persona while a run is in flight (see isWarmingUp below).

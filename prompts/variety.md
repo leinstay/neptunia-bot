@@ -1,0 +1,21 @@
+You read {{name}}'s last few messages and find repeated devices (turns of phrase, moves, structures) that {{name}} is falling into right now.
+
+Below: <lines> with {{name}}'s own recent messages, oldest first, numbered #1, #2, ... There may be as few as three. A line may end with (to: <a clipped version of what it answered>).
+
+A device is a repeated way of building a reply, not a repeated topic or a word the conversation needed. Kinds: the same opener or closer across lines ("well anyway...", "...but ok" on several replies); the same tag tacked onto the end ("(no)", "...or not" every time); one sentence frame refilled with new words ("I'd call that [noun]", "that's giving [noun]"); the same kind of joke (giving the thing a name, the same comparison template, the same escalation shape); the same stance taken by reflex (always conceding first, always deflecting to the same bit, always ending with a mock promise).
+
+Not a device: {{name}}'s ordinary voice (habitual swearing, lowercase, short lines are constant, not a rut), a word the topic needed (both lines mention "server" because the topic is the server), a reply to the same person about the same thing in one exchange, a running joke the chat keeps alive when {{name}} only answers it.
+
+A device counts when at least two lines use it; prefer ones that appear across different people or topics. A device in the newest lines matters most. With so few lines, do not stretch to fill the list: usually zero to two patterns, never more than {{maxPatterns}}. An empty list is the normal answer.
+
+Answer with ONE bare JSON object, nothing else:
+
+{ "patterns": [ { "shape": "", "examples": ["", ""], "count": 0 } ] }
+
+shape: the device in one short phrase, at most {{shapeChars}} characters, in the language the lines use. Name what the device does, not one of its wordings, so two differently phrased uses of the same move fall under one shape.
+examples: one to three short pieces copied verbatim from the lines, each at most 80 characters.
+count: how many of the lines use this device, at least 2.
+
+Up to {{maxPatterns}} patterns, strongest first. When nothing repeats: { "patterns": [] }.
+
+You judge nothing else: not quality, not tone, not correctness.

@@ -257,11 +257,13 @@ async function sample({ llm, messages, options, samples, signal, onUsage, read }
  * @param {(usage: object|null, estimated: number) => void} [input.onUsage]  Called after every completion.
  * @param {Map<string, string>} [input.descriptions]  Item id -> caption, rendered as the live transcript does.
  * @param {Map<string, object>} [input.videos]  Item id -> video state (`{ state: 'watched', text }`), likewise.
+ * @param {{ shape: string, examples: string[] }[]|null} [input.worn]  What the situation's variety pass
+ *   named (src/mentor/mentor.js), rendered as `<worn>` exactly as in a live turn; omitted, no block.
  * @returns {Promise<{ request: { system: string, user: string },
  *   answers: { messages: { text: string, replyTo: number|null }[], reactions: { to: number, emoji: string }[],
  *     skip: boolean, think: string }[], tokens: number, stopped: boolean }>}
  */
-export async function answerReply({ view, situation, selfId, selfName, channel, llm, samples, now, signal, onUsage, descriptions, videos }) {
+export async function answerReply({ view, situation, selfId, selfName, channel, llm, samples, now, signal, onUsage, descriptions, videos, worn = null }) {
   const config = view.config;
   const memory = view.memory;
   const memoryOn = config.features?.memory !== false;
@@ -297,6 +299,7 @@ export async function answerReply({ view, situation, selfId, selfName, channel, 
     lookup: null,
     searchAvailable: false,
     drawQuota: undefined,
+    worn,
   });
 
   // No pictures: a user message with image parts is sent as its text-only re-render.

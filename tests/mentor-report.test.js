@@ -360,3 +360,16 @@ test('renderFile: a stored repair block is ignored', () => {
   assert.doesNotMatch(text, /^Repair:/m);
   assert.match(text, /Diagnosis \(the mentor's opinion, not verified\)/);
 });
+
+test('renderFile: a situation with a variety pass shows the named devices on one line; without one, no line', () => {
+  const run = fakeRun();
+  run.situations[0].worn = [
+    { shape: 'mock promise ending in (no)', examples: ['fix it (no)', 'behave (no)'], count: 3 },
+    { shape: 'names what was said', examples: ['what a surprise'], count: 2 },
+  ];
+  run.situations[1].worn = [];
+  const text = renderFile(run).text;
+  assert.match(text, /^worn: mock promise ending in \(no\) x3 \("fix it \(no\)", "behave \(no\)"\); names what was said x2 \("what a surprise"\)$/m);
+  assert.match(text, /^worn: nothing named$/m);
+  assert.equal(text.match(/^worn: /gm).length, 2, 'the other situations carry no line');
+});

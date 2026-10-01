@@ -635,3 +635,12 @@ test('answerMemory: the analyzer answer is routed as the analyzer role', async (
   await answerMemory({ view, batch: history, selfName: 'Zoë', llm, samples: 1, now: NOW });
   assert.equal(llm.calls[0].options.role, 'analyzer');
 });
+
+test('answerReply: a situation\'s variety patterns render as <worn> as in a live turn; none, no block', async () => {
+  const worn = [{ shape: 'mock promise ending in (no)', examples: ['fix it (no)'], count: 2 }];
+  const view = liveView({ hot: fakeHot(), store: fakeStore(), guildId: 'g1' });
+  const withBlock = await answerReply({ view, situation: twoLines(), selfId: SELF_ID, selfName: 'Zoë', channel: CHANNEL, llm: fakeLlm('<msg>ok</msg>'), samples: 1, now: NOW, worn });
+  assert.ok(withBlock.request.user.includes(`<worn>\n${labels.variety.intro}\n- mock promise ending in (no) ("fix it (no)")\n</worn>`));
+  const without = await answerReply({ view, situation: twoLines(), selfId: SELF_ID, selfName: 'Zoë', channel: CHANNEL, llm: fakeLlm('<msg>ok</msg>'), samples: 1, now: NOW });
+  assert.ok(!without.request.user.includes('<worn>'));
+});

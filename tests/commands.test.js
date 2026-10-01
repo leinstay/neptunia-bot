@@ -40,7 +40,7 @@ test('buildCommandTree: never emits default_member_permissions -- always visible
 test('buildCommandTree: top-level leaves (status, ping, reload, pause, resume, interject, initiate, draw, set, unset)', () => {
   const [command] = buildCommandTree('nep');
   const names = command.options.map((o) => o.name);
-  assert.deepEqual(names, ['status', 'ping', 'reload', 'pause', 'resume', 'interject', 'initiate', 'draw', 'set', 'unset', 'rule', 'memory', 'private', 'alias', 'lore', 'learned', 'emoji', 'gifs', 'model', 'route', 'warmup', 'mentor', 'access']);
+  assert.deepEqual(names, ['status', 'ping', 'reload', 'variety', 'pause', 'resume', 'interject', 'initiate', 'draw', 'set', 'unset', 'rule', 'memory', 'private', 'alias', 'lore', 'learned', 'emoji', 'gifs', 'model', 'route', 'warmup', 'mentor', 'access']);
 
   const status = findOption(command.options, 'status');
   assert.equal(status.type, 1); // SUBCOMMAND
@@ -1809,4 +1809,12 @@ test('autocomplete: the route model option offers the route prefixes and the mod
   const typed = fakeInteraction({ kind: 'autocomplete', group: 'route', subcommand: 'remove', focused: { name: 'model', value: 'GOO' } });
   await handler(typed);
   assert.deepEqual(typed.respondCalls[0].map((c) => c.value), ['google/', 'google/gemini-3.8-flash']);
+});
+
+test('buildCommandTree: variety is a top-level leaf with no options, mapped to empty args', () => {
+  const [command] = buildCommandTree('nep');
+  const variety = findOption(command.options, 'variety');
+  assert.equal(variety.type, 1); // SUBCOMMAND
+  assert.equal(variety.options, undefined);
+  assert.ok(commandKeys().keys.has('variety'));
 });

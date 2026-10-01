@@ -37,6 +37,7 @@ import { commandKeys } from './discord/commands.js';
 import { isAllowed as accessIsAllowed, isOwnerOnly, grant as accessGrant, revoke as accessRevoke } from './discord/access.js';
 import { classifierTextModel, classifierMediaModel, classifierVideoModel } from './behavior/mention.js';
 import { buildDrawPrompt } from './behavior/prompt.js';
+import { renderVarietyReport, varietyStatusLine } from './behavior/variety.js';
 import { effectiveAffinity } from './behavior/private.js';
 import { ImageCapError, ImageGenError, UnsupportedImageModelError, familyOf as imageFamilyOf } from './llm/images.js';
 import { matchRoute, resolveProvider } from './llm/openrouter.js';
@@ -66,6 +67,7 @@ const READ_ONLY_ACCESS_KEYS = new Set([
   'warmup.people',
   'access.list',
   'route.list',
+  'variety',
 ]);
 
 /** How `/nep access grant` names each owner-only group (src/discord/access.js#OWNER_ONLY_GROUPS) when it refuses it. */
@@ -877,6 +879,8 @@ export function createAdmin({
       const buffer = store.getBuffer(guildId);
       const next = nextSpontaneousFor(guildId);
       lines.push(`guild: ${label} profiles=${profiles} buffer=${buffer.length} nextSpontaneous=${next ?? '-'}`);
+      // The variety pass: the switch, how many patterns its latest list holds and how old it is.
+      lines.push(varietyStatusLine(typeof store.getGuild === 'function' ? store.getGuild(guildId)?.worn : null, cfg, Date.now()));
     } else {
       lines.push('guild: not resolved yet');
     }
@@ -2767,6 +2771,15 @@ async function cmdPing(args) {
       .join('\n');
   }
 
+  /** `/nep variety`: the variety pass's latest list with its examples, then its history newest first. */
+  function cmdVariety(_args, context) {
+    freshenIfPaused();
+    const guildId = resolvedGuildId(context);
+    if (!guildId) throw new Error('no guild resolved yet');
+    const guild = store.getGuild(guildId);
+    return renderVarietyReport(guild?.worn, guild?.wornHistory, hot.config, Date.now());
+  }
+
   /** `/nep emoji status`: how many emoji the ranking holds, the top 10 (rank order,
    * `context.customEmoji.halfLifeDays`) with their counts, and the history backfill stamp. */
   function cmdEmojiStatus(_args, context) {
@@ -2942,6 +2955,7 @@ async function cmdPing(args) {
     'access.grant': (args) => cmdAccessGrant(args),
     'access.revoke': (args) => cmdAccessRevoke(args),
     'access.list': () => cmdAccessList(),
+    variety: (args, context) => cmdVariety(args, context),
   };
 
   /**

@@ -2981,3 +2981,125 @@ test('createTurnRunner: the rewatch and lookup classifiers are requested as clas
   assert.equal(lookup.llm.classifierCalls[0].options.role, 'classifier.text');
   assert.equal(lookup.llm.turnCalls[0].options.role, 'talk');
 });
+
+// ---------------------------------------------------------------------------
+// The variety pass (src/behavior/variety-pass.js): started before the turn's
+// other preparation, its answer rendered as <worn>, posted lines recorded.
+
+const WORN = [{ shape: 'mock promise ending in (no)', examples: ['(no)'], count: 2 }];
+
+/** A fake createVarietyPass(): `forTurn` answers through `answer(input)`, `record` keeps its calls. */
+function fakeVariety(answer = async () => WORN) {
+  const turnCalls = [];
+  const records = [];
+  return {
+    turnCalls,
+    records,
+    forTurn: (input) => {
+      turnCalls.push(input);
+      return answer(input);
+    },
+    record: (guildId, line) => {
+      records.push({ guildId, line });
+      return true;
+    },
+  };
+}
+
+function wornBlockOf(llm) {
+  const user = llm.calls[0][1].content;
+  const text = typeof user === 'string' ? user : user.find((p) => p.type === 'text').text;
+  const match = /<worn>\n([\s\S]*?)\n<\/worn>/.exec(text);
+  return match ? match[1] : null;
+}
+
+test('runTurn: the variety pass gets the turn\'s history and channel; its answer becomes the <worn> block', async () => {
+  const mine = rawMessage({ id: 'm0', authorId: 'self-id', authorName: 'Bot', ts: NOW - 5000, content: 'I will behave (no)' });
+  const raw = rawMessage({ id: 'm1' });
+  const channel = fakeTurnChannel({ historyMessages: [mine, raw] });
+  const llm = fakeLlm('<msg>hi</msg>');
+  const variety = fakeVariety();
+  const turns = createTurnRunner({ hot: fakeHot(), store: fakeStore(), llm, calibrator: identityCalibrator(), client: fakeClient(), variety });
+  await turns.runTurn({ channel, mode: 'reply', trigger: normalizedTrigger(raw), triggerKind: 'mention' });
+
+  assert.equal(variety.turnCalls.length, 1);
+  const input = variety.turnCalls[0];
+  assert.equal(input.guildId, 'g1');
+  assert.equal(input.channelId, 'c1');
+  assert.equal(input.privateChat, false);
+  assert.equal(input.selfName, 'Bot');
+  assert.deepEqual(input.history.filter((m) => m.self).map((m) => m.id), ['m0']);
+  assert.equal(wornBlockOf(llm), [labels.variety.intro, '- mock promise ending in (no) ("(no)")'].join('\n'));
+});
+
+test('runTurn: no variety pass, a null answer or a rejecting one -> the turn speaks without <worn>', async () => {
+  for (const variety of [undefined, fakeVariety(async () => null), fakeVariety(async () => { throw new Error('boom'); })]) {
+    const raw = rawMessage({ id: 'm1' });
+    const channel = fakeTurnChannel({ historyMessages: [raw] });
+    const llm = fakeLlm('<msg>hi</msg>');
+    const turns = createTurnRunner({ hot: fakeHot(), store: fakeStore(), llm, calibrator: identityCalibrator(), client: fakeClient(), variety });
+    const result = await turns.runTurn({ channel, mode: 'reply', trigger: normalizedTrigger(raw), triggerKind: 'mention' });
+    assert.equal(result.outcome, 'spoke');
+    assert.equal(wornBlockOf(llm), null);
+  }
+});
+
+test('runTurn: the variety pass runs alongside the rest of the preparation, not before it', async () => {
+  const raw = rawMessage({ id: 'm1' });
+  const channel = fakeTurnChannel({ historyMessages: [raw] });
+  const llm = fakeLlm('<msg>hi</msg>');
+  let described;
+  const describedOnce = new Promise((resolve) => {
+    described = resolve;
+  });
+  // The pass answers only once the describer has been asked: a turn that awaited the pass first would hang.
+  const variety = fakeVariety(async () => {
+    await describedOnce;
+    return WORN;
+  });
+  const describer = {
+    describeMany: async () => {
+      described();
+      return { descriptions: new Map() };
+    },
+  };
+  const turns = createTurnRunner({ hot: fakeHot({ mediaDescriptions: true }), store: fakeStore(), llm, calibrator: identityCalibrator(), client: fakeClient(), variety, describer });
+  const result = await Promise.race([
+    turns.runTurn({ channel, mode: 'reply', trigger: normalizedTrigger(raw), triggerKind: 'mention' }),
+    new Promise((resolve) => setTimeout(() => resolve({ outcome: 'hung' }), 2000)),
+  ]);
+  assert.equal(result.outcome, 'spoke');
+  assert.notEqual(wornBlockOf(llm), null);
+});
+
+test('runTurn: every message posted in a server channel joins the ring with its id and what it answered', async () => {
+  const raw = rawMessage({ id: 'm1', content: 'is the café open?' });
+  const channel = fakeTurnChannel({ historyMessages: [raw] });
+  const llm = fakeLlm('<msg reply="#1">ναι</msg><msg>until nine</msg>');
+  const variety = fakeVariety();
+  const turns = createTurnRunner({ hot: fakeHot(), store: fakeStore(), llm, calibrator: identityCalibrator(), client: fakeClient(), variety, now: () => NOW });
+  await turns.runTurn({ channel, mode: 'reply', trigger: normalizedTrigger(raw), triggerKind: 'mention' });
+
+  assert.deepEqual(variety.records, [
+    { guildId: 'g1', line: { id: 'sent-1', ts: NOW, channelId: 'c1', text: 'ναι', to: 'is the café open?' } },
+    { guildId: 'g1', line: { id: 'sent-2', ts: NOW, channelId: 'c1', text: 'until nine', to: 'is the café open?' } },
+  ]);
+});
+
+test('runTurn: a dry run records nothing; a private chat runs its pass as private and records nothing', async () => {
+  const raw = rawMessage({ id: 'm1' });
+  const dry = fakeVariety();
+  const turns = createTurnRunner({ hot: fakeHot({ dryRun: true }), store: fakeStore(), llm: fakeLlm('<msg>hi</msg>'), calibrator: identityCalibrator(), client: fakeClient(), variety: dry });
+  await turns.runTurn({ channel: fakeTurnChannel({ historyMessages: [raw] }), mode: 'reply', trigger: normalizedTrigger(raw), triggerKind: 'mention' });
+  assert.equal(dry.turnCalls.length, 1, 'the request of a dry run carries the block too');
+  assert.deepEqual(dry.records, []);
+
+  const variety = fakeVariety();
+  const channel = fakeTurnChannel({ id: 'dm1', dm: true, historyMessages: [raw] });
+  const privateTurns = createTurnRunner({ hot: privateHot(), store: privateStore(), llm: sequenceLlm(['<msg>hi</msg>']), calibrator: identityCalibrator(), client: guildClient(), variety });
+  const result = await privateTurns.runTurn({ channel, guildId: 'g1', mode: 'reply', trigger: normalizedTrigger(raw), triggerKind: 'private' });
+  assert.equal(result.outcome, 'spoke');
+  assert.equal(variety.turnCalls[0].privateChat, true);
+  assert.equal(variety.turnCalls[0].guildId, 'g1');
+  assert.deepEqual(variety.records, []);
+});

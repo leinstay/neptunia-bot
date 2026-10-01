@@ -8,6 +8,7 @@
 //   4. the map of the server's channels
 //   5. the channel transcript, newest messages first
 //   6. memory about other people present in the transcript
+//   6b. the devices the persona has worn out in its own recent lines (`<worn>`, one piece)
 //   7. neighbouring channels
 //   8. the server's custom emoji (`<emoji>`)
 //   9. the GIF library (`<gifs>`)
@@ -30,6 +31,7 @@ import { channelActivity, renderChannel } from '../memory/channels.js';
 import { selectPictures, mediaProxyUrl } from '../discord/media.js';
 import { fromTokens, occursAsWholeWord } from '../memory/mentions.js';
 import { mergeProfiles } from './private.js';
+import { renderWorn } from './variety.js';
 
 const TAG_OVERHEAD = 60;
 
@@ -566,6 +568,8 @@ function assembleUser({ now, timezone, labels, sensesText, kept, tempoText, task
     block('self_facts', kept.self.join('\n')),
     block('people', [...kept.interlocutor, ...kept.people].join('\n\n')),
     block('other_channels', kept.neighbors.join('\n\n')),
+    // The persona's own worn-out devices, just ahead of the chat where its own lines are.
+    block('worn', (kept.worn ?? []).join('\n')),
     // Right before the chat it answers a question from.
     block('lookup', (kept.lookup ?? []).join('\n')),
     block('chat', renderTranscript(chatItems, timezone, labels)),
@@ -913,6 +917,11 @@ function splitPeople(otherProfiles, candidateProfiles, history, trigger, exclude
  *   on (a missing key counts as on) and at least one entry, `<gifs>` renders (see `gifItems`),
  *   `<senses>` carries `senses.gifs`, and a GIF of the library in the transcript carries its
  *   handle (`transcript.gifKnown`/`gifKnownNoText`). Omitted or empty -> none of it.
+ * @param {{ shape: string, examples: string[] }[]|null} [input.worn]  What this turn's variety pass
+ *   (src/behavior/variety-pass.js, or the mentor's sandbox) named in the persona's own recent
+ *   lines; with `features.variety` on (a missing key counts as on) and `labels.variety.intro`
+ *   present, rendered as `<worn>` (see src/behavior/variety.js#renderWorn). Omitted, null or
+ *   empty -> no block.
  * @returns {{ messages: object[], stats: object, idByIndex: Map<number, string>, tempo: object }}
  */
 export function buildRequest(input) {
@@ -1120,6 +1129,8 @@ export function buildRequest(input) {
           ),
         ].filter(Boolean),
       },
+      // One small piece, kept or dropped whole: below the chat and the people, above the rest.
+      { name: 'worn', items: [renderWorn(input.worn, labels, config)].filter(Boolean) },
       { name: 'neighbors', cap: caps.neighbors, items: neighborItems },
       // Lowest priority: a list to pick from, trimmed from the bottom (least used last).
       {

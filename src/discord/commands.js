@@ -137,6 +137,7 @@ export function buildCommandTree(commandName) {
           ],
         },
         { type: SUBCOMMAND, name: 'reload', description: 'Reload config and prompts now.' },
+        { type: SUBCOMMAND, name: 'variety', description: 'Worn devices: latest list and history.' },
         {
           type: SUBCOMMAND,
           name: 'pause',
@@ -838,6 +839,7 @@ const OPTION_MAPPERS = {
     userId: options.getUser('user')?.id,
   }),
   'access.list': () => ({}),
+  variety: () => ({}),
 };
 
 function buildArgs(commandKey, interaction) {

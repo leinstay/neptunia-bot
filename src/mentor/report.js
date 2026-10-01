@@ -171,6 +171,17 @@ function answerLines(answer, target) {
   return lines;
 }
 
+/**
+ * `worn: <shape> x<count> ("<example>", ...); ...` -- the devices the variety
+ * pass named for a situation; `worn: nothing named` for an empty list.
+ */
+function wornLine(worn) {
+  const items = worn
+    .filter((p) => p && typeof p.shape === 'string')
+    .map((p) => `${p.shape} x${num(p.count)} (${(Array.isArray(p.examples) ? p.examples : []).map((e) => `"${e}"`).join(', ')})`);
+  return `worn: ${items.length ? items.join('; ') : 'nothing named'}`;
+}
+
 /** A multi-line text indented under a list item. */
 function indented(text) {
   return String(text ?? '').replace(/\n/g, '\n    ');
@@ -237,6 +248,8 @@ export function renderFile(run) {
       const medians = situationMedian(run, situation.n);
       lines.push(`medians: overall ${num(medians?.overall)} · goal ${num(medians?.goal)}`);
     }
+    // What the variety pass named in the persona's own lines of this situation, on one line.
+    if (Array.isArray(situation.worn)) lines.push(wornLine(situation.worn));
     lines.push(RULE, String(situation.transcript ?? ''));
     if (isAnchor(situation) && Array.isArray(situation.original) && situation.original.length > 0) {
       lines.push('', 'original answer:', ...situation.original.map((text) => `  ${String(text).replace(/\n/g, '\n  ')}`));

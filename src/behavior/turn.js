@@ -296,6 +296,12 @@ function describableCandidates(history, picked, { includePicked = false } = {}) 
  * Likewise, videos are only watched when `features.mediaDescriptions` AND
  * `features.videoDescriptions` (a missing key counts as on) are on and the describer has
  * `describeVideos`; otherwise they render as before.
+ *
+ * `variety` (src/behavior/variety-pass.js#createVarietyPass) is optional: when
+ * present, every turn starts its pass on the persona's own recent lines as
+ * soon as the history is known, alongside the rest of the preparation, and the
+ * request carries its answer as `<worn>`; every message posted in a server
+ * channel joins its ring of own lines. Absent -> neither.
  */
 export function createTurnRunner({
   hot,
@@ -310,6 +316,7 @@ export function createTurnRunner({
   lookup,
   images,
   emoji,
+  variety,
   now: clock = Date.now,
 }) {
   const busy = new Set();
@@ -666,12 +673,24 @@ export function createTurnRunner({
       }
 
       const replyId = !isFollowUp && message.replyTo !== null ? idByIndex.get(message.replyTo) : null;
-      await channel.send({
+      const posted = await channel.send({
         content: text,
         reply: replyId ? { messageReference: replyId, failIfNotExists: false } : undefined,
         allowedMentions: { parse: [], users: userIds, repliedUser: true },
       });
       lastPostAt.set(channel.id, Date.now());
+      // The ring of own lines the variety pass reads for the other channels: server channels only,
+      // the persona's text as it wrote it, with what it answered (the message it replied to, else the trigger).
+      if (variety && channel.guild) {
+        const answered = replyId ? history.find((m) => m.id === replyId) : trigger;
+        variety.record(channel.guild.id, {
+          id: posted?.id ?? null,
+          ts: clock(),
+          channelId: channel.id,
+          text: message.text,
+          to: typeof answered?.content === 'string' ? answered.content : undefined,
+        });
+      }
       log.info('turn: sent', {
         channel: channel.id,
         chars: text.length,
@@ -1017,6 +1036,14 @@ export function createTurnRunner({
         if (!finalMode) return { outcome: 'not-now' };
       }
 
+      // The variety pass on the persona's own recent lines starts now and runs alongside everything
+      // below (descriptions, re-watch, lookup, neighbours); it never rejects and is bounded by
+      // variety.timeoutMs, so it can only shorten the turn's wait, never fail it.
+      const wornPending =
+        variety && typeof variety.forTurn === 'function'
+          ? variety.forTurn({ guildId, channelId: channel.id, history, selfName, privateChat: isPrivate }).catch(() => null)
+          : Promise.resolve(null);
+
       // Lazy, request-time only (see fetchTextPreview's header comment):
       // never fetched during plain normalization or while just buffered.
       history = await withTextPreviews(history, config.media?.filePreviewChars ?? 500, fetchImpl);
@@ -1124,6 +1151,7 @@ export function createTurnRunner({
       // and Attach Files here; a drawFailed turn answers the failure and never draws again.
       const drawOn = Boolean(images) && features.imageGeneration !== false && triggerKind !== 'drawFailed' && canAttach(channel);
       const drawQuota = drawOn ? images.quota({ userId: trigger?.authorId ?? null }) : undefined;
+      const worn = await wornPending;
       const request = buildRequest({
         config,
         prompts: hot.prompts,
@@ -1163,6 +1191,8 @@ export function createTurnRunner({
         // The cached captions of both lists.
         mediaCache:
           emoji || (features.gifs !== false && typeof store.getGifs === 'function') ? store.getMediaCache(guildId) : null,
+        // The `<worn>` block: what this turn's variety pass named, or nothing.
+        worn,
       });
 
       // A Discord CDN image the provider cannot fetch must not cost the
