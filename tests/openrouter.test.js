@@ -4,7 +4,7 @@
 // (~1.5s) as instructed -- the backoff sleep in src is not touched.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createLlm, TokenLimitError, DailyCapError } from '../src/llm/openrouter.js';
+import { createLlm, TokenLimitError, DailyCapError, resolveProvider } from '../src/llm/openrouter.js';
 
 function baseConfig(overrides = {}) {
   return {
@@ -790,4 +790,124 @@ test('complete: options.reasoning (a plain object) is sent verbatim as body.reas
   await llm.complete([{ role: 'user', content: 'hi' }], { reasoning: ['x'] });
   assert.deepEqual(bodies[0].reasoning, { enabled: false });
   for (const body of bodies.slice(1)) assert.equal('reasoning' in body, false);
+});
+
+// --- provider routing per model family (llm.providerByModel) ---
+
+const BEDROCK = { only: ['amazon-bedrock'], allow_fallbacks: false };
+const VERTEX = { only: ['google-vertex'] };
+
+test('resolveProvider: a plain-object override wins over by-model and fallback', () => {
+  const override = { order: ['x'] };
+  const got = resolveProvider('anthropic/claude-opus-4.6', { override, byModel: { 'anthropic/': BEDROCK }, fallback: VERTEX });
+  assert.equal(got, override);
+});
+
+test('resolveProvider: a by-model entry wins over the fallback', () => {
+  const got = resolveProvider('anthropic/claude-opus-4.6', { byModel: { 'anthropic/': BEDROCK }, fallback: VERTEX });
+  assert.equal(got, BEDROCK);
+});
+
+test('resolveProvider: the longest matching prefix is chosen, regardless of key order', () => {
+  const exact = { only: ['anthropic'] };
+  for (const byModel of [
+    { 'anthropic/': BEDROCK, 'anthropic/claude-opus-4.6': exact },
+    { 'anthropic/claude-opus-4.6': exact, 'anthropic/': BEDROCK },
+  ]) {
+    assert.equal(resolveProvider('anthropic/claude-opus-4.6', { byModel }), exact);
+    assert.equal(resolveProvider('anthropic/claude-sonnet-4.6', { byModel }), BEDROCK);
+  }
+});
+
+test('resolveProvider: a non-matching model falls to the fallback, then to nothing', () => {
+  const byModel = { 'anthropic/': BEDROCK, 'google/': VERTEX };
+  const fallback = { ignore: ['some-provider'] };
+  assert.equal(resolveProvider('openai/gpt-x', { byModel, fallback }), fallback);
+  assert.equal(resolveProvider('openai/gpt-x', { byModel }), undefined);
+  assert.equal(resolveProvider('openai/gpt-x', { byModel, fallback: null }), undefined);
+});
+
+test('resolveProvider: keys are compared case-sensitively', () => {
+  assert.equal(resolveProvider('anthropic/claude-opus-4.6', { byModel: { 'Anthropic/': BEDROCK } }), undefined);
+});
+
+test('resolveProvider: a non-object entry is ignored and a shorter valid prefix still matches', () => {
+  const byModel = { 'anthropic/': BEDROCK, 'anthropic/claude-opus-4.6': ['amazon-bedrock'], 'anthropic/claude': null, 'anthropic/c': 'x' };
+  assert.equal(resolveProvider('anthropic/claude-opus-4.6', { byModel }), BEDROCK);
+  assert.equal(resolveProvider('anthropic/claude-opus-4.6', { byModel: { 'anthropic/': 'amazon-bedrock' }, fallback: VERTEX }), VERTEX);
+});
+
+test('resolveProvider: a non-object map, override or fallback is ignored; a non-string model skips the map', () => {
+  for (const byModel of [null, undefined, 'anthropic/', ['anthropic/']]) {
+    assert.equal(resolveProvider('anthropic/claude-opus-4.6', { byModel, override: ['x'], fallback: VERTEX }), VERTEX);
+  }
+  assert.equal(resolveProvider(undefined, { byModel: { '': BEDROCK }, fallback: VERTEX }), VERTEX);
+  assert.equal(resolveProvider('anthropic/x', { byModel: { 'anthropic/': BEDROCK }, override: 'pinned', fallback: [1] }), BEDROCK);
+  assert.equal(resolveProvider('anthropic/x'), undefined);
+});
+
+function capturingLlm(getConfig) {
+  const bodies = [];
+  const llm = createLlm({
+    apiKey: 'k',
+    getConfig,
+    calibrator: fakeCalibrator(),
+    state: fakeState(),
+    fetchImpl: async (url, init) => {
+      bodies.push(JSON.parse(init.body));
+      return okResponse('hi');
+    },
+  });
+  return { llm, bodies };
+}
+
+test('complete: precedence options.provider > llm.providerByModel (longest prefix) > llm.provider > none', async () => {
+  const exact = { only: ['anthropic'] };
+  const fallback = { ignore: ['some-provider'] };
+  const pinned = { order: ['google-ai-studio'], allow_fallbacks: false };
+  let cfg = baseConfig({
+    model: 'anthropic/claude-opus-4.6',
+    provider: fallback,
+    providerByModel: { 'anthropic/': BEDROCK, 'anthropic/claude-opus-4.6': exact, 'google/': VERTEX },
+  });
+  const { llm, bodies } = capturingLlm(() => cfg);
+  const msgs = [{ role: 'user', content: 'hi' }];
+  await llm.complete(msgs, { provider: pinned });
+  await llm.complete(msgs);
+  await llm.complete(msgs, { model: 'anthropic/claude-haiku-4.5' });
+  await llm.complete(msgs, { model: 'google/gemini-3.8-flash', provider: null });
+  await llm.complete(msgs, { model: 'openai/gpt-x' });
+  cfg = baseConfig({ model: 'openai/gpt-x', provider: null, providerByModel: { 'anthropic/': BEDROCK } });
+  await llm.complete(msgs);
+  assert.deepEqual(bodies[0].provider, pinned);
+  assert.deepEqual(bodies[1].provider, exact);
+  assert.deepEqual(bodies[2].provider, BEDROCK);
+  assert.deepEqual(bodies[3].provider, VERTEX);
+  assert.deepEqual(bodies[4].provider, fallback);
+  assert.equal('provider' in bodies[5], false);
+});
+
+test('complete: an invalid llm.providerByModel entry is ignored and llm.provider applies', async () => {
+  const fallback = { ignore: ['some-provider'] };
+  const { llm, bodies } = capturingLlm(() => baseConfig({
+    model: 'anthropic/claude-opus-4.6',
+    provider: fallback,
+    providerByModel: { 'anthropic/': ['amazon-bedrock'], 'anthropic/claude-opus-4.6': 'amazon-bedrock' },
+  }));
+  await llm.complete([{ role: 'user', content: 'hi' }]);
+  assert.deepEqual(bodies[0].provider, fallback);
+});
+
+test('complete: llm.providerByModel is read fresh on every call (hot-reloadable)', async () => {
+  let providerByModel = { 'anthropic/': BEDROCK };
+  const { llm, bodies } = capturingLlm(() => baseConfig({ model: 'anthropic/claude-opus-4.6', providerByModel }));
+  const msgs = [{ role: 'user', content: 'hi' }];
+  await llm.complete(msgs);
+  providerByModel = { 'anthropic/': { only: ['anthropic'] } };
+  await llm.complete(msgs);
+  providerByModel = {};
+  await llm.complete(msgs);
+  assert.deepEqual(bodies[0].provider, BEDROCK);
+  assert.deepEqual(bodies[1].provider, { only: ['anthropic'] });
+  assert.equal('provider' in bodies[2], false);
 });

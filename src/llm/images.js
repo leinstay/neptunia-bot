@@ -9,6 +9,7 @@
 // (it may quote members).
 
 import { log } from '../log.js';
+import { resolveProvider } from './openrouter.js';
 
 const RETRY_STATUS = new Set([408, 429, 500, 502, 503, 504]);
 const MODERATION_STATUS = new Set([400, 403]);
@@ -82,15 +83,20 @@ export function familyOf(model) {
   return null;
 }
 
-/** The request body for one generation; `null`/undefined config values omit their fields. */
-function buildBody({ cfg, family, prompt, reference }) {
+/**
+ * The request body for one generation; `null`/undefined config values omit their fields.
+ * `byModel` is `llm.providerByModel`, read by the caller at the moment of use.
+ */
+function buildBody({ cfg, byModel, family, prompt, reference }) {
   const body = { model: cfg.model, prompt };
   if (cfg.outputFormat != null) body.output_format = cfg.outputFormat;
   if (cfg.aspectRatio != null && !(family === 'google' && cfg.aspectRatio === 'auto')) {
     body.aspect_ratio = cfg.aspectRatio;
   }
-  // Routing first (copied, never mutated), then the family's own provider options over it.
-  const provider = isPlainObject(cfg.provider) ? { ...cfg.provider } : {};
+  // Routing first (the longest-prefix `llm.providerByModel` entry for the model, else
+  // `image.provider`; copied, never mutated), then the family's own provider options over it.
+  const routing = resolveProvider(cfg.model, { byModel, fallback: cfg.provider });
+  const provider = routing ? { ...routing } : {};
   if (family === 'openai') {
     const openai = cfg.openai ?? {};
     if (openai.quality != null) body.quality = openai.quality;
@@ -183,7 +189,8 @@ export function createImageGen({ apiKey, getConfig, state, fetchImpl = fetch, no
       throw err;
     }
 
-    const body = JSON.stringify(buildBody({ cfg, family, prompt, reference }));
+    const byModel = getConfig().llm?.providerByModel;
+    const body = JSON.stringify(buildBody({ cfg, byModel, family, prompt, reference }));
     // Normalised so a negative, NaN or non-numeric value still sends one request.
     const retries = Math.max(0, Math.floor(Number(cfg.retries ?? 1)) || 0);
     const timeoutMs = cfg.timeoutMs ?? 120000;

@@ -27,6 +27,37 @@ function chatCompletionsUrl(baseUrl) {
 export class TokenLimitError extends Error {}
 export class DailyCapError extends Error {}
 
+/** A plain object: the only shape sent as OpenRouter provider routing. */
+function isRouting(value) {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+/**
+ * The OpenRouter provider routing for one request, or undefined to send none.
+ * Precedence: a plain-object `override` (a caller pinning its own route), then
+ * the `byModel` entry whose key is the longest case-sensitive prefix of `model`
+ * (an exact id is simply the longest prefix), then a plain-object `fallback`.
+ * Non-object entries, maps and values are ignored. Exists because a provider
+ * restriction (e.g. `only`) must differ per model family when the owner's own
+ * provider keys are used: one routing object cannot fit every model.
+ * The chosen object is returned as is, never copied or mutated.
+ * @param {unknown} model
+ * @param {{ override?: unknown, byModel?: unknown, fallback?: unknown }} [sources]
+ * @returns {object|undefined}
+ */
+export function resolveProvider(model, { override, byModel, fallback } = {}) {
+  if (isRouting(override)) return override;
+  if (typeof model === 'string' && isRouting(byModel)) {
+    let bestKey = null;
+    for (const [key, value] of Object.entries(byModel)) {
+      if (!isRouting(value) || !model.startsWith(key)) continue;
+      if (bestKey === null || key.length > bestKey.length) bestKey = key;
+    }
+    if (bestKey !== null) return byModel[bestKey];
+  }
+  return isRouting(fallback) ? fallback : undefined;
+}
+
 /**
  * @param {object} deps
  * @param {string} deps.apiKey
@@ -80,9 +111,10 @@ export function createLlm({ apiKey, getConfig, calibrator, state, fetchImpl = fe
    * request already counted by the provider cannot be un-billed, but no
    * further retry/tokens are spent past the moment of the abort.
    * `options.provider` — OpenRouter provider routing for this one call; a plain
-   * object REPLACES `cfg.provider` (any other value leaves `cfg.provider` in
-   * charge). Exists for the video describer, which pins the provider that can
-   * fetch a public video URL.
+   * object REPLACES the configured routing (`llm.providerByModel`, then
+   * `llm.provider`; see `resolveProvider`); any other value leaves the
+   * configured routing in charge. Exists for the video describer, which pins
+   * the provider that can fetch a public video URL.
    * `options.reasoning` — OpenRouter's reasoning settings for this one call
    * (e.g. `{ enabled: false }`); a plain object is sent verbatim as
    * `body.reasoning`, anything else omits the field. Exists for the video
@@ -126,16 +158,17 @@ export function createLlm({ apiKey, getConfig, calibrator, state, fetchImpl = fe
       temperature: options.temperature ?? cfg.temperature,
       max_tokens: options.maxOutputTokens ?? cfg.maxOutputTokens,
     };
-    // OpenRouter's provider routing (e.g. `{ ignore: [...] }`, `{ order: [...] }`), sent
-    // verbatim and read fresh on every call so it is hot-reloadable. A non-object (including
-    // the default null) omits the field entirely -- OpenRouter then picks providers itself.
-    // A plain-object `options.provider` replaces it for this one call.
-    const isRouting = (value) => Boolean(value) && typeof value === 'object' && !Array.isArray(value);
-    if (isRouting(options.provider)) {
-      body.provider = options.provider;
-    } else if (isRouting(cfg.provider)) {
-      body.provider = cfg.provider;
-    }
+    // OpenRouter's provider routing (e.g. `{ ignore: [...] }`, `{ only: [...] }`), sent
+    // verbatim and read fresh on every call so it is hot-reloadable: a plain-object
+    // `options.provider`, else the longest-prefix `llm.providerByModel` entry for this
+    // request's model, else `llm.provider`. When none applies the field is omitted --
+    // OpenRouter then picks providers itself.
+    const provider = resolveProvider(body.model, {
+      override: options.provider,
+      byModel: cfg.providerByModel,
+      fallback: cfg.provider,
+    });
+    if (provider) body.provider = provider;
     if (isRouting(options.reasoning)) body.reasoning = options.reasoning;
 
     let lastError;

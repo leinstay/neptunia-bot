@@ -49,7 +49,8 @@
     "pingTimeoutMs": 30000,
     "retries": 2,
     "maxRequestsPerDay": 300,
-    "provider": null
+    "provider": null,
+    "providerByModel": {}
   },
   "classifier": {
     "text": "anthropic/claude-sonnet-4.6",

@@ -348,3 +348,42 @@ test('images: familyOf maps prefixes', () => {
   const { gen } = makeGen();
   assert.equal(gen.familyOf('google/x'), 'google');
 });
+
+// --- provider routing per model family (llm.providerByModel) ---
+
+test('images: llm.providerByModel (longest prefix) wins over image.provider, with moderation merged over it', async () => {
+  const config = baseConfig({ provider: { ignore: ['some-provider'] } });
+  config.llm.providerByModel = {
+    'openai/': { only: ['azure'] },
+    'openai/test-image': { only: ['openai'], allow_fallbacks: false },
+  };
+  const { gen, fetchImpl } = makeGen({ config });
+  await gen.generate({ prompt: 'a small boat' });
+  assert.deepEqual(fetchImpl.calls[0].body.provider, {
+    only: ['openai'],
+    allow_fallbacks: false,
+    options: { openai: { moderation: 'low' } },
+  });
+  assert.deepEqual(config.llm.providerByModel['openai/test-image'], { only: ['openai'], allow_fallbacks: false }, 'the config object is not mutated');
+});
+
+test('images: a model with no valid by-model entry falls back to image.provider, then to nothing', async () => {
+  const config = baseConfig({ model: 'google/test-image', provider: { order: ['google-vertex'] } });
+  config.llm.providerByModel = { 'openai/': { only: ['openai'] }, 'google/test-image': 'google-vertex' };
+  const { gen, fetchImpl } = makeGen({ config });
+  await gen.generate({ prompt: 'a small boat' });
+  assert.deepEqual(fetchImpl.calls[0].body.provider, { order: ['google-vertex'] });
+  config.image.provider = null;
+  await gen.generate({ prompt: 'a small boat' });
+  assert.equal('provider' in fetchImpl.calls[1].body, false);
+});
+
+test('images: llm.providerByModel is read fresh on every generation', async () => {
+  const config = baseConfig({ model: 'google/test-image' });
+  const { gen, fetchImpl } = makeGen({ config });
+  await gen.generate({ prompt: 'a small boat' });
+  config.llm.providerByModel = { 'google/': { only: ['google-vertex'] } };
+  await gen.generate({ prompt: 'a small boat' });
+  assert.equal('provider' in fetchImpl.calls[0].body, false);
+  assert.deepEqual(fetchImpl.calls[1].body.provider, { only: ['google-vertex'] });
+});
