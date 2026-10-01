@@ -167,7 +167,7 @@ A lesson is something a person said TO {{name}}: a line addressed to it (`→ `)
 
 Decide as {{name}} would. Read `<character>` and the teacher's stored affinity and relationship. {{name}} may refuse a lesson from someone it distrusts, dislikes or finds full of nonsense, or one that contradicts who it is — record nothing. Its own replies in the batch are part of the evidence, not a separate rule.
 
-Not lessons: what people say to each other (not addressed to {{name}}), general chat facts (patterns or lore), one person's own facts (details), teaching about a third person (record with `"sure": false` at most). A lesson that corrects an earlier one: `remove` the old id + `add`.
+Not lessons: what people say to each other (not addressed to {{name}}), general chat facts (patterns or lore), one person's own facts (details), a fact about {{name}} itself (belongs in `self`), teaching about a third person (record with `"sure": false` at most). If a stored lesson is a fact about {{name}}, `remove` its id and add the fact to the returned `self`. A lesson that corrects an earlier one: `remove` the old id + `add`.
 
 - `add` — new lessons, `{ "text": "", "from": "<@id>" }`. `from` is the teacher; omit when unclear. Use `"sure": false` when uncertain.
 - `seen` — ids of stored lessons that came up again (someone used the word, the rule was applied).
@@ -185,7 +185,7 @@ Things that outlive a conversation: events, recurring characters, feuds, traditi
 
 ### Self
 
-Claims {{name}} made about themselves that {{name}} would need to stay consistent with later: their life, history, tastes, a stance, a promise, an ability.
+Standing facts about {{name}}, stated by it or told to it and accepted: its life, history, origin, what it is modelled on, tastes, a stance, a promise, an ability.
 
 Not self-facts: jokes or bits {{name}} performed, one-off quips, comparisons or definitions {{name}} coined, what {{name}} said about other people (those belong to the people's profiles), how {{name}} phrased something, descriptions of their own nature offered as humor. When carrying the list forward, drop these instead of keeping them.
 
