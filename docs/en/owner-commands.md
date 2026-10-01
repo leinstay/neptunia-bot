@@ -6,7 +6,7 @@ Channels, roles and users are picked from Discord's own pickers; `set`/`unset` a
 
 | Command | What it does |
 |---|---|
-| `/nep status` | Model, calibration, quotas (including image count and image model), per-guild memory status, private chat on/off and private file count |
+| `/nep status` | Model, calibration, quotas (including image count and image model), per-guild memory status, the variety pass (switch, pattern count and age), private chat on/off and private file count |
 | `/nep reload` | Reload config and prompts now |
 | `/nep ping [role]` | Send a minimal request to one or all model roles (`talk`, `analyzer`, `classifier.text`, `classifier.media`, `classifier.video`, `mentor`), following each role's `llm.providerByModel` route, and report model, latency, provider, tokens or the error; `/nep ping classifier` pings all three classifier roles. After `classifier.video`, reports `youtube: API key — {status}` (e.g. `ok`, `not needed (yt-dlp ok)`, `missing (blocked)`); after `classifier.text`, reports `web: API key — {status}` (`ok`, `missing` or `off`). `role:image` checks `image.model` against the provider's public model listing (one free GET, no generation) and confirms the model is listed and outputs images; a pass does not guarantee that a generation will succeed. Without a role the image check runs last. Does not count against `llm.maxRequestsPerDay` and works while paused or warming up |
 | `/nep pause` | Stop all activity, flush memory to disk and unload it; a mentor run in flight is stopped and its report posted before the flush. `data/` is safe to edit while paused |
@@ -65,6 +65,7 @@ Channels, roles and users are picked from Discord's own pickers; `set`/`unset` a
 | `/nep mentor show <id>` | The report of the last run: situations, answers, scores, comments, and the diagnosis when present |
 | `/nep mentor wrong <id> <reason>` | Tell the mentor it judged that case wrongly and why; kept as a counter-example for future scoring |
 | `/nep mentor status` | Model, enabled or not, tokens used today / cap, cases by state, the run in flight (shows `, stopping` while a stop is pending), and the most recent finished run (`last:`): its case, outcome, median overall, scored answers, tokens and finish time |
+| `/nep variety` | The variety pass: latest list with examples, then the history of passes newest first. Read-only, grantable |
 | `/nep access grant <command> [role] [user]` | Open a command, group or `*` to everyone (default), a role, or a user. `private.*` and `mentor.*` are excluded; see above |
 | `/nep access revoke <command> [role] [user]` | Revoke a previous grant from everyone (default), a role, or a user |
 | `/nep access list` | List every current access grant |

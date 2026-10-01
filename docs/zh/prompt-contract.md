@@ -46,6 +46,7 @@
 | `mentor-score-memory.md` | 否 | Mentor：对分析器将存储的文本进行评分（`features.mentor`）。无角色卡。`character` 轴始终为 `null`。仅返回 JSON | `{{name}}` |
 | `mentor-signs.md` | 否 | Mentor：已知的模型文本习惯，作为 `<signs>` 块在每次 mentor 请求中发送（`features.mentor`）。文件缺失或为空时省略 | `{{name}}` |
 | `mentor-diagnose.md` | 否 | Mentor：评分后解释弱回答，指出角色上下文中的具体文本（`features.mentor`）。结果为未验证的假设，存储为运行中的 `diagnosis`。`mentor.diagnose` 为 false 或文件缺失时省略 | `{{name}}` |
+| `variety.md` | 否 | `classifier.text` 请求：识别角色近期消息中重复的表达手法（`features.variety`）。不接收角色卡 | `{{name}}` `{{maxPatterns}}` `{{shapeChars}}` |
 | `labels.json` | 是 | 代码插入提示中的所有字符串。键在下方固定，值由编写者决定 | 见下文 |
 
 `{{name}}` 机器人的显示名称 · `{{author}}` 呼叫者的显示名称 · `{{trigger}}` `labels.triggers.*` 之一 ·
@@ -54,7 +55,7 @@
 在强制回合（`/nep interject`、`/nep initiate`）中，如果 `forced.md` 存在，则追加在模式提示之后。
 在私聊中，`private.md` 追加在模式提示之后（`forced.md` 之前），使用相同的 `{{name}}` 和 `{{author}}` 占位符。
 分析器和预热的 `profile.md`、`server.md` 在用户消息中以 `<character>` 块接收角色卡和 `rules.md`。
-`channel.md`、`describe.md`、`describe-video.md`、`draw.md`、`rewatch.md`、`rewatch-answer.md`、`address.md`、`lookup.md`、`read-link.md` 和 `search-summary.md` 不接收角色卡。
+`channel.md`、`describe.md`、`describe-video.md`、`draw.md`、`rewatch.md`、`rewatch-answer.md`、`address.md`、`lookup.md`、`read-link.md`、`search-summary.md` 和 `variety.md` 不接收角色卡。
 
 `{{guildFieldChars}}` 等于 `fieldChars * 2`，是代码对服务器级规律和开场白进行截断的上限。
 `{{maxEpisodes}}` 是每人保留的回忆总数上限。两者均从配置填充，但默认提示未使用；自定义的 `memory.md`
@@ -74,6 +75,7 @@
 | `<self_facts>` | 角色声称过的关于自身的事实 |
 | `<people>` | 成员档案；呼叫者排首位，以 `labels.profile.interlocutorMark` 标记；每个档案包含角色的态度，呼叫者还包含**回忆**：角色记住的关于两人之间的时刻，附带日期和简短引用 |
 | `<other_channels>` | 每个相邻频道最多 `context.neighborMessages` 条消息，不超过 `context.neighborMaxAgeMinutes` 的时效 |
+| `<worn>` | 角色在近期消息中过度使用的手法（`features.variety`）：`labels.variety.intro`，然后每个手法一行 `- <shape> ("<example>", ...)`。过程未执行、未发现或开关关闭时省略 |
 | `<lookup>` | 角色本轮在线查询的内容（`features.webLookup`）：查询词、浓缩的答案和来源站点，或"未找到"行。仅在搜索分类器触发且搜索完成后出现 |
 | `<chat>` | 当前频道最新的 `context.channelMessages` 条消息 |
 | `<tempo>` | 10 分钟 / 1 小时 / 1 天的消息计数，不同人数，沉默时长，一个判定（活跃 / 缓慢 / 沉寂） |
@@ -81,7 +83,7 @@
 
 预算优先级（区块从此列表的底部开始裁剪）：系统提示 + 任务 + 时钟 + 节奏 + 感知
 （永不裁剪）→ 呼叫者的档案含回忆 → 查询结果（整体保留或丢弃）→ 聊天习惯 → 自述事实 → 世界书 → 服务器 → 对话记录（最新优先）→
-其他档案 → 相邻频道。
+其他档案 → worn（整体保留或丢弃）→ 相邻频道 → 表情符号（从底部删除条目，然后删除整个块；`context.caps.emoji`）→ GIF（同样的裁剪；`context.caps.gifs`）。
 
 对话记录行中的媒体，使用可用的最具信息量的形式：附加在当前请求上的图片 →
 `transcript.imageAttached`（按图片在文本后的顺序编号）；已描述的 →
@@ -226,6 +228,7 @@ warmup.contextMark                       prefixed to context lines in the profil
 mentor.intended                          array of short strings: engine behaviours that must not cost points in the mentor's scoring
 mentor.examples                          first line inside the `<examples>` block in a situations request: introduces the real moments
 mentor.original                          first line inside the `<original>` block in a score request: introduces the persona's rejected answer
+variety.intro                            first line of the `<worn>` block: tells the persona these devices are spent
 ```
 
 ## 输出
@@ -508,6 +511,42 @@ mentor.original                          first line inside the `<original>` bloc
 限制：每回合最多一次搜索；分类器和浓缩器各自计入 `llm.maxRequestsPerDay`；搜索本身计入 `web.maxPerDay`
 （与链接阅读共享）。结果按规范化查询缓存 `web.search.cacheHours`（默认 24）小时。开关 `features.webLookup`
 （缺失 = 关闭）。
+
+## 多样性过程
+
+每轮之前，`classifier.text` 过程读取角色近期的自身消息，识别角色正在陷入的重复手法（惯用表达、结构性套路、重复的玩笑模式）。结果成为本轮请求中的 `<worn>` 块。开关 `features.variety`（缺失 = 开启）。
+
+### 消息选取
+
+最多 `variety.window`（默认 12）条角色自身消息：先取本轮频道的（最新的优先），再取其他服务器频道的（存储在服务器记忆中的 `ownLines` 环，角色每次在服务器频道发送消息时写入）。只保留不超过 `variety.recentMinutes`（默认 45）分钟的消息。少于 `variety.minLines`（默认 3）条时整个过程跳过。机器人发出的限制通知（`labels.limits.notice`）不计为角色自身消息。
+
+### `<lines>` 格式
+
+消息编号 `#1`、`#2`、... 从最旧开始，空白折叠为一行。当消息是对另一条的回复时，附加 `(to: <该消息截断至 variety.contextChars>)`。`variety.contextChars` 为 0 时省略上下文。
+
+### 输出与验证
+
+一个裸 JSON 对象：
+
+```
+{ "patterns": [ { "shape": "", "examples": ["", ""], "count": 0 } ] }
+```
+
+`shape`：手法的描述，3 到 `variety.shapeChars` 字符，使用消息的语言。`examples`：1 到 3 个从角色自身用语中逐字复制的片段（不来自 `(to: ...)` 上下文），每个最多 80 字符，仅当文本出现在发送的消息中时保留（不区分大小写）。`count`：至少 2，上限为发送的消息数。最多 `variety.maxPatterns` 个有效手法；空列表是正常结果。不是预期 JSON 的回答不产生块。
+
+### 缓存与存储
+
+同一组消息不会连续被询问两次。服务器级缓存以消息 id 的 SHA-1 为键，无需模型请求即可复用上次结果。
+
+`worn` 存储在服务器记忆中（`data/guilds/<id>/guild.json`）：最新过程的 `{ at, key, channelId, lines, patterns }`。`wornHistory` 是最多 `variety.history`（默认 20）次历史过程的环，仅 shape 和 count，不含 examples。在私聊中执行的过程会为本轮产生 patterns，但不保存到服务器记忆，私聊中的内容不会出现在所有者视图或其他对话中。
+
+### 超时与失败
+
+`variety.timeoutMs`（默认 8000）限制模型请求。超时或失败不产生 `<worn>` 块；本轮在没有该块的情况下继续，最近存储的过程保持不变。
+
+### Mentor
+
+Mentor 沙盒为每个 reply 目标场景执行一次多样性过程，计入 mentor 的 token 预算（不计入 `llm.maxRequestsPerDay`）。识别的手法保存为场景记录上的 `worn`。评分者不会看到 `<worn>` 块。
 
 ## 绘画
 

@@ -46,6 +46,7 @@
 | `mentor-score-memory.md` | いいえ | Mentor: アナライザーが保存するテキストをスコアリング（`features.mentor`）。キャラクターカードなし。`character` 軸は常に `null`。JSON のみを返す | `{{name}}` |
 | `mentor-signs.md` | いいえ | Mentor: モデル文の既知の癖。すべての mentor リクエストで `<signs>` ブロックとして送信（`features.mentor`）。ファイルがないか空の場合は省略 | `{{name}}` |
 | `mentor-diagnose.md` | いいえ | Mentor: スコアリング後に弱い回答の原因をペルソナのコンテキスト内の具体的なテキストで説明（`features.mentor`）。結果は未検証の仮説としてランの `diagnosis` に保存。`mentor.diagnose` が false またはファイルがない場合は省略 | `{{name}}` |
+| `variety.md` | いいえ | `classifier.text` リクエスト: ペルソナの最近のメッセージで繰り返されている表現手法を特定（`features.variety`）。キャラクターカードなし | `{{name}}` `{{maxPatterns}}` `{{shapeChars}}` |
 | `labels.json` | はい | コードがプロンプトに挿入するすべての文字列。キーは以下で固定、値はライターが記述する | 以下参照 |
 
 `{{name}}` ボットの表示名 · `{{author}}` 発話者の表示名 · `{{trigger}}` `labels.triggers.*` のいずれか ·
@@ -54,7 +55,7 @@
 強制ターン（`/nep interject`、`/nep initiate`）では、`forced.md` が存在する場合、モードプロンプトの後に追加されます。
 プライベートチャットでは、`private.md` がモードプロンプトの後（`forced.md` の前）に同じ `{{name}}` と `{{author}}` プレースホルダーで追加されます。
 アナライザーとウォームアップの `profile.md` および `server.md` はキャラクターカードと `rules.md` をユーザーメッセージ内の
-`<character>` ブロックとして受け取ります。`channel.md`、`describe.md`、`describe-video.md`、`draw.md`、`rewatch.md`、`rewatch-answer.md`、`address.md`、`lookup.md`、`read-link.md`、`search-summary.md` はカードを受け取りません。
+`<character>` ブロックとして受け取ります。`channel.md`、`describe.md`、`describe-video.md`、`draw.md`、`rewatch.md`、`rewatch-answer.md`、`address.md`、`lookup.md`、`read-link.md`、`search-summary.md`、`variety.md` はカードを受け取りません。
 
 `{{guildFieldChars}}` は `fieldChars * 2` で、コードがギルドレベルのパターンとスターターをクランプする上限です。
 `{{maxEpisodes}}` はメンバーごとに保持されるエピソードの総数です。どちらも config から設定されますが、デフォルトプロンプトでは
@@ -74,6 +75,7 @@
 | `<self_facts>` | ペルソナが自身について主張した内容 |
 | `<people>` | メンバープロファイル。発話者が先頭で `labels.profile.interlocutorMark` でマーク。各メンバーにペルソナの態度を付し、発話者には**エピソード**も含む: ペルソナが二人の間で記憶している出来事（日付と短い引用付き） |
 | `<other_channels>` | 隣接チャンネルごとに最大 `context.neighborMessages` 件のメッセージ。`context.neighborMaxAgeMinutes` より古いものは含まない |
+| `<worn>` | ペルソナが最近のメッセージで使い回している表現手法（`features.variety`）: `labels.variety.intro`、続いて手法ごとに `- <shape> ("<example>", ...)`。パスが実行されなかった、何も検出しなかった、またはスイッチがオフの場合は省略 |
 | `<lookup>` | ペルソナがこのターンでオンラインで調べた内容（`features.webLookup`）: クエリ、要約された回答、ソースサイト、または「何も見つからなかった」行。検索分類器が発火し検索が完了した場合にのみ表示される |
 | `<chat>` | 現在のチャンネルの最新 `context.channelMessages` 件のメッセージ |
 | `<tempo>` | 10 分 / 1 時間 / 1 日のカウント、参加人数、沈黙時間、判定（live / slow / dead） |
@@ -81,7 +83,7 @@
 
 バジェットの優先順位（このリストの下からセクションがトリムされる）: system + task + clock + tempo + senses
 （カットされない）→ 発話者のプロファイル（エピソード付き）→ lookup（全体として保持または削除）→ about_chat → self_facts → lore → server → chat（新しい順）→
-他のプロファイル → other channels。
+他のプロファイル → worn（全体として保持または削除）→ other channels → 絵文字（下からエントリを削除、次にブロック全体; `context.caps.emoji`）→ GIF（同じトリム; `context.caps.gifs`）。
 
 トランスクリプト行のメディア（利用可能な最も情報量の多い形式）: このリクエストに添付された画像 →
 `transcript.imageAttached`（画像がテキストの後に並ぶ順にナンバリング）、説明済み →
@@ -223,6 +225,7 @@ warmup.contextMark                       prefixed to context lines in the profil
 mentor.intended                          array of short strings: engine behaviours that must not cost points in the mentor's scoring
 mentor.examples                          first line inside the `<examples>` block in a situations request: introduces the real moments
 mentor.original                          first line inside the `<original>` block in a score request: introduces the persona's rejected answer
+variety.intro                            first line of the `<worn>` block: tells the persona these devices are spent
 ```
 
 ## 出力
@@ -410,6 +413,42 @@ mentor.original                          first line inside the `<original>` bloc
 制限: ターンあたり最大 1 回の検索。分類器と要約はそれぞれ `llm.maxRequestsPerDay` にカウントされます。検索自体は
 `web.maxPerDay`（リンク読み取りと共有）にカウントされます。結果は正規化されたクエリごとに `web.search.cacheHours`
 （デフォルト 24）時間キャッシュされます。スイッチ `features.webLookup`（未設定 = オフ）。
+
+## 多様性パス
+
+各ターンの前に、`classifier.text` パスがペルソナの最近の自身のメッセージを読み、ペルソナが陥っている繰り返しの手法（言い回し、構造的な型、繰り返すジョークのパターン）を特定します。結果はターンのリクエスト内の `<worn>` ブロックになります。スイッチ `features.variety`（未設定 = オン）。
+
+### メッセージの選択
+
+最大 `variety.window`（デフォルト 12）件のペルソナ自身のメッセージ。ターンのチャンネルから先に取得（最新のものを優先）し、次に他のサーバーチャンネルから取得します（ギルドメモリの `ownLines` リングに保存、ペルソナがサーバーチャンネルに投稿するたびに書き込まれる）。`variety.recentMinutes`（デフォルト 45）より古いメッセージのみ保持。`variety.minLines`（デフォルト 3）未満の場合、パス全体がスキップされます。ボットが投稿したリミット通知（`labels.limits.notice`）はペルソナ自身のメッセージとしてカウントされません。
+
+### `<lines>` フォーマット
+
+メッセージは `#1`、`#2`、... と最も古いものから番号付け。空白は 1 行に折りたたまれます。メッセージが返信であった場合、`(to: <そのメッセージを variety.contextChars までクリップ>)` が付加されます。`variety.contextChars` が 0 の場合、コンテキストは省略されます。
+
+### 出力と検証
+
+1 つの裸の JSON オブジェクト:
+
+```
+{ "patterns": [ { "shape": "", "examples": ["", ""], "count": 0 } ] }
+```
+
+`shape`: 手法の説明、3 から `variety.shapeChars` 文字、メッセージの言語で記述。`examples`: 1 から 3 つの、ペルソナ自身の言葉からそのまま取った断片（`(to: ...)` コンテキストからではない）。各最大 80 文字。送信されたメッセージに出現する場合のみ保持（大文字小文字を区別しない）。`count`: 最低 2、送信されたメッセージ数が上限。最大 `variety.maxPatterns` 個の有効な手法。空のリストが通常の結果。期待される JSON でない回答はブロックを生成しません。
+
+### キャッシュとストレージ
+
+同じメッセージセットが連続して 2 度問い合わせされることはありません。ギルドレベルのキャッシュがメッセージ id の SHA-1 をキーとし、モデルリクエストなしで前回の結果を再利用します。
+
+`worn` はギルドメモリ（`data/guilds/<id>/guild.json`）に保存されます: 最新のパスの `{ at, key, channelId, lines, patterns }`。`wornHistory` は最大 `variety.history`（デフォルト 20）件の過去パスのリングで、shape と count のみ（examples なし）。プライベートチャットで実行されたパスはそのターン用の patterns を生成しますが、ギルドメモリには保存されません。プライベートでの内容がオーナーの表示や他の会話に漏れることはありません。
+
+### タイムアウトと失敗
+
+`variety.timeoutMs`（デフォルト 8000）がモデルリクエストを制限します。タイムアウトまたは失敗は `<worn>` ブロックを生成せず、ターンはブロックなしで続行し、最後に保存されたパスはそのまま残ります。
+
+### Mentor
+
+Mentor サンドボックスは、reply ターゲットの状況ごとに 1 回の多様性パスを実行し、mentor のトークン予算から差し引かれます（`llm.maxRequestsPerDay` にはカウントされません）。特定された手法は状況レコードの `worn` として保存されます。ジャッジは `<worn>` ブロックを見ることはありません。
 
 ## 描画
 

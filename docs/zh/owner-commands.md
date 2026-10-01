@@ -6,7 +6,7 @@
 
 | 命令 | 说明 |
 |---|---|
-| `/nep status` | 模型、校准、配额（包括图片计数和图像模型）、每服务器记忆状态、私聊开关和私有文件数 |
+| `/nep status` | 模型、校准、配额（包括图片计数和图像模型）、每服务器记忆状态、多样性过程（开关、手法数和时间）、私聊开关和私有文件数 |
 | `/nep reload` | 立即重新加载配置和提示 |
 | `/nep ping [role]` | 向一个或所有模型角色（`talk`、`analyzer`、`classifier.text`、`classifier.media`、`classifier.video`、`mentor`）发送最小请求，遵循每个角色的 `llm.providerByModel` 路由，并报告模型、延迟、provider、token 或错误；`classifier.video` 之后报告 `youtube: API key — {status}`（如 `ok`、`not needed (yt-dlp ok)`、`missing (blocked)`）；`classifier.text` 之后报告 `web: API key — {status}`（`ok`、`missing` 或 `off`）。`role:image` 检查 `image.model` 是否在 provider 的公开模型列表中且支持图片输出（一次免费 GET，不进行生成）；检查通过不代表生成一定成功。不指定 role 时 image 检查排在最后。不计入 `llm.maxRequestsPerDay`，在暂停或预热期间均可使用 |
 | `/nep pause` | 停止所有活动，将记忆刷入磁盘并卸载；进行中的 mentor 运行会被停止，其报告在刷盘前发布。暂停期间可安全编辑 `data/` |
@@ -61,6 +61,7 @@
 | `/nep mentor show <id>` | 上次运行的报告：场景、回答、分数、评论、以及诊断（如有） |
 | `/nep mentor wrong <id> <reason>` | 告知 mentor 对该案例判断有误以及原因；作为反例保存供未来评分 |
 | `/nep mentor status` | 模型、是否启用、今日 token 使用量/上限、各状态的案例数、进行中的运行（停止待处理时显示 `, stopping`），以及最近完成的运行（`last:`）：案例、结果、overall 中位数、已评分回答数、token 数和完成时间 |
+| `/nep variety` | 多样性过程：最新列表含示例，然后是从新到旧的历史过程。只读，可通过权限授予 |
 | `/nep access grant <command> [role] [user]` | 将命令、命令组或 `*` 开放给所有人（默认）、某个身份组或某个用户。`private.*` 和 `mentor.*` 被排除；见上文 |
 | `/nep access revoke <command> [role] [user]` | 从所有人（默认）、某个身份组或某个用户撤销授权 |
 | `/nep access list` | 列出所有当前访问授权 |

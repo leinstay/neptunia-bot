@@ -174,6 +174,7 @@ prompts/
   mentor-score-memory.md   mentor：评分分析器存储的文本
   mentor-signs.md          mentor：已知的模型文本习惯
   mentor-diagnose.md       mentor：评分后解释弱回答
+  variety.md               分类器：识别角色过度使用的手法
   profile.md               预热：从消息样本生成一个成员的档案
   channel.md               预热：从消息样本生成频道笔记
   server.md                预热：从频道笔记和成员摘要生成服务器级笔记

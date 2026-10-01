@@ -27,6 +27,7 @@
 | `imageGeneration` | `false` | 允许角色通过绘画子进程绘制图片。缺失的键视为开启。在 `config.local.json` 中启用；需要 `image.model` 中配置支持图像生成的模型。参见[媒体：绘画](media.md#绘画) |
 | `privateMessages` | `false` | 回复公会成员的私信。需要已存储的公共档案且 `affinity.score >= private.minAffinity`。参见[消息与记忆：私有层](messages-and-memory.md#私有层) |
 | `mentor` | `false` | 手动测试子进程，使用独立模型。必须严格为 `true` 才能启用；缺失的键视为关闭。参见 [Mentor](#mentor) |
+| `variety` | `true` | 每轮之前，模型过程识别角色在近期消息中过度使用的表达手法。缺失的键视为开启 |
 | `followUp` | `true` | 角色回复后对未标记消息进行分类以延续对话 |
 | `typingSimulation` | `true` | 模拟输入速度 |
 | `adminCommands` | `true` | 所有者斜杠命令；设为 `false` 时注销命令 |
@@ -361,6 +362,22 @@ YouTube 链接的时长通过以下链式探测获取：首先尝试 yt-dlp，�
 | 键 | 默认值 | 说明 |
 |---|---|---|
 | `resolution` | `"1K"` | 输出分辨率（`512`、`1K`、`2K`、`4K`；支持因模型而异）。`gemini-2.5-flash-image` 无分辨率设置 |
+
+## `variety`
+
+多样性过程的设置（`features.variety`）。每轮之前，角色近期的消息会发送给 `classifier.text` 模型，由其识别重复的表达手法。结果以 `<worn>` 块的形式出现在本轮请求中。超时或过程失败不会延迟或中断本轮，本轮会在没有该块的情况下继续。全部热重载。
+
+| 键 | 默认值 | 说明 |
+|---|---|---|
+| `window` | `12` | 过程查看的角色自身消息数：先取本轮频道的，再取其他频道的 |
+| `recentMinutes` | `45` | 超过此分钟数的消息不纳入 |
+| `minLines` | `3` | 消息少于此数时跳过过程 |
+| `contextChars` | `120` | 每条消息所回复内容保留的字符数（`(to: ...)` 上下文） |
+| `maxPatterns` | `4` | 一次过程最多可识别的手法数 |
+| `shapeChars` | `140` | 一个手法描述的最大字符数 |
+| `maxOutputTokens` | `500` | 过程的最大输出 token 数 |
+| `timeoutMs` | `8000` | 请求超时（毫秒）；过慢或失败的过程不会延迟本轮 |
+| `history` | `20` | `/nep variety` 显示的历史过程环的容量 |
 
 ## `private`
 

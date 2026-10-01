@@ -30,6 +30,7 @@ Every key in `config.json` with its default, grouped by section.
 | `imageGeneration` | `false` | Let the persona draw pictures through a drawing sub-process. A missing key counts as on. Turn on in `config.local.json`; needs an image-capable model in `image.model`. See [Media: Drawing](media.md#drawing) |
 | `privateMessages` | `false` | Answer direct messages from guild members. Needs a stored public profile and `affinity.score >= private.minAffinity`. See [Messages and memory: Private layer](messages-and-memory.md#private-layer) |
 | `mentor` | `false` | Manual testing sub-process with its own model. Must be exactly `true` to enable; a missing key counts as off. See [Mentor](#mentor) |
+| `variety` | `true` | Before each turn, a model pass names the devices the persona is overusing in its own recent lines. A missing key counts as on |
 | `followUp` | `true` | Classify untagged messages after the persona answers to continue a conversation |
 | `typingSimulation` | `true` | Simulate typing speed |
 | `adminCommands` | `true` | Owner slash commands; `false` unregisters them |
@@ -391,6 +392,22 @@ Provider-specific options for `google/*` image models.
 | Key | Default | Meaning |
 |---|---|---|
 | `resolution` | `"1K"` | Output resolution (`512`, `1K`, `2K`, `4K`; support varies by model). `gemini-2.5-flash-image` has no resolution knob |
+
+## `variety`
+
+Settings for the variety pass (`features.variety`). Before each turn the persona's own recent lines go to the `classifier.text` model, which names the repeated devices. The result becomes a `<worn>` block in the turn's request. A timeout or a failed pass never delays or fails the turn; the turn simply goes without the block. All hot-reloaded.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `window` | `12` | Own lines the pass looks at, taken from the turn's channel first, then from other channels |
+| `recentMinutes` | `45` | A line older than this many minutes is left out |
+| `minLines` | `3` | Fewer lines than this skips the pass |
+| `contextChars` | `120` | Characters kept from the message each line answered (the `(to: ...)` context) |
+| `maxPatterns` | `4` | Most patterns one pass may name |
+| `shapeChars` | `140` | Max characters for one shape description |
+| `maxOutputTokens` | `500` | Max output tokens for the pass |
+| `timeoutMs` | `8000` | Request timeout (ms); a slow or failed pass never delays the turn |
+| `history` | `20` | Passes kept in the history ring for `/nep variety` |
 
 ## `private`
 

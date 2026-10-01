@@ -6,7 +6,7 @@
 
 | コマンド | 説明 |
 |---|---|
-| `/nep status` | モデル、キャリブレーション、クォータ（画像カウントと画像モデルを含む）、ギルドごとのメモリ状況、プライベートチャットのオン/オフとプライベートファイル数を表示 |
+| `/nep status` | モデル、キャリブレーション、クォータ（画像カウントと画像モデルを含む）、ギルドごとのメモリ状況、多様性パス（スイッチ、手法数と経過時間）、プライベートチャットのオン/オフとプライベートファイル数を表示 |
 | `/nep reload` | 設定とプロンプトを即時リロード |
 | `/nep ping [role]` | 一つまたはすべてのモデルロール（`talk`、`analyzer`、`classifier.text`、`classifier.media`、`classifier.video`、`mentor`）にミニマルリクエストを送信し、各ロールの `llm.providerByModel` ルートに従って、モデル、レイテンシ、プロバイダー、トークン数またはエラーを報告。`classifier.video` の後に `youtube: API key — {status}`（例: `ok`、`not needed (yt-dlp ok)`、`missing (blocked)`）を報告。`classifier.text` の後に `web: API key — {status}`（`ok`、`missing`、`off`）を報告。`role:image` はプロバイダーの公開モデルリストで `image.model` を検証し（無料の GET 1 回、生成なし）、モデルが登録済みで画像出力に対応していることを確認するが、生成の成功は保証しない。ロール指定なしの場合 image の検査は最後に実行される。`llm.maxRequestsPerDay` にカウントされず、一時停止中やウォームアップ中でも動作 |
 | `/nep pause` | すべてのアクティビティを停止し、メモリをディスクにフラッシュしてアンロード。実行中の mentor ランは停止され、フラッシュ前にレポートが投稿される。一時停止中は `data/` を安全に編集可能 |
@@ -61,6 +61,7 @@
 | `/nep mentor show <id>` | 前回ランのレポート: 状況、回答、スコア、コメント、および診断（存在する場合） |
 | `/nep mentor wrong <id> <reason>` | そのケースの判定が誤っていたことと理由を mentor に伝える。今後のスコアリングの反例として保存 |
 | `/nep mentor status` | モデル、有効/無効、本日のトークン使用量/上限、状態別ケース数、実行中のラン（停止保留中は `, stopping` を表示）、および最近完了したラン（`last:`）: ケース、結果、overall 中央値、スコアリング済み回答数、トークン数、完了時刻 |
+| `/nep variety` | 多様性パス: 最新のリスト（例付き）、続いて新しい順のパス履歴。読み取り専用、グラント可能 |
 | `/nep access grant <command> [role] [user]` | コマンド、グループ、または `*` を全員（デフォルト）、ロール、またはユーザーに開放。`private.*` と `mentor.*` は除外; 上記参照 |
 | `/nep access revoke <command> [role] [user]` | 以前のグラントを全員（デフォルト）、ロール、またはユーザーから取り消し |
 | `/nep access list` | 現在のアクセスグラント一覧を表示 |

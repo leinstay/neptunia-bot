@@ -13,7 +13,7 @@ Answer with ONE bare JSON object, nothing else:
 { "patterns": [ { "shape": "", "examples": ["", ""], "count": 0 } ] }
 
 shape: the device in one short phrase, at most {{shapeChars}} characters, in the language the lines use. Name what the device does, not one of its wordings, so two differently phrased uses of the same move fall under one shape.
-examples: one to three short pieces copied verbatim from the lines, each at most 80 characters.
+examples: one to three short pieces copied verbatim from {{name}}'s own words (not from the (to: ...) part), each at most 80 characters.
 count: how many of the lines use this device, at least 2.
 
 Up to {{maxPatterns}} patterns, strongest first. When nothing repeats: { "patterns": [] }.

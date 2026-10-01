@@ -46,6 +46,7 @@ All instructions are English in both layers; a character's speech samples may be
 | `mentor-score-memory.md` | no | Mentor: score the text the analyzer would store (`features.mentor`). No character card. `character` axis is always `null`. Returns JSON only | `{{name}}` |
 | `mentor-signs.md` | no | Mentor: known habits of model-written text, sent as the `<signs>` block in every mentor request (`features.mentor`). Omitted when missing or empty | `{{name}}` |
 | `mentor-diagnose.md` | no | Mentor: explain weak answers after scoring by pointing at specific text in the persona's context (`features.mentor`). The result is an unverified opinion stored as `diagnosis` on the run. Omitted when `mentor.diagnose` is false or the file is missing | `{{name}}` |
+| `variety.md` | no | `classifier.text` request: name the repeated devices in the persona's own recent lines (`features.variety`). No character card | `{{name}}` `{{maxPatterns}}` `{{shapeChars}}` |
 | `labels.json` | yes | Every string the CODE inserts into a prompt. Keys fixed below, values are the writer's | see below |
 
 `{{name}}` bot's display name · `{{author}}` caller's display name · `{{trigger}}` one of `labels.triggers.*` ·
@@ -54,7 +55,7 @@ System message = `system-prompt` + `character-card` + `rules` + `format`. For th
 On a forced turn (`/nep interject`, `/nep initiate`), `forced.md` is appended after the mode prompt if the file exists.
 In a private chat, `private.md` is appended after the mode prompt (before `forced.md`) with the same `{{name}}` and `{{author}}` placeholders.
 The analyzer and the warmup's `profile.md` and `server.md` receive the character card and `rules.md` as a
-`<character>` block in the user message. `channel.md`, `describe.md`, `describe-video.md`, `draw.md`, `rewatch.md`, `rewatch-answer.md`, `address.md`, `lookup.md`, `read-link.md` and `search-summary.md` do not receive the card.
+`<character>` block in the user message. `channel.md`, `describe.md`, `describe-video.md`, `draw.md`, `rewatch.md`, `rewatch-answer.md`, `address.md`, `lookup.md`, `read-link.md`, `search-summary.md` and `variety.md` do not receive the card.
 
 `{{guildFieldChars}}` is `fieldChars * 2`, the limit code clamps guild-level patterns and starters to.
 `{{maxEpisodes}}` is the total episodes kept per person. Both are filled from config but not used by the default
@@ -76,6 +77,7 @@ The blocks of the user message. Empty ones are omitted; the order below is the o
 | `<self_facts>` | What the persona has claimed about itself |
 | `<people>` | Member profiles; the caller first, marked with `labels.profile.interlocutorMark`; each with the persona's attitude and, for the caller, the **episodes**: moments the persona remembers about the two of them, with dates and short quotes |
 | `<other_channels>` | Up to `context.neighborMessages` messages per neighbouring channel, not older than `context.neighborMaxAgeMinutes` |
+| `<worn>` | Devices the persona is overusing in its own recent lines (`features.variety`): `labels.variety.intro`, then `- <shape> ("<example>", ...)` per pattern. Omitted when the variety pass did not run, returned nothing, or the switch is off |
 | `<lookup>` | What the persona looked up online this turn (`features.webLookup`): the query, the condensed answer and the source sites, or a "nothing found" line. Appears only when the search classifier fired and the search completed |
 | `<chat>` | Up to `context.channelMessages` latest messages of the current channel |
 | `<tempo>` | Counts for 10 min / hour / day, distinct people, silence, a verdict (live / slow / dead) |
@@ -83,7 +85,7 @@ The blocks of the user message. Empty ones are omitted; the order below is the o
 
 Budget priority (sections are trimmed from the bottom of this list first): system + task + clock + tempo + senses
 (never cut) → caller's profile with episodes → lookup (kept or dropped whole) → about_chat → self_facts → lore → server → chat (newest first) →
-other profiles → other channels → emoji (entries from the bottom, then the whole block; `context.caps.emoji`) → gifs (same trimming; `context.caps.gifs`).
+other profiles → worn (kept or dropped whole) → other channels → emoji (entries from the bottom, then the whole block; `context.caps.emoji`) → gifs (same trimming; `context.caps.gifs`).
 
 Media in a transcript line, most informative form available: a picture attached to THIS request →
 `transcript.imageAttached`, or `transcript.imageAttachedDescribed` when `features.attachedDescriptions` is on and
@@ -243,6 +245,7 @@ warmup.contextMark                       prefixed to context lines in the profil
 mentor.intended                          array of short strings: engine behaviours that must not cost points in the mentor's scoring
 mentor.examples                          first line inside the `<examples>` block in a situations request: introduces the real moments
 mentor.original                          first line inside the `<original>` block in a score request: introduces the persona's rejected answer
+variety.intro                            first line of the `<worn>` block: tells the persona these devices are spent
 ```
 
 ## Output
@@ -566,6 +569,61 @@ nothing or the condenser found nothing useful, `labels.lookup.none` appears inst
 Rails: at most one search per turn; both the classifier and the condenser count against `llm.maxRequestsPerDay`;
 the search itself counts against `web.maxPerDay` (shared with link reads). Results are cached for
 `web.search.cacheHours` (default 24) hours per normalised query. Switch `features.webLookup` (missing = off).
+
+## Variety pass
+
+Before a turn, a `classifier.text` pass reads the persona's own most recent lines and names the repeated devices
+(turns of phrase, structural moves, recurring joke shapes) the persona has fallen into. The result becomes a `<worn>`
+block in the turn's request. Switch `features.variety` (missing = on).
+
+### Line selection
+
+Up to `variety.window` (default 12) of the persona's own lines, taken first from the turn's channel (newest kept),
+then from other server channels (a ring stored in guild memory as `ownLines`, written whenever the persona posts in a
+server channel). Only lines younger than `variety.recentMinutes` (default 45) are kept. Fewer than `variety.minLines`
+(default 3) skips the pass entirely. A limit notice (`labels.limits.notice`) posted by the bot is never counted as the
+persona's own line.
+
+### The `<lines>` format
+
+Each line is numbered `#1`, `#2`, ... oldest first, whitespace collapsed to a single line. When the line answered a
+message (a reply), `(to: <that message clipped to variety.contextChars>)` is appended. `variety.contextChars` of 0
+omits the context.
+
+### Output and validation
+
+One bare JSON object:
+
+```
+{ "patterns": [ { "shape": "", "examples": ["", ""], "count": 0 } ] }
+```
+
+`shape`: what the device does, 3 to `variety.shapeChars` characters, in the language the lines use. `examples`: 1 to 3
+verbatim pieces from the persona's own words (not from the `(to: ...)` context), each at most 80 characters, kept only
+when the text occurs in a sent line (case-insensitive). `count`: at least 2, capped at the number of lines sent. At
+most `variety.maxPatterns` valid patterns; an empty list is the normal answer. An answer that is not the expected JSON
+produces no block.
+
+### Cache and storage
+
+The same set of lines is never asked twice in a row. A per-guild cache, keyed by the SHA-1 of the line ids, reuses the
+previous answer without a model request.
+
+`worn` is stored in guild memory (`data/guilds/<id>/guild.json`): the latest pass with `{ at, key, channelId, lines,
+patterns }`. `wornHistory` is a ring of up to `variety.history` (default 20) past passes, shapes and counts only, no
+examples. A pass that runs in a private chat produces patterns for that turn but saves nothing to guild memory, so
+nothing said in private reaches the owner's view or another conversation.
+
+### Timeout and failure
+
+`variety.timeoutMs` (default 8000) caps the model request. A timeout or a failure produces no `<worn>` block; the turn
+proceeds without one and the latest stored pass stays unchanged.
+
+### Mentor
+
+The mentor sandbox runs one variety pass per reply-target situation, charged to the mentor's token budget (not to
+`llm.maxRequestsPerDay`). The patterns are saved as `worn` on the situation record. The judge never sees the `<worn>`
+block.
 
 ## Drawing
 
