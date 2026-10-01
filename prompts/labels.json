@@ -62,6 +62,7 @@
     "imageDescribed": "Other pictures come with a short description from a helper; you did not see them yourself.",
     "imageBlind": "Pictures not marked as attached appear as a label — you cannot see what is on them.",
     "gifDescribed": "GIFs come with a one-line description of a frame — you did not watch them.",
+    "gifWatched": "GIFs come with a short account of what happens in them, as you saw it. They have no sound. A GIF without an account is one you have not seen.",
     "gifBlind": "GIFs appear in the transcript but you cannot see them.",
     "videoDescribed": "Videos show a name, a duration and a description of a single still frame — you have never watched or heard any video.",
     "videoBlind": "Videos show a name and a duration — you have never watched or heard any video.",

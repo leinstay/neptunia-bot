@@ -32,6 +32,7 @@ import { selectPictures, mediaProxyUrl } from '../discord/media.js';
 import { fromTokens, occursAsWholeWord } from '../memory/mentions.js';
 import { mergeProfiles } from './private.js';
 import { renderWorn } from './variety.js';
+import { gifWatchBlocker } from '../memory/gif-watch.js';
 
 const TAG_OVERHEAD = 60;
 
@@ -662,8 +663,14 @@ function renderLookup(lookup, labels) {
  * `features.privateMessages === true` adds `senses.privateAware` instead.
  * `customEmoji` (the `<emoji>` block is possible) adds `senses.customEmoji`;
  * `gifs` (features.gifs on and a non-empty library) adds `senses.gifs` right after it.
+ * `gifWatching` (GIFs are watched now, src/memory/gif-watch.js#gifWatchBlocker)
+ * swaps `senses.gifDescribed` for `senses.gifWatched` when the labels have it.
  */
-function renderSenses(config, labels, { searchAvailable = false, drawQuota, privateChat = false, customEmoji = false, gifs = false } = {}) {
+function renderSenses(
+  config,
+  labels,
+  { searchAvailable = false, drawQuota, privateChat = false, customEmoji = false, gifs = false, gifWatching = false } = {},
+) {
   const senses = labels.senses;
   if (!senses) return '';
   const visionOn = config.features?.vision !== false;
@@ -671,7 +678,10 @@ function renderSenses(config, labels, { searchAvailable = false, drawQuota, priv
   const lines = [];
   if (visionOn) lines.push(senses.imageSee);
   lines.push(describedOn ? senses.imageDescribed : senses.imageBlind);
-  lines.push(describedOn ? senses.gifDescribed : senses.gifBlind);
+  // A watched GIF (its animation, not one frame); an older labels.json
+  // without the line keeps the one-frame one.
+  const gifDescribedLine = gifWatching ? (senses.gifWatched ?? senses.gifDescribed) : senses.gifDescribed;
+  lines.push(describedOn ? gifDescribedLine : senses.gifBlind);
   // Watching a video needs the describer on too; an older labels.json
   // without the video-watching lines falls back to the still-frame ones.
   const videoOn = describedOn && config.features?.videoDescriptions !== false;
@@ -1001,6 +1011,8 @@ export function buildRequest(input) {
     privateChat,
     customEmoji: customEmoji.length > 0,
     gifs: gifsOn,
+    // Whether a GIF in the transcript was watched rather than seen in one frame, under the live config and prompts.
+    gifWatching: gifWatchBlocker(config, prompts) === null,
   });
 
   // A private chat has no neighbouring channels (and no server map, below).

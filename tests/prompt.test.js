@@ -1043,6 +1043,55 @@ test('buildRequest: mediaDescriptions on -> described forms replace the blind on
   assert.ok(!senses.includes(labels.senses.videoBlind));
 });
 
+// --- <senses>: GIF watching -------------------------------------------------------
+
+/** The GIF line of a request's <senses> block under `config` and `prompts` overrides. */
+function gifSenses({ features = {}, media, prompts = {}, labelsOverride } = {}) {
+  const config = fakeConfig({ features: { vision: true, mediaDescriptions: true, ...features } });
+  if (media) config.media = media;
+  const promptSet = fakePrompts({ ...(labelsOverride ? { labels: labelsOverride } : {}), ...prompts });
+  return sensesOf(buildRequest(baseInput({ config, prompts: promptSet }))).split('\n');
+}
+
+test('buildRequest: GIFs watched (video vision on, a watch prompt) -> senses.gifWatched, never gifDescribed', () => {
+  for (const prompts of [{ 'describe-video': 'V' }, { 'describe-gif': 'G' }, { 'describe-video': 'V', 'describe-gif': 'G' }]) {
+    const lines = gifSenses({ prompts });
+    assert.ok(lines.includes(labels.senses.gifWatched), JSON.stringify(Object.keys(prompts)));
+    assert.ok(!lines.includes(labels.senses.gifDescribed));
+    assert.ok(!lines.includes(labels.senses.gifBlind));
+  }
+  // media.gif.watch true or missing both count as on.
+  assert.ok(gifSenses({ prompts: { 'describe-video': 'V' }, media: { gif: { watch: true } } }).includes(labels.senses.gifWatched));
+});
+
+test('buildRequest: GIFs not watched -> senses.gifDescribed', () => {
+  const states = [
+    { prompts: {} },
+    { prompts: { 'describe-video': '' } },
+    { prompts: { 'describe-video': 'V' }, media: { gif: { watch: false } } },
+    { prompts: { 'describe-video': 'V' }, features: { videoDescriptions: false } },
+  ];
+  for (const state of states) {
+    const lines = gifSenses(state);
+    assert.ok(lines.includes(labels.senses.gifDescribed), JSON.stringify(state));
+    assert.ok(!lines.includes(labels.senses.gifWatched));
+  }
+});
+
+test('buildRequest: mediaDescriptions off -> senses.gifBlind even with GIF watching configured', () => {
+  const lines = gifSenses({ features: { mediaDescriptions: false }, prompts: { 'describe-video': 'V', 'describe-gif': 'G' } });
+  assert.ok(lines.includes(labels.senses.gifBlind));
+  assert.ok(!lines.includes(labels.senses.gifWatched));
+  assert.ok(!lines.includes(labels.senses.gifDescribed));
+});
+
+test('buildRequest: an older labels.json without senses.gifWatched keeps senses.gifDescribed while GIFs are watched', () => {
+  const { gifWatched, ...olderSenses } = labels.senses;
+  assert.ok(gifWatched);
+  const lines = gifSenses({ prompts: { 'describe-video': 'V' }, labelsOverride: { ...labels, senses: olderSenses } });
+  assert.ok(lines.includes(labels.senses.gifDescribed));
+});
+
 // --- <senses>: video watching ---------------------------------------------------
 
 test('buildRequest: mediaDescriptions on, videoDescriptions missing (counts as on) -> videoWatch and linksWatch', () => {

@@ -114,6 +114,14 @@
 | `vision.maxBytes` | `1500000` | 图片文件大小上限（字节）；更大的图片会被跳过 |
 | `vision.fetchTimeoutMs` | `10000` | 每张图片下载超时（毫秒） |
 
+## `gifs`
+
+GIF 库（`features.gifs`）的设置。使用次数在每条消息到达时统计（仅成员，排除机器人和角色）。
+
+| 键 | 默认值 | 说明 |
+|---|---|---|
+| `recachePerRun` | `50` | 每次 `/nep gifs recache` 运行时重新描述的库 GIF 数量。库外的单帧说明立即删除；然后在后台从最旧的开始观看最多此数量的库条目 |
+
 ## `media`
 
 媒体描述器（`features.mediaDescriptions`）的设置。描述器模型为 `classifier.media`。
@@ -126,6 +134,16 @@
 | `cacheEntries` | `5000` | 描述缓存大小，以附件为键 |
 | `filePreviewChars` | `500` | 文本文件开头显示的字符数 |
 | `embedTextChars` | `200` | 链接嵌入文本显示的字符数 |
+
+### `media.gif`
+
+将 GIF 作为短视频片段观看（`media.gif.watch`）的设置。启用后，GIF 的动画被转换为短 mp4 并发送给 `classifier.video` 模型，而非描述单帧。观看后的说明替代单帧描述。无法观看的 GIF（无动画来源、日限额耗尽、转换失败）回退到单帧描述。
+
+| 键 | 默认值 | 说明 |
+|---|---|---|
+| `watch` | `true` | 将 GIF 作为短视频片段观看而非描述单帧。需同时开启 `features.mediaDescriptions` 和 `features.videoDescriptions`。缺失的键视为开启 |
+| `maxSeconds` | `8` | 发送给视频模型的动画秒数；片段通过 ffmpeg 转换 |
+| `maxPerDay` | `200` | 每日 GIF 观看上限，独立于 `media.video.maxPerDay`。耗尽后 GIF 获得单帧描述 |
 
 ### `media.video`
 

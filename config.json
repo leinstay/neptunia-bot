@@ -174,7 +174,7 @@
     "cacheEntries": 5000,
     "filePreviewChars": 500,
     "embedTextChars": 200,
-    "gif": { "watch": true, "maxSeconds": 8 },
+    "gif": { "watch": true, "maxSeconds": 8, "maxPerDay": 200 },
     "video": {
       "provider": { "order": ["google-ai-studio"], "allow_fallbacks": false },
       "maxOutputTokens": 800,

@@ -57,11 +57,13 @@
 // `video:<itemId>:q:<hash of the question>`, failures never.
 //
 // A GIF is watched, not described from one still frame (`media.gif.watch`,
-// a missing key counts as on, plus video vision on and the describe-video
-// prompt): its animation -- the mp4 of a tenor/giphy embed, an attached
-// .gif, a .gif link -- is converted to a short mp4 (the first
-// `media.gif.maxSeconds`) and summarised by the video model under every
-// video rail, the daily video count included. The caption is cached under the
+// a missing key counts as on, plus video vision on and the describe-gif or
+// describe-video prompt, see src/memory/gif-watch.js): its animation -- the
+// mp4 of a tenor/giphy embed, an attached .gif, a .gif link -- is converted
+// to a short mp4 (the first `media.gif.maxSeconds`) and summarised by the
+// video model under the video request rails, but with its own daily counter
+// (`state.data.gifWatchDay` / `gifWatchCount`, `media.gif.maxPerDay`): a GIF
+// never takes a video slot, nor a video a GIF one. The caption is cached under the
 // GIF's own item id like a picture's (so the transcript, the analyzer and
 // the GIF library read it unchanged), marked `watched: true`. A GIF that
 // cannot be watched -- the switches, no animation, a spent daily rail, a
@@ -79,6 +81,7 @@ import { TokenLimitError, DailyCapError } from '../llm/openrouter.js';
 import { clampText } from './clamp.js';
 import { classifierMediaModel, classifierVideoModel } from '../behavior/mention.js';
 import { createYoutubeCheck } from './youtube-check.js';
+import { gifWatchBlocker as gifWatchBlockerOf, gifWatchCap, gifWatchPrompt } from './gif-watch.js';
 import { log } from '../log.js';
 
 const MISS_TTL_MS = 60 * 60_000;
@@ -327,28 +330,24 @@ export function createDescriber({
   }
 
   /**
-   * Why GIFs are not watched under the live config, or null when they are:
-   * `off` (features.mediaDescriptions not on, or `media.gif.watch` false --
-   * a missing key counts as on), `video-off` (features.videoDescriptions
-   * false: video vision off) or `prompt` (no describe-video prompt).
+   * Why GIFs are not watched under the live config and prompts, or null when
+   * they are: `off`, `video-off` or `prompt` (src/memory/gif-watch.js#gifWatchBlocker).
    * @returns {'off'|'video-off'|'prompt'|null}
    */
   function gifWatchBlocker() {
-    const features = hot.config.features ?? {};
-    if (features.mediaDescriptions !== true || hot.config.media?.gif?.watch === false) return 'off';
-    if (features.videoDescriptions === false) return 'video-off';
-    if (!hot.prompts?.['describe-video']) return 'prompt';
-    return null;
+    return gifWatchBlockerOf(hot.config, hot.prompts);
   }
 
   /**
    * One GIF watch, uncached: the animation at `source` is downloaded and
    * converted to a short mp4 (src/discord/fetch-video.js#fetchGif, the first
    * `media.gif.maxSeconds`, the video size and tool settings), then
-   * summarised by the video model through the `describe-video` prompt with
-   * `{{maxChars}}` = `media.descriptionChars` (a GIF caption keeps a picture
-   * caption's length) and every video rail: the video token cap and output
-   * budget, a slot of `media.video.maxPerDay` reserved before the fetch and
+   * summarised by the video model through the `describe-gif` prompt
+   * (`{{maxChars}}` = `media.descriptionChars` -- a GIF caption keeps a
+   * picture caption's length -- and `{{seconds}}` = `media.gif.maxSeconds`),
+   * else the `describe-video` prompt with `{{maxChars}}` alone as before;
+   * under the video token cap and output budget, and a slot of the GIF's own
+   * `media.gif.maxPerDay` (never the video one) reserved before the fetch and
    * kept on failure. A watched caption is cached under the GIF's own item id
    * as `{ text, ts, watched: true, gif: true }`; nothing is cached otherwise.
    * Resolves `{ state: 'watched', text, usage, estimated }`, `{ state:
@@ -374,10 +373,10 @@ export function createDescriber({
       return outcome;
     };
 
-    // The daily video slot, reserved synchronously like a video watch's.
-    const countToday = videoCountToday();
-    if (countToday >= (videoCfg.maxPerDay ?? Infinity)) return report({ state: 'unavailable', reason: 'daily' });
-    state.data.videoCount = countToday + 1;
+    // The daily GIF slot, reserved synchronously like a video watch's.
+    const watchedToday = countToday('gifWatchDay', 'gifWatchCount');
+    if (watchedToday >= gifWatchCap(hot.config)) return report({ state: 'unavailable', reason: 'daily' });
+    state.data.gifWatchCount = watchedToday + 1;
     state.markDirty();
 
     const media = await videoFetcher.fetchGif(source, {
@@ -395,10 +394,7 @@ export function createDescriber({
     try {
       completion = await llm.complete(
         [
-          {
-            role: 'system',
-            content: fillTemplate(hot.prompts?.['describe-video'], { maxChars: descriptionChars, today: todayDate() }),
-          },
+          { role: 'system', content: gifSystemPrompt(descriptionChars, maxSeconds) },
           { role: 'user', content: [videoPart(videoCfg, clip)] },
         ],
         videoRequestOptions(videoCfg, clip, { maxOutputTokens: videoCfg.maxOutputTokens, countAgainstDailyCap }),
@@ -414,6 +410,18 @@ export function createDescriber({
     putVideoEntry(guildId, item.itemId, { text, ts: now(), watched: true, gif: true });
     report({ state: 'watched' }, sizes);
     return { state: 'watched', text, usage: completion.usage ?? null, estimated: completion.estimated ?? 0 };
+  }
+
+  /**
+   * The system message of a GIF watch: `describe-gif` with `{{maxChars}}`,
+   * `{{seconds}}` and `{{today}}`, else `describe-video` exactly as a GIF got
+   * it before (`{{maxChars}}`, `{{today}}`). Read at the moment of use.
+   */
+  function gifSystemPrompt(maxChars, seconds) {
+    const prompt = gifWatchPrompt(hot.prompts);
+    const values = { maxChars, today: todayDate() };
+    if (prompt?.name === 'describe-gif') values.seconds = seconds;
+    return fillTemplate(prompt?.text, values);
   }
 
   /**

@@ -31,6 +31,7 @@
 | `server.md` | да | Прогрев: серверные заметки из заметок каналов и сводок участников | `{{name}}` `{{fieldChars}}` `{{maxInjokes}}` `{{loreTextChars}}` |
 | `describe.md` | да | Внеролевой промпт модели описаний медиа (`features.mediaDescriptions`): одна картинка на входе, одна строка на выходе: действие и суть, читаемый текст цитируется в оригинальном написании. Всегда на английском. Без комментариев, без морализаторства, без разметки | `{{today}}` `{{maxChars}}` (необязательный) |
 | `describe-video.md` | да | Внеролевой промпт модели описаний видео (`features.videoDescriptions`): один видеоклип на входе (со звуком), полное описание настраиваемой длины на выходе: кто появляется, что говорится (ключевые фразы цитатой), текст на экране, что происходит визуально, музыка/звук при необходимости. Всегда на английском; речь, субтитры и текст на экране цитируются на языке оригинала. Без карточки персонажа | `{{today}}` `{{maxChars}}` |
+| `describe-gif.md` | нет | Внеролевой промпт для описателя GIF (`media.gif.watch`): короткий немой клип на входе, одна компактная строка на выходе: действие, что оно выражает, видимый текст. Всегда на английском. Без карточки персонажа. При отсутствии код использует `describe-video.md` | `{{today}}` `{{maxChars}}` `{{seconds}}` |
 | `rewatch.md` | да | Классификатор: нужно ли персонажу пересмотреть видео или повторить загрузку незагрузившегося (`features.videoRewatch`). Получает нумерованный список недавних видео с их статусом и новое сообщение. Выход: ОДНА строка: `<number> \| <question>`, `<number> \| retry` или `none` | `{{name}}` |
 | `rewatch-answer.md` | да | Внеролевой промпт для повторного просмотра: видеомодель смотрит клип ещё раз и отвечает на один вопрос на языке вопроса. Без карточки персонажа | `{{today}}` `{{question}}` `{{maxChars}}` |
 | `address.md` | да | Классификатор: адресовано ли сообщение без обращения персонажу | `{{name}}` |
@@ -55,7 +56,7 @@
 При принудительном ходе (`/nep interject`, `/nep initiate`) `forced.md` добавляется после промпта режима, если файл существует.
 В приватном чате `private.md` добавляется после промпта режима (перед `forced.md`) с теми же плейсхолдерами `{{name}}` и `{{author}}`.
 Анализатор и промпты прогрева `profile.md` и `server.md` получают карточку персонажа и `rules.md` как блок
-`<character>` в пользовательском сообщении. `channel.md`, `describe.md`, `describe-video.md`, `draw.md`, `rewatch.md`, `rewatch-answer.md`, `address.md`, `lookup.md`, `read-link.md`, `search-summary.md` и `variety.md` карточку не получают.
+`<character>` в пользовательском сообщении. `channel.md`, `describe.md`, `describe-video.md`, `describe-gif.md`, `draw.md`, `rewatch.md`, `rewatch-answer.md`, `address.md`, `lookup.md`, `read-link.md`, `search-summary.md` и `variety.md` карточку не получают.
 
 `{{guildFieldChars}}` равен `fieldChars * 2`, лимит, до которого код обрезает серверные паттерны и зачины разговоров.
 `{{maxEpisodes}}` определяет общее количество хранимых эпизодов на человека. Оба заполняются из конфигурации, но не
@@ -116,6 +117,8 @@
 
 Запись стоп-кадра картинки хранится под собственным ключом `<itemId>`, как и прежде. Обе могут сосуществовать для одного элемента.
 
+Просмотренный GIF кэшируется под собственным ключом `<itemId>` GIF (без префикса `video:`): `{ text, ts, watched: true, gif: true }`. Однокадровая подпись хранится как `{ text, ts, gif: true }` (плюс `watchFailed`, если попытка просмотра была). Обе записи находятся рядом с описаниями картинок в том же кэше.
+
 Результаты веб-поиска кэшируются в том же `data/guilds/<id>/media.json` рядом с записями видео и картинок:
 
 - Чтение ссылки: `read:<link.id>` хранит `{ text, ts }` (сжатую выдержку, постоянную) или `{ miss, ts, reason }` (промах, пропускаемый 6 часов; причины: `scheme`, `private`, `redirects`, `type`, `size`, `timeout`, `http`, `network`, `empty`, `unreadable`, `llm`). `TokenLimitError` или `DailyCapError` никогда не кэшируются.
@@ -174,7 +177,7 @@ transcript.reactionItem                  {emoji} {count}: one reaction; emoji is
 transcript.reactionMine                  {emoji} {count}: used instead of reactionItem when the persona is among the reactors; reads correctly whether count is 1 or more
 transcript.unknownDuration               shown in place of {duration} when Discord gave none
 senses.imageSee | imageDescribed | imageBlind        one line each; code picks the ones true under the live config. imageSee also covers the helper's note when features.attachedDescriptions is on
-senses.gifDescribed | gifBlind
+senses.gifWatched | gifDescribed | gifBlind   gifWatched replaces gifDescribed when media.gif.watch is on (needs video vision on and a describe-gif or describe-video prompt); a labels file without gifWatched falls back to gifDescribed
 senses.videoDescribed | videoBlind
 senses.videoWatch                        replaces videoDescribed when features.videoDescriptions is on (needs mediaDescriptions too); covers watched, still frame and not-watched states
 senses.videoRewatch                      shown alongside videoWatch when features.videoRewatch is on; tells the persona that a second look at a watched video may appear, marked as first-hand

@@ -4761,6 +4761,26 @@ test('run: status flags an image model of an unsupported family', async () => {
   assert.ok(lines.includes('image model: someone/else-model (unsupported family)'));
 });
 
+test('run: status shows today\'s GIF watches against media.gif.maxPerDay, apart from the video count', async () => {
+  const rootDir = makeRoot();
+  const { admin, store, hot } = makeAdmin(rootDir);
+  hot.config.media = { gif: { maxPerDay: 150 }, video: { maxPerDay: 40 } };
+  const today = new Date().toISOString().slice(0, 10);
+  Object.assign(store.state.data, { gifWatchDay: today, gifWatchCount: 12, videoDay: today, videoCount: 3 });
+
+  const lines = (await admin.run('status', {}, {})).split('\n');
+  assert.ok(lines.includes('gif watches today: 12/150'), lines.join('\n'));
+});
+
+test('run: status counts yesterday\'s GIF watches as zero; a missing cap shows the default 200', async () => {
+  const rootDir = makeRoot();
+  const { admin, store } = makeAdmin(rootDir);
+  Object.assign(store.state.data, { gifWatchDay: '2000-01-01', gifWatchCount: 12 });
+
+  const lines = (await admin.run('status', {}, {})).split('\n');
+  assert.ok(lines.includes('gif watches today: 0/200'), lines.join('\n'));
+});
+
 test('run: status has no image lines without an image client', async () => {
   const rootDir = makeRoot();
   const { admin } = makeAdmin(rootDir, { hot: hotForDraw(rootDir) });
@@ -5453,6 +5473,11 @@ test('run: gifs.status shows the library size, the top 10 with counts and captio
     store.setGifBackfill('g1', { at: '2026-09-30T10:00:00.000Z', channels: 4, messages: 900 });
     store.state.data.gifDay = new Date().toISOString().slice(0, 10);
     store.state.data.gifCount = 7;
+    hot.config.media = { gif: { maxPerDay: 120 } };
+    store.state.data.gifWatchDay = new Date().toISOString().slice(0, 10);
+    store.state.data.gifWatchCount = 9;
+    store.state.data.videoDay = new Date().toISOString().slice(0, 10);
+    store.state.data.videoCount = 33;
 
     const body = await admin.run('gifs.status', {}, { guildId: 'g1' });
     const lines = body.split('\n');
@@ -5463,6 +5488,7 @@ test('run: gifs.status shows the library size, the top 10 with counts and captio
     assert.equal(lines.filter((line) => line.startsWith('  g')).length, 10, 'only the top 10');
     assert.equal(lines[12], 'backfill: 2026-09-30T10:00:00.000Z, 4 channels, 900 messages');
     assert.equal(lines[13], 'posted today: 7/25');
+    assert.equal(lines[14], 'watched today: 9/120', 'the GIF watch count, never the video one');
   } finally {
     fs.rmSync(dataDir, { recursive: true, force: true });
   }
@@ -5474,8 +5500,13 @@ test('run: gifs.status with an empty library and no backfill says so; yesterday\
   try {
     store.state.data.gifDay = '2000-01-01';
     store.state.data.gifCount = 30;
+    store.state.data.gifWatchDay = '2000-01-01';
+    store.state.data.gifWatchCount = 30;
     const body = await admin.run('gifs.status', {}, { guildId: 'g1' });
-    assert.equal(body, ['library: 0 gifs', 'top 10: (none)', 'backfill: never (running now)', 'posted today: 0/40'].join('\n'));
+    assert.equal(
+      body,
+      ['library: 0 gifs', 'top 10: (none)', 'backfill: never (running now)', 'posted today: 0/40', 'watched today: 0/200'].join('\n'),
+    );
   } finally {
     fs.rmSync(dataDir, { recursive: true, force: true });
   }
@@ -5583,7 +5614,8 @@ test('run: gifs.status ends with the caption counts of the library and notes a r
     cache['m3-0#e0'] = { text: 'a sign', ts: now, watchFailed: now };
     const lines = (await admin.run('gifs.status', {}, { guildId: 'g1' })).split('\n');
     assert.equal(lines[lines.length - 1], 'captions: 1 watched, 1 one-frame, 1 failed, 1 none (recache running now)');
-    assert.match(lines[lines.length - 2], /^posted today: /);
+    assert.match(lines[lines.length - 2], /^watched today: /);
+    assert.match(lines[lines.length - 3], /^posted today: /);
   } finally {
     fs.rmSync(dataDir, { recursive: true, force: true });
   }

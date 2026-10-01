@@ -12,7 +12,9 @@
 
 贴纸和自定义表情经常重复出现，因此按 id 缓存，首次描述后几乎没有开销。启用 `features.vision` 时，呼叫消息的贴纸会作为图片附加。Discord 内置的动态贴纸是 Lottie 动画而非图片，因此只能显示名称。
 
-设置：直接视觉位于 `context.vision.*`，描述器位于 `media.*`。每个键请参阅[配置](configuration.md#media)。
+当 `media.gif.watch` 开启时（默认如此，需同时开启视频视觉），GIF 作为短无声片段被观看：动画被转换为不超过 `media.gif.maxSeconds`（默认 8）秒的 mp4，通过 `prompts/describe-gif.md` 发送给 `classifier.video` 模型（文件不存在时回退到 `describe-video.md`）。观看后的说明替代旧的单帧描述。无法观看的 GIF（无动画、每日 `media.gif.maxPerDay` 限额耗尽、转换或请求失败）保留单帧描述。`/nep gifs recache` 删除库外过时的单帧说明，并在后台从最旧的开始重新观看最多 `gifs.recachePerRun`（默认 50）个库条目。
+
+设置：直接视觉位于 `context.vision.*`，描述器位于 `media.*`，GIF 库位于 `gifs.*`。每个键请参阅[配置](configuration.md#media)。
 
 ## 视频
 

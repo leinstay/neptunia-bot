@@ -142,6 +142,7 @@ Settings for the GIF library (`features.gifs`). Uses are counted as each message
 | `maxPerDay` | `40` | GIFs the persona may post per day |
 | `backfillMessages` | `500` | Messages read per channel from history at startup to seed the library. Runs once when `features.gifs` is on and no backfill has run yet for this server. `0` disables |
 | `backfillDescribe` | `20` | Top GIFs by rank that are sent to the describer for a caption right after the backfill; the rest get captions as the chat meets them |
+| `recachePerRun` | `50` | Library GIFs re-described per `/nep gifs recache` run. One-frame captions outside the library are dropped at once; then up to this many library entries are watched in the background, oldest first |
 
 ## `media`
 
@@ -156,6 +157,16 @@ Settings for the media describer (`features.mediaDescriptions`). The describer m
 | `cacheEntries` | `5000` | Description cache size, keyed by attachment |
 | `filePreviewChars` | `500` | Characters shown from the beginning of text files |
 | `embedTextChars` | `200` | Characters shown from link embed text |
+
+### `media.gif`
+
+Settings for watching GIFs as short clips (`media.gif.watch`). When enabled, a GIF's animation is converted to a short mp4 and sent to the `classifier.video` model instead of describing a single frame. The watched caption replaces the one-frame description. A GIF that cannot be watched (no animation source, a failed conversion, a spent daily cap) falls back to the one-frame description.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `watch` | `true` | Watch GIFs as short video clips instead of describing a single frame. Needs `features.mediaDescriptions` and `features.videoDescriptions` on. A missing key counts as on |
+| `maxSeconds` | `8` | Seconds of the animation sent to the video model; the clip is converted with ffmpeg |
+| `maxPerDay` | `200` | Daily GIF watch cap, counted separately from `media.video.maxPerDay`. Once spent, a GIF gets the one-frame description instead |
 
 ### `media.video`
 

@@ -34,6 +34,7 @@ import { channelActivity } from './memory/channels.js';
 import { rankEmojiUsage } from './memory/emoji-usage.js';
 import { rankGifs } from './memory/gifs.js';
 import { gifCaptionCounts } from './memory/gif-recache.js';
+import { gifWatchesToday } from './memory/gif-watch.js';
 import { commandKeys } from './discord/commands.js';
 import { isAllowed as accessIsAllowed, isOwnerOnly, grant as accessGrant, revoke as accessRevoke } from './discord/access.js';
 import { classifierTextModel, classifierMediaModel, classifierVideoModel } from './behavior/mention.js';
@@ -874,6 +875,10 @@ export function createAdmin({
       const quota = images.quota({ userId: null });
       lines.push(`images today: ${quota.used}/${quota.cap ?? '-'}`, `image model: ${imageModelLabel(cfg)}`);
     }
+
+    // GIF watches have their own daily cap (media.gif.maxPerDay), apart from the video one.
+    const gifWatches = gifWatchesToday(data, cfg, new Date().toISOString().slice(0, 10));
+    lines.push(`gif watches today: ${gifWatches.used}/${gifWatches.cap}`);
 
     if (warmup && typeof warmup.summary === 'function') {
       const bs = warmup.summary();
@@ -2835,7 +2840,8 @@ async function cmdPing(args) {
 
   /** `/nep gifs status`: how many GIFs the library holds, the top 10 (rank order,
    * `gifs.halfLifeDays`) as `g<n> xCOUNT — caption or name`, the history backfill stamp, how
-   * many GIFs the persona posted today (UTC) against `gifs.maxPerDay`, and -- last, unless the
+   * many GIFs the persona posted today (UTC) against `gifs.maxPerDay`, how many GIFs it watched
+   * today against `media.gif.maxPerDay` (src/memory/gif-watch.js), and -- last, unless the
    * library is empty and no recache runs -- how the library's captions stand (watched /
    * one-frame / failed watch / none, see src/memory/gif-recache.js#gifCaptionCounts) with a
    * note while a recache runs. */
@@ -2858,6 +2864,7 @@ async function cmdPing(args) {
     const today = new Date().toISOString().slice(0, 10);
     const postedToday = data.gifDay === today && Number.isFinite(data.gifCount) ? data.gifCount : 0;
     const cap = hot.config?.gifs?.maxPerDay;
+    const watches = gifWatchesToday(data, hot.config, today);
     const captions = gifCaptionCounts(library, cache);
     const recaching = gifRecache?.isRunning?.() ? ' (recache running now)' : '';
     return [
@@ -2868,6 +2875,7 @@ async function cmdPing(args) {
         .map((entry) => `  ${entry.id} x${entry.count} — ${captionOf(entry) || entry.name || entry.site || entry.url}`),
       `backfill: ${backfill}${running}`,
       `posted today: ${postedToday}/${Number.isFinite(cap) ? cap : 40}`,
+      `watched today: ${watches.used}/${watches.cap}`,
       // Nothing to count in an empty library, unless a recache is running.
       ...(ranked.length > 0 || recaching
         ? [`captions: ${captions.watched} watched, ${captions.oneFrame} one-frame, ${captions.failed} failed, ${captions.none} none${recaching}`]

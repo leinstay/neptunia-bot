@@ -66,6 +66,7 @@ export const labels = {
     imageDescribed: 'pictures not attached to you come with a helper\'s one-line caption',
     imageBlind: 'pictures not attached to you are just [image] tags, you cannot see them',
     gifDescribed: 'gifs you do not see yourself come with a caption of their frame',
+    gifWatched: 'gifs you do not see yourself come with a caption of the watched loop',
     gifBlind: 'gifs you do not see yourself are just [gif] tags',
     videoDescribed: 'videos come with a caption of one frame, never the motion or sound',
     videoBlind: 'you cannot see or hear videos, only their [video] tag',

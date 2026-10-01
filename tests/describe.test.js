@@ -2196,9 +2196,9 @@ function gifFetcher(gif = (url, options) => ({ ok: true, dataUrl: GIF_CLIP_URL, 
   return fetcher;
 }
 
-function gifDescriber({ hot = gifHot(), llm = fakeLlm({ text: 'a man pulls a child back as a train rushes past' }), videoFetcher = gifFetcher(), imageFetcher = fakeImageFetcher(), state = fakeState() } = {}) {
+function gifDescriber({ hot = gifHot(), llm = fakeLlm({ text: 'a man pulls a child back as a train rushes past' }), videoFetcher = gifFetcher(), imageFetcher = fakeImageFetcher(), state = fakeState(), now } = {}) {
   const store = createStore({ dataDir: tmpDataDir() });
-  const describer = createDescriber({ hot, store, llm, imageFetcher, videoFetcher, state });
+  const describer = createDescriber({ hot, store, llm, imageFetcher, videoFetcher, state, ...(now ? { now } : {}) });
   return { describer, store, llm, videoFetcher, imageFetcher, state, hot };
 }
 
@@ -2259,7 +2259,9 @@ test('describe: a gifv embed is watched from its mp4 by the video model, cached 
   assert.equal(options.videoSeconds, 8);
   assert.equal(options.provider, undefined);
   assert.equal(options.skipCalibration, true);
-  assert.equal(state.data.videoCount, 1, 'a GIF watch takes a daily video slot');
+  assert.equal(state.data.gifWatchCount, 1, 'a GIF watch takes a daily GIF slot');
+  assert.equal(state.data.gifWatchDay, new Date().toISOString().slice(0, 10));
+  assert.equal(state.data.videoCount, undefined, 'never a daily video slot');
 
   const entry = store.getMediaCache('g1')['m1#e0'];
   assert.equal(entry.text, 'a man pulls a child back as a train rushes past');
@@ -2353,6 +2355,7 @@ test('describe: video vision off, media.gif.watch false or no describe-video pro
     assert.equal(result.text, 'a sign by a railway crossing');
     assert.equal(run.videoFetcher.calls.length, 0);
     assert.equal(run.state.data.videoCount, undefined, 'no daily video slot');
+    assert.equal(run.state.data.gifWatchCount, undefined, 'no daily GIF slot');
     assertOneFrame(run, 'm1#e0');
   }
 });
@@ -2386,7 +2389,8 @@ test('describe: a GIF that cannot be fetched or converted falls back to one fram
     assert.equal(line.reason, reason);
     assert.equal(line.location, 'cdn.discordapp.com/attachments/1/2/anim.gif');
     assert.ok(!JSON.stringify(logs).includes('secret'));
-    assert.equal(run.state.data.videoCount, 1, 'the attempt keeps its daily slot');
+    assert.equal(run.state.data.gifWatchCount, 1, 'the attempt keeps its daily GIF slot');
+    assert.equal(run.state.data.videoCount, undefined, 'never a daily video slot');
   }
 });
 
@@ -2400,11 +2404,16 @@ test('describe: a failed or empty watch request falls back to one frame, marked 
   assertOneFrame(empty, 'm1#e0', { watchFailed: true });
 });
 
-test('describe: a spent daily video cap or request cap falls back to one frame, not marked as a failed watch', async () => {
-  const daily = gifDescriber({ hot: gifHot({ video: { maxPerDay: 1 } }), state: fakeState({ videoDay: new Date().toISOString().slice(0, 10), videoCount: 1 }) });
-  await daily.describer.describe('g1', gifEmbedItem());
+test('describe: a spent daily GIF cap or request cap falls back to one frame, not marked as a failed watch', async () => {
+  const today = new Date().toISOString().slice(0, 10);
+  const daily = gifDescriber({ hot: gifHot({ gif: { maxPerDay: 1 } }), state: fakeState({ gifWatchDay: today, gifWatchCount: 1 }) });
+  const { logs } = await withCapturedLogs(() => daily.describer.describe('g1', gifEmbedItem()));
   assert.equal(daily.videoFetcher.calls.length, 0);
   assertOneFrame(daily, 'm1#e0');
+  assert.equal(daily.state.data.gifWatchCount, 1, 'a refused watch takes no slot');
+  const line = logs.find((l) => l.msg === 'describe: gif');
+  assert.equal(line.state, 'unavailable');
+  assert.equal(line.reason, 'daily');
 
   const capped = gifDescriber({ llm: fakeLlm([new DailyCapError('cap'), { text: 'a still' }]) });
   await capped.describer.describe('g1', gifEmbedItem());
@@ -2492,7 +2501,103 @@ test('watchGif: unavailable while GIFs are not watched or a daily rail is spent,
   assert.equal(noWatch.describer.gifWatchBlocker(), 'off');
   assert.equal(gifDescriber().describer.gifWatchBlocker(), null);
 
-  const daily = gifDescriber({ hot: gifHot({ video: { maxPerDay: 0 } }) });
+  const daily = gifDescriber({ hot: gifHot({ gif: { maxPerDay: 0 } }) });
   assert.deepEqual(await daily.describer.watchGif('g1', gifEmbedItem()), { state: 'unavailable', reason: 'daily' });
   assert.equal(daily.store.getMediaCache('g1')['m1#e0'], undefined);
+});
+
+// --- The GIF watch's own daily cap and prompt --------------------------------
+
+test('describe: a spent daily video cap never stops a GIF watch', async () => {
+  const today = new Date().toISOString().slice(0, 10);
+  const run = gifDescriber({ hot: gifHot({ video: { maxPerDay: 1 } }), state: fakeState({ videoDay: today, videoCount: 1 }) });
+  const result = await run.describer.describe('g1', gifEmbedItem());
+  assert.equal(result.text, 'a man pulls a child back as a train rushes past');
+  assert.equal(run.store.getMediaCache('g1')['m1#e0'].watched, true);
+  assert.equal(run.state.data.videoCount, 1, 'the video count is untouched');
+  assert.equal(run.state.data.gifWatchCount, 1);
+});
+
+test('describeVideo: a spent daily GIF cap never stops a video watch, and a video takes no GIF slot', async () => {
+  const today = new Date().toISOString().slice(0, 10);
+  const run = gifDescriber({ hot: gifHot({ gif: { maxPerDay: 1 } }), state: fakeState({ gifWatchDay: today, gifWatchCount: 1 }) });
+  const video = await run.describer.describeVideo('g1', videoAttachment());
+  assert.equal(video.state, 'watched');
+  assert.equal(run.state.data.videoCount, 1);
+  assert.equal(run.state.data.gifWatchCount, 1, 'the GIF count is untouched');
+
+  const fresh = gifDescriber();
+  await fresh.describer.describeVideo('g1', videoAttachment());
+  assert.equal(fresh.state.data.videoCount, 1);
+  assert.equal(fresh.state.data.gifWatchCount, undefined);
+});
+
+test('describe: the GIF cap counts every watch attempt up to media.gif.maxPerDay, then falls back to one frame', async () => {
+  const run = gifDescriber({ hot: gifHot({ gif: { maxPerDay: 2 } }), llm: fakeLlm({ text: 'a clip' }) });
+  await run.describer.describe('g1', gifEmbedItem('m1#e0'));
+  await run.describer.describe('g1', gifEmbedItem('m2#e0'));
+  await run.describer.describe('g1', gifEmbedItem('m3#e0'));
+  assert.equal(run.videoFetcher.calls.length, 2, 'the third GIF is not fetched');
+  assert.equal(run.state.data.gifWatchCount, 2);
+  assert.equal(run.store.getMediaCache('g1')['m2#e0'].watched, true);
+  assertOneFrame(run, 'm3#e0');
+});
+
+test('describe: the GIF count rolls over with the UTC day', async () => {
+  let clock = Date.parse('2026-10-01T23:59:00Z');
+  const state = fakeState({ gifWatchDay: '2026-10-01', gifWatchCount: 3 });
+  const run = gifDescriber({ hot: gifHot({ gif: { maxPerDay: 3 } }), state, now: () => clock, llm: fakeLlm({ text: 'a still' }) });
+  await run.describer.describe('g1', gifEmbedItem('m1#e0'));
+  assert.equal(run.videoFetcher.calls.length, 0, 'spent today');
+  assert.equal(state.data.gifWatchCount, 3);
+
+  clock = Date.parse('2026-10-02T00:01:00Z');
+  await run.describer.describe('g1', gifEmbedItem('m2#e0'));
+  assert.equal(run.videoFetcher.calls.length, 1, 'a new day, a new slot');
+  assert.equal(state.data.gifWatchDay, '2026-10-02');
+  assert.equal(state.data.gifWatchCount, 1);
+});
+
+test('describe: a missing media.gif.maxPerDay means 200 watches a day', async () => {
+  const hot = gifHot();
+  delete hot.config.media.gif.maxPerDay;
+  const today = new Date().toISOString().slice(0, 10);
+  const below = gifDescriber({ hot, state: fakeState({ gifWatchDay: today, gifWatchCount: 199 }) });
+  await below.describer.describe('g1', gifEmbedItem());
+  assert.equal(below.videoFetcher.calls.length, 1);
+  const spent = gifDescriber({ hot, state: fakeState({ gifWatchDay: today, gifWatchCount: 200 }), llm: fakeLlm({ text: 'a still' }) });
+  await spent.describer.describe('g1', gifEmbedItem());
+  assert.equal(spent.videoFetcher.calls.length, 0);
+});
+
+test('describe: a GIF watch uses describe-gif when present, with {{maxChars}} and {{seconds}}', async () => {
+  const hot = gifHot({ gif: { maxSeconds: 6 }, prompts: { 'describe-gif': 'Silent loop of {{seconds}} s, caption up to {{maxChars}}, {{today}}.' } });
+  const run = gifDescriber({ hot, now: () => Date.parse('2026-10-01T12:00:00Z') });
+  await run.describer.describe('g1', gifEmbedItem());
+  assert.deepEqual(run.llm.calls[0].messages[0], { role: 'system', content: 'Silent loop of 6 s, caption up to 200, 2026-10-01.' });
+  assert.equal(run.llm.calls[0].options.role, 'classifier.video');
+});
+
+test('describe: without describe-gif a GIF watch keeps describe-video exactly as before', async () => {
+  const run = gifDescriber({ hot: gifHot({ prompts: { 'describe-video': 'Video {{maxChars}} {{seconds}}' } }) });
+  await run.describer.describe('g1', gifEmbedItem());
+  assert.deepEqual(run.llm.calls[0].messages[0], { role: 'system', content: 'Video 200 {{seconds}}' });
+});
+
+test('describe: describe-gif alone (no describe-video) is enough to watch GIFs', async () => {
+  const run = gifDescriber({ hot: gifHot({ prompts: { 'describe-video': undefined, 'describe-gif': 'Loop, {{maxChars}}.' } }) });
+  assert.equal(run.describer.gifWatchBlocker(), null);
+  await run.describer.describe('g1', gifEmbedItem());
+  assert.equal(run.videoFetcher.calls[0].fn, 'fetchGif');
+  assert.equal(run.llm.calls[0].messages[0].content, 'Loop, 200.');
+});
+
+test('watchGif: the recache stops on a spent GIF cap, not on a spent video cap', async () => {
+  const today = new Date().toISOString().slice(0, 10);
+  const videoSpent = gifDescriber({ hot: gifHot({ video: { maxPerDay: 0 } }), state: fakeState({ videoDay: today, videoCount: 0 }) });
+  assert.equal((await videoSpent.describer.watchGif('g1', gifEmbedItem())).state, 'watched');
+
+  const gifSpent = gifDescriber({ hot: gifHot({ gif: { maxPerDay: 1 } }), state: fakeState({ gifWatchDay: today, gifWatchCount: 1 }) });
+  assert.deepEqual(await gifSpent.describer.watchGif('g1', gifEmbedItem()), { state: 'unavailable', reason: 'daily' });
+  assert.equal(gifSpent.videoFetcher.calls.length, 0);
 });
