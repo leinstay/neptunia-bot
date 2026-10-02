@@ -250,6 +250,20 @@ function normalizeSnapshot(snapshot, embedTextChars, videoSites) {
 }
 
 /**
+ * The replied-to author's id when they are among the message's mentioned
+ * users only because of the reply ping: `mentions.repliedUser` is set, that
+ * user is in `mentionedUserIds`, and the raw content holds no `<@id>` /
+ * `<@!id>` token for them. Null otherwise.
+ */
+function replyPingUserId(message, mentionedUserIds) {
+  const repliedId = message.mentions?.repliedUser?.id;
+  if (!repliedId || !message.reference?.messageId) return null;
+  if (!mentionedUserIds.includes(repliedId)) return null;
+  const typed = new RegExp(`<@!?${repliedId}>`).test(message.content ?? '');
+  return typed ? null : repliedId;
+}
+
+/**
  * Reduce a discord.js Message to the plain shape the rest of the code works
  * with. `options.embedTextChars` caps link/gif title+description text
  * (default `config.media.embedTextChars`, see config.json).
@@ -286,6 +300,7 @@ export function normalizeMessage(message, selfId, options = {}) {
   const isForward = message.reference?.type === MessageReferenceType.Forward;
   const sourceChannelId = isForward ? message.reference?.channelId : null;
   const sourceChannel = sourceChannelId ? message.guild?.channels?.cache?.get(sourceChannelId) : null;
+  const mentionedUserIds = [...(message.mentions?.users?.keys?.() ?? [])];
 
   return {
     id: message.id,
@@ -303,8 +318,13 @@ export function normalizeMessage(message, selfId, options = {}) {
     // src/behavior/prompt.js's <people> "asked about" window. `content`
     // above is `cleanContent`-derived and already reads "@DisplayName", so
     // this is the only place a stable member id survives normalization.
-    mentionedUserIds: [...(message.mentions?.users?.keys?.() ?? [])],
+    mentionedUserIds,
     replyToId: isForward ? null : (message.reference?.messageId ?? null),
+    // The replied-to author when Discord's reply ping alone put them into
+    // `mentionedUserIds` (no `<@id>` typed in the text), else null -- so the
+    // address classifier's pre-filter (src/behavior/mention.js) can tell a
+    // reply ping from a real mention of another member.
+    replyPingUserId: isForward ? null : replyPingUserId(message, mentionedUserIds),
     // The forwarded snapshot's source channel name, when it resolves in the
     // same guild -- see src/discord/format.js's `forwardedFrom` rendering.
     forwardedFrom: sourceChannel?.name ?? null,

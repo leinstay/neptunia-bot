@@ -1259,6 +1259,143 @@ test('events: a name trigger elsewhere while busy is dropped, not deferred', asy
   assert.equal(called, false, 'nothing was queued for a name trigger');
 });
 
+/**
+ * Turns whose channel `c1` is busy until `.finish()`: runTurn answers 'busy' while it is, records
+ * every call, and `spokeAfterSeeing` reports the ids passed in `seen`.
+ */
+function busyChannelTurns({ seen = [] } = {}) {
+  let busy = true;
+  const calls = [];
+  const turns = fakeTurns({
+    isBusy: (id) => busy && id === 'c1',
+    isAnyBusy: () => busy,
+    runTurn: async (args) => {
+      calls.push(args);
+      return { outcome: busy && args.channel.id === 'c1' ? 'busy' : 'spoke' };
+    },
+  });
+  turns.spokeAfterSeeing = (channelId, messageId) => channelId === 'c1' && seen.includes(messageId);
+  turns.calls = calls;
+  turns.finish = () => {
+    busy = false;
+  };
+  return turns;
+}
+
+/** tagHistory that counts its hits, to prove a deferred ping is not counted on arrival. */
+function countingTagHistory() {
+  const inner = createTagHistory();
+  const tags = { hits: 0, hit: (...args) => ((tags.hits += 1), inner.hit(...args)) };
+  return tags;
+}
+
+for (const oneAtATime of [true, false]) {
+  test(`events: a mention in the channel whose turn is running is deferred, answered after it (oneAtATime=${oneAtATime})`, async () => {
+    const turns = busyChannelTurns();
+    const tagHistory = countingTagHistory();
+    const config = baseConfig({ mention: { oneAtATime } });
+    // Exactly two values: the switch pause and decideMention at drain time -- none on arrival.
+    const handler = makeHandler({ config, turns, tagHistory, sleep: async () => {}, rng: scripted([0.5, 0.99]) });
+
+    const guild = fakeGuild();
+    const channel = fakeChannelWithMessage('c1', guild, 'm1');
+    const { logs } = await withCapturedLogs(() => handler(directPingMessage({ guild, channel, channelId: 'c1' })));
+
+    assert.equal(turns.calls.length, 0, 'not run against the busy channel');
+    assert.equal(tagHistory.hits, 0, 'counted at drain time, not on arrival');
+    const deferred = logs.find((entry) => entry.msg === 'mention: deferred');
+    assert.ok(deferred, 'logged as deferred');
+    assert.equal(deferred.sameChannel, true);
+
+    turns.finish();
+    await handler.drainPending();
+
+    assert.equal(turns.calls.length, 1);
+    assert.equal(turns.calls[0].channel, channel);
+    assert.equal(turns.calls[0].trigger.id, 'm1');
+    assert.equal(turns.calls[0].triggerKind, 'mention');
+    assert.equal(tagHistory.hits, 1);
+  });
+}
+
+test('events: a reply to the persona in the channel whose turn is running is deferred and answered after it', async () => {
+  const turns = busyChannelTurns();
+  const handler = makeHandler({ turns, sleep: async () => {}, rng: scripted([0.5, 0.99]) });
+
+  const guild = fakeGuild();
+  const channel = fakeChannelWithMessage('c1', guild, 'm1');
+  channel.messages.cache.set('m0', { author: { id: 'self1' } });
+  await handler(fakeMessage({ id: 'm1', guild, channel, channelId: 'c1', cleanContent: 'γεια', reference: { messageId: 'm0' } }));
+  assert.equal(turns.calls.length, 0);
+
+  turns.finish();
+  await handler.drainPending();
+
+  assert.equal(turns.calls.length, 1);
+  assert.equal(turns.calls[0].trigger.id, 'm1');
+  assert.equal(turns.calls[0].triggerKind, 'reply');
+});
+
+test('events: a name trigger in the channel whose turn is running is not queued; the busy drop is logged', async () => {
+  const turns = busyChannelTurns();
+  const config = baseConfig({ bot: { nameTriggers: ['νεπτούνια'] } });
+  const handler = makeHandler({ config, turns, sleep: async () => {}, rng: scripted([0.5]) });
+
+  const guild = fakeGuild();
+  const channel = fakeChannelWithMessage('c1', guild, 'm1');
+  const { logs } = await withCapturedLogs(async () => {
+    await handler(fakeMessage({ id: 'm1', guild, channel, channelId: 'c1', cleanContent: 'γεια νεπτούνια' }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+
+  assert.equal(turns.calls.length, 1, 'falls through to runTurn, which answers busy');
+  const dropped = logs.find((entry) => entry.msg === 'mention: dropped (busy)');
+  assert.ok(dropped);
+  assert.equal(dropped.channel, 'c1');
+  assert.equal(dropped.kind, 'name');
+  assert.equal(logs.some((entry) => entry.msg === 'mention: deferred'), false);
+
+  turns.finish();
+  await handler.drainPending();
+  assert.equal(turns.calls.length, 1, 'nothing was queued');
+});
+
+test('events: mention.pendingSameChannel=false restores the busy drop for a same-channel mention, read hot', async () => {
+  const turns = busyChannelTurns();
+  const config = baseConfig({ mention: { pendingSameChannel: false } });
+  // One value: decideMention on arrival (the old path); the drain must find nothing.
+  const handler = makeHandler({ config, turns, sleep: async () => {}, rng: scripted([0.99]) });
+
+  const guild = fakeGuild();
+  const channel = fakeChannelWithMessage('c1', guild, 'm1');
+  const { logs } = await withCapturedLogs(async () => {
+    await handler(directPingMessage({ guild, channel, channelId: 'c1' }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+
+  assert.equal(turns.calls.length, 1, 'decided and handed to runTurn, which answers busy');
+  assert.ok(logs.some((entry) => entry.msg === 'mention: dropped (busy)' && entry.kind === 'mention'));
+
+  turns.finish();
+  await handler.drainPending();
+  assert.equal(turns.calls.length, 1, 'nothing was queued');
+});
+
+test('events: a deferred ping the last speaking turn already had in view is not answered again', async () => {
+  const turns = busyChannelTurns({ seen: ['m1'] });
+  const handler = makeHandler({ turns, sleep: async () => {}, rng: scripted([0.5]) });
+
+  const guild = fakeGuild();
+  const channel = fakeChannelWithMessage('c1', guild, 'm1');
+  await handler(directPingMessage({ guild, channel, channelId: 'c1' }));
+
+  turns.finish();
+  const { logs } = await withCapturedLogs(() => handler.drainPending());
+
+  assert.equal(turns.calls.length, 0, 'the running turn already answered it');
+  assert.ok(logs.some((entry) => entry.msg === 'mention: already answered' && entry.channel === 'c1'));
+});
+
 test('events: a newer direct ping in the same channel replaces the older pending one', async () => {
   let seenArgs = null;
   const turns = fakeTurns({
@@ -1730,7 +1867,7 @@ test('follow-up: the window opens on send and expires after followUpMinutes', as
   assert.equal(spontaneous.onMessageCalls.length, 1, 'the expired-window message falls back to the spontaneous scheduler');
 });
 
-test('follow-up: a reply to another member is "no" without consulting the model', async () => {
+test('follow-up: a reply to another member reaches the classifier like plain text', async () => {
   const llm = fakeFollowUpLlm();
   const spontaneous = fakeSpontaneous();
   const handler = makeHandler({ spontaneous, llm, prompts: fakeAddressPrompts() });
@@ -1745,10 +1882,80 @@ test('follow-up: a reply to another member is "no" without consulting the model'
     cleanContent: 'replying to someone else',
     reference: { messageId: 'm-other' },
   });
-  await handler(msg);
+  const pending = handler(msg);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(llm.calls.length, 1, 'a reply to another member is asked about');
+  llm.respond('no');
+  await pending;
+  assert.equal(spontaneous.onMessageCalls.length, 0, 'handled by the classifier, not handed to spontaneous');
+});
 
-  assert.equal(llm.calls.length, 0, 'a reply to another member never reaches the model');
+test('follow-up: a reply carrying only the implicit reply ping reaches the classifier', async () => {
+  const llm = fakeFollowUpLlm();
+  const handler = makeHandler({ llm, prompts: fakeAddressPrompts() });
+  const guild = fakeGuild();
+  const channel = fakeChannelWithHistory('c1', guild, []);
+  await openFollowUpWindow(handler, { guild, channel, ts: Date.now() });
+
+  const msg = fakeMessage({
+    guild,
+    channel,
+    channelId: 'c1',
+    content: 'and what do you think',
+    cleanContent: 'and what do you think',
+    reference: { messageId: 'm-other' },
+    mentions: { users: new Map([['u2', { id: 'u2' }]]), repliedUser: { id: 'u2' } },
+  });
+  const pending = handler(msg);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(llm.calls.length, 1, 'the reply ping is not a mention of another member');
+  llm.respond('no');
+  await pending;
+});
+
+test('follow-up: a reply that also mentions a third member is "no" without consulting the model', async () => {
+  const llm = fakeFollowUpLlm();
+  const spontaneous = fakeSpontaneous();
+  const handler = makeHandler({ spontaneous, llm, prompts: fakeAddressPrompts() });
+  const guild = fakeGuild();
+  const channel = fakeChannelWithHistory('c1', guild, []);
+  await openFollowUpWindow(handler, { guild, channel, ts: Date.now() });
+
+  await handler(fakeMessage({
+    guild,
+    channel,
+    channelId: 'c1',
+    content: '<@u3> look at this',
+    cleanContent: '@Carol look at this',
+    reference: { messageId: 'm-other' },
+    mentions: { users: new Map([['u2', { id: 'u2' }], ['u3', { id: 'u3' }]]), repliedUser: { id: 'u2' } },
+  }));
+
+  assert.equal(llm.calls.length, 0);
   assert.equal(spontaneous.onMessageCalls.length, 0, 'handled by the pre-filter, not handed to spontaneous');
+});
+
+test('follow-up: mention.followUpClassifyReplies=false pre-filters any reply, read hot', async () => {
+  const config = baseConfig({ mention: { followUpClassifyReplies: false } });
+  const llm = fakeFollowUpLlm();
+  const spontaneous = fakeSpontaneous();
+  const handler = makeHandler({ config, spontaneous, llm, prompts: fakeAddressPrompts() });
+  const guild = fakeGuild();
+  const channel = fakeChannelWithHistory('c1', guild, []);
+  await openFollowUpWindow(handler, { guild, channel, ts: Date.now() });
+
+  const reply = (id) =>
+    fakeMessage({ id, guild, channel, channelId: 'c1', cleanContent: 'replying to someone else', reference: { messageId: 'm-other' } });
+  await handler(reply('m1'));
+  assert.equal(llm.calls.length, 0, 'switch off: a reply never reaches the model');
+  assert.equal(spontaneous.onMessageCalls.length, 0);
+
+  config.mention.followUpClassifyReplies = true;
+  const pending = handler(reply('m2'));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(llm.calls.length, 1, 'switched back on without recreating the handler');
+  llm.respond('no');
+  await pending;
 });
 
 test('follow-up: a mention of another member is "no" without consulting the model', async () => {

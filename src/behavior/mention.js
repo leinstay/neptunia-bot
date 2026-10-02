@@ -117,16 +117,22 @@ export function isFollowUpOpen(state, now, cfg) {
 }
 
 /**
- * A reply to another member, or a mention of another member (not the
- * persona), is always `no` before the classifier is ever asked — see the
- * prompt contract. `normalized` is the shape src/discord/collect.js's
- * `normalizeMessage` produces.
- * @param {{ replyToId: string|null, mentionedUserIds: string[] }} normalized
+ * A mention of another member (not the persona) is always `no` before the
+ * classifier is ever asked — see the prompt contract. A reply to another
+ * member's message goes to the classifier like plain text; the reply ping
+ * Discord adds for the replied-to author (`replyPingUserId`) is not a
+ * mention. With `mention.followUpClassifyReplies` false (a missing key counts
+ * as on) any reply is `no` as well. `normalized` is the shape
+ * src/discord/collect.js's `normalizeMessage` produces.
+ * @param {{ replyToId: string|null, mentionedUserIds: string[], replyPingUserId?: string|null }} normalized
  * @param {string} selfId
+ * @param {{ followUpClassifyReplies?: boolean }} [cfg]  config.mention, read by the caller now
  */
-export function followUpPreFilter(normalized, selfId) {
-  if (normalized.replyToId) return true;
-  return (normalized.mentionedUserIds ?? []).some((id) => id !== selfId);
+export function followUpPreFilter(normalized, selfId, cfg) {
+  const isReply = Boolean(normalized.replyToId);
+  if (isReply && cfg?.followUpClassifyReplies === false) return true;
+  const replyPing = isReply ? (normalized.replyPingUserId ?? null) : null;
+  return (normalized.mentionedUserIds ?? []).some((id) => id !== selfId && id !== replyPing);
 }
 
 /** The classifier answers with one word: `yes` when it starts with 'y' (case-insensitive), else `no`. */

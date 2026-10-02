@@ -342,8 +342,30 @@ test('isFollowUpOpen: falls back to defaults (15 min, streak 3) when cfg omits t
   assert.equal(isFollowUpOpen(state, 900_000, {}), false); // exactly 15 min
 });
 
-test('followUpPreFilter: a reply to another message is always "no" material', () => {
-  const normalized = { replyToId: 'm100', mentionedUserIds: [] };
+test('followUpPreFilter: a reply to another member reaches the classifier', () => {
+  const normalized = { replyToId: 'm100', mentionedUserIds: [], replyPingUserId: null };
+  assert.equal(followUpPreFilter(normalized, 'self1'), false);
+  assert.equal(followUpPreFilter(normalized, 'self1', { followUpClassifyReplies: true }), false);
+});
+
+test('followUpPreFilter: a reply whose only mention is the implicit reply ping reaches the classifier', () => {
+  const normalized = { replyToId: 'm100', mentionedUserIds: ['u2'], replyPingUserId: 'u2' };
+  assert.equal(followUpPreFilter(normalized, 'self1'), false);
+});
+
+test('followUpPreFilter: a reply that also mentions a third member explicitly is "no" material', () => {
+  const normalized = { replyToId: 'm100', mentionedUserIds: ['u2', 'u3'], replyPingUserId: 'u2' };
+  assert.equal(followUpPreFilter(normalized, 'self1'), true);
+});
+
+test('followUpPreFilter: followUpClassifyReplies=false pre-filters any reply, as before', () => {
+  const cfg = { followUpClassifyReplies: false };
+  assert.equal(followUpPreFilter({ replyToId: 'm100', mentionedUserIds: [], replyPingUserId: null }, 'self1', cfg), true);
+  assert.equal(followUpPreFilter({ replyToId: 'm100', mentionedUserIds: ['u2'], replyPingUserId: 'u2' }, 'self1', cfg), true);
+});
+
+test('followUpPreFilter: the reply-ping exemption only applies to a reply', () => {
+  const normalized = { replyToId: null, mentionedUserIds: ['u2'], replyPingUserId: 'u2' };
   assert.equal(followUpPreFilter(normalized, 'self1'), true);
 });
 

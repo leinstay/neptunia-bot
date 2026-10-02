@@ -581,6 +581,48 @@ test('normalizeMessage: no mentions at all means an empty mentionedUserIds array
   assert.deepEqual(m.mentionedUserIds, []);
 });
 
+// --- normalizeMessage: replyPingUserId -----------------------------------
+
+test('normalizeMessage: replyPingUserId is the replied-to author put into mentions by the reply ping alone', () => {
+  const raw = rawMessage({
+    content: 'só isso',
+    reference: { messageId: 'm0', channelId: 'c1' },
+    mentions: { users: new Map([['u2', {}]]), repliedUser: { id: 'u2' } },
+  });
+  const m = normalizeMessage(raw, 'self');
+  assert.deepEqual(m.mentionedUserIds, ['u2'], 'mentionedUserIds itself is unchanged');
+  assert.equal(m.replyPingUserId, 'u2');
+});
+
+test('normalizeMessage: replyPingUserId is null when the replied-to author is also typed as <@id>', () => {
+  for (const content of ['<@u2> look', '<@!u2> look']) {
+    const raw = rawMessage({
+      content,
+      reference: { messageId: 'm0', channelId: 'c1' },
+      mentions: { users: new Map([['u2', {}]]), repliedUser: { id: 'u2' } },
+    });
+    assert.equal(normalizeMessage(raw, 'self').replyPingUserId, null, content);
+  }
+});
+
+test('normalizeMessage: replyPingUserId is null for a reply with the ping off (author not in mentions)', () => {
+  const raw = rawMessage({
+    content: 'quiet reply',
+    reference: { messageId: 'm0', channelId: 'c1' },
+    mentions: { users: new Map(), repliedUser: { id: 'u2' } },
+  });
+  assert.equal(normalizeMessage(raw, 'self').replyPingUserId, null);
+});
+
+test('normalizeMessage: replyPingUserId is null without a reply, and for a forward', () => {
+  assert.equal(normalizeMessage(rawMessage(), 'self').replyPingUserId, null);
+  const forward = rawMessage({
+    reference: { messageId: 'orig', channelId: 'c2', type: MessageReferenceType.Forward },
+    mentions: { users: new Map([['u2', {}]]), repliedUser: { id: 'u2' } },
+  });
+  assert.equal(normalizeMessage(forward, 'self').replyPingUserId, null);
+});
+
 // --- fetchHistory: embedTextChars reaches normalizeMessage -------------------
 
 test('fetchHistory: threads embedTextChars through to the embed classification', async () => {

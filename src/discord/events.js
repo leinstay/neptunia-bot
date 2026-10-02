@@ -407,7 +407,7 @@ export function createMessageHandler({
     if (!canSend(channel)) return { kind: 'skip', reason: 'cannotSend' };
 
     const startedAt = now();
-    if (followUpPreFilter(normalized, selfId)) {
+    if (followUpPreFilter(normalized, selfId, mentionCfg)) {
       log.info('follow-up: verdict', { channel: channelId, author: normalized.authorId, verdict: 'no', ms: now() - startedAt });
       bumpFollowUpNoStreak(channelId, state, mentionCfg);
       return { kind: 'handled' };
@@ -673,9 +673,12 @@ export function createMessageHandler({
     }
   }
 
-  // --- One attention (mention.oneAtATime): pending direct pings ------------
-  // A @mention or a reply to the persona that arrives while a turn is
-  // running in another channel is remembered here instead of dropped; see
+  // --- Pending direct pings ---------------------------------------------------
+  // A @mention or a reply to the persona that arrives while a turn is running
+  // in its own channel (mention.pendingSameChannel) or, with one attention
+  // (mention.oneAtATime), in another channel is remembered here instead of
+  // dropped, and answered once the turn frees up -- unless the turn that
+  // spoke there already had it in view (turns.spokeAfterSeeing). See
   // src/behavior/pending.js for the plain queue operations. Never persisted.
   let pendingList = [];
   let draining = false; // guards against a re-entrant drainPending() call (see below)
@@ -689,17 +692,18 @@ export function createMessageHandler({
   }
 
   /**
-   * Remember a direct ping (mention/reply/private message) that arrived while the persona's
-   * one attention is busy elsewhere. At most one per channel -- a newer ping
-   * replaces an older one already queued for the same channel -- and at most
-   * mention.maxPending channels; the oldest is evicted when full.
+   * Remember a direct ping (mention/reply/private message) that arrived while
+   * a turn is running in its own channel or, with one attention, elsewhere.
+   * At most one per channel -- a newer ping replaces an older one already
+   * queued for the same channel -- and at most mention.maxPending channels;
+   * the oldest is evicted when full.
    */
   function enqueuePending(channel, trigger, kind) {
     const maxPending = hot.config.mention.maxPending ?? 3;
     const ping = { channelId: channel.id, channel, trigger, kind, arrivedAt: now() };
     const { list, evicted } = addPending(pendingList, ping, maxPending);
     pendingList = list;
-    log.info('mention: deferred', { channel: channel.id, kind, pending: pendingList.length });
+    log.info('mention: deferred', { channel: channel.id, kind, sameChannel: turns.isBusy(channel.id), pending: pendingList.length });
     if (evicted) log.info('mention: dropped (full)', { channel: evicted.channelId, kind: evicted.kind });
   }
 
@@ -710,8 +714,11 @@ export function createMessageHandler({
    * `setOnIdle`, in the same `finally` that frees the channel). The ignore
    * decision (decideMention) is rolled HERE, not when the ping arrived. A
    * message deleted meanwhile, or a channel that lost send permission, is
-   * dropped silently. Guarded against re-entrancy: the turn this function
-   * itself starts also frees the channel through the very same `onIdle`,
+   * dropped silently; a ping the last turn that spoke in its channel already
+   * had in its history (turns.spokeAfterSeeing) is dropped with a log line.
+   * A ping queued in a channel whose own turn was running is picked up the
+   * same way once that turn frees the channel. Guarded against re-entrancy:
+   * the turn this function itself starts also frees the channel through the very same `onIdle`,
    * which would otherwise start a second overlapping drain. A no-op while
    * `isWarmingUp()` is true -- the queue is left untouched for a later
    * call once the warmup run ends.
@@ -736,6 +743,12 @@ export function createMessageHandler({
 
         if (!canSend(ping.channel)) continue;
         if (!(await messageStillExists(ping.channel, ping.trigger.id))) continue;
+        // The turn that ran meanwhile fetched its history after this ping
+        // landed and spoke with it in view: not answered a second time.
+        if (turns.spokeAfterSeeing?.(ping.channelId, ping.trigger.id)) {
+          log.info('mention: already answered', { channel: ping.channelId, kind: ping.kind });
+          continue;
+        }
 
         const config = hot.config;
         const features = config.features ?? {};
@@ -961,16 +974,29 @@ export function createMessageHandler({
       // 11. The persona was called: decide whether to actually answer.
       if (!canSend(message.channel)) return;
 
-      // 11b. One attention (mention.oneAtATime, default on): while a turn is
-      // running in ANOTHER channel, a direct call (mention/reply) is worth
-      // remembering as pending instead of dropping -- everything else (a
-      // name trigger) is simply skipped, same as the same-channel busy drop
-      // further below (unchanged: runTurn itself returns 'busy' for it).
+      // 11b. A direct call (mention/reply) that cannot be answered now is
+      // remembered as pending instead of dropped, and answered by
+      // drainPending once the turn frees up (the tag count and the ignore
+      // roll happen there):
+      //  - a turn is running in THIS channel (mention.pendingSameChannel,
+      //    default on, regardless of mention.oneAtATime) -- that turn may
+      //    already have fetched its history without this message;
+      //  - one attention (mention.oneAtATime, default on): a turn is running
+      //    in ANOTHER channel.
+      // A name trigger is never queued: busy elsewhere it is skipped here;
+      // busy in this channel (or with pendingSameChannel off, any direct
+      // call) it falls through and runTurn itself returns 'busy', logged as
+      // a drop below.
+      const direct = kind === 'mention' || kind === 'reply';
       const oneAtATime = config.mention.oneAtATime !== false;
       const sameChannelBusy = turns.isBusy(message.channel.id);
+      if (sameChannelBusy && direct && config.mention.pendingSameChannel !== false) {
+        enqueuePending(message.channel, normalized, kind);
+        return;
+      }
       const busyElsewhere = oneAtATime && !sameChannelBusy && turns.isAnyBusy();
       if (busyElsewhere) {
-        if (kind === 'mention' || kind === 'reply') {
+        if (direct) {
           enqueuePending(message.channel, normalized, kind);
         } else {
           log.info('mention: dropped (busy)', { channel: message.channel.id, kind });
@@ -1005,7 +1031,10 @@ export function createMessageHandler({
       if (decision.respond) {
         turns
           .runTurn({ channel: message.channel, mode: 'reply', trigger: normalized, triggerKind: kind })
-          .then((result) => announceRefusal(message.channel, normalized, result))
+          .then((result) => {
+            if (result?.outcome === 'busy') log.info('mention: dropped (busy)', { channel: message.channel.id, kind });
+            return announceRefusal(message.channel, normalized, result);
+          })
           .catch((err) => log.error('events: reply turn failed', { channel: message.channel.id, error: err }));
       }
     } catch (err) {

@@ -323,6 +323,9 @@ export function createTurnRunner({
   const lastPostAt = new Map(); // channelId -> ts of the persona's last message
   let onIdle = null; // set via setOnIdle(); see the finally block of runTurn below
   let idleWaiters = []; // resolvers for waitIdle() (/nep pause), notified once busy.size hits 0
+  // channelId -> ids of the messages in the history of the last turn that spoke there. The
+  // pending-ping drain (src/discord/events.js) skips a ping this turn already had in view.
+  const spokeSaw = new Map();
 
   /** The custom emoji lookup, or null when there is no index or features.customEmoji is off (read now). */
   function emojiLookup() {
@@ -1285,9 +1288,11 @@ export function createTurnRunner({
       // and whether to actually post is the very last decision of a turn.
       if (hot.config.features?.dryRun === true) {
         await dryAct(channel, parsed, request.idByIndex, history, finalMode, triggerKind, selfName);
+        spokeSaw.set(channel.id, new Set(history.map((m) => m.id)));
         return { outcome: 'spoke', mode: finalMode, dryRun: true };
       }
       const acted = await act(channel, parsed, request.idByIndex, history, startedAt, triggerKind, trigger, selfName);
+      spokeSaw.set(channel.id, new Set(history.map((m) => m.id)));
       if (!acted.drawFailed) return { outcome: 'spoke', mode: finalMode };
       handOff = Boolean(trigger);
       return { outcome: 'spoke', mode: finalMode, drawFailed: acted.drawFailed };
@@ -1312,6 +1317,15 @@ export function createTurnRunner({
     isAnyBusy: () => busy.size > 0,
     lastPostAt: (channelId) => lastPostAt.get(channelId) ?? 0,
     notePost: (channelId, ts) => lastPostAt.set(channelId, ts),
+    /**
+     * Whether the last turn that spoke in `channelId` (this process, dry-run included) had
+     * `messageId` in its channel history -- so a direct ping queued while that turn ran was
+     * already in front of the model and is not answered a second time.
+     * @param {string} channelId
+     * @param {string} messageId
+     * @returns {boolean}
+     */
+    spokeAfterSeeing: (channelId, messageId) => spokeSaw.get(channelId)?.has(messageId) ?? false,
     /**
      * Resolves once no turn is in flight anywhere -- immediately if that is
      * already true. Used by admin.js's `/nep pause` to wait out a turn

@@ -1,6 +1,8 @@
 // Pure queue of "pending" direct pings: a @mention or a reply to the persona
-// that arrived while its one attention (see config.mention.oneAtATime) was
-// busy running a turn somewhere else. At most one pending ping per channel
+// that arrived while a turn was running in its own channel
+// (config.mention.pendingSameChannel) or, with one attention
+// (config.mention.oneAtATime), somewhere else; a private message waiting for
+// the same reason. At most one pending ping per channel
 // (a newer one replaces an older one in the same channel) and at most
 // mention.maxPending channels overall; the oldest is evicted when full.
 // In-memory only, never persisted -- a restart forgetting every pending ping
@@ -15,7 +17,7 @@
  * @property {string} channelId
  * @property {*} channel        the discord.js channel object the ping arrived in
  * @property {object} trigger   the normalized message that called the persona
- * @property {'mention'|'reply'} kind
+ * @property {'mention'|'reply'|'private'} kind
  * @property {number} arrivedAt
  */
 

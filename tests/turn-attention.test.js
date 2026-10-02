@@ -310,3 +310,33 @@ test('createTurnRunner: with no onIdle set, a turn finishes without throwing', a
   const result = await turns.runTurn({ channel, mode: 'reply', trigger: normalizedTrigger(raw), triggerKind: 'mention' });
   assert.equal(result.outcome, 'spoke');
 });
+
+// ---------------------------------------------------------------------------
+// spokeAfterSeeing() -- the pending-ping drain's double-answer check
+
+test('createTurnRunner: spokeAfterSeeing is true for a message in the history of the last turn that spoke there', async () => {
+  const raw1 = rawMessage({ id: 'm1' });
+  const raw2 = rawMessage({ id: 'm2', authorId: 'u2' });
+  const channel = fakeTurnChannel({ id: 'c1', historyMessages: [raw1, raw2] });
+  const turns = createTurnRunner({ hot: fakeHot({}), store: fakeStore(), llm: fakeLlm('<msg>ok</msg>'), calibrator: identityCalibrator(), client: fakeClient() });
+
+  assert.equal(turns.spokeAfterSeeing('c1', 'm2'), false, 'no turn has spoken yet');
+  const result = await turns.runTurn({ channel, mode: 'reply', trigger: normalizedTrigger(raw1), triggerKind: 'mention' });
+
+  assert.equal(result.outcome, 'spoke');
+  assert.equal(turns.spokeAfterSeeing('c1', 'm2'), true);
+  assert.equal(turns.spokeAfterSeeing('c1', 'm3'), false, 'not in that history');
+  assert.equal(turns.spokeAfterSeeing('c2', 'm2'), false, 'another channel');
+});
+
+test('createTurnRunner: spokeAfterSeeing stays false after a turn that chose to skip', async () => {
+  const raw1 = rawMessage({ id: 'm1' });
+  const raw2 = rawMessage({ id: 'm2', authorId: 'u2' });
+  const channel = fakeTurnChannel({ id: 'c1', historyMessages: [raw1, raw2] });
+  const turns = createTurnRunner({ hot: fakeHot({}), store: fakeStore(), llm: fakeLlm('<skip/>'), calibrator: identityCalibrator(), client: fakeClient() });
+
+  const result = await turns.runTurn({ channel, mode: 'reply', trigger: normalizedTrigger(raw1), triggerKind: 'mention' });
+
+  assert.equal(result.outcome, 'skip');
+  assert.equal(turns.spokeAfterSeeing('c1', 'm2'), false);
+});
