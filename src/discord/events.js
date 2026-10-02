@@ -24,7 +24,7 @@ import {
 } from '../behavior/mention.js';
 import { fill, formatTranscript, renderTranscript } from './format.js';
 import { topByRank } from '../memory/ranking.js';
-import { addPending, isExpired, popOldest } from '../behavior/pending.js';
+import { addPending, isExpired, popOldest, requeuePending } from '../behavior/pending.js';
 import { between } from '../behavior/turn.js';
 import { fillPromptTemplate } from '../behavior/prompt.js';
 import { privateGate } from '../behavior/private.js';
@@ -708,6 +708,27 @@ export function createMessageHandler({
   }
 
   /**
+   * The drain's runTurn answered 'busy': another turn started during the
+   * switch pause. The ping goes back into the queue with its original
+   * arrivedAt (a newer ping queued for the same channel meanwhile wins and
+   * this one is dropped; mention.maxPending still applies). Synchronous on
+   * purpose -- see drainPending. Returns whether a turn that blocks this ping
+   * is still running (its end calls drainPending again through onIdle).
+   */
+  function requeueBusy(ping) {
+    const mentionCfg = hot.config.mention;
+    const { list, dropped, evicted } = requeuePending(pendingList, ping, mentionCfg.maxPending ?? 3);
+    pendingList = list;
+    if (dropped) {
+      log.info('mention: dropped (newer)', { channel: dropped.channelId, kind: dropped.kind });
+    } else {
+      log.info('mention: deferred again (busy)', { channel: ping.channelId, kind: ping.kind, pending: pendingList.length });
+    }
+    if (evicted) log.info('mention: dropped (full)', { channel: evicted.channelId, kind: evicted.kind });
+    return mentionCfg.oneAtATime !== false ? turns.isAnyBusy() : turns.isBusy(ping.channelId);
+  }
+
+  /**
    * Answers pending direct pings, oldest first, one at a time, each after a
    * human "switch" pause (mention.switchDelayMs) -- called once a turn
    * finishes anywhere (src/index.js wires this to src/behavior/turn.js's
@@ -722,6 +743,15 @@ export function createMessageHandler({
    * which would otherwise start a second overlapping drain. A no-op while
    * `isWarmingUp()` is true -- the queue is left untouched for a later
    * call once the warmup run ends.
+   *
+   * A turn that started during the switch pause makes runTurn answer 'busy':
+   * the ping is re-queued (requeueBusy; a server ping keeps its `respond`
+   * decision, so the retry neither counts it again toward spamThreshold nor
+   * re-rolls the ignore chance) and the pass stops -- the running turn calls
+   * drainPending again when it ends. From the busy result to `draining =
+   * false` nothing is awaited, so that onIdle call either finds `draining`
+   * already cleared, or the blocking turn had already ended when requeueBusy
+   * looked and the pass goes on instead of stopping.
    */
   async function drainPending() {
     if (draining || isWarmingUp()) return;
@@ -752,6 +782,7 @@ export function createMessageHandler({
 
         const config = hot.config;
         const features = config.features ?? {};
+        let stop = false; // set by requeueBusy while the turn that blocked this ping still runs
 
         // A private message is answered like a direct ping, without the
         // ignore roll; the channel has no guild, so the pinned one is passed.
@@ -774,48 +805,56 @@ export function createMessageHandler({
               trigger: ping.trigger,
               triggerKind: 'private',
             });
-            await afterPrivateTurn(ping.channel, privateGuildId, ping.trigger, result);
+            if (result?.outcome === 'busy') stop = requeueBusy(ping);
+            else await afterPrivateTurn(ping.channel, privateGuildId, ping.trigger, result);
           } catch (err) {
             log.error('events: deferred private turn failed', { channel: ping.channelId, error: err });
           }
+          if (stop) break;
           continue;
         }
 
-        const memoryOn = features.memory !== false;
-        const relationshipsOn = features.relationships !== false;
-        const guildId = ping.channel.guild.id;
-        const recentCalls = tagHistory.hit(ping.trigger.authorId, now(), repeatWindowMs(config.mention));
-        const selfName = ping.channel.guild.members.me?.displayName ?? client.user.username;
-        const affinityScore =
-          memoryOn && relationshipsOn ? store?.getUser?.(guildId, ping.trigger.authorId)?.affinity?.score : undefined;
-        const decision = decideMention({
-          kind: ping.kind,
-          textLength: strippedLength(ping.trigger.content, selfName),
-          recentCalls,
-          neverIgnore: config.mention.neverIgnore.includes(ping.trigger.authorId),
-          affinityScore,
-          cfg: config.mention,
-          rng,
-        });
+        // A re-queued ping was already counted and decided `respond` on the
+        // pass whose turn found another one running: not counted or rolled again.
+        if (!ping.decided) {
+          const memoryOn = features.memory !== false;
+          const relationshipsOn = features.relationships !== false;
+          const guildId = ping.channel.guild.id;
+          const recentCalls = tagHistory.hit(ping.trigger.authorId, now(), repeatWindowMs(config.mention));
+          const selfName = ping.channel.guild.members.me?.displayName ?? client.user.username;
+          const affinityScore =
+            memoryOn && relationshipsOn ? store?.getUser?.(guildId, ping.trigger.authorId)?.affinity?.score : undefined;
+          const decision = decideMention({
+            kind: ping.kind,
+            textLength: strippedLength(ping.trigger.content, selfName),
+            recentCalls,
+            neverIgnore: config.mention.neverIgnore.includes(ping.trigger.authorId),
+            affinityScore,
+            cfg: config.mention,
+            rng,
+          });
 
-        log.info('mention: decided', {
-          kind: ping.kind,
-          reason: decision.reason,
-          ignoreChance: decision.ignoreChance,
-          roll: decision.roll === undefined ? undefined : Math.round(decision.roll * 100) / 100,
-          author: ping.trigger.authorId,
-          channel: ping.channelId,
-          deferred: true,
-        });
+          log.info('mention: decided', {
+            kind: ping.kind,
+            reason: decision.reason,
+            ignoreChance: decision.ignoreChance,
+            roll: decision.roll === undefined ? undefined : Math.round(decision.roll * 100) / 100,
+            author: ping.trigger.authorId,
+            channel: ping.channelId,
+            deferred: true,
+          });
 
-        if (decision.respond) {
-          try {
-            const result = await turns.runTurn({ channel: ping.channel, mode: 'reply', trigger: ping.trigger, triggerKind: ping.kind });
-            await announceRefusal(ping.channel, ping.trigger, result);
-          } catch (err) {
-            log.error('events: deferred reply turn failed', { channel: ping.channelId, error: err });
-          }
+          if (!decision.respond) continue;
         }
+
+        try {
+          const result = await turns.runTurn({ channel: ping.channel, mode: 'reply', trigger: ping.trigger, triggerKind: ping.kind });
+          if (result?.outcome === 'busy') stop = requeueBusy({ ...ping, decided: true });
+          else await announceRefusal(ping.channel, ping.trigger, result);
+        } catch (err) {
+          log.error('events: deferred reply turn failed', { channel: ping.channelId, error: err });
+        }
+        if (stop) break;
       }
     } finally {
       draining = false;

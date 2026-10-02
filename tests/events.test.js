@@ -1702,6 +1702,199 @@ test('events: a hot change to mention.maxPending is picked up', async () => {
   assert.deepEqual(answeredChannels.sort(), ['a', 'b'], 'both fit once the cap was raised live, so "a" was never evicted');
 });
 
+// A turn that starts during the drain's switch pause makes the drain's
+// runTurn answer 'busy': the picked-up ping goes back into the queue (its
+// original arrivedAt kept, its `respond` decision carried) and the pass stops
+// until the running turn ends and calls drainPending again.
+
+/**
+ * Turns where another channel ('other') is running a turn while `busy` is set: runTurn answers
+ * 'busy' then (one attention), records every call. `startDuringPause()` is meant for the
+ * injected sleep: the first switch pause starts that other turn.
+ */
+function pauseRaceTurns() {
+  const state = { busy: true };
+  const calls = [];
+  const turns = fakeTurns({
+    isBusy: (id) => state.busy && id === 'other',
+    isAnyBusy: () => state.busy,
+    runTurn: async (args) => {
+      calls.push(args);
+      return { outcome: state.busy ? 'busy' : 'spoke' };
+    },
+  });
+  turns.calls = calls;
+  turns.state = state;
+  return turns;
+}
+
+test('events: a drained ping whose turn finds another one running is re-queued and answered on the next drain, decided once', async () => {
+  const turns = pauseRaceTurns();
+  const tagHistory = countingTagHistory();
+  let pauses = 0;
+  const sleep = async () => {
+    pauses += 1;
+    if (pauses === 1) turns.state.busy = true; // a fresh turn starts during the first switch pause
+  };
+  // Exactly three values: switch pause, decideMention, switch pause on the retry -- a second roll would run out.
+  const handler = makeHandler({ turns, tagHistory, sleep, rng: scripted([0.5, 0.99, 0.5]) });
+
+  const guild = fakeGuild();
+  const channel = fakeChannelWithMessage('c1', guild, 'm1');
+  await handler(directPingMessage({ guild, channel, channelId: 'c1' }));
+  assert.equal(turns.calls.length, 0, 'deferred');
+
+  turns.state.busy = false;
+  const first = await withCapturedLogs(() => handler.drainPending());
+  assert.equal(turns.calls.length, 1, 'one attempt, answered busy');
+  const again = first.logs.find((entry) => entry.msg === 'mention: deferred again (busy)');
+  assert.ok(again, 'the re-queue is logged');
+  assert.equal(again.channel, 'c1');
+  assert.equal(again.kind, 'mention');
+  assert.equal(again.pending, 1);
+
+  turns.state.busy = false; // the other turn ends; its onIdle drains again
+  const second = await withCapturedLogs(() => handler.drainPending());
+  assert.equal(turns.calls.length, 2);
+  assert.equal(turns.calls[1].trigger.id, 'm1');
+  assert.equal(turns.calls[1].triggerKind, 'mention');
+  assert.equal(tagHistory.hits, 1, 'counted toward spamThreshold once');
+  const decided = [...first.logs, ...second.logs].filter((entry) => entry.msg === 'mention: decided');
+  assert.equal(decided.length, 1, 'one decision for the ping');
+  assert.equal(pauses, 2, 'the switch pause stays on the retry');
+});
+
+test('events: a re-queued ping keeps its original arrivedAt and expires mention.pendingMinutes after it', async () => {
+  const turns = pauseRaceTurns();
+  const clock = mutableNow(0);
+  const sleep = async () => {
+    turns.state.busy = true;
+  };
+  const handler = makeHandler({ turns, sleep, now: clock, rng: scripted([0.5, 0.99]) });
+
+  const guild = fakeGuild();
+  const channel = fakeChannelWithMessage('c1', guild, 'm1');
+  await handler(directPingMessage({ guild, channel, channelId: 'c1' }));
+
+  turns.state.busy = false;
+  clock.set(5 * 60_000);
+  await handler.drainPending();
+  assert.equal(turns.calls.length, 1, 'busy, re-queued');
+
+  turns.state.busy = false;
+  clock.set(10 * 60_000); // 10 minutes after the ORIGINAL arrival, 5 after the re-queue
+  const { logs } = await withCapturedLogs(() => handler.drainPending());
+  assert.equal(turns.calls.length, 1, 'not answered');
+  assert.ok(logs.some((entry) => entry.msg === 'mention: expired' && entry.channel === 'c1'));
+});
+
+test('events: a newer ping queued in the same channel during the switch pause wins over the re-queued one', async () => {
+  const turns = pauseRaceTurns();
+  const guild = fakeGuild();
+  const channel = fakeChannelWithMessage('c1', guild, 'm1');
+  channel.messages.cache.set('m2', {});
+  let handler = null;
+  let pauses = 0;
+  const sleep = async () => {
+    pauses += 1;
+    if (pauses !== 1) return;
+    turns.state.busy = true;
+    await handler(directPingMessage({ id: 'm2', guild, channel, channelId: 'c1', cleanContent: 'second' }));
+  };
+  const tagHistory = countingTagHistory();
+  handler = makeHandler({ turns, tagHistory, sleep, rng: scripted([0.5, 0.99, 0.5, 0.99]) });
+
+  await handler(directPingMessage({ guild, channel, channelId: 'c1', cleanContent: 'first' }));
+  turns.state.busy = false;
+  const first = await withCapturedLogs(() => handler.drainPending());
+  assert.equal(turns.calls.length, 1);
+  const dropped = first.logs.find((entry) => entry.msg === 'mention: dropped (newer)');
+  assert.ok(dropped, 'the old ping is dropped with a log line');
+  assert.equal(dropped.channel, 'c1');
+  assert.equal(first.logs.some((entry) => entry.msg === 'mention: deferred again (busy)'), false);
+
+  turns.state.busy = false;
+  await handler.drainPending();
+  assert.deepEqual(turns.calls.map((c) => c.trigger.id), ['m1', 'm2'], 'm1 tried once, then the newer m2 answered');
+  assert.equal(tagHistory.hits, 2, 'm2 is a separate call, decided on its own');
+});
+
+test('events: one busy result is one runTurn attempt per drain pass (no tight loop)', async () => {
+  const turns = pauseRaceTurns();
+  const sleep = async () => {
+    turns.state.busy = true; // another turn starts during every pause and never ends here
+  };
+  const handler = makeHandler({ turns, sleep, rng: () => 0.99 });
+
+  const guild = fakeGuild();
+  const channel = fakeChannelWithMessage('c1', guild, 'm1');
+  await handler(directPingMessage({ guild, channel, channelId: 'c1' }));
+
+  turns.state.busy = false;
+  await handler.drainPending();
+  assert.equal(turns.calls.length, 1);
+  turns.state.busy = false;
+  await handler.drainPending();
+  assert.equal(turns.calls.length, 2, 'still queued, one attempt per pass');
+});
+
+test('events: a busy result when nothing is busy any more continues the same pass', async () => {
+  let attempts = 0;
+  const turns = fakeTurns({
+    isBusy: () => false,
+    isAnyBusy: () => false, // the blocking turn already ended by the time the drain looks
+    runTurn: async () => {
+      attempts += 1;
+      return { outcome: attempts === 1 ? 'busy' : 'spoke' };
+    },
+  });
+  const handler = makeHandler({ turns, sleep: async () => {}, rng: scripted([0.5, 0.99, 0.5]) });
+
+  const guild = fakeGuild();
+  const channel = fakeChannelWithMessage('c1', guild, 'm1');
+  // Queue it: busy elsewhere on arrival.
+  turns.isAnyBusy = () => true;
+  await handler(directPingMessage({ guild, channel, channelId: 'c1' }));
+  turns.isAnyBusy = () => false;
+
+  await handler.drainPending();
+  assert.equal(attempts, 2, 'retried in the same pass, answered');
+});
+
+test('events: an onIdle drain arriving while the busy drain is still finishing does not strand the re-queued ping', async () => {
+  const state = { busy: false };
+  const calls = [];
+  let handler = null;
+  let idleDrain = null;
+  const turns = fakeTurns({
+    isBusy: () => false,
+    isAnyBusy: () => state.busy,
+    runTurn: async (args) => {
+      calls.push(args);
+      if (calls.length === 1) {
+        // The blocking turn ends right away and fires onIdle before the drain sees the result.
+        Promise.resolve().then(() => {
+          state.busy = false;
+          idleDrain = handler.drainPending();
+        });
+        return { outcome: 'busy' };
+      }
+      return { outcome: 'spoke' };
+    },
+  });
+  handler = makeHandler({ turns, sleep: async () => {}, rng: scripted([0.5, 0.99, 0.5]) });
+
+  const guild = fakeGuild();
+  const channel = fakeChannelWithMessage('c1', guild, 'm1');
+  state.busy = true;
+  await handler(directPingMessage({ guild, channel, channelId: 'c1' }));
+  state.busy = true; // still busy while the drain's turn is refused
+
+  await handler.drainPending();
+  await idleDrain;
+  assert.equal(calls.length, 2, 'the re-queued ping was answered');
+});
+
 // ---------------------------------------------------------------------------
 // The address classifier (features.followUp) -- an untagged follow-up
 // message inside a window the persona opened by answering is checked by
@@ -2966,6 +3159,67 @@ test('private: while busy elsewhere the DM is pending as "private"; the drain pa
   assert.equal(turns.calls[0].triggerKind, 'private');
   assert.equal(turns.calls[0].channel, channel);
   assert.deepEqual(store.bumps, [['g1', 'u1', TODAY]]);
+});
+
+test('private: a drained DM whose turn finds another one running is re-queued and answered on the next drain', async () => {
+  const state = { busy: true };
+  const turns = recordingTurns({ outcome: 'spoke' }, { isAnyBusy: () => state.busy });
+  const runOriginal = turns.runTurn;
+  turns.runTurn = async (args) => (state.busy ? (turns.calls.push(args), { outcome: 'busy' }) : runOriginal(args));
+  const store = fakePrivateStore();
+  const channel = fakeDmChannel();
+  let pauses = 0;
+  const sleep = async () => {
+    pauses += 1;
+    if (pauses === 1) state.busy = true;
+  };
+  const handler = makeDmHandler({ turns, store, sleep, rng: () => 0 });
+
+  await handler(fakeDmMessage({ channel }));
+  await settle();
+  state.busy = false;
+  const { logs } = await withCapturedLogs(() => handler.drainPending());
+  assert.equal(turns.calls.length, 1);
+  assert.deepEqual(store.bumps, [], 'a busy turn is not counted');
+  const again = logs.find((l) => l.msg === 'mention: deferred again (busy)');
+  assert.ok(again);
+  assert.equal(again.kind, 'private');
+  assert.equal(again.channel, 'dm1');
+
+  state.busy = false;
+  await handler.drainPending();
+  assert.equal(turns.calls.length, 2);
+  assert.equal(turns.calls[1].trigger.id, 'dm-m1');
+  assert.equal(turns.calls[1].guildId, 'g1');
+  assert.deepEqual(store.bumps, [['g1', 'u1', TODAY]]);
+});
+
+test('private: a newer DM queued during the switch pause wins over the re-queued one', async () => {
+  const state = { busy: true };
+  const turns = recordingTurns({ outcome: 'spoke' }, { isAnyBusy: () => state.busy });
+  const runOriginal = turns.runTurn;
+  turns.runTurn = async (args) => (state.busy ? (turns.calls.push(args), { outcome: 'busy' }) : runOriginal(args));
+  const channel = fakeDmChannel();
+  channel.messages.cache.set('dm-m2', {});
+  let handler = null;
+  let pauses = 0;
+  const sleep = async () => {
+    pauses += 1;
+    if (pauses !== 1) return;
+    state.busy = true;
+    await handler(fakeDmMessage({ channel, id: 'dm-m2', cleanContent: 'δεύτερο' }));
+  };
+  handler = makeDmHandler({ turns, sleep, rng: () => 0 });
+
+  await handler(fakeDmMessage({ channel }));
+  await settle();
+  state.busy = false;
+  const { logs } = await withCapturedLogs(() => handler.drainPending());
+  assert.ok(logs.some((l) => l.msg === 'mention: dropped (newer)' && l.channel === 'dm1' && l.kind === 'private'));
+
+  state.busy = false;
+  await handler.drainPending();
+  assert.deepEqual(turns.calls.map((c) => c.trigger.id), ['dm-m1', 'dm-m2']);
 });
 
 /** A DM queued while busy elsewhere; `change` runs before the drain. Returns what the drain did. */

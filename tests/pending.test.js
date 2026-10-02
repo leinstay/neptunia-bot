@@ -2,7 +2,7 @@
 // (see mention.oneAtATime in src/discord/events.js).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { addPending, isExpired, popOldest } from '../src/behavior/pending.js';
+import { addPending, isExpired, popOldest, requeuePending } from '../src/behavior/pending.js';
 
 function ping(channelId, arrivedAt, overrides = {}) {
   return { channelId, channel: { id: channelId }, trigger: { id: `m-${channelId}` }, kind: 'mention', arrivedAt, ...overrides };
@@ -90,4 +90,45 @@ test('popOldest: draining one at a time yields arrival order', () => {
     list = rest;
   }
   assert.deepEqual(order, ['c2', 'c3', 'c1']);
+});
+
+// --- requeuePending ----------------------------------------------------------
+
+test('requeuePending: puts a ping back into an empty list with its original arrivedAt', () => {
+  const { list, dropped, evicted } = requeuePending([], ping('c1', 100), 3);
+  assert.equal(list.length, 1);
+  assert.equal(list[0].arrivedAt, 100);
+  assert.equal(dropped, null);
+  assert.equal(evicted, null);
+});
+
+test('requeuePending: a newer ping already queued for the same channel wins; the re-queued one is dropped', () => {
+  const newer = ping('c1', 500, { trigger: { id: 'newer' } });
+  const old = ping('c1', 100, { trigger: { id: 'old' } });
+  const { list, dropped, evicted } = requeuePending([newer], old, 3);
+  assert.equal(list.length, 1);
+  assert.equal(list[0].trigger.id, 'newer');
+  assert.equal(dropped, old);
+  assert.equal(evicted, null);
+});
+
+test('requeuePending: an OLDER entry for the same channel is replaced, as addPending would', () => {
+  const older = ping('c1', 50, { trigger: { id: 'older' } });
+  const back = ping('c1', 100, { trigger: { id: 'back' } });
+  const { list, dropped } = requeuePending([older], back, 3);
+  assert.deepEqual(list.map((p) => p.trigger.id), ['back']);
+  assert.equal(dropped, null);
+});
+
+test('requeuePending: mention.maxPending still applies -- the oldest entry overall is evicted', () => {
+  const list0 = [ping('c2', 200), ping('c3', 300)];
+  const { list, dropped, evicted } = requeuePending(list0, ping('c1', 100), 2);
+  assert.equal(dropped, null);
+  assert.equal(evicted.channelId, 'c1', 'the re-queued ping is the oldest, so it is the one evicted');
+  assert.deepEqual(list.map((p) => p.channelId).sort(), ['c2', 'c3']);
+});
+
+test('requeuePending: keeps the extra fields carried on the ping', () => {
+  const { list } = requeuePending([], ping('c1', 100, { decided: true }), 3);
+  assert.equal(list[0].decided, true);
 });

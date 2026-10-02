@@ -19,6 +19,7 @@
  * @property {object} trigger   the normalized message that called the persona
  * @property {'mention'|'reply'|'private'} kind
  * @property {number} arrivedAt
+ * @property {boolean} [decided] set on a re-queued server ping whose ignore roll already said respond
  */
 
 /** Index of the entry with the smallest `arrivedAt` in a non-empty list, or -1 for an empty one. */
@@ -46,6 +47,25 @@ export function addPending(list, ping, maxPending) {
   const index = oldestIndex(next);
   const evicted = next[index];
   return { list: next.filter((_, i) => i !== index), evicted };
+}
+
+/**
+ * Put back a ping the drain picked up but could not answer (its turn found
+ * another one running), keeping its original `arrivedAt`. Unlike
+ * `addPending`, it never replaces a NEWER ping queued for the same channel
+ * meanwhile: that one wins and `ping` comes back as `dropped`. Otherwise it
+ * is added like `addPending`, `maxPending` included (the evicted entry may be
+ * `ping` itself, being the oldest).
+ * @param {PendingPing[]} list
+ * @param {PendingPing} ping
+ * @param {number} maxPending
+ * @returns {{ list: PendingPing[], dropped: PendingPing|null, evicted: PendingPing|null }}
+ */
+export function requeuePending(list, ping, maxPending) {
+  const newer = list.some((p) => p.channelId === ping.channelId && p.arrivedAt >= ping.arrivedAt);
+  if (newer) return { list, dropped: ping, evicted: null };
+  const { list: next, evicted } = addPending(list, ping, maxPending);
+  return { list: next, dropped: null, evicted };
 }
 
 /** Whether `ping` is past `pendingMinutes` from the time it arrived, at `now`. */
