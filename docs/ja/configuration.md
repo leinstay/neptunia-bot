@@ -209,10 +209,12 @@ YouTube リンクの再生時間は次の順序で取得されます: まず yt-
 | `affinityIgnoreBonus` | `0` | 態度 -100 時に追加される最大無視率。上げると嫌いなメンバーがより無視される |
 | `affinityLikeBonus` | `0.08` | 態度 +100 時に減少する最大無視率 |
 | `oneAtATime` | `true` | サーバー全体で一度に一つのリプライ |
+| `pendingSameChannel` | `true` | ターン実行中の同一チャンネルでの直接ピングを保持する。ターン終了後に通常の無視確率で応答。キー欠落 = オン |
 | `maxPending` | `3` | ビジー時に直接ピングを保持できるチャンネル数 |
 | `pendingMinutes` | `10` | 保持されたピングが期限切れになるまでの分数 |
 | `switchDelayMs` | `[2000, 9000]` | 次のチャンネルで応答する前の待機時間（ミリ秒） |
 | `followUpMinutes` | `15` | ペルソナの最後のリプライ後のフォローアップウィンドウ（分） |
+| `followUpClassifyReplies` | `true` | 別メンバーのメッセージへのリプライを自動 `no` にせず分類器に送る。キー欠落 = オン。スイッチオフの場合、リプライはモデルに尋ねる前に `no` |
 | `followUpContext` | `15` | 分類器に送信するトランスクリプト行数 |
 | `followUpMaxOutputTokens` | `8` | 分類器の最大出力トークン数 |
 | `followUpNoStreak` | `3` | ウィンドウを閉じる連続 `no` 判定回数 |

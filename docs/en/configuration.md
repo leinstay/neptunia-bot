@@ -232,10 +232,12 @@ At most one re-watch or retry per turn. Answers are cached for one hour per ques
 | `affinityIgnoreBonus` | `0` | Max added ignore at affinity -100; raise so disliked members are ignored more often |
 | `affinityLikeBonus` | `0.08` | Max reduced ignore at affinity +100 |
 | `oneAtATime` | `true` | One reply at a time across the server |
+| `pendingSameChannel` | `true` | Hold a direct ping in the same channel while a turn is running there; answered after the turn with the usual ignore chance. Missing key = on |
 | `maxPending` | `3` | Channels that can hold a direct ping while busy |
 | `pendingMinutes` | `10` | Minutes before a held ping expires |
 | `switchDelayMs` | `[2000, 9000]` | Pause before answering in the next channel (ms) |
 | `followUpMinutes` | `15` | Follow-up window after the persona's last reply (min) |
+| `followUpClassifyReplies` | `true` | Send a reply to another member's message to the classifier instead of automatic `no`. Missing key = on. With the switch off, any reply is `no` before the model is asked |
 | `followUpContext` | `15` | Transcript lines sent to the classifier |
 | `followUpMaxOutputTokens` | `8` | Max output tokens for the classifier |
 | `followUpNoStreak` | `3` | Consecutive `no` verdicts that close the window |

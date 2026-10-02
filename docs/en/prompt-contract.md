@@ -483,8 +483,11 @@ persona's own lines marked with `labels.self`, plus the new message marked as `<
 (pictures, stickers, GIFs, custom emoji, watched videos) in the same label forms as the persona's transcript. Code
 makes no new describer requests for the history lines; it describes only the candidate's own media before running the
 classifier. Output is ONE line: `yes` when the candidate
-addresses the persona or continues the exchange with it, `no` when people talk among themselves or to someone else
-(a reply to another member or a mention of another member is always `no` before the model is asked). `yes` runs a
+addresses the persona or continues the exchange with it, `no` when people talk among themselves or to someone else.
+An explicit @mention of another member is always `no` before the model is asked; the implicit ping Discord adds for the
+replied-to author does not count as such a mention. When `mention.followUpClassifyReplies` is on (default `true`,
+missing key = on), a reply to another member's message goes to the classifier like plain text. With the switch off,
+any reply to another member is an automatic `no`. `yes` runs a
 normal reply turn (the model may still `<skip/>`); three `no` in a row (`mention.followUpNoStreak`, default 3) close
 the window. Switch `features.followUp` (default on). Logged as counts and verdicts only.
 The window state survives a restart: active windows are saved in `data/state.json` under `followUpWindows` and restored at startup, with expired ones dropped.

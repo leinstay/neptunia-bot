@@ -438,8 +438,10 @@ variety.intro                            first line of the `<worn>` block: tells
 携带触发信号（无提及、无对角色消息的回复、无名字）的消息不会被盲目回复：代码将频道最近的
 `mention.followUpContext`（默认 15）行发送给 `address.md`，角色自身的行以 `labels.self` 标记，加上以
 `<candidate>` 标记的新消息，使用 `classifier.text` 模型角色（默认 `anthropic/claude-sonnet-4.6`）。输出
-为一行：当候选消息是在对角色说话或延续与角色的对话时为 `yes`，当人们在相互交谈或对其他人说话时为 `no`
-（对另一成员的回复或对另一成员的提及在询问模型之前即为 `no`）。`yes` 触发正常的回复回合（模型仍可
+为一行：当候选消息是在对角色说话或延续与角色的对话时为 `yes`，当人们在相互交谈或对其他人说话时为 `no`。
+对另一成员的显式 @提及在询问模型之前即为 `no`；Discord 为被回复作者自动添加的隐式提醒不算作此类提及。当
+`mention.followUpClassifyReplies` 开启（默认 `true`，缺失键 = 开启）时，对另一成员消息的回复会像普通文本一样发送给
+分类器。关闭该开关时，对另一成员的任何回复自动为 `no`。`yes` 触发正常的回复回合（模型仍可
 `<skip/>`）；连续三个 `no`（`mention.followUpNoStreak`，默认 3）关闭窗口。开关 `features.followUp`
 （默认开启）。仅记录计数和判定结果。
 窗口状态在重启后保留：活跃窗口保存在 `data/state.json` 的 `followUpWindows` 中，启动时恢复，过期的窗口会被丢弃。

@@ -209,10 +209,12 @@ YouTube 链接的时长通过以下链式探测获取：首先尝试 yt-dlp，�
 | `affinityIgnoreBonus` | `0` | 态度 -100 时增加的最大忽略概率；调高可使不喜欢的成员更易被忽略 |
 | `affinityLikeBonus` | `0.08` | 态度 +100 时减少的最大忽略概率 |
 | `oneAtATime` | `true` | 全服务器同一时间只处理一条回复 |
+| `pendingSameChannel` | `true` | 当同一频道中正在执行回合时挂起该频道的直接提及；回合结束后以通常的忽略概率回复。缺失键 = 开启 |
 | `maxPending` | `3` | 繁忙时可挂起直接提及的频道数 |
 | `pendingMinutes` | `10` | 挂起的提及过期时间（分钟） |
 | `switchDelayMs` | `[2000, 9000]` | 在下一个频道回复前的暂停时间（毫秒） |
 | `followUpMinutes` | `15` | 角色最后一条回复后的后续窗口（分钟） |
+| `followUpClassifyReplies` | `true` | 将对另一成员消息的回复发送给分类器而非自动 `no`。缺失键 = 开启。关闭时，任何回复在询问模型之前即为 `no` |
 | `followUpContext` | `15` | 发送给分类器的对话记录行数 |
 | `followUpMaxOutputTokens` | `8` | 分类器的最大输出 token 数 |
 | `followUpNoStreak` | `3` | 连续 `no` 判定次数达到此值关闭窗口 |
