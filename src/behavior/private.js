@@ -56,10 +56,25 @@ export function privateGate({ config, isMember, profile, isOwner, replies, today
     if (score < finiteOr(settings.minAffinity, Infinity)) return { ok: false, reason: 'affinity' };
   }
 
-  const cap = finiteOr(isOwner ? settings.maxPerOwnerPerDay : settings.maxPerUserPerDay, 0);
-  const used = replies?.day === today ? finiteOr(replies.count, 0) : 0;
+  const { used, cap } = privateRepliesToday({ config, isOwner, replies, today });
   if (used >= cap) return { ok: false, reason: 'cap', cap, used };
   return { ok: true, cap };
+}
+
+/**
+ * Today's DM replies to one member against their daily cap, the numbers
+ * `privateGate` decides on (and `/nep private show` reports): the cap is
+ * `private.maxPerOwnerPerDay` for an owner, `private.maxPerUserPerDay`
+ * otherwise, a missing one counting as 0; replies stored for a `day` other
+ * than `today` count as 0.
+ * @param {{ config: object, isOwner: boolean, replies?: { day?: string, count?: number }|null, today: string }} input
+ * @returns {{ used: number, cap: number }}
+ */
+export function privateRepliesToday({ config, isOwner, replies, today }) {
+  const settings = config?.private ?? {};
+  const cap = finiteOr(isOwner ? settings.maxPerOwnerPerDay : settings.maxPerUserPerDay, 0);
+  const used = replies?.day === today ? finiteOr(replies.count, 0) : 0;
+  return { used, cap };
 }
 
 /**

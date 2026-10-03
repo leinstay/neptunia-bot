@@ -272,7 +272,7 @@ export function splitNewestOlder(sortedAsc, total) {
  * @param {Set<string>|string[]} [mainChannelIds]
  * @returns {{ messages: object[], ownIds: Set<string>, channels: string[], ownCount: number, contextCount: number }}
  */
-export function sampleMember(windows, memberId, cfg = {}, mainChannelIds) {
+export function sampleMember(windows, memberId, cfg = {}, mainChannelIds = []) {
   const mainIds = mainChannelIds instanceof Set ? mainChannelIds : new Set((mainChannelIds ?? []).map(String));
   const messagesPerPerson = Number.isInteger(cfg.messagesPerPerson) && cfg.messagesPerPerson > 0 ? cfg.messagesPerPerson : 0;
   const contextBefore = Number.isInteger(cfg.contextBefore) && cfg.contextBefore >= 0 ? cfg.contextBefore : 0;

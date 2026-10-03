@@ -66,3 +66,23 @@ export function gifWatchesToday(data, config, today) {
   const used = data?.gifWatchDay === today && Number.isFinite(count) ? count : 0;
   return { used, cap: gifWatchCap(config) };
 }
+
+/** `gifs.maxPerDay` when missing or invalid (config.json carries the same). */
+export const GIF_POSTS_PER_DAY_FALLBACK = 40;
+
+/**
+ * Today's GIFs posted by the persona against `gifs.maxPerDay`, read only
+ * (src/behavior/turn.js counts a post and rolls the day over): the
+ * `state.data.gifDay` / `gifCount` pair, another day counting as 0. Shared by
+ * the turn's daily check and `/nep gifs status`.
+ * @param {object} [data]    store.state.data.
+ * @param {object} [config]  hot.config.
+ * @param {string} today     `YYYY-MM-DD` (UTC).
+ * @returns {{ used: number, cap: number }}
+ */
+export function gifPostsToday(data, config, today) {
+  const count = data?.gifCount;
+  const used = data?.gifDay === today && Number.isFinite(count) ? count : 0;
+  const cap = config?.gifs?.maxPerDay;
+  return { used, cap: Number.isFinite(cap) ? cap : GIF_POSTS_PER_DAY_FALLBACK };
+}

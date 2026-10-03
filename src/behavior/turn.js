@@ -26,6 +26,7 @@ import { renderCustomEmoji, resolveReactionEmoji } from '../discord/emoji.js';
 import { formatTranscript, renderTranscript } from '../discord/format.js';
 import { log } from '../log.js';
 import { clampChars, oneLine } from '../memory/clamp.js';
+import { gifPostsToday } from '../memory/gif-watch.js';
 import { bumpDaily, utcDay } from '../time.js';
 
 /**
@@ -191,8 +192,8 @@ function readableLinkCandidates(history, sites) {
   return out;
 }
 
-/** Upload file name for a generated picture: `image/jpeg` -> `image.jpg`, else `image.<subtype>`. */
-function imageFileName(mediaType) {
+/** Upload file name for a generated picture: `image/jpeg` -> `image.jpg`, else `image.<subtype>`; `/nep draw` names its picture the same way. */
+export function imageFileName(mediaType) {
   const subtype = String(mediaType ?? '').split('/')[1]?.split(';')[0]?.trim().toLowerCase() || 'png';
   return `image.${subtype === 'jpeg' ? 'jpg' : subtype}`;
 }
@@ -470,10 +471,9 @@ export function createTurnRunner({
     return utcDay(clock());
   }
 
-  /** How many GIFs the persona posted today (`state.data.gifDay` / `gifCount`); reads only, never rolls over. */
+  /** GIFs the persona posted today against `gifs.maxPerDay` (src/memory/gif-watch.js#gifPostsToday); reads only. */
   function gifsToday() {
-    const data = store.state.data;
-    return data.gifDay === todayDate() ? (Number.isFinite(data.gifCount) ? data.gifCount : 0) : 0;
+    return gifPostsToday(store.state.data, hot.config, todayDate());
   }
 
   /** Count one posted GIF against `gifs.maxPerDay` (the counter restarts on a new UTC day). */
@@ -495,12 +495,12 @@ export function createTurnRunner({
     if (hot.config.features?.gifs === false) reason = 'off';
     else {
       entry = store.findGif(guildId, gif.id);
-      const cap = hot.config.gifs?.maxPerDay;
+      const posts = gifsToday();
       if (!entry) reason = 'unknown';
-      else if (gifsToday() >= (Number.isFinite(cap) ? cap : 40)) reason = 'daily';
+      else if (posts.used >= posts.cap) reason = 'daily';
     }
     if (reason) {
-      log.info('turn: gif dropped', { channel: channelId, reason, usedToday: gifsToday() });
+      log.info('turn: gif dropped', { channel: channelId, reason, usedToday: gifsToday().used });
       return null;
     }
     return { ...gif, entry };

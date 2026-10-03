@@ -230,8 +230,8 @@ export function createLookup({ hot, store, llm, state = memoryState(), pageFetch
     const linksCfg = config.web?.links ?? {};
     const summaryChars = positiveOr(linksCfg.summaryChars, LINK_SUMMARY_CHARS_FALLBACK);
     const location = safeLocation(link.url);
-    const report = (state, reason = null, extra = {}) =>
-      log.info('lookup: link', { state, reason, cached: false, location, ...extra });
+    const report = (outcome, reason = null, extra = {}) =>
+      log.info('lookup: link', { state: outcome, reason, cached: false, location, ...extra });
     const miss = (reason, extra) => {
       putEntry(guildId, key, { miss: true, ts: now(), reason });
       report('miss', reason, extra);
@@ -355,7 +355,7 @@ export function createLookup({ hot, store, llm, state = memoryState(), pageFetch
     if (!promptText || !asked) return null;
     if (!hasSearch()) return null;
 
-    const report = (state, reason = null, extra = {}) => log.info('lookup: search', { state, reason, ...extra });
+    const report = (outcome, reason = null, extra = {}) => log.info('lookup: search', { state: outcome, reason, ...extra });
     const cache = store.getMediaCache(guildId);
     const key = searchKey(asked);
     const hit = cache[key];

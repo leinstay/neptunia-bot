@@ -251,7 +251,7 @@ export function createImageGen({ apiKey, getConfig, state, fetchImpl = fetch, no
       }
       const buffer = Buffer.from(item.b64_json, 'base64');
       const outputFormat = cfg.outputFormat ?? 'png';
-      const mediaType = item.media_type ?? 'image/' + (outputFormat === 'jpeg' ? 'jpeg' : outputFormat);
+      const mediaType = item.media_type ?? `image/${outputFormat === 'jpeg' ? 'jpeg' : outputFormat}`;
       const cost = json.usage?.cost ?? null;
       const usage = json.usage ?? null;
       const seconds = Math.round((now() - started) / 100) / 10;

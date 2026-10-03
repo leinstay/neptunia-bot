@@ -3,7 +3,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import { privateGate, effectiveAffinity, mergeProfiles } from '../src/behavior/private.js';
+import { privateGate, privateRepliesToday, effectiveAffinity, mergeProfiles } from '../src/behavior/private.js';
 
 const TODAY = '2026-09-29';
 
@@ -285,4 +285,11 @@ test('config.json: private chat and drawing ship off, with the private.* default
   assert.equal(shipped.features.privateMessages, false);
   assert.equal(shipped.features.imageGeneration, false);
   assert.deepEqual(shipped.private, { minAffinity: 5, maxPerUserPerDay: 100, maxPerOwnerPerDay: 200, purgeMaxMessages: 5000 });
+});
+
+test('privateRepliesToday: the owner or member cap, a missing cap as 0, another day as no replies', () => {
+  assert.deepEqual(privateRepliesToday({ config: config(), isOwner: false, replies: { day: TODAY, count: 7 }, today: TODAY }), { used: 7, cap: 100 });
+  assert.deepEqual(privateRepliesToday({ config: config(), isOwner: true, replies: { day: TODAY, count: 7 }, today: TODAY }), { used: 7, cap: 200 });
+  assert.deepEqual(privateRepliesToday({ config: config(), isOwner: false, replies: { day: '2026-09-28', count: 7 }, today: TODAY }), { used: 0, cap: 100 });
+  assert.deepEqual(privateRepliesToday({ config: {}, isOwner: false, replies: null, today: TODAY }), { used: 0, cap: 0 });
 });

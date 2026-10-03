@@ -985,6 +985,30 @@ test('interaction handler: gifs.status replies at once, gifs.rescan is deferred'
   assert.equal(rescan.edits.length, 1);
 });
 
+test('interaction handler: memory.forget, memory.wipe and private.forget are deferred (they wait for the analyzer)', async () => {
+  const admin = fakeAdmin();
+  const handler = createInteractionHandler({ hot: baseHot(), admin, getGuildId: () => 'g1' });
+
+  for (const [group, subcommand, optionValues] of [
+    ['memory', 'forget', { user: { id: 'target1' } }],
+    ['memory', 'wipe', { confirm: 'The Server' }],
+    ['private', 'forget', { user: { id: 'target1' } }],
+  ]) {
+    const interaction = fakeInteraction({ group, subcommand, optionValues });
+    await handler(interaction);
+    assert.ok(interaction.replies.some((r) => r.deferred), `${group}.${subcommand}`);
+    assert.equal(interaction.edits.length, 1, `${group}.${subcommand}`);
+  }
+});
+
+test('buildCommandTree: the case id help names the configured command', () => {
+  const [command] = buildCommandTree('bot2');
+  const mentorGroup = findOption(command.options, 'mentor');
+  const helps = mentorGroup.options.flatMap((sub) => (sub.options ?? []).filter((o) => o.name === 'id').map((o) => o.description));
+  assert.equal(helps.length, 5);
+  assert.ok(helps.every((help) => help === 'Case id from /bot2 mentor cases.'), helps.join(' | '));
+});
+
 test('interaction handler: gifs.recache replies at once, its work goes on in the background', async () => {
   const admin = fakeAdmin();
   const handler = createInteractionHandler({ hot: baseHot(), admin, getGuildId: () => 'g1' });

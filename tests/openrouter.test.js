@@ -1187,3 +1187,52 @@ test('sleep: resolves after the timer', async () => {
   await sleep(5);
   assert.ok(Date.now() - started >= 4);
 });
+
+// ---------------------------------------------------------------------------
+// modelEndpoints: the free listing GET of /nep ping image
+// ---------------------------------------------------------------------------
+
+test('modelEndpoints: one GET of the listing with the key and a timeout; nothing counted, nothing calibrated', async () => {
+  const calls = [];
+  const state = fakeState();
+  const calibrator = fakeCalibrator();
+  const body = { data: { architecture: { output_modalities: ['image'] }, endpoints: [{}] } };
+  const llm = createLlm({
+    apiKey: 'k-test',
+    getConfig: () => baseConfig({ baseUrl: 'https://openrouter.ai/api/v1/' }),
+    calibrator,
+    state,
+    fetchImpl: async (url, init) => {
+      calls.push({ url, init });
+      return { ok: true, status: 200, json: async () => body };
+    },
+  });
+
+  const result = await llm.modelEndpoints('openai/gpt-image-x', { timeoutMs: 1234 });
+
+  assert.deepEqual(result, { ok: true, status: 200, json: body });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, 'https://openrouter.ai/api/v1/models/openai/gpt-image-x/endpoints');
+  assert.equal(calls[0].init.method, 'GET');
+  assert.equal(calls[0].init.headers.Authorization, 'Bearer k-test');
+  assert.ok(calls[0].init.signal instanceof AbortSignal);
+  assert.deepEqual(state.data, {}, 'the daily counter is untouched');
+  assert.equal(state.dirty, undefined);
+  assert.deepEqual(calibrator.observed, []);
+});
+
+test('modelEndpoints: a non-2xx answer has no json, an unparsable body reads as null, a network failure throws', async () => {
+  const make = (fetchImpl) =>
+    createLlm({ apiKey: 'k', getConfig: () => baseConfig(), calibrator: fakeCalibrator(), state: fakeState(), fetchImpl });
+
+  const missing = make(async () => ({ ok: false, status: 404, json: async () => ({ error: 'x' }) }));
+  assert.deepEqual(await missing.modelEndpoints('a/b'), { ok: false, status: 404, json: null });
+
+  const garbled = make(async () => ({ ok: true, status: 200, json: async () => { throw new SyntaxError('bad'); } }));
+  assert.deepEqual(await garbled.modelEndpoints('a/b'), { ok: true, status: 200, json: null });
+
+  const down = make(async () => {
+    throw new TypeError('fetch failed');
+  });
+  await assert.rejects(() => down.modelEndpoints('a/b'), TypeError);
+});

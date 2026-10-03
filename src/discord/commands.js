@@ -50,8 +50,11 @@ const SLOW_COMMANDS = new Set([
   'warmup.status',
   'warmup.reset',
   'memory.refresh',
+  'memory.forget',
+  'memory.wipe',
   'emoji.rescan',
   'gifs.rescan',
+  'private.forget',
   'private.purge',
   'draw',
   'mentor.add',
@@ -62,12 +65,22 @@ const SLOW_COMMANDS = new Set([
 ]);
 
 /**
- * The roles whose model `/nep model set` changes (src/admin.js maps each to
- * its config path). `/nep route` adds `image` (src/llm/images.js), `/nep
+ * The roles whose model `/nep model set` changes, each with the config path it
+ * writes (src/admin.js). `/nep route` adds `image` (src/llm/images.js), `/nep
  * ping` adds `image` and `classifier`: every role choice list is derived
  * from this one.
  */
-export const MODEL_ROLES = Object.freeze(['talk', 'analyzer', 'classifier.text', 'classifier.media', 'classifier.video', 'mentor']);
+export const MODEL_ROLE_PATHS = Object.freeze({
+  talk: 'llm.model',
+  analyzer: 'memory.model',
+  'classifier.text': 'classifier.text',
+  'classifier.media': 'classifier.media',
+  'classifier.video': 'classifier.video',
+  mentor: 'mentor.model',
+});
+
+/** The roles of `MODEL_ROLE_PATHS`, in order. */
+export const MODEL_ROLES = Object.freeze(Object.keys(MODEL_ROLE_PATHS));
 
 /** The `section` choices of `/nep memory show`, in display order (src/admin.js falls back to `summary`). */
 export const MEMORY_SHOW_SECTIONS = Object.freeze([
@@ -136,6 +149,7 @@ export function isValidCommandName(name) {
  * client's cached command.
  */
 export function buildCommandTree(commandName) {
+  const caseIdHelp = `Case id from /${commandName} mentor cases.`;
   return [
     {
       name: commandName,
@@ -325,7 +339,7 @@ export function buildCommandTree(commandName) {
             {
               type: SUBCOMMAND,
               name: 'wipe',
-              description: 'Delete ALL remembered members, server habits, channel map and analyzer lore.',
+              description: 'Delete ALL server memory: profiles, private memory, habits, learned list, channels, analyzer lore.',
               options: [
                 {
                   type: STRING,
@@ -471,7 +485,7 @@ export function buildCommandTree(commandName) {
             {
               type: SUBCOMMAND,
               name: 'rescan',
-              description: 'Clear and recount the library from recent history, then caption the top ones.',
+              description: 'Reset the use counts (entries kept) and recount from recent history, then caption the top ones.',
             },
             { type: SUBCOMMAND, name: 'recache', description: 'Re-describe GIFs by watching them (background, per-run cap).' },
           ],
@@ -586,7 +600,7 @@ export function buildCommandTree(commandName) {
               name: 'anchor',
               description: 'Add another persona message to a case, with the chat before it.',
               options: [
-                { type: INTEGER, name: 'id', description: 'Case id from /nep mentor cases.', required: true, min_value: 1 },
+                { type: INTEGER, name: 'id', description: caseIdHelp, required: true, min_value: 1 },
                 { type: STRING, name: 'message', description: 'Message link (or id, in this channel).', required: true },
               ],
             },
@@ -595,13 +609,13 @@ export function buildCommandTree(commandName) {
               type: SUBCOMMAND,
               name: 'remove',
               description: 'Retire a case; its runs and feedback are kept.',
-              options: [{ type: INTEGER, name: 'id', description: 'Case id from /nep mentor cases.', required: true, min_value: 1 }],
+              options: [{ type: INTEGER, name: 'id', description: caseIdHelp, required: true, min_value: 1 }],
             },
             {
               type: SUBCOMMAND,
               name: 'run',
               description: 'Measure one case now; report to the admin channel. Spends balance.',
-              options: [{ type: INTEGER, name: 'id', description: 'Case id from /nep mentor cases.', required: true, min_value: 1 }],
+              options: [{ type: INTEGER, name: 'id', description: caseIdHelp, required: true, min_value: 1 }],
             },
             { type: SUBCOMMAND, name: 'check', description: 'Replay stored situations of every case with a run. Spends balance.' },
             { type: SUBCOMMAND, name: 'stop', description: 'Stop the mentor run in flight, the current model call included.' },
@@ -609,14 +623,14 @@ export function buildCommandTree(commandName) {
               type: SUBCOMMAND,
               name: 'show',
               description: "A case's last run: the card and the full report file.",
-              options: [{ type: INTEGER, name: 'id', description: 'Case id from /nep mentor cases.', required: true, min_value: 1 }],
+              options: [{ type: INTEGER, name: 'id', description: caseIdHelp, required: true, min_value: 1 }],
             },
             {
               type: SUBCOMMAND,
               name: 'wrong',
               description: 'Tell the mentor it misjudged a case; later runs read it as feedback.',
               options: [
-                { type: INTEGER, name: 'id', description: 'Case id from /nep mentor cases.', required: true, min_value: 1 },
+                { type: INTEGER, name: 'id', description: caseIdHelp, required: true, min_value: 1 },
                 { type: STRING, name: 'reason', description: 'Why the verdict was wrong (3-500 chars).', required: true },
               ],
             },
@@ -923,15 +937,9 @@ function routeModelChoices(config, typed) {
   const prefixes = byModel && typeof byModel === 'object' && !Array.isArray(byModel)
     ? Object.keys(byModel).map((key) => (key.includes('@') ? key.slice(0, key.lastIndexOf('@')) : key))
     : [];
-  const models = [
-    config?.llm?.model,
-    config?.memory?.model,
-    config?.classifier?.text,
-    config?.classifier?.media,
-    config?.classifier?.video,
-    config?.mentor?.model,
-    config?.image?.model,
-  ];
+  const models = [...Object.values(MODEL_ROLE_PATHS), 'image.model'].map((dotted) =>
+    dotted.split('.').reduce((node, key) => (isPlainObject(node) ? node[key] : undefined), config),
+  );
   const all = [...new Set([...prefixes, ...models].filter((value) => typeof value === 'string' && value))];
   return all
     .filter((value) => value.toLowerCase().includes(typed))
@@ -1027,7 +1035,6 @@ export function createInteractionHandler({ hot, admin, getGuildId }) {
       }
       if (interaction.isChatInputCommand?.()) {
         await handleChatInput(interaction);
-        return;
       }
     } catch (err) {
       log.error('commands: interaction handler failed', { error: err });

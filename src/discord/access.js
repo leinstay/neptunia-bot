@@ -28,6 +28,23 @@ export function isOwnerOnly(key) {
   return OWNER_ONLY_GROUPS.includes(groupOf(key) ?? key);
 }
 
+/** True when `owners` (ids, numbers or strings) lists `userId`; ids compared as strings. */
+function listsOwner(owners, userId) {
+  if (userId === undefined || userId === null) return false;
+  return (Array.isArray(owners) ? owners : []).map(String).includes(String(userId));
+}
+
+/**
+ * True when `userId` is one of `config.bot.owners`: the one owner check of the
+ * owner commands (src/admin.js) and of `isAllowed` below. No user, no owner.
+ * @param {object} config  The live merged config (hot.config).
+ * @param {unknown} userId
+ * @returns {boolean}
+ */
+export function isOwnerId(config, userId) {
+  return listsOwner(config?.bot?.owners, userId);
+}
+
 /** True when `userId` (an owner, or matched by a grant on the exact command
  * key, its group, or `*`) may run `commandKey`. Owners always pass, even with
  * no `access` at all. A missing/invalid `access` denies everyone else, and
@@ -38,8 +55,7 @@ export function isOwnerOnly(key) {
  * @returns {boolean}
  */
 export function isAllowed({ commandKey, userId, roleIds, owners, access }) {
-  const ownerIds = (Array.isArray(owners) ? owners : []).map(String);
-  if (ownerIds.includes(String(userId))) return true;
+  if (listsOwner(owners, userId)) return true;
 
   if (isOwnerOnly(commandKey)) return false;
   if (!access || typeof access !== 'object') return false;
@@ -124,4 +140,22 @@ export function revoke(access, key, { everyone, roleId, userId } = {}) {
     out[key] = next;
   }
   return out;
+}
+
+/**
+ * True when `key`'s grant holds the one thing `what` names (`{ everyone: true }`,
+ * `{ roleId }` or `{ userId }`, ids compared as strings) -- whether `revoke`
+ * with the same arguments would change anything.
+ * @param {object} access
+ * @param {string} key
+ * @param {{ everyone?: boolean, roleId?: (string|number), userId?: (string|number) }} what
+ * @returns {boolean}
+ */
+export function hasGrant(access, key, { everyone, roleId, userId } = {}) {
+  if (!access?.[key]) return false;
+  const entry = entryOf(access, key);
+  if (everyone) return entry.everyone;
+  if (roleId != null) return entry.roles.map(String).includes(String(roleId));
+  if (userId != null) return entry.users.map(String).includes(String(userId));
+  return false;
 }

@@ -348,5 +348,33 @@ export function createLlm({ apiKey, getConfig, calibrator, state, fetchImpl = fe
     throw lastError;
   }
 
-  return { complete };
+  /**
+   * One GET of OpenRouter's public endpoint listing of `model`
+   * (`<llm.baseUrl>/models/<model>/endpoints`; the model id's slash is a path
+   * separator): `{ ok, status, json }`, `json` being the parsed body of a 2xx
+   * answer (null when it is not JSON, or on any other status). Free: never
+   * counted against `llm.maxRequestsPerDay`, never calibrated, never retried.
+   * A network failure or the `timeoutMs` abort (default `llm.timeoutMs`)
+   * throws as fetch throws it. For `/nep ping image`, which checks the drawing
+   * model without generating a picture.
+   * @param {string} model
+   * @param {{ timeoutMs?: number }} [options]
+   * @returns {Promise<{ ok: boolean, status: number, json: object|null }>}
+   */
+  async function modelEndpoints(model, { timeoutMs } = {}) {
+    const cfg = getConfig().llm;
+    const response = await fetchImpl(apiUrl(cfg.baseUrl, `models/${model}/endpoints`), {
+      method: 'GET',
+      headers: openRouterHeaders(apiKey),
+      signal: AbortSignal.timeout(timeoutMs ?? cfg.timeoutMs),
+    });
+    const json = response.ok
+      ? await Promise.resolve()
+          .then(() => response.json())
+          .catch(() => null)
+      : null;
+    return { ok: response.ok, status: response.status, json };
+  }
+
+  return { complete, modelEndpoints };
 }

@@ -32,7 +32,7 @@ function write(level, msg, meta) {
     msg: String(msg),
     ...normalizeMeta(meta),
   };
-  process.stdout.write(JSON.stringify(entry) + '\n');
+  process.stdout.write(`${JSON.stringify(entry)}\n`);
 }
 
 /**

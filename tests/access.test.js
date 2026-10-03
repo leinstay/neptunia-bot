@@ -3,7 +3,32 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { isAllowed, grant, revoke, isOwnerOnly, OWNER_ONLY_GROUPS } from '../src/discord/access.js';
+import { isAllowed, grant, revoke, hasGrant, isOwnerId, isOwnerOnly, OWNER_ONLY_GROUPS } from '../src/discord/access.js';
+
+// ---------------------------------------------------------------------------
+// isOwnerId / hasGrant
+// ---------------------------------------------------------------------------
+
+test('isOwnerId: a listed id passes as a string or a number; no user and no owners list never do', () => {
+  const config = { bot: { owners: ['1', 2] } };
+  assert.equal(isOwnerId(config, '1'), true);
+  assert.equal(isOwnerId(config, '2'), true);
+  assert.equal(isOwnerId(config, '3'), false);
+  assert.equal(isOwnerId(config, undefined), false);
+  assert.equal(isOwnerId({}, '1'), false);
+  assert.equal(isOwnerId(undefined, '1'), false);
+});
+
+test('hasGrant: true exactly when revoke with the same arguments would change something', () => {
+  const access = { status: { everyone: true, roles: ['5'], users: [7] } };
+  assert.equal(hasGrant(access, 'status', { everyone: true }), true);
+  assert.equal(hasGrant(access, 'status', { roleId: 5 }), true);
+  assert.equal(hasGrant(access, 'status', { userId: '7' }), true);
+  assert.equal(hasGrant(access, 'status', { roleId: '6' }), false);
+  assert.equal(hasGrant(access, 'memory', { everyone: true }), false);
+  assert.equal(hasGrant({ status: { roles: ['5'] } }, 'status', { everyone: true }), false);
+  assert.equal(hasGrant(undefined, 'status', { everyone: true }), false);
+});
 
 // ---------------------------------------------------------------------------
 // isAllowed

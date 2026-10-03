@@ -843,40 +843,46 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
    * failed or has a situation whose median `overall` is under `passScore`,
    * the pass score its verdict was given with (src/mentor/judge.js#verdict).
    */
-  function needsDiagnosis(run, passScore) {
-    if (run.kind !== 'run' || run.stopped || run.error) return false;
+  function needsDiagnosis(record, passScore) {
+    if (record.kind !== 'run' || record.stopped || record.error) return false;
     if (hot.config.mentor?.diagnose === false) return false;
-    return !run.passed || run.situationMedians.some((m) => typeof m?.overall === 'number' && m.overall < passScore);
+    return !record.passed || record.situationMedians.some((m) => typeof m?.overall === 'number' && m.overall < passScore);
   }
 
   /**
    * One mentor request for its opinion of the worst situation: what it thinks
-   * caused the failure and what it would change. Sets `run.diagnosis`; on any
-   * failure `run.diagnosis` is null and `run.diagnosisError` a short reason.
+   * caused the failure and what it would change. Sets `record.diagnosis`; on any
+   * failure `record.diagnosis` is null and `record.diagnosisError` a short reason.
    * Never throws: the run is measured already.
    */
-  async function diagnose(ctx, run, item, measured) {
+  async function diagnose(ctx, record, item, measured) {
     const { reference, feedback, self, prepared } = measured;
     const fail = (reason) => {
-      run.diagnosis = null;
-      run.diagnosisError = reason;
+      record.diagnosis = null;
+      record.diagnosisError = reason;
       log.warn('mentor: diagnosis failed', { caseId: item.id, reason });
     };
     const template = hot.prompts?.[DIAGNOSE_PROMPT];
-    if (typeof template !== 'string' || !template.trim()) return fail('prompt missing');
-    const anchorNs = new Set(run.situations.filter(isAnchor).map((s) => s.n));
-    const worst = worstSituation(run.situationMedians, anchorNs);
+    if (typeof template !== 'string' || !template.trim()) {
+      fail('prompt missing');
+      return;
+    }
+    const anchorNs = new Set(record.situations.filter(isAnchor).map((s) => s.n));
+    const worst = worstSituation(record.situationMedians, anchorNs);
     const entry = worst ? prepared.find((p) => p.record.n === worst.n) : null;
-    if (!entry?.request) return fail('no situation to diagnose');
+    if (!entry?.request) {
+      fail('no situation to diagnose');
+      return;
+    }
     let text;
     try {
       const blocks = commonBlocks(item, reference, feedback, self.name);
-      const verdictJson = { passed: run.passed, medians: run.medians, situations: run.situationMedians, reasons: run.reasons };
+      const verdictJson = { passed: record.passed, medians: record.medians, situations: record.situationMedians, reasons: record.reasons };
       const seen = [block('system', entry.request.system), block('user', entry.request.user)].filter(Boolean).join('\n');
       const system = fillPromptTemplate(template, templateValues(self.name));
       const before = [blocks.case, block('verdict', JSON.stringify(verdictJson)), blocks.signs, blocks.feedback];
       const after = [block('seen', seen)];
-      const shown = worstRecord(entry.record, run.target);
+      const shown = worstRecord(entry.record, record.target);
       if (entry.items) {
         // The transcript is the part of <worst> that grows with a real moment: it gives way first.
         const room = roomLeft(system, [...before, ...after].filter(Boolean).join('\n\n')) - calibrated(estimateTokens(JSON.stringify({ ...shown, transcript: '' })));
@@ -886,11 +892,15 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
       ctx.phase = 'diagnosis';
       text = await askMentor(ctx, system, user);
     } catch (err) {
-      return fail(diagnosisFailure(err));
+      fail(diagnosisFailure(err));
+      return;
     }
     const diagnosis = parseDiagnosis(text);
-    if (!diagnosis) return fail('invalid answer');
-    run.diagnosis = diagnosis;
+    if (!diagnosis) {
+      fail('invalid answer');
+      return;
+    }
+    record.diagnosis = diagnosis;
     log.info('mentor: diagnosis', { caseId: item.id, causes: diagnosis.causes.length, changes: diagnosis.changes.length });
   }
 
@@ -906,7 +916,7 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
     const startedMs = now();
     const spentBefore = ctx.spent;
     ctx.caseId = item.id;
-    const run = {
+    const record = {
       caseId: item.id,
       caseText: item.text,
       target: item.target,
@@ -944,7 +954,7 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
         shared.reference = await readReference(ctx, view, self.id);
       }
       const reference = shared.reference;
-      run.reference = { profile: reference.profile, samples: reference.samples.length };
+      record.reference = { profile: reference.profile, samples: reference.samples.length };
       const feedback = feedbackText(guildId);
 
       let situations = stored;
@@ -952,7 +962,7 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
         // The case's real moments first, then the invented situations: `n` continues after the anchors.
         const anchored = anchorSituations(item);
         const invented = await inventSituations(ctx, { item, view, reference, feedback, self });
-        run.dropped = invented.dropped;
+        record.dropped = invented.dropped;
         situations = [...anchored, ...invented.situations];
         if (situations.length === 0) throw new RunEnd('error', 'no valid situation');
       }
@@ -963,43 +973,43 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
     } catch (err) {
       const end = endOf(err);
       if (!(err instanceof RunEnd)) log.warn('mentor: the run failed', { caseId: item.id, name: err?.name, status: err?.statusCode });
-      if (end.kind === 'stopped') run.stopped = end.reason;
-      else run.error = end.reason;
+      if (end.kind === 'stopped') record.stopped = end.reason;
+      else record.error = end.reason;
     }
-    if (into.records) run.situations = into.records;
-    if (into.repeated) run.repeated = into.repeated;
+    if (into.records) record.situations = into.records;
+    if (into.repeated) record.repeated = into.repeated;
     // Counts only: how much later memory the real moments were answered without.
     if (into.hidden?.situations > 0) log.info('mentor: later memory hidden', { kind, caseId: item.id, ...into.hidden });
 
-    const { scores, verdict: result } = verdictOf(run.situations);
-    run.medians = result.medians;
-    run.situationMedians = result.situations;
-    run.reasons = result.reasons;
-    run.passed = !run.stopped && !run.error && result.passed;
-    if (measured && needsDiagnosis(run, result.passScore)) await diagnose(ctx, run, item, measured);
-    run.finishedAt = new Date(now()).toISOString();
-    run.tokens = { spent: ctx.spent - spentBefore, left: budget.left() };
+    const { scores, verdict: result } = verdictOf(record.situations);
+    record.medians = result.medians;
+    record.situationMedians = result.situations;
+    record.reasons = result.reasons;
+    record.passed = !record.stopped && !record.error && result.passed;
+    if (measured && needsDiagnosis(record, result.passScore)) await diagnose(ctx, record, item, measured);
+    record.finishedAt = new Date(now()).toISOString();
+    record.tokens = { spent: ctx.spent - spentBefore, left: budget.left() };
 
-    let saved = run;
+    let saved = record;
     try {
-      saved = cases.saveRun(guildId, run);
+      saved = cases.saveRun(guildId, record);
     } catch (err) {
       log.error('mentor: the run could not be saved', { caseId: item.id, name: err?.name });
     }
-    const answers = run.situations.reduce((n, s) => n + s.answers.length, 0);
+    const answers = record.situations.reduce((n, s) => n + s.answers.length, 0);
     log.info('mentor: run finished', {
       kind,
       caseId: item.id,
       runId: saved.id ?? null,
-      passed: run.passed,
-      stopped: run.stopped ?? null,
-      failed: Boolean(run.error),
-      situations: run.situations.length,
-      dropped: run.dropped,
+      passed: record.passed,
+      stopped: record.stopped ?? null,
+      failed: Boolean(record.error),
+      situations: record.situations.length,
+      dropped: record.dropped,
       answers,
       scored: scores.length,
-      tokens: run.tokens.spent,
-      tokensLeft: run.tokens.left,
+      tokens: record.tokens.spent,
+      tokensLeft: record.tokens.left,
       durationMs: now() - startedMs,
     });
     return saved;
