@@ -299,8 +299,13 @@ YouTube 链接的时长通过以下链式探测获取：首先尝试 yt-dlp，�
 | `maxDeltaPerUpdate` | `15` | 每次更新的最大分数变化 |
 | `historySize` | `10` | 每成员保留的态度变化记录数 |
 | `directTriggerCount` | `6` | 强制提前更新的直接互动次数 |
+| `decayPerDay` | `0.04` | 每日向零漂移；每天损失 `decayPerDay * |score| * (|score| / 100) ^ decayPower`。`0` 或缺失 = 关 |
+| `decayPower` | `1` | 衰减曲线的指数；值越高，接近零的分数衰减越慢。非正数 = 1 |
+| `rewriteOnBandChange` | `true` | 当态度区间与写入时不同时，标记已存储的 `relationship` 文本需要重写。缺失键 = 开 |
 
 启用 `damping` 后，推离零点的分数变化会按 `(1 - |score| / 100) ^ dampingPower` 缩放，因此极端值需要持续努力才能达到；趋向零的变化全额应用。分数以小数精度存储，以整数显示；`/nep memory affinity` 可直接设置分数，不受阻尼影响。
+
+设置 `decayPerDay` 后，所有已存储的态度分数（公共和私有）每天向零漂移。使用默认设置时，分数 100 的每日损失为 4；64 时约 1.6；30 时约 0.36。扫描在启动时和每小时运行，从档案上的时间戳（`affinity.decayedAt`）按整天数应用，因此停机时间会被追上。暂停期间和预热期间不运行。不写入态度历史条目。
 
 ## `lore`
 

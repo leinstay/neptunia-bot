@@ -35,7 +35,7 @@ Profiles are updated incrementally: the analyzer returns only what changed, and 
 - **Details**: atomic items (a fact, a trait, a piece of context). Same ranking and confirmation mechanics as interests, with their own half-life (`memory.detailHalfLifeDays`).
 - **Aliases**: what people in chat actually call a member. The persona recognises a member mentioned by name or alias even when they are not in the conversation.
 - **Relationship**: how the persona and this person stand with each other, written in the persona's voice.
-- **Attitude**: a score from -100 to 100 (`features.relationships`). The analyzer returns a small delta, never the absolute score. The score never appears in chat; it shows in how much effort the persona puts in.
+- **Attitude**: a score from -100 to 100 (`features.relationships`). The analyzer returns a small delta, never the absolute score. The score never appears in chat; it shows in how much effort the persona puts in. Scores decay toward zero daily when `relationships.decayPerDay` is set, faster the further from zero. When the score has moved to a different band since the relationship text was written, the text is flagged for rewrite so the analyzer updates it.
 
 The portrait of a member's character and manner of speech is drawn from the channels in `memory.mainChannelIds`; when the list is empty, every channel counts. Stored memory refers to members by id and the current name is substituted when the memory is used, so renames never break stored notes.
 

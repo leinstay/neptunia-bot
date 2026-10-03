@@ -275,8 +275,8 @@ through the warmup prompts (`profile.md`, `channel.md`, `server.md`), not throug
 
 The numeric limits in the prompt are placeholders filled at runtime from `config.memory.*` and `relationships.maxDeltaPerUpdate`.
 
-Input: `<character>` · `<existing_profiles>` (JSON by user id, incl. current `affinity` score and reason and stored
-`episodes`) · `<existing_lore>` ·
+Input: `<character>` · `<existing_profiles>` (JSON by user id, incl. current `affinity` with score, band and reason,
+`relationshipStale` when the text is due for a rewrite, and stored `episodes`) · `<existing_lore>` ·
 `<existing_guild>` (JSON: patterns, starters, in-jokes, learned items) · `<existing_channels>` (JSON by channel id: `name`, Discord `category`, `topic`, stored `purpose`,
 `topics`, `tone`) · `<new_messages>` grouped under `## #channel-name (id:123)`, lines `[14:32] nick (id:123): text`,
 a line addressed to the persona starts with `→ `, own lines use `labels.self`.
@@ -354,8 +354,11 @@ of what is already stored, so facts are not degraded by being rewritten batch af
   HOW the person writes (length, rhythm, vocabulary, emoji habits), not what they do or talk about. `relationship`:
   how the persona and this person stand with each other, not news and not the person's relations with others; written
   first when the stored text is empty and a batch shows them dealing with each other (or affinity/episodes already
-  exist), afterwards only when it must change. Each ≤ `memory.fieldChars`; an absent field leaves the stored text
-  untouched.
+  exist), afterwards only when it must change. When the profile carries `relationshipStale`, the text is due for a
+  rewrite: `writtenAt` is the band the text was written at (or `none` when unwritten), `now` is the current band
+  (`affinity.band`). Code stamps `relationshipScore` on the profile each time `relationship` is written and compares
+  bands to detect drift. Switch `relationships.rewriteOnBandChange` (default true, missing = on).
+  Each ≤ `memory.fieldChars`; an absent field leaves the stored text untouched.
   `character` and `style` are written ONLY by `profile.md` (the warmup and a portrait refresh), never edited by the
   stream analyzer directly. The analyzer returns `portrait` (a one-line cue about what the stored text misses) when
   a batch warrants it, and code queues a refresh.
@@ -404,7 +407,11 @@ of what is already stored, so facts are not degraded by being rewritten batch af
   replaces the stored one; empty `guild` / `self` = nothing new.
 - `affinity` is a CHANGE: integer `delta` (usually ±1…5, up to ±`relationships.maxDeltaPerUpdate` for something
   striking), one-line `reason` naming an observed event. Code clamps it to ±`relationships.maxDeltaPerUpdate`, accumulates into −100…100, keeps a short
-  history. The model never sets the absolute score.
+  history. The model never sets the absolute score. Scores drift toward zero daily when `relationships.decayPerDay`
+  is set: per day the score loses `decayPerDay * |score| * (|score| / 100) ^ decayPower`, faster the further from
+  zero; negative scores rise the same way. Applied at startup and hourly from a per-profile stamp
+  (`affinity.decayedAt`), whole days only, so downtime is caught up. Never runs while paused or during the warmup.
+  No history entry is written.
 - `episodes` are APPENDED, never rewritten: return only NEW moments worth remembering for months: an insult, a
   kindness, a promise, a bet, a fight, a shared joke, something the person asked the persona to do or never do. `what`
   one line; `quote` the person's own words verbatim, short (≤ 120 chars), or empty; `feeling` how the persona took it,

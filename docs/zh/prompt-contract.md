@@ -255,8 +255,8 @@ variety.intro                            first line of the `<worn>` block: tells
 
 提示中的数值限制是占位符，在运行时从 `config.memory.*` 和 `relationships.maxDeltaPerUpdate` 填充。
 
-输入：`<character>` · `<existing_profiles>`（按用户 id 的 JSON，包含当前 `affinity` 分数、原因和已存储的
-`episodes`）· `<existing_lore>` ·
+输入：`<character>` · `<existing_profiles>`（按用户 id 的 JSON，包含当前 `affinity`（分数、区间和原因），
+适用时含 `relationshipStale`，以及已存储的 `episodes`）· `<existing_lore>` ·
 `<existing_guild>`（JSON：规律、开场白、内部梗、学到的条目）· `<existing_channels>`（按频道 id 的 JSON：`name`、Discord `category`、`topic`、已存储的
 `purpose`、`topics`、`tone`）· `<new_messages>` 按 `## #channel-name (id:123)` 分组，行格式为
 `[14:32] nick (id:123): text`，对角色说话的行以 `→ ` 开头，角色自身的行使用 `labels.self`。
@@ -324,7 +324,10 @@ variety.intro                            first line of the `<worn>` block: tells
   `reason` 和回忆的 `feeling` 以角色卡中的角色声音撰写（可用第一人称，不用生硬术语）。`style`：该成员
   怎么写（长度、节奏、词汇、表情使用习惯），而非他们做什么或谈什么。`relationship`：角色和这个人之间的
   关系如何，不是新闻，也不是该成员与其他人的关系；当已存储文本为空且批次显示双方有实际互动（或已有
-  affinity/episodes）时首次写入，之后仅在需要变更时返回。每个字段 ≤ `memory.fieldChars`；缺失的字段保持
+  affinity/episodes）时首次写入，之后仅在需要变更时返回。当档案携带 `relationshipStale` 时，文本需要重写：
+  `writtenAt` 是文本写入时所处的区间（未写入时为 `none`），`now` 是当前区间（`affinity.band`）。代码在每次
+  写入 `relationship` 时在档案上标记 `relationshipScore`，并比较区间以检测漂移。开关
+  `relationships.rewriteOnBandChange`（默认 true，缺失键 = 开）。每个字段 ≤ `memory.fieldChars`；缺失的字段保持
   已存储的文本不变。`character` 和 `style` 仅由 `profile.md`（预热和画像刷新）撰写，流
   分析器不直接编辑。分析器在批次有必要时返回 `portrait`（一行提示，指出已存储文本遗漏了什么），代码会
   排队进行刷新。
@@ -370,7 +373,10 @@ variety.intro                            first line of the `<worn>` block: tells
   `guild` / `self` = 无新内容。
 - `affinity` 是一个变化量：整数 `delta`（通常 ±1…5，重大事件时最多 ±`relationships.maxDeltaPerUpdate`），
   单行 `reason` 指明观察到的事件。代码将其限制在 ±`relationships.maxDeltaPerUpdate` 范围内，累积到
-  −100…100，保留简短历史。模型永远不设置绝对分数。
+  −100…100，保留简短历史。模型永远不设置绝对分数。设置 `relationships.decayPerDay` 后，分数每天向零漂移：
+  每天损失 `decayPerDay * |score| * (|score| / 100) ^ decayPower`，离零越远越快；负分数同样向零回升。
+  在启动时和每小时从档案上的时间戳 `affinity.decayedAt` 按整天数应用，因此停机时间会被追上。暂停期间和预热
+  期间不运行。不写入态度历史条目。
 - `episodes` 是追加的，永不重写：仅返回值得记忆数月的新时刻：一次冒犯、一次善意、一个承诺、一次打赌、
   一场争执、一个共同的笑话、某人要求角色做或不做的事情。`what` 一行；`quote` 当事人的原话逐字引用，简短
   （≤ 120 字符），或为空；`feeling` 角色如何看待此事，通过角色卡判断；`weight` 1–5（5 = 永不遗忘）。
