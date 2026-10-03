@@ -17,6 +17,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { writeJsonAtomic } from '../memory/store.js';
+import { isUsableAnchor } from './anchor.js';
 
 const TARGETS = ['reply', 'memory'];
 const TEXT_MIN = 10;
@@ -72,7 +73,8 @@ function isId(value) {
 /**
  * A resolved moment (src/mentor/anchor.js#resolveAnchor) as it is stored,
  * without its id and time; an Error when it cannot be replayed: its history
- * must be a non-empty list of messages whose last one is not the persona's.
+ * must be a non-empty list of messages whose last one is not the persona's
+ * (src/mentor/anchor.js#isUsableAnchor, the rule a replay applies).
  */
 function checkedAnchor(anchor) {
   const history = anchor?.history;
@@ -80,10 +82,8 @@ function checkedAnchor(anchor) {
     isId(anchor?.channelId) &&
     isId(anchor?.messageId) &&
     isId(anchor?.triggerId) &&
-    Array.isArray(history) &&
-    history.length > 0 &&
-    history.every((m) => m !== null && typeof m === 'object') &&
-    history[history.length - 1].self !== true;
+    isUsableAnchor(anchor) &&
+    history.every((m) => m !== null && typeof m === 'object');
   if (!ok) throw new Error('the moment cannot be replayed: its chat is empty or ends with the persona');
   const original = Array.isArray(anchor.original) ? anchor.original.filter((text) => typeof text === 'string') : [];
   return { channelId: anchor.channelId, messageId: anchor.messageId, triggerId: anchor.triggerId, history, original };

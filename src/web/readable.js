@@ -30,7 +30,6 @@ const CELL = new Set(['td', 'th']);
 const ELLIPSIS = '\u2026';
 const TITLE_MAX_CHARS = 300;
 const TITLE_SCAN_CHARS = 64 * 1024;
-const WALL_MAX_CHARS = 1200;
 
 // Latin-1 letters 0xC0-0xFF by their entity names, plus the usual punctuation.
 const LATIN1_NAMES = [
@@ -364,25 +363,4 @@ export function pageTitle(html) {
   } catch {
     return null;
   }
-}
-
-const WALL_PHRASES = [/\bconsent\b/i, /subscribe to continue/i, /sign in to continue/i, /enable javascript/i];
-const COOKIE = /\bcookies?\b/i;
-const COOKIE_CONTEXT = /\b(accept|agree|consent|privacy|policy|settings|preferences|manage)\b/i;
-
-/**
- * Whether an extracted page text looks like a cookie/consent banner, a login
- * or subscription wall, or a script-only shell rather than content: a very
- * short text (under ~1200 characters) with one of the telltale phrases. A
- * lone "cookie" counts only next to consent vocabulary, so a short recipe is
- * not a wall. A heuristic for the reader to label such pages.
- * @param {string} text
- * @returns {boolean}
- */
-export function looksLikePaywallOrConsent(text) {
-  if (typeof text !== 'string') return false;
-  const value = text.trim();
-  if (!value || value.length > WALL_MAX_CHARS) return false;
-  if (WALL_PHRASES.some((re) => re.test(value))) return true;
-  return COOKIE.test(value) && COOKIE_CONTEXT.test(value);
 }

@@ -223,7 +223,7 @@ export function sampleLines(messages, n, rng) {
 
 /**
  * The code-measured facts of one sandbox answer against the chat's reference.
- * @param {{ messages: { text: string, replyTo?: string|null }[] }} answer
+ * @param {{ messages: { text: string, replyTo?: number|null }[] }} answer
  * @param {{ unused: string[], rare?: string[], length: { p75: number } }} profile  A styleProfile result.
  * @returns {{ chars: number, messages: number, unusedMarks: Record<string, number>,
  *   rareMarks: Record<string, number>, commas: number,

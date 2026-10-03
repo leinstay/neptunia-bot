@@ -238,30 +238,45 @@ test('fetchText: redirects are followed manually, relative locations resolved, e
   assert.equal(first.state.cancelled, true);
 });
 
-test('fetchText: more redirects than maxRedirects fail with redirects', async () => {
+test('fetchText: three redirects are followed, a fourth fails with redirects (no option changes that)', async () => {
   const hop = (n) => fakeResponse({ status: 302, headers: { location: `https://r.example/${n}` } });
   const { calls, requestImpl } = fakeRequest({
     'https://r.example/0': hop(1), 'https://r.example/1': hop(2), 'https://r.example/2': hop(3), 'https://r.example/3': hop(4),
   });
   const fetcher = createPageFetcher({ requestImpl, lookup: fakeLookup().lookup });
-  const { result } = await run(fetcher, 'https://r.example/0', { ...OPTS, maxRedirects: 2 });
+  const { result } = await run(fetcher, 'https://r.example/0', { ...OPTS, maxRedirects: 10 });
   assert.deepEqual(result, { ok: false, reason: 'redirects' });
-  assert.equal(calls.length, 3);
+  assert.equal(calls.length, 4);
 
-  const { result: byDefault } = await run(createPageFetcher({ requestImpl, lookup: fakeLookup().lookup }), 'https://r.example/0');
-  assert.deepEqual(byDefault, { ok: false, reason: 'redirects' });
+  const three = fakeRequest({
+    'https://s.example/0': fakeResponse({ status: 302, headers: { location: 'https://s.example/1' } }),
+    'https://s.example/1': fakeResponse({ status: 302, headers: { location: 'https://s.example/2' } }),
+    'https://s.example/2': fakeResponse({ status: 302, headers: { location: 'https://s.example/3' } }),
+    'https://s.example/3': html('<p>arrived</p>'),
+  });
+  const { result: followed } = await run(createPageFetcher({ requestImpl: three.requestImpl, lookup: fakeLookup().lookup }), 'https://s.example/0');
+  assert.equal(followed.ok, true);
+  assert.equal(followed.finalUrl, 'https://s.example/3');
 });
 
-test('fetchText: sends the fixed header set with a GET', async () => {
+test('fetchText: sends the fixed header set with a GET; Accept-Language only when one is given', async () => {
   const { calls, requestImpl } = fakeRequest({ 'https://h.example/': html('<p>x</p>') });
   const fetcher = createPageFetcher({ requestImpl, lookup: fakeLookup().lookup });
   await run(fetcher, 'https://h.example/');
   assert.deepEqual(calls[0].options.headers, {
     'User-Agent': 'Mozilla/5.0 (compatible; neptunia-bot/1.0)',
     Accept: 'text/html,text/plain;q=0.9,*/*;q=0.1',
-    'Accept-Language': 'en,ru;q=0.8',
   });
   assert.ok(calls[0].options.signal);
+
+  await run(fetcher, 'https://h.example/', { ...OPTS, acceptLanguage: 'el,en;q=0.5' });
+  assert.equal(calls[1].options.headers['Accept-Language'], 'el,en;q=0.5');
+
+  // Not a usable header value: left out rather than sent broken.
+  for (const acceptLanguage of ['', '   ', 'el\r\nX-Injected: 1', 42, null]) {
+    await run(fetcher, 'https://h.example/', { ...OPTS, acceptLanguage });
+    assert.equal('Accept-Language' in calls.at(-1).options.headers, false, JSON.stringify(acceptLanguage));
+  }
 });
 
 test('fetchText: a content type other than html/plain/xhtml fails with type, a missing one too', async () => {

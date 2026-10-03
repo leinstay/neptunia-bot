@@ -219,7 +219,7 @@ function reference() {
   ];
 }
 
-function setup({ config = {}, prompts = {}, llm = fakeLlm(), sendFails = false, fetchChannel, windowFor, fetchMoment, store = fakeMemoryStore() } = {}) {
+function setup({ config = {}, prompts = {}, llm = fakeLlm(), sendFails = false, fetchChannel, windowFor, fetchMoment, store = fakeMemoryStore(), calibrator, emoji } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'nep-mentor-run-'));
   let clock = NOW;
   const now = () => (clock += 1000);
@@ -263,6 +263,8 @@ function setup({ config = {}, prompts = {}, llm = fakeLlm(), sendFails = false, 
     getSelf: () => ({ id: SELF_ID, name: 'Zoë' }),
     fetchHistoryWindow,
     fetchMoment,
+    calibrator,
+    emoji,
     now,
     rng: () => 0,
   });
@@ -737,7 +739,7 @@ test('check: a run ended by the switches skips the remaining cases', () => {
     assert.deepEqual(llm.kinds(), ['talk']);
     const card = env.sent.at(-1).content;
     assert.match(card, new RegExp(`case ${first.id}: stopped \\(disabled\\)`));
-    assert.match(card, new RegExp(`case ${second.id}: skipped \\(the mentor was disabled\\)`));
+    assert.match(card, new RegExp(`case ${second.id}: skipped \\(stopped: the mentor was disabled during the run\\)`));
   });
 });
 
@@ -755,6 +757,7 @@ test('run: a memory case goes through answerMemory', () =>
     assert.ok(stored[0].texts.some((t) => t.text === 'Asks about limits.'));
     const answer = run.situations[0].answers[0];
     assert.equal(answer.parseOk, true);
+    assert.equal(answer.applyOk, true);
     assert.ok(answer.texts.some((t) => t.path === 'guild.patterns'));
     assert.equal(answer.messages, undefined);
     assert.deepEqual(run.repeated, []);
@@ -1282,7 +1285,7 @@ test('run: without an admin channel nothing is posted and no warning is logged',
     assert.equal(fetched.includes(ADMIN), false);
     assert.equal(cases.lastRun(GUILD, item.id).id, run.id);
     assert.deepEqual(logs.filter((l) => l.level === 'warn' || l.level === 'error'), []);
-    const saved = logs.filter((l) => l.msg === 'mentor: report saved');
+    const saved = logs.filter((l) => l.msg === 'mentor: report not posted');
     assert.equal(saved.length, 1);
     assert.equal(saved[0].level, 'info');
     assert.equal(saved[0].caseId, item.id);
@@ -1292,7 +1295,7 @@ test('run: without an admin channel nothing is posted and no warning is logged',
     assert.equal(checked.result.length, 1);
     assert.equal(sent.length, 0);
     assert.deepEqual(checked.logs.filter((l) => l.level === 'warn' || l.level === 'error'), []);
-    const checkSaved = checked.logs.filter((l) => l.msg === 'mentor: report saved');
+    const checkSaved = checked.logs.filter((l) => l.msg === 'mentor: report not posted');
     assert.equal(checkSaved.length, 1);
     assert.equal(checkSaved[0].level, 'info');
     assert.equal(checkSaved[0].cases, 1);
@@ -1314,7 +1317,7 @@ test('run: a configured channel that cannot be fetched still logs a warning', ()
       assert.equal(warned[0].caseId, item.id);
       assert.equal(warned[0].name, 'Error');
       assert.equal('errorName' in warned[0], false);
-      assert.equal(logs.some((l) => l.msg === 'mentor: report saved'), false);
+      assert.equal(logs.some((l) => l.msg === 'mentor: report not posted'), false);
     },
   ));
 
@@ -1636,7 +1639,7 @@ test('worstSituation: ties go to the lower goal, then to an anchor, then to the 
   assert.equal(worstSituation([{ n: 3, overall: 4, goal: 3 }, { n: 2, overall: 4, goal: 3 }], new Set([2, 3])).n, 2);
 });
 
-test('resolveAnchor: reads mentor.anchor.contextMessages and the media settings at the moment of use', () => {
+test('readAnchor: reads mentor.anchor.contextMessages and the media settings at the moment of use', () => {
   const asked = [];
   const channel = { id: OTHER_CHANNEL.id, guild: { id: GUILD } };
   const fetchMoment = async (ch, messageId, options) => {
@@ -1647,23 +1650,23 @@ test('resolveAnchor: reads mentor.anchor.contextMessages and the media settings 
     { config: { mentor: { anchor: { contextMessages: 12 } } }, fetchChannel: (id) => (id === OTHER_CHANNEL.id ? channel : null), fetchMoment },
     async ({ mentor, hot, llm }) => {
       // A bare id is looked up in the channel the command was typed in.
-      const anchor = await mentor.resolveAnchor(snowflakeAt(MOMENT_TS), { channelId: OTHER_CHANNEL.id });
+      const anchor = await mentor.readAnchor(snowflakeAt(MOMENT_TS), { channelId: OTHER_CHANNEL.id });
       assert.equal(anchor.channelId, OTHER_CHANNEL.id);
       assert.deepEqual(anchor.original, ['M you are right, but']);
       assert.equal(asked[0].ch, channel);
       assert.deepEqual(asked[0].options, { selfId: SELF_ID, limit: 12, embedTextChars: 300, videoSites: undefined });
       hot.config.mentor.anchor.contextMessages = 7;
-      await mentor.resolveAnchor(snowflakeAt(MOMENT_TS), { channelId: OTHER_CHANNEL.id });
+      await mentor.readAnchor(snowflakeAt(MOMENT_TS), { channelId: OTHER_CHANNEL.id });
       assert.equal(asked[1].options.limit, 7);
       assert.equal(llm.calls.length, 0, 'reading a moment spends nothing');
-      await assert.rejects(mentor.resolveAnchor(`https://discord.com/channels/@me/${OTHER_CHANNEL.id}/${snowflakeAt(MOMENT_TS)}`), /direct message/);
+      await assert.rejects(mentor.readAnchor(`https://discord.com/channels/@me/${OTHER_CHANNEL.id}/${snowflakeAt(MOMENT_TS)}`), /direct message/);
     },
   );
 });
 
-test('resolveAnchor: without fetchMoment no moment can be read', () =>
+test('readAnchor: without fetchMoment no moment can be read', () =>
   withSetup({}, async ({ mentor }) => {
-    await assert.rejects(mentor.resolveAnchor(snowflakeAt(MOMENT_TS), { channelId: CHANNEL.id }), /not available/);
+    await assert.rejects(mentor.readAnchor(snowflakeAt(MOMENT_TS), { channelId: CHANNEL.id }), /not available/);
   }));
 
 // ---- a real moment shows the media as the persona saw them -------------------------
@@ -1751,7 +1754,7 @@ test('run: an anchor without descriptions and nothing cached replays as before',
     assert.doesNotMatch(run.situations[0].transcript, /watched/);
   }));
 
-test('resolveAnchor: the moment keeps the cached media descriptions; the log counts them, never their text', () => {
+test('readAnchor: the moment keeps the cached media descriptions; the log counts them, never their text', () => {
   const channel = { id: OTHER_CHANNEL.id, guild: { id: GUILD } };
   const answered = snowflakeAt(MOMENT_TS + 3 * 60_000);
   const fetchMoment = async () => ({
@@ -1765,7 +1768,7 @@ test('resolveAnchor: the moment keeps the cached media descriptions; the log cou
   return withSetup(
     { store: storeWithCache(cache), fetchChannel: (id) => (id === OTHER_CHANNEL.id ? channel : null), fetchMoment },
     async ({ mentor, cases, llm }) => {
-      const { result: anchor, logs } = await withCapturedLogs(() => mentor.resolveAnchor(answered, { channelId: OTHER_CHANNEL.id }));
+      const { result: anchor, logs } = await withCapturedLogs(() => mentor.readAnchor(answered, { channelId: OTHER_CHANNEL.id }));
       assert.deepEqual(anchor.history[0].mediaSeen, { watched: { [CLIP_ID]: CLIP_SUMMARY } });
       assert.ok(anchor.history.slice(1).every((m) => !('mediaSeen' in m)));
       const read = logs.find((l) => l.msg === 'mentor: moment read');
@@ -2084,3 +2087,143 @@ test('run: a memory-target case never runs the variety pass', () =>
     await withCapturedLogs(async () => (await mentor.run(item.id)).done);
     assert.equal(llm.calls.filter((c) => c.options.role === 'classifier.text').length, 0);
   }));
+
+test('run: the bot\'s limit notices among the persona\'s own lines never reach the variety pass', () => {
+  const notice = labels.limits.notice.replace('{limit}', 'llm.maxRequestsPerDay').replace('{used}', '300').replace('{cap}', '300');
+  const situations = {
+    situations: [
+      {
+        title: 'own lines and a notice',
+        lines: [
+          { authorId: 'self', authorName: 'self', text: 'I promise to behave (no)', replyTo: null },
+          { authorId: 'self', authorName: 'self', text: notice, replyTo: null },
+          { authorId: BRUNO, authorName: 'Bruno', text: 'sure you do', replyTo: 0 },
+          { authorId: 'self', authorName: 'self', text: 'I will fix it (no)', replyTo: null },
+          { authorId: 'self', authorName: 'self', text: 'never again (no)', replyTo: null },
+          { authorId: ALICE, authorName: 'Alice', text: 'are you out of drawings today?', replyTo: null },
+        ],
+      },
+    ],
+  };
+  const llm = fakeLlm({
+    situations,
+    hook: (call) => (call.options.role === 'classifier.text' ? { text: WORN_ANSWER, usage: USAGE, estimated: 50 } : undefined),
+  });
+  return withSetup({ config: { mentor: { situationLines: [2, 6] } }, prompts: { variety: VARIETY_PROMPT }, llm }, async ({ mentor, cases }) => {
+    const item = cases.add(GUILD, { text: CASE_TEXT, target: 'reply' });
+    await withCapturedLogs(async () => (await mentor.run(item.id)).done);
+    const passes = llm.calls.filter((c) => c.options.role === 'classifier.text');
+    assert.equal(passes.length, 1);
+    assert.equal(passes[0].user, '<lines>\n#1 I promise to behave (no)\n#2 I will fix it (no)\n#3 never again (no)\n</lines>');
+  });
+});
+
+// ---- parity with a live turn: custom emoji and GIFs ---------------------------
+
+const WAVE = { id: '600000000000000001', name: 'wave', animated: false };
+const GIF_LIBRARY = {
+  nextId: 2,
+  entries: {
+    k1: { id: 'g1', kind: 'link', url: 'https://tenor.com/view/dance-1', site: 'Tenor', name: 'Danse', itemId: 'k1', messageId: 'm1', channelId: CHANNEL.id, count: 3, last: NOW - 86_400_000, firstSeen: NOW - 86_400_000 },
+  },
+  backfill: null,
+};
+
+/** The memory store with the guild's GIF library and the describer cache a live turn reads. */
+function storeWithLists() {
+  const reads = [];
+  return {
+    reads,
+    ...fakeMemoryStore(),
+    getGifs: (guildId) => (reads.push(['getGifs', guildId]), GIF_LIBRARY),
+    getMediaCache: (guildId) => (reads.push(['getMediaCache', guildId]), { 'emoji:600000000000000001': { text: 'a waving hand' }, k1: { text: 'a dancing cat' } }),
+  };
+}
+
+test('run: a reply sandbox gets the custom emoji, the GIF library and their captions a live turn gets; a GIF answer is not silence', () => {
+  const store = storeWithLists();
+  return withSetup({ store, emoji: { list: () => [WAVE] }, llm: fakeLlm({ talk: '<gif reply="#2">g1</gif>' }) }, async ({ mentor, cases, llm }) => {
+    const item = cases.add(GUILD, { text: CASE_TEXT, target: 'reply' });
+    const run = await (await mentor.run(item.id)).done;
+    const talks = llm.calls.filter((c) => c.kind === 'talk');
+    assert.ok(talks.length > 0);
+    for (const talk of talks) {
+      assert.ok(talk.user.includes(':wave: -- a waving hand'), talk.user);
+      assert.ok(talk.user.includes('g1 -- a dancing cat'), talk.user);
+    }
+    assert.ok(store.reads.every(([, guildId]) => guildId === GUILD));
+    for (const situation of run.situations) for (const answer of situation.answers) assert.equal(answer.silent, false);
+  });
+});
+
+test('run: features.gifs off and no emoji index -> no <gifs>, no <emoji>, and a GIF answer is silence', () => {
+  const store = storeWithLists();
+  return withSetup({ store, config: { features: { mentor: true, gifs: false } }, llm: fakeLlm({ talk: '<gif>g1</gif>' }) }, async ({ mentor, cases, llm }) => {
+    const item = cases.add(GUILD, { text: CASE_TEXT, target: 'reply' });
+    const run = await (await mentor.run(item.id)).done;
+    for (const talk of llm.calls.filter((c) => c.kind === 'talk')) {
+      assert.ok(!talk.user.includes('<gifs>'));
+      assert.ok(!talk.user.includes('<emoji>'));
+    }
+    assert.equal(store.reads.some(([name]) => name === 'getGifs'), false);
+    for (const situation of run.situations) for (const answer of situation.answers) assert.equal(answer.silent, true);
+  });
+});
+
+// ---- small rules -----------------------------------------------------------------
+
+test('run: an empty memory.model names the talk model as the analyzer', () =>
+  withSetup({ config: { memory: { model: '' } } }, async ({ mentor, cases }) => {
+    const item = cases.add(GUILD, { text: CASE_TEXT, target: 'reply' });
+    const run = await (await mentor.run(item.id)).done;
+    assert.equal(run.models.analyzer, 'x/talk');
+  }));
+
+test('run: the budget pre-check measures a request as the llm rail does, calibrated', () =>
+  withSetup({ calibrator: { ratio: 10000, apply: (n) => n * 10000 } }, async ({ mentor, cases, llm }) => {
+    const item = cases.add(GUILD, { text: CASE_TEXT, target: 'reply' });
+    const run = await (await mentor.run(item.id)).done;
+    assert.equal(run.stopped, 'budget');
+    assert.equal(llm.calls.length, 0, 'the raw estimate would have fitted; the calibrated one does not');
+  }));
+
+test('run: the situations prompt is filled with the numbers the parser uses, also when the keys are unusable', () =>
+  withSetup({ config: { mentor: { situations: undefined, situationLines: 'many' } } }, async ({ mentor, cases, llm }) => {
+    const item = cases.add(GUILD, { text: CASE_TEXT, target: 'reply' });
+    await (await mentor.run(item.id)).done;
+    assert.equal(llm.calls[0].kind, 'situations');
+    assert.equal(llm.calls[0].system, 'SITUATIONS for Zoë: 5 of 6-15 lines. {{unknown}}');
+  }));
+
+test('status: names the kind, the case, the phase, the tokens and a stop asked for -- nothing else', () => {
+  let seen;
+  let env;
+  const llm = fakeLlm({
+    hook: (call) => {
+      if (call.kind === 'situations') seen = env.mentor.status();
+      return undefined;
+    },
+  });
+  return withSetup({ llm }, async (e) => {
+    env = e;
+    const item = e.cases.add(GUILD, { text: CASE_TEXT, target: 'reply' });
+    await (await e.mentor.run(item.id)).done;
+    assert.deepEqual(seen, { running: true, kind: 'run', caseId: item.id, phase: 'situations', tokens: 0, stopping: false });
+  });
+});
+
+test('run: a diagnosis the budget cannot pay for is named as the report names that stop', () =>
+  withSetup(
+    {
+      config: { mentor: { maxTokensPerDay: 11000, maxOutputTokens: 10 } },
+      llm: fakeLlm({ scoreFor: overallBySituation(9, 3), usageFor: (kind) => (kind === 'score' ? { prompt_tokens: 5000, completion_tokens: 0 } : USAGE) }),
+    },
+    async ({ mentor, cases, llm }) => {
+      const item = cases.add(GUILD, { text: CASE_TEXT, target: 'reply' });
+      const { result: run } = await withCapturedLogs(async () => (await mentor.run(item.id)).done);
+      assert.equal(run.stopped, undefined);
+      assert.equal(llm.kinds().includes('diagnose'), false);
+      assert.equal(run.diagnosis, null);
+      assert.equal(run.diagnosisError, 'stopped: the mentor daily token budget ran out');
+    },
+  ));

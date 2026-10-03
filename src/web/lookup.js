@@ -3,12 +3,12 @@
 // asked something that needs facts from outside, runs one web search. Two
 // halves, both modelled on the video describer (src/memory/describe.js):
 //
-// - readLink: a normal page link (never a video-site link -- the video
+// - readLinks: a normal page link (never a video-site link -- the video
 //   describer owns those -- never an embed classified as anything but a link
 //   (a gif), never a `web.links.skipSites` host, never a URL whose path ends
 //   with a picture/video/audio/archive/pdf extension) is fetched through the
-//   SSRF-guarded page fetcher
-//   (src/web/fetch-page.js) and condensed by the text classifier model through
+//   SSRF-guarded page fetcher (src/web/fetch-page.js; `web.acceptLanguage`
+//   sent as its Accept-Language) and condensed by the text classifier model through
 //   prompts/read-link.md into one excerpt of at most `web.links.summaryChars`.
 // - search: one Brave Search request (src/web/brave.js) whose numbered
 //   results are condensed through prompts/search-summary.md, sources kept.
@@ -16,22 +16,23 @@
 // Both share the media cache (data/guilds/<id>/media.json, LRU-trimmed to
 // `media.cacheEntries`): `read:<link id>` holds an excerpt `{ text, ts }` or a
 // miss `{ miss, ts, reason }` skipped for 6 hours; `search:<sha1 prefix of the
-// normalised query>` holds `{ query, text, sources, ts }`, served while younger
+// normalized query>` holds `{ query, text, sources, ts }`, served while younger
 // than `web.search.cacheHours`. Both share one daily counter
-// (`state.data.webDay` / `webCount`, `web.maxPerDay`), reserved before the
-// fetch or the search request and kept when either fails. Every model call
+// (`state.data.webDay` / `webCount`, `web.maxPerDay`; a cap that is not a
+// finite number counts as 0), reserved before the fetch or the search
+// request and kept when either fails. Every model call
 // goes through llm.complete (its token cap and daily request cap apply).
 // Logs carry reason codes, counts and `host/path` -- never page text, an
 // excerpt, a query or the key.
 
-import { createHash } from 'node:crypto';
 import { videoSiteFor, safeLocation } from '../discord/video-sites.js';
 import { classifierTextModel } from '../behavior/mention.js';
 import { fillPromptTemplate } from '../behavior/prompt.js';
-import { TokenLimitError, DailyCapError } from '../llm/openrouter.js';
+import { TokenLimitError, DailyCapError, dailyCapOf } from '../llm/openrouter.js';
 import { clampText } from '../memory/clamp.js';
 import { log } from '../log.js';
 import { bumpDaily, dailyCounter, utcDay } from '../time.js';
+import { hashedKey, touchKey, trimCache } from './cache.js';
 
 const READ_MISS_TTL_MS = 6 * 60 * 60_000;
 // An answer this short is the read-link prompt's "no real content" signal.
@@ -88,17 +89,11 @@ function isBinaryPath(url) {
   }
 }
 
-/** Move `key` to the end of `cache` (most-recently-used), inserting it if new. */
-function touchKey(cache, key, value) {
-  delete cache[key];
-  cache[key] = value;
-}
-
-/** Drop the oldest entries once `cache` holds more than `maxEntries`. */
-function trimCache(cache, maxEntries) {
-  const keys = Object.keys(cache);
-  const overflow = keys.length - Math.max(0, maxEntries);
-  for (let i = 0; i < overflow; i += 1) delete cache[keys[i]];
+/** The safety-rail refusals of llm.complete as reason codes; any other failure is `llm`. */
+function llmFailure(err) {
+  if (err instanceof TokenLimitError) return 'token-limit';
+  if (err instanceof DailyCapError) return 'daily-cap';
+  return 'llm';
 }
 
 /** A stand-in for the persistent state when none is wired (tests, tools). */
@@ -111,7 +106,7 @@ function memoryState() {
  * @param {string} query
  * @returns {string}
  */
-export function normaliseQuery(query) {
+export function normalizeQuery(query) {
   return String(query ?? '')
     .toLowerCase()
     .replace(/\s+/gu, ' ')
@@ -142,7 +137,7 @@ export function cleanQuery(query) {
 
 /** The cache key of one search. */
 function searchKey(query) {
-  return `search:${createHash('sha1').update(normaliseQuery(query)).digest('hex').slice(0, 16)}`;
+  return hashedKey('search', normalizeQuery(query));
 }
 
 /** The numbered result list the search-summary prompt reads (data, not wording). */
@@ -185,11 +180,15 @@ export function createLookup({ hot, store, llm, state = memoryState(), pageFetch
     return utcDay(now());
   }
 
-  /** Reserve one slot of the shared daily web counter; false when `web.maxPerDay` is spent. */
+  /**
+   * Reserve one slot of the shared daily web counter; false when `web.maxPerDay`
+   * (read now; not a finite number counts as 0) is spent.
+   */
   function reserveDaily() {
+    const cap = dailyCapOf(hot.config.web?.maxPerDay, 'web.maxPerDay');
     const nowMs = now();
     const { count } = dailyCounter(state.data, WEB_DAILY, nowMs);
-    if (count >= (hot.config.web?.maxPerDay ?? Infinity)) {
+    if (count >= cap) {
       state.markDirty();
       return false;
     }
@@ -248,6 +247,7 @@ export function createLookup({ hot, store, llm, state = memoryState(), pageFetch
       maxBytes: linksCfg.maxBytes,
       timeoutMs: linksCfg.fetchTimeoutMs,
       maxChars: linksCfg.textChars,
+      acceptLanguage: config.web?.acceptLanguage,
     });
     if (!page?.ok) return miss(page?.reason ?? 'network', page?.status !== undefined ? { status: page.status } : {});
 
@@ -275,9 +275,7 @@ export function createLookup({ hot, store, llm, state = memoryState(), pageFetch
       // A safety-rail refusal is cached as a miss like any other (skipped for
       // the same 6 hours), so the page is not re-fetched and re-charged on
       // every turn that sees the link.
-      if (err instanceof TokenLimitError) return miss('tokenLimit');
-      if (err instanceof DailyCapError) return miss('dailyCap');
-      return miss('llm', err?.statusCode !== undefined ? { status: err.statusCode } : {});
+      return miss(llmFailure(err), err?.statusCode !== undefined ? { status: err.statusCode } : {});
     }
 
     const text = cleanText(completion.text, summaryChars);
@@ -289,7 +287,7 @@ export function createLookup({ hot, store, llm, state = memoryState(), pageFetch
     return { result: { text }, attempted: true };
   }
 
-  /** readLink plus readLinks' accounting: `attempted` = a fetch was tried (or awaited in flight). */
+  /** One link read through the cache, with readLinks' accounting: `attempted` = a fetch was tried (or awaited in flight). */
   async function readLinkCharged(guildId, link, { cacheOnly = false } = {}) {
     if (!readable(link)) return { result: null, attempted: false };
     const key = `read:${link.id}`;
@@ -310,27 +308,18 @@ export function createLookup({ hot, store, llm, state = memoryState(), pageFetch
   }
 
   /**
-   * Read one link and condense it into an excerpt, through the shared cache.
+   * Read up to `maxNew` NEW links of `links`, in the order given, each
+   * condensed into an excerpt through the shared cache. Every fetch ATTEMPT
+   * counts toward `maxNew` (a failure included); cache hits and the daily cap
+   * are free; past `maxNew` the rest are only looked up in the cache. A link
+   * listed twice is read once. A link is left out of `reads` when the feature
+   * is off, it is not readable, a fresh miss is cached, the daily cap is spent
+   * or the read failed.
    * @param {string} guildId
-   * @param {{ id: string, url: string, site?: string, title?: string, kind?: string }} link
-   *   A normalized link item (src/discord/media.js#collectReadableLinks).
-   * @returns {Promise<{ text: string, cached?: true }|null>}  null when the feature is off, the
-   *   link is not readable, a fresh miss is cached, the daily cap is spent or the read failed.
-   */
-  async function readLink(guildId, link) {
-    const { result } = await readLinkCharged(guildId, link);
-    return result;
-  }
-
-  /**
-   * Read up to `maxNew` NEW links of `links`, in the order given. Every fetch
-   * ATTEMPT counts toward `maxNew` (a failure included); cache hits and the
-   * daily cap are free; past `maxNew` the rest are only looked up in the cache.
-   * A link listed twice is read once.
-   * @param {string} guildId
-   * @param {object[]} links
+   * @param {{ id: string, url: string, site?: string, title?: string, kind?: string }[]} links
+   *   Normalized link items (src/discord/media.js#collectReadableLinks).
    * @param {{ maxNew?: number }} [options]
-   * @returns {Promise<{ reads: Map<string, string>, newCount: number }>}
+   * @returns {Promise<{ reads: Map<string, string>, newCount: number }>}  link id -> excerpt.
    */
   async function readLinks(guildId, links, { maxNew = Infinity } = {}) {
     const reads = new Map();
@@ -375,7 +364,7 @@ export function createLookup({ hot, store, llm, state = memoryState(), pageFetch
       if (now() - hit.ts < maxAgeMs) {
         touchKey(cache, key, hit);
         store.markMediaCacheDirty(guildId);
-        report('found', null, { cached: true, results: hit.sources?.length ?? 0 });
+        report(hit.text ? 'found' : 'nothing', null, { cached: true, results: hit.sources?.length ?? 0 });
         return { query: hit.query ?? asked, text: hit.text, sources: hit.sources ?? [], cached: true };
       }
       delete cache[key];
@@ -414,8 +403,7 @@ export function createLookup({ hot, store, llm, state = memoryState(), pageFetch
           },
         );
       } catch (err) {
-        const reason = err instanceof TokenLimitError ? 'tokenLimit' : err instanceof DailyCapError ? 'dailyCap' : 'llm';
-        report('error', reason, err?.statusCode !== undefined ? { status: err.statusCode } : {});
+        report('error', llmFailure(err), err?.statusCode !== undefined ? { status: err.statusCode } : {});
         return null;
       }
       const text = cleanText(completion.text, summaryChars);
@@ -437,5 +425,5 @@ export function createLookup({ hot, store, llm, state = memoryState(), pageFetch
     return typeof braveApiKey === 'string' && braveApiKey.trim().length > 0;
   }
 
-  return { readLink, readLinks, search, hasSearch };
+  return { readLinks, search, hasSearch };
 }

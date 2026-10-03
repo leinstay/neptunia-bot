@@ -97,7 +97,14 @@ export function parseOutput(raw) {
   return result;
 }
 
-/** Extract the first JSON object from a model reply, tolerating code fences and chatter. */
+/**
+ * Parse the outermost `{...}` span of a model reply (from its first `{` to its
+ * last `}`), tolerating code fences and chatter around it. Two objects in one
+ * reply, or a stray `}` in trailing chatter, make the span invalid and throw.
+ * @param {unknown} raw
+ * @returns {any}
+ * @throws {Error|SyntaxError} no `{...}` span, or one that is not valid JSON.
+ */
 export function parseJsonObject(raw) {
   const text = String(raw ?? '');
   const start = text.indexOf('{');

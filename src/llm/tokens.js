@@ -23,11 +23,16 @@ export function estimateTokens(text) {
 
 /**
  * Raw estimate for a chat-completions `messages` array. Image parts are
- * charged a flat `tokensPerImage` each. A `video_url` part is charged 0: its
- * cost depends on the clip's length, which the caller passes to the client as
- * `videoSeconds` (see src/llm/openrouter.js).
+ * charged a flat `tokensPerImage` each (400 when null or unset, config.json's
+ * `context.vision.tokensPerImage`, as src/behavior/prompt.js reserves it). A
+ * `video_url` part is charged 0: its cost depends on the clip's length, which
+ * the caller passes to the client as `videoSeconds` (see src/llm/openrouter.js).
+ * @param {{ content: string|object[] }[]} messages
+ * @param {number|null} [tokensPerImage]
+ * @returns {number}
  */
-export function estimateMessages(messages, tokensPerImage = 1600) {
+export function estimateMessages(messages, tokensPerImage) {
+  const perImage = tokensPerImage ?? 400;
   let total = 0;
   for (const message of messages) {
     total += MESSAGE_OVERHEAD;
@@ -37,7 +42,7 @@ export function estimateMessages(messages, tokensPerImage = 1600) {
     }
     for (const part of message.content ?? []) {
       if (part.type === 'text') total += estimateTokens(part.text);
-      else if (part.type !== 'video_url') total += tokensPerImage;
+      else if (part.type !== 'video_url') total += perImage;
     }
   }
   return total;

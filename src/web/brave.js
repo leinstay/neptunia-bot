@@ -16,7 +16,6 @@ const ENDPOINT = 'https://api.search.brave.com/res/v1/web/search';
 const DEFAULT_COUNT = 5;
 const MAX_COUNT = 10;
 const DEFAULT_TIMEOUT_MS = 10_000;
-const LANG_CODE = /^[a-z]{2,3}(-[a-z]{2,4})?$/i;
 
 /** HTML fragment -> one line of plain text. */
 function inlineText(value) {
@@ -69,23 +68,22 @@ export function createBraveSearch({ fetchImpl = fetch } = {}) {
   }
 
   /**
-   * One Brave web search. `count` is capped at 10; `lang`, when it looks like
-   * a language code (`en`, `el`, `pt-br`), is sent as `search_lang`. An empty
-   * key fails with `no-key` and a blank query with `empty`, both without a
-   * request. Never rejects.
+   * One Brave web search. `count` is capped at 10. An empty key fails with
+   * `no-key` and a blank query with `empty`, both without a request and
+   * warned. A search that finds nothing usable is `{ ok: false, reason:
+   * 'empty' }` too, but a normal outcome: no warn line. Never rejects.
    * @param {string} query
-   * @param {{ apiKey?: string, count?: number, timeoutMs?: number, lang?: string }} [options]
+   * @param {{ apiKey?: string, count?: number, timeoutMs?: number }} [options]
    * @returns {Promise<{ ok: true, results: Array<{ title: string, url: string, snippet: string, age?: string }> }
    *   | { ok: false, reason: 'no-key'|'http'|'timeout'|'network'|'empty', status?: number }>}
    */
-  async function search(query, { apiKey, count = DEFAULT_COUNT, timeoutMs, lang } = {}) {
+  async function search(query, { apiKey, count = DEFAULT_COUNT, timeoutMs } = {}) {
     if (typeof apiKey !== 'string' || !apiKey.trim()) return fail('no-key');
     const q = typeof query === 'string' ? query.trim() : '';
     if (!q) return fail('empty');
 
     const n = clampCount(count);
-    let url = `${ENDPOINT}?q=${encodeURIComponent(q)}&count=${n}`;
-    if (typeof lang === 'string' && LANG_CODE.test(lang)) url += `&search_lang=${lang.toLowerCase()}`;
+    const url = `${ENDPOINT}?q=${encodeURIComponent(q)}&count=${n}`;
 
     const waitMs = Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : DEFAULT_TIMEOUT_MS;
     const controller = new AbortController();
@@ -114,7 +112,8 @@ export function createBraveSearch({ fetchImpl = fetch } = {}) {
         return fail('http', response.status);
       }
       const results = parseResults(payload, n);
-      if (!results.length) return fail('empty');
+      // Nothing found is an answer, not a failure: the caller renders it (src/web/lookup.js).
+      if (!results.length) return { ok: false, reason: 'empty' };
       return { ok: true, results };
     } catch {
       return fail(timedOut ? 'timeout' : 'network');

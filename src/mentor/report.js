@@ -19,10 +19,34 @@ const DIAGNOSIS_PREFIX = 'diagnosis: ';
 const BY_SITUATION_MIN = 40;
 const RULE = '='.repeat(60);
 
-/** `text` cut to `max` characters with an ellipsis when it was longer. */
-function clip(text, max) {
+/**
+ * `text` cut to `max` characters with an ellipsis when it was longer
+ * (src/mentor/mentor.js clips a run's error with it too).
+ * @param {unknown} text
+ * @param {number} max
+ * @returns {string}
+ */
+export function clip(text, max) {
   const value = String(text ?? '');
   return value.length > max ? `${value.slice(0, Math.max(0, max - 3))}...` : value;
+}
+
+/** How a run stopped early, by its stop code (`run.stopped`). */
+const STOP_PHRASES = {
+  budget: 'stopped: the mentor daily token budget ran out',
+  owner: 'stopped by the owner',
+  disabled: 'stopped: the mentor was disabled during the run',
+};
+
+/**
+ * The one operator phrase of a stop code ('budget' | 'owner' | 'disabled'):
+ * the card's outcome, a diagnosis that could not be asked and a case a check
+ * skipped all say it the same way. Another code reads `stopped: <code>`.
+ * @param {unknown} code
+ * @returns {string}
+ */
+export function stopPhrase(code) {
+  return Object.hasOwn(STOP_PHRASES, String(code)) ? STOP_PHRASES[code] : `stopped: ${clip(code, ERROR_MAX)}`;
 }
 
 /** A median or a point as text; '-' when there is none. */
@@ -43,8 +67,12 @@ function situationMedian(run, n) {
   return run.situationMedians.find((m) => m?.n === n) ?? null;
 }
 
-/** Whether a stored situation is a real moment of the chat (it carries its anchor id). */
-function isAnchor(situation) {
+/**
+ * Whether a stored situation is a real moment of the chat (it carries its anchor id).
+ * @param {unknown} situation
+ * @returns {boolean}
+ */
+export function isAnchor(situation) {
   return situation?.anchor !== undefined && situation?.anchor !== null;
 }
 
@@ -74,10 +102,7 @@ function answersOf(run) {
 /** How the run ended, in a few words. */
 function outcome(run) {
   if (run?.error) return `error: ${clip(run.error, ERROR_MAX)}`;
-  if (run?.stopped === 'budget') return 'stopped: the mentor daily token budget ran out';
-  if (run?.stopped === 'owner') return 'stopped by the owner';
-  if (run?.stopped === 'disabled') return 'stopped: the mentor was disabled during the run';
-  if (run?.stopped) return `stopped: ${clip(run.stopped, ERROR_MAX)}`;
+  if (run?.stopped) return stopPhrase(run.stopped);
   return run?.passed ? 'passed' : 'failed';
 }
 
@@ -147,6 +172,8 @@ function answerLines(answer, target) {
   if (target === 'memory') {
     if (answer.parseOk === false) {
       lines.push('stored: nothing (the answer was not parsed as JSON)');
+    } else if (answer.applyOk === false) {
+      lines.push('stored: nothing (the answer was parsed but could not be applied)');
     } else if (!answer.texts?.length) {
       lines.push('stored: nothing');
     } else {

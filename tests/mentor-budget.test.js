@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 
-import { weightedTokens, createMentorBudget, MentorBudgetError } from '../src/mentor/budget.js';
+import { weightedTokens, createMentorBudget, MentorBudgetError, outputTokenWeight, cachedTokenWeight } from '../src/mentor/budget.js';
 
 const WEIGHTS = { outputTokenWeight: 5, cachedTokenWeight: 0.1 };
 
@@ -33,6 +33,24 @@ test('weightedTokens: missing fields count as zero', () => {
 test('weightedTokens: a fractional total is rounded up', () => {
   const usage = { prompt_tokens: 3, completion_tokens: 0, prompt_tokens_details: { cached_tokens: 3 } };
   assert.equal(weightedTokens(usage, WEIGHTS), 1);
+});
+
+test('weightedTokens: a missing or invalid weight falls back to the config.json value (5 for output, 0.1 for cached)', () => {
+  const usage = { prompt_tokens: 1000, completion_tokens: 100, prompt_tokens_details: { cached_tokens: 400 } };
+  for (const cfg of [undefined, null, {}, { outputTokenWeight: -1, cachedTokenWeight: Number.NaN }, { outputTokenWeight: '5', cachedTokenWeight: null }]) {
+    assert.equal(weightedTokens(usage, cfg), 600 + 40 + 500, JSON.stringify(cfg));
+  }
+  assert.equal(weightedTokens(usage, { outputTokenWeight: 0, cachedTokenWeight: 0 }), 600, 'zero is a valid weight');
+});
+
+test('outputTokenWeight / cachedTokenWeight: the one reader of each key, the config.json value when unusable', () => {
+  assert.equal(outputTokenWeight({ outputTokenWeight: 2 }), 2);
+  assert.equal(outputTokenWeight({ outputTokenWeight: 0 }), 0);
+  assert.equal(cachedTokenWeight({ cachedTokenWeight: 0.5 }), 0.5);
+  for (const cfg of [undefined, null, {}, { outputTokenWeight: -1, cachedTokenWeight: -1 }, { outputTokenWeight: Infinity, cachedTokenWeight: '1' }]) {
+    assert.equal(outputTokenWeight(cfg), 5);
+    assert.equal(cachedTokenWeight(cfg), 0.1);
+  }
 });
 
 test('createMentorBudget: a new UTC day starts from zero', () => {

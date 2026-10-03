@@ -191,6 +191,33 @@ test('images: daily cap refuses before the request and persists imageDay/imageCo
   assert.equal(state.data.imageCount, 2);
 });
 
+test('images: a cap that is not a finite number counts as 0 -- refused before any request, quota spent', async () => {
+  for (const cap of [undefined, null, Number.NaN, '5']) {
+    const daily = makeGen({ config: baseConfig({ maxPerDay: cap }) });
+    await assert.rejects(daily.gen.generate({ prompt: 'one' }), (err) => {
+      assert.ok(err instanceof ImageCapError, String(cap));
+      assert.equal(err.reason, 'daily');
+      assert.equal(err.cap, 0);
+      return true;
+    });
+    assert.equal(daily.fetchImpl.calls.length, 0, String(cap));
+    assert.equal(daily.state.data.imageCount ?? 0, 0);
+    assert.equal(daily.gen.quota().spent, true);
+    assert.equal(daily.gen.quota().cap, 0);
+
+    const member = makeGen({ config: baseConfig({ maxPerUserPerDay: cap }) });
+    await assert.rejects(member.gen.generate({ prompt: 'one', userId: 'u1' }), (err) => {
+      assert.ok(err instanceof ImageCapError, String(cap));
+      assert.equal(err.reason, 'userDaily');
+      assert.equal(err.cap, 0);
+      return true;
+    });
+    assert.equal(member.fetchImpl.calls.length, 0, String(cap));
+    assert.equal(member.gen.quota({ userId: 'u1' }).userSpent, true);
+    assert.equal(member.gen.quota({ userId: 'u1' }).userCap, 0);
+  }
+});
+
 test('images: a failed request still counts', async () => {
   const state = fakeState();
   const { gen } = makeGen({ config: baseConfig({ retries: 0 }), state, fetchImpl: fakeFetch(errorResponse(400)) });

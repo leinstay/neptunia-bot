@@ -16,7 +16,10 @@ import {
   openRouterHeaders,
   apiUrl,
   backoffMs,
+  dailyCapOf,
+  VIDEO_TOKENS_PER_SECOND_FALLBACK,
 } from '../src/llm/openrouter.js';
+import { withCapturedLogs } from './fixtures/capture-logs.js';
 
 function baseConfig(overrides = {}) {
   return {
@@ -184,6 +187,71 @@ test('complete: a day rollover resets the counter and lets a new request through
   assert.equal(result.text, 'hi there');
   assert.equal(state.data.llmCount, 1); // reset to 0, then incremented once
   assert.equal(state.data.llmDay, new Date().toISOString().slice(0, 10));
+});
+
+test('complete: a cap that is not a finite number counts as 0 -- every request refused, logged once per process', async () => {
+  const { logs } = await withCapturedLogs(async () => {
+    for (const cap of [undefined, null, Number.NaN, '300', Infinity]) {
+      let calls = 0;
+      const state = fakeState();
+      const llm = createLlm({
+        apiKey: 'k',
+        getConfig: () => baseConfig({ maxRequestsPerDay: cap }),
+        calibrator: fakeCalibrator(),
+        state,
+        fetchImpl: async () => { calls += 1; return okResponse('x'); },
+      });
+      await assert.rejects(llm.complete([{ role: 'user', content: 'hi' }]), (err) => {
+        assert.ok(err instanceof DailyCapError, String(cap));
+        assert.equal(err.cap, 0);
+        assert.equal(err.key, 'llm.maxRequestsPerDay');
+        return true;
+      });
+      assert.equal(calls, 0, String(cap));
+      assert.equal(state.data.llmCount ?? 0, 0, String(cap));
+    }
+  });
+  const lines = logs.filter((l) => l.msg === 'llm: daily cap is not a number, refusing');
+  assert.equal(lines.length, 1);
+  assert.equal(lines[0].key, 'llm.maxRequestsPerDay');
+});
+
+test('dailyCapOf: a finite number is the cap as given; anything else is 0', () => {
+  assert.equal(dailyCapOf(5, 'test.finite'), 5);
+  assert.equal(dailyCapOf(0, 'test.finite'), 0);
+  for (const value of [undefined, null, Number.NaN, '5', Infinity, {}]) assert.equal(dailyCapOf(value, 'test.other'), 0);
+});
+
+test('complete: a json.error body after a 200 is thrown and never retried', async () => {
+  let calls = 0;
+  const llm = createLlm({
+    apiKey: 'k',
+    getConfig: () => baseConfig({ retries: 2 }),
+    calibrator: fakeCalibrator(),
+    state: fakeState(),
+    fetchImpl: async () => {
+      calls += 1;
+      return { ok: true, status: 200, json: async () => ({ error: { message: 'upstream refused' } }) };
+    },
+  });
+  await assert.rejects(llm.complete([{ role: 'user', content: 'hi' }]), /OpenRouter error/);
+  assert.equal(calls, 1);
+});
+
+test('complete: an unparsable 200 body is thrown and never retried', async () => {
+  let calls = 0;
+  const llm = createLlm({
+    apiKey: 'k',
+    getConfig: () => baseConfig({ retries: 2 }),
+    calibrator: fakeCalibrator(),
+    state: fakeState(),
+    fetchImpl: async () => {
+      calls += 1;
+      return { ok: true, status: 200, json: async () => { throw new SyntaxError('Unexpected token'); } };
+    },
+  });
+  await assert.rejects(llm.complete([{ role: 'user', content: 'hi' }]), (err) => err instanceof SyntaxError);
+  assert.equal(calls, 1);
 });
 
 test('complete: a non-retryable 4xx throws immediately with statusCode, fetch called once', async () => {
@@ -610,7 +678,8 @@ test('complete: options.videoSeconds raises the estimate by videoSeconds * media
   assert.equal(withVideo.estimated - plain.estimated, 18000);
 });
 
-test('complete: options.videoSeconds defaults to 300 tokens per second when media.video is absent', async () => {
+test('complete: options.videoSeconds defaults to 120 tokens per second (config.json) when media.video is absent', async () => {
+  assert.equal(VIDEO_TOKENS_PER_SECOND_FALLBACK, 120);
   const llm = createLlm({
     apiKey: 'k',
     getConfig: () => baseConfig({ maxRequestTokens: 50000 }),
@@ -621,7 +690,7 @@ test('complete: options.videoSeconds defaults to 300 tokens per second when medi
   const messages = [{ role: 'user', content: 'hi' }];
   const plain = await llm.complete(messages);
   const withVideo = await llm.complete(messages, { videoSeconds: 10 });
-  assert.equal(withVideo.estimated - plain.estimated, 3000);
+  assert.equal(withVideo.estimated - plain.estimated, 1200);
 });
 
 test('complete: options.videoSeconds counts against the token cap (just below passes, just above refuses)', async () => {
@@ -784,8 +853,8 @@ test('complete: without options.signal, behaviour is unchanged (only the per-req
   assert.equal(seenSignal.aborted, false);
 });
 
-// Only ONE test exercises the real retry backoff sleep (~1.5s at attempt 1).
-test('complete: retries once on a 503 then succeeds', async () => {
+// Only TWO tests exercise the real retry backoff sleep (~1.5s at attempt 1): a gateway error and a timeout.
+test('complete: retries once on a 503 then succeeds, logging the retried attempt', async () => {
   let calls = 0;
   const llm = createLlm({
     apiKey: 'k',
@@ -798,9 +867,49 @@ test('complete: retries once on a 503 then succeeds', async () => {
       return okResponse('recovered');
     },
   });
-  const result = await llm.complete([{ role: 'user', content: 'hi' }]);
+  const { result, logs } = await withCapturedLogs(() => llm.complete([{ role: 'user', content: 'hi' }]));
   assert.equal(result.text, 'recovered');
   assert.equal(calls, 2);
+  const retries = logs.filter((l) => l.msg === 'llm: retry');
+  assert.equal(retries.length, 1);
+  assert.equal(retries[0].attempt, 1);
+  assert.equal(retries[0].status, 503);
+  assert.equal(retries[0].name, 'Error');
+  assert.ok(!JSON.stringify(logs).includes('temporarily unavailable'), 'the provider body is never logged');
+});
+
+test('complete: a timed-out attempt is retried and logged with its error name', async () => {
+  let calls = 0;
+  const llm = createLlm({
+    apiKey: 'k',
+    getConfig: () => baseConfig({ retries: 1 }),
+    calibrator: fakeCalibrator(),
+    state: fakeState(),
+    fetchImpl: async () => {
+      calls += 1;
+      if (calls === 1) throw Object.assign(new Error('The operation was aborted due to timeout'), { name: 'TimeoutError' });
+      return okResponse('recovered');
+    },
+  });
+  const { result, logs } = await withCapturedLogs(() => llm.complete([{ role: 'user', content: 'hi' }]));
+  assert.equal(result.text, 'recovered');
+  assert.equal(calls, 2);
+  const retries = logs.filter((l) => l.msg === 'llm: retry');
+  assert.deepEqual(retries.map((l) => [l.attempt, l.status, l.name]), [[1, null, 'TimeoutError']]);
+});
+
+test('complete: the last failed attempt is thrown, not logged as a retry', async () => {
+  let calls = 0;
+  const llm = createLlm({
+    apiKey: 'k',
+    getConfig: () => baseConfig({ retries: 0 }),
+    calibrator: fakeCalibrator(),
+    state: fakeState(),
+    fetchImpl: async () => { calls += 1; return errorResponse(503, 'temporarily unavailable'); },
+  });
+  const { logs } = await withCapturedLogs(() => assert.rejects(llm.complete([{ role: 'user', content: 'hi' }]), (err) => err.statusCode === 503));
+  assert.equal(calls, 1);
+  assert.equal(logs.filter((l) => l.msg === 'llm: retry').length, 0);
 });
 
 test('complete: options.reasoning (a plain object) is sent verbatim as body.reasoning; anything else omits it', async () => {

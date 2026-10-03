@@ -27,8 +27,11 @@ import { htmlToText, pageTitle, truncateText } from './readable.js';
 const REQUEST_HEADERS = Object.freeze({
   'User-Agent': 'Mozilla/5.0 (compatible; neptunia-bot/1.0)',
   Accept: 'text/html,text/plain;q=0.9,*/*;q=0.1',
-  'Accept-Language': 'en,ru;q=0.8',
 });
+// A header value as sent: printable ASCII only, so a configured value can never split the header block.
+const HEADER_VALUE = /^[\x20-\x7e]+$/;
+/** Redirects followed by hand (each one checked by the guard) before a fetch fails with `redirects`. */
+const MAX_REDIRECTS = 3;
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 const HTML_TYPES = new Set(['text/html', 'application/xhtml+xml']);
 const PLAIN_TYPE = 'text/plain';
@@ -258,16 +261,20 @@ export function createPageFetcher({ requestImpl = nodeRequest, lookup = dns.prom
    * Fetch `url` as readable text behind the SSRF guard (see the header
    * comment). HTML goes through `htmlToText` (cut to `maxChars`) with its
    * title; text/plain comes back as written (cut to `maxChars` when given).
-   * Never rejects.
+   * At most 3 redirects are followed. `acceptLanguage` (the caller reads
+   * `web.acceptLanguage` at the moment of use) is sent as the Accept-Language
+   * header when it is a non-empty printable ASCII string; otherwise the header
+   * is left out. Never rejects.
    * @param {string} url
-   * @param {{ maxBytes?: number, timeoutMs?: number, maxRedirects?: number, maxChars?: number }} [options]
+   * @param {{ maxBytes?: number, timeoutMs?: number, maxChars?: number, acceptLanguage?: string }} [options]
    * @returns {Promise<{ ok: true, text: string, title: string|null, contentType: string, bytes: number, finalUrl: string }
    *   | { ok: false, reason: 'scheme'|'private'|'redirects'|'type'|'size'|'timeout'|'http'|'network', status?: number }>}
    */
-  async function fetchText(url, { maxBytes, timeoutMs, maxRedirects = 3, maxChars } = {}) {
+  async function fetchText(url, { maxBytes, timeoutMs, maxChars, acceptLanguage } = {}) {
     const byteCap = Number.isFinite(maxBytes) && maxBytes > 0 ? maxBytes : DEFAULT_MAX_BYTES;
     const waitMs = Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : DEFAULT_TIMEOUT_MS;
-    const hops = Number.isInteger(maxRedirects) && maxRedirects >= 0 ? maxRedirects : 3;
+    const language = typeof acceptLanguage === 'string' ? acceptLanguage.trim() : '';
+    const headers = HEADER_VALUE.test(language) ? { ...REQUEST_HEADERS, 'Accept-Language': language } : { ...REQUEST_HEADERS };
     const controller = new AbortController();
     let timedOut = false;
     const timer = setTimeout(() => {
@@ -292,7 +299,7 @@ export function createPageFetcher({ requestImpl = nodeRequest, lookup = dns.prom
         const response = await raceAbort(requestImpl(parsed.href, {
           lookupAddress: checked.address,
           family: checked.family,
-          headers: { ...REQUEST_HEADERS },
+          headers: { ...headers },
           signal: controller.signal,
         }), controller.signal);
         if (!response || typeof response !== 'object') return fail(current, 'network');
@@ -302,7 +309,7 @@ export function createPageFetcher({ requestImpl = nodeRequest, lookup = dns.prom
           discardBody(response);
           const location = headerOf(response, 'location');
           if (!location) return fail(current, 'http', status);
-          if (hop >= hops) return fail(current, 'redirects');
+          if (hop >= MAX_REDIRECTS) return fail(current, 'redirects');
           try {
             current = new URL(location, parsed).href;
           } catch {

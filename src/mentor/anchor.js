@@ -67,7 +67,7 @@ export function parseMessageRef(value, { channelId } = {}) {
  * @param {number} [input.embedTextChars]
  * @param {string[]} [input.videoSites]
  * @param {object|null} [input.mediaCache]  The describer's cache of the guild, read only (see
- *   `withSeenMedia`); without it the history carries no `mediaSeen`.
+ *   `withSeenMedia`'s `cache`); without it the history carries no `mediaSeen`.
  * @returns {Promise<{ channelId: string, messageId: string, triggerId: string, history: object[], original: string[],
  *   media: { described: number, none: number } }>}  `media` counts the media items of the history
  *   with and without a stored description, for the log.
@@ -86,7 +86,7 @@ export async function resolveAnchor({ ref, guildId, contextChannelId, selfId, cl
   if (!channel.guild) throw new Error('a direct message cannot be used');
   if (String(channel.guild.id) !== String(guildId)) throw new Error('that message is in another server');
   const moment = await fetchMoment(channel, parsed.messageId, { selfId, limit, embedTextChars, videoSites });
-  const seen = withSeenMedia(moment.history, mediaCache ?? null, { sites: videoSites, before: snowflakeTime(moment.messageId) });
+  const seen = withSeenMedia(moment.history, { cache: mediaCache ?? null, sites: videoSites, before: snowflakeTime(moment.messageId) });
   return {
     channelId: String(channel.id),
     messageId: moment.messageId,
@@ -125,7 +125,7 @@ function seenText(entry, { watched, before }) {
  */
 function mediaItemsOf(message, sites) {
   const pictures = [...collectPictures(message), ...collectEmojiItems(message)].filter(isDescribable).map((item) => item.itemId);
-  const videos = collectVideos(message, { sites: Array.isArray(sites) ? sites : [] }).map((item) => item.itemId);
+  const videos = collectVideos(message, { videoSites: Array.isArray(sites) ? sites : [] }).map((item) => item.itemId);
   return { pictures: [...new Set(pictures)], videos: [...new Set(videos)] };
 }
 
@@ -166,11 +166,11 @@ function lookupSeen(message, cache, { sites, before }) {
  * are never changed. `described` / `none` count the media items (per
  * message) with and without one. Pure.
  * @param {object[]} history  Normalized messages (src/discord/collect.js#normalizeMessage).
- * @param {object|null} cache  The describer's cache (`store.getMediaCache(guildId)`), or null.
- * @param {{ sites?: string[], before?: number|null }} [options]
+ * @param {{ cache?: object|null, sites?: string[], before?: number|null }} [options]  `cache`: the
+ *   describer's cache (`store.getMediaCache(guildId)`), or null -- the same options `replayMedia` takes.
  * @returns {{ history: object[], described: number, none: number }}
  */
-export function withSeenMedia(history, cache, { sites = [], before = null } = {}) {
+export function withSeenMedia(history, { cache = null, sites = [], before = null } = {}) {
   let described = 0;
   let none = 0;
   const out = (Array.isArray(history) ? history : []).map((message) => {
@@ -216,7 +216,13 @@ export function replayMedia(history, { cache = null, sites = [], before = null }
   return { descriptions, videos };
 }
 
-/** Whether a stored anchor can be replayed: a history that ends with a message not by the persona. */
+/**
+ * Whether a stored anchor can be replayed: a history that ends with a message
+ * not by the persona. The one copy of the rule: src/mentor/cases.js checks a
+ * moment with it before storing it.
+ * @param {unknown} anchor
+ * @returns {boolean}
+ */
 export function isUsableAnchor(anchor) {
   const history = anchor?.history;
   return Array.isArray(history) && history.length > 0 && Boolean(history[history.length - 1]) && history[history.length - 1].self !== true;
@@ -236,7 +242,7 @@ export function anchorSituations(item) {
 }
 
 /** One stored anchor as a situation (see `anchorSituations`). */
-export function anchorSituation(anchor) {
+function anchorSituation(anchor) {
   const trigger = anchor.history[anchor.history.length - 1];
   const triggerTs = Number.isFinite(trigger?.ts) ? trigger.ts : 0;
   const answered = snowflakeTime(anchor.messageId);

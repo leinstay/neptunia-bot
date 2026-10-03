@@ -548,7 +548,7 @@ function imageFileName(mediaType) {
  *   `waitIdle` (`/nep pause` waits for a run in flight). Absent -> `/nep gifs recache` reports it is
  *   not available.
  * `mentor` — from createMentor() (src/mentor/mentor.js), optional: `run`/`check` (started by
- *   `/nep mentor run|check`, never awaited to the end), `resolveAnchor` (reads the moment of a
+ *   `/nep mentor run|check`, never awaited to the end), `readAnchor` (reads the moment of a
  *   message for `/nep mentor add|anchor`), `stop`, `status`; `isRunning` and
  *   `waitIdle` let `/nep pause` stop a run in flight and wait for it. Absent -> every `mentor.*`
  *   command reports it is not available.
@@ -2527,7 +2527,7 @@ async function cmdPing(args) {
     const guildId = mentorGuildId(context);
     const ref = mentorMessageRef(args);
     const text = checkCaseText(args?.text);
-    const anchor = await mentor.resolveAnchor(ref, { channelId: context?.channelId ?? null });
+    const anchor = await mentor.readAnchor(ref, { channelId: context?.channelId ?? null });
     const item = mentorCases.add(guildId, { text, target: 'reply', anchor });
     return `case ${item.id} added (${item.target}), ${momentLine(item.anchors[0])}`;
   }
@@ -2544,7 +2544,7 @@ async function cmdPing(args) {
     const max = anchorMax(hot.config.mentor?.anchor?.max);
     const held = Array.isArray(item.anchors) ? item.anchors.length : 0;
     if (held >= max) throw new Error(`case ${id} has ${held} moments; at most ${max} (mentor.anchor.max)`);
-    const anchor = await mentor.resolveAnchor(ref, { channelId: context?.channelId ?? null });
+    const anchor = await mentor.readAnchor(ref, { channelId: context?.channelId ?? null });
     const { item: updated, anchor: added } = mentorCases.addAnchor(guildId, id, anchor, { max });
     return `case ${id}: ${momentLine(added)} (${updated.anchors.length} of ${max})`;
   }
@@ -2874,7 +2874,7 @@ async function cmdPing(args) {
       `watched today: ${watches.used}/${watches.cap}`,
       // Nothing to count in an empty library, unless a recache is running.
       ...(ranked.length > 0 || recaching
-        ? [`captions: ${captions.watched} watched, ${captions.oneFrame} one-frame, ${captions.failed} failed, ${captions.none} none${recaching}`]
+        ? [`captions: ${captions.watched} watched, ${captions['one-frame']} one-frame, ${captions.failed} failed, ${captions.none} none${recaching}`]
         : []),
     ].join('\n');
   }
@@ -2909,7 +2909,7 @@ async function cmdPing(args) {
     unavailable: 'the GIF recache is not available',
     off: 'GIFs are not watched (features.mediaDescriptions or media.gif.watch is off).',
     'video-off': 'GIFs are not watched while video vision is off (features.videoDescriptions).',
-    prompt: 'GIFs are not watched: the describe-video prompt is missing.',
+    'no-prompt': 'GIFs are not watched: the describe-video prompt is missing.',
   };
 
   /** `/nep gifs recache`: drops the one-frame GIF captions outside the library at once, then

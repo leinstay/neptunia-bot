@@ -66,8 +66,38 @@ export function apiUrl(baseUrl, path) {
 /** The state.json fields of the daily request counter. */
 const LLM_DAILY = { dayKey: 'llmDay', countKey: 'llmCount' };
 
+/**
+ * Video tokens per second when `media.video.tokensPerSecond` is unset or
+ * invalid: config.json's value (the rate of a statically sampled clip). The
+ * media describer (src/memory/describe.js) sizes its clips with the same one.
+ */
+export const VIDEO_TOKENS_PER_SECOND_FALLBACK = 120;
+
 export class TokenLimitError extends Error {}
 export class DailyCapError extends Error {}
+
+/** The cap keys already reported as not a number (one warn line per key and process). */
+const reportedCaps = new Set();
+
+/**
+ * One rule for every daily rail (this client's requests, src/llm/images.js's
+ * pictures, src/web/lookup.js's reads and searches): a cap that is not a
+ * finite number -- missing, null, a string, Infinity -- counts as 0, so the
+ * rail refuses everything (fail closed) instead of spending without a limit.
+ * The first such cap of each `key` in a process logs
+ * `llm: daily cap is not a number, refusing` with the key; later calls stay quiet.
+ * @param {unknown} value  The configured cap, read by the caller at the moment of use.
+ * @param {string} key     Its config path, e.g. `llm.maxRequestsPerDay`.
+ * @returns {number}
+ */
+export function dailyCapOf(value, key) {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (!reportedCaps.has(key)) {
+    reportedCaps.add(key);
+    log.warn('llm: daily cap is not a number, refusing', { key });
+  }
+  return 0;
+}
 
 /**
  * One `llm.providerByModel` key split into its model prefix and its role:
@@ -144,7 +174,8 @@ export function resolveProvider(model, { override, byModel, fallback, role } = {
  * @param {() => number} [deps.now]       Clock in ms, for the day rollover.
  */
 export function createLlm({ apiKey, getConfig, calibrator, state, fetchImpl = fetch, now = Date.now }) {
-  function countRequest(cap) {
+  function countRequest(configured) {
+    const cap = dailyCapOf(configured, 'llm.maxRequestsPerDay');
     const nowMs = now();
     const { count } = dailyCounter(state.data, LLM_DAILY, nowMs);
     if (count >= cap) {
@@ -156,12 +187,21 @@ export function createLlm({ apiKey, getConfig, calibrator, state, fetchImpl = fe
   }
 
   /**
-   * Send one chat completion. Returns `{ text, usage, estimated, finishReason }`.
+   * Send one chat completion. Returns `{ text, usage, estimated, finishReason, provider }`.
    * `finishReason` is the provider's `choices[0].finish_reason` verbatim
    * (e.g. `'stop'`, `'length'`), or `undefined` when the provider omitted it —
    * callers use it to tell a cut-off completion (`'length'`) from a genuinely
-   * bad answer.
-   * `options.model` / `options.maxOutputTokens` override the config defaults.
+   * bad answer. `provider` is OpenRouter's name for the upstream provider that
+   * served the request (`json.provider`), or `undefined` when the response omits it.
+   * `options.model` / `options.maxOutputTokens` / `options.temperature`
+   * override the config defaults (`llm.model`, `llm.maxOutputTokens`, `llm.temperature`).
+   *
+   * Retries (`llm.retries`): a network failure, a timed-out attempt and an
+   * HTTP status in `RETRY_STATUS` are retried after `backoffMs`, each retried
+   * attempt logged as `llm: retry` (`attempt` 1-based, `status` or null,
+   * `name`); the last one is thrown. Once a 200 was received (the request may
+   * be billed) nothing is retried: a `json.error` body or an unparsable body is
+   * thrown as it is.
    * `options.timeoutMs` overrides `llm.timeoutMs` for the request's abort
    * signal — the analyzer (a large batch, a long JSON answer) and the media
    * describer need more room than a chat reply's default.
@@ -203,8 +243,8 @@ export function createLlm({ apiKey, getConfig, calibrator, state, fetchImpl = fe
    * estimate before calibration, because `estimateMessages` cannot size a
    * `video_url` part on its own; the token cap then applies to the sum.
    * `tokensPerSecond` is `options.videoTokensPerSecond` when that is a finite
-   * positive number, else `media.video.tokensPerSecond` (300 per second when
-   * unset; the rate of a statically sampled clip). The override exists for
+   * positive number, else `media.video.tokensPerSecond` (`VIDEO_TOKENS_PER_SECOND_FALLBACK`,
+   * 120 per second, when unset; the rate of a statically sampled clip). The override exists for
    * the video describer's public-URL requests in agentic processing, where the
    * provider does not count the video as prompt tokens and the per-second cost
    * is far lower (`media.video.directUrlTokensPerSecond`).
@@ -218,7 +258,7 @@ export function createLlm({ apiKey, getConfig, calibrator, state, fetchImpl = fe
       const tokensPerSecond =
         typeof override === 'number' && Number.isFinite(override) && override > 0
           ? override
-          : (getConfig().media?.video?.tokensPerSecond ?? 300);
+          : (getConfig().media?.video?.tokensPerSecond ?? VIDEO_TOKENS_PER_SECOND_FALLBACK);
       raw += Math.ceil(options.videoSeconds * tokensPerSecond);
     }
     const estimated = calibrator.apply(raw);
@@ -253,12 +293,17 @@ export function createLlm({ apiKey, getConfig, calibrator, state, fetchImpl = fe
 
     let lastError;
     for (let attempt = 0; attempt <= cfg.retries; attempt += 1) {
-      if (attempt > 0) await sleep(backoffMs(attempt));
+      if (attempt > 0) {
+        // `attempt` is also the 1-based number of the attempt that failed and is retried now.
+        log.warn('llm: retry', { attempt, status: lastError?.statusCode ?? null, name: lastError?.name ?? null });
+        await sleep(backoffMs(attempt));
+      }
       if (options.signal?.aborted) throw lastError ?? options.signal.reason ?? new Error('request aborted');
+      let response;
       try {
         const timeoutSignal = AbortSignal.timeout(options.timeoutMs ?? cfg.timeoutMs);
         const signal = options.signal ? AbortSignal.any([options.signal, timeoutSignal]) : timeoutSignal;
-        const response = await fetchImpl(apiUrl(cfg.baseUrl, 'chat/completions'), {
+        response = await fetchImpl(apiUrl(cfg.baseUrl, 'chat/completions'), {
           method: 'POST',
           headers: openRouterHeaders(apiKey),
           body: JSON.stringify(body),
@@ -274,31 +319,31 @@ export function createLlm({ apiKey, getConfig, calibrator, state, fetchImpl = fe
           const error = new Error(`OpenRouter HTTP ${response.status}: ${detail}`);
           error.statusCode = response.status;
           error.body = rawBody;
-          if (RETRY_STATUS.has(response.status)) {
-            lastError = error;
-            continue;
-          }
-          throw error;
+          if (!RETRY_STATUS.has(response.status)) throw error;
+          lastError = error;
+          continue;
         }
-
-        const json = await response.json();
-        if (json.error) throw new Error(`OpenRouter error: ${JSON.stringify(json.error).slice(0, 500)}`);
-        const text = json.choices?.[0]?.message?.content ?? '';
-        const usage = json.usage ?? {};
-        const finishReason = json.choices?.[0]?.finish_reason ?? undefined;
-        if (options.skipCalibration !== true && usage.prompt_tokens) calibrator.observe(raw, usage.prompt_tokens);
-        if (usage.prompt_tokens > requestTokenCap) {
-          log.warn('llm: provider counted more prompt tokens than the cap', { usage, estimated });
-        }
-        // `json.provider` is OpenRouter's own name for whichever upstream provider
-        // actually served the request (undefined when the response omits it) --
-        // surfaced so `/nep ping` can report it without a second request shape.
-        return { text: typeof text === 'string' ? text : '', usage, estimated, finishReason, provider: json.provider };
       } catch (err) {
         if (options.signal?.aborted) throw err; // a deliberate external abort is never retried
         if (err.statusCode && !RETRY_STATUS.has(err.statusCode)) throw err;
-        lastError = err;
+        lastError = err; // a network failure or a timed-out attempt: retried
+        continue;
       }
+
+      // A 200 was received (and may be billed): whatever goes wrong from here is thrown, never retried.
+      const json = await response.json();
+      if (json.error) throw new Error(`OpenRouter error: ${JSON.stringify(json.error).slice(0, 500)}`);
+      const text = json.choices?.[0]?.message?.content ?? '';
+      const usage = json.usage ?? {};
+      const finishReason = json.choices?.[0]?.finish_reason ?? undefined;
+      if (options.skipCalibration !== true && usage.prompt_tokens) calibrator.observe(raw, usage.prompt_tokens);
+      if (usage.prompt_tokens > requestTokenCap) {
+        log.warn('llm: provider counted more prompt tokens than the cap', { usage, estimated });
+      }
+      // `json.provider` is OpenRouter's own name for whichever upstream provider
+      // actually served the request (undefined when the response omits it) --
+      // surfaced so `/nep ping` can report it without a second request shape.
+      return { text: typeof text === 'string' ? text : '', usage, estimated, finishReason, provider: json.provider };
     }
     throw lastError;
   }

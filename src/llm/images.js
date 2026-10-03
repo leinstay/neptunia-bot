@@ -11,7 +11,7 @@
 import { log } from '../log.js';
 import { isPlainObject } from '../config.js';
 import { bumpDaily, dailyCounter, utcDay } from '../time.js';
-import { RETRY_STATUS, apiUrl, backoffMs, openRouterHeaders, resolveProvider, sleep } from './openrouter.js';
+import { RETRY_STATUS, apiUrl, backoffMs, dailyCapOf, openRouterHeaders, resolveProvider, sleep } from './openrouter.js';
 
 const MODERATION_STATUS = new Set([400, 403]);
 const MODERATION_MARKERS = /moderation|content_policy|safety/i;
@@ -135,21 +135,27 @@ export function createImageGen({ apiKey, getConfig, state, fetchImpl = fetch, no
     return { used, userUsed };
   }
 
+  /** Both caps, read now; one that is not a finite number counts as 0 (src/llm/openrouter.js#dailyCapOf). */
+  function caps(cfg) {
+    return { cap: dailyCapOf(cfg.maxPerDay, 'image.maxPerDay'), userCap: dailyCapOf(cfg.maxPerUserPerDay, 'image.maxPerUserPerDay') };
+  }
+
   /** Roll both counters over to today, refuse at a cap, then count this request. */
   function countRequest(cfg, userId) {
+    const { cap, userCap } = caps(cfg);
     const nowMs = now();
     const { day, count: used } = dailyCounter(state.data, IMAGE_DAILY, nowMs);
     if (!isPlainObject(state.data.imageUsers) || state.data.imageUsers.day !== day || !isPlainObject(state.data.imageUsers.counts)) {
       state.data.imageUsers = { day, counts: {} };
     }
     const counts = state.data.imageUsers.counts;
-    if (used >= cfg.maxPerDay) {
-      const err = new ImageCapError('daily', `daily image cap reached (${cfg.maxPerDay})`);
-      throw Object.assign(err, { key: 'image.maxPerDay', used, cap: cfg.maxPerDay });
+    if (used >= cap) {
+      const err = new ImageCapError('daily', `daily image cap reached (${cap})`);
+      throw Object.assign(err, { key: 'image.maxPerDay', used, cap });
     }
-    if (userId != null && (counts[userId] ?? 0) >= cfg.maxPerUserPerDay) {
-      const err = new ImageCapError('userDaily', `daily per-member image cap reached (${cfg.maxPerUserPerDay})`);
-      throw Object.assign(err, { key: 'image.maxPerUserPerDay', used: counts[userId] ?? 0, cap: cfg.maxPerUserPerDay });
+    if (userId != null && (counts[userId] ?? 0) >= userCap) {
+      const err = new ImageCapError('userDaily', `daily per-member image cap reached (${userCap})`);
+      throw Object.assign(err, { key: 'image.maxPerUserPerDay', used: counts[userId] ?? 0, cap: userCap });
     }
     bumpDaily(state.data, IMAGE_DAILY, nowMs);
     if (userId != null) counts[userId] = (counts[userId] ?? 0) + 1;
@@ -264,8 +270,7 @@ export function createImageGen({ apiKey, getConfig, state, fetchImpl = fetch, no
   function quota({ userId = null } = {}) {
     const cfg = getConfig().image ?? {};
     const { used, userUsed } = readCounts(userId, today());
-    const cap = cfg.maxPerDay;
-    const userCap = cfg.maxPerUserPerDay;
+    const { cap, userCap } = caps(cfg);
     return {
       used,
       cap,

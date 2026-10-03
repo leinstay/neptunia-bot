@@ -44,8 +44,8 @@ test('estimateMessages: array content charges text parts by length and image par
       ],
     },
   ]);
-  // overhead 6 + text 2 + default tokensPerImage 1600
-  assert.equal(total, 6 + 2 + 1600);
+  // overhead 6 + text 2 + default tokensPerImage 400 (config.json's context.vision.tokensPerImage)
+  assert.equal(total, 6 + 2 + 400);
 });
 
 test('estimateMessages: an image_url part is charged the flat tokensPerImage regardless of the URL length (a data: URL must not be counted as text)', () => {

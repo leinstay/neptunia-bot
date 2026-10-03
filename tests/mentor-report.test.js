@@ -2,7 +2,7 @@
 // and the full text file attached to it.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { renderCard, renderFile, renderCheckCard, renderCheckFile, renderLastRun } from '../src/mentor/report.js';
+import { renderCard, renderFile, renderCheckCard, renderCheckFile, renderLastRun, stopPhrase, clip, isAnchor } from '../src/mentor/report.js';
 
 const ALICE = '111111111111111111';
 
@@ -260,6 +260,36 @@ test('renderFile: a memory answer shows its stored texts', () => {
   assert.match(file.text, /users\.1\.character: likes chess, café au lait/);
   assert.match(file.text, /not scored/);
   assert.match(file.text, /not parsed/i);
+  assert.doesNotMatch(file.text, /not applied/i);
+});
+
+test('renderFile: a memory answer that parsed but could not be applied says so, not "not parsed"', () => {
+  const run = fakeRun({ target: 'memory', repeated: [] });
+  run.situations = [
+    { n: 1, title: 't', lines: [], transcript: 'tr', answers: [{ id: 's1a1', texts: [], parseOk: true, applyOk: false, facts: {}, score: null }] },
+  ];
+  const file = renderFile(run);
+  assert.match(file.text, /^stored: nothing \(the answer was parsed but could not be applied\)$/m);
+  assert.doesNotMatch(file.text, /not parsed/i);
+});
+
+test('stopPhrase: one phrase per stop code, the one the card, the diagnosis and the check use', () => {
+  assert.equal(stopPhrase('budget'), 'stopped: the mentor daily token budget ran out');
+  assert.equal(stopPhrase('owner'), 'stopped by the owner');
+  assert.equal(stopPhrase('disabled'), 'stopped: the mentor was disabled during the run');
+  assert.equal(stopPhrase('x'.repeat(300)), `stopped: ${'x'.repeat(197)}...`);
+  assert.match(renderCard(fakeRun({ passed: false, stopped: 'budget' })), /-- stopped: the mentor daily token budget ran out$/m);
+});
+
+test('clip / isAnchor: the shared helpers', () => {
+  assert.equal(clip('abcdef', 5), 'ab...');
+  assert.equal(clip('abc', 5), 'abc');
+  assert.equal(clip(null, 5), '');
+  assert.equal(isAnchor({ anchor: 2 }), true);
+  assert.equal(isAnchor({ anchor: 0 }), true);
+  assert.equal(isAnchor({ anchor: null }), false);
+  assert.equal(isAnchor({}), false);
+  assert.equal(isAnchor(null), false);
 });
 
 test('renderCheckCard: lists checked and skipped cases under 1800 characters', () => {

@@ -1,5 +1,5 @@
 // Tests for src/web/brave.js: the Brave Search request (URL, query encoding,
-// count cap, language, headers), result parsing with snippet cleaning, every
+// count cap, headers), result parsing with snippet cleaning, every
 // failure reason, and logs that carry a reason and a status only -- never the
 // query, never the key. fetch is a fake; nothing touches the network.
 import { test } from 'node:test';
@@ -78,15 +78,12 @@ test('search: count is capped at 10, floored at 1, and defaults to 5', async () 
   assert.deepEqual(counts, ['10', '1', '3', '5', '5']);
 });
 
-test('search: lang becomes search_lang when it looks like a language code, else it is left out', async () => {
+test('search: the request carries only the query and the count -- no search_lang, whatever the options', async () => {
   const { calls, fetchImpl } = fakeFetch(jsonResponse(RESULTS));
   const brave = createBraveSearch({ fetchImpl });
   await run(brave, 'q', { apiKey: KEY, timeoutMs: 5000, lang: 'el' });
-  await run(brave, 'q', { apiKey: KEY, timeoutMs: 5000, lang: 'en & x=1' });
   await run(brave, 'q', { apiKey: KEY, timeoutMs: 5000 });
-  assert.equal(new URL(calls[0].url).searchParams.get('search_lang'), 'el');
-  assert.equal(new URL(calls[1].url).searchParams.has('search_lang'), false);
-  assert.equal(new URL(calls[2].url).searchParams.has('search_lang'), false);
+  for (const call of calls) assert.deepEqual([...new URL(call.url).searchParams.keys()], ['q', 'count']);
 });
 
 test('search: parses web.results, cleans titles and snippets, keeps age, drops entries without an http(s) url', async () => {
@@ -154,16 +151,18 @@ test('search: a thrown fetch or a missing response fails with network', async ()
     { ok: false, reason: 'network' });
 });
 
-test('search: no usable results fails with empty; a blank query too, without a request', async () => {
+test('search: no usable results fails with empty, without a warn line (a normal outcome); a blank query too, without a request but warned', async () => {
   for (const payload of [{}, { web: {} }, { web: { results: [] } }, { web: { results: [{ title: 'x' }] } }]) {
     const { fetchImpl } = fakeFetch(jsonResponse(payload));
-    const { result } = await run(createBraveSearch({ fetchImpl }), 'q', { apiKey: KEY, timeoutMs: 5000 });
+    const { result, logs } = await run(createBraveSearch({ fetchImpl }), 'q', { apiKey: KEY, timeoutMs: 5000 });
     assert.deepEqual(result, { ok: false, reason: 'empty' }, JSON.stringify(payload));
+    assert.equal(logs.length, 0, JSON.stringify(payload));
   }
   const { calls, fetchImpl } = fakeFetch(jsonResponse(RESULTS));
-  const { result } = await run(createBraveSearch({ fetchImpl }), '   ', { apiKey: KEY, timeoutMs: 5000 });
+  const { result, logs } = await run(createBraveSearch({ fetchImpl }), '   ', { apiKey: KEY, timeoutMs: 5000 });
   assert.deepEqual(result, { ok: false, reason: 'empty' });
   assert.equal(calls.length, 0);
+  assert.deepEqual(logs.map((l) => [l.level, l.msg, l.reason]), [['warn', 'brave: search failed', 'empty']]);
 });
 
 test('search: failure logs carry reason and status only, never the query or the key', async () => {

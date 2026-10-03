@@ -4,7 +4,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { createLookup, normaliseQuery, cleanQuery } from '../src/web/lookup.js';
+import { createLookup, normalizeQuery, cleanQuery } from '../src/web/lookup.js';
 import { DailyCapError, TokenLimitError } from '../src/llm/openrouter.js';
 import { withCapturedLogs } from './fixtures/capture-logs.js';
 
@@ -41,6 +41,7 @@ function fakeHot({ features = {}, web = {}, config = {}, prompts = {} } = {}) {
       media: { cacheEntries: 100, video: { sites: ['youtube.com', 'youtu.be'] } },
       web: {
         maxPerDay: 60,
+        acceptLanguage: 'el,en;q=0.5',
         links: { enabled: true, prefill: true, maxPerTurn: 2, maxBytes: 1_500_000, textChars: 6000, summaryChars: 700, maxOutputTokens: 300, fetchTimeoutMs: 10_000, skipSites: [], ...web.links },
         search: { enabled: true, maxPerTurn: 1, results: 5, summaryChars: 900, maxOutputTokens: 400, cacheHours: 24, contextMessages: 50, timeoutMs: 10_000, ...web.search },
         ...(web.maxPerDay !== undefined ? { maxPerDay: web.maxPerDay } : {}),
@@ -108,16 +109,22 @@ function setup(overrides = {}) {
 
 const LINK = { id: 'm1#e0', url: 'https://example.org/a', site: 'example.org', title: 'Ricetta' };
 
-// --- readLink ---------------------------------------------------------------
+/** One link through readLinks: its excerpt, or null when it was not read. */
+async function readOne(lookup, link, guildId = 'g1') {
+  const { reads } = await lookup.readLinks(guildId, [link]);
+  return reads.get(link.id) ?? null;
+}
 
-test('readLink: fetches the page, condenses it on the text classifier model and caches the excerpt', async () => {
+// --- readLinks: one link ----------------------------------------------------
+
+test('readLinks: fetches the page, condenses it on the text classifier model and caches the excerpt', async () => {
   const { lookup, llm, pageFetcher, store } = setup();
-  const result = await lookup.readLink('g1', LINK);
+  const result = await readOne(lookup, LINK);
 
-  assert.deepEqual(result, { text: 'An article about a simple recipe: three eggs, flour, ten minutes.' });
+  assert.equal(result, 'An article about a simple recipe: three eggs, flour, ten minutes.');
   assert.equal(pageFetcher.calls.length, 1);
   assert.equal(pageFetcher.calls[0].url, 'https://example.org/a');
-  assert.deepEqual(pageFetcher.calls[0].options, { maxBytes: 1_500_000, timeoutMs: 10_000, maxChars: 6000 });
+  assert.deepEqual(pageFetcher.calls[0].options, { maxBytes: 1_500_000, timeoutMs: 10_000, maxChars: 6000, acceptLanguage: 'el,en;q=0.5' });
   assert.equal(llm.calls.length, 1);
   const { messages, options } = llm.calls[0];
   assert.equal(messages[0].content, 'Condense this page, up to 700 characters.');
@@ -128,84 +135,110 @@ test('readLink: fetches the page, condenses it on the text classifier model and 
   assert.equal(options.skipCalibration, true);
   assert.equal(options.countAgainstDailyCap, true);
   const entry = store.getMediaCache('g1')['read:m1#e0'];
-  assert.equal(entry.text, result.text);
+  assert.equal(entry.text, result);
   assert.equal(entry.ts, NOW);
 });
 
-test('readLink: a cached excerpt is free -- no fetch, no LLM call, no daily slot', async () => {
+test('readLinks: web.acceptLanguage is read at the moment of use and handed to the page fetcher', async () => {
+  const { lookup, pageFetcher, hot } = setup();
+  await readOne(lookup, LINK);
+  hot.config.web.acceptLanguage = 'pt-BR,pt;q=0.9';
+  await readOne(lookup, { ...LINK, id: 'm2#e0', url: 'https://example.org/b' });
+  assert.deepEqual(pageFetcher.calls.map((c) => c.options.acceptLanguage), ['el,en;q=0.5', 'pt-BR,pt;q=0.9']);
+  const shipped = JSON.parse(readFileSync(new URL('../config.json', import.meta.url), 'utf8'));
+  assert.equal(shipped.web.acceptLanguage, 'en,ru;q=0.8', 'config.json keeps the header the fetcher always sent');
+});
+
+test('readLinks: a cached excerpt is free -- no fetch, no LLM call, no daily slot', async () => {
   const { lookup, llm, pageFetcher, store, state } = setup();
   store.getMediaCache('g1')['read:m1#e0'] = { text: 'déjà lu', ts: NOW - HOUR };
-  assert.deepEqual(await lookup.readLink('g1', LINK), { text: 'déjà lu', cached: true });
+  assert.equal(await readOne(lookup, LINK), 'déjà lu');
   assert.equal(pageFetcher.calls.length, 0);
   assert.equal(llm.calls.length, 0);
   assert.equal(state.data.webCount ?? 0, 0);
 });
 
-test('readLink: a failed fetch is cached as a miss with its reason and skipped for 6 hours', async () => {
+test('readLinks: a failed fetch is cached as a miss with its reason and skipped for 6 hours', async () => {
   let now = NOW;
   const { lookup, pageFetcher, llm, store } = setup({ page: { ok: false, reason: 'http', status: 404 }, now: () => now });
-  assert.equal(await lookup.readLink('g1', LINK), null);
+  assert.equal(await readOne(lookup, LINK), null);
   assert.deepEqual(store.getMediaCache('g1')['read:m1#e0'], { miss: true, ts: NOW, reason: 'http' });
   assert.equal(llm.calls.length, 0);
 
   now = NOW + 5 * HOUR;
-  assert.equal(await lookup.readLink('g1', LINK), null);
+  assert.equal(await readOne(lookup, LINK), null);
   assert.equal(pageFetcher.calls.length, 1, 'a miss younger than 6 h is not retried');
 
   now = NOW + 6 * HOUR + 1;
-  await lookup.readLink('g1', LINK);
+  await readOne(lookup, LINK);
   assert.equal(pageFetcher.calls.length, 2, 'an older miss is retried');
 });
 
-test('readLink: a very short answer (4 words or fewer) means unreadable -- cached as a miss', async () => {
+test('readLinks: a very short answer (4 words or fewer) means unreadable -- cached as a miss', async () => {
   const { lookup, store } = setup({ llmText: 'Cookie wall only.' });
-  assert.equal(await lookup.readLink('g1', LINK), null);
+  assert.equal(await readOne(lookup, LINK), null);
   const entry = store.getMediaCache('g1')['read:m1#e0'];
   assert.equal(entry.miss, true);
   assert.equal(entry.reason, 'unreadable');
 });
 
-test('readLink: the excerpt is whitespace-collapsed and capped at summaryChars', async () => {
+test('readLinks: the excerpt is whitespace-collapsed and capped at summaryChars', async () => {
   const long = `Una   pagina\n\nlunga ${'parola '.repeat(200)}`;
   const { lookup } = setup({ llmText: long, hotOptions: { web: { links: { summaryChars: 100 } } } });
-  const { text } = await lookup.readLink('g1', LINK);
+  const text = await readOne(lookup, LINK);
   assert.ok([...text].length <= 100, `${[...text].length}`);
   assert.ok(text.startsWith('Una pagina lunga parola'));
   assert.ok(!/\s{2,}|\n/.test(text));
 });
 
-test('readLink: the daily web cap is reserved before the fetch and refuses once spent, caching nothing', async () => {
+test('readLinks: the daily web cap is reserved before the fetch and refuses once spent, caching nothing', async () => {
   const { lookup, pageFetcher, state, store } = setup({ page: { ok: false, reason: 'timeout' }, hotOptions: { web: { maxPerDay: 1 } } });
-  await lookup.readLink('g1', LINK);
+  await readOne(lookup, LINK);
   assert.equal(state.data.webCount, 1, 'a failed fetch keeps its slot');
   assert.equal(state.data.webDay, '2026-09-20');
 
   const other = { ...LINK, id: 'm2#e0', url: 'https://example.org/b' };
-  assert.equal(await lookup.readLink('g1', other), null);
+  assert.equal(await readOne(lookup, other), null);
   assert.equal(pageFetcher.calls.length, 1, 'no fetch past the daily cap');
   assert.equal(store.getMediaCache('g1')['read:m2#e0'], undefined, 'the cap is not a miss');
 });
 
-test('readLink: the daily counter resets on a new UTC day', async () => {
+test('readLinks: the daily counter resets on a new UTC day', async () => {
   let now = NOW;
   const { lookup, pageFetcher, state } = setup({ hotOptions: { web: { maxPerDay: 1 } }, now: () => now });
-  await lookup.readLink('g1', LINK);
+  await readOne(lookup, LINK);
   now = NOW + 24 * HOUR;
-  await lookup.readLink('g1', { ...LINK, id: 'm2#e0' });
+  await readOne(lookup, { ...LINK, id: 'm2#e0' });
   assert.equal(pageFetcher.calls.length, 2);
   assert.equal(state.data.webCount, 1);
 });
 
-test('readLink: skipSites and video-site links are never read; a gif is never read', async () => {
+test('readLinks / search: a web.maxPerDay that is not a finite number counts as 0 -- nothing fetched, nothing searched', async () => {
+  const missing = fakeHot();
+  delete missing.config.web.maxPerDay;
+  for (const hot of [missing, fakeHot({ web: { maxPerDay: null } }), fakeHot({ web: { maxPerDay: '60' } })]) {
+    const pageFetcher = fakePageFetcher();
+    const braveSearch = fakeBrave();
+    const state = fakeState();
+    const lookup = createLookup({ hot, store: fakeStore(), llm: fakeLlm(), state, pageFetcher, braveSearch, braveApiKey: 'k', now: () => NOW });
+    assert.equal(await readOne(lookup, LINK), null);
+    assert.equal(await lookup.search('g1', 'x y'), null);
+    assert.equal(pageFetcher.calls.length, 0);
+    assert.equal(braveSearch.calls.length, 0);
+    assert.equal(state.data.webCount ?? 0, 0);
+  }
+});
+
+test('readLinks: skipSites and video-site links are never read; a gif is never read', async () => {
   const { lookup, pageFetcher, llm } = setup({ hotOptions: { web: { links: { skipSites: ['example.org'] } } } });
-  assert.equal(await lookup.readLink('g1', { ...LINK, url: 'https://sub.example.org/x' }), null);
-  assert.equal(await lookup.readLink('g1', { id: 'v', url: 'https://www.youtube.com/watch?v=abc', site: 'youtube.com', title: '' }), null);
-  assert.equal(await lookup.readLink('g1', { id: 'g', url: 'https://tenor.com/view/x', site: 'tenor', title: '', kind: 'gif' }), null);
+  assert.equal(await readOne(lookup, { ...LINK, url: 'https://sub.example.org/x' }), null);
+  assert.equal(await readOne(lookup, { id: 'v', url: 'https://www.youtube.com/watch?v=abc', site: 'youtube.com', title: '' }), null);
+  assert.equal(await readOne(lookup, { id: 'g', url: 'https://tenor.com/view/x', site: 'tenor', title: '', kind: 'gif' }), null);
   assert.equal(pageFetcher.calls.length, 0);
   assert.equal(llm.calls.length, 0);
 });
 
-test('readLink: the default skipSites (config.json) cover gif hosts and Discord attachments, subdomains included', async () => {
+test('readLinks: the default skipSites (config.json) cover gif hosts and Discord attachments, subdomains included', async () => {
   const shipped = JSON.parse(readFileSync(new URL('../config.json', import.meta.url), 'utf8'));
   const skipSites = shipped.web.links.skipSites;
   const { lookup, pageFetcher, llm } = setup({ hotOptions: { web: { links: { skipSites } } } });
@@ -220,32 +253,32 @@ test('readLink: the default skipSites (config.json) cover gif hosts and Discord 
     'https://v.redd.it/x',
     'https://pbs.twimg.com/media/x',
   ]) {
-    assert.equal(await lookup.readLink('g1', { ...LINK, id: url, url }), null, url);
+    assert.equal(await readOne(lookup, { ...LINK, id: url, url }), null, url);
   }
   assert.equal(pageFetcher.calls.length, 0);
   assert.equal(llm.calls.length, 0);
-  assert.ok(await lookup.readLink('g1', LINK), 'an ordinary page is still read');
+  assert.ok(await readOne(lookup, LINK), 'an ordinary page is still read');
 });
 
-test('readLink: a URL whose path ends with a binary extension is never read, whatever the case or query', async () => {
+test('readLinks: a URL whose path ends with a binary extension is never read, whatever the case or query', async () => {
   const { lookup, pageFetcher, llm, state } = setup();
   for (const ext of ['png', 'jpg', 'jpeg', 'gif', 'webp', 'avif', 'svg', 'mp4', 'webm', 'mov', 'mkv', 'mp3', 'ogg', 'wav', 'zip', 'rar', '7z', 'pdf']) {
     const url = `https://example.org/files/thing.${ext}`;
-    assert.equal(await lookup.readLink('g1', { ...LINK, id: url, url }), null, ext);
+    assert.equal(await readOne(lookup, { ...LINK, id: url, url }), null, ext);
   }
-  assert.equal(await lookup.readLink('g1', { ...LINK, id: 'up', url: 'https://example.org/Photo.JPG?width=640' }), null);
-  assert.equal(await lookup.readLink('g1', { ...LINK, id: 'frag', url: 'https://example.org/clip.mp4#t=10' }), null);
+  assert.equal(await readOne(lookup, { ...LINK, id: 'up', url: 'https://example.org/Photo.JPG?width=640' }), null);
+  assert.equal(await readOne(lookup, { ...LINK, id: 'frag', url: 'https://example.org/clip.mp4#t=10' }), null);
   assert.equal(pageFetcher.calls.length, 0);
   assert.equal(llm.calls.length, 0);
   assert.equal(state.data.webCount ?? 0, 0, 'no daily slot spent');
 });
 
-test('readLink: an extension only in the query, the host or mid-path does not block the read', async () => {
+test('readLinks: an extension only in the query, the host or mid-path does not block the read', async () => {
   const { lookup, pageFetcher } = setup();
-  assert.ok(await lookup.readLink('g1', { ...LINK, id: 'q', url: 'https://example.org/view?file=a.png' }));
-  assert.ok(await lookup.readLink('g1', { ...LINK, id: 'h', url: 'https://example.pdf/article' }));
-  assert.ok(await lookup.readLink('g1', { ...LINK, id: 'p', url: 'https://example.org/a.png/details' }));
-  assert.ok(await lookup.readLink('g1', { ...LINK, id: 'x', url: 'https://example.org/page.html' }));
+  assert.ok(await readOne(lookup, { ...LINK, id: 'q', url: 'https://example.org/view?file=a.png' }));
+  assert.ok(await readOne(lookup, { ...LINK, id: 'h', url: 'https://example.pdf/article' }));
+  assert.ok(await readOne(lookup, { ...LINK, id: 'p', url: 'https://example.org/a.png/details' }));
+  assert.ok(await readOne(lookup, { ...LINK, id: 'x', url: 'https://example.org/page.html' }));
   assert.equal(pageFetcher.calls.length, 4);
 });
 
@@ -262,17 +295,17 @@ test('readLinks: skipped links (binary path, skip site) spend no maxNew attempt'
   assert.equal(pageFetcher.calls.length, 1);
 });
 
-test('readLink: an embed whose kind is not link (gif, video) is never read; kind link or none is', async () => {
+test('readLinks: an embed whose kind is not link (gif, video) is never read; kind link or none is', async () => {
   const { lookup, pageFetcher } = setup();
-  assert.equal(await lookup.readLink('g1', { ...LINK, id: 'g', kind: 'gif' }), null);
-  assert.equal(await lookup.readLink('g1', { ...LINK, id: 'v', kind: 'video' }), null);
+  assert.equal(await readOne(lookup, { ...LINK, id: 'g', kind: 'gif' }), null);
+  assert.equal(await readOne(lookup, { ...LINK, id: 'v', kind: 'video' }), null);
   assert.equal(pageFetcher.calls.length, 0);
-  assert.ok(await lookup.readLink('g1', { ...LINK, id: 'l', kind: 'link' }));
-  assert.ok(await lookup.readLink('g1', { ...LINK, id: 'n' }));
+  assert.ok(await readOne(lookup, { ...LINK, id: 'l', kind: 'link' }));
+  assert.ok(await readOne(lookup, { ...LINK, id: 'n' }));
   assert.equal(pageFetcher.calls.length, 2);
 });
 
-test('readLink: feature off (false or missing), links.enabled off or no read-link prompt -> null, zero calls', async () => {
+test('readLinks: feature off (false or missing), links.enabled off or no read-link prompt -> null, zero calls', async () => {
   const cases = [
     fakeHot({ features: { webLookup: false } }),
     fakeHot({ web: { links: { enabled: false } } }),
@@ -285,45 +318,45 @@ test('readLink: feature off (false or missing), links.enabled off or no read-lin
     const pageFetcher = fakePageFetcher();
     const llm = fakeLlm();
     const lookup = createLookup({ hot, store: fakeStore(), llm, state: fakeState(), pageFetcher, braveSearch: fakeBrave(), braveApiKey: 'k', now: () => NOW });
-    assert.equal(await lookup.readLink('g1', LINK), null);
+    assert.equal(await readOne(lookup, LINK), null);
     assert.deepEqual(await lookup.readLinks('g1', [LINK]), { reads: new Map(), newCount: 0 });
     assert.equal(pageFetcher.calls.length, 0);
     assert.equal(llm.calls.length, 0);
   }
 });
 
-test('readLink: an LLM failure is a miss; a safety-rail refusal is a miss too, with its own reason', async () => {
+test('readLinks: an LLM failure is a miss; a safety-rail refusal is a miss too, with its own reason', async () => {
   const failing = setup({ llmText: Object.assign(new Error('boom'), { statusCode: 500 }) });
-  assert.equal(await failing.lookup.readLink('g1', LINK), null);
+  assert.equal(await readOne(failing.lookup, LINK), null);
   assert.equal(failing.store.getMediaCache('g1')['read:m1#e0'].reason, 'llm');
 
   const capped = setup({ llmText: new DailyCapError('cap') });
-  assert.equal(await capped.lookup.readLink('g1', LINK), null);
-  assert.deepEqual(capped.store.getMediaCache('g1')['read:m1#e0'], { miss: true, ts: NOW, reason: 'dailyCap' });
+  assert.equal(await readOne(capped.lookup, LINK), null);
+  assert.deepEqual(capped.store.getMediaCache('g1')['read:m1#e0'], { miss: true, ts: NOW, reason: 'daily-cap' });
 
   const tooBig = setup({ llmText: new TokenLimitError('too big') });
-  assert.equal(await tooBig.lookup.readLink('g1', LINK), null);
-  assert.deepEqual(tooBig.store.getMediaCache('g1')['read:m1#e0'], { miss: true, ts: NOW, reason: 'tokenLimit' });
+  assert.equal(await readOne(tooBig.lookup, LINK), null);
+  assert.deepEqual(tooBig.store.getMediaCache('g1')['read:m1#e0'], { miss: true, ts: NOW, reason: 'token-limit' });
 });
 
-test('readLink: after a safety-rail refusal the link is not fetched or charged again for 6 hours', async () => {
+test('readLinks: after a safety-rail refusal the link is not fetched or charged again for 6 hours', async () => {
   let now = NOW;
   const { lookup, pageFetcher, llm, state } = setup({ llmText: new TokenLimitError('too big'), now: () => now });
-  await lookup.readLink('g1', LINK);
+  await readOne(lookup, LINK);
   now = NOW + 5 * HOUR;
-  assert.equal(await lookup.readLink('g1', LINK), null);
+  assert.equal(await readOne(lookup, LINK), null);
   assert.equal(pageFetcher.calls.length, 1);
   assert.equal(llm.calls.length, 1);
   assert.equal(state.data.webCount, 1);
   now = NOW + 6 * HOUR + 1;
-  await lookup.readLink('g1', LINK);
+  await readOne(lookup, LINK);
   assert.equal(pageFetcher.calls.length, 2, 'retried once the miss is older than 6 h');
 });
 
-test('readLink: logs the host/path and the reason code, never the page text or the excerpt', async () => {
+test('readLinks: logs the host/path and the reason code, never the page text or the excerpt', async () => {
   const { logs } = await withCapturedLogs(async () => {
     const { lookup } = setup();
-    await lookup.readLink('g1', { ...LINK, url: 'https://example.org/a?token=secret' });
+    await readOne(lookup, { ...LINK, url: 'https://example.org/a?token=secret' });
   });
   const line = logs.find((l) => l.msg === 'lookup: link');
   assert.ok(line);
@@ -417,12 +450,12 @@ test('search: {{today}} in the summary prompt is the injected clock\'s UTC date'
   assert.equal(llm.calls[0].messages[0].content, 'Today is 2031-12-31. The query: la finale. Up to 900 characters.');
 });
 
-test('readLink: {{today}} in the read-link prompt is the injected clock\'s UTC date', async () => {
+test('readLinks: {{today}} in the read-link prompt is the injected clock\'s UTC date', async () => {
   const { lookup, llm } = setup({
     now: () => Date.UTC(2031, 0, 2, 3, 4, 5),
     hotOptions: { prompts: { 'read-link': 'Today is {{today}}. Condense this page, up to {{maxChars}} characters.' } },
   });
-  await lookup.readLink('g1', LINK);
+  await readOne(lookup, LINK);
   assert.equal(llm.calls[0].messages[0].content, 'Today is 2031-01-02. Condense this page, up to 700 characters.');
 });
 
@@ -451,8 +484,8 @@ test('search: the query is cleaned before the prompt, the search and the result'
   assert.equal(blank.braveSearch.calls.length, 0);
 });
 
-test('normaliseQuery: lower-cased, whitespace-collapsed, trimmed', () => {
-  assert.equal(normaliseQuery('  Qui A\tgagné \n ? '), 'qui a gagné ?');
+test('normalizeQuery: lower-cased, whitespace-collapsed, trimmed', () => {
+  assert.equal(normalizeQuery('  Qui A\tgagné \n ? '), 'qui a gagné ?');
 });
 
 test('search: no key -> null and nothing counted, no Brave call, no LLM call; hasSearch reports the key', async () => {
@@ -471,6 +504,30 @@ test('search: no results -> an empty text and no sources, without an LLM call', 
   assert.equal(llm.calls.length, 0);
 });
 
+test('search: an empty result is reported as nothing, fresh or from the cache', async () => {
+  const { lookup, braveSearch } = setup({ brave: { ok: false, reason: 'empty' } });
+  const { logs } = await withCapturedLogs(async () => {
+    await lookup.search('g1', 'ζζζζ');
+    const hit = await lookup.search('g1', 'ζζζζ');
+    assert.equal(hit.cached, true);
+    assert.equal(hit.text, '');
+  });
+  assert.equal(braveSearch.calls.length, 1);
+  const lines = logs.filter((l) => l.msg === 'lookup: search');
+  assert.deepEqual(lines.map((l) => [l.state, l.cached]), [['nothing', false], ['nothing', true]]);
+});
+
+test('search: a safety-rail refusal of the summary is logged with a kebab-case reason, nothing cached', async () => {
+  for (const [error, reason] of [[new TokenLimitError('too big'), 'token-limit'], [new DailyCapError('cap'), 'daily-cap'], [new Error('boom'), 'llm']]) {
+    const { lookup, store } = setup({ llmText: error });
+    const { logs } = await withCapturedLogs(() => lookup.search('g1', 'x y'));
+    const line = logs.find((l) => l.msg === 'lookup: search');
+    assert.equal(line.state, 'error');
+    assert.equal(line.reason, reason);
+    assert.deepEqual(Object.keys(store.getMediaCache('g1')), []);
+  }
+});
+
 test('search: a Brave failure or an LLM failure -> null, nothing cached', async () => {
   const failing = setup({ brave: { ok: false, reason: 'http', status: 429 } });
   assert.equal(await failing.lookup.search('g1', 'x y'), null);
@@ -484,7 +541,7 @@ test('search: a Brave failure or an LLM failure -> null, nothing cached', async 
 
 test('search: the daily web cap is shared with links', async () => {
   const { lookup, braveSearch } = setup({ hotOptions: { web: { maxPerDay: 1 } } });
-  await lookup.readLink('g1', LINK);
+  await readOne(lookup, LINK);
   assert.equal(await lookup.search('g1', 'x y'), null);
   assert.equal(braveSearch.calls.length, 0);
 });

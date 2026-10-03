@@ -17,15 +17,37 @@ function count(value) {
   return Number.isFinite(value) && value > 0 ? value : 0;
 }
 
-/** A finite, non-negative weight, or 1 (unweighted) when unset. */
-function weight(value) {
-  return Number.isFinite(value) && value >= 0 ? value : 1;
+/** A finite, non-negative weight, else `fallback`. */
+function weight(value, fallback) {
+  return Number.isFinite(value) && value >= 0 ? value : fallback;
+}
+
+/**
+ * `mentor.outputTokenWeight`: a finite, non-negative number, else 5 (the
+ * config.json value). The one reader of the key: the budget charges with it
+ * and the mentor's pre-flight check reserves output with it.
+ * @param {{ outputTokenWeight?: unknown } | null | undefined} cfg  The `mentor` config section.
+ * @returns {number}
+ */
+export function outputTokenWeight(cfg) {
+  return weight(cfg?.outputTokenWeight, 5);
+}
+
+/**
+ * `mentor.cachedTokenWeight`: a finite, non-negative number, else 0.1 (the
+ * config.json value). The one reader of the key.
+ * @param {{ cachedTokenWeight?: unknown } | null | undefined} cfg  The `mentor` config section.
+ * @returns {number}
+ */
+export function cachedTokenWeight(cfg) {
+  return weight(cfg?.cachedTokenWeight, 0.1);
 }
 
 /**
  * The cost of one completion in weighted tokens:
  * `(prompt - cached) + cached * cachedTokenWeight + completion * outputTokenWeight`, rounded up.
- * Missing numbers count as 0; a missing weight counts as 1.
+ * Missing numbers count as 0; a missing or invalid weight counts as its
+ * config.json value (see `outputTokenWeight`, `cachedTokenWeight`).
  *
  * @param {{ prompt_tokens?: number, completion_tokens?: number,
  *   prompt_tokens_details?: { cached_tokens?: number } } | null | undefined} usage  The provider's usage object.
@@ -36,7 +58,7 @@ export function weightedTokens(usage, cfg) {
   const prompt = count(usage?.prompt_tokens);
   const cached = Math.min(prompt, count(usage?.prompt_tokens_details?.cached_tokens));
   const completion = count(usage?.completion_tokens);
-  const total = (prompt - cached) + cached * weight(cfg?.cachedTokenWeight) + completion * weight(cfg?.outputTokenWeight);
+  const total = (prompt - cached) + cached * cachedTokenWeight(cfg) + completion * outputTokenWeight(cfg);
   // Round away float noise (0.1 * 3 = 0.30000000000000004) before rounding up.
   return Math.ceil(Math.round(total * 1e6) / 1e6);
 }

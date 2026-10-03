@@ -1,11 +1,11 @@
 // Tests for src/web/readable.js: the hand-written HTML-to-text used when the
 // persona reads a linked page -- scope choice (article/main over body),
 // boilerplate and raw-text elements dropped, entities, block newlines,
-// whitespace collapse, the word-boundary cut, malformed input, the page
-// title and the consent/paywall heuristic.
+// whitespace collapse, the word-boundary cut, malformed input and the page
+// title.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { htmlToText, pageTitle, looksLikePaywallOrConsent, truncateText } from '../src/web/readable.js';
+import { htmlToText, pageTitle, truncateText } from '../src/web/readable.js';
 
 test('htmlToText: the article is preferred over the rest of the body', () => {
   const html = '<html><body><div>Sidebar junk</div><article><p>The real story.</p></article><div>More junk</div></body></html>';
@@ -134,21 +134,4 @@ test('readable: pageTitle and htmlToText stay linear on 1.5 MB of unclosed title
       assert.ok(ms < 500, `${name} on repeated ${JSON.stringify(unit.slice(0, 12))}: ${ms.toFixed(0)} ms`);
     }
   }
-});
-
-test('looksLikePaywallOrConsent: short consent, login and script walls are flagged', () => {
-  assert.equal(looksLikePaywallOrConsent('We use cookies. Accept all or manage settings.'), true);
-  assert.equal(looksLikePaywallOrConsent('Before you continue, review our consent options.'), true);
-  assert.equal(looksLikePaywallOrConsent('Subscribe to continue reading.'), true);
-  assert.equal(looksLikePaywallOrConsent('Please sign in to continue.'), true);
-  assert.equal(looksLikePaywallOrConsent('You need to enable JavaScript to run this app.'), true);
-});
-
-test('looksLikePaywallOrConsent: long articles and plain short texts are not flagged', () => {
-  const long = `${'A real article paragraph about something. '.repeat(60)}We use cookies, accept them.`;
-  assert.equal(looksLikePaywallOrConsent(long), false);
-  assert.equal(looksLikePaywallOrConsent('A short note about the weather.'), false);
-  assert.equal(looksLikePaywallOrConsent('Bake the cookies for twelve minutes.'), false);
-  assert.equal(looksLikePaywallOrConsent(''), false);
-  assert.equal(looksLikePaywallOrConsent(null), false);
 });

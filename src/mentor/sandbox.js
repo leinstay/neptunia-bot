@@ -1,10 +1,11 @@
 // The mentor's two sandboxes. A sandbox run takes an invented chat excerpt (a
 // "situation"; or a real moment of the chat stored with a case, replayed from
-// its normalized messages), builds exactly the request a real turn or a real analyzer
+// its normalized messages), builds the request a real turn or a real analyzer
 // batch would build -- live prompts, live config, live stored memory -- asks
 // the model, parses the answer, and stops there: nothing reaches Discord and
 // nothing is written to memory. The reply sandbox reproduces the talk path
-// (src/behavior/prompt.js#buildRequest, src/behavior/turn.js), the memory
+// (src/behavior/prompt.js#buildRequest, src/behavior/turn.js) with the
+// omissions listed at `answerReply`, the memory
 // sandbox the analyzer (src/memory/update.js#buildMemoryRequest +
 // applyMemoryUpdate) on a store that only records what it would have written.
 //
@@ -18,6 +19,8 @@ import { buildRequest } from '../behavior/prompt.js';
 import { MINUTE_MS } from '../time.js';
 import { pickOtherProfiles } from '../behavior/turn.js';
 import { parseJsonObject, parseOutput } from '../llm/parse.js';
+import { log } from '../log.js';
+import { findGif } from '../memory/gifs.js';
 import {
   applyMemoryUpdate,
   batchAuthorNamesMap,
@@ -90,21 +93,22 @@ export function liveView({ hot, store, guildId, calibrator }) {
  * src/discord/collect.js#normalizeMessage), oldest first. Pure.
  *
  * Line n (0-based) gets id `sb-<n+1>`; `authorId: 'self'` is the persona
- * (`selfId`, `selfName`, `self: true`). `ts` is `now - minutesBefore` minutes;
+ * (`selfId`, `selfName`, `self: true`). `ts` is `at - minutesBefore` minutes
+ * (`at`: the moment the situation is answered at, in ms);
  * a line without `minutesBefore` sits one minute per remaining line before
- * `now` (the last one a minute before it); a line that would go back in time
+ * `at` (the last one a minute before it); a line that would go back in time
  * gets the previous line's ts + 1 second. `replyTo` (a 0-based index of an
  * earlier line) becomes that line's id in `replyToId`. The last line is the
  * trigger: `triggerKind` 'reply' when it replies to a line of the persona,
  * else 'mention' (and it then mentions `selfId`).
  * @param {{ title?: string, lines: { authorId: string, authorName?: string, text: string,
  *   replyTo?: number|null, minutesBefore?: number }[] }} situation
- * @param {{ selfId: string, selfName: string, now: number,
+ * @param {{ selfId: string, selfName: string, at: number,
  *   channel: { id: string, name?: string|null, category?: string|null, topic?: string|null } }} options
  * @returns {{ history: object[], trigger: object, triggerKind: 'reply'|'mention' }}
  * @throws {Error} fewer than 2 lines, a last line by 'self', a replyTo that is not an earlier line.
  */
-export function situationToHistory(situation, { selfId, selfName, now, channel }) {
+export function situationToHistory(situation, { selfId, selfName, at, channel }) {
   const lines = Array.isArray(situation?.lines) ? situation.lines : [];
   if (lines.length < 2) throw new Error('situation: at least 2 lines are needed');
   if (lines[lines.length - 1]?.authorId === 'self') throw new Error('situation: the last line must not be by self');
@@ -117,7 +121,7 @@ export function situationToHistory(situation, { selfId, selfName, now, channel }
       throw new Error(`situation: line ${n} replies to ${replyTo}, which is not an earlier line`);
     }
     const minutes = Number.isFinite(line.minutesBefore) ? line.minutesBefore : lines.length - n;
-    let ts = now - minutes * MINUTE_MS;
+    let ts = at - minutes * MINUTE_MS;
     if (ts < previousTs) ts = previousTs + 1000;
     previousTs = ts;
     const self = line.authorId === 'self';
@@ -160,7 +164,7 @@ export function situationToHistory(situation, { selfId, selfName, now, channel }
  * history, else 'mention' (as an invented situation). Invented lines go
  * through `situationToHistory`. Pure.
  * @param {{ history?: object[], lines?: object[] }} situation
- * @param {{ selfId: string, selfName?: string, now?: number, channel?: object }} options
+ * @param {{ selfId: string, selfName?: string, at?: number, channel?: object }} options
  * @returns {{ history: object[], trigger: object, triggerKind: 'reply'|'mention' }}
  * @throws {Error} an empty stored history or one whose last message is the persona's; see `situationToHistory`.
  */
@@ -185,12 +189,6 @@ function textOf(content) {
   return String(content ?? '');
 }
 
-/** What one completion costs: `usage.total_tokens`, else the pre-flight estimate. */
-function tokensOf(completion) {
-  const total = completion?.usage?.total_tokens;
-  return Number.isFinite(total) ? total : (completion?.estimated ?? 0);
-}
-
 /** How many samples to take: a positive integer, 1 when unusable. */
 function sampleCount(samples) {
   const n = Math.floor(Number(samples));
@@ -201,11 +199,11 @@ function sampleCount(samples) {
  * `samples` completions of `messages`, one after another. Before each one
  * `signal` is checked; an aborted signal (also one that aborts mid-request)
  * stops the loop and `stopped` is true. Any other llm error is thrown.
- * `onUsage(usage, estimated)` follows every completion.
+ * `onUsage(usage, estimated)` follows every completion: what a completion
+ * costs is the caller's (the mentor's budget) to weigh.
  */
 async function sample({ llm, messages, options, samples, signal, onUsage, read }) {
   const answers = [];
-  let tokens = 0;
   let stopped = false;
   for (let i = 0; i < sampleCount(samples); i += 1) {
     if (signal?.aborted) {
@@ -222,11 +220,10 @@ async function sample({ llm, messages, options, samples, signal, onUsage, read }
       }
       throw err;
     }
-    tokens += tokensOf(completion);
     if (typeof onUsage === 'function') onUsage(completion.usage ?? null, completion.estimated ?? 0);
     answers.push(read(completion.text));
   }
-  return { answers, tokens, stopped };
+  return { answers, stopped };
 }
 
 /**
@@ -235,15 +232,23 @@ async function sample({ llm, messages, options, samples, signal, onUsage, read }
  * a real turn -- `features.memory` off leaves it out -- and tokens measured
  * with `view.calibrator`, so the caps trim what a real turn trims), `samples` completions,
  * each parsed with parseOutput and trimmed by `features.reactions` /
- * `features.multiMessage` like a real turn. No neighbours, no web lookup, no
- * drawing, no pictures, never a private chat; nothing is sent and nothing is
- * stored. Media render with their labels only, unless the caller hands in
+ * `features.multiMessage` like a real turn. The server's custom emoji
+ * (`<emoji>`) and GIF library (`<gifs>`, the transcript's GIF handles) render
+ * as in a real turn when the caller hands in the same sources the turn uses
+ * (`customEmoji`, `gifs`, `mediaCache`; buildRequest applies
+ * `features.customEmoji` / `features.gifs`). Left out, unlike a real turn: no
+ * neighbours, no web lookup, no drawing offered (no draw quota in `<senses>`),
+ * no pictures, never a private chat, no daily GIF cap, and a custom-emoji
+ * reaction is kept as written (not resolved through the emoji index); nothing
+ * is sent and nothing is stored. Media render with their labels only, unless the caller hands in
  * what the persona saw of them (a real moment's `descriptions` / `videos`,
  * see src/mentor/anchor.js#replayMedia): nothing is described or watched
  * here. Every completion passes `countAgainstDailyCap: false`
  * and `skipCalibration: true`; the per-request token cap stays in force.
- * `skip` is true when the model skipped or left nothing to do (as a real
- * turn treats it).
+ * An answer's `gif` (a handle of the library, `features.gifs` on) and `draw`
+ * (`features.imageGeneration` on) count as actions, as in a real turn; an
+ * unknown handle or a switched-off kind is dropped (null). `skip` is true
+ * when the model skipped or left nothing to do (as a real turn treats it).
  * @param {object} input
  * @param {object} input.view        From `liveView` (or a view of the same shape, e.g. src/mentor/moment.js#momentView).
  * @param {object} input.situation   Invented lines (see `situationToHistory`) or a stored moment (see `situationHistory`).
@@ -252,22 +257,44 @@ async function sample({ llm, messages, options, samples, signal, onUsage, read }
  * @param {{ id: string, name?: string, category?: string, topic?: string }} input.channel
  * @param {{ complete: Function }} input.llm
  * @param {number} input.samples
- * @param {number} input.now
+ * @param {number} input.at          The moment the situation is answered at (ms).
  * @param {AbortSignal} [input.signal]
  * @param {(usage: object|null, estimated: number) => void} [input.onUsage]  Called after every completion.
  * @param {Map<string, string>} [input.descriptions]  Item id -> caption, rendered as the live transcript does.
  * @param {Map<string, object>} [input.videos]  Item id -> video state (`{ state: 'watched', text }`), likewise.
  * @param {{ shape: string, examples: string[] }[]|null} [input.worn]  What the situation's variety pass
  *   named (src/mentor/mentor.js), rendered as `<worn>` exactly as in a live turn; omitted, no block.
+ * @param {{ id: string, name: string, animated?: boolean }[]} [input.customEmoji]  The served guild's
+ *   custom emoji (src/discord/emoji.js#createEmojiIndex `list()`); omitted, no `<emoji>`.
+ * @param {object|null} [input.gifs]  The guild's GIF library (store.getGifs); omitted, no `<gifs>` and no `<gif>` kept.
+ * @param {object|null} [input.mediaCache]  The describer cache (store.getMediaCache), read only, for both lists' captions.
  * @returns {Promise<{ request: { system: string, user: string },
  *   answers: { messages: { text: string, replyTo: number|null }[], reactions: { to: number, emoji: string }[],
- *     skip: boolean, think: string }[], tokens: number, stopped: boolean }>}
+ *     gif: { id: string, replyTo: number|null }|null, draw: { text: string, self: boolean, replyTo: number|null }|null,
+ *     skip: boolean, think: string }[], stopped: boolean }>}
  */
-export async function answerReply({ view, situation, selfId, selfName, channel, llm, samples, now, signal, onUsage, descriptions, videos, worn = null }) {
+export async function answerReply({
+  view,
+  situation,
+  selfId,
+  selfName,
+  channel,
+  llm,
+  samples,
+  at,
+  signal,
+  onUsage,
+  descriptions,
+  videos,
+  worn = null,
+  customEmoji,
+  gifs = null,
+  mediaCache = null,
+}) {
   const config = view.config;
   const memory = view.memory;
   const memoryOn = config.features?.memory !== false;
-  const { history, trigger, triggerKind } = situationHistory(situation, { selfId, selfName, now, channel });
+  const { history, trigger, triggerKind } = situationHistory(situation, { selfId, selfName, at, channel });
   // pickOtherProfiles reads a store-shaped object; this one reads the view.
   const viewAsStore = { getUser: (guildId, id) => memory.getUser(id) };
 
@@ -277,7 +304,7 @@ export async function answerReply({ view, situation, selfId, selfName, channel, 
     calibrator: view.calibrator ?? IDENTITY_CALIBRATOR,
     mode: 'reply',
     forced: false,
-    now,
+    now: at,
     selfName,
     history,
     neighbors: [],
@@ -299,6 +326,9 @@ export async function answerReply({ view, situation, selfId, selfName, channel, 
     lookup: null,
     searchAvailable: false,
     drawQuota: undefined,
+    customEmoji: Array.isArray(customEmoji) ? customEmoji : [],
+    gifs,
+    mediaCache,
     worn,
   });
 
@@ -307,7 +337,7 @@ export async function answerReply({ view, situation, selfId, selfName, channel, 
   const userContent = Array.isArray(userMessage.content) ? request.textFallback : userMessage.content;
   const messages = [systemMessage, { ...userMessage, content: userContent }];
 
-  const { answers, tokens, stopped } = await sample({
+  const { answers, stopped } = await sample({
     llm,
     messages,
     options: { role: 'talk', countAgainstDailyCap: false, skipCalibration: true, signal },
@@ -319,12 +349,15 @@ export async function answerReply({ view, situation, selfId, selfName, channel, 
       const features = view.config.features ?? {};
       const reactions = features.reactions === false ? [] : parsed.reactions;
       const replies = features.multiMessage === false ? parsed.messages.slice(0, 1) : parsed.messages;
-      const nothingToDo = replies.length === 0 && reactions.length === 0;
-      return { messages: replies, reactions, skip: parsed.skip || nothingToDo, think: parsed.think };
+      // As src/behavior/turn.js: a GIF off the library or with the switch off, a drawing with drawing off, is dropped.
+      const gif = parsed.gif && features.gifs !== false && findGif(gifs, parsed.gif.id) ? parsed.gif : null;
+      const draw = features.imageGeneration === false ? null : parsed.draw;
+      const nothingToDo = replies.length === 0 && reactions.length === 0 && gif === null && draw === null;
+      return { messages: replies, reactions, gif, draw, skip: parsed.skip || nothingToDo, think: parsed.think };
     },
   });
 
-  return { request: { system: textOf(systemMessage.content), user: textOf(userContent) }, answers, tokens, stopped };
+  return { request: { system: textOf(systemMessage.content), user: textOf(userContent) }, answers, stopped };
 }
 
 /** The stored channel entry `id` among the view's channels, or null (the store's getChannel, through the view). */
@@ -463,21 +496,24 @@ function textsOf(writes) {
  * answer goes through parseJsonObject and applyMemoryUpdate with the
  * analyzer's own arguments (known ids from the batch, the feature switches,
  * the batch's timing and nicks) on a `captureStore`: nothing is stored.
- * `parseOk` is false when the answer is not a JSON object (or applying it
- * failed); its `texts` are then empty. See `textsOf` for the paths.
+ * `parseOk` is false when the answer is not a JSON object; `applyOk` is false
+ * when it was not applied: not parsed, or applying it threw (a code bug or a
+ * store shape mismatch, not the model's doing; logged as
+ * `mentor: memory apply failed` with the count of writes recorded and the
+ * error). Either way its `texts` are empty. See `textsOf` for the paths.
  * @param {object} input
  * @param {object} input.view         From `liveView` (or a view of the same shape, e.g. src/mentor/moment.js#momentView).
  * @param {object[]} input.batch      Normalized messages, e.g. `situationToHistory(...).history`.
  * @param {string} input.selfName
  * @param {{ complete: Function }} input.llm
  * @param {number} input.samples
- * @param {number} [input.now]        The clock for the apply step's dates; defaults to the wall clock.
+ * @param {number} [input.at]         The moment answered at (ms), the apply step's dates; defaults to the wall clock.
  * @param {AbortSignal} [input.signal]
  * @param {(usage: object|null, estimated: number) => void} [input.onUsage]  Called after every completion.
  * @returns {Promise<{ request: { system: string, user: string },
- *   answers: { texts: { path: string, text: string }[], parseOk: boolean }[], tokens: number, stopped: boolean }>}
+ *   answers: { texts: { path: string, text: string }[], parseOk: boolean, applyOk: boolean }[], stopped: boolean }>}
  */
-export async function answerMemory({ view, batch, selfName, llm, samples, now = Date.now(), signal, onUsage }) {
+export async function answerMemory({ view, batch, selfName, llm, samples, at = Date.now(), signal, onUsage }) {
   const config = view.config;
   const memory = view.memory;
   // As the live analyzer: no memory prompt, no request (it would be sent without its instructions).
@@ -500,11 +536,12 @@ export async function answerMemory({ view, batch, selfName, llm, samples, now = 
   });
 
   const memoryCfg = config.memory ?? {};
-  const { answers, tokens, stopped } = await sample({
+  const { answers, stopped } = await sample({
     llm,
     messages,
     options: {
-      model: memoryCfg.model ?? config.llm?.model,
+      // An empty `memory.model` means unset, as in `/nep model show`.
+      model: memoryCfg.model || config.llm?.model,
       role: 'analyzer',
       maxOutputTokens: memoryCfg.maxOutputTokens,
       temperature: MEMORY_TEMPERATURE,
@@ -517,30 +554,34 @@ export async function answerMemory({ view, batch, selfName, llm, samples, now = 
     signal,
     onUsage,
     read: (text) => {
+      let update;
       try {
-        const update = parseJsonObject(text);
+        update = parseJsonObject(text);
+      } catch {
+        return { texts: [], parseOk: false, applyOk: false };
+      }
+      let recorded = [];
+      try {
         const liveConfig = view.config;
-        const { relationships, episodes, lore } = memorySwitches(liveConfig, () => now);
+        const { relationships, episodes, lore } = memorySwitches(liveConfig, () => at);
         const { store, writes } = captureStore(view);
+        recorded = writes;
         applyMemoryUpdate(
           store,
           SANDBOX_GUILD,
           update,
           liveConfig.memory,
           knownUserIds,
-          knownChannelIds,
-          relationships,
-          episodes,
-          lore,
-          computeSeenAt(batch),
-          batchAuthorNamesMap(batch),
+          { knownChannelIds, relationships, episodes, lore, timing: computeSeenAt(batch), batchAuthorNames: batchAuthorNamesMap(batch) },
         );
-        return { texts: textsOf(writes), parseOk: true };
-      } catch {
-        return { texts: [], parseOk: false };
+        return { texts: textsOf(writes), parseOk: true, applyOk: true };
+      } catch (err) {
+        // Not the model's doing: the answer parsed. Counts and the error only, never a stored text.
+        log.warn('mentor: memory apply failed', { writes: recorded.length, error: err });
+        return { texts: [], parseOk: true, applyOk: false };
       }
     },
   });
 
-  return { request: { system: textOf(messages[0].content), user: textOf(messages[1].content) }, answers, tokens, stopped };
+  return { request: { system: textOf(messages[0].content), user: textOf(messages[1].content) }, answers, stopped };
 }

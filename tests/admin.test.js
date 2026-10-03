@@ -1769,7 +1769,7 @@ test('run: private.show / private.forget / memory.forget against the real store'
   const { admin, store, dataDir } = makeRealStoreAdmin(rootDir);
   try {
     store.touchUser('g1', '123', 'Zoé', Date.parse('2026-09-01T00:00:00.000Z'));
-    store.ensurePrivate('g1', '123');
+    store.applyPrivateOps('g1', '123', {});
     store.adjustPrivateAffinity('g1', '123', 8, 'nice in private', { maxDelta: Infinity, historySize: 10, now: 1 });
     store.pushPrivateBuffer('g1', '123', { id: 'm1', content: 'SECRET-BUFFERED-TEXT', ts: 1 });
     store.bumpPrivateReplies('g1', '123', utcToday());
@@ -1786,7 +1786,7 @@ test('run: private.show / private.forget / memory.forget against the real store'
     assert.equal(store.getPrivate('g1', '123'), null);
     assert.ok(store.getUser('g1', '123'), 'the public profile stays');
 
-    store.ensurePrivate('g1', '123');
+    store.applyPrivateOps('g1', '123', {});
     store.flush();
     await admin.run('memory.forget', { userId: '123' }, { guildId: 'g1' });
     assert.equal(store.getUser('g1', '123'), null);
@@ -4826,7 +4826,7 @@ function fakeMentor({ run, check, status, stopOk = false, resolveAnchor } = {}) 
   const calls = [];
   return {
     calls,
-    async resolveAnchor(ref, context) {
+    async readAnchor(ref, context) {
       calls.push(['resolveAnchor', ref, context]);
       if (resolveAnchor) return resolveAnchor(ref, context);
       return sampleMoment(/^\d+$/.test(ref) ? ref : '800000000000000004');
@@ -5580,7 +5580,7 @@ test('run: gifs.recache relays why it did not start', async () => {
     warmup: 'a warmup is running: /nep warmup stop first',
     'video-off': 'GIFs are not watched while video vision is off (features.videoDescriptions).',
     off: 'GIFs are not watched (features.mediaDescriptions or media.gif.watch is off).',
-    prompt: 'GIFs are not watched: the describe-video prompt is missing.',
+    'no-prompt': 'GIFs are not watched: the describe-video prompt is missing.',
     other: 'not started (other)',
   };
   for (const [reason, reply] of Object.entries(expected)) {

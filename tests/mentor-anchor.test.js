@@ -337,10 +337,16 @@ test('withSeenMedia: a forwarded picture counts for the outer message; the histo
   const history = deepFreeze([message, { id: 'm2', content: 'plain', attachments: [], links: [], forwarded: [], stickers: [], emojis: [] }]);
   // An entry without a time is taken; one with an empty text is not a description.
   const cache = deepFreeze({ [FORWARDED_ID]: { text: 'a map of the old town' }, other: { text: '  ', ts: 1 } });
-  const result = withSeenMedia(history, cache, { before: SEEN_TS });
+  const result = withSeenMedia(history, { cache, before: SEEN_TS });
   assert.deepEqual(result.history[0].mediaSeen, { captions: { [FORWARDED_ID]: 'a map of the old town' } });
   assert.equal(result.history[1], history[1]);
   assert.deepEqual({ described: result.described, none: result.none }, { described: 1, none: 0 });
+
+  // Without a cache (the options omitted, or a null one) nothing is described and the history is returned as is.
+  for (const bare of [withSeenMedia(history), withSeenMedia(history, { cache: null })]) {
+    assert.equal(bare.history[0], history[0]);
+    assert.deepEqual({ described: bare.described, none: bare.none }, { described: 0, none: 1 });
+  }
 });
 
 test('replayMedia: the stored descriptions render exactly as the live transcript rendered the cache', async () => {

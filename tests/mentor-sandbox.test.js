@@ -11,6 +11,7 @@ import { liveView, situationToHistory, situationHistory, answerReply, captureSto
 import { createStore } from '../src/memory/store.js';
 import { createCalibrator } from '../src/llm/tokens.js';
 import { labels } from './fixtures/labels.js';
+import { withCapturedLogs } from './fixtures/capture-logs.js';
 
 const NOW = Date.UTC(2026, 8, 20, 12, 0, 0);
 const SELF_ID = '900000000000000001';
@@ -122,7 +123,7 @@ function filesUnder(dir) {
 // ---- situationToHistory ------------------------------------------------------
 
 test('situationToHistory: the last line is the trigger', () => {
-  const { history, trigger, triggerKind } = situationToHistory(twoLines(), { selfId: SELF_ID, selfName: 'Zoë', now: NOW, channel: CHANNEL });
+  const { history, trigger, triggerKind } = situationToHistory(twoLines(), { selfId: SELF_ID, selfName: 'Zoë', at: NOW, channel: CHANNEL });
   assert.equal(history.length, 2);
   assert.equal(trigger, history[1]);
   assert.equal(triggerKind, 'mention');
@@ -158,7 +159,7 @@ test('situationToHistory: a reply to her own line is triggerKind reply', () => {
     { authorId: 'self', text: 'I prefer draughts', replyTo: null, minutesBefore: 3 },
     { authorId: ALICE, authorName: 'Alice', text: 'why?', replyTo: 0, minutesBefore: 1 },
   ]);
-  const { history, triggerKind, trigger } = situationToHistory(s, { selfId: SELF_ID, selfName: 'Zoë', now: NOW, channel: CHANNEL });
+  const { history, triggerKind, trigger } = situationToHistory(s, { selfId: SELF_ID, selfName: 'Zoë', at: NOW, channel: CHANNEL });
   assert.equal(triggerKind, 'reply');
   assert.equal(history[0].authorId, SELF_ID);
   assert.equal(history[0].authorName, 'Zoë');
@@ -172,7 +173,7 @@ test('situationToHistory: a reply to a member line is still a mention', () => {
     { authorId: BRUNO, authorName: 'Bruno', text: 'chess is dull', replyTo: null, minutesBefore: 3 },
     { authorId: ALICE, authorName: 'Alice', text: 'agree?', replyTo: 0, minutesBefore: 1 },
   ]);
-  const { triggerKind, trigger } = situationToHistory(s, { selfId: SELF_ID, selfName: 'Zoë', now: NOW, channel: CHANNEL });
+  const { triggerKind, trigger } = situationToHistory(s, { selfId: SELF_ID, selfName: 'Zoë', at: NOW, channel: CHANNEL });
   assert.equal(triggerKind, 'mention');
   assert.equal(trigger.replyToId, 'sb-1');
 });
@@ -183,7 +184,7 @@ test('situationToHistory: timestamps go back by minutesBefore', () => {
     { authorId: ALICE, authorName: 'Alice', text: 'b', replyTo: null, minutesBefore: 2 },
     { authorId: BRUNO, authorName: 'Bruno', text: 'c', replyTo: null, minutesBefore: 0 },
   ]);
-  const { history } = situationToHistory(s, { selfId: SELF_ID, selfName: 'Zoë', now: NOW, channel: CHANNEL });
+  const { history } = situationToHistory(s, { selfId: SELF_ID, selfName: 'Zoë', at: NOW, channel: CHANNEL });
   assert.deepEqual(history.map((m) => m.ts), [NOW - 30 * 60000, NOW - 2 * 60000, NOW]);
 });
 
@@ -193,7 +194,7 @@ test('situationToHistory: missing minutesBefore spaces lines a minute apart, end
     { authorId: ALICE, authorName: 'Alice', text: 'b', replyTo: null },
     { authorId: BRUNO, authorName: 'Bruno', text: 'c', replyTo: null },
   ]);
-  const { history } = situationToHistory(s, { selfId: SELF_ID, selfName: 'Zoë', now: NOW, channel: CHANNEL });
+  const { history } = situationToHistory(s, { selfId: SELF_ID, selfName: 'Zoë', at: NOW, channel: CHANNEL });
   assert.deepEqual(history.map((m) => m.ts), [NOW - 3 * 60000, NOW - 2 * 60000, NOW - 60000]);
 });
 
@@ -202,12 +203,12 @@ test('situationToHistory: a line that would go back in time follows the previous
     { authorId: BRUNO, authorName: 'Bruno', text: 'a', replyTo: null, minutesBefore: 2 },
     { authorId: ALICE, authorName: 'Alice', text: 'b', replyTo: null, minutesBefore: 10 },
   ]);
-  const { history } = situationToHistory(s, { selfId: SELF_ID, selfName: 'Zoë', now: NOW, channel: CHANNEL });
+  const { history } = situationToHistory(s, { selfId: SELF_ID, selfName: 'Zoë', at: NOW, channel: CHANNEL });
   assert.deepEqual(history.map((m) => m.ts), [NOW - 2 * 60000, NOW - 2 * 60000 + 1000]);
 });
 
 test('situationToHistory: missing channel fields are null', () => {
-  const { trigger } = situationToHistory(twoLines(), { selfId: SELF_ID, selfName: 'Zoë', now: NOW, channel: { id: 'c1' } });
+  const { trigger } = situationToHistory(twoLines(), { selfId: SELF_ID, selfName: 'Zoë', at: NOW, channel: { id: 'c1' } });
   assert.equal(trigger.channelId, 'c1');
   assert.equal(trigger.channelName, null);
   assert.equal(trigger.channelCategory, null);
@@ -219,12 +220,12 @@ test('situationToHistory: refuses a last line by self', () => {
     { authorId: ALICE, authorName: 'Alice', text: 'hi', replyTo: null },
     { authorId: 'self', text: 'hello', replyTo: null },
   ]);
-  assert.throws(() => situationToHistory(s, { selfId: SELF_ID, selfName: 'Zoë', now: NOW, channel: CHANNEL }));
+  assert.throws(() => situationToHistory(s, { selfId: SELF_ID, selfName: 'Zoë', at: NOW, channel: CHANNEL }));
 });
 
 test('situationToHistory: refuses fewer than 2 lines', () => {
   const s = situation([{ authorId: ALICE, authorName: 'Alice', text: 'hi', replyTo: null }]);
-  assert.throws(() => situationToHistory(s, { selfId: SELF_ID, selfName: 'Zoë', now: NOW, channel: CHANNEL }));
+  assert.throws(() => situationToHistory(s, { selfId: SELF_ID, selfName: 'Zoë', at: NOW, channel: CHANNEL }));
 });
 
 test('situationToHistory: refuses a replyTo that points forward', () => {
@@ -232,7 +233,7 @@ test('situationToHistory: refuses a replyTo that points forward', () => {
     { authorId: BRUNO, authorName: 'Bruno', text: 'a', replyTo: 1 },
     { authorId: ALICE, authorName: 'Alice', text: 'b', replyTo: null },
   ]);
-  assert.throws(() => situationToHistory(s, { selfId: SELF_ID, selfName: 'Zoë', now: NOW, channel: CHANNEL }));
+  assert.throws(() => situationToHistory(s, { selfId: SELF_ID, selfName: 'Zoë', at: NOW, channel: CHANNEL }));
 });
 
 // ---- liveView ----------------------------------------------------------------
@@ -302,7 +303,7 @@ test('answerReply: sends the live system prompt and renders the member\'s profil
   const store = fakeStore({ userProfiles: { [ALICE]: { id: ALICE, names: ['Alice'], character: 'CHARACTER_MARKER solves chess problems' } } });
   const view = liveView({ hot, store, guildId: 'g1' });
   const llm = fakeLlm('<msg reply="#2">δεν ξέρω</msg><react to="#1">👍</react>');
-  const result = await answerReply({ view, situation: twoLines(), selfId: SELF_ID, selfName: 'Zoë', channel: CHANNEL, llm, samples: 1, now: NOW });
+  const result = await answerReply({ view, situation: twoLines(), selfId: SELF_ID, selfName: 'Zoë', channel: CHANNEL, llm, samples: 1, at: NOW });
 
   assert.equal(llm.calls.length, 1);
   const [system, user] = llm.calls[0].messages;
@@ -314,7 +315,7 @@ test('answerReply: sends the live system prompt and renders the member\'s profil
   assert.ok(result.request.user.includes('CHARACTER_MARKER'));
   assert.ok(result.request.user.includes('what do you think about chess?'));
   assert.deepEqual(result.answers, [
-    { messages: [{ text: 'δεν ξέρω', replyTo: 2 }], reactions: [{ to: 1, emoji: '👍' }], skip: false, think: '' },
+    { messages: [{ text: 'δεν ξέρω', replyTo: 2 }], reactions: [{ to: 1, emoji: '👍' }], gif: null, draw: null, skip: false, think: '' },
   ]);
   assert.equal(result.stopped, false);
   assert.deepEqual(store.writes, [], 'nothing is written to memory');
@@ -347,7 +348,7 @@ function storedMoment({ replyToSelf = false, mentions = [] } = {}) {
 
 test('situationHistory: a stored moment is replayed as stored, the last message the trigger', () => {
   const moment = storedMoment();
-  const { history, trigger, triggerKind } = situationHistory(moment, { selfId: SELF_ID, selfName: 'Zoë', now: NOW, channel: CHANNEL });
+  const { history, trigger, triggerKind } = situationHistory(moment, { selfId: SELF_ID, selfName: 'Zoë', at: NOW, channel: CHANNEL });
   assert.equal(history, moment.history);
   assert.equal(trigger, moment.history[1]);
   assert.equal(triggerKind, 'mention');
@@ -355,13 +356,13 @@ test('situationHistory: a stored moment is replayed as stored, the last message 
   assert.throws(() => situationHistory({ history: [] }, { selfId: SELF_ID }), /stored/);
   assert.throws(() => situationHistory({ history: [moment.history[0]] }, { selfId: SELF_ID }), /self/);
   // Invented lines still go through situationToHistory.
-  assert.equal(situationHistory(twoLines(), { selfId: SELF_ID, selfName: 'Zoë', now: NOW, channel: CHANNEL }).history[0].id, 'sb-1');
+  assert.equal(situationHistory(twoLines(), { selfId: SELF_ID, selfName: 'Zoë', at: NOW, channel: CHANNEL }).history[0].id, 'sb-1');
 });
 
 test('answerReply: a stored moment is answered from its own messages, reactions included', async () => {
   const view = liveView({ hot: fakeHot(), store: fakeStore(), guildId: 'g1' });
   const llm = fakeLlm('<msg>ok</msg>');
-  const result = await answerReply({ view, situation: storedMoment({ replyToSelf: true }), selfId: SELF_ID, selfName: 'Zoë', channel: CHANNEL, llm, samples: 1, now: NOW });
+  const result = await answerReply({ view, situation: storedMoment({ replyToSelf: true }), selfId: SELF_ID, selfName: 'Zoë', channel: CHANNEL, llm, samples: 1, at: NOW });
   assert.ok(result.request.user.includes('REAL_MOMENT'));
   assert.ok(result.request.user.includes('it opens at nine'));
   assert.ok(result.request.user.includes('[reactions: '));
@@ -376,7 +377,7 @@ test('answerReply: a stored moment over the request budget loses its oldest mess
   const filler = Array.from({ length: 30 }, (_, i) => ({ ...moment.history[0], id: `70000000000000${1000 + i}`, self: false, authorId: BRUNO, authorName: 'Bruno', content: `OLD_${i} ${'x'.repeat(700)}`, ts: NOW - 3_600_000 + i * 1000 }));
   const view = liveView({ hot, store: fakeStore(), guildId: 'g1' });
   const llm = fakeLlm('<msg>ok</msg>');
-  const result = await answerReply({ view, situation: { ...moment, history: [...filler, ...moment.history] }, selfId: SELF_ID, selfName: 'Zoë', channel: CHANNEL, llm, samples: 1, now: NOW });
+  const result = await answerReply({ view, situation: { ...moment, history: [...filler, ...moment.history] }, selfId: SELF_ID, selfName: 'Zoë', channel: CHANNEL, llm, samples: 1, at: NOW });
   assert.ok(result.request.user.includes('REAL_MOMENT'));
   assert.ok(!result.request.user.includes('OLD_0 '));
 });
@@ -384,7 +385,7 @@ test('answerReply: a stored moment over the request budget loses its oldest mess
 test('answerReply: makes samples requests, none counted against the daily cap', async () => {
   const view = liveView({ hot: fakeHot(), store: fakeStore(), guildId: 'g1' });
   const llm = fakeLlm(['<msg>a</msg>', '<msg>b</msg>', '<skip/>']);
-  const result = await answerReply({ view, situation: twoLines(), selfId: SELF_ID, selfName: 'Zoë', channel: CHANNEL, llm, samples: 3, now: NOW });
+  const result = await answerReply({ view, situation: twoLines(), selfId: SELF_ID, selfName: 'Zoë', channel: CHANNEL, llm, samples: 3, at: NOW });
 
   assert.equal(llm.calls.length, 3);
   for (const { options } of llm.calls) {
@@ -404,7 +405,7 @@ test('answerReply: a ratio under 1 lets a capped section keep more', async () =>
     hot.config.context.caps.aboutChat = 300;
     const view = liveView({ hot, store: fakeStore({ guildMemory: { self } }), guildId: 'g1', calibrator: createCalibrator(ratio) });
     const llm = fakeLlm('<skip/>');
-    const result = await answerReply({ view, situation: twoLines(), selfId: SELF_ID, selfName: 'Zoë', channel: CHANNEL, llm, samples: 1, now: NOW });
+    const result = await answerReply({ view, situation: twoLines(), selfId: SELF_ID, selfName: 'Zoë', channel: CHANNEL, llm, samples: 1, at: NOW });
     return result.request.user;
   };
   const atOne = await userTextAt(1);
@@ -417,28 +418,95 @@ test('answerReply: a ratio under 1 lets a capped section keep more', async () =>
 test('answerReply: the feature switches trim the answer as in a real turn', async () => {
   const view = liveView({ hot: fakeHot({ reactions: false, multiMessage: false }), store: fakeStore(), guildId: 'g1' });
   const llm = fakeLlm('<msg>one</msg><msg>two</msg><react to="#1">👍</react>');
-  const result = await answerReply({ view, situation: twoLines(), selfId: SELF_ID, selfName: 'Zoë', channel: CHANNEL, llm, samples: 1, now: NOW });
+  const result = await answerReply({ view, situation: twoLines(), selfId: SELF_ID, selfName: 'Zoë', channel: CHANNEL, llm, samples: 1, at: NOW });
   assert.deepEqual(result.answers[0].messages, [{ text: 'one', replyTo: null }]);
   assert.deepEqual(result.answers[0].reactions, []);
 });
 
-test('answerReply: reports usage through onUsage', async () => {
+test('answerReply: reports usage through onUsage; the result carries no token count of its own', async () => {
   const view = liveView({ hot: fakeHot(), store: fakeStore(), guildId: 'g1' });
   const llm = fakeLlm('<msg>a</msg>', { usage: { total_tokens: 120 }, estimated: 100 });
   const seen = [];
   const result = await answerReply({
-    view, situation: twoLines(), selfId: SELF_ID, selfName: 'Zoë', channel: CHANNEL, llm, samples: 2, now: NOW,
+    view, situation: twoLines(), selfId: SELF_ID, selfName: 'Zoë', channel: CHANNEL, llm, samples: 2, at: NOW,
     onUsage: (usage, estimated) => seen.push([usage, estimated]),
   });
   assert.deepEqual(seen, [[{ total_tokens: 120 }, 100], [{ total_tokens: 120 }, 100]]);
-  assert.equal(result.tokens, 240);
+  assert.deepEqual(Object.keys(result).sort(), ['answers', 'request', 'stopped']);
 });
 
-test('answerReply: tokens fall back to the estimate when usage is missing', async () => {
+test('answerReply: without usage, onUsage gets null and the estimate (what the budget then charges)', async () => {
   const view = liveView({ hot: fakeHot(), store: fakeStore(), guildId: 'g1' });
   const llm = fakeLlm('<msg>a</msg>', { usage: null, estimated: 70 });
-  const result = await answerReply({ view, situation: twoLines(), selfId: SELF_ID, selfName: 'Zoë', channel: CHANNEL, llm, samples: 2, now: NOW });
-  assert.equal(result.tokens, 140);
+  const seen = [];
+  await answerReply({
+    view, situation: twoLines(), selfId: SELF_ID, selfName: 'Zoë', channel: CHANNEL, llm, samples: 2, at: NOW,
+    onUsage: (usage, estimated) => seen.push([usage, estimated]),
+  });
+  assert.deepEqual(seen, [[null, 70], [null, 70]]);
+});
+
+const EMOJI = [{ id: '600000000000000001', name: 'wave', animated: false }];
+const GIF_LIBRARY = {
+  nextId: 2,
+  entries: {
+    k1: { id: 'g1', kind: 'link', url: 'https://tenor.com/view/dance-1', site: 'Tenor', name: 'Danse', itemId: 'k1', messageId: 'm1', channelId: CHANNEL.id, count: 3, last: NOW - 86_400_000, firstSeen: NOW - 86_400_000 },
+  },
+  backfill: null,
+};
+const MEDIA_CACHE = {
+  'emoji:600000000000000001': { text: 'a waving hand', ts: NOW - 1000 },
+  k1: { text: 'a dancing cat', ts: NOW - 1000 },
+};
+
+test('answerReply: the server\'s custom emoji and GIF library render as in a live turn, with their cached captions', async () => {
+  const view = liveView({ hot: fakeHot(), store: fakeStore(), guildId: 'g1' });
+  const result = await answerReply({
+    view, situation: twoLines(), selfId: SELF_ID, selfName: 'Zoë', channel: CHANNEL, llm: fakeLlm('<msg>ok</msg>'), samples: 1, at: NOW,
+    customEmoji: EMOJI, gifs: GIF_LIBRARY, mediaCache: MEDIA_CACHE,
+  });
+  assert.ok(result.request.user.includes(`<emoji>\n${labels.emoji.header}\n:wave: -- a waving hand\n</emoji>`), result.request.user);
+  assert.ok(result.request.user.includes(`<gifs>\n${labels.gifs.header}\ng1 -- a dancing cat\n</gifs>`), result.request.user);
+  assert.ok(result.request.user.includes(labels.senses.customEmoji));
+  assert.ok(result.request.user.includes(labels.senses.gifs));
+
+  // The switches drop them as in a live turn; nothing handed in, nothing rendered.
+  const off = liveView({ hot: fakeHot({ customEmoji: false, gifs: false }), store: fakeStore(), guildId: 'g1' });
+  const without = await answerReply({
+    view: off, situation: twoLines(), selfId: SELF_ID, selfName: 'Zoë', channel: CHANNEL, llm: fakeLlm('<msg>ok</msg>'), samples: 1, at: NOW,
+    customEmoji: EMOJI, gifs: GIF_LIBRARY, mediaCache: MEDIA_CACHE,
+  });
+  const bare = await answerReply({ view, situation: twoLines(), selfId: SELF_ID, selfName: 'Zoë', channel: CHANNEL, llm: fakeLlm('<msg>ok</msg>'), samples: 1, at: NOW });
+  for (const { request } of [without, bare]) {
+    assert.ok(!request.user.includes('<emoji>'));
+    assert.ok(!request.user.includes('<gifs>'));
+  }
+});
+
+test('answerReply: a GIF or a drawing alone is an action, not silence; switched off or unknown, nothing is left to do', async () => {
+  const answer = async (text, { features = {}, gifs = GIF_LIBRARY } = {}) => {
+    const view = liveView({ hot: fakeHot(features), store: fakeStore(), guildId: 'g1' });
+    const result = await answerReply({ view, situation: twoLines(), selfId: SELF_ID, selfName: 'Zoë', channel: CHANNEL, llm: fakeLlm(text), samples: 1, at: NOW, gifs });
+    return result.answers[0];
+  };
+  const gif = await answer('<gif reply="#2">g1</gif>');
+  assert.equal(gif.skip, false);
+  assert.deepEqual(gif.gif, { id: 'g1', replyTo: 2 });
+  const draw = await answer('<draw self="yes">a cat on a chessboard</draw>');
+  assert.equal(draw.skip, false);
+  assert.deepEqual(draw.draw, { text: 'a cat on a chessboard', self: true, replyTo: null });
+
+  for (const [text, options] of [
+    ['<gif>g9</gif>', {}],
+    ['<gif>g1</gif>', { gifs: null }],
+    ['<gif>g1</gif>', { features: { gifs: false } }],
+    ['<draw>a cat</draw>', { features: { imageGeneration: false } }],
+  ]) {
+    const dropped = await answer(text, options);
+    assert.equal(dropped.skip, true, `${text} ${JSON.stringify(options)}`);
+    assert.equal(dropped.gif, null);
+    assert.equal(dropped.draw, null);
+  }
 });
 
 test('answerReply: an aborted signal stops before the next sample', async () => {
@@ -446,7 +514,7 @@ test('answerReply: an aborted signal stops before the next sample', async () => 
   const view = liveView({ hot: fakeHot(), store: fakeStore(), guildId: 'g1' });
   const llm = fakeLlm('<msg>a</msg>', { onCall: () => controller.abort() });
   const result = await answerReply({
-    view, situation: twoLines(), selfId: SELF_ID, selfName: 'Zoë', channel: CHANNEL, llm, samples: 3, now: NOW, signal: controller.signal,
+    view, situation: twoLines(), selfId: SELF_ID, selfName: 'Zoë', channel: CHANNEL, llm, samples: 3, at: NOW, signal: controller.signal,
   });
   assert.equal(llm.calls.length, 1);
   assert.equal(llm.calls[0].options.signal, controller.signal);
@@ -469,7 +537,7 @@ test('answerReply: an abort during a request returns what was collected', async 
     },
   };
   const result = await answerReply({
-    view, situation: twoLines(), selfId: SELF_ID, selfName: 'Zoë', channel: CHANNEL, llm, samples: 3, now: NOW, signal: controller.signal,
+    view, situation: twoLines(), selfId: SELF_ID, selfName: 'Zoë', channel: CHANNEL, llm, samples: 3, at: NOW, signal: controller.signal,
   });
   assert.equal(result.answers.length, 1);
   assert.equal(result.stopped, true);
@@ -479,7 +547,7 @@ test('answerReply: an llm error other than an abort is thrown to the caller', as
   const view = liveView({ hot: fakeHot(), store: fakeStore(), guildId: 'g1' });
   const llm = { complete: async () => { throw new Error('provider down'); } };
   await assert.rejects(
-    answerReply({ view, situation: twoLines(), selfId: SELF_ID, selfName: 'Zoë', channel: CHANNEL, llm, samples: 1, now: NOW }),
+    answerReply({ view, situation: twoLines(), selfId: SELF_ID, selfName: 'Zoë', channel: CHANNEL, llm, samples: 1, at: NOW }),
     /provider down/,
   );
 });
@@ -537,11 +605,11 @@ test('answerMemory: returns the texts that would be stored and applies nothing',
 
     const hot = fakeHot();
     const view = liveView({ hot, store, guildId: 'g1' });
-    const { history } = situationToHistory(twoLines(), { selfId: SELF_ID, selfName: 'Zoë', now: NOW, channel: CHANNEL });
+    const { history } = situationToHistory(twoLines(), { selfId: SELF_ID, selfName: 'Zoë', at: NOW, channel: CHANNEL });
     const llm = fakeLlm([MEMORY_ANSWER, MEMORY_ANSWER], { usage: { total_tokens: 300 }, estimated: 250 });
     const usages = [];
     const result = await answerMemory({
-      view, batch: history, selfName: 'Zoë', llm, samples: 2, now: NOW, onUsage: (u, e) => usages.push([u, e]),
+      view, batch: history, selfName: 'Zoë', llm, samples: 2, at: NOW, onUsage: (u, e) => usages.push([u, e]),
     });
 
     assert.equal(llm.calls.length, 2);
@@ -555,12 +623,13 @@ test('answerMemory: returns the texts that would be stored and applies nothing',
     }
     assert.equal(result.request.system, 'Summarize what happened.');
     assert.ok(result.request.user.includes('what do you think about chess?'));
-    assert.equal(result.tokens, 600);
-    assert.equal(usages.length, 2);
+    assert.deepEqual(usages, [[{ total_tokens: 300 }, 250], [{ total_tokens: 300 }, 250]]);
+    assert.deepEqual(Object.keys(result).sort(), ['answers', 'request', 'stopped']);
     assert.equal(result.answers.length, 2);
 
     const [answer] = result.answers;
     assert.equal(answer.parseOk, true);
+    assert.equal(answer.applyOk, true);
     const byPath = new Map(answer.texts.map((t) => [t.path, t.text]));
     assert.equal(byPath.get(`users.${ALICE}.character`), 'Curious and quick.');
     assert.equal(byPath.get(`users.${ALICE}.relationship`), 'Asks the persona about games.');
@@ -583,21 +652,52 @@ test('answerMemory: returns the texts that would be stored and applies nothing',
 
 test('answerMemory: a non-JSON answer gives parseOk false', async () => {
   const view = liveView({ hot: fakeHot(), store: fakeStore(), guildId: 'g1' });
-  const { history } = situationToHistory(twoLines(), { selfId: SELF_ID, selfName: 'Zoë', now: NOW, channel: CHANNEL });
+  const { history } = situationToHistory(twoLines(), { selfId: SELF_ID, selfName: 'Zoë', at: NOW, channel: CHANNEL });
   const llm = fakeLlm('I would store nothing here.', { usage: null, estimated: 40 });
-  const result = await answerMemory({ view, batch: history, selfName: 'Zoë', llm, samples: 1, now: NOW });
-  assert.deepEqual(result.answers, [{ texts: [], parseOk: false }]);
-  assert.equal(result.tokens, 40);
+  const result = await answerMemory({ view, batch: history, selfName: 'Zoë', llm, samples: 1, at: NOW });
+  assert.deepEqual(result.answers, [{ texts: [], parseOk: false, applyOk: false }]);
 });
 
-test('answerMemory: the model falls back to the chat model', async () => {
+test('answerMemory: an answer that parses but cannot be applied is applyOk false, logged with counts and the error only', async () => {
   const hot = fakeHot();
-  hot.config.memory.model = null;
-  const view = liveView({ hot, store: fakeStore(), guildId: 'g1' });
-  const { history } = situationToHistory(twoLines(), { selfId: SELF_ID, selfName: 'Zoë', now: NOW, channel: CHANNEL });
-  const llm = fakeLlm('{}');
-  await answerMemory({ view, batch: history, selfName: 'Zoë', llm, samples: 1, now: NOW });
-  assert.equal(llm.calls[0].options.model, 'x/chat');
+  let broken = false;
+  // A store-shape mismatch that shows only once the answer is applied (the request is built first).
+  const view = {
+    prompts: hot.prompts,
+    config: hot.config,
+    memory: {
+      getGuild: () => {
+        if (broken) throw new TypeError('the guild memory has an unexpected shape');
+        return {};
+      },
+      getUser: () => null,
+      listUserProfiles: () => [],
+      listChannels: () => [],
+      getLore: () => [],
+    },
+  };
+  const { history } = situationToHistory(twoLines(), { selfId: SELF_ID, selfName: 'Zoë', at: NOW, channel: CHANNEL });
+  const llm = fakeLlm(JSON.stringify({ guild: { patterns: 'PATTERN_MARKER short greetings.' } }), { onCall: () => (broken = true) });
+  const { result, logs } = await withCapturedLogs(() => answerMemory({ view, batch: history, selfName: 'Zoë', llm, samples: 1, at: NOW }));
+  assert.deepEqual(result.answers, [{ texts: [], parseOk: true, applyOk: false }]);
+  const failed = logs.filter((l) => l.msg === 'mentor: memory apply failed');
+  assert.equal(failed.length, 1);
+  assert.equal(failed[0].level, 'warn');
+  assert.equal(failed[0].error.name, 'TypeError');
+  assert.equal(typeof failed[0].writes, 'number');
+  assert.ok(!JSON.stringify(logs).includes('PATTERN_MARKER'), 'no stored text in the log');
+});
+
+test('answerMemory: the model falls back to the chat model when memory.model is null or empty', async () => {
+  for (const model of [null, '']) {
+    const hot = fakeHot();
+    hot.config.memory.model = model;
+    const view = liveView({ hot, store: fakeStore(), guildId: 'g1' });
+    const { history } = situationToHistory(twoLines(), { selfId: SELF_ID, selfName: 'Zoë', at: NOW, channel: CHANNEL });
+    const llm = fakeLlm('{}');
+    await answerMemory({ view, batch: history, selfName: 'Zoë', llm, samples: 1, at: NOW });
+    assert.equal(llm.calls[0].options.model, 'x/chat', JSON.stringify(model));
+  }
 });
 
 test('answerReply: reads everything through the view, so another view of the same shape needs no hot or store', async () => {
@@ -614,7 +714,7 @@ test('answerReply: reads everything through the view, so another view of the sam
     },
   };
   const llm = fakeLlm('<skip/>');
-  const result = await answerReply({ view: overlay, situation: twoLines(), selfId: SELF_ID, selfName: 'Zoë', channel: CHANNEL, llm, samples: 1, now: NOW });
+  const result = await answerReply({ view: overlay, situation: twoLines(), selfId: SELF_ID, selfName: 'Zoë', channel: CHANNEL, llm, samples: 1, at: NOW });
   assert.ok(result.request.system.includes('OVERLAY_SYSTEM'));
   assert.ok(result.request.user.includes('OVERLAY_CHARACTER'));
 });
@@ -624,23 +724,23 @@ test('answerReply: reads everything through the view, so another view of the sam
 test('answerReply: the persona answer is routed as the talk role', async () => {
   const view = liveView({ hot: fakeHot(), store: fakeStore(), guildId: 'g1' });
   const llm = fakeLlm('<msg>ok</msg>');
-  await answerReply({ view, situation: twoLines(), selfId: SELF_ID, selfName: 'Zoë', channel: CHANNEL, llm, samples: 2, now: NOW });
+  await answerReply({ view, situation: twoLines(), selfId: SELF_ID, selfName: 'Zoë', channel: CHANNEL, llm, samples: 2, at: NOW });
   assert.deepEqual(llm.calls.map((call) => call.options.role), ['talk', 'talk']);
 });
 
 test('answerMemory: the analyzer answer is routed as the analyzer role', async () => {
   const view = liveView({ hot: fakeHot(), store: fakeStore(), guildId: 'g1' });
-  const { history } = situationToHistory(twoLines(), { selfId: SELF_ID, selfName: 'Zoë', now: NOW, channel: CHANNEL });
+  const { history } = situationToHistory(twoLines(), { selfId: SELF_ID, selfName: 'Zoë', at: NOW, channel: CHANNEL });
   const llm = fakeLlm('{}');
-  await answerMemory({ view, batch: history, selfName: 'Zoë', llm, samples: 1, now: NOW });
+  await answerMemory({ view, batch: history, selfName: 'Zoë', llm, samples: 1, at: NOW });
   assert.equal(llm.calls[0].options.role, 'analyzer');
 });
 
 test('answerReply: a situation\'s variety patterns render as <worn> as in a live turn; none, no block', async () => {
   const worn = [{ shape: 'mock promise ending in (no)', examples: ['fix it (no)'], count: 2 }];
   const view = liveView({ hot: fakeHot(), store: fakeStore(), guildId: 'g1' });
-  const withBlock = await answerReply({ view, situation: twoLines(), selfId: SELF_ID, selfName: 'Zoë', channel: CHANNEL, llm: fakeLlm('<msg>ok</msg>'), samples: 1, now: NOW, worn });
+  const withBlock = await answerReply({ view, situation: twoLines(), selfId: SELF_ID, selfName: 'Zoë', channel: CHANNEL, llm: fakeLlm('<msg>ok</msg>'), samples: 1, at: NOW, worn });
   assert.ok(withBlock.request.user.includes(`<worn>\n${labels.variety.intro}\n- mock promise ending in (no) ("fix it (no)")\n</worn>`));
-  const without = await answerReply({ view, situation: twoLines(), selfId: SELF_ID, selfName: 'Zoë', channel: CHANNEL, llm: fakeLlm('<msg>ok</msg>'), samples: 1, now: NOW });
+  const without = await answerReply({ view, situation: twoLines(), selfId: SELF_ID, selfName: 'Zoë', channel: CHANNEL, llm: fakeLlm('<msg>ok</msg>'), samples: 1, at: NOW });
   assert.ok(!without.request.user.includes('<worn>'));
 });

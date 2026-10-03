@@ -193,8 +193,9 @@ function situationMedians(groups) {
  * @param {Iterable<number>} [anchorNs]  The 1-based places in `groups` of the situations that are real moments.
  * @returns {{ passed: boolean, medians: { human: number|null, character: number|null, rules: number|null,
  *   goal: number|null, overall: number|null }, situations: { n: number, overall: number|null, goal: number|null }[],
- *   reasons: string[] }}  `situations`: the per-situation medians, `n` from 1 in the order of `groups`;
- *   `[]` without `groups`.
+ *   reasons: string[], passScore: number }}  `situations`: the per-situation medians, `n` from 1 in the order of `groups`;
+ *   `[]` without `groups`. `passScore`: the pass score the rule was applied with (`passCfg.score`, else 7),
+ *   so a caller holding results to it uses the same number.
  */
 export function verdict(scores, passCfg, groups, anchorNs) {
   const list = (scores ?? []).filter(Boolean);
@@ -207,7 +208,7 @@ export function verdict(scores, passCfg, groups, anchorNs) {
   const reasons = [];
   if (medians.overall === null || medians.goal === null) {
     reasons.push('no answer was scored');
-    return { passed: false, medians, situations, reasons };
+    return { passed: false, medians, situations, reasons, passScore };
   }
   for (const axis of ['overall', 'goal']) {
     if (medians[axis] < passScore) reasons.push(`${axis} ${medians[axis]} is under the pass score ${passScore}`);
@@ -236,7 +237,7 @@ export function verdict(scores, passCfg, groups, anchorNs) {
       }
     }
   }
-  return { passed: reasons.length === 0, medians, situations, reasons };
+  return { passed: reasons.length === 0, medians, situations, reasons, passScore };
 }
 
 /** Where a proposed change may land. */

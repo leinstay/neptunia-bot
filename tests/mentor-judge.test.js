@@ -197,6 +197,15 @@ test('verdict: nothing scored does not pass', () => {
   assert.equal(result.reasons.length, 1);
 });
 
+test('verdict: returns the pass score it resolved, the config.json value when unusable', () => {
+  assert.equal(verdict([score()], PASS).passScore, 7);
+  assert.equal(verdict([score()], { score: 8, floor: 5 }).passScore, 8);
+  assert.equal(verdict([], { score: 9, floor: 5 }).passScore, 9, 'also when nothing was scored');
+  for (const passCfg of [undefined, null, {}, { score: '8' }, { score: Number.NaN }]) {
+    assert.equal(verdict([score()], passCfg).passScore, 7, JSON.stringify(passCfg));
+  }
+});
+
 // ---- verdict by situation ----------------------------------------------------
 
 /** Five situations of three scored answers; `n` (1-based) gets `low` instead of the default. */

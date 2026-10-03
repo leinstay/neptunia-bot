@@ -46,6 +46,7 @@
 // right after `<samples>`, and is simply left out when missing or empty.
 
 import { block, fillPromptTemplate, learnedConfig, learnedText } from '../behavior/prompt.js';
+import { isLimitNotice } from '../behavior/limits.js';
 import { classifierTextModel } from '../behavior/mention.js';
 import { buildVarietyRequest, parseVariety, selectOwnLines, varietyOn, varietySettings } from '../behavior/variety.js';
 import { fill, formatTranscript, renderTranscript } from '../discord/format.js';
@@ -54,11 +55,11 @@ import { estimateMessages, estimateTokens } from '../llm/tokens.js';
 import { log } from '../log.js';
 import { DAY_MS } from '../time.js';
 import { anchorSituations, replayMedia, resolveAnchor } from './anchor.js';
-import { MentorBudgetError } from './budget.js';
+import { MentorBudgetError, outputTokenWeight } from './budget.js';
 import { parseDiagnosis, parseScores, parseSituations, verdict } from './judge.js';
 import { hiddenLater, momentCutoff, momentView } from './moment.js';
 import { answerFacts, repeatedPhrases, sampleLines, styleProfile } from './reference.js';
-import { renderCard, renderCheckCard, renderCheckFile, renderFile } from './report.js';
+import { clip, isAnchor, renderCard, renderCheckCard, renderCheckFile, renderFile, stopPhrase } from './report.js';
 import { answerMemory, answerReply, liveView, situationHistory } from './sandbox.js';
 
 const ERROR_MAX = 200;
@@ -80,6 +81,18 @@ function positive(value, fallback) {
 }
 
 /**
+ * `mentor.situations` and `mentor.situationLines` as one run reads them: the
+ * situations prompt is filled with the same numbers the parser holds the
+ * answer to (the config.json values 5 and [6, 15] when unusable).
+ * @param {object} cfg  The `mentor` config section, read now.
+ * @returns {{ count: number, lines: [number, number] }}
+ */
+function situationSettings(cfg) {
+  const lines = Array.isArray(cfg?.situationLines) ? cfg.situationLines : [6, 15];
+  return { count: positive(cfg?.situations, 5), lines };
+}
+
+/**
  * How a run ended early: `kind` 'stopped' ('budget' | 'owner' | 'disabled':
  * `features.mentor` or `mentor.model` was turned off during the run) or
  * 'error' (a short reason).
@@ -97,16 +110,15 @@ function endOf(err) {
   if (err instanceof RunEnd) return err;
   if (err instanceof TokenLimitError || err?.key === 'llm.maxRequestTokens') return new RunEnd('error', 'request over the token cap');
   if (Number.isInteger(err?.statusCode)) return new RunEnd('error', `a model request failed: HTTP ${err.statusCode}`);
-  const message = String(err?.message ?? err ?? 'unexpected failure');
-  return new RunEnd('error', message.length > ERROR_MAX ? `${message.slice(0, ERROR_MAX - 3)}...` : message);
+  return new RunEnd('error', clip(err?.message ?? err ?? 'unexpected failure', ERROR_MAX));
 }
 
-/** Why a diagnosis request failed, as a short fixed reason (never an error's own text). */
+/**
+ * Why a diagnosis request failed, as a short fixed reason (never an error's
+ * own text); a stop reads as the report says it (src/mentor/report.js#stopPhrase).
+ */
 function diagnosisFailure(err) {
-  if (err instanceof RunEnd && err.kind === 'stopped') {
-    if (err.reason === 'owner') return 'stopped by the owner';
-    return err.reason === 'budget' ? 'budget' : 'disabled';
-  }
+  if (err instanceof RunEnd && err.kind === 'stopped') return stopPhrase(err.reason);
   if (err instanceof TokenLimitError || err?.key === 'llm.maxRequestTokens') return 'request over the token cap';
   return 'request failed';
 }
@@ -140,11 +152,6 @@ export function worstSituation(situationMedians, anchorNs = new Set()) {
     if (order < 0) worst = entry;
   }
   return worst;
-}
-
-/** Whether a stored situation record is a real moment of the chat (it carries its anchor id). */
-function isAnchorRecord(record) {
-  return record?.anchor !== undefined && record?.anchor !== null;
 }
 
 /** A stored situation as the diagnosis request shows it. */
@@ -184,16 +191,20 @@ function emptyMedians() {
  * @param {() => (string|null)} deps.getGuildId
  * @param {() => ({ id: string, name: string }|null)} deps.getSelf  The persona's user id and display name.
  * @param {Function} deps.fetchHistoryWindow  src/discord/collect.js#fetchHistoryWindow.
- * @param {Function} [deps.fetchMoment]  src/discord/collect.js#fetchMoment, for `resolveAnchor`.
+ * @param {Function} [deps.fetchMoment]  src/discord/collect.js#fetchMoment, for `readAnchor`.
  *   Without it no moment can be read.
  * @param {{ ratio: number, apply: (n: number) => number }} [deps.calibrator]  The live calibrator: the
  *   sandboxes measure tokens with its ratio (read at the moment of use) and never feed it.
  *   Without it, tokens are measured as they are.
+ * @param {{ list: () => { id: string, name: string, animated?: boolean }[] }} [deps.emoji]  The served
+ *   guild's custom emoji (src/discord/emoji.js#createEmojiIndex), the one a live turn uses: the reply
+ *   sandbox renders `<emoji>` from it as a turn does. Without it, no `<emoji>`. The guild's GIF library
+ *   and the describer cache come from `store` (`getGifs`, `getMediaCache`), read at the moment of use.
  * @param {() => number} [deps.now]
  * @param {() => number} [deps.rng]
  * @returns {{ run: (caseId: number) => Promise<{ started: true, done: Promise<object> }>,
  *   check: () => Promise<{ started: true, cases: number, done: Promise<object[]> }>,
- *   resolveAnchor: (ref: string, context?: { channelId?: string }) => Promise<object>,
+ *   readAnchor: (ref: string, context?: { channelId?: string }) => Promise<object>,
  *   stop: () => { ok: boolean }, status: () => object, isRunning: () => boolean,
  *   waitIdle: () => Promise<void> }}
  *   A case's anchors (real moments, src/mentor/anchor.js) are situations of their own in a run and
@@ -203,7 +214,7 @@ function emptyMedians() {
  *   off, has no model, the case or a required prompt is missing, a run is in flight or the budget is spent.
  *   `done` never rejects: a failure ends the run with `error`, which is saved and reported.
  */
-export function createMentor({ hot, store, llm, client, cases, budget, getGuildId, getSelf, fetchHistoryWindow, fetchMoment, calibrator, now = Date.now, rng = Math.random }) {
+export function createMentor({ hot, store, llm, client, cases, budget, getGuildId, getSelf, fetchHistoryWindow, fetchMoment, calibrator, emoji, now = Date.now, rng = Math.random }) {
   let current = null;
 
   // ---- guards ----------------------------------------------------------------
@@ -231,7 +242,7 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
 
   function begin(kind, caseIds) {
     const controller = new AbortController();
-    current = { kind, caseIds, caseId: caseIds[0] ?? null, controller, signal: controller.signal, spent: 0, phase: 'starting', startedAt: now() };
+    current = { kind, caseId: caseIds[0] ?? null, controller, signal: controller.signal, spent: 0, phase: 'starting' };
     return current;
   }
 
@@ -252,8 +263,9 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
 
   /**
    * One request to the mentor model: the switches and the budget first (the
-   * prompt plus the most the answer may cost, `maxOutputTokens` at
-   * `outputTokenWeight`), charged after; an abort ends the run. `as` sends
+   * prompt as the llm client's rail measures it -- calibrated -- plus the most
+   * the answer may cost, `maxOutputTokens` at `outputTokenWeight`), charged
+   * after; an abort ends the run. `as` sends
    * the request for another role through the same rails and budget (the
    * variety pass: its model, role, output cap and timeout); omitted, the
    * mentor's own.
@@ -267,9 +279,8 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
       { role: 'user', content: user },
     ];
     const maxOutputTokens = as.maxOutputTokens ?? cfg.maxOutputTokens;
-    const estimate = estimateMessages(messages);
-    const outputWeight = Number.isFinite(cfg.outputTokenWeight) && cfg.outputTokenWeight >= 0 ? cfg.outputTokenWeight : 5;
-    const possibleOutput = positive(maxOutputTokens, 6000) * outputWeight;
+    const estimate = calibrated(estimateMessages(messages));
+    const possibleOutput = positive(maxOutputTokens, 6000) * outputTokenWeight(cfg);
     if (!budget.canSpend(estimate + possibleOutput)) throw new RunEnd('stopped', 'budget');
     checkAborted(ctx);
     let completion;
@@ -385,10 +396,11 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
     };
   }
 
+  /** The `{{name}}`, `{{count}}`, `{{minLines}}`, `{{maxLines}}` of the mentor prompts, resolved as the parser resolves them. */
   function templateValues(selfName) {
-    const cfg = hot.config.mentor ?? {};
-    const [minLines, maxLines] = Array.isArray(cfg.situationLines) ? cfg.situationLines : [];
-    return { name: selfName, count: cfg.situations, minLines, maxLines };
+    const { count, lines } = situationSettings(hot.config.mentor);
+    const [minLines, maxLines] = lines;
+    return { name: selfName, count, minLines, maxLines };
   }
 
   // ---- the request budget ----------------------------------------------------
@@ -487,7 +499,8 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
    * request has room for.
    */
   async function inventSituations(ctx, { item, view, reference, feedback, self }) {
-    const cfg = hot.config.mentor ?? {};
+    // The numbers the prompt asks for (templateValues) are the ones the answer is held to.
+    const { count, lines } = situationSettings(hot.config.mentor);
     const profiles = view.memory.listUserProfiles().filter((p) => p?.id);
     const members = profiles.map((p) => `${p.names?.[0] ?? p.id} (id:${p.id})`).join('\n');
     const blocks = commonBlocks(item, reference, feedback, self.name);
@@ -497,8 +510,7 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
     const user = [...parts, examples].filter(Boolean).join('\n\n');
     ctx.phase = 'situations';
     const text = await askMentor(ctx, system, user);
-    const lines = Array.isArray(cfg.situationLines) ? cfg.situationLines : [6, 15];
-    const parsed = parseSituations(text, { knownIds: profiles.map((p) => String(p.id)), lines, count: positive(cfg.situations, 5) });
+    const parsed = parseSituations(text, { knownIds: profiles.map((p) => String(p.id)), lines, count });
     const names = new Map(profiles.map((p) => [String(p.id), p.names?.[0] ?? null]));
     // A line without a name gets the member's stored name, as a real message would carry it.
     const situations = parsed.situations.map((s) => ({
@@ -536,6 +548,23 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
   }
 
   /**
+   * The lists a live turn hands to buildRequest (src/behavior/turn.js), read
+   * now, for the reply sandbox: the emoji index's custom emoji, the guild's GIF
+   * library when `features.gifs` is on and the store keeps one, and the
+   * describer cache (read only) when either list may need its captions. The
+   * sandbox and buildRequest apply the switches as a turn does.
+   */
+  function turnLists() {
+    const guildId = getGuildId();
+    const gifsOn = hot.config.features?.gifs !== false && typeof store?.getGifs === 'function';
+    return {
+      customEmoji: typeof emoji?.list === 'function' ? emoji.list() : [],
+      gifs: gifsOn && guildId ? store.getGifs(guildId) : null,
+      mediaCache: emoji || gifsOn ? mediaCacheOf(guildId) : null,
+    };
+  }
+
+  /**
    * What the persona saw of a real moment's media (src/mentor/anchor.js#replayMedia): the
    * descriptions stored with its messages, else the describer's cache as it stood when she
    * answered (`situation.at`), read now and never written. `media.video.sites` is read now.
@@ -569,7 +598,8 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
     if (target === 'memory') {
       const texts = answer.texts ?? [];
       const facts = answerFacts({ messages: texts.map((t) => ({ text: t.text })) }, profile);
-      return { id, texts, parseOk: answer.parseOk === true, facts, score: null };
+      // `applyOk` false with `parseOk` true: the answer parsed but applying it threw (the report says "not applied").
+      return { id, texts, parseOk: answer.parseOk === true, applyOk: answer.applyOk === true, facts, score: null };
     }
     const facts = answerFacts({ messages: answer.messages ?? [] }, profile);
     return {
@@ -588,17 +618,21 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
    * history (`variety.window` of them, newest kept, no age limit: the
    * situation's own timeline is what counts), at least `variety.minLines`,
    * sent through `askMentor` on the `classifier.text` model (charged to the
-   * mentor's budget, never to the chat's daily cap). Null -- no pass, no
+   * mentor's budget, never to the chat's daily cap). As the live pass
+   * (src/behavior/variety-pass.js), the bot's limit notices (`labels.limits.notice`,
+   * read from `view`) are not the persona's lines and are left out. Null -- no pass, no
    * block, nothing saved -- with `features.variety` off, no `variety` prompt,
    * too few own lines, a failed request or an answer that is not the expected
    * JSON; a stop or a spent budget ends the run as usual. Logs counts only.
    */
-  async function wornFor(ctx, { history, view, record }, self, caseId) {
+  async function wornFor(ctx, { history, view, record, self, caseId }) {
     const config = view.config;
     const prompt = view.prompts?.variety;
     if (!varietyOn(config) || typeof prompt !== 'string' || !prompt.trim()) return null;
     const settings = varietySettings(config);
-    const lines = selectOwnLines({ history, window: settings.window });
+    const labels = view.prompts?.labels;
+    const spoken = (Array.isArray(history) ? history : []).filter((m) => !(m?.self && isLimitNotice(labels, m.content)));
+    const lines = selectOwnLines({ history: spoken, window: settings.window });
     if (lines.length < settings.minLines) return null;
     const request = buildVarietyRequest({ prompt, selfName: self.name, lines, config });
     let text;
@@ -633,11 +667,11 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
         charged += charge(ctx, usage, estimated);
       };
       // One variety pass per situation, its block shared by every sample; the patterns go on the record.
-      const worn = target === 'reply' ? await wornFor(ctx, entry, self, caseId) : null;
+      const worn = target === 'reply' ? await wornFor(ctx, { history, view, record, self, caseId }) : null;
       if (worn) record.worn = worn;
       const result =
         target === 'memory'
-          ? await answerMemory({ view, batch: history, selfName: self.name, llm, samples, now: at, signal: ctx.signal, onUsage })
+          ? await answerMemory({ view, batch: history, selfName: self.name, llm, samples, at, signal: ctx.signal, onUsage })
           : await answerReply({
               view,
               situation,
@@ -646,12 +680,13 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
               channel: channel ?? reference.channel,
               llm,
               samples,
-              now: at,
+              at,
               signal: ctx.signal,
               onUsage,
               descriptions: media?.descriptions,
               videos: media?.videos,
               worn,
+              ...turnLists(),
             });
       record.answers = result.answers.map((answer, i) => answerRecord(answer, `s${record.n}a${i + 1}`, target, reference.profile));
       // What the persona (or the analyzer) was given, for the diagnosis; kept off the run: it is large.
@@ -694,9 +729,11 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
             : asked.map((a) => ({ id: a.id, messages: a.messages, reactions: a.reactions, silent: a.silent }));
         const facts = Object.fromEntries(asked.map((a) => [a.id, a.facts]));
         facts.repeated = repeated;
-        // Built per request, the re-ask included, so a prompt edited mid-run is read at once.
+        // The common blocks are built per request, the re-ask included, so an edit to the
+        // `mentor-signs` prompt mid-run is read at once; the score prompt, the card, the rules and
+        // `labels.mentor.intended` are read once per scoring step, above.
         const blocks = commonBlocks(item, reference, feedback, self.name);
-        const original = isAnchorRecord(situation)
+        const original = isAnchor(situation)
           ? block('original', [mentorLabel('original'), ...(situation.original ?? [])].filter(Boolean).join('\n'))
           : '';
         const before = [blocks.case, blocks.reference, blocks.samples, blocks.signs, block('intended', intended.join('\n')), blocks.feedback, character, rules, learned];
@@ -722,7 +759,7 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
     // One group per situation, in order, so a situation's place in the verdict is its `n`.
     const groups = records.map((s) => s.answers.map((a) => a.score).filter(Boolean));
     const scores = groups.flat();
-    const anchorNs = records.flatMap((s, i) => (isAnchorRecord(s) ? [i + 1] : []));
+    const anchorNs = records.flatMap((s, i) => (isAnchor(s) ? [i + 1] : []));
     return { scores, groups, verdict: verdict(scores, hot.config.mentor?.pass, groups, anchorNs) };
   }
 
@@ -752,7 +789,7 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
       // A real moment (see src/mentor/anchor.js) is replayed from its stored history, at its own time and channel.
       const anchored = Array.isArray(situation?.history);
       const at = anchored && Number.isFinite(situation.at) ? situation.at : now();
-      const { history } = situationHistory(situation, { selfId: self.id, selfName: self.name, now: at, channel: reference.channel });
+      const { history } = situationHistory(situation, { selfId: self.id, selfName: self.name, at, channel: reference.channel });
       // A real moment's media render as she saw them, in its transcript and in her request alike.
       const media = anchored ? momentMedia(situation) : null;
       const items = transcriptItems(history, self.name, media);
@@ -803,13 +840,12 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
   /**
    * Whether a finished run gets a diagnosis: a run (not a check) that ended
    * normally, with `mentor.diagnose` on (a missing key counts as on), that
-   * failed or has a situation whose median `overall` is under the pass score.
+   * failed or has a situation whose median `overall` is under `passScore`,
+   * the pass score its verdict was given with (src/mentor/judge.js#verdict).
    */
-  function needsDiagnosis(run) {
+  function needsDiagnosis(run, passScore) {
     if (run.kind !== 'run' || run.stopped || run.error) return false;
-    const cfg = hot.config.mentor ?? {};
-    if (cfg.diagnose === false) return false;
-    const passScore = Number.isFinite(cfg.pass?.score) ? cfg.pass.score : 7;
+    if (hot.config.mentor?.diagnose === false) return false;
     return !run.passed || run.situationMedians.some((m) => typeof m?.overall === 'number' && m.overall < passScore);
   }
 
@@ -828,7 +864,7 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
     };
     const template = hot.prompts?.[DIAGNOSE_PROMPT];
     if (typeof template !== 'string' || !template.trim()) return fail('prompt missing');
-    const anchorNs = new Set(run.situations.filter(isAnchorRecord).map((s) => s.n));
+    const anchorNs = new Set(run.situations.filter(isAnchor).map((s) => s.n));
     const worst = worstSituation(run.situationMedians, anchorNs);
     const entry = worst ? prepared.find((p) => p.record.n === worst.n) : null;
     if (!entry?.request) return fail('no situation to diagnose');
@@ -880,7 +916,8 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
       models: {
         mentor: config.mentor?.model ?? null,
         talk: config.llm?.model ?? null,
-        analyzer: config.memory?.model ?? config.llm?.model ?? null,
+        // An empty `memory.model` means unset, as in `/nep model show` and the sandbox.
+        analyzer: config.memory?.model || config.llm?.model || null,
       },
       reference: { profile: null, samples: 0 },
       situations: [],
@@ -939,7 +976,7 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
     run.situationMedians = result.situations;
     run.reasons = result.reasons;
     run.passed = !run.stopped && !run.error && result.passed;
-    if (measured && needsDiagnosis(run)) await diagnose(ctx, run, item, measured);
+    if (measured && needsDiagnosis(run, result.passScore)) await diagnose(ctx, run, item, measured);
     run.finishedAt = new Date(now()).toISOString();
     run.tokens = { spent: ctx.spent - spentBefore, left: budget.left() };
 
@@ -979,7 +1016,7 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
   async function post(content, file, meta) {
     const channelId = hot.config.bot?.dryRunChannelId || '';
     if (!channelId) {
-      log.info('mentor: report saved', meta);
+      log.info('mentor: report not posted', meta);
       return;
     }
     try {
@@ -1071,7 +1108,7 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
       }
       // The case's real moments as they are stored now, then the invented situations of its last run.
       const invented = (Array.isArray(last?.situations) ? last.situations : [])
-        .filter((s) => !isAnchorRecord(s) && Array.isArray(s?.lines) && s.lines.length > 0)
+        .filter((s) => !isAnchor(s) && Array.isArray(s?.lines) && s.lines.length > 0)
         .map((s) => ({ title: s.title ?? '', lines: s.lines }));
       const situations = [...anchored, ...invented];
       if (situations.length === 0) {
@@ -1094,17 +1131,11 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
         const runs = [];
         const shared = {};
         for (const { item, situations } of plan) {
+          // A stop ends the check: every case after it is skipped, with the stop as the report names it.
           const last = runs[runs.length - 1];
-          if (last?.stopped === 'owner' || ctx.signal.aborted) {
-            skipped.push({ caseId: item.id, reason: 'stopped by the owner' });
-            continue;
-          }
-          if (last?.stopped === 'disabled') {
-            skipped.push({ caseId: item.id, reason: 'the mentor was disabled' });
-            continue;
-          }
-          if (last?.stopped === 'budget') {
-            skipped.push({ caseId: item.id, reason: 'budget' });
+          const stopped = ctx.signal.aborted ? 'owner' : last?.stopped;
+          if (stopped) {
+            skipped.push({ caseId: item.id, reason: stopPhrase(stopped) });
             continue;
           }
           const samples = positive(hot.config.mentor?.check?.samples, 1);
@@ -1178,20 +1209,24 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
     return current ? current.done.then(() => undefined) : Promise.resolve();
   }
 
-  /** What is running right now, for `/nep mentor status`. */
+  /**
+   * What is running right now, for `/nep mentor status`: `{ running: false }`,
+   * or the kind, the case being measured, the phase, the tokens spent so far
+   * and whether a stop was asked for.
+   * @returns {{ running: false } | { running: true, kind: string, caseId: number|null, phase: string,
+   *   tokens: number, stopping: boolean }}
+   */
   function status() {
     if (!current) return { running: false };
     return {
       running: true,
       kind: current.kind,
       caseId: current.caseId,
-      caseIds: [...current.caseIds],
       phase: current.phase,
-      startedAt: new Date(current.startedAt).toISOString(),
       tokens: current.spent,
       stopping: current.signal.aborted,
     };
   }
 
-  return { run, check, resolveAnchor: readAnchor, stop, status, waitIdle, isRunning: () => current !== null };
+  return { run, check, readAnchor, stop, status, waitIdle, isRunning: () => current !== null };
 }
