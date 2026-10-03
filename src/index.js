@@ -268,6 +268,20 @@ function every(ms, fn, label) {
   timers.push(id);
 }
 
+/**
+ * relationships.decayPerDay: every stored affinity (public and private) drifts toward zero, one
+ * step per whole day (src/memory/store.js#decayAffinities). Cheap to run hourly: it only applies
+ * full days. Skipped while paused (the owner may be editing data/) and while the warmup runs.
+ */
+function sweepAffinityDecay() {
+  const guildId = instance.guildId;
+  const config = hot.config;
+  if (!guildId || config.features?.relationships === false) return;
+  if (store.state.data.paused || isWarmingUp()) return;
+  const counts = store.decayAffinities(guildId, Date.now(), config.relationships ?? {});
+  if (counts.decayed > 0) log.info('affinity: decay applied', counts);
+}
+
 let lastCommandName = hot.config.bot.commandName;
 let lastAdminCommandsOn = hot.config.features?.adminCommands !== false;
 
@@ -307,6 +321,14 @@ client.once(Events.ClientReady, async () => {
   // The GIF library from history, once (features.gifs on, no backfill stamp in gifs.json,
   // gifs.backfillMessages > 0). Fire-and-forget: never blocks the persona, logs its errors.
   gifBackfill.startIfNeeded(instance.guildId);
+
+  // Affinity decay: once now (catches up the days the process was down), then hourly.
+  try {
+    sweepAffinityDecay();
+  } catch (err) {
+    log.error('index: affinity decay failed', { error: err });
+  }
+  every(3_600_000, sweepAffinityDecay, 'affinity decay');
 
   every(30_000, () => spontaneous.tick(), 'spontaneous.tick');
   // The tick still runs on schedule even with the switch off, so flipping it

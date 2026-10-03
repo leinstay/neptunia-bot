@@ -26,7 +26,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { log } from '../log.js';
-import { emptyAffinity, applyDelta } from './affinity.js';
+import { emptyAffinity, applyDelta, decayAffinity } from './affinity.js';
 import { mergeEpisodes } from './episodes.js';
 import { upsertLore } from './lore.js';
 import { applyInterestOps, normalizeInterests } from './interests.js';
@@ -270,6 +270,15 @@ function normalizeGuild(guild) {
   guild.wornHistory = normalizeWornHistory(guild.wornHistory);
 }
 
+/** The `relationshipScore` stamped next to a freshly written `relationship` text: the affinity
+ * score at that moment. `opts.relationshipScore` when finite (the analyzer passes the score its
+ * batch lands on, after its own delta -- the effective score for the private layer), else the
+ * stored score of this file's own affinity, else 0. Missing on an old profile = 0 for readers. */
+function relationshipScoreOf(opts, affinity) {
+  if (Number.isFinite(opts?.relationshipScore)) return opts.relationshipScore;
+  return Number.isFinite(affinity?.score) ? affinity.score : 0;
+}
+
 /** Keep only the newest `max` UTC-date keys of a `days` counter map. */
 function trimDays(days, max) {
   const keys = Object.keys(days).sort();
@@ -479,7 +488,11 @@ export function createStore({ dataDir }) {
      * @param {{ fieldChars?: number, maxInterests?: number, maxInterestsStored?: number, topicChars?: number,
      *   noteChars?: number, interestHalfLifeDays?: number, maxDetails?: number, maxDetailsStored?: number,
      *   detailHalfLifeDays?: number, maxAliases?: number, maxAliasesStored?: number, aliasHalfLifeDays?: number,
-     *   confirmGapHours?: number, seenAt?: number, now?: number, clampTolerance?: number }} [opts]
+     *   confirmGapHours?: number, seenAt?: number, now?: number, clampTolerance?: number,
+     *   relationshipScore?: number }} [opts]
+     *   `relationshipScore`: stamped as `profile.relationshipScore` whenever a `relationship` text
+     *   is written (falls back to the stored score) -- the band the text was written in, see
+     *   src/memory/update.js#buildMemoryRequest (`relationshipStale`).
      *   `maxInterestsStored`/`maxDetailsStored`/`interestHalfLifeDays`/`detailHalfLifeDays` drive the
      *   storage-cap-vs-shown-cap split and the rank decay -- see
      *   docs/prompt-contract.md, "More is stored than shown, and rank decays with age".
@@ -498,6 +511,7 @@ export function createStore({ dataDir }) {
         const value = ops?.[key];
         if (typeof value === 'string' && value.trim()) {
           profile[key] = clampText(value, opts.fieldChars, { tolerance: opts.clampTolerance });
+          if (key === 'relationship') profile.relationshipScore = relationshipScoreOf(opts, profile.affinity);
         }
       }
 
@@ -560,7 +574,7 @@ export function createStore({ dataDir }) {
       return added;
     },
 
-    /** Fold one delta into a member's stored affinity (see src/memory/affinity.js). */
+    /** Fold one delta into a member's stored affinity (see src/memory/affinity.js); `decayedAt` is kept. */
     adjustAffinity(guildId, userId, delta, reason, opts) {
       const item = entry(userFile(guildId, userId), () => emptyProfile(String(userId)));
       const current = item.value.affinity ?? emptyAffinity();
@@ -568,6 +582,38 @@ export function createStore({ dataDir }) {
       item.value.affinity = next;
       item.dirty = true;
       return next;
+    },
+
+    /**
+     * `relationships.decayPerDay`: run src/memory/affinity.js#decayAffinity over every member
+     * profile of a guild AND every private layer under its `private/` directory. Only a file
+     * whose affinity actually changed (score moved, or the `decayedAt` stamp was set or
+     * advanced) is marked dirty; a profile without any stored affinity is left alone. Never
+     * creates a file.
+     * @param {string} guildId
+     * @param {number} nowMs  Epoch milliseconds.
+     * @param {{ decayPerDay?: number, decayPower?: number }} cfg  `config.relationships`, read by the caller at the moment of the sweep.
+     * @returns {{ profiles: number, decayed: number }}  `profiles`: files looked at (public +
+     *   private); `decayed`: files whose score moved.
+     */
+    decayAffinities(guildId, nowMs, cfg) {
+      const counts = { profiles: 0, decayed: 0 };
+      const sweep = (item) => {
+        counts.profiles += 1;
+        const current = item.value.affinity;
+        if (!current || typeof current !== 'object' || Array.isArray(current)) return;
+        const { affinity } = decayAffinity(current, nowMs, cfg);
+        if (affinity === current) return;
+        if (affinity.score !== current.score) counts.decayed += 1;
+        item.value.affinity = affinity;
+        item.dirty = true;
+      };
+      for (const userId of idsUnder(path.join(guildDir(guildId), 'users'))) {
+        if (!store.getUser(guildId, userId)) continue;
+        sweep(entries.get(userFile(guildId, userId)));
+      }
+      for (const userId of idsUnder(privateDir(guildId))) sweep(privateEntry(guildId, userId));
+      return counts;
     },
 
     /**
@@ -623,7 +669,8 @@ export function createStore({ dataDir }) {
      * @param {{ relationship?: string,
      *   interests?: { add?: object[], update?: object[], seen?: string[], remove?: string[] },
      *   details?: { add?: unknown[], seen?: unknown[], remove?: unknown[] } }} ops
-     * @param {object} [opts]  As for `applyProfileOps`.
+     * @param {object} [opts]  As for `applyProfileOps`; `relationshipScore` falls back to this
+     *   layer's own score (the analyzer passes the effective one it showed the model).
      * @returns {object} The updated private layer.
      */
     applyPrivateOps(guildId, userId, ops, opts = {}) {
@@ -635,6 +682,7 @@ export function createStore({ dataDir }) {
       const relationship = ops?.relationship;
       if (typeof relationship === 'string' && relationship.trim()) {
         priv.relationship = clampText(relationship, opts.fieldChars, { tolerance: opts.clampTolerance });
+        priv.relationshipScore = relationshipScoreOf(opts, priv.affinity);
       }
 
       if (ops?.interests && typeof ops.interests === 'object' && !Array.isArray(ops.interests)) {

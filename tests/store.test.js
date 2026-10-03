@@ -1860,3 +1860,127 @@ test('touchPrivateSeen: stamps lastSeen every time, firstSeen only while empty; 
   assert.equal(priv.lastSeen, new Date(Date.UTC(2026, 0, 5)).toISOString());
   assert.equal(store.getUser('g1', 'u1').lastSeen, new Date(500).toISOString());
 });
+
+// --- affinity decay sweep and relationshipScore -------------------------------
+
+const DECAY_DAY_MS = 24 * 60 * 60 * 1000;
+const DECAY_NOW = Date.UTC(2026, 9, 3, 12, 0, 0);
+const DECAY_CFG = { decayPerDay: 0.04, decayPower: 1 };
+
+function writeRaw(file, value) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, JSON.stringify(value)); // compact: a flush would rewrite it pretty-printed
+}
+
+function userFileOf(dir, guildId, userId) {
+  return path.join(dir, 'guilds', guildId, 'users', `${userId}.json`);
+}
+
+test('decayAffinities: decays public and private profiles, marks only the changed ones dirty', () => {
+  const dir = tmpDataDir();
+  const dayAgo = new Date(DECAY_NOW - DECAY_DAY_MS).toISOString();
+  const hourAgo = new Date(DECAY_NOW - 3600_000).toISOString();
+  writeRaw(userFileOf(dir, 'g1', 'u1'), { id: 'u1', names: ['Zoé'], affinity: { score: 100, reason: 'r', history: [], decayedAt: dayAgo } });
+  writeRaw(userFileOf(dir, 'g1', 'u2'), { id: 'u2', names: ['Ἄννα'], affinity: { score: 50, reason: '', history: [], decayedAt: hourAgo } });
+  writeRaw(privateFile(dir, 'g1', 'u1'), { relationship: '', affinity: { score: -64, reason: '', history: [], decayedAt: dayAgo } });
+  const untouchedRaw = fs.readFileSync(userFileOf(dir, 'g1', 'u2'), 'utf8');
+
+  const store = createStore({ dataDir: dir });
+  const counts = store.decayAffinities('g1', DECAY_NOW, DECAY_CFG);
+  assert.deepEqual(counts, { profiles: 3, decayed: 2 });
+  assert.equal(store.getUser('g1', 'u1').affinity.score, 96);
+  assert.equal(store.getUser('g1', 'u1').affinity.decayedAt, new Date(DECAY_NOW).toISOString());
+  assert.equal(store.getPrivate('g1', 'u1').affinity.score, -62.36);
+  assert.equal(store.getUser('g1', 'u2').affinity.score, 50);
+
+  store.flush();
+  assert.equal(fs.readFileSync(userFileOf(dir, 'g1', 'u2'), 'utf8'), untouchedRaw, 'an unchanged profile is not rewritten');
+  const storeB = createStore({ dataDir: dir });
+  assert.equal(storeB.getUser('g1', 'u1').affinity.score, 96, 'the decayed public score was flushed');
+  assert.equal(storeB.getPrivate('g1', 'u1').affinity.score, -62.36, 'the decayed private score was flushed');
+});
+
+test('decayAffinities: the first sweep only stamps the baseline -- persisted, but nothing counts as decayed', () => {
+  const dir = tmpDataDir();
+  writeRaw(userFileOf(dir, 'g1', 'u1'), { id: 'u1', names: ['Zoé'], affinity: { score: 80, reason: '', history: [] } });
+  writeRaw(privateFile(dir, 'g1', 'u1'), { relationship: '', affinity: { score: 20, reason: '', history: [] } });
+
+  const store = createStore({ dataDir: dir });
+  assert.deepEqual(store.decayAffinities('g1', DECAY_NOW, DECAY_CFG), { profiles: 2, decayed: 0 });
+  store.flush();
+
+  const storeB = createStore({ dataDir: dir });
+  assert.equal(storeB.getUser('g1', 'u1').affinity.score, 80);
+  assert.equal(storeB.getUser('g1', 'u1').affinity.decayedAt, new Date(DECAY_NOW).toISOString());
+  assert.equal(storeB.getPrivate('g1', 'u1').affinity.decayedAt, new Date(DECAY_NOW).toISOString());
+  assert.deepEqual(storeB.decayAffinities('g1', DECAY_NOW + DECAY_DAY_MS, DECAY_CFG), { profiles: 2, decayed: 2 });
+});
+
+test('decayAffinities: decay off writes nothing; no profiles -> zero counts', () => {
+  const dir = tmpDataDir();
+  writeRaw(userFileOf(dir, 'g1', 'u1'), { id: 'u1', affinity: { score: 80, reason: '', history: [] } });
+  const raw = fs.readFileSync(userFileOf(dir, 'g1', 'u1'), 'utf8');
+  const store = createStore({ dataDir: dir });
+  assert.deepEqual(store.decayAffinities('g1', DECAY_NOW, { decayPerDay: 0 }), { profiles: 1, decayed: 0 });
+  store.flush();
+  assert.equal(fs.readFileSync(userFileOf(dir, 'g1', 'u1'), 'utf8'), raw);
+  assert.deepEqual(store.decayAffinities('empty-guild', DECAY_NOW, DECAY_CFG), { profiles: 0, decayed: 0 });
+});
+
+test('adjustAffinity / adjustPrivateAffinity: keep decayedAt when they fold a delta', () => {
+  const dir = tmpDataDir();
+  const stamp = new Date(DECAY_NOW).toISOString();
+  writeRaw(userFileOf(dir, 'g1', 'u1'), { id: 'u1', affinity: { score: 10, reason: '', history: [], decayedAt: stamp } });
+  writeRaw(privateFile(dir, 'g1', 'u1'), { affinity: { score: 10, reason: '', history: [], decayedAt: stamp } });
+  const store = createStore({ dataDir: dir });
+  assert.equal(store.adjustAffinity('g1', 'u1', 5, 'x', { maxDelta: 15, historySize: 10, now: DECAY_NOW }).decayedAt, stamp);
+  assert.equal(store.adjustPrivateAffinity('g1', 'u1', 5, 'x', { maxDelta: 15, historySize: 10, now: DECAY_NOW }).decayedAt, stamp);
+  assert.equal(store.getUser('g1', 'u1').affinity.decayedAt, stamp);
+  assert.equal(store.getPrivate('g1', 'u1').affinity.decayedAt, stamp);
+});
+
+test('normalisation on read keeps decayedAt and relationshipScore, public and private', () => {
+  const dir = tmpDataDir();
+  const stamp = new Date(DECAY_NOW).toISOString();
+  writeRaw(userFileOf(dir, 'g1', 'u1'), { id: 'u1', relationship: 'x', relationshipScore: 42, affinity: { score: 10, reason: '', history: [], decayedAt: stamp } });
+  writeRaw(privateFile(dir, 'g1', 'u1'), { relationship: 'y', relationshipScore: -9, affinity: { score: 10, decayedAt: stamp } });
+  const store = createStore({ dataDir: dir });
+  assert.equal(store.getUser('g1', 'u1').relationshipScore, 42);
+  assert.equal(store.getUser('g1', 'u1').affinity.decayedAt, stamp);
+  assert.equal(store.getPrivate('g1', 'u1').relationshipScore, -9);
+  assert.equal(store.getPrivate('g1', 'u1').affinity.decayedAt, stamp);
+});
+
+test('applyProfileOps: stamps relationshipScore when the relationship text is written, not otherwise', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  store.touchUser('g1', 'u1', 'Zoé', 1000);
+  store.adjustAffinity('g1', 'u1', 30, 'x', { maxDelta: 30, historySize: 10, now: 1000 });
+
+  store.applyProfileOps('g1', 'u1', { character: 'calm', relationship: '  ' }, { fieldChars: 400 });
+  assert.equal(store.getUser('g1', 'u1').relationshipScore, undefined, 'a blank relationship writes nothing');
+
+  store.applyProfileOps('g1', 'u1', { relationship: 'Close friends' }, { fieldChars: 400 });
+  assert.equal(store.getUser('g1', 'u1').relationshipScore, 30, 'falls back to the stored score');
+
+  store.applyProfileOps('g1', 'u1', { relationship: 'Closer still' }, { fieldChars: 400, relationshipScore: 44.5 });
+  assert.equal(store.getUser('g1', 'u1').relationshipScore, 44.5, 'opts.relationshipScore wins');
+
+  store.applyProfileOps('g1', 'u1', { details: { add: ['owns a cat'] } }, { fieldChars: 400, relationshipScore: 99 });
+  assert.equal(store.getUser('g1', 'u1').relationshipScore, 44.5, 'no relationship text -> untouched');
+});
+
+test('applyPrivateOps: stamps relationshipScore when the private relationship text is written, not otherwise', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  store.adjustPrivateAffinity('g1', 'u1', 12, 'x', { maxDelta: 15, historySize: 10, now: 1000 });
+
+  store.applyPrivateOps('g1', 'u1', { details: { add: ['a secret'] } }, { fieldChars: 400, relationshipScore: 50 });
+  assert.equal(store.getPrivate('g1', 'u1').relationshipScore, undefined);
+
+  store.applyPrivateOps('g1', 'u1', { relationship: 'Trusts the persona' }, { fieldChars: 400 });
+  assert.equal(store.getPrivate('g1', 'u1').relationshipScore, 12, 'falls back to the private score');
+
+  store.applyPrivateOps('g1', 'u1', { relationship: 'Trusts the persona more' }, { fieldChars: 400, relationshipScore: 61 });
+  assert.equal(store.getPrivate('g1', 'u1').relationshipScore, 61);
+});

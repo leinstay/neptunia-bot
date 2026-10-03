@@ -166,7 +166,10 @@
     "historySize": 10,
     "directTriggerCount": 6,
     "damping": true,
-    "dampingPower": 1
+    "dampingPower": 1,
+    "decayPerDay": 0.04,
+    "decayPower": 1,
+    "rewriteOnBandChange": true
   },
   "media": {
     "maxOutputTokens": 120,

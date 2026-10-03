@@ -17,7 +17,7 @@ import { parseJsonObject } from '../llm/parse.js';
 import { TokenLimitError } from '../llm/openrouter.js';
 import { isDescribable, stickerUrl } from '../discord/media.js';
 import { log } from '../log.js';
-import { emptyAffinity, roundScore } from './affinity.js';
+import { emptyAffinity, roundScore, affinityBand, applyDelta } from './affinity.js';
 import { keywordMatches } from './lore.js';
 import { normalizeInterests } from './interests.js';
 import { normalizeDetails } from './details.js';
@@ -361,6 +361,8 @@ export function buildMemoryRequest({ prompts, config, calibrator, profiles, guil
     throw new Error('prompts.labels is incomplete: memory.privateNote and memory.privateChannel are required for a private batch');
   }
   const relationships = config.features?.relationships !== false;
+  // relationships.rewriteOnBandChange: a missing key counts as on, like features.*.
+  const rewriteOnBandChange = config.relationships?.rewriteOnBandChange !== false;
   const episodesOn = config.features?.episodes !== false;
   const loreOn = config.features?.lore !== false;
   const resolveName = typeof nameOf === 'function' ? nameOf : () => null;
@@ -389,9 +391,28 @@ export function buildMemoryRequest({ prompts, config, calibrator, profiles, guil
     }
     if (relationships) {
       const affinity = profile?.affinity ?? emptyAffinity();
+      const score = Number.isFinite(affinity.score) ? affinity.score : 0;
       // The analyzer sees the integer score, same as the owner (see roundScore); band thresholds
       // and the ignore-chance maths, not the analyzer, are what need the precise value.
-      fields.affinity = { score: roundScore(affinity.score), reason: resolveText(affinity.reason, resolveName) };
+      const band = affinityBand(score);
+      fields.affinity = { score: roundScore(score), band, reason: resolveText(affinity.reason, resolveName) };
+      // The stored relationship text was written in another band than the one the score sits in
+      // now (`relationshipScore`, missing = 0): flag it so the analyzer rewrites it -- a slow drift
+      // never looks like a shift from inside one batch. An EMPTY text is flagged with
+      // `writtenAt: 'none'` once the profile has something a first version could be written from:
+      // a non-zero score, a non-empty reason, or stored episodes (the "dealing with each other in
+      // this batch" trigger is left to the model).
+      if (rewriteOnBandChange) {
+        const text = typeof fields.relationship === 'string' ? fields.relationship.trim() : '';
+        if (text) {
+          const writtenAt = affinityBand(Number.isFinite(profile?.relationshipScore) ? profile.relationshipScore : 0);
+          if (writtenAt !== band) fields.relationshipStale = { writtenAt, now: band };
+        } else {
+          const hasReason = typeof affinity.reason === 'string' && affinity.reason.trim() !== '';
+          const hasEpisodes = Array.isArray(profile?.episodes) && profile.episodes.length > 0;
+          if (score !== 0 || hasReason || hasEpisodes) fields.relationshipStale = { writtenAt: 'none', now: band };
+        }
+      }
     }
     if (episodesOn && Array.isArray(profile?.episodes) && profile.episodes.length > 0) {
       fields.episodes = profile.episodes.map(({ date, what, quote, weight }) => ({ date, what: resolveText(what, resolveName), quote, weight }));
@@ -683,6 +704,16 @@ function affinityOptions(relationships, cfg) {
   };
 }
 
+/** The affinity score after this batch's own `raw.affinity` delta, without storing anything: the
+ * same `applyDelta` call `adjustAffinity` / `adjustPrivateAffinity` make, or the stored score when
+ * relationships are off or the batch carries no delta. Missing/malformed = 0. */
+function scoreAfterBatch(affinity, raw, relationships, cfg) {
+  if (relationships?.enabled && isPlainObject(raw?.affinity)) {
+    return applyDelta(affinity, raw.affinity.delta, '', affinityOptions(relationships, cfg)).score;
+  }
+  return Number.isFinite(affinity?.score) ? affinity.score : 0;
+}
+
 /** `addEpisodes` / `addPrivateEpisodes` options from the `episodes` argument. */
 function episodeOptions(episodes, cfg) {
   return {
@@ -789,7 +820,12 @@ export function applyMemoryUpdate(store, guildId, update, cfg, knownUserIds, kno
       const beforeInterests = JSON.stringify(store.getUser(guildId, userId)?.interests ?? []);
       const beforeRelationship = store.getUser(guildId, userId)?.relationship ?? '';
 
-      store.applyProfileOps(guildId, userId, ops, profileOpsOptions(cfg, profileOpsNow, seenAt));
+      // A written relationship text is stamped with the score this batch lands on, after its own
+      // delta (computed with the same pure maths adjustAffinity runs below).
+      const relationshipWritten = typeof ops.relationship === 'string' && ops.relationship.trim() !== '';
+      const profileOpts = profileOpsOptions(cfg, profileOpsNow, seenAt);
+      if (relationshipWritten) profileOpts.relationshipScore = scoreAfterBatch(store.getUser(guildId, userId)?.affinity, raw, relationships, cfg);
+      store.applyProfileOps(guildId, userId, ops, profileOpts);
       result.users += 1;
 
       const afterInterests = JSON.stringify(store.getUser(guildId, userId)?.interests ?? []);
@@ -958,7 +994,15 @@ export function applyPrivateUpdate(store, guildId, userId, update, cfg, relation
   const beforeInterests = JSON.stringify(before?.interests ?? []);
   const beforeRelationship = before?.relationship ?? '';
 
-  const after = store.applyPrivateOps(guildId, id, ops, profileOpsOptions(cfg, opsNow, seenAt));
+  // The private analyzer sees the EFFECTIVE affinity (public + private), so a written private
+  // relationship is stamped with the effective score this batch lands on.
+  const relationshipWritten = typeof ops.relationship === 'string' && ops.relationship.trim() !== '';
+  const privateOpts = profileOpsOptions(cfg, opsNow, seenAt);
+  if (relationshipWritten) {
+    const privateScore = scoreAfterBatch(before?.affinity, raw, relationships, cfg);
+    privateOpts.relationshipScore = effectiveAffinity(store.getUser?.(guildId, id)?.affinity, { score: privateScore }).score;
+  }
+  const after = store.applyPrivateOps(guildId, id, ops, privateOpts);
   result.users = 1;
   if (JSON.stringify(after.interests) !== beforeInterests) result.interestsChanged = 1;
   if (after.relationship !== beforeRelationship) result.relationships = 1;

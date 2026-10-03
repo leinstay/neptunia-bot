@@ -8,7 +8,8 @@
 
 import { clampText } from './clamp.js';
 
-/** A member's attitude before anything has been observed about them. */
+/** A member's attitude before anything has been observed about them. A stored affinity may also
+ * carry `decayedAt` (ISO string, see `decayAffinity`); every function here keeps it. */
 export function emptyAffinity() {
   return { score: 0, reason: '', history: [] };
 }
@@ -132,7 +133,57 @@ export function applyDelta(
   const size = Number.isFinite(historySize) && historySize > 0 ? historySize : 0;
   const history = size > 0 ? [...base.history, entry].slice(-size) : [];
 
-  return { score: newScore, reason: finalReason, history };
+  // Any other stored field (`decayedAt`, see `decayAffinity`) rides along untouched.
+  const extra = affinity && typeof affinity === 'object' && !Array.isArray(affinity) ? affinity : {};
+  return { ...extra, score: newScore, reason: finalReason, history };
+}
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+/** Upper bound on the days one `decayAffinity` call applies; the rest waits for the next sweep. */
+const MAX_DECAY_DAYS = 3650;
+
+/**
+ * `relationships.decayPerDay` / `decayPower`: the daily drift of a score toward zero, stronger the
+ * further it is from zero. Per whole day elapsed since `affinity.decayedAt` the score loses
+ * `decayPerDay * |score| * (|score| / 100) ** decayPower`, never crossing zero; the result is
+ * rounded to 2 decimals (the stored precision, see `applyDelta`). `decayedAt` advances by exactly
+ * the whole days applied, so the remainder carries over to the next call. No history entry is
+ * written: history stays what the analyzer moved.
+ *
+ * A missing or malformed `decayedAt` is only stamped with `nowMs` (the first sweep sets the
+ * baseline, nothing is applied retroactively). A score of 0 only moves the stamp.
+ *
+ * @param {object} affinity  Stored `{ score, reason, history, decayedAt? }`, or malformed/undefined.
+ * @param {number} nowMs     Epoch milliseconds.
+ * @param {{ decayPerDay?: number, decayPower?: number }} [cfg]  `config.relationships`.
+ *   `decayPerDay` 0, missing or non-finite = off; `decayPower` not a positive finite number = 1.
+ * @returns {{ affinity: object, days: number }}  `affinity` is the SAME object when nothing
+ *   changes (off, less than a day elapsed, a stamp in the future); `days` = whole days applied.
+ */
+export function decayAffinity(affinity, nowMs, cfg = {}) {
+  const rate = cfg?.decayPerDay;
+  if (!Number.isFinite(rate) || rate <= 0 || !Number.isFinite(nowMs)) return { affinity, days: 0 };
+  const power = Number.isFinite(cfg?.decayPower) && cfg.decayPower > 0 ? cfg.decayPower : 1;
+  const extra = affinity && typeof affinity === 'object' && !Array.isArray(affinity) ? affinity : {};
+  const base = { ...extra, ...normalizeAffinity(affinity) };
+
+  const since = typeof base.decayedAt === 'string' ? Date.parse(base.decayedAt) : NaN;
+  if (!Number.isFinite(since)) {
+    return { affinity: { ...base, decayedAt: new Date(nowMs).toISOString() }, days: 0 };
+  }
+
+  const days = Math.min(MAX_DECAY_DAYS, Math.floor((nowMs - since) / DAY_MS));
+  if (days < 1) return { affinity, days: 0 };
+
+  let score = base.score;
+  for (let i = 0; i < days && score !== 0; i += 1) {
+    const magnitude = Math.min(100, Math.abs(score));
+    const loss = rate * magnitude * (magnitude / 100) ** power;
+    score = score > 0 ? Math.max(0, score - loss) : Math.min(0, score + loss);
+  }
+
+  // `|| 0` turns a rounded -0 into 0.
+  return { affinity: { ...base, score: round2(score) || 0, decayedAt: new Date(since + days * DAY_MS).toISOString() }, days };
 }
 
 /**

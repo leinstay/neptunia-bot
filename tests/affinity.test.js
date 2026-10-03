@@ -2,7 +2,7 @@
 // features.relationships (docs/prompt-contract.md, "The analyzer").
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { emptyAffinity, affinityBand, applyDelta, ignoreAdjustment, roundScore } from '../src/memory/affinity.js';
+import { emptyAffinity, affinityBand, applyDelta, decayAffinity, ignoreAdjustment, roundScore } from '../src/memory/affinity.js';
 
 // --- emptyAffinity -----------------------------------------------------
 
@@ -347,4 +347,124 @@ test('roundScore: rounds a fractional score to the nearest integer', () => {
 test('roundScore: a non-finite score displays as 0', () => {
   assert.equal(roundScore(NaN), 0);
   assert.equal(roundScore(undefined), 0);
+});
+
+// --- decayAffinity -----------------------------------------------------------
+// Daily drift toward zero (relationships.decayPerDay / decayPower): per elapsed
+// day the score loses decayPerDay * |score| * (|score| / 100) ** decayPower.
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+const DECAY_T0 = Date.UTC(2026, 9, 1, 12, 0, 0);
+const DECAY_CFG = { decayPerDay: 0.04, decayPower: 1 };
+
+function stamped(score, at = DECAY_T0) {
+  return { score, reason: 'r', history: [{ ts: 't', delta: 1 }], decayedAt: new Date(at).toISOString() };
+}
+
+test('decayAffinity: one day at 100 loses 4, at 64 about 1.64, at 30 about 0.36', () => {
+  assert.equal(decayAffinity(stamped(100), DECAY_T0 + DAY_MS, DECAY_CFG).affinity.score, 96);
+  assert.equal(decayAffinity(stamped(64), DECAY_T0 + DAY_MS, DECAY_CFG).affinity.score, 62.36);
+  assert.equal(decayAffinity(stamped(30), DECAY_T0 + DAY_MS, DECAY_CFG).affinity.score, 29.64);
+});
+
+test('decayAffinity: a negative score moves up toward zero by the same amount', () => {
+  assert.equal(decayAffinity(stamped(-100), DECAY_T0 + DAY_MS, DECAY_CFG).affinity.score, -96);
+  assert.equal(decayAffinity(stamped(-64), DECAY_T0 + DAY_MS, DECAY_CFG).affinity.score, -62.36);
+});
+
+test('decayAffinity: never crosses zero, even with a huge decayPerDay', () => {
+  const up = decayAffinity(stamped(50), DECAY_T0 + 3 * DAY_MS, { decayPerDay: 5, decayPower: 1 });
+  assert.equal(up.affinity.score, 0);
+  const down = decayAffinity(stamped(-50), DECAY_T0 + 3 * DAY_MS, { decayPerDay: 5, decayPower: 1 });
+  assert.equal(down.affinity.score, 0);
+});
+
+test('decayAffinity: several days apply one step per day, in order', () => {
+  const { affinity, days } = decayAffinity(stamped(100), DECAY_T0 + 2 * DAY_MS, DECAY_CFG);
+  assert.equal(days, 2);
+  // 100 -> 96 -> 96 - 0.04 * 96 * 0.96 = 92.3136
+  assert.equal(affinity.score, 92.31);
+});
+
+test('decayAffinity: missing or malformed decayedAt only stamps the baseline, the score stays', () => {
+  for (const decayedAt of [undefined, 'not a date', 42, null]) {
+    const start = { score: 80, reason: 'r', history: [], decayedAt };
+    const { affinity, days } = decayAffinity(start, DECAY_T0, DECAY_CFG);
+    assert.equal(days, 0);
+    assert.equal(affinity.score, 80);
+    assert.equal(affinity.decayedAt, new Date(DECAY_T0).toISOString());
+    assert.equal(affinity.reason, 'r');
+  }
+});
+
+test('decayAffinity: only whole days apply, the remainder carries over to the next sweep', () => {
+  const first = decayAffinity(stamped(100), DECAY_T0 + DAY_MS + 5 * 3600_000, DECAY_CFG);
+  assert.equal(first.days, 1);
+  assert.equal(first.affinity.decayedAt, new Date(DECAY_T0 + DAY_MS).toISOString(), 'advanced by exactly one day');
+  const second = decayAffinity(first.affinity, DECAY_T0 + 2 * DAY_MS + 1000, DECAY_CFG);
+  assert.equal(second.days, 1, 'the 5 leftover hours plus 19 more make the second day');
+  assert.equal(second.affinity.decayedAt, new Date(DECAY_T0 + 2 * DAY_MS).toISOString());
+});
+
+test('decayAffinity: less than a day elapsed returns the same object', () => {
+  const start = stamped(100);
+  const { affinity, days } = decayAffinity(start, DECAY_T0 + DAY_MS - 1, DECAY_CFG);
+  assert.equal(affinity, start);
+  assert.equal(days, 0);
+});
+
+test('decayAffinity: a decayedAt in the future changes nothing', () => {
+  const start = stamped(100, DECAY_T0 + 5 * DAY_MS);
+  assert.equal(decayAffinity(start, DECAY_T0, DECAY_CFG).affinity, start);
+});
+
+test('decayAffinity: score 0 moves only the stamp', () => {
+  const { affinity, days } = decayAffinity(stamped(0), DECAY_T0 + 3 * DAY_MS, DECAY_CFG);
+  assert.equal(days, 3);
+  assert.equal(affinity.score, 0);
+  assert.equal(affinity.decayedAt, new Date(DECAY_T0 + 3 * DAY_MS).toISOString());
+});
+
+test('decayAffinity: decayPerDay 0, missing or non-finite is off -- same object, no stamp', () => {
+  for (const cfg of [{ decayPerDay: 0 }, {}, { decayPerDay: NaN }, { decayPerDay: Infinity }, { decayPerDay: 'x' }, undefined]) {
+    const start = stamped(100);
+    assert.equal(decayAffinity(start, DECAY_T0 + 10 * DAY_MS, cfg).affinity, start);
+    const unstamped = { score: 100, reason: '', history: [] };
+    assert.equal(decayAffinity(unstamped, DECAY_T0, cfg).affinity, unstamped);
+  }
+});
+
+test('decayAffinity: decayPower falls back to 1 when it is not a positive finite number', () => {
+  for (const decayPower of [0, -1, NaN, Infinity, 'x', null, undefined]) {
+    const { affinity } = decayAffinity(stamped(64), DECAY_T0 + DAY_MS, { decayPerDay: 0.04, decayPower });
+    assert.equal(affinity.score, 62.36, `decayPower ${decayPower} should fall back to 1`);
+  }
+});
+
+test('decayAffinity: decayPower 2 makes a middling score decay slower', () => {
+  // 64 - 0.04 * 64 * 0.64 ** 2 = 62.951...
+  const { affinity } = decayAffinity(stamped(64), DECAY_T0 + DAY_MS, { decayPerDay: 0.04, decayPower: 2 });
+  assert.equal(affinity.score, 62.95);
+});
+
+test('decayAffinity: keeps reason and history untouched, adds no history entry', () => {
+  const start = stamped(100);
+  const { affinity } = decayAffinity(start, DECAY_T0 + DAY_MS, DECAY_CFG);
+  assert.equal(affinity.reason, 'r');
+  assert.deepEqual(affinity.history, start.history);
+  assert.equal(start.score, 100, 'the input is not mutated');
+});
+
+test('decayAffinity: the loop is capped (3650 days) and the stamp advances only by the days applied', () => {
+  const start = stamped(100, DECAY_T0 - 5000 * DAY_MS);
+  const { days, affinity } = decayAffinity(start, DECAY_T0, DECAY_CFG);
+  assert.equal(days, 3650);
+  assert.equal(affinity.decayedAt, new Date(DECAY_T0 - 1350 * DAY_MS).toISOString());
+});
+
+test('applyDelta: keeps decayedAt when it folds a delta', () => {
+  const start = stamped(10);
+  const result = applyDelta(start, 5, 'x', { maxDelta: 15, historySize: 10, now: DECAY_T0 });
+  assert.equal(result.score, 15);
+  assert.equal(result.decayedAt, start.decayedAt);
 });

@@ -8,7 +8,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { createStore } from '../src/memory/store.js';
-import { isDue, buildMemoryRequest, applyMemoryUpdate, createMemoryUpdater, touchMemory, computeSeenAt, batchAuthorNamesMap, characterText } from '../src/memory/update.js';
+import { isDue, buildMemoryRequest, applyMemoryUpdate, applyPrivateUpdate, createMemoryUpdater, touchMemory, computeSeenAt, batchAuthorNamesMap, characterText } from '../src/memory/update.js';
 import { createCalibrator, estimateTokens } from '../src/llm/tokens.js';
 import { formatTranscript } from '../src/discord/format.js';
 import { TokenLimitError } from '../src/llm/openrouter.js';
@@ -537,7 +537,7 @@ test('buildMemoryRequest: relationships on with no rules configured renders the 
   assert.match(user, /<character>\nCard of Nept\.\n<\/character>/);
 });
 
-test('buildMemoryRequest: relationships on adds affinity: { score, reason } to each existing profile', () => {
+test('buildMemoryRequest: relationships on adds affinity: { score, band, reason } to each existing profile', () => {
   const config = makeConfig({ features: { relationships: true } });
   const calibrator = createCalibrator();
   const messages = [slimMessage({ id: 'm1', ts: Date.UTC(2026, 0, 1, 12, 0, 0) })];
@@ -554,7 +554,7 @@ test('buildMemoryRequest: relationships on adds affinity: { score, reason } to e
 
   const user = llmMessages[1].content;
   const profiles = JSON.parse(/<existing_profiles>\n([\s\S]*?)\n<\/existing_profiles>/.exec(user)[1]);
-  assert.deepEqual(profiles['1'].affinity, { score: 42, reason: 'helped once' });
+  assert.deepEqual(profiles['1'].affinity, { score: 42, band: 'fond', reason: 'helped once' });
 });
 
 test('buildMemoryRequest: a damped (fractional) stored score is rounded to an integer for the analyzer', () => {
@@ -574,7 +574,7 @@ test('buildMemoryRequest: a damped (fractional) stored score is rounded to an in
 
   const user = llmMessages[1].content;
   const profiles = JSON.parse(/<existing_profiles>\n([\s\S]*?)\n<\/existing_profiles>/.exec(user)[1]);
-  assert.deepEqual(profiles['1'].affinity, { score: 60, reason: 'helped once' });
+  assert.deepEqual(profiles['1'].affinity, { score: 60, band: 'devoted', reason: 'helped once' });
 });
 
 test('buildMemoryRequest: relationships off never adds affinity to existing profiles', () => {
@@ -4415,5 +4415,186 @@ test('analyze: the analyzer request is routed as the analyzer role', async () =>
     await updater.analyze('g1', [slimMessage({ id: 'm1' })]);
 
     assert.equal(seenOptions.role, 'analyzer');
+  });
+});
+
+// ---- relationship text vs affinity band (relationshipScore / relationshipStale) ----
+
+function profilesViewOf(profile, configOverrides = {}, privateChat) {
+  const config = makeConfig({ features: { relationships: true }, ...configOverrides });
+  const { messages: llmMessages } = buildMemoryRequest({
+    prompts: { memory: 'sys', labels },
+    config,
+    calibrator: createCalibrator(),
+    profiles: { 1: { names: ['nick'], character: '', interests: [], style: '', details: [], ...profile } },
+    guildMemory: {},
+    messages: [slimMessage({ id: 'm1', ts: Date.UTC(2026, 0, 1, 12, 0, 0) })],
+    selfName: 'Nept',
+    privateChat,
+  });
+  return JSON.parse(/<existing_profiles>\n([\s\S]*?)\n<\/existing_profiles>/.exec(llmMessages[1].content)[1])['1'];
+}
+
+test('buildMemoryRequest: relationshipStale when the band moved since the relationship text was written', () => {
+  const view = profilesViewOf({ relationship: 'Barely knows them', relationshipScore: 26, affinity: { score: 64, reason: 'r', history: [] } });
+  assert.deepEqual(view.relationshipStale, { writtenAt: 'fond', now: 'devoted' });
+  assert.equal(view.affinity.band, 'devoted');
+});
+
+test('buildMemoryRequest: a missing relationshipScore counts as 0 (neutral)', () => {
+  const view = profilesViewOf({ relationship: 'Barely knows them', affinity: { score: 30, reason: '', history: [] } });
+  assert.deepEqual(view.relationshipStale, { writtenAt: 'neutral', now: 'fond' });
+});
+
+test('buildMemoryRequest: no relationshipStale within the same band, with an empty text, or with the switch off', () => {
+  const sameBand = profilesViewOf({ relationship: 'Friends', relationshipScore: 26, affinity: { score: 59, reason: '', history: [] } });
+  assert.equal(sameBand.relationshipStale, undefined);
+
+  const off = profilesViewOf(
+    { relationship: 'Friends', relationshipScore: 0, affinity: { score: 80, reason: '', history: [] } },
+    { relationships: { rewriteOnBandChange: false } },
+  );
+  assert.equal(off.relationshipStale, undefined);
+  assert.equal(off.affinity.band, 'devoted', 'the band itself is still shown');
+
+  const missingKey = profilesViewOf({ relationship: 'Friends', relationshipScore: 0, affinity: { score: 80, reason: '', history: [] } }, { relationships: {} });
+  assert.deepEqual(missingKey.relationshipStale, { writtenAt: 'neutral', now: 'devoted' }, 'a missing switch counts as on');
+});
+
+test('buildMemoryRequest: an empty relationship with episodes gets relationshipStale writtenAt "none"', () => {
+  const view = profilesViewOf({
+    relationship: '',
+    affinity: { score: 0, reason: '', history: [] },
+    episodes: [{ date: '2026-01-01', what: 'shared a joke', weight: 2 }],
+  });
+  assert.deepEqual(view.relationshipStale, { writtenAt: 'none', now: 'neutral' });
+});
+
+test('buildMemoryRequest: an empty relationship with a non-zero score or a reason gets writtenAt "none"', () => {
+  const scored = profilesViewOf({ relationship: '', affinity: { score: 30, reason: '', history: [] } });
+  assert.deepEqual(scored.relationshipStale, { writtenAt: 'none', now: 'fond' });
+  const reasoned = profilesViewOf({ relationship: '  ', affinity: { score: 0, reason: 'was kind once', history: [] } });
+  assert.deepEqual(reasoned.relationshipStale, { writtenAt: 'none', now: 'neutral' });
+});
+
+test('buildMemoryRequest: an empty relationship with score 0, no reason and no episodes gets no marker', () => {
+  const view = profilesViewOf({ relationship: '', affinity: { score: 0, reason: '', history: [] }, episodes: [] });
+  assert.equal(view.relationshipStale, undefined);
+  const noAffinity = profilesViewOf({ relationship: '' });
+  assert.equal(noAffinity.relationshipStale, undefined);
+});
+
+test('buildMemoryRequest: switch off -> no "none" marker for an empty relationship either', () => {
+  const view = profilesViewOf(
+    { relationship: '', affinity: { score: 40, reason: 'r', history: [] }, episodes: [{ date: '2026-01-01', what: 'x', weight: 1 }] },
+    { relationships: { rewriteOnBandChange: false } },
+  );
+  assert.equal(view.relationshipStale, undefined);
+});
+
+test('analyzePrivate: an empty private relationship with a non-zero effective score gets writtenAt "none"', async () => {
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    seedPrivate(store, guildId); // effective 14 -> warm, private relationship empty
+    let sent = null;
+    const llm = { complete: async (messages) => ((sent = messages), { text: '{}' }) };
+    const updater = createMemoryUpdater({ hot: privateHot(), store, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept' });
+    await updater.analyzePrivate(guildId, 'u1', [dmMessage({ id: 'm1', direct: true, ts: Date.UTC(2026, 0, 2, 10) })]);
+
+    const mine = JSON.parse(blockBody(sent[1].content, 'existing_profiles')).u1;
+    assert.deepEqual(mine.relationshipStale, { writtenAt: 'none', now: 'warm' });
+  });
+});
+
+test('buildMemoryRequest: features.relationships off -> neither band nor relationshipStale', () => {
+  const view = profilesViewOf(
+    { relationship: 'Friends', relationshipScore: 0, affinity: { score: 80, reason: '', history: [] } },
+    { features: { relationships: false } },
+  );
+  assert.equal(view.affinity, undefined);
+  assert.equal(view.relationshipStale, undefined);
+});
+
+test('applyMemoryUpdate: a written relationship stamps relationshipScore with the score after this batch delta', () => {
+  withStore((store) => {
+    const guildId = 'g1';
+    store.touchUser(guildId, '1', 'nick', Date.now());
+    store.adjustAffinity(guildId, '1', 20, 'start', { maxDelta: Infinity, historySize: 10, now: Date.now() });
+
+    const update = { users: { 1: { relationship: 'Getting closer', affinity: { delta: 10, reason: 'kind' } } } };
+    applyMemoryUpdate(store, guildId, update, MEMORY_CFG, new Set(['1']), new Set(), RELATIONSHIPS_CFG);
+
+    const profile = store.getUser(guildId, '1');
+    // damped: 20 + 10 * (1 - 20/100) = 28
+    assert.equal(profile.affinity.score, 28);
+    assert.equal(profile.relationshipScore, 28);
+  });
+});
+
+test('applyMemoryUpdate: no relationship text -> relationshipScore untouched, even when the score moves', () => {
+  withStore((store) => {
+    const guildId = 'g1';
+    store.touchUser(guildId, '1', 'nick', Date.now());
+    store.applyProfileOps(guildId, '1', { relationship: 'Strangers' }, { fieldChars: 400 });
+    assert.equal(store.getUser(guildId, '1').relationshipScore, 0);
+
+    const update = { users: { 1: { relationship: '', affinity: { delta: 10, reason: 'kind' } } } };
+    applyMemoryUpdate(store, guildId, update, MEMORY_CFG, new Set(['1']), new Set(), RELATIONSHIPS_CFG);
+
+    const profile = store.getUser(guildId, '1');
+    assert.equal(profile.affinity.score, 10);
+    assert.equal(profile.relationshipScore, 0);
+    assert.equal(profile.relationship, 'Strangers');
+  });
+});
+
+test('applyMemoryUpdate: relationships disabled still stamps the current score with a written text', () => {
+  withStore((store) => {
+    const guildId = 'g1';
+    store.touchUser(guildId, '1', 'nick', Date.now());
+    store.adjustAffinity(guildId, '1', 40, 'start', { maxDelta: Infinity, historySize: 10, now: Date.now() });
+    const update = { users: { 1: { relationship: 'Friends', affinity: { delta: 10, reason: 'kind' } } } };
+    applyMemoryUpdate(store, guildId, update, MEMORY_CFG, new Set(['1']), new Set(), undefined);
+    assert.equal(store.getUser(guildId, '1').affinity.score, 40);
+    assert.equal(store.getUser(guildId, '1').relationshipScore, 40);
+  });
+});
+
+test('applyPrivateUpdate: a written private relationship stamps the EFFECTIVE score after this batch delta', () => {
+  withStore((store) => {
+    const guildId = 'g1';
+    seedPrivate(store, guildId); // public 10, private 4
+    const update = { users: { u1: { relationship: 'Trusts the persona', affinity: { delta: 6, reason: 'kind' } } } };
+    applyPrivateUpdate(store, guildId, 'u1', update, MEMORY_CFG, { ...RELATIONSHIPS_CFG, damping: false });
+
+    const priv = store.getPrivate(guildId, 'u1');
+    assert.equal(priv.affinity.score, 10);
+    assert.equal(priv.relationshipScore, 20, 'public 10 + private 10, what the private analyzer sees');
+    assert.equal(store.getUser(guildId, 'u1').relationshipScore, undefined, 'the public profile is untouched');
+  });
+});
+
+test('applyPrivateUpdate: no private relationship text -> no relationshipScore', () => {
+  withStore((store) => {
+    const guildId = 'g1';
+    seedPrivate(store, guildId);
+    applyPrivateUpdate(store, guildId, 'u1', { users: { u1: { affinity: { delta: 6, reason: 'kind' } } } }, MEMORY_CFG, RELATIONSHIPS_CFG);
+    assert.equal(store.getPrivate(guildId, 'u1').relationshipScore, undefined);
+  });
+});
+
+test('analyzePrivate: the view compares the effective band with the private relationshipScore', async () => {
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    seedPrivate(store, guildId); // effective 14 -> warm
+    store.applyPrivateOps(guildId, 'u1', { relationship: 'A private note' }, { fieldChars: 400, relationshipScore: 0 });
+    let sent = null;
+    const llm = { complete: async (messages) => ((sent = messages), { text: '{}' }) };
+    const updater = createMemoryUpdater({ hot: privateHot(), store, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept' });
+    await updater.analyzePrivate(guildId, 'u1', [dmMessage({ id: 'm1', direct: true, ts: Date.UTC(2026, 0, 2, 10) })]);
+
+    const mine = JSON.parse(blockBody(sent[1].content, 'existing_profiles')).u1;
+    assert.equal(mine.affinity.band, 'warm');
+    assert.deepEqual(mine.relationshipStale, { writtenAt: 'neutral', now: 'warm' });
   });
 });
