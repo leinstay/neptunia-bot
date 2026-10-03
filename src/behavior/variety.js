@@ -20,8 +20,8 @@ import { MINUTE_MS } from '../time.js';
 
 /** Defaults of the `variety` config block (config.json carries the same values). */
 export const VARIETY_DEFAULTS = Object.freeze({
-  window: 12,
-  recentMinutes: 45,
+  window: 16,
+  recentMinutes: 180,
   minLines: 3,
   contextChars: 120,
   maxPatterns: 4,

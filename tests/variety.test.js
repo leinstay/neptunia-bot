@@ -46,7 +46,7 @@ function own(id, minutesAgo, content, extra = {}) {
 
 test('varietySettings: defaults for a missing block, live values otherwise, garbage falls back', () => {
   assert.deepEqual(varietySettings({}), { ...VARIETY_DEFAULTS });
-  assert.deepEqual(VARIETY_DEFAULTS, { window: 12, recentMinutes: 45, minLines: 3, contextChars: 120, maxPatterns: 4, shapeChars: 140, maxOutputTokens: 500, timeoutMs: 8000, history: 20 });
+  assert.deepEqual(VARIETY_DEFAULTS, { window: 16, recentMinutes: 180, minLines: 3, contextChars: 120, maxPatterns: 4, shapeChars: 140, maxOutputTokens: 500, timeoutMs: 8000, history: 20 });
   const live = varietySettings({ variety: { window: 5, recentMinutes: 10, minLines: 2, contextChars: 0, maxPatterns: 1, history: 0 } });
   assert.equal(live.window, 5);
   assert.equal(live.recentMinutes, 10);
@@ -55,7 +55,7 @@ test('varietySettings: defaults for a missing block, live values otherwise, garb
   assert.equal(live.maxPatterns, 1);
   assert.equal(live.history, 0);
   const broken = varietySettings({ variety: { window: 'many', minLines: -1, timeoutMs: null, shapeChars: 1 } });
-  assert.equal(broken.window, 12);
+  assert.equal(broken.window, 16);
   assert.equal(broken.minLines, 3);
   assert.equal(broken.timeoutMs, 8000);
   assert.equal(broken.shapeChars, 140);
