@@ -23,7 +23,7 @@
 | `rules.md` | 否 | 所有者的实时修正，覆盖前两个文件。**必须以最后一个 `## ` 标题下的项目列表结尾。**代码会追加 `- …` 行 | `{{name}}` |
 | `format.md` | 是 | 输出协议 | 无 |
 | `reply.md` | 是 | 任务：有人呼叫了角色 | `{{name}}` `{{author}}` `{{trigger}}` `{{target}}` |
-| `interject.md` / `initiate.md` | 是 | 任务：插入正在进行的对话 / 在沉寂的频道中发起话题 | `{{name}}` |
+| `interject.md` / `initiate.md` | 是 | 任务：插入正在进行的对话 / 在沉寂的频道中发起话题。代码在 `deadAfterMinutes` 的沉默后掷 `spontaneous.initiateChance`，因此 initiate 提示默认发言，`<skip/>` 用于新话题明显不合适的频道。频道沉寂后，即使角色自己的消息是最后一条，initiate 回合仍可触发 | `{{name}}` |
 | `forced.md` | 否 | 强制回合（`/nep interject`、`/nep initiate`）时追加在模式提示之后。覆盖默认的 `<skip/>` 选项 | `{{name}}` |
 | `memory.md` | 是 | 角色外提示，用于流分析器：从实时批次中对记忆进行针对性编辑 | `{{name}}` `{{fieldChars}}` `{{guildFieldChars}}` `{{maxDetails}}` `{{maxInjokes}}` `{{maxSelfFacts}}` `{{maxNewEpisodes}}` `{{maxEpisodes}}` `{{maxDeltaPerUpdate}}` `{{maxInterests}}` `{{interestTopicChars}}` `{{interestNoteChars}}` `{{loreTextChars}}` `{{maxLearned}}` `{{learnedChars}}` |
 | `profile.md` | 是 | 预热 / 画像刷新：从消息样本生成一个成员的档案 | `{{name}}` `{{fieldChars}}` `{{maxInterests}}` `{{maxDetails}}` `{{interestTopicChars}}` `{{interestNoteChars}}` `{{maxNewEpisodes}}` |
@@ -447,7 +447,11 @@ variety.intro                            first line of the `<worn>` block: tells
 为一行：当候选消息是在对角色说话或延续与角色的对话时为 `yes`，当人们在相互交谈或对其他人说话时为 `no`。
 对另一成员的显式 @提及在询问模型之前即为 `no`；Discord 为被回复作者自动添加的隐式提醒不算作此类提及。当
 `mention.followUpClassifyReplies` 开启（默认 `true`，缺失键 = 开启）时，对另一成员消息的回复会像普通文本一样发送给
-分类器。关闭该开关时，对另一成员的任何回复自动为 `no`。`yes` 触发正常的回复回合（模型仍可
+分类器。关闭该开关时，对另一成员的任何回复自动为 `no`。
+
+在 `mention.oneAtATime` 下服务器任何位置有回合执行时（关闭该开关时则为自身频道有回合执行时），后续候选不会被分类；遇到繁忙回合的 `yes` 会被丢弃并记录，不会进入队列。
+
+`yes` 触发正常的回复回合（模型仍可
 `<skip/>`）；连续三个 `no`（`mention.followUpNoStreak`，默认 3）关闭窗口。开关 `features.followUp`
 （默认开启）。仅记录计数和判定结果。
 窗口状态在重启后保留：活跃窗口保存在 `data/state.json` 的 `followUpWindows` 中，启动时恢复，过期的窗口会被丢弃。
@@ -529,7 +533,7 @@ variety.intro                            first line of the `<worn>` block: tells
 
 ### 消息选取
 
-最多 `variety.window`（默认 12）条角色自身消息：先取本轮频道的（最新的优先），再取其他服务器频道的（存储在服务器记忆中的 `ownLines` 环，角色每次在服务器频道发送消息时写入）。只保留不超过 `variety.recentMinutes`（默认 45）分钟的消息。少于 `variety.minLines`（默认 3）条时整个过程跳过。机器人发出的限制通知（`labels.limits.notice`）不计为角色自身消息。
+最多 `variety.window`（默认 16）条角色自身消息：先取本轮频道的（最新的优先），再取其他服务器频道的（存储在服务器记忆中的 `ownLines` 环，角色每次在服务器频道发送消息时写入）。只保留不超过 `variety.recentMinutes`（默认 180）分钟的消息。少于 `variety.minLines`（默认 3）条时整个过程跳过。机器人发出的限制通知（`labels.limits.notice`）不计为角色自身消息。
 
 ### `<lines>` 格式
 
@@ -659,6 +663,8 @@ Mentor 沙盒为每个 reply 目标场景执行一次多样性过程，计入 me
 ### 隐私
 
 Mentor 模型读取渲染后的沙盒请求，因此可以读取角色记忆中关于真实用户的内容。私信和私有记忆层永远不会出现在沙盒请求中。
+
+沙盒包含与实时回合相同的自定义表情和 GIF 块，因此角色在沙盒回答中可以使用表情反应、发布 GIF 或绘画。GIF 或绘画与 `<msg>` 一样计为一个动作。
 
 ### 运行如何结束
 

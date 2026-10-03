@@ -23,7 +23,7 @@ All instructions are English in both layers; a character's speech samples may be
 | `rules.md` | no | Owner's live corrections, override the two above. **Must end with the bullet list under its last `## ` heading.** Code appends `- …` lines | `{{name}}` |
 | `format.md` | yes | The output protocol | none |
 | `reply.md` | yes | Task: somebody called the persona | `{{name}}` `{{author}}` `{{trigger}}` `{{target}}` |
-| `interject.md` / `initiate.md` | yes | Tasks: cut into a live conversation / start a topic in a silent chat | `{{name}}` |
+| `interject.md` / `initiate.md` | yes | Tasks: cut into a live conversation / start a topic in a silent chat. Code rolls `spontaneous.initiateChance` after `deadAfterMinutes` of silence, so the initiate prompt speaks by default and `<skip/>` is for a channel where a new topic is plainly out of place. An initiate turn may also follow the persona's own last line once the channel is dead | `{{name}}` |
 | `forced.md` | no | Appended after the mode prompt on a forced turn (`/nep interject`, `/nep initiate`). Overrides the `<skip/>` default | `{{name}}` |
 | `memory.md` | yes | Out-of-character prompt of the stream analyzer: targeted edits to memory from live batches | `{{name}}` `{{fieldChars}}` `{{guildFieldChars}}` `{{maxDetails}}` `{{maxInjokes}}` `{{maxSelfFacts}}` `{{maxNewEpisodes}}` `{{maxEpisodes}}` `{{maxDeltaPerUpdate}}` `{{maxInterests}}` `{{interestTopicChars}}` `{{interestNoteChars}}` `{{loreTextChars}}` `{{maxLearned}}` `{{learnedChars}}` |
 | `profile.md` | yes | Warmup / portrait refresh: one member's profile from a message sample | `{{name}}` `{{fieldChars}}` `{{maxInterests}}` `{{maxDetails}}` `{{interestTopicChars}}` `{{interestNoteChars}}` `{{maxNewEpisodes}}` |
@@ -494,7 +494,9 @@ addresses the persona or continues the exchange with it, `no` when people talk a
 An explicit @mention of another member is always `no` before the model is asked; the implicit ping Discord adds for the
 replied-to author does not count as such a mention. When `mention.followUpClassifyReplies` is on (default `true`,
 missing key = on), a reply to another member's message goes to the classifier like plain text. With the switch off,
-any reply to another member is an automatic `no`. `yes` runs a
+any reply to another member is an automatic `no`. A follow-up candidate is not classified while a turn runs anywhere under `mention.oneAtATime` (or in its own channel with it off); a `yes` that still meets a busy turn is dropped and logged, never queued.
+
+`yes` runs a
 normal reply turn (the model may still `<skip/>`); three `no` in a row (`mention.followUpNoStreak`, default 3) close
 the window. Switch `features.followUp` (default on). Logged as counts and verdicts only.
 The window state survives a restart: active windows are saved in `data/state.json` under `followUpWindows` and restored at startup, with expired ones dropped.
@@ -591,9 +593,9 @@ block in the turn's request. Switch `features.variety` (missing = on).
 
 ### Line selection
 
-Up to `variety.window` (default 12) of the persona's own lines, taken first from the turn's channel (newest kept),
+Up to `variety.window` (default 16) of the persona's own lines, taken first from the turn's channel (newest kept),
 then from other server channels (a ring stored in guild memory as `ownLines`, written whenever the persona posts in a
-server channel). Only lines younger than `variety.recentMinutes` (default 45) are kept. Fewer than `variety.minLines`
+server channel). Only lines younger than `variety.recentMinutes` (default 180) are kept. Fewer than `variety.minLines`
 (default 3) skips the pass entirely. A limit notice (`labels.limits.notice`) posted by the bot is never counted as the
 persona's own line.
 
@@ -772,6 +774,8 @@ A manual sub-process (`features.mentor`) with its own model (`mentor.model`). Th
 ### Privacy
 
 The mentor model reads the rendered sandbox request, so it reads what the persona remembers about real people. Direct messages and the private memory layer are never part of a sandbox request.
+
+The sandbox carries the same custom-emoji and GIF blocks as a live turn, so the persona can react with emoji, post a GIF or draw a picture in its sandbox answers. A GIF or drawing counts as an action the same way `<msg>` does.
 
 ### How a run ends
 

@@ -81,7 +81,7 @@
 | `media` | `"anthropic/claude-haiku-4.5"` | 图片描述器（`features.mediaDescriptions`）：为图片、GIF 帧、视频封面、贴纸、自定义表情和链接缩略图生成单行描述 |
 | `video` | `"google/gemini-3.8-flash"` | 视频描述器（`features.videoDescriptions`）：观看短片段，基于问题重看，按请求重试。必须同时接受视频和音频输入 |
 
-**从旧键迁移。**已废弃的键 `llm.classifierModel`、`mention.followUpModel`、`media.model` 和 `media.video.model` 不再读取。如果 `config.local.json` 中存在这些键，机器人会在启动时记录一条警告（`config: deprecated model key ignored`），指出该键及其替代键。请将值分别移至 `classifier.text`、`classifier.media` 或 `classifier.video`。
+**从旧键迁移。**已废弃的键 `llm.classifierModel`、`mention.followUpModel`、`media.model` 和 `media.video.model` 不再读取。如果 `config.local.json` 中存在这些键，机器人会在启动时记录一条警告（`index: deprecated model key ignored`），指出该键及其替代键。请将值分别移至 `classifier.text`、`classifier.media` 或 `classifier.video`。
 
 ## `context`
 
@@ -91,6 +91,7 @@
 | `neighborMessages` | `5` | 每个相邻频道的消息数 |
 | `neighborMaxAgeMinutes` | `60` | 相邻频道消息最大时效（分钟） |
 | `neighborMaxChannels` | `8` | 最大相邻频道数 |
+| `neighborMessageChars` | `300` | 每条相邻频道消息保留的字符数（`<other_channels>`） |
 | `maxMessageChars` | `800` | 超出此长度的消息会被截断（字符） |
 | `gapMarkerMinutes` | `20` | 时间间隔标记阈值（分钟） |
 | `reactionsPerMessage` | `6` | 对话记录中每条消息列出的最大反应数，按频率降序 |
@@ -257,7 +258,7 @@ YouTube 链接的时长通过以下链式探测获取：首先尝试 yt-dlp，�
 | `model` | `null` | 分析器模型（`null` = `llm.model`） |
 | `mainChannelIds` | `[]` | 人们相互交流的频道；成员性格和风格的画像取自这些频道；为空表示所有频道均计入 |
 | `portraitRefreshHours` | `24` | 每成员画像刷新最短间隔（小时） |
-| `portraitRefreshPerDay` | `20` | 每服务器每天最大画像刷新次数 |
+| `portraitRefreshPerDay` | `20` | 每服务器每天最大画像刷新次数。日计数器存储在 `state.json` 中（`portraitDay` / `portraitCount`），`/nep warmup reset` 不会清除它 |
 | `batchMessages` | `60` | 理想批次大小 |
 | `minBatchMessages` | `15` | 更新前的最少消息数 |
 | `maxBatchAgeMinutes` | `180` | 超过此时长强制更新（分钟） |
@@ -323,6 +324,7 @@ YouTube 链接的时长通过以下链式探测获取：首先尝试 yt-dlp，�
 | 键 | 默认值 | 说明 |
 |---|---|---|
 | `maxPerDay` | `60` | 链接阅读和搜索请求合计的共享每日上限 |
+| `acceptLanguage` | `"en,ru;q=0.8"` | 读取页面时发送的 Accept-Language 请求头；为空则不发送 |
 
 ### `web.links`
 
@@ -394,8 +396,8 @@ YouTube 链接的时长通过以下链式探测获取：首先尝试 yt-dlp，�
 
 | 键 | 默认值 | 说明 |
 |---|---|---|
-| `window` | `12` | 过程查看的角色自身消息数：先取本轮频道的，再取其他频道的 |
-| `recentMinutes` | `45` | 超过此分钟数的消息不纳入 |
+| `window` | `16` | 过程查看的角色自身消息数：先取本轮频道的，再取其他频道的 |
+| `recentMinutes` | `180` | 超过此分钟数的消息不纳入 |
 | `minLines` | `3` | 消息少于此数时跳过过程 |
 | `contextChars` | `120` | 每条消息所回复内容保留的字符数（`(to: ...)` 上下文） |
 | `maxPatterns` | `4` | 一次过程最多可识别的手法数 |

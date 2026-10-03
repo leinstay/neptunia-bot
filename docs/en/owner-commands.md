@@ -14,8 +14,8 @@ Channels, roles and users are picked from Discord's own pickers; `set`/`unset` a
 | `/nep interject [channel]` | Jump into the current conversation in this channel now |
 | `/nep initiate [channel]` | Start a topic in this channel now |
 | `/nep draw <text> [self]` | Draw one picture through the drawing prompt. Answered only to you (ephemeral with the picture attached). Spends balance against `image.maxPerDay` but not against a member's quota. Refused while paused. NOT gated by `features.imageGeneration` |
-| `/nep set <path> <value>` | Override a config value (writes to `config.local.json`) |
-| `/nep unset <path>` | Remove a config override |
+| `/nep set <path> <value>` | Override a config value (writes to `config.local.json`). Paths under `bot.owners` and `bot.access` are owner-only even for members granted `set`. The value must be of the same JSON type as the current one and the path must be a leaf |
+| `/nep unset <path>` | Remove a config override. The same owner-only and leaf restrictions as `set` |
 | `/nep rule add <text>` | Append a rule to `prompts.local/rules.md` |
 | `/nep rule list` | List the rules, numbered |
 | `/nep rule remove <number>` | Remove a rule by number |
@@ -28,11 +28,11 @@ Channels, roles and users are picked from Discord's own pickers; `set`/`unset` a
 | `/nep memory channel [channel]` | With a channel: stored note in full (purpose, topics, tone, message count, activity, top writers). Without: a table of every channel the persona knows, sorted by last message |
 | `/nep memory server` | Server-wide notes: how people talk, how conversations start, in-jokes, self-facts, plus counts of profiles, channels and lore entries |
 | `/nep memory refresh <user>` | Force a portrait refresh for a member |
-| `/nep memory forget <user>` | Delete a stored profile and its private memory |
+| `/nep memory forget <user>` | Delete a stored profile and its private memory. Waits for a running analyzer batch to finish first |
 | `/nep memory affinity <user> [score] [reason]` | Show or set attitude (-100..100) |
-| `/nep memory wipe <confirm>` | Wipe all analyzer memory for this server, including private files; type the exact server name to confirm |
+| `/nep memory wipe <confirm>` | Wipe all analyzer memory for this server; type the exact server name to confirm. Deleted: member profiles and their private memory, server habits (patterns, starters, in-jokes), learned items, the emoji ranking, the variety history, the channel map, analyzer lore, warmup progress. Kept: owner lore entries, the media description cache, the GIF library, token calibration, daily counts, the spontaneous schedule. Waits for a running analyzer batch to finish first |
 | `/nep private show <user>` | Show a member's private memory: relationship, interests, details, episodes, private and effective attitude, today's reply count. No private layer is a plain answer, not an error. Owner-only; cannot be granted |
-| `/nep private forget <user>` | Delete only a member's private memory; the public profile is kept. Owner-only; cannot be granted |
+| `/nep private forget <user>` | Delete only a member's private memory; the public profile is kept. Waits for a running analyzer batch to finish first. Owner-only; cannot be granted |
 | `/nep private purge <user>` | Delete the bot's own messages in the DM chat with a member (scans up to `private.purgeMaxMessages`), then their private memory. The member's own messages stay. Refused while paused. Owner-only; cannot be granted |
 | `/nep alias add <user> <name>` | Add a chat alias; confirmed at once |
 | `/nep alias remove <user> <name>` | Remove a chat alias |
@@ -46,7 +46,7 @@ Channels, roles and users are picked from Discord's own pickers; `set`/`unset` a
 | `/nep emoji status` | Show the emoji ranking: size, top 10 names with counts, when the backfill ran |
 | `/nep emoji rescan` | Clear the usage ranking and recount from channel history |
 | `/nep gifs status` | Show the GIF library: size, top 10 with handle, count and caption or name, when the backfill ran, posted today vs `gifs.maxPerDay`, watched today vs `media.gif.maxPerDay`, and `captions:` (how many library entries are watched / one-frame / failed watch / none) |
-| `/nep gifs rescan` | Reset use counts to zero and recount from channel history; handles stay stable, entries not found remain at zero until the size cap evicts them |
+| `/nep gifs rescan` | Reset use counts to zero and recount from channel history; entries and handles are kept, entries not found remain at zero until the size cap evicts them |
 | `/nep gifs recache` | Drop one-frame GIF captions outside the library, then re-describe up to `gifs.recachePerRun` library GIFs by watching them in the background. Replies at once; follow progress with `/nep gifs status`. Refused while paused, during a warmup, or when GIFs are not watched |
 | `/nep warmup run` | Start or resume a full run: channels, then people, then server |
 | `/nep warmup users [member]` | With a member: profile or re-profile that one now; without: re-profile every qualifying member |

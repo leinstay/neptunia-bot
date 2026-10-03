@@ -8,11 +8,11 @@
 
 角色回复某人后，该频道内接下来 `mention.followUpMinutes` 分钟的未标记消息会被发送到 `classifier.text` 角色上的分类器，判断它们是否在延续对话；连续三个 `no` 判定（`mention.followUpNoStreak`）关闭窗口。后续窗口在重启后保留。`features.followUp` 可关闭此功能。
 
-自发回合由混沌定时器或逐消息窃听概率（`spontaneous.eavesdropChance`）触发。角色不会在沉默超过 `spontaneous.maxChannelSilenceHours` 小时的频道中主动发言；但该频道中的直接提及仍会回复。
+自发回合由混沌定时器或逐消息窃听概率（`spontaneous.eavesdropChance`）触发。`spontaneous.deadAfterMinutes` 的沉默后，即使角色自己的消息是频道中的最后一条，角色也可以发起话题；但它永远不会在自己的最后一条消息上插话。角色不会在沉默超过 `spontaneous.maxChannelSilenceHours` 小时的频道中主动发言；但该频道中的直接提及仍会回复。
 
 ### 一次一条回复
 
-角色在整个服务器范围内同一时间只写一条回复（`mention.oneAtATime`）。当 `mention.pendingSameChannel` 开启（默认 `true`，缺失键 = 开启）时，同一频道中在回合执行期间到达的直接提及（@提及或对角色消息的回复）会被挂起：每个频道保留一条，回合结束后以 `mention.switchDelayMs` 的暂停回复，忽略概率在那时判定。如果正在执行的回合已经在历史记录中处理了该提及，则不会重复回复。关闭该开关时，提及会被错过，仅出现在下次回复的对话记录中。来自其他频道的直接提及以相同方式挂起，每个频道保留一条，最多在 `mention.maxPending` 个频道中保留 `mention.pendingMinutes` 分钟；同一待处理频道中较新的提及会替换较旧的。当前回复完成后，角色在短暂停顿（`mention.switchDelayMs`）后切换频道，基于当前对话状态进行回复；通常的忽略概率仍然适用。繁忙期间到达的名字触发和窃听命中会被跳过。设置 `mention.oneAtATime: false` 后，每个频道独立处理。角色不会在缺少发送消息权限的频道中发言或做出反应，且在消耗 LLM 请求之前检查权限；此类频道仍会被读取和记忆。
+角色在整个服务器范围内同一时间只写一条回复（`mention.oneAtATime`）。当 `mention.pendingSameChannel` 开启（默认 `true`，缺失键 = 开启）时，同一频道中在回合执行期间到达的直接提及（@提及或对角色消息的回复）会被挂起：每个频道保留一条，回合结束后以 `mention.switchDelayMs` 的暂停回复，忽略概率在那时判定。如果正在执行的回合已经在历史记录中处理了该提及，则不会重复回复。关闭该开关时，提及会被错过，仅出现在下次回复的对话记录中。来自其他频道的直接提及以相同方式挂起，每个频道保留一条，最多在 `mention.maxPending` 个频道中保留 `mention.pendingMinutes` 分钟；同一待处理频道中较新的提及会替换较旧的。当前回复完成后，角色在短暂停顿（`mention.switchDelayMs`）后切换频道，基于当前对话状态进行回复；通常的忽略概率仍然适用。挂起的提及在机器人暂停时不会被回复。繁忙期间到达的名字触发和窃听命中会被跳过。设置 `mention.oneAtATime: false` 后，每个频道独立处理。角色不会在缺少发送消息权限的频道中发言或做出反应，且在消耗 LLM 请求之前检查权限；此类频道仍会被读取和记忆。
 
 ### 请求
 

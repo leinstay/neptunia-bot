@@ -14,8 +14,8 @@
 | `/nep interject [channel]` | 立即插入该频道的当前对话 |
 | `/nep initiate [channel]` | 立即在该频道中发起话题 |
 | `/nep draw <text> [self]` | 通过绘画提示绘制一张图片。仅回复给你（ephemeral 附带图片）。消耗 `image.maxPerDay` 的余额但不计入成员配额。暂停时拒绝。不依赖 `features.imageGeneration` |
-| `/nep set <path> <value>` | 覆盖配置值（写入 `config.local.json`） |
-| `/nep unset <path>` | 移除配置覆盖 |
+| `/nep set <path> <value>` | 覆盖配置值（写入 `config.local.json`）。`bot.owners` 和 `bot.access` 下的路径即使对被授予 `set` 权限的成员也仅限所有者。值必须与当前值的 JSON 类型一致，路径必须指向叶节点 |
+| `/nep unset <path>` | 移除配置覆盖。与 `set` 相同的所有者和叶节点限制 |
 | `/nep rule add <text>` | 向 `prompts.local/rules.md` 追加规则 |
 | `/nep rule list` | 列出编号的规则 |
 | `/nep rule remove <number>` | 按编号移除规则 |
@@ -28,11 +28,11 @@
 | `/nep memory channel [channel]` | 指定频道：完整的存储笔记（用途、话题、氛围、消息数、活跃度、最活跃作者）。不指定：角色已知的所有频道表格，按最后消息排序 |
 | `/nep memory server` | 服务器级笔记：人们如何交流、对话如何开始、内部梗、自述事实，以及档案、频道和世界书条目的计数 |
 | `/nep memory refresh <user>` | 强制刷新成员画像 |
-| `/nep memory forget <user>` | 删除存储的档案及其私有记忆 |
+| `/nep memory forget <user>` | 删除存储的档案及其私有记忆。等待正在运行的分析器批次完成后再执行 |
 | `/nep memory affinity <user> [score] [reason]` | 查看或设置态度（-100..100） |
-| `/nep memory wipe <confirm>` | 清除该服务器的所有分析器记忆（包括私有文件）；输入准确的服务器名称以确认 |
+| `/nep memory wipe <confirm>` | 清除该服务器的所有分析器记忆；输入准确的服务器名称以确认。删除项：成员档案及其私有记忆、服务器习惯（模式、开场白、内部梗）、所学条目、表情排名、多样性历史、频道地图、分析器世界书、预热进度。保留项：所有者世界书条目、媒体描述缓存、GIF 库、token 校准、每日计数器、自发时间表。等待正在运行的分析器批次完成后再执行 |
 | `/nep private show <user>` | 显示成员的私有记忆：关系、兴趣、细节、回忆、私有和有效好感度、今日回复数。无私有层则为普通回答。仅限所有者；不可授权 |
-| `/nep private forget <user>` | 仅删除成员的私有记忆；公共档案保留。仅限所有者；不可授权 |
+| `/nep private forget <user>` | 仅删除成员的私有记忆；公共档案保留。等待正在运行的分析器批次完成后再执行。仅限所有者；不可授权 |
 | `/nep private purge <user>` | 删除机器人在与成员的私信对话中发送的消息（扫描最多 `private.purgeMaxMessages` 条），然后删除该成员的私有记忆。成员自己的消息保留。暂停时拒绝。仅限所有者；不可授权 |
 | `/nep alias add <user> <name>` | 添加聊天别名；立即确认 |
 | `/nep alias remove <user> <name>` | 移除聊天别名 |
@@ -44,7 +44,7 @@
 | `/nep lore show <id>` | 显示世界书条目 |
 | `/nep lore remove <id>` | 移除世界书条目 |
 | `/nep gifs status` | 显示 GIF 库：大小，按排名前 10（含 handle、计数和说明或名称），历史回填时间，今日已发送 / `gifs.maxPerDay`，今日已观看 / `media.gif.maxPerDay`，以及 `captions:`（库条目中已观看 / 单帧 / 观看失败 / 无说明各多少） |
-| `/nep gifs rescan` | 将使用计数归零并从频道历史重新统计；handle 保持不变，未找到的条目保留零计数直到被大小上限淘汰 |
+| `/nep gifs rescan` | 将使用计数归零并从频道历史重新统计；条目和 handle 保留，未找到的条目保留零计数直到被大小上限淘汰 |
 | `/nep gifs recache` | 删除库外的单帧 GIF 说明，然后在后台对最多 `gifs.recachePerRun` 个库 GIF 进行观看式重新描述。立即回复；通过 `/nep gifs status` 跟踪进度。暂停、预热期间或 GIF 未被观看时拒绝 |
 | `/nep warmup run` | 启动或恢复完整运行：频道、人物、服务器 |
 | `/nep warmup users [member]` | 指定成员：为该成员生成或重新生成档案；不指定：为所有符合条件的成员重新生成 |

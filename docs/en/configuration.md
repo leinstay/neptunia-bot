@@ -84,7 +84,7 @@ The three helper model roles, grouped under one key. Each is set independently, 
 | `media` | `"anthropic/claude-haiku-4.5"` | Picture describer (`features.mediaDescriptions`): one-line descriptions for pictures, GIF frames, video posters, stickers, custom emoji and link thumbnails |
 | `video` | `"google/gemini-3.8-flash"` | Video describer (`features.videoDescriptions`): watches short clips, re-watches on a question, retries on request. Must accept both video and audio input |
 
-**Migration from the old keys.** The deprecated keys `llm.classifierModel`, `mention.followUpModel`, `media.model` and `media.video.model` are no longer read. If any of them is present in `config.local.json`, the bot logs a startup warning (`config: deprecated model key ignored`) naming the key and its replacement. Move the value to `classifier.text`, `classifier.media` or `classifier.video` respectively.
+**Migration from the old keys.** The deprecated keys `llm.classifierModel`, `mention.followUpModel`, `media.model` and `media.video.model` are no longer read. If any of them is present in `config.local.json`, the bot logs a startup warning (`index: deprecated model key ignored`) naming the key and its replacement. Move the value to `classifier.text`, `classifier.media` or `classifier.video` respectively.
 
 ## `context`
 
@@ -94,6 +94,7 @@ The three helper model roles, grouped under one key. Each is set independently, 
 | `neighborMessages` | `5` | Messages per neighbour channel |
 | `neighborMaxAgeMinutes` | `60` | Max age for neighbour messages (min) |
 | `neighborMaxChannels` | `8` | Max neighbour channels |
+| `neighborMessageChars` | `300` | Characters kept per message from a neighbouring channel (`<other_channels>`) |
 | `maxMessageChars` | `800` | Truncate messages beyond this (chars) |
 | `gapMarkerMinutes` | `20` | Time-gap marker threshold (min) |
 | `reactionsPerMessage` | `6` | Max reactions listed per message in the transcript, most frequent first |
@@ -280,7 +281,7 @@ Follow-up windows are persisted in `data/state.json` under `followUpWindows` and
 | `model` | `null` | Analyzer model (`null` = llm.model) |
 | `mainChannelIds` | `[]` | Channels where people talk to each other; the portrait of a member's character and style is drawn from them; empty means every channel counts |
 | `portraitRefreshHours` | `24` | Min hours between portrait refreshes per member |
-| `portraitRefreshPerDay` | `20` | Max portrait refreshes per server per day |
+| `portraitRefreshPerDay` | `20` | Max portrait refreshes per server per day. The day counter lives in `state.json` as `portraitDay` / `portraitCount` and survives `/nep warmup reset` |
 | `batchMessages` | `60` | Ideal batch size |
 | `minBatchMessages` | `15` | Min messages before update |
 | `maxBatchAgeMinutes` | `180` | Force update after (min) |
@@ -346,6 +347,7 @@ Settings for the web lookup (`features.webLookup`). Both link reading and search
 | Key | Default | Meaning |
 |---|---|---|
 | `maxPerDay` | `60` | Shared daily cap for link reads and search requests combined |
+| `acceptLanguage` | `"en,ru;q=0.8"` | The Accept-Language header sent when a page is read; empty sends none |
 
 ### `web.links`
 
@@ -417,8 +419,8 @@ Settings for the variety pass (`features.variety`). Before each turn the persona
 
 | Key | Default | Meaning |
 |---|---|---|
-| `window` | `12` | Own lines the pass looks at, taken from the turn's channel first, then from other channels |
-| `recentMinutes` | `45` | A line older than this many minutes is left out |
+| `window` | `16` | Own lines the pass looks at, taken from the turn's channel first, then from other channels |
+| `recentMinutes` | `180` | A line older than this many minutes is left out |
 | `minLines` | `3` | Fewer lines than this skips the pass |
 | `contextChars` | `120` | Characters kept from the message each line answered (the `(to: ...)` context) |
 | `maxPatterns` | `4` | Most patterns one pass may name |

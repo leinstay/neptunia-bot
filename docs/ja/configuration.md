@@ -81,7 +81,7 @@ OpenRouter アカウント自体が許可プロバイダーを制限している
 | `media` | `"anthropic/claude-haiku-4.5"` | 画像説明モデル（`features.mediaDescriptions`）: 画像、GIF フレーム、動画ポスター、スティッカー、カスタム絵文字、リンクサムネイルの一行説明文 |
 | `video` | `"google/gemini-3.8-flash"` | 動画説明モデル（`features.videoDescriptions`）: 短いクリップの視聴、質問に対する再視聴、リクエストに応じたリトライ。動画と音声の両方の入力を受け付ける必要がある |
 
-**旧キーからの移行。** 非推奨のキー `llm.classifierModel`、`mention.followUpModel`、`media.model`、`media.video.model` は読み取られなくなりました。これらのいずれかが `config.local.json` に存在する場合、ボットは起動時に警告をログに記録し（`config: deprecated model key ignored`）、キー名とその置き換え先を示します。値を `classifier.text`、`classifier.media`、`classifier.video` にそれぞれ移行してください。
+**旧キーからの移行。** 非推奨のキー `llm.classifierModel`、`mention.followUpModel`、`media.model`、`media.video.model` は読み取られなくなりました。これらのいずれかが `config.local.json` に存在する場合、ボットは起動時に警告をログに記録し（`index: deprecated model key ignored`）、キー名とその置き換え先を示します。値を `classifier.text`、`classifier.media`、`classifier.video` にそれぞれ移行してください。
 
 ## `context`
 
@@ -91,6 +91,7 @@ OpenRouter アカウント自体が許可プロバイダーを制限している
 | `neighborMessages` | `5` | 隣接チャンネルあたりのメッセージ数 |
 | `neighborMaxAgeMinutes` | `60` | 隣接メッセージの最大経過時間（分） |
 | `neighborMaxChannels` | `8` | 隣接チャンネルの最大数 |
+| `neighborMessageChars` | `300` | 隣接チャンネルのメッセージあたりの保持文字数（`<other_channels>`） |
 | `maxMessageChars` | `800` | この文字数を超えるメッセージを切り詰め（文字） |
 | `gapMarkerMinutes` | `20` | タイムギャップマーカーの閾値（分） |
 | `reactionsPerMessage` | `6` | トランスクリプト内の 1 メッセージあたりの最大リアクション数（頻度降順） |
@@ -257,7 +258,7 @@ YouTube リンクの再生時間は次の順序で取得されます: まず yt-
 | `model` | `null` | アナライザーモデル（`null` = `llm.model`） |
 | `mainChannelIds` | `[]` | メンバー同士が会話するチャンネル。キャラクターとスタイルのポートレートはここから作成される。空の場合はすべてのチャンネルが対象 |
 | `portraitRefreshHours` | `24` | メンバーごとのポートレートリフレッシュの最小間隔（時間） |
-| `portraitRefreshPerDay` | `20` | サーバーあたりのポートレートリフレッシュの 1 日最大数 |
+| `portraitRefreshPerDay` | `20` | サーバーあたりのポートレートリフレッシュの 1 日最大数。日次カウンターは `state.json` に `portraitDay` / `portraitCount` として保存され、`/nep warmup reset` で消去されない |
 | `batchMessages` | `60` | 理想的なバッチサイズ |
 | `minBatchMessages` | `15` | 更新前の最小メッセージ数 |
 | `maxBatchAgeMinutes` | `180` | この分数経過後に更新を強制（分） |
@@ -323,6 +324,7 @@ YouTube リンクの再生時間は次の順序で取得されます: まず yt-
 | キー | デフォルト | 説明 |
 |---|---|---|
 | `maxPerDay` | `60` | リンク読み取りと検索リクエストの合計に対する共有日次上限 |
+| `acceptLanguage` | `"en,ru;q=0.8"` | ページ読み取り時に送信する Accept-Language ヘッダー。空の場合はヘッダーを送信しない |
 
 ### `web.links`
 
@@ -394,8 +396,8 @@ YouTube リンクの再生時間は次の順序で取得されます: まず yt-
 
 | キー | デフォルト | 説明 |
 |---|---|---|
-| `window` | `12` | パスが参照するペルソナ自身のメッセージ数。ターンのチャンネルから先に取得し、次に他のチャンネルから取得 |
-| `recentMinutes` | `45` | この分数より古いメッセージは対象外 |
+| `window` | `16` | パスが参照するペルソナ自身のメッセージ数。ターンのチャンネルから先に取得し、次に他のチャンネルから取得 |
+| `recentMinutes` | `180` | この分数より古いメッセージは対象外 |
 | `minLines` | `3` | この数未満の場合パスをスキップ |
 | `contextChars` | `120` | 各メッセージが返信した内容から保持する文字数（`(to: ...)` コンテキスト） |
 | `maxPatterns` | `4` | 1 回のパスで特定できる最大手法数 |
