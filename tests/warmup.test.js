@@ -27,8 +27,10 @@ import {
   buildPersonWriteIterations,
   createWarmup,
 } from '../src/memory/warmup.js';
+import { ANALYZER_TEMPERATURE } from '../src/memory/update.js';
 import { createCalibrator } from '../src/llm/tokens.js';
 import { labels } from './fixtures/labels.js';
+import { withCapturedLogs } from './fixtures/capture-logs.js';
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -317,6 +319,53 @@ test('buildChannelRequest: fills {{fieldChars}} and the <channel>/<messages> blo
   assert.match(user, /<messages>[\s\S]*<\/messages>/);
 });
 
+test('buildChannelRequest: a missing memory.fieldChars falls back to config.json\'s 1000', () => {
+  const { messages: llmMessages } = buildChannelRequest({
+    prompts: { channel: 'CHANNEL fields={{fieldChars}}', labels },
+    config: baseConfig({ memory: {} }),
+    calibrator: createCalibrator(),
+    channel: { id: 'general', name: 'general', category: null, topic: null },
+    messages: [msg(1, 1000)],
+    isMain: false,
+  });
+  assert.equal(llmMessages[0].content, 'CHANNEL fields=1000');
+});
+
+test('clampServerResult: missing memory.fieldChars and lore.textChars fall back to config.json\'s 1000 and 600', () => {
+  const config = { memory: { clampTolerance: 1 } };
+  const clamped = clampServerResult({ patterns: 'p'.repeat(2500), lore: [{ title: 'T', keys: ['k1'], text: 'l'.repeat(700) }] }, config);
+  assert.equal(clamped.patterns.length, 2000, 'guild fields get twice fieldChars');
+  assert.equal(clamped.lore[0].text.length, 600);
+});
+
+test('buildChannelRequest: missing labels fail loudly, like the stream analyzer, never a request without them', () => {
+  assert.throws(
+    () =>
+      buildChannelRequest({
+        prompts: { channel: 'CHANNEL' },
+        config: baseConfig(),
+        calibrator: createCalibrator(),
+        channel: { id: 'general', name: 'general', category: null, topic: null },
+        messages: [msg(1, 1000)],
+        isMain: false,
+      }),
+    /labels/,
+  );
+});
+
+test('createWarmup: a person or server request without labels fails loudly, nothing sent', async () => {
+  const store = createStore({ dataDir: tmpDataDir() });
+  const client = fakeClient(fakeGuild('g1', [fakeChannel('c1', [rawMessage(1000, { authorId: 'a' })])]));
+  const hot = fakeHot({ prompts: { labels: undefined } });
+  hot.config.warmup.minMessages = 1;
+  const llm = scriptedLlm([{}]);
+  const warmup = createWarmup({ hot, store, client, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => 10_000_000 });
+
+  await assert.rejects(warmup.runPerson('g1', 'a'), /labels/);
+  await assert.rejects(warmup.runServer('g1'), /labels/);
+  assert.equal(llm.calls.length, 0);
+});
+
 test('buildChannelRequest: fitting drops the OLDEST messages only', () => {
   const many = Array.from({ length: 40 }, (_, i) =>
     msg(i, i * 60_000, { authorId: 'a', authorName: 'Alice', channelId: 'general', channelName: 'general', content: `content number ${i} padded out` }),
@@ -374,11 +423,33 @@ test('clampProfileResult: dedupes interests/details case-insensitively, keeping 
   assert.equal(result.details[0].times, 3);
 });
 
-test('clampProfileResult: episodes capped at memory.maxNewEpisodes, aliases hard-clamped to 40 chars', () => {
+test('clampProfileResult: episodes capped at memory.maxNewEpisodes; an alias is left for the store to clamp', () => {
   const episodes = Array.from({ length: 5 }, (_, i) => ({ date: '2026-01-01', what: `event ${i}`, weight: 3 }));
-  const result = clampProfileResult({ episodes, aliases: ['x'.repeat(60)] }, baseConfig());
+  const result = clampProfileResult({ episodes, aliases: ['x'.repeat(60), 42, ''] }, baseConfig());
   assert.equal(result.episodes.length, 3);
-  assert.ok(result.aliases[0].length <= 40);
+  assert.deepEqual(result.aliases, ['x'.repeat(60)]);
+});
+
+test('createWarmup: an alias, an episode weight and a lore title are clamped where they are stored', async () => {
+  const store = createStore({ dataDir: tmpDataDir() });
+  const history = [rawMessage(1000, { authorId: 'a' }), rawMessage(2000, { authorId: 'a' })];
+  const client = fakeClient(fakeGuild('g1', [fakeChannel('c1', history)]));
+  const hot = fakeHot();
+  hot.config.warmup.minMessages = 1;
+  const llm = scriptedLlm([
+    { character: 'c', style: 's', aliases: ['Αλέξανδρος '.repeat(6)], episodes: [{ date: '2026-01-01', what: 'won a game', weight: 9 }] },
+    { patterns: 'p', lore: [{ title: 'Τίτλος '.repeat(20), keys: ['k1'], text: 'x' }] },
+  ]);
+  const warmup = createWarmup({ hot, store, client, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => 10_000_000 });
+
+  assert.equal((await warmup.runPerson('g1', 'a')).ok, true);
+  assert.equal((await warmup.runServer('g1')).ok, true);
+
+  const profile = store.getUser('g1', 'a');
+  assert.equal(profile.aliases.length, 1);
+  assert.ok(profile.aliases[0].name.length <= 40);
+  assert.equal(profile.episodes[0].weight, 5);
+  assert.ok(store.getLore('g1')[0].title.length <= 80);
 });
 
 test('clampChannelResult: clamps purpose/topics/tone, null on garbage', () => {
@@ -462,8 +533,9 @@ test('buildPersonWriteIterations: an interest/detail with times: N appears in ex
   assert.deepEqual(iterations[0].interests.add.map((i) => i.topic), ['anime', 'chess']);
   assert.deepEqual(iterations[1].interests.add.map((i) => i.topic), ['anime']);
   assert.deepEqual(iterations[2].interests.add.map((i) => i.topic), ['anime']);
-  assert.deepEqual(iterations[0].details, ['plays guitar']);
-  assert.deepEqual(iterations[1].details, ['plays guitar']);
+  // The ops-object shape (`{ add }`), the only one applyMemoryUpdate / store.applyProfileOps accept.
+  assert.deepEqual(iterations[0].details, { add: ['plays guitar'] });
+  assert.deepEqual(iterations[1].details, { add: ['plays guitar'] });
   assert.equal(iterations[2].details, undefined);
 });
 
@@ -1157,6 +1229,45 @@ test('createWarmup: a bad-json person answer is retried once with half the sampl
   assert.deepEqual(store2.state.data.warmup.done.people, ['a']);
 });
 
+test('createWarmup: every failed target carries a reason; only a final skip is marked done', async () => {
+  const history = [rawMessage(1000, { authorId: 'a' }), rawMessage(2000, { authorId: 'a' })];
+  const setup = (llm, tweak = () => {}) => {
+    const store = createStore({ dataDir: tmpDataDir() });
+    const hot = fakeHot();
+    hot.config.warmup.minMessages = 1;
+    tweak(hot);
+    const client = fakeClient(fakeGuild('g1', [fakeChannel('c1', history.map((m) => ({ ...m })))]));
+    return { store, warmup: createWarmup({ hot, store, client, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => 10_000_000 }) };
+  };
+  const garbage = { complete: async () => ({ text: 'not json', usage: {}, estimated: 0, finishReason: 'stop' }) };
+  const failing = { complete: async () => { throw new Error('provider down'); } };
+  const tinyCap = (hot) => {
+    hot.config.warmup.maxRequestTokens = 3;
+    hot.config.llm.safetyMargin = 1;
+  };
+
+  let run = setup(garbage);
+  assert.equal((await run.warmup.runChannel('g1', 'c1')).message, 'bad-json');
+  assert.deepEqual(run.store.state.data.warmup.done.channels, [], 'retried next run');
+  assert.equal((await run.warmup.runServer('g1')).message, 'bad-json');
+  assert.equal(run.store.state.data.warmup.done.server, false, 'retried next run');
+  const unparsable = await run.warmup.runPerson('g1', 'a');
+  assert.equal(unparsable.message, 'unparsable');
+  assert.equal(unparsable.outcome.skipped, true);
+  assert.deepEqual(run.store.state.data.warmup.done.people, ['a'], 'a final skip: marked done');
+
+  run = setup(failing);
+  assert.equal((await run.warmup.runPerson('g1', 'a')).message, 'llm-error');
+  assert.deepEqual(run.store.state.data.warmup.done.people, [], 'retried next run');
+
+  run = setup(garbage, tinyCap);
+  assert.equal((await run.warmup.runChannel('g1', 'c1')).message, 'over-cap');
+  const overCap = await run.warmup.runPerson('g1', 'a');
+  assert.equal(overCap.message, 'over-cap');
+  assert.equal(overCap.outcome.skipped, undefined, 'not a final skip: a larger cap fixes it');
+  assert.deepEqual(run.store.state.data.warmup?.done?.people ?? [], []);
+});
+
 // ---------------------------------------------------------------------------
 // /nep warmup users user:<member> / channels channel:<channel> / server
 // (runPerson/runChannel/runServer's richer outcome) and /nep warmup
@@ -1199,6 +1310,33 @@ test('createWarmup: runPerson returns sample size, tokens used and the written a
   assert.equal(outcome.outcome.chunks, 1);
   assert.equal(outcome.outcome.answer.character, 'friendly');
   assert.equal(outcome.outcome.answer.interests.length, 1);
+});
+
+test('createWarmup: runPerson stores the answer\'s details, each at the weight of its "times"', async () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  const history = [rawMessage(1000, { authorId: 'a', content: 'hi one' }), rawMessage(2000, { authorId: 'a', content: 'hi two' })];
+  const c1 = fakeChannel('c1', history);
+  const guild = fakeGuild('g1', [c1]);
+  const client = fakeClient(guild);
+  const hot = fakeHot();
+  hot.config.warmup.minMessages = 1;
+  const llm = scriptedLlm([
+    { character: 'friendly', style: 'short', interests: [], details: [{ text: 'plays guitar', times: 2 }, { text: 'owns a cat', times: 1 }], episodes: [], aliases: [] },
+  ]);
+  const warmup = createWarmup({ hot, store, client, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => 10_000_000 });
+
+  const outcome = await warmup.runPerson('g1', 'a');
+  assert.equal(outcome.ok, true);
+
+  const details = store.getUser('g1', 'a').details;
+  assert.deepEqual(
+    details.map(({ text, weight }) => ({ text, weight })),
+    [
+      { text: 'plays guitar', weight: 2 },
+      { text: 'owns a cat', weight: 1 },
+    ],
+  );
 });
 
 test('createWarmup: runPerson appends prompts.rules after the card in the <character> block', async () => {
@@ -1343,6 +1481,68 @@ test('createWarmup: runServer returns counts of what was written on success', as
   assert.ok(outcome.outcome.counts.startersChars > 0);
 });
 
+test('createWarmup: a server answer that omits a field leaves the stored value as it was', async () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  store.updateGuild('g1', { patterns: 'old patterns', starters: 'old starters', injokes: ['old joke'] });
+  const c1 = fakeChannel('c1', [rawMessage(1000, { authorId: 'a' })]);
+  const guild = fakeGuild('g1', [c1]);
+  const client = fakeClient(guild);
+  const hot = fakeHot();
+  const llm = scriptedLlm([{ starters: 'new starters', patterns: '', lore: [] }]);
+  const warmup = createWarmup({ hot, store, client, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => 10_000_000 });
+
+  const outcome = await warmup.runServer('g1');
+  assert.equal(outcome.ok, true);
+
+  const stored = store.getGuild('g1');
+  assert.equal(stored.patterns, 'old patterns', 'an empty patterns never blanks the stored one');
+  assert.equal(stored.starters, 'new starters');
+  assert.deepEqual(stored.injokes, ['old joke'], 'a missing injokes list never empties the stored one');
+});
+
+test('createWarmup: a channel answer that omits a field leaves the stored value as it was', async () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  store.updateChannel('g1', 'c1', { purpose: 'old purpose', topics: 'old topics', tone: 'old tone' });
+  const c1 = fakeChannel('c1', [rawMessage(1000, { authorId: 'a' })], { name: 'general' });
+  const guild = fakeGuild('g1', [c1]);
+  const client = fakeClient(guild);
+  const hot = fakeHot();
+  const llm = scriptedLlm([{ purpose: 'new purpose', tone: '' }]);
+  const warmup = createWarmup({ hot, store, client, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => 10_000_000 });
+
+  const outcome = await warmup.runChannel('g1', 'c1');
+  assert.equal(outcome.ok, true);
+
+  const stored = store.getChannel('g1', 'c1');
+  assert.equal(stored.purpose, 'new purpose');
+  assert.equal(stored.topics, 'old topics', 'a missing field never blanks the stored one');
+  assert.equal(stored.tone, 'old tone', 'an empty field never blanks the stored one');
+});
+
+test('createWarmup: an unparsable channel, person or server answer is logged by its error name, never quoting it', async () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  const history = [rawMessage(1000, { authorId: 'a' }), rawMessage(2000, { authorId: 'a' })];
+  const client = fakeClient(fakeGuild('g1', [fakeChannel('c1', history)]));
+  const hot = fakeHot();
+  hot.config.warmup.minMessages = 1;
+  const llm = { complete: async () => ({ text: '{"purpose": she quit her job}', usage: {}, estimated: 0, finishReason: 'stop' }) };
+  const warmup = createWarmup({ hot, store, client, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => 10_000_000 });
+
+  const { logs } = await withCapturedLogs(async () => {
+    await warmup.runChannel('g1', 'c1');
+    await warmup.runPerson('g1', 'a');
+    await warmup.runServer('g1');
+  });
+
+  const parseWarnings = logs.filter((entry) => /could not be parsed|still bad/.test(entry.msg));
+  assert.ok(parseWarnings.length >= 3);
+  for (const entry of parseWarnings) assert.equal(entry.detail, 'SyntaxError', entry.msg);
+  assert.ok(!JSON.stringify(logs).includes('she quit'), 'the answer text never reaches a log line');
+});
+
 test('createWarmup: runServer appends prompts.rules after the card in the <character> block', async () => {
   const dir = tmpDataDir();
   const store = createStore({ dataDir: dir });
@@ -1459,6 +1659,56 @@ test('createWarmup: runUsers is refused while a run/one-off target is already in
 
   resolveFirst();
   await firstRun;
+});
+
+test('createWarmup: runUsers claims the run before its history fetch -- a redo started meanwhile is refused', async () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  const c1 = fakeChannel('c1', [rawMessage(1000, { authorId: 'a' }), rawMessage(2000, { authorId: 'a' })]);
+  const client = fakeClient(fakeGuild('g1', [c1]));
+  const hot = fakeHot();
+  hot.config.warmup.minMessages = 1;
+  const llm = scriptedLlm([{ character: 'c', style: 's', interests: [], details: [], episodes: [], aliases: [] }]);
+  const warmup = createWarmup({ hot, store, client, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => 10_000_000 });
+
+  const first = warmup.runUsers('g1');
+  assert.equal(warmup.isWarmingUp(), true, 'the persona is muted from the start, the history fetch included');
+  const second = await warmup.runChannels('g1');
+  assert.equal(second.ok, false);
+  assert.match(second.message, /already in flight/);
+
+  assert.equal((await first).count, 1);
+  while (warmup.isWarmingUp()) await new Promise((r) => setTimeout(r, 5));
+  assert.equal(c1.messages.fetchCalls, 1, 'one history fetch, not two');
+  assert.equal(llm.calls.length, 1, 'one redo loop, not two');
+});
+
+test('createWarmup: runUsers with nothing to redo, or a failed history fetch, releases the run at once', async () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  const hot = fakeHot();
+  hot.config.warmup.minMessages = 100;
+  const quiet = createWarmup({
+    hot,
+    store,
+    client: fakeClient(fakeGuild('g1', [fakeChannel('c1', [rawMessage(1000, { authorId: 'a' })])])),
+    llm: scriptedLlm([{}]),
+    calibrator: createCalibrator(),
+    getSelfName: () => 'Nept',
+    now: () => 10_000_000,
+  });
+  assert.deepEqual(await quiet.runUsers('g1'), { ok: true, count: 0 });
+  assert.equal(quiet.isWarmingUp(), false);
+  await quiet.waitIdle(); // resolves: nothing left in flight
+
+  const broken = fakeChannel('c1', []);
+  broken.isTextBased = () => {
+    throw new Error('channel cache unavailable');
+  };
+  const failing = createWarmup({ hot, store, client: fakeClient(fakeGuild('g1', [broken])), llm: scriptedLlm([{}]), calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => 10_000_000 });
+  await assert.rejects(failing.runChannels('g1'), /channel cache unavailable/);
+  assert.equal(failing.isWarmingUp(), false);
+  await failing.waitIdle();
 });
 
 test('createWarmup: runChannels starts a background redo of every readable channel', async () => {
@@ -1887,6 +2137,25 @@ test('refreshPortrait: samples the member and replaces only character/style, wit
   assert.ok(profile.portraitRefreshedAt);
 });
 
+test('refreshPortrait: the "portrait refreshed" log says whether a hint was given, never its text', async () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  store.touchUser('g1', 'a', 'Alice', 1000);
+  const history = Array.from({ length: 3 }, (_, i) => rawMessage(1000 + i * 1000, { authorId: 'a', content: `m${i}` }));
+  const client = fakeClient(fakeGuild('g1', [fakeChannel('c1', history)]));
+  const hot = fakeHot();
+  const llm = scriptedLlm([{ character: 'new character', style: 'new style', interests: [], details: [], episodes: [], aliases: [] }]);
+  const warmup = createWarmup({ hot, store, client, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => 20_000_000 });
+
+  const { result, logs } = await withCapturedLogs(() => warmup.refreshPortrait('g1', 'a', 'γράφει πιο σύντομα τώρα'));
+  assert.equal(result.ok, true);
+
+  const refreshed = logs.find((entry) => entry.msg === 'warmup: portrait refreshed');
+  assert.ok(refreshed);
+  assert.equal(refreshed.hinted, true);
+  assert.ok(!JSON.stringify(logs).includes('σύντομα'), 'the hint text never reaches a log line');
+});
+
 test('refreshPortrait: appends prompts.rules after the card in the <character> block', async () => {
   const dir = tmpDataDir();
   const store = createStore({ dataDir: dir });
@@ -1951,6 +2220,92 @@ test('refreshPortrait: skips once the daily refresh cap is reached', async () =>
   assert.equal(calls, 1);
 });
 
+test('refreshPortrait: concurrent cues never overshoot the daily cap -- the slot is taken before the history fetch', async () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  store.touchUser('g1', 'a', 'Alice', 1000);
+  store.touchUser('g1', 'b', 'Bob', 1000);
+  const history = [rawMessage(1000, { authorId: 'a' }), rawMessage(2000, { authorId: 'b' })];
+  const client = fakeClient(fakeGuild('g1', [fakeChannel('c1', history)]));
+  const hot = fakeHot();
+  hot.config.memory.portraitRefreshPerDay = 1;
+  let calls = 0;
+  const llm = { complete: async () => { calls += 1; return { text: '{"character":"c","style":"s"}', usage: {}, estimated: 0, finishReason: 'stop' }; } };
+  const warmup = createWarmup({ hot, store, client, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => 10_000_000 });
+
+  const [first, second] = await Promise.all([warmup.refreshPortrait('g1', 'a', 'r1'), warmup.refreshPortrait('g1', 'b', 'r2')]);
+
+  assert.deepEqual([first.ok, second.ok], [true, false]);
+  assert.equal(second.reason, 'daily-cap');
+  assert.equal(calls, 1);
+});
+
+test('refreshPortrait: the daily count lives outside the warmup progress, so /nep warmup reset never zeroes it', async () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  store.touchUser('g1', 'a', 'Alice', 1000);
+  const client = fakeClient(fakeGuild('g1', [fakeChannel('c1', [rawMessage(1000, { authorId: 'a' })])]));
+  const hot = fakeHot();
+  hot.config.memory.portraitRefreshPerDay = 1;
+  let calls = 0;
+  const llm = { complete: async () => { calls += 1; return { text: '{"character":"c","style":"s"}', usage: {}, estimated: 0, finishReason: 'stop' }; } };
+  const warmup = createWarmup({ hot, store, client, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => 10_000_000 });
+
+  assert.equal((await warmup.refreshPortrait('g1', 'a', 'r1', { force: true })).ok, true);
+  assert.equal(store.state.data.portraitDay, new Date(10_000_000).toISOString().slice(0, 10));
+  assert.equal(store.state.data.portraitCount, 1);
+
+  assert.equal(warmup.reset().ok, true);
+  const again = await warmup.refreshPortrait('g1', 'a', 'r2', { force: true });
+  assert.equal(again.reason, 'daily-cap');
+  assert.equal(calls, 1);
+});
+
+test('refreshPortrait: a missing prompts.profile is reason "no-prompt", no slot taken, no request', async () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  store.touchUser('g1', 'a', 'Alice', 1000);
+  const client = fakeClient(fakeGuild('g1', [fakeChannel('c1', [rawMessage(1000, { authorId: 'a' })])]));
+  const hot = fakeHot({ prompts: { profile: undefined } });
+  const llm = scriptedLlm([{}]);
+  const warmup = createWarmup({ hot, store, client, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => 10_000_000 });
+
+  const outcome = await warmup.refreshPortrait('g1', 'a', 'r1', { force: true });
+  assert.equal(outcome.reason, 'no-prompt');
+  assert.equal(llm.calls.length, 0);
+  assert.equal(store.state.data.portraitCount, undefined);
+});
+
+test('refreshPortrait: a refresh with nothing to sample gives its daily slot back', async () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  store.touchUser('g1', 'a', 'Alice', 1000);
+  const client = fakeClient(fakeGuild('g1', [fakeChannel('c1', [rawMessage(1000, { authorId: 'other' })])]));
+  const hot = fakeHot();
+  const warmup = createWarmup({ hot, store, client, llm: scriptedLlm([{}]), calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => 10_000_000 });
+
+  const outcome = await warmup.refreshPortrait('g1', 'a', 'r1', { force: true });
+  assert.equal(outcome.reason, 'nothing-to-sample');
+  assert.equal(store.state.data.portraitCount, 0);
+});
+
+test('refreshPortrait: concurrent cues share one history fetch', async () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  store.touchUser('g1', 'a', 'Alice', 1000);
+  store.touchUser('g1', 'b', 'Bob', 1000);
+  const c1 = fakeChannel('c1', [rawMessage(1000, { authorId: 'a' }), rawMessage(2000, { authorId: 'b' })]);
+  const client = fakeClient(fakeGuild('g1', [c1]));
+  const hot = fakeHot();
+  const llm = scriptedLlm([{ character: 'c', style: 's', interests: [], details: [], episodes: [], aliases: [] }]);
+  const warmup = createWarmup({ hot, store, client, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => 10_000_000 });
+
+  const results = await Promise.all([warmup.refreshPortrait('g1', 'a', 'r1'), warmup.refreshPortrait('g1', 'b', 'r2')]);
+
+  assert.deepEqual(results.map((r) => r.ok), [true, true]);
+  assert.equal(c1.messages.fetchCalls, 1, 'the second cue waits for the fetch already in flight');
+});
+
 test('refreshPortrait: queues nothing and just logs while a warmup run is in flight', async () => {
   const dir = tmpDataDir();
   const store = createStore({ dataDir: dir });
@@ -1992,13 +2347,14 @@ test('createWarmup: resumeIfNeeded resumes a run that has progress but no start 
   assert.ok(store.state.data.warmup.finishedAt, 'the run should have resumed and finished');
 });
 
-test('warmupState: a stored state.warmup from an older version is discarded wholesale, never healed field by field', () => {
+test('warmupState: a stored state.warmup from an older version is discarded wholesale by a write, never healed field by field', async () => {
   const dir = tmpDataDir();
   const store = createStore({ dataDir: dir });
   const guild = fakeGuild('g1', []);
   const client = fakeClient(guild);
   const hot = fakeHot();
-  store.state.data.warmup = {
+  hot.config.warmup.maxTokens = 0; // the run stops on its very first request: only the reset is observed
+  const stored = {
     version: 2,
     done: false,
     aborted: false,
@@ -2007,32 +2363,66 @@ test('warmupState: a stored state.warmup from an older version is discarded whol
     requests: 7,
     channels: {},
   };
-  const warmup = createWarmup({ hot, store, client, llm: {}, calibrator: createCalibrator(), getSelfName: () => 'Nept' });
+  store.state.data.warmup = structuredClone(stored);
+  const warmup = createWarmup({ hot, store, client, llm: {}, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => 10_000_000 });
 
-  warmup.summary(); // touches warmupState() without starting a run
+  const summary = warmup.summary(); // a read: reports the fresh view, writes nothing
+  assert.equal(summary.tokensUsed, 0);
+  assert.equal(summary.startedAt, null);
+  assert.deepEqual(store.state.data.warmup, stored);
 
-  const bs = store.state.data.warmup;
-  assert.equal(bs.version, 3);
-  assert.equal(bs.tokensUsed, 0);
-  assert.equal(bs.startedAt, null);
-  assert.deepEqual(bs.done, { channels: [], people: [], server: false });
+  await warmup.run('g1');
+
+  const progress = store.state.data.warmup;
+  assert.equal(progress.version, 3);
+  assert.equal(progress.tokensUsed, 0);
+  assert.equal(progress.requests, 0);
+  assert.equal(progress.startedAt, new Date(10_000_000).toISOString(), 'the old start stamp is gone, the run stamped its own');
+  assert.equal('channels' in progress, false);
+  assert.deepEqual(progress.done, { channels: [], people: [], server: false });
 });
 
-test('warmupState: a stored state.warmup already at the current version is healed field by field, not replaced', () => {
+test('warmupState: a stored state.warmup already at the current version is healed field by field, not replaced', async () => {
   const dir = tmpDataDir();
   const store = createStore({ dataDir: dir });
   const guild = fakeGuild('g1', []);
   const client = fakeClient(guild);
   const hot = fakeHot();
+  hot.config.warmup.maxTokens = 0;
   store.state.data.warmup = { version: 3, tokensUsed: 42, done: { channels: ['c1'], people: [], server: false } };
   const warmup = createWarmup({ hot, store, client, llm: {}, calibrator: createCalibrator(), getSelfName: () => 'Nept' });
 
-  warmup.summary();
+  assert.equal(warmup.summary().tokensUsed, 42);
+  assert.equal(warmup.summary().doneChannels, 1);
 
-  const bs = store.state.data.warmup;
-  assert.equal(bs.version, 3);
-  assert.equal(bs.tokensUsed, 42, 'a version-3 object keeps its own field values');
-  assert.deepEqual(bs.done.channels, ['c1']);
+  await warmup.run('g1');
+
+  const progress = store.state.data.warmup;
+  assert.equal(progress.version, 3);
+  assert.equal(progress.tokensUsed, 42, 'a version-3 object keeps its own field values');
+  assert.deepEqual(progress.done.channels, ['c1']);
+  assert.equal(progress.requests, 0, 'a missing field is filled in');
+});
+
+test('warmupState: status() and summary() are read-only -- they never write or dirty state.json', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  const client = fakeClient(fakeGuild('g1', []));
+  const hot = fakeHot();
+  const stored = { version: 1, done: 'garbage' };
+  store.state.data.warmup = structuredClone(stored);
+  let dirtied = 0;
+  store.state.markDirty = () => {
+    dirtied += 1;
+  };
+  const warmup = createWarmup({ hot, store, client, llm: {}, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => 10_000_000 });
+
+  const status = warmup.status('g1');
+  const summary = warmup.summary();
+  assert.equal(status.phase, 'not started');
+  assert.equal(summary.doneChannels, 0);
+  assert.deepEqual(store.state.data.warmup, stored, 'the stored object is left exactly as it was');
+  assert.equal(dirtied, 0);
 });
 
 test('status: next target skips the target currently in flight', async () => {
@@ -2054,6 +2444,66 @@ test('status: next target skips the target currently in flight', async () => {
   assert.match(s.nextTarget, /c2/);
   release();
   await running;
+});
+
+test('createWarmup: every warmup and portrait request runs at the analyzer temperature with memory.timeoutMs', async () => {
+  const store = createStore({ dataDir: tmpDataDir() });
+  const history = [rawMessage(1000, { authorId: 'a' }), rawMessage(2000, { authorId: 'a' }), rawMessage(3000, { authorId: 'a' })];
+  const client = fakeClient(fakeGuild('g1', [fakeChannel('c1', history)]));
+  const hot = fakeHot();
+  hot.config.memory.timeoutMs = 900_000;
+  hot.config.llm.timeoutMs = 300_000;
+  const llm = scriptedLlm([{ purpose: 'p' }, { character: 'c', style: 's' }, { patterns: 'x' }, { character: 'c2', style: 's2' }]);
+  const warmup = createWarmup({ hot, store, client, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => 10_000_000 });
+
+  await warmup.run('g1');
+  await warmup.refreshPortrait('g1', 'a', '');
+
+  assert.equal(llm.calls.length, 4);
+  for (const call of llm.calls) {
+    assert.equal(call.opts.temperature, ANALYZER_TEMPERATURE);
+    assert.equal(call.opts.timeoutMs, 900_000);
+  }
+});
+
+test('createWarmup: a missing warmup.maxRequestTokens is 120000 for fitting and for the request cap alike', async () => {
+  const store = createStore({ dataDir: tmpDataDir() });
+  const history = Array.from({ length: 6 }, (_, i) => rawMessage(1000 + i * 1000, { authorId: 'a', content: `line number ${i} with a few words` }));
+  const client = fakeClient(fakeGuild('g1', [fakeChannel('c1', history)]));
+  const hot = fakeHot();
+  delete hot.config.warmup.maxRequestTokens;
+  hot.config.llm.maxRequestTokens = 40; // the chat cap: far too small for this channel
+  hot.config.llm.safetyMargin = 1;
+  const llm = scriptedLlm([{ purpose: 'p' }]);
+  const warmup = createWarmup({ hot, store, client, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => 10_000_000 });
+
+  const outcome = await warmup.runChannel('g1', 'c1');
+  assert.equal(outcome.ok, true);
+  assert.equal(llm.calls[0].opts.maxRequestTokens, 120000);
+  assert.ok(llm.calls[0].messages[1].content.includes('line number 0 '), 'fitted to the warmup cap, nothing dropped');
+});
+
+test('createWarmup: warmup rails are read at the call -- a lowered warmup.maxTokens stops a run already in flight', async () => {
+  const store = createStore({ dataDir: tmpDataDir() });
+  const c1 = fakeChannel('c1', [rawMessage(1000, { authorId: 'a' })]);
+  const c2 = fakeChannel('c2', [rawMessage(2000, { authorId: 'b' })]);
+  const client = fakeClient(fakeGuild('g1', [c1, c2]));
+  const hot = fakeHot();
+  const llm = scriptedLlm([
+    () => {
+      // A hot reload replaces the config objects, as src/hot.js does.
+      hot.config = { ...hot.config, warmup: { ...hot.config.warmup, maxTokens: 1, maxOutputTokens: 1234 } };
+      return { purpose: 'p1' };
+    },
+    { purpose: 'p2' },
+  ]);
+  const warmup = createWarmup({ hot, store, client, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => 10_000_000 });
+
+  const result = await warmup.run('g1');
+  assert.equal(result.ok, false);
+  assert.equal(result.message, 'budget');
+  assert.equal(llm.calls.length, 1);
+  assert.equal(store.state.data.warmup.aborted, 'budget');
 });
 
 // Provider routing: every warmup request is routed as the analyzer role.

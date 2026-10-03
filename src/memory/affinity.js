@@ -48,6 +48,17 @@ function round2(value) {
   return Math.round(value * 100) / 100;
 }
 
+/**
+ * A score kept inside -100..100 and rounded to the stored precision (2
+ * decimals) -- what `applyDelta` stores, for a caller that combines scores
+ * (src/behavior/private.js#effectiveAffinity).
+ * @param {number} value
+ * @returns {number}
+ */
+export function clampScore(value) {
+  return round2(clamp(value, -100, 100));
+}
+
 function sign(value) {
   return value > 0 ? 1 : value < 0 ? -1 : 0;
 }

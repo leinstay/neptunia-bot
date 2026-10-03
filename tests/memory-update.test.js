@@ -231,11 +231,11 @@ test('buildMemoryRequest: absent config keys fall back to the config.json defaul
     selfName: 'Nept',
   });
 
-  assert.equal(llmMessages[0].content, '400 800 15 15 20 3 20 15 12');
+  assert.equal(llmMessages[0].content, '1000 2000 15 15 20 3 20 15 12');
 });
 
 test('buildMemoryRequest: fills {{loreTextChars}} from config.lore.textChars', () => {
-  const config = makeConfig({ lore: { textChars: 600 } });
+  const config = makeConfig({ lore: { textChars: 450 } });
   const calibrator = createCalibrator();
   const messages = [slimMessage({ id: 'm1', ts: Date.UTC(2026, 0, 1, 12, 0, 0) })];
 
@@ -249,10 +249,10 @@ test('buildMemoryRequest: fills {{loreTextChars}} from config.lore.textChars', (
     selfName: 'Nept',
   });
 
-  assert.equal(llmMessages[0].content, 'Lore text stays under 600 chars.');
+  assert.equal(llmMessages[0].content, 'Lore text stays under 450 chars.');
 });
 
-test('buildMemoryRequest: {{loreTextChars}} falls back to 400 when config.lore is absent', () => {
+test('buildMemoryRequest: {{loreTextChars}} falls back to 600 (config.json) when config.lore is absent', () => {
   const config = makeConfig(); // no lore block at all
   const calibrator = createCalibrator();
   const messages = [slimMessage({ id: 'm1', ts: Date.UTC(2026, 0, 1, 12, 0, 0) })];
@@ -267,7 +267,7 @@ test('buildMemoryRequest: {{loreTextChars}} falls back to 400 when config.lore i
     selfName: 'Nept',
   });
 
-  assert.equal(llmMessages[0].content, 'Lore text stays under 400 chars.');
+  assert.equal(llmMessages[0].content, 'Lore text stays under 600 chars.');
 });
 
 test('buildMemoryRequest: an unknown {{placeholder}} is left untouched', () => {
@@ -1070,12 +1070,30 @@ test('analyze: a watched video-site link renders linkWatched, keyed video:<link 
 });
 
 test('analyze: a permanent limit renders as not watched with its reason', async () => {
-  const seen = await analyzerTranscriptWithCache({ 'video:v1': { miss: true, ts: Date.now(), reason: 'length' } }, [VIDEO_SLIM]);
+  const seen = await analyzerTranscriptWithCache({ 'video:v1': { miss: true, ts: Date.now(), reason: 'length', durationSec: 600 } }, [VIDEO_SLIM]);
   const notWatched = labels.transcript.videoNotWatched
     .replace('{name}', 'clip.mp4')
     .replace('{duration}', '0:20')
     .replace('{reason}', labels.transcript.videoReason.length);
   assert.ok(seen.includes(notWatched));
+});
+
+test('analyze: a length miss that fits the length cap now (or of unknown length) is no limit, as the describer rules', async () => {
+  for (const entry of [{ durationSec: 20 }, {}]) {
+    let seenUser = null;
+    await withStoreAsync(async (store) => {
+      const hot = {
+        config: makeConfig({ features: { mediaDescriptions: true }, media: { video: { maxSeconds: 60 } } }),
+        prompts: { memory: 'sys', labels },
+      };
+      const llm = { complete: async (llmMessages) => { seenUser = llmMessages[1].content; return { text: '{}' }; } };
+      const updater = createMemoryUpdater({ hot, store, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept' });
+      store.getMediaCache('g1')['video:v1'] = { miss: true, ts: Date.now(), reason: 'length', ...entry };
+      await updater.analyze('g1', [VIDEO_SLIM]);
+    });
+    assert.ok(seenUser.includes(labels.transcript.video.replace('{name}', 'clip.mp4').replace('{duration}', '0:20')), JSON.stringify(entry));
+    assert.ok(!seenUser.includes(labels.transcript.videoReason.length), JSON.stringify(entry));
+  }
 });
 
 test('analyze: an error miss or no entry renders the plain video form', async () => {
@@ -1182,7 +1200,7 @@ test('applyMemoryUpdate: merges purpose/topics/tone for a known channel id, clam
     const cfg = { fieldChars: 5, maxDetails: 2, maxInjokes: 2, maxSelfFacts: 2 };
 
     const update = { channels: { c1: { purpose: 'a long purpose text', topics: 'games', tone: 'chill' } } };
-    const result = applyMemoryUpdate(store, guildId, update, cfg, new Set(), new Set(['c1']));
+    const result = applyMemoryUpdate(store, guildId, update, cfg, new Set(), { knownChannelIds: new Set(['c1']) });
 
     assert.equal(result.channels, 1);
     const channel = store.getChannel(guildId, 'c1');
@@ -1199,7 +1217,7 @@ test('applyMemoryUpdate: rejects a channel id outside knownChannelIds', () => {
     const guildId = 'g1';
     const cfg = { fieldChars: 400, maxDetails: 15, maxInjokes: 15, maxSelfFacts: 20 };
 
-    const result = applyMemoryUpdate(store, guildId, { channels: { c999: { purpose: 'x' } } }, cfg, new Set(), new Set(['c1']));
+    const result = applyMemoryUpdate(store, guildId, { channels: { c999: { purpose: 'x' } } }, cfg, new Set(), { knownChannelIds: new Set(['c1']) });
 
     assert.equal(result.channels, 0);
     assert.equal(store.getChannel(guildId, 'c999'), null);
@@ -1213,7 +1231,7 @@ test('applyMemoryUpdate: a channel field absent from the update leaves the store
     store.updateChannel(guildId, 'c1', { purpose: 'old purpose', tone: 'calm' });
     const cfg = { fieldChars: 400, maxDetails: 15, maxInjokes: 15, maxSelfFacts: 20 };
 
-    const result = applyMemoryUpdate(store, guildId, { channels: { c1: { tone: 'excited' } } }, cfg, new Set(), new Set(['c1']));
+    const result = applyMemoryUpdate(store, guildId, { channels: { c1: { tone: 'excited' } } }, cfg, new Set(), { knownChannelIds: new Set(['c1']) });
 
     assert.equal(result.channels, 1);
     const channel = store.getChannel(guildId, 'c1');
@@ -1458,7 +1476,7 @@ test('applyMemoryUpdate: relationships enabled applies and clamps the affinity d
     store.touchUser(guildId, '1', 'nick', Date.now());
 
     const update = { users: { 1: { affinity: { delta: 999, reason: 'was really kind' } } } };
-    const result = applyMemoryUpdate(store, guildId, update, MEMORY_CFG, new Set(['1']), new Set(), RELATIONSHIPS_CFG);
+    const result = applyMemoryUpdate(store, guildId, update, MEMORY_CFG, new Set(['1']), { relationships: RELATIONSHIPS_CFG });
 
     assert.equal(result.users, 1);
     assert.equal(result.affinity, 1);
@@ -1475,7 +1493,7 @@ test('applyMemoryUpdate: relationships.damping missing counts as on, damping an 
     store.adjustAffinity(guildId, '1', 50, 'a good start', { maxDelta: Infinity, historySize: 10, now: Date.now() });
 
     const update = { users: { 1: { affinity: { delta: 10, reason: 'kind again' } } } };
-    applyMemoryUpdate(store, guildId, update, MEMORY_CFG, new Set(['1']), new Set(), RELATIONSHIPS_CFG);
+    applyMemoryUpdate(store, guildId, update, MEMORY_CFG, new Set(['1']), { relationships: RELATIONSHIPS_CFG });
 
     // factor = 1 - 50/100 = 0.5 -> applied delta = 5, not the full 10.
     assert.equal(store.getUser(guildId, '1').affinity.score, 55);
@@ -1489,7 +1507,7 @@ test('applyMemoryUpdate: relationships.dampingPower steepens/flattens the dampin
     store.adjustAffinity(guildId, '1', 60, 'a good start', { maxDelta: Infinity, historySize: 10, now: Date.now() });
 
     const update = { users: { 1: { affinity: { delta: 1, reason: 'kind again' } } } };
-    applyMemoryUpdate(store, guildId, update, MEMORY_CFG, new Set(['1']), new Set(), { ...RELATIONSHIPS_CFG, dampingPower: 2 });
+    applyMemoryUpdate(store, guildId, update, MEMORY_CFG, new Set(['1']), { relationships: { ...RELATIONSHIPS_CFG, dampingPower: 2 } });
 
     // factor = (1 - 60/100) ** 2 = 0.16, not the plain power-1 factor of 0.4.
     assert.equal(store.getUser(guildId, '1').affinity.score, 60.16);
@@ -1503,7 +1521,7 @@ test('applyMemoryUpdate: relationships.dampingPower garbage falls back to 1', ()
     store.adjustAffinity(guildId, '1', 60, 'a good start', { maxDelta: Infinity, historySize: 10, now: Date.now() });
 
     const update = { users: { 1: { affinity: { delta: 1, reason: 'kind again' } } } };
-    applyMemoryUpdate(store, guildId, update, MEMORY_CFG, new Set(['1']), new Set(), { ...RELATIONSHIPS_CFG, dampingPower: 'not a number' });
+    applyMemoryUpdate(store, guildId, update, MEMORY_CFG, new Set(['1']), { relationships: { ...RELATIONSHIPS_CFG, dampingPower: 'not a number' } });
 
     assert.equal(store.getUser(guildId, '1').affinity.score, 60.4);
   });
@@ -1516,7 +1534,7 @@ test('applyMemoryUpdate: relationships.damping: false applies the delta undamped
     store.adjustAffinity(guildId, '1', 50, 'a good start', { maxDelta: Infinity, historySize: 10, now: Date.now() });
 
     const update = { users: { 1: { affinity: { delta: 10, reason: 'kind again' } } } };
-    applyMemoryUpdate(store, guildId, update, MEMORY_CFG, new Set(['1']), new Set(), { ...RELATIONSHIPS_CFG, damping: false });
+    applyMemoryUpdate(store, guildId, update, MEMORY_CFG, new Set(['1']), { relationships: { ...RELATIONSHIPS_CFG, damping: false } });
 
     assert.equal(store.getUser(guildId, '1').affinity.score, 60);
   });
@@ -1528,7 +1546,7 @@ test('applyMemoryUpdate: a zero/absent affinity delta does not count as a change
     store.touchUser(guildId, '1', 'nick', Date.now());
 
     const update = { users: { 1: { affinity: { delta: 0, reason: 'no change' } } } };
-    const result = applyMemoryUpdate(store, guildId, update, MEMORY_CFG, new Set(['1']), new Set(), RELATIONSHIPS_CFG);
+    const result = applyMemoryUpdate(store, guildId, update, MEMORY_CFG, new Set(['1']), { relationships: RELATIONSHIPS_CFG });
     assert.equal(result.affinity, 0);
 
     const noAffinityField = applyMemoryUpdate(
@@ -1537,8 +1555,7 @@ test('applyMemoryUpdate: a zero/absent affinity delta does not count as a change
       { users: { 1: { style: 'still chatty' } } },
       MEMORY_CFG,
       new Set(['1']),
-      new Set(),
-      RELATIONSHIPS_CFG,
+      { relationships: RELATIONSHIPS_CFG },
     );
     assert.equal(noAffinityField.affinity, 0);
   });
@@ -1555,8 +1572,7 @@ test('applyMemoryUpdate: an affinity delta for an unknown user id is ignored ent
       { users: { 999: { affinity: { delta: 20, reason: 'x' } } } },
       MEMORY_CFG,
       new Set(['1']),
-      new Set(),
-      RELATIONSHIPS_CFG,
+      { relationships: RELATIONSHIPS_CFG },
     );
 
     assert.equal(result.users, 0);
@@ -1571,7 +1587,7 @@ test('applyMemoryUpdate: relationships disabled (or absent) ignores affinity ent
     store.touchUser(guildId, '1', 'nick', Date.now());
 
     const update = { users: { 1: { affinity: { delta: 50, reason: 'should be ignored' } } } };
-    const resultDisabled = applyMemoryUpdate(store, guildId, update, MEMORY_CFG, new Set(['1']), new Set(), { enabled: false });
+    const resultDisabled = applyMemoryUpdate(store, guildId, update, MEMORY_CFG, new Set(['1']), { relationships: { enabled: false } });
     assert.equal(resultDisabled.affinity, 0);
     assert.equal(store.getUser(guildId, '1').affinity.score, 0);
 
@@ -1592,8 +1608,7 @@ test('applyMemoryUpdate: a malformed affinity value is ignored, other fields sti
       { users: { 1: { interests: { add: [{ topic: 'games', note: '' }] }, affinity: 'not an object' } } },
       MEMORY_CFG,
       new Set(['1']),
-      new Set(),
-      RELATIONSHIPS_CFG,
+      { relationships: RELATIONSHIPS_CFG },
     );
 
     assert.equal(result.users, 1);
@@ -1625,7 +1640,7 @@ test('applyMemoryUpdate: routes raw.episodes through store.addEpisodes, result g
     store.touchUser(guildId, '1', 'nick', Date.now());
 
     const update = { users: { 1: { episodes: [{ what: 'promised to help with the move' }] } } };
-    const result = applyMemoryUpdate(store, guildId, update, MEMORY_CFG, new Set(['1']), new Set(), undefined, EPISODES_CFG);
+    const result = applyMemoryUpdate(store, guildId, update, MEMORY_CFG, new Set(['1']), { episodes: EPISODES_CFG });
 
     assert.equal(result.episodes, 1);
     const profile = store.getUser(guildId, '1');
@@ -1671,7 +1686,7 @@ test('applyMemoryUpdate: routes update.lore through store.setLore, result gains 
   withStore((store) => {
     const guildId = 'g1';
     const update = { lore: [{ title: 'The Flood', keys: ['flood'], text: 'It flooded once.' }] };
-    const result = applyMemoryUpdate(store, guildId, update, MEMORY_CFG, new Set(), new Set(), undefined, undefined, LORE_CFG);
+    const result = applyMemoryUpdate(store, guildId, update, MEMORY_CFG, new Set(), { lore: LORE_CFG });
 
     assert.equal(result.lore, 1);
     assert.equal(store.getLore(guildId).length, 1);
@@ -1699,7 +1714,7 @@ test('applyMemoryUpdate: lore never overwrites an existing owner entry', () => {
     });
 
     const update = { lore: [{ title: 'Founders Day', keys: ['founders'], text: 'analyzer overwrite attempt' }] };
-    applyMemoryUpdate(store, guildId, update, MEMORY_CFG, new Set(), new Set(), undefined, undefined, LORE_CFG);
+    applyMemoryUpdate(store, guildId, update, MEMORY_CFG, new Set(), { lore: LORE_CFG });
 
     assert.equal(store.getLore(guildId)[0].text, 'owner text');
   });
@@ -1890,6 +1905,19 @@ test('analyze: falls back to llm.timeoutMs when memory.timeoutMs is unset', asyn
 
     await updater.analyze(guildId, [slimMessage({ id: 'm1' })]);
     assert.equal(seenOptions.timeoutMs, hot.config.llm.timeoutMs);
+  });
+});
+
+test('analyze: an empty or null memory.model is unset -- no model is named, so the client sends llm.model', async () => {
+  await withStoreAsync(async (store) => {
+    for (const model of ['', null]) {
+      const hot = { config: makeConfig({ memory: { ...makeConfig().memory, model } }), prompts: { memory: 'sys', labels } };
+      let seenOptions = null;
+      const llm = { complete: async (messages, options) => { seenOptions = options; return { text: '{}' }; } };
+      const updater = createMemoryUpdater({ hot, store, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept' });
+      await updater.analyze('g1', [slimMessage({ id: 'm1' })]);
+      assert.equal(seenOptions.model, undefined, JSON.stringify(model));
+    }
   });
 });
 
@@ -2123,11 +2151,7 @@ test('applyMemoryUpdate: threads maxInterestsStored/interestHalfLifeDays/maxDeta
       { users: { 1: { interests: { add: [{ topic: 'Ancient favorite' }] }, details: { add: ['Ancient favorite fact'] } } } },
       cfgAncient,
       new Set(['1']),
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      { seenAt: ancientMs },
+      { timing: { seenAt: ancientMs } },
     );
 
     const recentMs = Date.parse('2026-09-20T00:00:00.000Z');
@@ -2146,11 +2170,7 @@ test('applyMemoryUpdate: threads maxInterestsStored/interestHalfLifeDays/maxDeta
       { users: { 1: { interests: { add: [{ topic: 'Fresh interest' }] }, details: { add: ['Fresh detail'] } } } },
       cfgDecay,
       new Set(['1']),
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      { seenAt: recentMs },
+      { timing: { seenAt: recentMs } },
     );
 
     const profile = store.getUser(guildId, '1');
@@ -2640,6 +2660,53 @@ test('run: a "token-limit" failure halves the next batch size too, instead of lo
   });
 });
 
+test('run: messages that arrive while the analyzer call is in flight are kept, even when the capped buffer trims the batch', async () => {
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    // batchMessages 5: the buffer holds 15, a batch takes 10.
+    const hot = {
+      config: makeConfig({ memory: { ...makeConfig().memory, batchMessages: 5, minBatchMessages: 1 } }),
+      prompts: { memory: 'memory system prompt', labels },
+    };
+    const base = Date.now();
+    let updater;
+    const llm = {
+      complete: async () => {
+        // Ten arrivals during the call: the capped buffer trims m0..m9 off its front.
+        for (let i = 0; i < 10; i += 1) updater.observe(guildId, slimMessage({ id: `n${i}`, ts: base + 100 + i }));
+        return { text: JSON.stringify({ guild: { patterns: 'ok' } }) };
+      },
+    };
+    updater = createMemoryUpdater({ hot, store, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept' });
+    for (let i = 0; i < 15; i += 1) updater.observe(guildId, slimMessage({ id: `m${i}`, ts: base + i }));
+
+    await updater.run(guildId);
+
+    const left = store.getBuffer(guildId).map((m) => m.id);
+    assert.deepEqual(left, ['m10', 'm11', 'm12', 'm13', 'm14', 'n0', 'n1', 'n2', 'n3', 'n4', 'n5', 'n6', 'n7', 'n8', 'n9']);
+  });
+});
+
+test('runPrivate: direct messages that arrive while the analyzer call is in flight are kept', async () => {
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    const base = Date.now();
+    let updater;
+    const llm = {
+      complete: async () => {
+        for (let i = 0; i < 4; i += 1) updater.observe(guildId, dmMessage({ id: `n${i}`, ts: base + 100 + i }), { private: 'u1' });
+        return { text: JSON.stringify({ users: { u1: { relationship: 'note' } } }) };
+      },
+    };
+    updater = createMemoryUpdater({ hot: privateHot({ batchMessages: 2, minBatchMessages: 1 }), store, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept' });
+    for (let i = 0; i < 6; i += 1) updater.observe(guildId, dmMessage({ id: `m${i}`, ts: base + i }), { private: 'u1' });
+
+    await updater.runPrivate(guildId, 'u1');
+
+    assert.deepEqual(store.getPrivateBuffer(guildId, 'u1').map((m) => m.id), ['m4', 'm5', 'n0', 'n1', 'n2', 'n3']);
+  });
+});
+
 // ---- touchMemory -----------------------------------------------------------
 
 test('touchMemory: touches the user profile and the channel for a human message', () => {
@@ -2803,6 +2870,69 @@ test('analyze: a network/provider error message is trimmed to 200 chars in detai
     assert.equal(outcome.reason, 'llm-error');
     assert.equal(outcome.detail, longMessage.slice(0, 200));
     assert.equal(outcome.detail.length, 200);
+  });
+});
+
+test('analyze: an unparsable answer is reported and logged by its error name, never quoting the answer', async () => {
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    const hot = {
+      config: makeConfig({ memory: { ...makeConfig().memory, batchMessages: 1, minBatchMessages: 1 } }),
+      prompts: { memory: 'sys', labels },
+    };
+    const llm = { complete: async () => ({ text: '{"users": she quit her job}', usage: {}, estimated: 0, finishReason: 'stop' }) };
+    const updater = createMemoryUpdater({ hot, store, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept' });
+
+    const outcome = await updater.analyze(guildId, [slimMessage({ id: 'm1' })]);
+    assert.equal(outcome.reason, 'bad-json');
+    assert.equal(outcome.detail, 'SyntaxError');
+
+    store.pushBuffer(guildId, slimMessage({ id: 'm2' }), 100);
+    const { logs } = await withCapturedLogs(() => updater.run(guildId));
+    assert.ok(logs.some((entry) => entry.msg.startsWith('memory: update failed') && entry.detail === 'SyntaxError'));
+    assert.ok(!JSON.stringify(logs).includes('she quit'), 'the answer text never reaches a log line');
+  });
+});
+
+test('analyze: a store error while applying a parsed answer is "apply-error", backs off instead of halving, logged by name only', async () => {
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    const hot = {
+      config: makeConfig({ memory: { ...makeConfig().memory, batchMessages: 15, minBatchMessages: 1 } }),
+      prompts: { memory: 'sys', labels },
+    };
+    let calls = 0;
+    const llm = {
+      complete: async () => {
+        calls += 1;
+        return { text: JSON.stringify({ users: { 1: { relationship: 'κάτι' } } }), usage: { prompt_tokens: 5, completion_tokens: 5 }, estimated: 10 };
+      },
+    };
+    let nowValue = 1_000_000;
+    const updater = createMemoryUpdater({ hot, store, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => nowValue });
+    store.applyProfileOps = () => {
+      throw new Error('disk refused /data/guilds/g1/users/1.json');
+    };
+
+    const outcome = await updater.analyze(guildId, [slimMessage({ id: 'm1', authorId: '1' })]);
+    assert.equal(outcome.ok, false);
+    assert.equal(outcome.reason, 'apply-error');
+    assert.equal(outcome.detail, 'Error');
+    assert.deepEqual(outcome.usage, { prompt_tokens: 5, completion_tokens: 5 }, 'the completion was billed');
+
+    for (let i = 0; i < 40; i += 1) store.pushBuffer(guildId, slimMessage({ id: `m${i}`, authorId: '1', ts: nowValue + i }), 100);
+    const { logs } = await withCapturedLogs(() => updater.run(guildId));
+    assert.equal(store.getBuffer(guildId).length, 40, 'nothing consumed');
+    const failure = logs.find((entry) => entry.msg.startsWith('memory: update failed'));
+    assert.ok(failure);
+    assert.equal(failure.msg, 'memory: update failed, backing off', 'an apply error never halves the batch');
+    assert.equal(failure.reason, 'apply-error');
+    assert.ok(logs.some((entry) => entry.reason === 'apply-error' && entry.error === 'Error' && entry.msg !== failure.msg), 'its own count-only line');
+    assert.ok(!JSON.stringify(logs).includes('disk refused'), 'the error message never reaches a log line');
+
+    const callsBefore = calls;
+    await updater.tick();
+    assert.equal(calls, callsBefore, 'backed off');
   });
 });
 
@@ -3016,6 +3146,26 @@ test('analyze: an absent onPortraitRequest is fine, no throw, even with a portra
   });
 });
 
+test('run: the "update applied" log counts portrait cues, never carries their text', async () => {
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    const hot = {
+      config: makeConfig({ memory: { ...makeConfig().memory, batchMessages: 1, minBatchMessages: 1 } }),
+      prompts: { memory: 'sys', labels },
+    };
+    const llm = { complete: async () => ({ text: JSON.stringify({ users: { 1: { portrait: 'αλλάζει θέμα συνέχεια' } } }) }) };
+    const updater = createMemoryUpdater({ hot, store, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept' });
+    store.pushBuffer(guildId, slimMessage({ id: 'm1', authorId: '1', authorName: 'nick' }), 100);
+
+    const { logs } = await withCapturedLogs(() => updater.run(guildId));
+
+    const applied = logs.find((entry) => entry.msg === 'memory: update applied');
+    assert.ok(applied);
+    assert.equal(applied.portraitRequests, 1);
+    assert.ok(!JSON.stringify(logs).includes('αλλάζει'), 'the cue text never reaches a log line');
+  });
+});
+
 test('analyze: no memory prompt configured returns { ok: false } without calling the LLM', async () => {
   await withStoreAsync(async (store) => {
     const guildId = 'g1';
@@ -3091,7 +3241,7 @@ test('applyMemoryUpdate: timing.seenAtByUser dates a user\'s interest by their o
     const oldTs = Date.UTC(2020, 0, 1);
     const timing = { seenAtByUser: new Map([['1', oldTs]]), seenAt: oldTs };
     const update = { users: { 1: { interests: { add: [{ topic: 'Chess', note: '' }] } } } };
-    const result = applyMemoryUpdate(store, guildId, update, MEMORY_CFG, new Set(['1']), new Set(), undefined, undefined, undefined, timing);
+    const result = applyMemoryUpdate(store, guildId, update, MEMORY_CFG, new Set(['1']), { timing });
 
     assert.equal(result.users, 1);
     const profile = store.getUser(guildId, '1');
@@ -3106,7 +3256,7 @@ test('applyMemoryUpdate: without timing, seenAt falls back to relationships.now/
     store.touchUser(guildId, '1', 'nick', Date.now());
 
     const update = { users: { 1: { interests: { add: [{ topic: 'Chess', note: '' }] } } } };
-    applyMemoryUpdate(store, guildId, update, MEMORY_CFG, new Set(['1']), new Set(), RELATIONSHIPS_CFG);
+    applyMemoryUpdate(store, guildId, update, MEMORY_CFG, new Set(['1']), { relationships: RELATIONSHIPS_CFG });
 
     const profile = store.getUser(guildId, '1');
     assert.equal(profile.interests[0].firstSeen, new Date(RELATIONSHIPS_CFG.now).toISOString());
@@ -3293,7 +3443,7 @@ test('applyMemoryUpdate: episode what/feeling are tokenized, quote is left verba
         },
       },
     };
-    applyMemoryUpdate(store, guildId, update, MEMORY_CFG, new Set(['1']), new Set(), undefined, EPISODES_CFG);
+    applyMemoryUpdate(store, guildId, update, MEMORY_CFG, new Set(['1']), { episodes: EPISODES_CFG });
 
     const [episode] = store.getUser(guildId, '1').episodes;
     assert.equal(episode.what, 'argued with <@223456789012345678>');
@@ -3309,7 +3459,7 @@ test('applyMemoryUpdate: an affinity reason "Name (id:...)" is tokenized', () =>
     store.touchUser(guildId, '223456789012345678', 'Bran', Date.now());
 
     const update = { users: { 1: { affinity: { delta: 5, reason: 'stood up for Bran (id:223456789012345678)' } } } };
-    applyMemoryUpdate(store, guildId, update, MEMORY_CFG, new Set(['1']), new Set(), RELATIONSHIPS_CFG);
+    applyMemoryUpdate(store, guildId, update, MEMORY_CFG, new Set(['1']), { relationships: RELATIONSHIPS_CFG });
 
     assert.equal(store.getUser(guildId, '1').affinity.reason, 'stood up for <@223456789012345678>');
   });
@@ -3342,7 +3492,7 @@ test('applyMemoryUpdate: channel purpose/topics/tone are tokenized', () => {
     store.touchUser(guildId, '223456789012345678', 'Bran', Date.now());
 
     const update = { channels: { c1: { purpose: 'Bran (id:223456789012345678) posts art here', topics: 'art by Bran (id:223456789012345678)', tone: 'calm, thanks to Bran (id:223456789012345678)' } } };
-    applyMemoryUpdate(store, guildId, update, MEMORY_CFG, new Set(), new Set(['c1']));
+    applyMemoryUpdate(store, guildId, update, MEMORY_CFG, new Set(), { knownChannelIds: new Set(['c1']) });
 
     const channel = store.getChannel(guildId, 'c1');
     assert.equal(channel.purpose, '<@223456789012345678> posts art here');
@@ -3359,7 +3509,7 @@ test('applyMemoryUpdate: lore text is tokenized, title and keys are never touche
     const update = {
       lore: [{ title: 'The Bran (id:223456789012345678) Incident', keys: ['bran (id:223456789012345678)'], text: 'Bran (id:223456789012345678) broke the server once' }],
     };
-    applyMemoryUpdate(store, guildId, update, MEMORY_CFG, new Set(), new Set(), undefined, undefined, LORE_CFG);
+    applyMemoryUpdate(store, guildId, update, MEMORY_CFG, new Set(), { lore: LORE_CFG });
 
     const [entry] = store.getLore(guildId);
     assert.equal(entry.title, 'The Bran (id:223456789012345678) Incident', 'title is the identity, never tokenized');
@@ -3664,12 +3814,7 @@ test('applyMemoryUpdate + buildMemoryRequest: a multi-word display name round-tr
       { users: { [authorId]: { character: `Al Sus (id:${otherId}) plays it` } } },
       MEMORY_CFG,
       knownUserIds,
-      new Set(),
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      batchAuthorNames,
+      { batchAuthorNames },
     );
     assert.equal(store.getUser(guildId, authorId).character, `<@${otherId}> plays it`);
 
@@ -3703,12 +3848,7 @@ test('applyMemoryUpdate + buildMemoryRequest: a multi-word display name round-tr
       { users: { [authorId]: { character: view1 } } },
       MEMORY_CFG,
       knownUserIds,
-      new Set(),
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      batchAuthorNames,
+      { batchAuthorNames },
     );
     assert.equal(store.getUser(guildId, authorId).character, `<@${otherId}> plays it`, 'no growth, no duplication after round 2');
 
@@ -3722,12 +3862,7 @@ test('applyMemoryUpdate + buildMemoryRequest: a multi-word display name round-tr
       { users: { [authorId]: { character: view2 } } },
       MEMORY_CFG,
       knownUserIds,
-      new Set(),
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      batchAuthorNames,
+      { batchAuthorNames },
     );
     assert.equal(store.getUser(guildId, authorId).character, `<@${otherId}> plays it`, 'still stable after round 3');
     assert.equal(analyzerView(), view1);
@@ -3751,12 +3886,7 @@ test('applyMemoryUpdate: namesOf recognises a batch author\'s current nick even 
       { users: { [authorId]: { character: `Al Sus (id:${otherId}) plays it` } } },
       MEMORY_CFG,
       new Set([authorId]),
-      new Set(),
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      batchAuthorNames,
+      { batchAuthorNames },
     );
 
     assert.equal(store.getUser(guildId, authorId).character, `<@${otherId}> plays it`, 'the batch nick, not just the stale stored name, is recognised');
@@ -3906,7 +4036,7 @@ test('applyMemoryUpdate: guild.learned add items are tokenized and stored, the t
       },
     };
     // TEACHER_B has no stored profile but is an author of the batch: known.
-    const result = applyMemoryUpdate(store, guildId, update, MEMORY_CFG, new Set([TEACHER_B]), new Set(), undefined, undefined, undefined, { seenAt: LEARNED_AT });
+    const result = applyMemoryUpdate(store, guildId, update, MEMORY_CFG, new Set([TEACHER_B]), { timing: { seenAt: LEARNED_AT } });
 
     assert.equal(result.learned, 4);
     assert.equal(result.guild, false, 'learned alone does not flip the patterns/starters/injokes flag');
@@ -3958,9 +4088,16 @@ test('applyMemoryUpdate: guild.learned seen/remove take integer ids only', () =>
     const guildId = 'g1';
     store.applyLearnedOps(guildId, { add: ['a fact', 'b fact', 'c fact'] }, { seenAt: LEARNED_AT });
     const update = { guild: { learned: { seen: [1, '3', 1.5, null], remove: ['a fact', 2, '3', -1] } } };
-    const result = applyMemoryUpdate(store, guildId, update, MEMORY_CFG, new Set(), new Set(), undefined, undefined, undefined, {
+    const result = applyMemoryUpdate(
+      store,
+      guildId,
+      update,
+      MEMORY_CFG,
+      new Set(),
+      { timing: {
       seenAt: LEARNED_AT + 24 * 3_600_000,
-    });
+    } },
+    );
 
     assert.equal(result.learned, 0, 'no add ops');
     assert.deepEqual(
@@ -4522,7 +4659,7 @@ test('applyMemoryUpdate: a written relationship stamps relationshipScore with th
     store.adjustAffinity(guildId, '1', 20, 'start', { maxDelta: Infinity, historySize: 10, now: Date.now() });
 
     const update = { users: { 1: { relationship: 'Getting closer', affinity: { delta: 10, reason: 'kind' } } } };
-    applyMemoryUpdate(store, guildId, update, MEMORY_CFG, new Set(['1']), new Set(), RELATIONSHIPS_CFG);
+    applyMemoryUpdate(store, guildId, update, MEMORY_CFG, new Set(['1']), { relationships: RELATIONSHIPS_CFG });
 
     const profile = store.getUser(guildId, '1');
     // damped: 20 + 10 * (1 - 20/100) = 28
@@ -4539,7 +4676,7 @@ test('applyMemoryUpdate: no relationship text -> relationshipScore untouched, ev
     assert.equal(store.getUser(guildId, '1').relationshipScore, 0);
 
     const update = { users: { 1: { relationship: '', affinity: { delta: 10, reason: 'kind' } } } };
-    applyMemoryUpdate(store, guildId, update, MEMORY_CFG, new Set(['1']), new Set(), RELATIONSHIPS_CFG);
+    applyMemoryUpdate(store, guildId, update, MEMORY_CFG, new Set(['1']), { relationships: RELATIONSHIPS_CFG });
 
     const profile = store.getUser(guildId, '1');
     assert.equal(profile.affinity.score, 10);
@@ -4554,7 +4691,7 @@ test('applyMemoryUpdate: relationships disabled still stamps the current score w
     store.touchUser(guildId, '1', 'nick', Date.now());
     store.adjustAffinity(guildId, '1', 40, 'start', { maxDelta: Infinity, historySize: 10, now: Date.now() });
     const update = { users: { 1: { relationship: 'Friends', affinity: { delta: 10, reason: 'kind' } } } };
-    applyMemoryUpdate(store, guildId, update, MEMORY_CFG, new Set(['1']), new Set(), undefined);
+    applyMemoryUpdate(store, guildId, update, MEMORY_CFG, new Set(['1']));
     assert.equal(store.getUser(guildId, '1').affinity.score, 40);
     assert.equal(store.getUser(guildId, '1').relationshipScore, 40);
   });
@@ -4565,7 +4702,7 @@ test('applyPrivateUpdate: a written private relationship stamps the EFFECTIVE sc
     const guildId = 'g1';
     seedPrivate(store, guildId); // public 10, private 4
     const update = { users: { u1: { relationship: 'Trusts the persona', affinity: { delta: 6, reason: 'kind' } } } };
-    applyPrivateUpdate(store, guildId, 'u1', update, MEMORY_CFG, { ...RELATIONSHIPS_CFG, damping: false });
+    applyPrivateUpdate(store, guildId, 'u1', update, MEMORY_CFG, { relationships: { ...RELATIONSHIPS_CFG, damping: false } });
 
     const priv = store.getPrivate(guildId, 'u1');
     assert.equal(priv.affinity.score, 10);
@@ -4578,7 +4715,7 @@ test('applyPrivateUpdate: no private relationship text -> no relationshipScore',
   withStore((store) => {
     const guildId = 'g1';
     seedPrivate(store, guildId);
-    applyPrivateUpdate(store, guildId, 'u1', { users: { u1: { affinity: { delta: 6, reason: 'kind' } } } }, MEMORY_CFG, RELATIONSHIPS_CFG);
+    applyPrivateUpdate(store, guildId, 'u1', { users: { u1: { affinity: { delta: 6, reason: 'kind' } } } }, MEMORY_CFG, { relationships: RELATIONSHIPS_CFG });
     assert.equal(store.getPrivate(guildId, 'u1').relationshipScore, undefined);
   });
 });

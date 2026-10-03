@@ -27,8 +27,9 @@
 // `refreshPortrait()` is the stream analyzer's "the stored portrait misses
 // something" cue (src/memory/update.js's `onPortraitRequest`), rewriting only
 // `character`/`style` from a fresh sample. A missing `prompts.profile` /
-// `prompts.channel` / `prompts.server` is reported (and logged), never thrown
-// through to discord.js. An in-memory-only `activity` snapshot (`{ phase,
+// `prompts.channel` / `prompts.server` is reported (reason `no-prompt`), never
+// thrown; a missing or broken labels.json fails loudly (a throw), exactly as it
+// does for the stream analyzer. An in-memory-only `activity` snapshot (`{ phase,
 // detail, lastActivityAt }`, never persisted) tracks what a run is doing
 // right now -- fetching history, describing a channel, profiling a person
 // (with a chunk count when its sample does not fit one request), building
@@ -40,16 +41,32 @@ import { formatTranscript, renderTranscript } from '../discord/format.js';
 import { fitSections, SectionsTooLargeError } from '../llm/budget.js';
 import { estimateTokens, estimateMessages } from '../llm/tokens.js';
 import { parseJsonObject } from '../llm/parse.js';
-import { applyMemoryUpdate, characterText } from './update.js';
+import {
+  ANALYZER_TEMPERATURE,
+  MEMORY_LIMIT_DEFAULTS,
+  applyMemoryUpdate,
+  characterText,
+  detailOf,
+  errorNameOf,
+  looksTruncated,
+  mainChannelSet,
+  requireLabels,
+} from './update.js';
 import { block, fillPromptTemplate } from '../behavior/prompt.js';
 import { topByRank } from './ranking.js';
 import { clampText } from './clamp.js';
 import { normalizeTopic } from './interests.js';
 import { toTokens, fromTokens } from './mentions.js';
 import { log } from '../log.js';
-import { dailyCounter, utcDay } from '../time.js';
+import { bumpDaily, dailyCounter, utcDay } from '../time.js';
 
 const CACHE_TTL_MS = 15 * 60_000;
+
+// Only when warmup.maxRequestTokens is missing (config.json always has it, the same value).
+const WARMUP_MAX_REQUEST_TOKENS_FALLBACK = 120000;
+
+// The portrait refresh's daily counter in state.json (see refreshPortrait).
+const PORTRAIT_SLOTS = { dayKey: 'portraitDay', countKey: 'portraitCount' };
 
 // Bumped whenever `state.warmup`'s shape changes incompatibly -- a stored
 // object whose `version` does not match this is foreign (written by an older
@@ -64,61 +81,58 @@ function isRateLimited(err) {
   return err?.statusCode === 429;
 }
 
-/** `error?.message`, trimmed to 200 chars — never message contents. */
-function detailOf(err) {
-  return err?.message ? String(err.message).slice(0, 200) : undefined;
-}
-
-/**
- * Whether a completion looks cut off by the output token cap: the provider
- * said so (`finish_reason: 'length'`), or the text has no closing `}` for
- * its first `{`. Mirrors src/memory/update.js#looksTruncated (kept local:
- * this module's helpers are deliberately not shared with the stream
- * analyzer's, only the small validated surface it needs is imported).
- */
-function looksTruncated(text, finishReason) {
-  if (finishReason === 'length') return true;
-  const start = String(text ?? '').indexOf('{');
-  if (start === -1) return false;
-  const end = String(text ?? '').lastIndexOf('}');
-  return end <= start;
-}
-
-// Fallbacks for the profile-prompt placeholders, mirroring config.json's own
-// defaults -- used only when a deployment's config is missing the key. Kept
-// separate from src/memory/update.js's own MEMORY_LIMIT_DEFAULTS so this
-// module never has to import from it (its shape is not otherwise shared).
-const WARMUP_LIMIT_DEFAULTS = {
-  fieldChars: 400,
-  maxInterests: 12,
-  maxDetails: 15,
-  interestTopicChars: 40,
-  interestNoteChars: 120,
-  maxNewEpisodes: 3,
-};
-
 // ---------------------------------------------------------------------------
-// Small pure helpers local to this module. From src/memory/update.js only
-// `characterText` is shared, so a `/nep rule add` reaches every `<character>`
-// block the same way it reaches the chat prompt; `block` and
-// `fillPromptTemplate` are the request builders' shared ones
-// (src/behavior/prompt.js).
+// Small pure helpers local to this module. From src/memory/update.js come
+// `characterText` (so a `/nep rule add` reaches every `<character>` block the
+// same way it reaches the chat prompt), the failure helpers `detailOf`,
+// `errorNameOf` and `looksTruncated`, and MEMORY_LIMIT_DEFAULTS (config.json's
+// own defaults, used only when a key is missing); `block` and `fillPromptTemplate`
+// are the request builders' shared ones (src/behavior/prompt.js).
 // ---------------------------------------------------------------------------
 
 function isoDateOrDash(ts) {
   return Number.isFinite(ts) ? utcDay(ts) : '-';
 }
 
+/** Only the fields of a clamped answer that say something (a non-blank string, a non-empty
+ * array): an answer that leaves a field out or empty never blanks what is stored, the same rule
+ * the stream analyzer follows (src/memory/update.js#applyMemoryUpdate). */
+function nonEmptyFields(fields) {
+  return Object.fromEntries(
+    Object.entries(fields).filter(([, value]) => (typeof value === 'string' ? value.trim() !== '' : Array.isArray(value) && value.length > 0)),
+  );
+}
+
+/** formatTranscript's 'memory'-mode options for a warmup request (channel, person, server,
+ * portrait), from the live config -- the same mode the stream analyzer renders in. */
+function memoryFormatOptions(config, selfName, labels) {
+  return {
+    timezone: config?.bot?.timezone ?? 'UTC',
+    gapMinutes: config?.context?.gapMarkerMinutes ?? 20,
+    maxChars: config?.context?.maxMessageChars ?? 800,
+    selfName,
+    mode: 'memory',
+    labels,
+    seeReactions: config?.features?.seeReactions !== false,
+    reactionsPerMessage: config?.context?.reactionsPerMessage,
+  };
+}
+
+/** The `<member>` line of a profile.md request (a warmup person or a portrait refresh). */
+function memberLine(member) {
+  return `${member.name} (id:${member.id}), ${member.messages} messages in the window, first ${isoDateOrDash(member.firstTs)}, last ${isoDateOrDash(member.lastTs)}`;
+}
+
 function profileTemplateValues(config, selfName) {
   const memoryCfg = config?.memory ?? {};
   return {
     name: selfName,
-    fieldChars: memoryCfg.fieldChars ?? WARMUP_LIMIT_DEFAULTS.fieldChars,
-    maxInterests: memoryCfg.maxInterests ?? WARMUP_LIMIT_DEFAULTS.maxInterests,
-    maxDetails: memoryCfg.maxDetails ?? WARMUP_LIMIT_DEFAULTS.maxDetails,
-    interestTopicChars: memoryCfg.interestTopicChars ?? WARMUP_LIMIT_DEFAULTS.interestTopicChars,
-    interestNoteChars: memoryCfg.interestNoteChars ?? WARMUP_LIMIT_DEFAULTS.interestNoteChars,
-    maxNewEpisodes: memoryCfg.maxNewEpisodes ?? WARMUP_LIMIT_DEFAULTS.maxNewEpisodes,
+    fieldChars: memoryCfg.fieldChars ?? MEMORY_LIMIT_DEFAULTS.fieldChars,
+    maxInterests: memoryCfg.maxInterests ?? MEMORY_LIMIT_DEFAULTS.maxInterests,
+    maxDetails: memoryCfg.maxDetails ?? MEMORY_LIMIT_DEFAULTS.maxDetails,
+    interestTopicChars: memoryCfg.interestTopicChars ?? MEMORY_LIMIT_DEFAULTS.interestTopicChars,
+    interestNoteChars: memoryCfg.interestNoteChars ?? MEMORY_LIMIT_DEFAULTS.interestNoteChars,
+    maxNewEpisodes: memoryCfg.maxNewEpisodes ?? MEMORY_LIMIT_DEFAULTS.maxNewEpisodes,
   };
 }
 
@@ -410,10 +424,9 @@ function fitNewest(fixedItems, items, limit, cost) {
  * @returns {{ messages: {role: string, content: string}[], stats: { kept: number, dropped: number, estimatedTokens: number } }}
  */
 export function buildChannelRequest({ prompts, config, calibrator, channel, messages: channelMessages, isMain, selfName = '' }) {
-  const labels = prompts?.labels ?? {};
-  const timezone = config?.bot?.timezone ?? 'UTC';
+  const labels = requireLabels(prompts);
   const memoryCfg = config?.memory ?? {};
-  const system = fillPromptTemplate(prompts?.channel, { fieldChars: memoryCfg.fieldChars ?? WARMUP_LIMIT_DEFAULTS.fieldChars });
+  const system = fillPromptTemplate(prompts?.channel, { fieldChars: memoryCfg.fieldChars ?? MEMORY_LIMIT_DEFAULTS.fieldChars });
   const channelLine = [
     `${channel.name} (id:${channel.id})`,
     channel.category ? `category: ${channel.category}` : null,
@@ -424,16 +437,7 @@ export function buildChannelRequest({ prompts, config, calibrator, channel, mess
     .join(', ');
   const channelBlock = block('channel', channelLine);
 
-  const formatOptions = {
-    timezone,
-    gapMinutes: config?.context?.gapMarkerMinutes ?? 20,
-    maxChars: config?.context?.maxMessageChars ?? 800,
-    selfName,
-    mode: 'memory',
-    labels,
-    seeReactions: config?.features?.seeReactions !== false,
-    reactionsPerMessage: config?.context?.reactionsPerMessage,
-  };
+  const formatOptions = memoryFormatOptions(config, selfName, labels);
   const items = formatTranscript(channelMessages, formatOptions);
   const transcriptTexts = items.map((item) => item.text);
 
@@ -442,7 +446,7 @@ export function buildChannelRequest({ prompts, config, calibrator, channel, mess
   const keptTexts = fitNewest([system, channelBlock], transcriptTexts, limit, cost);
   const keptItems = items.slice(items.length - keptTexts.length);
 
-  const messagesBlock = block('messages', renderTranscript(keptItems, timezone, labels));
+  const messagesBlock = block('messages', renderTranscript(keptItems, formatOptions.timezone, labels));
   const user = [channelBlock, messagesBlock].filter(Boolean).join('\n\n');
   const messages = [
     { role: 'system', content: system },
@@ -515,10 +519,10 @@ export function clampProfileResult(raw, config, nameOf = () => null) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
   const memoryCfg = config?.memory ?? {};
   const tolerance = memoryCfg.clampTolerance;
-  const fieldChars = memoryCfg.fieldChars ?? WARMUP_LIMIT_DEFAULTS.fieldChars;
-  const topicChars = memoryCfg.interestTopicChars ?? WARMUP_LIMIT_DEFAULTS.interestTopicChars;
-  const noteChars = memoryCfg.interestNoteChars ?? WARMUP_LIMIT_DEFAULTS.interestNoteChars;
-  const maxNewEpisodes = memoryCfg.maxNewEpisodes ?? WARMUP_LIMIT_DEFAULTS.maxNewEpisodes;
+  const fieldChars = memoryCfg.fieldChars ?? MEMORY_LIMIT_DEFAULTS.fieldChars;
+  const topicChars = memoryCfg.interestTopicChars ?? MEMORY_LIMIT_DEFAULTS.interestTopicChars;
+  const noteChars = memoryCfg.interestNoteChars ?? MEMORY_LIMIT_DEFAULTS.interestNoteChars;
+  const maxNewEpisodes = memoryCfg.maxNewEpisodes ?? MEMORY_LIMIT_DEFAULTS.maxNewEpisodes;
   const tokenize = makeTokenizer(nameOf);
   const resolve = (text, limit) => clampResolvedField(text, limit, tolerance, tokenize, nameOf);
 
@@ -557,15 +561,14 @@ export function clampProfileResult(raw, config, nameOf = () => null) {
       if (!what) return null;
       const quote = typeof ep.quote === 'string' ? clampText(ep.quote, 120, { tolerance: 1 }) : '';
       const feeling = resolve(ep.feeling, fieldChars);
-      const weight = Number.isInteger(ep.weight) ? Math.min(5, Math.max(1, ep.weight)) : 3;
       const date = typeof ep.date === 'string' ? ep.date.slice(0, 10) : '';
-      return { date, what, quote, feeling, weight };
+      // `weight` is clamped where it is stored (src/memory/episodes.js).
+      return { date, what, quote, feeling, weight: ep.weight };
     })
     .filter(Boolean);
 
-  const aliases = (Array.isArray(raw.aliases) ? raw.aliases : [])
-    .map((a) => (typeof a === 'string' ? clampText(a, 40, { tolerance: 1 }) : ''))
-    .filter(Boolean);
+  // An alias is clamped where it is stored (src/memory/aliases.js).
+  const aliases = (Array.isArray(raw.aliases) ? raw.aliases : []).filter((a) => typeof a === 'string' && a.trim());
 
   return { character, style, interests, details, episodes, aliases };
 }
@@ -575,7 +578,7 @@ export function clampChannelResult(raw, config) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
   const memoryCfg = config?.memory ?? {};
   const tolerance = memoryCfg.clampTolerance;
-  const fieldChars = memoryCfg.fieldChars ?? WARMUP_LIMIT_DEFAULTS.fieldChars;
+  const fieldChars = memoryCfg.fieldChars ?? MEMORY_LIMIT_DEFAULTS.fieldChars;
   return {
     purpose: typeof raw.purpose === 'string' ? clampText(raw.purpose, fieldChars, { tolerance }) : '',
     topics: typeof raw.topics === 'string' ? clampText(raw.topics, fieldChars, { tolerance }) : '',
@@ -592,21 +595,21 @@ function serverTemplateValues(config, selfName) {
   const memoryCfg = config?.memory ?? {};
   return {
     name: selfName,
-    fieldChars: memoryCfg.fieldChars ?? WARMUP_LIMIT_DEFAULTS.fieldChars,
-    maxInjokes: memoryCfg.maxInjokes ?? 15,
-    loreTextChars: config?.lore?.textChars ?? 400,
+    fieldChars: memoryCfg.fieldChars ?? MEMORY_LIMIT_DEFAULTS.fieldChars,
+    maxInjokes: memoryCfg.maxInjokes ?? MEMORY_LIMIT_DEFAULTS.maxInjokes,
+    loreTextChars: config?.lore?.textChars ?? MEMORY_LIMIT_DEFAULTS.loreTextChars,
   };
 }
 
 /** Validate and clamp the model's `server.md` JSON. Never `null` -- an empty/garbage answer just
- * yields empty fields, since a server-level write only ever ADDS what is non-empty (see
- * store.updateGuild/store.setLore). */
+ * yields empty fields; `processServer` writes only the non-empty ones (`nonEmptyFields`), so an
+ * empty field never blanks what is stored, and `store.setLore` only ever adds or updates. */
 export function clampServerResult(raw, config, nameOf = () => null) {
   const memoryCfg = config?.memory ?? {};
   const tolerance = memoryCfg.clampTolerance;
-  const fieldChars = memoryCfg.fieldChars ?? WARMUP_LIMIT_DEFAULTS.fieldChars;
-  const maxInjokes = memoryCfg.maxInjokes ?? 15;
-  const loreTextChars = config?.lore?.textChars ?? 400;
+  const fieldChars = memoryCfg.fieldChars ?? MEMORY_LIMIT_DEFAULTS.fieldChars;
+  const maxInjokes = memoryCfg.maxInjokes ?? MEMORY_LIMIT_DEFAULTS.maxInjokes;
+  const loreTextChars = config?.lore?.textChars ?? MEMORY_LIMIT_DEFAULTS.loreTextChars;
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { patterns: '', starters: '', injokes: [], lore: [] };
 
   const tokenize = makeTokenizer(nameOf);
@@ -622,7 +625,8 @@ export function clampServerResult(raw, config, nameOf = () => null) {
   const lore = (Array.isArray(raw.lore) ? raw.lore : [])
     .map((entry) => {
       if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return null;
-      const title = typeof entry.title === 'string' ? entry.title.trim().slice(0, 80) : '';
+      // The title is clamped where it is stored (src/memory/lore.js).
+      const title = typeof entry.title === 'string' ? entry.title.trim() : '';
       if (!title) return null;
       const keys = Array.isArray(entry.keys) ? entry.keys.filter((k) => typeof k === 'string' && k.trim()).map((k) => k.trim()) : [];
       const text = resolve(entry.text, loreTextChars);
@@ -702,7 +706,7 @@ export function buildPersonWriteIterations(answer) {
     const interestAdd = interests.filter((it) => (it.times ?? 1) >= i).map((it) => ({ topic: it.topic, note: it.note }));
     if (interestAdd.length > 0) ops.interests = { add: interestAdd };
     const detailAdd = details.filter((d) => (d.times ?? 1) >= i).map((d) => d.text);
-    if (detailAdd.length > 0) ops.details = detailAdd;
+    if (detailAdd.length > 0) ops.details = { add: detailAdd };
     if (i === 1) {
       if (typeof answer?.character === 'string' && answer.character) ops.character = answer.character;
       if (typeof answer?.style === 'string' && answer.style) ops.style = answer.style;
@@ -732,35 +736,52 @@ function buildNameIndex(windows) {
   return (id) => latest.get(String(id))?.name ?? null;
 }
 
-/** The state.json shape this module owns (see docs/prompt-contract.md, "The warmup"),
+/** The warmup's progress (`state.warmup`, see docs/en/warmup.md) for a WRITE path,
  * created and self-healed in place -- garbage left by an old shape never crashes a read. A stored
  * object whose `version` is not `WARMUP_STATE_VERSION` was written by an older, differently-shaped
  * version of this project: it is foreign, replaced wholesale (nothing carried over) rather than
  * healed field by field, logged once, and the store marked dirty so the fresh object is flushed.
- * An object already at the current version is healed field by field, same as before. */
+ * An object already at the current version is healed field by field. Reads use `progressView`. */
 function warmupState(store) {
   const data = store.state.data;
-  const isForeign = !data.warmup || typeof data.warmup !== 'object' || Array.isArray(data.warmup) || data.warmup.version !== WARMUP_STATE_VERSION;
-  if (isForeign) {
+  if (isForeignProgress(data.warmup)) {
     if (data.warmup !== undefined) {
       log.info('warmup: discarded progress written by an older version, memory is untouched', {});
     }
     data.warmup = { version: WARMUP_STATE_VERSION };
     store.state.markDirty();
   }
-  const bs = data.warmup;
-  if (typeof bs.startedAt !== 'string') bs.startedAt = null;
-  if (typeof bs.finishedAt !== 'string') bs.finishedAt = null;
-  if (!Number.isFinite(bs.tokensUsed)) bs.tokensUsed = 0;
-  if (!Number.isFinite(bs.requests)) bs.requests = 0;
-  if (!bs.done || typeof bs.done !== 'object' || Array.isArray(bs.done)) bs.done = {};
-  if (!Array.isArray(bs.done.channels)) bs.done.channels = [];
-  if (!Array.isArray(bs.done.people)) bs.done.people = [];
-  if (typeof bs.done.server !== 'boolean') bs.done.server = false;
-  if (bs.aborted !== null && typeof bs.aborted !== 'string') bs.aborted = null;
-  if (typeof bs.refreshDay !== 'string') bs.refreshDay = null;
-  if (!Number.isFinite(bs.refreshCount)) bs.refreshCount = 0;
-  return bs;
+  return healProgress(data.warmup);
+}
+
+/** The same progress `warmupState` would heal, as a normalised COPY: never writes or dirties
+ * state.json (`status()`/`summary()` are reads). */
+function progressView(store) {
+  const stored = store.state.data.warmup;
+  return healProgress(isForeignProgress(stored) ? { version: WARMUP_STATE_VERSION } : structuredClone(stored));
+}
+
+/** Whether a stored `state.warmup` must be replaced rather than healed: missing, not an object,
+ * or written at another `WARMUP_STATE_VERSION`. */
+function isForeignProgress(value) {
+  return !value || typeof value !== 'object' || Array.isArray(value) || value.version !== WARMUP_STATE_VERSION;
+}
+
+/** Fill every missing or invalid field of a current-version progress object, in place. */
+function healProgress(progress) {
+  if (typeof progress.startedAt !== 'string') progress.startedAt = null;
+  if (typeof progress.finishedAt !== 'string') progress.finishedAt = null;
+  if (!Number.isFinite(progress.tokensUsed)) progress.tokensUsed = 0;
+  if (!Number.isFinite(progress.requests)) progress.requests = 0;
+  if (!progress.done || typeof progress.done !== 'object' || Array.isArray(progress.done)) progress.done = {};
+  if (!Array.isArray(progress.done.channels)) progress.done.channels = [];
+  if (!Array.isArray(progress.done.people)) progress.done.people = [];
+  if (typeof progress.done.server !== 'boolean') progress.done.server = false;
+  if (progress.aborted !== null && typeof progress.aborted !== 'string') progress.aborted = null;
+  // The portrait refresh counter lived here once; it has its own state keys now (refreshPortrait).
+  delete progress.refreshDay;
+  delete progress.refreshCount;
+  return progress;
 }
 
 /**
@@ -777,6 +798,7 @@ function warmupState(store) {
  */
 export function createWarmup({ hot, store, client, llm, calibrator, getSelfName, now = Date.now, sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)) }) {
   const cache = new Map(); // guildId -> { fetchedAt, windows }
+  const fetching = new Map(); // guildId -> the fetchGuildWindows promise in flight, see getWindows
   let running = false; // a full run() or one-off runXxx() in flight -- see isWarmingUp()
   let idleWaiters = []; // resolvers for waitIdle(), notified once running goes back to false
   let consecutiveFailures = 0; // resets on any successful request; 3 in a row aborts the run (resumable)
@@ -823,24 +845,35 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
           minTs,
           selfId,
           embedTextChars: hot.config.media?.embedTextChars,
+          videoSites: hot.config.media?.video?.sites,
         });
       } catch (err) {
-        log.warn('warmup: channel fetch failed, skipping it for this round', { channel: channel.id, error: err });
+        log.warn('warmup: channel fetch failed, skipping it for this round', { channelId: channel.id, error: err });
       }
-      log.info('warmup: channel fetched', { channel: channel.id, messages: messages.length });
+      log.info('warmup: channel fetched', { channelId: channel.id, messages: messages.length });
       windows.push({ id: channel.id, name: channel.name, category: channel.parent?.name ?? null, topic: channel.topic ?? null, messages, channel });
       touchActivity('fetching', { channelsFetched: i + 1, channelsTotal: channels.length });
     }
     return windows;
   }
 
-  /** Cached windows for `guildId`, refetched once the 15-minute cache entry has gone stale. */
-  async function getWindows(guildId, guild, cfg) {
+  /** Cached windows for `guildId`, refetched once the 15-minute cache entry has gone stale. A
+   * fetch already in flight is shared: concurrent callers (several portrait cues of one batch)
+   * wait for the same history read instead of each starting their own. */
+  function getWindows(guildId, guild, cfg) {
     const cached = cache.get(guildId);
-    if (cached && now() - cached.fetchedAt < CACHE_TTL_MS) return cached.windows;
-    const windows = await fetchGuildWindows(guild, cfg);
-    cache.set(guildId, { fetchedAt: now(), windows });
-    return windows;
+    if (cached && now() - cached.fetchedAt < CACHE_TTL_MS) return Promise.resolve(cached.windows);
+    let pending = fetching.get(guildId);
+    if (!pending) {
+      pending = fetchGuildWindows(guild, cfg)
+        .then((windows) => {
+          cache.set(guildId, { fetchedAt: now(), windows });
+          return windows;
+        })
+        .finally(() => fetching.delete(guildId));
+      fetching.set(guildId, pending);
+    }
+    return pending;
   }
 
   function resolvedGuild(guildId) {
@@ -907,25 +940,46 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
   }
 
   function markDone(kind, id) {
-    const bs = warmupState(store);
+    const progress = warmupState(store);
     if (kind === 'server') {
-      bs.done.server = true;
-    } else if (!bs.done[kind].includes(id)) {
-      bs.done[kind].push(id);
+      progress.done.server = true;
+    } else if (!progress.done[kind].includes(id)) {
+      progress.done[kind].push(id);
     }
     store.state.markDirty();
     store.flush();
   }
 
-  /** `config` with `llm.maxRequestTokens` overridden to `cfg.maxRequestTokens` (the warmup's own,
-   * much larger, cap) -- so buildChannelRequest fits under IT, not the global
-   * per-request rail (docs/prompt-contract.md, "The warmup"). */
-  function requestConfigFor(cfg) {
-    return { ...hot.config, llm: { ...hot.config.llm, maxRequestTokens: cfg.maxRequestTokens ?? hot.config.llm?.maxRequestTokens } };
+  /** `warmup.maxRequestTokens`, the warmup's own (much larger) per-request cap, read now -- the
+   * one reading behind both the fitting and the cap a request is sent under. */
+  function warmupMaxRequestTokens() {
+    return hot.config.warmup?.maxRequestTokens ?? WARMUP_MAX_REQUEST_TOKENS_FALLBACK;
   }
 
-  function warmupRequestCap(cfg) {
-    return Math.floor((cfg.maxRequestTokens ?? 120000) * (hot.config.llm?.safetyMargin ?? 0.9));
+  /** The live config with `llm.maxRequestTokens` overridden to the warmup's own cap -- so
+   * buildChannelRequest fits under IT, not the global per-request rail
+   * (docs/prompt-contract.md, "The warmup"). */
+  function requestConfig() {
+    return { ...hot.config, llm: { ...hot.config.llm, maxRequestTokens: warmupMaxRequestTokens() } };
+  }
+
+  /** The warmup's per-request token cap after `llm.safetyMargin`, read now. */
+  function warmupRequestCap() {
+    return Math.floor(warmupMaxRequestTokens() * (hot.config.llm?.safetyMargin ?? 0.9));
+  }
+
+  /** The `llm.complete` options every warmup and portrait request shares, read at the call:
+   * the analyzer model, role and temperature, `warmup.maxOutputTokens`, the warmup's request
+   * cap and `memory.timeoutMs` (a profile.md answer can take as long as a stream batch). */
+  function analyzerRequestOptions() {
+    return {
+      model: hot.config.memory?.model ?? hot.config.llm?.model,
+      role: 'analyzer',
+      temperature: ANALYZER_TEMPERATURE,
+      maxOutputTokens: hot.config.warmup?.maxOutputTokens ?? 6000,
+      maxRequestTokens: warmupRequestCap(),
+      timeoutMs: hot.config.memory?.timeoutMs ?? hot.config.llm?.timeoutMs,
+    };
   }
 
   /**
@@ -933,16 +987,19 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
    * (`warmup.maxTokens`, a "stop here, resumable" outcome, never a throw), the per-request cap
    * override, a sustained-429 wait (`rateLimitWaitMinutes` × up to `rateLimitMaxWaits`, then abort,
    * resumable), and the 3-consecutive-other-failures abort. Progress (`tokensUsed`/`requests`) is
-   * persisted after every completed request. Never throws: every outcome is reported.
+   * persisted after every completed request. Never throws: every outcome is reported. Every
+   * `warmup.*` rail is read at the call, never from the run's start, so `/nep set` reaches a run
+   * already in flight.
    * @returns {Promise<{ ok: true, completion: object } | { ok: false, stop?: boolean, reason: string, error?: Error }>}
    */
-  async function callWithRails(messages, cfg) {
-    const bs = warmupState(store);
+  async function callWithRails(messages) {
+    const progress = warmupState(store);
     const estimate = calibrator.apply(estimateMessages(messages));
-    const maxTokens = Number.isFinite(cfg.maxTokens) ? cfg.maxTokens : Infinity;
-    if (bs.tokensUsed + estimate > maxTokens) {
-      log.info('warmup: token budget reached, stopping the run (resumable)', { tokensUsed: bs.tokensUsed, estimate, maxTokens });
-      bs.aborted = 'budget';
+    const configuredMax = hot.config.warmup?.maxTokens;
+    const maxTokens = Number.isFinite(configuredMax) ? configuredMax : Infinity;
+    if (progress.tokensUsed + estimate > maxTokens) {
+      log.info('warmup: token budget reached, stopping the run (resumable)', { tokensUsed: progress.tokensUsed, estimate, maxTokens });
+      progress.aborted = 'budget';
       store.state.markDirty();
       store.flush();
       touchActivity('aborted', { reason: 'budget' });
@@ -962,15 +1019,7 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
       const controller = new AbortController();
       currentAbort = controller;
       try {
-        completion = await llm.complete(messages, {
-          model: hot.config.memory?.model ?? hot.config.llm?.model,
-          role: 'analyzer',
-          maxOutputTokens: cfg.maxOutputTokens ?? 6000,
-          maxRequestTokens: warmupRequestCap(cfg),
-          countAgainstDailyCap: false,
-          timeoutMs: hot.config.memory?.timeoutMs ?? hot.config.llm?.timeoutMs,
-          signal: controller.signal,
-        });
+        completion = await llm.complete(messages, { ...analyzerRequestOptions(), countAgainstDailyCap: false, signal: controller.signal });
       } catch (err) {
         currentAbort = null;
         // /nep warmup stop aborted THIS call -- report it as a clean stop, never a failure
@@ -982,10 +1031,11 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
         }
         if (isRateLimited(err)) {
           waits += 1;
+          const cfg = hot.config.warmup ?? {};
           const maxWaits = Number.isFinite(cfg.rateLimitMaxWaits) ? cfg.rateLimitMaxWaits : 36;
           if (waits > maxWaits) {
             log.warn('warmup: rate limit outlasted the wait budget, aborting the run (resumable)', { waits });
-            bs.aborted = 'rate-limit';
+            progress.aborted = 'rate-limit';
             store.state.markDirty();
             store.flush();
             touchActivity('aborted', { reason: 'rate-limit' });
@@ -1002,7 +1052,7 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
         log.warn('warmup: request failed', { detail: detailOf(err), consecutiveFailures });
         if (consecutiveFailures >= 3) {
           log.warn('warmup: three consecutive failures, aborting the run (resumable)');
-          bs.aborted = 'failures';
+          progress.aborted = 'failures';
           store.state.markDirty();
           store.flush();
           touchActivity('aborted', { reason: 'failures' });
@@ -1013,8 +1063,8 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
 
       currentAbort = null;
       consecutiveFailures = 0;
-      bs.tokensUsed += completion.usage?.total_tokens ?? completion.estimated ?? estimate;
-      bs.requests += 1;
+      progress.tokensUsed += completion.usage?.total_tokens ?? completion.estimated ?? estimate;
+      progress.requests += 1;
       store.state.markDirty();
       store.flush();
       bumpActivity();
@@ -1112,27 +1162,33 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
         { users: { [member.id]: ops } },
         cfgForOps,
         knownUserIds,
-        new Set(),
-        undefined, // relationships/affinity: untouched by the warmup
-        episodesCfg,
-        undefined, // lore: not a per-person field
-        timing,
-        batchAuthorNames,
+        // No relationships (attitude is never warmed up) and no lore: not a per-person field.
+        { episodes: episodesCfg, timing, batchAuthorNames },
       );
     }
     store.flush();
     return { iterations: iterations.length };
   }
 
+  // Outcomes of processChannel / processPerson / processServer. `{ ok: true, ... }` on a write (the
+  // target is marked done). Every other outcome carries a `reason`: `no-prompt`, the rails'
+  // `budget`/`rate-limit`/`failures`/`stopped`/`paused` (all with `stop: true`: the run ends,
+  // resumable), `llm-error`, `over-cap` (the fixed blocks alone exceed the request cap, nothing
+  // sent), `bad-json`, `unparsable` and `nothing-to-sample`. The one rule for marking done: a
+  // target is marked done after a write or a final skip (`skipped: true`: `nothing-to-sample`,
+  // or `unparsable` -- no usable answer even after the half-sample retry). Every other failure
+  // leaves it to the next run.
+
   /** One channel → `channel.md` → `store.updateChannel`. See `callWithRails` for the stop/failure
-   * contract; `{ ok: true }` on a clean write, marks the channel done either way it succeeds.
+   * contract and the comment above for the outcomes; `{ ok: true }` on a clean write. A single
+   * bad answer is `bad-json`, retried by the next run.
    * `progress` (`{ index, total }`, both 1-based/count, optional) is this channel's position among
    * the run's eligible channels -- purely for `activity.detail`, a one-off `/nep warmup channels
    * channel:` call omits it. */
   async function processChannel(guildId, window, cfg, mainChannelIds, progress) {
     touchActivity('channel', { id: window.id, name: window.name, index: progress?.index ?? null, total: progress?.total ?? null });
     if (!hot.prompts?.channel) {
-      return { ok: false, stop: true, reason: 'missing-prompt', message: 'prompt file missing: prompts/channel.md (or prompts.local/channel.md) is not configured yet' };
+      return { ok: false, stop: true, reason: 'no-prompt', message: 'prompt file missing: prompts/channel.md (or prompts.local/channel.md) is not configured yet' };
     }
     const isMain = mainChannelIds.has(String(window.id));
     // A channel quiet in the lookback window is described from its newest messages regardless of
@@ -1142,10 +1198,10 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
     const wanted = cfg.messagesPerChannel ?? 200;
     if (source.length < wanted && window.channel) {
       try {
-        source = await fetchHistoryWindow(window.channel, { limit: wanted, minTs: 0, selfId: client.user?.id, embedTextChars: hot.config.media?.embedTextChars });
-        log.info('warmup: quiet channel fetched deeper', { channel: window.id, messages: source.length });
+        source = await fetchHistoryWindow(window.channel, { limit: wanted, minTs: 0, selfId: client.user?.id, embedTextChars: hot.config.media?.embedTextChars, videoSites: hot.config.media?.video?.sites });
+        log.info('warmup: quiet channel fetched deeper', { channelId: window.id, messages: source.length });
       } catch (err) {
-        log.warn('warmup: deeper fetch failed, describing from the window', { channel: window.id, error: err });
+        log.warn('warmup: deeper fetch failed, describing from the window', { channelId: window.id, error: err });
       }
     }
     const selected = selectChannelMessages(source, cfg.messagesPerChannel);
@@ -1153,28 +1209,29 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
 
     let built;
     try {
-      built = buildChannelRequest({ prompts: hot.prompts, config: requestConfigFor(cfg), calibrator, channel: window, messages: selected, isMain, selfName });
+      built = buildChannelRequest({ prompts: hot.prompts, config: requestConfig(), calibrator, channel: window, messages: selected, isMain, selfName });
     } catch (err) {
       if (err instanceof SectionsTooLargeError) {
-        log.warn('warmup: channel request does not fit even the minimum, skipping this round', { channel: window.id });
-        return { ok: false };
+        log.warn('warmup: channel request does not fit even the minimum, skipping this round', { channelId: window.id });
+        return { ok: false, reason: 'over-cap' };
       }
       throw err;
     }
 
-    const result = await callWithRails(built.messages, cfg);
+    const result = await callWithRails(built.messages);
     if (!result.ok) return result;
 
     let parsed;
     try {
       parsed = parseJsonObject(result.completion.text);
     } catch (err) {
-      log.warn('warmup: channel answer could not be parsed, will retry next run', { channel: window.id, detail: detailOf(err) });
-      return { ok: false };
+      log.warn('warmup: channel answer could not be parsed, will retry next run', { channelId: window.id, detail: errorNameOf(err) });
+      return { ok: false, reason: 'bad-json' };
     }
 
-    const clamped = clampChannelResult(parsed, hot.config) ?? { purpose: '', topics: '', tone: '' };
-    store.updateChannel(guildId, window.id, clamped);
+    const clamped = clampChannelResult(parsed, hot.config);
+    const fields = nonEmptyFields(clamped);
+    if (Object.keys(fields).length > 0) store.updateChannel(guildId, window.id, fields);
     // A channel note without its counters/top writers looks dead and
     // anonymous until live traffic slowly fills them in (see the module
     // header and docs/prompt-contract.md) -- fill them now from the
@@ -1187,15 +1244,15 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
 
   /** One person → `profile.md`, chunked chronologically when the sample does not fit one request
    * (each chunk after the first carries the previous answer as `<draft>`) → the store, via
-   * `writePersonAnswer`. See `callWithRails` for the stop/failure contract. A bad-json/truncated
-   * answer is retried once with half the sample; a second failure skips (and marks done) this
-   * person. `progress` (`{ index, total }`, optional) is this person's position among the run's
+   * `writePersonAnswer`. See `callWithRails` for the stop/failure contract and the comment above
+   * `processChannel` for the outcomes. A bad-json/truncated answer is retried once with half the
+   * sample; a second failure is a final skip (`unparsable`, marked done). `progress` (`{ index, total }`, optional) is this person's position among the run's
    * eligible people, carried through the half-sample retry -- purely for `activity.detail`, a
    * one-off `/nep warmup users user:` call omits it. */
   async function processPerson(guildId, windows, member, cfg, mainChannelIds, sampleCfgOverride, progress) {
     touchActivity('person', { id: member.id, name: member.name, index: progress?.index ?? null, total: progress?.total ?? null, chunk: null });
     if (!hot.prompts?.profile) {
-      return { ok: false, stop: true, reason: 'missing-prompt', message: 'prompt file missing: prompts/profile.md (or prompts.local/profile.md) is not configured yet' };
+      return { ok: false, stop: true, reason: 'no-prompt', message: 'prompt file missing: prompts/profile.md (or prompts.local/profile.md) is not configured yet' };
     }
     const sampleCfg = sampleCfgOverride ?? cfg;
     const sample = sampleMember(windows, member.id, sampleCfg, mainChannelIds);
@@ -1205,26 +1262,16 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
     }
 
     const selfName = getSelfName(guildId);
-    const labels = hot.prompts.labels ?? {};
-    const timezone = hot.config.bot?.timezone ?? 'UTC';
-    const formatOptions = {
-      timezone,
-      gapMinutes: hot.config.context?.gapMarkerMinutes ?? 20,
-      maxChars: hot.config.context?.maxMessageChars ?? 800,
-      selfName,
-      mode: 'memory',
-      labels,
-      seeReactions: hot.config.features?.seeReactions !== false,
-      reactionsPerMessage: hot.config.context?.reactionsPerMessage,
-    };
+    const labels = requireLabels(hot.prompts);
+    const formatOptions = memoryFormatOptions(hot.config, selfName, labels);
+    const { timezone } = formatOptions;
     const items = markOwnContext(formatTranscript(sample.messages, formatOptions), sample.ownIds, labels);
 
-    const limit = warmupRequestCap(cfg);
+    const limit = warmupRequestCap();
     const cost = (text) => calibrator.apply(estimateTokens(text)) + 2;
     const system = fillPromptTemplate(hot.prompts.profile, profileTemplateValues(hot.config, selfName));
     const characterBlock = block('character', characterText(hot.prompts, selfName));
-    const memberLine = `${member.name} (id:${member.id}), ${member.messages} messages in the window, first ${isoDateOrDash(member.firstTs)}, last ${isoDateOrDash(member.lastTs)}`;
-    const memberBlock = block('member', memberLine);
+    const memberBlock = block('member', memberLine(member));
     const nameOf = buildNameIndex(windows);
 
     let remaining = items;
@@ -1244,8 +1291,8 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
       const fixedCost = fixedTexts.reduce((sum, text) => sum + cost(text), 0);
       const budget = limit - fixedCost;
       if (budget <= 0) {
-        log.warn('warmup: the fixed profile blocks alone exceed the request cap, skipping this person', { member: member.id });
-        return { ok: false, skipped: true };
+        log.warn('warmup: the fixed profile blocks alone exceed the request cap, skipping this person', { userId: member.id });
+        return { ok: false, reason: 'over-cap' };
       }
 
       const itemCost = (item) => cost(item.text);
@@ -1265,10 +1312,10 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
         { role: 'user', content: user },
       ];
 
-      const result = await callWithRails(messages, cfg);
+      const result = await callWithRails(messages);
       if (!result.ok) {
         if (result.stop) return result;
-        return { ok: false }; // llm-error, not (yet) a run-aborting streak -- retry this person next run
+        return { ok: false, reason: result.reason }; // llm-error, not (yet) a run-aborting streak -- retry this person next run
       }
       tokensUsed += result.completion.usage?.total_tokens ?? result.completion.estimated ?? 0;
 
@@ -1279,12 +1326,12 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
         if (!sampleCfgOverride) {
           const truncated = looksTruncated(result.completion.text, result.completion.finishReason);
           const halved = { ...cfg, messagesPerPerson: Math.max(1, Math.floor((sampleCfg.messagesPerPerson ?? sample.messages.length) / 2)) };
-          log.warn('warmup: person answer could not be parsed, retrying with half the sample', { member: member.id, truncated, detail: detailOf(err) });
+          log.warn('warmup: person answer could not be parsed, retrying with half the sample', { userId: member.id, truncated, detail: errorNameOf(err) });
           return processPerson(guildId, windows, member, halved, mainChannelIds, halved, progress);
         }
-        log.warn('warmup: person answer still bad after a retry, skipping this person', { member: member.id, detail: detailOf(err) });
+        log.warn('warmup: person answer still bad after a retry, skipping this person', { userId: member.id, detail: errorNameOf(err) });
         markDone('people', member.id);
-        return { ok: false, skipped: true };
+        return { ok: false, skipped: true, reason: 'unparsable' };
       }
 
       const clamped = clampProfileResult(parsed, hot.config, nameOf);
@@ -1292,7 +1339,7 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
       answer = clamped;
     }
 
-    writePersonAnswer(guildId, member, answer ?? { character: '', style: '', interests: [], details: [], episodes: [], aliases: [] });
+    writePersonAnswer(guildId, member, answer);
     markDone('people', member.id);
     return {
       ok: true,
@@ -1306,15 +1353,17 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
 
   /** The server-wide `server.md` request: `<channels>` = stored channel notes, `<members>` = one
    * line per profiled member, `<messages>` = newest `serverSampleMessages` of the main channels (or
-   * the single busiest channel when none is marked main) → `store.updateGuild`/`store.setLore`. */
+   * the single busiest channel when none is marked main) → `store.updateGuild`/`store.setLore`.
+   * Outcomes as for `processChannel`: a bad answer is `bad-json`, retried by the next run. */
   async function processServer(guildId, windows, cfg, mainChannelIds, people) {
     touchActivity('server');
     if (!hot.prompts?.server) {
-      return { ok: false, stop: true, reason: 'missing-prompt', message: 'prompt file missing: prompts/server.md (or prompts.local/server.md) is not configured yet' };
+      return { ok: false, stop: true, reason: 'no-prompt', message: 'prompt file missing: prompts/server.md (or prompts.local/server.md) is not configured yet' };
     }
     const selfName = getSelfName(guildId);
-    const labels = hot.prompts.labels ?? {};
-    const timezone = hot.config.bot?.timezone ?? 'UTC';
+    const labels = requireLabels(hot.prompts);
+    const formatOptions = memoryFormatOptions(hot.config, selfName, labels);
+    const { timezone } = formatOptions;
 
     const system = fillPromptTemplate(hot.prompts.server, serverTemplateValues(hot.config, selfName));
     const characterBlock = block('character', characterText(hot.prompts, selfName));
@@ -1346,16 +1395,6 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
     const sourceWindows = mainWindows.length > 0 ? mainWindows : [...windows].sort((a, b) => b.messages.length - a.messages.length).slice(0, 1);
     const pooled = sourceWindows.flatMap((window) => window.messages).sort((a, b) => a.ts - b.ts);
     const newest = selectChannelMessages(pooled, cfg.serverSampleMessages);
-    const formatOptions = {
-      timezone,
-      gapMinutes: hot.config.context?.gapMarkerMinutes ?? 20,
-      maxChars: hot.config.context?.maxMessageChars ?? 800,
-      selfName,
-      mode: 'memory',
-      labels,
-      seeReactions: hot.config.features?.seeReactions !== false,
-      reactionsPerMessage: hot.config.context?.reactionsPerMessage,
-    };
     const items = formatTranscript(newest, formatOptions);
     const messagesBlock = block('messages', renderTranscript(items, timezone, labels));
 
@@ -1365,20 +1404,21 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
       { role: 'user', content: user },
     ];
 
-    const result = await callWithRails(messages, cfg);
+    const result = await callWithRails(messages);
     if (!result.ok) return result;
 
     let parsed;
     try {
       parsed = parseJsonObject(result.completion.text);
     } catch (err) {
-      log.warn('warmup: server answer could not be parsed, will retry next run', { detail: detailOf(err) });
-      return { ok: false };
+      log.warn('warmup: server answer could not be parsed, will retry next run', { detail: errorNameOf(err) });
+      return { ok: false, reason: 'bad-json' };
     }
 
     const nameOf = buildNameIndex(windows);
     const clamped = clampServerResult(parsed, hot.config, nameOf);
-    store.updateGuild(guildId, { patterns: clamped.patterns, starters: clamped.starters, injokes: clamped.injokes });
+    const guildFields = nonEmptyFields({ patterns: clamped.patterns, starters: clamped.starters, injokes: clamped.injokes });
+    if (Object.keys(guildFields).length > 0) store.updateGuild(guildId, guildFields);
     if (clamped.lore.length > 0) {
       store.setLore(guildId, clamped.lore, {
         source: 'analyzer',
@@ -1412,10 +1452,10 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
     running = true;
     consecutiveFailures = 0;
     stopRequested = false;
-    const bs = warmupState(store);
-    if (!bs.startedAt) bs.startedAt = new Date(now()).toISOString();
-    bs.finishedAt = null;
-    bs.aborted = null;
+    const progress = warmupState(store);
+    if (!progress.startedAt) progress.startedAt = new Date(now()).toISOString();
+    progress.finishedAt = null;
+    progress.aborted = null;
     store.state.markDirty();
     store.flush();
     log.info('warmup: run starting', { guildId });
@@ -1423,7 +1463,7 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
     try {
       const cfg = hot.config.warmup ?? {};
       const windows = await getWindows(guildId, guild, cfg);
-      const mainChannelIds = new Set((hot.config.memory?.mainChannelIds ?? []).map(String));
+      const mainChannelIds = mainChannelSet(hot.config.memory?.mainChannelIds);
 
       const eligibleChannels = windows; // every readable channel gets a note: the map must cover channels that may wake up later
       for (let i = 0; i < eligibleChannels.length; i += 1) {
@@ -1436,7 +1476,7 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
           touchActivity('stopped');
           return { ok: false, message: 'stopped' };
         }
-        if (bs.done.channels.includes(window.id)) continue;
+        if (progress.done.channels.includes(window.id)) continue;
         const outcome = await processChannel(guildId, window, cfg, mainChannelIds, { index: i + 1, total: eligibleChannels.length });
         if (outcome.stop) return { ok: false, message: outcome.message ?? outcome.reason };
       }
@@ -1452,12 +1492,12 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
           touchActivity('stopped');
           return { ok: false, message: 'stopped' };
         }
-        if (bs.done.people.includes(person.id)) continue;
+        if (progress.done.people.includes(person.id)) continue;
         const outcome = await processPerson(guildId, windows, person, cfg, mainChannelIds, undefined, { index: i + 1, total: people.length });
         if (outcome.stop) return { ok: false, message: outcome.message ?? outcome.reason };
       }
 
-      if (!bs.done.server) {
+      if (!progress.done.server) {
         if (store.state.data.paused) {
           touchActivity('paused');
           return { ok: false, message: 'paused' };
@@ -1470,11 +1510,11 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
         if (outcome.stop) return { ok: false, message: outcome.message ?? outcome.reason };
       }
 
-      bs.finishedAt = new Date(now()).toISOString();
+      progress.finishedAt = new Date(now()).toISOString();
       store.state.markDirty();
       store.flush();
       touchActivity('finished');
-      log.info('warmup: run finished', { guildId, tokensUsed: bs.tokensUsed, requests: bs.requests });
+      log.info('warmup: run finished', { guildId, tokensUsed: progress.tokensUsed, requests: progress.requests });
       return { ok: true };
     } finally {
       running = false;
@@ -1498,7 +1538,7 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
     try {
       const cfg = hot.config.warmup ?? {};
       const windows = await getWindows(guildId, guild, cfg);
-      const mainChannelIds = new Set((hot.config.memory?.mainChannelIds ?? []).map(String));
+      const mainChannelIds = mainChannelSet(hot.config.memory?.mainChannelIds);
 
       if (kind === 'channel') {
         const window = windows.find((w) => w.id === String(id));
@@ -1542,15 +1582,30 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
     const guild = resolvedGuild(guildId);
     if (!guild) return { ok: false, message: 'no guild resolved yet' };
 
-    const cfg = hot.config.warmup ?? {};
-    const windows = await getWindows(guildId, guild, cfg);
-    const mainChannelIds = new Set((hot.config.memory?.mainChannelIds ?? []).map(String));
-    const targets = kind === 'channels' ? windows : pickPeople(windows, cfg);
-    if (targets.length === 0) return { ok: true, count: 0 };
-
+    // Claimed before the history fetch, like run(): a second redo started meanwhile is refused and
+    // the persona is muted for the fetch too. Released at once when there is nothing to loop over.
     running = true;
     consecutiveFailures = 0;
     stopRequested = false;
+    const release = () => {
+      running = false;
+      notifyIdle();
+    };
+
+    const cfg = hot.config.warmup ?? {};
+    let windows;
+    try {
+      windows = await getWindows(guildId, guild, cfg);
+    } catch (err) {
+      release();
+      throw err;
+    }
+    const mainChannelIds = mainChannelSet(hot.config.memory?.mainChannelIds);
+    const targets = kind === 'channels' ? windows : pickPeople(windows, cfg);
+    if (targets.length === 0) {
+      release();
+      return { ok: true, count: 0 };
+    }
 
     (async () => {
       try {
@@ -1573,8 +1628,7 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
       } catch (err) {
         log.error(`warmup: ${kind} redo failed`, { error: err });
       } finally {
-        running = false;
-        notifyIdle();
+        release();
       }
     })();
 
@@ -1590,10 +1644,10 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
   function resumeIfNeeded(guildId) {
     if (hot.config.warmup?.enabled === false) return false;
     if (running || store.state.data.paused) return false;
-    const bs = warmupState(store);
-    const hasProgress = bs.done.channels.length > 0 || bs.done.people.length > 0 || bs.done.server;
-    const unfinished = !bs.finishedAt && (Boolean(bs.startedAt) || hasProgress);
-    const neverStarted = !bs.startedAt && store.listUserProfiles(guildId).length === 0;
+    const progress = warmupState(store);
+    const hasProgress = progress.done.channels.length > 0 || progress.done.people.length > 0 || progress.done.server;
+    const unfinished = !progress.finishedAt && (Boolean(progress.startedAt) || hasProgress);
+    const neverStarted = !progress.startedAt && store.listUserProfiles(guildId).length === 0;
     if (!unfinished && !neverStarted) return false;
 
     log.info('warmup: starting/resuming a run automatically', { guildId, unfinished, neverStarted });
@@ -1601,30 +1655,31 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
     return true;
   }
 
-  /** Cheap, synchronous summary for `/nep status` -- never fetches Discord history. */
+  /** Cheap, synchronous summary for `/nep status` -- never fetches Discord history, never writes
+   * state.json (a read-only view of the progress, see `progressView`). */
   function summary() {
-    const bs = warmupState(store);
+    const progress = progressView(store);
     return {
       running,
-      startedAt: bs.startedAt,
-      finishedAt: bs.finishedAt,
-      tokensUsed: bs.tokensUsed,
-      requests: bs.requests,
-      doneChannels: bs.done.channels.length,
-      donePeople: bs.done.people.length,
-      doneServer: bs.done.server,
-      aborted: bs.aborted,
+      startedAt: progress.startedAt,
+      finishedAt: progress.finishedAt,
+      tokensUsed: progress.tokensUsed,
+      requests: progress.requests,
+      doneChannels: progress.done.channels.length,
+      donePeople: progress.done.people.length,
+      doneServer: progress.done.server,
+      aborted: progress.aborted,
     };
   }
 
   /** `/nep warmup status`: `summary()` plus totals, the next target and `activity` (this
    * module's own in-memory "what is it doing right now" snapshot -- see `touchActivity` above).
-   * Synchronous, side-effect free, never fetches: the totals come from the windows cache when a
+   * Synchronous, read-only (`progressView`), never fetches: the totals come from the windows cache when a
    * run or a recent command filled it, otherwise they are reported as unknown (null) -- `activity`
    * explains what is happening meanwhile (fetching history, and so on) so the command still answers
    * at once and still means something while the cache is still empty. */
   function status(guildId) {
-    const bs = warmupState(store);
+    const progress = progressView(store);
     const base = summary();
     let channelsEligible = null;
     let peopleEligible = null;
@@ -1642,11 +1697,11 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
       peopleEligible = people.length;
       // "Next" means after the target in flight: the one being worked on is shown by the phase line.
       const inFlightId = activity.phase === 'channel' || activity.phase === 'person' ? String(activity.detail?.id ?? '') : '';
-      const nextChannel = eligibleChannels.find((window) => !bs.done.channels.includes(window.id) && String(window.id) !== inFlightId);
-      const nextPerson = people.find((person) => !bs.done.people.includes(person.id) && String(person.id) !== inFlightId);
+      const nextChannel = eligibleChannels.find((window) => !progress.done.channels.includes(window.id) && String(window.id) !== inFlightId);
+      const nextPerson = people.find((person) => !progress.done.people.includes(person.id) && String(person.id) !== inFlightId);
       if (nextChannel) nextTarget = `channel: ${nextChannel.name} (id:${nextChannel.id})`;
       else if (nextPerson) nextTarget = `person: ${nextPerson.name} (id:${nextPerson.id})`;
-      else if (!bs.done.server) nextTarget = 'server';
+      else if (!progress.done.server) nextTarget = 'server';
     }
 
     const phase = running ? 'running' : !base.startedAt ? 'not started' : base.finishedAt ? 'finished' : base.aborted ? `aborted (${base.aborted})` : 'idle';
@@ -1662,6 +1717,27 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
     store.flush();
     activity = freshActivity();
     return { ok: true };
+  }
+
+  /** Take one of today's portrait-refresh slots (`state.portraitDay` / `portraitCount`, kept
+   * apart from `state.warmup` so `/nep warmup reset` and a warmup-state version bump never zero
+   * it). Synchronous. The UTC day the slot was taken on, or null when `perDay` is used up. */
+  function reservePortraitSlot(perDay) {
+    const data = store.state.data;
+    const { count, rolled } = dailyCounter(data, PORTRAIT_SLOTS, now());
+    if (rolled) store.state.markDirty();
+    if (count >= perDay) return null;
+    const { day } = bumpDaily(data, PORTRAIT_SLOTS, now());
+    store.state.markDirty();
+    return day;
+  }
+
+  /** Give back a slot `reservePortraitSlot` took on `day`, unless the day has turned since. */
+  function releasePortraitSlot(day) {
+    const data = store.state.data;
+    if (data[PORTRAIT_SLOTS.dayKey] !== day || !(data[PORTRAIT_SLOTS.countKey] > 0)) return;
+    data[PORTRAIT_SLOTS.countKey] -= 1;
+    store.state.markDirty();
   }
 
   /**
@@ -1699,23 +1775,32 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
       }
     }
 
-    const bs = warmupState(store);
-    const { count: refreshedToday } = dailyCounter(bs, { dayKey: 'refreshDay', countKey: 'refreshCount' }, now());
+    if (!hot.prompts?.profile) {
+      return { ok: false, reason: 'no-prompt', message: 'prompt file missing: prompts/profile.md (or prompts.local/profile.md) is not configured yet' };
+    }
+    const labels = requireLabels(hot.prompts);
+    const guild = resolvedGuild(guildId);
+    if (!guild) return { ok: false, reason: 'no-guild' };
+
+    // The daily slot, reserved synchronously before the first await so concurrent cues (one
+    // analyzer batch can raise several) can never overshoot `memory.portraitRefreshPerDay`. Kept
+    // once the request is sent, whatever its outcome; given back only when nothing was sent.
     const perDay = Number.isFinite(memoryCfg.portraitRefreshPerDay) ? memoryCfg.portraitRefreshPerDay : 20;
-    if (refreshedToday >= perDay) {
+    const slotDay = reservePortraitSlot(perDay);
+    if (!slotDay) {
       log.info('warmup: portrait refresh skipped, daily refresh cap reached', { userId, perDay });
       return { ok: false, reason: 'daily-cap' };
     }
 
-    if (!hot.prompts?.profile) {
-      return { ok: false, reason: 'missing-prompt', message: 'prompt file missing: prompts/profile.md (or prompts.local/profile.md) is not configured yet' };
-    }
-    const guild = resolvedGuild(guildId);
-    if (!guild) return { ok: false, reason: 'no-guild' };
-
     const cfg = hot.config.warmup ?? {};
-    const windows = await getWindows(guildId, guild, cfg);
-    const mainChannelIds = new Set((memoryCfg.mainChannelIds ?? []).map(String));
+    let windows;
+    try {
+      windows = await getWindows(guildId, guild, cfg);
+    } catch (err) {
+      releasePortraitSlot(slotDay);
+      throw err;
+    }
+    const mainChannelIds = mainChannelSet(memoryCfg.mainChannelIds);
     const member = memberStats(windows, userId) ?? {
       id: String(userId),
       name: profile?.names?.[0] ?? String(userId),
@@ -1725,29 +1810,19 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
     };
     const sample = sampleMember(windows, userId, { ...cfg, messagesPerPerson: cfg.refreshMessages ?? 400 }, mainChannelIds);
     if (sample.messages.length === 0) {
+      releasePortraitSlot(slotDay);
       log.info('warmup: portrait refresh: nothing to sample for this member', { userId });
       return { ok: false, reason: 'nothing-to-sample' };
     }
 
     const selfName = getSelfName(guildId);
-    const labels = hot.prompts.labels ?? {};
-    const timezone = hot.config.bot?.timezone ?? 'UTC';
-    const formatOptions = {
-      timezone,
-      gapMinutes: hot.config.context?.gapMarkerMinutes ?? 20,
-      maxChars: hot.config.context?.maxMessageChars ?? 800,
-      selfName,
-      mode: 'memory',
-      labels,
-      seeReactions: hot.config.features?.seeReactions !== false,
-      reactionsPerMessage: hot.config.context?.reactionsPerMessage,
-    };
+    const formatOptions = memoryFormatOptions(hot.config, selfName, labels);
+    const { timezone } = formatOptions;
     const items = markOwnContext(formatTranscript(sample.messages, formatOptions), sample.ownIds, labels);
 
     const system = fillPromptTemplate(hot.prompts.profile, profileTemplateValues(hot.config, selfName));
     const characterBlock = block('character', characterText(hot.prompts, selfName));
-    const memberLine = `${member.name} (id:${member.id}), ${member.messages} messages in the window, first ${isoDateOrDash(member.firstTs)}, last ${isoDateOrDash(member.lastTs)}`;
-    const memberBlock = block('member', memberLine);
+    const memberBlock = block('member', memberLine(member));
     const draftBlock = block('draft', JSON.stringify({ character: profile?.character ?? '', style: profile?.style ?? '' }));
     const hintBlock = reason ? block('hint', reason) : '';
     const snippetsBlock = block('snippets', renderTranscript(items, timezone, labels));
@@ -1759,12 +1834,7 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
 
     let completion;
     try {
-      completion = await llm.complete(messages, {
-        model: memoryCfg.model ?? hot.config.llm?.model,
-        role: 'analyzer',
-        maxOutputTokens: cfg.maxOutputTokens ?? 6000,
-        maxRequestTokens: warmupRequestCap(cfg),
-      });
+      completion = await llm.complete(messages, analyzerRequestOptions());
     } catch (err) {
       log.warn('warmup: portrait refresh call failed', { userId, detail: detailOf(err) });
       return { ok: false, reason: 'llm-error' };
@@ -1774,7 +1844,7 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
     try {
       parsed = parseJsonObject(completion.text);
     } catch (err) {
-      log.warn('warmup: portrait refresh answer could not be parsed', { userId, detail: detailOf(err) });
+      log.warn('warmup: portrait refresh answer could not be parsed', { userId, detail: errorNameOf(err) });
       return { ok: false, reason: 'bad-json' };
     }
 
@@ -1788,14 +1858,12 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
     const batchAuthorNames = new Map([[String(userId), member.name]]);
     const seenAt = Number.isFinite(member.lastTs) ? member.lastTs : now();
     const timing = { seenAtByUser: new Map([[String(userId), seenAt]]), seenAt };
-    applyMemoryUpdate(store, guildId, { users: { [userId]: ops } }, memoryCfg, knownUserIds, new Set(), undefined, undefined, undefined, timing, batchAuthorNames);
+    applyMemoryUpdate(store, guildId, { users: { [userId]: ops } }, memoryCfg, knownUserIds, { timing, batchAuthorNames });
 
     store.updateUser(guildId, userId, { portraitRefreshedAt: new Date(now()).toISOString() });
-    bs.refreshCount += 1;
-    store.state.markDirty();
     store.flush();
 
-    log.info('warmup: portrait refreshed', { userId, reason: reason ?? null });
+    log.info('warmup: portrait refreshed', { userId, hinted: Boolean(reason) });
     return { ok: true, userId };
   }
 

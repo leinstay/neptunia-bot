@@ -16,15 +16,17 @@
 //
 // Everything is cached in memory, marked dirty on change and flushed on a
 // timer and on shutdown. Writes are atomic (temp file + rename) so a crash
-// mid-write never corrupts a profile.
+// mid-write never corrupts a profile; when the OS refuses the rename the file
+// is written in place instead, with a warning (see writeJsonAtomic).
 //
-// `forgetUser`, `forgetPrivate` and `wipeGuild` are the only functions in the
-// whole project allowed to delete stored memory (see src/admin.js, the
-// owner-only `/nep memory forget`, `/nep private forget` and `/nep memory wipe`
-// commands).
+// `forgetUser`, `forgetPrivate`, `removeLore` and `wipeGuild` are the only
+// functions in the whole project allowed to delete stored memory (see
+// src/admin.js, the owner-only `/nep memory forget`, `/nep private forget`,
+// `/nep lore remove` and `/nep memory wipe` commands).
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { isPlainObject } from '../config.js';
 import { log } from '../log.js';
 import { utcDay } from '../time.js';
 import { emptyAffinity, applyDelta, decayAffinity } from './affinity.js';
@@ -35,7 +37,7 @@ import { applyDetailOps, normalizeDetails } from './details.js';
 import { applyAliasOps } from './aliases.js';
 import { clampText } from './clamp.js';
 import { mergeEmojiUsage, normalizeEmojiUsage } from './emoji-usage.js';
-import { emptyGifs, findGif, mergeGifs, normalizeGifs, resetGifCounts } from './gifs.js';
+import { emptyGifs, findGif, mergeGifs, normalizeBackfillStamp, normalizeGifs, resetGifCounts } from './gifs.js';
 import { appendOwnLine, appendWornHistory, normalizeOwnLines, normalizeWorn, normalizeWornHistory } from '../behavior/variety.js';
 
 function readJson(file, fallback) {
@@ -76,7 +78,7 @@ function walkJsonFiles(dir) {
  * @param {string} dataDir
  * @returns {string[]}
  */
-export function findInvalidJsonFiles(dataDir) {
+function findInvalidJsonFiles(dataDir) {
   const bad = [];
   for (const file of walkJsonFiles(dataDir)) {
     try {
@@ -100,13 +102,21 @@ export function writeJsonAtomic(file, value) {
   fs.writeFileSync(tmp, JSON.stringify(value, null, 2));
   try {
     fs.renameSync(tmp, file);
-  } catch {
-    // Windows can refuse to rename over a file an antivirus holds open.
+  } catch (err) {
+    // Windows can refuse to rename over a file an antivirus holds open. The in-place write is
+    // not atomic, so it is never silent.
+    log.warn('store: rename failed, writing in place', { file, error: err });
     fs.writeFileSync(file, JSON.stringify(value, null, 2));
     fs.rmSync(tmp, { force: true });
   }
 }
 
+/**
+ * A member profile nobody has written to yet: what every write starts from (`touchUser`,
+ * `applyProfileOps`, ...) and what `getUser` heals a hand-edited file towards.
+ * @param {string} id
+ * @returns {object}
+ */
 export function emptyProfile(id) {
   return {
     id,
@@ -127,7 +137,7 @@ export function emptyProfile(id) {
   };
 }
 
-export function emptyGuild() {
+function emptyGuild() {
   return {
     patterns: '',
     starters: '',
@@ -186,7 +196,7 @@ function normalizeProfile(profile) {
  * starting at 0, the daily DM reply counter and its own observation buffer.
  * @returns {object}
  */
-export function emptyPrivate() {
+function emptyPrivate() {
   return {
     relationship: '',
     interests: [],
@@ -239,16 +249,6 @@ function normalizePrivate(priv) {
   if (!Array.isArray(priv.buffer)) priv.buffer = [];
 }
 
-/** A stored `emojiBackfill` stamp made safe to read: `{ at, channels, messages }` with
- * `at` a non-empty string and the counts non-negative integers (floored, a bad one
- * becomes 0); anything without a string `at` becomes null (never backfilled). */
-function normalizeEmojiBackfill(value) {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
-  if (typeof value.at !== 'string' || !value.at) return null;
-  const count = (n) => (Number.isFinite(n) && n > 0 ? Math.floor(n) : 0);
-  return { at: value.at, channels: count(value.channels), messages: count(value.messages) };
-}
-
 /** Normalize a guild's `learned`/`learnedNextId`/`emojiUsage`/`emojiBackfill`/`ownLines`/`worn`/`wornHistory` fields in place: a
  * guild.json written before this list existed loads it as empty, a
  * hand-edited one is validated via src/memory/details.js#normalizeDetails
@@ -264,7 +264,7 @@ function normalizeGuild(guild) {
   // Missing or hand-broken -> {} (src/memory/emoji-usage.js#normalizeEmojiUsage).
   guild.emojiUsage = normalizeEmojiUsage(guild.emojiUsage);
   // Missing or hand-broken -> null: the history backfill has not run.
-  guild.emojiBackfill = normalizeEmojiBackfill(guild.emojiBackfill);
+  guild.emojiBackfill = normalizeBackfillStamp(guild.emojiBackfill);
   // The variety pass's fields (src/behavior/variety.js): missing or hand-broken -> empty.
   guild.ownLines = normalizeOwnLines(guild.ownLines);
   guild.worn = normalizeWorn(guild.worn);
@@ -280,10 +280,78 @@ function relationshipScoreOf(opts, affinity) {
   return Number.isFinite(affinity?.score) ? affinity.score : 0;
 }
 
+/** The sighting time of one profile/private batch: `opts.seenAt`, else `opts.now`, else the wall clock. */
+function seenAtOf(opts) {
+  if (Number.isFinite(opts?.seenAt)) return opts.seenAt;
+  return Number.isFinite(opts?.now) ? opts.now : Date.now();
+}
+
+/**
+ * Apply `ops.interests` (src/memory/interests.js#applyInterestOps) and `ops.details`
+ * (src/memory/details.js#applyDetailOps, advancing `target.detailsSeq`) to a public profile
+ * or a private layer, in place -- the item blocks `applyProfileOps` and `applyPrivateOps`
+ * share. Only the ops-object shape is taken; anything else changes nothing.
+ * @param {object} target  A normalised profile or private layer.
+ * @param {object} ops
+ * @param {object} opts    As for `applyProfileOps`.
+ * @param {number} seenAt
+ */
+function applyItemOps(target, ops, opts, seenAt) {
+  if (isPlainObject(ops?.interests)) {
+    target.interests = applyInterestOps(target.interests, ops.interests, {
+      maxInterests: opts.maxInterests,
+      maxInterestsStored: opts.maxInterestsStored,
+      topicChars: opts.topicChars,
+      noteChars: opts.noteChars,
+      confirmGapHours: opts.confirmGapHours,
+      halfLifeDays: opts.interestHalfLifeDays,
+      clampTolerance: opts.clampTolerance,
+      seenAt,
+    });
+  }
+  if (isPlainObject(ops?.details)) {
+    const { items, nextId } = applyDetailOps(target.details, ops.details, {
+      maxDetails: opts.maxDetails,
+      maxDetailsStored: opts.maxDetailsStored,
+      fieldChars: opts.fieldChars,
+      confirmGapHours: opts.confirmGapHours,
+      halfLifeDays: opts.detailHalfLifeDays,
+      clampTolerance: opts.clampTolerance,
+      seenAt,
+      nextId: target.detailsSeq,
+    });
+    target.details = items;
+    target.detailsSeq = nextId;
+  }
+}
+
 /** Keep only the newest `max` UTC-date keys of a `days` counter map. */
 function trimDays(days, max) {
   const keys = Object.keys(days).sort();
   for (const key of keys.slice(0, Math.max(0, keys.length - max))) delete days[key];
+}
+
+/**
+ * `buffer` without the entries one finished analyzer batch consumed, in place. A batch is taken
+ * off the front, but the buffer keeps moving while the call is in flight: new messages are
+ * appended and the capped buffer trims its oldest entries, so a count would drop the wrong
+ * ones. An entry goes when its `id` is one of the consumed ids; an entry without an id goes
+ * when it sits at or before the last consumed entry still buffered (found by id, or by
+ * reference for one without an id). Everything else stays.
+ * @param {object[]} buffer    Mutated.
+ * @param {object[]} consumed  The batch's messages.
+ */
+function dropConsumed(buffer, consumed) {
+  const batch = Array.isArray(consumed) ? consumed : [];
+  const hasId = (message) => message?.id !== undefined && message?.id !== null;
+  const ids = new Set(batch.filter(hasId).map((message) => String(message.id)));
+  const isConsumed = (message) => (hasId(message) ? ids.has(String(message.id)) : batch.includes(message));
+  let last = -1;
+  buffer.forEach((message, i) => {
+    if (isConsumed(message)) last = i;
+  });
+  const kept = buffer.filter((message, i) => (hasId(message) ? !ids.has(String(message.id)) : i > last));
+  buffer.splice(0, buffer.length, ...kept);
 }
 
 /** Bump one author's count in a channel's `topWriters` list (`{ id, count }[]`), keeping only the
@@ -343,7 +411,8 @@ export function createStore({ dataDir }) {
   }
 
   const guildDir = (guildId) => path.join(dataDir, 'guilds', String(guildId));
-  const userFile = (guildId, userId) => path.join(guildDir(guildId), 'users', `${userId}.json`);
+  const usersDir = (guildId) => path.join(guildDir(guildId), 'users');
+  const userFile = (guildId, userId) => path.join(usersDir(guildId), `${userId}.json`);
   const guildFile = (guildId) => path.join(guildDir(guildId), 'guild.json');
   const bufferFile = (guildId) => path.join(guildDir(guildId), 'buffer.json');
   const channelsDir = (guildId) => path.join(guildDir(guildId), 'channels');
@@ -506,7 +575,7 @@ export function createStore({ dataDir }) {
       const profile = item.value;
       normalizeProfile(profile);
 
-      const seenAt = Number.isFinite(opts.seenAt) ? opts.seenAt : Number.isFinite(opts.now) ? opts.now : Date.now();
+      const seenAt = seenAtOf(opts);
 
       for (const key of ['character', 'style', 'relationship']) {
         const value = ops?.[key];
@@ -516,33 +585,7 @@ export function createStore({ dataDir }) {
         }
       }
 
-      if (ops?.interests && typeof ops.interests === 'object' && !Array.isArray(ops.interests)) {
-        profile.interests = applyInterestOps(profile.interests, ops.interests, {
-          maxInterests: opts.maxInterests,
-          maxInterestsStored: opts.maxInterestsStored,
-          topicChars: opts.topicChars,
-          noteChars: opts.noteChars,
-          confirmGapHours: opts.confirmGapHours,
-          halfLifeDays: opts.interestHalfLifeDays,
-          clampTolerance: opts.clampTolerance,
-          seenAt,
-        });
-      }
-
-      if (ops?.details && typeof ops.details === 'object' && !Array.isArray(ops.details)) {
-        const { items, nextId } = applyDetailOps(profile.details, ops.details, {
-          maxDetails: opts.maxDetails,
-          maxDetailsStored: opts.maxDetailsStored,
-          fieldChars: opts.fieldChars,
-          confirmGapHours: opts.confirmGapHours,
-          halfLifeDays: opts.detailHalfLifeDays,
-          clampTolerance: opts.clampTolerance,
-          seenAt,
-          nextId: profile.detailsSeq,
-        });
-        profile.details = items;
-        profile.detailsSeq = nextId;
-      }
+      applyItemOps(profile, ops, opts, seenAt);
 
       if (ops?.aliases && typeof ops.aliases === 'object' && !Array.isArray(ops.aliases)) {
         profile.aliases = applyAliasOps(profile.aliases, ops.aliases, profile.names, {
@@ -609,7 +652,7 @@ export function createStore({ dataDir }) {
         item.value.affinity = affinity;
         item.dirty = true;
       };
-      for (const userId of idsUnder(path.join(guildDir(guildId), 'users'))) {
+      for (const userId of idsUnder(usersDir(guildId))) {
         if (!store.getUser(guildId, userId)) continue;
         sweep(entries.get(userFile(guildId, userId)));
       }
@@ -645,21 +688,6 @@ export function createStore({ dataDir }) {
     },
 
     /**
-     * A member's private layer, created with the empty shape (see
-     * `emptyPrivate`) and marked dirty when it did not exist yet; an existing
-     * one is returned untouched.
-     * @param {string} guildId
-     * @param {string} userId
-     * @returns {object}
-     */
-    ensurePrivate(guildId, userId) {
-      const existed = hasPrivate(guildId, userId);
-      const item = privateEntry(guildId, userId);
-      if (!existed) item.dirty = true;
-      return item.value;
-    },
-
-    /**
      * Apply one private analyzer batch to a member's private layer: the same
      * `relationship`/`interests`/`details` op shapes and `opts` as
      * `applyProfileOps` (an absent or empty `relationship` never blanks the
@@ -678,7 +706,7 @@ export function createStore({ dataDir }) {
       const item = privateEntry(guildId, userId);
       const priv = item.value;
 
-      const seenAt = Number.isFinite(opts.seenAt) ? opts.seenAt : Number.isFinite(opts.now) ? opts.now : Date.now();
+      const seenAt = seenAtOf(opts);
 
       const relationship = ops?.relationship;
       if (typeof relationship === 'string' && relationship.trim()) {
@@ -686,33 +714,7 @@ export function createStore({ dataDir }) {
         priv.relationshipScore = relationshipScoreOf(opts, priv.affinity);
       }
 
-      if (ops?.interests && typeof ops.interests === 'object' && !Array.isArray(ops.interests)) {
-        priv.interests = applyInterestOps(priv.interests, ops.interests, {
-          maxInterests: opts.maxInterests,
-          maxInterestsStored: opts.maxInterestsStored,
-          topicChars: opts.topicChars,
-          noteChars: opts.noteChars,
-          confirmGapHours: opts.confirmGapHours,
-          halfLifeDays: opts.interestHalfLifeDays,
-          clampTolerance: opts.clampTolerance,
-          seenAt,
-        });
-      }
-
-      if (ops?.details && typeof ops.details === 'object' && !Array.isArray(ops.details)) {
-        const { items, nextId } = applyDetailOps(priv.details, ops.details, {
-          maxDetails: opts.maxDetails,
-          maxDetailsStored: opts.maxDetailsStored,
-          fieldChars: opts.fieldChars,
-          confirmGapHours: opts.confirmGapHours,
-          halfLifeDays: opts.detailHalfLifeDays,
-          clampTolerance: opts.clampTolerance,
-          seenAt,
-          nextId: priv.detailsSeq,
-        });
-        priv.details = items;
-        priv.detailsSeq = nextId;
-      }
+      applyItemOps(priv, ops, opts, seenAt);
 
       item.dirty = true;
       return priv;
@@ -809,35 +811,15 @@ export function createStore({ dataDir }) {
     },
 
     /**
-     * Every buffered direct message of a member, oldest first, leaving the
-     * buffer empty. `[]` (and no file created) when there is no private layer.
+     * How many direct messages are buffered for a member (0 when there is no
+     * private layer). Creates nothing.
      * @param {string} guildId
      * @param {string} userId
-     * @returns {object[]}
-     */
-    takePrivateBuffer(guildId, userId) {
-      if (!hasPrivate(guildId, userId)) return [];
-      const item = privateEntry(guildId, userId);
-      const taken = item.value.buffer;
-      if (taken.length === 0) return [];
-      item.value.buffer = [];
-      item.dirty = true;
-      return taken;
-    },
-
-    /**
-     * How many direct messages are buffered for a member and the `ts` of the
-     * oldest (null when the buffer is empty or there is no private layer).
-     * Creates nothing.
-     * @param {string} guildId
-     * @param {string} userId
-     * @returns {{ size: number, oldestTs: number|null }}
+     * @returns {{ size: number }}
      */
     privateBufferInfo(guildId, userId) {
-      if (!hasPrivate(guildId, userId)) return { size: 0, oldestTs: null };
-      const buffer = privateEntry(guildId, userId).value.buffer;
-      const oldestTs = Number.isFinite(buffer[0]?.ts) ? buffer[0].ts : null;
-      return { size: buffer.length, oldestTs };
+      if (!hasPrivate(guildId, userId)) return { size: 0 };
+      return { size: privateEntry(guildId, userId).value.buffer.length };
     },
 
     /**
@@ -855,17 +837,17 @@ export function createStore({ dataDir }) {
     },
 
     /**
-     * Drop the first `count` buffered direct messages of a member (the ones a
-     * private update consumed). Nothing happens, and no file is created,
-     * when there is no private layer.
+     * Drop the buffered direct messages of a member that a private update
+     * consumed, by identity, as `shiftBuffer`. Nothing happens, and no file is
+     * created, when there is no private layer.
      * @param {string} guildId
      * @param {string} userId
-     * @param {number} count
+     * @param {object[]} consumed  The batch the update analyzed.
      */
-    shiftPrivateBuffer(guildId, userId, count) {
+    shiftPrivateBuffer(guildId, userId, consumed) {
       if (!hasPrivate(guildId, userId)) return;
       const item = privateEntry(guildId, userId);
-      item.value.buffer.splice(0, count);
+      dropConsumed(item.value.buffer, consumed);
       item.dirty = true;
     },
 
@@ -876,11 +858,11 @@ export function createStore({ dataDir }) {
      * Creates the file.
      * @param {string} guildId
      * @param {string} userId
-     * @param {number} now  Epoch milliseconds.
+     * @param {number} nowMs  Epoch milliseconds.
      */
-    touchPrivateSeen(guildId, userId, now) {
+    touchPrivateSeen(guildId, userId, nowMs) {
       const item = privateEntry(guildId, userId);
-      const iso = new Date(now).toISOString();
+      const iso = new Date(nowMs).toISOString();
       if (!item.value.firstSeen) item.value.firstSeen = iso;
       item.value.lastSeen = iso;
       item.dirty = true;
@@ -907,12 +889,9 @@ export function createStore({ dataDir }) {
       fs.rmSync(file, { force: true });
     },
 
+    /** How many member profiles a guild has, cached or on disk (a profile not flushed yet included). */
     countUsers(guildId) {
-      try {
-        return fs.readdirSync(path.join(guildDir(guildId), 'users')).filter((f) => f.endsWith('.json')).length;
-      } catch {
-        return 0;
-      }
+      return idsUnder(usersDir(guildId)).length;
     },
 
     /**
@@ -922,7 +901,7 @@ export function createStore({ dataDir }) {
      * Same normalize-on-read guarantee as `getUser`.
      */
     listUserProfiles(guildId) {
-      return idsUnder(path.join(guildDir(guildId), 'users')).map((id) => store.getUser(guildId, id)).filter(Boolean);
+      return idsUnder(usersDir(guildId)).map((id) => store.getUser(guildId, id)).filter(Boolean);
     },
 
     /** Ids of every guild that has anything stored on disk or in the cache. */
@@ -1016,7 +995,7 @@ export function createStore({ dataDir }) {
     setEmojiBackfill(guildId, stamp) {
       const item = entry(guildFile(guildId), emptyGuild);
       normalizeGuild(item.value);
-      item.value.emojiBackfill = normalizeEmojiBackfill(stamp);
+      item.value.emojiBackfill = normalizeBackfillStamp(stamp);
       item.dirty = true;
       return item.value.emojiBackfill;
     },
@@ -1126,19 +1105,7 @@ export function createStore({ dataDir }) {
 
     /** Every channel entry stored for a guild, cached or on disk. */
     listChannels(guildId) {
-      const ids = new Set();
-      try {
-        for (const name of fs.readdirSync(channelsDir(guildId))) {
-          if (name.endsWith('.json')) ids.add(name.slice(0, -5));
-        }
-      } catch {
-        // no channels directory yet
-      }
-      const prefix = channelsDir(guildId) + path.sep;
-      for (const file of entries.keys()) {
-        if (file.startsWith(prefix)) ids.add(path.basename(file, '.json'));
-      }
-      return [...ids].map((id) => entry(channelFile(guildId, id), () => emptyChannel(String(id))).value);
+      return idsUnder(channelsDir(guildId)).map((id) => entry(channelFile(guildId, id), () => emptyChannel(String(id))).value);
     },
 
     /**
@@ -1353,27 +1320,37 @@ export function createStore({ dataDir }) {
       item.dirty = true;
     },
 
-    /** Drop the first `count` buffered messages (the ones a memory update consumed). */
-    shiftBuffer(guildId, count) {
+    /**
+     * Drop the buffered messages a memory update consumed, by identity (see `dropConsumed`):
+     * messages that arrived while the update was in flight stay, even when the capped buffer
+     * already trimmed some of the consumed ones off its front.
+     * @param {string} guildId
+     * @param {object[]} consumed  The batch the update analyzed.
+     */
+    shiftBuffer(guildId, consumed) {
       const item = entry(bufferFile(guildId), () => []);
-      item.value.splice(0, count);
+      dropConsumed(item.value, consumed);
       item.dirty = true;
     },
 
     /**
      * A deliberate, owner-only clean start for one guild's memory (see
-     * src/admin.js `/nep memory wipe`). Together with `forgetUser` and
-     * `forgetPrivate` above, this is the ONLY other place in the project allowed to delete stored
-     * memory. Removes, from both the cache and disk: every user profile
+     * src/admin.js `/nep memory wipe`). Together with `forgetUser`,
+     * `forgetPrivate` and `removeLore`, one of the only places in the project allowed to delete
+     * stored memory. Removes, from both the cache and disk: every user profile
      * (affinity and episodes included), the whole `private/` directory (every
-     * member's private layer), `guild.json`, every channel entry,
-     * the live observation buffer, and lorebook entries whose `source` is
-     * `'analyzer'` (every entry, owner included, when `keepOwnerLore` is
-     * false). Keeps, by default, owner lore (`source: 'owner'`) and the
-     * media description cache. Drops `state.warmup` (the warmup's own
-     * progress, see src/memory/warmup.js) so the next run starts clean;
-     * everything else in `state.json` — token calibration, the daily LLM
-     * counter and the spontaneous schedule — survives untouched. Safe when
+     * member's private layer), `guild.json` -- and with it everything it holds:
+     * patterns, starters, in-jokes, self facts, `learned`, `emojiUsage`, the
+     * `emojiBackfill` stamp, `ownLines` and the variety pass's `worn` /
+     * `wornHistory` -- every channel entry, the live observation buffer, and
+     * lorebook entries whose `source` is `'analyzer'` (every entry, owner
+     * included, when `keepOwnerLore` is false). Keeps, by default, owner lore
+     * (`source: 'owner'`) and the media description cache, and always the GIF
+     * library (`gifs.json`, its counts and backfill stamp included). Drops
+     * `state.warmup` (the warmup's own progress, see src/memory/warmup.js) so
+     * the next run starts clean; everything else in `state.json` -- token
+     * calibration, the daily counters (the portrait refresh's included) and the
+     * spontaneous schedule -- survives untouched. Safe when
      * some files never existed; the store stays fully usable afterwards (a following
      * `touchUser`/`getGuild` works and persists), no restart required.
      * @param {string} guildId
@@ -1381,7 +1358,7 @@ export function createStore({ dataDir }) {
      * @returns {{ users: number, channels: number, loreRemoved: number, loreKept: number, bufferMessages: number }}
      */
     wipeGuild(guildId, { keepOwnerLore = true, keepMediaCache = true } = {}) {
-      const userIds = idsUnder(path.join(guildDir(guildId), 'users'));
+      const userIds = idsUnder(usersDir(guildId));
       for (const id of userIds) {
         const file = userFile(guildId, id);
         entries.delete(file);

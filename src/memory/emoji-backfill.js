@@ -11,6 +11,7 @@
 // with `force`).
 
 import { readableChannels, fetchHistoryWindow } from '../discord/collect.js';
+import { emojiUsageOpts } from './emoji-usage.js';
 import { log as defaultLog } from '../log.js';
 
 /** How many messages one `store.recordEmojiUsage` call takes. */
@@ -18,6 +19,41 @@ const CHUNK = 500;
 
 /** Default of `context.customEmoji.backfillMessages` when the key is missing. */
 const DEFAULT_BACKFILL_MESSAGES = 500;
+
+/**
+ * The newest `limit` messages of every readable channel of `guild`, read one channel after
+ * another over the Discord API (src/discord/collect.js#fetchHistoryWindow, 100 per page;
+ * discord.js waits out rate limits), without the persona's and other bots' messages. A channel
+ * whose read fails is logged (`<prefix>: channel read failed`) and skipped. The history read
+ * of both backfills (this one and src/memory/gif-backfill.js).
+ * @param {object} guild  A discord.js Guild.
+ * @param {number} limit
+ * @param {{ config: object, selfId?: string, log?: object, prefix: string }} deps  `config` is the
+ *   live config (`bot`, `media.embedTextChars`, `media.video.sites`).
+ * @returns {Promise<{ channels: number, messages: object[] }>}  `messages` normalized, in read order.
+ */
+export async function readMemberHistory(guild, limit, { config, selfId, log = defaultLog, prefix }) {
+  const channels = readableChannels(guild, config.bot);
+  const messages = [];
+  for (const channel of channels) {
+    let window = [];
+    try {
+      window = await fetchHistoryWindow(channel, {
+        limit,
+        minTs: 0,
+        selfId,
+        embedTextChars: config.media?.embedTextChars,
+        videoSites: config.media?.video?.sites,
+      });
+    } catch (err) {
+      log.warn(`${prefix}: channel read failed`, { channelId: channel.id, error: err });
+    }
+    for (const message of window) {
+      if (!message.self && !message.bot) messages.push(message);
+    }
+  }
+  return { channels: channels.length, messages };
+}
 
 /**
  * The emoji history backfill for the served guild.
@@ -70,33 +106,15 @@ export function createEmojiBackfill({ hot, store, client, log = defaultLog }) {
       const guild = client.guilds.cache.get(guildId);
       if (!guild) return skipped('no-guild');
 
-      const selfId = client.user?.id;
-      const channels = readableChannels(guild, hot.config.bot);
-      const collected = [];
-      for (const channel of channels) {
-        let messages = [];
-        try {
-          messages = await fetchHistoryWindow(channel, {
-            limit,
-            minTs: 0,
-            selfId,
-            embedTextChars: hot.config.media?.embedTextChars,
-          });
-        } catch (err) {
-          log.warn('emoji-backfill: channel read failed', { channel: channel.id, error: err });
-        }
-        for (const message of messages) {
-          if (message.self || message.bot) continue;
-          collected.push({ id: message.id, ts: message.ts, emojis: message.emojis ?? [] });
-        }
-      }
+      const history = await readMemberHistory(guild, limit, { config: hot.config, selfId: client.user?.id, log, prefix: 'emoji-backfill' });
+      const channels = history.channels;
+      const collected = history.messages.map((message) => ({ id: message.id, ts: message.ts, emojis: message.emojis ?? [] }));
 
       // From here on nothing awaits: the analyzer cannot consume a batch in between.
       if (store.state?.data?.paused) return skipped('paused');
       const buffered = new Set(store.getBuffer(guildId).map((message) => message?.id));
       const members = collected.filter((message) => !buffered.has(message.id)).sort((a, b) => a.ts - b.ts);
-      const emojiCfg = hot.config.context?.customEmoji ?? {};
-      const opts = { storeMax: emojiCfg.storeMax ?? 200, halfLifeDays: emojiCfg.halfLifeDays ?? 30 };
+      const opts = emojiUsageOpts(hot.config);
 
       // Always from a cleared ranking: the window already holds what the analyzer counted so far.
       store.clearEmojiUsage(guildId);
@@ -104,10 +122,10 @@ export function createEmojiBackfill({ hot, store, client, log = defaultLog }) {
       for (let i = 0; i < members.length; i += CHUNK) {
         emoji += store.recordEmojiUsage(guildId, members.slice(i, i + CHUNK), opts);
       }
-      store.setEmojiBackfill(guildId, { at: new Date().toISOString(), channels: channels.length, messages: members.length });
+      store.setEmojiBackfill(guildId, { at: new Date().toISOString(), channels, messages: members.length });
       store.flush();
 
-      const counts = { channels: channels.length, messages: members.length, emoji };
+      const counts = { channels, messages: members.length, emoji };
       log.info('emoji-backfill: done', counts);
       return { ok: true, ...counts };
     } finally {

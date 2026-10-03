@@ -5,6 +5,8 @@
 // A GIF watch has its own daily counter (`state.data.gifWatchDay` /
 // `gifWatchCount`, `media.gif.maxPerDay`), separate from the video one.
 
+import { isVideoVisionOn } from './youtube-check.js';
+
 /** `media.gif.maxPerDay` when missing or invalid (config.json carries the same). */
 export const GIF_MAX_PER_DAY_FALLBACK = 200;
 
@@ -29,16 +31,16 @@ export function gifWatchPrompt(prompts) {
  * Why GIFs are not watched under the live config and prompts, or null when
  * they are: `off` (features.mediaDescriptions not on, or `media.gif.watch`
  * false -- a missing key counts as on), `video-off` (features.videoDescriptions
- * false: video vision off) or `prompt` (neither describe-gif nor describe-video).
+ * false: video vision off) or `no-prompt` (neither describe-gif nor describe-video).
  * @param {object} [config]   hot.config.
  * @param {object} [prompts]  hot.prompts.
- * @returns {'off'|'video-off'|'prompt'|null}
+ * @returns {'off'|'video-off'|'no-prompt'|null}
  */
 export function gifWatchBlocker(config, prompts) {
   const features = config?.features ?? {};
   if (features.mediaDescriptions !== true || config?.media?.gif?.watch === false) return 'off';
-  if (features.videoDescriptions === false) return 'video-off';
-  if (!gifWatchPrompt(prompts)) return 'prompt';
+  if (!isVideoVisionOn(config)) return 'video-off';
+  if (!gifWatchPrompt(prompts)) return 'no-prompt';
   return null;
 }
 

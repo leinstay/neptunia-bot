@@ -18,53 +18,84 @@ import { parseJsonObject } from '../llm/parse.js';
 import { TokenLimitError } from '../llm/openrouter.js';
 import { isDescribable, mediaParts, stickerUrl } from '../discord/media.js';
 import { log } from '../log.js';
+import { MINUTE_MS } from '../time.js';
 import { emptyAffinity, roundScore, affinityBand, applyDelta } from './affinity.js';
 import { keywordMatches } from './lore.js';
 import { normalizeInterests } from './interests.js';
 import { normalizeDetails } from './details.js';
+import { emojiUsageOpts } from './emoji-usage.js';
+import { gifOpts } from './gifs.js';
 import { topByRank } from './ranking.js';
 import { ID_DIGITS, toTokens, fromTokens } from './mentions.js';
 import { clampText } from './clamp.js';
+import { videoStateFromCache } from './describe.js';
+import { isVideoVisionOn } from './youtube-check.js';
 import { block, fillPromptTemplate, renderProfile } from '../behavior/prompt.js';
 import { effectiveAffinity } from '../behavior/private.js';
 
 const BACKOFF_MS = 15 * 60_000;
 const MIN_LIVE_BATCH = 20; // the live analyzer never shrinks below this many messages
 
+/** The temperature of every analyzer-role request: the stream analyzer here, and the warmup's
+ * channel/profile/server requests and the portrait refresh (src/memory/warmup.js). */
+export const ANALYZER_TEMPERATURE = 0.3;
+
 // Fallbacks for the memory-prompt placeholders below (and for the guild
-// `learned` limits), equal to config.json's own defaults -- used only when a
-// deployment's config is missing the key.
-const MEMORY_LIMIT_DEFAULTS = {
-  fieldChars: 400,
+// `learned` limits and the affinity rails), equal to config.json's own
+// defaults -- used only when a deployment's config is missing the key.
+export const MEMORY_LIMIT_DEFAULTS = {
+  fieldChars: 1000,
   maxDetails: 15,
   maxInjokes: 15,
   maxSelfFacts: 20,
   maxNewEpisodes: 3,
   maxEpisodes: 20,
   maxDeltaPerUpdate: 15,
+  historySize: 10,
   maxInterests: 12,
   interestTopicChars: 40,
   interestNoteChars: 120,
-  loreTextChars: 400,
+  loreTextChars: 600,
   maxLearned: 20,
   maxLearnedStored: 60,
   learnedChars: 160,
   learnedHalfLifeDays: 720,
 };
 
-/** `error?.message`, trimmed to 200 chars — never message contents. */
-function detailOf(err) {
+/**
+ * The log/outcome `detail` of a failed request: `error?.message`, trimmed to
+ * 200 chars. Only for errors raised before an answer exists (the provider,
+ * the network, the request budget), never for an answer that failed to parse
+ * -- see `errorNameOf`. Shared with src/memory/warmup.js.
+ * @param {unknown} err
+ * @returns {string|undefined}
+ */
+export function detailOf(err) {
   return err?.message ? String(err.message).slice(0, 200) : undefined;
+}
+
+/**
+ * The log/outcome `detail` of an answer that failed to parse or to apply: the
+ * error's name only (`SyntaxError`, `TypeError`, `Error`). A JSON.parse
+ * message quotes the model's text, which is message contents. Shared with
+ * src/memory/warmup.js.
+ * @param {unknown} err
+ * @returns {string}
+ */
+export function errorNameOf(err) {
+  return typeof err?.name === 'string' && err.name ? err.name : 'Error';
 }
 
 /**
  * Whether a completion looks cut off by the output token cap: the provider
  * said so (`finish_reason: 'length'`), or the text has no closing `}` for
- * its first `{` (the same condition `parseJsonObject` fails on).
+ * its first `{` (the same condition `parseJsonObject` fails on). Shared with
+ * src/memory/warmup.js.
  * @param {string} text
  * @param {string|undefined} finishReason
+ * @returns {boolean}
  */
-function looksTruncated(text, finishReason) {
+export function looksTruncated(text, finishReason) {
   if (finishReason === 'length') return true;
   const start = String(text ?? '').indexOf('{');
   if (start === -1) return false;
@@ -75,17 +106,17 @@ function looksTruncated(text, finishReason) {
 /**
  * Whether the buffered messages of one guild are ready for a memory update.
  * @param {object[]} buffer  Buffered slim messages, oldest first.
- * @param {number} now
+ * @param {number} nowMs
  * @param {object} cfg       `config.memory`.
  * @param {object} [relationshipsCfg]  `config.relationships`, only when the feature is on. A
  *   pile-up of messages addressed to the persona (`direct: true`) triggers an update early,
  *   so reactions to how people talk TO it do not wait for a full batch.
  */
-export function isDue(buffer, now, cfg, relationshipsCfg) {
+export function isDue(buffer, nowMs, cfg, relationshipsCfg) {
   if (buffer.length >= cfg.batchMessages) return true;
   if (buffer.length >= cfg.minBatchMessages) {
     const oldest = buffer[0];
-    if (oldest && now - oldest.ts >= cfg.maxBatchAgeMinutes * 60_000) return true;
+    if (oldest && nowMs - oldest.ts >= cfg.maxBatchAgeMinutes * MINUTE_MS) return true;
   }
   if (relationshipsCfg?.directTriggerCount > 0) {
     const directCount = buffer.reduce((count, message) => count + (message.direct ? 1 : 0), 0);
@@ -124,8 +155,13 @@ function memoryTemplateValues(config, selfName) {
   };
 }
 
-/** A deployment with no/broken labels.json must fail loudly, not send a broken prompt. */
-function requireLabels(prompts) {
+/**
+ * `prompts.labels`, or a throw: a deployment with no/broken labels.json must fail loudly, not
+ * send a broken prompt. Shared with every warmup request builder (src/memory/warmup.js).
+ * @param {object} prompts
+ * @returns {object}
+ */
+export function requireLabels(prompts) {
   const labels = prompts?.labels;
   if (!labels || !labels.transcript) {
     throw new Error('prompts.labels is missing or incomplete: labels.transcript is required');
@@ -261,10 +297,11 @@ function pickChannelFields(channel, nameOf) {
  * see docs/prompt-contract.md, "Main channels are the source of the
  * portrait". Garbage config (not an array, non-string entries) never throws:
  * a non-array collapses to an empty set, every entry is coerced with String().
+ * Shared with src/memory/warmup.js.
  * @param {unknown} mainChannelIds
  * @returns {Set<string>}
  */
-function mainChannelSet(mainChannelIds) {
+export function mainChannelSet(mainChannelIds) {
   return new Set((Array.isArray(mainChannelIds) ? mainChannelIds : []).map((id) => String(id)));
 }
 
@@ -661,7 +698,7 @@ function makeTokenizers(store, guildId, knownUserIds, batchAuthorNames) {
 }
 
 /** `applyProfileOps` / `applyPrivateOps` options from `config.memory`. */
-function profileOpsOptions(cfg, now, seenAt) {
+function profileOpsOptions(cfg, nowMs, seenAt) {
   return {
     fieldChars: cfg.fieldChars,
     maxInterests: cfg.maxInterests,
@@ -677,7 +714,7 @@ function profileOpsOptions(cfg, now, seenAt) {
     aliasHalfLifeDays: cfg.aliasHalfLifeDays,
     confirmGapHours: cfg.confirmGapHours,
     clampTolerance: cfg.clampTolerance,
-    now,
+    now: nowMs,
     seenAt,
   };
 }
@@ -686,8 +723,8 @@ function profileOpsOptions(cfg, now, seenAt) {
 function affinityOptions(relationships, cfg) {
   return {
     // The model's verdict is never applied unclamped, even if the config block is missing.
-    maxDelta: relationships.maxDeltaPerUpdate ?? 15,
-    historySize: relationships.historySize ?? 10,
+    maxDelta: relationships.maxDeltaPerUpdate ?? MEMORY_LIMIT_DEFAULTS.maxDeltaPerUpdate,
+    historySize: relationships.historySize ?? MEMORY_LIMIT_DEFAULTS.historySize,
     now: relationships.now,
     clampTolerance: cfg.clampTolerance,
     // relationships.damping: a missing key counts as on, like features.*.
@@ -727,23 +764,24 @@ function episodeOptions(episodes, cfg) {
  * @param {unknown} update         Parsed model output; treated as untrusted.
  * @param {object} cfg             `config.memory`.
  * @param {Set<string>} knownUserIds
- * @param {Set<string>} [knownChannelIds]  Channel ids present in the batch; a channel outside
- *   this set is rejected, mirroring `knownUserIds`.
- * @param {{ enabled: boolean, maxDeltaPerUpdate: number, historySize: number, damping?: boolean, dampingPower?: number, now?: number }} [relationships]
+ * @param {object} [options]  Everything else, each optional:
+ * @param {Set<string>} [options.knownChannelIds]  Channel ids present in the batch; a channel outside
+ *   this set is rejected, mirroring `knownUserIds`. Omitted -> no channel is accepted.
+ * @param {{ enabled: boolean, maxDeltaPerUpdate: number, historySize: number, damping?: boolean, dampingPower?: number, now?: number }} [options.relationships]
  *   Only when `enabled`, `raw.affinity` (a `{ delta, reason }` change) is folded into the
  *   stored score via `store.adjustAffinity`. Absent/disabled -> affinity is ignored entirely.
  *   `damping` missing counts as on, `dampingPower` missing/garbage falls back to `1` (see
  *   src/memory/affinity.js#applyDelta).
- * @param {{ enabled: boolean, maxEpisodes: number, maxNew: number, now?: number }} [episodes]
+ * @param {{ enabled: boolean, maxEpisodes: number, maxNew: number, now?: number }} [options.episodes]
  *   Only when `enabled`, each user's `raw.episodes` (a new-moments array) is folded in via
  *   `store.addEpisodes` (src/memory/episodes.js#mergeEpisodes). Absent/disabled -> ignored entirely.
- * @param {{ enabled: boolean, maxEntries: number, now?: number }} [lore]
+ * @param {{ enabled: boolean, maxEntries: number, now?: number }} [options.lore]
  *   Only when `enabled`, `update.lore` (the server's lorebook) is folded in via `store.setLore`
  *   (src/memory/lore.js#upsertLore, source: 'analyzer'). Absent/disabled -> ignored entirely.
- * @param {{ seenAtByUser?: Map<string, number>, seenAt?: number }} [timing]  From `computeSeenAt`
+ * @param {{ seenAtByUser?: Map<string, number>, seenAt?: number }} [options.timing]  From `computeSeenAt`
  *   above; missing/absent falls back to `relationships.now`/`episodes.now`/the wall clock, same
  *   as before this option existed.
- * @param {Map<string, string>} [batchAuthorNames]  Author id -> the nick this batch's transcript
+ * @param {Map<string, string>} [options.batchAuthorNames]  Author id -> the nick this batch's transcript
  *   used for them (see `batchAuthorNamesMap` below), so the `Name (id:...)` normalization below
  *   recognises a name even for someone whose stored profile has not caught up yet. Omitted ->
  *   only the stored profile's own `names` are known.
@@ -752,7 +790,14 @@ function episodeOptions(episodes, cfg) {
  *   `guild`: patterns/starters/injokes changed. `learned`: how many valid `guild.learned` add ops were
  *   handed to `store.applyLearnedOps` (a re-add of a stored item counts too -- it is a sighting).
  */
-export function applyMemoryUpdate(store, guildId, update, cfg, knownUserIds, knownChannelIds = new Set(), relationships, episodes, lore, timing, batchAuthorNames) {
+export function applyMemoryUpdate(
+  store,
+  guildId,
+  update,
+  cfg,
+  knownUserIds,
+  { knownChannelIds = new Set(), relationships, episodes, lore, timing, batchAuthorNames } = {},
+) {
   const result = {
     users: 0,
     guild: false,
@@ -943,14 +988,13 @@ function hasContent(value) {
  * @param {string} userId       The DM partner.
  * @param {unknown} update      Parsed model output; untrusted.
  * @param {object} cfg          `config.memory`.
- * @param {object} [relationships]  As for `applyMemoryUpdate`.
- * @param {object} [episodes]       As for `applyMemoryUpdate`.
- * @param {{ seenAtByUser?: Map<string, number>, seenAt?: number }} [timing]  From `computeSeenAt`.
- * @param {Map<string, string>} [batchAuthorNames]  From `batchAuthorNamesMap`.
+ * @param {{ relationships?: object, episodes?: object, timing?: object, batchAuthorNames?: Map<string, string> }} [options]
+ *   As for `applyMemoryUpdate` (`timing` from `computeSeenAt`, `batchAuthorNames` from
+ *   `batchAuthorNamesMap`); there is no channel, lore or guild here.
  * @returns {{ users: number, affinity: number, relationships: number, episodes: number, interestsChanged: number,
  *   dropped: { users: number, guild: boolean, channels: number, lore: number, self: number } }}
  */
-export function applyPrivateUpdate(store, guildId, userId, update, cfg, relationships, episodes, timing, batchAuthorNames) {
+export function applyPrivateUpdate(store, guildId, userId, update, cfg, { relationships, episodes, timing, batchAuthorNames } = {}) {
   const id = String(userId);
   const result = {
     users: 0,
@@ -1108,6 +1152,14 @@ export function memorySwitches(config, now) {
   return { relationships, episodes, lore };
 }
 
+/** `nameOf` for buildMemoryRequest's token resolution: a member's current
+ * stored name, or null when the guild has no profile for that id -- see
+ * docs/prompt-contract.md, "Members are referred to by id, never by
+ * nickname". The one place `analyze()` touches the store for this. */
+function storeNameOf(store, guildId) {
+  return (id) => store.getUser(guildId, id)?.names?.[0] ?? null;
+}
+
 /**
  * @param {object} deps
  * @param {object} deps.hot          Live config + prompts; read at the moment of use.
@@ -1123,14 +1175,6 @@ export function memorySwitches(config, now) {
  *   (`profile.md`, `<draft>`/`<hint>`); this module only reports the cue, never awaits the result.
  *   Omitted -> no-op.
  */
-/** `nameOf` for buildMemoryRequest's token resolution: a member's current
- * stored name, or null when the guild has no profile for that id -- see
- * docs/prompt-contract.md, "Members are referred to by id, never by
- * nickname". The one place `analyze()` touches the store for this. */
-function storeNameOf(store, guildId) {
-  return (id) => store.getUser(guildId, id)?.names?.[0] ?? null;
-}
-
 export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, now = Date.now, onPortraitRequest }) {
   const running = new Set();
   let idleWaiters = []; // resolvers for waitIdle() (/nep pause), notified once running.size hits 0
@@ -1158,11 +1202,7 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
     // it needs the GIF's URL, and no URL survives into the buffer below. A
     // private chat never feeds it; the persona's own GIFs are skipped there.
     if (!privateUserId && hot.config.features?.gifs !== false) {
-      const gifCfg = hot.config.gifs ?? {};
-      const gifs = store.recordGifs(guildId, [normalized], {
-        storeMax: gifCfg.storeMax ?? 300,
-        halfLifeDays: gifCfg.halfLifeDays ?? 30,
-      });
+      const gifs = store.recordGifs(guildId, [normalized], gifOpts(hot.config));
       if (gifs > 0) log.info('memory: gifs recorded', { guildId, gifs });
     }
 
@@ -1246,12 +1286,14 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
           update,
           cfg,
           knownUserIds,
-          knownChannelIds,
-          relationships,
-          episodes,
-          lore,
-          computeSeenAt(messages),
-          batchAuthorNamesMap(messages),
+          {
+            knownChannelIds,
+            relationships,
+            episodes,
+            lore,
+            timing: computeSeenAt(messages),
+            batchAuthorNames: batchAuthorNamesMap(messages),
+          },
         );
 
         if (typeof onPortraitRequest === 'function') {
@@ -1295,10 +1337,7 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
           id,
           update,
           hot.config.memory,
-          relationships,
-          episodes,
-          computeSeenAt(messages),
-          batchAuthorNamesMap(messages),
+          { relationships, episodes, timing: computeSeenAt(messages), batchAuthorNames: batchAuthorNamesMap(messages) },
         );
         store.touchPrivateSeen(guildId, id, now());
         return result;
@@ -1347,24 +1386,20 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
     }
 
     // Videos the video describer already watched (or refused for good) are
-    // read from the same cache under `video:<item id>`; an error miss or no
-    // entry at all renders the plain form. Never a request from here. Both
-    // switches must be on, like the senses line; a missing videoDescriptions
-    // counts as on.
+    // read from the same cache under `video:<item id>`, by the describer's own
+    // rules (videoStateFromCache); an error miss or no entry at all renders the
+    // plain form. Never a request from here. Video vision must be on, like the
+    // senses line (isVideoVisionOn).
     let videos = null;
-    const videoOn = hot.config.features?.mediaDescriptions === true && hot.config.features?.videoDescriptions !== false;
-    if (videoOn) {
+    if (isVideoVisionOn(hot.config)) {
       const cache = store.getMediaCache(guildId);
       videos = new Map();
       for (const part of messages.flatMap(mediaParts)) {
         const items = [...(part.attachments ?? []).filter((a) => a.kind === 'video'), ...(part.links ?? [])];
         for (const item of items) {
           if (item.id == null) continue;
-          const cached = cache[`video:${item.id}`];
-          if (cached?.watched) videos.set(item.id, { state: 'watched', text: cached.text });
-          else if (cached?.miss && (cached.reason === 'length' || cached.reason === 'size')) {
-            videos.set(item.id, { state: 'limit', reason: cached.reason });
-          }
+          const state = videoStateFromCache(cache[`video:${item.id}`], hot.config, item);
+          if (state) videos.set(item.id, state);
         }
       }
     }
@@ -1398,7 +1433,9 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
    * `analyzePrivate()`. `requestInput()` (called only once a memory prompt is
    * configured) returns the mode-specific `buildMemoryRequest` fields;
    * `applyUpdate(update, switches)` stores the parsed answer and returns the
-   * result to report.
+   * result to report. A failure's `reason`: 'no-prompt', 'token-limit',
+   * 'llm-error' (nothing billed), 'truncated', 'bad-json' (the answer did not
+   * parse) or 'apply-error' (it parsed, the store refused it).
    */
   async function analyzeBatch(guildId, messages, requestInput, applyUpdate) {
     const cfg = hot.config.memory;
@@ -1429,10 +1466,10 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
       });
 
       completion = await llm.complete(llmMessages, {
-        model: cfg.model ?? undefined,
+        model: cfg.model || undefined,
         role: 'analyzer',
         maxOutputTokens: cfg.maxOutputTokens,
-        temperature: 0.3,
+        temperature: ANALYZER_TEMPERATURE,
         // A 150-message batch with an 8000-token answer on a large model can
         // take longer than the chat timeout -- the analyzer gets its own,
         // much larger budget (see docs/prompt-contract.md, "The analyzer").
@@ -1453,25 +1490,28 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
       return { ok: false, usage: null, estimated: 0, result: null, error: err, reason, detail: detailOf(err), status: err?.statusCode };
     }
 
+    const usage = completion.usage ?? null;
+    const estimated = completion.estimated ?? 0;
+    let update;
     try {
-      const update = parseJsonObject(completion.text);
-      const result = applyUpdate(update, applySwitches());
-      return { ok: true, usage: completion.usage ?? null, estimated: completion.estimated ?? 0, result };
+      update = parseJsonObject(completion.text);
     } catch (err) {
       // The completion arrived (and was billed) but its answer was garbage:
       // report the real usage/estimated so a caller charging a budget still
       // charges it. `reason` tells a cut-off completion (never going to
       // parse, no matter how many times it is retried) from plain bad JSON.
       const reason = looksTruncated(completion.text, completion.finishReason) ? 'truncated' : 'bad-json';
-      return {
-        ok: false,
-        usage: completion.usage ?? null,
-        estimated: completion.estimated ?? 0,
-        result: null,
-        error: err,
-        reason,
-        detail: detailOf(err),
-      };
+      return { ok: false, usage, estimated, result: null, error: err, reason, detail: errorNameOf(err) };
+    }
+
+    try {
+      const result = applyUpdate(update, applySwitches());
+      return { ok: true, usage, estimated, result };
+    } catch (err) {
+      // A parsed answer the store failed to take: not the answer's size, so the batch is not
+      // halved (see recordFailure). Logged by the error's name only.
+      log.warn('memory: the analyzer answer could not be applied', { guildId, reason: 'apply-error', error: errorNameOf(err) });
+      return { ok: false, usage, estimated, result: null, error: err, reason: 'apply-error', detail: errorNameOf(err) };
     }
   }
 
@@ -1528,7 +1568,8 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
         ...fields,
         reason: outcome.reason,
         detail: outcome.detail,
-        error: outcome.error,
+        // An apply error is reported by name only (see analyzeBatch).
+        error: outcome.reason === 'apply-error' ? undefined : outcome.error,
       });
     }
   }
@@ -1544,14 +1585,12 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
       if (outcome.ok) {
         sizeFactors.delete(guildId); // back to normal size after a success
         // Counted only once the batch is consumed: a failed batch stays in the buffer and is retried.
-        const emojiCfg = hot.config.context?.customEmoji ?? {};
-        const emojiUsage = store.recordEmojiUsage(guildId, messages, {
-          storeMax: emojiCfg.storeMax ?? 200,
-          halfLifeDays: emojiCfg.halfLifeDays ?? 30,
-        });
-        store.shiftBuffer(guildId, messages.length);
+        const emojiUsage = store.recordEmojiUsage(guildId, messages, emojiUsageOpts(hot.config));
+        store.shiftBuffer(guildId, messages);
         store.flush();
-        log.info('memory: update applied', { guildId, consumed: messages.length, ...outcome.result, emojiUsage });
+        // Counts only: a portrait cue's text is the analyzer's prose about a member.
+        const { portraitRequests, ...counts } = outcome.result;
+        log.info('memory: update applied', { guildId, consumed: messages.length, ...counts, portraitRequests: portraitRequests.length, emojiUsage });
         return;
       }
       recordFailure(guildId, outcome, 'memory: update', { guildId });
@@ -1583,7 +1622,7 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
       const outcome = await analyzePrivate(guildId, userId, messages);
       if (outcome.ok) {
         sizeFactors.delete(key);
-        store.shiftPrivateBuffer(guildId, userId, messages.length);
+        store.shiftPrivateBuffer(guildId, userId, messages);
         store.flush();
         log.info('memory: private update applied', { guildId, consumed: messages.length, ...outcome.result });
         return;

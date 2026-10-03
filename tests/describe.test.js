@@ -13,7 +13,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createStore } from '../src/memory/store.js';
-import { createDescriber } from '../src/memory/describe.js';
+import { createDescriber, videoStateFromCache } from '../src/memory/describe.js';
 import { createLlm, TokenLimitError, DailyCapError } from '../src/llm/openrouter.js';
 import { collectPictures } from '../src/discord/media.js';
 import { withCapturedLogs } from './fixtures/capture-logs.js';
@@ -259,7 +259,7 @@ test('describe: a downloaded-but-failed-LLM-request is cached as a miss and logs
   const line = logs.find((l) => l.msg === 'describe: failed');
   assert.ok(line);
   assert.equal(line.kind, 'video');
-  assert.equal(line.reason, 'llm');
+  assert.equal(line.reason, 'llm-error');
   assert.equal(line.status, 400);
   assert.ok(!JSON.stringify(line).includes('description'), 'never logs the description text');
 });
@@ -1067,6 +1067,22 @@ test('describeVideo: an LLM error (rails included) is an error miss', async () =
   }
 });
 
+test('videoStateFromCache: watched, a permanent limit, or null -- a length miss that fits the cap now is no limit', () => {
+  const config = { media: { video: { maxSeconds: 60 } } };
+  assert.deepEqual(videoStateFromCache({ text: 'ένας χορός', ts: 1, watched: true }, config), { state: 'watched', text: 'ένας χορός' });
+  assert.deepEqual(videoStateFromCache({ miss: true, ts: 1, reason: 'size' }, config), { state: 'limit', reason: 'size' });
+  assert.deepEqual(videoStateFromCache({ miss: true, ts: 1, reason: 'length', durationSec: 600 }, config), { state: 'limit', reason: 'length' });
+  assert.equal(videoStateFromCache({ miss: true, ts: 1, reason: 'length', durationSec: 30 }, config), null, 'fits the cap now');
+  assert.equal(videoStateFromCache({ miss: true, ts: 1, reason: 'length' }, config), null, 'unknown length: one probe to learn it');
+  assert.equal(videoStateFromCache({ miss: true, ts: 1, reason: 'error' }, config), null, 'an error miss is not a lasting state');
+  assert.equal(videoStateFromCache(undefined, config), null);
+  // A pinnable direct-URL link has its own, larger cap.
+  const direct = { media: { video: { maxSeconds: 60, directUrlMaxSeconds: 900, provider: { order: ['p'] }, directUrlSites: ['youtube.com'] } } };
+  const link = { source: 'link', url: 'https://www.youtube.com/watch?v=abc' };
+  assert.equal(videoStateFromCache({ miss: true, ts: 1, reason: 'length', durationSec: 600 }, direct, link), null);
+  assert.deepEqual(videoStateFromCache({ miss: true, ts: 1, reason: 'length', durationSec: 600 }, direct), { state: 'limit', reason: 'length' });
+});
+
 test('describeVideo: the daily cap returns daily without a request and without caching', async () => {
   const now = () => Date.parse('2026-09-23T12:00:00Z');
   const state = fakeState({ videoDay: '2026-09-23', videoCount: 40 });
@@ -1106,7 +1122,7 @@ test('describeVideo: feature off, missing prompt or a non-video item -> null wit
 
 test('describeVideo: the text is collapsed to one line and capped at 600 chars on a word boundary', async () => {
   const long = `  Première   scène\n\nκάποιος χορεύει\t${'mot '.repeat(300)}`;
-  const { describer } = videoDescriber({ llm: fakeLlm({ text: long }) });
+  const { describer } = videoDescriber({ hot: videoHot({ video: { summaryChars: 600 } }), llm: fakeLlm({ text: long }) });
   const { text } = await describer.describeVideo('g1', videoAttachment());
 
   assert.ok(text.startsWith('Première scène κάποιος χορεύει mot'));
@@ -1704,10 +1720,10 @@ test('describeVideo: an agentic pinnable link is capped at directUrlMaxSeconds a
 
 test('describeVideo: the non-agentic cap falls back like the client for missing token settings', async () => {
   const video = { ...LONG_URL_VIDEO, urlProcessing: 'static' };
-  // tokensPerSecond missing or invalid -> 300, as src/llm/openrouter.js assumes.
+  // tokensPerSecond missing or invalid -> 120 (config.json), the fallback src/llm/openrouter.js exports: 60000 / 120 = 500 s.
   for (const tokensPerSecond of [undefined, 0, -1, NaN, '300']) {
-    assert.equal(await linkRoute({ ...video, tokensPerSecond }, 200), 'url', String(tokensPerSecond));
-    assert.equal(await linkRoute({ ...video, tokensPerSecond }, 201), 'clip', String(tokensPerSecond));
+    assert.equal(await linkRoute({ ...video, tokensPerSecond }, 500), 'url', String(tokensPerSecond));
+    assert.equal(await linkRoute({ ...video, tokensPerSecond }, 501), 'clip', String(tokensPerSecond));
   }
   // media.video.maxRequestTokens missing -> the global llm.maxRequestTokens the client then applies.
   const withGlobal = (hot) => {
@@ -1894,6 +1910,14 @@ test('describeVideo: a larger summaryChars keeps a longer account than the old 6
   const { describer } = videoDescriber({ hot: videoHot({ video: { summaryChars: 1500 } }), llm: fakeLlm({ text: long }) });
   const { text } = await describer.describeVideo('g1', videoAttachment());
   assert.equal(text, long);
+});
+
+test('describeVideo: a missing summaryChars falls back to config.json\'s 1500', async () => {
+  const hot = videoHot({ prompts: { 'describe-video': 'At most {{maxChars}} characters.' } });
+  delete hot.config.media.video.summaryChars;
+  const { describer, llm } = videoDescriber({ hot, llm: fakeLlm({ text: 'scène' }) });
+  await describer.describeVideo('g1', videoAttachment());
+  assert.equal(llm.calls[0].messages[0].content, 'At most 1500 characters.');
 });
 
 // --- rewatchVideo: the second look on a question ---------------------------------
@@ -2491,6 +2515,17 @@ test('watchGif: an item without an animation fails as source; an uncaptioned GIF
   const entry = run.store.getMediaCache('g1')['m2#e0'];
   assert.equal(entry.miss, true);
   assert.equal(typeof entry.watchFailed, 'number');
+});
+
+test('watchGif: a request failure is reported with a kebab-case code', async () => {
+  for (const [error, expected] of [
+    [new TokenLimitError('cap'), { state: 'failed', reason: 'token-limit' }],
+    [new Error('boom'), { state: 'failed', reason: 'llm-error' }],
+    [new DailyCapError('day'), { state: 'unavailable', reason: 'daily-cap' }],
+  ]) {
+    const run = gifDescriber({ llm: fakeLlm(error) });
+    assert.deepEqual(await run.describer.watchGif('g1', gifEmbedItem()), expected);
+  }
 });
 
 test('watchGif: unavailable while GIFs are not watched or a daily rail is spent, nothing marked', async () => {

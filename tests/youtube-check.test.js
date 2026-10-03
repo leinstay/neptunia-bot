@@ -152,7 +152,7 @@ test('startYoutubeCheck: not run at all when video vision is off', () => {
       calls += 1;
       return { status: 'ytdlp', detail: '' };
     };
-    const running = startYoutubeCheck({ hot: checkHot({ features }), checkYoutube, logger });
+    const running = startYoutubeCheck({ hot: checkHot({ features }), checkYoutube, log: logger });
     assert.equal(running, null);
     assert.equal(calls, 0);
     assert.equal(logger.lines.length, 0);
@@ -163,8 +163,8 @@ test('startYoutubeCheck: ytdlp and api log one info line with the status only', 
   for (const status of ['ytdlp', 'api']) {
     const logger = makeLogger();
     const checkYoutube = async () => ({ status, detail: 'duration 19s', keySet: true });
-    await startYoutubeCheck({ hot: checkHot(), checkYoutube, logger });
-    assert.deepEqual(logger.lines, [{ level: 'info', msg: 'video: youtube check', meta: { status } }]);
+    await startYoutubeCheck({ hot: checkHot(), checkYoutube, log: logger });
+    assert.deepEqual(logger.lines, [{ level: 'info', msg: 'youtube-check: status', meta: { status } }]);
   }
 });
 
@@ -172,9 +172,9 @@ test('startYoutubeCheck: page and blocked log a warning with the YOUTUBE_API_KEY
   for (const status of ['page', 'blocked']) {
     const logger = makeLogger();
     const checkYoutube = async () => ({ status, detail: 'x', keySet: false });
-    await startYoutubeCheck({ hot: checkHot(), checkYoutube, logger });
+    await startYoutubeCheck({ hot: checkHot(), checkYoutube, log: logger });
     assert.deepEqual(logger.lines, [
-      { level: 'warn', msg: 'video: youtube check', meta: { status, hint: 'set YOUTUBE_API_KEY' } },
+      { level: 'warn', msg: 'youtube-check: status', meta: { status, hint: 'set YOUTUBE_API_KEY' } },
     ]);
   }
 });
@@ -184,7 +184,7 @@ test('startYoutubeCheck: a rejecting check is logged as an error, never left unh
   const checkYoutube = async () => {
     throw new Error('boom');
   };
-  await startYoutubeCheck({ hot: checkHot(), checkYoutube, logger });
+  await startYoutubeCheck({ hot: checkHot(), checkYoutube, log: logger });
   assert.equal(logger.lines.length, 1);
   assert.equal(logger.lines[0].level, 'error');
 });

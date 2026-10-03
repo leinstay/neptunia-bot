@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { createStore } from '../src/memory/store.js';
+import { createStore, writeJsonAtomic } from '../src/memory/store.js';
 import { emptyAffinity } from '../src/memory/affinity.js';
 import { withCapturedLogs } from './fixtures/capture-logs.js';
 
@@ -309,6 +309,29 @@ test('updateGuild: merges fields and stamps updatedAt', () => {
   assert.ok(guild.updatedAt);
 });
 
+test('writeJsonAtomic: a refused rename falls back to an in-place write, and says so in the log', async () => {
+  const dir = tmpDataDir();
+  const file = path.join(dir, 'guilds', 'g1', 'guild.json');
+  const originalRename = fs.renameSync;
+  fs.renameSync = () => {
+    const err = new Error('EPERM: operation not permitted');
+    err.code = 'EPERM';
+    throw err;
+  };
+  let logs;
+  try {
+    ({ logs } = await withCapturedLogs(() => writeJsonAtomic(file, { patterns: 'μιμίδια' })));
+  } finally {
+    fs.renameSync = originalRename;
+  }
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')), { patterns: 'μιμίδια' });
+  assert.deepEqual(fs.readdirSync(path.dirname(file)), ['guild.json'], 'no temp file left behind');
+  const warning = logs.find((entry) => entry.msg === 'store: rename failed, writing in place');
+  assert.ok(warning);
+  assert.equal(warning.file, file);
+  assert.equal(warning.error.code, 'EPERM');
+});
+
 test('pushBuffer: caps the buffer length, dropping the oldest entries', () => {
   const dir = tmpDataDir();
   const store = createStore({ dataDir: dir });
@@ -317,13 +340,44 @@ test('pushBuffer: caps the buffer length, dropping the oldest entries', () => {
   assert.deepEqual(buffer.map((m) => m.i), [2, 3, 4]);
 });
 
-test('shiftBuffer: drops the first N buffered messages', () => {
+test('shiftBuffer: drops exactly the consumed messages, by id; later arrivals and untaken ones stay', () => {
   const dir = tmpDataDir();
   const store = createStore({ dataDir: dir });
-  for (let i = 0; i < 5; i += 1) store.pushBuffer('g1', { i }, 100);
-  store.shiftBuffer('g1', 2);
-  const buffer = store.getBuffer('g1');
-  assert.deepEqual(buffer.map((m) => m.i), [2, 3, 4]);
+  for (let i = 0; i < 5; i += 1) store.pushBuffer('g1', { id: `m${i}`, i }, 100);
+  const consumed = store.getBuffer('g1').slice(0, 2);
+  store.pushBuffer('g1', { id: 'm5', i: 5 }, 100); // arrived while the batch was in flight
+  store.shiftBuffer('g1', consumed);
+  assert.deepEqual(store.getBuffer('g1').map((m) => m.id), ['m2', 'm3', 'm4', 'm5']);
+});
+
+test('shiftBuffer: consumed messages already trimmed off the front never cost a newer message its place', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  for (let i = 0; i < 5; i += 1) store.pushBuffer('g1', { id: `m${i}` }, 5);
+  const consumed = store.getBuffer('g1').slice(0, 3);
+  // Two arrivals during the call push m0 and m1 out of the capped buffer.
+  store.pushBuffer('g1', { id: 'm5' }, 5);
+  store.pushBuffer('g1', { id: 'm6' }, 5);
+  store.shiftBuffer('g1', consumed);
+  assert.deepEqual(store.getBuffer('g1').map((m) => m.id), ['m3', 'm4', 'm5', 'm6']);
+});
+
+test('shiftBuffer: an entry without an id goes only up to and including the last consumed entry', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  const fill = () => {
+    for (const m of [{ i: 0 }, { id: 'm1', i: 1 }, { i: 2 }, { id: 'm3', i: 3 }]) store.pushBuffer('g1', m, 100);
+  };
+  fill();
+  store.shiftBuffer('g1', store.getBuffer('g1').slice(0, 2));
+  assert.deepEqual(store.getBuffer('g1').map((m) => m.i), [2, 3]);
+
+  store.wipeGuild('g1');
+  fill();
+  const consumed = store.getBuffer('g1').slice(0, 3); // the last consumed entry has no id
+  store.pushBuffer('g1', { i: 4 }, 100); // arrived while the batch was in flight, no id either
+  store.shiftBuffer('g1', consumed);
+  assert.deepEqual(store.getBuffer('g1').map((m) => m.i), [3, 4]);
 });
 
 test('flush + a new store instance: profiles, guild memory and buffer survive a "restart"', () => {
@@ -405,6 +459,16 @@ test('countUsers: counts profile files on disk for a guild', () => {
   storeA.touchUser('g1', 'u2', 'Bob', 1000);
   storeA.flush();
   assert.equal(storeA.countUsers('g1'), 2);
+});
+
+test('countUsers: counts a profile not flushed yet, like every other lister', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  store.touchUser('g1', 'u1', 'Alice', 1000);
+  store.flush();
+  store.touchUser('g1', 'u2', 'Zoé', 1000); // only cached
+  assert.equal(store.countUsers('g1'), 2);
+  assert.equal(store.countUsers('g1'), store.listUserProfiles('g1').length);
 });
 
 test('countUsers: returns 0 when the guild has no users directory yet', () => {
@@ -1533,10 +1597,10 @@ test('getPrivate: null when no private file exists, and nothing is created', () 
   assert.deepEqual(store.listPrivate('g1'), []);
 });
 
-test('ensurePrivate: creates the empty shape, persists it on flush and survives a restart', () => {
+test('applyPrivateOps: a first private write creates the empty shape, persists it on flush and survives a restart', () => {
   const dir = tmpDataDir();
   const store = createStore({ dataDir: dir });
-  assert.deepEqual(store.ensurePrivate('g1', 'u1'), EMPTY_PRIVATE);
+  assert.deepEqual(store.applyPrivateOps('g1', 'u1', {}), EMPTY_PRIVATE);
   store.flush();
   assert.equal(fs.existsSync(privateFile(dir, 'g1', 'u1')), true);
 
@@ -1545,11 +1609,11 @@ test('ensurePrivate: creates the empty shape, persists it on flush and survives 
   assert.deepEqual(storeB.listPrivate('g1'), ['u1']);
 });
 
-test('ensurePrivate: returns the existing file untouched', () => {
+test('applyPrivateOps: a later write with nothing to say leaves the existing file untouched', () => {
   const dir = tmpDataDir();
   const store = createStore({ dataDir: dir });
   store.applyPrivateOps('g1', 'u1', { relationship: 'Trusts the persona' }, { fieldChars: 300 });
-  assert.equal(store.ensurePrivate('g1', 'u1').relationship, 'Trusts the persona');
+  assert.equal(store.applyPrivateOps('g1', 'u1', {}).relationship, 'Trusts the persona');
 });
 
 test('getPrivate: a hand-edited file is normalised on read: defaults filled, detail ids assigned', () => {
@@ -1607,7 +1671,7 @@ test('getPrivate: a private file that parses to a non-object is replaced by the 
       return priv;
     });
     assert.deepEqual(result, EMPTY_PRIVATE, label);
-    assert.deepEqual(store.takePrivateBuffer('g1', 'u1').map((m) => m.id), ['m1'], label);
+    assert.deepEqual(store.getPrivateBuffer('g1', 'u1').map((m) => m.id), ['m1'], label);
 
     const warnings = logs.filter((l) => l.msg === 'store: private file replaced');
     assert.equal(warnings.length, 1, `${label}: warned once`);
@@ -1725,22 +1789,23 @@ test('markPrivateNoticed: records the day the cap notice was posted, keeps the r
   assert.equal(storeB.getPrivate('g1', 'u1').replies.noticedDay, '2026-09-29');
 });
 
-test('private buffer: push, info, take empties it; info on a missing file creates nothing', () => {
+test('private buffer: push, info, consume empties it; info on a missing file creates nothing', () => {
   const dir = tmpDataDir();
   const store = createStore({ dataDir: dir });
-  assert.deepEqual(store.privateBufferInfo('g1', 'u1'), { size: 0, oldestTs: null });
-  assert.deepEqual(store.takePrivateBuffer('g1', 'u1'), []);
+  assert.deepEqual(store.privateBufferInfo('g1', 'u1'), { size: 0 });
+  assert.deepEqual(store.getPrivateBuffer('g1', 'u1'), []);
   assert.equal(store.getPrivate('g1', 'u1'), null);
 
   store.pushPrivateBuffer('g1', 'u1', { id: 'm1', content: 'γεια', ts: 1000 });
   store.pushPrivateBuffer('g1', 'u1', { id: 'm2', content: 'hello', ts: 2000 });
-  assert.deepEqual(store.privateBufferInfo('g1', 'u1'), { size: 2, oldestTs: 1000 });
+  assert.deepEqual(store.privateBufferInfo('g1', 'u1'), { size: 2 });
 
   store.flush();
   const storeB = createStore({ dataDir: dir });
-  const taken = storeB.takePrivateBuffer('g1', 'u1');
+  const taken = storeB.getPrivateBuffer('g1', 'u1');
   assert.deepEqual(taken.map((m) => m.id), ['m1', 'm2']);
-  assert.deepEqual(storeB.privateBufferInfo('g1', 'u1'), { size: 0, oldestTs: null });
+  storeB.shiftPrivateBuffer('g1', 'u1', taken);
+  assert.deepEqual(storeB.privateBufferInfo('g1', 'u1'), { size: 0 });
   storeB.flush();
   assert.deepEqual(createStore({ dataDir: dir }).getPrivate('g1', 'u1').buffer, []);
 });
@@ -1755,9 +1820,9 @@ test('pushPrivateBuffer: an optional maxLength drops the oldest entries', () => 
 test('listPrivate: ids with a private file, on disk or only cached', () => {
   const dir = tmpDataDir();
   const store = createStore({ dataDir: dir });
-  store.ensurePrivate('g1', 'u1');
+  store.applyPrivateOps('g1', 'u1', {});
   store.flush();
-  store.ensurePrivate('g1', 'u2');
+  store.applyPrivateOps('g1', 'u2', {});
   assert.deepEqual(store.listPrivate('g1').sort(), ['u1', 'u2']);
   assert.deepEqual(store.listPrivate('g2'), []);
 });
@@ -1780,7 +1845,7 @@ test('forgetUser: also deletes the private file', () => {
   const store = createStore({ dataDir: dir });
   store.touchUser('g1', 'u1', 'Alice', 1000);
   store.applyPrivateOps('g1', 'u1', { relationship: 'secret' }, { fieldChars: 300 });
-  store.ensurePrivate('g1', 'u2');
+  store.applyPrivateOps('g1', 'u2', {});
   store.flush();
   store.forgetUser('g1', 'u1');
   assert.equal(store.getUser('g1', 'u1'), null);
@@ -1796,7 +1861,7 @@ test('wipeGuild: removes the private directory, cache and disk, leaves other gui
   store.applyPrivateOps('g1', 'u1', { relationship: 'secret' }, { fieldChars: 300 });
   store.flush();
   store.pushPrivateBuffer('g1', 'u2', { id: 'm1', ts: 1000 }); // only cached, never flushed
-  store.ensurePrivate('g2', 'u9');
+  store.applyPrivateOps('g2', 'u9', {});
 
   const counts = store.wipeGuild('g1');
   assert.deepEqual(counts, { users: 2, channels: 2, loreRemoved: 1, loreKept: 1, bufferMessages: 2 });
@@ -1815,7 +1880,7 @@ test('wipeGuild: removes the private directory, cache and disk, leaves other gui
 test('validate: reports an unparsable private file like a broken profile', () => {
   const dir = tmpDataDir();
   const store = createStore({ dataDir: dir });
-  store.ensurePrivate('g1', 'u1');
+  store.applyPrivateOps('g1', 'u1', {});
   store.flush();
   fs.writeFileSync(privateFile(dir, 'g1', 'u1'), '{ not json');
   assert.deepEqual(store.validate(), ['guilds/g1/private/u1.json']);
@@ -1835,17 +1900,19 @@ test('getPrivateBuffer: a copy of the buffer, oldest first; [] and no file when 
   assert.equal(store.privateBufferInfo('g1', 'u1').size, 2, 'mutating the copy never touches the stored buffer');
 });
 
-test('shiftPrivateBuffer: drops the first count entries and persists; a missing layer is left alone', () => {
+test('shiftPrivateBuffer: drops the consumed entries by id and persists; a missing layer is left alone', () => {
   const dir = tmpDataDir();
   const store = createStore({ dataDir: dir });
-  store.shiftPrivateBuffer('g1', 'nobody', 2);
+  store.shiftPrivateBuffer('g1', 'nobody', [{ id: 'm1' }]);
   assert.equal(store.getPrivate('g1', 'nobody'), null, 'no file is created');
 
   for (let i = 1; i <= 4; i += 1) store.pushPrivateBuffer('g1', 'u1', { id: `m${i}`, ts: i });
   store.flush();
-  store.shiftPrivateBuffer('g1', 'u1', 3);
+  const consumed = store.getPrivateBuffer('g1', 'u1').slice(0, 3);
+  store.pushPrivateBuffer('g1', 'u1', { id: 'm5', ts: 5 }, 4); // an arrival trims m1 off the front
+  store.shiftPrivateBuffer('g1', 'u1', consumed);
   store.flush();
-  assert.deepEqual(createStore({ dataDir: dir }).getPrivateBuffer('g1', 'u1').map((m) => m.id), ['m4']);
+  assert.deepEqual(createStore({ dataDir: dir }).getPrivateBuffer('g1', 'u1').map((m) => m.id), ['m4', 'm5']);
 });
 
 test('touchPrivateSeen: stamps lastSeen every time, firstSeen only while empty; never touches the public profile', () => {

@@ -128,30 +128,30 @@ test('upsertLore: rejects an entry with no title', () => {
   assert.equal(result.upserted, 0);
 });
 
-test('upsertLore: title is a hard identity clamp at 80 chars; text is tolerant around the default 400 (400*1.25 when it has to cut)', () => {
+test('upsertLore: title is a hard identity clamp at 80 chars; text is tolerant around the default 600 (600*1.25 when it has to cut)', () => {
   const result = upsertLore([], [{ title: 'T'.repeat(200), keys: ['valid'], text: 'x'.repeat(1000) }], {
     source: 'analyzer',
     now: NOW,
   });
   assert.equal(result.entries[0].title.length, 80);
-  assert.equal(result.entries[0].text.length, 500, 'no boundary in a single long word -- hard-cut at 400*1.25');
+  assert.equal(result.entries[0].text.length, 750, 'no boundary in a single long word -- hard-cut at 600*1.25');
 });
 
-test('upsertLore: text within the default tolerance of 400 is kept whole', () => {
-  const result = upsertLore([], [{ title: 'X', keys: ['valid'], text: 'x'.repeat(450) }], {
+test('upsertLore: text within the default tolerance of 600 is kept whole', () => {
+  const result = upsertLore([], [{ title: 'X', keys: ['valid'], text: 'x'.repeat(700) }], {
     source: 'analyzer',
     now: NOW,
   });
-  assert.equal(result.entries[0].text.length, 450);
+  assert.equal(result.entries[0].text.length, 700);
 });
 
 test('upsertLore: textChars is configurable and read at the moment of use', () => {
   const result = upsertLore([], [{ title: 'X', keys: ['valid'], text: 'x'.repeat(1000) }], {
     source: 'analyzer',
     now: NOW,
-    textChars: 600,
+    textChars: 300,
   });
-  assert.equal(result.entries[0].text.length, 750, '600 * the default tolerance 1.25');
+  assert.equal(result.entries[0].text.length, 375, '300 * the default tolerance 1.25');
 });
 
 test('upsertLore: clampTolerance is configurable', () => {

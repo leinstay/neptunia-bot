@@ -51,7 +51,7 @@ test('gifCaptionState: watched, failed, one-frame or none', () => {
   assert.equal(gifCaptionState({ text: 'a man runs', ts: 1, watched: true }), 'watched');
   assert.equal(gifCaptionState({ text: 'a still', ts: 1, gif: true, watchFailed: 5 }), 'failed');
   assert.equal(gifCaptionState({ miss: true, ts: 1, watchFailed: 5 }), 'failed');
-  assert.equal(gifCaptionState({ text: 'a still', ts: 1 }), 'oneFrame');
+  assert.equal(gifCaptionState({ text: 'a still', ts: 1 }), 'one-frame');
   assert.equal(gifCaptionState({ miss: true, ts: 1 }), 'none');
   assert.equal(gifCaptionState(undefined), 'none');
 });
@@ -65,7 +65,7 @@ test('gifCaptionCounts: counts the library entries by their caption state', () =
     'm4#e0': { miss: true, ts: 1 },
     'x#e0': { text: 'not in the library', ts: 1 },
   };
-  assert.deepEqual(gifCaptionCounts(gifs, cache), { watched: 1, oneFrame: 1, failed: 1, none: 2 });
+  assert.deepEqual(gifCaptionCounts(gifs, cache), { watched: 1, 'one-frame': 1, failed: 1, none: 2 });
 });
 
 test('recacheQueue: never-described first, then oldest-described; watched skipped; capped', () => {
@@ -220,7 +220,7 @@ test('gif recache: a second run skips what the first watched and continues with 
     assert.deepEqual(recache.start('g1'), { ok: true, dropped: 0, queued: 1 });
     await recache.waitIdle();
     assert.deepEqual(describer.calls.map((c) => c.item.itemId), ['m1#e0', 'm2#e0', 'm3#e0']);
-    assert.deepEqual(gifCaptionCounts(store.getGifs('g1'), store.getMediaCache('g1')), { watched: 3, oneFrame: 0, failed: 0, none: 0 });
+    assert.deepEqual(gifCaptionCounts(store.getGifs('g1'), store.getMediaCache('g1')), { watched: 3, 'one-frame': 0, failed: 0, none: 0 });
     assert.deepEqual(recache.start('g1'), { ok: true, dropped: 0, queued: 0 });
     await recache.waitIdle();
   });
@@ -274,7 +274,7 @@ test('gif recache: refused while paused, during a warmup, without a describer or
       reason: 'warmup',
     });
     assert.deepEqual(createGifRecache({ ...base }).start('g1'), { ok: false, reason: 'unavailable' });
-    for (const blocker of ['off', 'video-off', 'prompt']) {
+    for (const blocker of ['off', 'video-off', 'no-prompt']) {
       assert.deepEqual(createGifRecache({ ...base, describer: fakeDescriber(store, { blocker }) }).start('g1'), { ok: false, reason: blocker });
     }
     store.state.data.paused = true;

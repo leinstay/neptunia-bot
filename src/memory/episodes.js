@@ -28,14 +28,14 @@ function normalizeWhat(what) {
  * instead -- see docs/prompt-contract.md, "Limits are soft for the
  * model, clean in code".
  */
-function sanitizeEpisode(raw, now, clampTolerance) {
+function sanitizeEpisode(raw, nowMs, clampTolerance) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
   const what = typeof raw.what === 'string' ? clampText(raw.what, 200, { tolerance: clampTolerance }) : '';
   if (!what) return null;
   const quote = typeof raw.quote === 'string' ? clampText(raw.quote, 120, { tolerance: 1 }) : '';
   const feeling = typeof raw.feeling === 'string' ? clampText(raw.feeling, 120, { tolerance: clampTolerance }) : '';
   const weight = clampWeight(raw.weight);
-  const date = typeof raw.date === 'string' && DATE_RE.test(raw.date) ? raw.date : utcDay(now);
+  const date = typeof raw.date === 'string' && DATE_RE.test(raw.date) ? raw.date : utcDay(nowMs);
   return { date, what, quote, feeling, weight };
 }
 
@@ -74,19 +74,19 @@ function evictionOrder(a, b) {
  * @param {{ maxEpisodes: number, maxNew: number, now?: number, clampTolerance?: number }} opts
  * @returns {{ episodes: object[], added: number }}
  */
-export function mergeEpisodes(existing, incoming, { maxEpisodes, maxNew = Infinity, now = Date.now(), clampTolerance } = {}) {
+export function mergeEpisodes(existing, incoming, { maxEpisodes, maxNew = Infinity, now: nowMs = Date.now(), clampTolerance } = {}) {
   const stored = Array.isArray(existing) ? existing : [];
   if (!Array.isArray(incoming) || incoming.length === 0) return { episodes: stored, added: 0 };
 
   const sanitized = incoming
-    .map((raw) => sanitizeEpisode(raw, now, clampTolerance))
+    .map((raw) => sanitizeEpisode(raw, nowMs, clampTolerance))
     .filter(Boolean)
     .slice(0, maxNew);
 
   const accepted = [];
   for (const candidate of sanitized) {
     if (isDuplicate(candidate, stored)) continue;
-    accepted.push({ ...candidate, addedAt: new Date(now).toISOString() });
+    accepted.push({ ...candidate, addedAt: new Date(nowMs).toISOString() });
   }
   if (accepted.length === 0) return { episodes: stored, added: 0 };
 

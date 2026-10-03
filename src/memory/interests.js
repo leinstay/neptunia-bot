@@ -27,7 +27,8 @@ import { topByRank } from './ranking.js';
 import { clampText } from './clamp.js';
 import { HOUR_MS } from '../time.js';
 
-const DEFAULT_CONFIRM_GAP_HOURS = 12;
+/** `memory.confirmGapHours` when it is missing (config.json carries the same). */
+export const DEFAULT_CONFIRM_GAP_HOURS = 12;
 
 /**
  * The identity a topic is compared by: trimmed, whitespace-collapsed,
@@ -51,7 +52,8 @@ export function normalizeTopic(topic) {
  * store fewer than it shows, even when misconfigured. Neither value given ->
  * no cap (`Infinity`), same as before this feature existed. Shared by
  * interests, details (src/memory/details.js) and aliases
- * (src/memory/aliases.js) -- same trade-off, three item kinds.
+ * (src/memory/aliases.js) -- same trade-off, three item kinds; details.js
+ * also imports `evictToCapacity`, `minIso`, `maxIso` and `isFarEnough` below.
  * @param {number} [storedMax]
  * @param {number} [shownMax]
  */
@@ -70,22 +72,23 @@ export function effectiveStorageCap(storedMax, shownMax) {
  * @param {object[]} items
  * @param {number} cap
  * @param {number} [halfLifeDays]
+ * @returns {object[]}
  */
-function evictToCapacity(items, cap, halfLifeDays) {
+export function evictToCapacity(items, cap, halfLifeDays) {
   if (!Number.isFinite(cap) || items.length <= cap) return items;
   const keep = new Set(topByRank(items, cap, halfLifeDays));
   return items.filter((item) => keep.has(item));
 }
 
 /** Earlier of two ISO date strings; a missing one never wins. */
-function minIso(a, b) {
+export function minIso(a, b) {
   if (!a) return b ?? null;
   if (!b) return a;
   return a < b ? a : b;
 }
 
 /** Later of two ISO date strings; a missing one never wins. */
-function maxIso(a, b) {
+export function maxIso(a, b) {
   if (!a) return b ?? null;
   if (!b) return a;
   return a > b ? a : b;
@@ -96,8 +99,12 @@ function maxIso(a, b) {
  * to count as a NEW occasion rather than the same conversation continuing: a
  * missing or unparsable stored date counts as far away (nothing to compare
  * against, so it can only heal an item stuck at its starting weight).
+ * @param {number} seenAt
+ * @param {string|null} priorLastSeenIso
+ * @param {number} gapMs
+ * @returns {boolean}
  */
-function isFarEnough(seenAt, priorLastSeenIso, gapMs) {
+export function isFarEnough(seenAt, priorLastSeenIso, gapMs) {
   if (!priorLastSeenIso) return true;
   const priorMs = Date.parse(priorLastSeenIso);
   if (!Number.isFinite(priorMs)) return true;

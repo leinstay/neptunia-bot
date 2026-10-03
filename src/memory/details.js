@@ -12,65 +12,17 @@
 // people taught the persona, see src/memory/store.js#applyLearnedOps), whose
 // items may also carry `from` -- the teacher's `<@id>` token.
 
-import { normalizeTopic } from './interests.js';
-import { topByRank } from './ranking.js';
+import {
+  DEFAULT_CONFIRM_GAP_HOURS,
+  effectiveStorageCap,
+  evictToCapacity,
+  isFarEnough,
+  maxIso,
+  minIso,
+  normalizeTopic,
+} from './interests.js';
 import { clampText } from './clamp.js';
 import { HOUR_MS } from '../time.js';
-
-const DEFAULT_CONFIRM_GAP_HOURS = 12;
-
-/** Earlier of two ISO date strings; a missing one never wins. */
-function minIso(a, b) {
-  if (!a) return b ?? null;
-  if (!b) return a;
-  return a < b ? a : b;
-}
-
-/** Later of two ISO date strings; a missing one never wins. */
-function maxIso(a, b) {
-  if (!a) return b ?? null;
-  if (!b) return a;
-  return a > b ? a : b;
-}
-
-/** Whether a sighting at `seenAt` (ms) is far enough from `priorLastSeenIso` to count as a new occasion. */
-function isFarEnough(seenAt, priorLastSeenIso, gapMs) {
-  if (!priorLastSeenIso) return true;
-  const priorMs = Date.parse(priorLastSeenIso);
-  if (!Number.isFinite(priorMs)) return true;
-  return Math.abs(seenAt - priorMs) >= gapMs;
-}
-
-/**
- * The storage cap actually enforced: `max(maxDetailsStored, maxDetails)` --
- * see docs/prompt-contract.md, "More is stored than shown, and rank
- * decays with age". A deployment can show fewer than it stores, but never
- * store fewer than it shows, even when misconfigured. Neither value given ->
- * no cap (`Infinity`), same as before this feature existed.
- * @param {number} [maxDetailsStored]
- * @param {number} [maxDetails]
- */
-function effectiveStorageCap(maxDetailsStored, maxDetails) {
-  const stored = Number.isInteger(maxDetailsStored) ? maxDetailsStored : -Infinity;
-  const shown = Number.isInteger(maxDetails) ? maxDetails : -Infinity;
-  const cap = Math.max(stored, shown);
-  return Number.isFinite(cap) ? cap : Infinity;
-}
-
-/**
- * Drop items over `cap`, keeping the highest-ranked ones (see
- * src/memory/ranking.js#topByRank) while preserving `items`' own relative
- * order among the survivors -- eviction never reshuffles storage order, it
- * only decides who stays.
- * @param {object[]} items
- * @param {number} cap
- * @param {number} [halfLifeDays]
- */
-function evictToCapacity(items, cap, halfLifeDays) {
-  if (!Number.isFinite(cap) || items.length <= cap) return items;
-  const keep = new Set(topByRank(items, cap, halfLifeDays));
-  return items.filter((item) => keep.has(item));
-}
 
 function normalizedNextId(startId) {
   return Number.isInteger(startId) && startId >= 1 ? startId : 1;

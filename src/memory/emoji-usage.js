@@ -10,6 +10,18 @@ import { isPlainObject } from '../config.js';
 import { sortByRank } from './ranking.js';
 
 /**
+ * The `mergeEmojiUsage` options from `context.customEmoji`, read by the caller at the
+ * moment of use: `storeMax` (200) and `halfLifeDays` (30), config.json's values when a key
+ * is missing. Shared by the analyzer (src/memory/update.js) and the history backfill.
+ * @param {object} config  Live config.
+ * @returns {{ storeMax: number, halfLifeDays: number }}
+ */
+export function emojiUsageOpts(config) {
+  const emojiCfg = config?.context?.customEmoji ?? {};
+  return { storeMax: emojiCfg.storeMax ?? 200, halfLifeDays: emojiCfg.halfLifeDays ?? 30 };
+}
+
+/**
  * A stored `emojiUsage` map made safe to read: anything but a plain object
  * becomes `{}`; an entry without a positive count is dropped, a missing name
  * becomes `''`, a missing `last` becomes 0. Never mutates `value`.

@@ -78,11 +78,11 @@ import { mediaProxyUrl } from '../discord/media.js';
 import { createImageFetcher } from '../discord/fetch-image.js';
 import { createVideoFetcher } from '../discord/fetch-video.js';
 import { isDirectUrlSite, safeLocation, youtubeVideoId } from '../discord/video-sites.js';
-import { TokenLimitError, DailyCapError } from '../llm/openrouter.js';
+import { TokenLimitError, DailyCapError, VIDEO_TOKENS_PER_SECOND_FALLBACK as STATIC_TOKENS_PER_SECOND_FALLBACK } from '../llm/openrouter.js';
 import { clampText } from './clamp.js';
 import { classifierMediaModel, classifierVideoModel } from '../behavior/mention.js';
 import { fillPromptTemplate } from '../behavior/prompt.js';
-import { createYoutubeCheck } from './youtube-check.js';
+import { createYoutubeCheck, isVideoVisionOn } from './youtube-check.js';
 import { gifWatchBlocker as gifWatchBlockerOf, gifWatchCap, gifWatchPrompt } from './gif-watch.js';
 import { log } from '../log.js';
 import { dailyCounter, utcDay } from '../time.js';
@@ -94,10 +94,8 @@ const DESCRIPTION_CHARS_FALLBACK = 200;
 const VIDEO_ERROR_RETRY_MINUTES_FALLBACK = 60;
 // Only when media.video.urlProcessing is missing (config.json always has it; null omits the field).
 const VIDEO_URL_PROCESSING_FALLBACK = 'agentic';
-// Only when media.video.tokensPerSecond is missing or invalid; the same default as src/llm/openrouter.js.
-const STATIC_TOKENS_PER_SECOND_FALLBACK = 300;
-// Only when media.video.summaryChars is missing (config.json always has it).
-const VIDEO_TEXT_CHARS_FALLBACK = 600;
+// Only when media.video.summaryChars is missing (config.json always has it, the same value).
+const VIDEO_TEXT_CHARS_FALLBACK = 1500;
 const REWATCH_ANSWER_CHARS_FALLBACK = 1200;
 const REWATCH_TTL_MS = 60 * 60_000;
 const PERMANENT_VIDEO_MISSES = new Set(['length', 'size']);
@@ -159,6 +157,13 @@ function safeDetail(message) {
     .slice(0, 200);
 }
 
+/** The log/outcome code of a failed request: a rail (`token-limit`, `daily-cap`) or `llm-error`. */
+function requestFailureReason(err) {
+  if (err instanceof TokenLimitError) return 'token-limit';
+  if (err instanceof DailyCapError) return 'daily-cap';
+  return 'llm-error';
+}
+
 /** Move `key` to the end of `cache` (most-recently-used), inserting it if new. */
 function touchKey(cache, key, value) {
   delete cache[key];
@@ -170,6 +175,87 @@ function trimCache(cache, maxEntries) {
   const keys = Object.keys(cache);
   const overflow = keys.length - Math.max(0, maxEntries);
   for (let i = 0; i < overflow; i += 1) delete cache[keys[i]];
+}
+
+/**
+ * Whether `item` is a link that may go out by its public URL: a pinned
+ * provider object and a `directUrlSites` site.
+ */
+function isPinnableLink(item, videoCfg) {
+  return (
+    item?.source === 'link' &&
+    isPlainObject(videoCfg.provider) &&
+    isDirectUrlSite(item.url, videoCfg.directUrlSites ?? [])
+  );
+}
+
+/**
+ * The length cap that applies to `item` under the live config: a pinnable
+ * direct-URL link is sent by URL up to `directUrlMaxSeconds` (falling back
+ * to `maxSeconds` when unset); anything else is clipped at `maxSeconds`.
+ * With agentic processing `directUrlMaxSeconds * directUrlTokensPerSecond`
+ * must stay under `media.video.maxRequestTokens` (3600 * 10 = 36 000 <
+ * 60 000 by default), or every long direct-URL video trips the token rail.
+ * With any other processing mode the request is estimated at
+ * `tokensPerSecond`, so the cap is also held to what the video token cap
+ * allows (60 000 / 120 = 500 s by default): a longer video takes the clip
+ * route instead of being refused by the rail on every retry.
+ */
+function lengthCap(item, videoCfg, llmCfg) {
+  if (!isPinnableLink(item, videoCfg)) return videoCfg.maxSeconds;
+  const cap = videoCfg.directUrlMaxSeconds ?? videoCfg.maxSeconds;
+  if (urlProcessingMode(videoCfg) === 'agentic') return cap;
+  const tokenSeconds = staticRequestSeconds(videoCfg, llmCfg);
+  return tokenSeconds === null ? cap : Math.min(cap, tokenSeconds);
+}
+
+/**
+ * How many seconds of video fit the pre-flight token cap at the static
+ * per-second estimate: `floor(maxRequestTokens / tokensPerSecond)`, with the
+ * same values the client then applies (`media.video.maxRequestTokens`, else
+ * `llm.maxRequestTokens`; `tokensPerSecond`, else 300). Null when no cap is
+ * known.
+ */
+function staticRequestSeconds(videoCfg, llmCfg) {
+  const isPositive = (value) => typeof value === 'number' && Number.isFinite(value) && value > 0;
+  const maxRequestTokens = isPositive(videoCfg.maxRequestTokens)
+    ? videoCfg.maxRequestTokens
+    : llmCfg?.maxRequestTokens;
+  if (!isPositive(maxRequestTokens)) return null;
+  const tokensPerSecond = isPositive(videoCfg.tokensPerSecond) ? videoCfg.tokensPerSecond : STATIC_TOKENS_PER_SECOND_FALLBACK;
+  return Math.floor(maxRequestTokens / tokensPerSecond);
+}
+
+/** The processing mode a public URL goes out with (see videoPart), or null when the field is omitted. */
+function urlProcessingMode(videoCfg) {
+  const mode = videoCfg.urlProcessing === undefined ? VIDEO_URL_PROCESSING_FALLBACK : videoCfg.urlProcessing;
+  return typeof mode === 'string' && mode ? mode : null;
+}
+
+/**
+ * The lasting video state a media cache entry (`video:<item id>`) stands for, by the describer's
+ * own rules, read-only: `{ state: 'watched', text }`, `{ state: 'limit', reason }` for a
+ * permanent miss (`length`, `size`), or null -- no entry, an error miss (retried after
+ * `media.video.errorRetryMinutes`, see describeVideo), or a `length` miss whose duration is
+ * unknown or fits the length cap that applies to `item` now (a raised cap retries it). `item`
+ * (a collectVideos candidate) only decides the cap: a pinnable direct-URL link has its own; without
+ * one (a buffered message keeps no URL) the cap is `media.video.maxSeconds`. Pure. Shared by the
+ * describer's cache lookup and the live analyzer (src/memory/update.js).
+ * @param {object|undefined} entry
+ * @param {object} config  Live config (`media.video`, `llm`).
+ * @param {object} [item]
+ * @returns {{ state: 'watched', text: string } | { state: 'limit', reason: string } | null}
+ */
+export function videoStateFromCache(entry, config, item = {}) {
+  if (!entry) return null;
+  if (entry.watched) return { state: 'watched', text: entry.text };
+  if (!entry.miss || !PERMANENT_VIDEO_MISSES.has(entry.reason)) return null;
+  if (entry.reason === 'length') {
+    // An unknown duration (older entries included) costs one probe to learn.
+    if (typeof entry.durationSec !== 'number') return null;
+    if (entry.durationSec <= lengthCap(item, config?.media?.video ?? {}, config?.llm)) return null;
+  }
+  return { state: 'limit', reason: entry.reason };
 }
 
 /**
@@ -292,7 +378,7 @@ export function createDescriber({
         },
       );
     } catch (err) {
-      log.warn('describe: failed', { kind: item.kind, reason: 'llm', status: err.statusCode, detail: safeDetail(err.message) });
+      log.warn('describe: failed', { kind: item.kind, reason: 'llm-error', status: err.statusCode, detail: safeDetail(err.message) });
       recordMiss();
       return null;
     }
@@ -322,8 +408,8 @@ export function createDescriber({
 
   /**
    * Why GIFs are not watched under the live config and prompts, or null when
-   * they are: `off`, `video-off` or `prompt` (src/memory/gif-watch.js#gifWatchBlocker).
-   * @returns {'off'|'video-off'|'prompt'|null}
+   * they are: `off`, `video-off` or `no-prompt` (src/memory/gif-watch.js#gifWatchBlocker).
+   * @returns {'off'|'video-off'|'no-prompt'|null}
    */
   function gifWatchBlocker() {
     return gifWatchBlockerOf(hot.config, hot.prompts);
@@ -343,7 +429,7 @@ export function createDescriber({
    * as `{ text, ts, watched: true, gif: true }`; nothing is cached otherwise.
    * Resolves `{ state: 'watched', text, usage, estimated }`, `{ state:
    * 'failed', reason }` (the fetch, the conversion, the request or an empty
-   * answer) or `{ state: 'unavailable', reason: 'daily'|'dailyCap' }` (a
+   * answer) or `{ state: 'unavailable', reason: 'daily'|'daily-cap' }` (a
    * daily rail is spent: no failure of this GIF). One `describe: gif` log
    * line, codes only.
    */
@@ -391,8 +477,8 @@ export function createDescriber({
         videoRequestOptions(videoCfg, clip, { maxOutputTokens: videoCfg.maxOutputTokens, countAgainstDailyCap }),
       );
     } catch (err) {
-      if (err instanceof DailyCapError) return report({ state: 'unavailable', reason: 'dailyCap' }, sizes);
-      const reason = err instanceof TokenLimitError ? 'tokenLimit' : 'llm';
+      const reason = requestFailureReason(err);
+      if (reason === 'daily-cap') return report({ state: 'unavailable', reason }, sizes);
       return report({ state: 'failed', reason }, { ...sizes, status: err.statusCode });
     }
 
@@ -545,77 +631,24 @@ export function createDescriber({
   }
 
   /**
-   * Whether `item` is a link that may go out by its public URL: a pinned
-   * provider object and a `directUrlSites` site.
-   */
-  function isPinnableLink(item, videoCfg) {
-    return (
-      item.source === 'link' &&
-      isPlainObject(videoCfg.provider) &&
-      isDirectUrlSite(item.url, videoCfg.directUrlSites ?? [])
-    );
-  }
-
-  /**
-   * The length cap that applies to `item` under the live config: a pinnable
-   * direct-URL link is sent by URL up to `directUrlMaxSeconds` (falling back
-   * to `maxSeconds` when unset); anything else is clipped at `maxSeconds`.
-   * With agentic processing `directUrlMaxSeconds * directUrlTokensPerSecond`
-   * must stay under `media.video.maxRequestTokens` (3600 * 10 = 36 000 <
-   * 60 000 by default), or every long direct-URL video trips the token rail.
-   * With any other processing mode the request is estimated at
-   * `tokensPerSecond`, so the cap is also held to what the video token cap
-   * allows (60 000 / 120 = 500 s by default): a longer video takes the clip
-   * route instead of being refused by the rail on every retry.
-   */
-  function lengthCap(item, videoCfg) {
-    if (!isPinnableLink(item, videoCfg)) return videoCfg.maxSeconds;
-    const cap = videoCfg.directUrlMaxSeconds ?? videoCfg.maxSeconds;
-    if (urlProcessingMode(videoCfg) === 'agentic') return cap;
-    const tokenSeconds = staticRequestSeconds(videoCfg);
-    return tokenSeconds === null ? cap : Math.min(cap, tokenSeconds);
-  }
-
-  /**
-   * How many seconds of video fit the pre-flight token cap at the static
-   * per-second estimate: `floor(maxRequestTokens / tokensPerSecond)`, with the
-   * same values the client then applies (`media.video.maxRequestTokens`, else
-   * `llm.maxRequestTokens`; `tokensPerSecond`, else 300). Null when no cap is
-   * known.
-   */
-  function staticRequestSeconds(videoCfg) {
-    const isPositive = (value) => typeof value === 'number' && Number.isFinite(value) && value > 0;
-    const maxRequestTokens = isPositive(videoCfg.maxRequestTokens)
-      ? videoCfg.maxRequestTokens
-      : hot.config.llm?.maxRequestTokens;
-    if (!isPositive(maxRequestTokens)) return null;
-    const tokensPerSecond = isPositive(videoCfg.tokensPerSecond) ? videoCfg.tokensPerSecond : STATIC_TOKENS_PER_SECOND_FALLBACK;
-    return Math.floor(maxRequestTokens / tokensPerSecond);
-  }
-
-  /**
-   * The cached state under `key`, or null when the video must be (re)watched.
-   * A watched entry is LRU-touched; an error miss counts only for
-   * `media.video.errorRetryMinutes` (read now) and never when `force` is set; a
-   * `length` miss is treated as absent when its `durationSec` is unknown
-   * (null or missing, as in entries written before it was stored) or now fits
-   * `lengthCap(item)`, so a raised cap retries it.
+   * The cached state under `key`, or null when the video must be (re)watched:
+   * the lasting states by videoStateFromCache (a watched entry is LRU-touched;
+   * a `length` miss of unknown duration, or one that fits the cap now, is
+   * absent so a raised cap retries it), plus an error miss, which counts only
+   * for `media.video.errorRetryMinutes` (read now) and never when `force` is set.
    */
   function cachedVideo(guildId, key, item, force = false) {
     const cache = store.getMediaCache(guildId);
     const entry = cache[key];
     if (!entry) return null;
-    if (entry.watched) {
+    const lasting = videoStateFromCache(entry, hot.config, item);
+    if (lasting?.state === 'watched') {
       touchKey(cache, key, entry);
       store.markMediaCacheDirty(guildId);
-      return { state: 'watched', text: entry.text, usage: null, estimated: 0, cached: true };
+      return { ...lasting, usage: null, estimated: 0, cached: true };
     }
-    if (entry.miss && entry.reason === 'length') {
-      // An unknown duration (older entries included) costs one probe to learn.
-      if (typeof entry.durationSec !== 'number') return null;
-      if (entry.durationSec <= lengthCap(item, hot.config.media?.video ?? {})) return null;
-    }
-    if (entry.miss && PERMANENT_VIDEO_MISSES.has(entry.reason)) return { state: 'limit', reason: entry.reason };
+    if (lasting) return lasting;
+    if (entry.miss && PERMANENT_VIDEO_MISSES.has(entry.reason)) return null; // a length miss to retry
     if (entry.miss && !force && now() - entry.ts < videoErrorTtlMs()) return { state: 'error' };
     return null;
   }
@@ -656,12 +689,6 @@ export function createDescriber({
       if (mode) videoUrl.processing = mode;
     }
     return { type: 'video_url', video_url: videoUrl };
-  }
-
-  /** The processing mode a public URL goes out with (see videoPart), or null when the field is omitted. */
-  function urlProcessingMode(videoCfg) {
-    const mode = videoCfg.urlProcessing === undefined ? VIDEO_URL_PROCESSING_FALLBACK : videoCfg.urlProcessing;
-    return typeof mode === 'string' && mode ? mode : null;
   }
 
   /**
@@ -752,7 +779,7 @@ export function createDescriber({
     const durationSec = probe.durationSec ?? item.durationSec ?? null;
     // A direct-URL video has its own cap (directUrlMaxSeconds, see lengthCap);
     // past it the clip route below still gets the first maxSeconds.
-    if (pinnable && durationSec != null && durationSec <= lengthCap(item, videoCfg)) {
+    if (pinnable && durationSec != null && durationSec <= lengthCap(item, videoCfg, hot.config.llm)) {
       return { ok: true, url: item.url, seconds: durationSec, bytes: null, pinned: true };
     }
     const clip = await videoFetcher.fetchSiteClip(item.url, {
@@ -831,8 +858,7 @@ export function createDescriber({
       );
     } catch (err) {
       const railHit = err instanceof TokenLimitError || err instanceof DailyCapError;
-      const reason = err instanceof TokenLimitError ? 'tokenLimit' : err instanceof DailyCapError ? 'dailyCap' : 'llm';
-      return { result: errorMiss(reason, { ...sizes, status: err.statusCode }), sent: !railHit, attempted: true };
+      return { result: errorMiss(requestFailureReason(err), { ...sizes, status: err.statusCode }), sent: !railHit, attempted: true };
     }
 
     const text = cleanVideoText(completion.text, summaryChars);
@@ -852,12 +878,8 @@ export function createDescriber({
    * still applies).
    */
   async function describeVideoCharged(guildId, item, { countAgainstDailyCap = true, cacheOnly = false, force = false } = {}) {
-    // Video vision needs both switches, like the senses line (src/behavior/prompt.js#renderSenses);
-    // a missing videoDescriptions counts as on.
-    const features = hot.config.features ?? {};
-    if (features.mediaDescriptions !== true || features.videoDescriptions === false) {
-      return { result: null, sent: false, attempted: false };
-    }
+    // Video vision needs both switches, like the senses line (src/behavior/prompt.js#renderSenses).
+    if (!isVideoVisionOn(hot.config)) return { result: null, sent: false, attempted: false };
     const promptText = hot.prompts?.['describe-video'];
     if (!promptText || !isVideoCandidate(item)) return { result: null, sent: false, attempted: false };
 
@@ -960,9 +982,7 @@ export function createDescriber({
    * @returns {Promise<{ question: string, text: string }|null>}
    */
   async function rewatchVideo(guildId, item, question) {
-    const features = hot.config.features ?? {};
-    if (features.mediaDescriptions !== true || features.videoDescriptions === false) return null;
-    if (features.videoRewatch === false) return null;
+    if (!isVideoVisionOn(hot.config) || hot.config.features?.videoRewatch === false) return null;
     const promptText = hot.prompts?.['rewatch-answer'];
     const asked = String(question ?? '').trim();
     if (!promptText || !isVideoCandidate(item) || !asked) return null;
@@ -1022,8 +1042,7 @@ export function createDescriber({
         videoRequestOptions(videoCfg, media, { maxOutputTokens: rewatchCfg.maxOutputTokens, countAgainstDailyCap: true }),
       );
     } catch (err) {
-      const reason = err instanceof TokenLimitError ? 'tokenLimit' : err instanceof DailyCapError ? 'dailyCap' : 'llm';
-      report('error', { reason, seconds: media.seconds ?? null });
+      report('error', { reason: requestFailureReason(err), seconds: media.seconds ?? null });
       return null;
     }
 

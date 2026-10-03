@@ -26,16 +26,16 @@ const EMBED_ID_RE = /#e\d+$/;
 /**
  * Where one GIF's caption stands in the media cache entry `entry`:
  * `watched` (a watched caption), `failed` (a watch was tried and failed; any
- * one-frame caption is kept), `oneFrame` (a caption from one still frame),
+ * one-frame caption is kept), `one-frame` (a caption from one still frame),
  * `none` (no caption: no entry or a miss).
  * @param {object|undefined} entry
- * @returns {'watched'|'failed'|'oneFrame'|'none'}
+ * @returns {'watched'|'failed'|'one-frame'|'none'}
  */
 export function gifCaptionState(entry) {
   const hasText = Boolean(entry) && !entry.miss && typeof entry.text === 'string' && entry.text.trim() !== '';
   if (hasText && entry.watched) return 'watched';
   if (entry && Number.isFinite(entry.watchFailed)) return 'failed';
-  return hasText ? 'oneFrame' : 'none';
+  return hasText ? 'one-frame' : 'none';
 }
 
 /**
@@ -43,10 +43,10 @@ export function gifCaptionState(entry) {
  * `itemId` in the media cache.
  * @param {unknown} gifs   A stored library (normalised here).
  * @param {object} cache   The guild's media cache.
- * @returns {{ watched: number, oneFrame: number, failed: number, none: number }}
+ * @returns {{ watched: number, 'one-frame': number, failed: number, none: number }}
  */
 export function gifCaptionCounts(gifs, cache) {
-  const counts = { watched: 0, oneFrame: 0, failed: 0, none: 0 };
+  const counts = { watched: 0, 'one-frame': 0, failed: 0, none: 0 };
   for (const entry of Object.values(normalizeGifs(gifs).entries)) counts[gifCaptionState(cache?.[entry.itemId])] += 1;
   return counts;
 }
@@ -124,7 +124,7 @@ export function createGifRecache({ hot, store, client, describer = null, isWarmi
       const channel = await client.channels.fetch(entry.channelId);
       const message = await channel?.messages?.fetch(entry.messageId);
       if (!message) return null;
-      const normalized = normalizeMessage(message, client.user?.id, { embedTextChars: hot.config.media?.embedTextChars });
+      const normalized = normalizeMessage(message, client.user?.id, { embedTextChars: hot.config.media?.embedTextChars, videoSites: hot.config.media?.video?.sites });
       const gifs = collectGifItems(normalized);
       const found =
         gifs.find((gif) => gif.key === entry.itemId || gif.key === entry.key) ??
@@ -133,7 +133,7 @@ export function createGifRecache({ hot, store, client, describer = null, isWarmi
       const picture = collectPictures(normalized).find((item) => item.kind === 'gif' && item.itemId === found.key);
       return picture ? { ...picture, itemId: entry.itemId } : null;
     } catch (err) {
-      log.warn('gif-recache: message read failed', { channel: entry.channelId, error: err });
+      log.warn('gif-recache: message read failed', { channelId: entry.channelId, error: err });
       return null;
     }
   }
@@ -170,7 +170,7 @@ export function createGifRecache({ hot, store, client, describer = null, isWarmi
    * `gifs.recachePerRun` library entries (recacheQueue) in the background.
    * Resolves at once, never throws for a skip: `{ ok: false, reason }` --
    * `running`, `paused`, `warmup`, `unavailable` (no describer), or why GIFs
-   * are not watched (`off`, `video-off`, `prompt`) -- else `{ ok: true,
+   * are not watched (`off`, `video-off`, `no-prompt`) -- else `{ ok: true,
    * dropped, queued }`.
    * @param {string} guildId
    */

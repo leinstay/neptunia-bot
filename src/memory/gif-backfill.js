@@ -12,9 +12,9 @@
 // what each GIF shows. Runs once at startup (`startIfNeeded`) and again only
 // on the owner's `/nep gifs rescan` (`run` with `force`).
 
-import { readableChannels, fetchHistoryWindow } from '../discord/collect.js';
 import { collectPictures } from '../discord/media.js';
-import { rankGifs } from './gifs.js';
+import { readMemberHistory } from './emoji-backfill.js';
+import { gifOpts, rankGifs } from './gifs.js';
 import { log as defaultLog } from '../log.js';
 
 /** How many messages one `store.recordGifs` call takes. */
@@ -23,8 +23,6 @@ const CHUNK = 500;
 /** Defaults of `gifs.*` when a key is missing (config.json carries the same). */
 const DEFAULT_BACKFILL_MESSAGES = 500;
 const DEFAULT_BACKFILL_DESCRIBE = 20;
-const DEFAULT_STORE_MAX = 300;
-const DEFAULT_HALF_LIFE_DAYS = 30;
 
 /**
  * The GIF history backfill for the served guild.
@@ -55,10 +53,9 @@ export function createGifBackfill({ hot, store, client, describer = null, log = 
    */
   async function describeTop(guildId, pictures, limit) {
     if (!describer || typeof describer.describeMany !== 'function' || limit <= 0) return 0;
-    const gifCfg = hot.config.gifs ?? {};
     const cache = store.getMediaCache(guildId);
     const items = [];
-    for (const entry of rankGifs(store.getGifs(guildId), gifCfg.halfLifeDays ?? DEFAULT_HALF_LIFE_DAYS)) {
+    for (const entry of rankGifs(store.getGifs(guildId), gifOpts(hot.config).halfLifeDays)) {
       if (items.length >= limit) break;
       const cached = cache?.[entry.itemId];
       if (cached && !cached.miss && typeof cached.text === 'string' && cached.text.trim()) continue;
@@ -106,32 +103,13 @@ export function createGifBackfill({ hot, store, client, describer = null, log = 
       const guild = client.guilds.cache.get(guildId);
       if (!guild) return skipped('no-guild');
 
-      const selfId = client.user?.id;
-      const channels = readableChannels(guild, hot.config.bot);
-      const collected = [];
-      for (const channel of channels) {
-        let messages = [];
-        try {
-          messages = await fetchHistoryWindow(channel, {
-            limit,
-            minTs: 0,
-            selfId,
-            embedTextChars: hot.config.media?.embedTextChars,
-          });
-        } catch (err) {
-          log.warn('gif-backfill: channel read failed', { channel: channel.id, error: err });
-        }
-        for (const message of messages) {
-          if (message.self || message.bot) continue;
-          collected.push(message);
-        }
-      }
+      const { channels, messages: collected } = await readMemberHistory(guild, limit, { config: hot.config, selfId: client.user?.id, log, prefix: 'gif-backfill' });
 
       // From here on nothing awaits until the stamp: no GIF can be recorded in between.
       if (store.state?.data?.paused) return skipped('paused');
       const members = collected.sort((a, b) => a.ts - b.ts);
       const gifCfg = hot.config.gifs ?? {};
-      const opts = { storeMax: gifCfg.storeMax ?? DEFAULT_STORE_MAX, halfLifeDays: gifCfg.halfLifeDays ?? DEFAULT_HALF_LIFE_DAYS };
+      const opts = gifOpts(hot.config);
 
       // Always from zero counts: the window already holds what was recorded on arrival.
       store.resetGifCounts(guildId);
@@ -139,7 +117,7 @@ export function createGifBackfill({ hot, store, client, describer = null, log = 
       for (let i = 0; i < members.length; i += CHUNK) {
         gifs += store.recordGifs(guildId, members.slice(i, i + CHUNK), opts);
       }
-      store.setGifBackfill(guildId, { at: new Date().toISOString(), channels: channels.length, messages: members.length });
+      store.setGifBackfill(guildId, { at: new Date().toISOString(), channels, messages: members.length });
       store.flush();
 
       // The picture item to describe per GIF: an attachment's file, an embed's thumbnail and animation.
@@ -154,7 +132,7 @@ export function createGifBackfill({ hot, store, client, describer = null, log = 
         store.state?.data?.paused || !Number.isInteger(describeLimit) ? 0 : await describeTop(guildId, pictures, describeLimit);
       if (described > 0) store.flush();
 
-      const counts = { channels: channels.length, messages: members.length, gifs, described };
+      const counts = { channels, messages: members.length, gifs, described };
       log.info('gif-backfill: done', counts);
       return { ok: true, ...counts };
     } finally {

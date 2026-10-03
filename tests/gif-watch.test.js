@@ -16,9 +16,9 @@ test('gifWatchBlocker: off, video-off and prompt in that order', () => {
   assert.equal(gifWatchBlocker({ features: {} }, VIDEO), 'off');
   assert.equal(gifWatchBlocker({ ...ON, media: { gif: { watch: false } } }, VIDEO), 'off');
   assert.equal(gifWatchBlocker({ ...ON, features: { mediaDescriptions: true, videoDescriptions: false } }, VIDEO), 'video-off');
-  assert.equal(gifWatchBlocker(ON, {}), 'prompt');
-  assert.equal(gifWatchBlocker(ON, { 'describe-video': '', 'describe-gif': '' }), 'prompt');
-  assert.equal(gifWatchBlocker(ON, undefined), 'prompt');
+  assert.equal(gifWatchBlocker(ON, {}), 'no-prompt');
+  assert.equal(gifWatchBlocker(ON, { 'describe-video': '', 'describe-gif': '' }), 'no-prompt');
+  assert.equal(gifWatchBlocker(ON, undefined), 'no-prompt');
   assert.equal(gifWatchBlocker(undefined, VIDEO), 'off');
 });
 

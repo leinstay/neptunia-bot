@@ -10,7 +10,7 @@ import { clampText } from './clamp.js';
 import { occursAsWholeWord } from './mentions.js';
 
 const MAX_TITLE = 80;
-const DEFAULT_MAX_TEXT = 400; // fallback only -- a deployment sets its own via config.lore.textChars
+const DEFAULT_MAX_TEXT = 600; // config.json's lore.textChars, used only when a caller passes none
 const MIN_KEY = 2;
 const MAX_KEY = 40;
 const MAX_KEYS = 8;
@@ -40,8 +40,8 @@ function normalizeKeys(rawKeys) {
 }
 
 /** A short, stable, deterministic id from the title, creation time and an in-call salt. */
-function makeId(title, now, salt) {
-  const base = `${title}|${now}|${salt}`;
+function makeId(title, nowMs, salt) {
+  const base = `${title}|${nowMs}|${salt}`;
   let hash = 0;
   for (let i = 0; i < base.length; i += 1) {
     hash = (Math.imul(hash, 31) + base.charCodeAt(i)) >>> 0;
@@ -86,12 +86,12 @@ function evictOverflow(entries, maxEntries) {
  *   src/memory/clamp.js) to `textChars` (config.lore.textChars; DEFAULT_MAX_TEXT when absent).
  * @returns {{ entries: object[], upserted: number }}
  */
-export function upsertLore(entries, incoming, { source, now = Date.now(), maxEntries = Infinity, textChars, clampTolerance } = {}) {
+export function upsertLore(entries, incoming, { source, now: nowMs = Date.now(), maxEntries = Infinity, textChars, clampTolerance } = {}) {
   const stored = Array.isArray(entries) ? [...entries] : [];
   if (!Array.isArray(incoming) || incoming.length === 0) return { entries: stored, upserted: 0 };
 
   const byTitle = new Map(stored.map((entry, index) => [normalizeTitle(entry.title), index]));
-  const nowIso = new Date(now).toISOString();
+  const nowIso = new Date(nowMs).toISOString();
   const effectiveTextChars = Number.isFinite(textChars) && textChars > 0 ? textChars : DEFAULT_MAX_TEXT;
   let upserted = 0;
   let salt = 0;
@@ -109,7 +109,7 @@ export function upsertLore(entries, incoming, { source, now = Date.now(), maxEnt
     if (existingIndex === undefined) {
       salt += 1;
       const entry = {
-        id: makeId(title, now, salt),
+        id: makeId(title, nowMs, salt),
         title,
         keys,
         text,

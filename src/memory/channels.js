@@ -2,7 +2,7 @@
 // real message statistics, never the model's call — see
 // docs/prompt-contract.md, "Server memory (the channel map)") and how
 // one channel entry is rendered into the <server> prompt block. No I/O here;
-// `now` and the channel record are always injected.
+// `nowMs` and the channel record are always injected.
 
 import { fill, formatDuration } from '../discord/format.js';
 import { DAY_MS, utcDay } from '../time.js';
@@ -16,23 +16,23 @@ const DEFAULT_ACTIVITY_THRESHOLDS = { liveMessagesPerDay: 20, deadAfterDays: 7 }
  * `slow`   — anything in between.
  *
  * @param {{ days?: Record<string, number>, lastMessageAt?: number|null }} channel
- * @param {number} now
+ * @param {number} nowMs
  * @param {{ liveMessagesPerDay?: number, deadAfterDays?: number }} [cfg]  Defaults to
  *   DEFAULT_ACTIVITY_THRESHOLDS when omitted or missing a key.
  * @returns {'live'|'slow'|'dead'}
  */
-export function channelActivity(channel, now, cfg) {
+export function channelActivity(channel, nowMs, cfg) {
   const liveMessagesPerDay = cfg?.liveMessagesPerDay ?? DEFAULT_ACTIVITY_THRESHOLDS.liveMessagesPerDay;
   const deadAfterDays = cfg?.deadAfterDays ?? DEFAULT_ACTIVITY_THRESHOLDS.deadAfterDays;
   const days = channel?.days ?? {};
 
-  const todayKey = utcDay(now);
-  const yesterdayKey = utcDay(now - DAY_MS);
+  const todayKey = utcDay(nowMs);
+  const yesterdayKey = utcDay(nowMs - DAY_MS);
   const recent = (days[todayKey] ?? 0) + (days[yesterdayKey] ?? 0);
   if (recent >= liveMessagesPerDay) return 'live';
 
   const lastMessageAt = channel?.lastMessageAt ?? null;
-  if (lastMessageAt === null || now - lastMessageAt > deadAfterDays * DAY_MS) return 'dead';
+  if (lastMessageAt === null || nowMs - lastMessageAt > deadAfterDays * DAY_MS) return 'dead';
 
   return 'slow';
 }
@@ -70,7 +70,7 @@ function topWritersText(topWriters, nameOf) {
  *   or (for the last-message line) when `now` was not given.
  * @returns {string}
  */
-export function renderChannel(channel, labels, { current = false, activity, now, nameOf } = {}) {
+export function renderChannel(channel, labels, { current = false, activity, now: nowMs, nameOf } = {}) {
   const s = labels.server;
   const mark = current ? s.currentMark : '';
   const lines = [`# ${channel.name}${mark}`];
@@ -81,8 +81,8 @@ export function renderChannel(channel, labels, { current = false, activity, now,
   if (channel.topics) lines.push(fill(s.topics, { text: channel.topics }));
   if (channel.tone) lines.push(fill(s.tone, { text: channel.tone }));
 
-  if (s.lastMessage && Number.isFinite(channel.lastMessageAt) && Number.isFinite(now)) {
-    const when = formatDuration(Math.max(0, now - channel.lastMessageAt), labels.units);
+  if (s.lastMessage && Number.isFinite(channel.lastMessageAt) && Number.isFinite(nowMs)) {
+    const when = formatDuration(Math.max(0, nowMs - channel.lastMessageAt), labels.units);
     lines.push(fill(s.lastMessage, { when }));
   }
 

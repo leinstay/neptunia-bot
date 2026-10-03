@@ -20,6 +20,18 @@ import { isPlainObject } from '../config.js';
 import { mediaParts } from '../discord/media.js';
 import { sortByRank } from './ranking.js';
 
+/**
+ * The library options from `gifs`, read by the caller at the moment of use: `storeMax` (300)
+ * and `halfLifeDays` (30), config.json's values when a key is missing. Shared by the
+ * analyzer (src/memory/update.js, recording on arrival) and the history backfill.
+ * @param {object} config  Live config.
+ * @returns {{ storeMax: number, halfLifeDays: number }}
+ */
+export function gifOpts(config) {
+  const gifCfg = config?.gifs ?? {};
+  return { storeMax: gifCfg.storeMax ?? 300, halfLifeDays: gifCfg.halfLifeDays ?? 30 };
+}
+
 const KINDS = new Set(['link', 'attachment']);
 const HANDLE_RE = /^g(\d+)$/;
 
@@ -27,8 +39,15 @@ function str(value) {
   return typeof value === 'string' ? value : value == null ? '' : String(value);
 }
 
-/** A stored `backfill` stamp made safe to read: `{ at, channels, messages }` or null. */
-function normalizeBackfill(value) {
+/**
+ * A stored history-backfill stamp made safe to read -- the GIF library's `backfill` and the
+ * guild's `emojiBackfill` (src/memory/store.js) alike: `{ at, channels, messages }` with `at` a
+ * non-empty string and the counts non-negative integers (floored, a bad one becomes 0); anything
+ * without a string `at` becomes null (never backfilled).
+ * @param {unknown} value
+ * @returns {{ at: string, channels: number, messages: number }|null}
+ */
+export function normalizeBackfillStamp(value) {
   if (!isPlainObject(value) || typeof value.at !== 'string' || !value.at) return null;
   const count = (n) => (Number.isFinite(n) && n > 0 ? Math.floor(n) : 0);
   return { at: value.at, channels: count(value.channels), messages: count(value.messages) };
@@ -90,7 +109,7 @@ export function normalizeGifs(value) {
     used.add(entry.id);
     entries[key] = entry;
   }
-  return { nextId, entries, backfill: normalizeBackfill(src.backfill) };
+  return { nextId, entries, backfill: normalizeBackfillStamp(src.backfill) };
 }
 
 /**

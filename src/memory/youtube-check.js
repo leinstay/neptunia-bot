@@ -8,7 +8,7 @@
 // `/nep ping video` and one startup log line. No LLM call, nothing cached,
 // nothing written under data/; never logs the URL or the key.
 
-import { log } from '../log.js';
+import { log as defaultLog } from '../log.js';
 
 /**
  * Whether video vision is on: features.mediaDescriptions AND
@@ -72,19 +72,19 @@ export function createYoutubeCheck({ hot, videoFetcher, youtubeApiKey = null }) 
 /**
  * The startup check: fire-and-forget, only when video vision is on. Logs the
  * status (info), or a warning with a hint when YouTube links will mostly fail.
- * @param {{ hot: object, checkYoutube: () => Promise<{ status: string }>, logger?: object }} deps
+ * @param {{ hot: object, checkYoutube: () => Promise<{ status: string }>, log?: object }} deps
  * @returns {Promise<void>|null}  null when the check was not run (video vision off).
  */
-export function startYoutubeCheck({ hot, checkYoutube, logger = log }) {
+export function startYoutubeCheck({ hot, checkYoutube, log = defaultLog }) {
   if (!isVideoVisionOn(hot.config)) return null;
   return Promise.resolve()
     .then(() => checkYoutube())
     .then(({ status }) => {
       if (status === 'page' || status === 'blocked') {
-        logger.warn('video: youtube check', { status, hint: 'set YOUTUBE_API_KEY' });
+        log.warn('youtube-check: status', { status, hint: 'set YOUTUBE_API_KEY' });
       } else {
-        logger.info('video: youtube check', { status });
+        log.info('youtube-check: status', { status });
       }
     })
-    .catch((err) => logger.error('video: youtube check failed', { error: err?.name ?? 'Error' }));
+    .catch((err) => log.error('youtube-check: failed', { error: err?.name ?? 'Error' }));
 }
