@@ -9,27 +9,17 @@
 // (it may quote members).
 
 import { log } from '../log.js';
-import { resolveProvider } from './openrouter.js';
+import { isPlainObject } from '../config.js';
+import { bumpDaily, dailyCounter, utcDay } from '../time.js';
+import { RETRY_STATUS, apiUrl, backoffMs, openRouterHeaders, resolveProvider, sleep } from './openrouter.js';
 
-const RETRY_STATUS = new Set([408, 429, 500, 502, 503, 504]);
 const MODERATION_STATUS = new Set([400, 403]);
 const MODERATION_MARKERS = /moderation|content_policy|safety/i;
 
 /** The role a generation routes as: `"<prefix>@image"` keys of `llm.providerByModel` apply to it. */
 export const IMAGE_ROLE = 'image';
-
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-/** `${baseUrl}/images`, tolerating trailing slashes on `baseUrl`. */
-function imagesUrl(baseUrl) {
-  return `${String(baseUrl).replace(/\/+$/, '')}/images`;
-}
-
-function isPlainObject(value) {
-  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
-}
+/** The state.json fields of the instance-wide daily picture counter. */
+const IMAGE_DAILY = { dayKey: 'imageDay', countKey: 'imageCount' };
 
 function isAbort(err) {
   return err?.name === 'AbortError' || err?.name === 'TimeoutError';
@@ -134,7 +124,7 @@ function buildBody({ cfg, byModel, family, prompt, reference }) {
  */
 export function createImageGen({ apiKey, getConfig, state, fetchImpl = fetch, now = () => Date.now() }) {
   function today() {
-    return new Date(now()).toISOString().slice(0, 10);
+    return utcDay(now());
   }
 
   /** Today's counters as read, without resetting anything. */
@@ -147,24 +137,21 @@ export function createImageGen({ apiKey, getConfig, state, fetchImpl = fetch, no
 
   /** Roll both counters over to today, refuse at a cap, then count this request. */
   function countRequest(cfg, userId) {
-    const day = today();
-    if (state.data.imageDay !== day) {
-      state.data.imageDay = day;
-      state.data.imageCount = 0;
-    }
+    const nowMs = now();
+    const { day, count: used } = dailyCounter(state.data, IMAGE_DAILY, nowMs);
     if (!isPlainObject(state.data.imageUsers) || state.data.imageUsers.day !== day || !isPlainObject(state.data.imageUsers.counts)) {
       state.data.imageUsers = { day, counts: {} };
     }
     const counts = state.data.imageUsers.counts;
-    if (state.data.imageCount >= cfg.maxPerDay) {
+    if (used >= cfg.maxPerDay) {
       const err = new ImageCapError('daily', `daily image cap reached (${cfg.maxPerDay})`);
-      throw Object.assign(err, { key: 'image.maxPerDay', used: state.data.imageCount, cap: cfg.maxPerDay });
+      throw Object.assign(err, { key: 'image.maxPerDay', used, cap: cfg.maxPerDay });
     }
     if (userId != null && (counts[userId] ?? 0) >= cfg.maxPerUserPerDay) {
       const err = new ImageCapError('userDaily', `daily per-member image cap reached (${cfg.maxPerUserPerDay})`);
       throw Object.assign(err, { key: 'image.maxPerUserPerDay', used: counts[userId] ?? 0, cap: cfg.maxPerUserPerDay });
     }
-    state.data.imageCount += 1;
+    bumpDaily(state.data, IMAGE_DAILY, nowMs);
     if (userId != null) counts[userId] = (counts[userId] ?? 0) + 1;
     state.markDirty();
   }
@@ -202,24 +189,20 @@ export function createImageGen({ apiKey, getConfig, state, fetchImpl = fetch, no
 
     // `attempt` is the loop index; the log counts attempts from 1.
     const fail = (error, attempt) => {
-      log.warn('images: failed', { model, reason: error.reason, statusCode: error.statusCode, attempt: attempt + 1 });
+      log.warn('images: failed', { model, reason: error.reason, status: error.statusCode, attempt: attempt + 1 });
       return error;
     };
 
     let lastError;
     let attempt = 0;
     for (; attempt <= retries; attempt += 1) {
-      if (attempt > 0) await sleep(1500 * 2 ** (attempt - 1));
+      if (attempt > 0) await sleep(backoffMs(attempt));
       let response;
       let json;
       try {
-        response = await fetchImpl(imagesUrl(baseUrl), {
+        response = await fetchImpl(apiUrl(baseUrl, 'images'), {
           method: 'POST',
-          headers: {
-            Authorization: `Bearer ${apiKey}`,
-            'Content-Type': 'application/json',
-            'X-Title': 'neptunia-bot',
-          },
+          headers: openRouterHeaders(apiKey),
           body,
           signal: AbortSignal.timeout(timeoutMs),
         });

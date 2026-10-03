@@ -16,14 +16,12 @@
 // the GIF, so the poster can re-fetch an attachment's fresh CDN URL (Discord
 // attachment URLs expire).
 
+import { isPlainObject } from '../config.js';
+import { mediaParts } from '../discord/media.js';
 import { sortByRank } from './ranking.js';
 
 const KINDS = new Set(['link', 'attachment']);
 const HANDLE_RE = /^g(\d+)$/;
-
-function isPlainObject(value) {
-  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
-}
 
 function str(value) {
   return typeof value === 'string' ? value : value == null ? '' : String(value);
@@ -93,11 +91,6 @@ export function normalizeGifs(value) {
     entries[key] = entry;
   }
   return { nextId, entries, backfill: normalizeBackfill(src.backfill) };
-}
-
-/** A message followed by its forwarded snapshots (src/discord/collect.js#normalizeSnapshot). */
-function mediaParts(message) {
-  return [message, ...(Array.isArray(message.forwarded) ? message.forwarded : [])];
 }
 
 /**

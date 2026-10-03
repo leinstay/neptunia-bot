@@ -67,7 +67,14 @@ export function applyEnv(parsed, target = process.env) {
   return target;
 }
 
-function isPlainObject(value) {
+/**
+ * Whether `value` is a plain object (not null, not an array). The one copy
+ * of this predicate: config merging, stored-state normalisers and the
+ * OpenRouter routing blocks all import it from here.
+ * @param {unknown} value
+ * @returns {boolean}
+ */
+export function isPlainObject(value) {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
 

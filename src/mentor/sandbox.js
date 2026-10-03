@@ -15,6 +15,7 @@
 // private chat is ever built.
 
 import { buildRequest } from '../behavior/prompt.js';
+import { MINUTE_MS } from '../time.js';
 import { pickOtherProfiles } from '../behavior/turn.js';
 import { parseJsonObject, parseOutput } from '../llm/parse.js';
 import {
@@ -30,7 +31,6 @@ import {
 const IDENTITY_CALIBRATOR = Object.freeze({ ratio: 1, apply: (n) => n, observe: () => 1 });
 // The captured store ignores guild ids (reads go to the view's one guild); this only fills the argument.
 const SANDBOX_GUILD = 'sandbox';
-const MINUTE_MS = 60_000;
 // Same temperature as the live analyzer (src/memory/update.js#analyzeBatch).
 const MEMORY_TEMPERATURE = 0.3;
 

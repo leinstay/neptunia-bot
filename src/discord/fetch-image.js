@@ -16,6 +16,7 @@
 // proxy) query string is a signature, never logged, not even truncated.
 
 import { log } from '../log.js';
+import { safeLocation } from './video-sites.js';
 
 const ALLOWED_CONTENT_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
 const DEFAULT_CACHE_MAX_ENTRIES = 50;
@@ -28,16 +29,6 @@ function cacheKeyFor(url) {
     return `${parsed.origin}${parsed.pathname}`;
   } catch {
     return String(url);
-  }
-}
-
-/** `hostname/path`, no query string -- safe to log (see the header comment). */
-function safeLocation(url) {
-  try {
-    const parsed = new URL(String(url));
-    return `${parsed.hostname}${parsed.pathname}`;
-  } catch {
-    return '(unparsable url)';
   }
 }
 

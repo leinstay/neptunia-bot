@@ -19,7 +19,20 @@ import {
   isDescribable,
   selectPictures,
   discordCdnVideo,
+  mediaParts,
 } from '../src/discord/media.js';
+
+// --- mediaParts ----------------------------------------------------------------
+
+test('mediaParts: the message first, then its forwarded snapshots; none when there are none', () => {
+  const a = { attachments: [] };
+  const b = { attachments: [] };
+  const message = { id: 'm1', forwarded: [a, b] };
+  assert.deepEqual(mediaParts(message), [message, a, b]);
+  const plain = { id: 'm2' };
+  assert.deepEqual(mediaParts(plain), [plain]);
+  assert.equal(mediaParts({ id: 'm3', forwarded: 'not a list' }).length, 1);
+});
 
 // --- classifyAttachment ------------------------------------------------------
 

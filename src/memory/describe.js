@@ -73,6 +73,7 @@
 // owner's recache, src/memory/gif-recache.js) replaces it.
 
 import { createHash } from 'node:crypto';
+import { isPlainObject } from '../config.js';
 import { mediaProxyUrl } from '../discord/media.js';
 import { createImageFetcher } from '../discord/fetch-image.js';
 import { createVideoFetcher } from '../discord/fetch-video.js';
@@ -80,9 +81,11 @@ import { isDirectUrlSite, safeLocation, youtubeVideoId } from '../discord/video-
 import { TokenLimitError, DailyCapError } from '../llm/openrouter.js';
 import { clampText } from './clamp.js';
 import { classifierMediaModel, classifierVideoModel } from '../behavior/mention.js';
+import { fillPromptTemplate } from '../behavior/prompt.js';
 import { createYoutubeCheck } from './youtube-check.js';
 import { gifWatchBlocker as gifWatchBlockerOf, gifWatchCap, gifWatchPrompt } from './gif-watch.js';
 import { log } from '../log.js';
+import { dailyCounter, utcDay } from '../time.js';
 
 const MISS_TTL_MS = 60 * 60_000;
 // Only when media.descriptionChars is missing or invalid (config.json always has it).
@@ -134,13 +137,6 @@ function positiveOr(value, fallback) {
   return typeof value === 'number' && value > 0 ? value : fallback;
 }
 
-/** Fill `{{key}}` placeholders of a prompt file; an unknown key is left as it is (same rule as src/behavior/prompt.js). */
-function fillTemplate(template, values) {
-  return (template ?? '').replace(/\{\{(\w+)\}\}/g, (all, key) =>
-    Object.prototype.hasOwnProperty.call(values, key) ? String(values[key]) : all,
-  );
-}
-
 /** The cache key of one question's answer: lower-cased, whitespace-collapsed, sha1-prefixed. */
 function questionKey(itemId, question) {
   const normalised = String(question ?? '')
@@ -149,11 +145,6 @@ function questionKey(itemId, question) {
     .trim();
   const digest = createHash('sha1').update(normalised).digest('hex').slice(0, 16);
   return `video:${itemId}:q:${digest}`;
-}
-
-/** Whether `value` is a plain object (a usable OpenRouter `provider` routing block). */
-function isPlainObject(value) {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
 /** A stand-in for the persistent state when none is wired (tests, tools): the daily count lives in memory. */
@@ -206,7 +197,7 @@ export function createDescriber({
 }) {
   /** Today's UTC date as `YYYY-MM-DD` from the injected clock: the daily counters and the prompts' `{{today}}`. */
   function todayDate() {
-    return new Date(now()).toISOString().slice(0, 10);
+    return utcDay(now());
   }
 
   /**
@@ -287,7 +278,7 @@ export function createDescriber({
     try {
       completion = await llm.complete(
         [
-          { role: 'system', content: fillTemplate(promptText, { maxChars: descriptionChars, today: todayDate() }) },
+          { role: 'system', content: fillPromptTemplate(promptText, { maxChars: descriptionChars, today: todayDate() }) },
           { role: 'user', content: [{ type: 'image_url', image_url: { url: downloaded.dataUrl } }] },
         ],
         {
@@ -421,7 +412,7 @@ export function createDescriber({
     const prompt = gifWatchPrompt(hot.prompts);
     const values = { maxChars, today: todayDate() };
     if (prompt?.name === 'describe-gif') values.seconds = seconds;
-    return fillTemplate(prompt?.text, values);
+    return fillPromptTemplate(prompt?.text, values);
   }
 
   /**
@@ -641,13 +632,9 @@ export function createDescriber({
    * resets it when the day changed (same day logic as the LLM client's).
    */
   function countToday(dayKey, countKey) {
-    const today = todayDate();
-    if (state.data[dayKey] !== today) {
-      state.data[dayKey] = today;
-      state.data[countKey] = 0;
-      state.markDirty();
-    }
-    return state.data[countKey] ?? 0;
+    const { count, rolled } = dailyCounter(state.data, { dayKey, countKey }, now());
+    if (rolled) state.markDirty();
+    return count;
   }
 
   /** Today's video count (every watch and every re-watch attempt). */
@@ -837,7 +824,7 @@ export function createDescriber({
     try {
       completion = await llm.complete(
         [
-          { role: 'system', content: fillTemplate(promptText, { maxChars: summaryChars, today: todayDate() }) },
+          { role: 'system', content: fillPromptTemplate(promptText, { maxChars: summaryChars, today: todayDate() }) },
           { role: 'user', content: [videoPart(videoCfg, media)] },
         ],
         videoRequestOptions(videoCfg, media, { maxOutputTokens: videoCfg.maxOutputTokens, countAgainstDailyCap }),
@@ -1029,7 +1016,7 @@ export function createDescriber({
     try {
       completion = await llm.complete(
         [
-          { role: 'system', content: fillTemplate(promptText, { question: asked, maxChars: answerChars, today: todayDate() }) },
+          { role: 'system', content: fillPromptTemplate(promptText, { question: asked, maxChars: answerChars, today: todayDate() }) },
           { role: 'user', content: [videoPart(videoCfg, media)] },
         ],
         videoRequestOptions(videoCfg, media, { maxOutputTokens: rewatchCfg.maxOutputTokens, countAgainstDailyCap: true }),

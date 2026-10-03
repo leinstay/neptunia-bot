@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { parseEnv, applyEnv, deepMerge, readConfig, need } from '../src/config.js';
+import { parseEnv, applyEnv, deepMerge, readConfig, need, isPlainObject } from '../src/config.js';
 
 function tmpDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'nep-'));
@@ -66,6 +66,17 @@ test('applyEnv: returns the target object', () => {
   const target = {};
   const returned = applyEnv({ A: '1' }, target);
   assert.equal(returned, target);
+});
+
+test('isPlainObject: true for objects, false for null, arrays, scalars and functions', () => {
+  assert.equal(isPlainObject({}), true);
+  assert.equal(isPlainObject({ a: 1 }), true);
+  assert.equal(isPlainObject(null), false);
+  assert.equal(isPlainObject(undefined), false);
+  assert.equal(isPlainObject([]), false);
+  assert.equal(isPlainObject('x'), false);
+  assert.equal(isPlainObject(0), false);
+  assert.equal(isPlainObject(() => {}), false);
 });
 
 test('deepMerge: arrays in override fully replace arrays in base', () => {

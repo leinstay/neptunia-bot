@@ -506,9 +506,12 @@ export function stickerLabelFor(sticker, { attachedIndex = null, description = n
  * with the OUTER message's id -- the one the history, the transcript and
  * selectPictures' ordering know. Item ids stay unique: attachment ids are
  * Discord snowflakes, link ids are cache keys or built from the original
- * message id.
+ * message id. Shared with the analyzer and the GIF library, which walk the
+ * same parts.
+ * @param {object} message  A normalized (or slim buffered) message.
+ * @returns {object[]}
  */
-function mediaParts(message) {
+export function mediaParts(message) {
   return [message, ...(Array.isArray(message.forwarded) ? message.forwarded : [])];
 }
 

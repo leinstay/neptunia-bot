@@ -14,8 +14,9 @@
 
 import { createHash } from 'node:crypto';
 import { parseJsonObject } from '../llm/parse.js';
-
-const MINUTE_MS = 60_000;
+import { fillPromptTemplate } from './prompt.js';
+import { clampChars, oneLine } from '../memory/clamp.js';
+import { MINUTE_MS } from '../time.js';
 
 /** Defaults of the `variety` config block (config.json carries the same values). */
 export const VARIETY_DEFAULTS = Object.freeze({
@@ -73,19 +74,6 @@ export function varietyOn(config) {
   return config?.features?.variety !== false;
 }
 
-/** Whitespace collapsed to single spaces, so a message stays on its one numbered line. */
-function oneLine(text) {
-  return String(text ?? '')
-    .replace(/\s+/gu, ' ')
-    .trim();
-}
-
-/** `text` cut to at most `max` code points. */
-function clip(text, max) {
-  const points = [...String(text ?? '')];
-  return points.length > max ? points.slice(0, Math.max(0, max)).join('') : points.join('');
-}
-
 /** A finite number, else null. */
 function finiteOrNull(value) {
   return Number.isFinite(value) ? value : null;
@@ -109,7 +97,7 @@ function normalizeOwnLine(value) {
     channelId: value.channelId === undefined || value.channelId === null ? null : String(value.channelId),
     text,
   };
-  if (typeof value.to === 'string' && value.to.trim()) line.to = clip(value.to.trim(), STORED_CONTEXT_CHARS);
+  if (typeof value.to === 'string' && value.to.trim()) line.to = clampChars(value.to.trim(), STORED_CONTEXT_CHARS);
   return line;
 }
 
@@ -206,13 +194,6 @@ export function linesKey(lines) {
 
 // ---- the request ------------------------------------------------------------
 
-/** `{{key}}` placeholders of a prompt file filled from `values`; an unknown key is left as it is. */
-function fillTemplate(template, values) {
-  return String(template ?? '').replace(/\{\{(\w+)\}\}/g, (all, key) =>
-    Object.prototype.hasOwnProperty.call(values, key) ? String(values[key]) : all,
-  );
-}
-
 /**
  * The pass request: system = `prompt` (prompts.variety) with `{{name}}`,
  * `{{maxPatterns}}` and `{{shapeChars}}` filled, user = one `<lines>` block, the lines oldest first,
@@ -228,10 +209,10 @@ export function buildVarietyRequest({ prompt, selfName, lines, config }) {
   const list = Array.isArray(lines) ? lines : [];
   const texts = list.map((line) => oneLine(line.text));
   const rows = list.map((line, i) => {
-    const to = settings.contextChars > 0 && line.to ? oneLine(clip(oneLine(line.to), settings.contextChars)) : '';
+    const to = settings.contextChars > 0 && line.to ? oneLine(clampChars(oneLine(line.to), settings.contextChars)) : '';
     return `#${i + 1} ${texts[i]}${to ? ` (to: ${to})` : ''}`;
   });
-  const system = fillTemplate(prompt, { name: selfName ?? '', maxPatterns: settings.maxPatterns, shapeChars: settings.shapeChars });
+  const system = fillPromptTemplate(prompt, { name: selfName ?? '', maxPatterns: settings.maxPatterns, shapeChars: settings.shapeChars });
   return {
     messages: [
       { role: 'system', content: system },
@@ -268,7 +249,7 @@ function validPattern(item, haystacks, settings) {
   for (const raw of Array.isArray(item.examples) ? item.examples : []) {
     if (examples.length >= MAX_EXAMPLES) break;
     if (typeof raw !== 'string') continue;
-    const example = clip(oneLine(raw), EXAMPLE_CHARS).trim();
+    const example = clampChars(oneLine(raw), EXAMPLE_CHARS).trim();
     const lower = example.toLowerCase();
     if (!example || seen.has(lower)) continue;
     if (!haystacks.some((text) => text.includes(lower))) continue;

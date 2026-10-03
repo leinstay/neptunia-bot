@@ -5,6 +5,7 @@
 // 0..10, causes and changes on a known layer) and applies the pass rule to
 // what survives. Pure: text in, values out.
 
+import { isPlainObject } from '../config.js';
 import { parseJsonObject } from '../llm/parse.js';
 
 const MAX_LINE_CHARS = 2000;
@@ -27,7 +28,7 @@ function jsonOf(raw) {
 
 /** A plain object, or null. */
 function objectOf(value) {
-  return value && typeof value === 'object' && !Array.isArray(value) ? value : null;
+  return isPlainObject(value) ? value : null;
 }
 
 /**

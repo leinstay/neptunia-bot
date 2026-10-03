@@ -10,10 +10,7 @@
 
 import { mediaLabelFor, stickerLabelFor, stickerUrl } from './media.js';
 import { gifHandleOf } from '../memory/gifs.js';
-
-const MINUTE = 60_000;
-const HOUR = 60 * MINUTE;
-const DAY = 24 * HOUR;
+import { MINUTE_MS, HOUR_MS, DAY_MS } from '../time.js';
 
 // A language-neutral marker (memory transcript only) for a message addressed
 // to the persona, so the analyzer can weigh "how people talk TO it" apart
@@ -74,17 +71,17 @@ export function localHour(ts, timezone) {
  * @param {{lessThanMinute: string, minute: string, hour: string, day: string}} units
  */
 export function formatDuration(ms, units) {
-  if (ms < MINUTE) return units.lessThanMinute;
+  if (ms < MINUTE_MS) return units.lessThanMinute;
 
-  if (ms < HOUR) {
-    const minutes = Math.round(ms / MINUTE);
+  if (ms < HOUR_MS) {
+    const minutes = Math.round(ms / MINUTE_MS);
     if (minutes >= 60) return `1 ${units.hour}`;
     return `${minutes} ${units.minute}`;
   }
 
-  if (ms < DAY) {
-    const hours = Math.floor(ms / HOUR);
-    let minutes = Math.round((ms - hours * HOUR) / MINUTE);
+  if (ms < DAY_MS) {
+    const hours = Math.floor(ms / HOUR_MS);
+    let minutes = Math.round((ms - hours * HOUR_MS) / MINUTE_MS);
     let wholeHours = hours;
     if (minutes >= 60) {
       wholeHours += 1;
@@ -94,8 +91,8 @@ export function formatDuration(ms, units) {
     return minutes ? `${wholeHours} ${units.hour} ${minutes} ${units.minute}` : `${wholeHours} ${units.hour}`;
   }
 
-  const days = Math.floor(ms / DAY);
-  let hours = Math.round((ms - days * DAY) / HOUR);
+  const days = Math.floor(ms / DAY_MS);
+  let hours = Math.round((ms - days * DAY_MS) / HOUR_MS);
   let wholeDays = days;
   if (hours >= 24) {
     wholeDays += 1;
@@ -325,7 +322,7 @@ export function formatTranscript(messages, options) {
       const gap = message.ts - gapPrevious.ts;
       const date = formatDate(message.ts, timezone, locale);
       const dayChanged = date !== formatDate(gapPrevious.ts, timezone, locale);
-      if (gap >= gapMinutes * MINUTE) {
+      if (gap >= gapMinutes * MINUTE_MS) {
         const duration = formatDuration(gap, labels.units);
         parts.push(dayChanged ? fill(labels.transcript.gapWithDate, { duration, date }) : fill(labels.transcript.gap, { duration }));
       } else if (dayChanged) {
@@ -377,12 +374,12 @@ export function computeTempo(messages, now, trigger = null) {
   const within = (ms) => others.filter((message) => edge - message.ts <= ms && message.ts <= edge);
   const last = others.at(-1) ?? null;
   const lastOwn = [...others].reverse().find((message) => message.self) ?? null;
-  const lastHour = within(HOUR);
+  const lastHour = within(HOUR_MS);
 
   return {
-    last10min: within(10 * MINUTE).length,
+    last10min: within(10 * MINUTE_MS).length,
     lastHour: lastHour.length,
-    lastDay: within(DAY).length,
+    lastDay: within(DAY_MS).length,
     authorsLastHour: new Set(lastHour.filter((message) => !message.self).map((message) => message.authorId)).size,
     silenceMs: last ? Math.max(0, edge - last.ts) : null,
     lastIsOwn: Boolean(last?.self),
@@ -430,7 +427,7 @@ export function renderTempo(tempo, labels, thresholds) {
 
   let verdict;
   if (tempo.last10min >= liveMessages10min) verdict = t.verdictLive;
-  else if (tempo.silenceMs === null || tempo.silenceMs >= deadSilenceMinutes * MINUTE) verdict = t.verdictDead;
+  else if (tempo.silenceMs === null || tempo.silenceMs >= deadSilenceMinutes * MINUTE_MS) verdict = t.verdictDead;
   else verdict = t.verdictSlow;
   lines.push(fill(t.verdict, { verdict }));
   return lines.join('\n');

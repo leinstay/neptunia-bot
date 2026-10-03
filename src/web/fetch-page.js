@@ -21,6 +21,7 @@ import net from 'node:net';
 import { pipeline } from 'node:stream';
 import zlib from 'node:zlib';
 import { log } from '../log.js';
+import { safeLocation } from '../discord/video-sites.js';
 import { htmlToText, pageTitle, truncateText } from './readable.js';
 
 const REQUEST_HEADERS = Object.freeze({
@@ -34,16 +35,6 @@ const PLAIN_TYPE = 'text/plain';
 const DEFAULT_MAX_BYTES = 2 * 1024 * 1024;
 const DEFAULT_TIMEOUT_MS = 10_000;
 const CHARSET_SNIFF_BYTES = 2048;
-
-/** `hostname/path`, no query string -- safe to log. */
-function safeLocation(url) {
-  try {
-    const parsed = new URL(String(url));
-    return `${parsed.hostname}${parsed.pathname}`;
-  } catch {
-    return '(unparsable url)';
-  }
-}
 
 /** `type/subtype` in lowercase, parameters dropped. */
 function bareContentType(value) {

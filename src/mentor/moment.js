@@ -13,6 +13,8 @@
 // entry or an interest updated later. Everything here is pure: the base view
 // is read at call time and never changed, nothing is cached.
 
+import { utcDay } from '../time.js';
+
 const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 /** The kinds of hidden items, in the order the counts are reported. */
@@ -44,7 +46,7 @@ function isLater(value, cutoff) {
  */
 function isLaterEpisode(episode, cutoff) {
   if (timeOf(episode?.addedAt) !== null) return isLater(episode.addedAt, cutoff);
-  if (typeof episode?.date === 'string' && DAY_RE.test(episode.date)) return episode.date >= new Date(cutoff).toISOString().slice(0, 10);
+  if (typeof episode?.date === 'string' && DAY_RE.test(episode.date)) return episode.date >= utcDay(cutoff);
   return false;
 }
 

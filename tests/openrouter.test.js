@@ -4,7 +4,19 @@
 // (~1.5s) as instructed -- the backoff sleep in src is not touched.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createLlm, TokenLimitError, DailyCapError, resolveProvider, matchRoute, parseRouteKey } from '../src/llm/openrouter.js';
+import {
+  createLlm,
+  TokenLimitError,
+  DailyCapError,
+  resolveProvider,
+  matchRoute,
+  parseRouteKey,
+  RETRY_STATUS,
+  sleep,
+  openRouterHeaders,
+  apiUrl,
+  backoffMs,
+} from '../src/llm/openrouter.js';
 
 function baseConfig(overrides = {}) {
   return {
@@ -96,6 +108,26 @@ test('complete: DailyCapError once the daily cap is reached, without calling fet
     (err) => err instanceof DailyCapError,
   );
   assert.equal(calls, 0);
+});
+
+test('complete: the daily counter follows the injected clock and starts again on a new UTC day', async () => {
+  const state = fakeState();
+  state.data.llmDay = '2026-09-20';
+  state.data.llmCount = 1;
+  let nowMs = Date.UTC(2026, 8, 20, 23, 59, 0);
+  const llm = createLlm({
+    apiKey: 'k',
+    getConfig: () => baseConfig({ maxRequestsPerDay: 1 }),
+    calibrator: fakeCalibrator(),
+    state,
+    fetchImpl: async () => okResponse('x'),
+    now: () => nowMs,
+  });
+  await assert.rejects(llm.complete([{ role: 'user', content: 'hi' }]), (err) => err instanceof DailyCapError);
+  nowMs = Date.UTC(2026, 8, 21, 0, 1, 0);
+  await llm.complete([{ role: 'user', content: 'hi' }]);
+  assert.equal(state.data.llmDay, '2026-09-21');
+  assert.equal(state.data.llmCount, 1);
 });
 
 test('complete: DailyCapError carries the limit key, the used count and the cap', async () => {
@@ -1014,4 +1046,35 @@ test('complete: without any route, a role changes nothing (llm.provider, else no
   await llm.complete(msgs, { role: 'talk' });
   assert.deepEqual(bodies[0].provider, VERTEX);
   assert.equal('provider' in bodies[1], false);
+});
+
+// --- shared transport helpers (also used by src/llm/images.js) ---
+
+test('apiUrl: joins the base URL and a path with exactly one slash', () => {
+  assert.equal(apiUrl('https://example.com/v1', 'images'), 'https://example.com/v1/images');
+  assert.equal(apiUrl('https://example.com/v1//', 'chat/completions'), 'https://example.com/v1/chat/completions');
+  assert.equal(apiUrl('https://example.com/v1/', '/images'), 'https://example.com/v1/images');
+});
+
+test('openRouterHeaders: bearer key, JSON body and the neutral X-Title', () => {
+  assert.deepEqual(openRouterHeaders('k1'), {
+    Authorization: 'Bearer k1',
+    'Content-Type': 'application/json',
+    'X-Title': 'neptunia-bot',
+  });
+});
+
+test('backoffMs: 1.5 s before the first retry, doubling after that', () => {
+  assert.deepEqual([1, 2, 3, 4].map(backoffMs), [1500, 3000, 6000, 12000]);
+});
+
+test('RETRY_STATUS: timeouts, rate limits and gateway errors are retried; client errors are not', () => {
+  for (const status of [408, 429, 500, 502, 503, 504]) assert.equal(RETRY_STATUS.has(status), true, String(status));
+  for (const status of [400, 401, 403, 404]) assert.equal(RETRY_STATUS.has(status), false, String(status));
+});
+
+test('sleep: resolves after the timer', async () => {
+  const started = Date.now();
+  await sleep(5);
+  assert.ok(Date.now() - started >= 4);
 });

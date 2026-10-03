@@ -6,13 +6,9 @@
 // `users.<id>.episodes` through this module via src/memory/store.js#addEpisodes.
 
 import { clampText } from './clamp.js';
+import { utcDay } from '../time.js';
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
-
-/** Today's date in UTC, `YYYY-MM-DD` -- the fallback for an invalid/missing `date`. */
-function todayUtc(now) {
-  return new Date(now).toISOString().slice(0, 10);
-}
 
 function clampWeight(raw) {
   const n = Number.isInteger(raw) ? raw : 3;
@@ -39,7 +35,7 @@ function sanitizeEpisode(raw, now, clampTolerance) {
   const quote = typeof raw.quote === 'string' ? clampText(raw.quote, 120, { tolerance: 1 }) : '';
   const feeling = typeof raw.feeling === 'string' ? clampText(raw.feeling, 120, { tolerance: clampTolerance }) : '';
   const weight = clampWeight(raw.weight);
-  const date = typeof raw.date === 'string' && DATE_RE.test(raw.date) ? raw.date : todayUtc(now);
+  const date = typeof raw.date === 'string' && DATE_RE.test(raw.date) ? raw.date : utcDay(now);
   return { date, what, quote, feeling, weight };
 }
 

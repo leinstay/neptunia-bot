@@ -20,6 +20,10 @@
 // Identity-like short fields (an interest's `topic`, an alias `name`, a lore
 // `title`/`key`) call this with `tolerance: 1` -- a HARD limit, still cut at
 // a boundary and never inside a token, just with no overshoot allowed.
+//
+// Two blunt helpers live here too, for text that is not analyzer prose:
+// `oneLine` (whitespace collapsed, so a value stays on its one line) and
+// `clampChars` (a plain code-point cut, no boundary search).
 
 const SENTENCE_ENDERS = new Set(['.', '!', '?', '…']);
 const SENTENCE_CLOSERS = new Set(['"', "'", '’', '”', ')', ']', '»']);
@@ -157,4 +161,29 @@ export function clampText(text, limit, { tolerance } = {}) {
 
   cut = avoidTokenSplit(cut, spans);
   return stripTrailing(codePoints.slice(0, cut));
+}
+
+/**
+ * `text` with every run of whitespace collapsed to one space and trimmed, so
+ * it stays on one line. A null/undefined `text` reads as ''.
+ * @param {unknown} text
+ * @returns {string}
+ */
+export function oneLine(text) {
+  return String(text ?? '')
+    .replace(/\s+/gu, ' ')
+    .trim();
+}
+
+/**
+ * `text` cut to at most `max` code points (never inside a surrogate pair), with
+ * no boundary search; a `max` that is not a finite non-negative number leaves
+ * it whole. A null/undefined `text` reads as ''.
+ * @param {unknown} text
+ * @param {number} max
+ * @returns {string}
+ */
+export function clampChars(text, max) {
+  const value = String(text ?? '');
+  return Number.isFinite(max) && max >= 0 ? [...value].slice(0, Math.floor(max)).join('') : value;
 }

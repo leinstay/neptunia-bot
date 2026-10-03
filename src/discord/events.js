@@ -25,11 +25,12 @@ import {
 import { fill, formatTranscript, renderTranscript } from './format.js';
 import { topByRank } from '../memory/ranking.js';
 import { addPending, isExpired, popOldest, requeuePending } from '../behavior/pending.js';
-import { between } from '../behavior/turn.js';
+import { between } from '../behavior/random.js';
 import { fillPromptTemplate } from '../behavior/prompt.js';
 import { privateGate } from '../behavior/private.js';
 import { limitNotice, isLimitNotice } from '../behavior/limits.js';
 import { log } from '../log.js';
+import { utcDay } from '../time.js';
 
 // The most pictures one observed message warms the describer cache for --
 // this runs per real-time message, not per batch, so it stays cheap.
@@ -216,7 +217,7 @@ export function createMessageHandler({
 
   /** Take up to `wanted` of the member's remaining daily prefill slots: `{ key, day, granted }`. */
   function reservePrefill(key, wanted, perUser) {
-    const day = new Date(now()).toISOString().slice(0, 10);
+    const day = utcDay(now());
     if (day !== prefillDay) {
       prefillDay = day;
       prefillCounts.clear();
@@ -573,11 +574,6 @@ export function createMessageHandler({
   // numbers (labels.limits.notice), so the requester knows it was a limit and
   // not silence in character. Spontaneous turns never come through here.
 
-  /** Today's UTC date, the day key the store uses for the private reply counts. */
-  function todayUtc() {
-    return new Date(now()).toISOString().slice(0, 10);
-  }
-
   /** The dry-run mirror (`bot.dryRunChannelId`, read now); failures are logged and swallowed. */
   async function mirrorDryRun(header, body) {
     const dryRunChannelId = hot.config.bot?.dryRunChannelId || '';
@@ -629,7 +625,7 @@ export function createMessageHandler({
    */
   async function afterPrivateTurn(channel, guildId, trigger, result) {
     if (result?.outcome === 'spoke' || result?.outcome === 'skip') {
-      store.bumpPrivateReplies(guildId, trigger.authorId, todayUtc());
+      store.bumpPrivateReplies(guildId, trigger.authorId, utcDay(now()));
     }
     await announceRefusal(channel, trigger, result);
   }
@@ -647,7 +643,7 @@ export function createMessageHandler({
     const profile = store.getUser(guildId, authorId);
     const isOwner = (config.bot?.owners ?? []).map(String).includes(String(authorId));
     const replies = store.getPrivate(guildId, authorId)?.replies ?? null;
-    const today = todayUtc();
+    const today = utcDay(now());
     const input = { config, profile, isOwner, replies, today };
 
     const guild = client.guilds?.cache?.get(guildId);

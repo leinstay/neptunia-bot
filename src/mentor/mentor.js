@@ -45,13 +45,14 @@
 // system prompt: it travels as the `<signs>` block of every mentor request,
 // right after `<samples>`, and is simply left out when missing or empty.
 
-import { fillPromptTemplate, learnedConfig, learnedText } from '../behavior/prompt.js';
+import { block, fillPromptTemplate, learnedConfig, learnedText } from '../behavior/prompt.js';
 import { classifierTextModel } from '../behavior/mention.js';
 import { buildVarietyRequest, parseVariety, selectOwnLines, varietyOn, varietySettings } from '../behavior/variety.js';
 import { fill, formatTranscript, renderTranscript } from '../discord/format.js';
 import { TokenLimitError } from '../llm/openrouter.js';
 import { estimateMessages, estimateTokens } from '../llm/tokens.js';
 import { log } from '../log.js';
+import { DAY_MS } from '../time.js';
 import { anchorSituations, replayMedia, resolveAnchor } from './anchor.js';
 import { MentorBudgetError } from './budget.js';
 import { parseDiagnosis, parseScores, parseSituations, verdict } from './judge.js';
@@ -60,7 +61,6 @@ import { answerFacts, repeatedPhrases, sampleLines, styleProfile } from './refer
 import { renderCard, renderCheckCard, renderCheckFile, renderFile } from './report.js';
 import { answerMemory, answerReply, liveView, situationHistory } from './sandbox.js';
 
-const DAY_MS = 86_400_000;
 const ERROR_MAX = 200;
 /** Tokens kept free in a mentor request for the tags and separators around a fitted transcript. */
 const FIT_SLACK = 50;
@@ -73,11 +73,6 @@ const PROMPTS = {
   reply: { situations: 'mentor-situations', score: 'mentor-score' },
   memory: { situations: 'mentor-situations-memory', score: 'mentor-score-memory' },
 };
-
-/** Wrap `body` in `<tag>`; '' for an empty body (the same helper the request builders use). */
-function block(tag, body) {
-  return body ? `<${tag}>\n${body}\n</${tag}>` : '';
-}
 
 /** A positive number from the config, else `fallback` (the config.json default). */
 function positive(value, fallback) {
@@ -348,7 +343,7 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
           videoSites: config.media?.video?.sites,
         });
       } catch (err) {
-        log.warn('mentor: a reference channel cannot be read', { channel: id, errorName: err?.name });
+        log.warn('mentor: a reference channel cannot be read', { channel: id, name: err?.name });
         continue;
       }
       // fetchHistoryWindow logs a failed page and returns [] rather than throwing.
@@ -616,7 +611,7 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
       });
     } catch (err) {
       if (err instanceof RunEnd) throw err;
-      log.warn('mentor: variety pass failed', { caseId, n: record.n, lines: lines.length, errorName: err?.name, statusCode: err?.statusCode ?? null });
+      log.warn('mentor: variety pass failed', { caseId, n: record.n, lines: lines.length, name: err?.name, status: err?.statusCode ?? null });
       return null;
     }
     const parsed = parseVariety(text, request.texts, view.config);
@@ -930,7 +925,7 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
       measured = { reference, feedback, self, prepared: done.prepared };
     } catch (err) {
       const end = endOf(err);
-      if (!(err instanceof RunEnd)) log.warn('mentor: the run failed', { caseId: item.id, errorName: err?.name, statusCode: err?.statusCode });
+      if (!(err instanceof RunEnd)) log.warn('mentor: the run failed', { caseId: item.id, name: err?.name, status: err?.statusCode });
       if (end.kind === 'stopped') run.stopped = end.reason;
       else run.error = end.reason;
     }
@@ -952,7 +947,7 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
     try {
       saved = cases.saveRun(guildId, run);
     } catch (err) {
-      log.error('mentor: the run could not be saved', { caseId: item.id, errorName: err?.name });
+      log.error('mentor: the run could not be saved', { caseId: item.id, name: err?.name });
     }
     const answers = run.situations.reduce((n, s) => n + s.answers.length, 0);
     log.info('mentor: run finished', {
@@ -996,7 +991,7 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
         allowedMentions: { parse: [] },
       });
     } catch (err) {
-      log.warn('mentor: the report could not be posted', { ...meta, errorName: err?.name, statusCode: err?.statusCode });
+      log.warn('mentor: the report could not be posted', { ...meta, name: err?.name, status: err?.statusCode });
     }
   }
 
@@ -1006,7 +1001,7 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
       try {
         return await work();
       } catch (err) {
-        log.error('mentor: unexpected failure', { kind: ctx.kind, errorName: err?.name });
+        log.error('mentor: unexpected failure', { kind: ctx.kind, error: err });
         return fallback;
       } finally {
         if (current === ctx) current = null;

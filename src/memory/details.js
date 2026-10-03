@@ -15,9 +15,9 @@
 import { normalizeTopic } from './interests.js';
 import { topByRank } from './ranking.js';
 import { clampText } from './clamp.js';
+import { HOUR_MS } from '../time.js';
 
 const DEFAULT_CONFIRM_GAP_HOURS = 12;
-const HOUR_MS = 3_600_000;
 
 /** Earlier of two ISO date strings; a missing one never wins. */
 function minIso(a, b) {

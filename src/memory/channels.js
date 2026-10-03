@@ -5,14 +5,9 @@
 // `now` and the channel record are always injected.
 
 import { fill, formatDuration } from '../discord/format.js';
-
-const DAY_MS = 24 * 60 * 60 * 1000;
+import { DAY_MS, utcDay } from '../time.js';
 
 const DEFAULT_ACTIVITY_THRESHOLDS = { liveMessagesPerDay: 20, deadAfterDays: 7 };
-
-function utcDateKey(ts) {
-  return new Date(ts).toISOString().slice(0, 10);
-}
 
 /**
  * How alive a channel is, from stored message statistics only.
@@ -31,8 +26,8 @@ export function channelActivity(channel, now, cfg) {
   const deadAfterDays = cfg?.deadAfterDays ?? DEFAULT_ACTIVITY_THRESHOLDS.deadAfterDays;
   const days = channel?.days ?? {};
 
-  const todayKey = utcDateKey(now);
-  const yesterdayKey = utcDateKey(now - DAY_MS);
+  const todayKey = utcDay(now);
+  const yesterdayKey = utcDay(now - DAY_MS);
   const recent = (days[todayKey] ?? 0) + (days[yesterdayKey] ?? 0);
   if (recent >= liveMessagesPerDay) return 'live';
 

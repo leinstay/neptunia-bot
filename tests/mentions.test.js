@@ -2,7 +2,7 @@
 // id-token round trip). Pure, no I/O.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { toTokens, fromTokens, occursAsWholeWord } from '../src/memory/mentions.js';
+import { ID_DIGITS, isWordChar, toTokens, fromTokens, occursAsWholeWord } from '../src/memory/mentions.js';
 
 const ID_A = '123456789012345678';
 const ID_B = '223456789012345678';
@@ -201,4 +201,23 @@ test('occursAsWholeWord: matches a whole word, case must already match (caller l
 
 test('occursAsWholeWord: an empty needle never matches', () => {
   assert.equal(occursAsWholeWord('anything', ''), false);
+});
+
+test('occursAsWholeWord: an occurrence inside a longer word does not hide a later whole one', () => {
+  assert.equal(occursAsWholeWord('vertexes and vertex', 'vertex'), true);
+});
+
+// ---- isWordChar / ID_DIGITS ---------------------------------------------------------
+
+test('isWordChar: letters, digits and underscore in any script; punctuation, space and undefined are not', () => {
+  for (const ch of ['a', 'é', 'λ', '7', '_']) assert.equal(isWordChar(ch), true, ch);
+  for (const ch of [' ', ',', '-', '@', undefined]) assert.equal(isWordChar(ch), false, String(ch));
+});
+
+test('ID_DIGITS: a Discord id of 17 to 20 digits, as a regex source', () => {
+  const whole = new RegExp(`^${ID_DIGITS}$`);
+  assert.equal(whole.test('1'.repeat(17)), true);
+  assert.equal(whole.test('1'.repeat(20)), true);
+  assert.equal(whole.test('1'.repeat(16)), false);
+  assert.equal(whole.test('1'.repeat(21)), false);
 });

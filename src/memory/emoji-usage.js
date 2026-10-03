@@ -6,11 +6,8 @@
 // the shared one of src/memory/ranking.js: `count` is the weight, `last` (the
 // ts of the latest use) drives the decay.
 
+import { isPlainObject } from '../config.js';
 import { sortByRank } from './ranking.js';
-
-function isPlainObject(value) {
-  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
-}
 
 /**
  * A stored `emojiUsage` map made safe to read: anything but a plain object

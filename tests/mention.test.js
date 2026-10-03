@@ -92,6 +92,23 @@ test('detectTrigger: a name at the very start or end of the message still matche
   assert.equal(start, 'name');
 });
 
+test('detectTrigger: a whole-word name after the same name inside a longer word still matches', () => {
+  const kind = detectTrigger({
+    mentionsSelf: false,
+    repliesToSelf: false,
+    content: 'νεπτούνιαπου και νεπτούνια',
+    nameTriggers: NAME_TRIGGERS,
+  });
+  assert.equal(kind, 'name');
+});
+
+test('detectTrigger: an empty name trigger matches nothing, an attachment-only message included', () => {
+  for (const content of ['', 'απλή κουβέντα']) {
+    const kind = detectTrigger({ mentionsSelf: false, repliesToSelf: false, content, nameTriggers: [''] });
+    assert.equal(kind, null, `content "${content}"`);
+  }
+});
+
 // --- strippedLength -----------------------------------------------------------
 
 test('strippedLength: a bare @name mention leaves nothing', () => {

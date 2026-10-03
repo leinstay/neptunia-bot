@@ -7,6 +7,11 @@
 // The counter lives in state.json (`mentorDay` / `mentorTokens`) and resets on
 // a new UTC day. Pure apart from the injected `state`, `getConfig` and `now`.
 
+import { bumpDaily, dailyCounter } from '../time.js';
+
+/** The state.json fields of the daily token counter. */
+const MENTOR_DAILY = { dayKey: 'mentorDay', countKey: 'mentorTokens' };
+
 /** A finite, non-negative number, or 0. */
 function count(value) {
   return Number.isFinite(value) && value > 0 ? value : 0;
@@ -65,18 +70,13 @@ export function createMentorBudget({ state, getConfig, now = Date.now }) {
 
   /** Today's UTC day; a new day starts the counter from zero. */
   function openDay() {
-    const day = new Date(now()).toISOString().slice(0, 10);
-    if (state.data.mentorDay !== day) {
-      state.data.mentorDay = day;
-      state.data.mentorTokens = 0;
-      state.markDirty();
-    }
-    return day;
+    const { day, count: spent, rolled } = dailyCounter(state.data, MENTOR_DAILY, now());
+    if (rolled) state.markDirty();
+    return { day, spent };
   }
 
   function used() {
-    openDay();
-    return count(state.data.mentorTokens);
+    return openDay().spent;
   }
 
   function left() {
@@ -89,14 +89,13 @@ export function createMentorBudget({ state, getConfig, now = Date.now }) {
 
   function charge(usage, fallbackEstimate) {
     const amount = hasUsage(usage) ? weightedTokens(usage, mentorConfig()) : Math.ceil(count(fallbackEstimate));
-    state.data.mentorTokens = used() + amount;
+    bumpDaily(state.data, MENTOR_DAILY, now(), amount);
     state.markDirty();
     return amount;
   }
 
   function snapshot() {
-    const day = openDay();
-    const spent = used();
+    const { day, spent } = openDay();
     const limit = cap();
     return { day, used: spent, cap: limit, left: Math.max(0, limit - spent) };
   }

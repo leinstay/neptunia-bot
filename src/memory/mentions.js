@@ -14,9 +14,21 @@
 // Pure, no discord.js dependency: `isKnownId`/`nameOf`/`namesOf` are injected
 // so the caller decides what "known" means (an author of the batch, an
 // existing stored profile, ...) and where a display name comes from.
+//
+// It also owns the two text primitives those conversions rest on and other
+// modules share: `ID_DIGITS` (the id range every id pattern is built from) and
+// the whole-word test (`isWordChar`, `occursAsWholeWord`) used by name
+// triggers, lore keys and the `<people>` name scan.
 
-const TOKEN_RE = /<@(\d{17,20})>/g;
-const ID_MARKER_RE = /\(id:(\d{17,20})\)/g;
+/**
+ * The digits of a Discord member id, as a regex source: the one id range every
+ * pattern that reads an id out of text is built from (`<@id>` tokens,
+ * `(id:...)` markers, a taught item's `from`, a mentor message reference).
+ */
+export const ID_DIGITS = '\\d{17,20}';
+
+const TOKEN_RE = new RegExp(`<@(${ID_DIGITS})>`, 'g');
+const ID_MARKER_RE = new RegExp(`\\(id:(${ID_DIGITS})\\)`, 'g');
 
 /**
  * How much of `before` (the text immediately preceding an `(id:...)` marker)
@@ -139,10 +151,27 @@ export function fromTokens(text, nameOf, mode) {
   });
 }
 
-/** Whether `needleLower` occurs in `haystackLower` as a whole word/phrase (Unicode-aware boundaries). */
+/**
+ * Whether `ch` is a word character: a letter, a digit or an underscore, in any
+ * script. `undefined` (before the start or past the end of a string) is not.
+ * @param {string|undefined} ch
+ * @returns {boolean}
+ */
+export function isWordChar(ch) {
+  return ch !== undefined && /[\p{L}\p{N}_]/u.test(ch);
+}
+
+/**
+ * Whether `needleLower` occurs in `haystackLower` as a whole word/phrase
+ * (Unicode-aware boundaries, see `isWordChar`). Every occurrence is tried, so
+ * one inside a longer word does not hide a later whole one; an empty needle
+ * never occurs.
+ * @param {string} haystackLower
+ * @param {string} needleLower
+ * @returns {boolean}
+ */
 export function occursAsWholeWord(haystackLower, needleLower) {
   if (!needleLower) return false;
-  const isWordChar = (ch) => ch !== undefined && /[\p{L}\p{N}_]/u.test(ch);
   let from = 0;
   for (;;) {
     const at = haystackLower.indexOf(needleLower, from);

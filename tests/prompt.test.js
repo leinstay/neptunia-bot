@@ -4,7 +4,7 @@
 // the prompt contract.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildDrawPrompt, buildRequest, renderProfile } from '../src/behavior/prompt.js';
+import { block, buildDrawPrompt, buildRequest, renderProfile, fillPromptTemplate } from '../src/behavior/prompt.js';
 import { estimateTokens } from '../src/llm/tokens.js';
 import { fill } from '../src/discord/format.js';
 import { labels } from './fixtures/labels.js';
@@ -1868,6 +1868,31 @@ const DRAW_PROMPTS = {
   draw: 'Drawing for {{name}}.\n\n## Look\n\n{{appearance}}\n\n## Request\n\n{{request}}\n',
   appearance: '{{name}}: short hair, green scarf.',
 };
+
+test('block: wraps a body in its tag on lines of their own; an empty body is no block', () => {
+  assert.equal(block('rules', 'one\ntwo'), '<rules>\none\ntwo\n</rules>');
+  assert.equal(block('rules', ''), '');
+  assert.equal(block('rules', undefined), '');
+});
+
+test('fillPromptTemplate: a present non-null value fills its placeholder as a string', () => {
+  assert.equal(fillPromptTemplate('{{name}} has {{n}} of {{max}} ({{off}}, {{empty}})', { name: 'Éla', n: 3, max: 0, off: false, empty: '' }), 'Éla has 3 of 0 (false, )');
+});
+
+test('fillPromptTemplate: an absent, null or undefined key leaves its placeholder untouched', () => {
+  assert.equal(fillPromptTemplate('{{a}} {{b}} {{c}} {{d}}', { a: null, b: undefined, d: 'x' }), '{{a}} {{b}} {{c}} x');
+});
+
+test('fillPromptTemplate: inherited object keys are not values', () => {
+  assert.equal(fillPromptTemplate('{{constructor}} {{toString}}', {}), '{{constructor}} {{toString}}');
+});
+
+test('fillPromptTemplate: a missing template reads as empty; every occurrence is filled', () => {
+  assert.equal(fillPromptTemplate(undefined, { a: 1 }), '');
+  assert.equal(fillPromptTemplate(null, { a: 1 }), '');
+  assert.equal(fillPromptTemplate('{{a}}-{{a}}', { a: 'λ' }), 'λ-λ');
+  assert.equal(fillPromptTemplate('{ a } {{ a }} {a}', { a: 1 }), '{ a } {{ a }} {a}');
+});
 
 test('buildDrawPrompt: fills name and request and blanks appearance for a non-self picture', () => {
   const text = buildDrawPrompt({ prompts: DRAW_PROMPTS, selfName: 'Nept', request: 'a cat on a roof', self: false });

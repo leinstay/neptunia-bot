@@ -11,7 +11,7 @@
 // shown or what survives an eviction goes through the SAME function, so a
 // history backfill and the live bot agree on what matters.
 
-const DAY_MS = 86_400_000;
+import { DAY_MS } from '../time.js';
 
 /** `lastSeen`, falling back to `firstSeen`, else the epoch (0) -- see
  * `rank` below. An unparsable date string is treated the same as a missing

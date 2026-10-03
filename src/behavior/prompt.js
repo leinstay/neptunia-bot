@@ -29,14 +29,22 @@ import { sortEpisodesForDisplay } from '../memory/episodes.js';
 import { matchLore } from '../memory/lore.js';
 import { channelActivity, renderChannel } from '../memory/channels.js';
 import { selectPictures, mediaProxyUrl } from '../discord/media.js';
-import { fromTokens, occursAsWholeWord } from '../memory/mentions.js';
+import { ID_DIGITS, fromTokens, isWordChar, occursAsWholeWord } from '../memory/mentions.js';
 import { mergeProfiles } from './private.js';
 import { renderWorn } from './variety.js';
 import { gifWatchBlocker } from '../memory/gif-watch.js';
 
 const TAG_OVERHEAD = 60;
 
-function block(tag, body) {
+/**
+ * `body` wrapped in `<tag>` ... `</tag>` on lines of their own; '' for an
+ * empty body, so a block with nothing to say drops out of a request. The one
+ * copy: every request builder (chat, analyzer, warm-up, mentor) uses it.
+ * @param {string} tag
+ * @param {string} body
+ * @returns {string}
+ */
+export function block(tag, body) {
   return body ? `<${tag}>\n${body}\n</${tag}>` : '';
 }
 
@@ -379,10 +387,13 @@ function serverItems(channels, currentChannelId, neighborChannelIds, history, no
   );
 }
 
+/** A stored `from`: a `<@id>`/`<@!id>` token or a bare id, in the shared id range. */
+const TEACHER_ID_RE = new RegExp(`^(?:<@!?(${ID_DIGITS})>|(${ID_DIGITS}))$`);
+
 /** The member id inside a stored `from` (`<@id>`/`<@!id>`, or a bare id), or null. */
 function teacherId(from) {
   if (typeof from !== 'string') return null;
-  const match = from.trim().match(/^(?:<@!?(\d+)>|(\d+))$/);
+  const match = TEACHER_ID_RE.exec(from.trim());
   return match ? (match[1] ?? match[2]) : null;
 }
 
@@ -584,12 +595,19 @@ function assembleUser({ now, timezone, labels, sensesText, kept, tempoText, task
 /**
  * Fill the double-brace `{{key}}` placeholders of a prompt file (the prompt
  * contract's form; labels.json uses single braces, see fill() in
- * src/discord/format.js). An unknown key is left untouched.
- * @param {string} template
- * @param {object} values
+ * src/discord/format.js). The one `{{key}}` filler of the codebase: a key
+ * present in `values` (an own property) with a non-null value is replaced by
+ * `String(value)`; a key that is absent, null or undefined leaves its
+ * placeholder untouched. A missing template reads as ''.
+ * @param {string|null|undefined} template
+ * @param {object} [values]
+ * @returns {string}
  */
 export function fillPromptTemplate(template, values) {
-  return (template ?? '').replace(/\{\{(\w+)\}\}/g, (all, key) => values[key] ?? all);
+  const source = values ?? {};
+  return String(template ?? '').replace(/\{\{(\w+)\}\}/g, (all, key) =>
+    Object.hasOwn(source, key) && source[key] != null ? String(source[key]) : all,
+  );
 }
 
 /**
@@ -733,13 +751,6 @@ function renderSenses(
 }
 
 const ASKED_ABOUT_SCAN_MESSAGES = 5;
-
-/** Whether `ch` is a letter/digit/underscore (Unicode-aware) -- same word-char
- * notion as `occursAsWholeWord` (src/memory/mentions.js), duplicated locally
- * so `nameOccurs` below stays a pure, single-purpose function. */
-function isWordChar(ch) {
-  return ch !== undefined && /[\p{L}\p{N}_]/u.test(ch);
-}
 
 /**
  * Whether `nameLower` (already lower-cased) is "named" inside `haystackLower`

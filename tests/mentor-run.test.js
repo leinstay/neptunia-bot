@@ -1312,6 +1312,8 @@ test('run: a configured channel that cannot be fetched still logs a warning', ()
       assert.equal(warned.length, 1);
       assert.equal(warned[0].level, 'warn');
       assert.equal(warned[0].caseId, item.id);
+      assert.equal(warned[0].name, 'Error');
+      assert.equal('errorName' in warned[0], false);
       assert.equal(logs.some((l) => l.msg === 'mentor: report saved'), false);
     },
   ));

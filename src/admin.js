@@ -46,6 +46,8 @@ import { matchRoute, resolveProvider } from './llm/openrouter.js';
 import { anchorMax, checkCaseText } from './mentor/cases.js';
 import { renderCard, renderFile, renderLastRun } from './mentor/report.js';
 import { log } from './log.js';
+import { clampChars } from './memory/clamp.js';
+import { utcDay } from './time.js';
 
 /** `/nep access grant/revoke`'s command keys that ONLY read — everything else (including every
  * group and `*`) is treated as opening a write command, and gets the "changes memory or config"
@@ -474,15 +476,6 @@ function writeLocalConfig(localPath, value) {
   fs.writeFileSync(localPath, `${JSON.stringify(value, null, 2)}\n`);
 }
 
-// The next two mirror src/behavior/turn.js's private helpers of the same name,
-// so `/nep draw` builds and names a picture exactly as a turn does.
-
-/** `text` cut to at most `max` code points; a non-number `max` leaves it whole. */
-function clampChars(text, max) {
-  const value = String(text ?? '');
-  return Number.isFinite(max) && max >= 0 ? [...value].slice(0, Math.floor(max)).join('') : value;
-}
-
 /** The oldest id of a page of messages, by snowflake order (the next page's `before`). */
 function oldestMessageId(batch) {
   let oldest = batch[batch.length - 1].id;
@@ -495,6 +488,9 @@ function oldestMessageId(batch) {
   }
   return oldest;
 }
+
+// Mirrors src/behavior/turn.js's private helper of the same name, so `/nep draw`
+// names a picture exactly as a turn does.
 
 /** Upload file name for a generated picture: `image/jpeg` -> `image.jpg`, else `image.<subtype>`. */
 function imageFileName(mediaType) {
@@ -877,7 +873,7 @@ export function createAdmin({
     }
 
     // GIF watches have their own daily cap (media.gif.maxPerDay), apart from the video one.
-    const gifWatches = gifWatchesToday(data, cfg, new Date().toISOString().slice(0, 10));
+    const gifWatches = gifWatchesToday(data, cfg, utcDay(Date.now()));
     lines.push(`gif watches today: ${gifWatches.used}/${gifWatches.cap}`);
 
     if (warmup && typeof warmup.summary === 'function') {
@@ -1136,7 +1132,7 @@ export function createAdmin({
 
   /** `YYYY-MM-DD` for an epoch-ms channel timestamp (`firstMessageAt`/`lastMessageAt`), or `-` when missing. */
   function channelDate(ts) {
-    return Number.isFinite(ts) ? new Date(ts).toISOString().slice(0, 10) : '-';
+    return Number.isFinite(ts) ? utcDay(ts) : '-';
   }
 
   /** A channel's stored `topWriters` (`{ id, count }[]`) resolved to current stored names, comma
@@ -1377,7 +1373,7 @@ export function createAdmin({
     const effective = effectiveAffinity(publicProfile?.affinity, privateAffinity);
     const privateReason = resolve(privateAffinity.reason);
 
-    const today = new Date().toISOString().slice(0, 10);
+    const today = utcDay(Date.now());
     const replies = priv.replies?.day === today && Number.isFinite(priv.replies.count) ? priv.replies.count : 0;
     const cap = isOwner(userId) ? privateCfg.maxPerOwnerPerDay : privateCfg.maxPerUserPerDay;
     const bufferSize = Array.isArray(priv.buffer) ? priv.buffer.length : 0;
@@ -2248,7 +2244,7 @@ async function cmdPing(args) {
 
   /** `YYYY-MM-DD`, or `-` when `ts` is not a finite timestamp. */
   function warmupDate(ts) {
-    return Number.isFinite(ts) ? new Date(ts).toISOString().slice(0, 10) : '-';
+    return Number.isFinite(ts) ? utcDay(ts) : '-';
   }
 
   function formatWarmupPeople(report) {
@@ -2861,7 +2857,7 @@ async function cmdPing(args) {
     const running = gifBackfill?.isRunning?.() ? ' (running now)' : '';
     const backfill = stamp?.at ? `${stamp.at}, ${stamp.channels} channels, ${stamp.messages} messages` : 'never';
     const data = store.state.data;
-    const today = new Date().toISOString().slice(0, 10);
+    const today = utcDay(Date.now());
     const postedToday = data.gifDay === today && Number.isFinite(data.gifCount) ? data.gifCount : 0;
     const cap = hot.config?.gifs?.maxPerDay;
     const watches = gifWatchesToday(data, hot.config, today);

@@ -26,6 +26,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { log } from '../log.js';
+import { utcDay } from '../time.js';
 import { emptyAffinity, applyDelta, decayAffinity } from './affinity.js';
 import { mergeEpisodes } from './episodes.js';
 import { upsertLore } from './lore.js';
@@ -1158,7 +1159,7 @@ export function createStore({ dataDir }) {
       channel.messageCount += 1;
       channel.firstMessageAt = channel.firstMessageAt === null ? ts : Math.min(channel.firstMessageAt, ts);
       channel.lastMessageAt = channel.lastMessageAt === null ? ts : Math.max(channel.lastMessageAt, ts);
-      const dateKey = new Date(ts).toISOString().slice(0, 10);
+      const dateKey = utcDay(ts);
       channel.days[dateKey] = (channel.days[dateKey] ?? 0) + 1;
       trimDays(channel.days, 30);
       if (authorId !== null && authorId !== undefined) channel.topWriters = bumpTopWriters(channel.topWriters, authorId);

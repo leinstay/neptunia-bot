@@ -11,26 +11,63 @@
 // applies, with no exception.
 
 import { estimateMessages } from './tokens.js';
+import { isPlainObject } from '../config.js';
+import { bumpDaily, dailyCounter } from '../time.js';
 import { log } from '../log.js';
 
-const RETRY_STATUS = new Set([408, 429, 500, 502, 503, 504]);
+// ---- transport shared with the images client (src/llm/images.js) ----------
 
-function sleep(ms) {
+/** HTTP statuses worth a retry: timeouts, rate limits and gateway errors. */
+export const RETRY_STATUS = new Set([408, 429, 500, 502, 503, 504]);
+
+/**
+ * Resolve after `ms` milliseconds.
+ * @param {number} ms
+ * @returns {Promise<void>}
+ */
+export function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-/** `${baseUrl}/chat/completions`, tolerating a trailing slash on `baseUrl`. */
-function chatCompletionsUrl(baseUrl) {
-  return `${String(baseUrl).replace(/\/+$/, '')}/chat/completions`;
+/**
+ * The wait before retry number `attempt` (1-based): 1.5 s, then doubling.
+ * @param {number} attempt
+ * @returns {number}
+ */
+export function backoffMs(attempt) {
+  return 1500 * 2 ** (attempt - 1);
 }
+
+/**
+ * The headers of an OpenRouter POST: the bearer key, a JSON body and the
+ * neutral app title (never a character name).
+ * @param {string} apiKey
+ * @returns {Record<string, string>}
+ */
+export function openRouterHeaders(apiKey) {
+  return {
+    Authorization: `Bearer ${apiKey}`,
+    'Content-Type': 'application/json',
+    'X-Title': 'neptunia-bot',
+  };
+}
+
+/**
+ * `${baseUrl}/${path}`, tolerating trailing slashes on `baseUrl` and leading
+ * ones on `path`.
+ * @param {string} baseUrl
+ * @param {string} path  E.g. `chat/completions`, `images`.
+ * @returns {string}
+ */
+export function apiUrl(baseUrl, path) {
+  return `${String(baseUrl).replace(/\/+$/, '')}/${String(path).replace(/^\/+/, '')}`;
+}
+
+/** The state.json fields of the daily request counter. */
+const LLM_DAILY = { dayKey: 'llmDay', countKey: 'llmCount' };
 
 export class TokenLimitError extends Error {}
 export class DailyCapError extends Error {}
-
-/** A plain object: the only shape sent as OpenRouter provider routing. */
-function isRouting(value) {
-  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
-}
 
 /**
  * One `llm.providerByModel` key split into its model prefix and its role:
@@ -58,12 +95,12 @@ export function parseRouteKey(key) {
  * @returns {{ key: string, prefix: string, role: string|null, value: object }|null}
  */
 export function matchRoute(model, byModel, role) {
-  if (typeof model !== 'string' || !isRouting(byModel)) return null;
+  if (typeof model !== 'string' || !isPlainObject(byModel)) return null;
   const wanted = typeof role === 'string' && role ? role : null;
   let bestRole = null;
   let bestAny = null;
   for (const [key, value] of Object.entries(byModel)) {
-    if (!isRouting(value)) continue;
+    if (!isPlainObject(value)) continue;
     const parsed = parseRouteKey(key);
     if (!model.startsWith(parsed.prefix)) continue;
     const entry = { key, prefix: parsed.prefix, role: parsed.role, value };
@@ -91,10 +128,10 @@ export function matchRoute(model, byModel, role) {
  * @returns {object|undefined}
  */
 export function resolveProvider(model, { override, byModel, fallback, role } = {}) {
-  if (isRouting(override)) return override;
+  if (isPlainObject(override)) return override;
   const route = matchRoute(model, byModel, role);
   if (route) return route.value;
-  return isRouting(fallback) ? fallback : undefined;
+  return isPlainObject(fallback) ? fallback : undefined;
 }
 
 /**
@@ -104,19 +141,17 @@ export function resolveProvider(model, { override, byModel, fallback, role } = {
  * @param {object} deps.calibrator        From createCalibrator().
  * @param {object} deps.state             Persistent state with `llmDay` / `llmCount` fields.
  * @param {typeof fetch} [deps.fetchImpl]
+ * @param {() => number} [deps.now]       Clock in ms, for the day rollover.
  */
-export function createLlm({ apiKey, getConfig, calibrator, state, fetchImpl = fetch }) {
+export function createLlm({ apiKey, getConfig, calibrator, state, fetchImpl = fetch, now = Date.now }) {
   function countRequest(cap) {
-    const today = new Date().toISOString().slice(0, 10);
-    if (state.data.llmDay !== today) {
-      state.data.llmDay = today;
-      state.data.llmCount = 0;
-    }
-    if (state.data.llmCount >= cap) {
+    const nowMs = now();
+    const { count } = dailyCounter(state.data, LLM_DAILY, nowMs);
+    if (count >= cap) {
       const err = new DailyCapError(`daily LLM request cap reached (${cap})`);
-      throw Object.assign(err, { key: 'llm.maxRequestsPerDay', used: state.data.llmCount, cap });
+      throw Object.assign(err, { key: 'llm.maxRequestsPerDay', used: count, cap });
     }
-    state.data.llmCount += 1;
+    bumpDaily(state.data, LLM_DAILY, nowMs);
     state.markDirty();
   }
 
@@ -214,22 +249,18 @@ export function createLlm({ apiKey, getConfig, calibrator, state, fetchImpl = fe
       role: options.role,
     });
     if (provider) body.provider = provider;
-    if (isRouting(options.reasoning)) body.reasoning = options.reasoning;
+    if (isPlainObject(options.reasoning)) body.reasoning = options.reasoning;
 
     let lastError;
     for (let attempt = 0; attempt <= cfg.retries; attempt += 1) {
-      if (attempt > 0) await sleep(1500 * 2 ** (attempt - 1));
+      if (attempt > 0) await sleep(backoffMs(attempt));
       if (options.signal?.aborted) throw lastError ?? options.signal.reason ?? new Error('request aborted');
       try {
         const timeoutSignal = AbortSignal.timeout(options.timeoutMs ?? cfg.timeoutMs);
         const signal = options.signal ? AbortSignal.any([options.signal, timeoutSignal]) : timeoutSignal;
-        const response = await fetchImpl(chatCompletionsUrl(cfg.baseUrl), {
+        const response = await fetchImpl(apiUrl(cfg.baseUrl, 'chat/completions'), {
           method: 'POST',
-          headers: {
-            Authorization: `Bearer ${apiKey}`,
-            'Content-Type': 'application/json',
-            'X-Title': 'neptunia-bot',
-          },
+          headers: openRouterHeaders(apiKey),
           body: JSON.stringify(body),
           signal,
         });

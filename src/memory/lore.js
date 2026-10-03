@@ -7,6 +7,7 @@
 // analyzer").
 
 import { clampText } from './clamp.js';
+import { occursAsWholeWord } from './mentions.js';
 
 const MAX_TITLE = 80;
 const DEFAULT_MAX_TEXT = 400; // fallback only -- a deployment sets its own via config.lore.textChars
@@ -14,8 +15,6 @@ const MIN_KEY = 2;
 const MAX_KEY = 40;
 const MAX_KEYS = 8;
 const DEFAULT_WEIGHT = 3;
-
-const isLetterOrDigit = (ch) => ch !== undefined && /[\p{L}\p{N}_]/u.test(ch);
 
 function normalizeTitle(title) {
   return String(title ?? '').trim().toLowerCase();
@@ -138,19 +137,6 @@ export function upsertLore(entries, incoming, { source, now = Date.now(), maxEnt
   return { entries: evictOverflow(stored, maxEntries), upserted };
 }
 
-/** Whether `key` occurs in `haystackLower` as a whole word/phrase (Unicode-aware boundaries). */
-function occursAsWord(haystackLower, key) {
-  let from = 0;
-  for (;;) {
-    const at = haystackLower.indexOf(key, from);
-    if (at === -1) return false;
-    const before = haystackLower[at - 1];
-    const after = haystackLower[at + key.length];
-    if (!isLetterOrDigit(before) && !isLetterOrDigit(after)) return true;
-    from = at + 1;
-  }
-}
-
 /**
  * Entries (any `always` status) whose keys literally occur, whole word/phrase
  * and case-insensitive, in `recentTexts` -- used for the analyzer's
@@ -173,7 +159,7 @@ export function keywordMatches(entries, recentTexts) {
       const lowered = String(key).toLowerCase();
       let found = false;
       for (let i = 0; i < texts.length; i += 1) {
-        if (occursAsWord(texts[i], lowered)) {
+        if (occursAsWholeWord(texts[i], lowered)) {
           found = true;
           if (i > lastIndex) lastIndex = i;
         }

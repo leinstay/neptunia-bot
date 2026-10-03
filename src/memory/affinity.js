@@ -7,6 +7,7 @@
 // ignore someone it likes. See docs/prompt-contract.md, "The analyzer".
 
 import { clampText } from './clamp.js';
+import { DAY_MS } from '../time.js';
 
 /** A member's attitude before anything has been observed about them. A stored affinity may also
  * carry `decayedAt` (ISO string, see `decayAffinity`); every function here keeps it. */
@@ -138,7 +139,6 @@ export function applyDelta(
   return { ...extra, score: newScore, reason: finalReason, history };
 }
 
-const DAY_MS = 24 * 60 * 60 * 1000;
 /** Upper bound on the days one `decayAffinity` call applies; the rest waits for the next sweep. */
 const MAX_DECAY_DAYS = 3650;
 

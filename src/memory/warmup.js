@@ -41,11 +41,13 @@ import { fitSections, SectionsTooLargeError } from '../llm/budget.js';
 import { estimateTokens, estimateMessages } from '../llm/tokens.js';
 import { parseJsonObject } from '../llm/parse.js';
 import { applyMemoryUpdate, characterText } from './update.js';
+import { block, fillPromptTemplate } from '../behavior/prompt.js';
 import { topByRank } from './ranking.js';
 import { clampText } from './clamp.js';
 import { normalizeTopic } from './interests.js';
 import { toTokens, fromTokens } from './mentions.js';
 import { log } from '../log.js';
+import { dailyCounter, utcDay } from '../time.js';
 
 const CACHE_TTL_MS = 15 * 60_000;
 
@@ -96,23 +98,15 @@ const WARMUP_LIMIT_DEFAULTS = {
 };
 
 // ---------------------------------------------------------------------------
-// Small pure helpers local to this module (deliberately not imported from
-// src/memory/update.js, whose internals are off-limits to this task, except
-// `characterText` -- the one helper the two modules deliberately share, so a
-// `/nep rule add` reaches every `<character>` block the same way it reaches
-// the chat prompt).
+// Small pure helpers local to this module. From src/memory/update.js only
+// `characterText` is shared, so a `/nep rule add` reaches every `<character>`
+// block the same way it reaches the chat prompt; `block` and
+// `fillPromptTemplate` are the request builders' shared ones
+// (src/behavior/prompt.js).
 // ---------------------------------------------------------------------------
 
-function block(tag, body) {
-  return body ? `<${tag}>\n${body}\n</${tag}>` : '';
-}
-
-function fillTemplate(template, values) {
-  return (template ?? '').replace(/\{\{(\w+)\}\}/g, (all, key) => (values[key] !== undefined ? values[key] : all));
-}
-
 function isoDateOrDash(ts) {
-  return Number.isFinite(ts) ? new Date(ts).toISOString().slice(0, 10) : '-';
+  return Number.isFinite(ts) ? utcDay(ts) : '-';
 }
 
 function profileTemplateValues(config, selfName) {
@@ -419,7 +413,7 @@ export function buildChannelRequest({ prompts, config, calibrator, channel, mess
   const labels = prompts?.labels ?? {};
   const timezone = config?.bot?.timezone ?? 'UTC';
   const memoryCfg = config?.memory ?? {};
-  const system = fillTemplate(prompts?.channel, { fieldChars: memoryCfg.fieldChars ?? WARMUP_LIMIT_DEFAULTS.fieldChars });
+  const system = fillPromptTemplate(prompts?.channel, { fieldChars: memoryCfg.fieldChars ?? WARMUP_LIMIT_DEFAULTS.fieldChars });
   const channelLine = [
     `${channel.name} (id:${channel.id})`,
     channel.category ? `category: ${channel.category}` : null,
@@ -1036,7 +1030,7 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
     const days = {};
     for (const message of messages ?? []) {
       if (!Number.isFinite(message?.ts)) continue;
-      const key = new Date(message.ts).toISOString().slice(0, 10);
+      const key = utcDay(message.ts);
       days[key] = (days[key] ?? 0) + 1;
     }
     const keys = Object.keys(days).sort();
@@ -1227,7 +1221,7 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
 
     const limit = warmupRequestCap(cfg);
     const cost = (text) => calibrator.apply(estimateTokens(text)) + 2;
-    const system = fillTemplate(hot.prompts.profile, profileTemplateValues(hot.config, selfName));
+    const system = fillPromptTemplate(hot.prompts.profile, profileTemplateValues(hot.config, selfName));
     const characterBlock = block('character', characterText(hot.prompts, selfName));
     const memberLine = `${member.name} (id:${member.id}), ${member.messages} messages in the window, first ${isoDateOrDash(member.firstTs)}, last ${isoDateOrDash(member.lastTs)}`;
     const memberBlock = block('member', memberLine);
@@ -1322,7 +1316,7 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
     const labels = hot.prompts.labels ?? {};
     const timezone = hot.config.bot?.timezone ?? 'UTC';
 
-    const system = fillTemplate(hot.prompts.server, serverTemplateValues(hot.config, selfName));
+    const system = fillPromptTemplate(hot.prompts.server, serverTemplateValues(hot.config, selfName));
     const characterBlock = block('character', characterText(hot.prompts, selfName));
 
     const channelsView = {};
@@ -1706,13 +1700,9 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
     }
 
     const bs = warmupState(store);
-    const today = new Date(now()).toISOString().slice(0, 10);
-    if (bs.refreshDay !== today) {
-      bs.refreshDay = today;
-      bs.refreshCount = 0;
-    }
+    const { count: refreshedToday } = dailyCounter(bs, { dayKey: 'refreshDay', countKey: 'refreshCount' }, now());
     const perDay = Number.isFinite(memoryCfg.portraitRefreshPerDay) ? memoryCfg.portraitRefreshPerDay : 20;
-    if (bs.refreshCount >= perDay) {
+    if (refreshedToday >= perDay) {
       log.info('warmup: portrait refresh skipped, daily refresh cap reached', { userId, perDay });
       return { ok: false, reason: 'daily-cap' };
     }
@@ -1754,7 +1744,7 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
     };
     const items = markOwnContext(formatTranscript(sample.messages, formatOptions), sample.ownIds, labels);
 
-    const system = fillTemplate(hot.prompts.profile, profileTemplateValues(hot.config, selfName));
+    const system = fillPromptTemplate(hot.prompts.profile, profileTemplateValues(hot.config, selfName));
     const characterBlock = block('character', characterText(hot.prompts, selfName));
     const memberLine = `${member.name} (id:${member.id}), ${member.messages} messages in the window, first ${isoDateOrDash(member.firstTs)}, last ${isoDateOrDash(member.lastTs)}`;
     const memberBlock = block('member', memberLine);

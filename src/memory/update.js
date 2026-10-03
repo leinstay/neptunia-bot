@@ -10,21 +10,22 @@
 // Memory is persistent: nothing here ever wipes it — a failed update just
 // leaves the buffer alone and backs off for a while.
 
+import { isPlainObject } from '../config.js';
 import { fitSections, SectionsTooLargeError } from '../llm/budget.js';
 import { estimateTokens } from '../llm/tokens.js';
 import { formatTranscript, renderTranscript } from '../discord/format.js';
 import { parseJsonObject } from '../llm/parse.js';
 import { TokenLimitError } from '../llm/openrouter.js';
-import { isDescribable, stickerUrl } from '../discord/media.js';
+import { isDescribable, mediaParts, stickerUrl } from '../discord/media.js';
 import { log } from '../log.js';
 import { emptyAffinity, roundScore, affinityBand, applyDelta } from './affinity.js';
 import { keywordMatches } from './lore.js';
 import { normalizeInterests } from './interests.js';
 import { normalizeDetails } from './details.js';
 import { topByRank } from './ranking.js';
-import { toTokens, fromTokens } from './mentions.js';
+import { ID_DIGITS, toTokens, fromTokens } from './mentions.js';
 import { clampText } from './clamp.js';
-import { renderProfile } from '../behavior/prompt.js';
+import { block, fillPromptTemplate, renderProfile } from '../behavior/prompt.js';
 import { effectiveAffinity } from '../behavior/private.js';
 
 const BACKOFF_MS = 15 * 60_000;
@@ -93,19 +94,11 @@ export function isDue(buffer, now, cfg, relationshipsCfg) {
   return false;
 }
 
-function block(tag, body) {
-  return body ? `<${tag}>\n${body}\n</${tag}>` : '';
-}
-
-function fillTemplate(template, values) {
-  return (template ?? '').replace(/\{\{(\w+)\}\}/g, (all, key) => values[key] ?? all);
-}
-
 /**
  * The `{{fieldChars}}`/`{{maxDetails}}`/... placeholders `prompts.memory` may use, filled from
  * the live config so a prompt states the same limits the code actually clamps to. Missing config
  * keys fall back to MEMORY_LIMIT_DEFAULTS (config.json's own defaults); an unknown placeholder in
- * the prompt is left untouched by fillTemplate regardless.
+ * the prompt is left untouched by fillPromptTemplate regardless.
  * @param {object} config  Live config (`config.memory`, `config.relationships`, `config.lore`).
  * @param {string} selfName
  */
@@ -314,7 +307,7 @@ function existingLoreBlock(loreEntries, batchTexts, nameOf) {
  * @returns {string}
  */
 export function characterText(prompts, selfName) {
-  const nameFill = (text) => fillTemplate(text, { name: selfName });
+  const nameFill = (text) => fillPromptTemplate(text, { name: selfName });
   return [prompts['character-card'], prompts.rules].map(nameFill).filter(Boolean).join('\n\n');
 }
 
@@ -366,7 +359,7 @@ export function buildMemoryRequest({ prompts, config, calibrator, profiles, guil
   const episodesOn = config.features?.episodes !== false;
   const loreOn = config.features?.lore !== false;
   const resolveName = typeof nameOf === 'function' ? nameOf : () => null;
-  const system = fillTemplate(prompts.memory, memoryTemplateValues(config, selfName));
+  const system = fillPromptTemplate(prompts.memory, memoryTemplateValues(config, selfName));
   const characterBlock = relationships ? block('character', characterText(prompts, selfName)) : '';
 
   const existingProfiles = {};
@@ -515,8 +508,8 @@ function clampStringArray(value, maxChars, maxItems, tolerance) {
     .slice(0, maxItems);
 }
 
-const TEACHER_TOKEN_RE = /^<@(\d{17,20})>$/;
-const TEACHER_REF_RE = /^[^()<>]*\(id:(\d{17,20})\)$/;
+const TEACHER_TOKEN_RE = new RegExp(`^<@(${ID_DIGITS})>$`);
+const TEACHER_REF_RE = new RegExp(`^[^()<>]*\\(id:(${ID_DIGITS})\\)$`);
 
 /**
  * The analyzer's `guild.learned` ops (`{ add, seen, remove }`), validated for
@@ -928,10 +921,6 @@ export function applyMemoryUpdate(store, guildId, update, cfg, knownUserIds, kno
   return result;
 }
 
-function isPlainObject(value) {
-  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
-}
-
 /** Whether an analyzer value says anything: a non-blank string, a non-empty array or object. */
 function hasContent(value) {
   if (typeof value === 'string') return value.trim() !== '';
@@ -1066,11 +1055,6 @@ function slimMedia(part) {
     stickers: (part.stickers ?? []).map((s) => ({ id: s.id, name: s.name, format: s.format })),
     emojis: (part.emojis ?? []).map((e) => ({ id: e.id, name: e.name })),
   };
-}
-
-/** A buffered message followed by its forwarded snapshots: every part whose media ids analyze() looks up. */
-function mediaParts(message) {
-  return [message, ...(Array.isArray(message.forwarded) ? message.forwarded : [])];
 }
 
 /**

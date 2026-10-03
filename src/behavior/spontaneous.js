@@ -11,12 +11,10 @@
 
 import { localHour } from '../discord/format.js';
 import { readableChannels, canSend, lastActivity, channelAllowed } from '../discord/collect.js';
-import { between } from './turn.js';
+import { between } from './random.js';
 import { log } from '../log.js';
+import { MINUTE_MS, HOUR_MS, DAY_MS } from '../time.js';
 
-const MINUTE = 60_000;
-const HOUR = 60 * MINUTE;
-const DAY = 24 * 60 * MINUTE;
 const REWAKE_MINUTES = [10, 40]; // how soon to try again after a turn found "nothing to say" / no channel
 
 /**
@@ -28,13 +26,13 @@ const REWAKE_MINUTES = [10, 40]; // how soon to try again after a turn found "no
  */
 export function nextDelayMs(cfg, rng) {
   if (rng() < cfg.burstChance) {
-    return between(cfg.burstMinutes, rng) * MINUTE;
+    return between(cfg.burstMinutes, rng) * MINUTE_MS;
   }
   const [min, max] = [cfg.minIntervalMinutes, cfg.maxIntervalMinutes];
   const logMin = Math.log(min);
   const logMax = Math.log(max);
   const minutes = Math.exp(logMin + rng() * (logMax - logMin));
-  return minutes * MINUTE;
+  return minutes * MINUTE_MS;
 }
 
 /**
@@ -63,10 +61,10 @@ export function msUntilActive(now, timezone, activeHours, rng) {
   let steps = 0;
   const maxSteps = 2 * (24 * 60); // two days of minutes, generous safety cap
   while (localHour(t, timezone) !== activeHours.from && steps < maxSteps) {
-    t += MINUTE;
+    t += MINUTE_MS;
     steps += 1;
   }
-  return t - now + between([0, 90], rng) * MINUTE;
+  return t - now + between([0, 90], rng) * MINUTE_MS;
 }
 
 /**
@@ -91,13 +89,13 @@ export function chooseMode(history, now, cfg, rng) {
 
   const last = history[history.length - 1];
   const silenceMs = now - last.ts;
-  if (silenceMs >= cfg.deadAfterMinutes * MINUTE) {
+  if (silenceMs >= cfg.deadAfterMinutes * MINUTE_MS) {
     return rng() < cfg.initiateChance ? 'initiate' : null;
   }
 
   if (last.self) return null; // the persona never interjects on its own last line
 
-  const windowStart = now - cfg.liveWindowMinutes * MINUTE;
+  const windowStart = now - cfg.liveWindowMinutes * MINUTE_MS;
   const liveCount = history.filter((m) => m.ts >= windowStart && !m.self && !m.bot).length;
   if (liveCount >= cfg.liveMinMessages) return 'interject';
 
@@ -115,7 +113,7 @@ export function chooseMode(history, now, cfg, rng) {
 export function isChannelDead(channel, cfg, now) {
   const maxHours = cfg.maxChannelSilenceHours;
   if (!(typeof maxHours === 'number' && maxHours > 0)) return false;
-  return now - lastActivity(channel) > maxHours * HOUR;
+  return now - lastActivity(channel) > maxHours * HOUR_MS;
 }
 
 /**
@@ -125,7 +123,7 @@ export function isChannelDead(channel, cfg, now) {
 export function pickChannel(candidates, now, rng) {
   if (candidates.length === 0) return null;
 
-  const activeRecently = candidates.filter((c) => now - c.lastActivity < DAY);
+  const activeRecently = candidates.filter((c) => now - c.lastActivity < DAY_MS);
   if (activeRecently.length === 0) {
     return candidates[Math.floor(rng() * candidates.length)].channel;
   }
@@ -174,7 +172,7 @@ export function createSpontaneous({
       channelAllowed(channel, config.bot) &&
       canSend(channel) &&
       (cfg.channels.length === 0 || cfg.channels.includes(channel.id)) &&
-      t - turns.lastPostAt(channel.id) >= cfg.minGapMinutes * MINUTE &&
+      t - turns.lastPostAt(channel.id) >= cfg.minGapMinutes * MINUTE_MS &&
       !turns.isBusy(channel.id) &&
       !(oneAtATime && turns.isAnyBusy())
     );
@@ -232,7 +230,7 @@ export function createSpontaneous({
     store.state.markDirty();
 
     if (!channel) {
-      schedule[guildId] = t + between(REWAKE_MINUTES, rng) * MINUTE;
+      schedule[guildId] = t + between(REWAKE_MINUTES, rng) * MINUTE_MS;
       store.state.markDirty();
       log.info('spontaneous: no eligible channel', { guild: guildId });
       return;
@@ -244,7 +242,7 @@ export function createSpontaneous({
       const result = await turns.runTurn({ channel, mode: 'auto', chooseMode: makeChooseMode(cfg) });
       log.info('spontaneous: turn finished', { guild: guildId, channel: channel.id, outcome: result.outcome });
       if (result.outcome === 'not-now') {
-        schedule[guildId] = now() + between(REWAKE_MINUTES, rng) * MINUTE;
+        schedule[guildId] = now() + between(REWAKE_MINUTES, rng) * MINUTE_MS;
         store.state.markDirty();
       }
     } catch (err) {

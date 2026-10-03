@@ -27,9 +27,11 @@
 import { createHash } from 'node:crypto';
 import { videoSiteFor, safeLocation } from '../discord/video-sites.js';
 import { classifierTextModel } from '../behavior/mention.js';
+import { fillPromptTemplate } from '../behavior/prompt.js';
 import { TokenLimitError, DailyCapError } from '../llm/openrouter.js';
 import { clampText } from '../memory/clamp.js';
 import { log } from '../log.js';
+import { bumpDaily, dailyCounter, utcDay } from '../time.js';
 
 const READ_MISS_TTL_MS = 6 * 60 * 60_000;
 // An answer this short is the read-link prompt's "no real content" signal.
@@ -39,6 +41,8 @@ const LINK_SUMMARY_CHARS_FALLBACK = 700;
 const SEARCH_SUMMARY_CHARS_FALLBACK = 900;
 const SEARCH_CACHE_HOURS_FALLBACK = 24;
 const QUERY_MAX_CHARS = 200;
+/** The state.json fields of the daily web counter (link reads and searches share it). */
+const WEB_DAILY = { dayKey: 'webDay', countKey: 'webCount' };
 // Tab, line feed, vertical tab, form feed, carriage return, NEL, line and paragraph separators.
 const QUERY_LINE_BREAKS = /[\t\n\v\f\r\u0085\u2028\u2029]+/g;
 const QUERY_CONTROLS = /[\u0000-\u001f\u007f-\u009f]/g;
@@ -56,13 +60,6 @@ function webOn(config) {
 /** A positive number from the config, else `fallback`. */
 function positiveOr(value, fallback) {
   return typeof value === 'number' && value > 0 ? value : fallback;
-}
-
-/** Fill `{{key}}` placeholders of a prompt file; an unknown key is left as it is. */
-function fillTemplate(template, values) {
-  return String(template ?? '').replace(/\{\{(\w+)\}\}/g, (all, key) =>
-    Object.prototype.hasOwnProperty.call(values, key) ? String(values[key]) : all,
-  );
 }
 
 /** Collapse whitespace, then cap at `maxChars` on a clean boundary. */
@@ -185,22 +182,18 @@ export function createLookup({ hot, store, llm, state = memoryState(), pageFetch
 
   /** Today's UTC date `YYYY-MM-DD` on the injected clock (the daily counter and `{{today}}`). */
   function todayDate() {
-    return new Date(now()).toISOString().slice(0, 10);
+    return utcDay(now());
   }
 
   /** Reserve one slot of the shared daily web counter; false when `web.maxPerDay` is spent. */
   function reserveDaily() {
-    const today = todayDate();
-    if (state.data.webDay !== today) {
-      state.data.webDay = today;
-      state.data.webCount = 0;
-    }
-    const count = state.data.webCount ?? 0;
+    const nowMs = now();
+    const { count } = dailyCounter(state.data, WEB_DAILY, nowMs);
     if (count >= (hot.config.web?.maxPerDay ?? Infinity)) {
       state.markDirty();
       return false;
     }
-    state.data.webCount = count + 1;
+    bumpDaily(state.data, WEB_DAILY, nowMs);
     state.markDirty();
     return true;
   }
@@ -266,7 +259,7 @@ export function createLookup({ hot, store, llm, state = memoryState(), pageFetch
     try {
       completion = await llm.complete(
         [
-          { role: 'system', content: fillTemplate(hot.prompts['read-link'], { maxChars: summaryChars, today: todayDate() }) },
+          { role: 'system', content: fillPromptTemplate(hot.prompts['read-link'], { maxChars: summaryChars, today: todayDate() }) },
           { role: 'user', content: title ? `${title}\n\n${body}` : body },
         ],
         {
@@ -408,7 +401,7 @@ export function createLookup({ hot, store, llm, state = memoryState(), pageFetch
       try {
         completion = await llm.complete(
           [
-            { role: 'system', content: fillTemplate(promptText, { query: asked, maxChars: summaryChars, today: todayDate() }) },
+            { role: 'system', content: fillPromptTemplate(promptText, { query: asked, maxChars: summaryChars, today: todayDate() }) },
             { role: 'user', content: renderResults(found.results) },
           ],
           {

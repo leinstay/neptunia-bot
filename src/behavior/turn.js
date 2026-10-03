@@ -6,12 +6,13 @@
 // channel without a guild, served on behalf of the one pinned guild).
 
 import { canAttach, fetchHistory, fetchNeighbors, withTextPreviews } from '../discord/collect.js';
-import { buildDrawPrompt, buildRequest } from './prompt.js';
+import { buildDrawPrompt, buildRequest, fillPromptTemplate } from './prompt.js';
 import { classifierTextModel } from './mention.js';
 import { parseOutput } from '../llm/parse.js';
-import { DailyCapError, TokenLimitError } from '../llm/openrouter.js';
+import { DailyCapError, TokenLimitError, sleep } from '../llm/openrouter.js';
 import { ImageCapError, ImageGenError } from '../llm/images.js';
 import { limitNotice, limitOf } from './limits.js';
+import { between, typingMs } from './random.js';
 import {
   collectPictures,
   collectEmojiItems,
@@ -24,21 +25,8 @@ import { createImageFetcher } from '../discord/fetch-image.js';
 import { renderCustomEmoji, resolveReactionEmoji } from '../discord/emoji.js';
 import { formatTranscript, renderTranscript } from '../discord/format.js';
 import { log } from '../log.js';
-
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-/** Uniform random number inside a `[min, max]` config pair. */
-export function between([min, max], rng) {
-  return min + (max - min) * rng();
-}
-
-/** How long a person would type `text`, per config.typing. */
-export function typingMs(text, cfg, rng) {
-  const ms = text.length * between(cfg.msPerChar, rng);
-  return Math.round(Math.min(cfg.maxMs, Math.max(cfg.minMs, ms)));
-}
+import { clampChars, oneLine } from '../memory/clamp.js';
+import { bumpDaily, utcDay } from '../time.js';
 
 /** Turn `@nick` written by the model into real mentions for people seen in the transcript. */
 export function resolveMentions(text, history) {
@@ -196,27 +184,10 @@ function readableLinkCandidates(history, sites) {
   return out;
 }
 
-/**
- * Fill the `{{name}}` placeholder of a prompt file with the persona's display name (as src/behavior/prompt.js does),
- * plus any `{{key}}` of `values`; an unknown key is left as it is.
- */
-function fillName(template, name, values = {}) {
-  const all = { ...values, name: name ?? '' };
-  return String(template ?? '').replace(/\{\{(\w+)\}\}/g, (placeholder, key) =>
-    Object.prototype.hasOwnProperty.call(all, key) ? String(all[key]) : placeholder,
-  );
-}
-
 /** Upload file name for a generated picture: `image/jpeg` -> `image.jpg`, else `image.<subtype>`. */
 function imageFileName(mediaType) {
   const subtype = String(mediaType ?? '').split('/')[1]?.split(';')[0]?.trim().toLowerCase() || 'png';
   return `image.${subtype === 'jpeg' ? 'jpg' : subtype}`;
-}
-
-/** `text` cut to at most `max` code points; a non-number `max` leaves it whole. */
-function clampChars(text, max) {
-  const value = String(text ?? '');
-  return Number.isFinite(max) && max >= 0 ? [...value].slice(0, Math.floor(max)).join('') : value;
 }
 
 // A Discord message holds 2000 characters; the part mark is ` (n/m)` on the header plus the newline.
@@ -240,13 +211,6 @@ function splitForMirror(text, max) {
   }
   parts.push(rest.join(''));
   return parts;
-}
-
-/** Collapse whitespace so a name or summary stays on its one `<videos>` line. */
-function oneLine(text) {
-  return String(text ?? '')
-    .replace(/\s+/gu, ' ')
-    .trim();
 }
 
 /**
@@ -545,10 +509,10 @@ export function createTurnRunner({
 
   /** Today's UTC date `YYYY-MM-DD` on the injected clock (the daily GIF counter). */
   function todayDate() {
-    return new Date(clock()).toISOString().slice(0, 10);
+    return utcDay(clock());
   }
 
-  /** How many GIFs the persona posted today (`state.data.gifDay` / `gifCount`). */
+  /** How many GIFs the persona posted today (`state.data.gifDay` / `gifCount`); reads only, never rolls over. */
   function gifsToday() {
     const data = store.state.data;
     return data.gifDay === todayDate() ? (Number.isFinite(data.gifCount) ? data.gifCount : 0) : 0;
@@ -556,13 +520,7 @@ export function createTurnRunner({
 
   /** Count one posted GIF against `gifs.maxPerDay` (the counter restarts on a new UTC day). */
   function countGif() {
-    const data = store.state.data;
-    const today = todayDate();
-    if (data.gifDay !== today) {
-      data.gifDay = today;
-      data.gifCount = 0;
-    }
-    data.gifCount = (Number.isFinite(data.gifCount) ? data.gifCount : 0) + 1;
+    bumpDaily(store.state.data, { dayKey: 'gifDay', countKey: 'gifCount' }, clock());
     store.state.markDirty();
   }
 
@@ -741,7 +699,7 @@ export function createTurnRunner({
       log.info('rewatch: skipped', { channel: channelId, reason: 'no-prompt' });
       return;
     }
-    const system = fillName(prompt, selfName);
+    const system = fillPromptTemplate(prompt, { name: selfName ?? '' });
     const mediaCfg = config.media ?? {};
     const rewatchCfg = mediaCfg.video?.rewatch ?? {};
     const recent = Math.max(0, Math.floor(rewatchCfg.recentMessages ?? 60));
@@ -897,7 +855,7 @@ export function createTurnRunner({
     try {
       completion = await llm.complete(
         [
-          { role: 'system', content: fillName(prompt, selfName, { today: new Date(clock()).toISOString().slice(0, 10) }) },
+          { role: 'system', content: fillPromptTemplate(prompt, { today: todayDate(), name: selfName ?? '' }) },
           { role: 'user', content: user },
         ],
         {

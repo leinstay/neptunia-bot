@@ -5,23 +5,17 @@
 // (<skip/>) for calls that are simply not interesting.
 
 import { ignoreAdjustment } from '../memory/affinity.js';
-
-const MINUTE = 60_000;
+import { occursAsWholeWord } from '../memory/mentions.js';
+import { MINUTE_MS } from '../time.js';
 
 /** How the persona was called. Order matters: a pinged reply is a 'reply', not a 'mention'. */
 export function detectTrigger({ mentionsSelf, repliesToSelf, content, nameTriggers }) {
   if (repliesToSelf) return 'reply';
   if (mentionsSelf) return 'mention';
   const lowered = content.toLowerCase();
-  const named = nameTriggers.some((name) => {
-    const at = lowered.indexOf(name.toLowerCase());
-    if (at === -1) return false;
-    // Whole word only, so a name trigger inside a longer word or URL does not count.
-    const before = lowered[at - 1];
-    const after = lowered[at + name.length];
-    const isLetter = (ch) => ch !== undefined && /[\p{L}\p{N}_]/u.test(ch);
-    return !isLetter(before) && !isLetter(after);
-  });
+  // Whole word only, so a name trigger inside a longer word or URL does not count;
+  // an empty trigger never matches.
+  const named = nameTriggers.some((name) => occursAsWholeWord(lowered, name.toLowerCase()));
   return named ? 'name' : null;
 }
 
@@ -92,7 +86,7 @@ export function decideMention({ kind, textLength, recentCalls, neverIgnore, affi
   return { respond, reason: respond ? 'respond' : `ignored:${reason}`, ignoreChance, roll };
 }
 
-export const repeatWindowMs = (cfg) => cfg.repeatWindowMinutes * MINUTE;
+export const repeatWindowMs = (cfg) => cfg.repeatWindowMinutes * MINUTE_MS;
 
 // --- The address classifier --------------------------------------------------
 // After the persona answers in a channel, a conversation window stays open for
@@ -113,7 +107,7 @@ export function isFollowUpOpen(state, now, cfg) {
   if (!state) return false;
   const minutes = cfg?.followUpMinutes ?? 15;
   const noStreakLimit = cfg?.followUpNoStreak ?? 3;
-  return now - state.lastAnswerAt < minutes * MINUTE && state.noStreak < noStreakLimit;
+  return now - state.lastAnswerAt < minutes * MINUTE_MS && state.noStreak < noStreakLimit;
 }
 
 /**

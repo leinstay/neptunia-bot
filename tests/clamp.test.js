@@ -2,7 +2,7 @@
 // token-safe replacement for a blind `.slice(0, limit)`. Pure, no I/O.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { clampText } from '../src/memory/clamp.js';
+import { clampChars, clampText, oneLine } from '../src/memory/clamp.js';
 
 // ---- non-string / empty --------------------------------------------------
 
@@ -209,4 +209,28 @@ test('clampText: an accented Latin word is never split mid-word', () => {
   const text = 'café au lait très agréable pendant longtemps encore aujourd’hui';
   const result = clampText(text, 12, { tolerance: 1 });
   assert.equal(result, 'café au lait');
+});
+
+// ---- oneLine / clampChars ----------------------------------------------------
+
+test('oneLine: collapses every whitespace run to one space and trims', () => {
+  assert.equal(oneLine('  καλή\n\tμέρα \r\n  φίλε  '), 'καλή μέρα φίλε');
+  assert.equal(oneLine(null), '');
+  assert.equal(oneLine(undefined), '');
+  assert.equal(oneLine(42), '42');
+});
+
+test('clampChars: cuts at most max code points, never inside a surrogate pair', () => {
+  assert.equal(clampChars('café', 3), 'caf');
+  assert.equal(clampChars('a😀b', 2), 'a😀');
+  assert.equal(clampChars('abc', 2.9), 'ab');
+  assert.equal(clampChars('abc', 0), '');
+  assert.equal(clampChars('abc', 10), 'abc');
+});
+
+test('clampChars: a max that is not a finite non-negative number leaves the text whole', () => {
+  for (const max of [undefined, null, NaN, Infinity, -1, '2']) {
+    assert.equal(clampChars('abc', max), 'abc', `max ${String(max)}`);
+  }
+  assert.equal(clampChars(null, 5), '');
 });

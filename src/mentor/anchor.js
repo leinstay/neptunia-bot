@@ -18,9 +18,10 @@
 // read: nothing is downloaded, described or written.
 
 import { collectEmojiItems, collectPictures, collectVideos, isDescribable } from '../discord/media.js';
+import { ID_DIGITS } from '../memory/mentions.js';
 
 const LINK = /^<?https?:\/\/(?:(?:ptb|canary)\.)?discord(?:app)?\.com\/channels\/(\d+|@me)\/(\d+)\/(\d+)\/?>?$/i;
-const SNOWFLAKE = /^\d{15,22}$/;
+const SNOWFLAKE = new RegExp(`^${ID_DIGITS}$`);
 const DISCORD_EPOCH = 1420070400000n;
 /** How long after the trigger an anchor is replayed when her message's time is unknown. */
 const FALLBACK_DELAY_MS = 60_000;
