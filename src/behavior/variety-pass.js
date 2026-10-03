@@ -7,8 +7,9 @@
 // is never asked about twice in a row (a per-guild cache, seeded from guild
 // memory after a restart). Each pass that ran is kept in guild memory: the
 // latest list (`worn`) and a short history of shapes (`wornHistory`) for the
-// owner; a private chat's pass is kept in memory only, never on disk, so
-// nothing said in private reaches the owner's view or another conversation.
+// owner; a private chat's pass is kept in memory only, under that chat's own
+// cache key, never on disk, so nothing said in private reaches the owner's
+// view or another conversation, and it never displaces the guild's latest pass.
 // The persona's own lines of other channels come from a small ring in guild
 // memory (`ownLines`), written here whenever a turn posts a message in a
 // server channel. Logs carry counts, never text.
@@ -28,8 +29,14 @@ import { log } from '../log.js';
  *   forTurn: (input: object) => Promise<{ shape: string, examples: string[], count: number }[]|null> }}
  */
 export function createVarietyPass({ hot, store, llm, now = Date.now }) {
-  const cache = new Map(); // guildId -> { key, patterns }: the latest pass of that guild
+  // cacheKeyFor() -> { key, patterns }: the latest pass of a guild, or of one private chat
+  const cache = new Map();
   let warnedNoPrompt = false;
+
+  /** The cache slot of a pass: the guild's own, or a private chat's apart from it. */
+  function cacheKeyFor(guildId, channelId, privateChat) {
+    return privateChat ? `private:${channelId}` : guildId;
+  }
 
   /**
    * Remember one message the persona posted in a server channel (the ring of
@@ -51,13 +58,18 @@ export function createVarietyPass({ hot, store, llm, now = Date.now }) {
     }
   }
 
-  /** The guild's latest pass: the cache, else what guild memory kept (after a restart). */
-  function latest(guildId) {
-    if (cache.has(guildId)) return cache.get(guildId);
+  /**
+   * The latest pass under `slot` (cacheKeyFor): the cache, else -- for the
+   * guild's own slot -- what guild memory kept (after a restart). A private
+   * chat's pass is never stored, so its slot only ever lives in the cache.
+   */
+  function latest(guildId, slot) {
+    if (cache.has(slot)) return cache.get(slot);
+    if (slot !== guildId) return null;
     const stored = normalizeWorn(store.getGuild(guildId)?.worn);
     if (!stored?.key) return null;
     const entry = { key: stored.key, patterns: stored.patterns };
-    cache.set(guildId, entry);
+    cache.set(slot, entry);
     return entry;
   }
 
@@ -91,14 +103,14 @@ export function createVarietyPass({ hot, store, llm, now = Date.now }) {
    * once), the persona's own lines are chosen (src/behavior/variety.js
    * #selectOwnLines: `variety.window` lines younger than
    * `variety.recentMinutes`, the turn's channel first, then the ring); fewer
-   * than `variety.minLines` -> null. The same lines as the guild's latest
-   * pass reuse its answer without a request; otherwise one request on the
-   * `classifier.text` model (counted against `llm.maxRequestsPerDay`), cut at
-   * `variety.timeoutMs`. A failure, a timeout or an answer that is not the
-   * expected JSON -> null (and the latest pass stays as it was). A valid
-   * answer (even an empty one) becomes the guild's latest pass and, outside a
-   * private chat and while not paused, is stored in guild memory with one
-   * more history entry. Never rejects.
+   * than `variety.minLines` -> null. The same lines as the latest pass (the
+   * guild's, or in a private chat that chat's own) reuse its answer without a
+   * request; otherwise one request on the `classifier.text` model (counted
+   * against `llm.maxRequestsPerDay`), cut at `variety.timeoutMs`. A failure, a
+   * timeout or an answer that is not the expected JSON -> null (and the latest
+   * pass stays as it was). A valid answer (even an empty one) becomes that
+   * latest pass and, outside a private chat and while not paused, is stored in
+   * guild memory with one more history entry. Never rejects.
    * @param {{ guildId: string, channelId: string, history: object[], selfName: string, privateChat?: boolean }} input
    * @returns {Promise<{ shape: string, examples: string[], count: number }[]|null>}
    */
@@ -131,7 +143,8 @@ export function createVarietyPass({ hot, store, llm, now = Date.now }) {
       }
 
       const key = linesKey(lines);
-      const previous = latest(guildId);
+      const slot = cacheKeyFor(guildId, channelId, privateChat);
+      const previous = latest(guildId, slot);
       if (previous?.key === key) {
         log.info('variety: turn', { channel: channelId, lines: lines.length, cached: true, kept: previous.patterns.length });
         return previous.patterns;
@@ -151,12 +164,12 @@ export function createVarietyPass({ hot, store, llm, now = Date.now }) {
         });
         return null;
       }
-      const parsed = parseVariety(completion?.text, request.texts, hot.config);
+      const parsed = parseVariety(completion?.text, request.texts, config);
       if (!parsed.ok) {
         log.warn('variety: turn', { channel: channelId, lines: lines.length, cached: false, parse: 'error' });
         return null;
       }
-      cache.set(guildId, { key, patterns: parsed.patterns });
+      cache.set(slot, { key, patterns: parsed.patterns });
       const stored = !privateChat && !store.state?.data?.paused;
       if (stored) {
         const at = now();

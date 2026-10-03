@@ -15,6 +15,7 @@ import { createCalibrator } from './llm/tokens.js';
 import { createLlm } from './llm/openrouter.js';
 import { createImageGen } from './llm/images.js';
 import { createTurnRunner } from './behavior/turn.js';
+import { hasRequiredLabels } from './behavior/prompt.js';
 import { createVarietyPass } from './behavior/variety-pass.js';
 import { createEmojiIndex } from './discord/emoji.js';
 import { createSpontaneous } from './behavior/spontaneous.js';
@@ -53,7 +54,7 @@ function needOrFail(key) {
   try {
     return need(key);
   } catch {
-    return fail(`Missing required environment variable ${key} — copy .env.example to .env and fill in the real values.`);
+    return fail(`index: missing required environment variable ${key} — copy .env.example to .env and fill in the real values.`);
   }
 }
 
@@ -68,14 +69,12 @@ const braveApiKey = env.BRAVE_SEARCH_API_KEY || null;
 const hot = createHot({ rootDir: ROOT_DIR }).watch();
 
 const missingPrompts = REQUIRED_PROMPTS.filter((name) => typeof hot.prompts[name] !== 'string' || !hot.prompts[name]);
-const labels = hot.prompts.labels;
-const labelsOk = Boolean(labels) && typeof labels === 'object' && Boolean(labels.transcript);
-if (!labelsOk) missingPrompts.push('labels');
+if (!hasRequiredLabels(hot.prompts.labels)) missingPrompts.push('labels');
 
 if (missingPrompts.length > 0) {
   const files = missingPrompts.map((name) => (name === 'labels' ? 'prompts/labels.json' : `prompts/${name}.md`));
   fail(
-    `Missing required prompt file(s): ${files.join(', ')} ` +
+    `index: missing required prompt file(s): ${files.join(', ')} ` +
       '(prompts.local/ may override any of these, file by file).',
   );
 }
@@ -89,7 +88,7 @@ if (!isValidCommandName(hot.config.bot.commandName)) {
 
 // The old per-feature model keys are never read (classifier.* replaced them);
 // say so once, key names only, never a value.
-for (const { key, use } of deprecatedModelKeys(hot.config)) log.warn('config: deprecated model key ignored', { key, use });
+for (const { key, use } of deprecatedModelKeys(hot.config)) log.warn('index: deprecated model key ignored', { key, use });
 
 const dataDir = path.join(ROOT_DIR, 'data');
 const store = createStore({ dataDir });
@@ -142,8 +141,9 @@ const lookup = createLookup({
 const emoji = createEmojiIndex(client, getGuildId);
 // The variety pass (features.variety): before each turn, the devices worn out in the persona's own recent lines.
 const variety = createVarietyPass({ hot, store, llm });
-const turns = createTurnRunner({ hot, store, llm, calibrator, client, describer, imageFetcher, lookup, images, emoji, variety });
+// The persona's display name in a guild: the one name every request, the warmup and the analyzer use.
 const getSelfName = (guildId) => client.guilds.cache.get(guildId)?.members.me?.displayName ?? client.user?.username ?? 'bot';
+const turns = createTurnRunner({ hot, store, llm, calibrator, client, describer, imageFetcher, lookup, images, emoji, variety, getSelfName });
 // THE way memory starts (docs/prompt-contract.md, "The warmup"): sample-based,
 // resumable, mutes the persona while a run is in flight (see isWarmingUp below).
 const warmup = createWarmup({ hot, store, client, llm, calibrator, getSelfName, getGuildId });
@@ -189,6 +189,7 @@ const mentor = createMentor({
   fetchMoment,
   // Read only: the sandboxes measure tokens as a real turn does and never feed it.
   calibrator,
+  emoji,
 });
 
 const onMessage = createMessageHandler({
@@ -200,6 +201,7 @@ const onMessage = createMessageHandler({
   memory,
   tagHistory,
   getGuildId,
+  getSelfName,
   isWarmingUp,
   describer,
   // features.followUp: the address classifier's own, separate LLM call.
@@ -279,7 +281,26 @@ function sweepAffinityDecay() {
   if (!guildId || config.features?.relationships === false) return;
   if (store.state.data.paused || isWarmingUp()) return;
   const counts = store.decayAffinities(guildId, Date.now(), config.relationships ?? {});
-  if (counts.decayed > 0) log.info('affinity: decay applied', counts);
+  if (counts.decayed > 0) log.info('index: affinity decay applied', counts);
+}
+
+/**
+ * One startup step after the guild resolved, by name: a synchronous throw or
+ * a rejected promise is logged as `index: startup step failed` and never
+ * stops the steps after it. With `wait` the step finishes before the next
+ * one starts; otherwise it runs on in the background (fire-and-forget).
+ * @param {string} step
+ * @param {() => unknown} fn
+ * @param {{ wait?: boolean }} [options]
+ */
+async function startupStep(step, fn, { wait = false } = {}) {
+  const failed = (err) => log.error('index: startup step failed', { step, error: err });
+  try {
+    const done = Promise.resolve(fn()).catch(failed);
+    if (wait) await done;
+  } catch (err) {
+    failed(err);
+  }
 }
 
 let lastCommandName = hot.config.bot.commandName;
@@ -291,13 +312,23 @@ client.once(Events.ClientReady, async () => {
   if (resolved.error) fail(`index: ${resolved.error}`);
 
   instance.guildId = resolved.guildId;
+
+  // The periodic work first, before anything below can throw or wait: the
+  // flush, the spontaneous and memory ticks, the hourly affinity decay.
+  every(30_000, () => store.flush(), 'store.flush');
+  every(30_000, () => spontaneous.tick(), 'spontaneous.tick');
+  // The tick still runs on schedule even with the switch off, so flipping it
+  // back on later needs no restart; it is the wrapper here that no-ops.
+  every(60_000, () => (hot.config.features?.memory !== false ? memory.tick() : undefined), 'memory.tick');
+  every(3_600_000, sweepAffinityDecay, 'affinity decay');
+
   if (!hot.config.bot.guildId) {
     log.info('index: bot.guildId is not set, using the only guild the bot is in — pin it in config.local.json', {
       guildId: instance.guildId,
     });
   }
 
-  log.info('index: ready', { guild: instance.guildId, tag: client.user.tag });
+  log.info('index: ready', { guildId: instance.guildId, tag: client.user.tag });
 
   // /nep pause: a pause persisted before this restart comes back
   // paused -- every spontaneous/analyzer tick keeps no-op'ing until /nep resume.
@@ -308,33 +339,22 @@ client.once(Events.ClientReady, async () => {
   }
 
   const guild = client.guilds.cache.get(instance.guildId);
-  await registerCommands(guild, hot.config);
+  await startupStep('registerCommands', () => registerCommands(guild, hot.config), { wait: true });
 
   // THE way memory starts: with warmup.enabled and no stored profile at all, starts a run
   // automatically; with an unfinished run left from before a restart, resumes it. Fire-and-forget.
-  warmup.resumeIfNeeded(instance.guildId);
+  await startupStep('warmup.resumeIfNeeded', () => warmup.resumeIfNeeded(instance.guildId));
 
   // The custom emoji ranking from history, once (features.customEmoji on, no emojiBackfill stamp,
   // context.customEmoji.backfillMessages > 0). Fire-and-forget: never blocks the persona, logs its errors.
-  emojiBackfill.startIfNeeded(instance.guildId);
+  await startupStep('emojiBackfill.startIfNeeded', () => emojiBackfill.startIfNeeded(instance.guildId));
 
   // The GIF library from history, once (features.gifs on, no backfill stamp in gifs.json,
   // gifs.backfillMessages > 0). Fire-and-forget: never blocks the persona, logs its errors.
-  gifBackfill.startIfNeeded(instance.guildId);
+  await startupStep('gifBackfill.startIfNeeded', () => gifBackfill.startIfNeeded(instance.guildId));
 
-  // Affinity decay: once now (catches up the days the process was down), then hourly.
-  try {
-    sweepAffinityDecay();
-  } catch (err) {
-    log.error('index: affinity decay failed', { error: err });
-  }
-  every(3_600_000, sweepAffinityDecay, 'affinity decay');
-
-  every(30_000, () => spontaneous.tick(), 'spontaneous.tick');
-  // The tick still runs on schedule even with the switch off, so flipping it
-  // back on later needs no restart; it is the wrapper here that no-ops.
-  every(60_000, () => (hot.config.features?.memory !== false ? memory.tick() : undefined), 'memory.tick');
-  every(30_000, () => store.flush(), 'store.flush');
+  // Affinity decay: once now (catches up the days the process was down), then hourly (above).
+  await startupStep('affinity decay', sweepAffinityDecay, { wait: true });
 });
 
 // A running instance never switches servers live: bot.guildId is only read at
@@ -386,4 +406,4 @@ process.on('SIGINT', () => shutdown('SIGINT'));
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('unhandledRejection', (err) => log.error('index: unhandled rejection', { error: err }));
 
-client.login(discordToken).catch((err) => fail(`Discord login failed: ${err.message}`));
+client.login(discordToken).catch((err) => fail(`index: Discord login failed: ${err.message}`));

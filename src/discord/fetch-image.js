@@ -2,8 +2,10 @@
 // `data:` URL, because the provider's own image fetcher gets a 403 from
 // Discord on some CDN hosts (media.discordapp.net) even though our server
 // fetches the very same URL fine. Used by src/behavior/turn.js (a live
-// vision request) and src/memory/describe.js (the media describer) so
-// neither ever hands the provider a Discord URL to fetch itself.
+// vision request, and the bot's avatar as a drawing's reference),
+// src/admin.js (the avatar reference of `/nep draw`) and
+// src/memory/describe.js (the media describer), so none of them ever hands
+// the provider a Discord URL to fetch itself.
 //
 // A tiny in-memory LRU (~50 entries, ~10 min) avoids re-downloading the same
 // picture attached on consecutive turns, keyed by the URL WITHOUT its query
@@ -13,10 +15,12 @@
 // retrying on the next turn, in case it was a transient network blip.
 //
 // Every log line carries the host and path only -- a Discord CDN (or embed
-// proxy) query string is a signature, never logged, not even truncated.
+// proxy) query string is a signature, never logged, not even truncated --
+// and a thrown error's code or class name, never its message (which may
+// quote the whole URL).
 
 import { log } from '../log.js';
-import { safeLocation } from './video-sites.js';
+import { bareContentType, safeLocation } from './video-sites.js';
 
 const ALLOWED_CONTENT_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
 const DEFAULT_CACHE_MAX_ENTRIES = 50;
@@ -67,7 +71,7 @@ export function createImageFetcher({
     try {
       response = await fetchImpl(url, { method: 'GET', signal: AbortSignal.timeout(timeoutMs) });
     } catch (err) {
-      log.warn('fetch-image: download failed', { location, error: String(err?.message ?? err).slice(0, 200) });
+      log.warn('fetch-image: download failed', { location, code: err?.code ?? err?.name ?? null });
       return null;
     }
 
@@ -76,10 +80,7 @@ export function createImageFetcher({
       return null;
     }
 
-    const contentType = String(response.headers?.get?.('content-type') ?? '')
-      .split(';')[0]
-      .trim()
-      .toLowerCase();
+    const contentType = bareContentType(response.headers?.get?.('content-type'));
     if (!ALLOWED_CONTENT_TYPES.has(contentType)) {
       log.warn('fetch-image: unsupported content type', { location, contentType });
       return null;
@@ -95,7 +96,7 @@ export function createImageFetcher({
     try {
       buffer = Buffer.from(await response.arrayBuffer());
     } catch (err) {
-      log.warn('fetch-image: reading the body failed', { location, error: String(err?.message ?? err).slice(0, 200) });
+      log.warn('fetch-image: reading the body failed', { location, code: err?.code ?? err?.name ?? null });
       return null;
     }
 
@@ -134,4 +135,29 @@ export function createImageFetcher({
   }
 
   return { fetchAsDataUrl };
+}
+
+/**
+ * The bot's avatar as a `data:` URL, the reference for a picture the persona
+ * is in: a static 1024 px PNG, downloaded through `imageFetcher` under
+ * `image.referenceMaxBytes` and `context.vision.fetchTimeoutMs` (`config` is
+ * the caller's `hot.config`, read at the moment of use). Null when there is
+ * no fetcher, no avatar URL, or the download fails; never throws. The one
+ * copy for a turn's drawing (src/behavior/turn.js) and `/nep draw`.
+ * @param {{ client: object, imageFetcher: { fetchAsDataUrl: Function }|null|undefined, config: object }} args
+ * @returns {Promise<string|null>}
+ */
+export async function avatarReference({ client, imageFetcher, config }) {
+  if (!imageFetcher || typeof client?.user?.displayAvatarURL !== 'function') return null;
+  try {
+    const url = client.user.displayAvatarURL({ extension: 'png', size: 1024, forceStatic: true });
+    if (!url) return null;
+    const downloaded = await imageFetcher.fetchAsDataUrl(url, {
+      maxBytes: config?.image?.referenceMaxBytes,
+      timeoutMs: config?.context?.vision?.fetchTimeoutMs,
+    });
+    return downloaded?.dataUrl || null;
+  } catch {
+    return null;
+  }
 }

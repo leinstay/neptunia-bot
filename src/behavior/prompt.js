@@ -5,6 +5,7 @@
 //   2. memory about the person the persona is talking to
 //   2b. what the persona looked up online this turn (`<lookup>`, one piece)
 //   3. how this server talks + what the persona has said about itself
+//   3b. lorebook entries matched by the transcript (`<lore>`)
 //   4. the map of the server's channels
 //   5. the channel transcript, newest messages first
 //   6. memory about other people present in the transcript
@@ -81,9 +82,9 @@ function episodeLines(episodes, labels, nameOf) {
 
 /**
  * Keep `lines[0]` (the episodes heading) plus as many of the following lines
- * (already ordered heaviest-first) as fit `remaining` tokens on top of
- * `restCost` (the rest of the profile) -- the lightest ones are dropped first
- * simply because they sort last. `[]` when even the heading does not fit.
+ * (already ordered heaviest-first) as fit `remaining` tokens, each priced by
+ * `cost` -- the lightest ones are dropped first simply because they sort
+ * last. `[]` when even the heading does not fit.
  */
 function fitEpisodeLines(lines, remaining, cost) {
   if (lines.length === 0) return [];
@@ -109,8 +110,8 @@ function fitEpisodeLines(lines, remaining, cost) {
  * entirely for `marks.stale === false`, since details never go stale). Both
  * marks are OPT IN: `marks.confirmAfter`/`marks.staleDays` being anything
  * other than a plain number (i.e. omitted -- the direct-call/older-caller
- * case) never marks anything, so a caller that does not know about this
- * feature renders exactly as before. A missing label appends nothing.
+ * case) never marks anything, so such a caller renders the text with no
+ * mark at all. A missing label appends nothing.
  * @param {string} text
  * @param {{ weight?: number, lastSeen?: string|null }} item
  * @param {object} p  `labels.profile`.
@@ -157,7 +158,7 @@ function renderInterestItem(item, p, marks) {
  * profile can hold more than a lowered live cap until the next analyzer
  * update evicts). `marks` (see `markConfirmation`) controls the unsure/stale
  * marks on each item; without `marks.interestHalfLifeDays` the rank is pure
- * weight (no decay), matching the behaviour before this feature.
+ * weight (no decay).
  */
 function interestsText(interests, labels, maxInterests, marks) {
   if (!Array.isArray(interests) || interests.length === 0) return '';
@@ -487,7 +488,7 @@ function loreItems(loreEntries, history, trigger, labels, loreCfg, nameOf) {
   const recentTexts = history.slice(-scan).map((m) => m.content ?? '').filter(Boolean);
   if (trigger?.content) recentTexts.push(trigger.content);
 
-  const matched = matchLore(entries, recentTexts, { maxMatches: loreCfg?.maxMatches ?? Infinity });
+  const matched = matchLore(entries, recentTexts, { maxMatches: loreCfg?.maxMatches ?? 8 });
   return matched.map((lore) => fill(entry, { title: lore.title, text: resolveChatText(lore.text, nameOf) }));
 }
 
@@ -627,10 +628,21 @@ export function buildDrawPrompt({ prompts, selfName, request, self }) {
     .trim();
 }
 
+/**
+ * Whether `labels` (prompts.labels) can render a request at all: an object
+ * with `transcript`. The startup check (src/index.js) and every request
+ * builder use this one test.
+ * @param {unknown} labels
+ * @returns {boolean}
+ */
+export function hasRequiredLabels(labels) {
+  return Boolean(labels) && typeof labels === 'object' && Boolean(labels.transcript);
+}
+
 /** A deployment with no/broken labels.json must fail loudly, not send a broken prompt. */
 function requireLabels(prompts) {
   const labels = prompts?.labels;
-  if (!labels || !labels.transcript) {
+  if (!hasRequiredLabels(labels)) {
     throw new Error('prompts.labels is missing or incomplete: labels.transcript is required');
   }
   return labels;
@@ -882,7 +894,7 @@ function splitPeople(otherProfiles, candidateProfiles, history, trigger, exclude
  * @param {boolean} [input.forced]  True for an owner-forced turn (`/nep interject`, `/nep
  *   initiate`): when `prompts.forced` is a non-empty string, its filled text is appended to the
  *   task text (same placeholders as `prompts[mode]`) so the model knows `<skip/>` is not the
- *   expected outcome this time. Missing `prompts.forced` -> no change, same as before this existed.
+ *   expected outcome this time. Missing `prompts.forced` -> the task text is left as it is.
  * @param {number} input.now
  * @param {string} input.selfName
  * @param {object[]} input.history         Normalized channel messages, oldest first.
@@ -943,7 +955,10 @@ function splitPeople(otherProfiles, candidateProfiles, history, trigger, exclude
  *   lines; with `features.variety` on (a missing key counts as on) and `labels.variety.intro`
  *   present, rendered as `<worn>` (see src/behavior/variety.js#renderWorn). Omitted, null or
  *   empty -> no block.
- * @returns {{ messages: object[], stats: object, idByIndex: Map<number, string>, tempo: object }}
+ * @returns {{ messages: object[], stats: object, idByIndex: Map<number, string>, tempo: object,
+ *   pictures: object[], textFallback: string|null }}  `pictures` are the ones attached as
+ *   image_url parts; `textFallback` is the same user message with every attached picture
+ *   rendered blind or described (null when nothing is attached), for a provider that rejects them.
  */
 export function buildRequest(input) {
   const { config, prompts, calibrator, mode, forced = false, now, selfName, history, neighbors, trigger, triggerKind, channels = [], currentChannelId = null, descriptions, videos, reads, lookup = null } = input;
@@ -1027,9 +1042,11 @@ export function buildRequest(input) {
   });
 
   // A private chat has no neighbouring channels (and no server map, below).
+  // A neighbour's message is cut shorter than the chat's (context.neighborMessageChars).
+  const neighborChars = config.context.neighborMessageChars ?? 300;
   const neighborItems = (privateChat ? [] : neighbors).map(
     ({ channelName, messages }) =>
-      `# ${channelName}\n${formatTranscript(messages, { ...formatOptions, maxChars: 300 })
+      `# ${channelName}\n${formatTranscript(messages, { ...formatOptions, maxChars: neighborChars })
         .map((item) => item.text.replace(/^#\d+ /gm, ''))
         .join('\n')}`,
   );
@@ -1037,8 +1054,8 @@ export function buildRequest(input) {
   const caps = config.context.caps;
   const cost = (text) => calibrator.apply(estimateTokens(text)) + 2;
   const limit =
-    Math.floor(config.llm.maxRequestTokens * config.llm.safetyMargin) -
-    pictures.length * (visionCfg.tokensPerImage ?? 0) -
+    Math.floor(config.llm.maxRequestTokens * (Number.isFinite(config.llm.safetyMargin) && config.llm.safetyMargin > 0 && config.llm.safetyMargin <= 1 ? config.llm.safetyMargin : 0.9)) -
+    pictures.length * (visionCfg.tokensPerImage ?? 400) -
     TAG_OVERHEAD;
 
   // <people> priority (b)/(c): who the trigger message / the last few
@@ -1102,7 +1119,7 @@ export function buildRequest(input) {
       },
       {
         name: 'server',
-        cap: caps.server ?? 2500,
+        cap: caps.server ?? 4000,
         keep: 'first',
         items: privateChat
           ? []

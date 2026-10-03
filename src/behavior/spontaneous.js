@@ -106,11 +106,14 @@ export function chooseMode(history, now, cfg, rng) {
  * Whether `channel`'s last message is older than `cfg.maxChannelSilenceHours`
  * -- such a channel is never a candidate for a spontaneous turn (interject or
  * initiate) started on the persona's own initiative. A `maxChannelSilenceHours`
- * that is not a positive number means no limit (today's behaviour): a direct
- * ping in a dead channel is still answered elsewhere, this only concerns
- * starting on her own.
+ * that is not a positive number means no limit. A direct ping in a dead
+ * channel is still answered: this only concerns the persona starting on its own.
+ * @param {object} channel
+ * @param {number} now
+ * @param {{ maxChannelSilenceHours?: number }} cfg  config.spontaneous
+ * @returns {boolean}
  */
-export function isChannelDead(channel, cfg, now) {
+export function isChannelDead(channel, now, cfg) {
   const maxHours = cfg.maxChannelSilenceHours;
   if (!(typeof maxHours === 'number' && maxHours > 0)) return false;
   return now - lastActivity(channel) > maxHours * HOUR_MS;
@@ -180,7 +183,7 @@ export function createSpontaneous({
 
   function channelCandidates(guild, config, cfg, t) {
     return readableChannels(guild, config.bot)
-      .filter((channel) => passesFilters(channel, config, cfg, t) && !isChannelDead(channel, cfg, t))
+      .filter((channel) => passesFilters(channel, config, cfg, t) && !isChannelDead(channel, t, cfg))
       .map((channel) => ({ channel, lastActivity: lastActivity(channel) }));
   }
 
@@ -219,64 +222,74 @@ export function createSpontaneous({
     if (!isActiveHour(hour, cfg.activeHours)) {
       schedule[guildId] = t + msUntilActive(t, config.bot.timezone, cfg.activeHours, rng);
       store.state.markDirty();
-      log.info('spontaneous: outside active hours, sleeping', { guild: guildId, wakeAt: schedule[guildId] });
+      log.info('spontaneous: outside active hours, sleeping', { guildId, wakeAt: schedule[guildId] });
       return;
     }
 
     const channel = pickChannel(channelCandidates(guild, config, cfg, t), t, rng);
 
+    if (!channel) {
+      schedule[guildId] = t + between(REWAKE_MINUTES, rng) * MINUTE_MS;
+      store.state.markDirty();
+      log.info('spontaneous: no eligible channel', { guildId });
+      return;
+    }
+
     // Reschedule before awaiting the turn, so a slow turn cannot double-fire.
     schedule[guildId] = t + nextDelayMs(cfg, rng);
     store.state.markDirty();
 
-    if (!channel) {
-      schedule[guildId] = t + between(REWAKE_MINUTES, rng) * MINUTE_MS;
-      store.state.markDirty();
-      log.info('spontaneous: no eligible channel', { guild: guildId });
-      return;
-    }
-
     running.add(guildId);
-    log.info('spontaneous: firing a turn', { guild: guildId, channel: channel.id });
+    log.info('spontaneous: firing a turn', { guildId, channel: channel.id });
     try {
       const result = await turns.runTurn({ channel, mode: 'auto', chooseMode: makeChooseMode(cfg) });
-      log.info('spontaneous: turn finished', { guild: guildId, channel: channel.id, outcome: result.outcome });
+      log.info('spontaneous: turn finished', { guildId, channel: channel.id, outcome: result.outcome });
       if (result.outcome === 'not-now') {
         schedule[guildId] = now() + between(REWAKE_MINUTES, rng) * MINUTE_MS;
         store.state.markDirty();
       }
     } catch (err) {
-      log.error('spontaneous: turn failed', { guild: guildId, error: err });
+      log.error('spontaneous: turn failed', { guildId, error: err });
     } finally {
       running.delete(guildId);
     }
+  }
+
+  /**
+   * Whether an eavesdrop may happen now, `config` read by the caller now:
+   * not warming up, both switches on (eavesdropping is a form of spontaneous
+   * speech) and inside active hours. A pause is checked by runTurn itself.
+   */
+  function eavesdropAllowed(config, t) {
+    if (isWarmingUp()) return false;
+    const features = config.features ?? {};
+    if (features.spontaneous === false || features.eavesdrop === false) return false;
+    return isActiveHour(localHour(t, config.bot.timezone), config.spontaneous.activeHours);
   }
 
   /** Eavesdrop on a freshly observed message and maybe jump in after a delay. */
   function onMessage(channel, normalized) {
     // /nep pause: no eavesdrop scheduling while paused.
     if (store.state.data.paused) return;
-    // A memory warmup run is in flight: no eavesdrop scheduling either.
-    if (isWarmingUp()) return;
 
     const config = hot.config;
     const cfg = config.spontaneous;
-    const features = config.features ?? {};
-    // Eavesdropping is a form of spontaneous speech: it needs both switches on.
-    if (features.spontaneous === false || features.eavesdrop === false) return;
+    const t = now();
+    // A memory warmup run, a switch off or the persona asleep: no eavesdrop scheduling.
+    if (!eavesdropAllowed(config, t)) return;
     if (normalized.self || normalized.bot) return;
     if (channel.guild.id !== getGuildId()) return;
-
-    const t = now();
-    if (!isActiveHour(localHour(t, config.bot.timezone), cfg.activeHours)) return;
     if (!passesFilters(channel, config, cfg, t)) return;
     if (rng() >= cfg.eavesdropChance) return;
 
     const delay = between(cfg.eavesdropDelayMs, rng);
     const timer = setTimeout(() => {
       eavesdropTimers.delete(timer);
+      // Up to eavesdropDelayMs later: the same checks again, on the config read now.
+      const current = hot.config;
+      if (!eavesdropAllowed(current, now())) return;
       turns
-        .runTurn({ channel, mode: 'auto', chooseMode: makeChooseMode(cfg) })
+        .runTurn({ channel, mode: 'auto', chooseMode: makeChooseMode(current.spontaneous) })
         .catch((err) => log.error('spontaneous: eavesdrop turn failed', { channel: channel.id, error: err }));
     }, delay);
     timer.unref?.();

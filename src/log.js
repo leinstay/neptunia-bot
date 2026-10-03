@@ -35,6 +35,13 @@ function write(level, msg, meta) {
   process.stdout.write(JSON.stringify(entry) + '\n');
 }
 
+/**
+ * The logger: `log.info|warn|error(msg, meta)` writes one JSON line
+ * (`{ level, time, msg, ...meta }`) to stdout; an Error in `meta` (or `meta`
+ * itself) is serialised with its name, message, code, status and stack.
+ * Messages are `module: event`; meta carries ids, counts and codes, never
+ * message contents.
+ */
 export const log = {
   info: (msg, meta) => write('info', msg, meta),
   warn: (msg, meta) => write('warn', msg, meta),

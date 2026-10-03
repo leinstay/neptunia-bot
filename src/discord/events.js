@@ -28,9 +28,12 @@ import { addPending, isExpired, popOldest, requeuePending } from '../behavior/pe
 import { between } from '../behavior/random.js';
 import { fillPromptTemplate } from '../behavior/prompt.js';
 import { privateGate } from '../behavior/private.js';
-import { limitNotice, isLimitNotice } from '../behavior/limits.js';
+import { isLimitNotice, postLimitNotice } from '../behavior/limits.js';
 import { log } from '../log.js';
-import { utcDay } from '../time.js';
+import { MINUTE_MS, utcDay } from '../time.js';
+
+/** @typedef {import('../behavior/turn.js').TurnOutcome} TurnOutcome */
+/** @typedef {import('../behavior/turn.js').TriggerKind} TriggerKind */
 
 // The most pictures one observed message warms the describer cache for --
 // this runs per real-time message, not per batch, so it stays cheap.
@@ -58,6 +61,8 @@ const PREFILL_PER_USER_PER_DAY_FALLBACK = 10;
  *   ever running a turn. Absent -- an older/direct caller, or a test that never opens a window --
  *   simply means `features.followUp` cannot ever fire (nothing reaches this dependency otherwise).
  * @param {() => string | null} deps.getGuildId  the single guild this instance serves, or null before it resolves
+ * @param {(guildId: string) => string} [deps.getSelfName]  The persona's display name in a guild
+ *   (src/index.js). Default: the client's cached guild member, else the bot user's name.
  * @param {() => boolean} [deps.isWarmingUp]  true while the memory warmup runner
  *   (src/memory/warmup.js) is in flight: messages are still observed, but no
  *   trigger, turn, eavesdrop or pending-ping drain happens. Default: never warming up.
@@ -96,6 +101,7 @@ export function createMessageHandler({
   memory,
   tagHistory,
   getGuildId,
+  getSelfName = (guildId) => client.guilds?.cache?.get(guildId)?.members?.me?.displayName ?? client.user?.username ?? 'bot',
   isWarmingUp = () => false,
   describer,
   llm,
@@ -104,17 +110,29 @@ export function createMessageHandler({
   now = Date.now,
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 }) {
-  async function resolveReference(message, selfId) {
-    const refId = message.reference?.messageId;
-    if (!refId) return false;
-    const cached = message.channel.messages.cache.get(refId);
-    const ref = cached ?? (await message.channel.messages.fetch(refId).catch(() => null));
+  /**
+   * Whether the message `replyToId` (normalizeMessage's: a forward has none)
+   * is one of the persona's own: the channel's cache first, then a fetch.
+   */
+  async function resolveReference(channel, replyToId, selfId) {
+    if (!replyToId) return false;
+    const cached = channel.messages.cache.get(replyToId);
+    const ref = cached ?? (await channel.messages.fetch(replyToId).catch(() => null));
     return ref?.author?.id === selfId;
   }
 
   /**
-   * Fire-and-forget: the message path never waits on it (see the class
-   * doc). A no-op when the feature is off or no describer was wired in, so
+   * Whether a turn blocks a new one in `channelId` (config read by the caller
+   * now): with one attention (mention.oneAtATime, default on) a turn running
+   * anywhere, otherwise one running in this channel -- the rule runTurn applies.
+   */
+  function turnBlocked(channelId, config) {
+    return config.mention?.oneAtATime !== false ? turns.isAnyBusy() : turns.isBusy(channelId);
+  }
+
+  /**
+   * Fire-and-forget: the message path never waits on it (see
+   * createMessageHandler). A no-op when the feature is off or no describer was wired in, so
    * this pipeline makes zero describer calls in that case. Returns the
    * picture prefill's promise (it never rejects), or null when none started:
    * only the address classifier awaits it, so a sticker- or picture-only
@@ -161,7 +179,7 @@ export function createMessageHandler({
     }
     if (typeof describer.cachedVideos === 'function') {
       const sites = config.media?.video?.sites;
-      const items = messages.flatMap((m) => collectVideos(m, { sites }));
+      const items = messages.flatMap((m) => collectVideos(m, { videoSites: sites }));
       if (items.length > 0) media.videos = await describer.cachedVideos(guildId, items);
     }
     return media;
@@ -176,7 +194,7 @@ export function createMessageHandler({
     if (features.mediaDescriptions !== true || features.videoDescriptions === false) return;
     if (config.media?.video?.prefill !== true) return;
     if (typeof describer.describeVideos !== 'function') return;
-    const candidates = collectVideos(normalized, { sites: config.media.video.sites }).slice(0, MAX_WARM_VIDEOS_PER_MESSAGE);
+    const candidates = collectVideos(normalized, { videoSites: config.media.video.sites }).slice(0, MAX_WARM_VIDEOS_PER_MESSAGE);
     if (candidates.length === 0) return;
     describer
       .describeVideos(guildId, candidates)
@@ -198,7 +216,7 @@ export function createMessageHandler({
     if (config.features?.webLookup !== true) return;
     const linksCfg = config.web?.links ?? {};
     if (linksCfg.enabled === false || linksCfg.prefill !== true) return;
-    const links = collectReadableLinks(normalized, { sites: config.media?.video?.sites ?? [] }).slice(0, MAX_WARM_LINKS_PER_MESSAGE);
+    const links = collectReadableLinks(normalized, { videoSites: config.media?.video?.sites ?? [] }).slice(0, MAX_WARM_LINKS_PER_MESSAGE);
     if (links.length === 0) return;
     const perUser = Number.isFinite(linksCfg.prefillPerUserPerDay)
       ? Math.max(0, Math.floor(linksCfg.prefillPerUserPerDay))
@@ -277,11 +295,13 @@ export function createMessageHandler({
   /**
    * Startup: load the saved windows back, dropping (and deleting from state)
    * any whose last answer is already older than `mention.followUpMinutes`
-   * (read now) or that is malformed.
+   * (read now) or that is malformed. Started paused (`/nep pause`), the
+   * dropped ones are only left out of the Map: state.json is not touched.
    */
   function loadFollowUpWindows() {
     const saved = store?.state?.data?.followUpWindows;
     if (!saved || typeof saved !== 'object') return;
+    const paused = Boolean(store.state.data.paused);
     const minutes = hot.config.mention?.followUpMinutes ?? 15;
     const t = now();
     let dropped = 0;
@@ -291,15 +311,17 @@ export function createMessageHandler({
         Number.isFinite(entry.openedAt) &&
         Number.isFinite(entry.lastAnswerAt) &&
         Number.isFinite(entry.noStreak);
-      if (valid && t - entry.lastAnswerAt < minutes * 60_000) {
+      if (valid && t - entry.lastAnswerAt < minutes * MINUTE_MS) {
         followUpWindows.set(channelId, { openedAt: entry.openedAt, lastAnswerAt: entry.lastAnswerAt, noStreak: entry.noStreak });
       } else {
-        delete saved[channelId];
+        if (!paused) delete saved[channelId];
         dropped += 1;
       }
     }
-    if (dropped > 0) store.state.markDirty?.();
-    if (followUpWindows.size > 0 || dropped > 0) log.info('follow-up: windows restored', { restored: followUpWindows.size, dropped });
+    if (dropped > 0 && !paused) store.state.markDirty?.();
+    if (followUpWindows.size > 0 || dropped > 0) {
+      log.info('follow-up: windows restored', { restored: followUpWindows.size, dropped, ...(paused ? { paused: true } : {}) });
+    }
   }
   loadFollowUpWindows();
 
@@ -338,7 +360,7 @@ export function createMessageHandler({
     if (!addressPrompt) return null;
     const labels = prompts.labels;
     const contextLines = Math.max(0, config.mention.followUpContext ?? 15);
-    const raw = contextLines > 0 ? await fetchHistory(channel, contextLines, selfId, config.media?.embedTextChars, config.media?.video?.sites) : [];
+    const raw = contextLines > 0 ? await fetchHistory(channel, { limit: contextLines, selfId, embedTextChars: config.media?.embedTextChars, videoSites: config.media?.video?.sites }) : [];
     const history = raw.filter((m) => m.id !== normalized.id);
     const messages = [...history, normalized];
     const { descriptions, videos } = await cachedFollowUpMedia(channel.guild.id, messages, config, ownPrefill);
@@ -387,9 +409,10 @@ export function createMessageHandler({
   /**
    * The checks in front of the classifier, read from the hot config now:
    * `{ kind: 'skip', reason }` when the classifier does not apply (feature
-   * off, no open window, busy in this channel, cannot send), `{ kind:
-   * 'handled' }` when the pre-filter already gave a "no" (logged, streak
-   * bumped), `{ kind: 'classify', config, state }` when the model must be asked.
+   * off, no open window, a turn that would refuse this one -- see
+   * turnBlocked -- cannot send), `{ kind: 'handled' }` when the pre-filter
+   * already gave a "no" (logged, streak bumped), `{ kind: 'classify', config,
+   * state }` when the model must be asked.
    */
   function followUpGate(message, normalized, selfId) {
     const config = hot.config;
@@ -404,8 +427,9 @@ export function createMessageHandler({
       if (state) closeFollowUpWindow(channelId); // expired: forget it here and in state.json
       return { kind: 'skip', reason: 'closed' };
     }
-    if (turns.isBusy(channelId)) return { kind: 'skip', reason: 'busy' };
-    if (!canSend(channel)) return { kind: 'skip', reason: 'cannotSend' };
+    // The paid classifier is not asked for a "yes" runTurn would refuse anyway.
+    if (turnBlocked(channelId, config)) return { kind: 'skip', reason: 'busy' };
+    if (!canSend(channel)) return { kind: 'skip', reason: 'cannot-send' };
 
     const startedAt = now();
     if (followUpPreFilter(normalized, selfId, mentionCfg)) {
@@ -423,7 +447,7 @@ export function createMessageHandler({
    * caller must then NOT also hand it to the spontaneous scheduler. Never
    * throws: an LLM/context-building error is treated as a "no" per the
    * contract. `false` means none of this applied (feature off, no open
-   * window, busy in this channel) and the caller falls back to its usual
+   * window, a turn running that blocks this one) and the caller falls back to its usual
    * handling. `ownPrefill` is the message's picture prefill from
    * warmMediaCache (or null), awaited before its classifier request is built.
    */
@@ -501,23 +525,28 @@ export function createMessageHandler({
   /**
    * One classifier call for `normalized` (the gate already passed): logs the
    * verdict, starts a reply turn on "yes", bumps the no-streak otherwise.
-   * Resolves to whether a turn was started. The caller owns the in-flight slot.
+   * Resolves to whether a turn was started: a "yes" that finds a turn
+   * running which would refuse this one (turnBlocked, read now) starts none
+   * and is logged as `follow-up: dropped`. The caller owns the in-flight slot.
    */
   async function classifyFollowUp(message, normalized, selfId, { config, state }, ownPrefill = null) {
     const channel = message.channel;
     const channelId = channel.id;
     const mentionCfg = config.mention;
     const startedAt = now();
-    const selfName = channel.guild.members.me?.displayName ?? client.user.username;
+    const selfName = getSelfName(channel.guild.id);
     let request = null;
+    let buildFailed = false;
     try {
       request = await buildFollowUpRequest({ config, prompts: hot.prompts, channel, selfId, selfName, normalized, ownPrefill });
     } catch (err) {
+      buildFailed = true;
       log.warn('follow-up: building the classifier request failed', { channel: channelId, error: err });
     }
 
     if (!request) {
-      if (!missingAddressPromptLogged) {
+      // Only a really missing prompt latches its one warning; a failed build was logged above.
+      if (!buildFailed && !missingAddressPromptLogged) {
         missingAddressPromptLogged = true;
         log.warn('follow-up: prompts.address is missing, every follow-up is treated as "no"', {});
       }
@@ -546,8 +575,9 @@ export function createMessageHandler({
           },
         );
         verdict = parseFollowUpVerdict(completion.text);
-      } catch {
+      } catch (err) {
         verdict = 'no';
+        log.warn('follow-up: classifier failed', { channel: channelId, error: err });
       }
     }
 
@@ -557,14 +587,26 @@ export function createMessageHandler({
       bumpFollowUpNoStreak(channelId, state, mentionCfg);
       return false;
     }
+    // A turn started elsewhere while the classifier was thinking: runTurn
+    // would answer 'busy', so none is started (and a held message is not
+    // dropped as already answered).
+    if (turnBlocked(channelId, hot.config)) {
+      log.info('follow-up: dropped', { channel: channelId, message: normalized.id, reason: 'busy' });
+      return false;
+    }
     // Still counted for spam (mention.spamThreshold, future explicit
     // pings), just never rolled for the ignore chance -- a follow-up is a
     // continuation, not a ping (see docs/prompt-contract.md).
     tagHistory.hit(normalized.authorId, now(), repeatWindowMs(mentionCfg));
     turns
       .runTurn({ channel, mode: 'reply', trigger: normalized, triggerKind: 'followUp' })
-      .then((result) => announceRefusal(channel, normalized, result))
-      .catch((err) => log.error('events: follow-up reply turn failed', { channel: channelId, error: err }));
+      .then((result) => {
+        if (result?.outcome === 'busy') {
+          log.info('follow-up: dropped', { channel: channelId, message: normalized.id, reason: 'busy' });
+        }
+        return announceRefusal(channel, normalized, result, 'followUp');
+      })
+      .catch((err) => log.error('follow-up: reply turn failed', { channel: channelId, error: err }));
     return true;
   }
 
@@ -574,60 +616,44 @@ export function createMessageHandler({
   // numbers (labels.limits.notice), so the requester knows it was a limit and
   // not silence in character. Spontaneous turns never come through here.
 
-  /** The dry-run mirror (`bot.dryRunChannelId`, read now); failures are logged and swallowed. */
-  async function mirrorDryRun(header, body) {
-    const dryRunChannelId = hot.config.bot?.dryRunChannelId || '';
-    if (!dryRunChannelId) return;
-    try {
-      const mirror = await client.channels.fetch(dryRunChannelId);
-      if (!mirror) return;
-      await mirror.send({ content: `${header}\n${body}`, allowedMentions: { parse: [] } });
-    } catch (err) {
-      log.warn('events: dry-run mirror failed', { dryRunChannelId, error: err });
-    }
+  /**
+   * Post the limit notice (src/behavior/limits.js#postLimitNotice: labels,
+   * dry-run and the mirror read now). A follow-up's notice is never a
+   * Discord reply, like the follow-up turn itself. Never throws.
+   * @param {TriggerKind} triggerKind
+   */
+  async function notifyLimit(channel, trigger, limit, triggerKind) {
+    await postLimitNotice({
+      channel,
+      trigger,
+      limit,
+      asReply: triggerKind !== 'followUp',
+      labels: hot.prompts?.labels,
+      config: hot.config,
+      client,
+    });
   }
 
   /**
-   * Post the limit notice as a plain reply to the trigger, no mentions. A
-   * missing label sends nothing; in dry-run (read now) it is logged and
-   * mirrored instead. Never throws.
+   * After a triggered turn: a rail refusal that carries its limit gets the notice.
+   * @param {{ outcome: TurnOutcome, limit?: object|null }|undefined} result
+   * @param {TriggerKind} triggerKind
    */
-  async function notifyLimit(channel, trigger, limit) {
-    const text = limit ? limitNotice(hot.prompts?.labels, limit) : '';
-    if (!text) return;
-    try {
-      if (hot.config.features?.dryRun === true) {
-        log.info('dry-run: would notify limit', { channel: channel.id, key: limit.key, used: limit.used, cap: limit.cap });
-        await mirrorDryRun(`[dry-run] #${channel.name ?? null} · limit`, text);
-        return;
-      }
-      await channel.send({
-        content: text,
-        reply: trigger?.id ? { messageReference: trigger.id, failIfNotExists: false } : undefined,
-        allowedMentions: { parse: [] },
-      });
-      log.info('events: limit notice sent', { channel: channel.id, key: limit.key });
-    } catch (err) {
-      log.warn('events: limit notice failed', { channel: channel.id, error: err });
-    }
-  }
-
-  /** After a triggered turn: a rail refusal that carries its limit gets the notice. */
-  async function announceRefusal(channel, trigger, result) {
+  async function announceRefusal(channel, trigger, result, triggerKind) {
     if (result?.outcome !== 'refused' || !result.limit) return;
-    await notifyLimit(channel, trigger, result.limit);
+    await notifyLimit(channel, trigger, result.limit, triggerKind);
   }
 
   /**
    * After a private turn: every turn that reached the model (it spoke, or it
    * chose to stay silent -- `skip`) counts toward today's cap; a refusal is
-   * announced. A refused, busy, paused, failed or not-now turn is not counted.
+   * announced. A refused, busy, paused, error or not-now turn is not counted.
    */
   async function afterPrivateTurn(channel, guildId, trigger, result) {
     if (result?.outcome === 'spoke' || result?.outcome === 'skip') {
       store.bumpPrivateReplies(guildId, trigger.authorId, utcDay(now()));
     }
-    await announceRefusal(channel, trigger, result);
+    await announceRefusal(channel, trigger, result, 'private');
   }
 
   /**
@@ -665,7 +691,7 @@ export function createMessageHandler({
     if (gate.reason === 'cap' && replies?.noticedDay !== today) {
       store.markPrivateNoticed(guildId, authorId, today);
       const key = isOwner ? 'private.maxPerOwnerPerDay' : 'private.maxPerUserPerDay';
-      await notifyLimit(channel, trigger, { key, used: gate.used, cap: gate.cap });
+      await notifyLimit(channel, trigger, { key, used: gate.used, cap: gate.cap }, 'private');
     }
   }
 
@@ -700,7 +726,7 @@ export function createMessageHandler({
     const { list, evicted } = addPending(pendingList, ping, maxPending);
     pendingList = list;
     log.info('mention: deferred', { channel: channel.id, kind, sameChannel: turns.isBusy(channel.id), pending: pendingList.length });
-    if (evicted) log.info('mention: dropped (full)', { channel: evicted.channelId, kind: evicted.kind });
+    if (evicted) log.info('mention: dropped', { channel: evicted.channelId, kind: evicted.kind, reason: 'full' });
   }
 
   /**
@@ -716,12 +742,48 @@ export function createMessageHandler({
     const { list, dropped, evicted } = requeuePending(pendingList, ping, mentionCfg.maxPending ?? 3);
     pendingList = list;
     if (dropped) {
-      log.info('mention: dropped (newer)', { channel: dropped.channelId, kind: dropped.kind });
+      log.info('mention: dropped', { channel: dropped.channelId, kind: dropped.kind, reason: 'newer' });
     } else {
-      log.info('mention: deferred again (busy)', { channel: ping.channelId, kind: ping.kind, pending: pendingList.length });
+      log.info('mention: deferred again', { channel: ping.channelId, kind: ping.kind, reason: 'busy', pending: pendingList.length });
     }
-    if (evicted) log.info('mention: dropped (full)', { channel: evicted.channelId, kind: evicted.kind });
-    return mentionCfg.oneAtATime !== false ? turns.isAnyBusy() : turns.isBusy(ping.channelId);
+    if (evicted) log.info('mention: dropped', { channel: evicted.channelId, kind: evicted.kind, reason: 'full' });
+    return turnBlocked(ping.channelId, hot.config);
+  }
+
+  /**
+   * Count the call, roll the ignore decision (decideMention) and log it, for
+   * a server ping of `kind` -- the live path and the drain alike. `config` is
+   * the caller's `hot.config`, read at the moment of use; `deferred` marks a
+   * ping answered from the pending queue.
+   * @returns {{ respond: boolean, reason: string, ignoreChance: number, roll?: number }}
+   */
+  function decideAndLog(channel, trigger, kind, config, { deferred = false } = {}) {
+    const features = config.features ?? {};
+    const guildId = channel.guild.id;
+    const recentCalls = tagHistory.hit(trigger.authorId, now(), repeatWindowMs(config.mention));
+    const affinityScore =
+      features.memory !== false && features.relationships !== false
+        ? store?.getUser?.(guildId, trigger.authorId)?.affinity?.score
+        : undefined;
+    const decision = decideMention({
+      kind,
+      textLength: strippedLength(trigger.content, getSelfName(guildId)),
+      recentCalls,
+      neverIgnore: config.mention.neverIgnore.includes(trigger.authorId),
+      affinityScore,
+      cfg: config.mention,
+      rng,
+    });
+    log.info('mention: decided', {
+      kind,
+      reason: decision.reason,
+      ignoreChance: decision.ignoreChance,
+      roll: decision.roll === undefined ? undefined : Math.round(decision.roll * 100) / 100,
+      author: trigger.authorId,
+      channel: channel.id,
+      ...(deferred ? { deferred: true } : {}),
+    });
+    return decision;
   }
 
   /**
@@ -738,7 +800,11 @@ export function createMessageHandler({
    * the turn this function itself starts also frees the channel through the very same `onIdle`,
    * which would otherwise start a second overlapping drain. A no-op while
    * `isWarmingUp()` is true -- the queue is left untouched for a later
-   * call once the warmup run ends.
+   * call once the warmup run ends -- and while paused (`/nep pause` clears
+   * the queue itself); a pause that lands during the switch pause drops the
+   * ping in hand and ends the pass. A server ping is also dropped when its
+   * channel is no longer allowed (bot.channels) or its switch
+   * (features.mentions / features.replies) was turned off while it waited.
    *
    * A turn that started during the switch pause makes runTurn answer 'busy':
    * the ping is re-queued (requeueBusy; a server ping keeps its `respond`
@@ -750,7 +816,7 @@ export function createMessageHandler({
    * looked and the pass goes on instead of stopping.
    */
   async function drainPending() {
-    if (draining || isWarmingUp()) return;
+    if (draining || isWarmingUp() || store?.state?.data?.paused) return;
     draining = true;
     try {
       while (pendingList.length > 0) {
@@ -767,6 +833,12 @@ export function createMessageHandler({
         log.info('mention: picked up', { channel: ping.channelId, kind: ping.kind });
         await sleep(between(mentionCfg.switchDelayMs ?? [2000, 9000], rng));
 
+        // Paused meanwhile: nothing may run or mark the store dirty; the
+        // queue's other pings are cleared by the pause itself.
+        if (store?.state?.data?.paused) {
+          log.info('mention: dropped', { channel: ping.channelId, kind: ping.kind, reason: 'paused' });
+          break;
+        }
         if (!canSend(ping.channel)) continue;
         if (!(await messageStillExists(ping.channel, ping.trigger.id))) continue;
         // The turn that ran meanwhile fetched its history after this ping
@@ -804,51 +876,33 @@ export function createMessageHandler({
             if (result?.outcome === 'busy') stop = requeueBusy(ping);
             else await afterPrivateTurn(ping.channel, privateGuildId, ping.trigger, result);
           } catch (err) {
-            log.error('events: deferred private turn failed', { channel: ping.channelId, error: err });
+            log.error('private: deferred turn failed', { channel: ping.channelId, error: err });
           }
           if (stop) break;
+          continue;
+        }
+
+        // The channel list and the ping's own switch are hot: either may have
+        // changed while the ping waited.
+        const switchOff = ping.kind === 'reply' ? features.replies === false : features.mentions === false;
+        if (!channelAllowed(ping.channel, config.bot) || switchOff) {
+          log.info('mention: dropped', { channel: ping.channelId, kind: ping.kind, reason: switchOff ? 'off' : 'channel' });
           continue;
         }
 
         // A re-queued ping was already counted and decided `respond` on the
         // pass whose turn found another one running: not counted or rolled again.
         if (!ping.decided) {
-          const memoryOn = features.memory !== false;
-          const relationshipsOn = features.relationships !== false;
-          const guildId = ping.channel.guild.id;
-          const recentCalls = tagHistory.hit(ping.trigger.authorId, now(), repeatWindowMs(config.mention));
-          const selfName = ping.channel.guild.members.me?.displayName ?? client.user.username;
-          const affinityScore =
-            memoryOn && relationshipsOn ? store?.getUser?.(guildId, ping.trigger.authorId)?.affinity?.score : undefined;
-          const decision = decideMention({
-            kind: ping.kind,
-            textLength: strippedLength(ping.trigger.content, selfName),
-            recentCalls,
-            neverIgnore: config.mention.neverIgnore.includes(ping.trigger.authorId),
-            affinityScore,
-            cfg: config.mention,
-            rng,
-          });
-
-          log.info('mention: decided', {
-            kind: ping.kind,
-            reason: decision.reason,
-            ignoreChance: decision.ignoreChance,
-            roll: decision.roll === undefined ? undefined : Math.round(decision.roll * 100) / 100,
-            author: ping.trigger.authorId,
-            channel: ping.channelId,
-            deferred: true,
-          });
-
+          const decision = decideAndLog(ping.channel, ping.trigger, ping.kind, config, { deferred: true });
           if (!decision.respond) continue;
         }
 
         try {
           const result = await turns.runTurn({ channel: ping.channel, mode: 'reply', trigger: ping.trigger, triggerKind: ping.kind });
           if (result?.outcome === 'busy') stop = requeueBusy({ ...ping, decided: true });
-          else await announceRefusal(ping.channel, ping.trigger, result);
+          else await announceRefusal(ping.channel, ping.trigger, result, ping.kind);
         } catch (err) {
-          log.error('events: deferred reply turn failed', { channel: ping.channelId, error: err });
+          log.error('mention: deferred turn failed', { channel: ping.channelId, error: err });
         }
         if (stop) break;
       }
@@ -874,7 +928,10 @@ export function createMessageHandler({
     if (!guildId) return;
     const memoryOn = features.memory !== false;
     const channel = message.channel;
-    const normalized = normalizeMessage(message, selfId, { videoSites: config.media?.video?.sites });
+    const normalized = normalizeMessage(message, selfId, {
+      embedTextChars: config.media?.embedTextChars,
+      videoSites: config.media?.video?.sites,
+    });
 
     // The persona's own DM message: bookkeeping, remembered under the
     // partner's id. Without a usable partner id, or for a limit notice (not
@@ -901,9 +958,7 @@ export function createMessageHandler({
 
     // One attention: busy anywhere (or, with oneAtATime off, in this very
     // chat) -> pending, answered by drainPending once the turn frees up.
-    const oneAtATime = config.mention.oneAtATime !== false;
-    const busy = oneAtATime ? turns.isAnyBusy() : turns.isBusy(channel.id);
-    if (busy) {
+    if (turnBlocked(channel.id, config)) {
       enqueuePending(channel, normalized, 'private');
       return;
     }
@@ -911,7 +966,7 @@ export function createMessageHandler({
     turns
       .runTurn({ channel, guildId, mode: 'reply', trigger: normalized, triggerKind: 'private' })
       .then((result) => afterPrivateTurn(channel, guildId, normalized, result))
-      .catch((err) => log.error('events: private turn failed', { channel: channel.id, error: err }));
+      .catch((err) => log.error('private: turn failed', { channel: channel.id, error: err }));
   }
 
   async function onMessage(message) {
@@ -950,7 +1005,10 @@ export function createMessageHandler({
 
       // 4. Normalize.
       const selfId = client.user.id;
-      const normalized = normalizeMessage(message, selfId, { videoSites: config.media?.video?.sites });
+      const normalized = normalizeMessage(message, selfId, {
+        embedTextChars: config.media?.embedTextChars,
+        videoSites: config.media?.video?.sites,
+      });
       const guildId = message.guild.id;
 
       // 5. Its own message: only bookkeeping. Also (re)opens/extends the
@@ -979,9 +1037,10 @@ export function createMessageHandler({
 
       // 8. Detect how (if at all) the persona was called, masking each input
       // by its own feature switch so detectTrigger itself stays pure. Done
-      // BEFORE memory observes the message, so the buffer can mark it.
+      // BEFORE memory observes the message, so the buffer can mark it. A
+      // forward of the persona's own message has no replyToId: not a reply.
       const mentionsSelf = features.mentions !== false && message.mentions.users.has(selfId);
-      const repliesToSelf = features.replies !== false && (await resolveReference(message, selfId));
+      const repliesToSelf = features.replies !== false && (await resolveReference(message.channel, normalized.replyToId, selfId));
       const nameTriggers = features.nameTriggers !== false ? config.bot.nameTriggers : [];
       const kind = detectTrigger({
         mentionsSelf,
@@ -1034,43 +1093,20 @@ export function createMessageHandler({
         if (direct) {
           enqueuePending(message.channel, normalized, kind);
         } else {
-          log.info('mention: dropped (busy)', { channel: message.channel.id, kind });
+          log.info('mention: dropped', { channel: message.channel.id, kind, reason: 'busy' });
         }
         return;
       }
 
-      const recentCalls = tagHistory.hit(normalized.authorId, now(), repeatWindowMs(config.mention));
-      const selfName = message.guild.members.me?.displayName ?? client.user.username;
-      const relationshipsOn = features.relationships !== false;
-      const affinityScore =
-        memoryOn && relationshipsOn ? store?.getUser?.(guildId, normalized.authorId)?.affinity?.score : undefined;
-      const decision = decideMention({
-        kind,
-        textLength: strippedLength(normalized.content, selfName),
-        recentCalls,
-        neverIgnore: config.mention.neverIgnore.includes(normalized.authorId),
-        affinityScore,
-        cfg: config.mention,
-        rng,
-      });
-
-      log.info('mention: decided', {
-        kind,
-        reason: decision.reason,
-        ignoreChance: decision.ignoreChance,
-        roll: decision.roll === undefined ? undefined : Math.round(decision.roll * 100) / 100,
-        author: normalized.authorId,
-        channel: message.channel.id,
-      });
-
+      const decision = decideAndLog(message.channel, normalized, kind, config);
       if (decision.respond) {
         turns
           .runTurn({ channel: message.channel, mode: 'reply', trigger: normalized, triggerKind: kind })
           .then((result) => {
-            if (result?.outcome === 'busy') log.info('mention: dropped (busy)', { channel: message.channel.id, kind });
-            return announceRefusal(message.channel, normalized, result);
+            if (result?.outcome === 'busy') log.info('mention: dropped', { channel: message.channel.id, kind, reason: 'busy' });
+            return announceRefusal(message.channel, normalized, result, kind);
           })
-          .catch((err) => log.error('events: reply turn failed', { channel: message.channel.id, error: err }));
+          .catch((err) => log.error('mention: reply turn failed', { channel: message.channel.id, error: err }));
       }
     } catch (err) {
       log.error('events: message handler failed', { error: err });

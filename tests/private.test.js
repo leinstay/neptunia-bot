@@ -49,7 +49,7 @@ test('privateGate: off wins over every other reason', () => {
 });
 
 test('privateGate: a non-member is refused', () => {
-  assert.deepEqual(gate({ isMember: false }), { ok: false, reason: 'notMember' });
+  assert.deepEqual(gate({ isMember: false }), { ok: false, reason: 'not-member' });
 });
 
 test('privateGate: a member without a stored profile is unknown', () => {
@@ -73,7 +73,7 @@ test('privateGate: owners skip the affinity check and get the owner cap', () => 
 });
 
 test('privateGate: owners still need membership and a profile', () => {
-  assert.deepEqual(gate({ isOwner: true, isMember: false }), { ok: false, reason: 'notMember' });
+  assert.deepEqual(gate({ isOwner: true, isMember: false }), { ok: false, reason: 'not-member' });
   assert.deepEqual(gate({ isOwner: true, profile: null }), { ok: false, reason: 'unknown' });
 });
 

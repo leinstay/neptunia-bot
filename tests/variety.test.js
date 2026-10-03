@@ -558,6 +558,22 @@ test('forTurn: a private chat\'s pass is used for the turn but never stored', as
   assert.deepEqual(store.getGuild('g1').wornHistory, []);
 });
 
+test("forTurn: a private chat's pass never displaces the guild's cached pass, and keeps one of its own", async () => {
+  const { pass, llm } = liveSetup();
+  await pass.forTurn({ ...TURN, history: ownHistory() });
+  const dm = ['only here, what a surprise', 'and again (no)', 'still just us'].map((text, i) =>
+    own(`d${i}`, 5 - i, text, { channelId: 'dm1' }),
+  );
+  const privateTurn = { guildId: 'g1', channelId: 'dm1', selfName: 'Nept', history: dm, privateChat: true };
+  await pass.forTurn(privateTurn);
+  assert.equal(llm.calls.length, 2);
+
+  await pass.forTurn({ ...TURN, history: ownHistory() });
+  assert.equal(llm.calls.length, 2, 'the public lines are still a cache hit');
+  await pass.forTurn(privateTurn);
+  assert.equal(llm.calls.length, 2, 'the private lines too, under their own key');
+});
+
 test('forTurn: logs carry counts, never the lines, the examples or the shapes', async () => {
   const { pass } = liveSetup();
   const { logs } = await withCapturedLogs(() => pass.forTurn({ ...TURN, history: ownHistory() }));

@@ -10,7 +10,6 @@ import {
   repeatWindowMs,
   isFollowUpOpen,
   followUpPreFilter,
-  classifierModelOf,
   classifierTextModel,
   classifierMediaModel,
   classifierVideoModel,
@@ -455,16 +454,6 @@ test('classifierTextModel: the deprecated llm.classifierModel, mention.followUpM
   assert.equal(classifierTextModel(OLD_KEYS), undefined);
   assert.equal(classifierTextModel({}), undefined);
   assert.equal(classifierTextModel(undefined), undefined);
-});
-
-test('classifierModelOf: the deprecated keys are ignored there too', () => {
-  assert.equal(classifierModelOf(OLD_KEYS), undefined);
-  assert.equal(classifierModelOf({ ...OLD_KEYS, classifier: { media: 'x/media' } }), 'x/media');
-});
-
-test('classifierModelOf: an alias of classifierTextModel', () => {
-  const config = { classifier: { text: 'x/text' }, llm: { classifierModel: 'x/llm-classifier' } };
-  assert.equal(classifierModelOf(config), classifierTextModel(config));
 });
 
 test('classifierMediaModel: classifier.media only; the deprecated media.model is ignored', () => {

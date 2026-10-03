@@ -525,6 +525,55 @@ test('onMessage: eavesdrops when spontaneous and eavesdrop are both on (missing 
   assert.equal(calls, 1);
 });
 
+test('onMessage: the eavesdrop timer re-checks warmup, both switches and active hours when it fires', async () => {
+  const cases = [
+    ['warmup', (ctx) => { ctx.warming = true; }],
+    ['eavesdrop off', (ctx) => { ctx.config.features.eavesdrop = false; }],
+    ['spontaneous off', (ctx) => { ctx.config.features.spontaneous = false; }],
+    ['outside active hours', (ctx) => { ctx.time = Date.UTC(2026, 0, 5, 5, 0, 0); }],
+  ];
+  for (const [label, change] of cases) {
+    const channel = fakeChannel('c1', fakeGuild('g1'));
+    let calls = 0;
+    const turns = fakeTurns({ runTurn: async () => { calls += 1; return { outcome: 'spoke' }; } });
+    const ctx = { warming: false, time: Date.UTC(2026, 0, 5, 12, 0, 0), config: eagerEavesdropConfig({}) };
+    const spontaneous = createSpontaneous({
+      hot: { config: ctx.config },
+      store: fakeStore(),
+      client: {},
+      turns,
+      getGuildId: () => 'g1',
+      isWarmingUp: () => ctx.warming,
+      rng: () => 0,
+      now: () => ctx.time,
+    });
+    spontaneous.onMessage(channel, { self: false, bot: false });
+    change(ctx);
+    await flushTimers();
+    assert.equal(calls, 0, label);
+  }
+});
+
+test('onMessage: the eavesdrop chooser reads config.spontaneous when the timer fires', async () => {
+  const channel = fakeChannel('c1', fakeGuild('g1'));
+  const config = eagerEavesdropConfig();
+  config.spontaneous.initiateChance = 0;
+  let chosen;
+  const turns = fakeTurns({
+    runTurn: async ({ chooseMode: choose }) => {
+      chosen = choose([], Date.UTC(2026, 0, 5, 12, 0, 0));
+      return { outcome: 'spoke' };
+    },
+  });
+  const hot = { config };
+  const spontaneous = createSpontaneous({ hot, store: fakeStore(), client: {}, turns, getGuildId: () => 'g1', rng: () => 0, now: () => Date.UTC(2026, 0, 5, 12, 0, 0) });
+  spontaneous.onMessage(channel, { self: false, bot: false });
+  hot.config = eagerEavesdropConfig();
+  hot.config.spontaneous.initiateChance = 1; // a reload between scheduling and firing
+  await flushTimers();
+  assert.equal(chosen, 'initiate');
+});
+
 test('onMessage: ignores a message from a guild other than the one this instance serves', async () => {
   const guild = fakeGuild('g1');
   const channel = fakeChannel('c1', guild);
@@ -659,21 +708,21 @@ test('stop: clears pending eavesdrop timers without throwing', () => {
 test('isChannelDead: silent longer than maxChannelSilenceHours is dead', () => {
   const now = 1_000_000_000;
   const channel = { lastMessageId: snowflake(now - 100 * HOUR) };
-  assert.equal(isChannelDead(channel, { maxChannelSilenceHours: 72 }, now), true);
+  assert.equal(isChannelDead(channel, now, { maxChannelSilenceHours: 72 }), true);
 });
 
 test('isChannelDead: within the window is not dead', () => {
   const now = 1_000_000_000;
   const channel = { lastMessageId: snowflake(now - 10 * HOUR) };
-  assert.equal(isChannelDead(channel, { maxChannelSilenceHours: 72 }, now), false);
+  assert.equal(isChannelDead(channel, now, { maxChannelSilenceHours: 72 }), false);
 });
 
 test('isChannelDead: a non-positive or missing value means no limit', () => {
   const now = 1_000_000_000;
   const ancientChannel = { lastMessageId: snowflake(now - 5000 * HOUR) };
-  assert.equal(isChannelDead(ancientChannel, { maxChannelSilenceHours: 0 }, now), false);
-  assert.equal(isChannelDead(ancientChannel, { maxChannelSilenceHours: -5 }, now), false);
-  assert.equal(isChannelDead(ancientChannel, {}, now), false);
+  assert.equal(isChannelDead(ancientChannel, now, { maxChannelSilenceHours: 0 }), false);
+  assert.equal(isChannelDead(ancientChannel, now, { maxChannelSilenceHours: -5 }), false);
+  assert.equal(isChannelDead(ancientChannel, now, {}), false);
 });
 
 test('tick: a dead channel is never a candidate, a fresh one still is', async () => {

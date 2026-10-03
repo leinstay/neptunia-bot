@@ -8,15 +8,7 @@
 // gate -- see docs/en/prompt-contract.md.
 
 import { normalizeTopic } from '../memory/interests.js';
-
-function clamp(value, min, max) {
-  return Math.min(max, Math.max(min, value));
-}
-
-/** Rounds to 2 decimal places -- the stored precision of an affinity score. */
-function round2(value) {
-  return Math.round(value * 100) / 100;
-}
+import { clampScore } from '../memory/affinity.js';
 
 function finiteOr(value, fallback) {
   return Number.isFinite(value) ? value : fallback;
@@ -51,11 +43,11 @@ function maxIso(a, b) {
  * (no threshold passes, a cap of 0).
  * @param {{ config: object, isMember: boolean, profile: object|null, isOwner: boolean,
  *   replies?: { day?: string, count?: number }|null, today: string }} input
- * @returns {{ ok: true, cap: number } | { ok: false, reason: 'off'|'notMember'|'unknown'|'affinity'|'cap', cap?: number, used?: number }}
+ * @returns {{ ok: true, cap: number } | { ok: false, reason: 'off'|'not-member'|'unknown'|'affinity'|'cap', cap?: number, used?: number }}
  */
 export function privateGate({ config, isMember, profile, isOwner, replies, today }) {
   if (config?.features?.privateMessages !== true) return { ok: false, reason: 'off' };
-  if (!isMember) return { ok: false, reason: 'notMember' };
+  if (!isMember) return { ok: false, reason: 'not-member' };
   if (!profile) return { ok: false, reason: 'unknown' };
 
   const settings = config.private ?? {};
@@ -80,7 +72,7 @@ export function privateGate({ config, isMember, profile, isOwner, replies, today
  * @returns {{ score: number, reason: string, history: [] }}
  */
 export function effectiveAffinity(publicAffinity, privateAffinity) {
-  const score = round2(clamp(finiteOr(publicAffinity?.score, 0) + finiteOr(privateAffinity?.score, 0), -100, 100));
+  const score = clampScore(finiteOr(publicAffinity?.score, 0) + finiteOr(privateAffinity?.score, 0));
   const privateReason = typeof privateAffinity?.reason === 'string' ? privateAffinity.reason : '';
   const publicReason = typeof publicAffinity?.reason === 'string' ? publicAffinity.reason : '';
   return { score, reason: privateReason || publicReason, history: [] };

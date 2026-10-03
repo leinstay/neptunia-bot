@@ -108,8 +108,10 @@ function loadPromptLayers(promptsDir, localPromptsDir, prevPrompts, prevSources)
 /**
  * Create a live view over the config and the two prompt layers under `rootDir`.
  * Emits 'change' with `{ what: 'config' | 'prompts' }` after every successful reload.
+ * @param {{ rootDir: string, watchImpl?: typeof fs.watch }} options  `watchImpl` is a test
+ *   hook; production uses `fs.watch`.
  */
-export function createHot({ rootDir }) {
+export function createHot({ rootDir, watchImpl = fs.watch }) {
   const promptsDir = path.join(rootDir, 'prompts');
   const localPromptsDir = path.join(rootDir, LOCAL_PROMPTS_DIRNAME);
   const hot = new EventEmitter();
@@ -179,39 +181,63 @@ export function createHot({ rootDir }) {
     return name.endsWith('.md') || name.endsWith('.json');
   }
 
-  function attachErrorHandler(watcher) {
+  function attachErrorHandler(watcher, onError) {
     watcher.on('error', (err) => {
       log.warn('hot: watcher error', { error: err });
+      onError?.();
     });
+  }
+
+  /** Close and forget the prompts.local/ watcher, so a directory created again gets a new one. */
+  function stopLocalWatch() {
+    const watcher = localWatcher;
+    if (!watcher) return;
+    localWatcher = null;
+    const index = watchers.indexOf(watcher);
+    if (index !== -1) watchers.splice(index, 1);
+    try {
+      watcher.close();
+    } catch {
+      // already closed by the error that brought us here
+    }
   }
 
   function startLocalWatch() {
     if (localWatcher) return;
     try {
-      localWatcher = fs.watch(localPromptsDir, (event, file) => {
+      const watcher = watchImpl(localPromptsDir, (event, file) => {
         if (isPromptFile(file)) schedule('prompts', hot.reloadPrompts);
       });
-      watchers.push(localWatcher);
-      attachErrorHandler(localWatcher);
+      localWatcher = watcher;
+      watchers.push(watcher);
+      // A watcher whose directory went away errors out: drop it, the root watcher starts the next one.
+      attachErrorHandler(watcher, () => {
+        if (localWatcher === watcher) stopLocalWatch();
+      });
     } catch (err) {
       log.warn('hot: failed to watch prompts.local', { error: err });
     }
   }
 
   hot.watch = () => {
-    const rootWatcher = fs.watch(rootDir, (event, file) => {
+    const rootWatcher = watchImpl(rootDir, (event, file) => {
       const name = file ? String(file) : '';
       if (CONFIG_FILES.has(name)) {
         schedule('config', hot.reloadConfig);
-      } else if (name === LOCAL_PROMPTS_DIRNAME && !localWatcher && fs.existsSync(localPromptsDir)) {
-        startLocalWatch();
-        schedule('prompts', hot.reloadPrompts);
+      } else if (name === LOCAL_PROMPTS_DIRNAME) {
+        if (!fs.existsSync(localPromptsDir)) {
+          // Deleted (or moved away by an rsync): its watcher is dead, a recreated directory gets a new one.
+          stopLocalWatch();
+        } else if (!localWatcher) {
+          startLocalWatch();
+          schedule('prompts', hot.reloadPrompts);
+        }
       }
     });
     watchers.push(rootWatcher);
     attachErrorHandler(rootWatcher);
 
-    const baseWatcher = fs.watch(promptsDir, (event, file) => {
+    const baseWatcher = watchImpl(promptsDir, (event, file) => {
       if (isPromptFile(file)) schedule('prompts', hot.reloadPrompts);
     });
     watchers.push(baseWatcher);

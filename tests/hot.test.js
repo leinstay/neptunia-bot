@@ -5,7 +5,9 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { EventEmitter } from 'node:events';
 import { createHot } from '../src/hot.js';
+import { withCapturedLogs } from './fixtures/capture-logs.js';
 
 function makeRoot({ config = { bot: { timezone: 'UTC' } }, prompts = {} } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'nep-hot-'));
@@ -362,6 +364,88 @@ test('reloadPrompts: invalid base labels.json on reload keeps the previous merge
     assert.equal(hot.promptSources.labels, 'merged');
   } finally {
     hot.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// prompts.local/ deleted and recreated while running (an rsync of the
+// directory): its watcher is dropped and a new one starts. A fake fs.watch
+// stands in, so no test depends on real watcher timing.
+// ---------------------------------------------------------------------------
+
+/** A fake fs.watch: every watcher it hands out records its target and listener, emits, and records close(). */
+function fakeWatch() {
+  const handed = [];
+  const watch = (target, listener) => {
+    const watcher = new EventEmitter();
+    Object.assign(watcher, { target, listener, closed: false });
+    watcher.close = () => {
+      watcher.closed = true;
+    };
+    handed.push(watcher);
+    return watcher;
+  };
+  watch.of = (target) => handed.filter((w) => w.target === target);
+  return watch;
+}
+
+test('watch: a prompts.local/ deleted and recreated is watched again', () => {
+  const dir = makeRoot({ prompts: { rules: 'base text' } });
+  writeLocalPrompt(dir, 'rules', 'local text');
+  const localDir = path.join(dir, 'prompts.local');
+  const watch = fakeWatch();
+  const hot = createHot({ rootDir: dir, watchImpl: watch }).watch();
+  try {
+    const [root] = watch.of(dir);
+    assert.equal(watch.of(localDir).length, 1);
+
+    fs.rmSync(localDir, { recursive: true, force: true });
+    root.listener('rename', 'prompts.local');
+    assert.equal(watch.of(localDir)[0].closed, true, 'the watcher of the deleted directory is closed');
+
+    writeLocalPrompt(dir, 'rules', 'local again');
+    root.listener('rename', 'prompts.local');
+    assert.equal(watch.of(localDir).length, 2, 'the recreated directory gets a watcher of its own');
+    assert.equal(watch.of(localDir)[1].closed, false);
+  } finally {
+    hot.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('watch: an error on the prompts.local/ watcher frees it, so the next root event starts a new one', async () => {
+  const dir = makeRoot({ prompts: { rules: 'base text' } });
+  writeLocalPrompt(dir, 'rules', 'local text');
+  const localDir = path.join(dir, 'prompts.local');
+  const watch = fakeWatch();
+  const hot = createHot({ rootDir: dir, watchImpl: watch }).watch();
+  try {
+    const [root] = watch.of(dir);
+    const [first] = watch.of(localDir);
+    const { logs } = await withCapturedLogs(() => first.emit('error', new Error('EPERM')));
+    assert.ok(logs.some((l) => l.msg === 'hot: watcher error'));
+    assert.equal(first.closed, true);
+
+    root.listener('rename', 'prompts.local');
+    assert.equal(watch.of(localDir).length, 2);
+  } finally {
+    hot.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('watch: close() closes every watcher, the prompts.local/ one included', () => {
+  const dir = makeRoot();
+  writeLocalPrompt(dir, 'rules', 'local text');
+  const watch = fakeWatch();
+  const hot = createHot({ rootDir: dir, watchImpl: watch }).watch();
+  hot.close();
+  try {
+    for (const target of [dir, path.join(dir, 'prompts'), path.join(dir, 'prompts.local')]) {
+      assert.equal(watch.of(target)[0].closed, true, target);
+    }
+  } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });

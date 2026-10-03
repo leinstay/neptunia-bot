@@ -11,7 +11,7 @@ import { classifierTextModel } from './mention.js';
 import { parseOutput } from '../llm/parse.js';
 import { DailyCapError, TokenLimitError, sleep } from '../llm/openrouter.js';
 import { ImageCapError, ImageGenError } from '../llm/images.js';
-import { limitNotice, limitOf } from './limits.js';
+import { limitOf, mirrorChannelLabel, mirrorDryRun, postLimitNotice } from './limits.js';
 import { between, typingMs } from './random.js';
 import {
   collectPictures,
@@ -21,12 +21,29 @@ import {
   isDescribable,
   selectPictures,
 } from '../discord/media.js';
-import { createImageFetcher } from '../discord/fetch-image.js';
+import { avatarReference, createImageFetcher } from '../discord/fetch-image.js';
 import { renderCustomEmoji, resolveReactionEmoji } from '../discord/emoji.js';
 import { formatTranscript, renderTranscript } from '../discord/format.js';
 import { log } from '../log.js';
 import { clampChars, oneLine } from '../memory/clamp.js';
 import { bumpDaily, utcDay } from '../time.js';
+
+/**
+ * How a turn ended. `spoke` and `skip` reached the model (a skip chose
+ * silence); `busy` (another turn blocks this one), `paused` (`/nep pause`),
+ * `not-now` (a spontaneous chooser found nothing to do) never did; `refused`
+ * is a rail (request or token cap) and carries its `limit`; `error` is any
+ * other failure, logged.
+ * @typedef {'spoke'|'skip'|'busy'|'refused'|'paused'|'not-now'|'error'} TurnOutcome
+ */
+
+/**
+ * Why a reply turn runs: a `@mention`, a Discord reply to the persona, a
+ * name trigger, a follow-up the address classifier said "yes" to, a private
+ * chat message, or the second turn after a drawing that failed. Each has a
+ * `labels.triggers` entry.
+ * @typedef {'mention'|'reply'|'name'|'followUp'|'private'|'drawFailed'} TriggerKind
+ */
 
 /** Turn `@nick` written by the model into real mentions for people seen in the transcript. */
 export function resolveMentions(text, history) {
@@ -92,24 +109,14 @@ const REWATCH_ORDINAL = /^#?\s*(\d+)\.?$/;
  * (1 = the newest; ordinals, not ids, because the model miscopies long ids).
  * `#1` and `1.` are accepted as `1`. Only the first non-empty line counts;
  * `none` (any case), anything unparsable, an ordinal outside 1..`count` or an
- * empty question -> null. The question is trimmed and cut to 300 characters;
- * `retry` is true when it is exactly `retry` (any case). The caller maps
- * `n` back to its candidate (`candidates[n - 1]`).
+ * empty question -> no pick. The question is trimmed and cut to 300
+ * characters; `retry` is true when it is exactly `retry` (any case). The
+ * caller maps `n` back to its candidate (`candidates[n - 1]`). `reason` is a
+ * code safe to log: `none` (the model answered none), `empty` (no non-empty
+ * line), `no-bar`, `unknown-id` (not an ordinal within 1..`count`; the name
+ * predates ordinals and is kept for log continuity), `no-question` or `ok`.
  * @param {string} raw
  * @param {number} count  How many videos the `<videos>` block listed.
- * @returns {{ n: number, question: string, retry: boolean }|null}
- */
-export function parseRewatchPick(raw, count) {
-  return parseRewatchPickDetailed(raw, count).pick;
-}
-
-/**
- * parseRewatchPick with the reason for its result, a code safe to log:
- * `none` (the model answered none), `empty` (no non-empty line), `no-bar`,
- * `unknown-id` (not an ordinal within 1..`count`; the name predates ordinals
- * and is kept for log continuity), `no-question` or `ok`.
- * @param {string} raw
- * @param {number} count
  * @returns {{ pick: { n: number, question: string, retry: boolean }|null,
  *   reason: 'none'|'empty'|'no-bar'|'unknown-id'|'no-question'|'ok' }}
  */
@@ -179,7 +186,7 @@ export function parseLookupQuery(raw) {
 function readableLinkCandidates(history, sites) {
   const out = [];
   for (let i = history.length - 1; i >= 0; i -= 1) {
-    out.push(...collectReadableLinks(history[i], { sites: sites ?? [] }));
+    out.push(...collectReadableLinks(history[i], { videoSites: sites ?? [] }));
   }
   return out;
 }
@@ -246,8 +253,8 @@ function describableCandidates(history, picked, { includePicked = false } = {}) 
  * `lookup` (src/web/lookup.js#createLookup) is optional too: absent, or
  * `features.webLookup` not true, no link is read and no search is made.
  *
- * `now` (default Date.now) is the clock behind the search classifier's
- * `{{today}}`.
+ * `now` (default Date.now) is the turn's clock: its own time, `{{today}}` of
+ * the search classifier, the daily GIF counter and every `lastPostAt` stamp.
  *
  * `emoji` (src/discord/emoji.js#createEmojiIndex) is optional: absent, or
  * `features.customEmoji` false (a missing key counts as on), no `:name:` is
@@ -259,13 +266,16 @@ function describableCandidates(history, picked, { includePicked = false } = {}) 
  * (and every attached one with its bare marker).
  * Likewise, videos are only watched when `features.mediaDescriptions` AND
  * `features.videoDescriptions` (a missing key counts as on) are on and the describer has
- * `describeVideos`; otherwise they render as before.
+ * `describeVideos`; otherwise they render without a watch.
  *
  * `variety` (src/behavior/variety-pass.js#createVarietyPass) is optional: when
- * present, every turn starts its pass on the persona's own recent lines as
- * soon as the history is known, alongside the rest of the preparation, and the
- * request carries its answer as `<worn>`; every message posted in a server
- * channel joins its ring of own lines. Absent -> neither.
+ * present, every turn but a `drawFailed` one starts its pass on the persona's
+ * own recent lines as soon as the history is known, alongside the rest of the
+ * preparation, and the request carries its answer as `<worn>`; every message
+ * posted in a server channel joins its ring of own lines. Absent -> neither.
+ *
+ * `getSelfName` (src/index.js) is the persona's display name in a guild;
+ * default: the client's cached guild member, else the bot user's name.
  */
 export function createTurnRunner({
   hot,
@@ -281,6 +291,7 @@ export function createTurnRunner({
   images,
   emoji,
   variety,
+  getSelfName = (guildId) => client.guilds?.cache?.get(guildId)?.members?.me?.displayName ?? client.user?.username ?? 'bot',
   now: clock = Date.now,
 }) {
   const busy = new Set();
@@ -296,22 +307,9 @@ export function createTurnRunner({
     return emoji && hot.config.features?.customEmoji !== false ? emoji.byName : null;
   }
 
-  /**
-   * Post one readable mirror of a would-be action into `dryRunChannelId`, when
-   * one is configured. Never throws: a fetch or send failure is logged and
-   * swallowed, so a misconfigured mirror channel never costs the persona (or
-   * the turn) anything. The channel is fetched fresh every time -- nothing is
-   * cached long-lived, so pointing the mirror elsewhere needs no restart.
-   */
-  async function mirrorDryRun(dryRunChannelId, header, body) {
-    if (!dryRunChannelId) return;
-    try {
-      const mirror = await client.channels.fetch(dryRunChannelId);
-      if (!mirror) return;
-      await mirror.send({ content: `${header}\n${body}`, allowedMentions: { parse: [] } });
-    } catch (err) {
-      log.warn('turn: dry-run mirror failed', { dryRunChannelId, error: err });
-    }
+  /** One dry-run mirror message (src/behavior/limits.js#mirrorDryRun), `bot.dryRunChannelId` read now. */
+  function mirror(header, body) {
+    return mirrorDryRun({ client, dryRunChannelId: hot.config.bot?.dryRunChannelId || '', header, body });
   }
 
   /**
@@ -319,10 +317,12 @@ export function createTurnRunner({
    * to do, but never touches the target channel -- no sendTyping, no send, no
    * react, no artificial timing. Logs one line per would-be action and, when
    * `bot.dryRunChannelId` is configured, mirrors it there in plain language.
+   * @param {{ channel: object, parsed: object, idByIndex: Map<number, string>, history: object[],
+   *   mode: string, triggerKind: TriggerKind|null, selfName: string }} args
    */
-  async function dryAct(channel, parsed, idByIndex, history, mode, triggerKind = null, selfName = client.user.username) {
+  async function dryAct({ channel, parsed, idByIndex, history, mode, triggerKind, selfName }) {
     const channelName = channel.name ?? null;
-    const dryRunChannelId = hot.config.bot?.dryRunChannelId || '';
+    const where = mirrorChannelLabel(channel);
     // A follow-up turn never posts as a Discord reply, in this mirror
     // either -- the model's reply="#n" is ignored the same as in act() below.
     const isFollowUp = triggerKind === 'followUp';
@@ -334,12 +334,8 @@ export function createTurnRunner({
       // The ONE deliberate exception to "never log message contents": this is
       // the persona's own output, not a user's, and only while dry-run is on.
       log.info('dry-run: would react', { channel: channel.id, channelName, to: targetId, emoji: reaction.emoji });
-      await mirrorDryRun(
-        dryRunChannelId,
-        `[dry-run] #${channelName} · ${mode} · reply to ${authorName}`,
-        `reacts with ${reaction.emoji} to ${authorName}`,
-      );
-      lastPostAt.set(channel.id, Date.now());
+      await mirror(`[dry-run] ${where} · ${mode} · reply to ${authorName}`, `reacts with ${reaction.emoji} to ${authorName}`);
+      lastPostAt.set(channel.id, clock());
     }
 
     for (const message of parsed.messages) {
@@ -350,12 +346,8 @@ export function createTurnRunner({
       log.info('dry-run: would send', { channel: channel.id, channelName, mode, replyTo: replyId ?? null, text });
       // The mirror shows @name as the model wrote it: resolving it to a real
       // mention here would ping someone in a channel meant to be invisible to them.
-      await mirrorDryRun(
-        dryRunChannelId,
-        `[dry-run] #${channelName} · ${mode} · reply to ${authorName}`,
-        renderCustomEmoji(message.text, emojiLookup()),
-      );
-      lastPostAt.set(channel.id, Date.now());
+      await mirror(`[dry-run] ${where} · ${mode} · reply to ${authorName}`, renderCustomEmoji(message.text, emojiLookup()));
+      lastPostAt.set(channel.id, clock());
     }
 
     if (parsed.gif) {
@@ -363,8 +355,8 @@ export function createTurnRunner({
       const { entry } = parsed.gif;
       // The persona's own pick from the library, dry-run only: the handle and the stored URL.
       log.info('dry-run: would send gif', { channel: channel.id, channelName, mode, replyTo: replyId ?? null, gif: entry.id, kind: entry.kind, url: entry.url });
-      await mirrorDryRun(dryRunChannelId, `[dry-run] #${channelName} · ${mode} · gif ${entry.id}`, entry.url);
-      lastPostAt.set(channel.id, Date.now());
+      await mirror(`[dry-run] ${where} · ${mode} · gif ${entry.id}`, entry.url);
+      lastPostAt.set(channel.id, clock());
     }
 
     if (parsed.draw) {
@@ -375,23 +367,13 @@ export function createTurnRunner({
       const prompt = drawPromptFor(selfName, parsed.draw);
       log.info('dry-run: would draw', { channel: channel.id, channelName, mode, self, prompt });
       // A full prompt outgrows one Discord message: mirrored in numbered parts.
-      const header = `[dry-run] #${channelName} · ${mode} · draw${self ? ' (self)' : ''}`;
+      const header = `[dry-run] ${where} · ${mode} · draw${self ? ' (self)' : ''}`;
       const parts = splitForMirror(prompt, MIRROR_MAX_CHARS - header.length - MIRROR_PART_MARK_CHARS);
       for (const [i, part] of parts.entries()) {
-        await mirrorDryRun(dryRunChannelId, parts.length > 1 ? `${header} (${i + 1}/${parts.length})` : header, part);
+        await mirror(parts.length > 1 ? `${header} (${i + 1}/${parts.length})` : header, part);
       }
-      lastPostAt.set(channel.id, Date.now());
+      lastPostAt.set(channel.id, clock());
     }
-  }
-
-  /**
-   * The persona's display name in the served guild: `channel.guild` for a
-   * server channel, the pinned guild (`guildId`) for a private chat, the bot
-   * user's name when neither resolves.
-   */
-  function selfNameFor(channel, guildId) {
-    const guild = channel.guild ?? client.guilds?.cache?.get(guildId);
-    return guild?.members?.me?.displayName ?? client.user.username;
   }
 
   /** The image prompt for `draw` (parsed.draw): prompts read now, the request clamped to image.maxPromptChars. */
@@ -405,26 +387,21 @@ export function createTurnRunner({
   }
 
   /**
-   * The limit notice for a refused drawing (`labels.limits.notice`, read now):
-   * one plain message, no mentions, quoting the trigger unless this is a
-   * follow-up (which never posts as a Discord reply). In dry-run (read now)
-   * it is logged and mirrored instead. A missing label sends nothing.
+   * The limit notice for a refused drawing (src/behavior/limits.js#postLimitNotice,
+   * labels and dry-run read now), quoting the trigger unless this is a
+   * follow-up (which never posts as a Discord reply). Never throws.
    */
   async function notifyLimit(channel, limit, trigger, isFollowUp) {
-    const text = limit ? limitNotice(hot.prompts.labels, limit) : '';
-    if (!text) return;
-    if (hot.config.features?.dryRun === true) {
-      log.info('dry-run: would notify limit', { channel: channel.id, key: limit.key, used: limit.used, cap: limit.cap });
-      await mirrorDryRun(hot.config.bot?.dryRunChannelId || '', `[dry-run] #${channel.name ?? null} · limit`, text);
-      return;
-    }
-    const replyId = !isFollowUp ? (trigger?.id ?? null) : null;
-    await channel.send({
-      content: text,
-      reply: replyId ? { messageReference: replyId, failIfNotExists: false } : undefined,
-      allowedMentions: { parse: [] },
+    const posted = await postLimitNotice({
+      channel,
+      trigger,
+      limit,
+      asReply: !isFollowUp,
+      labels: hot.prompts?.labels,
+      config: hot.config,
+      client,
     });
-    lastPostAt.set(channel.id, Date.now());
+    if (posted === 'sent') lastPostAt.set(channel.id, clock());
   }
 
   /**
@@ -439,30 +416,15 @@ export function createTurnRunner({
    * persona; on a triggered turn the limit notice tells the requester, a
    * spontaneous turn (nobody asked) stays silent and only logs it.
    */
-  async function draw(channel, parsed, idByIndex, trigger, isFollowUp, selfName = client.user.username) {
-    const imageCfg = hot.config.image ?? {};
+  async function draw({ channel, parsed, idByIndex, trigger, isFollowUp, selfName }) {
+    const config = hot.config;
     const self = parsed.draw.self === true;
     const prompt = drawPromptFor(selfName, parsed.draw);
     try {
       let reference = null;
-      if (self && imageCfg.reference === 'avatar') {
-        let downloaded = null;
-        try {
-          const url =
-            typeof client.user?.displayAvatarURL === 'function'
-              ? client.user.displayAvatarURL({ extension: 'png', size: 1024, forceStatic: true })
-              : null;
-          if (url) {
-            downloaded = await imageFetcher.fetchAsDataUrl(url, {
-              maxBytes: imageCfg.referenceMaxBytes,
-              timeoutMs: hot.config.context?.vision?.fetchTimeoutMs,
-            });
-          }
-        } catch {
-          downloaded = null;
-        }
-        if (downloaded?.dataUrl) reference = downloaded.dataUrl;
-        else log.warn('turn: avatar reference unavailable', { channel: channel.id });
+      if (self && config.image?.reference === 'avatar') {
+        reference = await avatarReference({ client, imageFetcher, config });
+        if (!reference) log.warn('turn: avatar reference unavailable', { channel: channel.id });
       }
 
       const picture = await images.generate({ prompt, reference, userId: trigger?.authorId ?? null });
@@ -472,7 +434,7 @@ export function createTurnRunner({
         reply: replyId ? { messageReference: replyId, failIfNotExists: false } : undefined,
         allowedMentions: { parse: [] },
       });
-      lastPostAt.set(channel.id, Date.now());
+      lastPostAt.set(channel.id, clock());
       log.info('turn: drew', {
         channel: channel.id,
         seconds: picture.seconds,
@@ -492,11 +454,7 @@ export function createTurnRunner({
           spontaneous: !trigger,
         });
         if (!trigger) return {};
-        try {
-          await notifyLimit(channel, limit, trigger, isFollowUp);
-        } catch (sendErr) {
-          log.warn('turn: limit notice failed', { channel: channel.id, error: sendErr });
-        }
+        await notifyLimit(channel, limit, trigger, isFollowUp);
         return {};
       }
       if (err instanceof ImageGenError) {
@@ -588,7 +546,7 @@ export function createTurnRunner({
         allowedMentions: { parse: [] },
       });
       countGif();
-      lastPostAt.set(channel.id, Date.now());
+      lastPostAt.set(channel.id, clock());
       log.info('turn: gif sent', { channel: channel.id, gif: entry.id, kind: entry.kind, fresh: Boolean(fresh) });
     } catch (err) {
       log.warn('turn: gif failed', { channel: channel.id, gif: entry.id, error: err });
@@ -598,8 +556,10 @@ export function createTurnRunner({
   /**
    * Post the turn for real. Resolves `{ drawFailed }` from draw() when the
    * persona's picture could not be posted, `{}` otherwise.
+   * @param {{ channel: object, parsed: object, idByIndex: Map<number, string>, history: object[],
+   *   startedAt: number, triggerKind: TriggerKind|null, trigger: object|null, selfName: string }} args
    */
-  async function act(channel, parsed, idByIndex, history, startedAt = Date.now(), triggerKind = null, trigger = null, selfName = client.user.username) {
+  async function act({ channel, parsed, idByIndex, history, startedAt, triggerKind, trigger, selfName }) {
     const cfg = hot.config.typing;
     const typingOn = hot.config.features?.typingSimulation !== false;
     // A follow-up turn (triggerKind: 'followUp') is its own trigger kind
@@ -615,7 +575,7 @@ export function createTurnRunner({
         const target = await channel.messages.fetch(targetId);
         await target.react(reaction.emoji);
       } catch (err) {
-        log.warn('turn: reaction failed', { emoji: reaction.emoji, error: err });
+        log.warn('turn: reaction failed', { channel: channel.id, emoji: reaction.emoji, error: err });
       }
     }
 
@@ -629,7 +589,8 @@ export function createTurnRunner({
       // Custom emoji after the mentions: `<@id>` has no `:name:` in it to break.
       const text = renderCustomEmoji(mentioned.text, emojiLookup());
       if (typingOn) {
-        await channel.sendTyping().catch(() => {});
+        // Only the indicator: a missing Send Messages shows up here first, so it is logged.
+        await channel.sendTyping().catch((err) => log.warn('turn: typing failed', { channel: channel.id, error: err }));
         await sleep(typingMs(text, cfg, rng));
       }
 
@@ -639,7 +600,7 @@ export function createTurnRunner({
         reply: replyId ? { messageReference: replyId, failIfNotExists: false } : undefined,
         allowedMentions: { parse: [], users: userIds, repliedUser: true },
       });
-      lastPostAt.set(channel.id, Date.now());
+      lastPostAt.set(channel.id, clock());
       // The ring of own lines the variety pass reads for the other channels: server channels only,
       // the persona's text as it wrote it, with what it answered (the message it replied to, else the trigger).
       if (variety && channel.guild) {
@@ -655,7 +616,7 @@ export function createTurnRunner({
       log.info('turn: sent', {
         channel: channel.id,
         chars: text.length,
-        secondsSinceTrigger: Math.round((Date.now() - startedAt) / 100) / 10,
+        secondsSinceTrigger: Math.round((clock() - startedAt) / 100) / 10,
         ...(isFollowUp ? { followUp: true } : {}),
       });
     }
@@ -667,8 +628,37 @@ export function createTurnRunner({
     }
 
     // The picture comes last, once every message is out.
-    if (parsed.draw) return draw(channel, parsed, idByIndex, trigger, isFollowUp, selfName);
+    if (parsed.draw) return draw({ channel, parsed, idByIndex, trigger, isFollowUp, selfName });
     return {};
+  }
+
+  /**
+   * The `<transcript>` block of a classifier request (re-watch, search): the
+   * last `contextMessages` messages of `history` before the trigger, rendered
+   * like the address classifier's context (src/discord/events.js) with the
+   * media states this turn already has, plus the trigger's text cut to
+   * `context.maxMessageChars`. `transcriptBlock` is '' (no block) for a
+   * window of 0 or no earlier message.
+   * @returns {{ triggerText: string, transcriptBlock: string }}
+   */
+  function classifierContext({ config, selfName, history, trigger, contextMessages, descriptions, videos, reads }) {
+    const triggerText = [...String(trigger.content ?? '')].slice(0, config.context?.maxMessageChars ?? 800).join('');
+    const context = contextMessages > 0 ? history.filter((m) => m.id !== trigger.id).slice(-contextMessages) : [];
+    if (context.length === 0) return { triggerText, transcriptBlock: '' };
+    const labels = hot.prompts.labels;
+    const items = formatTranscript(context, {
+      timezone: config.bot.timezone,
+      gapMinutes: config.context.gapMarkerMinutes,
+      maxChars: config.context.maxMessageChars,
+      selfName,
+      labels,
+      seeReactions: config.features?.seeReactions !== false,
+      reactionsPerMessage: config.context.reactionsPerMessage,
+      descriptions,
+      videos,
+      reads,
+    });
+    return { triggerText, transcriptBlock: `<transcript>\n${renderTranscript(items, config.bot.timezone, labels)}\n</transcript>\n` };
   }
 
   /**
@@ -733,26 +723,16 @@ export function createTurnRunner({
       const summary = video.state === 'watched' ? [...oneLine(video.text)].slice(0, REWATCH_SUMMARY_CHARS).join('') : '';
       return `${index + 1} | ${oneLine(item.name)} | ${status} | ${summary}`.trimEnd();
     });
-    const triggerText = [...String(trigger.content ?? '')].slice(0, config.context?.maxMessageChars ?? 800).join('');
-    // The chat around the question, rendered like the address classifier's context (src/discord/events.js).
-    const contextMessages = Math.max(0, Math.floor(rewatchCfg.contextMessages ?? 50));
-    const context = contextMessages > 0 ? history.filter((m) => m.id !== trigger.id).slice(-contextMessages) : [];
-    let transcriptBlock = '';
-    if (context.length > 0) {
-      const labels = hot.prompts.labels;
-      const items = formatTranscript(context, {
-        timezone: config.bot.timezone,
-        gapMinutes: config.context.gapMarkerMinutes,
-        maxChars: config.context.maxMessageChars,
-        selfName,
-        labels,
-        seeReactions: config.features?.seeReactions !== false,
-        reactionsPerMessage: config.context.reactionsPerMessage,
-        descriptions,
-        videos,
-      });
-      transcriptBlock = `<transcript>\n${renderTranscript(items, config.bot.timezone, labels)}\n</transcript>\n`;
-    }
+    // The chat around the question.
+    const { triggerText, transcriptBlock } = classifierContext({
+      config,
+      selfName,
+      history,
+      trigger,
+      contextMessages: Math.max(0, Math.floor(rewatchCfg.contextMessages ?? 50)),
+      descriptions,
+      videos,
+    });
     const user = `${transcriptBlock}<videos>\n${lines.join('\n')}\n</videos>\n<candidate>\n${trigger.authorName}: ${triggerText}\n</candidate>`;
 
     let completion;
@@ -828,27 +808,17 @@ export function createTurnRunner({
       return null;
     }
 
-    const triggerText = [...String(trigger.content ?? '')].slice(0, config.context?.maxMessageChars ?? 800).join('');
-    // The chat around the question, rendered like the re-watch classifier's context.
-    const contextMessages = Math.max(0, Math.floor(searchCfg.contextMessages ?? 50));
-    const context = contextMessages > 0 ? history.filter((m) => m.id !== trigger.id).slice(-contextMessages) : [];
-    let transcriptBlock = '';
-    if (context.length > 0) {
-      const labels = hot.prompts.labels;
-      const items = formatTranscript(context, {
-        timezone: config.bot.timezone,
-        gapMinutes: config.context.gapMarkerMinutes,
-        maxChars: config.context.maxMessageChars,
-        selfName,
-        labels,
-        seeReactions: config.features?.seeReactions !== false,
-        reactionsPerMessage: config.context.reactionsPerMessage,
-        descriptions,
-        videos,
-        reads,
-      });
-      transcriptBlock = `<transcript>\n${renderTranscript(items, config.bot.timezone, labels)}\n</transcript>\n`;
-    }
+    // The chat around the question, with the pages this turn already read.
+    const { triggerText, transcriptBlock } = classifierContext({
+      config,
+      selfName,
+      history,
+      trigger,
+      contextMessages: Math.max(0, Math.floor(searchCfg.contextMessages ?? 50)),
+      descriptions,
+      videos,
+      reads,
+    });
     const user = `${transcriptBlock}<candidate>\n${trigger.authorName}: ${triggerText}\n</candidate>`;
 
     let completion;
@@ -886,12 +856,12 @@ export function createTurnRunner({
    * @param {'reply'|'interject'|'initiate'|'auto'} params.mode  'auto' lets `chooseMode` pick
    *   between interject/initiate/nothing once the history is known (spontaneous turns).
    * @param {object} [params.trigger]      Normalized message that called the persona.
-   * @param {string} [params.triggerKind]
+   * @param {TriggerKind} [params.triggerKind]
    * @param {(history: object[], now: number) => string|null} [params.chooseMode]
    * @param {boolean} [params.forced]  True for an owner-forced turn (`/nep interject`, `/nep
    *   initiate`) -- passed straight through to buildRequest, which appends prompts.forced (when
    *   present) to the task text so the model knows `<skip/>` is not the expected outcome this time.
-   * @returns {Promise<{ outcome: string, mode?: string, dryRun?: boolean, drawFailed?: string,
+   * @returns {Promise<{ outcome: TurnOutcome, mode?: string, dryRun?: boolean, drawFailed?: string,
    *   limit?: { key: string, used: number, cap: number }|null }>}
    *   `drawFailed` (the reason) when the persona's picture could not be posted; `limit` on
    *   `outcome: 'refused'` (a request or token cap), for the caller's limit notice.
@@ -979,17 +949,19 @@ export function createTurnRunner({
       const features = config.features ?? {};
       const memoryOn = features.memory !== false;
       const selfId = client.user.id;
-      const selfName = selfNameFor(channel, guildId);
-      const now = Date.now();
+      const selfName = getSelfName(guildId);
+      const now = clock();
       const startedAt = now;
+      // A drawFailed turn only says the picture failed: no classifier or
+      // variety pass is paid for a second time.
+      const answersDrawFailure = triggerKind === 'drawFailed';
 
-      let history = await fetchHistory(
-        channel,
-        config.context.channelMessages,
+      let history = await fetchHistory(channel, {
+        limit: config.context.channelMessages,
         selfId,
-        config.media?.embedTextChars,
-        config.media?.video?.sites,
-      );
+        embedTextChars: config.media?.embedTextChars,
+        videoSites: config.media?.video?.sites,
+      });
 
       let finalMode = mode;
       if (mode === 'auto') {
@@ -1001,7 +973,7 @@ export function createTurnRunner({
       // below (descriptions, re-watch, lookup, neighbours); it never rejects and is bounded by
       // variety.timeoutMs, so it can only shorten the turn's wait, never fail it.
       const wornPending =
-        variety && typeof variety.forTurn === 'function'
+        variety && typeof variety.forTurn === 'function' && !answersDrawFailure
           ? variety.forTurn({ guildId, channelId: channel.id, history, selfName, privateChat: isPrivate }).catch(() => null)
           : Promise.resolve(null);
 
@@ -1016,13 +988,13 @@ export function createTurnRunner({
       // attached ones get one too, ahead of the rest, shown next to their
       // attachment marker.
       let descriptions;
-      if (hot.config.features?.mediaDescriptions === true && describer) {
+      if (features.mediaDescriptions === true && describer) {
         const visionCfg = config.context.vision ?? {};
         const picked = features.vision !== false ? selectPictures({ trigger, history, visionCfg, now }) : [];
-        const includePicked = hot.config.features?.attachedDescriptions !== false;
+        const includePicked = features.attachedDescriptions !== false;
         const candidates = describableCandidates(history, picked, { includePicked });
         const described = await describer.describeMany(guildId, candidates, {
-          maxNew: config.media?.maxPerTurn ?? Infinity,
+          maxNew: config.media?.maxPerTurn ?? 6,
           countAgainstDailyCap: true,
         });
         descriptions = described.descriptions;
@@ -1039,7 +1011,7 @@ export function createTurnRunner({
         const videoCfg = config.media?.video ?? {};
         const candidates = [];
         for (let i = history.length - 1; i >= 0; i -= 1) {
-          candidates.push(...collectVideos(history[i], { sites: videoCfg.sites }));
+          candidates.push(...collectVideos(history[i], { videoSites: videoCfg.sites }));
         }
         const watched = await describer.describeVideos(guildId, candidates, {
           maxNew: videoCfg.maxPerTurn ?? 1,
@@ -1048,9 +1020,9 @@ export function createTurnRunner({
         videos = watched.videos;
 
         // A second look when the trigger asks about a watched video: a
-        // direct address only (never a spontaneous turn), switch
-        // features.videoRewatch (a missing key counts as on).
-        if (trigger && features.videoRewatch !== false && typeof describer.rewatchVideo === 'function') {
+        // direct address only (never a spontaneous turn, never the
+        // drawFailed turn), switch features.videoRewatch (a missing key counts as on).
+        if (trigger && !answersDrawFailure && features.videoRewatch !== false && typeof describer.rewatchVideo === 'function') {
           try {
             await maybeRewatch({
               config,
@@ -1087,7 +1059,7 @@ export function createTurnRunner({
             log.warn('lookup: links failed', { channel: channel.id, error: err });
           }
         }
-        if (trigger && webCfg.search?.enabled !== false && typeof lookup.search === 'function') {
+        if (trigger && !answersDrawFailure && webCfg.search?.enabled !== false && typeof lookup.search === 'function') {
           try {
             lookupResult = await maybeLookup({
               config,
@@ -1223,7 +1195,7 @@ export function createTurnRunner({
 
       log.info('turn: model answered', {
         mode: finalMode,
-        secondsToAnswer: Math.round((Date.now() - startedAt) / 100) / 10,
+        secondsToAnswer: Math.round((clock() - startedAt) / 100) / 10,
         channel: channel.id,
         estimated: completion.estimated,
         usage: completion.usage,
@@ -1244,19 +1216,20 @@ export function createTurnRunner({
       // Read fresh right here, not from the `features` snapshot taken at the
       // top of this turn: unlike the other switches this one defaults to OFF,
       // and whether to actually post is the very last decision of a turn.
+      const idByIndex = request.idByIndex;
       if (hot.config.features?.dryRun === true) {
-        await dryAct(channel, parsed, request.idByIndex, history, finalMode, triggerKind, selfName);
+        await dryAct({ channel, parsed, idByIndex, history, mode: finalMode, triggerKind, selfName });
         spokeSaw.set(channel.id, new Set(history.map((m) => m.id)));
         return { outcome: 'spoke', mode: finalMode, dryRun: true };
       }
-      const acted = await act(channel, parsed, request.idByIndex, history, startedAt, triggerKind, trigger, selfName);
+      const acted = await act({ channel, parsed, idByIndex, history, startedAt, triggerKind, trigger, selfName });
       spokeSaw.set(channel.id, new Set(history.map((m) => m.id)));
       if (!acted.drawFailed) return { outcome: 'spoke', mode: finalMode };
       handOff = Boolean(trigger);
       return { outcome: 'spoke', mode: finalMode, drawFailed: acted.drawFailed };
     } catch (err) {
       if (err instanceof DailyCapError || err instanceof TokenLimitError) {
-        log.warn('turn: refused by a safety rail', { error: err });
+        log.warn('turn: refused by a safety rail', { channel: channel.id, error: err });
         return { outcome: 'refused', limit: limitOf(err) };
       }
       log.error('turn: failed', { channel: channel.id, error: err });

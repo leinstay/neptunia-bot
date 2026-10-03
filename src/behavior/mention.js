@@ -19,7 +19,14 @@ export function detectTrigger({ mentionsSelf, repliesToSelf, content, nameTrigge
   return named ? 'name' : null;
 }
 
-/** Message text without the mention itself — an empty rest means a bare ping. */
+/**
+ * Length of the message text without `@selfName` and without every `<@id>`
+ * token (any member's, not only the persona's) -- an empty rest means a bare
+ * ping, so "@persona @friend" with nothing else counts as one too.
+ * @param {string} content
+ * @param {string} selfName
+ * @returns {number}
+ */
 export function strippedLength(content, selfName) {
   return content.replaceAll(`@${selfName}`, '').replace(/<@!?\d+>/g, '').trim().length;
 }
@@ -52,7 +59,8 @@ export function createTagHistory() {
  *   for someone liked; never for neverIgnore, a name trigger, or tag spam.
  * @param {object} input.cfg            config.mention
  * @param {() => number} input.rng
- * @returns {{ respond: boolean, reason: string, ignoreChance: number }}
+ * @returns {{ respond: boolean, reason: string, ignoreChance: number, roll?: number }}  `roll`
+ *   is the rng value drawn (absent for neverIgnore, which rolls nothing), for the decision log.
  */
 export function decideMention({ kind, textLength, recentCalls, neverIgnore, affinityScore, cfg, rng }) {
   if (neverIgnore) return { respond: true, reason: 'never-ignore', ignoreChance: 0 };
@@ -86,6 +94,11 @@ export function decideMention({ kind, textLength, recentCalls, neverIgnore, affi
   return { respond, reason: respond ? 'respond' : `ignored:${reason}`, ignoreChance, roll };
 }
 
+/**
+ * The window in which repeated calls by one member add up (`mention.repeatWindowMinutes`), in ms.
+ * @param {{ repeatWindowMinutes: number }} cfg  config.mention
+ * @returns {number}
+ */
 export const repeatWindowMs = (cfg) => cfg.repeatWindowMinutes * MINUTE_MS;
 
 // --- The address classifier --------------------------------------------------
@@ -121,6 +134,7 @@ export function isFollowUpOpen(state, now, cfg) {
  * @param {{ replyToId: string|null, mentionedUserIds: string[], replyPingUserId?: string|null }} normalized
  * @param {string} selfId
  * @param {{ followUpClassifyReplies?: boolean }} [cfg]  config.mention, read by the caller now
+ * @returns {boolean} true = never the persona's: the answer is "no" without asking the model
  */
 export function followUpPreFilter(normalized, selfId, cfg) {
   const isReply = Boolean(normalized.replyToId);
@@ -187,14 +201,4 @@ const DEPRECATED_MODEL_KEYS = [
  */
 export function deprecatedModelKeys(config) {
   return DEPRECATED_MODEL_KEYS.filter(({ read }) => read(config) != null).map(({ key, use }) => ({ key, use }));
-}
-
-/**
- * DEPRECATED alias of classifierTextModel, kept for callers written against
- * the earlier `llm.classifierModel` shape.
- * @param {object|undefined} config  the full hot config
- * @returns {string|undefined}
- */
-export function classifierModelOf(config) {
-  return classifierTextModel(config);
 }

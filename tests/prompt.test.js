@@ -4,7 +4,7 @@
 // the prompt contract.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { block, buildDrawPrompt, buildRequest, renderProfile, fillPromptTemplate } from '../src/behavior/prompt.js';
+import { block, buildDrawPrompt, buildRequest, hasRequiredLabels, renderProfile, fillPromptTemplate } from '../src/behavior/prompt.js';
 import { estimateTokens } from '../src/llm/tokens.js';
 import { fill } from '../src/discord/format.js';
 import { labels } from './fixtures/labels.js';
@@ -236,6 +236,26 @@ test('buildRequest: the interlocutor is marked with labels.profile.interlocutorM
 
 test('buildRequest: throws a clear error when prompts.labels is missing', () => {
   assert.throws(() => buildRequest(baseInput({ prompts: fakePrompts({ labels: undefined }) })), /labels/);
+});
+
+test('hasRequiredLabels: an object with transcript passes; anything else fails', () => {
+  assert.equal(hasRequiredLabels(labels), true);
+  for (const bad of [undefined, null, {}, { transcript: '' }, 'labels', 42]) {
+    assert.equal(hasRequiredLabels(bad), false, JSON.stringify(bad));
+  }
+});
+
+test('buildRequest: a neighbour message is cut at context.neighborMessageChars (300 when missing)', () => {
+  const long = 'λ'.repeat(400);
+  const neighbors = [{ channelName: 'general', messages: [makeMessage(9, NOW - 5 * MIN, { content: long })] }];
+  const otherChannels = (config) => {
+    const user = buildRequest(baseInput({ config, neighbors })).messages[1].content;
+    return user.split('<other_channels>\n')[1].split('\n</other_channels>')[0];
+  };
+  const cut = otherChannels(fakeConfig({ context: { neighborMessageChars: 20 } }));
+  assert.ok(cut.includes('λ'.repeat(20)) && !cut.includes('λ'.repeat(21)), cut);
+  const fallback = otherChannels(fakeConfig());
+  assert.ok(fallback.includes('λ'.repeat(300)) && !fallback.includes('λ'.repeat(301)));
 });
 
 test('buildRequest: throws a clear error when prompts.labels has no transcript section', () => {

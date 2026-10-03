@@ -8,7 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { PermissionFlagsBits } from 'discord.js';
-import { resolveMentions, createTurnRunner, parseRewatchPick, parseRewatchPickDetailed, parseLookupQuery } from '../src/behavior/turn.js';
+import { resolveMentions, createTurnRunner, parseRewatchPickDetailed, parseLookupQuery } from '../src/behavior/turn.js';
 import { between, typingMs } from '../src/behavior/random.js';
 import { fill } from '../src/discord/format.js';
 import { labels } from './fixtures/labels.js';
@@ -1184,7 +1184,7 @@ test('createTurnRunner: features.dryRun=true swallows a mirror channel failure a
 
   assert.equal(result.outcome, 'spoke');
   assert.equal(channel.sent.length, 0);
-  assert.ok(logs.some((l) => l.msg === 'turn: dry-run mirror failed'));
+  assert.ok(logs.some((l) => l.msg === 'dry-run: mirror failed'));
 });
 
 test('createTurnRunner: features.dryRun=false (default) sends for real even when bot.dryRunChannelId is set', async () => {
@@ -1271,6 +1271,9 @@ test('createTurnRunner: features.dryRun=true on a follow-up turn logs replyTo=nu
 // ---------------------------------------------------------------------------
 // The re-watch on a question (features.videoRewatch).
 
+/** The pick alone, as maybeRewatch reads it. */
+const parseRewatchPick = (raw, count) => parseRewatchPickDetailed(raw, count).pick;
+
 test('parseRewatchPick: none (any case), garbage, an ordinal out of range or an empty question -> null', () => {
   for (const raw of ['none', 'NONE', '  None  ', '', '1', 'maybe the first one', '3 | what colour?', '0 | what?', '1 |   ', ' | what?', 'va | what?', '1.5 | what?', '-1 | what?', null]) {
     assert.equal(parseRewatchPick(raw, 2), null, String(raw));
@@ -1325,7 +1328,7 @@ test('parseRewatchPickDetailed: each null answer carries its reason code; a pick
     pick: { n: 1, question: 'τι χρώμα;', retry: false },
     reason: 'ok',
   });
-  assert.deepEqual(parseRewatchPickDetailed('1 | retry', 2).pick, parseRewatchPick('1 | retry', 2));
+  assert.deepEqual(parseRewatchPickDetailed('1 | retry', 2), { pick: { n: 1, question: 'retry', retry: true }, reason: 'ok' });
   assert.deepEqual(parseRewatchPickDetailed('1 | x', 0), { pick: null, reason: 'unknown-id' }, 'no candidates');
 });
 
@@ -2294,6 +2297,54 @@ test('runTurn: a failed generation runs a second turn with triggerKind drawFaile
   assert.equal(answered.outcome, 'spoke');
 });
 
+test('runTurn: the drawFailed turn reruns neither the re-watch nor the search classifier, nor the variety pass', async () => {
+  const hot = rewatchHot({ webLookup: true }, {}, {
+    image: { ...DRAW_IMAGE_CFG },
+    web: { maxPerDay: 60, links: { enabled: true, maxPerTurn: 2 }, search: { enabled: true, maxPerTurn: 1, contextMessages: 50 } },
+  });
+  hot.prompts.lookup = LOOKUP_SYSTEM;
+  hot.prompts.draw = 'Drawing for {{name}}.\n\n{{request}}';
+  const classifierCalls = { rewatch: 0, lookup: 0 };
+  const turnAnswers = ['<msg>on it</msg><draw>a red car</draw>', '<msg>it did not work</msg>'];
+  let turnCount = 0;
+  const llm = {
+    complete: async (messages) => {
+      const system = messages[0].content;
+      if (system.startsWith('Pick the video')) {
+        classifierCalls.rewatch += 1;
+        return { text: 'none', usage: {}, estimated: 5 };
+      }
+      if (system.startsWith('Decide whether')) {
+        classifierCalls.lookup += 1;
+        return { text: 'none', usage: {}, estimated: 5 };
+      }
+      const text = turnAnswers[Math.min(turnCount, turnAnswers.length - 1)];
+      turnCount += 1;
+      return { text, usage: {}, estimated: 10 };
+    },
+  };
+  const scene = rewatchScene();
+  const variety = fakeVariety();
+  const turns = createTurnRunner({
+    hot,
+    store: fakeStore(),
+    llm,
+    calibrator: identityCalibrator(),
+    client: fakeClient(),
+    describer: fakeRewatchDescriber({ va: { state: 'watched', text: 'ένα αυτοκίνητο περνά' } }),
+    lookup: fakeLookup(),
+    images: fakeImages({ error: new ImageGenError('moderation') }),
+    imageFetcher: fakeImageFetcher(),
+    variety,
+  });
+  const result = await turns.runTurn({ channel: scene.channel, mode: 'reply', trigger: normalizedTrigger(scene.trigger), triggerKind: 'mention' });
+
+  assert.equal(result.drawFailed, 'moderation');
+  assert.equal(turnCount, 2, 'the drawFailed turn ran');
+  assert.deepEqual(classifierCalls, { rewatch: 1, lookup: 1 }, 'each classifier once, for the first turn only');
+  assert.equal(variety.turnCalls.length, 1, 'one variety pass, for the first turn only');
+});
+
 // A cap refusal no longer reaches a second turn: it posts the limit notice (see the limit tests below).
 test('runTurn: an empty picture reaches the second turn as the error reason label', async () => {
   const { result, llm } = await runDrawTurn({ answers: ['<draw>a cat</draw>', '<msg>no</msg>'], images: fakeImages({ error: new ImageGenError('empty') }) });
@@ -2575,6 +2626,57 @@ test('runTurn: a private request carries the private prompt, the private trigger
 test('runTurn: a private turn falls back to the bot user name when the served guild is not cached', async () => {
   const { llm } = await runPrivateTurn({ client: fakeClient({ guilds: { cache: new Map() } }) });
   assert.ok(userTextOf(llm.calls[0]).includes('You are Bot.'));
+});
+
+test('runTurn: the injected clock stamps lastPostAt and the turn\'s own time', async () => {
+  const raw = rawMessage({ id: 'm1', ts: NOW - 1000 });
+  const channel = fakeTurnChannel({ historyMessages: [raw] });
+  const llm = fakeLlm('<msg>hi</msg>');
+  const turns = createTurnRunner({ hot: fakeHot(), store: fakeStore(), llm, calibrator: identityCalibrator(), client: fakeClient(), now: () => NOW });
+  const { logs } = await withCapturedLogs(() => turns.runTurn({ channel, mode: 'reply', trigger: normalizedTrigger(raw), triggerKind: 'mention' }));
+  assert.equal(channel.sent.length, 1);
+  assert.equal(turns.lastPostAt('c1'), NOW);
+  assert.equal(logs.find((l) => l.msg === 'turn: sent').secondsSinceTrigger, 0);
+  assert.equal(logs.find((l) => l.msg === 'turn: model answered').secondsToAnswer, 0);
+});
+
+test('runTurn: a failing typing indicator is logged with its channel and the message still goes out', async () => {
+  const raw = rawMessage({ id: 'm1' });
+  const channel = fakeTurnChannel({ historyMessages: [raw] });
+  channel.sendTyping = async () => {
+    throw new Error('Missing Permissions');
+  };
+  const turns = createTurnRunner({ hot: fakeHot(), store: fakeStore(), llm: fakeLlm('<msg>hi</msg>'), calibrator: identityCalibrator(), client: fakeClient() });
+  const { logs } = await withCapturedLogs(() => turns.runTurn({ channel, mode: 'reply', trigger: normalizedTrigger(raw), triggerKind: 'mention' }));
+  assert.equal(channel.sent.length, 1);
+  const line = logs.find((l) => l.msg === 'turn: typing failed');
+  assert.equal(line?.channel, 'c1');
+});
+
+test('runTurn: an injected getSelfName names the persona, keyed by the served guild', async () => {
+  const raw = rawMessage({ id: 'm1', authorId: 'u1', authorName: 'Alice', content: 'hey' });
+  const channel = fakeTurnChannel({ id: 'dm1', dm: true, historyMessages: [raw] });
+  const llm = sequenceLlm(['<msg>hi</msg>']);
+  const asked = [];
+  const getSelfName = (guildId) => {
+    asked.push(guildId);
+    return 'Ζωή';
+  };
+  const turns = createTurnRunner({ hot: privateHot(), store: privateStore(), llm, calibrator: identityCalibrator(), client: fakeClient(), getSelfName });
+  await turns.runTurn({ channel, guildId: 'g1', mode: 'reply', trigger: normalizedTrigger(raw), triggerKind: 'private' });
+  assert.deepEqual(asked, ['g1']);
+  assert.ok(userTextOf(llm.calls[0]).includes('You are Ζωή.'));
+});
+
+test('runTurn: a dry-run private turn mirrors under "private", never "#null"', async () => {
+  const mirrored = [];
+  const client = { ...guildClient(), channels: { fetch: async () => ({ send: async (payload) => mirrored.push(payload) }) } };
+  const hot = privateHot({ dryRun: true });
+  hot.config.bot.dryRunChannelId = 'mirror1';
+  const { channel } = await runPrivateTurn({ hot, client });
+  assert.equal(channel.sent.length, 0);
+  assert.equal(mirrored.length, 1);
+  assert.ok(mirrored[0].content.startsWith('[dry-run] private · reply · reply to '), mirrored[0].content);
 });
 
 test('runTurn: a private turn may draw (no Attach Files check in a DM), counted for the DM partner', async () => {
