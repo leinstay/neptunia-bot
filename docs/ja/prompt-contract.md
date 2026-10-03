@@ -41,10 +41,8 @@
 | `private.md` | いいえ | モードプロンプト（`reply.md`）の後、`forced.md` の前に追加。DM（`features.privateMessages`）のみ。プライベートな会話: ここで話されたことはここに留まる。ペルソナは公開知識を保持する。ファイルがなければ何も追加されない | `{{name}}` `{{author}}` |
 | `draw.md` | はい | 描画サブプロセスのアウトオブキャラクタープロンプト（`features.imageGeneration`）: シーン説明から画像 1 枚を生成する。外見とリクエストのみを受け取り、キャラクターカードは受け取らない | `{{name}}` `{{appearance}}` `{{request}}` |
 | `appearance.md` | いいえ | ペルソナのビジュアル外見。`self="yes"` 時に `draw.md` に挿入される。パーソナリティやバックストーリーなし、1 段落 | `{{name}}` |
-| `mentor-situations.md` | いいえ | Mentor: reply ターゲットケースのテスト状況を作成（`features.mentor`）。JSON のみを返す | `{{name}}` `{{count}}` `{{minLines}}` `{{maxLines}}` |
-| `mentor-situations-memory.md` | いいえ | Mentor: memory ターゲットケースのテスト状況を作成（`features.mentor`）。JSON のみを返す | `{{name}}` `{{count}}` `{{minLines}}` `{{maxLines}}` |
+| `mentor-situations.md` | いいえ | Mentor: ケースのテスト状況を作成（`features.mentor`）。JSON のみを返す | `{{name}}` `{{count}}` `{{minLines}}` `{{maxLines}}` |
 | `mentor-score.md` | いいえ | Mentor: ペルソナの回答をスコアリング（`features.mentor`）。キャラクターカードを受け取る。JSON のみを返す | `{{name}}` |
-| `mentor-score-memory.md` | いいえ | Mentor: アナライザーが保存するテキストをスコアリング（`features.mentor`）。キャラクターカードなし。`character` 軸は常に `null`。JSON のみを返す | `{{name}}` |
 | `mentor-signs.md` | いいえ | Mentor: モデル文の既知の癖。すべての mentor リクエストで `<signs>` ブロックとして送信（`features.mentor`）。ファイルがないか空の場合は省略 | `{{name}}` |
 | `mentor-diagnose.md` | いいえ | Mentor: スコアリング後に弱い回答の原因をペルソナのコンテキスト内の具体的なテキストで説明（`features.mentor`）。結果は未検証の仮説としてランの `diagnosis` に保存。`mentor.diagnose` が false またはファイルがない場合は省略 | `{{name}}` |
 | `variety.md` | いいえ | `classifier.text` リクエスト: ペルソナの最近のメッセージで繰り返されている表現手法を特定（`features.variety`）。キャラクターカードなし | `{{name}}` `{{maxPatterns}}` `{{shapeChars}}` |
@@ -206,6 +204,7 @@ profile.episodeNoQuote                   {date} {what} {feeling}: the same witho
 lore.entry                               {title} {text}
 affinity.bands.hostile | dislike | cool | neutral | warm | fond | devoted
                                          thresholds in code: ≤-60 · ≤-25 · ≤-8 · <8 · <25 · <60 · ≥60
+affinity.ownerSet                        reason shown when the owner set a score by hand without giving one
 aboutChat.patterns | starters | injokes  {text}
 aboutChat.learned                        {text}: things people taught the persona, joined by `; ` by code
 aboutChat.learnedItem                    {text} {who}: one lesson with a teacher
@@ -453,7 +452,7 @@ variety.intro                            first line of the `<worn>` block: tells
 
 ### Mentor
 
-Mentor サンドボックスは、reply ターゲットの状況ごとに 1 回の多様性パスを実行し、mentor のトークン予算から差し引かれます（`llm.maxRequestsPerDay` にはカウントされません）。特定された手法は状況レコードの `worn` として保存されます。ジャッジは `<worn>` ブロックを見ることはありません。
+Mentor サンドボックスは、状況ごとに 1 回の多様性パスを実行し、mentor のトークン予算から差し引かれます（`llm.maxRequestsPerDay` にはカウントされません）。特定された手法は状況レコードの `worn` として保存されます。ジャッジは `<worn>` ブロックを見ることはありません。
 
 ## 描画
 
@@ -595,15 +594,14 @@ Mentor モデルはレンダリングされたサンドボックスリクエス�
 
 ### プロンプト
 
-Mentor は 6 つのプロンプトファイルを使用します。ターゲットごとに 1 ペア、特徴ファイルと診断ファイル:
+Mentor は 4 つのプロンプトファイルを使用します。状況/スコアのペア、特徴ファイルと診断ファイル:
 
-- **Reply ターゲット**: `mentor-situations.md`（状況を作成）と `mentor-score.md`（回答をスコアリング）。
-- **Memory ターゲット**: `mentor-situations-memory.md`（状況を作成）と `mentor-score-memory.md`（保存テキストをスコアリング）。
-- **診断**: `mentor-diagnose.md`（スコアリング後に弱い回答を説明）。
+- `mentor-situations.md`（状況を作成）と `mentor-score.md`（回答をスコアリング）。
+- `mentor-diagnose.md`（スコアリング後に弱い回答を説明）。
 
 各プロンプトファイルは 1 つの mentor リクエストのシステムメッセージです。ブロックはユーザーメッセージで送信されます。
 
-コードが埋めるプレースホルダー: 6 つすべてに `{{name}}`。2 つの状況プロンプトに `{{count}}`、`{{minLines}}`、`{{maxLines}}`。
+コードが埋めるプレースホルダー: 4 つすべてに `{{name}}`。状況プロンプトに `{{count}}`、`{{minLines}}`、`{{maxLines}}`。
 
 ### ブロック
 
@@ -617,17 +615,16 @@ Mentor は 6 つのプロンプトファイルを使用します。ターゲッ�
 | `<intended>` | `labels.mentor.intended`、1 項目ずつ | スコアリング |
 | `<feedback>` | オーナーの修正の JSON 配列: `[{ "case": "...", "reason": "..." }]`、新しい順。空の場合省略 | すべて |
 | `<examples>` | チャットからの実際の moment: `labels.mentor.examples` を先頭行とし、moment ごとに 1 つの `<example>`。各 `<example>` には `<situation>`（保存されたトランスクリプト、最も古いメッセージはリクエスト予算に合わせてトリミングされる場合あり）と `<original>`（ペルソナのメッセージ）が含まれる。ケースに moment がない場合は省略 | 状況 |
-| `<original>` | その時のペルソナの回答（実際の moment のスコアリングリクエスト内）。`labels.mentor.original` を先頭行とし、ペルソナのメッセージが続く。既知の悪い参照であり、スコアリング対象の回答ではない。作成された状況では省略 | スコアリング（reply、実際の moment のみ） |
-| `<character>` | `{{name}}` を埋めたキャラクターカード | スコアリング（reply のみ） |
+| `<original>` | その時のペルソナの回答（実際の moment のスコアリングリクエスト内）。`labels.mentor.original` を先頭行とし、ペルソナのメッセージが続く。既知の悪い参照であり、スコアリング対象の回答ではない。作成された状況では省略 | スコアリング（実際の moment のみ） |
+| `<character>` | `{{name}}` を埋めたキャラクターカード | スコアリング |
 | `<rules>` | ルールプロンプト | スコアリング |
 | `<learned>` | ペルソナが見ている指示的な学習項目。`mentor.anchor.hideLaterMemory` が有効な実際の moment では、トリガー以降に書き込まれた項目は非表示 | スコアリング |
 | `<situation>` | チャットトランスクリプトとしてレンダリングされた状況（ペルソナの視点）。実際の moment では、最も古いメッセージがリクエスト予算に合わせてトリミングされる場合があり、トリガーは削除されない | スコアリング |
-| `<answers>` | JSON 配列: `[{ "id": "s1a1", "messages": ["..."], "reactions": ["..."], "silent": false }]` | スコアリング（reply） |
-| `<stored>` | JSON 配列: `[{ "id": "s1a1", "texts": [{ "path": "...", "text": "..." }], "parseOk": true }]`。`parseOk` が false の場合、アナライザーが無効な JSON を返し何も保存されない | スコアリング（memory） |
+| `<answers>` | JSON 配列: `[{ "id": "s1a1", "messages": ["..."], "reactions": ["..."], "silent": false }]` | スコアリング |
 | `<facts>` | 回答 id をキーとした JSON オブジェクト。確定的測定結果（未使用マーク、レアマーク、コンマ数、コンマ密度、長さ）と、2 つ以上の異なる状況で見つかったフレーズ `"repeated"` を含む。回答ごと: `commas` はカウント、`commaPer1000` は測定テキストが 150 文字以上の場合のみ数値で、短い場合は `null`（短すぎて測定不能、mentor はカウントで判断し密度を推定しない）。`repeated` は異なる状況で繰り返されたフレーズを列挙し、`count` は状況の数 | スコアリング |
 | `<verdict>` | JSON: `{ passed, medians, situations, reasons }`。合否結果、各軸の中央値、状況ごとの中央値、診断の理由。理由には作成された状況の `situation <n>: <axis> <v> is under the floor <f>` と実際の moment の `real moment <n>: <axis> <v> is under the pass score <s>` または `real moment <n>: <axis> <v> is under the anchor score <s>` が含まれる | 診断 |
-| `<worst>` | JSON: 種類を問わず `overall` 中央値が最低の状況（同率の場合はより低い `goal` 中央値、次に実際の moment が作成された状況より優先、次により小さい `n`）: `{ n, title, transcript, answers }`。各回答は id、messages/reactions/silent（memory の場合は `texts`/`parseOk`）、`facts`、`score` を含む。トランスクリプトはリクエスト予算に合わせてトリミングされる場合がある | 診断 |
-| `<seen>` | その状況でペルソナ（memory ケースの場合はアナライザー）に渡された完全なリクエスト。2 つのサブブロック: `<system>`（キャラクターカード、ルール、フォーマットを含むシステムプロンプト）と `<user>`（トランスクリプト、メモリブロック、タスク） | 診断 |
+| `<worst>` | JSON: 種類を問わず `overall` 中央値が最低の状況（同率の場合はより低い `goal` 中央値、次に実際の moment が作成された状況より優先、次により小さい `n`）: `{ n, title, transcript, answers }`。各回答は id、messages/reactions/silent、`facts`、`score` を含む。トランスクリプトはリクエスト予算に合わせてトリミングされる場合がある | 診断 |
+| `<seen>` | その状況でペルソナに渡された完全なリクエスト。2 つのサブブロック: `<system>`（キャラクターカード、ルール、フォーマットを含むシステムプロンプト）と `<user>`（トランスクリプト、メモリブロック、タスク） | 診断 |
 
 ### 回答 ID
 
@@ -654,7 +651,7 @@ Mentor は 6 つのプロンプトファイルを使用します。ターゲッ�
 }
 ```
 
-`authorId` は `<members>` のメンバー id または `self`（ペルソナ自身の行）。`replyTo` はこの状況の `lines` 配列内の 0 ベースインデックス、または `null`。両ターゲットとも最後の行は `self` であってはなりません。Reply ターゲット状況では最後の行がペルソナに話しかけます。Memory ターゲット状況ではペルソナへの呼びかけは不要です。ペルソナ自身の行は最後の行より前のどこにでも置けます。
+`authorId` は `<members>` のメンバー id または `self`（ペルソナ自身の行）。`replyTo` はこの状況の `lines` 配列内の 0 ベースインデックス、または `null`。最後の行は `self` であってはならず、ペルソナに話しかけます。
 
 実際の moment からの状況レコードは `lines` の代わりに `anchor: <id>` を持ちます。そのトランスクリプトは保存された履歴から構築されます。レコードには `original`（ペルソナのメッセージ）と `at`（ペルソナが回答した時間）も含まれます。
 
@@ -676,7 +673,7 @@ Mentor は 6 つのプロンプトファイルを使用します。ターゲッ�
 }
 ```
 
-各スコアは 0–10 の整数または `null`。`overall` と `goal` は常に数値。Memory ターゲットスコアリングでは `character` は常に `null`。
+各スコアは 0–10 の整数または `null`。`overall` と `goal` は常に数値。
 
 ### 軸
 
@@ -689,8 +686,6 @@ Mentor は 6 つのプロンプトファイルを使用します。ターゲッ�
 | `rules` | ルールと学習項目の遵守 | すべての適用ルールに違反 | 一部遵守、一部違反 | すべての適用ルールを遵守 |
 | `goal` | `<case>` の要求を満たしているか | 逆のことをしている | 部分的に達成、部分的に未達 | 記述通りに行動を処理 |
 | `overall` | Mentor の総合判定 | 全面的に不合格 | 明確な弱点はあるが許容範囲 | 全面的に優秀 |
-
-Memory ターゲットスコアリングでは `character` は常に `null`、`human` はテキストが知り合いについての個人的なメモ（10）か、そのような人が自分用に書く文体から遠い（0）かを測定します。
 
 ### 合格ルール
 

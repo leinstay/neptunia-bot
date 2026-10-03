@@ -168,10 +168,8 @@ prompts/
   lookup.md                分類器: 質問にウェブ検索が必要か
   read-link.md             フェッチしたページの要約
   search-summary.md        検索結果の要約
-  mentor-situations.md     mentor: テスト状況を作成（reply ターゲット）
-  mentor-situations-memory.md  mentor: テスト状況を作成（memory ターゲット）
+  mentor-situations.md     mentor: テスト状況を作成
   mentor-score.md          mentor: ペルソナの回答をスコアリング
-  mentor-score-memory.md   mentor: アナライザーの保存テキストをスコアリング
   mentor-signs.md          mentor: モデル文の既知の癖
   mentor-diagnose.md       mentor: スコアリング後に弱い回答を説明
   variety.md               分類器: ペルソナが使い回している手法を特定

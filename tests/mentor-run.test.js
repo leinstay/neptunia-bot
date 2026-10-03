@@ -85,9 +85,7 @@ function fakePrompts(overrides = {}) {
     reply: 'Someone called you: {{author}}.',
     memory: 'Summarize what happened.',
     'mentor-situations': 'SITUATIONS for {{name}}: {{count}} of {{minLines}}-{{maxLines}} lines. {{unknown}}',
-    'mentor-situations-memory': 'SITUATIONS-MEMORY for {{name}}: {{count}}',
     'mentor-score': 'SCORE for {{name}}',
-    'mentor-score-memory': 'SCORE-MEMORY for {{name}}',
     'mentor-signs': 'SIGNS FOR {{name}}',
     'mentor-diagnose': 'DIAGNOSE {{name}}',
     labels,
@@ -150,12 +148,10 @@ const DIAGNOSIS = {
   changes: [{ layer: 'rules', target: 'rules.md', from: '', to: 'say a limit once, in one line', why: 'Shorter notices.' }],
 };
 
-const MEMORY_ANSWER = JSON.stringify({ users: { [ALICE]: { character: 'Asks about limits.' } }, guild: { patterns: 'Short greetings.' } });
-
-/** The answer ids listed in the `<answers>` or `<stored>` block of a score request. */
+/** The answer ids listed in the `<answers>` block of a score request. */
 function idsIn(user) {
-  const match = /<(answers|stored)>\n([\s\S]*?)\n<\/\1>/.exec(user);
-  return match ? JSON.parse(match[2]).map((a) => a.id) : [];
+  const match = /<answers>\n([\s\S]*?)\n<\/answers>/.exec(user);
+  return match ? JSON.parse(match[1]).map((a) => a.id) : [];
 }
 
 function score(overall = 8) {
@@ -164,8 +160,7 @@ function score(overall = 8) {
 
 /**
  * A fake llm that answers by looking at the request: the mentor model by its
- * system text (situations, diagnose or score), the analyzer by its model,
- * else the talk model. `hook` may return a result (or a promise) to answer a
+ * system text (situations, diagnose or score), else the talk model. `hook` may return a result (or a promise) to answer a
  * call itself.
  */
 function fakeLlm({
@@ -186,7 +181,6 @@ function fakeLlm({
       const user = messages[1].content;
       let kind = 'talk';
       if (options.model === 'x/mentor') kind = system.startsWith('SITUATIONS') ? 'situations' : system.startsWith('DIAGNOSE') ? 'diagnose' : 'score';
-      else if (options.model === 'x/memory') kind = 'memory';
       const call = { kind, messages, options, system, user };
       calls.push(call);
       if (hook) {
@@ -202,7 +196,6 @@ function fakeLlm({
           .map(({ id, value }) => ({ id, ...value }));
         text = JSON.stringify({ answers });
       } else if (kind === 'diagnose') text = diagnosis;
-      else if (kind === 'memory') text = MEMORY_ANSWER;
       else text = talk;
       return { text, usage: usageFor ? usageFor(kind) : usage, estimated: 90 };
     },
@@ -269,7 +262,7 @@ function setup({ config = {}, prompts = {}, llm = fakeLlm(), sendFails = false, 
     rng: () => 0,
   });
   const cleanup = () => fs.rmSync(dir, { recursive: true, force: true });
-  return { mentor, cases, hot, llm, budget, state, sent, fetched, windows, store, cleanup };
+  return { mentor, cases, hot, llm, budget, state, sent, fetched, windows, store, dir, cleanup };
 }
 
 async function withSetup(options, fn) {
@@ -299,11 +292,11 @@ test('run: refuses without mentor.model', () =>
   }));
 
 test('run: refuses an unknown case, a missing prompt and an exhausted budget', () =>
-  withSetup({ prompts: { 'mentor-score-memory': undefined } }, async ({ mentor, cases, llm, hot }) => {
+  withSetup({ prompts: { 'mentor-score': undefined } }, async ({ mentor, cases, llm, hot }) => {
     await assert.rejects(mentor.run(42), /case 42/);
-    const memoryCase = cases.add(GUILD, { text: CASE_TEXT, target: 'memory' });
-    await assert.rejects(mentor.run(memoryCase.id), /mentor prompt missing: mentor-score-memory/);
     const replyCase = cases.add(GUILD, { text: CASE_TEXT, target: 'reply' });
+    await assert.rejects(mentor.run(replyCase.id), /mentor prompt missing: mentor-score/);
+    hot.prompts['mentor-score'] = 'SCORE for {{name}}';
     hot.config.mentor.maxTokensPerDay = 0;
     await assert.rejects(mentor.run(replyCase.id), /budget/);
     assert.equal(llm.calls.length, 0);
@@ -743,47 +736,6 @@ test('check: a run ended by the switches skips the remaining cases', () => {
   });
 });
 
-test('run: a memory case goes through answerMemory', () =>
-  withSetup({}, async ({ mentor, cases, llm }) => {
-    const item = cases.add(GUILD, { text: CASE_TEXT, target: 'memory' });
-    const run = await (await mentor.run(item.id)).done;
-    assert.deepEqual(llm.kinds(), ['situations', 'memory', 'memory', 'memory', 'memory', 'score', 'score']);
-    assert.match(llm.calls[0].system, /^SITUATIONS-MEMORY for Zoë: 2/);
-    const scoreCall = llm.calls.find((c) => c.kind === 'score');
-    assert.equal(scoreCall.system, 'SCORE-MEMORY for Zoë');
-    assert.doesNotMatch(scoreCall.user, /<character>|<answers>/);
-    const stored = JSON.parse(/<stored>\n([\s\S]*?)\n<\/stored>/.exec(scoreCall.user)[1]);
-    assert.equal(stored[0].id, 's1a1');
-    assert.ok(stored[0].texts.some((t) => t.text === 'Asks about limits.'));
-    const answer = run.situations[0].answers[0];
-    assert.equal(answer.parseOk, true);
-    assert.equal(answer.applyOk, true);
-    assert.ok(answer.texts.some((t) => t.path === 'guild.patterns'));
-    assert.equal(answer.messages, undefined);
-    assert.deepEqual(run.repeated, []);
-    assert.equal(run.passed, true);
-  }));
-
-test('run: <stored> tells the judge when an analyzer answer did not parse', () => {
-  let memoryCalls = 0;
-  const llm = fakeLlm({
-    hook: (call) => {
-      if (call.kind === 'memory' && (memoryCalls += 1) === 1) return { text: 'I would store nothing here.', usage: USAGE, estimated: 90 };
-      return undefined;
-    },
-  });
-  return withSetup({ llm }, async ({ mentor, cases }) => {
-    const item = cases.add(GUILD, { text: CASE_TEXT, target: 'memory' });
-    await (await mentor.run(item.id)).done;
-    const scoreCall = llm.calls.find((c) => c.kind === 'score');
-    const stored = JSON.parse(/<stored>\n([\s\S]*?)\n<\/stored>/.exec(scoreCall.user)[1]);
-    assert.deepEqual(stored[0], { id: 's1a1', texts: [], parseOk: false });
-    assert.equal(stored[1].id, 's1a2');
-    assert.equal(stored[1].parseOk, true);
-    assert.ok(stored[1].texts.length > 0);
-  });
-});
-
 // ---- the signs block -----------------------------------------------------------
 
 /** The `<signs>` block as the fake prompts fill it, directly after `<samples>`. */
@@ -836,16 +788,6 @@ test('run: a missing mentor-signs prompt omits the block and the run still compl
     });
   }
 });
-
-test('run: a memory case carries <signs> in both of its requests', () =>
-  withSetup({}, async ({ mentor, cases, llm }) => {
-    const item = cases.add(GUILD, { text: CASE_TEXT, target: 'memory' });
-    await (await mentor.run(item.id)).done;
-    const situations = llm.calls.find((c) => c.kind === 'situations');
-    const scoreCall = llm.calls.find((c) => c.kind === 'score');
-    assert.ok(situations.user.includes(SIGNS_AFTER_SAMPLES), situations.user);
-    assert.ok(scoreCall.user.includes(SIGNS_AFTER_SAMPLES), scoreCall.user);
-  }));
 
 // ---- the diagnosis -------------------------------------------------------------
 
@@ -1008,26 +950,6 @@ test('run: <worst> is the situation with the lowest median and <seen> carries it
     },
   );
 });
-
-test("run: a memory case's <worst> carries texts and parseOk", () =>
-  withSetup({ llm: fakeLlm({ scoreFor: overallBySituation(4, 9) }) }, async ({ mentor, cases, llm }) => {
-    const item = cases.add(GUILD, { text: CASE_TEXT, target: 'memory' });
-    const run = await (await mentor.run(item.id)).done;
-    assert.equal(run.passed, false);
-    const call = llm.calls.at(-1);
-    assert.equal(call.kind, 'diagnose');
-    const worst = JSON.parse(blockBody(call.user, 'worst'));
-    assert.equal(worst.n, 1);
-    assert.deepEqual(Object.keys(worst.answers[0]), ['id', 'texts', 'parseOk', 'facts', 'score']);
-    assert.equal(worst.answers[0].parseOk, true);
-    assert.ok(worst.answers[0].texts.some((t) => t.text === 'Asks about limits.'));
-    // What the analyzer was given for situation 1.
-    const analyzer = llm.calls.find((c) => c.kind === 'memory');
-    const seen = blockBody(call.user, 'seen');
-    assert.ok(seen.startsWith(`<system>\n${analyzer.system}\n</system>`));
-    assert.ok(seen.endsWith(`<user>\n${analyzer.user}\n</user>`));
-    assert.deepEqual(run.diagnosis, DIAGNOSIS);
-  }));
 
 test('run: mentor.diagnose false skips the step', () =>
   withSetup({ config: { mentor: { diagnose: false } }, llm: fakeLlm({ scoreFor: overallBySituation(9, 3) }) }, async ({ mentor, cases, llm }) => {
@@ -1261,6 +1183,40 @@ test('check: refuses when no case has a run', () =>
     await assert.rejects(mentor.check(), /no case/);
     assert.equal(llm.calls.length, 0);
     assert.equal(mentor.isRunning(), false);
+  }));
+
+/** A case with `target: 'memory'` as an earlier version stored it, appended to cases.json. */
+function addOldMemoryCase(dir) {
+  const file = path.join(dir, 'guilds', GUILD, 'mentor', 'cases.json');
+  let data = { nextId: 1, cases: [] };
+  if (fs.existsSync(file)) data = JSON.parse(fs.readFileSync(file, 'utf8'));
+  else fs.mkdirSync(path.dirname(file), { recursive: true });
+  const item = { id: data.nextId, text: 'Remember the pet named Héloïse.', target: 'memory', state: 'new', createdAt: new Date(NOW).toISOString(), lastRunId: null, lastScore: null };
+  data.cases.push(item);
+  data.nextId += 1;
+  fs.writeFileSync(file, JSON.stringify(data));
+  return item;
+}
+
+test('run / check: an old stored case with target memory is named unsupported, never measured, never a crash', () =>
+  withSetup({}, async ({ mentor, cases, llm, sent, dir }) => {
+    const old = addOldMemoryCase(dir);
+    await assert.rejects(mentor.run(old.id), new RegExp(`case ${old.id} has an unsupported target: memory`));
+    assert.equal(llm.calls.length, 0);
+    assert.equal(mentor.isRunning(), false);
+    // Alone, it leaves a check nothing to do.
+    await assert.rejects(mentor.check(), /no case/);
+
+    // Beside a reply case, the check measures the reply case and skips the old one by name.
+    const reply = cases.add(GUILD, { text: CASE_TEXT, target: 'reply' });
+    await (await mentor.run(reply.id)).done;
+    const started = await mentor.check();
+    assert.equal(started.cases, 1);
+    const runs = await started.done;
+    assert.deepEqual(runs.map((r) => r.caseId), [reply.id]);
+    assert.match(sent.at(-1).content, new RegExp(`case ${old.id}: skipped \\(unsupported target: memory\\)`));
+    assert.equal(cases.lastRun(GUILD, old.id), null);
+    assert.ok(cases.list(GUILD).some((c) => c.id === old.id && c.target === 'memory'));
   }));
 
 test('run: labels without mentor.intended leave the intended block out', () => {
@@ -2080,13 +2036,6 @@ test('run: a variety answer that is not JSON, or a failed pass, leaves the situa
     });
   }
 });
-
-test('run: a memory-target case never runs the variety pass', () =>
-  withSetup({ config: { mentor: { situationLines: [2, 6] } }, prompts: { variety: VARIETY_PROMPT }, llm: varietyLlm() }, async ({ mentor, cases, llm }) => {
-    const item = cases.add(GUILD, { text: CASE_TEXT, target: 'memory' });
-    await withCapturedLogs(async () => (await mentor.run(item.id)).done);
-    assert.equal(llm.calls.filter((c) => c.options.role === 'classifier.text').length, 0);
-  }));
 
 test('run: the bot\'s limit notices among the persona\'s own lines never reach the variety pass', () => {
   const notice = labels.limits.notice.replace('{limit}', 'llm.maxRequestsPerDay').replace('{used}', '300').replace('{cap}', '300');

@@ -242,7 +242,7 @@ test('renderFile: lists every answer with its points', () => {
   assert.ok(file.text.includes(run.caseText));
 });
 
-test('renderFile: a memory answer shows its stored texts', () => {
+test('renderFile / renderCard: a run stored for an old memory case still renders, its answers without messages', () => {
   const run = fakeRun({ target: 'memory', repeated: [] });
   run.situations = [
     {
@@ -252,25 +252,17 @@ test('renderFile: a memory answer shows its stored texts', () => {
       transcript: 'tr',
       answers: [
         { id: 's1a1', texts: [{ path: 'users.1.character', text: 'likes chess, café au lait' }], parseOk: true, facts: {}, score: null },
-        { id: 's1a2', texts: [], parseOk: false, facts: {}, score: null },
+        { id: 's1a2', texts: [], parseOk: false, applyOk: false, facts: {}, score: null },
       ],
     },
   ];
   const file = renderFile(run);
-  assert.match(file.text, /users\.1\.character: likes chess, café au lait/);
+  assert.match(file.text, /case \d+ \(memory\)/);
+  assert.match(file.text, /--- s1a1 ---/);
+  assert.match(file.text, /--- s1a2 ---/);
   assert.match(file.text, /not scored/);
-  assert.match(file.text, /not parsed/i);
-  assert.doesNotMatch(file.text, /not applied/i);
-});
-
-test('renderFile: a memory answer that parsed but could not be applied says so, not "not parsed"', () => {
-  const run = fakeRun({ target: 'memory', repeated: [] });
-  run.situations = [
-    { n: 1, title: 't', lines: [], transcript: 'tr', answers: [{ id: 's1a1', texts: [], parseOk: true, applyOk: false, facts: {}, score: null }] },
-  ];
-  const file = renderFile(run);
-  assert.match(file.text, /^stored: nothing \(the answer was parsed but could not be applied\)$/m);
-  assert.doesNotMatch(file.text, /not parsed/i);
+  assert.doesNotMatch(file.text, /^stored:/m);
+  assert.match(renderCard(run), /\(memory\)/);
 });
 
 test('stopPhrase: one phrase per stop code, the one the card, the diagnosis and the check use', () => {

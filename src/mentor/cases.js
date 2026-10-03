@@ -13,13 +13,18 @@
 // the value and writes it back through the atomic writer of the memory store.
 // A missing file is empty; a file that holds broken JSON throws, so nothing
 // ever starts over on top of the owner's data. Nothing here deletes a file.
+//
+// Every case is a `reply` case: it judges the persona's answers. A case stored
+// by an earlier version with another target (`memory`) stays readable and is
+// listed as it is; the mentor reports it as unsupported (src/mentor/mentor.js).
 
 import fs from 'node:fs';
 import path from 'node:path';
 import { writeJsonAtomic } from '../memory/store.js';
 import { isUsableAnchor } from './anchor.js';
 
-const TARGETS = ['reply', 'memory'];
+/** The one target a new case takes. */
+const CASE_TARGET = 'reply';
 const TEXT_MIN = 10;
 const TEXT_MAX = 1000;
 const REASON_MIN = 3;
@@ -135,14 +140,13 @@ export function createCaseStore({ dataDir, now = Date.now }) {
   return {
     /**
      * Store a new case in state `new`. With `anchor` (a resolved moment) the
-     * case starts with it as its anchor 1; only a `reply` case takes one.
+     * case starts with it as its anchor 1. `target` is always `reply`.
      * @param {string} guildId
-     * @param {{ text: string, target: 'reply' | 'memory', anchor?: object }} input
+     * @param {{ text: string, target: 'reply', anchor?: object }} input
      */
     add(guildId, { text, target, anchor } = {}) {
-      if (!TARGETS.includes(target)) throw new Error(`target must be one of: ${TARGETS.join(', ')}`);
+      if (target !== CASE_TARGET) throw new Error(`target must be ${CASE_TARGET}`);
       const clean = checkCaseText(text);
-      if (anchor !== undefined && target !== 'reply') throw new Error('only a reply case takes a moment');
       const moment = anchor === undefined ? null : checkedAnchor(anchor);
       const data = readCases(guildId);
       const createdAt = new Date(now()).toISOString();
@@ -192,7 +196,7 @@ export function createCaseStore({ dataDir, now = Date.now }) {
       const data = readCases(guildId);
       const item = findCase(data, id);
       if (item.state === 'retired') throw new Error(`case ${item.id} is retired`);
-      if (item.target !== 'reply') throw new Error(`case ${item.id} is not a reply case; only a reply case takes a moment`);
+      if (item.target !== CASE_TARGET) throw new Error(`case ${item.id} is not a reply case; only a reply case takes a moment`);
       const anchors = Array.isArray(item.anchors) ? item.anchors : [];
       const limit = anchorMax(max);
       if (anchors.length >= limit) throw new Error(`case ${item.id} has ${anchors.length} moments; at most ${limit} (mentor.anchor.max)`);

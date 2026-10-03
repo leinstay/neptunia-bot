@@ -1410,6 +1410,28 @@ test('memory.affinity: a score with no reason stores no text of its own (nothing
   assert.ok(shown.split('\n').includes('reason: -'), shown);
 });
 
+test('memory.affinity: a score with no reason stores labels.affinity.ownerSet, read at the moment of use; a given reason wins', async () => {
+  const rootDir = makeRoot();
+  const { admin, hot, store } = makeAdmin(rootDir);
+  store.profiles.set('g1:123', { id: '123', affinity: emptyAffinity() });
+
+  hot.prompts = { ...hot.prompts, labels: { ...hot.prompts.labels, affinity: { ownerSet: labels.affinity.ownerSet } } };
+  await admin.run('memory.affinity', { userId: '123', score: 20 }, { guildId: 'g1' });
+  let affinity = store.getUser('g1', '123').affinity;
+  assert.equal(affinity.score, 20);
+  assert.equal(affinity.reason, labels.affinity.ownerSet);
+  assert.equal(affinity.history.at(-1).reason, labels.affinity.ownerSet);
+
+  // A live edit of the label is read by the next set.
+  hot.prompts = { ...hot.prompts, labels: { ...hot.prompts.labels, affinity: { ownerSet: 'Ζωή set it' } } };
+  await admin.run('memory.affinity', { userId: '123', score: 25, reason: '   ' }, { guildId: 'g1' });
+  assert.equal(store.getUser('g1', '123').affinity.reason, 'Ζωή set it');
+
+  await admin.run('memory.affinity', { userId: '123', score: 30, reason: 'owner override' }, { guildId: 'g1' });
+  affinity = store.getUser('g1', '123').affinity;
+  assert.equal(affinity.reason, 'owner override');
+});
+
 test('memory.affinity / alias.add / alias.remove: a member with no profile is refused and none is created', async () => {
   const rootDir = makeRoot();
   const { admin, store } = makeAdmin(rootDir);
@@ -5255,10 +5277,15 @@ test('run: mentor.cases says (none) when there is no case', async () => {
 });
 
 test('run: mentor.cases lists the active cases, one line each, with the last score or - and the text clipped to 80', async () => {
-  const { admin, mentorCases } = makeMentorAdmin();
+  const { admin, mentorCases, rootDir } = makeMentorAdmin();
   const long = `Keep replies short in the evening; ${'every message stays under a dozen words '.repeat(3)}`.trim();
   mentorCases.add('g1', { text: long, target: 'reply' });
-  mentorCases.add('g1', { text: 'Remember the pet named Héloïse.', target: 'memory' });
+  // A memory case stored by an earlier version (`add` takes reply cases only) is still listed as it is.
+  mentorCases.add('g1', { text: 'Remember the pet named Héloïse.', target: 'reply' });
+  const casesFile = path.join(rootDir, 'data', 'guilds', 'g1', 'mentor', 'cases.json');
+  const stored = JSON.parse(fs.readFileSync(casesFile, 'utf8'));
+  stored.cases[1].target = 'memory';
+  fs.writeFileSync(casesFile, JSON.stringify(stored));
   mentorCases.add('g1', { text: 'A retired case that is not listed.', target: 'reply' });
   mentorCases.saveRun('g1', sampleMentorRun(2, { passed: true, overall: 7, target: 'memory' }));
   mentorCases.retire('g1', 3);
@@ -5606,6 +5633,18 @@ test('run: access.grant refuses the mentor group and its commands (owner-only), 
     await assert.rejects(() => admin.run('access.grant', { command }, {}), /the mentor is owner-only/, command);
     await assert.rejects(() => admin.run('access.grant', { command, roleId: '1' }, {}), /the mentor is owner-only/, command);
     await assert.rejects(() => admin.run('access.grant', { command, userId: '2' }, {}), /the mentor is owner-only/, command);
+  }
+  assert.equal(fs.existsSync(path.join(rootDir, 'config.local.json')), false);
+});
+
+test('run: access.grant refuses the access group and its commands (owner-only), writing nothing', async () => {
+  const rootDir = makeRoot();
+  const { admin } = makeAdmin(rootDir);
+
+  for (const command of ['access', 'access.grant', 'access.revoke', 'access.list']) {
+    await assert.rejects(() => admin.run('access.grant', { command }, {}), /access management is owner-only/, command);
+    await assert.rejects(() => admin.run('access.grant', { command, roleId: '1' }, {}), /access management is owner-only/, command);
+    await assert.rejects(() => admin.run('access.grant', { command, userId: '2' }, {}), /access management is owner-only/, command);
   }
   assert.equal(fs.existsSync(path.join(rootDir, 'config.local.json')), false);
 });

@@ -64,7 +64,7 @@ import { utcDay } from './time.js';
 
 /** `/nep access grant/revoke`'s command keys that ONLY read — everything else (including every
  * group and `*`) is treated as opening a write command, and gets the "changes memory or config"
- * note in the grant reply. The owner-only `private` and `mentor` commands are never grantable at all
+ * note in the grant reply. The owner-only `private`, `mentor` and `access` commands are never grantable at all
  * (src/discord/access.js#isOwnerOnly), so they are not listed here. docs/en/owner-commands.md
  * describes each command; a new read-only command is simply added here. `ping` writes nothing
  * but spends balance outside the daily request cap: its grant reply says so (SPENDS_BALANCE_KEYS). */
@@ -83,7 +83,6 @@ const READ_ONLY_ACCESS_KEYS = new Set([
   'gifs.status',
   'warmup.status',
   'warmup.people',
-  'access.list',
   'route.list',
   'variety',
 ]);
@@ -93,7 +92,7 @@ const READ_ONLY_ACCESS_KEYS = new Set([
 const SPENDS_BALANCE_KEYS = new Set(['ping']);
 
 /** How `/nep access grant` names each owner-only group (src/discord/access.js#OWNER_ONLY_GROUPS) when it refuses it. */
-const OWNER_ONLY_NAMES = { private: 'private memory', mentor: 'the mentor' };
+const OWNER_ONLY_NAMES = { private: 'private memory', mentor: 'the mentor', access: 'access management' };
 
 const FORBIDDEN_SEGMENTS = new Set(['__proto__', 'constructor', 'prototype']);
 
@@ -1936,8 +1935,9 @@ export function createAdmin({
 
   /** `/nep memory affinity`: without a score, the attitude view (`affinityView`); with one, sets
    * it exactly for a member who has a profile (refused while paused). The owner's `reason` is
-   * stored as given; none given stores an empty one (src/memory/affinity.js#applyDelta then keeps
-   * the previous reason). */
+   * stored as given; none given stores `labels.affinity.ownerSet` (read at the moment of use), or an
+   * empty one when that label is missing (src/memory/affinity.js#applyDelta then keeps the previous
+   * reason). */
   function cmdMemoryAffinity(args, context) {
     const userId = args?.userId;
     if (!userId) throw new Error('a user is required');
@@ -1956,7 +1956,8 @@ export function createAdmin({
     }
 
     const profile = requireProfile(guildId, userId);
-    const reason = String(args?.reason ?? '').trim();
+    // No reason given: the stored reason says the owner set it (`labels.affinity.ownerSet`, read now).
+    const reason = String(args?.reason ?? '').trim() || (hot.prompts.labels?.affinity?.ownerSet ?? '');
     const current = profile.affinity?.score ?? 0;
     const relCfg = hot.config?.relationships ?? {};
     const affinity = store.adjustAffinity(guildId, userId, score - current, reason, {

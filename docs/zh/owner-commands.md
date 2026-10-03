@@ -2,7 +2,7 @@
 
 频道、身份组和用户从 Discord 自带的选择器中选取；`set`/`unset` 和 `access grant`/`access revoke` 会自动补全其 `path`/`command` 选项。
 
-`/nep` 从一开始就对所有成员可见；访问权限在命令执行时按命令逐一检查，不通过 Discord 自身的命令可见性控制。所有者（`bot.owners`）始终可以运行所有命令。其他人需要授权：`/nep access grant <command> [role] [user]` 可开放一个命令键（如 `memory.show`）、一个完整组（如 `memory`）或所有命令（`*`）给所有人（不指定身份组/用户）、某个身份组或某个用户；`/nep access revoke` 撤销授权；`/nep access list` 显示当前授权。没有授权的非所有者运行 `/nep` 会收到一条仅自己可见的 “Not allowed” 回复。`private.show`、`private.forget` 和 `private.purge` 仅限所有者使用，不可通过任何授权方式开放；`access grant` 会拒绝它们，`access list` 也不会显示。`mentor` 组同样仅限所有者使用，不可授权。
+`/nep` 从一开始就对所有成员可见；访问权限在命令执行时按命令逐一检查，不通过 Discord 自身的命令可见性控制。所有者（`bot.owners`）始终可以运行所有命令。其他人需要授权：`/nep access grant <command> [role] [user]` 可开放一个命令键（如 `memory.show`）、一个完整组（如 `memory`）或所有命令（`*`）给所有人（不指定身份组/用户）、某个身份组或某个用户；`/nep access revoke` 撤销授权；`/nep access list` 显示当前授权。没有授权的非所有者运行 `/nep` 会收到一条仅自己可见的 “Not allowed” 回复。`private.show`、`private.forget` 和 `private.purge` 仅限所有者使用，不可通过任何授权方式开放；`access grant` 会拒绝它们，`access list` 也不会显示。`mentor` 和 `access` 组同样仅限所有者使用，不可授权。
 
 | 命令 | 说明 |
 |---|---|
@@ -65,6 +65,6 @@
 | `/nep mentor wrong <id> <reason>` | 告知 mentor 对该案例判断有误以及原因；作为反例保存供未来评分 |
 | `/nep mentor status` | 模型、是否启用、今日 token 使用量/上限、各状态的案例数、进行中的运行（停止待处理时显示 `, stopping`），以及最近完成的运行（`last:`）：案例、结果、overall 中位数、已评分回答数、token 数和完成时间 |
 | `/nep variety` | 多样性过程：最新列表含示例，然后是从新到旧的历史过程。只读，可通过权限授予 |
-| `/nep access grant <command> [role] [user]` | 将命令、命令组或 `*` 开放给所有人（默认）、某个身份组或某个用户。`private.*` 和 `mentor.*` 被排除；见上文 |
+| `/nep access grant <command> [role] [user]` | 将命令、命令组或 `*` 开放给所有人（默认）、某个身份组或某个用户。`private.*`、`mentor.*` 和 `access.*` 被排除；见上文 |
 | `/nep access revoke <command> [role] [user]` | 从所有人（默认）、某个身份组或某个用户撤销授权 |
 | `/nep access list` | 列出所有当前访问授权 |

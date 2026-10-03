@@ -11,6 +11,7 @@
 // tests.
 
 import { normalizeMessage, channelAllowed, canSend, fetchHistory } from './collect.js';
+import { isOwnerId } from './access.js';
 import { collectPictures, collectEmojiItems, collectVideos, collectReadableLinks, isDescribable } from './media.js';
 import {
   detectTrigger,
@@ -667,7 +668,7 @@ export function createMessageHandler({
    */
   async function checkPrivateGate(config, guildId, authorId) {
     const profile = store.getUser(guildId, authorId);
-    const isOwner = (config.bot?.owners ?? []).map(String).includes(String(authorId));
+    const isOwner = isOwnerId(config, authorId);
     const replies = store.getPrivate(guildId, authorId)?.replies ?? null;
     const today = utcDay(now());
     const input = { config, profile, isOwner, replies, today };

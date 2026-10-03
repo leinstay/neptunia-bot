@@ -167,27 +167,14 @@ function diagnosisSummary(run) {
 }
 
 /** The lines of one answer in the file. */
-function answerLines(answer, target) {
+function answerLines(answer) {
   const lines = [`--- ${answer.id} ---`];
-  if (target === 'memory') {
-    if (answer.parseOk === false) {
-      lines.push('stored: nothing (the answer was not parsed as JSON)');
-    } else if (answer.applyOk === false) {
-      lines.push('stored: nothing (the answer was parsed but could not be applied)');
-    } else if (!answer.texts?.length) {
-      lines.push('stored: nothing');
-    } else {
-      lines.push('stored:');
-      for (const item of answer.texts) lines.push(`  ${item.path}: ${item.text}`);
-    }
-  } else {
-    if (answer.messages?.length) {
-      lines.push('messages:');
-      for (const message of answer.messages) lines.push(`  ${String(message).replace(/\n/g, '\n  ')}`);
-    }
-    if (answer.reactions?.length) lines.push(`reactions: ${answer.reactions.join(' ')}`);
-    if (answer.silent) lines.push('silent');
+  if (answer.messages?.length) {
+    lines.push('messages:');
+    for (const message of answer.messages) lines.push(`  ${String(message).replace(/\n/g, '\n  ')}`);
   }
+  if (answer.reactions?.length) lines.push(`reactions: ${answer.reactions.join(' ')}`);
+  if (answer.silent) lines.push('silent');
   lines.push(`facts: ${JSON.stringify(answer.facts ?? {})}`);
   if (answer.score) {
     lines.push(`points: ${axesLine(answer.score)}`);
@@ -285,7 +272,7 @@ export function renderFile(run) {
       lines.push('', '(no answers)');
       continue;
     }
-    for (const answer of situation.answers) lines.push('', ...answerLines(answer, run?.target));
+    for (const answer of situation.answers) lines.push('', ...answerLines(answer));
   }
   return { name: `mentor-case-${run?.caseId}-${run?.id ?? 'unsaved'}.txt`, text: `${lines.join('\n')}\n` };
 }

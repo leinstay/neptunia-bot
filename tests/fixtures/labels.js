@@ -151,6 +151,7 @@ export const labels = {
       fond: 'fond',
       devoted: 'devoted',
     },
+    ownerSet: 'set without a reason',
   },
   aboutChat: {
     patterns: 'how people talk here: {text}',

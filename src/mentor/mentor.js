@@ -26,7 +26,11 @@
 // stood when she answered; src/mentor/anchor.js#replayMedia), everywhere its
 // transcript appears; the cache is only read.
 //
-// A reply-target situation exercises the variety pass as a live turn does
+// Every case is a reply case. A case stored by an earlier version with another
+// target (`memory`) is refused by `run` and skipped by `check`, both naming it
+// as unsupported; nothing else reads it.
+//
+// A situation exercises the variety pass as a live turn does
 // (src/behavior/variety.js): the persona's own lines of that situation's
 // history go to the same pass, charged to the mentor's budget, and its answer
 // becomes the `<worn>` block of every sample of that situation; the patterns
@@ -60,7 +64,7 @@ import { parseDiagnosis, parseScores, parseSituations, verdict } from './judge.j
 import { hiddenLater, momentCutoff, momentView } from './moment.js';
 import { answerFacts, repeatedPhrases, sampleLines, styleProfile } from './reference.js';
 import { clip, isAnchor, renderCard, renderCheckCard, renderCheckFile, renderFile, stopPhrase } from './report.js';
-import { answerMemory, answerReply, liveView, situationHistory } from './sandbox.js';
+import { answerReply, liveView, situationHistory } from './sandbox.js';
 
 const ERROR_MAX = 200;
 /** Tokens kept free in a mentor request for the tags and separators around a fitted transcript. */
@@ -69,11 +73,16 @@ const FIT_SLACK = 50;
 /** The system prompt of the diagnosis; optional (without it a run is saved without a diagnosis). */
 const DIAGNOSE_PROMPT = 'mentor-diagnose';
 
-/** The prompt files of each target. */
-const PROMPTS = {
-  reply: { situations: 'mentor-situations', score: 'mentor-score' },
-  memory: { situations: 'mentor-situations-memory', score: 'mentor-score-memory' },
-};
+/** The prompt files of a run. */
+const PROMPTS = { situations: 'mentor-situations', score: 'mentor-score' };
+
+/** The one target the mentor measures; a stored case with another one is unsupported. */
+const TARGET = 'reply';
+
+/** The operator-facing refusal of a case stored with a target other than `reply`. */
+function unsupportedTarget(item) {
+  return `case ${item.id} has an unsupported target: ${String(item.target)} (only reply cases run)`;
+}
 
 /** A positive number from the config, else `fallback` (the config.json default). */
 function positive(value, fallback) {
@@ -155,12 +164,8 @@ export function worstSituation(situationMedians, anchorNs = new Set()) {
 }
 
 /** A stored situation as the diagnosis request shows it. */
-function worstRecord(record, target) {
-  const answers = record.answers.map((a) =>
-    target === 'memory'
-      ? { id: a.id, texts: a.texts, parseOk: a.parseOk, facts: a.facts, score: a.score }
-      : { id: a.id, messages: a.messages, reactions: a.reactions, silent: a.silent, facts: a.facts, score: a.score },
-  );
+function worstRecord(record) {
+  const answers = record.answers.map((a) => ({ id: a.id, messages: a.messages, reactions: a.reactions, silent: a.silent, facts: a.facts, score: a.score }));
   return { n: record.n, title: record.title, transcript: record.transcript, answers };
 }
 
@@ -504,7 +509,7 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
     const profiles = view.memory.listUserProfiles().filter((p) => p?.id);
     const members = profiles.map((p) => `${p.names?.[0] ?? p.id} (id:${p.id})`).join('\n');
     const blocks = commonBlocks(item, reference, feedback, self.name);
-    const system = fillPromptTemplate(hot.prompts[PROMPTS[item.target].situations], templateValues(self.name));
+    const system = fillPromptTemplate(hot.prompts[PROMPTS.situations], templateValues(self.name));
     const parts = [blocks.case, block('members', members), blocks.reference, blocks.samples, blocks.signs, blocks.feedback].filter(Boolean);
     const examples = examplesBlock(item, anchorSituations(item), roomLeft(system, parts.join('\n\n')), self.name);
     const user = [...parts, examples].filter(Boolean).join('\n\n');
@@ -594,13 +599,7 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
   }
 
   /** One sandbox answer as the run stores it, with its facts. */
-  function answerRecord(answer, id, target, profile) {
-    if (target === 'memory') {
-      const texts = answer.texts ?? [];
-      const facts = answerFacts({ messages: texts.map((t) => ({ text: t.text })) }, profile);
-      // `applyOk` false with `parseOk` true: the answer parsed but applying it threw (the report says "not applied").
-      return { id, texts, parseOk: answer.parseOk === true, applyOk: answer.applyOk === true, facts, score: null };
-    }
+  function answerRecord(answer, id, profile) {
     const facts = answerFacts({ messages: answer.messages ?? [] }, profile);
     return {
       id,
@@ -613,7 +612,7 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
   }
 
   /**
-   * The variety pass of one reply-target situation, as a live turn runs it
+   * The variety pass of one situation, as a live turn runs it
    * (src/behavior/variety.js): the persona's own lines of the situation's
    * history (`variety.window` of them, newest kept, no age limit: the
    * situation's own timeline is what counts), at least `variety.minLines`,
@@ -654,7 +653,7 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
   }
 
   /** Answers every prepared situation on its own view (`entry.view`: a real moment's is filtered to its time). */
-  async function answerAll(ctx, { target, prepared, self, reference, caseId = null }) {
+  async function answerAll(ctx, { prepared, self, reference, caseId = null }) {
     let previous = 1;
     for (const entry of prepared) {
       const { situation, record, history, at, channel, view, media, samples } = entry;
@@ -667,29 +666,26 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
         charged += charge(ctx, usage, estimated);
       };
       // One variety pass per situation, its block shared by every sample; the patterns go on the record.
-      const worn = target === 'reply' ? await wornFor(ctx, { history, view, record, self, caseId }) : null;
+      const worn = await wornFor(ctx, { history, view, record, self, caseId });
       if (worn) record.worn = worn;
-      const result =
-        target === 'memory'
-          ? await answerMemory({ view, batch: history, selfName: self.name, llm, samples, at, signal: ctx.signal, onUsage })
-          : await answerReply({
-              view,
-              situation,
-              selfId: self.id,
-              selfName: self.name,
-              channel: channel ?? reference.channel,
-              llm,
-              samples,
-              at,
-              signal: ctx.signal,
-              onUsage,
-              descriptions: media?.descriptions,
-              videos: media?.videos,
-              worn,
-              ...turnLists(),
-            });
-      record.answers = result.answers.map((answer, i) => answerRecord(answer, `s${record.n}a${i + 1}`, target, reference.profile));
-      // What the persona (or the analyzer) was given, for the diagnosis; kept off the run: it is large.
+      const result = await answerReply({
+        view,
+        situation,
+        selfId: self.id,
+        selfName: self.name,
+        channel: channel ?? reference.channel,
+        llm,
+        samples,
+        at,
+        signal: ctx.signal,
+        onUsage,
+        descriptions: media?.descriptions,
+        videos: media?.videos,
+        worn,
+        ...turnLists(),
+      });
+      record.answers = result.answers.map((answer, i) => answerRecord(answer, `s${record.n}a${i + 1}`, reference.profile));
+      // What the persona was given, for the diagnosis; kept off the run: it is large.
       entry.request = result.request;
       if (result.stopped || ctx.signal.aborted) throw new RunEnd('stopped', 'owner');
       previous = Math.max(1, charged);
@@ -707,13 +703,12 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
    * stood at its time, see src/mentor/moment.js); the `<learned>` block of
    * that record is built from it.
    */
-  async function scoreAll(ctx, { target, records, repeated, item, view, judges = new Map(), self, reference, feedback, items = new Map() }) {
+  async function scoreAll(ctx, { records, repeated, item, view, judges = new Map(), self, reference, feedback, items = new Map() }) {
     const labels = view.prompts.labels ?? {};
     const intended = Array.isArray(labels.mentor?.intended) ? labels.mentor.intended.filter((s) => typeof s === 'string' && s.trim()) : [];
-    const character = target === 'reply' ? block('character', fillPromptTemplate(view.prompts['character-card'], { name: self.name })) : '';
+    const character = block('character', fillPromptTemplate(view.prompts['character-card'], { name: self.name }));
     const rules = block('rules', fillPromptTemplate(view.prompts.rules, { name: self.name }));
-    const system = fillPromptTemplate(hot.prompts[PROMPTS[item.target].score], templateValues(self.name));
-    const answersTag = target === 'memory' ? 'stored' : 'answers';
+    const system = fillPromptTemplate(hot.prompts[PROMPTS.score], templateValues(self.name));
 
     for (const situation of records) {
       if (situation.answers.length === 0) continue;
@@ -723,10 +718,7 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
       for (let attempt = 0; attempt < 2 && pending.length > 0; attempt += 1) {
         ctx.phase = `scores ${situation.n}/${records.length}`;
         const asked = situation.answers.filter((a) => pending.includes(a.id));
-        const shown =
-          target === 'memory'
-            ? asked.map((a) => ({ id: a.id, texts: a.texts, parseOk: a.parseOk }))
-            : asked.map((a) => ({ id: a.id, messages: a.messages, reactions: a.reactions, silent: a.silent }));
+        const shown = asked.map((a) => ({ id: a.id, messages: a.messages, reactions: a.reactions, silent: a.silent }));
         const facts = Object.fromEntries(asked.map((a) => [a.id, a.facts]));
         facts.repeated = repeated;
         // The common blocks are built per request, the re-ask included, so an edit to the
@@ -737,7 +729,7 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
           ? block('original', [mentorLabel('original'), ...(situation.original ?? [])].filter(Boolean).join('\n'))
           : '';
         const before = [blocks.case, blocks.reference, blocks.samples, blocks.signs, block('intended', intended.join('\n')), blocks.feedback, character, rules, learned];
-        const after = [original, block(answersTag, JSON.stringify(shown)), block('facts', JSON.stringify(facts))];
+        const after = [original, block('answers', JSON.stringify(shown)), block('facts', JSON.stringify(facts))];
         const recordItems = items.get(situation);
         let transcript = situation.transcript;
         if (recordItems) {
@@ -765,8 +757,8 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
 
   /**
    * Answer `situations` (invented lines, or anchors from
-   * src/mentor/anchor.js#anchorSituations) on `view` (as `item`'s target: the
-   * reply or the memory sandbox) with `samples` samples each, a real moment with
+   * src/mentor/anchor.js#anchorSituations) on `view` in the reply sandbox
+   * with `samples` samples each, a real moment with
    * `anchorSamples` (default: `samples`; a run and a check pass
    * `mentor.anchor.samples`), then score every answer: the one measuring
    * step of a run and a check. A real moment is answered and judged on
@@ -821,17 +813,14 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
     into.prepared = prepared;
     into.records = records;
     into.hidden = hidden;
-    await answerAll(ctx, { target: item.target, prepared, self, reference, caseId: item.id });
-    let repeated = [];
-    if (item.target === 'reply') {
-      // Tagged with their situation: a phrase shared only by the samples of one situation is no habit.
-      const all = records.flatMap((s) => s.answers.map((a) => ({ situation: s.n, messages: a.messages.map((text) => ({ text })) })));
-      repeated = repeatedPhrases(all);
-    }
+    await answerAll(ctx, { prepared, self, reference, caseId: item.id });
+    // Tagged with their situation: a phrase shared only by the samples of one situation is no habit.
+    const all = records.flatMap((s) => s.answers.map((a) => ({ situation: s.n, messages: a.messages.map((text) => ({ text })) })));
+    const repeated = repeatedPhrases(all);
     into.repeated = repeated;
     const items = new Map(prepared.map((p) => [p.record, p.items]));
     const judges = new Map(prepared.map((p) => [p.record, p.view]));
-    await scoreAll(ctx, { target: item.target, records, repeated, item, view, judges, self, reference, feedback, items });
+    await scoreAll(ctx, { records, repeated, item, view, judges, self, reference, feedback, items });
     return { records, ...verdictOf(records), repeated, prepared, hidden };
   }
 
@@ -882,7 +871,7 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
       const system = fillPromptTemplate(template, templateValues(self.name));
       const before = [blocks.case, block('verdict', JSON.stringify(verdictJson)), blocks.signs, blocks.feedback];
       const after = [block('seen', seen)];
-      const shown = worstRecord(entry.record, record.target);
+      const shown = worstRecord(entry.record);
       if (entry.items) {
         // The transcript is the part of <worst> that grows with a real moment: it gives way first.
         const room = roomLeft(system, [...before, ...after].filter(Boolean).join('\n\n')) - calibrated(estimateTokens(JSON.stringify({ ...shown, transcript: '' })));
@@ -926,7 +915,7 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
       models: {
         mentor: config.mentor?.model ?? null,
         talk: config.llm?.model ?? null,
-        // An empty `memory.model` means unset, as in `/nep model show` and the sandbox.
+        // An empty `memory.model` means unset, as in `/nep model show`.
         analyzer: config.memory?.model || config.llm?.model || null,
       },
       reference: { profile: null, samples: 0 },
@@ -1061,7 +1050,8 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
 
   /**
    * Measure one case: invent situations, answer them in the sandbox, score,
-   * save, report. Resolves at once with `{ started: true, done }`.
+   * save, report. Resolves at once with `{ started: true, done }`. A case
+   * stored with a target other than `reply` is refused as unsupported.
    * @param {number} caseId
    */
   async function run(caseId) {
@@ -1070,10 +1060,9 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
     const item = cases.get(guildId, caseId);
     if (!item) throw new Error(`no case ${caseId}`);
     if (item.state === 'retired') throw new Error(`case ${item.id} is retired`);
-    const prompts = PROMPTS[item.target];
-    if (!prompts) throw new Error(`case ${item.id} has an unknown target`);
-    requirePrompt(prompts.situations);
-    requirePrompt(prompts.score);
+    if (item.target !== TARGET) throw new Error(unsupportedTarget(item));
+    requirePrompt(PROMPTS.situations);
+    requirePrompt(PROMPTS.score);
     guardBudget();
 
     const ctx = begin('run', [item.id]);
@@ -1095,7 +1084,8 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
    * Replay every active case's anchors (as the case holds them now) and the
    * invented situations of its last run with
    * `mentor.check.samples` samples (a real moment with `mentor.anchor.samples`), no new situations; one run of kind
-   * 'check' saved per case and one combined card. Resolves at once with
+   * 'check' saved per case and one combined card. A case stored with a target
+   * other than `reply` is skipped as unsupported. Resolves at once with
    * `{ started: true, cases, done }`.
    */
   async function check() {
@@ -1104,6 +1094,11 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
     const plan = [];
     const skipped = [];
     for (const item of cases.list(guildId)) {
+      // A case stored with a retired target (`memory`) is named, never measured.
+      if (item.target !== TARGET) {
+        skipped.push({ caseId: item.id, reason: `unsupported target: ${String(item.target)}` });
+        continue;
+      }
       const anchored = anchorSituations(item);
       let last = null;
       try {
@@ -1128,10 +1123,7 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
       plan.push({ item, situations });
     }
     if (plan.length === 0) throw new Error('no case has a run to check');
-    for (const { item } of plan) {
-      if (!PROMPTS[item.target]) throw new Error(`case ${item.id} has an unknown target`);
-      requirePrompt(PROMPTS[item.target].score);
-    }
+    requirePrompt(PROMPTS.score);
     guardBudget();
 
     const ctx = begin('check', plan.map((p) => p.item.id));

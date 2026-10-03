@@ -2,7 +2,7 @@
 
 チャンネル、ロール、ユーザーは Discord 標準のピッカーから選択します。`set`/`unset` と `access grant`/`access revoke` では `path`/`command` オプションがオートコンプリートされます。
 
-`/nep` は最初からすべてのメンバーに表示されます。アクセスはコマンド実行時にコマンド単位でゲートされ、Discord 自体のコマンド表示設定は使いません。オーナー（`bot.owners`）はすべてのコマンドを常に実行できます。それ以外のユーザーにはグラントが必要です。`/nep access grant <command> [role] [user]` で一つのコマンドキー（例: `memory.show`）、グループ全体（例: `memory`）、またはすべてのコマンド（`*`）を、全員（ロール/ユーザー指定なし）、ロール、またはユーザーに開放します。`/nep access revoke` でグラントを取り消し、`/nep access list` で現在のグラント一覧を表示します。グラントのないオーナー以外のユーザーが `/nep` を実行すると、エフェメラルな「Not allowed」の応答が返ります。`private.show`、`private.forget`、`private.purge` はオーナー専用で、すべてのグラントから除外されます。`access grant` はこれらを拒否し、`access list` にも表示されません。`mentor` グループも同様にオーナー専用で、グラントできません。
+`/nep` は最初からすべてのメンバーに表示されます。アクセスはコマンド実行時にコマンド単位でゲートされ、Discord 自体のコマンド表示設定は使いません。オーナー（`bot.owners`）はすべてのコマンドを常に実行できます。それ以外のユーザーにはグラントが必要です。`/nep access grant <command> [role] [user]` で一つのコマンドキー（例: `memory.show`）、グループ全体（例: `memory`）、またはすべてのコマンド（`*`）を、全員（ロール/ユーザー指定なし）、ロール、またはユーザーに開放します。`/nep access revoke` でグラントを取り消し、`/nep access list` で現在のグラント一覧を表示します。グラントのないオーナー以外のユーザーが `/nep` を実行すると、エフェメラルな「Not allowed」の応答が返ります。`private.show`、`private.forget`、`private.purge` はオーナー専用で、すべてのグラントから除外されます。`access grant` はこれらを拒否し、`access list` にも表示されません。`mentor` と `access` グループも同様にオーナー専用で、グラントできません。
 
 | コマンド | 説明 |
 |---|---|
@@ -65,6 +65,6 @@
 | `/nep mentor wrong <id> <reason>` | そのケースの判定が誤っていたことと理由を mentor に伝える。今後のスコアリングの反例として保存 |
 | `/nep mentor status` | モデル、有効/無効、本日のトークン使用量/上限、状態別ケース数、実行中のラン（停止保留中は `, stopping` を表示）、および最近完了したラン（`last:`）: ケース、結果、overall 中央値、スコアリング済み回答数、トークン数、完了時刻 |
 | `/nep variety` | 多様性パス: 最新のリスト（例付き）、続いて新しい順のパス履歴。読み取り専用、グラント可能 |
-| `/nep access grant <command> [role] [user]` | コマンド、グループ、または `*` を全員（デフォルト）、ロール、またはユーザーに開放。`private.*` と `mentor.*` は除外; 上記参照 |
+| `/nep access grant <command> [role] [user]` | コマンド、グループ、または `*` を全員（デフォルト）、ロール、またはユーザーに開放。`private.*`、`mentor.*`、`access.*` は除外; 上記参照 |
 | `/nep access revoke <command> [role] [user]` | 以前のグラントを全員（デフォルト）、ロール、またはユーザーから取り消し |
 | `/nep access list` | 現在のアクセスグラント一覧を表示 |

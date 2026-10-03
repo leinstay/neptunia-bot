@@ -169,10 +169,8 @@ prompts/
   lookup.md                classifier: does a question need a web search
   read-link.md             condense a fetched page
   search-summary.md        condense search results
-  mentor-situations.md     mentor: invent test situations (reply target)
-  mentor-situations-memory.md  mentor: invent test situations (memory target)
+  mentor-situations.md     mentor: invent test situations
   mentor-score.md          mentor: score the persona's answers
-  mentor-score-memory.md   mentor: score the analyzer's stored text
   mentor-signs.md          mentor: known habits of model-written text
   mentor-diagnose.md       mentor: explain weak answers after scoring
   variety.md               classifier: name the devices the persona is overusing

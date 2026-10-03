@@ -41,10 +41,8 @@
 | `private.md` | 否 | 追加在模式提示（`reply.md`）之后、`forced.md` 之前，仅在 DM 中使用（`features.privateMessages`）。这是一段私聊：此处所说的一切留在此处；角色保留其公共知识。文件不存在则不追加任何内容 | `{{name}}` `{{author}}` |
 | `draw.md` | 是 | 绘画子进程的角色外提示（`features.imageGeneration`）：根据场景描述生成一张图片。仅接收外貌和请求，不接收角色卡 | `{{name}}` `{{appearance}}` `{{request}}` |
 | `appearance.md` | 否 | 角色的视觉外貌，在 `self="yes"` 时插入 `draw.md`。一段话，无性格，无背景故事 | `{{name}}` |
-| `mentor-situations.md` | 否 | Mentor：为 reply 目标案例构造测试场景（`features.mentor`）。仅返回 JSON | `{{name}}` `{{count}}` `{{minLines}}` `{{maxLines}}` |
-| `mentor-situations-memory.md` | 否 | Mentor：为 memory 目标案例构造测试场景（`features.mentor`）。仅返回 JSON | `{{name}}` `{{count}}` `{{minLines}}` `{{maxLines}}` |
+| `mentor-situations.md` | 否 | Mentor：为案例构造测试场景（`features.mentor`）。仅返回 JSON | `{{name}}` `{{count}}` `{{minLines}}` `{{maxLines}}` |
 | `mentor-score.md` | 否 | Mentor：对角色的回答进行评分（`features.mentor`）。接收角色卡。仅返回 JSON | `{{name}}` |
-| `mentor-score-memory.md` | 否 | Mentor：对分析器将存储的文本进行评分（`features.mentor`）。无角色卡。`character` 轴始终为 `null`。仅返回 JSON | `{{name}}` |
 | `mentor-signs.md` | 否 | Mentor：已知的模型文本习惯，作为 `<signs>` 块在每次 mentor 请求中发送（`features.mentor`）。文件缺失或为空时省略 | `{{name}}` |
 | `mentor-diagnose.md` | 否 | Mentor：评分后解释弱回答，指出角色上下文中的具体文本（`features.mentor`）。结果为未验证的假设，存储为运行中的 `diagnosis`。`mentor.diagnose` 为 false 或文件缺失时省略 | `{{name}}` |
 | `variety.md` | 否 | `classifier.text` 请求：识别角色近期消息中重复的表达手法（`features.variety`）。不接收角色卡 | `{{name}}` `{{maxPatterns}}` `{{shapeChars}}` |
@@ -209,6 +207,7 @@ profile.episodeNoQuote                   {date} {what} {feeling}: the same witho
 lore.entry                               {title} {text}
 affinity.bands.hostile | dislike | cool | neutral | warm | fond | devoted
                                          thresholds in code: ≤-60 · ≤-25 · ≤-8 · <8 · <25 · <60 · ≥60
+affinity.ownerSet                        reason shown when the owner set a score by hand without giving one
 aboutChat.patterns | starters | injokes  {text}
 aboutChat.learned                        {text}: things people taught the persona, joined by `; ` by code
 aboutChat.learnedItem                    {text} {who}: one lesson with a teacher
@@ -561,7 +560,7 @@ variety.intro                            first line of the `<worn>` block: tells
 
 ### Mentor
 
-Mentor 沙盒为每个 reply 目标场景执行一次多样性过程，计入 mentor 的 token 预算（不计入 `llm.maxRequestsPerDay`）。识别的手法保存为场景记录上的 `worn`。评分者不会看到 `<worn>` 块。
+Mentor 沙盒为每个场景执行一次多样性过程，计入 mentor 的 token 预算（不计入 `llm.maxRequestsPerDay`）。识别的手法保存为场景记录上的 `worn`。评分者不会看到 `<worn>` 块。
 
 ## 绘画
 
@@ -707,15 +706,14 @@ Mentor 模型读取渲染后的沙盒请求，因此可以读取角色记忆中�
 
 ### 提示
 
-Mentor 使用六个提示文件：每个目标一对，加上特征文件和诊断文件：
+Mentor 使用四个提示文件：场景/评分一对，加上特征文件和诊断文件：
 
-- **Reply 目标**：`mentor-situations.md`（构造场景）和 `mentor-score.md`（评分回答）。
-- **Memory 目标**：`mentor-situations-memory.md`（构造场景）和 `mentor-score-memory.md`（评分存储文本）。
-- **诊断**：`mentor-diagnose.md`（评分后解释弱回答）。
+- `mentor-situations.md`（构造场景）和 `mentor-score.md`（评分回答）。
+- `mentor-diagnose.md`（评分后解释弱回答）。
 
 每个提示文件是一次 mentor 请求的系统消息。块在用户消息中传递。
 
-代码填充的占位符：所有六个文件中的 `{{name}}`；两个场景提示中的 `{{count}}`、`{{minLines}}`、`{{maxLines}}`。
+代码填充的占位符：所有四个文件中的 `{{name}}`；场景提示中的 `{{count}}`、`{{minLines}}`、`{{maxLines}}`。
 
 ### 块
 
@@ -729,17 +727,16 @@ Mentor 使用六个提示文件：每个目标一对，加上特征文件和诊�
 | `<intended>` | `labels.mentor.intended`，每项一行 | 评分 |
 | `<feedback>` | 所有者修正的 JSON 数组：`[{ "case": "...", "reason": "..." }]`，从新到旧；空时省略 | 全部 |
 | `<examples>` | 聊天中的真实 moment：`labels.mentor.examples` 为首行，然后每个 moment 一个 `<example>`。每个 `<example>` 包含 `<situation>`（存储的转录，最旧消息可裁剪以适应请求预算）和 `<original>`（角色的消息）。案例无 moment 时省略 | 场景 |
-| `<original>` | 角色当时的回答（在真实 moment 的评分请求中）。`labels.mentor.original` 为首行，然后是角色的消息。已知的差参考，不是待评分的回答。构造的场景省略此块 | 评分（reply，仅真实 moment） |
-| `<character>` | 填充了 `{{name}}` 的角色卡 | 评分（仅 reply） |
+| `<original>` | 角色当时的回答（在真实 moment 的评分请求中）。`labels.mentor.original` 为首行，然后是角色的消息。已知的差参考，不是待评分的回答。构造的场景省略此块 | 评分（仅真实 moment） |
+| `<character>` | 填充了 `{{name}}` 的角色卡 | 评分 |
 | `<rules>` | 规则提示 | 评分 |
 | `<learned>` | 角色看到的指令式已学内容。对于启用了 `mentor.anchor.hideLaterMemory` 的真实 moment，在触发消息时间点或之后写入的内容被隐藏 | 评分 |
 | `<situation>` | 渲染为聊天记录的场景，角色所见。真实 moment 的最旧消息可能被裁剪以适应请求预算；触发消息不会被删除 | 评分 |
-| `<answers>` | JSON 数组：`[{ "id": "s1a1", "messages": ["..."], "reactions": ["..."], "silent": false }]` | 评分（reply） |
-| `<stored>` | JSON 数组：`[{ "id": "s1a1", "texts": [{ "path": "...", "text": "..." }], "parseOk": true }]`。当 `parseOk` 为 false 时分析器返回了无效 JSON，不会存储任何内容 | 评分（memory） |
+| `<answers>` | JSON 数组：`[{ "id": "s1a1", "messages": ["..."], "reactions": ["..."], "silent": false }]` | 评分 |
 | `<facts>` | 按回答 id 索引的 JSON 对象，包含确定性测量结果（未使用标记、稀有标记、逗号计数、逗号密度、长度），以及在两个或更多不同场景中出现的短语 `"repeated"`。每个回答：`commas` 为计数；`commaPer1000` 仅在测量文本至少 150 字符时为数字，更短时为 `null`（太短无法测量；mentor 根据计数评判，不推断密度）。`repeated` 列出在不同场景中重复出现的短语，`count` 为场景数 | 评分 |
 | `<verdict>` | JSON：`{ passed, medians, situations, reasons }`，包含通过/失败结果、各轴中位数、各场景中位数和诊断原因。原因包括构造场景的 `situation <n>: <axis> <v> is under the floor <f>` 和真实 moment 的 `real moment <n>: <axis> <v> is under the pass score <s>` 或 `real moment <n>: <axis> <v> is under the anchor score <s>` | 诊断 |
-| `<worst>` | JSON：`overall` 中位数最低的任意类型场景（平局时取较小的 `goal` 中位数，然后真实 moment 优先于构造场景，再取较小的 `n`）：`{ n, title, transcript, answers }`，每个回答包含 id、messages/reactions/silent（memory 目标为 `texts`/`parseOk`）、`facts` 和 `score`。转录可能被裁剪以适应请求预算 | 诊断 |
-| `<seen>` | 角色（或 memory 案例中的分析器）在该场景中收到的完整请求，分两个子块：`<system>`（系统提示含角色卡、规则和格式）和 `<user>`（聊天记录、记忆块和任务） | 诊断 |
+| `<worst>` | JSON：`overall` 中位数最低的任意类型场景（平局时取较小的 `goal` 中位数，然后真实 moment 优先于构造场景，再取较小的 `n`）：`{ n, title, transcript, answers }`，每个回答包含 id、messages/reactions/silent、`facts` 和 `score`。转录可能被裁剪以适应请求预算 | 诊断 |
+| `<seen>` | 角色在该场景中收到的完整请求，分两个子块：`<system>`（系统提示含角色卡、规则和格式）和 `<user>`（聊天记录、记忆块和任务） | 诊断 |
 
 ### 回答 ID
 
@@ -766,7 +763,7 @@ Mentor 使用六个提示文件：每个目标一对，加上特征文件和诊�
 }
 ```
 
-`authorId` 是 `<members>` 中的成员 id 或 `self`（角色自己的行）。`replyTo` 是该场景 `lines` 数组中的 0 索引，或 `null`。两种目标的最后一行都不能是 `self`。Reply 场景的最后一行必须对角色说话。Memory 场景不要求对角色说话；角色自己的行可以出现在最后一行之前的任何位置。
+`authorId` 是 `<members>` 中的成员 id 或 `self`（角色自己的行）。`replyTo` 是该场景 `lines` 数组中的 0 索引，或 `null`。最后一行不能是 `self`，且必须对角色说话。
 
 来自真实 moment 的场景记录携带 `anchor: <id>` 而非 `lines`。其转录从存储的历史构建；记录还包含 `original`（角色的消息）和 `at`（角色回答的时间）。
 
@@ -788,7 +785,7 @@ Mentor 使用六个提示文件：每个目标一对，加上特征文件和诊�
 }
 ```
 
-每个分数为 0–10 的整数或 `null`。`overall` 和 `goal` 始终为数字。Memory 评分中 `character` 始终为 `null`。
+每个分数为 0–10 的整数或 `null`。`overall` 和 `goal` 始终为数字。
 
 ### 轴
 
@@ -801,8 +798,6 @@ Mentor 使用六个提示文件：每个目标一对，加上特征文件和诊�
 | `rules` | 遵守规则和已学内容 | 违反所有适用规则 | 部分遵守部分违反 | 遵守每条适用规则 |
 | `goal` | 是否做到 `<case>` 要求的 | 做了相反的事 | 部分达成部分遗漏 | 完全按描述处理 |
 | `overall` | Mentor 的综合判断 | 全面失败 | 尚可但有明显弱点 | 全面优秀 |
-
-Memory 评分中 `character` 始终为 `null`，`human` 衡量文本是否读起来像某人关于熟悉的人的个人笔记（10），还是与这种人为自己写笔记的方式相差甚远（0）。
 
 ### 通过规则
 

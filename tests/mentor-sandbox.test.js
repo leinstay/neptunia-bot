@@ -1,17 +1,11 @@
 // Tests for src/mentor/sandbox.js: the invented chat excerpt turned into
-// normalized messages, the reply sandbox (the talk path's request, sampled,
-// nothing sent) and the memory sandbox (the analyzer's request, parsed and
-// applied to a store that only records), all against fakes or a temp store.
+// normalized messages and the reply sandbox (the talk path's request, sampled,
+// nothing sent), all against fakes.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
-import os from 'node:os';
-import path from 'node:path';
-import { liveView, situationToHistory, situationHistory, answerReply, captureStore, answerMemory } from '../src/mentor/sandbox.js';
-import { createStore } from '../src/memory/store.js';
+import { liveView, situationToHistory, situationHistory, answerReply } from '../src/mentor/sandbox.js';
 import { createCalibrator } from '../src/llm/tokens.js';
 import { labels } from './fixtures/labels.js';
-import { withCapturedLogs } from './fixtures/capture-logs.js';
 
 const NOW = Date.UTC(2026, 8, 20, 12, 0, 0);
 const SELF_ID = '900000000000000001';
@@ -105,20 +99,6 @@ function fakeLlm(texts, { usage = { total_tokens: 120 }, estimated = 100, onCall
   };
 }
 
-function tempStore(fn) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'nep-sandbox-'));
-  return Promise.resolve()
-    .then(() => fn(createStore({ dataDir: dir }), dir))
-    .finally(() => fs.rmSync(dir, { recursive: true, force: true }));
-}
-
-function filesUnder(dir) {
-  const out = [];
-  for (const entry of fs.readdirSync(dir, { withFileTypes: true, recursive: true })) {
-    if (entry.isFile()) out.push(path.join(entry.parentPath ?? entry.path, entry.name));
-  }
-  return out.sort().map((file) => [file, fs.readFileSync(file, 'utf8')]);
-}
 
 // ---- situationToHistory ------------------------------------------------------
 
@@ -552,154 +532,6 @@ test('answerReply: an llm error other than an abort is thrown to the caller', as
   );
 });
 
-// ---- captureStore ------------------------------------------------------------
-
-test('captureStore: a write is recorded and the real store is untouched', () =>
-  tempStore(async (store, dir) => {
-    store.applyProfileOps('g1', ALICE, { character: 'plays chess' }, { fieldChars: 400 });
-    store.flush();
-    const before = filesUnder(dir);
-    const profileBefore = JSON.stringify(store.getUser('g1', ALICE));
-
-    const view = liveView({ hot: fakeHot(), store, guildId: 'g1' });
-    const { store: captured, writes } = captureStore(view);
-    assert.equal(captured.getUser('ignored', ALICE).character, 'plays chess');
-    captured.applyProfileOps('g1', ALICE, { character: 'plays go' }, {});
-    captured.updateGuild('g1', { patterns: 'short lines' });
-    captured.state.markDirty();
-
-    assert.deepEqual(writes, [
-      { method: 'applyProfileOps', args: ['g1', ALICE, { character: 'plays go' }, {}] },
-      { method: 'updateGuild', args: ['g1', { patterns: 'short lines' }] },
-    ]);
-    assert.equal(JSON.stringify(store.getUser('g1', ALICE)), profileBefore);
-    store.flush();
-    assert.deepEqual(filesUnder(dir), before);
-  }));
-
-// ---- answerMemory ------------------------------------------------------------
-
-const MEMORY_ANSWER = JSON.stringify({
-  users: {
-    [ALICE]: {
-      character: 'Curious and quick.',
-      relationship: 'Asks the persona about games.',
-      aliases: { add: ['Ali'] },
-      affinity: { delta: 2, reason: 'Friendly question.' },
-      episodes: [{ what: 'Asked about chess.', quote: 'what do you think about chess?', feeling: 'amused', weight: 2 }],
-    },
-    '999999999999999999': { character: 'Not in the batch.' },
-  },
-  guild: { patterns: 'Short greetings in the morning.' },
-  self: ['Prefers draughts.'],
-  lore: [{ title: 'Chess club', keys: ['chess'], text: 'A weekly game night.' }],
-  channels: { [CHANNEL.id]: { purpose: 'Everyday talk.' } },
-});
-
-test('answerMemory: returns the texts that would be stored and applies nothing', () =>
-  tempStore(async (store, dir) => {
-    store.touchUser('g1', ALICE, 'Alice', NOW - 86400000);
-    store.applyProfileOps('g1', ALICE, { character: 'plays chess' }, { fieldChars: 400 });
-    store.flush();
-    const before = filesUnder(dir);
-
-    const hot = fakeHot();
-    const view = liveView({ hot, store, guildId: 'g1' });
-    const { history } = situationToHistory(twoLines(), { selfId: SELF_ID, selfName: 'Zoë', at: NOW, channel: CHANNEL });
-    const llm = fakeLlm([MEMORY_ANSWER, MEMORY_ANSWER], { usage: { total_tokens: 300 }, estimated: 250 });
-    const usages = [];
-    const result = await answerMemory({
-      view, batch: history, selfName: 'Zoë', llm, samples: 2, at: NOW, onUsage: (u, e) => usages.push([u, e]),
-    });
-
-    assert.equal(llm.calls.length, 2);
-    for (const { options } of llm.calls) {
-      assert.equal(options.model, 'x/memory');
-      assert.equal(options.maxOutputTokens, 4000);
-      assert.equal(options.timeoutMs, 9000);
-      assert.equal(options.countAgainstDailyCap, false);
-      assert.equal(options.skipCalibration, true);
-      assert.equal('maxRequestTokens' in options, false);
-    }
-    assert.equal(result.request.system, 'Summarize what happened.');
-    assert.ok(result.request.user.includes('what do you think about chess?'));
-    assert.deepEqual(usages, [[{ total_tokens: 300 }, 250], [{ total_tokens: 300 }, 250]]);
-    assert.deepEqual(Object.keys(result).sort(), ['answers', 'request', 'stopped']);
-    assert.equal(result.answers.length, 2);
-
-    const [answer] = result.answers;
-    assert.equal(answer.parseOk, true);
-    assert.equal(answer.applyOk, true);
-    const byPath = new Map(answer.texts.map((t) => [t.path, t.text]));
-    assert.equal(byPath.get(`users.${ALICE}.character`), 'Curious and quick.');
-    assert.equal(byPath.get(`users.${ALICE}.relationship`), 'Asks the persona about games.');
-    assert.equal(byPath.get(`users.${ALICE}.affinity.reason`), 'Friendly question.');
-    assert.equal(byPath.get(`users.${ALICE}.episodes[0].what`), 'Asked about chess.');
-    assert.equal(byPath.get(`users.${ALICE}.episodes[0].feeling`), 'amused');
-    assert.equal(byPath.get('guild.patterns'), 'Short greetings in the morning.');
-    assert.equal(byPath.get('guild.self[0]'), 'Prefers draughts.');
-    assert.equal(byPath.get('lore[Chess club].text'), 'A weekly game night.');
-    assert.equal(byPath.get(`channels.${CHANNEL.id}.purpose`), 'Everyday talk.');
-    const all = answer.texts.map((t) => t.text);
-    assert.equal(all.includes('what do you think about chess?'), false, 'an episode quote is a person\'s own words');
-    assert.equal(all.includes('Ali'), false, 'aliases are names');
-    assert.equal(all.includes('Not in the batch.'), false, 'an unknown member is refused as in the analyzer');
-    assert.equal(all.includes('Chess club'), false, 'a lore title is a name');
-
-    store.flush();
-    assert.deepEqual(filesUnder(dir), before, 'the real store is untouched');
-  }));
-
-test('answerMemory: a non-JSON answer gives parseOk false', async () => {
-  const view = liveView({ hot: fakeHot(), store: fakeStore(), guildId: 'g1' });
-  const { history } = situationToHistory(twoLines(), { selfId: SELF_ID, selfName: 'Zoë', at: NOW, channel: CHANNEL });
-  const llm = fakeLlm('I would store nothing here.', { usage: null, estimated: 40 });
-  const result = await answerMemory({ view, batch: history, selfName: 'Zoë', llm, samples: 1, at: NOW });
-  assert.deepEqual(result.answers, [{ texts: [], parseOk: false, applyOk: false }]);
-});
-
-test('answerMemory: an answer that parses but cannot be applied is applyOk false, logged with counts and the error only', async () => {
-  const hot = fakeHot();
-  let broken = false;
-  // A store-shape mismatch that shows only once the answer is applied (the request is built first).
-  const view = {
-    prompts: hot.prompts,
-    config: hot.config,
-    memory: {
-      getGuild: () => {
-        if (broken) throw new TypeError('the guild memory has an unexpected shape');
-        return {};
-      },
-      getUser: () => null,
-      listUserProfiles: () => [],
-      listChannels: () => [],
-      getLore: () => [],
-    },
-  };
-  const { history } = situationToHistory(twoLines(), { selfId: SELF_ID, selfName: 'Zoë', at: NOW, channel: CHANNEL });
-  const llm = fakeLlm(JSON.stringify({ guild: { patterns: 'PATTERN_MARKER short greetings.' } }), { onCall: () => (broken = true) });
-  const { result, logs } = await withCapturedLogs(() => answerMemory({ view, batch: history, selfName: 'Zoë', llm, samples: 1, at: NOW }));
-  assert.deepEqual(result.answers, [{ texts: [], parseOk: true, applyOk: false }]);
-  const failed = logs.filter((l) => l.msg === 'mentor: memory apply failed');
-  assert.equal(failed.length, 1);
-  assert.equal(failed[0].level, 'warn');
-  assert.equal(failed[0].error.name, 'TypeError');
-  assert.equal(typeof failed[0].writes, 'number');
-  assert.ok(!JSON.stringify(logs).includes('PATTERN_MARKER'), 'no stored text in the log');
-});
-
-test('answerMemory: the model falls back to the chat model when memory.model is null or empty', async () => {
-  for (const model of [null, '']) {
-    const hot = fakeHot();
-    hot.config.memory.model = model;
-    const view = liveView({ hot, store: fakeStore(), guildId: 'g1' });
-    const { history } = situationToHistory(twoLines(), { selfId: SELF_ID, selfName: 'Zoë', at: NOW, channel: CHANNEL });
-    const llm = fakeLlm('{}');
-    await answerMemory({ view, batch: history, selfName: 'Zoë', llm, samples: 1, at: NOW });
-    assert.equal(llm.calls[0].options.model, 'x/chat', JSON.stringify(model));
-  }
-});
-
 test('answerReply: reads everything through the view, so another view of the same shape needs no hot or store', async () => {
   const hot = fakeHot();
   const overlay = {
@@ -726,14 +558,6 @@ test('answerReply: the persona answer is routed as the talk role', async () => {
   const llm = fakeLlm('<msg>ok</msg>');
   await answerReply({ view, situation: twoLines(), selfId: SELF_ID, selfName: 'Zoë', channel: CHANNEL, llm, samples: 2, at: NOW });
   assert.deepEqual(llm.calls.map((call) => call.options.role), ['talk', 'talk']);
-});
-
-test('answerMemory: the analyzer answer is routed as the analyzer role', async () => {
-  const view = liveView({ hot: fakeHot(), store: fakeStore(), guildId: 'g1' });
-  const { history } = situationToHistory(twoLines(), { selfId: SELF_ID, selfName: 'Zoë', at: NOW, channel: CHANNEL });
-  const llm = fakeLlm('{}');
-  await answerMemory({ view, batch: history, selfName: 'Zoë', llm, samples: 1, at: NOW });
-  assert.equal(llm.calls[0].options.role, 'analyzer');
 });
 
 test('answerReply: a situation\'s variety patterns render as <worn> as in a live turn; none, no block', async () => {

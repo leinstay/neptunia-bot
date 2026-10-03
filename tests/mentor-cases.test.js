@@ -40,18 +40,37 @@ function allFiles(dir) {
 const TEXT_A = 'Answer a greeting with a short greeting.';
 const TEXT_B = 'Remember the name of a pet, Éloïse the cat.';
 
+/**
+ * Append a case to cases.json as an earlier version stored it (e.g. with
+ * `target: 'memory'`, which `add` no longer takes); returns the stored case.
+ */
+function addLegacyCase(dir, guildId, fields) {
+  const file = path.join(dir, 'guilds', guildId, 'mentor', 'cases.json');
+  let data = { nextId: 1, cases: [] };
+  try {
+    data = JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+  }
+  const item = { id: data.nextId, state: 'new', createdAt: new Date(0).toISOString(), lastRunId: null, lastScore: null, ...fields };
+  data.cases.push(item);
+  data.nextId += 1;
+  fs.writeFileSync(file, JSON.stringify(data));
+  return item;
+}
+
 test('add: stores the case and returns increasing ids', () => {
   const dir = tmpDataDir();
   try {
     const store = createCaseStore({ dataDir: dir, now: () => 5000 });
     const a = store.add('g1', { text: `  ${TEXT_A}  `, target: 'reply' });
-    const b = store.add('g1', { text: TEXT_B, target: 'memory' });
+    const b = store.add('g1', { text: TEXT_B, target: 'reply' });
     assert.deepEqual(a, {
       id: 1, text: TEXT_A, target: 'reply', state: 'new',
       createdAt: new Date(5000).toISOString(), lastRunId: null, lastScore: null,
     });
     assert.equal(b.id, 2);
-    assert.equal(b.target, 'memory');
+    assert.equal(b.target, 'reply');
     const file = path.join(dir, 'guilds', 'g1', 'mentor', 'cases.json');
     const onDisk = JSON.parse(fs.readFileSync(file, 'utf8'));
     assert.equal(onDisk.nextId, 3);
@@ -77,6 +96,8 @@ test('add: refuses an unknown target', () => {
     const store = createCaseStore({ dataDir: dir });
     assert.throws(() => store.add('g1', { text: TEXT_A, target: 'draw' }), /target/);
     assert.throws(() => store.add('g1', { text: TEXT_A }), /target/);
+    // The memory target is retired: a new case is always a reply case.
+    assert.throws(() => store.add('g1', { text: TEXT_A, target: 'memory' }), /target must be reply/);
     assert.deepEqual(store.list('g1'), []);
   } finally {
     cleanup(dir);
@@ -146,16 +167,16 @@ test('addAnchor: adds moments up to the max, never twice the same message', () =
   }
 });
 
-test('addAnchor: a retired case or a memory case takes no moment', () => {
+test('addAnchor: a retired case or an old memory case takes no moment', () => {
   const dir = tmpDataDir();
   try {
     const store = createCaseStore({ dataDir: dir });
     const retired = store.add('g1', { text: TEXT_A, target: 'reply' });
     store.retire('g1', retired.id);
-    const memory = store.add('g1', { text: TEXT_B, target: 'memory' });
+    const memory = addLegacyCase(dir, 'g1', { text: TEXT_B, target: 'memory' });
     assert.throws(() => store.addAnchor('g1', retired.id, moment(), { max: 5 }), /retired/);
     assert.throws(() => store.addAnchor('g1', memory.id, moment(), { max: 5 }), /reply/);
-    assert.throws(() => store.add('g1', { text: TEXT_B, target: 'memory', anchor: moment() }), /reply/);
+    assert.throws(() => store.add('g1', { text: TEXT_B, target: 'memory', anchor: moment() }), /target/);
     // A case stored before anchors existed takes its first one.
     const old = store.add('g1', { text: TEXT_A, target: 'reply' });
     assert.equal(store.addAnchor('g1', old.id, moment(), { max: 5 }).anchor.id, 1);
@@ -169,7 +190,7 @@ test('retire: hides the case from list, keeps its runs', () => {
   try {
     const store = createCaseStore({ dataDir: dir, now: clock(1000, 2000, 3000) });
     store.add('g1', { text: TEXT_A, target: 'reply' });
-    store.add('g1', { text: TEXT_B, target: 'memory' });
+    store.add('g1', { text: TEXT_B, target: 'reply' });
     const run = store.saveRun('g1', { caseId: 1, passed: true, medians: { overall: 8 } });
     const retired = store.retire('g1', 1);
     assert.equal(retired.state, 'retired');
@@ -179,6 +200,26 @@ test('retire: hides the case from list, keeps its runs', () => {
     assert.deepEqual(store.lastRun('g1', 1), run);
     assert.ok(fs.existsSync(path.join(dir, 'guilds', 'g1', 'mentor', 'runs', '1', `${run.id}.json`)));
     assert.throws(() => store.retire('g1', 42), /unknown case: 42/);
+  } finally {
+    cleanup(dir);
+  }
+});
+
+test('cases: an old stored case with target memory stays readable, listed, retirable and takes feedback', () => {
+  const dir = tmpDataDir();
+  try {
+    const store = createCaseStore({ dataDir: dir, now: clock(1000, 2000, 3000) });
+    store.add('g1', { text: TEXT_A, target: 'reply' });
+    const old = addLegacyCase(dir, 'g1', { text: TEXT_B, target: 'memory' });
+    assert.deepEqual(store.list('g1').map((c) => [c.id, c.target]), [[1, 'reply'], [2, 'memory']]);
+    assert.deepEqual(store.get('g1', old.id), old);
+    // New ids continue after it.
+    assert.equal(store.add('g1', { text: TEXT_A, target: 'reply' }).id, 3);
+    const run = store.saveRun('g1', { caseId: old.id, passed: false, medians: { overall: 2 } });
+    assert.equal(store.lastRun('g1', old.id).id, run.id);
+    assert.equal(store.addFeedback('g1', { caseId: old.id, reason: 'judged too harshly' }).caseId, old.id);
+    assert.equal(store.retire('g1', old.id).state, 'retired');
+    assert.deepEqual(store.list('g1').map((c) => c.id), [1, 3]);
   } finally {
     cleanup(dir);
   }
@@ -239,7 +280,7 @@ test('lastRun: returns the newest run of that case', () => {
   try {
     const store = createCaseStore({ dataDir: dir, now: clock(100, 200, 300, 9000, 10000, 11000) });
     store.add('g1', { text: TEXT_A, target: 'reply' });
-    store.add('g1', { text: TEXT_B, target: 'memory' });
+    store.add('g1', { text: TEXT_B, target: 'reply' });
     assert.equal(store.lastRun('g1', 1), null);
     store.saveRun('g1', { caseId: 1, passed: true, medians: { overall: 1 } });
     store.saveRun('g1', { caseId: 1, passed: true, medians: { overall: 2 } });
@@ -280,7 +321,7 @@ test('recentFeedback: newest first, capped', () => {
     let t = 0;
     const store = createCaseStore({ dataDir: dir, now: () => (t += 1000) });
     store.add('g1', { text: TEXT_A, target: 'reply' });
-    store.add('g1', { text: TEXT_B, target: 'memory' });
+    store.add('g1', { text: TEXT_B, target: 'reply' });
     store.saveRun('g1', { caseId: 1, passed: true, medians: { overall: 8 } });
     const run2 = store.saveRun('g1', { caseId: 2, passed: false, medians: { overall: 2 } });
     store.addFeedback('g1', { caseId: 1, reason: 'first note' });
@@ -334,7 +375,7 @@ test('files: broken JSON throws instead of starting over', () => {
     const casesFile = path.join(dir, 'guilds', 'g1', 'mentor', 'cases.json');
     fs.writeFileSync(casesFile, '{ "nextId": 2, "cases": [');
     assert.throws(() => store.list('g1'), /cases\.json/);
-    assert.throws(() => store.add('g1', { text: TEXT_B, target: 'memory' }), /cases\.json/);
+    assert.throws(() => store.add('g1', { text: TEXT_B, target: 'reply' }), /cases\.json/);
     assert.equal(fs.readFileSync(casesFile, 'utf8'), '{ "nextId": 2, "cases": [');
     const feedbackFile = path.join(dir, 'guilds', 'g1', 'mentor', 'feedback.json');
     fs.writeFileSync(feedbackFile, 'not json');

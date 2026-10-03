@@ -168,10 +168,8 @@ prompts/
   lookup.md                分类器：问题是否需要网络搜索
   read-link.md             浓缩获取的页面
   search-summary.md        浓缩搜索结果
-  mentor-situations.md     mentor：构造测试场景（reply 目标）
-  mentor-situations-memory.md  mentor：构造测试场景（memory 目标）
+  mentor-situations.md     mentor：构造测试场景
   mentor-score.md          mentor：评分角色的回答
-  mentor-score-memory.md   mentor：评分分析器存储的文本
   mentor-signs.md          mentor：已知的模型文本习惯
   mentor-diagnose.md       mentor：评分后解释弱回答
   variety.md               分类器：识别角色过度使用的手法

@@ -126,8 +126,13 @@ test('isAllowed: a malformed entry (not an object) on a matching key is skipped,
   assert.equal(allowed, true);
 });
 
-test('isOwnerOnly: the private and mentor groups and every key in them, nothing else', () => {
-  assert.deepEqual(OWNER_ONLY_GROUPS, ['private', 'mentor']);
+test('isOwnerOnly: the private, mentor and access groups and every key in them, nothing else', () => {
+  assert.deepEqual(OWNER_ONLY_GROUPS, ['private', 'mentor', 'access']);
+  assert.equal(isOwnerOnly('access'), true);
+  assert.equal(isOwnerOnly('access.grant'), true);
+  assert.equal(isOwnerOnly('access.revoke'), true);
+  assert.equal(isOwnerOnly('access.list'), true);
+  assert.equal(isOwnerOnly('accessible'), false);
   assert.equal(isOwnerOnly('private'), true);
   assert.equal(isOwnerOnly('private.show'), true);
   assert.equal(isOwnerOnly('private.forget'), true);
@@ -158,6 +163,16 @@ test('access: the mentor group is owner-only even with a * grant', () => {
   const keys = ['mentor.add', 'mentor.cases', 'mentor.remove', 'mentor.run', 'mentor.check', 'mentor.stop', 'mentor.show', 'mentor.wrong', 'mentor.status'];
   const access = { '*': everyone, mentor: everyone, ...Object.fromEntries(keys.map((key) => [key, everyone])) };
   for (const commandKey of [...keys, 'mentor']) {
+    assert.equal(isAllowed({ commandKey, userId: '2', roleIds: ['staff'], owners: ['1'], access }), false, commandKey);
+    assert.equal(isAllowed({ commandKey, userId: '1', roleIds: [], owners: ['1'], access: {} }), true, `${commandKey}: owner`);
+  }
+});
+
+test('access: the access group is owner-only even with a * grant', () => {
+  const everyone = { everyone: true, roles: ['staff'], users: ['2'] };
+  const keys = ['access.grant', 'access.revoke', 'access.list'];
+  const access = { '*': everyone, access: everyone, ...Object.fromEntries(keys.map((key) => [key, everyone])) };
+  for (const commandKey of [...keys, 'access']) {
     assert.equal(isAllowed({ commandKey, userId: '2', roleIds: ['staff'], owners: ['1'], access }), false, commandKey);
     assert.equal(isAllowed({ commandKey, userId: '1', roleIds: [], owners: ['1'], access: {} }), true, `${commandKey}: owner`);
   }

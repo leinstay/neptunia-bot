@@ -41,10 +41,8 @@ All instructions are English in both layers; a character's speech samples may be
 | `private.md` | no | Appended after the mode prompt (`reply.md`), before `forced.md`, only in a DM (`features.privateMessages`). This is a private conversation: what is said here stays here; the persona keeps its public knowledge. A missing file adds nothing | `{{name}}` `{{author}}` |
 | `draw.md` | yes | Out-of-character prompt of the drawing sub-process (`features.imageGeneration`): produces one picture from a scene description. Receives only the appearance and the request — never the character card | `{{name}}` `{{appearance}}` `{{request}}` |
 | `appearance.md` | no | The persona's visual look, inserted into `draw.md` when `self="yes"`. One paragraph, no personality, no backstory | `{{name}}` |
-| `mentor-situations.md` | no | Mentor: invent test chat situations for a reply-target case (`features.mentor`). Returns JSON only | `{{name}}` `{{count}}` `{{minLines}}` `{{maxLines}}` |
-| `mentor-situations-memory.md` | no | Mentor: invent test chat excerpts for a memory-target case (`features.mentor`). Returns JSON only | `{{name}}` `{{count}}` `{{minLines}}` `{{maxLines}}` |
+| `mentor-situations.md` | no | Mentor: invent test chat situations for a case (`features.mentor`). Returns JSON only | `{{name}}` `{{count}}` `{{minLines}}` `{{maxLines}}` |
 | `mentor-score.md` | no | Mentor: score the persona's answers to a situation (`features.mentor`). Receives the character card. Returns JSON only | `{{name}}` |
-| `mentor-score-memory.md` | no | Mentor: score the text the analyzer would store (`features.mentor`). No character card. `character` axis is always `null`. Returns JSON only | `{{name}}` |
 | `mentor-signs.md` | no | Mentor: known habits of model-written text, sent as the `<signs>` block in every mentor request (`features.mentor`). Omitted when missing or empty | `{{name}}` |
 | `mentor-diagnose.md` | no | Mentor: explain weak answers after scoring by pointing at specific text in the persona's context (`features.mentor`). The result is an unverified opinion stored as `diagnosis` on the run. Omitted when `mentor.diagnose` is false or the file is missing | `{{name}}` |
 | `variety.md` | no | `classifier.text` request: name the repeated devices in the persona's own recent lines (`features.variety`). No character card | `{{name}}` `{{maxPatterns}}` `{{shapeChars}}` |
@@ -226,6 +224,7 @@ gifs.entry                               {id} {text}: one GIF with a caption
 gifs.entryNoText                         {id}: one GIF without a caption
 affinity.bands.hostile | dislike | cool | neutral | warm | fond | devoted
                                          thresholds in code: ≤-60 · ≤-25 · ≤-8 · <8 · <25 · <60 · ≥60
+affinity.ownerSet                        reason shown when the owner set a score by hand without giving one
 aboutChat.patterns | starters | injokes  {text}
 aboutChat.learned                        {text}: things people taught the persona, joined by `; ` by code
 aboutChat.learnedItem                    {text} {who}: one lesson with a teacher
@@ -636,7 +635,7 @@ proceeds without one and the latest stored pass stays unchanged.
 
 ### Mentor
 
-The mentor sandbox runs one variety pass per reply-target situation, charged to the mentor's token budget (not to
+The mentor sandbox runs one variety pass per situation, charged to the mentor's token budget (not to
 `llm.maxRequestsPerDay`). The patterns are saved as `worn` on the situation record. The judge never sees the `<worn>`
 block.
 
@@ -818,15 +817,14 @@ The validator's cap on a single line of an invented situation is 2000 characters
 
 ### Prompts
 
-The mentor uses six prompt files, one pair per target, the signs file and the diagnosis file:
+The mentor uses four prompt files: a situations/score pair, the signs file and the diagnosis file:
 
-- **Reply target**: `mentor-situations.md` (invent situations) and `mentor-score.md` (score answers).
-- **Memory target**: `mentor-situations-memory.md` (invent situations) and `mentor-score-memory.md` (score stored text).
-- **Diagnosis**: `mentor-diagnose.md` (explain weak answers after scoring).
+- `mentor-situations.md` (invent situations) and `mentor-score.md` (score answers).
+- `mentor-diagnose.md` (explain weak answers after scoring).
 
 Each prompt file is the system message of one mentor request. The blocks arrive in the user message.
 
-Placeholders filled by code: `{{name}}` in all six; `{{count}}`, `{{minLines}}`, `{{maxLines}}` in the two situations prompts.
+Placeholders filled by code: `{{name}}` in all four; `{{count}}`, `{{minLines}}`, `{{maxLines}}` in the situations prompt.
 
 ### Blocks
 
@@ -840,17 +838,16 @@ Placeholders filled by code: `{{name}}` in all six; `{{count}}`, `{{minLines}}`,
 | `<intended>` | `labels.mentor.intended`, one line per item | score |
 | `<feedback>` | JSON array of the owner's corrections: `[{ "case": "...", "reason": "..." }]`, newest first; omitted when empty | all |
 | `<examples>` | Real moments from the chat: `labels.mentor.examples` as the first line, then one `<example>` per moment. Each `<example>` holds a `<situation>` (the stored transcript, oldest messages trimmed to the request budget) and an `<original>` (the persona's messages). Omitted when the case has no moments | situations |
-| `<original>` | The persona's answer at the time (in a score request for a real moment). `labels.mentor.original` as the first line, then the persona's messages. A known-bad reference, never an answer to score. Omitted for invented situations | score (reply target, real moments only) |
-| `<character>` | The character card with `{{name}}` filled | score (reply target only) |
+| `<original>` | The persona's answer at the time (in a score request for a real moment). `labels.mentor.original` as the first line, then the persona's messages. A known-bad reference, never an answer to score. Omitted for invented situations | score (real moments only) |
+| `<character>` | The character card with `{{name}}` filled | score |
 | `<rules>` | The rules prompt | score |
 | `<learned>` | Instruction-like learned items as the persona sees them. For a real moment with `mentor.anchor.hideLaterMemory` on, items written at or after the trigger are hidden | score |
 | `<situation>` | The situation rendered as a chat transcript, the way the persona saw it. For a real moment, the oldest messages may be trimmed to fit the request budget; the trigger is never dropped | score |
-| `<answers>` | JSON array: `[{ "id": "s1a1", "messages": ["..."], "reactions": ["..."], "silent": false }]` | score (reply target) |
-| `<stored>` | JSON array: `[{ "id": "s1a1", "texts": [{ "path": "...", "text": "..." }], "parseOk": true }]`. When `parseOk` is false the analyzer returned invalid JSON and nothing would have been stored | score (memory target) |
+| `<answers>` | JSON array: `[{ "id": "s1a1", "messages": ["..."], "reactions": ["..."], "silent": false }]` | score |
 | `<facts>` | JSON object keyed by answer id with deterministic measurements (unused marks, rare marks, comma count, comma density, length), plus `"repeated"` with phrases found in two or more different situations. Per answer: `commas` is a count; `commaPer1000` is a number only when the measured text has at least 150 characters, `null` for a shorter one (too short to measure; the mentor judges the count, never infers a density). `repeated` lists phrases that recurred across different situations, and `count` is the number of situations | score |
 | `<verdict>` | JSON: `{ passed, medians, situations, reasons }` with the pass/fail result, medians of each axis, per-situation medians and the reasons the case was brought to diagnosis. Reasons include `situation <n>: <axis> <v> is under the floor <f>` for invented situations and `real moment <n>: <axis> <v> is under the pass score <s>` or `real moment <n>: <axis> <v> is under the anchor score <s>` for real moments | diagnosis |
-| `<worst>` | JSON: the situation with the lowest median `overall` of any kind (ties: the lower median `goal`, then a real moment before an invented situation, then the lower `n`): `{ n, title, transcript, answers }` where each answer carries its id, messages/reactions/silent (or `texts`/`parseOk` for memory), `facts` and `score`. The transcript may be trimmed to the request budget | diagnosis |
-| `<seen>` | The full request the persona (or the analyzer for a memory case) was given for that situation, as two sub-blocks: `<system>` (the system prompt with the character card, rules and format) and `<user>` (the transcript, memory blocks and task) | diagnosis |
+| `<worst>` | JSON: the situation with the lowest median `overall` of any kind (ties: the lower median `goal`, then a real moment before an invented situation, then the lower `n`): `{ n, title, transcript, answers }` where each answer carries its id, messages/reactions/silent, `facts` and `score`. The transcript may be trimmed to the request budget | diagnosis |
+| `<seen>` | The full request the persona was given for that situation, as two sub-blocks: `<system>` (the system prompt with the character card, rules and format) and `<user>` (the transcript, memory blocks and task) | diagnosis |
 
 ### Answer ids
 
@@ -877,7 +874,7 @@ Placeholders filled by code: `{{name}}` in all six; `{{count}}`, `{{minLines}}`,
 }
 ```
 
-`authorId` is a member id from `<members>` or `self` for the persona's own earlier line. `replyTo` is a 0-based index into the same situation's `lines` array, or `null`. For both targets the last line is never by `self`. For reply-target situations it addresses the persona. For memory-target situations no line is required to address the persona; the persona's own lines may appear anywhere before the last line.
+`authorId` is a member id from `<members>` or `self` for the persona's own earlier line. `replyTo` is a 0-based index into the same situation's `lines` array, or `null`. The last line is never by `self` and addresses the persona.
 
 A situation record from a real moment has `anchor: <id>` instead of `lines`. Its transcript is rendered from the stored history; its record also carries `original` (the persona's messages) and `at` (the time the persona answered).
 
@@ -899,7 +896,7 @@ A situation record from a real moment has `anchor: <id>` instead of `lines`. Its
 }
 ```
 
-Each score is an integer 0–10 or `null`. `overall` and `goal` are always numbers. For memory-target scoring `character` is always `null`.
+Each score is an integer 0–10 or `null`. `overall` and `goal` are always numbers.
 
 ### Axes
 
@@ -912,8 +909,6 @@ All integers 0–10, 10 ideal, `null` when there is nothing to judge (never 5 as
 | `rules` | Compliance with rules and learned items | Breaks every applicable rule | Follows some, breaks others | Follows every applicable rule |
 | `goal` | Does what `<case>` asks | Does the opposite | Partly achieves, partly misses | Handles the behaviour exactly |
 | `overall` | The mentor's verdict | Fails across the board | Acceptable with clear weaknesses | Excellent on every front |
-
-For memory-target scoring `character` is always `null` and `human` measures whether the text reads like someone's own notes about people they know (10) or far from how such a person would write for themselves (0).
 
 ### Pass rule
 

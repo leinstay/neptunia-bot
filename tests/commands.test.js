@@ -1473,21 +1473,39 @@ test('autocomplete: command-option choices never offer the owner-only private co
   }
 });
 
-test('autocomplete: an allowed non-owner (granted access.* by role) gets command-key choices too', async () => {
+test('autocomplete: a non-owner granted * by role gets path choices, never command-key choices (access is owner-only)', async () => {
   const admin = fakeAdmin({ owners: ['owner1'], access: { '*': { everyone: false, roles: ['staff'], users: [] } } });
   const handler = createInteractionHandler({ hot: baseHot(), admin, getGuildId: () => 'g1' });
 
-  const interaction = fakeInteraction({
+  const paths = fakeInteraction({
     kind: 'autocomplete',
     user: { id: 'helper1' },
     member: { roles: ['staff'] },
-    group: 'access',
-    subcommand: 'revoke',
-    focused: { name: 'command', value: '' },
+    subcommand: 'set',
+    focused: { name: 'path', value: '' },
   });
-  await handler(interaction);
+  await handler(paths);
+  assert.ok(paths.respondCalls[0].length > 0);
 
-  assert.ok(interaction.respondCalls[0].length > 0);
+  for (const subcommand of ['grant', 'revoke']) {
+    const interaction = fakeInteraction({
+      kind: 'autocomplete',
+      user: { id: 'helper1' },
+      member: { roles: ['staff'] },
+      group: 'access',
+      subcommand,
+      focused: { name: 'command', value: '' },
+    });
+    await handler(interaction);
+    assert.deepEqual(interaction.respondCalls[0], [], subcommand);
+  }
+
+  // The owner still gets them, without any access key offered.
+  const owner = fakeInteraction({ kind: 'autocomplete', group: 'access', subcommand: 'grant', focused: { name: 'command', value: '' } });
+  await handler(owner);
+  const names = owner.respondCalls[0].map((c) => c.name);
+  assert.ok(names.length > 0);
+  assert.ok(!names.some((name) => name === 'access' || name.startsWith('access.')));
 });
 
 test('autocomplete: a non-owner gets no choices', async () => {

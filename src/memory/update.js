@@ -1104,9 +1104,8 @@ function slimMedia(part) {
 /**
  * The stored profiles/channels an analyzer batch needs, plus the distinct
  * non-self author ids and channel ids of `messages` (the `knownUserIds` /
- * `knownChannelIds` of `applyMemoryUpdate`). Shared by the live analyzer and
- * the mentor's memory sandbox (src/mentor/sandbox.js), which reads through
- * its own view instead of the store.
+ * `knownChannelIds` of `applyMemoryUpdate`). The lookups are passed in, so
+ * the caller decides where profiles and channels are read from.
  * @param {object[]} messages  Slim or normalized messages; `self`/`authorId`/`channelId` read.
  * @param {(id: string) => (object|null)} getUser     A stored profile, null when none.
  * @param {(id: string) => (object|null)} getChannel  A stored channel entry, null when none.
@@ -1133,8 +1132,7 @@ export function batchContext(messages, getUser, getChannel) {
 /**
  * The `relationships`/`episodes`/`lore` arguments of the apply functions,
  * from `config` (read by the caller at the moment of use). `now` is the clock
- * (a function), read once per enabled switch. Shared by the live analyzer and
- * the mentor's memory sandbox (src/mentor/sandbox.js).
+ * (a function), read once per enabled switch.
  * @param {object} config
  * @param {() => number} now
  * @returns {{ relationships?: object, episodes?: object, lore?: object }}

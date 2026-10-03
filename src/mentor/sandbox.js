@@ -1,13 +1,10 @@
-// The mentor's two sandboxes. A sandbox run takes an invented chat excerpt (a
+// The mentor's sandbox. A sandbox run takes an invented chat excerpt (a
 // "situation"; or a real moment of the chat stored with a case, replayed from
-// its normalized messages), builds the request a real turn or a real analyzer
-// batch would build -- live prompts, live config, live stored memory -- asks
-// the model, parses the answer, and stops there: nothing reaches Discord and
-// nothing is written to memory. The reply sandbox reproduces the talk path
-// (src/behavior/prompt.js#buildRequest, src/behavior/turn.js) with the
-// omissions listed at `answerReply`, the memory
-// sandbox the analyzer (src/memory/update.js#buildMemoryRequest +
-// applyMemoryUpdate) on a store that only records what it would have written.
+// its normalized messages), builds the request a real turn would build --
+// live prompts, live config, live stored memory -- asks the model, parses the
+// answer, and stops there: nothing reaches Discord and nothing is written to
+// memory. It reproduces the talk path (src/behavior/prompt.js#buildRequest,
+// src/behavior/turn.js) with the omissions listed at `answerReply`.
 //
 // Every read of prompts, config and memory goes through a `view` (see
 // `liveView`), never through `hot` or the store directly, so a caller can hand
@@ -18,24 +15,13 @@
 import { buildRequest } from '../behavior/prompt.js';
 import { MINUTE_MS } from '../time.js';
 import { pickOtherProfiles } from '../behavior/turn.js';
-import { parseJsonObject, parseOutput } from '../llm/parse.js';
-import { log } from '../log.js';
+import { parseOutput } from '../llm/parse.js';
 import { findGif } from '../memory/gifs.js';
-import {
-  applyMemoryUpdate,
-  batchAuthorNamesMap,
-  batchContext,
-  buildMemoryRequest,
-  computeSeenAt,
-  memorySwitches,
-} from '../memory/update.js';
 
 // Token estimates taken as they are: the calibrator of a view built without a live one.
 const IDENTITY_CALIBRATOR = Object.freeze({ ratio: 1, apply: (n) => n, observe: () => 1 });
-// The captured store ignores guild ids (reads go to the view's one guild); this only fills the argument.
+// pickOtherProfiles takes a guild id; the view serves one guild, so this only fills the argument.
 const SANDBOX_GUILD = 'sandbox';
-// Same temperature as the live analyzer (src/memory/update.js#analyzeBatch).
-const MEMORY_TEMPERATURE = 0.3;
 
 /**
  * A read-only view of the live calibrator: `ratio` and `apply` read the live
@@ -358,230 +344,4 @@ export async function answerReply({
   });
 
   return { request: { system: textOf(systemMessage.content), user: textOf(userContent) }, answers, stopped };
-}
-
-/** The stored channel entry `id` among the view's channels, or null (the store's getChannel, through the view). */
-function channelFromView(view, id) {
-  return view.memory.listChannels().find((channel) => String(channel?.id) === String(id)) ?? null;
-}
-
-/**
- * A store-shaped object for applyMemoryUpdate over `view`. Reads come from
- * `view.memory` (guild ids are ignored: the view serves one guild):
- * `getUser`, `getGuild`, `getLore`, `listChannels`, `listUserProfiles`,
- * `getChannel` (looked up in `listChannels`). Every write method --
- * `applyProfileOps`, `adjustAffinity`, `addEpisodes`, `setLore`,
- * `updateChannel`, `updateGuild`, `applyLearnedOps` (the ones
- * applyMemoryUpdate calls), plus `updateUser`, `touchUser`, `forgetUser`,
- * `removeLore`, `setChannelFacts`, `touchChannel`, `pushBuffer`,
- * `shiftBuffer`, `markMediaCacheDirty`, `flush` -- only records
- * `{ method, args }` in `writes` and changes nothing; its return value is
- * the unchanged current state (or 0 for a count). `state` is
- * `{ data: {}, markDirty() {} }`. There is no private-layer method.
- * @param {object} view  From `liveView` (or a view of the same shape, e.g. src/mentor/moment.js#momentView).
- * @returns {{ store: object, writes: { method: string, args: unknown[] }[] }}
- */
-export function captureStore(view) {
-  const writes = [];
-  const record =
-    (method, result = () => undefined) =>
-    (...args) => {
-      writes.push({ method, args });
-      return result(...args);
-    };
-  const store = {
-    getUser: (guildId, id) => view.memory.getUser(id),
-    getGuild: () => view.memory.getGuild(),
-    getLore: () => view.memory.getLore(),
-    listChannels: () => view.memory.listChannels(),
-    listUserProfiles: () => view.memory.listUserProfiles(),
-    getChannel: (guildId, id) => channelFromView(view, id),
-
-    applyProfileOps: record('applyProfileOps', (guildId, id) => view.memory.getUser(id)),
-    updateUser: record('updateUser', (guildId, id) => view.memory.getUser(id)),
-    touchUser: record('touchUser'),
-    forgetUser: record('forgetUser', () => false),
-    adjustAffinity: record('adjustAffinity', (guildId, id) => view.memory.getUser(id)?.affinity ?? { score: 0, reason: '', history: [] }),
-    addEpisodes: record('addEpisodes', () => 0),
-    updateGuild: record('updateGuild', () => view.memory.getGuild()),
-    applyLearnedOps: record('applyLearnedOps', () => view.memory.getGuild()?.learned ?? []),
-    setLore: record('setLore', () => 0),
-    removeLore: record('removeLore', () => false),
-    updateChannel: record('updateChannel', (guildId, id) => channelFromView(view, id)),
-    setChannelFacts: record('setChannelFacts', (guildId, id) => channelFromView(view, id)),
-    touchChannel: record('touchChannel'),
-    pushBuffer: record('pushBuffer'),
-    shiftBuffer: record('shiftBuffer'),
-    markMediaCacheDirty: record('markMediaCacheDirty'),
-    flush: record('flush'),
-    state: { data: {}, markDirty() {} },
-  };
-  return { store, writes };
-}
-
-// Keys whose strings are not prose: ids, dates, weights, names and aliases, lore
-// identities, list ops by id or topic, and an episode's `quote` (a person's own words).
-const NOT_PROSE_KEYS = new Set(['id', 'from', 'date', 'ts', 'url', 'names', 'aliases', 'title', 'keys', 'seen', 'remove', 'weight', 'sure', 'delta', 'source', 'quote']);
-// A whole string that is only a member token, a number or a URL.
-const NOT_PROSE_TEXT = /^(?:<@!?\d+>|\d+|https?:\/\/\S+)$/;
-
-/** Every prose string under `value`, addressed from `path` (`.key` for a key, `[i]` for an index). */
-function proseUnder(value, path, out) {
-  if (typeof value === 'string') {
-    const trimmed = value.trim();
-    if (trimmed && !NOT_PROSE_TEXT.test(trimmed)) out.push({ path, text: value });
-    return;
-  }
-  if (Array.isArray(value)) {
-    value.forEach((item, i) => proseUnder(item, `${path}[${i}]`, out));
-    return;
-  }
-  if (value && typeof value === 'object') {
-    for (const [key, item] of Object.entries(value)) {
-      if (!NOT_PROSE_KEYS.has(key)) proseUnder(item, `${path}.${key}`, out);
-    }
-  }
-}
-
-/** Where each recorded write lands: [path, payload] pairs. Other writes store no analyzer prose. */
-const WRITE_TARGETS = {
-  applyProfileOps: ([, userId, ops]) => [[`users.${userId}`, ops]],
-  updateUser: ([, userId, fields]) => [[`users.${userId}`, fields]],
-  adjustAffinity: ([, userId, , reason]) => [[`users.${userId}.affinity.reason`, reason]],
-  addEpisodes: ([, userId, episodes]) => [[`users.${userId}.episodes`, episodes]],
-  updateGuild: ([, fields]) => [['guild', fields]],
-  applyLearnedOps: ([, ops]) => [['guild.learned', ops]],
-  updateChannel: ([, channelId, fields]) => [[`channels.${channelId}`, fields]],
-  setLore: ([, entries]) =>
-    (Array.isArray(entries) ? entries : []).map((entry, i) => {
-      const title = typeof entry?.title === 'string' && entry.title.trim() ? entry.title.trim() : String(i);
-      return [`lore[${title}]`, entry];
-    }),
-};
-
-/**
- * Every prose string the recorded writes would store, in write order, with
- * a readable address:
- * `users.<id>.character` / `.style` / `.relationship`,
- * `users.<id>.interests.add[i].topic` / `.note` (and `.update[i]...`),
- * `users.<id>.details.add[i]` (or `.add[i].text`),
- * `users.<id>.affinity.reason`, `users.<id>.episodes[i].what` / `.feeling`,
- * `guild.patterns`, `guild.starters`, `guild.injokes[i]`, `guild.self[i]`,
- * `guild.learned.add[i].text`, `lore[<title>].text` (`lore[<i>]` without a
- * title), `channels.<id>.purpose` / `.topics` / `.tone`.
- * Left out: ids, dates, numbers, URLs, names, aliases, lore titles and keys,
- * and an episode's `quote`. These are the strings handed to the store, before
- * the store's own clamping and de-duplication.
- * @param {{ method: string, args: unknown[] }[]} writes
- * @returns {{ path: string, text: string }[]}
- */
-function textsOf(writes) {
-  const out = [];
-  for (const { method, args } of writes) {
-    const targets = WRITE_TARGETS[method];
-    if (!targets) continue;
-    for (const [path, payload] of targets(args)) proseUnder(payload, path, out);
-  }
-  return out;
-}
-
-/**
- * The memory sandbox: the request the live analyzer would send for `batch`
- * (buildMemoryRequest over `view`: the batch authors' profiles, the batch
- * channels' entries, the guild memory and the lorebook; no media captions;
- * tokens measured with `view.calibrator`),
- * `samples` completions on `memory.model` (else `llm.model`) with
- * `memory.maxOutputTokens` / `memory.timeoutMs` and the analyzer's
- * temperature, `countAgainstDailyCap: false`, `skipCalibration: true`. Each
- * answer goes through parseJsonObject and applyMemoryUpdate with the
- * analyzer's own arguments (known ids from the batch, the feature switches,
- * the batch's timing and nicks) on a `captureStore`: nothing is stored.
- * `parseOk` is false when the answer is not a JSON object; `applyOk` is false
- * when it was not applied: not parsed, or applying it threw (a code bug or a
- * store shape mismatch, not the model's doing; logged as
- * `mentor: memory apply failed` with the count of writes recorded and the
- * error). Either way its `texts` are empty. See `textsOf` for the paths.
- * @param {object} input
- * @param {object} input.view         From `liveView` (or a view of the same shape, e.g. src/mentor/moment.js#momentView).
- * @param {object[]} input.batch      Normalized messages, e.g. `situationToHistory(...).history`.
- * @param {string} input.selfName
- * @param {{ complete: Function }} input.llm
- * @param {number} input.samples
- * @param {number} [input.at]         The moment answered at (ms), the apply step's dates; defaults to the wall clock.
- * @param {AbortSignal} [input.signal]
- * @param {(usage: object|null, estimated: number) => void} [input.onUsage]  Called after every completion.
- * @returns {Promise<{ request: { system: string, user: string },
- *   answers: { texts: { path: string, text: string }[], parseOk: boolean, applyOk: boolean }[], stopped: boolean }>}
- */
-export async function answerMemory({ view, batch, selfName, llm, samples, at = Date.now(), signal, onUsage }) {
-  const config = view.config;
-  const memory = view.memory;
-  // As the live analyzer: no memory prompt, no request (it would be sent without its instructions).
-  if (!view.prompts.memory) throw new Error('answerMemory: no memory prompt configured');
-  const context = batchContext(batch, (id) => memory.getUser(id), (id) => channelFromView(view, id));
-  const knownUserIds = new Set(context.authorIds.map(String));
-  const knownChannelIds = new Set(context.channelIds.map(String));
-
-  const { messages } = buildMemoryRequest({
-    prompts: view.prompts,
-    config,
-    calibrator: view.calibrator ?? IDENTITY_CALIBRATOR,
-    profiles: context.profiles,
-    channels: context.channels,
-    guildMemory: memory.getGuild(),
-    messages: batch,
-    selfName,
-    loreEntries: memory.getLore(),
-    nameOf: (id) => memory.getUser(id)?.names?.[0] ?? null,
-  });
-
-  const memoryCfg = config.memory ?? {};
-  const { answers, stopped } = await sample({
-    llm,
-    messages,
-    options: {
-      // An empty `memory.model` means unset, as in `/nep model show`.
-      model: memoryCfg.model || config.llm?.model,
-      role: 'analyzer',
-      maxOutputTokens: memoryCfg.maxOutputTokens,
-      temperature: MEMORY_TEMPERATURE,
-      timeoutMs: memoryCfg.timeoutMs ?? config.llm?.timeoutMs,
-      countAgainstDailyCap: false,
-      skipCalibration: true,
-      signal,
-    },
-    samples,
-    signal,
-    onUsage,
-    read: (text) => {
-      let update;
-      try {
-        update = parseJsonObject(text);
-      } catch {
-        return { texts: [], parseOk: false, applyOk: false };
-      }
-      let recorded = [];
-      try {
-        const liveConfig = view.config;
-        const { relationships, episodes, lore } = memorySwitches(liveConfig, () => at);
-        const { store, writes } = captureStore(view);
-        recorded = writes;
-        applyMemoryUpdate(
-          store,
-          SANDBOX_GUILD,
-          update,
-          liveConfig.memory,
-          knownUserIds,
-          { knownChannelIds, relationships, episodes, lore, timing: computeSeenAt(batch), batchAuthorNames: batchAuthorNamesMap(batch) },
-        );
-        return { texts: textsOf(writes), parseOk: true, applyOk: true };
-      } catch (err) {
-        // Not the model's doing: the answer parsed. Counts and the error only, never a stored text.
-        log.warn('mentor: memory apply failed', { writes: recorded.length, error: err });
-        return { texts: [], parseOk: true, applyOk: false };
-      }
-    },
-  });
-
-  return { request: { system: textOf(messages[0].content), user: textOf(messages[1].content) }, answers, stopped };
 }
