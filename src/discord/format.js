@@ -8,7 +8,7 @@
 // Time gaps and date changes are spelled out because the model must tell a
 // live conversation from a dead chat that somebody has just poked.
 
-import { mediaLabelFor, stickerLabelFor, stickerUrl } from './media.js';
+import { clipWithEllipsis, mediaLabelFor, stickerLabelFor, stickerUrl } from './media.js';
 import { gifHandleOf } from '../memory/gifs.js';
 import { MINUTE_MS, HOUR_MS, DAY_MS } from '../time.js';
 
@@ -45,14 +45,37 @@ export function fill(template, values = {}) {
   );
 }
 
+/**
+ * Wall-clock time of `ts` in `timezone`, 24-hour `HH:MM` as `locale` writes it.
+ * @param {number} ts  epoch milliseconds
+ * @param {string} timezone  IANA zone name
+ * @param {string} [locale]
+ * @returns {string}
+ */
 export function formatClock(ts, timezone, locale = 'en-US') {
   return formatter(timezone, locale, { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(ts);
 }
 
+/**
+ * The date of `ts` in `timezone`: short weekday, day and month name in
+ * `locale` (the transcript's date and gap markers).
+ * @param {number} ts  epoch milliseconds
+ * @param {string} timezone  IANA zone
+ * @param {string} [locale]
+ * @returns {string}
+ */
 export function formatDate(ts, timezone, locale = 'en-US') {
   return formatter(timezone, locale, { weekday: 'short', day: 'numeric', month: 'long' }).format(ts);
 }
 
+/**
+ * The full "now" of `ts` in `timezone`: long weekday, day, month and year in
+ * `locale`, then the clock (formatClock) and the zone name in parentheses.
+ * @param {number} ts  epoch milliseconds
+ * @param {string} timezone  IANA zone
+ * @param {string} [locale]
+ * @returns {string}
+ */
 export function formatNow(ts, timezone, locale = 'en-US') {
   const date = formatter(timezone, locale, { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }).format(ts);
   return `${date}, ${formatClock(ts, timezone, locale)} (${timezone})`;
@@ -101,10 +124,6 @@ export function formatDuration(ms, units) {
   return hours ? `${wholeDays} ${units.day} ${hours} ${units.hour}` : `${wholeDays} ${units.day}`;
 }
 
-function truncate(text, maxChars) {
-  return text.length > maxChars ? `${text.slice(0, maxChars)}…` : text;
-}
-
 /**
  * One rendered tag per attachment/embed/sticker of `message`, most
  * informative form available (see docs/prompt-contract.md, "Media in
@@ -115,24 +134,24 @@ function truncate(text, maxChars) {
  * attachment's Discord id, a link's synthesized id, `sticker:<id>` or
  * `emoji:<id>` — see normalizeMessage). `context.videos` is an optional
  * `Map` of the same ids to a video state (see mediaLabelFor); it only takes
- * effect when the labels carry `transcript.videoWatched`, so an older
- * labels.json renders exactly as before; a video state's `answer` (a second
- * look on a question) likewise needs `transcript.videoAnswered`.
- * `context.reads` is an optional `Map` of link ids to the excerpt the web
- * lookup read from that page (src/web/lookup.js); it needs
- * `transcript.linkRead`, so an older labels.json renders exactly as before.
+ * effect when the labels carry `transcript.videoWatched` (a key blanked in
+ * prompts.local/labels.json switches this form off); a video state's
+ * `answer` (a second look on a question) likewise needs
+ * `transcript.videoAnswered`. `context.reads` is an optional `Map` of link
+ * ids to the excerpt the web lookup read from that page (src/web/lookup.js);
+ * it needs `transcript.linkRead`, blanked the same way to switch it off.
  * `context.gifHandles` is an optional `Map` from src/memory/gifs.js#gifHandleMap:
  * a GIF (attachment or embed) the library knows renders `transcript.gifKnown` /
- * `gifKnownNoText` with its handle; an older labels.json without the key in
- * question renders `gifDescribed` / `gif` exactly as before.
+ * `gifKnownNoText` with its handle; with the key in question blanked it
+ * renders `gifDescribed` / `gif` instead.
  */
 function mediaTags(message, labels, context = {}) {
   const unknownDuration = labels.transcript.unknownDuration ?? '?';
   const videosOn = Boolean(labels.transcript.videoWatched);
-  // A second look's answer (videoAnswered) is a newer, optional key: without
-  // it the video renders exactly as before.
+  // A second look's answer (videoAnswered): a key blanked in
+  // prompts.local/labels.json switches this form off.
   const answersOn = Boolean(labels.transcript.videoAnswered);
-  // A read page's excerpt (linkRead) is a newer, optional key too.
+  // A read page's excerpt (linkRead): blanking the key switches it off too.
   const readsOn = Boolean(labels.transcript.linkRead);
   const videoOf = (id) => {
     const video = videosOn ? (context.videos?.get(id) ?? null) : null;
@@ -154,11 +173,12 @@ function mediaTags(message, labels, context = {}) {
     pushTag({ key, values });
     for (const tag of Array.isArray(extra) ? extra : extra ? [extra] : []) pushTag(tag);
   };
-  // An attached picture's caption (imageAttachedDescribed) is a newer,
-  // optional key: without it the bare imageAttached renders as before.
+  // An attached picture's caption (imageAttachedDescribed): a key blanked in
+  // prompts.local/labels.json switches this form off, the bare imageAttached
+  // renders instead.
   const attachedCaptionOn = Boolean(labels.transcript.imageAttachedDescribed);
-  // A library GIF's handle (gifKnown / gifKnownNoText) is a newer, optional
-  // pair of keys: without the one chosen, the plain GIF form renders as before.
+  // A library GIF's handle (gifKnown / gifKnownNoText): blanking the one
+  // chosen switches it off, the plain GIF form renders instead.
   const handleOf = (item, kind) => (item.kind === 'gif' ? gifHandleOf(context.gifHandles, item, kind) : null);
   const withGifFallback = (label) => {
     if (label.key === 'gifKnown' && !labels.transcript.gifKnown) {
@@ -181,11 +201,11 @@ function mediaTags(message, labels, context = {}) {
   }
   for (const link of message.links ?? []) {
     const attachedIndex = context.attachedIndex?.get(link.id) ?? null;
-    // A plain 'link' (video-site preview) thumbnail description is a new,
-    // optional tag (transcript.thumbnailDescribed): an older labels.json
-    // without that key must render exactly as before -- a 'gif' embed's own
-    // description (gifDescribed) is a base contract key and is never gated
-    // this way.
+    // A plain 'link' (video-site preview) thumbnail description
+    // (transcript.thumbnailDescribed): a key blanked in
+    // prompts.local/labels.json switches this form off -- a 'gif' embed's
+    // own description (gifDescribed) is a base contract key and is never
+    // gated this way.
     const canDescribe = link.kind !== 'link' || Boolean(labels.transcript.thumbnailDescribed);
     const description = canDescribe ? (context.descriptions?.get(link.id) ?? null) : null;
     const read = readsOn ? (context.reads?.get(link.id) ?? null) : null;
@@ -211,7 +231,7 @@ function mediaTags(message, labels, context = {}) {
       tags.push(fill(labels.transcript.emojiDescribed, { name: emoji.name, text: description }));
     }
   }
-  // A label key missing from an older labels.json (fill() returns '' for it)
+  // A key blanked in prompts.local/labels.json (fill() returns '' for it)
   // must not leave a stray double space where that tag would have sat.
   return tags.filter(Boolean);
 }
@@ -236,14 +256,14 @@ function reactionsTag(message, labels, max) {
 
 /**
  * One forwarded message-snapshot, wrapped in `labels.transcript.forwardedFrom`
- * when the source channel's name is known AND the labels file has that key
- * (an older labels.json falls back gracefully); otherwise the plain
+ * when the source channel's name is known AND that key is set (a key blanked
+ * in prompts.local/labels.json switches this form off); otherwise the plain
  * `labels.transcript.forwarded`. A media-only snapshot (no text) still
  * renders its media tags inside the wrapper.
  */
 function renderForwarded(snapshot, labels, context, maxChars, channelName) {
   const body = [];
-  if (snapshot.content) body.push(truncate(snapshot.content, maxChars));
+  if (snapshot.content) body.push(clipWithEllipsis(snapshot.content, maxChars));
   body.push(...mediaTags(snapshot, labels, context));
   const text = body.filter(Boolean).join(' ').trim();
   if (channelName && labels.transcript.forwardedFrom) {
@@ -335,7 +355,7 @@ export function formatTranscript(messages, options) {
     const head = mode === 'memory' ? `[${formatClock(message.ts, timezone, locale)}]` : `#${index} [${formatClock(message.ts, timezone, locale)}]`;
 
     const body = [];
-    if (message.content) body.push(truncate(message.content, maxChars));
+    if (message.content) body.push(clipWithEllipsis(message.content, maxChars));
     if (message.replyToId && mode === 'chat') {
       const target = indexById.get(message.replyToId);
       body.push(target ? fill(labels.transcript.replyTo, { index: target }) : labels.transcript.replyToOld);

@@ -14,14 +14,18 @@
 /** Command groups only an owner may ever run: no `bot.access` grant opens them. */
 export const OWNER_ONLY_GROUPS = Object.freeze(['private', 'mentor']);
 
+/** The group of a dotted command key (`memory` for `memory.show`), or null for a bare key or a non-string. */
+function groupOf(key) {
+  return typeof key === 'string' && key.includes('.') ? key.split('.')[0] : null;
+}
+
 /** True when `key` is an owner-only group (`private`, `mentor`) or a command in one (`private.show`).
  * @param {unknown} key
  * @returns {boolean}
  */
 export function isOwnerOnly(key) {
   if (typeof key !== 'string' || !key) return false;
-  const group = key.includes('.') ? key.split('.')[0] : key;
-  return OWNER_ONLY_GROUPS.includes(group);
+  return OWNER_ONLY_GROUPS.includes(groupOf(key) ?? key);
 }
 
 /** True when `userId` (an owner, or matched by a grant on the exact command
@@ -40,8 +44,7 @@ export function isAllowed({ commandKey, userId, roleIds, owners, access }) {
   if (isOwnerOnly(commandKey)) return false;
   if (!access || typeof access !== 'object') return false;
 
-  const group = typeof commandKey === 'string' && commandKey.includes('.') ? commandKey.split('.')[0] : null;
-  const candidates = [commandKey, group, '*'].filter((key) => typeof key === 'string' && key.length > 0);
+  const candidates = [commandKey, groupOf(commandKey), '*'].filter((key) => typeof key === 'string' && key.length > 0);
   const roleSet = new Set((Array.isArray(roleIds) ? roleIds : []).map(String));
 
   for (const key of candidates) {

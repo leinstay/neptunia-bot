@@ -5,13 +5,27 @@
 // one thin view over discord.js that backs that lookup: it keeps no copy,
 // the guild's emoji cache (kept current by discord.js) is the map.
 
+/**
+ * Discord's custom emoji markup `<:name:id>` / `<a:name:id>` as a regex
+ * source: the one copy every markup regex here and in src/discord/collect.js
+ * is built from. Group 1 is `a` for an animated emoji (else empty), group 2
+ * the name (2-32 letters, digits or underscores, Discord's rule), group 3 the
+ * id (a snowflake). Unanchored and without flags: each user adds its own.
+ */
+export const CUSTOM_EMOJI_MARKUP = /<(a?):([A-Za-z0-9_]{2,32}):(\d{1,25})>/.source;
+
 // Skipped as a whole, never scanned for tokens: code blocks, inline code,
 // custom emoji markup already well formed, timestamps, bracketed and bare URLs.
 // The second alternative is a `:name:` token; a name followed by `//` is a URL scheme.
-const SCAN_RE =
-  /(```[\s\S]*?```|``[^`]*?``|`[^`\n]*`|<a?:\w+:\d+>|<t:-?\d+(?::[A-Za-z])?>|<https?:\/\/[^>\s]*>|https?:\/\/\S+)|:([A-Za-z0-9_]{2,32}):(?!\/\/)/g;
+const SKIPPED = [
+  /```[\s\S]*?```|``[^`]*?``|`[^`\n]*`/.source,
+  // The markup's own groups made non-capturing, so the token below stays group 2.
+  CUSTOM_EMOJI_MARKUP.replace(/\((?!\?)/g, '(?:'),
+  /<t:-?\d+(?::[A-Za-z])?>|<https?:\/\/[^>\s]*>|https?:\/\/\S+/.source,
+].join('|');
+const SCAN_RE = new RegExp(`(${SKIPPED})|${/:([A-Za-z0-9_]{2,32}):(?!\/\/)/.source}`, 'g');
 const NAME_TOKEN_RE = /^:([A-Za-z0-9_]{2,32}):$/;
-const MARKUP_RE = /^<(a?):([A-Za-z0-9_]{2,32}):(\d{1,25})>$/;
+const MARKUP_RE = new RegExp(`^${CUSTOM_EMOJI_MARKUP}$`);
 
 /** `<:name:id>` or `<a:name:id>` for one emoji. */
 function markup(emoji) {
@@ -109,33 +123,24 @@ export function resolveReactionEmoji(raw, lookup) {
  * @param {{ guilds: { cache: Map<string, any> } }} client
  * @param {string|(() => (string|null))} guildId
  * @returns {{ byName: (name: string) => ({ id: string, name: string, animated: boolean }|null),
- *             byId: (id: string) => ({ id: string, name: string, animated: boolean }|null),
- *             list: () => { id: string, name: string, animated: boolean }[],
- *             size: () => number }}
+ *             list: () => { id: string, name: string, animated: boolean }[] }}
  */
 export function createEmojiIndex(client, guildId) {
   function cache() {
     const id = typeof guildId === 'function' ? guildId() : guildId;
     return (id && client?.guilds?.cache?.get(id)?.emojis?.cache) || null;
   }
-  function plain(emoji) {
-    return { id: emoji.id, name: emoji.name, animated: Boolean(emoji.animated) };
-  }
-  function list() {
-    const emojis = cache();
-    if (!emojis) return [];
-    return [...emojis.values()].filter((e) => e?.id && e.name && e.available !== false).map(plain);
-  }
   return {
     byName: (name) => {
       const emojis = cache();
       return emojis ? matchEmojiName(emojis.values(), name) : null;
     },
-    byId: (id) => {
-      const emoji = cache()?.get(id);
-      return emoji && emoji.available !== false ? plain(emoji) : null;
+    list: () => {
+      const emojis = cache();
+      if (!emojis) return [];
+      return [...emojis.values()]
+        .filter((e) => e?.id && e.name && e.available !== false)
+        .map((e) => ({ id: e.id, name: e.name, animated: Boolean(e.animated) }));
     },
-    list,
-    size: () => list().length,
   };
 }

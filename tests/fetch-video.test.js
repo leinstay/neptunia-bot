@@ -694,7 +694,7 @@ test('logging: one warn per failure with source, reason, a query-free location a
   assert.equal(lines.length, 1);
   const [line] = lines;
   assert.equal(line.level, 'warn');
-  assert.equal(line.source, 'site');
+  assert.equal(line.source, 'link', 'a video-site link logs as source link, as collectVideos names it');
   assert.equal(line.reason, 'download');
   assert.equal(line.location, 'www.youtube.com/watch');
   assert.equal(line.code, 1);

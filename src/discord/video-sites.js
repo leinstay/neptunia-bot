@@ -10,9 +10,11 @@
 import { createHash } from 'node:crypto';
 
 // `>` closes Discord's `<url>` embed-suppression form; quotes and `<` never
-// belong to a bare URL in chat text.
+// belong to a bare URL in chat text. A match therefore never holds a `>`.
 const URL_PATTERN = /https?:\/\/[^\s<>"']+/gi;
-const TRAILING_PUNCTUATION = /[).,>]+$/;
+const TRAILING_PUNCTUATION = /[).,]+$/;
+// The height ceiling of a GIF's clip (ffmpegGifArgs), the same 360p as ffmpegTrimArgs.
+const GIF_MAX_HEIGHT = 360;
 // Tried left to right: a <=360p stream pair, a <=360p single file, then the
 // best H.264 single file up to 720 on its short side, and only then `w`.
 // yt-dlp always ranks the extractor's own preference first, so `w` lands on
@@ -71,7 +73,7 @@ export function isDirectUrlSite(url, directUrlSites) {
 
 /**
  * Distinct http(s) URLs in `text` that point at one of `sites`, in order of
- * appearance, with trailing `)`, `.`, `,`, `>` stripped. Plain text only.
+ * appearance, with trailing `)`, `.`, `,` stripped. Plain text only.
  * @param {string} text
  * @param {string[]} sites
  * @returns {string[]}
@@ -238,24 +240,24 @@ export function ffmpegTrimArgs(inPath, outPath, { ffmpegPath, maxSeconds } = {})
  * An ffmpeg run that turns a GIF -- a `.gif` file, or the mp4/webm a GIF
  * site (tenor, giphy) serves for it -- into a short clip a video model can
  * take: its first `maxSeconds` (a loop GIF is short; a longer animation is
- * cut), at most `maxHeight` pixels high but never upscaled, both sides even
- * (H.264 needs it), yuv420p H.264 (a GIF decodes to RGB, which libx264 would
- * otherwise keep as a 4:4:4 stream many decoders refuse), no audio track, and
- * the same bitrate cap as ffmpegTrimArgs. The height expression is quoted so
- * its comma is not read as a filter separator.
+ * cut), at most GIF_MAX_HEIGHT (360) pixels high but never upscaled, both
+ * sides even (H.264 needs it), yuv420p H.264 (a GIF decodes to RGB, which
+ * libx264 would otherwise keep as a 4:4:4 stream many decoders refuse), no
+ * audio track, and the same bitrate cap as ffmpegTrimArgs. The height
+ * expression is quoted so its comma is not read as a filter separator.
  * @param {string} inPath
  * @param {string} outPath
- * @param {{ ffmpegPath: string, maxSeconds: number, maxHeight?: number }} options
+ * @param {{ ffmpegPath: string, maxSeconds: number }} options
  * @returns {{ command: string, args: string[] }}
  */
-export function ffmpegGifArgs(inPath, outPath, { ffmpegPath, maxSeconds, maxHeight = 360 } = {}) {
+export function ffmpegGifArgs(inPath, outPath, { ffmpegPath, maxSeconds } = {}) {
   return {
     command: ffmpegPath,
     args: [
       '-y', '-hide_banner', '-loglevel', 'error',
       '-i', String(inPath),
       '-t', String(maxSeconds),
-      '-vf', `scale=-2:'min(${maxHeight},trunc(ih/2)*2)'`,
+      '-vf', `scale=-2:'min(${GIF_MAX_HEIGHT},trunc(ih/2)*2)'`,
       '-pix_fmt', 'yuv420p',
       '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '28',
       '-maxrate', '400k', '-bufsize', '800k',
@@ -268,7 +270,8 @@ export function ffmpegGifArgs(inPath, outPath, { ffmpegPath, maxSeconds, maxHeig
 
 /**
  * Duration and title from yt-dlp's `--dump-single-json` output; anything
- * missing, mistyped or unparsable becomes null.
+ * missing, mistyped or unparsable becomes null, and so does a zero duration
+ * (a live stream, see positiveSeconds).
  * @param {string} jsonText
  * @returns {{ durationSec: number|null, title: string|null }}
  */
@@ -280,9 +283,19 @@ export function parseProbe(jsonText) {
     return { durationSec: null, title: null };
   }
   if (!data || typeof data !== 'object') return { durationSec: null, title: null };
-  const duration = Number.isFinite(data.duration) && data.duration >= 0 ? data.duration : null;
+  const duration = positiveSeconds(data.duration);
   const title = typeof data.title === 'string' ? data.title : null;
   return { durationSec: duration, title };
+}
+
+/**
+ * A `content-type` header value as `type/subtype` in lowercase, parameters
+ * (`; charset=...`) dropped; '' when missing.
+ * @param {string|null|undefined} value
+ * @returns {string}
+ */
+export function bareContentType(value) {
+  return String(value ?? '').split(';')[0].trim().toLowerCase();
 }
 
 /**
@@ -319,7 +332,7 @@ export function parseIsoDuration(text) {
   return Math.ceil(total);
 }
 
-/** A positive whole number of seconds, else null -- a zero length is a live stream, not a duration. */
+/** A positive finite number of seconds, else null -- a zero length is a live stream, not a duration. */
 function positiveSeconds(value) {
   return Number.isFinite(value) && value > 0 ? value : null;
 }

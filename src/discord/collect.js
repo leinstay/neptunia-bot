@@ -12,12 +12,17 @@ import {
   linkThumbnailCacheKey,
   discordCdnVideo,
   DISCORD_CDN_SITES,
+  siteOf,
 } from './media.js';
 import { extractVideoUrls, videoSiteFor, videoUrlCacheKey } from './video-sites.js';
+import { CUSTOM_EMOJI_MARKUP } from './emoji.js';
 
 const TEXT_PREVIEW_SIZE_GUARD = 256 * 1024; // 256 KB — never fetch a bigger "text" attachment
+/** Discord's REST page size for a message list. */
+const PAGE = 100;
 const MAX_EMOJIS_PER_MESSAGE = 5;
-const CUSTOM_EMOJI_RE = /<(a)?:(\w+):(\d+)>/g;
+// Groups: the animated flag (`a` or empty), the name, the id.
+const CUSTOM_EMOJI_RE = new RegExp(CUSTOM_EMOJI_MARKUP, 'g');
 
 /**
  * Custom emoji markup `<:name:id>` / `<a:name:id>` reads better as `:name:`.
@@ -25,7 +30,7 @@ const CUSTOM_EMOJI_RE = /<(a)?:(\w+):(\d+)>/g;
  * safety net for any markup it leaves behind.
  */
 function cleanEmoji(text) {
-  return text.replace(/<a?:(\w+):\d+>/g, ':$1:');
+  return text.replace(CUSTOM_EMOJI_RE, ':$2:');
 }
 
 /**
@@ -131,15 +136,6 @@ function normalizeEmbedLinks(idPrefix, embeds, embedTextChars, videoSites) {
     });
 }
 
-/** Hostname without a leading `www.`, or '' for an unparsable URL. */
-function siteOf(url) {
-  try {
-    return new URL(url).hostname.replace(/^www\./i, '');
-  } catch {
-    return '';
-  }
-}
-
 /**
  * The embed links (see normalizeEmbedLinks) followed by one synthetic link per
  * video-site URL typed in the text (`videoSites`, see
@@ -149,13 +145,13 @@ function siteOf(url) {
  * `embedLinks` is returned apart because only those URLs are stripped from
  * the message text: a typed video link stays readable where the person put it.
  */
-function normalizeLinks(idPrefix, embeds, embedTextChars, rawContent, videoSites) {
+function normalizeLinks(idPrefix, embeds, embedTextChars, cleanText, videoSites) {
   const embedLinks = normalizeEmbedLinks(idPrefix, embeds, embedTextChars, videoSites);
   const links = [...embedLinks];
   if (Array.isArray(videoSites) && videoSites.length > 0) {
     const seenUrls = new Set(embedLinks.map((link) => link.url));
     const seenKeys = new Set(embedLinks.map((link) => videoUrlCacheKey(link.url)));
-    for (const url of extractVideoUrls(rawContent, videoSites)) {
+    for (const url of extractVideoUrls(cleanText, videoSites)) {
       const key = videoUrlCacheKey(url);
       if (seenUrls.has(url) || seenKeys.has(key)) continue;
       seenUrls.add(url);
@@ -178,7 +174,7 @@ function normalizeLinks(idPrefix, embeds, embedTextChars, rawContent, videoSites
  * matched URL, to strip from the text like a rendered embed's.
  * @returns {{ videos: object[], embedUrls: Set<string>, urls: string[] }}
  */
-function cdnVideoAttachments(embeds, rawContent, attachments) {
+function cdnVideoAttachments(embeds, cleanText, attachments) {
   const known = new Set(attachments.map((attachment) => attachment.id));
   const byId = new Map();
   const embedUrls = new Set();
@@ -195,7 +191,7 @@ function cdnVideoAttachments(embeds, rawContent, attachments) {
   for (const embed of embeds ?? []) {
     if (embed?.url && take(embed.url)) embedUrls.add(embed.url);
   }
-  for (const url of extractVideoUrls(rawContent, DISCORD_CDN_SITES)) take(url);
+  for (const url of extractVideoUrls(cleanText, DISCORD_CDN_SITES)) take(url);
   return { videos: [...byId.values()], embedUrls, urls };
 }
 
@@ -205,15 +201,15 @@ function cdnVideoAttachments(embeds, rawContent, attachments) {
  * embeds of those videos, and the text with every rendered embed URL and
  * every CDN video URL stripped (an `<url>` form included).
  */
-function normalizeMedia(idPrefix, source, isVoice, rawContent, embedTextChars, videoSites) {
+function normalizeMedia(idPrefix, source, isVoice, cleanText, embedTextChars, videoSites) {
   const real = normalizeAttachments(source.attachments, isVoice);
-  const { embedLinks, links } = normalizeLinks(idPrefix, source.embeds, embedTextChars, rawContent, videoSites);
-  const cdn = cdnVideoAttachments(source.embeds, rawContent, real);
+  const { embedLinks, links } = normalizeLinks(idPrefix, source.embeds, embedTextChars, cleanText, videoSites);
+  const cdn = cdnVideoAttachments(source.embeds, cleanText, real);
   const stripped = cdn.urls.flatMap((url) => [{ url: `<${url}>` }, { url }]);
   return {
     attachments: [...real, ...cdn.videos],
     links: links.filter((link) => !cdn.embedUrls.has(link.url)),
-    content: stripEmbedUrls(rawContent, [...stripped, ...embedLinks]),
+    content: stripEmbedUrls(cleanText, [...stripped, ...embedLinks]),
   };
 }
 
@@ -236,9 +232,9 @@ function normalizeSnapshot(snapshot, embedTextChars, videoSites) {
   const isVoice = isVoiceMessageFlag(snapshot);
   const cleanContent = snapshot.cleanContent ?? snapshot.content ?? '';
   const emojis = extractEmojis(snapshot.content ?? cleanContent);
-  const rawContent = cleanEmoji(cleanContent).trim();
+  const cleanText = cleanEmoji(cleanContent).trim();
   const { attachments, links, content } = normalizeMedia(
-    snapshot.id ?? 'fwd', snapshot, isVoice, rawContent, embedTextChars, videoSites,
+    snapshot.id ?? 'fwd', snapshot, isVoice, cleanText, embedTextChars, videoSites,
   );
   return {
     content,
@@ -285,9 +281,9 @@ export function normalizeMessage(message, selfId, options = {}) {
   const isVoice = isVoiceMessageFlag(message);
   const cleanContent = message.cleanContent ?? '';
   const emojis = extractEmojis(message.content ?? cleanContent);
-  const rawContent = cleanEmoji(cleanContent).trim();
+  const cleanText = cleanEmoji(cleanContent).trim();
   const { attachments, links, content } = normalizeMedia(
-    message.id, message, isVoice, rawContent, embedTextChars, videoSites,
+    message.id, message, isVoice, cleanText, embedTextChars, videoSites,
   );
   const forwarded = [...(message.messageSnapshots?.values?.() ?? [])].map((snapshot) =>
     normalizeSnapshot(snapshot, embedTextChars, videoSites),
@@ -399,45 +395,53 @@ export function channelAllowed(channel, botConfig) {
   return allow.length === 0 || allow.includes(channel.id);
 }
 
-function canRead(channel) {
+/**
+ * Whether the bot member holds permission `flag` in `channel`: no bot
+ * member, an unviewable channel or no resolved permissions count as no. A
+ * channel without a guild (a private chat) has no member permissions:
+ * always yes.
+ */
+function hasPermission(channel, flag) {
+  if (!channel.guild) return true;
   const me = channel.guild.members.me;
   if (!me || !channel.viewable) return false;
-  return channel.permissionsFor(me)?.has(PermissionFlagsBits.ReadMessageHistory) ?? false;
+  return channel.permissionsFor(me)?.has(flag) ?? false;
+}
+
+/** Whether the bot may read `channel`'s history (see hasPermission). */
+function canRead(channel) {
+  return hasPermission(channel, PermissionFlagsBits.ReadMessageHistory);
 }
 
 /**
- * Whether the bot may send messages in `channel`. A channel without a guild
- * (a private chat) has no member permissions: always yes.
+ * Whether the bot may send messages in `channel` (see hasPermission: a
+ * channel without a guild is always yes).
  * @returns {boolean}
  */
 export function canSend(channel) {
-  if (!channel.guild) return true;
-  const me = channel.guild.members.me;
-  if (!me || !channel.viewable) return false;
-  return channel.permissionsFor(me)?.has(PermissionFlagsBits.SendMessages) ?? false;
+  return hasPermission(channel, PermissionFlagsBits.SendMessages);
 }
 
 /**
- * Whether the bot may attach files in `channel` (a drawing is posted as one).
- * Resolved like canSend: no bot member, an unviewable channel or no
- * permissions for the member count as no; a channel without a guild (a
- * private chat) is always yes.
+ * Whether the bot may attach files in `channel` (a drawing is posted as one),
+ * resolved like canSend (see hasPermission).
  * @returns {boolean}
  */
 export function canAttach(channel) {
-  if (!channel.guild) return true;
-  const me = channel.guild.members.me;
-  if (!me || !channel.viewable) return false;
-  return channel.permissionsFor(me)?.has(PermissionFlagsBits.AttachFiles) ?? false;
+  return hasPermission(channel, PermissionFlagsBits.AttachFiles);
 }
 
 /**
- * Last `limit` messages of a channel, oldest first, normalized.
- * @param {number} [embedTextChars]  Caps link/gif embed title+description (config.media.embedTextChars).
- * @param {string[]} [videoSites]  Video-site hosts whose typed URLs become link items (config.media.video.sites).
+ * Last `limit` messages of a channel (at most one page), oldest first,
+ * normalized. `embedTextChars` caps link/gif embed title+description
+ * (config.media.embedTextChars); `videoSites` lists the video-site hosts
+ * whose typed URLs become link items (config.media.video.sites).
+ * @param {import('discord.js').TextBasedChannel} channel
+ * @param {{ limit: number, selfId: string, embedTextChars?: number, videoSites?: string[] }} options
+ * @returns {Promise<object[]>}
  */
-export async function fetchHistory(channel, limit, selfId, embedTextChars, videoSites) {
-  const fetched = await channel.messages.fetch({ limit: Math.min(100, limit) });
+export async function fetchHistory(channel, { limit, selfId, embedTextChars, videoSites }) {
+  const fetched = await channel.messages.fetch({ limit: Math.min(PAGE, limit) });
   return [...fetched.values()]
     .sort((a, b) => a.createdTimestamp - b.createdTimestamp)
     .map((message) => normalizeMessage(message, selfId, { embedTextChars, videoSites }));
@@ -450,7 +454,7 @@ function bumpSnowflake(id) {
 
 /**
  * Fetch a window of a channel's history, OLDEST first, for a memory history
- * backfill. Pages backwards 100 messages at a time, starting at `anchorId`
+ * backfill. Pages backwards PAGE messages at a time, starting at `anchorId`
  * inclusive (or the channel's most recent message when `anchorId` is
  * absent), until `limit` messages are collected, the channel start is
  * reached (a page comes back short), or a message older than `minTs` is met
@@ -468,7 +472,7 @@ export async function fetchHistoryWindow(channel, { anchorId, limit, minTs = 0, 
   while (collected.length < limit) {
     let page;
     try {
-      page = await channel.messages.fetch(before ? { limit: 100, before } : { limit: 100 });
+      page = await channel.messages.fetch(before ? { limit: PAGE, before } : { limit: PAGE });
     } catch (err) {
       log.warn('collect: history window fetch failed', { channel: channel.id, error: err });
       break;
@@ -487,14 +491,11 @@ export async function fetchHistoryWindow(channel, { anchorId, limit, minTs = 0, 
     }
 
     before = batch[batch.length - 1].id;
-    if (hitFloor || batch.length < 100 || collected.length >= limit) break;
+    if (hitFloor || batch.length < PAGE || collected.length >= limit) break;
   }
 
   return collected.reverse();
 }
-
-/** Discord's REST page size for a message list. */
-const PAGE = 100;
 
 /** A message list page (newest first), or [] when the fetch fails. */
 async function pageOf(channel, query) {
@@ -507,9 +508,17 @@ async function pageOf(channel, query) {
   }
 }
 
-/** One message by id, or null when it cannot be fetched. */
-async function messageById(channel, id) {
+/**
+ * One message of `channel` by id: discord.js's message cache first, else one
+ * fetch; null when it cannot be fetched (deleted, no access, any error).
+ * @param {import('discord.js').TextBasedChannel} channel
+ * @param {string} id
+ * @returns {Promise<import('discord.js').Message|null>}
+ */
+export async function fetchMessage(channel, id) {
   try {
+    const cached = channel.messages.cache?.get?.(id);
+    if (cached) return cached;
     return (await channel.messages.fetch(id)) ?? null;
   } catch {
     return null;
@@ -537,7 +546,7 @@ async function messageById(channel, id) {
 export async function fetchMoment(channel, messageId, { selfId, limit, embedTextChars, videoSites }) {
   if (!channel?.guild) throw new Error('a direct message cannot be used');
   if (!canRead(channel)) throw new Error('the bot cannot read that channel');
-  const own = await messageById(channel, messageId);
+  const own = await fetchMessage(channel, messageId);
   if (!own) throw new Error('that message was not found');
   if (own.author?.id !== selfId) throw new Error("that message is not the persona's");
   const normalize = (message) => normalizeMessage(message, selfId, { embedTextChars, videoSites });
@@ -554,7 +563,7 @@ export async function fetchMoment(channel, messageId, { selfId, limit, embedText
   const repliedId = isForward ? null : (own.reference?.messageId ?? null);
   let trigger = null;
   if (repliedId) {
-    trigger = await messageById(channel, repliedId);
+    trigger = await fetchMessage(channel, repliedId);
     if (!trigger) throw new Error('the message it replies to is gone');
     if (trigger.author?.id === selfId) trigger = null;
   }
@@ -606,7 +615,7 @@ export async function fetchNeighbors(channel, config, selfId, now = Date.now()) 
     candidates.map(async (other) => {
       try {
         const messages = (
-          await fetchHistory(other, neighborMessages, selfId, config.media?.embedTextChars, config.media?.video?.sites)
+          await fetchHistory(other, { limit: neighborMessages, selfId, embedTextChars: config.media?.embedTextChars, videoSites: config.media?.video?.sites })
         ).filter((m) => m.ts >= minTs);
         return { channelId: other.id, channelName: other.name, messages };
       } catch (err) {

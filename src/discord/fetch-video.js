@@ -33,6 +33,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { log } from '../log.js';
 import {
+  bareContentType,
   ffmpegGifArgs,
   ffmpegTrimArgs,
   parseProbe,
@@ -68,11 +69,6 @@ function isVideoType(type) {
 /** Whether a bare content type is a GIF's animation: the .gif itself, or the mp4/webm a GIF site serves. */
 function isGifType(type) {
   return type === 'image/gif' || isVideoType(type);
-}
-
-/** `type/subtype` in lowercase, parameters dropped. */
-function bareContentType(value) {
-  return String(value ?? '').split(';')[0].trim().toLowerCase();
 }
 
 /**
@@ -407,12 +403,12 @@ export function createVideoFetcher({
   async function probeSite(url, { ytdlpPath, toolTimeoutMs } = {}) {
     try {
       const run = await runTool(ytdlpProbeArgs(url, { ytdlpPath }), toolTimeoutMs);
-      if (run.timedOut) return fail('site', url, 'timeout', { code: runCode(run) });
-      if (run.spawnError) return fail('site', url, 'tool', { code: runCode(run) });
-      if (run.code !== 0) return fail('site', url, 'download', { code: runCode(run) });
+      if (run.timedOut) return fail('link', url, 'timeout', { code: runCode(run) });
+      if (run.spawnError) return fail('link', url, 'tool', { code: runCode(run) });
+      if (run.code !== 0) return fail('link', url, 'download', { code: runCode(run) });
       return { ok: true, ...parseProbe(run.stdout) };
     } catch (err) {
-      return fail('site', url, 'tool', { code: errorCode(err) });
+      return fail('link', url, 'tool', { code: errorCode(err) });
     }
   }
 
@@ -451,23 +447,23 @@ export function createVideoFetcher({
         }),
         toolTimeoutMs,
       );
-      if (run.timedOut) return fail('site', url, 'timeout', { code: runCode(run) });
-      if (run.spawnError) return fail('site', url, 'tool', { code: runCode(run) });
-      if (run.code !== 0) return fail('site', url, 'download', { code: runCode(run) });
+      if (run.timedOut) return fail('link', url, 'timeout', { code: runCode(run) });
+      if (run.spawnError) return fail('link', url, 'tool', { code: runCode(run) });
+      if (run.code !== 0) return fail('link', url, 'download', { code: runCode(run) });
 
       // yt-dlp exits 0 without writing anything when --max-filesize skips the download.
       const clipBytes = await sizeOf(clipPath);
-      if (clipBytes === null) return fail('site', url, 'size');
+      if (clipBytes === null) return fail('link', url, 'size');
       const seconds = Number.isFinite(durationSec) && durationSec < maxSeconds ? durationSec : maxSeconds;
       let outPath = clipPath;
       let bytes = clipBytes;
       if (clipBytes > maxBytes) {
         const trim = await runTool(ffmpegTrimArgs(clipPath, smallPath, { ffmpegPath, maxSeconds }), toolTimeoutMs);
-        if (trim.timedOut) return fail('site', url, 'timeout', { code: runCode(trim) });
-        if (trim.spawnError || trim.code !== 0) return fail('site', url, 'tool', { code: runCode(trim) });
+        if (trim.timedOut) return fail('link', url, 'timeout', { code: runCode(trim) });
+        if (trim.spawnError || trim.code !== 0) return fail('link', url, 'tool', { code: runCode(trim) });
         bytes = await sizeOf(smallPath);
-        if (bytes === null) return fail('site', url, 'tool', { code: runCode(trim) });
-        if (bytes > maxBytes) return fail('site', url, 'size');
+        if (bytes === null) return fail('link', url, 'tool', { code: runCode(trim) });
+        if (bytes > maxBytes) return fail('link', url, 'size');
         outPath = smallPath;
       }
       return {
@@ -478,7 +474,7 @@ export function createVideoFetcher({
         bytes,
       };
     } catch (err) {
-      return fail('site', url, 'download', { code: errorCode(err) });
+      return fail('link', url, 'download', { code: errorCode(err) });
     } finally {
       await removeWorkDir(dir);
     }

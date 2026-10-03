@@ -3,7 +3,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createEmojiIndex, matchEmojiName, renderCustomEmoji, resolveReactionEmoji } from '../src/discord/emoji.js';
+import { CUSTOM_EMOJI_MARKUP, createEmojiIndex, matchEmojiName, renderCustomEmoji, resolveReactionEmoji } from '../src/discord/emoji.js';
 
 const EMOJIS = [
   { id: '111111111111111111', name: 'pepe_cry', animated: false },
@@ -13,6 +13,17 @@ const EMOJIS = [
   { id: '555555555555555555', name: 'Blush', animated: false },
 ];
 const lookup = (name) => matchEmojiName(EMOJIS, name);
+
+test('CUSTOM_EMOJI_MARKUP: groups are the animated flag, the name and the id; Discord bounds on both', () => {
+  const whole = new RegExp(`^${CUSTOM_EMOJI_MARKUP}$`);
+  assert.deepEqual(whole.exec('<a:dance:222222222222222222>').slice(1), ['a', 'dance', '222222222222222222']);
+  assert.deepEqual(whole.exec('<:pepe_cry:111>').slice(1), ['', 'pepe_cry', '111']);
+  assert.equal(whole.test('<:x:111>'), false, 'a one-character name');
+  assert.equal(whole.test(`<:${'n'.repeat(33)}:111>`), false, 'a name over 32 characters');
+  assert.equal(whole.test(`<:dance:${'1'.repeat(26)}>`), false, 'an id over 25 digits');
+  assert.equal(whole.test('<:δέλτα:111>'), false, 'a non-ASCII name');
+  assert.equal(new RegExp(CUSTOM_EMOJI_MARKUP, 'g').source, CUSTOM_EMOJI_MARKUP, 'unanchored, usable with any flags');
+});
 
 test('matchEmojiName: an exact case-sensitive match wins over a case-insensitive one', () => {
   assert.equal(matchEmojiName(EMOJIS, 'Kappa').id, '333333333333333333');
@@ -116,9 +127,11 @@ function fakeClient(guildId, emojis) {
 test('createEmojiIndex: reads the guild cache on demand, so later changes are seen', () => {
   const { cache, client } = fakeClient('g1', EMOJIS.slice(0, 2));
   const index = createEmojiIndex(client, 'g1');
-  assert.equal(index.size(), 2);
+  assert.deepEqual(index.list(), [
+    { id: '111111111111111111', name: 'pepe_cry', animated: false },
+    { id: '222222222222222222', name: 'dance', animated: true },
+  ]);
   assert.deepEqual(index.byName('dance'), { id: '222222222222222222', name: 'dance', animated: true });
-  assert.deepEqual(index.byId('111111111111111111'), { id: '111111111111111111', name: 'pepe_cry', animated: false });
   cache.set('6', { id: '6', name: 'fresh', animated: false });
   cache.delete('222222222222222222');
   assert.equal(index.byName('dance'), null);
@@ -130,10 +143,15 @@ test('createEmojiIndex: the guild id may be a getter read at use; no guild -> em
   const { client } = fakeClient('g1', EMOJIS);
   let current = null;
   const index = createEmojiIndex(client, () => current);
-  assert.equal(index.size(), 0);
   assert.deepEqual(index.list(), []);
   assert.equal(index.byName('dance'), null);
-  assert.equal(index.byId('222222222222222222'), null);
   current = 'g1';
-  assert.equal(index.size(), EMOJIS.length);
+  assert.equal(index.list().length, EMOJIS.length);
+});
+
+test('createEmojiIndex: list leaves out unavailable emoji; the index offers byName and list only', () => {
+  const { client } = fakeClient('g1', [...EMOJIS.slice(0, 2), { id: '9', name: 'gone', animated: false, available: false }]);
+  const index = createEmojiIndex(client, 'g1');
+  assert.deepEqual(index.list().map((e) => e.name), ['pepe_cry', 'dance']);
+  assert.deepEqual(Object.keys(index).sort(), ['byName', 'list']);
 });

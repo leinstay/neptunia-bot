@@ -75,13 +75,30 @@ function extOf(name) {
   return match ? match[1].toLowerCase() : null;
 }
 
-function truncateText(text, maxChars) {
-  const trimmed = String(text ?? '').trim();
-  if (!maxChars || trimmed.length <= maxChars) return trimmed;
-  return `${trimmed.slice(0, maxChars)}…`;
+/**
+ * `text` cut to its first `maxChars` code points with `…` appended (the
+ * ellipsis is outside the budget), or unchanged when it fits. Never splits a
+ * surrogate pair, never trims. A missing, non-finite or non-positive
+ * `maxChars` means no limit.
+ * @param {string} text
+ * @param {number} [maxChars]
+ * @returns {string}
+ */
+export function clipWithEllipsis(text, maxChars) {
+  const value = String(text ?? '');
+  const limit = Math.floor(Number(maxChars));
+  if (!Number.isFinite(limit) || limit <= 0 || value.length <= limit) return value;
+  const points = Array.from(value);
+  if (points.length <= limit) return value;
+  return `${points.slice(0, limit).join('')}…`;
 }
 
-function hostnameOf(url) {
+/**
+ * The hostname of `url` without a leading `www.`, or '' for an unparsable URL.
+ * @param {string} url
+ * @returns {string}
+ */
+export function siteOf(url) {
   try {
     return new URL(String(url)).hostname.replace(/^www\./i, '');
   } catch {
@@ -195,15 +212,15 @@ function gifAnimationUrl(embed, url) {
  */
 export function classifyEmbed(embed, { embedTextChars = 200 } = {}) {
   const url = embed?.url ?? null;
-  const host = hostnameOf(url ?? '');
+  const host = siteOf(url ?? '');
   const providerName = String(embed?.provider?.name ?? '');
   const isGif = GIF_PROVIDERS.has(providerName.toLowerCase()) || GIF_HOST_RE.test(host);
   const site = providerName || host || '';
   const animationUrl = isGif ? gifAnimationUrl(embed, url) : null;
   return {
     site,
-    title: truncateText(embed?.title ?? '', embedTextChars),
-    text: truncateText(embed?.description ?? '', embedTextChars),
+    title: clipWithEllipsis(String(embed?.title ?? '').trim(), embedTextChars),
+    text: clipWithEllipsis(String(embed?.description ?? '').trim(), embedTextChars),
     thumbnailUrl: embed?.thumbnail?.proxyURL ?? embed?.thumbnail?.url ?? null,
     kind: isGif ? 'gif' : 'link',
     url,
@@ -359,9 +376,9 @@ function extraOf(...extras) {
  *
  * A plain image/thumbnail attached to the request renders as a bare
  * `imageAttached`, or as `imageAttachedDescribed` (`{ n, text }`: the marker
- * and the helper's caption together) when a caption exists -- an older
- * labels.json without that key falls back to `imageAttached` in
- * src/discord/format.js. A video or gif whose still frame is attached keeps its
+ * and the helper's caption together) when a caption exists -- with that key
+ * blanked in prompts.local/labels.json, src/discord/format.js falls back to
+ * `imageAttached`. A video or gif whose still frame is attached keeps its
  * normal form (`video`/`videoDescribed`/`gif`/`gifDescribed` -- so the
  * persona still knows it WAS a video, its name, its duration) and carries a
  * second tag in `extra`: `frameAttached`, numbered the same way. A `link`
@@ -393,9 +410,9 @@ function extraOf(...extras) {
  * `context.gifHandle` is the library handle (`g12`, see
  * src/memory/gifs.js#gifHandleOf) of a `gif` item the persona can post
  * back: it renders `gifKnown` (`{ id, text }`) when a caption exists, else
- * `gifKnownNoText` (`{ id, name }`), in place of `gifDescribed`/`gif` (an
- * older labels.json without those keys falls back to them in
- * src/discord/format.js). Every other kind ignores it.
+ * `gifKnownNoText` (`{ id, name }`), in place of `gifDescribed`/`gif` (with
+ * those keys blanked in prompts.local/labels.json, src/discord/format.js
+ * falls back to them). Every other kind ignores it.
  * @param {object} item
  * @param {{ attachedIndex?: number|null, description?: string|null, unknownDuration?: string,
  *   video?: { state: 'watched'|'limit'|'error', text?: string, reason?: string,
@@ -407,8 +424,8 @@ export function mediaLabelFor(
   item,
   { attachedIndex = null, description = null, unknownDuration = '?', video = null, read = null, gifHandle = null } = {},
 ) {
-  const isPicture = PICTURE_ATTACHMENT_KINDS.has(item.kind) || (item.kind === 'link' && item.thumbnailUrl);
-  if (attachedIndex != null && isPicture && item.kind !== 'link') {
+  // A `link`'s attached thumbnail is handled in its own case below.
+  if (attachedIndex != null && PICTURE_ATTACHMENT_KINDS.has(item.kind)) {
     if (item.kind === 'video' || item.kind === 'gif') {
       const base = mediaLabelFor(item, { description, unknownDuration, video, gifHandle });
       return { ...base, extra: extraOf({ key: 'frameAttached', values: { n: attachedIndex } }, base.extra) };
@@ -564,9 +581,12 @@ function partPictures(part, messageId) {
  * image/gif/video attachment, any embed carrying a thumbnail (gif or link
  * kind alike), or a PNG/APNG/GIF sticker (never a Lottie one -- `sticker.url`
  * is null for those, see stickerUrl). Each item is stamped with a stable
- * `itemId` (the attachment's Discord id, the message+embed-index for a link,
- * or `sticker:<id>`) so it can be looked up in a vision-selection or
- * description-cache map, and with the outer message's `messageId` (a
+ * `itemId` (the attachment's Discord id; for an embed, the link's own id from
+ * src/discord/collect.js -- `video:url:<hash>` for a video-site link,
+ * `link:<hash>` for another link with a thumbnail, the message+embed-index
+ * for a gif embed; or `sticker:<id>`) so it can be looked up in a
+ * vision-selection or description-cache map, and with the outer message's
+ * `messageId` (a
  * forwarded snapshot's item included). A gif embed's item also carries its
  * `animationUrl` when the embed has one (see classifyEmbed): the file the
  * GIF watch downloads, while `url` stays the still thumbnail. Custom emoji are never included here
@@ -601,7 +621,7 @@ export function collectEmojiItems(message) {
 }
 
 /** The video candidates of one message part (the message or one snapshot), see collectVideos. */
-function partVideos(part, messageId, sites) {
+function partVideos(part, messageId, videoSites) {
   const items = [];
   for (const attachment of part.attachments ?? []) {
     if (attachment.kind !== 'video') continue;
@@ -616,10 +636,10 @@ function partVideos(part, messageId, sites) {
       bytes: attachment.size,
     });
   }
-  if (!Array.isArray(sites) || sites.length === 0) return items;
+  if (!Array.isArray(videoSites) || videoSites.length === 0) return items;
   for (const link of part.links ?? []) {
     if (!link.url) continue;
-    const site = videoSiteFor(link.url, sites);
+    const site = videoSiteFor(link.url, videoSites);
     if (!site) continue;
     items.push({
       source: 'link',
@@ -638,17 +658,17 @@ function partVideos(part, messageId, sites) {
 /**
  * The video candidates of one normalized message (see src/discord/collect.js),
  * in the order they appear in it: every attachment of kind `video`, then every
- * link whose `url` belongs to one of `sites` (see videoSiteFor in
+ * link whose `url` belongs to one of `videoSites` (see videoSiteFor in
  * src/discord/video-sites.js) -- the message's own first, then each forwarded
  * snapshot's the same way, all stamped with the outer message's `messageId`.
  * `itemId` is the id the transcript's `videos`
  * state map is keyed by (the attachment's Discord id, or the link's id).
- * `sites` missing or empty -> attachments only.
+ * `videoSites` missing or empty -> attachments only.
  * @param {object} message  A normalized message (see src/discord/collect.js).
- * @param {{ sites?: string[] }} [options]
+ * @param {{ videoSites?: string[] }} [options]
  */
-export function collectVideos(message, { sites = [] } = {}) {
-  return mediaParts(message).flatMap((part) => partVideos(part, message.id, sites));
+export function collectVideos(message, { videoSites = [] } = {}) {
+  return mediaParts(message).flatMap((part) => partVideos(part, message.id, videoSites));
 }
 
 /**
@@ -657,18 +677,18 @@ export function collectVideos(message, { sites = [] } = {}) {
  * it (the message's own first, then each forwarded snapshot's, all stamped
  * with the outer message's `messageId`): every `link` item with a url, minus
  * the ones on a video site of
- * `sites` (the video describer's, see collectVideos) and every gif embed.
- * `sites` missing or empty -> no link is excluded as a video.
+ * `videoSites` (the video describer's, see collectVideos) and every gif embed.
+ * `videoSites` missing or empty -> no link is excluded as a video.
  * @param {object} message  A normalized message (see src/discord/collect.js).
- * @param {{ sites?: string[] }} [options]
+ * @param {{ videoSites?: string[] }} [options]
  * @returns {{ id: string, messageId: string, url: string, site: string, title: string }[]}
  */
-export function collectReadableLinks(message, { sites = [] } = {}) {
+export function collectReadableLinks(message, { videoSites = [] } = {}) {
   const items = [];
   for (const part of mediaParts(message)) {
     for (const link of part.links ?? []) {
       if (link?.kind !== 'link' || !link.url || !link.id) continue;
-      if (Array.isArray(sites) && sites.length > 0 && videoSiteFor(link.url, sites)) continue;
+      if (Array.isArray(videoSites) && videoSites.length > 0 && videoSiteFor(link.url, videoSites)) continue;
       items.push({ id: link.id, messageId: message.id, url: link.url, site: link.site ?? '', title: link.title ?? '' });
     }
   }
@@ -689,7 +709,7 @@ export function isDescribable(item) {
  * (a spontaneous turn) only the "recent" tier applies. The result is ordered
  * by where the picture actually sits in the transcript (oldest message
  * first, then item order within a message) — not by selection priority — so
- * the persona reads its own the numbering top-to-bottom as it reads the chat.
+ * the persona reads the numbering top-to-bottom as it reads the chat.
  *
  * A picture-format sticker (see collectPictures) is only ever eligible from
  * the TRIGGER's own message, at the same priority as its images -- never from

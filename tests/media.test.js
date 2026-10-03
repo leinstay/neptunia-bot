@@ -20,7 +20,40 @@ import {
   selectPictures,
   discordCdnVideo,
   mediaParts,
+  siteOf,
+  clipWithEllipsis,
 } from '../src/discord/media.js';
+
+// --- siteOf --------------------------------------------------------------------
+
+test('siteOf: the hostname without a leading www., empty for an unparsable URL', () => {
+  assert.equal(siteOf('https://www.example.com/page?x=1'), 'example.com');
+  assert.equal(siteOf('https://WWW.Example.com/'), 'example.com');
+  assert.equal(siteOf('https://m.youtube.com/watch?v=abc'), 'm.youtube.com');
+  assert.equal(siteOf('not a url'), '');
+  assert.equal(siteOf(undefined), '');
+});
+
+// --- clipWithEllipsis ----------------------------------------------------------
+
+test('clipWithEllipsis: at most maxChars code points, then an ellipsis; short text unchanged', () => {
+  assert.equal(clipWithEllipsis('abcdef', 3), 'abc…');
+  assert.equal(clipWithEllipsis('abc', 3), 'abc');
+  assert.equal(clipWithEllipsis('', 3), '');
+  assert.equal(clipWithEllipsis(undefined, 3), '');
+  assert.equal(clipWithEllipsis('  padded  ', 20), '  padded  ', 'no trimming: the caller decides');
+});
+
+test('clipWithEllipsis: never splits a surrogate pair', () => {
+  assert.equal(clipWithEllipsis('αβ😀😀γ', 3), 'αβ😀…');
+  assert.equal(clipWithEllipsis('😀😀', 2), '😀😀');
+});
+
+test('clipWithEllipsis: a missing, non-finite or non-positive maxChars means no limit', () => {
+  for (const maxChars of [undefined, null, 0, -1, Number.NaN, Infinity]) {
+    assert.equal(clipWithEllipsis('ἀρχή καὶ τέλος', maxChars), 'ἀρχή καὶ τέλος', String(maxChars));
+  }
+});
 
 // --- mediaParts ----------------------------------------------------------------
 
@@ -541,7 +574,7 @@ function videoMessage() {
 }
 
 test('collectVideos: video attachments first, then links on a video site, in order', () => {
-  const items = collectVideos(videoMessage(), { sites: ['youtube.com', 'youtu.be'] });
+  const items = collectVideos(videoMessage(), { videoSites: ['youtube.com', 'youtu.be'] });
   assert.deepEqual(items, [
     { source: 'attachment', messageId: 'm1', itemId: 'a2', kind: 'video', url: 'u2', name: 'ταξίδι.mp4', durationSec: 12, bytes: 2048 },
     {
@@ -569,11 +602,11 @@ test('collectVideos: video attachments first, then links on a video site, in ord
 
 test('collectVideos: no sites (missing or empty) -> attachments only', () => {
   assert.deepEqual(collectVideos(videoMessage()).map((item) => item.itemId), ['a2']);
-  assert.deepEqual(collectVideos(videoMessage(), { sites: [] }).map((item) => item.itemId), ['a2']);
+  assert.deepEqual(collectVideos(videoMessage(), { videoSites: [] }).map((item) => item.itemId), ['a2']);
 });
 
 test('collectVideos: a message with no media returns an empty list', () => {
-  assert.deepEqual(collectVideos({ id: 'm1' }, { sites: ['youtube.com'] }), []);
+  assert.deepEqual(collectVideos({ id: 'm1' }, { videoSites: ['youtube.com'] }), []);
 });
 
 // --- collectPictures / isDescribable -------------------------------------------
@@ -1008,7 +1041,7 @@ test('collectReadableLinks: plain links in order, without gif embeds, video-site
       { id: 'm1#e4', kind: 'link', site: 'news.example.com', title: 'B', url: 'https://news.example.com/b' },
     ],
   };
-  const items = collectReadableLinks(message, { sites: ['youtube.com'] });
+  const items = collectReadableLinks(message, { videoSites: ['youtube.com'] });
   assert.deepEqual(
     items.map((item) => item.id),
     ['m1#e0', 'm1#e4'],
@@ -1089,7 +1122,7 @@ test('collectEmojiItems: a forwarded snapshot\'s custom emoji follow the message
 });
 
 test('collectVideos: a forwarded YouTube link is a candidate with its site set (the forwarded-video case)', () => {
-  const items = collectVideos(forwardMessage(), { sites: ['youtube.com', 'youtu.be'] });
+  const items = collectVideos(forwardMessage(), { videoSites: ['youtube.com', 'youtu.be'] });
   assert.deepEqual(items, [
     { source: 'attachment', messageId: 'outer', itemId: 'fwd-a1', kind: 'video', url: 'u-fwd1', name: 'clip.mp4', durationSec: 30, bytes: 4096 },
     {
@@ -1110,7 +1143,7 @@ test('collectVideos: no sites -> a forwarded message still yields its forwarded 
 });
 
 test('collectReadableLinks: forwarded plain links follow the message\'s own, video-site links still excluded', () => {
-  const items = collectReadableLinks(forwardMessage(), { sites: ['youtube.com'] });
+  const items = collectReadableLinks(forwardMessage(), { videoSites: ['youtube.com'] });
   assert.deepEqual(items, [
     { id: 'outer#e0', messageId: 'outer', url: 'https://example.org/own', site: 'example.org', title: 'Own' },
     { id: 'fwd#e1', messageId: 'outer', url: 'https://news.example.com/story', site: 'news.example.com', title: 'Story' },
@@ -1120,7 +1153,7 @@ test('collectReadableLinks: forwarded plain links follow the message\'s own, vid
 test('collectors: a message with an empty forwarded list returns exactly what it did without the key', () => {
   const plain = videoMessage();
   const withEmpty = { ...videoMessage(), forwarded: [] };
-  const sites = { sites: ['youtube.com', 'youtu.be'] };
+  const sites = { videoSites: ['youtube.com', 'youtu.be'] };
   assert.deepEqual(collectPictures(withEmpty), collectPictures(plain));
   assert.deepEqual(collectEmojiItems(withEmpty), collectEmojiItems(plain));
   assert.deepEqual(collectVideos(withEmpty, sites), collectVideos(plain, sites));

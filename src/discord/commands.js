@@ -6,10 +6,14 @@
 // into an `admin.run(commandKey, args, context)` call and replies, always
 // ephemerally, never letting an error escape into discord.js.
 //
-// Every option → args mapping lives in one place (OPTION_MAPPERS) so adding a
-// command means adding one tree entry and one mapper, nothing else.
+// Every option → args mapping lives in one place (OPTION_MAPPERS): adding a
+// command here means one tree entry and one mapper, plus a SLOW_COMMANDS
+// entry when it may outlast Discord's reply window; its handler lives in
+// src/admin.js.
 
+import { MessageFlags } from 'discord.js';
 import { isOwnerOnly } from './access.js';
+import { isPlainObject } from '../config.js';
 import { log } from '../log.js';
 
 // Raw Discord API option-type numbers (application-command-option-type):
@@ -57,12 +61,37 @@ const SLOW_COMMANDS = new Set([
   'mentor.show',
 ]);
 
-/** The roles a `/nep route` may name: the `/nep model` roles plus `image` (src/llm/images.js). */
-const ROUTE_ROLE_CHOICES = ['talk', 'analyzer', 'classifier.text', 'classifier.media', 'classifier.video', 'mentor', 'image'].map(
-  (role) => ({ name: role, value: role }),
-);
+/**
+ * The roles whose model `/nep model set` changes (src/admin.js maps each to
+ * its config path). `/nep route` adds `image` (src/llm/images.js), `/nep
+ * ping` adds `image` and `classifier`: every role choice list is derived
+ * from this one.
+ */
+export const MODEL_ROLES = Object.freeze(['talk', 'analyzer', 'classifier.text', 'classifier.media', 'classifier.video', 'mentor']);
 
-const DISABLED_MESSAGE ='Owner commands are disabled (features.adminCommands is off).';
+/** The `section` choices of `/nep memory show`, in display order (src/admin.js falls back to `summary`). */
+export const MEMORY_SHOW_SECTIONS = Object.freeze([
+  'summary',
+  'character',
+  'style',
+  'relationship',
+  'affinity',
+  'aliases',
+  'interests',
+  'details',
+  'episodes',
+  'raw',
+]);
+
+/** `{ name, value }` choices, one per entry of `values`, the name being the value itself. */
+function choicesOf(values) {
+  return values.map((value) => ({ name: value, value }));
+}
+
+const ROUTE_ROLES = Object.freeze([...MODEL_ROLES, 'image']);
+const PING_ROLES = Object.freeze([...ROUTE_ROLES, 'classifier']);
+
+const DISABLED_MESSAGE = 'Owner commands are disabled (features.adminCommands is off).';
 const NOT_ALLOWED_MESSAGE = 'Not allowed';
 
 /** Discord's cap on one application command's combined text (see `commandSize`). */
@@ -99,7 +128,7 @@ export function isValidCommandName(name) {
 /**
  * The whole command tree as plain, JSON-serializable objects (the shape
  * `guild.commands.set([...])` expects), for one top-level command named
- * `commandName`. Pure — no discord.js import, no I/O. Always visible to
+ * `commandName`. Pure — no discord.js object, no I/O. Always visible to
  * every member (no `default_member_permissions`); an ungranted member who
  * runs it gets the not-allowed reply — all gating happens at interaction
  * time (`createInteractionHandler`, `admin.isAllowed`), never through
@@ -123,16 +152,7 @@ export function buildCommandTree(commandName) {
               name: 'role',
               description: 'Role to ping (default: all).',
               required: false,
-              choices: [
-                { name: 'talk', value: 'talk' },
-                { name: 'analyzer', value: 'analyzer' },
-                { name: 'classifier.text', value: 'classifier.text' },
-                { name: 'classifier.media', value: 'classifier.media' },
-                { name: 'classifier.video', value: 'classifier.video' },
-                { name: 'mentor', value: 'mentor' },
-                { name: 'image', value: 'image' },
-                { name: 'classifier', value: 'classifier' },
-              ],
+              choices: choicesOf(PING_ROLES),
             },
           ],
         },
@@ -238,18 +258,7 @@ export function buildCommandTree(commandName) {
                   name: 'section',
                   description: 'Profile part (default: summary).',
                   required: false,
-                  choices: [
-                    { name: 'summary', value: 'summary' },
-                    { name: 'character', value: 'character' },
-                    { name: 'style', value: 'style' },
-                    { name: 'relationship', value: 'relationship' },
-                    { name: 'affinity', value: 'affinity' },
-                    { name: 'aliases', value: 'aliases' },
-                    { name: 'interests', value: 'interests' },
-                    { name: 'details', value: 'details' },
-                    { name: 'episodes', value: 'episodes' },
-                    { name: 'raw', value: 'raw' },
-                  ],
+                  choices: choicesOf(MEMORY_SHOW_SECTIONS),
                 },
                 {
                   type: INTEGER,
@@ -483,14 +492,7 @@ export function buildCommandTree(commandName) {
                   name: 'role',
                   description: 'Role to change.',
                   required: true,
-                  choices: [
-                    { name: 'talk', value: 'talk' },
-                    { name: 'analyzer', value: 'analyzer' },
-                    { name: 'classifier.text', value: 'classifier.text' },
-                    { name: 'classifier.media', value: 'classifier.media' },
-                    { name: 'classifier.video', value: 'classifier.video' },
-                    { name: 'mentor', value: 'mentor' },
-                  ],
+                  choices: choicesOf(MODEL_ROLES),
                 },
                 { type: STRING, name: 'id', description: 'OpenRouter model id.', required: true },
               ],
@@ -510,7 +512,7 @@ export function buildCommandTree(commandName) {
               options: [
                 { type: STRING, name: 'model', description: 'Model id or prefix, e.g. google/ (no @ or spaces).', required: true, autocomplete: true },
                 { type: STRING, name: 'providers', description: 'Comma-separated provider slugs, e.g. google-vertex.', required: true },
-                { type: STRING, name: 'role', description: 'Only for this role (default: any).', required: false, choices: ROUTE_ROLE_CHOICES },
+                { type: STRING, name: 'role', description: 'Only for this role (default: any).', required: false, choices: choicesOf(ROUTE_ROLES) },
                 { type: BOOLEAN, name: 'fallbacks', description: 'Allow other providers if these fail (default: false).', required: false },
               ],
             },
@@ -520,7 +522,7 @@ export function buildCommandTree(commandName) {
               description: "Remove a model prefix's route, for one role or any.",
               options: [
                 { type: STRING, name: 'model', description: 'Model id or prefix of the route.', required: true, autocomplete: true },
-                { type: STRING, name: 'role', description: "The route's role (default: any).", required: false, choices: ROUTE_ROLE_CHOICES },
+                { type: STRING, name: 'role', description: "The route's role (default: any).", required: false, choices: choicesOf(ROUTE_ROLES) },
               ],
             },
           ],
@@ -659,7 +661,7 @@ export function buildCommandTree(commandName) {
  * bare top-level `<name>`) command key, and every subcommand-group name —
  * derived straight from the tree, so a new command is grantable the moment
  * it exists, with nothing to keep in sync by hand. `'*'` is a caller-known
- * constant, not part of either set. Pure — no discord.js import, no I/O.
+ * constant, not part of either set. Pure — no discord.js object, no I/O.
  * @returns {{ keys: Set<string>, groups: Set<string> }}
  */
 export function commandKeys() {
@@ -710,16 +712,19 @@ export async function registerCommands(guild, config) {
     return true;
   } catch (err) {
     if (isCommandTooLarge(err)) {
-      log.error('commands: failed to register guild commands — the command tree is over the size limit', {
+      log.error('commands: registration failed', {
+        reason: 'too-large',
         size: commandSize(tree[0]),
         limit: COMMAND_SIZE_LIMIT,
         error: err,
       });
       return false;
     }
+    // Anything else is read as the missing `applications.commands` scope:
+    // `inviteUrl` re-invites the bot with it.
     const appId = guild.client?.application?.id ?? guild.client?.user?.id ?? 'YOUR_APPLICATION_ID';
     const inviteUrl = `https://discord.com/oauth2/authorize?client_id=${appId}&scope=bot%20applications.commands`;
-    log.error(`commands: failed to register guild commands — re-invite the bot: ${inviteUrl}`, { error: err });
+    log.error('commands: registration failed', { reason: 'scope', inviteUrl, error: err });
     return false;
   }
 }
@@ -849,13 +854,12 @@ function buildArgs(commandKey, interaction) {
   return mapper ? mapper(interaction.options) : {};
 }
 
-/** Every dotted leaf path of a plain config object, deepest first key order preserved. */
+/** Every dotted leaf path of a plain config object, depth-first in key order; an empty object or an array is a leaf. */
 export function leafPaths(config, prefix = '') {
   const out = [];
   for (const [key, value] of Object.entries(config ?? {})) {
     const full = prefix ? `${prefix}.${key}` : key;
-    const isPlainObject = value !== null && typeof value === 'object' && !Array.isArray(value);
-    if (isPlainObject && Object.keys(value).length > 0) {
+    if (isPlainObject(value) && Object.keys(value).length > 0) {
       out.push(...leafPaths(value, full));
     } else {
       out.push(full);
@@ -882,10 +886,10 @@ async function respond(interaction, result, deferred) {
   if (deferred) {
     await interaction.editReply(first);
   } else {
-    await interaction.reply({ ...first, ephemeral: true });
+    await interaction.reply({ ...first, flags: MessageFlags.Ephemeral });
   }
   for (const chunk of chunks.slice(1)) {
-    await interaction.followUp({ content: format(chunk), ephemeral: true });
+    await interaction.followUp({ content: format(chunk), flags: MessageFlags.Ephemeral });
   }
 }
 
@@ -960,7 +964,7 @@ export function createInteractionHandler({ hot, admin, getGuildId }) {
     const typed = String(focused.value ?? '').toLowerCase();
 
     if (focused.name === 'path') {
-      const choices = leafPaths(hot.config)
+      const choices = leafPaths(config)
         .filter((p) => p.toLowerCase().includes(typed))
         .slice(0, MAX_AUTOCOMPLETE_CHOICES)
         .map((p) => ({ name: p, value: p }));
@@ -974,7 +978,7 @@ export function createInteractionHandler({ hot, admin, getGuildId }) {
     }
 
     if (focused.name === 'model') {
-      await interaction.respond(routeModelChoices(hot.config, typed)).catch(() => {});
+      await interaction.respond(routeModelChoices(config, typed)).catch(() => {});
       return;
     }
 
@@ -986,30 +990,31 @@ export function createInteractionHandler({ hot, admin, getGuildId }) {
     const config = hot.config;
 
     if (config?.features?.adminCommands === false) {
-      await interaction.reply({ content: DISABLED_MESSAGE, ephemeral: true }).catch(() => {});
+      await interaction.reply({ content: DISABLED_MESSAGE, flags: MessageFlags.Ephemeral }).catch(() => {});
       return;
     }
 
     const commandKey = commandKeyFor(interaction);
     if (!commandKey) {
-      await interaction.reply({ content: 'Error: no subcommand given.', ephemeral: true }).catch(() => {});
+      await interaction.reply({ content: 'Error: no subcommand given.', flags: MessageFlags.Ephemeral }).catch(() => {});
       return;
     }
 
     const allowed = admin.isAllowed(commandKey, { userId: interaction.user.id, roleIds: roleIdsFor(interaction) });
     if (!allowed) {
-      await interaction.reply({ content: NOT_ALLOWED_MESSAGE, ephemeral: true }).catch(() => {});
+      await interaction.reply({ content: NOT_ALLOWED_MESSAGE, flags: MessageFlags.Ephemeral }).catch(() => {});
       return;
     }
 
     const slow = SLOW_COMMANDS.has(commandKey);
     try {
-      if (slow) await interaction.deferReply({ ephemeral: true });
+      if (slow) await interaction.deferReply({ flags: MessageFlags.Ephemeral });
       const args = buildArgs(commandKey, interaction);
       const context = { guildId: interaction.guildId, channelId: interaction.channelId, userId: interaction.user.id };
       const result = await admin.run(commandKey, args, context);
       await respond(interaction, result, slow);
     } catch (err) {
+      log.warn('commands: command failed', { command: commandKey, error: err });
       await respond(interaction, `Error: ${err?.message ?? String(err)}`, slow).catch(() => {});
     }
   }

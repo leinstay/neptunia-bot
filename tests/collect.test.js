@@ -4,7 +4,7 @@
 // fixtures shaped just enough for normalizeMessage to read.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { normalizeMessage, fetchTextPreview, withTextPreviews, fetchHistory, fetchHistoryWindow, canAttach, canSend, fetchNeighbors } from '../src/discord/collect.js';
+import { normalizeMessage, fetchTextPreview, withTextPreviews, fetchHistory, fetchHistoryWindow, fetchMessage, canAttach, canSend, fetchNeighbors } from '../src/discord/collect.js';
 import { MessageReferenceType, PermissionFlagsBits } from 'discord.js';
 import { videoUrlCacheKey } from '../src/discord/video-sites.js';
 import { collectVideos } from '../src/discord/media.js';
@@ -630,29 +630,46 @@ test('fetchHistory: threads embedTextChars through to the embed classification',
     embeds: [{ url: 'https://example.com', title: 'x'.repeat(50), description: 'y'.repeat(50) }],
   });
   const channel = { messages: { fetch: async () => new Map([[raw.id, raw]]) } };
-  const [message] = await fetchHistory(channel, 10, 'self', 10);
+  const [message] = await fetchHistory(channel, { limit: 10, selfId: 'self', embedTextChars: 10 });
   assert.equal(message.links[0].title, `${'x'.repeat(10)}…`);
 });
 
 test('fetchHistory: defaults to 200 chars when embedTextChars is not given', async () => {
   const raw = rawMessage({
-    embeds: [{ url: 'https://example.com', title: 'x'.repeat(50) }],
+    embeds: [{ url: 'https://example.com', title: 'x'.repeat(250) }],
   });
   const channel = { messages: { fetch: async () => new Map([[raw.id, raw]]) } };
-  const [message] = await fetchHistory(channel, 10, 'self');
-  assert.equal(message.links[0].title, 'x'.repeat(50));
+  const [message] = await fetchHistory(channel, { limit: 10, selfId: 'self' });
+  assert.equal(message.links[0].title, `${'x'.repeat(200)}…`);
 });
 
 test('fetchHistory: threads videoSites through, a typed video-site URL becomes a link item', async () => {
   const raw = rawMessage({ cleanContent: 'regarde https://www.youtube.com/watch?v=abc' });
   const channel = { messages: { fetch: async () => new Map([[raw.id, raw]]) } };
 
-  const [withSites] = await fetchHistory(channel, 10, 'self', 200, ['youtube.com']);
+  const [withSites] = await fetchHistory(channel, { limit: 10, selfId: 'self', embedTextChars: 200, videoSites: ['youtube.com'] });
   assert.equal(withSites.links.length, 1);
   assert.equal(withSites.links[0].url, 'https://www.youtube.com/watch?v=abc');
 
-  const [withoutSites] = await fetchHistory(channel, 10, 'self', 200);
+  const [withoutSites] = await fetchHistory(channel, { limit: 10, selfId: 'self', embedTextChars: 200 });
   assert.equal(withoutSites.links.length, 0);
+});
+
+test('fetchHistory: asks for at most one page of messages, oldest first in the result', async () => {
+  const older = rawMessage({ id: 'm1', createdTimestamp: 1000 });
+  const newer = rawMessage({ id: 'm2', createdTimestamp: 2000 });
+  const queries = [];
+  const channel = {
+    messages: {
+      fetch: async (query) => {
+        queries.push(query);
+        return new Map([[newer.id, newer], [older.id, older]]);
+      },
+    },
+  };
+  const messages = await fetchHistory(channel, { limit: 500, selfId: 'self' });
+  assert.deepEqual(queries, [{ limit: 100 }]);
+  assert.deepEqual(messages.map((m) => m.id), ['m1', 'm2']);
 });
 
 test('fetchHistoryWindow: threads videoSites through to normalizeMessage', async () => {
@@ -661,6 +678,50 @@ test('fetchHistoryWindow: threads videoSites through to normalizeMessage', async
 
   const [message] = await fetchHistoryWindow(channel, { limit: 10, selfId: 'self', videoSites: ['youtube.com'] });
   assert.equal(message.links.length, 1);
+});
+
+// --- fetchMessage: cache first, then one fetch, null on failure ----------------
+
+test('fetchMessage: a cached message is returned without a fetch', async () => {
+  const cached = rawMessage({ id: 'm7' });
+  const fetches = [];
+  const channel = {
+    messages: {
+      cache: new Map([['m7', cached]]),
+      fetch: async (id) => {
+        fetches.push(id);
+        return null;
+      },
+    },
+  };
+  assert.equal(await fetchMessage(channel, 'm7'), cached);
+  assert.deepEqual(fetches, []);
+});
+
+test('fetchMessage: an uncached message is fetched by id', async () => {
+  const fetched = rawMessage({ id: 'm8' });
+  const fetches = [];
+  const channel = {
+    messages: {
+      cache: new Map(),
+      fetch: async (id) => {
+        fetches.push(id);
+        return fetched;
+      },
+    },
+  };
+  assert.equal(await fetchMessage(channel, 'm8'), fetched);
+  assert.deepEqual(fetches, ['m8']);
+});
+
+test('fetchMessage: a failed or empty fetch, or a channel without a message cache, is null', async () => {
+  const failing = { messages: { cache: new Map(), fetch: async () => { throw new Error('Unknown Message'); } } };
+  assert.equal(await fetchMessage(failing, 'gone'), null);
+  const empty = { messages: { cache: new Map(), fetch: async () => undefined } };
+  assert.equal(await fetchMessage(empty, 'gone'), null);
+  const uncached = rawMessage({ id: 'm9' });
+  const noCache = { messages: { fetch: async () => uncached } };
+  assert.equal(await fetchMessage(noCache, 'm9'), uncached);
 });
 
 // --- fetchTextPreview / withTextPreviews ------------------------------------
@@ -854,7 +915,7 @@ test('normalizeMessage: a Discord CDN picture link stays a link', () => {
 
 test('normalizeMessage: collectVideos sees a CDN video link as one attachment video', () => {
   const raw = rawMessage({ cleanContent: CDN_VIDEO_URL, embeds: [{ url: CDN_VIDEO_URL }] });
-  const videos = collectVideos(normalizeMessage(raw, 'self'), { sites: ['youtube.com'] });
+  const videos = collectVideos(normalizeMessage(raw, 'self'), { videoSites: ['youtube.com'] });
   assert.equal(videos.length, 1);
   assert.equal(videos[0].source, 'attachment');
   assert.equal(videos[0].itemId, '222');

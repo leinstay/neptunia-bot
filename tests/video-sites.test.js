@@ -20,6 +20,7 @@ import {
   parseIsoDuration,
   youtubeDataApiUrl,
   parseYoutubeDataApi,
+  bareContentType,
 } from '../src/discord/video-sites.js';
 
 const SITES = ['youtube.com', 'youtu.be', 'tiktok.com', 'vk.com', 'vkvideo.ru', 'x.com', 'twitter.com', 'reddit.com', 'twitch.tv'];
@@ -229,9 +230,9 @@ test('ffmpegGifArgs: a GIF becomes a short, even-sided, never upscaled yuv420p H
   });
 });
 
-test('ffmpegGifArgs: maxHeight sets the height ceiling', () => {
+test('ffmpegGifArgs: the height ceiling is fixed at 360p, maxSeconds sets the cut', () => {
   const { args } = ffmpegGifArgs('/tmp/in', '/tmp/out.mp4', { ffmpegPath: 'ffmpeg', maxSeconds: 5, maxHeight: 240 });
-  assert.equal(args[args.indexOf('-vf') + 1], "scale=-2:'min(240,trunc(ih/2)*2)'");
+  assert.equal(args[args.indexOf('-vf') + 1], "scale=-2:'min(360,trunc(ih/2)*2)'", 'no caller sets a height: the option is gone');
   assert.equal(args[args.indexOf('-t') + 1], '5');
 });
 
@@ -252,6 +253,18 @@ test('parseProbe: reads duration and title; tolerates missing fields and bad JSO
   assert.deepEqual(parseProbe('{not json'), { durationSec: null, title: null });
   assert.deepEqual(parseProbe('null'), { durationSec: null, title: null });
   assert.deepEqual(parseProbe(undefined), { durationSec: null, title: null });
+});
+
+test('parseProbe: a zero or negative duration is a live stream, not a length', () => {
+  assert.deepEqual(parseProbe(JSON.stringify({ duration: 0, title: 'ζωντανά' })), { durationSec: null, title: 'ζωντανά' });
+  assert.deepEqual(parseProbe(JSON.stringify({ duration: -3 })), { durationSec: null, title: null });
+});
+
+test('bareContentType: type/subtype in lowercase, parameters dropped; missing -> empty', () => {
+  assert.equal(bareContentType('Image/PNG; charset=binary'), 'image/png');
+  assert.equal(bareContentType(' video/mp4 '), 'video/mp4');
+  assert.equal(bareContentType(null), '');
+  assert.equal(bareContentType(undefined), '');
 });
 
 test('safeLocation: host and path only, never the query string', () => {

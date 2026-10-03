@@ -4,6 +4,7 @@
 // chunked follow-ups, autocomplete).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { MessageFlags } from 'discord.js';
 
 import {
   buildCommandTree,
@@ -13,6 +14,8 @@ import {
   leafPaths,
   commandKeys,
   commandSize,
+  MODEL_ROLES,
+  MEMORY_SHOW_SECTIONS,
 } from '../src/discord/commands.js';
 import { isAllowed as accessIsAllowed } from '../src/discord/access.js';
 import { withCapturedLogs } from './fixtures/capture-logs.js';
@@ -345,6 +348,33 @@ test('buildCommandTree: the ping role choices contain image, the model-set choic
   assert.ok(!setRole.choices.some((c) => c.value === 'image'));
 });
 
+test('MODEL_ROLES: the model-set, route and ping role choices are all derived from the one list', () => {
+  assert.deepEqual(MODEL_ROLES, ['talk', 'analyzer', 'classifier.text', 'classifier.media', 'classifier.video', 'mentor']);
+  assert.ok(Object.isFrozen(MODEL_ROLES));
+  const [command] = buildCommandTree('nep');
+  const values = (option) => option.choices.map((c) => c.value);
+  const names = (option) => option.choices.map((c) => c.name);
+  const setRole = findOption(findOption(findOption(command.options, 'model').options, 'set').options, 'role');
+  assert.deepEqual(values(setRole), [...MODEL_ROLES]);
+  const route = findOption(command.options, 'route');
+  for (const sub of ['set', 'remove']) {
+    const role = findOption(findOption(route.options, sub).options, 'role');
+    assert.deepEqual(values(role), [...MODEL_ROLES, 'image'], sub);
+    assert.deepEqual(names(role), values(role), sub);
+  }
+  const pingRole = findOption(findOption(command.options, 'ping').options, 'role');
+  assert.deepEqual(values(pingRole), [...MODEL_ROLES, 'image', 'classifier']);
+  assert.deepEqual(names(pingRole), values(pingRole));
+});
+
+test('MEMORY_SHOW_SECTIONS: the memory.show section choices, in order', () => {
+  assert.ok(Object.isFrozen(MEMORY_SHOW_SECTIONS));
+  const [command] = buildCommandTree('nep');
+  const show = findOption(findOption(command.options, 'memory').options, 'show');
+  const section = findOption(show.options, 'section');
+  assert.deepEqual(section.choices, MEMORY_SHOW_SECTIONS.map((name) => ({ name, value: name })));
+});
+
 test('buildCommandTree: warmup group (people, run, stop, users, channels, server, status, reset)', () => {
   const [command] = buildCommandTree('nep');
   const warmup = findOption(command.options, 'warmup');
@@ -584,9 +614,11 @@ test('registerCommands: a registration failure (missing applications.commands sc
   assert.equal(ok, false);
   const errorLog = logs.find((l) => l.level === 'error');
   assert.ok(errorLog, 'expected one error log line');
-  assert.match(errorLog.msg, /applications\.commands/);
-  assert.match(errorLog.msg, /scope=bot%20applications\.commands/);
-  assert.match(errorLog.msg, /app999/);
+  assert.equal(errorLog.msg, 'commands: registration failed');
+  assert.equal(errorLog.reason, 'scope');
+  assert.match(errorLog.inviteUrl, /scope=bot%20applications\.commands/);
+  assert.match(errorLog.inviteUrl, /client_id=app999/);
+  assert.equal(errorLog.error.code, 50001);
 });
 
 test('registerCommands: a command-too-large refusal logs the tree size and the limit, not the re-invite hint', async () => {
@@ -606,9 +638,11 @@ test('registerCommands: a command-too-large refusal logs the tree size and the l
   assert.equal(ok, false);
   const errorLog = logs.find((l) => l.level === 'error');
   assert.ok(errorLog, 'expected one error log line');
+  assert.equal(errorLog.msg, 'commands: registration failed');
+  assert.equal(errorLog.reason, 'too-large');
   assert.equal(errorLog.size, commandSize(buildCommandTree('nep')[0]));
   assert.equal(errorLog.limit, 8000);
-  assert.doesNotMatch(errorLog.msg, /re-invite/);
+  assert.equal(errorLog.inviteUrl, undefined, 'a tree over the size limit is no scope problem: no re-invite URL');
 });
 
 test('registerCommands: a failure while clearing commands (adminCommands off) is also swallowed', async () => {
@@ -728,8 +762,19 @@ test('interaction handler: features.adminCommands false replies "disabled" witho
 
   assert.equal(admin.runCalls.length, 0);
   assert.equal(interaction.replies.length, 1);
-  assert.equal(interaction.replies[0].ephemeral, true);
+  assert.equal(interaction.replies[0].flags, MessageFlags.Ephemeral);
   assert.match(interaction.replies[0].content, /disabled/i);
+});
+
+test('interaction handler: an interaction without a subcommand gets an ephemeral error and no admin.run', async () => {
+  const admin = fakeAdmin();
+  const handler = createInteractionHandler({ hot: baseHot(), admin, getGuildId: () => 'g1' });
+
+  const interaction = fakeInteraction({ subcommand: null });
+  await handler(interaction);
+
+  assert.equal(admin.runCalls.length, 0);
+  assert.deepEqual(interaction.replies, [{ content: 'Error: no subcommand given.', flags: MessageFlags.Ephemeral }]);
 });
 
 test('interaction handler: a non-owner is refused ephemerally and admin.run is never called', async () => {
@@ -741,7 +786,7 @@ test('interaction handler: a non-owner is refused ephemerally and admin.run is n
 
   assert.equal(admin.runCalls.length, 0);
   assert.equal(interaction.replies.length, 1);
-  assert.equal(interaction.replies[0].ephemeral, true);
+  assert.equal(interaction.replies[0].flags, MessageFlags.Ephemeral);
   assert.match(interaction.replies[0].content, /not allowed/i);
 });
 
@@ -850,7 +895,7 @@ test('interaction handler: a top-level subcommand maps to its bare command key',
   assert.equal(admin.runCalls.length, 1);
   assert.equal(admin.runCalls[0][0], 'status');
   assert.deepEqual(admin.runCalls[0][2], { guildId: 'g1', channelId: 'c1', userId: 'owner1' });
-  assert.equal(interaction.replies[0].ephemeral, true);
+  assert.equal(interaction.replies[0].flags, MessageFlags.Ephemeral);
   assert.equal(interaction.replies[0].content, 'ok: status');
 });
 
@@ -1027,7 +1072,7 @@ test('interaction handler: private.purge defers, maps the user option to userId 
   assert.equal(admin.runCalls[0][0], 'private.purge');
   assert.deepEqual(admin.runCalls[0][1], { userId: 'target1' });
   assert.equal(interaction.deferred, true);
-  assert.deepEqual(interaction.replies[0], { deferred: true, opts: { ephemeral: true } });
+  assert.deepEqual(interaction.replies[0], { deferred: true, opts: { flags: MessageFlags.Ephemeral } });
   assert.equal(interaction.edits[0].content, 'purged');
 });
 
@@ -1288,7 +1333,7 @@ test('interaction handler: a fast command replies directly, no defer', async () 
   assert.equal(interaction.deferred, false);
   assert.equal(interaction.edits.length, 0);
   assert.equal(interaction.replies[0].content, 'fast result');
-  assert.equal(interaction.replies[0].ephemeral, true);
+  assert.equal(interaction.replies[0].flags, MessageFlags.Ephemeral);
 });
 
 test('interaction handler: a thrown admin.run error is reported ephemerally, not thrown', async () => {
@@ -1302,8 +1347,29 @@ test('interaction handler: a thrown admin.run error is reported ephemerally, not
   const interaction = fakeInteraction({ subcommand: 'status' });
   await assert.doesNotReject(() => handler(interaction));
 
-  assert.equal(interaction.replies[0].ephemeral, true);
+  assert.equal(interaction.replies[0].flags, MessageFlags.Ephemeral);
   assert.match(interaction.replies[0].content, /Error: bad input/);
+});
+
+test('interaction handler: a thrown admin.run error is logged with the command key, even when the reply fails too', async () => {
+  const admin = fakeAdmin({
+    runImpl: () => {
+      throw new Error('bad input');
+    },
+  });
+  const handler = createInteractionHandler({ hot: baseHot(), admin, getGuildId: () => 'g1' });
+
+  const interaction = fakeInteraction({ group: 'memory', subcommand: 'server' });
+  interaction.reply = async () => {
+    throw new Error('Unknown interaction');
+  };
+  const { logs } = await withCapturedLogs(() => handler(interaction));
+
+  const line = logs.find((l) => l.msg === 'commands: command failed');
+  assert.ok(line, 'expected a command-failed log line');
+  assert.equal(line.level, 'warn');
+  assert.equal(line.command, 'memory.server');
+  assert.equal(line.error.message, 'bad input');
 });
 
 test('interaction handler: long output is chunked into ephemeral follow-ups', async () => {
@@ -1317,7 +1383,7 @@ test('interaction handler: long output is chunked into ephemeral follow-ups', as
 
   assert.ok(interaction.followUps.length >= 1, 'expected at least one follow-up for the overflow');
   for (const followUp of interaction.followUps) {
-    assert.equal(followUp.ephemeral, true);
+    assert.equal(followUp.flags, MessageFlags.Ephemeral);
   }
 });
 
@@ -1557,7 +1623,7 @@ test('interaction handler: draw defers, then edits the reply with the text and t
   await handler(interaction);
 
   assert.equal(interaction.deferred, true);
-  assert.deepEqual(interaction.replies[0], { deferred: true, opts: { ephemeral: true } });
+  assert.deepEqual(interaction.replies[0], { deferred: true, opts: { flags: MessageFlags.Ephemeral } });
   assert.equal(interaction.edits.length, 1);
   assert.equal(interaction.edits[0].content, 'openai/x · 12.3s · cost 0.04');
   assert.deepEqual(interaction.edits[0].files, [{ attachment, name: 'image.png' }]);
@@ -1572,7 +1638,7 @@ test('interaction handler: an object result on a fast command replies ephemerall
   const interaction = fakeInteraction({ subcommand: 'status' });
   await handler(interaction);
 
-  assert.deepEqual(interaction.replies[0], { content: 'done', files: [{ attachment, name: 'image.png' }], ephemeral: true });
+  assert.deepEqual(interaction.replies[0], { content: 'done', files: [{ attachment, name: 'image.png' }], flags: MessageFlags.Ephemeral });
 });
 
 test('interaction handler: a plain string result carries no files key', async () => {
@@ -1582,7 +1648,7 @@ test('interaction handler: a plain string result carries no files key', async ()
   const interaction = fakeInteraction({ subcommand: 'status' });
   await handler(interaction);
 
-  assert.deepEqual(interaction.replies[0], { content: 'fast result', ephemeral: true });
+  assert.deepEqual(interaction.replies[0], { content: 'fast result', flags: MessageFlags.Ephemeral });
 });
 
 test('interaction handler: a failed draw is reported as an error text with no file', async () => {
@@ -1682,7 +1748,7 @@ test('interaction handler: mentor.add/anchor/run/check/show defer; the other men
     await handler(interaction);
     assert.equal(interaction.deferred, slow.has(subcommand), subcommand);
     if (slow.has(subcommand)) assert.equal(interaction.edits[0].content, 'mentor result', subcommand);
-    else assert.deepEqual(interaction.replies[0], { content: 'mentor result', ephemeral: true }, subcommand);
+    else assert.deepEqual(interaction.replies[0], { content: 'mentor result', flags: MessageFlags.Ephemeral }, subcommand);
   }
 });
 
