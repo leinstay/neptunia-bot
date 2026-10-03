@@ -181,6 +181,36 @@ test('chooseMode: quiet-but-not-dead, non-live channel does nothing', () => {
   assert.equal(chooseMode(history, now, SPONTANEOUS_CFG, () => 0), null);
 });
 
+test('chooseMode: own last line followed by a dead silence may still initiate on a winning roll', () => {
+  const now = 10_000_000;
+  const history = [
+    msg({ ts: now - 3 * HOUR, authorId: 'a' }),
+    msg({ ts: now - SPONTANEOUS_CFG.deadAfterMinutes * MINUTE - 1, self: true }),
+  ];
+  assert.equal(chooseMode(history, now, SPONTANEOUS_CFG, () => 0), 'initiate');
+});
+
+test('chooseMode: own last line followed by a dead silence stays quiet on a losing roll', () => {
+  const now = 10_000_000;
+  const history = [
+    msg({ ts: now - 3 * HOUR, authorId: 'a' }),
+    msg({ ts: now - SPONTANEOUS_CFG.deadAfterMinutes * MINUTE - 1, self: true }),
+  ];
+  assert.equal(chooseMode(history, now, SPONTANEOUS_CFG, () => 0.99), null);
+});
+
+test('chooseMode: own recent last line means null even with a live window (never interjects on itself)', () => {
+  const now = 10_000_000;
+  const history = [
+    msg({ ts: now - 10 * MINUTE, authorId: 'a' }),
+    msg({ ts: now - 8 * MINUTE, authorId: 'b' }),
+    msg({ ts: now - 5 * MINUTE, authorId: 'a' }),
+    msg({ ts: now - 3 * MINUTE, authorId: 'c' }),
+    msg({ ts: now - 1 * MINUTE, self: true }),
+  ];
+  assert.equal(chooseMode(history, now, SPONTANEOUS_CFG, () => 0), null);
+});
+
 // ---------------------------------------------------------------------------
 // pickChannel
 

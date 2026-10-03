@@ -71,7 +71,13 @@ export function msUntilActive(now, timezone, activeHours, rng) {
 
 /**
  * Decide what a spontaneous turn should do, from the same normalized history
- * a real turn sees (oldest first, `{ ts, self, bot, authorId }`).
+ * a real turn sees (oldest first, `{ ts, self, bot, authorId }`), in order:
+ * an empty history, or a silence of at least `cfg.deadAfterMinutes` since the
+ * last message (whoever wrote it, the persona included), rolls
+ * `cfg.initiateChance` for 'initiate'; otherwise a last message of the
+ * persona's own means null (it never interjects on itself); otherwise at least
+ * `cfg.liveMinMessages` messages from other members (not the persona, not bots)
+ * within `cfg.liveWindowMinutes` means 'interject'; otherwise null.
  * @param {object[]} history
  * @param {number} now
  * @param {object} cfg  config.spontaneous
@@ -84,16 +90,16 @@ export function chooseMode(history, now, cfg, rng) {
   }
 
   const last = history[history.length - 1];
-  if (last.self) return null; // the persona never talks to itself
-
-  const windowStart = now - cfg.liveWindowMinutes * MINUTE;
-  const liveCount = history.filter((m) => m.ts >= windowStart && !m.self && !m.bot).length;
-  if (liveCount >= cfg.liveMinMessages) return 'interject';
-
   const silenceMs = now - last.ts;
   if (silenceMs >= cfg.deadAfterMinutes * MINUTE) {
     return rng() < cfg.initiateChance ? 'initiate' : null;
   }
+
+  if (last.self) return null; // the persona never interjects on its own last line
+
+  const windowStart = now - cfg.liveWindowMinutes * MINUTE;
+  const liveCount = history.filter((m) => m.ts >= windowStart && !m.self && !m.bot).length;
+  if (liveCount >= cfg.liveMinMessages) return 'interject';
 
   return null;
 }
