@@ -617,7 +617,9 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
    * history (`variety.window` of them, newest kept, no age limit: the
    * situation's own timeline is what counts), at least `variety.minLines`,
    * sent through `askMentor` on the `classifier.text` model (charged to the
-   * mentor's budget, never to the chat's daily cap). As the live pass
+   * mentor's budget, never to the chat's daily cap). Unlike a live turn, the
+   * request is cut at `variety.timeoutMs` (a live turn's wait), on purpose: a
+   * sandbox situation has no later turn a late answer could serve. As the live pass
    * (src/behavior/variety-pass.js), the bot's limit notices (`labels.limits.notice`,
    * read from `view`) are not the persona's lines and are left out. Null -- no pass, no
    * block, nothing saved -- with `features.variety` off, no `variety` prompt,

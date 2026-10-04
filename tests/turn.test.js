@@ -15,6 +15,8 @@ import { labels } from './fixtures/labels.js';
 import { withCapturedLogs } from './fixtures/capture-logs.js';
 import { ImageCapError, ImageGenError } from '../src/llm/images.js';
 import { DailyCapError, TokenLimitError } from '../src/llm/openrouter.js';
+import { createVarietyPass } from '../src/behavior/variety-pass.js';
+import { PAGE } from '../src/discord/collect.js';
 
 function rngReturning(value) {
   return () => value;
@@ -3276,20 +3278,30 @@ test('createTurnRunner: the rewatch and lookup classifiers are requested as clas
 
 // ---------------------------------------------------------------------------
 // The variety pass (src/behavior/variety-pass.js): started before the turn's
-// other preparation, its answer rendered as <worn>, posted lines recorded.
+// other preparation, its answer rendered as <worn>, posted lines recorded, and
+// the next turn's pass started ahead once the persona's text is out.
 
 const WORN = [{ shape: 'mock promise ending in (no)', examples: ['(no)'], count: 2 }];
 
-/** A fake createVarietyPass(): `forTurn` answers through `answer(input)`, `record` keeps its calls. */
-function fakeVariety(answer = async () => WORN) {
+/**
+ * A fake createVarietyPass(): `forTurn` answers through `answer(input)`, `ahead`
+ * through `onAhead(input)`; `forTurn`, `ahead` and `record` keep their calls.
+ */
+function fakeVariety(answer = async () => WORN, onAhead = async () => {}) {
   const turnCalls = [];
+  const aheadCalls = [];
   const records = [];
   return {
     turnCalls,
+    aheadCalls,
     records,
     forTurn: (input) => {
       turnCalls.push(input);
       return answer(input);
+    },
+    ahead: (input) => {
+      aheadCalls.push(input);
+      return onAhead(input);
     },
     record: (guildId, line) => {
       records.push({ guildId, line });
@@ -3394,4 +3406,237 @@ test('runTurn: a dry run records nothing; a private chat runs its pass as privat
   assert.equal(variety.turnCalls[0].privateChat, true);
   assert.equal(variety.turnCalls[0].guildId, 'g1');
   assert.deepEqual(variety.records, []);
+});
+
+/** A store with one link GIF `g1` in the library (no other GIF state). */
+function gifStore() {
+  return { ...fakeStore(), findGif: (guildId, id) => (id === 'g1' ? { id: 'g1', kind: 'link', url: 'https://tenor.com/view/chat-qui-danse-1' } : null) };
+}
+
+test('runTurn: after the persona posts, the pass ahead gets the history plus the posted lines, once, after the last text message', async () => {
+  const raw = rawMessage({ id: 'm1', content: 'is the café open?' });
+  const channel = fakeTurnChannel({ historyMessages: [raw] });
+  const llm = fakeLlm('<msg reply="#1">ναι</msg><msg>until nine</msg>');
+  let sentAtAhead = null;
+  const variety = fakeVariety(undefined, async () => {
+    sentAtAhead = channel.sent.length;
+  });
+  const turns = createTurnRunner({ hot: fakeHot(), store: fakeStore(), llm, calibrator: identityCalibrator(), client: fakeClient(), variety, now: () => NOW });
+  await turns.runTurn({ channel, mode: 'reply', trigger: normalizedTrigger(raw), triggerKind: 'mention' });
+
+  assert.equal(variety.aheadCalls.length, 1, 'once per turn');
+  assert.equal(sentAtAhead, 2, 'after the last text message');
+  const input = variety.aheadCalls[0];
+  assert.deepEqual([input.guildId, input.channelId, input.selfName, input.privateChat], ['g1', 'c1', 'Bot', false]);
+  assert.deepEqual(input.history.map((m) => m.id), ['m1', 'sent-1', 'sent-2']);
+  assert.deepEqual(input.history.slice(1), [
+    { id: 'sent-1', ts: NOW, channelId: 'c1', self: true, content: 'ναι', replyToId: 'm1' },
+    { id: 'sent-2', ts: NOW, channelId: 'c1', self: true, content: 'until nine', replyToId: null },
+  ]);
+});
+
+test('runTurn: a posted line carries the sent message id and time and the text as the persona wrote it', async () => {
+  const raw = rawMessage({ id: 'm1', authorName: 'Zoé' });
+  const channel = fakeTurnChannel({ historyMessages: [raw] });
+  channel.send = async (payload) => {
+    channel.sent.push(payload);
+    return { id: `sent-${channel.sent.length}`, createdTimestamp: NOW + channel.sent.length };
+  };
+  const variety = fakeVariety();
+  const turns = createTurnRunner({ hot: fakeHot(), store: fakeStore(), llm: fakeLlm('<msg>@Zoé έλα</msg>'), calibrator: identityCalibrator(), client: fakeClient(), variety, now: () => NOW });
+  await turns.runTurn({ channel, mode: 'reply', trigger: normalizedTrigger(raw), triggerKind: 'mention' });
+
+  assert.equal(channel.sent[0].content, '<@u1> έλα');
+  assert.deepEqual(variety.aheadCalls[0].history.at(-1), { id: 'sent-1', ts: NOW + 1, channelId: 'c1', self: true, content: '@Zoé έλα', replyToId: null });
+});
+
+test('runTurn: a dry run, a silent turn, a reactions-only and a GIF-only turn start nothing ahead', async () => {
+  const cases = [
+    { name: 'dry run', hot: fakeHot({ dryRun: true }), output: '<msg>hi</msg>', outcome: 'spoke', sent: 0 },
+    { name: 'silent', hot: fakeHot(), output: '<skip/>', outcome: 'skip', sent: 0 },
+    { name: 'reactions only', hot: fakeHot(), output: '<react to="#1">🔥</react>', outcome: 'spoke', sent: 0 },
+    { name: 'gif only', hot: fakeHot(), output: '<gif>g1</gif>', outcome: 'spoke', sent: 1, store: gifStore() },
+  ];
+  for (const c of cases) {
+    const raw = rawMessage({ id: 'm1' });
+    const channel = fakeTurnChannel({ historyMessages: [raw] });
+    const variety = fakeVariety();
+    const turns = createTurnRunner({ hot: c.hot, store: c.store ?? fakeStore(), llm: fakeLlm(c.output), calibrator: identityCalibrator(), client: fakeClient(), variety, now: () => NOW });
+    const { result } = await withCapturedLogs(() => turns.runTurn({ channel, mode: 'reply', trigger: normalizedTrigger(raw), triggerKind: 'mention' }));
+    assert.equal(result.outcome, c.outcome, c.name);
+    assert.equal(channel.sent.length, c.sent, c.name);
+    assert.equal(variety.turnCalls.length, 1, c.name);
+    assert.deepEqual(variety.aheadCalls, [], c.name);
+  }
+});
+
+test('runTurn: the pass ahead starts before the GIF and the drawing, not after them', async () => {
+  const raw = rawMessage({ id: 'm1', content: 'draw me a cat' });
+  const drawChannel = fakeTurnChannel({ historyMessages: [raw] });
+  const images = fakeImages();
+  const seen = [];
+  const drawVariety = fakeVariety(undefined, async () => {
+    seen.push({ sent: drawChannel.sent.length, generated: images.generateCalls.length });
+  });
+  const drawTurns = createTurnRunner({ hot: drawHot(), store: fakeStore(), llm: sequenceLlm(['<msg>one sec</msg><draw>a cat</draw>']), calibrator: identityCalibrator(), client: fakeClient(), images, imageFetcher: fakeImageFetcher(), variety: drawVariety });
+  await drawTurns.runTurn({ channel: drawChannel, mode: 'reply', trigger: normalizedTrigger(raw), triggerKind: 'mention' });
+  assert.equal(drawChannel.sent.length, 2, 'the text, then the picture');
+  assert.deepEqual(seen, [{ sent: 1, generated: 0 }]);
+
+  const gifChannel = fakeTurnChannel({ historyMessages: [raw] });
+  let sentAtAhead = null;
+  const gifVariety = fakeVariety(undefined, async () => {
+    sentAtAhead = gifChannel.sent.length;
+  });
+  const gifTurns = createTurnRunner({ hot: fakeHot({ typingSimulation: false }), store: gifStore(), llm: fakeLlm('<msg>ha</msg><gif>g1</gif>'), calibrator: identityCalibrator(), client: fakeClient(), variety: gifVariety, now: () => NOW });
+  await withCapturedLogs(() => gifTurns.runTurn({ channel: gifChannel, mode: 'reply', trigger: normalizedTrigger(raw), triggerKind: 'mention' }));
+  assert.equal(gifChannel.sent.length, 2, 'the text, then the GIF');
+  assert.equal(sentAtAhead, 1);
+  assert.equal(gifVariety.aheadCalls[0].history.at(-1).content, 'ha', 'the GIF is no line of the pass');
+});
+
+test('runTurn: a private chat starts its pass ahead as private with the served guild', async () => {
+  const raw = rawMessage({ id: 'm1' });
+  const channel = fakeTurnChannel({ id: 'dm1', dm: true, historyMessages: [raw] });
+  const variety = fakeVariety();
+  const turns = createTurnRunner({ hot: privateHot(), store: privateStore(), llm: sequenceLlm(['<msg>hi</msg>']), calibrator: identityCalibrator(), client: guildClient(), variety });
+  await turns.runTurn({ channel, guildId: 'g1', mode: 'reply', trigger: normalizedTrigger(raw), triggerKind: 'private' });
+  assert.equal(variety.aheadCalls.length, 1);
+  const input = variety.aheadCalls[0];
+  assert.deepEqual([input.guildId, input.channelId, input.privateChat, input.selfName], ['g1', 'dm1', true, 'GuildBot']);
+  assert.deepEqual(input.history.map((m) => m.id), ['m1', 'sent-1']);
+  assert.deepEqual(variety.records, []);
+});
+
+test('runTurn: a pass ahead that throws or rejects never fails the turn; a pass without ahead is fine', async () => {
+  const throwing = fakeVariety(undefined, () => {
+    throw new Error('boom');
+  });
+  const rejecting = fakeVariety(undefined, async () => {
+    throw new Error('boom');
+  });
+  const { ahead: _omit, ...withoutAhead } = fakeVariety();
+  for (const variety of [throwing, rejecting, withoutAhead]) {
+    const raw = rawMessage({ id: 'm1' });
+    const channel = fakeTurnChannel({ historyMessages: [raw] });
+    const turns = createTurnRunner({ hot: fakeHot(), store: fakeStore(), llm: fakeLlm('<msg>hi</msg>'), calibrator: identityCalibrator(), client: fakeClient(), variety });
+    const { result } = await withCapturedLogs(async () => {
+      const outcome = await turns.runTurn({ channel, mode: 'reply', trigger: normalizedTrigger(raw), triggerKind: 'mention' });
+      await new Promise((resolve) => setImmediate(resolve));
+      return outcome;
+    });
+    assert.equal(result.outcome, 'spoke');
+    assert.equal(channel.sent.length, 1);
+  }
+});
+
+test('runTurn: the drawFailed turn that posts text starts its own pass ahead, like any turn', async () => {
+  const raw = rawMessage({ id: 'm1', content: 'draw me a cat' });
+  const channel = fakeTurnChannel({ historyMessages: [raw] });
+  const variety = fakeVariety();
+  const turns = createTurnRunner({
+    hot: drawHot(),
+    store: fakeStore(),
+    llm: sequenceLlm(['<msg>on it</msg><draw>a cat</draw>', '<msg>it did not work</msg>']),
+    calibrator: identityCalibrator(),
+    client: fakeClient(),
+    images: fakeImages({ error: new ImageGenError('moderation') }),
+    imageFetcher: fakeImageFetcher(),
+    variety,
+  });
+  const { result } = await withCapturedLogs(() => turns.runTurn({ channel, mode: 'reply', trigger: normalizedTrigger(raw), triggerKind: 'mention' }));
+  assert.equal(result.drawFailed, 'moderation');
+  assert.equal(variety.turnCalls.length, 1, 'the at-turn pass is not paid twice');
+  assert.deepEqual(variety.aheadCalls.map((input) => input.history.at(-1).content), ['on it', 'it did not work']);
+});
+
+test('runTurn: the history given ahead is cut to what the next fetch returns: context.channelMessages, at most one page', async () => {
+  const page = Array.from({ length: PAGE }, (_, i) => rawMessage({ id: `h${i}`, ts: NOW - (PAGE - i) * 1000, content: `μήνυμα ${i}` }));
+  for (const [channelMessages, first, length] of [
+    [2, `h${PAGE - 1}`, 2],
+    [PAGE + 50, 'h1', PAGE],
+  ]) {
+    const channel = fakeTurnChannel({ historyMessages: page });
+    const variety = fakeVariety();
+    const hot = fakeHot({ typingSimulation: false });
+    hot.config.context.channelMessages = channelMessages;
+    const turns = createTurnRunner({ hot, store: fakeStore(), llm: fakeLlm('<msg>ναι</msg>'), calibrator: identityCalibrator(), client: fakeClient(), variety, now: () => NOW });
+    await turns.runTurn({ channel, mode: 'interject' });
+    const { history } = variety.aheadCalls[0];
+    assert.deepEqual([history.length, history[0].id, history.at(-1).id], [length, first, 'sent-1'], String(channelMessages));
+  }
+});
+
+test('runTurn: the pass ahead is keyed on the lines the next turn fetches, so that turn finds it ready', async () => {
+  // A full page of history with the persona's own lines spread through it, the oldest at the very start:
+  // posting two lines pushes it out of the next fetch, so the pass ahead must leave it out too.
+  const ownAt = new Set([0, 50, 60, 70]);
+  const page = Array.from({ length: PAGE }, (_, i) =>
+    rawMessage({
+      id: `h${i}`,
+      ts: NOW - (PAGE - i) * 1000,
+      ...(ownAt.has(i) ? { authorId: 'self-id', authorName: 'Bot', content: `λόγος ${i}` } : { content: `μήνυμα ${i}` }),
+    }),
+  );
+  const hot = fakeHot({ typingSimulation: false });
+  hot.config.context.channelMessages = PAGE + 50;
+  hot.config.classifier = { text: 'x/classifier' };
+  hot.prompts.variety = 'VARIETY for {{name}}';
+  const talk = ['<msg>πρώτο</msg><msg>δεύτερο</msg>', '<skip/>'];
+  let talkCalls = 0;
+  const classifierCalls = [];
+  const llm = {
+    complete: async (messages, options) => {
+      if (options?.role === 'classifier.text') {
+        classifierCalls.push(messages);
+        return { text: '{"patterns": []}', usage: {}, estimated: 5 };
+      }
+      const text = talk[Math.min(talkCalls, talk.length - 1)];
+      talkCalls += 1;
+      return { text, usage: {}, estimated: 10 };
+    },
+  };
+  const guild = {};
+  const passStore = {
+    getGuild: () => guild,
+    pushOwnLine: () => true,
+    setWorn: (guildId, worn) => {
+      guild.worn = worn;
+    },
+    appendWornHistory: () => {},
+    state: { data: {} },
+  };
+  const real = createVarietyPass({ hot, store: passStore, llm, now: () => NOW });
+  const aheads = [];
+  const variety = {
+    ...real,
+    ahead: (input) => {
+      const pending = real.ahead(input);
+      aheads.push(pending);
+      return pending;
+    },
+  };
+  const turns = createTurnRunner({ hot, store: fakeStore(), llm, calibrator: identityCalibrator(), client: fakeClient(), variety, now: () => NOW });
+
+  const first = fakeTurnChannel({ historyMessages: page });
+  first.send = async (payload) => {
+    first.sent.push(payload);
+    return { id: `sent-${first.sent.length}`, createdTimestamp: NOW + first.sent.length };
+  };
+  await withCapturedLogs(async () => {
+    await turns.runTurn({ channel: first, mode: 'interject' });
+    await Promise.all(aheads);
+  });
+  assert.equal(aheads.length, 1);
+  assert.equal(classifierCalls.length, 2, 'the turn asked for its own lines, then the pass ahead for the next ones');
+
+  // The next fetch: one page, the two posted lines at its end.
+  const posted = ['πρώτο', 'δεύτερο'].map((content, i) =>
+    rawMessage({ id: `sent-${i + 1}`, authorId: 'self-id', authorName: 'Bot', ts: NOW + i + 1, content }),
+  );
+  const second = fakeTurnChannel({ historyMessages: [...page, ...posted].slice(-PAGE) });
+  const { logs } = await withCapturedLogs(() => turns.runTurn({ channel: second, mode: 'interject' }));
+  assert.equal(classifierCalls.length, 2, 'the next turn makes no variety request');
+  const turn = logs.find((l) => l.msg === 'variety: turn');
+  assert.deepEqual([turn.source, turn.cached, turn.lines], ['cache', true, 5]);
 });

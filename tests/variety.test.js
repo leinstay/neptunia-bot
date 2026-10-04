@@ -1,12 +1,14 @@
 // Tests for src/behavior/variety.js (the pure core of the variety pass) and
-// src/behavior/variety-pass.js (the live pass before a turn), with the store's
-// variety fields on a real store in a temp directory. Fakes only: no network,
-// no real prompts/ or data/.
+// src/behavior/variety-pass.js (the live pass: at a turn, and ahead right after
+// the persona posts), with the store's variety fields on a real store in a temp
+// directory. Fakes only: no network, no real prompts/ or data/. A fake request
+// that waits for the test is always settled before the test ends.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 import {
   VARIETY_DEFAULTS,
   appendOwnLine,
@@ -19,6 +21,7 @@ import {
   renderVarietyReport,
   renderWorn,
   selectOwnLines,
+  varietyAheadOn,
   varietyOn,
   varietySettings,
   varietyStatusLine,
@@ -46,7 +49,7 @@ function own(id, minutesAgo, content, extra = {}) {
 
 test('varietySettings: defaults for a missing block, live values otherwise, garbage falls back', () => {
   assert.deepEqual(varietySettings({}), { ...VARIETY_DEFAULTS });
-  assert.deepEqual(VARIETY_DEFAULTS, { window: 16, recentMinutes: 180, minLines: 3, contextChars: 120, maxPatterns: 4, shapeChars: 140, maxOutputTokens: 500, timeoutMs: 8000, history: 20 });
+  assert.deepEqual(VARIETY_DEFAULTS, { window: 16, recentMinutes: 180, minLines: 3, contextChars: 120, maxPatterns: 4, shapeChars: 140, maxOutputTokens: 500, timeoutMs: 8000, requestTimeoutMs: 30000, history: 20 });
   const live = varietySettings({ variety: { window: 5, recentMinutes: 10, minLines: 2, contextChars: 0, maxPatterns: 1, history: 0 } });
   assert.equal(live.window, 5);
   assert.equal(live.recentMinutes, 10);
@@ -61,10 +64,32 @@ test('varietySettings: defaults for a missing block, live values otherwise, garb
   assert.equal(broken.shapeChars, 140);
 });
 
+test('varietySettings: requestTimeoutMs defaults to 30000, a live value is read, garbage falls back', () => {
+  assert.equal(varietySettings({}).requestTimeoutMs, 30000);
+  assert.equal(varietySettings({ variety: { requestTimeoutMs: 12000 } }).requestTimeoutMs, 12000);
+  for (const bad of [0, -5, 'soon', null, Number.NaN]) {
+    assert.equal(varietySettings({ variety: { requestTimeoutMs: bad } }).requestTimeoutMs, 30000, String(bad));
+  }
+  assert.equal(varietySettings({ variety: { requestTimeoutMs: 12000 } }).timeoutMs, 8000, 'the turn wait keeps its own default');
+});
+
 test('varietyOn: a missing switch counts as on, false turns it off', () => {
   assert.equal(varietyOn({}), true);
   assert.equal(varietyOn({ features: { variety: true } }), true);
   assert.equal(varietyOn({ features: { variety: false } }), false);
+});
+
+test('varietyAheadOn: a missing switch counts as on, false turns it off', () => {
+  assert.equal(varietyAheadOn({}), true);
+  assert.equal(varietyAheadOn(undefined), true);
+  assert.equal(varietyAheadOn({ features: { varietyPrecompute: true } }), true);
+  assert.equal(varietyAheadOn({ features: { varietyPrecompute: false } }), false);
+});
+
+test('config.json: the variety block and features.varietyPrecompute equal the code defaults', () => {
+  const config = JSON.parse(fs.readFileSync(new URL('../config.json', import.meta.url), 'utf8'));
+  assert.deepEqual(config.variety, { ...VARIETY_DEFAULTS });
+  assert.equal(config.features.varietyPrecompute, true);
 });
 
 // ---- which own lines --------------------------------------------------------------
@@ -413,6 +438,35 @@ function fakeLlm(respond = () => answer([{ shape: 'names what was said', example
   };
 }
 
+/**
+ * A fake llm whose requests wait for the test: `calls[i].answer(text)` or
+ * `calls[i].fail(err)` settles one; an abort of its signal rejects it the way
+ * the real client does.
+ */
+function deferredLlm() {
+  const calls = [];
+  return {
+    calls,
+    complete: (messages, options) =>
+      new Promise((resolve, reject) => {
+        calls.push({
+          messages,
+          options,
+          answer: (text) => resolve({ text, usage: {}, estimated: 10 }),
+          fail: (err) => reject(err),
+        });
+        options?.signal?.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })));
+      }),
+  };
+}
+
+/** Lets every promise chain that is already free to run finish (a fake answer lands within microtasks). */
+function settle() {
+  return new Promise((resolve) => setImmediate(resolve));
+}
+
+const ANSWER = answer([{ shape: 'names what was said', examples: ['what a surprise'], count: 2 }]);
+
 function ownHistory() {
   return [
     own('a1', 20, 'Crêpes again, what a surprise'),
@@ -420,6 +474,22 @@ function ownHistory() {
     own('a2', 14, 'what a surprise, another meeting', { replyToId: 'q' }),
     own('a3', 3, 'I will promise to behave (no)'),
   ];
+}
+
+/** ownHistory() and one more own line `id`: another set of lines, so another key. */
+function historyPlus(id) {
+  return [...ownHistory(), own(id, 1, `what a surprise, ${id}`)];
+}
+
+/** The key of the pass a turn in `c1` would run on `history` with an empty ring and the default settings. */
+function keyOf(history) {
+  const { window, recentMinutes } = VARIETY_DEFAULTS;
+  return linesKey(selectOwnLines({ history, ring: [], channelId: 'c1', now: NOW, window, recentMinutes }));
+}
+
+/** The log fields of one entry without the logger's own (`level`, `time`, `msg`), keys sorted. */
+function fieldsOf(entry) {
+  return Object.keys(entry).filter((k) => !['level', 'time', 'msg'].includes(k)).sort();
 }
 
 function liveSetup({ hot = liveHot(), llm = fakeLlm(), store = createStore({ dataDir: tmpDataDir() }) } = {}) {
@@ -443,6 +513,7 @@ test('forTurn: runs the pass on the classifier.text model with the rails, stores
   assert.equal(options.maxOutputTokens, 500);
   assert.equal(options.countAgainstDailyCap, true);
   assert.equal(options.skipCalibration, true);
+  assert.equal(options.timeoutMs, 30000, 'each attempt is cut at variety.requestTimeoutMs');
   assert.ok(options.signal instanceof AbortSignal);
   const guild = store.getGuild('g1');
   assert.equal(guild.worn.lines, 3);
@@ -459,13 +530,14 @@ test('forTurn: the same lines again reuse the answer without a request; a new li
   assert.equal(result.length, 1);
   const line = logs.find((l) => l.msg === 'variety: turn');
   assert.equal(line.cached, true);
+  assert.equal(line.source, 'cache');
   assert.equal(store.getGuild('g1').wornHistory.length, 1, 'a cache hit adds no history entry');
 
   await pass.forTurn({ ...TURN, history: [...ownHistory(), own('a4', 1, 'what a surprise indeed')] });
   assert.equal(llm.calls.length, 2);
 });
 
-test('forTurn: after a restart the stored list serves the same lines without a request', async () => {
+test('forTurn: after a restart the stored list serves the same lines without a request; a pass landing later replaces it', async () => {
   const dir = tmpDataDir();
   const first = liveSetup({ store: createStore({ dataDir: dir }) });
   await first.pass.forTurn({ ...TURN, history: ownHistory() });
@@ -475,6 +547,18 @@ test('forTurn: after a restart the stored list serves the same lines without a r
   const patterns = await second.pass.forTurn({ ...TURN, history: ownHistory() });
   assert.equal(second.llm.calls.length, 0);
   assert.equal(patterns[0].shape, 'names what was said');
+
+  // The list kept from before the restart counts as started before any pass of this process.
+  const storedKey = second.store.getGuild('g1').worn.key;
+  await second.pass.forTurn({ ...TURN, history: historyPlus('a9') });
+  assert.equal(second.llm.calls.length, 1);
+  const guild = second.store.getGuild('g1');
+  assert.notEqual(guild.worn.key, storedKey);
+  assert.equal(guild.worn.key, keyOf(historyPlus('a9')));
+  assert.equal(guild.wornHistory.length, 2);
+  const { logs } = await withCapturedLogs(() => second.pass.forTurn({ ...TURN, history: historyPlus('a9') }));
+  assert.equal(second.llm.calls.length, 1, 'the new lines are served from the cache');
+  assert.equal(logs.find((l) => l.msg === 'variety: turn').source, 'cache');
 });
 
 test('forTurn: fewer than minLines own lines -> no pass, no block', async () => {
@@ -513,23 +597,65 @@ test('forTurn: a missing prompt is logged once and nothing is asked', async () =
     await pass.forTurn({ ...TURN, history: ownHistory() });
   });
   assert.equal(llm.calls.length, 0);
-  assert.equal(logs.filter((l) => l.msg === 'variety: skipped' && l.reason === 'no-prompt').length, 1);
+  const skipped = logs.filter((l) => l.msg === 'variety: skipped' && l.reason === 'no-prompt');
+  assert.deepEqual(skipped.map((l) => l.cause), ['turn']);
 });
 
-test('forTurn: a pass slower than variety.timeoutMs is cut off; the turn gets null in time', async () => {
-  const llm = fakeLlm(
-    (messages, options) =>
-      new Promise((resolve, reject) => {
-        options.signal.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })));
-      }),
-  );
+test('ahead: a missing prompt is logged once, with cause ahead, and nothing is asked', async () => {
+  const { pass, llm } = liveSetup({ hot: liveHot({ prompts: { variety: undefined } }) });
+  const { logs } = await withCapturedLogs(async () => {
+    await pass.ahead({ ...TURN, history: ownHistory() });
+    await pass.forTurn({ ...TURN, history: ownHistory() });
+  });
+  assert.equal(llm.calls.length, 0);
+  const skipped = logs.filter((l) => l.msg === 'variety: skipped' && l.reason === 'no-prompt');
+  assert.deepEqual(skipped.map((l) => l.cause), ['ahead']);
+});
+
+test('forTurn: a pass slower than variety.timeoutMs leaves the turn without a block in time; the request is not cut, lands and serves the next turn', async () => {
+  const llm = deferredLlm();
   const { pass, store } = liveSetup({ hot: liveHot({ variety: { timeoutMs: 30 } }), llm });
   const started = Date.now();
   const { result, logs } = await withCapturedLogs(() => pass.forTurn({ ...TURN, history: ownHistory() }));
   assert.equal(result, null);
-  assert.ok(Date.now() - started < 2000);
-  assert.equal(logs.find((l) => l.msg === 'variety: pass failed').reason, 'timeout');
+  assert.ok(Date.now() - started < 2000, 'the turn stops waiting at variety.timeoutMs');
+  const turn = logs.find((l) => l.msg === 'variety: turn');
+  assert.deepEqual([turn.source, turn.cached, turn.late, turn.kept], ['request', false, true, 0]);
+  assert.equal(typeof turn.waitedMs, 'number');
+  assert.equal(logs.find((l) => l.msg === 'variety: pass failed'), undefined);
+  assert.equal(llm.calls[0].options.signal.aborted, false, 'the request keeps running');
+  assert.equal(llm.calls[0].options.timeoutMs, 30000, 'its own cut is variety.requestTimeoutMs');
+
+  const landing = await withCapturedLogs(async () => {
+    llm.calls[0].answer(ANSWER);
+    await settle();
+  });
+  const passLine = landing.logs.find((l) => l.msg === 'variety: pass');
+  assert.deepEqual([passLine.cause, passLine.parse, passLine.landed, passLine.stored], ['turn', 'ok', true, true]);
+  assert.equal(store.getGuild('g1').worn.lines, 3, 'the late answer is stored');
+  assert.equal(store.getGuild('g1').wornHistory.length, 1);
+
+  const next = await withCapturedLogs(() => pass.forTurn({ ...TURN, history: ownHistory() }));
+  assert.equal(llm.calls.length, 1, 'the next turn makes no request');
+  assert.equal(next.result.length, 1);
+  assert.equal(next.logs.find((l) => l.msg === 'variety: turn').source, 'cache');
+});
+
+test('forTurn: a pass slower than variety.requestTimeoutMs is cut there and nothing is stored', async () => {
+  const llm = deferredLlm();
+  const { pass, store } = liveSetup({ hot: liveHot({ variety: { timeoutMs: 5000, requestTimeoutMs: 30 } }), llm });
+  const started = Date.now();
+  const { result, logs } = await withCapturedLogs(() => pass.forTurn({ ...TURN, history: ownHistory() }));
+  assert.equal(result, null);
+  assert.ok(Date.now() - started < 2000, 'a cut request ends the wait');
+  assert.equal(llm.calls[0].options.timeoutMs, 30);
+  assert.equal(llm.calls[0].options.signal.aborted, true);
+  const failed = logs.find((l) => l.msg === 'variety: pass failed');
+  assert.deepEqual([failed.reason, failed.cause], ['timeout', 'turn']);
+  const turn = logs.find((l) => l.msg === 'variety: turn');
+  assert.deepEqual([turn.source, turn.kept, turn.late], ['request', 0, undefined]);
   assert.equal(store.getGuild('g1').worn, null);
+  assert.deepEqual(store.getGuild('g1').wornHistory, []);
 });
 
 test('forTurn: a failed request or an answer that is not JSON -> null, the latest list stays', async () => {
@@ -574,14 +700,28 @@ test("forTurn: a private chat's pass never displaces the guild's cached pass, an
   assert.equal(llm.calls.length, 2, 'the private lines too, under their own key');
 });
 
-test('forTurn: logs carry counts, never the lines, the examples or the shapes', async () => {
+test('forTurn: logs carry counts and codes, never the lines, the examples or the shapes', async () => {
   const { pass } = liveSetup();
-  const { logs } = await withCapturedLogs(() => pass.forTurn({ ...TURN, history: ownHistory() }));
+  const { logs } = await withCapturedLogs(async () => {
+    await pass.forTurn({ ...TURN, history: ownHistory() });
+    await pass.ahead({ ...TURN, history: ownHistory().slice(0, 2) });
+  });
   const line = logs.find((l) => l.msg === 'variety: turn');
   assert.deepEqual(
-    { lines: line.lines, cached: line.cached, parse: line.parse, kept: line.kept, dropped: line.dropped },
-    { lines: 3, cached: false, parse: 'ok', kept: 1, dropped: 0 },
+    { lines: line.lines, source: line.source, cached: line.cached, parse: line.parse, kept: line.kept, dropped: line.dropped, stored: line.stored },
+    { lines: 3, source: 'request', cached: false, parse: 'ok', kept: 1, dropped: 0, stored: true },
   );
+  assert.equal(typeof line.waitedMs, 'number');
+  assert.equal(line.late, undefined, 'only a turn whose wait ran out says late');
+  const passLine = logs.find((l) => l.msg === 'variety: pass');
+  assert.deepEqual(fieldsOf(passLine), ['cause', 'channel', 'dropped', 'kept', 'landed', 'lines', 'ms', 'parse', 'stored']);
+  assert.deepEqual(
+    [passLine.channel, passLine.cause, passLine.lines, passLine.parse, passLine.kept, passLine.dropped, passLine.stored, passLine.landed],
+    ['c1', 'turn', 3, 'ok', 1, 0, true, true],
+  );
+  assert.equal(typeof passLine.ms, 'number');
+  const skipped = logs.find((l) => l.msg === 'variety: skipped');
+  assert.deepEqual([skipped.reason, skipped.cause, skipped.lines], ['few-lines', 'ahead', 1]);
   const all = JSON.stringify(logs);
   for (const secret of ['surprise', 'Crêpes', 'promise', 'names what was said', 'meeting']) assert.ok(!all.includes(secret), secret);
 });
@@ -596,11 +736,14 @@ test('record: a line joins the ring (server channels only), never while paused',
 });
 
 test('forTurn: a pass that finishes while paused is used for the turn but nothing is written', async () => {
-  const { pass, store } = liveSetup();
+  const { pass, store, llm } = liveSetup();
   store.state.data.paused = true;
   const patterns = await pass.forTurn({ ...TURN, history: ownHistory() });
   assert.equal(patterns.length, 1);
   assert.equal(store.getGuild('g1').worn, null);
+  store.state.data.paused = false;
+  await pass.forTurn({ ...TURN, history: ownHistory() });
+  assert.equal(llm.calls.length, 2, 'no cache entry was kept while paused either');
 });
 
 test('forTurn: a limit notice the bot posted is not one of the persona\'s lines', async () => {
@@ -609,4 +752,255 @@ test('forTurn: a limit notice the bot posted is not one of the persona\'s lines'
   const history = [...ownHistory().slice(0, 3), own('n1', 2, notice)];
   assert.equal(await pass.forTurn({ ...TURN, history }), null, 'two real lines and a notice are fewer than minLines');
   assert.equal(llm.calls.length, 0);
+});
+
+// ---- the pass ahead, joins and late landings -------------------------------------------------------
+
+test('ahead: one request on the lines the next turn will see; that turn uses it without a request', async () => {
+  const { pass, llm, store } = liveSetup();
+  const { result, logs } = await withCapturedLogs(async () => {
+    await pass.ahead({ ...TURN, history: ownHistory() });
+    return pass.forTurn({ ...TURN, history: ownHistory() });
+  });
+  assert.equal(llm.calls.length, 1, 'one request, made ahead');
+  assert.deepEqual(result, [{ shape: 'names what was said', examples: ['what a surprise'], count: 2 }]);
+  const passLine = logs.find((l) => l.msg === 'variety: pass');
+  assert.deepEqual([passLine.cause, passLine.landed, passLine.stored], ['ahead', true, true]);
+  const turn = logs.find((l) => l.msg === 'variety: turn');
+  assert.deepEqual([turn.source, turn.cached, turn.kept], ['cache', true, 1]);
+  assert.equal(store.getGuild('g1').worn.lines, 3);
+  assert.equal(store.getGuild('g1').wornHistory.length, 1);
+});
+
+test('ahead: lines already answered or in flight start no second request', async () => {
+  const llm = deferredLlm();
+  const { pass } = liveSetup({ llm });
+  const first = pass.ahead({ ...TURN, history: ownHistory() });
+  const second = pass.ahead({ ...TURN, history: ownHistory() });
+  assert.equal(llm.calls.length, 1, 'the same lines in flight');
+  llm.calls[0].answer(ANSWER);
+  await Promise.all([first, second]);
+  await pass.ahead({ ...TURN, history: ownHistory() });
+  assert.equal(llm.calls.length, 1, 'the same lines answered');
+  const third = pass.ahead({ ...TURN, history: historyPlus('a9') });
+  assert.equal(llm.calls.length, 2, 'a new line asks again');
+  llm.calls[1].answer(ANSWER);
+  await third;
+});
+
+test('ahead: nothing with features.varietyPrecompute off, features.variety off, or while paused', async () => {
+  for (const features of [{ varietyPrecompute: false }, { variety: false }]) {
+    const { pass, llm } = liveSetup({ hot: liveHot({ features }) });
+    assert.equal(await pass.ahead({ ...TURN, history: ownHistory() }), undefined);
+    assert.equal(llm.calls.length, 0, JSON.stringify(features));
+  }
+  const paused = liveSetup();
+  paused.store.state.data.paused = true;
+  await paused.pass.ahead({ ...TURN, history: ownHistory() });
+  assert.equal(paused.llm.calls.length, 0, 'paused');
+
+  // Precompute off: the turn still asks for itself and its answer serves the next turn.
+  const atTurn = liveSetup({ hot: liveHot({ features: { varietyPrecompute: false } }) });
+  await atTurn.pass.forTurn({ ...TURN, history: ownHistory() });
+  await atTurn.pass.forTurn({ ...TURN, history: ownHistory() });
+  assert.equal(atTurn.llm.calls.length, 1);
+  assert.equal(atTurn.store.getGuild('g1').worn.lines, 3);
+});
+
+test("forTurn: with features.varietyPrecompute off the turn's request still runs to variety.requestTimeoutMs and lands for the next turn", async () => {
+  const llm = deferredLlm();
+  const { pass, store } = liveSetup({ hot: liveHot({ features: { varietyPrecompute: false }, variety: { timeoutMs: 30 } }), llm });
+  const { result, logs } = await withCapturedLogs(() => pass.forTurn({ ...TURN, history: ownHistory() }));
+  assert.equal(result, null);
+  const turn = logs.find((l) => l.msg === 'variety: turn');
+  assert.deepEqual([turn.source, turn.cached, turn.late], ['request', false, true]);
+  assert.equal(llm.calls[0].options.timeoutMs, 30000, 'its own cut is variety.requestTimeoutMs, not the turn wait');
+  await delay(30);
+  assert.equal(llm.calls[0].options.signal.aborted, false, 'the request keeps running past the wait');
+
+  const landing = await withCapturedLogs(async () => {
+    llm.calls[0].answer(ANSWER);
+    await settle();
+  });
+  const passLine = landing.logs.find((l) => l.msg === 'variety: pass');
+  assert.deepEqual([passLine.cause, passLine.parse, passLine.landed, passLine.stored], ['turn', 'ok', true, true]);
+  assert.equal(store.getGuild('g1').worn.lines, 3, 'the late answer is stored');
+
+  const next = await withCapturedLogs(() => pass.forTurn({ ...TURN, history: ownHistory() }));
+  assert.equal(llm.calls.length, 1, 'the next turn makes no request');
+  assert.equal(next.result.length, 1);
+  assert.equal(next.logs.find((l) => l.msg === 'variety: turn').source, 'cache');
+});
+
+test('forTurn: a turn joins the pass in flight on the same lines and waits at most variety.timeoutMs from its own call', async () => {
+  const llm = deferredLlm();
+  const { pass, advance } = liveSetup({ hot: liveHot({ variety: { timeoutMs: 150 } }), llm });
+  const { logs } = await withCapturedLogs(async () => {
+    const ahead = pass.ahead({ ...TURN, history: ownHistory() });
+    const started = Date.now();
+    assert.equal(await pass.forTurn({ ...TURN, history: ownHistory() }), null, 'the wait ran out');
+    assert.ok(Date.now() - started < 2000);
+    assert.equal(llm.calls[0].options.signal.aborted, false, 'the pass keeps running');
+    // The pass is now older than variety.timeoutMs, in real time and on the injected clock. A turn
+    // joining it still waits variety.timeoutMs from its own call, so an answer some time later
+    // serves it; measured from the pass's start, its wait would already be over.
+    await delay(30);
+    advance(200);
+    const joined = pass.forTurn({ ...TURN, history: ownHistory() });
+    await delay(25);
+    advance(25);
+    llm.calls[0].answer(ANSWER);
+    assert.equal((await joined)?.length, 1, 'the joined pass answers the turn');
+    await ahead;
+  });
+  assert.equal(llm.calls.length, 1, 'no second request');
+  const turns = logs.filter((l) => l.msg === 'variety: turn');
+  assert.deepEqual(
+    turns.map((l) => [l.source, l.cached, l.late ?? false, l.kept]),
+    [
+      ['joined', true, true, 0],
+      ['joined', true, false, 1],
+    ],
+  );
+  assert.equal(turns[1].late, undefined);
+  assert.equal(turns[1].waitedMs, 25, "waitedMs counts from the turn's own call");
+  const passes = logs.filter((l) => l.msg === 'variety: pass');
+  assert.deepEqual(passes.map((l) => [l.cause, l.landed]), [['ahead', true]]);
+});
+
+test('forTurn: a turn that joined a pass which then fails gets no block and starts no request of its own', async () => {
+  const llm = deferredLlm();
+  const { pass, store } = liveSetup({ llm });
+  const { result, logs } = await withCapturedLogs(async () => {
+    const ahead = pass.ahead({ ...TURN, history: ownHistory() });
+    const joined = pass.forTurn({ ...TURN, history: ownHistory() });
+    llm.calls[0].fail(Object.assign(new Error('boom'), { statusCode: 502 }));
+    await ahead;
+    return joined;
+  });
+  assert.equal(result, null);
+  assert.equal(llm.calls.length, 1);
+  const failed = logs.find((l) => l.msg === 'variety: pass failed');
+  assert.deepEqual([failed.cause, failed.reason, failed.status], ['ahead', 'error', 502]);
+  const turn = logs.find((l) => l.msg === 'variety: turn');
+  assert.deepEqual([turn.source, turn.cached, turn.kept], ['joined', true, 0]);
+  assert.equal(store.getGuild('g1').worn, null);
+});
+
+test('ahead: a pass landing while paused or after features.variety was turned off stores nothing', async () => {
+  const turnOffs = [
+    (setup) => {
+      setup.store.state.data.paused = true;
+    },
+    (setup) => {
+      setup.hot.config.features.variety = false;
+    },
+  ];
+  for (const turnOff of turnOffs) {
+    const llm = deferredLlm();
+    const setup = liveSetup({ llm });
+    const { logs } = await withCapturedLogs(async () => {
+      const ahead = setup.pass.ahead({ ...TURN, history: ownHistory() });
+      turnOff(setup);
+      llm.calls[0].answer(ANSWER);
+      await ahead;
+    });
+    const line = logs.find((l) => l.msg === 'variety: pass');
+    assert.deepEqual([line.parse, line.landed, line.stored], ['ok', false, false]);
+    const guild = setup.store.getGuild('g1');
+    assert.equal(guild.worn, null);
+    assert.deepEqual(guild.wornHistory, []);
+    // Back on: no cache entry was kept, so the same lines ask again.
+    setup.store.state.data.paused = false;
+    setup.hot.config.features.variety = true;
+    const again = setup.pass.forTurn({ ...TURN, history: ownHistory() });
+    assert.equal(llm.calls.length, 2, 'no cache entry');
+    llm.calls[1].answer(ANSWER);
+    await again;
+  }
+});
+
+test('forTurn: an older pass that lands after a newer one never replaces it', async () => {
+  const llm = deferredLlm();
+  const { pass, store } = liveSetup({ llm });
+  const older = pass.ahead({ ...TURN, history: ownHistory() });
+  const newer = pass.ahead({ ...TURN, history: historyPlus('a9') });
+  llm.calls[1].answer(answer([{ shape: 'newer device', examples: ['a9'] }]));
+  await newer;
+  const newerKey = store.getGuild('g1').worn.key;
+  const { logs } = await withCapturedLogs(async () => {
+    llm.calls[0].answer(ANSWER);
+    await older;
+  });
+  const line = logs.find((l) => l.msg === 'variety: pass');
+  assert.deepEqual([line.parse, line.landed, line.stored], ['ok', false, false]);
+  assert.equal(store.getGuild('g1').worn.key, newerKey);
+  assert.equal(store.getGuild('g1').wornHistory.length, 1);
+  const patterns = await pass.forTurn({ ...TURN, history: historyPlus('a9') });
+  assert.equal(llm.calls.length, 2, 'the newer lines are still served from the cache');
+  assert.equal(patterns[0].shape, 'newer device');
+});
+
+test('forTurn: passes in flight are kept per key, at most four per slot; an evicted one keeps running, is not joined, and still lands', async () => {
+  const llm = deferredLlm();
+  const { pass, store } = liveSetup({ hot: liveHot({ variety: { timeoutMs: 20 } }), llm });
+  const aheads = ['b1', 'b2', 'b3', 'b4', 'b5'].map((id) => pass.ahead({ ...TURN, history: historyPlus(id) }));
+  assert.equal(llm.calls.length, 5);
+  await pass.forTurn({ ...TURN, history: historyPlus('b2') });
+  assert.equal(llm.calls.length, 5, 'an older pass still in flight is joined, not asked again');
+  await pass.forTurn({ ...TURN, history: historyPlus('b1') });
+  assert.equal(llm.calls.length, 6, 'the evicted key asks again');
+  assert.equal(llm.calls[0].options.signal.aborted, false, 'evicting never cancels a request');
+
+  // The evicted pass (b1, the oldest started) answers first: it lands and is stored all the same.
+  const { logs } = await withCapturedLogs(async () => {
+    llm.calls[0].answer(ANSWER);
+    await settle();
+  });
+  const line = logs.find((l) => l.msg === 'variety: pass');
+  assert.deepEqual([line.cause, line.parse, line.landed, line.stored], ['ahead', 'ok', true, true]);
+  assert.equal(store.getGuild('g1').worn.key, keyOf(historyPlus('b1')));
+  for (const call of llm.calls.slice(1)) call.answer(ANSWER);
+  await Promise.all(aheads);
+  await settle();
+});
+
+test("ahead: a private chat's pass lands under that chat's own slot and is never stored", async () => {
+  const { pass, llm, store } = liveSetup();
+  const dm = ['only here, what a surprise', 'and again (no)', 'still just us'].map((text, i) =>
+    own(`d${i}`, 5 - i, text, { channelId: 'dm1' }),
+  );
+  const privateTurn = { guildId: 'g1', channelId: 'dm1', selfName: 'Nept', history: dm, privateChat: true };
+  await pass.ahead(privateTurn);
+  assert.equal(llm.calls.length, 1);
+  assert.equal(store.getGuild('g1').worn, null);
+  assert.deepEqual(store.getGuild('g1').wornHistory, []);
+  await pass.forTurn(privateTurn);
+  assert.equal(llm.calls.length, 1, 'the private turn finds it ready');
+  await pass.forTurn({ ...TURN, history: ownHistory() });
+  assert.equal(llm.calls.length, 2, 'the guild slot is apart');
+});
+
+test('ahead: a failed or unparsable pass stores nothing; the next turn asks again', async () => {
+  let mode = 'fail';
+  const llm = fakeLlm(() => {
+    if (mode === 'fail') throw Object.assign(new Error('boom'), { statusCode: 502 });
+    if (mode === 'junk') return 'no json at all';
+    return ANSWER;
+  });
+  const { pass, store } = liveSetup({ llm });
+  const { logs } = await withCapturedLogs(async () => {
+    await pass.ahead({ ...TURN, history: ownHistory() });
+    mode = 'junk';
+    await pass.ahead({ ...TURN, history: ownHistory() });
+  });
+  assert.equal(llm.calls.length, 2, 'a failure is never kept as an answer');
+  const failed = logs.find((l) => l.msg === 'variety: pass failed');
+  assert.deepEqual([failed.cause, failed.reason], ['ahead', 'error']);
+  const junk = logs.find((l) => l.msg === 'variety: pass');
+  assert.deepEqual([junk.cause, junk.parse, junk.landed, junk.stored], ['ahead', 'error', false, false]);
+  assert.equal(store.getGuild('g1').worn, null);
+  mode = 'ok';
+  await pass.forTurn({ ...TURN, history: ownHistory() });
+  assert.equal(llm.calls.length, 3);
 });

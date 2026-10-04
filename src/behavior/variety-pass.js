@@ -1,23 +1,43 @@
-// The live side of the variety pass (src/behavior/variety.js): before a turn,
-// the persona's own most recent lines go to a small model pass that names the
-// devices they keep reusing, and the turn's request carries the answer as
-// `<worn>`. The pass runs alongside the other pre-turn work and is bounded by
-// `variety.timeoutMs`: a slow or failed pass never delays the turn past that
-// or fails it, the turn simply goes without the block. The same set of lines
-// is never asked about twice in a row (a per-guild cache, seeded from guild
-// memory after a restart). Each pass that ran is kept in guild memory: the
-// latest list (`worn`) and a short history of shapes (`wornHistory`) for the
-// owner; a private chat's pass is kept in memory only, under that chat's own
-// cache key, never on disk, so nothing said in private reaches the owner's
-// view or another conversation, and it never displaces the guild's latest pass.
-// The persona's own lines of other channels come from a small ring in guild
-// memory (`ownLines`), written here whenever a turn posts a message in a
-// server channel. Logs carry counts, never text.
+// The live side of the variety pass (src/behavior/variety.js): the persona's
+// own most recent lines go to a small model pass that names the devices they
+// keep reusing, and the turn's request carries the answer as `<worn>`. The
+// pass is computed ahead: right after a turn posts text (`ahead`), on the
+// lines the next turn will see, so that turn finds the answer ready. A turn
+// (`forTurn`) uses a ready answer for its exact lines, else joins a pass
+// already in flight on them, else asks itself; it waits at most
+// `variety.timeoutMs` and otherwise goes without the block, but never fails.
+// A request is cut only at `variety.requestTimeoutMs`: one that outlives a
+// turn's wait keeps running and its answer serves the next turn. A failure is
+// never kept, so the same lines are asked again by the next turn. Each landed
+// pass is kept per guild in a cache (seeded from guild memory after a
+// restart) and in guild memory: the latest list (`worn`) and a short history
+// of shapes (`wornHistory`) for the owner. A private chat's pass is kept in
+// memory only, under that chat's own cache slot, never on disk, so nothing
+// said in private reaches the owner's view or another conversation, and it
+// never displaces the guild's latest pass. Nothing lands while paused or with
+// `features.variety` off. The persona's own lines of other channels come from
+// a small ring in guild memory (`ownLines`), written here whenever a turn
+// posts a message in a server channel. Logs carry counts and codes, never text.
 
 import { classifierTextModel } from './mention.js';
 import { isLimitNotice } from './limits.js';
-import { buildVarietyRequest, linesKey, normalizeWorn, parseVariety, selectOwnLines, varietyOn, varietySettings } from './variety.js';
+import {
+  buildVarietyRequest,
+  linesKey,
+  normalizeWorn,
+  parseVariety,
+  selectOwnLines,
+  varietyAheadOn,
+  varietyOn,
+  varietySettings,
+} from './variety.js';
 import { log } from '../log.js';
+
+// Passes in flight kept joinable per cache slot; an older one past this is
+// forgotten (its request still runs and may still land), never cancelled.
+const IN_FLIGHT_PER_SLOT = 4;
+// What a turn's wait resolves to when `variety.timeoutMs` ran out first.
+const LATE = Symbol('late');
 
 /**
  * @param {object} deps
@@ -26,16 +46,26 @@ import { log } from '../log.js';
  * @param {{ complete: Function }} deps.llm
  * @param {() => number} [deps.now]
  * @returns {{ record: (guildId: string|null, line: object) => boolean,
- *   forTurn: (input: object) => Promise<{ shape: string, examples: string[], count: number }[]|null> }}
+ *   forTurn: (input: object) => Promise<{ shape: string, examples: string[], count: number }[]|null>,
+ *   ahead: (input: object) => Promise<void> }}
  */
 export function createVarietyPass({ hot, store, llm, now = Date.now }) {
-  // cacheKeyFor() -> { key, patterns }: the latest pass of a guild, or of one private chat
+  // cacheKeyFor() -> { key, patterns, seq }: the latest landed pass of a guild, or of one private chat
   const cache = new Map();
+  // cacheKeyFor() -> Map(key -> { seq, promise }): the passes in flight, oldest first
+  const inflight = new Map();
+  // Every started pass takes the next number: a landed pass never replaces one started later.
+  let counter = 0;
   let warnedNoPrompt = false;
 
   /** The cache slot of a pass: the guild's own, or a private chat's apart from it. */
   function cacheKeyFor(guildId, channelId, privateChat) {
     return privateChat ? `private:${channelId}` : guildId;
+  }
+
+  /** Whether a landing may be kept now: `features.variety` on and not paused (read at the moment of use). */
+  function mayStore() {
+    return varietyOn(hot.config) && !store.state?.data?.paused;
   }
 
   /**
@@ -59,31 +89,38 @@ export function createVarietyPass({ hot, store, llm, now = Date.now }) {
   }
 
   /**
-   * The latest pass under `slot` (cacheKeyFor): the cache, else -- for the
-   * guild's own slot -- what guild memory kept (after a restart). A private
-   * chat's pass is never stored, so its slot only ever lives in the cache.
+   * The latest landed pass under `slot` (cacheKeyFor): the cache, else -- for
+   * the guild's own slot -- what guild memory kept (after a restart; it counts
+   * as started before any pass of this process). A private chat's pass is
+   * never stored, so its slot only ever lives in the cache.
    */
   function latest(guildId, slot) {
     if (cache.has(slot)) return cache.get(slot);
     if (slot !== guildId) return null;
     const stored = normalizeWorn(store.getGuild(guildId)?.worn);
     if (!stored?.key) return null;
-    const entry = { key: stored.key, patterns: stored.patterns };
+    const entry = { key: stored.key, patterns: stored.patterns, seq: 0 };
     cache.set(slot, entry);
     return entry;
   }
 
-  /** One pass on `request`, cut at `timeoutMs`; resolves the completion or throws (an abort says `timedOut`). */
+  /**
+   * One request on `request`, cut at `variety.requestTimeoutMs` (each attempt
+   * and the whole, retries included); resolves the completion or throws (a cut
+   * says `timedOut`).
+   */
   async function ask(request, config, settings) {
     const controller = new AbortController();
-    // Not unref'd: the timer is cleared as soon as the request settles, and it must fire to cut a hung one.
-    const timer = setTimeout(() => controller.abort(), settings.timeoutMs);
+    // Cleared as soon as the request settles. Unref'd: it only bounds a request
+    // and must never keep a process alive on its own (the bot's client does).
+    const timer = setTimeout(() => controller.abort(), settings.requestTimeoutMs);
+    timer.unref?.();
     try {
       return await llm.complete(request.messages, {
         model: classifierTextModel(config),
         role: 'classifier.text',
         maxOutputTokens: settings.maxOutputTokens,
-        timeoutMs: settings.timeoutMs,
+        timeoutMs: settings.requestTimeoutMs,
         countAgainstDailyCap: true,
         skipCalibration: true,
         signal: controller.signal,
@@ -98,99 +135,212 @@ export function createVarietyPass({ hot, store, llm, now = Date.now }) {
   }
 
   /**
-   * The `<worn>` patterns for one turn, or null for no block. With
-   * `features.variety` on and `prompts.variety` present (missing: logged
-   * once), the persona's own lines are chosen (src/behavior/variety.js
-   * #selectOwnLines: `variety.window` lines younger than
-   * `variety.recentMinutes`, the turn's channel first, then the ring); fewer
-   * than `variety.minLines` -> null. The same lines as the latest pass (the
-   * guild's, or in a private chat that chat's own) reuse its answer without a
-   * request; otherwise one request on the `classifier.text` model (counted
-   * against `llm.maxRequestsPerDay`), cut at `variety.timeoutMs`. A failure, a
-   * timeout or an answer that is not the expected JSON -> null (and the latest
-   * pass stays as it was). A valid answer (even an empty one) becomes that
-   * latest pass and, outside a private chat and while not paused, is stored in
-   * guild memory with one more history entry. Never rejects.
-   * @param {{ guildId: string, channelId: string, history: object[], selfName: string, privateChat?: boolean }} input
-   * @returns {Promise<{ shape: string, examples: string[], count: number }[]|null>}
+   * What a pass on `input` would look at, or null when no pass is due:
+   * `features.variety` off, no `prompts.variety` (logged once), or fewer than
+   * `variety.minLines` own lines (src/behavior/variety.js#selectOwnLines:
+   * `variety.window` lines younger than `variety.recentMinutes`, the turn's
+   * channel first, then the ring; a limit notice is never one of them).
    */
-  async function forTurn({ guildId, channelId, history, selfName, privateChat = false }) {
+  function plan({ guildId, channelId, history, selfName, privateChat = false }, cause) {
+    const config = hot.config;
+    if (!varietyOn(config)) return null;
+    const prompt = hot.prompts?.variety;
+    if (typeof prompt !== 'string' || !prompt.trim()) {
+      if (!warnedNoPrompt) log.warn('variety: skipped', { reason: 'no-prompt', cause });
+      warnedNoPrompt = true;
+      return null;
+    }
+    warnedNoPrompt = false;
+    const settings = varietySettings(config);
+    // A limit notice is the bot's, not the persona's speech: never a line of its own.
+    const labels = hot.prompts?.labels;
+    const lines = selectOwnLines({
+      history: (Array.isArray(history) ? history : []).filter((m) => !(m?.self && isLimitNotice(labels, m.content))),
+      ring: store.getGuild(guildId)?.ownLines,
+      channelId,
+      now: now(),
+      window: settings.window,
+      recentMinutes: settings.recentMinutes,
+    });
+    if (lines.length < settings.minLines) {
+      log.info('variety: skipped', { channel: channelId, cause, reason: 'few-lines', lines: lines.length, minLines: settings.minLines });
+      return null;
+    }
+    return {
+      config,
+      settings,
+      prompt,
+      lines,
+      key: linesKey(lines),
+      slot: cacheKeyFor(guildId, channelId, privateChat),
+      guildId,
+      channelId,
+      privateChat,
+      selfName,
+    };
+  }
+
+  /**
+   * Keep a valid answer as the slot's latest pass -- unless a pass started
+   * later already landed there -- and, outside a private chat, in guild
+   * memory with one more history entry. Nothing at all while paused or with
+   * `features.variety` off (read now, as `record` does).
+   */
+  function land(p, seq, patterns) {
+    if (!mayStore()) return { landed: false, stored: false };
+    const current = cache.get(p.slot);
+    if (current && current.seq > seq) return { landed: false, stored: false };
+    cache.set(p.slot, { key: p.key, patterns, seq });
+    if (p.privateChat) return { landed: true, stored: false };
+    const at = now();
+    store.setWorn(p.guildId, { at, key: p.key, channelId: p.channelId, lines: p.lines.length, patterns });
+    store.appendWornHistory(p.guildId, { at, channelId: p.channelId, lines: p.lines.length, patterns }, varietySettings(hot.config).history);
+    return { landed: true, stored: true };
+  }
+
+  /**
+   * One request for plan `p` to its end: asked, validated, landed. Resolves
+   * `{ patterns, parse, dropped, stored }` (`patterns` null on a failure or
+   * an answer that is not the expected JSON); never rejects.
+   */
+  async function run(p, seq, cause) {
+    const startedAt = now();
+    const failed = { patterns: null, parse: null, dropped: 0, stored: false };
     try {
-      const config = hot.config;
-      if (!varietyOn(config)) return null;
-      const prompt = hot.prompts?.variety;
-      if (typeof prompt !== 'string' || !prompt.trim()) {
-        if (!warnedNoPrompt) log.warn('variety: skipped', { reason: 'no-prompt' });
-        warnedNoPrompt = true;
-        return null;
-      }
-      warnedNoPrompt = false;
-      const settings = varietySettings(config);
-      const startedAt = now();
-      // A limit notice is the bot's, not the persona's speech: never a line of its own.
-      const labels = hot.prompts?.labels;
-      const lines = selectOwnLines({
-        history: (Array.isArray(history) ? history : []).filter((m) => !(m?.self && isLimitNotice(labels, m.content))),
-        ring: store.getGuild(guildId)?.ownLines,
-        channelId,
-        now: startedAt,
-        window: settings.window,
-        recentMinutes: settings.recentMinutes,
-      });
-      if (lines.length < settings.minLines) {
-        log.info('variety: skipped', { channel: channelId, reason: 'few-lines', lines: lines.length, minLines: settings.minLines });
-        return null;
-      }
-
-      const key = linesKey(lines);
-      const slot = cacheKeyFor(guildId, channelId, privateChat);
-      const previous = latest(guildId, slot);
-      if (previous?.key === key) {
-        log.info('variety: turn', { channel: channelId, lines: lines.length, cached: true, kept: previous.patterns.length });
-        return previous.patterns;
-      }
-
-      const request = buildVarietyRequest({ prompt, selfName, lines, config });
+      const request = buildVarietyRequest({ prompt: p.prompt, selfName: p.selfName, lines: p.lines, config: p.config });
       let completion;
       try {
-        completion = await ask(request, config, settings);
+        completion = await ask(request, p.config, p.settings);
       } catch (err) {
         log.warn('variety: pass failed', {
-          channel: channelId,
-          lines: lines.length,
+          channel: p.channelId,
+          cause,
+          lines: p.lines.length,
           reason: err?.timedOut ? 'timeout' : 'error',
           status: err?.statusCode ?? null,
           name: err?.name ?? null,
         });
-        return null;
+        return failed;
       }
-      const parsed = parseVariety(completion?.text, request.texts, config);
-      if (!parsed.ok) {
-        log.warn('variety: turn', { channel: channelId, lines: lines.length, cached: false, parse: 'error' });
-        return null;
-      }
-      cache.set(slot, { key, patterns: parsed.patterns });
-      const stored = !privateChat && !store.state?.data?.paused;
-      if (stored) {
-        const at = now();
-        store.setWorn(guildId, { at, key, channelId, lines: lines.length, patterns: parsed.patterns });
-        store.appendWornHistory(guildId, { at, channelId, lines: lines.length, patterns: parsed.patterns }, settings.history);
-      }
-      log.info('variety: turn', {
-        channel: channelId,
-        lines: lines.length,
-        cached: false,
-        parse: 'ok',
+      const parsed = parseVariety(completion?.text, request.texts, p.config);
+      const { landed, stored } = parsed.ok ? land(p, seq, parsed.patterns) : { landed: false, stored: false };
+      log[parsed.ok ? 'info' : 'warn']('variety: pass', {
+        channel: p.channelId,
+        cause,
+        lines: p.lines.length,
+        parse: parsed.ok ? 'ok' : 'error',
         kept: parsed.patterns.length,
         dropped: parsed.dropped,
         stored,
+        landed,
+        ms: now() - startedAt,
       });
-      return parsed.patterns;
+      if (!parsed.ok) return { ...failed, parse: 'error' };
+      return { patterns: parsed.patterns, parse: 'ok', dropped: parsed.dropped, stored };
     } catch (err) {
-      log.warn('variety: failed', { channel: channelId ?? null, error: err });
+      log.warn('variety: failed', { channel: p.channelId, cause, error: err });
+      return failed;
+    }
+  }
+
+  /**
+   * Start one request for plan `p` and keep it joinable under its key (at
+   * most IN_FLIGHT_PER_SLOT per slot, the oldest forgotten first) until it
+   * settles.
+   */
+  function start(p, cause) {
+    const seq = ++counter;
+    const entry = { seq, promise: null };
+    entry.promise = run(p, seq, cause).finally(() => {
+      const keys = inflight.get(p.slot);
+      if (keys?.get(p.key) !== entry) return;
+      keys.delete(p.key);
+      if (keys.size === 0) inflight.delete(p.slot);
+    });
+    let keys = inflight.get(p.slot);
+    if (!keys) inflight.set(p.slot, (keys = new Map()));
+    keys.set(p.key, entry);
+    while (keys.size > IN_FLIGHT_PER_SLOT) keys.delete(keys.keys().next().value);
+    return entry;
+  }
+
+  /** `promise`'s value, or LATE once `ms` ran out first; the timer goes as soon as either happens. */
+  function waitAtMost(promise, ms) {
+    let timer;
+    const late = new Promise((resolve) => {
+      timer = setTimeout(() => resolve(LATE), ms);
+    });
+    return Promise.race([promise, late]).finally(() => clearTimeout(timer));
+  }
+
+  /**
+   * The `<worn>` patterns for one turn, or null for no block (see `plan` for
+   * when no pass is due). The same lines as the slot's latest landed pass (the
+   * guild's, or in a private chat that chat's own) reuse its answer; else a
+   * pass in flight on the same lines is joined; else one request starts on the
+   * `classifier.text` model (counted against `llm.maxRequestsPerDay`). The turn
+   * waits at most `variety.timeoutMs` from this call: past it, or when the
+   * pass failed or answered something that is not the expected JSON, null --
+   * a joined pass that failed is not asked again for this turn. A request
+   * outliving the wait keeps running to `variety.requestTimeoutMs` and lands
+   * for the next turn. Never rejects.
+   * @param {{ guildId: string, channelId: string, history: object[], selfName: string, privateChat?: boolean }} input
+   * @returns {Promise<{ shape: string, examples: string[], count: number }[]|null>}
+   */
+  async function forTurn(input) {
+    const calledAt = now();
+    try {
+      const p = plan(input, 'turn');
+      if (!p) return null;
+      const base = { channel: p.channelId, lines: p.lines.length };
+      const previous = latest(p.guildId, p.slot);
+      if (previous?.key === p.key) {
+        log.info('variety: turn', { ...base, source: 'cache', cached: true, kept: previous.patterns.length, waitedMs: now() - calledAt });
+        return previous.patterns;
+      }
+      const running = inflight.get(p.slot)?.get(p.key);
+      const source = running ? 'joined' : 'request';
+      const entry = running ?? start(p, 'turn');
+      const outcome = await waitAtMost(entry.promise, p.settings.timeoutMs);
+      const fields = { ...base, source, cached: source !== 'request', waitedMs: now() - calledAt };
+      if (outcome === LATE) {
+        log.info('variety: turn', { ...fields, kept: 0, late: true });
+        return null;
+      }
+      const patterns = outcome.patterns;
+      // The turn's own request answered in time: what it answered stays on the turn's line.
+      const own = source === 'request' && outcome.parse ? { parse: outcome.parse, dropped: outcome.dropped, stored: outcome.stored } : {};
+      log[own.parse === 'error' ? 'warn' : 'info']('variety: turn', { ...fields, kept: patterns?.length ?? 0, ...own });
+      return patterns;
+    } catch (err) {
+      log.warn('variety: failed', { channel: input?.channelId ?? null, cause: 'turn', error: err });
       return null;
     }
   }
 
-  return { record, forTurn };
+  /**
+   * Start the pass for the next turn without waiting, right after a turn
+   * posted text: `input` is that turn's history with the posted lines, as the
+   * next turn will fetch it. Nothing with `features.variety` or
+   * `features.varietyPrecompute` off, while paused, when no pass is due (see
+   * `plan`), or when the same lines are already answered or in flight.
+   * Resolves once the pass is over (for tests; callers do not wait); never
+   * rejects.
+   * @param {{ guildId: string, channelId: string, history: object[], selfName: string, privateChat?: boolean }} input
+   * @returns {Promise<void>}
+   */
+  async function ahead(input) {
+    try {
+      const config = hot.config;
+      if (!varietyOn(config) || !varietyAheadOn(config) || store.state?.data?.paused) return;
+      const p = plan(input, 'ahead');
+      if (!p) return;
+      if (latest(p.guildId, p.slot)?.key === p.key || inflight.get(p.slot)?.has(p.key)) return;
+      await start(p, 'ahead').promise;
+    } catch (err) {
+      log.warn('variety: failed', { channel: input?.channelId ?? null, cause: 'ahead', error: err });
+    }
+  }
+
+  return { record, forTurn, ahead };
 }

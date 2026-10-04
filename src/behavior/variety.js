@@ -1,8 +1,9 @@
 // Variety: the persona latches onto a turn of phrase that worked and reuses
 // it in its next few messages, because it sees its own earlier lines in the
 // transcript and continues its own pattern. Regexes cannot tell a device from
-// a string, so before a turn a small model pass names the devices worn out in
-// the persona's own most recent lines, and the turn's request carries them as
+// a string, so a small model pass names the devices worn out in the persona's
+// own most recent lines (ahead, right after the persona posts, or at the start
+// of a turn when nothing is ready), and the turn's request carries them as
 // a `<worn>` block. This module is the pure core of that pass: which of the
 // persona's own lines are looked at, the request, the validation of the
 // model's answer (the answer is data), the cache key, the block and the
@@ -18,7 +19,11 @@ import { fillPromptTemplate } from './prompt.js';
 import { clampChars, oneLine } from '../memory/clamp.js';
 import { MINUTE_MS } from '../time.js';
 
-/** Defaults of the `variety` config block (config.json carries the same values). */
+/**
+ * Defaults of the `variety` config block (config.json carries the same values).
+ * `timeoutMs` is the longest a turn waits for the pass; `requestTimeoutMs` cuts
+ * the request itself, which keeps running after a turn stopped waiting.
+ */
 export const VARIETY_DEFAULTS = Object.freeze({
   window: 16,
   recentMinutes: 180,
@@ -28,6 +33,7 @@ export const VARIETY_DEFAULTS = Object.freeze({
   shapeChars: 140,
   maxOutputTokens: 500,
   timeoutMs: 8000,
+  requestTimeoutMs: 30000,
   history: 20,
 });
 
@@ -51,7 +57,8 @@ function intAtLeast(value, fallback, min) {
  * default when missing or unusable.
  * @param {object} config  The live config.
  * @returns {{ window: number, recentMinutes: number, minLines: number, contextChars: number,
- *   maxPatterns: number, shapeChars: number, maxOutputTokens: number, timeoutMs: number, history: number }}
+ *   maxPatterns: number, shapeChars: number, maxOutputTokens: number, timeoutMs: number,
+ *   requestTimeoutMs: number, history: number }}
  */
 export function varietySettings(config) {
   const v = config?.variety ?? {};
@@ -65,6 +72,7 @@ export function varietySettings(config) {
     shapeChars: intAtLeast(v.shapeChars, d.shapeChars, MIN_SHAPE_CHARS),
     maxOutputTokens: intAtLeast(v.maxOutputTokens, d.maxOutputTokens, 1),
     timeoutMs: intAtLeast(v.timeoutMs, d.timeoutMs, 1),
+    requestTimeoutMs: intAtLeast(v.requestTimeoutMs, d.requestTimeoutMs, 1),
     history: intAtLeast(v.history, d.history, 0),
   };
 }
@@ -72,6 +80,15 @@ export function varietySettings(config) {
 /** `features.variety` (a missing key counts as on). */
 export function varietyOn(config) {
   return config?.features?.variety !== false;
+}
+
+/**
+ * `features.varietyPrecompute` (a missing key counts as on): whether the pass
+ * for the next turn starts right after the persona posts. It needs
+ * `features.variety` on as well.
+ */
+export function varietyAheadOn(config) {
+  return config?.features?.varietyPrecompute !== false;
 }
 
 /** A finite number, else null. */

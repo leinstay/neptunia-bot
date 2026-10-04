@@ -5,7 +5,7 @@
 // ('interject' / 'initiate'), in a server channel or in a private chat (a
 // channel without a guild, served on behalf of the one pinned guild).
 
-import { canAttach, fetchHistory, fetchNeighbors, withTextPreviews } from '../discord/collect.js';
+import { canAttach, fetchHistory, fetchNeighbors, PAGE as HISTORY_PAGE, withTextPreviews } from '../discord/collect.js';
 import { buildDrawPrompt, buildRequest, fillPromptTemplate } from './prompt.js';
 import { classifierTextModel } from './mention.js';
 import { parseOutput } from '../llm/parse.js';
@@ -270,10 +270,12 @@ function describableCandidates(history, picked, { includePicked = false } = {}) 
  * `describeVideos`; otherwise they render without a watch.
  *
  * `variety` (src/behavior/variety-pass.js#createVarietyPass) is optional: when
- * present, every turn but a `drawFailed` one starts its pass on the persona's
+ * present, every turn but a `drawFailed` one looks up its pass on the persona's
  * own recent lines as soon as the history is known, alongside the rest of the
  * preparation, and the request carries its answer as `<worn>`; every message
- * posted in a server channel joins its ring of own lines. Absent -> neither.
+ * posted in a server channel joins its ring of own lines; and once a turn's
+ * text is out (not in a dry run), the pass for the next turn starts ahead
+ * (`variety.ahead`, when the pass has it). Absent -> none of these.
  *
  * `getSelfName` (src/index.js) is the persona's display name in a guild;
  * default: the client's cached guild member, else the bot user's name.
@@ -554,12 +556,37 @@ export function createTurnRunner({
   }
 
   /**
-   * Post the turn for real. Resolves `{ drawFailed }` from draw() when the
-   * persona's picture could not be posted, `{}` otherwise.
-   * @param {{ channel: object, parsed: object, idByIndex: Map<number, string>, history: object[],
-   *   startedAt: number, triggerKind: TriggerKind|null, trigger: object|null, selfName: string }} args
+   * Start the variety pass for the next turn (src/behavior/variety-pass.js#ahead)
+   * once this turn's text is out: on this turn's history plus the `posted`
+   * lines, cut to what the next fetchHistory returns (the last
+   * `context.channelMessages`, read now, at most one page), so the next turn's
+   * own lines carry the same ids and find the answer ready. Nothing when the
+   * pass has no `ahead` or nothing was posted. Never awaited, never throws
+   * into the turn.
    */
-  async function act({ channel, parsed, idByIndex, history, startedAt, triggerKind, trigger, selfName }) {
+  function startAhead({ guildId, channelId, history, posted, selfName, privateChat }) {
+    if (typeof variety?.ahead !== 'function' || posted.length === 0) return;
+    const failed = (err) => log.warn('turn: variety ahead failed', { channel: channelId, error: err });
+    try {
+      const cap = Math.min(HISTORY_PAGE, hot.config.context?.channelMessages);
+      const all = [...history, ...posted];
+      const seen = Number.isFinite(cap) && cap > 0 ? all.slice(-cap) : all;
+      Promise.resolve(variety.ahead({ guildId, channelId, history: seen, selfName, privateChat })).catch(failed);
+    } catch (err) {
+      failed(err);
+    }
+  }
+
+  /**
+   * Post the turn for real. Resolves `{ drawFailed }` from draw() when the
+   * persona's picture could not be posted, `{}` otherwise. Once the text
+   * messages are out (before the GIF and the picture), the variety pass for
+   * the next turn starts ahead (startAhead).
+   * @param {{ channel: object, guildId: string, privateChat: boolean, parsed: object,
+   *   idByIndex: Map<number, string>, history: object[], startedAt: number,
+   *   triggerKind: TriggerKind|null, trigger: object|null, selfName: string }} args
+   */
+  async function act({ channel, guildId, privateChat, parsed, idByIndex, history, startedAt, triggerKind, trigger, selfName }) {
     const cfg = hot.config.typing;
     const typingOn = hot.config.features?.typingSimulation !== false;
     // A follow-up turn (triggerKind: 'followUp') is its own trigger kind
@@ -579,6 +606,9 @@ export function createTurnRunner({
       }
     }
 
+    // Each posted message as the next fetchHistory will normalize it (its own id and time, the
+    // persona's text as written): the lines the pass ahead looks at.
+    const ownPosted = [];
     let first = true;
     for (const message of parsed.messages) {
       if (!first && typingOn) await sleep(between(cfg.betweenMessagesMs, rng));
@@ -601,6 +631,14 @@ export function createTurnRunner({
         allowedMentions: { parse: [], users: userIds, repliedUser: true },
       });
       lastPostAt.set(channel.id, clock());
+      ownPosted.push({
+        id: posted?.id ?? null,
+        ts: Number.isFinite(posted?.createdTimestamp) ? posted.createdTimestamp : clock(),
+        channelId: channel.id,
+        self: true,
+        content: message.text,
+        replyToId: replyId ?? null,
+      });
       // The ring of own lines the variety pass reads for the other channels: server channels only,
       // the persona's text as it wrote it, with what it answered (the message it replied to, else the trigger).
       if (variety && channel.guild) {
@@ -620,6 +658,7 @@ export function createTurnRunner({
         ...(isFollowUp ? { followUp: true } : {}),
       });
     }
+    startAhead({ guildId, channelId: channel.id, history, posted: ownPosted, selfName, privateChat });
 
     // The GIF right after the messages.
     if (parsed.gif) {
@@ -964,7 +1003,8 @@ export function createTurnRunner({
       const now = clock();
       const startedAt = now;
       // A drawFailed turn only says the picture failed: no classifier or
-      // variety pass is paid for a second time.
+      // at-turn variety pass is paid for a second time (once it posts, its
+      // pass ahead for the next turn starts like any turn's).
       const answersDrawFailure = triggerKind === 'drawFailed';
 
       let history = await fetchHistory(channel, {
@@ -980,9 +1020,10 @@ export function createTurnRunner({
         if (!finalMode) return { outcome: 'not-now' };
       }
 
-      // The variety pass on the persona's own recent lines starts now and runs alongside everything
-      // below (descriptions, re-watch, lookup, neighbours); it never rejects and is bounded by
-      // variety.timeoutMs, so it can only shorten the turn's wait, never fail it.
+      // The variety pass on the persona's own recent lines is looked up now (ready, in flight, or
+      // asked) and runs alongside everything below (descriptions, re-watch, lookup, neighbours); it
+      // never rejects and the turn waits for it at most variety.timeoutMs, so it can never fail the
+      // turn. A request still running then keeps going and its answer serves the next turn.
       const wornPending =
         variety && typeof variety.forTurn === 'function' && !answersDrawFailure
           ? variety.forTurn({ guildId, channelId: channel.id, history, selfName, privateChat: isPrivate }).catch(() => null)
@@ -1245,7 +1286,7 @@ export function createTurnRunner({
         spokeSaw.set(channel.id, new Set(history.map((m) => m.id)));
         return { outcome: 'spoke', mode: finalMode, dryRun: true };
       }
-      const acted = await act({ channel, parsed, idByIndex, history, startedAt, triggerKind, trigger, selfName });
+      const acted = await act({ channel, guildId, privateChat: isPrivate, parsed, idByIndex, history, startedAt, triggerKind, trigger, selfName });
       spokeSaw.set(channel.id, new Set(history.map((m) => m.id)));
       if (!acted.drawFailed) return { outcome: 'spoke', mode: finalMode };
       handOff = Boolean(trigger);

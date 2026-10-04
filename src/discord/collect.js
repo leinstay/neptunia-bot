@@ -19,7 +19,7 @@ import { CUSTOM_EMOJI_MARKUP } from './emoji.js';
 
 const TEXT_PREVIEW_SIZE_GUARD = 256 * 1024; // 256 KB — never fetch a bigger "text" attachment
 /** Discord's REST page size for a message list. */
-const PAGE = 100;
+export const PAGE = 100;
 const MAX_EMOJIS_PER_MESSAGE = 5;
 // Groups: the animated flag (`a` or empty), the name, the id.
 const CUSTOM_EMOJI_RE = new RegExp(CUSTOM_EMOJI_MARKUP, 'g');
