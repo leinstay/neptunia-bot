@@ -177,6 +177,7 @@
     "reply": "replied to your message",
     "name": "said your name",
     "followUp": "continued your conversation",
+    "overheard": "talked about you, not to you",
     "drawFailed": "was about to get a picture, but the drawing sub-process failed: {reason}",
     "private": "wrote to you privately"
   },
