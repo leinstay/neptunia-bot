@@ -1,7 +1,7 @@
 // Tests for src/llm/openrouter.js: the two hard safety rails (token cap,
-// daily request cap), retry behaviour and calibration feedback. No network:
-// fetchImpl is always a fake. Only ONE test exercises a real retry sleep
-// (~1.5s) as instructed -- the backoff sleep in src is not touched.
+// daily request cap), retry behaviour, calibration feedback and the usage log
+// line. No network: fetchImpl is always a fake. Only the few retry tests marked
+// below exercise a real retry sleep (~1.5s) -- the backoff sleep in src is not touched.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
@@ -853,7 +853,8 @@ test('complete: without options.signal, behaviour is unchanged (only the per-req
   assert.equal(seenSignal.aborted, false);
 });
 
-// Only TWO tests exercise the real retry backoff sleep (~1.5s at attempt 1): a gateway error and a timeout.
+// Only THREE tests exercise the real retry backoff sleep (~1.5s at attempt 1): a gateway error, a
+// timeout and a rate limit with a JSON body.
 test('complete: retries once on a 503 then succeeds, logging the retried attempt', async () => {
   let calls = 0;
   const llm = createLlm({
@@ -876,6 +877,8 @@ test('complete: retries once on a 503 then succeeds, logging the retried attempt
   assert.equal(retries[0].status, 503);
   assert.equal(retries[0].name, 'Error');
   assert.ok(!JSON.stringify(logs).includes('temporarily unavailable'), 'the provider body is never logged');
+  assert.equal('limitSource' in retries[0], false, 'a plain-text body adds no limit source');
+  assert.equal('provider' in retries[0], false, 'a plain-text body adds no provider');
 });
 
 test('complete: a timed-out attempt is retried and logged with its error name', async () => {
@@ -896,6 +899,40 @@ test('complete: a timed-out attempt is retried and logged with its error name', 
   assert.equal(calls, 2);
   const retries = logs.filter((l) => l.msg === 'llm: retry');
   assert.deepEqual(retries.map((l) => [l.attempt, l.status, l.name]), [[1, null, 'TimeoutError']]);
+  assert.equal('limitSource' in retries[0] || 'provider' in retries[0], false, 'no body, no limit fields');
+});
+
+test('complete: a 429 whose JSON body names the limit source and the provider puts both on the retry line', async () => {
+  let calls = 0;
+  const body = JSON.stringify({
+    error: {
+      message: 'Provider returned error',
+      code: 429,
+      metadata: { raw: 'the upstream asks to slow down', provider_name: 'Google AI Studio', limit_source: 'upstream', is_byok: true },
+    },
+  });
+  const llm = createLlm({
+    apiKey: 'k',
+    getConfig: () => baseConfig({ retries: 1 }),
+    calibrator: fakeCalibrator(),
+    state: fakeState(),
+    fetchImpl: async () => {
+      calls += 1;
+      if (calls === 1) return errorResponse(429, body);
+      return okResponse('recovered');
+    },
+  });
+  const { result, logs } = await withCapturedLogs(() => llm.complete([{ role: 'user', content: 'hi' }]));
+  assert.equal(result.text, 'recovered');
+  assert.equal(calls, 2);
+  const retries = logs.filter((l) => l.msg === 'llm: retry');
+  assert.equal(retries.length, 1);
+  const { level, time, msg, ...fields } = retries[0];
+  assert.equal(level, 'warn');
+  assert.equal(typeof time, 'string');
+  assert.equal(msg, 'llm: retry');
+  assert.deepEqual(fields, { attempt: 1, status: 429, name: 'Error', limitSource: 'upstream', provider: 'Google AI Studio' });
+  assert.ok(!JSON.stringify(logs).includes('slow down'), 'the raw body is never logged');
 });
 
 test('complete: the last failed attempt is thrown, not logged as a retry', async () => {
@@ -910,6 +947,133 @@ test('complete: the last failed attempt is thrown, not logged as a retry', async
   const { logs } = await withCapturedLogs(() => assert.rejects(llm.complete([{ role: 'user', content: 'hi' }]), (err) => err.statusCode === 503));
   assert.equal(calls, 1);
   assert.equal(logs.filter((l) => l.msg === 'llm: retry').length, 0);
+});
+
+// --- one `llm: usage` line per answered request, whatever its role ---
+
+/** The `llm: usage` lines of `logs`, each reduced to its own fields (level/time/msg checked and dropped). */
+function usageFields(logs) {
+  return logs
+    .filter((l) => l.msg === 'llm: usage')
+    .map(({ level, time, msg, ...fields }) => {
+      assert.equal(level, 'info');
+      assert.equal(typeof time, 'string');
+      assert.equal(msg, 'llm: usage');
+      return fields;
+    });
+}
+
+function jsonResponse(json) {
+  return { ok: true, status: 200, json: async () => json };
+}
+
+const NO_USAGE = {
+  provider: null,
+  promptTokens: null,
+  completionTokens: null,
+  reasoningTokens: null,
+  cachedTokens: null,
+  cacheWriteTokens: null,
+  cost: null,
+  upstreamCost: null,
+  byok: null,
+  id: null,
+};
+
+test('complete: an answered request logs exactly one llm: usage line filled from the response', async () => {
+  const llm = createLlm({
+    apiKey: 'k',
+    getConfig: () => baseConfig(),
+    calibrator: fakeCalibrator(),
+    state: fakeState(),
+    fetchImpl: async () => jsonResponse({
+      id: 'gen-1700000000-abc',
+      provider: 'Google AI Studio',
+      choices: [{ message: { content: 'the answer itself' }, finish_reason: 'stop' }],
+      usage: {
+        prompt_tokens: 1200,
+        completion_tokens: 80,
+        total_tokens: 1280,
+        prompt_tokens_details: { cached_tokens: 1000, cache_write_tokens: 150 },
+        completion_tokens_details: { reasoning_tokens: 30 },
+        cost: 0.0042,
+        is_byok: true,
+        cost_details: { upstream_inference_cost: 0.0038 },
+      },
+    }),
+  });
+  const { result, logs } = await withCapturedLogs(() =>
+    llm.complete([{ role: 'user', content: 'the prompt itself' }], { role: 'analyzer', model: 'google/gemini-x' }),
+  );
+  assert.equal(result.text, 'the answer itself');
+  assert.equal(result.provider, 'Google AI Studio');
+  assert.deepEqual(usageFields(logs), [{
+    role: 'analyzer',
+    model: 'google/gemini-x',
+    provider: 'Google AI Studio',
+    promptTokens: 1200,
+    completionTokens: 80,
+    reasoningTokens: 30,
+    cachedTokens: 1000,
+    cacheWriteTokens: 150,
+    cost: 0.0042,
+    upstreamCost: 0.0038,
+    byok: true,
+    id: 'gen-1700000000-abc',
+  }]);
+  const text = JSON.stringify(logs);
+  assert.ok(!text.includes('the prompt itself') && !text.includes('the answer itself'), 'no prompt or answer text');
+});
+
+test('complete: a response without usage logs the usage line with nulls and still answers', async () => {
+  for (const extra of [{}, { usage: null }, { usage: { prompt_tokens_details: null, completion_tokens_details: null, cost_details: null } }]) {
+    const llm = createLlm({
+      apiKey: 'k',
+      getConfig: () => baseConfig(),
+      calibrator: fakeCalibrator(),
+      state: fakeState(),
+      fetchImpl: async () => jsonResponse({ choices: [{ message: { content: 'hi' } }], ...extra }),
+    });
+    const { result, logs } = await withCapturedLogs(() => llm.complete([{ role: 'user', content: 'hi' }]));
+    assert.equal(result.text, 'hi', JSON.stringify(extra));
+    assert.deepEqual(usageFields(logs), [{ role: null, model: 'test-model', ...NO_USAGE }], JSON.stringify(extra));
+  }
+});
+
+test('complete: the usage line keeps numbers, booleans and ids only; a value of another type is null', async () => {
+  const llm = createLlm({
+    apiKey: 'k',
+    getConfig: () => baseConfig(),
+    calibrator: fakeCalibrator(),
+    state: fakeState(),
+    fetchImpl: async () => jsonResponse({
+      id: { text: 'not an id' },
+      provider: ['not a name'],
+      choices: [{ message: { content: 'hi' } }],
+      usage: {
+        prompt_tokens: 'many',
+        completion_tokens: null,
+        prompt_tokens_details: { cached_tokens: 'some', cache_write_tokens: [1] },
+        completion_tokens_details: 'none',
+        cost: '0.1',
+        is_byok: 'yes',
+        cost_details: { upstream_inference_cost: { value: 1 } },
+      },
+    }),
+  });
+  const { logs } = await withCapturedLogs(() => llm.complete([{ role: 'user', content: 'hi' }], { role: 7 }));
+  assert.deepEqual(usageFields(logs), [{ role: null, model: 'test-model', ...NO_USAGE }]);
+});
+
+test('complete: a refused, failed or json.error request logs no usage line', async () => {
+  const make = (fetchImpl, cfg = {}) =>
+    createLlm({ apiKey: 'k', getConfig: () => baseConfig(cfg), calibrator: fakeCalibrator(), state: fakeState(), fetchImpl });
+  const { logs } = await withCapturedLogs(async () => {
+    await assert.rejects(make(async () => okResponse('x'), { maxRequestTokens: 1 }).complete([{ role: 'user', content: 'hi' }]));
+    await assert.rejects(make(async () => errorResponse(400, 'bad request')).complete([{ role: 'user', content: 'hi' }]));
+    await assert.rejects(make(async () => jsonResponse({ error: { message: 'refused' } })).complete([{ role: 'user', content: 'hi' }]));
+  });
+  assert.deepEqual(usageFields(logs), []);
 });
 
 test('complete: options.reasoning (a plain object) is sent verbatim as body.reasoning; anything else omits it', async () => {

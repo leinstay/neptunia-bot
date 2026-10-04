@@ -164,6 +164,50 @@ export function resolveProvider(model, { override, byModel, fallback, role } = {
   return isPlainObject(fallback) ? fallback : undefined;
 }
 
+const numberOrNull = (value) => (typeof value === 'number' && Number.isFinite(value) ? value : null);
+const stringOrNull = (value) => (typeof value === 'string' && value ? value : null);
+
+// The fields of one `llm: usage` line, so a day's spend can be split by role: who asked
+// (`role`, `model`), who served it (`provider`, `id`) and what it cost, read from OpenRouter's
+// `usage` and its detail objects. Numbers, booleans and ids only -- an absent value or one of
+// another type is null -- so the line never carries text of a prompt or an answer.
+function usageLogFields(json, usage, model, role) {
+  return {
+    role: stringOrNull(role),
+    model: stringOrNull(model),
+    provider: stringOrNull(json.provider),
+    promptTokens: numberOrNull(usage.prompt_tokens),
+    completionTokens: numberOrNull(usage.completion_tokens),
+    reasoningTokens: numberOrNull(usage.completion_tokens_details?.reasoning_tokens),
+    cachedTokens: numberOrNull(usage.prompt_tokens_details?.cached_tokens),
+    cacheWriteTokens: numberOrNull(usage.prompt_tokens_details?.cache_write_tokens),
+    cost: numberOrNull(usage.cost),
+    upstreamCost: numberOrNull(usage.cost_details?.upstream_inference_cost),
+    byok: typeof usage.is_byok === 'boolean' ? usage.is_byok : null,
+    id: stringOrNull(json.id),
+  };
+}
+
+// What a retried error's body says about the limit that was hit, as `llm: retry` fields:
+// `limitSource` and `provider` from a JSON body's `error.metadata` (`limit_source`,
+// `provider_name`), each only when it is a string. Never the body itself -- it may echo the
+// request. No body, a body that is not JSON or one of another shape adds nothing.
+function retryLimitFields(body) {
+  if (typeof body !== 'string') return {};
+  let parsed;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return {};
+  }
+  const metadata = parsed?.error?.metadata;
+  if (!isPlainObject(metadata)) return {};
+  const fields = {};
+  if (stringOrNull(metadata.limit_source)) fields.limitSource = metadata.limit_source;
+  if (stringOrNull(metadata.provider_name)) fields.provider = metadata.provider_name;
+  return fields;
+}
+
 /**
  * @param {object} deps
  * @param {string} deps.apiKey
@@ -199,9 +243,13 @@ export function createLlm({ apiKey, getConfig, calibrator, state, fetchImpl = fe
    * Retries (`llm.retries`): a network failure, a timed-out attempt and an
    * HTTP status in `RETRY_STATUS` are retried after `backoffMs`, each retried
    * attempt logged as `llm: retry` (`attempt` 1-based, `status` or null,
-   * `name`); the last one is thrown. Once a 200 was received (the request may
-   * be billed) nothing is retried: a `json.error` body or an unparsable body is
-   * thrown as it is.
+   * `name`, plus `limitSource` / `provider` when the error body is JSON naming
+   * them in `error.metadata`); the last one is thrown. Once a 200 was received
+   * (the request may be billed) nothing is retried: a `json.error` body or an
+   * unparsable body is thrown as it is.
+   * Every answered request logs one `llm: usage` line (role, model, provider,
+   * token counts, cost, BYOK flag, response id; null where the response omits
+   * a value), whatever its role -- see `usageLogFields`.
    * `options.timeoutMs` overrides `llm.timeoutMs` for the request's abort
    * signal — the analyzer (a large batch, a long JSON answer) and the media
    * describer need more room than a chat reply's default.
@@ -295,7 +343,12 @@ export function createLlm({ apiKey, getConfig, calibrator, state, fetchImpl = fe
     for (let attempt = 0; attempt <= cfg.retries; attempt += 1) {
       if (attempt > 0) {
         // `attempt` is also the 1-based number of the attempt that failed and is retried now.
-        log.warn('llm: retry', { attempt, status: lastError?.statusCode ?? null, name: lastError?.name ?? null });
+        log.warn('llm: retry', {
+          attempt,
+          status: lastError?.statusCode ?? null,
+          name: lastError?.name ?? null,
+          ...retryLimitFields(lastError?.body),
+        });
         await sleep(backoffMs(attempt));
       }
       if (options.signal?.aborted) throw lastError ?? options.signal.reason ?? new Error('request aborted');
@@ -340,6 +393,7 @@ export function createLlm({ apiKey, getConfig, calibrator, state, fetchImpl = fe
       if (usage.prompt_tokens > requestTokenCap) {
         log.warn('llm: provider counted more prompt tokens than the cap', { usage, estimated });
       }
+      log.info('llm: usage', usageLogFields(json, usage, body.model, options.role));
       // `json.provider` is OpenRouter's own name for whichever upstream provider
       // actually served the request (undefined when the response omits it) --
       // surfaced so `/nep ping` can report it without a second request shape.
