@@ -485,8 +485,7 @@ After the persona answers someone, a conversation window opens in that channel (
 by every further answer). A message inside the window that carries no trigger (no mention, no reply to the persona,
 no name) is not answered blindly: code sends the last `mention.followUpContext` (default 15) lines of the channel, the
 persona's own lines marked with `labels.self`, plus the new message marked as `<candidate>`, to `address.md` on
-`classifier.address` when set, otherwise `classifier.text` (default `anthropic/claude-sonnet-4.6`); the request keeps
-the `classifier.text` role. The transcript carries cached media captions
+the `classifier.text` model (default `anthropic/claude-sonnet-4.6`). The transcript carries cached media captions
 (pictures, stickers, GIFs, custom emoji, watched videos) in the same label forms as the persona's transcript. Code
 makes no new describer requests for the history lines; it describes only the candidate's own media before running the
 classifier. Output is ONE line: `yes` when the candidate
@@ -556,8 +555,7 @@ question (see the video cache section above). Switch `features.videoRewatch` (mi
 When the persona is addressed (a reply turn) and all of the following hold (`features.webLookup` is on,
 `web.search.enabled` is not false, the `lookup.md` prompt exists, `web.search.maxPerTurn` is at least 1, and a
 `BRAVE_SEARCH_API_KEY` is configured), the classifier decides whether the trigger message asks something that needs
-a web search. The model is `classifier.search` when set, otherwise `classifier.text`; the request keeps the
-`classifier.text` role. Code sends `lookup.md` as the system prompt with a user
+a web search. Code sends `lookup.md` as the system prompt on the `classifier.text` model with a user
 message containing a short `<transcript>` (the same as the re-watch classifier, with the persona's own lines
 marked by `labels.self`) and a `<candidate>` block:
 

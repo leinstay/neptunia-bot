@@ -80,9 +80,7 @@ The three helper model roles, grouped under one key. Each is set independently, 
 
 | Key | Default | Meaning |
 |---|---|---|
-| `text` | `"anthropic/claude-sonnet-4.6"` | Default for `classifier.address` and `classifier.search` when those are null. Directly runs the re-watch classifier (`features.videoRewatch`), the variety pass (`features.variety`), the link reader and the search condenser (`features.webLookup`) |
-| `address` | `null` | Model of the address classifier (`features.followUp`): the yes/no decision whether an untagged message continues a conversation with the persona. `null` or empty = `classifier.text`. The request keeps the `classifier.text` role, so `llm.providerByModel` routes and `/nep model` / `/nep ping` stay the same |
-| `search` | `null` | Model of the search classifier (`features.webLookup`): whether a message needs a web search and the query. `null` or empty = `classifier.text`. Same role note as `classifier.address` |
+| `text` | `"anthropic/claude-sonnet-4.6"` | Runs the address classifier (`features.followUp`), the search classifier, the link reader and the search condenser (`features.webLookup`), the re-watch classifier (`features.videoRewatch`) and the variety pass (`features.variety`) |
 | `media` | `"anthropic/claude-haiku-4.5"` | Picture describer (`features.mediaDescriptions`): one-line descriptions for pictures, GIF frames, video posters, stickers, custom emoji and link thumbnails |
 | `video` | `"google/gemini-3.8-flash"` | Video describer (`features.videoDescriptions`): watches short clips, re-watches on a question, retries on request. Must accept both video and audio input |
 
@@ -519,7 +517,7 @@ Role `analyzer`. Reasons over long transcripts and returns strict JSON. Needs th
 
 ### Text classifiers (`classifier.text`)
 
-The cheapest text model that can answer "yes" or "no" reliably. Directly runs the re-watch classifier, the variety pass, the link reader and the search condenser. Also the default for `classifier.address` (the address classifier) and `classifier.search` (the search classifier) when those are null. Default: `anthropic/claude-sonnet-4.6`.
+The cheapest text model that can answer "yes" or "no" reliably. Runs the address classifier (`features.followUp`), the search classifier, the link reader and the search condenser (`features.webLookup`), the re-watch classifier (`features.videoRewatch`) and the variety pass (`features.variety`). Default: `anthropic/claude-sonnet-4.6`.
 
 ### Pictures (`classifier.media`)
 
