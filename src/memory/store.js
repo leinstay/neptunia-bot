@@ -801,13 +801,17 @@ export function createStore({ dataDir }) {
      * @param {string} userId
      * @param {object} message
      * @param {number} [maxLength]
+     * @returns {number} How many entries the cap dropped (0 under it or without one).
      */
     pushPrivateBuffer(guildId, userId, message, maxLength = Infinity) {
       const item = privateEntry(guildId, userId);
       const buffer = item.value.buffer;
       buffer.push(message);
-      if (buffer.length > maxLength) buffer.splice(0, buffer.length - maxLength);
+      const over = buffer.length - maxLength;
+      const dropped = over > 0 ? over : 0; // as pushBuffer: never NaN
+      if (dropped > 0) buffer.splice(0, dropped);
       item.dirty = true;
+      return dropped;
     },
 
     /**
@@ -1313,11 +1317,24 @@ export function createStore({ dataDir }) {
       return entry(bufferFile(guildId), () => []).value;
     },
 
+    /**
+     * Buffer one observed message for the next analyzer batch, dropping the
+     * oldest entries past `maxLength`.
+     * @param {string} guildId
+     * @param {object} message
+     * @param {number} maxLength
+     * @returns {number} How many entries the cap dropped (0 while under it), so
+     *   the caller can log a loss the analyzer will never see.
+     */
     pushBuffer(guildId, message, maxLength) {
       const item = entry(bufferFile(guildId), () => []);
       item.value.push(message);
-      if (item.value.length > maxLength) item.value.splice(0, item.value.length - maxLength);
+      // `> 0` rather than Math.max: a non-numeric cap keeps everything and reports 0, never NaN.
+      const over = item.value.length - maxLength;
+      const dropped = over > 0 ? over : 0;
+      if (dropped > 0) item.value.splice(0, dropped);
       item.dirty = true;
+      return dropped;
     },
 
     /**

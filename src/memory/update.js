@@ -382,7 +382,9 @@ export function characterText(prompts, selfName) {
  *   read-only into `<public_profile>` (src/behavior/prompt.js#renderProfile, `now` drives its
  *   unsure/stale marks), `<existing_channels>` is left out and every transcript line sits under
  *   `labels.memory.privateChannel` instead of a channel name. Omitted -> the guild request.
- * @returns {{ messages: object[], consumed: number }}
+ * @returns {{ messages: object[], consumed: number, shown: number, trimmed: number }} `consumed`
+ *   is always the whole batch; `shown` of it made it into `<new_messages>` (the newest lines),
+ *   the other `trimmed` did not fit the token cap (`shown + trimmed === consumed`).
  */
 export function buildMemoryRequest({ prompts, config, calibrator, profiles, guildMemory, channels, messages, selfName, loreEntries, descriptions, videos, reads, nameOf, privateChat }) {
   const { timezone } = config.bot;
@@ -533,6 +535,10 @@ export function buildMemoryRequest({ prompts, config, calibrator, profiles, guil
     // even the oldest ones that did not fit in the transcript block — they
     // are gone either way and must not be re-sent on the next update.
     consumed: messages.length,
+    // One transcript item per message: how many of the consumed the model
+    // actually saw, and how many the cap cut off the old end unseen.
+    shown: keptTranscriptItems.length,
+    trimmed: messages.length - keptTranscriptItems.length,
   };
 }
 
@@ -1228,8 +1234,15 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
       direct: Boolean(direct),
     };
     const cfg = hot.config.memory;
-    if (privateUserId) store.pushPrivateBuffer(guildId, String(privateUserId), slim, cfg.batchMessages * 3);
-    else store.pushBuffer(guildId, slim, cfg.batchMessages * 3);
+    // The cap drops the oldest buffered messages before any analyzer saw them (the analyzer
+    // is failing or backed off): say so, with the count only. A private line never names the member.
+    if (privateUserId) {
+      const dropped = store.pushPrivateBuffer(guildId, String(privateUserId), slim, cfg.batchMessages * 3);
+      if (dropped > 0) log.info('memory: private buffer trimmed', { guildId, dropped });
+    } else {
+      const dropped = store.pushBuffer(guildId, slim, cfg.batchMessages * 3);
+      if (dropped > 0) log.info('memory: buffer trimmed', { guildId, dropped });
+    }
   }
 
   /**
@@ -1261,9 +1274,13 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
    * `TokenLimitError`, a network/provider error, a missing prompt) reports
    * `usage: null, estimated: 0`: nothing was spent.
    *
+   * A success also carries `shown`/`trimmed`: how many of `messages` the
+   * request's transcript held and how many the token cap cut (see
+   * `buildMemoryRequest`).
+   *
    * @param {string} guildId
    * @param {object[]} messages  Slim messages (oldest first) to summarize; NOT read from or removed off any buffer.
-   * @returns {Promise<{ ok: boolean, usage: object|null, estimated: number, result: object|null, error?: Error }>}
+   * @returns {Promise<{ ok: boolean, usage: object|null, estimated: number, result: object|null, shown?: number, trimmed?: number, error?: Error }>}
    */
   async function analyze(guildId, messages) {
     let context;
@@ -1315,7 +1332,7 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
    * @param {string} guildId
    * @param {string} userId  The DM partner.
    * @param {object[]} messages  Slim buffered direct messages, oldest first.
-   * @returns {Promise<{ ok: boolean, usage: object|null, estimated: number, result: object|null, error?: Error }>}
+   * @returns {Promise<{ ok: boolean, usage: object|null, estimated: number, result: object|null, shown?: number, trimmed?: number, error?: Error }>}
    */
   async function analyzePrivate(guildId, userId, messages) {
     const id = String(userId);
@@ -1447,8 +1464,9 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
     const { descriptions, videos, reads } = cachedMedia(guildId, messages);
 
     let completion;
+    let fit; // the request's { shown, trimmed }, reported with a success
     try {
-      const { messages: llmMessages } = buildMemoryRequest({
+      const { messages: llmMessages, shown, trimmed } = buildMemoryRequest({
         prompts: hot.prompts,
         config: hot.config,
         calibrator,
@@ -1462,6 +1480,7 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
         nameOf: storeNameOf(store, guildId),
         ...input,
       });
+      fit = { shown, trimmed };
 
       completion = await llm.complete(llmMessages, {
         model: cfg.model || undefined,
@@ -1504,7 +1523,7 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
 
     try {
       const result = applyUpdate(update, applySwitches());
-      return { ok: true, usage, estimated, result };
+      return { ok: true, usage, estimated, result, ...fit };
     } catch (err) {
       // A parsed answer the store failed to take: not the answer's size, so the batch is not
       // halved (see recordFailure). Logged by the error's name only.
@@ -1588,7 +1607,15 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
         store.flush();
         // Counts only: a portrait cue's text is the analyzer's prose about a member.
         const { portraitRequests, ...counts } = outcome.result;
-        log.info('memory: update applied', { guildId, consumed: messages.length, ...counts, portraitRequests: portraitRequests.length, emojiUsage });
+        log.info('memory: update applied', {
+          guildId,
+          consumed: messages.length,
+          shown: outcome.shown,
+          trimmed: outcome.trimmed,
+          ...counts,
+          portraitRequests: portraitRequests.length,
+          emojiUsage,
+        });
         return;
       }
       recordFailure(guildId, outcome, 'memory: update', { guildId });
@@ -1622,7 +1649,7 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
         sizeFactors.delete(key);
         store.shiftPrivateBuffer(guildId, userId, messages);
         store.flush();
-        log.info('memory: private update applied', { guildId, consumed: messages.length, ...outcome.result });
+        log.info('memory: private update applied', { guildId, consumed: messages.length, shown: outcome.shown, trimmed: outcome.trimmed, ...outcome.result });
         return;
       }
       recordFailure(key, outcome, 'memory: private update', { guildId });

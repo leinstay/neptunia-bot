@@ -442,6 +442,53 @@ test('buildMemoryRequest: a tiny token limit still consumes everything but keeps
   assert.ok(!user.includes('message number 0'), 'oldest line is dropped first');
 });
 
+/** Five one-minute-apart lines against a cap that holds the required blocks plus `lines` of the newest ones. */
+function fiveLineRequest(lines) {
+  const calibrator = createCalibrator();
+  const cost = (text) => calibrator.apply(estimateTokens(text)) + 2;
+  const system = 'S';
+  const fixedCost =
+    cost(system) +
+    cost(`<existing_profiles>\n${JSON.stringify({})}\n</existing_profiles>`) +
+    cost(`<existing_guild>\n${JSON.stringify({ patterns: '', starters: '', injokes: [], self: [], learned: [] })}\n</existing_guild>`) +
+    cost(`<existing_channels>\n${JSON.stringify({})}\n</existing_channels>`);
+  const base = Date.UTC(2026, 0, 1, 0, 0, 0);
+  const messages = [0, 1, 2, 3, 4].map((i) => slimMessage({ id: `m${i}`, content: `message number ${i}`, ts: base + i * 60_000 }));
+  const lineTexts = formatTranscript(messages, { timezone: 'UTC', gapMinutes: 20, maxChars: 800, selfName: 'Nept', mode: 'memory', labels }).map(
+    (item) => item.text,
+  );
+  const lineCost = cost(lineTexts.at(-1));
+  const config = makeConfig({ llm: { ...makeConfig().llm, maxRequestTokens: fixedCost + lines * lineCost, safetyMargin: 1 } });
+  return buildMemoryRequest({ prompts: { memory: system, labels }, config, calibrator, profiles: {}, guildMemory: {}, messages, selfName: 'Nept' });
+}
+
+test('buildMemoryRequest: a transcript over the cap reports how many lines the model saw and how many were trimmed', () => {
+  const { messages: llmMessages, consumed, shown, trimmed } = fiveLineRequest(2);
+  assert.equal(consumed, 5);
+  assert.equal(shown, 2);
+  assert.equal(trimmed, 3);
+  assert.equal(shown + trimmed, consumed);
+  const user = llmMessages[1].content;
+  assert.ok(user.includes('message number 3') && user.includes('message number 4'), 'the two newest lines are the ones shown');
+  assert.ok(!user.includes('message number 2'));
+});
+
+test('buildMemoryRequest: a transcript that fits reports every line shown and none trimmed', () => {
+  const messages = [0, 1, 2].map((i) => slimMessage({ id: `m${i}`, content: `hi ${i}`, ts: Date.UTC(2026, 0, 1, 12, i) }));
+  const { consumed, shown, trimmed } = buildMemoryRequest({
+    prompts: { memory: 'memory system prompt', labels },
+    config: makeConfig(),
+    calibrator: createCalibrator(),
+    profiles: {},
+    guildMemory: {},
+    messages,
+    selfName: 'Nept',
+  });
+  assert.equal(consumed, 3);
+  assert.equal(shown, 3);
+  assert.equal(trimmed, 0);
+});
+
 // ---- relationships: <character> block + affinity in existing profiles ------
 
 test('buildMemoryRequest: relationships on prepends a <character> block with {{name}} filled', () => {
@@ -2434,6 +2481,27 @@ test('observe: does nothing while store.state.data.paused is true -- no buffer, 
   });
 });
 
+test('observe: a buffer over its cap logs "memory: buffer trimmed" with the dropped count, no contents', async () => {
+  await withStoreAsync(async (store) => {
+    const hot = { config: makeConfig({ memory: { ...makeConfig().memory, batchMessages: 1 } }) };
+    const updater = createMemoryUpdater({ hot, store, llm: {}, calibrator: createCalibrator(), getSelfName: () => 'Nept' });
+
+    const { logs } = await withCapturedLogs(() => {
+      for (let i = 1; i <= 5; i += 1) updater.observe('g1', slimMessage({ id: `m${i}`, content: `κείμενο ${i}` }));
+    });
+
+    assert.deepEqual(store.getBuffer('g1').map((m) => m.id), ['m3', 'm4', 'm5'], 'capped at batchMessages * 3');
+    const trimmed = logs.filter((entry) => entry.msg === 'memory: buffer trimmed');
+    assert.equal(trimmed.length, 2, 'one line per push past the cap, none before it');
+    for (const entry of trimmed) {
+      assert.equal(entry.level, 'info');
+      assert.equal(entry.guildId, 'g1');
+      assert.equal(entry.dropped, 1);
+    }
+    assert.ok(!JSON.stringify(logs).includes('κείμενο'), 'never message contents');
+  });
+});
+
 // ---- run -----------------------------------------------------------------
 
 test('run: happy path applies the update, shifts the buffer and flushes to disk', async () => {
@@ -4180,6 +4248,46 @@ test('run: the "memory: update applied" log line carries the learned add count',
   });
 });
 
+/** Run one guild batch of `count` long lines under `maxRequestTokens` and return its "update applied" log line. */
+async function appliedLogFor(count, maxRequestTokens) {
+  return withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    const base = Date.now() - 60_000;
+    for (let i = 0; i < count; i += 1) {
+      store.pushBuffer(guildId, slimMessage({ id: `m${i}`, content: `line ${i} ${'word '.repeat(100)}`, ts: base + i * 1000 }), 100);
+    }
+    const hot = {
+      config: makeConfig({
+        llm: { ...makeConfig().llm, maxRequestTokens, safetyMargin: 1 },
+        memory: { ...makeConfig().memory, batchMessages: count, minBatchMessages: 1 },
+      }),
+      prompts: { memory: 'memory system prompt', labels },
+    };
+    const llm = { complete: async () => ({ text: '{}' }) };
+    const updater = createMemoryUpdater({ hot, store, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept' });
+    const { logs } = await withCapturedLogs(() => updater.run(guildId));
+    assert.deepEqual(store.getBuffer(guildId), [], 'the whole batch is consumed, trimmed lines included');
+    return logs.find((entry) => entry.msg === 'memory: update applied');
+  });
+}
+
+test('run: the "memory: update applied" log says how many lines the model saw and how many were trimmed', async () => {
+  const applied = await appliedLogFor(6, 600);
+  assert.ok(applied, 'the update was applied');
+  assert.equal(applied.consumed, 6);
+  assert.ok(Number.isInteger(applied.shown) && applied.shown > 0, 'some newest lines fit');
+  assert.ok(Number.isInteger(applied.trimmed) && applied.trimmed > 0, 'the oldest lines did not');
+  assert.equal(applied.shown + applied.trimmed, applied.consumed);
+});
+
+test('run: a batch that fits logs every line shown and trimmed 0', async () => {
+  const applied = await appliedLogFor(6, 50000);
+  assert.ok(applied, 'the update was applied');
+  assert.equal(applied.consumed, 6);
+  assert.equal(applied.shown, 6);
+  assert.equal(applied.trimmed, 0);
+});
+
 // ---- private chat (Discord DMs) -------------------------------------------
 
 function privateHot(memoryOverrides = {}, configOverrides = {}) {
@@ -4441,9 +4549,52 @@ test('tick: a due private buffer is analyzed, shifted after success and logged w
     assert.equal(applied.users, 1);
     assert.equal(applied.consumed, 6);
     assert.deepEqual(applied.dropped, { users: 1, guild: false, channels: 0, lore: 0, self: 1 });
+    assert.equal(applied.shown, 6, 'a small private batch fits whole');
+    assert.equal(applied.trimmed, 0);
     const text = JSON.stringify(logs);
     assert.ok(!text.includes('99999'), 'never another member id');
     assert.ok(!text.includes('"u1"'), 'not even the partner id');
+  });
+});
+
+test('runPrivate: the "memory: private update applied" log says how many lines the model saw and how many were trimmed', async () => {
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    const hot = privateHot({ batchMessages: 6, minBatchMessages: 1 }, { llm: { ...makeConfig().llm, maxRequestTokens: 900, safetyMargin: 1 } });
+    const updater = createMemoryUpdater({ hot, store, llm: { complete: async () => ({ text: '{}' }) }, calibrator: createCalibrator(), getSelfName: () => 'Nept' });
+    const base = Date.now() - 60_000;
+    for (let i = 0; i < 6; i += 1) {
+      updater.observe(guildId, dmMessage({ id: `a${i}`, content: `line ${i} ${'word '.repeat(100)}`, ts: base + i * 1000 }), { private: 'u1' });
+    }
+
+    const { logs } = await withCapturedLogs(() => updater.runPrivate(guildId, 'u1'));
+
+    const applied = logs.find((entry) => entry.msg === 'memory: private update applied');
+    assert.ok(applied, 'the update was applied');
+    assert.equal(applied.consumed, 6);
+    assert.ok(Number.isInteger(applied.shown) && applied.shown > 0, 'some newest lines fit');
+    assert.ok(Number.isInteger(applied.trimmed) && applied.trimmed > 0, 'the oldest lines did not');
+    assert.equal(applied.shown + applied.trimmed, applied.consumed);
+    assert.deepEqual(store.getPrivateBuffer(guildId, 'u1'), [], 'the whole batch is consumed, trimmed lines included');
+  });
+});
+
+test('observe: a private buffer over its cap logs "memory: private buffer trimmed" with the count, never the member', async () => {
+  await withStoreAsync(async (store) => {
+    const updater = createMemoryUpdater({ hot: privateHot({ batchMessages: 1 }), store, llm: {}, calibrator: createCalibrator(), getSelfName: () => 'Nept' });
+
+    const { logs } = await withCapturedLogs(() => {
+      for (let i = 1; i <= 4; i += 1) updater.observe('g1', dmMessage({ id: `m${i}`, content: `κείμενο ${i}`, ts: i }), { private: 'u1' });
+    });
+
+    const trimmed = logs.filter((entry) => entry.msg === 'memory: private buffer trimmed');
+    assert.equal(trimmed.length, 1, 'only the push past the cap (batchMessages * 3) logs');
+    assert.equal(trimmed[0].level, 'info');
+    assert.equal(trimmed[0].guildId, 'g1');
+    assert.equal(trimmed[0].dropped, 1);
+    const text = JSON.stringify(logs);
+    assert.ok(!text.includes('u1'), 'never the partner id');
+    assert.ok(!text.includes('κείμενο'), 'never message contents');
   });
 });
 

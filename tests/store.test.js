@@ -340,6 +340,17 @@ test('pushBuffer: caps the buffer length, dropping the oldest entries', () => {
   assert.deepEqual(buffer.map((m) => m.i), [2, 3, 4]);
 });
 
+test('pushBuffer: returns how many oldest entries the cap dropped, 0 while under it', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  const dropped = [];
+  for (let i = 0; i < 5; i += 1) dropped.push(store.pushBuffer('g1', { i }, 3));
+  assert.deepEqual(dropped, [0, 0, 0, 1, 1]);
+  // A cap lowered by a hot config edit drops several at once.
+  assert.equal(store.pushBuffer('g1', { i: 5 }, 1), 3);
+  assert.deepEqual(store.getBuffer('g1').map((m) => m.i), [5]);
+});
+
 test('shiftBuffer: drops exactly the consumed messages, by id; later arrivals and untaken ones stay', () => {
   const dir = tmpDataDir();
   const store = createStore({ dataDir: dir });
@@ -1815,6 +1826,15 @@ test('pushPrivateBuffer: an optional maxLength drops the oldest entries', () => 
   const store = createStore({ dataDir: dir });
   for (let i = 1; i <= 5; i += 1) store.pushPrivateBuffer('g1', 'u1', { id: `m${i}`, ts: i }, 3);
   assert.deepEqual(store.getPrivate('g1', 'u1').buffer.map((m) => m.id), ['m3', 'm4', 'm5']);
+});
+
+test('pushPrivateBuffer: returns how many oldest entries the cap dropped, 0 under it or without one', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  const dropped = [];
+  for (let i = 1; i <= 5; i += 1) dropped.push(store.pushPrivateBuffer('g1', 'u1', { id: `m${i}`, ts: i }, 3));
+  assert.deepEqual(dropped, [0, 0, 0, 1, 1]);
+  assert.equal(store.pushPrivateBuffer('g1', 'u2', { id: 'm1', ts: 1 }), 0);
 });
 
 test('listPrivate: ids with a private file, on disk or only cached', () => {
