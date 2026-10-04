@@ -26,6 +26,7 @@
     "privateMessages": false,
     "mentor": false,
     "variety": true,
+    "varietyPrecompute": true,
     "typingSimulation": true,
     "adminCommands": true
   },
@@ -93,6 +94,7 @@
     "switchDelayMs": [2000, 9000],
     "followUpMinutes": 15,
     "followUpClassifyReplies": true,
+    "followUpOverheard": true,
     "followUpContext": 15,
     "followUpMaxOutputTokens": 8,
     "followUpNoStreak": 3,
@@ -147,6 +149,7 @@
     "learnedHalfLifeDays": 720,
     "maxAliases": 5,
     "maxAliasesStored": 15,
+    "aliasRosterSize": 40,
     "aliasHalfLifeDays": 365,
     "confirmAfter": 2,
     "confirmGapHours": 12,
@@ -233,7 +236,7 @@
     "google": { "resolution": "1K" }
   },
   "gifs": { "max": 20, "storeMax": 300, "halfLifeDays": 30, "maxPerDay": 40, "backfillMessages": 500, "backfillDescribe": 20, "recachePerRun": 50 },
-  "variety": { "window": 16, "recentMinutes": 180, "minLines": 3, "contextChars": 120, "maxPatterns": 4, "shapeChars": 140, "maxOutputTokens": 500, "timeoutMs": 8000, "history": 20 },
+  "variety": { "window": 16, "recentMinutes": 180, "minLines": 3, "contextChars": 120, "maxPatterns": 4, "shapeChars": 140, "maxOutputTokens": 500, "timeoutMs": 8000, "requestTimeoutMs": 30000, "history": 20 },
   "private": { "minAffinity": 5, "maxPerUserPerDay": 100, "maxPerOwnerPerDay": 200, "purgeMaxMessages": 5000 },
   "mentor": {
     "model": null,
