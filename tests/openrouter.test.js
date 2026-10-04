@@ -18,6 +18,7 @@ import {
   backoffMs,
   dailyCapOf,
   VIDEO_TOKENS_PER_SECOND_FALLBACK,
+  providerLimitOf,
 } from '../src/llm/openrouter.js';
 import { withCapturedLogs } from './fixtures/capture-logs.js';
 
@@ -853,8 +854,9 @@ test('complete: without options.signal, behaviour is unchanged (only the per-req
   assert.equal(seenSignal.aborted, false);
 });
 
-// Only THREE tests exercise the real retry backoff sleep (~1.5s at attempt 1): a gateway error, a
-// timeout and a rate limit with a JSON body.
+// Only FIVE tests exercise the real retry backoff sleep (~1.5s at attempt 1): a gateway error, a
+// timeout, a rate limit with a JSON body, the retried 429 kinds side by side and a rate limit
+// followed by a daily quota (below).
 test('complete: retries once on a 503 then succeeds, logging the retried attempt', async () => {
   let calls = 0;
   const llm = createLlm({
@@ -947,6 +949,205 @@ test('complete: the last failed attempt is thrown, not logged as a retry', async
   const { logs } = await withCapturedLogs(() => assert.rejects(llm.complete([{ role: 'user', content: 'hi' }]), (err) => err.statusCode === 503));
   assert.equal(calls, 1);
   assert.equal(logs.filter((l) => l.msg === 'llm: retry').length, 0);
+});
+
+// --- a provider's 429: which limit it names, and no retry on a daily quota ---
+
+/** The provider's own text when its account ran out of the day's token quota. */
+const DAILY_RAW = 'Too many tokens per day, please wait before trying again.';
+
+/** A 429 body in OpenRouter's provider-error shape, the limit on the provider account (`raw` omitted when undefined). */
+function upstreamLimitBody(raw, provider = 'Amazon Bedrock') {
+  const metadata = { provider_name: provider, limit_source: 'upstream_provider_account', is_byok: true };
+  if (raw !== undefined) metadata.raw = raw;
+  return JSON.stringify({ error: { message: 'Provider returned error', code: 429, metadata } });
+}
+
+/** OpenRouter's own 429: no provider metadata, even when its text names a day. */
+const OPENROUTER_429 = JSON.stringify({ error: { message: 'Rate limit exceeded: too many requests per day', code: 429 } });
+
+/** An error shaped as `complete()` throws it for a non-ok answer. */
+function httpError(status, body) {
+  return Object.assign(new Error(`OpenRouter HTTP ${status}`), { statusCode: status, body });
+}
+
+const NO_LIMIT = { limitSource: null, provider: null, kind: null };
+
+test('providerLimitOf: a 429 naming upstream_provider_account and a per-day limit is kind daily', () => {
+  assert.deepEqual(providerLimitOf(httpError(429, upstreamLimitBody(DAILY_RAW))), {
+    status: 429,
+    limitSource: 'upstream_provider_account',
+    provider: 'Amazon Bedrock',
+    kind: 'daily',
+  });
+  for (const raw of ['Daily token quota exceeded for this account.', JSON.stringify({ message: DAILY_RAW })]) {
+    assert.equal(providerLimitOf(httpError(429, upstreamLimitBody(raw))).kind, 'daily', raw);
+  }
+});
+
+test('providerLimitOf: a text naming both a day and a throttle is kind daily', () => {
+  // Each also reads as a short-window throttle ("too many requests", "too many tokens"):
+  // the quota of the day wins, so the order of the two checks is pinned here.
+  for (const raw of [
+    'Too many requests per day, please wait before trying again.',
+    'Rate exceeded: daily token quota, too many tokens.',
+    DAILY_RAW,
+  ]) {
+    assert.equal(providerLimitOf(httpError(429, upstreamLimitBody(raw))).kind, 'daily', raw);
+  }
+});
+
+test('providerLimitOf: a 429 saying too many requests is kind rate', () => {
+  for (const raw of [
+    'Too many requests, please wait before trying again.',
+    'Too many tokens, please wait before trying again.',
+    'Rate exceeded: 5 requests per minute.',
+  ]) {
+    assert.deepEqual(
+      providerLimitOf(httpError(429, upstreamLimitBody(raw))),
+      { status: 429, limitSource: 'upstream_provider_account', provider: 'Amazon Bedrock', kind: 'rate' },
+      raw,
+    );
+  }
+});
+
+test('providerLimitOf: upstream_provider_account without a raw text is kind unknown', () => {
+  assert.deepEqual(providerLimitOf(httpError(429, upstreamLimitBody(undefined, 'Fournisseur Éclair'))), {
+    status: 429,
+    limitSource: 'upstream_provider_account',
+    provider: 'Fournisseur Éclair',
+    kind: 'unknown',
+  });
+  for (const raw of ['', null, 42, 'Le fournisseur est momentanément indisponible.']) {
+    assert.equal(providerLimitOf(httpError(429, upstreamLimitBody(raw))).kind, 'unknown', String(raw));
+  }
+});
+
+test('providerLimitOf: another status, an OpenRouter 429, no body or a body that is not JSON give kind null', () => {
+  // The same provider body on another status: its fields are read, no kind.
+  assert.deepEqual(providerLimitOf(httpError(503, upstreamLimitBody(DAILY_RAW))), {
+    status: 503,
+    limitSource: 'upstream_provider_account',
+    provider: 'Amazon Bedrock',
+    kind: null,
+  });
+  // OpenRouter's own 429, and a 429 whose limit sits anywhere but the provider account.
+  assert.deepEqual(providerLimitOf(httpError(429, OPENROUTER_429)), { status: 429, ...NO_LIMIT });
+  const elsewhere = JSON.stringify({ error: { code: 429, metadata: { limit_source: 'upstream', raw: DAILY_RAW } } });
+  assert.deepEqual(providerLimitOf(httpError(429, elsewhere)), { status: 429, ...NO_LIMIT, limitSource: 'upstream' });
+  // No body, a body that is not JSON, JSON of another shape.
+  for (const body of [undefined, '', DAILY_RAW, 'null', '[]', JSON.stringify({ error: { metadata: 'x' } })]) {
+    assert.deepEqual(providerLimitOf(httpError(429, body)), { status: 429, ...NO_LIMIT }, String(body));
+  }
+  // Not an HTTP answer at all: no numeric statusCode.
+  for (const err of [undefined, null, new Error('fetch failed'), new DailyCapError('cap'), httpError('429', upstreamLimitBody(DAILY_RAW)), httpError(Number.NaN, '')]) {
+    assert.equal(providerLimitOf(err), null);
+  }
+});
+
+test('complete: a daily provider quota 429 is thrown after one attempt and logs llm: provider limit', async () => {
+  let calls = 0;
+  const state = fakeState();
+  const body = upstreamLimitBody(DAILY_RAW);
+  const llm = createLlm({
+    apiKey: 'k',
+    getConfig: () => baseConfig({ retries: 2 }),
+    calibrator: fakeCalibrator(),
+    state,
+    fetchImpl: async () => { calls += 1; return errorResponse(429, body); },
+  });
+  const { logs } = await withCapturedLogs(() =>
+    assert.rejects(llm.complete([{ role: 'user', content: 'hi' }], { role: 'talk' }), (err) => {
+      assert.equal(err.statusCode, 429, 'the turn runner still sees a 429');
+      assert.equal(err.body, body, 'the untrimmed body stays on the error');
+      assert.ok(err.message.startsWith('OpenRouter HTTP 429: '));
+      return true;
+    }),
+  );
+  assert.equal(calls, 1, 'a daily quota is not retried');
+  assert.equal(state.data.llmCount, 1, 'one request counted');
+  assert.equal(logs.filter((l) => l.msg === 'llm: retry').length, 0);
+  const limits = logs.filter((l) => l.msg === 'llm: provider limit');
+  assert.equal(limits.length, 1);
+  const { level, time, msg, ...fields } = limits[0];
+  assert.equal(level, 'warn');
+  assert.equal(typeof time, 'string');
+  assert.equal(msg, 'llm: provider limit');
+  assert.deepEqual(fields, {
+    role: 'talk',
+    model: 'test-model',
+    status: 429,
+    limitSource: 'upstream_provider_account',
+    provider: 'Amazon Bedrock',
+    kind: 'daily',
+    retried: false,
+  });
+  assert.ok(!JSON.stringify(logs).includes('per day'), 'the provider raw text is never logged');
+});
+
+test('complete: a rate 429, an unknown upstream 429 and an OpenRouter 429 are still retried llm.retries times', async () => {
+  // The three run side by side, so the one real backoff sleep is shared.
+  const bodies = {
+    rate: upstreamLimitBody('Too many requests, please wait before trying again.'),
+    unknown: upstreamLimitBody(undefined, 'Fournisseur Éclair'),
+    openrouter: OPENROUTER_429,
+  };
+  const calls = { rate: 0, unknown: 0, openrouter: 0 };
+  const llmFor = (name) => createLlm({
+    apiKey: 'k',
+    getConfig: () => baseConfig({ retries: 1 }),
+    calibrator: fakeCalibrator(),
+    state: fakeState(),
+    fetchImpl: async () => { calls[name] += 1; return errorResponse(429, bodies[name]); },
+  });
+  const { logs } = await withCapturedLogs(() =>
+    Promise.all(
+      Object.keys(bodies).map((name) =>
+        assert.rejects(
+          llmFor(name).complete([{ role: 'user', content: 'hi' }], { role: 'talk' }),
+          (err) => err.statusCode === 429 && err.body === bodies[name],
+        ),
+      ),
+    ),
+  );
+  assert.deepEqual(calls, { rate: 2, unknown: 2, openrouter: 2 }, 'one attempt plus llm.retries');
+  assert.equal(logs.filter((l) => l.msg === 'llm: provider limit').length, 0);
+  const retries = logs
+    .filter((l) => l.msg === 'llm: retry')
+    .map(({ level, time, msg, ...fields }) => fields)
+    .sort((a, b) => (a.kind ?? '').localeCompare(b.kind ?? ''));
+  assert.deepEqual(retries, [
+    { attempt: 1, status: 429, name: 'Error' },
+    { attempt: 1, status: 429, name: 'Error', limitSource: 'upstream_provider_account', provider: 'Amazon Bedrock', kind: 'rate' },
+    { attempt: 1, status: 429, name: 'Error', limitSource: 'upstream_provider_account', provider: 'Fournisseur Éclair', kind: 'unknown' },
+  ]);
+});
+
+test('complete: llm: retry carries kind when the body names one, never the raw text', async () => {
+  const rateRaw = 'Too many tokens, please wait before trying again.';
+  const bodies = [upstreamLimitBody(rateRaw), upstreamLimitBody(DAILY_RAW)];
+  let calls = 0;
+  const llm = createLlm({
+    apiKey: 'k',
+    getConfig: () => baseConfig({ retries: 2 }),
+    calibrator: fakeCalibrator(),
+    state: fakeState(),
+    fetchImpl: async () => { calls += 1; return errorResponse(429, bodies[calls - 1]); },
+  });
+  const { logs } = await withCapturedLogs(() =>
+    assert.rejects(
+      llm.complete([{ role: 'user', content: 'hi' }], { role: 'talk' }),
+      (err) => err.statusCode === 429 && err.body === bodies[1],
+    ),
+  );
+  assert.equal(calls, 2, 'the rate limit was retried, the daily quota after it was not');
+  const retries = logs.filter((l) => l.msg === 'llm: retry').map(({ level, time, msg, ...fields }) => fields);
+  assert.deepEqual(retries, [
+    { attempt: 1, status: 429, name: 'Error', limitSource: 'upstream_provider_account', provider: 'Amazon Bedrock', kind: 'rate' },
+  ]);
+  assert.deepEqual(logs.filter((l) => l.msg === 'llm: provider limit').map((l) => l.kind), ['daily']);
+  const text = JSON.stringify(logs);
+  for (const raw of [rateRaw, DAILY_RAW, 'please wait']) assert.ok(!text.includes(raw), raw);
 });
 
 // --- one `llm: usage` line per answered request, whatever its role ---

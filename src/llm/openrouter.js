@@ -188,23 +188,70 @@ function usageLogFields(json, usage, model, role) {
   };
 }
 
-// What a retried error's body says about the limit that was hit, as `llm: retry` fields:
-// `limitSource` and `provider` from a JSON body's `error.metadata` (`limit_source`,
-// `provider_name`), each only when it is a string. Never the body itself -- it may echo the
-// request. No body, a body that is not JSON or one of another shape adds nothing.
-function retryLimitFields(body) {
-  if (typeof body !== 'string') return {};
+// The `error.metadata.limit_source` of a limit hit on the provider account behind the route
+// (the owner's own key with that provider), as opposed to one of OpenRouter's own limits.
+const UPSTREAM_ACCOUNT = 'upstream_provider_account';
+// The provider's own text (`error.metadata.raw`) for a quota of the day, then for a short-window
+// throttle. Protocol data, matched here and never logged: a reworded text falls to `unknown`.
+// The day is checked first, so a text naming both ("too many requests per day") is `daily`.
+const DAILY_LIMIT = /per\s*day|daily/i;
+const RATE_LIMIT = /per\s*minute|too many requests|too many tokens/i;
+
+// What an error body says about the limit that was hit -- the one parser of it, behind
+// `providerLimitOf`: `limitSource` and `provider` from a JSON body's `error.metadata`
+// (`limit_source`, `provider_name`), each only when it is a non-empty string.
+// `kind` only for a 429 on the provider account: `daily` or `rate` by the raw text, `unknown`
+// when it is absent or matches neither. No body, a body that is not JSON or one of another shape
+// gives all three null. Never the body itself -- it may echo the request.
+function bodyLimit(status, rawBody) {
+  const limit = { limitSource: null, provider: null, kind: null };
+  if (typeof rawBody !== 'string') return limit;
   let parsed;
   try {
-    parsed = JSON.parse(body);
+    parsed = JSON.parse(rawBody);
   } catch {
-    return {};
+    return limit;
   }
   const metadata = parsed?.error?.metadata;
-  if (!isPlainObject(metadata)) return {};
+  if (!isPlainObject(metadata)) return limit;
+  limit.limitSource = stringOrNull(metadata.limit_source);
+  limit.provider = stringOrNull(metadata.provider_name);
+  if (status === 429 && limit.limitSource === UPSTREAM_ACCOUNT) {
+    const raw = stringOrNull(metadata.raw) ?? '';
+    limit.kind = DAILY_LIMIT.test(raw) ? 'daily' : RATE_LIMIT.test(raw) ? 'rate' : 'unknown';
+  }
+  return limit;
+}
+
+/**
+ * Which limit a failed request hit, read from the error `complete()` throws for a non-ok answer
+ * (`statusCode`, `body`): null when `err` carries no numeric `statusCode` (a rail refusal, a
+ * network failure, a timeout). `limitSource` / `provider` come from the JSON body's
+ * `error.metadata` (null when absent); `kind` is set only for a 429 whose `limit_source` is
+ * `upstream_provider_account` -- `'daily'` when the provider's raw text names a quota of the day
+ * (it comes back in minutes, not within the retry backoff), `'rate'` when it names a
+ * short-window throttle, `'unknown'` otherwise -- and null for every other status and for
+ * OpenRouter's own 429.
+ * Codes and names only: the provider's raw text is matched, never returned.
+ * @param {unknown} err
+ * @returns {{ status: number, limitSource: string|null, provider: string|null, kind: 'daily'|'rate'|'unknown'|null }|null}
+ */
+export function providerLimitOf(err) {
+  const status = err?.statusCode;
+  if (!Number.isInteger(status)) return null;
+  return { status, ...bodyLimit(status, err.body) };
+}
+
+// The `llm: retry` fields of a retried error: `limitSource`, `provider` and `kind`, each only
+// when `providerLimitOf` found it (nothing for an error without an HTTP status).
+function retryLimitFields(err) {
+  const limit = providerLimitOf(err);
+  if (!limit) return {};
+  const { limitSource, provider, kind } = limit;
   const fields = {};
-  if (stringOrNull(metadata.limit_source)) fields.limitSource = metadata.limit_source;
-  if (stringOrNull(metadata.provider_name)) fields.provider = metadata.provider_name;
+  if (limitSource) fields.limitSource = limitSource;
+  if (provider) fields.provider = provider;
+  if (kind) fields.kind = kind;
   return fields;
 }
 
@@ -244,7 +291,12 @@ export function createLlm({ apiKey, getConfig, calibrator, state, fetchImpl = fe
    * HTTP status in `RETRY_STATUS` are retried after `backoffMs`, each retried
    * attempt logged as `llm: retry` (`attempt` 1-based, `status` or null,
    * `name`, plus `limitSource` / `provider` when the error body is JSON naming
-   * them in `error.metadata`); the last one is thrown. Once a 200 was received
+   * them in `error.metadata`, and `kind` when `providerLimitOf` finds one); the
+   * last one is thrown. One exception: a 429 whose body names the provider
+   * account's quota of the day (kind `daily`) is thrown after that one attempt
+   * (same `statusCode`, `body` and message) and logged once as
+   * `llm: provider limit` (role, model, status, limitSource, provider, kind,
+   * `retried: false`; codes only, never the provider's text). Once a 200 was received
    * (the request may be billed) nothing is retried: a `json.error` body or an
    * unparsable body is thrown as it is.
    * Every answered request logs one `llm: usage` line (role, model, provider,
@@ -348,12 +400,13 @@ export function createLlm({ apiKey, getConfig, calibrator, state, fetchImpl = fe
           attempt,
           status: lastError?.statusCode ?? null,
           name: lastError?.name ?? null,
-          ...retryLimitFields(lastError?.body),
+          ...retryLimitFields(lastError),
         });
         await sleep(backoffMs(attempt));
       }
       if (options.signal?.aborted) throw lastError ?? options.signal.reason ?? new Error('request aborted');
       let response;
+      let notRetried = null; // an HTTP error thrown below that the catch must pass on, never retry
       try {
         const timeoutSignal = AbortSignal.timeout(options.timeoutMs ?? cfg.timeoutMs);
         const signal = options.signal ? AbortSignal.any([options.signal, timeoutSignal]) : timeoutSignal;
@@ -374,10 +427,27 @@ export function createLlm({ apiKey, getConfig, calibrator, state, fetchImpl = fe
           error.statusCode = response.status;
           error.body = rawBody;
           if (!RETRY_STATUS.has(response.status)) throw error;
+          // A provider's quota of the day: it comes back in minutes, not within the seconds of
+          // `backoffMs`, so a retry only holds the caller (the persona's one attention).
+          const limit = providerLimitOf(error);
+          if (limit.kind === 'daily') {
+            log.warn('llm: provider limit', {
+              role: stringOrNull(options.role),
+              model: stringOrNull(body.model),
+              status: response.status,
+              limitSource: limit.limitSource,
+              provider: limit.provider,
+              kind: limit.kind,
+              retried: false,
+            });
+            notRetried = error;
+            throw error;
+          }
           lastError = error;
           continue;
         }
       } catch (err) {
+        if (err === notRetried) throw err;
         if (options.signal?.aborted) throw err; // a deliberate external abort is never retried
         if (err.statusCode && !RETRY_STATUS.has(err.statusCode)) throw err;
         lastError = err; // a network failure or a timed-out attempt: retried
