@@ -260,9 +260,10 @@ export function createLlm({ apiKey, getConfig, calibrator, state, fetchImpl = fe
    * the memory warmup (src/memory/warmup.js), whose requests are fitted under a much larger,
    * separately-budgeted cap (`warmup.maxRequestTokens`) than a live chat/analyzer request.
    * `options.skipCalibration` (default false) — never feeds `usage.prompt_tokens`
-   * into the calibrator. For `/nep ping`: a 16-token ping reply is
-   * nothing like a real turn's request/response shape, and would only skew
-   * the ratio every other request is checked against.
+   * into the calibrator. For every request whose provider-counted prompt
+   * tokens say nothing about the text ratio the other requests are checked
+   * against: a 16-token `/nep ping`, a picture or video describe (the vision
+   * model counts media its own way), the short classifier passes.
    * `options.signal` — an external `AbortSignal` (e.g. an `AbortController`'s)
    * that cancels the in-flight HTTP request the moment it aborts, on top of
    * the per-attempt timeout signal (`options.timeoutMs`/`cfg.timeoutMs`) —
