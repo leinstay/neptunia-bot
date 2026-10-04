@@ -9,7 +9,7 @@ import { canAttach, fetchHistory, fetchNeighbors, withTextPreviews } from '../di
 import { buildDrawPrompt, buildRequest, fillPromptTemplate } from './prompt.js';
 import { classifierTextModel } from './mention.js';
 import { parseOutput } from '../llm/parse.js';
-import { DailyCapError, TokenLimitError, sleep } from '../llm/openrouter.js';
+import { DailyCapError, TokenLimitError, RETRY_STATUS, sleep } from '../llm/openrouter.js';
 import { ImageCapError, ImageGenError } from '../llm/images.js';
 import { limitOf, mirrorChannelLabel, mirrorDryRun, postLimitNotice } from './limits.js';
 import { between, typingMs } from './random.js';
@@ -1169,7 +1169,12 @@ export function createTurnRunner({
         // blind/described form -- resending the ORIGINAL text (still
         // claiming a picture is attached) alongside no actual image would be
         // worse than the error itself.
-        if (Array.isArray(messages[1]?.content) && err.statusCode >= 400 && err.statusCode < 500) {
+        // A 408 or 429 (timeout, rate limit, quota) says nothing about the
+        // pictures and the client has already retried it (RETRY_STATUS): a
+        // resend would only double a doomed request while the persona's one
+        // attention waits, so it propagates like any error without pictures.
+        const aboutThePictures = err.statusCode >= 400 && err.statusCode < 500 && !RETRY_STATUS.has(err.statusCode);
+        if (Array.isArray(messages[1]?.content) && aboutThePictures) {
           const textOnly = messages.map((m) => (Array.isArray(m.content) ? { ...m, content: request.textFallback } : m));
           completion = await llm.complete(textOnly, { role: 'talk' });
         } else {

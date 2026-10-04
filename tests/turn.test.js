@@ -941,6 +941,57 @@ test('createTurnRunner: a 4xx image error (download succeeded, the provider itse
   assert.ok(!secondUser.includes('still frame'), 'frameAttached must not survive into the text-only retry');
 });
 
+test('createTurnRunner: a 400 with pictures attached -- the text-only resend happens and its answer is the one posted', async () => {
+  const raw = videoRaw();
+  const channel = fakeTurnChannel({ historyMessages: [raw] });
+  const llm = fakeLlmRejectingImagesOnce(400, '<msg>from the resend</msg>');
+  const turns = createTurnRunner({
+    hot: fakeHot({}),
+    store: fakeStore(),
+    llm,
+    calibrator: identityCalibrator(),
+    client: fakeClient(),
+    imageFetcher: fakeImageFetcher(),
+  });
+
+  const result = await turns.runTurn({ channel, mode: 'reply', trigger: videoTrigger(raw), triggerKind: 'mention' });
+
+  assert.equal(result.outcome, 'spoke');
+  assert.equal(llm.calls.length, 2, 'the picture attempt and the text-only resend');
+  assert.equal(typeof llm.calls[1][1].content, 'string', 'the resend carries no image_url parts');
+  assert.equal(channel.sent.length, 1);
+  assert.equal(channel.sent[0].content, 'from the resend');
+});
+
+// A rate limit / quota (429) or a request timeout (408) says nothing about the
+// pictures: the client already retried it, so a text-only resend would only
+// double a doomed request while the persona's one attention waits.
+for (const status of [429, 408]) {
+  test(`createTurnRunner: a ${status} with pictures attached -- no text-only resend, the turn ends in error`, async () => {
+    const raw = videoRaw();
+    const channel = fakeTurnChannel({ historyMessages: [raw] });
+    const llm = fakeLlmRejectingImagesOnce(status, '<msg>never posted</msg>');
+    const turns = createTurnRunner({
+      hot: fakeHot({}),
+      store: fakeStore(),
+      llm,
+      calibrator: identityCalibrator(),
+      client: fakeClient(),
+      imageFetcher: fakeImageFetcher(),
+    });
+
+    const { result, logs } = await withCapturedLogs(() =>
+      turns.runTurn({ channel, mode: 'reply', trigger: videoTrigger(raw), triggerKind: 'mention' }),
+    );
+
+    assert.equal(result.outcome, 'error');
+    assert.equal(llm.calls.length, 1, 'the model is called once, never resent text-only');
+    assert.ok(Array.isArray(llm.calls[0][1].content), 'the one call carried the pictures');
+    assert.equal(channel.sent.length, 0);
+    assert.ok(logs.some((l) => l.msg === 'turn: failed'));
+  });
+}
+
 // ---------------------------------------------------------------------------
 // The picture is downloaded and inlined as a data: URL BEFORE the model
 // ever sees the request -- the provider's own fetcher gets a 403 from
