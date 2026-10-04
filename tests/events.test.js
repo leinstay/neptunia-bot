@@ -1542,7 +1542,46 @@ test('events: a pending ping whose message no longer exists is dropped silently'
   assert.equal(called, false);
 });
 
-test('events: a pending ping whose channel lost send permission is dropped silently', async () => {
+for (const { kind, extra } of [
+  { kind: 'mention', extra: {} },
+  { kind: 'reply', extra: { mentions: { users: new Map() }, reference: { messageId: 'm0' } } },
+  { kind: 'name', extra: { mentions: { users: new Map() }, cleanContent: 'γεια νεπτούνια' } },
+]) {
+  test(`events: a ${kind} trigger in a channel without send permission is dropped with a cannot-send log line`, async () => {
+    let called = false;
+    const turns = fakeTurns({
+      isBusy: () => false,
+      // Busy elsewhere: a direct call would be queued if the permission check let it through.
+      isAnyBusy: () => true,
+      runTurn: async () => {
+        called = true;
+        return { outcome: 'spoke' };
+      },
+    });
+    const config = baseConfig({ bot: { nameTriggers: ['νεπτούνια'] } });
+    // No rng values: neither the ignore roll nor the switch pause may run.
+    const handler = makeHandler({ config, turns, sleep: async () => {}, rng: scripted([]) });
+
+    const guild = fakeGuild();
+    const channel = fakeChannelWithMessage('c1', guild, 'm1', { permissionsFor: () => ({ has: () => false }) });
+    channel.messages.cache.set('m0', { author: { id: 'self1' } });
+    const { logs } = await withCapturedLogs(async () => {
+      await handler(directPingMessage({ guild, channel, channelId: 'c1', ...extra }));
+      await handler.drainPending();
+    });
+
+    assert.equal(called, false, 'no turn starts');
+    const dropped = logs.filter((entry) => entry.msg === 'mention: dropped');
+    assert.equal(dropped.length, 1, 'logged exactly once');
+    assert.equal(dropped[0].channel, 'c1');
+    assert.equal(dropped[0].kind, kind);
+    assert.equal(dropped[0].reason, 'cannot-send');
+    assert.equal(logs.some((entry) => entry.msg === 'mention: deferred'), false, 'no pending entry');
+    assert.equal(logs.some((entry) => entry.msg === 'mention: decided'), false, 'no ignore roll');
+  });
+}
+
+test('events: a pending ping whose channel lost send permission is dropped with a cannot-send log line', async () => {
   let called = false;
   let canSendNow = true;
   const turns = fakeTurns({
@@ -1560,9 +1599,15 @@ test('events: a pending ping whose channel lost send permission is dropped silen
   await handler(directPingMessage({ guild, channel, channelId: 'c1' }));
 
   canSendNow = false; // permission lost while the ping was pending
-  await handler.drainPending();
+  const { logs } = await withCapturedLogs(() => handler.drainPending());
 
   assert.equal(called, false);
+  const dropped = logs.filter((entry) => entry.msg === 'mention: dropped');
+  assert.equal(dropped.length, 1, 'logged exactly once');
+  assert.equal(dropped[0].channel, 'c1');
+  assert.equal(dropped[0].kind, 'mention');
+  assert.equal(dropped[0].reason, 'cannot-send');
+  assert.equal(logs.some((entry) => entry.msg === 'mention: decided'), false, 'no ignore roll');
 });
 
 test('events: several pending pings drain oldest first, one at a time (never concurrently)', async () => {

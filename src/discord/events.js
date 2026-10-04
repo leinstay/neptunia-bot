@@ -793,9 +793,9 @@ export function createMessageHandler({
    * finishes anywhere (src/index.js wires this to src/behavior/turn.js's
    * `setOnIdle`, in the same `finally` that frees the channel). The ignore
    * decision (decideMention) is rolled HERE, not when the ping arrived. A
-   * message deleted meanwhile, or a channel that lost send permission, is
-   * dropped silently; a ping the last turn that spoke in its channel already
-   * had in its history (turns.spokeAfterSeeing) is dropped with a log line.
+   * message deleted meanwhile is dropped silently; a channel that lost send
+   * permission, or a ping the last turn that spoke in its channel already
+   * had in its history (turns.spokeAfterSeeing), is dropped with a log line.
    * A ping queued in a channel whose own turn was running is picked up the
    * same way once that turn frees the channel. Guarded against re-entrancy:
    * the turn this function itself starts also frees the channel through the very same `onIdle`,
@@ -840,7 +840,10 @@ export function createMessageHandler({
           log.info('mention: dropped', { channel: ping.channelId, kind: ping.kind, reason: 'paused' });
           break;
         }
-        if (!canSend(ping.channel)) continue;
+        if (!canSend(ping.channel)) {
+          log.info('mention: dropped', { channel: ping.channelId, kind: ping.kind, reason: 'cannot-send' });
+          continue;
+        }
         if (!(await messageStillExists(ping.channel, ping.trigger.id))) continue;
         // The turn that ran meanwhile fetched its history after this ping
         // landed and spoke with it in view: not answered a second time.
@@ -1066,8 +1069,12 @@ export function createMessageHandler({
         return;
       }
 
-      // 11. The persona was called: decide whether to actually answer.
-      if (!canSend(message.channel)) return;
+      // 11. The persona was called: decide whether to actually answer. A
+      // call it cannot answer here is never queued, but it leaves a trace.
+      if (!canSend(message.channel)) {
+        log.info('mention: dropped', { channel: message.channel.id, kind, reason: 'cannot-send' });
+        return;
+      }
 
       // 11b. A direct call (mention/reply) that cannot be answered now is
       // remembered as pending instead of dropped, and answered by
