@@ -138,6 +138,67 @@ test('buildRequest: triggerKind "followUp" falls back to labels.triggers.reply w
   assert.ok(user.includes(labels.triggers.reply));
 });
 
+// An overheard turn: a line about the persona, said to someone else or to the room.
+const OVERHEARD_TASK = 'OVERHEARD_TASK: {{author}} {{trigger}} at {{target}}; you are {{name}}.';
+
+test('buildRequest: triggerKind "overheard" takes prompts.overheard as its task, every placeholder filled, no reply.md text', () => {
+  const m1 = makeMessage(1, NOW - 2 * MIN);
+  const trigger = makeMessage(2, NOW - MIN, { authorName: 'Élodie' });
+  const request = buildRequest(
+    baseInput({ prompts: fakePrompts({ overheard: OVERHEARD_TASK }), history: [m1, trigger], trigger, triggerKind: 'overheard' }),
+  );
+  const user = request.messages[1].content;
+  assert.ok(user.includes(`OVERHEARD_TASK: Élodie ${labels.triggers.overheard} at #2; you are Nept.`));
+  assert.ok(!user.includes('Called by'), 'reply.md is not used on an overheard turn');
+});
+
+test('buildRequest: triggerKind "overheard" without prompts.overheard (missing or blank) uses the mode prompt with the overheard label', () => {
+  const trigger = makeMessage(1, NOW - MIN, { authorName: 'Élodie' });
+  for (const overheard of [undefined, '', '   ']) {
+    const request = buildRequest(
+      baseInput({ prompts: fakePrompts({ overheard }), history: [trigger], trigger, triggerKind: 'overheard' }),
+    );
+    const user = request.messages[1].content;
+    assert.ok(user.includes(`Called by Élodie, they ${labels.triggers.overheard}. Answer #1 as Nept.`), JSON.stringify(overheard));
+  }
+});
+
+test('buildRequest: the overheard trigger label falls back to labels.triggers.followUp, then labels.triggers.reply', () => {
+  const trigger = makeMessage(1, NOW - MIN, { authorName: 'Élodie' });
+  const run = (triggers) =>
+    buildRequest(
+      baseInput({ prompts: fakePrompts({ overheard: OVERHEARD_TASK, labels: { ...labels, triggers } }), history: [trigger], trigger, triggerKind: 'overheard' }),
+    ).messages[1].content;
+  const { overheard, ...withoutOverheard } = labels.triggers;
+  assert.ok(overheard);
+  assert.ok(run(withoutOverheard).includes(`Élodie ${labels.triggers.followUp} at #1`));
+  const { followUp, ...withoutEither } = withoutOverheard;
+  assert.ok(followUp);
+  assert.ok(run(withoutEither).includes(`Élodie ${labels.triggers.reply} at #1`));
+  assert.ok(run({}).includes('OVERHEARD_TASK: Élodie  at #1'), 'no trigger label at all leaves it empty');
+});
+
+test('buildRequest: the author heads <people> without the interlocutor mark on an overheard turn; a followUp turn keeps it', () => {
+  const trigger = makeMessage(1, NOW - MIN, { authorName: 'Élodie' });
+  const interlocutor = { id: 'author-1', names: ['Élodie'], character: 'curious' };
+  const other = { id: 'p2', names: ['Carl'], character: 'calm' };
+  const run = (triggerKind) =>
+    buildRequest(
+      baseInput({ prompts: fakePrompts({ overheard: OVERHEARD_TASK }), history: [trigger], trigger, triggerKind, interlocutor, otherProfiles: [other] }),
+    ).messages[1].content;
+
+  const overheard = run('overheard');
+  assert.ok(!overheard.includes(labels.profile.interlocutorMark.trim()), 'no "talking to you" mark');
+  const peopleStart = overheard.indexOf('<people>');
+  const elodie = overheard.indexOf('## Élodie\n', peopleStart);
+  assert.ok(elodie !== -1, 'the author still heads <people>, heading bare');
+  assert.ok(elodie < overheard.indexOf('## Carl', peopleStart));
+  assert.ok(overheard.includes(fill(labels.profile.character, { text: 'curious' })), 'the full profile still renders');
+
+  const followUp = run('followUp');
+  assert.ok(followUp.includes(`## Élodie${labels.profile.interlocutorMark}`));
+});
+
 // /nep interject, /nep initiate: an owner-forced turn appends prompts.forced
 // (when present) to the task text, filled with the same placeholders as the
 // mode's own task template.
@@ -719,6 +780,21 @@ test('renderProfile: episodes render only for the interlocutor, right after the 
   assert.equal(lines[1], 'attitude: 10 (warm) — nice');
   assert.equal(lines[2], labels.profile.episodes);
   assert.equal(lines[3], '2026-01-01: said something memorable — "never forget this" (touched)');
+});
+
+test('renderProfile: mark false keeps the full interlocutor rendering, episodes included, with a bare heading', () => {
+  const profile = {
+    id: 'p1',
+    names: ['Carl'],
+    affinity: { score: 10, reason: 'nice', history: [] },
+    episodes: [episodeFixture()],
+  };
+  const options = { relationships: true, interlocutor: true, episodes: { enabled: true } };
+  const marked = renderProfile(profile, labels, options).split('\n');
+  const bare = renderProfile(profile, labels, { ...options, mark: false }).split('\n');
+  assert.equal(bare[0], '## Carl');
+  assert.deepEqual(bare.slice(1), marked.slice(1), 'only the heading changes');
+  assert.equal(renderProfile(profile, labels, { ...options, mark: true }).split('\n')[0], marked[0], 'true is the default');
 });
 
 test('renderProfile: episodes are never rendered for a non-interlocutor profile', () => {

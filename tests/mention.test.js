@@ -15,6 +15,8 @@ import {
   classifierVideoModel,
   deprecatedModelKeys,
   parseFollowUpVerdict,
+  parseAddressAnswer,
+  followUpTriggerKind,
 } from '../src/behavior/mention.js';
 
 const NAME_TRIGGERS = ['νεπτούνια'];
@@ -421,6 +423,60 @@ test('parseFollowUpVerdict: "no" and anything else is a no', () => {
   assert.equal(parseFollowUpVerdict(''), 'no');
   assert.equal(parseFollowUpVerdict(null), 'no');
   assert.equal(parseFollowUpVerdict(undefined), 'no');
+});
+
+test('parseAddressAnswer: a first word starting with "y" is yes, any case, surrounding text tolerated', () => {
+  for (const text of ['yes', '  Yes, obviously.', 'YES', 'yeah', 'y']) {
+    assert.equal(parseAddressAnswer(text), 'yes', JSON.stringify(text));
+  }
+});
+
+test('parseAddressAnswer: the first word "overheard", any case, trailing punctuation allowed, is overheard', () => {
+  for (const text of ['overheard', 'Overheard.', 'OVERHEARD', ' overheard ', 'Overheard, she is talked about', 'overheard!']) {
+    assert.equal(parseAddressAnswer(text), 'overheard', JSON.stringify(text));
+  }
+});
+
+test('parseAddressAnswer: everything else, empty included, is no; no markup is stripped', () => {
+  for (const text of ['no', 'No.', 'not sure', '', '   ', null, undefined, 'overhear', 'overheardx', 'absolutely', 'about', '"overheard"', '**overheard**', '"yes"', '**yes**']) {
+    assert.equal(parseAddressAnswer(text), 'no', JSON.stringify(text));
+  }
+});
+
+test('parseFollowUpVerdict: an overheard answer counts as yes', () => {
+  for (const text of ['overheard', 'Overheard.', 'OVERHEARD']) {
+    assert.equal(parseFollowUpVerdict(text), 'yes', text);
+  }
+});
+
+test('parseFollowUpVerdict: the same result as the two-way parser for every answer that is not overheard', () => {
+  // The two-way rule as it stood before the third answer: the first word starts with "y".
+  const twoWay = (text) => ((String(text ?? '').trim().split(/\s+/)[0] ?? '').toLowerCase().startsWith('y') ? 'yes' : 'no');
+  const inputs = ['yes', 'Yes, obviously.', 'YES', 'yeah', 'y', 'no', 'No.', 'nope', 'not sure', '', ' \n ', null, undefined,
+    '"yes"', '**yes**', '`no`', 'about', 'About.', 'overhear', 'absolutely', 'ναι', 'όχι', 'Ýes', 'yes\nno', 'no yes'];
+  for (const text of inputs) {
+    assert.equal(parseFollowUpVerdict(text), twoWay(text), JSON.stringify(text));
+  }
+});
+
+test('followUpTriggerKind: no starts nothing, yes a followUp turn, overheard an overheard turn', () => {
+  const cfg = { followUpOverheard: true };
+  assert.equal(followUpTriggerKind('no', cfg), null);
+  assert.equal(followUpTriggerKind('yes', cfg), 'followUp');
+  assert.equal(followUpTriggerKind('overheard', cfg), 'overheard');
+});
+
+test('followUpTriggerKind: with mention.followUpOverheard false an overheard answer starts a plain followUp turn', () => {
+  assert.equal(followUpTriggerKind('overheard', { followUpOverheard: false }), 'followUp');
+  assert.equal(followUpTriggerKind('yes', { followUpOverheard: false }), 'followUp');
+  assert.equal(followUpTriggerKind('no', { followUpOverheard: false }), null);
+});
+
+test('followUpTriggerKind: a missing config or key counts as on', () => {
+  assert.equal(followUpTriggerKind('overheard'), 'overheard');
+  assert.equal(followUpTriggerKind('overheard', undefined), 'overheard');
+  assert.equal(followUpTriggerKind('overheard', {}), 'overheard');
+  assert.equal(followUpTriggerKind('overheard', { followUpOverheard: undefined }), 'overheard');
 });
 
 test('decideMention: affinityScore is ignored inside the spam branch', () => {

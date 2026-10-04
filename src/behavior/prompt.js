@@ -2,7 +2,7 @@
 // the live prompts/config, returns chat-completions messages. The token budget
 // is spent in this priority order (see src/llm/budget.js):
 //   1. system prompt (persona + live rules + output format), task, clock, tempo — never cut
-//   2. memory about the person the persona is talking to
+//   2. memory about the trigger's author (the person the persona is talking to, or the one overheard)
 //   2b. what the persona looked up online this turn (`<lookup>`, one piece)
 //   3. how this server talks + what the persona has said about itself
 //   3b. lorebook entries matched by the transcript (`<lore>`)
@@ -249,12 +249,18 @@ function aliasesText(aliases, labels, maxAliases, aliasHalfLifeDays) {
  * alongside `interlocutor: true` in practice (the interlocutor is always
  * rendered in full), but `compact` wins over `interlocutor` for episodes
  * either way.
+ *
+ * `opts.mark` (default true) puts `labels.profile.interlocutorMark` on the
+ * interlocutor's heading; false leaves the heading bare and changes nothing
+ * else -- the author of an overheard line is rendered in full but is not
+ * talking to the persona.
  */
 export function renderProfile(
   profile,
   labels,
   {
     interlocutor = false,
+    mark: markInterlocutor = true,
     compact = false,
     relationships = false,
     episodes,
@@ -306,7 +312,7 @@ export function renderProfile(
   if (!hasContent) restLines.push(p.unknown);
   if (!compact && profile.messageCount) restLines.push(fill(p.messageCount, { count: profile.messageCount }));
 
-  const mark = interlocutor ? p.interlocutorMark : '';
+  const mark = interlocutor && markInterlocutor ? p.interlocutorMark : '';
   const heading = `## ${name}${mark}`;
 
   let renderedEpisodes = interlocutor && !compact && episodes?.enabled ? episodeLines(profile.episodes, labels, nameOf) : [];
@@ -902,8 +908,13 @@ function splitPeople(otherProfiles, candidateProfiles, history, trigger, exclude
  *   `channelId` (see src/discord/collect.js#fetchNeighbors) is how `<server>` tells which
  *   stored channel note, if any, belongs to a neighbour that contributed to `<other_channels>` --
  *   omitted (an older/direct caller) simply means that neighbour never gets its note shown.
- * @param {object|null} input.trigger      Normalized message that called the persona (reply mode).
- * @param {string|null} input.triggerKind
+ * @param {object|null} input.trigger      Normalized message the turn answers (reply mode): a call,
+ *   or an overheard line.
+ * @param {string|null} input.triggerKind  src/behavior/turn.js#TriggerKind, null on a spontaneous turn.
+ *   Its `labels.triggers` entry fills `{{trigger}}`. `overheard` (a line about the persona, said to
+ *   someone else or to the room) takes `prompts.overheard` as its task text instead of
+ *   `prompts[mode]` when that file is a non-empty string, falls back to the `followUp` then the
+ *   `reply` label, and renders the author's profile without `labels.profile.interlocutorMark`.
  * @param {object} input.guildMemory
  * @param {object|null} input.interlocutor Profile of the trigger's author (the public one).
  * @param {{ userId: string }|null} [input.privateChat]  Set for a private (DM) turn: the
@@ -1010,9 +1021,14 @@ export function buildRequest(input) {
   const triggerItem = trigger ? chatItems.find((item) => item.id === trigger.id) : null;
   // A follow-up (triggerKind: 'followUp') falls back to labels.triggers.reply
   // when an older labels.json has no dedicated label yet -- see prompt-contract.md.
+  // An overheard line (triggerKind: 'overheard') falls back to the follow-up's label, then reply's.
   // A failed drawing (triggerKind: 'drawFailed') names its reason through labels.draw.reasons.
-  const rawTriggerLabel =
-    triggerKind === 'followUp' ? (labels.triggers?.followUp ?? labels.triggers?.reply ?? '') : (labels.triggers?.[triggerKind] ?? '');
+  const overheard = triggerKind === 'overheard';
+  const rawTriggerLabel = overheard
+    ? (labels.triggers?.overheard ?? labels.triggers?.followUp ?? labels.triggers?.reply ?? '')
+    : triggerKind === 'followUp'
+      ? (labels.triggers?.followUp ?? labels.triggers?.reply ?? '')
+      : (labels.triggers?.[triggerKind] ?? '');
   const triggerLabel =
     triggerKind === 'drawFailed'
       ? fill(rawTriggerLabel, { reason: labels.draw?.reasons?.[input.drawReason] ?? input.drawReason ?? '' })
@@ -1023,7 +1039,10 @@ export function buildRequest(input) {
     trigger: triggerLabel,
     target: triggerItem ? `#${triggerItem.index}` : '',
   };
-  const baseTask = fillPromptTemplate(prompts[mode] ?? '', taskValues);
+  // An overheard turn has its own task text (prompts.overheard) INSTEAD of the mode's; without
+  // it (missing or blank) the mode's text frames the line as said to the persona: degraded.
+  const overheardTask = overheard && typeof prompts.overheard === 'string' && prompts.overheard.trim() ? prompts.overheard : null;
+  const baseTask = fillPromptTemplate(overheardTask ?? prompts[mode] ?? '', taskValues);
   // Owner-forced turn (`/nep interject`/`/nep initiate`): tell the model
   // `<skip/>` is not the expected outcome this time -- optional, missing
   // prompts.forced (an older/undeployed labels layer) leaves the task as-is.
@@ -1093,6 +1112,8 @@ export function buildRequest(input) {
         items: [
           renderProfile(interlocutor, labels, {
             interlocutor: true,
+            // The author of an overheard line is not talking to the persona.
+            mark: !overheard,
             relationships,
             episodes: episodesOpt,
             maxInterests: config.memory?.maxInterests,

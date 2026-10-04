@@ -1295,7 +1295,7 @@ test('createTurnRunner: features.dryRun=true mirrors each action into bot.dryRun
   assert.equal(mirrorSent.length, 1);
   assert.deepEqual(mirrorSent[0].allowedMentions, { parse: [] });
   const [header, ...bodyLines] = mirrorSent[0].content.split('\n');
-  assert.equal(header, '[dry-run] #general · reply · reply to Alice');
+  assert.equal(header, '[dry-run] #general · reply · mention · reply to Alice');
   assert.equal(bodyLines.join('\n'), 'hi @Alice');
   assert.ok(!mirrorSent[0].content.includes('<@'), 'a mirrored @name must never resolve to a real mention');
 });
@@ -2324,13 +2324,13 @@ function drawHot(features = {}, image = {}, bot = {}) {
   return hot;
 }
 
-async function runDrawTurn({ answers, hot = drawHot(), images = fakeImages(), client = fakeClient(), imageFetcher = fakeImageFetcher(), withTrigger = true, attachFiles = true } = {}) {
+async function runDrawTurn({ answers, hot = drawHot(), images = fakeImages(), client = fakeClient(), imageFetcher = fakeImageFetcher(), withTrigger = true, attachFiles = true, triggerKind = 'mention' } = {}) {
   const raw = rawMessage({ id: 'm1', authorId: 'u1', authorName: 'Alice', content: 'draw me a cat' });
   const channel = fakeTurnChannel({ id: 'c1', name: 'general', historyMessages: [raw], attachFiles });
   const llm = sequenceLlm(answers);
   const turns = createTurnRunner({ hot, store: fakeStore(), llm, calibrator: identityCalibrator(), client, images, imageFetcher });
   const params = withTrigger
-    ? { channel, mode: 'reply', trigger: normalizedTrigger(raw), triggerKind: 'mention' }
+    ? { channel, mode: 'reply', trigger: normalizedTrigger(raw), triggerKind }
     : { channel, mode: 'interject' };
   const { result, logs } = await withCapturedLogs(() => turns.runTurn(params));
   return { result, logs, channel, llm, images, imageFetcher, turns };
@@ -2443,7 +2443,7 @@ test('runTurn: dry-run logs the draw prompt and never calls generate', async () 
   assert.ok(line.prompt.endsWith('me on a bicycle'), 'the request is in the logged prompt');
   assert.equal(line.prompt, 'Drawing for Bot.\n\nBot wears a green scarf.\n\nme on a bicycle');
   assert.equal(mirrorSent.length, 1);
-  assert.equal(mirrorSent[0].content, `[dry-run] #general \u00b7 reply \u00b7 draw (self)\n${line.prompt}`);
+  assert.equal(mirrorSent[0].content, `[dry-run] #general \u00b7 reply \u00b7 mention \u00b7 draw (self)\n${line.prompt}`);
 });
 
 test('runTurn: dry-run mirrors a long draw prompt in numbered parts that each fit a Discord message', async () => {
@@ -2459,7 +2459,7 @@ test('runTurn: dry-run mirrors a long draw prompt in numbered parts that each fi
   const bodies = mirrorSent.map((payload, i) => {
     const [header, ...body] = payload.content.split('\n');
     assert.ok([...payload.content].length <= 2000, 'every part fits one Discord message');
-    assert.equal(header, `[dry-run] #general \u00b7 reply \u00b7 draw (${i + 1}/${mirrorSent.length})`);
+    assert.equal(header, `[dry-run] #general \u00b7 reply \u00b7 mention \u00b7 draw (${i + 1}/${mirrorSent.length})`);
     return body.join('\n');
   });
   assert.equal(bodies.join('\n'), prompt, 'the parts put together are the whole prompt');
@@ -2867,7 +2867,7 @@ test('runTurn: a dry-run private turn mirrors under "private", never "#null"', a
   const { channel } = await runPrivateTurn({ hot, client });
   assert.equal(channel.sent.length, 0);
   assert.equal(mirrored.length, 1);
-  assert.ok(mirrored[0].content.startsWith('[dry-run] private · reply · reply to '), mirrored[0].content);
+  assert.ok(mirrored[0].content.startsWith('[dry-run] private · reply · private · reply to '), mirrored[0].content);
 });
 
 test('runTurn: a private turn may draw (no Attach Files check in a DM), counted for the DM partner', async () => {
@@ -2986,6 +2986,7 @@ test('runTurn: a drawing refused by an image cap posts the limit notice as a pla
     const line = logs.find((l) => l.msg === 'turn: draw refused by a limit');
     assert.ok(line);
     assert.equal(line.key, key);
+    assert.equal(line.asked, true, 'someone asked: the notice above follows');
     assert.equal(logs.some((l) => l.msg === 'turn: draw failed'), false);
   }
 });
@@ -3100,6 +3101,7 @@ test('runTurn: an image cap on a spontaneous turn stays silent -- no notice, no 
   assert.equal(line.used, 5);
   assert.equal(line.cap, 5);
   assert.equal(line.spontaneous, true);
+  assert.equal(line.asked, false);
   assert.equal(logs.some((l) => l.msg === 'dry-run: would notify limit'), false);
 });
 
@@ -3639,4 +3641,205 @@ test('runTurn: the pass ahead is keyed on the lines the next turn fetches, so th
   assert.equal(classifierCalls.length, 2, 'the next turn makes no variety request');
   const turn = logs.find((l) => l.msg === 'variety: turn');
   assert.deepEqual([turn.source, turn.cached, turn.lines], ['cache', true, 5]);
+});
+
+// ---------------------------------------------------------------------------
+// An overheard turn (triggerKind 'overheard'): a line about the persona, said
+// to someone else or to the room. It posts plain like a follow-up, runs no
+// trigger-only helper, and nobody asked for its drawing.
+
+test('runTurn: an overheard turn ignores reply="#n" and sends plain; turn: sent carries overheard, a follow-up keeps followUp', async () => {
+  const cases = [
+    { triggerKind: 'overheard', reply: undefined, overheard: true, followUp: undefined },
+    { triggerKind: 'followUp', reply: undefined, overheard: undefined, followUp: true },
+    { triggerKind: 'mention', reply: { messageReference: 'm1', failIfNotExists: false }, overheard: undefined, followUp: undefined },
+  ];
+  for (const c of cases) {
+    const raw = rawMessage({ id: 'm1', authorName: 'Élodie' });
+    const channel = fakeTurnChannel({ historyMessages: [raw] });
+    const turns = createTurnRunner({ hot: fakeHot(), store: fakeStore(), llm: fakeLlm('<msg reply="#1">ναι, εγώ</msg>'), calibrator: identityCalibrator(), client: fakeClient() });
+    const { result, logs } = await withCapturedLogs(() =>
+      turns.runTurn({ channel, mode: 'reply', trigger: normalizedTrigger(raw), triggerKind: c.triggerKind }),
+    );
+    assert.equal(result.outcome, 'spoke', c.triggerKind);
+    assert.equal(channel.sent.length, 1, c.triggerKind);
+    assert.deepEqual(channel.sent[0].reply, c.reply, c.triggerKind);
+    const sent = logs.find((l) => l.msg === 'turn: sent');
+    assert.equal(sent.overheard, c.overheard, c.triggerKind);
+    assert.equal(sent.followUp, c.followUp, c.triggerKind);
+  }
+});
+
+test('runTurn: a dry-run overheard or follow-up turn logs no reply target, carries its kind, and names it in the mirror header', async () => {
+  for (const triggerKind of ['overheard', 'followUp']) {
+    const raw = rawMessage({ id: 'm1', authorName: 'Élodie' });
+    const channel = fakeTurnChannel({ id: 'c1', name: 'general', historyMessages: [raw] });
+    const mirrorSent = [];
+    const client = fakeClient({ channels: { fetch: async () => ({ send: async (payload) => mirrorSent.push(payload) }) } });
+    const hot = fakeHot({ dryRun: true }, { dryRunChannelId: 'mirror1' });
+    const turns = createTurnRunner({ hot, store: fakeStore(), llm: fakeLlm('<msg reply="#1">hi</msg>'), calibrator: identityCalibrator(), client });
+    const { result, logs } = await withCapturedLogs(() =>
+      turns.runTurn({ channel, mode: 'reply', trigger: normalizedTrigger(raw), triggerKind }),
+    );
+
+    assert.equal(result.dryRun, true, triggerKind);
+    assert.equal(channel.sent.length, 0, triggerKind);
+    const line = logs.find((l) => l.msg === 'dry-run: would send');
+    assert.equal(line.replyTo, null, triggerKind);
+    assert.equal(line.trigger, triggerKind);
+    assert.equal(mirrorSent.length, 1, triggerKind);
+    assert.equal(mirrorSent[0].content.split('\n')[0], `[dry-run] #general · reply · ${triggerKind} · reply to —`);
+  }
+});
+
+test('runTurn: dry-run: would send carries the trigger kind of a call, null on a spontaneous turn', async () => {
+  for (const triggerKind of ['mention', undefined]) {
+    const raw = rawMessage({ id: 'm1' });
+    const channel = fakeTurnChannel({ historyMessages: [raw] });
+    const turns = createTurnRunner({ hot: fakeHot({ dryRun: true }), store: fakeStore(), llm: fakeLlm('<msg>hi</msg>'), calibrator: identityCalibrator(), client: fakeClient() });
+    const params = triggerKind ? { channel, mode: 'reply', trigger: normalizedTrigger(raw), triggerKind } : { channel, mode: 'interject' };
+    const { logs } = await withCapturedLogs(() => turns.runTurn(params));
+    assert.equal(logs.find((l) => l.msg === 'dry-run: would send').trigger, triggerKind ?? null);
+  }
+});
+
+test('runTurn: the dry-run mirror header names the trigger kind of every triggered turn, none on a spontaneous turn', async () => {
+  for (const [triggerKind, header] of [
+    ['name', '[dry-run] #general · reply · name · reply to —'],
+    ['reply', '[dry-run] #general · reply · reply · reply to —'],
+    [undefined, '[dry-run] #general · interject · reply to —'],
+  ]) {
+    const raw = rawMessage({ id: 'm1' });
+    const channel = fakeTurnChannel({ id: 'c1', name: 'general', historyMessages: [raw] });
+    const mirrorSent = [];
+    const client = fakeClient({ channels: { fetch: async () => ({ send: async (payload) => mirrorSent.push(payload) }) } });
+    const hot = fakeHot({ dryRun: true }, { dryRunChannelId: 'mirror1' });
+    const turns = createTurnRunner({ hot, store: fakeStore(), llm: fakeLlm('<msg>hi</msg>'), calibrator: identityCalibrator(), client });
+    const params = triggerKind ? { channel, mode: 'reply', trigger: normalizedTrigger(raw), triggerKind } : { channel, mode: 'interject' };
+    await withCapturedLogs(() => turns.runTurn(params));
+    assert.equal(mirrorSent.length, 1, String(triggerKind));
+    assert.equal(mirrorSent[0].content.split('\n')[0], header);
+  }
+});
+
+test('runTurn: an overheard turn posts its GIF plain', async () => {
+  for (const [triggerKind, reply] of [['overheard', undefined], ['mention', { messageReference: 'm1', failIfNotExists: false }]]) {
+    const raw = rawMessage({ id: 'm1' });
+    const channel = fakeTurnChannel({ historyMessages: [raw] });
+    const turns = createTurnRunner({ hot: fakeHot(), store: gifStore(), llm: fakeLlm('<gif reply="#1">g1</gif>'), calibrator: identityCalibrator(), client: fakeClient() });
+    await withCapturedLogs(() => turns.runTurn({ channel, mode: 'reply', trigger: normalizedTrigger(raw), triggerKind }));
+    assert.equal(channel.sent.length, 1, triggerKind);
+    assert.equal(channel.sent[0].content, 'https://tenor.com/view/chat-qui-danse-1', triggerKind);
+    assert.deepEqual(channel.sent[0].reply, reply, triggerKind);
+  }
+});
+
+test('runTurn: an overheard turn draws unasked: a plain post, no member charged, the quota read without a member', async () => {
+  const { result, channel, images } = await runDrawTurn({ answers: ['<draw reply="#1">a cat</draw>'], triggerKind: 'overheard' });
+
+  assert.equal(result.outcome, 'spoke');
+  assert.deepEqual(images.quotaCalls, [{ userId: null }]);
+  assert.equal(images.generateCalls.length, 1);
+  assert.equal(images.generateCalls[0].userId, null);
+  assert.equal(channel.sent.length, 1);
+  assert.equal(channel.sent[0].files.length, 1);
+  assert.equal(channel.sent[0].reply, undefined);
+});
+
+test('runTurn: an image cap on an overheard turn posts no notice and runs no second turn', async () => {
+  const { result, llm, channel, logs } = await runDrawTurn({
+    answers: ['<msg>κοίτα</msg><draw reply="#1">a cat</draw>', '<msg>should never be asked</msg>'],
+    images: fakeImages({ error: imageCap('daily', 'image.maxPerDay', 5, 5) }),
+    triggerKind: 'overheard',
+  });
+
+  assert.equal(result.outcome, 'spoke');
+  assert.equal(result.drawFailed, undefined);
+  assert.equal(llm.calls.length, 1, 'no drawFailed turn');
+  assert.deepEqual(channel.sent.map((p) => p.content), ['κοίτα'], 'nobody asked: no notice');
+  const line = logs.find((l) => l.msg === 'turn: draw refused by a limit');
+  assert.ok(line);
+  // A trigger exists (not spontaneous), yet nobody asked: the line says why no notice followed.
+  assert.equal(line.spontaneous, false);
+  assert.equal(line.asked, false);
+});
+
+test('runTurn: a failed drawing on an overheard turn starts no drawFailed turn and fires onIdle once, right away', async () => {
+  const raw = rawMessage({ id: 'm1', authorName: 'Élodie' });
+  const channel = fakeTurnChannel({ historyMessages: [raw] });
+  const llm = sequenceLlm(['<msg>on it</msg><draw>a cat</draw>', '<msg>should never be asked</msg>']);
+  const turns = createTurnRunner({
+    hot: drawHot(),
+    store: fakeStore(),
+    llm,
+    calibrator: identityCalibrator(),
+    client: fakeClient(),
+    images: fakeImages({ error: new ImageGenError('timeout') }),
+  });
+  let idle = 0;
+  turns.setOnIdle(() => {
+    idle += 1;
+  });
+
+  const { result, logs } = await withCapturedLogs(() =>
+    turns.runTurn({ channel, mode: 'reply', trigger: normalizedTrigger(raw), triggerKind: 'overheard' }),
+  );
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.equal(result.drawFailed, 'timeout');
+  assert.equal(llm.calls.length, 1, 'no drawFailed turn');
+  assert.deepEqual(channel.sent.map((p) => p.content), ['on it']);
+  assert.equal(idle, 1, 'the pending queue is drained after this turn');
+  assert.equal(turns.isAnyBusy(), false);
+  assert.ok(logs.find((l) => l.msg === 'turn: draw failed'));
+  assert.equal(logs.some((l) => l.msg === 'turn: draw failure answered'), false);
+});
+
+test('runTurn: an overheard turn runs neither the re-watch nor the search classifier; a mention in the same scene runs both', async () => {
+  for (const [triggerKind, expected] of [['mention', { rewatch: 1, lookup: 1 }], ['overheard', { rewatch: 0, lookup: 0 }]]) {
+    const hot = rewatchHot({ webLookup: true }, {}, {
+      web: { maxPerDay: 60, links: { enabled: true, maxPerTurn: 2 }, search: { enabled: true, maxPerTurn: 1, contextMessages: 50 } },
+    });
+    hot.prompts.lookup = LOOKUP_SYSTEM;
+    const classifierCalls = { rewatch: 0, lookup: 0 };
+    const llm = {
+      complete: async (messages) => {
+        const system = messages[0].content;
+        if (system.startsWith('Pick the video')) classifierCalls.rewatch += 1;
+        else if (system.startsWith('Decide whether')) classifierCalls.lookup += 1;
+        else return { text: '<msg>ok</msg>', usage: {}, estimated: 10 };
+        return { text: 'none', usage: {}, estimated: 5 };
+      },
+    };
+    const scene = rewatchScene();
+    const lookup = fakeLookup();
+    const turns = createTurnRunner({
+      hot,
+      store: fakeStore(),
+      llm,
+      calibrator: identityCalibrator(),
+      client: fakeClient(),
+      describer: fakeRewatchDescriber({ va: { state: 'watched', text: 'ένα αυτοκίνητο περνά' } }),
+      lookup,
+      imageFetcher: fakeImageFetcher(),
+    });
+    const { result } = await withCapturedLogs(() =>
+      turns.runTurn({ channel: scene.channel, mode: 'reply', trigger: normalizedTrigger(scene.trigger), triggerKind }),
+    );
+
+    assert.equal(result.outcome, 'spoke', triggerKind);
+    assert.deepEqual(classifierCalls, expected, triggerKind);
+    assert.equal(lookup.searchCalls.length, 0, triggerKind);
+  }
+});
+
+test('runTurn: turn: model answered carries the trigger kind, null on a spontaneous turn', async () => {
+  for (const triggerKind of ['mention', 'followUp', 'overheard', undefined]) {
+    const raw = rawMessage({ id: 'm1' });
+    const channel = fakeTurnChannel({ historyMessages: [raw] });
+    const turns = createTurnRunner({ hot: fakeHot(), store: fakeStore(), llm: fakeLlm('<skip/>'), calibrator: identityCalibrator(), client: fakeClient() });
+    const params = triggerKind ? { channel, mode: 'reply', trigger: normalizedTrigger(raw), triggerKind } : { channel, mode: 'interject' };
+    const { logs } = await withCapturedLogs(() => turns.runTurn(params));
+    assert.equal(logs.find((l) => l.msg === 'turn: model answered').trigger, triggerKind ?? null, String(triggerKind));
+  }
 });

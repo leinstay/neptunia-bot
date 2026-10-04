@@ -143,10 +143,50 @@ export function followUpPreFilter(normalized, selfId, cfg) {
   return (normalized.mentionedUserIds ?? []).some((id) => id !== selfId && id !== replyPing);
 }
 
-/** The classifier answers with one word: `yes` when it starts with 'y' (case-insensitive), else `no`. */
+// Protocol token of the address classifier (docs/en/prompt-contract.md), not
+// wording: the answer for a line that talks about the persona to someone else
+// or to the room. Trailing punctuation is tolerated, nothing before the word.
+const OVERHEARD_ANSWER = /^overheard[.,;:!?\u2026]*$/;
+
+/**
+ * The address classifier's answer (prompts/address.md): its first
+ * whitespace-separated word, lower-cased. `yes` when it starts with 'y';
+ * `overheard` when it is `overheard` (trailing punctuation allowed);
+ * anything else, empty included, `no`. Quotes or markup around the word
+ * are not stripped.
+ * @param {unknown} text
+ * @returns {'yes'|'overheard'|'no'}
+ */
+export function parseAddressAnswer(text) {
+  const firstWord = (String(text ?? '').trim().split(/\s+/)[0] ?? '').toLowerCase();
+  if (firstWord.startsWith('y')) return 'yes';
+  return OVERHEARD_ANSWER.test(firstWord) ? 'overheard' : 'no';
+}
+
+/**
+ * The two-way projection of parseAddressAnswer: `overheard` counts as `yes`,
+ * so every two-word answer parses exactly as before the third answer. The
+ * bot itself reads parseAddressAnswer; this stays for the classifier bench,
+ * which scores yes / no.
+ * @param {unknown} text
+ * @returns {'yes'|'no'}
+ */
 export function parseFollowUpVerdict(text) {
-  const firstWord = String(text ?? '').trim().split(/\s+/)[0] ?? '';
-  return firstWord.toLowerCase().startsWith('y') ? 'yes' : 'no';
+  return parseAddressAnswer(text) === 'no' ? 'no' : 'yes';
+}
+
+/**
+ * The trigger kind an address-classifier answer starts: null for `no`,
+ * `followUp` for `yes`, `overheard` for `overheard` -- or `followUp` when
+ * `mention.followUpOverheard` is false (a missing key counts as on).
+ * @param {'yes'|'overheard'|'no'} answer
+ * @param {{ followUpOverheard?: boolean }} [cfg]  config.mention, read by the caller now
+ * @returns {'followUp'|'overheard'|null}
+ */
+export function followUpTriggerKind(answer, cfg) {
+  if (answer === 'yes') return 'followUp';
+  if (answer !== 'overheard') return null;
+  return cfg?.followUpOverheard === false ? 'followUp' : 'overheard';
 }
 
 // The helper models, grouped by modality under the `classifier` config block.

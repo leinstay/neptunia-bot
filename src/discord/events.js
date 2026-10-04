@@ -2,8 +2,8 @@
 // of a handful of outcomes (ignore, observe into memory, let the spontaneous
 // scheduler eavesdrop, or run a turn) without ever throwing into discord.js.
 // A direct message goes through the private-chat gate instead
-// (features.privateMessages, src/behavior/private.js). A triggered turn
-// refused by a rail gets one plain limit notice (src/behavior/limits.js).
+// (features.privateMessages, src/behavior/private.js). A turn someone asked
+// for that a rail refused gets one plain limit notice (src/behavior/limits.js).
 // Owner commands are a separate pipeline entirely (src/discord/commands.js,
 // driven by `interactionCreate`, not `messageCreate`). Kept free of
 // discord.js-specific assumptions beyond the shape already used by
@@ -20,7 +20,8 @@ import {
   repeatWindowMs,
   isFollowUpOpen,
   followUpPreFilter,
-  parseFollowUpVerdict,
+  parseAddressAnswer,
+  followUpTriggerKind,
   classifierTextModel,
 } from '../behavior/mention.js';
 import { fill, formatTranscript, renderTranscript } from './format.js';
@@ -267,7 +268,10 @@ export function createMessageHandler({
   // branch of onMessage below (the same place turns.notePost() is called),
   // never here. An untagged message that arrives while the window is open is
   // not answered blindly: it goes through address.md first (see
-  // docs/prompt-contract.md, "The address classifier").
+  // docs/prompt-contract.md, "The address classifier"). Its answer is `yes`
+  // (said to the persona: a follow-up turn), `overheard` (about the persona,
+  // said to someone else or to the room: an overheard turn, or a follow-up
+  // with mention.followUpOverheard off) or `no`.
   //
   // The Map is mirrored into `store.state.data.followUpWindows` (timestamps
   // and a counter only, never message text) so a restart does not close
@@ -414,6 +418,23 @@ export function createMessageHandler({
     return fill(template, { name: normalized.authorName, aliases: names.join(', ') });
   }
 
+  /** Whether the address classifier is switched off (features.followUp or features.mentions false) in `config`. */
+  function followUpOff(config) {
+    const features = config.features ?? {};
+    return features.followUp === false || features.mentions === false;
+  }
+
+  /**
+   * Why the persona is mute right now, as onMessage sees it before any
+   * classifier: `'paused'` (`/nep pause`), `'warmup'` (a memory warmup run in
+   * flight) or null.
+   * @returns {'paused'|'warmup'|null}
+   */
+  function followUpMuted() {
+    if (store?.state?.data?.paused) return 'paused';
+    return isWarmingUp() ? 'warmup' : null;
+  }
+
   /**
    * The checks in front of the classifier, read from the hot config now:
    * `{ kind: 'skip', reason }` when the classifier does not apply (feature
@@ -424,8 +445,7 @@ export function createMessageHandler({
    */
   function followUpGate(message, normalized, selfId) {
     const config = hot.config;
-    const features = config.features ?? {};
-    if (features.followUp === false || features.mentions === false) return { kind: 'skip', reason: 'off' };
+    if (followUpOff(config)) return { kind: 'skip', reason: 'off' };
 
     const channel = message.channel;
     const channelId = channel.id;
@@ -441,7 +461,7 @@ export function createMessageHandler({
 
     const startedAt = now();
     if (followUpPreFilter(normalized, selfId, mentionCfg)) {
-      log.info('follow-up: verdict', { channel: channelId, author: normalized.authorId, verdict: 'no', ms: now() - startedAt });
+      log.info('follow-up: verdict', { channel: channelId, author: normalized.authorId, verdict: 'no', answer: 'no', ms: now() - startedAt });
       bumpFollowUpNoStreak(channelId, state, mentionCfg);
       return { kind: 'handled' };
     }
@@ -450,7 +470,7 @@ export function createMessageHandler({
 
   /**
    * Whether an untagged `normalized` message was fully handled by the address
-   * classifier (pre-filter or a real model verdict, "yes" or "no" alike, or
+   * classifier (pre-filter or a real model verdict, any answer, or
    * held for a classifier call already in flight in its channel) -- the
    * caller must then NOT also hand it to the spontaneous scheduler. Never
    * throws: an LLM/context-building error is treated as a "no" per the
@@ -468,9 +488,12 @@ export function createMessageHandler({
     // while one is already running is held (only the latest per channel; an
     // earlier held one is replaced) and returned as handled. When the call in
     // flight ends without starting a turn, the held message goes through the
-    // gate and the classifier as if it had just arrived; after a "yes" it is
-    // dropped, since the turn reads it in the channel history anyway. The
-    // slot stays taken until the held messages are worked off, one at a time.
+    // gate and the classifier as if it had just arrived; after a turn started
+    // (a "yes") it is dropped, since the turn reads it in the channel history
+    // anyway. An overheard turn frames its line as not said to the persona,
+    // so it waits instead: the held message is classified first
+    // (settleFollowUp). The slot stays taken until the held messages are
+    // worked off, one at a time.
     const channelId = message.channel.id;
     if (followUpInFlight.has(channelId)) {
       const replaced = followUpHeld.has(channelId);
@@ -480,18 +503,19 @@ export function createMessageHandler({
     }
 
     followUpInFlight.add(channelId);
-    let startedTurn;
+    let settled;
     try {
-      startedTurn = await classifyFollowUp(message, normalized, selfId, gate, ownPrefill);
+      const answer = await classifyFollowUp(message, normalized, selfId, gate, ownPrefill);
+      settled = settleFollowUp(channelId, { message, normalized }, answer);
     } catch (err) {
       followUpHeld.delete(channelId);
       followUpInFlight.delete(channelId);
       throw err;
     }
-    // Not awaited: this message is answered; a held one is classified in the
-    // background, still holding the slot. With nothing held the slot is
-    // released synchronously, before this returns.
-    classifyHeldFollowUps(channelId, startedTurn).catch((err) =>
+    // Not awaited: this message is answered (or waits on a held one); a held
+    // one is classified in the background, still holding the slot. With
+    // nothing held the slot is released synchronously, before this returns.
+    classifyHeldFollowUps(channelId, settled).catch((err) =>
       log.error('follow-up: classifying a held message failed', { channel: channelId, error: err }),
     );
     return true;
@@ -499,31 +523,41 @@ export function createMessageHandler({
 
   /**
    * Works off the messages held for `channelId` while its classifier slot was
-   * taken, one at a time, then frees the slot. `startedTurn` is the outcome
-   * of the call that just ended.
+   * taken, one at a time, then frees the slot. `settled` is what the call
+   * that just ended left (settleFollowUp): whether it started a turn, and the
+   * overheard line still waiting on the held messages, if any. A waiting
+   * line that no newer verdict replaced is started at the end
+   * (startWaitingLine: its turn is overheard, or followUp with the switch
+   * turned off meanwhile) -- or dropped there.
+   * @param {string} channelId
+   * @param {{ started: boolean, waiting: { message: object, normalized: object }|null }} settled
    */
-  async function classifyHeldFollowUps(channelId, startedTurn) {
+  async function classifyHeldFollowUps(channelId, settled) {
     try {
-      let turnStarted = startedTurn;
+      let { started, waiting } = settled;
       for (;;) {
         const held = followUpHeld.get(channelId);
-        if (!held) return;
+        if (!held) break;
         followUpHeld.delete(channelId);
-        if (turnStarted) {
+        if (started) {
           log.info('follow-up: held message dropped', { channel: channelId, message: held.normalized.id, reason: 'turn' });
           return;
         }
         // As if it had just arrived: paused or warming up, onMessage would
         // never reach the classifier (and pause forbids marking the store dirty).
-        const muted = store?.state?.data?.paused ? 'paused' : isWarmingUp() ? 'warmup' : null;
+        const muted = followUpMuted();
         const gate = muted ? { kind: 'skip', reason: muted } : followUpGate(held.message, held.normalized, held.selfId);
         if (gate.kind === 'skip') {
           log.info('follow-up: held message dropped', { channel: channelId, message: held.normalized.id, reason: gate.reason });
-          return;
+          // A waiting line meets the same check in startWaitingLine, except
+          // `closed` (it was classified inside the window).
+          break;
         }
-        if (gate.kind === 'handled') return;
-        turnStarted = await classifyFollowUp(held.message, held.normalized, held.selfId, gate, held.ownPrefill);
+        if (gate.kind === 'handled') break;
+        const answer = await classifyFollowUp(held.message, held.normalized, held.selfId, gate, held.ownPrefill);
+        ({ started, waiting } = settleFollowUp(channelId, held, answer, waiting));
       }
+      if (waiting) startWaitingLine(channelId, waiting);
     } finally {
       followUpHeld.delete(channelId);
       followUpInFlight.delete(channelId);
@@ -531,11 +565,59 @@ export function createMessageHandler({
   }
 
   /**
+   * What an answer of the address classifier starts for `candidate` (`{
+   * message, normalized }`): `{ started, waiting }`. A "no" starts nothing and
+   * keeps `waiting` (an earlier overheard line still waiting on held
+   * messages). An overheard turn (followUpTriggerKind, the switch read now)
+   * waits while a newer message is held in the channel: that one is
+   * classified first. Otherwise the turn starts now (startFollowUpTurn), and
+   * a waiting line gives way to this newer one, whose turn reads it in the
+   * channel history.
+   * @param {string} channelId
+   * @param {{ message: object, normalized: object }} candidate
+   * @param {'yes'|'overheard'|'no'} answer
+   * @param {{ message: object, normalized: object }|null} [waiting]
+   * @returns {{ started: boolean, waiting: { message: object, normalized: object }|null }}
+   */
+  function settleFollowUp(channelId, candidate, answer, waiting = null) {
+    if (answer === 'no') return { started: false, waiting };
+    if (waiting) log.info('follow-up: dropped', { channel: channelId, message: waiting.normalized.id, reason: 'newer' });
+    const triggerKind = followUpTriggerKind(answer, hot.config.mention);
+    if (triggerKind === 'overheard' && followUpHeld.has(channelId)) return { started: false, waiting: candidate };
+    return { started: startFollowUpTurn(candidate, triggerKind), waiting: null };
+  }
+
+  /**
+   * Start the overheard line that waited on the held messages (settleFollowUp)
+   * once they are worked off. That took at least one more classifier call,
+   * so the gate's checks that do not depend on the window are read again
+   * now: paused, a warmup run, the follow-up or mention switch off, or no
+   * Send Messages drop the line (`follow-up: dropped` with that reason); a
+   * turn running drops it as busy (startFollowUpTurn). A window closed
+   * meanwhile does not: the line was classified while it was open. The kind
+   * is read now as well (followUpTriggerKind).
+   * @param {string} channelId
+   * @param {{ message: object, normalized: object }} waiting
+   */
+  function startWaitingLine(channelId, waiting) {
+    const config = hot.config;
+    let reason = followUpMuted();
+    if (!reason && followUpOff(config)) reason = 'off';
+    if (!reason && !canSend(waiting.message.channel)) reason = 'cannot-send';
+    if (reason) {
+      log.info('follow-up: dropped', { channel: channelId, message: waiting.normalized.id, reason });
+      return;
+    }
+    startFollowUpTurn(waiting, followUpTriggerKind('overheard', config.mention));
+  }
+
+  /**
    * One classifier call for `normalized` (the gate already passed): logs the
-   * verdict, starts a reply turn on "yes", bumps the no-streak otherwise.
-   * Resolves to whether a turn was started: a "yes" that finds a turn
-   * running which would refuse this one (turnBlocked, read now) starts none
-   * and is logged as `follow-up: dropped`. The caller owns the in-flight slot.
+   * verdict and bumps the no-streak on a "no"; a "yes" or an "overheard"
+   * leaves the streak alone (the persona is still part of the exchange).
+   * Resolves to the answer (parseAddressAnswer); the caller starts the turn
+   * (settleFollowUp) and owns the in-flight slot.
+   * @returns {Promise<'yes'|'overheard'|'no'>}
    */
   async function classifyFollowUp(message, normalized, selfId, { config, state }, ownPrefill = null) {
     const channel = message.channel;
@@ -558,12 +640,12 @@ export function createMessageHandler({
         missingAddressPromptLogged = true;
         log.warn('follow-up: prompts.address is missing, every follow-up is treated as "no"', {});
       }
-      log.info('follow-up: verdict', { channel: channelId, author: normalized.authorId, verdict: 'no', ms: now() - startedAt });
+      log.info('follow-up: verdict', { channel: channelId, author: normalized.authorId, verdict: 'no', answer: 'no', ms: now() - startedAt });
       bumpFollowUpNoStreak(channelId, state, mentionCfg);
-      return false;
+      return 'no';
     }
 
-    let verdict = 'no';
+    let answer = 'no';
     if (llm) {
       // Read once: the request and its empty-answer warning name the same model.
       const model = classifierTextModel(config);
@@ -585,42 +667,56 @@ export function createMessageHandler({
           },
         );
         if (String(completion.text ?? '').trim()) {
-          verdict = parseFollowUpVerdict(completion.text);
+          answer = parseAddressAnswer(completion.text);
         } else {
           // Nothing at all (typically a reasoning model that spent its whole
           // output cap thinking) is a failed call, not a silent "no".
           log.warn('follow-up: classifier failed', { channel: channelId, reason: 'empty', model: model ?? null });
         }
       } catch (err) {
-        verdict = 'no';
+        answer = 'no';
         log.warn('follow-up: classifier failed', { channel: channelId, error: err });
       }
     }
 
-    log.info('follow-up: verdict', { channel: channelId, author: normalized.authorId, verdict, ms: now() - startedAt });
+    // `verdict` is the two-way projection (overheard counts as yes), `answer` the word itself.
+    const verdict = answer === 'no' ? 'no' : 'yes';
+    log.info('follow-up: verdict', { channel: channelId, author: normalized.authorId, verdict, answer, ms: now() - startedAt });
+    if (answer === 'no') bumpFollowUpNoStreak(channelId, state, mentionCfg);
+    return answer;
+  }
 
-    if (verdict !== 'yes') {
-      bumpFollowUpNoStreak(channelId, state, mentionCfg);
-      return false;
-    }
-    // A turn started elsewhere while the classifier was thinking: runTurn
-    // would answer 'busy', so none is started (and a held message is not
-    // dropped as already answered).
-    if (turnBlocked(channelId, hot.config)) {
+  /**
+   * Start the reply turn a follow-up verdict asked for, `triggerKind` being
+   * `followUp` or `overheard` (followUpTriggerKind). Never awaits the turn;
+   * returns whether it was started: a turn started
+   * elsewhere while the classifier was thinking (turnBlocked, read now)
+   * would answer 'busy', so none is started, logged as `follow-up: dropped`
+   * (and a held message is not dropped as already answered).
+   * @param {{ message: object, normalized: object }} candidate
+   * @param {'followUp'|'overheard'} triggerKind
+   * @returns {boolean}
+   */
+  function startFollowUpTurn({ message, normalized }, triggerKind) {
+    const channel = message.channel;
+    const channelId = channel.id;
+    const config = hot.config;
+    if (turnBlocked(channelId, config)) {
       log.info('follow-up: dropped', { channel: channelId, message: normalized.id, reason: 'busy' });
       return false;
     }
-    // Still counted for spam (mention.spamThreshold, future explicit
-    // pings), just never rolled for the ignore chance -- a follow-up is a
-    // continuation, not a ping (see docs/prompt-contract.md).
-    tagHistory.hit(normalized.authorId, now(), repeatWindowMs(mentionCfg));
+    // A follow-up is still counted for spam (mention.spamThreshold, future
+    // explicit pings), just never rolled for the ignore chance -- it is a
+    // continuation, not a ping (see docs/prompt-contract.md). Talk about the
+    // persona (overheard) is not a call to it: not counted.
+    if (triggerKind === 'followUp') tagHistory.hit(normalized.authorId, now(), repeatWindowMs(config.mention));
     turns
-      .runTurn({ channel, mode: 'reply', trigger: normalized, triggerKind: 'followUp' })
+      .runTurn({ channel, mode: 'reply', trigger: normalized, triggerKind })
       .then((result) => {
         if (result?.outcome === 'busy') {
           log.info('follow-up: dropped', { channel: channelId, message: normalized.id, reason: 'busy' });
         }
-        return announceRefusal(channel, normalized, result, 'followUp');
+        return announceRefusal(channel, normalized, result, triggerKind);
       })
       .catch((err) => log.error('follow-up: reply turn failed', { channel: channelId, error: err }));
     return true;
@@ -630,7 +726,8 @@ export function createMessageHandler({
   // A turn someone asked for (a mention, reply, name, follow-up or private
   // message) that a rail refused gets one plain line naming the limit and the
   // numbers (labels.limits.notice), so the requester knows it was a limit and
-  // not silence in character. Spontaneous turns never come through here.
+  // not silence in character. Spontaneous turns never come through here; an
+  // overheard turn does, and nobody asked for it: it stays silent too.
 
   /**
    * Post the limit notice (src/behavior/limits.js#postLimitNotice: labels,
@@ -651,11 +748,13 @@ export function createMessageHandler({
   }
 
   /**
-   * After a triggered turn: a rail refusal that carries its limit gets the notice.
+   * After a triggered turn: a rail refusal that carries its limit gets the
+   * notice -- except on an overheard turn, which nobody asked for.
    * @param {{ outcome: TurnOutcome, limit?: object|null }|undefined} result
    * @param {TriggerKind} triggerKind
    */
   async function announceRefusal(channel, trigger, result, triggerKind) {
+    if (triggerKind === 'overheard') return;
     if (result?.outcome !== 'refused' || !result.limit) return;
     await notifyLimit(channel, trigger, result.limit, triggerKind);
   }
