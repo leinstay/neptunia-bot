@@ -171,6 +171,7 @@ export const labels = {
     tone: 'tone: {text}',
     lastMessage: 'last message: {when} ago',
     topWriters: 'writes here most: {names}',
+    readOnly: 'read-only for you: read and react, no writing',
     activity: 'activity: {activity}',
     activityLive: 'live',
     activitySlow: 'slow',

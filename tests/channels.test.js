@@ -207,6 +207,53 @@ test('renderChannel: topWriters is omitted when there is no nameOf, or an empty 
   assert.ok(!renderChannel(c, noTopWritersLabels, { activity: 'live', nameOf }).includes('writes here most'));
 });
 
+test('renderChannel: a read-only channel carries labels.server.readOnly', () => {
+  const c = channel({
+    name: 'ημερολόγιο',
+    topic: 'μόνο ανάγνωση',
+    purpose: 'café notes',
+    tone: 'calm',
+    lastMessageAt: NOW - 3 * DAY,
+    topWriters: [{ id: 'a', count: 8 }],
+  });
+  const nameOf = (id) => ({ a: 'Élodie' })[id] ?? null;
+  const text = renderChannel(c, labels, { activity: 'slow', now: NOW, nameOf, readOnly: true });
+  assert.equal(
+    text,
+    [
+      '# ημερολόγιο',
+      'topic: μόνο ανάγνωση',
+      'purpose: café notes',
+      'tone: calm',
+      labels.server.readOnly,
+      'last message: 3 d ago',
+      'writes here most: Élodie',
+      'activity: slow',
+    ].join('\n'),
+  );
+});
+
+test('renderChannel: the current channel never carries the read-only mark', () => {
+  const c = channel({ name: 'ημερολόγιο', purpose: 'café notes', lastMessageAt: NOW - 3 * DAY });
+  const current = renderChannel(c, labels, { current: true, activity: 'slow', now: NOW });
+  assert.equal(renderChannel(c, labels, { current: true, activity: 'slow', now: NOW, readOnly: true }), current);
+  assert.equal(current, `# ημερολόγιο${labels.server.currentMark}\npurpose: café notes\nlast message: 3 d ago\nactivity: slow`);
+  assert.ok(!current.includes(labels.server.readOnly));
+});
+
+test('renderChannel: without the label nothing is added', () => {
+  const c = channel({ name: 'ημερολόγιο', purpose: 'café notes', lastMessageAt: NOW - 3 * DAY });
+  const today = '# ημερολόγιο\npurpose: café notes\nlast message: 3 d ago\nactivity: slow';
+  // No option, or readOnly false: today's entry, byte for byte, with the label present.
+  assert.equal(renderChannel(c, labels, { activity: 'slow', now: NOW }), today);
+  assert.equal(renderChannel(c, labels, { activity: 'slow', now: NOW, readOnly: false }), today);
+  // The option set but the label missing (an older labels.json) or blanked (prompts.local).
+  for (const readOnly of [undefined, '']) {
+    const older = { server: { ...labels.server, readOnly }, units: labels.units };
+    assert.equal(renderChannel(c, older, { activity: 'slow', now: NOW, readOnly: true }), today);
+  }
+});
+
 test('renderChannel: works with a non-English (Greek) labels object', () => {
   const grLabels = {
     server: {

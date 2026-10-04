@@ -208,6 +208,71 @@ test('formatTranscript: a reply to a message inside the window shows its index',
   assert.ok(items[1].text.includes('(replying to #1)'));
 });
 
+// --- formatTranscript: indexOffset (a second block continues the numbering) ---
+
+function offsetMessages() {
+  const t0 = Date.UTC(2026, 8, 20, 10, 0, 0);
+  return [
+    msg('a', t0, { content: 'πρώτο' }),
+    msg('b', t0 + MIN, { content: 'δεύτερο', replyToId: 'a' }),
+    msg('c', t0 + 2 * MIN, { content: 'τρίτο', replyToId: 'outside' }),
+    msg('d', t0 + 3 * MIN, { content: 'café', replyToId: 'b' }),
+  ];
+}
+
+const offsetOptions = { timezone: TZ, gapMinutes: 20, maxChars: 100, selfName: 'Nept', labels };
+
+test('formatTranscript: indexOffset shifts every index and reply target', () => {
+  const items = formatTranscript(offsetMessages(), { ...offsetOptions, indexOffset: 7 });
+  assert.deepEqual(
+    items.map((item) => item.index),
+    [8, 9, 10, 11],
+  );
+  assert.deepEqual(
+    items.map((item) => item.text),
+    [
+      '#8 [13:00] Nick: πρώτο',
+      '#9 [13:01] Nick: δεύτερο (replying to #8)',
+      '#10 [13:02] Nick: τρίτο (replying to an older message)',
+      '#11 [13:03] Nick: café (replying to #9)',
+    ],
+  );
+});
+
+test('formatTranscript: no offset keeps 1..N', () => {
+  const expected = [
+    { id: 'a', index: 1, ts: Date.UTC(2026, 8, 20, 10, 0, 0), text: '#1 [13:00] Nick: πρώτο' },
+    { id: 'b', index: 2, ts: Date.UTC(2026, 8, 20, 10, 1, 0), text: '#2 [13:01] Nick: δεύτερο (replying to #1)' },
+    { id: 'c', index: 3, ts: Date.UTC(2026, 8, 20, 10, 2, 0), text: '#3 [13:02] Nick: τρίτο (replying to an older message)' },
+    { id: 'd', index: 4, ts: Date.UTC(2026, 8, 20, 10, 3, 0), text: '#4 [13:03] Nick: café (replying to #2)' },
+  ];
+  assert.deepEqual(formatTranscript(offsetMessages(), offsetOptions), expected);
+  assert.deepEqual(formatTranscript(offsetMessages(), { ...offsetOptions, indexOffset: undefined }), expected);
+  assert.deepEqual(formatTranscript(offsetMessages(), { ...offsetOptions, indexOffset: null }), expected);
+  assert.deepEqual(formatTranscript(offsetMessages(), { ...offsetOptions, indexOffset: 0 }), expected);
+});
+
+test('formatTranscript: an indexOffset given but not a whole number of at least 0 throws a RangeError', () => {
+  // A caller bug (say NaN from summing an undefined count) must not silently
+  // renumber a second block from #1 over the chat's own indices.
+  for (const indexOffset of [-3, 2.5, Number.NaN, Infinity, '4', {}]) {
+    assert.throws(() => formatTranscript(offsetMessages(), { ...offsetOptions, indexOffset }), RangeError, String(indexOffset));
+  }
+});
+
+test('formatTranscript: indexOffset in memory mode moves only item.index, the text has no #index', () => {
+  const plain = formatTranscript(offsetMessages(), { ...offsetOptions, mode: 'memory' });
+  const shifted = formatTranscript(offsetMessages(), { ...offsetOptions, mode: 'memory', indexOffset: 5 });
+  assert.deepEqual(
+    shifted.map((item) => item.text),
+    plain.map((item) => item.text),
+  );
+  assert.deepEqual(
+    shifted.map((item) => item.index),
+    [6, 7, 8, 9],
+  );
+});
+
 test('formatTranscript: a reply to a message outside the window is marked as an old message', () => {
   const t0 = Date.UTC(2026, 8, 20, 10, 0, 0);
   const messages = [msg('b', t0, { content: 'second', replyToId: 'missing-old-id' })];
