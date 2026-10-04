@@ -1073,6 +1073,44 @@ test('events: at most 2 pictures per message are handed to the describer', async
   assert.equal(describer.calls[0].items.length, 2);
 });
 
+test('events: media.prefillPerMessage caps the pictures handed to the describer, read per message; missing means 2 (config.json and the code fallback)', async () => {
+  assert.equal(DEFAULT_CONFIG.media.prefillPerMessage, 2);
+
+  const describer = fakeDescriber();
+  const config = baseConfig({ features: { mediaDescriptions: true }, media: { prefillPerMessage: 3 } });
+  const handler = makeHandler({ config, describer });
+  await handler(fakeMessage({ cleanContent: 'lots of pics', attachments: pictureAttachments(4) }));
+  assert.deepEqual(describer.calls[0].items.map((item) => item.itemId), ['a1', 'a2', 'a3']);
+
+  config.media.prefillPerMessage = 0; // a live edit: no picture prefill at all
+  await handler(fakeMessage({ cleanContent: 'lots of pics', attachments: pictureAttachments(4) }));
+  assert.equal(describer.calls.length, 1);
+
+  delete config.media.prefillPerMessage;
+  await handler(fakeMessage({ cleanContent: 'lots of pics', attachments: pictureAttachments(4) }));
+  assert.equal(describer.calls.length, 2);
+  assert.equal(describer.calls[1].items.length, 2);
+});
+
+test('events: media.video.prefillPerMessage caps the videos watched ahead per message; missing means 1 (config.json and the code fallback)', async () => {
+  assert.equal(DEFAULT_CONFIG.media.video.prefillPerMessage, 1);
+
+  const describer = fakeVideoDescriber();
+  const config = baseConfig({ features: { videoDescriptions: true }, media: { video: { prefill: true, prefillPerMessage: 2 } } });
+  const handler = makeHandler({ config, describer });
+  await handler(fakeMessage({ cleanContent: 'look', attachments: videoAttachments(3) }));
+  assert.deepEqual(describer.videoCalls[0].items.map((item) => item.itemId), ['v1', 'v2']);
+
+  config.media.video.prefillPerMessage = 0; // a live edit: no video prefill at all
+  await handler(fakeMessage({ cleanContent: 'look', attachments: videoAttachments(3) }));
+  assert.equal(describer.videoCalls.length, 1);
+
+  delete config.media.video.prefillPerMessage;
+  await handler(fakeMessage({ cleanContent: 'look', attachments: videoAttachments(3) }));
+  assert.equal(describer.videoCalls.length, 2);
+  assert.deepEqual(describer.videoCalls[1].items.map((item) => item.itemId), ['v1']);
+});
+
 test('events: a picture-format sticker warms the describer cache too', async () => {
   const describer = fakeDescriber();
   const config = baseConfig({ features: { mediaDescriptions: true } });

@@ -38,9 +38,17 @@ const BACKOFF_MS = 15 * 60_000;
 const MIN_LIVE_BATCH = 20; // the live analyzer never shrinks below this many messages
 const CHANNEL_FIELDS = ['purpose', 'topics', 'tone']; // the analyzer's own fields of a channel entry
 
-/** The temperature of every analyzer-role request: the stream analyzer here, and the warmup's
- * channel/profile/server requests and the portrait refresh (src/memory/warmup.js). */
-export const ANALYZER_TEMPERATURE = 0.3;
+/**
+ * The temperature of every analyzer-role request: the stream analyzer here, and the warmup's
+ * channel/profile/server requests and the portrait refresh (src/memory/warmup.js). The one
+ * reader of `memory.temperature`; called at each request, so a live edit reaches the next one.
+ * @param {object} [config]  The live config.
+ * @returns {number}  `memory.temperature` when it is a finite number, else 0.3 (config.json's value).
+ */
+export function analyzerTemperature(config) {
+  const temperature = config?.memory?.temperature;
+  return Number.isFinite(temperature) ? temperature : 0.3;
+}
 
 // Fallbacks for the memory-prompt placeholders below (and for the guild
 // `learned` limits and the affinity rails), equal to config.json's own
@@ -1497,7 +1505,7 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
         model: cfg.model || undefined,
         role: 'analyzer',
         maxOutputTokens: cfg.maxOutputTokens,
-        temperature: ANALYZER_TEMPERATURE,
+        temperature: analyzerTemperature(hot.config),
         // A 150-message batch with an 8000-token answer on a large model can
         // take longer than the chat timeout -- the analyzer gets its own,
         // much larger budget (see docs/prompt-contract.md, "The analyzer").

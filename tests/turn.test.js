@@ -1588,6 +1588,16 @@ test('createTurnRunner: rewatch -- the classifier model is classifierTextModel (
   assert.equal(withNone.llm.classifierCalls[0].options.model, undefined, 'the deprecated media.model is no fallback');
 });
 
+test('createTurnRunner: rewatch -- the classifier answer cap is media.video.rewatch.classifierMaxOutputTokens, 120 when missing (config.json and the code fallback)', async () => {
+  const shipped = JSON.parse(fs.readFileSync(new URL('../config.json', import.meta.url), 'utf8'));
+  assert.equal(shipped.media.video.rewatch.classifierMaxOutputTokens, 120);
+
+  const missing = await runRewatch({ hot: rewatchHot({}, { rewatch: {} }) });
+  assert.equal(missing.llm.classifierCalls[0].options.maxOutputTokens, 120);
+  const set = await runRewatch({ hot: rewatchHot({}, { rewatch: { classifierMaxOutputTokens: 90 } }) });
+  assert.equal(set.llm.classifierCalls[0].options.maxOutputTokens, 90);
+});
+
 test('createTurnRunner: rewatch -- none, garbage, an unknown id or a classifier error stop without a second look', async () => {
   for (const reply of ['none', 'I think the first video', '2 | τι χρώμα;', new Error('boom')]) {
     const { describer, llm } = await runRewatch({ llm: rewatchLlm(reply) });
@@ -2128,6 +2138,16 @@ test('createTurnRunner: lookup -- the classifier gets the transcript and the can
     fill(labels.lookup.sources, { list: 'example.com' }),
   ].join('\n');
   assert.ok(turnUser.includes(`<lookup>\n${block}\n</lookup>`), turnUser);
+});
+
+test('createTurnRunner: lookup -- the classifier answer cap is web.search.classifierMaxOutputTokens, 60 when missing (config.json and the code fallback)', async () => {
+  const shipped = JSON.parse(fs.readFileSync(new URL('../config.json', import.meta.url), 'utf8'));
+  assert.equal(shipped.web.search.classifierMaxOutputTokens, 60);
+
+  const missing = await runLookupTurn({ llm: lookupLlm('none') });
+  assert.equal(missing.llm.classifierCalls[0].options.maxOutputTokens, 60);
+  const set = await runLookupTurn({ hot: lookupHot({}, { search: { classifierMaxOutputTokens: 45 } }), llm: lookupLlm('none') });
+  assert.equal(set.llm.classifierCalls[0].options.maxOutputTokens, 45);
 });
 
 test('createTurnRunner: lookup -- {{today}} in the classifier prompt is the injected clock\'s UTC date, {{name}} still filled', async () => {

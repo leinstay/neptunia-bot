@@ -94,7 +94,6 @@ function authorNameFor(history, messageId) {
 
 const REWATCH_QUESTION_CHARS = 300;
 const REWATCH_SUMMARY_CHARS = 200;
-const REWATCH_CLASSIFIER_MAX_TOKENS = 120;
 // Protocol tokens of the re-watch classifier (docs/en/prompt-contract.md), not wording:
 // the status column of a `<videos>` line and the answer that asks for a retry.
 const REWATCH_STATUS_WATCHED = 'watched';
@@ -139,7 +138,6 @@ export function parseRewatchPickDetailed(raw, count) {
 }
 
 const LOOKUP_QUERY_CHARS = 200;
-const LOOKUP_CLASSIFIER_MAX_TOKENS = 60;
 // Protocol token of the search classifier (prompts/lookup.md), not wording:
 // a line whose first word is `none` (so `None needed.` counts too).
 const LOOKUP_NONE = /^none\b/i;
@@ -668,7 +666,8 @@ export function createTurnRunner({
    * asks about a video watched in the last `media.video.rewatch.recentMessages`
    * messages (at most `media.video.rewatch.maxCandidates` of them, newest
    * first), one cheap classifier call (prompts.rewatch, on the classifier
-   * model: classifierTextModel -- `classifier.text`, else the media model) picks the video and
+   * model: classifierTextModel -- `classifier.text`, else the media model; its answer capped at
+   * `media.video.rewatch.classifierMaxOutputTokens`) picks the video and
    * the question, then the describer looks at it again
    * (describer.rewatchVideo) and the answer joins that video's state as
    * `answer: { question, text }` -- mutating `videos` in place. Videos that
@@ -747,7 +746,7 @@ export function createTurnRunner({
         {
           model: classifierTextModel(config),
           role: 'classifier.text',
-          maxOutputTokens: REWATCH_CLASSIFIER_MAX_TOKENS,
+          maxOutputTokens: rewatchCfg.classifierMaxOutputTokens ?? 120,
           timeoutMs: config.llm?.timeoutMs,
           countAgainstDailyCap: true,
           skipCalibration: true,
@@ -789,8 +788,8 @@ export function createTurnRunner({
    * The search on a question (features.webLookup, web.search.enabled): one
    * cheap classifier call (prompts.lookup, `{{name}}` = the persona's display
    * name, `{{today}}` = the injected clock's UTC date `YYYY-MM-DD`, on
-   * classifierTextModel) reads the last `web.search.contextMessages`
-   * messages before the trigger (with the pictures' captions, the video
+   * classifierTextModel, its answer capped at `web.search.classifierMaxOutputTokens`) reads
+   * the last `web.search.contextMessages` messages before the trigger (with the pictures' captions, the video
    * states and the read links this turn already has) and the trigger itself,
    * and answers `none` or a query (parseLookupQuery); a query goes to
    * lookup.search. One classifier call and at most one search per turn
@@ -833,7 +832,7 @@ export function createTurnRunner({
         {
           model: classifierTextModel(config),
           role: 'classifier.text',
-          maxOutputTokens: LOOKUP_CLASSIFIER_MAX_TOKENS,
+          maxOutputTokens: searchCfg.classifierMaxOutputTokens ?? 60,
           timeoutMs: config.llm?.timeoutMs,
           countAgainstDailyCap: true,
           skipCalibration: true,

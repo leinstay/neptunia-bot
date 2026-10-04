@@ -127,6 +127,7 @@
     "minBatchMessages": 15,
     "maxBatchAgeMinutes": 180,
     "maxOutputTokens": 20000,
+    "temperature": 0.3,
     "fieldChars": 1000,
     "maxDetails": 15,
     "maxInjokes": 15,
@@ -177,6 +178,7 @@
     "descriptionChars": 200,
     "imageSize": 512,
     "maxPerTurn": 6,
+    "prefillPerMessage": 2,
     "cacheEntries": 5000,
     "filePreviewChars": 500,
     "embedTextChars": 200,
@@ -205,14 +207,15 @@
       "urlProcessing": "agentic",
       "reasoning": { "effort": "low" },
       "prefill": true,
-      "rewatch": { "maxPerDay": 20, "maxOutputTokens": 600, "answerChars": 1200, "recentMessages": 60, "maxCandidates": 6, "contextMessages": 50 }
+      "prefillPerMessage": 1,
+      "rewatch": { "maxPerDay": 20, "maxOutputTokens": 600, "classifierMaxOutputTokens": 120, "answerChars": 1200, "recentMessages": 60, "maxCandidates": 6, "contextMessages": 50 }
     }
   },
   "web": {
     "maxPerDay": 60,
     "acceptLanguage": "en,ru;q=0.8",
     "links": { "enabled": true, "prefill": true, "prefillPerUserPerDay": 10, "maxPerTurn": 2, "maxBytes": 1500000, "textChars": 6000, "summaryChars": 700, "maxOutputTokens": 300, "fetchTimeoutMs": 10000, "skipSites": ["cdn.discordapp.com", "media.discordapp.net", "tenor.com", "giphy.com", "klipy.com", "imgur.com", "i.redd.it", "v.redd.it", "pbs.twimg.com"] },
-    "search": { "enabled": true, "maxPerTurn": 1, "results": 5, "summaryChars": 900, "maxOutputTokens": 400, "cacheHours": 24, "contextMessages": 50, "timeoutMs": 10000 }
+    "search": { "enabled": true, "maxPerTurn": 1, "results": 5, "summaryChars": 900, "maxOutputTokens": 400, "classifierMaxOutputTokens": 60, "cacheHours": 24, "contextMessages": 50, "timeoutMs": 10000 }
   },
   "image": {
     "model": "openai/gpt-image-2.5-flare",

@@ -27,7 +27,6 @@ import {
   buildPersonWriteIterations,
   createWarmup,
 } from '../src/memory/warmup.js';
-import { ANALYZER_TEMPERATURE } from '../src/memory/update.js';
 import { createCalibrator } from '../src/llm/tokens.js';
 import { labels } from './fixtures/labels.js';
 import { withCapturedLogs } from './fixtures/capture-logs.js';
@@ -2461,9 +2460,25 @@ test('createWarmup: every warmup and portrait request runs at the analyzer tempe
 
   assert.equal(llm.calls.length, 4);
   for (const call of llm.calls) {
-    assert.equal(call.opts.temperature, ANALYZER_TEMPERATURE);
+    assert.equal(call.opts.temperature, 0.3, 'memory.temperature missing -> 0.3');
     assert.equal(call.opts.timeoutMs, 900_000);
   }
+});
+
+test('createWarmup: memory.temperature is read at each call, for the warmup and the portrait refresh alike', async () => {
+  const store = createStore({ dataDir: tmpDataDir() });
+  const history = [rawMessage(1000, { authorId: 'a' }), rawMessage(2000, { authorId: 'a' }), rawMessage(3000, { authorId: 'a' })];
+  const client = fakeClient(fakeGuild('g1', [fakeChannel('c1', history)]));
+  const hot = fakeHot();
+  hot.config.memory.temperature = 0.55;
+  const llm = scriptedLlm([{ purpose: 'p' }, { character: 'c', style: 's' }, { patterns: 'x' }, { character: 'c2', style: 's2' }]);
+  const warmup = createWarmup({ hot, store, client, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => 10_000_000 });
+
+  await warmup.run('g1');
+  hot.config.memory.temperature = 0.1; // a live edit reaches the next request
+  await warmup.refreshPortrait('g1', 'a', '');
+
+  assert.deepEqual(llm.calls.map((call) => call.opts.temperature), [0.55, 0.55, 0.55, 0.1]);
 });
 
 test('createWarmup: a missing warmup.maxRequestTokens is 120000 for fitting and for the request cap alike', async () => {

@@ -36,16 +36,19 @@ import { MINUTE_MS, utcDay } from '../time.js';
 /** @typedef {import('../behavior/turn.js').TurnOutcome} TurnOutcome */
 /** @typedef {import('../behavior/turn.js').TriggerKind} TriggerKind */
 
-// The most pictures one observed message warms the describer cache for --
-// this runs per real-time message, not per batch, so it stays cheap.
-const MAX_WARM_PICTURES_PER_MESSAGE = 2;
-// The most videos one observed message has watched ahead of time
-// (media.video.prefill): watching is far dearer than a picture caption.
-const MAX_WARM_VIDEOS_PER_MESSAGE = 1;
 // The most links one observed message has read ahead of time (web.links.prefill).
 const MAX_WARM_LINKS_PER_MESSAGE = 1;
 // Only when web.links.prefillPerUserPerDay is missing (config.json always has it).
 const PREFILL_PER_USER_PER_DAY_FALLBACK = 10;
+
+/**
+ * How many items of one observed message a prefill may take: `value` (a
+ * config count, read by the caller now) floored at 0, or `fallback` (the
+ * config.json value) when it is missing or not a number. 0 turns that prefill off.
+ */
+function prefillPerMessage(value, fallback) {
+  return Number.isFinite(value) ? Math.max(0, Math.floor(value)) : fallback;
+}
 
 /**
  * @param {object} deps
@@ -70,14 +73,14 @@ const PREFILL_PER_USER_PER_DAY_FALLBACK = 10;
  * @param {object} [deps.describer]  From createDescriber() (src/memory/describe.js), optional: when
  *   absent, or features.mediaDescriptions is off, no description request is ever made from this
  *   pipeline. When present, every observed human message's pictures (up to
- *   MAX_WARM_PICTURES_PER_MESSAGE) are handed to it fire-and-forget -- errors swallowed -- so the
+ *   media.prefillPerMessage) are handed to it fire-and-forget -- errors swallowed -- so the
  *   cache is already warm by the time the live memory analyzer (src/memory/update.js#analyze)
  *   wants a caption for one of them; the analyzer itself never triggers a new request. Only the
  *   address classifier awaits a message's own prefill, then reads captions from the cache alone
  *   (`describer.cachedDescriptions` / `cachedVideos`), never a new request. With
  *   features.mediaDescriptions, features.videoDescriptions (a missing key counts as on) and
- *   media.video.prefill all on, the message's first video
- *   (MAX_WARM_VIDEOS_PER_MESSAGE) is handed to `describer.describeVideos` the same way.
+ *   media.video.prefill all on, the message's first videos (up to
+ *   media.video.prefillPerMessage) are handed to `describer.describeVideos` the same way.
  * @param {object} [deps.lookup]  From createLookup() (src/web/lookup.js), optional: with
  *   features.webLookup, web.links.enabled and web.links.prefill on, the message's first readable
  *   link (MAX_WARM_LINKS_PER_MESSAGE) is handed to `lookup.readLinks` the same way. Absent -> no
@@ -145,7 +148,9 @@ export function createMessageHandler({
     if (!describer) return null;
     warmVideoCache(guildId, normalized);
     if (hot.config.features?.mediaDescriptions !== true) return null;
-    const candidates = describableItems([normalized]).slice(0, MAX_WARM_PICTURES_PER_MESSAGE);
+    // Per real-time message, not per batch, so it stays small (media.prefillPerMessage).
+    const max = prefillPerMessage(hot.config.media?.prefillPerMessage, 2);
+    const candidates = describableItems([normalized]).slice(0, max);
     if (candidates.length === 0) return null;
     return describer
       .describeMany(guildId, candidates)
@@ -186,7 +191,7 @@ export function createMessageHandler({
     return media;
   }
 
-  /** Fire-and-forget like warmMediaCache: watch the message's first video now, not when a turn needs it. */
+  /** Fire-and-forget like warmMediaCache: watch the message's first videos now, not when a turn needs it. */
   function warmVideoCache(guildId, normalized) {
     const config = hot.config;
     const features = config.features ?? {};
@@ -195,7 +200,9 @@ export function createMessageHandler({
     if (features.mediaDescriptions !== true || features.videoDescriptions === false) return;
     if (config.media?.video?.prefill !== true) return;
     if (typeof describer.describeVideos !== 'function') return;
-    const candidates = collectVideos(normalized, { videoSites: config.media.video.sites }).slice(0, MAX_WARM_VIDEOS_PER_MESSAGE);
+    // Watching is far dearer than a picture caption: one video per message by default.
+    const max = prefillPerMessage(config.media.video.prefillPerMessage, 1);
+    const candidates = collectVideos(normalized, { videoSites: config.media.video.sites }).slice(0, max);
     if (candidates.length === 0) return;
     describer
       .describeVideos(guildId, candidates)

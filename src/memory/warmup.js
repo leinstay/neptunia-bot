@@ -42,8 +42,8 @@ import { fitSections, SectionsTooLargeError } from '../llm/budget.js';
 import { estimateTokens, estimateMessages } from '../llm/tokens.js';
 import { parseJsonObject } from '../llm/parse.js';
 import {
-  ANALYZER_TEMPERATURE,
   MEMORY_LIMIT_DEFAULTS,
+  analyzerTemperature,
   applyMemoryUpdate,
   characterText,
   detailOf,
@@ -969,13 +969,13 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
   }
 
   /** The `llm.complete` options every warmup and portrait request shares, read at the call:
-   * the analyzer model, role and temperature, `warmup.maxOutputTokens`, the warmup's request
+   * the analyzer model, role and temperature (`memory.temperature`), `warmup.maxOutputTokens`, the warmup's request
    * cap and `memory.timeoutMs` (a profile.md answer can take as long as a stream batch). */
   function analyzerRequestOptions() {
     return {
       model: hot.config.memory?.model ?? hot.config.llm?.model,
       role: 'analyzer',
-      temperature: ANALYZER_TEMPERATURE,
+      temperature: analyzerTemperature(hot.config),
       maxOutputTokens: hot.config.warmup?.maxOutputTokens ?? 6000,
       maxRequestTokens: warmupRequestCap(),
       timeoutMs: hot.config.memory?.timeoutMs ?? hot.config.llm?.timeoutMs,

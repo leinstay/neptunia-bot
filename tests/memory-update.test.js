@@ -8,7 +8,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { createStore } from '../src/memory/store.js';
-import { isDue, buildMemoryRequest, applyMemoryUpdate, applyPrivateUpdate, createMemoryUpdater, touchMemory, computeSeenAt, batchAuthorNamesMap, characterText } from '../src/memory/update.js';
+import { isDue, buildMemoryRequest, applyMemoryUpdate, applyPrivateUpdate, createMemoryUpdater, touchMemory, computeSeenAt, batchAuthorNamesMap, characterText, analyzerTemperature } from '../src/memory/update.js';
 import { createCalibrator, estimateTokens } from '../src/llm/tokens.js';
 import { formatTranscript } from '../src/discord/format.js';
 import { TokenLimitError } from '../src/llm/openrouter.js';
@@ -2631,6 +2631,45 @@ test('run: happy path applies the update, shifts the buffer and flushes to disk'
   });
 });
 
+test('analyzerTemperature: memory.temperature when it is a number, else 0.3 (config.json and the code fallback)', () => {
+  const shipped = JSON.parse(fs.readFileSync(new URL('../config.json', import.meta.url), 'utf8'));
+  assert.equal(shipped.memory.temperature, 0.3);
+  assert.equal(analyzerTemperature({ memory: { temperature: 0.55 } }), 0.55);
+  assert.equal(analyzerTemperature({ memory: { temperature: 0 } }), 0, 'zero is a usable temperature');
+  assert.equal(analyzerTemperature({ memory: {} }), 0.3);
+  assert.equal(analyzerTemperature({ memory: { temperature: null } }), 0.3);
+  assert.equal(analyzerTemperature({ memory: { temperature: 'warm' } }), 0.3);
+  assert.equal(analyzerTemperature({}), 0.3);
+  assert.equal(analyzerTemperature(undefined), 0.3);
+});
+
+test('run: memory.temperature is read at the call and sent with the analyzer request', async () => {
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    const base = Date.now() - 60_000;
+    const hot = {
+      config: makeConfig({ memory: { ...makeConfig().memory, batchMessages: 2, minBatchMessages: 1, temperature: 0.55 } }),
+      prompts: { memory: 'memory system prompt', labels },
+    };
+    const seen = [];
+    const llm = {
+      complete: async (messages, options) => {
+        seen.push(options.temperature);
+        return { text: '{}' };
+      },
+    };
+    const updater = createMemoryUpdater({ hot, store, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept' });
+
+    for (let i = 0; i < 2; i += 1) store.pushBuffer(guildId, slimMessage({ id: `a${i}`, ts: base + i * 1000 }), 100);
+    await updater.run(guildId);
+    hot.config.memory.temperature = 0.1; // a live edit reaches the next batch
+    for (let i = 0; i < 2; i += 1) store.pushBuffer(guildId, slimMessage({ id: `b${i}`, ts: base + 10_000 + i * 1000 }), 100);
+    await updater.run(guildId);
+
+    assert.deepEqual(seen, [0.55, 0.1]);
+  });
+});
+
 // /nep pause: waitIdle() lets /nep pause wait out a live-analyzer run()
 // already in flight (an LLM call can take 30-90s) before it flushes and
 // drops the store's caches -- see src/admin.js#cmdPause.
@@ -4465,7 +4504,7 @@ test('analyzePrivate: the request carries <private>, only this user private prof
     assert.equal(sent.messages[0].content, 'memory system prompt');
     assert.equal(sent.opts.maxOutputTokens, 1234);
     assert.equal(sent.opts.timeoutMs, 777);
-    assert.equal(sent.opts.temperature, 0.3);
+    assert.equal(sent.opts.temperature, 0.3, 'memory.temperature missing -> 0.3');
     const user = sent.messages[1].content;
 
     assert.equal(blockBody(user, 'private'), labels.memory.privateNote);
