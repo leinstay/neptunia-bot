@@ -80,7 +80,9 @@ The three helper model roles, grouped under one key. Each is set independently, 
 
 | Key | Default | Meaning |
 |---|---|---|
-| `text` | `"anthropic/claude-sonnet-4.6"` | Text classifiers: the address classifier (`features.followUp`), the re-watch classifier (`features.videoRewatch`) and the search classifier (`features.webLookup`). Also condenses link reads and search results |
+| `text` | `"anthropic/claude-sonnet-4.6"` | Default for `classifier.address` and `classifier.search` when those are null. Directly runs the re-watch classifier (`features.videoRewatch`), the variety pass (`features.variety`), the link reader and the search condenser (`features.webLookup`) |
+| `address` | `null` | Model of the address classifier (`features.followUp`): the yes/no decision whether an untagged message continues a conversation with the persona. `null` or empty = `classifier.text`. The request keeps the `classifier.text` role, so `llm.providerByModel` routes and `/nep model` / `/nep ping` stay the same |
+| `search` | `null` | Model of the search classifier (`features.webLookup`): whether a message needs a web search and the query. `null` or empty = `classifier.text`. Same role note as `classifier.address` |
 | `media` | `"anthropic/claude-haiku-4.5"` | Picture describer (`features.mediaDescriptions`): one-line descriptions for pictures, GIF frames, video posters, stickers, custom emoji and link thumbnails |
 | `video` | `"google/gemini-3.8-flash"` | Video describer (`features.videoDescriptions`): watches short clips, re-watches on a question, retries on request. Must accept both video and audio input |
 
@@ -155,6 +157,7 @@ Settings for the media describer (`features.mediaDescriptions`). The describer m
 | `descriptionChars` | `200` | Max characters for a picture description; the first line is kept and cut on a word boundary. Fills `{{maxChars}}` in `describe.md` when the placeholder is present |
 | `imageSize` | `512` | Downscale target in px |
 | `maxPerTurn` | `6` | Max descriptions generated per turn |
+| `prefillPerMessage` | `2` | Pictures, stickers and custom emoji of one observed message sent to the describer as they arrive; `0` turns the picture prefill off |
 | `cacheEntries` | `5000` | Description cache size, keyed by attachment |
 | `filePreviewChars` | `500` | Characters shown from the beginning of text files |
 | `embedTextChars` | `200` | Characters shown from link embed text |
@@ -198,6 +201,7 @@ Settings for the video describer (`features.videoDescriptions`). Video vision ne
 | `urlProcessing` | `"agentic"` | OpenRouter's processing mode sent on public-URL video parts; without it some providers see only a single frame. `null` omits the field |
 | `reasoning` | `{ "effort": "low" }` | OpenRouter `reasoning` setting for every video request; keeps reasoning from eating the output budget. A non-object omits the field |
 | `prefill` | `true` | Watch a video as soon as it arrives, so the next turn finds it cached |
+| `prefillPerMessage` | `1` | Videos of one observed message watched as they arrive (with `prefill` on); `0` turns the video prefill off |
 
 Both `yt-dlp` and `ffmpeg` are optional system binaries. Without them, attachments within the caps still work (sent as-is). Longer attachments and all site links fall back to the still frame or preview picture, and the persona is told the reason. Every video request counts against `llm.maxRequestsPerDay` and the video token cap (`maxRequestTokens`).
 
@@ -210,7 +214,8 @@ Settings for the re-watch classifier (`features.videoRewatch`). When the persona
 | Key | Default | Meaning |
 |---|---|---|
 | `maxPerDay` | `20` | Daily re-watch cap (separate from `media.video.maxPerDay`) |
-| `maxOutputTokens` | `600` | Max output tokens for the re-watch answer |
+| `maxOutputTokens` | `600` | Max output tokens for the re-watch answer (the video model's second-look response, not the classifier's pick) |
+| `classifierMaxOutputTokens` | `120` | Max output tokens for the re-watch classifier (the pick/retry/none decision). A reasoning model that thinks before answering needs a larger cap, or it returns an empty answer |
 | `answerChars` | `1200` | Max characters for the answer; fills `{{maxChars}}` in `rewatch-answer.md` |
 | `recentMessages` | `60` | How many recent messages to scan for watched or error-state videos |
 | `maxCandidates` | `6` | Max videos offered to the classifier from the recent window, newest first |
@@ -240,7 +245,7 @@ At most one re-watch or retry per turn. Answers are cached for one hour per ques
 | `followUpMinutes` | `15` | Follow-up window after the persona's last reply (min) |
 | `followUpClassifyReplies` | `true` | Send a reply to another member's message to the classifier instead of automatic `no`. Missing key = on. With the switch off, any reply is `no` before the model is asked |
 | `followUpContext` | `15` | Transcript lines sent to the classifier |
-| `followUpMaxOutputTokens` | `8` | Max output tokens for the classifier |
+| `followUpMaxOutputTokens` | `8` | Max output tokens for the address classifier. A reasoning model that thinks before answering needs a larger cap, or it returns an empty answer |
 | `followUpNoStreak` | `3` | Consecutive `no` verdicts that close the window |
 
 Follow-up windows are persisted in `data/state.json` under `followUpWindows` and restored at startup; expired ones are dropped.
@@ -279,6 +284,7 @@ Follow-up windows are persisted in `data/state.json` under `followUpWindows` and
 | Key | Default | Meaning |
 |---|---|---|
 | `model` | `null` | Analyzer model (`null` = llm.model) |
+| `temperature` | `0.3` | Sampling temperature of every analyzer-role request: stream analyzer batches (server and private), the warmup's channel, profile and server requests and the portrait refresh |
 | `mainChannelIds` | `[]` | Channels where people talk to each other; the portrait of a member's character and style is drawn from them; empty means every channel counts |
 | `portraitRefreshHours` | `24` | Min hours between portrait refreshes per member |
 | `portraitRefreshPerDay` | `20` | Max portrait refreshes per server per day. The day counter lives in `state.json` as `portraitDay` / `portraitCount` and survives `/nep warmup reset` |
@@ -373,6 +379,7 @@ Settings for the web lookup (`features.webLookup`). Both link reading and search
 | `results` | `5` | Number of Brave Search results requested |
 | `summaryChars` | `900` | Max characters for the condensed answer; fills `{{maxChars}}` in `search-summary.md` |
 | `maxOutputTokens` | `400` | Max output tokens for the condenser |
+| `classifierMaxOutputTokens` | `60` | Max output tokens for the search classifier (search-or-not, not the condenser). A reasoning model that thinks before answering needs a larger cap, or it returns an empty answer |
 | `cacheHours` | `24` | Hours a cached search result is served before re-searching |
 | `contextMessages` | `50` | Recent channel messages rendered as a `<transcript>` for the search classifier |
 | `timeoutMs` | `10000` | Brave Search request timeout (ms) |
@@ -512,7 +519,7 @@ Role `analyzer`. Reasons over long transcripts and returns strict JSON. Needs th
 
 ### Text classifiers (`classifier.text`)
 
-The cheapest text model that can answer "yes" or "no" reliably. Runs the address classifier, the re-watch classifier, the search classifier, and condenses link reads and search results. Default: `anthropic/claude-sonnet-4.6`.
+The cheapest text model that can answer "yes" or "no" reliably. Directly runs the re-watch classifier, the variety pass, the link reader and the search condenser. Also the default for `classifier.address` (the address classifier) and `classifier.search` (the search classifier) when those are null. Default: `anthropic/claude-sonnet-4.6`.
 
 ### Pictures (`classifier.media`)
 

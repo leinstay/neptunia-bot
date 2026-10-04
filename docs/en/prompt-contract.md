@@ -75,7 +75,7 @@ The blocks of the user message. Empty ones are omitted; the order below is the o
 | `<lore>` | Server lore entries whose keys occur in the recent messages (plus entries marked always): events, recurring characters, long-running stories. Like a lorebook: hundreds may exist, only the relevant few are shown |
 | `<self_facts>` | What the persona has claimed about itself |
 | `<people>` | Member profiles; the caller first, marked with `labels.profile.interlocutorMark`; each with the persona's attitude and, for the caller, the **episodes**: moments the persona remembers about the two of them, with dates and short quotes |
-| `<other_channels>` | Up to `context.neighborMessages` messages per neighbouring channel, not older than `context.neighborMaxAgeMinutes` |
+| `<other_channels>` | Up to `context.neighborMessages` messages per neighbouring channel, not older than `context.neighborMaxAgeMinutes`. When `features.mediaDescriptions` is on, a picture in a neighbour's line carries its cached caption when the describer cache already holds one; no new describe request is ever made for neighbours |
 | `<worn>` | Devices the persona is overusing in its own recent lines (`features.variety`): `labels.variety.intro`, then `- <shape> ("<example>", ...)` per pattern. Omitted when the variety pass did not run, returned nothing, or the switch is off |
 | `<lookup>` | What the persona looked up online this turn (`features.webLookup`): the query, the condensed answer and the source sites, or a "nothing found" line. Appears only when the search classifier fired and the search completed |
 | `<chat>` | Up to `context.channelMessages` latest messages of the current channel |
@@ -484,12 +484,14 @@ own-lines attribution rule does not apply to them.
 After the persona answers someone, a conversation window opens in that channel (`mention.followUpMinutes`, extended
 by every further answer). A message inside the window that carries no trigger (no mention, no reply to the persona,
 no name) is not answered blindly: code sends the last `mention.followUpContext` (default 15) lines of the channel, the
-persona's own lines marked with `labels.self`, plus the new message marked as `<candidate>`, to `address.md` on the
-`classifier.text` model role (default `anthropic/claude-sonnet-4.6`). The transcript carries cached media captions
+persona's own lines marked with `labels.self`, plus the new message marked as `<candidate>`, to `address.md` on
+`classifier.address` when set, otherwise `classifier.text` (default `anthropic/claude-sonnet-4.6`); the request keeps
+the `classifier.text` role. The transcript carries cached media captions
 (pictures, stickers, GIFs, custom emoji, watched videos) in the same label forms as the persona's transcript. Code
 makes no new describer requests for the history lines; it describes only the candidate's own media before running the
 classifier. Output is ONE line: `yes` when the candidate
 addresses the persona or continues the exchange with it, `no` when people talk among themselves or to someone else.
+An empty or blank answer is a failed call (`reason: empty`), not a silent `no`.
 An explicit @mention of another member is always `no` before the model is asked; the implicit ping Discord adds for the
 replied-to author does not count as such a mention. When `mention.followUpClassifyReplies` is on (default `true`,
 missing key = on), a reply to another member's message goes to the classifier like plain text. With the switch off,
@@ -554,7 +556,8 @@ question (see the video cache section above). Switch `features.videoRewatch` (mi
 When the persona is addressed (a reply turn) and all of the following hold (`features.webLookup` is on,
 `web.search.enabled` is not false, the `lookup.md` prompt exists, `web.search.maxPerTurn` is at least 1, and a
 `BRAVE_SEARCH_API_KEY` is configured), the classifier decides whether the trigger message asks something that needs
-a web search. It uses the `classifier.text` model role. Code sends `lookup.md` as the system prompt with a user
+a web search. The model is `classifier.search` when set, otherwise `classifier.text`; the request keeps the
+`classifier.text` role. Code sends `lookup.md` as the system prompt with a user
 message containing a short `<transcript>` (the same as the re-watch classifier, with the persona's own lines
 marked by `labels.self`) and a `<candidate>` block:
 
@@ -573,6 +576,8 @@ The transcript carries descriptions, video summaries and link reads when availab
 - A search query (plain words, no quotes, no operators, at most 12 words) when the message needs facts from
   outside the chat, or when it explicitly asks to search the web.
 - `none` for everything else.
+
+An empty or blank answer is a failed call (`reason: empty`, no query), not a silent `none`.
 
 On a query hit, Brave Search runs the query (`web.search.results` results, default 5), the numbered results are
 condensed by `classifier.text` through `search-summary.md` (`{{today}}`, `{{query}}`, `{{maxChars}}` = `web.search.summaryChars`,
