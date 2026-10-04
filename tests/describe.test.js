@@ -547,6 +547,58 @@ test('describe: the picture model is classifier.media; the deprecated media.mode
   assert.equal(await run(stale), undefined, 'an old config.local.json media.model never takes effect');
 });
 
+test('describe: a picture request of every kind (image, gif frame, video poster, link, sticker, emoji) skips the text calibration', async () => {
+  const items = [
+    pictureItem('a1'),
+    pictureItem('a2', { kind: 'gif', url: 'https://cdn.discordapp.com/x/anim.gif' }),
+    pictureItem('a3', { kind: 'video', url: 'https://cdn.discordapp.com/x/poster.png' }),
+    pictureItem('link:abcd1234', { kind: 'link', url: 'https://cdn.discordapp.com/x/thumb.jpg' }),
+    pictureItem('sticker:s1', { kind: 'sticker', url: 'https://media.discordapp.net/stickers/s1.png?size=160' }),
+    pictureItem('emoji:e1', { kind: 'emoji', url: 'https://cdn.discordapp.com/emojis/e1.webp?size=96' }),
+  ];
+  for (const item of items) {
+    const llm = fakeLlm({ text: 'a cat' });
+    const describer = createDescriber({ hot: fakeHot(), store: createStore({ dataDir: tmpDataDir() }), llm, imageFetcher: fakeImageFetcher() });
+    await describer.describe('g1', item);
+    assert.equal(llm.calls.length, 1, item.kind);
+    assert.equal(llm.calls[0].messages[1].content[0].type, 'image_url', item.kind);
+    assert.equal(llm.calls[0].options.skipCalibration, true, `${item.kind}: a picture request must never feed the text calibration`);
+  }
+});
+
+test('describe: a picture describe through the real client never reaches the calibrator, even with prompt_tokens counted', async () => {
+  const hot = fakeHot({
+    config: {
+      llm: {
+        baseUrl: 'https://openrouter.test/api/v1',
+        model: 'x/chat',
+        temperature: 1,
+        maxOutputTokens: 100,
+        maxRequestTokens: 50_000,
+        maxRequestsPerDay: 300,
+        timeoutMs: 5_000,
+        retries: 0,
+      },
+    },
+  });
+  const observed = [];
+  const llm = createLlm({
+    apiKey: 'k',
+    getConfig: () => hot.config,
+    calibrator: { ratio: 1, apply: (n) => n, observe: (raw, counted) => observed.push({ raw, counted }) },
+    state: { data: {}, markDirty() {} },
+    fetchImpl: async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ choices: [{ message: { content: 'a cat' } }], usage: { prompt_tokens: 1500 } }),
+    }),
+  });
+  const describer = createDescriber({ hot, store: createStore({ dataDir: tmpDataDir() }), llm, imageFetcher: fakeImageFetcher() });
+
+  assert.equal((await describer.describe('g1', pictureItem('a1'))).text, 'a cat');
+  assert.deepEqual(observed, [], 'a vision prompt count says nothing about the text ratio');
+});
+
 // --- describeMany --------------------------------------------------------
 
 test('describeMany: caps NEW descriptions at maxNew, cache hits are free', async () => {

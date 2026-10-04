@@ -375,6 +375,10 @@ export function createDescriber({
           // A vision request has its own (usually cheap/fast) model, but still
           // deserves the same chat timeout, not the analyzer's much larger one.
           timeoutMs: hot.config.llm?.timeoutMs,
+          // A picture is estimated at a flat context.vision.tokensPerImage while
+          // the vision model counts far more: its provider-counted prompt tokens
+          // say nothing about the text ratio every chat request is checked against.
+          skipCalibration: true,
         },
       );
     } catch (err) {
