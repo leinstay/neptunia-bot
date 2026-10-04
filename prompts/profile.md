@@ -54,7 +54,7 @@ Something dropped long ago is at most a detail.
 - `feeling` — how {{name}} took it, in {{name}}'s voice: irritation, boredom or contempt as readily as warmth.
 - `weight` 1 to 5 (5 = never forget).
 
-**`aliases`** — what others call this member in chat: a stable nickname, shortened or translated name, NOT Discord display names. Read them from context lines (`(ctx)`) addressed to or about the member; the own-lines attribution rule does not apply to aliases. Only names used more than in passing.
+**`aliases`** — what others call this member in chat: a stable nickname, shortened or translated name, NOT Discord display names. Read them from context lines (`(ctx)`) addressed to or about the member; the own-lines attribution rule does not apply to aliases. One explicit statement that the member is called N is enough; inferring from usage alone still needs repeated use.
 
 ## Writing quality
 
