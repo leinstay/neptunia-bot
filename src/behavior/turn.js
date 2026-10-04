@@ -7,7 +7,7 @@
 
 import { canAttach, fetchHistory, fetchNeighbors, withTextPreviews } from '../discord/collect.js';
 import { buildDrawPrompt, buildRequest, fillPromptTemplate } from './prompt.js';
-import { classifierModelFor, classifierTextModel } from './mention.js';
+import { classifierTextModel } from './mention.js';
 import { parseOutput } from '../llm/parse.js';
 import { DailyCapError, TokenLimitError, RETRY_STATUS, sleep } from '../llm/openrouter.js';
 import { ImageCapError, ImageGenError } from '../llm/images.js';
@@ -788,8 +788,7 @@ export function createTurnRunner({
    * The search on a question (features.webLookup, web.search.enabled): one
    * cheap classifier call (prompts.lookup, `{{name}}` = the persona's display
    * name, `{{today}}` = the injected clock's UTC date `YYYY-MM-DD`, on
-   * `classifier.search`, else classifierTextModel (classifierModelFor), with the
-   * `classifier.text` role; its answer capped at `web.search.classifierMaxOutputTokens`) reads
+   * classifierTextModel, its answer capped at `web.search.classifierMaxOutputTokens`) reads
    * the last `web.search.contextMessages` messages before the trigger (with the pictures' captions, the video
    * states and the read links this turn already has) and the trigger itself,
    * and answers `none` or a query (parseLookupQuery); a query goes to
@@ -825,8 +824,8 @@ export function createTurnRunner({
     });
     const user = `${transcriptBlock}<candidate>\n${trigger.authorName}: ${triggerText}\n</candidate>`;
 
-    // `classifier.search`, else `classifier.text`; the role (provider routing) stays the text classifier's.
-    const model = classifierModelFor(config, 'search');
+    // Read once: the request and its empty-answer warning name the same model.
+    const model = classifierTextModel(config);
     let completion;
     try {
       completion = await llm.complete(

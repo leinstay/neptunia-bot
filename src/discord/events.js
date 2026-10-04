@@ -21,7 +21,7 @@ import {
   isFollowUpOpen,
   followUpPreFilter,
   parseFollowUpVerdict,
-  classifierModelFor,
+  classifierTextModel,
 } from '../behavior/mention.js';
 import { fill, formatTranscript, renderTranscript } from './format.js';
 import { topByRank } from '../memory/ranking.js';
@@ -565,8 +565,8 @@ export function createMessageHandler({
 
     let verdict = 'no';
     if (llm) {
-      // `classifier.address`, else `classifier.text`; the role (provider routing) stays the text classifier's.
-      const model = classifierModelFor(config, 'address');
+      // Read once: the request and its empty-answer warning name the same model.
+      const model = classifierTextModel(config);
       try {
         // A classifier call skipped by the daily cap (DailyCapError, thrown
         // synchronously before any fetch) lands here exactly like any other

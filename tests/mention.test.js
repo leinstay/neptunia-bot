@@ -11,7 +11,6 @@ import {
   isFollowUpOpen,
   followUpPreFilter,
   classifierTextModel,
-  classifierModelFor,
   classifierMediaModel,
   classifierVideoModel,
   deprecatedModelKeys,
@@ -455,30 +454,6 @@ test('classifierTextModel: the deprecated llm.classifierModel, mention.followUpM
   assert.equal(classifierTextModel(OLD_KEYS), undefined);
   assert.equal(classifierTextModel({}), undefined);
   assert.equal(classifierTextModel(undefined), undefined);
-});
-
-test('classifierModelFor: the per-use key wins over classifier.text', () => {
-  const config = { classifier: { text: 'x/text', media: 'x/media', address: 'x/address', search: 'x/search' } };
-  assert.equal(classifierModelFor(config, 'address'), 'x/address');
-  assert.equal(classifierModelFor(config, 'search'), 'x/search');
-});
-
-test('classifierModelFor: one use\'s key never serves the other', () => {
-  assert.equal(classifierModelFor({ classifier: { text: 'x/text', address: 'x/address' } }, 'search'), 'x/text');
-  assert.equal(classifierModelFor({ classifier: { text: 'x/text', search: 'x/search' } }, 'address'), 'x/text');
-});
-
-test('classifierModelFor: a null, empty, missing or non-string per-use key falls back to classifier.text', () => {
-  for (const address of [null, '', undefined, 42, { id: 'x/obj' }]) {
-    assert.equal(classifierModelFor({ classifier: { text: 'x/text', address } }, 'address'), 'x/text', String(address));
-  }
-});
-
-test('classifierModelFor: the fallback is classifierTextModel, so classifier.media and then undefined, as today', () => {
-  assert.equal(classifierModelFor({ ...OLD_KEYS, classifier: { text: null, media: 'x/media', search: null } }, 'search'), 'x/media');
-  assert.equal(classifierModelFor({ ...OLD_KEYS, classifier: { text: null, media: null, address: '' } }, 'address'), undefined);
-  assert.equal(classifierModelFor({}, 'address'), undefined);
-  assert.equal(classifierModelFor(undefined, 'search'), undefined);
 });
 
 test('classifierMediaModel: classifier.media only; the deprecated media.model is ignored', () => {

@@ -155,30 +155,15 @@ export function parseFollowUpVerdict(text) {
 // so they could never take effect; deprecatedModelKeys lets startup warn.
 
 /**
- * The text classifier model (the re-watch classifier, the variety pass, the
- * link reader, the search summary; the address and search classifiers go
- * through classifierModelFor): `classifier.text`, else the media model
- * (classifierMediaModel); `undefined` when none is set.
+ * The text classifier model (the address classifier, the search classifier,
+ * the re-watch classifier, the variety pass, the link reader, the search
+ * summary): `classifier.text`, else the media model (classifierMediaModel);
+ * `undefined` when none is set.
  * @param {object|undefined} config  the full hot config
  * @returns {string|undefined}
  */
 export function classifierTextModel(config) {
   return config?.classifier?.text || classifierMediaModel(config);
-}
-
-/**
- * The model of one text-classifier decision that may run on its own model:
- * `classifier.address` (the address classifier) or `classifier.search` (the
- * search classifier) when it is a non-empty string, else classifierTextModel.
- * Only the model moves: the request keeps the `classifier.text` role, so
- * provider routing by role is the same either way.
- * @param {object|undefined} config  the full hot config
- * @param {'address'|'search'} use
- * @returns {string|undefined}
- */
-export function classifierModelFor(config, use) {
-  const own = config?.classifier?.[use];
-  return typeof own === 'string' && own !== '' ? own : classifierTextModel(config);
 }
 
 /**

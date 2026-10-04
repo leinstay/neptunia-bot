@@ -55,8 +55,6 @@
   },
   "classifier": {
     "text": "anthropic/claude-sonnet-4.6",
-    "address": null,
-    "search": null,
     "media": "anthropic/claude-haiku-4.5",
     "video": "google/gemini-3.8-flash"
   },

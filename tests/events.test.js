@@ -2093,46 +2093,12 @@ test('follow-up: classifier.text null falls back to classifier.media', async () 
   await p;
 });
 
-test('follow-up: the shipped classifier.address is null, so the address classifier runs on classifier.text', () => {
-  assert.equal(DEFAULT_CONFIG.classifier.address, null);
-  assert.equal(DEFAULT_CONFIG.classifier.search, null);
-});
-
-test('follow-up: classifier.address, when set, is the address classifier model; the role stays classifier.text', async () => {
-  const llm = fakeFollowUpLlm();
-  const config = baseConfig({ classifier: { text: 'x/classifier', address: 'x/address', search: 'x/search' } });
-  const handler = makeHandler({ config, llm, prompts: fakeAddressPrompts() });
-  const guild = fakeGuild();
-  const t0 = Date.now();
-  const channel = fakeChannelWithHistory('c1', guild, []);
-  await openFollowUpWindow(handler, { guild, channel, ts: t0 + 1000 });
-
-  const p = handler(fakeMessage({ id: 'm-candidate', guild, channel, channelId: 'c1', cleanContent: 'is this for you', createdTimestamp: t0 + 2000 }));
-  await new Promise((resolve) => setTimeout(resolve, 0));
-
-  assert.equal(llm.calls.length, 1);
-  assert.equal(llm.calls[0].options.model, 'x/address');
-  assert.equal(llm.calls[0].options.role, 'classifier.text', 'provider routing by role is unchanged');
-
-  llm.respond('no');
-  await p;
-
-  // Read at the moment of use: cleared, the next call is back on classifier.text.
-  config.classifier.address = null;
-  const p2 = handler(fakeMessage({ id: 'm-next', guild, channel, channelId: 'c1', cleanContent: 'and this one', createdTimestamp: t0 + 3000 }));
-  await new Promise((resolve) => setTimeout(resolve, 0));
-  assert.equal(llm.calls.length, 2);
-  assert.equal(llm.calls[1].options.model, 'x/classifier');
-  llm.respond('no');
-  await p2;
-});
-
 test('follow-up: an empty or blank classifier answer is logged as a failure with its model and counts as "no"', async () => {
   for (const answer of ['', '  \n\t ']) {
     const llm = fakeFollowUpLlm();
     const turns = recordingTurns();
     const spontaneous = fakeSpontaneous();
-    const config = baseConfig({ classifier: { address: 'x/address' } });
+    const config = baseConfig({ classifier: { text: 'x/text' } });
     const handler = makeHandler({ config, turns, spontaneous, llm, prompts: fakeAddressPrompts() });
     const guild = fakeGuild();
     const channel = fakeChannelWithHistory('c1', guild, []);
@@ -2149,7 +2115,7 @@ test('follow-up: an empty or blank classifier answer is logged as a failure with
     assert.equal(failed.level, 'warn');
     assert.equal(failed.channel, 'c1');
     assert.equal(failed.reason, 'empty');
-    assert.equal(failed.model, 'x/address');
+    assert.equal(failed.model, 'x/text');
     assert.equal(logs.find((l) => l.msg === 'follow-up: verdict')?.verdict, 'no');
     assert.equal(turns.calls.length, 0, 'no reply turn');
     assert.equal(spontaneous.onMessageCalls.length, 0, 'handled as a "no", not handed to spontaneous');
