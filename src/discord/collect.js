@@ -1,9 +1,12 @@
 // Everything that reads from Discord: turning discord.js messages into plain
 // normalized objects and fetching the context of a turn — the last N messages
-// of the current channel plus a few fresh messages from neighbouring channels.
+// of the current channel plus a few fresh messages from neighbouring channels —
+// and what the bot may do in a channel (read, send, attach, react) and who else
+// can view it (the audience the pulled-channel rail compares).
 
-import { PermissionFlagsBits, SnowflakeUtil, MessageReferenceType } from 'discord.js';
+import { PermissionFlagsBits, SnowflakeUtil, MessageReferenceType, OverwriteType } from 'discord.js';
 import { log } from '../log.js';
+import { ID_DIGITS } from '../memory/mentions.js';
 import {
   classifyAttachment,
   classifyEmbed,
@@ -23,6 +26,9 @@ export const PAGE = 100;
 const MAX_EMOJIS_PER_MESSAGE = 5;
 // Groups: the animated flag (`a` or empty), the name, the id.
 const CUSTOM_EMOJI_RE = new RegExp(CUSTOM_EMOJI_MARKUP, 'g');
+const MAX_CHANNEL_MENTIONS = 5;
+// A raw channel mention `<#id>`; the group is the id.
+const CHANNEL_MENTION_RE = new RegExp(`<#(${ID_DIGITS})>`, 'g');
 
 /**
  * Custom emoji markup `<:name:id>` / `<a:name:id>` reads better as `:name:`.
@@ -53,6 +59,24 @@ function extractEmojis(text) {
     if (seen.size >= MAX_EMOJIS_PER_MESSAGE) break;
   }
   return [...seen.values()];
+}
+
+/**
+ * The channel ids written as raw channel mentions `<#id>` in a message's
+ * text, in first-appearance order, each once, capped at MAX_CHANNEL_MENTIONS.
+ * @param {string} text  The RAW `content`: discord.js's cleanContent has
+ *   already rewritten every `<#id>` to `#name`, dropping the id.
+ * @returns {string[]}
+ */
+function extractChannelIds(text) {
+  const seen = new Set();
+  CHANNEL_MENTION_RE.lastIndex = 0;
+  let match;
+  while ((match = CHANNEL_MENTION_RE.exec(String(text ?? '')))) {
+    seen.add(match[1]);
+    if (seen.size >= MAX_CHANNEL_MENTIONS) break;
+  }
+  return [...seen];
 }
 
 /** Classified stickers of a message/snapshot: `{ id, name, format, url }` (see stickerUrl). */
@@ -270,7 +294,10 @@ function replyPingUserId(message, mentionedUserIds) {
  * real ones, not a link, with its URL stripped from `content` (see
  * cdnVideoAttachments), so it is labelled, watched and cached like an upload.
  * `reactions` lists the message's reactions (see normalizeReactions), `[]`
- * when it has none.
+ * when it has none. `mentionedChannelIds` lists the channel ids of the raw
+ * channel mentions `<#id>` in the message's own text (see
+ * extractChannelIds; `[]` when there are none; forwarded snapshots are not
+ * scanned), while `content` keeps reading `#name`.
  * @param {object} message  A discord.js Message.
  * @param {string} selfId
  * @param {{ embedTextChars?: number, videoSites?: string[] }} [options]
@@ -315,6 +342,10 @@ export function normalizeMessage(message, selfId, options = {}) {
     // above is `cleanContent`-derived and already reads "@DisplayName", so
     // this is the only place a stable member id survives normalization.
     mentionedUserIds,
+    // Channels written as `<#id>` -- the only place their ids survive, since
+    // `content` reads `#name`; an explicit mention pulls that channel into a
+    // turn (src/behavior/pull.js).
+    mentionedChannelIds: extractChannelIds(message.content),
     replyToId: isForward ? null : (message.reference?.messageId ?? null),
     // The replied-to author when Discord's reply ping alone put them into
     // `mentionedUserIds` (no `<@id>` typed in the text), else null -- so the
@@ -408,9 +439,24 @@ function hasPermission(channel, flag) {
   return channel.permissionsFor(me)?.has(flag) ?? false;
 }
 
-/** Whether the bot may read `channel`'s history (see hasPermission). */
-function canRead(channel) {
+/**
+ * Whether the bot may read `channel`'s history (see hasPermission: a channel
+ * without a guild is always yes).
+ * @returns {boolean}
+ */
+export function canRead(channel) {
   return hasPermission(channel, PermissionFlagsBits.ReadMessageHistory);
+}
+
+/**
+ * Whether the bot may put a reaction on a message in `channel`: Add Reactions
+ * plus Read Message History, which Discord also requires for a reaction (see
+ * hasPermission: a channel without a guild is always yes). A channel the bot
+ * cannot send in may still allow it.
+ * @returns {boolean}
+ */
+export function canReact(channel) {
+  return canRead(channel) && hasPermission(channel, PermissionFlagsBits.AddReactions);
 }
 
 /**
@@ -577,15 +623,30 @@ export async function fetchMoment(channel, messageId, { selfId, limit, embedText
   return { messageId: own.id, triggerId: trigger.id, history, burst: burst.map(normalize) };
 }
 
-/** Plain text channels of a guild the persona may read, excluding threads and `exceptId`. */
+/**
+ * Whether `channel` is one the persona may read: a text channel, not a
+ * thread, allowed by `bot.channels` (channelAllowed), not the dry-run mirror
+ * (`bot.dryRunChannelId`, the owner's rehearsal room, never real
+ * conversation), and the bot can read its history (canRead).
+ * @param {object} channel  A discord.js guild channel.
+ * @param {object} botConfig  The live `config.bot`.
+ * @returns {boolean}
+ */
+export function isReadableChannel(channel, botConfig) {
+  const mirrorId = botConfig?.dryRunChannelId;
+  return (
+    !(mirrorId && channel.id === mirrorId) &&
+    channel.isTextBased() &&
+    !channel.isThread() &&
+    channelAllowed(channel, botConfig) &&
+    canRead(channel)
+  );
+}
+
+/** The channels of a guild the persona may read (isReadableChannel), excluding `exceptId`. */
 export function readableChannels(guild, botConfig, exceptId = null) {
   return [...guild.channels.cache.values()].filter(
-    (channel) =>
-      channel.id !== exceptId &&
-      channel.isTextBased() &&
-      !channel.isThread() &&
-      channelAllowed(channel, botConfig) &&
-      canRead(channel),
+    (channel) => channel.id !== exceptId && isReadableChannel(channel, botConfig),
   );
 }
 
@@ -597,9 +658,11 @@ export function lastActivity(channel) {
 /**
  * Up to `neighborMessages` recent messages from each neighbouring channel that
  * saw activity within `neighborMaxAgeMinutes`. Channels are pre-filtered by the
- * snowflake of their last message, so quiet channels cost no API calls. A
- * channel without a guild (a private chat) has no neighbours.
- * @returns {Promise<{ channelId: string, channelName: string, messages: object[] }[]>}
+ * snowflake of their last message, so quiet channels cost no API calls. Only
+ * channels the persona may read are neighbours (readableChannels: never the
+ * dry-run mirror). `readOnly` marks a neighbour the bot cannot send in
+ * (canSend). A channel without a guild (a private chat) has no neighbours.
+ * @returns {Promise<{ channelId: string, channelName: string, readOnly: boolean, messages: object[] }[]>}
  */
 export async function fetchNeighbors(channel, config, selfId, now = Date.now()) {
   if (!channel.guild) return [];
@@ -613,16 +676,78 @@ export async function fetchNeighbors(channel, config, selfId, now = Date.now()) 
 
   const results = await Promise.all(
     candidates.map(async (other) => {
+      const readOnly = !canSend(other);
       try {
         const messages = (
           await fetchHistory(other, { limit: neighborMessages, selfId, embedTextChars: config.media?.embedTextChars, videoSites: config.media?.video?.sites })
         ).filter((m) => m.ts >= minTs);
-        return { channelId: other.id, channelName: other.name, messages };
+        return { channelId: other.id, channelName: other.name, readOnly, messages };
       } catch (err) {
         log.warn('collect: neighbour channel fetch failed', { channel: other.id, error: err });
-        return { channelId: other.id, channelName: other.name, messages: [] };
+        return { channelId: other.id, channelName: other.name, readOnly, messages: [] };
       }
     }),
   );
   return results.filter((result) => result.messages.length > 0);
+}
+
+/**
+ * Who can view `channel`, read from Discord's permissions in the Audience
+ * shape `audienceCovers` (src/behavior/elsewhere.js) compares:
+ * - `everyone`: the @everyone role can view it (its overwrite applied);
+ * - `roles`: the id of EVERY role of the guild (@everyone included) that can
+ *   view it, each resolved on its own by `channel.permissionsFor(role)`, which
+ *   applies the @everyone overwrite, then that role's own overwrite, and lets
+ *   Administrator view everything -- so a role denied by an overwrite is
+ *   missing even where @everyone can view, and the rail never needs a
+ *   shortcut for @everyone;
+ * - `roleAllow` / `roleDeny`: the roles whose own overwrite allows / denies
+ *   View Channel (the @everyone overwrite belongs to `everyone` and `roles`,
+ *   never here);
+ * - `memberAllow` / `memberDeny`: the members whose own overwrite allows /
+ *   denies View Channel, except the bot's own (`guild.members.me`, else
+ *   `channel.client.user`): what the bot can view is not the audience the
+ *   rail protects (canRead decides that), and a destination that admits the
+ *   bot by name would otherwise cover no source. With no bot id known,
+ *   nothing is left out.
+ * Member roles are not resolved (no member intent). Null for a channel
+ * without a guild (a private chat) and for a thread (overwrites do not
+ * describe its audience: a private thread admits by membership); a null
+ * audience never covers.
+ * @param {object} channel  A discord.js channel.
+ * @returns {{ everyone: boolean, roles: Set<string>, roleAllow: Set<string>, roleDeny: Set<string>,
+ *   memberAllow: Set<string>, memberDeny: Set<string> }|null}
+ */
+export function audienceOf(channel) {
+  const guild = channel?.guild;
+  if (!guild || channel.isThread?.()) return null;
+  const view = PermissionFlagsBits.ViewChannel;
+  const canView = (role) => channel.permissionsFor(role)?.has(view) ?? false;
+  const everyoneRole = guild.roles?.everyone ?? null;
+  const everyoneId = everyoneRole?.id ?? guild.id; // the @everyone role's id is the guild's
+  const botId = guild.members?.me?.id ?? channel.client?.user?.id ?? null;
+  const roles = new Set();
+  for (const role of guild.roles?.cache?.values?.() ?? []) {
+    if (canView(role)) roles.add(role.id);
+  }
+  const sets = {
+    [OverwriteType.Role]: { allow: new Set(), deny: new Set() },
+    [OverwriteType.Member]: { allow: new Set(), deny: new Set() },
+  };
+  for (const overwrite of channel.permissionOverwrites?.cache?.values?.() ?? []) {
+    const target = sets[overwrite.type];
+    if (!target) continue;
+    if (overwrite.type === OverwriteType.Role && overwrite.id === everyoneId) continue;
+    if (overwrite.type === OverwriteType.Member && botId !== null && overwrite.id === botId) continue;
+    if (overwrite.allow?.has?.(view)) target.allow.add(overwrite.id);
+    if (overwrite.deny?.has?.(view)) target.deny.add(overwrite.id);
+  }
+  return {
+    everyone: everyoneRole !== null && canView(everyoneRole),
+    roles,
+    roleAllow: sets[OverwriteType.Role].allow,
+    roleDeny: sets[OverwriteType.Role].deny,
+    memberAllow: sets[OverwriteType.Member].allow,
+    memberDeny: sets[OverwriteType.Member].deny,
+  };
 }

@@ -1,11 +1,27 @@
 // Tests for src/discord/collect.js: normalizeMessage's media handling (voice
-// flag, embed classification, raw-URL de-duplication, forwarded snapshots)
-// and the lazy text-attachment preview fetch. Discord objects are plain
-// fixtures shaped just enough for normalizeMessage to read.
+// flag, embed classification, raw-URL de-duplication, forwarded snapshots),
+// its mention ids, the lazy text-attachment preview fetch, the bot's channel
+// permissions, readable channels and neighbours, and the audience reader.
+// Discord objects are plain fixtures shaped just enough for the code to read.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { normalizeMessage, fetchTextPreview, withTextPreviews, fetchHistory, fetchHistoryWindow, fetchMessage, canAttach, canSend, fetchNeighbors } from '../src/discord/collect.js';
-import { MessageReferenceType, PermissionFlagsBits } from 'discord.js';
+import {
+  normalizeMessage,
+  fetchTextPreview,
+  withTextPreviews,
+  fetchHistory,
+  fetchHistoryWindow,
+  fetchMessage,
+  canAttach,
+  canSend,
+  canRead,
+  canReact,
+  fetchNeighbors,
+  readableChannels,
+  isReadableChannel,
+  audienceOf,
+} from '../src/discord/collect.js';
+import { MessageReferenceType, OverwriteType, PermissionFlagsBits, PermissionsBitField, SnowflakeUtil } from 'discord.js';
 import { videoUrlCacheKey } from '../src/discord/video-sites.js';
 import { collectVideos } from '../src/discord/media.js';
 
@@ -581,6 +597,46 @@ test('normalizeMessage: no mentions at all means an empty mentionedUserIds array
   assert.deepEqual(m.mentionedUserIds, []);
 });
 
+// --- normalizeMessage: mentionedChannelIds -------------------------------
+// discord.js's cleanContent rewrites <#id> into #name, so the ids are read
+// from the RAW content; the text keeps reading as #name.
+
+const CHANNEL_IDS = Array.from({ length: 7 }, (_, i) => `40000000000000000${i}`);
+
+test('normalizeMessage: channel mentions in the raw text become mentionedChannelIds', () => {
+  const [a, b] = CHANNEL_IDS;
+  const raw = rawMessage({
+    content: `είδες το <#${a}>; και <#${b}> πάλι <#${a}> <@${b}> <@&${b}> <#12345>`,
+    cleanContent: 'είδες το #ημερολόγιο; και #τέχνη πάλι #ημερολόγιο @Ελένη @ρόλος #12345',
+  });
+  const m = normalizeMessage(raw, 'self');
+  assert.deepEqual(m.mentionedChannelIds, [a, b]);
+  assert.equal(m.content, 'είδες το #ημερολόγιο; και #τέχνη πάλι #ημερολόγιο @Ελένη @ρόλος #12345');
+  assert.deepEqual(m.mentionedUserIds, []);
+});
+
+test('normalizeMessage: no channel mention gives an empty list', () => {
+  assert.deepEqual(normalizeMessage(rawMessage(), 'self').mentionedChannelIds, []);
+  assert.deepEqual(normalizeMessage(rawMessage({ content: 'απλό κείμενο #γενικό' }), 'self').mentionedChannelIds, []);
+  // A forwarded snapshot is not scanned: the forward's own content is empty.
+  const forward = rawMessage({
+    content: '',
+    cleanContent: '',
+    reference: { messageId: 'orig', channelId: 'c2', type: MessageReferenceType.Forward },
+    messageSnapshots: new Map([
+      ['snap1', { id: 'snap1', content: `<#${CHANNEL_IDS[0]}>`, cleanContent: '#ημερολόγιο', attachments: new Map(), embeds: [], stickers: new Map(), flags: flagsWith([]) }],
+    ]),
+  });
+  assert.deepEqual(normalizeMessage(forward, 'self').mentionedChannelIds, []);
+});
+
+test('normalizeMessage: at most 5 channel ids in first appearance order', () => {
+  const [a, b, c, d, e, f, g] = CHANNEL_IDS;
+  const content = [c, a, c, g, b, a, e, d, f].map((id) => `<#${id}>`).join(' ');
+  const m = normalizeMessage(rawMessage({ content, cleanContent: 'κανάλια' }), 'self');
+  assert.deepEqual(m.mentionedChannelIds, [c, a, g, b, e]);
+});
+
 // --- normalizeMessage: replyPingUserId -----------------------------------
 
 test('normalizeMessage: replyPingUserId is the replied-to author put into mentions by the reply ping alone', () => {
@@ -834,6 +890,235 @@ test('canSend: still resolved through the bot member in a guild channel', () => 
 test('fetchNeighbors: a channel without a guild (a DM) has no neighbours', async () => {
   const config = { context: { neighborMessages: 5, neighborMaxAgeMinutes: 60, neighborMaxChannels: 8 }, bot: {} };
   assert.deepEqual(await fetchNeighbors(dmChannel(), config, 'self-id', 1000), []);
+});
+
+test('canRead: needs Read Message History on a viewable channel, a DM is always yes', () => {
+  assert.equal(canRead(permChannel({ granted: [PermissionFlagsBits.ReadMessageHistory] })), true);
+  assert.equal(canRead(permChannel({ granted: [PermissionFlagsBits.SendMessages] })), false);
+  assert.equal(canRead(permChannel({ granted: [PermissionFlagsBits.ReadMessageHistory], viewable: false })), false);
+  assert.equal(canRead(permChannel({ granted: [PermissionFlagsBits.ReadMessageHistory], me: null })), false);
+  assert.equal(canRead(dmChannel()), true);
+});
+
+test('canReact: needs AddReactions on a viewable channel, a DM is always yes', () => {
+  const read = PermissionFlagsBits.ReadMessageHistory;
+  const react = PermissionFlagsBits.AddReactions;
+  assert.equal(canReact(permChannel({ granted: [read, react] })), true, 'a read-only channel the bot may react in');
+  assert.equal(canReact(permChannel({ granted: [read, PermissionFlagsBits.SendMessages] })), false, 'sending is not reacting');
+  assert.equal(canReact(permChannel({ granted: [react] })), false, 'Discord also needs Read Message History to react');
+  assert.equal(canReact(permChannel({ granted: [read, react], viewable: false })), false);
+  assert.equal(canReact(permChannel({ granted: [read, react], me: null })), false);
+  assert.equal(canReact(permChannel({ granted: [read, react], permissionsFor: () => null })), false);
+  assert.equal(canReact(dmChannel()), true);
+});
+
+// --- readable channels, neighbours: a fake guild whose bot member holds per-channel flags ---
+
+const READ = PermissionFlagsBits.ReadMessageHistory;
+const SEND = PermissionFlagsBits.SendMessages;
+const REACT = PermissionFlagsBits.AddReactions;
+const NOW = Date.UTC(2026, 9, 5, 12, 0, 0);
+const MIRROR_ID = '500000000000000009';
+
+/**
+ * A guild with one text channel per spec: `granted` flags for the bot member,
+ * `lastTs` the time of its newest message (a real snowflake, as lastActivity
+ * reads it) and `messages` the raw messages its one page returns.
+ */
+function fakeGuild(specs) {
+  const me = { id: 'self-id' };
+  const guild = { id: 'g1', members: { me }, channels: { cache: new Map() } };
+  for (const spec of specs) {
+    guild.channels.cache.set(spec.id, {
+      id: spec.id,
+      name: spec.name ?? spec.id,
+      guild,
+      viewable: spec.viewable ?? true,
+      lastMessageId: spec.lastTs ? SnowflakeUtil.generate({ timestamp: spec.lastTs }).toString() : null,
+      isTextBased: () => spec.text !== false,
+      isThread: () => spec.thread === true,
+      permissionsFor: (member) => (member === me ? { has: (flag) => (spec.granted ?? []).includes(flag) } : null),
+      messages: { fetch: async () => new Map((spec.messages ?? []).map((message) => [message.id, message])) },
+    });
+  }
+  return guild;
+}
+
+/** One raw message `minutesAgo` before NOW in channel `channelId`. */
+function recentMessage(id, channelId, minutesAgo) {
+  return rawMessage({ id, channelId, cleanContent: 'καλημέρα', createdTimestamp: NOW - minutesAgo * 60_000 });
+}
+
+/** A neighbour spec with one message `minutesAgo` before NOW. */
+function neighbourSpec(id, granted, minutesAgo) {
+  return { id, granted, lastTs: NOW - minutesAgo * 60_000, messages: [recentMessage(`${id}-m`, id, minutesAgo)] };
+}
+
+const NEIGHBOUR_CONFIG = (bot = {}) => ({
+  context: { neighborMessages: 5, neighborMaxAgeMinutes: 60, neighborMaxChannels: 8 },
+  bot,
+  media: {},
+});
+
+test('fetchNeighbors: a neighbour the bot cannot write in is marked readOnly', async () => {
+  const guild = fakeGuild([
+    neighbourSpec('here', [READ, SEND], 1),
+    neighbourSpec('talk', [READ, SEND, REACT], 5),
+    neighbourSpec('diary', [READ, REACT], 3),
+  ]);
+  const neighbours = await fetchNeighbors(guild.channels.cache.get('here'), NEIGHBOUR_CONFIG(), 'self-id', NOW);
+  assert.deepEqual(
+    neighbours.map(({ channelId, readOnly }) => ({ channelId, readOnly })),
+    [
+      { channelId: 'diary', readOnly: true },
+      { channelId: 'talk', readOnly: false },
+    ],
+  );
+  assert.deepEqual(neighbours[0].messages.map((m) => m.id), ['diary-m']);
+});
+
+test('fetchNeighbors: the dry-run mirror channel is never a neighbour', async () => {
+  const guild = fakeGuild([
+    neighbourSpec('here', [READ, SEND], 1),
+    neighbourSpec(MIRROR_ID, [READ, SEND, REACT], 2),
+    neighbourSpec('talk', [READ, SEND], 4),
+  ]);
+  const here = guild.channels.cache.get('here');
+  const withMirror = await fetchNeighbors(here, NEIGHBOUR_CONFIG({ dryRunChannelId: MIRROR_ID }), 'self-id', NOW);
+  assert.deepEqual(withMirror.map((n) => n.channelId), ['talk']);
+  const noMirror = await fetchNeighbors(here, NEIGHBOUR_CONFIG({ dryRunChannelId: '' }), 'self-id', NOW);
+  assert.deepEqual(noMirror.map((n) => n.channelId), [MIRROR_ID, 'talk']);
+});
+
+test('readableChannels: threads, non-text, denied, unreadable channels and the dry-run mirror are left out', () => {
+  const guild = fakeGuild([
+    { id: 'open', granted: [READ, SEND] },
+    { id: 'diary', granted: [READ] },
+    { id: 'thread', granted: [READ, SEND], thread: true },
+    { id: 'voice', granted: [READ, SEND], text: false },
+    { id: 'denied', granted: [READ, SEND] },
+    { id: 'hidden', granted: [SEND] },
+    { id: 'unviewable', granted: [READ, SEND], viewable: false },
+    { id: MIRROR_ID, granted: [READ, SEND] },
+  ]);
+  const bot = { channels: { deny: ['denied'] }, dryRunChannelId: MIRROR_ID };
+  assert.deepEqual(readableChannels(guild, bot).map((c) => c.id), ['open', 'diary']);
+  assert.deepEqual(readableChannels(guild, bot, 'open').map((c) => c.id), ['diary']);
+  assert.equal(isReadableChannel(guild.channels.cache.get('diary'), bot), true);
+  assert.equal(isReadableChannel(guild.channels.cache.get(MIRROR_ID), bot), false);
+  assert.equal(isReadableChannel(guild.channels.cache.get(MIRROR_ID), { channels: {}, dryRunChannelId: '' }), true);
+});
+
+// --- audienceOf: who can view a channel, in the shape audienceCovers takes ---
+
+const GUILD_ID = '600000000000000000';
+const VIEW = PermissionFlagsBits.ViewChannel;
+const ROLE = { regular: '610000000000000001', muted: '610000000000000002', moderator: '610000000000000003' };
+const MEMBER = { zoe: '620000000000000001', iason: '620000000000000002', nefeli: '620000000000000003' };
+const BOT_ID = '630000000000000001';
+
+/**
+ * A guild channel whose permissionsFor(role) resolves like Discord does for
+ * one role: the role's and @everyone's base permissions, then the @everyone
+ * overwrite, then the role's own overwrite (deny, then allow). @everyone
+ * views at the guild level; every other role adds nothing at that level.
+ * `overwrites`: `{ id, type, allow?, deny? }` with bigint flags. `meId` is
+ * the bot member's id (guild.members.me), `clientUserId` the logged-in
+ * user's (channel.client.user); both absent by default.
+ */
+function audienceChannel({ roles = Object.values(ROLE), overwrites = [], thread = false, meId = null, clientUserId = null } = {}) {
+  const everyone = { id: GUILD_ID, permissions: new PermissionsBitField(VIEW) };
+  const all = [everyone, ...roles.map((id) => ({ id, permissions: new PermissionsBitField(0n) }))];
+  const cache = new Map(
+    overwrites.map((o) => [
+      o.id,
+      { id: o.id, type: o.type, allow: new PermissionsBitField(o.allow ?? 0n), deny: new PermissionsBitField(o.deny ?? 0n) },
+    ]),
+  );
+  const resolve = (role) => {
+    let bits = everyone.permissions.bitfield | role.permissions.bitfield;
+    for (const id of role === everyone ? [everyone.id] : [everyone.id, role.id]) {
+      const overwrite = cache.get(id);
+      if (overwrite?.type === OverwriteType.Role) bits = (bits & ~overwrite.deny.bitfield) | overwrite.allow.bitfield;
+    }
+    return new PermissionsBitField(bits);
+  };
+  return {
+    id: 'c-audience',
+    guild: {
+      id: GUILD_ID,
+      members: { me: meId ? { id: meId } : null },
+      roles: { everyone, cache: new Map(all.map((role) => [role.id, role])) },
+    },
+    client: { user: clientUserId ? { id: clientUserId } : null },
+    isThread: () => thread,
+    permissionOverwrites: { cache },
+    permissionsFor: (target) => (all.includes(target) ? resolve(target) : null),
+  };
+}
+
+test('audienceOf: reads everyone, roles and member overwrites for ViewChannel', () => {
+  const channel = audienceChannel({
+    overwrites: [
+      { id: GUILD_ID, type: OverwriteType.Role, deny: VIEW },
+      { id: ROLE.moderator, type: OverwriteType.Role, allow: VIEW },
+      { id: ROLE.muted, type: OverwriteType.Role, deny: VIEW | PermissionFlagsBits.SendMessages },
+      { id: ROLE.regular, type: OverwriteType.Role, allow: PermissionFlagsBits.SendMessages },
+      { id: MEMBER.zoe, type: OverwriteType.Member, allow: VIEW | PermissionFlagsBits.SendMessages },
+      { id: MEMBER.iason, type: OverwriteType.Member, deny: VIEW },
+      { id: MEMBER.nefeli, type: OverwriteType.Member, allow: PermissionFlagsBits.SendMessages },
+    ],
+  });
+  assert.deepEqual(audienceOf(channel), {
+    everyone: false,
+    roles: new Set([ROLE.moderator]),
+    roleAllow: new Set([ROLE.moderator]),
+    roleDeny: new Set([ROLE.muted]),
+    memberAllow: new Set([MEMBER.zoe]),
+    memberDeny: new Set([MEMBER.iason]),
+  });
+});
+
+// The audience rail blocks a role that views the destination but not the
+// source (audienceCovers, tests/elsewhere.test.js); these are the sets that
+// make it do so for a role denied on an everyone-visible source (M2).
+test('audienceOf: a role denied on an everyone-visible channel is missing from its roles though @everyone views it', () => {
+  const source = audienceOf(audienceChannel({ overwrites: [{ id: ROLE.muted, type: OverwriteType.Role, deny: VIEW }] }));
+  const dest = audienceOf(audienceChannel());
+  assert.equal(source.everyone, true, '@everyone still views the source');
+  assert.deepEqual(source.roles, new Set([GUILD_ID, ROLE.regular, ROLE.moderator]));
+  assert.deepEqual(source.roleDeny, new Set([ROLE.muted]));
+  assert.equal(dest.everyone, true);
+  assert.deepEqual(dest.roles, new Set([GUILD_ID, ...Object.values(ROLE)]));
+  assert.deepEqual(dest.roleDeny, new Set());
+});
+
+test("audienceOf: the bot's own member overwrite is not part of the audience", () => {
+  const botAllow = { id: BOT_ID, type: OverwriteType.Member, allow: VIEW | PermissionFlagsBits.SendMessages };
+  const botDeny = { id: BOT_ID, type: OverwriteType.Member, deny: VIEW };
+  const publicChannel = audienceOf(audienceChannel());
+  assert.deepEqual(audienceOf(audienceChannel({ overwrites: [botAllow], meId: BOT_ID })), publicChannel, 'the bot member from guild.members.me');
+  assert.deepEqual(audienceOf(audienceChannel({ overwrites: [botAllow], clientUserId: BOT_ID })), publicChannel, 'the bot user from channel.client');
+  assert.deepEqual(audienceOf(audienceChannel({ overwrites: [botDeny], meId: BOT_ID })).memberDeny, new Set());
+
+  const mixed = audienceOf(
+    audienceChannel({
+      meId: BOT_ID,
+      overwrites: [botAllow, { id: MEMBER.zoe, type: OverwriteType.Member, allow: VIEW }, { id: MEMBER.iason, type: OverwriteType.Member, deny: VIEW }],
+    }),
+  );
+  assert.deepEqual(mixed.memberAllow, new Set([MEMBER.zoe]), "another member's allow stays");
+  assert.deepEqual(mixed.memberDeny, new Set([MEMBER.iason]), "another member's deny stays");
+  assert.deepEqual(
+    audienceOf(audienceChannel({ overwrites: [botAllow] })).memberAllow,
+    new Set([BOT_ID]),
+    'with no bot id known, nothing is left out',
+  );
+});
+
+test('audienceOf: a channel without a guild or a thread has no audience', () => {
+  assert.equal(audienceOf(dmChannel()), null);
+  assert.equal(audienceOf(audienceChannel({ thread: true })), null);
 });
 
 // --- normalizeMessage: links to Discord CDN video attachments ------------------
