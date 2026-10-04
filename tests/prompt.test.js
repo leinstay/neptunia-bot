@@ -258,6 +258,46 @@ test('buildRequest: a neighbour message is cut at context.neighborMessageChars (
   assert.ok(fallback.includes('λ'.repeat(300)) && !fallback.includes('λ'.repeat(301)));
 });
 
+/** The `<other_channels>` body of a request built from `overrides`. */
+function otherChannelsOf(overrides) {
+  const user = buildRequest(baseInput(overrides)).messages[1].content;
+  return user.split('<other_channels>\n')[1].split('\n</other_channels>')[0];
+}
+
+test('buildRequest: a neighbour picture with a caption in neighborDescriptions renders described; one without stays blind', () => {
+  const pictures = [
+    { id: 'np1', kind: 'image', url: 'https://cdn/np1.png', name: 'np1.png' },
+    { id: 'np2', kind: 'image', url: 'https://cdn/np2.png', name: 'np2.png' },
+  ];
+  const neighbors = [{ channelName: 'random', messages: [makeMessage(9, NOW - 5 * MIN, { attachments: pictures })] }];
+  const described = otherChannelsOf({ neighbors, neighborDescriptions: new Map([['np1', 'a sleeping cat']]) });
+  assert.ok(described.includes(fill(labels.transcript.imageDescribed, { text: 'a sleeping cat' })), described);
+  assert.ok(described.includes(labels.transcript.image), 'the uncaptioned picture keeps its blind form');
+
+  const blind = otherChannelsOf({ neighbors });
+  assert.ok(!blind.includes('a sleeping cat'), blind);
+  assert.ok(blind.includes(labels.transcript.image));
+});
+
+test('buildRequest: neighborDescriptions never reach the chat lines; the chat captions still reach the neighbour lines', () => {
+  const chatPicture = { id: 'cp1', kind: 'image', url: 'https://cdn/cp1.png', name: 'cp1.png' };
+  const neighbourPicture = { id: 'np1', kind: 'image', url: 'https://cdn/np1.png', name: 'np1.png' };
+  const history = [makeMessage(1, NOW - MIN, { attachments: [chatPicture] })];
+  const neighbors = [{ channelName: 'random', messages: [makeMessage(9, NOW - 5 * MIN, { attachments: [neighbourPicture] })] }];
+  const input = baseInput({
+    history,
+    neighbors,
+    descriptions: new Map([['np1', 'a red fox']]),
+    neighborDescriptions: new Map([['cp1', 'a sleeping cat']]),
+  });
+  const user = buildRequest(input).messages[1].content;
+  const chat = user.split('<chat>\n')[1].split('\n</chat>')[0];
+  assert.ok(!chat.includes('a sleeping cat'), chat);
+  assert.ok(chat.includes(labels.transcript.image));
+  const others = user.split('<other_channels>\n')[1].split('\n</other_channels>')[0];
+  assert.ok(others.includes(fill(labels.transcript.imageDescribed, { text: 'a red fox' })), others);
+});
+
 test('buildRequest: throws a clear error when prompts.labels has no transcript section', () => {
   const brokenLabels = { ...labels, transcript: undefined };
   assert.throws(() => buildRequest(baseInput({ prompts: fakePrompts({ labels: brokenLabels }) })), /labels/);

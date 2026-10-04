@@ -927,6 +927,10 @@ function splitPeople(otherProfiles, candidateProfiles, history, trigger, exclude
  * @param {Map<string, string>} [input.descriptions]  Item id -> describer caption, for pictures
  *   NOT selected to be attached, and for attached ones too with features.attachedDescriptions
  *   (see src/behavior/turn.js, src/memory/describe.js).
+ * @param {Map<string, string>} [input.neighborDescriptions]  Item id -> the caption the
+ *   describer's cache already held for a picture in a neighbour's lines
+ *   (src/memory/describe.js#cachedDescriptions); used for `<other_channels>` only, alongside
+ *   `descriptions`. Omitted -> a neighbour picture shows a caption only when `descriptions` has one.
  * @param {Map<string, object>} [input.videos]  Item id -> video state from the video describer
  *   (src/memory/describe.js#describeVideos), passed to formatTranscript.
  * @param {Map<string, string>} [input.reads]  Link id -> the excerpt the web lookup read from that
@@ -1044,9 +1048,15 @@ export function buildRequest(input) {
   // A private chat has no neighbouring channels (and no server map, below).
   // A neighbour's message is cut shorter than the chat's (context.neighborMessageChars).
   const neighborChars = config.context.neighborMessageChars ?? 300;
+  // The neighbours' own cached captions join the chat's for their lines only, so the
+  // chat keeps exactly the captions this turn gave it.
+  const neighborDescriptions =
+    input.neighborDescriptions instanceof Map && input.neighborDescriptions.size > 0
+      ? new Map([...input.neighborDescriptions, ...(descriptions ?? [])])
+      : descriptions;
   const neighborItems = (privateChat ? [] : neighbors).map(
     ({ channelName, messages }) =>
-      `# ${channelName}\n${formatTranscript(messages, { ...formatOptions, maxChars: neighborChars })
+      `# ${channelName}\n${formatTranscript(messages, { ...formatOptions, maxChars: neighborChars, descriptions: neighborDescriptions })
         .map((item) => item.text.replace(/^#\d+ /gm, ''))
         .join('\n')}`,
   );

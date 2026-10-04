@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import { PermissionFlagsBits } from 'discord.js';
+import { PermissionFlagsBits, SnowflakeUtil } from 'discord.js';
 import { resolveMentions, createTurnRunner, parseRewatchPickDetailed, parseLookupQuery } from '../src/behavior/turn.js';
 import { between, typingMs } from '../src/behavior/random.js';
 import { fill } from '../src/discord/format.js';
@@ -828,6 +828,106 @@ test('createTurnRunner: features.mediaDescriptions on describes a custom emoji i
   const userMessage = llm.calls[0][1].content;
   assert.ok(userMessage.includes('nice :pog: job'));
   assert.ok(userMessage.includes(labels.transcript.emojiDescribed.replace('{name}', 'pog').replace('{text}', 'a surprised cat face')));
+});
+
+// Pictures in a neighbour channel's lines: the captions the describer's cache already holds, never a request.
+
+/**
+ * A reply turn in c1 whose guild has one neighbour channel, c2, with a recent message carrying two
+ * pictures: np1 (its caption is in the cache) and np2 (not cached). The fake describer's
+ * cachedDescriptions answers from `cached` alone; describeMany records every call.
+ */
+function neighborPictureTurn(features) {
+  const raw = rawMessage({ id: 'm1' });
+  const channel = fakeTurnChannel({ historyMessages: [raw] });
+  const posted = {
+    ...rawMessage({
+      id: 'n1',
+      authorId: 'u2',
+      authorName: 'Bob',
+      ts: NOW - 2000,
+      content: 'look',
+      attachments: new Map([
+        ['np1', { id: 'np1', contentType: 'image/png', name: 'cat.png', url: 'https://cdn.discordapp.com/x/cat.png' }],
+        ['np2', { id: 'np2', contentType: 'image/png', name: 'dog.png', url: 'https://cdn.discordapp.com/x/dog.png' }],
+      ]),
+    }),
+    channelId: 'c2',
+  };
+  const neighbor = {
+    ...fakeTurnChannel({ id: 'c2', name: 'random', historyMessages: [posted] }),
+    guild: channel.guild,
+    isTextBased: () => true,
+    isThread: () => false,
+    lastMessageId: SnowflakeUtil.generate({ timestamp: NOW - 2000 }).toString(),
+  };
+  channel.guild.channels.cache.set(neighbor.id, neighbor);
+  const cached = { np1: 'a sleeping cat' };
+  const describer = {
+    calls: [],
+    cachedCalls: [],
+    describeMany: async (guildId, items, options) => {
+      describer.calls.push({ guildId, items, options });
+      return { descriptions: new Map(), newCount: 0 };
+    },
+    cachedDescriptions: (guildId, items) => {
+      describer.cachedCalls.push({ guildId, items });
+      return new Map(items.filter((item) => cached[item.itemId]).map((item) => [item.itemId, cached[item.itemId]]));
+    },
+  };
+  const llm = fakeLlm('<msg>ok</msg>');
+  const turns = createTurnRunner({
+    hot: fakeHot(features),
+    store: fakeStore(),
+    llm,
+    calibrator: identityCalibrator(),
+    client: fakeClient(),
+    describer,
+    now: () => NOW,
+  });
+  return { channel, llm, describer, turns, trigger: normalizedTrigger(raw) };
+}
+
+/** The `<other_channels>` body of the first request the fake LLM received. */
+function otherChannelsSent(llm) {
+  return userText(llm).split('<other_channels>\n')[1].split('\n</other_channels>')[0];
+}
+
+test('runTurn: a neighbour picture already in the describer cache renders with its caption; an uncached one stays blind', async () => {
+  const { channel, llm, describer, turns, trigger } = neighborPictureTurn({ mediaDescriptions: true });
+
+  await turns.runTurn({ channel, mode: 'reply', trigger, triggerKind: 'mention' });
+
+  assert.equal(describer.cachedCalls.length, 1);
+  assert.equal(describer.cachedCalls[0].guildId, 'g1');
+  assert.deepEqual(describer.cachedCalls[0].items.map((item) => item.itemId).sort(), ['np1', 'np2']);
+  const others = otherChannelsSent(llm);
+  assert.ok(others.includes('# random'), others);
+  assert.ok(others.includes(fill(labels.transcript.imageDescribed, { text: 'a sleeping cat' })), others);
+  assert.ok(others.includes(labels.transcript.image), 'the uncached picture keeps its blind form');
+});
+
+test('runTurn: no describe request is made for a neighbour picture', async () => {
+  const { channel, describer, turns, trigger } = neighborPictureTurn({ mediaDescriptions: true });
+
+  await turns.runTurn({ channel, mode: 'reply', trigger, triggerKind: 'mention' });
+
+  const requested = describer.calls.flatMap((call) => call.items.map((item) => item.itemId));
+  assert.ok(!requested.includes('np1') && !requested.includes('np2'), JSON.stringify(requested));
+});
+
+test('runTurn: features.mediaDescriptions off leaves a neighbour picture blind and never reads the cache', async () => {
+  for (const features of [{}, { mediaDescriptions: false }]) {
+    const { channel, llm, describer, turns, trigger } = neighborPictureTurn(features);
+
+    await turns.runTurn({ channel, mode: 'reply', trigger, triggerKind: 'mention' });
+
+    assert.equal(describer.cachedCalls.length, 0);
+    assert.equal(describer.calls.length, 0);
+    const others = otherChannelsSent(llm);
+    assert.ok(!others.includes('a sleeping cat'), others);
+    assert.ok(others.includes(labels.transcript.image));
+  }
 });
 
 test('createTurnRunner: a text attachment is fetched lazily and rendered via filePreview', async () => {

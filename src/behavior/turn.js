@@ -264,7 +264,9 @@ function describableCandidates(history, picked, { includePicked = false } = {}) 
  * `describer` (src/memory/describe.js#createDescriber) is optional: when
  * absent, or `features.mediaDescriptions` is off, no description request is
  * ever made — buildRequest simply renders every un-attached picture blind
- * (and every attached one with its bare marker).
+ * (and every attached one with its bare marker). A neighbour channel's
+ * pictures never cost a request: they get only the captions the cache
+ * already holds (`describer.cachedDescriptions`), under the same switch.
  * Likewise, videos are only watched when `features.mediaDescriptions` AND
  * `features.videoDescriptions` (a missing key counts as on) are on and the describer has
  * `describeVideos`; otherwise they render without a watch.
@@ -1080,6 +1082,12 @@ export function createTurnRunner({
 
       // A private chat has no neighbouring channels.
       const neighbors = isPrivate ? [] : await fetchNeighbors(channel, config, selfId, now);
+      // A neighbour's pictures get only the captions the cache already holds, under the
+      // chat captions' switch: cachedDescriptions never sends a request or counts a day.
+      const neighborDescriptions =
+        features.mediaDescriptions === true && typeof describer?.cachedDescriptions === 'function' && neighbors.length > 0
+          ? describer.cachedDescriptions(guildId, neighbors.flatMap((neighbor) => describableCandidates(neighbor.messages, [])))
+          : undefined;
       // Drawing (features.imageGeneration, a missing key counts as on) needs the image client
       // and Attach Files here; a drawFailed turn answers the failure and never draws again.
       const drawOn = Boolean(images) && features.imageGeneration !== false && triggerKind !== 'drawFailed' && canAttach(channel);
@@ -1111,6 +1119,7 @@ export function createTurnRunner({
         loreEntries: memoryOn ? store.getLore(guildId) : [],
         currentChannelId: channel.id,
         descriptions,
+        neighborDescriptions,
         videos,
         reads,
         lookup: lookupResult,
