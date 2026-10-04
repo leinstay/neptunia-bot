@@ -309,6 +309,19 @@ test('updateGuild: merges fields and stamps updatedAt', () => {
   assert.ok(guild.updatedAt);
 });
 
+test('updateGuild: a re-send identical to what is stored leaves updatedAt alone; a change is stamped', () => {
+  const store = createStore({ dataDir: tmpDataDir() });
+  const earlier = '2000-01-01T00:00:00.000Z';
+  store.updateGuild('g1', { patterns: 'μιμίδια', injokes: ['ο βράχος', 'café'] }).updatedAt = earlier;
+
+  assert.equal(store.updateGuild('g1', { patterns: 'μιμίδια', injokes: ['ο βράχος', 'café'] }).updatedAt, earlier);
+  assert.equal(store.updateGuild('g1', { learned: [], learnedNextId: 99 }).updatedAt, earlier, 'stripped fields alone are no change');
+
+  const guild = store.updateGuild('g1', { patterns: 'μιμίδια', injokes: ['café', 'ο βράχος'] });
+  assert.notEqual(guild.updatedAt, earlier, 'a reordered list is a change');
+  assert.deepEqual(guild.injokes, ['café', 'ο βράχος']);
+});
+
 test('writeJsonAtomic: a refused rename falls back to an in-place write, and says so in the log', async () => {
   const dir = tmpDataDir();
   const file = path.join(dir, 'guilds', 'g1', 'guild.json');
@@ -738,6 +751,29 @@ test('updateChannel: creates the channel if it did not already exist', () => {
   const channel = store.updateChannel('g1', 'newchannel', { purpose: 'x' });
   assert.equal(channel.id, 'newchannel');
   assert.equal(channel.purpose, 'x');
+});
+
+const EARLIER_STAMP = '2000-01-01T00:00:00.000Z';
+
+test('updateChannel: a re-send identical to what is stored leaves updatedAt alone', () => {
+  const store = createStore({ dataDir: tmpDataDir() });
+  store.touchChannel('g1', 'c1', { name: 'general', category: null, topic: null }, 1000);
+  store.updateChannel('g1', 'c1', { purpose: 'chatter', topics: 'games', tone: 'casual' }).updatedAt = EARLIER_STAMP;
+
+  const channel = store.updateChannel('g1', 'c1', { purpose: 'chatter', tone: 'casual' });
+  assert.equal(channel.updatedAt, EARLIER_STAMP);
+  assert.equal(store.updateChannel('g1', 'c1', {}).updatedAt, EARLIER_STAMP, 'no field at all is no change either');
+});
+
+test('updateChannel: one changed field among identical ones is stamped', () => {
+  const store = createStore({ dataDir: tmpDataDir() });
+  store.touchChannel('g1', 'c1', { name: 'general', category: null, topic: null }, 1000);
+  store.updateChannel('g1', 'c1', { purpose: 'chatter', topics: 'games', tone: 'casual' }).updatedAt = EARLIER_STAMP;
+
+  const channel = store.updateChannel('g1', 'c1', { purpose: 'chatter', topics: 'games', tone: 'heated' });
+  assert.notEqual(channel.updatedAt, EARLIER_STAMP);
+  assert.equal(channel.tone, 'heated');
+  assert.equal(channel.purpose, 'chatter');
 });
 
 test('listChannels: lists every channel entry of a guild', () => {
@@ -1225,6 +1261,18 @@ test('setLore: an owner entry is never overwritten by a later analyzer update', 
   assert.equal(entries.length, 1);
   assert.equal(entries[0].text, 'owner text');
   assert.equal(entries[0].source, 'owner');
+});
+
+test('setLore: an identical analyzer re-send returns 0 and keeps updatedAt; a changed text returns 1', () => {
+  const store = createStore({ dataDir: tmpDataDir() });
+  const flood = { title: 'The Flood', keys: ['flood'], text: 'It flooded once.' };
+  store.setLore('g1', [flood], { source: 'analyzer', now: 1000 });
+
+  assert.equal(store.setLore('g1', [flood], { source: 'analyzer', now: 2000 }), 0);
+  assert.equal(store.getLore('g1')[0].updatedAt, new Date(1000).toISOString());
+
+  assert.equal(store.setLore('g1', [{ ...flood, text: 'It flooded twice.' }], { source: 'analyzer', now: 3000 }), 1);
+  assert.equal(store.getLore('g1')[0].updatedAt, new Date(3000).toISOString());
 });
 
 test('removeLore: deletes by id and reports whether anything was removed', () => {

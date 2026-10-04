@@ -20,6 +20,7 @@ import { isDescribable, mediaParts, stickerUrl } from '../discord/media.js';
 import { log } from '../log.js';
 import { MINUTE_MS } from '../time.js';
 import { emptyAffinity, roundScore, affinityBand, applyDelta } from './affinity.js';
+import { emptyChannel } from './store.js';
 import { keywordMatches } from './lore.js';
 import { normalizeInterests } from './interests.js';
 import { normalizeDetails } from './details.js';
@@ -35,6 +36,7 @@ import { effectiveAffinity } from '../behavior/private.js';
 
 const BACKOFF_MS = 15 * 60_000;
 const MIN_LIVE_BATCH = 20; // the live analyzer never shrinks below this many messages
+const CHANNEL_FIELDS = ['purpose', 'topics', 'tone']; // the analyzer's own fields of a channel entry
 
 /** The temperature of every analyzer-role request: the stream analyzer here, and the warmup's
  * channel/profile/server requests and the portrait refresh (src/memory/warmup.js). */
@@ -793,7 +795,8 @@ function episodeOptions(episodes, cfg) {
  *   only the stored profile's own `names` are known.
  * @returns {{ users: number, guild: boolean, self: boolean, affinity: number, relationships: number, channels: number, episodes: number, lore: number,
  *   learned: number, interestsChanged: number, portraitRequests: { userId: string, reason: string }[] }}
- *   `guild`: patterns/starters/injokes changed. `learned`: how many valid `guild.learned` add ops were
+ *   `guild`: patterns/starters/injokes changed. `channels`/`lore`: entries whose stored values changed
+ *   (an identical re-send, compared after clamping, counts 0). `learned`: how many valid `guild.learned` add ops were
  *   handed to `store.applyLearnedOps` (a re-add of a stored item counts too -- it is a sighting).
  */
 export function applyMemoryUpdate(
@@ -910,12 +913,13 @@ export function applyMemoryUpdate(
       if (!raw || typeof raw !== 'object' || Array.isArray(raw)) continue;
 
       const fields = {};
-      for (const key of ['purpose', 'topics', 'tone']) {
+      for (const key of CHANNEL_FIELDS) {
         if (typeof raw[key] === 'string') fields[key] = clampText(tokenize(raw[key]), cfg.fieldChars, { tolerance: cfg.clampTolerance });
       }
 
-      store.updateChannel(guildId, channelId, fields);
-      result.channels += 1;
+      // Counted only when the stored text moves: an identical re-send is no change (and unstamped).
+      const before = fieldsSnapshot(store.getChannel(guildId, channelId) ?? emptyChannel(String(channelId)), CHANNEL_FIELDS);
+      if (fieldsSnapshot(store.updateChannel(guildId, channelId, fields), CHANNEL_FIELDS) !== before) result.channels += 1;
     }
   }
 
@@ -934,8 +938,9 @@ export function applyMemoryUpdate(
     }
   }
   if (Object.keys(guildFields).length > 0) {
-    store.updateGuild(guildId, guildFields);
-    result.guild = true;
+    const keys = Object.keys(guildFields);
+    const before = fieldsSnapshot(store.getGuild(guildId), keys);
+    result.guild = fieldsSnapshot(store.updateGuild(guildId, guildFields), keys) !== before;
   }
 
   // Things people taught the persona: incremental ops, same mechanics as a
@@ -970,6 +975,12 @@ export function applyMemoryUpdate(
   }
 
   return result;
+}
+
+/** The listed fields of a stored entry as one comparable string, taken before and after a store
+ * write: equal means the write changed nothing (the store compares the same JSON form). */
+function fieldsSnapshot(value, keys) {
+  return JSON.stringify(keys.map((key) => value?.[key]));
 }
 
 /** Whether an analyzer value says anything: a non-blank string, a non-empty array or object. */

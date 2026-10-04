@@ -93,6 +93,55 @@ test('upsertLore: an owner update can overwrite another owner entry (re-editing)
   assert.equal(result.entries[0].always, false);
 });
 
+// ---- a re-send that changes nothing ---------------------------------------------
+
+test('upsertLore: an analyzer re-send identical after normalisation is not stamped and counts 0', () => {
+  const existing = [entry()];
+  const result = upsertLore(existing, [{ title: 'The Great Migration', keys: ['  Migration ', 'THE MOVE'], text: 'The server moved house in spring.' }], {
+    source: 'analyzer',
+    now: NOW,
+  });
+  assert.equal(result.upserted, 0);
+  assert.deepEqual(result.entries, existing, 'the stored entry, updatedAt included, is left as it was');
+});
+
+test('upsertLore: an analyzer re-send identical after clamping counts 0', () => {
+  const clamped = upsertLore([], [{ title: 'X', keys: ['valid'], text: 'x'.repeat(1000) }], { source: 'analyzer', now: NOW }).entries;
+  const result = upsertLore(clamped, [{ title: 'X', keys: ['valid'], text: 'x'.repeat(2000) }], { source: 'analyzer', now: NOW + 60_000 });
+  assert.equal(result.upserted, 0, 'both texts clamp to the same 750 characters');
+  assert.equal(result.entries[0].updatedAt, new Date(NOW).toISOString());
+});
+
+test('upsertLore: an analyzer re-send that changes only the keys is stamped and counted', () => {
+  const result = upsertLore([entry()], [{ title: 'The Great Migration', keys: ['migration'], text: 'The server moved house in spring.' }], {
+    source: 'analyzer',
+    now: NOW,
+  });
+  assert.equal(result.upserted, 1);
+  assert.deepEqual(result.entries[0].keys, ['migration']);
+  assert.equal(result.entries[0].updatedAt, new Date(NOW).toISOString());
+});
+
+test('upsertLore: an analyzer re-send that changes only the title casing is stamped and counted', () => {
+  const result = upsertLore([entry()], [{ title: 'the great migration', keys: ['migration', 'the move'], text: 'The server moved house in spring.' }], {
+    source: 'analyzer',
+    now: NOW,
+  });
+  assert.equal(result.upserted, 1);
+  assert.equal(result.entries[0].title, 'the great migration');
+  assert.equal(result.entries[0].updatedAt, new Date(NOW).toISOString());
+});
+
+test('upsertLore: an owner re-save of an identical owner entry is still stamped and counted (an explicit save)', () => {
+  const existing = [entry({ source: 'owner', always: true })];
+  const result = upsertLore(existing, [{ title: 'The Great Migration', keys: ['migration', 'the move'], text: 'The server moved house in spring.', always: true }], {
+    source: 'owner',
+    now: NOW,
+  });
+  assert.equal(result.upserted, 1);
+  assert.equal(result.entries[0].updatedAt, new Date(NOW).toISOString());
+});
+
 // ---- key normalization / rejection ------------------------------------------
 
 test('upsertLore: keys are lowercased, trimmed, de-duplicated, kept 1-8', () => {

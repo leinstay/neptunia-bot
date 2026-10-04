@@ -39,6 +39,18 @@ function normalizeKeys(rawKeys) {
   return out;
 }
 
+/** Whether a stored entry already holds exactly these (normalised, clamped) values. */
+function isSameEntry(existing, { title, keys, text, source }) {
+  return (
+    existing.title === title &&
+    existing.text === text &&
+    existing.source === source &&
+    Array.isArray(existing.keys) &&
+    existing.keys.length === keys.length &&
+    existing.keys.every((key, index) => key === keys[index])
+  );
+}
+
 /** A short, stable, deterministic id from the title, creation time and an in-call salt. */
 function makeId(title, nowMs, salt) {
   const base = `${title}|${nowMs}|${salt}`;
@@ -76,7 +88,9 @@ function evictOverflow(entries, maxEntries) {
  * is left completely untouched by an analyzer update (silently dropped). An
  * `owner` update always wins -- it overwrites any entry under that title
  * (analyzer or owner alike) and the entry becomes/stays an owner entry, the
- * one way a title becomes protected from the analyzer.
+ * one way a title becomes protected from the analyzer. An analyzer update
+ * that would leave an entry exactly as stored (title, keys, text compared
+ * after normalising and clamping) is skipped: not stamped, not counted.
  *
  * @param {object[]|undefined} entries  Stored entries.
  * @param {unknown} incoming            Untrusted `{ title, keys, text, always? }[]`.
@@ -84,7 +98,7 @@ function evictOverflow(entries, maxEntries) {
  *   clampTolerance?: number }} opts
  *   `title` is a hard identity clamp at MAX_TITLE; `text` is free prose, clamped tolerantly (see
  *   src/memory/clamp.js) to `textChars` (config.lore.textChars; DEFAULT_MAX_TEXT when absent).
- * @returns {{ entries: object[], upserted: number }}
+ * @returns {{ entries: object[], upserted: number }}  `upserted`: entries inserted or actually changed.
  */
 export function upsertLore(entries, incoming, { source, now: nowMs = Date.now(), maxEntries = Infinity, textChars, clampTolerance } = {}) {
   const stored = Array.isArray(entries) ? [...entries] : [];
@@ -127,6 +141,10 @@ export function upsertLore(entries, incoming, { source, now: nowMs = Date.now(),
 
     const existing = stored[existingIndex];
     if (existing.source === 'owner' && source !== 'owner') continue; // never touched by the analyzer
+    // An analyzer re-send that leaves the entry as it is stays unstamped and uncounted, so neither
+    // `updatedAt` nor the update log overstates how much the lorebook moves. An owner write is an
+    // explicit save and always counts (src/admin.js reads 0 as an invalid entry).
+    if (source !== 'owner' && isSameEntry(existing, { title, keys, text, source })) continue;
 
     const updated = { ...existing, title, keys, text, source, updatedAt: nowIso };
     if (source === 'owner') updated.always = Boolean(raw.always);

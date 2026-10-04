@@ -1287,6 +1287,59 @@ test('applyMemoryUpdate: a channel field absent from the update leaves the store
   });
 });
 
+const EARLIER_STAMP = '2000-01-01T00:00:00.000Z';
+
+test('applyMemoryUpdate: a channel re-send identical after clamping counts 0 and leaves updatedAt alone', () => {
+  withStore((store) => {
+    const guildId = 'g1';
+    store.touchChannel(guildId, 'c1', { name: 'general', category: null, topic: null }, Date.now());
+    const cfg = { fieldChars: 5, maxDetails: 2, maxInjokes: 2, maxSelfFacts: 2 };
+    const known = { knownChannelIds: new Set(['c1']) };
+
+    applyMemoryUpdate(store, guildId, { channels: { c1: { purpose: 'a long purpose text', tone: 'chill' } } }, cfg, new Set(), known);
+    store.getChannel(guildId, 'c1').updatedAt = EARLIER_STAMP;
+
+    // A different tail past the clamp lands on the same stored 'a long'.
+    const again = { channels: { c1: { purpose: 'a long story, retold', tone: 'chill' } } };
+    assert.equal(applyMemoryUpdate(store, guildId, again, cfg, new Set(), known).channels, 0);
+    assert.equal(applyMemoryUpdate(store, guildId, { channels: { c1: {} } }, cfg, new Set(), known).channels, 0, 'no field is no change');
+    assert.equal(store.getChannel(guildId, 'c1').updatedAt, EARLIER_STAMP);
+
+    const changed = { channels: { c1: { purpose: 'a long purpose text', tone: 'loud' } } };
+    assert.equal(applyMemoryUpdate(store, guildId, changed, cfg, new Set(), known).channels, 1);
+    assert.notEqual(store.getChannel(guildId, 'c1').updatedAt, EARLIER_STAMP);
+    assert.equal(store.getChannel(guildId, 'c1').tone, 'loud');
+  });
+});
+
+test('applyMemoryUpdate: a known channel with no stored entry yet counts only when a field says something', () => {
+  withStore((store) => {
+    const guildId = 'g1';
+    const cfg = { fieldChars: 400, maxDetails: 15, maxInjokes: 15, maxSelfFacts: 20 };
+    const known = { knownChannelIds: new Set(['c1', 'c2']) };
+
+    assert.equal(applyMemoryUpdate(store, guildId, { channels: { c1: { purpose: '', tone: '' } } }, cfg, new Set(), known).channels, 0);
+    assert.equal(store.getChannel(guildId, 'c1').updatedAt, null);
+    assert.equal(applyMemoryUpdate(store, guildId, { channels: { c2: { purpose: 'memes' } } }, cfg, new Set(), known).channels, 1);
+  });
+});
+
+test('applyMemoryUpdate: only the channels that actually changed are counted', () => {
+  withStore((store) => {
+    const guildId = 'g1';
+    store.touchChannel(guildId, 'c1', { name: 'general', category: null, topic: null }, Date.now());
+    store.touchChannel(guildId, 'c2', { name: 'random', category: null, topic: null }, Date.now());
+    store.updateChannel(guildId, 'c1', { purpose: 'chatter' });
+    const cfg = { fieldChars: 400, maxDetails: 15, maxInjokes: 15, maxSelfFacts: 20 };
+
+    const update = { channels: { c1: { purpose: 'chatter' }, c2: { purpose: 'memes' } } };
+    const result = applyMemoryUpdate(store, guildId, update, cfg, new Set(), { knownChannelIds: new Set(['c1', 'c2']) });
+
+    assert.equal(result.channels, 1);
+    assert.equal(store.getChannel(guildId, 'c2').purpose, 'memes');
+  });
+});
+
 // ---- applyMemoryUpdate ------------------------------------------------------
 
 test('applyMemoryUpdate: clamps string and detail fields to the configured limits', () => {
@@ -1448,6 +1501,27 @@ test('applyMemoryUpdate: empty guild and self updates are no-ops', () => {
     assert.equal(result.guild, false);
     assert.equal(result.self, false);
     assert.deepEqual(store.getGuild(guildId), before);
+  });
+});
+
+test('applyMemoryUpdate: a guild re-send identical after clamping is guild: false and leaves updatedAt alone', () => {
+  withStore((store) => {
+    const guildId = 'g1';
+    // fieldChars 4 -> patterns/starters clamp at 4 * 2 * 1.25 = 10 characters.
+    const cfg = { fieldChars: 4, maxDetails: 15, maxInjokes: 2, maxSelfFacts: 20 };
+    const first = { guild: { patterns: 'μιμίδια και γάτες', starters: 'καλημέρα', injokes: ['ο βράχος', 'café', 'extra'] } };
+    assert.equal(applyMemoryUpdate(store, guildId, first, cfg, new Set()).guild, true);
+    store.getGuild(guildId).updatedAt = EARLIER_STAMP;
+
+    // Different tails past the clamps, a third injoke past maxInjokes: the same stored values.
+    const again = { guild: { patterns: 'μιμίδια και σκύλοι', starters: 'καλημέρα', injokes: ['ο βράχος', 'café', 'other'] } };
+    assert.equal(applyMemoryUpdate(store, guildId, again, cfg, new Set()).guild, false);
+    assert.equal(store.getGuild(guildId).updatedAt, EARLIER_STAMP);
+
+    const changed = { guild: { starters: 'γεια σου' } };
+    assert.equal(applyMemoryUpdate(store, guildId, changed, cfg, new Set()).guild, true);
+    assert.notEqual(store.getGuild(guildId).updatedAt, EARLIER_STAMP);
+    assert.equal(store.getGuild(guildId).starters, 'γεια σου');
   });
 });
 
@@ -1764,6 +1838,23 @@ test('applyMemoryUpdate: lore never overwrites an existing owner entry', () => {
     applyMemoryUpdate(store, guildId, update, MEMORY_CFG, new Set(), { lore: LORE_CFG });
 
     assert.equal(store.getLore(guildId)[0].text, 'owner text');
+  });
+});
+
+test('applyMemoryUpdate: an identical lore re-send counts 0 and leaves updatedAt alone; a changed one counts', () => {
+  withStore((store) => {
+    const guildId = 'g1';
+    const later = { ...LORE_CFG, now: LORE_CFG.now + 3_600_000 };
+    const flood = { title: 'The Flood', keys: ['flood'], text: 'It flooded once.' };
+    const tale = { title: 'The Tale', keys: ['tale'], text: 'A tale was told.' };
+    assert.equal(applyMemoryUpdate(store, guildId, { lore: [flood, tale] }, MEMORY_CFG, new Set(), { lore: LORE_CFG }).lore, 2);
+
+    const result = applyMemoryUpdate(store, guildId, { lore: [flood, { ...tale, text: 'A tale was told twice.' }] }, MEMORY_CFG, new Set(), { lore: later });
+
+    assert.equal(result.lore, 1, 'only the changed entry');
+    const [storedFlood, storedTale] = store.getLore(guildId);
+    assert.equal(storedFlood.updatedAt, new Date(LORE_CFG.now).toISOString());
+    assert.equal(storedTale.updatedAt, new Date(later.now).toISOString());
   });
 });
 

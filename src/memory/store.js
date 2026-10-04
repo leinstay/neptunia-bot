@@ -154,6 +154,12 @@ function emptyGuild() {
   };
 }
 
+/** Whether merging `patch` over `target` would change anything stored, compared as it lands on
+ * disk (JSON): a write that changes nothing must not be stamped, so `updatedAt` stays honest. */
+function changesStored(target, patch) {
+  return Object.entries(patch).some(([key, value]) => JSON.stringify(target[key]) !== JSON.stringify(value));
+}
+
 export function emptyChannel(id) {
   return {
     id,
@@ -936,7 +942,8 @@ export function createStore({ dataDir }) {
     },
 
     /**
-     * Merge fields into the guild's memory and stamp `updatedAt`. `learned`/
+     * Merge fields into the guild's memory and stamp `updatedAt` -- only when
+     * something stored actually changes: an identical re-send is left alone. `learned`/
      * `learnedNextId` are never taken from here -- they only ever change
      * through `applyLearnedOps`, which merges incrementally instead of
      * overwriting wholesale (mirrors `updateUser`); `emojiUsage` likewise
@@ -948,6 +955,7 @@ export function createStore({ dataDir }) {
       const item = entry(guildFile(guildId), emptyGuild);
       normalizeGuild(item.value);
       const { learned, learnedNextId, emojiUsage, emojiBackfill, ownLines, worn, wornHistory, ...safeFields } = fields ?? {};
+      if (!changesStored(item.value, safeFields)) return item.value;
       Object.assign(item.value, safeFields, { updatedAt: new Date().toISOString() });
       item.dirty = true;
       return item.value;
@@ -1183,7 +1191,8 @@ export function createStore({ dataDir }) {
     /**
      * Merge analyzer-extracted fields into a channel entry. Only `purpose`,
      * `topics`, `tone` travel through here — everything else (counters,
-     * Discord facts) is stripped, mirroring `updateUser`.
+     * Discord facts) is stripped, mirroring `updateUser`. Stamps `updatedAt`
+     * only when one of them actually changes: an identical re-send is left alone.
      */
     updateChannel(guildId, channelId, fields) {
       const item = entry(channelFile(guildId, channelId), () => emptyChannel(String(channelId)));
@@ -1191,6 +1200,7 @@ export function createStore({ dataDir }) {
       for (const key of ['purpose', 'topics', 'tone']) {
         if (typeof fields?.[key] === 'string') patch[key] = fields[key];
       }
+      if (!changesStored(item.value, patch)) return item.value;
       Object.assign(item.value, patch, { updatedAt: new Date().toISOString() });
       item.dirty = true;
       return item.value;
@@ -1291,7 +1301,7 @@ export function createStore({ dataDir }) {
      * Merge `incoming` entries into the guild's lorebook via
      * src/memory/lore.js#upsertLore: an analyzer update never touches an
      * owner entry, an owner write always wins. Returns how many were
-     * inserted or updated.
+     * inserted or actually changed (an identical analyzer re-send is neither).
      */
     setLore(guildId, incoming, opts) {
       const item = entry(loreFile(guildId), () => []);
