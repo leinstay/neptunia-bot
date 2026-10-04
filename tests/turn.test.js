@@ -2183,6 +2183,40 @@ test('createTurnRunner: lookup -- none, an empty answer or a classifier error ->
   }
 });
 
+test('createTurnRunner: lookup -- classifier.search, when set, is the search classifier model; the role stays classifier.text', async () => {
+  const llm = lookupLlm('none');
+  await runLookupTurn({ llm, hot: lookupHot({}, {}, { classifier: { text: 'x/text', address: 'x/address', search: 'x/search' } }) });
+  assert.equal(llm.classifierCalls.length, 1);
+  assert.equal(llm.classifierCalls[0].options.model, 'x/search');
+  assert.equal(llm.classifierCalls[0].options.role, 'classifier.text', 'provider routing by role is unchanged');
+});
+
+test('createTurnRunner: lookup -- classifier.search null or empty falls back to classifier.text', async () => {
+  for (const search of [null, '']) {
+    const llm = lookupLlm('none');
+    await runLookupTurn({ llm, hot: lookupHot({}, {}, { classifier: { text: 'x/text', address: 'x/address', search } }) });
+    assert.equal(llm.classifierCalls[0].options.model, 'x/text', String(search));
+  }
+});
+
+test('createTurnRunner: lookup -- an empty or blank classifier answer is logged as a failure with its model and gives no query', async () => {
+  for (const answer of ['', ' \n  \t']) {
+    const lookup = fakeLookup();
+    const hot = lookupHot({}, {}, { classifier: { text: 'x/text', search: 'x/search' } });
+    const { logs, result: run } = await withCapturedLogs(() => runLookupTurn({ hot, llm: lookupLlm(answer), lookup }));
+    const failed = logs.find((l) => l.msg === 'lookup: classifier failed');
+    assert.ok(failed, JSON.stringify(answer));
+    assert.equal(failed.level, 'warn');
+    assert.equal(failed.channel, 'c1');
+    assert.equal(failed.reason, 'empty');
+    assert.equal(failed.model, 'x/search');
+    assert.equal(logs.some((l) => l.msg === 'lookup: classified'), false, 'a failure, not a parsed answer');
+    assert.equal(lookup.searchCalls.length, 0);
+    assert.equal(run.result.outcome, 'spoke');
+    assert.ok(!run.llm.turnCalls[0].messages[1].content.includes('\n<lookup>\n'));
+  }
+});
+
 test('createTurnRunner: lookup -- a search returning null leaves no <lookup> block', async () => {
   const lookup = fakeLookup({ searchResult: null });
   const { llm } = await runLookupTurn({ llm: lookupLlm('x y'), lookup });

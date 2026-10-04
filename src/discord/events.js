@@ -21,7 +21,7 @@ import {
   isFollowUpOpen,
   followUpPreFilter,
   parseFollowUpVerdict,
-  classifierTextModel,
+  classifierModelFor,
 } from '../behavior/mention.js';
 import { fill, formatTranscript, renderTranscript } from './format.js';
 import { topByRank } from '../memory/ranking.js';
@@ -565,6 +565,8 @@ export function createMessageHandler({
 
     let verdict = 'no';
     if (llm) {
+      // `classifier.address`, else `classifier.text`; the role (provider routing) stays the text classifier's.
+      const model = classifierModelFor(config, 'address');
       try {
         // A classifier call skipped by the daily cap (DailyCapError, thrown
         // synchronously before any fetch) lands here exactly like any other
@@ -575,14 +577,20 @@ export function createMessageHandler({
             { role: 'user', content: request.user },
           ],
           {
-            model: classifierTextModel(config),
+            model,
             role: 'classifier.text',
             maxOutputTokens: mentionCfg.followUpMaxOutputTokens,
             countAgainstDailyCap: true,
             skipCalibration: true,
           },
         );
-        verdict = parseFollowUpVerdict(completion.text);
+        if (String(completion.text ?? '').trim()) {
+          verdict = parseFollowUpVerdict(completion.text);
+        } else {
+          // Nothing at all (typically a reasoning model that spent its whole
+          // output cap thinking) is a failed call, not a silent "no".
+          log.warn('follow-up: classifier failed', { channel: channelId, reason: 'empty', model: model ?? null });
+        }
       } catch (err) {
         verdict = 'no';
         log.warn('follow-up: classifier failed', { channel: channelId, error: err });

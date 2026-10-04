@@ -7,7 +7,7 @@
 
 import { canAttach, fetchHistory, fetchNeighbors, withTextPreviews } from '../discord/collect.js';
 import { buildDrawPrompt, buildRequest, fillPromptTemplate } from './prompt.js';
-import { classifierTextModel } from './mention.js';
+import { classifierModelFor, classifierTextModel } from './mention.js';
 import { parseOutput } from '../llm/parse.js';
 import { DailyCapError, TokenLimitError, RETRY_STATUS, sleep } from '../llm/openrouter.js';
 import { ImageCapError, ImageGenError } from '../llm/images.js';
@@ -788,14 +788,17 @@ export function createTurnRunner({
    * The search on a question (features.webLookup, web.search.enabled): one
    * cheap classifier call (prompts.lookup, `{{name}}` = the persona's display
    * name, `{{today}}` = the injected clock's UTC date `YYYY-MM-DD`, on
-   * classifierTextModel, its answer capped at `web.search.classifierMaxOutputTokens`) reads
+   * `classifier.search`, else classifierTextModel (classifierModelFor), with the
+   * `classifier.text` role; its answer capped at `web.search.classifierMaxOutputTokens`) reads
    * the last `web.search.contextMessages` messages before the trigger (with the pictures' captions, the video
    * states and the read links this turn already has) and the trigger itself,
    * and answers `none` or a query (parseLookupQuery); a query goes to
    * lookup.search. One classifier call and at most one search per turn
    * (`web.search.maxPerTurn` below 1 turns the search off). Resolves the
    * search result or null. The query and the transcript are data: never
-   * logged; every early stop logs `lookup: skipped` with its reason.
+   * logged; every early stop logs `lookup: skipped` with its reason; an
+   * empty or blank answer is a failed call (`lookup: classifier failed`,
+   * `reason: 'empty'`), no query.
    */
   async function maybeLookup({ config, guildId, channelId, selfName, history, trigger, descriptions, videos, reads }) {
     const prompt = hot.prompts?.lookup;
@@ -822,6 +825,8 @@ export function createTurnRunner({
     });
     const user = `${transcriptBlock}<candidate>\n${trigger.authorName}: ${triggerText}\n</candidate>`;
 
+    // `classifier.search`, else `classifier.text`; the role (provider routing) stays the text classifier's.
+    const model = classifierModelFor(config, 'search');
     let completion;
     try {
       completion = await llm.complete(
@@ -830,7 +835,7 @@ export function createTurnRunner({
           { role: 'user', content: user },
         ],
         {
-          model: classifierTextModel(config),
+          model,
           role: 'classifier.text',
           maxOutputTokens: searchCfg.classifierMaxOutputTokens ?? 60,
           timeoutMs: config.llm?.timeoutMs,
@@ -840,6 +845,12 @@ export function createTurnRunner({
       );
     } catch (err) {
       log.warn('lookup: classifier failed', { channel: channelId, status: err.statusCode ?? null, name: err.name });
+      return null;
+    }
+    if (!String(completion.text ?? '').trim()) {
+      // Nothing at all (typically a reasoning model that spent its whole
+      // output cap thinking) is a failed call, not a silent "none".
+      log.warn('lookup: classifier failed', { channel: channelId, reason: 'empty', model: model ?? null });
       return null;
     }
     const { query, reason } = parseLookupQuery(completion.text);
