@@ -3,7 +3,10 @@
 // (`isDue`), a periodic tick (`tick`, called by index.js every 60s) asks the
 // LLM to merge what happened into per-user profiles, server-wide patterns and
 // facts the persona has claimed about itself (`run`, via `buildMemoryRequest`
-// + `applyMemoryUpdate`). Direct messages (private chat) go to a per-member
+// + `applyMemoryUpdate`). A batch writes to its own authors; members who did
+// not write in it are listed in a roster only so that an alias stated about
+// one of them can still be stored (aliases only, never another field).
+// Direct messages (private chat) go to a per-member
 // private buffer instead and are analyzed into that member's private layer
 // only (`runPrivate`/`analyzePrivate`, via `applyPrivateUpdate`): nothing said
 // in private ever reaches the public profile, the server notes or the lore.
@@ -22,8 +25,9 @@ import { MINUTE_MS } from '../time.js';
 import { emptyAffinity, roundScore, affinityBand, applyDelta } from './affinity.js';
 import { emptyChannel } from './store.js';
 import { keywordMatches } from './lore.js';
-import { normalizeInterests } from './interests.js';
+import { normalizeInterests, normalizeTopic } from './interests.js';
 import { normalizeDetails } from './details.js';
+import { applyAliasOps } from './aliases.js';
 import { emojiUsageOpts } from './emoji-usage.js';
 import { gifOpts } from './gifs.js';
 import { topByRank } from './ranking.js';
@@ -244,10 +248,65 @@ function existingDetailsView(details, maxDetails, halfLifeDays, nameOf) {
 /** The `<existing_profiles>` view of one person's aliases: a plain list of
  * names, top `maxAliases` by rank -- see docs/prompt-contract.md,
  * "Aliases". Alias names are never token-resolved: they are literal
- * nicknames, not free text that could name a member by id. */
+ * nicknames, not free text that could name a member by id. Stored JSON is
+ * hand-editable: an item without a string `name` is skipped, never thrown on
+ * (it would otherwise fail every batch whose roster or authors include its member). */
 function existingAliasesView(aliases, maxAliases, halfLifeDays) {
-  const list = Array.isArray(aliases) ? aliases : [];
+  const list = Array.isArray(aliases) ? aliases.filter((item) => typeof item?.name === 'string') : [];
   return topByRank(list, maxAliases, halfLifeDays).map((item) => item.name);
+}
+
+/**
+ * `memory.aliasRosterSize`: how many members the analyzer's `<known_members>` roster lists at
+ * most; 0 = no roster. Missing or not a non-negative integer -> 40, config.json's value. Read
+ * at each request (buildMemoryRequest, and analyze() before it lists the stored profiles).
+ * @param {object} [config]  The live config.
+ * @returns {number}
+ */
+function aliasRosterSize(config) {
+  const size = config?.memory?.aliasRosterSize;
+  return Number.isInteger(size) && size >= 0 ? size : 40;
+}
+
+/** The distinct non-self author ids of `messages`, as strings, in first-seen order. */
+function batchAuthorIds(messages) {
+  return [...new Set((messages ?? []).filter((m) => !m?.self).map((m) => String(m.authorId)))];
+}
+
+/**
+ * The `<known_members>` roster: stored members who are NOT among `authorIds`, most recently
+ * seen (`lastSeen`) first, at most `size` of them. Each entry is the member's id plus one
+ * `"<id>":{"names":[...],"aliases":[...]}` fragment holding exactly what `<existing_profiles>`
+ * shows for names and aliases -- every stored display name, newest first, and the
+ * `existingAliasesView` list (key omitted when empty) -- and nothing else. A profile with
+ * neither a name nor an alias gives the analyzer nothing to match and is left out.
+ * @param {object[]} [pool]  Stored profiles (store.listUserProfiles): `id`, `names`, `aliases`, `lastSeen` read.
+ * @param {Set<string>} authorIds
+ * @param {number} size
+ * @param {object} memoryCfg  `config.memory` (`maxAliases`, `aliasHalfLifeDays`).
+ * @returns {{ id: string, text: string }[]}
+ */
+function aliasRoster(pool, authorIds, size, memoryCfg) {
+  if (size <= 0 || !Array.isArray(pool)) return [];
+  const listed = new Set();
+  const members = [];
+  for (const profile of pool) {
+    const id = profile?.id === undefined || profile?.id === null ? '' : String(profile.id);
+    if (!id || authorIds.has(id) || listed.has(id)) continue;
+    listed.add(id);
+    const usable = (name) => typeof name === 'string' && name.trim() !== '';
+    const names = (Array.isArray(profile.names) ? profile.names : []).filter(usable);
+    const aliases = existingAliasesView(profile.aliases, memoryCfg.maxAliases, memoryCfg.aliasHalfLifeDays).filter(usable);
+    if (names.length === 0 && aliases.length === 0) continue;
+    const lastSeenMs = Date.parse(profile.lastSeen ?? '');
+    members.push({ id, names, aliases, lastSeenMs: Number.isFinite(lastSeenMs) ? lastSeenMs : -Infinity });
+  }
+  // Newest first; an unknown lastSeen last; ties by id, so the order never depends on the pool's.
+  members.sort((a, b) => b.lastSeenMs - a.lastSeenMs || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  return members.slice(0, size).map(({ id, names, aliases }) => {
+    const view = aliases.length > 0 ? { names, aliases } : { names };
+    return { id, text: `${JSON.stringify(id)}:${JSON.stringify(view)}` };
+  });
 }
 
 /** The `<existing_guild>` view of the things people taught the persona: only
@@ -392,11 +451,24 @@ export function characterText(prompts, selfName) {
  *   read-only into `<public_profile>` (src/behavior/prompt.js#renderProfile, `now` drives its
  *   unsure/stale marks), `<existing_channels>` is left out and every transcript line sits under
  *   `labels.memory.privateChannel` instead of a channel name. Omitted -> the guild request.
- * @returns {{ messages: object[], consumed: number, shown: number, trimmed: number }} `consumed`
- *   is always the whole batch; `shown` of it made it into `<new_messages>` (the newest lines),
- *   the other `trimmed` did not fit the token cap (`shown + trimmed === consumed`).
+ * @param {object[]} [input.rosterProfiles]  Every stored member profile of the guild
+ *   (store.listUserProfiles): the pool of the `<known_members>` roster, the members who did NOT
+ *   write in this batch (see `aliasRoster`), so the analyzer can give one of them an alias.
+ *   Omitted, a private batch, or `memory.aliasRosterSize` 0 -> no roster. The roster is its own
+ *   section, ranked before the transcript; never required, so it can never make the request
+ *   fail. Entries that do not fit are skipped in newest-first order (budget.js, `keep: 'first'`):
+ *   a long entry can be skipped while a shorter, older one still fits, so the roster sent may
+ *   have gaps anywhere, not only a cut tail.
+ * @returns {{ messages: object[], consumed: number, shown: number, trimmed: number, rosterIds: string[],
+ *   rosterCandidates: number, rosterTokens: number }}
+ *   `consumed` is always the whole batch; `shown` of it made it into `<new_messages>` (the newest
+ *   lines), the other `trimmed` did not fit the token cap (`shown + trimmed === consumed`).
+ *   `rosterIds`: the members the request's `<known_members>` actually carries, in the order
+ *   sent -- the only non-authors an answer may give an alias (applyMemoryUpdate's `aliasOnlyIds`).
+ *   `rosterCandidates`: the roster entries offered to the budget (after `memory.aliasRosterSize`),
+ *   sent or not; `rosterTokens`: the estimated tokens the sent entries took from the request.
  */
-export function buildMemoryRequest({ prompts, config, calibrator, profiles, guildMemory, channels, messages, selfName, loreEntries, descriptions, videos, reads, nameOf, privateChat }) {
+export function buildMemoryRequest({ prompts, config, calibrator, profiles, guildMemory, channels, messages, selfName, loreEntries, descriptions, videos, reads, nameOf, privateChat, rosterProfiles }) {
   const { timezone } = config.bot;
   const labels = requireLabels(prompts);
   if (privateChat && (!labels.memory?.privateNote || !labels.memory?.privateChannel)) {
@@ -515,26 +587,40 @@ export function buildMemoryRequest({ prompts, config, calibrator, profiles, guil
   const transcriptItems = formatTranscript(transcriptMessages, formatOptions);
   const transcriptTexts = transcriptItems.map((item) => item.text);
 
+  // The `<known_members>` roster, guild batches only: stored members who did not write in this
+  // batch, so an alias stated about one of them has an id to land on.
+  const rosterEntries = privateChat
+    ? []
+    : aliasRoster(rosterProfiles, new Set([...batchAuthorIds(messages), ...Object.keys(profiles ?? {})]), aliasRosterSize(config), config.memory ?? {});
+
   const cost = (text) => calibrator.apply(estimateTokens(text)) + 2;
   const limit = Math.floor(config.llm.maxRequestTokens * config.llm.safetyMargin);
 
-  const { kept } = fitSections(
+  const { kept, stats } = fitSections(
     [
       {
         name: 'fixed',
         required: true,
         items: [system, ...fixedBlocks].filter(Boolean),
       },
+      // Ranked before the transcript, so a heavy batch cannot starve it; not required, so it
+      // never raises a token-limit failure: an entry that does not fit is skipped and the next,
+      // older one is still tried, so what is sent may have gaps.
+      { name: 'roster', keep: 'first', items: rosterEntries.map((entry) => entry.text) },
       { name: 'transcript', keep: 'newest', items: transcriptTexts },
     ],
     limit,
     cost,
   );
 
+  const keptRosterTexts = new Set(kept.roster);
+  const keptRoster = rosterEntries.filter((entry) => keptRosterTexts.has(entry.text));
+  const rosterBlock = keptRoster.length > 0 ? block('known_members', `{${keptRoster.map((entry) => entry.text).join(',')}}`) : '';
+
   const keptTranscriptItems = transcriptItems.slice(transcriptItems.length - kept.transcript.length);
   const newMessagesBlock = block('new_messages', renderTranscript(keptTranscriptItems, timezone, labels));
 
-  const user = [...fixedBlocks, newMessagesBlock].filter(Boolean).join('\n\n');
+  const user = [...fixedBlocks, rosterBlock, newMessagesBlock].filter(Boolean).join('\n\n');
 
   return {
     messages: [
@@ -549,6 +635,11 @@ export function buildMemoryRequest({ prompts, config, calibrator, profiles, guil
     // actually saw, and how many the cap cut off the old end unseen.
     shown: keptTranscriptItems.length,
     trimmed: messages.length - keptTranscriptItems.length,
+    rosterIds: keptRoster.map((entry) => entry.id),
+    // How many the roster offered and what the sent ones cost: whether `trimmed` grew because
+    // of the roster, and how often the roster itself was cut.
+    rosterCandidates: rosterEntries.length,
+    rosterTokens: stats.roster?.used ?? 0,
   };
 }
 
@@ -770,10 +861,72 @@ function episodeOptions(episodes, cfg) {
   };
 }
 
+// An alias that names a member by id instead of being a nickname: a `<@id>` token or the
+// `Name (id:...)` reference form (see src/memory/mentions.js).
+const ALIAS_REF_RE = /<@|\(id:/;
+
+/** `name` lower-cased, with spaces and punctuation gone (letters, their marks and digits stay):
+ * how a proposed alias is compared with the member's own display names, so `nick 42` matches
+ * the display name `Nick-42%`. */
+function looseNameKey(name) {
+  return String(name ?? '')
+    .toLowerCase()
+    .replace(/[^\p{L}\p{M}\p{N}]/gu, '');
+}
+
+/** The identity the store keeps `name` under as an alias, for comparison only: clamped the
+ * store's own way (worked out through applyAliasOps, as `/nep alias add` does, so the clamp is
+ * never copied here) and case-insensitive. '' for a name the store would not take. */
+function aliasIdentity(name) {
+  return typeof name === 'string' ? normalizeTopic(applyAliasOps([], { add: [name] }, [])[0]?.name ?? '') : '';
+}
+
+/**
+ * One member's `users.<id>.aliases` answer as store ops, guarded for every member: an alias
+ * that is not a string, holds a `<@` token or an `(id:` marker is dropped, and so is one equal
+ * to any of the member's stored display names once case, spaces and punctuation are ignored.
+ * The ops object (`{ add, remove }`) passes on with both of its creating lists (`add`,
+ * `update`) filtered. A bare list -- the shape of the input view -- is read as an add of the
+ * names NOT stored yet (compared by the identity the store keeps, clamp included): echoing the
+ * stored list back is never a sighting. Untrusted input: any shape -> a result, never a throw.
+ * @param {unknown} raw
+ * @param {object|null} profile  The member's stored profile (`names`, `aliases` read).
+ * @returns {{ ops: object|null, dropped: number }}  `ops` for store.applyProfileOps, null when
+ *   there is nothing to hand over; `dropped`: the proposed items the guards held back (in a bare
+ *   list also a name already stored or listed twice).
+ */
+function guardedAliasOps(raw, profile) {
+  const ownNames = new Set((Array.isArray(profile?.names) ? profile.names : []).map(looseNameKey).filter(Boolean));
+  const acceptable = (name) => typeof name === 'string' && !ALIAS_REF_RE.test(name) && !ownNames.has(looseNameKey(name));
+  if (Array.isArray(raw)) {
+    const known = new Set((Array.isArray(profile?.aliases) ? profile.aliases : []).map((item) => aliasIdentity(item?.name)));
+    const add = [];
+    for (const name of raw) {
+      const key = acceptable(name) ? aliasIdentity(name) : '';
+      if (!key || known.has(key)) continue;
+      known.add(key);
+      add.push(name);
+    }
+    return { ops: add.length > 0 ? { add } : null, dropped: raw.length - add.length };
+  }
+  if (!isPlainObject(raw)) return { ops: null, dropped: 0 };
+  const ops = { ...raw };
+  let dropped = 0;
+  for (const key of ['add', 'update']) {
+    if (!Array.isArray(ops[key])) continue;
+    const kept = ops[key].filter(acceptable);
+    dropped += ops[key].length - kept.length;
+    ops[key] = kept;
+  }
+  return { ops, dropped };
+}
+
 /**
  * Validate and store the model's memory-update JSON. Never throws on garbage
- * input, never accepts a user id outside `knownUserIds`, never drops a field
- * that was not part of the update.
+ * input, never drops a field that was not part of the update. A user id is
+ * taken in full only when it is in `knownUserIds` (the batch's authors); one
+ * in `options.aliasOnlyIds` instead gets its `aliases` and nothing else, and
+ * only when it already has a stored profile. Every other id is dropped.
  *
  * @param {object} store
  * @param {string} guildId
@@ -783,6 +936,12 @@ function episodeOptions(episodes, cfg) {
  * @param {object} [options]  Everything else, each optional:
  * @param {Set<string>} [options.knownChannelIds]  Channel ids present in the batch; a channel outside
  *   this set is rejected, mirroring `knownUserIds`. Omitted -> no channel is accepted.
+ * @param {Set<string>} [options.aliasOnlyIds]  The `<known_members>` roster ids the request carried
+ *   (buildMemoryRequest's `rosterIds`): members who wrote nothing in the batch. For such an id
+ *   (not an author) with a stored profile, ONLY `aliases` is applied (dated like any member with
+ *   no line in the batch: `timing.seenAt`); every other key is dropped and counted in
+ *   `droppedFields`; a profile is never created for it. Omitted (the warmup and the portrait
+ *   refresh) -> only `knownUserIds` are written, as before.
  * @param {{ enabled: boolean, maxDeltaPerUpdate: number, historySize: number, damping?: boolean, dampingPower?: number, now?: number }} [options.relationships]
  *   Only when `enabled`, `raw.affinity` (a `{ delta, reason }` change) is folded into the
  *   stored score via `store.adjustAffinity`. Absent/disabled -> affinity is ignored entirely.
@@ -802,10 +961,17 @@ function episodeOptions(episodes, cfg) {
  *   recognises a name even for someone whose stored profile has not caught up yet. Omitted ->
  *   only the stored profile's own `names` are known.
  * @returns {{ users: number, guild: boolean, self: boolean, affinity: number, relationships: number, channels: number, episodes: number, lore: number,
- *   learned: number, interestsChanged: number, portraitRequests: { userId: string, reason: string }[] }}
- *   `guild`: patterns/starters/injokes changed. `channels`/`lore`: entries whose stored values changed
+ *   learned: number, interestsChanged: number, aliasesChanged: number, aliasOnly: number, aliasesDropped: number,
+ *   droppedUsers: number, droppedFields: number, portraitRequests: { userId: string, reason: string }[] }}
+ *   `users`: authors written. `guild`: patterns/starters/injokes changed. `channels`/`lore`: entries whose stored values changed
  *   (an identical re-send, compared after clamping, counts 0). `learned`: how many valid `guild.learned` add ops were
  *   handed to `store.applyLearnedOps` (a re-add of a stored item counts too -- it is a sighting).
+ *   `aliasesChanged`: members (authors and roster) whose stored alias list really changed; `aliasOnly`: roster
+ *   members among them. `aliasesDropped`: proposed aliases the guards held back (a member reference, the member's
+ *   own display name, a non-string; in a bare list also a name already stored), authors and roster members alike --
+ *   a proposal that was dropped, told apart from none. `droppedUsers`: entries for an id that is neither an author
+ *   nor a roster member with a stored profile. `droppedFields`: non-empty keys other than `aliases` dropped from
+ *   roster members' entries.
  */
 export function applyMemoryUpdate(
   store,
@@ -813,7 +979,7 @@ export function applyMemoryUpdate(
   update,
   cfg,
   knownUserIds,
-  { knownChannelIds = new Set(), relationships, episodes, lore, timing, batchAuthorNames } = {},
+  { knownChannelIds = new Set(), aliasOnlyIds = new Set(), relationships, episodes, lore, timing, batchAuthorNames } = {},
 ) {
   const result = {
     users: 0,
@@ -826,6 +992,11 @@ export function applyMemoryUpdate(
     lore: 0,
     learned: 0,
     interestsChanged: 0,
+    aliasesChanged: 0,
+    aliasOnly: 0,
+    aliasesDropped: 0,
+    droppedUsers: 0,
+    droppedFields: 0,
     portraitRequests: [],
   };
   if (!update || typeof update !== 'object' || Array.isArray(update)) return result;
@@ -834,8 +1005,33 @@ export function applyMemoryUpdate(
 
   if (update.users && typeof update.users === 'object' && !Array.isArray(update.users)) {
     for (const [userId, raw] of Object.entries(update.users)) {
-      if (!knownUserIds.has(String(userId))) continue;
+      const id = String(userId);
+      const author = knownUserIds.has(id);
+      // A member the request showed only in its `<known_members>` roster: aliases only, and
+      // only onto a profile that already exists -- never a new one.
+      const aliasOnly = !author && aliasOnlyIds.has(id) && store.getUser(guildId, id) != null;
+      if (!author && !aliasOnly) {
+        result.droppedUsers += 1;
+        continue;
+      }
       if (!raw || typeof raw !== 'object' || Array.isArray(raw)) continue;
+
+      const profileOpsNow = relationships?.now ?? episodes?.now ?? Date.now();
+      const seenAt = timing?.seenAtByUser?.get(id) ?? timing?.seenAt ?? profileOpsNow;
+      const beforeAliases = JSON.stringify(store.getUser(guildId, id)?.aliases ?? []);
+      const { ops: aliasOps, dropped: aliasesDropped } = guardedAliasOps(raw.aliases, store.getUser(guildId, id));
+      result.aliasesDropped += aliasesDropped;
+
+      if (aliasOnly) {
+        result.droppedFields += Object.entries(raw).filter(([key, value]) => key !== 'aliases' && hasContent(value)).length;
+        if (!hasContent(aliasOps)) continue;
+        store.applyProfileOps(guildId, id, { aliases: aliasOps }, profileOpsOptions(cfg, profileOpsNow, seenAt));
+        if (JSON.stringify(store.getUser(guildId, id)?.aliases ?? []) !== beforeAliases) {
+          result.aliasesChanged += 1;
+          result.aliasOnly += 1;
+        }
+        continue;
+      }
 
       // Incremental profile ops (see docs/prompt-contract.md, "The
       // analyzer"): prose fields pass through as-is, store.applyProfileOps
@@ -864,14 +1060,10 @@ export function applyMemoryUpdate(
       tokenizeItemOps(raw, ops);
 
       // Aliases are literal nicknames, never a `<@id>` reference to someone
-      // else -- passed through untouched, see docs/prompt-contract.md,
-      // "Aliases".
-      if (raw.aliases && typeof raw.aliases === 'object' && !Array.isArray(raw.aliases)) {
-        ops.aliases = raw.aliases;
-      }
+      // else -- never tokenized, only guarded (`guardedAliasOps`), see
+      // docs/prompt-contract.md, "Aliases".
+      if (aliasOps) ops.aliases = aliasOps;
 
-      const profileOpsNow = relationships?.now ?? episodes?.now ?? Date.now();
-      const seenAt = timing?.seenAtByUser?.get(String(userId)) ?? timing?.seenAt ?? profileOpsNow;
       const beforeInterests = JSON.stringify(store.getUser(guildId, userId)?.interests ?? []);
       const beforeRelationship = store.getUser(guildId, userId)?.relationship ?? '';
 
@@ -885,6 +1077,7 @@ export function applyMemoryUpdate(
 
       const afterInterests = JSON.stringify(store.getUser(guildId, userId)?.interests ?? []);
       if (afterInterests !== beforeInterests) result.interestsChanged += 1;
+      if (JSON.stringify(store.getUser(guildId, userId)?.aliases ?? []) !== beforeAliases) result.aliasesChanged += 1;
       // Diagnostic: how many members had their stored relationship text rewritten.
       if ((store.getUser(guildId, userId)?.relationship ?? '') !== beforeRelationship) result.relationships += 1;
 
@@ -1137,7 +1330,7 @@ function slimMedia(part) {
  * @returns {{ authorIds: string[], profiles: object, channelIds: string[], channels: object }}
  */
 export function batchContext(messages, getUser, getChannel) {
-  const authorIds = [...new Set(messages.filter((m) => !m.self).map((m) => m.authorId))];
+  const authorIds = batchAuthorIds(messages);
   const profiles = {};
   for (const id of authorIds) {
     const profile = getUser(id);
@@ -1294,12 +1487,16 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
    * `usage: null, estimated: 0`: nothing was spent.
    *
    * A success also carries `shown`/`trimmed`: how many of `messages` the
-   * request's transcript held and how many the token cap cut (see
-   * `buildMemoryRequest`).
+   * request's transcript held and how many the token cap cut, and `roster`:
+   * how many members the request's `<known_members>` carried, i.e. members
+   * who did not write in the batch (see `buildMemoryRequest`), of
+   * `rosterCandidates` offered, taking `rosterTokens`. Of the non-authors,
+   * only those sent may get anything from the answer: an alias.
    *
    * @param {string} guildId
    * @param {object[]} messages  Slim messages (oldest first) to summarize; NOT read from or removed off any buffer.
-   * @returns {Promise<{ ok: boolean, usage: object|null, estimated: number, result: object|null, shown?: number, trimmed?: number, error?: Error }>}
+   * @returns {Promise<{ ok: boolean, usage: object|null, estimated: number, result: object|null, shown?: number, trimmed?: number,
+   *   roster?: number, rosterCandidates?: number, rosterTokens?: number, error?: Error }>}
    */
   async function analyze(guildId, messages) {
     let context;
@@ -1308,9 +1505,20 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
       messages,
       () => {
         context = collectContext(guildId, messages);
-        return { profiles: context.profiles, channels: context.channels };
+        // The roster's pool: every stored profile, listed only while the roster is on. A stored
+        // profile that cannot be read (hand-edited while paused) costs this batch its roster,
+        // never the batch: this runs outside analyzeBatch's try.
+        let rosterProfiles = [];
+        if (aliasRosterSize(hot.config) > 0) {
+          try {
+            rosterProfiles = store.listUserProfiles(guildId);
+          } catch (err) {
+            log.warn('memory: alias roster left out', { guildId, reason: 'store-error', error: errorNameOf(err) });
+          }
+        }
+        return { profiles: context.profiles, channels: context.channels, rosterProfiles };
       },
-      (update, { relationships, episodes, lore }) => {
+      (update, { relationships, episodes, lore }, { rosterIds }) => {
         const cfg = hot.config.memory;
         const knownUserIds = new Set(context.authorIds.map(String));
         const knownChannelIds = new Set(context.channelIds.map(String));
@@ -1322,6 +1530,7 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
           knownUserIds,
           {
             knownChannelIds,
+            aliasOnlyIds: new Set(rosterIds),
             relationships,
             episodes,
             lore,
@@ -1351,7 +1560,9 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
    * @param {string} guildId
    * @param {string} userId  The DM partner.
    * @param {object[]} messages  Slim buffered direct messages, oldest first.
-   * @returns {Promise<{ ok: boolean, usage: object|null, estimated: number, result: object|null, shown?: number, trimmed?: number, error?: Error }>}
+   * @returns {Promise<{ ok: boolean, usage: object|null, estimated: number, result: object|null, shown?: number, trimmed?: number,
+   *   roster?: number, rosterCandidates?: number, rosterTokens?: number, error?: Error }>}
+   *   The `roster*` counts are always 0 here: a private batch carries no `<known_members>`.
    */
   async function analyzePrivate(guildId, userId, messages) {
     const id = String(userId);
@@ -1466,8 +1677,9 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
    * Build, send, parse, apply: the body shared by `analyze()` and
    * `analyzePrivate()`. `requestInput()` (called only once a memory prompt is
    * configured) returns the mode-specific `buildMemoryRequest` fields;
-   * `applyUpdate(update, switches)` stores the parsed answer and returns the
-   * result to report. A failure's `reason`: 'no-prompt', 'token-limit',
+   * `applyUpdate(update, switches, { rosterIds })` stores the parsed answer and
+   * returns the result to report (`rosterIds`: the roster members the request
+   * carried, see `buildMemoryRequest`). A failure's `reason`: 'no-prompt', 'token-limit',
    * 'llm-error' (nothing billed), 'truncated', 'bad-json' (the answer did not
    * parse) or 'apply-error' (it parsed, the store refused it).
    */
@@ -1483,9 +1695,10 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
     const { descriptions, videos, reads } = cachedMedia(guildId, messages);
 
     let completion;
-    let fit; // the request's { shown, trimmed }, reported with a success
+    let fit; // the request's { shown, trimmed, roster, rosterCandidates, rosterTokens }, reported with a success
+    let rosterIds = []; // the roster members the request carried: the only non-authors an answer may give an alias
     try {
-      const { messages: llmMessages, shown, trimmed } = buildMemoryRequest({
+      const { messages: llmMessages, shown, trimmed, rosterIds: sentRoster, rosterCandidates, rosterTokens } = buildMemoryRequest({
         prompts: hot.prompts,
         config: hot.config,
         calibrator,
@@ -1499,7 +1712,8 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
         nameOf: storeNameOf(store, guildId),
         ...input,
       });
-      fit = { shown, trimmed };
+      fit = { shown, trimmed, roster: sentRoster.length, rosterCandidates, rosterTokens };
+      rosterIds = sentRoster;
 
       completion = await llm.complete(llmMessages, {
         model: cfg.model || undefined,
@@ -1541,7 +1755,7 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
     }
 
     try {
-      const result = applyUpdate(update, applySwitches());
+      const result = applyUpdate(update, applySwitches(), { rosterIds });
       return { ok: true, usage, estimated, result, ...fit };
     } catch (err) {
       // A parsed answer the store failed to take: not the answer's size, so the batch is not
@@ -1631,6 +1845,9 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
           consumed: messages.length,
           shown: outcome.shown,
           trimmed: outcome.trimmed,
+          roster: outcome.roster,
+          rosterCandidates: outcome.rosterCandidates,
+          rosterTokens: outcome.rosterTokens,
           ...counts,
           portraitRequests: portraitRequests.length,
           emojiUsage,

@@ -1375,6 +1375,7 @@ test('applyMemoryUpdate: rejects user ids outside knownUserIds', () => {
     const result = applyMemoryUpdate(store, guildId, { users: { 999: { character: 'x' } } }, cfg, new Set(['1']));
 
     assert.equal(result.users, 0);
+    assert.equal(result.droppedUsers, 1);
     assert.equal(store.getUser(guildId, '999'), null);
   });
 });
@@ -1544,6 +1545,11 @@ test('applyMemoryUpdate: garbage input changes nothing and never throws', () => 
         lore: 0,
         learned: 0,
         interestsChanged: 0,
+        aliasesChanged: 0,
+        aliasOnly: 0,
+        aliasesDropped: 0,
+        droppedUsers: 0,
+        droppedFields: 0,
         portraitRequests: [],
       });
     }
@@ -3766,6 +3772,663 @@ test('applyMemoryUpdate: threads maxAliases/maxAliasesStored/aliasHalfLifeDays i
   });
 });
 
+// ---- the alias roster (<known_members>) ------------------------------------------
+// A guild batch also lists members with a stored profile who did NOT write in it, so an
+// alias stated about one of them has an id to land on; such a member gets aliases only.
+
+const ZOE = '223456789012345678';
+const BRAN = '323456789012345678';
+const CELIA = '423456789012345678';
+
+/** A stored profile the way store.listUserProfiles hands it over: the roster pool. */
+function poolProfile(id, names, lastSeen, aliases = []) {
+  return { id, names, lastSeen, aliases, interests: [], details: [] };
+}
+
+/** One guild request with `pool` as the roster pool; `memory`/`llm` override makeConfig's own. */
+function rosterRequest(pool, { memory = {}, llm = {}, messages, profiles = {}, privateChat } = {}) {
+  const base = makeConfig();
+  return buildMemoryRequest({
+    prompts: { memory: 'x', labels },
+    config: makeConfig({ memory: { ...base.memory, ...memory }, llm: { ...base.llm, ...llm } }),
+    calibrator: createCalibrator(),
+    profiles,
+    guildMemory: {},
+    messages: messages ?? [slimMessage({ id: 'm1', authorId: '1', authorName: 'Aria', ts: Date.UTC(2026, 0, 9, 12) })],
+    selfName: 'Nept',
+    rosterProfiles: pool,
+    privateChat,
+  });
+}
+
+/** The parsed `<known_members>` block of a request, or null when it is absent. */
+function rosterOf(request) {
+  const body = blockBody(request.messages[1].content, 'known_members');
+  return body === null ? null : JSON.parse(body);
+}
+
+test('buildMemoryRequest: the alias roster lists non-author members with every stored display name and their shown aliases, newest lastSeen first', () => {
+  const pool = [
+    poolProfile('1', ['Aria'], '2026-01-09T12:00:00.000Z'),
+    poolProfile(CELIA, ['Célia'], null),
+    poolProfile(ZOE, ['Ζωή', 'Zoé-42%', 'zoé 42'], '2026-01-03T00:00:00.000Z', [
+      { name: 'Ζωίτσα', weight: 2, firstSeen: '2026-01-01T00:00:00.000Z', lastSeen: '2026-01-02T00:00:00.000Z' },
+      { name: 'Zo', weight: 1, firstSeen: '2020-01-01T00:00:00.000Z', lastSeen: '2020-01-01T00:00:00.000Z' },
+    ]),
+    poolProfile(BRAN, ['Βράνος'], '2026-01-05T00:00:00.000Z'),
+  ];
+
+  const request = rosterRequest(pool, { memory: { maxAliases: 1 } });
+
+  assert.deepEqual(request.rosterIds, [BRAN, ZOE, CELIA], 'newest lastSeen first, an unknown lastSeen last');
+  const roster = rosterOf(request);
+  assert.deepEqual(roster, {
+    [BRAN]: { names: ['Βράνος'] },
+    [ZOE]: { names: ['Ζωή', 'Zoé-42%', 'zoé 42'], aliases: ['Ζωίτσα'] },
+    [CELIA]: { names: ['Célia'] },
+  });
+  assert.ok(!('1' in roster), 'the batch author is not in the roster');
+  const body = blockBody(request.messages[1].content, 'known_members');
+  assert.ok(body.indexOf(BRAN) < body.indexOf(ZOE) && body.indexOf(ZOE) < body.indexOf(CELIA), 'rendered in the same order');
+});
+
+test('buildMemoryRequest: a batch author never appears in the alias roster', () => {
+  const messages = [
+    slimMessage({ id: 'm1', authorId: ZOE, authorName: 'Ζωή', ts: Date.UTC(2026, 0, 9, 12) }),
+    slimMessage({ id: 'm2', authorId: 'self1', authorName: 'Nept', self: true, ts: Date.UTC(2026, 0, 9, 12, 1) }),
+  ];
+  const pool = [poolProfile(ZOE, ['Ζωή'], '2026-01-09T12:00:00.000Z'), poolProfile(BRAN, ['Βράνος'], '2026-01-01T00:00:00.000Z')];
+
+  // The author set comes from the messages themselves: no `profiles` entry is needed to exclude Zoé.
+  const request = rosterRequest(pool, { messages, profiles: {} });
+
+  assert.deepEqual(request.rosterIds, [BRAN]);
+  assert.deepEqual(Object.keys(rosterOf(request)), [BRAN]);
+});
+
+test('buildMemoryRequest: memory.aliasRosterSize caps the roster at the most recently seen members; 0 sends no roster', () => {
+  const pool = [poolProfile(ZOE, ['Ζωή'], '2026-01-03T00:00:00.000Z'), poolProfile(BRAN, ['Βράνος'], '2026-01-05T00:00:00.000Z')];
+
+  assert.deepEqual(rosterRequest(pool, { memory: { aliasRosterSize: 1 } }).rosterIds, [BRAN]);
+
+  const off = rosterRequest(pool, { memory: { aliasRosterSize: 0 } });
+  assert.deepEqual(off.rosterIds, []);
+  assert.equal(rosterOf(off), null);
+  assert.ok(!off.messages[1].content.includes('Βράνος'));
+});
+
+test('buildMemoryRequest: memory.aliasRosterSize missing falls back to 40, config.json\'s value', () => {
+  const shipped = JSON.parse(fs.readFileSync(new URL('../config.json', import.meta.url), 'utf8'));
+  assert.equal(shipped.memory.aliasRosterSize, 40);
+  const pool = Array.from({ length: 45 }, (_, i) =>
+    poolProfile(`5234567890123456${String(i).padStart(2, '0')}`, [`Μέλος ${i}`], new Date(Date.UTC(2026, 0, 1) + i * 60_000).toISOString()),
+  );
+
+  const request = rosterRequest(pool); // makeConfig().memory carries no aliasRosterSize
+
+  assert.equal(request.rosterIds.length, shipped.memory.aliasRosterSize);
+});
+
+test('buildMemoryRequest: a private batch carries no alias roster', () => {
+  const pool = [poolProfile(BRAN, ['Βράνος'], '2026-01-05T00:00:00.000Z')];
+  const publicProfile = { id: '1', names: ['Aria'], interests: [], details: [], aliases: [] };
+
+  const request = rosterRequest(pool, { privateChat: { publicProfile, now: Date.UTC(2026, 0, 9) } });
+
+  assert.deepEqual(request.rosterIds, []);
+  assert.equal(rosterOf(request), null);
+  assert.ok(!request.messages[1].content.includes('Βράνος'));
+});
+
+test('buildMemoryRequest: the alias roster is fitted before the transcript, entries that do not fit are skipped, never a SectionsTooLargeError, and the kept ids are returned', () => {
+  const calibrator = createCalibrator();
+  const cost = (text) => calibrator.apply(estimateTokens(text)) + 2;
+  const fixedCost =
+    cost('x') +
+    cost(`<existing_profiles>\n${JSON.stringify({})}\n</existing_profiles>`) +
+    cost(`<existing_guild>\n${JSON.stringify({ patterns: '', starters: '', injokes: [], self: [], learned: [] })}\n</existing_guild>`) +
+    cost(`<existing_channels>\n${JSON.stringify({})}\n</existing_channels>`);
+  const base = Date.UTC(2026, 0, 9, 12);
+  const messages = [0, 1, 2].map((i) =>
+    slimMessage({ id: `m${i}`, authorId: '1', authorName: 'Aria', content: `message number ${i} ${'word '.repeat(30)}`, ts: base + i * 60_000 }),
+  );
+  const lineTexts = formatTranscript(messages, { timezone: 'UTC', gapMinutes: 20, maxChars: 800, selfName: 'Nept', mode: 'memory', labels }).map(
+    (item) => item.text,
+  );
+  const room = 2 * cost(lineTexts.at(-1)); // two transcript lines' worth, a few roster entries, far from all 30
+  const pool = Array.from({ length: 30 }, (_, i) =>
+    poolProfile(`6234567890123456${String(i).padStart(2, '0')}`, [`Μέλος ${String(i).padStart(2, '0')}`], new Date(base - i * 60_000).toISOString()),
+  );
+  const llm = { maxRequestTokens: fixedCost + room, safetyMargin: 1 };
+
+  const without = rosterRequest([], { messages, llm });
+  const withRoster = rosterRequest(pool, { messages, llm });
+
+  assert.ok(without.shown >= 1);
+  assert.ok(withRoster.rosterIds.length > 0 && withRoster.rosterIds.length < pool.length, 'trimmed, not dropped whole');
+  assert.deepEqual(
+    withRoster.rosterIds,
+    pool.slice(0, withRoster.rosterIds.length).map((profile) => profile.id),
+    'entries of one size: the most recently seen members survive',
+  );
+  assert.equal(withRoster.rosterCandidates, pool.length, 'every candidate is counted, sent or not');
+  assert.deepEqual(Object.keys(rosterOf(withRoster)), withRoster.rosterIds, 'the ids returned are exactly the ones sent');
+  assert.ok(withRoster.shown < without.shown, 'the roster takes its share before the transcript');
+
+  // Room for the required sections only: the roster is dropped, the request still builds.
+  const bare = rosterRequest(pool, { messages, llm: { maxRequestTokens: fixedCost, safetyMargin: 1 } });
+  assert.deepEqual(bare.rosterIds, []);
+  assert.equal(rosterOf(bare), null);
+  assert.equal(bare.consumed, 3);
+});
+
+test('buildMemoryRequest: a roster entry that does not fit is skipped while a shorter, older one is still sent, and the roster counts candidates and tokens', () => {
+  const calibrator = createCalibrator();
+  const cost = (text) => calibrator.apply(estimateTokens(text)) + 2;
+  const fixedCost =
+    cost('x') +
+    cost(`<existing_profiles>\n${JSON.stringify({})}\n</existing_profiles>`) +
+    cost(`<existing_guild>\n${JSON.stringify({ patterns: '', starters: '', injokes: [], self: [], learned: [] })}\n</existing_guild>`) +
+    cost(`<existing_channels>\n${JSON.stringify({})}\n</existing_channels>`);
+  const entry = (id, names) => `${JSON.stringify(id)}:${JSON.stringify({ names })}`;
+  const longNames = Array.from({ length: 5 }, (_, i) => `Βράνος ο πολύ μακρύς ${i} ${'λ'.repeat(10)}`);
+  const pool = [
+    poolProfile(ZOE, ['Ζωή'], '2026-01-09T00:00:00.000Z'),
+    poolProfile(BRAN, longNames, '2026-01-08T00:00:00.000Z'),
+    poolProfile(CELIA, ['Célia'], '2026-01-07T00:00:00.000Z'),
+  ];
+  const sentCost = cost(entry(ZOE, ['Ζωή'])) + cost(entry(CELIA, ['Célia']));
+  assert.ok(cost(entry(BRAN, longNames)) > cost(entry(CELIA, ['Célia'])) + 1, 'the middle entry is the heavy one');
+
+  const request = rosterRequest(pool, { llm: { maxRequestTokens: fixedCost + sentCost + 1, safetyMargin: 1 } });
+
+  assert.deepEqual(request.rosterIds, [ZOE, CELIA], 'skipped, not cut at the first misfit: the roster may have gaps');
+  assert.deepEqual(Object.keys(rosterOf(request)), [ZOE, CELIA]);
+  assert.equal(request.rosterCandidates, 3, 'every candidate, sent or not');
+  assert.equal(request.rosterTokens, sentCost, 'the tokens the sent entries took');
+
+  const none = rosterRequest([]);
+  assert.equal(none.rosterCandidates, 0);
+  assert.equal(none.rosterTokens, 0);
+});
+
+test('buildMemoryRequest: memory.aliasRosterSize negative, fractional or not a number falls back to 40', () => {
+  const pool = Array.from({ length: 45 }, (_, i) =>
+    poolProfile(`5234567890123456${String(i).padStart(2, '0')}`, [`Μέλος ${i}`], new Date(Date.UTC(2026, 0, 1) + i * 60_000).toISOString()),
+  );
+
+  for (const aliasRosterSize of [-1, 1.5, '10']) {
+    assert.equal(rosterRequest(pool, { memory: { aliasRosterSize } }).rosterIds.length, 40, `aliasRosterSize ${JSON.stringify(aliasRosterSize)}`);
+  }
+});
+
+test('buildMemoryRequest: the roster leaves out a profile with neither a name nor an alias, lists a duplicate id once and skips malformed alias items', () => {
+  const alias = (name, day) => ({ name, weight: 1, firstSeen: `2026-01-0${day}T00:00:00.000Z`, lastSeen: `2026-01-0${day}T00:00:00.000Z` });
+  const pool = [
+    null,
+    poolProfile(ZOE, ['Ζωή'], '2026-01-05T00:00:00.000Z', [null, { name: 7 }, alias('Ζωίτσα', 4)]),
+    poolProfile(BRAN, [], '2026-01-09T00:00:00.000Z'), // nothing the analyzer could match
+    poolProfile(CELIA, ['', '  '], '2026-01-08T00:00:00.000Z', [null]), // blank names, no usable alias
+    poolProfile(ZOE, ['Ζωούλα'], '2026-01-09T00:00:00.000Z'), // the same id again
+  ];
+  // A malformed stored alias of a batch author is skipped in <existing_profiles> the same way.
+  const profiles = { 1: { names: ['Aria'], aliases: [null, alias('Αρι', 3)] } };
+
+  const request = rosterRequest(pool, { profiles });
+
+  assert.deepEqual(request.rosterIds, [ZOE]);
+  assert.deepEqual(rosterOf(request), { [ZOE]: { names: ['Ζωή'], aliases: ['Ζωίτσα'] } }, 'the first entry for an id is the one listed');
+  assert.equal(request.rosterCandidates, 1);
+  assert.deepEqual(JSON.parse(blockBody(request.messages[1].content, 'existing_profiles'))[1].aliases, ['Αρι']);
+});
+
+test('applyMemoryUpdate: an alias for a roster member who wrote nothing in the batch is stored, dated by the batch', () => {
+  withStore((store) => {
+    const guildId = 'g1';
+    store.touchUser(guildId, '1', 'Aria', Date.UTC(2026, 0, 9, 12));
+    store.touchUser(guildId, ZOE, 'Zoé-42%', Date.UTC(2026, 0, 1));
+    const batchNewest = Date.UTC(2026, 0, 9, 12, 30);
+
+    const result = applyMemoryUpdate(store, guildId, { users: { [ZOE]: { aliases: { add: ['Ζωή'] } } } }, MEMORY_CFG, new Set(['1']), {
+      aliasOnlyIds: new Set([ZOE]),
+      timing: computeSeenAt([slimMessage({ authorId: '1', ts: batchNewest })]),
+    });
+
+    const [alias] = store.getUser(guildId, ZOE).aliases;
+    assert.equal(alias.name, 'Ζωή');
+    assert.equal(alias.weight, 1);
+    assert.equal(alias.firstSeen, new Date(batchNewest).toISOString(), 'dated by the batch\'s newest message');
+    assert.equal(result.aliasOnly, 1);
+    assert.equal(result.aliasesChanged, 1);
+    assert.equal(result.users, 0, 'a roster member is not a written author');
+    assert.equal(result.droppedUsers, 0);
+  });
+});
+
+test('applyMemoryUpdate: every field except aliases for a roster member is dropped and counted', () => {
+  withStore((store) => {
+    const guildId = 'g1';
+    store.touchUser(guildId, '1', 'Aria', Date.now());
+    store.touchUser(guildId, ZOE, 'Zoé', Date.now());
+    const raw = {
+      aliases: { add: ['Ζωίτσα'] },
+      character: 'λέει πολλά',
+      style: 'σύντομα',
+      relationship: 'φίλη',
+      interests: { add: [{ topic: 'κιθάρα', note: '' }] },
+      details: { add: ['café au lait'] },
+      affinity: { delta: 5, reason: 'καλή' },
+      episodes: [{ what: 'είπε κάτι', weight: 2 }],
+      portrait: 'μια νέα πλευρά',
+    };
+
+    const result = applyMemoryUpdate(store, guildId, { users: { [ZOE]: raw } }, MEMORY_CFG, new Set(['1']), {
+      aliasOnlyIds: new Set([ZOE]),
+      relationships: { enabled: true, maxDeltaPerUpdate: 15, historySize: 10 },
+      episodes: { enabled: true, maxEpisodes: 20, maxNew: 3 },
+    });
+
+    const profile = store.getUser(guildId, ZOE);
+    assert.deepEqual(profile.aliases.map((a) => a.name), ['Ζωίτσα']);
+    assert.equal(profile.character, '');
+    assert.equal(profile.style, '');
+    assert.equal(profile.relationship, '');
+    assert.deepEqual(profile.interests, []);
+    assert.deepEqual(profile.details, []);
+    assert.equal(profile.affinity.score, 0);
+    assert.deepEqual(profile.episodes, []);
+    assert.deepEqual(result.portraitRequests, []);
+    assert.equal(result.droppedFields, 8, 'every key but aliases');
+    assert.equal(result.affinity, 0);
+    assert.equal(result.episodes, 0);
+    assert.equal(result.aliasOnly, 1);
+  });
+});
+
+test('applyMemoryUpdate: a roster id with no stored profile gets nothing, and no profile is created', () => {
+  withStore((store) => {
+    const guildId = 'g1';
+    store.touchUser(guildId, '1', 'Aria', Date.now());
+
+    const result = applyMemoryUpdate(store, guildId, { users: { [ZOE]: { aliases: { add: ['Ζωή'] } } } }, MEMORY_CFG, new Set(['1']), {
+      aliasOnlyIds: new Set([ZOE]),
+    });
+
+    assert.equal(store.getUser(guildId, ZOE), null);
+    assert.equal(result.droppedUsers, 1);
+    assert.equal(result.aliasOnly, 0);
+  });
+});
+
+test('applyMemoryUpdate: an entry for an id outside the authors and the roster is dropped and counted in droppedUsers', () => {
+  withStore((store) => {
+    const guildId = 'g1';
+    store.touchUser(guildId, '1', 'Aria', Date.now());
+    store.touchUser(guildId, BRAN, 'Βράνος', Date.now()); // stored, but neither an author nor sent in the roster
+
+    const result = applyMemoryUpdate(
+      store,
+      guildId,
+      { users: { [BRAN]: { aliases: { add: ['Βράνι'] } }, 999: { character: 'x' }, 1: { style: 'ήρεμο' } } },
+      MEMORY_CFG,
+      new Set(['1']),
+      { aliasOnlyIds: new Set([ZOE]) },
+    );
+
+    assert.equal(result.droppedUsers, 2);
+    assert.equal(result.users, 1);
+    assert.deepEqual(store.getUser(guildId, BRAN).aliases, []);
+    assert.equal(store.getUser(guildId, '999'), null);
+  });
+});
+
+test('applyMemoryUpdate: an alias holding a member token or an id marker is dropped, for an author and a roster member alike', () => {
+  withStore((store) => {
+    const guildId = 'g1';
+    store.touchUser(guildId, '1', 'Aria', Date.now());
+    store.touchUser(guildId, ZOE, 'Zoé', Date.now());
+    const refs = [`<@${ZOE}>`, `Ζωή <@!${ZOE}>`, `Zoé (id:${ZOE})`];
+
+    applyMemoryUpdate(
+      store,
+      guildId,
+      { users: { 1: { aliases: { add: [...refs, 'Αρι'] } }, [ZOE]: { aliases: { add: [...refs, 'Ζωίτσα'] } } } },
+      MEMORY_CFG,
+      new Set(['1']),
+      { aliasOnlyIds: new Set([ZOE]) },
+    );
+
+    assert.deepEqual(store.getUser(guildId, '1').aliases.map((a) => a.name), ['Αρι']);
+    assert.deepEqual(store.getUser(guildId, ZOE).aliases.map((a) => a.name), ['Ζωίτσα']);
+  });
+});
+
+test('applyMemoryUpdate: an alias equal to a stored display name modulo case, spaces and punctuation is dropped', () => {
+  withStore((store) => {
+    const guildId = 'g1';
+    store.touchUser(guildId, ZOE, 'Zoé-42%', Date.UTC(2026, 0, 1));
+    store.touchUser(guildId, ZOE, 'Ζωή Π.', Date.UTC(2026, 0, 2)); // the current name; the earlier one stays stored
+
+    applyMemoryUpdate(store, guildId, { users: { [ZOE]: { aliases: { add: ['zoé 42', 'ΖΩΉΠ', 'Ζωίτσα'] } } } }, MEMORY_CFG, new Set([ZOE]));
+
+    assert.deepEqual(store.getUser(guildId, ZOE).aliases.map((a) => a.name), ['Ζωίτσα']);
+  });
+});
+
+test('applyMemoryUpdate: a bare array under aliases adds only names not stored yet and never sights a stored alias', () => {
+  withStore((store) => {
+    const guildId = 'g1';
+    store.touchUser(guildId, '1', 'Aria', Date.UTC(2026, 0, 1));
+    const cfg = { ...MEMORY_CFG, confirmGapHours: 12 };
+    applyMemoryUpdate(store, guildId, { users: { 1: { aliases: { add: ['Αρι'] } } } }, cfg, new Set(['1']), { timing: { seenAt: Date.UTC(2026, 0, 1) } });
+    const stored = { ...store.getUser(guildId, '1').aliases[0] };
+
+    // Four days later: an object-form add of 'αρι' would be a sighting (weight 2); the bare list is not.
+    applyMemoryUpdate(store, guildId, { users: { 1: { aliases: ['αρι', 'Ariette', 'ariette'] } } }, cfg, new Set(['1']), {
+      timing: { seenAt: Date.UTC(2026, 0, 5) },
+    });
+
+    const aliases = store.getUser(guildId, '1').aliases;
+    assert.deepEqual(aliases.map((a) => a.name), ['Αρι', 'Ariette'], 'the unknown name is added once');
+    assert.deepEqual(aliases[0], stored, 'the stored alias was not sighted: same weight, same dates');
+    assert.equal(aliases[1].weight, 1);
+  });
+});
+
+test('applyMemoryUpdate: a bare array never sights a stored alias the store clamped from a longer name', () => {
+  withStore((store) => {
+    const guildId = 'g1';
+    store.touchUser(guildId, '1', 'Aria', Date.UTC(2026, 0, 1));
+    const cfg = { ...MEMORY_CFG, confirmGapHours: 12 };
+    const long = 'Αριάδνη η βασίλισσα των γατών του σπιτιού μας';
+    assert.ok([...long].length > 40, 'longer than an alias may be');
+    applyMemoryUpdate(store, guildId, { users: { 1: { aliases: { add: [long] } } } }, cfg, new Set(['1']), { timing: { seenAt: Date.UTC(2026, 0, 1) } });
+    const stored = { ...store.getUser(guildId, '1').aliases[0] };
+    assert.notEqual(stored.name, long, 'stored clamped');
+
+    // Four days later the same long name comes back as a bare list: still not a sighting.
+    const result = applyMemoryUpdate(store, guildId, { users: { 1: { aliases: [long] } } }, cfg, new Set(['1']), {
+      timing: { seenAt: Date.UTC(2026, 0, 5) },
+    });
+
+    assert.deepEqual(store.getUser(guildId, '1').aliases, [stored]);
+    assert.equal(result.aliasesChanged, 0);
+    assert.equal(result.aliasesDropped, 1);
+  });
+});
+
+test('applyMemoryUpdate: the alias guards also filter an update list, for an author and a roster member alike', () => {
+  withStore((store) => {
+    const guildId = 'g1';
+    store.touchUser(guildId, '1', 'Célia-7', Date.now());
+    store.touchUser(guildId, ZOE, 'Zoé-42%', Date.now());
+
+    const result = applyMemoryUpdate(
+      store,
+      guildId,
+      {
+        users: {
+          1: { aliases: { update: [`<@${ZOE}>`, `Zoé (id:${ZOE})`, 'célia 7', { name: 'Κελ' }, 'Κέλι'] } },
+          [ZOE]: { aliases: { update: [`<@${BRAN}>`, `Βράνος (id:${BRAN})`, 'zoé 42', { name: 'Ζο' }, 'Ζωίτσα'] } },
+        },
+      },
+      MEMORY_CFG,
+      new Set(['1']),
+      { aliasOnlyIds: new Set([ZOE]) },
+    );
+
+    assert.deepEqual(store.getUser(guildId, '1').aliases.map((a) => a.name), ['Κέλι']);
+    assert.deepEqual(store.getUser(guildId, ZOE).aliases.map((a) => a.name), ['Ζωίτσα']);
+    assert.equal(result.aliasesDropped, 8, 'a token, an id marker, the own name and a non-string, for each');
+    assert.equal(result.aliasesChanged, 2);
+    assert.equal(result.aliasOnly, 1);
+  });
+});
+
+test('applyMemoryUpdate: aliasesDropped counts every proposed alias a guard held back, so a dropped proposal differs from none', () => {
+  withStore((store) => {
+    const guildId = 'g1';
+    store.touchUser(guildId, '1', 'Aria', Date.UTC(2026, 0, 1));
+    store.touchUser(guildId, ZOE, 'Zoé-42%', Date.UTC(2026, 0, 1));
+    applyMemoryUpdate(store, guildId, { users: { 1: { aliases: { add: ['Αρι'] } } } }, MEMORY_CFG, new Set(['1']));
+
+    const empty = applyMemoryUpdate(store, guildId, {}, MEMORY_CFG, new Set(['1']), { aliasOnlyIds: new Set([ZOE]) });
+    const proposed = applyMemoryUpdate(
+      store,
+      guildId,
+      { users: { [ZOE]: { aliases: { add: ['zoé 42', '<@2>'] } }, 1: { aliases: ['αρι'] } } },
+      MEMORY_CFG,
+      new Set(['1']),
+      { aliasOnlyIds: new Set([ZOE]) },
+    );
+
+    assert.equal(empty.aliasesDropped, 0);
+    assert.equal(proposed.aliasesDropped, 3, 'a display name, a member token, a name already stored sent as a bare list');
+    assert.equal(proposed.aliasesChanged, 0);
+    assert.equal(proposed.aliasOnly, 0);
+    assert.deepEqual(store.getUser(guildId, ZOE).aliases, []);
+  });
+});
+
+test('applyMemoryUpdate: aliasesChanged counts only members whose stored alias list really changed', () => {
+  withStore((store) => {
+    const guildId = 'g1';
+    for (const [id, name] of [['1', 'Aria'], ['2', 'Βράνος'], ['3', 'Célia'], [ZOE, 'Zoé'], [BRAN, 'Βρανούλης']]) store.touchUser(guildId, id, name, Date.now());
+
+    const result = applyMemoryUpdate(
+      store,
+      guildId,
+      {
+        users: {
+          1: { aliases: { add: ['Αρι'] } }, // a new alias: a change
+          2: { aliases: { remove: ['κανένα'] } }, // nothing stored to remove: no change
+          3: { aliases: { add: ['célia'] } }, // her own display name: dropped, no change
+          [ZOE]: { aliases: { remove: ['κανένα'] } }, // a roster member: the op reaches the store, the list stays as it was
+          [BRAN]: { aliases: [`<@${BRAN}>`] }, // a roster member whose only alias is dropped
+        },
+      },
+      MEMORY_CFG,
+      new Set(['1', '2', '3']),
+      { aliasOnlyIds: new Set([ZOE, BRAN]) },
+    );
+
+    assert.equal(result.aliasesChanged, 1);
+    assert.equal(result.aliasOnly, 0, 'a roster member counts only when the stored list really changed');
+    assert.equal(result.users, 3);
+  });
+});
+
+test('applyMemoryUpdate: without the alias-only set (the warmup and refresh callers) authors get every field and nobody else anything', () => {
+  withStore((store) => {
+    const guildId = 'g1';
+    store.touchUser(guildId, '1', 'Aria', Date.now());
+    store.touchUser(guildId, ZOE, 'Zoé', Date.now());
+
+    const result = applyMemoryUpdate(
+      store,
+      guildId,
+      { users: { 1: { character: 'λέει πολλά', aliases: { add: ['Αρι'] } }, [ZOE]: { aliases: { add: ['Ζωή'] } } } },
+      MEMORY_CFG,
+      new Set(['1']),
+      { timing: { seenAt: Date.now() } },
+    );
+
+    assert.equal(store.getUser(guildId, '1').character, 'λέει πολλά');
+    assert.deepEqual(store.getUser(guildId, '1').aliases.map((a) => a.name), ['Αρι']);
+    assert.deepEqual(store.getUser(guildId, ZOE).aliases, [], 'a stored member who is not an author gets nothing');
+    assert.equal(result.users, 1);
+    assert.equal(result.droppedUsers, 1);
+    assert.equal(result.aliasOnly, 0);
+  });
+});
+
+test('analyze: the request lists stored members who did not write in <known_members>, and an alias stated about one of them is stored', async () => {
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    const t = Date.UTC(2026, 0, 9, 12);
+    store.touchUser(guildId, '1', 'Aria', t);
+    store.touchUser(guildId, ZOE, 'Zoé-42%', t - 86_400_000);
+    store.touchUser(guildId, BRAN, 'Βράνος', t - 2 * 86_400_000);
+    let sent = null;
+    const llm = {
+      complete: async (messages) => {
+        sent = messages;
+        return { text: JSON.stringify({ users: { [ZOE]: { aliases: { add: ['Ζωή'] }, character: 'λέει πολλά' } } }) };
+      },
+    };
+    const hot = { config: makeConfig(), prompts: { memory: 'memory system prompt', labels } };
+    const updater = createMemoryUpdater({ hot, store, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept' });
+
+    const outcome = await updater.analyze(guildId, [slimMessage({ id: 'm1', authorId: '1', authorName: 'Aria', content: 'η Ζωή είναι η zoé 42', ts: t })]);
+
+    assert.equal(outcome.ok, true);
+    assert.equal(outcome.roster, 2);
+    const roster = JSON.parse(blockBody(sent[1].content, 'known_members'));
+    assert.deepEqual(Object.keys(roster), [ZOE, BRAN], 'the author is left out, the rest newest first');
+    assert.deepEqual(roster[ZOE], { names: ['Zoé-42%'] });
+    const zoe = store.getUser(guildId, ZOE);
+    assert.deepEqual(zoe.aliases.map((a) => a.name), ['Ζωή']);
+    assert.equal(zoe.character, '', 'only the alias is taken for a roster member');
+    assert.equal(outcome.result.aliasOnly, 1);
+    assert.equal(outcome.result.droppedFields, 1);
+  });
+});
+
+test('analyze: only the roster members the request carried may receive an alias', async () => {
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    const t = Date.UTC(2026, 0, 9, 12);
+    store.touchUser(guildId, '1', 'Aria', t);
+    store.touchUser(guildId, ZOE, 'Zoé', t - 86_400_000);
+    store.touchUser(guildId, BRAN, 'Βράνος', t - 2 * 86_400_000);
+    const llm = {
+      complete: async () => ({ text: JSON.stringify({ users: { [ZOE]: { aliases: { add: ['Ζωίτσα'] } }, [BRAN]: { aliases: { add: ['Βράνι'] } } } }) }),
+    };
+    const hot = { config: makeConfig({ memory: { ...makeConfig().memory, aliasRosterSize: 1 } }), prompts: { memory: 'memory system prompt', labels } };
+    const updater = createMemoryUpdater({ hot, store, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept' });
+
+    const outcome = await updater.analyze(guildId, [slimMessage({ id: 'm1', authorId: '1', authorName: 'Aria', ts: t })]);
+
+    assert.equal(outcome.roster, 1);
+    assert.deepEqual(store.getUser(guildId, ZOE).aliases.map((a) => a.name), ['Ζωίτσα']);
+    assert.deepEqual(store.getUser(guildId, BRAN).aliases, [], 'cut by the roster size: never sent, never written');
+    assert.equal(outcome.result.droppedUsers, 1);
+  });
+});
+
+test('analyze: a malformed alias item in a stored profile never fails the batch', async () => {
+  await withStoreAsync(async (seed, dir) => {
+    const guildId = 'g1';
+    const t = Date.UTC(2026, 0, 9, 12);
+    seed.touchUser(guildId, '1', 'Aria', t);
+    seed.touchUser(guildId, ZOE, 'Zoé', t - 86_400_000);
+    seed.flush();
+    // A hand edit made while paused (the stored JSON is hand-editable): one alias item is null.
+    for (const id of ['1', ZOE]) {
+      const file = path.join(dir, 'guilds', guildId, 'users', `${id}.json`);
+      const profile = JSON.parse(fs.readFileSync(file, 'utf8'));
+      profile.aliases = [null, { name: id === ZOE ? 'Ζωίτσα' : 'Αρι', weight: 1, firstSeen: '2026-01-02T00:00:00.000Z', lastSeen: '2026-01-02T00:00:00.000Z' }];
+      fs.writeFileSync(file, JSON.stringify(profile));
+    }
+    const store = createStore({ dataDir: dir });
+    let sent = null;
+    const llm = {
+      complete: async (messages) => {
+        sent = messages;
+        return { text: JSON.stringify({ users: { [ZOE]: { aliases: { add: ['Ζωή'] } } } }) };
+      },
+    };
+    const hot = { config: makeConfig(), prompts: { memory: 'memory system prompt', labels } };
+    const updater = createMemoryUpdater({ hot, store, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept' });
+
+    const outcome = await updater.analyze(guildId, [slimMessage({ id: 'm1', authorId: '1', authorName: 'Aria', ts: t })]);
+
+    assert.equal(outcome.ok, true);
+    assert.deepEqual(JSON.parse(blockBody(sent[1].content, 'known_members')), { [ZOE]: { names: ['Zoé'], aliases: ['Ζωίτσα'] } });
+    assert.deepEqual(JSON.parse(blockBody(sent[1].content, 'existing_profiles'))[1].aliases, ['Αρι']);
+    assert.equal(outcome.result.aliasOnly, 1);
+  });
+});
+
+test('analyze: a stored profile list that cannot be read costs the batch its roster, never the batch', async () => {
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    const t = Date.UTC(2026, 0, 9, 12);
+    store.touchUser(guildId, '1', 'Aria', t);
+    store.touchUser(guildId, ZOE, 'Zoé', t - 86_400_000);
+    store.listUserProfiles = () => {
+      throw new TypeError("Cannot read properties of null (reading 'interests')");
+    };
+    let sent = null;
+    const llm = {
+      complete: async (messages) => {
+        sent = messages;
+        return { text: JSON.stringify({ users: { 1: { style: 'ήρεμο' }, [ZOE]: { aliases: { add: ['Ζωή'] } } } }) };
+      },
+    };
+    const hot = { config: makeConfig(), prompts: { memory: 'memory system prompt', labels } };
+    const updater = createMemoryUpdater({ hot, store, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept' });
+
+    const { result: outcome, logs } = await withCapturedLogs(() =>
+      updater.analyze(guildId, [slimMessage({ id: 'm1', authorId: '1', authorName: 'Aria', ts: t })]),
+    );
+
+    assert.equal(outcome.ok, true);
+    assert.equal(outcome.roster, 0);
+    assert.equal(blockBody(sent[1].content, 'known_members'), null);
+    assert.equal(store.getUser(guildId, '1').style, 'ήρεμο', 'the authors are still written');
+    assert.deepEqual(store.getUser(guildId, ZOE).aliases, [], 'no roster sent: nobody else gets anything');
+    const warning = logs.find((entry) => entry.msg === 'memory: alias roster left out');
+    assert.ok(warning, 'the lost roster is logged');
+    assert.equal(warning.reason, 'store-error');
+    assert.equal(warning.error, 'TypeError', 'by the error\'s name only');
+  });
+});
+
+test('run: "memory: update applied" logs the alias and roster counts, never ids or names', async () => {
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    const base = Date.now() - 60_000;
+    store.touchUser(guildId, ZOE, 'Zoé', base - 86_400_000);
+    store.touchUser(guildId, BRAN, 'Βράνος', base - 2 * 86_400_000);
+    store.touchUser(guildId, '1', 'Aria', base);
+    for (let i = 0; i < 4; i += 1) {
+      store.pushBuffer(guildId, slimMessage({ id: `m${i}`, authorId: '1', authorName: 'Aria', content: `γεια ${i}`, ts: base + i * 1000 }), 100);
+    }
+    const hot = {
+      config: makeConfig({ memory: { ...makeConfig().memory, batchMessages: 4, minBatchMessages: 1 } }),
+      prompts: { memory: 'memory system prompt', labels },
+    };
+    const answer = {
+      users: {
+        1: { aliases: { add: ['Αρι', `<@${ZOE}>`] } },
+        [ZOE]: { aliases: { add: ['Ζωίτσα', 'zoé'] }, style: 'σύντομα' },
+        '999999999999999999': { aliases: { add: ['Κανείς'] } },
+      },
+    };
+    const llm = { complete: async () => ({ text: JSON.stringify(answer) }) };
+    const updater = createMemoryUpdater({ hot, store, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept' });
+
+    const { logs } = await withCapturedLogs(() => updater.run(guildId));
+
+    const applied = logs.find((entry) => entry.msg === 'memory: update applied');
+    assert.ok(applied, 'the update was applied');
+    assert.equal(applied.roster, 2, 'members sent');
+    assert.equal(applied.rosterCandidates, 2, 'members the roster could have sent');
+    assert.ok(applied.rosterTokens > 0, 'the roster\'s share of the request');
+    assert.equal(applied.aliasesChanged, 2);
+    assert.equal(applied.aliasOnly, 1);
+    assert.equal(applied.aliasesDropped, 2, 'a member token and a display name, held back by the guards');
+    assert.equal(applied.droppedUsers, 1);
+    assert.equal(applied.droppedFields, 1);
+    for (const key of ['roster', 'rosterCandidates', 'rosterTokens', 'aliasesChanged', 'aliasOnly', 'aliasesDropped', 'droppedUsers', 'droppedFields']) {
+      assert.ok(Number.isInteger(applied[key]), `${key} is a count`);
+    }
+    const line = JSON.stringify(applied);
+    for (const secret of [ZOE, BRAN, 'Ζωίτσα', 'Κανείς', 'Αρι', 'zoé']) assert.ok(!line.includes(secret), 'counts only');
+  });
+});
+
 // ---- buildMemoryRequest: id tokens resolved on the way OUT (analyzer mode) ------
 
 function baseNameOf(names) {
@@ -4528,6 +5191,7 @@ test('analyzePrivate: the request carries <private>, only this user private prof
 
     assert.ok(JSON.parse(blockBody(user, 'existing_guild')).patterns.includes('guild pattern'));
     assert.equal(blockBody(user, 'existing_channels'), null);
+    assert.equal(blockBody(user, 'known_members'), null, 'a private batch carries no alias roster');
     assert.ok(!user.includes('Ander'), 'no other member profile is sent');
 
     const transcript = blockBody(user, 'new_messages');
