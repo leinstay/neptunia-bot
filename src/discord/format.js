@@ -307,6 +307,11 @@ function renderForwarded(snapshot, labels, context, maxChars, channelName) {
  *   `transcript.reactions` at the end of its line. Ignored when the labels have no
  *   `transcript.reactions` key.
  * @param {number} [options.reactionsPerMessage]  Default 6: at most this many reactions per message.
+ * @param {number} [options.indexOffset]  Default 0 (when undefined or null): the first message
+ *   is numbered `indexOffset + 1`, and every index (the `#index`, a reply target inside the
+ *   list, `item.index`) shifts by it, so a second block (another channel's lines) continues
+ *   the numbering of the first and its indices never collide with it.
+ * @throws {RangeError} when `indexOffset` is given but is not an integer of at least 0.
  * @returns {{ id: string, index: number, ts: number, text: string }[]}
  *
  * In `mode: 'memory'`, messages come from possibly several channels (see
@@ -323,7 +328,14 @@ export function formatTranscript(messages, options) {
   const mediaContext = { attachedIndex, descriptions, videos, reads, gifHandles };
   const locale = labels.locale;
   const selfLabel = fill(labels.self, { name: selfName });
-  const indexById = new Map(messages.map((message, i) => [message.id, i + 1]));
+  const indexOffset = options.indexOffset ?? 0;
+  // A bad offset is a caller bug: counting it as 0 would renumber a second
+  // block from #1 over the first block's indices, so a tag aimed at one line
+  // would silently land on another.
+  if (!Number.isInteger(indexOffset) || indexOffset < 0) {
+    throw new RangeError(`formatTranscript: indexOffset must be an integer >= 0, got ${String(indexOffset)}`);
+  }
+  const indexById = new Map(messages.map((message, i) => [message.id, indexOffset + i + 1]));
   const items = [];
   let previous = null;
   let previousChannelId = NO_CHANNEL;

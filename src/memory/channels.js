@@ -62,15 +62,19 @@ function topWritersText(topWriters, nameOf) {
  *   topWriters?: {id: string, count: number}[] }} channel
  * @param {object} labels  Live `prompts.labels`; uses `labels.server.*`/`labels.units`.
  * @param {{ current?: boolean, activity: 'live'|'slow'|'dead', now?: number,
- *   nameOf?: (id: string) => (string|null) }} options  `now` and `labels.server.lastMessage`
- *   together render "how long ago the last message was" (`formatDuration`, the same humanised-age
- *   helper the `<tempo>` block uses); `nameOf` and `labels.server.topWriters` together render who
- *   writes here most. Either fact is omitted -- not rendered as an empty/placeholder line -- when
- *   its label is missing (an older labels.json never breaks), when the underlying data is missing,
- *   or (for the last-message line) when `now` was not given.
+ *   nameOf?: (id: string) => (string|null), readOnly?: boolean }} options  `now` and
+ *   `labels.server.lastMessage` together render "how long ago the last message was"
+ *   (`formatDuration`, the same humanised-age helper the `<tempo>` block uses); `nameOf` and
+ *   `labels.server.topWriters` together render who writes here most. Either fact is omitted --
+ *   not rendered as an empty/placeholder line -- when its label is missing (an older labels.json
+ *   never breaks), when the underlying data is missing, or (for the last-message line) when `now`
+ *   was not given. `readOnly` (a channel the bot can read but not write in, decided by the
+ *   caller) adds the `labels.server.readOnly` line after the fact lines, before the last-message
+ *   line; nothing is added when that label is missing or blank, and never on the `current`
+ *   channel (the turn is answering there, so it is never shown as one the persona cannot write in).
  * @returns {string}
  */
-export function renderChannel(channel, labels, { current = false, activity, now: nowMs, nameOf } = {}) {
+export function renderChannel(channel, labels, { current = false, activity, now: nowMs, nameOf, readOnly = false } = {}) {
   const s = labels.server;
   const mark = current ? s.currentMark : '';
   const lines = [`# ${channel.name}${mark}`];
@@ -80,6 +84,8 @@ export function renderChannel(channel, labels, { current = false, activity, now:
   if (channel.purpose) lines.push(fill(s.purpose, { text: channel.purpose }));
   if (channel.topics) lines.push(fill(s.topics, { text: channel.topics }));
   if (channel.tone) lines.push(fill(s.tone, { text: channel.tone }));
+
+  if (readOnly === true && !current && s.readOnly) lines.push(fill(s.readOnly));
 
   if (s.lastMessage && Number.isFinite(channel.lastMessageAt) && Number.isFinite(nowMs)) {
     const when = formatDuration(Math.max(0, nowMs - channel.lastMessageAt), labels.units);
