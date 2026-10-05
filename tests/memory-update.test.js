@@ -861,15 +861,16 @@ test('analyze: a hot change to memory.clampTolerance between two updates is pick
       config: makeConfig({ memory: { ...makeConfig().memory, fieldChars: 100, clampTolerance: 1 } }),
       prompts: { memory: 'sys', labels },
     };
-    const llm = { complete: async () => ({ text: JSON.stringify({ users: { 1: { character: longText } } }) }) };
+    // `relationship`: a prose field a stream batch still writes (character/style need the portrait refresh).
+    const llm = { complete: async () => ({ text: JSON.stringify({ users: { 1: { relationship: longText } } }) }) };
     const updater = createMemoryUpdater({ hot, store, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept' });
 
     await updater.analyze(guildId, [slimMessage({ id: 'm1', authorId: '1', authorName: 'nick' })]);
-    assert.equal(store.getUser(guildId, '1').character.length, 100, 'tolerance 1 -- a hard limit');
+    assert.equal(store.getUser(guildId, '1').relationship.length, 100, 'tolerance 1 -- a hard limit');
 
     hot.config.memory.clampTolerance = 2;
     await updater.analyze(guildId, [slimMessage({ id: 'm2', authorId: '1', authorName: 'nick' })]);
-    assert.equal(store.getUser(guildId, '1').character.length, 200, 'tolerance 2, read fresh on this call');
+    assert.equal(store.getUser(guildId, '1').relationship.length, 200, 'tolerance 2, read fresh on this call');
   });
 });
 
@@ -1352,7 +1353,7 @@ test('applyMemoryUpdate: clamps string and detail fields to the configured limit
       users: { 1: { character: '0123456789', details: { add: [longDetail, 'b', 'c'] } } },
     };
 
-    const result = applyMemoryUpdate(store, guildId, update, cfg, new Set(['1']));
+    const result = applyMemoryUpdate(store, guildId, update, cfg, new Set(['1']), { portraitFields: true });
 
     assert.equal(result.users, 1);
     const profile = store.getUser(guildId, '1');
@@ -1384,9 +1385,9 @@ test('applyMemoryUpdate: a field absent from the update leaves the stored value 
   withStore((store) => {
     const guildId = 'g1';
     store.touchUser(guildId, '1', 'nick', Date.now());
-    applyMemoryUpdate(store, guildId, { users: { 1: { relationship: 'old', style: 'calm' } } }, MEMORY_CFG, new Set(['1']));
+    applyMemoryUpdate(store, guildId, { users: { 1: { relationship: 'old', style: 'calm' } } }, MEMORY_CFG, new Set(['1']), { portraitFields: true });
 
-    const result = applyMemoryUpdate(store, guildId, { users: { 1: { style: 'new' } } }, MEMORY_CFG, new Set(['1']));
+    const result = applyMemoryUpdate(store, guildId, { users: { 1: { style: 'new' } } }, MEMORY_CFG, new Set(['1']), { portraitFields: true });
 
     assert.equal(result.users, 1);
     const profile = store.getUser(guildId, '1');
@@ -1399,11 +1400,114 @@ test('applyMemoryUpdate: an empty-string prose field never blanks the stored val
   withStore((store) => {
     const guildId = 'g1';
     store.touchUser(guildId, '1', 'nick', Date.now());
-    applyMemoryUpdate(store, guildId, { users: { 1: { character: 'chatty' } } }, MEMORY_CFG, new Set(['1']));
+    applyMemoryUpdate(store, guildId, { users: { 1: { character: 'chatty' } } }, MEMORY_CFG, new Set(['1']), { portraitFields: true });
 
-    applyMemoryUpdate(store, guildId, { users: { 1: { character: '' } } }, MEMORY_CFG, new Set(['1']));
+    applyMemoryUpdate(store, guildId, { users: { 1: { character: '' } } }, MEMORY_CFG, new Set(['1']), { portraitFields: true });
 
     assert.equal(store.getUser(guildId, '1').character, 'chatty');
+  });
+});
+
+// ---- applyMemoryUpdate: the portrait fields ---------------------------------
+// `character`/`style` are written only by profile.md: the warmup's person run and the portrait
+// refresh pass `portraitFields: true`. A stream batch never does: whatever it returns for them is
+// dropped and counted in `portraitDropped` (the `memory: update applied` line).
+
+test('applyMemoryUpdate: character and style from a stream batch are dropped and counted', () => {
+  withStore((store) => {
+    const guildId = 'g1';
+    store.touchUser(guildId, '1', 'Ἀλκμήνη', Date.now());
+    store.touchUser(guildId, '2', 'Βράνος', Date.now());
+    applyMemoryUpdate(store, guildId, { users: { 1: { character: 'μιλάει πολύ', style: 'σύντομα' } } }, MEMORY_CFG, new Set(['1']), { portraitFields: true });
+
+    const result = applyMemoryUpdate(
+      store,
+      guildId,
+      {
+        users: {
+          1: { character: 'γράφει άλλα τώρα', style: 'μακριές προτάσεις', relationship: 'φίλη' },
+          2: { character: '   ', style: 'ήρεμο', details: { add: ['café au lait'] } },
+        },
+      },
+      MEMORY_CFG,
+      new Set(['1', '2']),
+    );
+
+    const first = store.getUser(guildId, '1');
+    assert.equal(first.character, 'μιλάει πολύ', 'the stored portrait is untouched');
+    assert.equal(first.style, 'σύντομα');
+    assert.equal(first.relationship, 'φίλη', 'every other field still lands');
+    const second = store.getUser(guildId, '2');
+    assert.equal(second.style, '');
+    assert.deepEqual(second.details.map((d) => d.text), ['café au lait']);
+    assert.equal(result.portraitDropped, 3, 'a blank string is nothing to drop');
+    assert.equal(result.users, 2);
+  });
+});
+
+test('applyMemoryUpdate: with portraitFields (the portrait refresh, the warmup person run) character and style are stored', () => {
+  withStore((store) => {
+    const guildId = 'g1';
+    store.touchUser(guildId, '1', 'Ἀλκμήνη', Date.now());
+
+    const result = applyMemoryUpdate(
+      store,
+      guildId,
+      { users: { 1: { character: 'μιλάει πολύ', style: 'σύντομα' } } },
+      MEMORY_CFG,
+      new Set(['1']),
+      { portraitFields: true },
+    );
+
+    assert.equal(store.getUser(guildId, '1').character, 'μιλάει πολύ');
+    assert.equal(store.getUser(guildId, '1').style, 'σύντομα');
+    assert.equal(result.portraitDropped, 0);
+  });
+});
+
+test('run: "memory: update applied" counts the portrait fields a stream batch tried to write', async () => {
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    const base = Date.now() - 60_000;
+    store.touchUser(guildId, '1', 'Ἀλκμήνη', base);
+    for (let i = 0; i < 4; i += 1) {
+      store.pushBuffer(guildId, slimMessage({ id: `m${i}`, authorId: '1', authorName: 'Ἀλκμήνη', content: `γεια ${i}`, ts: base + i * 1000 }), 100);
+    }
+    const hot = {
+      config: makeConfig({ memory: { ...makeConfig().memory, batchMessages: 4, minBatchMessages: 1 } }),
+      prompts: { memory: 'memory system prompt', labels },
+    };
+    const llm = { complete: async () => ({ text: JSON.stringify({ users: { 1: { character: 'νέο πορτρέτο', style: 'νέο ύφος' } } }) }) };
+    const updater = createMemoryUpdater({ hot, store, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept' });
+
+    const { logs } = await withCapturedLogs(() => updater.run(guildId));
+
+    const applied = logs.find((entry) => entry.msg === 'memory: update applied');
+    assert.ok(applied);
+    assert.equal(applied.portraitDropped, 2);
+    assert.equal(store.getUser(guildId, '1').character, '');
+    assert.ok(!JSON.stringify(logs).includes('πορτρέτο'), 'counts only');
+  });
+});
+
+test('applyPrivateUpdate: character and style are never stored and are counted in dropped.portrait', () => {
+  withStore((store) => {
+    const guildId = 'g1';
+    store.touchUser(guildId, 'u1', 'Ἀλκμήνη', Date.now());
+    const publicBefore = JSON.stringify(store.getUser(guildId, 'u1'));
+
+    const result = applyPrivateUpdate(
+      store,
+      guildId,
+      'u1',
+      { users: { u1: { character: 'μιλάει πολύ', style: '  ', relationship: 'μυστική φίλη' } } },
+      MEMORY_CFG,
+    );
+
+    assert.equal(result.dropped.portrait, 1);
+    assert.equal(store.getPrivate(guildId, 'u1').relationship, 'μυστική φίλη');
+    assert.equal(store.getPrivate(guildId, 'u1').character, undefined);
+    assert.equal(JSON.stringify(store.getUser(guildId, 'u1')), publicBefore);
   });
 });
 
@@ -1550,6 +1654,7 @@ test('applyMemoryUpdate: garbage input changes nothing and never throws', () => 
         aliasesDropped: 0,
         droppedUsers: 0,
         droppedFields: 0,
+        portraitDropped: 0,
         portraitRequests: [],
       });
     }
@@ -1796,7 +1901,7 @@ test('applyMemoryUpdate: updateUser can never overwrite episodes via a normal pr
     store.addEpisodes(guildId, '1', [{ what: 'a real episode' }], { maxEpisodes: 20, maxNew: 3, now: 1000 });
 
     const update = { users: { 1: { character: 'nice', episodes: 'this is not routed through this key' } } };
-    applyMemoryUpdate(store, guildId, update, MEMORY_CFG, new Set(['1']));
+    applyMemoryUpdate(store, guildId, update, MEMORY_CFG, new Set(['1']), { portraitFields: true });
 
     const profile = store.getUser(guildId, '1');
     assert.equal(profile.character, 'nice');
@@ -2377,9 +2482,9 @@ test('applyMemoryUpdate: an absent prose field never blanks the stored value', (
   withStore((store) => {
     const guildId = 'g1';
     store.touchUser(guildId, '1', 'nick', Date.now());
-    applyMemoryUpdate(store, guildId, { users: { 1: { character: 'chatty', relationship: 'trusts you' } } }, MEMORY_CFG, new Set(['1']));
+    applyMemoryUpdate(store, guildId, { users: { 1: { character: 'chatty', relationship: 'trusts you' } } }, MEMORY_CFG, new Set(['1']), { portraitFields: true });
 
-    applyMemoryUpdate(store, guildId, { users: { 1: { character: 'still chatty' } } }, MEMORY_CFG, new Set(['1']));
+    applyMemoryUpdate(store, guildId, { users: { 1: { character: 'still chatty' } } }, MEMORY_CFG, new Set(['1']), { portraitFields: true });
 
     const profile = store.getUser(guildId, '1');
     assert.equal(profile.character, 'still chatty');
@@ -3563,7 +3668,7 @@ test('applyMemoryUpdate: character/style/relationship "Name (id:...)" becomes a 
         },
       },
     };
-    applyMemoryUpdate(store, guildId, update, MEMORY_CFG, new Set(['1']));
+    applyMemoryUpdate(store, guildId, update, MEMORY_CFG, new Set(['1']), { portraitFields: true });
 
     const profile = store.getUser(guildId, '1');
     assert.equal(profile.character, 'gets along with <@223456789012345678>');
@@ -3578,7 +3683,7 @@ test('applyMemoryUpdate: an unknown id in "Name (id:...)" is left exactly as wri
     store.touchUser(guildId, '1', 'Aria', Date.now());
 
     const update = { users: { 1: { character: 'mentions Ghost (id:99999999999999999)' } } };
-    applyMemoryUpdate(store, guildId, update, MEMORY_CFG, new Set(['1']));
+    applyMemoryUpdate(store, guildId, update, MEMORY_CFG, new Set(['1']), { portraitFields: true });
 
     assert.equal(store.getUser(guildId, '1').character, 'mentions Ghost (id:99999999999999999)');
   });
@@ -4250,7 +4355,7 @@ test('applyMemoryUpdate: without the alias-only set (the warmup and refresh call
       { users: { 1: { character: 'λέει πολλά', aliases: { add: ['Αρι'] } }, [ZOE]: { aliases: { add: ['Ζωή'] } } } },
       MEMORY_CFG,
       new Set(['1']),
-      { timing: { seenAt: Date.now() } },
+      { timing: { seenAt: Date.now() }, portraitFields: true },
     );
 
     assert.equal(store.getUser(guildId, '1').character, 'λέει πολλά');
@@ -4363,7 +4468,7 @@ test('analyze: a stored profile list that cannot be read costs the batch its ros
     const llm = {
       complete: async (messages) => {
         sent = messages;
-        return { text: JSON.stringify({ users: { 1: { style: 'ήρεμο' }, [ZOE]: { aliases: { add: ['Ζωή'] } } } }) };
+        return { text: JSON.stringify({ users: { 1: { relationship: 'ήρεμη' }, [ZOE]: { aliases: { add: ['Ζωή'] } } } }) };
       },
     };
     const hot = { config: makeConfig(), prompts: { memory: 'memory system prompt', labels } };
@@ -4376,7 +4481,7 @@ test('analyze: a stored profile list that cannot be read costs the batch its ros
     assert.equal(outcome.ok, true);
     assert.equal(outcome.roster, 0);
     assert.equal(blockBody(sent[1].content, 'known_members'), null);
-    assert.equal(store.getUser(guildId, '1').style, 'ήρεμο', 'the authors are still written');
+    assert.equal(store.getUser(guildId, '1').relationship, 'ήρεμη', 'the authors are still written');
     assert.deepEqual(store.getUser(guildId, ZOE).aliases, [], 'no roster sent: nobody else gets anything');
     const warning = logs.find((entry) => entry.msg === 'memory: alias roster left out');
     assert.ok(warning, 'the lost roster is logged');
@@ -4675,7 +4780,7 @@ test('applyMemoryUpdate + buildMemoryRequest: a multi-word display name round-tr
       { users: { [authorId]: { character: `Al Sus (id:${otherId}) plays it` } } },
       MEMORY_CFG,
       knownUserIds,
-      { batchAuthorNames },
+      { batchAuthorNames, portraitFields: true },
     );
     assert.equal(store.getUser(guildId, authorId).character, `<@${otherId}> plays it`);
 
@@ -4709,7 +4814,7 @@ test('applyMemoryUpdate + buildMemoryRequest: a multi-word display name round-tr
       { users: { [authorId]: { character: view1 } } },
       MEMORY_CFG,
       knownUserIds,
-      { batchAuthorNames },
+      { batchAuthorNames, portraitFields: true },
     );
     assert.equal(store.getUser(guildId, authorId).character, `<@${otherId}> plays it`, 'no growth, no duplication after round 2');
 
@@ -4723,7 +4828,7 @@ test('applyMemoryUpdate + buildMemoryRequest: a multi-word display name round-tr
       { users: { [authorId]: { character: view2 } } },
       MEMORY_CFG,
       knownUserIds,
-      { batchAuthorNames },
+      { batchAuthorNames, portraitFields: true },
     );
     assert.equal(store.getUser(guildId, authorId).character, `<@${otherId}> plays it`, 'still stable after round 3');
     assert.equal(analyzerView(), view1);
@@ -4747,7 +4852,7 @@ test('applyMemoryUpdate: namesOf recognises a batch author\'s current nick even 
       { users: { [authorId]: { character: `Al Sus (id:${otherId}) plays it` } } },
       MEMORY_CFG,
       new Set([authorId]),
-      { batchAuthorNames },
+      { batchAuthorNames, portraitFields: true },
     );
 
     assert.equal(store.getUser(guildId, authorId).character, `<@${otherId}> plays it`, 'the batch nick, not just the stale stored name, is recognised');
@@ -5245,7 +5350,7 @@ test('analyzePrivate: applies only users[userId] to the private layer and report
 
     const outcome = await updater.analyzePrivate(guildId, 'u1', [dmMessage({ id: 'm1', direct: true, ts: Date.UTC(2026, 0, 2) })]);
     assert.equal(outcome.ok, true);
-    assert.deepEqual(outcome.result.dropped, { users: 2, guild: true, channels: 1, lore: 1, self: 1 });
+    assert.deepEqual(outcome.result.dropped, { users: 2, guild: true, channels: 1, lore: 1, self: 1, portrait: 2 });
     assert.equal(outcome.result.users, 1);
 
     const priv = store.getPrivate(guildId, 'u1');
@@ -5342,7 +5447,7 @@ test('tick: a due private buffer is analyzed, shifted after success and logged w
     assert.ok(applied);
     assert.equal(applied.users, 1);
     assert.equal(applied.consumed, 6);
-    assert.deepEqual(applied.dropped, { users: 1, guild: false, channels: 0, lore: 0, self: 1 });
+    assert.deepEqual(applied.dropped, { users: 1, guild: false, channels: 0, lore: 0, self: 1, portrait: 0 });
     assert.equal(applied.shown, 6, 'a small private batch fits whole');
     assert.equal(applied.trimmed, 0);
     const text = JSON.stringify(logs);

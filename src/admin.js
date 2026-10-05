@@ -851,7 +851,8 @@ const GIFS_RECACHE_SKIPS = {
  * `warmup` — from createWarmup() (src/memory/warmup.js), optional: the sample-based
  *   memory warmup -- `peopleReport` (read-only), `run`/`runPerson`/`runChannel`/`runServer`/
  *   `runUsers`/`runChannels`/`status`/`reset` (write under data/), `refreshPortrait`, `waitIdle`
- *   (awaited by `/nep pause`, same shape as `memory`/`turns`). Absent -> every `warmup.*`/
+ *   (awaited by `/nep pause`, same shape as `memory`/`turns`; it also covers portrait refreshes
+ *   in flight). Absent -> every `warmup.*`/
  *   `memory.refresh` command reports it is not available.
  * `describer` — from createDescriber() (src/memory/describe.js), optional: `checkYoutube()`, used by
  *   `/nep ping` (video role) to add a line saying which YouTube duration source works on this host.
@@ -1154,7 +1155,7 @@ export function createAdmin({
    * a live-analyzer `run()` already in flight (its LLM call can take
    * 30-90s; `tick()`/`observe()` are already no-ops from the moment `paused`
    * is set, so no NEW run can start -- this only waits out one that started
-   * before the pause), a warmup run, and a mentor run in flight (stopped
+   * before the pause), a warmup run or portrait refresh, and a mentor run in flight (stopped
    * first, then waited for until it has saved and reported; the reply says
    * so). Only once all are idle does it clear the pending-ping
    * queue, flush everything and drop every cache except state.json itself, so
@@ -1186,8 +1187,9 @@ export function createAdmin({
       await memory.waitIdle();
     }
 
-    // A warmup run/one-off target already in flight: same rule, its own
-    // loop already stops after the request in flight once `paused` is seen.
+    // A warmup run/one-off target or a portrait refresh already in flight:
+    // same rule. The run's loop stops after the request in flight once
+    // `paused` is seen; a refresh whose answer arrives now writes nothing.
     if (warmup && typeof warmup.waitIdle === 'function') {
       await warmup.waitIdle();
     }

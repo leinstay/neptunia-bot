@@ -960,9 +960,14 @@ function guardedAliasOps(raw, profile) {
  *   used for them (see `batchAuthorNamesMap` below), so the `Name (id:...)` normalization below
  *   recognises a name even for someone whose stored profile has not caught up yet. Omitted ->
  *   only the stored profile's own `names` are known.
+ * @param {boolean} [options.portraitFields]  `true` only from the two writers of a portrait
+ *   (`profile.md`): the portrait refresh and the warmup's person run (src/memory/warmup.js).
+ *   Omitted or false (every stream batch) -> an author's `character`/`style` are dropped and each
+ *   non-blank one is counted in `portraitDropped`, so a batch can never rewrite a portrait outside
+ *   the refresh's counters, daily cap and merge.
  * @returns {{ users: number, guild: boolean, self: boolean, affinity: number, relationships: number, channels: number, episodes: number, lore: number,
  *   learned: number, interestsChanged: number, aliasesChanged: number, aliasOnly: number, aliasesDropped: number,
- *   droppedUsers: number, droppedFields: number, portraitRequests: { userId: string, reason: string }[] }}
+ *   droppedUsers: number, droppedFields: number, portraitDropped: number, portraitRequests: { userId: string, reason: string }[] }}
  *   `users`: authors written. `guild`: patterns/starters/injokes changed. `channels`/`lore`: entries whose stored values changed
  *   (an identical re-send, compared after clamping, counts 0). `learned`: how many valid `guild.learned` add ops were
  *   handed to `store.applyLearnedOps` (a re-add of a stored item counts too -- it is a sighting).
@@ -971,7 +976,7 @@ function guardedAliasOps(raw, profile) {
  *   own display name, a non-string; in a bare list also a name already stored), authors and roster members alike --
  *   a proposal that was dropped, told apart from none. `droppedUsers`: entries for an id that is neither an author
  *   nor a roster member with a stored profile. `droppedFields`: non-empty keys other than `aliases` dropped from
- *   roster members' entries.
+ *   roster members' entries. `portraitDropped`: authors' non-blank `character`/`style` dropped without `portraitFields`.
  */
 export function applyMemoryUpdate(
   store,
@@ -979,7 +984,7 @@ export function applyMemoryUpdate(
   update,
   cfg,
   knownUserIds,
-  { knownChannelIds = new Set(), aliasOnlyIds = new Set(), relationships, episodes, lore, timing, batchAuthorNames } = {},
+  { knownChannelIds = new Set(), aliasOnlyIds = new Set(), relationships, episodes, lore, timing, batchAuthorNames, portraitFields = false } = {},
 ) {
   const result = {
     users: 0,
@@ -997,6 +1002,7 @@ export function applyMemoryUpdate(
     aliasesDropped: 0,
     droppedUsers: 0,
     droppedFields: 0,
+    portraitDropped: 0,
     portraitRequests: [],
   };
   if (!update || typeof update !== 'object' || Array.isArray(update)) return result;
@@ -1040,11 +1046,16 @@ export function applyMemoryUpdate(
       // `character`/`style` stay plain prose (see docs/prompt-contract.md,
       // "Data model"): the stream analyzer never edits them directly -- they
       // are written only by profile.md (the warmup and a portrait refresh,
-      // see `raw.portrait` below). The whole-string form is kept here for
-      // that writer, not for the stream analyzer's own JSON.
+      // which pass `portraitFields`). From any other caller they are dropped
+      // and counted, never stored.
       const ops = {};
       for (const key of ['character', 'style', 'relationship']) {
-        if (typeof raw[key] === 'string') ops[key] = tokenize(raw[key]);
+        if (typeof raw[key] !== 'string') continue;
+        if (key !== 'relationship' && !portraitFields) {
+          if (raw[key].trim()) result.portraitDropped += 1;
+          continue;
+        }
+        ops[key] = tokenize(raw[key]);
       }
 
       // `portrait`: the stream analyzer's cue that this member's stored
@@ -1198,9 +1209,13 @@ function hasContent(value) {
  * -- `relationship`/`interests`/`details` via `store.applyPrivateOps`,
  * `affinity` via `store.adjustPrivateAffinity`, `episodes` via
  * `store.addPrivateEpisodes`, with the same options `applyMemoryUpdate` uses.
- * `character`, `style`, `aliases` and `portrait` are public-only and ignored.
- * Every other user, `guild`, `channels`, `lore` and `self` is dropped and
- * only counted in `dropped` (never an id). Never throws on garbage input.
+ * `character`, `style`, `aliases` and `portrait` are public-only and ignored:
+ * the private layer has no portrait, and no caller can make this path write
+ * one (only the portrait refresh and the warmup write `character`/`style`,
+ * through `applyMemoryUpdate`); a non-blank `character`/`style` is counted
+ * in `dropped.portrait`. Every other user, `guild`, `channels`, `lore` and
+ * `self` is dropped and only counted in `dropped` (never an id). Never throws
+ * on garbage input.
  * @param {object} store
  * @param {string} guildId
  * @param {string} userId       The DM partner.
@@ -1210,7 +1225,7 @@ function hasContent(value) {
  *   As for `applyMemoryUpdate` (`timing` from `computeSeenAt`, `batchAuthorNames` from
  *   `batchAuthorNamesMap`); there is no channel, lore or guild here.
  * @returns {{ users: number, affinity: number, relationships: number, episodes: number, interestsChanged: number,
- *   dropped: { users: number, guild: boolean, channels: number, lore: number, self: number } }}
+ *   dropped: { users: number, guild: boolean, channels: number, lore: number, self: number, portrait: number } }}
  */
 export function applyPrivateUpdate(store, guildId, userId, update, cfg, { relationships, episodes, timing, batchAuthorNames } = {}) {
   const id = String(userId);
@@ -1220,7 +1235,7 @@ export function applyPrivateUpdate(store, guildId, userId, update, cfg, { relati
     relationships: 0,
     episodes: 0,
     interestsChanged: 0,
-    dropped: { users: 0, guild: false, channels: 0, lore: 0, self: 0 },
+    dropped: { users: 0, guild: false, channels: 0, lore: 0, self: 0, portrait: 0 },
   };
   if (!isPlainObject(update)) return result;
 
@@ -1233,6 +1248,7 @@ export function applyPrivateUpdate(store, guildId, userId, update, cfg, { relati
 
   const raw = users[id];
   if (!isPlainObject(raw)) return result;
+  result.dropped.portrait = ['character', 'style'].filter((key) => typeof raw[key] === 'string' && raw[key].trim()).length;
 
   const { tokenize, tokenizeItemOps, tokenizeEpisodes } = makeTokenizers(store, guildId, new Set([id]), batchAuthorNames);
   const ops = {};

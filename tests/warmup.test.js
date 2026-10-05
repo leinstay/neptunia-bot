@@ -27,7 +27,9 @@ import {
   buildPersonWriteIterations,
   createWarmup,
 } from '../src/memory/warmup.js';
-import { createCalibrator } from '../src/llm/tokens.js';
+import { createCalibrator, estimateMessages } from '../src/llm/tokens.js';
+import { DailyCapError, TokenLimitError } from '../src/llm/openrouter.js';
+import { createPortraitScheduler, portraitDue, portraitSettings } from '../src/memory/portrait.js';
 import { labels } from './fixtures/labels.js';
 import { withCapturedLogs } from './fixtures/capture-logs.js';
 
@@ -643,7 +645,6 @@ function fakeHot(overrides = {}) {
         maxTokens: 6_000_000,
         rateLimitWaitMinutes: 10,
         rateLimitMaxWaits: 36,
-        refreshMessages: 20,
       },
       ...overrides.config,
     },
@@ -2184,8 +2185,9 @@ test('refreshPortrait: skips a member refreshed less than memory.portraitRefresh
   const guild = fakeGuild('g1', [c1]);
   const client = fakeClient(guild);
   const hot = fakeHot();
+  hot.config.warmup.minMessages = 1; // one own line is a sample worth sending here
   let calls = 0;
-  const llm = { complete: async () => { calls += 1; return { text: '{}', usage: {}, estimated: 0, finishReason: 'stop' }; } };
+  const llm = { complete: async () => { calls += 1; return { text: '{"character":"c","style":"s"}', usage: {}, estimated: 0, finishReason: 'stop' }; } };
   const warmup = createWarmup({ hot, store, client, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => 10_000_000 + 3600_000 }); // 1h later, rail is 24h
 
   const skipped = await warmup.refreshPortrait('g1', 'a', 'reason');
@@ -2193,6 +2195,7 @@ test('refreshPortrait: skips a member refreshed less than memory.portraitRefresh
   assert.equal(skipped.reason, 'too-soon');
   assert.equal(calls, 0);
 
+  // Forced (the owner's command): the whole window is sampled, not only lines since the stamp.
   const forced = await warmup.refreshPortrait('g1', 'a', 'reason', { force: true });
   assert.equal(forced.ok, true);
   assert.equal(calls, 1);
@@ -2207,8 +2210,9 @@ test('refreshPortrait: skips once the daily refresh cap is reached', async () =>
   const client = fakeClient(guild);
   const hot = fakeHot();
   hot.config.memory.portraitRefreshPerDay = 1;
+  hot.config.warmup.minMessages = 1;
   let calls = 0;
-  const llm = { complete: async () => { calls += 1; return { text: '{}', usage: {}, estimated: 0, finishReason: 'stop' }; } };
+  const llm = { complete: async () => { calls += 1; return { text: '{"character":"c","style":"s"}', usage: {}, estimated: 0, finishReason: 'stop' }; } };
   const warmup = createWarmup({ hot, store, client, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => 10_000_000 });
 
   const first = await warmup.refreshPortrait('g1', 'a', 'r1', { force: true });
@@ -2228,6 +2232,7 @@ test('refreshPortrait: concurrent cues never overshoot the daily cap -- the slot
   const client = fakeClient(fakeGuild('g1', [fakeChannel('c1', history)]));
   const hot = fakeHot();
   hot.config.memory.portraitRefreshPerDay = 1;
+  hot.config.warmup.minMessages = 1;
   let calls = 0;
   const llm = { complete: async () => { calls += 1; return { text: '{"character":"c","style":"s"}', usage: {}, estimated: 0, finishReason: 'stop' }; } };
   const warmup = createWarmup({ hot, store, client, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => 10_000_000 });
@@ -2246,6 +2251,7 @@ test('refreshPortrait: the daily count lives outside the warmup progress, so /ne
   const client = fakeClient(fakeGuild('g1', [fakeChannel('c1', [rawMessage(1000, { authorId: 'a' })])]));
   const hot = fakeHot();
   hot.config.memory.portraitRefreshPerDay = 1;
+  hot.config.warmup.minMessages = 1;
   let calls = 0;
   const llm = { complete: async () => { calls += 1; return { text: '{"character":"c","style":"s"}', usage: {}, estimated: 0, finishReason: 'stop' }; } };
   const warmup = createWarmup({ hot, store, client, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => 10_000_000 });
@@ -2286,6 +2292,7 @@ test('refreshPortrait: a refresh with nothing to sample gives its daily slot bac
   const outcome = await warmup.refreshPortrait('g1', 'a', 'r1', { force: true });
   assert.equal(outcome.reason, 'nothing-to-sample');
   assert.equal(store.state.data.portraitCount, 0);
+  assert.equal(store.getUser('g1', 'a').portraitAttemptAt, new Date(10_000_000).toISOString(), 'the attempt is stamped: it backs off');
 });
 
 test('refreshPortrait: concurrent cues share one history fetch', async () => {
@@ -2296,6 +2303,7 @@ test('refreshPortrait: concurrent cues share one history fetch', async () => {
   const c1 = fakeChannel('c1', [rawMessage(1000, { authorId: 'a' }), rawMessage(2000, { authorId: 'b' })]);
   const client = fakeClient(fakeGuild('g1', [c1]));
   const hot = fakeHot();
+  hot.config.warmup.minMessages = 1;
   const llm = scriptedLlm([{ character: 'c', style: 's', interests: [], details: [], episodes: [], aliases: [] }]);
   const warmup = createWarmup({ hot, store, client, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => 10_000_000 });
 
@@ -2456,7 +2464,8 @@ test('createWarmup: every warmup and portrait request runs at the analyzer tempe
   const warmup = createWarmup({ hot, store, client, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => 10_000_000 });
 
   await warmup.run('g1');
-  await warmup.refreshPortrait('g1', 'a', '');
+  // The run just wrote (and stamped) a portrait: only the owner's forced refresh runs at once.
+  await warmup.refreshPortrait('g1', 'a', '', { force: true });
 
   assert.equal(llm.calls.length, 4);
   for (const call of llm.calls) {
@@ -2476,7 +2485,7 @@ test('createWarmup: memory.temperature is read at each call, for the warmup and 
 
   await warmup.run('g1');
   hot.config.memory.temperature = 0.1; // a live edit reaches the next request
-  await warmup.refreshPortrait('g1', 'a', '');
+  await warmup.refreshPortrait('g1', 'a', '', { force: true });
 
   assert.deepEqual(llm.calls.map((call) => call.opts.temperature), [0.55, 0.55, 0.55, 0.1]);
 });
@@ -2537,9 +2546,845 @@ test('createWarmup: run() and refreshPortrait() route every request as the analy
   const warmup = createWarmup({ hot, store, client, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => 10_000_000 });
 
   await warmup.run('g1');
-  const refreshed = await warmup.refreshPortrait('g1', 'a', '');
+  const refreshed = await warmup.refreshPortrait('g1', 'a', '', { force: true });
 
   assert.equal(refreshed.ok, true);
   assert.equal(llm.calls.length, 4);
   assert.deepEqual(llm.calls.map((call) => call.opts.role), ['analyzer', 'analyzer', 'analyzer', 'analyzer']);
+});
+
+// ---------------------------------------------------------------------------
+// refreshPortrait() under the counters (src/memory/portrait.js): the 50k rail, the sample since
+// the last portrait, the stamps, the back-off, pause safety, and the scheduler's one history
+// crawl per check.
+// ---------------------------------------------------------------------------
+
+const T0 = Date.UTC(2026, 9, 1, 12);
+const iso = (ms) => new Date(ms).toISOString();
+
+/** `count` normalized lines of `authorId` in channel `channelId`, one a minute from `startTs`. */
+function lines(channelId, authorId, count, startTs, content = (i) => `line ${i} of ${authorId}`) {
+  return Array.from({ length: count }, (_, i) =>
+    msg(`${channelId}-${authorId}-${i}`, startTs + i * 60_000, { channelId, authorId, authorName: authorId, content: content(i) }),
+  );
+}
+
+/** A client that serves no guild: only the injected-windows path can refresh. */
+function guildlessClient() {
+  return { user: { id: 'selfUser' }, guilds: { cache: new Map() } };
+}
+
+/** A warmup for portrait tests; the clock defaults to 30 hours after T0. */
+function portraitWarmup({ hot = fakeHot(), store = createStore({ dataDir: tmpDataDir() }), client = guildlessClient(), llm, now = () => T0 + 30 * 3_600_000, calibrator = createCalibrator() } = {}) {
+  const warmup = createWarmup({ hot, store, client, llm, calibrator, getSelfName: () => 'Nept', now });
+  return { warmup, store, hot, llm };
+}
+
+/** A member with a stored portrait, seen at `at`; `stamps` go through the generic setter. */
+function seedPortrait(store, userId, { at = T0, character = 'μιλάει πολύ', style = 'σύντομα', ...stamps } = {}) {
+  store.touchUser('g1', userId, userId, at);
+  store.applyProfileOps('g1', userId, { character, style }, { fieldChars: 400 });
+  if (Object.keys(stamps).length > 0) store.updateUser('g1', userId, stamps);
+}
+
+/** A fake `llm.complete` answering raw text (with a finish reason) or throwing an Error entry. */
+function textLlm(results) {
+  const calls = [];
+  return {
+    calls,
+    complete: async (messages, opts) => {
+      const entry = results[Math.min(calls.length, results.length - 1)];
+      calls.push({ messages, opts });
+      if (entry instanceof Error) throw entry;
+      return { text: entry.text, usage: {}, estimated: 0, finishReason: entry.finishReason ?? 'stop' };
+    },
+  };
+}
+
+/** A fake `llm.complete` that holds every answer until `release()`. */
+function gatedLlm(answer) {
+  let release;
+  const gate = new Promise((resolve) => {
+    release = resolve;
+  });
+  const calls = [];
+  return {
+    calls,
+    release: () => release(),
+    complete: async (messages, opts) => {
+      calls.push({ messages, opts });
+      await gate;
+      return { text: JSON.stringify(answer), usage: {}, estimated: 0, finishReason: 'stop' };
+    },
+  };
+}
+
+const snippetsOf = (call) => /<snippets>\n([\s\S]*?)\n<\/snippets>/.exec(call.messages[1].content)[1];
+const ownLinesOf = (call) => snippetsOf(call).split('\n').filter((line) => line.startsWith('[own] '));
+
+test('refreshPortrait: injected windows need no guild and fetch nothing', async () => {
+  const llm = scriptedLlm([{ character: 'νέος χαρακτήρας', style: 'νέο ύφος' }]);
+  const { warmup, store } = portraitWarmup({ llm });
+  seedPortrait(store, 'a');
+
+  const noWindows = await warmup.refreshPortrait('g1', 'a', '');
+  assert.equal(noWindows.reason, 'no-guild');
+  assert.equal(store.state.data.portraitCount, undefined, 'no slot taken');
+
+  const result = await warmup.refreshPortrait('g1', 'a', '', { windows: [win('c1', lines('c1', 'a', 5, T0))] });
+  assert.equal(result.ok, true);
+  assert.equal(llm.calls.length, 1);
+  assert.equal(store.getUser('g1', 'a').character, 'νέος χαρακτήρας');
+  assert.equal(store.getUser('g1', 'a').style, 'νέο ύφος');
+});
+
+test('refreshPortrait: the request fits llm.maxRequestTokens x safetyMargin, shrinking the sample, main channels first', async () => {
+  const hot = fakeHot();
+  hot.config.llm.maxRequestTokens = 2500;
+  hot.config.llm.safetyMargin = 1;
+  hot.config.memory.mainChannelIds = ['main'];
+  hot.config.memory.portraitRefreshMessages = 60;
+  hot.config.warmup.minMessages = 5;
+  hot.config.warmup.contextBefore = 0;
+  const llm = scriptedLlm([{ character: 'c', style: 's' }]);
+  const { warmup, store } = portraitWarmup({ hot, llm });
+  seedPortrait(store, 'a');
+  const long = (tag) => (i) => `${tag} ${i} ${'a walk along the river and back again, '.repeat(5)}`;
+  const windows = [win('main', lines('main', 'a', 20, T0, long('main'))), win('side', lines('side', 'a', 40, T0, long('side')))];
+
+  const result = await warmup.refreshPortrait('g1', 'a', '', { windows });
+
+  assert.equal(result.ok, true);
+  assert.ok(result.shrunk > 0, 'the sample shrank');
+  const [call] = llm.calls;
+  assert.ok(createCalibrator().apply(estimateMessages(call.messages)) <= 2500, 'fitted under the cap');
+  assert.equal(call.opts.maxRequestTokens, undefined, 'the llm.maxRequestTokens rail applies, not the warmup cap');
+  const own = ownLinesOf(call);
+  assert.equal(own.filter((line) => line.includes('main ')).length, 20, 'every main-channel line kept');
+  assert.ok(own.filter((line) => line.includes('side ')).length < 40, 'the other channel gave way');
+  assert.equal(result.own, own.length);
+});
+
+test('refreshPortrait: a 300-message sample is trimmed under the 50k rail, never a token-limit failure', async () => {
+  const hot = fakeHot(); // llm.maxRequestTokens 50000, safetyMargin 0.9
+  hot.config.memory.portraitRefreshMessages = 300;
+  hot.config.warmup.minMessages = 30;
+  hot.config.warmup.contextBefore = 1;
+  const calibrator = createCalibrator();
+  // The real client's pre-flight check: over llm.maxRequestTokens is a TokenLimitError, nothing sent.
+  const llm = {
+    calls: [],
+    async complete(messages, opts) {
+      this.calls.push({ messages, opts });
+      const estimated = calibrator.apply(estimateMessages(messages));
+      if (estimated > (opts.maxRequestTokens ?? hot.config.llm.maxRequestTokens)) throw new TokenLimitError(`request estimated at ${estimated}`);
+      return { text: JSON.stringify({ character: 'c', style: 's' }), usage: {}, estimated, finishReason: 'stop' };
+    },
+  };
+  const { warmup, store } = portraitWarmup({ hot, llm, calibrator });
+  seedPortrait(store, 'a');
+  const text = (i) => `${i} ${'the long story of a weekend trip to the mountains, '.repeat(10)}`;
+  const mixed = [];
+  for (let i = 0; i < 320; i += 1) {
+    mixed.push(msg(`b-${i}`, T0 + i * 120_000, { channelId: 'c1', authorId: 'b', authorName: 'b', content: text(i) }));
+    mixed.push(msg(`a-${i}`, T0 + i * 120_000 + 60_000, { channelId: 'c1', authorId: 'a', authorName: 'a', content: text(i) }));
+  }
+
+  const result = await warmup.refreshPortrait('g1', 'a', '', { windows: [win('c1', mixed)] });
+
+  assert.equal(result.ok, true);
+  assert.equal(llm.calls.length, 1);
+  const sent = calibrator.apply(estimateMessages(llm.calls[0].messages));
+  assert.ok(sent <= 45000, `fitted to 45000 calibrated tokens, was ${sent}`);
+  assert.ok(result.own < 300 && result.own >= 30);
+});
+
+test('refreshPortrait: samples only own messages since the last refresh', async () => {
+  const llm = scriptedLlm([{ character: 'c', style: 's' }]);
+  const { warmup, store } = portraitWarmup({ llm }); // 30 hours after T0
+  seedPortrait(store, 'a', { portraitRefreshedAt: iso(T0 + 4 * 60_000) });
+  const content = (i) => (i < 4 ? `παλιό ${i}` : `νέο ${i}`);
+  const channel = [...lines('c1', 'a', 10, T0, content), ...lines('c1', 'b', 10, T0 - 30_000)].sort((x, y) => x.ts - y.ts);
+
+  const result = await warmup.refreshPortrait('g1', 'a', '', { windows: [win('c1', channel)] });
+
+  assert.equal(result.ok, true);
+  const own = ownLinesOf(llm.calls[0]);
+  assert.equal(own.length, 6);
+  assert.ok(own.every((line) => line.includes('νέο')), 'no own line from before the last portrait');
+  assert.match(llm.calls[0].messages[1].content, /<member>\na \(id:a\), 6 messages in the window/, 'the member line counts since the last portrait');
+});
+
+test('refreshPortrait: a forced refresh (the owner\'s command) samples the whole window', async () => {
+  const llm = scriptedLlm([{ character: 'c', style: 's' }]);
+  const { warmup, store } = portraitWarmup({ llm, now: () => T0 + 3_600_000 });
+  seedPortrait(store, 'a', { portraitRefreshedAt: iso(T0 + 4 * 60_000) });
+  const windows = [win('c1', lines('c1', 'a', 10, T0, (i) => (i < 4 ? `παλιό ${i}` : `νέο ${i}`)))];
+
+  assert.equal((await warmup.refreshPortrait('g1', 'a', '', { windows })).reason, 'too-soon');
+  const result = await warmup.refreshPortrait('g1', 'a', '', { windows, force: true });
+
+  assert.equal(result.ok, true);
+  assert.equal(ownLinesOf(llm.calls[0]).length, 10);
+});
+
+test('refreshPortrait: a pre-flight token limit or daily cap sends nothing and gives the slot back', async () => {
+  const llm = textLlm([new DailyCapError('daily LLM request cap reached (300)'), new TokenLimitError('request estimated at 60000 tokens, cap is 50000')]);
+  const { warmup, store } = portraitWarmup({ llm });
+  seedPortrait(store, 'a');
+  const windows = [win('c1', lines('c1', 'a', 5, T0))];
+
+  const capped = await warmup.refreshPortrait('g1', 'a', '', { windows });
+  assert.deepEqual([capped.ok, capped.reason, capped.cap], [false, 'daily-cap', 'llm']);
+  assert.equal(store.state.data.portraitCount, 0, 'the slot is given back');
+  assert.equal(store.getUser('g1', 'a').portraitAttemptAt ?? null, null, 'nothing about the member: no back-off');
+
+  const over = await warmup.refreshPortrait('g1', 'a', '', { windows });
+  assert.deepEqual([over.ok, over.reason], [false, 'token-limit']);
+  assert.equal(store.state.data.portraitCount, 0, 'the slot is given back');
+  assert.equal(store.getUser('g1', 'a').portraitAttemptAt, iso(T0 + 30 * 3_600_000), 'the member backs off');
+  assert.equal(store.getUser('g1', 'a').character, 'μιλάει πολύ');
+});
+
+test('refreshPortrait: success stamps portraitRefreshedAt and portraitMessageCount and clears portraitAttemptAt', async () => {
+  const now = T0 + 30 * 3_600_000;
+  const llm = scriptedLlm([{ character: 'νέος', style: 'νέο' }]);
+  const { warmup, store, hot } = portraitWarmup({ llm, now: () => now });
+  seedPortrait(store, 'a', { messageCount: 420, portraitAttemptAt: iso(now - 25 * 3_600_000) });
+
+  const result = await warmup.refreshPortrait('g1', 'a', '', { windows: [win('c1', lines('c1', 'a', 5, T0))] });
+
+  assert.equal(result.ok, true);
+  const profile = store.getUser('g1', 'a');
+  assert.equal(profile.portraitRefreshedAt, iso(now));
+  assert.equal(profile.portraitMessageCount, 420);
+  assert.equal(profile.portraitAttemptAt, null);
+  assert.equal(store.state.data.portraitCount, 1);
+  assert.equal(portraitDue(profile, now, portraitSettings(hot.config)).due, false);
+});
+
+test('refreshPortrait: a failure after sending keeps the slot and stamps portraitAttemptAt', async () => {
+  const now = T0 + 30 * 3_600_000;
+  const llm = textLlm([Object.assign(new Error('OpenRouter HTTP 500: upstream'), { statusCode: 500 })]);
+  const { warmup, store } = portraitWarmup({ llm, now: () => now });
+  seedPortrait(store, 'a');
+  const windows = [win('c1', lines('c1', 'a', 5, T0))];
+
+  const failed = await warmup.refreshPortrait('g1', 'a', '', { windows });
+  assert.deepEqual([failed.ok, failed.reason], [false, 'llm-error']);
+  assert.equal(store.state.data.portraitCount, 1, 'the request was sent: the slot is spent');
+  assert.equal(store.getUser('g1', 'a').portraitAttemptAt, iso(now));
+
+  const again = await warmup.refreshPortrait('g1', 'a', 'a cue', { windows });
+  assert.equal(again.reason, 'retry-wait', 'a cue waits memory.portraitRetryHours too');
+  assert.equal(llm.calls.length, 1);
+});
+
+test('refreshPortrait: an empty or cut answer leaves the stored portrait untouched', async () => {
+  const llm = textLlm([
+    { text: JSON.stringify({ character: '', style: '  ' }) },
+    { text: JSON.stringify({ character: 'μισό', style: 'μισό' }), finishReason: 'length' },
+    { text: '{"character": "μισ' },
+    { text: 'όχι json' },
+  ]);
+  const { warmup, store } = portraitWarmup({ llm });
+  seedPortrait(store, 'a');
+  const windows = [win('c1', lines('c1', 'a', 5, T0))];
+
+  const reasons = [];
+  for (let i = 0; i < 4; i += 1) reasons.push((await warmup.refreshPortrait('g1', 'a', '', { windows, force: true })).reason);
+
+  assert.deepEqual(reasons, ['empty-answer', 'truncated', 'truncated', 'bad-json']);
+  const profile = store.getUser('g1', 'a');
+  assert.equal(profile.character, 'μιλάει πολύ');
+  assert.equal(profile.style, 'σύντομα');
+  assert.equal(profile.portraitRefreshedAt ?? null, null);
+  assert.ok(profile.portraitAttemptAt, 'backs off');
+  assert.equal(store.state.data.portraitCount, 4, 'every request was sent');
+});
+
+test('refreshPortrait: a member with no lines in the history is stamped and not crawled for again within memory.portraitRetryHours', async () => {
+  let nowMs = T0;
+  const c1 = fakeChannel('c1', [rawMessage(T0 - 60_000, { authorId: 'b' })]);
+  const llm = scriptedLlm([{ character: 'c', style: 's' }]);
+  const { warmup, store, hot } = portraitWarmup({ llm, client: fakeClient(fakeGuild('g1', [c1])), now: () => nowMs });
+  seedPortrait(store, 'a', { messageCount: 900 });
+
+  const first = await warmup.refreshPortrait('g1', 'a', '');
+  assert.equal(first.reason, 'nothing-to-sample');
+  const fetches = c1.messages.fetchCalls;
+  assert.equal(store.state.data.portraitCount, 0, 'the slot is given back');
+  const profile = store.getUser('g1', 'a');
+  assert.equal(profile.portraitAttemptAt, iso(T0));
+  assert.equal(portraitDue(profile, T0 + 23 * 3_600_000, portraitSettings(hot.config)).reason, 'retry-wait');
+
+  nowMs = T0 + 2 * 3_600_000; // well past the 15-minute history cache
+  assert.equal((await warmup.refreshPortrait('g1', 'a', 'a cue')).reason, 'retry-wait');
+  assert.equal(c1.messages.fetchCalls, fetches, 'no second crawl');
+  assert.equal(llm.calls.length, 0);
+});
+
+test('refreshPortrait: a sample thinner than warmup.minMessages sends nothing, gives the slot back and backs off', async () => {
+  const hot = fakeHot();
+  hot.config.warmup.minMessages = 5;
+  const llm = scriptedLlm([{ character: 'c', style: 's' }]);
+  const { warmup, store } = portraitWarmup({ hot, llm });
+  seedPortrait(store, 'a');
+
+  const result = await warmup.refreshPortrait('g1', 'a', '', { windows: [win('c1', lines('c1', 'a', 3, T0))] });
+
+  assert.equal(result.reason, 'thin-sample');
+  assert.equal(llm.calls.length, 0);
+  assert.equal(store.state.data.portraitCount, 0);
+  assert.ok(store.getUser('g1', 'a').portraitAttemptAt);
+});
+
+test('refreshPortrait: the stored portrait reaches the request as the draft, member tokens resolved for the analyzer', async () => {
+  const llm = scriptedLlm([{ character: 'c', style: 's' }]);
+  const { warmup, store } = portraitWarmup({ llm });
+  store.touchUser('g1', '222222222222222222', 'Βράνος', T0);
+  seedPortrait(store, 'a', { character: 'φίλη του <@222222222222222222>, γελάει εύκολα', style: 'σύντομα, χωρίς τελείες' });
+
+  await warmup.refreshPortrait('g1', 'a', '', { windows: [win('c1', lines('c1', 'a', 5, T0))] });
+
+  const draft = JSON.parse(/<draft>\n([\s\S]*?)\n<\/draft>/.exec(llm.calls[0].messages[1].content)[1]);
+  assert.deepEqual(draft, { character: 'φίλη του Βράνος (id:222222222222222222), γελάει εύκολα', style: 'σύντομα, χωρίς τελείες' });
+});
+
+test('refreshPortrait: a refresh that finishes while paused writes nothing', async () => {
+  const llm = gatedLlm({ character: 'νέος', style: 'νέο' });
+  const { warmup, store } = portraitWarmup({ llm });
+  seedPortrait(store, 'a');
+
+  const pending = warmup.refreshPortrait('g1', 'a', '', { windows: [win('c1', lines('c1', 'a', 5, T0))] });
+  await waitFor(() => llm.calls.length === 1);
+  const sent = JSON.stringify(store.getUser('g1', 'a')); // the attempt stamp was written before sending
+  store.state.data.paused = true;
+  llm.release();
+  const result = await pending;
+
+  assert.deepEqual([result.ok, result.reason], [false, 'paused']);
+  assert.equal(JSON.stringify(store.getUser('g1', 'a')), sent, 'nothing written after the pause');
+  assert.equal(store.getUser('g1', 'a').character, 'μιλάει πολύ');
+});
+
+test('refreshPortrait: waitIdle waits for a refresh in flight, which never mutes the persona', async () => {
+  const llm = gatedLlm({ character: 'νέος', style: 'νέο' });
+  const { warmup, store } = portraitWarmup({ llm });
+  seedPortrait(store, 'a');
+
+  const pending = warmup.refreshPortrait('g1', 'a', '', { windows: [win('c1', lines('c1', 'a', 5, T0))] });
+  await waitFor(() => llm.calls.length === 1);
+  assert.equal(warmup.isWarmingUp(), false);
+  let idle = false;
+  const waiting = warmup.waitIdle().then(() => {
+    idle = true;
+  });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(idle, false, 'waitIdle waits for the refresh in flight');
+
+  llm.release();
+  await pending;
+  await waiting;
+  assert.equal(idle, true);
+  assert.equal(store.getUser('g1', 'a').character, 'νέος');
+});
+
+test('refreshPortrait: the same member is never refreshed twice at once', async () => {
+  const llm = gatedLlm({ character: 'νέος', style: 'νέο' });
+  const { warmup, store } = portraitWarmup({ llm });
+  seedPortrait(store, 'a');
+  const windows = [win('c1', lines('c1', 'a', 5, T0))];
+
+  const pending = warmup.refreshPortrait('g1', 'a', '', { windows });
+  const second = await warmup.refreshPortrait('g1', 'a', 'a cue', { windows, force: true });
+
+  assert.equal(second.reason, 'busy');
+  assert.equal(store.state.data.portraitCount, 1, 'one slot, not two');
+  llm.release();
+  assert.equal((await pending).ok, true);
+});
+
+test('writePersonAnswer: a warmup person run stamps portraitRefreshedAt and portraitMessageCount', async () => {
+  const store = createStore({ dataDir: tmpDataDir() });
+  const history = [rawMessage(1000, { authorId: 'a' }), rawMessage(2000, { authorId: 'a' }), rawMessage(3000, { authorId: 'a' }), rawMessage(4000, { authorId: 'b' })];
+  const client = fakeClient(fakeGuild('g1', [fakeChannel('c1', history)]));
+  const llm = scriptedLlm([{ character: 'μιλάει πολύ', style: 'σύντομα' }, { character: '', style: '', interests: [{ topic: 'σκάκι', note: '', times: 1 }] }]);
+  const warmup = createWarmup({ hot: fakeHot(), store, client, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => 10_000_000 });
+  store.touchUser('g1', 'a', 'a', 500);
+  store.updateUser('g1', 'a', { messageCount: 700, portraitAttemptAt: new Date(9_000_000).toISOString() });
+
+  assert.equal((await warmup.runPerson('g1', 'a')).ok, true);
+  const profile = store.getUser('g1', 'a');
+  assert.equal(profile.character, 'μιλάει πολύ');
+  assert.equal(profile.messageCount, 3, 'the run SETS the count from its window');
+  assert.equal(profile.portraitMessageCount, 3, 'and the stamp re-bases on it');
+  assert.equal(profile.portraitRefreshedAt, new Date(10_000_000).toISOString());
+  assert.equal(profile.portraitAttemptAt, null);
+
+  // An answer that carries no portrait writes none, so stamps none.
+  assert.equal((await warmup.runPerson('g1', 'b')).ok, true);
+  assert.equal(store.getUser('g1', 'b').portraitRefreshedAt, undefined);
+  assert.deepEqual(store.getUser('g1', 'b').interests.map((it) => it.topic), ['σκάκι']);
+});
+
+test('portrait scheduler: one history crawl per check, and a member with no lines in it is stamped and not picked again within the retry time', async () => {
+  let nowMs = T0;
+  const history = [
+    ...Array.from({ length: 5 }, (_, i) => rawMessage(T0 - (60 - i) * 60_000, { authorId: 'a' })),
+    ...Array.from({ length: 4 }, (_, i) => rawMessage(T0 - (30 - i) * 60_000, { authorId: 'b' })),
+  ];
+  const c1 = fakeChannel('c1', history);
+  const hot = fakeHot();
+  hot.config.memory.portraitRefreshPerDay = 3;
+  // Every answer takes 20 minutes: longer than the 15-minute history cache.
+  const llm = scriptedLlm([
+    () => {
+      nowMs += 20 * 60_000;
+      return { character: 'νέος', style: 'νέο' };
+    },
+  ]);
+  const store = createStore({ dataDir: tmpDataDir() });
+  const warmup = createWarmup({ hot, store, client: fakeClient(fakeGuild('g1', [c1])), llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => nowMs });
+  for (const [id, count] of [['z', 500], ['a', 400], ['b', 350]]) {
+    seedPortrait(store, id, { at: T0 - 3_600_000, character: 'παλιός', style: 'παλιό', messageCount: count });
+  }
+  const scheduler = createPortraitScheduler({ hot, store, refreshPortrait: warmup.refreshPortrait, isWarmingUp: warmup.isWarmingUp, getGuildId: () => 'g1', now: () => nowMs });
+
+  const cycle = await scheduler.tick();
+
+  assert.deepEqual(cycle, { ran: true, due: 3, started: 3, refreshed: 2, skipped: 1 });
+  assert.equal(c1.messages.fetchCalls, 1, 'one crawl for the whole check');
+  assert.equal(store.getUser('g1', 'z').portraitAttemptAt, iso(T0), 'no lines in the window: stamped');
+  assert.equal(store.getUser('g1', 'z').character, 'παλιός');
+  assert.equal(store.getUser('g1', 'a').character, 'νέος');
+  assert.equal(store.getUser('g1', 'b').character, 'νέος');
+  assert.equal(store.state.data.portraitCount, 2);
+
+  nowMs += 61 * 60_000;
+  assert.deepEqual(await scheduler.tick(), { ran: false, reason: 'none-due' });
+  assert.equal(c1.messages.fetchCalls, 1, 'nobody due: no crawl');
+});
+
+test('portrait scheduler: features.portraitRefresh false starts no refresh, the owner\'s command still works', async () => {
+  const hot = fakeHot();
+  hot.config.features = { portraitRefresh: false };
+  const llm = scriptedLlm([{ character: 'νέος', style: 'νέο' }]);
+  const { warmup, store } = portraitWarmup({ hot, llm });
+  seedPortrait(store, 'a', { messageCount: 900 });
+  const scheduler = createPortraitScheduler({ hot, store, refreshPortrait: warmup.refreshPortrait, isWarmingUp: warmup.isWarmingUp, getGuildId: () => 'g1', now: () => T0 + 30 * 3_600_000 });
+
+  assert.deepEqual(await scheduler.tick(), { ran: false, reason: 'off' });
+  assert.equal(llm.calls.length, 0);
+
+  const owner = await warmup.refreshPortrait('g1', 'a', '', { force: true, windows: [win('c1', lines('c1', 'a', 5, T0))] });
+  assert.equal(owner.ok, true);
+  assert.equal(store.getUser('g1', 'a').character, 'νέος');
+});
+
+// ---------------------------------------------------------------------------
+// refreshPortrait(): what happens while a refresh is in flight (forget, wipe, pause, a warmup
+// run), the slot and the stamps on every early end, the LLM's daily cap before any history read,
+// and where the next sample starts.
+// ---------------------------------------------------------------------------
+
+/** A promise with its resolver, to hold a fake dependency (a history read, one answer). */
+function deferred() {
+  let resolve;
+  const promise = new Promise((r) => {
+    resolve = r;
+  });
+  return { promise, resolve };
+}
+
+/** A fake `llm.complete` whose call `i` answers `answers[i]` once `gates[i]` (if any) resolves. */
+function perCallLlm(answers, gates = []) {
+  const calls = [];
+  return {
+    calls,
+    complete: async (messages, opts) => {
+      const i = calls.length;
+      calls.push({ messages, opts });
+      if (gates[i]) await gates[i].promise;
+      return { text: JSON.stringify(answers[Math.min(i, answers.length - 1)]), usage: {}, estimated: 0, finishReason: 'stop' };
+    },
+  };
+}
+
+const userFileOf = (dir, userId) => path.join(dir, 'guilds', 'g1', 'users', `${userId}.json`);
+
+test('refreshPortrait: a member forgotten while the request is in flight is not written back', async () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  const llm = gatedLlm({ character: 'νέος', style: 'νέο' });
+  const { warmup } = portraitWarmup({ store, llm });
+  seedPortrait(store, 'a');
+  store.flush();
+
+  const pending = warmup.refreshPortrait('g1', 'a', '', { windows: [win('c1', lines('c1', 'a', 5, T0))] });
+  await waitFor(() => llm.calls.length === 1);
+  store.forgetUser('g1', 'a');
+  llm.release();
+  const result = await pending;
+  store.flush();
+
+  assert.deepEqual([result.ok, result.reason], [false, 'gone']);
+  assert.equal(store.getUser('g1', 'a'), null);
+  assert.equal(fs.existsSync(userFileOf(dir, 'a')), false, 'the forgotten file is not re-created');
+  assert.equal(store.state.data.portraitCount, 1, 'the request was sent: the slot is spent');
+});
+
+test('refreshPortrait: a member forgotten or wiped during the history read sends nothing and gives the slot back', async () => {
+  for (const remove of [(store) => store.forgetUser('g1', 'a'), (store) => store.wipeGuild('g1')]) {
+    const dir = tmpDataDir();
+    const store = createStore({ dataDir: dir });
+    const llm = scriptedLlm([{ character: 'νέος', style: 'νέο' }]);
+    const { warmup } = portraitWarmup({ store, llm, client: fakeClient(fakeGuild('g1', [])) });
+    seedPortrait(store, 'a');
+    store.flush();
+    const read = deferred();
+
+    const pending = warmup.refreshPortrait('g1', 'a', '', { crawl: { windows: read.promise } });
+    remove(store);
+    read.resolve([win('c1', lines('c1', 'a', 5, T0))]);
+    const result = await pending;
+    store.flush();
+
+    assert.deepEqual([result.ok, result.reason], [false, 'gone']);
+    assert.equal(llm.calls.length, 0);
+    assert.equal(store.state.data.portraitCount, 0, 'the slot is given back');
+    assert.equal(fs.existsSync(userFileOf(dir, 'a')), false);
+  }
+});
+
+test('refreshPortrait: a member without a stored profile is refreshed only when forced', async () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  const llm = scriptedLlm([{ character: 'νέος', style: 'νέο' }]);
+  const { warmup } = portraitWarmup({ store, llm });
+  const windows = [win('c1', lines('c1', 'a', 5, T0))];
+
+  const cue = await warmup.refreshPortrait('g1', 'a', 'a cue', { windows });
+  assert.deepEqual([cue.ok, cue.reason], [false, 'no-profile']);
+  assert.equal(store.state.data.portraitCount, undefined, 'no slot taken');
+  assert.equal(llm.calls.length, 0);
+  store.flush();
+  assert.equal(fs.existsSync(userFileOf(dir, 'a')), false);
+
+  // The owner's command names the member on purpose.
+  const owner = await warmup.refreshPortrait('g1', 'a', '', { windows, force: true });
+  assert.equal(owner.ok, true);
+  assert.equal(store.getUser('g1', 'a').character, 'νέος');
+});
+
+test('portrait scheduler: a candidate forgotten before its turn is not re-created', async () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  const nowMs = T0 + 3_600_000;
+  const history = [
+    ...Array.from({ length: 4 }, (_, i) => rawMessage(T0 - (50 - i) * 60_000, { authorId: 'x' })),
+    ...Array.from({ length: 4 }, (_, i) => rawMessage(T0 - (40 - i) * 60_000, { authorId: 'y' })),
+  ];
+  const c1 = fakeChannel('c1', history);
+  const hot = fakeHot();
+  const llm = gatedLlm({ character: 'νέος', style: 'νέο' });
+  const warmup = createWarmup({ hot, store, client: fakeClient(fakeGuild('g1', [c1])), llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => nowMs });
+  seedPortrait(store, 'x', { at: T0 - 3_600_000, messageCount: 500 });
+  seedPortrait(store, 'y', { at: T0 - 3_600_000, messageCount: 400 });
+  store.flush();
+  const scheduler = createPortraitScheduler({ hot, store, refreshPortrait: warmup.refreshPortrait, isWarmingUp: warmup.isWarmingUp, getGuildId: () => 'g1', now: () => nowMs });
+
+  const cycle = scheduler.tick();
+  await waitFor(() => llm.calls.length === 1, 500);
+  store.forgetUser('g1', 'y'); // the cycle already picked x and y
+  llm.release();
+  assert.deepEqual(await cycle, { ran: true, due: 2, started: 1, refreshed: 1, skipped: 1 }, 'y is skipped at its turn, no refresh started');
+  store.flush();
+
+  assert.equal(llm.calls.length, 1, 'no request for the forgotten member');
+  assert.equal(store.getUser('g1', 'y'), null);
+  assert.equal(fs.existsSync(userFileOf(dir, 'y')), false);
+  assert.equal(store.getUser('g1', 'x').character, 'νέος');
+  assert.equal(store.state.data.portraitCount, 1);
+});
+
+test('portrait scheduler: a candidate forgotten and re-created by a new message before its turn is not refreshed', async () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  const nowMs = T0 + 3_600_000;
+  const history = [
+    ...Array.from({ length: 4 }, (_, i) => rawMessage(T0 - (50 - i) * 60_000, { authorId: 'x' })),
+    ...Array.from({ length: 4 }, (_, i) => rawMessage(T0 - (40 - i) * 60_000, { authorId: 'y', content: `before forget ${i}` })),
+  ];
+  const c1 = fakeChannel('c1', history);
+  const hot = fakeHot();
+  const llm = gatedLlm({ character: 'NEW', style: 'NEW' });
+  const warmup = createWarmup({ hot, store, client: fakeClient(fakeGuild('g1', [c1])), llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => nowMs });
+  seedPortrait(store, 'x', { at: T0 - 3_600_000, messageCount: 500 });
+  seedPortrait(store, 'y', { at: T0 - 3_600_000, messageCount: 400 });
+  store.flush();
+  const scheduler = createPortraitScheduler({ hot, store, refreshPortrait: warmup.refreshPortrait, isWarmingUp: warmup.isWarmingUp, getGuildId: () => 'g1', now: () => nowMs });
+
+  const cycle = scheduler.tick();
+  await waitFor(() => llm.calls.length === 1, 500);
+  store.forgetUser('g1', 'y'); // the cycle already picked x and y
+  store.touchUser('g1', 'y', 'y', nowMs); // y posts once: a fresh profile
+  llm.release();
+  assert.deepEqual(await cycle, { ran: true, due: 2, started: 1, refreshed: 1, skipped: 1 });
+  store.flush();
+
+  assert.equal(llm.calls.length, 1, 'no second request');
+  const y = store.getUser('g1', 'y');
+  assert.equal(y.messageCount, 1);
+  assert.equal(y.character, '');
+  assert.equal(y.style, '');
+  assert.equal(y.portraitRefreshedAt ?? null, null);
+  assert.equal(y.portraitMessageCount ?? null, null);
+  assert.equal(y.portraitAttemptAt ?? null, null);
+  assert.equal(store.state.data.portraitCount, 1);
+});
+
+test('refreshPortrait: a profile re-created after a forget never samples a line from before it; the owner\'s forced refresh reads the whole window', async () => {
+  const llm = scriptedLlm([{ character: 'νέος', style: 'νέο' }]);
+  const { warmup, store } = portraitWarmup({ llm }); // 30 hours after T0
+  seedPortrait(store, 'y', { at: T0 });
+  store.forgetUser('g1', 'y');
+  const after = T0 + 10 * 3_600_000;
+  for (let i = 0; i < 30; i += 1) store.touchUser('g1', 'y', 'y', after + i * 60_000);
+  const windows = [
+    win('c1', lines('c1', 'y', 40, T0, (i) => `πριν ${i}`)),
+    win('c2', lines('c2', 'y', 30, after, (i) => `μετά ${i}`)),
+  ];
+
+  const result = await warmup.refreshPortrait('g1', 'y', '', { windows });
+
+  assert.equal(result.ok, true);
+  const own = ownLinesOf(llm.calls[0]);
+  assert.equal(own.length, 30);
+  assert.ok(own.every((line) => line.includes('μετά')), 'no own line from before the profile was re-created');
+  assert.match(llm.calls[0].messages[1].content, /<member>\ny \(id:y\), 30 messages in the window/);
+
+  const forced = await warmup.refreshPortrait('g1', 'y', '', { windows, force: true });
+  assert.equal(forced.ok, true);
+  assert.equal(ownLinesOf(llm.calls[1]).length, 70, 'the owner names the member on purpose: the whole window');
+});
+
+test('refreshPortrait: a re-created profile whose own lines all predate it samples nothing and backs off', async () => {
+  const llm = scriptedLlm([{ character: 'νέος', style: 'νέο' }]);
+  const now = T0 + 30 * 3_600_000;
+  const { warmup, store } = portraitWarmup({ llm, now: () => now });
+  seedPortrait(store, 'y', { at: T0 });
+  store.forgetUser('g1', 'y');
+  for (let i = 0; i < 30; i += 1) store.touchUser('g1', 'y', 'y', now - 60_000 + i);
+
+  const result = await warmup.refreshPortrait('g1', 'y', '', { windows: [win('c1', lines('c1', 'y', 40, T0))] });
+
+  assert.deepEqual([result.ok, result.reason], [false, 'nothing-to-sample']);
+  assert.equal(llm.calls.length, 0);
+  assert.equal(store.getUser('g1', 'y').character, '');
+  assert.equal(store.getUser('g1', 'y').portraitAttemptAt, iso(now), 'backs off memory.portraitRetryHours');
+  assert.equal(store.state.data.portraitCount, 0, 'the slot is given back');
+});
+
+test('refreshPortrait: a pause during the history read gives the slot back and stamps nothing', async () => {
+  const llm = scriptedLlm([{ character: 'νέος', style: 'νέο' }]);
+  const { warmup, store } = portraitWarmup({ llm, client: fakeClient(fakeGuild('g1', [])) });
+  seedPortrait(store, 'a');
+  const read = deferred();
+
+  const pending = warmup.refreshPortrait('g1', 'a', '', { crawl: { windows: read.promise } });
+  assert.equal(store.state.data.portraitCount, 1, 'the slot is held during the read');
+  store.state.data.paused = true;
+  read.resolve([win('c1', lines('c1', 'a', 5, T0))]);
+  const result = await pending;
+
+  assert.deepEqual([result.ok, result.reason], [false, 'paused']);
+  assert.equal(llm.calls.length, 0);
+  assert.equal(store.state.data.portraitCount, 0, 'the slot is given back');
+  assert.equal(store.getUser('g1', 'a').portraitAttemptAt ?? null, null, 'the pause backs nobody off');
+});
+
+test('refreshPortrait: a sample still over the cap at warmup.minMessages own lines is over-cap: nothing sent, slot back, attempt stamped', async () => {
+  const hot = fakeHot({ prompts: { rules: 'a rule about the long story of the weekend trip. '.repeat(200) } });
+  hot.config.llm.maxRequestTokens = 1000;
+  hot.config.llm.safetyMargin = 1;
+  hot.config.warmup.minMessages = 2;
+  const llm = scriptedLlm([{ character: 'νέος', style: 'νέο' }]);
+  const now = T0 + 30 * 3_600_000;
+  const { warmup, store } = portraitWarmup({ hot, llm, now: () => now });
+  seedPortrait(store, 'a');
+
+  const result = await warmup.refreshPortrait('g1', 'a', '', { windows: [win('c1', lines('c1', 'a', 5, T0))] });
+
+  assert.deepEqual([result.ok, result.reason], [false, 'over-cap']);
+  assert.equal(llm.calls.length, 0, 'no request is built past the cap');
+  assert.equal(store.state.data.portraitCount, 0, 'the slot is given back');
+  assert.equal(store.getUser('g1', 'a').portraitAttemptAt, iso(now), 'the member backs off');
+  assert.equal(store.getUser('g1', 'a').character, 'μιλάει πολύ');
+});
+
+test('refreshPortrait: the LLM daily cap keeps an earlier attempt stamp as it was', async () => {
+  const now = T0 + 30 * 3_600_000;
+  const earlier = iso(now - 30 * 3_600_000); // past memory.portraitRetryHours
+  const llm = textLlm([new DailyCapError('daily LLM request cap reached (300)')]);
+  const { warmup, store } = portraitWarmup({ llm, now: () => now });
+  seedPortrait(store, 'a', { portraitAttemptAt: earlier });
+
+  const result = await warmup.refreshPortrait('g1', 'a', '', { windows: [win('c1', lines('c1', 'a', 5, T0))] });
+
+  assert.deepEqual([result.ok, result.reason, result.cap], [false, 'daily-cap', 'llm']);
+  assert.equal(store.getUser('g1', 'a').portraitAttemptAt, earlier, 'neither a fresh back-off nor a cleared one');
+  assert.equal(store.state.data.portraitCount, 0);
+});
+
+test('refreshPortrait: today\'s LLM requests at llm.maxRequestsPerDay end the refresh before any history read', async () => {
+  const now = T0 + 30 * 3_600_000;
+  const c1 = fakeChannel('c1', Array.from({ length: 3 }, (_, i) => rawMessage(T0 + i * 60_000, { authorId: 'a' })));
+  const hot = fakeHot();
+  hot.config.llm.maxRequestsPerDay = 5;
+  const llm = scriptedLlm([{ character: 'νέος', style: 'νέο' }]);
+  const { warmup, store } = portraitWarmup({ hot, llm, client: fakeClient(fakeGuild('g1', [c1])), now: () => now });
+  seedPortrait(store, 'a');
+  Object.assign(store.state.data, { llmDay: new Date(now).toISOString().slice(0, 10), llmCount: 5 });
+
+  const capped = await warmup.refreshPortrait('g1', 'a', 'a cue');
+  assert.deepEqual([capped.ok, capped.reason, capped.cap], [false, 'daily-cap', 'llm']);
+  assert.equal(c1.messages.fetchCalls, 0, 'no history read');
+  assert.equal(store.state.data.portraitCount, undefined, 'no slot taken');
+  assert.equal(store.getUser('g1', 'a').portraitAttemptAt ?? null, null);
+
+  hot.config.llm.maxRequestsPerDay = 6; // a live raise
+  assert.equal((await warmup.refreshPortrait('g1', 'a', 'a cue')).ok, true);
+  assert.equal(store.state.data.llmCount, 5, 'the check only reads the LLM counter');
+});
+
+test('refreshPortrait: an answer that lands while a warmup run is in flight is not stored', async () => {
+  const gates = [deferred(), deferred()];
+  const llm = perCallLlm([{ character: 'από την ανανέωση', style: 'ανανέωση' }, { character: 'από την προθέρμανση', style: 'προθέρμανση' }], gates);
+  const c1 = fakeChannel('c1', Array.from({ length: 3 }, (_, i) => rawMessage(T0 + i * 60_000, { authorId: 'a' })));
+  const { warmup, store } = portraitWarmup({ llm, client: fakeClient(fakeGuild('g1', [c1])) });
+  seedPortrait(store, 'a');
+
+  const refresh = warmup.refreshPortrait('g1', 'a', '', { windows: [win('c1', lines('c1', 'a', 5, T0))] });
+  await waitFor(() => llm.calls.length === 1);
+  const redo = warmup.runPerson('g1', 'a'); // the owner's /nep warmup users user:a
+  await waitFor(() => llm.calls.length === 2, 1000);
+  gates[0].resolve();
+  const outcome = await refresh;
+
+  assert.deepEqual([outcome.ok, outcome.reason], [false, 'warming-up']);
+  assert.equal(store.getUser('g1', 'a').character, 'μιλάει πολύ', 'the late answer wrote nothing');
+  gates[1].resolve();
+  assert.equal((await redo).ok, true);
+  assert.equal(store.getUser('g1', 'a').character, 'από την προθέρμανση', 'the redo is the portrait');
+});
+
+test('refreshPortrait: a portrait written while the request was in flight is never overwritten', async () => {
+  const gates = [deferred()];
+  const llm = perCallLlm([{ character: 'από την ανανέωση', style: 'ανανέωση' }, { character: 'από την προθέρμανση', style: 'προθέρμανση' }], gates);
+  const c1 = fakeChannel('c1', Array.from({ length: 3 }, (_, i) => rawMessage(T0 + i * 60_000, { authorId: 'a' })));
+  const { warmup, store } = portraitWarmup({ llm, client: fakeClient(fakeGuild('g1', [c1])) });
+  seedPortrait(store, 'a');
+
+  const refresh = warmup.refreshPortrait('g1', 'a', '', { windows: [win('c1', lines('c1', 'a', 5, T0))] });
+  await waitFor(() => llm.calls.length === 1);
+  assert.equal((await warmup.runPerson('g1', 'a')).ok, true, 'a person redo runs to the end meanwhile');
+  gates[0].resolve();
+  const outcome = await refresh;
+
+  assert.deepEqual([outcome.ok, outcome.reason], [false, 'changed']);
+  assert.equal(store.getUser('g1', 'a').character, 'από την προθέρμανση');
+  assert.equal(store.getUser('g1', 'a').style, 'προθέρμανση');
+});
+
+test('refreshPortrait: member tokens in the hint reach the analyzer as name (id:...)', async () => {
+  const llm = scriptedLlm([{ character: 'c', style: 's' }]);
+  const { warmup, store } = portraitWarmup({ llm });
+  store.touchUser('g1', '222222222222222222', 'Βράνος', T0);
+  seedPortrait(store, 'a');
+
+  await warmup.refreshPortrait('g1', 'a', 'λέει άλλα από όσα είπε για αυτήν ο <@222222222222222222>', { windows: [win('c1', lines('c1', 'a', 5, T0))] });
+
+  const hint = /<hint>\n([\s\S]*?)\n<\/hint>/.exec(llm.calls[0].messages[1].content)[1];
+  assert.equal(hint, 'λέει άλλα από όσα είπε για αυτήν ο Βράνος (id:222222222222222222)');
+});
+
+test('refreshPortrait: a throw before the request is sent gives the slot back and stamps nothing', async () => {
+  const llm = scriptedLlm([{ character: 'c', style: 's' }]);
+  const broken = { ratio: 1, apply() { throw new TypeError('broken'); }, observe() {} };
+  const { warmup, store } = portraitWarmup({ llm, calibrator: broken });
+  seedPortrait(store, 'a');
+  const windows = [win('c1', lines('c1', 'a', 5, T0))];
+
+  await assert.rejects(warmup.refreshPortrait('g1', 'a', '', { windows }), TypeError);
+  assert.equal(store.state.data.portraitCount, 0, 'the slot is given back');
+  assert.equal(store.getUser('g1', 'a').portraitAttemptAt ?? null, null);
+  assert.equal(llm.calls.length, 0);
+  await warmup.waitIdle(); // nothing left in flight
+  await assert.rejects(warmup.refreshPortrait('g1', 'a', '', { windows }), TypeError, 'the member is free again, not busy');
+});
+
+test('refreshPortrait: the next sample starts where the history read began, so a line written during a refresh is not skipped', async () => {
+  let nowMs = T0 + 3_600_000;
+  const readStart = nowMs;
+  const history = Array.from({ length: 3 }, (_, i) => rawMessage(T0 + i * 60_000, { authorId: 'a', content: `παλιό ${i}` }));
+  const guild = fakeGuild('g1', [fakeChannel('c1', history)]);
+  const hot = fakeHot();
+  hot.config.warmup.minMessages = 1;
+  const llm = scriptedLlm([
+    () => {
+      nowMs += 20 * 60_000; // the answer takes 20 minutes
+      return { character: 'νέος', style: 'νέο' };
+    },
+  ]);
+  const { warmup, store } = portraitWarmup({ hot, llm, client: fakeClient(guild), now: () => nowMs });
+  seedPortrait(store, 'a', { at: T0 });
+
+  assert.equal((await warmup.refreshPortrait('g1', 'a', '')).ok, true);
+  assert.equal(store.getUser('g1', 'a').portraitRefreshedAt, iso(readStart), 'stamped with the read, not the write');
+
+  // A line written while that request was in flight, read by the next crawl a day later.
+  const during = rawMessage(readStart + 5 * 60_000, { authorId: 'a', content: 'γράφτηκε στο μεταξύ' });
+  const later = fakeChannel('c1', [...history.map((m) => ({ ...m })), during]);
+  later.guild = guild;
+  guild.channels.cache.set('c1', later);
+  nowMs += 25 * 3_600_000;
+  assert.equal((await warmup.refreshPortrait('g1', 'a', '')).ok, true);
+
+  const own = ownLinesOf(llm.calls[1]);
+  assert.equal(own.length, 1);
+  assert.ok(own[0].includes('γράφτηκε στο μεταξύ'));
+});
+
+test('writePersonAnswer: a person run stamps the time its history read began', async () => {
+  let nowMs = 10_000_000;
+  const store = createStore({ dataDir: tmpDataDir() });
+  const history = [rawMessage(1000, { authorId: 'a' }), rawMessage(2000, { authorId: 'a' })];
+  const client = fakeClient(fakeGuild('g1', [fakeChannel('c1', history)]));
+  const llm = scriptedLlm([
+    () => {
+      nowMs += 20 * 60_000;
+      return { character: 'μιλάει πολύ', style: 'σύντομα' };
+    },
+  ]);
+  const warmup = createWarmup({ hot: fakeHot(), store, client, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => nowMs });
+
+  assert.equal((await warmup.runPerson('g1', 'a')).ok, true);
+  assert.equal(store.getUser('g1', 'a').portraitRefreshedAt, new Date(10_000_000).toISOString());
+});
+
+test('writePersonAnswer: a person run with no portrait keeps the own messages since the last one', async () => {
+  const store = createStore({ dataDir: tmpDataDir() });
+  const history = [rawMessage(1000, { authorId: 'a' }), rawMessage(2000, { authorId: 'a' }), rawMessage(3000, { authorId: 'a' })];
+  const client = fakeClient(fakeGuild('g1', [fakeChannel('c1', history)]));
+  const llm = scriptedLlm([{ character: '', style: '', interests: [{ topic: 'σκάκι', note: '', times: 1 }] }]);
+  const warmup = createWarmup({ hot: fakeHot(), store, client, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => 10_000_000 });
+  store.touchUser('g1', 'a', 'a', 500);
+  store.updateUser('g1', 'a', { messageCount: 2000, portraitMessageCount: 1999 });
+
+  assert.equal((await warmup.runPerson('g1', 'a')).ok, true);
+  const profile = store.getUser('g1', 'a');
+  assert.equal(profile.messageCount, 3, 'the run SETS the count from its window');
+  assert.equal(profile.portraitMessageCount, 2, 'the stamp moved with it');
+  assert.equal(profile.portraitRefreshedAt, undefined);
 });

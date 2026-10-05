@@ -17,6 +17,7 @@ import { emptyAffinity, applyDelta } from '../src/memory/affinity.js';
 import { upsertLore } from '../src/memory/lore.js';
 import { createStore } from '../src/memory/store.js';
 import { createMemoryUpdater } from '../src/memory/update.js';
+import { createWarmup } from '../src/memory/warmup.js';
 import { createSpontaneous } from '../src/behavior/spontaneous.js';
 import { buildDrawPrompt } from '../src/behavior/prompt.js';
 import { familyOf, ImageCapError, ImageGenError } from '../src/llm/images.js';
@@ -3515,6 +3516,93 @@ test('run: pause waits for an in-flight live-analyzer run to finish -- its resul
     const onDisk = JSON.parse(fs.readFileSync(path.join(dataDir, 'guilds', guildId, 'guild.json'), 'utf8'));
     assert.equal(onDisk.patterns, 'set by the in-flight run', 'and flushed to disk before pause completed');
     assert.deepEqual(realStore.getBuffer(guildId), [], 'the buffer was shifted by the completed run, not left for a later write');
+  } finally {
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+// /nep pause and a portrait refresh in flight (src/memory/warmup.js#refreshPortrait, started by
+// src/memory/portrait.js's scheduler, a cue or the owner): pause waits for it through
+// warmup.waitIdle, and a refresh whose answer arrives after the pause writes nothing.
+test('run: pause waits for a portrait refresh in flight and nothing is written after it', async () => {
+  const rootDir = makeRoot();
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'nep-admin-portrait-'));
+  try {
+    const realStore = createStore({ dataDir });
+    const guildId = 'g1';
+    const t0 = Date.UTC(2026, 9, 1, 12);
+    realStore.touchUser(guildId, 'u1', 'Ἀλκμήνη', t0);
+    realStore.applyProfileOps(guildId, 'u1', { character: 'μιλάει πολύ', style: 'σύντομα' }, { fieldChars: 400 });
+    realStore.flush();
+    const windows = [
+      {
+        id: 'c1',
+        name: 'general',
+        category: null,
+        topic: null,
+        messages: Array.from({ length: 5 }, (_, i) => ({
+          ...slimBufferMessage({ id: `m${i}`, authorId: 'u1', authorName: 'Ἀλκμήνη', content: `γεια ${i}`, ts: t0 + i * 60_000 }),
+          forwarded: [],
+        })),
+      },
+    ];
+
+    let resolveLlm;
+    let sent = 0;
+    const llm = {
+      complete: () => {
+        sent += 1;
+        return new Promise((resolve) => {
+          resolveLlm = () => resolve({ text: JSON.stringify({ character: 'νέος χαρακτήρας', style: 'νέο ύφος' }), usage: {}, estimated: 1, finishReason: 'stop' });
+        });
+      },
+    };
+    const warmupHot = {
+      config: {
+        bot: { timezone: 'UTC' },
+        context: { gapMarkerMinutes: 20, maxMessageChars: 800 },
+        llm: { model: 'x/y', maxRequestTokens: 50000, safetyMargin: 0.9 },
+        memory: { fieldChars: 400, mainChannelIds: [] },
+        warmup: { minMessages: 2, contextBefore: 1, maxChannelShare: 1 },
+      },
+      prompts: { profile: 'PROFILE {{name}}', 'character-card': 'CARD {{name}}', labels },
+    };
+    const warmup = createWarmup({
+      hot: warmupHot,
+      store: realStore,
+      client: { user: { id: 'self' }, guilds: { cache: new Map() } },
+      llm,
+      calibrator: { ratio: 1, apply: (n) => n, observe: () => {} },
+      getSelfName: () => 'Nept',
+      now: () => t0 + 30 * 3_600_000,
+    });
+
+    const refresh = warmup.refreshPortrait(guildId, 'u1', '', { windows });
+    for (let i = 0; i < 50 && sent === 0; i += 1) await Promise.resolve();
+    assert.equal(sent, 1, 'the refresh request is in flight');
+    const onDiskBefore = fs.readFileSync(path.join(dataDir, 'guilds', guildId, 'users', 'u1.json'), 'utf8');
+
+    const { admin } = makeAdmin(rootDir, { store: realStore, warmup });
+    let pauseResolved = false;
+    const pausePromise = admin.run('pause', {}, {}).then((r) => {
+      pauseResolved = true;
+      return r;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(pauseResolved, false, 'pause must wait for the refresh in flight');
+
+    resolveLlm();
+    const outcome = await refresh;
+    await pausePromise;
+
+    assert.equal(pauseResolved, true);
+    assert.deepEqual([outcome.ok, outcome.reason], [false, 'paused']);
+    assert.equal(realStore.getUser(guildId, 'u1').character, 'μιλάει πολύ', 'the answer that came after the pause is not stored');
+    const onDisk = JSON.parse(fs.readFileSync(path.join(dataDir, 'guilds', guildId, 'users', 'u1.json'), 'utf8'));
+    assert.equal(onDisk.character, 'μιλάει πολύ');
+    assert.equal(onDisk.portraitRefreshedAt, undefined);
+    assert.notEqual(JSON.stringify(onDisk), onDiskBefore, 'only the attempt stamp written before the pause reached the disk');
+    assert.ok(onDisk.portraitAttemptAt);
   } finally {
     fs.rmSync(dataDir, { recursive: true, force: true });
   }
