@@ -39,7 +39,11 @@ All instructions are English in both layers; a character's speech samples may be
 | `rewatch-answer.md` | yes | Out-of-character prompt for the re-watch answer: the video model watches a clip again and answers one question in the language of the question. No character card | `{{today}}` `{{question}}` `{{maxChars}}` |
 | `address.md` | yes | Classifier: is this untagged message addressed to the persona, about it, or neither. Output is one word: `yes`, `overheard` or `no` | `{{name}}` |
 | `overheard.md` | no | Task: the message talks about the persona, not to it. Used INSTEAD of the mode prompt when the trigger kind is `overheard` and the file is present and non-blank; missing or blank falls back to the mode prompt (degraded) | `{{name}}` `{{author}}` `{{trigger}}` `{{target}}` |
-| `lookup.md` | no | Classifier: does the persona need to search the web to answer this message (`features.webLookup`). Receives a short transcript and a `<candidate>` block. Output is ONE line: a search query (plain words, at most 12) or `none` | `{{name}}` `{{today}}` |
+| `lookup.md` | no | Classifier: does the persona need to look something up (`features.webLookup`, `features.recall`). Receives a short transcript and a `<candidate>` block. Output is `none`, or up to four labelled lines: `web:` a web query, `server:` word forms to search in the server's messages, `who:` name forms to find a person, `when:` a date range. A single unlabelled line is still read as a web query | `{{name}}` `{{today}}` |
+| `recall-summary.md` | no | Out-of-character prompt for the recall summary (`features.recall`): reads the stretches of old chat found by the server search and answers the question, optionally naming one stretch the persona gets verbatim. No character card | `{{name}}` `{{answerChars}}` |
+| `room.md` | no | Classifier: is this message put to everyone in the room, or aimed at one person (`spontaneous.roomQuestionChance`). Receives a short transcript, the author's aliases and a `<candidate>` block. Output is ONE word: `yes` or `no` | `{{name}}` |
+| `route-channel.md` | no | Classifier: does answering this message need the persona to see another channel (`features.channelRoute`). Receives a short transcript, a `<channels>` list and a `<candidate>` block. Output is ONE line: a number from the list or `none` | `{{name}}` |
+| `elsewhere.md` | no | Task: the persona read a channel where it cannot write and may comment on it in the main channel (`features.elsewhere`). Used as the task text for a noticed turn. `<skip/>` is the normal outcome | `{{name}}` `{{channel}}` `{{destination}}` |
 | `read-link.md` | no | Out-of-character prompt for the link reader (`features.webLookup`, `web.links.enabled`): condense a fetched page into one paragraph. Receives the page title and body. No character card | `{{today}}` `{{maxChars}}` |
 | `search-summary.md` | no | Out-of-character prompt for the search condenser (`features.webLookup`, `web.search.enabled`): condense numbered search results into one note with inline sources. No character card | `{{today}}` `{{query}}` `{{maxChars}}` |
 | `private.md` | no | Appended after the mode prompt (`reply.md`), before `forced.md`, only in a DM (`features.privateMessages`). This is a private conversation: what is said here stays here; the persona keeps its public knowledge. A missing file adds nothing | `{{name}}` `{{author}}` |
@@ -54,12 +58,13 @@ All instructions are English in both layers; a character's speech samples may be
 
 `{{name}}` bot's display name · `{{author}}` caller's display name · `{{trigger}}` one of `labels.triggers.*` ·
 `{{target}}` index of the calling message (`#87`).
+`{{today}}` in `lookup.md` is the date in `bot.timezone`; in the describers (`describe.md`, `describe-video.md`, `describe-gif.md`) and `search-summary.md` it is the UTC date.
 System message = `system-prompt` + `character-card` + `rules` + `format`. For the analyzer: `memory.md` alone.
 On a forced turn (`/nep interject`, `/nep initiate`), `forced.md` is appended after the mode prompt if the file exists.
 On an `overheard` turn, `overheard.md` REPLACES the mode prompt (it is the task text, not an append). When `overheard.md` is missing or blank, the mode prompt is used instead (degraded: the mode prompt frames the line as said to the persona, which is not what happened).
 In a private chat, `private.md` is appended after the mode prompt (before `forced.md`) with the same `{{name}}` and `{{author}}` placeholders.
 The analyzer and the warmup's `profile.md` and `server.md` receive the character card and `rules.md` as a
-`<character>` block in the user message. `channel.md`, `describe.md`, `describe-video.md`, `describe-gif.md`, `draw.md`, `rewatch.md`, `rewatch-answer.md`, `address.md`, `lookup.md`, `read-link.md`, `search-summary.md` and `variety.md` do not receive the card.
+`<character>` block in the user message. `channel.md`, `describe.md`, `describe-video.md`, `describe-gif.md`, `draw.md`, `rewatch.md`, `rewatch-answer.md`, `address.md`, `lookup.md`, `read-link.md`, `search-summary.md`, `recall-summary.md`, `room.md`, `route-channel.md`, `elsewhere.md` and `variety.md` do not receive the card.
 
 `{{guildFieldChars}}` is `fieldChars * 2`, the limit code clamps guild-level patterns and starters to.
 `{{maxEpisodes}}` is the total episodes kept per person. Both are filled from config but not used by the default
@@ -84,16 +89,16 @@ The blocks of the user message. Empty ones are omitted; the order below is the o
 | `<other_channels>` | Up to `context.neighborMessages` messages per neighbouring channel, not older than `context.neighborMaxAgeMinutes`. When `features.mediaDescriptions` is on, a picture in a neighbour's line carries its cached caption when the describer cache already holds one; no new describe request is ever made for neighbours. A channel whose block is shown in `<channel_view>` is left out of `<other_channels>`; if the budget dropped the pulled block, the channel reappears here as an ordinary neighbour |
 | `<channel_view>` | Another channel pulled into this turn (`features.channelPull`). Contains one item per pulled channel: a header line (`labels.pull.header`), a read-only mark when applicable (`labels.server.readOnly`), an "older not shown" line when the window was cut, a "pictures not seen" count, earlier calls to the persona (with answered/unanswered/skipped marks), then the window lines. Lines use the same transcript format as `<chat>` but are numbered on after the chat (the chat has `#1`..`#N`, the pulled block starts at `#N+1`), so every `#n` is unique across blocks. Pictures appear as captions or blind tags only, never as attached images. Without `labels.pull.header` the block is empty |
 | `<worn>` | Devices the persona is overusing in its own recent lines (`features.variety`): `labels.variety.intro`, then `- <shape> ("<example>", ...)` per pattern. Omitted when the variety pass did not run, returned nothing, or the switch is off |
-| `<lookup>` | What the persona looked up online this turn (`features.webLookup`): the query, the condensed answer and the source sites, or a "nothing found" line. Appears only when the search classifier fired and the search completed |
+| `<lookup>` | What the persona looked up this turn. A web search (`features.webLookup`) carries `labels.lookup.webHeader`, the condensed answer, `labels.lookup.sources` and, when nothing was found, `labels.lookup.none`. A server search (`features.recall`) carries `labels.lookup.serverHeader`, the summary note and, when the summary names a stretch, the verbatim lines of that stretch. When both ran, `labels.lookup.bothNote` sits between them. A `labels.lookup.stretch` line introduces a verbatim stretch (`{date}` `{channel}`). Appears only when a search classifier fired and at least one search completed |
 | `<chat>` | Up to `context.channelMessages` latest messages of the current channel |
 | `<tempo>` | Counts for 10 min / hour / day, distinct people, silence, a verdict (live / slow / dead) |
-| `<task>` | `reply` / `interject` / `initiate` / `overheard` (when `overheard.md` exists), placeholders filled |
+| `<task>` | `reply` / `interject` / `initiate` / `overheard` (when `overheard.md` exists) / `elsewhere` (when `elsewhere.md` exists, for a noticed comment), placeholders filled |
 
 Budget priority (sections are trimmed from the bottom of this list first): system + task + clock + tempo + senses
-(never cut) → caller's profile with episodes → lookup (kept or dropped whole) → about_chat → self_facts → lore → server → chat (newest first) →
-pulled (`<channel_view>`, capped at `context.caps.pulled`; on a turn that answers a call from a read-only channel the pulled block sits before the chat instead of after it) →
-recent (capped at `context.caps.recent`) →
-other profiles → worn (kept or dropped whole) → other channels → emoji (entries from the bottom, then the whole block; `context.caps.emoji`) → gifs (same trimming; `context.caps.gifs`).
+(never cut) -> caller's profile with episodes -> lookup (kept or dropped whole; may hold a web part, a server part or both) -> about_chat -> self_facts -> lore -> server -> chat (newest first) ->
+pulled (`<channel_view>`, capped at `context.caps.pulled`; on a turn that answers a call from a read-only channel the pulled block sits before the chat instead of after it) ->
+recent (capped at `context.caps.recent`) ->
+other profiles -> worn (kept or dropped whole) -> other channels -> emoji (entries from the bottom, then the whole block; `context.caps.emoji`) -> gifs (same trimming; `context.caps.gifs`).
 
 Media in a transcript line, most informative form available: a picture attached to THIS request →
 `transcript.imageAttached`, or `transcript.imageAttachedDescribed` when `features.attachedDescriptions` is on and
@@ -202,9 +207,13 @@ senses.drawSpent                         replaces draw when the daily picture qu
 senses.drawSpentUser                     replaces draw when this member's daily quota is spent
 senses.privateChat                       shown in a DM turn: this is a one-on-one conversation, what is said here stays between the two of them
 senses.privateAware                      shown on a server turn when features.privateMessages is on: the persona knows it has private chats and never repeats or hints at anything from them
-lookup.header                            {query}: heading of the `<lookup>` block
+lookup.header                            {query}: heading of the `<lookup>` block (web search)
 lookup.sources                           {list}: site names, comma-separated by code
 lookup.none                              shown in `<lookup>` when the search found nothing useful
+lookup.webHeader                         heading of the web part inside `<lookup>` when both web and server searches ran
+lookup.serverHeader                      heading of the server part inside `<lookup>` when both web and server searches ran
+lookup.bothNote                          shown between the web and server parts when both ran
+lookup.stretch                           {date} {channel}: introduces a verbatim stretch of old chat inside the server part
 tempo.counts                             {last10min} {lastHour} {lastDay}
 tempo.authors                            {authors}: a head count
 tempo.silenceBeforeTrigger | lastMessageAgo | sinceOwn          {duration}
@@ -263,11 +272,14 @@ draw.reasons.moderation | daily | userDaily | timeout | error    human phrases f
 memory.privateNote                       the <private> block content in a private analyzer batch: marks the batch as a private conversation, constrains output to users for the partner's id only
 memory.privateChannel                    heading used in place of a channel name for the <new_messages> section in a private batch
 limits.notice                            {limit} {used} {cap}: posted as a plain reply when a rail refuses a triggered action; limit is the config key, used/cap are the numbers
+limits.paused                            posted as a plain reply when the persona is called while paused (`features.pauseNotice`). No placeholders. At most once per channel per `mention.pauseNoticeMinutes`
 warmup.ownMark                           prefixed to a member's own lines in the profile.md transcript
 warmup.contextMark                       prefixed to context lines in the profile.md transcript
 mentor.intended                          array of short strings: engine behaviours that must not cost points in the mentor's scoring
 mentor.examples                          first line inside the `<examples>` block in a situations request: introduces the real moments
 mentor.original                          first line inside the `<original>` block in a score request: introduces the persona's rejected answer
+room.focus                               {target} {author}: appended to the reply task when a room question triggers the turn
+address.author                           {name} {aliases}: the candidate author's display name and known aliases, shown to the address classifier when the member has aliases
 variety.intro                            first line of the `<worn>` block: tells the persona these devices are spent
 recent.header                            REQUIRED {hours}: the block's first line. A missing header or a missing `recent.line` means no `<recent>` block
 recent.line                              REQUIRED {date} {time} {text}: one note from the turn's own channel or an unnamed channel
@@ -301,11 +313,12 @@ through the warmup prompts (`profile.md`, `channel.md`, `server.md`), not throug
 
 The numeric limits in the prompt are placeholders filled at runtime from `config.memory.*` and `relationships.maxDeltaPerUpdate`.
 
-Input: `<character>` · `<existing_profiles>` (JSON by user id, incl. current `affinity` with score, band and reason,
-`relationshipStale` when the text is due for a rewrite, and stored `episodes`) · `<existing_lore>` ·
+Input: `<character>` · `<existing_profiles>` (JSON by user id; each profile is either whole or compact. A whole profile carries prose fields, attitude, and the ranked top of interests, details, aliases and episodes: interests capped at `memory.maxInterests`, details at `memory.maxDetails`, aliases at `memory.maxAliases`, episodes at `memory.analyzerEpisodes` (default 8). A compact profile carries only `names`, `affinity` and `"compact": true`. When the batch is too large to fit every profile whole, authors with the most shown lines keep theirs whole and the rest arrive compact. Log fields `profilesWhole`, `profilesCompact`, `profilesTokens` on `memory: update applied`) · `<existing_lore>` ·
 `<existing_guild>` (JSON: patterns, starters, in-jokes, learned items) · `<existing_channels>` (JSON by channel id: `name`, Discord `category`, `topic`, stored `purpose`,
 `topics`, `tone`) · `<known_members>` (guild batches only, absent from private batches; may be partial or absent entirely: stored members who did NOT write in this batch, each with their display names and aliases, so the analyzer can record an alias for one of them; at most `memory.aliasRosterSize` entries, most recently seen first, `0` = off; ranked before the transcript in the budget so a heavy batch cannot starve it, not required so it never makes the request fail) · `<new_messages>` grouped under `## #channel-name (id:123)`, lines `[14:32] nick (id:123): text`,
 a line addressed to the persona starts with `→ `, own lines use `labels.self`.
+
+Section order in the user message (budget trims from the bottom first): compact profiles of every author, the roster (`<known_members>`), the transcript (`<new_messages>`), whole profiles (offered only for authors with a shown line, most lines first), recent notes (`<recent_notes>`). The guild, channel and lore blocks sit before the compact profiles. A profile that does not fit whole is sent compact; the request never fails because of a profile.
 
 Output: a bare JSON object. Profiles are updated INCREMENTALLY: the analyzer returns changes, never a re-summary
 of what is already stored, so facts are not degraded by being rewritten batch after batch:
@@ -646,14 +659,9 @@ Rails: at most one re-watch or retry per turn; the classifier and the second loo
 question (see the video cache section above). Switch `features.videoRewatch` (missing = on, needs
 `videoDescriptions` on).
 
-## Search classifier
+## Search and recall classifier
 
-When the persona is directly addressed (a reply turn, not an overheard or spontaneous turn) and all of the following hold (`features.webLookup` is on,
-`web.search.enabled` is not false, the `lookup.md` prompt exists, `web.search.maxPerTurn` is at least 1, and a
-`BRAVE_SEARCH_API_KEY` is configured), the classifier decides whether the trigger message asks something that needs
-a web search. Code sends `lookup.md` as the system prompt on the `classifier.text` model with a user
-message containing a short `<transcript>` (the same as the re-watch classifier, with the persona's own lines
-marked by `labels.self`) and a `<candidate>` block:
+When the persona is directly addressed (a reply turn, not an overheard or spontaneous turn) and the `lookup.md` prompt exists, the classifier decides whether the trigger needs a web search, a server-history search, or both. Code sends `lookup.md` as the system prompt on the `classifier.text` model with a user message containing a short `<transcript>` (the same as the re-watch classifier, with the persona's own lines marked by `labels.self`) and a `<candidate>` block:
 
 ```
 <transcript>
@@ -664,24 +672,26 @@ marked by `labels.self`) and a `<candidate>` block:
 </candidate>
 ```
 
-The transcript carries descriptions, video summaries and link reads when available. The trigger text is cut at
-`context.maxMessageChars`. Output is ONE line:
+The transcript carries descriptions, video summaries and link reads when available. The trigger text is cut at `context.maxMessageChars`. Output is `none`, or up to four labelled lines in any order:
 
-- A search query (plain words, no quotes, no operators, at most 12 words) when the message needs facts from
-  outside the chat, or when it explicitly asks to search the web.
-- `none` for everything else.
+- `web: <search query>` (plain words, no quotes, no operators, at most 12 words): the message needs facts from outside the chat, or explicitly asks to search the web. This line fires only when `features.webLookup` is on, `web.search.enabled` is not false, `web.search.maxPerTurn` is at least 1, and a `BRAVE_SEARCH_API_KEY` is configured.
+- `server: <form>, <form>, ...`: the message asks about something said or done on this server that is not in the transcript. Each form is one word or a short phrase as people would type it, listing inflected forms for the search. Fires only when `features.recall` is on.
+- `who: <name form>, <name form>, ...`: the question is about a person not obviously in the transcript. The forms help find them by nickname, username or tag.
+- `when: <from> .. <to>`: the question points at a time (`YYYY-MM-DD` or `YYYY-MM-DD HH:MM` on each side of `..`; one date alone means that whole day).
 
-An empty or blank answer is a failed call (`reason: empty`, no query), not a silent `none`.
+A single unlabelled line (the old format) is still read as a web query. An empty or blank answer is a failed call (`reason: empty`), not a silent `none`.
 
-On a query hit, Brave Search runs the query (`web.search.results` results, default 5), the numbered results are
-condensed by `classifier.text` through `search-summary.md` (`{{today}}`, `{{query}}`, `{{maxChars}}` = `web.search.summaryChars`,
-default 900), and the answer is rendered as a `<lookup>` block right before `<chat>`: `labels.lookup.header` with
-the query, the condensed text, and `labels.lookup.sources` with the distinct site names. When the search returned
-nothing or the condenser found nothing useful, `labels.lookup.none` appears instead.
+On a `web:` hit, Brave Search runs the query (`web.search.results` results, default 5), the numbered results are condensed by `classifier.text` through `search-summary.md` (`{{today}}`, `{{query}}`, `{{maxChars}}` = `web.search.summaryChars`, default 900), and the web part is rendered in the `<lookup>` block: `labels.lookup.header` with the query, the condensed text, and `labels.lookup.sources` with the distinct site names. When the search returned nothing or the condenser found nothing useful, `labels.lookup.none` appears instead.
 
-Rails: at most one search per turn; both the classifier and the condenser count against `llm.maxRequestsPerDay`;
-the search itself counts against `web.maxPerDay` (shared with link reads). Results are cached for
-`web.search.cacheHours` (default 24) hours per normalised query. Switch `features.webLookup` (missing = off).
+On a `server:` hit (with optional `who:` and `when:` lines), the engine searches the server's message history through Discord's search API. The forms become an ordered list of search queries (content forms round-robin, then author names), or date-range samples when only `when:` is given. Hits are filtered (other bots and channels the audience rule refuses are excluded), grouped into clusters by channel and time (`recall.clusterGapMinutes`), and a window of `recall.windowMessages` messages is fetched around each cluster. The classifier's word forms and name forms are also matched against stored memory (never the private layer): members' episodes, lore entries, taught lessons and recent lines. Each matching item becomes one line in a `<memory>` block: `kind | date | name | text`, with kinds `episode`, `lore`, `learned`, `recent`. A `when:` date range drops undated kinds (lore, learned). At most `recall.memoryItems` (default 6) items, ranked by the number of forms they match and by weight. The `<memory>` block sits after `<people>` and before `<found>`; its items cannot be named as a `stretch`. A run with memory matches and no chat hits still asks the summary. Logged as `stats.memory` on the `recall: searched` line.
+
+The summary helper (`recall-summary.md` on `classifier.text`, blocks `<people>`, `<memory>`, `<found>`, `<question>`) reads the windows, the stored memory and the question, and writes a note. The summary may name one stretch that best answers the question (`stretch: <n>`); if it does, the verbatim lines of that stretch (capped at `recall.stretchChars`) appear alongside the note. When the summary says `nothing`, the `<lookup>` block carries no server part. A summary that fails or runs out of time falls back to the verbatim stretch of the top-ranked window with no note.
+
+When both web and server searches ran, the `<lookup>` block carries `labels.lookup.webHeader` above the web part, `labels.lookup.serverHeader` above the server part, and `labels.lookup.bothNote` between them.
+
+The `<lookup>` block follows the same audience rule as `<other_channels>` (`context.pull.sameAudience`): a server-search window is refused when the channel it came from is not readable by everyone who can read the destination.
+
+Rails: at most one web search and one server search per turn. The classifier, the web condenser and the recall summary each count against `llm.maxRequestsPerDay`; the web search counts against `web.maxPerDay` (shared with link reads); the recall run counts against `recall.maxPerDay` (stored in `state.json` as `recallDay` / `recallCount`). Web results are cached for `web.search.cacheHours` (default 24) hours per normalised query. The classifier fires when either `features.webLookup` or `features.recall` is on. Switches: `features.webLookup` (missing = off), `features.recall` (missing = on).
 
 ## Variety pass
 
@@ -872,7 +882,11 @@ A manual sub-process (`features.mentor`) with its own model (`mentor.model`). Th
 
 The mentor model reads the rendered sandbox request, so it reads what the persona remembers about real people. Direct messages and the private memory layer are never part of a sandbox request.
 
-The sandbox carries the same custom-emoji and GIF blocks as a live turn, so the persona can react with emoji, post a GIF or draw a picture in its sandbox answers. A GIF or drawing counts as an action the same way `<msg>` does.
+The sandbox carries the same custom-emoji and GIF blocks as a live turn, so the persona can react with emoji, post a GIF or draw a picture in its sandbox answers. A GIF or drawing counts as an action the same way `<msg>` does. The sandbox also carries the `<senses>` lines for the elsewhere destination and the search sense, so the persona's awareness of those features is tested.
+
+### Post ledger
+
+`state.json` `postLedger` records each message the persona posts in a server channel: the message id, channel, mode, trigger kind, trigger id, the newest history line id and the source channel id. It is written only while `features.mentor` is on (or the mentor's anchor-related path is used). The ledger is capped at `mentor.anchor.ledgerSize` (default 300) entries; the mentor uses it to find which turn a posted message belonged to when resolving a real moment. Requests from the mentor itself carry `origin: mentor` in the usage log.
 
 ### How a run ends
 
@@ -1029,7 +1043,7 @@ After scoring, when the run did not end early and the case failed or any situati
 
 The result is stored on the run as `diagnosis` and printed in the report. These are hypotheses for the owner to review; the mentor does not edit anything.
 
-Layers a cause may name: `rules` (a rule in the rules block), `prompt` (the engine's system prompt, format or task), `card` (the character card), `self` (a note the persona keeps about itself), `learned` (something people taught it), `guild` (a server habit or in-joke), `profile` (what it remembers about a person), `missing` (an instruction that should be there is absent).
+Layers a cause may name: `rules` (a rule in the rules block), `prompt` (the engine's system prompt, format or task), `card` (the character card), `self` (a note the persona keeps about itself), `learned` (something people taught it), `guild` (a server habit or in-joke), `profile` (what it remembers about a person), `labels` (a string from `labels.json`), `variety` (something in the `<worn>` block), `lore` (a lorebook entry), `channel` (a channel note), `recent` (a line in the `<recent>` block), `missing` (an instruction that should be there is absent).
 
 #### Diagnosis schema
 

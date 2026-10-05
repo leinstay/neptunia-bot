@@ -35,6 +35,10 @@ Every key in `config.json` with its default, grouped by section.
 | `memoryTwoStage` | `false` | Split the memory analyzer into two stages: a neutral GPT model decides what changed (stage A), then the voice model words the persona's texts (stage B). Must be exactly `true` to enable; a missing key counts as off. See `memory.voiceModel` and `memory.voice.*` |
 | `mentor` | `false` | Manual testing sub-process with its own model. Must be exactly `true` to enable; a missing key counts as off. See [Mentor](#mentor) |
 | `promptCache` | `false` | Mark the system message for the provider's prompt cache. A cached read costs a fraction of normal input; some providers do not count cached reads against token quotas. Must be exactly `true` to enable; a missing key counts as off. See `llm.cache.*` |
+| `recall` | `true` | Search the server's own message history beside the web search when a question calls for it. A missing key counts as on. See [Media: Search](media.md#search) and `recall.*` |
+| `recent` | `true` | Show a `<recent>` block of what happened on the server in the last few days. A missing key counts as on. See `memory.recentHours` and `context.caps.recent` |
+| `channelRoute` | `true` | A classifier picks a channel the conversation is about before a turn, so the channel can be pulled into the request. A missing key counts as on. See `route.*` |
+| `pauseNotice` | `true` | Post a short notice when the persona is called while paused. A missing key counts as on. See `mention.pauseNoticeMinutes` and `labels.limits.paused` |
 | `variety` | `true` | A model pass names the devices the persona is overusing in its own recent lines. The result becomes a `<worn>` block in the turn's request. A missing key counts as on |
 | `varietyPrecompute` | `true` | Start the variety pass right after the persona posts text, so the next turn finds the result ready. Off: the pass runs only at the turn, but a late answer is still stored for later. A missing key counts as on |
 | `followUp` | `true` | Classify untagged messages after the persona answers to continue a conversation |
@@ -66,6 +70,7 @@ Every key in `config.json` with its default, grouped by section.
 | `maxRequestTokens` | `50000` | Hard token cap per request |
 | `safetyMargin` | `0.9` | Budgeting fraction of maxRequestTokens |
 | `timeoutMs` | `300000` | Request timeout (ms) |
+| `helperTimeoutMs` | `30000` | Timeout for a helper that runs alongside the turn (the route classifier, the search classifier and the recall summary). A helper that runs past this limit is abandoned; the turn continues without its result |
 | `pingTimeoutMs` | `30000` | Timeout for `/nep ping` requests (ms) |
 | `retries` | `2` | Retries on transient HTTP errors (408/429/5xx) and network failures. A provider account's daily-quota 429 gets one attempt and is thrown at once, not retried |
 | `maxRequestsPerDay` | `300` | Daily request cap |
@@ -75,6 +80,10 @@ Every key in `config.json` with its default, grouped by section.
 | `cache.roles` | `["talk"]` | Request roles whose system message gets the cache marker |
 | `cache.models` | `["anthropic/"]` | Model id prefixes (case-sensitive) whose provider accepts the `cache_control` marker. A request to a model outside the list is sent without one |
 | `cache.promptIncludesCached` | `true` | Whether the provider's reported `prompt_tokens` already includes cached and cache-write tokens. Set once from a probe; the token calibration and the per-request cap use the full count either way |
+| `hedge.roles` | `["classifier.text"]` | Request roles whose calls are hedged (two concurrent attempts, first to finish wins) |
+| `hedge.afterMs` | `2500` | Milliseconds before the second attempt starts. `0` or below turns hedging off for all roles |
+| `hedge.timeoutMs` | `8000` | Milliseconds from the first attempt's start at which both are aborted if neither has returned |
+| `hedge.longTimeoutMs` | `20000` | Timeout used instead of `timeoutMs` when the caller marks the request `long: true` (the route classifier does this for a large channel list) |
 
 `llm.provider` sets a default OpenRouter provider routing on chat requests, for example `{ "ignore": ["some-provider"] }` or `{ "order": ["anthropic"], "allow_fallbacks": true }`. `llm.providerByModel` adds per-model overrides: each key is a model id prefix (matching any role) or `<prefix>@<role>` (matching one role only), and each value is an OpenRouter routing object sent verbatim.
 
@@ -86,13 +95,17 @@ If the OpenRouter account itself restricts allowed providers, ignoring the only 
 
 With `features.promptCache` on, the system message is marked for the provider's prompt cache on requests whose role is in `llm.cache.roles` and whose model starts with a prefix in `llm.cache.models`. The marker goes on after the token estimate, so the 50k per-request cap and the calibration are unaffected. `llm.cache.promptIncludesCached` tells the engine how the provider reports cached tokens; set it once from a real probe. The `llm: usage` log line gains `cache`: `write`, `read`, `none` or `off`.
 
+The `llm: usage` log line also carries `ms` (wall time of the request), `purpose` (a short string naming what the request was for, e.g. `route-channel`, `recall-summary`, `address`), `origin` (e.g. `mentor` for requests the mentor made or caused), `hedged` (true when the request was hedged) and `attempt` (1 or 2 for hedged requests, absent otherwise).
+
+With `llm.hedge` configured, requests on the roles it lists are hedged: a second attempt fires `llm.hedge.afterMs` after the first, and the first to finish wins. Both are aborted at `llm.hedge.timeoutMs` (or `longTimeoutMs` for a `long: true` request). This adds one extra request per hedged call that did not finish before the second started; both count against `llm.maxRequestsPerDay`.
+
 ## `classifier`
 
 The three helper model roles, grouped under one key. Each is set independently, so the helpers can stay on cheap models while the voice uses a premium one.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `text` | `"anthropic/claude-sonnet-4.6"` | Runs the address classifier (`features.followUp`), the search classifier, the link reader and the search condenser (`features.webLookup`), the re-watch classifier (`features.videoRewatch`) and the variety pass (`features.variety`) |
+| `text` | `"anthropic/claude-sonnet-4.6"` | Runs the address classifier (`features.followUp`), the search classifier, the link reader, the search condenser and the recall summary (`features.webLookup`, `features.recall`), the re-watch classifier (`features.videoRewatch`), the room classifier (`spontaneous.roomQuestionChance`), the channel route classifier (`features.channelRoute`) and the variety pass (`features.variety`) |
 | `media` | `"anthropic/claude-haiku-4.5"` | Picture describer (`features.mediaDescriptions`): one-line descriptions for pictures, GIF frames, video posters, stickers, custom emoji and link thumbnails |
 | `video` | `"google/gemini-3.8-flash"` | Video describer (`features.videoDescriptions`): watches short clips, re-watches on a question, retries on request. Must accept both video and audio input |
 
@@ -112,6 +125,7 @@ The three helper model roles, grouped under one key. Each is set independently, 
 | `reactionsPerMessage` | `6` | Max reactions listed per message in the transcript, most frequent first |
 | `otherProfiles` | `6` | Max other profiles shown |
 | `askedAboutProfiles` | `3` | Members named in recent messages whose profiles are shown in full, ahead of the other participants |
+| `askedAboutEpisodes` | `3` | Episodes shown per member who is asked about. `0` hides episodes for asked-about members. Private chats always hide them |
 | `tempo.liveMessages10min` | `4` | Messages in 10 min = "live" |
 | `tempo.deadSilenceMinutes` | `45` | Silence minutes = "dead" |
 | `caps.interlocutor` | `6000` | Token cap: caller's profile with episodes |
@@ -159,7 +173,7 @@ Settings for pulling another channel into a turn's request (`features.channelPul
 | `scanMessages` | `20` | Recent messages of the current channel scanned for channel mentions |
 | `maxChannels` | `1` | Channels that can be pulled per turn |
 | `maxAgeDays` | `0` | Refuse a pull when the channel's newest message is older than this many days. `0` = no limit |
-| `sameAudience` | `true` | Check that every role allowed to view the destination channel can also view the source. When false, content from a restricted channel can reach a wider audience |
+| `sameAudience` | `true` | Check that every role allowed to view the destination channel can also view the source. Also governs which neighbour channels appear in `<other_channels>` and which server-search windows the recall run keeps. When false, content from a restricted channel can reach a wider audience |
 
 ## `elsewhere`
 
@@ -171,6 +185,48 @@ Settings for answering calls from channels where the bot can read but not send (
 | `settleMaxSeconds` | `300` | Maximum seconds from the first call in a burst before the answer fires regardless |
 | `rememberPings` | `20` | Calls remembered in the ring per channel |
 | `pingMaxAgeDays` | `7` | Days before a remembered call expires from the ring |
+
+## `pace`
+
+How long each stage of a turn may take. All hot-reloaded. A helper that misses its deadline is dropped; the turn continues without it. A turn whose answer is not in hand by `dropAfterMs` is dropped entirely (logged as `turn: dropped`). Each request logs the time of every stage in `turn: timings`.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `prepareMs` | `6000` | Milliseconds from the turn's start before the talk request. Everything that runs before the LLM call (history, captions, the variety pass, the route and search classifiers) must finish within this window. `0` or a non-number removes the limit |
+| `prepareSearchMs` | `12000` | Extended deadline once the search classifier asked for a web or server search. Never shorter than `prepareMs`. `0` or a non-number removes the limit |
+| `dropAfterMs` | `60000` | Milliseconds from the turn's start. If the finished answer has not arrived by this time, the turn is dropped unposted (`turn: dropped`). `0` or a non-number removes the bar |
+| `typingWhilePreparing` | `false` | Show the typing indicator from the start of a turn answering a direct call (mention, reply, name, follow-up, private), not only while the finished answer is being typed out. Must be exactly `true` to enable |
+
+## `route`
+
+Settings for the channel route classifier (`features.channelRoute`). When the conversation names or refers to another channel, a classifier (`prompts/route-channel.md` on the `classifier.text` role) picks the channel number from a list. The picked channel is pulled into the request as a `<channel_view>` block alongside any explicit channel mentions. Logged as `route: classified`, `route: skipped` or `route: failed`.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `contextMessages` | `20` | Recent channel messages rendered for the classifier |
+| `maxChannels` | `40` | Channels listed for the classifier to choose from |
+| `purposeChars` | `80` | Characters of each channel's stored purpose shown in the list |
+| `maxOutputTokens` | `120` | Max output tokens for the classifier |
+
+## `recall`
+
+Settings for the server-history search (`features.recall`). When the lookup classifier (`prompts/lookup.md`) answers with `server:` forms, `who:` name forms or `when:` date ranges, the engine searches the server's own message history through Discord's search API, groups the hits into clusters, fetches a window of messages around each, and asks a summary helper (`prompts/recall-summary.md` on the `classifier.text` role) what the history answers. The summary may single out one stretch that the persona then gets verbatim alongside the condensed note. Logged as `recall: searched`, `recall: summary`, `recall: skipped` or `recall: failed`.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `maxForms` | `5` | Search forms (word inflections) the classifier may list per `server:` line |
+| `maxPeople` | `2` | People the `who:` line may name |
+| `dateSamples` | `4` | Date-only queries sampled across a `when:` range when no content forms are given |
+| `clusterGapMinutes` | `30` | Gap between hits that separates them into clusters |
+| `maxClusters` | `5` | Clusters kept (the rest are dropped, newest first) |
+| `windowMessages` | `16` | Messages fetched around each cluster centre |
+| `answerChars` | `1200` | Max characters for the summary note; fills `{{answerChars}}` in `recall-summary.md` |
+| `stretchChars` | `1500` | Max characters of the verbatim stretch shown to the persona |
+| `maxPerDay` | `100` | Daily recall runs (stored in `state.json` as `recallDay` / `recallCount`) |
+| `timeoutMs` | `10000` | Total time for the recall run (search, windows, summary). Once half the time is gone no further search is sent; the summary runs only when at least `minSummaryMs` is left |
+| `minSummaryMs` | `2500` | Minimum time left for the summary helper to be asked. Without it the verbatim stretch of the top window is returned without a note |
+| `memoryItems` | `6` | Stored memory items (episodes, lore, lessons, recent lines) matched against the classifier's word forms and name forms and sent in the `<memory>` block of the recall summary. `0` turns the match off |
+| `maxOutputTokens` | `500` | Max output tokens for the summary helper |
 
 ## `gifs`
 
@@ -286,7 +342,9 @@ At most one re-watch or retry per turn. Answers are cached for one hour per ques
 | `followUpContext` | `15` | Transcript lines sent to the classifier |
 | `followUpMaxOutputTokens` | `8` | Max output tokens for the address classifier. A reasoning model that thinks before answering needs a larger cap, or it returns an empty answer |
 | `followUpOverheard` | `true` | When on, an `overheard` answer from the address classifier starts its own kind of turn with `prompts/overheard.md`. Off: an `overheard` answer counts as a plain `yes` (a follow-up turn). Missing key = on |
+| `followUpAliases` | `5` | Stored aliases of the persona sent to the address classifier alongside its name, so it recognises them as a call. `0` sends none |
 | `followUpNoStreak` | `3` | Consecutive `no` verdicts that close the window |
+| `pauseNoticeMinutes` | `10` | Minimum minutes between pause notices in the same channel. `0` posts one for every call |
 
 Follow-up windows are persisted in `data/state.json` under `followUpWindows` and restored at startup; expired ones are dropped.
 
@@ -315,6 +373,7 @@ Follow-up windows are persisted in `data/state.json` under `followUpWindows` and
 | `liveMinMessages` | `4` | Min messages for "live" |
 | `deadAfterMinutes` | `90` | Silence before "dead" (min) |
 | `initiateChance` | `0.35` | Chance of starting a topic vs interjecting |
+| `roomQuestionChance` | `0.04` | Chance that a message put to the room (not to one person) is picked up by the persona. A classifier (`prompts/room.md`) pre-filters. `0` turns it off |
 | `eavesdropChance` | `0.02` | Per-message jump-in chance |
 | `eavesdropDelayMs` | `[5000, 40000]` | Eavesdrop delay range (ms) |
 | `minGapMinutes` | `12` | Min gap between actions (min) |
@@ -332,7 +391,19 @@ Follow-up windows are persisted in `data/state.json` under `followUpWindows` and
 | `portraitRefreshPerDay` | `3` | Max portrait refreshes per server per day (code-triggered, analyzer cue and `/nep memory refresh` share this cap). The day counter lives in `state.json` as `portraitDay` / `portraitCount` and survives `/nep warmup reset` |
 | `portraitRetryHours` | `24` | Hours to wait after a failed refresh attempt before trying the same member again |
 | `portraitCheckMinutes` | `60` | How often the portrait scheduler checks for members due a refresh |
+| `analyzerEpisodes` | `8` | Episodes shown per author in the analyzer's `<existing_profiles>`. Only the top by weight and recency are sent; the stored list keeps every episode. `0` sends none |
 | `keepNewestEpisodes` | `5` | The newest episodes (by when they were added) are exempt from eviction. `0` uses the previous rule: evict lightest first, then oldest |
+| `recentHours` | `72` | Hours of recent notes kept and shown in the `<recent>` block. Lowering it narrows the view at once and deletes older lines at the next write |
+| `maxRecentStored` | `150` | Lines kept on disk. When a write adds lines past this cap, the lightest, then the oldest are evicted |
+| `maxNewRecent` | `3` | Lines the analyzer may add per batch |
+| `recentChars` | `160` | Max characters per recent line |
+| `recentShown` | `12` | Live recent lines the analyzer is shown in `<existing_recent>` so it does not repeat them |
+| `notesStaleDays` | `7` | Days after which a channel's or the server's notes are flagged for a re-check by the analyzer. `0` turns the flag off |
+| `notesMinLines` | `20` | Batch lines a channel needs in this batch for its staleness flag to be sent |
+| `privateMaxAgeMinutes` | `360` | Minutes before a quiet private buffer is analyzed even though it has not reached `minBatchMessages` |
+| `channelWritersStored` | `20` | Top writers kept per channel, ranked by a decayed tally |
+| `channelWritersHalfLifeDays` | `30` | Half-life of the per-channel writer tally (days); a writer who stopped writing sinks below active ones |
+| `reasoning` | `null` | OpenRouter `reasoning` object sent on the analyzer's stage A requests and the warmup's neutral route. `null` omits the field. Example: `{ "effort": "low" }` |
 | `voiceModel` | `null` | Model for stage B of the two-stage analyzer, which words the persona's texts. `null` uses the talk model (`llm.model`). Set through `/nep model set voice` |
 | `batchMessages` | `60` | Ideal batch size |
 | `minBatchMessages` | `15` | Min messages before update |
@@ -380,6 +451,7 @@ Settings for stage B of the two-stage analyzer (`features.memoryTwoStage`). Stag
 | `maxAttempts` | `4` | Answers that left an item out before it takes the degraded path. A failed request (bad JSON, timeout) does not count toward this |
 | `queueMax` | `100` | Items kept in the queue; the oldest non-character items overflow to the degraded path |
 | `queueHours` | `24` | Hours before a queued item expires to the degraded path. Character items never expire |
+| `timeoutMs` | `120000` | Request timeout for voice requests (ms) |
 
 ## `relationships`
 
@@ -444,7 +516,7 @@ Settings for the web lookup (`features.webLookup`). Both link reading and search
 | `results` | `5` | Number of Brave Search results requested |
 | `summaryChars` | `900` | Max characters for the condensed answer; fills `{{maxChars}}` in `search-summary.md` |
 | `maxOutputTokens` | `400` | Max output tokens for the condenser |
-| `classifierMaxOutputTokens` | `60` | Max output tokens for the search classifier (search-or-not, not the condenser). A reasoning model that thinks before answering needs a larger cap, or it returns an empty answer |
+| `classifierMaxOutputTokens` | `200` | Max output tokens for the search classifier. Raised to fit the multi-line answer format (`web:`, `server:`, `who:`, `when:`). A reasoning model that thinks before answering needs a larger cap |
 | `cacheHours` | `24` | Hours a cached search result is served before re-searching |
 | `contextMessages` | `50` | Recent channel messages rendered as a `<transcript>` for the search classifier |
 | `timeoutMs` | `10000` | Brave Search request timeout (ms) |
@@ -544,6 +616,7 @@ Settings for the manual testing sub-process (`features.mentor`). The mentor inve
 | `anchor.contextMessages` | `30` | Messages of the channel fetched as context when resolving a moment, ending at the trigger |
 | `anchor.samples` | `5` | Persona completions per real moment in a run and in `/nep mentor check` |
 | `anchor.hideLaterMemory` | `true` | When replaying a real moment, hide memory written at or after its trigger (episodes, attitude changes, details, interests, aliases, learned items, lore entries). `false` replays it with all of today's memory |
+| `anchor.ledgerSize` | `300` | Entries kept in the post ledger (`state.json` `postLedger`). The ledger maps each posted message to its turn so the mentor can find the trigger of a real moment. Written only while `features.mentor` is on. `0` keeps none |
 | `feedbackExamples` | `10` | Latest owner corrections (`/nep mentor wrong`) included in every scoring request |
 
 `llm.maxRequestTokens` (50k per request) applies to every request the mentor makes or causes, including sandbox answers. Before each mentor request the budget check counts the prompt plus the most the answer may cost (`mentor.maxOutputTokens` at `mentor.outputTokenWeight`), so a request is refused when its possible output does not fit what is left. When the budget runs out the run stops and reports what it has. A run also stops when `features.mentor` or `mentor.model` is turned off during it, or when the reference channels hold no messages of people in the reference window.
@@ -588,7 +661,7 @@ Role `voice`. Words the persona's texts from stage B of the two-stage analyzer: 
 
 ### Text classifiers (`classifier.text`)
 
-The cheapest text model that can answer "yes" or "no" reliably. Runs the address classifier (`features.followUp`), the search classifier, the link reader and the search condenser (`features.webLookup`), the re-watch classifier (`features.videoRewatch`) and the variety pass (`features.variety`). Default: `anthropic/claude-sonnet-4.6`.
+The cheapest text model that can answer "yes" or "no" reliably. Runs the address classifier (`features.followUp`), the search classifier, the link reader, the search condenser and the recall summary (`features.webLookup`, `features.recall`), the re-watch classifier (`features.videoRewatch`), the room classifier (`spontaneous.roomQuestionChance`), the channel route classifier (`features.channelRoute`) and the variety pass (`features.variety`). Default: `anthropic/claude-sonnet-4.6`.
 
 ### Pictures (`classifier.media`)
 

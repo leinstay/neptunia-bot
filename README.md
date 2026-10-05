@@ -124,7 +124,7 @@ One Discord slash command, `/nep` (the name comes from `bot.commandName`). It is
 
 ## Messages and memory
 
-The persona responds to mentions, replies and name triggers, sometimes ignoring them. It cuts into conversations at random intervals and starts topics in dead channels. After answering, it tracks follow-up messages in that channel through a classifier. It writes one reply at a time across the server; pings in other channels are held and answered in turn.
+The persona responds to mentions, replies and name triggers, sometimes ignoring them. It cuts into conversations at random intervals, starts topics in dead channels, and may pick up a question put to the room. After answering, it tracks follow-up messages in that channel through a classifier. It writes one reply at a time across the server; pings in other channels are held and answered in turn. When someone talks about another channel, a classifier picks the channel so the persona can read it.
 
 A separate memory analyzer runs when enough messages accumulate. It builds per-member profiles with interests, details, aliases, episodes and attitudes, server-wide habits and in-jokes, a lorebook of events and stories, and a list of things people taught the persona directly (words, facts, requests). Profiles are updated incrementally; stored facts are never re-summarised. The persona also learns what people call each other and recognises a member by name or alias. Lessons are stored at the server level (`memory.maxLearned` shown, `memory.maxLearnedStored` kept on disk, `memory.learnedChars` per item) and always appear in the prompt.
 
@@ -132,7 +132,7 @@ See [`docs/en/messages-and-memory.md`](docs/en/messages-and-memory.md) for the p
 
 ## Media
 
-The persona can see attached pictures, watch short video clips, read pages behind links, search the web for facts it does not have, draw pictures on request through an image generation model, and post GIFs from a library built from what the chat shares. Each capability is a separate feature switch, off or capped by default, with its own daily limit. A `<senses>` block in each request tells the persona what is on; it never claims to have perceived anything beyond it. See [`docs/en/media.md`](docs/en/media.md) for pictures, video vision, link reading, search, drawing, tools, costs and privacy.
+The persona can see attached pictures, watch short video clips, read pages behind links, search the web and the server's own message history for facts it does not have, draw pictures on request through an image generation model, and post GIFs from a library built from what the chat shares. Each capability is a separate feature switch, off or capped by default, with its own daily limit. A `<senses>` block in each request tells the persona what is on; it never claims to have perceived anything beyond it. See [`docs/en/media.md`](docs/en/media.md) for pictures, video vision, link reading, search, drawing, tools, costs and privacy.
 
 ## Private chat
 
@@ -146,7 +146,7 @@ The mentor model, budget and commands are independent from the persona's. See [`
 
 ## Costs
 
-Each turn is one LLM request; a memory update adds a second. Cost depends on the model and endpoint; `llm.model` and `llm.baseUrl` accept any compatible values. The daily cap (`llm.maxRequestsPerDay`) prevents runaway spending. Video descriptions add one request per watched clip to a separate, cheaper model (`media.video.maxPerDay` caps the daily count); `yt-dlp` and `ffmpeg` run locally and cost nothing beyond bandwidth. Link reads and searches (`features.webLookup`, off by default) add requests to the text classifier model, capped by `web.maxPerDay`; search additionally needs a Brave Search API key (free tier: 2,000 queries/month). Image generation (`features.imageGeneration`, off by default) bills per output token through `image.model`; `image.maxPerDay` caps the daily count separately from chat requests. Private chat (`features.privateMessages`, off by default) uses the same LLM and caps; each DM reply is one request, each private analyzer batch is another. With `features.webLookup` on, the bot makes outbound HTTP requests to fetch pages and to the Brave Search API; private addresses are refused.
+Each turn is one LLM request; a memory update adds a second. Cost depends on the model and endpoint; `llm.model` and `llm.baseUrl` accept any compatible values. The daily cap (`llm.maxRequestsPerDay`) prevents runaway spending. Video descriptions add one request per watched clip to a separate, cheaper model (`media.video.maxPerDay` caps the daily count); `yt-dlp` and `ffmpeg` run locally and cost nothing beyond bandwidth. Link reads and web searches (`features.webLookup`, off by default) add requests to the text classifier model, capped by `web.maxPerDay`; web search additionally needs a Brave Search API key (free tier: 2,000 queries/month). Server-history searches (`features.recall`, on by default) use Discord's built-in search API and add only the classifier and summary requests. Image generation (`features.imageGeneration`, off by default) bills per output token through `image.model`; `image.maxPerDay` caps the daily count separately from chat requests. Private chat (`features.privateMessages`, off by default) uses the same LLM and caps; each DM reply is one request, each private analyzer batch is another. With `features.webLookup` on, the bot makes outbound HTTP requests to fetch pages and to the Brave Search API; private addresses are refused.
 
 `data/` holds per-member profiles, relationship scores, channel observations, server patterns, cached media descriptions and web excerpts. It stays on your machine, is gitignored, and is only sent to the LLM as context. The analyzer is instructed not to store sensitive details. `/nep memory forget` deletes a profile entirely.
 
@@ -207,9 +207,13 @@ prompts/
   rewatch.md               classifier: re-watch a video for a question
   rewatch-answer.md        prompt for the re-watch answer
   address.md               classifier for follow-up messages
-  lookup.md                classifier: does a question need a web search
+  lookup.md                classifier: does a question need a web or server search
   read-link.md             condense a fetched page
-  search-summary.md        condense search results
+  search-summary.md        condense web search results
+  recall-summary.md        condense server-history search results
+  room.md                  classifier: is this message for everyone in the room
+  route-channel.md         classifier: does answering need another channel
+  elsewhere.md             task: comment on a read-only channel in the main channel
   mentor-situations.md     mentor: invent test situations
   mentor-score.md          mentor: score the persona's answers
   mentor-signs.md          mentor: known habits of model-written text
@@ -271,6 +275,8 @@ src/
     collect.js             channel history, neighbours, permissions
     format.js              transcript lines, time gaps, tempo
     media.js               media classification, label selection, proxy URLs
+    search.js              Discord message search and member search
+    pull-fetch.js          audience check, pull-channel fetch
     fetch-image.js         download and cache images for inline LLM requests
     video-sites.js         video site matching, URL cache keys, yt-dlp/ffmpeg args
     fetch-video.js         download, probe and trim videos for the video describer
@@ -283,10 +289,15 @@ src/
     mention.js             call detection, ignore heuristics
     prompt.js              request builder with token budget
     turn.js                one turn: collect, build, call, act
-    spontaneous.js         chaotic timer, eavesdrop
+    spontaneous.js         chaotic timer, eavesdrop, room questions
     pending.js             pending direct pings while the persona is busy
     private.js             pure: DM gate, merged profiles, effective affinity
-    limits.js              pure: limit notice text from labels
+    limits.js              pure: limit and pause notices from labels
+    recall.js              pure: server-history search decisions
+    recall-run.js          recall runner: Discord search, windows, summary
+    route.js               pure: channel route decisions
+    route-channel.js       channel route classifier: picks a channel for the turn
+    elsewhere.js           pure: noticed comments from read-only channels
   memory/
     store.js               JSON file persistence, atomic writes
     update.js              batch memory updates
@@ -300,18 +311,21 @@ src/
     clamp.js               text clamping: soft limits, sentence boundaries, safe member tokens
     ranking.js             shared ranking for interests and details: frequency, recency, decay
     lore.js                lorebook logic: key matching, entry selection
+    recent.js              recent notes: the last few days of short events
     describe.js            media describer: one picture in, one cached caption out
+    portrait.js            periodic portrait refresh scheduler
     youtube-check.js       YouTube duration probes and the API key check
     warmup.js              sample-based memory warmup
 tests/                     node --test, pure-function unit tests
 deploy/
   neptunia-bot.service     example systemd unit
 data/                      persistent state (gitignored, created at runtime)
-  state.json               scheduler times, token calibration, daily request counter, warmup progress
+  state.json               scheduler times, token calibration, daily counters, warmup progress, post ledger
   guilds/<id>/guild.json   server habits, in-jokes, the persona's self-claims
   guilds/<id>/buffer.json  messages observed since the last memory update
   guilds/<id>/media.json   media description cache
   guilds/<id>/gifs.json    GIF library: handles, URLs, use counts
+  guilds/<id>/recent.json  recent notes from the analyzer
   guilds/<id>/users/       per-member profiles and relationships
   guilds/<id>/private/     per-member private DM memory
   guilds/<id>/channels/    channel observations from the analyzer
