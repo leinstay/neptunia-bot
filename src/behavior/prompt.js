@@ -8,6 +8,10 @@
 //   3b. lorebook entries matched by the transcript (`<lore>`)
 //   4. the map of the server's channels
 //   5. the channel transcript, newest messages first
+//   5b. another channel pulled into this turn (`<channel_view>`, newest lines
+//       first); on a routed turn -- a call from a channel the persona cannot
+//       write in, answered here -- it goes right BEFORE the chat instead,
+//       since the call itself lives in it
 //   6. memory about other people present in the transcript
 //   6b. the devices the persona has worn out in its own recent lines (`<worn>`, one piece)
 //   7. neighbouring channels
@@ -15,12 +19,24 @@
 //   9. the GIF library (`<gifs>`)
 // The rendered order is different: reference material first, the chat and the
 // task last, where the model attends best. A private chat (`privateChat`)
-// drops the server map and the neighbouring channels and sees its partner
-// through the public and private profiles merged (src/behavior/private.js).
+// drops the server map, the neighbouring channels and any pulled channel and
+// sees its partner through the public and private profiles merged
+// (src/behavior/private.js). Pictures of another channel are shown as
+// captions only: nothing outside the turn's own channel is ever attached.
 
 import { fitSections } from '../llm/budget.js';
 import { estimateTokens } from '../llm/tokens.js';
-import { computeTempo, fill, formatNow, formatTranscript, renderTempo, renderTranscript } from '../discord/format.js';
+import {
+  computeTempo,
+  fill,
+  formatClock,
+  formatDate,
+  formatDuration,
+  formatNow,
+  formatTranscript,
+  renderTempo,
+  renderTranscript,
+} from '../discord/format.js';
 import { affinityBand, roundScore } from '../memory/affinity.js';
 import { isConfirmed, isStale } from '../memory/interests.js';
 import { topByRank } from '../memory/ranking.js';
@@ -365,9 +381,13 @@ function currentChannelFallback(currentChannelId, history) {
  * reply and would eat most of the block's budget for nothing. A neighbour
  * id with no stored note is skipped, not synthesized -- unlike the current
  * channel, a neighbour the persona is not replying in does not need a
- * where-am-I fallback.
+ * where-am-I fallback. A pulled channel (`<channel_view>`) joins the list
+ * the same way: the caller puts its id ahead of the neighbours'. An entry
+ * whose id is in `readOnlyIds` (a channel the bot can read but not write in)
+ * carries `labels.server.readOnly` (src/memory/channels.js#renderChannel,
+ * never on the current channel).
  */
-function serverItems(channels, currentChannelId, neighborChannelIds, history, now, activityCfg, labels, nameOf) {
+function serverItems(channels, currentChannelId, neighborChannelIds, history, now, activityCfg, labels, nameOf, readOnlyIds = new Set()) {
   const byId = new Map(channels.map((channel) => [channel.id, channel]));
   const current = byId.get(currentChannelId) ?? currentChannelFallback(currentChannelId, history);
   const neighborEntries = [...new Set(neighborChannelIds)]
@@ -389,6 +409,7 @@ function serverItems(channels, currentChannelId, neighborChannelIds, history, no
         activity: channelActivity(channel, now, activityCfg),
         now,
         nameOf,
+        readOnly: readOnlyIds.has(channel.id),
       },
     ),
   );
@@ -572,8 +593,10 @@ function gifItems(gifs, mediaCache, labels, gifsCfg) {
 /**
  * Assemble the `<now>…<task>` user-message text from already-rendered parts.
  * Factored out so a fallback rendering (see `textFallback` below) can reuse
- * every block untouched except `<chat>`, which is the only one that can ever
- * carry an `imageAttached`/`frameAttached` tag.
+ * every block untouched except `<chat>`. A pulled channel's lines never carry
+ * an `imageAttached`/`frameAttached` tag (nothing of another channel is
+ * attached); `<other_channels>` lines can, when they hold an item attached for
+ * the chat (see `textFallback`).
  */
 function assembleUser({ now, timezone, labels, sensesText, kept, tempoText, task, chatItems }) {
   return [
@@ -587,6 +610,8 @@ function assembleUser({ now, timezone, labels, sensesText, kept, tempoText, task
     block('self_facts', kept.self.join('\n')),
     block('people', [...kept.interlocutor, ...kept.people].join('\n\n')),
     block('other_channels', kept.neighbors.join('\n\n')),
+    // Another channel pulled into this turn, one item per channel.
+    block('channel_view', (kept.pulled ?? []).join('\n\n')),
     // The persona's own worn-out devices, just ahead of the chat where its own lines are.
     block('worn', (kept.worn ?? []).join('\n')),
     // Right before the chat it answers a question from.
@@ -701,11 +726,24 @@ function renderLookup(lookup, labels) {
  * `gifs` (features.gifs on and a non-empty library) adds `senses.gifs` right after it.
  * `gifWatching` (GIFs are watched now, src/memory/gif-watch.js#gifWatchBlocker)
  * swaps `senses.gifDescribed` for `senses.gifWatched` when the labels have it.
+ * Outside a private chat, right after the files line: `senses.channels` (the
+ * persona sees only the channels this request shows), then, with an
+ * `elsewhereDestination` (`{ name }`, where a call from a read-only channel is
+ * answered), `senses.elsewhere` with `{destination}`. A missing label adds
+ * nothing.
  */
 function renderSenses(
   config,
   labels,
-  { searchAvailable = false, drawQuota, privateChat = false, customEmoji = false, gifs = false, gifWatching = false } = {},
+  {
+    searchAvailable = false,
+    drawQuota,
+    privateChat = false,
+    customEmoji = false,
+    gifs = false,
+    gifWatching = false,
+    elsewhereDestination = null,
+  } = {},
 ) {
   const senses = labels.senses;
   if (!senses) return '';
@@ -761,6 +799,12 @@ function renderSenses(
     lines.push(drawQuota.spent ? senses.drawSpent : drawQuota.userSpent ? senses.drawSpentUser : senses.draw);
   }
   lines.push(senses.files);
+  // Which channels the persona sees, and where it answers a call from one it
+  // cannot write in: a server turn only.
+  if (!privateChat && senses.channels) lines.push(senses.channels);
+  if (!privateChat && senses.elsewhere && typeof elsewhereDestination?.name === 'string' && elsewhereDestination.name) {
+    lines.push(fill(senses.elsewhere, { destination: elsewhereDestination.name }));
+  }
   // Private chat: the one line for this conversation, or -- on the server,
   // with the feature on -- the rule about what was said in private.
   if (privateChat) lines.push(senses.privateChat);
@@ -848,6 +892,10 @@ function isAskedAbout(profile, mentionedIds, scanTextLower, maxAliases, aliasHal
  * to `askedAbout`, never to `participants` (a candidate who neither spoke nor
  * was asked about has no place in this request at all). `excludeId` (the
  * interlocutor, already rendered separately in full) is skipped in both.
+ * Last, the authors of the lines shown from another channel
+ * (`pulledAuthorIds`, most relevant first) are asked-about candidates too,
+ * after everyone the chat names and under the same cap: a participant among
+ * them is promoted, a silent member is taken from `candidateProfiles`.
  * @param {object[]} otherProfiles
  * @param {object[]} candidateProfiles
  * @param {object[]} history
@@ -856,9 +904,20 @@ function isAskedAbout(profile, mentionedIds, scanTextLower, maxAliases, aliasHal
  * @param {number} [maxAskedAbout]        Not a non-negative integer -> no cap.
  * @param {number} [maxAliases]
  * @param {number} [aliasHalfLifeDays]
+ * @param {string[]} [pulledAuthorIds]
  * @returns {{ askedAbout: object[], participants: object[] }}
  */
-function splitPeople(otherProfiles, candidateProfiles, history, trigger, excludeId, maxAskedAbout, maxAliases, aliasHalfLifeDays) {
+function splitPeople(
+  otherProfiles,
+  candidateProfiles,
+  history,
+  trigger,
+  excludeId,
+  maxAskedAbout,
+  maxAliases,
+  aliasHalfLifeDays,
+  pulledAuthorIds = [],
+) {
   const { mentionedIds, scanTextLower } = askedAboutWindow(history, trigger);
   const cap = Number.isInteger(maxAskedAbout) && maxAskedAbout >= 0 ? maxAskedAbout : Infinity;
   const covered = new Set();
@@ -888,7 +947,226 @@ function splitPeople(otherProfiles, candidateProfiles, history, trigger, exclude
     }
   }
 
+  const idOf = (profile) => (profile?.id === undefined || profile?.id === null ? '' : String(profile.id));
+  for (const authorId of pulledAuthorIds) {
+    if (askedAbout.length >= cap) break;
+    const id = String(authorId);
+    if (excludeId !== undefined && excludeId !== null && id === String(excludeId)) continue;
+    if (askedAbout.some((profile) => idOf(profile) === id)) continue;
+    const at = participants.findIndex((profile) => idOf(profile) === id);
+    if (at !== -1) {
+      askedAbout.push(...participants.splice(at, 1));
+      continue;
+    }
+    if (covered.has(id)) continue;
+    const profile = (Array.isArray(candidateProfiles) ? candidateProfiles : []).find((candidate) => idOf(candidate) === id);
+    if (profile) {
+      covered.add(id);
+      askedAbout.push(profile);
+    }
+  }
+
   return { askedAbout, participants };
+}
+
+/**
+ * Another channel shown to a turn: the record src/discord/pull-fetch.js#fetchPull
+ * returns (the one definition), read here and never changed. This module reads
+ * it a little more loosely than the producer writes it: `earlierPingIds` may
+ * also be an array, `channelName` null falls back to the channel id, and a
+ * missing `descriptions`, `olderNotShown`, `picturesNotSeen`, `earlierPingIds`
+ * or `pingState` reads as empty.
+ * @typedef {import('../discord/pull-fetch.js').PulledChannel} PulledChannel
+ */
+
+/** `{from}` / `{to}` of a pulled channel's header: the date and the clock of `ts`, joined as `<now>` joins them. */
+function pulledMoment(ts, timezone, locale) {
+  return `${formatDate(ts, timezone, locale)}, ${formatClock(ts, timezone, locale)}`;
+}
+
+/** Ids as strings, from a Set or an array; anything else is empty. */
+function idSet(value) {
+  const list = value instanceof Set ? [...value] : Array.isArray(value) ? value : [];
+  return new Set(list.map(String));
+}
+
+/** The state of message `id` in a pulled channel's `pingState` (a Map), or null. */
+function pingStateOf(pingState, id) {
+  const state = pingState instanceof Map ? pingState.get(String(id)) : null;
+  return typeof state === 'string' ? state : null;
+}
+
+/**
+ * The pulled channels a request can show: entries with a channel id and at
+ * least one message with an id and a time, one per channel (the first wins),
+ * never the turn's own channel; each message once, oldest first.
+ * @param {PulledChannel[]|unknown} pulled
+ * @param {string|null} currentChannelId
+ * @returns {{ entry: PulledChannel, channelId: string, name: string, messages: object[] }[]}
+ */
+function usablePulled(pulled, currentChannelId) {
+  const out = [];
+  const seen = new Set();
+  for (const entry of Array.isArray(pulled) ? pulled : []) {
+    const channelId = typeof entry?.channelId === 'string' ? entry.channelId : '';
+    if (!channelId || seen.has(channelId) || channelId === currentChannelId) continue;
+    const byId = new Map();
+    for (const message of Array.isArray(entry.messages) ? entry.messages : []) {
+      if (message?.id === undefined || message?.id === null || !Number.isFinite(message.ts)) continue;
+      if (!byId.has(message.id)) byId.set(message.id, message);
+    }
+    if (byId.size === 0) continue;
+    seen.add(channelId);
+    const messages = [...byId.values()].sort((a, b) => a.ts - b.ts);
+    out.push({ entry, channelId, name: entry.channelName || channelId, messages });
+  }
+  return out;
+}
+
+/**
+ * Every pulled channel's transcript items: ordinary chat lines
+ * (`formatOptions`, so `context.maxMessageChars`), numbered on from
+ * `firstIndex` and on again after each earlier channel, with the channel's own
+ * captions joined to the turn's and NO attachment marker (nothing of another
+ * channel is attached). A line that called the persona gets
+ * `labels.pull.pingAnswered` / `pingUnanswered` / `pingSkipped` after one
+ * space, by its `pingState` -- never the turn's trigger, and a state without
+ * its label gets no mark (a skipped call never reads as unanswered).
+ */
+function pulledTranscripts(pulledChannels, { formatOptions, descriptions, firstIndex, triggerId, labels }) {
+  const marks = new Map([
+    ['answered', labels.pull?.pingAnswered],
+    ['unanswered', labels.pull?.pingUnanswered],
+    ['skipped', labels.pull?.pingSkipped],
+  ]);
+  let offset = firstIndex;
+  return pulledChannels.map((channel) => {
+    const own = channel.entry.descriptions;
+    const captions = own instanceof Map && own.size > 0 ? new Map([...own, ...(descriptions ?? [])]) : descriptions;
+    const items = formatTranscript(channel.messages, { ...formatOptions, attachedIndex: undefined, descriptions: captions, indexOffset: offset });
+    offset += channel.messages.length;
+    for (const item of items) {
+      if (triggerId !== null && item.id === triggerId) continue;
+      const mark = marks.get(pingStateOf(channel.entry.pingState, item.id));
+      if (mark) item.text = `${item.text} ${mark}`;
+    }
+    return { ...channel, items, earlierIds: idSet(channel.entry.earlierPingIds) };
+  });
+}
+
+/**
+ * One pulled channel as its `<channel_view>` item, cut to `budget` tokens.
+ * The item: `labels.pull.header` (`{channel}`, `{from}` = the first window line
+ * kept, `{to}` = the window's newest line, `{ago}` = how long before `now` that
+ * one was written: the channel's real span and age, whatever is cut), then --
+ * each when it applies and its label exists -- `labels.server.readOnly`,
+ * `labels.pull.olderNotShown` (older messages exist, or window lines older
+ * than the first one kept were cut here), `labels.pull.picturesNotSeen`
+ * `{count}`; then the earlier calls under `labels.pull.earlierPings` (`{date}`
+ * = the oldest one's date); then the window's lines, with
+ * `labels.pull.olderNotShown` again between two kept lines whose lines in
+ * between were cut (the trigger kept, newer lines cut, the newest ones kept).
+ * What is kept: the trigger's line first, then the window's lines newest first
+ * while they fit, then the earlier calls newest first. The trigger's line --
+ * with the window's newest line when the trigger sits before the window, so
+ * the header has a span -- may take up to `ceiling` even past `budget` (a call
+ * is never lost to the share or the cap); then nothing else is kept. Null when
+ * no window line fits: a header alone is never shown.
+ * @returns {{ text: string, ids: Array<string|number>, newestId: string|number, newestTs: number }|null}
+ */
+function fitPulledChannel(channel, { budget, ceiling = budget, cost, labels, timezone, now, readOnly, triggerId }) {
+  const p = labels.pull;
+  const windowItems = channel.items.filter((item) => !channel.earlierIds.has(String(item.id)));
+  const earlierItems = channel.items.filter((item) => channel.earlierIds.has(String(item.id)));
+  if (windowItems.length === 0) return null;
+  const notSeen = Number.isFinite(channel.entry.picturesNotSeen) ? Math.max(0, Math.floor(channel.entry.picturesNotSeen)) : 0;
+  const newestWindow = windowItems.at(-1);
+  const windowAt = new Map(windowItems.map((item, i) => [item.id, i]));
+
+  const render = (keep) => {
+    const keptWindow = windowItems.filter((item) => keep.has(item.id));
+    if (keptWindow.length === 0) return null;
+    const keptEarlier = earlierItems.filter((item) => keep.has(item.id));
+    const lines = [
+      fill(p.header, {
+        channel: channel.name,
+        from: pulledMoment(keptWindow[0].ts, timezone, labels.locale),
+        to: pulledMoment(newestWindow.ts, timezone, labels.locale),
+        ago: formatDuration(Math.max(0, now - newestWindow.ts), labels.units),
+      }),
+    ];
+    if (readOnly && labels.server?.readOnly) lines.push(fill(labels.server.readOnly));
+    const older = channel.entry.olderNotShown === true || keptWindow[0] !== windowItems[0];
+    if (older && p.olderNotShown) lines.push(fill(p.olderNotShown));
+    if (notSeen > 0 && p.picturesNotSeen) lines.push(fill(p.picturesNotSeen, { count: notSeen }));
+    if (keptEarlier.length > 0) {
+      if (p.earlierPings) lines.push(fill(p.earlierPings, { date: formatDate(keptEarlier[0].ts, timezone, labels.locale) }));
+      lines.push(...keptEarlier.map((item) => item.text));
+    }
+    keptWindow.forEach((item, i) => {
+      // Lines cut between two kept ones are not shown either.
+      if (i > 0 && windowAt.get(item.id) - windowAt.get(keptWindow[i - 1].id) > 1 && p.olderNotShown) lines.push(fill(p.olderNotShown));
+      lines.push(item.text);
+    });
+    return lines.join('\n');
+  };
+  const fitted = (keep) => {
+    const kept = windowItems.filter((item) => keep.has(item.id));
+    const newest = kept.at(-1);
+    return {
+      text: render(keep),
+      ids: [...earlierItems, ...windowItems].filter((item) => keep.has(item.id)).map((item) => item.id),
+      newestId: newest.id,
+      newestTs: newest.ts,
+    };
+  };
+
+  const keep = new Set();
+  const pinned = triggerId !== null ? channel.items.find((item) => item.id === triggerId) : undefined;
+  if (pinned) {
+    const floor = new Set([pinned.id, ...(windowAt.has(pinned.id) ? [] : [newestWindow.id])]);
+    const floorCost = cost(render(floor));
+    if (floorCost <= ceiling) {
+      if (floorCost > budget) return fitted(floor);
+      for (const id of floor) keep.add(id);
+    }
+  }
+  if (!(budget > 0)) return null;
+  for (const group of [windowItems, earlierItems]) {
+    for (let i = group.length - 1; i >= 0; i -= 1) {
+      const { id } = group[i];
+      if (keep.has(id)) continue;
+      keep.add(id);
+      const text = render(keep);
+      if (text !== null && cost(text) <= budget) continue;
+      keep.delete(id);
+      break;
+    }
+  }
+  const text = render(keep);
+  if (text === null || cost(text) > budget) return null;
+  return fitted(keep);
+}
+
+/**
+ * The authors of the pulled lines kept (`fitPulledChannel`'s `ids` over each
+ * channel's `messages`), newest line first, each once: members only, never the
+ * persona and never a bot.
+ * @param {{ ids: Array<string|number>, messages: object[] }[]} pulledFits
+ * @returns {string[]}
+ */
+function pulledAuthors(pulledFits) {
+  const out = [];
+  for (const fit of pulledFits) {
+    const byId = new Map(fit.messages.map((message) => [message.id, message]));
+    for (const id of [...fit.ids].reverse()) {
+      const message = byId.get(id);
+      if (!message || message.self || message.bot || message.authorId === undefined || message.authorId === null) continue;
+      const authorId = String(message.authorId);
+      if (!out.includes(authorId)) out.push(authorId);
+    }
+  }
+  return out;
 }
 
 /**
@@ -896,7 +1174,8 @@ function splitPeople(otherProfiles, candidateProfiles, history, trigger, exclude
  * @param {object} input.config            Live config.
  * @param {object} input.prompts           Live prompts keyed by file name.
  * @param {object} input.calibrator
- * @param {'reply'|'interject'|'initiate'} input.mode
+ * @param {'reply'|'interject'|'initiate'|'elsewhere'} input.mode  `prompts[mode]` is the task
+ *   text; `elsewhere` (a noticed comment on a read-only channel) takes `prompts.elsewhere`.
  * @param {boolean} [input.forced]  True for an owner-forced turn (`/nep interject`, `/nep
  *   initiate`): when `prompts.forced` is a non-empty string, its filled text is appended to the
  *   task text (same placeholders as `prompts[mode]`) so the model knows `<skip/>` is not the
@@ -970,10 +1249,48 @@ function splitPeople(otherProfiles, candidateProfiles, history, trigger, exclude
  *   lines; with `features.variety` on (a missing key counts as on) and `labels.variety.intro`
  *   present, rendered as `<worn>` (see src/behavior/variety.js#renderWorn). Omitted, null or
  *   empty -> no block.
+ * @param {PulledChannel[]} [input.pulled]  Other channels pulled into this turn, rendered as
+ *   `<channel_view>` (one item per channel, see `fitPulledChannel`) after `<other_channels>`:
+ *   lines numbered on after the chat's (and after each earlier pulled channel), captions only
+ *   (nothing of another channel is attached for vision), budget section `pulled` capped by
+ *   `context.caps.pulled` (4000 when unset) and fitted right after the chat -- right before it
+ *   on a routed turn. The block's room is shared evenly between the channels; a trigger that
+ *   lives in a pulled channel (a routed call) keeps its line and the header past the share and
+ *   the cap whenever the request has room for them. A pulled channel whose block is shown
+ *   leaves `<other_channels>` (one dropped by the budget stays there); its stored note joins
+ *   `<server>` right after the current channel either way; the authors of its kept lines are
+ *   asked-about candidates for `<people>` (see `splitPeople`). No `labels.pull.header` -> no block.
+ * @param {{ channelId: string, reason: 'routed'|'noticed' }|null} [input.source]  The channel a
+ *   routed call or a noticed comment comes from (it is among `pulled`). It fills the task's
+ *   `{{channel}}` (its name) and `{{destination}}` (this channel's name: the one the chat's
+ *   messages carry, else `elsewhereDestination`'s, else the channel map's, else ''). `routed`:
+ *   the trigger is looked up in the pulled lines; when its line is shown, its index fills
+ *   `{{target}}` and `labels.elsewhere.called` (`{channel}` `{destination}`, left out while the
+ *   destination has no name) follows the mode's task text -- when it is not, `{{target}}` is ''
+ *   and no called text follows. The pulled block is fitted before the chat, and `<tempo>` is
+ *   measured to `now` without saying that nobody answered the persona.
+ * @param {object|null} [input.focus]  A message of the chat put to everyone present (a room
+ *   question): `labels.room.focus` (`{author}` `{target}`) follows the task text when it is in
+ *   the chat.
+ * @param {{ name: string }|null} [input.elsewhereDestination]  Where a call from a read-only
+ *   channel is answered: `<senses>` gains `senses.elsewhere` with `{destination}`.
+ * @param {Set<string>|string[]} [input.readOnlyIds]  Channels the bot can read but not write in:
+ *   their `<server>` entries (never the current channel's) carry `labels.server.readOnly`, as do
+ *   pulled channels whose record says `readOnly`. A private chat ignores `pulled`, `source`,
+ *   `focus`, `elsewhereDestination` and `readOnlyIds`; with none of them given the request is
+ *   the one built before pulled channels existed, save `senses.channels` on a server turn.
  * @returns {{ messages: object[], stats: object, idByIndex: Map<number, string>, tempo: object,
- *   pictures: object[], textFallback: string|null }}  `pictures` are the ones attached as
- *   image_url parts; `textFallback` is the same user message with every attached picture
- *   rendered blind or described (null when nothing is attached), for a provider that rejects them.
+ *   pictures: object[], textFallback: string|null, pulledIds: Map<string, string>,
+ *   pulledKept: { channelId: string, ids: string[], newestId: string, newestTs: number }[] }}
+ *   `pictures` are the ones attached as image_url parts; `textFallback` is the same user message
+ *   with every attached picture rendered blind or described (null when nothing is attached), for
+ *   a provider that rejects them. `idByIndex` maps chat AND pulled indices; `pulledIds` maps
+ *   every pulled line's message id to its channel id (the output side reacts there, never
+ *   replies across channels); `pulledKept` lists the channels whose block survived the budget,
+ *   with the ids of the lines shown and the newest window line shown. `stats.pulled` is the
+ *   block's budget line: `used`, `kept` (channels shown), `dropped` (channels offered and not
+ *   shown, the budget's cut or a missing header label), `lines` (lines offered) and `linesCut`
+ *   (lines offered and not shown).
  */
 export function buildRequest(input) {
   const { config, prompts, calibrator, mode, forced = false, now, selfName, history, neighbors, trigger, triggerKind, channels = [], currentChannelId = null, descriptions, videos, reads, lookup = null } = input;
@@ -987,7 +1304,9 @@ export function buildRequest(input) {
   const loreOn = config.features?.lore !== false;
   const visionCfg = config.context.vision ?? {};
   const visionOn = config.features?.vision !== false;
-  const pictures = visionOn ? selectPictures({ trigger, history, visionCfg, now }) : [];
+  // Only this channel's pictures are attached: a trigger in another channel (a routed call)
+  // is shown as captions, like every pulled line.
+  const pictures = visionOn ? selectPictures({ trigger, history, visionCfg, now, channelId: currentChannelId }) : [];
   const attachedIndex = new Map(pictures.map((picture, i) => [picture.itemId, i + 1]));
   // The GIF library: the switch (a missing key counts as on) and at least one entry.
   const gifLibrary = config.features?.gifs !== false && input.gifs ? normalizeGifs(input.gifs) : null;
@@ -1015,10 +1334,33 @@ export function buildRequest(input) {
     .join('\n\n');
   const chatItems = formatTranscript(history, formatOptions);
   const idByIndex = new Map(chatItems.map((item) => [item.index, item.id]));
-  const tempo = computeTempo(history, now, trigger);
-  const tempoText = renderTempo(tempo, labels, config.context.tempo);
 
-  const triggerItem = trigger ? chatItems.find((item) => item.id === trigger.id) : null;
+  // Another channel pulled into this turn (`<channel_view>`): never in a private chat, and
+  // shown only when the labels can head it. Its lines are numbered on after the chat's and
+  // map back through idByIndex and pulledIds. A routed turn answers a call that lives there.
+  const source = privateChat ? null : (input.source ?? null);
+  const routed = source?.reason === 'routed';
+  const offered = privateChat ? [] : usablePulled(input.pulled, currentChannelId);
+  const pulledChannels = labels.pull?.header ? offered : [];
+  const chatTrigger = trigger ? (chatItems.find((item) => item.id === trigger.id) ?? null) : null;
+  const pulledTriggerId = trigger && !chatTrigger ? trigger.id : null;
+  const pulledSets = pulledTranscripts(pulledChannels, { formatOptions, descriptions, firstIndex: history.length, triggerId: pulledTriggerId, labels });
+  const pulledIds = new Map();
+  for (const channel of pulledSets) {
+    for (const item of channel.items) {
+      idByIndex.set(item.index, item.id);
+      pulledIds.set(item.id, channel.channelId);
+    }
+  }
+
+  // On a routed turn the call is not in this chat: its silence is measured to now, and its
+  // last line being the persona's own is no sign that nobody answered the persona.
+  const tempo = computeTempo(history, now, routed ? null : trigger);
+  const tempoText = renderTempo(routed ? { ...tempo, lastIsOwn: false } : tempo, labels, config.context.tempo);
+
+  // The trigger's line in another channel (a routed call), when a pulled channel holds it.
+  const pulledTrigger =
+    pulledTriggerId !== null ? (pulledSets.flatMap((channel) => channel.items).find((item) => item.id === pulledTriggerId) ?? null) : null;
   // A follow-up (triggerKind: 'followUp') falls back to labels.triggers.reply
   // when an older labels.json has no dedicated label yet -- see prompt-contract.md.
   // An overheard line (triggerKind: 'overheard') falls back to the follow-up's label, then reply's.
@@ -1033,24 +1375,52 @@ export function buildRequest(input) {
     triggerKind === 'drawFailed'
       ? fill(rawTriggerLabel, { reason: labels.draw?.reasons?.[input.drawReason] ?? input.drawReason ?? '' })
       : rawTriggerLabel;
-  const taskValues = {
-    name: selfName,
-    author: trigger?.authorName ?? '',
-    trigger: triggerLabel,
-    target: triggerItem ? `#${triggerItem.index}` : '',
-  };
+  // A turn about another channel (routed or noticed) names both channels in its task: the
+  // source, and this one, where the words go (its live name first).
+  const sourceChannel = source ? (offered.find((channel) => channel.channelId === source.channelId) ?? null) : null;
+  const here = sourceChannel
+    ? (currentChannelFallback(currentChannelId, history)?.name ??
+      (input.elsewhereDestination?.name || null) ??
+      channels.find((channel) => channel?.id === currentChannelId)?.name ??
+      '')
+    : '';
   // An overheard turn has its own task text (prompts.overheard) INSTEAD of the mode's; without
   // it (missing or blank) the mode's text frames the line as said to the persona: degraded.
   const overheardTask = overheard && typeof prompts.overheard === 'string' && prompts.overheard.trim() ? prompts.overheard : null;
-  const baseTask = fillPromptTemplate(overheardTask ?? prompts[mode] ?? '', taskValues);
-  // Owner-forced turn (`/nep interject`/`/nep initiate`): tell the model
-  // `<skip/>` is not the expected outcome this time -- optional, missing
-  // prompts.forced (an older/undeployed labels layer) leaves the task as-is.
-  const forcedText = forced && typeof prompts.forced === 'string' && prompts.forced.trim() ? fillPromptTemplate(prompts.forced, taskValues) : '';
-  // Private chat: prompts.private follows the mode prompt; a missing file adds nothing.
-  const privateText =
-    privateChat && typeof prompts.private === 'string' && prompts.private.trim() ? fillPromptTemplate(prompts.private, taskValues) : '';
-  const task = [baseTask, privateText, forcedText].filter(Boolean).join('\n\n');
+  // A line put to everyone present (a room question), found in the chat.
+  const focus = privateChat ? null : (input.focus ?? null);
+  const focusItem = focus ? chatItems.find((item) => item.id === focus.id) : null;
+  const focusText = focusItem && labels.room?.focus ? fill(labels.room.focus, { author: focus.authorName ?? '', target: `#${focusItem.index}` }) : '';
+  // The task text. `callShown`: whether the pulled trigger's line made it into
+  // `<channel_view>` -- a task never points at a line the request does not show.
+  const composeTask = (callShown) => {
+    const callItem = chatTrigger ?? (callShown ? pulledTrigger : null);
+    const taskValues = {
+      name: selfName,
+      author: trigger?.authorName ?? '',
+      trigger: triggerLabel,
+      target: callItem ? `#${callItem.index}` : '',
+      ...(sourceChannel ? { channel: sourceChannel.name, destination: here } : {}),
+    };
+    const baseTask = fillPromptTemplate(overheardTask ?? prompts[mode] ?? '', taskValues);
+    // Owner-forced turn (`/nep interject`/`/nep initiate`): tell the model
+    // `<skip/>` is not the expected outcome this time -- optional, missing
+    // prompts.forced (an older/undeployed labels layer) leaves the task as-is.
+    const forcedText = forced && typeof prompts.forced === 'string' && prompts.forced.trim() ? fillPromptTemplate(prompts.forced, taskValues) : '';
+    // Private chat: prompts.private follows the mode prompt; a missing file adds nothing.
+    const privateText =
+      privateChat && typeof prompts.private === 'string' && prompts.private.trim() ? fillPromptTemplate(prompts.private, taskValues) : '';
+    // A routed call: where it came from and where the words go follow the mode's text, while
+    // the call is shown and this channel has a name.
+    const calledText =
+      routed && sourceChannel && callItem && here && labels.elsewhere?.called
+        ? fill(labels.elsewhere.called, { channel: sourceChannel.name, destination: here })
+        : '';
+    return [baseTask, calledText, focusText, privateText, forcedText].filter(Boolean).join('\n\n');
+  };
+  // Fitted as if the call's line is shown: the pulled block keeps it whenever the request has
+  // room for it (see fitPulledChannel); checked once the budget is spent.
+  const fittedTask = composeTask(true);
 
   // The server's custom emoji: the switch (a missing key counts as on) and a non-empty index.
   const customEmoji = config.features?.customEmoji !== false && Array.isArray(input.customEmoji) ? input.customEmoji : [];
@@ -1062,23 +1432,18 @@ export function buildRequest(input) {
     gifs: gifsOn,
     // Whether a GIF in the transcript was watched rather than seen in one frame, under the live config and prompts.
     gifWatching: gifWatchBlocker(config, prompts) === null,
+    elsewhereDestination: input.elsewhereDestination ?? null,
   });
 
   // A private chat has no neighbouring channels (and no server map, below).
-  // A neighbour's message is cut shorter than the chat's (context.neighborMessageChars).
-  const neighborChars = config.context.neighborMessageChars ?? 300;
-  // The neighbours' own cached captions join the chat's for their lines only, so the
-  // chat keeps exactly the captions this turn gave it.
-  const neighborDescriptions =
-    input.neighborDescriptions instanceof Map && input.neighborDescriptions.size > 0
-      ? new Map([...input.neighborDescriptions, ...(descriptions ?? [])])
-      : descriptions;
-  const neighborItems = (privateChat ? [] : neighbors).map(
-    ({ channelName, messages }) =>
-      `# ${channelName}\n${formatTranscript(messages, { ...formatOptions, maxChars: neighborChars, descriptions: neighborDescriptions })
-        .map((item) => item.text.replace(/^#\d+ /gm, ''))
-        .join('\n')}`,
-  );
+  const offeredNeighbors = privateChat ? [] : neighbors;
+  const pulledChannelIds = new Set(pulledChannels.map((channel) => channel.channelId));
+  // Channels the bot can read but not write in, marked in `<server>` and on a pulled header.
+  const givenReadOnly = input.readOnlyIds instanceof Set || Array.isArray(input.readOnlyIds) ? input.readOnlyIds : [];
+  const readOnlyIds = new Set([
+    ...(privateChat ? [] : givenReadOnly),
+    ...pulledChannels.filter((channel) => channel.entry.readOnly === true).map((channel) => channel.channelId),
+  ]);
 
   const caps = config.context.caps;
   const cost = (text) => calibrator.apply(estimateTokens(text)) + 2;
@@ -1087,10 +1452,131 @@ export function buildRequest(input) {
     pictures.length * (visionCfg.tokensPerImage ?? 400) -
     TAG_OVERHEAD;
 
+  const episodesOpt = { enabled: episodesOn, cap: caps.interlocutor, cost };
+  // The sections fitted ahead of the chat, in priority order.
+  const head = [
+    { name: 'fixed', required: true, items: [system, fittedTask, formatNow(now, timezone, labels.locale), sensesText, tempoText] },
+    {
+      name: 'interlocutor',
+      cap: caps.interlocutor,
+      items: [
+        renderProfile(interlocutor, labels, {
+          interlocutor: true,
+          // The author of an overheard line is not talking to the persona.
+          mark: !overheard,
+          relationships,
+          episodes: episodesOpt,
+          maxInterests: config.memory?.maxInterests,
+          maxDetails: config.memory?.maxDetails,
+          maxAliases: config.memory?.maxAliases,
+          aliasHalfLifeDays: config.memory?.aliasHalfLifeDays,
+          interestHalfLifeDays: config.memory?.interestHalfLifeDays,
+          detailHalfLifeDays: config.memory?.detailHalfLifeDays,
+          confirmAfter: config.memory?.confirmAfter,
+          staleDays: config.memory?.interestStaleDays,
+          now,
+          nameOf,
+        }),
+      ].filter(Boolean),
+    },
+    // One piece, never split: already bounded by web.search.summaryChars,
+    // and ahead of the chat so a tight budget trims old messages first.
+    { name: 'lookup', items: [renderLookup(lookup, labels)].filter(Boolean) },
+    {
+      name: 'aboutChat',
+      cap: caps.aboutChat,
+      items: aboutChatItems(input.guildMemory, labels, nameOf, learnedConfig(config)),
+    },
+    {
+      name: 'self',
+      cap: caps.aboutChat,
+      items: (input.guildMemory?.self ?? []).map((fact) => `- ${resolveChatText(fact, nameOf)}`),
+    },
+    {
+      name: 'lore',
+      cap: caps.lore,
+      keep: 'first',
+      items: loreOn ? loreItems(input.loreEntries, history, trigger, labels, config.lore, nameOf) : [],
+    },
+    {
+      name: 'server',
+      cap: caps.server ?? 4000,
+      keep: 'first',
+      items: privateChat
+        ? []
+        : serverItems(
+            channels,
+            currentChannelId,
+            // A pulled channel's note right after the current channel's, then the neighbours'
+            // (each once). Fitted ahead of the pulled block, so it cannot hang on its cut.
+            [...pulledChannelIds, ...offeredNeighbors.map((n) => n.channelId).filter(Boolean)],
+            history,
+            now,
+            config.context.channelActivity,
+            labels,
+            nameOf,
+            readOnlyIds,
+          ),
+    },
+  ];
+  const chatSection = { name: 'chat', keep: 'newest', items: chatItems.map((item) => item.text) };
+
+  // The pulled block's room: what the sections fitted ahead of it leave (the chat included,
+  // except on a routed turn), at most context.caps.pulled, shared evenly between the
+  // channels. Each channel is cut to its share here -- the call's own line may go past the
+  // share and the cap, never past what the request has left (`free`, exactly what the main
+  // pass leaves the block) -- so the main pass keeps every channel whole and the block can
+  // never fail the request.
+  const pulledCap = caps.pulled ?? 4000;
+  const pulledFits = [];
+  let pulledTaken = 0;
+  if (pulledSets.length > 0) {
+    const ahead = routed ? head : [...head, chatSection];
+    const free = Math.max(0, limit - fitSections(ahead, limit, cost).used);
+    const room = Math.min(pulledCap, free);
+    const share = Math.floor(room / pulledSets.length);
+    for (const channel of pulledSets) {
+      const fitted = fitPulledChannel(channel, {
+        budget: Math.min(share, Math.max(0, room - pulledTaken)),
+        ceiling: free - pulledTaken,
+        cost,
+        labels,
+        timezone,
+        now,
+        readOnly: readOnlyIds.has(channel.channelId),
+        triggerId: pulledTriggerId,
+      });
+      if (!fitted) continue;
+      pulledTaken += cost(fitted.text);
+      pulledFits.push({ ...fitted, channelId: channel.channelId, messages: channel.messages });
+    }
+  }
+  const pulledSection = { name: 'pulled', cap: Math.max(pulledCap, pulledTaken), keep: 'first', items: pulledFits.map((fit) => fit.text) };
+
+  // The neighbours, cut shorter than the chat (context.neighborMessageChars); a channel whose
+  // pulled block is shown is not shown again among them, one whose block was cut still is.
+  const neighborChars = config.context.neighborMessageChars ?? 300;
+  // The neighbours' own cached captions join the chat's for their lines only, so the
+  // chat keeps exactly the captions this turn gave it.
+  const neighborDescriptions =
+    input.neighborDescriptions instanceof Map && input.neighborDescriptions.size > 0
+      ? new Map([...input.neighborDescriptions, ...(descriptions ?? [])])
+      : descriptions;
+  const shownPulledIds = new Set(pulledFits.map((fit) => fit.channelId));
+  const neighborItems = offeredNeighbors
+    .filter((neighbor) => !shownPulledIds.has(neighbor.channelId))
+    .map(
+      ({ channelName, messages }) =>
+        `# ${channelName}\n${formatTranscript(messages, { ...formatOptions, maxChars: neighborChars, descriptions: neighborDescriptions })
+          .map((item) => item.text.replace(/^#\d+ /gm, ''))
+          .join('\n')}`,
+    );
+
   // <people> priority (b)/(c): who the trigger message / the last few
   // messages name or @mention (askedAbout, rendered FULL, no episodes) vs. the
   // other active participants (participants, rendered COMPACT) -- see
-  // docs/prompt-contract.md, "Aliases".
+  // docs/prompt-contract.md, "Aliases". The authors of the pulled lines shown
+  // join (b) after them, under the same cap.
   const { askedAbout, participants } = splitPeople(
     input.otherProfiles,
     input.candidateProfiles,
@@ -1100,72 +1586,14 @@ export function buildRequest(input) {
     config.context.askedAboutProfiles,
     config.memory?.maxAliases,
     config.memory?.aliasHalfLifeDays,
+    pulledAuthors(pulledFits),
   );
 
-  const episodesOpt = { enabled: episodesOn, cap: caps.interlocutor, cost };
-  const { kept, stats, used } = fitSections(
+  const budgetFit = fitSections(
     [
-      { name: 'fixed', required: true, items: [system, task, formatNow(now, timezone, labels.locale), sensesText, tempoText] },
-      {
-        name: 'interlocutor',
-        cap: caps.interlocutor,
-        items: [
-          renderProfile(interlocutor, labels, {
-            interlocutor: true,
-            // The author of an overheard line is not talking to the persona.
-            mark: !overheard,
-            relationships,
-            episodes: episodesOpt,
-            maxInterests: config.memory?.maxInterests,
-            maxDetails: config.memory?.maxDetails,
-            maxAliases: config.memory?.maxAliases,
-            aliasHalfLifeDays: config.memory?.aliasHalfLifeDays,
-            interestHalfLifeDays: config.memory?.interestHalfLifeDays,
-            detailHalfLifeDays: config.memory?.detailHalfLifeDays,
-            confirmAfter: config.memory?.confirmAfter,
-            staleDays: config.memory?.interestStaleDays,
-            now,
-            nameOf,
-          }),
-        ].filter(Boolean),
-      },
-      // One piece, never split: already bounded by web.search.summaryChars,
-      // and ahead of the chat so a tight budget trims old messages first.
-      { name: 'lookup', items: [renderLookup(lookup, labels)].filter(Boolean) },
-      {
-        name: 'aboutChat',
-        cap: caps.aboutChat,
-        items: aboutChatItems(input.guildMemory, labels, nameOf, learnedConfig(config)),
-      },
-      {
-        name: 'self',
-        cap: caps.aboutChat,
-        items: (input.guildMemory?.self ?? []).map((fact) => `- ${resolveChatText(fact, nameOf)}`),
-      },
-      {
-        name: 'lore',
-        cap: caps.lore,
-        keep: 'first',
-        items: loreOn ? loreItems(input.loreEntries, history, trigger, labels, config.lore, nameOf) : [],
-      },
-      {
-        name: 'server',
-        cap: caps.server ?? 4000,
-        keep: 'first',
-        items: privateChat
-          ? []
-          : serverItems(
-              channels,
-              currentChannelId,
-              neighbors.map((n) => n.channelId).filter(Boolean),
-              history,
-              now,
-              config.context.channelActivity,
-              labels,
-              nameOf,
-            ),
-      },
-      { name: 'chat', keep: 'newest', items: chatItems.map((item) => item.text) },
+      ...head,
+      // The pulled block right after the chat; ahead of it on a routed turn, whose call lives there.
+      ...(routed ? [pulledSection, chatSection] : [chatSection, pulledSection]),
       {
         name: 'people',
         cap: caps.people,
@@ -1221,9 +1649,31 @@ export function buildRequest(input) {
     limit,
     cost,
   );
+  const { kept, stats } = budgetFit;
+  let { used } = budgetFit;
   // The header alone, or entries without their header, make no block.
   if (kept.emoji.length < 2 || kept.emoji[0] !== labels.emoji?.header) kept.emoji = [];
   if (kept.gifs.length < 2 || kept.gifs[0] !== labels.gifs?.header) kept.gifs = [];
+  // The pulled channels whose block survived, with what of them was shown.
+  const keptPulled = new Set(kept.pulled);
+  const pulledKept = pulledFits
+    .filter((fit) => keptPulled.has(fit.text))
+    .map(({ channelId, ids, newestId, newestTs }) => ({ channelId, ids, newestId, newestTs }));
+  // The block's budget line counts what was offered and not shown too: a channel cut whole,
+  // or lines cut inside a channel shown.
+  const pulledShownLines = pulledKept.reduce((sum, shown) => sum + shown.ids.length, 0);
+  const pulledLines = offered.reduce((sum, channel) => sum + channel.messages.length, 0);
+  stats.pulled = { ...stats.pulled, dropped: offered.length - pulledKept.length, lines: pulledLines, linesCut: pulledLines - pulledShownLines };
+
+  // A call whose line did not make it into the block is not pointed at: the task loses its
+  // target and the called text. The request only gets shorter, so the fit holds.
+  const callShown = pulledKept.some((shown) => shown.ids.includes(pulledTrigger?.id));
+  const task = pulledTrigger && !callShown ? composeTask(false) : fittedTask;
+  if (task !== fittedTask) {
+    const saved = cost(fittedTask) - cost(task);
+    stats.fixed.used -= saved;
+    used -= saved;
+  }
 
   const keptChat = chatItems.slice(chatItems.length - kept.chat.length);
   const user = assembleUser({ now, timezone, labels, sensesText, kept, tempoText, task, chatItems: keptChat });
@@ -1232,9 +1682,13 @@ export function buildRequest(input) {
   // retry) must never resend a <chat> claiming a picture is attached with
   // nothing actually attached: `textFallback` re-renders the SAME kept
   // messages with attachedIndex dropped, so imageAttached/frameAttached fall
-  // back to their blind/described forms. Every other block is identical
-  // (none of them ever depend on attachedIndex), so it is computed only when
-  // there is anything to fall back from.
+  // back to their blind/described forms. Only `<chat>` is re-rendered: the
+  // pulled lines never carry an attachment marker (rendered without
+  // attachedIndex from the start), but `<other_channels>` lines are rendered
+  // with it, so a neighbour line holding an item that is attached for the
+  // chat (the same sticker or link id) shows the attached marker in both
+  // renderings -- a known gap, left as it is. Computed only when there is
+  // anything to fall back from.
   let textFallback = null;
   if (pictures.length) {
     const chatItemsBlind = formatTranscript(history, { ...formatOptions, attachedIndex: undefined });
@@ -1270,5 +1724,7 @@ export function buildRequest(input) {
     tempo,
     pictures,
     textFallback,
+    pulledIds,
+    pulledKept,
   };
 }
