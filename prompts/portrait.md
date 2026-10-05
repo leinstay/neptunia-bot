@@ -34,14 +34,14 @@ Describe only this member. Everyone else in the snippets is context.
 
 ## Fields
 
-**`style`**: HOW the person writes, the final merged text. Carry forward what the draft's style says that still holds, add what the new lines show, let newer evidence outweigh older. Message length, rhythm, vocabulary, emoji habits. A precise technical description, not in {{name}}'s voice. Not what they talk about. Within {{fieldChars}} characters.
+**`style`**: HOW the person writes, the final merged text. Message length, rhythm, vocabulary, emoji habits. A precise technical description, not in {{name}}'s voice. Not what they talk about. Carry forward what the draft says that still holds, add what the new lines show, let newer evidence outweigh older. Concrete examples in the draft (specific words, emoji, misspellings, slang terms, formatting habits) stay verbatim unless the new lines show the member stopped doing it. Replacing examples with their category ("uses filler words" instead of the listed words) is a loss: the persona needs the examples to recognize this person's writing. Shorten only when the limit forces it, and drop the least distinctive example first. The result is usually about as long as the draft or longer, up to {{fieldChars}} characters.
 
-**`character`**: four lists about how this person acts with others. Every item is one self-contained neutral statement that makes sense to a reader who has not seen the snippets and will rewrite it in {{name}}'s voice. Habits, not adjectives: "stubborn" is a label; "returns to the same argument for days, rarely concedes" is the habit. Skills, knowledge, jobs, hobbies are not character.
+**`character`**: four lists about how this person acts with others. Every point of the draft must appear in exactly one of keep, revise or drop. Nothing may silently fall out. Habits, not adjectives: "stubborn" is a label; "returns to the same argument for days, rarely concedes" is the habit. Skills, knowledge, jobs, hobbies are not character.
 
-- **`keep`**: draft points that still hold. Restate each as a neutral observation. A point the snippets do not mention is kept: absence of evidence is not contradiction.
-- **`revise`**: points the new lines clearly contradict or outgrow. `old` identifies which draft point is being replaced, stated neutrally. `now` states what it should say instead, neutrally.
+- **`keep`**: draft points that still hold. Copy the draft's own sentence (or sentences) for that point as written, so the voice model keeps the wording. A point the snippets do not mention is kept: absence of evidence is not contradiction.
+- **`revise`**: points the new lines clearly contradict or outgrow. `old` copies the draft's sentence for that point. `now` states what it should say instead, as a neutral observation. Quantities, verbatim quotes and named habits in the draft carry into `now` unless the new lines contradict them.
 - **`add`**: recurring habits the new lines show that the draft does not cover. Patterns across multiple messages only. A single remark is not a habit.
-- **`drop`**: points the new lines contradict outright. `old` identifies which draft point to remove, stated neutrally.
+- **`drop`**: points the new lines contradict outright. `old` copies the draft's sentence for identification. A point is dropped only on outright contradiction.
 
 When nothing changed, `keep` holds the draft's points and the other three lists are empty arrays. Most refreshes look like this.
 
