@@ -24,9 +24,12 @@
 // warmup users`/`channels` given with no member/channel -- a redo always
 // re-processes its targets regardless of `state.warmup.done`, then marks
 // them done, so `/nep warmup status` reports the same progress either way.
-// `refreshPortrait()` is the stream analyzer's "the stored portrait misses
-// something" cue (src/memory/update.js's `onPortraitRequest`), rewriting only
-// `character`/`style` from a fresh sample. A missing `prompts.profile` /
+// `refreshPortrait()` rewrites only `character`/`style` from the member's own
+// lines since their last portrait (never older than the profile's `firstSeen`
+// unless the owner forces it), with the stored portrait as the `<draft>`;
+// it is started by src/memory/portrait.js's scheduler (by counters), by the
+// stream analyzer's cue (src/memory/update.js's `onPortraitRequest`) and by
+// `/nep memory refresh`, all under one daily cap. A missing `prompts.profile` /
 // `prompts.channel` / `prompts.server` is reported (reason `no-prompt`), never
 // thrown; a missing or broken labels.json fails loudly (a throw), exactly as it
 // does for the stream analyzer. An in-memory-only `activity` snapshot (`{ phase,
@@ -57,16 +60,21 @@ import { topByRank } from './ranking.js';
 import { clampText } from './clamp.js';
 import { normalizeTopic } from './interests.js';
 import { toTokens, fromTokens } from './mentions.js';
+import { PORTRAIT_SLOTS, llmCapReached, portraitSettings, stampMs, storedCount } from './portrait.js';
+import { DailyCapError, TokenLimitError } from '../llm/openrouter.js';
 import { log } from '../log.js';
-import { bumpDaily, dailyCounter, utcDay } from '../time.js';
+import { HOUR_MS, bumpDaily, dailyCounter, utcDay } from '../time.js';
 
 const CACHE_TTL_MS = 15 * 60_000;
 
 // Only when warmup.maxRequestTokens is missing (config.json always has it, the same value).
 const WARMUP_MAX_REQUEST_TOKENS_FALLBACK = 120000;
 
-// The portrait refresh's daily counter in state.json (see refreshPortrait).
-const PORTRAIT_SLOTS = { dayKey: 'portraitDay', countKey: 'portraitCount' };
+// How much of the sample a portrait refresh keeps each time its request is over the cap.
+const PORTRAIT_SHRINK = 0.8;
+
+// A portrait refresh's outcomes that drop an answer on purpose rather than fail (see refreshPortrait).
+const PORTRAIT_STOOD_DOWN = new Set(['paused', 'warming-up', 'gone', 'changed']);
 
 // Bumped whenever `state.warmup`'s shape changes incompatibly -- a stored
 // object whose `version` does not match this is foreign (written by an older
@@ -145,12 +153,14 @@ function profileTemplateValues(config, selfName) {
  *   `messages` are normalized (src/discord/collect.js#normalizeMessage), oldest first.
  */
 
-/** Per-author counters over every window's own (non-bot, non-self) messages, keyed by author id. */
-function collectAuthorStats(windows) {
+/** Per-author counters over every window's own (non-bot, non-self) messages, keyed by author id;
+ * messages older than `sinceTs` are left out. */
+function collectAuthorStats(windows, sinceTs = -Infinity) {
   const authors = new Map();
   for (const window of windows ?? []) {
     for (const message of window.messages ?? []) {
       if (message.bot || message.self) continue;
+      if (message.ts < sinceTs) continue;
       const id = String(message.authorId);
       let entry = authors.get(id);
       if (!entry) {
@@ -193,9 +203,10 @@ export function pickPeople(windows, cfg = {}) {
 
 /** One member's stats (see pickPeople), with no threshold/cap applied -- `null` when they wrote
  * nothing in `windows` at all. Used by `/nep warmup users user:<member>` to report on exactly the
- * member asked for, regardless of `warmup.minMessages`. */
-export function memberStats(windows, memberId) {
-  const entry = collectAuthorStats(windows).get(String(memberId));
+ * member asked for, regardless of `warmup.minMessages`. `sinceTs` (optional) counts only messages
+ * from then on: a portrait refresh's `<member>` line counts the lines since the last portrait. */
+export function memberStats(windows, memberId, sinceTs = -Infinity) {
+  const entry = collectAuthorStats(windows, sinceTs).get(String(memberId));
   if (!entry) return null;
   const { nameTs: _nameTs, ...rest } = entry;
   return rest;
@@ -265,10 +276,13 @@ export function splitNewestOlder(sortedAsc, total) {
  * its reply target when that is inside the fetched window; overlapping
  * context is merged (a `Set` per channel). The returned messages are grouped
  * by channel (main channels first, each by activity), chronological within a
- * channel. Pure.
+ * channel. `cfg.since` (epoch ms, optional) leaves the member's own messages
+ * older than that out of the pool -- a portrait refresh samples only what was
+ * written since the last portrait -- while context lines may still be older.
+ * Pure.
  * @param {ChannelWindow[]} windows
  * @param {string} memberId
- * @param {{ messagesPerPerson?: number, contextBefore?: number, maxChannelShare?: number }} cfg
+ * @param {{ messagesPerPerson?: number, contextBefore?: number, maxChannelShare?: number, since?: number }} cfg
  * @param {Set<string>|string[]} [mainChannelIds]
  * @returns {{ messages: object[], ownIds: Set<string>, channels: string[], ownCount: number, contextCount: number }}
  */
@@ -277,6 +291,7 @@ export function sampleMember(windows, memberId, cfg = {}, mainChannelIds = []) {
   const messagesPerPerson = Number.isInteger(cfg.messagesPerPerson) && cfg.messagesPerPerson > 0 ? cfg.messagesPerPerson : 0;
   const contextBefore = Number.isInteger(cfg.contextBefore) && cfg.contextBefore >= 0 ? cfg.contextBefore : 0;
   const maxChannelShare = Number.isFinite(cfg.maxChannelShare) && cfg.maxChannelShare > 0 && cfg.maxChannelShare <= 1 ? cfg.maxChannelShare : 1;
+  const since = Number.isFinite(cfg.since) ? cfg.since : -Infinity;
 
   const id = String(memberId);
   const channelPools = new Map(); // channelId -> this member's own messages, chronological
@@ -288,7 +303,7 @@ export function sampleMember(windows, memberId, cfg = {}, mainChannelIds = []) {
     const idx = new Map();
     (window.messages ?? []).forEach((m, i) => idx.set(m.id, i));
     indexById.set(window.id, idx);
-    const own = (window.messages ?? []).filter((m) => String(m.authorId) === id && !m.bot && !m.self);
+    const own = (window.messages ?? []).filter((m) => String(m.authorId) === id && !m.bot && !m.self && !(m.ts < since));
     if (own.length > 0) channelPools.set(window.id, own);
   }
 
@@ -799,8 +814,13 @@ function healProgress(progress) {
 export function createWarmup({ hot, store, client, llm, calibrator, getSelfName, now = Date.now, sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)) }) {
   const cache = new Map(); // guildId -> { fetchedAt, windows }
   const fetching = new Map(); // guildId -> the fetchGuildWindows promise in flight, see getWindows
+  // Fetched windows -> when their history read began (epoch ms): a portrait drawn from them is
+  // stamped with it, so the next refresh samples whatever was written after that read.
+  const readAtOf = new WeakMap();
   let running = false; // a full run() or one-off runXxx() in flight -- see isWarmingUp()
-  let idleWaiters = []; // resolvers for waitIdle(), notified once running goes back to false
+  let refreshing = 0; // portrait refreshes in flight: waitIdle() waits for them, isWarmingUp() does not
+  const refreshingUsers = new Set(); // members whose portrait refresh is in flight (one at a time each)
+  let idleWaiters = []; // resolvers for waitIdle(), notified once nothing above is in flight
   let consecutiveFailures = 0; // resets on any successful request; 3 in a row aborts the run (resumable)
   let stopRequested = false; // /nep warmup stop -- see `stop()` and run()'s own checkpoints
   let currentAbort = null; // the AbortController for whichever model call is in flight right now
@@ -865,8 +885,10 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
     if (cached && now() - cached.fetchedAt < CACHE_TTL_MS) return Promise.resolve(cached.windows);
     let pending = fetching.get(guildId);
     if (!pending) {
+      const startedAt = now();
       pending = fetchGuildWindows(guild, cfg)
         .then((windows) => {
+          readAtOf.set(windows, startedAt);
           cache.set(guildId, { fetchedAt: now(), windows });
           return windows;
         })
@@ -907,17 +929,18 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
   // -------------------------------------------------------------------
 
   function notifyIdle() {
-    if (running) return;
+    if (running || refreshing > 0) return;
     const waiters = idleWaiters;
     idleWaiters = [];
     for (const resolve of waiters) resolve();
   }
 
-  /** Resolves once no run()/runXxx() is in flight -- immediately if that is already true. Used by
-   * `/nep pause` (src/admin.js), the same shape as src/memory/update.js#createMemoryUpdater's own
-   * `waitIdle`. */
+  /** Resolves once no run()/runXxx() and no portrait refresh is in flight -- immediately if that
+   * is already true. Used by `/nep pause` (src/admin.js), the same shape as
+   * src/memory/update.js#createMemoryUpdater's own `waitIdle`; a refresh that finishes after the
+   * pause writes nothing (see refreshPortrait). */
   function waitIdle() {
-    return running ? new Promise((resolve) => idleWaiters.push(resolve)) : Promise.resolve();
+    return running || refreshing > 0 ? new Promise((resolve) => idleWaiters.push(resolve)) : Promise.resolve();
   }
 
   function isWarmingUp() {
@@ -968,8 +991,8 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
     return Math.floor(warmupMaxRequestTokens() * (hot.config.llm?.safetyMargin ?? 0.9));
   }
 
-  /** The `llm.complete` options every warmup and portrait request shares, read at the call:
-   * the analyzer model, role and temperature (`memory.temperature`), `warmup.maxOutputTokens`, the warmup's request
+  /** The `llm.complete` options every warmup request shares, read at the call: the analyzer
+   * model, role and temperature (`memory.temperature`), `warmup.maxOutputTokens`, the warmup's request
    * cap and `memory.timeoutMs` (a profile.md answer can take as long as a stream batch). */
   function analyzerRequestOptions() {
     return {
@@ -980,6 +1003,13 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
       maxRequestTokens: warmupRequestCap(),
       timeoutMs: hot.config.memory?.timeoutMs ?? hot.config.llm?.timeoutMs,
     };
+  }
+
+  /** A portrait refresh's options: the warmup's, minus its request cap -- a refresh is live
+   * behaviour, so `llm.maxRequestTokens` (the 50k rail) and the daily request cap apply. */
+  function portraitRequestOptions() {
+    const { maxRequestTokens: _warmupCap, ...options } = analyzerRequestOptions();
+    return options;
   }
 
   /**
@@ -1143,8 +1173,17 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
   }
 
   /** Writes one `profile.md` answer for `member` through applyMemoryUpdate (see
-   * `buildPersonWriteIterations`) -- attitude/relationship untouched. */
-  function writePersonAnswer(guildId, member, answer) {
+   * `buildPersonWriteIterations`) -- attitude/relationship untouched. An answer that carries a
+   * portrait stamps it like a refresh does (`portraitRefreshedAt` = `readAtMs`, when the run's
+   * history read began, and `portraitMessageCount` = the message count this run just SET from its
+   * window, see src/memory/portrait.js). An answer without one moves an existing count stamp by
+   * as much as the SET moved the count, so the own messages since the last portrait stay what
+   * they were. */
+  function writePersonAnswer(guildId, member, answer, readAtMs) {
+    const before = store.getUser(guildId, member.id);
+    const ownBefore = Number.isFinite(before?.portraitMessageCount)
+      ? Math.max(0, storedCount(before.messageCount) - storedCount(before.portraitMessageCount))
+      : null;
     touchUserFromWindows(guildId, member);
 
     const knownUserIds = new Set([String(member.id)]);
@@ -1163,11 +1202,37 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
         cfgForOps,
         knownUserIds,
         // No relationships (attitude is never warmed up) and no lore: not a per-person field.
-        { episodes: episodesCfg, timing, batchAuthorNames },
+        // A person run is one of the two writers of a portrait.
+        { episodes: episodesCfg, timing, batchAuthorNames, portraitFields: true },
       );
+    }
+    if (answer?.character || answer?.style) {
+      stampPortrait(guildId, member.id, readAtMs);
+    } else if (ownBefore !== null) {
+      const count = storedCount(store.getUser(guildId, member.id)?.messageCount);
+      store.updateUser(guildId, member.id, { portraitMessageCount: Math.max(0, count - ownBefore) });
     }
     store.flush();
     return { iterations: iterations.length };
+  }
+
+  /** The stamps of a portrait just written: `portraitRefreshedAt` = `readAtMs`, when the history
+   * it was drawn from began to be read (the next refresh samples own lines from then on, so a
+   * line written after that read is never skipped; now when not given), the member's message
+   * count it covers (read now, see src/memory/portrait.js#portraitDue), and no pending attempt. */
+  function stampPortrait(guildId, userId, readAtMs) {
+    store.updateUser(guildId, userId, {
+      portraitRefreshedAt: new Date(Number.isFinite(readAtMs) ? readAtMs : now()).toISOString(),
+      portraitMessageCount: storedCount(store.getUser(guildId, userId)?.messageCount),
+      portraitAttemptAt: null,
+    });
+  }
+
+  /** Stamp an attempt that ended without a stored portrait, so the member backs off
+   * `memory.portraitRetryHours` -- only onto a profile that exists (never creates one). */
+  function stampAttempt(guildId, userId, value = new Date(now()).toISOString()) {
+    if (!store.getUser(guildId, userId)) return;
+    store.updateUser(guildId, userId, { portraitAttemptAt: value });
   }
 
   // Outcomes of processChannel / processPerson / processServer. `{ ok: true, ... }` on a write (the
@@ -1339,7 +1404,7 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
       answer = clamped;
     }
 
-    writePersonAnswer(guildId, member, answer);
+    writePersonAnswer(guildId, member, answer, readAtOf.get(windows));
     markDone('people', member.id);
     return {
       ok: true,
@@ -1740,131 +1805,266 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
     store.state.markDirty();
   }
 
+  /** Give back the slot of a refresh that sent nothing; once only, whoever asks. */
+  function giveBackSlot(slot) {
+    if (slot.released) return;
+    slot.released = true;
+    releasePortraitSlot(slot.day);
+  }
+
+  /** Log a refresh that stored nothing and return its outcome. `sent`: whether a request (and a
+   * daily slot) was spent on it -- a failure after sending is a warning, everything else (an
+   * answer dropped on purpose included, see PORTRAIT_STOOD_DOWN) info. */
+  function portraitNotDone(userId, reason, { sent = false, detail, ...extra } = {}) {
+    const fields = { userId, reason, sent };
+    if (detail !== undefined) fields.detail = detail;
+    if (sent && !PORTRAIT_STOOD_DOWN.has(reason)) log.warn('warmup: portrait refresh failed', fields);
+    else log.info('warmup: portrait refresh skipped', fields);
+    return { ok: false, reason, ...extra };
+  }
+
+  /** The history a refresh reads: the injected `windows`, else one read shared through `crawl`
+   * (an object one scheduler cycle hands to every refresh it starts, so a cycle crawls at most
+   * once even past the 15-minute cache), else the cached/shared `getWindows`. */
+  function portraitWindows(guildId, guild, givenWindows, crawl) {
+    if (givenWindows) return Promise.resolve(givenWindows);
+    if (crawl?.windows) return crawl.windows;
+    const pending = getWindows(guildId, guild, hot.config.warmup ?? {});
+    if (crawl) crawl.windows = pending;
+    return pending;
+  }
+
   /**
-   * The stream analyzer's cue that a member's stored portrait misses or contradicts something
-   * (src/memory/update.js's `onPortraitRequest`, docs/prompt-contract.md, "Data model"):
-   * samples their newest `warmup.refreshMessages` own messages exactly like the warmup, calls
-   * `profile.md` with `<draft>` = the stored character+style and `<hint>` = `reason`, and replaces
-   * ONLY `character`/`style` from the answer -- interests/details/episodes/aliases of that answer
-   * are ignored, they keep flowing through the stream analyzer's own ops. Rails: at most one refresh
-   * per member per `memory.portraitRefreshHours` (skipped when `force` is false), at most
-   * `memory.portraitRefreshPerDay` per server, never while a warmup run is in flight (queues
-   * nothing, just logs and returns). Counts against the daily LLM request cap -- this is live
-   * behaviour, not seeding.
+   * Rewrite one member's portrait (`character`/`style` only) from `profile.md`: `<draft>` = the
+   * stored portrait (the base the answer merges into), `<hint>` = `reason` when given (member
+   * tokens resolved as in the draft), `<snippets>` = the member's own lines since their last
+   * portrait (`portraitRefreshedAt`) and never older than the profile (`firstSeen`: a profile
+   * re-created after a forget or wipe does not read the lines from before it); every line of the
+   * window when `force`d. A little context, sampled like the warmup
+   * (`memory.portraitRefreshMessages`, main channels first).
+   * Interests/details/episodes/aliases of the answer are ignored; they keep flowing through the
+   * stream analyzer's own ops (docs/en/prompt-contract.md, "Data model"). Started by
+   * src/memory/portrait.js's scheduler, the stream analyzer's cue and `/nep memory refresh`
+   * (`force`).
+   *
+   * Rails: never while a warmup run is in flight or paused; one refresh per member at a time;
+   * unless `force`d, only for a member with a stored profile, and not within
+   * `memory.portraitRefreshHours` of the last refresh nor `memory.portraitRetryHours` of the last
+   * attempt; nothing at all once today's LLM requests reached `llm.maxRequestsPerDay`
+   * (src/memory/portrait.js#llmCapReached, checked before any history read);
+   * `memory.portraitRefreshPerDay` per UTC day for the whole server (`PORTRAIT_SLOTS`, a slot
+   * reserved before the first await and given back whenever nothing was sent, a throw before the
+   * request included); the request is fitted under `llm.maxRequestTokens` x `llm.safetyMargin` by
+   * shrinking the sample (never below `warmup.minMessages` own lines) and sent under the live
+   * rails (the 50k request cap, `llm.maxRequestsPerDay`).
+   *
+   * Nothing is written for a member whose stored profile is not the one the refresh started from
+   * (`gone`: `/nep memory forget` or `wipe` removed it, or it was reloaded from disk), when a
+   * warmup run is in flight as the answer lands (`warming-up`), when the stored portrait changed
+   * while the request was in flight (`changed`: a warmup person run wrote one), or when paused;
+   * `waitIdle()` waits for refreshes in flight.
+   *
+   * Stamps: `portraitAttemptAt` when the request is sent and on every outcome that ends without a
+   * stored portrait for the member's own reasons (`nothing-to-sample`, `thin-sample`, `over-cap`,
+   * `token-limit`, a failed or unusable answer), so they back off; a success stamps
+   * `portraitRefreshedAt` (when the history the sample came from began to be read, so the next
+   * sample misses nothing written since), `portraitMessageCount` and clears the attempt. An
+   * answer that is empty or cut (`empty-answer`, `truncated`) is never stored.
    * @param {string} guildId
    * @param {string} userId
-   * @param {string} [reason]  The analyzer's one-line cue, used as `<hint>`.
-   * @param {{ force?: boolean }} [opts]  `force: true` (owner's `/nep memory refresh`) ignores the
-   *   hours rail, never the daily cap.
+   * @param {string} [reason]  The analyzer's one-line cue, used as `<hint>`; '' for none.
+   * @param {{ force?: boolean, windows?: ChannelWindow[], crawl?: object }} [opts]
+   *   `force: true` (the owner's `/nep memory refresh`): no hours or retry rail, no stored profile
+   *   needed, and the whole window is sampled; never the daily caps. `windows`: the history to
+   *   sample (no guild check, no fetch). `crawl`: an object shared by the refreshes of one
+   *   scheduler cycle, see portraitWindows.
+   * @returns {Promise<{ ok: true, userId: string, own: number, context: number, shrunk: number } |
+   *   { ok: false, reason: string, cap?: 'portrait'|'llm', message?: string }>}
+   *   `reason`: `warming-up`, `paused`, `busy`, `no-profile`, `too-soon`, `retry-wait`,
+   *   `no-prompt`, `no-guild`, `daily-cap` (`cap`: whose), `gone`, `nothing-to-sample`,
+   *   `thin-sample`, `over-cap`, `token-limit`, `llm-error`, `bad-json`, `truncated`,
+   *   `empty-answer`, `changed`.
    */
-  async function refreshPortrait(guildId, userId, reason, { force = false } = {}) {
-    if (running) {
-      log.info('warmup: portrait refresh skipped, a warmup run is in flight', { userId });
-      return { ok: false, reason: 'warming-up' };
-    }
-    if (store.state.data.paused) return { ok: false, reason: 'paused' };
+  async function refreshPortrait(guildId, userId, reason, { force = false, windows: givenWindows, crawl } = {}) {
+    const id = String(userId);
+    if (running) return portraitNotDone(id, 'warming-up');
+    if (store.state.data.paused) return portraitNotDone(id, 'paused');
+    if (refreshingUsers.has(id)) return portraitNotDone(id, 'busy');
 
-    const memoryCfg = hot.config.memory ?? {};
-    const profile = store.getUser(guildId, userId);
-    if (!force && profile?.portraitRefreshedAt) {
-      const lastMs = Date.parse(profile.portraitRefreshedAt);
-      const hoursMs = (memoryCfg.portraitRefreshHours ?? 24) * 3_600_000;
-      if (Number.isFinite(lastMs) && now() - lastMs < hoursMs) {
-        log.info('warmup: portrait refresh skipped, refreshed too recently', { userId });
-        return { ok: false, reason: 'too-soon' };
+    const settings = portraitSettings(hot.config);
+    const profile = store.getUser(guildId, id);
+    if (!force) {
+      // A member the owner just forgot (or never seen) is never brought back by a refresh.
+      if (!profile) return portraitNotDone(id, 'no-profile');
+      const refreshedAt = stampMs(profile.portraitRefreshedAt);
+      if (refreshedAt !== null && now() - refreshedAt < (hot.config.memory?.portraitRefreshHours ?? 24) * HOUR_MS) {
+        return portraitNotDone(id, 'too-soon');
       }
+      const attemptAt = stampMs(profile.portraitAttemptAt);
+      if (attemptAt !== null && now() - attemptAt < settings.retryHours * HOUR_MS) return portraitNotDone(id, 'retry-wait');
     }
 
     if (!hot.prompts?.profile) {
+      log.info('warmup: portrait refresh skipped', { userId: id, reason: 'no-prompt', sent: false });
       return { ok: false, reason: 'no-prompt', message: 'prompt file missing: prompts/profile.md (or prompts.local/profile.md) is not configured yet' };
     }
     const labels = requireLabels(hot.prompts);
-    const guild = resolvedGuild(guildId);
-    if (!guild) return { ok: false, reason: 'no-guild' };
+    const guild = givenWindows ? null : resolvedGuild(guildId);
+    if (!givenWindows && !guild) return portraitNotDone(id, 'no-guild');
 
-    // The daily slot, reserved synchronously before the first await so concurrent cues (one
-    // analyzer batch can raise several) can never overshoot `memory.portraitRefreshPerDay`. Kept
-    // once the request is sent, whatever its outcome; given back only when nothing was sent.
-    const perDay = Number.isFinite(memoryCfg.portraitRefreshPerDay) ? memoryCfg.portraitRefreshPerDay : 20;
-    const slotDay = reservePortraitSlot(perDay);
-    if (!slotDay) {
-      log.info('warmup: portrait refresh skipped, daily refresh cap reached', { userId, perDay });
-      return { ok: false, reason: 'daily-cap' };
-    }
+    // The LLM's own daily cap, before any history read: a refused request would cost a crawl.
+    if (llmCapReached(store.state.data, hot.config, now())) return portraitNotDone(id, 'daily-cap', { cap: 'llm' });
 
-    const cfg = hot.config.warmup ?? {};
-    let windows;
+    // The daily slot, reserved synchronously before the first await so concurrent refreshes can
+    // never overshoot `memory.portraitRefreshPerDay`; given back whenever nothing was sent.
+    const slotDay = reservePortraitSlot(settings.perDay);
+    if (!slotDay) return portraitNotDone(id, 'daily-cap', { cap: 'portrait' });
+    const slot = { day: slotDay, sent: false, released: false };
+
+    refreshing += 1;
+    refreshingUsers.add(id);
     try {
-      windows = await getWindows(guildId, guild, cfg);
+      return await refreshWithSlot({ guildId, id, reason, force, givenWindows, crawl, guild, labels, slot, startProfile: profile });
     } catch (err) {
-      releasePortraitSlot(slotDay);
+      // A throw before the request went out (the history read, a hot-reloaded labels.json the
+      // transcript cannot render, the calibrator): nothing was sent, the slot goes back.
+      if (!slot.sent) giveBackSlot(slot);
       throw err;
+    } finally {
+      refreshing -= 1;
+      refreshingUsers.delete(id);
+      notifyIdle();
     }
-    const mainChannelIds = mainChannelSet(memoryCfg.mainChannelIds);
-    const member = memberStats(windows, userId) ?? {
-      id: String(userId),
-      name: profile?.names?.[0] ?? String(userId),
-      messages: 0,
-      firstTs: null,
-      lastTs: now(),
+  }
+
+  /** refreshPortrait's work once its daily slot is held; see refreshPortrait. `startProfile`: the
+   * stored profile when the refresh started (null for a forced refresh of a member with none). */
+  async function refreshWithSlot({ guildId, id, reason, force, givenWindows, crawl, guild, labels, slot, startProfile }) {
+    /** Nothing was sent: the slot goes back; `stamp` -- the member backs off. */
+    const unsent = (why, { stamp = true, ...extra } = {}) => {
+      giveBackSlot(slot);
+      if (stamp) stampAttempt(guildId, id);
+      return portraitNotDone(id, why, extra);
     };
-    const sample = sampleMember(windows, userId, { ...cfg, messagesPerPerson: cfg.refreshMessages ?? 400 }, mainChannelIds);
-    if (sample.messages.length === 0) {
-      releasePortraitSlot(slotDay);
-      log.info('warmup: portrait refresh: nothing to sample for this member', { userId });
-      return { ok: false, reason: 'nothing-to-sample' };
-    }
+    // Whether the stored profile is still the object this refresh started from: forget, wipe
+    // and a reload from disk (pause/resume) all replace or remove it.
+    const sameProfile = () => store.getUser(guildId, id) === startProfile;
+
+    const startedAt = now();
+    const windows = await portraitWindows(guildId, guild, givenWindows, crawl);
+    if (store.state.data.paused) return unsent('paused', { stamp: false });
+    if (!sameProfile()) return unsent('gone', { stamp: false });
+    // Fetched windows carry when their read began; injected ones are as of this call.
+    const readAt = readAtOf.get(windows) ?? startedAt;
+
+    const config = hot.config;
+    const settings = portraitSettings(config);
+    const profile = startProfile;
+    // Own lines since the last portrait, and never from before the profile itself (`firstSeen`):
+    // a profile re-created by a new message after `/nep memory forget` or `wipe` starts there, so
+    // a refresh never rebuilds a portrait from the lines the owner had the persona forget. Only
+    // the owner's forced refresh (and a warmup person run) reads the whole window on purpose.
+    const since = force
+      ? -Infinity
+      : Math.max(stampMs(profile?.portraitRefreshedAt) ?? -Infinity, stampMs(profile?.firstSeen) ?? -Infinity);
+    const mainChannelIds = mainChannelSet(config.memory?.mainChannelIds);
+    const member = memberStats(windows, id, since) ?? { id, name: profile?.names?.[0] ?? id, messages: 0, firstTs: null, lastTs: now() };
+    const minOwn = Math.max(1, Math.floor(settings.firstMessages) || 0);
+    const limit = Math.floor((config.llm?.maxRequestTokens ?? 50000) * (config.llm?.safetyMargin ?? 0.9));
 
     const selfName = getSelfName(guildId);
-    const formatOptions = memoryFormatOptions(hot.config, selfName, labels);
-    const { timezone } = formatOptions;
-    const items = markOwnContext(formatTranscript(sample.messages, formatOptions), sample.ownIds, labels);
-
-    const system = fillPromptTemplate(hot.prompts.profile, profileTemplateValues(hot.config, selfName));
-    const characterBlock = block('character', characterText(hot.prompts, selfName));
-    const memberBlock = block('member', memberLine(member));
-    const draftBlock = block('draft', JSON.stringify({ character: profile?.character ?? '', style: profile?.style ?? '' }));
-    const hintBlock = reason ? block('hint', reason) : '';
-    const snippetsBlock = block('snippets', renderTranscript(items, timezone, labels));
-    const user = [characterBlock, memberBlock, draftBlock, hintBlock, snippetsBlock].filter(Boolean).join('\n\n');
-    const messages = [
-      { role: 'system', content: system },
-      { role: 'user', content: user },
+    const formatOptions = memoryFormatOptions(config, selfName, labels);
+    const nameOf = buildNameIndex(windows);
+    // The stored portrait and the cue as the analyzer reads ids: `name (id:...)`
+    // (docs/en/prompt-contract.md).
+    const draftNameOf = (memberId) => nameOf(memberId) ?? store.getUser(guildId, memberId)?.names?.[0] ?? null;
+    const stored = { character: profile?.character ?? '', style: profile?.style ?? '' };
+    const draft = {
+      character: fromTokens(stored.character, draftNameOf, 'analyzer'),
+      style: fromTokens(stored.style, draftNameOf, 'analyzer'),
+    };
+    const system = fillPromptTemplate(hot.prompts.profile, profileTemplateValues(config, selfName));
+    const fixedBlocks = [
+      block('character', characterText(hot.prompts, selfName)),
+      block('member', memberLine(member)),
+      block('draft', JSON.stringify(draft)),
+      reason ? block('hint', fromTokens(reason, draftNameOf, 'analyzer')) : '',
     ];
 
-    let completion;
-    try {
-      completion = await llm.complete(messages, analyzerRequestOptions());
-    } catch (err) {
-      log.warn('warmup: portrait refresh call failed', { userId, detail: detailOf(err) });
-      return { ok: false, reason: 'llm-error' };
+    // Fit under the live per-request rail: shrink the sample (main channels are filled first, so
+    // they stay) until the calibrated estimate fits, never below `minOwn` own lines.
+    let perPerson = Math.floor(settings.messages);
+    let shrunk = 0;
+    let sample;
+    let messages;
+    for (;;) {
+      sample = sampleMember(windows, id, { ...config.warmup, messagesPerPerson: perPerson, since }, mainChannelIds);
+      if (sample.ownCount === 0) return unsent('nothing-to-sample');
+      if (sample.ownCount < minOwn) return unsent('thin-sample');
+      const items = markOwnContext(formatTranscript(sample.messages, formatOptions), sample.ownIds, labels);
+      const snippets = block('snippets', renderTranscript(items, formatOptions.timezone, labels));
+      messages = [
+        { role: 'system', content: system },
+        { role: 'user', content: [...fixedBlocks, snippets].filter(Boolean).join('\n\n') },
+      ];
+      if (calibrator.apply(estimateMessages(messages)) <= limit) break;
+      const next = Math.floor(Math.min(perPerson, sample.ownCount) * PORTRAIT_SHRINK);
+      if (next < minOwn) return unsent('over-cap');
+      perPerson = next;
+      shrunk += 1;
     }
 
+    // Stamped when sent: a crash or a pause mid-request still backs the member off.
+    const previousAttempt = profile?.portraitAttemptAt ?? null;
+    stampAttempt(guildId, id);
+    slot.sent = true;
+    let completion;
+    try {
+      completion = await llm.complete(messages, portraitRequestOptions());
+    } catch (err) {
+      if (err instanceof DailyCapError) {
+        // The LLM's daily cap says nothing about this member: no back-off.
+        if (!store.state.data.paused && sameProfile()) stampAttempt(guildId, id, previousAttempt);
+        return unsent('daily-cap', { stamp: false, cap: 'llm' });
+      }
+      if (err instanceof TokenLimitError) return unsent('token-limit', { stamp: false });
+      return portraitNotDone(id, 'llm-error', { sent: true, detail: detailOf(err) });
+    }
+
+    if (completion.finishReason === 'length') return portraitNotDone(id, 'truncated', { sent: true });
     let parsed;
     try {
       parsed = parseJsonObject(completion.text);
     } catch (err) {
-      log.warn('warmup: portrait refresh answer could not be parsed', { userId, detail: errorNameOf(err) });
-      return { ok: false, reason: 'bad-json' };
+      const why = looksTruncated(completion.text, completion.finishReason) ? 'truncated' : 'bad-json';
+      return portraitNotDone(id, why, { sent: true, detail: errorNameOf(err) });
     }
-
-    const nameOf = buildNameIndex(windows);
     const clamped = clampProfileResult(parsed, hot.config, nameOf);
     const ops = {};
     if (clamped?.character) ops.character = clamped.character;
     if (clamped?.style) ops.style = clamped.style;
+    if (Object.keys(ops).length === 0) return portraitNotDone(id, 'empty-answer', { sent: true });
 
-    const knownUserIds = new Set([String(userId)]);
-    const batchAuthorNames = new Map([[String(userId), member.name]]);
+    // Right before the write, with no await left until it is done: what happened while the
+    // request was in flight wins -- a pause, a warmup run, a forget/wipe, a newer portrait.
+    if (store.state.data.paused) return portraitNotDone(id, 'paused', { sent: true });
+    if (running) return portraitNotDone(id, 'warming-up', { sent: true });
+    if (!sameProfile()) return portraitNotDone(id, 'gone', { sent: true });
+    if ((profile?.character ?? '') !== stored.character || (profile?.style ?? '') !== stored.style) {
+      return portraitNotDone(id, 'changed', { sent: true });
+    }
+
     const seenAt = Number.isFinite(member.lastTs) ? member.lastTs : now();
-    const timing = { seenAtByUser: new Map([[String(userId), seenAt]]), seenAt };
-    applyMemoryUpdate(store, guildId, { users: { [userId]: ops } }, memoryCfg, knownUserIds, { timing, batchAuthorNames });
-
-    store.updateUser(guildId, userId, { portraitRefreshedAt: new Date(now()).toISOString() });
+    applyMemoryUpdate(store, guildId, { users: { [id]: ops } }, hot.config.memory ?? {}, new Set([id]), {
+      timing: { seenAtByUser: new Map([[id, seenAt]]), seenAt },
+      batchAuthorNames: new Map([[id, member.name]]),
+      portraitFields: true,
+    });
+    stampPortrait(guildId, id, readAt);
     store.flush();
 
-    log.info('warmup: portrait refreshed', { userId, hinted: Boolean(reason) });
-    return { ok: true, userId };
+    log.info('warmup: portrait refreshed', { userId: id, hinted: Boolean(reason), forced: force, own: sample.ownCount, context: sample.contextCount, shrunk });
+    return { ok: true, userId: id, own: sample.ownCount, context: sample.contextCount, shrunk };
   }
 
   return {

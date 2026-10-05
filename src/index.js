@@ -21,6 +21,7 @@ import { createEmojiIndex } from './discord/emoji.js';
 import { createSpontaneous } from './behavior/spontaneous.js';
 import { createMemoryUpdater } from './memory/update.js';
 import { createWarmup } from './memory/warmup.js';
+import { createPortraitScheduler } from './memory/portrait.js';
 import { createEmojiBackfill } from './memory/emoji-backfill.js';
 import { createGifBackfill } from './memory/gif-backfill.js';
 import { createGifRecache } from './memory/gif-recache.js';
@@ -312,12 +313,16 @@ client.once(Events.ClientReady, async () => {
   instance.guildId = resolved.guildId;
 
   // The periodic work first, before anything below can throw or wait: the
-  // flush, the spontaneous and memory ticks, the hourly affinity decay.
+  // flush, the spontaneous, memory and portrait ticks, the hourly affinity decay.
   every(30_000, () => store.flush(), 'store.flush');
   every(30_000, () => spontaneous.tick(), 'spontaneous.tick');
   // The tick still runs on schedule even with the switch off, so flipping it
   // back on later needs no restart; it is the wrapper here that no-ops.
   every(60_000, () => (hot.config.features?.memory !== false ? memory.tick() : undefined), 'memory.tick');
+  // Portraits refreshed by counters (features.portraitRefresh): the scheduler looks every
+  // memory.portraitCheckMinutes itself; the minute tick only gives it the chance.
+  const portraits = createPortraitScheduler({ hot, store, refreshPortrait: warmup.refreshPortrait, isWarmingUp, getGuildId, now: Date.now });
+  every(60_000, () => portraits.tick(), 'portraits.tick');
   every(3_600_000, sweepAffinityDecay, 'affinity decay');
 
   if (!hot.config.bot.guildId) {
