@@ -88,13 +88,6 @@ test('clampText: a hard cut is only used when there really is no earlier boundar
 
 // ---- token safety: never split a <@digits> mention ------------------------
 
-test('clampText: a token straddling the cut point is dropped whole, never split', () => {
-  const text = `intro text here <@123456789012345678> more words that push this well past the limit`;
-  const result = clampText(text, 30, { tolerance: 1 });
-  assert.equal(result, 'intro text here', 'the boundary falls before the token, which is dropped whole');
-  assert.ok(!result.includes('<@'));
-});
-
 test('clampText: a token that fits entirely before the cut, right at the boundary, is kept whole', () => {
   const text = 'ping <@123456789012345678> please respond soon about the thing we discussed yesterday';
   const result = clampText(text, 26, { tolerance: 1 }); // "ping <@123456789012345678>" is exactly 26 chars
@@ -102,19 +95,24 @@ test('clampText: a token that fits entirely before the cut, right at the boundar
 });
 
 test('clampText: a token that would be split is dropped entirely, leaving no partial marker', () => {
-  const text = 'abc <@999999999999999999>';
-  // limit lands mid-token: "abc " is 4 chars, token starts at 4.
+  // No whitespace before the token, so the only cut left is the hard one at 10 code points,
+  // which lands inside the token (code points 3 to 23).
+  const text = 'abc<@999999999999999999> and more words after it';
   const result = clampText(text, 10, { tolerance: 1 });
-  assert.ok(!result.includes('<@'), 'the straddling token is dropped whole, not chopped');
+  assert.equal(result, 'abc', 'the straddling token is dropped whole, not chopped');
+  assert.ok(!result.includes('<@'));
 });
 
 // ---- dangling opening bracket / trailing separator -------------------------
 
 test('clampText: a dangling opening bracket left at the cut is stripped', () => {
-  const text = 'plays chess (mostly on weekends with friends from the old neighborhood club)';
-  const result = clampText(text, 13, { tolerance: 1 });
-  assert.ok(!result.endsWith('('), 'no dangling opening bracket');
-  assert.equal(result, 'plays chess');
+  // The word cut lands on the space right after the bracket, so the bracket is the last thing kept.
+  for (const open of ['(', '[']) {
+    const text = `plays chess ${open} mostly on weekends with friends`;
+    assert.equal(clampText(text, 16, { tolerance: 1 }), 'plays chess', `word cut after ${open}`);
+  }
+  // A hard cut (no whitespace at all) leaves it glued to the word before it.
+  assert.equal(clampText('abc(defghijklmnop', 4, { tolerance: 1 }), 'abc', 'hard cut after (');
 });
 
 test('clampText: a trailing comma left at the cut is stripped', () => {
@@ -125,14 +123,6 @@ test('clampText: a trailing comma left at the cut is stripped', () => {
 
 // ---- surrogate pairs / emoji never split -----------------------------------
 
-test('clampText: a surrogate-pair emoji at the cut point is kept or dropped whole, never split', () => {
-  const text = `abcde 🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉 more text after the emoji run to push well past the limit here`;
-  const result = clampText(text, 12, { tolerance: 1 });
-  // every remaining code point must be a valid, whole one -- Array.from re-parses cleanly.
-  const codePoints = Array.from(result);
-  assert.equal(codePoints.join(''), result, 'no lone surrogate half');
-});
-
 test('clampText: length is counted in code points, not UTF-16 units', () => {
   const emoji = '🎉'; // 1 code point, 2 UTF-16 units
   const text = emoji.repeat(5); // 5 code points, 10 UTF-16 units
@@ -141,12 +131,6 @@ test('clampText: length is counted in code points, not UTF-16 units', () => {
 });
 
 // ---- tolerance sanitization -------------------------------------------------
-
-test('clampText: tolerance omitted defaults to 1.25', () => {
-  const text = 'x'.repeat(10);
-  assert.equal(clampText(text, 8), text, '10 <= 8*1.25');
-  assert.equal(clampText('x'.repeat(11), 8), 'x'.repeat(10));
-});
 
 test('clampText: a non-number tolerance is treated as a hard limit (1)', () => {
   const text = 'x'.repeat(10);

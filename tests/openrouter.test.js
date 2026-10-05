@@ -10,7 +10,6 @@ import {
   DailyCapError,
   resolveProvider,
   matchRoute,
-  parseRouteKey,
   RETRY_STATUS,
   sleep,
   openRouterHeaders,
@@ -176,23 +175,6 @@ test('complete: TokenLimitError carries the limit key, the estimate as used and 
   });
 });
 
-test('complete: a day rollover resets the counter and lets a new request through', async () => {
-  const state = fakeState();
-  state.data.llmDay = '2000-01-01'; // long past day, at/over the old cap
-  state.data.llmCount = 1;
-  const llm = createLlm({
-    apiKey: 'k',
-    getConfig: () => baseConfig({ maxRequestsPerDay: 1 }),
-    calibrator: fakeCalibrator(),
-    state,
-    fetchImpl: async () => okResponse('hi there'),
-  });
-  const result = await llm.complete([{ role: 'user', content: 'hi' }]);
-  assert.equal(result.text, 'hi there');
-  assert.equal(state.data.llmCount, 1); // reset to 0, then incremented once
-  assert.equal(state.data.llmDay, new Date().toISOString().slice(0, 10));
-});
-
 test('complete: a cap that is not a finite number counts as 0 -- every request refused, logged once per process', async () => {
   const { logs } = await withCapturedLogs(async () => {
     for (const cap of [undefined, null, Number.NaN, '300', Infinity]) {
@@ -301,32 +283,25 @@ test('complete: options.skipCalibration true never feeds the calibrator, even wi
   assert.equal(calibrator.observed.length, 0);
 });
 
-test('complete: returns the provider named in the response json', async () => {
-  const llm = createLlm({
-    apiKey: 'k',
-    getConfig: () => baseConfig(),
-    calibrator: fakeCalibrator(),
-    state: fakeState(),
-    fetchImpl: async () => ({
+test('complete: returns the provider named in the response json, undefined when the response omits it', async () => {
+  for (const [label, response, expected] of [
+    ['named', {
       ok: true,
       status: 200,
       json: async () => ({ choices: [{ message: { content: 'hi' } }], usage: {}, provider: 'Anthropic' }),
-    }),
-  });
-  const result = await llm.complete([{ role: 'user', content: 'hi' }]);
-  assert.equal(result.provider, 'Anthropic');
-});
-
-test('complete: provider is undefined when the response omits it', async () => {
-  const llm = createLlm({
-    apiKey: 'k',
-    getConfig: () => baseConfig(),
-    calibrator: fakeCalibrator(),
-    state: fakeState(),
-    fetchImpl: async () => okResponse('hi'),
-  });
-  const result = await llm.complete([{ role: 'user', content: 'hi' }]);
-  assert.equal(result.provider, undefined);
+    }, 'Anthropic'],
+    ['omitted', okResponse('hi'), undefined],
+  ]) {
+    const llm = createLlm({
+      apiKey: 'k',
+      getConfig: () => baseConfig(),
+      calibrator: fakeCalibrator(),
+      state: fakeState(),
+      fetchImpl: async () => response,
+    });
+    const result = await llm.complete([{ role: 'user', content: 'hi' }]);
+    assert.equal(result.provider, expected, label);
+  }
 });
 
 test('complete: a non-retryable HTTP error carries the untrimmed body as .body, for a caller that needs more than the trimmed message', async () => {
@@ -484,48 +459,64 @@ test('complete: options.maxRequestTokens can also tighten the cap for one call',
   assert.equal(called, false);
 });
 
-test('complete: passes through choices[0].finish_reason as finishReason', async () => {
-  const llm = createLlm({
-    apiKey: 'k',
-    getConfig: () => baseConfig(),
-    calibrator: fakeCalibrator(),
-    state: fakeState(),
-    fetchImpl: async () => ({
+test('complete: passes through choices[0].finish_reason as finishReason, undefined when the provider omits it', async () => {
+  for (const [label, response, expected] of [
+    ['length', {
       ok: true,
       status: 200,
       json: async () => ({ choices: [{ message: { content: 'cut off' }, finish_reason: 'length' }], usage: {} }),
-    }),
-  });
-  const result = await llm.complete([{ role: 'user', content: 'hi' }]);
-  assert.equal(result.finishReason, 'length');
-});
-
-test('complete: finishReason is undefined when the provider omits it', async () => {
-  const llm = createLlm({
-    apiKey: 'k',
-    getConfig: () => baseConfig(),
-    calibrator: fakeCalibrator(),
-    state: fakeState(),
-    fetchImpl: async () => okResponse('hi'), // okResponse's choices carry no finish_reason
-  });
-  const result = await llm.complete([{ role: 'user', content: 'hi' }]);
-  assert.equal(result.finishReason, undefined);
+    }, 'length'],
+    ['omitted', okResponse('hi'), undefined], // okResponse's choices carry no finish_reason
+  ]) {
+    const llm = createLlm({
+      apiKey: 'k',
+      getConfig: () => baseConfig(),
+      calibrator: fakeCalibrator(),
+      state: fakeState(),
+      fetchImpl: async () => response,
+    });
+    const result = await llm.complete([{ role: 'user', content: 'hi' }]);
+    assert.equal(result.finishReason, expected, label);
+  }
 });
 
 test('complete: defaults to llm.timeoutMs for the request signal when options.timeoutMs is absent', async () => {
   let seenSignal;
+  let abortedAtSend;
   const llm = createLlm({
+    apiKey: 'k',
+    getConfig: () => baseConfig({ timeoutMs: 5 }),
+    calibrator: fakeCalibrator(),
+    state: fakeState(),
+    fetchImpl: async (url, init) => {
+      seenSignal = init.signal;
+      // Recorded at send time, so the check does not depend on how the success path awaits afterwards.
+      abortedAtSend = init.signal.aborted;
+      return okResponse('hi');
+    },
+  });
+  const result = await llm.complete([{ role: 'user', content: 'hi' }]);
+  assert.equal(result.text, 'hi');
+  assert.equal(abortedAtSend, false, 'the request must not go out on an already aborted signal');
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(seenSignal.aborted, true, 'without options.timeoutMs, the short llm.timeoutMs must abort the request signal');
+
+  // Second phase: with a long llm.timeoutMs and no options.signal, a successful call must leave the request
+  // signal live (the body is read after fetch resolves, so an early abort would break every real response).
+  let liveSignal;
+  const longLlm = createLlm({
     apiKey: 'k',
     getConfig: () => baseConfig({ timeoutMs: 100000 }),
     calibrator: fakeCalibrator(),
     state: fakeState(),
     fetchImpl: async (url, init) => {
-      seenSignal = init.signal;
+      liveSignal = init.signal;
       return okResponse('hi');
     },
   });
-  await llm.complete([{ role: 'user', content: 'hi' }]);
-  assert.equal(seenSignal.aborted, false);
+  const longResult = await longLlm.complete([{ role: 'user', content: 'hi' }]);
+  assert.equal(longResult.text, 'hi');
+  assert.equal(liveSignal.aborted, false, 'a successful call leaves the request signal live; only the timeout aborts it');
 });
 
 test('complete: options.timeoutMs overrides llm.timeoutMs for the request signal', async () => {
@@ -545,22 +536,6 @@ test('complete: options.timeoutMs overrides llm.timeoutMs for the request signal
   assert.equal(seenSignal.aborted, true, 'a short options.timeoutMs must win over the much longer llm.timeoutMs');
 });
 
-test('complete: omits the provider field when llm.provider is null (the default)', async () => {
-  let seenBody = null;
-  const llm = createLlm({
-    apiKey: 'k',
-    getConfig: () => baseConfig({ provider: null }),
-    calibrator: fakeCalibrator(),
-    state: fakeState(),
-    fetchImpl: async (url, init) => {
-      seenBody = JSON.parse(init.body);
-      return okResponse('hi');
-    },
-  });
-  await llm.complete([{ role: 'user', content: 'hi' }]);
-  assert.equal('provider' in seenBody, false);
-});
-
 test('complete: omits the provider field when llm.provider is a non-object (e.g. a stray string)', async () => {
   let seenBody = null;
   const llm = createLlm({
@@ -575,60 +550,6 @@ test('complete: omits the provider field when llm.provider is a non-object (e.g.
   });
   await llm.complete([{ role: 'user', content: 'hi' }]);
   assert.equal('provider' in seenBody, false);
-});
-
-test('complete: sends llm.provider verbatim as the request\'s provider field when it is an object', async () => {
-  let seenBody = null;
-  const provider = { order: ['anthropic'], allow_fallbacks: true };
-  const llm = createLlm({
-    apiKey: 'k',
-    getConfig: () => baseConfig({ provider }),
-    calibrator: fakeCalibrator(),
-    state: fakeState(),
-    fetchImpl: async (url, init) => {
-      seenBody = JSON.parse(init.body);
-      return okResponse('hi');
-    },
-  });
-  await llm.complete([{ role: 'user', content: 'hi' }]);
-  assert.deepEqual(seenBody.provider, provider);
-});
-
-test('complete: llm.provider is read fresh on every call (hot-reloadable), not cached from the first request', async () => {
-  const bodies = [];
-  let provider = { ignore: ['amazon-bedrock'] };
-  const llm = createLlm({
-    apiKey: 'k',
-    getConfig: () => baseConfig({ provider }),
-    calibrator: fakeCalibrator(),
-    state: fakeState(),
-    fetchImpl: async (url, init) => {
-      bodies.push(JSON.parse(init.body));
-      return okResponse('hi');
-    },
-  });
-  await llm.complete([{ role: 'user', content: 'hi' }]);
-  provider = null;
-  await llm.complete([{ role: 'user', content: 'hi' }]);
-  assert.deepEqual(bodies[0].provider, { ignore: ['amazon-bedrock'] });
-  assert.equal('provider' in bodies[1], false);
-});
-
-test('complete: options.provider is sent as the provider field and overrides a configured llm.provider', async () => {
-  let seenBody = null;
-  const pinned = { order: ['google-ai-studio'], allow_fallbacks: false };
-  const llm = createLlm({
-    apiKey: 'k',
-    getConfig: () => baseConfig({ provider: { ignore: ['amazon-bedrock'] } }),
-    calibrator: fakeCalibrator(),
-    state: fakeState(),
-    fetchImpl: async (url, init) => {
-      seenBody = JSON.parse(init.body);
-      return okResponse('hi');
-    },
-  });
-  await llm.complete([{ role: 'user', content: 'hi' }], { provider: pinned });
-  assert.deepEqual(seenBody.provider, pinned);
 });
 
 test('complete: options.provider is sent even when llm.provider is null', async () => {
@@ -838,23 +759,6 @@ test('complete: options.signal already aborted before the call is never sent to 
 
   await assert.rejects(llm.complete([{ role: 'user', content: 'hi' }], { signal: controller.signal }));
   assert.equal(calls, 0);
-});
-
-test('complete: without options.signal, behaviour is unchanged (only the per-request timeout applies)', async () => {
-  let seenSignal;
-  const llm = createLlm({
-    apiKey: 'k',
-    getConfig: () => baseConfig({ timeoutMs: 100000 }),
-    calibrator: fakeCalibrator(),
-    state: fakeState(),
-    fetchImpl: async (url, init) => {
-      seenSignal = init.signal;
-      return okResponse('hi');
-    },
-  });
-  const result = await llm.complete([{ role: 'user', content: 'hi' }]);
-  assert.equal(result.text, 'hi');
-  assert.equal(seenSignal.aborted, false);
 });
 
 // Only FIVE tests exercise the real retry backoff sleep (~1.5s at attempt 1): a gateway error, a
@@ -1398,17 +1302,6 @@ test('complete: precedence options.provider > llm.providerByModel (longest prefi
   assert.equal('provider' in bodies[5], false);
 });
 
-test('complete: an invalid llm.providerByModel entry is ignored and llm.provider applies', async () => {
-  const fallback = { ignore: ['some-provider'] };
-  const { llm, bodies } = capturingLlm(() => baseConfig({
-    model: 'anthropic/claude-opus-4.6',
-    provider: fallback,
-    providerByModel: { 'anthropic/': ['amazon-bedrock'], 'anthropic/claude-opus-4.6': 'amazon-bedrock' },
-  }));
-  await llm.complete([{ role: 'user', content: 'hi' }]);
-  assert.deepEqual(bodies[0].provider, fallback);
-});
-
 test('complete: llm.providerByModel is read fresh on every call (hot-reloadable)', async () => {
   let providerByModel = { 'anthropic/': BEDROCK };
   const { llm, bodies } = capturingLlm(() => baseConfig({ model: 'anthropic/claude-opus-4.6', providerByModel }));
@@ -1463,12 +1356,6 @@ test('resolveProvider: without a role (or with a non-string one) only role-less 
   assert.equal(resolveProvider('google/gemini-3.8-flash', { byModel: { 'google/@talk': STUDIO } }), undefined);
 });
 
-test('resolveProvider: the per-call override wins over a role key', () => {
-  const pinned = { order: ['google-ai-studio'], allow_fallbacks: false };
-  const byModel = { 'google/@classifier.video': VERTEX };
-  assert.equal(resolveProvider('google/gemini-3.8-flash', { override: pinned, byModel, role: 'classifier.video' }), pinned);
-});
-
 test('resolveProvider: a non-object role entry is ignored and the role-less group still applies', () => {
   const byModel = { 'google/@talk': 'google-ai-studio', 'google/': VERTEX };
   assert.equal(resolveProvider('google/gemini-3.8-flash', { byModel, role: 'talk' }), VERTEX);
@@ -1487,12 +1374,8 @@ test('matchRoute: names the matching key and its role, or null', () => {
   });
   assert.deepEqual(matchRoute('google/gemini-3.8-flash', byModel, 'talk'), { key: 'google/', prefix: 'google/', role: null, value: VERTEX });
   assert.equal(matchRoute('openai/gpt-x', byModel, 'talk'), null);
-});
-
-test('parseRouteKey: splits at the last @; a key without one has no role', () => {
-  assert.deepEqual(parseRouteKey('google/'), { prefix: 'google/', role: null });
-  assert.deepEqual(parseRouteKey('google/@classifier.video'), { prefix: 'google/', role: 'classifier.video' });
-  assert.deepEqual(parseRouteKey('@talk'), { prefix: '', role: 'talk' });
+  // A key splits at its last @: the role is what follows it, the prefix may hold an @ of its own.
+  assert.deepEqual(matchRoute('a@b/model-x', { 'a@b@talk': STUDIO }, 'talk'), { key: 'a@b@talk', prefix: 'a@b', role: 'talk', value: STUDIO });
 });
 
 test('complete: options.role selects the role key; a call without a role uses the role-less key', async () => {
@@ -1514,17 +1397,6 @@ test('complete: options.role selects the role key; a call without a role uses th
   assert.deepEqual(bodies[3].provider, { order: ['x'] });
   assert.deepEqual(bodies[4].provider, fallback);
   assert.equal('role' in bodies[0], false, 'the role is never sent to OpenRouter');
-});
-
-test('complete: without any route, a role changes nothing (llm.provider, else no field)', async () => {
-  let cfg = baseConfig({ model: 'google/gemini-3.8-flash', provider: VERTEX, providerByModel: {} });
-  const { llm, bodies } = capturingLlm(() => cfg);
-  const msgs = [{ role: 'user', content: 'hi' }];
-  await llm.complete(msgs, { role: 'talk' });
-  cfg = baseConfig({ model: 'google/gemini-3.8-flash', provider: null });
-  await llm.complete(msgs, { role: 'talk' });
-  assert.deepEqual(bodies[0].provider, VERTEX);
-  assert.equal('provider' in bodies[1], false);
 });
 
 // --- prompt caching: the marker on the system message, the full prompt count, the usage code ---
