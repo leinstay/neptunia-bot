@@ -42,7 +42,7 @@ import { isConfirmed, isStale } from '../memory/interests.js';
 import { topByRank } from '../memory/ranking.js';
 import { rankEmojiUsage } from '../memory/emoji-usage.js';
 import { gifHandleMap, normalizeGifs, rankGifs } from '../memory/gifs.js';
-import { sortEpisodesForDisplay } from '../memory/episodes.js';
+import { sortEpisodesForDisplay, topEpisodes } from '../memory/episodes.js';
 import { matchLore } from '../memory/lore.js';
 import { channelActivity, renderChannel } from '../memory/channels.js';
 import { selectPictures, mediaProxyUrl } from '../discord/media.js';
@@ -75,7 +75,8 @@ function resolveChatText(text, nameOf) {
 }
 
 /**
- * The caller's remembered episodes as `[heading, ...oneLinePerEpisode]`,
+ * A member's remembered episodes (the interlocutor's, or the top few of a
+ * member asked about) as `[heading, ...oneLinePerEpisode]`,
  * heaviest weight first then newest (see sortEpisodesForDisplay). `[]` when
  * there is nothing to show, or when `labels.profile` lacks any of
  * `episodes`/`episode`/`episodeNoQuote` — an older labels.json simply never
@@ -243,10 +244,16 @@ function aliasesText(aliases, labels, maxAliases, aliasHalfLifeDays) {
  * For the interlocutor (`interlocutor: true`), right after the attitude line
  * (or right after the heading, if there is none), `opts.episodes.enabled`
  * additionally renders the caller's remembered episodes -- see
- * docs/prompt-contract.md, "<people>". `opts.episodes.cap`/`.cost`
+ * docs/prompt-contract.md, "<people>". Anyone else (a member the persona is
+ * asked about) gets them in the same place only with `opts.episodes.max` a
+ * positive integer, and then only the top `max` (src/memory/episodes.js#topEpisodes,
+ * heaviest then newest); `max` never caps the interlocutor. Such a profile
+ * with nothing else learned is shown by its episodes alone (no
+ * `labels.profile.unknown` line). `opts.episodes.cap`/`.cost`
  * (when given) trim the episode list, heaviest-first, to fit that token
- * budget on top of the rest of the profile; without them every episode
- * renders. `opts.maxInterests`/`opts.maxDetails` cap how many interests/details
+ * budget on top of the rest of the profile (for anyone but the interlocutor,
+ * down to no heading at all when not one episode fits); without them every
+ * episode renders. `opts.maxInterests`/`opts.maxDetails` cap how many interests/details
  * render, keeping the top-ranked ones (see `interestsText`/`detailsText`
  * above); omitted -> every stored item renders. `opts.interestHalfLifeDays`/
  * `opts.detailHalfLifeDays` (from `memory.interestHalfLifeDays`/
@@ -324,18 +331,25 @@ export function renderProfile(
   if (detailsLine) restLines.push(fill(p.details, { text: detailsLine }));
   if (!compact && profile.relationship) restLines.push(fill(p.relationship, { text: resolveChatText(profile.relationship, nameOf) }));
   const hasContent = attitudeLines.length > 0 || restLines.length > 0;
-  if (!hasContent && !interlocutor) return '';
-  if (!hasContent) restLines.push(p.unknown);
+  // Every episode for the interlocutor; the top `episodes.max` for a member asked about.
+  const showEpisodes = !compact && episodes?.enabled && (interlocutor || (Number.isInteger(episodes.max) && episodes.max > 0));
+  let renderedEpisodes = showEpisodes
+    ? episodeLines(interlocutor ? profile.episodes : topEpisodes(profile.episodes, episodes.max), labels, nameOf)
+    : [];
+  if (!hasContent && interlocutor) restLines.push(p.unknown);
   if (!compact && profile.messageCount) restLines.push(fill(p.messageCount, { count: profile.messageCount }));
 
   const mark = interlocutor && markInterlocutor ? p.interlocutorMark : '';
   const heading = `## ${name}${mark}`;
 
-  let renderedEpisodes = interlocutor && !compact && episodes?.enabled ? episodeLines(profile.episodes, labels, nameOf) : [];
   if (renderedEpisodes.length && typeof episodes.cap === 'number' && typeof episodes.cost === 'function') {
     const restText = [heading, ...attitudeLines, ...restLines].join('\n');
     renderedEpisodes = fitEpisodeLines(renderedEpisodes, episodes.cap - episodes.cost(restText), episodes.cost);
+    // A member asked about never shows the episodes heading with no episode under it.
+    if (!interlocutor && renderedEpisodes.length < 2) renderedEpisodes = [];
   }
+  // Anyone but the interlocutor with nothing learned and no moment shown (none, or none fit): nothing to show.
+  if (!hasContent && !interlocutor && renderedEpisodes.length === 0) return '';
 
   return [heading, ...attitudeLines, ...renderedEpisodes, ...restLines].join('\n');
 }
@@ -1573,10 +1587,10 @@ export function buildRequest(input) {
     );
 
   // <people> priority (b)/(c): who the trigger message / the last few
-  // messages name or @mention (askedAbout, rendered FULL, no episodes) vs. the
-  // other active participants (participants, rendered COMPACT) -- see
-  // docs/prompt-contract.md, "Aliases". The authors of the pulled lines shown
-  // join (b) after them, under the same cap.
+  // messages name or @mention (askedAbout, rendered FULL with their top
+  // episodes, see below) vs. the other active participants (participants,
+  // rendered COMPACT) -- see docs/prompt-contract.md, "Aliases". The authors
+  // of the pulled lines shown join (b) after them, under the same cap.
   const { askedAbout, participants } = splitPeople(
     input.otherProfiles,
     input.candidateProfiles,
@@ -1588,31 +1602,70 @@ export function buildRequest(input) {
     config.memory?.aliasHalfLifeDays,
     pulledAuthors(pulledFits),
   );
+  // The sections fitted ahead of `<people>`, in priority order: the one list both the main
+  // pass and the room of the asked-about members' episodes (below) are measured on. The
+  // pulled block right after the chat; ahead of it on a routed turn, whose call lives there.
+  const aheadOfPeople = [...head, ...(routed ? [pulledSection, chatSection] : [chatSection, pulledSection])];
+  // Each member asked about shows their top `context.askedAboutEpisodes` episodes (0 = off;
+  // none in a private chat: another member's moments never reach it). Episodes only fill
+  // what `<people>` has left once every member asked about is placed without them, as the
+  // budget takes them in order, so no member asked about is ever cut for anyone's episodes;
+  // the earlier members take theirs first, each losing their lightest first. That room is
+  // `caps.people`, or less when the sections ahead of `<people>` leave less; measured only
+  // when an episode may be shown. The compact participants after them get what is left.
+  const askedAboutEpisodes = privateChat ? 0 : (config.context.askedAboutEpisodes ?? 3);
+  const episodeCount = (profile) => (Array.isArray(profile?.episodes) ? profile.episodes.length : 0);
+  const renderAsked = (profile, episodes) =>
+    renderProfile(profile, labels, {
+      relationships,
+      episodes,
+      maxInterests: config.memory?.maxInterests,
+      maxDetails: config.memory?.maxDetails,
+      maxAliases: config.memory?.maxAliases,
+      aliasHalfLifeDays: config.memory?.aliasHalfLifeDays,
+      interestHalfLifeDays: config.memory?.interestHalfLifeDays,
+      detailHalfLifeDays: config.memory?.detailHalfLifeDays,
+      confirmAfter: config.memory?.confirmAfter,
+      staleDays: config.memory?.interestStaleDays,
+      now,
+      nameOf,
+    });
+  const askedAboutBare = askedAbout.map((profile) => renderAsked(profile, undefined));
+  let askedAboutItems = askedAboutBare;
+  if (episodesOn && Number.isInteger(askedAboutEpisodes) && askedAboutEpisodes > 0 && askedAbout.some((profile) => episodeCount(profile) > 0)) {
+    let spare = Math.min(Number.isFinite(caps.people) ? caps.people : Infinity, Math.max(0, limit - fitSections(aheadOfPeople, limit, cost).used));
+    // Who the budget keeps without episodes: one that does not fit is skipped, the next tried.
+    const placed = askedAboutBare.map((text) => {
+      const price = text ? cost(text) : 0;
+      if (price > spare) return false;
+      spare -= price;
+      return true;
+    });
+    askedAboutItems = askedAbout.map((profile, i) => {
+      const bare = askedAboutBare[i];
+      if (!placed[i]) return bare;
+      const base = bare ? cost(bare) : 0;
+      // The most of the top episodes whose rendering fits what is spare.
+      for (let max = Math.min(askedAboutEpisodes, episodeCount(profile)); max > 0; max -= 1) {
+        const text = renderAsked(profile, { enabled: true, max });
+        const extra = (text ? cost(text) : 0) - base;
+        if (extra <= spare) {
+          spare -= extra;
+          return text;
+        }
+      }
+      return bare;
+    });
+  }
 
   const budgetFit = fitSections(
     [
-      ...head,
-      // The pulled block right after the chat; ahead of it on a routed turn, whose call lives there.
-      ...(routed ? [pulledSection, chatSection] : [chatSection, pulledSection]),
+      ...aheadOfPeople,
       {
         name: 'people',
         cap: caps.people,
         items: [
-          ...askedAbout.map((profile) =>
-            renderProfile(profile, labels, {
-              relationships,
-              maxInterests: config.memory?.maxInterests,
-              maxDetails: config.memory?.maxDetails,
-              maxAliases: config.memory?.maxAliases,
-              aliasHalfLifeDays: config.memory?.aliasHalfLifeDays,
-              interestHalfLifeDays: config.memory?.interestHalfLifeDays,
-              detailHalfLifeDays: config.memory?.detailHalfLifeDays,
-              confirmAfter: config.memory?.confirmAfter,
-              staleDays: config.memory?.interestStaleDays,
-              now,
-              nameOf,
-            }),
-          ),
+          ...askedAboutItems,
           ...participants.map((profile) =>
             renderProfile(profile, labels, {
               compact: true,
