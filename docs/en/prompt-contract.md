@@ -54,7 +54,7 @@ All instructions are English in both layers; a character's speech samples may be
 | `mentor-signs.md` | no | Mentor: known habits of model-written text, sent as the `<signs>` block in every mentor request (`features.mentor`). Omitted when missing or empty | `{{name}}` |
 | `mentor-diagnose.md` | no | Mentor: explain weak answers after scoring by pointing at specific text in the persona's context (`features.mentor`). The result is an unverified opinion stored as `diagnosis` on the run. Omitted when `mentor.diagnose` is false or the file is missing | `{{name}}` |
 | `variety.md` | no | `classifier.text` request: name the repeated devices in the persona's own recent lines (`features.variety`). No character card | `{{name}}` `{{maxPatterns}}` `{{shapeChars}}` |
-| `variety-long.md` | no | Long variety pass: name the devices across the whole ring of own lines (`features.variety`, `variety.longLines`). Same placeholders, `<lines>` block and answer format as `variety.md`. Uses `variety.longModel` (null = `classifier.text`). No character card. Falls back to no long pass when absent | `{{name}}` `{{maxPatterns}}` `{{shapeChars}}` |
+| `variety-long.md` | no | Long variety pass: name the devices across the whole ring of own lines (`features.variety`, `variety.longLines`). Same placeholders, `<lines>` block and answer format as `variety.md`. Uses the `classifier.text` model. No character card. Falls back to no long pass when absent | `{{name}}` `{{maxPatterns}}` `{{shapeChars}}` |
 | `split.md` | no | Classifier: does a direct call hold several separate requests (`features.splitTasks`). Receives a short `<transcript>` and the new message as `<candidate>`. Output is the word `one`, or 2 to `{{maxTasks}}` lines each starting with `- ` and holding one part in the author's own words. No character card. Without this file the splitter is off | `{{name}}` `{{maxTasks}}` |
 | `merge.md` | no | Classifier: does a new message from an author with waiting items belong to one of them. Receives a numbered `<waiting>` list and the new message as `<candidate>`. Output is one line: a number from the list or the word `new`. No character card. Without this file a new call is always queued as its own item | `{{name}}` |
 | `labels.json` | yes | Every string the CODE inserts into a prompt. Keys fixed below, values are the writer's | see below |
@@ -488,7 +488,7 @@ of what is already stored, so facts are not degraded by being rewritten batch af
 
 When `features.memoryTwoStage` is exactly `true` and both `prompts/memory-decide.md` and `prompts/memory-voice.md`
 are present, guild batches are split into two stages. A switch on with a prompt missing falls back to single-stage
-mode. Private batches always use single-stage mode (`memory.md` on `memory.voiceModel`, or the talk model when null).
+mode. Private batches always use single-stage mode (`memory.md` on `llm.model`).
 
 **Stage A** runs `memory-decide.md` on `memory.model` (role `analyzer`). It returns the same JSON structure with
 neutral decisions: interests, details, aliases, in-jokes, channel notes, lore, `style` and the episode line and
@@ -507,7 +507,7 @@ The stage A answer shape for voice fields:
 - `self`: an object `{ "add": [...], "remove": [...] }` (a bare list is ignored).
 - `guild.patterns` and `guild.starters`: briefs, only when the note must change.
 
-**Stage B** runs `memory-voice.md` on `memory.voiceModel` (role `voice`, `null` = the talk model). It takes the
+**Stage B** runs `memory-voice.md` on `llm.model` (role `voice`). It takes the
 queued items and returns `{ "items": { "<id>": "<text>" } }`. Each item carries its kind, the stored old text (when
 applicable), the neutral brief from stage A, and a character limit. Applied items leave the queue; items left out of
 the answer are retried with increasing back-off. Items that expire (older than `memory.voice.queueHours`, or left
@@ -710,7 +710,7 @@ block in the turn's request. Switch `features.variety` (missing = on).
 A second pass with a longer view runs at most once per `variety.longEveryHours` (default 6) hours after the persona
 posts in a server channel, reading the newest `variety.longLines` (default 300; `0` = off) of the ring across all
 channels with no age limit. When the ring holds at least `variety.longMinLines` (default 60) lines and
-`prompts/variety-long.md` exists, the pass is asked on `variety.longModel` (null = the `classifier.text` model) under
+`prompts/variety-long.md` exists, the pass is asked on the `classifier.text` model under
 usage purpose `variety-long`, with the same `<lines>` block and answer format as the short pass and at most
 `variety.longMaxPatterns` (default 3) patterns. Its list is stored as `wornLong` in guild memory and stays in force
 until the next long pass; a failure keeps the previous list. A turn's `<worn>` block carries the long pass's patterns
