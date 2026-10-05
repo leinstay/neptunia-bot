@@ -8,7 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { PermissionFlagsBits, SnowflakeUtil } from 'discord.js';
-import { resolveMentions, createTurnRunner, parseRewatchPickDetailed, parseLookupQuery } from '../src/behavior/turn.js';
+import { resolveMentions, createTurnRunner, parseRewatchPickDetailed, parseLookupQuery, usableDestination } from '../src/behavior/turn.js';
 import { between, typingMs } from '../src/behavior/random.js';
 import { fill } from '../src/discord/format.js';
 import { labels } from './fixtures/labels.js';
@@ -3842,4 +3842,858 @@ test('runTurn: turn: model answered carries the trigger kind, null on a spontane
     const { logs } = await withCapturedLogs(() => turns.runTurn(params));
     assert.equal(logs.find((l) => l.msg === 'turn: model answered').trigger, triggerKind ?? null, String(triggerKind));
   }
+});
+
+// --- another channel pulled into a turn (<channel_view>): the inputs ----------------------------
+
+const MINUTE = 60_000;
+const HOUR = 60 * MINUTE;
+// Other channels of the guild, snowflake-shaped: a `<#id>` mention is only read for such ids.
+const DIARY = '100000000000000002';
+const NOTES = '100000000000000003';
+
+/** A raw message of channel `channelId`; `raw` is Discord's own text (`<#id>` tokens), `content` the clean one. */
+function lineIn(channelId, { raw, ...fields }) {
+  const message = { ...rawMessage(fields), channelId };
+  if (raw !== undefined) message.content = raw;
+  return message;
+}
+
+/**
+ * Another text channel of `turnChannel`'s guild the bot may read, holding `messages`; its newest
+ * message is at `lastTs` (a neighbour when within the last hour of NOW). `readOnly`: the bot
+ * cannot send there. `fetchFails`: every history fetch throws. Records every fetch in `fetches`.
+ */
+function addChannel(turnChannel, { id, name, messages = [], lastTs = messages.at(-1)?.createdTimestamp ?? NOW - 3 * HOUR, readOnly = false, fetchFails = false }) {
+  const base = fakeTurnChannel({ id, name, historyMessages: messages });
+  const fetches = [];
+  const other = {
+    ...base,
+    guild: turnChannel.guild,
+    isTextBased: () => true,
+    isThread: () => false,
+    lastMessageId: SnowflakeUtil.generate({ timestamp: lastTs }).toString(),
+    permissionsFor: () => ({ has: (flag) => !readOnly || flag !== PermissionFlagsBits.SendMessages }),
+    fetches,
+    messages: {
+      cache: new Map(),
+      fetch: async (arg) => {
+        fetches.push(arg);
+        if (fetchFails) throw new Error('fixture: fetch failed');
+        return base.messages.fetch(arg);
+      },
+    },
+  };
+  turnChannel.guild.channels.cache.set(id, other);
+  return other;
+}
+
+/** The diary channel's lines: two by Éloïse, `ago` before NOW, the second one with a picture. */
+function diaryLines(ago = 3 * HOUR) {
+  const wall = { id: 'dp1', contentType: 'image/png', name: 'wall.png', url: 'https://cdn.discordapp.com/x/wall.png' };
+  return [
+    lineIn(DIARY, { id: 'd1', authorId: 'u3', authorName: 'Éloïse', ts: NOW - ago, content: 'σήμερα έβαψα τον τοίχο μπλε' }),
+    lineIn(DIARY, { id: 'd2', authorId: 'u3', authorName: 'Éloïse', ts: NOW - ago + MINUTE, content: 'και μετά κοιμήθηκα', attachments: new Map([['dp1', wall]]) }),
+  ];
+}
+
+/**
+ * A turn in #general (c1) whose history holds Bob's line naming #diary (DIARY) -- a real `<#id>`
+ * token unless `mention` is false -- and Alice's call after it. The guild holds the diary channel.
+ */
+function pullScene({ features = {}, context = {}, config = {}, bot = {}, mention = true, diary = {}, between = [], routeChannels, describer, images, store = fakeStore(), llm = fakeLlm('<msg>ok</msg>') } = {}) {
+  const asked = lineIn('c1', { id: 'm1', authorId: 'u2', authorName: 'Bob', ts: NOW - 5 * MINUTE, content: 'είδες το #diary;', raw: mention ? `είδες το <#${DIARY}>;` : 'είδες το #diary;' });
+  const call = lineIn('c1', { id: 'm9', ts: NOW - 1000, content: 'λοιπόν;' });
+  const channel = fakeTurnChannel({ historyMessages: [asked, ...between, call] });
+  const other = addChannel(channel, { id: DIARY, name: 'diary', messages: diaryLines(), ...diary });
+  const hot = fakeHot(features, bot, config);
+  hot.config.context = { ...hot.config.context, ...context };
+  const turns = createTurnRunner({ hot, store, llm, calibrator: identityCalibrator(), client: fakeClient(), describer, routeChannels, images, imageFetcher: fakeImageFetcher(), now: () => NOW });
+  return { channel, other, hot, llm, store, turns, trigger: normalizedTrigger(call) };
+}
+
+/** Makes the fixture channel `channel` a text channel listed in its own guild, as a main channel must be. */
+function registerTextChannel(channel) {
+  channel.isTextBased = () => true;
+  channel.isThread = () => false;
+  channel.guild.channels.cache.set(channel.id, channel);
+  return channel;
+}
+
+/** A describer like pullDescriber whose cache read throws (a corrupt media cache). */
+function throwingCacheDescriber() {
+  return {
+    ...pullDescriber(),
+    cachedDescriptions: () => {
+      throw new Error('fixture: corrupt media cache');
+    },
+  };
+}
+
+/** A store like fakeStore whose ring of calls (`state.json` `elsewherePings`) cannot be read. */
+function unreadableRingStore() {
+  const store = fakeStore();
+  Object.defineProperty(store.state.data, 'elsewherePings', {
+    get() {
+      throw new Error('fixture: unreadable state');
+    },
+  });
+  return store;
+}
+
+/** The `<channel_view>` body of the first request, or null when the request has none. */
+function channelViewOf(llm) {
+  const text = userText(llm);
+  return text.includes('<channel_view>') ? text.split('<channel_view>\n')[1].split('\n</channel_view>')[0] : null;
+}
+
+/** A describer with an empty cache whose describeMany captions every item, recording each call in `calls` and `events`. */
+function pullDescriber(events = []) {
+  const calls = [];
+  return {
+    calls,
+    events,
+    cachedDescriptions: () => new Map(),
+    describeMany: async (guildId, items, options) => {
+      const ids = items.map((item) => item.itemId);
+      calls.push({ ids, options });
+      events.push(`describe:${ids.join(',')}`);
+      return { descriptions: new Map(items.map((item) => [item.itemId, `caption of ${item.itemId}`])), newCount: items.length };
+    },
+  };
+}
+
+/** The describeMany calls that asked for item `itemId`. */
+function callsFor(describer, itemId) {
+  return describer.calls.filter((call) => call.ids.includes(itemId));
+}
+
+test('runTurn: an explicit channel mention in the last scanMessages pulls that channel', async () => {
+  const { turns, channel, other, llm, trigger } = pullScene();
+
+  const { result } = await withCapturedLogs(() => turns.runTurn({ channel, mode: 'reply', trigger, triggerKind: 'mention' }));
+
+  assert.equal(result.outcome, 'spoke');
+  const view = channelViewOf(llm);
+  assert.ok(view, 'the request carries <channel_view>');
+  assert.ok(view.includes('channel #diary'), view);
+  assert.ok(view.includes('σήμερα έβαψα τον τοίχο μπλε') && view.includes('και μετά κοιμήθηκα'), view);
+  assert.ok(view.includes('#3 ') && view.includes('#4 '), 'the pulled lines are numbered on after the chat');
+  assert.equal(other.fetches.length, 1, 'one page of the pulled channel');
+
+  // A mention older than the scanned span pulls nothing.
+  const filler = lineIn('c1', { id: 'm5', authorId: 'u2', authorName: 'Bob', ts: NOW - 4 * MINUTE, content: 'τέλος πάντων' });
+  const older = pullScene({ context: { pull: { scanMessages: 1 } }, between: [filler] });
+  await withCapturedLogs(() => older.turns.runTurn({ channel: older.channel, mode: 'reply', trigger: older.trigger, triggerKind: 'mention' }));
+  assert.equal(channelViewOf(older.llm), null);
+  assert.equal(older.other.fetches.length, 0);
+});
+
+test('runTurn: a channel mention in the trigger itself pulls that channel', async () => {
+  const { turns, channel, llm, trigger } = pullScene({ mention: false });
+
+  await withCapturedLogs(() => turns.runTurn({ channel, mode: 'reply', trigger: { ...trigger, mentionedChannelIds: [DIARY] }, triggerKind: 'mention' }));
+
+  assert.ok(channelViewOf(llm)?.includes('σήμερα έβαψα τον τοίχο μπλε'));
+});
+
+test('runTurn: a spontaneous turn pulls a channel mentioned in its history', async () => {
+  const describer = pullDescriber();
+  const { turns, channel, llm } = pullScene({ features: { mediaDescriptions: true }, describer });
+  const seen = [];
+
+  const { result } = await withCapturedLogs(() =>
+    turns.runTurn({
+      channel,
+      mode: 'auto',
+      chooseMode: (history, now, context) => {
+        seen.push({ pulled: context.pulled, describeCalls: describer.calls.length });
+        return 'interject';
+      },
+    }),
+  );
+
+  assert.equal(result.outcome, 'spoke');
+  assert.ok(channelViewOf(llm)?.includes('και μετά κοιμήθηκα'));
+  // The mention is pulled before the mode is chosen, and the chooser sees it.
+  assert.equal(seen.length, 1);
+  assert.deepEqual(seen[0].pulled.map((entry) => [entry.channelId, entry.reason]), [[DIARY, 'mention']]);
+  assert.equal(seen[0].describeCalls, 0, 'no caption was asked before the chooser chose');
+});
+
+test('runTurn: features.channelPull off pulls nothing for a mention and builds the request as without the channel', async () => {
+  const off = pullScene({ features: { channelPull: false } });
+  const { logs } = await withCapturedLogs(() => off.turns.runTurn({ channel: off.channel, mode: 'reply', trigger: off.trigger, triggerKind: 'mention' }));
+
+  assert.equal(off.other.fetches.length, 0, 'the mentioned channel is never fetched');
+  assert.equal(channelViewOf(off.llm), null);
+  assert.equal(logs.some((l) => l.msg.startsWith('pull: ')), false);
+
+  // The same scene with no mention at all: byte for byte the same request.
+  const plain = pullScene({ features: { channelPull: false }, mention: false });
+  await withCapturedLogs(() => plain.turns.runTurn({ channel: plain.channel, mode: 'reply', trigger: plain.trigger, triggerKind: 'mention' }));
+  assert.deepEqual(off.llm.calls[0], plain.llm.calls[0]);
+});
+
+test('runTurn: with nothing to pull the request is the one built without the pull machinery', async () => {
+  const hook = [];
+  const none = pullScene({ mention: false, routeChannels: async (args) => (hook.push(args), []) });
+  const off = pullScene({ mention: false, features: { channelPull: false } });
+
+  const { logs } = await withCapturedLogs(() => none.turns.runTurn({ channel: none.channel, mode: 'reply', trigger: none.trigger, triggerKind: 'mention' }));
+  await withCapturedLogs(() => off.turns.runTurn({ channel: off.channel, mode: 'reply', trigger: off.trigger, triggerKind: 'mention' }));
+
+  assert.equal(hook.length, 1, 'the hook was asked');
+  assert.deepEqual(none.llm.calls[0], off.llm.calls[0]);
+  assert.equal(logs.some((l) => l.msg.startsWith('pull: ')), false);
+  const answered = logs.find((l) => l.msg === 'turn: model answered');
+  assert.equal('source' in answered || 'pulled' in answered || 'focus' in answered, false, 'no pull fields on an ordinary turn');
+});
+
+test('runTurn: route hook ids are pulled after explicit mentions', async () => {
+  const hookCalls = [];
+  const scene = pullScene({
+    context: { pull: { maxChannels: 2 } },
+    routeChannels: async (args) => {
+      hookCalls.push(args);
+      return [NOTES, DIARY];
+    },
+  });
+  addChannel(scene.channel, {
+    id: NOTES,
+    name: 'notes',
+    messages: [lineIn(NOTES, { id: 'n1', authorId: 'u4', authorName: 'Zoë', ts: NOW - 2 * HOUR, content: 'σημειώσεις για αύριο' })],
+  });
+
+  await withCapturedLogs(() => scene.turns.runTurn({ channel: scene.channel, mode: 'reply', trigger: scene.trigger, triggerKind: 'mention' }));
+
+  assert.equal(hookCalls.length, 1);
+  const args = hookCalls[0];
+  assert.equal(args.guildId, 'g1');
+  assert.equal(args.channel, scene.channel);
+  assert.equal(args.trigger, scene.trigger);
+  assert.equal(args.selfName, 'Bot');
+  assert.equal(args.config, scene.hot.config);
+  assert.deepEqual(args.history.map((m) => m.id), ['m1', 'm9']);
+  const view = channelViewOf(scene.llm);
+  assert.ok(view.indexOf('channel #diary') < view.indexOf('channel #notes'), view);
+  assert.ok(view.includes('σημειώσεις για αύριο'));
+});
+
+test('runTurn: the route hook is not asked once the mentions fill every slot, nor while features.channelPull is off', async () => {
+  for (const features of [{}, { channelPull: false }]) {
+    let asked = 0;
+    const scene = pullScene({
+      features,
+      routeChannels: async () => {
+        asked += 1;
+        return [];
+      },
+    });
+    await withCapturedLogs(() => scene.turns.runTurn({ channel: scene.channel, mode: 'reply', trigger: scene.trigger, triggerKind: 'mention' }));
+    assert.equal(asked, 0, JSON.stringify(features));
+  }
+});
+
+test('runTurn: context.pull.maxChannels caps the pulled channels, the newest mention first', async () => {
+  const newer = lineIn('c1', { id: 'm5', authorId: 'u2', authorName: 'Bob', ts: NOW - 4 * MINUTE, content: 'και το #notes', raw: `και το <#${NOTES}>` });
+  const scene = pullScene({ between: [newer] });
+  const notes = addChannel(scene.channel, {
+    id: NOTES,
+    name: 'notes',
+    messages: [lineIn(NOTES, { id: 'n1', authorId: 'u4', authorName: 'Zoë', ts: NOW - 2 * HOUR, content: 'σημειώσεις για αύριο' })],
+  });
+
+  await withCapturedLogs(() => scene.turns.runTurn({ channel: scene.channel, mode: 'reply', trigger: scene.trigger, triggerKind: 'mention' }));
+
+  const view = channelViewOf(scene.llm);
+  assert.ok(view.includes('channel #notes') && !view.includes('channel #diary'), view);
+  assert.equal(scene.other.fetches.length, 0);
+  assert.equal(notes.fetches.length, 1);
+});
+
+test('runTurn: a pulled channel is left out of the neighbours', async () => {
+  const diary = { messages: diaryLines(10 * MINUTE) };
+  const pulled = pullScene({ diary });
+  await withCapturedLogs(() => pulled.turns.runTurn({ channel: pulled.channel, mode: 'reply', trigger: pulled.trigger, triggerKind: 'mention' }));
+
+  assert.ok(channelViewOf(pulled.llm)?.includes('σήμερα έβαψα τον τοίχο μπλε'));
+  assert.equal(userText(pulled.llm).includes('# diary'), false, 'not shown again among the neighbours');
+
+  // Not pulled, the same channel is an ordinary neighbour.
+  const neighbour = pullScene({ diary, features: { channelPull: false } });
+  await withCapturedLogs(() => neighbour.turns.runTurn({ channel: neighbour.channel, mode: 'reply', trigger: neighbour.trigger, triggerKind: 'mention' }));
+  assert.ok(otherChannelsSent(neighbour.llm).includes('# diary'));
+});
+
+test('runTurn: a noticed turn passes the pulled source to chooseMode', async () => {
+  const seen = [];
+  const { turns, channel, llm } = pullScene({ mention: false });
+
+  const { result } = await withCapturedLogs(() =>
+    turns.runTurn({
+      channel,
+      mode: 'auto',
+      source: { channelId: DIARY, reason: 'noticed' },
+      chooseMode: (history, now, context) => {
+        seen.push({ history, now, context });
+        return null;
+      },
+    }),
+  );
+
+  assert.equal(result.outcome, 'not-now');
+  assert.equal(llm.calls.length, 0);
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].now, NOW);
+  assert.deepEqual(seen[0].history.map((m) => m.id), ['m1', 'm9'], "the chooser still gets the turn channel's history");
+  const [source] = seen[0].context.pulled;
+  assert.equal(seen[0].context.pulled.length, 1);
+  assert.equal(source.channelId, DIARY);
+  assert.equal(source.reason, 'noticed');
+  assert.deepEqual(source.messages.map((m) => m.id), ['d1', 'd2']);
+});
+
+test('runTurn: a routed turn whose source cannot be pulled ends in error, a noticed one in not-now', async () => {
+  for (const [reason, outcome] of [['routed', 'error'], ['noticed', 'not-now']]) {
+    const { turns, channel, llm } = pullScene({ mention: false });
+    let chosen = 0;
+    const { result, logs } = await withCapturedLogs(() =>
+      turns.runTurn({
+        channel,
+        mode: reason === 'routed' ? 'reply' : 'auto',
+        source: { channelId: 'c9', reason },
+        chooseMode: () => {
+          chosen += 1;
+          return 'elsewhere';
+        },
+      }),
+    );
+
+    assert.equal(result.outcome, outcome, reason);
+    assert.equal(llm.calls.length, 0, reason);
+    assert.equal(chosen, 0, `${reason}: no chooser without the source`);
+    assert.equal(turns.isBusy('c1'), false);
+    assert.ok(logs.some((l) => l.msg === 'pull: skipped' && l.source === 'c9' && l.reason === 'not-found'), reason);
+    const unavailable = logs.find((l) => l.msg === 'turn: source unavailable');
+    if (reason === 'routed') assert.deepEqual([unavailable.channel, unavailable.source, unavailable.reason], ['c1', 'c9', 'not-found']);
+    else assert.equal(unavailable, undefined);
+  }
+});
+
+test('runTurn: fresh captions for a pulled channel are asked only once the turn is certain to run', async () => {
+  // A chooser that says not-now: nothing is asked, the cache alone was read.
+  const quiet = pullDescriber();
+  const notNow = pullScene({ features: { mediaDescriptions: true }, describer: quiet });
+  const { result } = await withCapturedLogs(() => notNow.turns.runTurn({ channel: notNow.channel, mode: 'auto', chooseMode: () => null }));
+  assert.equal(result.outcome, 'not-now');
+  assert.equal(quiet.calls.length, 0);
+
+  // A chooser that picks a mode: the caption is asked after it chose, and reaches the block.
+  const events = [];
+  const chosen = pullDescriber(events);
+  const live = pullScene({ features: { mediaDescriptions: true }, describer: chosen });
+  await withCapturedLogs(() =>
+    live.turns.runTurn({
+      channel: live.channel,
+      mode: 'auto',
+      chooseMode: () => {
+        events.push('chooser');
+        return 'interject';
+      },
+    }),
+  );
+  assert.deepEqual(callsFor(chosen, 'dp1').map((call) => call.options), [{ maxNew: 1, countAgainstDailyCap: true }]);
+  assert.ok(events.indexOf('chooser') < events.indexOf('describe:dp1'), events.join(' '));
+  assert.ok(channelViewOf(live.llm).includes('caption of dp1'));
+
+  // No chooser at all: asked with the fetch, once.
+  const direct = pullDescriber();
+  const reply = pullScene({ features: { mediaDescriptions: true }, describer: direct });
+  await withCapturedLogs(() => reply.turns.runTurn({ channel: reply.channel, mode: 'reply', trigger: reply.trigger, triggerKind: 'mention' }));
+  assert.equal(callsFor(direct, 'dp1').length, 1);
+  assert.ok(channelViewOf(reply.llm).includes('caption of dp1'));
+});
+
+test('runTurn: a failed, refused or throwing pull never fails the turn', async () => {
+  const failing = pullScene({ diary: { fetchFails: true } });
+  const failed = await withCapturedLogs(() => failing.turns.runTurn({ channel: failing.channel, mode: 'reply', trigger: failing.trigger, triggerKind: 'mention' }));
+  assert.equal(failed.result.outcome, 'spoke');
+  assert.equal(channelViewOf(failing.llm), null);
+  assert.ok(failed.logs.some((l) => l.msg === 'pull: skipped' && l.source === DIARY && l.reason === 'fetch-failed'));
+
+  const denied = pullScene({ bot: { channels: { deny: [DIARY] } } });
+  const refused = await withCapturedLogs(() => denied.turns.runTurn({ channel: denied.channel, mode: 'reply', trigger: denied.trigger, triggerKind: 'mention' }));
+  assert.equal(refused.result.outcome, 'spoke');
+  assert.equal(denied.other.fetches.length, 0, 'a refused channel is never fetched');
+  const skipped = refused.logs.find((l) => l.msg === 'pull: skipped');
+  assert.deepEqual([skipped.channel, skipped.source, skipped.reason, skipped.pullReason], ['c1', DIARY, 'denied', 'mention']);
+
+  const throwing = pullScene({
+    mention: false,
+    routeChannels: async () => {
+      throw new Error('fixture: route classifier down');
+    },
+  });
+  const thrown = await withCapturedLogs(() => throwing.turns.runTurn({ channel: throwing.channel, mode: 'reply', trigger: throwing.trigger, triggerKind: 'mention' }));
+  assert.equal(thrown.result.outcome, 'spoke');
+  assert.ok(thrown.logs.some((l) => l.msg === 'pull: route failed' && l.channel === 'c1'));
+});
+
+test('runTurn: a private chat never pulls a channel', async () => {
+  let asked = 0;
+  const raw = rawMessage({ id: 'm1', authorId: 'u1', authorName: 'Alice', content: 'hey' });
+  const channel = fakeTurnChannel({ id: 'dm1', dm: true, historyMessages: [raw] });
+  const llm = sequenceLlm(['<msg>hi</msg>']);
+  const turns = createTurnRunner({
+    hot: privateHot(),
+    store: privateStore(),
+    llm,
+    calibrator: identityCalibrator(),
+    client: guildClient(),
+    images: fakeImages(),
+    routeChannels: async () => {
+      asked += 1;
+      return [DIARY];
+    },
+  });
+
+  const { result, logs } = await withCapturedLogs(() =>
+    turns.runTurn({ channel, guildId: 'g1', mode: 'reply', trigger: { ...normalizedTrigger(raw), mentionedChannelIds: [DIARY] }, triggerKind: 'private' }),
+  );
+
+  assert.equal(result.outcome, 'spoke');
+  assert.equal(asked, 0);
+  assert.equal(userTextOf(llm.calls[0]).includes('<channel_view>'), false);
+  assert.equal(logs.some((l) => l.msg.startsWith('pull: ')), false);
+});
+
+/**
+ * A call to the persona in the read-only #diary (c2), answered in #general (c1): the source holds
+ * the diary lines and Alice's call; #general holds one line by Bob.
+ */
+function routedScene({
+  features = {},
+  hot = fakeHot(features),
+  describer,
+  llm = fakeLlm('<msg>ok</msg>'),
+  lookup,
+  callAttachments,
+  chat = [lineIn('c1', { id: 'm1', authorId: 'u2', authorName: 'Bob', ts: NOW - 5 * MINUTE, content: 'καλημέρα σε όλους' })],
+  callTs = NOW - 2 * MINUTE,
+  after = [],
+  routeChannels,
+  store = fakeStore(),
+} = {}) {
+  const channel = fakeTurnChannel({ historyMessages: chat });
+  const call = lineIn(DIARY, { id: 'd3', ts: callTs, content: '@Bot τι λες για τον τοίχο;', attachments: callAttachments });
+  const other = addChannel(channel, { id: DIARY, name: 'diary', messages: [...diaryLines(), call, ...after], readOnly: true });
+  const turns = createTurnRunner({ hot, store, llm, calibrator: identityCalibrator(), client: fakeClient(), describer, lookup, routeChannels, imageFetcher: fakeImageFetcher(), now: () => NOW });
+  const trigger = { ...normalizedTrigger(call), mentionedUserIds: ['self-id'] };
+  const params = { channel, mode: 'reply', trigger, triggerKind: 'mention', source: { channelId: DIARY, reason: 'routed' } };
+  return { channel, other, hot, llm, turns, trigger, params };
+}
+
+/** Makes #general (c1) the scene's main channel: `memory.mainChannelIds` and a usable text channel. */
+function asMainChannel(scene) {
+  registerTextChannel(scene.channel);
+  scene.hot.config.memory = { ...scene.hot.config.memory, mainChannelIds: ['c1'] };
+  return scene;
+}
+
+test('runTurn: a routed turn pulls its source with the call and builds the request in the destination', async () => {
+  const scene = asMainChannel(routedScene());
+
+  const { result, logs } = await withCapturedLogs(() => scene.turns.runTurn(scene.params));
+
+  assert.equal(result.outcome, 'spoke');
+  const view = channelViewOf(scene.llm);
+  assert.ok(view.includes('@Bot τι λες για τον τοίχο;') && view.includes('σήμερα έβαψα τον τοίχο μπλε'), view);
+  assert.ok(view.includes(labels.server.readOnly), 'the source is marked read-only');
+  // The request knows the turn's source: the task says where the call came from and where the words go.
+  assert.ok(userText(scene.llm).includes(fill(labels.elsewhere.called, { channel: 'diary', destination: 'general' })));
+  const pulled = logs.find((l) => l.msg === 'pull: channel');
+  assert.deepEqual([pulled.channel, pulled.source, pulled.pullReason], ['c1', DIARY, 'routed']);
+  const answered = logs.find((l) => l.msg === 'turn: model answered');
+  assert.deepEqual([answered.channel, answered.source, answered.pulled], ['c1', DIARY, 1]);
+  assert.equal(answered.budget.pulled.kept, 1, 'the pulled block is in the budget');
+  assert.equal('focus' in answered, false);
+});
+
+test('runTurn: a routed call older than the window is still shown with its source', async () => {
+  // Five newer lines fill the window; the call, three hours old, is outside it.
+  const after = [0, 1, 2, 3, 4].map((i) =>
+    lineIn(DIARY, { id: `d${4 + i}`, authorId: 'u4', authorName: 'Zoë', ts: NOW - 30 * MINUTE + i * MINUTE, content: `γραμμή ${i + 1} για τον κήπο` }),
+  );
+  const scene = routedScene({ callTs: NOW - 3 * HOUR + 2 * MINUTE, after });
+
+  const { result } = await withCapturedLogs(() => scene.turns.runTurn(scene.params));
+
+  assert.equal(result.outcome, 'spoke');
+  const view = channelViewOf(scene.llm);
+  assert.ok(view.includes('γραμμή 5 για τον κήπο'), view);
+  assert.ok(view.includes('@Bot τι λες για τον τοίχο;'), 'the call is shown although the window left it out');
+  assert.equal(view.includes('σήμερα έβαψα τον τοίχο μπλε'), false, 'the older lines stay out of the window');
+});
+
+test("runTurn: a pulled channel shows the ring's earlier unanswered call with its mark", async () => {
+  const earlier = lineIn(DIARY, { id: 'd0', authorId: 'u4', authorName: 'Zoë', ts: NOW - 5 * HOUR, content: '@Bot είσαι εδώ;' });
+  const diary = { messages: [earlier, ...diaryLines()] };
+  const context = { pull: { minMessages: 1 } };
+  const earlierHeader = labels.pull.earlierPings.split('{date}')[0];
+
+  const store = fakeStore();
+  store.state.data.elsewherePings = [{ messageId: 'd0', channelId: DIARY, ts: NOW - 5 * HOUR, answeredAt: null, skippedAt: null }];
+  const ringed = pullScene({ store, context, diary });
+  await withCapturedLogs(() => ringed.turns.runTurn({ channel: ringed.channel, mode: 'reply', trigger: ringed.trigger, triggerKind: 'mention' }));
+  const view = channelViewOf(ringed.llm);
+  assert.ok(view.includes('@Bot είσαι εδώ;'), view);
+  assert.ok(view.includes(earlierHeader), view);
+  assert.ok(view.includes(labels.pull.pingUnanswered), view);
+
+  // Without the ring entry the old line is outside the window and nothing is marked.
+  const plain = pullScene({ context, diary });
+  await withCapturedLogs(() => plain.turns.runTurn({ channel: plain.channel, mode: 'reply', trigger: plain.trigger, triggerKind: 'mention' }));
+  const plainView = channelViewOf(plain.llm);
+  assert.equal(plainView.includes('@Bot είσαι εδώ;') || plainView.includes(earlierHeader) || plainView.includes(labels.pull.pingUnanswered), false, plainView);
+});
+
+test("runTurn: on a routed turn the search classifier reads the source channel's lines", async () => {
+  const llm = lookupLlm('none');
+  const scene = routedScene({ hot: lookupHot(), llm, lookup: fakeLookup() });
+
+  await withCapturedLogs(() => scene.turns.runTurn(scene.params));
+
+  assert.equal(llm.classifierCalls.length, 1);
+  const user = llm.classifierCalls[0].messages[1].content;
+  assert.ok(user.includes('σήμερα έβαψα τον τοίχο μπλε'), user);
+  assert.ok(!user.includes('καλημέρα σε όλους'), "the destination's chat is not the call's context");
+  assert.ok(user.includes('<candidate>\nAlice: @Bot τι λες για τον τοίχο;'), user);
+});
+
+test("runTurn: a routed call's pictures are captioned through the pull, never as the chat's attached pictures", async () => {
+  const photo = { id: 'cp1', contentType: 'image/png', name: 'photo.png', url: 'https://cdn.discordapp.com/x/photo.png' };
+  const describer = pullDescriber();
+  const scene = routedScene({ features: { mediaDescriptions: true }, describer, callAttachments: new Map([['cp1', photo]]) });
+  scene.params.trigger = { ...scene.params.trigger, attachments: [{ id: 'cp1', kind: 'image', url: photo.url, name: 'photo.png' }] };
+
+  await withCapturedLogs(() => scene.turns.runTurn(scene.params));
+
+  assert.deepEqual(callsFor(describer, 'cp1').map((call) => call.options), [{ maxNew: 1, countAgainstDailyCap: true }]);
+  assert.equal(Array.isArray(scene.llm.calls[0][1].content), false, 'nothing is attached for vision');
+  assert.ok(channelViewOf(scene.llm).includes('caption of cp1'));
+});
+
+test('runTurn: a focus line reaches the task and the log', async () => {
+  const { turns, channel, llm } = pullScene({ mention: false });
+  const focus = normalizedTrigger(lineIn('c1', { id: 'm1', authorId: 'u2', authorName: 'Bob', ts: NOW - 5 * MINUTE, content: 'είδες το #diary;' }));
+
+  const { logs } = await withCapturedLogs(() => turns.runTurn({ channel, mode: 'interject', focus }));
+
+  assert.ok(userText(llm).includes(fill(labels.room.focus, { author: 'Bob', target: '#1' })));
+  assert.equal(logs.find((l) => l.msg === 'turn: model answered').focus, true);
+});
+
+test('runTurn: a read-only neighbour is marked in the server map', async () => {
+  const store = fakeStore({ channels: [{ id: DIARY, name: 'diary', lastMessageAt: NOW - 10 * MINUTE, days: {} }] });
+  for (const readOnly of [true, false]) {
+    const scene = pullScene({ features: { channelPull: false }, diary: { messages: diaryLines(10 * MINUTE), readOnly }, store });
+    await withCapturedLogs(() => scene.turns.runTurn({ channel: scene.channel, mode: 'reply', trigger: scene.trigger, triggerKind: 'mention' }));
+    const server = userText(scene.llm).split('<server>\n')[1].split('\n</server>')[0];
+    assert.ok(server.includes('diary'), server);
+    assert.equal(server.includes(labels.server.readOnly), readOnly, server);
+  }
+});
+
+test('runTurn: senses name the main channel where calls from read-only channels are answered', async () => {
+  for (const [features, expected] of [[{}, true], [{ elsewhere: false }, false]]) {
+    const scene = pullScene({ mention: false, features, config: { memory: { mainChannelIds: ['c1'] } } });
+    registerTextChannel(scene.channel);
+    await withCapturedLogs(() => scene.turns.runTurn({ channel: scene.channel, mode: 'reply', trigger: scene.trigger, triggerKind: 'mention' }));
+    assert.equal(userText(scene.llm).includes(fill(labels.senses.elsewhere, { destination: 'general' })), expected, JSON.stringify(features));
+  }
+});
+
+test('runTurn: senses name only a usable main channel, the first one in list order', async () => {
+  const sensesPrefix = labels.senses.elsewhere.split('{destination}')[0];
+  const cases = [
+    { name: 'cannot send', main: ['c5'], add: (scene) => addChannel(scene.channel, { id: 'c5', name: 'lounge', readOnly: true }), expected: null },
+    { name: 'thread', main: ['c5'], add: (scene) => Object.assign(addChannel(scene.channel, { id: 'c5', name: 'lounge' }), { isThread: () => true }), expected: null },
+    { name: 'denied', main: ['c5'], bot: { channels: { deny: ['c5'] } }, add: (scene) => addChannel(scene.channel, { id: 'c5', name: 'lounge' }), expected: null },
+    {
+      name: 'first usable',
+      main: ['c5', 'c6'],
+      add: (scene) => {
+        addChannel(scene.channel, { id: 'c5', name: 'lounge', readOnly: true });
+        addChannel(scene.channel, { id: 'c6', name: 'hall' });
+      },
+      expected: 'hall',
+    },
+  ];
+  for (const { name, main, bot = {}, add, expected } of cases) {
+    const scene = pullScene({ mention: false, bot, config: { memory: { mainChannelIds: main } } });
+    add(scene);
+    await withCapturedLogs(() => scene.turns.runTurn({ channel: scene.channel, mode: 'reply', trigger: scene.trigger, triggerKind: 'mention' }));
+    const text = userText(scene.llm);
+    if (expected) assert.ok(text.includes(fill(labels.senses.elsewhere, { destination: expected })), name);
+    else assert.equal(text.includes(sensesPrefix), false, name);
+  }
+});
+
+test('usableDestination: the first usable main channel, never the excepted one; off and none carry their codes', () => {
+  const general = registerTextChannel(fakeTurnChannel());
+  const hall = addChannel(general, { id: 'c6', name: 'hall' });
+  const config = { bot: {}, features: {}, memory: { mainChannelIds: ['c1', 'c6'] } };
+
+  assert.deepEqual(usableDestination(general.guild, config), { channel: general, reason: null });
+  assert.deepEqual(usableDestination(general.guild, config, { exceptId: 'c1' }), { channel: hall, reason: null });
+  assert.deepEqual(usableDestination(general.guild, { ...config, features: { elsewhere: false } }), { channel: null, reason: 'off' });
+  assert.deepEqual(usableDestination(general.guild, { ...config, memory: { mainChannelIds: [] } }), { channel: null, reason: 'no-destination' });
+  assert.deepEqual(usableDestination(null, config), { channel: null, reason: 'no-destination' }, 'a private chat has none');
+});
+
+test("runTurn: on a routed turn the re-watch classifier is not asked about the destination's videos", async () => {
+  // #general holds a watched clip and one that did not load; the call in #diary asks to try again.
+  const chat = () => [videoAttachmentRaw('m1', NOW - 10 * MINUTE, 'va', 'clip.mp4'), videoAttachmentRaw('m2', NOW - 8 * MINUTE, 'vb', 'other.mp4')];
+  const scene = (llm, describer) => routedScene({ hot: rewatchHot(), llm, describer, chat: chat() });
+  const states = { va: { state: 'watched', text: 'ένα αυτοκίνητο περνά' }, vb: { state: 'error' } };
+
+  const llm = rewatchLlm('1 | retry');
+  const describer = fakeRetryDescriber(states);
+  const routed = scene(llm, describer);
+  const { result, logs } = await withCapturedLogs(() => routed.turns.runTurn(routed.params));
+
+  assert.equal(result.outcome, 'spoke');
+  assert.equal(llm.classifierCalls.length, 0, 'no re-watch classifier request');
+  assert.equal(describer.retryCalls.length + describer.rewatchCalls.length, 0, 'nothing watched again');
+  const skipped = logs.find((l) => l.msg === 'rewatch: skipped');
+  assert.deepEqual([skipped.channel, skipped.reason], ['c1', 'routed']);
+
+  // The same call without its source (an ordinary turn here) is offered the videos.
+  const controlLlm = rewatchLlm('1 | retry');
+  const control = scene(controlLlm, fakeRetryDescriber(states));
+  await withCapturedLogs(() => control.turns.runTurn({ ...control.params, source: null }));
+  assert.equal(controlLlm.classifierCalls.length, 1);
+});
+
+test("runTurn: on a routed turn the route hook reads the source channel's lines", async () => {
+  const hookCalls = [];
+  const scene = routedScene({
+    routeChannels: async (args) => {
+      hookCalls.push(args);
+      return [];
+    },
+  });
+  scene.hot.config.context.pull = { maxChannels: 2 };
+
+  const { result } = await withCapturedLogs(() => scene.turns.runTurn(scene.params));
+
+  assert.equal(result.outcome, 'spoke');
+  assert.equal(hookCalls.length, 1);
+  assert.equal(hookCalls[0].channel, scene.channel, 'asked for the destination');
+  assert.deepEqual(hookCalls[0].history.map((m) => m.id), ['d1', 'd2', 'd3'], "the call's channel, not the destination's chat");
+});
+
+test('runTurn: a route hook id that is refused logs its pull reason', async () => {
+  const scene = pullScene({ mention: false, bot: { channels: { deny: [DIARY] } }, routeChannels: async () => [DIARY] });
+
+  const { result, logs } = await withCapturedLogs(() => scene.turns.runTurn({ channel: scene.channel, mode: 'reply', trigger: scene.trigger, triggerKind: 'mention' }));
+
+  assert.equal(result.outcome, 'spoke');
+  assert.equal(scene.other.fetches.length, 0);
+  const skipped = logs.find((l) => l.msg === 'pull: skipped');
+  assert.deepEqual([skipped.channel, skipped.source, skipped.reason, skipped.pullReason], ['c1', DIARY, 'denied', 'route']);
+});
+
+test('runTurn: the drawFailed turn after a pull asks neither the route hook nor a fresh caption again', async () => {
+  let asked = 0;
+  const describer = pullDescriber();
+  const scene = pullScene({
+    features: { mediaDescriptions: true, typingSimulation: false },
+    context: { pull: { maxChannels: 2 } },
+    config: { image: { ...DRAW_IMAGE_CFG } },
+    describer,
+    images: fakeImages({ error: new ImageGenError('moderation') }),
+    llm: sequenceLlm(['<msg>on it</msg><draw>a blue wall</draw>', '<msg>it did not work</msg>']),
+    routeChannels: async () => {
+      asked += 1;
+      return [];
+    },
+  });
+  scene.hot.prompts.draw = 'Drawing for {{name}}.\n\n{{request}}';
+
+  const { result } = await withCapturedLogs(() => scene.turns.runTurn({ channel: scene.channel, mode: 'reply', trigger: scene.trigger, triggerKind: 'mention' }));
+
+  assert.equal(result.drawFailed, 'moderation');
+  assert.equal(scene.llm.calls.length, 2, 'the drawFailed turn ran');
+  assert.equal(asked, 1, 'the hook is asked for the first turn only');
+  assert.equal(callsFor(describer, 'dp1').length, 1, 'the pulled picture is described once');
+  assert.equal(describer.calls.filter((call) => call.options?.maxNew === 1).length, 1, 'no other fresh caption request');
+  assert.ok(userTextOf(scene.llm.calls[1]).includes('σήμερα έβαψα τον τοίχο μπλε'), 'the second turn still shows the channel');
+});
+
+test('runTurn: a pull that throws never fails an ordinary turn; a routed one ends in error, a noticed one in not-now', async () => {
+  // A corrupt media cache throws inside fetchPull; an unreadable ring throws before any fetch.
+  // `perChannel`: the failure is caught for its channel alone (the log names it and why it was pulled).
+  const scenes = [
+    ['fetchPull throws', (options) => ({ ...options, features: { mediaDescriptions: true }, describer: throwingCacheDescriber() }), true],
+    ['the pull itself throws', (options) => ({ ...options, store: unreadableRingStore() }), false],
+  ];
+  const failedLine = (logs, pullReason, perChannel) =>
+    logs.find((l) => l.msg === 'pull: failed' && l.channel === 'c1' && (perChannel ? l.source === DIARY && l.pullReason === pullReason : l.source === undefined));
+  for (const [name, withFailure, perChannel] of scenes) {
+    const ordinary = pullScene(withFailure({}));
+    const plain = await withCapturedLogs(() => ordinary.turns.runTurn({ channel: ordinary.channel, mode: 'reply', trigger: ordinary.trigger, triggerKind: 'mention' }));
+    assert.equal(plain.result.outcome, 'spoke', name);
+    assert.equal(channelViewOf(ordinary.llm), null, name);
+    assert.ok(failedLine(plain.logs, 'mention', perChannel), name);
+
+    const routed = routedScene(withFailure({}));
+    const call = await withCapturedLogs(() => routed.turns.runTurn(routed.params));
+    assert.equal(call.result.outcome, 'error', name);
+    assert.equal(routed.llm.calls.length, 0, name);
+    assert.ok(failedLine(call.logs, 'routed', perChannel), name);
+    const unavailable = call.logs.find((l) => l.msg === 'turn: source unavailable');
+    assert.deepEqual([unavailable.channel, unavailable.source, unavailable.reason], ['c1', DIARY, 'error'], name);
+
+    const noticed = pullScene(withFailure({ mention: false }));
+    let chosen = 0;
+    const comment = await withCapturedLogs(() =>
+      noticed.turns.runTurn({
+        channel: noticed.channel,
+        mode: 'auto',
+        source: { channelId: DIARY, reason: 'noticed' },
+        chooseMode: () => {
+          chosen += 1;
+          return 'interject';
+        },
+      }),
+    );
+    assert.equal(comment.result.outcome, 'not-now', name);
+    assert.equal(chosen, 0, name);
+    assert.ok(failedLine(comment.logs, 'noticed', perChannel), name);
+    assert.equal(comment.logs.some((l) => l.msg === 'turn: source unavailable'), false, name);
+  }
+});
+
+test('runTurn: a pulled channel whose fetch throws costs only that channel', async () => {
+  // #diary has a picture and the cache read throws for it; #notes has none and is pulled.
+  const newer = lineIn('c1', { id: 'm5', authorId: 'u2', authorName: 'Bob', ts: NOW - 4 * MINUTE, content: 'και το #notes', raw: `και το <#${NOTES}>` });
+  const describer = {
+    ...pullDescriber(),
+    cachedDescriptions: (guildId, items) => {
+      if (items.some((item) => item.itemId === 'dp1')) throw new Error('fixture: corrupt media cache');
+      return new Map();
+    },
+  };
+  const scene = pullScene({ features: { mediaDescriptions: true }, describer, context: { pull: { maxChannels: 2 } }, between: [newer] });
+  addChannel(scene.channel, { id: NOTES, name: 'notes', messages: [lineIn(NOTES, { id: 'n1', authorId: 'u4', authorName: 'Zoë', ts: NOW - 2 * HOUR, content: 'σημειώσεις για αύριο' })] });
+
+  const { result, logs } = await withCapturedLogs(() => scene.turns.runTurn({ channel: scene.channel, mode: 'reply', trigger: scene.trigger, triggerKind: 'mention' }));
+
+  assert.equal(result.outcome, 'spoke');
+  const view = channelViewOf(scene.llm);
+  assert.ok(view.includes('σημειώσεις για αύριο') && !view.includes('σήμερα έβαψα τον τοίχο μπλε'), view);
+  const failed = logs.find((l) => l.msg === 'pull: failed');
+  assert.deepEqual([failed.channel, failed.source, failed.pullReason], ['c1', DIARY, 'mention']);
+});
+
+test('runTurn: fresh captions that fail after a chooser leave the cached ones', async () => {
+  const door = { id: 'dp2', contentType: 'image/png', name: 'door.png', url: 'https://cdn.discordapp.com/x/door.png' };
+  const [first, second] = diaryLines();
+  const messages = [{ ...first, attachments: new Map([['dp2', door]]) }, second];
+  let reads = 0;
+  const describer = {
+    ...pullDescriber(),
+    // The fetch finds one caption in the cache; the second read, for the fresh captions, throws.
+    cachedDescriptions: () => {
+      reads += 1;
+      if (reads > 1) throw new Error('fixture: corrupt media cache');
+      return new Map([['dp1', 'cached caption of dp1']]);
+    },
+  };
+  const scene = pullScene({ features: { mediaDescriptions: true }, describer, diary: { messages } });
+
+  const { result, logs } = await withCapturedLogs(() => scene.turns.runTurn({ channel: scene.channel, mode: 'auto', chooseMode: () => 'interject' }));
+
+  assert.equal(result.outcome, 'spoke');
+  assert.equal(reads, 2);
+  const failed = logs.find((l) => l.msg === 'pull: captions failed');
+  assert.deepEqual([failed.channel, failed.source], ['c1', DIARY]);
+  assert.ok(channelViewOf(scene.llm).includes('cached caption of dp1'));
+  assert.equal(callsFor(describer, 'dp2').length, 0, 'no fresh caption was asked');
+});
+
+test('runTurn: a pull candidate whose check throws is left out, and a routed turn keeps its source', async () => {
+  const named = lineIn('c1', { id: 'm1', authorId: 'u2', authorName: 'Bob', ts: NOW - 5 * MINUTE, content: 'και το #notes', raw: `και το <#${NOTES}>` });
+  const scene = routedScene({ chat: [named] });
+  scene.hot.config.context.pull = { maxChannels: 2 };
+  const notes = addChannel(scene.channel, { id: NOTES, name: 'notes', messages: [lineIn(NOTES, { id: 'n1', authorId: 'u4', authorName: 'Zoë', ts: NOW - 2 * HOUR, content: 'σημειώσεις για αύριο' })] });
+  Object.defineProperty(notes, 'permissionOverwrites', {
+    get() {
+      throw new Error('fixture: broken channel');
+    },
+  });
+
+  const { result, logs } = await withCapturedLogs(() => scene.turns.runTurn(scene.params));
+
+  assert.equal(result.outcome, 'spoke');
+  const view = channelViewOf(scene.llm);
+  assert.ok(view.includes('@Bot τι λες για τον τοίχο;') && !view.includes('σημειώσεις για αύριο'), view);
+  assert.equal(notes.fetches.length, 0);
+  const failed = logs.find((l) => l.msg === 'pull: failed');
+  assert.deepEqual([failed.channel, failed.source, failed.pullReason], ['c1', NOTES, 'mention']);
+  assert.equal(logs.some((l) => l.msg === 'pull: skipped' && l.source === NOTES), false, 'logged once, as a failure');
+  assert.equal(logs.some((l) => l.msg === 'turn: source unavailable'), false);
+});
+
+test('runTurn: without labels.pull.header only the source is pulled, with cached captions only', async () => {
+  const { pull, ...unlabelled } = labels;
+  assert.ok(pull.header, 'the fixture has the label the live layer lacks here');
+
+  // A mention and a route hook: nothing is fetched or asked, one no-label line.
+  let asked = 0;
+  const describer = pullDescriber();
+  const mention = pullScene({
+    features: { mediaDescriptions: true },
+    context: { pull: { maxChannels: 2 } },
+    describer,
+    routeChannels: async () => {
+      asked += 1;
+      return [NOTES];
+    },
+  });
+  mention.hot.prompts.labels = unlabelled;
+  const plain = await withCapturedLogs(() => mention.turns.runTurn({ channel: mention.channel, mode: 'reply', trigger: mention.trigger, triggerKind: 'mention' }));
+  assert.equal(plain.result.outcome, 'spoke');
+  assert.equal(mention.other.fetches.length, 0);
+  assert.equal(asked, 0);
+  assert.equal(callsFor(describer, 'dp1').length, 0);
+  assert.deepEqual(plain.logs.filter((l) => l.msg.startsWith('pull: ')).map((l) => [l.msg, l.channel, l.reason]), [['pull: skipped', 'c1', 'no-label']]);
+
+  // A routed turn: its source is pulled, no fresh caption is asked.
+  const routedDescriber = pullDescriber();
+  const routed = routedScene({ features: { mediaDescriptions: true }, describer: routedDescriber });
+  routed.hot.prompts.labels = unlabelled;
+  const call = await withCapturedLogs(() => routed.turns.runTurn(routed.params));
+  assert.equal(call.result.outcome, 'spoke');
+  assert.ok(call.logs.some((l) => l.msg === 'pull: channel' && l.source === DIARY));
+  assert.equal(callsFor(routedDescriber, 'dp1').length, 0);
+
+  // A noticed turn whose chooser picks a mode: no fresh caption after it either.
+  const noticedDescriber = pullDescriber();
+  const noticed = pullScene({ mention: false, features: { mediaDescriptions: true }, describer: noticedDescriber });
+  noticed.hot.prompts.labels = unlabelled;
+  const comment = await withCapturedLogs(() =>
+    noticed.turns.runTurn({ channel: noticed.channel, mode: 'auto', source: { channelId: DIARY, reason: 'noticed' }, chooseMode: () => 'interject' }),
+  );
+  assert.equal(comment.result.outcome, 'spoke');
+  assert.equal(callsFor(noticedDescriber, 'dp1').length, 0);
+  assert.equal(comment.logs.some((l) => l.msg === 'pull: captions'), false);
+
+  // Nothing to pull: no line at all.
+  const quiet = pullScene({ mention: false });
+  quiet.hot.prompts.labels = unlabelled;
+  const none = await withCapturedLogs(() => quiet.turns.runTurn({ channel: quiet.channel, mode: 'reply', trigger: quiet.trigger, triggerKind: 'mention' }));
+  assert.equal(none.logs.some((l) => l.msg.startsWith('pull: ')), false);
 });
