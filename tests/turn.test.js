@@ -16,6 +16,7 @@ import { withCapturedLogs } from './fixtures/capture-logs.js';
 import { ImageCapError, ImageGenError } from '../src/llm/images.js';
 import { DailyCapError, TokenLimitError } from '../src/llm/openrouter.js';
 import { createVarietyPass } from '../src/behavior/variety-pass.js';
+import { pingStatus } from '../src/behavior/elsewhere.js';
 import { PAGE } from '../src/discord/collect.js';
 
 function rngReturning(value) {
@@ -4270,7 +4271,7 @@ test('runTurn: a private chat never pulls a channel', async () => {
 
 /**
  * A call to the persona in the read-only #diary (c2), answered in #general (c1): the source holds
- * the diary lines and Alice's call; #general holds one line by Bob.
+ * the diary lines, `before`, Alice's call and `after`; #general holds one line by Bob.
  */
 function routedScene({
   features = {},
@@ -4281,6 +4282,7 @@ function routedScene({
   callAttachments,
   chat = [lineIn('c1', { id: 'm1', authorId: 'u2', authorName: 'Bob', ts: NOW - 5 * MINUTE, content: 'καλημέρα σε όλους' })],
   callTs = NOW - 2 * MINUTE,
+  before = [],
   after = [],
   routeChannels,
   store = fakeStore(),
@@ -4290,7 +4292,7 @@ function routedScene({
 } = {}) {
   const channel = fakeTurnChannel({ historyMessages: chat });
   const call = lineIn(DIARY, { id: 'd3', ts: callTs, content: '@Bot τι λες για τον τοίχο;', attachments: callAttachments });
-  const other = addChannel(channel, { id: DIARY, name: 'diary', messages: [...diaryLines(), call, ...after], readOnly: true });
+  const other = addChannel(channel, { id: DIARY, name: 'diary', messages: [...diaryLines(), ...before, call, ...after], readOnly: true });
   const turns = createTurnRunner({ hot, store, llm, calibrator: identityCalibrator(), client, describer, lookup, routeChannels, images, variety, imageFetcher: fakeImageFetcher(), now: () => NOW });
   const trigger = { ...normalizedTrigger(call), mentionedUserIds: ['self-id'] };
   const params = { channel, mode: 'reply', trigger, triggerKind: 'mention', source: { channelId: DIARY, reason: 'routed' } };
@@ -5056,6 +5058,210 @@ test('runTurn: dry-run logs the source reaction and the link, and acts nowhere',
       ['dry-run: would react', null, null],
     ],
   );
+});
+
+test('runTurn: an image cap on a routed turn posts the notice in the destination, never as a reply to the call', async () => {
+  const scene = routedScene({
+    hot: drawHot(),
+    images: fakeImages({ error: imageCap('userDaily', 'image.maxPerUserPerDay', 3, 3) }),
+    llm: fakeLlm('<msg reply="#4">μισό λεπτό</msg><draw reply="#4">a blue wall</draw>'),
+  });
+
+  const { result, logs } = await withCapturedLogs(() => scene.turns.runTurn(scene.params));
+
+  assert.equal(result.outcome, 'spoke');
+  assert.equal(result.drawFailed, undefined);
+  assert.equal(scene.llm.calls.length, 1, 'no drawFailed turn');
+  assert.deepEqual(scene.channel.sent, [
+    { content: linked('μισό λεπτό', 'd3'), reply: undefined, allowedMentions: { parse: [], users: [], repliedUser: true } },
+    { content: fill(labels.limits.notice, { limit: 'image.maxPerUserPerDay', used: 3, cap: 3 }), reply: undefined, allowedMentions: { parse: [] } },
+  ]);
+  assert.equal(scene.other.sent.length, 0, 'nothing in the source');
+  assert.equal(logs.find((l) => l.msg === 'turn: draw refused by a limit').asked, true, 'the caller asked: the notice follows');
+});
+
+test('runTurn: a routed turn that only reacts on its call counts as spoke', async () => {
+  const scene = routedScene({ features: { typingSimulation: false }, llm: fakeLlm('<react to="#4">👍</react>') });
+
+  const { result } = await withCapturedLogs(() => scene.turns.runTurn(scene.params));
+
+  assert.equal(result.outcome, 'spoke', 'the caller of a routed turn marks the call answered on spoke');
+  assert.equal(result.delivered, true, 'the reaction was put');
+  assert.deepEqual(scene.other.reactCalls, [{ id: 'd3', emoji: '👍' }]);
+  assert.deepEqual(scene.channel.sent, []);
+});
+
+test('runTurn: a turn whose output never reached the chat reports delivered false', async () => {
+  const quiet = { typingSimulation: false };
+  // The bot may not react in the source: the one reaction, on the call, is dropped.
+  const denied = routedScene({ features: quiet, llm: fakeLlm('<react to="#4">👍</react>') });
+  denyReactions(denied.other);
+  const dropped = await withCapturedLogs(() => denied.turns.runTurn(denied.params));
+  assert.deepEqual([dropped.result.outcome, dropped.result.delivered], ['spoke', false]);
+  assert.deepEqual([denied.other.reactCalls, denied.channel.sent], [[], []]);
+  assert.ok(dropped.logs.some((l) => l.msg === 'turn: reaction dropped' && l.reason === 'cannot-react'));
+
+  // Discord refuses the reaction on a chat line.
+  const refusing = routedScene({ features: quiet, llm: fakeLlm('<react to="#1">👍</react>') });
+  const fetchMessages = refusing.channel.messages.fetch;
+  refusing.channel.messages.fetch = async (arg) =>
+    arg && typeof arg === 'object'
+      ? fetchMessages(arg)
+      : {
+          react: async () => {
+            throw new Error('fixture: reaction refused');
+          },
+        };
+  const failed = await withCapturedLogs(() => refusing.turns.runTurn(refusing.params));
+  assert.deepEqual([failed.result.outcome, failed.result.delivered], ['spoke', false]);
+  assert.ok(failed.logs.some((l) => l.msg === 'turn: reaction failed'));
+
+  // A picture an image cap refused: the limit notice is not an answer.
+  const capped = routedScene({ hot: drawHot(), images: fakeImages({ error: imageCap('userDaily', 'image.maxPerUserPerDay', 3, 3) }), llm: fakeLlm('<draw reply="#4">a blue wall</draw>') });
+  const refused = await withCapturedLogs(() => capped.turns.runTurn(capped.params));
+  assert.deepEqual([refused.result.outcome, refused.result.delivered], ['spoke', false]);
+  assert.equal(capped.channel.sent.length, 1, 'only the notice');
+
+  // A message, a picture, or the drawFailed turn's message reached the chat.
+  const said = routedScene({ features: quiet });
+  assert.equal((await withCapturedLogs(() => said.turns.runTurn(said.params))).result.delivered, true);
+  const drawn = routedScene({ hot: drawHot(), images: fakeImages(), llm: fakeLlm('<draw reply="#4">a blue wall</draw>') });
+  assert.equal((await withCapturedLogs(() => drawn.turns.runTurn(drawn.params))).result.delivered, true);
+  const failedDraw = routedScene({
+    hot: drawHot(),
+    images: fakeImages({ error: new ImageGenError('moderation') }),
+    llm: sequenceLlm(['<draw reply="#4">a blue wall</draw>', '<msg>δεν βγήκε</msg>']),
+  });
+  const explained = await withCapturedLogs(() => failedDraw.turns.runTurn(failedDraw.params));
+  assert.deepEqual([explained.result.drawFailed, explained.result.delivered], ['moderation', true], 'the failure was answered in the chat');
+});
+
+// --- the ring of calls after a turn that showed some (state.json `elsewherePings`) --------------
+
+/** A ring entry for the diary line `line`, unanswered and unskipped. */
+function ringEntry(line) {
+  return { messageId: line.id, channelId: DIARY, ts: line.createdTimestamp, answeredAt: null, skippedAt: null };
+}
+
+/** The state of each ring entry of `store` by message id: `answered`, `skipped` or `unanswered`. */
+function ringStates(store) {
+  return Object.fromEntries(store.state.data.elsewherePings.map((entry) => [entry.messageId, pingStatus(entry)]));
+}
+
+/** The `elsewhere: marked` lines of `logs` as [source, message, status], sorted by message id. */
+function markedLines(logs) {
+  return logs
+    .filter((l) => l.msg === 'elsewhere: marked')
+    .map(({ source, message, status }) => [source, message, status])
+    .sort((a, b) => a[1].localeCompare(b[1]));
+}
+
+/**
+ * pullScene options whose read-only #diary holds two calls to the persona before its lines (e1 by
+ * Zoë, e2 by Chloé, both in the ring): in the request #3 e1, #4 e2, #5 d1, #6 d2.
+ */
+function ringedDiary(options = {}) {
+  const calls = [
+    lineIn(DIARY, { id: 'e1', authorId: 'u4', authorName: 'Zoë', ts: NOW - 3 * HOUR - 10 * MINUTE, content: '@Bot είσαι εδώ;' }),
+    lineIn(DIARY, { id: 'e2', authorId: 'u5', authorName: 'Chloé', ts: NOW - 3 * HOUR - 5 * MINUTE, content: '@Bot καλημέρα' }),
+  ];
+  const store = fakeStore();
+  store.state.data.elsewherePings = calls.map(ringEntry);
+  const { diary = {}, ...rest } = options;
+  return { store, ...rest, diary: { messages: [...calls, ...diaryLines()], readOnly: true, ...diary } };
+}
+
+test('runTurn: a turn that showed calls of a read-only channel stamps them: answered when its output answered them, skipped otherwise', async () => {
+  const quiet = { typingSimulation: false };
+  for (const [label, answer, states] of [
+    ['a reply to e1', '<msg reply="#3">ναι, εδώ είμαι</msg>', { e1: 'answered', e2: 'skipped' }],
+    ['a reaction on e2', '<react to="#4">👍</react>', { e1: 'skipped', e2: 'answered' }],
+    ['a GIF answering e2', '<msg>χα</msg><gif reply="#4">g1</gif>', { e1: 'skipped', e2: 'answered' }],
+    ['a picture answering e1', '<draw reply="#3">a blue wall</draw>', { e1: 'answered', e2: 'skipped' }],
+    ['a reply to a diary line that is no call', '<msg reply="#5">ωραίο</msg>', { e1: 'skipped', e2: 'skipped' }],
+    ['a message answering no pulled line', '<msg>καλημέρα</msg>', { e1: 'skipped', e2: 'skipped' }],
+  ]) {
+    const drawing = answer.includes('<draw');
+    const scene = pullScene(
+      ringedDiary({
+        features: quiet,
+        llm: fakeLlm(answer),
+        ...(drawing ? { config: { image: { ...DRAW_IMAGE_CFG } }, images: fakeImages() } : {}),
+      }),
+    );
+    if (drawing) scene.hot.prompts.draw = 'Drawing for {{name}}.\n\n{{request}}';
+    scene.store.findGif = gifStore().findGif;
+
+    const { result, logs } = await withCapturedLogs(() => scene.turns.runTurn({ channel: scene.channel, mode: 'reply', trigger: scene.trigger, triggerKind: 'mention' }));
+
+    assert.equal(result.outcome, 'spoke', label);
+    assert.ok(channelViewOf(scene.llm).includes('@Bot είσαι εδώ;'), label);
+    assert.deepEqual(ringStates(scene.store), states, label);
+    assert.deepEqual(markedLines(logs), Object.entries(states).map(([id, status]) => [DIARY, id, status]), label);
+    for (const entry of scene.store.state.data.elsewherePings) {
+      assert.equal(entry.answeredAt ?? entry.skippedAt, NOW, `${label}: stamped at the turn's clock`);
+    }
+  }
+
+  // The reply to e1 posts in the chat with its jump link, never as a Discord reply across channels.
+  const replied = pullScene(ringedDiary({ features: quiet, llm: fakeLlm('<msg reply="#3">ναι, εδώ είμαι</msg>') }));
+  await withCapturedLogs(() => replied.turns.runTurn({ channel: replied.channel, mode: 'reply', trigger: replied.trigger, triggerKind: 'mention' }));
+  assert.deepEqual(replied.channel.sent.map((post) => [post.content, post.reply]), [[linked('ναι, εδώ είμαι', 'e1'), undefined]]);
+});
+
+test('runTurn: a turn that chose silence stamps the calls it showed skipped; a rehearsal, a dropped block or a writable channel stamps none', async () => {
+  const silent = pullScene(ringedDiary({ llm: fakeLlm('<skip/>') }));
+  const skip = await withCapturedLogs(() => silent.turns.runTurn({ channel: silent.channel, mode: 'reply', trigger: silent.trigger, triggerKind: 'mention' }));
+  assert.equal(skip.result.outcome, 'skip');
+  assert.deepEqual(ringStates(silent.store), { e1: 'skipped', e2: 'skipped' }, 'she had them in view and chose silence');
+  assert.deepEqual(markedLines(skip.logs), [[DIARY, 'e1', 'skipped'], [DIARY, 'e2', 'skipped']]);
+
+  const caps = { interlocutor: 2500, aboutChat: 2500, people: 4000, neighbors: 3000, pulled: 1 };
+  const cases = [
+    // A rehearsal reached nobody: nothing answered, nothing let pass.
+    ['dry run', ringedDiary({ features: { dryRun: true }, llm: fakeLlm('<msg reply="#3">ναι</msg>') }), 'spoke'],
+    ['the block cut by the budget', ringedDiary({ context: { caps } }), 'spoke'],
+    ['a skip whose block was cut', ringedDiary({ context: { caps }, llm: fakeLlm('<skip/>') }), 'skip'],
+    // A call written where the bot can write is answered there, not by being shown here.
+    ['a writable channel', ringedDiary({ diary: { readOnly: false }, llm: fakeLlm('<msg reply="#3">ναι</msg>') }), 'spoke'],
+  ];
+  for (const [label, options, outcome] of cases) {
+    const scene = pullScene(options);
+    const { result, logs } = await withCapturedLogs(() => scene.turns.runTurn({ channel: scene.channel, mode: 'reply', trigger: scene.trigger, triggerKind: 'mention' }));
+    assert.equal(result.outcome, outcome, label);
+    assert.deepEqual(ringStates(scene.store), { e1: 'unanswered', e2: 'unanswered' }, label);
+    assert.deepEqual(markedLines(logs), [], label);
+  }
+
+  // Paused while the turn ran (the owner may be editing data/): the ring is left as it was.
+  const paused = pullScene(ringedDiary());
+  paused.llm.complete = async () => {
+    paused.store.state.data.paused = true;
+    return { text: '<msg reply="#3">ναι</msg>', usage: {}, estimated: 10 };
+  };
+  const late = await withCapturedLogs(() => paused.turns.runTurn({ channel: paused.channel, mode: 'reply', trigger: paused.trigger, triggerKind: 'mention' }));
+  assert.equal(late.result.outcome, 'spoke');
+  assert.deepEqual(ringStates(paused.store), { e1: 'unanswered', e2: 'unanswered' });
+});
+
+test('runTurn: a routed turn stamps the other calls it showed and leaves its own call to its caller', async () => {
+  // The diary in the request: #2 d1, #3 d2, #4 e1 (an earlier call by Zoë), #5 d3 (the routed call).
+  const earlier = lineIn(DIARY, { id: 'e1', authorId: 'u4', authorName: 'Zoë', ts: NOW - 4 * MINUTE, content: '@Bot είσαι εδώ;' });
+  for (const [label, answer, outcome, states] of [
+    ['a reply to the earlier call', '<msg reply="#4">ναι, Zoë</msg>', 'spoke', { e1: 'answered', d3: 'unanswered' }],
+    ['a reply to its own call', '<msg reply="#5">ναι</msg>', 'spoke', { e1: 'skipped', d3: 'unanswered' }],
+    ['silence', '<skip/>', 'skip', { e1: 'skipped', d3: 'unanswered' }],
+  ]) {
+    const scene = routedScene({ features: { typingSimulation: false }, before: [earlier], llm: fakeLlm(answer) });
+    scene.store.state.data.elsewherePings = [ringEntry(earlier), ringEntry({ id: 'd3', createdTimestamp: NOW - 2 * MINUTE })];
+
+    const { result, logs } = await withCapturedLogs(() => scene.turns.runTurn(scene.params));
+
+    assert.equal(result.outcome, outcome, label);
+    assert.deepEqual(ringStates(scene.store), states, `${label}: the routed call is stamped by its caller (src/discord/events.js)`);
+    assert.deepEqual(markedLines(logs), [[DIARY, 'e1', states.e1]], label);
+    assert.equal('sourceShownIds' in result, false, label);
+  }
 });
 
 test('runTurn: a drawFailed turn after a routed one keeps the source', async () => {

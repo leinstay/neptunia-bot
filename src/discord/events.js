@@ -33,7 +33,7 @@ import { addPending, isExpired, popOldest, requeuePending } from '../behavior/pe
 import { between } from '../behavior/random.js';
 import { fillPromptTemplate } from '../behavior/prompt.js';
 import { usableDestination } from '../behavior/turn.js';
-import { elsewhereSettings, recordPing, settleDueAt } from '../behavior/elsewhere.js';
+import { elsewhereSettings, pingsIn, recordPing, settleDueAt, stampPings } from '../behavior/elsewhere.js';
 import { privateGate } from '../behavior/private.js';
 import { isLimitNotice, postLimitNotice } from '../behavior/limits.js';
 import { log } from '../log.js';
@@ -115,8 +115,9 @@ function callRank(triggerKind) {
  *   src/behavior/turn.js's `setOnIdle`, in the same `finally` that frees the channel) to answer
  *   the oldest non-expired pending direct ping, one at a time, after a human switch pause. And a
  *   `.clearPending()` method (`/nep pause`, wired from src/admin.js via src/index.js) that
- *   drops every queued ping without answering any of them. And a `.stop()` method (shutdown,
- *   src/index.js) that clears every settle wait, so none starts a turn while the client goes down.
+ *   drops every queued ping and every settle wait without answering any of them. And a `.stop()`
+ *   method (shutdown, src/index.js) that clears every settle wait, so none starts a turn while the
+ *   client goes down.
  */
 export function createMessageHandler({
   hot,
@@ -752,17 +753,19 @@ export function createMessageHandler({
   // overheard turn does, and nobody asked for it: it stays silent too.
 
   /**
-   * Post the limit notice (src/behavior/limits.js#postLimitNotice: labels,
-   * dry-run and the mirror read now). A follow-up's notice is never a
-   * Discord reply, like the follow-up turn itself. Never throws.
+   * Post the limit notice in `channel` (src/behavior/limits.js#postLimitNotice:
+   * labels, dry-run and the mirror read now). A follow-up's notice is never a
+   * Discord reply, like the follow-up turn itself; nor is one posted `plain`
+   * (a routed call's, whose trigger lives in another channel). Never throws.
    * @param {TriggerKind} triggerKind
+   * @param {{ plain?: boolean }} [options]
    */
-  async function notifyLimit(channel, trigger, limit, triggerKind) {
+  async function notifyLimit(channel, trigger, limit, triggerKind, { plain = false } = {}) {
     await postLimitNotice({
       channel,
       trigger,
       limit,
-      asReply: triggerKind !== 'followUp',
+      asReply: !plain && triggerKind !== 'followUp',
       labels: hot.prompts?.labels,
       config: hot.config,
       client,
@@ -771,14 +774,124 @@ export function createMessageHandler({
 
   /**
    * After a triggered turn: a rail refusal that carries its limit gets the
-   * notice -- except on an overheard turn, which nobody asked for.
+   * notice in `channel` -- except on an overheard turn, which nobody asked
+   * for. `plain`: see notifyLimit.
    * @param {{ outcome: TurnOutcome, limit?: object|null }|undefined} result
    * @param {TriggerKind} triggerKind
+   * @param {{ plain?: boolean }} [options]
    */
-  async function announceRefusal(channel, trigger, result, triggerKind) {
+  async function announceRefusal(channel, trigger, result, triggerKind, { plain = false } = {}) {
     if (triggerKind === 'overheard') return;
     if (result?.outcome !== 'refused' || !result.limit) return;
-    await notifyLimit(channel, trigger, result.limit, triggerKind);
+    await notifyLimit(channel, trigger, result.limit, triggerKind, { plain });
+  }
+
+  /**
+   * `{ destination: id }` for the log lines of a routed call (anything
+   * carrying the channel its turn posts in as `destination`: a call, a
+   * pending ping), `{}` for any other.
+   * @param {{ destination?: object|null }} call
+   */
+  function routedFields({ destination }) {
+    return destination ? { destination: destination.id } : {};
+  }
+
+  /**
+   * After the reply turn of a server call, the live path and the drain alike:
+   * a rail refusal gets its limit notice (announceRefusal). A routed call
+   * (`destination`: the channel its turn posted in) gets it there, as a plain
+   * message -- never a Discord reply to a message of another channel -- and its
+   * ring entry follows the outcome (markRoutedCall).
+   * @param {object} channel  Where the call was written.
+   * @param {object} trigger
+   * @param {{ outcome: TurnOutcome, dryRun?: boolean, delivered?: boolean, limit?: object|null }|undefined} result
+   * @param {TriggerKind} kind
+   * @param {object|null} [destination]
+   */
+  async function afterCallTurn(channel, trigger, result, kind, destination = null) {
+    if (!destination) {
+      await announceRefusal(channel, trigger, result, kind);
+      return;
+    }
+    markRoutedCall(trigger.id, result);
+    await announceRefusal(destination, trigger, result, kind, { plain: true });
+  }
+
+  /**
+   * The routed call itself after its turn (state.json `elsewherePings`, read
+   * by every later pull of the source; stampRing): answered when the turn
+   * spoke for real and something reached the chat (`delivered`: a reaction
+   * alone counts), skipped when the persona chose silence (`skip`) or nothing
+   * it chose reached the chat (a reaction dropped or refused). The other
+   * calls of the ring the turn showed -- one this call replaced, an earlier
+   * one still waiting -- are the turn's to stamp, by what its output answered
+   * (src/behavior/turn.js#stampShownCalls); one it did not show stays as it
+   * was. A dry run that spoke reached nobody and stamps nothing (the call
+   * stays unanswered); a dry run that skipped stamps it like any skip --
+   * silence is the persona's choice, not a post. Any other outcome (an error,
+   * a refusal, busy, paused) stamps nothing.
+   * @param {string} messageId
+   * @param {{ outcome: TurnOutcome, dryRun?: boolean, delivered?: boolean }|undefined} result
+   */
+  function markRoutedCall(messageId, result) {
+    let status = null;
+    if (result?.outcome === 'skip') status = 'skipped';
+    else if (result?.outcome === 'spoke' && result.dryRun !== true) status = result.delivered === false ? 'skipped' : 'answered';
+    if (status) stampRing([{ messageId, status }]);
+  }
+
+  /**
+   * The ignore roll let a routed call pass -- the persona's choice, and one
+   * decision for the burst the settle grouped: the call and every call it
+   * took the place of (`superseded`: replaced in the settle wait or the
+   * pending slot, or outranked by it) are stamped skipped (stampRing), so a
+   * later pull never presents them as waiting. Safe in a dry run: a skip
+   * claims no answer.
+   * @param {string} messageId
+   * @param {string[]} [superseded]
+   */
+  function passRoutedCall(messageId, superseded = []) {
+    stampRing([messageId, ...superseded].map((id) => ({ messageId: id, status: 'skipped' })));
+  }
+
+  /**
+   * A routed call a turn that spoke already had in view
+   * (turns.spokeAfterSeeing): the call and every other call of its source in
+   * the ring that turn showed are stamped skipped (stampRing) -- in view, so
+   * a later pull never presents them as waiting. A turn that spoke for real
+   * stamped them itself already (src/behavior/turn.js#stampShownCalls; an
+   * answer it gave is kept), a rehearsal did not. A call of the source that
+   * turn did not show is left as it was. Safe in a dry run: a skip claims no
+   * answer.
+   * @param {string} sourceId
+   * @param {string} messageId
+   */
+  function skipSeenCalls(sourceId, messageId) {
+    const { pingMaxAgeMs } = elsewhereSettings(hot.config);
+    const seen = pingsIn(store?.state?.data?.elsewherePings, sourceId, { now: now(), maxAgeMs: pingMaxAgeMs })
+      .map((entry) => entry.messageId)
+      .filter((id) => id !== messageId && turns.spokeAfterSeeing?.(sourceId, id));
+    stampRing([messageId, ...seen].map((id) => ({ messageId: id, status: 'skipped' })));
+  }
+
+  /**
+   * Stamp calls of the ring (state.json `elsewherePings`) `answered` or
+   * `skipped` (src/behavior/elsewhere.js#stampPings: an answer wins over a
+   * skip, a stamp is never moved), log `elsewhere: marked` for each call
+   * whose state changed and mark the state dirty once. A message id the ring
+   * does not hold is passed over. Nothing changes while paused (the owner may
+   * be editing data/) or without a state.
+   * @param {{ messageId: string, status: 'answered'|'skipped' }[]} stamps
+   */
+  function stampRing(stamps) {
+    const state = store?.state;
+    const data = state?.data;
+    if (!data || data.paused || !Array.isArray(data.elsewherePings)) return;
+    const { ring, marked } = stampPings(data.elsewherePings, stamps, now());
+    if (marked.length === 0) return;
+    data.elsewherePings = ring;
+    state.markDirty?.();
+    for (const { messageId, channelId, status } of marked) log.info('elsewhere: marked', { source: channelId, message: messageId, status });
   }
 
   /**
@@ -837,10 +950,37 @@ export function createMessageHandler({
   // in its own channel (mention.pendingSameChannel) or, with one attention
   // (mention.oneAtATime), in another channel is remembered here instead of
   // dropped, and answered once the turn frees up -- unless the turn that
-  // spoke there already had it in view (turns.spokeAfterSeeing). See
-  // src/behavior/pending.js for the plain queue operations. Never persisted.
+  // spoke there already had it in view (turns.spokeAfterSeeing). A routed
+  // call (written where the persona cannot write, answered in the main
+  // channel) is held the same way once its settle wait is over: under the
+  // channel it was written in, carrying the `destination` its turn posts in.
+  // See src/behavior/pending.js for the plain queue operations. Never persisted.
   let pendingList = [];
   let draining = false; // guards against a re-entrant drainPending() call (see below)
+
+  /**
+   * Log a ping that left the queue because a newer one of the same channel
+   * took its slot (addPending / requeuePending: `replaced` or `dropped`).
+   */
+  function logNewer(ping) {
+    log.info('mention: dropped', { channel: ping.channelId, kind: ping.kind, reason: 'newer', ...routedFields(ping) });
+  }
+
+  /**
+   * Log the ping addPending / requeuePending pushed out to stay within
+   * mention.maxPending (the oldest of any channel, a routed call's destination
+   * included), with the counts: how many wait now, and the cap.
+   */
+  function logEvicted(evicted, maxPending) {
+    log.info('mention: dropped', {
+      channel: evicted.channelId,
+      kind: evicted.kind,
+      reason: 'full',
+      pending: pendingList.length,
+      maxPending,
+      ...routedFields(evicted),
+    });
+  }
 
   /** Same cached-then-fetch existence check `resolveReference` uses, generalised to any message id. */
   async function messageStillExists(channel, messageId) {
@@ -852,18 +992,33 @@ export function createMessageHandler({
 
   /**
    * Remember a direct ping (mention/reply/private message) that arrived while
-   * a turn is running in its own channel or, with one attention, elsewhere.
-   * At most one per channel -- a newer ping replaces an older one already
-   * queued for the same channel -- and at most mention.maxPending channels;
-   * the oldest is evicted when full.
+   * a turn is running in its own channel or, with one attention, elsewhere --
+   * or a routed call (`destination`: the channel its turn posts in) while a
+   * turn runs there or, with one attention, anywhere. At most one per channel
+   * the ping was written in -- a newer ping replaces an older one already
+   * queued for the same channel (logNewer); a routed call never replaces one
+   * of its destination, and one that replaces a call of its source carries it
+   * along (src/behavior/pending.js `superseded`, beside the calls it took the
+   * place of in its settle wait) -- and at most mention.maxPending entries;
+   * the oldest of any channel is evicted when full (logEvicted).
+   * `sameChannel` is logged for the channel the turn would post in.
+   * @param {string[]} [superseded]  A routed call only: see answerCall.
    */
-  function enqueuePending(channel, trigger, kind) {
+  function enqueuePending(channel, trigger, kind, destination = null, superseded = []) {
     const maxPending = hot.config.mention.maxPending ?? 3;
-    const ping = { channelId: channel.id, channel, trigger, kind, arrivedAt: now() };
-    const { list, evicted } = addPending(pendingList, ping, maxPending);
+    const routed = destination ? { destination, ...(superseded.length > 0 ? { superseded: [...superseded] } : {}) } : {};
+    const ping = { channelId: channel.id, channel, trigger, kind, arrivedAt: now(), ...routed };
+    const { list, evicted, replaced } = addPending(pendingList, ping, maxPending);
     pendingList = list;
-    log.info('mention: deferred', { channel: channel.id, kind, sameChannel: turns.isBusy(channel.id), pending: pendingList.length });
-    if (evicted) log.info('mention: dropped', { channel: evicted.channelId, kind: evicted.kind, reason: 'full' });
+    log.info('mention: deferred', {
+      channel: channel.id,
+      kind,
+      sameChannel: turns.isBusy((destination ?? channel).id),
+      pending: pendingList.length,
+      ...routedFields(ping),
+    });
+    if (replaced) logNewer(replaced);
+    if (evicted) logEvicted(evicted, maxPending);
   }
 
   /**
@@ -872,19 +1027,28 @@ export function createMessageHandler({
    * arrivedAt (a newer ping queued for the same channel meanwhile wins and
    * this one is dropped; mention.maxPending still applies). Synchronous on
    * purpose -- see drainPending. Returns whether a turn that blocks this ping
-   * is still running (its end calls drainPending again through onIdle).
+   * is still running (its end calls drainPending again through onIdle): for a
+   * routed call, one that blocks its destination.
    */
   function requeueBusy(ping) {
     const mentionCfg = hot.config.mention;
-    const { list, dropped, evicted } = requeuePending(pendingList, ping, mentionCfg.maxPending ?? 3);
+    const maxPending = mentionCfg.maxPending ?? 3;
+    const { list, dropped, evicted, replaced } = requeuePending(pendingList, ping, maxPending);
     pendingList = list;
     if (dropped) {
-      log.info('mention: dropped', { channel: dropped.channelId, kind: dropped.kind, reason: 'newer' });
+      logNewer(dropped);
     } else {
-      log.info('mention: deferred again', { channel: ping.channelId, kind: ping.kind, reason: 'busy', pending: pendingList.length });
+      log.info('mention: deferred again', {
+        channel: ping.channelId,
+        kind: ping.kind,
+        reason: 'busy',
+        pending: pendingList.length,
+        ...routedFields(ping),
+      });
     }
-    if (evicted) log.info('mention: dropped', { channel: evicted.channelId, kind: evicted.kind, reason: 'full' });
-    return turnBlocked(ping.channelId, hot.config);
+    if (replaced) logNewer(replaced);
+    if (evicted) logEvicted(evicted, maxPending);
+    return turnBlocked(ping.destination?.id ?? ping.channelId, hot.config);
   }
 
   /**
@@ -921,7 +1085,7 @@ export function createMessageHandler({
       author: trigger.authorId,
       channel: channel.id,
       ...(deferred ? { deferred: true } : {}),
-      ...(destination ? { destination: destination.id } : {}),
+      ...routedFields({ destination }),
     });
     return decision;
   }
@@ -946,6 +1110,18 @@ export function createMessageHandler({
    * channel is no longer allowed (bot.channels) or its switch
    * (features.mentions / features.replies) was turned off while it waited.
    *
+   * A routed call (one with a `destination`) goes through the same checks in
+   * the channel it was written in, except the send permission: the
+   * destination it waited with is not checked, its route is read again now
+   * instead (routeFor: features.elsewhere, memory.mainChannelIds, the audience
+   * rail, a main channel the bot can send in) -- a route that no longer holds
+   * drops it like onMessage step 11 does (`cannot-send` with `route`) -- and
+   * its turn posts in the destination resolved now, with its source
+   * (afterCallTurn: the notice there, plain; the ring). A routed call a turn
+   * that spoke already had in view is stamped skipped in the ring with every
+   * other call of its source that turn showed (skipSeenCalls); one the ignore
+   * roll lets pass, with every call it took the place of (passRoutedCall).
+   *
    * A turn that started during the switch pause makes runTurn answer 'busy':
    * the ping is re-queued (requeueBusy; a server ping keeps its `respond`
    * decision, so the retry neither counts it again toward spamThreshold nor
@@ -965,29 +1141,36 @@ export function createMessageHandler({
         if (!ping) break;
 
         const mentionCfg = hot.config.mention;
+        const routed = routedFields(ping);
         if (isExpired(ping, now(), mentionCfg.pendingMinutes ?? 10)) {
-          log.info('mention: expired', { channel: ping.channelId, kind: ping.kind });
+          log.info('mention: expired', { channel: ping.channelId, kind: ping.kind, ...routed });
           continue;
         }
 
-        log.info('mention: picked up', { channel: ping.channelId, kind: ping.kind });
+        log.info('mention: picked up', { channel: ping.channelId, kind: ping.kind, ...routed });
         await sleep(between(mentionCfg.switchDelayMs ?? [2000, 9000], rng));
 
         // Paused meanwhile: nothing may run or mark the store dirty; the
         // queue's other pings are cleared by the pause itself.
         if (store?.state?.data?.paused) {
-          log.info('mention: dropped', { channel: ping.channelId, kind: ping.kind, reason: 'paused' });
+          log.info('mention: dropped', { channel: ping.channelId, kind: ping.kind, reason: 'paused', ...routed });
           break;
         }
-        if (!canSend(ping.channel)) {
-          log.info('mention: dropped', { channel: ping.channelId, kind: ping.kind, reason: 'cannot-send' });
+        // An ordinary ping is answered where it was written. A routed call's
+        // turn posts in a main channel, resolved again below (routeFor): the
+        // one it waited with may have changed or lost Send meanwhile.
+        if (!ping.destination && !canSend(ping.channel)) {
+          log.info('mention: dropped', { channel: ping.channelId, kind: ping.kind, reason: 'cannot-send', ...routed });
           continue;
         }
         if (!(await messageStillExists(ping.channel, ping.trigger.id))) continue;
         // The turn that ran meanwhile fetched its history after this ping
-        // landed and spoke with it in view: not answered a second time.
+        // landed and spoke with it in view: not answered a second time (a
+        // routed call, and the calls of its source that turn showed, are no
+        // longer presented as waiting either).
         if (turns.spokeAfterSeeing?.(ping.channelId, ping.trigger.id)) {
-          log.info('mention: already answered', { channel: ping.channelId, kind: ping.kind });
+          log.info('mention: already answered', { channel: ping.channelId, kind: ping.kind, ...routed });
+          if (ping.destination) skipSeenCalls(ping.channelId, ping.trigger.id);
           continue;
         }
 
@@ -1029,23 +1212,45 @@ export function createMessageHandler({
         // changed while the ping waited.
         const switchOff = ping.kind === 'reply' ? features.replies === false : features.mentions === false;
         if (!channelAllowed(ping.channel, config.bot) || switchOff) {
-          log.info('mention: dropped', { channel: ping.channelId, kind: ping.kind, reason: switchOff ? 'off' : 'channel' });
+          log.info('mention: dropped', { channel: ping.channelId, kind: ping.kind, reason: switchOff ? 'off' : 'channel', ...routed });
           continue;
+        }
+
+        // A routed call: where it is answered is read again now (the switch,
+        // the main channels and the audience rail are hot).
+        let destination = null;
+        if (ping.destination) {
+          const route = routeFor(ping.channel, config);
+          if (!route.destination) {
+            log.info('mention: dropped', { channel: ping.channelId, kind: ping.kind, reason: 'cannot-send', route: route.reason, ...routed });
+            continue;
+          }
+          destination = route.destination;
         }
 
         // A re-queued ping was already counted and decided `respond` on the
         // pass whose turn found another one running: not counted or rolled again.
         if (!ping.decided) {
-          const decision = decideAndLog(ping.channel, ping.trigger, ping.kind, config, { deferred: true });
-          if (!decision.respond) continue;
+          const decision = decideAndLog(ping.channel, ping.trigger, ping.kind, config, { deferred: true, destination });
+          if (!decision.respond) {
+            // The ignore roll let a routed call pass, and the calls it replaced with it.
+            if (destination) passRoutedCall(ping.trigger.id, ping.superseded);
+            continue;
+          }
         }
 
         try {
-          const result = await turns.runTurn({ channel: ping.channel, mode: 'reply', trigger: ping.trigger, triggerKind: ping.kind });
-          if (result?.outcome === 'busy') stop = requeueBusy({ ...ping, decided: true });
-          else await announceRefusal(ping.channel, ping.trigger, result, ping.kind);
+          const result = await turns.runTurn({
+            channel: destination ?? ping.channel,
+            mode: 'reply',
+            trigger: ping.trigger,
+            triggerKind: ping.kind,
+            ...(destination ? { source: { channelId: ping.channelId, reason: 'routed' } } : {}),
+          });
+          if (result?.outcome === 'busy') stop = requeueBusy({ ...ping, decided: true, ...(destination ? { destination } : {}) });
+          else await afterCallTurn(ping.channel, ping.trigger, result, ping.kind, destination);
         } catch (err) {
-          log.error('mention: deferred turn failed', { channel: ping.channelId, error: err });
+          log.error('mention: deferred turn failed', { channel: ping.channelId, ...routed, error: err });
         }
         if (stop) break;
       }
@@ -1067,25 +1272,31 @@ export function createMessageHandler({
    *    fetched its history without this message;
    *  - one attention (mention.oneAtATime, default on): a turn is running in
    *    another channel.
-   * A routed call is never queued: the drain answers a ping in the channel it
-   * was written in, where a routed call cannot be answered, so a direct one
-   * that would be held is dropped as busy instead (`mention: dropped` with its
-   * destination; it stays unanswered in the ring). A name trigger is never
+   * A routed call is held the same way: queued under the channel it was
+   * written in (its source, so it never replaces a ping of its destination),
+   * carrying its destination, which the drain posts in, and the calls it
+   * took the place of. A name trigger is never
    * queued: busy elsewhere it is skipped here; busy in that channel (or with
    * pendingSameChannel off, any direct call) it falls through and runTurn
    * itself returns 'busy', logged as a drop.
    * Otherwise the call is counted and rolled (decideAndLog) and the reply
    * turn started, never awaited; a routed one carries its `source`
-   * (`reason: 'routed'`). `config` is the caller's `hot.config`, read now.
-   * @param {{ channel: object, normalized: object, kind: TriggerKind, config: object, destination?: object|null }} call
+   * (`reason: 'routed'`), and its outcome reaches the ring and its notice the
+   * destination (afterCallTurn). A routed call the ignore roll lets pass
+   * (`ignored:*`, `name-unnoticed`) is stamped skipped in the ring with the
+   * calls it took the place of (passRoutedCall). `config` is the caller's
+   * `hot.config`, read now.
+   * @param {{ channel: object, normalized: object, kind: TriggerKind, config: object, destination?: object|null,
+   *   superseded?: string[] }} call  `superseded`: a routed call only, the message ids of the calls of its
+   *   source it took the place of in its settle wait (armSettle).
    */
-  function answerCall({ channel, normalized, kind, config, destination = null }) {
+  function answerCall({ channel, normalized, kind, config, destination = null, superseded = [] }) {
     const turnChannel = destination ?? channel;
-    const routed = destination ? { destination: destination.id } : {};
+    const routed = routedFields({ destination });
     const direct = kind === 'mention' || kind === 'reply';
     const oneAtATime = config.mention.oneAtATime !== false;
     const dropBusy = () => log.info('mention: dropped', { channel: channel.id, kind, reason: 'busy', ...routed });
-    const holdDirect = () => (destination ? dropBusy() : enqueuePending(channel, normalized, kind));
+    const holdDirect = () => enqueuePending(channel, normalized, kind, destination, superseded);
     const sameChannelBusy = turns.isBusy(turnChannel.id);
     if (sameChannelBusy && direct && config.mention.pendingSameChannel !== false) {
       holdDirect();
@@ -1099,16 +1310,17 @@ export function createMessageHandler({
     }
 
     const decision = decideAndLog(channel, normalized, kind, config, { destination });
-    if (!decision.respond) return;
+    if (!decision.respond) {
+      // The ignore roll let a routed call pass, and the calls it replaced with it.
+      if (destination) passRoutedCall(normalized.id, superseded);
+      return;
+    }
     const source = destination ? { source: { channelId: channel.id, reason: 'routed' } } : {};
     turns
       .runTurn({ channel: turnChannel, mode: 'reply', trigger: normalized, triggerKind: kind, ...source })
       .then((result) => {
         if (result?.outcome === 'busy') dropBusy();
-        // A routed call's limit notice belongs in the destination and never as a
-        // Discord reply to a message of another channel: none is posted for it here.
-        if (destination) return undefined;
-        return announceRefusal(channel, normalized, result, kind);
+        return afterCallTurn(channel, normalized, result, kind, destination);
       })
       .catch((err) => log.error('mention: reply turn failed', { channel: channel.id, ...routed, error: err }));
   }
@@ -1126,12 +1338,33 @@ export function createMessageHandler({
   // (elsewhere.settleSeconds after the last one, at most
   // elsewhere.settleMaxSeconds after the call that armed it); a newer call
   // there takes the waiting one's place unless it is weaker (a name after a
-  // tag; callRank), and both stay in the ring. When the wait is over, the call
-  // takes the ordinary call path (answerCall) with the destination as the
-  // channel the turn posts in and the source passed to the turn. The waits
-  // live in memory only: a restart during one loses the call, which stays
-  // unanswered in the ring; shutdown clears them (stop).
-  const settles = new Map(); // source channel id -> { kind, channel, normalized, triggerKind, firstAt, lastAt, due, moved, timer }
+  // tag; callRank), and both stay in the ring; the call that keeps the wait
+  // carries the other along (`superseded`): the settle groups a burst into
+  // one decision. When the wait is over, the call takes the ordinary call path
+  // (answerCall) with the destination as the channel the turn posts in and
+  // the source passed to the turn -- pending included -- and the ring follows
+  // the outcome: the call by its turn's outcome (markRoutedCall; every other
+  // call the turn showed is stamped by the turn itself), the call and those it
+  // carries when the ignore roll lets it pass (passRoutedCall), the call and
+  // the others of its source a turn that spoke already had in view
+  // (skipSeenCalls). The waits live in memory only: a restart during one loses
+  // the call, which stays unanswered in the ring; a pause (clearPending) and
+  // shutdown (stop) clear them.
+  // source channel id -> { kind, channel, normalized, triggerKind, superseded, firstAt, lastAt, due, moved, timer }
+  const settles = new Map();
+
+  /**
+   * Clear every settle wait without answering its call (it stays unanswered
+   * in the ring); with a `reason` each is logged as `elsewhere: dropped`.
+   * @param {'paused'|null} reason
+   */
+  function clearSettles(reason) {
+    for (const [sourceId, entry] of settles) {
+      timers.clear(entry.timer);
+      if (reason) log.info('elsewhere: dropped', { source: sourceId, kind: entry.kind, message: entry.normalized.id, reason });
+    }
+    settles.clear();
+  }
 
   /**
    * Where a call written in `source` (a channel the bot cannot send in) is
@@ -1190,21 +1423,25 @@ export function createMessageHandler({
    * keeps its start, and its due time was already moved for this message
    * (touchSettle). A weaker newer call (the persona's name after a tag) is the
    * one dropped (`outranked`; it stays in the ring too) and the waiting call
-   * keeps its place. Waits are per source: a call elsewhere never touches this one.
+   * keeps its place. Either way the call that keeps the wait carries the one
+   * dropped, and whatever that one carried, in `superseded`. Waits are per
+   * source: a call elsewhere never touches this one.
    */
   function armSettle(source, normalized, triggerKind, destination) {
     const waiting = settles.get(source.id);
     if (waiting) {
       if (callRank(triggerKind) < callRank(waiting.triggerKind)) {
         log.info('elsewhere: dropped', { source: source.id, kind: 'ping', message: normalized.id, reason: 'outranked' });
+        waiting.superseded = [...waiting.superseded, normalized.id];
         return;
       }
       log.info('elsewhere: dropped', { source: source.id, kind: waiting.kind, message: waiting.normalized.id, reason: 'replaced' });
-      Object.assign(waiting, { kind: 'ping', channel: source, normalized, triggerKind });
+      const superseded = [...waiting.superseded, waiting.normalized.id];
+      Object.assign(waiting, { kind: 'ping', channel: source, normalized, triggerKind, superseded });
       return;
     }
     const t = now();
-    const entry = { kind: 'ping', channel: source, normalized, triggerKind, firstAt: t, lastAt: t, due: null, moved: 0, timer: null };
+    const entry = { kind: 'ping', channel: source, normalized, triggerKind, superseded: [], firstAt: t, lastAt: t, due: null, moved: 0, timer: null };
     settles.set(source.id, entry);
     scheduleSettle(source.id, entry, settleDue(entry));
     log.info('elsewhere: settling', { source: source.id, kind: entry.kind, message: normalized.id, destination: destination.id });
@@ -1234,16 +1471,19 @@ export function createMessageHandler({
    * (`elsewhere: dropped` with that code), or, as at the pending drain: silently
    * when the message was deleted meanwhile; when a turn that spoke had it in
    * view (turns.spokeAfterSeeing -- a pulled block showed it and the persona
-   * could answer it there; `mention: already answered`); when its channel is
-   * no longer allowed (bot.channels) or its kind's switch was turned off
-   * (`mention: dropped`, `channel` / `off`). A timer whose wait already ended
-   * (or was removed) does nothing. Never rejects: it runs from a timer.
+   * could answer it there; `mention: already answered`, and the call and the
+   * other calls of its source that turn showed are stamped skipped in the
+   * ring: skipSeenCalls); when its channel is no longer allowed (bot.channels)
+   * or its kind's switch was turned off (`mention: dropped`, `channel` /
+   * `off`). The calls it carries (`superseded`) go with it to answerCall. A
+   * timer whose wait already ended (or was removed) does nothing. Never
+   * rejects: it runs from a timer.
    */
   async function fireSettle(sourceId, entry) {
     if (settles.get(sourceId) !== entry) return;
     settles.delete(sourceId);
     try {
-      const { kind, channel, normalized, triggerKind } = entry;
+      const { kind, channel, normalized, triggerKind, superseded } = entry;
       log.info('elsewhere: settled', { source: sourceId, kind, waitedMs: now() - entry.firstAt, moved: entry.moved });
       const muted = followUpMuted();
       if (muted) {
@@ -1255,6 +1495,7 @@ export function createMessageHandler({
       // source: not answered a second time.
       if (turns.spokeAfterSeeing?.(sourceId, normalized.id)) {
         log.info('mention: already answered', { channel: sourceId, kind: triggerKind });
+        skipSeenCalls(sourceId, normalized.id);
         return;
       }
       const config = hot.config;
@@ -1275,7 +1516,7 @@ export function createMessageHandler({
         log.info('elsewhere: dropped', { source: sourceId, kind, message: normalized.id, reason: route.reason });
         return;
       }
-      answerCall({ channel, normalized, kind: triggerKind, config, destination: route.destination });
+      answerCall({ channel, normalized, kind: triggerKind, config, destination: route.destination, superseded });
     } catch (err) {
       log.error('elsewhere: settle failed', { source: sourceId, error: err });
     }
@@ -1464,14 +1705,18 @@ export function createMessageHandler({
   }
 
   onMessage.drainPending = drainPending;
-  /** Drop every pending direct ping without answering any of them (`/nep pause`). */
+  /**
+   * Drop every pending direct ping and every settle wait without answering any
+   * of them (`/nep pause`): no timer fires afterwards. Each wait is logged as
+   * `elsewhere: dropped` (`paused`); its call stays unanswered in the ring.
+   */
   onMessage.clearPending = () => {
     pendingList = [];
+    clearSettles('paused');
   };
   /** Clear every settle wait without answering its call (shutdown): none starts a turn on a client going down. */
   onMessage.stop = () => {
-    for (const entry of settles.values()) timers.clear(entry.timer);
-    settles.clear();
+    clearSettles(null);
   };
   return onMessage;
 }
