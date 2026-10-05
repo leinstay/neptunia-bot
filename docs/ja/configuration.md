@@ -17,7 +17,9 @@
 | `episodes` | `true` | メンバーごとの長期記憶（出来事、引用、恨み） |
 | `lore` | `true` | サーバー全体のロアブック |
 | `reactions` | `true` | 絵文字リアクション（ペルソナがリアクションを付ける） |
-| `seeReactions` | `true` | トランスクリプト内のメッセージにリアクションを表示。キーが存在しない場合はオンとして扱われる。`reactions`（ペルソナがリアクションを付けるかどうか）とは異なり、こちらはリアクションを見るかどうかを制御する |
+| `seeReactions` | `true` | トランスクリプト内のメッセージにリアクションを表示。キーが存在しない場合はオンとして扱われる。`reactions`（ペルソナがリアクションを付けるかどうか）とは異なり、こちらはペルソナがリアクションを見るかどうかを制御する |
+| `customEmoji` | `true` | サーバーのカスタム絵文字を使用頻度でランク付けし、ペルソナが `:name:` で使用可能にする。キー欠落 = オン |
+| `gifs` | `true` | メンバーが共有した GIF からライブラリを構築し、ペルソナがハンドルで投稿可能にする。キー欠落 = オン |
 | `multiMessage` | `true` | 2〜3 件の連続メッセージを許可 |
 | `vision` | `true` | 添付画像を処理 |
 | `mediaDescriptions` | `true` | 画像、GIF、動画フレーム、リンクサムネイルの一行説明文 |
@@ -32,6 +34,10 @@
 | `memoryTwoStage` | `false` | メモリアナライザーを 2 段階に分割: ニュートラルな GPT モデルが変更を判定（ステージ A）、次にボイスモデルがペルソナのテキストを執筆（ステージ B）。厳密に `true` で有効。キー欠落 = オフ。`memory.voiceModel` と `memory.voice.*` 参照 |
 | `mentor` | `false` | 独自モデルを使用する手動テストサブプロセス。有効にするには厳密に `true` にする必要がある。キーが存在しない場合はオフ。[Mentor](#mentor) を参照 |
 | `promptCache` | `false` | システムメッセージにプロバイダーのプロンプトキャッシュマーカーを付与する。キャッシュ読み取りは通常入力の数分の一のコストで、プロバイダーによってはトークンクォータにカウントされない。厳密に `true` で有効。キーが存在しない場合はオフ。`llm.cache.*` を参照 |
+| `recall` | `true` | 質問に応じてウェブ検索と並行してサーバー自身のメッセージ履歴を検索する。キー欠落 = オン。[メディア: 検索](media.md#検索) と `recall.*` 参照 |
+| `recent` | `true` | サーバーで直近数日間に何が起きたかを `<recent>` ブロックとして表示する。キー欠落 = オン。`memory.recentHours` と `context.caps.recent` 参照 |
+| `channelRoute` | `true` | ターン前に分類器が会話の話題になっているチャンネルを特定し、リクエストに取り込めるようにする。キー欠落 = オン。`route.*` 参照 |
+| `pauseNotice` | `true` | ペルソナが一時停止中に呼ばれた場合、短い通知を投稿する。キー欠落 = オン。`mention.pauseNoticeMinutes` と `labels.limits.paused` 参照 |
 | `variety` | `true` | モデルパスがペルソナの最近のメッセージで使い回している表現手法を特定する。結果はターンのリクエストに `<worn>` ブロックとして含まれる。キーが存在しない場合はオン |
 | `varietyPrecompute` | `true` | ペルソナがテキストを投稿した直後に多様性パスを開始し、次のターンが結果を即座に利用できるようにする。オフ: パスはターン時にのみ実行されるが、遅延した結果は保存される。キーが存在しない場合はオン |
 | `followUp` | `true` | ペルソナの応答後、タグなしメッセージを分類して会話を継続 |
@@ -63,6 +69,7 @@
 | `maxRequestTokens` | `50000` | リクエストあたりのハードトークン上限 |
 | `safetyMargin` | `0.9` | `maxRequestTokens` のバジェット比率 |
 | `timeoutMs` | `300000` | リクエストタイムアウト（ミリ秒） |
+| `helperTimeoutMs` | `30000` | ターンと並行して実行されるヘルパー（ルート分類器、検索分類器、リコールサマリー）のタイムアウト。この時間を超えたヘルパーは破棄され、ターンはその結果なしで続行する |
 | `pingTimeoutMs` | `30000` | `/nep ping` リクエストのタイムアウト（ミリ秒） |
 | `retries` | `2` | 一時的な HTTP エラー（408/429/5xx）およびネットワーク障害時のリトライ回数。プロバイダーアカウントの日次クォータ 429 はリトライされず、1 回の試行後にそのままスローされる |
 | `maxRequestsPerDay` | `300` | 1 日あたりのリクエスト上限 |
@@ -72,6 +79,10 @@
 | `cache.roles` | `["talk"]` | システムメッセージにキャッシュマーカーを付与するリクエストロール |
 | `cache.models` | `["anthropic/"]` | `cache_control` マーカーを受け入れるプロバイダーのモデル id プレフィックス（大文字小文字区別）。リスト外のモデルへのリクエストにはマーカーが付かない |
 | `cache.promptIncludesCached` | `true` | プロバイダーが報告する `prompt_tokens` にキャッシュ読み取りとキャッシュ書き込みのトークンが含まれているかどうか。実際のプローブから一度設定する。トークンキャリブレーションとリクエスト上限は常にフルカウントを使用する |
+| `hedge.roles` | `["classifier.text"]` | 呼び出しをヘッジするリクエストロール（2 つ同時に試行し、先に完了した方を採用） |
+| `hedge.afterMs` | `2500` | 2 回目の試行を開始するまでのミリ秒。`0` 以下ですべてのロールのヘッジをオフ |
+| `hedge.timeoutMs` | `8000` | 1 回目の試行開始からこのミリ秒でどちらも返っていない場合、両方を打ち切り |
+| `hedge.longTimeoutMs` | `20000` | 呼び出し元がリクエストに `long: true` を付けた場合に `timeoutMs` の代わりに使用するタイムアウト（ルート分類器が大きなチャンネルリストで使用） |
 
 `llm.provider` はチャットリクエストに対するデフォルトの OpenRouter プロバイダールーティングを設定します。例: `{ "ignore": ["some-provider"] }` や `{ "order": ["anthropic"], "allow_fallbacks": true }`。`llm.providerByModel` はモデルごとのオーバーライドを追加します。キーはモデル id のプレフィックス（任意のロールに一致）または `<prefix>@<role>`（1 つのロールのみ一致）で、値はそのまま渡される OpenRouter ルーティングオブジェクトです。
 
@@ -83,13 +94,17 @@ OpenRouter アカウント自体が許可プロバイダーを制限している
 
 `features.promptCache` がオンの場合、ロールが `llm.cache.roles` に含まれ、モデルが `llm.cache.models` のプレフィックスで始まるリクエストのシステムメッセージにプロバイダーのプロンプトキャッシュマーカーが付与されます。マーカーはトークン推定の後に付与されるため、リクエストあたり 50k の上限とキャリブレーションに影響しません。`llm.cache.promptIncludesCached` は、プロバイダーがキャッシュトークンをどのように報告するかをエンジンに伝えます。実際のプローブから一度設定してください。`llm: usage` ログ行に `cache` フィールドが追加されます: `write`、`read`、`none`、`off`。
 
+`llm: usage` ログ行には `ms`（リクエストの経過時間）、`purpose`（リクエストの用途を示す短い文字列。例: `route-channel`、`recall-summary`、`address`）、`origin`（例: mentor が発行したリクエストでは `mentor`）、`hedged`（ヘッジされたリクエストの場合 true）、`attempt`（ヘッジされたリクエストで 1 または 2。それ以外は省略）も含まれます。
+
+`llm.hedge` が設定されている場合、リストされたロールのリクエストはヘッジされます: 1 回目の `llm.hedge.afterMs` 後に 2 回目の試行が発火し、先に完了した方が採用されます。どちらも `llm.hedge.timeoutMs`（`long: true` リクエストでは `longTimeoutMs`）で打ち切られます。2 回目が開始される前に完了しなかったヘッジ呼び出しは追加のリクエストを 1 件発生させ、両方が `llm.maxRequestsPerDay` にカウントされます。
+
 ## `classifier`
 
 3 つのヘルパーモデルロールを 1 つのキーにまとめています。それぞれ独立して設定できるため、ペルソナの声にはプレミアムモデルを使い、ヘルパーには安価なモデルを使うことができます。
 
 | キー | デフォルト | 説明 |
 |---|---|---|
-| `text` | `"anthropic/claude-sonnet-4.6"` | テキスト分類器: アドレス分類器（`features.followUp`）、再視聴分類器（`features.videoRewatch`）、検索分類器（`features.webLookup`）。リンク読み取りと検索結果の要約も行う |
+| `text` | `"anthropic/claude-sonnet-4.6"` | テキスト分類器: アドレス分類器（`features.followUp`）、検索分類器・リンク読み取り・検索要約・リコールサマリー（`features.webLookup`、`features.recall`）、再視聴分類器（`features.videoRewatch`）、ルーム分類器（`spontaneous.roomQuestionChance`）、チャンネルルート分類器（`features.channelRoute`）、多様性パス（`features.variety`） |
 | `media` | `"anthropic/claude-haiku-4.5"` | 画像説明モデル（`features.mediaDescriptions`）: 画像、GIF フレーム、動画ポスター、スティッカー、カスタム絵文字、リンクサムネイルの一行説明文 |
 | `video` | `"google/gemini-3.8-flash"` | 動画説明モデル（`features.videoDescriptions`）: 短いクリップの視聴、質問に対する再視聴、リクエストに応じたリトライ。動画と音声の両方の入力を受け付ける必要がある |
 
@@ -109,6 +124,7 @@ OpenRouter アカウント自体が許可プロバイダーを制限している
 | `reactionsPerMessage` | `6` | トランスクリプト内の 1 メッセージあたりの最大リアクション数（頻度降順） |
 | `otherProfiles` | `6` | 表示する他のプロファイルの最大数 |
 | `askedAboutProfiles` | `3` | 最近のメッセージで言及されたメンバーを他の参加者より先にフル表示する最大数 |
+| `askedAboutEpisodes` | `3` | 言及されたメンバーごとに表示するエピソード数。`0` で非表示。プライベートチャットでは常に非表示 |
 | `tempo.liveMessages10min` | `4` | 10 分間のメッセージ数がこの値で「ライブ」 |
 | `tempo.deadSilenceMinutes` | `45` | この分数の沈黙で「デッド」 |
 | `caps.interlocutor` | `6000` | トークン上限: 発話者のプロファイル（エピソード含む） |
@@ -117,6 +133,8 @@ OpenRouter アカウント自体が許可プロバイダーを制限している
 | `caps.people` | `9000` | トークン上限: 他のプロファイル |
 | `caps.neighbors` | `3000` | トークン上限: 隣接チャンネル |
 | `caps.server` | `4000` | トークン上限: チャンネルマップ |
+| `caps.emoji` | `800` | トークン上限: カスタム絵文字 |
+| `caps.gifs` | `900` | トークン上限: GIF ライブラリ |
 | `caps.pulled` | `4000` | トークン上限: プルされたチャンネルブロック（`<channel_view>`） |
 | `channelActivity.liveMessagesPerDay` | `20` | 1 日あたりのメッセージ数がこの値で「アクティブ」チャンネル |
 | `channelActivity.deadAfterDays` | `7` | メッセージがないまま経過した日数で「デッド」チャンネル |
@@ -128,12 +146,87 @@ OpenRouter アカウント自体が許可プロバイダーを制限している
 | `vision.maxBytes` | `1500000` | 画像ファイルの最大サイズ（バイト）。超過した画像はスキップ |
 | `vision.fetchTimeoutMs` | `10000` | 画像あたりのダウンロードタイムアウト（ミリ秒） |
 
-## `gifs`
+### `context.pull`
 
-GIF ライブラリ（`features.gifs`）の設定です。メッセージ到着時に使用回数をカウントします（メンバーのみ、ボットとペルソナは除外）。
+別のチャンネルをターンのリクエストに取り込む設定（`features.channelPull`）。最近のメッセージやトリガーに Discord チャンネルメンション（`<#id>`）が含まれる場合、そのチャンネルの最新メッセージが `<channel_view>` ブロックとして描画されます。
 
 | キー | デフォルト | 説明 |
 |---|---|---|
+| `windowMinutes` | `60` | 取り込むメッセージのウィンドウ（チャンネルの最新メッセージから遡る分数） |
+| `minMessages` | `5` | ウィンドウ内の最小メッセージ数。不足する場合はさらに遡る |
+| `maxMessages` | `60` | チャンネルあたりの最大取り込みメッセージ数 |
+| `maxPictures` | `10` | キャプションを含める画像数。キャッシュ済みのキャプションはコストなし |
+| `maxNewDescriptions` | `8` | プルされたチャンネルの画像に対するターンあたりの新規説明リクエスト数 |
+| `describeTimeoutMs` | `15000` | 新規キャプションリクエストのタイムアウト（ミリ秒） |
+| `scanMessages` | `20` | チャンネルメンションをスキャンする現在のチャンネルの直近メッセージ数 |
+| `maxChannels` | `1` | ターンあたりに取り込めるチャンネル数 |
+| `maxAgeDays` | `0` | チャンネルの最新メッセージがこの日数より古い場合、取り込みを拒否。`0` = 制限なし |
+| `sameAudience` | `true` | 送信先チャンネルを閲覧できるすべてのロールがソースも閲覧できるかチェック。`<other_channels>` に表示される隣接チャンネルとリコール検索で保持されるウィンドウにも適用。false にすると制限チャンネルのコンテンツがより広い範囲に届く可能性がある |
+
+## `elsewhere`
+
+ボットが読めるが書けないチャンネルからの呼びかけ（`features.elsewhere`）への応答設定。そうしたチャンネルでの呼びかけ（メンション、リプライ、名前）は会話が落ち着くのを待ち、`memory.mainChannelIds` の最初の利用可能なチャンネルにリンク付きで応答します。
+
+| キー | デフォルト | 説明 |
+|---|---|---|
+| `settleSeconds` | `90` | ソースチャンネルの最後のメッセージからこの秒数後に応答 |
+| `settleMaxSeconds` | `300` | バーストの最初の呼びかけからこの秒数で、待たずに応答 |
+| `rememberPings` | `20` | チャンネルあたりのリングに記憶する呼びかけ数 |
+| `pingMaxAgeDays` | `7` | 記憶された呼びかけが期限切れになるまでの日数 |
+
+## `pace`
+
+ターンの各段階に許される時間。すべてホットリロード。期限を過ぎたヘルパーは破棄され、ターンはその結果なしで続行します。`dropAfterMs` までに完成した回答が届いていないターンは破棄されます（`turn: dropped` としてログ）。各リクエストは `turn: timings` で各段階の所要時間をログに記録します。
+
+| キー | デフォルト | 説明 |
+|---|---|---|
+| `prepareMs` | `6000` | ターン開始からトークリクエストまでのミリ秒。LLM 呼び出し前に実行されるすべて（履歴、キャプション、多様性パス、ルートおよび検索分類器）がこのウィンドウ内に完了する必要がある。`0` または数値以外で制限を解除 |
+| `prepareSearchMs` | `12000` | 検索分類器がウェブまたはサーバー検索を要求した場合の延長期限。`prepareMs` より短くならない。`0` または数値以外で制限を解除 |
+| `dropAfterMs` | `60000` | ターン開始からのミリ秒。この時間までに完成した回答が届いていない場合、ターンは投稿されず破棄（`turn: dropped`）。`0` または数値以外で制限を解除 |
+| `typingWhilePreparing` | `false` | 直接呼びかけ（メンション、リプライ、名前、フォローアップ、プライベート）に応答するターンの開始時点から入力中インジケーターを表示する（完成した回答のタイプアウト中だけでなく）。厳密に `true` で有効 |
+
+## `route`
+
+チャンネルルート分類器（`features.channelRoute`）の設定。会話が別のチャンネルに名前で言及したり参照したりする場合、分類器（`prompts/route-channel.md`、`classifier.text` ロール）がリストからチャンネル番号を選択します。選択されたチャンネルは明示的なチャンネルメンションと並んで `<channel_view>` ブロックとしてリクエストに取り込まれます。ログ: `route: classified`、`route: skipped`、`route: failed`。
+
+| キー | デフォルト | 説明 |
+|---|---|---|
+| `contextMessages` | `20` | 分類器に渡す直近のチャンネルメッセージ数 |
+| `maxChannels` | `40` | 分類器の選択肢として表示するチャンネル数 |
+| `purposeChars` | `80` | リストに表示する各チャンネルの保存済み目的の文字数 |
+| `maxOutputTokens` | `120` | 分類器の最大出力トークン数 |
+
+## `recall`
+
+サーバー履歴検索（`features.recall`）の設定。ルックアップ分類器（`prompts/lookup.md`）が `server:` フォーム、`who:` 名前フォーム、`when:` 日付範囲で応答した場合、エンジンは Discord の検索 API でサーバーのメッセージ履歴を検索し、ヒットをクラスターに分類、各クラスターの周辺のメッセージウィンドウをフェッチし、サマリーヘルパー（`prompts/recall-summary.md`、`classifier.text` ロール）に回答を求めます。サマリーが特定のストレッチを指定した場合、そのストレッチの原文が要約ノートと共に表示されます。ログ: `recall: searched`、`recall: summary`、`recall: skipped`、`recall: failed`。
+
+| キー | デフォルト | 説明 |
+|---|---|---|
+| `maxForms` | `5` | `server:` 行ごとの検索フォーム（語形変化）の最大数 |
+| `maxPeople` | `2` | `who:` 行に含められる人数 |
+| `dateSamples` | `4` | コンテンツフォームがない `when:` 範囲でサンプルされる日付のみクエリ数 |
+| `clusterGapMinutes` | `30` | ヒットを別のクラスターに分割するギャップ（分） |
+| `maxClusters` | `5` | 保持されるクラスター数（残りは新しい順にドロップ） |
+| `windowMessages` | `16` | 各クラスター中心の周辺でフェッチするメッセージ数 |
+| `answerChars` | `1200` | サマリーノートの最大文字数。`recall-summary.md` の `{{answerChars}}` に使用 |
+| `stretchChars` | `1500` | ペルソナに表示される原文ストレッチの最大文字数 |
+| `maxPerDay` | `100` | 1 日あたりのリコール実行数（`state.json` に `recallDay` / `recallCount` として保存） |
+| `timeoutMs` | `10000` | リコール実行の合計時間（検索、ウィンドウ、サマリー）。半分の時間が経過すると新たな検索は送信されず、サマリーは少なくとも `minSummaryMs` が残っている場合のみ実行 |
+| `minSummaryMs` | `2500` | サマリーヘルパーを呼ぶための最小残り時間。残り時間不足の場合、上位ウィンドウの原文ストレッチがノートなしで返される |
+| `memoryItems` | `6` | 分類器のワードフォームとネームフォームに一致する保存済みメモリ項目（エピソード、ロア、レッスン、最近の行）をリコールサマリーの `<memory>` ブロックとして送信。`0` でマッチオフ |
+| `maxOutputTokens` | `500` | サマリーヘルパーの最大出力トークン数 |
+
+## `gifs`
+
+GIF ライブラリ（`features.gifs`）の設定です。メッセージ到着時に使用回数をカウントします（メンバーのみ、ボットとペルソナは除外）。起動時にチャンネル履歴から一度だけバックフィルしてランキングをシードします。
+
+| キー | デフォルト | 説明 |
+|---|---|---|
+| `max` | `40` | `<gifs>` ブロックに表示する GIF 数（使用頻度と新しさでランク付け） |
+| `listChars` | `70` | `<gifs>` リストのキャプションあたりの保持文字数（単語境界でカット）。`0` で全文表示 |
+| `storeMax` | `300` | ライブラリに保持する GIF 数。上位 `max` 件が表示される |
+| `halfLifeDays` | `30` | 使用ランキングの新しさ半減期（日）。カスタム絵文字と同じ計算式 |
+| `maxPerDay` | `40` | ペルソナが 1 日に投稿できる GIF 数 |
 | `recachePerRun` | `50` | `/nep gifs recache` の 1 回の実行で再記述するライブラリ GIF の件数。ライブラリ外の単一フレーム説明は即座に削除され、その後バックグラウンドで古いものから順にこの件数まで視聴される |
 
 ## `media`
@@ -232,7 +325,9 @@ YouTube リンクの再生時間は次の順序で取得されます: まず yt-
 | `followUpContext` | `15` | 分類器に送信するトランスクリプト行数 |
 | `followUpMaxOutputTokens` | `8` | 分類器の最大出力トークン数 |
 | `followUpOverheard` | `true` | オンの場合、アドレス分類器の `overheard` 回答は `prompts/overheard.md` による独自のターンを開始する。オフ: `overheard` 回答は通常の `yes`（フォローアップターン）として扱われる。キーが存在しない場合はオン |
+| `followUpAliases` | `5` | アドレス分類器にペルソナの名前と共に送信する保存済みエイリアス数（呼びかけとして認識させるため）。`0` で送信しない |
 | `followUpNoStreak` | `3` | ウィンドウを閉じる連続 `no` 判定回数 |
+| `pauseNoticeMinutes` | `10` | 同一チャンネルでのポーズ通知の最小間隔（分）。`0` で呼びかけごとに通知 |
 
 フォローアップウィンドウは `data/state.json` の `followUpWindows` に保存され、起動時に復元されます。期限切れのウィンドウは削除されます。
 
@@ -261,6 +356,7 @@ YouTube リンクの再生時間は次の順序で取得されます: まず yt-
 | `liveMinMessages` | `4` | 「ライブ」判定に必要な最小メッセージ数 |
 | `deadAfterMinutes` | `90` | 「デッド」判定までの沈黙時間（分） |
 | `initiateChance` | `0.35` | 割り込みではなく話題を切り出す確率 |
+| `roomQuestionChance` | `0.04` | 全員に向けた（特定の誰かではない）メッセージがペルソナに拾われる確率。分類器（`prompts/room.md`）が事前フィルター。`0` でオフ |
 | `eavesdropChance` | `0.02` | メッセージごとの割り込み確率 |
 | `eavesdropDelayMs` | `[5000, 40000]` | 盗み聞き時の遅延範囲（ミリ秒） |
 | `minGapMinutes` | `12` | アクション間の最小間隔（分） |
@@ -277,7 +373,19 @@ YouTube リンクの再生時間は次の順序で取得されます: まず yt-
 | `portraitRefreshPerDay` | `3` | サーバーあたりのポートレートリフレッシュの 1 日最大数（コードトリガー、アナライザーのキュー、`/nep memory refresh` で共有）。日次カウンターは `state.json` に `portraitDay` / `portraitCount` として保存され、`/nep warmup reset` で消去されない |
 | `portraitRetryHours` | `24` | リフレッシュ失敗後、同じメンバーを再試行するまでの待機時間（時間） |
 | `portraitCheckMinutes` | `60` | ポートレートスケジューラーがリフレッシュ対象をチェックする頻度（分） |
+| `analyzerEpisodes` | `8` | アナライザーの `<existing_profiles>` で著者ごとに表示するエピソード数。重みと新しさの上位のみ送信され、保存リストはすべてのエピソードを保持。`0` で送信しない |
 | `keepNewestEpisodes` | `5` | 最新のエピソード（追加日時順）は淘汰対象外。`0` = 従来ルール: 重みが軽い順、次に古い順に淘汰 |
+| `recentHours` | `72` | `<recent>` ブロックに保持・表示する最近のノートの時間数。下げると即座にビューが狭まり、次の書き込みで古い行が削除される |
+| `maxRecentStored` | `150` | ディスクに保持するライン数。書き込み時にこの上限を超えると、重みが軽い順、次に古い順に淘汰 |
+| `maxNewRecent` | `3` | アナライザーがバッチごとに追加できるライン数 |
+| `recentChars` | `160` | 最近のラインあたりの最大文字数 |
+| `recentShown` | `12` | アナライザーに `<existing_recent>` として表示するライブの最近のライン数（重複防止用） |
+| `notesStaleDays` | `7` | チャンネルまたはサーバーのノートがこの日数変更されていない場合、アナライザーに再チェックをフラグする。`0` でフラグオフ |
+| `notesMinLines` | `20` | 陳腐化フラグを送信するためにチャンネルがこのバッチで必要とするバッチ行数 |
+| `privateMaxAgeMinutes` | `360` | 静かなプライベートバッファーが `minBatchMessages` に達していなくても分析されるまでの分数 |
+| `channelWritersStored` | `20` | チャンネルごとに保持するトップライター数（減衰するカウントでランク付け） |
+| `channelWritersHalfLifeDays` | `30` | チャンネルごとのライターカウントの半減期（日）。書かなくなったライターはアクティブなライターの下に沈む |
+| `reasoning` | `null` | アナライザーのステージ A リクエストとウォームアップのニュートラルルートに送信する OpenRouter `reasoning` オブジェクト。`null` でフィールド省略。例: `{ "effort": "low" }` |
 | `voiceModel` | `null` | 2 段階アナライザーのステージ B で使用するモデル。ペルソナのテキストを執筆する。`null` はトークモデル（`llm.model`）を使用。`/nep model set voice` で設定 |
 | `batchMessages` | `60` | 理想的なバッチサイズ |
 | `minBatchMessages` | `15` | 更新前の最小メッセージ数 |
@@ -311,6 +419,21 @@ YouTube リンクの再生時間は次の順序で取得されます: まず yt-
 | `timeoutMs` | `900000` | アナライザーのタイムアウト（ミリ秒）。`llm.timeoutMs` とは別 |
 
 アナライザープロンプトはこれらの上限をプレースホルダーとして読み取るため、値を上げると次のバッチから反映されます。プロファイルを大きくするとコンテキストトークン（`context.caps.people`、`context.caps.interlocutor`）とアナライザー出力（`memory.maxOutputTokens`）のコストが増加します。
+
+### `memory.voice`
+
+2 段階アナライザーのステージ B（`features.memoryTwoStage`）の設定です。ステージ B はステージ A がキューしたニュートラルなブリーフを受け取り、ペルソナの声で記述します。キューは `data/guilds/<id>/voice.json` に永続化され、再起動後も保持されます。
+
+| キー | デフォルト | 説明 |
+|---|---|---|
+| `maxItems` | `24` | ボイスリクエストあたりの項目数。50k トークン制限内に収める |
+| `maxPerDay` | `100` | UTC 日あたりのボイスリクエスト数。`0` で送信を防止（ステージ A のみのシミュレーション実行に有用） |
+| `maxOutputTokens` | `3000` | ボイスリクエストあたりの最大出力トークン数 |
+| `retryMinutes` | `15` | 項目が欠落したボイス回答後のバックオフ。ミスごとに遅延が倍増 |
+| `maxAttempts` | `4` | 項目がデグレードパスに入る前に欠落を許容する回答数。失敗したリクエスト（不正 JSON、タイムアウト）はカウントしない |
+| `queueMax` | `100` | キューに保持する項目数。最も古い非キャラクター項目がデグレードパスにオーバーフロー |
+| `queueHours` | `24` | キューされた項目がデグレードパスに期限切れとなるまでの時間。キャラクター項目は期限切れにならない |
+| `timeoutMs` | `120000` | ボイスリクエストのタイムアウト（ミリ秒） |
 
 ## `relationships`
 
@@ -375,13 +498,14 @@ YouTube リンクの再生時間は次の順序で取得されます: まず yt-
 | `results` | `5` | Brave Search に要求する結果数 |
 | `summaryChars` | `900` | 要約回答の最大文字数。`search-summary.md` の `{{maxChars}}` に使用 |
 | `maxOutputTokens` | `400` | 要約モデルの最大出力トークン数 |
+| `classifierMaxOutputTokens` | `200` | 検索分類器の最大出力トークン数。複数行回答形式（`web:`、`server:`、`who:`、`when:`）に合わせて増加。推論する前に考えるモデルはより大きな上限が必要 |
 | `cacheHours` | `24` | キャッシュされた検索結果が再検索されるまでの時間 |
 | `contextMessages` | `50` | 検索分類器に `<transcript>` として渡す直近のチャンネルメッセージ数 |
 | `timeoutMs` | `10000` | Brave Search リクエストのタイムアウト（ミリ秒） |
 
 ## `image`
 
-描画サブプロセス（`features.imageGeneration`）の設定。ペルソナが `<draw>` タグを出力すると、コードが OpenRouter Images API を通じて 1 枚の画像を生成し、独立したメッセージとして投稿します。生成回数と日次カウンターは `data/state.json`（`imageDay`、`imageCount`、`imageUsers`）に保存されます。すべての画像は `image.model` を使用し、チャットモデルや分類器モデルは使用しません。
+描画サブプロセス（`features.imageGeneration`）の設定。ペルソナが `<draw>` タグを出力すると、コードが OpenRouter Images API を通じて 1 枚の画像を生成し、別のメッセージとして投稿します。生成回数と日次カウンターは `data/state.json`（`imageDay`、`imageCount`、`imageUsers`）に保存されます。すべての画像は `image.model` を使用し、チャットモデルや分類器モデルは使用しません。
 
 | キー | デフォルト | 説明 |
 |---|---|---|
@@ -417,7 +541,7 @@ YouTube リンクの再生時間は次の順序で取得されます: まず yt-
 
 ## `variety`
 
-多様性パス（`features.variety`）の設定。ペルソナの最近のメッセージが `classifier.text` モデルに送られ、繰り返されている表現手法を特定します。`features.varietyPrecompute` がオンの場合、ペルソナがテキストを投稿した直後にパスが開始され、次のターンが結果を即座に利用できます。ターン時にはキャッシュされた結果を使用するか、実行中のパスに参加して最大 `variety.timeoutMs` 待機します。結果はターンのリクエストに `<worn>` ブロックとして含まれます。タイムアウトやパスの失敗がターンを遅延させたり失敗させたりすることはなく、ブロックなしでターンが続行します。すべてホットリロード。
+多様性パス（`features.variety`）の設定。ペルソナの最近のメッセージが `classifier.text` モデルに送られ、繰り返されている表現手法を特定します。`features.varietyPrecompute` がオンの場合、ペルソナがテキストを投稿した直後にパスが開始され、次のターンが結果を即座に利用できます。ターン時にはキャッシュされた結果を使用するか、実行中のパスに参加して最大 `variety.timeoutMs` 待機します。結果はターンのリクエストに `<worn>` ブロックとして含まれます。タイムアウトやパスの失敗がターンを遅延させたり失敗させたりすることはなく、ブロックなしでターンが続行します。2 番目の長いパス（`variety.longLines`）は `variety.longEveryHours` ごとに最大 1 回、全チャンネルにわたるペルソナの自分の行のリングを `prompts/variety-long.md` で `variety.longModel` モデル（null = `classifier.text`）に読ませます。そのパターンはギルドメモリに `wornLong` として保存され、次の長いパスまで有効です。ターンは長いパスのパターンを短いパスのパターンの前に受け取ります。すべてホットリロード。
 
 | キー | デフォルト | 説明 |
 |---|---|---|
@@ -431,6 +555,11 @@ YouTube リンクの再生時間は次の順序で取得されます: まず yt-
 | `timeoutMs` | `8000` | ターンがパス結果を待つ時間（ミリ秒）。この待機を超えたパスは `requestTimeoutMs` まで実行を続行し、遅延した結果は保存されて次のターンで使用される。Mentor サンドボックスはこの値をリクエストタイムアウトとして使用する |
 | `requestTimeoutMs` | `30000` | 多様性モデル呼び出しのリクエストタイムアウト（ミリ秒）。パスはこの時間で打ち切られる。`variety.timeoutMs` はターンの待機時間のみ |
 | `history` | `20` | `/nep variety` 表示用のヒストリーリングに保持されるパス数 |
+| `longLines` | `300` | 長いパスがリングから読むペルソナ自身の行数（全チャンネル、経過時間制限なし）。`0` で長いパスをオフ |
+| `longEveryHours` | `6` | 長いパス間の時間。失敗もカウントされるため、投稿ごとにリトライされない |
+| `longMinLines` | `60` | リング内の行数がこの値未満の場合、長いパスをスキップ |
+| `longMaxPatterns` | `3` | 長いパスが特定できる最大手法数 |
+| `longModel` | `null` | 長いパスのモデル。`null` で `classifier.text` モデルを使用 |
 
 ## `private`
 
@@ -474,6 +603,7 @@ YouTube リンクの再生時間は次の順序で取得されます: まず yt-
 | `anchor.contextMessages` | `30` | moment 解決時にチャンネルから取得するコンテキストメッセージ数（トリガーまで） |
 | `anchor.samples` | `5` | ランおよび `/nep mentor check` での実際の moment あたりのペルソナ回答数 |
 | `anchor.hideLaterMemory` | `true` | 実際の moment を再生する際、トリガーの時点以降に書き込まれた記憶を非表示にする（エピソード、態度変化、詳細、興味、エイリアス、学習項目、ロアエントリ）。`false` にすると現在の全記憶で再生 |
+| `anchor.ledgerSize` | `300` | ポストレジャー（`state.json` `postLedger`）に保持するエントリ数。各投稿メッセージとそのターンを対応付け、mentor が実際の moment のトリガーを見つけるために使用。`features.mentor` が有効の間のみ書き込み。`0` で保持しない |
 | `feedbackExamples` | `10` | すべてのスコアリングリクエストに含める最新のオーナー修正（`/nep mentor wrong`）の数 |
 
 `llm.maxRequestTokens`（リクエストあたり 50k）は、mentor が発行または引き起こすすべてのリクエスト（サンドボックス回答を含む）に適用されます。各 mentor リクエスト前の予算チェックでは、プロンプトに加えて回答が最大でかかるコスト（`mentor.maxOutputTokens` を `mentor.outputTokenWeight` で乗算）を計上するため、可能な出力が残り予算に収まらない場合リクエストは拒否されます。予算が尽きると実行が停止し、得られた結果を報告します。ラン中に `features.mentor` や `mentor.model` がオフにされた場合、またはリファレンスウィンドウ内のリファレンスチャンネルに人々のメッセージがない場合も実行が停止します。
@@ -514,7 +644,7 @@ YouTube リンクの再生時間は次の順序で取得されます: まず yt-
 
 ### テキスト分類器（`classifier.text`）
 
-「yes」または「no」を確実に回答できる最も安価なテキストモデルです。アドレス分類器、再視聴分類器、検索分類器を実行し、リンク読み取りと検索結果の要約も行います。デフォルト: `anthropic/claude-sonnet-4.6`。
+「yes」または「no」を確実に回答できる最も安価なテキストモデルです。アドレス分類器（`features.followUp`）、検索分類器・リンク読み取り・検索要約・リコールサマリー（`features.webLookup`、`features.recall`）、再視聴分類器（`features.videoRewatch`）、ルーム分類器（`spontaneous.roomQuestionChance`）、チャンネルルート分類器（`features.channelRoute`）、多様性パス（`features.variety`）を実行します。デフォルト: `anthropic/claude-sonnet-4.6`。
 
 ### 画像（`classifier.media`）
 

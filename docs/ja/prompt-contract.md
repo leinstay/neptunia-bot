@@ -27,21 +27,25 @@
 | `forced.md` | いいえ | 強制ターン（`/nep interject`、`/nep initiate`）時にモードプロンプトの後に追加される。デフォルトの `<skip/>` を無効化する | `{{name}}` |
 | `memory.md` | はい | ストリームアナライザーのアウトオブキャラクタープロンプト（シングルステージモードおよびプライベートバッチ）: ライブバッチからのメモリへの差分更新 | `{{name}}` `{{fieldChars}}` `{{guildFieldChars}}` `{{maxDetails}}` `{{maxInjokes}}` `{{maxSelfFacts}}` `{{maxNewEpisodes}}` `{{maxEpisodes}}` `{{maxDeltaPerUpdate}}` `{{maxInterests}}` `{{interestTopicChars}}` `{{interestNoteChars}}` `{{loreTextChars}}` `{{maxLearned}}` `{{learnedChars}}` `{{relationshipChars}}` |
 | `memory-decide.md` | いいえ | 2 段階アナライザーのステージ A（`features.memoryTwoStage`）: 変更のニュートラルな判定。`memory.md` と同じ入力ブロック。JSON を返す。ファイルがない場合はシングルステージにフォールバック | `{{name}}` `{{fieldChars}}` `{{guildFieldChars}}` `{{maxDetails}}` `{{maxInjokes}}` `{{maxSelfFacts}}` `{{maxNewEpisodes}}` `{{maxEpisodes}}` `{{maxDeltaPerUpdate}}` `{{maxInterests}}` `{{interestTopicChars}}` `{{interestNoteChars}}` `{{loreTextChars}}` `{{maxLearned}}` `{{learnedChars}}` `{{relationshipChars}}` |
-| `memory-voice.md` | いいえ | 2 段階アナライザーのステージ B: ペルソナがキューされたアイテムを自分の声で記述。JSON を返す | `{{name}}` `{{fieldChars}}` `{{guildFieldChars}}` `{{relationshipChars}}` `{{learnedChars}}` |
+| `memory-voice.md` | いいえ | 2 段階アナライザーのステージ B: ペルソナがキューされたアイテムを自分自身の声で記述。JSON を返す | `{{name}}` `{{fieldChars}}` `{{guildFieldChars}}` `{{relationshipChars}}` `{{learnedChars}}` |
 | `portrait.md` | いいえ | 2 段階ポートレートリフレッシュのステージ A。詳細は後のドキュメンテーションパスにて | `{{name}}` `{{fieldChars}}` |
 | `profile.md` | はい | ウォームアップ / ポートレートリフレッシュ: メッセージサンプルからメンバーのプロファイルを作成 | `{{name}}` `{{fieldChars}}` `{{maxInterests}}` `{{maxDetails}}` `{{interestTopicChars}}` `{{interestNoteChars}}` `{{maxNewEpisodes}}` |
 | `channel.md` | はい | ウォームアップ: メッセージサンプルからチャンネルノートを作成 | `{{fieldChars}}` |
 | `server.md` | はい | ウォームアップ: チャンネルノートとメンバーの要約からサーバーレベルのノートを作成 | `{{name}}` `{{fieldChars}}` `{{maxInjokes}}` `{{loreTextChars}}` |
-| `describe.md` | はい | メディア説明モデルのアウトオブキャラクタープロンプト（`features.mediaDescriptions`）: 画像 1 枚を入力、チャットの言語でプレーンテキスト 1 行を出力: 写っているもの、判読可能なテキスト。意見なし、マークダウンなし | なし |
-| `describe-video.md` | はい | 動画説明モデルのアウトオブキャラクタープロンプト（`features.videoDescriptions`）: 動画クリップ 1 本（音声付き）を入力、設定可能な長さの完全な説明を出力: 誰が登場するか、何が言われるか（重要なフレーズを引用）、画面上のテキスト、視覚的に何が起きるか、音楽/効果音。キャラクターカードなし | `{{maxChars}}` |
+| `describe.md` | はい | メディア説明モデルのアウトオブキャラクタープロンプト（`features.mediaDescriptions`）: 画像 1 枚を入力、プレーンテキスト 1 行を出力: 写っているもの、要点、判読可能なテキストは元のスクリプトで引用。常に英語。意見なし、道徳的判断なし、マークダウンなし | `{{today}}` `{{maxChars}}`（オプション） |
+| `describe-video.md` | はい | 動画説明モデルのアウトオブキャラクタープロンプト（`features.videoDescriptions`）: 動画クリップ 1 本（音声付き）を入力、設定可能な長さの完全な説明を出力: 誰が登場するか、何が言われるか（重要なフレーズを引用）、画面上のテキスト、視覚的に何が起きるか、音楽/効果音。常に英語。発話、字幕、画面上のテキストは元の言語で引用。キャラクターカードなし | `{{today}}` `{{maxChars}}` |
 | `describe-gif.md` | いいえ | GIF 説明モデルのアウトオブキャラクタープロンプト（`media.gif.watch`）: 短い無音クリップを入力、1 行のコンパクトな説明を出力: アクション、表現する内容、可視テキスト。常に英語。キャラクターカードなし。ファイルがない場合は `describe-video.md` にフォールバック | `{{today}}` `{{maxChars}}` `{{seconds}}` |
 | `rewatch.md` | はい | 分類器: ペルソナが動画を再視聴する必要があるか、または読み込めなかった動画をリトライする必要があるか（`features.videoRewatch`）。番号付きの最近の動画リストとステータス、および新しいメッセージを受け取る。出力は 1 行: `<number> \| <question>`、`<number> \| retry` または `none` | `{{name}}` |
-| `rewatch-answer.md` | はい | 再視聴のアウトオブキャラクタープロンプト: 動画モデルがクリップを再度視聴し、1 つの質問に回答する。言語と制約のルールは `describe-video.md` と同じ。キャラクターカードなし | `{{question}}` `{{maxChars}}` |
+| `rewatch-answer.md` | はい | 再視聴のアウトオブキャラクタープロンプト: 動画モデルがクリップを再度視聴し、質問の言語で 1 つの質問に回答。キャラクターカードなし | `{{today}}` `{{question}}` `{{maxChars}}` |
 | `address.md` | はい | 分類器: タグなしメッセージがペルソナ宛か、ペルソナについてか、どちらでもないか。出力は 1 語: `yes`、`overheard` または `no` | `{{name}}` |
-| `overheard.md` | いいえ | タスク: メッセージがペルソナについて話しているが、ペルソナに話しかけていない。トリガー種別が `overheard` でファイルが存在し空でない場合、モードプロンプトの代わりに使用。ファイルが存在しないか空の場合はモードプロンプトにフォールバック（劣化） | `{{name}}` `{{author}}` `{{trigger}}` `{{target}}` |
-| `lookup.md` | いいえ | 分類器: ペルソナがこのメッセージに答えるためにウェブ検索が必要か（`features.webLookup`）。短いトランスクリプトと `<candidate>` ブロックを受け取る。出力は 1 行: 検索クエリ（プレーンワード、最大 12 語）または `none` | `{{name}}` |
-| `read-link.md` | いいえ | リンク読み取りのアウトオブキャラクタープロンプト（`features.webLookup`、`web.links.enabled`）: フェッチしたページを 1 段落に要約する。ページのタイトルと本文を受け取る。キャラクターカードなし | `{{maxChars}}` |
-| `search-summary.md` | いいえ | 検索要約のアウトオブキャラクタープロンプト（`features.webLookup`、`web.search.enabled`）: 番号付き検索結果をインラインソース付きの 1 つのノートに要約する。キャラクターカードなし | `{{query}}` `{{maxChars}}` |
+| `overheard.md` | いいえ | タスク: メッセージがペルソナについて話しているが、ペルソナに話しかけてはいない。トリガー種別が `overheard` でファイルが存在し空でない場合、モードプロンプトの代わりに使用。ファイルが存在しないか空の場合はモードプロンプトにフォールバック（劣化） | `{{name}}` `{{author}}` `{{trigger}}` `{{target}}` |
+| `lookup.md` | いいえ | 分類器: ペルソナが何かを調べる必要があるか（`features.webLookup`、`features.recall`）。短いトランスクリプトと `<candidate>` ブロックを受け取る。出力は `none`、または最大 4 行のラベル付き行: `web:` ウェブクエリ、`server:` サーバーのメッセージを検索するワードフォーム、`who:` 人物を見つけるネームフォーム、`when:` 日付範囲。ラベルなしの 1 行（旧フォーマット）はウェブクエリとして読み取られる | `{{name}}` `{{today}}` |
+| `recall-summary.md` | いいえ | リコールサマリーのアウトオブキャラクタープロンプト（`features.recall`）: サーバー検索で見つかった古いチャットのストレッチを読み、質問に回答。ペルソナに原文で届けるストレッチを任意に指定。キャラクターカードなし | `{{name}}` `{{answerChars}}` |
+| `room.md` | いいえ | 分類器: メッセージが全員に向けたものか、特定の一人に向けたものか（`spontaneous.roomQuestionChance`）。短いトランスクリプト、発話者のエイリアス、`<candidate>` ブロックを受け取る。出力は 1 語: `yes` または `no` | `{{name}}` |
+| `route-channel.md` | いいえ | 分類器: このメッセージに応答するにはペルソナが別のチャンネルを見る必要があるか（`features.channelRoute`）。短いトランスクリプト、`<channels>` リスト、`<candidate>` ブロックを受け取る。出力は 1 行: リストの番号または `none` | `{{name}}` |
+| `elsewhere.md` | いいえ | タスク: ペルソナが書き込めないチャンネルを読み、メインチャンネルでコメントする可能性がある（`features.elsewhere`）。注目ターンのタスクテキストとして使用。`<skip/>` が通常の結果 | `{{name}}` `{{channel}}` `{{destination}}` |
+| `read-link.md` | いいえ | リンク読み取りのアウトオブキャラクタープロンプト（`features.webLookup`、`web.links.enabled`）: フェッチしたページを 1 段落に要約する。ページのタイトルと本文を受け取る。キャラクターカードなし | `{{today}}` `{{maxChars}}` |
+| `search-summary.md` | いいえ | 検索要約のアウトオブキャラクタープロンプト（`features.webLookup`、`web.search.enabled`）: 番号付き検索結果をインラインソース付きの 1 つのノートに要約する。キャラクターカードなし | `{{today}}` `{{query}}` `{{maxChars}}` |
 | `private.md` | いいえ | モードプロンプト（`reply.md`）の後、`forced.md` の前に追加。DM（`features.privateMessages`）のみ。プライベートな会話: ここで話されたことはここに留まる。ペルソナは公開知識を保持する。ファイルがなければ何も追加されない | `{{name}}` `{{author}}` |
 | `draw.md` | はい | 描画サブプロセスのアウトオブキャラクタープロンプト（`features.imageGeneration`）: シーン説明から画像 1 枚を生成する。外見とリクエストのみを受け取り、キャラクターカードは受け取らない | `{{name}}` `{{appearance}}` `{{request}}` |
 | `appearance.md` | いいえ | ペルソナのビジュアル外見。`self="yes"` 時に `draw.md` に挿入される。パーソナリティやバックストーリーなし、1 段落 | `{{name}}` |
@@ -50,16 +54,18 @@
 | `mentor-signs.md` | いいえ | Mentor: モデル文の既知の癖。すべての mentor リクエストで `<signs>` ブロックとして送信（`features.mentor`）。ファイルがないか空の場合は省略 | `{{name}}` |
 | `mentor-diagnose.md` | いいえ | Mentor: スコアリング後に弱い回答の原因をペルソナのコンテキスト内の具体的なテキストで説明（`features.mentor`）。結果は未検証の仮説としてランの `diagnosis` に保存。`mentor.diagnose` が false またはファイルがない場合は省略 | `{{name}}` |
 | `variety.md` | いいえ | `classifier.text` リクエスト: ペルソナの最近のメッセージで繰り返されている表現手法を特定（`features.variety`）。キャラクターカードなし | `{{name}}` `{{maxPatterns}}` `{{shapeChars}}` |
+| `variety-long.md` | いいえ | 長い多様性パス: 全チャンネルにわたるペルソナ自身の行のリング全体での使い回し手法を特定（`features.variety`、`variety.longLines`）。プレースホルダー、`<lines>` ブロック、回答フォーマットは `variety.md` と同じ。`variety.longModel`（null = `classifier.text`）を使用。キャラクターカードなし。ファイルがない場合、長いパスは実行されない | `{{name}}` `{{maxPatterns}}` `{{shapeChars}}` |
 | `labels.json` | はい | コードがプロンプトに挿入するすべての文字列。キーは以下で固定、値はライターが記述する | 以下参照 |
 
 `{{name}}` ボットの表示名 · `{{author}}` 発話者の表示名 · `{{trigger}}` `labels.triggers.*` のいずれか ·
 `{{target}}` 呼び出しメッセージのインデックス（`#87`）。
+`{{today}}` は `lookup.md` では `bot.timezone` の日付、説明モデル（`describe.md`、`describe-video.md`、`describe-gif.md`）と `search-summary.md` では UTC 日付。
 システムメッセージ = `system-prompt` + `character-card` + `rules` + `format`。アナライザーの場合: `memory.md` のみ。
 強制ターン（`/nep interject`、`/nep initiate`）では、`forced.md` が存在する場合、モードプロンプトの後に追加されます。
 `overheard` ターンでは、`overheard.md` がモードプロンプトを置き換えます（追加ではなくタスクテキストそのもの）。`overheard.md` が存在しないか空の場合、モードプロンプトが代わりに使用されます（劣化: モードプロンプトはメッセージをペルソナ宛として扱い、実際と異なる）。
 プライベートチャットでは、`private.md` がモードプロンプトの後（`forced.md` の前）に同じ `{{name}}` と `{{author}}` プレースホルダーで追加されます。
 アナライザーとウォームアップの `profile.md` および `server.md` はキャラクターカードと `rules.md` をユーザーメッセージ内の
-`<character>` ブロックとして受け取ります。`channel.md`、`describe.md`、`describe-video.md`、`describe-gif.md`、`draw.md`、`rewatch.md`、`rewatch-answer.md`、`address.md`、`lookup.md`、`read-link.md`、`search-summary.md`、`variety.md` はカードを受け取りません。
+`<character>` ブロックとして受け取ります。`channel.md`、`describe.md`、`describe-video.md`、`describe-gif.md`、`draw.md`、`rewatch.md`、`rewatch-answer.md`、`address.md`、`lookup.md`、`read-link.md`、`search-summary.md`、`recall-summary.md`、`room.md`、`route-channel.md`、`elsewhere.md`、`variety.md`、`variety-long.md` はカードを受け取りません。
 
 `{{guildFieldChars}}` は `fieldChars * 2` で、コードがギルドレベルのパターンとスターターをクランプする上限です。
 `{{maxEpisodes}}` はメンバーごとに保持されるエピソードの総数です。どちらも config から設定されますが、デフォルトプロンプトでは
@@ -72,22 +78,28 @@
 | ブロック | 内容 |
 |---|---|
 | `<now>` | 日付、曜日、`config.bot.timezone` の時刻。`labels.locale` でフォーマット |
-| `<senses>` | ペルソナが今この瞬間に何を知覚でき何を知覚できないか。ライブ設定から生成: どの画像をペルソナ自身が見て、どれがヘルパーの説明文として届き、何が見えず聞こえないか。動画を見たと偽ることなく、自分の声でネタにできるようにする |
+| `<senses>` | ペルソナが今この瞬間に何を知覚でき何を知覚できないか。ライブ設定から生成: どの画像をペルソナ自身が見て、どれがヘルパーの説明文として届き、何が見えず聞こえないか。ペルソナが動画を見たと偽ることなく、自分の声でネタにできるようにする |
 | `<about_chat>` | 人々がここでどう話すか、会話の始め方と割り込み方、内輪ネタ、人々がペルソナに教えたこと |
+| `<emoji>` | ペルソナが使えるカスタム絵文字（`features.customEmoji`）: 最大 `context.customEmoji.max` エントリ、メンバーの使用頻度でランク付け。各エントリは `:name:` とキャッシュ済みのヘルパーキャプション（ある場合） |
+| `<gifs>` | ペルソナが投稿できる GIF（`features.gifs`）: 最大 `gifs.max`（デフォルト 40）エントリ、使用頻度と新しさでランク付け。各エントリはハンドル（`g1`、`g2`、...）とキャッシュ済みのヘルパーキャプション（ある場合）。キャプションは `gifs.listChars`（デフォルト 70、`0` で全文）でカットされ、より多くのエントリがバジェットに収まるようにする |
 | `<server>` | 現在のチャンネルの詳細（Discord カテゴリとトピック、目的、投稿内容、トーン、アクティビティ、最新メッセージ、トップライター。`labels.server.currentMark` でマーク）に加え、このターンで `<other_channels>` に供給した隣接チャンネルのみ。他のチャンネルは含まない |
 | `<lore>` | 直近のメッセージにキーが出現するサーバーのロアブックエントリ（常時表示マーク付きのエントリも含む）: イベント、繰り返し登場するキャラクター、長期にわたるストーリー。ロアブックのように数百エントリが存在できるが、該当する少数だけが表示される |
 | `<self_facts>` | ペルソナが自身について主張した内容 |
-| `<people>` | メンバープロファイル。発話者が先頭で `labels.profile.interlocutorMark` でマーク（`overheard` ターンでは省略: 発話者はペルソナについて話しており、ペルソナに話しかけていない）。各メンバーにペルソナの態度を付し、発話者には**エピソード**も含む: ペルソナが二人の間で記憶している出来事（日付と短い引用付き） |
-| `<other_channels>` | 隣接チャンネルごとに最大 `context.neighborMessages` 件のメッセージ。`context.neighborMaxAgeMinutes` より古いものは含まない |
-| `<worn>` | ペルソナが最近のメッセージで使い回している表現手法（`features.variety`）: `labels.variety.intro`、続いて手法ごとに `- <shape> ("<example>", ...)`。パスが実行されなかった、何も検出しなかった、またはスイッチがオフの場合は省略 |
-| `<lookup>` | ペルソナがこのターンでオンラインで調べた内容（`features.webLookup`）: クエリ、要約された回答、ソースサイト、または「何も見つからなかった」行。検索分類器が発火し検索が完了した場合にのみ表示される |
+| `<recent>` | サーバーで直近 `memory.recentHours`（デフォルト 72）時間に何が起きたか: アナライザーが書く最近のノート（短いイベント）と、ウィンドウ内のメンバーのエピソード（参照で表示）。ノートはターン自身のチャンネル、またはここにいる全員が読めるチャンネルからのみ表示。プライベートチャットでは全サーバーメンバーが読めるチャンネルからのみ表示され、エピソードなし。このターンが話しかけている人についての項目が優先。`<people>` で既に表示されたエピソードは除外、メンバーあたり最大 2 件。古い順。ヘッダーのみで項目がない場合は何も表示しない。スイッチ `features.recent`（キー欠落 = オン）。上限 `context.caps.recent`（デフォルト 1200） |
+| `<people>` | メンバープロファイル。発話者が先頭で `labels.profile.interlocutorMark` でマーク（`overheard` ターンでは省略: 発話者はペルソナについて話しているのであり、ペルソナに話しかけているのではない）。各メンバーにペルソナの態度を付し、発話者には**エピソード**も含む: ペルソナが二人の間で記憶している出来事（日付と短い引用付き） |
+| `<other_channels>` | 隣接チャンネルごとに最大 `context.neighborMessages` 件のメッセージ。`context.neighborMaxAgeMinutes` より古いものは含まない。`features.mediaDescriptions` がオンの場合、隣接チャンネルの行内の画像はキャッシュ済みキャプションを持つ場合にそれを付加。隣接チャンネルに対して新規の説明リクエストは行われない。`<channel_view>` にブロックが表示されているチャンネルは `<other_channels>` から除外。バジェットがプルされたブロックを落とした場合、そのチャンネルは通常の隣接チャンネルとしてここに再表示 |
+| `<channel_view>` | このターンにプルされた別のチャンネル（`features.channelPull`）。プルされたチャンネルごとにヘッダー行（`labels.pull.header`）、該当時の読み取り専用マーク（`labels.server.readOnly`）、ウィンドウがカットされた場合の「古いものは非表示」行、「画像は未確認」カウント、ペルソナへの過去の呼びかけ（応答済み/未応答/スキップマーク付き）、ウィンドウの行。行は `<chat>` と同じトランスクリプト形式だが、チャットの後に番号が続く（チャットは `#1`..`#N`、プルブロックは `#N+1` から）ため、すべての `#n` がブロック間で一意。画像はキャプションまたはブラインドタグのみ、添付画像としては含まない。`labels.pull.header` がない場合ブロックは空 |
+| `<worn>` | ペルソナが最近のメッセージで使い回している表現手法（`features.variety`）: `labels.variety.intro`、続いて手法ごとに `- <shape> ("<example>", ...)`。長いパスのパターン（`wornLong`、`variety-long.md` から）が先、次に短いパス、重複は除去、最大 `variety.maxPatterns` + `variety.longMaxPatterns`。どちらのパスも結果を出さなかった場合またはスイッチがオフの場合は省略 |
+| `<lookup>` | ペルソナがこのターンで調べた内容。ウェブ検索（`features.webLookup`）は `labels.lookup.webHeader`、要約された回答、`labels.lookup.sources`。何も見つからなかった場合は `labels.lookup.none`。サーバー検索（`features.recall`）は `labels.lookup.serverHeader`、サマリーノート。サマリーがストレッチを指定した場合はそのストレッチの原文行。両方実行された場合は `labels.lookup.bothNote` がその間に配置。`labels.lookup.stretch` 行が原文ストレッチを導入（`{date}` `{channel}`）。検索分類器が発火し少なくとも 1 つの検索が完了した場合にのみ表示 |
 | `<chat>` | 現在のチャンネルの最新 `context.channelMessages` 件のメッセージ |
 | `<tempo>` | 10 分 / 1 時間 / 1 日のカウント、参加人数、沈黙時間、判定（live / slow / dead） |
-| `<task>` | `reply` / `interject` / `initiate` / `overheard`（`overheard.md` が存在する場合）、プレースホルダー補完済み |
+| `<task>` | `reply` / `interject` / `initiate` / `overheard`（`overheard.md` が存在する場合）/ `elsewhere`（`elsewhere.md` が存在する場合、注目コメント用）、プレースホルダー補完済み |
 
 バジェットの優先順位（このリストの下からセクションがトリムされる）: system + task + clock + tempo + senses
-（カットされない）→ 発話者のプロファイル（エピソード付き）→ lookup（全体として保持または削除）→ about_chat → self_facts → lore → server → chat（新しい順）→
-他のプロファイル → worn（全体として保持または削除）→ other channels → 絵文字（下からエントリを削除、次にブロック全体; `context.caps.emoji`）→ GIF（同じトリム; `context.caps.gifs`）。
+（カットされない）-> 発話者のプロファイル（エピソード付き）-> lookup（全体として保持または削除。ウェブパート、サーバーパート、またはその両方を含む場合がある）-> about_chat -> self_facts -> lore -> server -> chat（新しい順）->
+pulled（`<channel_view>`、`context.caps.pulled` で制限。読み取り専用チャンネルからの呼びかけに応答するターンでは、プルされたブロックは chat の後ではなく前に配置）->
+recent（`context.caps.recent` で制限）->
+他のプロファイル -> worn（全体として保持または削除）-> other channels -> 絵文字（下からエントリを削除、次にブロック全体; `context.caps.emoji`）-> GIF（同じトリム; `context.caps.gifs`）。
 
 トランスクリプト行のメディア（利用可能な最も情報量の多い形式）: このリクエストに添付された画像 →
 `transcript.imageAttached`（画像がテキストの後に並ぶ順にナンバリング）、説明済み →
@@ -141,9 +153,12 @@ transcript.file | sticker                {name}
 transcript.stickerDescribed              {name} {text}
 transcript.emojiDescribed                {name} {text}: appended to a line for a custom emoji; text keeps :name:
 transcript.imageAttached                 {n}: this picture is attached to the request, the persona sees it
+transcript.imageAttachedDescribed        {n} {text}: attached to the request and captioned by the helper (features.attachedDescriptions)
 transcript.imageDescribed                {text}
 transcript.gif                           {name}
 transcript.gifDescribed                  {text}
+transcript.gifKnown                      {id} {text}: a GIF that is in the library; id is its handle, text is the caption
+transcript.gifKnownNoText                {id} {name}: a library GIF without a caption; id is the handle, name is the file or link name
 transcript.video                         {name} {duration}
 transcript.videoDescribed                {name} {duration} {text}: text describes ONE frame
 transcript.videoWatched                  {name} {duration} {text}: first-hand, the persona saw and heard the clip
@@ -168,25 +183,31 @@ transcript.reactions                     OPTIONAL {list}: appended at the end of
 transcript.reactionItem                  {emoji} {count}: one reaction; emoji is unicode or :name: for custom
 transcript.reactionMine                  {emoji} {count}: used instead of reactionItem when the persona is among the reactors; reads correctly whether count is 1 or more
 transcript.unknownDuration               shown in place of {duration} when Discord gave none
-senses.imageSee | imageDescribed | imageBlind        one line each; code picks the ones true under the live config
+senses.imageSee | imageDescribed | imageBlind        one line each; code picks the ones true under the live config. imageSee also covers the helper's note when features.attachedDescriptions is on
 senses.gifWatched | gifDescribed | gifBlind   gifWatched replaces gifDescribed when media.gif.watch is on (needs video vision on and a describe-gif or describe-video prompt); a labels file without gifWatched falls back to gifDescribed
 senses.videoDescribed | videoBlind
 senses.videoWatch                        replaces videoDescribed when features.videoDescriptions is on (needs mediaDescriptions too); covers watched, still frame and not-watched states
 senses.videoRewatch                      shown alongside videoWatch when features.videoRewatch is on; tells the persona that a second look at a watched video may appear, marked as first-hand
 senses.stickerSee | stickerDescribed | stickerBlind
 senses.lottie
+senses.customEmoji                       shown when features.customEmoji is on and the server has at least one custom emoji; tells the persona they can use server custom emoji by writing :name:
+senses.gifs                              shown when features.gifs is on and the library is not empty; tells the persona they can post one GIF per turn by handle from the list
 senses.voice | links | files
 senses.linksWatch                        replaces links when features.videoDescriptions is on; adds that a linked video may come watched or not watched with the reason
 senses.linksRead                         shown after the links line when features.webLookup is on and web.links.enabled is not false; tells the persona that a link may come with a read excerpt, first-hand
-senses.search                            shown when features.webLookup is on, web.search.enabled is not false AND a Brave Search key is configured; tells the persona that a `<lookup>` block may appear with web results
-senses.draw                              shown when features.imageGeneration is on and an image client is wired; tells the persona it can draw
+senses.search                            shown when features.webLookup is on, web.search.enabled is not false AND a Brave Search key is configured; tells the persona that a `<lookup>` block may appear with web results and that no search can happen during the reply itself
+senses.draw                              shown when features.imageGeneration is on and an image client is wired; tells the persona they can draw
 senses.drawSpent                         replaces draw when the daily picture quota is spent
 senses.drawSpentUser                     replaces draw when this member's daily quota is spent
 senses.privateChat                       shown in a DM turn: this is a one-on-one conversation, what is said here stays between the two of them
-senses.privateAware                      shown on a server turn when features.privateMessages is on: the persona knows it has private chats and never repeats or hints at anything from them
-lookup.header                            {query}: heading of the `<lookup>` block
+senses.privateAware                      shown on a server turn when features.privateMessages is on: the persona knows they have private chats and never repeats or hints at anything from them
+lookup.header                            {query}: heading of the `<lookup>` block (web search)
 lookup.sources                           {list}: site names, comma-separated by code
 lookup.none                              shown in `<lookup>` when the search found nothing useful
+lookup.webHeader                         heading of the web part inside `<lookup>` when both web and server searches ran
+lookup.serverHeader                      heading of the server part inside `<lookup>` when both web and server searches ran
+lookup.bothNote                          shown between the web and server parts when both ran
+lookup.stretch                           {date} {channel}: introduces a verbatim stretch of old chat inside the server part
 tempo.counts                             {last10min} {lastHour} {lastDay}
 tempo.authors                            {authors}: a head count
 tempo.silenceBeforeTrigger | lastMessageAgo | sinceOwn          {duration}
@@ -220,19 +241,38 @@ server.category | topic | purpose | topics | tone               {text}
 server.activity                          {activity} = server.activityLive | activitySlow | activityDead
 server.lastMessage                       {when}: humanised age of the channel's newest message
 server.topWriters                        {names}: current names of the members who write there most
-triggers.mention | reply | name | followUp | overheard   followUp = an untagged message the address classifier judged to be for the persona; overheard = talk about the persona, not to it. Both post plain, never as a Discord reply. overheard falls back to followUp, then reply
+server.readOnly                          shown on a channel the bot can read and react in but not write in; never shown on the current channel. Appears in the `<server>` map entry and as a line after a pulled channel's header
+senses.channels                          shown on every server turn: which channels this request shows (the chat, `<other_channels>`, `<channel_view>`); never claim to have looked at a channel not shown
+senses.elsewhere                         {destination}: shown when `features.elsewhere` is on and `memory.mainChannelIds` has a usable channel; says a call from a read-only channel is answered in {destination} with a link
+pull.header                              REQUIRED {channel} {from} {to} {ago}: first line of a pulled channel. Without it no `<channel_view>` renders. {from}/{{to}} are formatted dates, {ago} is a duration phrase from labels.units
+pull.olderNotShown                       shown when older messages exist in the pulled channel that are not included
+pull.picturesNotSeen                     {count}: shown when pictures in the pulled channel were not looked at
+pull.earlierPings                        {date}: heading before earlier calls to the persona in that channel, older than the window
+pull.pingAnswered                        appended to a pulled line that called the persona and was answered
+pull.pingUnanswered                      appended to a pulled line that called the persona and has not been answered yet
+pull.pingSkipped                         OPTIONAL appended to a pulled line the persona saw and chose to let pass; without it no mark is shown for skipped calls
+elsewhere.called                         {channel} {destination}: appended to the reply task text on a turn answering a call from a read-only channel
+elsewhere.link                           {text} {link}: joins the jump link to the persona's posted message; members read it, the model never sees it
+triggers.mention | reply | name | followUp | overheard   followUp = an untagged message the address classifier judged to be for the persona; overheard = talk about the persona, not to them. Both post plain, never as a Discord reply. overheard falls back to followUp, then reply
 triggers.private                         the trigger for a private (DM) message
 triggers.drawFailed                      {reason}: the drawing sub-process failed; reason is the human phrase from draw.reasons.*
 draw.reasons.moderation | daily | userDaily | timeout | error    human phrases for the five failure reasons; daily and userDaily are reserved but no longer reached by triggers.drawFailed — an image cap now posts limits.notice instead of a follow-up turn
 memory.privateNote                       the <private> block content in a private analyzer batch: marks the batch as a private conversation, constrains output to users for the partner's id only
 memory.privateChannel                    heading used in place of a channel name for the <new_messages> section in a private batch
 limits.notice                            {limit} {used} {cap}: posted as a plain reply when a rail refuses a triggered action; limit is the config key, used/cap are the numbers
+limits.paused                            posted as a plain reply when the persona is called while paused (`features.pauseNotice`). No placeholders. At most once per channel per `mention.pauseNoticeMinutes`
 warmup.ownMark                           prefixed to a member's own lines in the profile.md transcript
 warmup.contextMark                       prefixed to context lines in the profile.md transcript
 mentor.intended                          array of short strings: engine behaviours that must not cost points in the mentor's scoring
 mentor.examples                          first line inside the `<examples>` block in a situations request: introduces the real moments
 mentor.original                          first line inside the `<original>` block in a score request: introduces the persona's rejected answer
+room.focus                               {target} {author}: appended to the reply task when a room question triggers the turn
+address.author                           {name} {aliases}: the candidate author's display name and known aliases, shown to the address classifier when the member has aliases
 variety.intro                            first line of the `<worn>` block: tells the persona these devices are spent
+recent.header                            REQUIRED {hours}: the block's first line. A missing header or a missing `recent.line` means no `<recent>` block
+recent.line                              REQUIRED {date} {time} {text}: one note from the turn's own channel or an unnamed channel
+recent.lineIn                            OPTIONAL {date} {time} {channel} {text}: a note from another named channel; {channel} arrives without '#'. Without it `recent.line` is used
+recent.episode                           OPTIONAL {date} {name} {what}: a moment the persona remembers with {name} on {date}; no quote, no feeling. Without it the block shows notes only
 ```
 
 ## 出力
@@ -255,11 +295,12 @@ variety.intro                            first line of the `<worn>` block: tells
 
 プロンプト内の数値制限はプレースホルダーで、ランタイムに `config.memory.*` と `relationships.maxDeltaPerUpdate` から設定されます。
 
-入力: `<character>` · `<existing_profiles>`（ユーザー ID 別の JSON、現在の `affinity`（スコア、段階、理由）、
-該当時は `relationshipStale`、保存済みの `episodes` を含む）· `<existing_lore>` ·
+入力: `<character>` · `<existing_profiles>`（ユーザー ID 別の JSON。各プロファイルは全体またはコンパクト。全体プロファイルは散文フィールド、態度、関心・詳細・エイリアス・エピソードのランク付き上位を含む: 関心は `memory.maxInterests`、詳細は `memory.maxDetails`、エイリアスは `memory.maxAliases`、エピソードは `memory.analyzerEpisodes`（デフォルト 8）で制限。コンパクトプロファイルは `names`、`affinity`、`"compact": true` のみ。バッチが大きすぎて全プロファイルを全体で収められない場合、表示行数の多い著者が全体を保持し、残りはコンパクトになる。ログフィールド `profilesWhole`、`profilesCompact`、`profilesTokens` は `memory: update applied` に記録）· `<existing_lore>` ·
 `<existing_guild>`（JSON: パターン、スターター、内輪ネタ、学んだ項目）· `<existing_channels>`（チャンネル ID 別の JSON: `name`、Discord の `category`、`topic`、保存済みの
 `purpose`、`topics`、`tone`）· `<known_members>`（サーバーバッチのみ、プライベートバッチには含まれない。部分的または完全に欠落する場合あり: このバッチで書き込みをしていない保存済みメンバー。各メンバーの表示名とエイリアス付き。アナライザーがそのメンバーにエイリアスを記録できるようにする。最大 `memory.aliasRosterSize` 件、最近確認された順、`0` = オフ。バジェットではトランスクリプトより前にランクされ、必須ではないためリクエストを失敗させることはない）· `<new_messages>` は `## #channel-name (id:123)` の下にグループ化、行形式は
 `[14:32] nick (id:123): text`、ペルソナ宛の行は `→ ` で始まり、自分の行には `labels.self` を使用。
+
+ユーザーメッセージ内のセクション順（バジェットは下から先にトリム）: 全著者のコンパクトプロファイル、ロスター（`<known_members>`）、トランスクリプト（`<new_messages>`）、全体プロファイル（表示行のある著者のみ、行数の多い順）、最近のノート（`<recent_notes>`）。ギルド、チャンネル、ロアブロックはコンパクトプロファイルの前に配置。プロファイルが全体で収まらない場合はコンパクトで送信。プロファイルが原因でリクエストが失敗することはない。
 
 出力: 素の JSON オブジェクト。プロファイルは**差分更新**されます。アナライザーは変更だけを返し、保存済みの再要約は行わないため、バッチごとの書き換えで事実が劣化しません:
 
@@ -394,13 +435,9 @@ variety.intro                            first line of the `<worn>` block: tells
 再視聴を個別に制限します。回答は質問ごとに 1 時間キャッシュされます（上記の動画キャッシュセクションを参照）。スイッチ
 `features.videoRewatch`（未設定 = オン、`videoDescriptions` が必要）。
 
-## 検索分類器
+## 検索およびリコール分類器
 
-ペルソナに直接話しかけられた（リプライターン、`overheard` や自発的ターンではない）とき、以下のすべてが成立する場合（`features.webLookup` がオン、
-`web.search.enabled` が false でない、`lookup.md` プロンプトが存在する、`web.search.maxPerTurn` が 1 以上、
-`BRAVE_SEARCH_API_KEY` が設定されている）、分類器がトリガーメッセージにウェブ検索が必要かを判定します。`classifier.text`
-モデルロールを使用します。コードは `lookup.md` をシステムプロンプトとして送信し、ユーザーメッセージに短い `<transcript>`
-（再視聴分類器と同じもの、ペルソナ自身の行は `labels.self` でマーク）と `<candidate>` ブロックを含めます:
+ペルソナに直接話しかけられた（リプライターン、`overheard` や自発的ターンではない）とき、`lookup.md` プロンプトが存在する場合、分類器がトリガーにウェブ検索、サーバー履歴検索、またはその両方が必要かを判定します。コードは `lookup.md` をシステムプロンプトとして `classifier.text` モデルに送信し、ユーザーメッセージに短い `<transcript>`（再視聴分類器と同じもの、ペルソナ自身の行は `labels.self` でマーク）と `<candidate>` ブロックを含めます:
 
 ```
 <transcript>
@@ -411,25 +448,32 @@ variety.intro                            first line of the `<worn>` block: tells
 </candidate>
 ```
 
-トランスクリプトには利用可能な場合、説明文、動画サマリー、リンク読み取りが含まれます。トリガーテキストは
-`context.maxMessageChars` で切り詰め。出力は 1 行:
+トランスクリプトには利用可能な場合、説明文、動画サマリー、リンク読み取りが含まれます。トリガーテキストは `context.maxMessageChars` で切り詰め。出力は `none`、または最大 4 行のラベル付き行（順不同）:
 
-- 検索クエリ（プレーンワード、引用符なし、演算子なし、最大 12 語）: メッセージがチャット外の事実を必要とする場合。
-- `none`: それ以外すべて。
+- `web: <検索クエリ>`（プレーンワード、引用符なし、演算子なし、最大 12 語）: メッセージがチャット外の事実を必要とする場合、またはウェブ検索を明示的に依頼された場合。`features.webLookup` がオン、`web.search.enabled` が false でない、`web.search.maxPerTurn` が 1 以上、`BRAVE_SEARCH_API_KEY` が設定されている場合のみ発火。
+- `server: <フォーム>, <フォーム>, ...`: メッセージがこのサーバーで言われたことや行われたことについてで、トランスクリプトにない場合。各フォームは人々が実際に入力するような 1 語または短いフレーズで、活用形を列挙。`features.recall` がオンの場合のみ発火。
+- `who: <名前フォーム>, <名前フォーム>, ...`: 質問がトランスクリプトに明示的にいない人物についての場合。ニックネーム、ユーザー名、タグで見つけるためのフォーム。
+- `when: <from> .. <to>`: 質問が時間を指していう場合（`..` の各側に `YYYY-MM-DD` または `YYYY-MM-DD HH:MM`。日付単体はその日全体）。
 
-クエリでヒットした場合、Brave Search がクエリを実行し（`web.search.results` 件の結果、デフォルト 5）、番号付きの結果が
-`classifier.text` を通じて `search-summary.md`（`{{query}}`、`{{maxChars}}` = `web.search.summaryChars`、
-デフォルト 900）で要約され、回答は `<chat>` の直前に `<lookup>` ブロックとして描画されます: `labels.lookup.header` に
-クエリ、要約テキスト、`labels.lookup.sources` にサイト名（重複排除済み）。検索が何も返さなかった場合、または要約が有用な
-内容を見つけなかった場合は `labels.lookup.none` が代わりに表示されます。
+ラベルなしの 1 行（旧フォーマット）はウェブクエリとして読み取られます。空白の回答は失敗した呼び出し（`reason: empty`）であり、`none` ではありません。
 
-制限: ターンあたり最大 1 回の検索。分類器と要約はそれぞれ `llm.maxRequestsPerDay` にカウントされます。検索自体は
-`web.maxPerDay`（リンク読み取りと共有）にカウントされます。結果は正規化されたクエリごとに `web.search.cacheHours`
-（デフォルト 24）時間キャッシュされます。スイッチ `features.webLookup`（未設定 = オフ）。
+`web:` ヒット時、Brave Search がクエリを実行し（`web.search.results` 件の結果、デフォルト 5）、番号付きの結果が `classifier.text` を通じて `search-summary.md`（`{{today}}`、`{{query}}`、`{{maxChars}}` = `web.search.summaryChars`、デフォルト 900）で要約され、ウェブパートが `<lookup>` ブロックに描画されます: `labels.lookup.header` にクエリ、要約テキスト、`labels.lookup.sources` にサイト名（重複排除済み）。検索が何も返さなかった場合、または要約が有用な内容を見つけなかった場合は `labels.lookup.none` が代わりに表示されます。
+
+`server:` ヒット時（オプションの `who:` と `when:` 行付き）、エンジンは Discord の検索 API でサーバーのメッセージ履歴を検索します。フォームは順序付きの検索クエリリストになり（コンテンツフォームのラウンドロビン、次に著者名）、`when:` のみの場合は日付範囲のサンプルになります。ヒットはフィルター（他のボットとオーディエンスルールが拒否するチャンネルは除外）され、チャンネルと時間（`recall.clusterGapMinutes`）でクラスター化され、各クラスターの周辺で `recall.windowMessages` 件のメッセージがフェッチされます。分類器のワードフォームとネームフォームは保存済みメモリ（プライベートレイヤーは対象外）とも照合: メンバーのエピソード、ロアエントリ、学んだレッスン、最近の行。一致する各項目は `<memory>` ブロックの 1 行になります: `kind | date | name | text`、種類は `episode`、`lore`、`learned`、`recent`。`when:` の日付範囲は日付のない種類（lore、learned）を除外。最大 `recall.memoryItems`（デフォルト 6）項目、一致するフォーム数と重みでランク付け。`<memory>` ブロックは `<people>` の後 `<found>` の前に配置。メモリのマッチがあってチャットヒットがない場合でもサマリーに問い合わせます。`recall: searched` 行の `stats.memory` としてログ。
+
+サマリーヘルパー（`recall-summary.md`、`classifier.text`、ブロック `<people>`、`<memory>`、`<found>`、`<question>`）がウィンドウ、保存済みメモリ、質問を読み、ノートを書きます。サマリーが 1 つのストレッチを指定した場合（`stretch: <n>`）、そのストレッチの原文行（`recall.stretchChars` で制限）がノートと共に表示されます。サマリーが `nothing` の場合、`<lookup>` ブロックにサーバーパートは含まれません。サマリーの失敗またはタイムアウトの場合、上位ウィンドウの原文ストレッチがノートなしでフォールバックとして返されます。
+
+両方のウェブとサーバー検索が実行された場合、`<lookup>` ブロックには `labels.lookup.webHeader`（ウェブパートの上）、`labels.lookup.serverHeader`（サーバーパートの上）、`labels.lookup.bothNote`（その間）が含まれます。
+
+`<lookup>` ブロックは `<other_channels>` と同じオーディエンスルール（`context.pull.sameAudience`）に従います: ソースのチャンネルが送信先の全閲覧者に読めない場合、そのサーバー検索ウィンドウは拒否されます。
+
+制限: ターンあたり最大 1 回のウェブ検索と 1 回のサーバー検索。分類器、ウェブ要約、リコールサマリーはそれぞれ `llm.maxRequestsPerDay` にカウント。ウェブ検索は `web.maxPerDay`（リンク読み取りと共有）にカウント。リコール実行は `recall.maxPerDay`（`state.json` に `recallDay` / `recallCount` として保存）にカウント。ウェブ結果は正規化されたクエリごとに `web.search.cacheHours`（デフォルト 24）時間キャッシュ。分類器は `features.webLookup` または `features.recall` のいずれかがオンの場合に発火。スイッチ: `features.webLookup`（未設定 = オフ）、`features.recall`（未設定 = オン）。
 
 ## 多様性パス
 
 `classifier.text` パスがペルソナの最近の自身のメッセージを読み、ペルソナが陥っている繰り返しの手法（言い回し、構造的な型、繰り返すジョークのパターン）を特定します。結果はターンのリクエスト内の `<worn>` ブロックになります。スイッチ `features.variety`（未設定 = オン）。
+
+2 番目の長いビューを持つパスは、ペルソナがサーバーチャンネルに投稿した後、`variety.longEveryHours`（デフォルト 6）時間に最大 1 回実行されます。全チャンネルにわたるリングの最新 `variety.longLines`（デフォルト 300、`0` = オフ）行を経過時間制限なしで読みます。リングに少なくとも `variety.longMinLines`（デフォルト 60）行あり、`prompts/variety-long.md` が存在する場合、`variety.longModel`（null = `classifier.text` モデル）に使用目的 `variety-long` で、短いパスと同じ `<lines>` ブロックと回答フォーマットで、最大 `variety.longMaxPatterns`（デフォルト 3）パターンを求めます。リストはギルドメモリに `wornLong` として保存され、次の長いパスまで有効です。失敗時は前回のリストを保持。ターンの `<worn>` ブロックには長いパスのパターンが先、次に短いパス、重複は除去（shape を大小文字無視・空白圧縮で比較）、最大 `variety.maxPatterns` + `variety.longMaxPatterns`。長いパスはリプライ前には実行されず、ターンを保持せず、プライベートチャットでは実行されません。ログ: 成功時 `variety: long`、失敗時 `variety: pass failed`（`cause: 'long'`）。
 
 `features.varietyPrecompute` がオン（デフォルト）の場合、パスはペルソナがテキストを投稿した直後に開始され、次の `fetchHistory` が返すメッセージに基づきます。ターンは自身のメッセージセットを検索し、キャッシュに一致する結果があればモデルリクエストなしで使用、同じメッセージのパスが実行中であれば参加して最大 `variety.timeoutMs` 待機、それ以外は独自のリクエストを開始します。リクエストは `variety.requestTimeoutMs`（デフォルト 30000）まで実行されます。ターンの待機 `variety.timeoutMs` が先に切れた場合、リクエストは継続し遅延した結果は次のターンのために保存されます。参加したパスが失敗したターンはブロックを受け取らず、独自のリクエストも開始しません。一時停止中や `features.variety` がオフの場合、何も保存されません。
 
@@ -562,7 +606,11 @@ DM は以下のすべてが満たされた場合にのみ応答されます（�
 
 Mentor モデルはレンダリングされたサンドボックスリクエストを読み取るため、ペルソナが実際の人物について記憶している内容を読み取ります。ダイレクトメッセージとプライベートメモリレイヤーはサンドボックスリクエストに含まれません。
 
-サンドボックスにはライブターンと同じカスタム絵文字と GIF のブロックが含まれるため、ペルソナはサンドボックスの回答で絵文字リアクション、GIF の投稿、画像の描画が可能です。GIF や描画は `<msg>` と同様にアクションとしてカウントされます。
+サンドボックスにはライブターンと同じカスタム絵文字と GIF のブロックが含まれるため、ペルソナはサンドボックスの回答で絵文字リアクション、GIF の投稿、画像の描画が可能です。GIF や描画は `<msg>` と同様にアクションとしてカウントされます。サンドボックスには elsewhere の送信先と検索感覚の `<senses>` 行も含まれるため、これらの機能に対するペルソナの認識もテストされます。
+
+### ポストレジャー
+
+`state.json` の `postLedger` はペルソナがサーバーチャンネルに投稿した各メッセージを記録します: メッセージ ID、チャンネル、モード、トリガー種別、トリガー ID、最新の履歴行 ID、ソースチャンネル ID。`features.mentor` がオン（または mentor のアンカー関連パスが使用されている）間のみ書き込まれます。レジャーは `mentor.anchor.ledgerSize`（デフォルト 300）エントリで制限されます。mentor はこれを使って、実際の moment を解決する際に投稿されたメッセージがどのターンに属していたかを特定します。mentor 自身のリクエストは使用ログに `origin: mentor` を付けます。
 
 ### ランの終了方法
 
@@ -719,7 +767,7 @@ Mentor は 4 つのプロンプトファイルを使用します。状況/スコ
 
 結果はランの `diagnosis` として保存され、レポートに出力されます。これらはオーナーが検討するための仮説であり、mentor 自体は何も編集しません。
 
-原因が指すレイヤー: `rules`（ルールブロック内のルール）、`prompt`（エンジンのシステムプロンプト、フォーマット、タスク）、`card`（キャラクターカード）、`self`（ペルソナが自分について保持するメモ）、`learned`（他者が教えたこと）、`guild`（サーバーの習慣や内輪ネタ）、`profile`（ある人についての記憶）、`missing`（あるべき指示が存在しない）。
+原因が指すレイヤー: `rules`（ルールブロック内のルール）、`prompt`（エンジンのシステムプロンプト、フォーマット、タスク）、`card`（キャラクターカード）、`self`（ペルソナが自身について保持するメモ）、`learned`（ペルソナに教えたこと）、`guild`（サーバーの習慣や内輪ネタ）、`profile`（ペルソナがある人について記憶していること）、`labels`（`labels.json` の文字列）、`variety`（`<worn>` ブロック内の項目）、`lore`（ロアブックエントリ）、`channel`（チャンネルノート）、`recent`（`<recent>` ブロック内の行）、`missing`（あるべき指示が存在しない）。
 
 #### 診断スキーマ
 
