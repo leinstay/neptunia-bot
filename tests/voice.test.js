@@ -115,7 +115,8 @@ test('voiceSettings: every fallback equals config.json', () => {
   const defaults = voiceSettings({});
   for (const [key, value] of Object.entries(defaults)) assert.equal(value, tracked.memory.voice[key], key);
   // memory.voice.maxPerDay is a daily rail: read through src/llm/openrouter.js#dailyCapOf by the voice run.
-  assert.deepEqual(Object.keys(tracked.memory.voice).filter((key) => !(key in defaults)), ['maxPerDay']);
+  // memory.voice.timeoutMs is the voice request's timeout: a request option (src/memory/update.js#voiceRequestOptions), not a queue setting.
+  assert.deepEqual(Object.keys(tracked.memory.voice).filter((key) => !(key in defaults)), ['maxPerDay', 'timeoutMs']);
 });
 
 test('voiceSettings: a garbage value falls back, a valid one is kept', () => {
@@ -823,6 +824,20 @@ test('buildVoiceRequest: items past the token cap are not sent, oldest first kep
   assert.ok(sent.length >= 1 && sent.length < 5, `sent ${sent.length}`);
   assert.deepEqual(sent, queue.slice(0, sent.length).map((queued) => queued.id));
   assert.deepEqual(itemsBlock(messages).map((view) => view.id), sent.map((_, i) => String(i + 1)));
+});
+
+test('buildVoiceRequest: an llm.safetyMargin outside (0, 1] still trims the request, at 0.9 as a chat turn does', () => {
+  const long = 'α'.repeat(400); // about 200 tokens each
+  const queue = queueOf([0, 1, 2, 3, 4].map((n) => item('self', { brief: [`${n}${long}`] }, NOW + n)));
+  const sentWith = (llm) => request(queue, { config: makeConfig({ llm }) }).sent;
+  const atDefault = sentWith({ maxRequestTokens: 1000, safetyMargin: 0.9 });
+  assert.ok(atDefault.length >= 1 && atDefault.length < 5, `sent ${atDefault.length}`);
+  assert.ok(sentWith({ maxRequestTokens: 1000, safetyMargin: 1 }).length > atDefault.length, 'a valid margin is applied as given');
+  for (const safetyMargin of [null, undefined, 0, -0.5, 1.5, Number.NaN, '0.5']) {
+    assert.deepEqual(sentWith({ maxRequestTokens: 1000, safetyMargin }), atDefault, String(safetyMargin));
+  }
+  assert.deepEqual(sentWith({ maxRequestTokens: 1000 }), atDefault, 'a missing margin');
+  assert.deepEqual(sentWith({ safetyMargin: 0.9 }), queue.map((queued) => queued.id), 'a missing token cap is config.json\'s 50000');
 });
 
 test('buildVoiceRequest: an item too big for the cap is skipped and a later smaller one is still sent', () => {
