@@ -603,17 +603,142 @@ test('audienceCovers: a source hidden from everyone never covers an everyone-vis
   assert.equal(audienceCovers(dest, source), false);
 });
 
-test('audienceCovers: a member allowed only on the destination blocks', () => {
-  const source = audience({ everyone: true, roles: ['guild', 'r1'] });
-  assert.equal(audienceCovers(audience({ everyone: true, roles: ['guild', 'r1'], memberAllow: ['u1'] }), source), false);
-  const allowedBoth = audience({ everyone: true, roles: ['guild', 'r1'], memberAllow: ['u1'] });
-  assert.equal(audienceCovers(audience({ everyone: true, roles: ['guild', 'r1'], memberAllow: ['u1'] }), allowedBoth), true);
+test('audienceCovers: a member allowed only on the destination blocks a source that may hide itself from that member', () => {
+  const hidden = audience({ everyone: false, roles: ['r1'] });
+  assert.equal(audienceCovers(audience({ roles: ['r1'], memberAllow: ['u1'] }), hidden), false);
+  const allowedBoth = audience({ everyone: false, roles: ['r1'], memberAllow: ['u1'] });
+  assert.equal(audienceCovers(audience({ roles: ['r1'], memberAllow: ['u1'] }), allowedBoth), true);
+  const open = audience({ everyone: true, roles: ['guild', 'r1'] });
+  assert.equal(
+    audienceCovers(audience({ everyone: true, roles: ['guild', 'r1'], memberAllow: ['u1'] }), open),
+    true,
+    'a source nothing hides from anyone needs no allow by name',
+  );
 });
 
 test('audienceCovers: a member denied on the source blocks unless denied on the destination', () => {
   const source = audience({ everyone: true, roles: ['guild', 'r1'], memberDeny: ['u9'] });
   assert.equal(audienceCovers(audience({ everyone: true, roles: ['guild', 'r1'] }), source), false);
   assert.equal(audienceCovers(audience({ everyone: true, roles: ['guild', 'r1'], memberDeny: ['u9'] }), source), true);
+});
+
+// A large guild: 74 roles, @everyone's among them; the main channel denies one
+// role and allows three members by name.
+const GUILD_ROLE = 'guild';
+const PLAIN_ROLES = Array.from({ length: 73 }, (_, i) => `role-${i + 1}`);
+const ALL_ROLES = [GUILD_ROLE, ...PLAIN_ROLES];
+const DENIED_ROLE = PLAIN_ROLES[40];
+const ALL_BUT_DENIED = ALL_ROLES.filter((id) => id !== DENIED_ROLE);
+const MAIN_MEMBERS = ['member-1', 'member-2', 'member-3'];
+const LARGE_MAIN = audience({ everyone: true, roles: ALL_BUT_DENIED, roleDeny: [DENIED_ROLE], memberAllow: MAIN_MEMBERS });
+
+test('audienceCovers: an open source covers a large main channel whose member allows it does not repeat', () => {
+  const open = audience({ everyone: true, roles: ALL_ROLES });
+  assert.equal(LARGE_MAIN.roles.size, 73);
+  assert.equal(audienceCovers(LARGE_MAIN, open), true);
+});
+
+test('audienceCovers: a source with a role deny needs an allow there for every member a large main channel allows', () => {
+  const source = audience({ everyone: true, roles: ALL_BUT_DENIED, roleDeny: [DENIED_ROLE], memberAllow: ['member-1'] });
+  assert.equal(audienceCovers(LARGE_MAIN, source), false, 'member-2 and member-3 may hold the denied role');
+  const repeats = audience({ everyone: true, roles: ALL_BUT_DENIED, roleDeny: [DENIED_ROLE], memberAllow: MAIN_MEMBERS });
+  assert.equal(audienceCovers(LARGE_MAIN, repeats), true, 'the member step was the only one in the way');
+});
+
+test('audienceCovers: a source @everyone views with no role deny and no member deny covers any destination through the full check', () => {
+  const open = audience({ everyone: true, roles: ['guild', 'r1', 'r2'], roleAllow: ['r2'], memberAllow: ['u7'] });
+  const destinations = [
+    audience({ everyone: true, roles: ['guild', 'r1', 'r2'], memberAllow: ['u1', 'u2'] }),
+    audience({ everyone: false, roles: ['r1'], roleAllow: ['r1'], memberAllow: ['u1'], memberDeny: ['u2'] }),
+    audience({ everyone: true, roles: ['guild', 'r2'], roleAllow: ['r2'], roleDeny: ['r1'], memberAllow: ['u3'] }),
+    audience(),
+  ];
+  for (const [i, dest] of destinations.entries()) assert.equal(audienceCovers(dest, open), true, `destination ${i}`);
+});
+
+test('audience model: a source @everyone views with no role denied lists every role, so the role step passes it', () => {
+  // As discord.js rolePermissions does, each role starts from its own and @everyone's base permissions.
+  let open = 0;
+  for (const guildView of [false, true]) for (const aBits of [0, 1, 2, 3]) for (const bBits of [0, 1, 2, 3]) {
+    const roles = {
+      guild: { view: guildView, admin: false },
+      a: { view: (aBits & 1) === 1, admin: (aBits & 2) === 2 },
+      b: { view: (bBits & 1) === 1, admin: (bBits & 2) === 2 },
+    };
+    for (const guild of OVERWRITES) for (const a of OVERWRITES) for (const b of OVERWRITES) {
+      const seen = modelAudience(roles, { roles: { guild, a, b }, members: {} });
+      if (!seen.everyone || seen.roleDeny.size > 0) continue;
+      open += 1;
+      assert.deepEqual([...seen.roles].sort(), [...ROLE_IDS].sort());
+    }
+  }
+  assert.ok(open > 0);
+});
+
+test('audienceCovers: the role step runs on a source @everyone views with nothing denied (no @everyone shortcut)', () => {
+  // audienceOf never reads this shape (see the test above); the rail still compares the roles.
+  const open = audience({ everyone: true, roles: ['guild', 'r1'] });
+  assert.equal(audienceCovers(audience({ everyone: false, roles: ['r3'], roleAllow: ['r3'] }), open), false);
+});
+
+test('audienceCovers: a member the destination allows passes an everyone-visible source without role denies that does not deny that member', () => {
+  const source = audience({ everyone: true, roles: ['guild', 'r1'], memberDeny: ['u9'] });
+  const dest = audience({ everyone: true, roles: ['guild', 'r1'], memberAllow: ['u1'], memberDeny: ['u9'] });
+  assert.equal(audienceCovers(dest, source), true);
+});
+
+test('audienceCovers: a source that denies a member the destination allows blocks', () => {
+  const source = audience({ everyone: true, roles: ['guild', 'r1'], memberDeny: ['u1'] });
+  assert.equal(audienceCovers(audience({ everyone: true, roles: ['guild', 'r1'], memberAllow: ['u1'] }), source), false);
+  assert.equal(audienceCovers(audience({ everyone: false, roles: ['r1'], memberAllow: ['u1'] }), source), false);
+  const allowsAndDenies = audience({ everyone: true, roles: ['guild', 'r1'], memberAllow: ['u2'], memberDeny: ['u1'] });
+  assert.equal(audienceCovers(audience({ everyone: true, roles: ['guild', 'r1'], memberAllow: ['u1'] }), allowsAndDenies), false);
+});
+
+test('audienceCovers: with a role deny on the source only an allow there proves a member the destination allows', () => {
+  const source = audience({ everyone: true, roles: ['guild', 'members'], roleDeny: ['jail'] });
+  const dest = audience({ everyone: true, roles: ['guild', 'members'], roleDeny: ['jail'], memberAllow: ['u1'] });
+  assert.equal(audienceCovers(dest, source), false, 'u1 may hold jail: the allow by name beats it on the destination only');
+  const allowed = audience({ everyone: true, roles: ['guild', 'members'], roleDeny: ['jail'], memberAllow: ['u1'] });
+  assert.equal(audienceCovers(dest, allowed), true);
+});
+
+test('audienceCovers: a source @everyone cannot view needs an allow there for every member the destination allows', () => {
+  const plain = audience({ everyone: false, roles: ['r1'] });
+  assert.equal(audienceCovers(audience({ everyone: true, roles: ['guild', 'r1'] }), plain), false, 'even with nothing denied on it');
+  assert.equal(audienceCovers(audience({ everyone: false, roles: ['r1'], memberAllow: ['u1'] }), plain), false);
+  const allowed = audience({ everyone: false, roles: ['r1'], memberAllow: ['u1'] });
+  assert.equal(audienceCovers(audience({ everyone: false, roles: ['r1'], memberAllow: ['u1'] }), allowed), true);
+});
+
+test('audienceCovers: never covers a leaking pair when two members carry overwrites on both channels', () => {
+  const channels = [];
+  for (const guild of OVERWRITES) for (const a of OVERWRITES) for (const b of OVERWRITES) {
+    for (const m of OVERWRITES) for (const x of OVERWRITES) channels.push({ roles: { guild, a, b }, members: { m, x } });
+  }
+  const roleSets = [];
+  for (const guildView of [false, true]) for (const aView of [false, true]) for (const bView of [false, true]) {
+    roleSets.push({ guild: { view: guildView, admin: false }, a: { view: aView, admin: false }, b: { view: bView, admin: false } });
+  }
+  let openSource = 0;
+  let notDeniedByName = 0;
+  for (const roles of roleSets) {
+    const seen = channels.map((channel) => ({
+      audience: modelAudience(roles, channel),
+      views: PEOPLE.flatMap((person) => HOLDINGS.map((held) => memberViews(roles, channel, person, held))),
+    }));
+    for (const dest of seen) {
+      for (const source of seen) {
+        if (!audienceCovers(dest.audience, source.audience)) continue;
+        dest.views.forEach((view, i) => assert.ok(!view || source.views[i], 'a member sees the destination and not the source'));
+        const unrepeated = [...dest.audience.memberAllow].some((id) => !source.audience.memberAllow.has(id));
+        if (!unrepeated) continue;
+        if (source.audience.memberDeny.size === 0) openSource += 1;
+        else notDeniedByName += 1;
+      }
+    }
+  }
+  assert.ok(openSource > 0 && notDeniedByName > 0, 'both ways past an allow by name the source does not repeat are reached');
 });
 
 test('audienceCovers: a missing or malformed audience never covers', () => {
