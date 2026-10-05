@@ -15,6 +15,7 @@ import {
   usableDestination,
   postLedgerSize,
   appendPostLedger,
+  paceSettings,
 } from '../src/behavior/turn.js';
 import { between, typingMs } from '../src/behavior/random.js';
 import { fill, formatClock, formatDate } from '../src/discord/format.js';
@@ -3038,7 +3039,10 @@ test('createTurnRunner: the persona turn is requested as the talk role', async (
   const raw = rawMessage({ id: 'm1' });
   const channel = fakeTurnChannel({ historyMessages: [raw] });
   const llm = fakeLlm('<skip/>');
-  const turns = createTurnRunner({ hot: fakeHot(), store: fakeStore(), llm, calibrator: identityCalibrator(), client: fakeClient() });
+  // No drop bar (pace.dropAfterMs): with one, the request also carries the bar's timeout and signal.
+  const hot = fakeHot();
+  hot.config.pace = { dropAfterMs: 0 };
+  const turns = createTurnRunner({ hot, store: fakeStore(), llm, calibrator: identityCalibrator(), client: fakeClient() });
   await turns.runTurn({ channel, mode: 'interject' });
   assert.equal(llm.optionCalls.length, 1);
   assert.deepEqual(llm.optionCalls[0], { role: 'talk' }, 'only the role: the talk model and every other setting stay the defaults');
@@ -5397,4 +5401,487 @@ test('runTurn: a routed answer records the call it answered and its source chann
   assert.deepEqual(scene.store.state.data.postLedger, [
     { messageId: 'sent-1', channelId: 'c1', mode: 'reply', triggerKind: 'mention', triggerId: 'd3', newestHistoryId: 'm1', sourceChannelId: DIARY, at: NOW },
   ]);
+});
+
+// ---------------------------------------------------------------------------
+// Pace: the helpers before the talk request run together, under one deadline (pace.*).
+
+/** A promise with its resolve and reject handed out. */
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+/** A fake `schedule`: every timer is kept with its delay and fired by hand. */
+function fakeSchedule() {
+  const timers = [];
+  return {
+    timers,
+    schedule: (fn, ms) => {
+      const timer = { fn, ms, cancelled: false, fired: false };
+      timers.push(timer);
+      return () => {
+        timer.cancelled = true;
+      };
+    },
+    live: () => timers.filter((timer) => !timer.cancelled && !timer.fired),
+    fire(timer) {
+      timer.fired = true;
+      timer.fn();
+    },
+  };
+}
+
+/** Let pending callbacks run, one round of immediates at a time, until `done()` holds (at most `rounds`). */
+async function settleUntil(done = () => false, rounds = 50) {
+  for (let i = 0; i < rounds && !done(); i += 1) await new Promise((resolve) => setImmediate(resolve));
+}
+
+// The pace every test below sets for itself; a test passing its own `pace` overrides single keys.
+const TEST_PACE = { prepareMs: 1000, prepareSearchMs: 3000, dropAfterMs: 0, typingWhilePreparing: false };
+
+function paceHot(features = {}, pace = {}) {
+  const hot = lookupHot({ mediaDescriptions: true, ...features });
+  hot.config.pace = { ...TEST_PACE, ...pace };
+  return hot;
+}
+
+/**
+ * A reply turn whose chat holds a picture (img1) and a page link (m2#e0) before the trigger. The
+ * describer's caption and the lookup's read answer once `caption` / `read` (deferreds) settle,
+ * at once without them; the lookup has no search, so no classifier runs.
+ */
+function paceScene({ hot = paceHot(), caption = null, read = null, clock = () => NOW, llm = fakeLlm('<msg>ok</msg>'), timers = fakeSchedule() } = {}) {
+  const picture = rawMessage({
+    id: 'm1',
+    ts: NOW - 9000,
+    attachments: new Map([['img1', { id: 'img1', contentType: 'image/png', name: 'pic.png', url: 'https://cdn/pic.png' }]]),
+  });
+  const link = linkRaw('m2', NOW - 5000, [PAGE_EMBED]);
+  const trigger = rawMessage({ id: 'm3', ts: NOW - 1000, authorName: 'Zoë', content: 'τι λες;' });
+  const channel = fakeTurnChannel({ historyMessages: [picture, link, trigger] });
+  const describer = {
+    calls: 0,
+    describeMany: async () => {
+      describer.calls += 1;
+      await caption?.promise;
+      return { descriptions: new Map([['img1', 'a grey cat']]), newCount: 1 };
+    },
+  };
+  const lookup = {
+    calls: 0,
+    readLinks: async () => {
+      lookup.calls += 1;
+      await read?.promise;
+      return { reads: new Map([['m2#e0', 'une recette']]), newCount: 1 };
+    },
+  };
+  const turns = createTurnRunner({ hot, store: fakeStore(), llm, calibrator: identityCalibrator(), client: fakeClient(), describer, lookup, now: clock, schedule: timers.schedule });
+  const params = { channel, mode: 'reply', trigger: normalizedTrigger(trigger), triggerKind: 'mention' };
+  return { turns, params, channel, llm, describer, lookup, timers };
+}
+
+const CAPTION_SHOWN = fill(labels.transcript.imageDescribed, { text: 'a grey cat' });
+const READ_SHOWN = fill(labels.transcript.linkRead, { text: 'une recette' });
+
+test('paceSettings: 0, a negative value or a non-number turns a limit off; a missing key keeps a positive limit', () => {
+  const missing = paceSettings({});
+  assert.ok(missing.prepareMs > 0 && missing.prepareSearchMs > 0);
+  assert.equal(missing.typingWhilePreparing, true);
+  for (const off of [0, -5, '6000', null, Number.NaN, Infinity]) {
+    const pace = paceSettings({ pace: { prepareMs: off, prepareSearchMs: off } });
+    assert.equal(pace.prepareMs, null, String(off));
+    assert.equal(pace.prepareSearchMs, null, String(off));
+  }
+  assert.ok(missing.dropAfterMs > 0);
+  assert.equal(paceSettings({ pace: { dropAfterMs: 0 } }).dropAfterMs, null);
+  assert.deepEqual(paceSettings({ pace: { prepareMs: 2500, prepareSearchMs: 7000, dropAfterMs: 9000, typingWhilePreparing: false } }), {
+    prepareMs: 2500,
+    prepareSearchMs: 7000,
+    dropAfterMs: 9000,
+    typingWhilePreparing: false,
+  });
+  assert.deepEqual(paceSettings({ pace: 'fast' }), missing, 'a group that is not an object counts as missing');
+});
+
+test('runTurn: the helpers before the talk request overlap -- two slow ones take the time of one', async () => {
+  let t = NOW;
+  const caption = deferred();
+  const read = deferred();
+  const scene = paceScene({ caption, read, clock: () => t });
+
+  const running = withCapturedLogs(() => scene.turns.runTurn(scene.params));
+  await settleUntil(() => scene.describer.calls > 0 && scene.lookup.calls > 0);
+  assert.deepEqual([scene.describer.calls, scene.lookup.calls], [1, 1], 'both asked before either answered');
+  assert.equal(scene.llm.calls.length, 0);
+  t = NOW + 1000;
+  caption.resolve();
+  read.resolve();
+  const { result, logs } = await running;
+
+  assert.equal(result.outcome, 'spoke');
+  const timings = logs.find((l) => l.msg === 'turn: timings');
+  assert.equal(timings.stages.captions, 1000);
+  assert.equal(timings.stages.links, 1000);
+  assert.equal(timings.prepareMs, 1000, 'the maximum of the two, not their sum');
+  const user = userText(scene.llm);
+  assert.ok(user.includes(CAPTION_SHOWN) && user.includes(READ_SHOWN), user);
+});
+
+test('runTurn: with every helper in time the request is the one built without a deadline', async () => {
+  const withDeadline = paceScene();
+  const { logs } = await withCapturedLogs(() => withDeadline.turns.runTurn(withDeadline.params));
+  const waiting = paceScene({ hot: paceHot({}, { prepareMs: 0, prepareSearchMs: 0 }) });
+  await withCapturedLogs(() => waiting.turns.runTurn(waiting.params));
+
+  assert.deepEqual(withDeadline.llm.calls[0], waiting.llm.calls[0]);
+  const user = userText(withDeadline.llm);
+  assert.ok(user.includes(CAPTION_SHOWN) && user.includes(READ_SHOWN), user);
+  assert.deepEqual(logs.find((l) => l.msg === 'turn: timings').late, []);
+  assert.ok(withDeadline.timers.timers.every((timer) => timer.cancelled && !timer.fired), 'the deadline is cleared once everything is in');
+});
+
+test('runTurn: a helper past pace.prepareMs is left out and named in late; its late result changes nothing', async () => {
+  const caption = deferred();
+  const scene = paceScene({ caption });
+
+  const running = withCapturedLogs(() => scene.turns.runTurn(scene.params));
+  await settleUntil(() => scene.describer.calls > 0 && scene.timers.live().length > 0);
+  const [deadline] = scene.timers.live();
+  assert.equal(deadline.ms, TEST_PACE.prepareMs);
+  scene.timers.fire(deadline);
+  const { result, logs } = await running;
+
+  assert.equal(result.outcome, 'spoke');
+  const user = userText(scene.llm);
+  assert.ok(!user.includes('a grey cat'), 'the late caption is absent');
+  assert.ok(user.includes(READ_SHOWN), 'the read in time is there');
+  const timings = logs.find((l) => l.msg === 'turn: timings');
+  assert.deepEqual(timings.late, ['captions']);
+  assert.equal(timings.stages.captions, null);
+  assert.equal(typeof timings.stages.links, 'number');
+
+  const { logs: after } = await withCapturedLogs(async () => {
+    caption.resolve();
+    await settleUntil();
+  });
+  assert.equal(scene.llm.calls.length, 1, 'nothing more reaches the model');
+  assert.equal(scene.channel.sent.length, 1);
+  assert.deepEqual(
+    after.filter((l) => l.msg === 'turn: stage late').map((l) => [l.stage, typeof l.ms]),
+    [['captions', 'number']],
+  );
+});
+
+test('runTurn: a helper that fails after the deadline throws nothing and changes nothing', async () => {
+  const caption = deferred();
+  const scene = paceScene({ caption });
+  const unhandled = [];
+  const onUnhandled = (err) => unhandled.push(err);
+  process.on('unhandledRejection', onUnhandled);
+  try {
+    const running = withCapturedLogs(() => scene.turns.runTurn(scene.params));
+    await settleUntil(() => scene.describer.calls > 0 && scene.timers.live().length > 0);
+    scene.timers.fire(scene.timers.live()[0]);
+    const { result } = await running;
+    assert.equal(result.outcome, 'spoke');
+
+    const { logs } = await withCapturedLogs(async () => {
+      caption.reject(new Error('describer down'));
+      await settleUntil();
+    });
+    assert.deepEqual(unhandled, []);
+    assert.equal(scene.llm.calls.length, 1);
+    assert.equal(scene.channel.sent.length, 1);
+    assert.ok(logs.some((l) => l.msg === 'turn: stage failed' && l.stage === 'captions'));
+  } finally {
+    process.off('unhandledRejection', onUnhandled);
+  }
+});
+
+test('runTurn: pace.prepareMs 0 waits for every helper, however slow', async () => {
+  const caption = deferred();
+  const scene = paceScene({ caption, hot: paceHot({}, { prepareMs: 0 }) });
+
+  const running = withCapturedLogs(() => scene.turns.runTurn(scene.params));
+  await settleUntil(() => scene.describer.calls > 0);
+  await settleUntil();
+  assert.equal(scene.timers.timers.length, 0, 'no deadline is set');
+  assert.equal(scene.llm.calls.length, 0, 'the turn still waits');
+  caption.resolve();
+  const { logs } = await running;
+
+  assert.ok(userText(scene.llm).includes(CAPTION_SHOWN));
+  assert.deepEqual(logs.find((l) => l.msg === 'turn: timings').late, []);
+});
+
+test('runTurn: a search the classifier asks for moves the deadline to pace.prepareSearchMs, counted from the turn start', async () => {
+  let t = NOW;
+  const search = deferred();
+  const lookup = fakeLookup();
+  const searchOnce = lookup.search;
+  lookup.search = async (guildId, query) => {
+    await search.promise;
+    return searchOnce(guildId, query);
+  };
+  const base = lookupLlm('champions final winner 2026');
+  const llm = {
+    ...base,
+    complete: async (messages, options) => {
+      if (messages[0].content.startsWith('Decide whether')) t = NOW + 500;
+      return base.complete(messages, options);
+    },
+  };
+  const hot = lookupHot();
+  hot.config.pace = { ...TEST_PACE };
+  const timers = fakeSchedule();
+  const trigger = rawMessage({ id: 'm1', ts: NOW - 1000, authorName: 'Zoë', content: 'ποιος κέρδισε τον τελικό;' });
+  const channel = fakeTurnChannel({ historyMessages: [trigger] });
+  const turns = createTurnRunner({ hot, store: fakeStore(), llm, calibrator: identityCalibrator(), client: fakeClient(), lookup, now: () => t, schedule: timers.schedule });
+
+  const running = withCapturedLogs(() => turns.runTurn({ channel, mode: 'reply', trigger: normalizedTrigger(trigger), triggerKind: 'mention' }));
+  await settleUntil(() => timers.timers.length > 1);
+  const [first, second] = timers.timers;
+  assert.equal(first.ms, TEST_PACE.prepareMs);
+  assert.equal(first.cancelled, true, 'the first deadline is replaced');
+  assert.equal(second.ms, TEST_PACE.prepareSearchMs - 500, 'the longer limit, less the time already spent');
+  assert.equal(second.cancelled, false);
+  search.resolve();
+  const { logs } = await running;
+
+  assert.ok(base.turnCalls[0].messages[1].content.includes('<lookup>'), 'the search arrived in time');
+  const timings = logs.find((l) => l.msg === 'turn: timings');
+  assert.deepEqual(timings.late, []);
+  assert.equal(timings.stages.lookup, 500);
+});
+
+test('runTurn: turn: timings carries every stage, null for one that did not run', async () => {
+  let t = NOW;
+  const caption = deferred();
+  const base = fakeLlm('<msg>ok</msg>');
+  const llm = {
+    ...base,
+    complete: async (messages, options) => {
+      t += 2000;
+      return base.complete(messages, options);
+    },
+  };
+  const scene = paceScene({ caption, clock: () => t, llm });
+  const fetchMessages = scene.channel.messages.fetch;
+  scene.channel.messages.fetch = async (arg) => {
+    if (arg && typeof arg === 'object' && 'limit' in arg) t += 100;
+    return fetchMessages(arg);
+  };
+
+  const running = withCapturedLogs(() => scene.turns.runTurn(scene.params));
+  await settleUntil(() => scene.describer.calls > 0);
+  await settleUntil();
+  t = NOW + 1100;
+  caption.resolve();
+  const { logs } = await running;
+
+  const timings = logs.find((l) => l.msg === 'turn: timings');
+  assert.deepEqual(Object.keys(timings.stages), ['history', 'previews', 'captions', 'videos', 'rewatch', 'links', 'lookup', 'neighbors', 'pulled', 'variety']);
+  assert.equal(timings.stages.history, 100);
+  assert.equal(timings.stages.captions, 1000);
+  for (const name of ['previews', 'links', 'neighbors', 'pulled']) assert.equal(typeof timings.stages[name], 'number', name);
+  for (const name of ['videos', 'rewatch', 'lookup', 'variety']) assert.equal(timings.stages[name], null, name);
+  assert.deepEqual(
+    [timings.channel, timings.mode, timings.triggerKind, timings.prepareMs, timings.talkMs, timings.totalMs, timings.late],
+    ['c1', 'reply', 'mention', 1100, 2000, 3100, []],
+  );
+  assert.ok(logs.some((l) => l.msg === 'turn: model answered' && 'secondsToAnswer' in l));
+});
+
+/** An llm fake that notes how many typing indicators the channel had when the talk request came. */
+function typingAtTalk(channel) {
+  const base = fakeLlm('<msg>ok</msg>');
+  const seen = [];
+  return {
+    ...base,
+    seen,
+    complete: async (messages, options) => {
+      seen.push(channel.typingCalls.length);
+      return base.complete(messages, options);
+    },
+  };
+}
+
+test('runTurn: a direct call shows the typing indicator while it prepares and refreshes it', async () => {
+  const caption = deferred();
+  const hot = paceHot({}, { typingWhilePreparing: true });
+  const scene = paceScene({ caption, hot });
+  const llm = typingAtTalk(scene.channel);
+  const turns = createTurnRunner({ hot, store: fakeStore(), llm, calibrator: identityCalibrator(), client: fakeClient(), describer: scene.describer, lookup: scene.lookup, now: () => NOW, schedule: scene.timers.schedule });
+
+  const running = withCapturedLogs(() => turns.runTurn(scene.params));
+  await settleUntil(() => scene.describer.calls > 0 && scene.channel.typingCalls.length > 0);
+  assert.equal(scene.channel.typingCalls.length, 1, 'sent once as the turn starts preparing');
+  const refresh = scene.timers.live().find((timer) => timer.ms !== TEST_PACE.prepareMs);
+  assert.ok(refresh, 'a refresh is scheduled');
+  scene.timers.fire(refresh);
+  await settleUntil(() => scene.channel.typingCalls.length > 1);
+  assert.equal(scene.channel.typingCalls.length, 2, 'refreshed while preparing');
+  caption.resolve();
+  const { result } = await running;
+
+  assert.equal(result.outcome, 'spoke');
+  assert.deepEqual(llm.seen, [2]);
+  assert.deepEqual(scene.timers.live(), [], 'nothing is refreshed once the preparation is over');
+});
+
+test('runTurn: no typing indicator while preparing an unprompted turn, nor in a dry run', async () => {
+  const hot = paceHot({}, { typingWhilePreparing: true });
+  const spontaneous = paceScene({ hot });
+  const llm = typingAtTalk(spontaneous.channel);
+  const turns = createTurnRunner({ hot, store: fakeStore(), llm, calibrator: identityCalibrator(), client: fakeClient(), describer: spontaneous.describer, lookup: spontaneous.lookup, now: () => NOW, schedule: spontaneous.timers.schedule });
+  await withCapturedLogs(() => turns.runTurn({ channel: spontaneous.channel, mode: 'interject' }));
+  assert.deepEqual(llm.seen, [0]);
+  assert.ok(spontaneous.timers.timers.every((timer) => timer.ms === TEST_PACE.prepareMs), 'no refresh is scheduled');
+
+  const dry = paceScene({ hot: paceHot({ dryRun: true }, { typingWhilePreparing: true }) });
+  const { result } = await withCapturedLogs(() => dry.turns.runTurn(dry.params));
+  assert.equal(result.dryRun, true);
+  assert.equal(dry.channel.typingCalls.length, 0);
+});
+
+// The drop bar (pace.dropAfterMs): the answer must be in hand by then, or the turn is dropped unposted.
+
+const BAR_MS = 5000;
+
+/** An llm fake whose talk request runs `talk(messages, options)`; every call's options are kept. */
+function barLlm(talk) {
+  const optionCalls = [];
+  return {
+    optionCalls,
+    complete: async (messages, options) => {
+      optionCalls.push(options);
+      return talk(messages, options, optionCalls.length);
+    },
+  };
+}
+
+test('runTurn: an answer in hand just before pace.dropAfterMs is posted, the talk request bounded by the time left', async () => {
+  let t = NOW;
+  const llm = barLlm(async () => {
+    t = NOW + BAR_MS - 1;
+    return { text: '<msg>ok</msg>', usage: {}, estimated: 10 };
+  });
+  const hot = paceHot({}, { dropAfterMs: BAR_MS });
+  hot.config.llm.timeoutMs = 300_000;
+  const scene = paceScene({ hot, llm, clock: () => t });
+
+  const { result, logs } = await withCapturedLogs(() => scene.turns.runTurn(scene.params));
+
+  assert.equal(result.outcome, 'spoke');
+  assert.equal(scene.channel.sent.length, 1);
+  assert.equal(logs.some((l) => l.msg === 'turn: dropped'), false);
+  const [options] = llm.optionCalls;
+  assert.equal(options.role, 'talk');
+  assert.equal(options.timeoutMs, BAR_MS, 'the smaller of llm.timeoutMs and the time left');
+  assert.equal(options.signal.aborted, false);
+  assert.deepEqual(scene.timers.live(), [], 'the bar is cleared once the answer is in hand');
+});
+
+test('runTurn: a talk request still out at pace.dropAfterMs is aborted; nothing is posted, the turn ends in error and the queue drains', async () => {
+  const answer = deferred();
+  const llm = barLlm(() => answer.promise);
+  const hot = paceHot({}, { dropAfterMs: BAR_MS, typingWhilePreparing: true });
+  const scene = paceScene({ hot, llm, clock: () => NOW });
+  let idle = 0;
+  scene.turns.setOnIdle(() => {
+    idle += 1;
+  });
+
+  const running = withCapturedLogs(() => scene.turns.runTurn(scene.params));
+  await settleUntil(() => llm.optionCalls.length > 0);
+  const bar = scene.timers.live().find((timer) => timer.ms === BAR_MS);
+  assert.ok(bar, 'the bar is set from the turn start');
+  assert.ok(scene.timers.live().some((timer) => timer.ms !== BAR_MS), 'the typing indicator is refreshed through the talk request');
+  scene.timers.fire(bar);
+  const { result, logs } = await running;
+  await settleUntil(() => idle > 0);
+
+  assert.equal(result.outcome, 'error');
+  assert.equal(llm.optionCalls[0].signal.aborted, true, 'the talk request is aborted');
+  assert.equal(scene.channel.sent.length, 0);
+  const dropped = logs.find((l) => l.msg === 'turn: dropped');
+  assert.deepEqual(
+    [dropped.channel, dropped.mode, dropped.triggerKind, dropped.reason, typeof dropped.seconds],
+    ['c1', 'reply', 'mention', 'too-slow', 'number'],
+  );
+  assert.deepEqual(scene.timers.live(), [], 'the typing indicator is no longer refreshed');
+  assert.equal(idle, 1, 'the pending queue drains as after any finished turn');
+  assert.equal(scene.turns.isAnyBusy(), false);
+
+  answer.resolve({ text: '<msg>late</msg>', usage: {}, estimated: 10 });
+  await settleUntil();
+  assert.equal(scene.channel.sent.length, 0, 'a late answer is never posted');
+});
+
+test('runTurn: no text-only resend is made once no time is left before pace.dropAfterMs', async () => {
+  let t = NOW;
+  const raw = rawMessage({
+    id: 'm1',
+    attachments: new Map([
+      ['v1', { id: 'v1', contentType: 'video/mp4', name: 'clip.mp4', url: 'https://cdn.discordapp.com/attachments/1/2/clip.mp4', duration: 34 }],
+    ]),
+  });
+  const channel = fakeTurnChannel({ historyMessages: [raw] });
+  const llm = barLlm(async () => {
+    t = NOW + BAR_MS;
+    const err = new Error('bad request');
+    err.statusCode = 400;
+    throw err;
+  });
+  const hot = fakeHot({});
+  hot.config.pace = { ...TEST_PACE, dropAfterMs: BAR_MS };
+  const timers = fakeSchedule();
+  const turns = createTurnRunner({ hot, store: fakeStore(), llm, calibrator: identityCalibrator(), client: fakeClient(), imageFetcher: fakeImageFetcher(), now: () => t, schedule: timers.schedule });
+
+  const { result, logs } = await withCapturedLogs(() => turns.runTurn({ channel, mode: 'reply', trigger: videoTrigger(raw), triggerKind: 'mention' }));
+
+  assert.equal(llm.optionCalls.length, 1, 'the resend is never asked');
+  assert.equal(result.outcome, 'error');
+  assert.equal(channel.sent.length, 0);
+  assert.ok(logs.some((l) => l.msg === 'turn: dropped' && l.reason === 'too-slow'));
+});
+
+test('runTurn: pace.dropAfterMs 0 sets no bar -- a slow answer is still posted, the request as before', async () => {
+  let t = NOW;
+  const llm = barLlm(async () => {
+    t = NOW + 10 * 60_000;
+    return { text: '<msg>ok</msg>', usage: {}, estimated: 10 };
+  });
+  const scene = paceScene({ hot: paceHot({}, { dropAfterMs: 0 }), llm, clock: () => t });
+
+  const { result, logs } = await withCapturedLogs(() => scene.turns.runTurn(scene.params));
+
+  assert.equal(result.outcome, 'spoke');
+  assert.equal(scene.channel.sent.length, 1);
+  assert.deepEqual(llm.optionCalls, [{ role: 'talk' }]);
+  assert.equal(logs.some((l) => l.msg === 'turn: dropped'), false);
+  assert.ok(scene.timers.timers.every((timer) => timer.ms === TEST_PACE.prepareMs), 'only the preparation deadline');
+});
+
+test('runTurn: a private chat message shows the typing indicator while its turn prepares', async () => {
+  const hot = privateHot({ typingSimulation: true });
+  hot.config.pace = { ...TEST_PACE, typingWhilePreparing: true };
+  const raw = rawMessage({ id: 'm1', authorId: 'u1', authorName: 'Alice', content: 'hey' });
+  const channel = fakeTurnChannel({ id: 'dm1', dm: true, historyMessages: [raw] });
+  const llm = typingAtTalk(channel);
+  const timers = fakeSchedule();
+  const turns = createTurnRunner({ hot, store: privateStore(), llm, calibrator: identityCalibrator(), client: guildClient(), images: fakeImages(), now: () => NOW, schedule: timers.schedule });
+
+  const { result } = await withCapturedLogs(() =>
+    turns.runTurn({ channel, guildId: 'g1', mode: 'reply', trigger: normalizedTrigger(raw), triggerKind: 'private' }),
+  );
+
+  assert.equal(result.outcome, 'spoke');
+  assert.deepEqual(llm.seen, [1], 'typing before the talk request');
 });
