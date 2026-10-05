@@ -15,7 +15,10 @@
 // history read per look, under the one daily cap (`memory.portraitRefreshPerDay`, counted in
 // `PORTRAIT_SLOTS`) that the analyzer's cue and the owner's `/nep memory refresh` share. A look
 // on a day the LLM's own request cap (`llm.maxRequestsPerDay`) is already used up ends before
-// any history read.
+// any history read. In two-stage mode (`portraitMode`) a member whose character text still waits
+// for the voice model (a public `character` item in the guild's voice queue, `waitingPortraits`)
+// is not picked: another stage A answer would only replace that item, so during a voice outage
+// the member costs no request and no history read until the item is applied or dropped.
 
 import { log } from '../log.js';
 import { DAY_MS, HOUR_MS, MINUTE_MS, dailyCounter, utcDay } from '../time.js';
@@ -25,8 +28,14 @@ import { errorNameOf } from './update.js';
  * every refresh that sends a request takes one slot, whoever started it (code, cue, owner). */
 export const PORTRAIT_SLOTS = { dayKey: 'portraitDay', countKey: 'portraitCount' };
 
+// The prompts a two-stage portrait refresh needs: its stage A (prompts/portrait.md), and the voice
+// model's (prompts/memory-voice.md), without which the character item it queues is never worded.
+const PORTRAIT_TWO_STAGE_PROMPTS = ['portrait', 'memory-voice'];
+
 // The LLM client's own daily request counter in state.json -- the fields src/llm/openrouter.js
 // counts every request in (its module-private LLM_DAILY). Only read here, never written.
+// TODO: a copy waiting for its one home, which does not exist yet: read today's count with
+// src/llm/openrouter.js#llmCountToday once openrouter.js exports it, and delete this copy.
 const LLM_DAILY = { dayKey: 'llmDay', countKey: 'llmCount' };
 
 /** `llm.maxRequestsPerDay` when it is a finite number, else null (the client then refuses
@@ -101,8 +110,53 @@ export function storedCount(value) {
   return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : 0;
 }
 
-function hasText(value) {
+/**
+ * Whether `value` is a string with something in it: the one rule by which a portrait field and a
+ * prompt count as present (src/memory/warmup.js uses it too).
+ * @param {unknown} value
+ * @returns {boolean}
+ */
+export function hasText(value) {
   return typeof value === 'string' && value.trim() !== '';
+}
+
+/**
+ * Which request a portrait refresh sends, read from the live config and prompts at the moment of
+ * use. `two` (stage A, prompts/portrait.md on `memory.model`, the character queued for the voice
+ * model) only when `features.memoryTwoStage` is exactly true AND both PORTRAIT_TWO_STAGE_PROMPTS
+ * are non-blank. Otherwise `single`, today's prompts/profile.md request that writes the portrait
+ * itself: as always with the switch off; with it on (a prompt `missing`), on the voice model
+ * (`voiceModel: true`), since its answer words the character. Pure.
+ * @param {object} [config]   The live config.
+ * @param {object} [prompts]  The live prompts.
+ * @returns {{ stage: 'single'|'two', voiceModel: boolean, missing: string[] }}
+ */
+export function portraitMode(config, prompts) {
+  if (config?.features?.memoryTwoStage !== true) return { stage: 'single', voiceModel: false, missing: [] };
+  const missing = PORTRAIT_TWO_STAGE_PROMPTS.filter((key) => !hasText(prompts?.[key]));
+  return missing.length === 0 ? { stage: 'two', voiceModel: false, missing } : { stage: 'single', voiceModel: true, missing };
+}
+
+/**
+ * Whether a voice queue item is a member's public `character` item: the brief a two-stage refresh
+ * queued (src/memory/warmup.js#queueCharacter) that the voice model has not worded yet. Pure.
+ * @param {unknown} item  One item of `store.getVoiceQueue(guildId)`.
+ * @returns {boolean}
+ */
+export function isQueuedPortrait(item) {
+  return item?.kind === 'character' && !item.layer && typeof item.userId === 'string' && item.userId !== '';
+}
+
+/**
+ * The members whose character text waits for the voice model: those with a queued public
+ * `character` item (`isQueuedPortrait`). While the refresh would ask stage A again, the scheduler
+ * does not pick them and a non-forced refresh stands down (`voice-pending`). Pure; garbage is
+ * skipped.
+ * @param {unknown} queue  `store.getVoiceQueue(guildId)`.
+ * @returns {Set<string>}  Member ids.
+ */
+export function waitingPortraits(queue) {
+  return new Set((Array.isArray(queue) ? queue : []).filter(isQueuedPortrait).map((item) => item.userId));
 }
 
 /**
@@ -146,18 +200,21 @@ export function portraitDue(profile, nowMs, cfg) {
 
 /**
  * The members due for a portrait refresh, most own messages first, then the most recently seen,
- * then by id; at most `limit`. Pure.
+ * then by id; at most `limit`. A member in `waiting` (`waitingPortraits`: a character text still
+ * waits for the voice model) is never picked. Pure.
  * @param {object[]} profiles  Stored profiles (`store.listUserProfiles`); entries without an id are skipped.
  * @param {number} nowMs
  * @param {object} cfg  From `portraitSettings`.
  * @param {number} limit  A non-finite limit means no limit.
+ * @param {{ waiting?: Set<string> }} [opts]
  * @returns {{ userId: string, own: number, reason: string }[]}
  */
-export function pickDuePortraits(profiles, nowMs, cfg, limit) {
+export function pickDuePortraits(profiles, nowMs, cfg, limit, { waiting } = {}) {
   const max = Number.isFinite(limit) ? Math.max(0, Math.floor(limit)) : Infinity;
   const due = [];
   for (const profile of Array.isArray(profiles) ? profiles : []) {
     if (!profile || typeof profile !== 'object' || profile.id === undefined || profile.id === null || profile.id === '') continue;
+    if (waiting?.has(String(profile.id))) continue;
     const verdict = portraitDue(profile, nowMs, cfg);
     if (!verdict.due) continue;
     due.push({ userId: String(profile.id), own: verdict.own, reason: verdict.reason, seen: stampMs(profile.lastSeen) ?? -Infinity });
@@ -174,7 +231,9 @@ export function pickDuePortraits(profiles, nowMs, cfg, limit) {
  * memory), with no free daily slot, when today's LLM requests reached `llm.maxRequestsPerDay`
  * (`llmCapReached`), or on a UTC day a refresh already came back refused by that cap at the
  * cap's current value (a live raise lets the next look run). Otherwise it refreshes the due
- * members in `pickDuePortraits` order, one at a time, until today's slots are taken (recounted
+ * members in `pickDuePortraits` order (in two-stage mode, `portraitMode`, without the members
+ * whose character text still waits for the voice model: the guild's voice queue is read once
+ * per look), one at a time, until today's slots are taken (recounted
  * after each refresh, so the cue's and the owner's refreshes count too), passing one `crawl`
  * object to every call of the cycle so they share one history read. Right before each call the
  * member's stored profile is read again and `portraitDue` asked once more: one no longer due
@@ -184,9 +243,9 @@ export function pickDuePortraits(profiles, nowMs, cfg, limit) {
  * about the next one), a thrown refresh, or the switch turned off. Logs `portrait: cycle` once
  * per cycle that found anyone due.
  * @param {object} deps
- * @param {object} deps.hot  Live config; read at the moment of use.
+ * @param {object} deps.hot  Live config and prompts; read at the moment of use.
  * @param {object} deps.store  `state.data`, `state.markDirty()`, `listUserProfiles(guildId)`,
- *   `getUser(guildId, userId)`.
+ *   `getUser(guildId, userId)`, `getVoiceQueue(guildId)` (read only in two-stage mode).
  * @param {(guildId: string, userId: string, reason: string, opts: { crawl: object }) =>
  *   Promise<{ ok: boolean, reason?: string, cap?: string }>} deps.refreshPortrait
  *   src/memory/warmup.js#createWarmup's `refreshPortrait`.
@@ -236,7 +295,9 @@ export function createPortraitScheduler({ hot, store, refreshPortrait, isWarming
 
     let candidates;
     try {
-      candidates = pickDuePortraits(store.listUserProfiles(guildId), nowMs, settings, Infinity);
+      // A refresh in two-stage mode would ask stage A again and only replace the waiting item.
+      const waiting = portraitMode(hot.config, hot.prompts).stage === 'two' ? waitingPortraits(store.getVoiceQueue(guildId)) : undefined;
+      candidates = pickDuePortraits(store.listUserProfiles(guildId), nowMs, settings, Infinity, { waiting });
     } catch (err) {
       log.warn('portrait: look failed', { guildId, reason: 'store-error', error: errorNameOf(err) });
       return { ran: false, reason: 'store-error' };
