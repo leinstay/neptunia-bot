@@ -28,10 +28,21 @@
 // folds letters that NFD splits into a base letter and a mark, e.g. U+0451
 // into U+0435 and U+0439 into U+0438: harmless for duplicates, but it widens a
 // whole-word match.
+//
+// `recentView` is the view by time a turn shows as `<recent>` (built by
+// src/behavior/prompt.js): the live lines a caller's audience predicate lets
+// through, then the moments of members (src/memory/episodes.js) that fall inside
+// the same window, read from the profiles by reference and never copied here.
+// It only ranks; the request builder renders, caps and re-orders by time. A
+// stored moment has no time of its own, only its `date` (the day the model
+// wrote, in the server's zone) and `addedAt` (when the analyzer stored it, or
+// the last sampled message for the warmup): both have to fall in the window
+// (see `momentAt`).
 
 import { isPlainObject } from '../config.js';
-import { HOUR_MS } from '../time.js';
+import { DAY_MS, HOUR_MS } from '../time.js';
 import { clampText, oneLine } from './clamp.js';
+import { topEpisodes } from './episodes.js';
 import { isWordChar, occursAsWholeWord, tokenIds } from './mentions.js';
 
 /**
@@ -51,6 +62,19 @@ const DEFAULT_WEIGHT = 2;
 /** The fewest letters and digits a member name (once folded) needs for a purge to match it as a
  * word: symbols and underscores do not count, so a name like `-_-` matches nothing. */
 const MIN_PURGE_NAME = 3;
+
+/**
+ * The most moments of one member the view offers (the lead's ruling: at most two
+ * per member), unless a caller passes `perMember` to `recentView`.
+ */
+export const RECENT_EPISODES_PER_MEMBER = 2;
+
+/** A stored episode date: `YYYY-MM-DD` (src/memory/episodes.js keeps no other form). */
+const EPISODE_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+/** How far ahead of UTC a time zone can be: a date the model wrote in the server's zone can be
+ * "today" there while its UTC day has not begun yet. */
+const MAX_ZONE_AHEAD_MS = 14 * HOUR_MS;
 
 /**
  * The recent layer's settings, read from `config` at the moment of use: null when
@@ -338,4 +362,150 @@ export function purgeRecentFor(stored, userId, names = []) {
     return !folded.some((name) => occursAsWholeWord(text, name));
   });
   return { value: { nextId: base.nextId, lines }, removed: base.lines.length - lines.length };
+}
+
+/**
+ * The key of one remembered moment of a member: `profileId|date|what`, the
+ * fields src/memory/episodes.js treats as its identity. A caller that already
+ * shows some moments elsewhere in a request passes their keys to `recentView`
+ * so it never repeats them.
+ * @param {string|number} profileId
+ * @param {{ date?: string, what?: string }} ep
+ * @returns {string}
+ */
+export function episodeKey(profileId, ep) {
+  return `${profileId}|${ep?.date}|${ep?.what}`;
+}
+
+/**
+ * Where a stored moment sits in the window that starts at `cutoff` and ends at
+ * `clock`: noon UTC of its `date` (which formats to that same calendar date in
+ * any zone within 12 hours of UTC), or null when it is outside. A moment is
+ * inside when
+ *   - its `date` is a `YYYY-MM-DD` whose day (UTC) ends at or after `cutoff`:
+ *     a date counts until the end of its day (a date the model wrote in the
+ *     server's zone may thus count a few hours longer or shorter than that local
+ *     day), and does not begin later than `clock` plus the widest zone offset (a
+ *     date still ahead of every zone's today is a mistake, not a moment); and
+ *   - its `addedAt`, when it is a time that parses, lies between `cutoff` and
+ *     `clock`. Every moment stored by src/memory/episodes.js#mergeEpisodes
+ *     carries one: the analyzer's clock at the batch, a little after the
+ *     moment, so a moment leaves the window by its time, not by its calendar
+ *     day. The date still has to qualify: the warmup stamps old moments with a
+ *     recent `addedAt` (the member's last sampled message).
+ * A moment without a parsable `addedAt` (written before the field existed, or by
+ * hand) is judged by its date alone.
+ */
+function momentAt(ep, cutoff, clock) {
+  if (typeof ep.date !== 'string' || !EPISODE_DATE_RE.test(ep.date)) return null;
+  const dayStart = Date.parse(`${ep.date}T00:00:00.000Z`);
+  if (!Number.isFinite(dayStart)) return null;
+  if (dayStart + DAY_MS - 1 < cutoff || dayStart > clock + MAX_ZONE_AHEAD_MS) return null;
+  const stored = typeof ep.addedAt === 'string' ? Date.parse(ep.addedAt) : NaN;
+  if (Number.isFinite(stored) && (stored < cutoff || stored > clock)) return null;
+  return dayStart + DAY_MS / 2;
+}
+
+/**
+ * An id (a member's, a profile's) as a string: a finite number as its decimal
+ * form, a non-empty string as it is, anything else null. The one copy for the
+ * recent view and the request builder (src/behavior/prompt.js).
+ * @param {unknown} raw
+ * @returns {string|null}
+ */
+export function memberIdOf(raw) {
+  if (typeof raw === 'number' && Number.isFinite(raw)) return String(raw);
+  return typeof raw === 'string' && raw !== '' ? raw : null;
+}
+
+/**
+ * The view of the last `hours` before `now` -- what a turn's `<recent>` block
+ * may show -- in the order a capped block should take it (the lead's ruling):
+ *   1. the live lines (`liveRecent`) whose source channel `isShown` accepts,
+ *      the ones about a focus member first (their `who`, or the tokens of
+ *      their text, holds an id of `focusIds`), each group heavier, then newer,
+ *      then the higher id;
+ *   2. then the moments of the members of `profiles` inside the window, at
+ *      most `perMember` per member (the heaviest, then newest of theirs, as
+ *      src/memory/episodes.js#topEpisodes orders them), the focus members'
+ *      first, each group heavier, then newer.
+ * Every line comes before every moment, so a capped block that takes the items
+ * in this order never trades a line for a moment. Which moments are inside the
+ * window: see `momentAt` (by the time it was stored and by its date). A moment
+ * whose key (`episodeKey`) is in `excludeEpisodeKeys` -- one the request already
+ * shows elsewhere -- is left out (`repeated`); so is a line `isShown` refuses
+ * (`hidden`). Without `isShown` no line is shown: the audience is the caller's
+ * to give. `perMember` is a whole number of at least 0 (0: no moment), anything
+ * else `RECENT_EPISODES_PER_MEMBER`. A profile, line or moment that is
+ * malformed is passed over. Pure: nothing is mutated, and every item points at
+ * the stored line or moment itself.
+ * @param {{ lines?: unknown, profiles?: unknown, now?: number, hours?: number,
+ *   focusIds?: Iterable<string>, excludeEpisodeKeys?: Set<string>,
+ *   isShown?: (channelId: string|null) => boolean, perMember?: number }} [args]
+ * @returns {{ items: Array<{ kind: 'line', at: number, focus: boolean, line: object }
+ *   | { kind: 'episode', at: number, focus: boolean, profileId: string, name: string|null, episode: object }>,
+ *   hidden: number, repeated: number }}  `at`: a line's moment, a moment's noon UTC of its date;
+ *   `name`: the profile's current stored name, null when it has none.
+ */
+export function recentView({ lines, profiles, now, hours, focusIds, excludeEpisodeKeys, isShown, perMember } = {}) {
+  const clock = nowOf(now);
+  const cutoff = windowStart(clock, hours);
+  const focus = new Set([...(focusIds ?? [])].map(memberIdOf).filter(Boolean));
+  const excluded = excludeEpisodeKeys instanceof Set ? excludeEpisodeKeys : new Set();
+  const shows = typeof isShown === 'function' ? isShown : () => false;
+  const most = Number.isInteger(perMember) && perMember >= 0 ? perMember : RECENT_EPISODES_PER_MEMBER;
+
+  let hidden = 0;
+  const shownLines = [];
+  for (const line of liveRecent(lines, { now: clock, hours })) {
+    if (typeof line.text !== 'string' || !line.text) continue;
+    if (!shows(line.channelId ?? null)) {
+      hidden += 1;
+      continue;
+    }
+    const who = Array.isArray(line.who) ? line.who : tokenIds(line.text);
+    shownLines.push({ kind: 'line', at: line.at, focus: who.some((id) => focus.has(String(id))), line });
+  }
+  shownLines.sort(
+    (a, b) =>
+      Number(b.focus) - Number(a.focus) ||
+      weightOf(b.line.weight) - weightOf(a.line.weight) ||
+      b.at - a.at ||
+      (Number(b.line.id) || 0) - (Number(a.line.id) || 0),
+  );
+
+  let repeated = 0;
+  const moments = [];
+  for (const profile of Array.isArray(profiles) ? profiles : []) {
+    if (!isPlainObject(profile)) continue;
+    const profileId = memberIdOf(profile.id);
+    if (profileId === null) continue;
+    const inWindow = [];
+    const atOf = new Map();
+    for (const ep of Array.isArray(profile.episodes) ? profile.episodes : []) {
+      if (!isPlainObject(ep) || typeof ep.what !== 'string' || !ep.what.trim()) continue;
+      const at = momentAt(ep, cutoff, clock);
+      if (at === null) continue;
+      if (excluded.has(episodeKey(profileId, ep))) {
+        repeated += 1;
+        continue;
+      }
+      inWindow.push(ep);
+      atOf.set(ep, at);
+    }
+    const name = typeof profile.names?.[0] === 'string' && profile.names[0] ? profile.names[0] : null;
+    const focused = focus.has(profileId);
+    for (const episode of topEpisodes(inWindow, most)) {
+      moments.push({ kind: 'episode', at: atOf.get(episode), focus: focused, profileId, name, episode });
+    }
+  }
+  moments.sort(
+    (a, b) =>
+      Number(b.focus) - Number(a.focus) ||
+      (Number(b.episode.weight) || 0) - (Number(a.episode.weight) || 0) ||
+      b.at - a.at ||
+      String(b.episode.addedAt ?? '').localeCompare(String(a.episode.addedAt ?? '')),
+  );
+
+  return { items: [...shownLines, ...moments], hidden, repeated };
 }

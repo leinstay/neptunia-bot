@@ -10,7 +10,7 @@ import fs from 'node:fs';
 import { PermissionFlagsBits, SnowflakeUtil } from 'discord.js';
 import { resolveMentions, createTurnRunner, parseRewatchPickDetailed, parseLookupQuery, usableDestination } from '../src/behavior/turn.js';
 import { between, typingMs } from '../src/behavior/random.js';
-import { fill } from '../src/discord/format.js';
+import { fill, formatClock, formatDate } from '../src/discord/format.js';
 import { labels } from './fixtures/labels.js';
 import { withCapturedLogs } from './fixtures/capture-logs.js';
 import { ImageCapError, ImageGenError } from '../src/llm/images.js';
@@ -5283,4 +5283,190 @@ test('runTurn: a drawFailed turn after a routed one keeps the source', async () 
   ]);
   const answered = logs.filter((l) => l.msg === 'turn: model answered');
   assert.deepEqual(answered.map((l) => [l.trigger, l.source]), [['mention', DIARY], ['drawFailed', DIARY]]);
+});
+
+// --- <recent>: the recent lines a turn may show -------------------------------------------------
+
+const OPEN_ROOM = '100000000000000011';
+const STAFF_ROOM = '100000000000000012';
+const STAFF_ROLE = '100000000000000099';
+
+/**
+ * Gives `guild` its roles -- @everyone (the guild's id) and a staff role -- and two more text
+ * channels the bot reads (quiet: never a neighbour): #open, which every role can view, and
+ * #staff, which only the staff role can. A fakeTurnChannel grants every permission, so the
+ * turn's own channel is viewable by every role.
+ */
+function audienceGuild(guild) {
+  const everyone = { id: guild.id };
+  const staff = { id: STAFF_ROLE };
+  guild.roles = { everyone, cache: new Map([[everyone.id, everyone], [staff.id, staff]]) };
+  const room = (id, name, viewers) =>
+    guild.channels.cache.set(id, {
+      id,
+      name,
+      guild,
+      isTextBased: () => true,
+      isThread: () => false,
+      permissionsFor: (target) =>
+        target === guild.members.me ? { has: () => true } : { has: (flag) => flag === PermissionFlagsBits.ViewChannel && viewers.includes(target?.id) },
+    });
+  room(OPEN_ROOM, 'open', [everyone.id, staff.id]);
+  room(STAFF_ROOM, 'staff', [staff.id]);
+  return guild;
+}
+
+/** Three live lines: one of #general (c1), one of #open, one of #staff. */
+function threeRooms() {
+  return [
+    { id: 1, at: NOW - 3 * HOUR, addedAt: null, channelId: 'c1', text: 'εδώ το πρωί', who: [], weight: 2 },
+    { id: 2, at: NOW - 2 * HOUR, addedAt: null, channelId: OPEN_ROOM, text: 'στην αυλή', who: [], weight: 2 },
+    { id: 3, at: NOW - HOUR, addedAt: null, channelId: STAFF_ROOM, text: 'στο γραφείο', who: [], weight: 2 },
+  ];
+}
+
+/** A store like fakeStore that also holds `lines` as the guild's recent lines; `recentReads` counts the reads. */
+function recentStore(lines, base) {
+  const store = fakeStore(base);
+  store.recentReads = 0;
+  store.getRecent = () => {
+    store.recentReads += 1;
+    return { nextId: lines.length + 1, lines: structuredClone(lines) };
+  };
+  return store;
+}
+
+/** The `recent: shown` entries of `logs`, without the logger's own fields. */
+function recentShownLogs(logs) {
+  return logs.filter((entry) => entry.msg === 'recent: shown').map(({ level, time, msg, ...fields }) => fields);
+}
+
+test("turn: <recent> shows this channel's lines and those of channels everyone here can read, never a narrower channel's", async () => {
+  const raw = rawMessage({ id: 'm1' });
+  const channel = fakeTurnChannel({ historyMessages: [raw] });
+  audienceGuild(channel.guild);
+  const store = recentStore(threeRooms(), { channels: [{ id: OPEN_ROOM, name: 'open' }] });
+  const llm = fakeLlm('<skip/>');
+  const turns = createTurnRunner({ hot: fakeHot(), store, llm, calibrator: identityCalibrator(), client: fakeClient(), now: () => NOW });
+
+  const { result, logs } = await withCapturedLogs(() => turns.runTurn({ channel, mode: 'reply', trigger: normalizedTrigger(raw), triggerKind: 'mention' }));
+
+  assert.equal(result.outcome, 'skip');
+  const text = userText(llm);
+  const recent = text.split('<recent>\n')[1].split('\n</recent>')[0];
+  assert.ok(recent.includes('εδώ το πρωί'), "this channel's line");
+  const at = NOW - 2 * HOUR;
+  const openLine = fill(labels.recent.lineIn, { date: formatDate(at, 'UTC', labels.locale), time: formatClock(at, 'UTC', labels.locale), channel: 'open', text: 'στην αυλή' });
+  assert.ok(recent.includes(openLine), 'named by its channel');
+  assert.ok(!text.includes('στο γραφείο'), 'a channel only the staff can read never reaches #general');
+  assert.deepEqual(recentShownLogs(logs), [{ channel: 'c1', lines: 2, episodes: 0, cut: 0, hidden: 1, repeated: 0, unnamed: 0 }], 'counts only');
+  const answered = logs.find((entry) => entry.msg === 'turn: model answered');
+  assert.equal(answered.budget.recent.kept, 2);
+
+  // In #staff, whose readers can all read #general and #open, all three are shown.
+  const staffChannel = { ...fakeTurnChannel({ id: STAFF_ROOM, historyMessages: [{ ...raw, channelId: STAFF_ROOM }] }), guild: channel.guild };
+  staffChannel.permissionsFor = channel.guild.channels.cache.get(STAFF_ROOM).permissionsFor;
+  const staffLlm = fakeLlm('<skip/>');
+  const staffTurns = createTurnRunner({ hot: fakeHot(), store, llm: staffLlm, calibrator: identityCalibrator(), client: fakeClient(), now: () => NOW });
+  registerTextChannel(channel);
+  const { logs: staffLogs } = await withCapturedLogs(() =>
+    staffTurns.runTurn({ channel: staffChannel, mode: 'reply', trigger: { ...normalizedTrigger(raw), channelId: STAFF_ROOM }, triggerKind: 'mention' }),
+  );
+  assert.ok(userText(staffLlm).includes('στο γραφείο') && userText(staffLlm).includes('στην αυλή') && userText(staffLlm).includes('εδώ το πρωί'));
+  assert.deepEqual(recentShownLogs(staffLogs), [{ channel: STAFF_ROOM, lines: 3, episodes: 0, cut: 0, hidden: 0, repeated: 0, unnamed: 0 }]);
+});
+
+test('turn: a private chat shows only the recent lines of channels everyone on the server can read', async () => {
+  const general = fakeTurnChannel({ id: 'c1' });
+  const guild = audienceGuild(general.guild);
+  registerTextChannel(general);
+  const raw = rawMessage({ id: 'm1', authorId: 'u1', authorName: 'Alice', content: 'hey' });
+  const dm = fakeTurnChannel({ id: 'dm1', dm: true, historyMessages: [raw] });
+  const store = recentStore(threeRooms());
+  const llm = fakeLlm('<skip/>');
+  const client = fakeClient({ guilds: { cache: new Map([[guild.id, guild]]) } });
+  const turns = createTurnRunner({ hot: fakeHot(), store, llm, calibrator: identityCalibrator(), client, now: () => NOW });
+
+  const { logs } = await withCapturedLogs(() => turns.runTurn({ channel: dm, guildId: guild.id, mode: 'reply', trigger: normalizedTrigger(raw), triggerKind: 'private' }));
+
+  const text = userText(llm);
+  assert.ok(text.includes('εδώ το πρωί') && text.includes('στην αυλή'), 'channels every member can read');
+  assert.ok(!text.includes('στο γραφείο'));
+  assert.deepEqual(recentShownLogs(logs), [{ channel: 'dm1', lines: 2, episodes: 0, cut: 0, hidden: 1, repeated: 0, unnamed: 0 }]);
+
+  // A role denied on #open hides it from some members: it is no longer every member's.
+  guild.channels.cache.get(OPEN_ROOM).permissionOverwrites = {
+    cache: new Map([[STAFF_ROLE, { id: STAFF_ROLE, type: 0, allow: { has: () => false }, deny: { has: (flag) => flag === PermissionFlagsBits.ViewChannel } }]]),
+  };
+  const deniedLlm = fakeLlm('<skip/>');
+  const denied = createTurnRunner({ hot: fakeHot(), store, llm: deniedLlm, calibrator: identityCalibrator(), client, now: () => NOW });
+  await withCapturedLogs(() => denied.runTurn({ channel: dm, guildId: guild.id, mode: 'reply', trigger: normalizedTrigger(raw), triggerKind: 'private' }));
+  assert.ok(userText(deniedLlm).includes('εδώ το πρωί') && !userText(deniedLlm).includes('στην αυλή'));
+});
+
+test('turn: with no live line <recent> still shows the moments of the last hours, and a line hidden here changes nothing', async () => {
+  const nikos = {
+    id: 'u9',
+    names: ['Nikos'],
+    episodes: [{ date: '2026-09-19', what: 'η στιγμή του Nikos', quote: '', feeling: '', weight: 3, addedAt: new Date(NOW - 20 * HOUR).toISOString() }],
+  };
+  const run = async (lines) => {
+    const raw = rawMessage({ id: 'm1' });
+    const channel = fakeTurnChannel({ historyMessages: [raw] });
+    audienceGuild(channel.guild);
+    const llm = fakeLlm('<skip/>');
+    const store = recentStore(lines, { userProfiles: { u9: nikos } });
+    const turns = createTurnRunner({ hot: fakeHot(), store, llm, calibrator: identityCalibrator(), client: fakeClient(), now: () => NOW });
+    const { logs } = await withCapturedLogs(() => turns.runTurn({ channel, mode: 'reply', trigger: normalizedTrigger(raw), triggerKind: 'mention' }));
+    return { text: userText(llm), logs };
+  };
+  const quiet = await run([]);
+  const moment = fill(labels.recent.episode, { date: formatDate(Date.parse('2026-09-19T12:00:00Z'), 'UTC', labels.locale), name: 'Nikos', what: 'η στιγμή του Nikos' });
+  assert.ok(quiet.text.includes(`<recent>\n${fill(labels.recent.header, { hours: 72 })}\n${moment}\n</recent>`), 'an empty store still shows the moments');
+  assert.deepEqual(recentShownLogs(quiet.logs), [{ channel: 'c1', lines: 0, episodes: 1, cut: 0, hidden: 0, repeated: 0, unnamed: 0 }]);
+
+  const staffOnly = await run([threeRooms()[2]]);
+  assert.equal(staffOnly.text, quiet.text, 'a line only #staff can read neither switches the moments on nor off');
+  assert.deepEqual(recentShownLogs(staffOnly.logs), [{ channel: 'c1', lines: 0, episodes: 1, cut: 0, hidden: 1, repeated: 0, unnamed: 0 }]);
+});
+
+test('turn: features.recent false, memory off or a store without the recent store read nothing and change nothing', async () => {
+  const run = async ({ store, features = {} }) => {
+    const raw = rawMessage({ id: 'm1' });
+    const channel = fakeTurnChannel({ historyMessages: [raw] });
+    audienceGuild(channel.guild);
+    const llm = fakeLlm('<skip/>');
+    const turns = createTurnRunner({ hot: fakeHot(features), store, llm, calibrator: identityCalibrator(), client: fakeClient(), now: () => NOW });
+    const { result, logs } = await withCapturedLogs(() => turns.runTurn({ channel, mode: 'reply', trigger: normalizedTrigger(raw), triggerKind: 'mention' }));
+    return { result, logs, sent: llm.calls[0] };
+  };
+  const before = await run({ store: fakeStore() });
+  assert.equal(before.result.outcome, 'skip', 'a store without getRecent never breaks a turn');
+  assert.ok(!userTextOf(before.sent).includes('<recent>'));
+
+  for (const [label, features] of [['recent off', { recent: false }], ['memory off', { memory: false }]]) {
+    const store = recentStore(threeRooms());
+    const { result, logs, sent } = await run({ store, features });
+    assert.equal(result.outcome, 'skip', label);
+    assert.equal(store.recentReads, 0, label);
+    assert.ok(!userTextOf(sent).includes('<recent>'), label);
+    assert.deepEqual(recentShownLogs(logs), [], label);
+  }
+  const offBefore = await run({ store: fakeStore(), features: { recent: false } });
+  const off = await run({ store: recentStore(threeRooms()), features: { recent: false } });
+  assert.deepEqual(off.sent, offBefore.sent, 'the request is the one built without the store');
+
+  const empty = await run({ store: recentStore([]) });
+  assert.deepEqual(empty.sent, before.sent, 'an empty store and no moment in the window: the request as before');
+  assert.deepEqual(recentShownLogs(empty.logs), []);
+
+  // A store whose read throws: logged, no block, the turn goes on.
+  const broken = fakeStore();
+  broken.getRecent = () => {
+    throw new Error('fixture: unreadable recent store');
+  };
+  const failed = await run({ store: broken });
+  assert.equal(failed.result.outcome, 'skip');
+  assert.deepEqual(failed.sent, before.sent);
+  assert.ok(failed.logs.some((entry) => entry.msg === 'recent: failed' && entry.channel === 'c1'));
 });
