@@ -17,8 +17,27 @@ import { createDescriber, videoStateFromCache } from '../src/memory/describe.js'
 import { createLlm, TokenLimitError, DailyCapError, VIDEO_TOKENS_PER_SECOND_FALLBACK } from '../src/llm/openrouter.js';
 import { withCapturedLogs } from './fixtures/capture-logs.js';
 
+// One directory under the system temp dir per run, removed when the process exits; every call gets its own
+// empty subdirectory of it, so a run leaves nothing behind.
+let tmpRoot = null;
+let tmpDirCount = 0;
+
 function tmpDataDir() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), 'nep-describe-'));
+  if (tmpRoot === null) {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'nep-describe-'));
+    tmpRoot = root;
+    process.on('exit', () => {
+      try {
+        fs.rmSync(root, { recursive: true, force: true });
+      } catch {
+        // Best effort: a directory that cannot be removed must never turn a green run red.
+      }
+    });
+  }
+  tmpDirCount += 1;
+  const dir = path.join(tmpRoot, String(tmpDirCount));
+  fs.mkdirSync(dir);
+  return dir;
 }
 
 function fakeHot(overrides = {}) {
@@ -1796,8 +1815,19 @@ test('describeVideo: config.json ships a direct-URL cap that, at the shipped age
   const shipped = JSON.parse(fs.readFileSync(new URL('../config.json', import.meta.url), 'utf8'));
   const prompt = fs.readFileSync(new URL('../prompts/describe-video.md', import.meta.url), 'utf8');
   const video = shipped.media.video;
-  // The direct-URL rate applies only in agentic processing, whatever mode config.json ships.
-  const hot = videoHot({ video: { ...video, urlProcessing: 'agentic' }, prompts: { 'describe-video': prompt } });
+  // Only the values under test come from config.json. What makes a link go out by its URL at the direct-URL
+  // rate is pinned, whatever config.json ships for it: agentic processing (the only mode that rate applies
+  // in) here, the pinned provider, the direct-URL sites and the daily rail by the test defaults (VIDEO_CFG).
+  const hot = videoHot({
+    video: {
+      urlProcessing: 'agentic',
+      directUrlMaxSeconds: video.directUrlMaxSeconds,
+      directUrlTokensPerSecond: video.directUrlTokensPerSecond,
+      tokensPerSecond: video.tokensPerSecond,
+      maxRequestTokens: video.maxRequestTokens,
+    },
+    prompts: { 'describe-video': prompt },
+  });
   const { llm: client, bodies } = realVideoLlm(hot);
   const options = [];
   const llm = {
