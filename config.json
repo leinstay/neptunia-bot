@@ -28,6 +28,8 @@
     "variety": true,
     "varietyPrecompute": true,
     "promptCache": false,
+    "channelPull": true,
+    "elsewhere": true,
     "typingSimulation": true,
     "adminCommands": true
   },
@@ -73,7 +75,8 @@
     "otherProfiles": 6,
     "askedAboutProfiles": 3,
     "tempo": { "liveMessages10min": 4, "deadSilenceMinutes": 45 },
-    "caps": { "interlocutor": 6000, "aboutChat": 2500, "people": 9000, "neighbors": 3000, "server": 4000, "lore": 1500, "emoji": 800, "gifs": 600 },
+    "caps": { "interlocutor": 6000, "aboutChat": 2500, "people": 9000, "neighbors": 3000, "server": 4000, "lore": 1500, "emoji": 800, "gifs": 600, "pulled": 4000 },
+    "pull": { "windowMinutes": 60, "minMessages": 5, "maxMessages": 60, "maxPictures": 10, "maxNewDescriptions": 8, "describeTimeoutMs": 15000, "scanMessages": 20, "maxChannels": 1, "maxAgeDays": 0, "sameAudience": true },
     "customEmoji": { "max": 30, "storeMax": 200, "halfLifeDays": 30, "backfillMessages": 500 },
     "channelActivity": { "liveMessagesPerDay": 20, "deadAfterDays": 7 },
     "vision": { "maxImages": 4, "tokensPerImage": 400, "imageSize": 512, "recentImages": 3, "recentImageMinutes": 30, "maxBytes": 1500000, "fetchTimeoutMs": 10000 }
@@ -109,6 +112,7 @@
     "maxMs": 12000,
     "betweenMessagesMs": [700, 3500]
   },
+  "elsewhere": { "settleSeconds": 90, "settleMaxSeconds": 300, "rememberPings": 20, "pingMaxAgeDays": 7 },
   "spontaneous": {
     "channels": [],
     "minIntervalMinutes": 25,
