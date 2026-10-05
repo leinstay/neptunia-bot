@@ -53,7 +53,7 @@ When `bot.guildId` is empty and the bot is in exactly one server, it locks to th
 ## Features and changes
 
 **05.10.2026**  
-Neptunia distinguishes between someone talking to them and people talking about them in the third person. When a conversation mentions another channel, Neptunia opens that channel and reads the latest messages with pictures, even when the channel was named in words without a link. If someone calls them in a channel where Neptunia cannot write, Neptunia answers in the main channel with a link to that message. On their own Neptunia can comment in the main channel on something they read in a channel where they cannot write. Neptunia is more likely to respond to a question asked to everyone than to someone specific. Neptunia remembers what mattered over the last few days: what someone gave them or asked them to do, what they promised, what happened between members. When someone asks about a person, Neptunia recalls moments connected to them. Neptunia searches old server messages the same way they search the web: for questions like "what did we do on New Year's" or "who is ..." Neptunia finds the right conversation and answers from it.
+Neptunia distinguishes between someone talking to them and people talking about them in the third person. When a conversation mentions another channel, they open that channel and read the latest messages with pictures, even when the channel was named in words without a link. If someone calls them in a channel where they cannot write, they answer in the main channel with a link to that message. On their own they can comment in the main channel on something they read in a channel where they cannot write. They are more likely to respond to a question asked to everyone than to someone specific. They remember what mattered over the last few days: what someone gave them or asked them to do, what they promised, what happened between members. When someone asks about a person, they recall moments connected to that person. They search old server messages the same way they search the web: for questions like "what did we do on New Year's" or "who is ..." they find the right conversation and answer from it.
 
 **04.10.2026**  
 Neptunia knows what is in the pictures that were recently posted in other channels.
@@ -65,31 +65,31 @@ When Neptunia has not talked to someone in a while, their attitude toward that p
 Neptunia notices which phrases and devices they have been repeating too often and stops using them.
 
 **30.09.2026**  
-Neptunia uses the server's custom emoji in their messages on their own. Neptunia also posts GIFs from the ones people share on the server. Neptunia sees what is happening in a GIF. Neptunia knows today's date.
+Neptunia uses the server's custom emoji in their messages on their own. They also post GIFs from the ones people share on the server. They see what is happening in a GIF. They know today's date.
 
 **29.09.2026**  
-Neptunia replies in direct messages. What someone tells them in a DM does not appear in the server channels. Neptunia sees which reactions people put on messages.
+Neptunia replies in direct messages. What someone tells them in a DM does not appear in the server channels. They see which reactions people put on messages.
 
 **28.09.2026**  
-Neptunia draws pictures on request or on their own. Neptunia can draw themselves: they have a consistent appearance.
+Neptunia draws pictures on request or on their own. They can draw themselves: they have a consistent appearance.
 
 **26.09.2026**  
-Neptunia sees pictures and videos inside forwarded messages. Neptunia also watches long videos from YouTube.
+Neptunia sees pictures and videos inside forwarded messages. They also watch long videos from YouTube.
 
 **24.09.2026**  
 Neptunia remembers what people teach them in the chat: facts, rules, "that's how we do things here."
 
 **23.09.2026**  
-Neptunia watches videos: both attached files and links from YouTube, TikTok, VK, X (Twitter), Reddit, Twitch. If someone asks about a detail in a video Neptunia already watched, Neptunia re-watches the video with that question. Neptunia opens links from messages and reads what is on the page. Neptunia searches the web when a question needs fresh facts or when someone directly asks them to look something up.
+Neptunia watches videos: both attached files and links from YouTube, TikTok, VK, X (Twitter), Reddit, Twitch. When asked about a detail in a video they already watched, they re-watch the video with that question. They open links from messages and read what is on the page. They search the web when a question needs fresh facts or when someone directly asks them to look something up.
 
 **22.09.2026**  
 Neptunia understands when someone is talking to them without a mention or a tag, from the context of the conversation.
 
 **21.09.2026**  
-Neptunia sees pictures posted in the chat. Neptunia also sees stickers, the server's custom emoji, and link previews with the site title and description. If a message has an attachment Neptunia cannot open, such as a file or a voice message, Neptunia knows the attachment is there and does not pretend they looked. Neptunia understands forwarded messages: who sent the original and what it says. Neptunia remembers individual moments with people: who said or did what, and what they thought about it. Neptunia keeps track of local jokes and server stories. Neptunia remembers a person's hobbies and facts about them, but only what has come up more than once. Neptunia also remembers nicknames: what members call each other.
+Neptunia sees pictures posted in the chat. They also see stickers, the server's custom emoji, and link previews with the site title and description. If a message has an attachment they cannot open, such as a file or a voice message, they know the attachment is there and do not pretend they looked. They understand forwarded messages: who sent the original and what it says. They remember individual moments with people: who said or did what, and what they thought about it. They keep track of local jokes and server stories. They remember a person's hobbies and facts about them, but only what has come up more than once. They also remember nicknames: what members call each other.
 
 **20.09.2026**  
-Neptunia answers when called: by a mention, a reply to their message, or just their name in the text. Neptunia can write in a channel on their own when nobody called them. Neptunia can join someone else's conversation when they have something to say on the topic. Neptunia can also ignore a message, like someone who reads it and stays quiet. Replies are not instant: a typing indicator shows, the answer may come as several short messages, and sometimes instead of words they place a reaction. Neptunia remembers every member: who they are and how they talk. Neptunia's attitude toward each person is different and changes depending on how that person talks to them. Neptunia can tell whether a channel has a live conversation or is quiet. Neptunia knows which channels the server has and what each one is about. On the first launch Neptunia reads older messages from the server and builds a first picture of the people and channels, so Neptunia does not start from zero.
+Neptunia answers when called: by a mention, a reply to their message, or just their name in the text. They can write in a channel on their own when nobody called them. They can join someone else's conversation when they have something to say on the topic. They can also ignore a message, like someone who reads it and stays quiet. Replies are not instant: a typing indicator shows, the answer may come as several short messages, and sometimes instead of words they place a reaction. They remember every member: who each one is and how each one talks. Their attitude toward each person is different and changes depending on how that person talks to them. They can tell whether a channel has a live conversation or is quiet. They know which channels the server has and what each one is about. On the first launch they read older messages from the server and build a first picture of the people and channels, so they do not start from zero.
 
 ## Prompt layers
 
