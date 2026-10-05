@@ -2829,6 +2829,62 @@ test('run: a "token-limit" failure halves the next batch size too, instead of lo
   });
 });
 
+/** How many buffered lines (content `line-<n>-end`) one analyzer request carried. */
+function linesSent(llmMessages) {
+  return (JSON.stringify(llmMessages).match(/line-\d+-end/g) ?? []).length;
+}
+
+/** A completion cut by the output cap: always reason 'truncated'. */
+const TRUNCATED = { text: '{"users": {"1": {"interests": "cut off here', usage: { prompt_tokens: 10, completion_tokens: 10 }, estimated: 20, finishReason: 'length' };
+
+test('tick: a truncated batch above the floor is retried smaller at the next tick; at the floor it backs off and is sent again after the back-off', async () => {
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    let nowValue = 1_000_000_000;
+    for (let i = 0; i < 40; i += 1) {
+      store.pushBuffer(guildId, slimMessage({ id: `m${i}`, content: `line-${i}-end`, ts: nowValue + i }), 200);
+    }
+    // batchMessages 15: a normal batch takes 30, the first halving reaches the floor (20).
+    const hot = {
+      config: makeConfig({ memory: { ...makeConfig().memory, batchMessages: 15, minBatchMessages: 1 } }),
+      prompts: { memory: 'memory system prompt', labels },
+    };
+    const sent = [];
+    const llm = {
+      complete: async (llmMessages) => {
+        sent.push(linesSent(llmMessages));
+        return TRUNCATED;
+      },
+    };
+    const updater = createMemoryUpdater({ hot, store, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => nowValue });
+
+    const first = await withCapturedLogs(() => updater.tick());
+    assert.deepEqual(sent, [30], 'the normal size goes first');
+    const halved = first.logs.find((entry) => entry.msg === 'memory: update failed, halving the batch size for next time');
+    assert.ok(halved, 'above the floor: halved');
+    assert.equal(halved.atFloor, undefined);
+
+    const second = await withCapturedLogs(() => updater.tick());
+    assert.deepEqual(sent, [30, 20], 'retried smaller at the very next tick, no back-off above the floor');
+    const backedOff = second.logs.find((entry) => entry.msg === 'memory: update failed, backing off');
+    assert.ok(backedOff, 'at the floor: backed off');
+    assert.equal(backedOff.reason, 'truncated');
+    assert.equal(backedOff.atFloor, true);
+    assert.equal(backedOff.backoffMs, 15 * MINUTE_MS);
+    assert.ok(!second.logs.some((entry) => entry.msg === 'memory: update failed, halving the batch size for next time'), 'one line per failure');
+
+    await updater.tick();
+    nowValue += 15 * MINUTE_MS - 1;
+    await updater.tick();
+    assert.deepEqual(sent, [30, 20], 'the batch at the floor is not sent again before the back-off ends');
+
+    nowValue += 1;
+    await updater.tick();
+    assert.deepEqual(sent, [30, 20, 20], 'sent again, still at the floor, once the back-off is over');
+    assert.equal(store.getBuffer(guildId).length, 40, 'the stored buffer is never dropped');
+  });
+});
+
 test('run: messages that arrive while the analyzer call is in flight are kept, even when the capped buffer trims the batch', async () => {
   await withStoreAsync(async (store) => {
     const guildId = 'g1';
@@ -4987,6 +5043,52 @@ test('tick: a failed private update keeps the buffer, logs a warning and backs o
     nowValue += 16 * 60_000;
     await updater.tick();
     assert.equal(calls, 2, 'retried after the back-off');
+  });
+});
+
+test('tick: a truncated private batch above the floor is retried smaller at the next tick; at the floor it backs off and is sent again after', async () => {
+  await withStoreAsync(async (store) => {
+    let nowValue = 1_000_000_000;
+    const sent = [];
+    const llm = {
+      complete: async (llmMessages) => {
+        sent.push(linesSent(llmMessages));
+        return TRUNCATED;
+      },
+    };
+    // batchMessages 15: a normal batch takes 30, the first halving reaches the floor (20).
+    const updater = createMemoryUpdater({
+      hot: privateHot({ batchMessages: 15, minBatchMessages: 1 }),
+      store,
+      llm,
+      calibrator: createCalibrator(),
+      getSelfName: () => 'Nept',
+      now: () => nowValue,
+    });
+    for (let i = 0; i < 40; i += 1) updater.observe('g1', dmMessage({ id: `m${i}`, content: `line-${i}-end`, ts: nowValue + i }), { private: 'u1' });
+
+    const first = await withCapturedLogs(() => updater.tick());
+    assert.deepEqual(sent, [30]);
+    assert.ok(first.logs.some((entry) => entry.msg === 'memory: private update failed, halving the batch size for next time'));
+
+    const second = await withCapturedLogs(() => updater.tick());
+    assert.deepEqual(sent, [30, 20], 'retried smaller at the very next tick');
+    const backedOff = second.logs.find((entry) => entry.msg === 'memory: private update failed, backing off');
+    assert.ok(backedOff, 'at the floor: backed off');
+    assert.equal(backedOff.reason, 'truncated');
+    assert.equal(backedOff.atFloor, true);
+    assert.equal(backedOff.backoffMs, 15 * MINUTE_MS);
+    assert.ok(!JSON.stringify(second.logs).includes('u1'), 'never the partner id');
+
+    await updater.tick();
+    nowValue += 15 * MINUTE_MS - 1;
+    await updater.tick();
+    assert.deepEqual(sent, [30, 20], 'not sent again before the back-off ends');
+
+    nowValue += 1;
+    await updater.tick();
+    assert.deepEqual(sent, [30, 20, 20], 'sent again once the back-off is over');
+    assert.equal(store.getPrivateBuffer('g1', 'u1').length, 40, 'the stored buffer is never dropped');
   });
 });
 

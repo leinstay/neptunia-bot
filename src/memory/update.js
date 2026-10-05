@@ -2426,8 +2426,9 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
   let idleWaiters = []; // resolvers for waitIdle() (/nep pause), notified once running.size hits 0
   const backoffUntil = new Map();
   // Per-guild in-memory factor on the live batch size (1 = normal). Halved on
-  // a 'truncated'/'bad-json' failure so the next attempt for that guild asks
-  // for less, floored at MIN_LIVE_BATCH messages; deleted (back to 1) on the
+  // a 'truncated'/'bad-json'/'token-limit' failure so the next attempt for that guild asks
+  // for less, floored at MIN_LIVE_BATCH messages (a batch at the floor is
+  // backed off too, see recordFailure); deleted (back to 1) on the
   // next success. Never persisted: a restart always starts at normal size.
   const sizeFactors = new Map();
   // Whether the two-stage switch is on while its prompts are not there (the batches run single):
@@ -2938,14 +2939,30 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
   }
 
   /**
-   * A failed batch for `key`: halve the next batch or back off, and log it.
+   * A failed batch for `key`: halve the next batch or back off, and log it. A size failure
+   * ('truncated', 'bad-json', 'token-limit') of a batch already at the floor (`sent` at most
+   * MIN_LIVE_BATCH messages) is backed off as well: halving cannot shrink it any more, so the
+   * next tick would send, and pay for, the same batch again. The buffer is kept either way.
    * @param {string} key
    * @param {object} outcome  From `analyze()` / `analyzePrivate()`.
    * @param {string} what     The log message prefix.
    * @param {object} fields   Extra log fields (counts and the guild id only).
+   * @param {number} sent     How many buffered messages the failed batch took.
    */
-  function recordFailure(key, outcome, what, fields) {
-    if (outcome.reason === 'truncated' || outcome.reason === 'bad-json' || outcome.reason === 'token-limit') {
+  function recordFailure(key, outcome, what, fields, sent) {
+    const sizeFailure = outcome.reason === 'truncated' || outcome.reason === 'bad-json' || outcome.reason === 'token-limit';
+    if (sizeFailure && sent <= MIN_LIVE_BATCH) {
+      // Still halved, so the batch after the back-off stays at the floor instead of the normal size.
+      sizeFactors.set(key, (sizeFactors.get(key) ?? 1) / 2);
+      backoffUntil.set(key, now() + BACKOFF_MS);
+      log.warn(`${what} failed, backing off`, {
+        ...fields,
+        reason: outcome.reason,
+        detail: outcome.detail,
+        atFloor: true,
+        backoffMs: BACKOFF_MS,
+      });
+    } else if (sizeFailure) {
       // Retrying the same-size batch can never succeed: 'truncated'/'bad-json'
       // means the completion is being cut by the output cap, and 'token-limit'
       // means the request itself (the compact profiles of its authors
@@ -3035,7 +3052,7 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
         if (outcome.stage === 'two') await runVoice(guildId);
         return;
       }
-      recordFailure(guildId, outcome, 'memory: update', { guildId, ...stageField(outcome) });
+      recordFailure(guildId, outcome, 'memory: update', { guildId, ...stageField(outcome) }, messages.length);
     } finally {
       settle(guildId);
     }
@@ -3079,7 +3096,7 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
         });
         return;
       }
-      recordFailure(key, outcome, 'memory: private update', { guildId, ...stageField(outcome) });
+      recordFailure(key, outcome, 'memory: private update', { guildId, ...stageField(outcome) }, messages.length);
     } finally {
       settle(key);
     }
