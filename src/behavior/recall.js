@@ -21,18 +21,22 @@ import { DAY_MS, MINUTE_MS, utcDay, zonedDay, zonedEpoch } from '../time.js';
 
 /** Defaults of the `recall` config group (config.json carries the same values). */
 export const RECALL_DEFAULTS = Object.freeze({
-  maxForms: 8,
+  maxForms: 5,
   maxPeople: 2,
   dateSamples: 4,
   clusterGapMinutes: 30,
-  maxClusters: 8,
+  maxClusters: 5,
   windowMessages: 16,
   answerChars: 1200,
   stretchChars: 1500,
   maxPerDay: 100,
-  timeoutMs: 30000,
+  timeoutMs: 10000,
+  minSummaryMs: 2500,
   maxOutputTokens: 500,
 });
+
+/** How many of the newest windows the fallback stretch is chosen among (fallbackWindow). */
+export const FALLBACK_AMONG = 3;
 
 /** Discord's epoch (2015-01-01T00:00:00Z) in ms: a snowflake counts from it. */
 export const DISCORD_EPOCH_MS = 1420070400000;
@@ -81,13 +85,14 @@ function numberAtLeast(value, fallback, min) {
  * The `recall` settings read from the live config, or null when
  * `features.recall` is false (a missing key counts as on). Each number falls
  * back to RECALL_DEFAULTS when missing or unusable; counts are floored.
- * `maxForms`, `maxPeople`, `maxPerDay` and `stretchChars` may be 0 (no
- * content query, no member lookup, no recall today, no stretch);
- * `windowMessages` is at most 100.
+ * `maxForms`, `maxPeople`, `maxPerDay`, `stretchChars` and `minSummaryMs`
+ * may be 0 (no content query, no member lookup, no recall today, no
+ * stretch, the summary asked whatever time is left); `windowMessages` is at
+ * most 100.
  * @param {object} config  The live config.
  * @returns {{ maxForms: number, maxPeople: number, dateSamples: number, clusterGapMinutes: number,
  *   maxClusters: number, windowMessages: number, answerChars: number, stretchChars: number, maxPerDay: number,
- *   timeoutMs: number, maxOutputTokens: number }|null}
+ *   timeoutMs: number, minSummaryMs: number, maxOutputTokens: number }|null}
  */
 export function recallSettings(config) {
   if (config?.features?.recall === false) return null;
@@ -104,6 +109,7 @@ export function recallSettings(config) {
     stretchChars: intAtLeast(r.stretchChars, d.stretchChars, 0),
     maxPerDay: intAtLeast(r.maxPerDay, d.maxPerDay, 0),
     timeoutMs: intAtLeast(r.timeoutMs, d.timeoutMs, 1),
+    minSummaryMs: intAtLeast(r.minSummaryMs, d.minSummaryMs, 0),
     maxOutputTokens: intAtLeast(r.maxOutputTokens, d.maxOutputTokens, 1),
   };
 }
@@ -214,7 +220,7 @@ function parseRange(value, timezone, now) {
  * - `server` / `who`: comma-separated forms, each trimmed, wrapping quotes
  *   and trailing punctuation stripped, whitespace collapsed, lower-cased,
  *   kept when 2..40 characters and at most 3 words, de-duplicated in order,
- *   at most `maxForms` per label (a missing or unusable value: 8).
+ *   at most `maxForms` per label (a missing or unusable value: RECALL_DEFAULTS.maxForms).
  * - `when`: `YYYY-MM-DD` or `YYYY-MM-DD HH:MM` on each side of `..`, in
  *   `timezone`; one date alone means that whole local day; a side may be
  *   left open; reversed bounds are swapped; an end after `now` is clamped
@@ -411,6 +417,31 @@ export function mergeWindows(windows) {
   }
   for (const window of out) window.messages.sort((x, y) => x.ts - y.ts);
   return out;
+}
+
+/**
+ * The window the verbatim fallback shows when the summary gives no answer
+ * (failed, timed out or skipped): among the first `among` windows -- the
+ * newest, as the runner keeps them in clusterHits' order -- the one with the
+ * most matched lines (its messages whose id is in its `hitIds`), the newer
+ * one on a tie. Null when there is no window.
+ * @param {{ messages?: object[], hitIds?: Iterable<string> }[]} windows  Newest first.
+ * @param {number} [among]  FALLBACK_AMONG when missing or below 1.
+ * @returns {object|null}
+ */
+export function fallbackWindow(windows, among = FALLBACK_AMONG) {
+  const list = (Array.isArray(windows) ? windows : []).filter(Boolean).slice(0, intAtLeast(among, FALLBACK_AMONG, 1));
+  let best = null;
+  let bestCount = -1;
+  for (const window of list) {
+    const hits = new Set(window.hitIds ?? []);
+    const count = (window.messages ?? []).filter((m) => m?.id && hits.has(m.id)).length;
+    if (count > bestCount) {
+      best = window;
+      bestCount = count;
+    }
+  }
+  return best;
 }
 
 /**

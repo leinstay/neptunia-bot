@@ -370,6 +370,39 @@ test('readLinks: the same link twice is read once', async () => {
   assert.equal(reads.size, 1);
 });
 
+// --- cachedReads ------------------------------------------------------------
+
+test('cachedReads: only what the cache holds -- no fetch, no model request, no web slot, no miss recorded', () => {
+  const { lookup, pageFetcher, llm, store, state } = setup();
+  const cache = store.getMediaCache('g1');
+  cache['read:c'] = { text: 'già letto', ts: NOW - HOUR };
+  cache['read:m'] = { miss: true, ts: NOW - HOUR, reason: 'http' };
+  cache['read:v'] = { text: 'a video excerpt', ts: NOW - HOUR };
+  const links = [
+    { id: 'c', url: 'https://example.org/c', site: 'example.org', title: '' },
+    { id: 'n', url: 'https://example.org/n', site: 'example.org', title: '' },
+    { id: 'm', url: 'https://example.org/m', site: 'example.org', title: '' },
+    { id: 'v', url: 'https://youtu.be/abc', site: 'youtu.be', title: '' },
+    { id: 'c', url: 'https://example.org/c', site: 'example.org', title: '' },
+  ];
+  const reads = lookup.cachedReads('g1', links);
+  assert.ok(reads instanceof Map, 'synchronous: a Map, not a promise');
+  assert.deepEqual([...reads], [['c', 'già letto']], 'a video-site link is not readable, as in readLinks');
+  assert.equal(pageFetcher.calls.length, 0);
+  assert.equal(llm.calls.length, 0);
+  assert.equal(state.data.webCount ?? 0, 0);
+  assert.equal(cache['read:n'], undefined, 'an uncached link records no miss');
+  assert.deepEqual(Object.keys(cache).sort(), ['read:c', 'read:m', 'read:v']);
+});
+
+test('cachedReads: the feature off or no read-link prompt gives an empty map', () => {
+  for (const hotOptions of [{ features: { webLookup: false } }, { web: { links: { enabled: false } } }, { prompts: { 'read-link': '' } }]) {
+    const { lookup, store } = setup({ hotOptions });
+    store.getMediaCache('g1')['read:m1#e0'] = { text: 'già letto', ts: NOW };
+    assert.equal(lookup.cachedReads('g1', [LINK]).size, 0, JSON.stringify(hotOptions));
+  }
+});
+
 // --- search -----------------------------------------------------------------
 
 test('search: Brave results are condensed on the text classifier model; sources carry the site', async () => {

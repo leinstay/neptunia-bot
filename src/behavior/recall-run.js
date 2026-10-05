@@ -5,15 +5,22 @@
 // (prompts/recall-summary.md) say what that history answers, optionally
 // singling out one stretch the persona gets verbatim. Steps: the people the
 // name forms point at (stored profiles, Discord's member search for a Latin
-// form), the queries one after another (discord.js serializes a guild's
-// searches anyway), the hits filtered (other bots, channels the pull rail
-// refuses for this destination, the turn's own chat), clustered, a window
-// fetched around each cluster, the windows captioned from the media cache
-// only, then the summary. Rails: `features.recall`, server turns only, the
-// daily request cap (`llm.capLeft`), `recall.maxPerDay` runs a day
+// form), the queries one after another (discord.js's REST client runs the
+// requests of one guild's search route strictly one at a time -- a
+// SequentialHandler per route bucket and guild in @discordjs/rest -- so
+// sending them together would only queue them there), the hits filtered
+// (other bots, channels the pull rail refuses for this destination, the
+// turn's own chat), clustered, the windows around the clusters fetched
+// together (channel routes, queued per channel), captioned from the media
+// cache only, then the summary. Rails: `features.recall`, server turns only,
+// the daily request cap (`llm.capLeft`), `recall.maxPerDay` runs a day
 // (state.json `recallDay`/`recallCount`), and `recall.timeoutMs` for the
-// whole run, after which it is abandoned and the turn goes on without it;
-// the searches themselves stop being sent once half of that budget is gone.
+// whole run, after which it is abandoned. Inside that budget: no search is
+// sent once half of it is gone, a search still out at 60 % is cut (what the
+// earlier ones found is kept), and the summary is asked only when at least
+// `recall.minSummaryMs` is left. A summary that fails, times out or is
+// skipped never costs the result: the verbatim stretch of the first-ranked
+// window (recall.js fallbackWindow) is returned without a text.
 // Logs carry counts, ids and codes only: never a form, a name or a message.
 
 import { log } from '../log.js';
@@ -28,6 +35,7 @@ import {
   buildRecallRequest,
   clusterHits,
   cutStretch,
+  fallbackWindow,
   mergeWindows,
   parseRecallAnswer,
   recallSettings,
@@ -38,8 +46,10 @@ import {
 
 /** The state.json fields of the daily recall counter. */
 const RECALL_DAILY = Object.freeze({ dayKey: 'recallDay', countKey: 'recallCount' });
-/** The share of `recall.timeoutMs` after which no further search is sent (the windows and the summary need the rest). */
+/** The share of `recall.timeoutMs` after which no further search is sent. */
 const SEARCH_SHARE = 0.5;
+/** The share of `recall.timeoutMs` at which a search still out is cut: the windows and the summary need the rest. */
+const PREPARE_SHARE = 0.6;
 const TIMEOUT = Symbol('timeout');
 const DEFAULT_TIMERS = Object.freeze({
   set: (fn, ms) => setTimeout(fn, ms),
@@ -70,7 +80,12 @@ function hitFrom(raw) {
 
 /** A fresh stats record of one run. */
 function emptyStats() {
-  return { planned: 0, queries: 0, failed: 0, hits: 0, kept: 0, clusters: 0, windows: 0, ms: 0 };
+  return { planned: 0, queries: 0, failed: 0, hits: 0, kept: 0, clusters: 0, windows: 0, summary: null, ms: 0 };
+}
+
+/** The kind of a failed summary request: `timeout` for a request cut at its limit, else `failed`. */
+function summaryFailure(err) {
+  return err?.name === 'TimeoutError' ? 'timeout' : 'failed';
 }
 
 /**
@@ -183,8 +198,14 @@ export function createRecall({ hot, store, llm, describer = null, now = Date.now
     }
   }
 
-  /** The search, the windows and the summary; null once `signal` is aborted (the run was abandoned). */
-  async function recallWith({ config, settings, prompt, guild, guildId, channel, selfId, selfName, history, candidate, server, signal, started, stats }) {
+  /**
+   * The search, the windows and the summary; null once `signal` is aborted
+   * (the run was abandoned). The Discord searches carry `searchSignal`
+   * (aborted with `signal`, or at the PREPARE_SHARE mark: a search cut there
+   * counts as failed and ends the searching). Once the windows are read,
+   * `progress.fallback(kind)` gives the answer without a summary.
+   */
+  async function recallWith({ config, settings, prompt, guild, guildId, channel, selfId, selfName, history, candidate, server, signal, searchSignal, progress, started, stats }) {
     const channelId = channel.id;
     const searchUntil = started + settings.timeoutMs * SEARCH_SHARE;
     let counted = false;
@@ -197,7 +218,7 @@ export function createRecall({ hot, store, llm, describer = null, now = Date.now
     const result = (extra = {}) => ({ text: null, stretch: null, people: [], stats: { ...stats, ms: now() - started }, ...extra });
 
     // 1. People.
-    const people = await findPeople({ guild, guildId, who: server.who ?? [], maxPeople: settings.maxPeople, selfId, signal, searchUntil, beforeRequest });
+    const people = await findPeople({ guild, guildId, who: server.who ?? [], maxPeople: settings.maxPeople, selfId, signal: searchSignal, searchUntil, beforeRequest });
     if (signal.aborted) return null;
 
     // 2. The queries: never past the oldest line of the turn's own chat.
@@ -225,10 +246,10 @@ export function createRecall({ hot, store, llm, describer = null, now = Date.now
     stats.planned = plan.length;
     while (queue.length > 0) {
       if (signal.aborted) return null;
-      if (stats.queries > 0 && now() >= searchUntil) break;
+      if (searchSignal.aborted || (stats.queries > 0 && now() >= searchUntil)) break;
       const query = queue.shift();
       beforeRequest();
-      const page = await searchMessages(guild, query, { signal });
+      const page = await searchMessages(guild, query, { signal: searchSignal });
       stats.queries += 1;
       if (signal.aborted) return null;
       if (!page) {
@@ -317,6 +338,14 @@ export function createRecall({ hot, store, llm, describer = null, now = Date.now
       seeReactions: config.features?.seeReactions !== false,
       reactionsPerMessage: config.context?.reactionsPerMessage,
     };
+    /** One window as a stretch (no indices, cut to `recall.stretchChars`), or null. */
+    const stretchOf = (window) => {
+      if (!window || settings.stretchChars <= 0) return null;
+      const [shown] = renderRecallWindows([window], { ...render, indexed: false });
+      const lines = cutStretch(shown?.lines ?? [], settings.stretchChars);
+      if (lines.length === 0) return null;
+      return { channelId: window.channelId, channelName: window.channelName, startTs: lines[0].ts, lines: lines.map((line) => line.text).join('\n') };
+    };
     const messages =
       windows.length > 0
         ? buildRecallRequest({ prompt, selfName, question: candidate ?? {}, people, windows, answerChars: settings.answerChars, now: now(), ...render })
@@ -325,7 +354,17 @@ export function createRecall({ hot, store, llm, describer = null, now = Date.now
       log.info('recall: skipped', { channel: channelId, reason: 'no-hits' });
       return result({ people: peopleOut() });
     }
-    const asked = now();
+    // Without a summary the search still answers: the first-ranked window verbatim, no text.
+    let asked = null;
+    const fallback = (kind) => {
+      stats.summary = kind;
+      const stretch = stretchOf(fallbackWindow(windows));
+      log.info('recall: summary', { channel: channelId, ms: asked === null ? 0 : now() - asked, answer: 'fallback', stretch: stretch !== null, summary: kind });
+      return result({ stretch, people: peopleOut() });
+    };
+    progress.fallback = fallback;
+    if (started + settings.timeoutMs - now() < settings.minSummaryMs) return fallback('skipped');
+    asked = now();
     let completion;
     try {
       completion = await llm.complete(messages, {
@@ -342,19 +381,12 @@ export function createRecall({ hot, store, llm, describer = null, now = Date.now
     } catch (err) {
       if (signal.aborted) return null;
       log.warn('recall: failed', { channel: channelId, reason: railReason(err), status: err?.statusCode ?? null, name: err?.name ?? null });
-      return result({ people: peopleOut() });
+      return fallback(summaryFailure(err));
     }
     if (signal.aborted) return null;
+    stats.summary = 'answered';
     const answer = parseRecallAnswer(completion?.text, { answerChars: settings.answerChars, count: windows.length });
-    let stretch = null;
-    if (answer.stretch !== null && settings.stretchChars > 0) {
-      const window = windows[answer.stretch - 1];
-      const [shown] = renderRecallWindows([window], { ...render, indexed: false });
-      const lines = cutStretch(shown?.lines ?? [], settings.stretchChars);
-      if (lines.length > 0) {
-        stretch = { channelId: window.channelId, channelName: window.channelName, startTs: lines[0].ts, lines: lines.map((line) => line.text).join('\n') };
-      }
-    }
+    const stretch = answer.stretch !== null ? stretchOf(windows[answer.stretch - 1]) : null;
     log.info('recall: summary', { channel: channelId, ms: now() - asked, answer: answer.text ? 'text' : 'nothing', stretch: stretch !== null });
     return result({ text: answer.text, stretch, people: peopleOut() });
   }
@@ -369,12 +401,18 @@ export function createRecall({ hot, store, llm, describer = null, now = Date.now
    * `visible` (the range lies inside the turn's own chat) or `no-hits`
    * (nothing left to read). The first Discord request of a run bumps
    * `recallDay`/`recallCount` once. Never rejects: a failure logs `recall:
-   * failed` (`reason`: the rail code of a refused summary request, `timeout`
+   * failed` (`reason`: the rail code of a failed summary request, `timeout`
    * when `recall.timeoutMs` ran out -- the run is abandoned, its requests
-   * aborted -- or `error`). Resolves `text` null when nothing was found or
-   * the helper answered `nothing`; `stretch` is the window the helper named,
-   * else null; `people` the members the name forms found, with how many of
-   * their messages were kept and the newest one's time.
+   * aborted -- or `error`). Once the windows are read the result is never
+   * lost: when the summary request fails, times out (its own limit or the
+   * run's) or is skipped (less than `recall.minSummaryMs` left), the run
+   * resolves `text` null with `stretch` the first-ranked window
+   * (fallbackWindow), `stats.summary` `failed` | `timeout` | `skipped`, and
+   * logs `recall: summary` with `answer: 'fallback'`; an answered summary
+   * sets `stats.summary` `answered`. Resolves `text` null when nothing was
+   * found or the helper answered `nothing`; `stretch` is the window the
+   * helper named, else null; `people` the members the name forms found,
+   * with how many of their messages were kept and the newest one's time.
    */
   async function run({ guild, guildId = guild?.id ?? null, channel, selfId, selfName, history = [], candidate = null, server = null } = {}) {
     const started = now();
@@ -387,6 +425,7 @@ export function createRecall({ hot, store, llm, describer = null, now = Date.now
     };
     let controller = null;
     let timer = null;
+    let cut = null;
     try {
       const config = hot.config;
       const settings = recallSettings(config);
@@ -399,17 +438,22 @@ export function createRecall({ hot, store, llm, describer = null, now = Date.now
       if (dailySpent(settings)) return skip('daily');
 
       controller = new AbortController();
+      const searching = new AbortController();
+      controller.signal.addEventListener('abort', () => searching.abort(), { once: true });
       const deadline = new Promise((resolve) => {
         timer = timers.set(() => resolve(TIMEOUT), settings.timeoutMs);
         timer?.unref?.();
       });
-      const work = recallWith({ config, settings, prompt, guild, guildId, channel, selfId, selfName, history, candidate, server, signal: controller.signal, started, stats });
+      cut = timers.set(() => searching.abort(), Math.floor(settings.timeoutMs * PREPARE_SHARE));
+      cut?.unref?.();
+      const progress = { fallback: null };
+      const work = recallWith({ config, settings, prompt, guild, guildId, channel, selfId, selfName, history, candidate, server, signal: controller.signal, searchSignal: searching.signal, progress, started, stats });
       work.catch(() => {});
       const outcome = await Promise.race([work, deadline]);
       if (outcome === TIMEOUT) {
         controller.abort();
         log.warn('recall: failed', { channel: channelId, reason: 'timeout', status: null, name: null });
-        return empty();
+        return progress.fallback ? progress.fallback('timeout') : empty();
       }
       return outcome ?? empty();
     } catch (err) {
@@ -418,6 +462,7 @@ export function createRecall({ hot, store, llm, describer = null, now = Date.now
       return empty();
     } finally {
       if (timer !== null) timers.clear(timer);
+      if (cut !== null) timers.clear(cut);
     }
   }
 

@@ -23,7 +23,7 @@ const GUILD = 'g1';
 const PROMPT = 'You are {{name}}; {{answerChars}}.';
 
 // The recall settings the runner tests rely on, pinned here instead of read from the shipped defaults.
-const RECALL_PIN = { maxForms: 8, maxPeople: 2, dateSamples: 4, clusterGapMinutes: 30, maxClusters: 8, windowMessages: 16, answerChars: 1200, stretchChars: 1500, maxPerDay: 100, timeoutMs: 30000, maxOutputTokens: 500 };
+const RECALL_PIN = { maxForms: 8, maxPeople: 2, dateSamples: 4, clusterGapMinutes: 30, maxClusters: 8, windowMessages: 16, answerChars: 1200, stretchChars: 1500, maxPerDay: 100, timeoutMs: 30000, minSummaryMs: 2500, maxOutputTokens: 500 };
 
 /** The shipped config.json with the recall settings pinned and the given groups merged over a fresh copy (one level deep). */
 function config(overrides = {}) {
@@ -68,7 +68,7 @@ function rawHit(channelId, l) {
  * A scene: a guild with #general (c1, the turn's channel), #garden (c2) and #private (c4, which @everyone cannot
  * view, so the audience rail refuses it here); `lines` per channel id; `answers(route, query)` gives the REST body.
  */
-function scene({ lines = {}, answers = () => ({ total_results: 0, messages: [] }), answer = 'stretch: 1\nAna did it on October 1.', features = {}, recall = {}, state = {}, capLeft = 100, describer = null, profiles = [], timers } = {}) {
+function scene({ lines = {}, answers = () => ({ total_results: 0, messages: [] }), answer = 'stretch: 1\nAna did it on October 1.', features = {}, recall = {}, state = {}, capLeft = 100, describer = null, profiles = [], timers, now = () => NOW } = {}) {
   const calls = [];
   let inFlight = 0;
   let maxInFlight = 0;
@@ -138,6 +138,7 @@ function scene({ lines = {}, answers = () => ({ total_results: 0, messages: [] }
     complete: async (messages, options) => {
       llmCalls.push({ messages, options });
       if (answer instanceof Error) throw answer;
+      if (typeof answer === 'function') return answer(messages, options);
       return { text: answer };
     },
   };
@@ -145,7 +146,7 @@ function scene({ lines = {}, answers = () => ({ total_results: 0, messages: [] }
     config: config({ features, recall: { ...recall }, llm: { helperTimeoutMs: 30000 } }),
     prompts: { 'recall-summary': PROMPT, labels },
   };
-  const recaller = createRecall({ hot, store, llm, describer, now: () => NOW, ...(timers ? { timers } : {}) });
+  const recaller = createRecall({ hot, store, llm, describer, now, ...(timers ? { timers } : {}) });
   const history = [
     { id: 'h1', channelId: 'c1', ts: NOW - 30 * MINUTE, self: false, bot: false, authorName: 'Nikos', content: 'τι έγινε με το κουνέλι;' },
     { id: 'h2', channelId: 'c1', ts: NOW - MINUTE, self: false, bot: false, authorName: 'Nikos', content: 'ποιος σκότωσε το κουνέλι;' },
@@ -320,25 +321,255 @@ test('recall: the switch off, a private chat or nothing asked make no request', 
   assert.equal(dm.calls.length, 0);
 });
 
-test('recall: the time budget abandons the run with no text and aborts its request', async () => {
+/** Timers fired by hand: `fire(ms)` runs the pending one that was set for `ms`. */
+function manualTimers() {
+  const all = [];
+  return {
+    set: (fn, ms) => {
+      const timer = { fn, ms, done: false };
+      all.push(timer);
+      return timer;
+    },
+    clear: (timer) => {
+      timer.done = true;
+    },
+    fire(ms) {
+      const timer = all.find((t) => t.ms === ms && !t.done);
+      assert.ok(timer, `a pending timer of ${ms} ms`);
+      timer.done = true;
+      timer.fn();
+    },
+    pending: () => all.filter((t) => !t.done).map((t) => t.ms),
+  };
+}
+
+/** A promise with its resolve at hand. */
+function deferred() {
+  let resolve;
+  const promise = new Promise((r) => {
+    resolve = r;
+  });
+  return { promise, resolve };
+}
+
+/** A pending request that rejects with an AbortError once `signal` aborts. */
+function hangUntilAbort(signal) {
+  return new Promise((resolve, reject) => {
+    signal.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })));
+  });
+}
+
+const BUDGET = { timeoutMs: 10000, minSummaryMs: 2500 };
+
+test('recall: a search still out at 60 % of the budget is cut; with nothing found there is no text and no summary', async () => {
+  const timers = manualTimers();
+  const sent = deferred();
   const s = scene({
-    recall: { timeoutMs: 20 },
-    // Ref'd timers: the production one is unref'd, and nothing else keeps this test's event loop alive.
-    timers: { set: (fn, ms) => ({ handle: setTimeout(fn, ms) }), clear: (timer) => clearTimeout(timer.handle) },
-    answers: (route, query, signal) =>
-      new Promise((resolve, reject) => {
-        signal.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })));
-      }),
+    recall: BUDGET,
+    timers,
+    answers: (route, query, signal) => {
+      sent.resolve();
+      return hangUntilAbort(signal);
+    },
   });
   const { result, logs } = await withCapturedLogs(async () => {
-    const out = await s.recaller.run({ ...s.args, server: RABBIT_SERVER });
-    await new Promise((resolve) => setImmediate(resolve));
-    return out;
+    const running = s.recaller.run({ ...s.args, server: RABBIT_SERVER });
+    await sent.promise;
+    assert.deepEqual(timers.pending().sort((a, b) => a - b), [BUDGET.timeoutMs * 0.6, BUDGET.timeoutMs]);
+    timers.fire(BUDGET.timeoutMs * 0.6);
+    return running;
   });
-  assert.equal(result.text, null);
-  assert.equal(result.stretch, null);
+  assert.deepEqual([result.text, result.stretch], [null, null]);
   assert.ok(s.calls[0].signal.aborted);
-  assert.equal(searches(s.calls).length, 1, 'no further search after the abandon');
+  assert.equal(searches(s.calls).length, 1, 'no further search after the cut');
+  assert.deepEqual([result.stats.queries, result.stats.failed], [1, 1]);
+  assert.ok(logs.some((l) => l.msg === 'recall: skipped' && l.reason === 'no-hits'));
+  assert.ok(!logs.some((l) => l.msg === 'recall: summary'));
+  assert.equal(s.llmCalls.length, 0);
+  assert.deepEqual(timers.pending(), [], 'both timers cleared');
+});
+
+test('recall: a cut search keeps what the earlier ones found; the summary gets the rest of the budget', async () => {
+  const timers = manualTimers();
+  const second = deferred();
+  let t = NOW;
+  const s = scene({
+    lines: { c1: RABBIT_LINES },
+    recall: BUDGET,
+    timers,
+    now: () => t,
+    answers: (route, query, signal) => {
+      if (query.content === 'κουνέλι') {
+        t = NOW + 3000;
+        return rabbitAnswers(route, query);
+      }
+      second.resolve();
+      return hangUntilAbort(signal);
+    },
+  });
+  const { result } = await withCapturedLogs(async () => {
+    const running = s.recaller.run({ ...s.args, server: { ...RABBIT_SERVER, forms: ['κουνέλι', 'κουνελιού', 'κήπος'] } });
+    await second.promise;
+    t = NOW + BUDGET.timeoutMs * 0.6;
+    timers.fire(BUDGET.timeoutMs * 0.6);
+    return running;
+  });
+  assert.deepEqual(searches(s.calls).map((c) => c.query.content), ['κουνέλι', 'κουνελιού'], 'the third form is never sent');
+  assert.deepEqual(s.fetches.map((f) => f.around), ['r3', 'g1'], 'the first search\'s hits reach the windows');
+  assert.equal(s.llmCalls[0].options.timeoutMs, BUDGET.timeoutMs * 0.4, 'the summary is limited to what is left');
+  assert.equal(result.text, 'Ana did it on October 1.');
+  assert.equal(result.stats.summary, 'answered');
+});
+
+test('recall: no search is sent once half of the budget is gone', async () => {
+  let t = NOW;
+  const s = scene({
+    lines: { c1: RABBIT_LINES },
+    recall: BUDGET,
+    now: () => t,
+    answers: (route, query) => {
+      t = NOW + BUDGET.timeoutMs * 0.5;
+      return rabbitAnswers(route, query);
+    },
+  });
+  const { result } = await withCapturedLogs(() => s.recaller.run({ ...s.args, server: RABBIT_SERVER }));
+  assert.equal(searches(s.calls).length, 1);
+  assert.deepEqual([result.stats.planned, result.stats.queries], [2, 1]);
+  assert.equal(s.llmCalls[0].options.timeoutMs, BUDGET.timeoutMs * 0.5);
+});
+
+test('recall: the windows of the kept clusters are fetched together', async () => {
+  const s = scene({ lines: { c1: RABBIT_LINES, c2: GARDEN_LINES }, answers: rabbitAnswers });
+  let inFlight = 0;
+  let most = 0;
+  for (const id of ['c1', 'c2']) {
+    const messages = s.args.guild.channels.cache.get(id).messages;
+    const fetch = messages.fetch;
+    messages.fetch = async (options) => {
+      inFlight += 1;
+      most = Math.max(most, inFlight);
+      await new Promise((resolve) => setImmediate(resolve));
+      inFlight -= 1;
+      return fetch(options);
+    };
+  }
+  await withCapturedLogs(() => s.recaller.run({ ...s.args, server: RABBIT_SERVER }));
+  assert.equal(s.fetches.length, 2);
+  assert.equal(most, 2, 'both windows were out at once');
+});
+
+/** The rabbit scene plus a newer one-hit cluster in #garden: the newest cluster is not the best-matched one. */
+const GARDEN_AGAIN = line('g9', RABBIT + 2 * HOUR, { name: 'Éloïse', author: 'u3', content: 'κουνέλι ξανά' });
+function rankedAnswers(route, query) {
+  if (route.endsWith('/members/search')) return [];
+  if (query.content !== 'κουνέλι') return { total_results: 0, messages: [] };
+  return { total_results: 3, messages: [[rawHit('c2', GARDEN_AGAIN)], [rawHit('c1', RABBIT_LINES[3])], [rawHit('c1', RABBIT_LINES[2])]] };
+}
+const RANKED_LINES = { c1: RABBIT_LINES, c2: [...GARDEN_LINES, GARDEN_AGAIN] };
+const RANKED_STRETCH = [
+  '[18:38] Βασίλης: πάμε κυνήγι',
+  '[18:40] Ana: bang [image]',
+  `${HIT_MARK}[18:44] Βασίλης: το κουνέλι πέθανε`,
+  `${HIT_MARK}[18:46] Ana: κηδεία για το κουνέλι`,
+].join('\n');
+
+test('recall: a summary that fails or times out returns the first-ranked window verbatim, without a text', async () => {
+  const cases = [
+    [new Error('fixture: provider down'), 'failed'],
+    [Object.assign(new Error('fixture: cut at its limit'), { name: 'TimeoutError' }), 'timeout'],
+  ];
+  for (const [answer, kind] of cases) {
+    const s = scene({ lines: RANKED_LINES, answers: rankedAnswers, answer, recall: BUDGET });
+    const { result, logs } = await withCapturedLogs(() => s.recaller.run({ ...s.args, server: RABBIT_SERVER }));
+    assert.equal(s.llmCalls.length, 1, kind);
+    assert.equal(result.text, null, kind);
+    assert.equal(result.stretch.channelId, 'c1', `${kind}: the best-matched of the newest three, not the newest`);
+    assert.equal(result.stretch.lines, RANKED_STRETCH, kind);
+    assert.equal(result.stretch.startTs, RABBIT_LINES[0].ts, kind);
+    assert.equal(result.stats.summary, kind);
+    const summary = logs.find((l) => l.msg === 'recall: summary');
+    assert.deepEqual([summary.answer, summary.summary, summary.stretch], ['fallback', kind, true], kind);
+    assert.equal(logs.find((l) => l.msg === 'recall: failed').name, answer.name, kind);
+  }
+});
+
+test('recall: the fallback stretch is cut by recall.stretchChars, and none is shown with it at 0', async () => {
+  const cut = scene({ lines: RANKED_LINES, answers: rankedAnswers, answer: new Error('fixture'), recall: { ...BUDGET, stretchChars: 60 } });
+  const first = await withCapturedLogs(() => cut.recaller.run({ ...cut.args, server: RABBIT_SERVER }));
+  assert.deepEqual(first.result.stretch.lines.split('\n'), RANKED_STRETCH.split('\n').slice(2));
+
+  const none = scene({ lines: RANKED_LINES, answers: rankedAnswers, answer: new Error('fixture'), recall: { ...BUDGET, stretchChars: 0 } });
+  const second = await withCapturedLogs(() => none.recaller.run({ ...none.args, server: RABBIT_SERVER }));
+  assert.deepEqual([second.result.text, second.result.stretch, second.result.stats.summary], [null, null, 'failed']);
+  assert.equal(second.logs.find((l) => l.msg === 'recall: summary').stretch, false);
+});
+
+test('recall: with less than recall.minSummaryMs left the summary is skipped and the fallback returned at once', async () => {
+  let t = NOW;
+  const s = scene({
+    lines: RANKED_LINES,
+    recall: BUDGET,
+    now: () => t,
+    answers: (route, query) => {
+      t = NOW + BUDGET.timeoutMs - BUDGET.minSummaryMs + 1;
+      return rankedAnswers(route, query);
+    },
+  });
+  const { result, logs } = await withCapturedLogs(() => s.recaller.run({ ...s.args, server: RABBIT_SERVER }));
+  assert.equal(s.llmCalls.length, 0);
+  assert.equal(result.text, null);
+  assert.equal(result.stretch.lines, RANKED_STRETCH);
+  assert.equal(result.stats.summary, 'skipped');
+  const summary = logs.find((l) => l.msg === 'recall: summary');
+  assert.deepEqual([summary.answer, summary.summary, summary.ms], ['fallback', 'skipped', 0]);
+  assert.ok(!logs.some((l) => l.msg === 'recall: failed'));
+});
+
+test('recall: the run budget running out during the summary aborts it and returns the fallback', async () => {
+  const timers = manualTimers();
+  const asked = deferred();
+  const s = scene({
+    lines: RANKED_LINES,
+    answers: rankedAnswers,
+    recall: BUDGET,
+    timers,
+    answer: (messages, options) => {
+      asked.resolve();
+      return hangUntilAbort(options.signal);
+    },
+  });
+  const { result, logs } = await withCapturedLogs(async () => {
+    const running = s.recaller.run({ ...s.args, server: RABBIT_SERVER });
+    await asked.promise;
+    timers.fire(BUDGET.timeoutMs);
+    return running;
+  });
+  assert.ok(s.llmCalls[0].options.signal.aborted);
+  assert.equal(result.text, null);
+  assert.equal(result.stretch.lines, RANKED_STRETCH);
+  assert.equal(result.stats.summary, 'timeout');
+  assert.ok(logs.some((l) => l.msg === 'recall: failed' && l.reason === 'timeout'));
+  const summary = logs.find((l) => l.msg === 'recall: summary');
+  assert.deepEqual([summary.answer, summary.summary], ['fallback', 'timeout']);
+});
+
+test('recall: the run budget running out before the windows are read abandons it with nothing', async () => {
+  const timers = manualTimers();
+  const reading = deferred();
+  const s = scene({ lines: RANKED_LINES, answers: rankedAnswers, recall: BUDGET, timers });
+  for (const id of ['c1', 'c2']) {
+    s.args.guild.channels.cache.get(id).messages.fetch = () => {
+      reading.resolve();
+      return new Promise(() => {});
+    };
+  }
+  const { result, logs } = await withCapturedLogs(async () => {
+    const running = s.recaller.run({ ...s.args, server: RABBIT_SERVER });
+    await reading.promise;
+    timers.fire(BUDGET.timeoutMs);
+    return running;
+  });
+  assert.deepEqual([result.text, result.stretch, result.stats.summary], [null, null, null]);
   assert.ok(logs.some((l) => l.msg === 'recall: failed' && l.reason === 'timeout'));
   assert.ok(!logs.some((l) => l.msg === 'recall: summary'));
   assert.equal(s.llmCalls.length, 0);

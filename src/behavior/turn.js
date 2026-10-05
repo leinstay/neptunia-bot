@@ -2181,6 +2181,16 @@ export function createTurnRunner({
       // chat) can run, and what its answer asks for of the two, in parallel.
       let linksStage = null;
       const webCfg = config.web ?? {};
+      // Cache only: no fetch, no model request, no daily slot (src/web/lookup.js#cachedReads).
+      const cachedLinkReads = () => {
+        if (!linksStage || typeof lookup?.cachedReads !== 'function') return undefined;
+        try {
+          return lookup.cachedReads(guildId, readableLinkCandidates(rawHistory, config.media?.video?.sites));
+        } catch (err) {
+          log.warn('lookup: links failed', { channel: channel.id, error: err });
+          return undefined;
+        }
+      };
       const webLookupOn = features.webLookup === true && Boolean(lookup);
       if (webLookupOn && webCfg.links?.enabled !== false && typeof lookup.readLinks === 'function') {
         linksStage = track('links', async () => {
@@ -2222,7 +2232,8 @@ export function createTurnRunner({
                     trigger,
                     descriptions: routedPull ? new Map([...(shown ?? []), ...routedPull.descriptions]) : shown,
                     videos: videosShown,
-                    reads: linksStage?.done ? linksStage.value : undefined,
+                    // Link reads of this turn when they are in, else what the link cache already holds.
+                    reads: linksStage?.done ? linksStage.value : cachedLinkReads(),
                     webOn,
                     serverOn,
                     onSearch: () => deadline.extend(pace.prepareSearchMs),
