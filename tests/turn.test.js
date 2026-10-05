@@ -5492,7 +5492,7 @@ const READ_SHOWN = fill(labels.transcript.linkRead, { text: 'une recette' });
 test('paceSettings: 0, a negative value or a non-number turns a limit off; a missing key keeps a positive limit', () => {
   const missing = paceSettings({});
   assert.ok(missing.prepareMs > 0 && missing.prepareSearchMs > 0);
-  assert.equal(missing.typingWhilePreparing, true);
+  assert.equal(missing.typingWhilePreparing, false, 'the early indicator is opt-in');
   for (const off of [0, -5, '6000', null, Number.NaN, Infinity]) {
     const pace = paceSettings({ pace: { prepareMs: off, prepareSearchMs: off } });
     assert.equal(pace.prepareMs, null, String(off));

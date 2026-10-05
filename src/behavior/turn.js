@@ -119,7 +119,7 @@ export function appendPostLedger(ledger, entry, size) {
 }
 
 /** `pace` when a key is missing: config.json's values. */
-const PACE_FALLBACK = Object.freeze({ prepareMs: 6000, prepareSearchMs: 12000, dropAfterMs: 60000, typingWhilePreparing: true });
+const PACE_FALLBACK = Object.freeze({ prepareMs: 6000, prepareSearchMs: 12000, dropAfterMs: 60000, typingWhilePreparing: false });
 
 /**
  * The pace of a turn's preparation, read from `config` (the live config):
@@ -130,9 +130,10 @@ const PACE_FALLBACK = Object.freeze({ prepareMs: 6000, prepareSearchMs: 12000, d
  * counted from the turn's start, past which the turn is dropped unposted;
  * each a positive number of milliseconds, or null -- no deadline, wait for
  * everything; no bar -- for 0, a negative value or a non-number. A missing
- * key takes config.json's value. `typingWhilePreparing` (a missing key counts
- * as on): the typing indicator from the start of a turn answering a direct
- * call until its answer is in hand.
+ * key takes config.json's value. `typingWhilePreparing` (only exactly true
+ * turns it on; off as shipped): the typing indicator from the start of a turn
+ * answering a direct call until its answer is in hand. Off, the indicator
+ * shows only while the finished answer is being typed out, as before.
  * @param {object} config
  * @returns {{ prepareMs: number|null, prepareSearchMs: number|null, dropAfterMs: number|null,
  *   typingWhilePreparing: boolean }}
@@ -147,7 +148,7 @@ export function paceSettings(config) {
     prepareMs: limit(pace.prepareMs, PACE_FALLBACK.prepareMs),
     prepareSearchMs: limit(pace.prepareSearchMs, PACE_FALLBACK.prepareSearchMs),
     dropAfterMs: limit(pace.dropAfterMs, PACE_FALLBACK.dropAfterMs),
-    typingWhilePreparing: pace.typingWhilePreparing !== false,
+    typingWhilePreparing: pace.typingWhilePreparing === true,
   };
 }
 
