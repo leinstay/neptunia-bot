@@ -34,83 +34,126 @@ test('hasGrant: true exactly when revoke with the same arguments would change so
 // isAllowed
 // ---------------------------------------------------------------------------
 
-test('isAllowed: an owner always passes, even with no access at all', () => {
-  const allowed = isAllowed({ commandKey: 'memory.wipe', userId: '1', roleIds: [], owners: ['1'], access: undefined });
-  assert.equal(allowed, true);
-});
+// One row per case: `label` names it in a failure, `expected` is isAllowed's answer, the rest are its arguments.
+const IS_ALLOWED_CASES = [
+  {
+    label: 'an owner always passes, even with no access at all',
+    commandKey: 'memory.wipe',
+    userId: '1',
+    roleIds: [],
+    owners: ['1'],
+    access: undefined,
+    expected: true,
+  },
+  {
+    label: 'owner id compared as a string against a numeric owners list',
+    commandKey: 'status',
+    userId: '1',
+    roleIds: [],
+    owners: [1],
+    access: {},
+    expected: true,
+  },
+  {
+    label: 'a non-owner with no matching grant is refused',
+    commandKey: 'memory.show',
+    userId: '2',
+    roleIds: [],
+    owners: ['1'],
+    access: {},
+    expected: false,
+  },
+  {
+    label: 'everyone: true on the exact command key lets a non-owner through',
+    commandKey: 'memory.show',
+    userId: '2',
+    roleIds: [],
+    owners: ['1'],
+    access: { 'memory.show': { everyone: true, roles: [], users: [] } },
+    expected: true,
+  },
+  {
+    label: 'a matching role id lets a non-owner through',
+    commandKey: 'status',
+    userId: '2',
+    roleIds: ['role-a'],
+    owners: ['1'],
+    access: { status: { everyone: false, roles: ['role-a'], users: [] } },
+    expected: true,
+  },
+  {
+    label: 'role id compared as a string (number vs numeric string)',
+    commandKey: 'status',
+    userId: '2',
+    roleIds: ['12345'],
+    owners: ['1'],
+    access: { status: { everyone: false, roles: [12345], users: [] } },
+    expected: true,
+  },
+  {
+    label: 'a non-matching role does not let a non-owner through',
+    commandKey: 'status',
+    userId: '2',
+    roleIds: ['role-b'],
+    owners: ['1'],
+    access: { status: { everyone: false, roles: ['role-a'], users: [] } },
+    expected: false,
+  },
+  {
+    label: 'a matching user id lets a non-owner through',
+    commandKey: 'status',
+    userId: '2',
+    roleIds: [],
+    owners: ['1'],
+    access: { status: { everyone: false, roles: [], users: ['2'] } },
+    expected: true,
+  },
+  {
+    label: 'user id compared as a string (number vs numeric string)',
+    commandKey: 'status',
+    userId: '999',
+    roleIds: [],
+    owners: ['1'],
+    access: { status: { everyone: false, roles: [], users: [999] } },
+    expected: true,
+  },
+  {
+    label: 'falls back to the group key when the exact command key has no grant',
+    commandKey: 'memory.show',
+    userId: '2',
+    roleIds: [],
+    owners: ['1'],
+    access: { memory: { everyone: true, roles: [], users: [] } },
+    expected: true,
+  },
+  {
+    label: 'falls back to * when neither the exact key nor the group has a grant',
+    commandKey: 'memory.show',
+    userId: '2',
+    roleIds: [],
+    owners: ['1'],
+    access: { '*': { everyone: true, roles: [], users: [] } },
+    expected: true,
+  },
+  {
+    label: 'precedence does not matter -- any one of the three matching is enough',
+    commandKey: 'memory.show',
+    userId: '2',
+    roleIds: [],
+    owners: ['1'],
+    access: {
+      'memory.show': { everyone: false, roles: [], users: [] },
+      memory: { everyone: false, roles: [], users: ['2'] },
+      '*': { everyone: false, roles: [], users: [] },
+    },
+    expected: true,
+  },
+];
 
-test('isAllowed: owner id compared as a string against a numeric owners list', () => {
-  const allowed = isAllowed({ commandKey: 'status', userId: '1', roleIds: [], owners: [1], access: {} });
-  assert.equal(allowed, true);
-});
-
-test('isAllowed: a non-owner with no matching grant is refused', () => {
-  const allowed = isAllowed({ commandKey: 'memory.show', userId: '2', roleIds: [], owners: ['1'], access: {} });
-  assert.equal(allowed, false);
-});
-
-test('isAllowed: everyone: true on the exact command key lets a non-owner through', () => {
-  const access = { 'memory.show': { everyone: true, roles: [], users: [] } };
-  const allowed = isAllowed({ commandKey: 'memory.show', userId: '2', roleIds: [], owners: ['1'], access });
-  assert.equal(allowed, true);
-});
-
-test('isAllowed: a matching role id lets a non-owner through', () => {
-  const access = { status: { everyone: false, roles: ['role-a'], users: [] } };
-  const allowed = isAllowed({ commandKey: 'status', userId: '2', roleIds: ['role-a'], owners: ['1'], access });
-  assert.equal(allowed, true);
-});
-
-test('isAllowed: role id compared as a string (number vs numeric string)', () => {
-  const access = { status: { everyone: false, roles: [12345], users: [] } };
-  const allowed = isAllowed({ commandKey: 'status', userId: '2', roleIds: ['12345'], owners: ['1'], access });
-  assert.equal(allowed, true);
-});
-
-test('isAllowed: a non-matching role does not let a non-owner through', () => {
-  const access = { status: { everyone: false, roles: ['role-a'], users: [] } };
-  const allowed = isAllowed({ commandKey: 'status', userId: '2', roleIds: ['role-b'], owners: ['1'], access });
-  assert.equal(allowed, false);
-});
-
-test('isAllowed: a matching user id lets a non-owner through', () => {
-  const access = { status: { everyone: false, roles: [], users: ['2'] } };
-  const allowed = isAllowed({ commandKey: 'status', userId: '2', roleIds: [], owners: ['1'], access });
-  assert.equal(allowed, true);
-});
-
-test('isAllowed: user id compared as a string (number vs numeric string)', () => {
-  const access = { status: { everyone: false, roles: [], users: [999] } };
-  const allowed = isAllowed({ commandKey: 'status', userId: '999', roleIds: [], owners: ['1'], access });
-  assert.equal(allowed, true);
-});
-
-test('isAllowed: falls back to the group key when the exact command key has no grant', () => {
-  const access = { memory: { everyone: true, roles: [], users: [] } };
-  const allowed = isAllowed({ commandKey: 'memory.show', userId: '2', roleIds: [], owners: ['1'], access });
-  assert.equal(allowed, true);
-});
-
-test('isAllowed: falls back to * when neither the exact key nor the group has a grant', () => {
-  const access = { '*': { everyone: true, roles: [], users: [] } };
-  const allowed = isAllowed({ commandKey: 'memory.show', userId: '2', roleIds: [], owners: ['1'], access });
-  assert.equal(allowed, true);
-});
-
-test('isAllowed: a bare top-level command key (no group) is looked up directly, never split', () => {
-  const access = { status: { everyone: true, roles: [], users: [] } };
-  const allowed = isAllowed({ commandKey: 'status', userId: '2', roleIds: [], owners: ['1'], access });
-  assert.equal(allowed, true);
-});
-
-test('isAllowed: precedence does not matter -- any one of the three matching is enough', () => {
-  const access = {
-    'memory.show': { everyone: false, roles: [], users: [] },
-    memory: { everyone: false, roles: [], users: ['2'] },
-    '*': { everyone: false, roles: [], users: [] },
-  };
-  const allowed = isAllowed({ commandKey: 'memory.show', userId: '2', roleIds: [], owners: ['1'], access });
-  assert.equal(allowed, true);
+test('isAllowed: an owner always passes; a non-owner needs a user, role or everyone grant on the exact key, its group or *', () => {
+  for (const { label, expected, ...args } of IS_ALLOWED_CASES) {
+    assert.equal(isAllowed(args), expected, label);
+  }
 });
 
 test('isAllowed: an invalid access shape (not an object) denies every non-owner', () => {
@@ -147,34 +190,35 @@ test('isOwnerOnly: the private, mentor and access groups and every key in them, 
   assert.equal(isOwnerOnly(undefined), false);
 });
 
-test('isAllowed: private commands refuse every non-owner, whatever bot.access grants', () => {
-  const everyone = { everyone: true, roles: ['staff'], users: ['2'] };
-  const access = { 'private.show': everyone, 'private.forget': everyone, 'private.purge': everyone, private: everyone, '*': everyone };
-  for (const commandKey of ['private.show', 'private.forget', 'private.purge', 'private']) {
-    assert.equal(isAllowed({ commandKey, userId: '2', roleIds: ['staff'], owners: ['1'], access }), false, commandKey);
-    assert.equal(isAllowed({ commandKey, userId: '1', roleIds: [], owners: ['1'], access: {} }), true, `${commandKey}: owner`);
-  }
-  // the same wildcard still opens everything else
-  assert.equal(isAllowed({ commandKey: 'memory.show', userId: '2', roleIds: [], owners: ['1'], access }), true);
-});
+// One row per owner-only group: every key in it, and the group itself, gets an everyone + role + user grant.
+const OWNER_ONLY_CASES = [
+  {
+    label: 'private commands refuse every non-owner, whatever bot.access grants',
+    group: 'private',
+    keys: ['private.show', 'private.forget', 'private.purge'],
+  },
+  {
+    label: 'the mentor group is owner-only even with a * grant',
+    group: 'mentor',
+    keys: ['mentor.add', 'mentor.cases', 'mentor.remove', 'mentor.run', 'mentor.check', 'mentor.stop', 'mentor.show', 'mentor.wrong', 'mentor.status'],
+  },
+  {
+    label: 'the access group is owner-only even with a * grant',
+    group: 'access',
+    keys: ['access.grant', 'access.revoke', 'access.list'],
+  },
+];
 
-test('access: the mentor group is owner-only even with a * grant', () => {
+test('isAllowed: the owner-only groups refuse every non-owner even with a * grant, the owner passes', () => {
   const everyone = { everyone: true, roles: ['staff'], users: ['2'] };
-  const keys = ['mentor.add', 'mentor.cases', 'mentor.remove', 'mentor.run', 'mentor.check', 'mentor.stop', 'mentor.show', 'mentor.wrong', 'mentor.status'];
-  const access = { '*': everyone, mentor: everyone, ...Object.fromEntries(keys.map((key) => [key, everyone])) };
-  for (const commandKey of [...keys, 'mentor']) {
-    assert.equal(isAllowed({ commandKey, userId: '2', roleIds: ['staff'], owners: ['1'], access }), false, commandKey);
-    assert.equal(isAllowed({ commandKey, userId: '1', roleIds: [], owners: ['1'], access: {} }), true, `${commandKey}: owner`);
-  }
-});
-
-test('access: the access group is owner-only even with a * grant', () => {
-  const everyone = { everyone: true, roles: ['staff'], users: ['2'] };
-  const keys = ['access.grant', 'access.revoke', 'access.list'];
-  const access = { '*': everyone, access: everyone, ...Object.fromEntries(keys.map((key) => [key, everyone])) };
-  for (const commandKey of [...keys, 'access']) {
-    assert.equal(isAllowed({ commandKey, userId: '2', roleIds: ['staff'], owners: ['1'], access }), false, commandKey);
-    assert.equal(isAllowed({ commandKey, userId: '1', roleIds: [], owners: ['1'], access: {} }), true, `${commandKey}: owner`);
+  for (const { label, group, keys } of OWNER_ONLY_CASES) {
+    const access = { '*': everyone, [group]: everyone, ...Object.fromEntries(keys.map((key) => [key, everyone])) };
+    for (const commandKey of [...keys, group]) {
+      assert.equal(isAllowed({ commandKey, userId: '2', roleIds: ['staff'], owners: ['1'], access }), false, `${label}: ${commandKey}`);
+      assert.equal(isAllowed({ commandKey, userId: '1', roleIds: [], owners: ['1'], access: {} }), true, `${label}: ${commandKey}: owner`);
+    }
+    // the same wildcard still opens everything else
+    assert.equal(isAllowed({ commandKey: 'memory.show', userId: '2', roleIds: [], owners: ['1'], access }), true, `${label}: memory.show`);
   }
 });
 
@@ -182,19 +226,28 @@ test('access: the access group is owner-only even with a * grant', () => {
 // grant / revoke
 // ---------------------------------------------------------------------------
 
-test('grant: everyone on a fresh key creates the entry', () => {
-  const result = grant({}, 'status', { everyone: true });
-  assert.deepEqual(result, { status: { everyone: true, roles: [], users: [] } });
-});
+const GRANT_FRESH_CASES = [
+  {
+    label: 'everyone on a fresh key creates the entry',
+    what: { everyone: true },
+    expected: { status: { everyone: true, roles: [], users: [] } },
+  },
+  {
+    label: 'a role on a fresh key creates the entry with that role',
+    what: { roleId: 'r1' },
+    expected: { status: { everyone: false, roles: ['r1'], users: [] } },
+  },
+  {
+    label: 'a user on a fresh key creates the entry with that user',
+    what: { userId: 'u1' },
+    expected: { status: { everyone: false, roles: [], users: ['u1'] } },
+  },
+];
 
-test('grant: a role on a fresh key creates the entry with that role', () => {
-  const result = grant({}, 'status', { roleId: 'r1' });
-  assert.deepEqual(result, { status: { everyone: false, roles: ['r1'], users: [] } });
-});
-
-test('grant: a user on a fresh key creates the entry with that user', () => {
-  const result = grant({}, 'status', { userId: 'u1' });
-  assert.deepEqual(result, { status: { everyone: false, roles: [], users: ['u1'] } });
+test('grant: everyone, a role or a user on a fresh key creates the entry with just that', () => {
+  for (const { label, what, expected } of GRANT_FRESH_CASES) {
+    assert.deepEqual(grant({}, 'status', what), expected, label);
+  }
 });
 
 test('grant: adding a role already present is a no-op, not a duplicate', () => {
@@ -222,22 +275,59 @@ test('grant: leaves other keys untouched', () => {
   assert.deepEqual(result.status, { everyone: true, roles: [], users: [] });
 });
 
-test('revoke: everyone clears the flag but keeps the rest of the entry', () => {
-  const access = { status: { everyone: true, roles: ['r1'], users: [] } };
-  const result = revoke(access, 'status', { everyone: true });
-  assert.deepEqual(result.status, { everyone: false, roles: ['r1'], users: [] });
-});
+// `expected` is the whole entry left behind: the one thing named is gone, the rest of the entry stays.
+// The first three rows leave only one kind set (roles, roles, users), so an emptiness check that ignores that
+// kind deletes the entry and fails. The next three hold the other two kinds as well, so a revoke that wipes a
+// neighbouring list fails. The last leaves only the flag, for an emptiness check that ignores `everyone`.
+const REVOKE_ONE_CASES = [
+  {
+    label: 'everyone clears the flag but keeps the rest of the entry',
+    entry: { everyone: true, roles: ['r1'], users: [] },
+    what: { everyone: true },
+    expected: { everyone: false, roles: ['r1'], users: [] },
+  },
+  {
+    label: 'a role removes just that role',
+    entry: { everyone: false, roles: ['r1', 'r2'], users: [] },
+    what: { roleId: 'r1' },
+    expected: { everyone: false, roles: ['r2'], users: [] },
+  },
+  {
+    label: 'a user removes just that user',
+    entry: { everyone: false, roles: [], users: ['u1', 'u2'] },
+    what: { userId: 'u1' },
+    expected: { everyone: false, roles: [], users: ['u2'] },
+  },
+  {
+    label: 'everyone clears the flag but keeps the roles and users',
+    entry: { everyone: true, roles: ['r1'], users: ['u9'] },
+    what: { everyone: true },
+    expected: { everyone: false, roles: ['r1'], users: ['u9'] },
+  },
+  {
+    label: 'a role removes just that role, keeping the flag and the users',
+    entry: { everyone: true, roles: ['r1', 'r2'], users: ['u9'] },
+    what: { roleId: 'r1' },
+    expected: { everyone: true, roles: ['r2'], users: ['u9'] },
+  },
+  {
+    label: 'a user removes just that user, keeping the flag and the roles',
+    entry: { everyone: true, roles: ['r9'], users: ['u1', 'u2'] },
+    what: { userId: 'u1' },
+    expected: { everyone: true, roles: ['r9'], users: ['u2'] },
+  },
+  {
+    label: 'the last role goes but the everyone flag still holds the entry',
+    entry: { everyone: true, roles: ['r1'], users: [] },
+    what: { roleId: 'r1' },
+    expected: { everyone: true, roles: [], users: [] },
+  },
+];
 
-test('revoke: a role removes just that role', () => {
-  const access = { status: { everyone: false, roles: ['r1', 'r2'], users: [] } };
-  const result = revoke(access, 'status', { roleId: 'r1' });
-  assert.deepEqual(result.status.roles, ['r2']);
-});
-
-test('revoke: a user removes just that user', () => {
-  const access = { status: { everyone: false, roles: [], users: ['u1', 'u2'] } };
-  const result = revoke(access, 'status', { userId: 'u1' });
-  assert.deepEqual(result.status.users, ['u2']);
+test('revoke: everyone, a role or a user removes just that one thing from the entry', () => {
+  for (const { label, entry, what, expected } of REVOKE_ONE_CASES) {
+    assert.deepEqual(revoke({ status: entry }, 'status', what).status, expected, label);
+  }
 });
 
 test('revoke: the last thing in an entry deletes the whole entry', () => {
@@ -263,11 +353,4 @@ test('revoke: does not mutate its input', () => {
   const snapshot = JSON.parse(JSON.stringify(access));
   revoke(access, 'status', { everyone: true });
   assert.deepEqual(access, snapshot);
-});
-
-test('grant/revoke round trip: grant then revoke the same thing returns to empty', () => {
-  let access = {};
-  access = grant(access, 'memory', { roleId: 'r1' });
-  access = revoke(access, 'memory', { roleId: 'r1' });
-  assert.deepEqual(access, {});
 });

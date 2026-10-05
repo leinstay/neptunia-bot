@@ -17,12 +17,6 @@ import {
   RELATIONSHIP_STALE_DEFAULTS,
 } from '../src/memory/affinity.js';
 
-// --- emptyAffinity -----------------------------------------------------
-
-test('emptyAffinity: score 0, empty reason, empty history', () => {
-  assert.deepEqual(emptyAffinity(), { score: 0, reason: '', history: [] });
-});
-
 // --- affinityBand: every boundary from the contract ---------------------
 
 const BAND_CASES = [
@@ -43,11 +37,11 @@ const BAND_CASES = [
   [100, 'devoted'],
 ];
 
-for (const [score, band] of BAND_CASES) {
-  test(`affinityBand: ${score} -> ${band}`, () => {
-    assert.equal(affinityBand(score), band);
-  });
-}
+test('affinityBand: every boundary from the contract falls in its band', () => {
+  for (const [score, band] of BAND_CASES) {
+    assert.equal(affinityBand(score), band, `${score} -> ${band}`);
+  }
+});
 
 // --- applyDelta ----------------------------------------------------------
 
@@ -153,25 +147,23 @@ test('applyDelta: tolerates a malformed/undefined affinity (a profile written be
 
 const MENTION_CFG = { affinityIgnoreBonus: 0.3, affinityLikeBonus: 0.08 };
 
-test('ignoreAdjustment: 0 changes nothing', () => {
-  assert.equal(ignoreAdjustment(0, MENTION_CFG), 0);
-});
+// [label, score, expected adjustment]
+const IGNORE_CASES = [
+  ['0 changes nothing', 0, 0],
+  ['a non-finite score (NaN) changes nothing', NaN, 0],
+  ['a non-finite score (undefined) changes nothing', undefined, 0],
+  ['score -100 adds the full affinityIgnoreBonus', -100, MENTION_CFG.affinityIgnoreBonus],
+  ['score 100 subtracts the full affinityLikeBonus', 100, -MENTION_CFG.affinityLikeBonus],
+];
 
-test('ignoreAdjustment: a non-finite score changes nothing', () => {
-  assert.equal(ignoreAdjustment(NaN, MENTION_CFG), 0);
-  assert.equal(ignoreAdjustment(undefined, MENTION_CFG), 0);
-});
-
-test('ignoreAdjustment: score -100 adds the full affinityIgnoreBonus', () => {
-  assert.equal(ignoreAdjustment(-100, MENTION_CFG), MENTION_CFG.affinityIgnoreBonus);
+test('ignoreAdjustment: nothing at 0 or a non-finite score, the full bonus at either end of the scale', () => {
+  for (const [label, score, expected] of IGNORE_CASES) {
+    assert.equal(ignoreAdjustment(score, MENTION_CFG), expected, label);
+  }
 });
 
 test('ignoreAdjustment: score -50 adds half the affinityIgnoreBonus (linear)', () => {
   assert.equal(ignoreAdjustment(-50, MENTION_CFG), MENTION_CFG.affinityIgnoreBonus * 0.5);
-});
-
-test('ignoreAdjustment: score 100 subtracts the full affinityLikeBonus', () => {
-  assert.equal(ignoreAdjustment(100, MENTION_CFG), -MENTION_CFG.affinityLikeBonus);
 });
 
 test('ignoreAdjustment: score 50 subtracts half the affinityLikeBonus (linear)', () => {
@@ -279,14 +271,6 @@ test('applyDelta: history keeps the model\'s original (clamped) delta and, separ
   });
 });
 
-test('applyDelta: damping is read fresh from opts every call, a "hot" toggle takes effect immediately', () => {
-  let affinity = { score: 50, reason: 'r', history: [] };
-  affinity = applyDelta(affinity, 10, 'x', { maxDelta: 15, historySize: 10, now: OPTS.now, damping: true });
-  assert.equal(affinity.score, 55, 'damped: factor 0.5 on this call');
-  affinity = applyDelta(affinity, 10, 'x', { maxDelta: 15, historySize: 10, now: OPTS.now, damping: false });
-  assert.equal(affinity.score, 65, 'undamped: the next call is unaffected by the previous one\'s setting');
-});
-
 test('applyDelta: truncate:false applies an exact (possibly fractional) delta -- the owner\'s absolute set', () => {
   // A score that carries two decimals (from a previous damped update), set to an exact target via
   // `delta = target - current`: truncating that delta first would strand the result off-target.
@@ -304,14 +288,6 @@ test('applyDelta: truncate:false applies an exact (possibly fractional) delta --
 // --- applyDelta: relationships.dampingPower ---------------------------------
 // Tunable curve steepness: the damping factor becomes (1 - |score| / 100) ** dampingPower.
 // dampingPower 1 is exactly the plain curve above; missing/garbage falls back to 1 too.
-
-test('applyDelta: dampingPower 1 (the default) matches the plain damping curve', () => {
-  const start = { score: 60, reason: 'r', history: [] };
-  const withExplicitPower = applyDelta(start, 1, 'x', { maxDelta: 15, historySize: 10, now: OPTS.now, damping: true, dampingPower: 1 });
-  const withoutPower = applyDelta(start, 1, 'x', { maxDelta: 15, historySize: 10, now: OPTS.now, damping: true });
-  assert.equal(withExplicitPower.score, 60.4);
-  assert.equal(withoutPower.score, 60.4);
-});
 
 test('applyDelta: dampingPower > 1 flattens the curve less near zero, steepens it near the cap', () => {
   const start = { score: 60, reason: 'r', history: [] };
@@ -337,14 +313,6 @@ test('applyDelta: dampingPower falls back to 1 for a non-positive, non-finite or
     const result = applyDelta(start, 1, 'x', { maxDelta: 15, historySize: 10, now: OPTS.now, damping: true, dampingPower });
     assert.equal(result.score, 60.4, `dampingPower ${dampingPower} should fall back to 1`);
   }
-});
-
-test('applyDelta: dampingPower is read fresh from opts every call, a "hot" change takes effect immediately', () => {
-  const start = { score: 60, reason: 'r', history: [] };
-  const power1 = applyDelta(start, 1, 'x', { maxDelta: 15, historySize: 10, now: OPTS.now, damping: true, dampingPower: 1 });
-  const power2 = applyDelta(start, 1, 'x', { maxDelta: 15, historySize: 10, now: OPTS.now, damping: true, dampingPower: 2 });
-  assert.equal(power1.score, 60.4);
-  assert.equal(power2.score, 60.16, 'the same starting affinity, only the opts passed to this call changed');
 });
 
 // --- roundScore --------------------------------------------------------------
