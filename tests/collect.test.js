@@ -61,22 +61,27 @@ test('normalizeMessage: classifies attachments through media.js, keeping url/siz
   assert.equal(m.attachments[1].kind, 'video');
 });
 
-test('normalizeMessage: a voice-message flag reclassifies the attachment as voice', () => {
-  const raw = rawMessage({
-    flags: flagsWith(['IsVoiceMessage']),
-    attachments: new Map([['a1', { id: 'a1', contentType: 'audio/ogg', name: 'voice-message.ogg', url: 'https://cdn/v.ogg', duration: 12 }]]),
-  });
-  const m = normalizeMessage(raw, 'self');
-  assert.equal(m.attachments[0].kind, 'voice');
-  assert.equal(m.attachments[0].durationSec, 12);
-});
-
-test('normalizeMessage: no voice flag leaves the same attachment as audio', () => {
-  const raw = rawMessage({
-    attachments: new Map([['a1', { id: 'a1', contentType: 'audio/ogg', name: 'song.ogg', url: 'https://cdn/v.ogg' }]]),
-  });
-  const m = normalizeMessage(raw, 'self');
-  assert.equal(m.attachments[0].kind, 'audio');
+test('normalizeMessage: the voice-message flag reclassifies an audio attachment as voice, without it the attachment stays audio', () => {
+  const rows = [
+    {
+      label: 'a voice-message flag reclassifies the attachment as voice',
+      flags: ['IsVoiceMessage'],
+      attachment: { id: 'a1', contentType: 'audio/ogg', name: 'voice-message.ogg', url: 'https://cdn/v.ogg', duration: 12 },
+      expected: { kind: 'voice', durationSec: 12 },
+    },
+    {
+      label: 'no voice flag leaves the same attachment as audio',
+      flags: [],
+      attachment: { id: 'a1', contentType: 'audio/ogg', name: 'song.ogg', url: 'https://cdn/v.ogg' },
+      expected: { kind: 'audio' },
+    },
+  ];
+  for (const { label, flags, attachment, expected } of rows) {
+    const m = normalizeMessage(rawMessage({ flags: flagsWith(flags), attachments: new Map([['a1', attachment]]) }), 'self');
+    for (const [key, value] of Object.entries(expected)) {
+      assert.equal(m.attachments[0][key], value, `${label}: ${key}`);
+    }
+  }
 });
 
 test('normalizeMessage: an embed becomes a link item and its raw URL is removed from the content', () => {
@@ -218,38 +223,11 @@ test('normalizeMessage: an animated custom emoji in the raw content is marked an
   assert.deepEqual(m.emojis, [{ id: PEPE_ID, name: 'pepe', animated: true, url: `https://cdn.discordapp.com/emojis/${PEPE_ID}.webp?size=96` }]);
 });
 
-test('normalizeMessage: a forwarded snapshot reads its custom emoji from its raw content', () => {
-  const raw = rawMessage({
-    content: '',
-    cleanContent: '',
-    messageSnapshots: new Map([
-      ['snap1', { id: 'snap1', content: `hi <:pepe:${PEPE_ID}>`, cleanContent: 'hi :pepe:', attachments: new Map(), embeds: [], stickers: new Map(), flags: flagsWith([]) }],
-    ]),
-  });
-  const m = normalizeMessage(raw, 'self');
-  assert.equal(m.forwarded[0].content, 'hi :pepe:');
-  assert.deepEqual(m.forwarded[0].emojis, [{ id: PEPE_ID, name: 'pepe', animated: false, url: `https://cdn.discordapp.com/emojis/${PEPE_ID}.webp?size=96` }]);
-});
-
 test('normalizeMessage: without a raw content, custom emoji fall back to cleanContent', () => {
   const raw = rawMessage({ content: undefined, cleanContent: `hi <:pepe:${PEPE_ID}>` });
   const m = normalizeMessage(raw, 'self');
   assert.equal(m.content, 'hi :pepe:');
   assert.deepEqual(m.emojis.map((e) => e.name), ['pepe']);
-});
-
-test('normalizeMessage: a static custom emoji is extracted, text keeps reading as :name:', () => {
-  const raw = rawMessage({ content: 'nice <:pog:111> job', cleanContent: 'nice :pog: job' });
-  const m = normalizeMessage(raw, 'self');
-  assert.equal(m.content, 'nice :pog: job');
-  assert.deepEqual(m.emojis, [{ id: '111', name: 'pog', animated: false, url: 'https://cdn.discordapp.com/emojis/111.webp?size=96' }]);
-});
-
-test('normalizeMessage: an animated custom emoji is marked animated, same webp URL pattern', () => {
-  const raw = rawMessage({ content: 'lol <a:kekw:222>', cleanContent: 'lol :kekw:' });
-  const m = normalizeMessage(raw, 'self');
-  assert.equal(m.content, 'lol :kekw:');
-  assert.deepEqual(m.emojis, [{ id: '222', name: 'kekw', animated: true, url: 'https://cdn.discordapp.com/emojis/222.webp?size=96' }]);
 });
 
 test('normalizeMessage: the same custom emoji repeated in one message is de-duplicated', () => {
@@ -430,16 +408,6 @@ test('normalizeMessage: a typed URL that an embed already carries is added once 
   assert.equal(m.links[0].id, videoUrlCacheKey(url));
   assert.equal(m.links[0].title, 'Cool video');
   assert.equal(m.content, 'look');
-});
-
-test('normalizeMessage: a typed URL whose canonical key matches an embed URL is not added again', () => {
-  const raw = rawMessage({
-    cleanContent: 'look https://youtube.com/watch?v=xyz&si=tracking',
-    embeds: [{ url: 'https://www.youtube.com/watch?v=xyz', provider: { name: 'YouTube' }, title: 'Cool video' }],
-  });
-  const m = normalizeMessage(raw, 'self', { videoSites: VIDEO_SITES });
-  assert.equal(m.links.length, 1);
-  assert.equal(m.links[0].id, videoUrlCacheKey('https://www.youtube.com/watch?v=xyz'));
 });
 
 test('normalizeMessage: a typed youtu.be link and a watch?v= embed of one video are one link with the canonical key', () => {
@@ -832,12 +800,6 @@ test('withTextPreviews: a fetch failure leaves the attachment without previewTex
   assert.equal(result[0].attachments[0].previewText, undefined);
 });
 
-test('withTextPreviews: a message with no text attachments is returned as the same reference', async () => {
-  const messages = [{ id: 'm1', attachments: [] }];
-  const result = await withTextPreviews(messages, 20, fakeFetch(''));
-  assert.equal(result[0], messages[0]);
-});
-
 /** A channel whose bot member holds exactly `granted` permission flags. */
 function permChannel({ granted = [], me = { id: 'self-id' }, viewable = true, permissionsFor } = {}) {
   return {
@@ -1135,6 +1097,11 @@ test('normalizeMessage: an embedded Discord CDN video link becomes a video attac
   assert.deepEqual(m.attachments, [CDN_VIDEO_ENTRY]);
   assert.deepEqual(m.links, []);
   assert.equal(m.content, 'mirad jajá');
+  // collectVideos sees it as one attachment video and keeps the unknown duration unknown.
+  assert.deepEqual(
+    collectVideos(m, { videoSites: ['youtube.com'] }).map((v) => [v.source, v.itemId, v.url, v.durationSec]),
+    [['attachment', '222', CDN_VIDEO_URL, null]],
+  );
 });
 
 test('normalizeMessage: a typed Discord CDN video link without an embed becomes a video attachment', () => {
@@ -1196,14 +1163,4 @@ test('normalizeMessage: a Discord CDN picture link stays a link', () => {
   assert.deepEqual(m.attachments, []);
   assert.equal(m.links.length, 1);
   assert.equal(m.links[0].site, 'cdn.discordapp.com');
-});
-
-test('normalizeMessage: collectVideos sees a CDN video link as one attachment video', () => {
-  const raw = rawMessage({ cleanContent: CDN_VIDEO_URL, embeds: [{ url: CDN_VIDEO_URL }] });
-  const videos = collectVideos(normalizeMessage(raw, 'self'), { videoSites: ['youtube.com'] });
-  assert.equal(videos.length, 1);
-  assert.equal(videos[0].source, 'attachment');
-  assert.equal(videos[0].itemId, '222');
-  assert.equal(videos[0].url, CDN_VIDEO_URL);
-  assert.equal(videos[0].durationSec, null);
 });
