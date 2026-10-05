@@ -29,8 +29,7 @@
 // (src/behavior/private.js). Pictures of another channel are shown as
 // captions only: nothing outside the turn's own channel is ever attached.
 
-import { fitSections } from '../llm/budget.js';
-import { estimateTokens } from '../llm/tokens.js';
+import { fitSections, requestTokenLimit, sectionCost } from '../llm/budget.js';
 import {
   computeTempo,
   fill,
@@ -48,6 +47,7 @@ import { isConfirmed, isStale } from '../memory/interests.js';
 import { topByRank } from '../memory/ranking.js';
 import { rankEmojiUsage } from '../memory/emoji-usage.js';
 import { gifHandleMap, normalizeGifs, rankGifs } from '../memory/gifs.js';
+import { clampText } from '../memory/clamp.js';
 import { sortEpisodesForDisplay, topEpisodes } from '../memory/episodes.js';
 import { RECENT_EPISODES_PER_MEMBER, episodeKey, memberIdOf, recentSettings, recentView } from '../memory/recent.js';
 import { matchLore } from '../memory/lore.js';
@@ -603,27 +603,31 @@ function emojiItems(index, usage, mediaCache, labels, emojiCfg) {
 
 /**
  * The `<gifs>` section's items: `labels.gifs.header` first, then one line
- * per GIF of the library -- the top `gifsCfg.max` (default 20) by rank
+ * per GIF of the library -- the top `gifsCfg.max` (default 40) by rank
  * (src/memory/gifs.js#rankGifs, `gifsCfg.halfLifeDays`, default 30). A helper
  * caption cached under the entry's `itemId` (the describer's cache; a `miss`
  * entry has no text) renders through `labels.gifs.entry` (`{id}`/`{text}`),
- * otherwise `labels.gifs.entryNoText` (`{id}`). `[]` when the library is
- * empty or the labels lack `header`/`entryNoText` (an older labels.json).
+ * cut to `gifsCfg.listChars` (default 70; 0 = whole) at a word boundary
+ * (src/memory/clamp.js#clampText, a hard limit) -- only here: the cached
+ * caption stays whole -- otherwise `labels.gifs.entryNoText` (`{id}`). `[]`
+ * when the library is empty or the labels lack `header`/`entryNoText` (an
+ * older labels.json).
  * @param {unknown} gifs            The library (store.getGifs).
  * @param {object|null} mediaCache  The describer cache (store.getMediaCache), read only.
  * @param {object} labels
- * @param {{ max?: number, halfLifeDays?: number }} [gifsCfg]  `config.gifs`.
+ * @param {{ max?: number, halfLifeDays?: number, listChars?: number }} [gifsCfg]  `config.gifs`.
  * @returns {string[]}
  */
 function gifItems(gifs, mediaCache, labels, gifsCfg) {
   const g = labels.gifs;
   if (!g?.header || !g.entryNoText) return [];
-  const max = Number.isInteger(gifsCfg?.max) && gifsCfg.max >= 0 ? gifsCfg.max : 20;
+  const max = Number.isInteger(gifsCfg?.max) && gifsCfg.max >= 0 ? gifsCfg.max : 40;
+  const listChars = gifsCfg?.listChars ?? 70;
   const chosen = rankGifs(gifs, gifsCfg?.halfLifeDays ?? 30).slice(0, max);
   if (chosen.length === 0) return [];
   const lines = chosen.map((entry) => {
     const cached = mediaCache?.[entry.itemId];
-    const text = cached && !cached.miss && typeof cached.text === 'string' ? cached.text.trim() : '';
+    const text = cached && !cached.miss && typeof cached.text === 'string' ? clampText(cached.text, listChars, { tolerance: 1 }) : '';
     return text && g.entry ? fill(g.entry, { id: entry.id, text }) : fill(g.entryNoText, { id: entry.id });
   });
   return [g.header, ...lines];
@@ -684,6 +688,38 @@ export function fillPromptTemplate(template, values) {
 }
 
 /**
+ * The transcript body of a helper classifier's `<transcript>` block (the
+ * route classifier, src/behavior/route.js#routeContext; the re-watch and
+ * lookup classifiers, src/behavior/turn.js#classifierContext): `messages`
+ * (already chosen by the caller, oldest first) rendered as the chat renders
+ * them (src/discord/format.js) under the live `config` -- `bot.timezone`,
+ * `context.gapMarkerMinutes`, `context.maxMessageChars` (800, config.json's
+ * value, when missing), `features.seeReactions`, `context.reactionsPerMessage`
+ * -- with the media states the caller already has (`descriptions`, `videos`,
+ * `reads`; each optional). The one copy of these options for the classifiers;
+ * the caller wraps the body. Pure.
+ * @param {object[]} messages
+ * @param {{ config: object, selfName: string, labels: object, descriptions?: Map<string, unknown>,
+ *   videos?: Map<string, unknown>, reads?: Map<string, unknown> }} params
+ * @returns {string}
+ */
+export function classifierTranscript(messages, { config, selfName, labels, descriptions, videos, reads }) {
+  const items = formatTranscript(messages, {
+    timezone: config.bot?.timezone,
+    gapMinutes: config.context?.gapMarkerMinutes,
+    maxChars: config.context?.maxMessageChars ?? 800,
+    selfName,
+    labels,
+    seeReactions: config.features?.seeReactions !== false,
+    reactionsPerMessage: config.context?.reactionsPerMessage,
+    descriptions,
+    videos,
+    reads,
+  });
+  return renderTranscript(items, config.bot?.timezone, labels);
+}
+
+/**
  * The drawing sub-process's prompt (prompts/draw.md): `{{name}}` and
  * `{{request}}` filled, `{{appearance}}` filled with prompts/appearance.md
  * (its own `{{name}}` filled) for a picture the persona is in, else blanked;
@@ -709,6 +745,48 @@ export function buildDrawPrompt({ prompts, selfName, request, self }) {
  */
 export function hasRequiredLabels(labels) {
   return Boolean(labels) && typeof labels === 'object' && Boolean(labels.transcript);
+}
+
+// How the task labels list several items inline: `{others}` and `{added}` sit inside a sentence.
+const TASK_ITEM_JOIN = '; ';
+
+/** `texts` as `<n>. <text>` items, numbered from `first`. */
+function numberedItems(texts, first) {
+  return texts.map((text, i) => `${first + i}. ${text}`);
+}
+
+/**
+ * The task labels for buildRequest's `input.tasks` (see there), joined by a
+ * blank line: `labels.task.part` (or, without a usable part,
+ * `labels.task.queued`), then `labels.task.queuedOthers`, then
+ * `labels.task.added`. '' when nothing applies.
+ * @param {{ part?: { index: number, total?: number, parts: string[] }|null, queued?: string[],
+ *   queuedOthers?: { author: string, text: string }[], added?: string[] }|null|undefined} tasks
+ * @param {object} labels
+ * @returns {string}
+ */
+function renderTasks(tasks, labels) {
+  if (!tasks) return '';
+  const queued = Array.isArray(tasks.queued) ? tasks.queued : [];
+  const added = Array.isArray(tasks.added) ? tasks.added : [];
+  const texts = [];
+  const part = tasks.part;
+  const parts = Array.isArray(part?.parts) ? part.parts : [];
+  const usablePart = Boolean(part) && Number.isInteger(part.index) && part.index >= 1 && part.index <= parts.length;
+  if (usablePart && labels.task?.part) {
+    const otherParts = numberedItems(parts, 1).filter((_, i) => i + 1 !== part.index);
+    const others = [...otherParts, ...numberedItems(queued, parts.length + 1)].join(TASK_ITEM_JOIN);
+    texts.push(fill(labels.task.part, { index: part.index, total: part.total ?? parts.length, part: parts[part.index - 1], others }));
+  } else if (!usablePart && queued.length > 0 && labels.task?.queued) {
+    texts.push(fill(labels.task.queued, { others: numberedItems(queued, 1).join(TASK_ITEM_JOIN) }));
+  }
+  const others = Array.isArray(tasks.queuedOthers) ? tasks.queuedOthers.filter((call) => call && call.text) : [];
+  if (others.length > 0 && labels.task?.queuedOthers) {
+    const items = numberedItems(others.map((call) => `${call.author ?? ''}: ${call.text}`), 1);
+    texts.push(fill(labels.task.queuedOthers, { others: items.join(TASK_ITEM_JOIN) }));
+  }
+  if (added.length > 0 && labels.task?.added) texts.push(fill(labels.task.added, { added: added.join(TASK_ITEM_JOIN) }));
+  return texts.join('\n\n');
 }
 
 /** A deployment with no/broken labels.json must fail loudly, not send a broken prompt. */
@@ -819,6 +897,7 @@ function lookupCandidates(lookup, labels, timezone) {
  * undefined when no image client is wired) picks the drawing line.
  * `privateChat` adds `senses.privateChat`; outside a private chat,
  * `features.privateMessages === true` adds `senses.privateAware` instead.
+ * `recallAvailable` (outside a private chat) adds `senses.recall` right after the search line.
  * `customEmoji` (the `<emoji>` block is possible) adds `senses.customEmoji`;
  * `gifs` (features.gifs on and a non-empty library) adds `senses.gifs` right after it.
  * `gifWatching` (GIFs are watched now, src/memory/gif-watch.js#gifWatchBlocker)
@@ -834,6 +913,7 @@ function renderSenses(
   labels,
   {
     searchAvailable = false,
+    recallAvailable = false,
     drawQuota,
     privateChat = false,
     customEmoji = false,
@@ -889,6 +969,10 @@ function renderSenses(
   lines.push(senses.voice, videoOn ? (senses.linksWatch ?? senses.links) : senses.links);
   if (readOn && senses.linksRead) lines.push(senses.linksRead);
   if (searchOn && senses.search) lines.push(senses.search);
+  // The search of the server's own message history (`recallAvailable`: a server
+  // turn where the runner is available; its own switch, not the web one); an
+  // older labels.json without the line shows nothing.
+  if (!privateChat && recallAvailable === true && senses.recall) lines.push(senses.recall);
   // Drawing (features.imageGeneration, a missing key counts as on) needs the
   // image client (`drawQuota` present): one line, the spent forms first. An
   // older labels.json without senses.draw shows nothing.
@@ -1075,9 +1159,11 @@ function splitPeople(
  * a moment through `labels.recent.episode` (`{date}` `{name}` `{what}`) --
  * the caller offers none without that label -- left out and counted
  * (`unnamed`) when the member has no name (`nameOf` gives none and the profile
- * stores none). `{date}` and `{time}` are the transcript's own forms of the
- * item's time; every stored `<@id>` token becomes the member's name
- * (`nameOf`). No quote and no feeling: a moment is named, not replayed.
+ * stores none). A line's `{date}` and `{time}` are the transcript's own forms
+ * of its time; a moment's `{date}` is its stored `YYYY-MM-DD` (the day it
+ * happened) in the transcript's date form, never its `at` moved through a time
+ * zone. Every stored `<@id>` token becomes the member's name (`nameOf`). No
+ * quote and no feeling: a moment is named, not replayed.
  * @returns {{ entries: { kind: 'line'|'episode', at: number, text: string }[], unnamed: number }}
  */
 function recentEntries(items, { labels, timezone, currentChannelId, channels, nameOf }) {
@@ -1088,8 +1174,8 @@ function recentEntries(items, { labels, timezone, currentChannelId, channels, na
   const entries = [];
   let unnamed = 0;
   for (const item of items) {
-    const date = formatDate(item.at, timezone, labels.locale);
     if (item.kind === 'line') {
+      const date = formatDate(item.at, timezone, labels.locale);
       const text = resolveChatText(item.line.text, nameOf);
       const time = formatClock(item.at, timezone, labels.locale);
       const channel = item.line.channelId !== currentChannelId ? channelNames.get(item.line.channelId) : undefined;
@@ -1103,9 +1189,16 @@ function recentEntries(items, { labels, timezone, currentChannelId, channels, na
       unnamed += 1;
       continue;
     }
+    const date = calendarDate(item.episode.date, labels.locale);
     entries.push({ kind: 'episode', at: item.at, text: fill(r.episode, { date, name, what: resolveChatText(item.episode.what, nameOf) }) });
   }
   return { entries, unnamed };
+}
+
+/** A stored `YYYY-MM-DD` in the transcript's date form (`formatDate`), read as that calendar day:
+ * its noon formatted in UTC, so no zone moves it to a neighbouring day. */
+function calendarDate(ymd, locale) {
+  return formatDate(Date.parse(`${ymd}T12:00:00.000Z`), 'UTC', locale);
 }
 
 /**
@@ -1374,6 +1467,9 @@ function pulledAuthors(pulledFits) {
  *   the server part needs `labels.lookup.serverHeader`, its stretch `labels.lookup.stretch`.
  * @param {boolean} [input.searchAvailable]  Whether a web search key is configured
  *   (lookup.hasSearch()); `senses.search` renders only when it is true.
+ * @param {boolean} [input.recallAvailable]  Whether the search of the server's own history could
+ *   run this turn (src/behavior/turn.js#recallAvailable, never in a private chat); `senses.recall`
+ *   renders, right after the web search line, only when it is true (and never in a private chat).
  * @param {{ spent: boolean, userSpent: boolean }} [input.drawQuota]  The image client's
  *   quota for this turn (src/llm/images.js#quota); omitted -> no drawing line in `<senses>`.
  * @param {string} [input.drawReason]  For `triggerKind: 'drawFailed'`: the failure reason,
@@ -1417,6 +1513,18 @@ function pulledAuthors(pulledFits) {
  * @param {object|null} [input.focus]  A message of the chat put to everyone present (a room
  *   question): `labels.room.focus` (`{author}` `{target}`) follows the task text when it is in
  *   the chat.
+ * @param {{ part: { index: number, total: number, parts: string[] }|null, queued: string[],
+ *   queuedOthers?: { author: string, text: string }[], added: string[] }|null} [input.tasks]  What else the trigger's author is waiting for, after
+ *   the task text (src/behavior/turn.js). `part`: this turn answers one part of a message that
+ *   holds several requests (src/behavior/split.js) -- `labels.task.part` with `{index}` (1-based),
+ *   `{total}`, `{part}` (the part answered now) and `{others}` (every other part, then each of
+ *   `queued`, as `<n>. <text>` items numbered on, joined by `; `). `queued`: the author's other
+ *   calls still waiting for their own turns -- without a part, `labels.task.queued` with
+ *   `{others}` (them, `<n>. <text>` items from 1, joined by `; `). `queuedOthers`: other members'
+ *   calls waiting in this channel -- `labels.task.queuedOthers` with `{others}` (`<n>. <author>:
+ *   <text>` items from 1, joined by `; `), on a part too. `added`: later messages of the
+ *   author about this same call -- `labels.task.added` with `{added}` (their texts joined by `; `).
+ *   A label missing (an older labels file) or a part outside its parts adds nothing for it.
  * @param {{ name: string }|null} [input.elsewhereDestination]  Where a call from a read-only
  *   channel is answered: `<senses>` gains `senses.elsewhere` with `{destination}`.
  * @param {Set<string>|string[]} [input.readOnlyIds]  Channels the bot can read but not write in:
@@ -1564,6 +1672,9 @@ export function buildRequest(input) {
   const focus = privateChat ? null : (input.focus ?? null);
   const focusItem = focus ? chatItems.find((item) => item.id === focus.id) : null;
   const focusText = focusItem && labels.room?.focus ? fill(labels.room.focus, { author: focus.authorName ?? '', target: `#${focusItem.index}` }) : '';
+  // What else the author waits for: the part answered now and the rest, their queued calls, and
+  // their later messages about this call.
+  const tasksText = renderTasks(input.tasks, labels);
   // The task text. `callShown`: whether the pulled trigger's line made it into
   // `<channel_view>` -- a task never points at a line the request does not show.
   const composeTask = (callShown) => {
@@ -1589,7 +1700,7 @@ export function buildRequest(input) {
       routed && sourceChannel && callItem && here && labels.elsewhere?.called
         ? fill(labels.elsewhere.called, { channel: sourceChannel.name, destination: here })
         : '';
-    return [baseTask, calledText, focusText, privateText, forcedText].filter(Boolean).join('\n\n');
+    return [baseTask, calledText, focusText, tasksText, privateText, forcedText].filter(Boolean).join('\n\n');
   };
   // Fitted as if the call's line is shown: the pulled block keeps it whenever the request has
   // room for it (see fitPulledChannel); checked once the budget is spent.
@@ -1599,6 +1710,7 @@ export function buildRequest(input) {
   const customEmoji = config.features?.customEmoji !== false && Array.isArray(input.customEmoji) ? input.customEmoji : [];
   const sensesText = renderSenses(config, labels, {
     searchAvailable: input.searchAvailable === true,
+    recallAvailable: input.recallAvailable === true,
     drawQuota: input.drawQuota,
     privateChat,
     customEmoji: customEmoji.length > 0,
@@ -1619,11 +1731,8 @@ export function buildRequest(input) {
   ]);
 
   const caps = config.context.caps;
-  const cost = (text) => calibrator.apply(estimateTokens(text)) + 2;
-  const limit =
-    Math.floor(config.llm.maxRequestTokens * (Number.isFinite(config.llm.safetyMargin) && config.llm.safetyMargin > 0 && config.llm.safetyMargin <= 1 ? config.llm.safetyMargin : 0.9)) -
-    pictures.length * (visionCfg.tokensPerImage ?? 400) -
-    TAG_OVERHEAD;
+  const cost = sectionCost(calibrator);
+  const limit = requestTokenLimit(config) - pictures.length * (visionCfg.tokensPerImage ?? 400) - TAG_OVERHEAD;
 
   const episodesOpt = { enabled: episodesOn, cap: caps.interlocutor, cost };
   const interlocutorShown = renderProfileShown(interlocutor, labels, {
@@ -1964,7 +2073,7 @@ export function buildRequest(input) {
       // Below even the emoji: the GIF library, trimmed the same way (least used last).
       {
         name: 'gifs',
-        cap: caps.gifs ?? 600,
+        cap: caps.gifs ?? 900,
         keep: 'first',
         items: gifsOn ? gifItems(gifLibrary, input.mediaCache ?? null, labels, config.gifs) : [],
       },

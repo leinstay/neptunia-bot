@@ -21,6 +21,7 @@ import {
   mediaParts,
   siteOf,
   clipWithEllipsis,
+  isGifHostUrl,
 } from '../src/discord/media.js';
 
 // --- siteOf --------------------------------------------------------------------
@@ -155,6 +156,82 @@ test('classifyEmbed: a link embed never carries animationUrl, even with a video 
   const other = classifyEmbed({ url: 'https://example.com/a.gif', thumbnail: { url: 'https://example.com/a.gif' } });
   assert.equal(other.kind, 'link');
   assert.equal('animationUrl' in other, false);
+});
+
+/** A GIF-picker post as Discord delivers it: a `gifv` embed of a provider the code has no name for. */
+function pickerEmbed(overrides = {}) {
+  return {
+    type: 'gifv',
+    url: 'https://gifs.example.net/gifs/dancing-cat',
+    provider: { name: 'Gifland' },
+    thumbnail: { url: 'https://static.gifs.example.net/x/still.webp', proxyURL: 'https://images-ext-1.discordapp.net/external/t/still.webp' },
+    video: { url: 'https://static.gifs.example.net/x/loop.mp4', proxyURL: 'https://images-ext-1.discordapp.net/external/v/loop.mp4' },
+    ...overrides,
+  };
+}
+
+test('classifyEmbed: a gifv embed is a gif whatever its provider: the page to post, the video to watch, the still to describe', () => {
+  const item = classifyEmbed(pickerEmbed());
+  assert.equal(item.kind, 'gif');
+  assert.equal(item.url, 'https://gifs.example.net/gifs/dancing-cat');
+  assert.equal(item.animationUrl, 'https://images-ext-1.discordapp.net/external/v/loop.mp4');
+  assert.equal(item.thumbnailUrl, 'https://images-ext-1.discordapp.net/external/t/still.webp');
+  assert.equal(item.site, 'Gifland');
+});
+
+test('classifyEmbed: the embed type is read off a discord.js Embed too (its `data.type`)', () => {
+  const { type, ...fields } = pickerEmbed();
+  const item = classifyEmbed({ ...fields, data: { type } });
+  assert.equal(item.kind, 'gif');
+  assert.equal(item.animationUrl, 'https://images-ext-1.discordapp.net/external/v/loop.mp4');
+});
+
+test('classifyEmbed: a klipy page is a gif by its host, with or without a type or a provider name', () => {
+  const bare = classifyEmbed({ url: 'https://klipy.com/gifs/dancing-cat', thumbnail: { url: 'https://static.klipy.com/x/still.webp' } });
+  assert.equal(bare.kind, 'gif');
+  assert.equal(bare.url, 'https://klipy.com/gifs/dancing-cat');
+  const picker = classifyEmbed(pickerEmbed({ url: 'https://klipy.com/gifs/dancing-cat', provider: { name: 'Klipy' } }));
+  assert.equal(picker.kind, 'gif');
+  assert.equal(picker.animationUrl, 'https://images-ext-1.discordapp.net/external/v/loop.mp4');
+});
+
+test('classifyEmbed: tenor and giphy stay gifs exactly as before; an embed of another type stays a link', () => {
+  const rows = [
+    { label: 'tenor by provider', embed: { url: 'https://tenor.com/view/x', provider: { name: 'Tenor' } }, kind: 'gif' },
+    { label: 'giphy by host', embed: { url: 'https://giphy.com/gifs/x' }, kind: 'gif' },
+    { label: 'tenor gifv', embed: { type: 'gifv', url: 'https://tenor.com/view/x', provider: { name: 'Tenor' } }, kind: 'gif' },
+    { label: 'a rich page', embed: { type: 'rich', url: 'https://example.com/a', provider: { name: 'Example' } }, kind: 'link' },
+    { label: 'an article', embed: { type: 'article', url: 'https://example.com/b' }, kind: 'link' },
+  ];
+  for (const { label, embed, kind } of rows) assert.equal(classifyEmbed(embed).kind, kind, label);
+});
+
+test('classifyEmbed: a gifv embed on a video site of videoSites stays a link (the video describer owns it)', () => {
+  const embed = pickerEmbed({ url: 'https://x.com/someone/status/1', provider: null });
+  assert.equal(classifyEmbed(embed, { videoSites: ['x.com'] }).kind, 'link');
+  assert.equal('animationUrl' in classifyEmbed(embed, { videoSites: ['x.com'] }), false);
+  assert.equal(classifyEmbed(embed, { videoSites: ['youtube.com'] }).kind, 'gif');
+});
+
+test('isGifHostUrl: tenor, giphy and klipy pages and their media hosts; nothing else', () => {
+  for (const url of [
+    'https://tenor.com/view/x',
+    'https://www.tenor.com/view/x',
+    'https://giphy.com/gifs/x',
+    'https://media.giphy.com/media/abc/giphy.gif',
+    'https://klipy.com/gifs/dancing-cat',
+    'https://static.klipy.com/x/loop.mp4',
+  ]) {
+    assert.equal(isGifHostUrl(url), true, url);
+  }
+  for (const url of ['https://example.com/klipy.com', 'https://notklipy.com/gifs/x', 'https://youtube.com/watch?v=1', 'not a url', undefined]) {
+    assert.equal(isGifHostUrl(url), false, String(url));
+  }
+});
+
+test('collectReadableLinks: a gifv embed from any provider is never a page to read', () => {
+  const message = { id: 'm1', links: [{ id: 'm1#e0', ...classifyEmbed(pickerEmbed()) }, { id: 'm1#e1', ...classifyEmbed({ url: 'https://example.com/a' }) }] };
+  assert.deepEqual(collectReadableLinks(message).map((link) => link.id), ['m1#e1']);
 });
 
 test('classifyEmbed: title/description are truncated to embedTextChars', () => {

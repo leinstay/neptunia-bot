@@ -22,9 +22,10 @@ import {
   fetchMoment,
   audienceOf,
 } from '../src/discord/collect.js';
-import { MessageReferenceType, OverwriteType, PermissionFlagsBits, PermissionsBitField, SnowflakeUtil } from 'discord.js';
+import { Embed, MessageReferenceType, OverwriteType, PermissionFlagsBits, PermissionsBitField, SnowflakeUtil } from 'discord.js';
 import { videoUrlCacheKey } from '../src/discord/video-sites.js';
-import { collectVideos } from '../src/discord/media.js';
+import { collectPictures, collectVideos } from '../src/discord/media.js';
+import { emptyGifs, mergeGifs } from '../src/memory/gifs.js';
 
 function flagsWith(names) {
   const set = new Set(names);
@@ -117,6 +118,40 @@ test('normalizeMessage: a tenor gifv embed keeps its mp4 as animationUrl, in the
   assert.equal(m.links[0].animationUrl, 'https://images-ext-1.discordapp.net/external/v/x.mp4');
   assert.equal(m.forwarded[0].links[0].id, 'snap1#e0');
   assert.equal(m.forwarded[0].links[0].animationUrl, 'https://images-ext-1.discordapp.net/external/v/x.mp4');
+});
+
+test('normalizeMessage: a GIF-picker post (a gifv embed of an unknown provider) reaches the library with the page to post and the video to watch', () => {
+  const page = 'https://gifs.example.net/gifs/dancing-cat';
+  const embed = new Embed({
+    type: 'gifv',
+    url: page,
+    provider: { name: 'Gifland' },
+    thumbnail: { url: 'https://static.gifs.example.net/x/still.webp' },
+    video: { url: 'https://static.gifs.example.net/x/loop.mp4' },
+  });
+  const m = normalizeMessage(rawMessage({ cleanContent: page, content: page, embeds: [embed] }), 'self');
+  assert.equal(m.content, '', 'the page URL is not left in the text');
+  assert.equal(m.links[0].kind, 'gif');
+
+  const { gifs, counted } = mergeGifs(emptyGifs(), [m]);
+  assert.equal(counted, 1);
+  const [entry] = Object.values(gifs.entries);
+  assert.equal(entry.kind, 'link');
+  assert.equal(entry.url, page, 'what the persona posts back');
+
+  const [picture] = collectPictures(m);
+  assert.equal(picture.kind, 'gif');
+  assert.equal(picture.itemId, entry.itemId, 'its caption lands where the library looks');
+  assert.equal(picture.animationUrl, 'https://static.gifs.example.net/x/loop.mp4', 'what the GIF watch downloads');
+  assert.equal(picture.url, 'https://static.gifs.example.net/x/still.webp', 'the still frame');
+});
+
+test('normalizeMessage: a gifv embed on a configured video site stays a video link', () => {
+  const url = 'https://x.com/someone/status/1';
+  const embed = new Embed({ type: 'gifv', url, thumbnail: { url: 'https://pbs.example.net/t.jpg' }, video: { url: 'https://video.example.net/v.mp4' } });
+  const m = normalizeMessage(rawMessage({ cleanContent: url, embeds: [embed] }), 'self', { videoSites: ['x.com'] });
+  assert.equal(m.links[0].kind, 'link');
+  assert.equal(m.links[0].id, videoUrlCacheKey(url));
 });
 
 test('normalizeMessage: an embed with no URL is skipped entirely (nothing to de-dupe or render)', () => {

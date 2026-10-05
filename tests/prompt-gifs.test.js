@@ -157,6 +157,41 @@ test('buildRequest: context.caps.gifs trims entries from the bottom, a cap below
   assert.equal(gifsBlock(none), null);
 });
 
+/** A full-sentence caption of about 190 characters, the shape the describer stores. */
+function longCaption(n) {
+  return `Un chat roux numéro ${n} danse sur une table de cuisine en agitant les pattes, puis il glisse lentement et tombe sur le dos pendant que quelqu'un rit derrière la caméra du téléphone.`;
+}
+
+test('buildRequest: <gifs> cuts a long caption to gifs.listChars at a word boundary; the stored caption is untouched', () => {
+  const caption = longCaption(2);
+  const mediaCache = { k2: { text: caption, ts: NOW } };
+  const config = fakeConfig({ gifs: { listChars: 40 } });
+  const lines = gifsBlock(buildRequest(baseInput({ config, gifs: THREE, mediaCache })));
+  const line = lines[1];
+  assert.ok(line.startsWith('g2 -- '), line);
+  const shown = line.slice('g2 -- '.length);
+  assert.ok([...shown].length <= 40, shown);
+  assert.ok(caption.startsWith(shown), 'a prefix of the caption');
+  assert.equal(caption[shown.length], ' ', 'cut where a word ends');
+  assert.equal(mediaCache.k2.text, caption);
+
+  const short = { k2: { text: 'a cat', ts: NOW } };
+  assert.equal(gifsBlock(buildRequest(baseInput({ config, gifs: THREE, mediaCache: short })))[1], 'g2 -- a cat');
+});
+
+test('buildRequest: with gifs.listChars the same context.caps.gifs holds more entries than with full captions', () => {
+  const many = library(Array.from({ length: 40 }, (_, i) => linkEntry(i + 1, 80 - i)));
+  const mediaCache = Object.fromEntries(Array.from({ length: 40 }, (_, i) => [`k${i + 1}`, { text: longCaption(i + 1), ts: NOW }]));
+  const shownWith = (listChars) => {
+    const config = fakeConfig({ gifs: { max: 40, listChars }, caps: { gifs: 900 } });
+    return gifsBlock(buildRequest(baseInput({ config, gifs: many, mediaCache }))).length - 1;
+  };
+  const full = shownWith(0);
+  const clamped = shownWith(70);
+  assert.ok(full > 0 && full < 40, `full captions: ${full}`);
+  assert.ok(clamped > full, `clamped ${clamped} vs full ${full}`);
+});
+
 test('buildRequest: <gifs> sits right after <emoji> and before <server>', () => {
   const guildMemory = { patterns: 'short lines' };
   const history = [{ ...baseInput().history[0], channelId: 'c1', channelName: 'general' }];

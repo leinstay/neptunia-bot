@@ -65,17 +65,17 @@ const SLOW_COMMANDS = new Set([
 ]);
 
 /**
- * The roles whose model `/nep model set` changes, each with the config path it
- * writes (src/admin.js). `/nep route` adds `image` (src/llm/images.js), `/nep
- * ping` adds `image` and `classifier`: every role choice list is derived
- * from this one. `voice` is the two-stage analyzer's stage B, the model that
- * words the memory texts in the persona's voice (src/memory/update.js#runVoice;
- * unset = the talk model).
+ * The chat-model roles, each with the config path of its model (src/admin.js):
+ * the roles `/nep ping` sends a chat completion for. `/nep model` and `/nep
+ * route` add `image` (`MODEL_SET_PATHS`), `/nep ping` adds `image` (checked
+ * against the provider's listing, never with a chat request) and `classifier`:
+ * every role choice list is derived from this one. `voice` is the one model that
+ * speaks as the persona: its replies and every memory text worded in its voice
+ * (src/memory/update.js#runVoice).
  */
 export const MODEL_ROLE_PATHS = Object.freeze({
-  talk: 'llm.model',
+  voice: 'llm.model',
   analyzer: 'memory.model',
-  voice: 'memory.voiceModel',
   'classifier.text': 'classifier.text',
   'classifier.media': 'classifier.media',
   'classifier.video': 'classifier.video',
@@ -84,6 +84,16 @@ export const MODEL_ROLE_PATHS = Object.freeze({
 
 /** The roles of `MODEL_ROLE_PATHS`, in order. */
 export const MODEL_ROLES = Object.freeze(Object.keys(MODEL_ROLE_PATHS));
+
+/**
+ * The roles whose model `/nep model show|set` lists and changes, each with the config path
+ * `set` writes: the chat roles, then the drawing model (`image`, src/llm/images.js#IMAGE_ROLE),
+ * which takes no chat completion.
+ */
+export const MODEL_SET_PATHS = Object.freeze({ ...MODEL_ROLE_PATHS, image: 'image.model' });
+
+/** The roles of `MODEL_SET_PATHS`, in order: the choices of `/nep model set` and `/nep route`. */
+export const MODEL_SET_ROLES = Object.freeze(Object.keys(MODEL_SET_PATHS));
 
 /** The `section` choices of `/nep memory show`, in display order (src/admin.js falls back to `summary`). */
 export const MEMORY_SHOW_SECTIONS = Object.freeze([
@@ -104,7 +114,7 @@ function choicesOf(values) {
   return values.map((value) => ({ name: value, value }));
 }
 
-const ROUTE_ROLES = Object.freeze([...MODEL_ROLES, 'image']);
+const ROUTE_ROLES = MODEL_SET_ROLES;
 const PING_ROLES = Object.freeze([...ROUTE_ROLES, 'classifier']);
 
 const DISABLED_MESSAGE = 'Owner commands are disabled (features.adminCommands is off).';
@@ -514,7 +524,7 @@ export function buildCommandTree(commandName) {
                   name: 'role',
                   description: 'Role to change.',
                   required: true,
-                  choices: choicesOf(MODEL_ROLES),
+                  choices: choicesOf(MODEL_SET_ROLES),
                 },
                 { type: STRING, name: 'id', description: 'OpenRouter model id.', required: true },
               ],
@@ -946,7 +956,7 @@ function routeModelChoices(config, typed) {
   const prefixes = byModel && typeof byModel === 'object' && !Array.isArray(byModel)
     ? Object.keys(byModel).map((key) => (key.includes('@') ? key.slice(0, key.lastIndexOf('@')) : key))
     : [];
-  const models = [...Object.values(MODEL_ROLE_PATHS), 'image.model'].map((dotted) =>
+  const models = Object.values(MODEL_SET_PATHS).map((dotted) =>
     dotted.split('.').reduce((node, key) => (isPlainObject(node) ? node[key] : undefined), config),
   );
   const all = [...new Set([...prefixes, ...models].filter((value) => typeof value === 'string' && value))];

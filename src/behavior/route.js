@@ -12,8 +12,7 @@
 // into the request: the prompt file says everything, the list lines carry
 // structural fields only.
 
-import { block, fillPromptTemplate } from './prompt.js';
-import { formatTranscript, renderTranscript } from '../discord/format.js';
+import { block, classifierTranscript, fillPromptTemplate } from './prompt.js';
 import { clampText, oneLine } from '../memory/clamp.js';
 import { topByRank } from '../memory/ranking.js';
 
@@ -194,8 +193,8 @@ export function routeCandidate(history, trigger) {
  * The `<transcript>` and `<candidate>` blocks: the last `contextMessages`
  * messages of `history` before the candidate (all of it but the candidate
  * when the candidate is not in it), rendered like the other classifiers'
- * context (src/discord/format.js, labels from `labels`, no caption: the
- * request runs beside the turn's media preparation), and the candidate's
+ * context (src/behavior/prompt.js#classifierTranscript, labels from `labels`,
+ * no caption: the request runs beside the turn's media preparation), and the candidate's
  * author and text cut to `context.maxMessageChars`. `transcriptBlock` is ''
  * for a window of 0 or no earlier message.
  * @param {{ history: object[], candidate: object, contextMessages: number, config: object,
@@ -211,16 +210,7 @@ export function routeContext({ history, candidate, contextMessages, config, labe
   const text = [...String(candidate.content ?? '')].slice(0, maxChars).join('');
   const candidateBlock = block('candidate', `${candidate.authorName}: ${text}`);
   if (context.length === 0) return { transcriptBlock: '', candidateBlock };
-  const items = formatTranscript(context, {
-    timezone: config.bot?.timezone,
-    gapMinutes: config.context?.gapMarkerMinutes,
-    maxChars,
-    selfName,
-    labels,
-    seeReactions: config.features?.seeReactions !== false,
-    reactionsPerMessage: config.context?.reactionsPerMessage,
-  });
-  return { transcriptBlock: block('transcript', renderTranscript(items, config.bot?.timezone, labels)), candidateBlock };
+  return { transcriptBlock: block('transcript', classifierTranscript(context, { config, selfName, labels })), candidateBlock };
 }
 
 /**

@@ -15,6 +15,7 @@ import {
   commandKeys,
   commandSize,
   MODEL_ROLES,
+  MODEL_SET_ROLES,
 } from '../src/discord/commands.js';
 import { isAllowed as accessIsAllowed } from '../src/discord/access.js';
 import { withCapturedLogs } from './fixtures/capture-logs.js';
@@ -56,7 +57,9 @@ test('MODEL_ROLES: the model-set, route and ping role choices are all derived fr
   const values = (option) => option.choices.map((c) => c.value);
   const names = (option) => option.choices.map((c) => c.name);
   const setRole = findOption(findOption(findOption(command.options, 'model').options, 'set').options, 'role');
-  assert.deepEqual(values(setRole), [...MODEL_ROLES]);
+  assert.deepEqual(values(setRole), [...MODEL_ROLES, 'image'], 'the chat roles, then the drawing model');
+  assert.deepEqual([...MODEL_SET_ROLES], [...MODEL_ROLES, 'image']);
+  assert.ok(MODEL_ROLES.includes('voice') && !MODEL_ROLES.includes('talk') && !MODEL_ROLES.includes('image'));
   const route = findOption(command.options, 'route');
   for (const sub of ['set', 'remove']) {
     const role = findOption(findOption(route.options, sub).options, 'role');
@@ -609,7 +612,7 @@ test('interaction handler: defers then edits for every warmup subcommand (slow c
 });
 
 test('interaction handler: defers then edits for a slow command (ping)', async () => {
-  const admin = fakeAdmin({ runImpl: () => 'talk: x — ok, 100ms' });
+  const admin = fakeAdmin({ runImpl: () => 'voice: x — ok, 100ms' });
   const handler = createInteractionHandler({ hot: baseHot(), admin, getGuildId: () => 'g1' });
 
   const interaction = fakeInteraction({ subcommand: 'ping', optionValues: {} });
@@ -617,7 +620,7 @@ test('interaction handler: defers then edits for a slow command (ping)', async (
 
   assert.equal(interaction.deferred, true);
   assert.equal(interaction.edits.length, 1);
-  assert.equal(interaction.edits[0].content, 'talk: x — ok, 100ms');
+  assert.equal(interaction.edits[0].content, 'voice: x — ok, 100ms');
 });
 
 // ---------------------------------------------------------------------------

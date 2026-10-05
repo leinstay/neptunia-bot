@@ -445,7 +445,7 @@ test('describe: a helper request -- llm.helperTimeoutMs, never llm.timeoutMs, co
   assert.equal(tuned.role, 'classifier.media');
   assert.equal(tuned.maxOutputTokens, 120);
   const unset = await run({ timeoutMs: 90000 });
-  assert.equal(unset.timeoutMs, helperRequestOptions({}).timeoutMs, 'the helper fallback, not the talk timeout');
+  assert.equal(unset.timeoutMs, helperRequestOptions({}).timeoutMs, 'the helper fallback, not the reply timeout');
 });
 
 test('describe: the picture model is classifier.media; the deprecated media.model is ignored', async () => {

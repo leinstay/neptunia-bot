@@ -150,7 +150,25 @@ const getSelfName = (guildId) => client.guilds.cache.get(guildId)?.members.me?.d
 const routeChannels = createChannelRouter({ hot, store, llm });
 // The search of the server's own history beside the web search (features.recall): the lookup's server part.
 const recall = createRecall({ hot, store, llm, describer });
-const turns = createTurnRunner({ hot, store, llm, calibrator, client, describer, imageFetcher, lookup, recall, images, emoji, variety, getSelfName, routeChannels });
+// A warmup run ends a chain of parts (a message answered part by part) before its next part;
+// read through a closure, as the warmup is created just below.
+const turns = createTurnRunner({
+  hot,
+  store,
+  llm,
+  calibrator,
+  client,
+  describer,
+  imageFetcher,
+  lookup,
+  recall,
+  images,
+  emoji,
+  variety,
+  getSelfName,
+  routeChannels,
+  isWarmingUp: () => warmup.isWarmingUp(),
+});
 // THE way memory starts (docs/prompt-contract.md, "The warmup"): sample-based,
 // resumable, mutes the persona while a run is in flight (see isWarmingUp below).
 const warmup = createWarmup({ hot, store, client, llm, calibrator, getSelfName, getGuildId });

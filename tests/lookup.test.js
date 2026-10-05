@@ -235,6 +235,16 @@ test('readLinks: skipSites and video-site links are never read; a gif is never r
   assert.equal(llm.calls.length, 0);
 });
 
+test('readLinks: a GIF page (tenor, giphy, klipy) is never read, even with an empty skipSites', async () => {
+  const { lookup, pageFetcher, llm, state } = setup({ hotOptions: { web: { links: { skipSites: [] } } } });
+  for (const url of ['https://klipy.com/gifs/dancing-cat', 'https://tenor.com/view/x', 'https://giphy.com/gifs/x']) {
+    assert.equal(await readOne(lookup, { ...LINK, id: url, url, kind: 'link' }), null, url);
+  }
+  assert.equal(pageFetcher.calls.length, 0);
+  assert.equal(llm.calls.length, 0);
+  assert.equal(state.data.webCount ?? 0, 0, 'no daily slot spent');
+});
+
 test('readLinks: a URL whose path ends with a binary extension is never read, whatever the case or query', async () => {
   const { lookup, pageFetcher, llm, state } = setup();
   for (const ext of ['png', 'jpg', 'jpeg', 'gif', 'webp', 'avif', 'svg', 'mp4', 'webm', 'mov', 'mkv', 'mp3', 'ogg', 'wav', 'zip', 'rar', '7z', 'pdf']) {

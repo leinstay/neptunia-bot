@@ -18,6 +18,7 @@ import {
   paceSettings,
 } from '../src/behavior/turn.js';
 import { between, typingMs } from '../src/behavior/random.js';
+import { fillPromptTemplate } from '../src/behavior/prompt.js';
 import { fill, formatClock, formatDate } from '../src/discord/format.js';
 import { labels } from './fixtures/labels.js';
 import { withCapturedLogs } from './fixtures/capture-logs.js';
@@ -1448,7 +1449,7 @@ test('createTurnRunner: rewatch -- the classifier gets the watched videos and th
   );
   assert.equal(options.model, 'x/haiku', 'no text classifier model -> the media model');
   assert.equal(options.maxOutputTokens, 120);
-  assert.equal(options.timeoutMs, 25_000, 'a helper: llm.helperTimeoutMs, not the talk timeout');
+  assert.equal(options.timeoutMs, 25_000, 'a helper: llm.helperTimeoutMs, not the reply timeout');
   assert.equal(options.countAgainstDailyCap, true);
   assert.equal(options.skipCalibration, true);
   assert.equal(options.purpose, 'rewatch');
@@ -1870,7 +1871,7 @@ test('createTurnRunner: lookup -- the classifier gets the transcript and the can
   assert.ok(user.endsWith('</transcript>\n<candidate>\nZoë: ποιος κέρδισε τον τελικό;\n</candidate>'), user);
   assert.ok(!user.split('<candidate>')[0].includes('ποιος κέρδισε'), 'the trigger only in <candidate>');
   assert.equal(options.model, 'x/text');
-  assert.equal(options.timeoutMs, 25_000, 'a helper: llm.helperTimeoutMs, not the talk timeout');
+  assert.equal(options.timeoutMs, 25_000, 'a helper: llm.helperTimeoutMs, not the reply timeout');
   assert.equal(options.skipCalibration, true);
   assert.equal(options.countAgainstDailyCap, true);
   assert.equal(options.purpose, 'lookup');
@@ -1890,13 +1891,15 @@ test('createTurnRunner: lookup -- the classifier answer cap is web.search.classi
   assert.equal(set.llm.classifierCalls[0].options.maxOutputTokens, 45);
 });
 
-test('createTurnRunner: lookup -- {{today}} in the classifier prompt is the injected clock\'s UTC date, {{name}} still filled', async () => {
+test('createTurnRunner: lookup -- {{today}} in the classifier prompt is the injected clock\'s date in bot.timezone, {{name}} still filled', async () => {
   const hot = lookupHot();
   hot.prompts.lookup = 'Decide whether {{name}} needs to look something up. Today is {{today}}; {{name}} again.';
   const llm = lookupLlm('none');
-  // 23:30 UTC on the last day of the year: the UTC date, not a local one.
+  // 23:30 UTC on the last day of the year is already New Year's Day in Tokyo (UTC+9),
+  // the zone the answer's `when:` range is read in.
+  hot.config.bot.timezone = 'Asia/Tokyo';
   await runLookupTurn({ hot, llm, now: () => Date.UTC(2031, 11, 31, 23, 30, 0) });
-  assert.equal(llm.classifierCalls[0].messages[0].content, 'Decide whether Bot needs to look something up. Today is 2031-12-31; Bot again.');
+  assert.equal(llm.classifierCalls[0].messages[0].content, 'Decide whether Bot needs to look something up. Today is 2032-01-01; Bot again.');
 });
 
 test('createTurnRunner: lookup -- a classifier prompt without {{today}} passes through unchanged apart from {{name}}', async () => {
@@ -2130,6 +2133,26 @@ test('createTurnRunner: recall -- a recall that found nothing leaves no server p
   const alone = await runRecallTurn({ llm: lookupLlm('server: κουνέλι'), recall: nothing() });
   assert.equal(alone.recall.runCalls.length, 1);
   assert.equal(turnLookupOf(alone.llm), null);
+});
+
+test('createTurnRunner: recall -- senses.recall reaches the request only on a server turn where the runner is available', async () => {
+  const sensesHas = ({ llm }) => llm.turnCalls[0].messages[1].content.includes(labels.senses.recall);
+  const throwing = { ...fakeRecall(), available: () => { throw new Error('boom'); } };
+  const noRun = { available: () => true };
+  const cases = [
+    { name: 'available', run: { recall: fakeRecall() }, expected: true },
+    { name: 'available, no web lookup either', run: { hot: lookupHot({ webLookup: false }), lookup: null, recall: fakeRecall() }, expected: true },
+    { name: 'unavailable', run: { recall: fakeRecall({ available: false }) }, expected: false },
+    { name: 'not wired', run: { recall: null }, expected: false },
+    { name: 'no run function', run: { recall: noRun }, expected: false },
+    { name: 'available() throws', run: { recall: throwing }, expected: false },
+    { name: 'private chat', run: { recall: fakeRecall(), dm: true }, expected: false },
+  ];
+  for (const { name, run, expected } of cases) {
+    const turn = await runRecallTurn({ llm: lookupLlm('x y'), ...run });
+    assert.equal(turn.result.outcome, 'spoke', name);
+    assert.equal(sensesHas(turn), expected, name);
+  }
 });
 
 test('createTurnRunner: recall -- a stretch from recall reaches the block under its header', async () => {
@@ -3035,7 +3058,7 @@ test('createTurnRunner: only a custom reaction the index does not know means out
 // Provider routing: every request says which role makes it (llm.providerByModel
 // keys of the form "<prefix>@<role>").
 
-test('createTurnRunner: the persona turn is requested as the talk role', async () => {
+test('createTurnRunner: the persona turn is requested as role voice, purpose reply', async () => {
   const raw = rawMessage({ id: 'm1' });
   const channel = fakeTurnChannel({ historyMessages: [raw] });
   const llm = fakeLlm('<skip/>');
@@ -3045,10 +3068,11 @@ test('createTurnRunner: the persona turn is requested as the talk role', async (
   const turns = createTurnRunner({ hot, store: fakeStore(), llm, calibrator: identityCalibrator(), client: fakeClient() });
   await turns.runTurn({ channel, mode: 'interject' });
   assert.equal(llm.optionCalls.length, 1);
-  assert.deepEqual(llm.optionCalls[0], { role: 'talk' }, 'only the role: the talk model and every other setting stay the defaults');
+  assert.deepEqual(llm.optionCalls[0], { role: 'voice', purpose: 'reply' }, 'only the role and the purpose: llm.model and every other setting stay the defaults');
+  assert.equal('cache' in llm.optionCalls[0], false, 'the cache policy decides: the reply is the request it marks');
 });
 
-test('createTurnRunner: the text-only retry after a 4xx image error is requested as the talk role too', async () => {
+test('createTurnRunner: the text-only retry after a 4xx image error is requested as the reply too', async () => {
   const raw = rawMessage({
     id: 'm1',
     attachments: new Map([
@@ -3060,16 +3084,16 @@ test('createTurnRunner: the text-only retry after a 4xx image error is requested
   const turns = createTurnRunner({ hot: fakeHot({}), store: fakeStore(), llm, calibrator: identityCalibrator(), client: fakeClient(), imageFetcher: fakeImageFetcher() });
   await turns.runTurn({ channel, mode: 'reply', trigger: videoTrigger(raw), triggerKind: 'mention' });
   assert.equal(llm.optionCalls.length, 2);
-  assert.deepEqual(llm.optionCalls.map((o) => o?.role), ['talk', 'talk']);
+  assert.deepEqual(llm.optionCalls.map((o) => [o?.role, o?.purpose]), [['voice', 'reply'], ['voice', 'reply']]);
 });
 
-test('createTurnRunner: the rewatch and lookup classifiers are requested as classifier.text, the turn as talk', async () => {
+test('createTurnRunner: the rewatch and lookup classifiers are requested as classifier.text, the turn as voice', async () => {
   const rewatch = await runRewatch();
   assert.equal(rewatch.llm.classifierCalls[0].options.role, 'classifier.text');
-  assert.equal(rewatch.llm.turnCalls[0].options.role, 'talk');
+  assert.equal(rewatch.llm.turnCalls[0].options.role, 'voice');
   const lookup = await runLookupTurn();
   assert.equal(lookup.llm.classifierCalls[0].options.role, 'classifier.text');
-  assert.equal(lookup.llm.turnCalls[0].options.role, 'talk');
+  assert.equal(lookup.llm.turnCalls[0].options.role, 'voice');
 });
 
 // ---------------------------------------------------------------------------
@@ -5404,7 +5428,7 @@ test('runTurn: a routed answer records the call it answered and its source chann
 });
 
 // ---------------------------------------------------------------------------
-// Pace: the helpers before the talk request run together, under one deadline (pace.*).
+// Pace: the helpers before the reply request run together, under one deadline (pace.*).
 
 /** A promise with its resolve and reject handed out. */
 function deferred() {
@@ -5509,7 +5533,7 @@ test('paceSettings: 0, a negative value or a non-number turns a limit off; a mis
   assert.deepEqual(paceSettings({ pace: 'fast' }), missing, 'a group that is not an object counts as missing');
 });
 
-test('runTurn: the helpers before the talk request overlap -- two slow ones take the time of one', async () => {
+test('runTurn: the helpers before the reply request overlap -- two slow ones take the time of one', async () => {
   let t = NOW;
   const caption = deferred();
   const read = deferred();
@@ -5692,13 +5716,13 @@ test('runTurn: turn: timings carries every stage, null for one that did not run'
   for (const name of ['previews', 'links', 'neighbors', 'pulled']) assert.equal(typeof timings.stages[name], 'number', name);
   for (const name of ['videos', 'rewatch', 'lookup', 'variety']) assert.equal(timings.stages[name], null, name);
   assert.deepEqual(
-    [timings.channel, timings.mode, timings.triggerKind, timings.prepareMs, timings.talkMs, timings.totalMs, timings.late],
+    [timings.channel, timings.mode, timings.triggerKind, timings.prepareMs, timings.replyMs, timings.totalMs, timings.late],
     ['c1', 'reply', 'mention', 1100, 2000, 3100, []],
   );
   assert.ok(logs.some((l) => l.msg === 'turn: model answered' && 'secondsToAnswer' in l));
 });
 
-/** An llm fake that notes how many typing indicators the channel had when the talk request came. */
+/** An llm fake that notes how many typing indicators the channel had when the reply request came. */
 function typingAtTalk(channel) {
   const base = fakeLlm('<msg>ok</msg>');
   const seen = [];
@@ -5766,7 +5790,7 @@ function barLlm(talk) {
   };
 }
 
-test('runTurn: an answer in hand just before pace.dropAfterMs is posted, the talk request bounded by the time left', async () => {
+test('runTurn: an answer in hand just before pace.dropAfterMs is posted, the reply request bounded by the time left', async () => {
   let t = NOW;
   const llm = barLlm(async () => {
     t = NOW + BAR_MS - 1;
@@ -5782,7 +5806,8 @@ test('runTurn: an answer in hand just before pace.dropAfterMs is posted, the tal
   assert.equal(scene.channel.sent.length, 1);
   assert.equal(logs.some((l) => l.msg === 'turn: dropped'), false);
   const [options] = llm.optionCalls;
-  assert.equal(options.role, 'talk');
+  assert.equal(options.role, 'voice');
+  assert.equal(options.purpose, 'reply');
   assert.equal(options.timeoutMs, BAR_MS, 'the smaller of llm.timeoutMs and the time left');
   assert.equal(options.signal.aborted, false);
   assert.deepEqual(scene.timers.live(), [], 'the bar is cleared once the answer is in hand');
@@ -5802,13 +5827,13 @@ test('runTurn: a talk request still out at pace.dropAfterMs is aborted; nothing 
   await settleUntil(() => llm.optionCalls.length > 0);
   const bar = scene.timers.live().find((timer) => timer.ms === BAR_MS);
   assert.ok(bar, 'the bar is set from the turn start');
-  assert.ok(scene.timers.live().some((timer) => timer.ms !== BAR_MS), 'the typing indicator is refreshed through the talk request');
+  assert.ok(scene.timers.live().some((timer) => timer.ms !== BAR_MS), 'the typing indicator is refreshed through the reply request');
   scene.timers.fire(bar);
   const { result, logs } = await running;
   await settleUntil(() => idle > 0);
 
   assert.equal(result.outcome, 'error');
-  assert.equal(llm.optionCalls[0].signal.aborted, true, 'the talk request is aborted');
+  assert.equal(llm.optionCalls[0].signal.aborted, true, 'the reply request is aborted');
   assert.equal(scene.channel.sent.length, 0);
   const dropped = logs.find((l) => l.msg === 'turn: dropped');
   assert.deepEqual(
@@ -5864,7 +5889,7 @@ test('runTurn: pace.dropAfterMs 0 sets no bar -- a slow answer is still posted, 
 
   assert.equal(result.outcome, 'spoke');
   assert.equal(scene.channel.sent.length, 1);
-  assert.deepEqual(llm.optionCalls, [{ role: 'talk' }]);
+  assert.deepEqual(llm.optionCalls, [{ role: 'voice', purpose: 'reply' }]);
   assert.equal(logs.some((l) => l.msg === 'turn: dropped'), false);
   assert.ok(scene.timers.timers.every((timer) => timer.ms === TEST_PACE.prepareMs), 'only the preparation deadline');
 });
@@ -5883,5 +5908,397 @@ test('runTurn: a private chat message shows the typing indicator while its turn 
   );
 
   assert.equal(result.outcome, 'spoke');
-  assert.deepEqual(llm.seen, [1], 'typing before the talk request');
+  assert.deepEqual(llm.seen, [1], 'typing before the reply request');
+});
+
+// ---------------------------------------------------------------------------
+// A message that holds several requests: the splitter (prompts/split.md) and the chain of parts.
+
+const SPLIT_SYSTEM = 'Split this call to {{name}} into at most {{maxTasks}} parts.';
+const SPLIT_TEXT = 'ποιος είναι ο Νίκος; κοίτα το κανάλι της Ελένης, και πες μου αν το μιμίδιο είναι αστείο.';
+const SPLIT_PARTS = ['ποιος είναι ο Νίκος', 'κοίτα το κανάλι της Ελένης', 'το μιμίδιο είναι αστείο;'];
+const PARTS_ANSWER = SPLIT_PARTS.map((part) => `- ${part}`).join('\n');
+
+/**
+ * An llm fake routing by request purpose: the splitter (`split`), the search classifier
+ * (`lookup`), everything else is the reply request. Each answer is a string, an Error to throw,
+ * or a function of the call's index (0-based, per kind) giving one of those or a promise.
+ */
+function splitLlm({ split = PARTS_ANSWER, lookup = 'none', talk = '<msg reply="#2">ok</msg>' } = {}) {
+  const calls = { split: [], lookup: [], talk: [] };
+  const answer = async (spec, index) => {
+    const value = typeof spec === 'function' ? await spec(index) : spec;
+    if (value instanceof Error) throw value;
+    return { text: value, usage: {}, estimated: 10 };
+  };
+  return {
+    calls,
+    complete: async (messages, options) => {
+      const kind = options?.purpose === 'split' ? 'split' : options?.purpose === 'lookup' ? 'lookup' : 'talk';
+      calls[kind].push({ messages, options });
+      const spec = kind === 'split' ? split : kind === 'lookup' ? lookup : talk;
+      return answer(spec, calls[kind].length - 1);
+    },
+  };
+}
+
+/** The settings the split tests rely on, set here: the pre-filter, the cap, and the pace. */
+function splitHot({ features = {}, split = {}, labels: ownLabels } = {}) {
+  const hot = lookupHot(
+    { typingSimulation: false, ...features },
+    {},
+    {
+      split: { minChars: 20, maxTasks: 4, contextMessages: 2, maxOutputTokens: 50, ...split },
+      pace: { prepareMs: 5000, prepareSearchMs: 5000, dropAfterMs: 60000, typingWhilePreparing: false },
+    },
+  );
+  hot.prompts.split = SPLIT_SYSTEM;
+  if (ownLabels) hot.prompts.labels = ownLabels;
+  return hot;
+}
+
+/** A schedule whose timers fire only when `fire(ms)` is called (the turn's clock stands still at NOW). */
+function manualSchedule() {
+  const timers = [];
+  const schedule = (fn, ms) => {
+    const timer = { fn, ms, cancelled: false };
+    timers.push(timer);
+    return () => {
+      timer.cancelled = true;
+    };
+  };
+  schedule.fire = (ms) => {
+    for (const timer of timers.filter((t) => t.ms === ms && !t.cancelled)) {
+      timer.cancelled = true;
+      timer.fn();
+    }
+  };
+  return schedule;
+}
+
+/** One reply turn on a call with `content`, under the split settings. */
+async function runSplitTurn({ hot = splitHot(), llm = splitLlm(), content = SPLIT_TEXT, triggerKind = 'mention', extra = {}, turnExtra = {}, schedule = manualSchedule() } = {}) {
+  const raw = rawMessage({ id: 'm2', ts: NOW - 1000, content });
+  const channel = fakeTurnChannel({ historyMessages: [rawMessage({ id: 'm1', ts: NOW - 5000, authorId: 'u2', authorName: 'Léa', content: 'καλημέρα' }), raw] });
+  const turns = createTurnRunner({ hot, store: fakeStore(), llm, calibrator: identityCalibrator(), client: fakeClient(), lookup: fakeLookup(), now: () => NOW, schedule, ...extra });
+  const trigger = normalizedTrigger(raw);
+  const { result, logs } = await withCapturedLogs(() => turns.runTurn({ channel, mode: 'reply', trigger, triggerKind, ...turnExtra }));
+  return { result, logs, llm, channel, turns, trigger };
+}
+
+/** The `<candidate>` text a classifier request carried. */
+function candidateOf(call) {
+  return /<candidate>\n[^:]*: ([\s\S]*?)\n<\/candidate>/.exec(call.messages[1].content)?.[1] ?? null;
+}
+
+/** The `<task>` block of a talk request. */
+function taskOf(call) {
+  return /<task>\n([\s\S]*?)\n<\/task>/.exec(userTextOf(call.messages))?.[1] ?? '';
+}
+
+/** labels.task.part as the request renders it for part `index` of SPLIT_PARTS (no queued call). */
+function partLabel(index, parts = SPLIT_PARTS) {
+  const others = parts.map((text, i) => (i + 1 === index ? null : `${i + 1}. ${text}`)).filter(Boolean).join('; ');
+  return fill(labels.task.part, { index, total: parts.length, part: parts[index - 1], others });
+}
+
+test('runTurn: a short or unstructured call never asks the splitter', async () => {
+  for (const content of ['γεια σου', 'a'.repeat(60)]) {
+    const { llm, result } = await runSplitTurn({ content });
+    assert.equal(llm.calls.split.length, 0, content);
+    assert.equal(llm.calls.talk.length, 1);
+    assert.equal(result.outcome, 'spoke');
+  }
+});
+
+test('runTurn: a `one` verdict leaves the turn exactly as without the splitter', async () => {
+  const off = splitHot();
+  delete off.prompts.split;
+  const before = await runSplitTurn({ hot: off });
+  const after = await runSplitTurn({ llm: splitLlm({ split: 'one' }) });
+
+  assert.equal(before.llm.calls.split.length, 0);
+  assert.equal(after.llm.calls.split.length, 1);
+  assert.deepEqual(after.llm.calls.talk.map((call) => call.messages), before.llm.calls.talk.map((call) => call.messages), 'the same talk request');
+  assert.deepEqual(after.llm.calls.lookup.map((call) => call.messages), before.llm.calls.lookup.map((call) => call.messages), 'the search classifier asked once, the same way');
+  assert.deepEqual(after.channel.sent, before.channel.sent);
+  assert.deepEqual(after.result, before.result);
+  const verdict = after.logs.find((line) => line.msg === 'split: verdict');
+  assert.deepEqual([verdict.channel, verdict.parts, typeof verdict.ms], ['c1', 1, 'number']);
+  assert.equal(after.logs.some((line) => line.msg === 'turn: part'), false);
+});
+
+test('runTurn: the splitter request fills split.md and carries the transcript and the candidate', async () => {
+  const { llm } = await runSplitTurn({ llm: splitLlm({ split: 'one' }) });
+  const [call] = llm.calls.split;
+  assert.equal(call.messages[0].content, fillPromptTemplate(SPLIT_SYSTEM, { name: 'Bot', maxTasks: 4 }));
+  assert.ok(call.messages[1].content.startsWith('<transcript>\n'));
+  assert.equal(candidateOf(call), SPLIT_TEXT);
+  assert.deepEqual([call.options.role, call.options.purpose, call.options.maxOutputTokens, call.options.helper], ['classifier.text', 'split', 50, true]);
+});
+
+test('runTurn: a failed, empty or unparsable splitter answer is one request', async () => {
+  for (const split of [Object.assign(new Error('boom'), { statusCode: 503 }), '   ', '- only one']) {
+    const { llm, logs, result } = await runSplitTurn({ llm: splitLlm({ split }) });
+    assert.equal(llm.calls.talk.length, 1);
+    assert.equal(taskOf(llm.calls.talk[0]).includes('parts'), false);
+    assert.equal(result.outcome, 'spoke');
+    const failed = logs.find((line) => line.msg === 'split: failed');
+    assert.ok(failed, String(split));
+    assert.ok(['llm-error', 'empty', 'unparsed'].includes(failed.reason));
+  }
+});
+
+test('runTurn: a splitter still thinking at the deadline is one request; its late verdict is only logged', async () => {
+  let release;
+  const late = new Promise((resolve) => {
+    release = resolve;
+  });
+  const schedule = manualSchedule();
+  const llm = splitLlm({ split: () => late });
+  const raw = rawMessage({ id: 'm2', ts: NOW - 1000, content: SPLIT_TEXT });
+  const channel = fakeTurnChannel({ historyMessages: [raw] });
+  const turns = createTurnRunner({ hot: splitHot(), store: fakeStore(), llm, calibrator: identityCalibrator(), client: fakeClient(), lookup: fakeLookup(), now: () => NOW, schedule });
+  const { logs } = await withCapturedLogs(async () => {
+    const running = turns.runTurn({ channel, mode: 'reply', trigger: normalizedTrigger(raw), triggerKind: 'mention' });
+    for (let i = 0; i < 20 && llm.calls.split.length === 0; i += 1) await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(llm.calls.talk.length, 0, 'the turn waits for the splitter like any stage');
+    schedule.fire(5000);
+    const result = await running;
+    assert.equal(result.outcome, 'spoke');
+    release(PARTS_ANSWER);
+    await new Promise((resolve) => setImmediate(resolve));
+  });
+  assert.equal(llm.calls.talk.length, 1, 'one turn, for the whole message');
+  const verdict = logs.find((line) => line.msg === 'split: verdict');
+  assert.deepEqual([verdict.parts, verdict.late], [3, true]);
+});
+
+test('runTurn: parts in time become one turn per part, in order, each helper judging its part', async () => {
+  const { llm, logs, result, channel } = await runSplitTurn();
+
+  assert.equal(llm.calls.talk.length, 3);
+  // The search classifier: every part asks it with its own text (the whole message's may have started first).
+  const candidates = llm.calls.lookup.map(candidateOf);
+  assert.deepEqual(candidates.filter((text) => text !== SPLIT_TEXT), SPLIT_PARTS);
+  assert.ok(candidates.filter((text) => text === SPLIT_TEXT).length <= 1);
+  // The persona's request names the part it answers now and the others.
+  assert.deepEqual(llm.calls.talk.map((call) => taskOf(call).endsWith(partLabel(llm.calls.talk.indexOf(call) + 1))), [true, true, true]);
+  // The first answer replies to the message, the later ones post plain.
+  assert.deepEqual(channel.sent.map((payload) => payload.reply?.messageReference ?? null), ['m2', null, null]);
+  assert.deepEqual(logs.filter((line) => line.msg === 'turn: part').map(({ channel: id, index, total, outcome }) => [id, index, total, outcome]), [
+    ['c1', 1, 3, 'spoke'],
+    ['c1', 2, 3, 'spoke'],
+    ['c1', 3, 3, 'spoke'],
+  ]);
+  assert.deepEqual(result, { outcome: 'spoke', mode: 'reply', delivered: true });
+  const lines = logs.filter((line) => line.msg.startsWith('split:') || line.msg === 'turn: part');
+  assert.equal(JSON.stringify(lines).includes('Νίκος'), false, 'counts and codes only, never a part');
+});
+
+test('runTurn: the route hook judges each part\'s text', async () => {
+  const seen = [];
+  const routeChannels = async ({ trigger }) => {
+    seen.push(trigger.content);
+    return [];
+  };
+  await runSplitTurn({ extra: { routeChannels } });
+  assert.deepEqual(seen.filter((text) => text !== SPLIT_TEXT), SPLIT_PARTS);
+});
+
+test('runTurn: the persona may stay silent on a part; a failed part does not stop the next', async () => {
+  const talk = (index) => (index === 0 ? new Error('provider down') : index === 1 ? '<skip/>' : '<msg>τρία</msg>');
+  const { logs, result, channel } = await runSplitTurn({ llm: splitLlm({ talk }) });
+  assert.deepEqual(logs.filter((line) => line.msg === 'turn: part').map((line) => line.outcome), ['error', 'skip', 'spoke']);
+  assert.equal(channel.sent.length, 1);
+  assert.equal(channel.sent[0].reply, undefined, 'a later part posts plain');
+  assert.equal(result.outcome, 'spoke');
+});
+
+test('runTurn: a chain where no part spoke gives the first skip, else the first part\'s result', async () => {
+  const silent = await runSplitTurn({ llm: splitLlm({ talk: '<skip/>' }) });
+  assert.deepEqual(silent.result, { outcome: 'skip', mode: 'reply' });
+  const failing = await runSplitTurn({ llm: splitLlm({ talk: new Error('down') }) });
+  assert.equal(failing.result.outcome, 'error');
+});
+
+test('runTurn: split.maxTasks cuts the parts', async () => {
+  const { llm } = await runSplitTurn({ hot: splitHot({ split: { maxTasks: 2 } }), llm: splitLlm({ split: `${PARTS_ANSWER}\n- και κάτι ακόμα` }) });
+  assert.equal(llm.calls.talk.length, 2);
+  assert.ok(taskOf(llm.calls.talk[0]).endsWith(partLabel(1, SPLIT_PARTS.slice(0, 2))));
+});
+
+test('runTurn: an overheard line, a drawFailed turn or an unprompted turn never asks the splitter', async () => {
+  const overheard = await runSplitTurn({ triggerKind: 'overheard' });
+  assert.equal(overheard.llm.calls.split.length, 0);
+  const llm = splitLlm();
+  const channel = fakeTurnChannel({ historyMessages: [rawMessage({ id: 'm2', ts: NOW - 1000, content: SPLIT_TEXT })] });
+  const turns = createTurnRunner({ hot: splitHot(), store: fakeStore(), llm, calibrator: identityCalibrator(), client: fakeClient(), now: () => NOW, schedule: manualSchedule() });
+  await turns.runTurn({ channel, mode: 'interject' });
+  assert.equal(llm.calls.split.length, 0);
+});
+
+test('runTurn: an older labels file without labels.task.part never starts a chain; a missing split.md logs no-prompt', async () => {
+  const { task, ...older } = labels;
+  const old = await runSplitTurn({ hot: splitHot({ labels: older }) });
+  assert.equal(old.llm.calls.split.length, 0);
+  assert.equal(old.llm.calls.talk.length, 1);
+
+  const hot = splitHot();
+  delete hot.prompts.split;
+  const { logs, llm } = await runSplitTurn({ hot });
+  assert.equal(llm.calls.split.length, 0);
+  assert.deepEqual(logs.filter((line) => line.msg === 'split: skipped').map(({ channel, reason }) => [channel, reason]), [['c1', 'no-prompt']]);
+});
+
+test('runTurn: features.splitTasks false asks no splitter', async () => {
+  const { llm } = await runSplitTurn({ hot: splitHot({ features: { splitTasks: false } }) });
+  assert.equal(llm.calls.split.length, 0);
+});
+
+test('runTurn: the chain holds the one attention to its end and notifies idle once', async () => {
+  const other = fakeTurnChannel({ id: 'c9' });
+  let idle = 0;
+  const busyDuring = [];
+  let turnsRef = null;
+  const talk = async (index) => {
+    busyDuring.push(turnsRef.isAnyBusy());
+    if (index === 0) {
+      const elsewhere = await turnsRef.runTurn({ channel: other, mode: 'interject' });
+      busyDuring.push(elsewhere.outcome);
+    }
+    return '<msg>ok</msg>';
+  };
+  const llm = splitLlm({ talk });
+  const raw = rawMessage({ id: 'm2', ts: NOW - 1000, content: SPLIT_TEXT });
+  const channel = fakeTurnChannel({ historyMessages: [raw] });
+  turnsRef = createTurnRunner({ hot: splitHot(), store: fakeStore(), llm, calibrator: identityCalibrator(), client: fakeClient(), lookup: fakeLookup(), now: () => NOW, schedule: manualSchedule() });
+  turnsRef.setOnIdle(() => {
+    idle += 1;
+  });
+  const waited = turnsRef.waitIdle();
+  let waitedDone = false;
+  waited.then(() => {
+    waitedDone = true;
+  });
+  await turnsRef.runTurn({ channel, mode: 'reply', trigger: normalizedTrigger(raw), triggerKind: 'mention' });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(busyDuring, [true, 'busy', true, true]);
+  assert.equal(idle, 1, 'one notification, once the chain is over');
+  assert.equal(waitedDone, true);
+  assert.equal(turnsRef.isAnyBusy(), false);
+});
+
+test('runTurn: a pause or a warmup ends the chain before its next part', async () => {
+  for (const reason of ['paused', 'warmup']) {
+    const store = fakeStore();
+    let warming = false;
+    const talk = () => {
+      if (reason === 'paused') store.state.data.paused = true;
+      else warming = true;
+      return '<msg>ok</msg>';
+    };
+    const llm = splitLlm({ talk });
+    const raw = rawMessage({ id: 'm2', ts: NOW - 1000, content: SPLIT_TEXT });
+    const channel = fakeTurnChannel({ historyMessages: [raw] });
+    const turns = createTurnRunner({ hot: splitHot(), store, llm, calibrator: identityCalibrator(), client: fakeClient(), lookup: fakeLookup(), now: () => NOW, schedule: manualSchedule(), isWarmingUp: () => warming });
+    const { logs, result } = await withCapturedLogs(() => turns.runTurn({ channel, mode: 'reply', trigger: normalizedTrigger(raw), triggerKind: 'mention' }));
+    assert.equal(llm.calls.talk.length, 1, reason);
+    assert.deepEqual(logs.filter((line) => line.msg === 'turn: chain stopped').map(({ reason: why, index, total }) => [why, index, total]), [[reason, 2, 3]]);
+    assert.equal(result.outcome, 'spoke');
+    assert.equal(turns.isAnyBusy(), false);
+  }
+});
+
+test('runTurn: a dry run mirrors each part with its number in the header', async () => {
+  const mirrored = [];
+  const hot = splitHot({ features: { dryRun: true } });
+  hot.config.bot.dryRunChannelId = 'mirror1';
+  const { result } = await runSplitTurn({ hot, llm: splitLlm({ talk: '<msg>ok</msg>' }), extra: { client: mirrorClient(mirrored) } });
+  assert.deepEqual(result, { outcome: 'spoke', mode: 'reply', dryRun: true });
+  assert.deepEqual(
+    mirrored.map((payload) => /· part (\d)\/(\d)/.exec(payload.content)?.slice(1).join('/')),
+    ['1/3', '2/3', '3/3'],
+  );
+});
+
+test('runTurn: the parts not started yet are the author\'s waiting items; a message folded into one reaches its request', async () => {
+  let turnsRef = null;
+  const seen = [];
+  const talk = (index) => {
+    if (index === 0) {
+      seen.push(turnsRef.waitingParts('c1', 'u1'), turnsRef.waitingParts('c1', 'u2'));
+      seen.push(turnsRef.addToPart('c1', 'u1', 2, { id: 'f1', text: 'και το δεύτερο;', ts: NOW }));
+      seen.push(turnsRef.addToPart('c1', 'u1', 1, { id: 'f2', text: 'όχι', ts: NOW }));
+    }
+    return '<msg>ok</msg>';
+  };
+  const llm = splitLlm({ talk });
+  const raw = rawMessage({ id: 'm2', ts: NOW - 1000, content: SPLIT_TEXT });
+  const channel = fakeTurnChannel({ historyMessages: [raw] });
+  turnsRef = createTurnRunner({ hot: splitHot(), store: fakeStore(), llm, calibrator: identityCalibrator(), client: fakeClient(), lookup: fakeLookup(), now: () => NOW, schedule: manualSchedule() });
+  await turnsRef.runTurn({ channel, mode: 'reply', trigger: normalizedTrigger(raw), triggerKind: 'mention' });
+
+  assert.deepEqual(seen, [[{ index: 2, text: SPLIT_PARTS[1] }, { index: 3, text: SPLIT_PARTS[2] }], [], true, false]);
+  assert.ok(taskOf(llm.calls.talk[1]).endsWith(fill(labels.task.added, { added: 'και το δεύτερο;' })));
+  assert.equal(taskOf(llm.calls.talk[2]).includes('και το δεύτερο;'), false);
+  assert.deepEqual(turnsRef.waitingParts('c1', 'u1'), [], 'nothing waits once the chain is over');
+});
+
+test('runTurn: a part\'s others name the author\'s queued calls after the parts', async () => {
+  const queued = () => [{ id: 'm7', text: 'και ένα ακόμα' }];
+  const { llm } = await runSplitTurn({ turnExtra: { queued } });
+  const others = '2. κοίτα το κανάλι της Ελένης; 3. το μιμίδιο είναι αστείο;; 4. και ένα ακόμα';
+  assert.ok(taskOf(llm.calls.talk[0]).endsWith(fill(labels.task.part, { index: 1, total: 3, part: SPLIT_PARTS[0], others })));
+});
+
+test('runTurn: queued calls named in the request are not counted as seen; without labels.task.queued they are', async () => {
+  const history = [rawMessage({ id: 'm1', ts: NOW - 3000, content: 'πρώτο' }), rawMessage({ id: 'm3', ts: NOW - 2000, content: 'δεύτερο' })];
+  const run = async (hot) => {
+    const llm = splitLlm({ talk: '<msg>ok</msg>' });
+    const channel = fakeTurnChannel({ historyMessages: history });
+    const turns = createTurnRunner({ hot, store: fakeStore(), llm, calibrator: identityCalibrator(), client: fakeClient(), now: () => NOW, schedule: manualSchedule() });
+    const queued = () => [{ id: 'm3', text: 'δεύτερο' }];
+    const added = [{ id: 'm4', text: 'λοιπόν;', ts: NOW }];
+    await turns.runTurn({ channel, mode: 'reply', trigger: normalizedTrigger(history[0]), triggerKind: 'mention', queued, added });
+    return { turns, task: taskOf(llm.calls.talk[0]) };
+  };
+  const named = await run(splitHot());
+  assert.ok(named.task.endsWith([fill(labels.task.queued, { others: '1. δεύτερο' }), fill(labels.task.added, { added: 'λοιπόν;' })].join('\n\n')));
+  assert.equal(named.turns.spokeAfterSeeing('c1', 'm3'), false, 'left to its own turn');
+  assert.equal(named.turns.spokeAfterSeeing('c1', 'm1'), true);
+
+  const { queued: _queued, ...noQueued } = labels.task;
+  const older = await run(splitHot({ labels: { ...labels, task: noQueued } }));
+  assert.equal(older.task.includes('δεύτερο'), false);
+  assert.equal(older.turns.spokeAfterSeeing('c1', 'm3'), true, 'the old rule: seen is answered');
+});
+
+test('runTurn: another member\'s waiting call is named under labels.task.queuedOthers and not counted as seen; without the label it is', async () => {
+  const history = [
+    rawMessage({ id: 'm1', ts: NOW - 3000, content: 'πρώτο' }),
+    rawMessage({ id: 'm2', ts: NOW - 2500, authorId: 'u2', authorName: 'Léa', content: 'άλλο' }),
+    rawMessage({ id: 'm3', ts: NOW - 2000, content: 'δεύτερο' }),
+  ];
+  const run = async (hot) => {
+    const llm = splitLlm({ talk: '<msg>ok</msg>' });
+    const channel = fakeTurnChannel({ historyMessages: history });
+    const turns = createTurnRunner({ hot, store: fakeStore(), llm, calibrator: identityCalibrator(), client: fakeClient(), now: () => NOW, schedule: manualSchedule() });
+    const queued = () => [
+      { id: 'm2', text: 'άλλο', author: 'Léa' },
+      { id: 'm3', text: 'δεύτερο' },
+    ];
+    await turns.runTurn({ channel, mode: 'reply', trigger: normalizedTrigger(history[0]), triggerKind: 'mention', queued });
+    return { turns, task: taskOf(llm.calls.talk[0]) };
+  };
+  const named = await run(splitHot());
+  assert.ok(named.task.endsWith([fill(labels.task.queued, { others: '1. δεύτερο' }), fill(labels.task.queuedOthers, { others: '1. Léa: άλλο' })].join('\n\n')));
+  assert.equal(named.turns.spokeAfterSeeing('c1', 'm2'), false, 'left to its own turn');
+  assert.equal(named.turns.spokeAfterSeeing('c1', 'm3'), false);
+
+  const { queuedOthers: _others, ...older } = labels.task;
+  const old = await run(splitHot({ labels: { ...labels, task: older } }));
+  assert.equal(old.task.includes('άλλο'), false);
+  assert.equal(old.turns.spokeAfterSeeing('c1', 'm2'), true, 'the old rule for another member\'s call');
+  assert.equal(old.turns.spokeAfterSeeing('c1', 'm3'), false, 'the author\'s own call is still named under task.queued');
 });

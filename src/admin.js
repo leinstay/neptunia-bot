@@ -39,7 +39,7 @@ import { rankEmojiUsage } from './memory/emoji-usage.js';
 import { rankGifs } from './memory/gifs.js';
 import { gifCaptionCounts } from './memory/gif-recache.js';
 import { gifPostsToday, gifWatchesToday } from './memory/gif-watch.js';
-import { commandKeys, leafPaths, MEMORY_SHOW_SECTIONS, MODEL_ROLES, MODEL_ROLE_PATHS } from './discord/commands.js';
+import { commandKeys, leafPaths, MEMORY_SHOW_SECTIONS, MODEL_ROLES, MODEL_SET_PATHS, MODEL_SET_ROLES } from './discord/commands.js';
 import {
   isAllowed as accessIsAllowed,
   isOwnerId,
@@ -577,6 +577,10 @@ const ROUTE_ROLES = [...MODEL_ROLES, IMAGE_ROLE];
 /** A provider slug as OpenRouter writes it: lowercase letters, digits and `-`. */
 const PROVIDER_SLUG_RE = /^[a-z0-9-]+$/;
 
+/** The order the model lines of `/nep ping` are printed in (a display rule only: the speaking
+ * model first, then the subprocessors); the image line follows them, the API checks come last. */
+const PING_DISPLAY_ORDER = ['voice', 'analyzer', 'classifier.text', 'classifier.media', 'classifier.video', 'mentor'];
+
 /** The roles one `/nep ping` argument stands for: one role, a group, the image check, or (anything else)
  * all of them, the image check last. */
 function pingRolesFor(role) {
@@ -588,14 +592,13 @@ function pingRolesFor(role) {
 
 /** The model id one role resolves to right now — used by model show and ping alike. */
 function modelForRole(role, cfg) {
-  if (role === 'talk') return cfg?.llm?.model || undefined;
+  // The one model that speaks as the persona: its replies and its memory wording.
+  if (role === 'voice') return cfg?.llm?.model || undefined;
   if (role === 'analyzer') return cfg?.memory?.model || cfg?.llm?.model || undefined;
-  // The two-stage analyzer's voice model (src/memory/update.js#runVoice): unset = the talk model.
-  if (role === 'voice') return cfg?.memory?.voiceModel || cfg?.llm?.model || undefined;
   if (role === 'classifier.text') return classifierTextModel(cfg);
   if (role === 'classifier.media') return classifierMediaModel(cfg);
   if (role === 'classifier.video') return classifierVideoModel(cfg);
-  // No fallback to the talk model: an unset mentor model means the mentor is not configured.
+  // No fallback to the voice model: an unset mentor model means the mentor is not configured.
   if (role === 'mentor') return cfg?.mentor?.model || undefined;
   return undefined;
 }
@@ -686,14 +689,13 @@ function formatYoutubeLine(result) {
   return `youtube: API key — ${state}`;
 }
 
-/** `lines` with the YouTube line inserted right after the classifier.video line. */
-function withYoutubeLine(lines, requested, youtubeLine) {
+/** `lines` with the YouTube line appended: an API check, so it follows every model line. */
+function withYoutubeLine(lines, youtubeLine) {
   if (youtubeLine == null) return lines;
-  const at = requested.indexOf('classifier.video');
-  return [...lines.slice(0, at + 1), youtubeLine, ...lines.slice(at + 1)];
+  return [...lines, youtubeLine];
 }
 
-/** `lines` with the image line appended last, after every model line and the lines that follow them. */
+/** `lines` with the image line appended, after the other model lines and before the API checks. */
 function withImageLine(lines, imageLine) {
   if (imageLine == null) return lines;
   return [...lines, imageLine];
@@ -2205,8 +2207,8 @@ export function createAdmin({
 
   function cmdModelSet(args) {
     const role = String(args?.role ?? '');
-    const dottedPath = Object.hasOwn(MODEL_ROLE_PATHS, role) ? MODEL_ROLE_PATHS[role] : null;
-    if (!dottedPath) throw new Error(`unknown role: ${role} (${MODEL_ROLES.join(', ')})`);
+    const dottedPath = Object.hasOwn(MODEL_SET_PATHS, role) ? MODEL_SET_PATHS[role] : null;
+    if (!dottedPath) throw new Error(`unknown role: ${role} (${MODEL_SET_ROLES.join(', ')})`);
 
     const id = String(args?.id ?? '').trim();
     if (!MODEL_ID_RE.test(id)) throw new Error('id must look like a model id, e.g. anthropic/claude-haiku-4.5 (3-100 chars)');
@@ -2289,18 +2291,15 @@ export function createAdmin({
     if (!llm) return 'ping is not available (no llm client configured)';
 
     const requested = pingRolesFor(args?.role);
-    const modelRoles = requested.filter((role) => role !== IMAGE_ROLE);
+    const modelRoles = PING_DISPLAY_ORDER.filter((role) => requested.includes(role));
     const cfg = hot.config;
     const roleModel = new Map(modelRoles.map((role) => [role, modelForRole(role, cfg)]));
 
     const youtube = startPingYoutube(modelRoles);
     const image = startPingImage(requested, cfg);
 
-    const promptText = hot.prompts?.labels?.ping?.prompt;
-    if (!promptText) {
-      const skipped = modelRoles.map((role) => `${role}: ${roleModel.get(role) ?? '(no model configured)'} — skipped: label missing`);
-      return withImageLine(withWebLine(withYoutubeLine(skipped, modelRoles, await youtube), modelRoles), await image).join('\n');
-    }
+    // The model lines come first (the image line among them), the API checks after.
+    const assemble = async (lines) => withWebLine(withYoutubeLine(withImageLine(lines, await image), await youtube), modelRoles);
 
     // One request per distinct (model, route): roles sharing a model share a ping unless a
     // role-specific `llm.providerByModel` key routes one of them elsewhere. Each request is
@@ -2310,6 +2309,13 @@ export function createAdmin({
       const route = resolveProvider(model, { byModel: cfg?.llm?.providerByModel, fallback: cfg?.llm?.provider, role });
       return `${model}\n${JSON.stringify(route ?? null)}`;
     };
+
+    const promptText = hot.prompts?.labels?.ping?.prompt;
+    if (!promptText) {
+      const skipped = modelRoles.map((role) => `${role}: ${roleModel.get(role) ?? '(no model configured)'} — skipped: label missing`);
+      return (await assemble(skipped)).join('\n');
+    }
+
     const targets = new Map();
     for (const role of modelRoles) {
       const model = roleModel.get(role);
@@ -2344,7 +2350,7 @@ export function createAdmin({
         ? formatPingSuccess(role, model, outcome.result, outcome.ms)
         : formatPingFailure(role, model, outcome.err, outcome.ms);
     });
-    return withImageLine(withWebLine(withYoutubeLine(lines, modelRoles, await youtube), modelRoles), await image).join('\n');
+    return (await assemble(lines)).join('\n');
   }
 
   // ---------------------------------------------------------------------
@@ -2931,12 +2937,12 @@ export function createAdmin({
       .join('\n');
   }
 
-  /** `/nep variety`: the variety pass's latest list with its examples, then its history newest first. */
+  /** `/nep variety`: the variety pass's latest list with its examples, the long pass's list, then the history newest first. */
   function cmdVariety(_args, context) {
     freshenIfPaused();
     const guildId = requireGuildId(context);
     const guild = store.getGuild(guildId);
-    return renderVarietyReport(guild?.worn, guild?.wornHistory, hot.config, Date.now());
+    return renderVarietyReport(guild?.worn, guild?.wornHistory, hot.config, Date.now(), guild?.wornLong);
   }
 
   // ---------------------------------------------------------------------

@@ -379,9 +379,9 @@ export function episodeKey(profileId, ep) {
 
 /**
  * Where a stored moment sits in the window that starts at `cutoff` and ends at
- * `clock`: noon UTC of its `date` (which formats to that same calendar date in
- * any zone within 12 hours of UTC), or null when it is outside. A moment is
- * inside when
+ * `clock`: noon UTC of its `date`, a key for ordering by time only (the request
+ * builder renders the date from the stored `date` itself, never from this
+ * time), or null when it is outside. A moment is inside when
  *   - its `date` is a `YYYY-MM-DD` whose day (UTC) ends at or after `cutoff`:
  *     a date counts until the end of its day (a date the model wrote in the
  *     server's zone may thus count a few hours longer or shorter than that local
@@ -407,9 +407,11 @@ function momentAt(ep, cutoff, clock) {
 }
 
 /**
- * An id (a member's, a profile's) as a string: a finite number as its decimal
- * form, a non-empty string as it is, anything else null. The one copy for the
- * recent view and the request builder (src/behavior/prompt.js).
+ * An id (a member's, a profile's, a channel's, a message's) as a string: a
+ * finite number as its decimal form, a non-empty string as it is, anything
+ * else null. The one copy for the recent view, the request builder
+ * (src/behavior/prompt.js) and src/behavior/elsewhere.js (which cannot be its
+ * home: it imports src/memory/update.js, which imports this module).
  * @param {unknown} raw
  * @returns {string|null}
  */
@@ -444,8 +446,9 @@ export function memberIdOf(raw) {
  *   isShown?: (channelId: string|null) => boolean, perMember?: number }} [args]
  * @returns {{ items: Array<{ kind: 'line', at: number, focus: boolean, line: object }
  *   | { kind: 'episode', at: number, focus: boolean, profileId: string, name: string|null, episode: object }>,
- *   hidden: number, repeated: number }}  `at`: a line's moment, a moment's noon UTC of its date;
- *   `name`: the profile's current stored name, null when it has none.
+ *   hidden: number, repeated: number }}  `at`: a line's moment, a moment's noon UTC of its date
+ *   (for ordering; a moment's shown date is its stored `date`); `name`: the profile's current
+ *   stored name, null when it has none.
  */
 export function recentView({ lines, profiles, now, hours, focusIds, excludeEpisodeKeys, isShown, perMember } = {}) {
   const clock = nowOf(now);

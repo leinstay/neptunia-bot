@@ -137,10 +137,10 @@ test('waitingPortraits: the members with a public character item in the voice qu
 
 test('portraitMode: two only with the switch on and both the portrait and the voice prompt present; otherwise the single request, on the voice model while the switch is on', () => {
   const prompts = { profile: 'P', portrait: 'A', 'memory-voice': 'V' };
-  assert.deepEqual(portraitMode({}, prompts), { stage: 'single', voiceModel: false, missing: [] });
-  assert.deepEqual(portraitMode({ features: { memoryTwoStage: true } }, prompts), { stage: 'two', voiceModel: false, missing: [] });
-  assert.deepEqual(portraitMode({ features: { memoryTwoStage: true } }, { ...prompts, portrait: '  ' }), { stage: 'single', voiceModel: true, missing: ['portrait'] });
-  assert.deepEqual(portraitMode({ features: { memoryTwoStage: true } }, { profile: 'P' }), { stage: 'single', voiceModel: true, missing: ['portrait', 'memory-voice'] });
+  assert.deepEqual(portraitMode({}, prompts), { stage: 'single', voice: false, missing: [] });
+  assert.deepEqual(portraitMode({ features: { memoryTwoStage: true } }, prompts), { stage: 'two', voice: false, missing: [] });
+  assert.deepEqual(portraitMode({ features: { memoryTwoStage: true } }, { ...prompts, portrait: '  ' }), { stage: 'single', voice: true, missing: ['portrait'] });
+  assert.deepEqual(portraitMode({ features: { memoryTwoStage: true } }, { profile: 'P' }), { stage: 'single', voice: true, missing: ['portrait', 'memory-voice'] });
 });
 
 // ---------------------------------------------------------------------------

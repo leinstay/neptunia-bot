@@ -23,6 +23,14 @@ const DEBOUNCE_MS = 250;
 const CONFIG_FILES = new Set(['config.json', 'config.local.json']);
 const LOCAL_PROMPTS_DIRNAME = 'prompts.local';
 
+/**
+ * Config keys a deployment may still carry that are no longer read, each with what is read
+ * instead: `memory.voiceModel` (the memory wording runs on `llm.model`, the one voice model).
+ */
+const RETIRED_CONFIG_KEYS = Object.freeze([
+  { key: 'memory.voiceModel', use: 'llm.model', read: (config) => config?.memory?.voiceModel },
+]);
+
 function stripText(raw) {
   return raw.replace(/^﻿/, '').replace(/\r\n/g, '\n').trim();
 }
@@ -120,6 +128,20 @@ export function createHot({ rootDir, watchImpl = fs.watch }) {
   let localWatcher = null;
 
   hot.config = readConfig(rootDir);
+  // The retired keys reported for the config now live: one warning when a key appears (at
+  // startup or on a reload), none while it stays, another once it was removed and set again.
+  const reportedRetired = new Set();
+  const reportRetiredKeys = () => {
+    for (const { key, use, read } of RETIRED_CONFIG_KEYS) {
+      if (read(hot.config) == null) {
+        reportedRetired.delete(key);
+      } else if (!reportedRetired.has(key)) {
+        reportedRetired.add(key);
+        log.warn(`config: ${key} is no longer read`, { key, use });
+      }
+    }
+  };
+  reportRetiredKeys();
   // Initial load: invalid labels JSON throws so a broken deployment fails at startup.
   const initial = loadPromptLayers(promptsDir, localPromptsDir, {}, {});
   hot.prompts = initial.prompts;
@@ -132,6 +154,7 @@ export function createHot({ rootDir, watchImpl = fs.watch }) {
     try {
       hot.config = readConfig(rootDir);
       log.info('hot: config reloaded');
+      reportRetiredKeys();
       hot.emit('change', { what: 'config' });
       return true;
     } catch (err) {

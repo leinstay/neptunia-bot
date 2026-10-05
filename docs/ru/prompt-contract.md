@@ -27,7 +27,7 @@
 | `forced.md` | нет | Добавляется после промпта режима при принудительном ходе (`/nep interject`, `/nep initiate`). Отменяет вариант `<skip/>` по умолчанию | `{{name}}` |
 | `memory.md` | да | Внеролевой промпт потокового анализатора (одноэтапный режим и приватные батчи): точечные правки памяти по живым батчам | `{{name}}` `{{fieldChars}}` `{{guildFieldChars}}` `{{maxDetails}}` `{{maxInjokes}}` `{{maxSelfFacts}}` `{{maxNewEpisodes}}` `{{maxEpisodes}}` `{{maxDeltaPerUpdate}}` `{{maxInterests}}` `{{interestTopicChars}}` `{{interestNoteChars}}` `{{loreTextChars}}` `{{maxLearned}}` `{{learnedChars}}` `{{relationshipChars}}` |
 | `memory-decide.md` | нет | Этап A двухэтапного анализатора (`features.memoryTwoStage`): нейтральные решения о том, что изменилось. Те же входные блоки, что у `memory.md`. Возвращает JSON. Без файла откат на одноэтапный режим | `{{name}}` `{{fieldChars}}` `{{guildFieldChars}}` `{{maxDetails}}` `{{maxInjokes}}` `{{maxSelfFacts}}` `{{maxNewEpisodes}}` `{{maxEpisodes}}` `{{maxDeltaPerUpdate}}` `{{maxInterests}}` `{{interestTopicChars}}` `{{interestNoteChars}}` `{{loreTextChars}}` `{{maxLearned}}` `{{learnedChars}}` `{{relationshipChars}}` |
-| `memory-voice.md` | нет | Этап B двухэтапного анализатора: персонаж записывает элементы очереди своим голосом. Возвращает JSON | `{{name}}` `{{fieldChars}}` `{{guildFieldChars}}` `{{relationshipChars}}` `{{learnedChars}}` |
+| `memory-voice.md` | нет | Этап B двухэтапного анализатора: персонаж записывает элементы очереди собственным голосом. Возвращает JSON. Обязателен при включённом `features.memoryTwoStage` | `{{name}}` `{{fieldChars}}` `{{guildFieldChars}}` `{{relationshipChars}}` `{{learnedChars}}` |
 | `portrait.md` | нет | Этап A двухэтапного обновления портрета. Детали в следующей документационной итерации | `{{name}}` `{{fieldChars}}` |
 | `profile.md` | да | Прогрев / обновление портрета: профиль одного участника из выборки сообщений | `{{name}}` `{{fieldChars}}` `{{maxInterests}}` `{{maxDetails}}` `{{interestTopicChars}}` `{{interestNoteChars}}` `{{maxNewEpisodes}}` |
 | `channel.md` | да | Прогрев: заметки о канале из выборки сообщений | `{{fieldChars}}` |
@@ -38,8 +38,12 @@
 | `rewatch.md` | да | Классификатор: нужно ли персонажу пересмотреть видео или повторить загрузку незагрузившегося (`features.videoRewatch`). Получает нумерованный список недавних видео с их статусом и новое сообщение. Выход: ОДНА строка: `<number> \| <question>`, `<number> \| retry` или `none` | `{{name}}` |
 | `rewatch-answer.md` | да | Внеролевой промпт для повторного просмотра: видеомодель смотрит клип ещё раз и отвечает на один вопрос на языке вопроса. Без карточки персонажа | `{{today}}` `{{question}}` `{{maxChars}}` |
 | `address.md` | да | Классификатор: адресовано ли сообщение без обращения персонажу, говорят ли о нём или ни то ни другое. Выход: одно слово: `yes`, `overheard` или `no` | `{{name}}` |
-| `overheard.md` | нет | Задача: сообщение говорит О персонаже, а не ему. Используется ВМЕСТО промпта режима при виде триггера `overheard` и наличии файла; отсутствующий или пустой файл откатывается к промпту режима (деградированно) | `{{name}}` `{{author}}` `{{trigger}}` `{{target}}` |
-| `lookup.md` | нет | Классификатор: нужно ли персонажу искать в интернете, чтобы ответить на сообщение (`features.webLookup`). Получает короткий транскрипт и блок `<candidate>`. Выход: ОДНА строка: поисковый запрос (обычные слова, не более 12) или `none` | `{{name}}` `{{today}}` |
+| `overheard.md` | нет | Задача: сообщение говорит О персонаже, а не к нему. Используется ВМЕСТО промпта режима при виде триггера `overheard` и наличии файла; отсутствующий или пустой файл откатывается к промпту режима (деградированно) | `{{name}}` `{{author}}` `{{trigger}}` `{{target}}` |
+| `lookup.md` | нет | Классификатор: нужно ли персонажу что-то найти (`features.webLookup`, `features.recall`). Получает короткий транскрипт и блок `<candidate>`. Выход: `none` или до четырёх помеченных строк: `web:` веб-запрос, `server:` формы слов для поиска по сообщениям сервера, `who:` формы имён для поиска человека, `when:` диапазон дат. Одна строка без пометки (старый формат) по-прежнему читается как веб-запрос | `{{name}}` `{{today}}` |
+| `recall-summary.md` | нет | Внеролевой промпт для сводки recall (`features.recall`): читает отрезки старого чата, найденные серверным поиском, и отвечает на вопрос, опционально называя один отрезок, который персонаж получит дословно. Без карточки персонажа | `{{name}}` `{{answerChars}}` |
+| `room.md` | нет | Классификатор: адресовано ли сообщение всем в комнате или одному человеку (`spontaneous.roomQuestionChance`). Получает короткий транскрипт, псевдонимы автора и блок `<candidate>`. Выход: ОДНО слово: `yes` или `no` | `{{name}}` |
+| `route-channel.md` | нет | Классификатор: нужен ли для ответа на сообщение просмотр другого канала (`features.channelRoute`). Получает короткий транскрипт, список `<channels>` и блок `<candidate>`. Выход: ОДНА строка: номер из списка или `none` | `{{name}}` |
+| `elsewhere.md` | нет | Задача: персонаж прочитал канал, где не может писать, и может прокомментировать его в основном канале (`features.elsewhere`). Используется как текст задачи для замеченного хода. `<skip/>` — нормальный исход | `{{name}}` `{{channel}}` `{{destination}}` |
 | `read-link.md` | нет | Внеролевой промпт для чтения ссылок (`features.webLookup`, `web.links.enabled`): сжать загруженную страницу в один абзац. Получает заголовок и тело страницы. Без карточки персонажа | `{{today}}` `{{maxChars}}` |
 | `search-summary.md` | нет | Внеролевой промпт для конденсатора поиска (`features.webLookup`, `web.search.enabled`): сжать нумерованные результаты поиска в одну заметку со встроенными ссылками на источники. Без карточки персонажа | `{{today}}` `{{query}}` `{{maxChars}}` |
 | `private.md` | нет | Добавляется после промпта режима (`reply.md`), перед `forced.md`, только в личном сообщении (`features.privateMessages`). Приватный разговор: сказанное здесь остаётся здесь; персонаж сохраняет публичные знания. Отсутствующий файл ничего не добавляет | `{{name}}` `{{author}}` |
@@ -50,16 +54,20 @@
 | `mentor-signs.md` | нет | Ментор: известные привычки модельного текста, отправляется как блок `<signs>` в каждом запросе ментора (`features.mentor`). Опускается при отсутствии или пустом файле | `{{name}}` |
 | `mentor-diagnose.md` | нет | Ментор: объяснить слабые ответы после оценки, указывая на конкретный текст в контексте персонажа (`features.mentor`). Результат — непроверенная гипотеза, сохраняется как `diagnosis` в прогоне. Опускается при `mentor.diagnose` false или отсутствии файла | `{{name}}` |
 | `variety.md` | нет | Запрос `classifier.text`: назвать повторяющиеся приёмы в последних сообщениях персонажа (`features.variety`). Без карточки персонажа | `{{name}}` `{{maxPatterns}}` `{{shapeChars}}` |
+| `variety-long.md` | нет | Длинный проход разнообразия: назвать приёмы на всём кольце собственных сообщений (`features.variety`, `variety.longLines`). Те же плейсхолдеры, блок `<lines>` и формат ответа, что и `variety.md`. Использует модель `classifier.text`. Без карточки персонажа. При отсутствии длинный проход не выполняется | `{{name}}` `{{maxPatterns}}` `{{shapeChars}}` |
+| `split.md` | нет | Классификатор: содержит ли прямой вызов несколько отдельных просьб (`features.splitTasks`). Получает короткий `<transcript>` и новое сообщение как `<candidate>`. Выход: слово `one` или от 2 до `{{maxTasks}}` строк, каждая начинается с `- ` и содержит одну часть словами автора. Без карточки персонажа. Без этого файла разделитель выключен | `{{name}}` `{{maxTasks}}` |
+| `merge.md` | нет | Классификатор: относится ли новое сообщение от автора с ожидающими элементами к одному из них. Получает нумерованный список `<waiting>` и новое сообщение как `<candidate>`. Выход: одна строка: номер из списка или слово `new`. Без карточки персонажа. Без этого файла новый вызов всегда ставится в очередь как собственный элемент | `{{name}}` |
 | `labels.json` | да | Все строки, которые КОД вставляет в промпт. Ключи фиксированы ниже, формулировки определяет автор текстов | см. ниже |
 
 `{{name}}` отображаемое имя бота · `{{author}}` отображаемое имя вызвавшего · `{{trigger}}` одно из значений `labels.triggers.*` ·
 `{{target}}` индекс вызвавшего сообщения (`#87`).
+`{{today}}` в `lookup.md` — дата в часовом поясе `bot.timezone`; в описателях (`describe.md`, `describe-video.md`, `describe-gif.md`) и `search-summary.md` — UTC-дата.
 Системное сообщение = `system-prompt` + `character-card` + `rules` + `format`. Для анализатора: только `memory.md`.
 При принудительном ходе (`/nep interject`, `/nep initiate`) `forced.md` добавляется после промпта режима, если файл существует.
 При ходе `overheard` промпт `overheard.md` ЗАМЕНЯЕТ промпт режима (это текст задачи, а не дополнение). Когда `overheard.md` отсутствует или пуст, используется промпт режима (деградированно: промпт режима представляет строку как обращение к персонажу, что не соответствует действительности).
 В приватном чате `private.md` добавляется после промпта режима (перед `forced.md`) с теми же плейсхолдерами `{{name}}` и `{{author}}`.
 Анализатор и промпты прогрева `profile.md` и `server.md` получают карточку персонажа и `rules.md` как блок
-`<character>` в пользовательском сообщении. `channel.md`, `describe.md`, `describe-video.md`, `describe-gif.md`, `draw.md`, `rewatch.md`, `rewatch-answer.md`, `address.md`, `lookup.md`, `read-link.md`, `search-summary.md` и `variety.md` карточку не получают.
+`<character>` в пользовательском сообщении. `channel.md`, `describe.md`, `describe-video.md`, `describe-gif.md`, `draw.md`, `rewatch.md`, `rewatch-answer.md`, `address.md`, `lookup.md`, `read-link.md`, `search-summary.md`, `recall-summary.md`, `room.md`, `route-channel.md`, `elsewhere.md`, `variety.md` и `variety-long.md` карточку не получают.
 
 `{{guildFieldChars}}` равен `fieldChars * 2`, лимит, до которого код обрезает серверные паттерны и зачины разговоров.
 `{{maxEpisodes}}` определяет общее количество хранимых эпизодов на человека. Оба заполняются из конфигурации, но не
@@ -72,24 +80,28 @@
 | Блок | Содержимое |
 |---|---|
 | `<now>` | Дата, день недели, время в часовом поясе `config.bot.timezone`, отформатированные через `labels.locale` |
-| `<senses>` | Что персонаж может и чего не может воспринимать ПРЯМО СЕЙЧАС. Генерируется из текущей конфигурации: какие картинки он видит сам, какие приходят описанием от вспомогательной модели, к чему слеп и глух. Поэтому он никогда не притворяется, что посмотрел видео, и может пошутить об этом в своей манере |
+| `<senses>` | Что персонаж может и чего не может воспринимать ПРЯМО СЕЙЧАС. Генерируется из текущей конфигурации: какие картинки персонаж видит сам, какие приходят описанием от вспомогательной модели, к чему слеп и глух. Поэтому персонаж никогда не притворяется, что посмотрел видео, и может пошутить об этом в своей манере |
 | `<about_chat>` | Как здесь общаются, как заводят и подхватывают разговоры, внутренние шутки, то, чему люди научили персонажа |
 | `<emoji>` | Пользовательские эмодзи, доступные персонажу (`features.customEmoji`): не более `context.customEmoji.max` записей, ранжированных по частоте использования участниками. Каждая содержит `:name:` и подпись от помощника, если она есть в кэше |
-| `<gifs>` | GIF, которые персонаж может отправить (`features.gifs`): не более `gifs.max` записей из библиотеки, ранжированных по частоте и новизне использования. Каждая содержит хэндл (`g1`, `g2`, …) и подпись от помощника, если она есть в кэше |
+| `<gifs>` | GIF, которые персонаж может отправить (`features.gifs`): не более `gifs.max` (по умолчанию 40) записей из библиотеки, ранжированных по частоте и новизне использования. Каждая содержит хэндл (`g1`, `g2`, …) и подпись от помощника, если она есть в кэше, обрезанную до `gifs.listChars` (по умолчанию 70; `0` = целиком) по границе слова, чтобы вместить больше записей в бюджет |
 | `<server>` | ТЕКУЩИЙ канал полностью (категория и тема Discord, назначение, о чём пишут, тон, активность, последнее сообщение, самые активные авторы; отмечен `labels.server.currentMark`), затем только те соседние каналы, которые дали сообщения в `<other_channels>` этого хода; никаких других каналов |
 | `<lore>` | Записи серверного лорбука, чьи ключевые слова встречаются в последних сообщениях (плюс записи с пометкой always): события, повторяющиеся персонажи, длительные истории. Как лорбук: записей могут быть сотни, показываются только подходящие |
 | `<self_facts>` | Что персонаж утверждал о себе |
+| `<recent>` | Что произошло на сервере за последние `memory.recentHours` (по умолчанию 72) часов: недавние заметки (короткие события от анализатора) и эпизоды участников в окне, показанные по ссылке. Заметка появляется только из канала хода или из канала, доступного для чтения всем здесь; в приватном чате только из каналов, доступных каждому участнику сервера, без эпизодов. Элементы о людях, к которым обращается ход, ранжируются первыми; эпизоды, уже отрисованные в `<people>`, исключаются, не более 2 на участника. Старейшие первыми. Заголовок без элементов ничего не рендерит. Переключатель `features.recent` (отсутствующий = вкл.); лимит `context.caps.recent` (по умолчанию 1200) |
 | `<people>` | Профили участников; вызвавший первым, отмечен `labels.profile.interlocutorMark` (пропускается при ходе `overheard`: автор говорил о персонаже, а не к нему); каждый с отношением персонажа, а для вызвавшего ещё и **эпизоды**: моменты, которые персонаж помнит о них двоих, с датами и короткими цитатами |
-| `<other_channels>` | До `context.neighborMessages` сообщений на соседний канал, не старше `context.neighborMaxAgeMinutes`. При включённом `features.mediaDescriptions` картинка в строке соседнего канала несёт закэшированную подпись, если описатель уже её создал; новых запросов к описателю для соседних каналов не делается |
-| `<worn>` | Приёмы, которые персонаж перерасходует в своих последних сообщениях (`features.variety`): `labels.variety.intro`, затем `- <shape> ("<example>", ...)` на каждый приём. Опускается, если проход не выполнялся, ничего не нашёл или переключатель выключен |
-| `<lookup>` | Что персонаж нашёл в интернете на этом ходу (`features.webLookup`): запрос, сжатый ответ и сайты-источники, или строка «ничего не найдено». Появляется только когда классификатор поиска сработал и поиск завершён |
+| `<other_channels>` | До `context.neighborMessages` сообщений на соседний канал, не старше `context.neighborMaxAgeMinutes`. При включённом `features.mediaDescriptions` картинка в строке соседнего канала несёт закэшированную подпись, если описатель уже её создал; новых запросов к описателю для соседних каналов не делается. Канал, чей блок показан в `<channel_view>`, исключается из `<other_channels>`; если бюджет отбросил подтянутый блок, канал возвращается сюда как обычный сосед |
+| `<channel_view>` | Другой канал, подтянутый в этот ход (`features.channelPull`). Содержит по одному элементу на подтянутый канал: заголовок (`labels.pull.header`), пометку «только чтение» при необходимости (`labels.server.readOnly`), строку «более ранние не показаны» при обрезке окна, счётчик «картинки не просмотрены», более ранние вызовы персонажу (с пометками отвечено/неотвечено/пропущено), затем строки окна. Строки используют тот же формат транскрипта, что и `<chat>`, но нумеруются после чата (чат имеет `#1`..`#N`, подтянутый блок начинается с `#N+1`), поэтому каждый `#n` уникален среди блоков. Картинки приходят только как подписи или слепые теги, без прикреплённых изображений. Без `labels.pull.header` блок пуст |
+| `<worn>` | Приёмы, которые персонаж перерасходует в своих последних сообщениях (`features.variety`): `labels.variety.intro`, затем `- <shape> ("<example>", ...)` на каждый приём. Приёмы длинного прохода (`wornLong`, из `variety-long.md`) идут первыми, затем короткого прохода, дубликаты удалены, не более `variety.maxPatterns` + `variety.longMaxPatterns`. Опускается, если ни один проход ничего не нашёл или переключатель выключен |
+| `<lookup>` | Что персонаж нашёл на этом ходу. Веб-поиск (`features.webLookup`) содержит `labels.lookup.webHeader`, сжатый ответ, `labels.lookup.sources` и, если ничего не найдено, `labels.lookup.none`. Серверный поиск (`features.recall`) содержит `labels.lookup.serverHeader`, сводку и, если помощник назвал отрезок, дословные строки этого отрезка. Когда оба выполнены, `labels.lookup.bothNote` стоит между ними. Строка `labels.lookup.stretch` вводит дословный отрезок (`{date}` `{channel}`). Появляется только когда классификатор поиска сработал и хотя бы один поиск завершился |
 | `<chat>` | До `context.channelMessages` последних сообщений текущего канала |
 | `<tempo>` | Счётчики за 10 мин / час / сутки, число участников, тишина, вердикт (live / slow / dead) |
-| `<task>` | `reply` / `interject` / `initiate` / `overheard` (при наличии `overheard.md`) с заполненными плейсхолдерами |
+| `<task>` | `reply` / `interject` / `initiate` / `overheard` (при наличии `overheard.md`) / `elsewhere` (при наличии `elsewhere.md`, для замеченного комментария) с заполненными плейсхолдерами. После промпта режима добавляются до трёх меток `task.*`, когда их условия выполнены (каждая через пустую строку): `task.part`, когда ход отвечает на одну часть разделённого сообщения, или `task.queued`, когда у автора триггера есть другие ожидающие вызовы; затем `task.queuedOthers`, когда у других участников есть ожидающие вызовы в канале; затем `task.added`, когда поздние сообщения были вложены в этот вызов. См. `labels.task.*` ниже |
 
 Приоритет бюджета (секции обрезаются с конца этого списка): системный промпт + задача + часы + темп + восприятие
-(никогда не обрезаются) → профиль вызвавшего с эпизодами → lookup (сохраняется или отбрасывается целиком) → серверные привычки → факты о себе → лорбук → карта каналов → транскрипт (новейшие сначала) →
-остальные профили → worn (сохраняется или отбрасывается целиком) → соседние каналы → эмодзи (записи с конца, затем весь блок; `context.caps.emoji`) → GIF (та же обрезка; `context.caps.gifs`).
+(никогда не обрезаются) -> профиль вызвавшего с эпизодами -> lookup (сохраняется или отбрасывается целиком; может содержать веб-часть, серверную часть или обе) -> серверные привычки -> факты о себе -> лорбук -> карта каналов -> транскрипт (новейшие сначала) ->
+подтянутый (`<channel_view>`, лимит `context.caps.pulled`; на ходе, отвечающем на вызов из канала только для чтения, подтянутый блок ставится перед транскриптом, а не после) ->
+recent (лимит `context.caps.recent`) ->
+остальные профили -> worn (сохраняется или отбрасывается целиком) -> соседние каналы -> эмодзи (записи с конца, затем весь блок; `context.caps.emoji`) -> GIF (та же обрезка; `context.caps.gifs`).
 
 Медиа в строке транскрипта, наиболее информативная доступная форма: картинка, прикреплённая к ЭТОМУ запросу →
 `transcript.imageAttached`, или `transcript.imageAttachedDescribed`, когда `features.attachedDescriptions` включён и
@@ -186,20 +198,25 @@ senses.videoWatch                        replaces videoDescribed when features.v
 senses.videoRewatch                      shown alongside videoWatch when features.videoRewatch is on; tells the persona that a second look at a watched video may appear, marked as first-hand
 senses.stickerSee | stickerDescribed | stickerBlind
 senses.lottie
-senses.customEmoji                       shown when features.customEmoji is on and the server has at least one custom emoji; tells the persona it can use server custom emoji by writing :name:
-senses.gifs                              shown when features.gifs is on and the library is not empty; tells the persona it can post one GIF per turn by handle from the list
+senses.customEmoji                       shown when features.customEmoji is on and the server has at least one custom emoji; tells the persona they can use server custom emoji by writing :name:
+senses.gifs                              shown when features.gifs is on and the library is not empty; tells the persona they can post one GIF per turn by handle from the list
 senses.voice | links | files
 senses.linksWatch                        replaces links when features.videoDescriptions is on; adds that a linked video may come watched or not watched with the reason
 senses.linksRead                         shown after the links line when features.webLookup is on and web.links.enabled is not false; tells the persona that a link may come with a read excerpt, first-hand
 senses.search                            shown when features.webLookup is on, web.search.enabled is not false AND a Brave Search key is configured; tells the persona that a `<lookup>` block may appear with web results and that no search can happen during the reply itself
-senses.draw                              shown when features.imageGeneration is on and an image client is wired; tells the persona it can draw
+senses.recall                            shown right after the search line on a server turn when the server-history search is available (never in a private chat); tells the persona that a search of the server's old messages either ran before the reply or did not, that its part of `<lookup>` is what the history holds (a helper's summary or a verbatim stretch), and that without it nothing was looked up there. An older labels file without the key renders nothing
+senses.draw                              shown when features.imageGeneration is on and an image client is wired; tells the persona they can draw
 senses.drawSpent                         replaces draw when the daily picture quota is spent
 senses.drawSpentUser                     replaces draw when this member's daily quota is spent
 senses.privateChat                       shown in a DM turn: this is a one-on-one conversation, what is said here stays between the two of them
-senses.privateAware                      shown on a server turn when features.privateMessages is on: the persona knows it has private chats and never repeats or hints at anything from them
-lookup.header                            {query}: heading of the `<lookup>` block
+senses.privateAware                      shown on a server turn when features.privateMessages is on: the persona knows they have private chats and never repeats or hints at anything from them
+lookup.header                            {query}: heading of the `<lookup>` block (web search)
 lookup.sources                           {list}: site names, comma-separated by code
 lookup.none                              shown in `<lookup>` when the search found nothing useful
+lookup.webHeader                         heading of the web part inside `<lookup>` when both web and server searches ran
+lookup.serverHeader                      heading of the server part inside `<lookup>` when both web and server searches ran
+lookup.bothNote                          shown between the web and server parts when both ran
+lookup.stretch                           {date} {channel}: introduces a verbatim stretch of old chat inside the server part
 tempo.counts                             {last10min} {lastHour} {lastDay}
 tempo.authors                            {authors}: a head count
 tempo.silenceBeforeTrigger | lastMessageAgo | sinceOwn          {duration}
@@ -239,19 +256,42 @@ server.category | topic | purpose | topics | tone               {text}
 server.activity                          {activity} = server.activityLive | activitySlow | activityDead
 server.lastMessage                       {when}: humanised age of the channel's newest message
 server.topWriters                        {names}: current names of the members who write there most
-triggers.mention | reply | name | followUp | overheard   followUp = an untagged message the address classifier judged to be for the persona; overheard = talk about the persona, not to it. Both post plain, never as a Discord reply. overheard falls back to followUp, then reply
+server.readOnly                          shown on a channel the bot can read and react in but not write in; never shown on the current channel. Appears in the `<server>` map entry and as a line after a pulled channel's header
+senses.channels                          shown on every server turn: which channels this request shows (the chat, `<other_channels>`, `<channel_view>`); never claim to have looked at a channel not shown
+senses.elsewhere                         {destination}: shown when `features.elsewhere` is on and `memory.mainChannelIds` has a usable channel; says a call from a read-only channel is answered in {destination} with a link
+pull.header                              REQUIRED {channel} {from} {to} {ago}: first line of a pulled channel. Without it no `<channel_view>` renders. {from}/{{to}} are formatted dates, {ago} is a duration phrase from labels.units
+pull.olderNotShown                       shown when older messages exist in the pulled channel that are not included
+pull.picturesNotSeen                     {count}: shown when pictures in the pulled channel were not looked at
+pull.earlierPings                        {date}: heading before earlier calls to the persona in that channel, older than the window
+pull.pingAnswered                        appended to a pulled line that called the persona and was answered
+pull.pingUnanswered                      appended to a pulled line that called the persona and has not been answered yet
+pull.pingSkipped                         OPTIONAL appended to a pulled line the persona saw and chose to let pass; without it no mark is shown for skipped calls
+elsewhere.called                         {channel} {destination}: appended to the reply task text on a turn answering a call from a read-only channel
+elsewhere.link                           {text} {link}: joins the jump link to the persona's posted message; members read it, the model never sees it
+triggers.mention | reply | name | followUp | overheard   followUp = an untagged message the address classifier judged to be for the persona; overheard = talk about the persona, not to them. Both post plain, never as a Discord reply. overheard falls back to followUp, then reply
 triggers.private                         the trigger for a private (DM) message
 triggers.drawFailed                      {reason}: the drawing sub-process failed; reason is the human phrase from draw.reasons.*
 draw.reasons.moderation | daily | userDaily | timeout | error    human phrases for the five failure reasons; daily and userDaily are reserved but no longer reached by triggers.drawFailed — an image cap now posts limits.notice instead of a follow-up turn
 memory.privateNote                       the <private> block content in a private analyzer batch: marks the batch as a private conversation, constrains output to users for the partner's id only
 memory.privateChannel                    heading used in place of a channel name for the <new_messages> section in a private batch
 limits.notice                            {limit} {used} {cap}: posted as a plain reply when a rail refuses a triggered action; limit is the config key, used/cap are the numbers
+limits.paused                            posted as a plain reply when the persona is called while paused (`features.pauseNotice`). No placeholders. At most once per channel per `mention.pauseNoticeMinutes`
 warmup.ownMark                           prefixed to a member's own lines in the profile.md transcript
 warmup.contextMark                       prefixed to context lines in the profile.md transcript
 mentor.intended                          array of short strings: engine behaviours that must not cost points in the mentor's scoring
 mentor.examples                          first line inside the `<examples>` block in a situations request: introduces the real moments
 mentor.original                          first line inside the `<original>` block in a score request: introduces the persona's rejected answer
+room.focus                               {target} {author}: appended to the reply task when a room question triggers the turn
+address.author                           {name} {aliases}: the candidate author's display name and known aliases, shown to the address classifier when the member has aliases
 variety.intro                            first line of the `<worn>` block: tells the persona these devices are spent
+recent.header                            REQUIRED {hours}: the block's first line. A missing header or a missing `recent.line` means no `<recent>` block
+recent.line                              REQUIRED {date} {time} {text}: one note from the turn's own channel or an unnamed channel
+recent.lineIn                            OPTIONAL {date} {time} {channel} {text}: a note from another named channel; {channel} arrives without '#'. Without it `recent.line` is used
+recent.episode                           OPTIONAL {date} {name} {what}: a moment the persona remembers with {name} on {date}; no quote, no feeling. Without it the block shows notes only
+task.part                                {index} {total} {part} {others}: this turn answers one part of a split message. {index} is 1-based, {part} is the text of this part, {others} lists the remaining parts and any queued calls as numbered items joined by `; `. Without this key the splitter is off even when the prompt file exists
+task.queued                              {others}: the trigger author has other calls waiting, listed as numbered items joined by `; `. Shown only when there is no `task.part` for this turn. Without this key the waiting calls are not named and the seen-in-history drop rule applies to them
+task.queuedOthers                        {others}: other members have calls waiting in this channel, listed as `<n>. <author>: <text>` items joined by `; `. Without this key those calls are not named
+task.added                               {added}: later messages from the author were folded into this call while it waited, joined by `; `. Without this key the folded messages are not named
 ```
 
 ## Вывод
@@ -278,11 +318,12 @@ variety.intro                            first line of the `<worn>` block: tells
 
 Числовые лимиты в промпте заполняются в рантайме из `config.memory.*` и `relationships.maxDeltaPerUpdate`.
 
-Вход: `<character>` · `<existing_profiles>` (JSON по user id, включая текущий `affinity` с баллом, полосой отношения и причиной,
-`relationshipStale` когда текст пора переписать, и сохранённые `episodes`) · `<existing_lore>` ·
+Вход: `<character>` · `<existing_profiles>` (JSON по user id; каждый профиль либо полный, либо компактный. Полный содержит прозаические поля, отношение и лучшие из интересов, деталей, псевдонимов и эпизодов: интересов не более `memory.maxInterests`, деталей не более `memory.maxDetails`, псевдонимов не более `memory.maxAliases`, эпизодов не более `memory.analyzerEpisodes` (по умолчанию 8). Компактный содержит только `names`, `affinity` и `"compact": true`. Когда батч слишком велик для полных профилей всех, авторы с наибольшим числом показанных строк получают полный профиль, остальные компактный. Поля лога `profilesWhole`, `profilesCompact`, `profilesTokens` на `memory: update applied`) · `<existing_lore>` ·
 `<existing_guild>` (JSON: паттерны, зачины, внутренние шутки, усвоенное) · `<existing_channels>` (JSON по channel id: `name`, категория Discord `category`, `topic`, сохранённые `purpose`,
 `topics`, `tone`) · `<known_members>` (только серверные батчи, отсутствует в приватных; может быть неполным или отсутствовать: сохранённые участники, НЕ писавшие в этом батче, каждый с их отображаемыми именами и псевдонимами, чтобы анализатор мог записать псевдоним для одного из них; не более `memory.aliasRosterSize` записей, недавно виденные первыми, `0` = выключено; в бюджете стоит перед транскриптом, не является обязательным и не может привести к ошибке запроса) · `<new_messages>`, сгруппированные под `## #channel-name (id:123)`, строки `[14:32] nick (id:123): text`,
 строка, адресованная персонажу, начинается с `→ `, собственные строки используют `labels.self`.
+
+Порядок секций в пользовательском сообщении (бюджет обрезает с конца): компактные профили каждого автора, реестр (`<known_members>`), транскрипт (`<new_messages>`), полные профили (только для авторов с показанной строкой, сначала с наибольшим числом строк), недавние заметки (`<recent_notes>`). Блоки гильдии, каналов и лора стоят перед компактными профилями. Профиль, не поместившийся полным, отправляется компактным; запрос никогда не отказывает из-за профиля.
 
 Выход: голый JSON-объект. Профили обновляются ИНКРЕМЕНТАЛЬНО: анализатор возвращает изменения, а не пересказ
 уже сохранённого, поэтому факты не деградируют от переписывания батч за батчом:
@@ -463,7 +504,7 @@ variety.intro                            first line of the `<worn>` block: tells
   именами; id без профиля пропускается.
 
 Когда у текущего канала ещё нет сохранённой заметки (анализатор его не обрабатывал), запись-заглушка синтезируется из
-фактов Discord по сообщениям в транскрипте, чтобы персонаж всё же знал, где находится.
+фактов Discord по сообщениям в транскрипте, чтобы персонаж всё же знал, где он.
 
 ## Прогрев
 
@@ -560,13 +601,9 @@ variety.intro                            first line of the `<worn>` block: tells
 по каждому вопросу (см. раздел кэша видео выше). Переключатель `features.videoRewatch` (отсутствие = включён,
 требуется `videoDescriptions`).
 
-## Классификатор поиска
+## Классификатор поиска и recall
 
-Когда к персонажу обращаются напрямую (ход ответа, не `overheard` и не спонтанный) и выполнены все условия (`features.webLookup` включён, `web.search.enabled`
-не false, промпт `lookup.md` существует, `web.search.maxPerTurn` не менее 1 и `BRAVE_SEARCH_API_KEY` настроен),
-классификатор определяет, спрашивает ли триггерное сообщение о чём-то, что требует поиска в интернете. Код отправляет `lookup.md` как системный промпт на модели `classifier.text` с пользовательским сообщением,
-содержащим короткий `<transcript>` (тот же, что у классификатора повторного просмотра, собственные строки персонажа
-отмечены `labels.self`) и блок `<candidate>`:
+Когда к персонажу обращаются напрямую (ход ответа, не `overheard` и не спонтанный) и промпт `lookup.md` существует, классификатор определяет, нужен ли триггерному сообщению веб-поиск, поиск по истории сервера или оба. Код отправляет `lookup.md` как системный промпт на модели `classifier.text` с пользовательским сообщением, содержащим короткий `<transcript>` (тот же, что у классификатора повторного просмотра, собственные строки персонажа отмечены `labels.self`) и блок `<candidate>`:
 
 ```
 <transcript>
@@ -577,29 +614,32 @@ variety.intro                            first line of the `<worn>` block: tells
 </candidate>
 ```
 
-Транскрипт содержит описания, описания видео и прочитанные ссылки, если доступны. Текст триггера обрезан до
-`context.maxMessageChars`. Выход: ОДНА строка:
+Транскрипт содержит описания, описания видео и прочитанные ссылки, если доступны. Текст триггера обрезан до `context.maxMessageChars`. Выход: `none` или до четырёх помеченных строк в любом порядке:
 
-- Поисковый запрос (обычные слова, без кавычек, без операторов, не более 12 слов), когда сообщение требует фактов
-  извне чата или явно просит поискать в интернете.
-- `none` во всех остальных случаях.
+- `web: <поисковый запрос>` (обычные слова, без кавычек, без операторов, не более 12 слов): сообщение требует фактов извне чата или явно просит поискать в интернете. Строка срабатывает только при совокупности: `features.webLookup` включён, `web.search.enabled` не false, `web.search.maxPerTurn` не менее 1 и `BRAVE_SEARCH_API_KEY` настроен.
+- `server: <форма>, <форма>, ...`: сообщение спрашивает о чём-то, что говорили или делали на этом сервере и чего нет в транскрипте. Каждая форма — одно слово или короткая фраза, как люди напечатали бы, с перечислением словоформ для поиска. Срабатывает только при включённом `features.recall`.
+- `who: <форма имени>, <форма имени>, ...`: вопрос о человеке, которого нет явно в транскрипте. Формы помогают найти его по нику, имени пользователя или тегу.
+- `when: <от> .. <до>`: вопрос указывает на время (`YYYY-MM-DD` или `YYYY-MM-DD HH:MM` с каждой стороны от `..`; одна дата означает весь этот день).
 
-Пустой или полностью пробельный ответ считается сбоем вызова (`reason: empty`, нет запроса), а не молчаливым `none`.
+Одна строка без пометки (старый формат) по-прежнему читается как веб-запрос. Пустой или полностью пробельный ответ считается сбоем вызова (`reason: empty`), а не молчаливым `none`.
 
-При совпадении Brave Search выполняет запрос (`web.search.results` результатов, по умолчанию 5), нумерованные
-результаты сжимаются ролью `classifier.text` через `search-summary.md` (`{{today}}`, `{{query}}`, `{{maxChars}}` =
-`web.search.summaryChars`, по умолчанию 900), и ответ рендерится в блок `<lookup>` непосредственно перед `<chat>`:
-`labels.lookup.header` с запросом, сжатый текст и `labels.lookup.sources` с именами сайтов. Если поиск ничего не вернул
-или конденсатор не нашёл полезного, вместо этого появляется `labels.lookup.none`.
+При совпадении `web:` Brave Search выполняет запрос (`web.search.results` результатов, по умолчанию 5), нумерованные результаты сжимаются ролью `classifier.text` через `search-summary.md` (`{{today}}`, `{{query}}`, `{{maxChars}}` = `web.search.summaryChars`, по умолчанию 900), и веб-часть рендерится в блок `<lookup>`: `labels.lookup.header` с запросом, сжатый текст и `labels.lookup.sources` с именами сайтов. Если поиск ничего не вернул или конденсатор не нашёл полезного, вместо этого появляется `labels.lookup.none`.
 
-Ограничения: не более одного поиска за ход; и классификатор, и конденсатор считаются в `llm.maxRequestsPerDay`;
-сам поиск считается в `web.maxPerDay` (общий с чтением ссылок). Результаты кэшируются на
-`web.search.cacheHours` (по умолчанию 24) часов на нормализованный запрос. Переключатель `features.webLookup`
-(отсутствие = выключен).
+При совпадении `server:` (с необязательными строками `who:` и `when:`) движок ищет по истории сообщений сервера через поисковый API Discord. Формы становятся упорядоченным списком поисковых запросов (содержательные формы чередуются, затем имена авторов) или выборкой по дат-диапазону, когда есть только `when:`. Попадания фильтруются (другие боты и каналы, не прошедшие проверку аудитории, исключаются), группируются в кластеры по каналу и времени (`recall.clusterGapMinutes`), и вокруг каждого кластера загружается окно из `recall.windowMessages` сообщений. Формы слов и имён из классификатора также сопоставляются с сохранённой памятью (без приватного слоя): эпизоды участников, записи лора, уроки и недавние заметки. Каждый совпавший элемент становится строкой в блоке `<memory>`: `kind | date | name | text`, с видами `episode`, `lore`, `learned`, `recent`. Диапазон дат `when:` исключает виды без даты (lore, learned). Не более `recall.memoryItems` (по умолчанию 6) элементов, ранжированных по числу совпавших форм и по весу. Блок `<memory>` стоит после `<people>` и перед `<found>`; его элементы нельзя назвать как `stretch`. Запуск с совпадениями в памяти, но без попаданий в чате, всё равно запрашивает сводку. Логируется как `stats.memory` на строке `recall: searched`.
+
+Помощник по сводке (`recall-summary.md` на `classifier.text`, блоки `<people>`, `<memory>`, `<found>`, `<question>`) читает окна, сохранённую память и вопрос и пишет заметку. Помощник может назвать один отрезок, лучше всего отвечающий на вопрос (`stretch: <n>`); если да, дословные строки этого отрезка (не более `recall.stretchChars`) появляются рядом с заметкой. Если помощник отвечает `nothing`, серверная часть блока `<lookup>` не рендерится. Помощник, который не успел или отказал, откатывается к дословному отрезку первого окна без заметки.
+
+Когда оба поиска выполнены, блок `<lookup>` содержит `labels.lookup.webHeader` над веб-частью, `labels.lookup.serverHeader` над серверной частью и `labels.lookup.bothNote` между ними.
+
+Блок `<lookup>` следует тому же правилу аудитории, что `<other_channels>` (`context.pull.sameAudience`): окно серверного поиска отклоняется, если канал, из которого оно пришло, недоступен для чтения каждому, кто может читать канал-назначение.
+
+Ограничения: не более одного веб-поиска и одного серверного поиска за ход. Классификатор, веб-конденсатор и сводка recall каждый считаются в `llm.maxRequestsPerDay`; веб-поиск считается в `web.maxPerDay` (общий с чтением ссылок); запуск recall считается в `recall.maxPerDay` (хранится в `state.json` как `recallDay` / `recallCount`). Веб-результаты кэшируются на `web.search.cacheHours` (по умолчанию 24) часов на нормализованный запрос. Классификатор срабатывает при включённом `features.webLookup` или `features.recall`. Переключатели: `features.webLookup` (отсутствие = выключен), `features.recall` (отсутствие = включён).
 
 ## Проход разнообразия
 
 Проход `classifier.text` читает последние сообщения персонажа и называет повторяющиеся приёмы (обороты, структурные ходы, однотипные шутки), в которые персонаж впадает. Результат становится блоком `<worn>` в запросе хода. Переключатель `features.variety` (отсутствие = включён).
+
+Второй проход с более длинным обзором выполняется не чаще раза в `variety.longEveryHours` (по умолчанию 6) часов после публикации персонажа в серверном канале, читая новейшие `variety.longLines` (по умолчанию 300; `0` = выключено) строк кольца из всех каналов без ограничения по возрасту. Когда в кольце не менее `variety.longMinLines` (по умолчанию 60) строк и файл `prompts/variety-long.md` существует, проход запрашивается на модели `classifier.text` с назначением `variety-long`, с тем же блоком `<lines>` и форматом ответа, что у короткого прохода, и не более `variety.longMaxPatterns` (по умолчанию 3) приёмов. Его список сохраняется как `wornLong` в памяти сервера и действует до следующего длинного прохода; при ошибке сохраняется предыдущий список. Блок `<worn>` хода содержит приёмы длинного прохода первыми, затем короткого, дубликаты удалены (shape сравнивается без учёта регистра со схлопнутыми пробелами), не более `variety.maxPatterns` + `variety.longMaxPatterns`. Длинный проход не выполняется перед ответом, не задерживает ход и не работает для приватного чата. Лог: `variety: long` при успехе, `variety: pass failed` с `cause: 'long'` при неудаче.
 
 При включённом `features.varietyPrecompute` (по умолчанию) проход запускается сразу после публикации текста персонажем, на строках, которые вернёт следующий `fetchHistory`. Ход ищет свой набор строк: при совпадении с кэшем ответ используется без запроса; при совпадении с уже летящим проходом ход присоединяется и ждёт не дольше `variety.timeoutMs`; иначе ход запускает собственный запрос. Запрос работает до `variety.requestTimeoutMs` (по умолчанию 30000): если ожидание хода `variety.timeoutMs` истекло раньше, запрос продолжается и поздний ответ сохраняется для следующего хода. Ход, присоединившийся к проходу, который затем упал, не получает блока и не запускает собственный запрос. Ничего не сохраняется при паузе или при выключенном `features.variety`.
 
@@ -634,6 +674,18 @@ variety.intro                            first line of the `<worn>` block: tells
 ### Ментор
 
 Песочница ментора выполняет один проход разнообразия на каждую ситуацию, за счёт токенового бюджета ментора (не из `llm.maxRequestsPerDay`). Песочница использует `variety.timeoutMs` как таймаут запроса (у неё нет следующего хода, который мог бы использовать поздний ответ). Приёмы сохраняются как `worn` в записи ситуации. Оценщик никогда не видит блок `<worn>`.
+
+## Разделитель задач
+
+Прямой вызов (упоминание, ответ, имя, продолжение, ЛС), достаточно длинный и структурированный (`split.minChars` символов без ссылок и токенов Discord, не менее двух рядов разделителей), отправляется классификатору (`prompts/split.md` на `classifier.text`, назначение `split`) параллельно с подготовкой хода. Классификатор читает короткий `<transcript>` из последних `split.contextMessages` сообщений, собственные строки персонажа отмечены `labels.self`, затем новое сообщение как `<candidate>` (`<имя автора>: <текст>`). Ответ: слово `one` или от 2 до `split.maxTasks` (по умолчанию 4) строк, каждая начинается с `- ` и содержит одну часть словами автора. Пустой, неразбираемый или запоздавший ответ (подготовка хода завершилась раньше) трактуется как одна просьба и логируется `split: failed`. Переключатель `features.splitTasks` (отсутствие = включён).
+
+Части становятся цепочкой обычных ходов на одном сообщении (`turn: part`). Помощники каждой части (классификатор поиска, recall, маршрут, повторный просмотр) оценивают текст этой части, а запрос называет часть и остальные (`labels.task.part` с `{index}`, `{total}`, `{part}`, `{others}`). Первая часть использует историю, загруженную ходом всего сообщения, и отвечает на него; последующие загружают историю заново и публикуются обычным текстом. У каждой части свой срок и планка отбрасывания; часть, которая не прошла или была отклонена, не останавливает следующую. Бросок игнорирования, дневной лимит ЛС и отметка в кольце считаются один раз на сообщение. Пауза или прогрев завершают цепочку перед следующей частью (`turn: chain stopped`). Пока цепочка идёт, её незапущенные части являются ожидающими элементами автора (`waitingParts` на runner хода); позднее сообщение автора, вложенное в одну из них (`addToPart`), попадает в запрос этой части как `tasks.added`. Внимание остаётся за цепочкой от первого хода до конца; уведомления о простое срабатывают один раз, в конце.
+
+Без `prompts/split.md` разделитель выключен (`split: skipped`, `no-prompt`). Без `labels.task.part` разделитель тоже выключен: разобранный ответ отбрасывается. Настройки: `split.minChars` (по умолчанию 80), `split.maxTasks` (по умолчанию 4), `split.contextMessages` (по умолчанию 6), `split.maxOutputTokens` (по умолчанию 300).
+
+## Классификатор объединения
+
+Когда приходит вызов от автора, у которого уже есть ожидающие элементы в этом канале (части разделённого сообщения, до которых цепочка не дошла, или вызовы в очереди отложенных), классификатор (`prompts/merge.md` на `classifier.text`, назначение `merge`) определяет, относится ли новое сообщение к одному из них. Классификатор читает блок `<waiting>` из нумерованных элементов (`1. <текст>`, по одному на ожидающий элемент) и новое сообщение как `<candidate>` (`<имя автора>: <текст>`). Ответ: одна строка: номер из списка или слово `new`. Вложенное сообщение никогда не получает собственного хода; оно появляется в ходе своего элемента через `labels.task.added` (`{added}`). Маршрутизированные вызовы никогда не вкладываются. Без файла промпта каждый вызов ставится в очередь как собственный элемент (`merge: failed`, `no-prompt`). Логируется как `merge: verdict` или `merge: failed`. Собственных настроек нет; лимит вывода берётся из `mention.followUpMaxOutputTokens`.
 
 ## Рисование
 
@@ -768,7 +820,11 @@ Discord загружается и отправляется как элемент
 
 Модель ментора читает отрендеренный запрос песочницы, а значит читает, что персонаж помнит о реальных людях. Личные сообщения и приватный слой памяти никогда не попадают в запрос песочницы.
 
-Песочница содержит те же блоки пользовательских эмодзи и GIF, что и живой ход, поэтому персонаж может реагировать эмодзи, отправить GIF или нарисовать картинку в ответах песочницы. GIF или рисование считается действием так же, как `<msg>`.
+Песочница содержит те же блоки пользовательских эмодзи и GIF, что и живой ход, поэтому персонаж может реагировать эмодзи, отправить GIF или нарисовать картинку в ответах песочницы. GIF или рисование считается действием так же, как `<msg>`. Песочница также содержит строки `<senses>` для канала-назначения elsewhere и для восприятия поиска, чтобы осведомлённость персонажа об этих функциях проверялась.
+
+### Журнал публикаций
+
+`state.json` `postLedger` записывает каждое сообщение, которое персонаж публикует в серверном канале: id сообщения, канал, режим, вид триггера, id триггера, id новейшей строки истории и id исходного канала. Ведётся только при включённом `features.mentor` (или при использовании пути ментора, связанного с моментами). Журнал ограничен `mentor.anchor.ledgerSize` (по умолчанию 300) записями; ментор использует его, чтобы найти, к какому ходу принадлежит опубликованное сообщение при разрешении реального момента. Запросы от самого ментора несут `origin: mentor` в логе использования.
 
 ### Как завершается прогон
 
@@ -925,7 +981,7 @@ Discord загружается и отправляется как элемент
 
 Результат сохраняется в прогоне как `diagnosis` и выводится в отчёте. Это гипотезы для рассмотрения владельцем; ментор ничего не правит сам.
 
-Слои, на которые может указывать причина: `rules` (правило в блоке правил), `prompt` (системный промпт движка, формат или задача), `card` (карточка персонажа), `self` (заметка персонажа о себе), `learned` (что люди ему объяснили), `guild` (серверная привычка или инсайд-шутка), `profile` (что персонаж помнит о человеке), `missing` (нужная инструкция отсутствует).
+Слои, на которые может указывать причина: `rules` (правило в блоке правил), `prompt` (системный промпт движка, формат или задача), `card` (карточка персонажа), `self` (заметка персонажа о себе), `learned` (что люди объяснили персонажу), `guild` (серверная привычка или инсайд-шутка), `profile` (что персонаж помнит о человеке), `labels` (строка из `labels.json`), `variety` (что-то в блоке `<worn>`), `lore` (запись лорбука), `channel` (заметка канала), `recent` (строка в блоке `<recent>`), `missing` (нужная инструкция отсутствует).
 
 #### Схема диагностики
 

@@ -23,7 +23,7 @@ const GUILD = 'g1';
 const PROMPT = 'You are {{name}}; {{answerChars}}.';
 
 // The recall settings the runner tests rely on, pinned here instead of read from the shipped defaults.
-const RECALL_PIN = { maxForms: 8, maxPeople: 2, dateSamples: 4, clusterGapMinutes: 30, maxClusters: 8, windowMessages: 16, answerChars: 1200, stretchChars: 1500, maxPerDay: 100, timeoutMs: 30000, minSummaryMs: 2500, maxOutputTokens: 500 };
+const RECALL_PIN = { maxForms: 8, maxPeople: 2, dateSamples: 4, clusterGapMinutes: 30, maxClusters: 8, windowMessages: 16, answerChars: 1200, stretchChars: 1500, maxPerDay: 100, timeoutMs: 30000, minSummaryMs: 2500, maxOutputTokens: 500, memoryItems: 6 };
 
 /** The shipped config.json with the recall settings pinned and the given groups merged over a fresh copy (one level deep). */
 function config(overrides = {}) {
@@ -68,7 +68,7 @@ function rawHit(channelId, l) {
  * A scene: a guild with #general (c1, the turn's channel), #garden (c2) and #private (c4, which @everyone cannot
  * view, so the audience rail refuses it here); `lines` per channel id; `answers(route, query)` gives the REST body.
  */
-function scene({ lines = {}, answers = () => ({ total_results: 0, messages: [] }), answer = 'stretch: 1\nAna did it on October 1.', features = {}, recall = {}, state = {}, capLeft = 100, describer = null, profiles = [], timers, now = () => NOW } = {}) {
+function scene({ lines = {}, answers = () => ({ total_results: 0, messages: [] }), answer = 'stretch: 1\nAna did it on October 1.', features = {}, recall = {}, state = {}, capLeft = 100, describer = null, profiles = [], memory = {}, timers, now = () => NOW } = {}) {
   const calls = [];
   let inFlight = 0;
   let maxInFlight = 0;
@@ -131,6 +131,8 @@ function scene({ lines = {}, answers = () => ({ total_results: 0, messages: [] }
       },
     },
     listUserProfiles: () => profiles,
+    // The other stored memory a test hands over: getLore, getGuild, getRecent, getPrivate.
+    ...memory,
   };
   const llmCalls = [];
   const llm = {
@@ -644,4 +646,120 @@ test('recall: logs carry counts, ids and codes, never a form, a name or a messag
     assert.ok(!text.includes(secret), secret);
   }
   assert.ok(logs.some((l) => l.msg === 'recall: searched' && Number.isInteger(l.queries)));
+});
+
+// ---- stored memory ---------------------------------------------------------------------------
+
+const ANA_ID = '411111111111111111';
+const ELO_ID = '433333333333333333';
+const MEMORY_PROFILES = [
+  {
+    id: ANA_ID,
+    names: ['Ana'],
+    aliases: [],
+    episodes: [
+      { date: '2026-10-01', what: `held a funeral for the κουνέλι with <@${ELO_ID}>`, quote: 'ο δολοφόνος έρχεται στην κηδεία', feeling: '', weight: 5, addedAt: '2026-10-01T20:00:00.000Z' },
+      { date: '2026-09-20', what: 'baked bread', quote: '', feeling: 'thinks of the κουνέλι', weight: 5, addedAt: '2026-09-20T20:00:00.000Z' },
+    ],
+  },
+  { id: ELO_ID, names: ['Éloïse'], aliases: [], episodes: [] },
+];
+const MEMORY_LORE = [{ id: 'l1', title: 'Το κουνέλι', keys: ['κουνέλι'], text: 'The rabbit of the main channel.', weight: 3 }];
+const FUNERAL_LINE = `episode | 2026-10-01 | Ana | held a funeral for the κουνέλι with Éloïse "ο δολοφόνος έρχεται στην κηδεία"`;
+const LORE_LINE = 'lore | - | - | Το κουνέλι: The rabbit of the main channel.';
+
+test('recall: stored memory is read before any Discord request and reaches the summary as <memory> before <found>', async () => {
+  let readAt = null;
+  const holder = {};
+  const s = scene({
+    lines: { c1: RABBIT_LINES },
+    answers: rabbitAnswers,
+    profiles: MEMORY_PROFILES,
+    memory: {
+      getLore: () => {
+        readAt ??= holder.scene.calls.length;
+        return MEMORY_LORE;
+      },
+    },
+  });
+  holder.scene = s;
+  const { result, logs } = await withCapturedLogs(() => s.recaller.run({ ...s.args, server: RABBIT_SERVER }));
+  assert.equal(readAt, 0, 'no Discord request before the memory was read');
+  const user = s.llmCalls[0].messages[1].content;
+  assert.ok(user.startsWith(['<memory>', FUNERAL_LINE, LORE_LINE, '</memory>', '<found>\n'].join('\n')), user);
+  assert.ok(!user.includes('baked bread'), 'a feeling is never searched');
+  assert.equal(result.stats.memory, 2);
+  assert.equal(logs.find((l) => l.msg === 'recall: searched').memory, 2);
+  assert.equal(result.text, 'Ana did it on October 1.');
+});
+
+test('recall: stored memory alone still asks the summary; without an answer it gives nothing verbatim', async () => {
+  const s = scene({ profiles: MEMORY_PROFILES, recall: { maxForms: 0 } });
+  const { result, logs } = await withCapturedLogs(() => s.recaller.run({ ...s.args, server: RABBIT_SERVER }));
+  assert.equal(searches(s.calls).length, 0, 'no form query at maxForms 0');
+  assert.equal(s.llmCalls.length, 1);
+  const user = s.llmCalls[0].messages[1].content;
+  assert.ok(user.startsWith(`<memory>\n${FUNERAL_LINE}\n</memory>\n<question>`), user);
+  assert.ok(!user.includes('<found>'));
+  assert.deepEqual([result.text, result.stretch, result.stats.summary], ['Ana did it on October 1.', null, 'answered']);
+  assert.equal(s.data.recallCount, 1, 'the summary counts the run');
+  assert.ok(!logs.some((l) => l.msg === 'recall: skipped'));
+
+  const failed = scene({ profiles: MEMORY_PROFILES, answer: new Error('fixture: provider down') });
+  const second = await withCapturedLogs(() => failed.recaller.run({ ...failed.args, server: RABBIT_SERVER }));
+  assert.equal(searches(failed.calls).length, 2, 'the forms were searched and found nothing');
+  assert.equal(failed.llmCalls.length, 1);
+  assert.deepEqual([second.result.text, second.result.stretch, second.result.stats.summary], [null, null, 'failed']);
+});
+
+test('recall: a recent line from a channel the audience cannot see is left out; a private layer is never read', async () => {
+  const at = NOW - 2 * HOUR;
+  const recent = {
+    nextId: 4,
+    lines: [
+      { id: 1, at, addedAt: null, channelId: 'c1', text: 'κουνέλι in general', who: [], weight: 2 },
+      { id: 2, at: at - HOUR, addedAt: null, channelId: 'c2', text: 'κουνέλι in garden', who: [], weight: 2 },
+      { id: 3, at, addedAt: null, channelId: 'c4', text: 'μυστικό κουνέλι', who: [], weight: 3 },
+    ],
+  };
+  const learned = [{ id: 1, text: 'the κουνέλι was called Bun', from: `<@${ELO_ID}>`, weight: 1, firstSeen: '2026-09-01T00:00:00.000Z', lastSeen: '2026-09-02T00:00:00.000Z' }];
+  let privateReads = 0;
+  const s = scene({
+    profiles: MEMORY_PROFILES,
+    memory: {
+      getRecent: () => structuredClone(recent),
+      getGuild: () => ({ learned }),
+      getPrivate: () => {
+        privateReads += 1;
+        return { episodes: [{ date: '2026-10-01', what: 'κουνέλι secret', weight: 5 }] };
+      },
+    },
+  });
+  await withCapturedLogs(() => s.recaller.run({ ...s.args, server: RABBIT_SERVER }));
+  const user = s.llmCalls[0].messages[1].content;
+  assert.ok(user.includes('recent | 2026-10-05 | - | κουνέλι in general'), user);
+  assert.ok(user.includes('recent | 2026-10-05 | - | κουνέλι in garden'), user);
+  assert.ok(user.includes('learned | - | Éloïse | the κουνέλι was called Bun'), user);
+  assert.ok(!user.includes('μυστικό'), 'the line of a channel @everyone cannot view');
+  assert.ok(!user.includes('secret'));
+  assert.equal(privateReads, 0);
+});
+
+test('recall: the memory switches gate each store; recall.memoryItems caps the items', async () => {
+  const memory = { getLore: () => MEMORY_LORE };
+  const run = async (options) => {
+    const s = scene({ profiles: MEMORY_PROFILES, memory, ...options });
+    const { result } = await withCapturedLogs(() => s.recaller.run({ ...s.args, server: RABBIT_SERVER }));
+    return { user: s.llmCalls[0]?.messages[1].content ?? '', result };
+  };
+  const noEpisodes = await run({ features: { episodes: false } });
+  assert.ok(noEpisodes.user.includes(LORE_LINE) && !noEpisodes.user.includes('funeral'));
+  const noLore = await run({ features: { lore: false } });
+  assert.ok(noLore.user.includes(FUNERAL_LINE) && !noLore.user.includes('lore |'));
+  const off = await run({ features: { memory: false } });
+  assert.deepEqual([off.user, off.result.stats.memory], ['', 0], 'memory off: nothing to ask about');
+  const one = await run({ recall: { memoryItems: 1 } });
+  assert.ok(one.user.includes(`<memory>\n${FUNERAL_LINE}\n</memory>`));
+  const none = await run({ recall: { memoryItems: 0 } });
+  assert.equal(none.user, '');
 });

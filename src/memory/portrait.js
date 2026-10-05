@@ -20,6 +20,7 @@
 // is not picked: another stage A answer would only replace that item, so during a voice outage
 // the member costs no request and no history read until the item is applied or dropped.
 
+import { llmCountToday } from '../llm/openrouter.js';
 import { log } from '../log.js';
 import { DAY_MS, HOUR_MS, MINUTE_MS, dailyCounter, utcDay } from '../time.js';
 import { errorNameOf } from './update.js';
@@ -31,12 +32,6 @@ export const PORTRAIT_SLOTS = { dayKey: 'portraitDay', countKey: 'portraitCount'
 // The prompts a two-stage portrait refresh needs: its stage A (prompts/portrait.md), and the voice
 // model's (prompts/memory-voice.md), without which the character item it queues is never worded.
 const PORTRAIT_TWO_STAGE_PROMPTS = ['portrait', 'memory-voice'];
-
-// The LLM client's own daily request counter in state.json -- the fields src/llm/openrouter.js
-// counts every request in (its module-private LLM_DAILY). Only read here, never written.
-// TODO: a copy waiting for its one home, which does not exist yet: read today's count with
-// src/llm/openrouter.js#llmCountToday once openrouter.js exports it, and delete this copy.
-const LLM_DAILY = { dayKey: 'llmDay', countKey: 'llmCount' };
 
 /** `llm.maxRequestsPerDay` when it is a finite number, else null (the client then refuses
  * every request itself, see src/llm/openrouter.js#dailyCapOf). */
@@ -58,8 +53,7 @@ function llmDailyCap(config) {
 export function llmCapReached(stateData, config, nowMs) {
   const cap = llmDailyCap(config);
   if (cap === null) return false;
-  const copy = { [LLM_DAILY.dayKey]: stateData?.[LLM_DAILY.dayKey], [LLM_DAILY.countKey]: stateData?.[LLM_DAILY.countKey] };
-  return dailyCounter(copy, LLM_DAILY, nowMs).count >= cap;
+  return llmCountToday(stateData, nowMs) >= cap;
 }
 
 /**
@@ -126,15 +120,15 @@ export function hasText(value) {
  * model) only when `features.memoryTwoStage` is exactly true AND both PORTRAIT_TWO_STAGE_PROMPTS
  * are non-blank. Otherwise `single`, today's prompts/profile.md request that writes the portrait
  * itself: as always with the switch off; with it on (a prompt `missing`), on the voice model
- * (`voiceModel: true`), since its answer words the character. Pure.
+ * (`voice: true`), since its answer words the character. Pure.
  * @param {object} [config]   The live config.
  * @param {object} [prompts]  The live prompts.
- * @returns {{ stage: 'single'|'two', voiceModel: boolean, missing: string[] }}
+ * @returns {{ stage: 'single'|'two', voice: boolean, missing: string[] }}
  */
 export function portraitMode(config, prompts) {
-  if (config?.features?.memoryTwoStage !== true) return { stage: 'single', voiceModel: false, missing: [] };
+  if (config?.features?.memoryTwoStage !== true) return { stage: 'single', voice: false, missing: [] };
   const missing = PORTRAIT_TWO_STAGE_PROMPTS.filter((key) => !hasText(prompts?.[key]));
-  return missing.length === 0 ? { stage: 'two', voiceModel: false, missing } : { stage: 'single', voiceModel: true, missing };
+  return missing.length === 0 ? { stage: 'two', voice: false, missing } : { stage: 'single', voice: true, missing };
 }
 
 /**

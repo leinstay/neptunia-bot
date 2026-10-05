@@ -552,7 +552,7 @@ test('run: model.set writes the right config path for each role', async () => {
   const hot = makeHotWithMedia(rootDir);
   const { admin } = makeAdmin(rootDir, { hot });
 
-  await admin.run('model.set', { role: 'talk', id: 'anthropic/claude-opus-4.6' }, {});
+  await admin.run('model.set', { role: 'voice', id: 'anthropic/claude-opus-4.6' }, {});
   assert.deepEqual(readLocal(rootDir), { llm: { model: 'anthropic/claude-opus-4.6' } });
 
   await admin.run('model.set', { role: 'analyzer', id: 'openrouter/cheap-model' }, {});
@@ -571,10 +571,10 @@ test('run: model.set rejects an unknown role, the old role names and the classif
   const rootDir = makeRoot();
   const { admin } = makeAdmin(rootDir, { hot: makeHotWithMedia(rootDir) });
 
-  for (const role of ['bogus', 'followup', 'media', 'video', 'classifier']) {
+  for (const role of ['bogus', 'followup', 'media', 'video', 'classifier', 'talk']) {
     await assert.rejects(
       () => admin.run('model.set', { role, id: 'x/y' }, {}),
-      new RegExp(`unknown role: ${role} \\(talk, analyzer, voice, classifier\\.text, classifier\\.media, classifier\\.video, mentor\\)`),
+      new RegExp(`unknown role: ${role} \\(voice, analyzer, classifier\\.text, classifier\\.media, classifier\\.video, mentor, image\\)`),
       role,
     );
   }
@@ -585,8 +585,8 @@ test('run: model.set rejects an id that does not look like a model id', async ()
   const rootDir = makeRoot();
   const { admin } = makeAdmin(rootDir, { hot: makeHotWithMedia(rootDir) });
 
-  await assert.rejects(() => admin.run('model.set', { role: 'talk', id: 'x' }, {}), /model id/);
-  await assert.rejects(() => admin.run('model.set', { role: 'talk', id: 'has spaces here' }, {}), /model id/);
+  await assert.rejects(() => admin.run('model.set', { role: 'voice', id: 'x' }, {}), /model id/);
+  await assert.rejects(() => admin.run('model.set', { role: 'image', id: 'has spaces here' }, {}), /model id/);
   assert.equal(fs.existsSync(path.join(rootDir, 'config.local.json')), false);
 });
 
@@ -604,26 +604,43 @@ test('model show: lists the mentor role', async () => {
   const { admin } = makeAdmin(rootDir, { hot });
 
   const unset = (await admin.run('model.show', {}, {})).split('\n');
-  assert.ok(unset.includes('mentor: -'), 'an unset mentor model does not fall back to the talk model');
+  assert.ok(unset.includes('mentor: -'), 'an unset mentor model does not fall back to the voice model');
 
   hot.config.mentor = { model: 'openrouter/mentor-model' };
   const set = (await admin.run('model.show', {}, {})).split('\n');
   assert.ok(set.includes('mentor: openrouter/mentor-model'));
 });
 
-test('model show: the voice role shows memory.voiceModel, and the talk model while it is unset', async () => {
+test('model show: the voice role is llm.model, never memory.model or a stale memory.voiceModel; no talk line', async () => {
   const rootDir = makeRoot();
   const hot = makeHotWithMedia(rootDir);
   hot.config.memory.model = 'openai/analyzer-model';
+  hot.config.memory.voiceModel = 'openrouter/stale-voice-model';
   const { admin } = makeAdmin(rootDir, { hot });
 
-  const unset = (await admin.run('model.show', {}, {})).split('\n');
-  assert.ok(unset.includes('voice: anthropic/claude-opus-4.6'), 'never memory.model');
+  const lines = (await admin.run('model.show', {}, {})).split('\n');
+  assert.ok(lines.includes('voice: anthropic/claude-opus-4.6'));
+  assert.ok(lines.includes('analyzer: openai/analyzer-model'));
+  assert.ok(!lines.some((l) => l.startsWith('talk:')), 'no talk role');
+  assert.ok(!lines.some((l) => l.includes('stale-voice-model')), 'memory.voiceModel is not read');
+});
 
-  hot.config.memory.voiceModel = 'openrouter/voice-model';
-  const set = (await admin.run('model.show', {}, {})).split('\n');
-  assert.ok(set.includes('voice: openrouter/voice-model'));
-  assert.ok(set.includes('analyzer: openai/analyzer-model'));
+test('model set image: writes image.model to config.local.json, reloads, and model show lists it', async () => {
+  const rootDir = makeRoot();
+  const hot = makeHotWithMedia(rootDir);
+  hot.reloadConfig = function reloadConfig() {
+    this.reloadConfigCalls += 1;
+    this.config.image = { ...this.config.image, ...readLocal(rootDir).image };
+    return true;
+  };
+  const { admin } = makeAdmin(rootDir, { hot });
+
+  assert.ok((await admin.run('model.show', {}, {})).split('\n').includes('image: -'));
+  const reply = await admin.run('model.set', { role: 'image', id: 'openai/gpt-image-2.5-flare' }, {});
+  assert.match(reply, /^Set image model to openai\/gpt-image-2\.5-flare /);
+  assert.deepEqual(readLocal(rootDir), { image: { model: 'openai/gpt-image-2.5-flare' } });
+  assert.equal(hot.reloadConfigCalls, 1);
+  assert.ok((await admin.run('model.show', {}, {})).split('\n').includes('image: openai/gpt-image-2.5-flare'));
 });
 
 // ---------------------------------------------------------------------------
@@ -808,7 +825,7 @@ function hotForPing(rootDir, { label = true } = {}) {
 test('run: ping pings the seven roles in parallel and reports latency, provider and tokens', async () => {
   const rootDir = makeRoot();
   const hot = hotForPing(rootDir);
-  hot.config.memory.model = 'openrouter/analyzer-model'; // distinct from talk, so every role gets its own call
+  hot.config.memory.model = 'openrouter/analyzer-model'; // distinct from voice, so every role gets its own call
   hot.config.classifier.video = 'openrouter/video-model';
   const llm = fakeLlm((options) => ({
     text: 'pong',
@@ -822,16 +839,15 @@ test('run: ping pings the seven roles in parallel and reports latency, provider 
   const body = await admin.run('ping', {}, {});
   const lines = body.split('\n');
 
-  assert.equal(llm.calls.length, 4, 'talk, analyzer, media and video are four distinct models here; voice shares the talk model; classifier.text falls back to classifier.media; mentor is unset');
-  assert.equal(lines.length, 8);
-  assert.ok(lines.some((l) => l.startsWith('talk: anthropic/claude-opus-4.6 — ok,') && l.includes('provider=provider-for-anthropic/claude-opus-4.6') && l.includes('tokens 5/1')));
+  assert.equal(llm.calls.length, 4, 'voice, analyzer, media and video are four distinct models here; classifier.text falls back to classifier.media; mentor is unset');
+  assert.equal(lines.length, 7, 'six role lines and the image line');
+  assert.ok(lines.some((l) => l.startsWith('voice: anthropic/claude-opus-4.6 — ok,') && l.includes('provider=provider-for-anthropic/claude-opus-4.6') && l.includes('tokens 5/1')));
   assert.ok(lines.some((l) => l.startsWith('analyzer: openrouter/analyzer-model — ok,')));
-  assert.ok(lines.some((l) => l.startsWith('voice: anthropic/claude-opus-4.6 — ok,')), 'memory.voiceModel unset: the talk model');
   assert.ok(lines.some((l) => l.startsWith('classifier.media: anthropic/claude-haiku-4.5 — ok,')));
   assert.ok(lines.some((l) => l.startsWith('classifier.text: anthropic/claude-haiku-4.5 — ok,')));
   assert.ok(lines.some((l) => l.startsWith('classifier.video: openrouter/video-model — ok,')));
   assert.ok(llm.calls.some((c) => c.options.model === 'openrouter/video-model'));
-  assert.ok(lines.includes('mentor: (no model configured)'), 'an unset mentor model never falls back to the talk model');
+  assert.ok(lines.includes('mentor: (no model configured)'), 'an unset mentor model never falls back to the voice model');
 });
 
 test('run: ping single-role form pings only that role\'s model (classifier.text falls back to classifier.media), or reports no model when it is unset', async () => {
@@ -892,7 +908,7 @@ test('run: ping calls llm.complete with the ping prompt, 16 max tokens, no daily
   const llm = fakeLlm(() => ({ text: 'pong', usage: {}, estimated: 1 }));
   const { admin } = makeAdmin(rootDir, { hot, llm });
 
-  await admin.run('ping', { role: 'talk' }, {});
+  await admin.run('ping', { role: 'voice' }, {});
 
   assert.equal(llm.calls.length, 1);
   const [{ messages, options }] = llm.calls;
@@ -907,47 +923,103 @@ test('run: ping calls llm.complete with the ping prompt, 16 max tokens, no daily
 test('run: ping de-duplicates identical models: one call, reported for every role that uses it', async () => {
   const rootDir = makeRoot();
   const hot = hotForPing(rootDir);
-  // memory.model is null in makeHotWithMedia -> analyzer falls back to the same model as talk.
+  // memory.model is null in makeHotWithMedia -> analyzer falls back to the same model as voice.
   const llm = fakeLlm(() => ({ text: 'pong', usage: {}, estimated: 1 }));
   const { admin } = makeAdmin(rootDir, { hot, llm });
 
   const body = await admin.run('ping', {}, {});
   const lines = body.split('\n');
 
-  assert.equal(llm.calls.length, 2, 'talk+analyzer+voice share one model, classifier.media (and classifier.text, which falls back to it) share another: two calls');
-  assert.equal(lines.length, 8, 'still one line per requested role');
-  assert.ok(lines.some((l) => l.startsWith('talk: anthropic/claude-opus-4.6 — ok,')));
+  assert.equal(llm.calls.length, 2, 'voice+analyzer share one model, classifier.media (and classifier.text, which falls back to it) share another: two calls');
+  assert.equal(lines.length, 7, 'one line per requested role, and the image line');
+  assert.ok(lines.some((l) => l.startsWith('voice: anthropic/claude-opus-4.6 — ok,')));
   assert.ok(lines.some((l) => l.startsWith('analyzer: anthropic/claude-opus-4.6 — ok,')));
   assert.ok(lines.some((l) => l.startsWith('classifier.text: anthropic/claude-haiku-4.5 — ok,')));
   assert.ok(lines.includes('classifier.video: (no model configured)'), 'no classifier.video -> skipped, like any role without a model');
 });
 
-test('ping: role voice pings memory.voiceModel as role voice, the talk model while it is unset', async () => {
+test('ping: role voice pings llm.model as role voice; a stale memory.voiceModel is never pinged', async () => {
   const rootDir = makeRoot();
   const hot = hotForPing(rootDir);
   hot.config.memory.model = 'openai/analyzer-model';
-  hot.config.memory.voiceModel = 'openrouter/voice-model';
+  hot.config.memory.voiceModel = 'openrouter/stale-voice-model';
   const llm = fakeLlm(() => ({ text: 'pong', usage: {}, estimated: 1 }));
   const { admin } = makeAdmin(rootDir, { hot, llm });
 
   const body = await admin.run('ping', { role: 'voice' }, {});
   assert.equal(llm.calls.length, 1);
-  assert.equal(llm.calls[0].options.model, 'openrouter/voice-model');
+  assert.equal(llm.calls[0].options.model, 'anthropic/claude-opus-4.6');
   assert.equal(llm.calls[0].options.role, 'voice');
   assert.equal(llm.calls[0].options.countAgainstDailyCap, false);
-  assert.ok(body.startsWith('voice: openrouter/voice-model — ok,'));
+  assert.equal(body.split('\n').length, 1);
+  assert.ok(body.startsWith('voice: anthropic/claude-opus-4.6 — ok,'));
 
-  hot.config.memory.voiceModel = null;
-  llm.calls.length = 0;
-  const unset = await admin.run('ping', { role: 'voice' }, {});
-  assert.equal(llm.calls[0].options.model, 'anthropic/claude-opus-4.6', 'the talk model, never memory.model');
-  assert.ok(unset.startsWith('voice: anthropic/claude-opus-4.6 — ok,'));
-
-  // A route for the voice role only gives it its own ping, even on the talk model.
-  hot.config.llm.providerByModel = { 'anthropic/@voice': { only: ['amazon-bedrock'] } };
   llm.calls.length = 0;
   await admin.run('ping', {}, {});
-  assert.deepEqual(llm.calls.map((c) => c.options.role).filter((role) => role === 'talk' || role === 'voice'), ['talk', 'voice']);
+  assert.ok(!llm.calls.some((c) => c.options.model === 'openrouter/stale-voice-model'));
+  assert.ok(!llm.calls.some((c) => c.options.role === 'talk'));
+});
+
+test('ping: one voice line and no talk line, whatever the routes; talk is not a ping role', async () => {
+  const rootDir = makeRoot();
+  const hot = hotForPing(rootDir);
+  const llm = fakeLlm((options) => ({ text: 'pong', usage: {}, estimated: 1, provider: `served-${options.role}` }));
+  const { admin } = makeAdmin(rootDir, { hot, llm });
+
+  for (const routes of [{}, { 'anthropic/@voice': { only: ['amazon-bedrock'] } }, { 'anthropic/@talk': { only: ['amazon-bedrock'] } }]) {
+    hot.config.llm.providerByModel = routes;
+    llm.calls.length = 0;
+    const lines = (await admin.run('ping', {}, {})).split('\n');
+    const label = JSON.stringify(routes);
+    assert.equal(lines.filter((l) => l.startsWith('voice:')).length, 1, label);
+    assert.equal(lines.filter((l) => l.startsWith('talk:')).length, 0, label);
+    assert.ok(lines.some((l) => l.startsWith('voice: anthropic/claude-opus-4.6 — ok,') && l.includes('provider=served-voice')), label);
+    assert.ok(!llm.calls.some((c) => c.options.role === 'talk'), label);
+  }
+
+  // `talk` names no role: like any unknown argument, every role is pinged, still without a talk line.
+  const all = (await admin.run('ping', { role: 'talk' }, {})).split('\n');
+  assert.equal(all.filter((l) => l.startsWith('talk:')).length, 0);
+  assert.equal(all.filter((l) => l.startsWith('voice:')).length, 1);
+});
+
+test('ping: every model line comes before the youtube and web lines, the image line among the models', async () => {
+  const rootDir = makeRoot();
+  const hot = hotForPing(rootDir);
+  hot.config.memory.model = 'openrouter/analyzer-model';
+  hot.config.classifier.video = 'openrouter/video-model';
+  hot.config.mentor = { model: 'openrouter/mentor-model' };
+  hot.config.image = { model: 'openai/gpt-image-2.5-flare' };
+  hot.config.features = { ...hot.config.features, webLookup: true };
+  const llm = fakeLlm(() => ({ text: 'pong', usage: {}, estimated: 1 }));
+  const describer = fakeYoutubeDescriber({ status: 'api', detail: '', keySet: true });
+  const { admin } = makeAdmin(rootDir, { hot, llm, describer, lookup: fakeWebLookup(true) });
+
+  const lines = (await admin.run('ping', {}, {})).split('\n');
+
+  assert.deepEqual(
+    lines.map((l) => l.split(':')[0]),
+    ['voice', 'analyzer', 'classifier.text', 'classifier.media', 'classifier.video', 'mentor', 'image', 'youtube', 'web'],
+  );
+  assert.ok(!llm.calls.some((c) => c.options.model === 'openai/gpt-image-2.5-flare' || c.options.role === 'image'), 'no chat request for the image model');
+});
+
+test('ping image: the image model is checked by its listing, never with a chat request', async () => {
+  const rootDir = makeRoot();
+  const hot = hotForPing(rootDir);
+  hot.config.image = { model: 'openai/gpt-image-2.5-flare' };
+  const llm = fakeLlm(() => ({ text: 'pong', usage: {}, estimated: 1 }));
+  const listed = [];
+  llm.modelEndpoints = async (model) => {
+    listed.push(model);
+    return { ok: true, status: 200, json: { data: { architecture: { output_modalities: ['image'] }, endpoints: [{}] } } };
+  };
+  const { admin } = makeAdmin(rootDir, { hot, llm });
+
+  const body = await admin.run('ping', { role: 'image' }, {});
+  assert.equal(llm.calls.length, 0);
+  assert.deepEqual(listed, ['openai/gpt-image-2.5-flare']);
+  assert.match(body, /^image: openai\/gpt-image-2\.5-flare — listed, image output, 1 endpoint\(s\)/);
 });
 
 // A real "wrong provider keys" 404 body captured from OpenRouter, verbatim -- see the
@@ -981,12 +1053,12 @@ test('run: ping reports a role that returns an HTTP error with its status, a tri
   const body = await admin.run('ping', {}, {});
   const lines = body.split('\n');
 
-  const talkLine = lines.find((l) => l.startsWith('talk:'));
-  assert.ok(talkLine.includes('FAIL'));
-  assert.ok(talkLine.includes('404'));
+  const voiceLine = lines.find((l) => l.startsWith('voice:'));
+  assert.ok(voiceLine.includes('FAIL'));
+  assert.ok(voiceLine.includes('404'));
   // The last step is also the first one that hit 0 here, so only one is shown.
-  assert.ok(talkLine.includes('funnel: Add BYOK Endpoints -> 0 endpoints'));
-  assert.ok(!talkLine.includes('first hit 0 at'));
+  assert.ok(voiceLine.includes('funnel: Add BYOK Endpoints -> 0 endpoints'));
+  assert.ok(!voiceLine.includes('first hit 0 at'));
   assert.ok(lines.some((l) => l.startsWith('analyzer: openrouter/analyzer-model — ok,')));
   assert.ok(lines.some((l) => l.startsWith('classifier.media: anthropic/claude-haiku-4.5 — ok,')));
 });
@@ -1011,7 +1083,7 @@ test('run: ping shows both the last step and the first step that hit 0 endpoints
   const llm = fakeLlm(() => throwHttpError(404, bodyText));
   const { admin } = makeAdmin(rootDir, { hot, llm });
 
-  const body = await admin.run('ping', { role: 'talk' }, {});
+  const body = await admin.run('ping', { role: 'voice' }, {});
 
   assert.ok(body.includes('funnel: Add BYOK Endpoints -> 0 endpoints'));
   assert.ok(body.includes('(first hit 0 at Filter by Regional Surcharge -> 0 endpoints)'));
@@ -1027,9 +1099,9 @@ test('run: ping reports every role skipped when labels.ping.prompt is missing, w
 
   assert.equal(llm.calls.length, 0);
   const lines = body.split('\n');
-  assert.equal(lines.length, 8);
-  assert.ok(lines.slice(0, 7).every((l) => l.includes('skipped: label missing')));
-  assert.equal(lines[7], 'image: (no model configured)', 'the image check needs no label');
+  assert.equal(lines.length, 7, 'six role lines and the image line');
+  assert.ok(lines.slice(0, 6).every((l) => l.includes('skipped: label missing')));
+  assert.equal(lines[6], 'image: (no model configured)', 'the image check needs no label');
 });
 
 test('run: ping works while paused', async () => {
@@ -2561,7 +2633,7 @@ test('run: read-only and config commands keep working while paused', async () =>
   await assert.doesNotReject(() => admin.run('reload', {}, {}));
   await assert.doesNotReject(() => admin.run('set', { path: 'llm.model', value: '"x/y"' }, {}));
   await assert.doesNotReject(() => admin.run('unset', { path: 'llm.model' }, {}));
-  await assert.doesNotReject(() => admin.run('model.set', { role: 'talk', id: 'x/y' }, {}));
+  await assert.doesNotReject(() => admin.run('model.set', { role: 'voice', id: 'x/y' }, {}));
 });
 
 test('run: memory.show/lore.list/lore.show drop caches first while paused, so a hand-edit is always seen', async () => {
@@ -3359,7 +3431,7 @@ function sampleMentorRun(caseId, { passed = true, overall = 7, target = 'reply' 
     kind: 'run',
     startedAt: '2026-09-30T11:00:00.000Z',
     finishedAt: '2026-09-30T11:05:00.000Z',
-    models: { mentor: 'mentor/model-a', talk: 'talk/model', analyzer: 'talk/model' },
+    models: { mentor: 'mentor/model-a', voice: 'voice/model', analyzer: 'voice/model' },
     reference: { profile: null, samples: 0 },
     situations: [],
     dropped: 0,
@@ -3667,12 +3739,12 @@ test('run: route.set with a role writes "<prefix>@<role>"; a dotted model id sta
 
   await admin.run('route.set', { model: 'google/', providers: 'google-vertex' }, {});
   await admin.run('route.set', { model: 'google/', providers: ' google-ai-studio , google-vertex ,', role: 'classifier.video' }, {});
-  await admin.run('route.set', { model: 'anthropic/claude-sonnet-4.6', providers: 'amazon-bedrock', role: 'talk', fallbacks: true }, {});
+  await admin.run('route.set', { model: 'anthropic/claude-sonnet-4.6', providers: 'amazon-bedrock', role: 'voice', fallbacks: true }, {});
 
   assert.deepEqual(readLocal(rootDir).llm.providerByModel, {
     'google/': { only: ['google-vertex'], allow_fallbacks: false },
     'google/@classifier.video': { only: ['google-ai-studio', 'google-vertex'], allow_fallbacks: false },
-    'anthropic/claude-sonnet-4.6@talk': { only: ['amazon-bedrock'], allow_fallbacks: true },
+    'anthropic/claude-sonnet-4.6@voice': { only: ['amazon-bedrock'], allow_fallbacks: true },
   });
 });
 
@@ -3682,7 +3754,7 @@ test('run: route.set validates the prefix, the providers and the role, writing n
   const bad = [
     [{ model: '', providers: 'google-vertex' }, /model/],
     [{ model: '   ', providers: 'google-vertex' }, /model/],
-    [{ model: 'google/@talk', providers: 'google-vertex' }, /@/],
+    [{ model: 'google/@voice', providers: 'google-vertex' }, /@/],
     [{ model: 'google /x', providers: 'google-vertex' }, /space/],
     [{ model: '__proto__', providers: 'google-vertex' }, /model/],
     [{ model: 'google/', providers: '' }, /provider/],
@@ -3691,6 +3763,7 @@ test('run: route.set validates the prefix, the providers and the role, writing n
     [{ model: 'google/', providers: 'google_vertex' }, /provider/],
     [{ model: 'google/', providers: 'google-vertex', role: 'bogus' }, /unknown role: bogus/],
     [{ model: 'google/', providers: 'google-vertex', role: 'classifier' }, /unknown role/],
+    [{ model: 'google/', providers: 'google-vertex', role: 'talk' }, /unknown role: talk/],
   ];
   for (const [args, message] of bad) {
     await assert.rejects(() => admin.run('route.set', args, {}), message, JSON.stringify(args));
@@ -3711,7 +3784,7 @@ test('run: route.remove deletes only the named key; an unknown route is an error
   assert.equal(hot.reloadConfigCalls, 3);
 
   const before = fs.readFileSync(path.join(rootDir, 'config.local.json'), 'utf8');
-  await assert.rejects(() => admin.run('route.remove', { model: 'google/', role: 'talk' }, {}), /no route google\/@talk/);
+  await assert.rejects(() => admin.run('route.remove', { model: 'google/', role: 'voice' }, {}), /no route google\/@voice/);
   await assert.rejects(() => admin.run('route.remove', { model: 'google/', role: 'bogus' }, {}), /unknown role/);
   assert.equal(fs.readFileSync(path.join(rootDir, 'config.local.json'), 'utf8'), before);
   assert.equal(hot.reloadConfigCalls, 3);
@@ -3747,15 +3820,25 @@ test('run: route.list renders every route (prefix, role or any, providers, fallb
     '  google/ | any | only google-vertex | fallbacks: off',
     '  google/ | classifier.video | only google-ai-studio | fallbacks: off',
     'by role:',
-    '  talk: anthropic/claude-opus-4.6 -> llm.provider (ignore some-provider, fallbacks: on)',
-    '  analyzer: anthropic/claude-opus-4.6 -> anthropic/@analyzer (only amazon-bedrock, anthropic, fallbacks: on)',
     '  voice: anthropic/claude-opus-4.6 -> llm.provider (ignore some-provider, fallbacks: on)',
+    '  analyzer: anthropic/claude-opus-4.6 -> anthropic/@analyzer (only amazon-bedrock, anthropic, fallbacks: on)',
     '  classifier.text: google/gemini-3.8-flash -> google/ (only google-vertex, fallbacks: off)',
     '  classifier.media: google/gemini-3.8-flash -> google/ (only google-vertex, fallbacks: off)',
     '  classifier.video: google/gemini-3.8-flash -> google/@classifier.video (only google-ai-studio, fallbacks: off); direct-URL videos: media.video.provider (order google-ai-studio, fallbacks: off)',
     '  mentor: (no model configured)',
     '  image: openai/gpt-image-x -> image.provider (only openai, fallbacks: on)',
   ]);
+});
+
+test('run: route.list shows a route key still written with the old role name talk as the route of the voice role', async () => {
+  const rootDir = makeRoot();
+  const hot = hotForRoutes(rootDir);
+  hot.config.llm.providerByModel = { 'anthropic/@talk': { only: ['amazon-bedrock'], allow_fallbacks: false } };
+  const { admin } = makeAdmin(rootDir, { hot });
+
+  const lines = (await admin.run('route.list', {}, {})).split('\n');
+  assert.ok(lines.includes('  voice: anthropic/claude-opus-4.6 -> anthropic/@talk (only amazon-bedrock, fallbacks: off)'));
+  assert.ok(lines.includes('  analyzer: anthropic/claude-opus-4.6 -> none'), 'the old name is the voice role only');
 });
 
 test('access: route.list is read-only, route.set and route.remove open a write; none is open to a non-owner by default', async () => {
@@ -3773,19 +3856,19 @@ test('access: route.list is read-only, route.set and route.remove open a write; 
 test('run: ping sends each role as its own role and pings a shared model once per distinct route', async () => {
   const rootDir = makeRoot();
   const hot = hotForPing(rootDir);
-  // memory.model null -> the analyzer shares the talk model; classifier.text falls back to classifier.media.
+  // memory.model null -> the analyzer shares the voice model; classifier.text falls back to classifier.media.
   const llm = fakeLlm((options) => ({ text: 'pong', usage: {}, estimated: 1, provider: `served-${options.role}` }));
   const { admin } = makeAdmin(rootDir, { hot, llm });
 
   const plain = (await admin.run('ping', {}, {})).split('\n');
-  assert.deepEqual(llm.calls.map((c) => c.options.role), ['talk', 'classifier.text'], 'no routes: one call per model, as the first role using it');
-  assert.ok(plain.some((l) => l.startsWith('analyzer: anthropic/claude-opus-4.6 — ok,') && l.includes('provider=served-talk')));
+  assert.deepEqual(llm.calls.map((c) => c.options.role), ['voice', 'classifier.text'], 'no routes: one call per model, as the first role using it');
+  assert.ok(plain.some((l) => l.startsWith('analyzer: anthropic/claude-opus-4.6 — ok,') && l.includes('provider=served-voice')));
 
   hot.config.llm.providerByModel = { 'anthropic/@analyzer': { only: ['amazon-bedrock'] } };
   llm.calls.length = 0;
   const routed = (await admin.run('ping', {}, {})).split('\n');
-  assert.deepEqual(llm.calls.map((c) => c.options.role), ['talk', 'analyzer', 'classifier.text'], 'the analyzer route differs from talk: its own call');
-  assert.ok(routed.some((l) => l.startsWith('talk: anthropic/claude-opus-4.6 — ok,') && l.includes('provider=served-talk')));
+  assert.deepEqual(llm.calls.map((c) => c.options.role), ['voice', 'analyzer', 'classifier.text'], 'the analyzer route differs from voice: its own call');
+  assert.ok(routed.some((l) => l.startsWith('voice: anthropic/claude-opus-4.6 — ok,') && l.includes('provider=served-voice')));
   assert.ok(routed.some((l) => l.startsWith('analyzer: anthropic/claude-opus-4.6 — ok,') && l.includes('provider=served-analyzer')));
 });
 
@@ -3876,4 +3959,21 @@ test('run: memory.recent works while paused, writes nothing and is open to a gra
   assert.equal(store.flushCalls, 0);
   assert.equal(admin.isAllowed('memory.recent', { userId: '7', roleIds: ['123'] }), true);
   assert.equal(admin.isAllowed('memory.recent', { userId: '7', roleIds: [] }), false);
+});
+
+test("run: variety shows the long pass's list under its own mark beside the latest one", async () => {
+  const rootDir = makeRoot();
+  const { admin, store } = makeAdmin(rootDir);
+  const at = Date.now() - 60_000;
+  store.guilds.set('g1', {
+    worn: { at, key: 'k', lines: 3, patterns: [{ shape: 'short device', examples: ['ένα'], count: 2 }] },
+    wornLong: { at, lines: 70, patterns: [{ shape: 'long habit', examples: ['δύο'], count: 6 }] },
+    wornHistory: [],
+  });
+  const lines = (await admin.run('variety', {}, {})).split('\n');
+  const long = lines.findIndex((line) => line.startsWith('long (') && line.endsWith(' UTC, 70 lines):'));
+  assert.ok(long > lines.findIndex((line) => line.startsWith('latest (')), lines.join('\n'));
+  assert.equal(lines[long + 1], '  - long habit x6: "δύο"');
+  store.guilds.set('g1', { worn: null, wornHistory: [] });
+  assert.ok(!(await admin.run('variety', {}, {})).includes('long ('), 'no long pass yet: no long section');
 });

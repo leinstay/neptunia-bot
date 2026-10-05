@@ -9,6 +9,7 @@ import { parseEnv, applyEnv, deepMerge, readConfig, need, isPlainObject } from '
 import { roomQuestionChance } from '../src/behavior/spontaneous.js';
 import { RECALL_DEFAULTS, recallSettings } from '../src/behavior/recall.js';
 import { paceSettings } from '../src/behavior/turn.js';
+import { SPLIT_DEFAULTS, splitSettings } from '../src/behavior/split.js';
 
 function tmpDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'nep-'));
@@ -184,4 +185,31 @@ test('config.json: the recall budget fallbacks (forms, clusters, run limit, summ
   for (const key of ['maxForms', 'maxClusters', 'timeoutMs', 'minSummaryMs']) {
     assert.equal(recallSettings({ recall: {} })[key], shipped.recall[key], key);
   }
+});
+
+test('config.json: the code fallback of memory.analyzerEpisodes is the shipped value', async () => {
+  const { analyzerEpisodes } = await import('../src/memory/update.js');
+  const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
+  const shipped = JSON.parse(fs.readFileSync(path.join(root, 'config.json'), 'utf8'));
+  assert.equal(analyzerEpisodes({}), shipped.memory.analyzerEpisodes);
+  assert.equal(analyzerEpisodes({ memory: {} }), shipped.memory.analyzerEpisodes);
+});
+
+test('config.json: the code fallbacks of the variety group, the long pass included, are the shipped values', async () => {
+  const { VARIETY_DEFAULTS, varietySettings } = await import('../src/behavior/variety.js');
+  const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
+  const shipped = JSON.parse(fs.readFileSync(path.join(root, 'config.json'), 'utf8'));
+  assert.deepEqual(varietySettings({}), shipped.variety);
+  assert.deepEqual(varietySettings({ variety: {} }), shipped.variety);
+  assert.deepEqual({ ...VARIETY_DEFAULTS }, shipped.variety);
+  for (const key of ['longLines', 'longEveryHours', 'longMinLines', 'longMaxPatterns']) assert.ok(Object.hasOwn(shipped.variety, key), key);
+});
+
+test('config.json: the code fallbacks of the split group are the shipped values, and splitTasks ships on', () => {
+  const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
+  const shipped = JSON.parse(fs.readFileSync(path.join(root, 'config.json'), 'utf8'));
+  assert.deepEqual(splitSettings({}), shipped.split);
+  assert.deepEqual(splitSettings({ split: {} }), shipped.split);
+  assert.deepEqual({ ...SPLIT_DEFAULTS }, shipped.split);
+  assert.equal(shipped.features.splitTasks, true, 'a missing features.splitTasks counts as on, like the shipped value');
 });

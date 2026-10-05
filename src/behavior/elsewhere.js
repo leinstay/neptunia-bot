@@ -17,6 +17,7 @@
 // `elsewhereSeen`) only change where the caller assigns the result and marks
 // the state dirty.
 
+import { memberIdOf as idOf } from '../memory/recent.js';
 import { mainChannelSet } from '../memory/update.js';
 import { MINUTE_MS, DAY_MS } from '../time.js';
 
@@ -53,12 +54,6 @@ function nonNegativeOr(value, fallback) {
 /** A finite number from `value`, else null. */
 function finiteOrNull(value) {
   return Number.isFinite(value) ? value : null;
-}
-
-/** An id as a string, or null for a missing or empty one. */
-function idOf(value) {
-  if (typeof value === 'number' && Number.isFinite(value)) return String(value);
-  return typeof value === 'string' && value !== '' ? value : null;
 }
 
 /**

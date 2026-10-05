@@ -38,7 +38,7 @@ function fakeConfig({ features = { mentor: true }, mentor = {}, bot = {}, memory
       caps: { interlocutor: 2500, aboutChat: 2500, people: 4000, neighbors: 3000 },
       vision: { maxImages: 2, tokensPerImage: 400, imageSize: 512, recentImages: 0, recentImageMinutes: 0 },
     },
-    llm: { model: 'x/talk', maxRequestTokens: 50000, safetyMargin: 0.9, timeoutMs: 1000 },
+    llm: { model: 'x/voice', maxRequestTokens: 50000, safetyMargin: 0.9, timeoutMs: 1000 },
     memory: {
       model: 'x/memory',
       maxOutputTokens: 4000,
@@ -161,7 +161,7 @@ function score(overall = 8) {
 
 /**
  * A fake llm that answers by looking at the request: the mentor model by its
- * system text (situations, diagnose or score), else the talk model. `hook` may return a result (or a promise) to answer a
+ * system text (situations, diagnose or score), else the voice model. `hook` may return a result (or a promise) to answer a
  * call itself.
  */
 function fakeLlm({
@@ -356,7 +356,7 @@ test('run: the run object carries situations, answers, scores and the verdict', 
     assert.equal(run.target, 'reply');
     assert.equal(run.kind, 'run');
     // No classifier.text model is configured here: the run names none for its variety pass.
-    assert.deepEqual(run.models, { mentor: 'x/mentor', talk: 'x/talk', classifierText: null });
+    assert.deepEqual(run.models, { mentor: 'x/mentor', voice: 'x/voice', classifierText: null });
     assert.equal(run.dropped, 1);
     assert.equal(run.situations.length, 2);
     assert.equal(run.reference.profile.messages, 2);
@@ -692,7 +692,7 @@ test('run: turning features.mentor off ends the run as stopped', () => {
   });
 });
 
-test('run: clearing mentor.model never sends a request to the talk model', () => {
+test('run: clearing mentor.model never sends a request to the voice model', () => {
   let hot;
   let talks = 0;
   const llm = fakeLlm({
@@ -1871,7 +1871,7 @@ test('check: a real moment is replayed without the memory written after it', () 
 
 // ---- provider routing ----------------------------------------------------------
 
-test('run: the mentor requests are routed as the mentor role, the sandbox persona answers as talk', () =>
+test('run: the mentor requests are routed as the mentor role, the sandbox persona answers as the reply (role voice)', () =>
   withSetup({}, async ({ mentor, cases, llm }) => {
     const item = cases.add(GUILD, { text: CASE_TEXT, target: 'reply' });
     await (await mentor.run(item.id)).done;
@@ -1879,7 +1879,7 @@ test('run: the mentor requests are routed as the mentor role, the sandbox person
     const talkCalls = llm.calls.filter((c) => c.kind === 'talk');
     assert.ok(mentorCalls.length > 0 && talkCalls.length > 0);
     for (const { options } of mentorCalls) assert.equal(options.role, 'mentor');
-    for (const { options } of talkCalls) assert.equal(options.role, 'talk');
+    for (const { options } of talkCalls) assert.deepEqual([options.role, options.purpose], ['voice', 'reply']);
   }));
 
 // ---- the variety pass in the sandbox ---------------------------------------------
@@ -1935,7 +1935,7 @@ test('run: a reply situation with enough own lines gets one variety pass, its <w
     assert.deepEqual(run.situations[0].worn, [{ shape: 'mock promise ending in (no)', examples: ['fix it (no)'], count: 3 }]);
     assert.equal('worn' in run.situations[1], false, 'too few own lines: nothing saved');
 
-    const talks = llm.calls.filter((c) => c.kind === 'talk' && c.options.role === 'talk');
+    const talks = llm.calls.filter((c) => c.kind === 'talk' && c.options.role === 'voice');
     const withBlock = talks.filter((c) => c.user.includes(`<worn>\n${labels.variety.intro}\n- mock promise ending in (no) ("fix it (no)")\n</worn>`));
     assert.equal(withBlock.length, 2, 'both samples of the first situation carry the block');
     assert.equal(talks.length - withBlock.length, 2, 'the second situation has no block');

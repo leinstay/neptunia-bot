@@ -403,3 +403,34 @@ test('watch: close() closes every watcher, the prompts.local/ one included', () 
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('createHot: a config that still sets memory.voiceModel warns once at startup and once per reload that brings it back; the value stays in the config, unread', async () => {
+  const dir = makeRoot({ config: { llm: { model: 'x/voice' }, memory: { voiceModel: 'x/old-voice' } } });
+  const retired = (logs) => logs.filter((entry) => entry.msg === 'config: memory.voiceModel is no longer read');
+  let hot;
+  try {
+    const started = await withCapturedLogs(() => {
+      hot = createHot({ rootDir: dir });
+    });
+    assert.equal(retired(started.logs).length, 1);
+    assert.equal(retired(started.logs)[0].level, 'warn');
+    assert.ok(!JSON.stringify(started.logs).includes('x/old-voice'), 'the key, never its value');
+
+    const reloads = await withCapturedLogs(() => {
+      hot.reloadConfig(); // still set: no second warning
+      fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({ llm: { model: 'x/voice' }, memory: { voiceModel: null } }));
+      hot.reloadConfig(); // gone (null counts as unset)
+      fs.writeFileSync(path.join(dir, 'config.local.json'), JSON.stringify({ memory: { voiceModel: 'x/old-voice' } }));
+      hot.reloadConfig(); // back through the local layer
+    });
+    assert.equal(retired(reloads.logs).length, 1);
+
+    const clean = makeRoot({ config: { llm: { model: 'x/voice' } } });
+    const quiet = await withCapturedLogs(() => createHot({ rootDir: clean }).close());
+    assert.equal(retired(quiet.logs).length, 0);
+    fs.rmSync(clean, { recursive: true, force: true });
+  } finally {
+    hot?.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

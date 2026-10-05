@@ -474,7 +474,7 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
 
   /**
    * What a mentor request may hold: the per-request token cap the llm client
-   * enforces (`llm.maxRequestTokens`) with the talk path's `llm.safetyMargin`
+   * enforces (`llm.maxRequestTokens`) with the reply path's `llm.safetyMargin`
    * (src/llm/budget.js#requestTokenLimit, read now).
    */
   function requestLimit() {
@@ -1076,7 +1076,7 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
       finishedAt: null,
       models: {
         mentor: config.mentor?.model ?? null,
-        talk: config.llm?.model ?? null,
+        voice: config.llm?.model ?? null,
         // The variety pass's model: the one other model a run calls.
         classifierText: classifierTextModel(config) || null,
       },

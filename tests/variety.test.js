@@ -15,10 +15,15 @@ import {
   appendWornHistory,
   buildVarietyRequest,
   linesKey,
+  longPassDue,
+  mergeWorn,
   normalizeOwnLines,
   normalizeWorn,
+  normalizeWornLong,
   parseVariety,
+  renderVarietyReport,
   renderWorn,
+  selectLongLines,
   selectOwnLines,
   varietySettings,
 } from '../src/behavior/variety.js';
@@ -245,8 +250,10 @@ test('renderWorn: nothing for no patterns, the switch off, or labels without var
   assert.equal(renderWorn(PATTERNS, older, {}), '');
 });
 
-test('renderWorn: at most variety.maxPatterns lines, read now', () => {
-  assert.equal(renderWorn(PATTERNS, labels, { variety: { maxPatterns: 1 } }).split('\n').length, 2);
+test('renderWorn: at most variety.maxPatterns + variety.longMaxPatterns lines, read now', () => {
+  assert.equal(renderWorn(PATTERNS, labels, { variety: { maxPatterns: 1, longMaxPatterns: 0 } }).split('\n').length, 2);
+  assert.equal(renderWorn(PATTERNS, labels, { variety: { maxPatterns: 0, longMaxPatterns: 1 } }).split('\n').length, 2);
+  assert.equal(renderWorn(PATTERNS, labels, { variety: { maxPatterns: 1, longMaxPatterns: 1 } }).split('\n').length, 3);
 });
 
 // ---- storage --------------------------------------------------------------------------------
@@ -944,4 +951,368 @@ test('ahead: a failed or unparsable pass stores nothing; the next turn asks agai
   mode = 'ok';
   await pass.forTurn({ ...TURN, history: ownHistory() });
   assert.equal(llm.calls.length, 3);
+});
+
+// ---- the long pass: pure parts -----------------------------------------------------------------------
+
+test('varietySettings: the long keys are read live, garbage falls back, longLines 0 is allowed', () => {
+  const live = varietySettings({ variety: { longLines: 0, longEveryHours: 0.5, longMinLines: 7, longMaxPatterns: 0 } });
+  assert.deepEqual(
+    [live.longLines, live.longEveryHours, live.longMinLines, live.longMaxPatterns],
+    [0, 0.5, 7, 0],
+  );
+  const broken = varietySettings({ variety: { longLines: -1, longEveryHours: 0, longMinLines: 0, longMaxPatterns: 'x' } });
+  assert.deepEqual(
+    [broken.longLines, broken.longEveryHours, broken.longMinLines, broken.longMaxPatterns],
+    [VARIETY_DEFAULTS.longLines, VARIETY_DEFAULTS.longEveryHours, VARIETY_DEFAULTS.longMinLines, VARIETY_DEFAULTS.longMaxPatterns],
+  );
+  assert.equal(Object.hasOwn(varietySettings({ variety: { longModel: 'x/long' } }), 'longModel'), false, 'no separate long model');
+});
+
+test('appendOwnLine: the ring keeps longLines; only the newest three windows keep what a line answered', () => {
+  let ring = [];
+  for (let i = 0; i < 30; i += 1) ring = appendOwnLine(ring, { id: String(i), ts: i, channelId: 'c', text: `t${i}`, to: `q${i}` }, 2, 20);
+  assert.equal(ring.length, 20);
+  assert.deepEqual([ring[0].id, ring[19].id], ['10', '29']);
+  assert.deepEqual(ring.map((l) => 'to' in l), [...Array(14).fill(false), ...Array(6).fill(true)]);
+  assert.deepEqual(ring[0], { id: '10', ts: 10, channelId: 'c', text: 't10' }, 'an older line keeps its own text, time and channel');
+  // longLines below three windows: the short pass's ring wins.
+  let short = [];
+  for (let i = 0; i < 10; i += 1) short = appendOwnLine(short, { id: String(i), ts: i, text: `t${i}` }, 2, 3);
+  assert.equal(short.length, 6);
+});
+
+test('selectOwnLines: a long ring still gives the short pass at most its window of recent lines', () => {
+  let ring = [];
+  for (let i = 0; i < 120; i += 1) ring = appendOwnLine(ring, { id: `r${i}`, ts: NOW - (120 - i) * MIN, channelId: 'c2', text: `λόγος ${i}` }, 16, 300);
+  assert.equal(ring.length, 120);
+  const lines = selectOwnLines({ ring, channelId: 'c1', now: NOW, window: 16, recentMinutes: 180 });
+  assert.equal(lines.length, 16);
+  assert.equal(lines[15].id, 'r119');
+  assert.equal(selectOwnLines({ ring, channelId: 'c1', now: NOW, window: 16, recentMinutes: 10 }).length, 10, 'and only inside recentMinutes');
+});
+
+test('selectLongLines: the newest longLines of the ring, every channel, oldest first, without what they answered', () => {
+  const ring = [
+    { id: 'b', ts: 20, channelId: 'c2', text: 'two', to: 'x' },
+    { id: 'a', ts: 10, channelId: 'c1', text: 'one' },
+    { id: 'c', ts: 30, channelId: 'c1', text: 'three', to: 'y' },
+    { ts: 40, text: '' },
+  ];
+  assert.deepEqual(selectLongLines(ring, 2), [
+    { id: 'b', ts: 20, channelId: 'c2', text: 'two' },
+    { id: 'c', ts: 30, channelId: 'c1', text: 'three' },
+  ]);
+  assert.equal(selectLongLines(ring, 10).length, 3);
+  assert.deepEqual(selectLongLines(ring, 0), []);
+});
+
+test('longPassDue: never run is due; then only after longEveryHours since the later of the stored list and the last try', () => {
+  const settings = varietySettings({ variety: { longEveryHours: 6 } });
+  const hour = 60 * MIN;
+  assert.equal(longPassDue({ wornLong: null, now: NOW, settings }), true);
+  const wornLong = { at: NOW, lines: 70, patterns: [] };
+  assert.equal(longPassDue({ wornLong, now: NOW + 6 * hour - 1, settings }), false);
+  assert.equal(longPassDue({ wornLong, now: NOW + 6 * hour, settings }), true);
+  assert.equal(longPassDue({ wornLong, triedAt: NOW + 2 * hour, now: NOW + 7 * hour, settings }), false, 'a failed try counts');
+  assert.equal(longPassDue({ wornLong: null, triedAt: NOW, now: NOW + hour, settings }), false);
+  assert.equal(longPassDue({ wornLong: null, now: NOW, settings: varietySettings({ variety: { longLines: 0 } }) }), false, 'longLines 0: never');
+});
+
+test('mergeWorn: the long patterns first, then the short ones, the same shape once (case and spaces ignored), capped', () => {
+  const long = [
+    { shape: 'ends a line on a word', examples: ['honestly'], count: 5 },
+    { shape: 'Names  What Was Said', examples: ['what a surprise'], count: 3 },
+  ];
+  const short = [
+    { shape: 'names what was said', examples: ['what a surprise'], count: 2 },
+    { shape: 'mock promise ending in (no)', examples: ['fix it (no)'], count: 2 },
+  ];
+  assert.deepEqual(
+    mergeWorn(long, short, {}).map((p) => p.shape),
+    ['ends a line on a word', 'Names  What Was Said', 'mock promise ending in (no)'],
+  );
+  assert.deepEqual(mergeWorn(long, short, { variety: { maxPatterns: 1, longMaxPatterns: 1 } }).map((p) => p.shape), ['ends a line on a word', 'Names  What Was Said']);
+  assert.deepEqual(mergeWorn(null, short, {}).map((p) => p.shape), ['names what was said', 'mock promise ending in (no)']);
+  assert.equal(mergeWorn(long, null, {}).length, 2);
+});
+
+test('buildVarietyRequest / parseVariety: the long pass passes its own prompt and maxPatterns', () => {
+  const lines = TEXTS.map((text, i) => ({ id: String(i), ts: i, channelId: 'c1', text }));
+  const request = buildVarietyRequest({ prompt: 'LONG {{name}} {{maxPatterns}} {{shapeChars}}', selfName: 'Nept', lines, config: {}, maxPatterns: 2 });
+  assert.equal(request.messages[0].content, 'LONG Nept 2 140');
+  const three = answer([
+    { shape: 'names what was said', examples: ['what a surprise'] },
+    { shape: 'mock promise ending in (no)', examples: ['(no)'] },
+    { shape: 'food first', examples: ['Crêpes'] },
+  ]);
+  const parsed = parseVariety(three, request.texts, {}, { maxPatterns: 2 });
+  assert.deepEqual([parsed.patterns.length, parsed.dropped], [2, 1]);
+  assert.equal(parseVariety(three, request.texts, { variety: { maxPatterns: 1 } }).patterns.length, 1, 'without it: variety.maxPatterns');
+});
+
+test('normalizeWornLong: { at, lines, patterns } or null', () => {
+  assert.equal(normalizeWornLong(null), null);
+  assert.equal(normalizeWornLong('x'), null);
+  assert.deepEqual(normalizeWornLong({ at: 'x', lines: -1, patterns: [{ shape: 's', examples: [] }, { shape: 'ok', examples: ['e'] }] }), {
+    at: null,
+    lines: 0,
+    patterns: [{ shape: 'ok', count: 2, examples: ['e'] }],
+  });
+});
+
+test('renderVarietyReport: the long list shows under its own mark, with its examples; nothing when none ran', () => {
+  const worn = { at: NOW - 5 * MIN, key: 'k', lines: 3, patterns: PATTERNS };
+  const wornLong = { at: NOW - 60 * MIN, lines: 70, patterns: [{ shape: 'ends a line on a word', examples: ['honestly'], count: 5 }] };
+  const report = renderVarietyReport(worn, [], {}, NOW, wornLong).split('\n');
+  const at = report.indexOf('long (2026-10-01 11:00 UTC, 70 lines):');
+  assert.ok(at > report.indexOf('latest (2026-10-01 11:55 UTC):'), report.join('\n'));
+  assert.equal(report[at + 1], '  - ends a line on a word x5: "honestly"');
+  assert.equal(renderVarietyReport(worn, [], {}, NOW, { at: NOW, lines: 70, patterns: [] }).split('\n').includes('  (nothing named)'), true);
+  assert.ok(!renderVarietyReport(worn, [], {}, NOW).includes('long ('));
+});
+
+test('store: setWornLong persists across a restart without stamping updatedAt; updateGuild never overwrites it; broken loads as null; a wipe clears it', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  const long = { at: NOW, lines: 70, patterns: PATTERNS };
+  assert.deepEqual(store.setWornLong('g1', long), normalizeWornLong(long));
+  assert.equal(store.getGuild('g1').updatedAt, null);
+  store.updateGuild('g1', { patterns: 'p', wornLong: null });
+  assert.equal(store.getGuild('g1').wornLong.lines, 70);
+  store.flush();
+  const again = createStore({ dataDir: dir });
+  assert.deepEqual(again.getGuild('g1').wornLong, normalizeWornLong(long));
+  assert.equal(again.getGuild('g1').patterns, 'p');
+
+  const file = path.join(dir, 'guilds', 'g2', 'guild.json');
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, JSON.stringify({ wornLong: [1, 2] }));
+  assert.equal(createStore({ dataDir: dir }).getGuild('g2').wornLong, null);
+
+  again.wipeGuild('g1');
+  assert.equal(again.getGuild('g1').wornLong, null);
+  assert.equal(createStore({ dataDir: dir }).getGuild('g1').wornLong, null);
+});
+
+// ---- the long pass: live ---------------------------------------------------------------------------
+
+const HOUR = 60 * MIN;
+const LONG_PROMPT = 'LONG for {{name}}, at most {{maxPatterns}} patterns of {{shapeChars}} characters.';
+const LONG_VARIETY = { longLines: 80, longEveryHours: 6, longMinLines: 60, longMaxPatterns: 3 };
+const LONG_ANSWER = answer([
+  { shape: 'ends a line on honestly', examples: ['honestly'], count: 5 },
+  { shape: 'Names What Was Said', examples: ['what a surprise'], count: 9 },
+]);
+
+function longHot({ features = {}, variety = {}, prompts = {} } = {}) {
+  return liveHot({ features, variety: { ...LONG_VARIETY, ...variety }, prompts: { 'variety-long': LONG_PROMPT, ...prompts } });
+}
+
+/** A fake llm answering the long pass with `long()` and the short pass with `short()`. */
+function bothLlm({ long = () => LONG_ANSWER, short = () => ANSWER } = {}) {
+  return fakeLlm((messages, options) => (options.purpose === 'variety-long' ? long() : short()));
+}
+
+function longCalls(llm) {
+  return llm.calls.filter((c) => c.options.purpose === 'variety-long');
+}
+
+/** `n` own lines of the persona in channel `c2`, a day old (outside the short pass's recentMinutes), each answering someone. */
+function fillRing(store, n, longLines = LONG_VARIETY.longLines) {
+  for (let i = 0; i < n; i += 1) {
+    const text = i % 5 === 0 ? `that was fine, honestly ${i}` : `what a surprise number ${i}`;
+    store.pushOwnLine('g1', { id: `r${i}`, ts: NOW - 24 * HOUR + i * MIN, channelId: 'c2', text, to: `question ${i}` }, 16, longLines);
+  }
+}
+
+test('long pass: runs after a post when due and enough lines exist; the request carries the helper options with the long mark', async () => {
+  const { pass, llm, store } = liveSetup({ hot: longHot(), llm: bothLlm() });
+  fillRing(store, 70);
+  await pass.ahead({ ...TURN, history: ownHistory() });
+  const calls = longCalls(llm);
+  assert.equal(calls.length, 1);
+  const { messages, options } = calls[0];
+  assert.equal(messages[0].content, 'LONG for Nept, at most 3 patterns of 140 characters.');
+  const rows = messages[1].content.split('\n');
+  assert.deepEqual([rows[0], rows[1], rows.at(-1)], ['<lines>', '#1 that was fine, honestly 0', '</lines>']);
+  assert.equal(rows.length, 72, 'every ring line, oldest first');
+  assert.ok(!messages[1].content.includes('(to:'), "the long look carries no other member's words");
+  assert.equal(options.model, 'x/classifier');
+  assert.equal(options.role, 'classifier.text');
+  assert.equal(options.purpose, 'variety-long');
+  assert.equal(options.long, true);
+  assert.equal(options.helper, true);
+  assert.equal(options.countAgainstDailyCap, true);
+  assert.equal(options.skipCalibration, true);
+  assert.equal(options.maxOutputTokens, 500);
+  assert.equal(options.timeoutMs, 30000);
+  assert.ok(options.signal instanceof AbortSignal);
+  assert.deepEqual(store.getGuild('g1').wornLong, {
+    at: NOW,
+    lines: 70,
+    patterns: [
+      { shape: 'ends a line on honestly', examples: ['honestly'], count: 5 },
+      { shape: 'Names What Was Said', examples: ['what a surprise'], count: 9 },
+    ],
+  });
+  assert.equal(store.getGuild('g1').wornHistory.length, 1, 'the history holds the short pass only');
+
+  // A deployment that still carries the removed `variety.longModel`: never read.
+  const stale = liveSetup({ hot: longHot({ variety: { longModel: 'x/long' } }), llm: bothLlm() });
+  fillRing(stale.store, 70);
+  await stale.pass.ahead({ ...TURN, history: ownHistory() });
+  assert.equal(longCalls(stale.llm)[0].options.model, 'x/classifier', 'the text classifier model, like the short pass');
+});
+
+test('long pass: not before longEveryHours, not without its prompt, below longMinLines, in a private chat or while paused', async () => {
+  const { pass, llm, store, advance } = liveSetup({ hot: longHot(), llm: bothLlm() });
+  fillRing(store, 70);
+  await pass.ahead({ ...TURN, history: ownHistory() });
+  advance(6 * HOUR - 1);
+  await pass.ahead({ ...TURN, history: historyPlus('a7') });
+  assert.equal(longCalls(llm).length, 1, 'not yet');
+  advance(1);
+  await pass.ahead({ ...TURN, history: historyPlus('a8') });
+  assert.equal(longCalls(llm).length, 2, 'due again');
+
+  for (const [why, setup, lines, input] of [
+    ['no prompt', liveSetup({ hot: longHot({ prompts: { 'variety-long': undefined } }), llm: bothLlm() }), 70, TURN],
+    ['too few lines', liveSetup({ hot: longHot(), llm: bothLlm() }), 59, TURN],
+    ['private chat', liveSetup({ hot: longHot(), llm: bothLlm() }), 70, { ...TURN, privateChat: true }],
+    ['switched off', liveSetup({ hot: longHot({ variety: { longLines: 0 } }), llm: bothLlm() }), 70, TURN],
+  ]) {
+    fillRing(setup.store, lines);
+    await setup.pass.ahead({ ...input, history: ownHistory() });
+    assert.equal(longCalls(setup.llm).length, 0, why);
+    assert.equal(setup.store.getGuild('g1').wornLong, null, why);
+  }
+  const paused = liveSetup({ hot: longHot(), llm: bothLlm() });
+  fillRing(paused.store, 70);
+  paused.store.state.data.paused = true;
+  await paused.pass.ahead({ ...TURN, history: ownHistory() });
+  assert.equal(longCalls(paused.llm).length, 0, 'paused');
+
+  // The long pass is not a precompute: it runs with features.varietyPrecompute off.
+  const noAhead = liveSetup({ hot: longHot({ features: { varietyPrecompute: false } }), llm: bothLlm() });
+  fillRing(noAhead.store, 70);
+  await noAhead.pass.ahead({ ...TURN, history: ownHistory() });
+  assert.deepEqual([longCalls(noAhead.llm).length, noAhead.llm.calls.length], [1, 1]);
+});
+
+test('long pass: one in flight per guild; a turn never waits for it', async () => {
+  const llm = deferredLlm();
+  const { pass, store } = liveSetup({ hot: longHot({ features: { varietyPrecompute: false } }), llm });
+  fillRing(store, 70);
+  const first = pass.ahead({ ...TURN, history: ownHistory() });
+  const second = pass.ahead({ ...TURN, history: historyPlus('a7') });
+  assert.equal(longCalls(llm).length, 1);
+  // A turn meanwhile: its own short request answers, the long one is still out.
+  const turn = pass.forTurn({ ...TURN, history: ownHistory() });
+  await settle();
+  llm.calls.find((c) => c.options.purpose === 'variety').answer(ANSWER);
+  assert.equal((await turn).length, 1);
+  longCalls(llm)[0].answer(LONG_ANSWER);
+  await Promise.all([first, second]);
+  assert.equal(store.getGuild('g1').wornLong.patterns.length, 2);
+});
+
+test("long pass: its patterns reach a later turn's worn ahead of the short ones, de-duplicated and capped", async () => {
+  const { pass, store, hot } = liveSetup({ hot: longHot({ features: { varietyPrecompute: false } }), llm: bothLlm() });
+  fillRing(store, 70);
+  await pass.ahead({ ...TURN, history: ownHistory() });
+  const worn = await pass.forTurn({ ...TURN, history: ownHistory() });
+  assert.deepEqual(
+    worn.map((p) => p.shape),
+    ['ends a line on honestly', 'Names What Was Said'],
+    'the short pass named "names what was said" too: kept once, the long one first',
+  );
+  hot.config.variety.maxPatterns = 0;
+  hot.config.variety.longMaxPatterns = 1;
+  assert.deepEqual((await pass.forTurn({ ...TURN, history: ownHistory() })).map((p) => p.shape), ['ends a line on honestly']);
+});
+
+test('long pass: its list survives short passes that find nothing and turns with no short pass; off means none', async () => {
+  const llm = bothLlm({ short: () => answer([]) });
+  const { pass, store, hot } = liveSetup({ hot: longHot({ features: { varietyPrecompute: false } }), llm });
+  fillRing(store, 70);
+  await pass.ahead({ ...TURN, history: ownHistory() });
+  const empty = await pass.forTurn({ ...TURN, history: ownHistory() });
+  assert.deepEqual(empty.map((p) => p.shape), ['ends a line on honestly', 'Names What Was Said']);
+  assert.deepEqual(store.getGuild('g1').worn.patterns, [], 'the short pass did land, with nothing');
+  const few = await pass.forTurn({ ...TURN, history: [own('z1', 1, 'μόνο')] });
+  assert.equal(few.length, 2, 'too few lines for a short pass: the long list still comes');
+  hot.config.features.variety = false;
+  assert.equal(await pass.forTurn({ ...TURN, history: ownHistory() }), null);
+});
+
+test('long pass: a new one replaces the list; a failed or unparsable one keeps the previous and waits the interval', async () => {
+  let mode = 'first';
+  const second = answer([{ shape: 'a question tag at the end', examples: ['number 3'], count: 3 }]);
+  const llm = bothLlm({
+    long: () => {
+      if (mode === 'fail') throw Object.assign(new Error('boom'), { statusCode: 502 });
+      if (mode === 'junk') return 'no json';
+      return mode === 'first' ? LONG_ANSWER : second;
+    },
+  });
+  const { pass, store, advance } = liveSetup({ hot: longHot({ features: { varietyPrecompute: false } }), llm });
+  fillRing(store, 70);
+  await pass.ahead({ ...TURN, history: ownHistory() });
+  const before = store.getGuild('g1').wornLong;
+  assert.equal(before.patterns.length, 2);
+
+  advance(6 * HOUR);
+  mode = 'fail';
+  const failing = await withCapturedLogs(() => pass.ahead({ ...TURN, history: ownHistory() }));
+  const failed = failing.logs.find((l) => l.msg === 'variety: pass failed');
+  assert.deepEqual([failed.cause, failed.reason, failed.status, failed.lines], ['long', 'error', 502, 70]);
+  assert.deepEqual(store.getGuild('g1').wornLong, before);
+  await pass.ahead({ ...TURN, history: ownHistory() });
+  assert.equal(longCalls(llm).length, 2, 'a failed try waits the interval too');
+
+  advance(6 * HOUR);
+  mode = 'junk';
+  const junk = await withCapturedLogs(() => pass.ahead({ ...TURN, history: ownHistory() }));
+  const line = junk.logs.find((l) => l.msg === 'variety: long');
+  assert.deepEqual([line.level, line.parse, line.stored], ['warn', 'error', false]);
+  assert.deepEqual(store.getGuild('g1').wornLong, before);
+
+  advance(6 * HOUR);
+  mode = 'second';
+  await pass.ahead({ ...TURN, history: ownHistory() });
+  const after = store.getGuild('g1').wornLong;
+  assert.equal(after.at, NOW + 18 * HOUR);
+  assert.deepEqual(after.patterns.map((p) => p.shape), ['a question tag at the end']);
+  assert.equal((await pass.forTurn({ ...TURN, history: ownHistory() }))[0].shape, 'a question tag at the end');
+});
+
+test('long pass: after a restart the stored list serves turns and the interval still holds', async () => {
+  const dir = tmpDataDir();
+  const first = liveSetup({ hot: longHot(), llm: bothLlm(), store: createStore({ dataDir: dir }) });
+  fillRing(first.store, 70);
+  await first.pass.ahead({ ...TURN, history: ownHistory() });
+  first.store.flush();
+
+  const again = liveSetup({ hot: longHot(), llm: bothLlm(), store: createStore({ dataDir: dir }) });
+  again.advance(HOUR);
+  await again.pass.ahead({ ...TURN, history: historyPlus('a7') });
+  assert.equal(longCalls(again.llm).length, 0);
+  assert.equal((await again.pass.forTurn({ ...TURN, history: historyPlus('a7') }))[0].shape, 'ends a line on honestly');
+});
+
+test('long pass: logs carry counts and codes, never the lines, the examples or the shapes', async () => {
+  const { pass, store } = liveSetup({ hot: longHot(), llm: bothLlm() });
+  fillRing(store, 70);
+  const { logs } = await withCapturedLogs(async () => {
+    await pass.ahead({ ...TURN, history: ownHistory() });
+    await pass.forTurn({ ...TURN, history: ownHistory() });
+  });
+  const line = logs.find((l) => l.msg === 'variety: long');
+  assert.deepEqual(fieldsOf(line), ['dropped', 'kept', 'lines', 'ms', 'parse', 'stored']);
+  assert.deepEqual([line.lines, line.kept, line.dropped, line.parse, line.stored], [70, 2, 0, 'ok', true]);
+  assert.equal(typeof line.ms, 'number');
+  assert.equal(logs.find((l) => l.msg === 'variety: turn').long, 2);
+  const all = JSON.stringify(logs);
+  for (const secret of ['honestly', 'surprise', 'question', 'Names What', 'ends a line']) assert.ok(!all.includes(secret), secret);
 });

@@ -3,7 +3,7 @@
 // its normalized messages), builds the request a real turn would build --
 // live prompts, live config, live stored memory -- asks the model, parses the
 // answer, and stops there: nothing reaches Discord and nothing is written to
-// memory. It reproduces the talk path (src/behavior/prompt.js#buildRequest,
+// memory. It reproduces the reply path (src/behavior/prompt.js#buildRequest,
 // src/behavior/turn.js) as the turn it was: a real moment keeps its mode and
 // trigger kind (an overheard line, a follow-up, a name call, an unasked
 // turn), the call it answered from a channel the persona cannot write in and
@@ -27,7 +27,7 @@
 import { buildRequest } from '../behavior/prompt.js';
 import { MINUTE_MS } from '../time.js';
 import { pickOtherProfiles } from '../behavior/turn.js';
-import { cacheTtlFor } from '../llm/openrouter.js';
+import { REPLY_REQUEST, cacheTtlFor } from '../llm/openrouter.js';
 import { parseOutput } from '../llm/parse.js';
 import { log } from '../log.js';
 import { findGif } from '../memory/gifs.js';
@@ -61,9 +61,11 @@ export const SANDBOX_OMITS = Object.freeze({
   privateProfile: 'never a private chat: the private layer is out of bounds',
   reads: 'no web lookup: no link is read',
   lookup: 'no web lookup: no search is run',
+  recallAvailable: 'no server search is run: <senses> does not offer it',
   drawQuota: 'no drawing is offered: a sandbox never draws, so <senses> has no drawing line',
   drawReason: 'a failed drawing\'s reason is not stored with a moment',
   focus: 'no room question: a live turn has no caller for it either',
+  tasks: 'no part of a split message, no queued or folded call: a stored moment records none',
   recentAudience: 'no guild to compare audiences in: <recent> shows the lines of the turn\'s own channel only',
 });
 
@@ -380,9 +382,11 @@ export function sandboxRequestInput({
     privateProfile: null,
     reads: null,
     lookup: null,
+    recallAvailable: null,
     drawQuota: null,
     drawReason: null,
     focus: null,
+    tasks: null,
     recentAudience: null,
   };
 }
@@ -405,7 +409,7 @@ export function sandboxRequestInput({
  * channel inside `memory.recentHours` at `at` and the members' moments of
  * those hours (`recentLinesOf`; a real moment's view holds the lines added
  * before it, src/mentor/moment.js). Left out, unlike a real turn: every input
- * of `SANDBOX_OMITS` (neighbours, the web lookup, a drawing offer, a room
+ * of `SANDBOX_OMITS` (neighbours, the web lookup, the server search, a drawing offer, a room
  * question, the recent lines of other channels, a private chat), pictures (a
  * user message with image parts is sent as its text-only re-render), an
  * owner-forced turn's text, the daily GIF cap, and a custom-emoji reaction is
@@ -414,10 +418,10 @@ export function sandboxRequestInput({
  * what the persona saw of them (a real moment's `descriptions` / `videos`,
  * see src/mentor/anchor.js#replayMedia; its other channels' captions are
  * stored with them): nothing is described or watched here. Every completion
- * passes `role: 'talk'`, `origin: 'mentor'`, `countAgainstDailyCap: false`
+ * passes `role: 'voice'`, `purpose: 'reply'` (`REPLY_REQUEST`), `origin: 'mentor'`, `countAgainstDailyCap: false`
  * and `skipCalibration: true`; the per-request token cap stays in force.
  * With `samples` > 1 and a request the llm client caches
- * (src/llm/openrouter.js#cacheTtlFor: `features.promptCache`, role `talk`,
+ * (src/llm/openrouter.js#cacheTtlFor: `features.promptCache`, role `voice`,
  * the model), the user message is one text part carrying a cache marker, so
  * samples 2..N read the cache instead of paying for it again.
  * An answer's `gif` (a handle of the library, `features.gifs` on) and `draw`
@@ -481,14 +485,14 @@ export async function answerReply({
   const [systemMessage, userMessage] = request.messages;
   const userText = Array.isArray(userMessage.content) ? request.textFallback : userMessage.content;
   // Samples 2..N repeat sample 1 exactly: the user part carries a cache breakpoint when the client caches the request.
-  const cached = sampleCount(samples) > 1 && cacheTtlFor(config, 'talk', config.llm?.model) !== null;
+  const cached = sampleCount(samples) > 1 && cacheTtlFor(config, REPLY_REQUEST.role, config.llm?.model) !== null;
   const userContent = cached ? [{ type: 'text', text: userText, cache_control: { ...USER_CACHE_MARKER } }] : userText;
   const messages = [systemMessage, { ...userMessage, content: userContent }];
 
   const { answers, stopped } = await sample({
     llm,
     messages,
-    options: { role: 'talk', origin: 'mentor', countAgainstDailyCap: false, skipCalibration: true, signal },
+    options: { ...REPLY_REQUEST, origin: 'mentor', countAgainstDailyCap: false, skipCalibration: true, signal },
     samples,
     signal,
     onUsage,

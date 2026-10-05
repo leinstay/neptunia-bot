@@ -135,7 +135,7 @@ test('getGuild: an old guild.json without learned loads it as empty, every other
 
   const store = createStore({ dataDir: dir });
   const guild = store.getGuild('g1');
-  assert.deepEqual(guild, { ...old, learned: [], learnedNextId: 1, emojiUsage: {}, emojiBackfill: null, ownLines: [], worn: null, wornHistory: [], notesUpdatedAt: null, notesCheckedAt: null });
+  assert.deepEqual(guild, { ...old, learned: [], learnedNextId: 1, emojiUsage: {}, emojiBackfill: null, ownLines: [], worn: null, wornLong: null, wornHistory: [], notesUpdatedAt: null, notesCheckedAt: null });
   store.flush();
   assert.equal(fs.readFileSync(file, 'utf8'), raw, 'reading alone never rewrites the file');
 });
@@ -2678,4 +2678,18 @@ test('store: recent lines survive a pause and a restart; nothing but a write, a 
 
   const restarted = createStore({ dataDir: dir });
   assert.deepEqual(recentTexts(restarted, 'g1'), ['μία', 'δύο'], 'long past the window, still stored until a write');
+});
+
+test('pushOwnLine: the ring keeps variety.longLines across a restart; without it, three windows as before', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  for (let i = 0; i < 40; i += 1) store.pushOwnLine('g1', { id: 'm' + i, ts: i, channelId: 'c1', text: 'λέξη ' + i, to: 'q' }, 2, 30);
+  store.flush();
+  const ring = createStore({ dataDir: dir }).getGuild('g1').ownLines;
+  assert.equal(ring.length, 30);
+  assert.deepEqual([ring[0].id, ring[29].id], ['m10', 'm39']);
+  assert.equal(ring.filter((line) => 'to' in line).length, 6, 'only the newest three windows keep what they answered');
+  store.pushOwnLine('g2', { id: 'x', ts: 1, channelId: 'c1', text: 'ένα' }, 2);
+  for (let i = 0; i < 10; i += 1) store.pushOwnLine('g2', { id: 'y' + i, ts: i + 2, channelId: 'c1', text: 'δύο' }, 2);
+  assert.equal(store.getGuild('g2').ownLines.length, 6);
 });

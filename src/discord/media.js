@@ -17,7 +17,11 @@ import { videoSiteFor } from './video-sites.js';
 const DISCORD_CDN_HOSTS = new Set(['cdn.discordapp.com', 'media.discordapp.net']);
 const DISCORD_EXTERNAL_PROXY_HOST_RE = /^images-ext-\d+\.discordapp\.net$/;
 const GIF_PROVIDERS = new Set(['tenor', 'giphy']);
-const GIF_HOST_RE = /(^|\.)((tenor|giphy)\.com)$/i;
+// The GIF sites whose pages Discord's GIF picker posts (and their media hosts).
+const GIF_HOST_RE = /(^|\.)((tenor|giphy|klipy)\.com)$/i;
+// Discord's embed type for a looping GIF video: what every GIF-picker post
+// carries, whatever site serves it.
+const GIF_EMBED_TYPE = 'gifv';
 
 // Extensions Discord may leave without a contentType (or none at all, for
 // bots that strip it): a conservative, deliberately small map — anything
@@ -183,7 +187,7 @@ function isGifFileUrl(url) {
 
 /**
  * The animation of a gif embed, for the GIF watch (src/memory/describe.js):
- * the mp4/webm Discord plays for a tenor/giphy `gifv` embed
+ * the mp4/webm Discord plays for a `gifv` embed
  * (`video.proxyURL` preferred, like the thumbnail, else `video.url`), else
  * the embed's own URL when it is a `.gif` file, else null.
  */
@@ -194,10 +198,30 @@ function gifAnimationUrl(embed, url) {
 }
 
 /**
+ * Whether `url` is on a GIF site (tenor, giphy, klipy -- a page or one of
+ * their media hosts). False for an unparsable URL.
+ * @param {string} url
+ * @returns {boolean}
+ */
+export function isGifHostUrl(url) {
+  return GIF_HOST_RE.test(siteOf(url ?? ''));
+}
+
+/** An embed's Discord type (`gifv`, `rich`, ...), lowercased: a plain object's `type`, a discord.js Embed's `data.type`. */
+function embedTypeOf(embed) {
+  return String(embed?.type ?? embed?.data?.type ?? '').toLowerCase();
+}
+
+/**
  * Classify one Discord embed into a link-ish item: `{ site, title, text,
- * thumbnailUrl, kind, url }`. `kind` is `'gif'` for a tenor/giphy embed (its
- * thumbnail is the frame to describe), else `'link'` — a video-site embed
- * (e.g. YouTube) keeps `kind: 'link'` but still carries `thumbnailUrl`.
+ * thumbnailUrl, kind, url }`. `kind` is `'gif'` for a GIF (its thumbnail is
+ * the frame to describe), else `'link'` — a video-site embed (e.g. YouTube)
+ * keeps `kind: 'link'` but still carries `thumbnailUrl`. An embed is a GIF
+ * when its Discord type is `gifv` (a GIF-picker post, whatever the site),
+ * its provider is tenor/giphy, or its URL is on a GIF site (isGifHostUrl).
+ * A `gifv` embed whose URL is on one of `videoSites` stays a link: the video
+ * describer owns that site. `url` stays the page Discord embeds again when
+ * it is posted.
  * `thumbnail.proxyURL` is preferred over `thumbnail.url` when discord.js
  * exposes one: Discord's own embed proxy (`media.discordapp.net` /
  * `images-ext-*.discordapp.net`) is reliably fetchable, unlike some
@@ -208,13 +232,15 @@ function gifAnimationUrl(embed, url) {
  *   thumbnail?: { url?: string|null, proxyURL?: string|null }|null,
  *   video?: { url?: string|null, proxyURL?: string|null }|null,
  *   provider?: { name?: string|null }|null }} embed
- * @param {{ embedTextChars?: number }} [options]
+ * @param {{ embedTextChars?: number, videoSites?: string[] }} [options]
  */
-export function classifyEmbed(embed, { embedTextChars = 200 } = {}) {
+export function classifyEmbed(embed, { embedTextChars = 200, videoSites = [] } = {}) {
   const url = embed?.url ?? null;
   const host = siteOf(url ?? '');
   const providerName = String(embed?.provider?.name ?? '');
-  const isGif = GIF_PROVIDERS.has(providerName.toLowerCase()) || GIF_HOST_RE.test(host);
+  const onVideoSite = Boolean(url) && Array.isArray(videoSites) && videoSites.length > 0 && videoSiteFor(url, videoSites) !== null;
+  const isGifv = embedTypeOf(embed) === GIF_EMBED_TYPE && !onVideoSite;
+  const isGif = isGifv || GIF_PROVIDERS.has(providerName.toLowerCase()) || isGifHostUrl(url);
   const site = providerName || host || '';
   const animationUrl = isGif ? gifAnimationUrl(embed, url) : null;
   return {

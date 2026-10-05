@@ -23,8 +23,7 @@
 
 import { localHour } from '../discord/format.js';
 import { readableChannels, canSend, lastActivity, channelAllowed, isWritableChannel } from '../discord/collect.js';
-import { audienceAllows } from '../discord/pull-fetch.js';
-import { usableDestination } from './turn.js';
+import { routeFor } from './turn.js';
 import { chooseElsewhereMode, elsewhereSettings, hasUnseen, mayBeLive } from './elsewhere.js';
 import { between } from './random.js';
 import { log } from '../log.js';
@@ -180,27 +179,6 @@ export function pickChannel(candidates, now, rng) {
     return activeRecently.reduce((a, b) => (b.lastActivity > a.lastActivity ? b : a)).channel;
   }
   return activeRecently[Math.floor(rng() * activeRecently.length)].channel;
-}
-
-/**
- * Where the persona's words about `source` (a channel the bot cannot send
- * in) go, read from `config` (the live config) now: `{ destination, reason:
- * null }` with the discord.js channel, or `{ destination: null, reason }`
- * with the code logged as `route`: `off` (features.elsewhere false),
- * `no-destination` (no usable memory.mainChannelIds entry other than the
- * source, src/behavior/turn.js#usableDestination) or `audience` (someone who
- * can view the destination cannot view the source,
- * src/discord/pull-fetch.js#audienceAllows). The one copy of the route of a
- * routed call and of a noticed comment.
- * @param {object} source  A discord.js guild channel.
- * @param {object} config  The live config.
- * @returns {{ destination: object, reason: null } | { destination: null, reason: 'off'|'no-destination'|'audience' }}
- */
-export function routeFor(source, config) {
-  const { channel: destination, reason } = usableDestination(source.guild, config, { exceptId: source.id });
-  if (!destination) return { destination: null, reason };
-  if (!audienceAllows(destination, source, config)) return { destination: null, reason: 'audience' };
-  return { destination, reason: null };
 }
 
 /** Whether `prompts.elsewhere` (the task of a noticed comment) is a non-empty text. */

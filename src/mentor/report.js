@@ -226,7 +226,7 @@ function diagnosisLines(diagnosis) {
 
 /**
  * The file attached to the card: the case, the models (the mentor's, the
- * talk model and the `classifier.text` model of the variety pass; a run
+ * voice model (`llm.model`) and the `classifier.text` model of the variety pass; a run
  * stored before that names none), the verdict, the reference, every
  * situation with its transcript (its header carries its anchor id for a real moment, then its median overall and
  * goal, `-` for none, unless the run was stored without them; a real moment
@@ -245,7 +245,7 @@ export function renderFile(run) {
   const lines = [
     `Mentor ${run?.kind === 'check' ? 'check' : 'run'} ${run?.id ?? '(not saved)'} -- case ${run?.caseId} (${run?.target})`,
     `started ${run?.startedAt ?? '-'}, finished ${run?.finishedAt ?? '-'}`,
-    `models: mentor ${run?.models?.mentor ?? '-'}, talk ${run?.models?.talk ?? '-'}, classifier.text ${run?.models?.classifierText ?? '-'}`,
+    `models: mentor ${run?.models?.mentor ?? '-'}, voice ${run?.models?.voice ?? '-'}, classifier.text ${run?.models?.classifierText ?? '-'}`,
     `outcome: ${run?.error ? `error: ${run.error}` : outcome(run)}`,
   ];
   if (Array.isArray(run?.reasons) && run.reasons.length > 0) lines.push(`reasons: ${run.reasons.join('; ')}`);

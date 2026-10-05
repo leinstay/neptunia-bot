@@ -116,14 +116,14 @@ const HELPER_TIMEOUT_MS_FALLBACK = 30000;
  * (`{ model, ...helperRequestOptions(config, { ... }) }`). The set carries the
  * helper mark `helper: true` (never sent): only a marked request on a role
  * `llm.hedge.roles` lists is hedged by `complete` (see `hedgeSettings`), so the
- * talk request, the analyzer, the describers and the mentor never are.
+ * reply, the memory wording, the analyzer, the describers and the mentor never are.
  * Pure; `config` is the live config read at the moment of use.
  * @param {object|null|undefined} config  The whole live config.
  * @param {object} [request]
  * @param {string} [request.role]             The subprocess, e.g. `classifier.text` (see `complete`).
  * @param {number} [request.maxOutputTokens]  Undefined leaves `llm.maxOutputTokens` in charge.
  * @param {string} [request.purpose]          What the request is for, a kebab-case code for the
- *   `llm: usage` line (`address`, `variety`, `rewatch`, `lookup`, `read-link`, `search-summary`, `route-channel`,
+ *   `llm: usage` line (`address`, `variety`, `rewatch`, `lookup`, `read-link`, `search-summary`, `route-channel`, `variety-long`,
  *   `describe`); never sent.
  * @param {AbortSignal} [request.signal]      The caller's own abort signal, if it has one.
  * @param {number} [request.timeoutMs]        A helper with a clock of its own; else
@@ -156,8 +156,8 @@ const HEDGE_FALLBACK = Object.freeze({ roles: Object.freeze(['classifier.text'])
 /**
  * The hedge settings of the live config, or null when `llm.hedge` is not an object (no hedge at
  * all, every request as without it). Inside the group a key that is missing or invalid reads as
- * config.json's: `roles` (the `options.role` values whose helper requests are hedged; not an array
- * -> `['classifier.text']`), `afterMs` (how long the first attempt is given before a second one is
+ * config.json's: `roles` (the `options.role` values whose helper requests are hedged, each read
+ * through `currentRoleName`; not an array -> `['classifier.text']`), `afterMs` (how long the first attempt is given before a second one is
  * sent; a finite number >= 0, 0 = no hedge; else 2500), `timeoutMs` (the limit of the whole
  * hedged call, both attempts included; a finite number > 0, else 8000) and `longTimeoutMs` (the
  * same limit for a helper marked `long`, whose answer is a summary of several hundred tokens; a
@@ -173,7 +173,7 @@ export function hedgeSettings(config) {
   const finite = (value) => typeof value === 'number' && Number.isFinite(value);
   const limit = (value, fallback) => (finite(value) && value > 0 ? value : fallback);
   return {
-    roles: Array.isArray(group.roles) ? group.roles : [...HEDGE_FALLBACK.roles],
+    roles: Array.isArray(group.roles) ? group.roles.map(currentRoleName) : [...HEDGE_FALLBACK.roles],
     afterMs: finite(group.afterMs) && group.afterMs >= 0 ? group.afterMs : HEDGE_FALLBACK.afterMs,
     timeoutMs: limit(group.timeoutMs, HEDGE_FALLBACK.timeoutMs),
     longTimeoutMs: limit(group.longTimeoutMs, HEDGE_FALLBACK.longTimeoutMs),
@@ -241,6 +241,51 @@ export function dailyCapOf(value, key) {
 }
 
 /**
+ * The `llm.complete` options that name the persona's reply (src/behavior/turn.js, and its replay
+ * in src/mentor/sandbox.js): role `voice`, the one role on `llm.model`, purpose `reply`. Spread
+ * into a request's own options, never mutated.
+ */
+export const REPLY_REQUEST = Object.freeze({ role: 'voice', purpose: 'reply' });
+
+/**
+ * The `llm.complete` options that name a request wording memory in the persona's voice (the
+ * two-stage analyzer's voice run, its single-stage fallback, the warmup's and the portrait
+ * refresh's wording requests): role `voice` on `llm.model` like the reply, purpose
+ * `memory-voice`, and `cache: false`, so the prompt-cache marker stays on the reply only (a
+ * cache write costs more than a plain prompt, and this system text is not the reply's).
+ * Spread into a request's own options, never mutated.
+ */
+export const MEMORY_VOICE_REQUEST = Object.freeze({ role: 'voice', purpose: 'memory-voice', cache: false });
+
+/** The former name of the role `voice` (the model that speaks as the persona, `llm.model`). */
+const RETIRED_ROLE = 'talk';
+/** The role it is read as. */
+const VOICE_ROLE = 'voice';
+/** Whether the retired role name was already reported in this process. */
+let retiredRoleReported = false;
+
+/**
+ * A role name as written in a deployment's config, read under today's names: `talk`, the
+ * former name of the role `voice`, is `voice`; anything else is returned as it is. The one
+ * reader of the old name, used by the three places a config may still carry it -- the role
+ * suffix of an `llm.providerByModel` key (`matchRoute`), `llm.cache.roles` (`cacheTtlFor`) and
+ * `llm.hedge.roles` (`hedgeSettings`) -- so an existing deployment keeps routing, caching and
+ * hedging the reply as before. The first `talk` seen in a process logs
+ * `config: role talk is now voice`; later ones stay quiet. Requests never carry the old name:
+ * a request's own `options.role` is never read through this.
+ * @param {unknown} role
+ * @returns {unknown}
+ */
+export function currentRoleName(role) {
+  if (role !== RETIRED_ROLE) return role;
+  if (!retiredRoleReported) {
+    retiredRoleReported = true;
+    log.warn('config: role talk is now voice', { role: RETIRED_ROLE, use: VOICE_ROLE });
+  }
+  return VOICE_ROLE;
+}
+
+/**
  * One `llm.providerByModel` key split into its model prefix and its role:
  * `"<prefix>@<role>"` applies to that role only, a key without `@` to any
  * role (`role: null`). Split at the last `@`; model ids carry none.
@@ -258,7 +303,9 @@ export function parseRouteKey(key) {
  * for exactly this role, the longest case-sensitive prefix of `model` (an
  * exact id is simply the longest prefix); when none matches, the same among
  * the role-less keys. A role-specific key beats a role-less one whatever their
- * lengths. A non-string or empty `role` matches role-less keys only.
+ * lengths. A non-string or empty `role` matches role-less keys only. A key's
+ * role is read through `currentRoleName` (`"<prefix>@talk"` is a key for the
+ * role `voice`, and its entry's `role` says `voice`); `role` itself is taken as given.
  * Non-object entries and maps are ignored.
  * @param {unknown} model
  * @param {unknown} byModel
@@ -274,10 +321,11 @@ export function matchRoute(model, byModel, role) {
     if (!isPlainObject(value)) continue;
     const parsed = parseRouteKey(key);
     if (!model.startsWith(parsed.prefix)) continue;
-    const entry = { key, prefix: parsed.prefix, role: parsed.role, value };
-    if (parsed.role === null) {
+    const keyRole = parsed.role === null ? null : currentRoleName(parsed.role);
+    const entry = { key, prefix: parsed.prefix, role: keyRole, value };
+    if (keyRole === null) {
       if (bestAny === null || parsed.prefix.length > bestAny.prefix.length) bestAny = entry;
-    } else if (wanted !== null && parsed.role === wanted) {
+    } else if (wanted !== null && keyRole === wanted) {
       if (bestRole === null || parsed.prefix.length > bestRole.prefix.length) bestRole = entry;
     }
   }
@@ -325,7 +373,7 @@ const CACHE_CONTROL = 'cache_control';
 /** Breakpoints a provider accepts per request; markers past the first four are dropped. */
 const MAX_CACHE_MARKERS = 4;
 /** `llm.cache.roles` when it is not an array: config.json's value. */
-const DEFAULT_CACHE_ROLES = Object.freeze(['talk']);
+const DEFAULT_CACHE_ROLES = Object.freeze(['voice']);
 /** `llm.cache.models` when it is not an array: the one family whose `cache_control` the marker follows. */
 const DEFAULT_CACHE_MODELS = Object.freeze(['anthropic/']);
 
@@ -334,7 +382,7 @@ const DEFAULT_CACHE_MODELS = Object.freeze(['anthropic/']);
  * `force === true` -> the TTL whatever the switch, the role list and the model list say (one
  * call that must be cached, e.g. a probe); anything else -> null unless
  * `config.features.promptCache === true` (missing = off), `role` is in `config.llm.cache.roles`
- * (not an array -> `['talk']`) and `model` starts with one of the strings in
+ * (each read through `currentRoleName`; not an array -> `['voice']`) and `model` starts with one of the strings in
  * `config.llm.cache.models` (case-sensitive, like `llm.providerByModel`; not an array ->
  * `['anthropic/']`; a model that is not a string matches none).
  * The TTL is `'5m'` when `config.llm.cache.ttl` is exactly `'5m'`, else `'1h'` (config.json's).
@@ -352,7 +400,7 @@ export function cacheTtlFor(config, role, model, force) {
   if (force === true) return ttl;
   if (config?.features?.promptCache !== true) return null;
   const roles = Array.isArray(cache?.roles) ? cache.roles : DEFAULT_CACHE_ROLES;
-  if (typeof role !== 'string' || !roles.includes(role)) return null;
+  if (typeof role !== 'string' || !roles.some((listed) => currentRoleName(listed) === role)) return null;
   const models = Array.isArray(cache?.models) ? cache.models : DEFAULT_CACHE_MODELS;
   const listed = typeof model === 'string' && models.some((prefix) => typeof prefix === 'string' && model.startsWith(prefix));
   return listed ? ttl : null;
@@ -848,9 +896,11 @@ export function createLlm({
    * it. The winner's usage line adds `hedged` (whether attempt 2 was sent) and
    * `attempt` (1 or 2, the winner); `ms` still runs from attempt 1's start.
    * `options.timeoutMs` still cuts each attempt on its own.
-   * `options.purpose` — what the request is for, a kebab-case code (`address`,
-   * `variety`, `rewatch`, `lookup`, `read-link`, `search-summary`, `describe`,
-   * ...): the helpers that share one role are told apart by it in the journal.
+   * `options.purpose` — what the request is for, a kebab-case code (`reply`,
+   * `memory-voice`, `address`, `variety`, `rewatch`, `lookup`, `read-link`,
+   * `search-summary`, `describe`, ...): the requests that share one role are told
+   * apart by it in the journal (the reply and the memory wording both go out as
+   * role `voice`).
    * `options.origin` — where the request comes from when it is not live chat
    * traffic (e.g. `mentor`), so a day's count can leave it out. Both are
    * logged on the usage line only: never sent in the request body, never
@@ -864,7 +914,9 @@ export function createLlm({
    * it (whatever the model), `false` forbids it, anything else leaves the policy
    * in charge (a marker only while `features.promptCache` is true, `options.role`
    * is listed in `llm.cache.roles` and the request's model starts with a prefix
-   * listed in `llm.cache.models`; see `cacheTtlFor`). The marker (TTL
+   * listed in `llm.cache.models`; see `cacheTtlFor`). The memory wording passes
+   * `false` (`MEMORY_VOICE_REQUEST`): it shares the reply's role `voice`, not its
+   * system text, so only the reply is marked. The marker (TTL
    * `llm.cache.ttl`) is placed on the system message by `withCacheMarker` after
    * the estimate and the token cap check, which always see the caller's
    * `messages` as given.
@@ -898,9 +950,9 @@ export function createLlm({
    * `llm.provider`; see `resolveProvider`); any other value leaves the
    * configured routing in charge. Exists for the video describer, which pins
    * the provider that can fetch a public video URL.
-   * `options.role` — which subprocess makes the request (`talk`, `analyzer`,
-   * `voice`, `classifier.text`, `classifier.media`, `classifier.video`,
-   * `mentor`; the names of `/nep model`), so a `"<prefix>@<role>"` key of
+   * `options.role` — which subprocess makes the request (`voice`, `analyzer`,
+   * `classifier.text`, `classifier.media`, `classifier.video`, `mentor`; the
+   * names of `/nep model`), so a `"<prefix>@<role>"` key of
    * `llm.providerByModel` can route it; never sent. A call without a role
    * matches only role-less keys.
    * `options.reasoning` — OpenRouter's reasoning settings for this one call

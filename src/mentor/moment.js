@@ -66,8 +66,10 @@ function keepBefore(list, later) {
 /**
  * An affinity without the history entries at or after `cutoff`. When the
  * newest stored entry is one of them, the current `reason` came from it (or
- * from a later one): it falls back to the reason of the newest entry kept, or
- * to none. The score is left as stored.
+ * from a later one): it falls back to the reason of the newest entry kept that
+ * has one -- an entry may carry an empty reason (a two-stage move not worded
+ * yet, see src/memory/affinity.js#applyDelta), and the stored reason then
+ * stayed the earlier one -- or to none. The score is left as stored.
  */
 function affinityBefore(affinity, cutoff) {
   if (!affinity || typeof affinity !== 'object' || !Array.isArray(affinity.history)) return { affinity, hidden: 0, reasons: 0 };
@@ -75,8 +77,8 @@ function affinityBefore(affinity, cutoff) {
   if (hidden === 0) return { affinity, hidden: 0, reasons: 0 };
   const newest = affinity.history[affinity.history.length - 1];
   if (!isLater(newest?.ts, cutoff)) return { affinity: { ...affinity, history }, hidden, reasons: 0 };
-  const fallback = history.length > 0 && typeof history[history.length - 1]?.reason === 'string' ? history[history.length - 1].reason : '';
-  return { affinity: { ...affinity, history, reason: fallback }, hidden, reasons: 1 };
+  const worded = history.findLast((entry) => typeof entry?.reason === 'string' && entry.reason !== '');
+  return { affinity: { ...affinity, history, reason: worded ? worded.reason : '' }, hidden, reasons: 1 };
 }
 
 /**
@@ -158,7 +160,8 @@ export function momentCutoff(situation) {
  * stood before `cutoff`: every dated item written at or after it is left out
  * -- a member's episodes (by `addedAt`; without one, those dated the cutoff's
  * day or later), affinity history entries (by `ts`; when the newest one goes,
- * `reason` falls back to the newest kept entry's, or to ''; the score stays),
+ * `reason` falls back to that of the newest kept entry that has one, or to '';
+ * the score stays),
  * details, interests and aliases (by `firstSeen`), the guild's learned items
  * (by `firstSeen`), lore entries (by `createdAt`) and the recent store's
  * lines (by `addedAt`, else by their moment `at`; null for a base without

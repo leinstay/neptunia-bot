@@ -20,7 +20,7 @@ import { deepMerge, isPlainObject } from '../src/config.js';
 import { DAY_MS, HOUR_MS, MINUTE_MS, utcDay, zonedDay } from '../src/time.js';
 import { buildDrawPrompt, buildRequest, hasRequiredLabels } from '../src/behavior/prompt.js';
 import { fill, formatDate } from '../src/discord/format.js';
-import { buildVarietyRequest, selectOwnLines } from '../src/behavior/variety.js';
+import { buildVarietyRequest, selectLongLines, selectOwnLines } from '../src/behavior/variety.js';
 import { createTurnRunner } from '../src/behavior/turn.js';
 import { createRecall } from '../src/behavior/recall-run.js';
 import { createChannelRouter } from '../src/behavior/route-channel.js';
@@ -126,6 +126,7 @@ const LOADS = {
   memoryDecide: ['memory-decide', ...CHARACTER],
   voice: ['memory-voice', ...CHARACTER],
   variety: ['variety'],
+  varietyLong: ['variety-long'],
   warmupChannel: ['channel'],
   warmupPerson: ['profile', ...CHARACTER],
   warmupServer: ['server', ...CHARACTER],
@@ -142,6 +143,8 @@ const LOADS = {
   recallSummary: ['recall-summary'],
   routeChannel: ['route-channel'],
   room: ['room'],
+  split: ['split'],
+  merge: ['merge'],
   turn:[...SYSTEM, 'reply'],
   mentorSituations: ['mentor-situations', 'mentor-signs'],
   mentorVariety: ['variety'],
@@ -763,6 +766,22 @@ test('buildVarietyRequest: variety.md is filled', async () => {
   assertFilled(request.messages, { files: LOADS.variety, blocks: ['lines'] }, 'variety');
 });
 
+test('buildVarietyRequest: variety-long.md is filled (the long pass: its lines from the ring, its own maxPatterns)', async () => {
+  const history = await generalHistory();
+  const config = shippedConfig();
+  const ring = history.filter((m) => m.self).map((m) => ({ id: m.id, ts: m.ts, channelId: m.channelId, text: m.content }));
+  const lines = selectLongLines(ring, config.variety.longLines);
+  assert.ok(lines.length > 0);
+  const request = buildVarietyRequest({
+    prompt: SHIPPED.prompts['variety-long'],
+    selfName: SELF_NAME,
+    lines,
+    config,
+    maxPatterns: config.variety.longMaxPatterns,
+  });
+  assertFilled(request.messages, { files: LOADS.varietyLong, blocks: ['lines'] }, 'variety-long');
+});
+
 // ---- the warm-up and the portrait refresh ---------------------------------------------------
 
 /** A discord.js-shaped text channel of `guild`: its history newest first on fetch, every permission granted. */
@@ -970,7 +989,8 @@ test('createTurnRunner: a reply turn fills the describer, re-watch, link, search
     for (const call of calls) assertFilled(call.messages, { files }, kind);
   }
   const [summary] = llm.calls.filter((call) => kindOf(call.messages) === 'recall-summary');
-  assertFilled(summary.messages, { files: LOADS.recallSummary, blocks: ['found', 'question'] }, 'recall-summary');
+  // `<memory>`: the stored lore entry keyed `tomate` matches the form `tomate`.
+  assertFilled(summary.messages, { files: LOADS.recallSummary, blocks: ['memory', 'found', 'question'] }, 'recall-summary');
   const [turn] = llm.calls.filter((call) => kindOf(call.messages) === 'system-prompt');
   const text = assertFilled(turn?.messages, { files: LOADS.turn, blocks: ['senses', 'about_chat', 'server', 'lore', 'people', 'lookup', 'chat', 'tempo', 'task'] }, 'the turn');
   // Both parts of <lookup>, with the stretch the summary named.
@@ -1040,6 +1060,102 @@ test('createMessageHandler: the room classifier fills room.md', async () => {
   assert.deepEqual(scheduled.at(-1)?.[2], { room: true }, 'the yes reached the scheduler');
 });
 
+// ---- several requests in one message, several calls waiting ------------------------------
+
+const SPLIT_LINE = 'Zoë, trois choses : qui a planté les tomates, regarde le canal du jardin, et dis-moi si la photo est drôle.';
+
+/** The store a turn reads, empty but for the state: the split tests look at the task labels only. */
+function bareStore() {
+  return {
+    state: { data: {}, markDirty() {} },
+    getGuild: () => ({}),
+    getUser: () => null,
+    getPrivate: () => null,
+    listUserProfiles: () => [],
+    listChannels: () => [],
+    getLore: () => [],
+    getMediaCache: () => ({}),
+  };
+}
+
+test('createTurnRunner: the splitter fills split.md; each part, its queued calls and a folded message fill labels.task', async () => {
+  const hot = shippedHot({ features: { typingSimulation: false } });
+  const line = rawMessage(GENERAL_INFO, { ts: NOW - MINUTE_MS, author: PEOPLE[ANA], content: SPLIT_LINE, mentions: [SELF_ID] });
+  const guild = discordGuild([[GENERAL_INFO, [...generalRaws(), line]]]);
+  const channel = guild.channels.cache.get(GENERAL);
+  const llm = recordingLlm((messages, options) => (options.purpose === 'split' ? '- qui a planté les tomates\n- regarde le canal du jardin' : '<skip/>'));
+  const turns = createTurnRunner({ hot, store: bareStore(), llm, calibrator: createCalibrator(), client: discordClient(guild), now: () => NOW, rng: () => 0.5 });
+  const history = normalize([...generalRaws(), line]);
+  const trigger = history.at(-1);
+  const queued = () => [{ id: 'q1', text: 'et la photo ?' }];
+  await withCapturedLogs(() => turns.runTurn({ channel, mode: 'reply', trigger, triggerKind: 'mention', queued }));
+
+  const [split] = llm.calls.filter((call) => call.options.purpose === 'split');
+  assertFilled(split?.messages, { files: LOADS.split, blocks: ['transcript', 'candidate'] }, 'split');
+  const parts = llm.calls.filter((call) => call.options.purpose === 'reply');
+  assert.equal(parts.length, 2, 'one turn per part');
+  for (const [i, call] of parts.entries()) {
+    const text = assertFilled(call.messages, { files: LOADS.reply, blocks: ['chat', 'task'] }, `part ${i + 1}`);
+    assert.ok(text.includes(LABELS.task.part.split('{')[0]), `part ${i + 1}: labels.task.part`);
+    assert.ok(text.includes('3. et la photo ?'), `part ${i + 1}: the queued call follows the parts`);
+  }
+
+  // A turn with no part: its author's queued calls under labels.task.queued, a folded message under labels.task.added.
+  const plainLlm = recordingLlm(() => '<skip/>');
+  const plain = createTurnRunner({ hot, store: bareStore(), llm: plainLlm, calibrator: createCalibrator(), client: discordClient(guild), now: () => NOW, rng: () => 0.5 });
+  const short = history.at(-2);
+  await withCapturedLogs(() => plain.runTurn({ channel, mode: 'reply', trigger: short, triggerKind: 'mention', queued, added: [{ id: 'f1', text: 'alors ?', ts: NOW }] }));
+  const reply = plainLlm.calls.find((call) => call.options.purpose === 'reply');
+  const text = assertFilled(reply?.messages, { files: LOADS.reply, blocks: ['task'] }, 'queued and added');
+  assert.ok(text.includes(fill(LABELS.task.queued, { others: '1. et la photo ?' })));
+  assert.ok(text.includes(fill(LABELS.task.added, { added: 'alors ?' })));
+});
+
+test('createMessageHandler: the merge classifier fills merge.md', async () => {
+  const hot = shippedHot();
+  const guild = discordGuild([[GENERAL_INFO, generalRaws()]]);
+  const channel = guild.channels.cache.get(GENERAL);
+  const line = rawMessage(GENERAL_INFO, { ts: NOW - MINUTE_MS, author: PEOPLE[ANA], content: 'alors, le canal ?', mentions: [SELF_ID] });
+  Object.assign(line, { guild, channel, system: false, webhookId: null });
+  const folded = [];
+  // She is busy with Ana's split message: its second part still waits.
+  const turns = {
+    notePost() {},
+    runTurn: async () => ({ outcome: 'skip' }),
+    isBusy: () => false,
+    isAnyBusy: () => true,
+    lastPostAt: () => 0,
+    waitingParts: () => [{ index: 2, text: 'regarde le canal du jardin' }],
+    addToPart: (...args) => folded.push(args) > 0,
+  };
+  const llm = recordingLlm(() => '1');
+  const handler = createMessageHandler({
+    hot,
+    store: { state: { data: {}, markDirty() {} }, getUser: () => null },
+    client: discordClient(guild),
+    turns,
+    spontaneous: { onMessage: () => false },
+    memory: { observe() {} },
+    tagHistory: createTagHistory(),
+    getGuildId: () => GUILD,
+    getSelfName: () => SELF_NAME,
+    llm,
+    rng: () => 0.5,
+    now: () => NOW,
+    sleep: async () => {},
+  });
+
+  await withCapturedLogs(async () => {
+    await handler(line);
+    for (let i = 0; i < 20 && folded.length === 0; i += 1) await new Promise((resolve) => setImmediate(resolve));
+  });
+
+  assert.equal(llm.calls.length, 1, 'one merge request');
+  assertFilled(llm.calls[0].messages, { files: LOADS.merge, blocks: ['waiting', 'candidate'] }, 'merge');
+  assert.equal(llm.calls[0].options.purpose, 'merge');
+  assert.equal(folded.length, 1, 'folded into the waiting part');
+});
+
 // ---- the mentor -----------------------------------------------------------------------------
 
 /** An in-memory stand-in for src/mentor/cases.js#createCaseStore holding one reply case. */
@@ -1076,7 +1192,7 @@ test('createMentor: a failing run fills the situations, variety, sandbox, score 
   });
   const kindOf = (messages, options) => {
     const user = contentText(messages[1]?.content);
-    if (options.role === 'talk') return 'sandbox';
+    if (options.purpose === 'reply') return 'sandbox';
     if (options.role === 'classifier.text') return 'variety';
     if (user.includes('<verdict>\n')) return 'diagnose';
     if (user.includes('<answers>\n')) return 'score';

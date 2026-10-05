@@ -2829,6 +2829,62 @@ test('run: a "token-limit" failure halves the next batch size too, instead of lo
   });
 });
 
+/** How many buffered lines (content `line-<n>-end`) one analyzer request carried. */
+function linesSent(llmMessages) {
+  return (JSON.stringify(llmMessages).match(/line-\d+-end/g) ?? []).length;
+}
+
+/** A completion cut by the output cap: always reason 'truncated'. */
+const TRUNCATED = { text: '{"users": {"1": {"interests": "cut off here', usage: { prompt_tokens: 10, completion_tokens: 10 }, estimated: 20, finishReason: 'length' };
+
+test('tick: a truncated batch above the floor is retried smaller at the next tick; at the floor it backs off and is sent again after the back-off', async () => {
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    let nowValue = 1_000_000_000;
+    for (let i = 0; i < 40; i += 1) {
+      store.pushBuffer(guildId, slimMessage({ id: `m${i}`, content: `line-${i}-end`, ts: nowValue + i }), 200);
+    }
+    // batchMessages 15: a normal batch takes 30, the first halving reaches the floor (20).
+    const hot = {
+      config: makeConfig({ memory: { ...makeConfig().memory, batchMessages: 15, minBatchMessages: 1 } }),
+      prompts: { memory: 'memory system prompt', labels },
+    };
+    const sent = [];
+    const llm = {
+      complete: async (llmMessages) => {
+        sent.push(linesSent(llmMessages));
+        return TRUNCATED;
+      },
+    };
+    const updater = createMemoryUpdater({ hot, store, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => nowValue });
+
+    const first = await withCapturedLogs(() => updater.tick());
+    assert.deepEqual(sent, [30], 'the normal size goes first');
+    const halved = first.logs.find((entry) => entry.msg === 'memory: update failed, halving the batch size for next time');
+    assert.ok(halved, 'above the floor: halved');
+    assert.equal(halved.atFloor, undefined);
+
+    const second = await withCapturedLogs(() => updater.tick());
+    assert.deepEqual(sent, [30, 20], 'retried smaller at the very next tick, no back-off above the floor');
+    const backedOff = second.logs.find((entry) => entry.msg === 'memory: update failed, backing off');
+    assert.ok(backedOff, 'at the floor: backed off');
+    assert.equal(backedOff.reason, 'truncated');
+    assert.equal(backedOff.atFloor, true);
+    assert.equal(backedOff.backoffMs, 15 * MINUTE_MS);
+    assert.ok(!second.logs.some((entry) => entry.msg === 'memory: update failed, halving the batch size for next time'), 'one line per failure');
+
+    await updater.tick();
+    nowValue += 15 * MINUTE_MS - 1;
+    await updater.tick();
+    assert.deepEqual(sent, [30, 20], 'the batch at the floor is not sent again before the back-off ends');
+
+    nowValue += 1;
+    await updater.tick();
+    assert.deepEqual(sent, [30, 20, 20], 'sent again, still at the floor, once the back-off is over');
+    assert.equal(store.getBuffer(guildId).length, 40, 'the stored buffer is never dropped');
+  });
+});
+
 test('run: messages that arrive while the analyzer call is in flight are kept, even when the capped buffer trims the batch', async () => {
   await withStoreAsync(async (store) => {
     const guildId = 'g1';
@@ -4990,6 +5046,52 @@ test('tick: a failed private update keeps the buffer, logs a warning and backs o
   });
 });
 
+test('tick: a truncated private batch above the floor is retried smaller at the next tick; at the floor it backs off and is sent again after', async () => {
+  await withStoreAsync(async (store) => {
+    let nowValue = 1_000_000_000;
+    const sent = [];
+    const llm = {
+      complete: async (llmMessages) => {
+        sent.push(linesSent(llmMessages));
+        return TRUNCATED;
+      },
+    };
+    // batchMessages 15: a normal batch takes 30, the first halving reaches the floor (20).
+    const updater = createMemoryUpdater({
+      hot: privateHot({ batchMessages: 15, minBatchMessages: 1 }),
+      store,
+      llm,
+      calibrator: createCalibrator(),
+      getSelfName: () => 'Nept',
+      now: () => nowValue,
+    });
+    for (let i = 0; i < 40; i += 1) updater.observe('g1', dmMessage({ id: `m${i}`, content: `line-${i}-end`, ts: nowValue + i }), { private: 'u1' });
+
+    const first = await withCapturedLogs(() => updater.tick());
+    assert.deepEqual(sent, [30]);
+    assert.ok(first.logs.some((entry) => entry.msg === 'memory: private update failed, halving the batch size for next time'));
+
+    const second = await withCapturedLogs(() => updater.tick());
+    assert.deepEqual(sent, [30, 20], 'retried smaller at the very next tick');
+    const backedOff = second.logs.find((entry) => entry.msg === 'memory: private update failed, backing off');
+    assert.ok(backedOff, 'at the floor: backed off');
+    assert.equal(backedOff.reason, 'truncated');
+    assert.equal(backedOff.atFloor, true);
+    assert.equal(backedOff.backoffMs, 15 * MINUTE_MS);
+    assert.ok(!JSON.stringify(second.logs).includes('u1'), 'never the partner id');
+
+    await updater.tick();
+    nowValue += 15 * MINUTE_MS - 1;
+    await updater.tick();
+    assert.deepEqual(sent, [30, 20], 'not sent again before the back-off ends');
+
+    nowValue += 1;
+    await updater.tick();
+    assert.deepEqual(sent, [30, 20, 20], 'sent again once the back-off is over');
+    assert.equal(store.getPrivateBuffer('g1', 'u1').length, 40, 'the stored buffer is never dropped');
+  });
+});
+
 test('tick: never runs the same private buffer twice at once; waitIdle waits for a private run', async () => {
   await withStoreAsync(async (store) => {
     let calls = 0;
@@ -5557,10 +5659,11 @@ test('buildMemoryRequest: the decide stage uses memory-decide and leaves style o
     single.messages[1].content.replace(',"style":"σύντομες φράσεις"', ''),
     'the rest of the user message is the single-stage one',
   );
-  const { messages: singleMessages, ...singleFit } = single;
-  const { messages: decideMessages, ...decideFit } = decide;
+  const { messages: singleMessages, profilesTokens: singleProfilesTokens, ...singleFit } = single;
+  const { messages: decideMessages, profilesTokens: decideProfilesTokens, ...decideFit } = decide;
   assert.equal(singleMessages.length, decideMessages.length);
   assert.deepEqual(decideFit, singleFit, 'roster, markers, fit and counts as in a single-stage request');
+  assert.ok(decideProfilesTokens < singleProfilesTokens, 'the profiles block is smaller by the style left out');
   assert.deepEqual(decideFit.rosterIds, [ZOE]);
 });
 
@@ -5825,12 +5928,12 @@ test('analyze (two-stage): an item queued while the stage A request is in flight
   });
 });
 
-test('analyze (two-stage): a missing memory-decide prompt runs the single-stage request on memory.voiceModel and warns once per change', async () => {
+test('analyze (two-stage): a missing memory-decide prompt runs the single-stage request on llm.model and warns once per change', async () => {
   await withStoreAsync(async (store) => {
     const guildId = 'g1';
     store.touchUser(guildId, '1', 'Aria', STAGE_A_AT);
-    // The fallback is a role voice request: it needs the voice rail config.json ships.
-    const hot = twoStageHot({ model: 'openai/gpt-z', voiceModel: 'anthropic/voice-v', voice: { maxPerDay: 100 } });
+    // The fallback is a memory-wording request: it needs the voice rail config.json ships.
+    const hot = twoStageHot({ model: 'openai/gpt-z', voice: { maxPerDay: 100 } });
     delete hot.prompts['memory-decide'];
     const llm = recordingLlm({ users: { 1: { relationship: 'φίλοι από παλιά' } } });
     const updater = createMemoryUpdater({ hot, store, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => STAGE_A_AT });
@@ -5852,13 +5955,13 @@ test('analyze (two-stage): a missing memory-decide prompt runs the single-stage 
     );
     assert.deepEqual(
       llm.calls.map((call) => call.options.model),
-      ['anthropic/voice-v', 'anthropic/voice-v', 'openai/gpt-z', 'anthropic/voice-v'],
-      'the fallback words every voice text, so it goes out on the voice model, never on memory.model',
+      [undefined, undefined, 'openai/gpt-z', undefined],
+      'the fallback words every voice text, so it goes out on llm.model, never on memory.model',
     );
     assert.deepEqual(
       llm.calls.map((call) => call.options.skipCalibration),
-      [true, true, true, true],
-      'neither model is llm.model',
+      [false, false, true, false],
+      'only llm.model feeds the calibration',
     );
     assert.equal(store.getUser(guildId, '1').relationship, 'φίλοι από παλιά', 'the single-stage answer is applied as today');
     const warnings = logs.filter((entry) => entry.msg === 'memory: two-stage unavailable');
@@ -5871,7 +5974,7 @@ test('analyze (two-stage): a missing memory-decide prompt runs the single-stage 
   });
 });
 
-test('analyze (two-stage): the single-stage fallback goes out on memory.voiceModel (null = llm.model), never on memory.model; with the switch off as before', async () => {
+test('analyze (two-stage): the single-stage fallback goes out on llm.model as a memory-wording request, never on memory.model or a stale memory.voiceModel; with the switch off as before', async () => {
   const optionsOf = (hot) =>
     withStoreAsync(async (store) => {
       const llm = recordingLlm({});
@@ -5886,25 +5989,24 @@ test('analyze (two-stage): the single-stage fallback goes out on memory.voiceMod
     return hot;
   };
 
-  const talk = await optionsOf(fallback({ voiceModel: null }));
-  assert.equal(talk.model, undefined, 'voiceModel null: the talk model');
-  assert.equal(talk.skipCalibration, false);
-  const named = await optionsOf(fallback({ voiceModel: 'x/y' }));
-  assert.equal(named.model, 'x/y');
-  assert.equal(named.skipCalibration, false, 'llm.model feeds the shared ratio');
-  const other = await optionsOf(fallback({ voiceModel: 'anthropic/voice-v' }));
-  assert.equal(other.model, 'anthropic/voice-v');
-  assert.equal(other.skipCalibration, true);
-  for (const options of [talk, named, other]) {
-    assert.equal(options.role, 'voice', 'on the voice model as role voice: the provider pin of that role covers it');
+  const plain = await optionsOf(fallback({}));
+  const stale = await optionsOf(fallback({ voiceModel: 'anthropic/voice-v' }));
+  for (const options of [plain, stale]) {
+    assert.equal(options.model, undefined, 'llm.model, whatever memory.voiceModel says');
+    assert.equal(options.skipCalibration, false, 'llm.model feeds the shared ratio');
+    assert.equal(options.role, 'voice', 'role voice: the provider pin of that role covers it');
+    assert.equal(options.purpose, 'memory-voice');
+    assert.equal(options.cache, false, 'never cache-marked: the marker stays on the reply');
     assert.equal('reasoning' in options, false, 'the stage A reasoning setting stays with stage A');
   }
 
-  const off = twoStageHot({ model: 'openai/gpt-z', voiceModel: 'anthropic/voice-v', reasoning: { effort: 'low' } });
+  const off = twoStageHot({ model: 'openai/gpt-z', reasoning: { effort: 'low' } });
   off.config.features.memoryTwoStage = false;
   const today = await optionsOf(off);
   assert.equal(today.model, 'openai/gpt-z', 'with the switch off the request goes out on memory.model, as before');
   assert.equal(today.role, 'analyzer');
+  assert.equal('purpose' in today, false);
+  assert.equal('cache' in today, false);
   assert.equal('skipCalibration' in today, false);
   assert.equal('reasoning' in today, false);
 });
@@ -5914,7 +6016,7 @@ test('analyze (two-stage): the single-stage fallback counts against memory.voice
     const guildId = 'g1';
     const clock = STAGE_A_AT;
     store.touchUser(guildId, '1', 'Aria', clock - MINUTE_MS);
-    const hot = twoStageHot({ voiceModel: 'anthropic/voice-v', batchMessages: 1, minBatchMessages: 1, voice: { maxPerDay: 1 } });
+    const hot = twoStageHot({ batchMessages: 1, minBatchMessages: 1, voice: { maxPerDay: 1 } });
     delete hot.prompts['memory-decide'];
     let refusal = null;
     const calls = [];
@@ -5945,7 +6047,7 @@ test('analyze (two-stage): the single-stage fallback counts against memory.voice
     assert.equal(outcomes[3].reason, 'daily-cap');
     assert.equal(outcomes[3].stage, 'single');
     assert.equal(calls.length, 3, 'the batch past the rail is never sent');
-    assert.ok(calls.every((options) => options.role === 'voice'));
+    assert.ok(calls.every((options) => options.role === 'voice' && options.purpose === 'memory-voice'));
     assert.equal(store.state.data.voiceCount, 1, 'the request that went out counts');
     assert.equal(store.state.data.voiceDay, utcDay(clock));
 
@@ -6321,13 +6423,13 @@ function voiceUpdater(store, hot, llm, now = () => VOICE_AT) {
   return createMemoryUpdater({ hot, store, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now });
 }
 
-test('run (two-stage): a voice request follows a successful batch on memory.voiceModel with role voice, and its texts are stored', async () => {
+test('run (two-stage): a voice request follows a successful batch on llm.model as a memory-wording request, and its texts are stored', async () => {
   await withStoreAsync(async (store, dir) => {
     const guildId = 'g1';
     store.touchUser(guildId, '1', 'Aria', Date.now() - 60_000);
     store.pushBuffer(guildId, slimMessage({ id: 'm1', authorId: '1', authorName: 'Aria', ts: Date.now() - 1000 }), 100);
     const hot = voiceHot(
-      { model: 'openai/gpt-z', voiceModel: 'anthropic/voice-v', batchMessages: 1, minBatchMessages: 1, temperature: 0.4, timeoutMs: 4321, voice: { maxOutputTokens: 2500 } },
+      { model: 'openai/gpt-z', batchMessages: 1, minBatchMessages: 1, temperature: 0.4, timeoutMs: 4321, voice: { maxOutputTokens: 2500 } },
       { relationships: { damping: false } },
     );
     const texts = { relationship: 'φίλοι από το παζλ', reason: 'με βοήθησε στο δύσκολο σημείο', feeling: 'χάρηκα πολύ' };
@@ -6343,11 +6445,14 @@ test('run (two-stage): a voice request follows a successful batch on memory.voic
     const [stageA, voice] = llm.calls;
     assert.equal(stageA.options.role, 'analyzer');
     assert.equal(stageA.options.model, 'openai/gpt-z');
+    assert.equal('purpose' in stageA.options, false, 'stage A is no memory-wording request');
     assert.equal(voice.options.role, 'voice');
-    assert.equal(voice.options.model, 'anthropic/voice-v');
+    assert.equal(voice.options.purpose, 'memory-voice');
+    assert.equal(voice.options.cache, false);
+    assert.equal(voice.options.model, undefined, 'llm.model');
     assert.equal(voice.options.maxOutputTokens, 2500);
     assert.equal(voice.options.temperature, 0.4);
-    assert.equal(voice.options.skipCalibration, true, 'not the talk model');
+    assert.equal(voice.options.skipCalibration, false, 'llm.model feeds the calibration');
     assert.equal(voice.messages[0].content, 'voice prompt for Nept: relationship 600, portrait 400');
     assert.deepEqual(voiceItemsOf(voice.messages).map((item) => item.kind).sort(), ['feeling', 'reason', 'relationship']);
 
@@ -6359,7 +6464,7 @@ test('run (two-stage): a voice request follows a successful batch on memory.voic
     assert.equal(aria.affinity.history.at(-1).reason, 'με βοήθησε στο δύσκολο σημείο');
     assert.equal(aria.episodes[0].feeling, 'χάρηκα πολύ');
     assert.deepEqual(store.getVoiceQueue(guildId), [], 'every applied item left the queue');
-    assert.equal(store.state.data.voiceCount, 1);
+    assert.equal(store.state.data.voiceCount, 1, 'the voice request counts, stage A does not');
     assert.equal(store.state.data.voiceDay, utcDay(Date.now()));
     assert.deepEqual(JSON.parse(fs.readFileSync(path.join(dir, 'guilds', guildId, 'voice.json'), 'utf8')), [], 'flushed');
     const onDisk = JSON.parse(fs.readFileSync(path.join(dir, 'guilds', guildId, 'users', '1.json'), 'utf8'));
@@ -6376,13 +6481,8 @@ test('run (two-stage): a voice request follows a successful batch on memory.voic
   });
 });
 
-test('runVoice: memory.voiceModel null sends on the talk model and feeds calibration; memory.model is never used', async () => {
-  const cases = [
-    { voiceModel: null, model: undefined, skip: false },
-    { voiceModel: 'x/y', model: 'x/y', skip: false },
-    { voiceModel: 'anthropic/voice-v', model: 'anthropic/voice-v', skip: true },
-  ];
-  for (const { voiceModel, model, skip } of cases) {
+test('runVoice: sends on llm.model and feeds calibration whatever a stale memory.voiceModel says; memory.model is never used', async () => {
+  for (const voiceModel of [undefined, null, 'anthropic/voice-v']) {
     await withStoreAsync(async (store) => {
       store.touchUser('g1', '1', 'Aria', VOICE_AT);
       const hot = voiceHot({ model: 'openai/gpt-z', voiceModel, reasoning: { effort: 'low' } });
@@ -6393,10 +6493,10 @@ test('runVoice: memory.voiceModel null sends on the talk model and feeds calibra
 
       assert.equal(llm.calls.length, 1);
       const [{ options }] = llm.calls;
-      assert.equal(options.model, model, `voiceModel ${voiceModel}`);
-      assert.notEqual(options.model, 'openai/gpt-z');
+      assert.equal(options.model, undefined, `voiceModel ${voiceModel}`);
       assert.equal(options.role, 'voice');
-      assert.equal(options.skipCalibration, skip, `voiceModel ${voiceModel}`);
+      assert.equal(options.purpose, 'memory-voice');
+      assert.equal(options.skipCalibration, false, `voiceModel ${voiceModel}`);
       assert.equal('reasoning' in options, false, 'the stage A reasoning setting stays with stage A');
     });
   }
@@ -7933,5 +8033,179 @@ test('analyze (two-stage): stage A sees the notes, writes a recent add itself an
       ],
     );
     assert.deepEqual(queuedKinds(store, guildId), ['learned', 'self'], 'only the lesson and the self claim wait for the voice model');
+  });
+});
+
+// ---- the analyzer's profile view: capped lists, whole or compact by lines shown ----
+
+/** A stored-shape profile whose `character` is `chars` Greek letters long (one raw token per two). */
+function heavyProfile(name, chars, extra = {}) {
+  return { names: [name], character: 'λ'.repeat(chars), style: '', relationship: '', interests: [], details: [], ...extra };
+}
+
+/** One guild line of `authorId` at `ts`. */
+function authorLine(id, authorId, authorName, ts) {
+  return slimMessage({ id, authorId, authorName, content: 'γεια', ts });
+}
+
+/** makeConfig() with `llm.maxRequestTokens` = `tokens` (no safety margin) and `memory` merged in. */
+function budgetConfig(tokens, memory = {}) {
+  const base = makeConfig();
+  return makeConfig({ llm: { ...base.llm, maxRequestTokens: tokens, safetyMargin: 1 }, memory: { ...base.memory, ...memory } });
+}
+
+const profilesOf = (request) => JSON.parse(blockBody(request.messages[1].content, 'existing_profiles'));
+
+test('buildMemoryRequest: existing_profiles sends at most memory.analyzerEpisodes episodes, heaviest then newest, and the stored list keeps every one', () => {
+  const episodes = [
+    { date: '2026-01-01', what: 'α', quote: '', feeling: '', weight: 2 },
+    { date: '2026-01-02', what: 'β', quote: '', feeling: '', weight: 5 },
+    { date: '2026-01-03', what: 'γ', quote: '', feeling: '', weight: 2 },
+    { date: '2026-01-04', what: 'δ', quote: '', feeling: '', weight: 1 },
+  ];
+  const profile = heavyProfile('Zoé', 10, { episodes });
+  const build = (analyzerEpisodes) =>
+    buildMemoryRequest({
+      prompts: { memory: 'sys', labels },
+      config: makeConfig({ memory: { ...makeConfig().memory, analyzerEpisodes } }),
+      calibrator: createCalibrator(),
+      profiles: { 1: profile },
+      guildMemory: {},
+      messages: [authorLine('m1', '1', 'Zoé', Date.UTC(2026, 0, 5, 12))],
+      selfName: 'Nept',
+    });
+
+  assert.deepEqual(profilesOf(build(2))['1'].episodes.map((ep) => ep.what), ['β', 'γ'], 'the first two of the reply side order');
+  assert.deepEqual(profilesOf(build(10))['1'].episodes.map((ep) => ep.what), ['β', 'γ', 'α', 'δ'], 'fewer than the cap: all, in that order');
+  assert.equal('episodes' in profilesOf(build(0))['1'], false, '0 sends none');
+  assert.deepEqual(profile.episodes.map((ep) => ep.what), ['α', 'β', 'γ', 'δ'], 'the stored profile is never trimmed');
+});
+
+test('analyze: an episode equal to a stored one the request did not show is still rejected by code', async () => {
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    const at = Date.UTC(2026, 0, 10, 12);
+    store.touchUser(guildId, '1', 'Zoé', at - DAY_MS);
+    store.addEpisodes(
+      guildId,
+      '1',
+      [
+        { date: '2026-01-02', what: 'έφερε γλυκά', weight: 5 },
+        { date: '2026-01-03', what: 'τραγούδησε', weight: 4 },
+        { date: '2026-01-04', what: 'έχασε το κλειδί', weight: 1 },
+      ],
+      { maxEpisodes: 20, maxNew: 5, now: at - DAY_MS },
+    );
+    const llm = recordingLlm({ users: { 1: { episodes: [{ date: '2026-01-04', what: 'Έχασε  το κλειδί', weight: 2 }] } } });
+    const hot = { config: makeConfig({ memory: { ...makeConfig().memory, analyzerEpisodes: 2 } }), prompts: { memory: 'sys', labels } };
+    const updater = createMemoryUpdater({ hot, store, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => at });
+
+    const outcome = await updater.analyze(guildId, [authorLine('m1', '1', 'Zoé', at - MINUTE_MS)]);
+
+    assert.equal(outcome.ok, true);
+    assert.deepEqual(profilesOf(llm.calls[0])['1'].episodes.map((ep) => ep.what), ['έφερε γλυκά', 'τραγούδησε'], 'the light one was not shown');
+    assert.equal(outcome.result.episodes, 0, 'the same moment is not stored twice');
+    assert.deepEqual(store.getUser(guildId, '1').episodes.map((ep) => ep.what), ['έφερε γλυκά', 'τραγούδησε', 'έχασε το κλειδί']);
+  });
+});
+
+test('buildMemoryRequest: with a tight budget the authors with the most lines shown keep their whole profile, the others go compact', () => {
+  const t0 = Date.UTC(2026, 0, 5, 12);
+  // Cyra writes first but least; Aria most.
+  const messages = [
+    authorLine('m1', '3', 'Cyra', t0),
+    authorLine('m2', '2', 'Bea', t0 + 1000),
+    authorLine('m3', '1', 'Aria', t0 + 2000),
+    authorLine('m4', '1', 'Aria', t0 + 3000),
+    authorLine('m5', '2', 'Bea', t0 + 4000),
+    authorLine('m6', '1', 'Aria', t0 + 5000),
+  ];
+  const profiles = { 1: heavyProfile('Aria', 1600), 2: heavyProfile('Bea', 1600), 3: heavyProfile('Cyra', 1600) };
+  const build = (config) =>
+    buildMemoryRequest({ prompts: { memory: 'sys', labels }, config, calibrator: createCalibrator(), profiles, guildMemory: {}, messages, selfName: 'Nept' });
+
+  // Room for the transcript and one whole profile (about 800 tokens each), not two.
+  const tight = build(budgetConfig(1400));
+  const sent = profilesOf(tight);
+  assert.equal(tight.shown, 6, 'every line is read: the profiles take only what the transcript left');
+  assert.equal(sent['1'].character, profiles[1].character, 'the busiest author is whole');
+  for (const id of ['2', '3']) {
+    assert.deepEqual(Object.keys(sent[id]).sort(), ['affinity', 'compact', 'names'], `${id}: id, names and attitude only`);
+    assert.equal(sent[id].compact, true);
+    assert.deepEqual(sent[id].names, profiles[id].names);
+  }
+  assert.deepEqual([tight.profilesWhole, tight.profilesCompact], [1, 2]);
+  const blockText = `<existing_profiles>\n${blockBody(tight.messages[1].content, 'existing_profiles')}\n</existing_profiles>`;
+  assert.equal(tight.profilesTokens, createCalibrator().apply(estimateTokens(blockText)) + 2);
+
+  const roomy = build(budgetConfig(50000));
+  assert.deepEqual([roomy.profilesWhole, roomy.profilesCompact], [3, 0]);
+  assert.equal(profilesOf(roomy)['3'].character, profiles[3].character);
+  assert.ok(roomy.profilesTokens > tight.profilesTokens);
+});
+
+test('run: a compact author is still written, and "memory: update applied" counts the profiles sent whole and compact and the block tokens', async () => {
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    const t0 = Date.UTC(2026, 0, 5, 12);
+    for (const [id, name] of [['1', 'Aria'], ['2', 'Bea']]) {
+      store.touchUser(guildId, id, name, t0 - DAY_MS);
+      store.applyProfileOps(guildId, id, { character: 'λ'.repeat(1600) }, { fieldChars: 2000 });
+    }
+    for (const message of [authorLine('m1', '2', 'Bea', t0), authorLine('m2', '1', 'Aria', t0 + 1000), authorLine('m3', '1', 'Aria', t0 + 2000)]) {
+      store.pushBuffer(guildId, message, 100);
+    }
+    const llm = recordingLlm({ users: { 2: { interests: { add: [{ topic: 'κιθάρα', note: 'παίζει τα βράδια' }] } } } });
+    const hot = { config: budgetConfig(1300, { batchMessages: 3, minBatchMessages: 1 }), prompts: { memory: 'sys', labels } };
+    const updater = createMemoryUpdater({ hot, store, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => t0 + HOUR_MS });
+
+    const { logs } = await withCapturedLogs(() => updater.run(guildId));
+
+    const sent = profilesOf(llm.calls[0]);
+    assert.equal(sent['2'].compact, true, 'Bea went compact');
+    assert.equal(sent['1'].compact, undefined, 'Aria went whole');
+    assert.deepEqual(store.getUser(guildId, '2').interests.map((item) => item.topic), ['κιθάρα'], 'the update for the compact author is applied');
+    const applied = logs.find((entry) => entry.msg === 'memory: update applied');
+    assert.deepEqual([applied.profilesWhole, applied.profilesCompact], [1, 1]);
+    assert.ok(Number.isInteger(applied.profilesTokens) && applied.profilesTokens > 0);
+  });
+});
+
+test('buildMemoryRequest: the notes markers count only the lines the request shows, and run stamps nothing it did not flag', async () => {
+  const long = notesLines('c1', 20).map((m) => ({ ...m, content: 'λ'.repeat(400) }));
+  const channels = { c1: notesChannel('γενικό', { updatedAt: notesDaysAgo(30) }) };
+  const guildMemory = { patterns: 'μιμίδια', notesUpdatedAt: notesDaysAgo(9) };
+  const build = (tokens) =>
+    buildMemoryRequest({ prompts: { memory: 'sys', labels }, config: budgetConfig(tokens), calibrator: createCalibrator(), profiles: {}, guildMemory, channels, messages: long, selfName: 'Nept', now: NOTES_NOW });
+
+  const cut = build(2500);
+  assert.ok(cut.shown > 0 && cut.shown < 20, `a part of the batch is shown (${cut.shown})`);
+  assert.equal('stale' in channelsOf(cut).c1, false, 'fewer than memory.notesMinLines lines shown in the channel');
+  assert.equal('stale' in guildOf(cut), false, 'fewer than memory.notesMinLines lines shown');
+  assert.deepEqual(cut.staleNotes, { channels: [], guild: false });
+
+  const whole = build(50000);
+  assert.equal(whole.shown, 20);
+  assert.deepEqual(channelsOf(whole).c1.stale, { days: 30 });
+  assert.deepEqual(whole.staleNotes, { channels: ['c1'], guild: true });
+
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    for (const message of long) {
+      touchMemory(store, guildId, message);
+      store.pushBuffer(guildId, message, 100);
+    }
+    store.getChannel(guildId, 'c1').updatedAt = notesDaysAgo(30);
+    const marked = [];
+    store.markNotesChecked = (...args) => marked.push(args);
+    const hot = { config: budgetConfig(2500, { batchMessages: 20, minBatchMessages: 1 }), prompts: { memory: 'sys', labels } };
+    const updater = createMemoryUpdater({ hot, store, llm: recordingLlm({}), calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => NOTES_NOW });
+
+    const { logs } = await withCapturedLogs(() => updater.run(guildId));
+
+    const applied = logs.find((entry) => entry.msg === 'memory: update applied');
+    assert.ok(applied.deferred > 0, 'the cut batch left lines for the next one');
+    assert.equal(applied.notesFlagged, 0);
+    assert.deepEqual(marked, [], 'nothing was stamped re-checked');
   });
 });

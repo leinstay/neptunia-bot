@@ -2155,6 +2155,40 @@ test('buildRequest: an older labels set without linksRead/search keeps only the 
   assert.equal(senses.length, withLabels.length - 2);
 });
 
+test('buildRequest: recallAvailable true -> the recall line follows the search line, whatever the web lookup does', () => {
+  const senses = sensesOf(buildRequest(baseInput({ config: webConfig({ mediaDescriptions: true }), searchAvailable: true, recallAvailable: true }))).split('\n');
+  const at = senses.indexOf(labels.senses.search);
+  assert.ok(at !== -1);
+  assert.equal(senses[at + 1], labels.senses.recall);
+  assert.equal(senses[at + 2], labels.senses.files);
+
+  // Its own switch: no web lookup at all, the recall line is still there.
+  const noWeb = sensesOf(buildRequest(baseInput({ config: fakeConfig({ features: { webLookup: false } }), recallAvailable: true }))).split('\n');
+  assert.ok(!noWeb.includes(labels.senses.search));
+  assert.equal(noWeb[noWeb.indexOf(labels.senses.links) + 1], labels.senses.recall);
+});
+
+test('buildRequest: no recall line unless recallAvailable is true -- false, omitted or null', () => {
+  for (const recallAvailable of [false, undefined, null]) {
+    const senses = sensesOf(buildRequest(baseInput({ config: webConfig(), searchAvailable: true, recallAvailable }))).split('\n');
+    assert.ok(!senses.includes(labels.senses.recall), String(recallAvailable));
+  }
+});
+
+test('buildRequest: a private chat shows no recall line even when recallAvailable is true', () => {
+  const senses = sensesOf(buildRequest(privateScene({ recallAvailable: true }))).split('\n');
+  assert.ok(!senses.includes(labels.senses.recall));
+});
+
+test('buildRequest: an older labels set without senses.recall renders no recall line and no gap', () => {
+  const { recall: _recall, ...olderSenses } = labels.senses;
+  const older = fakePrompts({ labels: { ...labels, senses: olderSenses } });
+  const withLabel = sensesOf(buildRequest(baseInput({ config: webConfig(), searchAvailable: true, recallAvailable: true }))).split('\n');
+  const senses = sensesOf(buildRequest(baseInput({ config: webConfig(), searchAvailable: true, recallAvailable: true, prompts: older }))).split('\n');
+  assert.equal(senses.length, withLabel.length - 1);
+  assert.ok(senses.every((line) => line.trim() !== ''));
+});
+
 // --- <about_chat>: what people taught the persona (guild.learned) ------------------
 
 const TEACHER_A = '311111111111111111';
@@ -2723,6 +2757,63 @@ test('buildRequest: a focus line appends labels.room.focus with its index', () =
   assert.equal(task({ focus: history[1], prompts: fakePrompts({ labels: noRoom }) }), 'INTERJECT_TASK for Nept');
 });
 
+test('buildRequest: a part of a split message appends labels.task.part with the part and the other parts', () => {
+  const trigger = makeMessage(1, NOW - MIN, { authorName: 'Alice', content: 'ποιος είναι ο Νίκος, κοίτα το κανάλι, και το μιμίδιο' });
+  const parts = ['ποιος είναι ο Νίκος', 'κοίτα το κανάλι', 'και το μιμίδιο'];
+  const task = (overrides) => bodyOf(userText(buildRequest(baseInput({ history: [trigger], trigger, triggerKind: 'mention', ...overrides }))), 'task');
+  const plain = task({ tasks: null });
+  const others = ['1. ποιος είναι ο Νίκος', '3. και το μιμίδιο'].join('; ');
+  const second = { part: { index: 2, total: 3, parts }, queued: [], added: [] };
+  assert.equal(task({ tasks: second }), [plain, fill(labels.task.part, { index: 2, total: 3, part: 'κοίτα το κανάλι', others })].join('\n\n'));
+  const { task: _task, ...older } = labels;
+  assert.equal(task({ tasks: second, prompts: fakePrompts({ labels: older }) }), plain, 'an older labels file adds nothing');
+  assert.equal(task({ tasks: { ...second, part: { index: 4, total: 3, parts } } }), plain, 'a part out of range adds nothing');
+});
+
+test('buildRequest: the author\'s queued calls follow a part\'s others, numbered on; without a part they get labels.task.queued', () => {
+  const trigger = makeMessage(1, NOW - MIN, { authorName: 'Alice' });
+  const parts = ['ένα', 'δύο'];
+  const task = (tasks) => bodyOf(userText(buildRequest(baseInput({ history: [trigger], trigger, triggerKind: 'mention', tasks }))), 'task');
+  const plain = task(null);
+  assert.equal(
+    task({ part: { index: 1, total: 2, parts }, queued: ['τρία', 'τέσσερα'], added: [] }),
+    [plain, fill(labels.task.part, { index: 1, total: 2, part: 'ένα', others: '2. δύο; 3. τρία; 4. τέσσερα' })].join('\n\n'),
+  );
+  assert.equal(task({ part: null, queued: ['τρία', 'τέσσερα'], added: [] }), [plain, fill(labels.task.queued, { others: '1. τρία; 2. τέσσερα' })].join('\n\n'));
+  const { queued: _queued, ...noQueued } = labels.task;
+  const older = fakePrompts({ labels: { ...labels, task: noQueued } });
+  assert.equal(bodyOf(userText(buildRequest(baseInput({ history: [trigger], trigger, triggerKind: 'mention', prompts: older, tasks: { part: null, queued: ['τρία'], added: [] } }))), 'task'), plain);
+});
+
+test('buildRequest: other members\' waiting calls append labels.task.queuedOthers, on a part too; an older labels file adds nothing', () => {
+  const trigger = makeMessage(1, NOW - MIN, { authorName: 'Alice' });
+  const task = (tasks, prompts = fakePrompts()) => bodyOf(userText(buildRequest(baseInput({ history: [trigger], trigger, triggerKind: 'mention', tasks, prompts }))), 'task');
+  const plain = task(null);
+  const others = [{ author: 'Léa', text: 'δύο' }, { author: 'Bjørn', text: 'τρία' }];
+  const othersText = fill(labels.task.queuedOthers, { others: '1. Léa: δύο; 2. Bjørn: τρία' });
+  assert.equal(
+    task({ part: null, queued: ['ένα'], queuedOthers: others, added: ['λοιπόν;'] }),
+    [plain, fill(labels.task.queued, { others: '1. ένα' }), othersText, fill(labels.task.added, { added: 'λοιπόν;' })].join('\n\n'),
+  );
+  const part = { index: 1, total: 2, parts: ['α', 'β'] };
+  assert.equal(task({ part, queued: [], queuedOthers: others, added: [] }), [plain, fill(labels.task.part, { index: 1, total: 2, part: 'α', others: '2. β' }), othersText].join('\n\n'));
+  const { queuedOthers: _others, ...older } = labels.task;
+  assert.equal(task({ part: null, queued: [], queuedOthers: others, added: [] }, fakePrompts({ labels: { ...labels, task: older } })), plain);
+});
+
+test('buildRequest: messages folded into the call append labels.task.added after the other task labels', () => {
+  const trigger = makeMessage(1, NOW - MIN, { authorName: 'Alice' });
+  const task = (tasks, prompts = fakePrompts()) => bodyOf(userText(buildRequest(baseInput({ history: [trigger], trigger, triggerKind: 'mention', tasks, prompts }))), 'task');
+  const plain = task(null);
+  const tasks = { part: null, queued: ['τρία'], added: ['και το δεύτερο;', 'λοιπόν;'] };
+  assert.equal(
+    task(tasks),
+    [plain, fill(labels.task.queued, { others: '1. τρία' }), fill(labels.task.added, { added: 'και το δεύτερο;; λοιπόν;' })].join('\n\n'),
+  );
+  const { added: _added, ...noAdded } = labels.task;
+  assert.equal(task({ ...tasks, queued: [] }, fakePrompts({ labels: { ...labels, task: noAdded } })), plain, 'an older labels file adds nothing');
+});
+
 test('buildRequest: server lists the pulled channel and marks read-only channels', () => {
   const channels = [
     fakeChannel(DEST, { name: 'général' }),
@@ -2955,9 +3046,9 @@ function clockOf(ts) {
   return { date: formatDate(ts, TZ, labels.locale), time: formatClock(ts, TZ, labels.locale) };
 }
 
-/** `{date}` of a moment dated `date` (it sits at noon UTC of that day). */
+/** `{date}` of a moment dated `date`: that calendar day in the transcript's date form. */
 function momentDate(date) {
-  return formatDate(Date.parse(`${date}T12:00:00Z`), TZ, labels.locale);
+  return formatDate(Date.parse(`${date}T12:00:00Z`), 'UTC', labels.locale);
 }
 
 /** The recent header for the window the base config pins (memory.recentHours). */
@@ -3085,6 +3176,16 @@ test('recent view: kept items render oldest first', () => {
     fill(labels.recent.line, { ...clockOf(NOW - 5 * HOUR), text: 'δεύτερη' }),
     fill(labels.recent.line, { ...clockOf(NOW - 2 * HOUR), text: 'τρίτη' }),
   ]);
+});
+
+test('recent view: a moment shows its stored date in a zone far ahead of UTC', () => {
+  // NOW is 00:00 on 21 Sep in Kiritimati (UTC+14): noon UTC of the 19th is already the 20th there.
+  const nikos = { id: NIKOS_ID, names: ['Nikos'], episodes: [recentMoment('η στιγμή του Nikos', { date: '2026-09-19' })] };
+  const input = recentScene({ candidateProfiles: [nikos] });
+  const body = recentOf(buildRequest({ ...input, config: { ...input.config, bot: { timezone: 'Pacific/Kiritimati' } } }));
+  const nineteenth = formatDate(Date.UTC(2026, 8, 19, 12), 'Europe/Moscow', labels.locale);
+  assert.notEqual(nineteenth, formatDate(Date.UTC(2026, 8, 19, 12), 'Pacific/Kiritimati', labels.locale), 'the zone would move the day');
+  assert.deepEqual(body.split('\n'), [RECENT_HEADER, fill(labels.recent.episode, { date: nineteenth, name: 'Nikos', what: 'η στιγμή του Nikos' })]);
 });
 
 test("recent view: the interlocutor's own episodes are left out", () => {
