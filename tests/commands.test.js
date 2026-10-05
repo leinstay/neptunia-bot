@@ -530,6 +530,16 @@ test('interaction handler: memory.channel maps the optional channel option to ch
   assert.deepEqual(admin.runCalls[1][1], { channelId: undefined });
 });
 
+test('interaction handler: memory.recent runs the memory.recent handler with no arguments', async () => {
+  const admin = fakeAdmin();
+  const handler = createInteractionHandler({ hot: baseHot(), admin, getGuildId: () => 'g1' });
+
+  await handler(fakeInteraction({ group: 'memory', subcommand: 'recent' }));
+
+  assert.equal(admin.runCalls[0][0], 'memory.recent');
+  assert.deepEqual(admin.runCalls[0][1], {});
+});
+
 test('interaction handler: private.purge defers, maps the user option to userId and edits the reply', async () => {
   const admin = fakeAdmin({ runImpl: () => 'purged' });
   const handler = createInteractionHandler({ hot: baseHot(), admin, getGuildId: () => 'g1' });

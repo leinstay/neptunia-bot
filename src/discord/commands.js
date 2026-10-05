@@ -318,6 +318,11 @@ export function buildCommandTree(commandName) {
             },
             {
               type: SUBCOMMAND,
+              name: 'recent',
+              description: 'Show the live recent lines, newest first.',
+            },
+            {
+              type: SUBCOMMAND,
               name: 'forget',
               description: "Delete a member's profile and private memory.",
               options: [{ type: USER, name: 'user', description: 'Member.', required: true }],
@@ -794,6 +799,7 @@ const OPTION_MAPPERS = {
   }),
   'memory.channel': (options) => ({ channelId: options.getChannel('channel')?.id }),
   'memory.server': () => ({}),
+  'memory.recent': () => ({}),
   'memory.forget': (options) => ({ userId: options.getUser('user', true).id }),
   'memory.wipe': (options) => ({ confirm: options.getString('confirm', true) }),
   'memory.refresh': (options) => ({ userId: options.getUser('user', true).id }),

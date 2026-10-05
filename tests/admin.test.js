@@ -225,6 +225,10 @@ function makeStore() {
     getGuild(guildId) {
       return guilds.get(guildId) ?? { patterns: '', starters: '', injokes: [], self: [], updatedAt: null };
     },
+    recent: new Map(), // guildId -> { nextId, lines }
+    getRecent(guildId) {
+      return structuredClone(this.recent.get(guildId) ?? { nextId: 1, lines: [] });
+    },
     state: { data: { llmCount: 5, llmDay: '2026-09-20' }, markDirty() {} },
     flushCalls: 0,
     flush() {
@@ -3783,4 +3787,93 @@ test('run: ping sends each role as its own role and pings a shared model once pe
   assert.deepEqual(llm.calls.map((c) => c.options.role), ['talk', 'analyzer', 'classifier.text'], 'the analyzer route differs from talk: its own call');
   assert.ok(routed.some((l) => l.startsWith('talk: anthropic/claude-opus-4.6 — ok,') && l.includes('provider=served-talk')));
   assert.ok(routed.some((l) => l.startsWith('analyzer: anthropic/claude-opus-4.6 — ok,') && l.includes('provider=served-analyzer')));
+});
+
+// ---------------------------------------------------------------------------
+// memory.recent
+// ---------------------------------------------------------------------------
+
+const RECENT_NOW = Date.UTC(2026, 9, 5, 12, 0, 0);
+const HOUR = 3600 * 1000;
+
+function recentLine(id, hoursAgo, text, extra = {}) {
+  return { id, at: RECENT_NOW - hoursAgo * HOUR, addedAt: null, channelId: 'c1', text, who: [], weight: 2, ...extra };
+}
+
+function makeRecentAdmin(t, lines, config = {}) {
+  t.mock.method(Date, 'now', () => RECENT_NOW);
+  const rootDir = makeRoot();
+  const hot = makeHot(rootDir);
+  hot.config.memory = { recentHours: 72 };
+  Object.assign(hot.config, config);
+  const store = makeStore();
+  store.recent.set('g1', { nextId: 100, lines });
+  return { ...makeAdmin(rootDir, { hot, store }), store, hot };
+}
+
+test('run: memory.recent lists the live lines newest first and leaves out the expired ones', async (t) => {
+  const { admin } = makeRecentAdmin(t, [
+    recentLine(1, 10, 'older line'),
+    recentLine(2, 1, 'newest line'),
+    recentLine(3, 100, 'expired line'),
+    recentLine(4, 5, 'middle line'),
+  ]);
+
+  const rows = (await admin.run('memory.recent', {}, { guildId: 'g1' })).split('\n');
+
+  assert.equal(rows.length, 4, 'the header and three live lines');
+  assert.match(rows[0], /3/);
+  assert.ok(rows[1].includes('newest line'));
+  assert.ok(rows[2].includes('middle line'));
+  assert.ok(rows[3].includes('older line'));
+  assert.ok(!rows.join('\n').includes('expired line'));
+});
+
+test('run: memory.recent resolves <@id> tokens, names the channel from its note and shows the weight', async (t) => {
+  const otherId = '999999999999999999';
+  const { admin, store } = makeRecentAdmin(t, [recentLine(1, 1, `joked with <@${otherId}>`, { weight: 3 })]);
+  store.profiles.set(`g1:${otherId}`, { id: otherId, names: ['Zoe'] });
+  store.channels.set('g1:c1', { id: 'c1', name: 'general' });
+
+  const text = await admin.run('memory.recent', {}, { guildId: 'g1' });
+
+  assert.ok(text.includes(`joked with Zoe (id:${otherId})`));
+  assert.ok(!text.includes('<@'));
+  assert.ok(text.includes('#general'));
+  assert.ok(text.includes('w3'));
+});
+
+test('run: memory.recent shows the time in the configured time zone', async (t) => {
+  const { admin, hot } = makeRecentAdmin(t, [{ ...recentLine(1, 0, 'late line'), at: Date.UTC(2026, 9, 5, 22, 30, 0) }]);
+  hot.config.bot.timezone = 'Europe/Athens';
+
+  const text = await admin.run('memory.recent', {}, { guildId: 'g1' });
+
+  assert.ok(text.includes('2026-10-06 01:30'), text);
+});
+
+test('run: memory.recent answers one short line with the switch off or with no live line', async (t) => {
+  const off = makeRecentAdmin(t, [recentLine(1, 1, 'a line')], { features: { recent: false } });
+  const offText = await off.admin.run('memory.recent', {}, { guildId: 'g1' });
+  assert.ok(!offText.includes('\n'));
+  assert.ok(!offText.includes('a line'));
+
+  const none = makeRecentAdmin(t, [recentLine(1, 100, 'expired line')]);
+  const noneText = await none.admin.run('memory.recent', {}, { guildId: 'g1' });
+  assert.ok(!noneText.includes('\n'));
+  assert.ok(!noneText.includes('expired line'));
+  assert.notEqual(noneText, offText);
+});
+
+test('run: memory.recent works while paused, writes nothing and is open to a granted read-only access', async (t) => {
+  const { admin, store, hot } = makeRecentAdmin(t, [recentLine(1, 1, 'a line')]);
+  store.state.data.paused = true;
+  hot.config.bot.access = { 'memory.recent': { everyone: false, roles: ['123'], users: [] } };
+
+  const text = await admin.run('memory.recent', {}, { guildId: 'g1' });
+
+  assert.ok(text.includes('a line'));
+  assert.equal(store.flushCalls, 0);
+  assert.equal(admin.isAllowed('memory.recent', { userId: '7', roleIds: ['123'] }), true);
+  assert.equal(admin.isAllowed('memory.recent', { userId: '7', roleIds: [] }), false);
 });
