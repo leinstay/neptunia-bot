@@ -190,10 +190,10 @@ test('need: throws when the value is an empty string', () => {
   }
 });
 
-test('config.json: spontaneous.roomQuestionChance ships 0.1, the code fallback', () => {
+test('config.json: spontaneous.roomQuestionChance ships 0.04, the code fallback', () => {
   const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
   const shipped = JSON.parse(fs.readFileSync(path.join(root, 'config.json'), 'utf8'));
-  assert.equal(shipped.spontaneous.roomQuestionChance, 0.1);
+  assert.equal(shipped.spontaneous.roomQuestionChance, 0.04);
   assert.equal(roomQuestionChance({}), shipped.spontaneous.roomQuestionChance);
-  assert.equal(roomQuestionChance(shipped), 0.1);
+  assert.equal(roomQuestionChance(shipped), 0.04);
 });

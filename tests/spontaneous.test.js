@@ -1357,9 +1357,9 @@ test('spontaneous: eavesdropReady is the eavesdrop rails as one boolean, with no
   assert.equal(readOnly.spontaneous.eavesdropReady(cannotSend), false, 'a channel the bot cannot send in');
 });
 
-test('roomQuestionChance: spontaneous.roomQuestionChance, 0.1 when missing (config.json\'s value)', () => {
+test('roomQuestionChance: spontaneous.roomQuestionChance, 0.04 when missing (config.json\'s value)', () => {
   assert.equal(roomQuestionChance({ spontaneous: { roomQuestionChance: 0.3 } }), 0.3);
   assert.equal(roomQuestionChance({ spontaneous: { roomQuestionChance: 0 } }), 0);
-  assert.equal(roomQuestionChance({ spontaneous: {} }), 0.1);
-  assert.equal(roomQuestionChance({}), 0.1);
+  assert.equal(roomQuestionChance({ spontaneous: {} }), 0.04);
+  assert.equal(roomQuestionChance({}), 0.04);
 });

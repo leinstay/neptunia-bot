@@ -134,12 +134,12 @@ export function chooseRoomMode(history, focusId) {
 }
 
 // Only when spontaneous.roomQuestionChance is missing (config.json always has it).
-const ROOM_QUESTION_CHANCE_FALLBACK = 0.1;
+const ROOM_QUESTION_CHANCE_FALLBACK = 0.04;
 
 /**
  * The chance a line that failed the eavesdrop roll is shown to the room
  * classifier (src/discord/events.js): `spontaneous.roomQuestionChance`, or
- * 0.1 (config.json's value) when it is missing. 0 turns the room path off.
+ * 0.04 (config.json's value) when it is missing. 0 turns the room path off.
  * @param {object} config  The live config, read by the caller now.
  * @returns {number}
  */
