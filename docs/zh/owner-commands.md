@@ -19,8 +19,8 @@
 | `/nep rule add <text>` | 向 `prompts.local/rules.md` 追加规则 |
 | `/nep rule list` | 列出编号的规则 |
 | `/nep rule remove <number>` | 按编号移除规则 |
-| `/nep model show` | 显示每个角色（`talk`、`analyzer`、`classifier.text`、`classifier.media`、`classifier.video`、`mentor`）的当前模型 |
-| `/nep model set <role> <id>` | 设置某个角色（`talk`、`analyzer`、`classifier.text`、`classifier.media`、`classifier.video`、`mentor`）的模型 |
+| `/nep model show` | 显示每个角色（`talk`、`analyzer`、`classifier.text`、`classifier.media`、`classifier.video`、`mentor`、`voice`）的当前模型 |
+| `/nep model set <role> <id>` | 设置某个角色（`talk`、`analyzer`、`classifier.text`、`classifier.media`、`classifier.video`、`mentor`、`voice`）的模型。`voice` 角色写入 `memory.voiceModel` |
 | `/nep route list` | 列出 `llm.providerByModel` 中的所有路由，然后是每个角色的当前模型及其适用的路由。访问键 `route.list`（只读） |
 | `/nep route set <model> <providers> [role] [fallbacks]` | 将模型前缀路由到指定的 provider。`model` 为模型 id 或前缀（如 `google/`，不含 `@` 或空格）。`providers` 为逗号分隔的 provider slug 列表（如 `google-vertex`；小写字母、数字和连字符）。`role` 限制路由到一个角色（默认：任意）。`fallbacks` 在这些 provider 不可用时允许其他 provider（默认：false）。将 `{ "only": [...], "allow_fallbacks": ... }` 写入 `config.local.json` 的 `llm.providerByModel` 下并重新加载。访问键 `route.set` |
 | `/nep route remove <model> [role]` | 移除一条路由。键必须存在于 `config.local.json`；仅存在于 `config.json` 中的键无法通过此方式移除。访问键 `route.remove` |
@@ -28,9 +28,9 @@
 | `/nep memory channel [channel]` | 指定频道：完整的存储笔记（用途、话题、氛围、消息数、活跃度、最活跃作者）。不指定：角色已知的所有频道表格，按最后消息排序 |
 | `/nep memory server` | 服务器级笔记：人们如何交流、对话如何开始、内部梗、自述事实，以及档案、频道和世界书条目的计数 |
 | `/nep memory refresh <user>` | 强制刷新成员画像 |
-| `/nep memory forget <user>` | 删除存储的档案及其私有记忆。等待正在运行的分析器批次完成后再执行 |
+| `/nep memory forget <user>` | 删除存储的档案、私有记忆和排队的语音条目（包括该成员教授的课程）。等待正在运行的分析器批次完成后再执行 |
 | `/nep memory affinity <user> [score] [reason]` | 查看或设置态度（-100..100） |
-| `/nep memory wipe <confirm>` | 清除该服务器的所有分析器记忆；输入准确的服务器名称以确认。删除项：成员档案及其私有记忆、服务器习惯（模式、开场白、内部梗）、所学条目、表情排名、多样性历史、频道地图、分析器世界书、预热进度。保留项：所有者世界书条目、媒体描述缓存、GIF 库、token 校准、每日计数器、自发时间表。等待正在运行的分析器批次完成后再执行 |
+| `/nep memory wipe <confirm>` | 清除该服务器的所有分析器记忆；输入准确的服务器名称以确认。删除项：成员档案及其私有记忆、服务器习惯（模式、开场白、内部梗）、所学条目、语音队列、表情排名、多样性历史、频道地图、分析器世界书、预热进度。保留项：所有者世界书条目、媒体描述缓存、GIF 库、token 校准、每日计数器、自发时间表。等待正在运行的分析器批次完成后再执行 |
 | `/nep private show <user>` | 显示成员的私有记忆：关系、兴趣、细节、回忆、私有和有效好感度、今日回复数。无私有层则为普通回答。仅限所有者；不可授权 |
 | `/nep private forget <user>` | 仅删除成员的私有记忆；公共档案保留。等待正在运行的分析器批次完成后再执行。仅限所有者；不可授权 |
 | `/nep private purge <user>` | 删除机器人在与成员的私信对话中发送的消息（扫描最多 `private.purgeMaxMessages` 条），然后删除该成员的私有记忆。成员自己的消息保留。暂停时拒绝。仅限所有者；不可授权 |

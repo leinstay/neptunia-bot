@@ -25,7 +25,10 @@
 | `reply.md` | 是 | 任务：有人呼叫了角色 | `{{name}}` `{{author}}` `{{trigger}}` `{{target}}` |
 | `interject.md` / `initiate.md` | 是 | 任务：插入正在进行的对话 / 在沉寂的频道中发起话题。代码在 `deadAfterMinutes` 的沉默后掷 `spontaneous.initiateChance`，因此 initiate 提示默认发言，`<skip/>` 用于新话题明显不合适的频道。频道沉寂后，即使角色自己的消息是最后一条，initiate 回合仍可触发 | `{{name}}` |
 | `forced.md` | 否 | 强制回合（`/nep interject`、`/nep initiate`）时追加在模式提示之后。覆盖默认的 `<skip/>` 选项 | `{{name}}` |
-| `memory.md` | 是 | 角色外提示，用于流分析器：从实时批次中对记忆进行针对性编辑 | `{{name}}` `{{fieldChars}}` `{{guildFieldChars}}` `{{maxDetails}}` `{{maxInjokes}}` `{{maxSelfFacts}}` `{{maxNewEpisodes}}` `{{maxEpisodes}}` `{{maxDeltaPerUpdate}}` `{{maxInterests}}` `{{interestTopicChars}}` `{{interestNoteChars}}` `{{loreTextChars}}` `{{maxLearned}}` `{{learnedChars}}` |
+| `memory.md` | 是 | 角色外提示，用于流分析器（单阶段模式和私有批次）：从实时批次中对记忆进行针对性编辑 | `{{name}}` `{{fieldChars}}` `{{guildFieldChars}}` `{{maxDetails}}` `{{maxInjokes}}` `{{maxSelfFacts}}` `{{maxNewEpisodes}}` `{{maxEpisodes}}` `{{maxDeltaPerUpdate}}` `{{maxInterests}}` `{{interestTopicChars}}` `{{interestNoteChars}}` `{{loreTextChars}}` `{{maxLearned}}` `{{learnedChars}}` `{{relationshipChars}}` |
+| `memory-decide.md` | 否 | 两阶段分析器的阶段 A（`features.memoryTwoStage`）：对变更的中性判定。与 `memory.md` 相同的输入块。返回 JSON。文件缺失时回退到单阶段模式 | `{{name}}` `{{fieldChars}}` `{{guildFieldChars}}` `{{maxDetails}}` `{{maxInjokes}}` `{{maxSelfFacts}}` `{{maxNewEpisodes}}` `{{maxEpisodes}}` `{{maxDeltaPerUpdate}}` `{{maxInterests}}` `{{interestTopicChars}}` `{{interestNoteChars}}` `{{loreTextChars}}` `{{maxLearned}}` `{{learnedChars}}` `{{relationshipChars}}` |
+| `memory-voice.md` | 否 | 两阶段分析器的阶段 B：角色用自己的声音撰写排队的条目。返回 JSON | `{{name}}` `{{fieldChars}}` `{{guildFieldChars}}` `{{relationshipChars}}` `{{learnedChars}}` |
+| `portrait.md` | 否 | 两阶段画像刷新的阶段 A。详情见后续文档迭代 | `{{name}}` `{{fieldChars}}` |
 | `profile.md` | 是 | 预热 / 画像刷新：从消息样本生成一个成员的档案 | `{{name}}` `{{fieldChars}}` `{{maxInterests}}` `{{maxDetails}}` `{{interestTopicChars}}` `{{interestNoteChars}}` `{{maxNewEpisodes}}` |
 | `channel.md` | 是 | 预热：从消息样本生成频道笔记 | `{{fieldChars}}` |
 | `server.md` | 是 | 预热：从频道笔记和成员摘要生成服务器级笔记 | `{{name}}` `{{fieldChars}}` `{{maxInjokes}}` `{{loreTextChars}}` |

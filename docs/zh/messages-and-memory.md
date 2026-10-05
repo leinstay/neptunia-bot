@@ -30,14 +30,14 @@
 
 档案以增量方式更新：分析器只返回变更内容，已存储的事实不会被重新概括。每个档案包含：
 
-- **性格和风格**：由档案提示（`profile.md`）在预热期间完整撰写的自由文本段落，当分析器标记出缺失或矛盾时会从近期消息刷新。流分析器不直接编辑它们；它返回一行画像提示，代码会排队进行画像刷新。
+- **性格和风格**：由档案提示（`profile.md`）在预热期间完整撰写的自由文本段落，由代码（基于消息计数器的定期调度）或分析器标记出缺失或矛盾时刷新。流分析器不直接编辑它们；流批次返回的 `character` 和 `style` 会被丢弃。
 - **兴趣**：独立条目，带有主题和备注。按频率和近期程度排名，权重随时间衰减（`memory.interestHalfLifeDays`）。每人保存的条目多于显示的（`memory.maxInterestsStored` vs `memory.maxInterests`），因此新条目可以在不可见的尾部积累权重。超过 `memory.interestStaleDays` 未被观察到的兴趣会以过时状态展示给角色。
 - **细节**：独立条目（一个事实、一个特征、一段背景信息）。与兴趣相同的排名和确认机制，有自己的半衰期（`memory.detailHalfLifeDays`）。
 - **别名**：人们在聊天中实际称呼某成员的方式。角色能通过名字或别名识别被提及的成员，即使该成员不在对话中。
 - **关系**：角色和这个人之间的关系如何，以角色的声音撰写。
-- **态度**：-100 到 100 的分数（`features.relationships`）。分析器返回一个小的变化量，永远不设置绝对分数。分数不会出现在聊天中；它体现在角色投入多少精力上。设置 `relationships.decayPerDay` 后，分数每天向零漂移，离零越远越快。当分数所在的区间与 relationship 文本写入时不同时，该文本会被标记为需要分析器重写。
+- **态度**：-100 到 100 的分数（`features.relationships`）。分析器返回一个小的变化量，永远不设置绝对分数。分数不会出现在聊天中；它体现在角色投入多少精力上。设置 `relationships.decayPerDay` 后，分数每天向零漂移，离零越远越快。relationship 文本在陈旧时标记为重写：区间变化（`relationships.bandHysteresis` 点余量）、自写入以来 `relationships.rewriteOnDrift` 点的漂移或 `relationships.rewriteAfterMoves` 次态度变动。文本限制为 `relationships.textChars`（默认 600）字符。
 
-成员性格和说话方式的画像取自 `memory.mainChannelIds` 中的频道；当列表为空时，所有频道均计入。存储的记忆通过 id 引用成员，使用时替换为当前名称，因此改名不会破坏已存储的笔记。
+成员性格和说话方式的画像取自 `memory.mainChannelIds` 中的频道；当列表为空时，所有频道均计入。`memory.mainChannelIds` 也是只读频道呼叫响应的目标频道（`features.elsewhere`）。存储的记忆通过 id 引用成员，使用时替换为当前名称，因此改名不会破坏已存储的笔记。
 
 ### 确认
 

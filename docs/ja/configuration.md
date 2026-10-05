@@ -26,6 +26,10 @@
 | `webLookup` | `false` | チャットに投稿されたリンクを読み取り、事実に関する質問にウェブ検索で回答。他の機能と異なり、キーが存在しない場合はオフとして扱われる。検索には `.env` に `BRAVE_SEARCH_API_KEY` が必要。キーがない場合はリンク読み取りのみ動作する。[メディア: リンクと検索](media.md#リンク)を参照 |
 | `imageGeneration` | `false` | ペルソナが描画サブプロセスを通じて画像を描くことを許可。キーが存在しない場合はオンとして扱われる。`config.local.json` で有効化。`image.model` に画像生成対応モデルが必要。[メディア: 描画](media.md#描画)を参照 |
 | `privateMessages` | `false` | ギルドメンバーのダイレクトメッセージに応答。保存された公開プロファイルと `affinity.score >= private.minAffinity` が必要。[メッセージとメモリ: プライベートレイヤー](messages-and-memory.md#プライベートレイヤー)を参照 |
+| `channelPull` | `true` | 最近のメッセージやトリガーにチャンネルメンションが含まれている場合、そのチャンネルをリクエストに取り込む。キー欠落 = オン。`context.pull.*` 参照 |
+| `elsewhere` | `true` | ボットが読めるが書けないチャンネルからの呼びかけ（@メンション、リプライ、名前）に応答。応答は `memory.mainChannelIds` の最初の利用可能なチャンネルに送信される。キー欠落 = オン |
+| `portraitRefresh` | `true` | メッセージカウンターに基づいてメンバーのポートレートを定期的にリフレッシュ。キー欠落 = オン |
+| `memoryTwoStage` | `false` | メモリアナライザーを 2 段階に分割: ニュートラルな GPT モデルが変更を判定（ステージ A）、次にボイスモデルがペルソナのテキストを執筆（ステージ B）。厳密に `true` で有効。キー欠落 = オフ。`memory.voiceModel` と `memory.voice.*` 参照 |
 | `mentor` | `false` | 独自モデルを使用する手動テストサブプロセス。有効にするには厳密に `true` にする必要がある。キーが存在しない場合はオフ。[Mentor](#mentor) を参照 |
 | `promptCache` | `false` | システムメッセージにプロバイダーのプロンプトキャッシュマーカーを付与する。キャッシュ読み取りは通常入力の数分の一のコストで、プロバイダーによってはトークンクォータにカウントされない。厳密に `true` で有効。キーが存在しない場合はオフ。`llm.cache.*` を参照 |
 | `variety` | `true` | モデルパスがペルソナの最近のメッセージで使い回している表現手法を特定する。結果はターンのリクエストに `<worn>` ブロックとして含まれる。キーが存在しない場合はオン |
@@ -113,6 +117,7 @@ OpenRouter アカウント自体が許可プロバイダーを制限している
 | `caps.people` | `9000` | トークン上限: 他のプロファイル |
 | `caps.neighbors` | `3000` | トークン上限: 隣接チャンネル |
 | `caps.server` | `4000` | トークン上限: チャンネルマップ |
+| `caps.pulled` | `4000` | トークン上限: プルされたチャンネルブロック（`<channel_view>`） |
 | `channelActivity.liveMessagesPerDay` | `20` | 1 日あたりのメッセージ数がこの値で「アクティブ」チャンネル |
 | `channelActivity.deadAfterDays` | `7` | メッセージがないまま経過した日数で「デッド」チャンネル |
 | `vision.maxImages` | `4` | リクエストあたりの最大画像数 |
@@ -265,9 +270,15 @@ YouTube リンクの再生時間は次の順序で取得されます: まず yt-
 | キー | デフォルト | 説明 |
 |---|---|---|
 | `model` | `null` | アナライザーモデル（`null` = `llm.model`） |
-| `mainChannelIds` | `[]` | メンバー同士が会話するチャンネル。キャラクターとスタイルのポートレートはここから作成される。空の場合はすべてのチャンネルが対象 |
+| `mainChannelIds` | `[]` | メンバー同士が会話するチャンネル。キャラクターとスタイルのポートレートはここから作成される。空の場合はすべてのチャンネルが対象。読み取り専用チャンネルからの呼びかけへの応答先でもある（`features.elsewhere`）: リストの最初の利用可能なチャンネルが使用される |
 | `portraitRefreshHours` | `24` | メンバーごとのポートレートリフレッシュの最小間隔（時間） |
-| `portraitRefreshPerDay` | `20` | サーバーあたりのポートレートリフレッシュの 1 日最大数。日次カウンターは `state.json` に `portraitDay` / `portraitCount` として保存され、`/nep warmup reset` で消去されない |
+| `portraitRefreshMessages` | `300` | 前回のポートレート以降のメンバー自身のメッセージ数がこの値に達するとコードトリガーのリフレッシュが発動。サンプルサイズも兼ねる |
+| `portraitRefreshDays` | `3` | 前回の成功リフレッシュからこの日数が経過するとコードトリガーのリフレッシュが発動 |
+| `portraitRefreshPerDay` | `3` | サーバーあたりのポートレートリフレッシュの 1 日最大数（コードトリガー、アナライザーのキュー、`/nep memory refresh` で共有）。日次カウンターは `state.json` に `portraitDay` / `portraitCount` として保存され、`/nep warmup reset` で消去されない |
+| `portraitRetryHours` | `24` | リフレッシュ失敗後、同じメンバーを再試行するまでの待機時間（時間） |
+| `portraitCheckMinutes` | `60` | ポートレートスケジューラーがリフレッシュ対象をチェックする頻度（分） |
+| `keepNewestEpisodes` | `5` | 最新のエピソード（追加日時順）は淘汰対象外。`0` = 従来ルール: 重みが軽い順、次に古い順に淘汰 |
+| `voiceModel` | `null` | 2 段階アナライザーのステージ B で使用するモデル。ペルソナのテキストを執筆する。`null` はトークモデル（`llm.model`）を使用。`/nep model set voice` で設定 |
 | `batchMessages` | `60` | 理想的なバッチサイズ |
 | `minBatchMessages` | `15` | 更新前の最小メッセージ数 |
 | `maxBatchAgeMinutes` | `180` | この分数経過後に更新を強制（分） |
@@ -313,6 +324,10 @@ YouTube リンクの再生時間は次の順序で取得されます: まず yt-
 | `decayPerDay` | `0.04` | 毎日のゼロへのドリフト。1 日あたり `decayPerDay * |score| * (|score| / 100) ^ decayPower` を失う。`0` または欠落 = オフ |
 | `decayPower` | `1` | 減衰曲線の指数。大きいほどゼロ近くのスコアの減衰が遅くなる。正の数でない場合 = 1 |
 | `rewriteOnBandChange` | `true` | 態度段階が変化した場合、保存済みの `relationship` テキストを書き直し対象にフラグする。キー欠落 = オン |
+| `rewriteOnDrift` | `8` | 記述時からスコアがこのポイント分移動した場合、同じ段階内でも書き直し対象にフラグ。`0` = オフ |
+| `rewriteAfterMoves` | `6` | テキスト記述後にこの回数の態度履歴エントリが生じた場合、書き直し対象にフラグ。`0` = オフ |
+| `bandHysteresis` | `2` | 旧段階の境界からこのポイント超えてから段階変化を書き直し原因としてカウント。境界付近でのスコア変動による不要な書き直しを防止 |
+| `textChars` | `600` | relationship テキストの最大文字数。アナライザープロンプトの `{{relationshipChars}}` に代入 |
 
 `damping` が有効な場合、ゼロから離れる方向のスコア変化は `(1 - |score| / 100) ^ dampingPower` でスケールされるため、極端な値には継続的な努力が必要です。ゼロに向かう変化はそのまま適用されます。スコアは小数精度で保存され、整数で表示されます。`/nep memory affinity` は減衰なしで直接設定します。
 
@@ -476,7 +491,6 @@ YouTube リンクの再生時間は次の順序で取得されます: まず yt-
 | `maxChannelShare` | `0.5` | 一つのチャンネルからのサンプルの最大割合 |
 | `messagesPerChannel` | `200` | チャンネル記述に使う最新メッセージ数 |
 | `serverSampleMessages` | `600` | サーバーリクエスト用のメインチャンネルの最新メッセージ数 |
-| `refreshMessages` | `400` | ポートレートリフレッシュ時にサンプルするメッセージ数 |
 | `fetchLimitPerChannel` | `15000` | サンプルプール用にチャンネルごとにフェッチするメッセージ数 |
 | `maxOutputTokens` | `6000` | ウォームアップリクエストあたりの最大出力トークン数 |
 | `maxRequestTokens` | `120000` | ウォームアップリクエストあたりの最大トークン数（入力 + 出力） |

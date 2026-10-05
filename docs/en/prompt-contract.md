@@ -25,7 +25,10 @@ All instructions are English in both layers; a character's speech samples may be
 | `reply.md` | yes | Task: somebody called the persona | `{{name}}` `{{author}}` `{{trigger}}` `{{target}}` |
 | `interject.md` / `initiate.md` | yes | Tasks: cut into a live conversation / start a topic in a silent chat. Code rolls `spontaneous.initiateChance` after `deadAfterMinutes` of silence, so the initiate prompt speaks by default and `<skip/>` is for a channel where a new topic is plainly out of place. An initiate turn may also follow the persona's own last line once the channel is dead | `{{name}}` |
 | `forced.md` | no | Appended after the mode prompt on a forced turn (`/nep interject`, `/nep initiate`). Overrides the `<skip/>` default | `{{name}}` |
-| `memory.md` | yes | Out-of-character prompt of the stream analyzer: targeted edits to memory from live batches | `{{name}}` `{{fieldChars}}` `{{guildFieldChars}}` `{{maxDetails}}` `{{maxInjokes}}` `{{maxSelfFacts}}` `{{maxNewEpisodes}}` `{{maxEpisodes}}` `{{maxDeltaPerUpdate}}` `{{maxInterests}}` `{{interestTopicChars}}` `{{interestNoteChars}}` `{{loreTextChars}}` `{{maxLearned}}` `{{learnedChars}}` |
+| `memory.md` | yes | Out-of-character prompt of the stream analyzer (single-stage mode and private batches): targeted edits to memory from live batches | `{{name}}` `{{fieldChars}}` `{{guildFieldChars}}` `{{maxDetails}}` `{{maxInjokes}}` `{{maxSelfFacts}}` `{{maxNewEpisodes}}` `{{maxEpisodes}}` `{{maxDeltaPerUpdate}}` `{{maxInterests}}` `{{interestTopicChars}}` `{{interestNoteChars}}` `{{loreTextChars}}` `{{maxLearned}}` `{{learnedChars}}` `{{relationshipChars}}` |
+| `memory-decide.md` | no | Stage A of the two-stage analyzer (`features.memoryTwoStage`): neutral decisions on what changed, with briefs for the voice model. Same input blocks as `memory.md`. Returns JSON. Required when `features.memoryTwoStage` is on; a missing file falls back to single-stage mode | `{{name}}` `{{fieldChars}}` `{{guildFieldChars}}` `{{maxDetails}}` `{{maxInjokes}}` `{{maxSelfFacts}}` `{{maxNewEpisodes}}` `{{maxEpisodes}}` `{{maxDeltaPerUpdate}}` `{{maxInterests}}` `{{interestTopicChars}}` `{{interestNoteChars}}` `{{loreTextChars}}` `{{maxLearned}}` `{{learnedChars}}` `{{relationshipChars}}` |
+| `memory-voice.md` | no | Stage B of the two-stage analyzer: the persona words queued items in its own voice. Returns JSON. Required when `features.memoryTwoStage` is on | `{{name}}` `{{fieldChars}}` `{{guildFieldChars}}` `{{relationshipChars}}` `{{learnedChars}}` |
+| `portrait.md` | no | Stage A of the two-stage portrait refresh: reads the stored portrait and a message sample, returns a merged `style` text and structured `character` edits. The character edits are queued as a voice item for stage B. Used by the two-stage portrait refresh; details are in a later documentation pass | `{{name}}` `{{fieldChars}}` |
 | `profile.md` | yes | Warmup / portrait refresh: one member's profile from a message sample | `{{name}}` `{{fieldChars}}` `{{maxInterests}}` `{{maxDetails}}` `{{interestTopicChars}}` `{{interestNoteChars}}` `{{maxNewEpisodes}}` |
 | `channel.md` | yes | Warmup: channel notes from a message sample | `{{fieldChars}}` |
 | `server.md` | yes | Warmup: server-level notes from channel notes and member summaries | `{{name}}` `{{fieldChars}}` `{{maxInjokes}}` `{{loreTextChars}}` |
@@ -77,7 +80,8 @@ The blocks of the user message. Empty ones are omitted; the order below is the o
 | `<lore>` | Server lore entries whose keys occur in the recent messages (plus entries marked always): events, recurring characters, long-running stories. Like a lorebook: hundreds may exist, only the relevant few are shown |
 | `<self_facts>` | What the persona has claimed about itself |
 | `<people>` | Member profiles; the caller first, marked with `labels.profile.interlocutorMark` (omitted on an `overheard` turn: the author talked about the persona, not to it); each with the persona's attitude and, for the caller, the **episodes**: moments the persona remembers about the two of them, with dates and short quotes |
-| `<other_channels>` | Up to `context.neighborMessages` messages per neighbouring channel, not older than `context.neighborMaxAgeMinutes`. When `features.mediaDescriptions` is on, a picture in a neighbour's line carries its cached caption when the describer cache already holds one; no new describe request is ever made for neighbours |
+| `<other_channels>` | Up to `context.neighborMessages` messages per neighbouring channel, not older than `context.neighborMaxAgeMinutes`. When `features.mediaDescriptions` is on, a picture in a neighbour's line carries its cached caption when the describer cache already holds one; no new describe request is ever made for neighbours. A channel whose block is shown in `<channel_view>` is left out of `<other_channels>`; if the budget dropped the pulled block, the channel reappears here as an ordinary neighbour |
+| `<channel_view>` | Another channel pulled into this turn (`features.channelPull`). Contains one item per pulled channel: a header line (`labels.pull.header`), a read-only mark when applicable (`labels.server.readOnly`), an "older not shown" line when the window was cut, a "pictures not seen" count, earlier calls to the persona (with answered/unanswered/skipped marks), then the window lines. Lines use the same transcript format as `<chat>` but are numbered on after the chat (the chat has `#1`..`#N`, the pulled block starts at `#N+1`), so every `#n` is unique across blocks. Pictures appear as captions or blind tags only, never as attached images. Without `labels.pull.header` the block is empty |
 | `<worn>` | Devices the persona is overusing in its own recent lines (`features.variety`): `labels.variety.intro`, then `- <shape> ("<example>", ...)` per pattern. Omitted when the variety pass did not run, returned nothing, or the switch is off |
 | `<lookup>` | What the persona looked up online this turn (`features.webLookup`): the query, the condensed answer and the source sites, or a "nothing found" line. Appears only when the search classifier fired and the search completed |
 | `<chat>` | Up to `context.channelMessages` latest messages of the current channel |
@@ -86,6 +90,7 @@ The blocks of the user message. Empty ones are omitted; the order below is the o
 
 Budget priority (sections are trimmed from the bottom of this list first): system + task + clock + tempo + senses
 (never cut) → caller's profile with episodes → lookup (kept or dropped whole) → about_chat → self_facts → lore → server → chat (newest first) →
+pulled (`<channel_view>`, capped at `context.caps.pulled`; on a turn that answers a call from a read-only channel the pulled block sits before the chat instead of after it) →
 other profiles → worn (kept or dropped whole) → other channels → emoji (entries from the bottom, then the whole block; `context.caps.emoji`) → gifs (same trimming; `context.caps.gifs`).
 
 Media in a transcript line, most informative form available: a picture attached to THIS request →
@@ -237,6 +242,18 @@ server.category | topic | purpose | topics | tone               {text}
 server.activity                          {activity} = server.activityLive | activitySlow | activityDead
 server.lastMessage                       {when}: humanised age of the channel's newest message
 server.topWriters                        {names}: current names of the members who write there most
+server.readOnly                          shown on a channel the bot can read and react in but not write in; never shown on the current channel. Appears in the `<server>` map entry and as a line after a pulled channel's header
+senses.channels                          shown on every server turn: which channels this request shows (the chat, `<other_channels>`, `<channel_view>`); never claim to have looked at a channel not shown
+senses.elsewhere                         {destination}: shown when `features.elsewhere` is on and `memory.mainChannelIds` has a usable channel; says a call from a read-only channel is answered in {destination} with a link
+pull.header                              REQUIRED {channel} {from} {to} {ago}: first line of a pulled channel. Without it no `<channel_view>` renders. {from}/{{to}} are formatted dates, {ago} is a duration phrase from labels.units
+pull.olderNotShown                       shown when older messages exist in the pulled channel that are not included
+pull.picturesNotSeen                     {count}: shown when pictures in the pulled channel were not looked at
+pull.earlierPings                        {date}: heading before earlier calls to the persona in that channel, older than the window
+pull.pingAnswered                        appended to a pulled line that called the persona and was answered
+pull.pingUnanswered                      appended to a pulled line that called the persona and has not been answered yet
+pull.pingSkipped                         OPTIONAL appended to a pulled line the persona saw and chose to let pass; without it no mark is shown for skipped calls
+elsewhere.called                         {channel} {destination}: appended to the reply task text on a turn answering a call from a read-only channel
+elsewhere.link                           {text} {link}: joins the jump link to the persona's posted message; members read it, the model never sees it
 triggers.mention | reply | name | followUp | overheard   followUp = an untagged message the address classifier judged to be for the persona; overheard = talk about the persona, not to it. Both post plain, never as a Discord reply. overheard falls back to followUp, then reply
 triggers.private                         the trigger for a private (DM) message
 triggers.drawFailed                      {reason}: the drawing sub-process failed; reason is the human phrase from draw.reasons.*
@@ -267,6 +284,8 @@ Only these tags are acted on:
 
 `features.reactions: false` drops `<react>`, `features.multiMessage: false` keeps the first `<msg>`;
 `features.gifs: false` or an empty library drops `<gif>`; `features.imageGeneration: false` or no image client drops `<draw>`; on a `drawFailed` turn `<draw>` is dropped too. Prompts need not know.
+
+A `<react to="#n">` targeting a `<channel_view>` line places the reaction in that line's channel when the bot has Add Reactions and Read Message History there; otherwise the reaction is dropped. A `reply="#n"` targeting a pulled line posts plain in the turn's channel (never as a Discord reply to a message in another channel); each pulled line is linked at most once per turn. On a turn answering a call from a read-only channel, the first message carries one jump link: to the pulled line it answers, or to the routed call, or to the newest line of the source shown. `@name` resolves over the authors of pulled lines too.
 
 ## Analyzer
 
@@ -357,9 +376,15 @@ of what is already stored, so facts are not degraded by being rewritten batch af
   first when the stored text is empty and a batch shows them dealing with each other (or affinity/episodes already
   exist), afterwards only when it must change. When the profile carries `relationshipStale`, the text is due for a
   rewrite: `writtenAt` is the band the text was written at (or `none` when unwritten), `now` is the current band
-  (`affinity.band`). Code stamps `relationshipScore` on the profile each time `relationship` is written and compares
-  bands to detect drift. Switch `relationships.rewriteOnBandChange` (default true, missing = on).
-  Each ≤ `memory.fieldChars`; an absent field leaves the stored text untouched.
+  (`affinity.band`), `cause` is one of `first` (empty text with a non-zero score, a reason or episodes), `band`
+  (the band changed, past `relationships.bandHysteresis`), `drift` (the score moved `relationships.rewriteOnDrift`
+  points since the text was written, within the same band), or `moves` (at least `relationships.rewriteAfterMoves`
+  attitude history entries since the text was written). Code stamps `relationshipScore` and
+  `relationshipWrittenAt` each time `relationship` is written and compares bands and drift to detect staleness.
+  Switches: `relationships.rewriteOnBandChange` (default true, missing = on), `rewriteOnDrift` (default 8, `0` = off),
+  `rewriteAfterMoves` (default 6, `0` = off).
+  Relationship text ≤ `relationships.textChars` (default 600, placeholder `{{relationshipChars}}`); other prose fields
+  ≤ `memory.fieldChars`; an absent field leaves the stored text untouched.
   `character` and `style` are written ONLY by `profile.md` (the warmup and a portrait refresh), never edited by the
   stream analyzer directly. The analyzer returns `portrait` (a one-line cue about what the stored text misses) when
   a batch warrants it, and code queues a refresh.
@@ -419,7 +444,9 @@ of what is already stored, so facts are not degraded by being rewritten batch af
   one line; `quote` the person's own words verbatim, short (≤ 120 chars), or empty; `feeling` how the persona took it,
   judged through the character card; `weight` 1–5 (5 = never forget). At most `memory.maxNewEpisodes` per user per
   batch; most batches add none. The input shows the episodes already stored so nothing is recorded twice. Code keeps
-  `memory.maxEpisodes` per person, evicting the lightest, then the oldest.
+  `memory.maxEpisodes` per person, evicting the lightest, then the oldest; the `memory.keepNewestEpisodes` (default 5)
+  most recently added episodes are exempt from eviction, so a light new moment of an active member is not pushed out
+  on arrival.
 - `lore` is the server's lorebook: things that outlive a conversation: events ("the day X left"), recurring
   characters and pets, long-running stories, feuds, traditions. `title` is the identity (an entry with the same title
   is an UPDATE and carries the whole merged text), `keys` 2–6 words or short phrases that people actually type when
@@ -428,14 +455,55 @@ of what is already stored, so facts are not degraded by being rewritten batch af
   Entries added by the owner (`/nep lore add`) are never changed by the analyzer.
 - String fields ≤ `memory.fieldChars`; details ≤ `memory.maxDetails`, injokes ≤ `memory.maxInjokes`, self ≤ `memory.maxSelfFacts`. Notes in the language the chat speaks.
   Observed facts only; nothing sensitive (addresses, phones, documents, health, finances, real full names).
-- **Counters on `memory: update applied`** (logged after each batch): `roster` (members sent in `<known_members>`), `rosterCandidates` (roster entries offered to the budget), `rosterTokens` (estimated tokens the sent roster took), `aliasesChanged` (members, authors and roster, whose stored alias list really changed), `aliasOnly` (roster members among them), `droppedUsers` (entries for an id that is neither an author nor a roster member with a stored profile), `droppedFields` (non-alias keys dropped from roster members' entries).
+- **Counters on `memory: update applied`** (logged after each batch): `roster` (members sent in `<known_members>`), `rosterCandidates` (roster entries offered to the budget), `rosterTokens` (estimated tokens the sent roster took), `aliasesChanged` (members, authors and roster, whose stored alias list really changed), `aliasOnly` (roster members among them), `droppedUsers` (entries for an id that is neither an author nor a roster member with a stored profile), `droppedFields` (non-alias keys dropped from roster members' entries), `portraitDropped` (authors' non-blank `character`/`style` dropped).
+
+### Two-stage mode
+
+When `features.memoryTwoStage` is exactly `true` and both `prompts/memory-decide.md` and `prompts/memory-voice.md`
+are present, guild batches are split into two stages. A switch on with a prompt missing falls back to single-stage
+mode. Private batches always use single-stage mode (`memory.md` on `memory.voiceModel`, or the talk model when null).
+
+**Stage A** runs `memory-decide.md` on `memory.model` (role `analyzer`). It returns the same JSON structure with
+neutral decisions: interests, details, aliases, in-jokes, channel notes, lore, `style` and the episode line and
+quote are stored at once. Voice fields (relationship, affinity reason, episode feeling, lessons, self-facts, server
+patterns, starters, character) are returned as neutral briefs and queued for stage B. The attitude delta is applied
+at once with the stored reason kept; episodes are stored at once with an empty feeling. `character`, `style` and
+`portrait` keys from stage A are dropped and counted. Known-members roster rules apply to stage A: aliases for
+roster members are stored by stage A alone.
+
+The stage A answer shape for voice fields:
+
+- `relationship`: a brief (only when `relationshipStale` or the standing changed).
+- `affinity.delta`: an integer; `affinity.event`: a neutral one-line reason (the key is `event`, not `reason`).
+- `episodes[].tone`: how it landed, neutral (becomes the feeling's brief for stage B).
+- `guild.learned.add[].brief`: the lesson as a neutral claim (the key is `brief`, not `text`).
+- `self`: an object `{ "add": [...], "remove": [...] }` (a bare list is ignored).
+- `guild.patterns` and `guild.starters`: briefs, only when the note must change.
+
+**Stage B** runs `memory-voice.md` on `memory.voiceModel` (role `voice`, `null` = the talk model). It takes the
+queued items and returns `{ "items": { "<id>": "<text>" } }`. Each item carries its kind, the stored old text (when
+applicable), the neutral brief from stage A, and a character limit. Applied items leave the queue; items left out of
+the answer are retried with increasing back-off. Items that expire (older than `memory.voice.queueHours`, or left
+out `memory.voice.maxAttempts` times) take the degraded path: a feeling falls back to the stage A tone, lessons and
+self-facts are stored from the brief, and the rest (relationship, reason, patterns, starters) are dropped (the delta
+already landed, and the stale markers bring the notes back). Character items never expire, overflow or take the
+degraded path.
+
+The voice queue is persisted in `data/guilds/<id>/voice.json`. It survives restarts. `/nep memory forget` removes
+the member's queued items and the lessons they taught. `/nep memory wipe` deletes the queue file. One voice request
+runs after each successful stage A batch and on every tick that finds due items, at most `memory.voice.maxPerDay`
+(default 100) per UTC day. Each request carries up to `memory.voice.maxItems` (default 24) items, fitted under the
+50k token rail.
 
 ## Channel map
 
 The `<server>` block is assembled from stored channel notes and code-maintained facts, filtered to only the channels
-that matter for this turn. The current channel appears first, marked with `labels.server.currentMark`; then only the
-neighbour channels that contributed messages to `<other_channels>` this turn, each in full. Every other stored channel
-is left out. On a large server most of them are irrelevant and waste budget.
+that matter for this turn. The current channel appears first, marked with `labels.server.currentMark`; then a pulled
+channel's stored note (when a pull happened), then the neighbour channels that contributed messages to
+`<other_channels>` this turn, each in full. Every other stored channel is left out. On a large server most of them
+are irrelevant and waste budget. A channel the bot can read but not write in carries `labels.server.readOnly` (never
+shown on the current channel). The dry-run mirror channel (`bot.dryRunChannelId`) is never read as a neighbour, a
+spontaneous candidate, by the warmup or by the emoji backfill.
 
 A channel entry (`renderChannel` in `src/memory/channels.js`) carries:
 
@@ -469,11 +537,29 @@ lore. For the run order, sampling, progress, rails and subcommands see [Warmup](
 ### Data model
 
 `character` and `style` STAY PROSE and are written ONLY by `profile.md`: by the warmup and by a PORTRAIT REFRESH.
-The stream analyzer never edits them: for a member whose batch showed a recurring habit or a change in how they write
-that the stored portrait misses or contradicts, it returns `users.<id>.portrait: "one line: what the portrait misses"`.
-Code then queues a refresh for that member: `profile.md` is called with `<draft>` = the stored character + style,
-`<hint>` = the analyzer's line, and the answer's `character` and `style` replace the stored ones (interests, details,
-episodes and aliases of that answer are IGNORED; they keep flowing through the stream ops).
+The stream analyzer never edits them directly. A stream batch can no longer overwrite `character` or `style`; any
+non-blank value from a stream batch is dropped and counted as `portraitDropped`. For a member whose batch shows a
+recurring habit or a change in how they write that the stored portrait misses or contradicts, the analyzer returns
+`users.<id>.portrait: "one line: what the portrait misses"`, and code queues a refresh.
+
+Portraits are also refreshed by code on a periodic schedule (`features.portraitRefresh`). A member is due when they
+have written at least `memory.portraitRefreshMessages` (default 300) own messages since their last portrait AND at
+least `memory.portraitRefreshDays` (default 3) have passed since the last successful refresh. A failed attempt
+backs off for `memory.portraitRetryHours` (default 24). The scheduler checks every `memory.portraitCheckMinutes`
+(default 60) and refreshes up to `memory.portraitRefreshPerDay` (default 3) members per day, most active first.
+A member with no portrait stamp counts all their messages, so several qualify at once on first deploy; the daily
+cap spreads them over a few days. Code-triggered refreshes, analyzer cue refreshes and `/nep memory refresh` share
+this cap. Each refresh is fitted under the 50k token rail (`llm.maxRequestTokens`), shrinking the sample if needed.
+
+`profile.md` is called with `<draft>` = the stored character + style, `<hint>` = the analyzer's line (when present),
+and the answer's `character` and `style` replace the stored ones. The draft is a MERGE base: every point still
+compatible with the sample stays (condensed to make room), points the sample contradicts are revised, new recurring
+habits are added, and a point the sample merely does not show is NOT dropped. Interests, details, episodes and
+aliases of the refresh answer are IGNORED; they keep flowing through the stream ops.
+
+In two-stage mode (`features.memoryTwoStage`), the portrait refresh uses `prompts/portrait.md` on `memory.model`
+(stage A), which returns a merged `style` text stored at once and structured `character` edits queued as a voice
+item. The next voice run (stage B) words the character text. Details of this flow are in a later documentation pass.
 
 Attitude and `relationship` are NOT warmed up; they grow from live conversation only.
 
