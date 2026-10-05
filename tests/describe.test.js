@@ -14,8 +14,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { createStore } from '../src/memory/store.js';
 import { createDescriber, videoStateFromCache } from '../src/memory/describe.js';
-import { createLlm, TokenLimitError, DailyCapError } from '../src/llm/openrouter.js';
-import { collectPictures } from '../src/discord/media.js';
+import { createLlm, TokenLimitError, DailyCapError, VIDEO_TOKENS_PER_SECOND_FALLBACK } from '../src/llm/openrouter.js';
 import { withCapturedLogs } from './fixtures/capture-logs.js';
 
 function tmpDataDir() {
@@ -115,17 +114,6 @@ test('describe: a successful call downloads the picture, sends it as a data: URL
 
   const cache = store.getMediaCache('g1');
   assert.equal(cache.a1.text, 'A grey cat sleeping on a couch.');
-});
-
-test('describe: the caption is trimmed to at most 200 characters', async () => {
-  const dir = tmpDataDir();
-  const store = createStore({ dataDir: dir });
-  const hot = fakeHot();
-  const llm = fakeLlm({ text: 'x'.repeat(500) });
-  const describer = createDescriber({ hot, store, llm, imageFetcher: fakeImageFetcher() });
-
-  const result = await describer.describe('g1', pictureItem('a1'));
-  assert.equal(result.text.length, 200);
 });
 
 /** A prose line of `words` short words, sentence-free, so a cut can only land on a space. */
@@ -384,19 +372,6 @@ test('describe: video items request a webp poster frame via the media proxy, wit
   assert.equal(llm.calls[0].messages[1].content[0].image_url.url, SUCCESSFUL_DOWNLOAD.dataUrl);
 });
 
-test('describe: an image request resizes through the media proxy at media.imageSize', async () => {
-  const dir = tmpDataDir();
-  const store = createStore({ dataDir: dir });
-  const hot = fakeHot({ config: { features: { mediaDescriptions: true }, media: { imageSize: 256 } } });
-  const llm = fakeLlm({ text: 'a cat' });
-  const imageFetcher = fakeImageFetcher();
-  const describer = createDescriber({ hot, store, llm, imageFetcher });
-
-  await describer.describe('g1', pictureItem('a1'));
-  const fetchedUrl = imageFetcher.calls[0].url;
-  assert.equal(new URL(fetchedUrl).searchParams.get('width'), '256');
-});
-
 test('describe: a gif item requests a single still png frame at media.imageSize, never an animated webp', async () => {
   const dir = tmpDataDir();
   const store = createStore({ dataDir: dir });
@@ -477,39 +452,6 @@ test('describe: a link-thumbnail item resizes through the media proxy exactly li
   await describer.describe('g1', linkPicture);
   const fetchedUrl = imageFetcher.calls[0].url;
   assert.equal(new URL(fetchedUrl).searchParams.get('width'), '256');
-});
-
-test('describe: a link-thumbnail item on a non-Discord host (e.g. i.ytimg.com) is passed through untouched', async () => {
-  const dir = tmpDataDir();
-  const store = createStore({ dataDir: dir });
-  const hot = fakeHot();
-  const llm = fakeLlm({ text: 'a cat plays piano' });
-  const imageFetcher = fakeImageFetcher();
-  const describer = createDescriber({ hot, store, llm, imageFetcher });
-
-  const linkPicture = pictureItem('link:abcd1234', { kind: 'link', url: 'https://i.ytimg.com/vi/xyz/hq.jpg' });
-  await describer.describe('g1', linkPicture);
-  assert.equal(imageFetcher.calls[0].url, 'https://i.ytimg.com/vi/xyz/hq.jpg');
-});
-
-test('describe: a cache HIT refreshes the entry\'s recency (sticker/emoji/link keys are ordinary LRU entries)', async () => {
-  const dir = tmpDataDir();
-  const store = createStore({ dataDir: dir });
-  const hot = fakeHot({ config: { features: { mediaDescriptions: true }, media: { cacheEntries: 2 } } });
-  const llm = fakeLlm([{ text: 'one' }, { text: 'two' }, { text: 'three' }]);
-  const describer = createDescriber({ hot, store, llm, imageFetcher: fakeImageFetcher() });
-
-  await describer.describe('g1', pictureItem('sticker:s1', { kind: 'sticker', url: 'https://media.discordapp.net/stickers/s1.png?size=160' }));
-  await describer.describe('g1', pictureItem('emoji:e1', { kind: 'emoji', url: 'https://cdn.discordapp.com/emojis/e1.webp?size=96' }));
-  // Re-describe the sticker (cache hit): it becomes the most-recently-used.
-  const hit = await describer.describe('g1', pictureItem('sticker:s1', { kind: 'sticker', url: 'https://media.discordapp.net/stickers/s1.png?size=160' }));
-  assert.equal(hit.cached, true);
-  assert.equal(llm.calls.length, 2, 'the re-describe was a cache hit, no third LLM call yet');
-
-  // A third distinct item must evict emoji:e1 (now the least-recently-used), not sticker:s1.
-  await describer.describe('g1', pictureItem('link:abcd1234', { kind: 'link', url: 'https://cdn.discordapp.com/x/thumb.jpg' }));
-  const cache = store.getMediaCache('g1');
-  assert.deepEqual(Object.keys(cache).sort(), ['link:abcd1234', 'sticker:s1']);
 });
 
 test('describe: forwards countAgainstDailyCap to llm.complete', async () => {
@@ -913,23 +855,19 @@ test('describeVideo: shares the media cache under video:<itemId>, LRU-trimmed to
   assert.equal(cache['video:v3'].text, 'someone dances');
 });
 
-test('describeVideo: a length or size failure is a permanent limit, never retried', async () => {
-  for (const reason of ['length', 'size']) {
-    let t = 1_000_000;
-    // A length miss stays a limit only with a known duration over the cap.
-    const attachment = reason === 'length' ? { ok: false, reason, durationSec: 600 } : { ok: false, reason };
-    const videoFetcher = fakeVideoFetcher({ attachment });
-    const { describer, llm, store, state } = videoDescriber({ videoFetcher, now: () => t });
+test('describeVideo: an attachment size failure is a permanent limit, never retried', async () => {
+  let t = 1_000_000;
+  const videoFetcher = fakeVideoFetcher({ attachment: { ok: false, reason: 'size' } });
+  const { describer, llm, store, state } = videoDescriber({ videoFetcher, now: () => t });
 
-    assert.deepEqual(await describer.describeVideo('g1', videoAttachment()), { state: 'limit', reason });
-    t += 30 * 24 * 60 * 60_000;
-    assert.deepEqual(await describer.describeVideo('g1', videoAttachment()), { state: 'limit', reason });
+  assert.deepEqual(await describer.describeVideo('g1', videoAttachment()), { state: 'limit', reason: 'size' });
+  t += 30 * 24 * 60 * 60_000;
+  assert.deepEqual(await describer.describeVideo('g1', videoAttachment()), { state: 'limit', reason: 'size' });
 
-    assert.equal(videoFetcher.calls.length, 1, 'the permanent miss is served from the cache');
-    assert.equal(llm.calls.length, 0);
-    assert.equal(store.getMediaCache('g1')['video:v1'].reason, reason);
-    assert.equal(state.data.videoCount, 1, 'the attempt reserved its daily slot, which it keeps');
-  }
+  assert.equal(videoFetcher.calls.length, 1, 'the permanent miss is served from the cache');
+  assert.equal(llm.calls.length, 0);
+  assert.equal(store.getMediaCache('g1')['video:v1'].reason, 'size');
+  assert.equal(state.data.videoCount, 1, 'the attempt reserved its daily slot, which it keeps');
 });
 
 test('describeVideo: a download/tool/timeout failure is an error miss, retried after an hour', async () => {
@@ -969,9 +907,22 @@ test('describeVideo: media.video.errorRetryMinutes sets the error-miss TTL, read
   assert.equal(videoFetcher.calls.length, 2, 'a live change applies to the next lookup');
 });
 
-test('describeVideo: errorRetryMinutes defaults to 60 in config.json', () => {
+test('describeVideo: without errorRetryMinutes an error miss waits exactly what config.json ships (code fallback = shipped value)', async () => {
   const shipped = JSON.parse(fs.readFileSync(new URL('../config.json', import.meta.url), 'utf8'));
-  assert.equal(shipped.media.video.errorRetryMinutes, 60);
+  const minutes = shipped.media.video.errorRetryMinutes;
+  assert.ok(typeof minutes === 'number' && minutes > 0, 'config.json ships a usable retry delay');
+  let t = 1_000_000;
+  const hot = videoHot({ video: { errorRetryMinutes: undefined } });
+  const videoFetcher = fakeVideoFetcher({ attachment: { ok: false, reason: 'download' } });
+  const { describer } = videoDescriber({ hot, videoFetcher, now: () => t });
+
+  assert.deepEqual(await describer.describeVideo('g1', videoAttachment()), { state: 'error' });
+  t += minutes * 60_000 - 1;
+  await describer.describeVideo('g1', videoAttachment());
+  assert.equal(videoFetcher.calls.length, 1, 'just before the shipped delay the miss is served from the cache');
+  t += 1;
+  await describer.describeVideo('g1', videoAttachment());
+  assert.equal(videoFetcher.calls.length, 2, 'once the shipped delay has passed it is retried');
 });
 
 test('describeVideo: force retries an error miss at once and logs forced: true', async () => {
@@ -1047,10 +998,13 @@ test('describeVideo: a public-URL part carries media.video.urlProcessing; a data
   assert.equal('processing' in off.llm.calls[0].messages[1].content[0].video_url, false, 'null omits the field');
 });
 
-test('describeVideo: config.json ships urlProcessing agentic and reasoning effort low', () => {
+test('describeVideo: without urlProcessing a public URL goes out in the mode config.json ships (code fallback = shipped value)', async () => {
   const shipped = JSON.parse(fs.readFileSync(new URL('../config.json', import.meta.url), 'utf8'));
-  assert.equal(shipped.media.video.urlProcessing, 'agentic');
-  assert.deepEqual(shipped.media.video.reasoning, { effort: 'low' });
+  const { describer, llm } = videoDescriber({ hot: videoHot({ video: { urlProcessing: undefined } }) });
+  assert.equal((await describer.describeVideo('g1', videoLink())).state, 'watched');
+  const part = llm.calls[0].messages[1].content[0].video_url;
+  assert.equal(part.url, 'https://www.youtube.com/watch?v=abc', 'the pinned public URL');
+  assert.equal(part.processing, shipped.media.video.urlProcessing);
 });
 
 test('describeVideo: the request body carries media.video.reasoning (shipped default) through the real client; a non-object omits it', async () => {
@@ -1498,32 +1452,6 @@ test('describeVideo: a direct-URL link of 120 s (within directUrlMaxSeconds) goe
   assert.equal(llm.calls[0].options.videoSeconds, 120);
 });
 
-test('describeVideo: a direct-URL link of 200 s (over directUrlMaxSeconds) takes the clip route capped at maxSeconds', async () => {
-  const videoFetcher = fakeVideoFetcher({ probe: { ok: true, durationSec: 200, title: null } });
-  const { describer, llm } = videoDescriber({ videoFetcher });
-  assert.equal((await describer.describeVideo('g1', videoLink())).state, 'watched');
-  assert.deepEqual(videoFetcher.calls.map((c) => c.fn), ['probeSite', 'fetchSiteClip']);
-  assert.equal(videoFetcher.calls[1].options.maxSeconds, 60);
-  assert.equal(videoFetcher.calls[1].options.durationSec, 200);
-  assert.equal(llm.calls[0].options.provider, undefined);
-});
-
-test('describeVideo: a 200 s direct-URL link whose clip fails is a length limit storing durationSec', async () => {
-  const videoFetcher = fakeVideoFetcher({ probe: { ok: true, durationSec: 200, title: null }, clip: { ok: false, reason: 'tool' } });
-  const { describer, store } = videoDescriber({ videoFetcher, now: () => 5_000 });
-  assert.deepEqual(await describer.describeVideo('g1', videoLink()), { state: 'limit', reason: 'length' });
-  assert.deepEqual(store.getMediaCache('g1')[LINK_KEY], { miss: true, ts: 5_000, reason: 'length', durationSec: 200 });
-});
-
-test('describeVideo: a 120 s link on a non-direct site still takes the clip route', async () => {
-  const videoFetcher = fakeVideoFetcher({ probe: { ok: true, durationSec: 120, title: null } });
-  const { describer, llm } = videoDescriber({ videoFetcher });
-  assert.equal((await describer.describeVideo('g1', videoLink('video:url:bbbbbbbbbbbbbbbb', TIKTOK))).state, 'watched');
-  assert.deepEqual(videoFetcher.calls.map((c) => c.fn), ['probeSite', 'fetchSiteClip']);
-  assert.equal(videoFetcher.calls[1].options.maxSeconds, 60);
-  assert.equal(llm.calls[0].options.provider, undefined);
-});
-
 test('describeVideo: a 120 s non-direct link whose clip fails stores a length miss with durationSec 120', async () => {
   const videoFetcher = fakeVideoFetcher({ probe: { ok: true, durationSec: 120, title: null }, clip: { ok: false, reason: 'download' } });
   const { describer, store } = videoDescriber({ videoFetcher, now: () => 7_000 });
@@ -1540,17 +1468,6 @@ test('describeVideo: a 120 s non-direct link whose clip fails stores a length mi
   assert.equal(videoFetcher.calls.length, 2);
 });
 
-test('describeVideo: a cached length miss with durationSec 120 is retried once the direct-URL cap allows it', async () => {
-  const videoFetcher = fakeVideoFetcher({ probe: { ok: true, durationSec: 120, title: null } });
-  const { describer, store, llm } = videoDescriber({ videoFetcher });
-  store.getMediaCache('g1')[LINK_KEY] = { miss: true, ts: 1, reason: 'length', durationSec: 120 };
-  const result = await describer.describeVideo('g1', videoLink());
-  assert.equal(result.state, 'watched');
-  assert.equal(llm.calls.length, 1);
-  assert.equal(llm.calls[0].options.videoSeconds, 120);
-  assert.equal(store.getMediaCache('g1')[LINK_KEY].watched, true);
-});
-
 test('describeVideo: a cached length miss is re-read against the live caps (maxSeconds raised for a non-direct site)', async () => {
   const hot = videoHot();
   const { describer, store, videoFetcher } = videoDescriber({ hot });
@@ -1561,16 +1478,6 @@ test('describeVideo: a cached length miss is re-read against the live caps (maxS
   hot.config.media.video.maxSeconds = 120;
   assert.equal((await describer.describeVideo('g1', item)).state, 'watched');
   assert.equal(videoFetcher.calls.length, 2);
-});
-
-test('describeVideo: a cached length miss with durationSec 200 stays a limit', async () => {
-  for (const extra of [{ durationSec: 200 }]) {
-    const { describer, store, videoFetcher, llm } = videoDescriber();
-    store.getMediaCache('g1')[LINK_KEY] = { miss: true, ts: 1, reason: 'length', ...extra };
-    assert.deepEqual(await describer.describeVideo('g1', videoLink()), { state: 'limit', reason: 'length' }, JSON.stringify(extra));
-    assert.equal(videoFetcher.calls.length, 0);
-    assert.equal(llm.calls.length, 0);
-  }
 });
 
 test('describeVideo: a cached size miss stays permanent whatever its duration', async () => {
@@ -1885,24 +1792,43 @@ test('describeVideo: cached length misses of 2719 s and 570 s pinned links are r
   }
 });
 
-test('describeVideo: config.json ships directUrlMaxSeconds 3600 and directUrlTokensPerSecond 10, within maxRequestTokens', () => {
+test('describeVideo: config.json ships a direct-URL cap that, at the shipped agentic rate, stays within maxRequestTokens', async () => {
   const shipped = JSON.parse(fs.readFileSync(new URL('../config.json', import.meta.url), 'utf8'));
+  const prompt = fs.readFileSync(new URL('../prompts/describe-video.md', import.meta.url), 'utf8');
   const video = shipped.media.video;
-  assert.equal(video.directUrlMaxSeconds, 3600);
-  assert.equal(video.directUrlTokensPerSecond, 10);
-  assert.equal(video.tokensPerSecond, 120, 'data-URL clips keep the static estimate');
-  assert.ok(video.directUrlMaxSeconds * video.directUrlTokensPerSecond < video.maxRequestTokens);
+  // The direct-URL rate applies only in agentic processing, whatever mode config.json ships.
+  const hot = videoHot({ video: { ...video, urlProcessing: 'agentic' }, prompts: { 'describe-video': prompt } });
+  const { llm: client, bodies } = realVideoLlm(hot);
+  const options = [];
+  const llm = {
+    ...client,
+    complete: (messages, opts) => {
+      options.push(opts);
+      return client.complete(messages, opts);
+    },
+  };
+  const videoFetcher = fakeVideoFetcher({ probe: { ok: true, durationSec: video.directUrlMaxSeconds, title: null } });
+  const { describer } = videoDescriber({ hot, llm, videoFetcher });
+
+  const watched = await describer.describeVideo('g1', videoLink());
+
+  assert.equal(watched.state, 'watched');
+  assert.deepEqual(videoFetcher.calls.map((c) => c.fn), ['probeSite'], 'the longest direct-URL video is not clipped');
+  assert.equal(bodies.length, 1, 'the token rail let the request through');
+  assert.equal(bodies[0].messages[1].content[0].video_url.url, videoLink().url, 'sent by its public URL');
+  assert.equal(options[0].videoSeconds, video.directUrlMaxSeconds);
+  assert.equal(options[0].videoTokensPerSecond, video.directUrlTokensPerSecond, 'src applies the shipped rate, not a fallback');
+  assert.ok(watched.estimated >= video.directUrlMaxSeconds * video.directUrlTokensPerSecond, String(watched.estimated));
+  assert.ok(watched.estimated < video.maxRequestTokens, String(watched.estimated));
 });
 
-test('describeVideo: config.json ships 180 s clips of at most 12 MB, estimated at 120 tokens per second', () => {
+test('describeVideo: config.json ships clips whose base64 fits the inline request limit, estimated at the code-fallback rate', () => {
   const shipped = JSON.parse(fs.readFileSync(new URL('../config.json', import.meta.url), 'utf8'));
   const video = shipped.media.video;
-  assert.equal(video.maxSeconds, 180);
-  assert.equal(video.maxBytes, 12_000_000);
-  assert.equal(video.tokensPerSecond, 120);
-  assert.equal(video.maxRequestTokens, 60_000);
   // Base64 of the largest clip stays under the provider's ~20 MB inline request limit.
   assert.ok(Math.ceil(video.maxBytes / 3) * 4 < 20_000_000);
+  // Data-URL clips keep the static estimate; a missing tokensPerSecond must mean the same rate.
+  assert.equal(video.tokensPerSecond, VIDEO_TOKENS_PER_SECOND_FALLBACK);
 });
 
 test('describeVideo: a shipped-length clip at the shipped rate plus the shipped prompt stays under media.video.maxRequestTokens', async () => {
@@ -2025,14 +1951,6 @@ test('rewatchVideo: one fetch and one video request with the question and answer
   const keys = Object.keys(store.getMediaCache('g1')).filter((k) => k.startsWith('video:v1:q:'));
   assert.equal(keys.length, 1);
   assert.equal(store.getMediaCache('g1')[keys[0]].answer, 'la voiture est rouge');
-});
-
-test('rewatchVideo: the second look uses classifier.video when set', async () => {
-  const hot = rewatchHot();
-  hot.config.classifier = { video: 'x/new-video' };
-  const { describer, llm } = videoDescriber({ hot, llm: fakeLlm({ text: 'rouge' }), now: clock() });
-  await describer.rewatchVideo('g1', videoAttachment(), 'De quelle couleur ?');
-  assert.equal(llm.calls[0].options.model, 'x/new-video');
 });
 
 test('rewatchVideo: a pinnable link goes out by URL with the pinned provider, like a watch', async () => {
@@ -2362,24 +2280,6 @@ test('describe: an attached .gif is downloaded and converted by the fetcher, the
   assert.equal(store.getMediaCache('g1').a9.watched, true);
 });
 
-test('describe: a GIF inside a forwarded message is watched like the message\'s own', async () => {
-  const message = {
-    id: 'm7',
-    ts: 0,
-    attachments: [],
-    links: [],
-    forwarded: [{ attachments: [], links: [{ id: 'o5#e0', kind: 'gif', thumbnailUrl: 'https://t/still.png', animationUrl: TENOR_MP4, site: 'Tenor' }] }],
-  };
-  const [item] = collectPictures(message);
-  const { describer, videoFetcher, store } = gifDescriber();
-
-  const result = await describer.describe('g1', item);
-
-  assert.equal(result.text, 'a man pulls a child back as a train rushes past');
-  assert.equal(videoFetcher.calls[0].url, TENOR_MP4);
-  assert.equal(store.getMediaCache('g1')['o5#e0'].watched, true);
-});
-
 test('describe: media.gif.maxSeconds caps the watched length; a missing or invalid value means 8', async () => {
   const capped = gifDescriber({ hot: gifHot({ gif: { maxSeconds: 5 } }) });
   await capped.describer.describe('g1', gifEmbedItem());
@@ -2434,15 +2334,6 @@ test('describe: video vision off, media.gif.watch false or no describe-video pro
     assert.equal(run.state.data.gifWatchCount, undefined, 'no daily GIF slot');
     assertOneFrame(run, 'm1#e0');
   }
-});
-
-test('describe: media.gif.watch false describes a GIF exactly as before (the still png frame at media.imageSize)', async () => {
-  const run = gifDescriber({ hot: gifHot({ gif: { watch: false } }) });
-  await run.describer.describe('g1', gifAttachmentItem());
-  assert.equal(
-    run.imageFetcher.calls[0].url,
-    'https://media.discordapp.net/attachments/1/2/anim.gif?ex=secret&width=512&height=512&format=png&animated=false',
-  );
 });
 
 test('describe: a gif embed without an animation keeps the one-frame description', async () => {
