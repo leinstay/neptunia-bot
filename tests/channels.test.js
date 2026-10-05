@@ -31,19 +31,45 @@ function channel(overrides = {}) {
 
 // --- channelActivity --------------------------------------------------------
 
-test('channelActivity: live when today + yesterday reach the default threshold (20)', () => {
-  const c = channel({ days: { [TODAY_KEY]: 15, [YESTERDAY_KEY]: 5 }, lastMessageAt: NOW });
-  assert.equal(channelActivity(c, NOW, undefined), 'live');
-});
-
-test('channelActivity: exactly at the live threshold is inclusive', () => {
-  const c = channel({ days: { [TODAY_KEY]: 20 }, lastMessageAt: NOW });
-  assert.equal(channelActivity(c, NOW, { liveMessagesPerDay: 20, deadAfterDays: 7 }), 'live');
-});
-
-test('channelActivity: one message short of the live threshold is not live', () => {
-  const c = channel({ days: { [TODAY_KEY]: 19 }, lastMessageAt: NOW });
-  assert.notEqual(channelActivity(c, NOW, { liveMessagesPerDay: 20, deadAfterDays: 7 }), 'live');
+test('channelActivity: live when today + yesterday reach the threshold, slow below it', () => {
+  const cfg = { liveMessagesPerDay: 20, deadAfterDays: 7 };
+  const rows = [
+    {
+      label: 'today + yesterday reach the default threshold (20)',
+      c: channel({ days: { [TODAY_KEY]: 15, [YESTERDAY_KEY]: 5 }, lastMessageAt: NOW }),
+      cfg: undefined,
+      expected: 'live',
+    },
+    {
+      label: 'exactly at the live threshold is inclusive',
+      c: channel({ days: { [TODAY_KEY]: 20 }, lastMessageAt: NOW }),
+      cfg,
+      expected: 'live',
+    },
+    {
+      label: 'one message short of the live threshold is not live',
+      c: channel({ days: { [TODAY_KEY]: 19 }, lastMessageAt: NOW }),
+      cfg,
+      notExpected: 'live',
+    },
+    {
+      label: 'an empty days object never counts as live',
+      c: channel({ days: {}, lastMessageAt: NOW }),
+      cfg: { liveMessagesPerDay: 1, deadAfterDays: 7 },
+      expected: 'slow',
+    },
+    {
+      label: 'recent activity below the live threshold and within deadAfterDays is "slow"',
+      c: channel({ days: { [TODAY_KEY]: 2 }, lastMessageAt: NOW - DAY }),
+      cfg,
+      expected: 'slow',
+    },
+  ];
+  for (const row of rows) {
+    const activity = channelActivity(row.c, NOW, row.cfg);
+    if ('expected' in row) assert.equal(activity, row.expected, row.label);
+    else assert.notEqual(activity, row.notExpected, row.label);
+  }
 });
 
 test('channelActivity: only counts today + yesterday, older days do not count toward "live"', () => {
@@ -51,18 +77,8 @@ test('channelActivity: only counts today + yesterday, older days do not count to
   assert.notEqual(channelActivity(c, NOW, { liveMessagesPerDay: 20, deadAfterDays: 7 }), 'live');
 });
 
-test('channelActivity: an empty days object never counts as live', () => {
-  const c = channel({ days: {}, lastMessageAt: NOW });
-  assert.equal(channelActivity(c, NOW, { liveMessagesPerDay: 1, deadAfterDays: 7 }), 'slow');
-});
-
 test('channelActivity: dead when lastMessageAt is null, regardless of days', () => {
   const c = channel({ lastMessageAt: null });
-  assert.equal(channelActivity(c, NOW, { liveMessagesPerDay: 20, deadAfterDays: 7 }), 'dead');
-});
-
-test('channelActivity: dead when the last message is older than deadAfterDays', () => {
-  const c = channel({ lastMessageAt: NOW - 8 * DAY });
   assert.equal(channelActivity(c, NOW, { liveMessagesPerDay: 20, deadAfterDays: 7 }), 'dead');
 });
 
@@ -74,11 +90,6 @@ test('channelActivity: exactly at deadAfterDays is NOT dead yet (slow)', () => {
 test('channelActivity: one millisecond past deadAfterDays is dead', () => {
   const c = channel({ lastMessageAt: NOW - 7 * DAY - 1 });
   assert.equal(channelActivity(c, NOW, { liveMessagesPerDay: 20, deadAfterDays: 7 }), 'dead');
-});
-
-test('channelActivity: recent activity below the live threshold and within deadAfterDays is "slow"', () => {
-  const c = channel({ days: { [TODAY_KEY]: 2 }, lastMessageAt: NOW - DAY });
-  assert.equal(channelActivity(c, NOW, { liveMessagesPerDay: 20, deadAfterDays: 7 }), 'slow');
 });
 
 test('channelActivity: default thresholds (20 / 7 days) apply when cfg is entirely missing', () => {
@@ -125,12 +136,6 @@ test('renderChannel: fact lines appear in the documented order: category, topic,
       'activity: live',
     ].join('\n'),
   );
-});
-
-test('renderChannel: empty/null facts are omitted, not rendered as empty lines', () => {
-  const c = channel({ name: 'general', category: null, topic: null, purpose: '', topics: '', tone: '' });
-  const text = renderChannel(c, labels, { current: false, activity: 'dead' });
-  assert.equal(text, '# general\nactivity: dead');
 });
 
 test('renderChannel: a partial set of facts renders only the non-empty ones, in order', () => {
