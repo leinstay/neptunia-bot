@@ -10,6 +10,7 @@
 //                normalized rather than rejected)
 //   fromTokens   tokens -> display text, on the way OUT: the member's current
 //                name for the chat model, `name (id:123...)` for the analyzer
+//   tokenIds     the member ids a stored text's tokens name
 //
 // Pure, no discord.js dependency: `isKnownId`/`nameOf`/`namesOf` are injected
 // so the caller decides what "known" means (an author of the batch, an
@@ -149,6 +150,19 @@ export function fromTokens(text, nameOf, mode) {
     if (typeof name !== 'string' || !name) return whole;
     return mode === 'analyzer' ? `${name} (id:${id})` : name;
   });
+}
+
+/**
+ * The member ids `text` names through `<@id>` tokens, each once, in the order
+ * they first appear -- how a stored text's member list is computed by code
+ * rather than taken from the model (src/memory/recent.js). An `(id:...)`
+ * marker is not a token; a non-string `text` names nobody.
+ * @param {unknown} text
+ * @returns {string[]}
+ */
+export function tokenIds(text) {
+  if (typeof text !== 'string' || !text) return [];
+  return [...new Set(Array.from(text.matchAll(TOKEN_RE), (match) => match[1]))];
 }
 
 /**

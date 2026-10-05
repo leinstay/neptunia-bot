@@ -15,6 +15,9 @@
 //   data/guilds/<guildId>/gifs.json           the GIF library the persona posts from (src/memory/gifs.js)
 //   data/guilds/<guildId>/voice.json          the voice queue: briefs the two-stage analyzer's stage A left for
 //                                            the voice model to word (src/memory/voice.js); survives restarts
+//   data/guilds/<guildId>/recent.json         the recent store: short dated lines about the last
+//                                            `memory.recentHours` hours, each with its source channel
+//                                            (src/memory/recent.js)
 //
 // Everything is cached in memory, marked dirty on change and flushed on a
 // timer and on shutdown. Writes are atomic (temp file + rename) so a crash
@@ -32,6 +35,17 @@
 // queued item of the same target, a newer character item replacing the queued
 // one (src/memory/voice.js). An item the queue file holds but that cannot be
 // read is left out on load, and logged as a count.
+//
+// The recent store has a documented retention of its own, applied only when
+// `applyRecentOps` writes (src/memory/recent.js#mergeRecent), never on read: a
+// line expires `memory.recentHours` after its moment, the storage cap
+// (`memory.maxRecentStored`) evicts the lightest, then the oldest when lines are
+// added, and the analyzer may remove a line by id. The one number is also the
+// view's window, so a hot lowering of `memory.recentHours` deletes the older
+// lines at the next write, and raising it again restores none. Apart from that
+// only a forget (every line naming the member, written at once) and a wipe (the
+// file) remove lines. On load, lines a hand edit broke are left out and logged
+// as a count, like the voice queue's items.
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -48,6 +62,7 @@ import { clampText } from './clamp.js';
 import { mergeEmojiUsage, normalizeEmojiUsage } from './emoji-usage.js';
 import { emptyGifs, findGif, mergeGifs, normalizeBackfillStamp, normalizeGifs, resetGifCounts } from './gifs.js';
 import { FEELING_CHARS, REASON_CHARS, SELF_CHARS, forgetMember, normalizeQueue } from './voice.js';
+import { emptyRecent, mergeRecent, normalizeRecent, purgeRecentFor } from './recent.js';
 import { appendOwnLine, appendWornHistory, normalizeOwnLines, normalizeWorn, normalizeWornHistory } from '../behavior/variety.js';
 
 function readJson(file, fallback) {
@@ -463,6 +478,7 @@ export function createStore({ dataDir }) {
   const privateDir = (guildId) => path.join(guildDir(guildId), 'private');
   const privateFile = (guildId, userId) => path.join(privateDir(guildId), `${userId}.json`);
   const voiceFile = (guildId) => path.join(guildDir(guildId), 'voice.json');
+  const recentFile = (guildId) => path.join(guildDir(guildId), 'recent.json');
   const stateFile = path.join(dataDir, 'state.json');
 
   const stateEntry = entry(stateFile, () => ({}));
@@ -547,6 +563,43 @@ export function createStore({ dataDir }) {
     const { queue, removed } = forgetMember(item.value, userId, opts);
     if (removed === 0) return 0;
     item.value = queue;
+    item.dirty = true;
+    flushEntry(file, item);
+    return removed;
+  }
+
+  /** The cache entry of a guild's recent store, the empty store when there is no file, normalised
+   * in place of the cached value (src/memory/recent.js#normalizeRecent); never marked dirty by
+   * reading, so a healed hand edit is written only by the next change. On the read that loads the
+   * file, lines normalising leaves out (a hand edit, a file from another version) are logged as a
+   * count, `store: recent lines dropped`, and a value that is not a store (not an object, or
+   * `lines` not a list) as `store: recent store replaced`: the next write makes the loss
+   * permanent. An unparsable file reads as empty with `readJson`'s warning. */
+  function recentEntry(guildId) {
+    const file = recentFile(guildId);
+    const loading = !entries.has(file);
+    const item = entry(file, emptyRecent);
+    const raw = item.value;
+    item.value = normalizeRecent(raw);
+    if (loading && (!isPlainObject(raw) || !Array.isArray(raw.lines))) {
+      log.warn('store: recent store replaced', { guildId, reason: 'malformed' });
+    } else if (loading && raw.lines.length > item.value.lines.length) {
+      log.warn('store: recent lines dropped', { guildId, dropped: raw.lines.length - item.value.lines.length });
+    }
+    return item;
+  }
+
+  /** Take every recent line that names one member out of the guild's recent store
+   * (src/memory/recent.js#purgeRecentFor: their token, or one of `names` as a whole word) and
+   * write the file at once, like the files a forget deletes. No store -> nothing, no file
+   * created. Returns how many lines were removed. */
+  function forgetRecent(guildId, userId, names) {
+    const file = recentFile(guildId);
+    if (!entries.has(file) && !fs.existsSync(file)) return 0;
+    const item = recentEntry(guildId);
+    const { value, removed } = purgeRecentFor(item.value, userId, names);
+    if (removed === 0) return 0;
+    item.value = value;
     item.dirty = true;
     flushEntry(file, item);
     return removed;
@@ -767,14 +820,24 @@ export function createStore({ dataDir }) {
      * cache and disk alike: removing a person removes all of them -- the
      * guild's voice queue included: every item about them, public and private,
      * and every lesson they taught (src/memory/voice.js#forgetMember), the
-     * queue file rewritten at once. See also `wipeGuild` below.
+     * queue file rewritten at once -- and every recent line that names them (their
+     * token, or one of their stored names or aliases as a whole word, read from
+     * the profile before it goes; src/memory/recent.js#purgeRecentFor), the recent
+     * file rewritten at once. See also `wipeGuild` below.
+     * @param {string} guildId
+     * @param {string} userId
+     * @returns {{ recentRemoved: number }}  How many recent lines went.
      */
     forgetUser(guildId, userId) {
+      const profile = store.getUser(guildId, userId);
+      const names = [...(Array.isArray(profile?.names) ? profile.names : []), ...(profile?.aliases ?? []).map((alias) => alias?.name)];
+      const recentRemoved = forgetRecent(guildId, userId, names);
       const file = userFile(guildId, userId);
       entries.delete(file);
       fs.rmSync(file, { force: true });
       forgetQueued(guildId, userId);
       store.forgetPrivate(guildId, userId);
+      return { recentRemoved };
     },
 
     /**
@@ -1639,6 +1702,47 @@ export function createStore({ dataDir }) {
       return outcome;
     },
 
+    // ---- the recent store: short dated lines about the last days (src/memory/recent.js) ----
+
+    /**
+     * A copy of the guild's recent store (data/guilds/<id>/recent.json): `{ nextId, lines }`, the
+     * empty store when there is no file. Normalised on read (src/memory/recent.js#normalizeRecent),
+     * persisted only by the next change; reading never creates the file and never expires a line
+     * (src/memory/recent.js#liveRecent is the view by time). Changing the copy changes nothing
+     * stored: a change goes through `applyRecentOps`.
+     * @param {string} guildId
+     * @returns {{ nextId: number, lines: Array<{ id: number, at: number, addedAt: string|null,
+     *   channelId: string, text: string, who: string[], weight: number }> }}
+     */
+    getRecent(guildId) {
+      return structuredClone(recentEntry(guildId).value);
+    },
+
+    /**
+     * One write of the guild's recent store, synchronous: expiry, the removes by id, then the new
+     * lines with dedupe and both caps (src/memory/recent.js#mergeRecent, which documents every
+     * option and count). Marked dirty only when a stored line was added, removed, expired or
+     * evicted, so a call that changes nothing creates or rewrites no file. The settings are the
+     * caller's, read at the moment of use (src/memory/recent.js#recentSettings); a lowered `hours`
+     * expires the older lines here, at the first write after the change.
+     * @param {string} guildId
+     * @param {unknown} incoming  `{ text, at, channelId, weight }` items, untrusted.
+     * @param {{ now?: number, hours?: number, maxStored?: number, maxNew?: number, chars?: number,
+     *   clampTolerance?: number, removeIds?: unknown[] }} [opts]
+     * @returns {{ added: number, removed: number, expired: number, evicted: number, dropped: number,
+     *   invalid: number, noChannel: number, stale: number, duplicate: number, overCap: number }}
+     *   `dropped` is the sum of the five reasons after it.
+     */
+    applyRecentOps(guildId, incoming, opts = {}) {
+      const item = recentEntry(guildId);
+      const { value, ...counts } = mergeRecent(item.value, incoming, opts);
+      if (counts.added + counts.removed + counts.expired + counts.evicted > 0) {
+        item.value = value;
+        item.dirty = true;
+      }
+      return counts;
+    },
+
     /**
      * A deliberate, owner-only clean start for one guild's memory (see
      * src/admin.js `/nep memory wipe`). Together with `forgetUser`,
@@ -1649,7 +1753,7 @@ export function createStore({ dataDir }) {
      * patterns, starters, in-jokes, self facts, `learned`, `emojiUsage`, the
      * `emojiBackfill` stamp, `ownLines` and the variety pass's `worn` /
      * `wornHistory` -- every channel entry, the live observation buffer, the
-     * voice queue (`voice.json`), and
+     * voice queue (`voice.json`), the recent store (`recent.json`), and
      * lorebook entries whose `source` is `'analyzer'` (every entry, owner
      * included, when `keepOwnerLore` is false). Keeps, by default, owner lore
      * (`source: 'owner'`) and the media description cache, and always the GIF
@@ -1662,7 +1766,8 @@ export function createStore({ dataDir }) {
      * `touchUser`/`getGuild` works and persists), no restart required.
      * @param {string} guildId
      * @param {{ keepOwnerLore?: boolean, keepMediaCache?: boolean }} [opts]
-     * @returns {{ users: number, channels: number, loreRemoved: number, loreKept: number, bufferMessages: number }}
+     * @returns {{ users: number, channels: number, loreRemoved: number, loreKept: number, bufferMessages: number,
+     *   recentLines: number }}  `recentLines`: the recent lines the wipe removed.
      */
     wipeGuild(guildId, { keepOwnerLore = true, keepMediaCache = true } = {}) {
       const userIds = idsUnder(usersDir(guildId));
@@ -1705,6 +1810,11 @@ export function createStore({ dataDir }) {
         fs.rmSync(file, { force: true });
       }
 
+      const recentFileName = recentFile(guildId);
+      const recentLines = recentEntry(guildId).value.lines.length;
+      entries.delete(recentFileName);
+      fs.rmSync(recentFileName, { force: true });
+
       const loreItem = entry(loreFile(guildId), () => []);
       const storedLore = loreItem.value;
       const keptLore = keepOwnerLore ? storedLore.filter((e) => e.source === 'owner') : [];
@@ -1730,7 +1840,7 @@ export function createStore({ dataDir }) {
 
       flushAll();
 
-      return { users: userIds.length, channels: channelIds.length, loreRemoved, loreKept, bufferMessages };
+      return { users: userIds.length, channels: channelIds.length, loreRemoved, loreKept, bufferMessages, recentLines };
     },
 
     flush() {

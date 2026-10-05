@@ -1334,7 +1334,7 @@ test('wipeGuild: removes profiles, guild memory, channels, buffer and analyzer l
   storeA.flush();
 
   const counts = storeA.wipeGuild('g1');
-  assert.deepEqual(counts, { users: 2, channels: 2, loreRemoved: 1, loreKept: 1, bufferMessages: 2 });
+  assert.deepEqual(counts, { users: 2, channels: 2, loreRemoved: 1, loreKept: 1, bufferMessages: 2, recentLines: 0 });
 
   // cache is immediately usable
   assert.equal(storeA.getUser('g1', 'u1'), null);
@@ -1388,7 +1388,7 @@ test('wipeGuild: safe when nothing was ever stored for the guild', () => {
   const dir = tmpDataDir();
   const store = createStore({ dataDir: dir });
   const counts = store.wipeGuild('never-seen');
-  assert.deepEqual(counts, { users: 0, channels: 0, loreRemoved: 0, loreKept: 0, bufferMessages: 0 });
+  assert.deepEqual(counts, { users: 0, channels: 0, loreRemoved: 0, loreKept: 0, bufferMessages: 0, recentLines: 0 });
   assert.doesNotThrow(() => store.touchUser('never-seen', 'u1', 'Dee', 1000));
 });
 
@@ -1936,7 +1936,7 @@ test('wipeGuild: removes the private directory, cache and disk, leaves other gui
   store.applyPrivateOps('g2', 'u9', {});
 
   const counts = store.wipeGuild('g1');
-  assert.deepEqual(counts, { users: 2, channels: 2, loreRemoved: 1, loreKept: 1, bufferMessages: 2 });
+  assert.deepEqual(counts, { users: 2, channels: 2, loreRemoved: 1, loreKept: 1, bufferMessages: 2, recentLines: 0 });
   assert.equal(fs.existsSync(path.join(dir, 'guilds', 'g1', 'private')), false);
   assert.equal(store.getPrivate('g1', 'u1'), null);
   assert.equal(store.getPrivate('g1', 'u2'), null);
@@ -2790,4 +2790,159 @@ test('voice writes: a reason and a feeling land on what stage A stored, and appl
   assert.equal(once.affinity.reason, 'με βοήθησε');
   assert.deepEqual(once.episodes.map((ep) => ep.feeling), ['χάρηκα']);
   assert.deepEqual(store.getVoiceQueue('g1'), []);
+});
+
+// --- the recent store (data/guilds/<id>/recent.json, src/memory/recent.js) ------
+
+const RECENT_NOW = Date.UTC(2026, 9, 5, 12, 0, 0);
+const RECENT_HOUR = 60 * 60 * 1000;
+const AGORA = '900000000000000001';
+
+function recentFileOf(dir, guildId) {
+  return path.join(dir, 'guilds', guildId, 'recent.json');
+}
+
+function recentAdd(text, fields = {}) {
+  return { text, at: RECENT_NOW - RECENT_HOUR, channelId: AGORA, ...fields };
+}
+
+const recentTexts = (store, guildId) => store.getRecent(guildId).lines.map((line) => line.text);
+
+/** applyRecentOps' counts: zero for every reason unless `fields` says otherwise; `dropped` their sum. */
+function recentCounts(fields = {}) {
+  const base = { added: 0, removed: 0, expired: 0, evicted: 0, invalid: 0, noChannel: 0, stale: 0, duplicate: 0, overCap: 0, ...fields };
+  return { ...base, dropped: base.invalid + base.noChannel + base.stale + base.duplicate + base.overCap };
+}
+
+test('store: getRecent on a fresh guild creates no file, nor does a write that changes nothing', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  assert.deepEqual(store.getRecent('g1'), { nextId: 1, lines: [] });
+  assert.deepEqual(store.applyRecentOps('g1', [], { now: RECENT_NOW }), recentCounts());
+  assert.deepEqual(store.applyRecentOps('g1', [{ text: 'χωρίς κανάλι' }], { now: RECENT_NOW }), recentCounts({ noChannel: 1 }));
+  assert.deepEqual(store.applyRecentOps('g1', [recentAdd('δεν χωρά')], { now: RECENT_NOW, maxStored: 0 }), recentCounts({ overCap: 1 }));
+  store.flush();
+  assert.equal(fs.existsSync(recentFileOf(dir, 'g1')), false);
+});
+
+test('store: recent lines are written atomically, survive a restart and read back normalised', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  const counts = store.applyRecentOps('g1', [recentAdd(`<@${ELENI}> έφερε σύκα`, { weight: 3 }), recentAdd('βράδυ με βροχή')], { now: RECENT_NOW });
+  assert.deepEqual(counts, recentCounts({ added: 2 }));
+  store.flush();
+
+  const file = recentFileOf(dir, 'g1');
+  assert.deepEqual(fs.readdirSync(path.dirname(file)).filter((name) => name.startsWith('recent')), ['recent.json'], 'no temp file left behind');
+  const restarted = createStore({ dataDir: dir });
+  assert.deepEqual(restarted.getRecent('g1'), {
+    nextId: 3,
+    lines: [
+      { id: 1, at: RECENT_NOW - RECENT_HOUR, addedAt: new Date(RECENT_NOW).toISOString(), channelId: AGORA, text: `<@${ELENI}> έφερε σύκα`, who: [ELENI], weight: 3 },
+      { id: 2, at: RECENT_NOW - RECENT_HOUR, addedAt: new Date(RECENT_NOW).toISOString(), channelId: AGORA, text: 'βράδυ με βροχή', who: [], weight: 2 },
+    ],
+  });
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')), restarted.getRecent('g1'));
+});
+
+test('store: getRecent returns a copy; only applyRecentOps writes', () => {
+  const store = createStore({ dataDir: tmpDataDir() });
+  store.applyRecentOps('g1', [recentAdd('μία')], { now: RECENT_NOW });
+  const copy = store.getRecent('g1');
+  copy.lines.push({ id: 9 });
+  copy.lines[0].text = 'άλλη';
+  assert.deepEqual(recentTexts(store, 'g1'), ['μία']);
+});
+
+test('store: applyRecentOps marks the file dirty only when a line was added, removed or expired', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  store.applyRecentOps('g1', [recentAdd('μία'), recentAdd('δύο')], { now: RECENT_NOW });
+  store.flush();
+  const file = recentFileOf(dir, 'g1');
+  const raw = fs.readFileSync(file, 'utf8');
+
+  assert.deepEqual(
+    store.applyRecentOps('g1', [recentAdd('ΜΙΑ'), recentAdd('τρία', { channelId: null })], { now: RECENT_NOW, removeIds: [7] }),
+    recentCounts({ duplicate: 1, noChannel: 1 }),
+  );
+  store.flush();
+  assert.equal(fs.readFileSync(file, 'utf8'), raw);
+
+  assert.equal(store.applyRecentOps('g1', [], { now: RECENT_NOW, removeIds: [1] }).removed, 1);
+  store.flush();
+  assert.deepEqual(recentTexts(createStore({ dataDir: dir }), 'g1'), ['δύο']);
+
+  // a lowered cap and a new line it takes at once: nothing added, yet stored lines were evicted
+  store.applyRecentOps('g1', [recentAdd('τρία'), recentAdd('τέσσερα')], { now: RECENT_NOW });
+  store.flush();
+  assert.deepEqual(
+    store.applyRecentOps('g1', [recentAdd('ελαφριά', { weight: 1 })], { now: RECENT_NOW, maxStored: 1 }),
+    recentCounts({ evicted: 2, overCap: 1 }),
+  );
+  store.flush();
+  assert.deepEqual(recentTexts(createStore({ dataDir: dir }), 'g1'), ['τέσσερα'], 'written: the evictions alone mark the file dirty');
+});
+
+test('store: forgetUser drops the member\'s recent lines with the profile', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  store.touchUser('g1', ELENI, 'Ελένη', 1000);
+  store.applyProfileOps('g1', ELENI, { aliases: { add: ['Λενιώ'] } }, { maxAliases: 5, maxAliasesStored: 15, now: 1000 });
+  store.applyRecentOps(
+    'g1',
+    [recentAdd(`<@${ELENI}> χάρισε ένα κοχύλι`), recentAdd('η ελενη άργησε'), recentAdd('η Λενιώ τραγούδησε'), recentAdd(`<@${NIKOS}> έφτιαξε τσάι`)],
+    { now: RECENT_NOW, maxNew: 10 },
+  );
+  store.applyRecentOps('g2', [recentAdd(`<@${ELENI}> σε άλλο σπίτι`)], { now: RECENT_NOW });
+  store.flush();
+
+  assert.deepEqual(store.forgetUser('g1', ELENI), { recentRemoved: 3 });
+  assert.equal(store.getUser('g1', ELENI), null);
+  assert.deepEqual(recentTexts(store, 'g1'), [`<@${NIKOS}> έφτιαξε τσάι`]);
+  assert.deepEqual(recentTexts(createStore({ dataDir: dir }), 'g1'), [`<@${NIKOS}> έφτιαξε τσάι`], 'on disk at once, no flush needed');
+  assert.deepEqual(recentTexts(store, 'g2'), [`<@${ELENI}> σε άλλο σπίτι`], 'another guild is not touched');
+
+  assert.deepEqual(store.forgetUser('g1', ELENI), { recentRemoved: 0 }, 'a second forget finds nothing');
+  assert.deepEqual(store.forgetUser('g3', ELENI), { recentRemoved: 0 });
+  store.flush();
+  assert.equal(fs.existsSync(recentFileOf(dir, 'g3')), false, 'a forget creates no recent file');
+});
+
+test('store: wipeGuild removes recent.json', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  store.applyRecentOps('g1', [recentAdd('μία'), recentAdd('δύο')], { now: RECENT_NOW });
+  store.applyRecentOps('g2', [recentAdd('τρία')], { now: RECENT_NOW });
+  store.flush();
+  store.applyRecentOps('g1', [recentAdd('μόνο στη μνήμη')], { now: RECENT_NOW }); // cached, never flushed
+
+  assert.equal(store.wipeGuild('g1').recentLines, 3);
+  assert.equal(fs.existsSync(recentFileOf(dir, 'g1')), false);
+  assert.deepEqual(store.getRecent('g1'), { nextId: 1, lines: [] });
+  store.flush();
+  assert.equal(fs.existsSync(recentFileOf(dir, 'g1')), false, 'a wiped store is not written back');
+  assert.deepEqual(recentTexts(createStore({ dataDir: dir }), 'g2'), ['τρία'], 'another guild keeps its lines');
+});
+
+test('store: recent lines survive a pause and a restart; nothing but a write, a forget or a wipe takes them', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  store.touchUser('g1', NIKOS, 'Νίκος', 1000);
+  store.applyRecentOps('g1', [recentAdd('μία'), recentAdd('δύο', { at: RECENT_NOW - 70 * RECENT_HOUR })], { now: RECENT_NOW });
+  store.flush();
+
+  store.dropCaches(); // /nep pause
+  assert.deepEqual(recentTexts(store, 'g1'), ['μία', 'δύο']);
+  store.reloadState(); // /nep resume
+  store.forgetPrivate('g1', NIKOS);
+  store.wipeGuild('g2');
+  store.decayAffinities('g1', RECENT_NOW + 200 * RECENT_HOUR, { decayPerDay: 0.04, decayPower: 1 });
+  store.removeLore('g1', 'κανένα');
+  store.shiftBuffer('g1', []);
+  store.updateGuild('g1', { patterns: 'ήσυχα' });
+  store.flush();
+
+  const restarted = createStore({ dataDir: dir });
+  assert.deepEqual(recentTexts(restarted, 'g1'), ['μία', 'δύο'], 'long past the window, still stored until a write');
 });
