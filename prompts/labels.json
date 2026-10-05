@@ -74,6 +74,8 @@
     "linksRead": "A link may come with a read excerpt — first-hand, you read that part of the page yourself, but nothing beyond it.",
     "search": "A search either ran before your reply or did not happen at all. A <lookup> block is what you found online, first-hand. No block means no search happened; never say you searched, are searching, or will search, and never invent results. Answer from what you know or say you did not look it up.",
     "files": "Text files show their beginning; other files show only a name.",
+    "channels": "You see only the channels shown in this request: the chat, any other channels, any channel view. Everything else you know only from the server map. Never claim you saw a channel not shown here, and never claim you cannot see one that is shown.",
+    "elsewhere": "A channel marked read-only you can read and react in, but not write in. If someone calls you there, or you see something worth commenting on, you say it in #{destination} with a link back. A reaction you put on a line there goes through.",
     "stickerSee": "A sticker marked as attached you see yourself.",
     "stickerDescribed": "Stickers and custom emoji come with a short description from a helper.",
     "stickerBlind": "Stickers and custom emoji appear as a name — you cannot see what they depict.",
@@ -167,6 +169,7 @@
     "tone": "Tone: {text}",
     "lastMessage": "Last message: {when}",
     "topWriters": "Top writers: {names}",
+    "readOnly": "You can read and react here, but not write.",
     "activity": "Activity: {activity}",
     "activityLive": "active",
     "activitySlow": "slow",
@@ -220,5 +223,21 @@
   },
   "address": {
     "author": "{name}, also called: {aliases}"
+  },
+  "pull": {
+    "header": "Messages from #{channel}, {from} to {to} (last one {ago} ago):",
+    "olderNotShown": "(older messages exist but are not shown)",
+    "picturesNotSeen": "({count} pictures here were not seen)",
+    "earlierPings": "Earlier calls to you in this channel, from {date}:",
+    "pingAnswered": "[called you, answered]",
+    "pingUnanswered": "[called you, unanswered]",
+    "pingSkipped": "[called you, you let it pass]"
+  },
+  "elsewhere": {
+    "called": "This call came from #{channel}, where you cannot write. Your answer goes to #{destination} with a link to the call. A reaction you put on a #{channel} line lands there.",
+    "link": "{text}\n{link}"
+  },
+  "room": {
+    "focus": "Message {target} by {author} is for everyone in the room. Pick it up or let it pass."
   }
 }
