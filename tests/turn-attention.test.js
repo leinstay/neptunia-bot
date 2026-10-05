@@ -106,6 +106,7 @@ function fakeHot(configOverrides = {}) {
       typing: { reactionDelayMs: [0, 0], msPerChar: [1, 1], minMs: 0, maxMs: 100, betweenMessagesMs: [0, 0] },
       features: {},
       media: { maxPerTurn: 6, filePreviewChars: 500 },
+      mention: { oneAtATime: true },
       ...configOverrides,
     },
     prompts: {
@@ -162,7 +163,7 @@ async function waitForCalls(llm, count) {
 // ---------------------------------------------------------------------------
 // isAnyBusy() / busy-elsewhere refusal (mention.oneAtATime)
 
-test('createTurnRunner: a turn in another channel is refused as busy while one is running (oneAtATime default true)', async () => {
+test('createTurnRunner: a turn in another channel is refused as busy while one is running (mention.oneAtATime on)', async () => {
   const raw1 = rawMessage({ id: 'm1' });
   const channel1 = fakeTurnChannel({ id: 'c1', historyMessages: [raw1] });
   const raw2 = rawMessage({ id: 'm2', authorId: 'u2' });
@@ -238,7 +239,7 @@ test('createTurnRunner: a hot change to mention.oneAtATime is picked up without 
 
   const firstPromise = turns.runTurn({ channel: channel1, mode: 'reply', trigger: normalizedTrigger(raw1), triggerKind: 'mention' });
   const busyResult = await turns.runTurn({ channel: channel2, mode: 'reply', trigger: normalizedTrigger(raw2), triggerKind: 'mention' });
-  assert.equal(busyResult.outcome, 'busy', 'oneAtATime true (default): channel2 is refused');
+  assert.equal(busyResult.outcome, 'busy', 'oneAtATime true: channel2 is refused');
 
   hot.config.mention = { oneAtATime: false };
   const secondPromise = turns.runTurn({ channel: channel2, mode: 'reply', trigger: normalizedTrigger(raw2), triggerKind: 'mention' });
