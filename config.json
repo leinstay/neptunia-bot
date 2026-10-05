@@ -27,6 +27,7 @@
     "mentor": false,
     "variety": true,
     "varietyPrecompute": true,
+    "promptCache": false,
     "typingSimulation": true,
     "adminCommands": true
   },
@@ -52,7 +53,8 @@
     "retries": 2,
     "maxRequestsPerDay": 300,
     "provider": null,
-    "providerByModel": {}
+    "providerByModel": {},
+    "cache": { "ttl": "1h", "roles": ["talk"], "models": ["anthropic/"], "promptIncludesCached": true }
   },
   "classifier": {
     "text": "anthropic/claude-sonnet-4.6",
