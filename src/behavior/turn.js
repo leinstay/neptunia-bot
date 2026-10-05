@@ -23,7 +23,7 @@ import {
   withTextPreviews,
 } from '../discord/collect.js';
 import { audienceAllows, captionPulled, checkPull, fetchPull } from '../discord/pull-fetch.js';
-import { buildDrawPrompt, buildRequest, fillPromptTemplate } from './prompt.js';
+import { buildDrawPrompt, buildRequest, classifierTranscript, fillPromptTemplate } from './prompt.js';
 import { channelPullOn, pullSettings, pullTargets } from './pull.js';
 import { audienceCovers, markSeen, messageLink, resolveDestination, stampPings } from './elsewhere.js';
 import { classifierTextModel } from './mention.js';
@@ -44,13 +44,13 @@ import {
 } from '../discord/media.js';
 import { avatarReference, createImageFetcher } from '../discord/fetch-image.js';
 import { renderCustomEmoji, resolveReactionEmoji } from '../discord/emoji.js';
-import { fill, formatTranscript, renderTranscript } from '../discord/format.js';
+import { fill } from '../discord/format.js';
 import { log } from '../log.js';
 import { clampChars, oneLine } from '../memory/clamp.js';
 import { gifPostsToday } from '../memory/gif-watch.js';
 import { liveRecent, recentSettings } from '../memory/recent.js';
 import { isVideoVisionOn } from '../memory/youtube-check.js';
-import { bumpDaily, utcDay } from '../time.js';
+import { bumpDaily, utcDay, zonedDay } from '../time.js';
 import { isPlainObject } from '../config.js';
 
 /**
@@ -564,6 +564,27 @@ export function usableDestination(guild, config, { exceptId = null } = {}) {
   };
   const { destinationId, reason } = resolveDestination(config, usable);
   return destinationId ? { channel: channelOf(destinationId), reason: null } : { channel: null, reason };
+}
+
+/**
+ * Where the persona's words about `source` (a channel the bot cannot send
+ * in) go, read from `config` (the live config) now: `{ destination, reason:
+ * null }` with the discord.js channel, or `{ destination: null, reason }`
+ * with the code logged as `route`: `off` (features.elsewhere false),
+ * `no-destination` (no usable memory.mainChannelIds entry other than the
+ * source, `usableDestination`) or `audience` (someone who
+ * can view the destination cannot view the source,
+ * src/discord/pull-fetch.js#audienceAllows). The one copy of the route of a
+ * routed call and of a noticed comment.
+ * @param {object} source  A discord.js guild channel.
+ * @param {object} config  The live config.
+ * @returns {{ destination: object, reason: null } | { destination: null, reason: 'off'|'no-destination'|'audience' }}
+ */
+export function routeFor(source, config) {
+  const { channel: destination, reason } = usableDestination(source.guild, config, { exceptId: source.id });
+  if (!destination) return { destination: null, reason };
+  if (!audienceAllows(destination, source, config)) return { destination: null, reason: 'audience' };
+  return { destination, reason: null };
 }
 
 /**
@@ -1227,8 +1248,8 @@ export function createTurnRunner({
   /**
    * The `<transcript>` block of a classifier request (re-watch, search): the
    * last `contextMessages` messages of `history` before the trigger, rendered
-   * like the address classifier's context (src/discord/events.js) with the
-   * media states this turn already has, plus the trigger's text cut to
+   * by src/behavior/prompt.js#classifierTranscript (as the route classifier's)
+   * with the media states this turn already has, plus the trigger's text cut to
    * `context.maxMessageChars`. `transcriptBlock` is '' (no block) for a
    * window of 0 or no earlier message.
    * @returns {{ triggerText: string, transcriptBlock: string }}
@@ -1237,20 +1258,8 @@ export function createTurnRunner({
     const triggerText = [...String(trigger.content ?? '')].slice(0, config.context?.maxMessageChars ?? 800).join('');
     const context = contextMessages > 0 ? history.filter((m) => m.id !== trigger.id).slice(-contextMessages) : [];
     if (context.length === 0) return { triggerText, transcriptBlock: '' };
-    const labels = hot.prompts.labels;
-    const items = formatTranscript(context, {
-      timezone: config.bot.timezone,
-      gapMinutes: config.context.gapMarkerMinutes,
-      maxChars: config.context.maxMessageChars,
-      selfName,
-      labels,
-      seeReactions: config.features?.seeReactions !== false,
-      reactionsPerMessage: config.context.reactionsPerMessage,
-      descriptions,
-      videos,
-      reads,
-    });
-    return { triggerText, transcriptBlock: `<transcript>\n${renderTranscript(items, config.bot.timezone, labels)}\n</transcript>\n` };
+    const body = classifierTranscript(context, { config, selfName, labels: hot.prompts.labels, descriptions, videos, reads });
+    return { triggerText, transcriptBlock: `<transcript>\n${body}\n</transcript>\n` };
   }
 
   /**
@@ -1416,8 +1425,9 @@ export function createTurnRunner({
    * web.search.enabled, a lookup with `search`) and the search of the
    * server's own history (`serverOn`: recall wired and available, a server
    * turn). One cheap classifier call (prompts.lookup, `{{name}}` = the
-   * persona's display name, `{{today}}` = the injected clock's UTC date
-   * `YYYY-MM-DD`, on classifierTextModel, its answer capped at
+   * persona's display name, `{{today}}` = the injected clock's date
+   * `YYYY-MM-DD` in `bot.timezone`, the zone its `when:` range is read in;
+   * on classifierTextModel, its answer capped at
    * `web.search.classifierMaxOutputTokens`) reads the last
    * `web.search.contextMessages` messages of `history` before the trigger
    * (with the pictures' captions, the video states and the read links this
@@ -1481,7 +1491,7 @@ export function createTurnRunner({
     try {
       completion = await llm.complete(
         [
-          { role: 'system', content: fillPromptTemplate(prompt, { today: todayDate(), name: selfName ?? '' }) },
+          { role: 'system', content: fillPromptTemplate(prompt, { today: zonedDay(clock(), config.bot?.timezone), name: selfName ?? '' }) },
           { role: 'user', content: user },
         ],
         { model, ...helperRequestOptions(config, { role: 'classifier.text', maxOutputTokens: searchCfg.classifierMaxOutputTokens ?? 200, purpose: 'lookup' }) },

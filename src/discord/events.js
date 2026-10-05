@@ -37,7 +37,8 @@ import { topByRank } from '../memory/ranking.js';
 import { addPending, isExpired, popOldest, requeuePending } from '../behavior/pending.js';
 import { between } from '../behavior/random.js';
 import { fillPromptTemplate } from '../behavior/prompt.js';
-import { routeFor, roomQuestionChance } from '../behavior/spontaneous.js';
+import { roomQuestionChance } from '../behavior/spontaneous.js';
+import { routeFor } from '../behavior/turn.js';
 import { elsewhereSettings, pingsIn, pingStatus, recordPing, settleDueAt, stampPings } from '../behavior/elsewhere.js';
 import { privateGate } from '../behavior/private.js';
 import { isLimitNotice, pauseNotice, pauseNoticeMinutes, postLimitNotice, postPauseNotice } from '../behavior/limits.js';
@@ -1545,7 +1546,7 @@ export function createMessageHandler({
   // usable (the first usable id of memory.mainChannelIds,
   // src/behavior/turn.js#usableDestination) and everyone who can view it can
   // view the source too (the audience rail, context.pull.sameAudience;
-  // src/behavior/spontaneous.js#routeFor), the
+  // src/behavior/turn.js#routeFor), the
   // call is recorded in the ring (state.json `elsewherePings`: ids and a time,
   // no author, no text) and a settle wait is armed for the source: one timer
   // per source, never a busy mark, so the one attention stays free while it

@@ -2955,9 +2955,9 @@ function clockOf(ts) {
   return { date: formatDate(ts, TZ, labels.locale), time: formatClock(ts, TZ, labels.locale) };
 }
 
-/** `{date}` of a moment dated `date` (it sits at noon UTC of that day). */
+/** `{date}` of a moment dated `date`: that calendar day in the transcript's date form. */
 function momentDate(date) {
-  return formatDate(Date.parse(`${date}T12:00:00Z`), TZ, labels.locale);
+  return formatDate(Date.parse(`${date}T12:00:00Z`), 'UTC', labels.locale);
 }
 
 /** The recent header for the window the base config pins (memory.recentHours). */
@@ -3085,6 +3085,16 @@ test('recent view: kept items render oldest first', () => {
     fill(labels.recent.line, { ...clockOf(NOW - 5 * HOUR), text: 'δεύτερη' }),
     fill(labels.recent.line, { ...clockOf(NOW - 2 * HOUR), text: 'τρίτη' }),
   ]);
+});
+
+test('recent view: a moment shows its stored date in a zone far ahead of UTC', () => {
+  // NOW is 00:00 on 21 Sep in Kiritimati (UTC+14): noon UTC of the 19th is already the 20th there.
+  const nikos = { id: NIKOS_ID, names: ['Nikos'], episodes: [recentMoment('η στιγμή του Nikos', { date: '2026-09-19' })] };
+  const input = recentScene({ candidateProfiles: [nikos] });
+  const body = recentOf(buildRequest({ ...input, config: { ...input.config, bot: { timezone: 'Pacific/Kiritimati' } } }));
+  const nineteenth = formatDate(Date.UTC(2026, 8, 19, 12), 'Europe/Moscow', labels.locale);
+  assert.notEqual(nineteenth, formatDate(Date.UTC(2026, 8, 19, 12), 'Pacific/Kiritimati', labels.locale), 'the zone would move the day');
+  assert.deepEqual(body.split('\n'), [RECENT_HEADER, fill(labels.recent.episode, { date: nineteenth, name: 'Nikos', what: 'η στιγμή του Nikos' })]);
 });
 
 test("recent view: the interlocutor's own episodes are left out", () => {

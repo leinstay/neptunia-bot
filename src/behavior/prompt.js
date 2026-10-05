@@ -29,8 +29,7 @@
 // (src/behavior/private.js). Pictures of another channel are shown as
 // captions only: nothing outside the turn's own channel is ever attached.
 
-import { fitSections } from '../llm/budget.js';
-import { estimateTokens } from '../llm/tokens.js';
+import { fitSections, requestTokenLimit, sectionCost } from '../llm/budget.js';
 import {
   computeTempo,
   fill,
@@ -684,6 +683,38 @@ export function fillPromptTemplate(template, values) {
 }
 
 /**
+ * The transcript body of a helper classifier's `<transcript>` block (the
+ * route classifier, src/behavior/route.js#routeContext; the re-watch and
+ * lookup classifiers, src/behavior/turn.js#classifierContext): `messages`
+ * (already chosen by the caller, oldest first) rendered as the chat renders
+ * them (src/discord/format.js) under the live `config` -- `bot.timezone`,
+ * `context.gapMarkerMinutes`, `context.maxMessageChars` (800, config.json's
+ * value, when missing), `features.seeReactions`, `context.reactionsPerMessage`
+ * -- with the media states the caller already has (`descriptions`, `videos`,
+ * `reads`; each optional). The one copy of these options for the classifiers;
+ * the caller wraps the body. Pure.
+ * @param {object[]} messages
+ * @param {{ config: object, selfName: string, labels: object, descriptions?: Map<string, unknown>,
+ *   videos?: Map<string, unknown>, reads?: Map<string, unknown> }} params
+ * @returns {string}
+ */
+export function classifierTranscript(messages, { config, selfName, labels, descriptions, videos, reads }) {
+  const items = formatTranscript(messages, {
+    timezone: config.bot?.timezone,
+    gapMinutes: config.context?.gapMarkerMinutes,
+    maxChars: config.context?.maxMessageChars ?? 800,
+    selfName,
+    labels,
+    seeReactions: config.features?.seeReactions !== false,
+    reactionsPerMessage: config.context?.reactionsPerMessage,
+    descriptions,
+    videos,
+    reads,
+  });
+  return renderTranscript(items, config.bot?.timezone, labels);
+}
+
+/**
  * The drawing sub-process's prompt (prompts/draw.md): `{{name}}` and
  * `{{request}}` filled, `{{appearance}}` filled with prompts/appearance.md
  * (its own `{{name}}` filled) for a picture the persona is in, else blanked;
@@ -1075,9 +1106,11 @@ function splitPeople(
  * a moment through `labels.recent.episode` (`{date}` `{name}` `{what}`) --
  * the caller offers none without that label -- left out and counted
  * (`unnamed`) when the member has no name (`nameOf` gives none and the profile
- * stores none). `{date}` and `{time}` are the transcript's own forms of the
- * item's time; every stored `<@id>` token becomes the member's name
- * (`nameOf`). No quote and no feeling: a moment is named, not replayed.
+ * stores none). A line's `{date}` and `{time}` are the transcript's own forms
+ * of its time; a moment's `{date}` is its stored `YYYY-MM-DD` (the day it
+ * happened) in the transcript's date form, never its `at` moved through a time
+ * zone. Every stored `<@id>` token becomes the member's name (`nameOf`). No
+ * quote and no feeling: a moment is named, not replayed.
  * @returns {{ entries: { kind: 'line'|'episode', at: number, text: string }[], unnamed: number }}
  */
 function recentEntries(items, { labels, timezone, currentChannelId, channels, nameOf }) {
@@ -1088,8 +1121,8 @@ function recentEntries(items, { labels, timezone, currentChannelId, channels, na
   const entries = [];
   let unnamed = 0;
   for (const item of items) {
-    const date = formatDate(item.at, timezone, labels.locale);
     if (item.kind === 'line') {
+      const date = formatDate(item.at, timezone, labels.locale);
       const text = resolveChatText(item.line.text, nameOf);
       const time = formatClock(item.at, timezone, labels.locale);
       const channel = item.line.channelId !== currentChannelId ? channelNames.get(item.line.channelId) : undefined;
@@ -1103,9 +1136,16 @@ function recentEntries(items, { labels, timezone, currentChannelId, channels, na
       unnamed += 1;
       continue;
     }
+    const date = calendarDate(item.episode.date, labels.locale);
     entries.push({ kind: 'episode', at: item.at, text: fill(r.episode, { date, name, what: resolveChatText(item.episode.what, nameOf) }) });
   }
   return { entries, unnamed };
+}
+
+/** A stored `YYYY-MM-DD` in the transcript's date form (`formatDate`), read as that calendar day:
+ * its noon formatted in UTC, so no zone moves it to a neighbouring day. */
+function calendarDate(ymd, locale) {
+  return formatDate(Date.parse(`${ymd}T12:00:00.000Z`), 'UTC', locale);
 }
 
 /**
@@ -1619,11 +1659,8 @@ export function buildRequest(input) {
   ]);
 
   const caps = config.context.caps;
-  const cost = (text) => calibrator.apply(estimateTokens(text)) + 2;
-  const limit =
-    Math.floor(config.llm.maxRequestTokens * (Number.isFinite(config.llm.safetyMargin) && config.llm.safetyMargin > 0 && config.llm.safetyMargin <= 1 ? config.llm.safetyMargin : 0.9)) -
-    pictures.length * (visionCfg.tokensPerImage ?? 400) -
-    TAG_OVERHEAD;
+  const cost = sectionCost(calibrator);
+  const limit = requestTokenLimit(config) - pictures.length * (visionCfg.tokensPerImage ?? 400) - TAG_OVERHEAD;
 
   const episodesOpt = { enabled: episodesOn, cap: caps.interlocutor, cost };
   const interlocutorShown = renderProfileShown(interlocutor, labels, {

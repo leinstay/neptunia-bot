@@ -1890,13 +1890,15 @@ test('createTurnRunner: lookup -- the classifier answer cap is web.search.classi
   assert.equal(set.llm.classifierCalls[0].options.maxOutputTokens, 45);
 });
 
-test('createTurnRunner: lookup -- {{today}} in the classifier prompt is the injected clock\'s UTC date, {{name}} still filled', async () => {
+test('createTurnRunner: lookup -- {{today}} in the classifier prompt is the injected clock\'s date in bot.timezone, {{name}} still filled', async () => {
   const hot = lookupHot();
   hot.prompts.lookup = 'Decide whether {{name}} needs to look something up. Today is {{today}}; {{name}} again.';
   const llm = lookupLlm('none');
-  // 23:30 UTC on the last day of the year: the UTC date, not a local one.
+  // 23:30 UTC on the last day of the year is already New Year's Day in Tokyo (UTC+9),
+  // the zone the answer's `when:` range is read in.
+  hot.config.bot.timezone = 'Asia/Tokyo';
   await runLookupTurn({ hot, llm, now: () => Date.UTC(2031, 11, 31, 23, 30, 0) });
-  assert.equal(llm.classifierCalls[0].messages[0].content, 'Decide whether Bot needs to look something up. Today is 2031-12-31; Bot again.');
+  assert.equal(llm.classifierCalls[0].messages[0].content, 'Decide whether Bot needs to look something up. Today is 2032-01-01; Bot again.');
 });
 
 test('createTurnRunner: lookup -- a classifier prompt without {{today}} passes through unchanged apart from {{name}}', async () => {

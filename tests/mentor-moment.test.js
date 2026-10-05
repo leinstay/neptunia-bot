@@ -175,6 +175,27 @@ test('momentView: affinity history entries at or after the cutoff are hidden; th
   assert.equal(later.history.length, 3);
 });
 
+test('momentView: the restored reason looks past kept entries whose reason is empty', () => {
+  const { view } = baseView();
+  // A two-stage move before the cutoff whose reason was never worded: its entry has none.
+  const profile = {
+    ...alice(),
+    affinity: {
+      score: 14,
+      reason: 'R3 after the argument',
+      history: [
+        { ts: EARLIER, delta: 5, appliedDelta: 5, score: 5, reason: 'R1' },
+        { ts: BEFORE, delta: 4, appliedDelta: 4, score: 9, reason: '' },
+        { ts: AFTER, delta: 5, appliedDelta: 5, score: 14, reason: 'R3 after the argument' },
+      ],
+    },
+  };
+  const moment = momentView({ ...view, memory: { ...view.memory, getUser: () => profile } }, CUTOFF);
+  const affinity = moment.memory.getUser(ALICE).affinity;
+  assert.deepEqual(affinity.history.map((h) => h.reason), ['R1', '']);
+  assert.equal(affinity.reason, 'R1');
+});
+
 test('momentView: details, interests and aliases first recorded at or after the cutoff are hidden', () => {
   const { view } = baseView();
   const profile = momentView(view, CUTOFF).memory.getUser(ALICE);

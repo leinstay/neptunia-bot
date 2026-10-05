@@ -57,8 +57,8 @@
 
 import { readableChannels, fetchHistoryWindow } from '../discord/collect.js';
 import { formatTranscript, renderTranscript } from '../discord/format.js';
-import { fitSections, SectionsTooLargeError } from '../llm/budget.js';
-import { estimateTokens, estimateMessages } from '../llm/tokens.js';
+import { fitSections, requestTokenLimit, sectionCost, SectionsTooLargeError } from '../llm/budget.js';
+import { estimateMessages } from '../llm/tokens.js';
 import { parseJsonObject } from '../llm/parse.js';
 import { isPlainObject } from '../config.js';
 import {
@@ -76,6 +76,7 @@ import {
 import { block, fillPromptTemplate } from '../behavior/prompt.js';
 import { topByRank } from './ranking.js';
 import { clampText } from './clamp.js';
+import { INJOKE_CHARS } from './text-limits.js';
 import { normalizeTopic } from './interests.js';
 import { toTokens, fromTokens } from './mentions.js';
 import {
@@ -549,8 +550,8 @@ export function buildChannelRequest({ prompts, config, calibrator, channel, mess
   const items = formatTranscript(channelMessages, formatOptions);
   const transcriptTexts = items.map((item) => item.text);
 
-  const cost = (text) => calibrator.apply(estimateTokens(text)) + 2;
-  const limit = Math.floor((config?.llm?.maxRequestTokens ?? 50000) * (config?.llm?.safetyMargin ?? 0.9));
+  const cost = sectionCost(calibrator);
+  const limit = requestTokenLimit(config);
   const keptTexts = fitNewest([system, channelBlock], transcriptTexts, limit, cost);
   const keptItems = items.slice(items.length - keptTexts.length);
 
@@ -789,7 +790,7 @@ export function clampServerResult(raw, config, nameOf = () => null) {
   const patterns = resolve(raw.patterns, guildFieldChars);
   const starters = resolve(raw.starters, guildFieldChars);
   const injokes = (Array.isArray(raw.injokes) ? raw.injokes : [])
-    .map((s) => (typeof s === 'string' ? clampText(tokenize(s), 200, { tolerance }) : ''))
+    .map((s) => (typeof s === 'string' ? clampText(tokenize(s), INJOKE_CHARS, { tolerance }) : ''))
     .filter(Boolean)
     .slice(0, maxInjokes);
 
@@ -1147,7 +1148,7 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
 
   /** The warmup's per-request token cap after `llm.safetyMargin`, read now. */
   function warmupRequestCap() {
-    return Math.floor(warmupMaxRequestTokens() * (hot.config.llm?.safetyMargin ?? 0.9));
+    return requestTokenLimit(hot.config, warmupMaxRequestTokens());
   }
 
   /** The `llm.complete` options every warmup request shares, read at the call: the model, role
@@ -1512,7 +1513,7 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
     const items = markOwnContext(formatTranscript(sample.messages, formatOptions), sample.ownIds, labels);
 
     const limit = warmupRequestCap();
-    const cost = (text) => calibrator.apply(estimateTokens(text)) + 2;
+    const cost = sectionCost(calibrator);
     const system = fillPromptTemplate(hot.prompts.profile, profileTemplateValues(hot.config, selfName));
     const characterBlock = block('character', characterText(hot.prompts, selfName));
     const memberBlock = block('member', memberLine(member));
@@ -2234,7 +2235,7 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
     const mainChannelIds = mainChannelSet(config.memory?.mainChannelIds);
     const member = memberStats(windows, id, since) ?? { id, name: profile?.names?.[0] ?? id, messages: 0, firstTs: null, lastTs: now() };
     const minOwn = Math.max(1, Math.floor(settings.firstMessages) || 0);
-    const limit = Math.floor((config.llm?.maxRequestTokens ?? 50000) * (config.llm?.safetyMargin ?? 0.9));
+    const limit = requestTokenLimit(config);
 
     const selfName = getSelfName(guildId);
     const formatOptions = memoryFormatOptions(config, selfName, labels);
