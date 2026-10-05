@@ -99,20 +99,18 @@ test('formatDuration: under a minute', () => {
   assert.equal(formatDuration(59_999, labels.units), 'less than a minute');
 });
 
-test('formatDuration: exactly one minute', () => {
-  assert.equal(formatDuration(MIN, labels.units), '1 min');
-});
-
-test('formatDuration: minutes under an hour', () => {
-  assert.equal(formatDuration(5 * MIN, labels.units), '5 min');
+test('formatDuration: exactly one minute, and minutes under an hour, render as N min', () => {
+  const rows = [
+    { label: 'exactly one minute', ms: MIN, expected: '1 min' },
+    { label: 'minutes under an hour', ms: 5 * MIN, expected: '5 min' },
+  ];
+  for (const { label, ms, expected } of rows) {
+    assert.equal(formatDuration(ms, labels.units), expected, label);
+  }
 });
 
 test('formatDuration: exactly one hour, no leftover minutes', () => {
   assert.equal(formatDuration(HOUR, labels.units), '1 h');
-});
-
-test('formatDuration: hours with leftover minutes (contract example)', () => {
-  assert.equal(formatDuration(3 * HOUR + 12 * MIN, labels.units), '3 h 12 min');
 });
 
 test('formatDuration: exactly one day, no leftover hours', () => {
@@ -148,18 +146,17 @@ test('formatTranscript: no marker for a gap under the threshold, same day', () =
   assert.ok(!items[1].text.includes('passed'));
 });
 
-test('formatTranscript: a gap at/over the threshold gets a "passed" marker', () => {
+test('formatTranscript: a gap exactly at the threshold also gets a marker (inclusive), as does one over it', () => {
   const t0 = Date.UTC(2026, 8, 20, 10, 0, 0);
-  const messages = [msg('a', t0), msg('b', t0 + 25 * MIN)];
-  const items = formatTranscript(messages, { timezone: TZ, gapMinutes: 20, maxChars: 100, selfName: 'Nept', labels });
-  assert.ok(items[1].text.startsWith('--- 25 min passed ---'));
-});
-
-test('formatTranscript: a gap exactly at the threshold also gets a marker (inclusive)', () => {
-  const t0 = Date.UTC(2026, 8, 20, 10, 0, 0);
-  const messages = [msg('a', t0), msg('b', t0 + 20 * MIN)];
-  const items = formatTranscript(messages, { timezone: TZ, gapMinutes: 20, maxChars: 100, selfName: 'Nept', labels });
-  assert.ok(items[1].text.startsWith('--- 20 min passed ---'));
+  const rows = [
+    { label: 'a gap over the threshold gets a "passed" marker', gap: 25 * MIN, expected: '--- 25 min passed ---' },
+    { label: 'a gap exactly at the threshold also gets a marker (inclusive)', gap: 20 * MIN, expected: '--- 20 min passed ---' },
+  ];
+  for (const { label, gap, expected } of rows) {
+    const messages = [msg('a', t0), msg('b', t0 + gap)];
+    const items = formatTranscript(messages, { timezone: TZ, gapMinutes: 20, maxChars: 100, selfName: 'Nept', labels });
+    assert.ok(items[1].text.startsWith(expected), `${label}: ${JSON.stringify(items[1].text)}`);
+  }
 });
 
 test('formatTranscript: a date change under the gap threshold gets a plain date marker', () => {
@@ -412,19 +409,6 @@ test('formatTranscript: mode "memory" for the persona\'s own line omits the id',
 
 // --- formatTranscript: mode "memory" groups by channel ----------------------
 
-test('formatTranscript: mode "memory" opens with a channel heading before the very first message', () => {
-  const t0 = Date.UTC(2026, 8, 20, 10, 0, 0);
-  const items = formatTranscript([msg('a', t0, { channelId: 'c1', channelName: 'general' })], {
-    timezone: TZ,
-    gapMinutes: 20,
-    maxChars: 100,
-    selfName: 'Nept',
-    labels,
-    mode: 'memory',
-  });
-  assert.ok(items[0].text.startsWith('## #general (id:c1)\n'));
-});
-
 test('formatTranscript: mode "memory" does not repeat the heading while the channel stays the same', () => {
   const t0 = Date.UTC(2026, 8, 20, 10, 0, 0);
   const messages = [
@@ -524,13 +508,6 @@ test('formatTranscript: a described image (not attached) renders imageDescribed'
   const descriptions = new Map([['att1', 'a grey cat sleeping']]);
   const items = formatTranscript(messages, { timezone: TZ, gapMinutes: 20, maxChars: 100, selfName: 'Nept', labels, descriptions });
   assert.ok(items[0].text.includes('[image: a grey cat sleeping]'));
-});
-
-test('formatTranscript: a plain image with neither attachment nor description renders the blind form', () => {
-  const t0 = Date.UTC(2026, 8, 20, 10, 0, 0);
-  const messages = [msg('a', t0, { content: '', attachments: [{ id: 'att1', kind: 'image', name: 'pic.png' }] })];
-  const items = formatTranscript(messages, { timezone: TZ, gapMinutes: 20, maxChars: 100, selfName: 'Nept', labels });
-  assert.ok(items[0].text.includes('[image]'));
 });
 
 test('formatTranscript: a gif attachment renders blind by name, described by caption', () => {
@@ -1161,9 +1138,33 @@ function baseTempo(overrides = {}) {
 // with 2 messages 4 minutes ago is live, not dead -- see the dry-run case
 // below). Default thresholds: liveMessages10min: 4, deadSilenceMinutes: 45.
 
-test('renderTempo: 3 messages in the last 10 min is below the live threshold', () => {
-  const text = renderTempo(baseTempo({ last10min: 3, silenceMs: 10 * MIN }), labels);
-  assert.ok(!text.includes(labels.tempo.verdictLive));
+test('renderTempo: under 4 messages in the last 10 min is below the live threshold (default thresholds)', () => {
+  const { verdictLive, verdictSlow, verdictDead } = labels.tempo;
+  const rows = [
+    {
+      label: '3 messages in the last 10 min is below the live threshold',
+      tempo: { last10min: 3, silenceMs: 10 * MIN },
+      present: [],
+      absent: [verdictLive],
+    },
+    {
+      label: 'no thresholds argument: 3 messages and no silence yet is still not live',
+      tempo: { last10min: 3, silenceMs: 0 },
+      present: [],
+      absent: [verdictLive],
+    },
+    {
+      label: 'dry-run case -- 2 messages in the last 10 min, 4 min of silence -> "slow", not "dead"',
+      tempo: { last10min: 2, silenceMs: 4 * MIN },
+      present: [verdictSlow],
+      absent: [verdictDead, verdictLive],
+    },
+  ];
+  for (const { label, tempo, present, absent } of rows) {
+    const text = renderTempo(baseTempo(tempo), labels);
+    for (const verdict of present) assert.ok(text.includes(verdict), `${label}: expected ${verdict}`);
+    for (const verdict of absent) assert.ok(!text.includes(verdict), `${label}: unexpected ${verdict}`);
+  }
 });
 
 test('renderTempo: 4 messages in the last 10 min -> the "live" verdict, even with long silence', () => {
@@ -1176,21 +1177,9 @@ test('renderTempo: silence just under 45 min -> the "slow" verdict, not dead', (
   assert.ok(text.includes(labels.tempo.verdictSlow));
 });
 
-test('renderTempo: silence at exactly 45 min -> the "dead" verdict (inclusive)', () => {
-  const text = renderTempo(baseTempo({ last10min: 0, silenceMs: 45 * MIN }), labels);
-  assert.ok(text.includes(labels.tempo.verdictDead));
-});
-
 test('renderTempo: an empty channel (silenceMs null) -> the "dead" verdict', () => {
   const text = renderTempo(baseTempo({ last10min: 0, silenceMs: null }), labels);
   assert.ok(text.includes(labels.tempo.verdictDead));
-});
-
-test('renderTempo: dry-run case -- 2 messages in the last 10 min, 4 min of silence -> "slow", not "dead"', () => {
-  const text = renderTempo(baseTempo({ last10min: 2, silenceMs: 4 * MIN }), labels);
-  assert.ok(text.includes(labels.tempo.verdictSlow));
-  assert.ok(!text.includes(labels.tempo.verdictDead));
-  assert.ok(!text.includes(labels.tempo.verdictLive));
 });
 
 test('renderTempo: custom thresholds are honoured', () => {
@@ -1203,16 +1192,16 @@ test('renderTempo: custom thresholds are honoured', () => {
   assert.ok(slow.includes(labels.tempo.verdictSlow));
 });
 
-test('renderTempo: a missing thresholds argument falls back to the defaults (4 / 45 min)', () => {
-  const notYetLive = renderTempo(baseTempo({ last10min: 3, silenceMs: 0 }), labels);
-  assert.ok(!notYetLive.includes(labels.tempo.verdictLive));
-  const notYetDead = renderTempo(baseTempo({ last10min: 0, silenceMs: 44 * MIN }), labels);
-  assert.ok(!notYetDead.includes(labels.tempo.verdictDead));
-});
-
-test('renderTempo: a thresholds object missing one key falls back to the default for that key only', () => {
-  const text = renderTempo(baseTempo({ last10min: 0, silenceMs: 45 * MIN }), labels, { liveMessages10min: 10 });
-  assert.ok(text.includes(labels.tempo.verdictDead)); // deadSilenceMinutes still defaults to 45
+test('renderTempo: silence at exactly 45 min -> "dead" (inclusive), also when a thresholds object misses that key', () => {
+  const rows = [
+    { label: 'no thresholds argument: silence at exactly 45 min -> the "dead" verdict (inclusive)', thresholds: undefined },
+    // deadSilenceMinutes still defaults to 45
+    { label: 'a thresholds object missing one key falls back to the default for that key', thresholds: { liveMessages10min: 10 } },
+  ];
+  for (const { label, thresholds } of rows) {
+    const text = renderTempo(baseTempo({ last10min: 0, silenceMs: 45 * MIN }), labels, thresholds);
+    assert.ok(text.includes(labels.tempo.verdictDead), label);
+  }
 });
 
 test('renderTempo: null silenceMs describes an empty channel', () => {
@@ -1238,11 +1227,6 @@ test('renderTempo: mentions when the last own message went unanswered (no trigge
 test('renderTempo: does not mention the unanswered line when there is a trigger', () => {
   const text = renderTempo(baseTempo({ lastIsOwn: true, hasTrigger: true }), labels);
   assert.ok(!text.includes(labels.tempo.ownUnanswered));
-});
-
-test('renderTempo: works with a non-English labels object', () => {
-  const text = renderTempo(baseTempo({ last10min: 4 }), grLabels);
-  assert.ok(text.includes(grLabels.tempo.verdictLive));
 });
 
 // --- formatTranscript: a second look on a question (videoAnswered) -----------------

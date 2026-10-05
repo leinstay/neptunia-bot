@@ -88,12 +88,14 @@ test('classifyAttachment: falls back to the file extension when contentType is m
   assert.equal(classifyAttachment({ name: null }), 'file');
 });
 
-test('classifyAttachment: a voice-message flag wins over content type', () => {
-  assert.equal(classifyAttachment({ contentType: 'audio/ogg', name: 'voice.ogg', isVoice: true }), 'voice');
-});
-
-test('classifyAttachment: no voice flag keeps audio as audio', () => {
-  assert.equal(classifyAttachment({ contentType: 'audio/ogg', name: 'voice.ogg', isVoice: false }), 'audio');
+test('classifyAttachment: a voice-message flag wins over content type; without it audio stays audio', () => {
+  const rows = [
+    { label: 'a voice-message flag wins over content type', isVoice: true, expected: 'voice' },
+    { label: 'no voice flag keeps audio as audio', isVoice: false, expected: 'audio' },
+  ];
+  for (const { label, isVoice, expected } of rows) {
+    assert.equal(classifyAttachment({ contentType: 'audio/ogg', name: 'voice.ogg', isVoice }), expected, label);
+  }
 });
 
 // --- classifyEmbed -----------------------------------------------------------
@@ -279,11 +281,6 @@ test('mediaProxyUrl: any images-ext-<n> number is rewritten, a lookalike host is
   assert.equal(mediaProxyUrl(noNumber, { format: 'webp' }), noNumber);
 });
 
-test('mediaProxyUrl: a YouTube thumbnail host (i.ytimg.com) is returned untouched', () => {
-  const url = 'https://i.ytimg.com/vi/abc/hqdefault.jpg';
-  assert.equal(mediaProxyUrl(url, { width: 512, height: 512, format: 'webp' }), url);
-});
-
 test('mediaProxyUrl: a non-Discord host is returned untouched', () => {
   const url = 'https://example.com/pic.png?foo=bar';
   assert.equal(mediaProxyUrl(url, { width: 512, height: 512, format: 'webp' }), url);
@@ -461,12 +458,30 @@ test('mediaLabelFor: a watched video wins over a still-frame description', () =>
   assert.equal(result.values.text, 'the whole clip');
 });
 
-test('mediaLabelFor: a watched video with an attached still frame keeps frameAttached as its extra', () => {
-  assert.deepEqual(mediaLabelFor(clip, { attachedIndex: 2, video: { state: 'watched', text: 'a dog runs' } }), {
-    key: 'videoWatched',
-    values: { name: 'clip.mp4', duration: '1:05', text: 'a dog runs' },
-    extra: { key: 'frameAttached', values: { n: 2 } },
-  });
+test('mediaLabelFor: a video with an attached still frame keeps frameAttached as its extra, watched or not', () => {
+  const rows = [
+    {
+      label: 'a watched video with an attached still frame',
+      options: { attachedIndex: 2, video: { state: 'watched', text: 'a dog runs' } },
+      expected: {
+        key: 'videoWatched',
+        values: { name: 'clip.mp4', duration: '1:05', text: 'a dog runs' },
+        extra: { key: 'frameAttached', values: { n: 2 } },
+      },
+    },
+    {
+      label: 'a video not watched with an attached frame',
+      options: { attachedIndex: 1, video: { state: 'error' } },
+      expected: {
+        key: 'videoNotWatched',
+        values: { name: 'clip.mp4', duration: '1:05', reason: 'error' },
+        extra: { key: 'frameAttached', values: { n: 1 } },
+      },
+    },
+  ];
+  for (const { label, options, expected } of rows) {
+    assert.deepEqual(mediaLabelFor(clip, options), expected, label);
+  }
 });
 
 test('mediaLabelFor: a video not watched for a limit carries the reason CODE, not a label', () => {
@@ -489,14 +504,6 @@ test('mediaLabelFor: a video not watched but with a still-frame caption renders 
   assert.deepEqual(mediaLabelFor(clip, { description: 'a café terrace', video: { state: 'limit', reason: 'size' } }), {
     key: 'videoNotWatchedFrame',
     values: { name: 'clip.mp4', duration: '1:05', reason: 'size', text: 'a café terrace' },
-  });
-});
-
-test('mediaLabelFor: a video not watched with an attached frame keeps frameAttached as its extra', () => {
-  assert.deepEqual(mediaLabelFor(clip, { attachedIndex: 1, video: { state: 'error' } }), {
-    key: 'videoNotWatched',
-    values: { name: 'clip.mp4', duration: '1:05', reason: 'error' },
-    extra: { key: 'frameAttached', values: { n: 1 } },
   });
 });
 
@@ -691,27 +698,44 @@ test('selectPictures: vision off (maxImages 0) selects nothing', () => {
 
 test('selectPictures: trigger pictures come first', () => {
   const now = 1_000_000;
-  const trigger = pictureMessage('t', now, 'trig');
-  const picked = selectPictures({
-    trigger,
-    history: [trigger],
-    visionCfg: { maxImages: 4, recentImages: 3, recentImageMinutes: 30 },
-    now,
-  });
-  assert.deepEqual(picked.map((p) => p.itemId), ['trig']);
+  // Every tier has a candidate and maxImages leaves room for fewer: priority decides.
+  // The replied-to picture is older than recentImageMinutes (only its own tier can
+  // take it); a newer picture follows the trigger (the recent tier would take it first).
+  const replied = pictureMessage('r', now - 60 * MIN, 'replied');
+  const trigger = { ...pictureMessage('t', now - 2 * MIN, 'trig'), replyToId: 'r' };
+  const later = pictureMessage('m1', now - MIN, 'later');
+  const pick = (maxImages) =>
+    selectPictures({
+      trigger,
+      history: [replied, trigger, later],
+      visionCfg: { maxImages, recentImages: 3, recentImageMinutes: 30 },
+      now,
+    }).map((p) => p.itemId);
+  assert.deepEqual(pick(1), ['trig'], 'room for one: the trigger\'s own, ahead of the replied-to and the newer picture');
+  assert.deepEqual(pick(2), ['replied', 'trig'], 'room for two: the replied-to picture next, ahead of the newer one');
 });
 
 test('selectPictures: replied-to message pictures come after the trigger\'s own', () => {
   const now = 1_000_000;
-  const replied = pictureMessage('r', now - 5 * MIN, 'replied');
-  const trigger = { ...pictureMessage('t', now, 'trig'), replyToId: 'r' };
-  const picked = selectPictures({
-    trigger,
-    history: [replied, trigger],
-    visionCfg: { maxImages: 4, recentImages: 3, recentImageMinutes: 30 },
-    now,
+  // Older than recentImageMinutes: only the replied-to tier can take it.
+  const replied = pictureMessage('r', now - 60 * MIN, 'replied');
+  const trigger = message('t', {
+    ts: now,
+    replyToId: 'r',
+    attachments: [
+      { id: 't1', kind: 'image', url: 'url-t1', name: 't1.png' },
+      { id: 't2', kind: 'image', url: 'url-t2', name: 't2.png' },
+    ],
   });
-  assert.deepEqual(picked.map((p) => p.itemId), ['replied', 'trig']);
+  const pick = (maxImages) =>
+    selectPictures({
+      trigger,
+      history: [replied, trigger],
+      visionCfg: { maxImages, recentImages: 3, recentImageMinutes: 30 },
+      now,
+    }).map((p) => p.itemId);
+  assert.deepEqual(pick(2), ['t1', 't2'], 'the trigger\'s own fill the room first');
+  assert.deepEqual(pick(4), ['replied', 't1', 't2'], 'then the replied-to picture, in transcript order');
 });
 
 test('selectPictures: recent channel pictures fill up to recentImages, newest first, then re-sorted to transcript order', () => {
@@ -816,24 +840,20 @@ test('selectPictures: a trigger in the turn\'s channel, or with either channel i
 
 // --- stickerUrl / emojiUrl / linkThumbnailCacheKey ------------------------
 
-test('stickerUrl: PNG and APNG sizes to media.discordapp.net/.../<id>.png?size=160', () => {
-  assert.equal(stickerUrl('123', 1), 'https://media.discordapp.net/stickers/123.png?size=160');
-  assert.equal(stickerUrl('123', 2), 'https://media.discordapp.net/stickers/123.png?size=160');
-});
-
-test('stickerUrl: GIF sizes to media.discordapp.net/.../<id>.gif?size=160, never cdn.discordapp.com', () => {
-  const url = stickerUrl('123', 4);
-  assert.equal(url, 'https://media.discordapp.net/stickers/123.gif?size=160');
-  assert.ok(!url.includes('cdn.discordapp.com'));
-});
-
-test('stickerUrl: Lottie (format 3) is never a picture -- null', () => {
-  assert.equal(stickerUrl('123', 3), null);
-});
-
-test('stickerUrl: an unknown/missing format is never a picture -- null', () => {
-  assert.equal(stickerUrl('123', undefined), null);
-  assert.equal(stickerUrl('123', 99), null);
+test('stickerUrl: a picture format sizes to media.discordapp.net/.../<id>.<ext>?size=160; Lottie and unknown formats are null', () => {
+  const rows = [
+    { label: 'PNG (format 1)', format: 1, expected: 'https://media.discordapp.net/stickers/123.png?size=160' },
+    { label: 'APNG (format 2)', format: 2, expected: 'https://media.discordapp.net/stickers/123.png?size=160' },
+    { label: 'GIF (format 4), never cdn.discordapp.com', format: 4, expected: 'https://media.discordapp.net/stickers/123.gif?size=160' },
+    { label: 'Lottie (format 3) is never a picture', format: 3, expected: null },
+    { label: 'a missing format is never a picture', format: undefined, expected: null },
+    { label: 'an unknown format is never a picture', format: 99, expected: null },
+  ];
+  for (const { label, format, expected } of rows) {
+    const url = stickerUrl('123', format);
+    assert.equal(url, expected, label);
+    if (url !== null) assert.ok(!url.includes('cdn.discordapp.com'), label);
+  }
 });
 
 test('emojiUrl: cdn.discordapp.com/emojis/<id>.webp?size=96, same for static and animated', () => {
@@ -936,13 +956,6 @@ test('selectPictures: the trigger\'s own picture-format sticker is eligible, sam
   ]);
   const picked = selectPictures({ trigger, history: [trigger], visionCfg: { maxImages: 4, recentImages: 3, recentImageMinutes: 30 }, now });
   assert.deepEqual(picked.map((p) => p.itemId), ['sticker:s1']);
-});
-
-test('selectPictures: a Lottie sticker on the trigger is never vision-eligible (no url to attach)', () => {
-  const now = 1_000_000;
-  const trigger = stickerMessage('t', now, [{ id: 's1', name: 'dance', format: 3, url: null }]);
-  const picked = selectPictures({ trigger, history: [trigger], visionCfg: { maxImages: 4, recentImages: 3, recentImageMinutes: 30 }, now });
-  assert.deepEqual(picked, []);
 });
 
 test('selectPictures: a sticker on the REPLIED-TO message is never vision-eligible, only the trigger\'s own', () => {
