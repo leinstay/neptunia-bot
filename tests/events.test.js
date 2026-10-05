@@ -6284,7 +6284,9 @@ test('follow-up: the address request is byte-identical to the one before the roo
 test('events: a failed eavesdrop roll may roll roomQuestionChance and ask the room classifier', async () => {
   const llm = fakeFollowUpLlm();
   const spontaneous = roomSpontaneous();
-  const handler = makeHandler({ llm, spontaneous, prompts: fakeRoomPrompts(), rng: scripted([0.039]), now: () => ROOM_T0 });
+  // The chance is set here, so the test does not move with the shipped default.
+  const config = baseConfig({ spontaneous: { roomQuestionChance: 0.5 } });
+  const handler = makeHandler({ llm, spontaneous, config, prompts: fakeRoomPrompts(), rng: scripted([0.49]), now: () => ROOM_T0 });
   const channel = roomChannel();
   const p = handler(roomMessage(channel));
   await tickOnce();
@@ -6312,11 +6314,9 @@ test('events: a failed eavesdrop roll may roll roomQuestionChance and ask the ro
   llm.respond('no');
   await p;
 
-  // The roll is strict: at the chance itself the classifier is not asked; a missing key counts as 0.1.
-  const config = baseConfig();
-  delete config.spontaneous.roomQuestionChance;
+  // The roll is strict: at the chance itself the classifier is not asked.
   const llm2 = fakeFollowUpLlm();
-  const handler2 = makeHandler({ llm: llm2, spontaneous: roomSpontaneous(), config, prompts: fakeRoomPrompts(), rng: scripted([0.04]), now: () => ROOM_T0 });
+  const handler2 = makeHandler({ llm: llm2, spontaneous: roomSpontaneous(), config, prompts: fakeRoomPrompts(), rng: scripted([0.5]), now: () => ROOM_T0 });
   await handler2(roomMessage(roomChannel()));
   assert.equal(llm2.calls.length, 0);
 });
