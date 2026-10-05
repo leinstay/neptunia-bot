@@ -3,8 +3,11 @@
 // nothing sent), all against fakes.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { liveView, situationToHistory, situationHistory, answerReply } from '../src/mentor/sandbox.js';
+import fs from 'node:fs';
+import { liveView, situationToHistory, situationHistory, answerReply, sandboxRequestInput, SANDBOX_OMITS } from '../src/mentor/sandbox.js';
 import { createCalibrator } from '../src/llm/tokens.js';
+import { fill } from '../src/discord/format.js';
+import { withCapturedLogs } from './fixtures/capture-logs.js';
 import { labels } from './fixtures/labels.js';
 
 const NOW = Date.UTC(2026, 8, 20, 12, 0, 0);
@@ -201,6 +204,20 @@ test('situationToHistory: refuses a last line by self', () => {
     { authorId: 'self', text: 'hello', replyTo: null },
   ]);
   assert.throws(() => situationToHistory(s, { selfId: SELF_ID, selfName: 'Zoë', at: NOW, channel: CHANNEL }));
+});
+
+test('situationToHistory: a named kind is the trigger kind; only a mention tags her', () => {
+  const at = { selfId: SELF_ID, selfName: 'Zoë', at: NOW, channel: CHANNEL };
+  for (const kind of ['overheard', 'followUp', 'name']) {
+    const { trigger, triggerKind } = situationToHistory({ ...twoLines(), kind }, at);
+    assert.equal(triggerKind, kind);
+    assert.deepEqual(trigger.mentionedUserIds, [], kind);
+  }
+  assert.deepEqual(situationToHistory({ ...twoLines(), kind: 'mention' }, at).trigger.mentionedUserIds, [SELF_ID]);
+  // `reply` needs a last line that replies to hers; an unknown kind is no kind: the guess.
+  assert.equal(situationToHistory({ ...twoLines(), kind: 'reply' }, at).triggerKind, 'mention');
+  assert.equal(situationToHistory({ ...twoLines(), kind: 'drawFailed' }, at).triggerKind, 'mention');
+  assert.equal(situationToHistory({ ...twoLines(), kind: 'shouted' }, at).triggerKind, 'mention');
 });
 
 test('situationToHistory: refuses fewer than 2 lines', () => {
@@ -558,4 +575,260 @@ test('answerReply: a situation\'s variety patterns render as <worn> as in a live
   assert.ok(withBlock.request.user.includes(`<worn>\n${labels.variety.intro}\n- mock promise ending in (no) ("fix it (no)")\n</worn>`));
   const without = await answerReply({ view, situation: twoLines(), selfId: SELF_ID, selfName: 'Zoë', channel: CHANNEL, llm: fakeLlm('<msg>ok</msg>'), samples: 1, at: NOW });
   assert.ok(!without.request.user.includes('<worn>'));
+});
+
+// ---- a stored moment replayed as the turn it was ----------------------------
+
+/** The task texts of the reply, overheard and interject prompts, each naming itself. */
+function kindHot(featureOverrides = {}) {
+  const hot = fakeHot(featureOverrides);
+  hot.prompts = {
+    ...hot.prompts,
+    reply: 'REPLY_TASK {{author}}: {{trigger}}',
+    overheard: 'OVERHEARD_TASK {{author}}: {{trigger}}',
+    interject: 'INTERJECT_TASK',
+  };
+  return hot;
+}
+
+const TRIGGER_ID = '800000000000000002';
+const SOURCE = { id: '500000000000000002', name: 'announcements' };
+const KITCHEN = { id: '500000000000000003', name: 'kitchen' };
+
+/** A channel window as src/mentor/anchor.js#resolveAnchor stores it: lines `[id, authorId, authorName, text]`. */
+function storedWindow(channel, lines, { reason = 'mention', readOnly = false } = {}) {
+  const base = { channelId: channel.id, channelName: channel.name, channelCategory: null, channelTopic: null, self: false, bot: false, mentionedUserIds: [], replyToId: null, forwardedFrom: null, attachments: [], links: [], forwarded: [], stickers: [], emojis: [], reactions: [] };
+  const messages = lines.map(([id, authorId, authorName, content], i) => ({ ...base, id, authorId, authorName, content, ts: NOW - (lines.length - i) * 90_000 }));
+  return { channelId: channel.id, channelName: channel.name, readOnly, reason, messages, olderNotShown: false };
+}
+
+function aliceStore() {
+  return fakeStore({
+    userProfiles: {
+      [ALICE]: { id: ALICE, names: ['Alice'], character: 'ALICE_PORTRAIT' },
+      [BRUNO]: { id: BRUNO, names: ['Bruno'], character: 'BRUNO_PORTRAIT' },
+    },
+  });
+}
+
+async function replay(situation, { hot = kindHot(), samples = 1, ...extra } = {}) {
+  const view = liveView({ hot, store: aliceStore(), guildId: 'g1' });
+  const llm = fakeLlm('<skip/>');
+  const result = await answerReply({ view, situation, selfId: SELF_ID, selfName: 'Zoë', channel: CHANNEL, llm, samples, at: NOW, ...extra });
+  return { ...result, llm };
+}
+
+test('situationHistory: a stored kind replaces the guess; the trigger is found by its id', () => {
+  const moment = { ...storedMoment(), kind: 'overheard', triggerId: TRIGGER_ID };
+  const { trigger, triggerKind } = situationHistory(moment, { selfId: SELF_ID });
+  assert.equal(triggerKind, 'overheard');
+  assert.equal(trigger.id, TRIGGER_ID);
+  // A kind a turn does not know is no kind: the guess.
+  assert.equal(situationHistory({ ...storedMoment(), kind: 'shouted' }, { selfId: SELF_ID }).triggerKind, 'mention');
+  // A line of hers after the trigger (her request held it) does not make the moment unusable.
+  const later = { ...moment.history[0], id: '800000000000000003', content: 'a later line of hers', ts: NOW - 30_000 };
+  const extended = situationHistory({ ...moment, history: [...moment.history, later] }, { selfId: SELF_ID });
+  assert.equal(extended.trigger.id, TRIGGER_ID);
+  assert.equal(extended.history.length, 3);
+  // A trigger id that points at her own line is refused.
+  assert.throws(() => situationHistory({ ...moment, triggerId: '800000000000000001' }, { selfId: SELF_ID }), /self/);
+});
+
+test('situationHistory: a spontaneous moment has no trigger, whoever wrote last', () => {
+  for (const mode of ['interject', 'initiate']) {
+    const own = { ...storedMoment(), mode, history: storedMoment().history.slice(0, 1) };
+    const { history, trigger, triggerKind } = situationHistory(own, { selfId: SELF_ID });
+    assert.equal(history.length, 1);
+    assert.equal(trigger, null);
+    assert.equal(triggerKind, null);
+  }
+});
+
+test('answerReply: a moment stored as overheard is replayed with the overheard task and its trigger label', async () => {
+  const overheard = await replay({ ...storedMoment(), mode: 'reply', kind: 'overheard', triggerId: TRIGGER_ID });
+  assert.ok(overheard.request.user.includes(`OVERHEARD_TASK Alice: ${labels.triggers.overheard}`), overheard.request.user);
+  assert.ok(!overheard.request.user.includes('REPLY_TASK'));
+  // Its author is not the one who called her.
+  assert.ok(overheard.request.user.includes('ALICE_PORTRAIT'));
+  assert.ok(!overheard.request.user.includes(labels.profile.interlocutorMark));
+  // The same moment without its kind is the old guess: a mention under the reply task.
+  const guessed = await replay(storedMoment());
+  assert.ok(guessed.request.user.includes(`REPLY_TASK Alice: ${labels.triggers.mention}`));
+  assert.ok(guessed.request.user.includes(labels.profile.interlocutorMark));
+});
+
+test('answerReply: a follow-up and a name call keep their trigger labels; a spontaneous moment takes its mode\'s task', async () => {
+  for (const kind of ['followUp', 'name']) {
+    const result = await replay({ ...storedMoment(), mode: 'reply', kind, triggerId: TRIGGER_ID });
+    assert.ok(result.request.user.includes(`REPLY_TASK Alice: ${labels.triggers[kind]}`), kind);
+  }
+  const unasked = await replay({ ...storedMoment(), mode: 'interject', kind: null, triggerId: null });
+  assert.ok(unasked.request.user.includes('INTERJECT_TASK'));
+  assert.ok(!unasked.request.user.includes('REPLY_TASK'));
+  assert.ok(!unasked.request.user.includes(labels.profile.interlocutorMark), 'nobody called her');
+  // An unknown mode is a reply.
+  const odd = await replay({ ...storedMoment(), mode: 'auto' });
+  assert.ok(odd.request.user.includes('REPLY_TASK'));
+});
+
+test('answerReply: a moment with a pulled channel is replayed with its <channel_view>', async () => {
+  const kitchen = storedWindow(KITCHEN, [['800000000000000101', BRUNO, 'Bruno', 'PULLED_LINE the oven is on']]);
+  const result = await replay({ ...storedMoment(), pulled: [kitchen] });
+  assert.match(result.request.user, /<channel_view>\n[^]*PULLED_LINE the oven is on[^]*\n<\/channel_view>/);
+  assert.ok(result.request.user.includes('channel #kitchen'));
+  // An invented situation is shown no other channel.
+  const invented = await replay({ ...twoLines(), pulled: [kitchen] });
+  assert.ok(!invented.request.user.includes('<channel_view>'));
+});
+
+test('answerReply: a routed moment answers the call in its source channel, with the called text', async () => {
+  const call = '800000000000000202';
+  const source = storedWindow(SOURCE, [['800000000000000201', ALICE, 'Alice', 'an earlier note'], [call, BRUNO, 'Bruno', 'CALL_LINE are you there?']], { reason: 'routed', readOnly: true });
+  const situation = { ...storedMoment(), mode: 'reply', kind: 'mention', triggerId: call, source: { channelId: SOURCE.id, reason: 'routed' }, pulled: [source] };
+  const called = fill(labels.elsewhere.called, { channel: SOURCE.name, destination: CHANNEL.name });
+  const result = await replay(situation);
+  assert.match(result.request.user, /<channel_view>\n[^]*CALL_LINE are you there\?[^]*\n<\/channel_view>/);
+  assert.ok(result.request.user.includes(called), result.request.user);
+  assert.ok(result.request.user.includes(`REPLY_TASK Bruno: ${labels.triggers.mention}`));
+  assert.ok(result.request.user.includes('BRUNO_PORTRAIT'));
+  // Without its source the same lines are a pulled channel and no called text.
+  const plain = await replay({ ...situation, source: null, triggerId: TRIGGER_ID });
+  assert.ok(!plain.request.user.includes(called));
+});
+
+test('answerReply: the destination of a read-only call and the search flag reach <senses>', async () => {
+  const destination = fill(labels.senses.elsewhere, { destination: 'general' });
+  const withBoth = await replay(storedMoment(), { hot: kindHot({ webLookup: true }), elsewhereDestination: { name: 'general' }, searchAvailable: true });
+  assert.ok(withBoth.request.user.includes(destination));
+  assert.ok(withBoth.request.user.includes(labels.senses.search));
+  const without = await replay(storedMoment(), { hot: kindHot({ webLookup: true }) });
+  assert.ok(!without.request.user.includes(destination));
+  assert.ok(!without.request.user.includes(labels.senses.search));
+});
+
+test('answerReply: with the prompt cache on, samples 1 and 2 carry the same marked user part', async () => {
+  const cachedHot = () => {
+    const hot = fakeHot({ promptCache: true });
+    hot.config.llm.model = 'anthropic/claude-test';
+    return hot;
+  };
+  const view = liveView({ hot: cachedHot(), store: fakeStore(), guildId: 'g1' });
+  const llm = fakeLlm('<msg>ok</msg>');
+  const result = await answerReply({ view, situation: twoLines(), selfId: SELF_ID, selfName: 'Zoë', channel: CHANNEL, llm, samples: 2, at: NOW });
+  const [first, second] = llm.calls.map((call) => call.messages[1].content);
+  assert.deepEqual(first, second);
+  assert.equal(first.length, 1);
+  assert.equal(first[0].type, 'text');
+  assert.equal(first[0].text, result.request.user);
+  assert.ok(first[0].cache_control, 'the part carries the cache marker');
+
+  // One sample, or a request the client does not cache: the plain text as before.
+  const single = fakeLlm('<msg>ok</msg>');
+  await answerReply({ view, situation: twoLines(), selfId: SELF_ID, selfName: 'Zoë', channel: CHANNEL, llm: single, samples: 1, at: NOW });
+  assert.equal(typeof single.calls[0].messages[1].content, 'string');
+  const off = fakeLlm('<msg>ok</msg>');
+  const offHot = cachedHot();
+  offHot.config.features.promptCache = false;
+  await answerReply({ view: liveView({ hot: offHot, store: fakeStore(), guildId: 'g1' }), situation: twoLines(), selfId: SELF_ID, selfName: 'Zoë', channel: CHANNEL, llm: off, samples: 2, at: NOW });
+  assert.ok(off.calls.every((call) => typeof call.messages[1].content === 'string'));
+});
+
+test('answerReply: every sample is sent as the mentor\'s', async () => {
+  const { llm } = await replay(storedMoment(), { samples: 2 });
+  assert.equal(llm.calls.length, 2);
+  assert.ok(llm.calls.every((call) => call.options.origin === 'mentor' && call.options.role === 'talk'));
+});
+
+// ---- the last hours: <recent> -------------------------------------------------
+
+const HOUR = 3_600_000;
+
+/** A recent line the way the store hands it over (src/memory/store.js#getRecent). */
+function recentLine(id, text, { at = NOW - HOUR, channelId = CHANNEL.id } = {}) {
+  return { id, at, addedAt: new Date(at + 60_000).toISOString(), channelId, text, who: [], weight: 2 };
+}
+
+/** A store that keeps a recent store too, counting its reads. */
+function recentStore(lines) {
+  const reads = [];
+  return { ...fakeStore(), reads, getRecent: (guildId) => (reads.push(guildId), { nextId: lines.length + 1, lines }) };
+}
+
+test('liveView: the recent store is read for the one guild; a store without one reads as none', () => {
+  const store = recentStore([recentLine(1, 'η αγορά άνοιξε')]);
+  const view = liveView({ hot: fakeHot(), store, guildId: 'g1' });
+  assert.deepEqual(view.memory.getRecent().lines.map((line) => line.text), ['η αγορά άνοιξε']);
+  assert.deepEqual(store.reads, ['g1']);
+  assert.equal(liveView({ hot: fakeHot(), store: fakeStore(), guildId: 'g1' }).memory.getRecent(), null);
+});
+
+test('answerReply: the channel\'s recent lines inside the window render as <recent>, as they stood at the turn\'s time', async () => {
+  const lines = [
+    recentLine(1, 'RECENT_HERE the café closed early'),
+    recentLine(2, 'RECENT_ELSEWHERE a kitchen rumour', { channelId: KITCHEN.id }),
+    recentLine(3, 'RECENT_OLD the market moved', { at: NOW - 80 * HOUR }),
+  ];
+  const ask = async (store, featureOverrides = {}, at = NOW) => {
+    const view = liveView({ hot: fakeHot(featureOverrides), store, guildId: 'g1' });
+    const result = await answerReply({ view, situation: twoLines(), selfId: SELF_ID, selfName: 'Zoë', channel: CHANNEL, llm: fakeLlm('<skip/>'), samples: 1, at });
+    return result.request.user;
+  };
+  const user = await ask(recentStore(lines));
+  const block = /<recent>\n([^]*?)\n<\/recent>/.exec(user)?.[1] ?? '';
+  assert.ok(block.startsWith(fill(labels.recent.header, { hours: 72 })), user);
+  assert.ok(block.includes('RECENT_HERE the café closed early'));
+  // Another channel's audience cannot be checked without the guild: its line stays out.
+  assert.ok(!user.includes('RECENT_ELSEWHERE'));
+  // A line older than memory.recentHours at the turn's time is no longer live.
+  assert.ok(!user.includes('RECENT_OLD'));
+  // The window is measured at the turn's time, not at today's.
+  assert.ok((await ask(recentStore(lines), {}, NOW - 70 * HOUR)).includes('RECENT_OLD the market moved'));
+
+  // No block: the switch off, memory off, a store without a recent store.
+  for (const without of [await ask(recentStore(lines), { recent: false }), await ask(recentStore(lines), { memory: false }), await ask(fakeStore())]) {
+    assert.ok(!without.includes('<recent>'));
+  }
+});
+
+test('answerReply: a recent store that cannot be read costs the block, never the answer', async () => {
+  const store = { ...fakeStore(), getRecent: () => { throw new Error('the memory store is read-only here'); } };
+  const view = liveView({ hot: fakeHot(), store, guildId: 'g1' });
+  const llm = fakeLlm('<msg>ok</msg>');
+  const { result, logs } = await withCapturedLogs(() =>
+    answerReply({ view, situation: twoLines(), selfId: SELF_ID, selfName: 'Zoë', channel: CHANNEL, llm, samples: 1, at: NOW }),
+  );
+  assert.equal(result.answers.length, 1);
+  assert.ok(!result.request.user.includes('<recent>'));
+  assert.deepEqual(logs.map((entry) => [entry.level, entry.msg]), [['warn', 'mentor: recent failed']]);
+});
+
+/** Every input buildRequest reads: the keys it destructures from `input` and each `input.<key>` of its body. */
+function buildRequestInputs() {
+  const source = fs.readFileSync(new URL('../src/behavior/prompt.js', import.meta.url), 'utf8');
+  const start = source.indexOf('export function buildRequest(input) {');
+  assert.ok(start >= 0, 'buildRequest is where this test reads it');
+  const body = source.slice(start, source.indexOf('\n}\n', start));
+  const destructured = /const \{([^}]*)\} = input;/.exec(body);
+  assert.ok(destructured, 'buildRequest destructures its input');
+  const keys = destructured[1].split(',').map((part) => part.trim().split(/[\s=:]/)[0]).filter(Boolean);
+  for (const match of body.matchAll(/\binput\.(\w+)/g)) keys.push(match[1]);
+  return new Set(keys);
+}
+
+test('sandboxRequestInput: names every input buildRequest reads; what it leaves out is SANDBOX_OMITS, passed as absent', () => {
+  const view = liveView({ hot: fakeHot(), store: fakeStore(), guildId: 'g1' });
+  const wanted = buildRequestInputs();
+  assert.ok(wanted.has('history') && wanted.has('pulled') && wanted.has('worn'), 'the reader finds both kinds of key');
+  for (const situation of [twoLines(), { ...storedMoment(), mode: 'interject' }]) {
+    const input = sandboxRequestInput({ view, situation, selfId: SELF_ID, selfName: 'Zoë', channel: CHANNEL, at: NOW });
+    assert.deepEqual(Object.keys(input).sort(), [...wanted].sort());
+    const passed = Object.keys(input).filter((key) => !Object.hasOwn(SANDBOX_OMITS, key));
+    assert.deepEqual(new Set([...passed, ...Object.keys(SANDBOX_OMITS)]), wanted);
+    for (const key of passed) assert.notEqual(input[key], undefined, `${key} is named`);
+    for (const [key, reason] of Object.entries(SANDBOX_OMITS)) {
+      assert.ok(typeof reason === 'string' && reason.trim(), `${key} says why`);
+      const absent = input[key] === null || (Array.isArray(input[key]) && input[key].length === 0);
+      assert.ok(absent, `${key} is left out`);
+    }
+  }
 });

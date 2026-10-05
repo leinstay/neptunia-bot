@@ -5,7 +5,10 @@
 //
 //   data/guilds/<guildId>/mentor/cases.json               { nextId, cases: [...] }
 //     a case: { id, text, target, state, createdAt, lastRunId, lastScore,
-//       anchors?: [{ id, channelId, messageId, triggerId, addedAt, history, original }] }
+//       anchors?: [{ id, channelId, messageId, triggerId, addedAt, history, original,
+//         mode?, triggerKind?, sourceChannelId?, triggerGuessed?, pulled? }] }
+//     (the turn a moment was and the other channels it showed: src/mentor/anchor.js#resolveAnchor;
+//     an anchor stored before them has none and replays as a reply or a mention)
 //   data/guilds/<guildId>/mentor/feedback.json            [{ caseId, runId, reason, at }]
 //   data/guilds/<guildId>/mentor/runs/<caseId>/<runId>.json  one run, stored whole
 //
@@ -21,7 +24,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { writeJsonAtomic } from '../memory/store.js';
-import { isUsableAnchor } from './anchor.js';
+import { anchorKind, anchorMode, isSpontaneous, isUsableAnchor, storedWindows } from './anchor.js';
 
 /** The one target a new case takes. */
 const CASE_TARGET = 'reply';
@@ -75,23 +78,41 @@ function isId(value) {
   return typeof value === 'string' && value.trim() !== '';
 }
 
+/** The warning code of a moment whose trigger was guessed (no post ledger entry named it). */
+const TRIGGER_GUESSED = 'trigger-guessed';
+
 /**
  * A resolved moment (src/mentor/anchor.js#resolveAnchor) as it is stored,
- * without its id and time; an Error when it cannot be replayed: its history
- * must be a non-empty list of messages whose last one is not the persona's
- * (src/mentor/anchor.js#isUsableAnchor, the rule a replay applies).
+ * without its id and time, and the warnings to report with it; an Error when
+ * it cannot be replayed: its history must be a non-empty list of messages
+ * and its trigger not the persona's (src/mentor/anchor.js#isUsableAnchor,
+ * the rule a replay applies); a turn with a trigger needs its id, a
+ * spontaneous one (`mode` `interject` / `initiate`) none. The turn it was is
+ * kept when the moment carries it -- `mode` and `triggerKind` (null for a
+ * value a turn does not have), `sourceChannelId`, `triggerGuessed: true` --
+ * and its windows of other channels, cleaned (src/mentor/anchor.js#storedWindows).
+ * Warnings are kebab-case codes: `trigger-guessed` for a guessed trigger.
+ * @returns {{ moment: object, warnings: string[] }}
  */
 function checkedAnchor(anchor) {
   const history = anchor?.history;
+  const triggerOk = isId(anchor?.triggerId) || (isSpontaneous(anchor?.mode) && (anchor?.triggerId === null || anchor?.triggerId === undefined));
   const ok =
     isId(anchor?.channelId) &&
     isId(anchor?.messageId) &&
-    isId(anchor?.triggerId) &&
+    triggerOk &&
     isUsableAnchor(anchor) &&
     history.every((m) => m !== null && typeof m === 'object');
   if (!ok) throw new Error('the moment cannot be replayed: its chat is empty or ends with the persona');
   const original = Array.isArray(anchor.original) ? anchor.original.filter((text) => typeof text === 'string') : [];
-  return { channelId: anchor.channelId, messageId: anchor.messageId, triggerId: anchor.triggerId, history, original };
+  const moment = { channelId: anchor.channelId, messageId: anchor.messageId, triggerId: isId(anchor.triggerId) ? anchor.triggerId : null, history, original };
+  if (anchor.mode !== undefined) moment.mode = anchorMode(anchor.mode);
+  if (anchor.triggerKind !== undefined) moment.triggerKind = anchorKind(anchor.triggerKind);
+  if (anchor.sourceChannelId !== undefined) moment.sourceChannelId = isId(anchor.sourceChannelId) ? anchor.sourceChannelId : null;
+  if (anchor.triggerGuessed === true) moment.triggerGuessed = true;
+  const pulled = storedWindows(anchor.pulled);
+  if (pulled.length > 0) moment.pulled = pulled;
+  return { moment, warnings: moment.triggerGuessed ? [TRIGGER_GUESSED] : [] };
 }
 
 /**
@@ -140,14 +161,18 @@ export function createCaseStore({ dataDir, now = Date.now }) {
   return {
     /**
      * Store a new case in state `new`. With `anchor` (a resolved moment) the
-     * case starts with it as its anchor 1. `target` is always `reply`.
+     * case starts with it as its anchor 1, and the returned case carries
+     * `warnings` (kebab-case codes about that moment, never stored; see
+     * `checkedAnchor`) for the reply to report. `target` is always `reply`.
      * @param {string} guildId
      * @param {{ text: string, target: 'reply', anchor?: object }} input
+     * @returns {object}  The stored case; with an anchor, plus `warnings: string[]`.
      */
     add(guildId, { text, target, anchor } = {}) {
       if (target !== CASE_TARGET) throw new Error(`target must be ${CASE_TARGET}`);
       const clean = checkCaseText(text);
-      const moment = anchor === undefined ? null : checkedAnchor(anchor);
+      const checked = anchor === undefined ? null : checkedAnchor(anchor);
+      const moment = checked?.moment ?? null;
       const data = readCases(guildId);
       const createdAt = new Date(now()).toISOString();
       const item = {
@@ -163,7 +188,7 @@ export function createCaseStore({ dataDir, now = Date.now }) {
       data.cases.push(item);
       data.nextId += 1;
       writeJsonAtomic(casesFile(guildId), data);
-      return item;
+      return checked ? { ...item, warnings: checked.warnings } : item;
     },
 
     /**
@@ -190,7 +215,8 @@ export function createCaseStore({ dataDir, now = Date.now }) {
      * @param {number} id
      * @param {object} anchor  A resolved moment (src/mentor/anchor.js#resolveAnchor).
      * @param {{ max: number }} options  `mentor.anchor.max`, read by the caller now.
-     * @returns {{ item: object, anchor: object }}
+     * @returns {{ item: object, anchor: object, warnings: string[] }}  `warnings`: kebab-case codes about
+     *   the moment for the reply to report (see `checkedAnchor`), never stored.
      */
     addAnchor(guildId, id, anchor, { max } = {}) {
       const data = readCases(guildId);
@@ -200,13 +226,13 @@ export function createCaseStore({ dataDir, now = Date.now }) {
       const anchors = Array.isArray(item.anchors) ? item.anchors : [];
       const limit = anchorMax(max);
       if (anchors.length >= limit) throw new Error(`case ${item.id} has ${anchors.length} moments; at most ${limit} (mentor.anchor.max)`);
-      const moment = checkedAnchor(anchor);
+      const { moment, warnings } = checkedAnchor(anchor);
       if (anchors.some((a) => a.messageId === moment.messageId)) throw new Error(`that message is already a moment of case ${item.id}`);
       const nextId = anchors.reduce((top, a) => (Number.isInteger(a?.id) && a.id > top ? a.id : top), 0) + 1;
       const added = { id: nextId, ...moment, addedAt: new Date(now()).toISOString() };
       item.anchors = [...anchors, added];
       writeJsonAtomic(casesFile(guildId), data);
-      return { item, anchor: added };
+      return { item, anchor: added, warnings };
     },
 
     /** Mark a case retired; its runs and feedback stay on disk. Throws on an unknown id. */
