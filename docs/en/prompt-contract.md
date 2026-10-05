@@ -79,6 +79,7 @@ The blocks of the user message. Empty ones are omitted; the order below is the o
 | `<server>` | The CURRENT channel in full (Discord category and topic, purpose, what people write, tone, activity, last message, top writers; marked with `labels.server.currentMark`) plus only the neighbour channels that fed `<other_channels>` this turn; no other channel |
 | `<lore>` | Server lore entries whose keys occur in the recent messages (plus entries marked always): events, recurring characters, long-running stories. Like a lorebook: hundreds may exist, only the relevant few are shown |
 | `<self_facts>` | What the persona has claimed about itself |
+| `<recent>` | What happened on the server in the last `memory.recentHours` (default 72) hours: recent notes (short events the analyzer writes) and in-window episodes of members, shown by reference. A note appears only from the turn's own channel or from a channel everyone here can also read; in a private chat, only from channels every server member can read, with no episodes. Items about the people this turn addresses rank first; episodes already rendered in `<people>` are left out, at most 2 per member. Oldest first. A header with no item renders nothing. Switch `features.recent` (missing = on); cap `context.caps.recent` (default 1200) |
 | `<people>` | Member profiles; the caller first, marked with `labels.profile.interlocutorMark` (omitted on an `overheard` turn: the author talked about the persona, not to it); each with the persona's attitude and, for the caller, the **episodes**: moments the persona remembers about the two of them, with dates and short quotes |
 | `<other_channels>` | Up to `context.neighborMessages` messages per neighbouring channel, not older than `context.neighborMaxAgeMinutes`. When `features.mediaDescriptions` is on, a picture in a neighbour's line carries its cached caption when the describer cache already holds one; no new describe request is ever made for neighbours. A channel whose block is shown in `<channel_view>` is left out of `<other_channels>`; if the budget dropped the pulled block, the channel reappears here as an ordinary neighbour |
 | `<channel_view>` | Another channel pulled into this turn (`features.channelPull`). Contains one item per pulled channel: a header line (`labels.pull.header`), a read-only mark when applicable (`labels.server.readOnly`), an "older not shown" line when the window was cut, a "pictures not seen" count, earlier calls to the persona (with answered/unanswered/skipped marks), then the window lines. Lines use the same transcript format as `<chat>` but are numbered on after the chat (the chat has `#1`..`#N`, the pulled block starts at `#N+1`), so every `#n` is unique across blocks. Pictures appear as captions or blind tags only, never as attached images. Without `labels.pull.header` the block is empty |
@@ -91,6 +92,7 @@ The blocks of the user message. Empty ones are omitted; the order below is the o
 Budget priority (sections are trimmed from the bottom of this list first): system + task + clock + tempo + senses
 (never cut) → caller's profile with episodes → lookup (kept or dropped whole) → about_chat → self_facts → lore → server → chat (newest first) →
 pulled (`<channel_view>`, capped at `context.caps.pulled`; on a turn that answers a call from a read-only channel the pulled block sits before the chat instead of after it) →
+recent (capped at `context.caps.recent`) →
 other profiles → worn (kept or dropped whole) → other channels → emoji (entries from the bottom, then the whole block; `context.caps.emoji`) → gifs (same trimming; `context.caps.gifs`).
 
 Media in a transcript line, most informative form available: a picture attached to THIS request →
@@ -267,6 +269,10 @@ mentor.intended                          array of short strings: engine behaviou
 mentor.examples                          first line inside the `<examples>` block in a situations request: introduces the real moments
 mentor.original                          first line inside the `<original>` block in a score request: introduces the persona's rejected answer
 variety.intro                            first line of the `<worn>` block: tells the persona these devices are spent
+recent.header                            REQUIRED {hours}: the block's first line. A missing header or a missing `recent.line` means no `<recent>` block
+recent.line                              REQUIRED {date} {time} {text}: one note from the turn's own channel or an unnamed channel
+recent.lineIn                            OPTIONAL {date} {time} {channel} {text}: a note from another named channel; {channel} arrives without '#'. Without it `recent.line` is used
+recent.episode                           OPTIONAL {date} {name} {what}: a moment the persona remembers with {name} on {date}; no quote, no feeling. Without it the block shows notes only
 ```
 
 ## Output
