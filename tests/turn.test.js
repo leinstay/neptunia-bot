@@ -12,7 +12,6 @@ import {
   resolveMentions,
   createTurnRunner,
   parseRewatchPickDetailed,
-  parseLookupQuery,
   usableDestination,
   pickOtherProfiles,
   postLedgerSize,
@@ -1988,31 +1987,6 @@ test('createTurnRunner: rewatch -- a video that did not load renders its not-wat
 // ---------------------------------------------------------------------------
 // The web lookup: read links and the search on a question.
 
-test('parseLookupQuery: none (any case, a trailing dot), empty or blank -> no query; else the first line, cut to 200', () => {
-  assert.deepEqual(parseLookupQuery('none'), { query: null, reason: 'none' });
-  assert.deepEqual(parseLookupQuery('  NONE.\nextra'), { query: null, reason: 'none' });
-  assert.deepEqual(parseLookupQuery(''), { query: null, reason: 'empty' });
-  assert.deepEqual(parseLookupQuery(' \n \n'), { query: null, reason: 'empty' });
-  assert.deepEqual(parseLookupQuery(null), { query: null, reason: 'empty' });
-  assert.deepEqual(parseLookupQuery('\n  qui a gagné la finale  \nsecond'), { query: 'qui a gagné la finale', reason: 'ok' });
-  assert.equal([...parseLookupQuery('λ'.repeat(300)).query].length, 200);
-});
-
-test('parseLookupQuery: any first line starting with the word none is none, quotes and trailing punctuation aside', () => {
-  for (const raw of ['None needed.', '"none"', '`none`', "'None.'", 'none!', 'NONE -- nothing to look up', '\u201cnone\u201d', '``none``']) {
-    assert.deepEqual(parseLookupQuery(raw), { query: null, reason: 'none' }, raw);
-  }
-  assert.deepEqual(parseLookupQuery('nonexistent planets list'), { query: 'nonexistent planets list', reason: 'ok' });
-  assert.deepEqual(parseLookupQuery('nonetheless the score'), { query: 'nonetheless the score', reason: 'ok' });
-});
-
-test('parseLookupQuery: surrounding quotes/backticks and trailing punctuation are stripped from the query', () => {
-  assert.deepEqual(parseLookupQuery('"qui a gagné la finale ?"'), { query: 'qui a gagné la finale', reason: 'ok' });
-  assert.deepEqual(parseLookupQuery('`ώρα στην Αθήνα`.'), { query: 'ώρα στην Αθήνα', reason: 'ok' });
-  assert.deepEqual(parseLookupQuery("'C++ release date'"), { query: 'C++ release date', reason: 'ok' });
-  assert.deepEqual(parseLookupQuery('"..."'), { query: null, reason: 'empty' });
-});
-
 /** A raw message carrying link embeds. */
 function linkRaw(id, ts, embeds, content = 'κοίτα αυτό') {
   return { ...rawMessage({ id, ts, content }), embeds };
@@ -2140,7 +2114,6 @@ test('createTurnRunner: lookup -- the classifier gets the transcript and the can
   assert.ok(user.endsWith('</transcript>\n<candidate>\nZoë: ποιος κέρδισε τον τελικό;\n</candidate>'), user);
   assert.ok(!user.split('<candidate>')[0].includes('ποιος κέρδισε'), 'the trigger only in <candidate>');
   assert.equal(options.model, 'x/text');
-  assert.equal(options.maxOutputTokens, 60);
   assert.equal(options.timeoutMs, 25_000, 'a helper: llm.helperTimeoutMs, not the talk timeout');
   assert.equal(options.skipCalibration, true);
   assert.equal(options.countAgainstDailyCap, true);
@@ -2156,12 +2129,10 @@ test('createTurnRunner: lookup -- the classifier gets the transcript and the can
   assert.ok(turnUser.includes(`<lookup>\n${block}\n</lookup>`), turnUser);
 });
 
-test('createTurnRunner: lookup -- the classifier answer cap is web.search.classifierMaxOutputTokens, 60 when missing (config.json and the code fallback)', async () => {
+test('createTurnRunner: lookup -- the classifier answer cap is web.search.classifierMaxOutputTokens, the shipped value when missing', async () => {
   const shipped = JSON.parse(fs.readFileSync(new URL('../config.json', import.meta.url), 'utf8'));
-  assert.equal(shipped.web.search.classifierMaxOutputTokens, 60);
-
   const missing = await runLookupTurn({ llm: lookupLlm('none') });
-  assert.equal(missing.llm.classifierCalls[0].options.maxOutputTokens, 60);
+  assert.equal(missing.llm.classifierCalls[0].options.maxOutputTokens, shipped.web.search.classifierMaxOutputTokens);
   const set = await runLookupTurn({ hot: lookupHot({}, { search: { classifierMaxOutputTokens: 45 } }), llm: lookupLlm('none') });
   assert.equal(set.llm.classifierCalls[0].options.maxOutputTokens, 45);
 });
@@ -2291,6 +2262,177 @@ test('createTurnRunner: lookup -- senses.search reaches the request only when lo
     assert.equal(user.includes(labels.senses.search), hasKey);
     assert.ok(user.includes(labels.senses.linksRead), 'reading links needs no search key');
   }
+});
+
+// ---------------------------------------------------------------------------
+// Recall: the search of the server's own history beside the web search.
+
+const RECALL_TEXT = 'Ana a tiré sur le lapin le 1er octobre.';
+
+/** A fake createRecall()-shaped dependency: `available()` as given; `run()` records its arguments, then resolves `result`. */
+function fakeRecall({ available = true, result = { text: RECALL_TEXT, stretch: null, people: [] }, events = null } = {}) {
+  const runCalls = [];
+  return {
+    runCalls,
+    available: () => available,
+    run: async (args) => {
+      runCalls.push(args);
+      events?.push('server:start');
+      await new Promise((resolve) => setImmediate(resolve));
+      events?.push('server:end');
+      return { stats: {}, ...result };
+    },
+  };
+}
+
+/** One reply turn (`dm`: a private chat served for g1) with a web lookup and a recall wired. */
+async function runRecallTurn({ hot = lookupHot(), llm, lookup = fakeLookup(), recall = fakeRecall(), dm = false } = {}) {
+  const messages = [
+    rawMessage({ id: 'm1', ts: NOW - 5000, content: 'καλημέρα' }),
+    rawMessage({ id: 'm2', ts: NOW - 1000, authorName: 'Zoë', content: 'ποιος σκότωσε το κουνέλι;' }),
+  ];
+  const channel = fakeTurnChannel({ historyMessages: messages, ...(dm ? { id: 'dm1', dm: true } : {}) });
+  const turns = createTurnRunner({ hot, store: fakeStore(), llm, calibrator: identityCalibrator(), client: fakeClient(), lookup, recall, now: () => NOW });
+  const trigger = normalizedTrigger(messages[1]);
+  const { result, logs } = await withCapturedLogs(() =>
+    turns.runTurn({ channel, ...(dm ? { guildId: 'g1' } : {}), mode: 'reply', trigger, triggerKind: dm ? 'private' : 'mention' }),
+  );
+  return { result, logs, llm, lookup, recall, channel, trigger };
+}
+
+/** The `<lookup>` block of the turn's request, or null. */
+function turnLookupOf(llm) {
+  const match = /<lookup>\n([\s\S]*?)\n<\/lookup>/.exec(llm.turnCalls[0].messages[1].content);
+  return match ? match[1] : null;
+}
+
+/** The web part fakeLookup's result renders for `query`, as before recall. */
+function webPartOf(query) {
+  return [fill(labels.lookup.header, { query }), 'ευρήματα', fill(labels.lookup.sources, { list: 'example.com' })].join('\n');
+}
+
+test('createTurnRunner: recall -- a server: answer runs recall with the trigger, the turn\'s chat and the parsed forms; its text sits under the server header', async () => {
+  const llm = lookupLlm('server: κουνέλι, κουνελιού');
+  const { recall, lookup, trigger, channel } = await runRecallTurn({ llm });
+  assert.equal(lookup.searchCalls.length, 0, 'no web query was asked');
+  assert.equal(recall.runCalls.length, 1);
+  const args = recall.runCalls[0];
+  assert.equal(args.channel, channel);
+  assert.equal(args.guild, channel.guild);
+  assert.equal(args.guildId, 'g1');
+  assert.equal(args.selfId, 'self-id');
+  assert.equal(args.selfName, 'Bot');
+  assert.equal(args.candidate.id, trigger.id);
+  assert.deepEqual(args.history.map((m) => m.id), ['m1', 'm2']);
+  assert.deepEqual(args.server, { forms: ['κουνέλι', 'κουνελιού'], who: [], from: null, to: null });
+  assert.equal(turnLookupOf(llm), [labels.lookup.serverHeader, RECALL_TEXT].join('\n'));
+});
+
+test('createTurnRunner: recall -- web: and server: run both searches in parallel; the block carries the both-note, then both parts', async () => {
+  const events = [];
+  const lookup = fakeLookup();
+  const search = lookup.search;
+  lookup.search = async (...args) => {
+    events.push('web:start');
+    await new Promise((resolve) => setImmediate(resolve));
+    const found = await search(...args);
+    events.push('web:end');
+    return found;
+  };
+  const llm = lookupLlm('web: lapin chasse saison\nserver: κουνέλι');
+  const { recall } = await runRecallTurn({ llm, lookup, recall: fakeRecall({ events }) });
+  assert.equal(recall.runCalls.length, 1);
+  assert.deepEqual(lookup.searchCalls.map((c) => c.query), ['lapin chasse saison']);
+  assert.deepEqual(events.slice(0, 2).sort(), ['server:start', 'web:start'], 'both started before either ended');
+  assert.equal(
+    turnLookupOf(llm),
+    [labels.lookup.bothNote, labels.lookup.webHeader, webPartOf('lapin chasse saison'), labels.lookup.serverHeader, RECALL_TEXT].join('\n'),
+  );
+});
+
+test('createTurnRunner: recall -- a web-only or an old unlabelled answer runs no recall and renders the block exactly as before', async () => {
+  for (const answer of ['web: champions final', 'champions final']) {
+    const llm = lookupLlm(answer);
+    const { recall, lookup } = await runRecallTurn({ llm });
+    assert.equal(recall.runCalls.length, 0, answer);
+    assert.deepEqual(lookup.searchCalls.map((c) => c.query), ['champions final'], answer);
+    assert.equal(turnLookupOf(llm), webPartOf('champions final'), answer);
+  }
+});
+
+test('createTurnRunner: recall -- unavailable: a server: line is ignored and recall is never run; with no web search either, no classifier call', async () => {
+  const llm = lookupLlm('web: champions final\nserver: κουνέλι');
+  const { recall, lookup } = await runRecallTurn({ llm, recall: fakeRecall({ available: false }) });
+  assert.equal(recall.runCalls.length, 0);
+  assert.equal(lookup.searchCalls.length, 1);
+  assert.equal(turnLookupOf(llm), webPartOf('champions final'));
+
+  const none = await runRecallTurn({ llm: lookupLlm('server: κουνέλι'), lookup: fakeLookup({ hasKey: false }), recall: fakeRecall({ available: false }) });
+  assert.equal(none.llm.classifierCalls.length, 0);
+  assert.equal(none.recall.runCalls.length, 0);
+});
+
+test('createTurnRunner: recall -- with the web search unable to run, the classifier still runs for the server search', async () => {
+  const cases = [
+    { hot: lookupHot({ webLookup: false }), lookup: null },
+    { hot: lookupHot(), lookup: fakeLookup({ hasKey: false }) },
+  ];
+  for (const { hot, lookup } of cases) {
+    const llm = lookupLlm('web: champions final\nserver: κουνέλι');
+    const { recall } = await runRecallTurn({ hot, llm, lookup });
+    assert.equal(llm.classifierCalls.length, 1);
+    assert.equal(recall.runCalls.length, 1);
+    assert.equal(lookup?.searchCalls.length ?? 0, 0, 'the web part the answer asked for is not run');
+    assert.equal(turnLookupOf(llm), [labels.lookup.serverHeader, RECALL_TEXT].join('\n'));
+  }
+});
+
+test('createTurnRunner: recall -- a private chat never runs recall', async () => {
+  const withWeb = await runRecallTurn({ llm: lookupLlm('web: champions final\nserver: κουνέλι'), dm: true });
+  assert.equal(withWeb.result.outcome, 'spoke');
+  assert.equal(withWeb.recall.runCalls.length, 0);
+  assert.equal(withWeb.lookup.searchCalls.length, 1);
+  assert.equal(turnLookupOf(withWeb.llm), webPartOf('champions final'));
+
+  const noWeb = await runRecallTurn({ hot: lookupHot({ webLookup: false }), llm: lookupLlm('server: κουνέλι'), lookup: null, dm: true });
+  assert.equal(noWeb.llm.classifierCalls.length, 0, 'nothing can run: no classifier');
+  assert.equal(noWeb.recall.runCalls.length, 0);
+});
+
+test('createTurnRunner: recall -- a recall that found nothing leaves no server part', async () => {
+  const nothing = () => fakeRecall({ result: { text: null, stretch: null, people: [] } });
+  const both = await runRecallTurn({ llm: lookupLlm('web: champions final\nserver: κουνέλι'), recall: nothing() });
+  assert.equal(both.recall.runCalls.length, 1);
+  assert.equal(turnLookupOf(both.llm), webPartOf('champions final'));
+
+  const alone = await runRecallTurn({ llm: lookupLlm('server: κουνέλι'), recall: nothing() });
+  assert.equal(alone.recall.runCalls.length, 1);
+  assert.equal(turnLookupOf(alone.llm), null);
+});
+
+test('createTurnRunner: recall -- a stretch from recall reaches the block under its header', async () => {
+  const stretch = { channelId: 'c2', channelName: 'jardin', startTs: NOW - 3 * 24 * 3_600_000, lines: '>> [11:00] Ana: le lapin' };
+  const llm = lookupLlm('server: κουνέλι');
+  await runRecallTurn({ llm, recall: fakeRecall({ result: { text: RECALL_TEXT, stretch, people: [] } }) });
+  const heading = fill(labels.lookup.stretch, { date: new Date(stretch.startTs).toISOString().slice(0, 10), channel: 'jardin' });
+  assert.equal(turnLookupOf(llm), [labels.lookup.serverHeader, RECALL_TEXT, heading, stretch.lines].join('\n'));
+});
+
+test('createTurnRunner: recall -- lookup: classified carries what was asked as flags and counts, never a query, a form or a name', async () => {
+  const llm = lookupLlm('web: requête secrète\nserver: λαγός, λαγού\nwho: Ἀλέξανδρος\nwhen: 2026-09-01');
+  const { logs, recall } = await runRecallTurn({ llm });
+  const line = logs.find((l) => l.msg === 'lookup: classified');
+  assert.ok(line);
+  assert.equal(line.picked, true);
+  assert.equal(line.parse, 'ok');
+  assert.equal(line.web, true);
+  assert.equal(line.server, true);
+  assert.equal(line.forms, 2);
+  assert.equal(line.who, 1);
+  assert.equal(line.ranged, true);
+  assert.equal(recall.runCalls[0].server.from, Date.UTC(2026, 8, 1), 'when: is read in the bot time zone');
+  const all = JSON.stringify(logs);
+  for (const secret of ['secrète', 'λαγ', 'λέξανδρ']) assert.ok(!all.includes(secret), secret);
 });
 
 // ---------------------------------------------------------------------------

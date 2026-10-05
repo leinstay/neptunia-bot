@@ -54,6 +54,15 @@ test('parseLookupAnswer: the old single-line answer is still a web query, none i
   assert.equal([...parseLookupAnswer('x'.repeat(300)).web].length, 200);
 });
 
+test('parseLookupAnswer: the old shape -- none only as a whole first word in any wrapping; a line of punctuation alone is empty', () => {
+  for (const raw of ['"none"', "'None.'", 'none!', 'NONE -- nothing to look up', '“none”', '``none``', '  NONE.\nextra']) {
+    assert.deepEqual(parseLookupAnswer(raw), { web: null, server: null, reason: 'none' }, raw);
+  }
+  assert.equal(parseLookupAnswer('nonexistent planets list').web, 'nonexistent planets list');
+  assert.equal(parseLookupAnswer('nonetheless the score').web, 'nonetheless the score');
+  assert.deepEqual(parseLookupAnswer('"..."'), { web: null, server: null, reason: 'empty' });
+});
+
 test('parseLookupAnswer: labelled lines in any order and case; unlabelled lines are ignored', () => {
   const answer = ['Here you go:', 'WHO: Ἀλέξανδρος, alexandros', 'Server: "κουνέλι", κουνελιού, κουνέλι', '- **web:** rabbit hunting season', 'When: none'].join('\n');
   const parsed = parseLookupAnswer(answer, { timezone: 'UTC', now: NOW });

@@ -142,6 +142,10 @@ export const labels = {
     header: 'searched for: {query}',
     sources: 'from: {list}',
     none: 'the search found nothing useful',
+    webHeader: '[web part]',
+    serverHeader: '[server part]',
+    bothNote: '[both searches ran]',
+    stretch: '[stretch of {date} in #{channel}]',
   },
   affinity: {
     bands: {

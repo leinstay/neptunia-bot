@@ -7,6 +7,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseEnv, applyEnv, deepMerge, readConfig, need, isPlainObject } from '../src/config.js';
 import { roomQuestionChance } from '../src/behavior/spontaneous.js';
+import { RECALL_DEFAULTS, recallSettings } from '../src/behavior/recall.js';
 
 function tmpDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'nep-'));
@@ -194,4 +195,11 @@ test('config.json: the code fallback of spontaneous.roomQuestionChance is the sh
   const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
   const shipped = JSON.parse(fs.readFileSync(path.join(root, 'config.json'), 'utf8'));
   assert.equal(roomQuestionChance({}), shipped.spontaneous.roomQuestionChance);
+});
+
+test('config.json: the code fallbacks of the recall group are the shipped values', () => {
+  const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
+  const shipped = JSON.parse(fs.readFileSync(path.join(root, 'config.json'), 'utf8'));
+  assert.deepEqual(recallSettings({}), shipped.recall);
+  assert.deepEqual({ ...RECALL_DEFAULTS }, shipped.recall);
 });
