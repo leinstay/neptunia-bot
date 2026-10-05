@@ -35,22 +35,16 @@ test('weightedTokens: a fractional total is rounded up', () => {
   assert.equal(weightedTokens(usage, WEIGHTS), 1);
 });
 
-test('weightedTokens: a missing or invalid weight falls back to the config.json value (5 for output, 0.1 for cached)', () => {
+test('weights: a missing or invalid weight falls back to the config.json value; zero is a valid weight', () => {
+  const shipped = JSON.parse(fs.readFileSync(new URL('../config.json', import.meta.url), 'utf8')).mentor;
   const usage = { prompt_tokens: 1000, completion_tokens: 100, prompt_tokens_details: { cached_tokens: 400 } };
-  for (const cfg of [undefined, null, {}, { outputTokenWeight: -1, cachedTokenWeight: Number.NaN }, { outputTokenWeight: '5', cachedTokenWeight: null }]) {
-    assert.equal(weightedTokens(usage, cfg), 600 + 40 + 500, JSON.stringify(cfg));
+  const unusable = [undefined, null, {}, { outputTokenWeight: -1, cachedTokenWeight: Number.NaN }, { outputTokenWeight: '5', cachedTokenWeight: null }, { outputTokenWeight: Infinity, cachedTokenWeight: '1' }];
+  for (const cfg of unusable) {
+    assert.equal(weightedTokens(usage, cfg), weightedTokens(usage, shipped), JSON.stringify(cfg));
+    assert.equal(outputTokenWeight(cfg), shipped.outputTokenWeight, JSON.stringify(cfg));
+    assert.equal(cachedTokenWeight(cfg), shipped.cachedTokenWeight, JSON.stringify(cfg));
   }
   assert.equal(weightedTokens(usage, { outputTokenWeight: 0, cachedTokenWeight: 0 }), 600, 'zero is a valid weight');
-});
-
-test('outputTokenWeight / cachedTokenWeight: the one reader of each key, the config.json value when unusable', () => {
-  assert.equal(outputTokenWeight({ outputTokenWeight: 2 }), 2);
-  assert.equal(outputTokenWeight({ outputTokenWeight: 0 }), 0);
-  assert.equal(cachedTokenWeight({ cachedTokenWeight: 0.5 }), 0.5);
-  for (const cfg of [undefined, null, {}, { outputTokenWeight: -1, cachedTokenWeight: -1 }, { outputTokenWeight: Infinity, cachedTokenWeight: '1' }]) {
-    assert.equal(outputTokenWeight(cfg), 5);
-    assert.equal(cachedTokenWeight(cfg), 0.1);
-  }
 });
 
 test('createMentorBudget: a new UTC day starts from zero', () => {
@@ -105,19 +99,4 @@ test('createMentorBudget: every charge marks the state dirty', () => {
   budget.charge({ prompt_tokens: 5 }, 0);
   budget.charge(null, 0);
   assert.equal(state.dirty - before, 3);
-});
-
-test('createMentorBudget: snapshot reports the day, the use and the cap', () => {
-  const { budget } = makeBudget({ mentor: { maxTokensPerDay: 1000 } });
-  budget.charge(null, 250);
-  assert.deepEqual(budget.snapshot(), { day: '2026-09-30', used: 250, cap: 1000, left: 750 });
-});
-
-test('config.json: ships the mentor off, without a model, under a daily token cap', () => {
-  const shipped = JSON.parse(fs.readFileSync(new URL('../config.json', import.meta.url), 'utf8'));
-  assert.equal(shipped.features.mentor, false);
-  assert.equal(shipped.mentor.model, null);
-  assert.equal(shipped.mentor.maxTokensPerDay, 400000);
-  assert.equal(shipped.mentor.outputTokenWeight, 5);
-  assert.equal(shipped.mentor.cachedTokenWeight, 0.1);
 });

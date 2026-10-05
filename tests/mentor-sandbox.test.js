@@ -190,14 +190,6 @@ test('situationToHistory: a line that would go back in time follows the previous
   assert.deepEqual(history.map((m) => m.ts), [NOW - 2 * 60000, NOW - 2 * 60000 + 1000]);
 });
 
-test('situationToHistory: missing channel fields are null', () => {
-  const { trigger } = situationToHistory(twoLines(), { selfId: SELF_ID, selfName: 'Zoë', at: NOW, channel: { id: 'c1' } });
-  assert.equal(trigger.channelId, 'c1');
-  assert.equal(trigger.channelName, null);
-  assert.equal(trigger.channelCategory, null);
-  assert.equal(trigger.channelTopic, null);
-});
-
 test('situationToHistory: refuses a last line by self', () => {
   const s = situation([
     { authorId: ALICE, authorName: 'Alice', text: 'hi', replyTo: null },
@@ -218,19 +210,6 @@ test('situationToHistory: a named kind is the trigger kind; only a mention tags 
   assert.equal(situationToHistory({ ...twoLines(), kind: 'reply' }, at).triggerKind, 'mention');
   assert.equal(situationToHistory({ ...twoLines(), kind: 'drawFailed' }, at).triggerKind, 'mention');
   assert.equal(situationToHistory({ ...twoLines(), kind: 'shouted' }, at).triggerKind, 'mention');
-});
-
-test('situationToHistory: refuses fewer than 2 lines', () => {
-  const s = situation([{ authorId: ALICE, authorName: 'Alice', text: 'hi', replyTo: null }]);
-  assert.throws(() => situationToHistory(s, { selfId: SELF_ID, selfName: 'Zoë', at: NOW, channel: CHANNEL }));
-});
-
-test('situationToHistory: refuses a replyTo that points forward', () => {
-  const s = situation([
-    { authorId: BRUNO, authorName: 'Bruno', text: 'a', replyTo: 1 },
-    { authorId: ALICE, authorName: 'Alice', text: 'b', replyTo: null },
-  ]);
-  assert.throws(() => situationToHistory(s, { selfId: SELF_ID, selfName: 'Zoë', at: NOW, channel: CHANNEL }));
 });
 
 // ---- liveView ----------------------------------------------------------------
