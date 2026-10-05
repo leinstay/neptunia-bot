@@ -123,7 +123,7 @@
     "maxMs": 12000,
     "betweenMessagesMs": [700, 3500]
   },
-  "pace": { "prepareMs": 6000, "prepareSearchMs": 12000, "dropAfterMs": 60000, "typingWhilePreparing": false },
+  "pace": { "prepareMs": 6000, "prepareSearchMs": 12000, "dropAfterMs": 60000, "typingWhilePreparing": false, "unpromptedWaits": true },
   "split": { "minChars": 80, "maxTasks": 4, "contextMessages": 6, "maxOutputTokens": 300 },
   "route": { "contextMessages": 20, "maxChannels": 40, "purposeChars": 80, "maxOutputTokens": 120 },
   "elsewhere": { "settleSeconds": 90, "settleMaxSeconds": 300, "rememberPings": 20, "pingMaxAgeDays": 7 },

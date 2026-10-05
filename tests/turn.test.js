@@ -5621,11 +5621,12 @@ test('paceSettings: 0, a negative value or a non-number turns a limit off; a mis
   }
   assert.ok(missing.dropAfterMs > 0);
   assert.equal(paceSettings({ pace: { dropAfterMs: 0 } }).dropAfterMs, null);
-  assert.deepEqual(paceSettings({ pace: { prepareMs: 2500, prepareSearchMs: 7000, dropAfterMs: 9000, typingWhilePreparing: false } }), {
+  assert.deepEqual(paceSettings({ pace: { prepareMs: 2500, prepareSearchMs: 7000, dropAfterMs: 9000, typingWhilePreparing: false, unpromptedWaits: false } }), {
     prepareMs: 2500,
     prepareSearchMs: 7000,
     dropAfterMs: 9000,
     typingWhilePreparing: false,
+    unpromptedWaits: false,
   });
   assert.deepEqual(paceSettings({ pace: 'fast' }), missing, 'a group that is not an object counts as missing');
 });
@@ -5739,6 +5740,75 @@ test('runTurn: pace.prepareMs 0 waits for every helper, however slow', async () 
 
   assert.ok(userText(scene.llm).includes(CAPTION_SHOWN));
   assert.deepEqual(logs.find((l) => l.msg === 'turn: timings').late, []);
+});
+
+test('paceSettings: unpromptedWaits is on unless it is exactly false', () => {
+  assert.equal(paceSettings({ pace: { unpromptedWaits: false } }).unpromptedWaits, false);
+  for (const on of [true, undefined, null, 0, 'false']) {
+    assert.equal(paceSettings({ pace: { unpromptedWaits: on } }).unpromptedWaits, true, String(on));
+  }
+});
+
+// A turn nobody waits for (pace.unpromptedWaits): a spontaneous one and an overheard line.
+const UNHURRIED_TURNS = [
+  ['an initiate turn', (scene) => ({ channel: scene.channel, mode: 'initiate' })],
+  ['an overheard line', (scene) => ({ ...scene.params, triggerKind: 'overheard' })],
+];
+
+for (const [name, paramsOf] of UNHURRIED_TURNS) {
+  test(`runTurn: ${name} with pace.unpromptedWaits on has no deadline and no bar -- it waits for a slow helper`, async () => {
+    const caption = deferred();
+    const scene = paceScene({ caption, hot: paceHot({}, { prepareMs: 1000, prepareSearchMs: 3000, dropAfterMs: 5000, unpromptedWaits: true }) });
+
+    const running = withCapturedLogs(() => scene.turns.runTurn(paramsOf(scene)));
+    await settleUntil(() => scene.describer.calls > 0);
+    await settleUntil();
+    assert.equal(scene.timers.timers.length, 0, 'neither a deadline nor a bar is set');
+    assert.equal(scene.llm.calls.length, 0, 'the turn still waits');
+    caption.resolve();
+    const { result, logs } = await running;
+
+    assert.equal(result.outcome, 'spoke');
+    assert.ok(userText(scene.llm).includes(CAPTION_SHOWN), 'the slow caption enters the request');
+    const timings = logs.find((l) => l.msg === 'turn: timings');
+    assert.deepEqual(timings.late, []);
+    assert.equal(typeof timings.stages.captions, 'number');
+  });
+}
+
+test('runTurn: a mention with pace.unpromptedWaits on still cuts a slow helper at pace.prepareMs', async () => {
+  const caption = deferred();
+  const scene = paceScene({ caption, hot: paceHot({}, { prepareMs: 1000, dropAfterMs: 0, unpromptedWaits: true }) });
+
+  const running = withCapturedLogs(() => scene.turns.runTurn(scene.params));
+  await settleUntil(() => scene.describer.calls > 0 && scene.timers.live().length > 0);
+  const [deadline] = scene.timers.live();
+  assert.equal(deadline.ms, 1000);
+  scene.timers.fire(deadline);
+  const { result, logs } = await running;
+
+  assert.equal(result.outcome, 'spoke');
+  assert.ok(!userText(scene.llm).includes('a grey cat'), 'the late caption is absent');
+  assert.deepEqual(logs.find((l) => l.msg === 'turn: timings').late, ['captions']);
+  caption.resolve();
+});
+
+test('runTurn: with pace.unpromptedWaits false an initiate turn cuts a slow helper at pace.prepareMs, like a mention', async () => {
+  const caption = deferred();
+  const scene = paceScene({ caption, hot: paceHot({}, { prepareMs: 1000, dropAfterMs: 0, unpromptedWaits: false }) });
+
+  const running = withCapturedLogs(() => scene.turns.runTurn({ channel: scene.channel, mode: 'initiate' }));
+  await settleUntil(() => scene.describer.calls > 0 && scene.timers.live().length > 0);
+  const [deadline] = scene.timers.live();
+  assert.equal(deadline.ms, 1000);
+  scene.timers.fire(deadline);
+  const { result, logs } = await running;
+
+  assert.equal(result.outcome, 'spoke');
+  assert.ok(!userText(scene.llm).includes('a grey cat'), 'the late caption is absent');
+  const timings = logs.find((l) => l.msg === 'turn: timings');
+  assert.deepEqual([timings.mode, timings.triggerKind, timings.late], ['initiate', null, ['captions']]);
+  caption.resolve();
 });
 
 test('runTurn: a search the classifier asks for moves the deadline to pace.prepareSearchMs, counted from the turn start', async () => {

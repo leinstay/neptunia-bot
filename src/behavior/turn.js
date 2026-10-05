@@ -120,7 +120,7 @@ export function appendPostLedger(ledger, entry, size) {
 }
 
 /** `pace` when a key is missing: config.json's values. */
-const PACE_FALLBACK = Object.freeze({ prepareMs: 6000, prepareSearchMs: 12000, dropAfterMs: 60000, typingWhilePreparing: false });
+const PACE_FALLBACK = Object.freeze({ prepareMs: 6000, prepareSearchMs: 12000, dropAfterMs: 60000, typingWhilePreparing: false, unpromptedWaits: true });
 
 /**
  * The pace of a turn's preparation, read from `config` (the live config):
@@ -135,9 +135,13 @@ const PACE_FALLBACK = Object.freeze({ prepareMs: 6000, prepareSearchMs: 12000, d
  * turns it on; off as shipped): the typing indicator from the start of a turn
  * answering a direct call until its answer is in hand. Off, the indicator
  * shows only while the finished answer is being typed out, as before.
+ * `unpromptedWaits` (a missing key counts as on; only false turns it off): a
+ * turn nobody waits for (unhurried) gets neither the deadline nor the bar --
+ * it waits for every stage and posts once ready. Off, every turn keeps the same
+ * deadline and bar.
  * @param {object} config
  * @returns {{ prepareMs: number|null, prepareSearchMs: number|null, dropAfterMs: number|null,
- *   typingWhilePreparing: boolean }}
+ *   typingWhilePreparing: boolean, unpromptedWaits: boolean }}
  */
 export function paceSettings(config) {
   const pace = isPlainObject(config?.pace) ? config.pace : {};
@@ -150,6 +154,7 @@ export function paceSettings(config) {
     prepareSearchMs: limit(pace.prepareSearchMs, PACE_FALLBACK.prepareSearchMs),
     dropAfterMs: limit(pace.dropAfterMs, PACE_FALLBACK.dropAfterMs),
     typingWhilePreparing: pace.typingWhilePreparing === true,
+    unpromptedWaits: pace.unpromptedWaits !== false,
   };
 }
 
@@ -158,9 +163,23 @@ const PREPARE_STAGES = Object.freeze(['history', 'previews', 'captions', 'videos
 
 /**
  * The trigger kinds that are a direct call (a private chat message included): the typing
- * indicator may show while such a turn prepares and waits for its answer.
+ * indicator may show while such a turn prepares and waits for its answer, and its preparation
+ * keeps the deadline and the bar (see unhurried).
  */
 const DIRECT_CALLS = new Set(['mention', 'reply', 'name', 'followUp', 'private']);
+
+/**
+ * Whether nobody waits for a turn of `triggerKind` -- a spontaneous one (no trigger kind: an
+ * interject, an initiate, a noticed comment, a forced turn) or an overheard line -- so that, with
+ * `pace.unpromptedWaits` on, it prepares without a deadline or a bar. A drawFailed turn answers
+ * the direct call before it and keeps that call's pace.
+ * @param {TriggerKind|null} triggerKind
+ * @param {{ unpromptedWaits: boolean }} pace  paceSettings of the turn's config.
+ * @returns {boolean}
+ */
+function unhurried(triggerKind, pace) {
+  return pace.unpromptedWaits && triggerKind !== 'drawFailed' && !DIRECT_CALLS.has(triggerKind);
+}
 
 /** What a turn throws to itself once its bar (pace.dropAfterMs) has passed: caught by runTurnOnce. */
 const TOO_SLOW = Symbol('too-slow');
@@ -761,7 +780,8 @@ function taskInput({ part, queued, added, labels, channelId }) {
  * start, `pace.prepareSearchMs` once the search classifier asked for a
  * search). A helper still running then contributes nothing to this turn --
  * its block is absent, as when it fails -- and keeps running for its cache.
- * Every turn that reaches the reply request logs `turn: timings`.
+ * A turn nobody waits for (unhurried, `pace.unpromptedWaits`) has no such
+ * deadline and no bar: it waits for every helper. Every turn that reaches the reply request logs `turn: timings`.
  * `schedule(fn, ms)` (default: setTimeout) runs that deadline and the typing
  * indicator's refresh; it resolves a function that cancels it.
  */
@@ -2251,11 +2271,15 @@ export function createTurnRunner({
       const selfName = getSelfName(guildId);
       const now = turnStartedAt;
       const startedAt = now;
+      // The turn's pace. A turn nobody waits for (unhurried: a spontaneous or an overheard one,
+      // with pace.unpromptedWaits on) has neither the bar nor the preparation's deadline below.
+      const pace = paceSettings(config);
+      const waitsForAll = unhurried(triggerKind, pace);
       // The bar (pace.dropAfterMs, from the turn's start; a drawFailed turn has its own): the
       // answer must be in hand by then, or the turn is dropped unposted. At the bar every wait
       // below gives up (beforeBar throws TOO_SLOW), the typing indicator stops, and the reply
       // request is aborted -- its client sends no retry once its signal is aborted.
-      bar = createDeadline({ clock, startedAt, schedule, limitMs: paceSettings(config).dropAfterMs });
+      bar = createDeadline({ clock, startedAt, schedule, limitMs: waitsForAll ? null : pace.dropAfterMs });
       const barAbort = new AbortController();
       bar.reached.then(() => {
         stopTyping();
@@ -2369,9 +2393,9 @@ export function createTurnRunner({
       // turn's start; longer once the search classifier asked for a search). A stage still running
       // then contributes nothing -- its block is absent, as when it fails -- and keeps running for
       // its cache; nothing it settles later reaches this turn. A stage whose inputs were not ready
-      // by then is never started.
-      const pace = paceSettings(config);
-      deadline = createDeadline({ clock, startedAt, schedule, limitMs: pace.prepareMs });
+      // by then is never started. An unhurried turn has no deadline: it waits for every stage (a
+      // search asked for leaves it so: extend never sets a limit on a deadline without one).
+      deadline = createDeadline({ clock, startedAt, schedule, limitMs: waitsForAll ? null : pace.prepareMs });
       const stages = new Map();
       const track = (name, work, from = clock()) => {
         const stage = trackStage(work, {
