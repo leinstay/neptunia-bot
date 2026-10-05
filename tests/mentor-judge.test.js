@@ -2,7 +2,7 @@
 // (situations, scores and the diagnosis) and the pass rule over the medians.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseDiagnosis, parseSituations, parseScores, verdict } from '../src/mentor/judge.js';
+import { CAUSE_LAYERS, CHANGE_LAYERS, parseDiagnosis, parseSituations, parseScores, readDiagnosis, verdict } from '../src/mentor/judge.js';
 
 const ALICE = '111111111111111111';
 const BRUNO = '222222222222222222';
@@ -403,4 +403,45 @@ test('parseDiagnosis: long strings are clipped', () => {
   assert.equal(change.from.length, 1000);
   assert.equal([...change.to].length, 1000);
   assert.equal(change.why.length, 500);
+});
+
+test('parseDiagnosis: labels, variety, lore, channel and recent are layers of causes and changes', () => {
+  const layers = ['labels', 'variety', 'lore', 'channel', 'recent'];
+  const parsed = parseDiagnosis(
+    JSON.stringify(
+      diagnosis({
+        causes: layers.map((layer) => ({ layer, excerpt: `in ${layer}`, why: `blame ${layer}` })),
+        changes: layers.map((layer) => ({ layer, target: layer, from: '', to: 'shorter', why: `change ${layer}` })),
+      }),
+    ),
+  );
+  assert.deepEqual(parsed.causes.map((c) => c.layer), layers);
+  assert.deepEqual(parsed.changes.map((c) => c.layer), layers);
+  for (const layer of layers) {
+    assert.ok(CHANGE_LAYERS.includes(layer), layer);
+    assert.ok(CAUSE_LAYERS.includes(layer), layer);
+  }
+  assert.deepEqual(CAUSE_LAYERS.filter((layer) => !CHANGE_LAYERS.includes(layer)), ['missing']);
+});
+
+test('readDiagnosis: counts the causes and changes dropped for an unknown layer, nothing else', () => {
+  const raw = JSON.stringify(
+    diagnosis({
+      causes: [
+        { layer: 'weather', excerpt: 'x', why: 'no such layer' },
+        { layer: 'guild', excerpt: 'x' },
+        { layer: 'lore', excerpt: 'entry', why: 'kept' },
+      ],
+      changes: [
+        { layer: 'missing', target: 'x', to: 'y', why: 'missing is not a change layer' },
+        { layer: 'labels', target: 'senses.elsewhere', to: 'y', why: 'kept' },
+      ],
+    }),
+  );
+  const { diagnosis: parsed, unknownLayer } = readDiagnosis(raw);
+  assert.equal(unknownLayer, 2);
+  assert.deepEqual(parsed, parseDiagnosis(raw));
+  assert.deepEqual(parsed.causes.map((c) => c.layer), ['lore']);
+  assert.deepEqual(parsed.changes.map((c) => c.layer), ['labels']);
+  assert.deepEqual(readDiagnosis('not json'), { diagnosis: null, unknownLayer: 0 });
 });

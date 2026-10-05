@@ -7,6 +7,7 @@
 // comments and diagnosis are shown verbatim. Pure: a stored run object in,
 // text out.
 
+import { oneLine } from '../memory/clamp.js';
 import { AXES } from './judge.js';
 
 /** Discord's hard limit is 2000; the card stays well under it. */
@@ -174,6 +175,8 @@ function answerLines(answer) {
     for (const message of answer.messages) lines.push(`  ${String(message).replace(/\n/g, '\n  ')}`);
   }
   if (answer.reactions?.length) lines.push(`reactions: ${answer.reactions.join(' ')}`);
+  if (answer.gif?.handle) lines.push(`gif: ${answer.gif.handle}${answer.gif.caption ? ` (${oneLine(answer.gif.caption)})` : ''}`);
+  if (typeof answer.draw === 'string' && answer.draw) lines.push(`draw: ${indented(answer.draw)}`);
   if (answer.silent) lines.push('silent');
   lines.push(`facts: ${JSON.stringify(answer.facts ?? {})}`);
   if (answer.score) {
@@ -222,11 +225,15 @@ function diagnosisLines(diagnosis) {
 }
 
 /**
- * The file attached to the card: the case, the verdict, the reference, every
+ * The file attached to the card: the case, the models (the mentor's, the
+ * talk model and the `classifier.text` model of the variety pass; a run
+ * stored before that names none), the verdict, the reference, every
  * situation with its transcript (its header carries its anchor id for a real moment, then its median overall and
  * goal, `-` for none, unless the run was stored without them; a real moment
  * shows the persona's original answer after its transcript) and every
- * answer with its facts, points per axis and the mentor's comment. A run with
+ * answer with its messages, reactions, GIF (handle and library caption),
+ * drawing text, facts, points per axis and the mentor's comment. Every
+ * diagnosis layer is printed as stored. A run with
  * a diagnosis gets its section after the case (summary, causes, proposed
  * changes, marked as the mentor's unverified opinion); a diagnosis that
  * failed is named with its reason in the header. A `repair` block left on a
@@ -238,7 +245,7 @@ export function renderFile(run) {
   const lines = [
     `Mentor ${run?.kind === 'check' ? 'check' : 'run'} ${run?.id ?? '(not saved)'} -- case ${run?.caseId} (${run?.target})`,
     `started ${run?.startedAt ?? '-'}, finished ${run?.finishedAt ?? '-'}`,
-    `models: mentor ${run?.models?.mentor ?? '-'}, talk ${run?.models?.talk ?? '-'}, analyzer ${run?.models?.analyzer ?? '-'}`,
+    `models: mentor ${run?.models?.mentor ?? '-'}, talk ${run?.models?.talk ?? '-'}, classifier.text ${run?.models?.classifierText ?? '-'}`,
     `outcome: ${run?.error ? `error: ${run.error}` : outcome(run)}`,
   ];
   if (Array.isArray(run?.reasons) && run.reasons.length > 0) lines.push(`reasons: ${run.reasons.join('; ')}`);

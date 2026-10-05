@@ -240,10 +240,30 @@ export function verdict(scores, passCfg, groups, anchorNs) {
   return { passed: reasons.length === 0, medians, situations, reasons, passScore };
 }
 
-/** Where a proposed change may land. */
-const CHANGE_LAYERS = new Set(['rules', 'prompt', 'card', 'self', 'learned', 'guild', 'profile']);
+/**
+ * Where a proposed change may land: the prompt files (`rules`, `prompt`,
+ * `card`), `labels.json` (`labels`), the variety pass's `<worn>` (`variety`),
+ * and the stored memory (`self`, `learned`, `guild`, `profile`, `lore`, a
+ * channel note `channel`, the last hours `recent`).
+ */
+export const CHANGE_LAYERS = Object.freeze([
+  'rules',
+  'prompt',
+  'card',
+  'labels',
+  'variety',
+  'self',
+  'learned',
+  'guild',
+  'profile',
+  'lore',
+  'channel',
+  'recent',
+]);
 /** Where a cause may lie: a change layer, or something no layer says ('missing'). */
-const CAUSE_LAYERS = new Set([...CHANGE_LAYERS, 'missing']);
+export const CAUSE_LAYERS = Object.freeze([...CHANGE_LAYERS, 'missing']);
+const CHANGE_LAYER_SET = new Set(CHANGE_LAYERS);
+const CAUSE_LAYER_SET = new Set(CAUSE_LAYERS);
 const DIAGNOSIS_ITEMS = 5;
 const DIAGNOSIS_CHARS = { summary: 1500, excerpt: 300, target: 200, from: 1000, to: 1000, why: 500 };
 
@@ -254,26 +274,56 @@ function clipped(value, max) {
   return chars.length > max ? chars.slice(0, max).join('') : value;
 }
 
-/** The items of `list` with a known layer and a non-empty `why`, cleaned by `keys`, at most five. */
+/**
+ * The items of `list` with a known layer and a non-empty `why`, cleaned by
+ * `keys`, at most five; `unknownLayer` counts the objects dropped for a layer
+ * not in `layers`.
+ */
 function diagnosisItems(list, layers, keys) {
-  const out = [];
+  const items = [];
+  let unknownLayer = 0;
   for (const value of list) {
     const item = objectOf(value);
-    if (!item || !layers.has(item.layer)) continue;
+    if (!item) continue;
+    if (!layers.has(item.layer)) {
+      unknownLayer += 1;
+      continue;
+    }
     if (typeof item.why !== 'string' || !item.why.trim()) continue;
+    if (items.length === DIAGNOSIS_ITEMS) continue;
     const clean = { layer: item.layer };
     for (const key of keys) clean[key] = clipped(item[key], DIAGNOSIS_CHARS[key]);
-    out.push(clean);
-    if (out.length === DIAGNOSIS_ITEMS) break;
+    items.push(clean);
   }
-  return out;
+  return { items, unknownLayer };
+}
+
+/**
+ * `parseDiagnosis` with what it dropped: `diagnosis` is parseDiagnosis's
+ * value (null when the reply is not of the shape), `unknownLayer` the number
+ * of causes and changes dropped for a layer outside `CAUSE_LAYERS` /
+ * `CHANGE_LAYERS` (0 for a null diagnosis), for the caller's log.
+ * @param {string} raw  The mentor model's text.
+ * @returns {{ diagnosis: ReturnType<typeof parseDiagnosis>, unknownLayer: number }}
+ */
+export function readDiagnosis(raw) {
+  const value = jsonOf(raw ?? '');
+  if (!value || typeof value.summary !== 'string' || !value.summary.trim()) return { diagnosis: null, unknownLayer: 0 };
+  if (!Array.isArray(value.causes) || !Array.isArray(value.changes)) return { diagnosis: null, unknownLayer: 0 };
+  const causes = diagnosisItems(value.causes, CAUSE_LAYER_SET, ['excerpt', 'why']);
+  const changes = diagnosisItems(value.changes, CHANGE_LAYER_SET, ['target', 'from', 'to', 'why']);
+  return {
+    diagnosis: { summary: clipped(value.summary, DIAGNOSIS_CHARS.summary), causes: causes.items, changes: changes.items },
+    unknownLayer: causes.unknownLayer + changes.unknownLayer,
+  };
 }
 
 /**
  * The mentor model's opinion of why a case failed, validated. `summary` must
  * be a non-empty string (clipped to 1500 characters); `causes` and `changes`
- * must be arrays. A cause's `layer` is one of rules, prompt, card, self,
- * learned, guild, profile or missing; a change's the same without missing.
+ * must be arrays. A cause's `layer` is one of `CAUSE_LAYERS` (rules, prompt,
+ * card, labels, variety, self, learned, guild, profile, lore, channel, recent
+ * or missing); a change's one of `CHANGE_LAYERS` (the same without missing).
  * An item with another layer or without a non-empty `why` is dropped; at most
  * five of each are kept, in the order given. Strings are clipped (excerpt 300,
  * target 200, from and to 1000, why 500); a missing one becomes ''.
@@ -283,12 +333,5 @@ function diagnosisItems(list, layers, keys) {
  *   null when the reply is not of that shape.
  */
 export function parseDiagnosis(raw) {
-  const value = jsonOf(raw ?? '');
-  if (!value || typeof value.summary !== 'string' || !value.summary.trim()) return null;
-  if (!Array.isArray(value.causes) || !Array.isArray(value.changes)) return null;
-  return {
-    summary: clipped(value.summary, DIAGNOSIS_CHARS.summary),
-    causes: diagnosisItems(value.causes, CAUSE_LAYERS, ['excerpt', 'why']),
-    changes: diagnosisItems(value.changes, CHANGE_LAYERS, ['target', 'from', 'to', 'why']),
-  };
+  return readDiagnosis(raw).diagnosis;
 }
