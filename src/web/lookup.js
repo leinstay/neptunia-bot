@@ -280,7 +280,7 @@ export function createLookup({ hot, store, llm, state = memoryState(), pageFetch
         ],
         {
           model: classifierTextModel(config),
-          ...helperRequestOptions(config, { role: 'classifier.text', maxOutputTokens: linksCfg.maxOutputTokens, purpose: 'read-link' }),
+          ...helperRequestOptions(config, { role: 'classifier.text', maxOutputTokens: linksCfg.maxOutputTokens, purpose: 'read-link', long: true }),
         },
       );
     } catch (err) {
@@ -421,7 +421,7 @@ export function createLookup({ hot, store, llm, state = memoryState(), pageFetch
           ],
           {
             model: classifierTextModel(config),
-            ...helperRequestOptions(config, { role: 'classifier.text', maxOutputTokens: searchCfg.maxOutputTokens, purpose: 'search-summary' }),
+            ...helperRequestOptions(config, { role: 'classifier.text', maxOutputTokens: searchCfg.maxOutputTokens, purpose: 'search-summary', long: true }),
           },
         );
       } catch (err) {

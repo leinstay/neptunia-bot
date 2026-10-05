@@ -590,6 +590,7 @@ test('lookup: the link read and the search summary are helper requests (llm.help
   for (const { options } of tuned.llm.calls) {
     assert.equal(options.countAgainstDailyCap, true);
     assert.equal(options.skipCalibration, true);
+    assert.equal(options.long, true, 'a summary: the long hedge limit');
   }
 
   const unset = setup();

@@ -336,6 +336,7 @@ export function createRecall({ hot, store, llm, describer = null, now = Date.now
           purpose: 'recall-summary',
           signal,
           timeoutMs: Math.max(1, started + settings.timeoutMs - asked),
+          long: true,
         }),
       });
     } catch (err) {

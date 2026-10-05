@@ -126,6 +126,7 @@ export function createVarietyPass({ hot, store, llm, now = Date.now }) {
           purpose: 'variety',
           timeoutMs: settings.requestTimeoutMs,
           signal: controller.signal,
+          long: true,
         }),
       });
     } catch (err) {

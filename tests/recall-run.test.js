@@ -209,6 +209,7 @@ test('recall: forms are searched one after another in order; the summary reads t
   const { messages, options } = s.llmCalls[0];
   assert.equal(options.purpose, 'recall-summary');
   assert.equal(options.role, 'classifier.text');
+  assert.equal(options.long, true, 'a summary: the long hedge limit');
   assert.equal(messages[0].content, 'You are Zoë; 900.');
   const user = messages[1].content;
   assert.ok(user.includes('## 1 | 2026-10-01 | #general') && user.includes('## 2 | 2026-09-30 | #garden'), user);

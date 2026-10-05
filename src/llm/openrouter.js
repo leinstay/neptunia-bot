@@ -20,7 +20,9 @@
 //
 // The same module holds the read-only side of that counter (`capLeft`,
 // `llmCountToday`), the reason code of a rail refusal (`railReason`) and the
-// one spelling of an in-turn helper request (`helperRequestOptions`).
+// one spelling of an in-turn helper request (`helperRequestOptions`), whose
+// requests on the roles `llm.hedge` lists are hedged: a second attempt after a
+// short wait, the first answer taken (see `complete`).
 //
 // It is also the one place the prompt-cache marker is put on a request (see
 // `withCacheMarker`): after the estimate, so the rails never see it.
@@ -111,7 +113,10 @@ const HELPER_TIMEOUT_MS_FALLBACK = 30000;
  * turn-length `llm.timeoutMs`: while a helper is out it holds the persona's
  * one attention. `countAgainstDailyCap` and `skipCalibration` are not the
  * caller's to set. The model is not part of the set: the caller adds its own
- * (`{ model, ...helperRequestOptions(config, { ... }) }`).
+ * (`{ model, ...helperRequestOptions(config, { ... }) }`). The set carries the
+ * helper mark `helper: true` (never sent): only a marked request on a role
+ * `llm.hedge.roles` lists is hedged by `complete` (see `hedgeSettings`), so the
+ * talk request, the analyzer, the describers and the mentor never are.
  * Pure; `config` is the live config read at the moment of use.
  * @param {object|null|undefined} config  The whole live config.
  * @param {object} [request]
@@ -123,10 +128,15 @@ const HELPER_TIMEOUT_MS_FALLBACK = 30000;
  * @param {AbortSignal} [request.signal]      The caller's own abort signal, if it has one.
  * @param {number} [request.timeoutMs]        A helper with a clock of its own; else
  *   `llm.helperTimeoutMs`, else 30000 (config.json's value).
+ * @param {boolean} [request.long]            True for a helper whose answer is a summary of several
+ *   hundred tokens (recall, link read, search summary, variety): hedged, its whole call is limited by
+ *   `llm.hedge.longTimeoutMs` instead of `llm.hedge.timeoutMs`. Only `true` puts `long: true` in the
+ *   set (never sent); anything else leaves the key out.
  * @returns {{ role: string|undefined, maxOutputTokens: number|undefined, countAgainstDailyCap: true,
- *   skipCalibration: true, timeoutMs: number, purpose: string|undefined, signal: AbortSignal|undefined }}
+ *   skipCalibration: true, timeoutMs: number, purpose: string|undefined, signal: AbortSignal|undefined, helper: true,
+ *   long?: true }}
  */
-export function helperRequestOptions(config, { role, maxOutputTokens, purpose, signal, timeoutMs } = {}) {
+export function helperRequestOptions(config, { role, maxOutputTokens, purpose, signal, timeoutMs, long } = {}) {
   return {
     role,
     maxOutputTokens,
@@ -135,7 +145,49 @@ export function helperRequestOptions(config, { role, maxOutputTokens, purpose, s
     timeoutMs: timeoutMs ?? config?.llm?.helperTimeoutMs ?? HELPER_TIMEOUT_MS_FALLBACK,
     purpose,
     signal,
+    helper: true,
+    ...(long === true ? { long: true } : {}),
   };
+}
+
+/** `llm.hedge`, key by key, when the group is there but a key is missing or invalid: config.json's values. */
+const HEDGE_FALLBACK = Object.freeze({ roles: Object.freeze(['classifier.text']), afterMs: 2500, timeoutMs: 8000, longTimeoutMs: 20000 });
+
+/**
+ * The hedge settings of the live config, or null when `llm.hedge` is not an object (no hedge at
+ * all, every request as without it). Inside the group a key that is missing or invalid reads as
+ * config.json's: `roles` (the `options.role` values whose helper requests are hedged; not an array
+ * -> `['classifier.text']`), `afterMs` (how long the first attempt is given before a second one is
+ * sent; a finite number >= 0, 0 = no hedge; else 2500), `timeoutMs` (the limit of the whole
+ * hedged call, both attempts included; a finite number > 0, else 8000) and `longTimeoutMs` (the
+ * same limit for a helper marked `long`, whose answer is a summary of several hundred tokens; a
+ * finite number > 0, else 20000). Exists because the tail of a tiny request belongs to the
+ * provider: one slow classifier must not hold a whole turn.
+ * Pure; `config` is the whole live config read at the moment of use.
+ * @param {unknown} config
+ * @returns {{ roles: unknown[], afterMs: number, timeoutMs: number, longTimeoutMs: number }|null}
+ */
+export function hedgeSettings(config) {
+  const group = config?.llm?.hedge;
+  if (!isPlainObject(group)) return null;
+  const finite = (value) => typeof value === 'number' && Number.isFinite(value);
+  const limit = (value, fallback) => (finite(value) && value > 0 ? value : fallback);
+  return {
+    roles: Array.isArray(group.roles) ? group.roles : [...HEDGE_FALLBACK.roles],
+    afterMs: finite(group.afterMs) && group.afterMs >= 0 ? group.afterMs : HEDGE_FALLBACK.afterMs,
+    timeoutMs: limit(group.timeoutMs, HEDGE_FALLBACK.timeoutMs),
+    longTimeoutMs: limit(group.longTimeoutMs, HEDGE_FALLBACK.longTimeoutMs),
+  };
+}
+
+// The hedge of one request, or null to send it as ever: only a helper's set (`options.helper ===
+// true`, from `helperRequestOptions`) on a role `llm.hedge.roles` lists, with `afterMs` above 0.
+// `timeoutMs` is the limit of this call: `longTimeoutMs` for a set marked `long`.
+function hedgeOf(config, options) {
+  if (options.helper !== true || typeof options.role !== 'string') return null;
+  const hedge = hedgeSettings(config);
+  if (!hedge || hedge.afterMs <= 0 || !hedge.roles.includes(options.role)) return null;
+  return { afterMs: hedge.afterMs, timeoutMs: options.long === true ? hedge.longTimeoutMs : hedge.timeoutMs };
 }
 
 /**
@@ -511,6 +563,56 @@ function retryLimitFields(err) {
   return fields;
 }
 
+// The error of a non-ok answer: the status on `.statusCode`, the full (untrimmed) body on `.body`
+// for a caller that needs more than the 500-char message allows -- e.g. `/nep ping` picking
+// OpenRouter's `routing_funnel` diagnostic out of a "No endpoints found" error.
+async function httpErrorOf(response) {
+  const rawBody = await response.text();
+  const error = new Error(`OpenRouter HTTP ${response.status}: ${rawBody.slice(0, 500)}`);
+  error.statusCode = response.status;
+  error.body = rawBody;
+  return error;
+}
+
+// The parsed body of a 200. A 200 may be billed, so what goes wrong from here is thrown and never
+// retried: a `json.error` body, or a body that is not JSON.
+async function answerJsonOf(response) {
+  const json = await response.json();
+  if (json.error) throw new Error(`OpenRouter error: ${JSON.stringify(json.error).slice(0, 500)}`);
+  return json;
+}
+
+// One attempt of a hedged call, never rejecting (a loser's late failure is no unhandled
+// rejection): `{ json }` for an answer, else `{ err, answered, retryable }` -- `answered` when the
+// provider sent a status (an HTTP error, or an error after a 200), `retryable` when the ordinary
+// loop would retry it (a network failure, a timed-out attempt, a status in RETRY_STATUS).
+async function hedgeAttempt(send, signal) {
+  let response;
+  try {
+    response = await send(signal);
+    if (!response.ok) throw await httpErrorOf(response);
+  } catch (err) {
+    const status = err?.statusCode;
+    return { err, answered: Number.isInteger(status), retryable: !status || RETRY_STATUS.has(status) };
+  }
+  try {
+    return { json: await answerJsonOf(response) };
+  } catch (err) {
+    return { err, answered: true, retryable: false };
+  }
+}
+
+// The error a failed hedged call throws: the first of the highest rank -- a rail refusal (3) over
+// an error the provider answered with (2) over a network failure or a timeout (1).
+function mostInformative(failures) {
+  return failures.reduce((best, failure) => (failure.rank > best.rank ? failure : best)).err;
+}
+
+// The error of a hedged call cut at its limit (`llm.hedge.timeoutMs` or `longTimeoutMs`).
+function hedgeTimeoutError(ms) {
+  return Object.assign(new Error(`hedged request timed out after ${ms} ms`), { name: 'TimeoutError' });
+}
+
 /**
  * @param {object} deps
  * @param {string} deps.apiKey
@@ -519,9 +621,20 @@ function retryLimitFields(err) {
  * @param {object} deps.state             Persistent state with `llmDay` / `llmCount` fields.
  * @param {typeof fetch} [deps.fetchImpl]
  * @param {() => number} [deps.now]       Clock in ms, for the day rollover and a request's logged duration.
+ * @param {(fn: () => void, ms: number) => unknown} [deps.setTimer]  The hedge's timers (`setTimeout`).
+ * @param {(handle: unknown) => void} [deps.clearTimer]              Their cancel (`clearTimeout`).
  * @returns {{ complete: Function, modelEndpoints: Function, capLeft: (nowMs?: number) => number }}
  */
-export function createLlm({ apiKey, getConfig, calibrator, state, fetchImpl = fetch, now = Date.now }) {
+export function createLlm({
+  apiKey,
+  getConfig,
+  calibrator,
+  state,
+  fetchImpl = fetch,
+  now = Date.now,
+  setTimer = (fn, ms) => setTimeout(fn, ms),
+  clearTimer = (handle) => clearTimeout(handle),
+}) {
   /**
    * The requests `llm.maxRequestsPerDay` still allows today, read only: the cap, read now,
    * minus `llmCountToday` (the stored count of another UTC day reads as 0, so the whole cap is
@@ -550,6 +663,138 @@ export function createLlm({ apiKey, getConfig, calibrator, state, fetchImpl = fe
     }
     bumpDaily(state.data, LLM_DAILY, nowMs);
     state.markDirty();
+  }
+
+  // The one `llm: provider limit` line of a provider's quota of the day, thrown without a retry.
+  function logProviderLimit(options, model, limit) {
+    log.warn('llm: provider limit', {
+      role: stringOrNull(options.role),
+      model: stringOrNull(model),
+      status: limit.status,
+      limitSource: limit.limitSource,
+      provider: limit.provider,
+      kind: limit.kind,
+      retried: false,
+    });
+  }
+
+  /**
+   * One hedged call (see `complete`): attempt 1 now; attempt 2, the same body, at `hedge.afterMs`
+   * -- or at once when attempt 1 fails first with a retryable error (the hedge is the call's
+   * retry) -- unless the daily cap has no room for it. The first answer wins and the attempt
+   * still out is aborted. A failure while the other attempt is out waits for it; a non-retryable
+   * failure of attempt 1 alone and a provider's quota of the day are thrown at once. At
+   * `hedge.timeoutMs` from the start everything is aborted. The caller's `options.signal` aborts
+   * both. Never retried past its two attempts. Resolves with the winning JSON body.
+   * @param {(signal: AbortSignal) => Promise<Response>} send  One POST of the request body.
+   * @param {{ hedge: { afterMs: number, timeoutMs: number }, options: object, model: unknown, attemptTimeoutMs: number }} call
+   * @returns {Promise<{ json: object, attempt: number, hedged: boolean }>}
+   */
+  function hedgedCall(send, { hedge, options, model, attemptTimeoutMs }) {
+    return new Promise((resolve, reject) => {
+      const attempts = []; // { controller, done }, in the order sent
+      const failures = []; // { err, rank }, in the order they came
+      const timers = [];
+      let settled = false;
+      let secondTried = false;
+      const running = () => attempts.filter((attempt) => !attempt.done).length;
+
+      // Settle once: timers cleared, the caller's signal left, every attempt still out (never the winner) aborted.
+      const close = (winner) => {
+        settled = true;
+        for (const timer of timers) clearTimer(timer);
+        options.signal?.removeEventListener('abort', onAbort);
+        attempts.forEach((attempt, index) => {
+          if (index + 1 !== winner && !attempt.done) attempt.controller.abort();
+        });
+      };
+      const fail = (err) => {
+        if (settled) return;
+        close(0);
+        reject(err);
+      };
+      function onAbort() {
+        fail(options.signal.reason ?? new Error('request aborted'));
+      }
+
+      const settle = (number, outcome) => {
+        if (settled) return;
+        if (outcome.json) {
+          close(number);
+          resolve({ json: outcome.json, attempt: number, hedged: attempts.length > 1 });
+          return;
+        }
+        const { err } = outcome;
+        // A provider's quota of the day comes back in minutes: never hedged around.
+        const limit = providerLimitOf(err);
+        if (limit?.kind === 'daily') {
+          logProviderLimit(options, model, limit);
+          fail(err);
+          return;
+        }
+        failures.push({ err, rank: outcome.answered ? 2 : 1 });
+        if (running() > 0) return;
+        if (!secondTried) {
+          if (!outcome.retryable) {
+            fail(err); // attempt 1 alone, answered for good: the result, as without a hedge
+            return;
+          }
+          second();
+          if (running() > 0) return;
+        }
+        fail(mostInformative(failures));
+      };
+
+      const launch = () => {
+        const controller = new AbortController();
+        const attempt = { controller, done: false };
+        attempts.push(attempt);
+        const number = attempts.length;
+        const signals = [controller.signal, AbortSignal.timeout(attemptTimeoutMs)];
+        if (options.signal) signals.push(options.signal);
+        hedgeAttempt(send, AbortSignal.any(signals)).then((outcome) => {
+          attempt.done = true;
+          settle(number, outcome);
+        });
+      };
+
+      // The second attempt, tried once: counted like the first; with no room left under the
+      // daily cap it is never sent, and the refusal is kept as the call's most telling failure.
+      const second = () => {
+        if (settled || secondTried) return;
+        secondTried = true;
+        if (options.countAgainstDailyCap !== false) {
+          try {
+            countRequest(getConfig().llm?.maxRequestsPerDay);
+          } catch (err) {
+            failures.push({ err, rank: 3 });
+            return;
+          }
+        }
+        log.info('llm: hedge', {
+          role: stringOrNull(options.role),
+          purpose: stringOrNull(options.purpose),
+          model: stringOrNull(model),
+          afterMs: hedge.afterMs,
+        });
+        launch();
+      };
+
+      const startTimer = (fn, ms) => {
+        const handle = setTimer(fn, ms);
+        handle?.unref?.();
+        timers.push(handle);
+      };
+
+      options.signal?.addEventListener('abort', onAbort, { once: true });
+      launch();
+      if (hedge.afterMs < hedge.timeoutMs) startTimer(second, hedge.afterMs);
+      startTimer(() => {
+        // The cut itself comes first among the failures of its rank: a timeout, not a network error.
+        failures.unshift({ err: hedgeTimeoutError(hedge.timeoutMs), rank: 1 });
+        fail(mostInformative(failures));
+      }, hedge.timeoutMs);
+    });
   }
 
   /**
@@ -584,6 +829,25 @@ export function createLlm({ apiKey, getConfig, calibrator, state, fetchImpl = fe
    * response id, and `ms`, the time from the start of the first attempt to the
    * answer; null where the response or the caller omits a value), whatever its
    * role -- see `usageLogFields`.
+   * Hedged calls (`llm.hedge`, see `hedgeSettings`): a request carrying the
+   * helper mark (`options.helper === true`, set by `helperRequestOptions` only;
+   * never sent) whose `options.role` is listed in `llm.hedge.roles`, while
+   * `llm.hedge.afterMs` is above 0, never enters the retry loop above: attempt 1
+   * is sent; one answering before `afterMs` (a success or a non-retryable error)
+   * is the result as ever; at `afterMs` -- or at once when attempt 1 fails first
+   * with a retryable error -- attempt 2 is sent with the same body (logged once as
+   * `llm: hedge` with role, purpose, model, afterMs) and the first success wins,
+   * the other attempt aborted. A failure while the other attempt is out waits
+   * for it; when both fail the most telling error is thrown (a rail refusal over
+   * an error the provider answered with over a network failure or a timeout). At
+   * `llm.hedge.timeoutMs` from the start (`llm.hedge.longTimeoutMs` for a set
+   * marked `options.long === true`, also never sent) both are aborted and a
+   * `TimeoutError` is thrown. A provider's quota of the day is thrown at once, as above. Rails: the
+   * token cap is checked once; attempt 2 is counted against
+   * `llm.maxRequestsPerDay` when it is sent and is never sent without room under
+   * it. The winner's usage line adds `hedged` (whether attempt 2 was sent) and
+   * `attempt` (1 or 2, the winner); `ms` still runs from attempt 1's start.
+   * `options.timeoutMs` still cuts each attempt on its own.
    * `options.purpose` — what the request is for, a kebab-case code (`address`,
    * `variety`, `rewatch`, `lookup`, `read-link`, `search-summary`, `describe`,
    * ...): the helpers that share one role are told apart by it in the journal.
@@ -704,8 +968,42 @@ export function createLlm({ apiKey, getConfig, calibrator, state, fetchImpl = fe
     if (isPlainObject(options.reasoning)) body.reasoning = options.reasoning;
     // `options.purpose` and `options.origin` are for the usage line only: never put on `body`.
 
+    // One POST of this body, under the attempt's own signal.
+    const send = (signal) => fetchImpl(apiUrl(cfg.baseUrl, 'chat/completions'), {
+      method: 'POST',
+      headers: openRouterHeaders(apiKey),
+      body: JSON.stringify(body),
+      signal,
+    });
     // The start of the first attempt: the logged duration covers the retries and their backoff.
     const startedAt = now();
+    // The answered request, once: calibration, the over-cap warning and the usage line (`extra`
+    // fields appended to it).
+    const answer = (json, extra) => {
+      const text = json.choices?.[0]?.message?.content ?? '';
+      const usage = json.usage ?? {};
+      const finishReason = json.choices?.[0]?.finish_reason ?? undefined;
+      // The whole prompt as the provider counted it, its cached part included (see fullPromptTokens).
+      const promptTokens = fullPromptTokens(usage, getConfig(), marked);
+      if (options.skipCalibration !== true && promptTokens !== null) calibrator.observe(raw, promptTokens);
+      if (promptTokens !== null && promptTokens > requestTokenCap) {
+        log.warn('llm: provider counted more prompt tokens than the cap', { usage, estimated });
+      }
+      log.info('llm: usage', { ...usageLogFields(json, usage, body.model, options, marked, now() - startedAt), ...extra });
+      // `json.provider` is OpenRouter's own name for whichever upstream provider
+      // actually served the request (undefined when the response omits it) --
+      // surfaced so `/nep ping` can report it without a second request shape.
+      return { text: typeof text === 'string' ? text : '', usage, estimated, finishReason, provider: json.provider, promptTokens };
+    };
+
+    // A helper request on a hedged role: two attempts at most, never the retry loop below.
+    const hedge = hedgeOf(getConfig(), options);
+    if (hedge) {
+      if (options.signal?.aborted) throw options.signal.reason ?? new Error('request aborted');
+      const won = await hedgedCall(send, { hedge, options, model: body.model, attemptTimeoutMs: options.timeoutMs ?? cfg.timeoutMs });
+      return answer(won.json, { hedged: won.hedged, attempt: won.attempt });
+    }
+
     let lastError;
     for (let attempt = 0; attempt <= cfg.retries; attempt += 1) {
       if (attempt > 0) {
@@ -724,36 +1022,16 @@ export function createLlm({ apiKey, getConfig, calibrator, state, fetchImpl = fe
       try {
         const timeoutSignal = AbortSignal.timeout(options.timeoutMs ?? cfg.timeoutMs);
         const signal = options.signal ? AbortSignal.any([options.signal, timeoutSignal]) : timeoutSignal;
-        response = await fetchImpl(apiUrl(cfg.baseUrl, 'chat/completions'), {
-          method: 'POST',
-          headers: openRouterHeaders(apiKey),
-          body: JSON.stringify(body),
-          signal,
-        });
+        response = await send(signal);
 
         if (!response.ok) {
-          // Full (untrimmed) body kept on `.body` for a caller that needs more than the
-          // 500-char message allows -- e.g. `/nep ping` picking OpenRouter's
-          // `routing_funnel` diagnostic out of a "No endpoints found" error.
-          const rawBody = await response.text();
-          const detail = rawBody.slice(0, 500);
-          const error = new Error(`OpenRouter HTTP ${response.status}: ${detail}`);
-          error.statusCode = response.status;
-          error.body = rawBody;
+          const error = await httpErrorOf(response);
           if (!RETRY_STATUS.has(response.status)) throw error;
           // A provider's quota of the day: it comes back in minutes, not within the seconds of
           // `backoffMs`, so a retry only holds the caller (the persona's one attention).
           const limit = providerLimitOf(error);
           if (limit.kind === 'daily') {
-            log.warn('llm: provider limit', {
-              role: stringOrNull(options.role),
-              model: stringOrNull(body.model),
-              status: response.status,
-              limitSource: limit.limitSource,
-              provider: limit.provider,
-              kind: limit.kind,
-              retried: false,
-            });
+            logProviderLimit(options, body.model, limit);
             notRetried = error;
             throw error;
           }
@@ -769,22 +1047,7 @@ export function createLlm({ apiKey, getConfig, calibrator, state, fetchImpl = fe
       }
 
       // A 200 was received (and may be billed): whatever goes wrong from here is thrown, never retried.
-      const json = await response.json();
-      if (json.error) throw new Error(`OpenRouter error: ${JSON.stringify(json.error).slice(0, 500)}`);
-      const text = json.choices?.[0]?.message?.content ?? '';
-      const usage = json.usage ?? {};
-      const finishReason = json.choices?.[0]?.finish_reason ?? undefined;
-      // The whole prompt as the provider counted it, its cached part included (see fullPromptTokens).
-      const promptTokens = fullPromptTokens(usage, getConfig(), marked);
-      if (options.skipCalibration !== true && promptTokens !== null) calibrator.observe(raw, promptTokens);
-      if (promptTokens !== null && promptTokens > requestTokenCap) {
-        log.warn('llm: provider counted more prompt tokens than the cap', { usage, estimated });
-      }
-      log.info('llm: usage', usageLogFields(json, usage, body.model, options, marked, now() - startedAt));
-      // `json.provider` is OpenRouter's own name for whichever upstream provider
-      // actually served the request (undefined when the response omits it) --
-      // surfaced so `/nep ping` can report it without a second request shape.
-      return { text: typeof text === 'string' ? text : '', usage, estimated, finishReason, provider: json.provider, promptTokens };
+      return answer(await answerJsonOf(response));
     }
     throw lastError;
   }

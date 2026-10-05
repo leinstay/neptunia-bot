@@ -1839,6 +1839,8 @@ test('follow-up: the classifier request is address.md as system and a <candidate
   assert.equal(options.skipCalibration, true);
   assert.equal(options.timeoutMs, config.llm.helperTimeoutMs, 'llm.helperTimeoutMs, never the turn-length llm.timeoutMs');
   assert.equal(options.purpose, 'address', 'named on the usage line');
+  assert.equal(options.helper, true, 'spelled by helperRequestOptions, so llm.hedge applies');
+  assert.equal('long' in options, false, 'a one-word answer: the short hedge limit');
 
   llm.respond('no');
   await p;
@@ -5968,6 +5970,7 @@ test('events: a failed eavesdrop roll may roll roomQuestionChance and ask the ro
       timeoutMs: config.llm.helperTimeoutMs,
       purpose: 'room',
       signal: undefined,
+      helper: true,
     },
     'the helper request options: classifier.text, mention.followUpMaxOutputTokens, the daily cap, llm.helperTimeoutMs',
   );

@@ -51,8 +51,6 @@ import { MINUTE_MS, utcDay } from '../time.js';
 const MAX_WARM_LINKS_PER_MESSAGE = 1;
 // Only when web.links.prefillPerUserPerDay is missing (config.json always has it).
 const PREFILL_PER_USER_PER_DAY_FALLBACK = 10;
-// Only when llm.helperTimeoutMs is missing (config.json always has it).
-const HELPER_TIMEOUT_FALLBACK_MS = 30000;
 
 /**
  * How many items of one observed message a prefill may take: `value` (a
@@ -712,17 +710,10 @@ export function createMessageHandler({
           ],
           {
             model,
-            role: 'classifier.text',
-            maxOutputTokens: mentionCfg.followUpMaxOutputTokens,
-            countAgainstDailyCap: true,
-            skipCalibration: true,
-            // A helper's own short timeout (llm.helperTimeoutMs), never the
-            // turn-length llm.timeoutMs: while this call is in flight it
-            // holds the channel's follow-up slot, and every untagged line
-            // there is only held.
-            timeoutMs: config.llm?.helperTimeoutMs ?? HELPER_TIMEOUT_FALLBACK_MS,
-            // What the request is for, for the usage journal: an option, never part of the request body.
-            purpose: 'address',
+            // A helper's request: on llm.helperTimeoutMs, never the turn-length llm.timeoutMs, and
+            // hedged (llm.hedge) -- while this call is in flight it holds the channel's follow-up
+            // slot, and every untagged line there is only held.
+            ...helperRequestOptions(config, { role: 'classifier.text', maxOutputTokens: mentionCfg.followUpMaxOutputTokens, purpose: 'address' }),
           },
         );
         if (String(completion.text ?? '').trim()) {
