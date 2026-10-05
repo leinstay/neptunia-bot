@@ -12,6 +12,7 @@ import { isDue, buildMemoryRequest, applyMemoryUpdate, applyPrivateUpdate, creat
 import { createCalibrator, estimateTokens } from '../src/llm/tokens.js';
 import { formatTranscript } from '../src/discord/format.js';
 import { TokenLimitError } from '../src/llm/openrouter.js';
+import { DAY_MS } from '../src/time.js';
 import { labels } from './fixtures/labels.js';
 import { withCapturedLogs } from './fixtures/capture-logs.js';
 
@@ -1908,6 +1909,74 @@ test('applyMemoryUpdate: updateUser can never overwrite episodes via a normal pr
     assert.equal(profile.episodes.length, 1);
     assert.equal(profile.episodes[0].what, 'a real episode');
   });
+});
+
+/** Twenty stored weight-5 moments, added before EPISODES_CFG.now: a member at the default cap. */
+function fullHeavyEpisodes() {
+  return Array.from({ length: 20 }, (_, i) => ({ date: `2025-11-${String(i + 1).padStart(2, '0')}`, what: `βαριά στιγμή ${i + 1}`, weight: 5 }));
+}
+const SEED_EPISODES = { maxEpisodes: 20, maxNew: 20, now: Date.UTC(2025, 11, 1) };
+const LIGHT_WHATS = Array.from({ length: 6 }, (_, i) => `ελαφριά στιγμή ${i + 1}`);
+
+/** Six weight-1 moments over a member at the cap of heavy ones, in two batches of three
+ * (EPISODES_CFG.maxNew) a day apart, each through `apply(update, episodes)`. Every light moment
+ * is the lightest entry, so exactly the last K of them survive: K 4 would keep four, K 6 or
+ * more all six, K 0 none. Returns the light moments kept, in stored order. */
+function lightMomentsKept(apply, readEpisodes) {
+  for (const [n, whats] of [LIGHT_WHATS.slice(0, 3), LIGHT_WHATS.slice(3)].entries()) {
+    apply(whats.map((what) => ({ what, weight: 1 })), { ...EPISODES_CFG, now: EPISODES_CFG.now + n * DAY_MS });
+  }
+  const whats = readEpisodes().map((e) => e.what);
+  assert.equal(whats.length, 20, 'the list stays at the cap');
+  return whats.filter((what) => LIGHT_WHATS.includes(what));
+}
+
+test('applyMemoryUpdate: memory.keepNewestEpisodes reaches the merge, missing key = 5', () => {
+  const shipped = JSON.parse(fs.readFileSync(new URL('../config.json', import.meta.url), 'utf8'));
+  assert.equal(shipped.memory.keepNewestEpisodes, 5, 'the code fallback below equals config.json');
+  for (const [cfg, keep] of [
+    [MEMORY_CFG, 5],
+    [{ ...MEMORY_CFG, keepNewestEpisodes: 5 }, 5],
+    [{ ...MEMORY_CFG, keepNewestEpisodes: 2 }, 2],
+    [{ ...MEMORY_CFG, keepNewestEpisodes: 0 }, 0],
+  ]) {
+    withStore((store) => {
+      const guildId = 'g1';
+      store.touchUser(guildId, '1', 'Ἑλένη', Date.now());
+      store.addEpisodes(guildId, '1', fullHeavyEpisodes(), SEED_EPISODES);
+
+      const kept = lightMomentsKept(
+        (episodes, episodesCfg) =>
+          applyMemoryUpdate(store, guildId, { users: { 1: { episodes } } }, cfg, new Set(['1']), { episodes: episodesCfg }),
+        () => store.getUser(guildId, '1').episodes,
+      );
+
+      assert.deepEqual(kept, LIGHT_WHATS.slice(LIGHT_WHATS.length - keep), `keepNewestEpisodes ${cfg.keepNewestEpisodes}`);
+    });
+  }
+});
+
+test('applyPrivateUpdate: memory.keepNewestEpisodes reaches the private merge, missing key = 5', () => {
+  for (const [cfg, keep] of [
+    [MEMORY_CFG, 5],
+    [{ ...MEMORY_CFG, keepNewestEpisodes: 2 }, 2],
+    [{ ...MEMORY_CFG, keepNewestEpisodes: 0 }, 0],
+  ]) {
+    withStore((store) => {
+      const guildId = 'g1';
+      store.touchUser(guildId, 'u1', 'Ἑλένη', Date.now());
+      store.addPrivateEpisodes(guildId, 'u1', fullHeavyEpisodes(), SEED_EPISODES);
+
+      const kept = lightMomentsKept(
+        (episodes, episodesCfg) => applyPrivateUpdate(store, guildId, 'u1', { users: { u1: { episodes } } }, cfg, { episodes: episodesCfg }),
+        () => store.getPrivate(guildId, 'u1').episodes,
+      );
+
+      const label = `keepNewestEpisodes ${cfg.keepNewestEpisodes}`;
+      assert.deepEqual(kept, LIGHT_WHATS.slice(LIGHT_WHATS.length - keep), label);
+      assert.deepEqual(store.getUser(guildId, 'u1').episodes, [], `${label}: the public profile is untouched`);
+    });
+  }
 });
 
 // ---- applyMemoryUpdate: lore ---------------------------------------------------

@@ -851,13 +851,20 @@ function scoreAfterBatch(affinity, raw, relationships, cfg) {
   return Number.isFinite(affinity?.score) ? affinity.score : 0;
 }
 
-/** `addEpisodes` / `addPrivateEpisodes` options from the `episodes` argument. */
+/** `addEpisodes` / `addPrivateEpisodes` options from the `episodes` argument and `cfg`
+ * (`config.memory`): `keepNewest` = `memory.keepNewestEpisodes`, 5 (config.json's value) when the
+ * key is missing, 0 = eviction by weight then age alone (src/memory/episodes.js#mergeEpisodes).
+ * The guild apply, the private apply and the warmup's person run (whose `cfg` spreads
+ * `config.memory`) all merge through here, and none of them loses a moment on arrival. The
+ * warmup stamps its moments with the member's last sampled message, not the clock, so once
+ * stored they may rank below later stream moments (see mergeEpisodes). */
 function episodeOptions(episodes, cfg) {
   return {
     maxEpisodes: episodes.maxEpisodes,
     maxNew: episodes.maxNew,
     now: episodes.now,
     clampTolerance: cfg.clampTolerance,
+    keepNewest: cfg.keepNewestEpisodes ?? 5,
   };
 }
 
@@ -949,7 +956,8 @@ function guardedAliasOps(raw, profile) {
  *   src/memory/affinity.js#applyDelta).
  * @param {{ enabled: boolean, maxEpisodes: number, maxNew: number, now?: number }} [options.episodes]
  *   Only when `enabled`, each user's `raw.episodes` (a new-moments array) is folded in via
- *   `store.addEpisodes` (src/memory/episodes.js#mergeEpisodes). Absent/disabled -> ignored entirely.
+ *   `store.addEpisodes` (src/memory/episodes.js#mergeEpisodes), sparing the newest
+ *   `cfg.keepNewestEpisodes` (missing = 5) from eviction. Absent/disabled -> ignored entirely.
  * @param {{ enabled: boolean, maxEntries: number, now?: number }} [options.lore]
  *   Only when `enabled`, `update.lore` (the server's lorebook) is folded in via `store.setLore`
  *   (src/memory/lore.js#upsertLore, source: 'analyzer'). Absent/disabled -> ignored entirely.
