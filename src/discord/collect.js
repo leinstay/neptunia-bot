@@ -138,8 +138,9 @@ function normalizeAttachments(attachments, isVoice) {
  * instead of the usual per-message-index one, so a repost of the same video
  * shares one description-cache entry and the slim memory buffer never has to
  * store the URL to look it up again later (see src/memory/update.js
- * `observe()`/`analyze()`). A `kind: 'gif'` embed (tenor/giphy) keeps the
- * existing per-message-index id, unchanged. A `kind: 'link'` embed whose URL
+ * `observe()`/`analyze()`). A `kind: 'gif'` embed (a `gifv` embed or a GIF
+ * site, see classifyEmbed; `videoSites` keeps a video site's `gifv` a link)
+ * keeps the existing per-message-index id, unchanged. A `kind: 'link'` embed whose URL
  * is on one of `videoSites` takes `videoUrlCacheKey(url)` instead -- the same
  * id a typed link of that video gets (see normalizeLinks), so one video has
  * one id (and one video/still-frame cache entry) whether Discord embedded it
@@ -150,7 +151,7 @@ function normalizeEmbedLinks(idPrefix, embeds, embedTextChars, videoSites) {
   return [...(embeds ?? [])]
     .filter((embed) => embed?.url)
     .map((embed, index) => {
-      const classified = classifyEmbed(embed, { embedTextChars });
+      const classified = classifyEmbed(embed, { embedTextChars, videoSites });
       let id;
       if (classified.kind === 'link' && watchSites && videoSiteFor(classified.url, videoSites) !== null) {
         id = videoUrlCacheKey(classified.url);

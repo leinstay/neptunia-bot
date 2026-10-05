@@ -5,7 +5,8 @@
 //
 // - readLinks: a normal page link (never a video-site link -- the video
 //   describer owns those -- never an embed classified as anything but a link
-//   (a gif), never a `web.links.skipSites` host, never a URL whose path ends
+//   (a gif), never a GIF site's page (src/discord/media.js#isGifHostUrl),
+//   never a `web.links.skipSites` host, never a URL whose path ends
 //   with a picture/video/audio/archive/pdf extension) is fetched through the
 //   SSRF-guarded page fetcher (src/web/fetch-page.js; `web.acceptLanguage`
 //   sent as its Accept-Language) and condensed by the text classifier model through
@@ -28,7 +29,7 @@
 // Logs carry reason codes, counts and `host/path` -- never page text, an
 // excerpt, a query or the key.
 
-import { siteOf } from '../discord/media.js';
+import { isGifHostUrl, siteOf } from '../discord/media.js';
 import { videoSiteFor, safeLocation } from '../discord/video-sites.js';
 import { classifierTextModel } from '../behavior/mention.js';
 import { fillPromptTemplate } from '../behavior/prompt.js';
@@ -218,6 +219,7 @@ export function createLookup({ hot, store, llm, state = memoryState(), pageFetch
     if (!link?.id || !link.url) return false;
     if (link.kind !== undefined && link.kind !== 'link') return false;
     if (videoSiteFor(link.url, linksCfg.skipSites ?? [])) return false;
+    if (isGifHostUrl(link.url)) return false;
     if (videoSiteFor(link.url, config.media?.video?.sites ?? [])) return false;
     if (isBinaryPath(link.url)) return false;
     return true;

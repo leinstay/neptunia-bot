@@ -86,6 +86,12 @@ test('collectGifItems: gif embeds and gif attachments, the message\'s own then i
   ]);
 });
 
+test('collectGifItems: a gif embed of a Discord CDN link is not a library item (its signed URL expires)', () => {
+  const cdn = 'https://cdn.discordapp.com/attachments/1/2/loop.gif?ex=1&is=2&hm=3';
+  const items = collectGifItems(msg({ links: [gifLink('m1#e0', cdn), gifLink('m1#e1', 'https://klipy.com/gifs/dancing-cat')] }));
+  assert.deepEqual(items.map((item) => item.url), ['https://klipy.com/gifs/dancing-cat']);
+});
+
 test('collectGifItems: items without a url or an id are skipped; no message -> []', () => {
   assert.deepEqual(collectGifItems(msg({ links: [{ ...gifLink('e0'), url: null }], attachments: [{ ...gifAttachment('a1'), id: null }] })), []);
   assert.deepEqual(collectGifItems(null), []);
@@ -203,6 +209,15 @@ test('mergeGifs: a reset link entry is matched by url under a new embed id and k
   assert.equal(gifs.entries['m1#e0'].count, 1);
   assert.equal(gifs.entries['m1#e0'].messageId, 'm9');
   assert.equal(gifs.nextId, 2);
+});
+
+test('rankGifs: a GIF posted once yesterday outranks one posted seven times three years ago', () => {
+  const now = T0 + 3 * 365 * DAY;
+  const oldPosts = Array.from({ length: 7 }, (_, i) => msg({ id: `o${i}`, ts: T0 + i * DAY, attachments: [gifAttachment('old')] }));
+  const { gifs } = mergeGifs(undefined, [...oldPosts, msg({ id: 'n1', ts: now - DAY, attachments: [gifAttachment('new')] })]);
+  assert.equal(gifs.entries.old.count, 7);
+  assert.equal(gifs.entries.new.count, 1);
+  assert.deepEqual(rankGifs(gifs, 30).map((entry) => entry.key), ['new', 'old']);
 });
 
 test('rankGifs: a zero count ranks below any positive count, however recent', () => {

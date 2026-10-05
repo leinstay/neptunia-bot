@@ -1,5 +1,6 @@
 // The GIF library the persona builds from the chat: every GIF a member posts
-// (a tenor/giphy embed, or an attached .gif) is counted deterministically (no
+// (a GIF embed -- a `gifv` one of any site, or a tenor/giphy/klipy page, see
+// src/discord/media.js#classifyEmbed -- or an attached .gif) is counted deterministically (no
 // LLM) into data/guilds/<id>/gifs.json, and the persona can post one back by
 // its short handle (`<gif>g12</gif>`, see src/llm/parse.js and
 // src/behavior/turn.js). An entry is keyed by the describer's item id of the
@@ -17,7 +18,7 @@
 // attachment URLs expire).
 
 import { isPlainObject } from '../config.js';
-import { mediaParts } from '../discord/media.js';
+import { DISCORD_CDN_SITES, mediaParts, siteOf } from '../discord/media.js';
 import { sortByRank } from './ranking.js';
 
 /**
@@ -116,9 +117,10 @@ export function normalizeGifs(value) {
  * The GIFs of one normalized message (see src/discord/collect.js), the
  * message's own first, then each forwarded snapshot's: every attachment of
  * kind `gif` (`key` = its Discord id) and every embed link of kind `gif`
- * (tenor/giphy, see src/discord/media.js#classifyEmbed; `key` = its item id,
+ * (see src/discord/media.js#classifyEmbed; `key` = its item id,
  * `url` = the page link Discord embeds again when posted). Items without an
- * id or a URL are skipped. Every item carries the OUTER message's id and
+ * id or a URL are skipped, and so is a gif embed of a Discord CDN link (its
+ * signed URL expires, so it could not be posted back). Every item carries the OUTER message's id and
  * channel, like src/discord/media.js#collectPictures.
  * @param {object} message
  * @returns {{ key: string, kind: 'link'|'attachment', url: string, site?: string, name?: string,
@@ -146,6 +148,8 @@ export function collectGifItems(message) {
     }
     for (const link of Array.isArray(part.links) ? part.links : []) {
       if (link?.kind !== 'gif' || link.id == null || typeof link.url !== 'string' || !link.url) continue;
+      // A Discord CDN link's signed URL expires: posted back later it would not embed.
+      if (DISCORD_CDN_SITES.includes(siteOf(link.url))) continue;
       const key = String(link.id);
       items.push({
         key,

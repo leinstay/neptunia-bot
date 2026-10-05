@@ -47,6 +47,7 @@ import { isConfirmed, isStale } from '../memory/interests.js';
 import { topByRank } from '../memory/ranking.js';
 import { rankEmojiUsage } from '../memory/emoji-usage.js';
 import { gifHandleMap, normalizeGifs, rankGifs } from '../memory/gifs.js';
+import { clampText } from '../memory/clamp.js';
 import { sortEpisodesForDisplay, topEpisodes } from '../memory/episodes.js';
 import { RECENT_EPISODES_PER_MEMBER, episodeKey, memberIdOf, recentSettings, recentView } from '../memory/recent.js';
 import { matchLore } from '../memory/lore.js';
@@ -602,27 +603,31 @@ function emojiItems(index, usage, mediaCache, labels, emojiCfg) {
 
 /**
  * The `<gifs>` section's items: `labels.gifs.header` first, then one line
- * per GIF of the library -- the top `gifsCfg.max` (default 20) by rank
+ * per GIF of the library -- the top `gifsCfg.max` (default 40) by rank
  * (src/memory/gifs.js#rankGifs, `gifsCfg.halfLifeDays`, default 30). A helper
  * caption cached under the entry's `itemId` (the describer's cache; a `miss`
  * entry has no text) renders through `labels.gifs.entry` (`{id}`/`{text}`),
- * otherwise `labels.gifs.entryNoText` (`{id}`). `[]` when the library is
- * empty or the labels lack `header`/`entryNoText` (an older labels.json).
+ * cut to `gifsCfg.listChars` (default 70; 0 = whole) at a word boundary
+ * (src/memory/clamp.js#clampText, a hard limit) -- only here: the cached
+ * caption stays whole -- otherwise `labels.gifs.entryNoText` (`{id}`). `[]`
+ * when the library is empty or the labels lack `header`/`entryNoText` (an
+ * older labels.json).
  * @param {unknown} gifs            The library (store.getGifs).
  * @param {object|null} mediaCache  The describer cache (store.getMediaCache), read only.
  * @param {object} labels
- * @param {{ max?: number, halfLifeDays?: number }} [gifsCfg]  `config.gifs`.
+ * @param {{ max?: number, halfLifeDays?: number, listChars?: number }} [gifsCfg]  `config.gifs`.
  * @returns {string[]}
  */
 function gifItems(gifs, mediaCache, labels, gifsCfg) {
   const g = labels.gifs;
   if (!g?.header || !g.entryNoText) return [];
-  const max = Number.isInteger(gifsCfg?.max) && gifsCfg.max >= 0 ? gifsCfg.max : 20;
+  const max = Number.isInteger(gifsCfg?.max) && gifsCfg.max >= 0 ? gifsCfg.max : 40;
+  const listChars = gifsCfg?.listChars ?? 70;
   const chosen = rankGifs(gifs, gifsCfg?.halfLifeDays ?? 30).slice(0, max);
   if (chosen.length === 0) return [];
   const lines = chosen.map((entry) => {
     const cached = mediaCache?.[entry.itemId];
-    const text = cached && !cached.miss && typeof cached.text === 'string' ? cached.text.trim() : '';
+    const text = cached && !cached.miss && typeof cached.text === 'string' ? clampText(cached.text, listChars, { tolerance: 1 }) : '';
     return text && g.entry ? fill(g.entry, { id: entry.id, text }) : fill(g.entryNoText, { id: entry.id });
   });
   return [g.header, ...lines];
@@ -2001,7 +2006,7 @@ export function buildRequest(input) {
       // Below even the emoji: the GIF library, trimmed the same way (least used last).
       {
         name: 'gifs',
-        cap: caps.gifs ?? 600,
+        cap: caps.gifs ?? 900,
         keep: 'first',
         items: gifsOn ? gifItems(gifLibrary, input.mediaCache ?? null, labels, config.gifs) : [],
       },
