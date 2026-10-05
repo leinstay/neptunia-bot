@@ -2,7 +2,20 @@
 // features.relationships (docs/prompt-contract.md, "The analyzer").
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { emptyAffinity, affinityBand, applyDelta, decayAffinity, ignoreAdjustment, roundScore } from '../src/memory/affinity.js';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import {
+  emptyAffinity,
+  affinityBand,
+  applyDelta,
+  decayAffinity,
+  ignoreAdjustment,
+  roundScore,
+  bandGap,
+  relationshipStaleOf,
+  RELATIONSHIP_STALE_DEFAULTS,
+} from '../src/memory/affinity.js';
 
 // --- emptyAffinity -----------------------------------------------------
 
@@ -467,4 +480,188 @@ test('applyDelta: keeps decayedAt when it folds a delta', () => {
   const result = applyDelta(start, 5, 'x', { maxDelta: 15, historySize: 10, now: DECAY_T0 });
   assert.equal(result.score, 15);
   assert.equal(result.decayedAt, start.decayedAt);
+});
+
+// --- bandGap / relationshipStaleOf: when the relationship text is due --------
+
+test('bandGap: 0 inside the band, the distance to the nearest edge outside', () => {
+  for (const [score, band] of BAND_CASES) assert.equal(bandGap(score, band), 0, `${score} sits in ${band}`);
+  assert.equal(bandGap(64, 'fond'), 4);
+  assert.equal(bandGap(20, 'fond'), 5);
+  assert.equal(bandGap(-30, 'neutral'), 22);
+  assert.equal(bandGap(-70, 'dislike'), 10);
+  assert.equal(bandGap(61.5, 'fond'), 1.5);
+  assert.equal(bandGap(60, 'fond'), 0, 'the first point past an edge is still 0 away from it');
+  assert.equal(bandGap(-8, 'neutral'), 0);
+  assert.equal(bandGap(-100, 'devoted'), 160);
+});
+
+test('bandGap: an unknown band or a score that is not a number gives 0', () => {
+  assert.equal(bandGap(50, 'adoring'), 0);
+  assert.equal(bandGap(50, undefined), 0);
+  assert.equal(bandGap(NaN, 'fond'), 0);
+  assert.equal(bandGap('70', 'fond'), 0);
+});
+
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+
+test('RELATIONSHIP_STALE_DEFAULTS: equal the values of config.json', () => {
+  const tracked = JSON.parse(fs.readFileSync(path.join(ROOT, 'config.json'), 'utf8')).relationships;
+  assert.deepEqual(RELATIONSHIP_STALE_DEFAULTS, {
+    bandHysteresis: tracked.bandHysteresis,
+    rewriteOnDrift: tracked.rewriteOnDrift,
+    rewriteAfterMoves: tracked.rewriteAfterMoves,
+  });
+  assert.deepEqual(RELATIONSHIP_STALE_DEFAULTS, { bandHysteresis: 2, rewriteOnDrift: 8, rewriteAfterMoves: 6 });
+});
+
+const WRITTEN_MS = Date.UTC(2026, 9, 1, 12, 0, 0);
+const WRITTEN_AT = new Date(WRITTEN_MS).toISOString();
+
+/** A stored attitude history of `count` moves, the first `before` of them stamped before the text was written. */
+function movesAround(count, before = 0) {
+  return Array.from({ length: count }, (_, i) => ({
+    ts: new Date(WRITTEN_MS + (i < before ? -(before - i) : i - before + 1) * 3600_000).toISOString(),
+    delta: 1,
+    appliedDelta: 1,
+    score: i,
+    reason: 'μια κουβέντα',
+  }));
+}
+
+/** A view of a member with a written text, overriding any field. */
+function writtenView(overrides = {}) {
+  return { text: 'Φίλοι από παλιά.', score: 30, writtenScore: 30, writtenAt: WRITTEN_AT, history: [], hasReason: true, hasEpisodes: true, ...overrides };
+}
+
+const STALE_CFG = { rewriteOnBandChange: true, bandHysteresis: 2, rewriteOnDrift: 8, rewriteAfterMoves: 6 };
+
+test('relationshipStaleOf: a band change inside the hysteresis margin is not flagged, past it is cause band', () => {
+  // Written at 59 (fond); 61 is devoted, but only 1 point past the edge at 60.
+  assert.equal(relationshipStaleOf(writtenView({ writtenScore: 59, score: 61 }), STALE_CFG), null);
+  assert.deepEqual(relationshipStaleOf(writtenView({ writtenScore: 59, score: 62 }), STALE_CFG), { writtenAt: 'fond', now: 'devoted', cause: 'band' });
+  // Downward the same: written at 9 (warm), 7 is neutral but 1 point under the edge at 8.
+  assert.equal(relationshipStaleOf(writtenView({ writtenScore: 9, score: 7 }), STALE_CFG), null);
+  assert.deepEqual(relationshipStaleOf(writtenView({ writtenScore: 9, score: 6 }), STALE_CFG), { writtenAt: 'warm', now: 'neutral', cause: 'band' });
+});
+
+test('relationshipStaleOf: back and forth across one edge is never flagged inside the margin', () => {
+  // Written at 7.5 (neutral); the score wanders 8.5, 7, 9.9, 6.5: each is under 2 points from 8.
+  for (const score of [8.5, 7, 9.9, 6.5]) {
+    assert.equal(relationshipStaleOf(writtenView({ writtenScore: 7.5, score }), STALE_CFG), null, `score ${score}`);
+  }
+});
+
+test('relationshipStaleOf: bandHysteresis 0 flags a band change at the edge itself, as before the margin existed', () => {
+  const cfg = { ...STALE_CFG, bandHysteresis: 0 };
+  assert.deepEqual(relationshipStaleOf(writtenView({ writtenScore: 59, score: 60 }), cfg), { writtenAt: 'fond', now: 'devoted', cause: 'band' });
+});
+
+test('relationshipStaleOf: a drift of rewriteOnDrift points inside one band is cause drift', () => {
+  assert.equal(relationshipStaleOf(writtenView({ writtenScore: 26, score: 33.99 }), STALE_CFG), null, '7.99 points');
+  assert.deepEqual(relationshipStaleOf(writtenView({ writtenScore: 26, score: 34 }), STALE_CFG), { writtenAt: 'fond', now: 'fond', cause: 'drift' });
+  assert.deepEqual(relationshipStaleOf(writtenView({ writtenScore: 59, score: 51 }), STALE_CFG), { writtenAt: 'fond', now: 'fond', cause: 'drift' }, 'downward too');
+  // Inside the band margin a move of 8 points can still cross an edge: drift names it.
+  assert.deepEqual(relationshipStaleOf(writtenView({ writtenScore: 0, score: 8.5 }), STALE_CFG), { writtenAt: 'neutral', now: 'warm', cause: 'drift' });
+});
+
+test('relationshipStaleOf: band wins over drift and moves when several apply', () => {
+  const view = writtenView({ writtenScore: 26, score: 64, history: movesAround(8) });
+  assert.equal(relationshipStaleOf(view, STALE_CFG).cause, 'band');
+  assert.equal(relationshipStaleOf({ ...view, score: 40 }, STALE_CFG).cause, 'drift');
+});
+
+test('relationshipStaleOf: rewriteAfterMoves moves since the text was written is cause moves; no stamp counts the whole history', () => {
+  assert.equal(relationshipStaleOf(writtenView({ history: movesAround(5) }), STALE_CFG), null, '5 moves since the text');
+  assert.deepEqual(relationshipStaleOf(writtenView({ history: movesAround(6) }), STALE_CFG), { writtenAt: 'fond', now: 'fond', cause: 'moves' });
+  assert.equal(relationshipStaleOf(writtenView({ history: movesAround(9, 4) }), STALE_CFG), null, 'only the 5 moves after the stamp count');
+  assert.equal(relationshipStaleOf(writtenView({ history: movesAround(10, 4) }), STALE_CFG).cause, 'moves', '6 after the stamp');
+
+  const unstamped = writtenView({ writtenAt: undefined, history: movesAround(6, 6) });
+  assert.equal(relationshipStaleOf(unstamped, STALE_CFG).cause, 'moves', 'no stamp: every stored move counts');
+  assert.equal(relationshipStaleOf({ ...unstamped, writtenAt: 'not a date' }, STALE_CFG).cause, 'moves', 'an unreadable stamp counts as none');
+  assert.equal(relationshipStaleOf({ ...unstamped, history: movesAround(5, 5) }, STALE_CFG), null);
+});
+
+test('relationshipStaleOf: a move stamped at the moment the text was written is not a move since it', () => {
+  const sameBatch = [{ ts: WRITTEN_AT, delta: 3, appliedDelta: 3, score: 30, reason: 'ίδια παρτίδα' }];
+  const history = [...sameBatch, ...movesAround(5)];
+  assert.equal(relationshipStaleOf(writtenView({ history }), STALE_CFG), null);
+  const unreadable = [...movesAround(5), { ts: 'ποτέ', delta: 1 }, null];
+  assert.equal(relationshipStaleOf(writtenView({ history: unreadable }), STALE_CFG), null, 'a move with no readable time never counts');
+});
+
+test('relationshipStaleOf: zeros switch drift and moves off, rewriteOnBandChange false switches band off', () => {
+  const drifted = writtenView({ writtenScore: 26, score: 50 });
+  assert.equal(relationshipStaleOf(drifted, { ...STALE_CFG, rewriteOnDrift: 0 }), null);
+  const moved = writtenView({ history: movesAround(10) });
+  assert.equal(relationshipStaleOf(moved, { ...STALE_CFG, rewriteAfterMoves: 0 }), null);
+  const banded = writtenView({ writtenScore: 26, score: 64 });
+  assert.equal(relationshipStaleOf(banded, { ...STALE_CFG, rewriteOnBandChange: false, rewriteOnDrift: 0 }), null);
+  assert.equal(relationshipStaleOf(banded, { ...STALE_CFG, rewriteOnBandChange: false }).cause, 'drift', 'the switch reaches only band (and first)');
+});
+
+test('relationshipStaleOf: rewriteOnBandChange false keeps the first marker off too, as it always did', () => {
+  const empty = { text: '', score: 40, writtenScore: undefined, history: [], hasReason: true, hasEpisodes: true };
+  assert.equal(relationshipStaleOf(empty, { ...STALE_CFG, rewriteOnBandChange: false }), null);
+});
+
+test('relationshipStaleOf: an empty text with a score, reason or episodes is cause first', () => {
+  const empty = { text: '  ', score: 0, history: movesAround(8), hasReason: false, hasEpisodes: false };
+  assert.equal(relationshipStaleOf(empty, STALE_CFG), null, 'nothing to write a first version from; moves never apply to no text');
+  assert.deepEqual(relationshipStaleOf({ ...empty, score: 30 }, STALE_CFG), { writtenAt: 'none', now: 'fond', cause: 'first' });
+  assert.deepEqual(relationshipStaleOf({ ...empty, hasReason: true }, STALE_CFG), { writtenAt: 'none', now: 'neutral', cause: 'first' });
+  assert.deepEqual(relationshipStaleOf({ ...empty, hasEpisodes: true }, STALE_CFG), { writtenAt: 'none', now: 'neutral', cause: 'first' });
+  assert.deepEqual(relationshipStaleOf({ ...empty, text: undefined, score: -12 }, STALE_CFG), { writtenAt: 'none', now: 'cool', cause: 'first' });
+});
+
+test('relationshipStaleOf: no cause when nothing applies', () => {
+  assert.equal(relationshipStaleOf(writtenView(), STALE_CFG), null);
+  assert.equal(relationshipStaleOf(writtenView({ writtenScore: 26, score: 31, history: movesAround(5) }), STALE_CFG), null);
+});
+
+test('relationshipStaleOf: a missing relationshipScore counts as 0, a missing score as 0', () => {
+  assert.deepEqual(relationshipStaleOf(writtenView({ writtenScore: undefined, score: 30 }), STALE_CFG), { writtenAt: 'neutral', now: 'fond', cause: 'band' });
+  assert.equal(relationshipStaleOf(writtenView({ writtenScore: undefined, score: undefined }), STALE_CFG), null);
+});
+
+test('relationshipStaleOf: missing or unusable settings fall back to config.json (on, 2, 8, 6)', () => {
+  for (const cfg of [undefined, {}, { rewriteOnBandChange: 'yes', bandHysteresis: -1, rewriteOnDrift: 'x', rewriteAfterMoves: NaN }]) {
+    assert.equal(relationshipStaleOf(writtenView({ writtenScore: 59, score: 61 }), cfg), null, 'hysteresis 2');
+    assert.equal(relationshipStaleOf(writtenView({ writtenScore: 59, score: 62 }), cfg).cause, 'band');
+    assert.equal(relationshipStaleOf(writtenView({ writtenScore: 26, score: 34 }), cfg).cause, 'drift', 'drift 8');
+    assert.equal(relationshipStaleOf(writtenView({ history: movesAround(5) }), cfg), null);
+    assert.equal(relationshipStaleOf(writtenView({ history: movesAround(6) }), cfg).cause, 'moves', 'moves 6');
+  }
+});
+
+test('relationshipStaleOf: an empty history never flags moves, stamped or not', () => {
+  const unstamped = writtenView({ writtenAt: undefined, history: [] });
+  assert.equal(relationshipStaleOf(unstamped, { ...STALE_CFG, rewriteAfterMoves: 1 }), null);
+  assert.equal(relationshipStaleOf(writtenView({ history: [] }), { ...STALE_CFG, rewriteAfterMoves: 1 }), null);
+  assert.equal(relationshipStaleOf(writtenView({ history: undefined }), { ...STALE_CFG, rewriteAfterMoves: 1 }), null);
+});
+
+test('relationshipStaleOf: with no stamp a move whose own time cannot be read never counts', () => {
+  const junk = [null, { ts: 'ποτέ', delta: 1 }, { delta: 1 }, 'κάτι'];
+  const unstamped = writtenView({ writtenAt: undefined, history: [...junk, ...movesAround(5)] });
+  assert.equal(relationshipStaleOf(unstamped, STALE_CFG), null, '5 readable moves, the junk does not make 6');
+  assert.equal(relationshipStaleOf({ ...unstamped, history: [...junk, ...movesAround(6)] }, STALE_CFG).cause, 'moves');
+  assert.equal(relationshipStaleOf({ ...unstamped, writtenAt: 'not a date' }, STALE_CFG), null, 'an unreadable stamp: the same rule');
+});
+
+test('relationshipStaleOf: now is the band of the current score for drift and moves too, even across an edge', () => {
+  // Written at 53 (fond), now 61 (devoted): 1 point past the edge, inside the margin, so not
+  // band; 8 points of drift. `now` names where the score is, the band the request shows.
+  assert.deepEqual(relationshipStaleOf(writtenView({ writtenScore: 53, score: 61 }), STALE_CFG), { writtenAt: 'fond', now: 'devoted', cause: 'drift' });
+  assert.deepEqual(relationshipStaleOf(writtenView({ writtenScore: 59, score: 61, history: movesAround(6) }), STALE_CFG), {
+    writtenAt: 'fond',
+    now: 'devoted',
+    cause: 'moves',
+  });
+  assert.deepEqual(relationshipStaleOf(writtenView({ writtenScore: 26, score: 64 }), { ...STALE_CFG, rewriteOnBandChange: false }), {
+    writtenAt: 'fond',
+    now: 'devoted',
+    cause: 'drift',
+  });
 });

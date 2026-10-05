@@ -22,7 +22,7 @@ import { TokenLimitError } from '../llm/openrouter.js';
 import { isDescribable, mediaParts, stickerUrl } from '../discord/media.js';
 import { log } from '../log.js';
 import { MINUTE_MS } from '../time.js';
-import { emptyAffinity, roundScore, affinityBand, applyDelta } from './affinity.js';
+import { emptyAffinity, roundScore, affinityBand, applyDelta, relationshipStaleOf } from './affinity.js';
 import { emptyChannel } from './store.js';
 import { keywordMatches } from './lore.js';
 import { normalizeInterests, normalizeTopic } from './interests.js';
@@ -37,6 +37,7 @@ import { videoStateFromCache } from './describe.js';
 import { isVideoVisionOn } from './youtube-check.js';
 import { block, fillPromptTemplate, renderProfile } from '../behavior/prompt.js';
 import { effectiveAffinity } from '../behavior/private.js';
+import { voiceLimits } from './voice.js';
 
 const BACKOFF_MS = 15 * 60_000;
 const MIN_LIVE_BATCH = 20; // the live analyzer never shrinks below this many messages
@@ -75,6 +76,20 @@ export const MEMORY_LIMIT_DEFAULTS = {
   learnedChars: 160,
   learnedHalfLifeDays: 720,
 };
+
+/**
+ * The limit an apply clamps a relationship text to: `relationshipChars` (the caller's live
+ * `relationships.textChars`), else `relationships.textChars` of the `relationships` argument, by
+ * src/memory/voice.js#voiceLimits' rule -- the one copy (a finite number above 0, else
+ * config.json's 600), so the analyzer's `{{relationshipChars}}`, the voice request's `limit` and
+ * every store clamp of the text agree.
+ * @param {unknown} relationshipChars
+ * @param {object} [relationships]
+ * @returns {number}
+ */
+function relationshipLimitOf(relationshipChars, relationships) {
+  return voiceLimits({ relationships: { textChars: relationshipChars ?? relationships?.textChars } }).relationship;
+}
 
 /**
  * The log/outcome `detail` of a failed request: `error?.message`, trimmed to
@@ -142,8 +157,9 @@ export function isDue(buffer, nowMs, cfg, relationshipsCfg) {
 /**
  * The `{{fieldChars}}`/`{{maxDetails}}`/... placeholders `prompts.memory` may use, filled from
  * the live config so a prompt states the same limits the code actually clamps to. Missing config
- * keys fall back to MEMORY_LIMIT_DEFAULTS (config.json's own defaults); an unknown placeholder in
- * the prompt is left untouched by fillPromptTemplate regardless.
+ * keys fall back to MEMORY_LIMIT_DEFAULTS (config.json's own defaults), `{{relationshipChars}}`
+ * to src/memory/voice.js#voiceLimits' (the limit stage B states for the same text); an unknown
+ * placeholder in the prompt is left untouched by fillPromptTemplate regardless.
  * @param {object} config  Live config (`config.memory`, `config.relationships`, `config.lore`).
  * @param {string} selfName
  */
@@ -166,6 +182,7 @@ function memoryTemplateValues(config, selfName) {
     loreTextChars: config.lore?.textChars ?? MEMORY_LIMIT_DEFAULTS.loreTextChars,
     maxLearned: memoryCfg.maxLearned ?? MEMORY_LIMIT_DEFAULTS.maxLearned,
     learnedChars: memoryCfg.learnedChars ?? MEMORY_LIMIT_DEFAULTS.learnedChars,
+    relationshipChars: voiceLimits(config).relationship,
   };
 }
 
@@ -460,13 +477,16 @@ export function characterText(prompts, selfName) {
  *   a long entry can be skipped while a shorter, older one still fits, so the roster sent may
  *   have gaps anywhere, not only a cut tail.
  * @returns {{ messages: object[], consumed: number, shown: number, trimmed: number, rosterIds: string[],
- *   rosterCandidates: number, rosterTokens: number }}
+ *   rosterCandidates: number, rosterTokens: number, staleRelationships: number }}
  *   `consumed` is always the whole batch; `shown` of it made it into `<new_messages>` (the newest
  *   lines), the other `trimmed` did not fit the token cap (`shown + trimmed === consumed`).
  *   `rosterIds`: the members the request's `<known_members>` actually carries, in the order
  *   sent -- the only non-authors an answer may give an alias (applyMemoryUpdate's `aliasOnlyIds`).
  *   `rosterCandidates`: the roster entries offered to the budget (after `memory.aliasRosterSize`),
  *   sent or not; `rosterTokens`: the estimated tokens the sent entries took from the request.
+ *   `staleRelationships`: the profiles sent with a `relationshipStale` marker
+ *   (src/memory/affinity.js#relationshipStaleOf, settings `relationships.rewriteOnBandChange`,
+ *   `bandHysteresis`, `rewriteOnDrift`, `rewriteAfterMoves`); 0 with relationships off.
  */
 export function buildMemoryRequest({ prompts, config, calibrator, profiles, guildMemory, channels, messages, selfName, loreEntries, descriptions, videos, reads, nameOf, privateChat, rosterProfiles }) {
   const { timezone } = config.bot;
@@ -475,8 +495,6 @@ export function buildMemoryRequest({ prompts, config, calibrator, profiles, guil
     throw new Error('prompts.labels is incomplete: memory.privateNote and memory.privateChannel are required for a private batch');
   }
   const relationships = config.features?.relationships !== false;
-  // relationships.rewriteOnBandChange: a missing key counts as on, like features.*.
-  const rewriteOnBandChange = config.relationships?.rewriteOnBandChange !== false;
   const episodesOn = config.features?.episodes !== false;
   const loreOn = config.features?.lore !== false;
   const resolveName = typeof nameOf === 'function' ? nameOf : () => null;
@@ -484,6 +502,7 @@ export function buildMemoryRequest({ prompts, config, calibrator, profiles, guil
   const characterBlock = relationships ? block('character', characterText(prompts, selfName)) : '';
 
   const existingProfiles = {};
+  let staleRelationships = 0;
   for (const [id, profile] of Object.entries(profiles ?? {})) {
     const fields = pickProfileFields(profile);
     if (privateChat) {
@@ -510,22 +529,30 @@ export function buildMemoryRequest({ prompts, config, calibrator, profiles, guil
       // and the ignore-chance maths, not the analyzer, are what need the precise value.
       const band = affinityBand(score);
       fields.affinity = { score: roundScore(score), band, reason: resolveText(affinity.reason, resolveName) };
-      // The stored relationship text was written in another band than the one the score sits in
-      // now (`relationshipScore`, missing = 0): flag it so the analyzer rewrites it -- a slow drift
-      // never looks like a shift from inside one batch. An EMPTY text is flagged with
-      // `writtenAt: 'none'` once the profile has something a first version could be written from:
-      // a non-zero score, a non-empty reason, or stored episodes (the "dealing with each other in
-      // this batch" trigger is left to the model).
-      if (rewriteOnBandChange) {
-        const text = typeof fields.relationship === 'string' ? fields.relationship.trim() : '';
-        if (text) {
-          const writtenAt = affinityBand(Number.isFinite(profile?.relationshipScore) ? profile.relationshipScore : 0);
-          if (writtenAt !== band) fields.relationshipStale = { writtenAt, now: band };
-        } else {
-          const hasReason = typeof affinity.reason === 'string' && affinity.reason.trim() !== '';
-          const hasEpisodes = Array.isArray(profile?.episodes) && profile.episodes.length > 0;
-          if (score !== 0 || hasReason || hasEpisodes) fields.relationshipStale = { writtenAt: 'none', now: band };
-        }
+      // The stored relationship text no longer matches the score -- a slow drift never looks like
+      // a shift from inside one batch: flag it with its cause (`first`, `band`, `drift`, `moves`,
+      // see relationshipStaleOf) so the analyzer rewrites it. Measured from the score and the
+      // moment the text was written (`relationshipScore`, missing = 0; `relationshipWrittenAt`).
+      // An EMPTY text is flagged `first` once the profile has something a first version could be
+      // written from: a non-zero score, a non-empty reason, or stored episodes (the "dealing with
+      // each other in this batch" trigger is left to the model). A private view's affinity is the
+      // effective score with the private layer's own history (analyzePrivate): its text counts
+      // the private moves since it was written. The history is read here, never shown.
+      const stale = relationshipStaleOf(
+        {
+          text: fields.relationship,
+          score,
+          writtenScore: profile?.relationshipScore,
+          writtenAt: profile?.relationshipWrittenAt,
+          history: affinity.history,
+          hasReason: typeof affinity.reason === 'string' && affinity.reason.trim() !== '',
+          hasEpisodes: Array.isArray(profile?.episodes) && profile.episodes.length > 0,
+        },
+        config.relationships,
+      );
+      if (stale) {
+        fields.relationshipStale = stale;
+        staleRelationships += 1;
       }
     }
     if (episodesOn && Array.isArray(profile?.episodes) && profile.episodes.length > 0) {
@@ -640,6 +667,7 @@ export function buildMemoryRequest({ prompts, config, calibrator, profiles, guil
     // of the roster, and how often the roster itself was cut.
     rosterCandidates: rosterEntries.length,
     rosterTokens: stats.roster?.used ?? 0,
+    staleRelationships,
   };
 }
 
@@ -973,6 +1001,13 @@ function guardedAliasOps(raw, profile) {
  *   Omitted or false (every stream batch) -> an author's `character`/`style` are dropped and each
  *   non-blank one is counted in `portraitDropped`, so a batch can never rewrite a portrait outside
  *   the refresh's counters, daily cap and merge.
+ * @param {number} [options.relationshipChars]  The relationship text's limit (`relationships.textChars`,
+ *   the `{{relationshipChars}}` the request stated), read by the caller at the moment of use, so it
+ *   holds with `features.relationships` off too. Omitted -> `relationships.textChars`; either
+ *   validated by src/memory/voice.js#voiceLimits' rule (not a number above 0 -> 600).
+ *   A written text is clamped to it and stamped `relationshipScore` (the score after this batch's
+ *   delta) and `relationshipWrittenAt` (the batch clock, `relationships.now`, the time this batch's
+ *   attitude move is stamped with) -- see src/memory/store.js#applyProfileOps.
  * @returns {{ users: number, guild: boolean, self: boolean, affinity: number, relationships: number, channels: number, episodes: number, lore: number,
  *   learned: number, interestsChanged: number, aliasesChanged: number, aliasOnly: number, aliasesDropped: number,
  *   droppedUsers: number, droppedFields: number, portraitDropped: number, portraitRequests: { userId: string, reason: string }[] }}
@@ -992,7 +1027,7 @@ export function applyMemoryUpdate(
   update,
   cfg,
   knownUserIds,
-  { knownChannelIds = new Set(), aliasOnlyIds = new Set(), relationships, episodes, lore, timing, batchAuthorNames, portraitFields = false } = {},
+  { knownChannelIds = new Set(), aliasOnlyIds = new Set(), relationships, episodes, lore, timing, batchAuthorNames, portraitFields = false, relationshipChars } = {},
 ) {
   const result = {
     users: 0,
@@ -1016,6 +1051,7 @@ export function applyMemoryUpdate(
   if (!update || typeof update !== 'object' || Array.isArray(update)) return result;
 
   const { isKnownId, tokenize, tokenizeArray, tokenizeItemOps, tokenizeEpisodes } = makeTokenizers(store, guildId, knownUserIds, batchAuthorNames);
+  const relationshipLimit = relationshipLimitOf(relationshipChars, relationships);
 
   if (update.users && typeof update.users === 'object' && !Array.isArray(update.users)) {
     for (const [userId, raw] of Object.entries(update.users)) {
@@ -1087,9 +1123,11 @@ export function applyMemoryUpdate(
       const beforeRelationship = store.getUser(guildId, userId)?.relationship ?? '';
 
       // A written relationship text is stamped with the score this batch lands on, after its own
-      // delta (computed with the same pure maths adjustAffinity runs below).
+      // delta (computed with the same pure maths adjustAffinity runs below), and with this
+      // batch's clock (`profileOpsNow`), which also stamps that delta's history entry.
       const relationshipWritten = typeof ops.relationship === 'string' && ops.relationship.trim() !== '';
       const profileOpts = profileOpsOptions(cfg, profileOpsNow, seenAt);
+      profileOpts.relationshipChars = relationshipLimit;
       if (relationshipWritten) profileOpts.relationshipScore = scoreAfterBatch(store.getUser(guildId, userId)?.affinity, raw, relationships, cfg);
       store.applyProfileOps(guildId, userId, ops, profileOpts);
       result.users += 1;
@@ -1229,13 +1267,17 @@ function hasContent(value) {
  * @param {string} userId       The DM partner.
  * @param {unknown} update      Parsed model output; untrusted.
  * @param {object} cfg          `config.memory`.
- * @param {{ relationships?: object, episodes?: object, timing?: object, batchAuthorNames?: Map<string, string> }} [options]
+ * @param {{ relationships?: object, episodes?: object, timing?: object, batchAuthorNames?: Map<string, string>,
+ *   relationshipChars?: number }} [options]
  *   As for `applyMemoryUpdate` (`timing` from `computeSeenAt`, `batchAuthorNames` from
- *   `batchAuthorNamesMap`); there is no channel, lore or guild here.
+ *   `batchAuthorNamesMap`, `relationshipChars` the text's limit); there is no channel, lore or
+ *   guild here. A written private relationship is stamped in the private layer: the EFFECTIVE
+ *   score after this batch's delta and the batch clock (`relationshipWrittenAt`), the clock this
+ *   batch's private move is stamped with, so the move is not one since the text.
  * @returns {{ users: number, affinity: number, relationships: number, episodes: number, interestsChanged: number,
  *   dropped: { users: number, guild: boolean, channels: number, lore: number, self: number, portrait: number } }}
  */
-export function applyPrivateUpdate(store, guildId, userId, update, cfg, { relationships, episodes, timing, batchAuthorNames } = {}) {
+export function applyPrivateUpdate(store, guildId, userId, update, cfg, { relationships, episodes, timing, batchAuthorNames, relationshipChars } = {}) {
   const id = String(userId);
   const result = {
     users: 0,
@@ -1273,6 +1315,7 @@ export function applyPrivateUpdate(store, guildId, userId, update, cfg, { relati
   // relationship is stamped with the effective score this batch lands on.
   const relationshipWritten = typeof ops.relationship === 'string' && ops.relationship.trim() !== '';
   const privateOpts = profileOpsOptions(cfg, opsNow, seenAt);
+  privateOpts.relationshipChars = relationshipLimitOf(relationshipChars, relationships);
   if (relationshipWritten) {
     const privateScore = scoreAfterBatch(before?.affinity, raw, relationships, cfg);
     privateOpts.relationshipScore = effectiveAffinity(store.getUser?.(guildId, id)?.affinity, { score: privateScore }).score;
@@ -1516,11 +1559,12 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
    * who did not write in the batch (see `buildMemoryRequest`), of
    * `rosterCandidates` offered, taking `rosterTokens`. Of the non-authors,
    * only those sent may get anything from the answer: an alias.
+   * `staleRelationships`: how many profiles went with a `relationshipStale` marker.
    *
    * @param {string} guildId
    * @param {object[]} messages  Slim messages (oldest first) to summarize; NOT read from or removed off any buffer.
    * @returns {Promise<{ ok: boolean, usage: object|null, estimated: number, result: object|null, shown?: number, trimmed?: number,
-   *   roster?: number, rosterCandidates?: number, rosterTokens?: number, error?: Error }>}
+   *   roster?: number, rosterCandidates?: number, rosterTokens?: number, staleRelationships?: number, error?: Error }>}
    */
   async function analyze(guildId, messages) {
     let context;
@@ -1560,6 +1604,7 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
             lore,
             timing: computeSeenAt(messages),
             batchAuthorNames: batchAuthorNamesMap(messages),
+            relationshipChars: voiceLimits(hot.config).relationship,
           },
         );
 
@@ -1577,7 +1622,9 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
    * `messages` are one member's direct messages with the persona. The request
    * (see `buildMemoryRequest`'s `privateChat`) carries ONLY that member's
    * private layer, with the effective affinity (src/behavior/private.js
-   * #effectiveAffinity), plus their public profile as read-only prose and the
+   * #effectiveAffinity) carrying the private layer's own attitude history (only
+   * `relationshipStale`'s `moves` reads it; the model sees score, band and
+   * reason), plus their public profile as read-only prose and the
    * usual read-only guild/lore context; only `users[userId]` of the answer is
    * applied, to the private layer (`applyPrivateUpdate`). A success stamps the
    * private layer's `lastSeen` (and `firstSeen` the first time).
@@ -1585,8 +1632,9 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
    * @param {string} userId  The DM partner.
    * @param {object[]} messages  Slim buffered direct messages, oldest first.
    * @returns {Promise<{ ok: boolean, usage: object|null, estimated: number, result: object|null, shown?: number, trimmed?: number,
-   *   roster?: number, rosterCandidates?: number, rosterTokens?: number, error?: Error }>}
+   *   roster?: number, rosterCandidates?: number, rosterTokens?: number, staleRelationships?: number, error?: Error }>}
    *   The `roster*` counts are always 0 here: a private batch carries no `<known_members>`.
+   *   `staleRelationships` is 0 or 1: the partner's private text went with a marker or not.
    */
   async function analyzePrivate(guildId, userId, messages) {
     const id = String(userId);
@@ -1596,7 +1644,12 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
       () => {
         const publicProfile = store.getUser(guildId, id);
         const privateProfile = store.getPrivate(guildId, id) ?? {};
-        const view = { ...privateProfile, affinity: effectiveAffinity(publicProfile?.affinity, privateProfile.affinity) };
+        // The private moves and the private text's `relationshipWrittenAt` are both stamped on
+        // the private batch clock (applyPrivateUpdate), so `moves` compares like with like; a
+        // public move reaches the private text only through the effective score.
+        const privateHistory = Array.isArray(privateProfile.affinity?.history) ? privateProfile.affinity.history : [];
+        const affinity = { ...effectiveAffinity(publicProfile?.affinity, privateProfile.affinity), history: privateHistory };
+        const view = { ...privateProfile, affinity };
         return { profiles: { [id]: view }, channels: {}, privateChat: { publicProfile, now: now() } };
       },
       (update, { relationships, episodes }) => {
@@ -1606,7 +1659,13 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
           id,
           update,
           hot.config.memory,
-          { relationships, episodes, timing: computeSeenAt(messages), batchAuthorNames: batchAuthorNamesMap(messages) },
+          {
+            relationships,
+            episodes,
+            timing: computeSeenAt(messages),
+            batchAuthorNames: batchAuthorNamesMap(messages),
+            relationshipChars: voiceLimits(hot.config).relationship,
+          },
         );
         store.touchPrivateSeen(guildId, id, now());
         return result;
@@ -1719,10 +1778,10 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
     const { descriptions, videos, reads } = cachedMedia(guildId, messages);
 
     let completion;
-    let fit; // the request's { shown, trimmed, roster, rosterCandidates, rosterTokens }, reported with a success
+    let fit; // the request's { shown, trimmed, roster, rosterCandidates, rosterTokens, staleRelationships }, reported with a success
     let rosterIds = []; // the roster members the request carried: the only non-authors an answer may give an alias
     try {
-      const { messages: llmMessages, shown, trimmed, rosterIds: sentRoster, rosterCandidates, rosterTokens } = buildMemoryRequest({
+      const { messages: llmMessages, shown, trimmed, rosterIds: sentRoster, rosterCandidates, rosterTokens, staleRelationships } = buildMemoryRequest({
         prompts: hot.prompts,
         config: hot.config,
         calibrator,
@@ -1736,7 +1795,7 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
         nameOf: storeNameOf(store, guildId),
         ...input,
       });
-      fit = { shown, trimmed, roster: sentRoster.length, rosterCandidates, rosterTokens };
+      fit = { shown, trimmed, roster: sentRoster.length, rosterCandidates, rosterTokens, staleRelationships };
       rosterIds = sentRoster;
 
       completion = await llm.complete(llmMessages, {
@@ -1872,6 +1931,8 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
           roster: outcome.roster,
           rosterCandidates: outcome.rosterCandidates,
           rosterTokens: outcome.rosterTokens,
+          // Relationship markers sent; `relationships` (in counts) = texts actually rewritten.
+          staleRelationships: outcome.staleRelationships,
           ...counts,
           portraitRequests: portraitRequests.length,
           emojiUsage,
@@ -1909,7 +1970,14 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
         sizeFactors.delete(key);
         store.shiftPrivateBuffer(guildId, userId, messages);
         store.flush();
-        log.info('memory: private update applied', { guildId, consumed: messages.length, shown: outcome.shown, trimmed: outcome.trimmed, ...outcome.result });
+        log.info('memory: private update applied', {
+          guildId,
+          consumed: messages.length,
+          shown: outcome.shown,
+          trimmed: outcome.trimmed,
+          staleRelationships: outcome.staleRelationships,
+          ...outcome.result,
+        });
         return;
       }
       recordFailure(key, outcome, 'memory: private update', { guildId });
