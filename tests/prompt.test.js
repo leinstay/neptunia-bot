@@ -1647,6 +1647,33 @@ test('buildRequest: under a tight caps.people, the member asked about survives w
   assert.ok(request.stats.people.dropped > 0, 'at least one active participant is trimmed under the tight cap');
 });
 
+test('buildRequest: peopleShown names the members whose profile the budget kept, the interlocutor first', () => {
+  const trigger = makeMessage(7, NOW - MIN, { authorId: 'asker', authorName: 'Asker', content: 'what is Wanda up to lately' });
+  const interlocutor = { id: 'asker', names: ['Asker', 'Ásker'], character: 'curious' };
+  const otherProfiles = [
+    { id: 'p0', names: ['Member0'], character: 'short' },
+    { id: 'p1', names: ['Member1'], character: 'x'.repeat(4000) },
+  ];
+  const candidateProfiles = [
+    { id: 'target', names: ['Wanda', 'Wanda Más'], character: 'brief and sharp' },
+    { id: 'silent', names: ['Ταξιάρχης'], character: 'never named here' },
+  ];
+  const config = fakeConfig({ context: { caps: { interlocutor: 2500, aboutChat: 2500, people: 900, neighbors: 3000, server: 2500, lore: 1500 } } });
+  const request = buildRequest(
+    baseInput({ config, history: [trigger], trigger, triggerKind: 'mention', interlocutor, otherProfiles, candidateProfiles }),
+  );
+  assert.deepEqual(request.peopleShown, [
+    { id: 'asker', names: ['Asker', 'Ásker'] },
+    { id: 'target', names: ['Wanda', 'Wanda Más'] },
+    { id: 'p0', names: ['Member0'] },
+  ]);
+
+  // The interlocutor's block cut by its cap: not shown, not listed.
+  const tight = fakeConfig({ context: { caps: { interlocutor: 1, aboutChat: 2500, people: 900, neighbors: 3000, server: 2500, lore: 1500 } } });
+  const cut = buildRequest(baseInput({ config: tight, history: [trigger], trigger, triggerKind: 'mention', interlocutor, otherProfiles, candidateProfiles }));
+  assert.deepEqual(cut.peopleShown.map((person) => person.id), ['target', 'p0']);
+});
+
 // --- <people>: episodes of the members asked about (context.askedAboutEpisodes) -----
 
 /** Five moments of one member: heaviest-then-newest order is ε5, ε4, ε3, ε2, ε1. */
