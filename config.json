@@ -142,7 +142,8 @@
     "roomQuestionChance": 0.04,
     "eavesdropDelayMs": [5000, 40000],
     "minGapMinutes": 12,
-    "maxChannelSilenceHours": 72
+    "maxChannelSilenceHours": 72,
+    "someoneAroundMinutes": 120
   },
   "memory": {
     "model": null,

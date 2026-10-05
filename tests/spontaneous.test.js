@@ -11,6 +11,7 @@ import {
   isChannelDead,
   createSpontaneous,
   chooseRoomMode,
+  someoneAround,
 } from '../src/behavior/spontaneous.js';
 
 function snowflake(ts) {
@@ -1292,4 +1293,92 @@ test('spontaneous: eavesdropReady is the eavesdrop rails as one boolean, with no
   const readOnly = roomScene({ rng });
   const cannotSend = fakeChannel('c2', fakeGuild('g1'), { permissionsFor: () => ({ has: () => false }) });
   assert.equal(readOnly.spontaneous.eavesdropReady(cannotSend), false, 'a channel the bot cannot send in');
+});
+
+// ---------------------------------------------------------------------------
+// Server presence (spontaneous.someoneAroundMinutes): a tick starts a turn of
+// the persona's own only when somebody wrote somewhere on the server lately.
+
+test('someoneAround: open when any channel saw a message within the window, closed when all are older', () => {
+  const now = 1_000_000_000;
+  const cfg = { someoneAroundMinutes: 120 };
+  const old = { lastActivity: now - 150 * MINUTE };
+  const recent = { lastActivity: now - 100 * MINUTE };
+  assert.equal(someoneAround([old, recent], now, cfg), true, 'one recent channel is enough');
+  assert.equal(someoneAround([old, { lastActivity: now - 121 * MINUTE }], now, cfg), false, 'every channel older than the window');
+  assert.equal(someoneAround([{ lastActivity: 0 }], now, cfg), false, 'a channel without messages');
+  assert.equal(someoneAround([], now, cfg), false, 'no channels at all');
+});
+
+test('someoneAround: a channel whose last message is the persona\'s own post does not count', () => {
+  const now = 1_000_000_000;
+  const cfg = { someoneAroundMinutes: 120 };
+  const own = { lastActivity: now - 10 * MINUTE, ownPostAt: now - 10 * MINUTE + 300 };
+  const answered = { lastActivity: now - 5 * MINUTE, ownPostAt: now - 10 * MINUTE };
+  assert.equal(someoneAround([own], now, cfg), false, 'the persona\'s own post is the newest message');
+  assert.equal(someoneAround([own, answered], now, cfg), true, 'somebody wrote after the persona\'s post');
+});
+
+test('someoneAround: a non-positive, missing or non-number someoneAroundMinutes means no gate', () => {
+  const now = 1_000_000_000;
+  const dead = [{ lastActivity: now - 500 * HOUR }];
+  for (const cfg of [{ someoneAroundMinutes: 0 }, { someoneAroundMinutes: -5 }, {}, { someoneAroundMinutes: '120' }]) {
+    assert.equal(someoneAround(dead, now, cfg), true, JSON.stringify(cfg));
+  }
+});
+
+function presenceScene({ ages, someoneAroundMinutes, lastPostAt }) {
+  const guild = fakeGuild('g1');
+  const t = Date.UTC(2026, 0, 5, 12, 0, 0);
+  for (const [id, minutes] of Object.entries(ages)) {
+    guild.channels.cache.set(id, fakeChannel(id, guild, { lastMessageId: snowflake(t - minutes * MINUTE) }));
+  }
+  const client = { guilds: { cache: new Map([[guild.id, guild]]) } };
+  const store = fakeStore({ spontaneous: { g1: t } });
+  const calls = [];
+  const turns = fakeTurns({ runTurn: async (args) => { calls.push(args); return { outcome: 'spoke' }; }, lastPostAt });
+  const spontaneous = createSpontaneous({
+    hot: { config: baseConfig({ someoneAroundMinutes, maxChannelSilenceHours: 72 }) },
+    store,
+    client,
+    turns,
+    getGuildId: () => 'g1',
+    rng: () => 0.1,
+    now: () => t,
+  });
+  return { t, store, calls, spontaneous };
+}
+
+test('tick: nobody wrote anywhere within someoneAroundMinutes -- skipped, logged, pulled in like "not now"', async () => {
+  const scene = presenceScene({ ages: { c1: 150, c2: 300 }, someoneAroundMinutes: 120 });
+  const { logs } = await withCapturedLogs(() => scene.spontaneous.tick());
+
+  assert.equal(scene.calls.length, 0, 'no turn starts on a silent server');
+  const skipped = logs.filter((entry) => entry.msg === 'spontaneous: skipped');
+  assert.equal(skipped.length, 1);
+  assert.equal(skipped[0].reason, 'nobody-around');
+  assert.equal(skipped[0].guildId, 'g1');
+  const scheduled = scene.store.state.data.spontaneous.g1;
+  assert.ok(scheduled > scene.t && scheduled <= scene.t + 40 * MINUTE, `expected a 10-40min pull-in, got ${scheduled - scene.t}ms`);
+});
+
+test('tick: one channel with a message inside someoneAroundMinutes opens the gate for the whole server', async () => {
+  const scene = presenceScene({ ages: { c1: 150, c2: 30 }, someoneAroundMinutes: 120 });
+  await scene.spontaneous.tick();
+  assert.equal(scene.calls.length, 1);
+});
+
+test('tick: someoneAroundMinutes 0 never gates a tick', async () => {
+  const scene = presenceScene({ ages: { c1: 150, c2: 300 }, someoneAroundMinutes: 0 });
+  await scene.spontaneous.tick();
+  assert.equal(scene.calls.length, 1);
+});
+
+test('tick: the persona\'s own recent post (turns.lastPostAt) does not keep the server "alive"', async () => {
+  const t = Date.UTC(2026, 0, 5, 12, 0, 0);
+  // c1's newest message is the persona's own, 20 minutes ago; c2 last heard a member 300 minutes ago.
+  const lastPostAt = (channelId) => (channelId === 'c1' ? t - 20 * MINUTE + 500 : 0);
+  const scene = presenceScene({ ages: { c1: 20, c2: 300 }, someoneAroundMinutes: 120, lastPostAt });
+  await scene.spontaneous.tick();
+  assert.equal(scene.calls.length, 0);
 });

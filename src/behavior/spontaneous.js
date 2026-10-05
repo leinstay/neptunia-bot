@@ -164,6 +164,31 @@ export function isChannelDead(channel, now, cfg) {
 }
 
 /**
+ * Whether somebody is around on the server: some entry of `channels`
+ * (`[{ lastActivity, ownPostAt? }]`, epoch ms) saw a message within the last
+ * `cfg.someoneAroundMinutes`. A tick starts a turn of the persona's own only
+ * when this holds; a direct call never asks. `lastActivity` comes from the
+ * snowflake of the channel's last message (src/discord/collect.js#lastActivity),
+ * so it cannot tell who wrote it: a member's message and another bot's both
+ * count. `ownPostAt` (the persona's last post there, turns.lastPostAt, kept in
+ * memory only) is the one author-aware hint: a channel whose newest message is
+ * not newer than it ends on the persona's own post and does not count, so its
+ * own unanswered lines never keep the server "alive". After a restart that hint
+ * is gone and the persona's own last post counts like anyone's until a member
+ * writes. A `someoneAroundMinutes` that is not a positive number means no gate.
+ * @param {{ lastActivity: number, ownPostAt?: number }[]} channels
+ * @param {number} now
+ * @param {{ someoneAroundMinutes?: number }} cfg  config.spontaneous
+ * @returns {boolean}
+ */
+export function someoneAround(channels, now, cfg) {
+  const minutes = cfg.someoneAroundMinutes;
+  if (!(typeof minutes === 'number' && minutes > 0)) return true;
+  const since = now - minutes * MINUTE_MS;
+  return channels.some(({ lastActivity: last, ownPostAt = 0 }) => last > 0 && last > ownPostAt && last >= since);
+}
+
+/**
  * Pick a channel to speak in, favouring recent activity without always
  * picking the same one. `candidates = [{ channel, lastActivity }]`.
  */
@@ -304,6 +329,14 @@ export function createSpontaneous({
     return candidates;
   }
 
+  /** Every channel the persona can read as someoneAround's input: its last message and the persona's last post there. */
+  function presence(guild, config) {
+    return readableChannels(guild, config.bot).map((channel) => ({
+      lastActivity: lastActivity(channel),
+      ownPostAt: turns.lastPostAt(channel.id),
+    }));
+  }
+
   function makeChooseMode(cfg) {
     return (history, ts) => chooseMode(history, ts, cfg, rng);
   }
@@ -368,6 +401,14 @@ export function createSpontaneous({
     }
 
     const candidates = channelCandidates(guild, config, cfg, t);
+    // Presence is server-wide: every channel the persona can read counts, not
+    // only the candidates (the one it just spoke in is held back by minGapMinutes).
+    if (candidates.length > 0 && !someoneAround(presence(guild, config), t, cfg)) {
+      schedule[guildId] = t + between(REWAKE_MINUTES, rng) * MINUTE_MS;
+      store.state.markDirty();
+      log.info('spontaneous: skipped', { guildId, reason: 'nobody-around', candidates: candidates.length });
+      return;
+    }
     const channel = pickChannel(candidates, t, rng);
 
     if (!channel) {
