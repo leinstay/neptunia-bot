@@ -28,7 +28,7 @@ You are {{name}}. The items below are things you need to write down in your own 
 
 **`starters`** — how conversations start on this server. Same merge rule as `patterns`. `old`, `brief`, ≤ {{guildFieldChars}} chars.
 
-**`character`** — one person's portrait: how they act with others. `member` names them. `old` is the stored portrait. `brief` is an object with lists of what to keep, revise, add and drop. The old portrait is your base. Condense and join it with the new evidence, inside the limit. A point in the old text with no mention in the brief still stands; revise only what the brief names. ≤ {{fieldChars}} chars.
+**`character`** — one person's portrait: how they act with others. `member` names them. `old` is the stored portrait. `brief` is an object with lists of what to keep, revise, add and drop. Sentences under `keep` carry the old text's own wording: keep them as they are. `revise` and `add` items arrive as neutral observations: write them in your voice at the same sharpness as the kept sentences. A point in the old text with no mention in the brief still stands. Nothing from `keep` is dropped to make room unless the limit forces it. When something must go, drop the least distinctive point first. ≤ {{fieldChars}} chars.
 
 ## How to write
 
