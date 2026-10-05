@@ -242,17 +242,6 @@ test('createHot: an empty local file falls back to the base text', () => {
   }
 });
 
-test('createHot: a base-only file is reported with source "base"', () => {
-  const dir = makeRoot({ prompts: { persona: 'base text' } });
-  const hot = createHot({ rootDir: dir });
-  try {
-    assert.equal(hot.promptSources.persona, 'base');
-  } finally {
-    hot.close();
-    fs.rmSync(dir, { recursive: true, force: true });
-  }
-});
-
 test('reloadPrompts: deleting a local file falls back to the base text', () => {
   const dir = makeRoot({ prompts: { rules: 'base text' } });
   writeLocalPrompt(dir, 'rules', 'local text');

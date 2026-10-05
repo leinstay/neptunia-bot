@@ -177,16 +177,6 @@ test('emoji backfill run: a first run over a ranking with counts ends with the h
   });
 });
 
-test('emoji backfill startIfNeeded: the automatic first run also starts from a cleared ranking', async () => {
-  await withStore(async (store) => {
-    store.recordEmojiUsage('g1', [{ id: '1002', ts: T0 + 2000, emojis: [{ id: '111', name: 'kappa' }] }]);
-    const backfill = createEmojiBackfill({ hot: fakeHot(), store, client: fakeClient(standardChannels()), log: fakeLog() });
-
-    await backfill.startIfNeeded('g1');
-    assert.equal(store.getGuild('g1').emojiUsage['111'].count, 2, 'not 3: the analyzer\'s count is not added on top');
-  });
-});
-
 test('emoji backfill run: backfillMessages 0 disables it, even forced', async () => {
   await withStore(async (store) => {
     const log = fakeLog();

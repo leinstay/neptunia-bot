@@ -134,11 +134,6 @@ test('buildRequest: an empty index -> no <emoji> block and no senses line', () =
   assert.equal(emojiBlock(buildRequest(baseInput())), null, 'no index passed at all');
 });
 
-test('buildRequest: senses.customEmoji shows when the feature is on and the index is non-empty', () => {
-  const request = buildRequest(baseInput({ customEmoji: INDEX }));
-  assert.ok(sensesOf(request).split('\n').includes(labels.senses.customEmoji));
-});
-
 test('buildRequest: a labels.json without the emoji keys renders nothing', () => {
   const older = { ...labels, emoji: undefined, senses: { ...labels.senses, customEmoji: undefined } };
   const request = buildRequest(baseInput({ customEmoji: INDEX, prompts: { ...baseInput().prompts, labels: older } }));

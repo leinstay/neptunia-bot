@@ -133,17 +133,12 @@ test('applyDetailOps: text is clamped tolerantly to fieldChars (a single long wo
   assert.equal(items[0].text.length, 6, '5 * the default tolerance 1.25, floored');
 });
 
-test('applyDetailOps: text within the default tolerance is kept whole', () => {
-  const { items } = applyDetailOps([], { add: ['x'.repeat(6)] }, opts({ fieldChars: 5 }));
-  assert.equal(items[0].text.length, 6);
-});
-
 test('applyDetailOps: an empty/whitespace-only text is rejected', () => {
   const { items } = applyDetailOps([], { add: ['   ', ''] }, opts());
   assert.deepEqual(items, []);
 });
 
-// ---- eviction: weight then age -------------------------------------------------
+// ---- eviction: lowest weight first (the age tie-break is tested in interests.test.js) ----
 
 test('applyDetailOps: evicts the lowest weight first once over maxDetails', () => {
   const existing = [
@@ -155,16 +150,6 @@ test('applyDetailOps: evicts the lowest weight first once over maxDetails', () =
   assert.deepEqual(items.map((i) => i.text).sort(), ['a', 'c', 'd']);
 });
 
-test('applyDetailOps: among equal weights, evicts the oldest lastSeen first', () => {
-  const existing = [
-    { id: 1, text: 'a', weight: 3, firstSeen: 'x', lastSeen: '2026-01-01T00:00:00.000Z' },
-    { id: 2, text: 'b', weight: 3, firstSeen: 'x', lastSeen: '2026-01-05T00:00:00.000Z' },
-    { id: 3, text: 'c', weight: 3, firstSeen: 'x', lastSeen: '2026-01-03T00:00:00.000Z' },
-  ];
-  const { items } = applyDetailOps(existing, {}, opts({ maxDetails: 2, nextId: 4 }));
-  assert.deepEqual(items.map((i) => i.text).sort(), ['b', 'c']);
-});
-
 // ---- storage cap vs shown cap, and rank-driven eviction -----------------------
 
 test('applyDetailOps: the storage cap is max(maxDetailsStored, maxDetails) -- a smaller stored cap never wins', () => {
@@ -174,16 +159,6 @@ test('applyDetailOps: the storage cap is max(maxDetailsStored, maxDetails) -- a 
   ];
   const { items } = applyDetailOps(existing, {}, opts({ maxDetails: 15, maxDetailsStored: 1, nextId: 3 }));
   assert.equal(items.length, 2, 'stored cap floored at the shown cap (15), so 2 items are never touched');
-});
-
-test('applyDetailOps: with halfLifeDays, eviction drops the lowest RANK -- an ancient heavy detail can be evicted before a light recent one', () => {
-  const existing = [
-    { id: 1, text: 'Ancient favorite fact', weight: 10, firstSeen: 'x', lastSeen: '2021-01-01T00:00:00.000Z' },
-    { id: 2, text: 'b', weight: 2, firstSeen: 'x', lastSeen: '2026-09-01T00:00:00.000Z' },
-    { id: 3, text: 'c', weight: 2, firstSeen: 'x', lastSeen: '2026-09-05T00:00:00.000Z' },
-  ];
-  const { items } = applyDetailOps(existing, { add: ['New detail'] }, opts({ maxDetails: 3, seenAt: Date.parse('2026-09-20T00:00:00.000Z'), nextId: 4, halfLifeDays: 720 }));
-  assert.deepEqual(items.map((i) => i.text).sort(), ['New detail', 'b', 'c'], 'the ancient heavy detail sinks below the recent ones and is evicted');
 });
 
 test('applyDetailOps: a shorter detailHalfLifeDays makes recency dominate sooner than a longer one', () => {

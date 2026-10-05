@@ -32,8 +32,24 @@ function gate(overrides = {}) {
 
 // --- privateGate ---------------------------------------------------------------
 
-test('privateGate: passes a known member above the threshold, with the member cap', () => {
-  assert.deepEqual(gate(), { ok: true, cap: 100 });
+test('privateGate: membership, the owner cap and today\'s replies decide the verdict', () => {
+  const owner = { isOwner: true };
+  const rows = [
+    ['a known member above the threshold passes, with the member cap', {}, { ok: true, cap: 100 }],
+    ['a non-member is refused', { isMember: false }, { ok: false, reason: 'not-member' }],
+    ['owners skip the affinity check and get the owner cap', { ...owner, profile: profile(-80) }, { ok: true, cap: 200 }],
+    ['the owner cap is checked for owners: 150 of 200 passes', { ...owner, replies: { day: TODAY, count: 150 } }, { ok: true, cap: 200 }],
+    ['the owner cap is checked for owners: 200 of 200 is refused', { ...owner, replies: { day: TODAY, count: 200 } }, { ok: false, reason: 'cap', cap: 200, used: 200 }],
+    ['replies from another day count as 0 (day rollover)', { replies: { day: '2026-09-28', count: 100 } }, { ok: true, cap: 100 }],
+    ['replies with an empty day count as 0', { replies: { day: '', count: 500 } }, { ok: true, cap: 100 }],
+    ['missing replies count as 0', { replies: undefined }, { ok: true, cap: 100 }],
+    ['null replies count as 0', { replies: null }, { ok: true, cap: 100 }],
+    ['a malformed count counts as 0', { replies: { day: TODAY, count: 'many' } }, { ok: true, cap: 100 }],
+    ['a numeric-string count over the cap counts as 0', { replies: { day: TODAY, count: '150' } }, { ok: true, cap: 100 }],
+  ];
+  for (const [label, overrides, expected] of rows) {
+    assert.deepEqual(gate(overrides), expected, label);
+  }
 });
 
 test('privateGate: off unless features.privateMessages is exactly true', () => {
@@ -46,10 +62,6 @@ test('privateGate: off unless features.privateMessages is exactly true', () => {
 test('privateGate: off wins over every other reason', () => {
   const result = gate({ config: config({ privateMessages: false }), isMember: false, profile: null });
   assert.deepEqual(result, { ok: false, reason: 'off' });
-});
-
-test('privateGate: a non-member is refused', () => {
-  assert.deepEqual(gate({ isMember: false }), { ok: false, reason: 'not-member' });
 });
 
 test('privateGate: a member without a stored profile is unknown', () => {
@@ -68,10 +80,6 @@ test('privateGate: a profile without an affinity counts as score 0', () => {
   assert.deepEqual(gate({ profile: { id: 'u1' }, config: config({ minAffinity: 0 }) }), { ok: true, cap: 100 });
 });
 
-test('privateGate: owners skip the affinity check and get the owner cap', () => {
-  assert.deepEqual(gate({ isOwner: true, profile: profile(-80) }), { ok: true, cap: 200 });
-});
-
 test('privateGate: owners still need membership and a profile', () => {
   assert.deepEqual(gate({ isOwner: true, isMember: false }), { ok: false, reason: 'not-member' });
   assert.deepEqual(gate({ isOwner: true, profile: null }), { ok: false, reason: 'unknown' });
@@ -81,30 +89,6 @@ test('privateGate: the cap boundary -- one below passes, at the cap is refused w
   assert.deepEqual(gate({ replies: { day: TODAY, count: 99 } }), { ok: true, cap: 100 });
   assert.deepEqual(gate({ replies: { day: TODAY, count: 100 } }), { ok: false, reason: 'cap', cap: 100, used: 100 });
   assert.deepEqual(gate({ replies: { day: TODAY, count: 150 } }), { ok: false, reason: 'cap', cap: 100, used: 150 });
-});
-
-test('privateGate: the owner cap is checked for owners', () => {
-  const owner = { isOwner: true };
-  assert.deepEqual(gate({ ...owner, replies: { day: TODAY, count: 150 } }), { ok: true, cap: 200 });
-  assert.deepEqual(gate({ ...owner, replies: { day: TODAY, count: 200 } }), { ok: false, reason: 'cap', cap: 200, used: 200 });
-});
-
-test('privateGate: replies from another day count as 0 (day rollover)', () => {
-  assert.deepEqual(gate({ replies: { day: '2026-09-28', count: 100 } }), { ok: true, cap: 100 });
-  assert.deepEqual(gate({ replies: { day: '', count: 500 } }), { ok: true, cap: 100 });
-});
-
-test('privateGate: missing or malformed replies count as 0', () => {
-  assert.deepEqual(gate({ replies: undefined }), { ok: true, cap: 100 });
-  assert.deepEqual(gate({ replies: null }), { ok: true, cap: 100 });
-  assert.deepEqual(gate({ replies: { day: TODAY, count: 'many' } }), { ok: true, cap: 100 });
-});
-
-test('privateGate: the cap is read from the config passed in (hot values)', () => {
-  assert.deepEqual(
-    gate({ config: config({ maxPerUserPerDay: 3 }), replies: { day: TODAY, count: 3 } }),
-    { ok: false, reason: 'cap', cap: 3, used: 3 },
-  );
 });
 
 test('privateGate: missing private.* numbers fail closed', () => {

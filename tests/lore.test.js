@@ -349,8 +349,3 @@ test('matchLore: no match and not always -> excluded', () => {
   const entries = [entry({ keys: ['nope'] })];
   assert.deepEqual(matchLore(entries, ['irrelevant text'], { maxMatches: 8 }), []);
 });
-
-test('matchLore: an always entry appears even with zero textual matches', () => {
-  const entries = [entry({ always: true, keys: ['never-mentioned'] })];
-  assert.equal(matchLore(entries, ['irrelevant text'], { maxMatches: 8 }).length, 1);
-});

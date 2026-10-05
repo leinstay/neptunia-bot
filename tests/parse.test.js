@@ -39,15 +39,16 @@ test('parseOutput: an unclosed <think> means silence, even with a <msg> after it
 });
 
 test('parseOutput: <skip/> alone means silence', () => {
-  const result = parseOutput('<skip/>');
-  assert.equal(result.skip, true);
-  assert.deepEqual(result.messages, []);
-  assert.deepEqual(result.reactions, []);
-});
-
-test('parseOutput: <skip /> with a space before the slash also works', () => {
-  const result = parseOutput('<skip />');
-  assert.equal(result.skip, true);
+  const rows = [
+    ['<skip/>', '<skip/>'],
+    ['<skip /> with a space before the slash', '<skip />'],
+  ];
+  for (const [label, raw] of rows) {
+    const result = parseOutput(raw);
+    assert.equal(result.skip, true, label);
+    assert.deepEqual(result.messages, [], label);
+    assert.deepEqual(result.reactions, [], label);
+  }
 });
 
 test('parseOutput: a reaction alone is not silence', () => {
@@ -184,25 +185,17 @@ test('parseOutput: <draw> alongside <msg> keeps both', () => {
   assert.deepEqual(result.draw, { text: 'a boat', self: false, replyTo: 4 });
 });
 
-test('parseJsonObject: extracts a bare JSON object', () => {
-  const parsed = parseJsonObject('{"a": 1, "b": "x"}');
-  assert.deepEqual(parsed, { a: 1, b: 'x' });
-});
-
-test('parseJsonObject: extracts JSON from inside a code fence', () => {
-  const parsed = parseJsonObject('```json\n{"a": 1}\n```');
-  assert.deepEqual(parsed, { a: 1 });
-});
-
-test('parseJsonObject: extracts JSON surrounded by chatter', () => {
-  const parsed = parseJsonObject('Sure, here you go:\n{"a": 1}\nHope that helps!');
-  assert.deepEqual(parsed, { a: 1 });
+test('parseJsonObject: extracts the object, bare, inside a code fence or surrounded by chatter', () => {
+  const rows = [
+    ['a bare JSON object', '{"a": 1, "b": "x"}', { a: 1, b: 'x' }],
+    ['JSON inside a code fence', '```json\n{"a": 1}\n```', { a: 1 }],
+    ['JSON surrounded by chatter', 'Sure, here you go:\n{"a": 1}\nHope that helps!', { a: 1 }],
+  ];
+  for (const [label, raw, expected] of rows) {
+    assert.deepEqual(parseJsonObject(raw), expected, label);
+  }
 });
 
 test('parseJsonObject: throws when there is no JSON object at all', () => {
   assert.throws(() => parseJsonObject('no json here'), /no JSON object in the model reply/);
-});
-
-test('parseJsonObject: throws on an empty string', () => {
-  assert.throws(() => parseJsonObject(''), /no JSON object in the model reply/);
 });

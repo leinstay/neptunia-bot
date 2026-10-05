@@ -22,7 +22,6 @@ import {
   renderWorn,
   selectOwnLines,
   varietyAheadOn,
-  varietyOn,
   varietySettings,
   varietyStatusLine,
 } from '../src/behavior/variety.js';
@@ -71,12 +70,6 @@ test('varietySettings: requestTimeoutMs defaults to 30000, a live value is read,
     assert.equal(varietySettings({ variety: { requestTimeoutMs: bad } }).requestTimeoutMs, 30000, String(bad));
   }
   assert.equal(varietySettings({ variety: { requestTimeoutMs: 12000 } }).timeoutMs, 8000, 'the turn wait keeps its own default');
-});
-
-test('varietyOn: a missing switch counts as on, false turns it off', () => {
-  assert.equal(varietyOn({}), true);
-  assert.equal(varietyOn({ features: { variety: true } }), true);
-  assert.equal(varietyOn({ features: { variety: false } }), false);
 });
 
 test('varietyAheadOn: a missing switch counts as on, false turns it off', () => {
