@@ -3,10 +3,16 @@
 // proportional to the text, several short messages in a row, reactions).
 // Used for answering a call ('reply') and for spontaneous turns
 // ('interject' / 'initiate'), in a server channel or in a private chat (a
-// channel without a guild, served on behalf of the one pinned guild).
+// channel without a guild, served on behalf of the one pinned guild). A
+// server turn may also show other channels it is about (`<channel_view>`):
+// the read-only channel a call came from, a channel named with an explicit
+// <#id>, or one a route hook names.
 
-import { canAttach, fetchHistory, fetchNeighbors, PAGE as HISTORY_PAGE, withTextPreviews } from '../discord/collect.js';
+import { canAttach, canSend, channelAllowed, fetchHistory, fetchNeighbors, PAGE as HISTORY_PAGE, withTextPreviews } from '../discord/collect.js';
+import { captionPulled, checkPull, fetchPull } from '../discord/pull-fetch.js';
 import { buildDrawPrompt, buildRequest, fillPromptTemplate } from './prompt.js';
+import { channelPullOn, pullSettings, pullTargets } from './pull.js';
+import { resolveDestination } from './elsewhere.js';
 import { classifierTextModel } from './mention.js';
 import { parseOutput } from '../llm/parse.js';
 import { DailyCapError, TokenLimitError, RETRY_STATUS, sleep } from '../llm/openrouter.js';
@@ -264,6 +270,38 @@ function describableCandidates(history, picked, { includePicked = false } = {}) 
 }
 
 /**
+ * Where the persona's words about a channel it cannot write in go (a call
+ * from there, a remark on it), read from `config` (the live config) at the
+ * call: the first id of `memory.mainChannelIds`
+ * (src/behavior/elsewhere.js#resolveDestination) that is a text channel of
+ * `guild`, not a thread, allowed by `bot.channels`, where the bot can send,
+ * and not `exceptId` (the channel the words are about). The one copy of the
+ * rule: `<senses>` names this channel, and whatever routes a call there asks
+ * the same function.
+ * @param {object|null} guild  The discord.js guild; none (a private chat) has no destination.
+ * @param {object} config      The live config.
+ * @param {{ exceptId?: string|null }} [options]
+ * @returns {{ channel: object, reason: null } | { channel: null, reason: 'off'|'no-destination' }}
+ *   `reason` is resolveDestination's code: `off` with features.elsewhere false, else `no-destination`.
+ */
+export function usableDestination(guild, config, { exceptId = null } = {}) {
+  const channelOf = (id) => guild?.channels?.cache?.get?.(id) ?? null;
+  const usable = (id) => {
+    const target = channelOf(id);
+    return (
+      Boolean(target) &&
+      id !== exceptId &&
+      target.isTextBased?.() === true &&
+      target.isThread?.() !== true &&
+      channelAllowed(target, config?.bot ?? {}) &&
+      canSend(target)
+    );
+  };
+  const { destinationId, reason } = resolveDestination(config, usable);
+  return destinationId ? { channel: channelOf(destinationId), reason: null } : { channel: null, reason };
+}
+
+/**
  * `images` (src/llm/images.js#createImageGen) is optional: absent,
  * `features.imageGeneration` false, a `drawFailed` turn, or a channel where
  * the bot cannot attach files, the persona's `<draw>` is dropped and no
@@ -284,7 +322,9 @@ function describableCandidates(history, picked, { includePicked = false } = {}) 
  * ever made — buildRequest simply renders every un-attached picture blind
  * (and every attached one with its bare marker). A neighbour channel's
  * pictures never cost a request: they get only the captions the cache
- * already holds (`describer.cachedDescriptions`), under the same switch.
+ * already holds (`describer.cachedDescriptions`), under the same switch. A
+ * pulled channel's pictures (`<channel_view>`) get the cache's captions, and
+ * fresh ones only once the turn is certain to run (src/discord/pull-fetch.js).
  * Likewise, videos are only watched when `features.mediaDescriptions` AND
  * `features.videoDescriptions` (a missing key counts as on) are on and the describer has
  * `describeVideos`; otherwise they render without a watch.
@@ -299,6 +339,17 @@ function describableCandidates(history, picked, { includePicked = false } = {}) 
  *
  * `getSelfName` (src/index.js) is the persona's display name in a guild;
  * default: the client's cached guild member, else the bot user's name.
+ *
+ * `routeChannels` (the route classifier's hook) is optional:
+ * `({ guildId, channel, history, trigger, selfName, config }) => Promise<string[]>`,
+ * the ids of channels the conversation is about. It is asked on a server turn
+ * (never a drawFailed one) with features.channelPull on and the labels able
+ * to render the block (`labels.pull.header`) while a
+ * `<channel_view>` slot (`context.pull.maxChannels`) is left after the turn's
+ * source and the explicit `<#id>` mentions; its ids are pulled after those
+ * (src/behavior/pull.js#pullTargets). On a routed turn `history` is the source
+ * channel's lines, not this chat. A throw or an answer that is not an array
+ * counts as no id (a throw logs `pull: route failed`).
  */
 export function createTurnRunner({
   hot,
@@ -315,6 +366,7 @@ export function createTurnRunner({
   emoji,
   variety,
   getSelfName = (guildId) => client.guilds?.cache?.get(guildId)?.members?.me?.displayName ?? client.user?.username ?? 'bot',
+  routeChannels,
   now: clock = Date.now,
 }) {
   const busy = new Set();
@@ -857,8 +909,9 @@ export function createTurnRunner({
    * cheap classifier call (prompts.lookup, `{{name}}` = the persona's display
    * name, `{{today}}` = the injected clock's UTC date `YYYY-MM-DD`, on
    * classifierTextModel, its answer capped at `web.search.classifierMaxOutputTokens`) reads
-   * the last `web.search.contextMessages` messages before the trigger (with the pictures' captions, the video
-   * states and the read links this turn already has) and the trigger itself,
+   * the last `web.search.contextMessages` messages of `history` before the trigger (with the pictures' captions, the video
+   * states and the read links this turn already has; on a routed turn the caller passes the
+   * source channel's lines, where the call was written) and the trigger itself,
    * and answers `none` or a query (parseLookupQuery); a query goes to
    * lookup.search. One classifier call and at most one search per turn
    * (`web.search.maxPerTurn` below 1 turns the search off). Resolves the
@@ -928,6 +981,154 @@ export function createTurnRunner({
   }
 
   /**
+   * fetchPull (src/discord/pull-fetch.js) that never throws: an unexpected
+   * failure is logged (`pull: failed`) and counts as a skip with code `error`.
+   */
+  async function pullSafely(args) {
+    try {
+      return await fetchPull(args);
+    } catch (err) {
+      log.warn('pull: failed', { channel: args.destination?.id ?? null, source: args.channelId, pullReason: args.reason, error: err });
+      return { pulled: null, channel: null, skip: 'error' };
+    }
+  }
+
+  /** The route hook's channel ids (non-empty strings); a throw (`pull: route failed`) or a non-array answer is []. */
+  async function routeIds(args) {
+    try {
+      const ids = await routeChannels(args);
+      return Array.isArray(ids) ? ids.filter((id) => typeof id === 'string' && id !== '') : [];
+    } catch (err) {
+      log.warn('pull: route failed', { channel: args.channel.id, error: err });
+      return [];
+    }
+  }
+
+  /**
+   * The other channels a server turn shows in `<channel_view>`, each fetched
+   * by fetchPull, in the order of src/behavior/pull.js#pullTargets: the
+   * turn's `source` first and alone -- a turn about it does not go on
+   * without it, so nothing else is fetched when it fails -- then the explicit
+   * `<#id>` mentions of the trigger and of the last `context.pull.scanMessages`
+   * messages, then the route hook's ids (routeIds; asked only with
+   * features.channelPull on, not on a drawFailed turn, and while a slot is
+   * left; on a routed turn it reads the source's lines), at most
+   * `context.pull.maxChannels` in all. features.channelPull off: the source
+   * alone. Without `labelled` (no `labels.pull.header`: buildRequest renders
+   * no `<channel_view>`) the source alone too, with no fresh caption, and one
+   * `pull: skipped` (`reason: 'no-label'`) when the turn had a source, a
+   * mention or a route hook to ask. Every candidate is judged once, without a
+   * request, by the rails fetchPull checks first (checkPull); a refused one
+   * logs `pull: skipped` (`channel`, `source` = its id, `reason` = the skip
+   * code, `pullReason` = `mention` or `route`), one whose check throws logs
+   * `pull: failed` and is not pulled. Every pull reads the ring of calls
+   * (`state.json` `elsewherePings`) for its ping marks. Fresh captions only
+   * with `certain` (no chooser can still end the turn as not-now), never on a
+   * drawFailed turn. Settings come from `config`, the turn's live config.
+   * @returns {Promise<{ pulled: object[], sourceSkip: string|null }>}  The PulledChannel records,
+   *   source first; `sourceSkip` is the skip code of a source that could not be pulled.
+   */
+  async function pullChannels({ channel, guildId, history, trigger, source, selfId, selfName, config, now, certain, drawFailure, labelled }) {
+    const guild = channel.guild;
+    const settings = pullSettings(config);
+    const channelPull = channelPullOn(config) && labelled;
+    // Every candidate judged once: its skip code (null = pullable) and why it was a candidate.
+    const judged = new Map();
+    let judging = 'mention';
+    const judge = (id) => {
+      try {
+        return checkPull({ guild, channelId: id, destination: channel, config, now }).skip;
+      } catch (err) {
+        log.warn('pull: failed', { channel: channel.id, source: id, pullReason: judging, error: err });
+        return 'error';
+      }
+    };
+    const isPullable = (id) => {
+      if (!judged.has(id)) judged.set(id, { skip: judge(id), pullReason: judging });
+      return judged.get(id).skip === null;
+    };
+    const targetsWith = (extra, { pullable = isPullable, more = channelPull } = {}) =>
+      pullTargets({
+        source,
+        history,
+        trigger,
+        extra,
+        currentChannelId: channel.id,
+        scanMessages: settings.scanMessages,
+        maxChannels: settings.maxChannels,
+        isPullable: pullable,
+        channelPull: more,
+      });
+    const logRefused = () => {
+      for (const [id, { skip, pullReason }] of judged) {
+        // A check that threw was logged as `pull: failed` already.
+        if (skip && skip !== 'error') log.info('pull: skipped', { channel: channel.id, source: id, reason: skip, pullReason });
+      }
+    };
+    if (!labelled) {
+      // What the turn would have pulled with the label (unjudged: no check is wasted on it).
+      const wanted = targetsWith([], { pullable: () => true, more: channelPullOn(config) });
+      const hookWanted = typeof routeChannels === 'function' && channelPullOn(config) && !drawFailure && wanted.length < settings.maxChannels;
+      if (wanted.length > 0 || hookWanted) log.info('pull: skipped', { channel: channel.id, reason: 'no-label' });
+    }
+    const pings = store.state.data.elsewherePings ?? [];
+    const pullOne = (target) =>
+      pullSafely({
+        guild,
+        guildId,
+        channelId: target.channelId,
+        destination: channel,
+        reason: target.reason,
+        trigger: target.reason === 'routed' ? trigger : null,
+        pings,
+        config,
+        selfId,
+        now,
+        describer: describer ?? null,
+        turnCertain: certain && !drawFailure && labelled,
+      });
+
+    let targets = targetsWith([]);
+    const sourceTarget = source ? (targets.find((target) => target.channelId === source.channelId) ?? null) : null;
+    let sourcePulled = null;
+    if (sourceTarget) {
+      const result = await pullOne(sourceTarget);
+      if (!result.pulled) {
+        logRefused();
+        return { pulled: [], sourceSkip: result.skip };
+      }
+      sourcePulled = result.pulled;
+    }
+    if (typeof routeChannels === 'function' && channelPull && !drawFailure && targets.length < settings.maxChannels) {
+      const routedLines = source?.reason === 'routed' ? sourcePulled?.messages : null;
+      const ids = await routeIds({ guildId, channel, history: routedLines ?? history, trigger, selfName, config });
+      judging = 'route';
+      if (ids.length > 0) targets = targetsWith(ids);
+    }
+    const fetched = await Promise.all(targets.filter((target) => target.channelId !== sourceTarget?.channelId).map(pullOne));
+    logRefused();
+    return { pulled: [sourcePulled, ...fetched.map((result) => result.pulled)].filter(Boolean), sourceSkip: null };
+  }
+
+  /**
+   * Fresh captions (src/discord/pull-fetch.js#captionPulled) for channels
+   * pulled before a chooser, once the turn is certain to run; only with
+   * features.mediaDescriptions on and a describer. Never rejects: a channel
+   * whose captions fail keeps the cached ones (`pull: captions failed`).
+   */
+  function captionAll(pulled, { guildId, config, destination }) {
+    if (pulled.length === 0 || config.features?.mediaDescriptions !== true || !describer) return Promise.resolve(pulled);
+    return Promise.all(
+      pulled.map((entry) =>
+        captionPulled(entry, { describer, guildId, config, destination }).catch((err) => {
+          log.warn('pull: captions failed', { channel: destination.id, source: entry.channelId, error: err });
+          return entry;
+        }),
+      ),
+    );
+  }
+
+  /**
    * @param {object} params
    * @param {import('discord.js').TextBasedChannel} params.channel
    * @param {string} [params.guildId]  The served guild, used when `channel` has no guild (a
@@ -937,7 +1138,16 @@ export function createTurnRunner({
    * @param {object} [params.trigger]      Normalized message the turn answers (a call, or an
    *   overheard line).
    * @param {TriggerKind} [params.triggerKind]
-   * @param {(history: object[], now: number) => string|null} [params.chooseMode]
+   * @param {(history: object[], now: number, context: { pulled: object[] }) => string|null} [params.chooseMode]
+   *   Called with this channel's history and the channels already pulled for the turn (the
+   *   PulledChannel records of src/discord/pull-fetch.js, the source first).
+   * @param {{ channelId: string, reason: 'routed'|'noticed' }|null} [params.source]  The channel
+   *   this turn is about when it is not `channel` (a call from a channel the bot cannot write in,
+   *   a noticed comment): pulled before anything else and shown in `<channel_view>`. When it
+   *   cannot be pulled a routed turn ends in `error` (`turn: source unavailable`), a noticed one
+   *   in `not-now`. `channel` is where the words go and the one marked busy.
+   * @param {object|null} [params.focus]  A normalized message of this chat put to everyone present
+   *   (a room question): buildRequest appends `labels.room.focus` to the task.
    * @param {boolean} [params.forced]  True for an owner-forced turn (`/nep interject`, `/nep
    *   initiate`) -- passed straight through to buildRequest, which appends prompts.forced (when
    *   present) to the task text so the model knows `<skip/>` is not the expected outcome this time.
@@ -1003,7 +1213,19 @@ export function createTurnRunner({
    * `drawReason`, and `holdIdle` -- leave the idle notifications to the
    * caller (runTurn fires them once the second turn is over).
    */
-  async function runTurnOnce({ channel, guildId: guildIdParam = null, mode, trigger = null, triggerKind = null, chooseMode = null, forced = false, drawReason = null, holdIdle = false }) {
+  async function runTurnOnce({
+    channel,
+    guildId: guildIdParam = null,
+    mode,
+    trigger = null,
+    triggerKind = null,
+    chooseMode = null,
+    forced = false,
+    source = null,
+    focus = null,
+    drawReason = null,
+    holdIdle = false,
+  }) {
     // A server channel carries its guild; a private chat is served on behalf of the pinned one.
     const guildId = channel.guild?.id ?? guildIdParam;
     if (!guildId) throw new Error('runTurn: a channel without a guild needs a guildId');
@@ -1047,11 +1269,48 @@ export function createTurnRunner({
         videoSites: config.media?.video?.sites,
       });
 
+      // The other channels this turn shows (`<channel_view>`, pullChannels), found and fetched
+      // before the mode is chosen so a chooser sees them. Fresh captions only for a turn certain
+      // to run: with the fetch when no chooser can still say not-now, else once it chose
+      // (captionAll). A turn about another channel, or one with a chooser, waits for them here;
+      // any other turn fetches them alongside the preparation below. Never in a private chat.
+      // The block renders only under `labels.pull.header` (read now, as buildRequest reads it):
+      // without it no channel is fetched for a mention or the route hook and no fresh caption
+      // is paid for; a turn's source is still pulled (its chooser and a routed call's search
+      // classifier read it).
+      const certain = mode !== 'auto';
+      const pullLabelled = Boolean(hot.prompts?.labels?.pull?.header);
+      const pullsPending = isPrivate
+        ? Promise.resolve({ pulled: [], sourceSkip: null })
+        : pullChannels({ channel, guildId, history, trigger, source, selfId, selfName, config, now, certain, drawFailure: answersDrawFailure, labelled: pullLabelled })
+            // Never fails the turn: anything unexpected is no pull (and no source).
+            .catch((err) => {
+              log.warn('pull: failed', { channel: channel.id, error: err });
+              return { pulled: [], sourceSkip: source ? 'error' : null };
+            });
+      const early = source || !certain ? await pullsPending : null;
+      if (early?.sourceSkip) {
+        // Nothing to answer, or nothing to comment on: the source is gone or refused.
+        if (source.reason !== 'routed') return { outcome: 'not-now' };
+        log.warn('turn: source unavailable', { channel: channel.id, source: source.channelId, reason: early.sourceSkip });
+        return { outcome: 'error' };
+      }
+
       let finalMode = mode;
       if (mode === 'auto') {
-        finalMode = chooseMode(history, now);
+        finalMode = chooseMode(history, now, { pulled: early.pulled });
         if (!finalMode) return { outcome: 'not-now' };
       }
+      // Ready before the request is built; pulled ahead of a chooser, they get their fresh
+      // captions now (only when the block can render).
+      const pulledPending = !early
+        ? pullsPending.then((pulls) => pulls.pulled)
+        : certain || !pullLabelled
+          ? Promise.resolve(early.pulled)
+          : captionAll(early.pulled, { guildId, config, destination: channel });
+      // A routed call lives in its source: the search classifier reads the source's lines around
+      // it, with their captions, instead of this chat; the re-watch is not offered (below).
+      const routedPull = source?.reason === 'routed' ? (early?.pulled.find((entry) => entry.channelId === source.channelId) ?? null) : null;
 
       // The variety pass on the persona's own recent lines is looked up now (ready, in flight, or
       // asked) and runs alongside everything below (descriptions, re-watch, lookup, neighbours); it
@@ -1071,11 +1330,13 @@ export function createTurnRunner({
       // captions are free (see src/memory/describe.js). With
       // features.attachedDescriptions (a missing key counts as on) the
       // attached ones get one too, ahead of the rest, shown next to their
-      // attachment marker.
+      // attachment marker. Only this channel's pictures are attached, as
+      // buildRequest picks them: a routed call's own pictures are captioned
+      // with its pulled channel instead.
       let descriptions;
       if (features.mediaDescriptions === true && describer) {
         const visionCfg = config.context.vision ?? {};
-        const picked = features.vision !== false ? selectPictures({ trigger, history, visionCfg, now }) : [];
+        const picked = features.vision !== false ? selectPictures({ trigger, history, visionCfg, now, channelId: channel.id }) : [];
         const includePicked = features.attachedDescriptions !== false;
         const candidates = describableCandidates(history, picked, { includePicked });
         const described = await describer.describeMany(guildId, candidates, {
@@ -1084,6 +1345,9 @@ export function createTurnRunner({
         });
         descriptions = described.descriptions;
       }
+      // What the search classifier reads around the trigger (routedPull above).
+      const searchHistory = routedPull ? routedPull.messages : history;
+      const searchDescriptions = routedPull ? new Map([...(descriptions ?? []), ...routedPull.descriptions]) : descriptions;
 
       // Videos (attached, or linked from a known video site) may be watched
       // by the video describer, newest first, at most media.video.maxPerTurn
@@ -1107,21 +1371,27 @@ export function createTurnRunner({
         // A second look when the trigger asks about a watched video: a
         // direct address only (never a spontaneous or an overheard turn, never
         // the drawFailed turn), switch features.videoRewatch (a missing key counts as on).
+        // A routed call asks about its source, whose videos no turn watches: the videos
+        // here belong to another conversation, so nothing is offered or retried.
         if (asked && !answersDrawFailure && features.videoRewatch !== false && typeof describer.rewatchVideo === 'function') {
-          try {
-            await maybeRewatch({
-              config,
-              guildId,
-              channelId: channel.id,
-              selfName,
-              history,
-              trigger,
-              videos,
-              descriptions,
-              candidates,
-            });
-          } catch (err) {
-            log.warn('rewatch: failed', { channel: channel.id, error: err });
+          if (routedPull) {
+            log.info('rewatch: skipped', { channel: channel.id, reason: 'routed' });
+          } else {
+            try {
+              await maybeRewatch({
+                config,
+                guildId,
+                channelId: channel.id,
+                selfName,
+                history,
+                trigger,
+                videos,
+                descriptions,
+                candidates,
+              });
+            } catch (err) {
+              log.warn('rewatch: failed', { channel: channel.id, error: err });
+            }
           }
         }
       }
@@ -1152,9 +1422,9 @@ export function createTurnRunner({
               guildId,
               channelId: channel.id,
               selfName,
-              history,
+              history: searchHistory,
               trigger,
-              descriptions,
+              descriptions: searchDescriptions,
               videos,
               reads,
             });
@@ -1177,6 +1447,13 @@ export function createTurnRunner({
       // An unasked turn reads the quota for no member, like draw() charges none.
       const drawOn = Boolean(images) && features.imageGeneration !== false && triggerKind !== 'drawFailed' && canAttach(channel);
       const drawQuota = drawOn ? images.quota({ userId: asked ? (trigger.authorId ?? null) : null }) : undefined;
+      const pulled = await pulledPending;
+      // Neighbours the bot can read but not write in, marked in `<server>` (a pulled channel's
+      // record carries its own mark). A pulled channel whose block is shown is left out of the
+      // neighbours by buildRequest itself.
+      const readOnlyIds = new Set(neighbors.filter((neighbor) => neighbor.readOnly === true).map((neighbor) => neighbor.channelId));
+      // Where a call from a read-only channel is answered, for `<senses>`.
+      const destination = isPrivate ? null : usableDestination(channel.guild, config).channel;
       const worn = await wornPending;
       const request = buildRequest({
         config,
@@ -1220,6 +1497,13 @@ export function createTurnRunner({
           emoji || (features.gifs !== false && typeof store.getGifs === 'function') ? store.getMediaCache(guildId) : null,
         // The `<worn>` block: what this turn's variety pass named, or nothing.
         worn,
+        // `<channel_view>`: the channels pulled into this turn, the one it is about, the chat
+        // line put to the room, where a call from a read-only channel is answered.
+        pulled,
+        source,
+        focus,
+        elsewhereDestination: destination?.name ? { name: destination.name } : null,
+        readOnlyIds,
       });
 
       // A Discord CDN image the provider cannot fetch must not cost the
@@ -1295,6 +1579,10 @@ export function createTurnRunner({
       log.info('turn: model answered', {
         mode: finalMode,
         trigger: triggerKind ?? null,
+        // Only on a turn about another channel, with channels pulled, or with a line put to the room.
+        ...(source ? { source: source.channelId ?? null } : {}),
+        ...(pulled.length > 0 ? { pulled: pulled.length } : {}),
+        ...(focus ? { focus: true } : {}),
         secondsToAnswer: Math.round((clock() - startedAt) / 100) / 10,
         channel: channel.id,
         estimated: completion.estimated,

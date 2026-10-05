@@ -9,6 +9,7 @@
 // smaller file, every test here runs reliably.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { PermissionFlagsBits } from 'discord.js';
 import { createTurnRunner } from '../src/behavior/turn.js';
 import { labels } from './fixtures/labels.js';
 import { withCapturedLogs } from './fixtures/capture-logs.js';
@@ -327,6 +328,45 @@ test('createTurnRunner: spokeAfterSeeing is true for a message in the history of
   assert.equal(turns.spokeAfterSeeing('c1', 'm2'), true);
   assert.equal(turns.spokeAfterSeeing('c1', 'm3'), false, 'not in that history');
   assert.equal(turns.spokeAfterSeeing('c2', 'm2'), false, 'another channel');
+});
+
+// ---------------------------------------------------------------------------
+// A routed turn: a call from a channel the bot cannot write in, answered in another one.
+
+test('turn: a routed turn marks the destination busy, not the source', async () => {
+  const destination = fakeTurnChannel({ id: 'c1', historyMessages: [rawMessage({ id: 'm1', authorId: 'u2', authorName: 'Bob' })] });
+  const call = { ...rawMessage({ id: 'd1', authorName: 'Éloïse', content: '@Bot εδώ;' }), channelId: 'c2' };
+  // The source: a readable text channel of the same guild where the bot may not send.
+  const source = {
+    ...fakeTurnChannel({ id: 'c2', name: 'diary', historyMessages: [call] }),
+    guild: destination.guild,
+    viewable: true,
+    isTextBased: () => true,
+    isThread: () => false,
+    permissionsFor: () => ({ has: (flag) => flag !== PermissionFlagsBits.SendMessages }),
+  };
+  destination.guild.channels.cache.set('c2', source);
+  const llm = controllableLlm();
+  const turns = createTurnRunner({ hot: fakeHot({}), store: fakeStore(), llm, calibrator: identityCalibrator(), client: fakeClient() });
+
+  const running = withCapturedLogs(() =>
+    turns.runTurn({
+      channel: destination,
+      mode: 'reply',
+      trigger: normalizedTrigger(call),
+      triggerKind: 'mention',
+      source: { channelId: 'c2', reason: 'routed' },
+    }),
+  );
+  await waitForCalls(llm, 1);
+  assert.equal(llm.calls.length, 1, 'the turn reached the model');
+  assert.equal(turns.isBusy('c1'), true, 'the destination is busy');
+  assert.equal(turns.isBusy('c2'), false, 'the source is not');
+
+  llm.resolveNext();
+  const { result } = await running;
+  assert.equal(result.outcome, 'spoke');
+  assert.equal(turns.isAnyBusy(), false);
 });
 
 test('createTurnRunner: spokeAfterSeeing stays false after a turn that chose to skip', async () => {
