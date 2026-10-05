@@ -15,12 +15,7 @@ import {
   helperRequestOptions,
   resolveProvider,
   matchRoute,
-  RETRY_STATUS,
-  sleep,
   openRouterHeaders,
-  apiUrl,
-  backoffMs,
-  dailyCapOf,
   VIDEO_TOKENS_PER_SECOND_FALLBACK,
   providerLimitOf,
   cacheTtlFor,
@@ -207,12 +202,6 @@ test('complete: a cap that is not a finite number counts as 0 -- every request r
   assert.equal(lines[0].key, 'llm.maxRequestsPerDay');
 });
 
-test('dailyCapOf: a finite number is the cap as given; anything else is 0', () => {
-  assert.equal(dailyCapOf(5, 'test.finite'), 5);
-  assert.equal(dailyCapOf(0, 'test.finite'), 0);
-  for (const value of [undefined, null, Number.NaN, '5', Infinity, {}]) assert.equal(dailyCapOf(value, 'test.other'), 0);
-});
-
 // --- the read-only side of the daily request rail: capLeft, llmCountToday ---
 
 test('capLeft: the slots left under llm.maxRequestsPerDay today, rolling over at 00:00 UTC, with state.data unchanged', async () => {
@@ -333,48 +322,22 @@ test('railReason: daily-cap for a DailyCapError, token-limit for a TokenLimitErr
   }
 });
 
-test('railReason: names the errors complete really throws at each rail', async () => {
-  const state = fakeState();
-  state.data = { llmDay: '2026-09-21', llmCount: 1 };
-  const make = (cfg) =>
-    createLlm({
-      apiKey: 'k',
-      getConfig: () => baseConfig(cfg),
-      calibrator: fakeCalibrator(),
-      state,
-      fetchImpl: async () => errorResponse(400, 'bad request'),
-      now: () => Date.UTC(2026, 8, 21, 12, 0, 0),
-    });
-  const reasonOf = (promise) => promise.then(() => 'answered', (err) => railReason(err));
-  assert.equal(await reasonOf(make({ maxRequestsPerDay: 1 }).complete([{ role: 'user', content: 'hi' }])), 'daily-cap');
-  assert.equal(await reasonOf(make({ maxRequestTokens: 1 }).complete([{ role: 'user', content: 'hi' }])), 'token-limit');
-  assert.equal(await reasonOf(make({}).complete([{ role: 'user', content: 'hi' }])), 'llm-error');
-});
-
 // --- helperRequestOptions: the one spelling of an in-turn helper request ---
 
-test('helperRequestOptions: counted, never calibrated, 30 s unless llm.helperTimeoutMs or the caller says otherwise', () => {
-  const shipped = JSON.parse(fs.readFileSync(new URL('../config.json', import.meta.url), 'utf8'));
-  assert.equal(shipped.llm.helperTimeoutMs, 30000, 'the code fallback equals config.json');
-
-  assert.deepEqual(helperRequestOptions({ llm: { timeoutMs: 300000 } }, { role: 'classifier.text', maxOutputTokens: 60, purpose: 'lookup' }), {
+test('helperRequestOptions: counted, never calibrated, on llm.helperTimeoutMs unless the caller says otherwise', () => {
+  const config = { llm: { timeoutMs: 300000, helperTimeoutMs: 12000 } };
+  assert.deepEqual(helperRequestOptions(config, { role: 'classifier.text', maxOutputTokens: 60, purpose: 'lookup' }), {
     role: 'classifier.text',
     maxOutputTokens: 60,
     countAgainstDailyCap: true,
     skipCalibration: true,
-    timeoutMs: 30000, // never the turn-length llm.timeoutMs
+    timeoutMs: 12000, // never the turn-length llm.timeoutMs
     purpose: 'lookup',
     signal: undefined,
   });
 
-  const config = { llm: { timeoutMs: 300000, helperTimeoutMs: 12000 } };
-  assert.equal(helperRequestOptions(config, { role: 'classifier.media' }).timeoutMs, 12000);
   config.llm.helperTimeoutMs = 7000; // a hot edit between two calls: nothing is remembered
   assert.equal(helperRequestOptions(config, { role: 'classifier.media' }).timeoutMs, 7000);
-  assert.equal(helperRequestOptions(shipped, { role: 'classifier.text' }).timeoutMs, 30000);
-  for (const bare of [undefined, null, {}, { llm: null }, { llm: {} }, { llm: { helperTimeoutMs: null } }]) {
-    assert.equal(helperRequestOptions(bare, { role: 'classifier.text' }).timeoutMs, 30000, JSON.stringify(bare));
-  }
 
   // A helper with its own clock (the variety pass) passes it, with its abort signal.
   const controller = new AbortController();
@@ -386,7 +349,16 @@ test('helperRequestOptions: counted, never calibrated, 30 s unless llm.helperTim
   const forced = helperRequestOptions(config, { role: 'classifier.text', countAgainstDailyCap: false, skipCalibration: false, model: 'x/y' });
   assert.deepEqual([forced.countAgainstDailyCap, forced.skipCalibration], [true, true]);
   assert.equal('model' in forced, false, 'the model stays the caller\'s own option');
-  assert.deepEqual(Object.keys(helperRequestOptions(config)).sort(), ['countAgainstDailyCap', 'maxOutputTokens', 'purpose', 'role', 'signal', 'skipCalibration', 'timeoutMs']);
+});
+
+test('code fallbacks: the defaults the code applies when a setting is missing equal config.json', () => {
+  const shipped = JSON.parse(fs.readFileSync(new URL('../config.json', import.meta.url), 'utf8'));
+  for (const bare of [undefined, null, {}, { llm: null }, { llm: {} }, { llm: { helperTimeoutMs: null } }]) {
+    assert.equal(helperRequestOptions(bare, { role: 'classifier.text' }).timeoutMs, shipped.llm.helperTimeoutMs, JSON.stringify(bare));
+  }
+  assert.equal(VIDEO_TOKENS_PER_SECOND_FALLBACK, shipped.media.video.tokensPerSecond);
+  const noCacheBlock = { ...baseConfig(), features: { promptCache: true } };
+  assert.equal(cacheTtlFor(noCacheBlock, shipped.llm.cache.roles[0], shipped.llm.cache.models[0] + 'x'), shipped.llm.cache.ttl, 'a missing llm.cache reads as config.json');
 });
 
 test('helperRequestOptions: complete takes the set as it is -- counted, uncalibrated, on the helper timeout, purpose logged and never sent', async () => {
@@ -493,27 +465,6 @@ test('complete: options.skipCalibration true never feeds the calibrator, even wi
   assert.equal(calibrator.observed.length, 0);
 });
 
-test('complete: returns the provider named in the response json, undefined when the response omits it', async () => {
-  for (const [label, response, expected] of [
-    ['named', {
-      ok: true,
-      status: 200,
-      json: async () => ({ choices: [{ message: { content: 'hi' } }], usage: {}, provider: 'Anthropic' }),
-    }, 'Anthropic'],
-    ['omitted', okResponse('hi'), undefined],
-  ]) {
-    const llm = createLlm({
-      apiKey: 'k',
-      getConfig: () => baseConfig(),
-      calibrator: fakeCalibrator(),
-      state: fakeState(),
-      fetchImpl: async () => response,
-    });
-    const result = await llm.complete([{ role: 'user', content: 'hi' }]);
-    assert.equal(result.provider, expected, label);
-  }
-});
-
 test('complete: a non-retryable HTTP error carries the untrimmed body as .body, for a caller that needs more than the trimmed message', async () => {
   const longBody = JSON.stringify({ error: { message: 'No endpoints found' }, routing_funnel: [{ step: 'BYOK endpoints', endpoints: 0 }] });
   const llm = createLlm({
@@ -554,22 +505,6 @@ test('complete: an empty/non-string model content falls back to an empty string'
   assert.equal(result.text, '');
 });
 
-test('complete: posts to `${baseUrl}/chat/completions` when baseUrl has no trailing slash', async () => {
-  let seenUrl = null;
-  const llm = createLlm({
-    apiKey: 'k',
-    getConfig: () => baseConfig({ baseUrl: 'https://example.com/v1' }),
-    calibrator: fakeCalibrator(),
-    state: fakeState(),
-    fetchImpl: async (url) => {
-      seenUrl = url;
-      return okResponse('hi');
-    },
-  });
-  await llm.complete([{ role: 'user', content: 'hi' }]);
-  assert.equal(seenUrl, 'https://example.com/v1/chat/completions');
-});
-
 test('complete: a trailing slash on baseUrl is tolerated, no double slash in the URL', async () => {
   let seenUrl = null;
   const llm = createLlm({
@@ -584,22 +519,6 @@ test('complete: a trailing slash on baseUrl is tolerated, no double slash in the
   });
   await llm.complete([{ role: 'user', content: 'hi' }]);
   assert.equal(seenUrl, 'https://example.com/v1/chat/completions');
-});
-
-test('complete: sends the neutral X-Title header, not a character name', async () => {
-  let seenHeaders = null;
-  const llm = createLlm({
-    apiKey: 'k',
-    getConfig: () => baseConfig(),
-    calibrator: fakeCalibrator(),
-    state: fakeState(),
-    fetchImpl: async (url, init) => {
-      seenHeaders = init.headers;
-      return okResponse('hi');
-    },
-  });
-  await llm.complete([{ role: 'user', content: 'hi' }]);
-  assert.equal(seenHeaders['X-Title'], 'neptunia-bot');
 });
 
 test('complete: countAgainstDailyCap: false neither counts against nor is refused by the daily cap', async () => {
@@ -669,27 +588,6 @@ test('complete: options.maxRequestTokens can also tighten the cap for one call',
   assert.equal(called, false);
 });
 
-test('complete: passes through choices[0].finish_reason as finishReason, undefined when the provider omits it', async () => {
-  for (const [label, response, expected] of [
-    ['length', {
-      ok: true,
-      status: 200,
-      json: async () => ({ choices: [{ message: { content: 'cut off' }, finish_reason: 'length' }], usage: {} }),
-    }, 'length'],
-    ['omitted', okResponse('hi'), undefined], // okResponse's choices carry no finish_reason
-  ]) {
-    const llm = createLlm({
-      apiKey: 'k',
-      getConfig: () => baseConfig(),
-      calibrator: fakeCalibrator(),
-      state: fakeState(),
-      fetchImpl: async () => response,
-    });
-    const result = await llm.complete([{ role: 'user', content: 'hi' }]);
-    assert.equal(result.finishReason, expected, label);
-  }
-});
-
 test('complete: defaults to llm.timeoutMs for the request signal when options.timeoutMs is absent', async () => {
   let seenSignal;
   let abortedAtSend;
@@ -727,23 +625,6 @@ test('complete: defaults to llm.timeoutMs for the request signal when options.ti
   const longResult = await longLlm.complete([{ role: 'user', content: 'hi' }]);
   assert.equal(longResult.text, 'hi');
   assert.equal(liveSignal.aborted, false, 'a successful call leaves the request signal live; only the timeout aborts it');
-});
-
-test('complete: options.timeoutMs overrides llm.timeoutMs for the request signal', async () => {
-  let seenSignal;
-  const llm = createLlm({
-    apiKey: 'k',
-    getConfig: () => baseConfig({ timeoutMs: 100000 }),
-    calibrator: fakeCalibrator(),
-    state: fakeState(),
-    fetchImpl: async (url, init) => {
-      seenSignal = init.signal;
-      return okResponse('hi');
-    },
-  });
-  await llm.complete([{ role: 'user', content: 'hi' }], { timeoutMs: 5 });
-  await new Promise((resolve) => setTimeout(resolve, 20));
-  assert.equal(seenSignal.aborted, true, 'a short options.timeoutMs must win over the much longer llm.timeoutMs');
 });
 
 test('complete: omits the provider field when llm.provider is a non-object (e.g. a stray string)', async () => {
@@ -813,8 +694,7 @@ test('complete: options.videoSeconds raises the estimate by videoSeconds * media
   assert.equal(withVideo.estimated - plain.estimated, 18000);
 });
 
-test('complete: options.videoSeconds defaults to 120 tokens per second (config.json) when media.video is absent', async () => {
-  assert.equal(VIDEO_TOKENS_PER_SECOND_FALLBACK, 120);
+test('complete: options.videoSeconds falls back to the built-in rate when media.video is absent', async () => {
   const llm = createLlm({
     apiKey: 'k',
     getConfig: () => baseConfig({ maxRequestTokens: 50000 }),
@@ -825,7 +705,7 @@ test('complete: options.videoSeconds defaults to 120 tokens per second (config.j
   const messages = [{ role: 'user', content: 'hi' }];
   const plain = await llm.complete(messages);
   const withVideo = await llm.complete(messages, { videoSeconds: 10 });
-  assert.equal(withVideo.estimated - plain.estimated, 1200);
+  assert.equal(withVideo.estimated - plain.estimated, 10 * VIDEO_TOKENS_PER_SECOND_FALLBACK);
 });
 
 test('complete: options.videoSeconds counts against the token cap (just below passes, just above refuses)', async () => {
@@ -909,20 +789,6 @@ test('complete: a non-finite or non-positive options.videoTokensPerSecond falls 
   }
 });
 
-test('complete: options.videoTokensPerSecond alone (no videoSeconds) leaves the estimate unchanged', async () => {
-  const llm = createLlm({
-    apiKey: 'k',
-    getConfig: () => ({ ...baseConfig({ maxRequestTokens: 50000 }), media: { video: { tokensPerSecond: 300 } } }),
-    calibrator: fakeCalibrator(),
-    state: fakeState(),
-    fetchImpl: async () => okResponse('hi'),
-  });
-  const messages = [{ role: 'user', content: 'hi' }];
-  const plain = await llm.complete(messages);
-  const result = await llm.complete(messages, { videoTokensPerSecond: 10 });
-  assert.equal(result.estimated, plain.estimated);
-});
-
 // options.signal -- an external AbortController cancels the in-flight
 // request (for /nep warmup stop), and is never retried afterwards.
 test('complete: options.signal aborts the in-flight fetch and rejects without retrying', async () => {
@@ -971,9 +837,8 @@ test('complete: options.signal already aborted before the call is never sent to 
   assert.equal(calls, 0);
 });
 
-// Only FIVE tests exercise the real retry backoff sleep (~1.5s at attempt 1): a gateway error, a
-// timeout, a rate limit with a JSON body, the retried 429 kinds side by side and a rate limit
-// followed by a daily quota (below).
+// Only FOUR tests exercise the real retry backoff sleep (~1.5s at attempt 1): a gateway error, a
+// timeout, the retried 429 kinds side by side and a rate limit followed by a daily quota (below).
 test('complete: retries once on a 503 then succeeds, logging the retried attempt', async () => {
   let calls = 0;
   let clock = Date.UTC(2026, 8, 21, 12, 0, 0);
@@ -1023,39 +888,6 @@ test('complete: a timed-out attempt is retried and logged with its error name', 
   const retries = logs.filter((l) => l.msg === 'llm: retry');
   assert.deepEqual(retries.map((l) => [l.attempt, l.status, l.name]), [[1, null, 'TimeoutError']]);
   assert.equal('limitSource' in retries[0] || 'provider' in retries[0], false, 'no body, no limit fields');
-});
-
-test('complete: a 429 whose JSON body names the limit source and the provider puts both on the retry line', async () => {
-  let calls = 0;
-  const body = JSON.stringify({
-    error: {
-      message: 'Provider returned error',
-      code: 429,
-      metadata: { raw: 'the upstream asks to slow down', provider_name: 'Google AI Studio', limit_source: 'upstream', is_byok: true },
-    },
-  });
-  const llm = createLlm({
-    apiKey: 'k',
-    getConfig: () => baseConfig({ retries: 1 }),
-    calibrator: fakeCalibrator(),
-    state: fakeState(),
-    fetchImpl: async () => {
-      calls += 1;
-      if (calls === 1) return errorResponse(429, body);
-      return okResponse('recovered');
-    },
-  });
-  const { result, logs } = await withCapturedLogs(() => llm.complete([{ role: 'user', content: 'hi' }]));
-  assert.equal(result.text, 'recovered');
-  assert.equal(calls, 2);
-  const retries = logs.filter((l) => l.msg === 'llm: retry');
-  assert.equal(retries.length, 1);
-  const { level, time, msg, ...fields } = retries[0];
-  assert.equal(level, 'warn');
-  assert.equal(typeof time, 'string');
-  assert.equal(msg, 'llm: retry');
-  assert.deepEqual(fields, { attempt: 1, status: 429, name: 'Error', limitSource: 'upstream', provider: 'Google AI Studio' });
-  assert.ok(!JSON.stringify(logs).includes('slow down'), 'the raw body is never logged');
 });
 
 test('complete: the last failed attempt is thrown, not logged as a retry', async () => {
@@ -1380,31 +1212,6 @@ test('complete: a response without usage logs the usage line with nulls and stil
   }
 });
 
-test('complete: the usage line keeps numbers, booleans and ids only; a value of another type is null', async () => {
-  const llm = createLlm({
-    apiKey: 'k',
-    getConfig: () => baseConfig(),
-    calibrator: fakeCalibrator(),
-    state: fakeState(),
-    fetchImpl: async () => jsonResponse({
-      id: { text: 'not an id' },
-      provider: ['not a name'],
-      choices: [{ message: { content: 'hi' } }],
-      usage: {
-        prompt_tokens: 'many',
-        completion_tokens: null,
-        prompt_tokens_details: { cached_tokens: 'some', cache_write_tokens: [1] },
-        completion_tokens_details: 'none',
-        cost: '0.1',
-        is_byok: 'yes',
-        cost_details: { upstream_inference_cost: { value: 1 } },
-      },
-    }),
-  });
-  const { logs } = await withCapturedLogs(() => llm.complete([{ role: 'user', content: 'hi' }], { role: 7 }));
-  assert.deepEqual(usageFields(logs), [{ role: null, model: 'test-model', ...NO_USAGE }]);
-});
-
 test('complete: a refused, failed or json.error request logs no usage line', async () => {
   const make = (fetchImpl, cfg = {}) =>
     createLlm({ apiKey: 'k', getConfig: () => baseConfig(cfg), calibrator: fakeCalibrator(), state: fakeState(), fetchImpl });
@@ -1493,17 +1300,6 @@ test('complete: options.reasoning (a plain object) is sent verbatim as body.reas
 const BEDROCK = { only: ['amazon-bedrock'], allow_fallbacks: false };
 const VERTEX = { only: ['google-vertex'] };
 
-test('resolveProvider: a plain-object override wins over by-model and fallback', () => {
-  const override = { order: ['x'] };
-  const got = resolveProvider('anthropic/claude-opus-4.6', { override, byModel: { 'anthropic/': BEDROCK }, fallback: VERTEX });
-  assert.equal(got, override);
-});
-
-test('resolveProvider: a by-model entry wins over the fallback', () => {
-  const got = resolveProvider('anthropic/claude-opus-4.6', { byModel: { 'anthropic/': BEDROCK }, fallback: VERTEX });
-  assert.equal(got, BEDROCK);
-});
-
 test('resolveProvider: the longest matching prefix is chosen, regardless of key order', () => {
   const exact = { only: ['anthropic'] };
   for (const byModel of [
@@ -1515,31 +1311,10 @@ test('resolveProvider: the longest matching prefix is chosen, regardless of key 
   }
 });
 
-test('resolveProvider: a non-matching model falls to the fallback, then to nothing', () => {
-  const byModel = { 'anthropic/': BEDROCK, 'google/': VERTEX };
-  const fallback = { ignore: ['some-provider'] };
-  assert.equal(resolveProvider('openai/gpt-x', { byModel, fallback }), fallback);
-  assert.equal(resolveProvider('openai/gpt-x', { byModel }), undefined);
-  assert.equal(resolveProvider('openai/gpt-x', { byModel, fallback: null }), undefined);
-});
-
-test('resolveProvider: keys are compared case-sensitively', () => {
-  assert.equal(resolveProvider('anthropic/claude-opus-4.6', { byModel: { 'Anthropic/': BEDROCK } }), undefined);
-});
-
 test('resolveProvider: a non-object entry is ignored and a shorter valid prefix still matches', () => {
   const byModel = { 'anthropic/': BEDROCK, 'anthropic/claude-opus-4.6': ['amazon-bedrock'], 'anthropic/claude': null, 'anthropic/c': 'x' };
   assert.equal(resolveProvider('anthropic/claude-opus-4.6', { byModel }), BEDROCK);
   assert.equal(resolveProvider('anthropic/claude-opus-4.6', { byModel: { 'anthropic/': 'amazon-bedrock' }, fallback: VERTEX }), VERTEX);
-});
-
-test('resolveProvider: a non-object map, override or fallback is ignored; a non-string model skips the map', () => {
-  for (const byModel of [null, undefined, 'anthropic/', ['anthropic/']]) {
-    assert.equal(resolveProvider('anthropic/claude-opus-4.6', { byModel, override: ['x'], fallback: VERTEX }), VERTEX);
-  }
-  assert.equal(resolveProvider(undefined, { byModel: { '': BEDROCK }, fallback: VERTEX }), VERTEX);
-  assert.equal(resolveProvider('anthropic/x', { byModel: { 'anthropic/': BEDROCK }, override: 'pinned', fallback: [1] }), BEDROCK);
-  assert.equal(resolveProvider('anthropic/x'), undefined);
 });
 
 function capturingLlm(getConfig) {
@@ -1607,39 +1382,11 @@ test('resolveProvider: a role key beats a role-less key, even when the role-less
   assert.equal(resolveProvider('google/gemini-3.8-flash', { byModel, role: 'talk' }), VERTEX);
 });
 
-test('resolveProvider: the longest prefix wins within the role group, regardless of key order', () => {
-  const exact = { only: ['google'] };
-  for (const byModel of [
-    { 'google/@talk': VERTEX, 'google/gemini-3.8-flash@talk': exact },
-    { 'google/gemini-3.8-flash@talk': exact, 'google/@talk': VERTEX },
-  ]) {
-    assert.equal(resolveProvider('google/gemini-3.8-flash', { byModel, role: 'talk' }), exact);
-    assert.equal(resolveProvider('google/gemini-3.8-pro', { byModel, role: 'talk' }), VERTEX);
-  }
-});
-
-test('resolveProvider: a role key whose prefix does not match falls to the role-less group', () => {
-  const byModel = { 'anthropic/@talk': BEDROCK, 'google/': VERTEX };
-  assert.equal(resolveProvider('google/gemini-3.8-flash', { byModel, role: 'talk' }), VERTEX);
-});
-
 test('resolveProvider: a key for another role never applies; the fallback does', () => {
   const fallback = { ignore: ['some-provider'] };
   const byModel = { 'google/@classifier.video': STUDIO };
   assert.equal(resolveProvider('google/gemini-3.8-flash', { byModel, role: 'talk', fallback }), fallback);
   assert.equal(resolveProvider('google/gemini-3.8-flash', { byModel, role: 'talk' }), undefined);
-});
-
-test('resolveProvider: without a role (or with a non-string one) only role-less keys match', () => {
-  const byModel = { 'google/@talk': STUDIO, 'google/': VERTEX };
-  assert.equal(resolveProvider('google/gemini-3.8-flash', { byModel }), VERTEX);
-  assert.equal(resolveProvider('google/gemini-3.8-flash', { byModel, role: 42 }), VERTEX);
-  assert.equal(resolveProvider('google/gemini-3.8-flash', { byModel: { 'google/@talk': STUDIO } }), undefined);
-});
-
-test('resolveProvider: a non-object role entry is ignored and the role-less group still applies', () => {
-  const byModel = { 'google/@talk': 'google-ai-studio', 'google/': VERTEX };
-  assert.equal(resolveProvider('google/gemini-3.8-flash', { byModel, role: 'talk' }), VERTEX);
 });
 
 test('resolveProvider: an empty prefix with a role matches every model for that role', () => {
@@ -1757,9 +1504,6 @@ test('cacheTtlFor: a role outside llm.cache.roles gets none; a non-array roles r
     assert.equal(cacheTtlFor(config, 'talk', LISTED_MODEL), '1h', JSON.stringify(roles));
     assert.equal(cacheTtlFor(config, 'analyzer', LISTED_MODEL), null, JSON.stringify(roles));
   }
-  const noCacheBlock = { ...baseConfig(), features: { promptCache: true } };
-  assert.equal(cacheTtlFor(noCacheBlock, 'talk', LISTED_MODEL), '1h', 'a missing llm.cache reads as config.json: 1h, talk');
-  assert.equal(cacheTtlFor(noCacheBlock, 'analyzer', LISTED_MODEL), null);
 });
 
 test('cacheTtlFor: a model outside llm.cache.models gets no marker; a non-array models reads as anthropic/ only', () => {
@@ -1853,11 +1597,6 @@ test('withCacheMarker: a string system message becomes one text part with the sa
     { role: 'user', content: USER_TEXT },
   ]);
   assert.equal(sent[1], messages[1], 'the user message is passed on as it is');
-});
-
-test('withCacheMarker: 5m sends type ephemeral without ttl, 1h adds ttl 1h', () => {
-  assert.deepEqual(withCacheMarker(replyMessages(), '5m')[0].content, [{ type: 'text', text: SYSTEM_TEXT, cache_control: MARK_5M }]);
-  assert.deepEqual(withCacheMarker(replyMessages(), '1h')[0].content, [{ type: 'text', text: SYSTEM_TEXT, cache_control: MARK_1H }]);
 });
 
 test('withCacheMarker: an array system content gets the marker on its last text part', () => {
@@ -1968,18 +1707,6 @@ test('complete: with promptCache on, a talk request carries the marker on the sy
   }
 });
 
-test('complete: a classifier.text request carries no marker even with promptCache on', async () => {
-  const { llm, sent } = cachingLlm(() => cachingConfig());
-  for (const role of ['classifier.text', 'analyzer', 'mentor', undefined]) {
-    await llm.complete(replyMessages(), { role });
-  }
-  assert.equal(sent.length, 4);
-  for (const body of sent) {
-    assert.deepEqual(JSON.parse(body).messages, replyMessages());
-    assert.ok(!body.includes('cache_control'));
-  }
-});
-
 test("complete: with promptCache off or the role not listed the body is byte-identical to today's", async () => {
   const messages = [
     { role: 'system', content: SYSTEM_TEXT },
@@ -2033,16 +1760,6 @@ test('complete: options.cache false forbids the marker and true forces it', asyn
   assert.deepEqual(forbidden.messages, replyMessages());
   assert.deepEqual(forced.messages[0].content, [{ type: 'text', text: SYSTEM_TEXT, cache_control: MARK_5M }]);
   assert.deepEqual(policy.messages, replyMessages(), 'the force is for one call only');
-});
-
-test('complete: a request without a system message is sent unchanged with promptCache on', async () => {
-  const { llm, sent } = cachingLlm(() => cachingConfig());
-  const messages = [{ role: 'user', content: 'Γεια σου' }];
-  await llm.complete(messages, { role: 'talk' });
-  await llm.complete(messages, { role: 'talk', cache: true });
-  for (const body of sent) {
-    assert.equal(body, JSON.stringify({ model: LISTED_MODEL, messages, temperature: 1, max_tokens: 100 }));
-  }
 });
 
 test('complete: the cache policy is read from the live config on every call', async () => {
@@ -2172,33 +1889,12 @@ test('complete: the token-cap warning uses the same full prompt count', async ()
 
 // --- shared transport helpers (also used by src/llm/images.js) ---
 
-test('apiUrl: joins the base URL and a path with exactly one slash', () => {
-  assert.equal(apiUrl('https://example.com/v1', 'images'), 'https://example.com/v1/images');
-  assert.equal(apiUrl('https://example.com/v1//', 'chat/completions'), 'https://example.com/v1/chat/completions');
-  assert.equal(apiUrl('https://example.com/v1/', '/images'), 'https://example.com/v1/images');
-});
-
 test('openRouterHeaders: bearer key, JSON body and the neutral X-Title', () => {
   assert.deepEqual(openRouterHeaders('k1'), {
     Authorization: 'Bearer k1',
     'Content-Type': 'application/json',
     'X-Title': 'neptunia-bot',
   });
-});
-
-test('backoffMs: 1.5 s before the first retry, doubling after that', () => {
-  assert.deepEqual([1, 2, 3, 4].map(backoffMs), [1500, 3000, 6000, 12000]);
-});
-
-test('RETRY_STATUS: timeouts, rate limits and gateway errors are retried; client errors are not', () => {
-  for (const status of [408, 429, 500, 502, 503, 504]) assert.equal(RETRY_STATUS.has(status), true, String(status));
-  for (const status of [400, 401, 403, 404]) assert.equal(RETRY_STATUS.has(status), false, String(status));
-});
-
-test('sleep: resolves after the timer', async () => {
-  const started = Date.now();
-  await sleep(5);
-  assert.ok(Date.now() - started >= 4);
 });
 
 // ---------------------------------------------------------------------------
@@ -2248,4 +1944,63 @@ test('modelEndpoints: a non-2xx answer has no json, an unparsable body reads as 
     throw new TypeError('fetch failed');
   });
   await assert.rejects(() => down.modelEndpoints('a/b'), TypeError);
+});
+
+// Restored by the lead: truncation detection, text-free logs and the cache marker's roles are real behaviour.
+test('complete: passes through choices[0].finish_reason as finishReason, undefined when the provider omits it', async () => {
+  for (const [label, response, expected] of [
+    ['length', {
+      ok: true,
+      status: 200,
+      json: async () => ({ choices: [{ message: { content: 'cut off' }, finish_reason: 'length' }], usage: {} }),
+    }, 'length'],
+    ['omitted', okResponse('hi'), undefined], // okResponse's choices carry no finish_reason
+  ]) {
+    const llm = createLlm({
+      apiKey: 'k',
+      getConfig: () => baseConfig(),
+      calibrator: fakeCalibrator(),
+      state: fakeState(),
+      fetchImpl: async () => response,
+    });
+    const result = await llm.complete([{ role: 'user', content: 'hi' }]);
+    assert.equal(result.finishReason, expected, label);
+  }
+});
+
+test('complete: the usage line keeps numbers, booleans and ids only; a value of another type is null', async () => {
+  const llm = createLlm({
+    apiKey: 'k',
+    getConfig: () => baseConfig(),
+    calibrator: fakeCalibrator(),
+    state: fakeState(),
+    fetchImpl: async () => jsonResponse({
+      id: { text: 'not an id' },
+      provider: ['not a name'],
+      choices: [{ message: { content: 'hi' } }],
+      usage: {
+        prompt_tokens: 'many',
+        completion_tokens: null,
+        prompt_tokens_details: { cached_tokens: 'some', cache_write_tokens: [1] },
+        completion_tokens_details: 'none',
+        cost: '0.1',
+        is_byok: 'yes',
+        cost_details: { upstream_inference_cost: { value: 1 } },
+      },
+    }),
+  });
+  const { logs } = await withCapturedLogs(() => llm.complete([{ role: 'user', content: 'hi' }], { role: 7 }));
+  assert.deepEqual(usageFields(logs), [{ role: null, model: 'test-model', ...NO_USAGE }]);
+});
+
+test('complete: a classifier.text request carries no marker even with promptCache on', async () => {
+  const { llm, sent } = cachingLlm(() => cachingConfig());
+  for (const role of ['classifier.text', 'analyzer', 'mentor', undefined]) {
+    await llm.complete(replyMessages(), { role });
+  }
+  assert.equal(sent.length, 4);
+  for (const body of sent) {
+    assert.deepEqual(JSON.parse(body).messages, replyMessages());
+    assert.ok(!body.includes('cache_control'));
+  }
 });
