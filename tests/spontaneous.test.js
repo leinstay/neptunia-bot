@@ -10,6 +10,8 @@ import {
   pickChannel,
   isChannelDead,
   createSpontaneous,
+  chooseRoomMode,
+  roomQuestionChance,
 } from '../src/behavior/spontaneous.js';
 
 function snowflake(ts) {
@@ -1258,4 +1260,106 @@ test('spontaneous: runNoticed re-checks the rails when it fires', async () => {
     assert.equal(refused.reason, reason, label);
     assert.equal(scene.calls.length, 0, label);
   }
+});
+
+// ---------------------------------------------------------------------------
+// Room questions: chooseRoomMode, onMessage with { room }, eavesdropReady
+
+function roomLine({ id, ts, self = false, bot = false, authorId = 'u1' }) {
+  return { id, ts, self, bot, authorId };
+}
+
+test('chooseRoomMode: interject while no own line follows the focus', () => {
+  const history = [
+    roomLine({ id: 'm1', ts: 1000, self: true }),
+    roomLine({ id: 'm2', ts: 2000, authorId: 'a' }),
+    roomLine({ id: 'm3', ts: 3000, authorId: 'b' }),
+  ];
+  assert.equal(chooseRoomMode(history, 'm2'), 'interject', 'members talking after it change nothing');
+  assert.equal(chooseRoomMode(history, 'm3'), 'interject', 'the focus as the last line');
+  assert.equal(chooseRoomMode([roomLine({ id: 'm9', ts: 1 })], 'm9'), 'interject', 'a quiet channel: no liveness needed');
+});
+
+test('chooseRoomMode: null once the persona spoke after it', () => {
+  const history = [
+    roomLine({ id: 'm2', ts: 2000, authorId: 'a' }),
+    roomLine({ id: 'm3', ts: 3000, self: true }),
+    roomLine({ id: 'm4', ts: 4000, authorId: 'b' }),
+  ];
+  assert.equal(chooseRoomMode(history, 'm2'), null);
+  assert.equal(chooseRoomMode(history, 'gone'), null, 'a focus no longer in the history');
+  assert.equal(chooseRoomMode([], 'm2'), null);
+});
+
+/** A spontaneous scheduler for the room tests: the ordinary eavesdrop rails pass at noon. */
+function roomScene({ rng, config = baseConfig({ eavesdropDelayMs: [0, 0] }), store = fakeStore(), turns: turnOptions = {}, getGuildId = () => 'g1' } = {}) {
+  const calls = [];
+  const turns = fakeTurns({ runTurn: async (args) => { calls.push(args); return { outcome: 'spoke' }; }, ...turnOptions });
+  const channel = fakeChannel('c1', fakeGuild('g1'));
+  const hot = { config };
+  const spontaneous = createSpontaneous({ hot, store, client: {}, turns, getGuildId, rng, now: () => Date.UTC(2026, 0, 5, 12, 0, 0) });
+  return { spontaneous, channel, calls, hot, store };
+}
+
+test('spontaneous: a room line is scheduled without a roll and with its focus', async () => {
+  // One rng value only: the delay. A chance roll would take 0.5 >= eavesdropChance (0.02) and refuse.
+  const scene = roomScene({ rng: scripted([0.5]) });
+  const focus = { id: 'm7', self: false, bot: false, authorId: 'u1', ts: Date.UTC(2026, 0, 5, 11, 59, 0) };
+  assert.equal(scene.spontaneous.onMessage(scene.channel, focus, { room: true }), true);
+  await flushTimers();
+  assert.equal(scene.calls.length, 1);
+  const [args] = scene.calls;
+  assert.equal(args.channel, scene.channel);
+  assert.equal(args.mode, 'auto');
+  assert.equal(args.focus, focus);
+  assert.equal(args.chooseMode([roomLine({ id: 'm7', ts: 1 })], 2), 'interject', 'the room chooser, no liveness');
+  assert.equal(args.chooseMode([roomLine({ id: 'm7', ts: 1 }), roomLine({ id: 'm8', ts: 2, self: true })], 3), null);
+});
+
+test('spontaneous: onMessage returns whether it scheduled', async () => {
+  const hit = roomScene({ rng: scripted([0, 0]), config: baseConfig({ eavesdropChance: 0.5, eavesdropDelayMs: [0, 0] }) });
+  assert.equal(hit.spontaneous.onMessage(hit.channel, { self: false, bot: false }), true, 'a won roll');
+  const miss = roomScene({ rng: scripted([0.9]), config: baseConfig({ eavesdropChance: 0.5 }) });
+  assert.equal(miss.spontaneous.onMessage(miss.channel, { self: false, bot: false }), false, 'a lost roll');
+  const paused = roomScene({ rng: () => 0, store: fakeStore({ paused: true }) });
+  assert.equal(paused.spontaneous.onMessage(paused.channel, { self: false, bot: false }, { room: true }), false, 'paused');
+  const busy = roomScene({ rng: () => 0, turns: { isAnyBusy: () => true } });
+  assert.equal(busy.spontaneous.onMessage(busy.channel, { self: false, bot: false }, { room: true }), false, 'a room line still meets the rails');
+  const own = roomScene({ rng: () => 0 });
+  assert.equal(own.spontaneous.onMessage(own.channel, { self: true, bot: false }, { room: true }), false, 'its own line');
+  await flushTimers();
+  assert.equal(hit.calls.length, 1);
+  assert.equal(hit.calls[0].focus, undefined, 'an ordinary eavesdrop carries no focus');
+  for (const scene of [miss, paused, busy, own]) assert.equal(scene.calls.length, 0);
+});
+
+test('spontaneous: eavesdropReady is the eavesdrop rails as one boolean, with no roll', () => {
+  const rng = () => {
+    throw new Error('eavesdropReady never rolls');
+  };
+  assert.equal(roomScene({ rng }).spontaneous.eavesdropReady(roomScene({ rng }).channel), true);
+  const rows = [
+    ['paused', { store: fakeStore({ paused: true }) }],
+    ['features.eavesdrop off', { config: baseConfig({}, { eavesdrop: false }) }],
+    ['features.spontaneous off', { config: baseConfig({}, { spontaneous: false }) }],
+    ['asleep', { config: baseConfig({ activeHours: { from: 14, to: 16 } }) }],
+    ['minGapMinutes', { turns: { lastPostAt: () => Date.UTC(2026, 0, 5, 11, 55, 0) } }],
+    ['one attention', { turns: { isAnyBusy: () => true } }],
+    ['spontaneous.channels', { config: baseConfig({ channels: ['other'] }) }],
+    ['another guild', { getGuildId: () => 'g2' }],
+  ];
+  for (const [label, options] of rows) {
+    const scene = roomScene({ rng, ...options });
+    assert.equal(scene.spontaneous.eavesdropReady(scene.channel), false, label);
+  }
+  const readOnly = roomScene({ rng });
+  const cannotSend = fakeChannel('c2', fakeGuild('g1'), { permissionsFor: () => ({ has: () => false }) });
+  assert.equal(readOnly.spontaneous.eavesdropReady(cannotSend), false, 'a channel the bot cannot send in');
+});
+
+test('roomQuestionChance: spontaneous.roomQuestionChance, 0.1 when missing (config.json\'s value)', () => {
+  assert.equal(roomQuestionChance({ spontaneous: { roomQuestionChance: 0.3 } }), 0.3);
+  assert.equal(roomQuestionChance({ spontaneous: { roomQuestionChance: 0 } }), 0);
+  assert.equal(roomQuestionChance({ spontaneous: {} }), 0.1);
+  assert.equal(roomQuestionChance({}), 0.1);
 });

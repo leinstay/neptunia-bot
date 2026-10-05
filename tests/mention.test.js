@@ -17,6 +17,7 @@ import {
   parseFollowUpVerdict,
   parseAddressAnswer,
   followUpTriggerKind,
+  roomPreFilter,
 } from '../src/behavior/mention.js';
 
 const NAME_TRIGGERS = ['νεπτούνια'];
@@ -507,4 +508,25 @@ test('deprecatedModelKeys: none for a current config, a null old key or no confi
   assert.deepEqual(deprecatedModelKeys({ classifier: { text: 'a', media: 'b', video: 'c' }, llm: { model: 'x' }, media: { maxPerTurn: 6 } }), []);
   assert.deepEqual(deprecatedModelKeys({ llm: { classifierModel: null }, mention: {} }), []);
   assert.deepEqual(deprecatedModelKeys(undefined), []);
+});
+
+// --- Room questions: roomPreFilter ------------------------------------------
+
+test('roomPreFilter: text with no reply and no member mention passes', () => {
+  assert.equal(roomPreFilter({ content: 'ποιος έρχεται απόψε;', replyToId: null, mentionedUserIds: [] }), true);
+  assert.equal(roomPreFilter({ content: '  quelqu\'un a vu le film ?  ', replyToId: null, mentionedUserIds: [] }), true);
+  // A shape without a mention list is no mention.
+  assert.equal(roomPreFilter({ content: 'καλημέρα σε όλους', replyToId: null }), true);
+});
+
+test('roomPreFilter: a reply or a member mention never passes', () => {
+  assert.equal(roomPreFilter({ content: 'ναι, σωστά', replyToId: 'm100', mentionedUserIds: [] }), false);
+  assert.equal(roomPreFilter({ content: 'έλα κι εσύ', replyToId: null, mentionedUserIds: ['u2'] }), false);
+  assert.equal(roomPreFilter({ content: 'ναι', replyToId: 'm100', mentionedUserIds: ['u2'] }), false);
+});
+
+test('roomPreFilter: a message with no text never passes', () => {
+  assert.equal(roomPreFilter({ content: '', replyToId: null, mentionedUserIds: [] }), false);
+  assert.equal(roomPreFilter({ content: '   \n ', replyToId: null, mentionedUserIds: [] }), false);
+  assert.equal(roomPreFilter({ replyToId: null, mentionedUserIds: [] }), false);
 });

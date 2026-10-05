@@ -2,7 +2,10 @@
 // intervals it either cuts into a conversation that is clearly alive right
 // now ('interject') or starts a topic itself in a channel that has gone
 // quiet ('initiate'). It can also eavesdrop on a single fresh message and
-// jump in a few seconds/minutes later, as if it had just noticed it.
+// jump in a few seconds/minutes later, as if it had just noticed it. A line
+// the room classifier of src/discord/events.js found put to everyone present
+// (spontaneous.roomQuestionChance) is scheduled the same way without the
+// roll, the turn about that line (its focus).
 //
 // A channel the persona can read but not write in (a read-only channel) is a
 // candidate too, with the main channel as its destination
@@ -112,6 +115,36 @@ export function chooseMode(history, now, cfg, rng) {
   if (liveCount >= cfg.liveMinMessages) return 'interject';
 
   return null;
+}
+
+/**
+ * The chooser of a room turn (a line put to everyone present, picked up
+ * unprompted): 'interject' while the line `focusId` is still in `history`
+ * (oldest first, `{ id, self }`) with no line of the persona's own after it,
+ * else null. Liveness does not apply: a question in a quiet channel must be
+ * pickable.
+ * @param {object[]} history
+ * @param {string} focusId
+ * @returns {'interject'|null}
+ */
+export function chooseRoomMode(history, focusId) {
+  const at = history.findIndex((m) => m.id === focusId);
+  if (at === -1) return null;
+  return history.slice(at + 1).some((m) => m.self) ? null : 'interject';
+}
+
+// Only when spontaneous.roomQuestionChance is missing (config.json always has it).
+const ROOM_QUESTION_CHANCE_FALLBACK = 0.1;
+
+/**
+ * The chance a line that failed the eavesdrop roll is shown to the room
+ * classifier (src/discord/events.js): `spontaneous.roomQuestionChance`, or
+ * 0.1 (config.json's value) when it is missing. 0 turns the room path off.
+ * @param {object} config  The live config, read by the caller now.
+ * @returns {number}
+ */
+export function roomQuestionChance(config) {
+  return config?.spontaneous?.roomQuestionChance ?? ROOM_QUESTION_CHANCE_FALLBACK;
 }
 
 /**
@@ -406,20 +439,52 @@ export function createSpontaneous({
     return isActiveHour(localHour(t, config.bot.timezone), config.spontaneous.activeHours) ? null : 'asleep';
   }
 
-  /** Eavesdrop on a freshly observed message and maybe jump in after a delay. */
-  function onMessage(channel, normalized) {
+  /**
+   * The eavesdrop rails of `channel`, `config` read by the caller now: not
+   * paused (`/nep pause`), eavesdropAllowed, a channel of the served guild
+   * and passesFilters (allowed, canSend, spontaneous.channels,
+   * minGapMinutes, one attention).
+   */
+  function eavesdropRails(channel, config, t) {
     // /nep pause: no eavesdrop scheduling while paused.
-    if (store.state.data.paused) return;
+    if (store.state.data.paused) return false;
+    // A memory warmup run, a switch off or the persona asleep: no eavesdrop scheduling.
+    if (!eavesdropAllowed(config, t)) return false;
+    if (channel.guild?.id !== getGuildId()) return false;
+    return passesFilters(channel, config, config.spontaneous, t);
+  }
 
+  /**
+   * Whether an eavesdrop on `channel` could be scheduled now, the roll
+   * aside: the rails onMessage checks before its roll, read from the live
+   * config now, as one boolean. src/discord/events.js asks it before paying
+   * for a room classifier call. Rolls nothing, schedules nothing.
+   * @param {object} channel  A discord.js guild channel.
+   * @returns {boolean}
+   */
+  function eavesdropReady(channel) {
+    return eavesdropRails(channel, hot.config, now());
+  }
+
+  /**
+   * Eavesdrop on a freshly observed message and maybe jump in after a delay
+   * (spontaneous.eavesdropDelayMs): the rails (eavesdropRails), a member's
+   * message, then one roll of spontaneous.eavesdropChance. With `room` (the
+   * room classifier said the line is put to everyone present) there is no
+   * roll: the turn carries the line as its `focus` and the room chooser
+   * (chooseRoomMode) instead of the ordinary one.
+   * @param {object} channel  The discord.js channel the message was written in.
+   * @param {object} normalized
+   * @param {{ room?: boolean }} [options]
+   * @returns {boolean}  Whether a turn was scheduled.
+   */
+  function onMessage(channel, normalized, { room = false } = {}) {
     const config = hot.config;
     const cfg = config.spontaneous;
     const t = now();
-    // A memory warmup run, a switch off or the persona asleep: no eavesdrop scheduling.
-    if (!eavesdropAllowed(config, t)) return;
-    if (normalized.self || normalized.bot) return;
-    if (channel.guild.id !== getGuildId()) return;
-    if (!passesFilters(channel, config, cfg, t)) return;
-    if (rng() >= cfg.eavesdropChance) return;
+    if (normalized.self || normalized.bot) return false;
+    if (!eavesdropRails(channel, config, t)) return false;
+    if (!room && rng() >= cfg.eavesdropChance) return false;
 
     const delay = between(cfg.eavesdropDelayMs, rng);
     const timer = setTimeout(() => {
@@ -427,12 +492,14 @@ export function createSpontaneous({
       // Up to eavesdropDelayMs later: the same checks again, on the config read now.
       const current = hot.config;
       if (!eavesdropAllowed(current, now())) return;
-      turns
-        .runTurn({ channel, mode: 'auto', chooseMode: makeChooseMode(current.spontaneous) })
-        .catch((err) => log.error('spontaneous: eavesdrop turn failed', { channel: channel.id, error: err }));
+      const turn = room
+        ? { channel, mode: 'auto', chooseMode: (history) => chooseRoomMode(history, normalized.id), focus: normalized }
+        : { channel, mode: 'auto', chooseMode: makeChooseMode(current.spontaneous) };
+      turns.runTurn(turn).catch((err) => log.error('spontaneous: eavesdrop turn failed', { channel: channel.id, error: err }));
     }, delay);
     timer.unref?.();
     eavesdropTimers.add(timer);
+    return true;
   }
 
   /**
@@ -516,5 +583,5 @@ export function createSpontaneous({
     eavesdropTimers.clear();
   }
 
-  return { tick, onMessage, noticeElsewhere, runNoticed, force, status, stop };
+  return { tick, onMessage, eavesdropReady, noticeElsewhere, runNoticed, force, status, stop };
 }

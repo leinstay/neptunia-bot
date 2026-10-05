@@ -189,6 +189,26 @@ export function followUpTriggerKind(answer, cfg) {
   return cfg?.followUpOverheard === false ? 'followUp' : 'overheard';
 }
 
+// --- Room questions ------------------------------------------------------------
+// Outside a conversation window, an untagged line put to everyone present may
+// get a higher chance of an unprompted answer (spontaneous.roomQuestionChance,
+// src/discord/events.js): a cheap classifier (prompts/room.md) is asked first.
+// The check below runs before any money is spent on it.
+
+/**
+ * Whether `normalized` may be a line put to the whole room, before the room
+ * classifier is asked: it has text (non-empty after trim), replies to nothing
+ * and mentions no member. `normalized` is the shape
+ * src/discord/collect.js's `normalizeMessage` produces.
+ * @param {{ content?: string, replyToId?: string|null, mentionedUserIds?: string[] }} normalized
+ * @returns {boolean}
+ */
+export function roomPreFilter(normalized) {
+  if (String(normalized?.content ?? '').trim() === '') return false;
+  if (normalized.replyToId) return false;
+  return (normalized.mentionedUserIds ?? []).length === 0;
+}
+
 // The helper models, grouped by modality under the `classifier` config block.
 // Each resolver takes the full hot config at the moment of use. The older
 // per-feature keys are never read: config.json always ships `classifier.*`,

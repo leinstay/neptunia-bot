@@ -6201,3 +6201,285 @@ test('events: an eavesdrop miss, or a writable channel, arms no noticed settle',
   assert.equal(writable.onMessageCalls.length, 1, 'its ordinary eavesdrop is unchanged');
   assert.equal(writableScene.timers.all.length, 0);
 });
+
+// ---------------------------------------------------------------------------
+// Room questions (spontaneous.roomQuestionChance) -- a line put to everyone
+// present, outside any follow-up window, that failed the eavesdrop roll may
+// roll the room chance; the room classifier (room.md) then says yes or no,
+// and a yes schedules an unprompted turn about that line.
+
+const ROOM_T0 = Date.UTC(2026, 0, 5, 12, 0, 0);
+
+/** A spontaneous scheduler stand-in: onMessage answers `scheduled`, eavesdropReady answers `ready`. */
+function roomSpontaneous({ scheduled = false, ready = true } = {}) {
+  const calls = [];
+  const readyCalls = [];
+  return {
+    calls,
+    readyCalls,
+    onMessage: (...args) => {
+      calls.push(args);
+      return typeof scheduled === 'function' ? scheduled(...args) : scheduled;
+    },
+    eavesdropReady: (channel) => {
+      readyCalls.push(channel);
+      return ready;
+    },
+  };
+}
+
+function fakeRoomPrompts() {
+  return { ...fakeAddressPrompts(), room: 'You watch the room for {{name}}. Is the candidate put to everyone? Answer yes or no.' };
+}
+
+/** A channel holding one earlier line, the room scene's clock fixed at ROOM_T0. */
+function roomChannel(id = 'c1', guild = fakeGuild('g1', 'Neptunia')) {
+  const history = [rawHistoryMessage({ id: `${id}-h1`, authorId: 'u2', authorName: 'Ἀλέξης', ts: ROOM_T0 - 60000, content: 'earlier line', channelId: id })];
+  return fakeChannelWithHistory(id, guild, history);
+}
+
+function roomMessage(channel, overrides = {}) {
+  return fakeMessage({
+    id: 'm-room',
+    guild: channel.guild,
+    channel,
+    channelId: channel.id,
+    author: { id: 'u7', bot: false, globalName: 'Ελένη', username: 'el' },
+    member: { displayName: 'Ελένη' },
+    cleanContent: 'ποιος θέλει καφέ;',
+    createdTimestamp: ROOM_T0 - 1000,
+    ...overrides,
+  });
+}
+
+/** Lets the handler reach a pending classifier call. */
+const tickOnce = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+test('follow-up: the address request is byte-identical to the one before the room classifier shared its builder', async () => {
+  const store = fakeStore({ u7: profileWithAliases('u7', ['Λένα', 'Ελενάκι']) });
+  const llm = fakeFollowUpLlm();
+  const handler = makeHandler({ llm, prompts: fakeAddressPrompts(), store, now: () => ROOM_T0 });
+  const guild = fakeGuild('g1', 'Neptunia');
+  const history = [rawHistoryMessage({ id: 'h1', authorId: 'u1', authorName: 'Alice', ts: ROOM_T0 - 60000, content: 'earlier message' })];
+  const channel = fakeChannelWithHistory('c1', guild, history);
+  await openFollowUpWindow(handler, { guild, channel, ts: ROOM_T0 - 30000 });
+  const p = handler(roomMessage(channel, { id: 'm-candidate', cleanContent: 'and you too' }));
+  await tickOnce();
+  assert.equal(llm.calls.length, 1);
+  const [{ messages }] = llm.calls;
+  // Pinned from the request built before the extraction (the same fixtures, the same clock).
+  assert.deepEqual(messages, [
+    { role: 'system', content: 'You are Neptunia. Is the candidate message addressed to you? Answer yes or no.' },
+    {
+      role: 'user',
+      content:
+        '=== Mon, January 5 ===\n#1 [11:59] Alice: earlier message\n<author>\nΕλένη -- known as: Λένα, Ελενάκι\n</author>\n' +
+        '<candidate>\n#2 [11:59] Ελένη: and you too\n</candidate>',
+    },
+  ]);
+  llm.respond('no');
+  await p;
+});
+
+test('events: a failed eavesdrop roll may roll roomQuestionChance and ask the room classifier', async () => {
+  const llm = fakeFollowUpLlm();
+  const spontaneous = roomSpontaneous();
+  const handler = makeHandler({ llm, spontaneous, prompts: fakeRoomPrompts(), rng: scripted([0.09]), now: () => ROOM_T0 });
+  const channel = roomChannel();
+  const p = handler(roomMessage(channel));
+  await tickOnce();
+
+  assert.equal(llm.calls.length, 1, 'the room classifier was asked');
+  const [{ messages, options }] = llm.calls;
+  assert.equal(messages[0].role, 'system');
+  assert.equal(messages[0].content, 'You watch the room for Neptunia. Is the candidate put to everyone? Answer yes or no.', 'room.md, {{name}} filled');
+  assert.equal(messages[1].role, 'user');
+  assert.match(messages[1].content, /earlier line[\s\S]*<candidate>\n[^\n]*ποιος θέλει καφέ;\n<\/candidate>$/, 'the transcript, then the candidate');
+  assert.deepEqual(
+    { ...options },
+    {
+      model: 'anthropic/claude-sonnet-4.6',
+      role: 'classifier.text',
+      maxOutputTokens: 8,
+      countAgainstDailyCap: true,
+      skipCalibration: true,
+      timeoutMs: 30000,
+      purpose: 'room',
+      signal: undefined,
+    },
+    'the helper request options: classifier.text, mention.followUpMaxOutputTokens, the daily cap, llm.helperTimeoutMs',
+  );
+  llm.respond('no');
+  await p;
+
+  // The roll is strict: at the chance itself the classifier is not asked; a missing key counts as 0.1.
+  const config = baseConfig();
+  delete config.spontaneous.roomQuestionChance;
+  const llm2 = fakeFollowUpLlm();
+  const handler2 = makeHandler({ llm: llm2, spontaneous: roomSpontaneous(), config, prompts: fakeRoomPrompts(), rng: scripted([0.1]), now: () => ROOM_T0 });
+  await handler2(roomMessage(roomChannel()));
+  assert.equal(llm2.calls.length, 0);
+});
+
+test('events: the room classifier is never asked when the eavesdrop rails fail', async () => {
+  const noRoll = () => {
+    throw new Error('no room roll');
+  };
+  const llm = fakeFollowUpLlm();
+  const spontaneous = roomSpontaneous({ ready: false });
+  const handler = makeHandler({ llm, spontaneous, prompts: fakeRoomPrompts(), rng: noRoll, now: () => ROOM_T0 });
+  const channel = roomChannel();
+  await handler(roomMessage(channel));
+  assert.equal(spontaneous.readyCalls.length, 1, 'the rails were asked');
+  assert.equal(spontaneous.readyCalls[0], channel);
+  assert.equal(llm.calls.length, 0);
+
+  // The pre-filter: a reply or a member mention, or no text, is never a room line.
+  const ready = roomSpontaneous();
+  const handler2 = makeHandler({ llm, spontaneous: ready, prompts: fakeRoomPrompts(), rng: noRoll, now: () => ROOM_T0 });
+  await handler2(roomMessage(channel, { id: 'm-r1', reference: { messageId: 'other' } }));
+  await handler2(roomMessage(channel, { id: 'm-r2', mentions: { users: new Map([['u2', { id: 'u2' }]]) } }));
+  await handler2(roomMessage(channel, { id: 'm-r3', cleanContent: '   ' }));
+  assert.equal(llm.calls.length, 0);
+
+  // An eavesdrop that scheduled leaves nothing to the room path.
+  const hit = roomSpontaneous({ scheduled: true });
+  const handler3 = makeHandler({ llm, spontaneous: hit, prompts: fakeRoomPrompts(), rng: noRoll, now: () => ROOM_T0 });
+  await handler3(roomMessage(channel));
+  assert.equal(hit.readyCalls.length, 0);
+  assert.equal(llm.calls.length, 0);
+});
+
+test('events: roomQuestionChance 0 never asks', async () => {
+  const llm = fakeFollowUpLlm();
+  const spontaneous = roomSpontaneous();
+  const config = baseConfig({ spontaneous: { roomQuestionChance: 0 } });
+  const handler = makeHandler({ llm, spontaneous, config, prompts: fakeRoomPrompts(), rng: () => 0, now: () => ROOM_T0 });
+  const { logs } = await withCapturedLogs(() => handler(roomMessage(roomChannel())));
+  assert.equal(llm.calls.length, 0);
+  assert.equal(spontaneous.readyCalls.length, 0, 'not even the rails are read');
+  assert.equal(logs.some((entry) => entry.msg?.startsWith('room:')), false, 'silent');
+});
+
+test('events: a yes schedules the room turn, a no leaves the message', async () => {
+  for (const [answer, scheduled] of [['yes', true], ['Yes.', true], ['no', false], ['overheard', false]]) {
+    const llm = fakeFollowUpLlm();
+    const spontaneous = roomSpontaneous();
+    const handler = makeHandler({ llm, spontaneous, prompts: fakeRoomPrompts(), rng: scripted([0]), now: () => ROOM_T0 });
+    const channel = roomChannel();
+    const { logs } = await withCapturedLogs(async () => {
+      const p = handler(roomMessage(channel));
+      await tickOnce();
+      llm.respond(answer);
+      await p;
+    });
+    assert.equal(spontaneous.calls.length, scheduled ? 2 : 1, answer);
+    const [first] = spontaneous.calls;
+    assert.equal(first.length, 2, 'the ordinary eavesdrop comes first, no options');
+    if (scheduled) {
+      const [roomChannelArg, roomLine, options] = spontaneous.calls[1];
+      assert.equal(roomChannelArg, channel);
+      assert.equal(roomLine, first[1], 'the same message is the focus');
+      assert.deepEqual(options, { room: true });
+    }
+    const verdict = logs.find((entry) => entry.msg === 'room: verdict');
+    assert.equal(verdict?.answer, scheduled ? 'yes' : 'no', answer);
+    assert.equal(verdict.channel, 'c1');
+    assert.equal(verdict.author, 'u7');
+    assert.equal(typeof verdict.ms, 'number');
+    assert.ok(!JSON.stringify(logs).includes('καφέ'), 'no message text in the logs');
+  }
+});
+
+test('events: a failed or empty room classifier call schedules nothing and says why', async () => {
+  const rows = [
+    ['an error', (llm) => llm.fail(Object.assign(new Error('boom'), { statusCode: 503 })), { reason: 'llm-error', status: 503 }],
+    ['the daily cap', (llm) => llm.fail(new DailyCapError('cap')), { reason: 'daily-cap', status: null }],
+    ['an empty answer', (llm) => llm.respond('   '), { reason: 'empty', status: null }],
+  ];
+  for (const [label, settle, expected] of rows) {
+    const llm = fakeFollowUpLlm();
+    const spontaneous = roomSpontaneous();
+    const handler = makeHandler({ llm, spontaneous, prompts: fakeRoomPrompts(), rng: scripted([0]), now: () => ROOM_T0 });
+    const { logs } = await withCapturedLogs(async () => {
+      const p = handler(roomMessage(roomChannel()));
+      await tickOnce();
+      settle(llm);
+      await p;
+    });
+    assert.equal(spontaneous.calls.length, 1, `${label}: nothing scheduled`);
+    const failed = logs.find((entry) => entry.msg === 'room: classifier failed');
+    assert.equal(failed?.channel, 'c1', label);
+    assert.equal(failed.reason, expected.reason, label);
+    assert.equal(failed.status, expected.status, label);
+    assert.equal(logs.some((entry) => entry.msg === 'room: verdict'), false, `${label}: no verdict`);
+  }
+
+  // No room.md: skipped with its code, nothing asked.
+  const llm = fakeFollowUpLlm();
+  const handler = makeHandler({ llm, spontaneous: roomSpontaneous(), prompts: fakeAddressPrompts(), rng: scripted([0]), now: () => ROOM_T0 });
+  const { logs } = await withCapturedLogs(() => handler(roomMessage(roomChannel())));
+  assert.equal(llm.calls.length, 0);
+  assert.deepEqual(
+    logs.filter((entry) => entry.msg === 'room: skipped').map((entry) => [entry.channel, entry.reason]),
+    [['c1', 'no-prompt']],
+  );
+});
+
+test('events: one room call per channel at a time', async () => {
+  const llm = fakeFollowUpLlm();
+  const spontaneous = roomSpontaneous();
+  const handler = makeHandler({ llm, spontaneous, prompts: fakeRoomPrompts(), rng: () => 0, now: () => ROOM_T0 });
+  const guild = fakeGuild('g1', 'Neptunia');
+  const c1 = roomChannel('c1', guild);
+  const c2 = roomChannel('c2', guild);
+  const { logs } = await withCapturedLogs(async () => {
+    const first = handler(roomMessage(c1, { id: 'm1' }));
+    await tickOnce();
+    await handler(roomMessage(c1, { id: 'm2' }));
+    assert.equal(llm.calls.length, 1, 'the second line of c1 is skipped while the first is classified');
+    const other = handler(roomMessage(c2, { id: 'm3' }));
+    await tickOnce();
+    assert.equal(llm.calls.length, 2, 'another channel has its own slot');
+    llm.respond('no');
+    await Promise.all([first, other]);
+    const third = handler(roomMessage(c1, { id: 'm4' }));
+    await tickOnce();
+    assert.equal(llm.calls.length, 3, 'the slot is free again once the call ended');
+    llm.respond('no');
+    await third;
+  });
+  assert.deepEqual(
+    logs.filter((entry) => entry.msg === 'room: skipped').map((entry) => [entry.channel, entry.reason]),
+    [['c1', 'in-flight']],
+  );
+});
+
+test('events: a message inside an open follow-up window never reaches the room path', async () => {
+  // The address classifier handles it: one address call, no room call.
+  const llm = fakeFollowUpLlm();
+  const spontaneous = roomSpontaneous();
+  const handler = makeHandler({ llm, spontaneous, prompts: fakeRoomPrompts(), rng: () => 0, now: () => ROOM_T0 });
+  const channel = roomChannel();
+  await openFollowUpWindow(handler, { guild: channel.guild, channel, ts: ROOM_T0 - 30000 });
+  const p = handler(roomMessage(channel));
+  await tickOnce();
+  assert.equal(llm.calls.length, 1);
+  assert.match(llm.calls[0].messages[0].content, /addressed to you/, 'the address classifier, not room.md');
+  llm.respond('no');
+  await p;
+  assert.equal(llm.calls.length, 1);
+  assert.equal(spontaneous.readyCalls.length, 0);
+
+  // An open window the address classifier passed over (features.followUp off here): still no room path.
+  const config = baseConfig({ features: { followUp: false } });
+  const llm2 = fakeFollowUpLlm();
+  const spontaneous2 = roomSpontaneous();
+  const handler2 = makeHandler({ llm: llm2, spontaneous: spontaneous2, config, prompts: fakeRoomPrompts(), rng: () => 0, now: () => ROOM_T0 });
+  const channel2 = roomChannel();
+  await openFollowUpWindow(handler2, { guild: channel2.guild, channel: channel2, ts: ROOM_T0 - 30000 });
+  await handler2(roomMessage(channel2));
+  assert.equal(spontaneous2.calls.length, 1, 'the ordinary eavesdrop still sees it');
+  assert.equal(llm2.calls.length, 0);
+  assert.equal(spontaneous2.readyCalls.length, 0);
+});
