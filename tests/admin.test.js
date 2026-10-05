@@ -1921,6 +1921,8 @@ test('memory.wipe: the confirmation and the reply say what goes (private memory,
   const kept = done.split('\n').find((line) => line.startsWith('Kept:'));
   assert.ok(kept.includes('the GIF library'), kept);
   assert.ok(done.includes('the learned list') && done.includes('the warmup progress'));
+  assert.ok(prompt.includes('the voice queue') && prompt.includes('the recent lines'), prompt);
+  assert.ok(done.includes('the voice queue') && done.includes('the recent lines'), done);
 });
 
 /** A fake live analyzer whose `waitIdle` resolves only when `finish()` is called. */
@@ -3007,7 +3009,8 @@ test('run: lore.remove rejects an unknown id', async () => {
 test('run: status reports model, calibration ratio and the daily request count', async () => {
   const rootDir = makeRoot();
   const client = { guilds: { cache: new Map([['g1', { id: 'g1', name: 'The Server' }]]) } };
-  const { admin } = makeAdmin(rootDir, { client, calibrator: { ratio: 1.2 } });
+  const { admin, store } = makeAdmin(rootDir, { client, calibrator: { ratio: 1.2 } });
+  store.state.data.llmDay = new Date().toISOString().slice(0, 10); // the count only reads as today's when stamped today
 
   const body = await admin.run('status', {}, {});
 
@@ -4293,6 +4296,27 @@ test('run: memory.refresh forces a portrait refresh, ignoring the hours rail', a
   assert.equal(warmup.calls.lastRefreshUserId, '1');
   assert.deepEqual(warmup.calls.lastRefreshOpts, { force: true });
   assert.match(body, /refreshed/);
+});
+
+test('run: memory.refresh says the character text waits for the voice run when it was queued', async () => {
+  const rootDir = makeRoot();
+  const warmup = fakeWarmup({ refreshPortrait: { ok: true, userId: '1', stage: 'two', characterQueued: true } });
+  const { admin } = makeAdmin(rootDir, { warmup });
+
+  const body = await admin.run('memory.refresh', { userId: '1' }, { guildId: 'g1' });
+  assert.match(body, /next voice run/);
+});
+
+test('run: status shows 0 requests when the stored count is from yesterday, and the stored count for today', async () => {
+  const rootDir = makeRoot();
+  const { admin, store } = makeAdmin(rootDir);
+  const today = new Date().toISOString().slice(0, 10);
+
+  store.state.data = { llmCount: 5, llmDay: '2000-01-01' };
+  assert.ok((await admin.run('status', {}, {})).split('\n').some((l) => l.startsWith('llm requests today: 0 /')));
+
+  store.state.data = { llmCount: 5, llmDay: today };
+  assert.ok((await admin.run('status', {}, {})).split('\n').some((l) => l.startsWith('llm requests today: 5 /')));
 });
 
 test('run: memory.refresh reports the reason when the refresh is not performed', async () => {

@@ -55,7 +55,8 @@ import { imageFileName } from './behavior/turn.js';
 import { renderVarietyReport, varietyStatusLine } from './behavior/variety.js';
 import { effectiveAffinity, privateRepliesToday } from './behavior/private.js';
 import { ImageCapError, ImageGenError, UnsupportedImageModelError, familyOf as imageFamilyOf, IMAGE_ROLE } from './llm/images.js';
-import { matchRoute, resolveProvider } from './llm/openrouter.js';
+import { matchRoute, resolveProvider, llmCountToday } from './llm/openrouter.js';
+import { PAGE } from './discord/collect.js';
 import { anchorMax, checkCaseText } from './mentor/cases.js';
 import { renderCard, renderFile, renderLastRun } from './mentor/report.js';
 import { log } from './log.js';
@@ -105,9 +106,6 @@ const NO_GUILD = 'no guild resolved yet';
 
 /** The reply for an empty list, the same for every list command. */
 const NONE = '(none)';
-
-/** Page size of a Discord message history fetch (Discord's maximum). */
-const PAGE = 100;
 
 // ---------------------------------------------------------------------------
 // Pure functions
@@ -1283,7 +1281,7 @@ export function createAdmin({
       `dry-run: ${onOff(dryRunOn)}${dryRunTarget}`,
       `model: ${cfg?.llm?.model ?? '-'}`,
       `calibration ratio: ${calibrator ? calibrator.ratio.toFixed(3) : '-'}`,
-      `llm requests today: ${data.llmCount ?? 0} / ${cfg?.llm?.maxRequestsPerDay ?? '-'} (day: ${data.llmDay ?? '-'})`,
+      `llm requests today: ${llmCountToday(data, Date.now())} / ${cfg?.llm?.maxRequestsPerDay ?? '-'} (day: ${todayUtc()})`,
       `paused: ${onOff(data.paused)}${data.paused ? ` (since ${data.pausedAt ?? '?'})` : ''}`,
       `warming up: ${onOff(isWarmingUp())}`,
     ];
@@ -1919,7 +1917,7 @@ export function createAdmin({
     if (confirm !== guildName) {
       return (
         'This deletes everything remembered about this server: every member profile and private memory, the server habits, ' +
-        'the learned list, the emoji ranking, the variety history, the channel map, analyzer lore and the warmup progress. ' +
+        'the learned list, the emoji ranking, the variety history, the voice queue, the recent lines, the channel map, analyzer lore and the warmup progress. ' +
         `To confirm, run again with confirm: ${guildName}`
       );
     }
@@ -1935,7 +1933,7 @@ export function createAdmin({
       `channels removed: ${counts.channels}`,
       `lore removed: ${counts.loreRemoved} (kept: ${counts.loreKept})`,
       `buffer messages cleared: ${counts.bufferMessages}`,
-      'Also removed: the server habits, the learned list, the emoji ranking, the variety history and the warmup progress.',
+      'Also removed: the server habits, the learned list, the emoji ranking, the variety history, the voice queue, the recent lines and the warmup progress.',
       'Kept: owner lore, the GIF library, the media description cache, token calibration, the daily request counts and the spontaneous schedule.',
     ].join('\n');
   }
@@ -2590,6 +2588,9 @@ export function createAdmin({
     if (!result.ok) {
       const why = result.reason === 'warming-up' ? warmupBusyText() : outcomeText(result, 'unknown reason');
       return `Refresh not performed: ${why}`;
+    }
+    if (result.characterQueued) {
+      return `Portrait refreshed for ${userId}; its character text lands after the next voice run.`;
     }
     return `Portrait refreshed for ${userId}.`;
   }
