@@ -54,7 +54,7 @@
 
 服务器搜索需要 `features.recall` 开启（默认如此）。引擎通过 Discord 搜索 API 搜索服务器消息历史，将命中项分组为时间聚类，获取每个聚类周围的消息窗口，并让摘要辅助（`prompts/recall-summary.md`）给出历史中的答案。分类器的词形和名称词形还会与已存储记忆匹配（不含私有层；最多 `recall.memoryItems`，默认 6），匹配的条目作为 `<memory>` 块发送给摘要，使辅助即使在没有找到旧聊天时也有上下文。摘要可能指出一段最佳回答问题的原文，角色会在 `<lookup>` 块中看到该段原文。摘要未找到结果时，不显示服务器部分。recall 运行受 `recall.maxPerDay`（默认 100）每日上限和 `recall.timeoutMs`（默认 10 秒）每次运行限制。受众规则拒绝的频道中的窗口会被排除。每个键请参阅[配置](configuration.md#recall)。
 
-两者都运行时，`<lookup>` 块分别使用标题和中间注释。每回合最多一次网络搜索和一次服务器搜索。分类器、网络浓缩器和 recall 摘要各自计入 `llm.maxRequestsPerDay`。网络结果按规范化查询缓存 `web.search.cacheHours`（默认 24）小时。`<senses>` 块仅在配置了 Brave 密钥时包含 `senses.search`。
+两者都运行时，`<lookup>` 块分别使用标题和中间注释。每回合最多一次网络搜索和一次服务器搜索。分类器、网络浓缩器和 recall 摘要各自计入 `llm.maxRequestsPerDay`。网络结果按规范化查询缓存 `web.search.cacheHours`（默认 24）小时。`<senses>` 块仅在配置了 Brave 密钥时包含 `senses.search`。`senses.recall` 在服务器历史搜索可用的服务器回合中包含。
 
 网络侧设置位于 `web`，服务器侧设置位于 `recall`。每个键请参阅[配置](configuration.md#web)和[配置](configuration.md#recall)。提示文件与代码之间的契约在[提示契约](prompt-contract.md)中。
 
