@@ -120,15 +120,15 @@ export function hasText(value) {
  * model) only when `features.memoryTwoStage` is exactly true AND both PORTRAIT_TWO_STAGE_PROMPTS
  * are non-blank. Otherwise `single`, today's prompts/profile.md request that writes the portrait
  * itself: as always with the switch off; with it on (a prompt `missing`), on the voice model
- * (`voiceModel: true`), since its answer words the character. Pure.
+ * (`voice: true`), since its answer words the character. Pure.
  * @param {object} [config]   The live config.
  * @param {object} [prompts]  The live prompts.
- * @returns {{ stage: 'single'|'two', voiceModel: boolean, missing: string[] }}
+ * @returns {{ stage: 'single'|'two', voice: boolean, missing: string[] }}
  */
 export function portraitMode(config, prompts) {
-  if (config?.features?.memoryTwoStage !== true) return { stage: 'single', voiceModel: false, missing: [] };
+  if (config?.features?.memoryTwoStage !== true) return { stage: 'single', voice: false, missing: [] };
   const missing = PORTRAIT_TWO_STAGE_PROMPTS.filter((key) => !hasText(prompts?.[key]));
-  return missing.length === 0 ? { stage: 'two', voiceModel: false, missing } : { stage: 'single', voiceModel: true, missing };
+  return missing.length === 0 ? { stage: 'two', voice: false, missing } : { stage: 'single', voice: true, missing };
 }
 
 /**

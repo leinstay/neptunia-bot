@@ -725,7 +725,7 @@ test('answerReply: with the prompt cache on, samples 1 and 2 carry the same mark
 test('answerReply: every sample is sent as the mentor\'s', async () => {
   const { llm } = await replay(storedMoment(), { samples: 2 });
   assert.equal(llm.calls.length, 2);
-  assert.ok(llm.calls.every((call) => call.options.origin === 'mentor' && call.options.role === 'talk'));
+  assert.ok(llm.calls.every((call) => call.options.origin === 'mentor' && call.options.role === 'voice' && call.options.purpose === 'reply'));
 });
 
 // ---- the last hours: <recent> -------------------------------------------------

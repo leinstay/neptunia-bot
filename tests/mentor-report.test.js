@@ -41,7 +41,7 @@ function fakeRun(overrides = {}) {
     kind: 'run',
     startedAt: '2026-09-30T10:00:00.000Z',
     finishedAt: '2026-09-30T10:05:00.000Z',
-    models: { mentor: 'x/mentor', talk: 'x/talk', classifierText: 'x/classifier' },
+    models: { mentor: 'x/mentor', voice: 'x/voice', classifierText: 'x/classifier' },
     reference: { profile: { messages: 100 }, samples: 40 },
     situations,
     dropped: 1,
@@ -329,4 +329,8 @@ test('renderFile: an answer shows its GIF with the caption and its drawing; one 
   assert.match(text, /^gif: g8$/m);
   const plain = text.slice(text.indexOf('--- s1a3 ---'), text.indexOf('--- s2a1 ---'));
   assert.doesNotMatch(plain, /^(gif|draw):/m);
+});
+
+test('renderFile: the models line names the mentor, the voice model and the classifier.text model', () => {
+  assert.match(renderFile(fakeRun()).text, /^models: mentor x\/mentor, voice x\/voice, classifier\.text x\/classifier$/m);
 });

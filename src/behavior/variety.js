@@ -33,8 +33,8 @@ import { HOUR_MS, MINUTE_MS } from '../time.js';
  * `long*` keys drive the long pass: how many own lines the ring keeps and the
  * pass reads (`longLines`, 0 = no long pass), how often it may run
  * (`longEveryHours`), the fewest lines it needs (`longMinLines`), how many
- * patterns it keeps (`longMaxPatterns`) and its model (`longModel`, null =
- * the `classifier.text` model).
+ * patterns it keeps (`longMaxPatterns`). It runs on the `classifier.text`
+ * model, as the short pass does.
  */
 export const VARIETY_DEFAULTS = Object.freeze({
   window: 16,
@@ -51,7 +51,6 @@ export const VARIETY_DEFAULTS = Object.freeze({
   longEveryHours: 6,
   longMinLines: 60,
   longMaxPatterns: 3,
-  longModel: null,
 });
 
 // Fixed by the prompt contract, not by config: an example is a short verbatim
@@ -76,7 +75,7 @@ function intAtLeast(value, fallback, min) {
  * @returns {{ window: number, recentMinutes: number, minLines: number, contextChars: number,
  *   maxPatterns: number, shapeChars: number, maxOutputTokens: number, timeoutMs: number,
  *   requestTimeoutMs: number, history: number, longLines: number, longEveryHours: number,
- *   longMinLines: number, longMaxPatterns: number, longModel: string|null }}
+ *   longMinLines: number, longMaxPatterns: number }}
  */
 export function varietySettings(config) {
   const v = config?.variety ?? {};
@@ -96,7 +95,6 @@ export function varietySettings(config) {
     longEveryHours: Number.isFinite(v.longEveryHours) && v.longEveryHours > 0 ? v.longEveryHours : d.longEveryHours,
     longMinLines: intAtLeast(v.longMinLines, d.longMinLines, 1),
     longMaxPatterns: intAtLeast(v.longMaxPatterns, d.longMaxPatterns, 0),
-    longModel: typeof v.longModel === 'string' && v.longModel.trim() ? v.longModel.trim() : d.longModel,
   };
 }
 

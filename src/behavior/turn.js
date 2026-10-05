@@ -31,7 +31,7 @@ import { parseLookupAnswer, recallSettings } from './recall.js';
 import { parseSplitAnswer, splitCandidate, splitSettings } from './split.js';
 import { turnRequestInput } from './turn-input.js';
 import { parseOutput } from '../llm/parse.js';
-import { DailyCapError, TokenLimitError, RETRY_STATUS, helperRequestOptions, railReason, sleep } from '../llm/openrouter.js';
+import { DailyCapError, REPLY_REQUEST, TokenLimitError, RETRY_STATUS, helperRequestOptions, railReason, sleep } from '../llm/openrouter.js';
 import { ImageCapError, ImageGenError } from '../llm/images.js';
 import { limitOf, mirrorChannelLabel, mirrorDryRun, postLimitNotice } from './limits.js';
 import { between, typingMs } from './random.js';
@@ -124,7 +124,7 @@ const PACE_FALLBACK = Object.freeze({ prepareMs: 6000, prepareSearchMs: 12000, d
 
 /**
  * The pace of a turn's preparation, read from `config` (the live config):
- * `prepareMs`, how long everything before the talk request may take, counted
+ * `prepareMs`, how long everything before the reply request may take, counted
  * from the turn's start; `prepareSearchMs`, the longer limit once the search
  * classifier asked for a web or server search (never shorter than
  * `prepareMs`); `dropAfterMs`, the bar a turn's answer must be in hand by,
@@ -713,7 +713,7 @@ function taskInput({ part, queued, added, labels, channelId }) {
  * channel's lines, not this chat. A throw or an answer that is not an array
  * counts as no id (a throw logs `pull: route failed`).
  *
- * Everything a turn prepares before its talk request (the file previews, the
+ * Everything a turn prepares before its reply request (the file previews, the
  * captions, the videos and their re-watch, the link reads, the search
  * classifier with its searches, the neighbours, the pulled channels, the
  * variety pass) starts as soon as its inputs exist and runs alongside the
@@ -721,7 +721,7 @@ function taskInput({ part, queued, added, labels, channelId }) {
  * start, `pace.prepareSearchMs` once the search classifier asked for a
  * search). A helper still running then contributes nothing to this turn --
  * its block is absent, as when it fails -- and keeps running for its cache.
- * Every turn that reaches the talk request logs `turn: timings`.
+ * Every turn that reaches the reply request logs `turn: timings`.
  * `schedule(fn, ms)` (default: setTimeout) runs that deadline and the typing
  * indicator's refresh; it resolves a function that cancels it.
  */
@@ -2211,7 +2211,7 @@ export function createTurnRunner({
       const startedAt = now;
       // The bar (pace.dropAfterMs, from the turn's start; a drawFailed turn has its own): the
       // answer must be in hand by then, or the turn is dropped unposted. At the bar every wait
-      // below gives up (beforeBar throws TOO_SLOW), the typing indicator stops, and the talk
+      // below gives up (beforeBar throws TOO_SLOW), the typing indicator stops, and the reply
       // request is aborted -- its client sends no retry once its signal is aborted.
       bar = createDeadline({ clock, startedAt, schedule, limitMs: paceSettings(config).dropAfterMs });
       const barAbort = new AbortController();
@@ -2228,16 +2228,16 @@ export function createTurnRunner({
                 throw TOO_SLOW;
               }),
             ]);
-      // The talk request's options: with a bar, each attempt's timeout is the smaller of
-      // llm.timeoutMs (read now) and the time left, and the bar's signal aborts it; nothing is
-      // asked once no time is left.
-      const talkOptions = () => {
+      // The reply request's options (role `voice`, purpose `reply`): with a bar, each attempt's
+      // timeout is the smaller of llm.timeoutMs (read now) and the time left, and the bar's
+      // signal aborts it; nothing is asked once no time is left.
+      const replyOptions = () => {
         const left = bar.leftMs();
-        if (left === null) return { role: 'talk' };
+        if (left === null) return { ...REPLY_REQUEST };
         if (left <= 0) throw TOO_SLOW;
         const configured = hot.config.llm?.timeoutMs;
         const timeoutMs = Number.isFinite(configured) && configured > 0 ? Math.min(configured, left) : left;
-        return { role: 'talk', timeoutMs, signal: barAbort.signal };
+        return { ...REPLY_REQUEST, timeoutMs, signal: barAbort.signal };
       };
       // A drawFailed turn only says the picture failed: no classifier or
       // at-turn variety pass is paid for a second time (once it posts, its
@@ -2746,9 +2746,9 @@ export function createTurnRunner({
       }
 
       let completion;
-      const talkStartedAt = clock();
+      const replyStartedAt = clock();
       try {
-        completion = await beforeBar(llm.complete(messages, talkOptions()));
+        completion = await beforeBar(llm.complete(messages, replyOptions()));
       } catch (err) {
         // The bar passed (or no time was left to ask): the turn is dropped, nothing is resent.
         if (err === TOO_SLOW || bar.passed) throw TOO_SLOW;
@@ -2766,7 +2766,7 @@ export function createTurnRunner({
         const aboutThePictures = err.statusCode >= 400 && err.statusCode < 500 && !RETRY_STATUS.has(err.statusCode);
         if (Array.isArray(messages[1]?.content) && aboutThePictures) {
           const textOnly = messages.map((m) => (Array.isArray(m.content) ? { ...m, content: request.textFallback } : m));
-          completion = await beforeBar(llm.complete(textOnly, talkOptions()));
+          completion = await beforeBar(llm.complete(textOnly, replyOptions()));
         } else {
           throw err;
         }
@@ -2780,7 +2780,7 @@ export function createTurnRunner({
           prepareMs,
           late,
           stages: timings,
-          talkMs: end - talkStartedAt,
+          replyMs: end - replyStartedAt,
           totalMs: end - startedAt,
         });
       }

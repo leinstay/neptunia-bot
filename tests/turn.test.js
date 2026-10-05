@@ -1449,7 +1449,7 @@ test('createTurnRunner: rewatch -- the classifier gets the watched videos and th
   );
   assert.equal(options.model, 'x/haiku', 'no text classifier model -> the media model');
   assert.equal(options.maxOutputTokens, 120);
-  assert.equal(options.timeoutMs, 25_000, 'a helper: llm.helperTimeoutMs, not the talk timeout');
+  assert.equal(options.timeoutMs, 25_000, 'a helper: llm.helperTimeoutMs, not the reply timeout');
   assert.equal(options.countAgainstDailyCap, true);
   assert.equal(options.skipCalibration, true);
   assert.equal(options.purpose, 'rewatch');
@@ -1871,7 +1871,7 @@ test('createTurnRunner: lookup -- the classifier gets the transcript and the can
   assert.ok(user.endsWith('</transcript>\n<candidate>\nZoë: ποιος κέρδισε τον τελικό;\n</candidate>'), user);
   assert.ok(!user.split('<candidate>')[0].includes('ποιος κέρδισε'), 'the trigger only in <candidate>');
   assert.equal(options.model, 'x/text');
-  assert.equal(options.timeoutMs, 25_000, 'a helper: llm.helperTimeoutMs, not the talk timeout');
+  assert.equal(options.timeoutMs, 25_000, 'a helper: llm.helperTimeoutMs, not the reply timeout');
   assert.equal(options.skipCalibration, true);
   assert.equal(options.countAgainstDailyCap, true);
   assert.equal(options.purpose, 'lookup');
@@ -3058,7 +3058,7 @@ test('createTurnRunner: only a custom reaction the index does not know means out
 // Provider routing: every request says which role makes it (llm.providerByModel
 // keys of the form "<prefix>@<role>").
 
-test('createTurnRunner: the persona turn is requested as the talk role', async () => {
+test('createTurnRunner: the persona turn is requested as role voice, purpose reply', async () => {
   const raw = rawMessage({ id: 'm1' });
   const channel = fakeTurnChannel({ historyMessages: [raw] });
   const llm = fakeLlm('<skip/>');
@@ -3068,10 +3068,11 @@ test('createTurnRunner: the persona turn is requested as the talk role', async (
   const turns = createTurnRunner({ hot, store: fakeStore(), llm, calibrator: identityCalibrator(), client: fakeClient() });
   await turns.runTurn({ channel, mode: 'interject' });
   assert.equal(llm.optionCalls.length, 1);
-  assert.deepEqual(llm.optionCalls[0], { role: 'talk' }, 'only the role: the talk model and every other setting stay the defaults');
+  assert.deepEqual(llm.optionCalls[0], { role: 'voice', purpose: 'reply' }, 'only the role and the purpose: llm.model and every other setting stay the defaults');
+  assert.equal('cache' in llm.optionCalls[0], false, 'the cache policy decides: the reply is the request it marks');
 });
 
-test('createTurnRunner: the text-only retry after a 4xx image error is requested as the talk role too', async () => {
+test('createTurnRunner: the text-only retry after a 4xx image error is requested as the reply too', async () => {
   const raw = rawMessage({
     id: 'm1',
     attachments: new Map([
@@ -3083,16 +3084,16 @@ test('createTurnRunner: the text-only retry after a 4xx image error is requested
   const turns = createTurnRunner({ hot: fakeHot({}), store: fakeStore(), llm, calibrator: identityCalibrator(), client: fakeClient(), imageFetcher: fakeImageFetcher() });
   await turns.runTurn({ channel, mode: 'reply', trigger: videoTrigger(raw), triggerKind: 'mention' });
   assert.equal(llm.optionCalls.length, 2);
-  assert.deepEqual(llm.optionCalls.map((o) => o?.role), ['talk', 'talk']);
+  assert.deepEqual(llm.optionCalls.map((o) => [o?.role, o?.purpose]), [['voice', 'reply'], ['voice', 'reply']]);
 });
 
-test('createTurnRunner: the rewatch and lookup classifiers are requested as classifier.text, the turn as talk', async () => {
+test('createTurnRunner: the rewatch and lookup classifiers are requested as classifier.text, the turn as voice', async () => {
   const rewatch = await runRewatch();
   assert.equal(rewatch.llm.classifierCalls[0].options.role, 'classifier.text');
-  assert.equal(rewatch.llm.turnCalls[0].options.role, 'talk');
+  assert.equal(rewatch.llm.turnCalls[0].options.role, 'voice');
   const lookup = await runLookupTurn();
   assert.equal(lookup.llm.classifierCalls[0].options.role, 'classifier.text');
-  assert.equal(lookup.llm.turnCalls[0].options.role, 'talk');
+  assert.equal(lookup.llm.turnCalls[0].options.role, 'voice');
 });
 
 // ---------------------------------------------------------------------------
@@ -5427,7 +5428,7 @@ test('runTurn: a routed answer records the call it answered and its source chann
 });
 
 // ---------------------------------------------------------------------------
-// Pace: the helpers before the talk request run together, under one deadline (pace.*).
+// Pace: the helpers before the reply request run together, under one deadline (pace.*).
 
 /** A promise with its resolve and reject handed out. */
 function deferred() {
@@ -5532,7 +5533,7 @@ test('paceSettings: 0, a negative value or a non-number turns a limit off; a mis
   assert.deepEqual(paceSettings({ pace: 'fast' }), missing, 'a group that is not an object counts as missing');
 });
 
-test('runTurn: the helpers before the talk request overlap -- two slow ones take the time of one', async () => {
+test('runTurn: the helpers before the reply request overlap -- two slow ones take the time of one', async () => {
   let t = NOW;
   const caption = deferred();
   const read = deferred();
@@ -5715,13 +5716,13 @@ test('runTurn: turn: timings carries every stage, null for one that did not run'
   for (const name of ['previews', 'links', 'neighbors', 'pulled']) assert.equal(typeof timings.stages[name], 'number', name);
   for (const name of ['videos', 'rewatch', 'lookup', 'variety']) assert.equal(timings.stages[name], null, name);
   assert.deepEqual(
-    [timings.channel, timings.mode, timings.triggerKind, timings.prepareMs, timings.talkMs, timings.totalMs, timings.late],
+    [timings.channel, timings.mode, timings.triggerKind, timings.prepareMs, timings.replyMs, timings.totalMs, timings.late],
     ['c1', 'reply', 'mention', 1100, 2000, 3100, []],
   );
   assert.ok(logs.some((l) => l.msg === 'turn: model answered' && 'secondsToAnswer' in l));
 });
 
-/** An llm fake that notes how many typing indicators the channel had when the talk request came. */
+/** An llm fake that notes how many typing indicators the channel had when the reply request came. */
 function typingAtTalk(channel) {
   const base = fakeLlm('<msg>ok</msg>');
   const seen = [];
@@ -5789,7 +5790,7 @@ function barLlm(talk) {
   };
 }
 
-test('runTurn: an answer in hand just before pace.dropAfterMs is posted, the talk request bounded by the time left', async () => {
+test('runTurn: an answer in hand just before pace.dropAfterMs is posted, the reply request bounded by the time left', async () => {
   let t = NOW;
   const llm = barLlm(async () => {
     t = NOW + BAR_MS - 1;
@@ -5805,7 +5806,8 @@ test('runTurn: an answer in hand just before pace.dropAfterMs is posted, the tal
   assert.equal(scene.channel.sent.length, 1);
   assert.equal(logs.some((l) => l.msg === 'turn: dropped'), false);
   const [options] = llm.optionCalls;
-  assert.equal(options.role, 'talk');
+  assert.equal(options.role, 'voice');
+  assert.equal(options.purpose, 'reply');
   assert.equal(options.timeoutMs, BAR_MS, 'the smaller of llm.timeoutMs and the time left');
   assert.equal(options.signal.aborted, false);
   assert.deepEqual(scene.timers.live(), [], 'the bar is cleared once the answer is in hand');
@@ -5825,13 +5827,13 @@ test('runTurn: a talk request still out at pace.dropAfterMs is aborted; nothing 
   await settleUntil(() => llm.optionCalls.length > 0);
   const bar = scene.timers.live().find((timer) => timer.ms === BAR_MS);
   assert.ok(bar, 'the bar is set from the turn start');
-  assert.ok(scene.timers.live().some((timer) => timer.ms !== BAR_MS), 'the typing indicator is refreshed through the talk request');
+  assert.ok(scene.timers.live().some((timer) => timer.ms !== BAR_MS), 'the typing indicator is refreshed through the reply request');
   scene.timers.fire(bar);
   const { result, logs } = await running;
   await settleUntil(() => idle > 0);
 
   assert.equal(result.outcome, 'error');
-  assert.equal(llm.optionCalls[0].signal.aborted, true, 'the talk request is aborted');
+  assert.equal(llm.optionCalls[0].signal.aborted, true, 'the reply request is aborted');
   assert.equal(scene.channel.sent.length, 0);
   const dropped = logs.find((l) => l.msg === 'turn: dropped');
   assert.deepEqual(
@@ -5887,7 +5889,7 @@ test('runTurn: pace.dropAfterMs 0 sets no bar -- a slow answer is still posted, 
 
   assert.equal(result.outcome, 'spoke');
   assert.equal(scene.channel.sent.length, 1);
-  assert.deepEqual(llm.optionCalls, [{ role: 'talk' }]);
+  assert.deepEqual(llm.optionCalls, [{ role: 'voice', purpose: 'reply' }]);
   assert.equal(logs.some((l) => l.msg === 'turn: dropped'), false);
   assert.ok(scene.timers.timers.every((timer) => timer.ms === TEST_PACE.prepareMs), 'only the preparation deadline');
 });
@@ -5906,7 +5908,7 @@ test('runTurn: a private chat message shows the typing indicator while its turn 
   );
 
   assert.equal(result.outcome, 'spoke');
-  assert.deepEqual(llm.seen, [1], 'typing before the talk request');
+  assert.deepEqual(llm.seen, [1], 'typing before the reply request');
 });
 
 // ---------------------------------------------------------------------------
@@ -5919,7 +5921,7 @@ const PARTS_ANSWER = SPLIT_PARTS.map((part) => `- ${part}`).join('\n');
 
 /**
  * An llm fake routing by request purpose: the splitter (`split`), the search classifier
- * (`lookup`), everything else is the talk request. Each answer is a string, an Error to throw,
+ * (`lookup`), everything else is the reply request. Each answer is a string, an Error to throw,
  * or a function of the call's index (0-based, per kind) giving one of those or a promise.
  */
 function splitLlm({ split = PARTS_ANSWER, lookup = 'none', talk = '<msg reply="#2">ok</msg>' } = {}) {

@@ -202,7 +202,7 @@ test('config.json: the code fallbacks of the variety group, the long pass includ
   assert.deepEqual(varietySettings({}), shipped.variety);
   assert.deepEqual(varietySettings({ variety: {} }), shipped.variety);
   assert.deepEqual({ ...VARIETY_DEFAULTS }, shipped.variety);
-  for (const key of ['longLines', 'longEveryHours', 'longMinLines', 'longMaxPatterns', 'longModel']) assert.ok(Object.hasOwn(shipped.variety, key), key);
+  for (const key of ['longLines', 'longEveryHours', 'longMinLines', 'longMaxPatterns']) assert.ok(Object.hasOwn(shipped.variety, key), key);
 });
 
 test('config.json: the code fallbacks of the split group are the shipped values, and splitTasks ships on', () => {

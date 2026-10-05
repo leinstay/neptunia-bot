@@ -64,7 +64,7 @@
     "maxRequestsPerDay": 300,
     "provider": null,
     "providerByModel": {},
-    "cache": { "ttl": "1h", "roles": ["talk"], "models": ["anthropic/"], "promptIncludesCached": true },
+    "cache": { "ttl": "1h", "roles": ["voice"], "models": ["anthropic/"], "promptIncludesCached": true },
     "hedge": { "roles": ["classifier.text"], "afterMs": 2500, "timeoutMs": 8000, "longTimeoutMs": 20000 }
   },
   "classifier": {
@@ -197,7 +197,6 @@
     "portraitRefreshPerDay": 3,
     "portraitRetryHours": 24,
     "portraitCheckMinutes": 60,
-    "voiceModel": null,
     "voice": { "maxItems": 24, "maxPerDay": 100, "maxOutputTokens": 3000, "retryMinutes": 15, "maxAttempts": 4, "queueMax": 100, "queueHours": 24, "timeoutMs": 120000 }
   },
   "lore": {
@@ -281,7 +280,7 @@
     "google": { "resolution": "1K" }
   },
   "gifs": { "max": 40, "listChars": 70, "storeMax": 300, "halfLifeDays": 30, "maxPerDay": 40, "backfillMessages": 500, "backfillDescribe": 20, "recachePerRun": 50 },
-  "variety": { "window": 16, "recentMinutes": 180, "minLines": 3, "contextChars": 120, "maxPatterns": 4, "shapeChars": 140, "maxOutputTokens": 500, "timeoutMs": 8000, "requestTimeoutMs": 30000, "history": 20, "longLines": 300, "longEveryHours": 6, "longMinLines": 60, "longMaxPatterns": 3, "longModel": null },
+  "variety": { "window": 16, "recentMinutes": 180, "minLines": 3, "contextChars": 120, "maxPatterns": 4, "shapeChars": 140, "maxOutputTokens": 500, "timeoutMs": 8000, "requestTimeoutMs": 30000, "history": 20, "longLines": 300, "longEveryHours": 6, "longMinLines": 60, "longMaxPatterns": 3 },
   "private": { "minAffinity": 5, "maxPerUserPerDay": 100, "maxPerOwnerPerDay": 200, "purgeMaxMessages": 5000 },
   "mentor": {
     "model": null,

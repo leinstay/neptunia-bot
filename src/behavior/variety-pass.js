@@ -129,10 +129,10 @@ export function createVarietyPass({ hot, store, llm, now = Date.now }) {
   /**
    * One request on `request`, cut at `variety.requestTimeoutMs` (each attempt
    * and the whole, retries included); resolves the completion or throws (a cut
-   * says `timedOut`). The short pass asks the `classifier.text` model under
-   * purpose `variety`; the long pass passes its own model and purpose.
+   * says `timedOut`), on the `classifier.text` model (read now) under
+   * `purpose`: `variety` for the short pass, `variety-long` for the long one.
    */
-  async function ask(request, config, settings, { model = classifierTextModel(config), purpose = 'variety' } = {}) {
+  async function ask(request, config, settings, { purpose = 'variety' } = {}) {
     const controller = new AbortController();
     // Cleared as soon as the request settles. Unref'd: it only bounds a request
     // and must never keep a process alive on its own (the bot's client does).
@@ -140,7 +140,7 @@ export function createVarietyPass({ hot, store, llm, now = Date.now }) {
     timer.unref?.();
     try {
       return await llm.complete(request.messages, {
-        model,
+        model: classifierTextModel(config),
         // The shared helper fields; the pass keeps its own clock (variety.requestTimeoutMs) and abort.
         ...helperRequestOptions(config, {
           role: 'classifier.text',
@@ -426,8 +426,8 @@ export function createVarietyPass({ hot, store, llm, now = Date.now }) {
   }
 
   /**
-   * One long pass for plan `p` to its end: asked on `variety.longModel` (else
-   * the `classifier.text` model) under purpose `variety-long`, validated
+   * One long pass for plan `p` to its end: asked on the `classifier.text`
+   * model, as the short pass is, under purpose `variety-long`, validated
    * against `variety.longMaxPatterns`, and kept as the guild's `wornLong`
    * (replacing the previous list) unless paused or switched off by then. A
    * failure or an answer that is not the expected JSON keeps the previous
@@ -441,10 +441,7 @@ export function createVarietyPass({ hot, store, llm, now = Date.now }) {
       const request = buildVarietyRequest({ prompt: p.prompt, selfName: p.selfName, lines: p.lines, config: p.config, maxPatterns });
       let completion;
       try {
-        completion = await ask(request, p.config, p.settings, {
-          model: p.settings.longModel ?? classifierTextModel(p.config),
-          purpose: 'variety-long',
-        });
+        completion = await ask(request, p.config, p.settings, { purpose: 'variety-long' });
       } catch (err) {
         log.warn('variety: pass failed', {
           channel: null,

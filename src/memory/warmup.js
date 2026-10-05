@@ -37,14 +37,14 @@
 // `memory.model`) returns the merged `style`, stored at once, and lists about
 // the character that become one voice item for the voice run
 // (src/memory/voice.js, src/memory/update.js#runVoice), which words it on
-// `memory.voiceModel` and only then stamps the portrait. While that item waits,
+// `llm.model` (the role `voice`) and only then stamps the portrait. While that item waits,
 // only the owner's forced refresh asks stage A for the member again (any other
 // refresh stands down, `voice-pending`, and src/memory/portrait.js's scheduler
 // does not pick the member); a newer portrait decision stored here meanwhile
 // (that forced refresh, a single-mode refresh after the switch was turned off,
 // a warmup person run) takes the item out of the queue unworded. The warmup's
 // person and server requests, which word a portrait, episode feelings and the server's
-// notes, go out on `memory.voiceModel` whole; its channel requests (neutral
+// notes, go out on `llm.model` whole; its channel requests (neutral
 // notes) stay on `memory.model`. A missing `prompts.profile` /
 // `prompts.channel` / `prompts.server` is reported (reason `no-prompt`), never
 // thrown; a missing or broken labels.json fails loudly (a throw), exactly as it
@@ -91,7 +91,7 @@ import {
   waitingPortraits,
 } from './portrait.js';
 import { mergeIntoQueue } from './voice.js';
-import { DailyCapError, TokenLimitError } from '../llm/openrouter.js';
+import { DailyCapError, MEMORY_VOICE_REQUEST, TokenLimitError } from '../llm/openrouter.js';
 import { log } from '../log.js';
 import { DAY_MS, HOUR_MS, MINUTE_MS, bumpDaily, dailyCounter, utcDay } from '../time.js';
 
@@ -199,28 +199,29 @@ export function profileTemplateValues(config, selfName) {
  * role `analyzer`, as always. With it on, no text in the persona's voice is asked of
  * `memory.model` (DECISIONS-R4): a request whose answer holds one (`voice: true`: a portrait's
  * `character`, an episode's `feeling`, the server's `patterns` and `starters`) goes out on
- * `memory.voiceModel` (null = `llm.model`) as role `voice`, the role whose provider route the
- * owner pins, as the stream analyzer's are (src/memory/update.js); a neutral one (channel notes,
+ * `llm.model` as a memory-wording request (src/llm/openrouter.js#MEMORY_VOICE_REQUEST: role
+ * `voice`, the role whose provider route the owner pins; purpose `memory-voice`; no cache
+ * marker), as the stream analyzer's are (src/memory/update.js); a neutral one (channel notes,
  * the portrait refresh's stage A) stays on `memory.model` as role `analyzer` with the settings of
  * the stream analyzer's stage A: `memory.reasoning` when that is a plain object, and
  * `memory.maxOutputTokens` as its output budget (a reasoning model spends that budget on its
- * reasoning too); both skip calibration off the talk model (src/memory/update.js#feedsCalibration).
+ * reasoning too); both skip calibration off the voice model (src/memory/update.js#feedsCalibration).
  * The voice-role requests of this module are not counted in `memory.voice.maxPerDay` (that rail is
  * src/memory/update.js's, for its voice runs and its batches' fallback): the warmup's person and
  * server requests are railed by `warmup.maxTokens`, the portrait refresh's fallback by
  * `memory.portraitRefreshPerDay` and `llm.maxRequestsPerDay`. Pure.
  * @param {object} [config]  The live config.
  * @param {{ voice?: boolean }} [opts]
- * @returns {{ model: string|undefined, role: 'analyzer'|'voice', skipCalibration?: boolean, reasoning?: object,
- *   maxOutputTokens?: number }}  `maxOutputTokens` only on the neutral two-stage route (the caller's
- *   own budget otherwise).
+ * @returns {{ model: string|undefined, role: 'analyzer'|'voice', purpose?: 'memory-voice', cache?: false,
+ *   skipCalibration?: boolean, reasoning?: object, maxOutputTokens?: number }}  `maxOutputTokens`
+ *   only on the neutral two-stage route (the caller's own budget otherwise).
  */
 export function warmupRoute(config, { voice = false } = {}) {
   const memoryCfg = config?.memory ?? {};
   if (config?.features?.memoryTwoStage !== true) return { model: memoryCfg.model ?? config?.llm?.model, role: 'analyzer' };
   if (voice) {
-    const model = memoryCfg.voiceModel || config?.llm?.model;
-    return { model, role: 'voice', skipCalibration: !feedsCalibration(config, model) };
+    const model = config?.llm?.model;
+    return { model, ...MEMORY_VOICE_REQUEST, skipCalibration: !feedsCalibration(config, model) };
   }
   const model = memoryCfg.model || config?.llm?.model;
   const route = { model, role: 'analyzer', skipCalibration: !feedsCalibration(config, model), maxOutputTokens: memoryCfg.maxOutputTokens ?? 20000 };
@@ -2038,7 +2039,7 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
    * the voice run words it) queued in one synchronous step (`store.updateVoiceQueue`, replacing a
    * queued character item of the member; nothing the queue held is pushed out, see
    * queueCharacter), dated when the history was read; the voice run (src/memory/update.js#runVoice,
-   * on `memory.voiceModel`) words it, writes `character` and only then the portrait stamps, so the
+   * on `llm.model`) words it, writes `character` and only then the portrait stamps, so the
    * member keeps its attempt stamp meanwhile, and no refresh but a forced one asks stage A again
    * while the item waits (`voice-pending`). When they
    * change nothing, nothing is queued and the member is stamped as checked (the portrait stamps,
@@ -2286,7 +2287,7 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
     slot.sent = true;
     let completion;
     try {
-      completion = await llm.complete(messages, portraitRequestOptions({ voice: mode.voiceModel }));
+      completion = await llm.complete(messages, portraitRequestOptions({ voice: mode.voice }));
     } catch (err) {
       if (err instanceof DailyCapError) {
         // The LLM's daily cap says nothing about this member: no back-off.
@@ -2325,7 +2326,7 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
       });
     // `stage` and `characterQueued` are said only while the two-stage switch was on when the
     // refresh started (stage A, or the fallback on the voice model): with it off, as before.
-    const marker = (characterQueued) => (mode.stage === 'two' || mode.voiceModel ? { stage: mode.stage, characterQueued } : {});
+    const marker = (characterQueued) => (mode.stage === 'two' || mode.voice ? { stage: mode.stage, characterQueued } : {});
     const done = (characterQueued) => {
       const counts = { own: sample.ownCount, context: sample.contextCount, shrunk };
       log.info('warmup: portrait refreshed', { userId: id, hinted: Boolean(reason), forced: force, ...counts, ...marker(characterQueued) });

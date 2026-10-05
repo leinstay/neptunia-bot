@@ -5928,12 +5928,12 @@ test('analyze (two-stage): an item queued while the stage A request is in flight
   });
 });
 
-test('analyze (two-stage): a missing memory-decide prompt runs the single-stage request on memory.voiceModel and warns once per change', async () => {
+test('analyze (two-stage): a missing memory-decide prompt runs the single-stage request on llm.model and warns once per change', async () => {
   await withStoreAsync(async (store) => {
     const guildId = 'g1';
     store.touchUser(guildId, '1', 'Aria', STAGE_A_AT);
-    // The fallback is a role voice request: it needs the voice rail config.json ships.
-    const hot = twoStageHot({ model: 'openai/gpt-z', voiceModel: 'anthropic/voice-v', voice: { maxPerDay: 100 } });
+    // The fallback is a memory-wording request: it needs the voice rail config.json ships.
+    const hot = twoStageHot({ model: 'openai/gpt-z', voice: { maxPerDay: 100 } });
     delete hot.prompts['memory-decide'];
     const llm = recordingLlm({ users: { 1: { relationship: 'φίλοι από παλιά' } } });
     const updater = createMemoryUpdater({ hot, store, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => STAGE_A_AT });
@@ -5955,13 +5955,13 @@ test('analyze (two-stage): a missing memory-decide prompt runs the single-stage 
     );
     assert.deepEqual(
       llm.calls.map((call) => call.options.model),
-      ['anthropic/voice-v', 'anthropic/voice-v', 'openai/gpt-z', 'anthropic/voice-v'],
-      'the fallback words every voice text, so it goes out on the voice model, never on memory.model',
+      [undefined, undefined, 'openai/gpt-z', undefined],
+      'the fallback words every voice text, so it goes out on llm.model, never on memory.model',
     );
     assert.deepEqual(
       llm.calls.map((call) => call.options.skipCalibration),
-      [true, true, true, true],
-      'neither model is llm.model',
+      [false, false, true, false],
+      'only llm.model feeds the calibration',
     );
     assert.equal(store.getUser(guildId, '1').relationship, 'φίλοι από παλιά', 'the single-stage answer is applied as today');
     const warnings = logs.filter((entry) => entry.msg === 'memory: two-stage unavailable');
@@ -5974,7 +5974,7 @@ test('analyze (two-stage): a missing memory-decide prompt runs the single-stage 
   });
 });
 
-test('analyze (two-stage): the single-stage fallback goes out on memory.voiceModel (null = llm.model), never on memory.model; with the switch off as before', async () => {
+test('analyze (two-stage): the single-stage fallback goes out on llm.model as a memory-wording request, never on memory.model or a stale memory.voiceModel; with the switch off as before', async () => {
   const optionsOf = (hot) =>
     withStoreAsync(async (store) => {
       const llm = recordingLlm({});
@@ -5989,25 +5989,24 @@ test('analyze (two-stage): the single-stage fallback goes out on memory.voiceMod
     return hot;
   };
 
-  const talk = await optionsOf(fallback({ voiceModel: null }));
-  assert.equal(talk.model, undefined, 'voiceModel null: the talk model');
-  assert.equal(talk.skipCalibration, false);
-  const named = await optionsOf(fallback({ voiceModel: 'x/y' }));
-  assert.equal(named.model, 'x/y');
-  assert.equal(named.skipCalibration, false, 'llm.model feeds the shared ratio');
-  const other = await optionsOf(fallback({ voiceModel: 'anthropic/voice-v' }));
-  assert.equal(other.model, 'anthropic/voice-v');
-  assert.equal(other.skipCalibration, true);
-  for (const options of [talk, named, other]) {
-    assert.equal(options.role, 'voice', 'on the voice model as role voice: the provider pin of that role covers it');
+  const plain = await optionsOf(fallback({}));
+  const stale = await optionsOf(fallback({ voiceModel: 'anthropic/voice-v' }));
+  for (const options of [plain, stale]) {
+    assert.equal(options.model, undefined, 'llm.model, whatever memory.voiceModel says');
+    assert.equal(options.skipCalibration, false, 'llm.model feeds the shared ratio');
+    assert.equal(options.role, 'voice', 'role voice: the provider pin of that role covers it');
+    assert.equal(options.purpose, 'memory-voice');
+    assert.equal(options.cache, false, 'never cache-marked: the marker stays on the reply');
     assert.equal('reasoning' in options, false, 'the stage A reasoning setting stays with stage A');
   }
 
-  const off = twoStageHot({ model: 'openai/gpt-z', voiceModel: 'anthropic/voice-v', reasoning: { effort: 'low' } });
+  const off = twoStageHot({ model: 'openai/gpt-z', reasoning: { effort: 'low' } });
   off.config.features.memoryTwoStage = false;
   const today = await optionsOf(off);
   assert.equal(today.model, 'openai/gpt-z', 'with the switch off the request goes out on memory.model, as before');
   assert.equal(today.role, 'analyzer');
+  assert.equal('purpose' in today, false);
+  assert.equal('cache' in today, false);
   assert.equal('skipCalibration' in today, false);
   assert.equal('reasoning' in today, false);
 });
@@ -6017,7 +6016,7 @@ test('analyze (two-stage): the single-stage fallback counts against memory.voice
     const guildId = 'g1';
     const clock = STAGE_A_AT;
     store.touchUser(guildId, '1', 'Aria', clock - MINUTE_MS);
-    const hot = twoStageHot({ voiceModel: 'anthropic/voice-v', batchMessages: 1, minBatchMessages: 1, voice: { maxPerDay: 1 } });
+    const hot = twoStageHot({ batchMessages: 1, minBatchMessages: 1, voice: { maxPerDay: 1 } });
     delete hot.prompts['memory-decide'];
     let refusal = null;
     const calls = [];
@@ -6048,7 +6047,7 @@ test('analyze (two-stage): the single-stage fallback counts against memory.voice
     assert.equal(outcomes[3].reason, 'daily-cap');
     assert.equal(outcomes[3].stage, 'single');
     assert.equal(calls.length, 3, 'the batch past the rail is never sent');
-    assert.ok(calls.every((options) => options.role === 'voice'));
+    assert.ok(calls.every((options) => options.role === 'voice' && options.purpose === 'memory-voice'));
     assert.equal(store.state.data.voiceCount, 1, 'the request that went out counts');
     assert.equal(store.state.data.voiceDay, utcDay(clock));
 
@@ -6424,13 +6423,13 @@ function voiceUpdater(store, hot, llm, now = () => VOICE_AT) {
   return createMemoryUpdater({ hot, store, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now });
 }
 
-test('run (two-stage): a voice request follows a successful batch on memory.voiceModel with role voice, and its texts are stored', async () => {
+test('run (two-stage): a voice request follows a successful batch on llm.model as a memory-wording request, and its texts are stored', async () => {
   await withStoreAsync(async (store, dir) => {
     const guildId = 'g1';
     store.touchUser(guildId, '1', 'Aria', Date.now() - 60_000);
     store.pushBuffer(guildId, slimMessage({ id: 'm1', authorId: '1', authorName: 'Aria', ts: Date.now() - 1000 }), 100);
     const hot = voiceHot(
-      { model: 'openai/gpt-z', voiceModel: 'anthropic/voice-v', batchMessages: 1, minBatchMessages: 1, temperature: 0.4, timeoutMs: 4321, voice: { maxOutputTokens: 2500 } },
+      { model: 'openai/gpt-z', batchMessages: 1, minBatchMessages: 1, temperature: 0.4, timeoutMs: 4321, voice: { maxOutputTokens: 2500 } },
       { relationships: { damping: false } },
     );
     const texts = { relationship: 'φίλοι από το παζλ', reason: 'με βοήθησε στο δύσκολο σημείο', feeling: 'χάρηκα πολύ' };
@@ -6446,11 +6445,14 @@ test('run (two-stage): a voice request follows a successful batch on memory.voic
     const [stageA, voice] = llm.calls;
     assert.equal(stageA.options.role, 'analyzer');
     assert.equal(stageA.options.model, 'openai/gpt-z');
+    assert.equal('purpose' in stageA.options, false, 'stage A is no memory-wording request');
     assert.equal(voice.options.role, 'voice');
-    assert.equal(voice.options.model, 'anthropic/voice-v');
+    assert.equal(voice.options.purpose, 'memory-voice');
+    assert.equal(voice.options.cache, false);
+    assert.equal(voice.options.model, undefined, 'llm.model');
     assert.equal(voice.options.maxOutputTokens, 2500);
     assert.equal(voice.options.temperature, 0.4);
-    assert.equal(voice.options.skipCalibration, true, 'not the talk model');
+    assert.equal(voice.options.skipCalibration, false, 'llm.model feeds the calibration');
     assert.equal(voice.messages[0].content, 'voice prompt for Nept: relationship 600, portrait 400');
     assert.deepEqual(voiceItemsOf(voice.messages).map((item) => item.kind).sort(), ['feeling', 'reason', 'relationship']);
 
@@ -6462,7 +6464,7 @@ test('run (two-stage): a voice request follows a successful batch on memory.voic
     assert.equal(aria.affinity.history.at(-1).reason, 'με βοήθησε στο δύσκολο σημείο');
     assert.equal(aria.episodes[0].feeling, 'χάρηκα πολύ');
     assert.deepEqual(store.getVoiceQueue(guildId), [], 'every applied item left the queue');
-    assert.equal(store.state.data.voiceCount, 1);
+    assert.equal(store.state.data.voiceCount, 1, 'the voice request counts, stage A does not');
     assert.equal(store.state.data.voiceDay, utcDay(Date.now()));
     assert.deepEqual(JSON.parse(fs.readFileSync(path.join(dir, 'guilds', guildId, 'voice.json'), 'utf8')), [], 'flushed');
     const onDisk = JSON.parse(fs.readFileSync(path.join(dir, 'guilds', guildId, 'users', '1.json'), 'utf8'));
@@ -6479,13 +6481,8 @@ test('run (two-stage): a voice request follows a successful batch on memory.voic
   });
 });
 
-test('runVoice: memory.voiceModel null sends on the talk model and feeds calibration; memory.model is never used', async () => {
-  const cases = [
-    { voiceModel: null, model: undefined, skip: false },
-    { voiceModel: 'x/y', model: 'x/y', skip: false },
-    { voiceModel: 'anthropic/voice-v', model: 'anthropic/voice-v', skip: true },
-  ];
-  for (const { voiceModel, model, skip } of cases) {
+test('runVoice: sends on llm.model and feeds calibration whatever a stale memory.voiceModel says; memory.model is never used', async () => {
+  for (const voiceModel of [undefined, null, 'anthropic/voice-v']) {
     await withStoreAsync(async (store) => {
       store.touchUser('g1', '1', 'Aria', VOICE_AT);
       const hot = voiceHot({ model: 'openai/gpt-z', voiceModel, reasoning: { effort: 'low' } });
@@ -6496,10 +6493,10 @@ test('runVoice: memory.voiceModel null sends on the talk model and feeds calibra
 
       assert.equal(llm.calls.length, 1);
       const [{ options }] = llm.calls;
-      assert.equal(options.model, model, `voiceModel ${voiceModel}`);
-      assert.notEqual(options.model, 'openai/gpt-z');
+      assert.equal(options.model, undefined, `voiceModel ${voiceModel}`);
       assert.equal(options.role, 'voice');
-      assert.equal(options.skipCalibration, skip, `voiceModel ${voiceModel}`);
+      assert.equal(options.purpose, 'memory-voice');
+      assert.equal(options.skipCalibration, false, `voiceModel ${voiceModel}`);
       assert.equal('reasoning' in options, false, 'the stage A reasoning setting stays with stage A');
     });
   }

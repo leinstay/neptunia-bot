@@ -39,7 +39,7 @@ import { rankEmojiUsage } from './memory/emoji-usage.js';
 import { rankGifs } from './memory/gifs.js';
 import { gifCaptionCounts } from './memory/gif-recache.js';
 import { gifPostsToday, gifWatchesToday } from './memory/gif-watch.js';
-import { commandKeys, leafPaths, MEMORY_SHOW_SECTIONS, MODEL_ROLES, MODEL_ROLE_PATHS } from './discord/commands.js';
+import { commandKeys, leafPaths, MEMORY_SHOW_SECTIONS, MODEL_ROLES, MODEL_SET_PATHS, MODEL_SET_ROLES } from './discord/commands.js';
 import {
   isAllowed as accessIsAllowed,
   isOwnerId,
@@ -578,8 +578,8 @@ const ROUTE_ROLES = [...MODEL_ROLES, IMAGE_ROLE];
 const PROVIDER_SLUG_RE = /^[a-z0-9-]+$/;
 
 /** The order the model lines of `/nep ping` are printed in (a display rule only: the speaking
- * pair first, then the subprocessors); the image line follows them, the API checks come last. */
-const PING_DISPLAY_ORDER = ['talk', 'voice', 'analyzer', 'classifier.text', 'classifier.media', 'classifier.video', 'mentor'];
+ * model first, then the subprocessors); the image line follows them, the API checks come last. */
+const PING_DISPLAY_ORDER = ['voice', 'analyzer', 'classifier.text', 'classifier.media', 'classifier.video', 'mentor'];
 
 /** The roles one `/nep ping` argument stands for: one role, a group, the image check, or (anything else)
  * all of them, the image check last. */
@@ -592,14 +592,13 @@ function pingRolesFor(role) {
 
 /** The model id one role resolves to right now — used by model show and ping alike. */
 function modelForRole(role, cfg) {
-  if (role === 'talk') return cfg?.llm?.model || undefined;
+  // The one model that speaks as the persona: its replies and its memory wording.
+  if (role === 'voice') return cfg?.llm?.model || undefined;
   if (role === 'analyzer') return cfg?.memory?.model || cfg?.llm?.model || undefined;
-  // The two-stage analyzer's voice model (src/memory/update.js#runVoice): unset = the talk model.
-  if (role === 'voice') return cfg?.memory?.voiceModel || cfg?.llm?.model || undefined;
   if (role === 'classifier.text') return classifierTextModel(cfg);
   if (role === 'classifier.media') return classifierMediaModel(cfg);
   if (role === 'classifier.video') return classifierVideoModel(cfg);
-  // No fallback to the talk model: an unset mentor model means the mentor is not configured.
+  // No fallback to the voice model: an unset mentor model means the mentor is not configured.
   if (role === 'mentor') return cfg?.mentor?.model || undefined;
   return undefined;
 }
@@ -2208,8 +2207,8 @@ export function createAdmin({
 
   function cmdModelSet(args) {
     const role = String(args?.role ?? '');
-    const dottedPath = Object.hasOwn(MODEL_ROLE_PATHS, role) ? MODEL_ROLE_PATHS[role] : null;
-    if (!dottedPath) throw new Error(`unknown role: ${role} (${MODEL_ROLES.join(', ')})`);
+    const dottedPath = Object.hasOwn(MODEL_SET_PATHS, role) ? MODEL_SET_PATHS[role] : null;
+    if (!dottedPath) throw new Error(`unknown role: ${role} (${MODEL_SET_ROLES.join(', ')})`);
 
     const id = String(args?.id ?? '').trim();
     if (!MODEL_ID_RE.test(id)) throw new Error('id must look like a model id, e.g. anthropic/claude-haiku-4.5 (3-100 chars)');
@@ -2310,14 +2309,10 @@ export function createAdmin({
       const route = resolveProvider(model, { byModel: cfg?.llm?.providerByModel, fallback: cfg?.llm?.provider, role });
       return `${model}\n${JSON.stringify(route ?? null)}`;
     };
-    // Display only: when voice has the very same model and route as talk (the usual case: no
-    // memory.voiceModel), one line labelled `voice` stands for the pair.
-    const mergedIntoVoice = modelRoles.includes('talk') && modelRoles.includes('voice') && targetOf('talk') === targetOf('voice');
-    const shownRoles = modelRoles.filter((role) => !(mergedIntoVoice && role === 'talk'));
 
     const promptText = hot.prompts?.labels?.ping?.prompt;
     if (!promptText) {
-      const skipped = shownRoles.map((role) => `${role}: ${roleModel.get(role) ?? '(no model configured)'} — skipped: label missing`);
+      const skipped = modelRoles.map((role) => `${role}: ${roleModel.get(role) ?? '(no model configured)'} — skipped: label missing`);
       return (await assemble(skipped)).join('\n');
     }
 
@@ -2347,7 +2342,7 @@ export function createAdmin({
       }),
     );
 
-    const lines = shownRoles.map((role) => {
+    const lines = modelRoles.map((role) => {
       const model = roleModel.get(role);
       if (!model) return `${role}: (no model configured)`;
       const outcome = results.get(targetOf(role));

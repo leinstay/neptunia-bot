@@ -1092,7 +1092,7 @@ test('createTurnRunner: the splitter fills split.md; each part, its queued calls
 
   const [split] = llm.calls.filter((call) => call.options.purpose === 'split');
   assertFilled(split?.messages, { files: LOADS.split, blocks: ['transcript', 'candidate'] }, 'split');
-  const parts = llm.calls.filter((call) => call.options.role === 'talk');
+  const parts = llm.calls.filter((call) => call.options.purpose === 'reply');
   assert.equal(parts.length, 2, 'one turn per part');
   for (const [i, call] of parts.entries()) {
     const text = assertFilled(call.messages, { files: LOADS.reply, blocks: ['chat', 'task'] }, `part ${i + 1}`);
@@ -1105,8 +1105,8 @@ test('createTurnRunner: the splitter fills split.md; each part, its queued calls
   const plain = createTurnRunner({ hot, store: bareStore(), llm: plainLlm, calibrator: createCalibrator(), client: discordClient(guild), now: () => NOW, rng: () => 0.5 });
   const short = history.at(-2);
   await withCapturedLogs(() => plain.runTurn({ channel, mode: 'reply', trigger: short, triggerKind: 'mention', queued, added: [{ id: 'f1', text: 'alors ?', ts: NOW }] }));
-  const talk = plainLlm.calls.find((call) => call.options.role === 'talk');
-  const text = assertFilled(talk?.messages, { files: LOADS.reply, blocks: ['task'] }, 'queued and added');
+  const reply = plainLlm.calls.find((call) => call.options.purpose === 'reply');
+  const text = assertFilled(reply?.messages, { files: LOADS.reply, blocks: ['task'] }, 'queued and added');
   assert.ok(text.includes(fill(LABELS.task.queued, { others: '1. et la photo ?' })));
   assert.ok(text.includes(fill(LABELS.task.added, { added: 'alors ?' })));
 });
@@ -1192,7 +1192,7 @@ test('createMentor: a failing run fills the situations, variety, sandbox, score 
   });
   const kindOf = (messages, options) => {
     const user = contentText(messages[1]?.content);
-    if (options.role === 'talk') return 'sandbox';
+    if (options.purpose === 'reply') return 'sandbox';
     if (options.role === 'classifier.text') return 'variety';
     if (user.includes('<verdict>\n')) return 'diagnose';
     if (user.includes('<answers>\n')) return 'score';

@@ -955,17 +955,18 @@ test('ahead: a failed or unparsable pass stores nothing; the next turn asks agai
 
 // ---- the long pass: pure parts -----------------------------------------------------------------------
 
-test('varietySettings: the long keys are read live, garbage falls back, longLines 0 and longModel null are allowed', () => {
-  const live = varietySettings({ variety: { longLines: 0, longEveryHours: 0.5, longMinLines: 7, longMaxPatterns: 0, longModel: ' x/long ' } });
+test('varietySettings: the long keys are read live, garbage falls back, longLines 0 is allowed', () => {
+  const live = varietySettings({ variety: { longLines: 0, longEveryHours: 0.5, longMinLines: 7, longMaxPatterns: 0 } });
   assert.deepEqual(
-    [live.longLines, live.longEveryHours, live.longMinLines, live.longMaxPatterns, live.longModel],
-    [0, 0.5, 7, 0, 'x/long'],
+    [live.longLines, live.longEveryHours, live.longMinLines, live.longMaxPatterns],
+    [0, 0.5, 7, 0],
   );
-  const broken = varietySettings({ variety: { longLines: -1, longEveryHours: 0, longMinLines: 0, longMaxPatterns: 'x', longModel: '  ' } });
+  const broken = varietySettings({ variety: { longLines: -1, longEveryHours: 0, longMinLines: 0, longMaxPatterns: 'x' } });
   assert.deepEqual(
-    [broken.longLines, broken.longEveryHours, broken.longMinLines, broken.longMaxPatterns, broken.longModel],
-    [VARIETY_DEFAULTS.longLines, VARIETY_DEFAULTS.longEveryHours, VARIETY_DEFAULTS.longMinLines, VARIETY_DEFAULTS.longMaxPatterns, null],
+    [broken.longLines, broken.longEveryHours, broken.longMinLines, broken.longMaxPatterns],
+    [VARIETY_DEFAULTS.longLines, VARIETY_DEFAULTS.longEveryHours, VARIETY_DEFAULTS.longMinLines, VARIETY_DEFAULTS.longMaxPatterns],
   );
+  assert.equal(Object.hasOwn(varietySettings({ variety: { longModel: 'x/long' } }), 'longModel'), false, 'no separate long model');
 });
 
 test('appendOwnLine: the ring keeps longLines; only the newest three windows keep what a line answered', () => {
@@ -1157,10 +1158,11 @@ test('long pass: runs after a post when due and enough lines exist; the request 
   });
   assert.equal(store.getGuild('g1').wornHistory.length, 1, 'the history holds the short pass only');
 
-  const own = liveSetup({ hot: longHot({ variety: { longModel: 'x/long' } }), llm: bothLlm() });
-  fillRing(own.store, 70);
-  await own.pass.ahead({ ...TURN, history: ownHistory() });
-  assert.equal(longCalls(own.llm)[0].options.model, 'x/long', 'variety.longModel when set');
+  // A deployment that still carries the removed `variety.longModel`: never read.
+  const stale = liveSetup({ hot: longHot({ variety: { longModel: 'x/long' } }), llm: bothLlm() });
+  fillRing(stale.store, 70);
+  await stale.pass.ahead({ ...TURN, history: ownHistory() });
+  assert.equal(longCalls(stale.llm)[0].options.model, 'x/classifier', 'the text classifier model, like the short pass');
 });
 
 test('long pass: not before longEveryHours, not without its prompt, below longMinLines, in a private chat or while paused', async () => {
