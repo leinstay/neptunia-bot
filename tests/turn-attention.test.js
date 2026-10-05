@@ -369,6 +369,32 @@ test('turn: a routed turn marks the destination busy, not the source', async () 
   assert.equal(turns.isAnyBusy(), false);
 });
 
+test('createTurnRunner: spokeAfterSeeing covers the source lines a routed turn showed, under the source', async () => {
+  const destination = fakeTurnChannel({ id: 'c1', historyMessages: [rawMessage({ id: 'm1', authorId: 'u2', authorName: 'Bob' })] });
+  const earlier = { ...rawMessage({ id: 'd1', authorId: 'u3', authorName: 'Zoë', ts: Date.now() - 5000, content: 'ο κήπος άνθισε' }), channelId: 'c2' };
+  const call = { ...rawMessage({ id: 'd2', authorName: 'Éloïse', content: '@Bot εδώ;' }), channelId: 'c2' };
+  const source = {
+    ...fakeTurnChannel({ id: 'c2', name: 'diary', historyMessages: [earlier, call] }),
+    guild: destination.guild,
+    viewable: true,
+    isTextBased: () => true,
+    isThread: () => false,
+    permissionsFor: () => ({ has: (flag) => flag !== PermissionFlagsBits.SendMessages }),
+  };
+  destination.guild.channels.cache.set('c2', source);
+  const turns = createTurnRunner({ hot: fakeHot({}), store: fakeStore(), llm: fakeLlm('<msg>ok</msg>'), calibrator: identityCalibrator(), client: fakeClient() });
+
+  const { result } = await withCapturedLogs(() =>
+    turns.runTurn({ channel: destination, mode: 'reply', trigger: normalizedTrigger(call), triggerKind: 'mention', source: { channelId: 'c2', reason: 'routed' } }),
+  );
+
+  assert.equal(result.outcome, 'spoke');
+  assert.equal(turns.spokeAfterSeeing('c2', 'd1'), true, 'a call queued meanwhile and already in view');
+  assert.equal(turns.spokeAfterSeeing('c2', 'd2'), true);
+  assert.equal(turns.spokeAfterSeeing('c1', 'm1'), true, "the destination's history as before");
+  assert.equal(turns.spokeAfterSeeing('c1', 'd1'), false, 'never under the destination');
+});
+
 test('createTurnRunner: spokeAfterSeeing stays false after a turn that chose to skip', async () => {
   const raw1 = rawMessage({ id: 'm1' });
   const raw2 = rawMessage({ id: 'm2', authorId: 'u2' });

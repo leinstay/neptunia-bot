@@ -4284,14 +4284,17 @@ function routedScene({
   after = [],
   routeChannels,
   store = fakeStore(),
+  client = fakeClient(),
+  images,
+  variety,
 } = {}) {
   const channel = fakeTurnChannel({ historyMessages: chat });
   const call = lineIn(DIARY, { id: 'd3', ts: callTs, content: '@Bot τι λες για τον τοίχο;', attachments: callAttachments });
   const other = addChannel(channel, { id: DIARY, name: 'diary', messages: [...diaryLines(), call, ...after], readOnly: true });
-  const turns = createTurnRunner({ hot, store, llm, calibrator: identityCalibrator(), client: fakeClient(), describer, lookup, routeChannels, imageFetcher: fakeImageFetcher(), now: () => NOW });
+  const turns = createTurnRunner({ hot, store, llm, calibrator: identityCalibrator(), client, describer, lookup, routeChannels, images, variety, imageFetcher: fakeImageFetcher(), now: () => NOW });
   const trigger = { ...normalizedTrigger(call), mentionedUserIds: ['self-id'] };
   const params = { channel, mode: 'reply', trigger, triggerKind: 'mention', source: { channelId: DIARY, reason: 'routed' } };
-  return { channel, other, hot, llm, turns, trigger, params };
+  return { channel, other, hot, llm, store, turns, trigger, params };
 }
 
 /** Makes #general (c1) the scene's main channel: `memory.mainChannelIds` and a usable text channel. */
@@ -4696,4 +4699,382 @@ test('runTurn: without labels.pull.header only the source is pulled, with cached
   quiet.hot.prompts.labels = unlabelled;
   const none = await withCapturedLogs(() => quiet.turns.runTurn({ channel: quiet.channel, mode: 'reply', trigger: quiet.trigger, triggerKind: 'mention' }));
   assert.equal(none.logs.some((l) => l.msg.startsWith('pull: ')), false);
+});
+
+// --- another channel pulled into a turn (<channel_view>): the outputs ---------------------------
+// In pullScene the chat is #1 m1 (Bob), #2 m9 (Alice, the trigger) and the diary #3 d1, #4 d2;
+// in routedScene the chat is #1 m1 (Bob) and the diary #2 d1, #3 d2, #4 d3 (the call).
+
+/** Discord's jump link to a diary line of the fixture guild g1. */
+function diaryLink(messageId) {
+  return `https://discord.com/channels/g1/${DIARY}/${messageId}`;
+}
+
+/** `text` with the jump link to diary line `messageId`, joined through the fixture's labels.elsewhere.link. */
+function linked(text, messageId) {
+  return fill(labels.elsewhere.link, { text, link: diaryLink(messageId) });
+}
+
+/** A client whose dry-run mirror channel records every post in `mirrored`. */
+function mirrorClient(mirrored) {
+  return fakeClient({ channels: { fetch: async () => ({ send: async (payload) => mirrored.push(payload) }) } });
+}
+
+/** Lets the bot read `channel` but not put a reaction there. */
+function denyReactions(channel) {
+  channel.permissionsFor = () => ({ has: (flag) => flag !== PermissionFlagsBits.AddReactions });
+}
+
+test('runTurn: a reaction to a pulled line reacts in the source channel, one to a chat line stays here', async () => {
+  const scene = pullScene({ features: { typingSimulation: false }, llm: fakeLlm('<react to="#3">🎉</react><react to="#2">👍</react>') });
+
+  const { result, logs } = await withCapturedLogs(() => scene.turns.runTurn({ channel: scene.channel, mode: 'reply', trigger: scene.trigger, triggerKind: 'mention' }));
+
+  assert.equal(result.outcome, 'spoke');
+  assert.deepEqual(scene.other.reactCalls, [{ id: 'd1', emoji: '🎉' }]);
+  assert.deepEqual(scene.channel.reactCalls, [{ id: 'm9', emoji: '👍' }]);
+  assert.equal(logs.some((l) => l.msg === 'turn: reaction dropped'), false);
+});
+
+test('runTurn: a reaction to a pulled line is dropped where the bot cannot react', async () => {
+  const scene = pullScene({ features: { typingSimulation: false }, llm: fakeLlm('<react to="#3">🎉</react><react to="#2">👍</react>') });
+  denyReactions(scene.other);
+
+  const { result, logs } = await withCapturedLogs(() => scene.turns.runTurn({ channel: scene.channel, mode: 'reply', trigger: scene.trigger, triggerKind: 'mention' }));
+
+  assert.equal(result.outcome, 'spoke');
+  assert.ok(channelViewOf(scene.llm), 'the channel is still shown');
+  assert.deepEqual(scene.other.reactCalls, []);
+  assert.deepEqual(scene.channel.reactCalls, [{ id: 'm9', emoji: '👍' }], 'a reaction on a chat line is unchanged');
+  const dropped = logs.filter((l) => l.msg === 'turn: reaction dropped');
+  assert.deepEqual(dropped.map((l) => [l.channel, l.source, l.reason]), [['c1', DIARY, 'cannot-react']]);
+});
+
+test('runTurn: a reply to a pulled line posts plain here with one jump link to that line', async () => {
+  const scene = pullScene({
+    features: { typingSimulation: false },
+    llm: fakeLlm('<msg reply="#3">ωραίο μπλε</msg><msg reply="#3">πολύ ωραίο</msg><msg reply="#2">ναι, το είδα</msg>'),
+  });
+
+  const { result, logs } = await withCapturedLogs(() => scene.turns.runTurn({ channel: scene.channel, mode: 'reply', trigger: scene.trigger, triggerKind: 'mention' }));
+
+  assert.equal(result.outcome, 'spoke');
+  const [first, second, third] = scene.channel.sent;
+  assert.equal(first.content, linked('ωραίο μπλε', 'd1'));
+  assert.equal(first.reply, undefined, 'never a Discord reply across channels');
+  assert.equal(second.content, 'πολύ ωραίο', 'a second reply to the same line adds no second link');
+  assert.equal(second.reply, undefined);
+  assert.equal(third.content, 'ναι, το είδα');
+  assert.equal(third.reply.messageReference, 'm9', 'a reply to a chat line is unchanged');
+  assert.equal(scene.other.sent.length, 0, 'nothing is posted in the pulled channel');
+  const sent = logs.filter((l) => l.msg === 'turn: sent');
+  assert.deepEqual(sent.map((l) => l.link ?? false), [true, false, false]);
+  assert.equal(sent.some((l) => 'source' in l), false, 'a turn without a source logs none');
+});
+
+test('runTurn: a routed turn posts in the destination with the link to the call on its first message', async () => {
+  const scene = routedScene({
+    features: { typingSimulation: false },
+    llm: fakeLlm('<msg>καλημέρα</msg><msg reply="#4">ναι, μπλε</msg><msg reply="#2">κι αυτό ωραίο</msg>'),
+  });
+
+  const { result, logs } = await withCapturedLogs(() => scene.turns.runTurn(scene.params));
+
+  assert.equal(result.outcome, 'spoke');
+  assert.deepEqual(
+    scene.channel.sent.map((post) => post.content),
+    [linked('καλημέρα', 'd3'), 'ναι, μπλε', linked('κι αυτό ωραίο', 'd1')],
+    'the call once, on the first message; another pulled line it answers gets its own',
+  );
+  assert.ok(scene.channel.sent.every((post) => post.reply === undefined), 'never a Discord reply to the call');
+  assert.equal(scene.other.sent.length, 0, 'nothing is posted in the source');
+  const sent = logs.filter((l) => l.msg === 'turn: sent');
+  assert.deepEqual(sent.map((l) => [l.channel, l.source, l.link ?? false]), [['c1', DIARY, true], ['c1', DIARY, false], ['c1', DIARY, true]]);
+});
+
+test('runTurn: a noticed turn links its first message to the newest line of its source shown', async () => {
+  const scene = pullScene({ mention: false, features: { typingSimulation: false }, llm: fakeLlm('<msg>τι ωραίο χρώμα</msg>') });
+
+  const { result } = await withCapturedLogs(() =>
+    scene.turns.runTurn({ channel: scene.channel, mode: 'auto', source: { channelId: DIARY, reason: 'noticed' }, chooseMode: () => 'interject' }),
+  );
+
+  assert.equal(result.outcome, 'spoke');
+  assert.deepEqual(scene.channel.sent.map((post) => [post.content, post.reply]), [[linked('τι ωραίο χρώμα', 'd2'), undefined]]);
+});
+
+test('runTurn: @name of a pulled author resolves to a mention', async () => {
+  const scene = routedScene({ features: { typingSimulation: false }, llm: fakeLlm('<msg>@Éloïse ωραίος τοίχος</msg>') });
+
+  await withCapturedLogs(() => scene.turns.runTurn(scene.params));
+
+  const [post] = scene.channel.sent;
+  assert.equal(post.content, linked('<@u3> ωραίος τοίχος', 'd3'));
+  assert.deepEqual(post.allowedMentions.users, ['u3']);
+});
+
+test('runTurn: a picture or a GIF answering a pulled line posts plain with its jump link', async () => {
+  const scene = routedScene({ hot: drawHot(), images: fakeImages(), store: gifStore(), llm: fakeLlm('<gif reply="#4">g1</gif><draw reply="#2">a blue wall</draw>') });
+
+  const { result, logs } = await withCapturedLogs(() => scene.turns.runTurn(scene.params));
+
+  assert.equal(result.outcome, 'spoke');
+  const [gif, picture] = scene.channel.sent;
+  assert.deepEqual([gif.content, gif.reply], [linked('https://tenor.com/view/chat-qui-danse-1', 'd3'), undefined], 'the media URL first, so it still embeds');
+  assert.equal(picture.files.length, 1);
+  assert.equal(picture.reply, undefined);
+  assert.equal(picture.content, diaryLink('d1'), 'the picture carries the link to the line it answers');
+  assert.equal(scene.other.sent.length, 0);
+  assert.equal(logs.find((l) => l.msg === 'turn: gif sent').link, true);
+  assert.equal(logs.find((l) => l.msg === 'turn: drew').link, true);
+});
+
+test('runTurn: a GIF alone answering a routed call links the call; after a message it carries none', async () => {
+  const alone = routedScene({ features: { typingSimulation: false }, store: gifStore(), llm: fakeLlm('<gif>g1</gif>') });
+  await withCapturedLogs(() => alone.turns.runTurn(alone.params));
+  assert.deepEqual(alone.channel.sent.map((post) => [post.content, post.reply]), [[linked('https://tenor.com/view/chat-qui-danse-1', 'd3'), undefined]]);
+
+  const after = routedScene({ features: { typingSimulation: false }, store: gifStore(), llm: fakeLlm('<msg>κοίτα</msg><gif>g1</gif>') });
+  const { logs } = await withCapturedLogs(() => after.turns.runTurn(after.params));
+  assert.deepEqual(after.channel.sent.map((post) => post.content), [linked('κοίτα', 'd3'), 'https://tenor.com/view/chat-qui-danse-1'], 'one link per turn, on its first post');
+  assert.equal('link' in logs.find((l) => l.msg === 'turn: gif sent'), false);
+});
+
+test('runTurn: dry-run gives the GIF and the picture the links a real turn posts', async () => {
+  const scene = routedScene({ hot: drawHot({ dryRun: true }), images: fakeImages(), store: gifStore(), llm: fakeLlm('<gif reply="#4">g1</gif><draw reply="#2">a blue wall</draw>') });
+
+  const { result, logs } = await withCapturedLogs(() => scene.turns.runTurn(scene.params));
+
+  assert.deepEqual([result.outcome, result.dryRun], ['spoke', true]);
+  assert.deepEqual([scene.channel.sent, scene.other.sent], [[], []]);
+  assert.equal(logs.find((l) => l.msg === 'dry-run: would send gif').link, diaryLink('d3'));
+  assert.equal(logs.find((l) => l.msg === 'dry-run: would draw').link, diaryLink('d1'));
+});
+
+test('runTurn: a follow-up reply to a pulled line posts plain with its jump link', async () => {
+  const scene = pullScene({ features: { typingSimulation: false }, llm: fakeLlm('<msg reply="#3">ωραίο μπλε</msg><msg reply="#2">ναι</msg>') });
+
+  const { result, logs } = await withCapturedLogs(() => scene.turns.runTurn({ channel: scene.channel, mode: 'reply', trigger: scene.trigger, triggerKind: 'followUp' }));
+
+  assert.equal(result.outcome, 'spoke');
+  assert.deepEqual(
+    scene.channel.sent.map((post) => [post.content, post.reply]),
+    [
+      [linked('ωραίο μπλε', 'd1'), undefined],
+      ['ναι', undefined],
+    ],
+    'a follow-up quotes nothing, yet links the pulled line it answers',
+  );
+  assert.deepEqual(logs.filter((l) => l.msg === 'turn: sent').map((l) => l.link ?? false), [true, false]);
+});
+
+test('runTurn: a chat author wins @name over a pulled author with the same display name', async () => {
+  const namesake = lineIn(DIARY, { id: 'd5', authorId: 'u7', authorName: 'Bob', ts: NOW - 3 * HOUR + 2 * MINUTE, content: 'κι εγώ' });
+  const scene = pullScene({ features: { typingSimulation: false }, diary: { messages: [...diaryLines(), namesake] }, llm: fakeLlm('<msg>@Bob ναι</msg>') });
+
+  await withCapturedLogs(() => scene.turns.runTurn({ channel: scene.channel, mode: 'reply', trigger: scene.trigger, triggerKind: 'mention' }));
+
+  assert.ok(channelViewOf(scene.llm).includes('κι εγώ'), 'the namesake is shown');
+  const [post] = scene.channel.sent;
+  assert.equal(post.content, '<@u2> ναι');
+  assert.deepEqual(post.allowedMentions.users, ['u2']);
+});
+
+test('runTurn: @name of an author whose pulled block the budget dropped stays text', async () => {
+  const caps = { interlocutor: 2500, aboutChat: 2500, people: 4000, neighbors: 3000, pulled: 1 };
+  const scene = pullScene({ features: { typingSimulation: false }, context: { caps }, llm: fakeLlm('<msg>@Éloïse γεια</msg>') });
+
+  await withCapturedLogs(() => scene.turns.runTurn({ channel: scene.channel, mode: 'reply', trigger: scene.trigger, triggerKind: 'mention' }));
+
+  assert.equal(channelViewOf(scene.llm), null, 'the block was cut');
+  const [post] = scene.channel.sent;
+  assert.equal(post.content, '@Éloïse γεια');
+  assert.deepEqual(post.allowedMentions.users, []);
+});
+
+test('runTurn: a noticed turn whose source block the budget dropped posts no link', async () => {
+  const caps = { interlocutor: 2500, aboutChat: 2500, people: 4000, neighbors: 3000, pulled: 1 };
+  const scene = pullScene({ mention: false, context: { caps }, features: { typingSimulation: false }, llm: fakeLlm('<msg>τι ωραίο χρώμα</msg>') });
+
+  const { result, logs } = await withCapturedLogs(() =>
+    scene.turns.runTurn({ channel: scene.channel, mode: 'auto', source: { channelId: DIARY, reason: 'noticed' }, chooseMode: () => 'interject' }),
+  );
+
+  assert.equal(result.outcome, 'spoke');
+  assert.equal(channelViewOf(scene.llm), null, 'nothing of the source was shown');
+  assert.deepEqual(scene.channel.sent.map((post) => post.content), ['τι ωραίο χρώμα']);
+  assert.equal('link' in logs.find((l) => l.msg === 'turn: sent'), false);
+});
+
+test('runTurn: a reply to a pulled line records that line as what the persona answered', async () => {
+  const variety = fakeVariety();
+  const scene = routedScene({ features: { typingSimulation: false }, variety, llm: fakeLlm('<msg reply="#2">ωραίο μπλε</msg><msg>λοιπόν</msg>') });
+
+  await withCapturedLogs(() => scene.turns.runTurn(scene.params));
+
+  assert.deepEqual(
+    variety.records.map((record) => record.line.to),
+    ['σήμερα έβαψα τον τοίχο μπλε', '@Bot τι λες για τον τοίχο;'],
+    'the pulled line answered, else the trigger',
+  );
+});
+
+test('runTurn: a reaction on a pulled line whose channel is gone is dropped as not-found', async () => {
+  for (const dryRun of [false, true]) {
+    let guild = null;
+    const calls = [];
+    // The pulled channel leaves the guild's cache while the model answers.
+    const llm = {
+      calls,
+      complete: async (messages) => {
+        calls.push(messages);
+        guild.channels.cache.delete(DIARY);
+        return { text: '<react to="#3">🎉</react>', usage: {}, estimated: 10 };
+      },
+    };
+    const scene = pullScene({ features: { typingSimulation: false, dryRun }, llm });
+    guild = scene.channel.guild;
+
+    const { result, logs } = await withCapturedLogs(() => scene.turns.runTurn({ channel: scene.channel, mode: 'reply', trigger: scene.trigger, triggerKind: 'mention' }));
+
+    assert.equal(result.outcome, 'spoke', `dryRun ${dryRun}`);
+    assert.ok(channelViewOf(scene.llm), 'the channel was shown');
+    assert.deepEqual([scene.other.reactCalls, scene.channel.reactCalls], [[], []], `dryRun ${dryRun}`);
+    const dropped = logs.filter((l) => l.msg === 'turn: reaction dropped');
+    assert.deepEqual(dropped.map((l) => [l.channel, l.source, l.reason]), [['c1', DIARY, 'not-found']], `dryRun ${dryRun}`);
+    assert.equal(logs.some((l) => l.msg === 'dry-run: would react' || l.msg === 'turn: reaction failed'), false, `dryRun ${dryRun}`);
+  }
+});
+
+test('runTurn: labels.elsewhere.link is read at the moment of use; without it the link follows a newline', async () => {
+  const scene = routedScene({ features: { typingSimulation: false }, llm: fakeLlm('<msg>ναι</msg>') });
+  const run = () => withCapturedLogs(() => scene.turns.runTurn(scene.params));
+
+  await run();
+  scene.hot.prompts.labels = { ...labels, elsewhere: { ...labels.elsewhere, link: '{text} -> {link}' } };
+  await run();
+  const { elsewhere, ...withoutElsewhere } = labels;
+  scene.hot.prompts.labels = { ...withoutElsewhere, elsewhere: { called: elsewhere.called } };
+  await run();
+
+  assert.deepEqual(scene.channel.sent.map((post) => post.content), [
+    `ναι [from ${diaryLink('d3')}]`,
+    `ναι -> ${diaryLink('d3')}`,
+    `ναι\n${diaryLink('d3')}`,
+  ]);
+});
+
+test('runTurn: a message near the length limit is cut so its link still fits one Discord message', async () => {
+  const long = `${'a'.repeat(1850)}${' :dance:'.repeat(5)}`;
+  const scene = routedScene({ features: { typingSimulation: false }, llm: fakeLlm(`<msg>${long}</msg>`) });
+  const turns = createTurnRunner({ hot: scene.hot, store: fakeStore(), llm: scene.llm, calibrator: identityCalibrator(), client: fakeClient(), emoji: fakeEmojiIndex(), imageFetcher: fakeImageFetcher(), now: () => NOW });
+
+  const { result } = await withCapturedLogs(() => turns.runTurn(scene.params));
+
+  assert.equal(result.outcome, 'spoke');
+  const [post] = scene.channel.sent;
+  const tail = ` [from ${diaryLink('d3')}]`;
+  assert.ok(post.content.endsWith(tail), 'the link is kept');
+  assert.ok([...post.content].length <= 2000, `${[...post.content].length} characters`);
+  assert.ok(post.content.startsWith('a'.repeat(1850)), 'the text is cut at its end');
+  assert.equal(/<[^>]*$/.test(post.content.slice(0, -tail.length)), false, 'no custom emoji token is cut in half');
+});
+
+test('runTurn: a pulled channel gets its seen mark and its spokeSaw ids', async () => {
+  const scene = routedScene({ features: { typingSimulation: false } });
+
+  const { result } = await withCapturedLogs(() => scene.turns.runTurn(scene.params));
+
+  assert.equal(result.outcome, 'spoke');
+  assert.deepEqual(scene.store.state.data.elsewhereSeen, { [DIARY]: NOW - 2 * MINUTE }, 'the newest line shown');
+  for (const id of ['d1', 'd2', 'd3']) assert.equal(scene.turns.spokeAfterSeeing(DIARY, id), true, id);
+  assert.equal(scene.turns.spokeAfterSeeing(DIARY, 'm1'), false);
+  assert.equal(scene.turns.spokeAfterSeeing('c1', 'm1'), true, "the destination's own history as before");
+});
+
+test('runTurn: a pulled channel the bot can write in gets a seen mark but no spokeSaw ids', async () => {
+  const scene = pullScene({ features: { typingSimulation: false } });
+
+  await withCapturedLogs(() => scene.turns.runTurn({ channel: scene.channel, mode: 'reply', trigger: scene.trigger, triggerKind: 'mention' }));
+
+  assert.deepEqual(scene.store.state.data.elsewhereSeen, { [DIARY]: NOW - 3 * HOUR + MINUTE });
+  assert.equal(scene.turns.spokeAfterSeeing(DIARY, 'd1'), false, 'a call written there is answered there');
+  assert.equal(scene.turns.spokeAfterSeeing('c1', 'm9'), true);
+});
+
+test('runTurn: the seen mark follows the request sent: set on a skip, never for a block the budget dropped', async () => {
+  const skipped = routedScene({ llm: fakeLlm('<skip/>') });
+  const skip = await withCapturedLogs(() => skipped.turns.runTurn(skipped.params));
+  assert.equal(skip.result.outcome, 'skip');
+  assert.deepEqual(skipped.store.state.data.elsewhereSeen, { [DIARY]: NOW - 2 * MINUTE }, 'a skip saw the block');
+  assert.equal(skipped.turns.spokeAfterSeeing(DIARY, 'd3'), false, 'no spokeSaw without speaking');
+
+  // A channel the bot cannot write in, the one kind that gets spokeSaw ids: shown -> its ids,
+  // cut by the budget -> none.
+  const kept = pullScene({ diary: { readOnly: true } });
+  const shown = await withCapturedLogs(() => kept.turns.runTurn({ channel: kept.channel, mode: 'reply', trigger: kept.trigger, triggerKind: 'mention' }));
+  assert.equal(shown.result.outcome, 'spoke');
+  assert.ok(channelViewOf(kept.llm), 'the control shows the block');
+  assert.equal(kept.turns.spokeAfterSeeing(DIARY, 'd1'), true, 'the control records what it showed');
+
+  const caps = { interlocutor: 2500, aboutChat: 2500, people: 4000, neighbors: 3000, pulled: 1 };
+  const dropped = pullScene({ diary: { readOnly: true }, context: { caps } });
+  const cut = await withCapturedLogs(() => dropped.turns.runTurn({ channel: dropped.channel, mode: 'reply', trigger: dropped.trigger, triggerKind: 'mention' }));
+  assert.equal(cut.result.outcome, 'spoke');
+  assert.equal(dropped.other.fetches.length, 1, 'the channel was pulled');
+  assert.equal(channelViewOf(dropped.llm), null, 'and its block cut by the budget');
+  assert.equal(dropped.store.state.data.elsewhereSeen, undefined);
+  assert.equal(dropped.turns.spokeAfterSeeing(DIARY, 'd1'), false);
+});
+
+test('runTurn: dry-run logs the source reaction and the link, and acts nowhere', async () => {
+  const answer = '<react to="#2">🎉</react><react to="#1">👍</react><msg reply="#4">ναι, μπλε</msg>';
+  const mirrored = [];
+  const scene = routedScene({ hot: fakeHot({ dryRun: true }, { dryRunChannelId: 'mirror1' }), client: mirrorClient(mirrored), llm: fakeLlm(answer) });
+
+  const { result, logs } = await withCapturedLogs(() => scene.turns.runTurn(scene.params));
+
+  assert.deepEqual([result.outcome, result.dryRun], ['spoke', true]);
+  assert.deepEqual([scene.other.reactCalls, scene.channel.reactCalls, scene.channel.sent, scene.other.sent], [[], [], [], []]);
+  const reacts = logs.filter((l) => l.msg === 'dry-run: would react');
+  assert.deepEqual(reacts.map((l) => [l.channel, l.source, l.to]), [['c1', DIARY, 'd1'], ['c1', null, 'm1']]);
+  const send = logs.find((l) => l.msg === 'dry-run: would send');
+  assert.deepEqual([send.replyTo, send.link, send.text], [null, diaryLink('d3'), linked('ναι, μπλε', 'd3')]);
+  assert.ok(mirrored.some((post) => post.content.endsWith(`\n${linked('ναι, μπλε', 'd3')}`)), 'the mirror shows the post with its link');
+  assert.ok(mirrored.some((post) => post.content.includes('#diary')), 'the mirror names where the reaction goes');
+  assert.deepEqual(scene.store.state.data.elsewhereSeen, { [DIARY]: NOW - 2 * MINUTE }, 'dry-run included');
+  assert.equal(scene.turns.spokeAfterSeeing(DIARY, 'd3'), true);
+
+  // Where the bot may not react, the rehearsal drops the reaction exactly as a real turn would.
+  const denied = routedScene({ hot: fakeHot({ dryRun: true }), llm: fakeLlm(answer) });
+  denyReactions(denied.other);
+  const rehearsal = await withCapturedLogs(() => denied.turns.runTurn(denied.params));
+  assert.deepEqual(
+    rehearsal.logs.filter((l) => l.msg === 'dry-run: would react' || l.msg === 'turn: reaction dropped').map((l) => [l.msg, l.source, l.reason ?? null]),
+    [
+      ['turn: reaction dropped', DIARY, 'cannot-react'],
+      ['dry-run: would react', null, null],
+    ],
+  );
+});
+
+test('runTurn: a drawFailed turn after a routed one keeps the source', async () => {
+  const scene = routedScene({
+    hot: drawHot(),
+    images: fakeImages({ error: new ImageGenError('moderation') }),
+    llm: sequenceLlm(['<msg reply="#4">μισό λεπτό</msg><draw reply="#4">a blue wall</draw>', '<msg>δεν βγήκε</msg>']),
+  });
+
+  const { result, logs } = await withCapturedLogs(() => scene.turns.runTurn(scene.params));
+
+  assert.equal(result.drawFailed, 'moderation');
+  assert.equal(scene.llm.calls.length, 2, 'the drawFailed turn ran');
+  const second = userTextOf(scene.llm.calls[1]);
+  assert.ok(second.includes('<channel_view>') && second.includes('@Bot τι λες για τον τοίχο;'), 'the second turn still shows the call');
+  assert.deepEqual(scene.channel.sent.map((post) => [post.content, post.reply]), [
+    [linked('μισό λεπτό', 'd3'), undefined],
+    [linked('δεν βγήκε', 'd3'), undefined],
+  ]);
+  const answered = logs.filter((l) => l.msg === 'turn: model answered');
+  assert.deepEqual(answered.map((l) => [l.trigger, l.source]), [['mention', DIARY], ['drawFailed', DIARY]]);
 });

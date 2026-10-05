@@ -6,13 +6,16 @@
 // channel without a guild, served on behalf of the one pinned guild). A
 // server turn may also show other channels it is about (`<channel_view>`):
 // the read-only channel a call came from, a channel named with an explicit
-// <#id>, or one a route hook names.
+// <#id>, or one a route hook names. The turn still speaks only here: a
+// reaction on a shown line of another channel lands in that channel, and a
+// post (a message, the GIF, the picture) answering such a line goes here
+// plain, with a jump link to it.
 
-import { canAttach, canSend, channelAllowed, fetchHistory, fetchNeighbors, PAGE as HISTORY_PAGE, withTextPreviews } from '../discord/collect.js';
+import { canAttach, canReact, canSend, channelAllowed, fetchHistory, fetchNeighbors, PAGE as HISTORY_PAGE, withTextPreviews } from '../discord/collect.js';
 import { captionPulled, checkPull, fetchPull } from '../discord/pull-fetch.js';
 import { buildDrawPrompt, buildRequest, fillPromptTemplate } from './prompt.js';
 import { channelPullOn, pullSettings, pullTargets } from './pull.js';
-import { resolveDestination } from './elsewhere.js';
+import { markSeen, messageLink, resolveDestination } from './elsewhere.js';
 import { classifierTextModel } from './mention.js';
 import { parseOutput } from '../llm/parse.js';
 import { DailyCapError, TokenLimitError, RETRY_STATUS, sleep } from '../llm/openrouter.js';
@@ -29,7 +32,7 @@ import {
 } from '../discord/media.js';
 import { avatarReference, createImageFetcher } from '../discord/fetch-image.js';
 import { renderCustomEmoji, resolveReactionEmoji } from '../discord/emoji.js';
-import { formatTranscript, renderTranscript } from '../discord/format.js';
+import { fill, formatTranscript, renderTranscript } from '../discord/format.js';
 import { log } from '../log.js';
 import { clampChars, oneLine } from '../memory/clamp.js';
 import { gifPostsToday } from '../memory/gif-watch.js';
@@ -56,7 +59,8 @@ import { bumpDaily, utcDay } from '../time.js';
 /**
  * Whether a turn of `triggerKind` posts plain, never as a Discord reply: the
  * address classifier's turns (a follow-up, an overheard line), whose model
- * `reply="#n"` is ignored for messages, the GIF and the picture alike.
+ * `reply="#n"` quotes nothing for messages, the GIF and the picture alike (a
+ * pulled line it points at still gets its jump link: replyTarget).
  */
 function postsPlain(triggerKind) {
   return triggerKind === 'followUp' || triggerKind === 'overheard';
@@ -116,6 +120,103 @@ export function pickOtherProfiles(store, guildId, history, exceptId, count) {
 function authorNameFor(history, messageId) {
   const message = history.find((m) => m.id === messageId);
   return message?.authorName ?? null;
+}
+
+/**
+ * Where the model's `reply="#n"` points. `replyId`: a line of this chat, which
+ * a post may quote as a Discord reply. `pulledId`: a line of a pulled channel
+ * (`pulledIds`, buildRequest's map of every pulled line to its channel), which
+ * a post here never quotes -- Discord resolves a reply reference in the
+ * channel posted to -- and links instead (createLinker). A turn that posts
+ * plain (postsPlain) quotes no chat line; a pulled line is linked all the
+ * same, since a link is not a Discord reply.
+ * @returns {{ replyId: string|null, pulledId: string|null }}
+ */
+function replyTarget(replyTo, { plain, idByIndex, pulledIds }) {
+  const id = replyTo !== null && replyTo !== undefined ? (idByIndex.get(replyTo) ?? null) : null;
+  if (id === null) return { replyId: null, pulledId: null };
+  if (pulledIds.has(id)) return { replyId: null, pulledId: id };
+  return { replyId: plain ? null : id, pulledId: null };
+}
+
+/**
+ * Where a reaction on line `targetId` goes: this channel for a chat line; for
+ * a pulled line (`pulledIds`) its own channel, looked up in this channel's
+ * guild, while the bot may react there now (canReact). Otherwise `target` is
+ * null and `reason` is the code the drop is logged with: `not-found` (the
+ * channel is gone) or `cannot-react`. `source` is the pulled channel's id,
+ * null for a chat line.
+ * @returns {{ target: object|null, source: string|null, reason: 'not-found'|'cannot-react'|null }}
+ */
+function reactionChannel(channel, targetId, pulledIds) {
+  const source = pulledIds.get(targetId) ?? null;
+  if (!source) return { target: channel, source: null, reason: null };
+  const target = channel.guild?.channels?.cache?.get?.(source) ?? null;
+  if (!target) return { target: null, source, reason: 'not-found' };
+  return canReact(target) ? { target, source, reason: null } : { target: null, source, reason: 'cannot-react' };
+}
+
+/**
+ * What the first post of a turn about another channel (`source`) links to
+ * when it answers no pulled line: a routed call (in its own channel), else the
+ * newest line of the source the request showed (buildRequest's `pulledKept`).
+ * Null without a source, or when nothing of it was shown (the budget dropped
+ * its block): a post never points at a line the model did not see.
+ * @returns {{ channelId: string, messageId: string }|null}
+ */
+function sourceLinkTarget({ source, trigger, pulledKept }) {
+  if (!source?.channelId) return null;
+  if (source.reason === 'routed' && trigger?.id) return { channelId: trigger.channelId || source.channelId, messageId: trigger.id };
+  const newestId = pulledKept.find((shown) => shown.channelId === source.channelId)?.newestId ?? null;
+  return newestId ? { channelId: source.channelId, messageId: newestId } : null;
+}
+
+/**
+ * The jump links (src/behavior/elsewhere.js#messageLink) of one turn's posts
+ * -- its messages, then the GIF, then the picture -- asked in posting order;
+ * act and dryAct share the rule, so a rehearsal shows the links a real turn
+ * posts. A post answering a pulled line (`pulledId`) links to that line; on a
+ * turn about another channel the first post links to `sourceTarget` when it
+ * answers none. One line is linked at most once per turn: a second answer to
+ * it carries no link.
+ * @param {{ guildId: string, pulledIds: Map<string, string>,
+ *   sourceTarget: { channelId: string, messageId: string }|null }} args
+ * @returns {(pulledId: string|null) => string|null}  The next post's link, or null.
+ */
+function createLinker({ guildId, pulledIds, sourceTarget }) {
+  const linked = new Set();
+  let first = true;
+  return (pulledId) => {
+    const target = pulledId ? { channelId: pulledIds.get(pulledId), messageId: pulledId } : first ? sourceTarget : null;
+    first = false;
+    if (!target || linked.has(target.messageId)) return null;
+    linked.add(target.messageId);
+    return messageLink(guildId, target.channelId, target.messageId);
+  };
+}
+
+// A Discord message holds at most 2000 characters.
+const DISCORD_MESSAGE_CHARS = 2000;
+
+/**
+ * `text` with `link` joined through `labels.elsewhere.link` (`{text}` `{link}`);
+ * without the label, a newline between them. The link always fits: when the
+ * joined post would outgrow one Discord message, `text` is cut at its end,
+ * never inside a `<...>` token (a mention, a custom emoji). parse.js leaves
+ * only a small margin under the limit, meant for the mentions and custom
+ * emoji expanded after it, which a link alone almost fills.
+ */
+function withLink(text, link, labels) {
+  if (!link) return text;
+  const template = labels?.elsewhere?.link;
+  const join = (body) => (typeof template === 'string' && template ? fill(template, { text: body, link }) : `${body}\n${link}`);
+  let body = clampChars(text, Math.max(0, DISCORD_MESSAGE_CHARS - [...join('')].length));
+  if (body.length < text.length) {
+    const open = body.lastIndexOf('<');
+    if (open > body.lastIndexOf('>')) body = body.slice(0, open);
+    body = body.trimEnd();
+  }
+  return join(body);
 }
 
 const REWATCH_QUESTION_CHARS = 300;
@@ -373,8 +474,10 @@ export function createTurnRunner({
   const lastPostAt = new Map(); // channelId -> ts of the persona's last message
   let onIdle = null; // set via setOnIdle(); see the finally block of runTurn below
   let idleWaiters = []; // resolvers for waitIdle() (/nep pause), notified once busy.size hits 0
-  // channelId -> ids of the messages in the history of the last turn that spoke there. The
-  // pending-ping drain (src/discord/events.js) skips a ping this turn already had in view.
+  // channelId -> ids of the messages in the history of the last turn that spoke there; for a
+  // channel the bot cannot write in, the lines its `<channel_view>` block showed in the last
+  // turn that spoke anywhere while showing it (noteSpokeSaw). The pending-ping drain
+  // (src/discord/events.js) skips a ping such a turn already had in view.
   const spokeSaw = new Map();
 
   /** The custom emoji lookup, or null when there is no index or features.customEmoji is off (read now). */
@@ -392,61 +495,79 @@ export function createTurnRunner({
    * to do, but never touches the target channel -- no sendTyping, no send, no
    * react, no artificial timing. Logs one line per would-be action and, when
    * `bot.dryRunChannelId` is configured, mirrors it there in plain language.
-   * @param {{ channel: object, parsed: object, idByIndex: Map<number, string>, history: object[],
-   *   mode: string, triggerKind: TriggerKind|null, selfName: string }} args
+   * The same routing as act(): a reaction on a pulled line names its channel
+   * (`source`) or is dropped where the bot may not react there, a message, the
+   * GIF or the picture answering a pulled line carries its jump link
+   * (`linkFor`) and no reply.
+   * @param {{ channel: object, parsed: object, idByIndex: Map<number, string>,
+   *   mode: string, triggerKind: TriggerKind|null, selfName: string, pulledIds: Map<string, string>,
+   *   lines: object[], linkFor: (pulledId: string|null) => string|null }} args
+   *   `lines`: the lines shown of the pulled channels, then this chat's history (names and authors).
    */
-  async function dryAct({ channel, parsed, idByIndex, history, mode, triggerKind, selfName }) {
+  async function dryAct({ channel, parsed, idByIndex, mode, triggerKind, selfName, pulledIds, lines, linkFor }) {
     const channelName = channel.name ?? null;
     const where = mirrorChannelLabel(channel);
     // A follow-up or an overheard turn never posts as a Discord reply, in this
-    // mirror either -- the model's reply="#n" is ignored the same as in act() below.
+    // mirror either -- the model's reply="#n" quotes nothing, the same as in act() below.
     const plain = postsPlain(triggerKind);
     // Every triggered turn shares the mode `reply`: the header names its
     // trigger kind (a call, a follow-up, an overheard line...); a spontaneous
     // turn has none.
     const head = `[dry-run] ${where} · ${mode}${triggerKind ? ` · ${triggerKind}` : ''}`;
+    const labels = hot.prompts?.labels;
 
     for (const reaction of parsed.reactions) {
       const targetId = idByIndex.get(reaction.to);
       if (!targetId) continue;
-      const authorName = authorNameFor(history, targetId) ?? '—';
+      const route = reactionChannel(channel, targetId, pulledIds);
+      if (!route.target) {
+        log.info('turn: reaction dropped', { channel: channel.id, source: route.source, reason: route.reason });
+        continue;
+      }
+      const authorName = authorNameFor(lines, targetId) ?? '—';
       // The ONE deliberate exception to "never log message contents": this is
       // the persona's own output, not a user's, and only while dry-run is on.
-      log.info('dry-run: would react', { channel: channel.id, channelName, to: targetId, emoji: reaction.emoji });
-      await mirror(`${head} · reply to ${authorName}`, `reacts with ${reaction.emoji} to ${authorName}`);
+      log.info('dry-run: would react', { channel: channel.id, channelName, source: route.source, to: targetId, emoji: reaction.emoji });
+      const elsewhere = route.source ? ` in ${mirrorChannelLabel(route.target)}` : '';
+      await mirror(`${head} · reply to ${authorName}`, `reacts with ${reaction.emoji} to ${authorName}${elsewhere}`);
       lastPostAt.set(channel.id, clock());
     }
 
     for (const message of parsed.messages) {
-      const replyId = !plain && message.replyTo !== null ? idByIndex.get(message.replyTo) : null;
-      const authorName = replyId ? (authorNameFor(history, replyId) ?? '—') : '—';
+      const { replyId, pulledId } = replyTarget(message.replyTo, { plain, idByIndex, pulledIds });
+      const answeredId = replyId ?? pulledId;
+      const authorName = answeredId ? (authorNameFor(lines, answeredId) ?? '—') : '—';
+      const link = linkFor(pulledId);
       // Same deliberate exception as above: the persona's own output, dry-run only.
-      const text = renderCustomEmoji(resolveMentions(message.text, history).text, emojiLookup());
-      log.info('dry-run: would send', { channel: channel.id, channelName, mode, trigger: triggerKind ?? null, replyTo: replyId ?? null, text });
+      const text = withLink(renderCustomEmoji(resolveMentions(message.text, lines).text, emojiLookup()), link, labels);
+      log.info('dry-run: would send', { channel: channel.id, channelName, mode, trigger: triggerKind ?? null, replyTo: replyId, link, text });
       // The mirror shows @name as the model wrote it: resolving it to a real
       // mention here would ping someone in a channel meant to be invisible to them.
-      await mirror(`${head} · reply to ${authorName}`, renderCustomEmoji(message.text, emojiLookup()));
+      await mirror(`${head} · reply to ${authorName}`, withLink(renderCustomEmoji(message.text, emojiLookup()), link, labels));
       lastPostAt.set(channel.id, clock());
     }
 
     if (parsed.gif) {
-      const replyId = !plain && parsed.gif.replyTo !== null ? idByIndex.get(parsed.gif.replyTo) : null;
+      const { replyId, pulledId } = replyTarget(parsed.gif.replyTo, { plain, idByIndex, pulledIds });
+      const link = linkFor(pulledId);
       const { entry } = parsed.gif;
       // The persona's own pick from the library, dry-run only: the handle and the stored URL.
-      log.info('dry-run: would send gif', { channel: channel.id, channelName, mode, replyTo: replyId ?? null, gif: entry.id, kind: entry.kind, url: entry.url });
-      await mirror(`${head} · gif ${entry.id}`, entry.url);
+      log.info('dry-run: would send gif', { channel: channel.id, channelName, mode, replyTo: replyId, link, gif: entry.id, kind: entry.kind, url: entry.url });
+      await mirror(`${head} · gif ${entry.id}`, withLink(entry.url, link, labels));
       lastPostAt.set(channel.id, clock());
     }
 
     if (parsed.draw) {
       const self = parsed.draw.self === true;
+      const { pulledId } = replyTarget(parsed.draw.replyTo, { plain, idByIndex, pulledIds });
+      const link = linkFor(pulledId);
       // The FULL image prompt (prompt files + the persona's request), so the
       // owner can check the prompt files in dry-run. Same deliberate exception:
       // the persona's own output, dry-run only. Nothing is generated.
       const prompt = drawPromptFor(selfName, parsed.draw);
-      log.info('dry-run: would draw', { channel: channel.id, channelName, mode, self, prompt });
+      log.info('dry-run: would draw', { channel: channel.id, channelName, mode, self, link, prompt });
       // A full prompt outgrows one Discord message: mirrored in numbered parts.
-      const header = `${head} · draw${self ? ' (self)' : ''}`;
+      const header = `${head} · draw${self ? ' (self)' : ''}${link ? ` · ${link}` : ''}`;
       const parts = splitForMirror(prompt, MIRROR_MAX_CHARS - header.length - MIRROR_PART_MARK_CHARS);
       for (const [i, part] of parts.entries()) {
         await mirror(parts.length > 1 ? `${header} (${i + 1}/${parts.length})` : header, part);
@@ -494,9 +615,11 @@ export function createTurnRunner({
    * (`ImageCapError`) resolves `{}`: the senses line already told the
    * persona; on a turn someone asked for the limit notice tells the
    * requester, an unasked one (spontaneous, overheard: askedFor) stays silent
-   * and only logs it. An unasked picture is charged to no member.
+   * and only logs it. An unasked picture is charged to no member. A picture
+   * answering a pulled line (`pulledIds`) posts plain (replyTarget); the link
+   * `linkFor` gives it, asked once the picture is ready, is its content.
    */
-  async function draw({ channel, parsed, idByIndex, trigger, triggerKind, selfName }) {
+  async function draw({ channel, parsed, idByIndex, pulledIds, linkFor, trigger, triggerKind, selfName }) {
     const config = hot.config;
     const self = parsed.draw.self === true;
     const prompt = drawPromptFor(selfName, parsed.draw);
@@ -510,8 +633,10 @@ export function createTurnRunner({
       }
 
       const picture = await images.generate({ prompt, reference, userId: asked ? (trigger.authorId ?? null) : null });
-      const replyId = !plain && parsed.draw.replyTo !== null ? idByIndex.get(parsed.draw.replyTo) : null;
+      const { replyId, pulledId } = replyTarget(parsed.draw.replyTo, { plain, idByIndex, pulledIds });
+      const link = linkFor(pulledId);
       await channel.send({
+        ...(link ? { content: link } : {}),
         files: [{ attachment: picture.buffer, name: imageFileName(picture.mediaType) }],
         reply: replyId ? { messageReference: replyId, failIfNotExists: false } : undefined,
         allowedMentions: { parse: [] },
@@ -523,6 +648,7 @@ export function createTurnRunner({
         cost: picture.cost,
         self,
         bytes: picture.buffer?.length ?? 0,
+        ...(link ? { link: true } : {}),
       });
       return {};
     } catch (err) {
@@ -616,21 +742,23 @@ export function createTurnRunner({
    * Post the persona's GIF (after its messages): a link GIF as its stored
    * URL (Discord embeds tenor/giphy links), an attached one as a fresh URL of
    * its attachment, the stored one when that fails. Counted against
-   * `gifs.maxPerDay` once sent. Never throws.
+   * `gifs.maxPerDay` once sent. Never throws. `replyId`: the chat line it
+   * quotes as a Discord reply (replyTarget), or null; `link`: the jump link
+   * it carries after its URL (withLink, so the URL comes first and still
+   * embeds), or null.
    */
-  async function postGif(channel, gif, idByIndex, plain) {
+  async function postGif(channel, gif, replyId, link) {
     const { entry } = gif;
     try {
       const fresh = entry.kind === 'attachment' ? await freshAttachmentUrl(channel, entry) : null;
-      const replyId = !plain && gif.replyTo !== null ? idByIndex.get(gif.replyTo) : null;
       await channel.send({
-        content: fresh ?? entry.url,
+        content: withLink(fresh ?? entry.url, link, hot.prompts?.labels),
         reply: replyId ? { messageReference: replyId, failIfNotExists: false } : undefined,
         allowedMentions: { parse: [] },
       });
       countGif();
       lastPostAt.set(channel.id, clock());
-      log.info('turn: gif sent', { channel: channel.id, gif: entry.id, kind: entry.kind, fresh: Boolean(fresh) });
+      log.info('turn: gif sent', { channel: channel.id, gif: entry.id, kind: entry.kind, fresh: Boolean(fresh), ...(link ? { link: true } : {}) });
     } catch (err) {
       log.warn('turn: gif failed', { channel: channel.id, gif: entry.id, error: err });
     }
@@ -662,27 +790,45 @@ export function createTurnRunner({
    * Post the turn for real. Resolves `{ drawFailed }` from draw() when the
    * persona's picture could not be posted, `{}` otherwise. Once the text
    * messages are out (before the GIF and the picture), the variety pass for
-   * the next turn starts ahead (startAhead).
+   * the next turn starts ahead (startAhead) on this chat's history.
+   *
+   * Everything is posted in `channel`. A reaction on a pulled line
+   * (`pulledIds`) is put in that line's channel when the bot may react there,
+   * else dropped (`turn: reaction dropped`); a message, the GIF or the picture
+   * answering a pulled line posts plain, never as a Discord reply across
+   * channels, and each post carries the jump link `linkFor` gives it (a message
+   * and the GIF through `labels.elsewhere.link`, read now; the picture as its
+   * content). `@name` resolves over `lines`.
    * @param {{ channel: object, guildId: string, privateChat: boolean, parsed: object,
    *   idByIndex: Map<number, string>, history: object[], startedAt: number,
-   *   triggerKind: TriggerKind|null, trigger: object|null, selfName: string }} args
+   *   triggerKind: TriggerKind|null, trigger: object|null, selfName: string,
+   *   pulledIds: Map<string, string>, lines: object[], linkFor: (pulledId: string|null) => string|null,
+   *   sourceId: string|null }} args
+   *   `lines`: the lines shown of the pulled channels, then `history` (a chat author wins a
+   *   display name both share); `sourceId`: the channel the turn is about (its `source`),
+   *   logged on every message sent.
    */
-  async function act({ channel, guildId, privateChat, parsed, idByIndex, history, startedAt, triggerKind, trigger, selfName }) {
+  async function act({ channel, guildId, privateChat, parsed, idByIndex, history, startedAt, triggerKind, trigger, selfName, pulledIds, lines, linkFor, sourceId }) {
     const cfg = hot.config.typing;
     const typingOn = hot.config.features?.typingSimulation !== false;
     // A follow-up or an overheard turn (postsPlain) never posts as a Discord
-    // reply -- the model's reply="#n" (if any) is ignored, plain messages only.
+    // reply -- the model's reply="#n" (if any) quotes nothing, plain messages only.
     const plain = postsPlain(triggerKind);
 
     for (const reaction of parsed.reactions) {
       const targetId = idByIndex.get(reaction.to);
       if (!targetId) continue;
+      const route = reactionChannel(channel, targetId, pulledIds);
+      if (!route.target) {
+        log.info('turn: reaction dropped', { channel: channel.id, source: route.source, reason: route.reason });
+        continue;
+      }
       if (typingOn) await sleep(between(cfg.reactionDelayMs, rng));
       try {
-        const target = await channel.messages.fetch(targetId);
+        const target = await route.target.messages.fetch(targetId);
         await target.react(reaction.emoji);
       } catch (err) {
-        log.warn('turn: reaction failed', { channel: channel.id, emoji: reaction.emoji, error: err });
+        log.warn('turn: reaction failed', { channel: channel.id, ...(route.source ? { source: route.source } : {}), emoji: reaction.emoji, error: err });
       }
     }
 
@@ -694,17 +840,19 @@ export function createTurnRunner({
       if (!first && typingOn) await sleep(between(cfg.betweenMessagesMs, rng));
       first = false;
 
-      const mentioned = resolveMentions(message.text, history);
+      const { replyId, pulledId } = replyTarget(message.replyTo, { plain, idByIndex, pulledIds });
+      const link = linkFor(pulledId);
+      const mentioned = resolveMentions(message.text, lines);
       const { userIds } = mentioned;
       // Custom emoji after the mentions: `<@id>` has no `:name:` in it to break.
-      const text = renderCustomEmoji(mentioned.text, emojiLookup());
+      const spoken = renderCustomEmoji(mentioned.text, emojiLookup());
+      const text = withLink(spoken, link, hot.prompts?.labels);
       if (typingOn) {
         // Only the indicator: a missing Send Messages shows up here first, so it is logged.
         await channel.sendTyping().catch((err) => log.warn('turn: typing failed', { channel: channel.id, error: err }));
-        await sleep(typingMs(text, cfg, rng));
+        await sleep(typingMs(spoken, cfg, rng));
       }
 
-      const replyId = !plain && message.replyTo !== null ? idByIndex.get(message.replyTo) : null;
       const posted = await channel.send({
         content: text,
         reply: replyId ? { messageReference: replyId, failIfNotExists: false } : undefined,
@@ -717,12 +865,14 @@ export function createTurnRunner({
         channelId: channel.id,
         self: true,
         content: message.text,
-        replyToId: replyId ?? null,
+        replyToId: replyId,
       });
       // The ring of own lines the variety pass reads for the other channels: server channels only,
-      // the persona's text as it wrote it, with what it answered (the message it replied to, else the trigger).
+      // the persona's text as it wrote it, with what it answered (the line it answered, here or
+      // in a pulled channel, else the trigger).
       if (variety && channel.guild) {
-        const answered = replyId ? history.find((m) => m.id === replyId) : trigger;
+        const answeredId = replyId ?? pulledId;
+        const answered = answeredId ? lines.find((m) => m.id === answeredId) : trigger;
         variety.record(channel.guild.id, {
           id: posted?.id ?? null,
           ts: clock(),
@@ -737,6 +887,8 @@ export function createTurnRunner({
         secondsSinceTrigger: Math.round((clock() - startedAt) / 100) / 10,
         ...(triggerKind === 'followUp' ? { followUp: true } : {}),
         ...(triggerKind === 'overheard' ? { overheard: true } : {}),
+        ...(sourceId ? { source: sourceId } : {}),
+        ...(link ? { link: true } : {}),
       });
     }
     startAhead({ guildId, channelId: channel.id, history, posted: ownPosted, selfName, privateChat });
@@ -744,11 +896,12 @@ export function createTurnRunner({
     // The GIF right after the messages.
     if (parsed.gif) {
       if (parsed.messages.length > 0 && typingOn) await sleep(between(cfg.betweenMessagesMs, rng));
-      await postGif(channel, parsed.gif, idByIndex, plain);
+      const { replyId, pulledId } = replyTarget(parsed.gif.replyTo, { plain, idByIndex, pulledIds });
+      await postGif(channel, parsed.gif, replyId, linkFor(pulledId));
     }
 
     // The picture comes last, once every message is out.
-    if (parsed.draw) return draw({ channel, parsed, idByIndex, trigger, triggerKind, selfName });
+    if (parsed.draw) return draw({ channel, parsed, idByIndex, pulledIds, linkFor, trigger, triggerKind, selfName });
     return {};
   }
 
@@ -1129,6 +1282,40 @@ export function createTurnRunner({
   }
 
   /**
+   * Move the seen mark of each pulled channel whose block the request showed
+   * (buildRequest's `pulledKept`) to the newest line shown, in `state.json`
+   * `elsewhereSeen` (src/behavior/elsewhere.js#markSeen: never backwards). The
+   * caller marks the state dirty.
+   * @param {{ channelId: string, newestTs: number }[]} shown
+   */
+  function markPulledSeen(shown) {
+    if (shown.length === 0) return;
+    let seen = store.state.data.elsewhereSeen;
+    for (const { channelId, newestTs } of shown) seen = markSeen(seen, channelId, newestTs);
+    store.state.data.elsewhereSeen = seen;
+  }
+
+  /**
+   * What a turn that spoke had in view (spokeAfterSeeing): this channel's
+   * history under this channel, and the lines shown of each pulled channel
+   * the bot cannot write in under that channel -- a call there is answered
+   * here, so one queued meanwhile and already shown is not answered twice. A
+   * pulled channel the bot can write in keeps its own record: a call written
+   * there is answered there, not by being shown here.
+   * @param {object} channel
+   * @param {object[]} history
+   * @param {{ channelId: string, ids: string[] }[]} shown  buildRequest's `pulledKept`.
+   * @param {object[]} pulled  The PulledChannel records (their `readOnly`).
+   */
+  function noteSpokeSaw(channel, history, shown, pulled) {
+    spokeSaw.set(channel.id, new Set(history.map((m) => m.id)));
+    const readOnly = new Set(pulled.filter((entry) => entry.readOnly === true).map((entry) => entry.channelId));
+    for (const { channelId, ids } of shown) {
+      if (readOnly.has(channelId)) spokeSaw.set(channelId, new Set(ids));
+    }
+  }
+
+  /**
    * @param {object} params
    * @param {import('discord.js').TextBasedChannel} params.channel
    * @param {string} [params.guildId]  The served guild, used when `channel` has no guild (a
@@ -1145,7 +1332,9 @@ export function createTurnRunner({
    *   this turn is about when it is not `channel` (a call from a channel the bot cannot write in,
    *   a noticed comment): pulled before anything else and shown in `<channel_view>`. When it
    *   cannot be pulled a routed turn ends in `error` (`turn: source unavailable`), a noticed one
-   *   in `not-now`. `channel` is where the words go and the one marked busy.
+   *   in `not-now`. `channel` is where the words go and the one marked busy; the first post
+   *   links to the routed call, or to the newest line of the source shown (none when the budget
+   *   dropped its block). The drawFailed turn after a failed picture keeps it.
    * @param {object|null} [params.focus]  A normalized message of this chat put to everyone present
    *   (a room question): buildRequest appends `labels.room.focus` to the task.
    * @param {boolean} [params.forced]  True for an owner-forced turn (`/nep interject`, `/nep
@@ -1159,7 +1348,7 @@ export function createTurnRunner({
   async function runTurn(params) {
     const first = await runTurnOnce(params);
     if (!first.drawFailed) return first;
-    const { channel, guildId, trigger = null, triggerKind = null } = params;
+    const { channel, guildId, trigger = null, triggerKind = null, source = null } = params;
     // A failed picture someone asked for gets its own turn, started only once
     // the first one has fully returned (and freed the channel), with the
     // reason in the trigger label; its own <draw> is dropped. The first turn
@@ -1167,6 +1356,8 @@ export function createTurnRunner({
     // pending ping is drained only after this second turn -- never raced by
     // it. Nobody asked on a spontaneous or an overheard turn (askedFor, the
     // same predicate as runTurnOnce's hand-off): the failure is only logged.
+    // A turn about another channel keeps its source: a routed call is still
+    // answered here, with the call shown and linked.
     if (askedFor(trigger, triggerKind)) {
       try {
         const second = await runTurnOnce({
@@ -1176,6 +1367,7 @@ export function createTurnRunner({
           trigger,
           triggerKind: 'drawFailed',
           drawReason: first.drawFailed,
+          source,
           holdIdle: true,
         });
         log.info('turn: draw failure answered', { channel: channel.id, reason: first.drawFailed, outcome: second.outcome });
@@ -1596,22 +1788,56 @@ export function createTurnRunner({
         draw: Boolean(parsed.draw),
         gif: Boolean(parsed.gif),
       });
+      // The pulled channels whose block was in the request sent (a skip and a dry run included):
+      // their seen marks move to the newest line shown; a block the budget dropped moves none.
+      const shownPulled = request.pulledKept ?? [];
+      markPulledSeen(shownPulled);
       store.state.data.calibration = calibrator.ratio;
       store.state.markDirty();
 
       if (parsed.skip || nothingToDo) return { outcome: 'skip', mode: finalMode };
 
+      const idByIndex = request.idByIndex;
+      // The output side of the pulled channels: which line lives where, whose @name resolves,
+      // which post carries a jump link (one rule for act and dryAct). Names resolve over the
+      // pulled lines the request showed, then this chat's history: resolveMentions keeps the
+      // last author of a display name, so a chat author wins a name both share, and nobody the
+      // model was not shown (a block the budget dropped) is pinged.
+      const pulledIds = request.pulledIds ?? new Map();
+      const shownLines = shownPulled.flatMap(({ channelId, ids }) => {
+        const shownIds = new Set(ids);
+        return (pulled.find((entry) => entry.channelId === channelId)?.messages ?? []).filter((message) => shownIds.has(message.id));
+      });
+      const lines = shownLines.length > 0 ? [...shownLines, ...history] : history;
+      const linkFor = createLinker({
+        guildId,
+        pulledIds,
+        sourceTarget: isPrivate ? null : sourceLinkTarget({ source, trigger, pulledKept: shownPulled }),
+      });
+      const routing = { pulledIds, lines, linkFor };
       // Read fresh right here, not from the `features` snapshot taken at the
       // top of this turn: unlike the other switches this one defaults to OFF,
       // and whether to actually post is the very last decision of a turn.
-      const idByIndex = request.idByIndex;
       if (hot.config.features?.dryRun === true) {
-        await dryAct({ channel, parsed, idByIndex, history, mode: finalMode, triggerKind, selfName });
-        spokeSaw.set(channel.id, new Set(history.map((m) => m.id)));
+        await dryAct({ channel, parsed, idByIndex, mode: finalMode, triggerKind, selfName, ...routing });
+        noteSpokeSaw(channel, history, shownPulled, pulled);
         return { outcome: 'spoke', mode: finalMode, dryRun: true };
       }
-      const acted = await act({ channel, guildId, privateChat: isPrivate, parsed, idByIndex, history, startedAt, triggerKind, trigger, selfName });
-      spokeSaw.set(channel.id, new Set(history.map((m) => m.id)));
+      const acted = await act({
+        channel,
+        guildId,
+        privateChat: isPrivate,
+        parsed,
+        idByIndex,
+        history,
+        startedAt,
+        triggerKind,
+        trigger,
+        selfName,
+        ...routing,
+        sourceId: isPrivate ? null : (source?.channelId ?? null),
+      });
+      noteSpokeSaw(channel, history, shownPulled, pulled);
       if (!acted.drawFailed) return { outcome: 'spoke', mode: finalMode };
       // The same predicate as runTurn's hand-off: an unasked turn notifies right here.
       handOff = asked;
@@ -1640,7 +1866,9 @@ export function createTurnRunner({
     /**
      * Whether the last turn that spoke in `channelId` (this process, dry-run included) had
      * `messageId` in its channel history -- so a direct ping queued while that turn ran was
-     * already in front of the model and is not answered a second time.
+     * already in front of the model and is not answered a second time. For a channel the bot
+     * cannot write in: whether the last turn that spoke while showing that channel's lines
+     * (`<channel_view>`) showed `messageId`.
      * @param {string} channelId
      * @param {string} messageId
      * @returns {boolean}

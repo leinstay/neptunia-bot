@@ -233,7 +233,7 @@ export const labels = {
   },
   elsewhere: {
     called: 'the call came from #{channel}, where you cannot write; you answer in #{destination}',
-    link: '{text}\n{link}',
+    link: '{text} [from {link}]',
   },
   room: {
     focus: 'message {target} by {author} is put to everyone present',
