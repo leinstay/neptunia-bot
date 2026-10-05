@@ -36,7 +36,7 @@ Everything beyond attachments within the caps is downloaded with `yt-dlp` and tr
 
 ### Re-watch
 
-When someone addresses the persona with a question about a video it has already watched, a classifier (`prompts/rewatch.md`, on the `classifier.text` role) decides whether a second look is needed. If so, the video model watches the clip again with `prompts/rewatch-answer.md` and the answer appears in the transcript alongside the original summary. The same classifier can retry a video that failed to load when the person asks about it again. At most one re-watch or retry per turn; answers are cached for one hour. Switch `features.videoRewatch` (default on).
+When someone directly addresses the persona (not an overheard or spontaneous turn) with a question about a video it has already watched, a classifier (`prompts/rewatch.md`, on the `classifier.text` role) decides whether a second look is needed. If so, the video model watches the clip again with `prompts/rewatch-answer.md` and the answer appears in the transcript alongside the original summary. The same classifier can retry a video that failed to load when the person asks about it again. At most one re-watch or retry per turn; answers are cached for one hour. Switch `features.videoRewatch` (default on).
 
 The video prompt is `prompts/describe-video.md`. Settings live under `media.video`. See [Configuration](configuration.md#mediavideo) for every key and a model comparison table.
 
@@ -52,7 +52,7 @@ Read results are cached in the media cache: `read:<link.id>` holds the excerpt o
 
 ## Search
 
-When the persona is addressed and the trigger message asks something that needs facts from outside the chat, a classifier (`prompts/lookup.md`, on the `classifier.text` role) phrases a web search query. The search runs through Brave Search (`BRAVE_SEARCH_API_KEY` in `.env`; free tier: 2,000 queries/month, then $5 per 1,000), the numbered results are condensed through `prompts/search-summary.md`, and the answer appears in a `<lookup>` block right before `<chat>`.
+When the persona is directly addressed (not an overheard or spontaneous turn) and the trigger message asks something that needs facts from outside the chat, a classifier (`prompts/lookup.md`, on the `classifier.text` role) phrases a web search query. The search runs through Brave Search (`BRAVE_SEARCH_API_KEY` in `.env`; free tier: 2,000 queries/month, then $5 per 1,000), the numbered results are condensed through `prompts/search-summary.md`, and the answer appears in a `<lookup>` block right before `<chat>`.
 
 The classifier fires only when all of these hold: there is a trigger, `features.webLookup` is on, `web.search.enabled` is not false, the `lookup.md` prompt exists, `web.search.maxPerTurn` is at least 1, and a `BRAVE_SEARCH_API_KEY` is configured. Without a key, link reading still works but search does not.
 
@@ -78,7 +78,7 @@ The drawing prompt may quote members (it includes the scene text the model wrote
 
 ### Failure
 
-When the drawing fails on a reply turn, a second turn fires with the failure reason in the trigger label, so the persona can tell the requester what happened. The second turn's own `<draw>` is dropped. On a spontaneous turn, a failure is only logged. An image cap (daily or per-member) does not fire the failure turn; it posts a limit notice (`labels.limits.notice`) instead, naming the limit and the numbers.
+When the drawing fails on a turn someone asked for (a mention, reply, name trigger or follow-up), a second turn fires with the failure reason in the trigger label, so the persona can tell the requester what happened. The second turn's own `<draw>` is dropped. On a spontaneous or overheard turn, a failure is only logged. An image cap (daily or per-member) does not fire the failure turn; it posts a limit notice (`labels.limits.notice`) instead on asked-for turns, naming the limit and the numbers.
 
 Settings live under `image`. See [Configuration](configuration.md#image) for every key and [Configuration: Pictures out](configuration.md#pictures-out-imagemodel) for the supported models.
 

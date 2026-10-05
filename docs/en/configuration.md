@@ -30,7 +30,8 @@ Every key in `config.json` with its default, grouped by section.
 | `imageGeneration` | `false` | Let the persona draw pictures through a drawing sub-process. A missing key counts as on. Turn on in `config.local.json`; needs an image-capable model in `image.model`. See [Media: Drawing](media.md#drawing) |
 | `privateMessages` | `false` | Answer direct messages from guild members. Needs a stored public profile and `affinity.score >= private.minAffinity`. See [Messages and memory: Private layer](messages-and-memory.md#private-layer) |
 | `mentor` | `false` | Manual testing sub-process with its own model. Must be exactly `true` to enable; a missing key counts as off. See [Mentor](#mentor) |
-| `variety` | `true` | Before each turn, a model pass names the devices the persona is overusing in its own recent lines. A missing key counts as on |
+| `variety` | `true` | A model pass names the devices the persona is overusing in its own recent lines. The result becomes a `<worn>` block in the turn's request. A missing key counts as on |
+| `varietyPrecompute` | `true` | Start the variety pass right after the persona posts text, so the next turn finds the result ready. Off: the pass runs only at the turn, but a late answer is still stored for later. A missing key counts as on |
 | `followUp` | `true` | Classify untagged messages after the persona answers to continue a conversation |
 | `typingSimulation` | `true` | Simulate typing speed |
 | `adminCommands` | `true` | Owner slash commands; `false` unregisters them |
@@ -244,6 +245,7 @@ At most one re-watch or retry per turn. Answers are cached for one hour per ques
 | `followUpClassifyReplies` | `true` | Send a reply to another member's message to the classifier instead of automatic `no`. Missing key = on. With the switch off, any reply is `no` before the model is asked |
 | `followUpContext` | `15` | Transcript lines sent to the classifier |
 | `followUpMaxOutputTokens` | `8` | Max output tokens for the address classifier. A reasoning model that thinks before answering needs a larger cap, or it returns an empty answer |
+| `followUpOverheard` | `true` | When on, an `overheard` answer from the address classifier starts its own kind of turn with `prompts/overheard.md`. Off: an `overheard` answer counts as a plain `yes` (a follow-up turn). Missing key = on |
 | `followUpNoStreak` | `3` | Consecutive `no` verdicts that close the window |
 
 Follow-up windows are persisted in `data/state.json` under `followUpWindows` and restored at startup; expired ones are dropped.
@@ -309,6 +311,7 @@ Follow-up windows are persisted in `data/state.json` under `followUpWindows` and
 | `learnedHalfLifeDays` | `720` | Weight half-life for lessons (days) |
 | `maxAliases` | `5` | Aliases shown to the persona and analyzer per profile |
 | `maxAliasesStored` | `15` | Aliases kept per profile; the top by frequency and recency are shown |
+| `aliasRosterSize` | `40` | Members carried in the `<known_members>` block of a guild analyzer batch: stored profiles not present as authors, so the analyzer can record an alias for one of them. `0` turns the roster off. Private batches never carry it |
 | `aliasHalfLifeDays` | `365` | Weight half-life for aliases (days) |
 | `maxInjokes` | `15` | Max server in-jokes |
 | `maxSelfFacts` | `20` | Max self-claims |
@@ -420,7 +423,7 @@ Provider-specific options for `google/*` image models.
 
 ## `variety`
 
-Settings for the variety pass (`features.variety`). Before each turn the persona's own recent lines go to the `classifier.text` model, which names the repeated devices. The result becomes a `<worn>` block in the turn's request. A timeout or a failed pass never delays or fails the turn; the turn simply goes without the block. All hot-reloaded.
+Settings for the variety pass (`features.variety`). The persona's own recent lines go to the `classifier.text` model, which names the repeated devices. With `features.varietyPrecompute` on, the pass starts right after the persona posts text so the next turn finds the answer ready; at the turn, a ready answer is used from cache, or the turn joins a pass already in flight and waits at most `variety.timeoutMs`. The result becomes a `<worn>` block in the turn's request. A timeout or a failed pass never delays or fails the turn; the turn simply goes without the block. All hot-reloaded.
 
 | Key | Default | Meaning |
 |---|---|---|
@@ -431,7 +434,8 @@ Settings for the variety pass (`features.variety`). Before each turn the persona
 | `maxPatterns` | `4` | Most patterns one pass may name |
 | `shapeChars` | `140` | Max characters for one shape description |
 | `maxOutputTokens` | `500` | Max output tokens for the pass |
-| `timeoutMs` | `8000` | Request timeout (ms); a slow or failed pass never delays the turn |
+| `timeoutMs` | `8000` | How long a turn waits for a pass result (ms). A pass that outlives this wait keeps running to `requestTimeoutMs`; a late answer is stored and serves the next turn. The mentor sandbox uses this value as its request timeout |
+| `requestTimeoutMs` | `30000` | Request timeout for the variety model call (ms). The pass is cut at this time; `variety.timeoutMs` is only how long a turn waits for it |
 | `history` | `20` | Passes kept in the history ring for `/nep variety` |
 
 ## `private`

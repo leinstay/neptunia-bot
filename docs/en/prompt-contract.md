@@ -34,7 +34,8 @@ All instructions are English in both layers; a character's speech samples may be
 | `describe-gif.md` | no | Out-of-character prompt for the GIF describer (`media.gif.watch`): a short silent clip in, one compact line out: the action, what it expresses, visible text. Always English. No character card. Falls back to `describe-video.md` when absent | `{{today}}` `{{maxChars}}` `{{seconds}}` |
 | `rewatch.md` | yes | Classifier: does this message need the persona to re-watch a video or retry one that did not load (`features.videoRewatch`). Receives a numbered list of recent videos with their status and the new message. Output is ONE line: `<number> \| <question>`, `<number> \| retry` or `none` | `{{name}}` |
 | `rewatch-answer.md` | yes | Out-of-character prompt for the re-watch answer: the video model watches a clip again and answers one question in the language of the question. No character card | `{{today}}` `{{question}}` `{{maxChars}}` |
-| `address.md` | yes | Classifier: is this untagged message addressed to the persona | `{{name}}` |
+| `address.md` | yes | Classifier: is this untagged message addressed to the persona, about it, or neither. Output is one word: `yes`, `overheard` or `no` | `{{name}}` |
+| `overheard.md` | no | Task: the message talks about the persona, not to it. Used INSTEAD of the mode prompt when the trigger kind is `overheard` and the file is present and non-blank; missing or blank falls back to the mode prompt (degraded) | `{{name}}` `{{author}}` `{{trigger}}` `{{target}}` |
 | `lookup.md` | no | Classifier: does the persona need to search the web to answer this message (`features.webLookup`). Receives a short transcript and a `<candidate>` block. Output is ONE line: a search query (plain words, at most 12) or `none` | `{{name}}` `{{today}}` |
 | `read-link.md` | no | Out-of-character prompt for the link reader (`features.webLookup`, `web.links.enabled`): condense a fetched page into one paragraph. Receives the page title and body. No character card | `{{today}}` `{{maxChars}}` |
 | `search-summary.md` | no | Out-of-character prompt for the search condenser (`features.webLookup`, `web.search.enabled`): condense numbered search results into one note with inline sources. No character card | `{{today}}` `{{query}}` `{{maxChars}}` |
@@ -52,6 +53,7 @@ All instructions are English in both layers; a character's speech samples may be
 `{{target}}` index of the calling message (`#87`).
 System message = `system-prompt` + `character-card` + `rules` + `format`. For the analyzer: `memory.md` alone.
 On a forced turn (`/nep interject`, `/nep initiate`), `forced.md` is appended after the mode prompt if the file exists.
+On an `overheard` turn, `overheard.md` REPLACES the mode prompt (it is the task text, not an append). When `overheard.md` is missing or blank, the mode prompt is used instead (degraded: the mode prompt frames the line as said to the persona, which is not what happened).
 In a private chat, `private.md` is appended after the mode prompt (before `forced.md`) with the same `{{name}}` and `{{author}}` placeholders.
 The analyzer and the warmup's `profile.md` and `server.md` receive the character card and `rules.md` as a
 `<character>` block in the user message. `channel.md`, `describe.md`, `describe-video.md`, `describe-gif.md`, `draw.md`, `rewatch.md`, `rewatch-answer.md`, `address.md`, `lookup.md`, `read-link.md`, `search-summary.md` and `variety.md` do not receive the card.
@@ -74,13 +76,13 @@ The blocks of the user message. Empty ones are omitted; the order below is the o
 | `<server>` | The CURRENT channel in full (Discord category and topic, purpose, what people write, tone, activity, last message, top writers; marked with `labels.server.currentMark`) plus only the neighbour channels that fed `<other_channels>` this turn; no other channel |
 | `<lore>` | Server lore entries whose keys occur in the recent messages (plus entries marked always): events, recurring characters, long-running stories. Like a lorebook: hundreds may exist, only the relevant few are shown |
 | `<self_facts>` | What the persona has claimed about itself |
-| `<people>` | Member profiles; the caller first, marked with `labels.profile.interlocutorMark`; each with the persona's attitude and, for the caller, the **episodes**: moments the persona remembers about the two of them, with dates and short quotes |
+| `<people>` | Member profiles; the caller first, marked with `labels.profile.interlocutorMark` (omitted on an `overheard` turn: the author talked about the persona, not to it); each with the persona's attitude and, for the caller, the **episodes**: moments the persona remembers about the two of them, with dates and short quotes |
 | `<other_channels>` | Up to `context.neighborMessages` messages per neighbouring channel, not older than `context.neighborMaxAgeMinutes`. When `features.mediaDescriptions` is on, a picture in a neighbour's line carries its cached caption when the describer cache already holds one; no new describe request is ever made for neighbours |
 | `<worn>` | Devices the persona is overusing in its own recent lines (`features.variety`): `labels.variety.intro`, then `- <shape> ("<example>", ...)` per pattern. Omitted when the variety pass did not run, returned nothing, or the switch is off |
 | `<lookup>` | What the persona looked up online this turn (`features.webLookup`): the query, the condensed answer and the source sites, or a "nothing found" line. Appears only when the search classifier fired and the search completed |
 | `<chat>` | Up to `context.channelMessages` latest messages of the current channel |
 | `<tempo>` | Counts for 10 min / hour / day, distinct people, silence, a verdict (live / slow / dead) |
-| `<task>` | `reply` / `interject` / `initiate`, placeholders filled |
+| `<task>` | `reply` / `interject` / `initiate` / `overheard` (when `overheard.md` exists), placeholders filled |
 
 Budget priority (sections are trimmed from the bottom of this list first): system + task + clock + tempo + senses
 (never cut) → caller's profile with episodes → lookup (kept or dropped whole) → about_chat → self_facts → lore → server → chat (newest first) →
@@ -235,7 +237,7 @@ server.category | topic | purpose | topics | tone               {text}
 server.activity                          {activity} = server.activityLive | activitySlow | activityDead
 server.lastMessage                       {when}: humanised age of the channel's newest message
 server.topWriters                        {names}: current names of the members who write there most
-triggers.mention | reply | name | followUp   followUp = an untagged message the address classifier judged to be for the persona; such a turn posts plain, never as a Discord reply
+triggers.mention | reply | name | followUp | overheard   followUp = an untagged message the address classifier judged to be for the persona; overheard = talk about the persona, not to it. Both post plain, never as a Discord reply. overheard falls back to followUp, then reply
 triggers.private                         the trigger for a private (DM) message
 triggers.drawFailed                      {reason}: the drawing sub-process failed; reason is the human phrase from draw.reasons.*
 draw.reasons.moderation | daily | userDaily | timeout | error    human phrases for the five failure reasons; daily and userDaily are reserved but no longer reached by triggers.drawFailed — an image cap now posts limits.notice instead of a follow-up turn
@@ -277,7 +279,7 @@ The numeric limits in the prompt are placeholders filled at runtime from `config
 Input: `<character>` · `<existing_profiles>` (JSON by user id, incl. current `affinity` with score, band and reason,
 `relationshipStale` when the text is due for a rewrite, and stored `episodes`) · `<existing_lore>` ·
 `<existing_guild>` (JSON: patterns, starters, in-jokes, learned items) · `<existing_channels>` (JSON by channel id: `name`, Discord `category`, `topic`, stored `purpose`,
-`topics`, `tone`) · `<new_messages>` grouped under `## #channel-name (id:123)`, lines `[14:32] nick (id:123): text`,
+`topics`, `tone`) · `<known_members>` (guild batches only, absent from private batches; may be partial or absent entirely: stored members who did NOT write in this batch, each with their display names and aliases, so the analyzer can record an alias for one of them; at most `memory.aliasRosterSize` entries, most recently seen first, `0` = off; ranked before the transcript in the budget so a heavy batch cannot starve it, not required so it never makes the request fail) · `<new_messages>` grouped under `## #channel-name (id:123)`, lines `[14:32] nick (id:123): text`,
 a line addressed to the persona starts with `→ `, own lines use `labels.self`.
 
 Output: a bare JSON object. Profiles are updated INCREMENTALLY: the analyzer returns changes, never a re-summary
@@ -364,7 +366,7 @@ of what is already stored, so facts are not degraded by being rewritten batch af
 - **Members are referred to by id, never by nickname.** Nicknames change daily, so in every free-text field the
   analyzer writes (profile prose, interest notes, detail text, episode `what`/`feeling`, affinity reason, `guild`
   fields, channel notes, lore `text`, `self`) a member is written as the token `<@id>` (the id from the transcript's
-  `nick (id:123)` or from `<existing_profiles>`). Only when the analyzer is sure who is meant; otherwise the name stays
+  `nick (id:123)`, from `<existing_profiles>` or from `<known_members>`). Only when the analyzer is sure who is meant; otherwise the name stays
   as written; an id is never invented. Verbatim `quote`s and lore `keys`/`title` are left alone. Code resolves tokens
   at the moment of use: for the chat model `<@id>` becomes the member's current name (the same string the transcript
   shows, so `@name` still works), for the analyzer it becomes `name (id:123)`; on the way in, code turns a
@@ -375,6 +377,7 @@ of what is already stored, so facts are not degraded by being rewritten batch af
   known alias is a sighting. The input view shows them as a plain list; the chat model sees them through
   `labels.profile.aliases` `{text}`. A member whose current name OR alias occurs in the recent transcript is pulled
   into `<people>` even if they have not spoken; members referred to in the trigger or the last five messages (by mention, current name or alias, prefix match for names of 4+ characters) come right after the interlocutor in full (`context.askedAboutProfiles` at most), the other recent participants after them in compact form (name, aliases, character, attitude, top 5 topics); the budget trims the compact ones first.
+  For a member listed in `<known_members>` (a roster member), only `aliases` is applied; every other key in the answer is dropped and counted. A profile is never created for a roster member: it must already exist. Guards on a proposed alias (all members, authors and roster alike): dropped when it holds a `<@` token or an `(id:` marker, dropped when it equals one of the member's stored display names (case-insensitive, punctuation ignored). A bare array under `aliases` (instead of `{ add, remove }`) is read as an add of the names not already stored (it never bumps a stored alias). The `firstSeen`/`lastSeen` date for a roster member's alias comes from the newest message in the batch, since the roster member wrote no message themselves.
 - **Main channels are the source of the portrait.** `memory.mainChannelIds` (default `[]`) lists the channels where
   people talk to each other; in `<existing_channels>` such a channel carries `"main": true` (key omitted otherwise).
   `character` and `style` are judged from how the person talks with others in a main channel; diaries and topical
@@ -425,6 +428,7 @@ of what is already stored, so facts are not degraded by being rewritten batch af
   Entries added by the owner (`/nep lore add`) are never changed by the analyzer.
 - String fields ≤ `memory.fieldChars`; details ≤ `memory.maxDetails`, injokes ≤ `memory.maxInjokes`, self ≤ `memory.maxSelfFacts`. Notes in the language the chat speaks.
   Observed facts only; nothing sensitive (addresses, phones, documents, health, finances, real full names).
+- **Counters on `memory: update applied`** (logged after each batch): `roster` (members sent in `<known_members>`), `rosterCandidates` (roster entries offered to the budget), `rosterTokens` (estimated tokens the sent roster took), `aliasesChanged` (members, authors and roster, whose stored alias list really changed), `aliasOnly` (roster members among them), `droppedUsers` (entries for an id that is neither an author nor a roster member with a stored profile), `droppedFields` (non-alias keys dropped from roster members' entries).
 
 ## Channel map
 
@@ -477,7 +481,7 @@ Attitude and `relationship` are NOT warmed up; they grow from live conversation 
 "episodes": [...], "aliases": [""] }`; blocks `<character>` `<member>` `<draft>` (optional) `<hint>` (optional, portrait
 refresh only) `<snippets>`. Own lines in the snippets start with `labels.warmup.ownMark`; context lines start with
 `labels.warmup.contextMark`. Aliases come from OTHER people's lines (how they address the member), so the
-own-lines attribution rule does not apply to them.
+own-lines attribution rule does not apply to them. One explicit naming statement is enough evidence for an alias; a teasing name thrown once in passing is not.
 
 ## Address classifier
 
@@ -488,22 +492,22 @@ persona's own lines marked with `labels.self`, plus the new message marked as `<
 the `classifier.text` model (default `anthropic/claude-sonnet-4.6`). The transcript carries cached media captions
 (pictures, stickers, GIFs, custom emoji, watched videos) in the same label forms as the persona's transcript. Code
 makes no new describer requests for the history lines; it describes only the candidate's own media before running the
-classifier. Output is ONE line: `yes` when the candidate
-addresses the persona or continues the exchange with it, `no` when people talk among themselves or to someone else.
+classifier. Output is ONE word: `yes` when the candidate
+addresses the persona or continues the exchange with it, `overheard` when people talk ABOUT the persona to someone else or to the room, `no` when the conversation has nothing to do with the persona.
 An empty or blank answer is a failed call (`reason: empty`), not a silent `no`.
 An explicit @mention of another member is always `no` before the model is asked; the implicit ping Discord adds for the
 replied-to author does not count as such a mention. When `mention.followUpClassifyReplies` is on (default `true`,
 missing key = on), a reply to another member's message goes to the classifier like plain text. With the switch off,
-any reply to another member is an automatic `no`. A follow-up candidate is not classified while a turn runs anywhere under `mention.oneAtATime` (or in its own channel with it off); a `yes` that still meets a busy turn is dropped and logged, never queued.
+any reply to another member is an automatic `no`. A follow-up candidate is not classified while a turn runs anywhere under `mention.oneAtATime` (or in its own channel with it off); a `yes` or `overheard` that still meets a busy turn is dropped and logged, never queued.
 
-`yes` runs a
-normal reply turn (the model may still `<skip/>`); three `no` in a row (`mention.followUpNoStreak`, default 3) close
-the window. Switch `features.followUp` (default on). Logged as counts and verdicts only.
+`yes` runs a normal reply turn (the model may still `<skip/>`). `overheard` runs a reply-mode turn with trigger kind `overheard`: its task text is `prompts/overheard.md` when present (falling back to the mode prompt), no interlocutor mark on the author's profile heading, plain posting, not counted for the repeat penalty, no limit notice when a rail refuses the turn, no search or re-watch classifier, drawing treated as unasked (no image-cap notice, no per-user image accounting, no `drawFailed` follow-up). With `mention.followUpOverheard` off, an `overheard` answer starts a plain follow-up turn instead (the log still records `answer: 'overheard'`). When a newer message was held during the classifier call and the verdict is `overheard`, the held message is classified first: a `yes` starts the follow-up turn for it, an `overheard` starts the overheard turn for the held message, a `no` starts the overheard turn for the original candidate.
+
+Three `no` in a row (`mention.followUpNoStreak`, default 3) close the window; `overheard` counts as `yes` for the streak. Switch `features.followUp` (default on). Logged as counts, verdicts and `answer` on `follow-up: verdict`.
 The window state survives a restart: active windows are saved in `data/state.json` under `followUpWindows` and restored at startup, with expired ones dropped.
 
 ## Re-watch classifier
 
-When the persona is addressed (a reply turn) and a video sits in the last `media.video.rewatch.recentMessages`
+When the persona is directly addressed (a reply turn, not an overheard or spontaneous turn) and a video sits in the last `media.video.rewatch.recentMessages`
 (default 60) messages of the channel, a classifier decides whether the message asks about one of those videos or asks
 to retry one that did not load. Candidates are watched videos and error-state videos (a requested retry uses its own slot, independent of the turn's
 `media.video.maxPerTurn` attempts). At most `media.video.rewatch.maxCandidates` (default 6) are
@@ -552,7 +556,7 @@ question (see the video cache section above). Switch `features.videoRewatch` (mi
 
 ## Search classifier
 
-When the persona is addressed (a reply turn) and all of the following hold (`features.webLookup` is on,
+When the persona is directly addressed (a reply turn, not an overheard or spontaneous turn) and all of the following hold (`features.webLookup` is on,
 `web.search.enabled` is not false, the `lookup.md` prompt exists, `web.search.maxPerTurn` is at least 1, and a
 `BRAVE_SEARCH_API_KEY` is configured), the classifier decides whether the trigger message asks something that needs
 a web search. Code sends `lookup.md` as the system prompt on the `classifier.text` model with a user
@@ -589,9 +593,11 @@ the search itself counts against `web.maxPerDay` (shared with link reads). Resul
 
 ## Variety pass
 
-Before a turn, a `classifier.text` pass reads the persona's own most recent lines and names the repeated devices
+A `classifier.text` pass reads the persona's own most recent lines and names the repeated devices
 (turns of phrase, structural moves, recurring joke shapes) the persona has fallen into. The result becomes a `<worn>`
 block in the turn's request. Switch `features.variety` (missing = on).
+
+With `features.varietyPrecompute` on (the default), the pass starts right after the persona posts text, on the lines the next `fetchHistory` will return. A turn looks up its own line set: when a cached answer matches, it is used without a model request; when a pass for those lines is already in flight, the turn joins it and waits at most `variety.timeoutMs`; otherwise the turn starts its own request. A request runs to `variety.requestTimeoutMs` (default 30000): if a turn's wait of `variety.timeoutMs` runs out first, the request keeps going and a late answer is stored for the next turn. A turn that joined a pass which then fails gets no block and starts no request of its own. Nothing is stored while paused or with `features.variety` off.
 
 ### Line selection
 
@@ -623,8 +629,7 @@ produces no block.
 
 ### Cache and storage
 
-The same set of lines is never asked twice in a row. A per-guild cache, keyed by the SHA-1 of the line ids, reuses the
-previous answer without a model request.
+A per-guild cache, keyed by the SHA-1 of the line ids, reuses the previous answer without a model request. A cache slot keeps one landed entry; a newer landed pass replaces the stored one. Up to 4 passes may be in flight per slot at once; a turn whose key matches any of them joins it. A failure is never cached, so the same lines are asked again by the next turn.
 
 `worn` is stored in guild memory (`data/guilds/<id>/guild.json`): the latest pass with `{ at, key, channelId, lines,
 patterns }`. `wornHistory` is a ring of up to `variety.history` (default 20) past passes, shapes and counts only, no
@@ -633,14 +638,12 @@ nothing said in private reaches the owner's view or another conversation.
 
 ### Timeout and failure
 
-`variety.timeoutMs` (default 8000) caps the model request. A timeout or a failure produces no `<worn>` block; the turn
-proceeds without one and the latest stored pass stays unchanged.
+`variety.timeoutMs` (default 8000) is how long a turn waits for a pass result. `variety.requestTimeoutMs` (default 30000) is the request's own cut. A pass that outlives the turn's wait keeps running; a late answer is stored and serves the next turn. A timeout or a failure produces no `<worn>` block for that turn; the turn proceeds without one.
 
 ### Mentor
 
 The mentor sandbox runs one variety pass per situation, charged to the mentor's token budget (not to
-`llm.maxRequestsPerDay`). The patterns are saved as `worn` on the situation record. The judge never sees the `<worn>`
-block.
+`llm.maxRequestsPerDay`). The sandbox uses `variety.timeoutMs` as its request timeout (it has no later turn that could use a late answer). The patterns are saved as `worn` on the situation record. The judge never sees the `<worn>` block.
 
 ## Drawing
 
@@ -679,7 +682,7 @@ An older `labels.json` without `senses.draw` shows nothing.
 
 ### Failure turn
 
-When a generation fails on a reply turn (someone asked for the picture), a second turn fires automatically:
+When a generation fails on a turn someone asked for (a mention, reply, name trigger or follow-up, not an overheard or spontaneous turn), a second turn fires automatically:
 
 - `triggerKind: 'drawFailed'`, with the failure reason rendered through `labels.draw.reasons.*` into
   `labels.triggers.drawFailed`'s `{reason}` placeholder.
@@ -688,7 +691,7 @@ When a generation fails on a reply turn (someone asked for the picture), a secon
 - The channel's idle notification is held until the second turn finishes, so a pending ping is drained only after
   the follow-up.
 
-On a spontaneous turn (nobody asked), a failed generation is only logged and no follow-up runs.
+On a spontaneous or overheard turn (nobody asked), a failed generation is only logged and no follow-up runs.
 
 An image cap (`ImageCapError`, reason `daily` or `userDaily`) does NOT fire the failure turn. Instead, the turn posts a
 limit notice (`labels.limits.notice`) as a plain reply. The senses line already told the persona the quota was spent;
@@ -964,7 +967,7 @@ At most 5 causes and 5 changes. `summary` clipped to 1500 characters; `excerpt` 
 
 ## Limit notices
 
-When a rail refuses a directly requested action (a mention, reply, name trigger, follow-up or private message), the
+When a rail refuses a directly requested action (a mention, reply, name trigger, follow-up or private message, not an overheard or spontaneous turn), the
 bot posts one plain line from `labels.limits.notice` with `{limit}` (the config key), `{used}` and `{cap}` filled.
 Spontaneous turns that hit a rail stay silent. In dry-run the notice is logged and mirrored, not sent.
 
