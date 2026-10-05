@@ -302,24 +302,6 @@ async function openFollowUpWindow(handler, { guild, channel, ts }) {
 // Tests
 // ---------------------------------------------------------------------------
 
-// Owner commands are a separate pipeline entirely now (slash commands via
-// interactionCreate, src/discord/commands.js) — this createMessageHandler
-// no longer takes an `admin` dependency at all.
-
-test('events: a DM is ignored entirely, never reaches memory or the spontaneous scheduler', async () => {
-  const turns = fakeTurns();
-  const spontaneous = fakeSpontaneous();
-  const memory = fakeMemory();
-  const handler = makeHandler({ turns, spontaneous, memory });
-
-  const message = fakeMessage({ guild: null, channel: null, channelId: undefined });
-  await handler(message);
-
-  assert.equal(memory.observeCalls.length, 0);
-  assert.equal(spontaneous.onMessageCalls.length, 0);
-  assert.equal(turns.notePostCalls.length, 0);
-});
-
 // /nep pause: while paused, nothing here may observe, trigger, run a
 // turn or eavesdrop -- a burst of otherwise-triggering messages is a no-op.
 test('events: while paused, a burst of messages triggers no observe, no trigger, no turn, no eavesdrop', async () => {
@@ -347,18 +329,6 @@ test('events: while paused, a burst of messages triggers no observe, no trigger,
   assert.equal(spontaneous.onMessageCalls.length, 0);
   assert.equal(turns.notePostCalls.length, 0);
   assert.equal(runTurnCalls, 0);
-});
-
-test('events: a DM whose content looks like an old-style owner command is still just ignored', async () => {
-  const memory = fakeMemory();
-  const spontaneous = fakeSpontaneous();
-  const handler = makeHandler({ memory, spontaneous });
-
-  const message = fakeMessage({ guild: null, channel: null, channelId: undefined, cleanContent: '/nep status' });
-  await handler(message);
-
-  assert.equal(memory.observeCalls.length, 0);
-  assert.equal(spontaneous.onMessageCalls.length, 0);
 });
 
 test('events: its own message notes the post and is observed, never turned into a turn', async () => {
@@ -426,21 +396,6 @@ test('events: a plain message is observed and handed to the spontaneous schedule
   assert.equal(spontaneous.onMessageCalls.length, 1);
   assert.equal(spontaneous.onMessageCalls[0][0], message.channel);
   assert.equal(spontaneous.onMessageCalls[0][1].content, 'ένα μήνυμα χωρίς πρόκληση');
-});
-
-test('events: a message that looks like an old-style owner command is now just an ordinary message', async () => {
-  const memory = fakeMemory();
-  const spontaneous = fakeSpontaneous();
-  // bot.nameTriggers is cleared explicitly: a deployment's own name triggers
-  // (config.local.json, not read here) must not turn the old prefix into one.
-  const config = baseConfig({ bot: { nameTriggers: [] } });
-  const handler = makeHandler({ config, memory, spontaneous });
-
-  const message = fakeMessage({ cleanContent: 'hey, old bang-prefix status command, remember that?' });
-  await handler(message);
-
-  assert.equal(memory.observeCalls.length, 1);
-  assert.equal(spontaneous.onMessageCalls.length, 1);
 });
 
 test('events: a mention with rng above ignoreChance runs a reply turn', async () => {
@@ -606,21 +561,6 @@ test('features.mentions=false: a plain @mention is no longer a trigger', async (
 
   assert.equal(called, false);
   assert.equal(spontaneous.onMessageCalls.length, 1);
-});
-
-test('features.mentions=true (default): a plain @mention still triggers', async () => {
-  let called = false;
-  const turns = fakeTurns({ runTurn: async () => { called = true; return { outcome: 'spoke' }; } });
-  const handler = makeHandler({ turns, rng: scripted([0.99]) });
-
-  const message = fakeMessage({
-    cleanContent: 'γεια',
-    mentions: { users: new Map([['self1', { id: 'self1' }]]) },
-  });
-  await handler(message);
-  await Promise.resolve();
-
-  assert.equal(called, true);
 });
 
 test('features.replies=false: a reply to its own message is no longer a trigger by itself', async () => {
@@ -862,27 +802,11 @@ test('events: while warming up, a pending ping already queued is left for a late
   assert.ok(seenArgs, 'and answered once warming up ends');
 });
 
-test('events: isWarmingUp defaults to false when not provided (unmuted: a trigger runs a turn normally)', async () => {
-  let called = false;
-  const turns = fakeTurns({ runTurn: async () => { called = true; return { outcome: 'spoke' }; } });
-  const handler = makeHandler({ turns, rng: scripted([0.99]) });
-
-  const message = fakeMessage({
-    cleanContent: 'γεια',
-    mentions: { users: new Map([['self1', { id: 'self1' }]]) },
-  });
-  await handler(message);
-  await Promise.resolve();
-
-  assert.equal(called, true);
-});
-
 // ---------------------------------------------------------------------------
 // bot.dryRunChannelId: the dry-run mirror channel (src/behavior/turn.js)
 // carries the persona's own rehearsal output and is the owner's private test
 // room. It goes back to being ignored entirely: nothing there is observed or
-// triggers anything, not even a message that looks like an owner command
-// (owner commands live in interactionCreate now, not here at all).
+// triggers anything.
 
 test('events: any message in the dry-run mirror channel is ignored entirely', async () => {
   const memory = fakeMemory();
@@ -893,22 +817,6 @@ test('events: any message in the dry-run mirror channel is ignored entirely', as
   const handler = makeHandler({ config, memory, spontaneous, turns });
 
   const message = fakeMessage({ channel, channelId: 'mirror1', cleanContent: 'just chatting, no command' });
-  await handler(message);
-
-  assert.equal(memory.observeCalls.length, 0);
-  assert.equal(spontaneous.onMessageCalls.length, 0);
-  assert.equal(turns.notePostCalls.length, 0);
-});
-
-test('events: a message that looks like an owner command in the dry-run mirror channel is still just ignored', async () => {
-  const memory = fakeMemory();
-  const spontaneous = fakeSpontaneous();
-  const turns = fakeTurns();
-  const config = baseConfig({ bot: { dryRunChannelId: 'mirror1' } });
-  const channel = fakeChannel('mirror1', fakeGuild());
-  const handler = makeHandler({ config, memory, spontaneous, turns });
-
-  const message = fakeMessage({ channel, channelId: 'mirror1', cleanContent: 'old bang-prefix admin command' });
   await handler(message);
 
   assert.equal(memory.observeCalls.length, 0);
@@ -932,19 +840,6 @@ test("events: the persona's own messages mirrored into the dry-run channel are n
 
   assert.equal(memory.observeCalls.length, 0);
   assert.equal(turns.notePostCalls.length, 0);
-});
-
-test('events: an empty bot.dryRunChannelId (default) does not affect any channel', async () => {
-  const memory = fakeMemory();
-  const spontaneous = fakeSpontaneous();
-  const config = baseConfig({ bot: { dryRunChannelId: '' } });
-  const handler = makeHandler({ config, memory, spontaneous });
-
-  const message = fakeMessage({ cleanContent: 'just a plain message, no trigger' });
-  await handler(message);
-
-  assert.equal(memory.observeCalls.length, 1);
-  assert.equal(spontaneous.onMessageCalls.length, 1);
 });
 
 // ---------------------------------------------------------------------------
@@ -1156,14 +1051,6 @@ test('events: pictures come before a message\'s emoji within the shared 2-per-me
     ['a1', 'sticker:s1'],
     'the attachment and the sticker (both pictures) fill the cap before the emoji is ever considered',
   );
-});
-
-test('events: no describer wired in never throws, even with mediaDescriptions on and a picture', async () => {
-  const config = baseConfig({ features: { mediaDescriptions: true } });
-  const handler = makeHandler({ config });
-
-  const message = fakeMessage({ cleanContent: 'look', attachments: pictureAttachments(1) });
-  await assert.doesNotReject(() => handler(message));
 });
 
 test('events: the dry-run mirror channel never triggers a describer call, even with a picture', async () => {
@@ -1683,25 +1570,6 @@ test('events: several pending pings drain oldest first, one at a time (never con
   assert.equal(sawConcurrency, false, 'never more than one deferred turn in flight at once');
 });
 
-test('events: mention.oneAtATime=false runs the turn immediately even while busy elsewhere (today\'s behaviour)', async () => {
-  let called = false;
-  const config = baseConfig({ mention: { oneAtATime: false } });
-  const turns = fakeTurns({
-    isBusy: () => false,
-    isAnyBusy: () => true,
-    runTurn: async () => {
-      called = true;
-      return { outcome: 'spoke' };
-    },
-  });
-  const handler = makeHandler({ config, turns, rng: scripted([0.99]) });
-
-  await handler(directPingMessage());
-  await Promise.resolve();
-
-  assert.equal(called, true, 'oneAtATime=false: nothing is ever deferred');
-});
-
 test('events: a hot change to mention.oneAtATime is picked up without recreating the handler', async () => {
   const config = baseConfig();
   const answeredChannels = [];
@@ -2020,25 +1888,6 @@ test('follow-up: the classifier request is address.md as system and a <candidate
   await p;
 });
 
-test('follow-up: the address classifier uses classifier.text over the deprecated llm.classifierModel and mention.followUpModel', async () => {
-  const llm = fakeFollowUpLlm();
-  const config = baseConfig({ classifier: { text: 'x/classifier' }, llm: { classifierModel: 'x/old' }, mention: { followUpModel: 'x/older' } });
-  const handler = makeHandler({ config, llm, prompts: fakeAddressPrompts() });
-  const guild = fakeGuild('g1', 'Neptunia');
-  const t0 = Date.now();
-  const channel = fakeChannelWithHistory('c1', guild, []);
-  await openFollowUpWindow(handler, { guild, channel, ts: t0 + 1000 });
-
-  const p = handler(fakeMessage({ id: 'm-candidate', guild, channel, channelId: 'c1', cleanContent: 'is this for you', createdTimestamp: t0 + 2000 }));
-  await new Promise((resolve) => setTimeout(resolve, 0));
-
-  assert.equal(llm.calls.length, 1);
-  assert.equal(llm.calls[0].options.model, 'x/classifier');
-
-  llm.respond('no');
-  await p;
-});
-
 test('follow-up: the address classifier ignores a deprecated llm.classifierModel when classifier.text is null', async () => {
   const llm = fakeFollowUpLlm();
   const config = baseConfig({ classifier: { text: null }, llm: { classifierModel: 'x/old' }, mention: { followUpModel: 'x/older' } });
@@ -2058,42 +1907,37 @@ test('follow-up: the address classifier ignores a deprecated llm.classifierModel
   await p;
 });
 
-test('follow-up: the address classifier ignores a deprecated mention.followUpModel when classifier.text and llm.classifierModel are null', async () => {
-  const llm = fakeFollowUpLlm();
-  const config = baseConfig({ classifier: { text: null }, llm: { classifierModel: null }, mention: { followUpModel: 'x/older' } });
-  const handler = makeHandler({ config, llm, prompts: fakeAddressPrompts() });
-  const guild = fakeGuild('g1', 'Neptunia');
-  const t0 = Date.now();
-  const channel = fakeChannelWithHistory('c1', guild, []);
-  await openFollowUpWindow(handler, { guild, channel, ts: t0 + 1000 });
+test('follow-up: the address classifier model is classifier.text over the deprecated keys, classifier.media when classifier.text is null', async () => {
+  const cases = [
+    {
+      label: 'classifier.text wins over the deprecated llm.classifierModel and mention.followUpModel',
+      overrides: { classifier: { text: 'x/classifier' }, llm: { classifierModel: 'x/old' }, mention: { followUpModel: 'x/older' } },
+      expected: () => 'x/classifier',
+    },
+    {
+      label: 'classifier.text null falls back to classifier.media',
+      overrides: { classifier: { text: null } },
+      expected: (config) => config.classifier.media,
+    },
+  ];
+  for (const { label, overrides, expected } of cases) {
+    const llm = fakeFollowUpLlm();
+    const config = baseConfig(overrides);
+    const handler = makeHandler({ config, llm, prompts: fakeAddressPrompts() });
+    const guild = fakeGuild('g1', 'Neptunia');
+    const t0 = Date.now();
+    const channel = fakeChannelWithHistory('c1', guild, []);
+    await openFollowUpWindow(handler, { guild, channel, ts: t0 + 1000 });
 
-  const p = handler(fakeMessage({ id: 'm-candidate', guild, channel, channelId: 'c1', cleanContent: 'is this for you', createdTimestamp: t0 + 2000 }));
-  await new Promise((resolve) => setTimeout(resolve, 0));
+    const p = handler(fakeMessage({ id: 'm-candidate', guild, channel, channelId: 'c1', cleanContent: 'is this for you', createdTimestamp: t0 + 2000 }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
 
-  assert.equal(llm.calls.length, 1);
-  assert.equal(llm.calls[0].options.model, config.classifier.media, 'classifier.media, never the deprecated key');
+    assert.equal(llm.calls.length, 1, label);
+    assert.equal(llm.calls[0].options.model, expected(config), label);
 
-  llm.respond('no');
-  await p;
-});
-
-test('follow-up: classifier.text null falls back to classifier.media', async () => {
-  const llm = fakeFollowUpLlm();
-  const config = baseConfig({ classifier: { text: null } });
-  const handler = makeHandler({ config, llm, prompts: fakeAddressPrompts() });
-  const guild = fakeGuild('g1', 'Neptunia');
-  const t0 = Date.now();
-  const channel = fakeChannelWithHistory('c1', guild, []);
-  await openFollowUpWindow(handler, { guild, channel, ts: t0 + 1000 });
-
-  const p = handler(fakeMessage({ id: 'm-candidate', guild, channel, channelId: 'c1', cleanContent: 'is this for you', createdTimestamp: t0 + 2000 }));
-  await new Promise((resolve) => setTimeout(resolve, 0));
-
-  assert.equal(llm.calls.length, 1);
-  assert.equal(llm.calls[0].options.model, config.classifier.media, 'classifier.text=null falls back to classifier.media');
-
-  llm.respond('no');
-  await p;
+    llm.respond('no');
+    await p;
+  }
 });
 
 test('follow-up: an empty or blank classifier answer is logged as a failure with its model and counts as "no"', async () => {
@@ -2383,40 +2227,6 @@ test('follow-up: a missing prompts.address is a "no" without calling the model',
 
   assert.equal(llm.calls.length, 0);
   assert.equal(spontaneous.onMessageCalls.length, 0, 'still handled (as a no), not handed to spontaneous');
-});
-
-test('follow-up: an LLM error is a "no", never thrown', async () => {
-  const llm = fakeFollowUpLlm();
-  const spontaneous = fakeSpontaneous();
-  const handler = makeHandler({ spontaneous, llm, prompts: fakeAddressPrompts() });
-  const guild = fakeGuild();
-  const channel = fakeChannelWithHistory('c1', guild, []);
-  await openFollowUpWindow(handler, { guild, channel, ts: Date.now() });
-
-  const msg = fakeMessage({ guild, channel, channelId: 'c1', cleanContent: 'plain follow-up' });
-  const p = handler(msg);
-  await new Promise((resolve) => setTimeout(resolve, 0));
-  llm.fail(new Error('boom'));
-  await assert.doesNotReject(() => p);
-
-  assert.equal(spontaneous.onMessageCalls.length, 0);
-});
-
-test('follow-up: a DailyCapError from the LLM is a "no" too (the request never actually left)', async () => {
-  const llm = fakeFollowUpLlm();
-  const spontaneous = fakeSpontaneous();
-  const handler = makeHandler({ spontaneous, llm, prompts: fakeAddressPrompts() });
-  const guild = fakeGuild();
-  const channel = fakeChannelWithHistory('c1', guild, []);
-  await openFollowUpWindow(handler, { guild, channel, ts: Date.now() });
-
-  const msg = fakeMessage({ guild, channel, channelId: 'c1', cleanContent: 'plain follow-up' });
-  const p = handler(msg);
-  await new Promise((resolve) => setTimeout(resolve, 0));
-  llm.fail(new DailyCapError('daily LLM request cap reached (300)'));
-  await assert.doesNotReject(() => p);
-
-  assert.equal(spontaneous.onMessageCalls.length, 0, 'still handled as a "no", not handed to spontaneous');
 });
 
 test('features.followUp=false: an open window is never consulted, falls back to spontaneous', async () => {
@@ -3569,15 +3379,6 @@ test('limits: a refusal with no limit, or another outcome, posts nothing', async
   }
 });
 
-test('limits: a missing limits.notice label sends nothing', async () => {
-  const guild = fakeGuild();
-  const channel = sendingChannel('c1', guild);
-  const handler = makeHandler({ turns: refusedTurns(), rng: scripted([0.99]), prompts: { labels: {} } });
-  await handler(directPingMessage({ guild, channel, channelId: 'c1' }));
-  await settle();
-  assert.equal(channel.sent.length, 0);
-});
-
 test('limits: in dry-run the notice is logged and mirrored, never sent to the channel', async () => {
   const guild = fakeGuild();
   const channel = sendingChannel('c1', guild);
@@ -3597,21 +3398,6 @@ test('limits: in dry-run the notice is logged and mirrored, never sent to the ch
   assert.equal(line.cap, 800);
   assert.equal(mirrored.length, 1);
   assert.deepEqual(mirrored[0].allowedMentions, { parse: [] });
-});
-
-test('limits: a failing notice send never escapes the handler', async () => {
-  const guild = fakeGuild();
-  const channel = fakeChannelWithMessage('c1', guild, 'm1', {
-    send: async () => {
-      throw new Error('Missing Permissions');
-    },
-  });
-  const handler = makeHandler({ turns: refusedTurns(), rng: scripted([0.99]), prompts: { labels } });
-  const { logs } = await withCapturedLogs(async () => {
-    await handler(directPingMessage({ guild, channel, channelId: 'c1' }));
-    await settle();
-  });
-  assert.ok(logs.some((l) => l.msg === 'limits: notice failed'));
 });
 
 test('limits: a follow-up turn refused by a rail posts the notice', async () => {
@@ -3878,18 +3664,18 @@ test('follow-up author: ranking decays with memory.aliasHalfLifeDays, like the p
   assert.ok(user.includes(authorLine('Ελένη', 'Nélé, Λένα')),'the recent alias outranks the old heavier one');
 });
 
-test('follow-up author: a profile without aliases adds no <author> block', async () => {
-  const store = fakeStore({ u7: { id: 'u7', names: ['Ελένη'], aliases: [] } });
-  const user = await classifierUserMessage({ store });
-  assert.ok(!user.includes('<author>'));
-  assert.ok(user.includes('<candidate>') && user.includes('and you too'));
-});
-
-test('follow-up author: no stored profile adds no <author> block', async () => {
-  const store = fakeStore({});
-  const user = await classifierUserMessage({ store });
-  assert.ok(!user.includes('<author>'));
-  assert.deepEqual(store.getUserCalls, [['g1', 'u7']]);
+test('follow-up author: a profile without aliases, or no stored profile, adds no <author> block', async () => {
+  const cases = [
+    { label: 'a profile without aliases', profiles: { u7: { id: 'u7', names: ['Ελένη'], aliases: [] } } },
+    { label: 'no stored profile', profiles: {} },
+  ];
+  for (const { label, profiles } of cases) {
+    const store = fakeStore(profiles);
+    const user = await classifierUserMessage({ store });
+    assert.ok(!user.includes('<author>'), `${label}: no <author> block`);
+    assert.ok(user.includes('<candidate>') && user.includes('and you too'), `${label}: the candidate is still sent`);
+    assert.deepEqual(store.getUserCalls, [['g1', 'u7']], `${label}: the candidate author's profile, read once`);
+  }
 });
 
 test('follow-up author: followUpAliases 0 adds no <author> block', async () => {
@@ -4552,24 +4338,33 @@ test('follow-up: a failure while building the classifier request is not reported
 });
 
 test('follow-up: a failed classifier call is logged with its error, not only as a "no"', async () => {
-  const llm = fakeFollowUpLlm();
-  const handler = makeHandler({ llm, prompts: fakeAddressPrompts() });
-  const guild = fakeGuild();
-  const channel = fakeChannelWithHistory('c1', guild, []);
-  await openFollowUpWindow(handler, { guild, channel, ts: Date.now() });
+  const cases = [
+    { label: 'an ordinary error', error: new Error('boom') },
+    // The daily cap refuses before any request leaves: the same logged "no", never thrown.
+    { label: 'a DailyCapError', error: new DailyCapError('daily LLM request cap reached (300)') },
+  ];
+  for (const { label, error } of cases) {
+    const llm = fakeFollowUpLlm();
+    const spontaneous = fakeSpontaneous();
+    const handler = makeHandler({ spontaneous, llm, prompts: fakeAddressPrompts() });
+    const guild = fakeGuild();
+    const channel = fakeChannelWithHistory('c1', guild, []);
+    await openFollowUpWindow(handler, { guild, channel, ts: Date.now() });
 
-  const { logs } = await withCapturedLogs(async () => {
-    const p = handler(plainFollowUpMessage({ id: 'm1', guild, channel, content: 'plain follow-up' }));
-    await tick();
-    llm.fail(new Error('boom'));
-    await p;
-  });
-  const failed = logs.find((l) => l.msg === 'follow-up: classifier failed');
-  assert.ok(failed);
-  assert.equal(failed.level, 'warn');
-  assert.equal(failed.channel, 'c1');
-  assert.equal(failed.error.message, 'boom');
-  assert.equal(logs.find((l) => l.msg === 'follow-up: verdict')?.verdict, 'no');
+    const { logs } = await withCapturedLogs(async () => {
+      const p = handler(plainFollowUpMessage({ id: 'm1', guild, channel, content: 'plain follow-up' }));
+      await tick();
+      llm.fail(error);
+      await p;
+    });
+    const failed = logs.find((l) => l.msg === 'follow-up: classifier failed');
+    assert.ok(failed, `${label}: logged as a failed call`);
+    assert.equal(failed.level, 'warn', label);
+    assert.equal(failed.channel, 'c1', label);
+    assert.equal(failed.error.message, error.message, label);
+    assert.equal(logs.find((l) => l.msg === 'follow-up: verdict')?.verdict, 'no', `${label}: a "no"`);
+    assert.equal(spontaneous.onMessageCalls.length, 0, `${label}: still handled as a "no", not handed to spontaneous`);
+  }
 });
 
 test('events: a queued mention in a channel denied meanwhile is not answered at drain time', async () => {

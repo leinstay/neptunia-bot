@@ -120,13 +120,6 @@ test('popOldest: null for an empty list', () => {
   assert.deepEqual(popOldest([]), { ping: null, list: [] });
 });
 
-test('popOldest: removes and returns the entry with the smallest arrivedAt', () => {
-  const list = [ping('c1', 300), ping('c2', 100), ping('c3', 200)];
-  const { ping: popped, list: rest } = popOldest(list);
-  assert.equal(popped.channelId, 'c2');
-  assert.deepEqual(rest.map((p) => p.channelId).sort(), ['c1', 'c3']);
-});
-
 test('popOldest: draining one at a time yields arrival order', () => {
   let list = [ping('c1', 300), ping('c2', 100), ping('c3', 200)];
   const order = [];

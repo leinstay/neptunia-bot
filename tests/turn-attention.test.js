@@ -308,8 +308,16 @@ test('createTurnRunner: with no onIdle set, a turn finishes without throwing', a
   const hot = fakeHot({});
   const turns = createTurnRunner({ hot, store, llm, calibrator: identityCalibrator(), client: fakeClient() });
 
-  const result = await turns.runTurn({ channel, mode: 'reply', trigger: normalizedTrigger(raw), triggerKind: 'mention' });
+  // The idle notification runs fire-and-forget behind a .catch, so a missing guard would not
+  // reject runTurn: it would only log 'turn: onIdle failed'. Capture past that microtask.
+  const { result, logs } = await withCapturedLogs(async () => {
+    const r = await turns.runTurn({ channel, mode: 'reply', trigger: normalizedTrigger(raw), triggerKind: 'mention' });
+    await new Promise((resolve) => setImmediate(resolve));
+    return r;
+  });
+
   assert.equal(result.outcome, 'spoke');
+  assert.equal(logs.some((l) => l.msg === 'turn: onIdle failed'), false, 'no idle callback is called when none is set');
 });
 
 // ---------------------------------------------------------------------------
