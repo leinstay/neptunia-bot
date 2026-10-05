@@ -587,6 +587,8 @@ function pingRolesFor(role) {
 function modelForRole(role, cfg) {
   if (role === 'talk') return cfg?.llm?.model || undefined;
   if (role === 'analyzer') return cfg?.memory?.model || cfg?.llm?.model || undefined;
+  // The two-stage analyzer's voice model (src/memory/update.js#runVoice): unset = the talk model.
+  if (role === 'voice') return cfg?.memory?.voiceModel || cfg?.llm?.model || undefined;
   if (role === 'classifier.text') return classifierTextModel(cfg);
   if (role === 'classifier.media') return classifierMediaModel(cfg);
   if (role === 'classifier.video') return classifierVideoModel(cfg);
@@ -839,8 +841,9 @@ const GIFS_RECACHE_SKIPS = {
  * `turns` — from createTurnRunner() (src/behavior/turn.js), optional: `waitIdle()`, used by
  *   `/nep pause` to wait out a turn already in flight. Absent -> the wait is simply skipped.
  * `memory` — from createMemoryUpdater() (src/memory/update.js), optional: `waitIdle()`, used by
- *   `/nep pause` to wait out a live-analyzer `run()` already in flight (an LLM call can take
- *   30-90s) before the pause flushes and drops the store's caches, and by `/nep memory forget`,
+ *   `/nep pause` to wait out a live-analyzer `run()` or a voice run (`runVoice`, the two-stage
+ *   analyzer's stage B) already in flight (an LLM call can take 30-90s; a voice answer that
+ *   arrives once paused writes nothing) before the pause flushes and drops the store's caches, and by `/nep memory forget`,
  *   `/nep private forget` and `/nep memory wipe` before they delete (the run would re-create what
  *   they removed). Absent -> the wait is skipped.
  * `pending` — `{ clear() }`, optional: clears src/discord/events.js's pending-ping queue on pause.
@@ -1152,7 +1155,7 @@ export function createAdmin({
   /**
    * Sets `paused`/`pausedAt` in state.json FIRST (so a crash or restart
    * mid-pause comes back paused), then waits out a turn already running, AND
-   * a live-analyzer `run()` already in flight (its LLM call can take
+   * a live-analyzer `run()` or voice run already in flight (its LLM call can take
    * 30-90s; `tick()`/`observe()` are already no-ops from the moment `paused`
    * is set, so no NEW run can start -- this only waits out one that started
    * before the pause), a warmup run or portrait refresh, and a mentor run in flight (stopped
@@ -1183,6 +1186,8 @@ export function createAdmin({
 
     // The live analyzer's own in-flight run (if any) must land on disk
     // BEFORE the flush + dropCaches below -- see the header comment above.
+    // Its waitIdle also covers a voice run in flight, which writes nothing
+    // once it sees `paused`.
     if (memory && typeof memory.waitIdle === 'function') {
       await memory.waitIdle();
     }
