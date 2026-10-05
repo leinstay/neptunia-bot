@@ -448,20 +448,39 @@ function roleDeniesContained(dest, source) {
 }
 
 /**
+ * Whether a member allowed by name on the destination provably views the
+ * source: allowed by name there too, or the source is viewable by @everyone,
+ * denies no role and does not deny that member. With a role denied on the
+ * source only the allow by name proves it: the member may hold the denied
+ * role, and a member overwrite beats a role deny on its own channel only.
+ */
+function memberViewsSource(memberId, source) {
+  if (source.memberAllow.has(memberId)) return true;
+  return source.everyone && source.roleDeny.size === 0 && !source.memberDeny.has(memberId);
+}
+
+/**
  * Whether everyone who can view the destination can view the source, so the
  * source's content may enter a turn there. There is no shortcut for a source
- * @everyone can view: a role overwrite on the source may still hide it. The
- * check, in order: a source @everyone cannot view never covers a destination
- * @everyone can view; every role that views the destination must view the
- * source; a role denied on the source must not reach the destination through
- * a combination of roles (`roleDeniesContained`); every member allowed on the
- * destination must be allowed on the source; every member denied on the
- * source must be denied on the destination. Member roles are not resolved
- * (no member intent), so the check holds for any set of roles a member may
- * hold. It may block a safe pair (a role with Administrator views every
- * channel, but nothing in the shape says which role has it); it never covers
- * a pair where some combination of roles and overwrites shows the destination
- * and hides the source. A missing or malformed audience never covers.
+ * @everyone can view: a role overwrite on the source may still hide it, so
+ * every step runs on every pair. The check, in order: a source @everyone
+ * cannot view never covers a destination @everyone can view; every role that
+ * views the destination must view the source; a role denied on the source
+ * must not reach the destination through a combination of roles
+ * (`roleDeniesContained`); every member allowed by name on the destination
+ * must provably view the source (`memberViewsSource`): allowed by name there
+ * too, or proven by the source's @everyone view when the source denies no
+ * role and does not deny that member; every member denied on the source must
+ * be denied on the destination. So a source @everyone can view that denies no
+ * role and no member covers every destination through the full check: each
+ * role's view starts from its own and @everyone's base permissions, so every
+ * role views such a source, and the member step accepts the destination's
+ * allows by name. Member roles are not resolved (no member intent), so the
+ * check holds for any set of roles a member may hold. It may block a safe
+ * pair (a role with Administrator views every channel, but nothing in the
+ * shape says which role has it); it never covers a pair where some
+ * combination of roles and overwrites shows the destination and hides the
+ * source. A missing or malformed audience never covers.
  * @param {Audience|null|undefined} dest
  * @param {Audience|null|undefined} source
  * @returns {boolean}
@@ -471,7 +490,7 @@ export function audienceCovers(dest, source) {
   if (dest.everyone && !source.everyone) return false;
   if (!isSubset(dest.roles, source.roles)) return false;
   if (source.roleDeny.size > 0 && !roleDeniesContained(dest, source)) return false;
-  if (!isSubset(dest.memberAllow, source.memberAllow)) return false;
+  for (const memberId of dest.memberAllow) if (!memberViewsSource(memberId, source)) return false;
   return isSubset(source.memberDeny, dest.memberDeny);
 }
 
