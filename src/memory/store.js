@@ -9,7 +9,7 @@
 //                                            of the channels a turn pulled in
 //   data/guilds/<guildId>/guild.json         how this server talks, in-jokes, what the persona said about itself,
 //                                            what people taught it (`learned`), the persona's own recent lines and
-//                                            the variety pass's latest list and history (src/behavior/variety.js),
+//                                            the variety pass's latest lists and history (src/behavior/variety.js),
 //                                            and when the server notes last changed and were last re-checked
 //   data/guilds/<guildId>/buffer.json        messages observed since the last memory update
 //   data/guilds/<guildId>/users/<userId>.json  one profile per active member
@@ -71,7 +71,7 @@ import { mergeEmojiUsage, normalizeEmojiUsage } from './emoji-usage.js';
 import { emptyGifs, findGif, mergeGifs, normalizeBackfillStamp, normalizeGifs, resetGifCounts } from './gifs.js';
 import { FEELING_CHARS, REASON_CHARS, SELF_CHARS, forgetMember, normalizeQueue } from './voice.js';
 import { emptyRecent, mergeRecent, normalizeRecent, purgeRecentFor } from './recent.js';
-import { appendOwnLine, appendWornHistory, normalizeOwnLines, normalizeWorn, normalizeWornHistory } from '../behavior/variety.js';
+import { appendOwnLine, appendWornHistory, normalizeOwnLines, normalizeWorn, normalizeWornHistory, normalizeWornLong } from '../behavior/variety.js';
 
 function readJson(file, fallback) {
   try {
@@ -182,6 +182,7 @@ function emptyGuild() {
     emojiBackfill: null, // { at, channels, messages } once src/memory/emoji-backfill.js has read the history
     ownLines: [], // the persona's own recent lines in server channels, a ring -- see pushOwnLine
     worn: null, // { at, key, channelId, lines, patterns } -- the variety pass's latest list, see setWorn
+    wornLong: null, // { at, lines, patterns } -- the long variety pass's list, in force until the next one, see setWornLong
     wornHistory: [], // { at, channelId, lines, patterns: [{ shape, count }] } per pass -- see appendWornHistory
     updatedAt: null,
     notesUpdatedAt: null, // when patterns, starters or injokes last changed -- see updateGuild
@@ -300,7 +301,7 @@ function normalizePrivate(priv) {
   if (!Array.isArray(priv.buffer)) priv.buffer = [];
 }
 
-/** Normalize a guild's `learned`/`learnedNextId`/`emojiUsage`/`emojiBackfill`/`ownLines`/`worn`/`wornHistory` fields in place: a
+/** Normalize a guild's `learned`/`learnedNextId`/`emojiUsage`/`emojiBackfill`/`ownLines`/`worn`/`wornLong`/`wornHistory` fields in place: a
  * guild.json written before this list existed loads it as empty, a
  * hand-edited one is validated via src/memory/details.js#normalizeDetails
  * (fresh ids off `learnedNextId` when needed). The two notes stamps
@@ -322,6 +323,7 @@ function normalizeGuild(guild) {
   // The variety pass's fields (src/behavior/variety.js): missing or hand-broken -> empty.
   guild.ownLines = normalizeOwnLines(guild.ownLines);
   guild.worn = normalizeWorn(guild.worn);
+  guild.wornLong = normalizeWornLong(guild.wornLong);
   guild.wornHistory = normalizeWornHistory(guild.wornHistory);
   // Missing or hand-broken -> null: never stamped.
   guild.notesUpdatedAt = isoStampOrNull(guild.notesUpdatedAt);
@@ -1336,8 +1338,8 @@ export function createStore({ dataDir }) {
      * through `applyLearnedOps`, which merges incrementally instead of
      * overwriting wholesale (mirrors `updateUser`); `emojiUsage` likewise
      * only through `recordEmojiUsage`/`clearEmojiUsage`, `emojiBackfill` only
-     * through `setEmojiBackfill`, `ownLines`/`worn`/`wornHistory` only through
-     * `pushOwnLine`/`setWorn`/`appendWornHistory`, and the notes stamps only
+     * through `setEmojiBackfill`, `ownLines`/`worn`/`wornLong`/`wornHistory` only through
+     * `pushOwnLine`/`setWorn`/`setWornLong`/`appendWornHistory`, and the notes stamps only
      * through this write and `markNotesChecked`. `notesUpdatedAt` gets the
      * same stamp when one of the server notes (`patterns`, `starters`,
      * `injokes`) really changes; `self` alone never moves it, and neither do
@@ -1347,7 +1349,7 @@ export function createStore({ dataDir }) {
     updateGuild(guildId, fields) {
       const item = entry(guildFile(guildId), emptyGuild);
       normalizeGuild(item.value);
-      const { learned, learnedNextId, emojiUsage, emojiBackfill, ownLines, worn, wornHistory, notesUpdatedAt, notesCheckedAt, ...safeFields } =
+      const { learned, learnedNextId, emojiUsage, emojiBackfill, ownLines, worn, wornLong, wornHistory, notesUpdatedAt, notesCheckedAt, ...safeFields } =
         fields ?? {};
       if (!changesStored(item.value, safeFields)) return item.value;
       const notes = Object.fromEntries(Object.entries(safeFields).filter(([key]) => NOTES_FIELDS.includes(key)));
@@ -1459,21 +1461,39 @@ export function createStore({ dataDir }) {
     /**
      * Remember one message the persona posted in a server channel: appended
      * to the guild's `ownLines` ring (src/behavior/variety.js#appendOwnLine,
-     * capped from `window`, `variety.window`). A line without text or time
-     * changes nothing. Never stamps `updatedAt` (a counter, like `touchUser`).
+     * capped from `window`, `variety.window`, and `longLines`,
+     * `variety.longLines`). A line without text or time changes nothing.
+     * Never stamps `updatedAt` (a counter, like `touchUser`).
      * @param {string} guildId
      * @param {{ id?: string, ts: number, channelId?: string, text: string, to?: string }} line
      * @param {number} window
+     * @param {number} [longLines]
      * @returns {boolean} whether the line was stored
      */
-    pushOwnLine(guildId, line, window) {
+    pushOwnLine(guildId, line, window, longLines) {
       const item = entry(guildFile(guildId), emptyGuild);
       normalizeGuild(item.value);
       const usable = typeof line?.text === 'string' && line.text.trim() !== '' && Number.isFinite(line?.ts);
       if (!usable) return false;
-      item.value.ownLines = appendOwnLine(item.value.ownLines, line, window);
+      item.value.ownLines = appendOwnLine(item.value.ownLines, line, window, longLines);
       item.dirty = true;
       return true;
+    },
+
+    /**
+     * Store the long variety pass's list (`wornLong`: `{ at, lines,
+     * patterns }`, normalised like on read), replacing the previous one.
+     * Never stamps `updatedAt`.
+     * @param {string} guildId
+     * @param {object} wornLong
+     * @returns {object|null} The stored value.
+     */
+    setWornLong(guildId, wornLong) {
+      const item = entry(guildFile(guildId), emptyGuild);
+      normalizeGuild(item.value);
+      item.value.wornLong = normalizeWornLong(wornLong);
+      item.dirty = true;
+      return item.value.wornLong;
     },
 
     /**
@@ -1995,7 +2015,7 @@ export function createStore({ dataDir }) {
      * member's private layer), `guild.json` -- and with it everything it holds:
      * patterns, starters, in-jokes, self facts, `learned`, `emojiUsage`, the
      * `emojiBackfill` stamp, `ownLines`, the variety pass's `worn` /
-     * `wornHistory` and the notes stamps -- every channel entry (its writers
+     * `wornLong` / `wornHistory` and the notes stamps -- every channel entry (its writers
      * tally included), the live observation buffer, the
      * voice queue (`voice.json`), the recent store (`recent.json`), and
      * lorebook entries whose `source` is `'analyzer'` (every entry, owner

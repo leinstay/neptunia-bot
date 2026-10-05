@@ -2931,12 +2931,12 @@ export function createAdmin({
       .join('\n');
   }
 
-  /** `/nep variety`: the variety pass's latest list with its examples, then its history newest first. */
+  /** `/nep variety`: the variety pass's latest list with its examples, the long pass's list, then the history newest first. */
   function cmdVariety(_args, context) {
     freshenIfPaused();
     const guildId = requireGuildId(context);
     const guild = store.getGuild(guildId);
-    return renderVarietyReport(guild?.worn, guild?.wornHistory, hot.config, Date.now());
+    return renderVarietyReport(guild?.worn, guild?.wornHistory, hot.config, Date.now(), guild?.wornLong);
   }
 
   // ---------------------------------------------------------------------

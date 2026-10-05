@@ -10,19 +10,31 @@
 // stored shapes (the current list in guild memory, a short history of
 // passes). No I/O: the clock is passed in. The wiring lives in
 // src/behavior/variety-pass.js (live turns) and src/mentor/mentor.js (the
-// sandbox). Every model-facing word comes from the prompt file
-// (`prompts.variety`) and `labels.variety`.
+// sandbox). Every model-facing word comes from the prompt files
+// (`prompts.variety`, `prompts['variety-long']`) and `labels.variety`.
+//
+// The short pass sees about an hour of the persona's speech, so a word it
+// leans on once every few hours never shows twice in one window. A long pass,
+// at most once per `variety.longEveryHours`, reads the last `variety.longLines`
+// own lines of the guild's ring and names the habits that span the whole
+// stretch; its list (`wornLong`) stays in force until the next long pass, and
+// a turn receives it ahead of the short pass's list (mergeWorn).
 
 import { createHash } from 'node:crypto';
 import { parseJsonObject } from '../llm/parse.js';
 import { fillPromptTemplate } from './prompt.js';
 import { clampChars, oneLine } from '../memory/clamp.js';
-import { MINUTE_MS } from '../time.js';
+import { HOUR_MS, MINUTE_MS } from '../time.js';
 
 /**
  * Defaults of the `variety` config block (config.json carries the same values).
  * `timeoutMs` is the longest a turn waits for the pass; `requestTimeoutMs` cuts
- * the request itself, which keeps running after a turn stopped waiting.
+ * the request itself, which keeps running after a turn stopped waiting. The
+ * `long*` keys drive the long pass: how many own lines the ring keeps and the
+ * pass reads (`longLines`, 0 = no long pass), how often it may run
+ * (`longEveryHours`), the fewest lines it needs (`longMinLines`), how many
+ * patterns it keeps (`longMaxPatterns`) and its model (`longModel`, null =
+ * the `classifier.text` model).
  */
 export const VARIETY_DEFAULTS = Object.freeze({
   window: 16,
@@ -35,6 +47,11 @@ export const VARIETY_DEFAULTS = Object.freeze({
   timeoutMs: 8000,
   requestTimeoutMs: 30000,
   history: 20,
+  longLines: 300,
+  longEveryHours: 6,
+  longMinLines: 60,
+  longMaxPatterns: 3,
+  longModel: null,
 });
 
 // Fixed by the prompt contract, not by config: an example is a short verbatim
@@ -58,7 +75,8 @@ function intAtLeast(value, fallback, min) {
  * @param {object} config  The live config.
  * @returns {{ window: number, recentMinutes: number, minLines: number, contextChars: number,
  *   maxPatterns: number, shapeChars: number, maxOutputTokens: number, timeoutMs: number,
- *   requestTimeoutMs: number, history: number }}
+ *   requestTimeoutMs: number, history: number, longLines: number, longEveryHours: number,
+ *   longMinLines: number, longMaxPatterns: number, longModel: string|null }}
  */
 export function varietySettings(config) {
   const v = config?.variety ?? {};
@@ -74,6 +92,11 @@ export function varietySettings(config) {
     timeoutMs: intAtLeast(v.timeoutMs, d.timeoutMs, 1),
     requestTimeoutMs: intAtLeast(v.requestTimeoutMs, d.requestTimeoutMs, 1),
     history: intAtLeast(v.history, d.history, 0),
+    longLines: intAtLeast(v.longLines, d.longLines, 0),
+    longEveryHours: Number.isFinite(v.longEveryHours) && v.longEveryHours > 0 ? v.longEveryHours : d.longEveryHours,
+    longMinLines: intAtLeast(v.longMinLines, d.longMinLines, 1),
+    longMaxPatterns: intAtLeast(v.longMaxPatterns, d.longMaxPatterns, 0),
+    longModel: typeof v.longModel === 'string' && v.longModel.trim() ? v.longModel.trim() : d.longModel,
   };
 }
 
@@ -129,20 +152,35 @@ export function normalizeOwnLines(value) {
 }
 
 /**
- * The ring after one more own line: appended, the oldest dropped past
- * `RING_WINDOWS` windows (`window` from `variety.window`). A line without
- * text or time leaves the ring as it was.
+ * The ring after one more own line: appended, the oldest dropped past the
+ * larger of `RING_WINDOWS` windows (`window` from `variety.window`, what the
+ * short pass needs) and `longLines` (`variety.longLines`, what the long pass
+ * reads; missing or 0 = the short pass's alone). Only the newest
+ * `RING_WINDOWS` windows keep what a line answered (`to`, another member's
+ * words): an older line keeps its own text, time and channel only, so the
+ * longer ring holds no more about other members than the short one did. A
+ * line without text or time leaves the ring as it was.
  * @param {unknown} lines  The stored ring.
  * @param {object} line    `{ id, ts, channelId, text, to? }`.
  * @param {number} window  `variety.window`.
+ * @param {number} [longLines]  `variety.longLines`.
  * @returns {object[]}
  */
-export function appendOwnLine(lines, line, window) {
+export function appendOwnLine(lines, line, window, longLines = 0) {
   const ring = normalizeOwnLines(lines);
   const entry = normalizeOwnLine(line);
   if (!entry) return ring;
-  const cap = Math.max(1, Math.floor(window) || 1) * RING_WINDOWS;
-  return [...ring, entry].slice(-cap);
+  const short = Math.max(1, Math.floor(window) || 1) * RING_WINDOWS;
+  const cap = Math.max(short, Number.isFinite(longLines) && longLines > 0 ? Math.floor(longLines) : 0);
+  const kept = [...ring, entry].slice(-cap);
+  const bare = kept.length - short;
+  return kept.map((l, i) => (i < bare && l.to !== undefined ? withoutAnswered(l) : l));
+}
+
+/** An own line without what it answered. */
+function withoutAnswered(line) {
+  const { to: _to, ...rest } = line;
+  return rest;
 }
 
 /** The persona's own line of a normalized message, with what it replied to (when that is in `history`). */
@@ -204,6 +242,41 @@ export function selectOwnLines({ history = [], ring = [], channelId = null, now,
 }
 
 /**
+ * The persona's own lines the long pass reads: the newest `longLines` of the
+ * ring (every channel, no age limit), oldest first, each without what it
+ * answered -- the long look is about the persona's own words across the
+ * stretch, and the request stays the same size whatever the ring kept.
+ * @param {unknown} ring  The stored ring (guild memory `ownLines`).
+ * @param {number} longLines  `variety.longLines`.
+ * @returns {{ id: string|null, ts: number, channelId: string|null, text: string }[]}
+ */
+export function selectLongLines(ring, longLines) {
+  const cap = Math.max(0, Math.floor(longLines) || 0);
+  if (cap === 0) return [];
+  return normalizeOwnLines(ring)
+    .map((line, i) => ({ line, i }))
+    .sort((a, b) => a.line.ts - b.line.ts || a.i - b.i)
+    .slice(-cap)
+    .map(({ line }) => withoutAnswered(line));
+}
+
+/**
+ * Whether a long pass is due at `now`: the long pass on (`variety.longLines`
+ * above 0) and at least `variety.longEveryHours` since the later of the
+ * stored long list's time (`wornLong.at`) and the last long pass started
+ * (`triedAt`, a failure included, so a failing pass is not asked again after
+ * every post). Never run before = due.
+ * @param {{ wornLong?: unknown, triedAt?: number|null, now: number, settings: object }} input
+ * @returns {boolean}
+ */
+export function longPassDue({ wornLong, triedAt = null, now, settings }) {
+  if (!(settings?.longLines > 0)) return false;
+  const stored = normalizeWornLong(wornLong)?.at;
+  const last = Math.max(Number.isFinite(stored) ? stored : -Infinity, Number.isFinite(triedAt) ? triedAt : -Infinity);
+  return !Number.isFinite(last) || now - last >= settings.longEveryHours * HOUR_MS;
+}
+
+/**
  * The cache key of a set of lines: the first 16 hex digits of the SHA-1 of
  * their ids in order (a line without an id counts by its time and text).
  * @param {{ id?: string|null, ts?: number, text?: string }[]} lines
@@ -222,12 +295,14 @@ export function linesKey(lines) {
  * numbered `#1..`, each on one line, followed, when it answered something, by
  * ` (to: <that message clipped to variety.contextChars>)` (0 leaves it out).
  * `texts` are the persona's lines exactly as sent (what an example must occur
- * in); `count` how many there are.
- * @param {{ prompt: string, selfName: string, lines: object[], config: object }} input
+ * in); `count` how many there are. The long pass sends its own prompt
+ * (`prompts['variety-long']`) with the same block, and its `maxPatterns`
+ * (`variety.longMaxPatterns`) in place of the short pass's.
+ * @param {{ prompt: string, selfName: string, lines: object[], config: object, maxPatterns?: number }} input
  * @returns {{ messages: { role: string, content: string }[], texts: string[], count: number }}
  */
-export function buildVarietyRequest({ prompt, selfName, lines, config }) {
-  const settings = varietySettings(config);
+export function buildVarietyRequest({ prompt, selfName, lines, config, maxPatterns }) {
+  const settings = withMaxPatterns(varietySettings(config), maxPatterns);
   const list = Array.isArray(lines) ? lines : [];
   const texts = list.map((line) => oneLine(line.text));
   const rows = list.map((line, i) => {
@@ -243,6 +318,11 @@ export function buildVarietyRequest({ prompt, selfName, lines, config }) {
     texts,
     count: list.length,
   };
+}
+
+/** `settings` with `maxPatterns` replaced when an integer of at least 0 is given. */
+function withMaxPatterns(settings, maxPatterns) {
+  return Number.isInteger(maxPatterns) && maxPatterns >= 0 ? { ...settings, maxPatterns } : settings;
 }
 
 // ---- the answer -------------------------------------------------------------
@@ -292,9 +372,10 @@ function validPattern(item, haystacks, settings) {
  * @param {string} raw    The model's answer.
  * @param {string[]} texts  The persona's lines as sent (`buildVarietyRequest().texts`).
  * @param {object} config   The live config.
+ * @param {{ maxPatterns?: number }} [options]  The long pass's cap (`variety.longMaxPatterns`) in place of `variety.maxPatterns`.
  * @returns {{ ok: boolean, patterns: { shape: string, examples: string[], count: number }[], dropped: number }}
  */
-export function parseVariety(raw, texts, config) {
+export function parseVariety(raw, texts, config, { maxPatterns } = {}) {
   let parsed;
   try {
     parsed = parseJsonObject(raw);
@@ -302,7 +383,7 @@ export function parseVariety(raw, texts, config) {
     return { ok: false, patterns: [], dropped: 0 };
   }
   if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.patterns)) return { ok: false, patterns: [], dropped: 0 };
-  const settings = varietySettings(config);
+  const settings = withMaxPatterns(varietySettings(config), maxPatterns);
   const haystacks = (Array.isArray(texts) ? texts : []).map((text) => oneLine(text).toLowerCase());
   const patterns = [];
   for (const item of parsed.patterns) {
@@ -342,6 +423,51 @@ export function normalizeWorn(value) {
     lines: Number.isInteger(value.lines) && value.lines >= 0 ? value.lines : 0,
     patterns: normalizePatterns(value.patterns),
   };
+}
+
+/**
+ * The stored list of the long pass (guild memory `wornLong`) made safe to
+ * read: `{ at, lines, patterns }`, or null when nothing usable is stored.
+ * @param {unknown} value
+ * @returns {{ at: number|null, lines: number, patterns: object[] }|null}
+ */
+export function normalizeWornLong(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  return {
+    at: finiteOrNull(value.at),
+    lines: Number.isInteger(value.lines) && value.lines >= 0 ? value.lines : 0,
+    patterns: normalizePatterns(value.patterns),
+  };
+}
+
+/** What makes two patterns the same device when lists are joined: the shape, whitespace collapsed, case ignored. */
+function shapeKey(pattern) {
+  return oneLine(pattern.shape).toLowerCase();
+}
+
+/**
+ * What a turn receives as `worn`: the long pass's patterns first, then the
+ * short pass's, a pattern whose shape (whitespace collapsed, case ignored)
+ * is already in the list left out, at most `variety.maxPatterns` +
+ * `variety.longMaxPatterns` (read now). Either list may be missing.
+ * @param {unknown} long   The long pass's patterns (`wornLong.patterns`).
+ * @param {unknown} short  The short pass's patterns for this turn.
+ * @param {object} config  The live config.
+ * @returns {{ shape: string, examples: string[], count: number }[]}
+ */
+export function mergeWorn(long, short, config) {
+  const settings = varietySettings(config);
+  const cap = settings.maxPatterns + settings.longMaxPatterns;
+  const out = [];
+  const seen = new Set();
+  for (const pattern of [...normalizePatterns(long), ...normalizePatterns(short)]) {
+    if (out.length >= cap) break;
+    const key = shapeKey(pattern);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(pattern);
+  }
+  return out;
 }
 
 /**
@@ -385,9 +511,11 @@ export function appendWornHistory(history, pass, max) {
 
 /**
  * The `<worn>` block's body: `labels.variety.intro`, then one line per pattern,
- * `- <shape> ("<example>", "<example>")`, at most `variety.maxPatterns` (read
- * now). '' when there is no pattern, the switch is off, or the labels have
- * no `variety.intro` (an older labels.json renders nothing).
+ * `- <shape> ("<example>", "<example>")`, at most `variety.maxPatterns` +
+ * `variety.longMaxPatterns` (read now; the long pass's list and the short
+ * one's, joined by mergeWorn). '' when there is no pattern, the switch is
+ * off, or the labels have no `variety.intro` (an older labels.json renders
+ * nothing).
  * @param {{ shape: string, examples: string[] }[]|null|undefined} patterns
  * @param {object} labels
  * @param {object} config  The live config.
@@ -396,7 +524,8 @@ export function appendWornHistory(history, pass, max) {
 export function renderWorn(patterns, labels, config) {
   const intro = labels?.variety?.intro;
   if (!varietyOn(config) || typeof intro !== 'string' || !intro.trim()) return '';
-  const list = normalizePatterns(patterns).slice(0, varietySettings(config).maxPatterns);
+  const settings = varietySettings(config);
+  const list = normalizePatterns(patterns).slice(0, settings.maxPatterns + settings.longMaxPatterns);
   if (list.length === 0) return '';
   const lines = list.map((p) => `- ${p.shape} (${p.examples.map((e) => `"${e}"`).join(', ')})`);
   return [intro, ...lines].join('\n');
@@ -435,22 +564,31 @@ export function varietyStatusLine(worn, config, now) {
 }
 
 /**
- * `/nep variety`: the latest list with its examples, then the history of
- * passes newest first, one line each (time UTC, lines, shapes with counts).
- * Operator-facing English.
+ * `/nep variety`: the latest list with its examples, the long pass's list
+ * the same way (when one ran), then the history of passes newest first, one
+ * line each (time UTC, lines, shapes with counts). Operator-facing English.
  * @param {unknown} worn     Guild memory `worn`.
  * @param {unknown} history  Guild memory `wornHistory`.
  * @param {object} config
  * @param {number} now
+ * @param {unknown} [wornLong]  Guild memory `wornLong`.
  * @returns {string}
  */
-export function renderVarietyReport(worn, history, config, now) {
+export function renderVarietyReport(worn, history, config, now, wornLong = null) {
   const lines = [varietyStatusLine(worn, config, now)];
+  const listed = (patterns) => {
+    if (patterns.length === 0) lines.push('  (nothing named)');
+    for (const p of patterns) lines.push(`  - ${p.shape} x${p.count}: ${p.examples.map((e) => `"${e}"`).join(', ')}`);
+  };
   const current = normalizeWorn(worn);
   if (current?.at) {
     lines.push(`latest (${minuteUtc(current.at)} UTC):`);
-    if (current.patterns.length === 0) lines.push('  (nothing named)');
-    for (const p of current.patterns) lines.push(`  - ${p.shape} x${p.count}: ${p.examples.map((e) => `"${e}"`).join(', ')}`);
+    listed(current.patterns);
+  }
+  const long = normalizeWornLong(wornLong);
+  if (long?.at) {
+    lines.push(`long (${minuteUtc(long.at)} UTC, ${long.lines} lines):`);
+    listed(long.patterns);
   }
   const passes = normalizeWornHistory(history).reverse();
   lines.push(passes.length ? `history (${passes.length}, newest first):` : 'history: none');

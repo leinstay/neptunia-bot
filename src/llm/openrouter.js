@@ -123,7 +123,7 @@ const HELPER_TIMEOUT_MS_FALLBACK = 30000;
  * @param {string} [request.role]             The subprocess, e.g. `classifier.text` (see `complete`).
  * @param {number} [request.maxOutputTokens]  Undefined leaves `llm.maxOutputTokens` in charge.
  * @param {string} [request.purpose]          What the request is for, a kebab-case code for the
- *   `llm: usage` line (`address`, `variety`, `rewatch`, `lookup`, `read-link`, `search-summary`, `route-channel`,
+ *   `llm: usage` line (`address`, `variety`, `rewatch`, `lookup`, `read-link`, `search-summary`, `route-channel`, `variety-long`,
  *   `describe`); never sent.
  * @param {AbortSignal} [request.signal]      The caller's own abort signal, if it has one.
  * @param {number} [request.timeoutMs]        A helper with a clock of its own; else

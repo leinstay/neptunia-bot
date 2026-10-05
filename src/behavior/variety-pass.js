@@ -16,8 +16,19 @@
 // said in private reaches the owner's view or another conversation, and it
 // never displaces the guild's latest pass. Nothing lands while paused or with
 // `features.variety` off. The persona's own lines of other channels come from
-// a small ring in guild memory (`ownLines`), written here whenever a turn
-// posts a message in a server channel. Logs carry counts and codes, never text.
+// a ring in guild memory (`ownLines`), written here whenever a turn posts a
+// message in a server channel.
+//
+// The long pass: after a post in a server channel, at most once per
+// `variety.longEveryHours` and with at least `variety.longMinLines` own lines
+// in the ring, one request over the last `variety.longLines` of them (its own
+// prompt, `prompts['variety-long']`; none = no long pass) names the habits
+// that span the whole stretch. Its list (`wornLong`) replaces the previous one
+// and stays in force until the next long pass; a failure keeps the previous
+// one. Every turn's `worn` is that list first, then the short pass's
+// (src/behavior/variety.js#mergeWorn). It never runs before a reply, never
+// holds a turn and never runs for a private chat. Logs carry counts and
+// codes, never text.
 
 import { classifierTextModel } from './mention.js';
 import { isLimitNotice } from './limits.js';
@@ -25,8 +36,12 @@ import { helperRequestOptions } from '../llm/openrouter.js';
 import {
   buildVarietyRequest,
   linesKey,
+  longPassDue,
+  mergeWorn,
   normalizeWorn,
+  normalizeWornLong,
   parseVariety,
+  selectLongLines,
   selectOwnLines,
   varietyAheadOn,
   varietyOn,
@@ -43,7 +58,7 @@ const LATE = Symbol('late');
 /**
  * @param {object} deps
  * @param {{ config: object, prompts: object }} deps.hot
- * @param {object} deps.store   src/memory/store.js: `getGuild`, `pushOwnLine`, `setWorn`, `appendWornHistory`, `state`.
+ * @param {object} deps.store   src/memory/store.js: `getGuild`, `pushOwnLine`, `setWorn`, `setWornLong`, `appendWornHistory`, `state`.
  * @param {{ complete: Function }} deps.llm
  * @param {() => number} [deps.now]
  * @returns {{ record: (guildId: string|null, line: object) => boolean,
@@ -58,6 +73,10 @@ export function createVarietyPass({ hot, store, llm, now = Date.now }) {
   // Every started pass takes the next number: a landed pass never replaces one started later.
   let counter = 0;
   let warnedNoPrompt = false;
+  // guildId -> the long pass in flight (one at a time per guild)
+  const longInflight = new Map();
+  // guildId -> when the last long pass started, a failed one included (longPassDue)
+  const longTriedAt = new Map();
 
   /** The cache slot of a pass: the guild's own, or a private chat's apart from it. */
   function cacheKeyFor(guildId, channelId, privateChat) {
@@ -71,8 +90,9 @@ export function createVarietyPass({ hot, store, llm, now = Date.now }) {
 
   /**
    * Remember one message the persona posted in a server channel (the ring of
-   * own lines, capped from `variety.window`). Nothing for a private chat (no
-   * `guildId`), with `features.variety` off or while paused. Never throws.
+   * own lines, capped from `variety.window` and `variety.longLines`). Nothing
+   * for a private chat (no `guildId`), with `features.variety` off or while
+   * paused. Never throws.
    * @param {string|null|undefined} guildId
    * @param {{ id?: string, ts: number, channelId: string, text: string, to?: string }} line
    * @returns {boolean} whether the line was stored
@@ -82,7 +102,8 @@ export function createVarietyPass({ hot, store, llm, now = Date.now }) {
       if (!guildId || store.state?.data?.paused) return false;
       const config = hot.config;
       if (!varietyOn(config) || typeof store.pushOwnLine !== 'function') return false;
-      return store.pushOwnLine(guildId, line, varietySettings(config).window);
+      const settings = varietySettings(config);
+      return store.pushOwnLine(guildId, line, settings.window, settings.longLines);
     } catch (err) {
       log.warn('variety: own line not stored', { error: err });
       return false;
@@ -108,9 +129,10 @@ export function createVarietyPass({ hot, store, llm, now = Date.now }) {
   /**
    * One request on `request`, cut at `variety.requestTimeoutMs` (each attempt
    * and the whole, retries included); resolves the completion or throws (a cut
-   * says `timedOut`).
+   * says `timedOut`). The short pass asks the `classifier.text` model under
+   * purpose `variety`; the long pass passes its own model and purpose.
    */
-  async function ask(request, config, settings) {
+  async function ask(request, config, settings, { model = classifierTextModel(config), purpose = 'variety' } = {}) {
     const controller = new AbortController();
     // Cleared as soon as the request settles. Unref'd: it only bounds a request
     // and must never keep a process alive on its own (the bot's client does).
@@ -118,12 +140,12 @@ export function createVarietyPass({ hot, store, llm, now = Date.now }) {
     timer.unref?.();
     try {
       return await llm.complete(request.messages, {
-        model: classifierTextModel(config),
+        model,
         // The shared helper fields; the pass keeps its own clock (variety.requestTimeoutMs) and abort.
         ...helperRequestOptions(config, {
           role: 'classifier.text',
           maxOutputTokens: settings.maxOutputTokens,
-          purpose: 'variety',
+          purpose,
           timeoutMs: settings.requestTimeoutMs,
           signal: controller.signal,
           long: true,
@@ -287,16 +309,37 @@ export function createVarietyPass({ hot, store, llm, now = Date.now }) {
    * pass failed or answered something that is not the expected JSON, null --
    * a joined pass that failed is not asked again for this turn. A request
    * outliving the wait keeps running to `variety.requestTimeoutMs` and lands
-   * for the next turn. Never rejects.
+   * for the next turn. The guild's long list (`wornLong`, from the last long
+   * pass) comes first, ahead of what the short pass named, joined by
+   * src/behavior/variety.js#mergeWorn; it stays even when the short pass is
+   * not due, late or failed. Never rejects.
    * @param {{ guildId: string, channelId: string, history: object[], selfName: string, privateChat?: boolean }} input
    * @returns {Promise<{ shape: string, examples: string[], count: number }[]|null>}
    */
   async function forTurn(input) {
+    let long = [];
+    try {
+      if (varietyOn(hot.config) && input?.guildId) long = normalizeWornLong(store.getGuild(input.guildId)?.wornLong)?.patterns ?? [];
+    } catch (err) {
+      log.warn('variety: failed', { channel: input?.channelId ?? null, cause: 'long', error: err });
+    }
+    const short = await shortForTurn(input, long.length);
+    if (long.length === 0) return short;
+    try {
+      return mergeWorn(long, short, hot.config);
+    } catch (err) {
+      log.warn('variety: failed', { channel: input?.channelId ?? null, cause: 'turn', error: err });
+      return short;
+    }
+  }
+
+  /** The short pass's patterns for one turn (see forTurn); `long` is how many long patterns join them, for the log. */
+  async function shortForTurn(input, long) {
     const calledAt = now();
     try {
       const p = plan(input, 'turn');
       if (!p) return null;
-      const base = { channel: p.channelId, lines: p.lines.length };
+      const base = { channel: p.channelId, lines: p.lines.length, long };
       const previous = latest(p.guildId, p.slot);
       if (previous?.key === p.key) {
         log.info('variety: turn', { ...base, source: 'cache', cached: true, kept: previous.patterns.length, waitedMs: now() - calledAt });
@@ -328,12 +371,20 @@ export function createVarietyPass({ hot, store, llm, now = Date.now }) {
    * next turn will fetch it. Nothing with `features.variety` or
    * `features.varietyPrecompute` off, while paused, when no pass is due (see
    * `plan`), or when the same lines are already answered or in flight.
-   * Resolves once the pass is over (for tests; callers do not wait); never
-   * rejects.
+   * The long pass starts here too when it is due (see `planLong`; it needs
+   * `features.variety`, not `features.varietyPrecompute`). Resolves once
+   * both passes are over (for tests; callers do not wait); never rejects.
    * @param {{ guildId: string, channelId: string, history: object[], selfName: string, privateChat?: boolean }} input
    * @returns {Promise<void>}
    */
   async function ahead(input) {
+    const long = startLong(input);
+    await aheadShort(input);
+    await long;
+  }
+
+  /** The short pass ahead (see `ahead`). Never rejects. */
+  async function aheadShort(input) {
     try {
       const config = hot.config;
       if (!varietyOn(config) || !varietyAheadOn(config) || store.state?.data?.paused) return;
@@ -343,6 +394,99 @@ export function createVarietyPass({ hot, store, llm, now = Date.now }) {
       await start(p, 'ahead').promise;
     } catch (err) {
       log.warn('variety: failed', { channel: input?.channelId ?? null, cause: 'ahead', error: err });
+    }
+  }
+
+  // ---- the long pass ------------------------------------------------------
+
+  /**
+   * What a long pass after a post would look at, or null when none is due:
+   * a private chat or no guild, `features.variety` off, paused, no
+   * `prompts['variety-long']`, a long pass of this guild in flight, not yet
+   * `variety.longEveryHours` since the last one (src/behavior/variety.js#longPassDue;
+   * `variety.longLines` 0 = never), or fewer than `variety.longMinLines` own
+   * lines in the ring (the newest `variety.longLines`, a limit notice never
+   * one of them). Everything read now.
+   */
+  function planLong({ guildId, selfName, privateChat = false } = {}) {
+    if (!guildId || privateChat) return null;
+    const config = hot.config;
+    if (!varietyOn(config) || store.state?.data?.paused) return null;
+    const prompt = hot.prompts?.['variety-long'];
+    if (typeof prompt !== 'string' || !prompt.trim()) return null;
+    if (longInflight.has(guildId)) return null;
+    const settings = varietySettings(config);
+    const guild = store.getGuild(guildId);
+    if (!longPassDue({ wornLong: guild?.wornLong, triedAt: longTriedAt.get(guildId) ?? null, now: now(), settings })) return null;
+    const labels = hot.prompts?.labels;
+    const ring = (Array.isArray(guild?.ownLines) ? guild.ownLines : []).filter((line) => !isLimitNotice(labels, line?.text));
+    const lines = selectLongLines(ring, settings.longLines);
+    if (lines.length < settings.longMinLines) return null;
+    return { config, settings, prompt, lines, guildId, selfName };
+  }
+
+  /**
+   * One long pass for plan `p` to its end: asked on `variety.longModel` (else
+   * the `classifier.text` model) under purpose `variety-long`, validated
+   * against `variety.longMaxPatterns`, and kept as the guild's `wornLong`
+   * (replacing the previous list) unless paused or switched off by then. A
+   * failure or an answer that is not the expected JSON keeps the previous
+   * list. Never rejects.
+   */
+  async function runLong(p) {
+    const startedAt = now();
+    longTriedAt.set(p.guildId, startedAt);
+    try {
+      const maxPatterns = p.settings.longMaxPatterns;
+      const request = buildVarietyRequest({ prompt: p.prompt, selfName: p.selfName, lines: p.lines, config: p.config, maxPatterns });
+      let completion;
+      try {
+        completion = await ask(request, p.config, p.settings, {
+          model: p.settings.longModel ?? classifierTextModel(p.config),
+          purpose: 'variety-long',
+        });
+      } catch (err) {
+        log.warn('variety: pass failed', {
+          channel: null,
+          cause: 'long',
+          lines: p.lines.length,
+          reason: err?.timedOut ? 'timeout' : 'error',
+          status: err?.statusCode ?? null,
+          name: err?.name ?? null,
+        });
+        return;
+      }
+      const parsed = parseVariety(completion?.text, request.texts, p.config, { maxPatterns });
+      const stored = parsed.ok && mayStore();
+      if (stored) store.setWornLong(p.guildId, { at: now(), lines: p.lines.length, patterns: parsed.patterns });
+      log[parsed.ok ? 'info' : 'warn']('variety: long', {
+        lines: p.lines.length,
+        parse: parsed.ok ? 'ok' : 'error',
+        kept: parsed.patterns.length,
+        dropped: parsed.dropped,
+        ms: now() - startedAt,
+        stored,
+      });
+    } catch (err) {
+      log.warn('variety: failed', { channel: null, cause: 'long', error: err });
+    }
+  }
+
+  /**
+   * Start the long pass after a post when one is due (see `planLong`),
+   * without waiting for it; at most one per guild in flight. Resolves once
+   * it is over (or at once when none started); never rejects.
+   */
+  function startLong(input) {
+    try {
+      const p = planLong(input);
+      if (!p) return Promise.resolve();
+      const promise = runLong(p).finally(() => longInflight.delete(p.guildId));
+      longInflight.set(p.guildId, promise);
+      return promise;
+    } catch (err) {
+      log.warn('variety: failed', { channel: input?.channelId ?? null, cause: 'long', error: err });
+      return Promise.resolve();
     }
   }
 

@@ -20,7 +20,7 @@ import { deepMerge, isPlainObject } from '../src/config.js';
 import { DAY_MS, HOUR_MS, MINUTE_MS, utcDay, zonedDay } from '../src/time.js';
 import { buildDrawPrompt, buildRequest, hasRequiredLabels } from '../src/behavior/prompt.js';
 import { fill, formatDate } from '../src/discord/format.js';
-import { buildVarietyRequest, selectOwnLines } from '../src/behavior/variety.js';
+import { buildVarietyRequest, selectLongLines, selectOwnLines } from '../src/behavior/variety.js';
 import { createTurnRunner } from '../src/behavior/turn.js';
 import { createRecall } from '../src/behavior/recall-run.js';
 import { createChannelRouter } from '../src/behavior/route-channel.js';
@@ -126,6 +126,7 @@ const LOADS = {
   memoryDecide: ['memory-decide', ...CHARACTER],
   voice: ['memory-voice', ...CHARACTER],
   variety: ['variety'],
+  varietyLong: ['variety-long'],
   warmupChannel: ['channel'],
   warmupPerson: ['profile', ...CHARACTER],
   warmupServer: ['server', ...CHARACTER],
@@ -761,6 +762,22 @@ test('buildVarietyRequest: variety.md is filled', async () => {
   assert.ok(lines.length > 0);
   const request = buildVarietyRequest({ prompt: SHIPPED.prompts.variety, selfName: SELF_NAME, lines, config });
   assertFilled(request.messages, { files: LOADS.variety, blocks: ['lines'] }, 'variety');
+});
+
+test('buildVarietyRequest: variety-long.md is filled (the long pass: its lines from the ring, its own maxPatterns)', async () => {
+  const history = await generalHistory();
+  const config = shippedConfig();
+  const ring = history.filter((m) => m.self).map((m) => ({ id: m.id, ts: m.ts, channelId: m.channelId, text: m.content }));
+  const lines = selectLongLines(ring, config.variety.longLines);
+  assert.ok(lines.length > 0);
+  const request = buildVarietyRequest({
+    prompt: SHIPPED.prompts['variety-long'],
+    selfName: SELF_NAME,
+    lines,
+    config,
+    maxPatterns: config.variety.longMaxPatterns,
+  });
+  assertFilled(request.messages, { files: LOADS.varietyLong, blocks: ['lines'] }, 'variety-long');
 });
 
 // ---- the warm-up and the portrait refresh ---------------------------------------------------

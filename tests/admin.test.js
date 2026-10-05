@@ -3877,3 +3877,20 @@ test('run: memory.recent works while paused, writes nothing and is open to a gra
   assert.equal(admin.isAllowed('memory.recent', { userId: '7', roleIds: ['123'] }), true);
   assert.equal(admin.isAllowed('memory.recent', { userId: '7', roleIds: [] }), false);
 });
+
+test("run: variety shows the long pass's list under its own mark beside the latest one", async () => {
+  const rootDir = makeRoot();
+  const { admin, store } = makeAdmin(rootDir);
+  const at = Date.now() - 60_000;
+  store.guilds.set('g1', {
+    worn: { at, key: 'k', lines: 3, patterns: [{ shape: 'short device', examples: ['ένα'], count: 2 }] },
+    wornLong: { at, lines: 70, patterns: [{ shape: 'long habit', examples: ['δύο'], count: 6 }] },
+    wornHistory: [],
+  });
+  const lines = (await admin.run('variety', {}, {})).split('\n');
+  const long = lines.findIndex((line) => line.startsWith('long (') && line.endsWith(' UTC, 70 lines):'));
+  assert.ok(long > lines.findIndex((line) => line.startsWith('latest (')), lines.join('\n'));
+  assert.equal(lines[long + 1], '  - long habit x6: "δύο"');
+  store.guilds.set('g1', { worn: null, wornHistory: [] });
+  assert.ok(!(await admin.run('variety', {}, {})).includes('long ('), 'no long pass yet: no long section');
+});
