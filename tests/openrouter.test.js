@@ -19,6 +19,9 @@ import {
   dailyCapOf,
   VIDEO_TOKENS_PER_SECOND_FALLBACK,
   providerLimitOf,
+  cacheTtlFor,
+  withCacheMarker,
+  fullPromptTokens,
 } from '../src/llm/openrouter.js';
 import { withCapturedLogs } from './fixtures/capture-logs.js';
 
@@ -1175,6 +1178,7 @@ const NO_USAGE = {
   reasoningTokens: null,
   cachedTokens: null,
   cacheWriteTokens: null,
+  cache: 'off',
   cost: null,
   upstreamCost: null,
   byok: null,
@@ -1217,6 +1221,7 @@ test('complete: an answered request logs exactly one llm: usage line filled from
     reasoningTokens: 30,
     cachedTokens: 1000,
     cacheWriteTokens: 150,
+    cache: 'off', // no marker was sent: the counts stay, the code says the bot did not ask for caching
     cost: 0.0042,
     upstreamCost: 0.0038,
     byok: true,
@@ -1520,6 +1525,496 @@ test('complete: without any route, a role changes nothing (llm.provider, else no
   await llm.complete(msgs, { role: 'talk' });
   assert.deepEqual(bodies[0].provider, VERTEX);
   assert.equal('provider' in bodies[1], false);
+});
+
+// --- prompt caching: the marker on the system message, the full prompt count, the usage code ---
+
+/** config.json's `llm.cache` (no `models`: the code's fallback, `['anthropic/']`, applies). */
+const CACHE = { ttl: '1h', roles: ['talk'], promptIncludesCached: true };
+
+/** A model id of the family `llm.cache.models` admits by default. */
+const LISTED_MODEL = 'anthropic/claude-test-4';
+/** A model id outside it. */
+const UNLISTED_MODEL = 'openai/gpt-test-5';
+
+/**
+ * A config with `features.promptCache` (on by default here), `llm.cache` as given and a talk
+ * model of the listed family (`LISTED_MODEL`) unless `model` says otherwise.
+ */
+function cachingConfig({ promptCache = true, cache = CACHE, ...llm } = {}) {
+  return { ...baseConfig({ maxRequestTokens: 50000, model: LISTED_MODEL, ...llm, cache }), features: { promptCache } };
+}
+
+const SYSTEM_TEXT = 'Tu es la persona du salon : réponds brièvement, sans en faire trop.';
+const USER_TEXT = '<chat>\nΚαλημέρα σε όλους\n</chat>';
+const MARK_1H = { type: 'ephemeral', ttl: '1h' };
+const MARK_5M = { type: 'ephemeral' };
+
+/** A reply-shaped request: one string system message, one string user message (fresh each call). */
+function replyMessages() {
+  return [
+    { role: 'system', content: SYSTEM_TEXT },
+    { role: 'user', content: USER_TEXT },
+  ];
+}
+
+/** The parts of `messages` that carry a `cache_control`. */
+function markedParts(messages) {
+  return messages.flatMap((m) => (Array.isArray(m.content) ? m.content : [])).filter((p) => 'cache_control' in p);
+}
+
+/**
+ * The real client over a fetch that keeps every sent body as the exact string, answering with
+ * `usage` (an object, or a function of the 0-based call number).
+ */
+function cachingLlm(getConfig, { usage = { prompt_tokens: 42 }, calibrator = fakeCalibrator() } = {}) {
+  const sent = [];
+  const llm = createLlm({
+    apiKey: 'k',
+    getConfig,
+    calibrator,
+    state: fakeState(),
+    fetchImpl: async (url, init) => {
+      sent.push(init.body);
+      const answer = typeof usage === 'function' ? usage(sent.length - 1) : usage;
+      return okResponse('hi', answer);
+    },
+  });
+  return { llm, sent, bodies: () => sent.map((s) => JSON.parse(s)) };
+}
+
+test('cacheTtlFor: no marker unless features.promptCache is exactly true', () => {
+  assert.equal(cacheTtlFor(cachingConfig(), 'talk', LISTED_MODEL), '1h');
+  for (const promptCache of [false, undefined, null, 'true', 1, {}]) {
+    assert.equal(cacheTtlFor({ ...cachingConfig(), features: { promptCache } }, 'talk', LISTED_MODEL), null, String(promptCache));
+  }
+  for (const config of [undefined, null, {}, { features: {} }, baseConfig({ cache: CACHE })]) {
+    assert.equal(cacheTtlFor(config, 'talk', LISTED_MODEL), null, JSON.stringify(config));
+  }
+});
+
+test('cacheTtlFor: a role outside llm.cache.roles gets none; a non-array roles reads as talk only', () => {
+  for (const role of ['analyzer', 'classifier.text', 'mentor', undefined, null, 7]) {
+    assert.equal(cacheTtlFor(cachingConfig(), role, LISTED_MODEL), null, String(role));
+  }
+  assert.equal(cacheTtlFor(cachingConfig({ cache: { ...CACHE, roles: ['talk', 'analyzer'] } }), 'analyzer', LISTED_MODEL), '1h');
+  assert.equal(cacheTtlFor(cachingConfig({ cache: { ...CACHE, roles: [] } }), 'talk', LISTED_MODEL), null, 'an empty list marks nothing');
+  for (const roles of [undefined, null, 'analyzer', { analyzer: true }]) {
+    const config = cachingConfig({ cache: { ...CACHE, roles } });
+    assert.equal(cacheTtlFor(config, 'talk', LISTED_MODEL), '1h', JSON.stringify(roles));
+    assert.equal(cacheTtlFor(config, 'analyzer', LISTED_MODEL), null, JSON.stringify(roles));
+  }
+  const noCacheBlock = { ...baseConfig(), features: { promptCache: true } };
+  assert.equal(cacheTtlFor(noCacheBlock, 'talk', LISTED_MODEL), '1h', 'a missing llm.cache reads as config.json: 1h, talk');
+  assert.equal(cacheTtlFor(noCacheBlock, 'analyzer', LISTED_MODEL), null);
+});
+
+test('cacheTtlFor: a model outside llm.cache.models gets no marker; a non-array models reads as anthropic/ only', () => {
+  // the fallback: Anthropic's ids only, whatever the switch and the role say
+  for (const model of [UNLISTED_MODEL, 'google/gemini-test', 'Anthropic/claude-test-4', 'claude-test-4', '', undefined, null, 7]) {
+    assert.equal(cacheTtlFor(cachingConfig(), 'talk', model), null, String(model));
+  }
+  for (const models of [undefined, null, 'openai/', { 'openai/': true }]) {
+    const config = cachingConfig({ cache: { ...CACHE, models } });
+    assert.equal(cacheTtlFor(config, 'talk', LISTED_MODEL), '1h', JSON.stringify(models));
+    assert.equal(cacheTtlFor(config, 'talk', UNLISTED_MODEL), null, JSON.stringify(models));
+  }
+  // a listed prefix admits its family; an empty list marks nothing; a non-string entry matches nothing
+  const both = cachingConfig({ cache: { ...CACHE, models: ['anthropic/', 'openai/'] } });
+  assert.equal(cacheTtlFor(both, 'talk', UNLISTED_MODEL), '1h');
+  assert.equal(cacheTtlFor(both, 'talk', 'google/gemini-test'), null);
+  assert.equal(cacheTtlFor(cachingConfig({ cache: { ...CACHE, models: [] } }), 'talk', LISTED_MODEL), null);
+  assert.equal(cacheTtlFor(cachingConfig({ cache: { ...CACHE, models: [null, 7, { a: 1 }] } }), 'talk', LISTED_MODEL), null);
+  // the role gate still applies to a listed model
+  assert.equal(cacheTtlFor(cachingConfig(), 'analyzer', LISTED_MODEL), null);
+});
+
+test('cacheTtlFor: an unknown ttl reads as 1h; force true and false override the policy', () => {
+  assert.equal(cacheTtlFor(cachingConfig({ cache: { ...CACHE, ttl: '5m' } }), 'talk', LISTED_MODEL), '5m');
+  for (const ttl of [undefined, null, '1h', '10m', '5M', 300]) {
+    assert.equal(cacheTtlFor(cachingConfig({ cache: { ...CACHE, ttl } }), 'talk', LISTED_MODEL), '1h', String(ttl));
+  }
+  // true marks whatever the switch, the role list and the model list say (the cache probe sends it with the switch off)
+  assert.equal(cacheTtlFor(baseConfig(), 'mentor', 'test-model', true), '1h');
+  assert.equal(cacheTtlFor({ llm: { cache: { ttl: '5m' } } }, undefined, undefined, true), '5m');
+  assert.equal(cacheTtlFor(cachingConfig({ promptCache: false }), 'talk', LISTED_MODEL, true), '1h');
+  assert.equal(cacheTtlFor(cachingConfig({ cache: { ...CACHE, models: [] } }), 'talk', UNLISTED_MODEL, true), '1h');
+  // false forbids it on a listed role and model with the switch on
+  assert.equal(cacheTtlFor(cachingConfig(), 'talk', LISTED_MODEL, false), null);
+  // anything else leaves the policy in charge
+  for (const force of [undefined, null, 'true', 1]) {
+    assert.equal(cacheTtlFor(cachingConfig(), 'talk', LISTED_MODEL, force), '1h', String(force));
+    assert.equal(cacheTtlFor(cachingConfig(), 'analyzer', LISTED_MODEL, force), null, String(force));
+    assert.equal(cacheTtlFor(cachingConfig(), 'talk', UNLISTED_MODEL, force), null, String(force));
+  }
+});
+
+test('fullPromptTokens: prompt_tokens as reported by default; plus cached and cache-write tokens when llm.cache.promptIncludesCached is false', () => {
+  const usage = { prompt_tokens: 1200, prompt_tokens_details: { cached_tokens: 8500, cache_write_tokens: 300 } };
+  const includes = [
+    undefined,
+    {},
+    baseConfig(),
+    cachingConfig(),
+    cachingConfig({ cache: { ...CACHE, promptIncludesCached: undefined } }),
+    cachingConfig({ cache: { ...CACHE, promptIncludesCached: 'no' } }),
+  ];
+  for (const config of includes) assert.equal(fullPromptTokens(usage, config, true), 1200, JSON.stringify(config));
+  const net = cachingConfig({ cache: { ...CACHE, promptIncludesCached: false } });
+  assert.equal(fullPromptTokens(usage, net, true), 10000);
+  assert.equal(fullPromptTokens({ prompt_tokens: 1200 }, net, true), 1200, 'no details add nothing');
+  assert.equal(
+    fullPromptTokens({ prompt_tokens: 1200, prompt_tokens_details: { cached_tokens: 'many', cache_write_tokens: -5 } }, net, true),
+    1200,
+    'a detail that is not a count adds nothing',
+  );
+  assert.equal(fullPromptTokens({ prompt_tokens: 0, prompt_tokens_details: { cached_tokens: 900 } }, net, true), 900);
+});
+
+test('fullPromptTokens: an unmarked request keeps prompt_tokens as reported even under promptIncludesCached false', () => {
+  // A provider that caches on its own (no marker sent) already counts its cached tokens inside
+  // prompt_tokens: adding them back would count them twice.
+  const usage = { prompt_tokens: 20000, prompt_tokens_details: { cached_tokens: 5000, cache_write_tokens: 300 } };
+  const net = cachingConfig({ cache: { ...CACHE, promptIncludesCached: false } });
+  for (const marked of [false, undefined, null, 'true', 1]) {
+    assert.equal(fullPromptTokens(usage, net, marked), 20000, String(marked));
+  }
+  assert.equal(fullPromptTokens(usage, net, true), 25300, 'only a marked request is read by the probed route');
+});
+
+test('fullPromptTokens: no reported prompt count gives null', () => {
+  const net = cachingConfig({ cache: { ...CACHE, promptIncludesCached: false } });
+  for (const usage of [undefined, null, 5, {}, { prompt_tokens: 0 }, { prompt_tokens: 'many' }, { prompt_tokens: Number.NaN }, { prompt_tokens: -3 }, { prompt_tokens: Infinity }]) {
+    assert.equal(fullPromptTokens(usage, cachingConfig(), true), null, JSON.stringify(usage));
+  }
+  assert.equal(fullPromptTokens({ prompt_tokens_details: { cached_tokens: 900 } }, net, true), null, 'details without a prompt count are no count');
+  assert.equal(fullPromptTokens({ prompt_tokens: 0 }, net, true), null);
+  assert.equal(fullPromptTokens({ prompt_tokens: 0, prompt_tokens_details: { cached_tokens: 900 } }, net, false), null, 'unmarked: nothing is added back');
+});
+
+test('withCacheMarker: a string system message becomes one text part with the same text and the marker', () => {
+  const messages = replyMessages();
+  const sent = withCacheMarker(messages, '1h');
+  assert.deepEqual(sent, [
+    { role: 'system', content: [{ type: 'text', text: SYSTEM_TEXT, cache_control: MARK_1H }] },
+    { role: 'user', content: USER_TEXT },
+  ]);
+  assert.equal(sent[1], messages[1], 'the user message is passed on as it is');
+});
+
+test('withCacheMarker: 5m sends type ephemeral without ttl, 1h adds ttl 1h', () => {
+  assert.deepEqual(withCacheMarker(replyMessages(), '5m')[0].content, [{ type: 'text', text: SYSTEM_TEXT, cache_control: MARK_5M }]);
+  assert.deepEqual(withCacheMarker(replyMessages(), '1h')[0].content, [{ type: 'text', text: SYSTEM_TEXT, cache_control: MARK_1H }]);
+});
+
+test('withCacheMarker: an array system content gets the marker on its last text part', () => {
+  const picture = { type: 'image_url', image_url: { url: 'data:image/png;base64,AAAA' } };
+  const messages = [
+    { role: 'system', content: [{ type: 'text', text: 'première partie' }, { type: 'text', text: 'dernière partie' }, picture] },
+    { role: 'user', content: USER_TEXT },
+  ];
+  const sent = withCacheMarker(messages, '1h');
+  assert.deepEqual(sent[0].content, [
+    { type: 'text', text: 'première partie' },
+    { type: 'text', text: 'dernière partie', cache_control: MARK_1H },
+    picture,
+  ]);
+  assert.equal(sent[1], messages[1]);
+});
+
+test('withCacheMarker: a request without a system message is unchanged', () => {
+  const plain = [{ role: 'user', content: 'Γεια σου' }];
+  assert.deepEqual(withCacheMarker(plain, '1h'), [{ role: 'user', content: 'Γεια σου' }]);
+  assert.deepEqual(withCacheMarker(plain, '5m'), [{ role: 'user', content: 'Γεια σου' }]);
+  // an empty system text gets no marker either: an empty block carrying a marker would be refused
+  const empty = [{ role: 'system', content: '' }, { role: 'user', content: 'Γεια σου' }];
+  assert.deepEqual(withCacheMarker(empty, '1h'), [{ role: 'system', content: '' }, { role: 'user', content: 'Γεια σου' }]);
+  const noText = [{ role: 'system', content: [{ type: 'image_url', image_url: { url: 'https://example.com/a.png' } }] }];
+  assert.deepEqual(markedParts(withCacheMarker(noText, '1h')), []);
+});
+
+test("withCacheMarker: the caller's messages and parts are never mutated", () => {
+  const messages = [
+    { role: 'system', content: SYSTEM_TEXT },
+    {
+      role: 'user',
+      content: [
+        { type: 'text', text: 'bloc stable', cache_control: { type: 'ephemeral', ttl: '1h' } },
+        { type: 'text', text: USER_TEXT },
+        { type: 'image_url', image_url: { url: 'https://example.com/a.png' } },
+      ],
+    },
+  ];
+  const before = structuredClone(messages);
+  const first = withCacheMarker(messages, '5m');
+  withCacheMarker(messages, '1h');
+  withCacheMarker(messages, null);
+  assert.deepEqual(messages, before);
+  // two markers of one result are separate objects: a later change to one never reaches the other
+  const [systemMark, userMark] = markedParts(first).map((p) => p.cache_control);
+  assert.notEqual(systemMark, userMark);
+});
+
+test('withCacheMarker: without a ttl every builder-placed cache_control is stripped', () => {
+  const messages = [
+    { role: 'system', content: [{ type: 'text', text: SYSTEM_TEXT, cache_control: { type: 'ephemeral', ttl: '1h' } }] },
+    { role: 'user', content: [{ type: 'text', text: 'bloc stable', cache_control: { type: 'ephemeral' } }, { type: 'text', text: USER_TEXT }] },
+  ];
+  for (const ttl of [null, undefined, '2h']) {
+    assert.deepEqual(withCacheMarker(messages, ttl), [
+      { role: 'system', content: [{ type: 'text', text: SYSTEM_TEXT }] },
+      { role: 'user', content: [{ type: 'text', text: 'bloc stable' }, { type: 'text', text: USER_TEXT }] },
+    ], String(ttl));
+  }
+  // nothing to strip: the very same messages come back, a string system content stays a string
+  const plain = replyMessages();
+  assert.equal(withCacheMarker(plain, null), plain);
+});
+
+test('withCacheMarker: a builder-placed marker takes the configured ttl', () => {
+  const messages = [
+    { role: 'system', content: SYSTEM_TEXT },
+    { role: 'user', content: [{ type: 'text', text: 'bloc stable', cache_control: { type: 'ephemeral', ttl: '1h' } }, { type: 'text', text: USER_TEXT }] },
+  ];
+  const sent = withCacheMarker(messages, '5m');
+  assert.deepEqual(sent[0].content, [{ type: 'text', text: SYSTEM_TEXT, cache_control: MARK_5M }]);
+  assert.deepEqual(sent[1].content, [{ type: 'text', text: 'bloc stable', cache_control: MARK_5M }, { type: 'text', text: USER_TEXT }]);
+});
+
+test('withCacheMarker: no more than four markers are sent', () => {
+  const letters = ['α', 'β', 'γ', 'δ', 'ε'];
+  const messages = [
+    { role: 'system', content: SYSTEM_TEXT },
+    { role: 'user', content: letters.map((text) => ({ type: 'text', text, cache_control: { type: 'ephemeral' } })) },
+  ];
+  const sent = withCacheMarker(messages, '5m');
+  assert.equal(markedParts(sent).length, 4);
+  assert.deepEqual(sent[0].content[0].cache_control, MARK_5M, 'the system marker comes first in message order');
+  assert.deepEqual(sent[1].content.map((p) => 'cache_control' in p), [true, true, true, false, false]);
+  assert.deepEqual(sent[1].content.map((p) => p.text), letters, 'the text is kept on every part');
+  // without a system message the first four builder markers survive
+  assert.deepEqual(withCacheMarker([messages[1]], '1h')[0].content.map((p) => 'cache_control' in p), [true, true, true, true, false]);
+});
+
+test('complete: with promptCache on, a talk request carries the marker on the system part and the user message is sent unchanged', async () => {
+  let config = cachingConfig();
+  const { llm, bodies } = cachingLlm(() => config);
+  await llm.complete(replyMessages(), { role: 'talk' });
+  config = cachingConfig({ cache: { ...CACHE, ttl: '5m' } });
+  await llm.complete(replyMessages(), { role: 'talk' });
+  const [hour, minutes] = bodies();
+  assert.deepEqual(hour.messages, [
+    { role: 'system', content: [{ type: 'text', text: SYSTEM_TEXT, cache_control: MARK_1H }] },
+    { role: 'user', content: USER_TEXT },
+  ]);
+  assert.deepEqual(minutes.messages[0].content, [{ type: 'text', text: SYSTEM_TEXT, cache_control: MARK_5M }]);
+  assert.deepEqual(minutes.messages[1], { role: 'user', content: USER_TEXT });
+  for (const body of [hour, minutes]) {
+    assert.equal('cache_control' in body, false, 'no top-level marker: it would put the breakpoint after the whole prompt');
+    assert.equal(markedParts(body.messages).length, 1);
+  }
+});
+
+test('complete: a classifier.text request carries no marker even with promptCache on', async () => {
+  const { llm, sent } = cachingLlm(() => cachingConfig());
+  for (const role of ['classifier.text', 'analyzer', 'mentor', undefined]) {
+    await llm.complete(replyMessages(), { role });
+  }
+  assert.equal(sent.length, 4);
+  for (const body of sent) {
+    assert.deepEqual(JSON.parse(body).messages, replyMessages());
+    assert.ok(!body.includes('cache_control'));
+  }
+});
+
+test("complete: with promptCache off or the role not listed the body is byte-identical to today's", async () => {
+  const messages = [
+    { role: 'system', content: SYSTEM_TEXT },
+    { role: 'user', content: [{ type: 'text', text: USER_TEXT }, { type: 'image_url', image_url: { url: 'https://example.com/a.png' } }] },
+  ];
+  const today = (model) => JSON.stringify({ model, messages, temperature: 1, max_tokens: 100 });
+  const configs = [
+    baseConfig({ maxRequestTokens: 50000 }),
+    cachingConfig({ promptCache: false }),
+    { ...cachingConfig(), features: {} },
+    { ...cachingConfig(), features: { promptCache: 'true' } },
+  ];
+  for (const config of configs) {
+    const { llm, sent } = cachingLlm(() => config);
+    for (const role of ['talk', 'analyzer', 'classifier.text', 'mentor', undefined]) await llm.complete(messages, { role });
+    for (const body of sent) assert.equal(body, today(config.llm.model));
+  }
+  const { llm, sent } = cachingLlm(() => cachingConfig());
+  for (const role of ['analyzer', 'classifier.text', 'classifier.media', 'mentor', undefined]) await llm.complete(messages, { role });
+  for (const body of sent) assert.equal(body, today(LISTED_MODEL));
+});
+
+test('complete: a talk request on a non-listed model is byte-identical with promptCache on', async () => {
+  const messages = replyMessages();
+  const today = (model) => JSON.stringify({ model, messages, temperature: 1, max_tokens: 100 });
+  // the configured talk model hot-switched to another family, or another model passed for one call
+  let config = cachingConfig({ model: UNLISTED_MODEL });
+  const { llm, sent } = cachingLlm(() => config);
+  await llm.complete(messages, { role: 'talk' });
+  config = cachingConfig();
+  await llm.complete(messages, { role: 'talk', model: UNLISTED_MODEL });
+  config = cachingConfig({ model: UNLISTED_MODEL, cache: { ...CACHE, models: ['anthropic/'] } });
+  await llm.complete(messages, { role: 'talk' });
+  assert.deepEqual(sent, [today(UNLISTED_MODEL), today(UNLISTED_MODEL), today(UNLISTED_MODEL)]);
+  // a listed family marks the same request, and a list naming the other family marks it too
+  await llm.complete(messages, { role: 'talk', model: LISTED_MODEL });
+  config = cachingConfig({ model: UNLISTED_MODEL, cache: { ...CACHE, models: ['openai/'] } });
+  await llm.complete(messages, { role: 'talk' });
+  assert.deepEqual(sent.slice(3).map((body) => markedParts(JSON.parse(body).messages).length), [1, 1]);
+});
+
+test('complete: options.cache false forbids the marker and true forces it', async () => {
+  let config = cachingConfig();
+  const { llm, bodies } = cachingLlm(() => config);
+  await llm.complete(replyMessages(), { role: 'talk', cache: false });
+  // no features.promptCache at all, and a model outside llm.cache.models: the force wins over both
+  config = baseConfig({ maxRequestTokens: 50000, cache: { ...CACHE, ttl: '5m' } });
+  await llm.complete(replyMessages(), { role: 'classifier.text', cache: true });
+  await llm.complete(replyMessages(), { role: 'talk' });
+  const [forbidden, forced, policy] = bodies();
+  assert.deepEqual(forbidden.messages, replyMessages());
+  assert.deepEqual(forced.messages[0].content, [{ type: 'text', text: SYSTEM_TEXT, cache_control: MARK_5M }]);
+  assert.deepEqual(policy.messages, replyMessages(), 'the force is for one call only');
+});
+
+test('complete: a request without a system message is sent unchanged with promptCache on', async () => {
+  const { llm, sent } = cachingLlm(() => cachingConfig());
+  const messages = [{ role: 'user', content: 'Γεια σου' }];
+  await llm.complete(messages, { role: 'talk' });
+  await llm.complete(messages, { role: 'talk', cache: true });
+  for (const body of sent) {
+    assert.equal(body, JSON.stringify({ model: LISTED_MODEL, messages, temperature: 1, max_tokens: 100 }));
+  }
+});
+
+test('complete: the cache policy is read from the live config on every call', async () => {
+  let config = cachingConfig({ promptCache: false });
+  const { llm, bodies } = cachingLlm(() => config);
+  await llm.complete(replyMessages(), { role: 'talk' });
+  config = cachingConfig();
+  await llm.complete(replyMessages(), { role: 'talk' });
+  config = cachingConfig({ cache: { ...CACHE, roles: ['analyzer'] } });
+  await llm.complete(replyMessages(), { role: 'talk' });
+  assert.deepEqual(bodies().map((b) => markedParts(b.messages).length), [0, 1, 0]);
+});
+
+test('complete: the estimate and the token cap check are the same with and without a marker', async () => {
+  const applied = [];
+  const calibrator = { ...fakeCalibrator(), apply: (n) => { applied.push(n); return n; } };
+  let config = cachingConfig({ promptCache: false });
+  const { llm, sent } = cachingLlm(() => config, { calibrator });
+  const plain = await llm.complete(replyMessages(), { role: 'talk' });
+  config = cachingConfig();
+  const marked = await llm.complete(replyMessages(), { role: 'talk' });
+  assert.equal(markedParts(JSON.parse(sent[1]).messages).length, 1, 'the second request did carry the marker');
+  assert.equal(marked.estimated, plain.estimated);
+  assert.deepEqual(applied, [plain.estimated, plain.estimated], 'the estimator saw the same raw count');
+  // the cap at exactly the estimate lets both through; one below refuses both before any fetch
+  for (const promptCache of [false, true]) {
+    config = cachingConfig({ promptCache, maxRequestTokens: plain.estimated });
+    await llm.complete(replyMessages(), { role: 'talk' });
+    config = cachingConfig({ promptCache, maxRequestTokens: plain.estimated - 1 });
+    await assert.rejects(llm.complete(replyMessages(), { role: 'talk' }), (err) => {
+      assert.ok(err instanceof TokenLimitError);
+      assert.equal(err.used, plain.estimated);
+      return true;
+    });
+  }
+  assert.equal(sent.length, 4, 'only the requests under the cap were sent');
+});
+
+test('complete: llm: usage carries cache read, write, none or off from the usage fields', async () => {
+  const usages = {
+    read: { prompt_tokens: 9300, prompt_tokens_details: { cached_tokens: 8900, cache_write_tokens: 0 } },
+    write: { prompt_tokens: 9300, prompt_tokens_details: { cached_tokens: 0, cache_write_tokens: 8900 } },
+    both: { prompt_tokens: 9300, prompt_tokens_details: { cached_tokens: 8900, cache_write_tokens: 200 } },
+    none: { prompt_tokens: 9300, prompt_tokens_details: { cached_tokens: 0 } },
+    bare: { prompt_tokens: 9300 },
+  };
+  const order = Object.keys(usages);
+  let config = cachingConfig();
+  const { llm } = cachingLlm(() => config, { usage: (call) => usages[order[call]] ?? usages.read });
+  const { logs } = await withCapturedLogs(async () => {
+    for (let i = 0; i < order.length; i += 1) await llm.complete(replyMessages(), { role: 'talk' });
+    await llm.complete(replyMessages(), { role: 'classifier.text' }); // a read reported, no marker sent
+    await llm.complete([{ role: 'user', content: 'Γεια σου' }], { role: 'talk' }); // nothing to mark
+    config = cachingConfig({ promptCache: false });
+    await llm.complete(replyMessages(), { role: 'talk' });
+  });
+  const lines = usageFields(logs);
+  assert.deepEqual(lines.map((l) => l.cache), ['read', 'write', 'read', 'none', 'none', 'off', 'off', 'off']);
+  assert.deepEqual(lines.map((l) => [l.cachedTokens, l.cacheWriteTokens]).slice(0, 2), [[8900, 0], [0, 8900]]);
+  assert.equal(lines[5].cachedTokens, 8900, 'the counts are logged whether or not a marker was sent');
+  const text = JSON.stringify(logs);
+  assert.ok(!text.includes('persona du salon') && !text.includes('Καλημέρα'), 'counts and codes only, never prompt text');
+});
+
+test('complete: the calibrator observes the full prompt count when the usage reports cached tokens', async () => {
+  // Under both readings of llm.cache.promptIncludesCached: as reported (true, the default) or
+  // net of the cache (false: the cached and written tokens are added back).
+  const usage = { prompt_tokens: 600, prompt_tokens_details: { cached_tokens: 8500, cache_write_tokens: 200 } };
+  const cases = [
+    [CACHE, 600],
+    [{ ttl: '1h', roles: ['talk'] }, 600],
+    [{ ...CACHE, promptIncludesCached: false }, 9300],
+  ];
+  for (const [cache, counted] of cases) {
+    const calibrator = fakeCalibrator();
+    const { llm } = cachingLlm(() => cachingConfig({ cache }), { usage, calibrator });
+    const result = await llm.complete(replyMessages(), { role: 'talk' });
+    assert.deepEqual(calibrator.observed, [[result.estimated, counted]], JSON.stringify(cache));
+    assert.equal(result.promptTokens, counted, 'the caller gets the same full count');
+  }
+  // skipCalibration still feeds nothing, and still returns the full count
+  const calibrator = fakeCalibrator();
+  const { llm } = cachingLlm(() => cachingConfig({ cache: { ...CACHE, promptIncludesCached: false } }), { usage, calibrator });
+  const skipped = await llm.complete(replyMessages(), { role: 'talk', skipCalibration: true });
+  assert.deepEqual(calibrator.observed, []);
+  assert.equal(skipped.promptTokens, 9300);
+  // no usage count: null
+  const { llm: bare } = cachingLlm(() => cachingConfig(), { usage: {} });
+  assert.equal((await bare.complete(replyMessages(), { role: 'talk' })).promptTokens, null);
+});
+
+test('complete: an unmarked request reporting cached tokens feeds prompt_tokens unchanged under promptIncludesCached false', async () => {
+  // An analyzer on a provider that caches on its own: no marker sent, cached tokens already inside prompt_tokens.
+  const usage = { prompt_tokens: 20000, prompt_tokens_details: { cached_tokens: 5000, cache_write_tokens: 0 } };
+  const net = { ...CACHE, promptIncludesCached: false };
+  const cases = [
+    [cachingConfig({ cache: net }), { role: 'analyzer' }],
+    [cachingConfig({ cache: net, model: UNLISTED_MODEL }), { role: 'talk' }],
+    [cachingConfig({ cache: net }), { role: 'talk', cache: false }],
+    [cachingConfig({ cache: net, promptCache: false }), { role: 'talk' }],
+  ];
+  for (const [config, options] of cases) {
+    const calibrator = fakeCalibrator();
+    const { llm, sent } = cachingLlm(() => config, { usage, calibrator });
+    const result = await llm.complete(replyMessages(), options);
+    assert.ok(!sent[0].includes('cache_control'), JSON.stringify(options));
+    assert.deepEqual(calibrator.observed, [[result.estimated, 20000]], JSON.stringify(options));
+    assert.equal(result.promptTokens, 20000);
+  }
+  // the same answer to a marked request is read as net of the cache
+  const calibrator = fakeCalibrator();
+  const { llm } = cachingLlm(() => cachingConfig({ cache: net }), { usage, calibrator });
+  const marked = await llm.complete(replyMessages(), { role: 'talk' });
+  assert.deepEqual(calibrator.observed, [[marked.estimated, 25000]]);
+});
+
+test('complete: the token-cap warning uses the same full prompt count', async () => {
+  const usage = { prompt_tokens: 800, prompt_tokens_details: { cached_tokens: 600, cache_write_tokens: 0 } };
+  const warned = async (promptIncludesCached) => {
+    const { llm } = cachingLlm(() => cachingConfig({ maxRequestTokens: 1000, cache: { ...CACHE, promptIncludesCached } }), { usage });
+    const { logs } = await withCapturedLogs(() => llm.complete(replyMessages(), { role: 'talk' }));
+    return logs.filter((l) => l.msg === 'llm: provider counted more prompt tokens than the cap').length;
+  };
+  assert.equal(await warned(true), 0, '800 as reported is under the cap of 1000');
+  assert.equal(await warned(false), 1, '800 + 600 counted back is over it');
 });
 
 // --- shared transport helpers (also used by src/llm/images.js) ---

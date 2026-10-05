@@ -9,6 +9,9 @@
 // budget, which would otherwise burn through the whole day's request cap
 // while seeding memory. The per-request token cap (`TokenLimitError`) always
 // applies, with no exception.
+//
+// It is also the one place the prompt-cache marker is put on a request (see
+// `withCacheMarker`): after the estimate, so the rails never see it.
 
 import { estimateMessages } from './tokens.js';
 import { isPlainObject } from '../config.js';
@@ -166,12 +169,171 @@ export function resolveProvider(model, { override, byModel, fallback, role } = {
 
 const numberOrNull = (value) => (typeof value === 'number' && Number.isFinite(value) ? value : null);
 const stringOrNull = (value) => (typeof value === 'string' && value ? value : null);
+// A token count read from a usage object: a finite positive number, else 0.
+const countOrZero = (value) => (typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : 0);
+
+// ---- prompt caching ----------------------------------------------------------
+// Every reply re-sends the same system message, and tokens read from a provider's prompt cache
+// cost a fraction of fresh input (and, on some providers, nothing against the account's quota of
+// the day). `complete()` is the one policy point: it puts a cache marker on the system message
+// for the roles `llm.cache.roles` lists, on the model families `llm.cache.models` lists, while
+// `features.promptCache` is on, AFTER the token estimate was taken, so the 50k rail and the
+// calibration see exactly what they saw without it. The model gate exists because the engine is
+// generic: a route that does not take `cache_control` parts could refuse every marked request, so
+// a model outside the list is sent exactly as without caching, whatever the role.
+
+/** The part field OpenRouter reads a cache breakpoint from. */
+const CACHE_CONTROL = 'cache_control';
+/** Breakpoints a provider accepts per request; markers past the first four are dropped. */
+const MAX_CACHE_MARKERS = 4;
+/** `llm.cache.roles` when it is not an array: config.json's value. */
+const DEFAULT_CACHE_ROLES = Object.freeze(['talk']);
+/** `llm.cache.models` when it is not an array: the one family whose `cache_control` the marker follows. */
+const DEFAULT_CACHE_MODELS = Object.freeze(['anthropic/']);
+
+/**
+ * The cache TTL to mark one request with, or null for no marker. `force === false` -> null;
+ * `force === true` -> the TTL whatever the switch, the role list and the model list say (one
+ * call that must be cached, e.g. a probe); anything else -> null unless
+ * `config.features.promptCache === true` (missing = off), `role` is in `config.llm.cache.roles`
+ * (not an array -> `['talk']`) and `model` starts with one of the strings in
+ * `config.llm.cache.models` (case-sensitive, like `llm.providerByModel`; not an array ->
+ * `['anthropic/']`; a model that is not a string matches none).
+ * The TTL is `'5m'` when `config.llm.cache.ttl` is exactly `'5m'`, else `'1h'` (config.json's).
+ * Pure; the caller passes the live config read at the moment of use.
+ * @param {unknown} config  The whole live config.
+ * @param {unknown} role    The request's `options.role`.
+ * @param {unknown} model   The model id the request is sent to (`body.model`).
+ * @param {unknown} [force] The request's `options.cache`.
+ * @returns {'1h'|'5m'|null}
+ */
+export function cacheTtlFor(config, role, model, force) {
+  if (force === false) return null;
+  const cache = config?.llm?.cache;
+  const ttl = cache?.ttl === '5m' ? '5m' : '1h';
+  if (force === true) return ttl;
+  if (config?.features?.promptCache !== true) return null;
+  const roles = Array.isArray(cache?.roles) ? cache.roles : DEFAULT_CACHE_ROLES;
+  if (typeof role !== 'string' || !roles.includes(role)) return null;
+  const models = Array.isArray(cache?.models) ? cache.models : DEFAULT_CACHE_MODELS;
+  const listed = typeof model === 'string' && models.some((prefix) => typeof prefix === 'string' && model.startsWith(prefix));
+  return listed ? ttl : null;
+}
+
+// The marker of one TTL, a fresh object per call: `5m` is the provider's default (no `ttl` key),
+// `1h` names itself. Anything else is no marker.
+function cacheMarkerFor(ttl) {
+  if (ttl === '1h') return { type: 'ephemeral', ttl: '1h' };
+  if (ttl === '5m') return { type: 'ephemeral' };
+  return null;
+}
+
+// The index of the last text part with a non-empty text in a content array, or -1.
+function lastTextPart(content) {
+  return content.findLastIndex((part) => isPlainObject(part) && part.type === 'text' && typeof part.text === 'string' && part.text !== '');
+}
+
+/**
+ * `messages` as they are sent under the cache policy: a new array, the input never mutated (a
+ * message or part that needs no change is passed on as the same object, and with nothing to
+ * change the very same array comes back, so the body serialises exactly as without this step).
+ * With a TTL (`'1h'` / `'5m'`): the first `system` message carries the marker on its end -- a
+ * non-empty string content becomes one text part `{ type: 'text', text, cache_control }`, an
+ * array content gets it on its last non-empty text part -- and every `cache_control` a builder
+ * already placed on any part takes the same marker; only the first four markers in message order
+ * survive, the rest are removed. Without a system message (or with an empty one) no marker is
+ * added. With anything else (null): every `cache_control` on any part is removed and nothing else
+ * changes (a string system content stays a string).
+ * @param {object[]} messages  The caller's chat-completions messages.
+ * @param {'1h'|'5m'|null} ttl From `cacheTtlFor`.
+ * @returns {object[]}
+ */
+export function withCacheMarker(messages, ttl) {
+  if (!Array.isArray(messages)) return messages;
+  const marker = cacheMarkerFor(ttl);
+  const systemAt = marker ? messages.findIndex((message) => isPlainObject(message) && message.role === 'system') : -1;
+  let kept = 0;
+  // One part on its way out: the marker when it is the system breakpoint or already carried
+  // one, while fewer than four are placed; otherwise without any `cache_control`.
+  const settle = (part, breakpoint) => {
+    const placed = Object.hasOwn(part, CACHE_CONTROL);
+    if (marker && (placed || breakpoint) && kept < MAX_CACHE_MARKERS) {
+      kept += 1;
+      return { ...part, [CACHE_CONTROL]: { ...marker } };
+    }
+    if (!placed) return part;
+    const { [CACHE_CONTROL]: _removed, ...rest } = part;
+    return rest;
+  };
+  const sent = messages.map((message, index) => {
+    if (!isPlainObject(message)) return message;
+    const { content } = message;
+    if (index === systemAt && typeof content === 'string') {
+      if (content === '' || kept >= MAX_CACHE_MARKERS) return message;
+      return { ...message, content: [settle({ type: 'text', text: content }, true)] };
+    }
+    if (!Array.isArray(content)) return message;
+    const breakpoint = index === systemAt ? lastTextPart(content) : -1;
+    const parts = content.map((part, at) => (isPlainObject(part) ? settle(part, at === breakpoint) : part));
+    return parts.some((part, at) => part !== content[at]) ? { ...message, content: parts } : message;
+  });
+  return sent.some((message, index) => message !== messages[index]) ? sent : messages;
+}
+
+// Whether any part of `messages` carries a `cache_control` (what was actually sent).
+function hasCacheMarker(messages) {
+  return Array.isArray(messages) && messages.some(
+    (message) => Array.isArray(message?.content) && message.content.some((part) => isPlainObject(part) && Object.hasOwn(part, CACHE_CONTROL)),
+  );
+}
+
+/**
+ * The provider's count of the WHOLE prompt of one answered request -- the cached and the
+ * cache-written parts included -- or null when the usage reports none. What the calibration and
+ * the over-cap warning are fed: if they saw only the uncached part, the ratio would sink toward
+ * its floor and the 50k rail would under-estimate. `config.llm.cache.promptIncludesCached`
+ * (missing = true, config.json's) says how the marked route reports it, set by the owner from a
+ * probe and never guessed per response: true -> `usage.prompt_tokens` as reported (OpenRouter's
+ * normalised usage counts cached and written tokens inside it); false -> for a request that was
+ * sent with a cache marker (`marked === true`, the route the probe measured), `prompt_tokens` plus
+ * `prompt_tokens_details.cached_tokens` plus `prompt_tokens_details.cache_write_tokens` (a detail
+ * that is not a positive count adds nothing). An unmarked request always counts `prompt_tokens`
+ * as reported: a provider that caches on its own already counts those tokens inside it.
+ * `prompt_tokens` must be a finite number >= 0; a total that is not positive is null.
+ * @param {unknown} usage   The response's `usage` object.
+ * @param {unknown} config  The whole live config.
+ * @param {unknown} marked  Whether the sent request carried a cache marker (only `true` counts).
+ * @returns {number|null}
+ */
+export function fullPromptTokens(usage, config, marked) {
+  const prompt = usage?.prompt_tokens;
+  if (typeof prompt !== 'number' || !Number.isFinite(prompt) || prompt < 0) return null;
+  let total = prompt;
+  if (marked === true && config?.llm?.cache?.promptIncludesCached === false) {
+    total += countOrZero(usage.prompt_tokens_details?.cached_tokens) + countOrZero(usage.prompt_tokens_details?.cache_write_tokens);
+  }
+  return total > 0 ? total : null;
+}
+
+// The `cache` code of one `llm: usage` line: `off` when the request carried no marker; else what
+// the provider reports doing with the marked prefix -- `read` when any prompt tokens came from
+// the cache (a read wins over a write in the same answer: the cache paid off), `write` when
+// tokens were only written to it, `none` when neither (a prefix under the provider's minimum, or
+// a marker dropped on the way).
+function cacheCode(marked, usage) {
+  if (!marked) return 'off';
+  if (countOrZero(usage?.prompt_tokens_details?.cached_tokens) > 0) return 'read';
+  if (countOrZero(usage?.prompt_tokens_details?.cache_write_tokens) > 0) return 'write';
+  return 'none';
+}
 
 // The fields of one `llm: usage` line, so a day's spend can be split by role: who asked
-// (`role`, `model`), who served it (`provider`, `id`) and what it cost, read from OpenRouter's
-// `usage` and its detail objects. Numbers, booleans and ids only -- an absent value or one of
-// another type is null -- so the line never carries text of a prompt or an answer.
-function usageLogFields(json, usage, model, role) {
+// (`role`, `model`), who served it (`provider`, `id`), what it cost, read from OpenRouter's
+// `usage` and its detail objects, and what the prompt cache did (`cache`, see `cacheCode`;
+// `marked` = the sent request carried a marker). Numbers, booleans, ids and codes only -- an
+// absent value or one of another type is null -- so the line never carries text of a prompt or
+// an answer.
+function usageLogFields(json, usage, model, role, marked) {
   return {
     role: stringOrNull(role),
     model: stringOrNull(model),
@@ -181,6 +343,7 @@ function usageLogFields(json, usage, model, role) {
     reasoningTokens: numberOrNull(usage.completion_tokens_details?.reasoning_tokens),
     cachedTokens: numberOrNull(usage.prompt_tokens_details?.cached_tokens),
     cacheWriteTokens: numberOrNull(usage.prompt_tokens_details?.cache_write_tokens),
+    cache: cacheCode(marked, usage),
     cost: numberOrNull(usage.cost),
     upstreamCost: numberOrNull(usage.cost_details?.upstream_inference_cost),
     byok: typeof usage.is_byok === 'boolean' ? usage.is_byok : null,
@@ -278,7 +441,11 @@ export function createLlm({ apiKey, getConfig, calibrator, state, fetchImpl = fe
   }
 
   /**
-   * Send one chat completion. Returns `{ text, usage, estimated, finishReason, provider }`.
+   * Send one chat completion. Returns `{ text, usage, estimated, finishReason, provider, promptTokens }`.
+   * `promptTokens` is the provider's count of the whole prompt, its cached part included
+   * (`fullPromptTokens` with whether this request carried a cache marker), or null when the
+   * usage reports none -- the count a caller's own token budget should add up, since a raw
+   * `usage.prompt_tokens` may leave the cached part out (`llm.cache.promptIncludesCached` false).
    * `finishReason` is the provider's `choices[0].finish_reason` verbatim
    * (e.g. `'stop'`, `'length'`), or `undefined` when the provider omitted it —
    * callers use it to tell a cut-off completion (`'length'`) from a genuinely
@@ -300,8 +467,22 @@ export function createLlm({ apiKey, getConfig, calibrator, state, fetchImpl = fe
    * (the request may be billed) nothing is retried: a `json.error` body or an
    * unparsable body is thrown as it is.
    * Every answered request logs one `llm: usage` line (role, model, provider,
-   * token counts, cost, BYOK flag, response id; null where the response omits
-   * a value), whatever its role -- see `usageLogFields`.
+   * token counts, the prompt cache's `cache` code -- `read` | `write` | `none`,
+   * or `off` when no marker was sent --, cost, BYOK flag, response id; null
+   * where the response omits a value), whatever its role -- see `usageLogFields`.
+   * The calibrator is fed, and the over-cap warning
+   * (`llm: provider counted more prompt tokens than the cap`) compares, the
+   * provider's count of the whole prompt, its cached part included
+   * (`promptTokens` above: `fullPromptTokens`, by `llm.cache.promptIncludesCached`
+   * for a marked request).
+   * `options.cache` — the prompt-cache marker for this one call: `true` forces
+   * it (whatever the model), `false` forbids it, anything else leaves the policy
+   * in charge (a marker only while `features.promptCache` is true, `options.role`
+   * is listed in `llm.cache.roles` and the request's model starts with a prefix
+   * listed in `llm.cache.models`; see `cacheTtlFor`). The marker (TTL
+   * `llm.cache.ttl`) is placed on the system message by `withCacheMarker` after
+   * the estimate and the token cap check, which always see the caller's
+   * `messages` as given.
    * `options.timeoutMs` overrides `llm.timeoutMs` for the request's abort
    * signal — the analyzer (a large batch, a long JSON answer) and the media
    * describer need more room than a chat reply's default.
@@ -311,8 +492,8 @@ export function createLlm({ apiKey, getConfig, calibrator, state, fetchImpl = fe
    * cap check only (the global rail stays in force for every caller that omits it). Exists for
    * the memory warmup (src/memory/warmup.js), whose requests are fitted under a much larger,
    * separately-budgeted cap (`warmup.maxRequestTokens`) than a live chat/analyzer request.
-   * `options.skipCalibration` (default false) — never feeds `usage.prompt_tokens`
-   * into the calibrator. For every request whose provider-counted prompt
+   * `options.skipCalibration` (default false) — never feeds the provider's prompt
+   * count into the calibrator. For every request whose provider-counted prompt
    * tokens say nothing about the text ratio the other requests are checked
    * against: a 16-token `/nep ping`, a picture or video describe (the vision
    * model counts media its own way), the short classifier passes.
@@ -372,12 +553,17 @@ export function createLlm({ apiKey, getConfig, calibrator, state, fetchImpl = fe
       countRequest(cfg.maxRequestsPerDay);
     }
 
+    const model = options.model ?? cfg.model;
     const body = {
-      model: options.model ?? cfg.model,
-      messages,
+      model,
+      // The cache marker goes on only now: `raw` above was estimated from the caller's own
+      // messages, and a marker is a JSON field, not prompt text.
+      messages: withCacheMarker(messages, cacheTtlFor(getConfig(), options.role, model, options.cache)),
       temperature: options.temperature ?? cfg.temperature,
       max_tokens: options.maxOutputTokens ?? cfg.maxOutputTokens,
     };
+    // What was actually sent: the usage of a marked request is read by the route the probe measured.
+    const marked = hasCacheMarker(body.messages);
     // OpenRouter's provider routing (e.g. `{ ignore: [...] }`, `{ only: [...] }`), sent
     // verbatim and read fresh on every call so it is hot-reloadable: a plain-object
     // `options.provider`, else the `llm.providerByModel` entry for this request's model
@@ -460,15 +646,17 @@ export function createLlm({ apiKey, getConfig, calibrator, state, fetchImpl = fe
       const text = json.choices?.[0]?.message?.content ?? '';
       const usage = json.usage ?? {};
       const finishReason = json.choices?.[0]?.finish_reason ?? undefined;
-      if (options.skipCalibration !== true && usage.prompt_tokens) calibrator.observe(raw, usage.prompt_tokens);
-      if (usage.prompt_tokens > requestTokenCap) {
+      // The whole prompt as the provider counted it, its cached part included (see fullPromptTokens).
+      const promptTokens = fullPromptTokens(usage, getConfig(), marked);
+      if (options.skipCalibration !== true && promptTokens !== null) calibrator.observe(raw, promptTokens);
+      if (promptTokens !== null && promptTokens > requestTokenCap) {
         log.warn('llm: provider counted more prompt tokens than the cap', { usage, estimated });
       }
-      log.info('llm: usage', usageLogFields(json, usage, body.model, options.role));
+      log.info('llm: usage', usageLogFields(json, usage, body.model, options.role, marked));
       // `json.provider` is OpenRouter's own name for whichever upstream provider
       // actually served the request (undefined when the response omits it) --
       // surfaced so `/nep ping` can report it without a second request shape.
-      return { text: typeof text === 'string' ? text : '', usage, estimated, finishReason, provider: json.provider };
+      return { text: typeof text === 'string' ? text : '', usage, estimated, finishReason, provider: json.provider, promptTokens };
     }
     throw lastError;
   }
