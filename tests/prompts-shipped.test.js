@@ -22,6 +22,7 @@ import { buildDrawPrompt, buildRequest, hasRequiredLabels } from '../src/behavio
 import { fill, formatDate } from '../src/discord/format.js';
 import { buildVarietyRequest, selectOwnLines } from '../src/behavior/variety.js';
 import { createTurnRunner } from '../src/behavior/turn.js';
+import { createChannelRouter } from '../src/behavior/route-channel.js';
 import { normalizeMessage, withTextPreviews } from '../src/discord/collect.js';
 import { createCalibrator } from '../src/llm/tokens.js';
 import { buildMemoryRequest, characterText } from '../src/memory/update.js';
@@ -138,6 +139,7 @@ const LOADS = {
   readLink: ['read-link'],
   lookup: ['lookup'],
   searchSummary: ['search-summary'],
+  routeChannel: ['route-channel'],
   turn: [...SYSTEM, 'reply'],
   mentorSituations: ['mentor-situations', 'mentor-signs'],
   mentorVariety: ['variety'],
@@ -955,6 +957,26 @@ test('createTurnRunner: a reply turn fills the describer, re-watch, link, search
   }
   const [turn] = llm.calls.filter((call) => kindOf(call.messages) === 'system-prompt');
   assertFilled(turn?.messages, { files: LOADS.turn, blocks: ['senses', 'about_chat', 'server', 'lore', 'people', 'lookup', 'chat', 'tempo', 'task'] }, 'the turn');
+});
+
+test('createChannelRouter: the route classifier fills route-channel.md', async () => {
+  const hot = shippedHot();
+  const guild = discordGuild([
+    [GENERAL_INFO, generalRaws()],
+    [GARDEN_INFO, []],
+    [DIARY_INFO, []],
+  ]);
+  const store = { listChannels: () => CHANNELS, getUser: (guildId, id) => PROFILES[id] ?? null };
+  const llm = recordingLlm(() => 'none');
+  const router = createChannelRouter({ hot, store, llm, now: () => NOW });
+  const history = await generalHistory();
+  const channel = guild.channels.cache.get(GENERAL);
+  const { result } = await withCapturedLogs(() =>
+    router({ guildId: GUILD, channel, history, trigger: history.at(-1), triggerKind: 'mention', selfName: SELF_NAME, config: hot.config }),
+  );
+  assert.deepEqual(result, []);
+  assert.equal(llm.calls.length, 1, 'one route request');
+  assertFilled(llm.calls[0].messages, { files: LOADS.routeChannel, blocks: ['transcript', 'channels', 'candidate'] }, 'route-channel');
 });
 
 // ---- the mentor -----------------------------------------------------------------------------

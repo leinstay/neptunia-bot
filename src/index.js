@@ -17,6 +17,7 @@ import { createImageGen } from './llm/images.js';
 import { createTurnRunner } from './behavior/turn.js';
 import { hasRequiredLabels } from './behavior/prompt.js';
 import { createVarietyPass } from './behavior/variety-pass.js';
+import { createChannelRouter } from './behavior/route-channel.js';
 import { createEmojiIndex } from './discord/emoji.js';
 import { createSpontaneous } from './behavior/spontaneous.js';
 import { createMemoryUpdater } from './memory/update.js';
@@ -144,7 +145,9 @@ const emoji = createEmojiIndex(client, getGuildId);
 const variety = createVarietyPass({ hot, store, llm });
 // The persona's display name in a guild: the one name every request, the warmup and the analyzer use.
 const getSelfName = (guildId) => client.guilds.cache.get(guildId)?.members.me?.displayName ?? client.user?.username ?? 'bot';
-const turns = createTurnRunner({ hot, store, llm, calibrator, client, describer, imageFetcher, lookup, images, emoji, variety, getSelfName });
+// The route classifier (features.channelRoute): picks a channel the conversation is about for <channel_view>.
+const routeChannels = createChannelRouter({ hot, store, llm });
+const turns = createTurnRunner({ hot, store, llm, calibrator, client, describer, imageFetcher, lookup, images, emoji, variety, getSelfName, routeChannels });
 // THE way memory starts (docs/prompt-contract.md, "The warmup"): sample-based,
 // resumable, mutes the persona while a run is in flight (see isWarmingUp below).
 const warmup = createWarmup({ hot, store, client, llm, calibrator, getSelfName, getGuildId });

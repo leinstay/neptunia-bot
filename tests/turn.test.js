@@ -4075,10 +4075,21 @@ test('runTurn: route hook ids are pulled after explicit mentions', async () => {
   assert.equal(args.trigger, scene.trigger);
   assert.equal(args.selfName, 'Bot');
   assert.equal(args.config, scene.hot.config);
+  assert.equal(args.triggerKind, 'mention');
   assert.deepEqual(args.history.map((m) => m.id), ['m1', 'm9']);
   const view = channelViewOf(scene.llm);
   assert.ok(view.indexOf('channel #diary') < view.indexOf('channel #notes'), view);
   assert.ok(view.includes('σημειώσεις για αύριο'));
+});
+
+test('runTurn: the route hook is told the turn\'s trigger kind, null on a turn without a trigger', async () => {
+  const kinds = [];
+  const hook = async (args) => (kinds.push(args.triggerKind), []);
+  const followUp = pullScene({ mention: false, routeChannels: hook });
+  await withCapturedLogs(() => followUp.turns.runTurn({ channel: followUp.channel, mode: 'reply', trigger: followUp.trigger, triggerKind: 'followUp' }));
+  const spontaneous = pullScene({ mention: false, routeChannels: hook });
+  await withCapturedLogs(() => spontaneous.turns.runTurn({ channel: spontaneous.channel, mode: 'interject' }));
+  assert.deepEqual(kinds, ['followUp', null]);
 });
 
 test('runTurn: the route hook is not asked once the mentions fill every slot, nor while features.channelPull is off', async () => {

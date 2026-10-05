@@ -32,6 +32,7 @@
     "memoryTwoStage": false,
     "promptCache": false,
     "channelPull": true,
+    "channelRoute": true,
     "elsewhere": true,
     "typingSimulation": true,
     "adminCommands": true
@@ -117,6 +118,7 @@
     "maxMs": 12000,
     "betweenMessagesMs": [700, 3500]
   },
+  "route": { "contextMessages": 20, "maxChannels": 40, "purposeChars": 80, "maxOutputTokens": 120 },
   "elsewhere": { "settleSeconds": 90, "settleMaxSeconds": 300, "rememberPings": 20, "pingMaxAgeDays": 7 },
   "spontaneous": {
     "channels": [],
