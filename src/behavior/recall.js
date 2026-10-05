@@ -30,7 +30,7 @@ export const RECALL_DEFAULTS = Object.freeze({
   answerChars: 1200,
   stretchChars: 1500,
   maxPerDay: 100,
-  timeoutMs: 15000,
+  timeoutMs: 30000,
   maxOutputTokens: 500,
 });
 
