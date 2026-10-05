@@ -6,14 +6,20 @@
 // persona "remember" how it ended. This module wraps a sandbox view
 // (src/mentor/sandbox.js#liveView, or another view of the same shape) in one
 // whose memory reads leave out every dated item written at or after the
-// moment's cutoff (the trigger's time). Items that carry no date cannot be
-// filtered and pass through as they are: a profile's `character`, `style`,
-// `relationship`, names and counters, the guild's `patterns`, `starters`,
-// `injokes` and `self`, the channel entries, and the current text of a lore
-// entry or an interest updated later. Everything here is pure: the base view
-// is read at call time and never changed, nothing is cached.
+// moment's cutoff (the newest line she saw: the trigger's time, or a later
+// line her request held). Only the items listed at `momentView` are filtered;
+// everything else passes through as it is today: a profile's names and
+// counters, the guild's `patterns`, `starters`, `injokes` and `self`, the
+// channel entries, the current text of a lore entry or an interest updated
+// later -- and a profile's `relationship` text and its portrait (`character`,
+// `style`), although both now carry the time they were written
+// (`relationshipWrittenAt`, `portraitRefreshedAt`): a replay shows the ones
+// written after the moment (whether to hide or flag them is the owner's open
+// decision). Everything here is pure: the base view is read at call time and
+// never changed, nothing is cached.
 
 import { utcDay } from '../time.js';
+import { newestSeenTs } from './anchor.js';
 
 const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -118,16 +124,31 @@ function loreBefore(entries, cutoff) {
 }
 
 /**
- * When a replayed moment's memory stops: the time of its trigger (the last
- * message of its stored `history`), else its `at` (when the persona
- * answered); null when neither is known (nothing is then hidden). Pure.
- * @param {{ history?: object[], at?: number }} situation
+ * The recent store (src/memory/store.js#getRecent) before `cutoff`: the lines
+ * the analyzer added at or after it left out (by `addedAt`; a line without
+ * one, by the time of the moment it is about, `at`). A new object when a line
+ * was hidden, the given one otherwise; a value without `lines` (a view
+ * without a recent store reads null) passes through.
+ */
+function recentBefore(recent, cutoff) {
+  if (!recent || typeof recent !== 'object' || !Array.isArray(recent.lines)) return recent;
+  const { list, hidden } = keepBefore(recent.lines, (line) => isLater(timeOf(line?.addedAt) !== null ? line.addedAt : line?.at, cutoff));
+  return hidden ? { ...recent, lines: list } : recent;
+}
+
+/**
+ * When a replayed moment's memory stops: the time of the newest line the
+ * persona saw (src/mentor/anchor.js#newestSeenTs: the last message of its
+ * stored `history`, or its trigger when that is newer -- a call in another
+ * channel, found by `triggerId` in its stored windows), else its `at` (when
+ * the persona answered); null when neither is known (nothing is then
+ * hidden). Pure.
+ * @param {{ history?: object[], triggerId?: string|null, pulled?: object[], mode?: string|null, at?: number }} situation
  * @returns {number|null}
  */
 export function momentCutoff(situation) {
-  const history = Array.isArray(situation?.history) ? situation.history : [];
-  const triggerTs = history[history.length - 1]?.ts;
-  if (Number.isFinite(triggerTs)) return triggerTs;
+  const seen = newestSeenTs(situation);
+  if (seen !== null) return seen;
   return Array.isArray(situation?.history) && Number.isFinite(situation?.at) ? situation.at : null;
 }
 
@@ -139,10 +160,11 @@ export function momentCutoff(situation) {
  * day or later), affinity history entries (by `ts`; when the newest one goes,
  * `reason` falls back to the newest kept entry's, or to ''; the score stays),
  * details, interests and aliases (by `firstSeen`), the guild's learned items
- * (by `firstSeen`) and lore entries (by `createdAt`). Undated items and every
- * other field pass through; `prompts`, `config`, `calibrator` and
- * `listChannels` are the base's, read at call time. The base is never
- * written and nothing is cached. Pure.
+ * (by `firstSeen`), lore entries (by `createdAt`) and the recent store's
+ * lines (by `addedAt`, else by their moment `at`; null for a base without
+ * `getRecent`). Undated items and every other field pass through; `prompts`,
+ * `config`, `calibrator` and `listChannels` are the base's, read at call
+ * time. The base is never written and nothing is cached. Pure.
  * @param {object} base
  * @param {number} cutoff  Epoch ms.
  * @returns {object}
@@ -164,6 +186,7 @@ export function momentView(base, cutoff) {
       listUserProfiles: () => (base.memory.listUserProfiles() ?? []).map((profile) => profileBefore(profile, cutoff).profile),
       listChannels: () => base.memory.listChannels(),
       getLore: () => loreBefore(base.memory.getLore(), cutoff).list,
+      getRecent: () => recentBefore(typeof base.memory.getRecent === 'function' ? base.memory.getRecent() : null, cutoff),
     },
   };
 }
@@ -172,7 +195,8 @@ export function momentView(base, cutoff) {
  * How many items `momentView(base, cutoff)` leaves out over the whole memory,
  * by kind: `episodes`, `affinity` (history entries), `reasons` (attitudes
  * whose reason fell back), `details`, `interests`, `aliases`, `learned`,
- * `lore`. Counts only, for the log. Pure.
+ * `lore`. The recent lines it leaves out are not counted. Counts only, for
+ * the log. Pure.
  * @param {object} base
  * @param {number} cutoff
  * @returns {{ episodes: number, affinity: number, reasons: number, details: number, interests: number,

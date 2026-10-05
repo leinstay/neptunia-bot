@@ -11,11 +11,21 @@
 // post (a message, the GIF, the picture) answering such a line goes here
 // plain, with a jump link to it.
 
-import { canAttach, canReact, canSend, channelAllowed, fetchHistory, fetchNeighbors, PAGE as HISTORY_PAGE, withTextPreviews } from '../discord/collect.js';
+import {
+  audienceOf,
+  canAttach,
+  canReact,
+  canSend,
+  channelAllowed,
+  fetchHistory,
+  fetchNeighbors,
+  PAGE as HISTORY_PAGE,
+  withTextPreviews,
+} from '../discord/collect.js';
 import { captionPulled, checkPull, fetchPull } from '../discord/pull-fetch.js';
 import { buildDrawPrompt, buildRequest, fillPromptTemplate } from './prompt.js';
 import { channelPullOn, pullSettings, pullTargets } from './pull.js';
-import { markSeen, messageLink, resolveDestination, stampPings } from './elsewhere.js';
+import { audienceCovers, markSeen, messageLink, resolveDestination, stampPings } from './elsewhere.js';
 import { classifierTextModel } from './mention.js';
 import { parseOutput } from '../llm/parse.js';
 import { DailyCapError, TokenLimitError, RETRY_STATUS, sleep } from '../llm/openrouter.js';
@@ -36,6 +46,7 @@ import { fill, formatTranscript, renderTranscript } from '../discord/format.js';
 import { log } from '../log.js';
 import { clampChars, oneLine } from '../memory/clamp.js';
 import { gifPostsToday } from '../memory/gif-watch.js';
+import { liveRecent, recentSettings } from '../memory/recent.js';
 import { bumpDaily, utcDay } from '../time.js';
 
 /**
@@ -114,6 +125,19 @@ export function pickOtherProfiles(store, guildId, history, exceptId, count) {
     if (profiles.length >= count) break;
   }
   return profiles;
+}
+
+/** No `<recent>` input: no store's lines handed over, so the request builder builds no block. */
+const NO_RECENT = Object.freeze({ lines: undefined, audience: undefined });
+
+/**
+ * The audience of "every member of the server" in the shape
+ * src/behavior/elsewhere.js#audienceCovers compares: @everyone views it and no
+ * role or member is held back. A source covers it only when every member can
+ * read that source -- the private chat's rail for recent lines.
+ */
+function everyMemberAudience() {
+  return { everyone: true, roles: new Set(), roleAllow: new Set(), roleDeny: new Set(), memberAllow: new Set(), memberDeny: new Set() };
 }
 
 /** Display name of the author of `messageId` in `history`, or null when the message is not there. */
@@ -1185,6 +1209,44 @@ export function createTurnRunner({
   }
 
   /**
+   * The input of a turn's `<recent>` block (src/behavior/prompt.js#buildRequest
+   * `recentLines` / `recentAudience`): the guild's recent lines inside the last
+   * `memory.recentHours` (src/memory/store.js#getRecent, read now) and which
+   * source channels this turn may show them from. On a server turn: the
+   * channel the turn posts in, and every channel whose audience covers it
+   * (src/discord/collect.js#audienceOf, src/behavior/elsewhere.js#audienceCovers:
+   * everyone who can read this channel can read that one). In a private chat:
+   * the channels every member of the served guild can read. A channel the
+   * guild does not hold is never covered. No live line: an empty list (the
+   * block may still show the members' moments of those hours). Nothing
+   * (`lines` undefined: no block at all) with features.recent off (a missing
+   * key counts as on) or for a store without the recent store (tests' fakes);
+   * a read that throws is logged (`recent: failed`) and is nothing either: the
+   * block is never worth a turn.
+   * @returns {{ lines: object[]|undefined, audience: ((channelId: string|null) => boolean)|undefined }}
+   */
+  function recentInput({ channel, guildId, isPrivate, config, now }) {
+    const settings = recentSettings(config);
+    if (!settings || typeof store.getRecent !== 'function') return NO_RECENT;
+    try {
+      const lines = liveRecent(store.getRecent(guildId)?.lines, { now, hours: settings.hours });
+      if (lines.length === 0) return { lines, audience: undefined };
+      const guild = isPrivate ? (client.guilds?.cache?.get?.(guildId) ?? null) : channel.guild;
+      const here = isPrivate ? everyMemberAudience() : audienceOf(channel);
+      const allowed = new Set();
+      for (const id of new Set(lines.map((line) => line.channelId))) {
+        if (typeof id !== 'string' || !id) continue;
+        if (!isPrivate && id === channel.id) allowed.add(id);
+        else if (audienceCovers(here, audienceOf(guild?.channels?.cache?.get?.(id) ?? null))) allowed.add(id);
+      }
+      return { lines, audience: (channelId) => allowed.has(channelId) };
+    } catch (err) {
+      log.warn('recent: failed', { channel: channel.id, error: err });
+      return NO_RECENT;
+    }
+  }
+
+  /**
    * The other channels a server turn shows in `<channel_view>`, each fetched
    * by fetchPull, in the order of src/behavior/pull.js#pullTargets: the
    * turn's `source` first and alone -- a turn about it does not go on
@@ -1717,6 +1779,8 @@ export function createTurnRunner({
       // Where a call from a read-only channel is answered, for `<senses>`.
       const destination = isPrivate ? null : usableDestination(channel.guild, config).channel;
       const worn = await wornPending;
+      // `<recent>`: the guild's live recent lines (none: an empty list) and the channels this turn may show them from.
+      const recent = memoryOn ? recentInput({ channel, guildId, isPrivate, config, now }) : NO_RECENT;
       const request = buildRequest({
         config,
         prompts: hot.prompts,
@@ -1766,7 +1830,12 @@ export function createTurnRunner({
         focus,
         elsewhereDestination: destination?.name ? { name: destination.name } : null,
         readOnlyIds,
+        // `<recent>`: the last hours, its live lines and the members' moments (no block without the store).
+        recentLines: recent.lines,
+        recentAudience: recent.audience,
       });
+      // What `<recent>` showed, held back or cut: counts only.
+      if (request.recent) log.info('recent: shown', { channel: channel.id, ...request.recent });
 
       // A Discord CDN image the provider cannot fetch must not cost the
       // persona the reply -- the provider's own fetcher gets a 403 from

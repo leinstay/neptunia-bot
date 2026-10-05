@@ -15,6 +15,8 @@ import {
   bandGap,
   relationshipStaleOf,
   RELATIONSHIP_STALE_DEFAULTS,
+  REASON_CHARS,
+  deltaCapOf,
 } from '../src/memory/affinity.js';
 
 // --- affinityBand: every boundary from the contract ---------------------
@@ -123,6 +125,54 @@ test('applyDelta: an empty/whitespace reason keeps the previous reason', () => {
   const start = { score: 5, reason: 'kept reason', history: [] };
   const result = applyDelta(start, 1, '   ', OPTS);
   assert.equal(result.reason, 'kept reason');
+});
+
+test('applyDelta: each history entry records the reason of its own move, empty when none was given', () => {
+  const start = { score: 5, reason: 'παλιός λόγος', history: [{ ts: 't0', delta: 5, appliedDelta: 5, score: 5, reason: 'παλιός λόγος' }] };
+  for (const reason of ['   ', '', undefined, null, 42]) {
+    const result = applyDelta(start, 2, reason, OPTS);
+    assert.equal(result.score, 7, String(reason));
+    assert.equal(result.reason, 'παλιός λόγος', `${String(reason)}: the stored reason stays the last one given`);
+    assert.equal(result.history.length, 2);
+    assert.equal(result.history[0].reason, 'παλιός λόγος', 'an earlier entry is untouched');
+    assert.deepEqual(result.history[1], { ts: new Date(OPTS.now).toISOString(), delta: 2, appliedDelta: 2, score: 7, reason: '' }, String(reason));
+  }
+  const given = applyDelta(start, -3, '  νέος λόγος  ', OPTS);
+  assert.equal(given.reason, 'νέος λόγος');
+  assert.equal(given.history[1].reason, 'νέος λόγος', 'a given reason is recorded trimmed');
+});
+
+test('REASON_CHARS: 200, the limit applyDelta cuts a reason at, on the entry and the stored reason alike', () => {
+  assert.equal(REASON_CHARS, 200);
+  const result = applyDelta(undefined, 5, 'α'.repeat(1000), { maxDelta: 15, historySize: 10, now: OPTS.now, clampTolerance: 1 });
+  assert.equal([...result.reason].length, REASON_CHARS);
+  assert.equal(result.history[0].reason, result.reason);
+});
+
+// --- deltaCapOf: the one reading of relationships.maxDeltaPerUpdate ----------
+
+test('deltaCapOf: a finite number caps at its absolute value, anything else caps nothing', () => {
+  const rows = [
+    [15, 15],
+    [-10, 10],
+    [0, 0],
+    [2.5, 2.5],
+    [undefined, Infinity],
+    [null, Infinity],
+    [NaN, Infinity],
+    [Infinity, Infinity],
+    [-Infinity, Infinity],
+    ['15', Infinity],
+  ];
+  for (const [maxDelta, cap] of rows) assert.equal(deltaCapOf(maxDelta), cap, String(maxDelta));
+});
+
+test('applyDelta: the delta is clamped to deltaCapOf(maxDelta)', () => {
+  assert.equal(applyDelta(emptyAffinity(), 999, 'x', { ...OPTS, maxDelta: -10 }).score, 10, 'a negative cap counts by its size');
+  assert.equal(applyDelta(emptyAffinity(), -40, 'x', { ...OPTS, maxDelta: undefined }).score, -40, 'no cap: the delta lands whole');
+  assert.equal(applyDelta(emptyAffinity(), 40, 'x', { ...OPTS, maxDelta: 'ten' }).score, 40, 'a cap that is not a number caps nothing');
+  const start = emptyAffinity();
+  assert.equal(applyDelta(start, 40, 'x', { ...OPTS, maxDelta: 0 }), start, 'a cap of 0 lets nothing through');
 });
 
 test('applyDelta: history is trimmed to the last historySize entries', () => {

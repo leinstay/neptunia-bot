@@ -169,7 +169,7 @@ test('getGuild: returns the default empty guild memory when nothing is stored', 
   const dir = tmpDataDir();
   const store = createStore({ dataDir: dir });
   const guild = store.getGuild('g1');
-  assert.deepEqual(guild, { patterns: '', starters: '', injokes: [], self: [], learned: [], learnedNextId: 1, emojiUsage: {}, emojiBackfill: null, ownLines: [], worn: null, wornHistory: [], updatedAt: null });
+  assert.deepEqual(guild, { patterns: '', starters: '', injokes: [], self: [], learned: [], learnedNextId: 1, emojiUsage: {}, emojiBackfill: null, ownLines: [], worn: null, wornHistory: [], updatedAt: null, notesUpdatedAt: null, notesCheckedAt: null });
 });
 
 // ---- guild.learned: things people taught the persona --------------------------
@@ -187,7 +187,7 @@ test('getGuild: an old guild.json without learned loads it as empty, every other
 
   const store = createStore({ dataDir: dir });
   const guild = store.getGuild('g1');
-  assert.deepEqual(guild, { ...old, learned: [], learnedNextId: 1, emojiUsage: {}, emojiBackfill: null, ownLines: [], worn: null, wornHistory: [] });
+  assert.deepEqual(guild, { ...old, learned: [], learnedNextId: 1, emojiUsage: {}, emojiBackfill: null, ownLines: [], worn: null, wornHistory: [], notesUpdatedAt: null, notesCheckedAt: null });
   store.flush();
   assert.equal(fs.readFileSync(file, 'utf8'), raw, 'reading alone never rewrites the file');
 });
@@ -306,6 +306,133 @@ test('updateGuild: a re-send identical to what is stored leaves updatedAt alone;
   const guild = store.updateGuild('g1', { patterns: 'μιμίδια', injokes: ['café', 'ο βράχος'] });
   assert.notEqual(guild.updatedAt, earlier, 'a reordered list is a change');
   assert.deepEqual(guild.injokes, ['café', 'ο βράχος']);
+});
+
+// ---- the notes stamps: when the server and channel notes last changed, and were last re-checked ----
+
+const NOTES_EARLIER = '2000-01-01T00:00:00.000Z';
+const NOTES_CHECK_AT = Date.UTC(2026, 9, 5, 9, 0, 0);
+
+test('updateGuild: notesUpdatedAt moves for patterns, starters or injokes only', () => {
+  const store = createStore({ dataDir: tmpDataDir() });
+  const rewind = () => Object.assign(store.getGuild('g1'), { updatedAt: NOTES_EARLIER, notesUpdatedAt: NOTES_EARLIER });
+  store.updateGuild('g1', { patterns: 'μιμίδια', starters: 'καλημέρα', injokes: ['ο βράχος'], self: ['πίνω τσάι'] });
+  assert.equal(store.getGuild('g1').notesUpdatedAt, store.getGuild('g1').updatedAt, 'the first notes are stamped with the write');
+
+  for (const fields of [{ patterns: 'γάτες' }, { starters: 'καληνύχτα' }, { injokes: ['ο βράχος', 'café'] }, { self: ['παίζω κιθάρα'], patterns: 'σκύλοι' }]) {
+    rewind();
+    const guild = store.updateGuild('g1', fields);
+    assert.notEqual(guild.notesUpdatedAt, NOTES_EARLIER, `${Object.keys(fields)} moves the notes stamp`);
+    assert.equal(guild.notesUpdatedAt, guild.updatedAt, 'one instant for both stamps');
+  }
+
+  rewind();
+  const selfOnly = store.updateGuild('g1', { self: ['φοβάμαι τις αράχνες'] });
+  assert.notEqual(selfOnly.updatedAt, NOTES_EARLIER, 'a self fact is a change of the guild');
+  assert.equal(selfOnly.notesUpdatedAt, NOTES_EARLIER, 'self alone never moves the notes stamp');
+
+  rewind();
+  const sameNotes = store.updateGuild('g1', { self: ['μισώ τη βροχή'], patterns: 'σκύλοι', starters: 'καληνύχτα', injokes: ['ο βράχος', 'café'] });
+  assert.notEqual(sameNotes.updatedAt, NOTES_EARLIER);
+  assert.equal(sameNotes.notesUpdatedAt, NOTES_EARLIER, 'notes re-sent as stored beside a new self fact are no change of the notes');
+
+  rewind();
+  const resent = store.updateGuild('g1', { patterns: 'σκύλοι', starters: 'καληνύχτα', injokes: ['ο βράχος', 'café'] });
+  assert.deepEqual([resent.updatedAt, resent.notesUpdatedAt], [NOTES_EARLIER, NOTES_EARLIER], 'an identical re-send stamps nothing');
+});
+
+test('updateGuild: the notes stamps can never be set through the fields', () => {
+  const store = createStore({ dataDir: tmpDataDir() });
+  store.updateGuild('g1', { patterns: 'μιμίδια' });
+  Object.assign(store.getGuild('g1'), { updatedAt: NOTES_EARLIER, notesUpdatedAt: NOTES_EARLIER });
+
+  const guild = store.updateGuild('g1', { notesUpdatedAt: '2030-01-01T00:00:00.000Z', notesCheckedAt: '2030-01-01T00:00:00.000Z' });
+  assert.deepEqual([guild.updatedAt, guild.notesUpdatedAt, guild.notesCheckedAt], [NOTES_EARLIER, NOTES_EARLIER, null]);
+});
+
+test('applySelfOps, applyLearnedOps: a self fact or a lesson never moves notesUpdatedAt', () => {
+  const store = createStore({ dataDir: tmpDataDir() });
+  store.updateGuild('g1', { patterns: 'μιμίδια' });
+  Object.assign(store.getGuild('g1'), { updatedAt: NOTES_EARLIER, notesUpdatedAt: NOTES_EARLIER });
+
+  store.applySelfOps('g1', { add: ['πίνω τσάι'] }, { maxSelfFacts: 20, now: NOTES_CHECK_AT });
+  store.applyLearnedOps('g1', { add: ['Café closes at nine'] }, { ...LEARNED_CFG, seenAt: TEACH_AT });
+  const guild = store.getGuild('g1');
+  assert.notEqual(guild.updatedAt, NOTES_EARLIER);
+  assert.equal(guild.notesUpdatedAt, NOTES_EARLIER);
+});
+
+test('markNotesChecked: stamps notesCheckedAt on each listed channel and on the guild, never updatedAt', () => {
+  const store = createStore({ dataDir: tmpDataDir() });
+  store.updateGuild('g1', { patterns: 'μιμίδια' });
+  Object.assign(store.getGuild('g1'), { updatedAt: NOTES_EARLIER, notesUpdatedAt: NOTES_EARLIER });
+  for (const id of ['c1', 'c2', 'c3']) store.updateChannel('g1', id, { purpose: 'κουβέντα' }).updatedAt = NOTES_EARLIER;
+  const before = structuredClone({ guild: store.getGuild('g1'), channels: store.listChannels('g1') });
+
+  const marked = store.markNotesChecked('g1', { channels: ['c1', 'c2', 'c1'], guild: true }, NOTES_CHECK_AT);
+
+  const at = new Date(NOTES_CHECK_AT).toISOString();
+  assert.deepEqual(marked, { channels: 2, guild: true }, 'a channel listed twice is one channel');
+  assert.deepEqual(store.getGuild('g1'), { ...before.guild, notesCheckedAt: at }, 'the guild: nothing but the check stamp');
+  const checked = (channel) => (channel.id === 'c3' ? channel : { ...channel, notesCheckedAt: at });
+  assert.deepEqual(store.listChannels('g1'), before.channels.map(checked), 'each listed channel: nothing but the check stamp');
+  assert.equal(store.getChannel('g1', 'c3').notesCheckedAt, null, 'a channel that was not listed keeps none');
+});
+
+test('markNotesChecked: guild false leaves the guild alone; a channel never seen is skipped, not created', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  store.updateChannel('g1', 'c1', { purpose: 'κουβέντα' });
+
+  assert.deepEqual(store.markNotesChecked('g1', { channels: ['c1', 'c9'], guild: false }, NOTES_CHECK_AT), { channels: 1, guild: false });
+  store.flush();
+
+  assert.equal(store.getChannel('g1', 'c9'), null);
+  assert.equal(fs.existsSync(path.join(dir, 'guilds', 'g1', 'channels', 'c9.json')), false);
+  assert.equal(fs.existsSync(path.join(dir, 'guilds', 'g1', 'guild.json')), false, 'no guild file appears for a channel-only check');
+  assert.equal(store.getGuild('g1').notesCheckedAt, null);
+});
+
+test('markNotesChecked: targets that name nothing change nothing and never throw', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  store.updateChannel('g1', 'c1', { purpose: 'κουβέντα' });
+  store.flush();
+  const file = path.join(dir, 'guilds', 'g1', 'channels', 'c1.json');
+  const raw = fs.readFileSync(file, 'utf8');
+
+  for (const targets of [undefined, null, 'c1', 42, [], {}, { channels: 'c1' }, { channels: [null, {}, ['c1']], guild: 'yes' }]) {
+    assert.deepEqual(store.markNotesChecked('g1', targets, NOTES_CHECK_AT), { channels: 0, guild: false }, `targets ${JSON.stringify(targets)}`);
+  }
+  store.flush();
+  assert.equal(fs.readFileSync(file, 'utf8'), raw);
+  assert.equal(fs.existsSync(path.join(dir, 'guilds', 'g1', 'guild.json')), false);
+});
+
+test('markNotesChecked: a guild never written gets its check stamp, and the stamps survive a restart', () => {
+  const dir = tmpDataDir();
+  const storeA = createStore({ dataDir: dir });
+  storeA.touchChannel('g1', 'c1', { name: 'αγορά', category: null, topic: null }, 1000);
+  storeA.markNotesChecked('g1', { channels: ['c1'], guild: true }, NOTES_CHECK_AT);
+  storeA.flush();
+
+  const storeB = createStore({ dataDir: dir });
+  const at = new Date(NOTES_CHECK_AT).toISOString();
+  assert.equal(storeB.getGuild('g1').notesCheckedAt, at);
+  assert.equal(storeB.getGuild('g1').notesUpdatedAt, null, 'checked, never written');
+  assert.equal(storeB.getChannel('g1', 'c1').notesCheckedAt, at);
+  assert.equal(storeB.getChannel('g1', 'c1').updatedAt, null);
+});
+
+test('getGuild: notes stamps a hand edit broke read as never stamped', () => {
+  const dir = tmpDataDir();
+  const file = path.join(dir, 'guilds', 'g1', 'guild.json');
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, JSON.stringify({ patterns: 'μιμίδια', notesUpdatedAt: 'χθες', notesCheckedAt: 1759654800000 }));
+
+  const guild = createStore({ dataDir: dir }).getGuild('g1');
+  assert.deepEqual([guild.notesUpdatedAt, guild.notesCheckedAt], [null, null]);
+  assert.equal(guild.patterns, 'μιμίδια');
 });
 
 test('writeJsonAtomic: a refused rename falls back to an in-place write, and says so in the log', async () => {
@@ -790,6 +917,218 @@ test('flush + a new store instance: channels survive a "restart"', () => {
   assert.equal(channel.name, 'general');
   assert.equal(channel.purpose, 'chatter');
   assert.deepEqual(channel.days, { '1970-01-01': 1 });
+});
+
+// ---- the writers tally behind a channel's topWriters ------------------------
+
+const WRITERS_DAY_MS = 24 * 60 * 60 * 1000;
+const WRITERS_T0 = Date.UTC(2026, 5, 1, 12, 0, 0);
+const AGORA_FACTS = { name: 'αγορά', category: null, topic: null };
+
+/** `count` messages of one writer in a channel, a millisecond apart from `fromTs`; the channel after the last. */
+function writeLines(store, channelId, authorId, count, fromTs, opts) {
+  let channel;
+  for (let n = 0; n < count; n += 1) channel = store.touchChannel('g1', channelId, AGORA_FACTS, fromTs + n, authorId, opts);
+  return channel;
+}
+
+/** A channel file as the store wrote it before the tally existed. */
+function writeOldChannelFile(dir, channelId, fields = {}) {
+  const file = path.join(dir, 'guilds', 'g1', 'channels', `${channelId}.json`);
+  const old = {
+    id: channelId,
+    name: 'αγορά',
+    category: null,
+    topic: null,
+    purpose: 'κουβέντα',
+    topics: '',
+    tone: '',
+    days: { '2026-06-01': 25 },
+    messageCount: 25,
+    firstMessageAt: WRITERS_T0,
+    lastMessageAt: WRITERS_T0 + 5000,
+    topWriters: [{ id: 'άλφα', count: 9 }, { id: 'βήτα', count: 7 }, { id: 'γάμα', count: 5 }, { id: 'δέλτα', count: 3 }, { id: 'έψιλον', count: 1 }],
+    updatedAt: '2026-06-01T00:00:00.000Z',
+    ...fields,
+  };
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, JSON.stringify(old, null, 2));
+  return { file, old, raw: fs.readFileSync(file, 'utf8') };
+}
+
+test('touchChannel: a newcomer who keeps writing enters topWriters past five stored writers', () => {
+  const store = createStore({ dataDir: tmpDataDir() });
+  for (const [i, id] of ['άλφα', 'βήτα', 'γάμα', 'δέλτα', 'έψιλον'].entries()) writeLines(store, 'c1', id, 1, WRITERS_T0 + i);
+
+  const channel = writeLines(store, 'c1', 'ζήτα', 50, WRITERS_T0 + 1000);
+
+  assert.deepEqual(channel.topWriters[0], { id: 'ζήτα', count: 50 });
+  assert.deepEqual(channel.topWriters.map((writer) => writer.id), ['ζήτα', 'έψιλον', 'δέλτα', 'γάμα', 'βήτα'], 'the five shown, the latest of equals first');
+  assert.deepEqual(channel.writers['άλφα'], { count: 1, last: WRITERS_T0 }, 'the writer who left the five shown keeps a tally');
+});
+
+test('touchChannel: a writer silent for 90 days falls below a steady newcomer', () => {
+  const store = createStore({ dataDir: tmpDataDir() });
+  const pair = (channelId, daysLater, opts) => {
+    writeLines(store, channelId, 'παλιός', 8, WRITERS_T0, opts);
+    return writeLines(store, channelId, 'νέος', 3, WRITERS_T0 + daysLater * WRITERS_DAY_MS, opts).topWriters;
+  };
+
+  assert.deepEqual(pair('c1', 1), [{ id: 'παλιός', count: 8 }, { id: 'νέος', count: 3 }], 'a day apart the count decides');
+  assert.deepEqual(pair('c2', 90), [{ id: 'νέος', count: 3 }, { id: 'παλιός', count: 8 }], 'three half-lives of silence outweigh the count');
+  assert.deepEqual(store.getChannel('g1', 'c2').writers['παλιός'], { count: 8, last: WRITERS_T0 + 7 }, 'ranked lower, not forgotten');
+});
+
+test('touchChannel: channelWritersHalfLifeDays is read from the call; 0 ranks by count alone', () => {
+  const store = createStore({ dataDir: tmpDataDir() });
+  const order = (channelId, opts) => {
+    writeLines(store, channelId, 'παλιός', 8, WRITERS_T0, opts);
+    return writeLines(store, channelId, 'νέος', 3, WRITERS_T0 + 90 * WRITERS_DAY_MS, opts).topWriters.map((writer) => writer.id);
+  };
+
+  assert.deepEqual(order('c1', { channelWritersHalfLifeDays: 0 }), ['παλιός', 'νέος']);
+  assert.deepEqual(order('c2', { channelWritersHalfLifeDays: 365 }), ['παλιός', 'νέος'], 'a quarter of a half-life is not enough');
+  assert.deepEqual(order('c3', { channelWritersHalfLifeDays: 30 }), ['νέος', 'παλιός']);
+  assert.deepEqual(order('c4', { channelWritersHalfLifeDays: 'μήνας' }), ['νέος', 'παλιός'], 'not a number: the 30 days of config.json');
+});
+
+test('touchChannel: the tally keeps channelWritersStored writers, 20 unless told, never fewer than the five shown', () => {
+  const store = createStore({ dataDir: tmpDataDir() });
+  const stored = (channelId, opts) => {
+    for (let n = 0; n < 25; n += 1) writeLines(store, channelId, `γράφων-${String(n).padStart(2, '0')}`, 1, WRITERS_T0 + n, opts);
+    return Object.keys(store.getChannel('g1', channelId).writers).sort();
+  };
+  const newest = (count) => Array.from({ length: count }, (_, i) => `γράφων-${String(25 - count + i).padStart(2, '0')}`);
+
+  assert.deepEqual(stored('c1'), newest(20), 'the lowest-ranked leave: here the ones who wrote longest ago');
+  assert.deepEqual(stored('c2', { channelWritersStored: 7 }), newest(7));
+  assert.deepEqual(stored('c3', { channelWritersStored: 0 }), newest(5));
+  assert.deepEqual(stored('c4', { channelWritersStored: 'πολλοί' }), newest(20), 'not a number: the 20 of config.json');
+  assert.equal(store.getChannel('g1', 'c2').topWriters.length, 5);
+});
+
+test('touchChannel: a writer below the five shown comes back with the count they gathered', () => {
+  const store = createStore({ dataDir: tmpDataDir() });
+  for (const id of ['άλφα', 'βήτα', 'γάμα', 'δέλτα', 'έψιλον']) writeLines(store, 'c1', id, 3, WRITERS_T0);
+  const below = writeLines(store, 'c1', 'ζήτα', 2, WRITERS_T0);
+  assert.ok(!below.topWriters.some((writer) => writer.id === 'ζήτα'), 'two lines against five writers with three');
+
+  const channel = writeLines(store, 'c1', 'ζήτα', 2, WRITERS_T0 + 10);
+  assert.deepEqual(channel.topWriters[0], { id: 'ζήτα', count: 4 });
+});
+
+test('touchChannel: a line that arrives late is counted and never moves the writer\'s last backwards', () => {
+  const store = createStore({ dataDir: tmpDataDir() });
+  writeLines(store, 'c1', 'άλφα', 1, WRITERS_T0 + 5000);
+  const channel = writeLines(store, 'c1', 'άλφα', 1, WRITERS_T0);
+  assert.deepEqual(channel.writers, { 'άλφα': { count: 2, last: WRITERS_T0 + 5000 } });
+});
+
+test('touchChannel: a message without an author leaves the tally and topWriters as they are', () => {
+  const store = createStore({ dataDir: tmpDataDir() });
+  writeLines(store, 'c1', 'άλφα', 2, WRITERS_T0);
+  const before = structuredClone(store.getChannel('g1', 'c1'));
+
+  const channel = store.touchChannel('g1', 'c1', AGORA_FACTS, WRITERS_T0 + 10);
+  assert.deepEqual([channel.writers, channel.topWriters], [before.writers, before.topWriters]);
+  assert.equal(channel.messageCount, before.messageCount + 1);
+});
+
+test('touchChannel, setChannelFacts: counters never stamp updatedAt, only a change of the notes does', () => {
+  const store = createStore({ dataDir: tmpDataDir() });
+  writeLines(store, 'c1', 'άλφα', 3, WRITERS_T0);
+  store.setChannelFacts('g1', 'c1', { ...AGORA_FACTS, messageCount: 3, lastMessageAt: WRITERS_T0, days: {}, topWriters: [{ id: 'άλφα', count: 3 }] });
+  assert.equal(store.getChannel('g1', 'c1').updatedAt, null);
+  assert.equal(store.getChannel('g1', 'c1').notesCheckedAt, null);
+
+  assert.ok(store.updateChannel('g1', 'c1', { tone: 'ήρεμος' }).updatedAt);
+});
+
+test('setChannelFacts: seeds the writers tally from its window, and a redo lands on the same tally', () => {
+  const store = createStore({ dataDir: tmpDataDir() });
+  const facts = {
+    ...AGORA_FACTS,
+    messageCount: 12,
+    firstMessageAt: WRITERS_T0,
+    lastMessageAt: WRITERS_T0 + 9000,
+    days: { '2026-06-01': 12 },
+    topWriters: [{ id: 'άλφα', count: 8 }, { id: 'βήτα', count: 4 }],
+  };
+  writeLines(store, 'c1', 'γάμα', 6, WRITERS_T0); // a live tally the window replaces, like every counter
+  store.setChannelFacts('g1', 'c1', facts);
+  const channel = store.setChannelFacts('g1', 'c1', facts);
+  assert.deepEqual(channel.writers, { 'άλφα': { count: 8, last: WRITERS_T0 + 9000 }, 'βήτα': { count: 4, last: WRITERS_T0 + 9000 } });
+  assert.deepEqual(channel.topWriters, facts.topWriters);
+
+  const live = writeLines(store, 'c1', 'βήτα', 5, WRITERS_T0 + 10_000);
+  assert.deepEqual(live.topWriters, [{ id: 'βήτα', count: 9 }, { id: 'άλφα', count: 8 }], 'live lines add to the seeded counts');
+
+  const empty = store.setChannelFacts('g1', 'c1', { ...AGORA_FACTS, messageCount: 0, days: {}, topWriters: [] });
+  assert.deepEqual([empty.writers, empty.topWriters], [{}, []], 'a window without messages empties the tally too');
+});
+
+test('setChannelFacts: writers the window counts equal keep their order at the next message', () => {
+  const store = createStore({ dataDir: tmpDataDir() });
+  const topWriters = [{ id: 'άλφα', count: 3 }, { id: 'βήτα', count: 3 }, { id: 'γάμα', count: 3 }];
+  store.setChannelFacts('g1', 'c1', { ...AGORA_FACTS, messageCount: 9, lastMessageAt: WRITERS_T0, days: {}, topWriters });
+
+  const channel = writeLines(store, 'c1', 'δέλτα', 1, WRITERS_T0 + 1);
+  assert.deepEqual(channel.topWriters.map((writer) => writer.id), ['άλφα', 'βήτα', 'γάμα', 'δέλτα']);
+});
+
+test('getChannel: an old channel file without a tally seeds it from the stored topWriters, the file untouched', () => {
+  const dir = tmpDataDir();
+  const { file, old, raw } = writeOldChannelFile(dir, 'c1');
+  const store = createStore({ dataDir: dir });
+
+  const channel = store.getChannel('g1', 'c1');
+  const last = old.lastMessageAt;
+  assert.deepEqual(channel, {
+    ...old,
+    notesCheckedAt: null,
+    writers: { 'άλφα': { count: 9, last }, 'βήτα': { count: 7, last }, 'γάμα': { count: 5, last }, 'δέλτα': { count: 3, last }, 'έψιλον': { count: 1, last } },
+  });
+  assert.deepEqual(store.listChannels('g1'), [channel]);
+  store.flush();
+  assert.equal(fs.readFileSync(file, 'utf8'), raw, 'reading alone never rewrites the file');
+});
+
+test('touchChannel: a sixth writer enters the frozen top five of an old channel file, stored counts kept', () => {
+  const dir = tmpDataDir();
+  writeOldChannelFile(dir, 'c1');
+  const store = createStore({ dataDir: dir });
+
+  const first = writeLines(store, 'c1', 'ζήτα', 1, WRITERS_T0 + 6000);
+  assert.deepEqual(first.topWriters, [{ id: 'άλφα', count: 9 }, { id: 'βήτα', count: 7 }, { id: 'γάμα', count: 5 }, { id: 'δέλτα', count: 3 }, { id: 'ζήτα', count: 1 }], 'the stored order holds; the newest of two single lines is shown');
+  const channel = writeLines(store, 'c1', 'ζήτα', 9, WRITERS_T0 + 7000);
+  assert.deepEqual(channel.topWriters.slice(0, 2), [{ id: 'ζήτα', count: 10 }, { id: 'άλφα', count: 9 }]);
+  assert.deepEqual(writeLines(store, 'c1', 'έψιλον', 1, WRITERS_T0 + 8000).writers['έψιλον'], { count: 2, last: WRITERS_T0 + 8000 });
+
+  store.flush();
+  const reloaded = createStore({ dataDir: dir }).getChannel('g1', 'c1');
+  assert.deepEqual(reloaded.writers, store.getChannel('g1', 'c1').writers, 'the tally is stored with the next write');
+});
+
+test('getChannel: a tally or a check stamp a hand edit broke is made safe to read', () => {
+  const dir = tmpDataDir();
+  writeOldChannelFile(dir, 'c1', {
+    notesCheckedAt: 7,
+    writers: {
+      'άλφα': { count: 3, last: WRITERS_T0 },
+      'βήτα': { count: 0, last: WRITERS_T0 },
+      'γάμα': 'πολύ',
+      'δέλτα': { count: 2.9, last: 'χθες' },
+      'έψιλον': { count: 4, last: 1e300 },
+    },
+  });
+  writeOldChannelFile(dir, 'c2', { writers: ['άλφα'], topWriters: [{ id: 'άλφα', count: 2 }, { id: 'βήτα' }, null, { count: 4 }] });
+  const store = createStore({ dataDir: dir });
+
+  const channel = store.getChannel('g1', 'c1');
+  assert.equal(channel.notesCheckedAt, null);
+  assert.deepEqual(channel.writers, { 'άλφα': { count: 3, last: WRITERS_T0 }, 'δέλτα': { count: 2, last: 0 }, 'έψιλον': { count: 4, last: 0 } });
+  assert.deepEqual(store.getChannel('g1', 'c2').writers, { 'άλφα': { count: 2, last: WRITERS_T0 + 5000 } }, 'not a tally: seeded from the usable part of topWriters');
+  assert.deepEqual(writeLines(store, 'c1', 'έψιλον', 1, WRITERS_T0 + 6000).topWriters[0], { id: 'έψιλον', count: 5 });
 });
 
 // --- media cache (src/memory/describe.js's storage) --------------------------
@@ -1316,7 +1655,7 @@ test('wipeGuild: removes profiles, guild memory, channels, buffer and analyzer l
   // cache is immediately usable
   assert.equal(storeA.getUser('g1', 'u1'), null);
   assert.equal(storeA.getUser('g1', 'u2'), null);
-  assert.deepEqual(storeA.getGuild('g1'), { patterns: '', starters: '', injokes: [], self: [], learned: [], learnedNextId: 1, emojiUsage: {}, emojiBackfill: null, ownLines: [], worn: null, wornHistory: [], updatedAt: null });
+  assert.deepEqual(storeA.getGuild('g1'), { patterns: '', starters: '', injokes: [], self: [], learned: [], learnedNextId: 1, emojiUsage: {}, emojiBackfill: null, ownLines: [], worn: null, wornHistory: [], updatedAt: null, notesUpdatedAt: null, notesCheckedAt: null });
   assert.deepEqual(storeA.listChannels('g1'), []);
   assert.deepEqual(storeA.getBuffer('g1'), []);
   const lore = storeA.getLore('g1');
@@ -1332,7 +1671,7 @@ test('wipeGuild: removes profiles, guild memory, channels, buffer and analyzer l
   const storeB = createStore({ dataDir: dir });
   assert.equal(storeB.getUser('g1', 'u1'), null);
   assert.equal(storeB.getUser('g1', 'u2'), null);
-  assert.deepEqual(storeB.getGuild('g1'), { patterns: '', starters: '', injokes: [], self: [], learned: [], learnedNextId: 1, emojiUsage: {}, emojiBackfill: null, ownLines: [], worn: null, wornHistory: [], updatedAt: null });
+  assert.deepEqual(storeB.getGuild('g1'), { patterns: '', starters: '', injokes: [], self: [], learned: [], learnedNextId: 1, emojiUsage: {}, emojiBackfill: null, ownLines: [], worn: null, wornHistory: [], updatedAt: null, notesUpdatedAt: null, notesCheckedAt: null });
   assert.deepEqual(storeB.listChannels('g1'), []);
   assert.deepEqual(storeB.getBuffer('g1'), []);
   const loreB = storeB.getLore('g1');

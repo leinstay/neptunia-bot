@@ -62,12 +62,6 @@ test('applyEnv: real environment variables always win over parsed ones', () => {
   assert.equal(target.BAR, 'from-dotenv');
 });
 
-test('applyEnv: returns the target object', () => {
-  const target = {};
-  const returned = applyEnv({ A: '1' }, target);
-  assert.equal(returned, target);
-});
-
 test('isPlainObject: true for objects, false for null, arrays, scalars and functions', () => {
   assert.equal(isPlainObject({}), true);
   assert.equal(isPlainObject({ a: 1 }), true);

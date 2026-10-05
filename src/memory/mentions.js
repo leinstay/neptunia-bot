@@ -19,7 +19,11 @@
 // It also owns the two text primitives those conversions rest on and other
 // modules share: `ID_DIGITS` (the id range every id pattern is built from) and
 // the whole-word test (`isWordChar`, `occursAsWholeWord`) used by name
-// triggers, lore keys and the `<people>` name scan.
+// triggers, lore keys and the `<people>` name scan. And the lesson teacher
+// rule (`teacherToken`, `TEACHER_TOKEN_RE`): which member taught the persona a
+// thing, one rule for both analyzer modes (src/memory/update.js#parseLearnedOps
+// and src/memory/voice.js#splitDecision), so switching modes never changes a
+// lesson's teacher.
 
 /**
  * The digits of a Discord member id, as a regex source: the one id range every
@@ -30,6 +34,31 @@ export const ID_DIGITS = '\\d{17,20}';
 
 const TOKEN_RE = new RegExp(`<@(${ID_DIGITS})>`, 'g');
 const ID_MARKER_RE = new RegExp(`\\(id:(${ID_DIGITS})\\)`, 'g');
+
+/**
+ * A lesson's teacher in its stored form: the whole value is exactly one `<@id>` token (group 1 =
+ * the id). No `g` flag, so the shared pattern keeps no state between calls.
+ */
+export const TEACHER_TOKEN_RE = new RegExp(`^<@(${ID_DIGITS})>$`);
+// The other form the analyzer may write a teacher in: one `name (id:...)` reference, the name any
+// text without parentheses or angle brackets (several words, or none).
+const TEACHER_REF_RE = new RegExp(`^[^()<>]*\\(id:(${ID_DIGITS})\\)$`);
+
+/**
+ * A lesson's teacher (the `from` of a taught item) as the `<@id>` token it is stored as. `from`,
+ * trimmed, must be exactly one `<@id>` token or one `name (id:...)` reference (whatever the name)
+ * of an id `isKnownId` accepts; anything else -- a bare name, an unknown id, two references, other
+ * text around them -- gives undefined: a teacher is never guessed from the text or the batch.
+ * @param {unknown} from
+ * @param {(id: string) => boolean} isKnownId  Not a function -> no id is known.
+ * @returns {string|undefined}
+ */
+export function teacherToken(from, isKnownId) {
+  if (typeof from !== 'string') return undefined;
+  const trimmed = from.trim();
+  const id = TEACHER_TOKEN_RE.exec(trimmed)?.[1] ?? TEACHER_REF_RE.exec(trimmed)?.[1];
+  return id && typeof isKnownId === 'function' && isKnownId(id) ? `<@${id}>` : undefined;
+}
 
 /**
  * How much of `before` (the text immediately preceding an `(id:...)` marker)

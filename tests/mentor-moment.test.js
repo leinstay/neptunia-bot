@@ -140,6 +140,17 @@ test('momentCutoff: the trigger time, else the answer time, else null', () => {
   assert.equal(momentCutoff({ lines: [] }), null);
 });
 
+test('momentCutoff: the newest line she saw -- a call in another channel after the chat, or the chat after the trigger', () => {
+  const history = [{ id: 'a', ts: CUTOFF - 120_000 }, { id: 'b', ts: CUTOFF - 60_000 }];
+  const call = { id: 'c', ts: CUTOFF, self: false };
+  const routed = { history, triggerId: 'c', pulled: [{ channelId: '500000000000000002', reason: 'routed', messages: [call] }], at: CUTOFF + 5000 };
+  assert.equal(momentCutoff(routed), CUTOFF);
+  // Lines after the trigger that her request held: the last of them.
+  assert.equal(momentCutoff({ history: [{ id: 't', ts: CUTOFF - 60_000 }, { id: 'n', ts: CUTOFF }], triggerId: 't', at: CUTOFF + 5000 }), CUTOFF);
+  // A trigger id found nowhere: the last line, as before.
+  assert.equal(momentCutoff({ history, triggerId: 'gone', at: CUTOFF + 5000 }), CUTOFF - 60_000);
+});
+
 test('momentView: episodes written at or after the cutoff are hidden, earlier ones kept', () => {
   const { view } = baseView();
   const episodes = momentView(view, CUTOFF).memory.getUser(ALICE).episodes.map((e) => e.what);
@@ -179,6 +190,33 @@ test('momentView: learned items and lore entries created at or after the cutoff 
   const moment = momentView(view, CUTOFF);
   assert.deepEqual(moment.memory.getGuild().learned.map((i) => i.text), ['answer in one line']);
   assert.deepEqual(moment.memory.getLore().map((e) => e.title), ['Old tale', 'Owner note']);
+});
+
+test('momentView: recent lines added at or after the cutoff are hidden; a base without a recent store reads none', () => {
+  const { view } = baseView();
+  const line = (id, fields = {}) => ({ id, at: CUTOFF - 7_200_000, addedAt: EARLIER, channelId: 'c1', text: `σημείωση ${id}`, who: [], weight: 2, ...fields });
+  const stored = deepFreeze({
+    nextId: 6,
+    lines: [
+      line(1),
+      line(2, { addedAt: AT }),
+      // About a line before the cutoff, written down after it.
+      line(3, { at: CUTOFF - 60_000, addedAt: AFTER }),
+      // Without the time it was added: judged by the moment it is about.
+      line(4, { addedAt: null }),
+      line(5, { at: CUTOFF + 60_000, addedAt: null }),
+    ],
+  });
+  const base = { prompts: view.prompts, config: view.config, memory: { ...view.memory, getRecent: () => stored } };
+  const seen = momentView(base, CUTOFF).memory.getRecent();
+  assert.deepEqual(seen.lines.map((entry) => entry.id), [1, 4]);
+  assert.equal(seen.nextId, 6);
+  assert.equal(seen.lines[0], stored.lines[0], 'a kept line is the stored one');
+  // Nothing to hide: the stored value itself.
+  assert.equal(momentView(base, CUTOFF + 3_600_000).memory.getRecent(), stored);
+  assert.equal(momentView(view, CUTOFF).memory.getRecent(), null);
+  // The counts for the log do not include them.
+  assert.deepEqual(hiddenLater(base, CUTOFF), hiddenLater(view, CUTOFF));
 });
 
 test('momentView: undated fields, channels, prompts and config are untouched', () => {

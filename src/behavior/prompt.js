@@ -12,6 +12,10 @@
 //       first); on a routed turn -- a call from a channel the persona cannot
 //       write in, answered here -- it goes right BEFORE the chat instead,
 //       since the call itself lives in it
+//   5c. the last `memory.recentHours` (`<recent>`): the recent lines this
+//       channel's audience may read, then members' moments of those hours that
+//       `<people>` does not show, capped by `context.caps.recent`, ranked by who
+//       the turn is about
 //   6. memory about other people present in the transcript
 //   6b. the devices the persona has worn out in its own recent lines (`<worn>`, one piece)
 //   7. neighbouring channels
@@ -43,6 +47,7 @@ import { topByRank } from '../memory/ranking.js';
 import { rankEmojiUsage } from '../memory/emoji-usage.js';
 import { gifHandleMap, normalizeGifs, rankGifs } from '../memory/gifs.js';
 import { sortEpisodesForDisplay, topEpisodes } from '../memory/episodes.js';
+import { RECENT_EPISODES_PER_MEMBER, episodeKey, memberIdOf, recentSettings, recentView } from '../memory/recent.js';
 import { matchLore } from '../memory/lore.js';
 import { channelActivity, renderChannel } from '../memory/channels.js';
 import { selectPictures, mediaProxyUrl } from '../discord/media.js';
@@ -277,8 +282,25 @@ function aliasesText(aliases, labels, maxAliases, aliasHalfLifeDays) {
  * interlocutor's heading; false leaves the heading bare and changes nothing
  * else -- the author of an overheard line is rendered in full but is not
  * talking to the persona.
+ * @param {object|null} profile
+ * @param {object} labels
+ * @param {object} [opts]  The options above.
+ * @returns {string}
  */
-export function renderProfile(
+export function renderProfile(profile, labels, opts) {
+  return renderProfileShown(profile, labels, opts).text;
+}
+
+/**
+ * `renderProfile`'s text (`text`) and how many of the member's episodes it
+ * shows (`episodes`): always the first that many in display order
+ * (src/memory/episodes.js#topEpisodes), since a cap only ever drops the
+ * lightest. 0 when none renders -- none stored, none fits, or an older labels
+ * file without the episode labels -- so a block that must not repeat them
+ * knows exactly which ones the request shows.
+ * @returns {{ text: string, episodes: number }}
+ */
+function renderProfileShown(
   profile,
   labels,
   {
@@ -299,7 +321,7 @@ export function renderProfile(
     nameOf,
   } = {},
 ) {
-  if (!profile) return '';
+  if (!profile) return { text: '', episodes: 0 };
   const p = labels.profile;
   const name = profile.names?.[0] ?? profile.id;
   const marks = { confirmAfter, staleDays, now, interestHalfLifeDays, detailHalfLifeDays, nameOf };
@@ -349,9 +371,10 @@ export function renderProfile(
     if (!interlocutor && renderedEpisodes.length < 2) renderedEpisodes = [];
   }
   // Anyone but the interlocutor with nothing learned and no moment shown (none, or none fit): nothing to show.
-  if (!hasContent && !interlocutor && renderedEpisodes.length === 0) return '';
+  if (!hasContent && !interlocutor && renderedEpisodes.length === 0) return { text: '', episodes: 0 };
 
-  return [heading, ...attitudeLines, ...renderedEpisodes, ...restLines].join('\n');
+  // The episodes heading, then one line per episode.
+  return { text: [heading, ...attitudeLines, ...renderedEpisodes, ...restLines].join('\n'), episodes: Math.max(0, renderedEpisodes.length - 1) };
 }
 
 /**
@@ -622,6 +645,8 @@ function assembleUser({ now, timezone, labels, sensesText, kept, tempoText, task
     block('server', kept.server.join('\n\n')),
     block('lore', kept.lore.join('\n\n')),
     block('self_facts', kept.self.join('\n')),
+    // The last hours: one item, the header with the kept lines and moments, oldest first.
+    block('recent', (kept.recent ?? []).join('\n')),
     block('people', [...kept.interlocutor, ...kept.people].join('\n\n')),
     block('other_channels', kept.neighbors.join('\n\n')),
     // Another channel pulled into this turn, one item per channel.
@@ -984,6 +1009,48 @@ function splitPeople(
 }
 
 /**
+ * The `<recent>` items of a view (src/memory/recent.js#recentView), in its
+ * order, each with its text and its time (`at`). A line renders through
+ * `labels.recent.lineIn` (`{date}` `{time}` `{channel}` `{text}`) when it comes
+ * from another channel whose name the channel map (`channels`) holds and the
+ * label exists, else through `labels.recent.line` (`{date}` `{time}` `{text}`);
+ * a moment through `labels.recent.episode` (`{date}` `{name}` `{what}`) --
+ * the caller offers none without that label -- left out and counted
+ * (`unnamed`) when the member has no name (`nameOf` gives none and the profile
+ * stores none). `{date}` and `{time}` are the transcript's own forms of the
+ * item's time; every stored `<@id>` token becomes the member's name
+ * (`nameOf`). No quote and no feeling: a moment is named, not replayed.
+ * @returns {{ entries: { kind: 'line'|'episode', at: number, text: string }[], unnamed: number }}
+ */
+function recentEntries(items, { labels, timezone, currentChannelId, channels, nameOf }) {
+  const r = labels.recent;
+  const channelNames = new Map(
+    (Array.isArray(channels) ? channels : []).filter((channel) => channel?.id && channel.name).map((channel) => [channel.id, channel.name]),
+  );
+  const entries = [];
+  let unnamed = 0;
+  for (const item of items) {
+    const date = formatDate(item.at, timezone, labels.locale);
+    if (item.kind === 'line') {
+      const text = resolveChatText(item.line.text, nameOf);
+      const time = formatClock(item.at, timezone, labels.locale);
+      const channel = item.line.channelId !== currentChannelId ? channelNames.get(item.line.channelId) : undefined;
+      const rendered = channel && r.lineIn ? fill(r.lineIn, { date, time, channel, text }) : fill(r.line, { date, time, text });
+      entries.push({ kind: 'line', at: item.at, text: rendered });
+      continue;
+    }
+    if (!r.episode) continue;
+    const name = nameOf(item.profileId) || item.name;
+    if (!name) {
+      unnamed += 1;
+      continue;
+    }
+    entries.push({ kind: 'episode', at: item.at, text: fill(r.episode, { date, name, what: resolveChatText(item.episode.what, nameOf) }) });
+  }
+  return { entries, unnamed };
+}
+
+/**
  * Another channel shown to a turn: the record src/discord/pull-fetch.js#fetchPull
  * returns (the one definition), read here and never changed. This module reads
  * it a little more loosely than the producer writes it: `earlierPingIds` may
@@ -1293,9 +1360,32 @@ function pulledAuthors(pulledFits) {
  *   pulled channels whose record says `readOnly`. A private chat ignores `pulled`, `source`,
  *   `focus`, `elsewhereDestination` and `readOnlyIds`; with none of them given the request is
  *   the one built before pulled channels existed, save `senses.channels` on a server turn.
+ * @param {object[]} [input.recentLines]  The guild's recent lines (store.getRecent(guildId).lines;
+ *   an empty array for a store that holds none). With it an array, `features.recent` on (a
+ *   missing key counts as on) and `labels.recent.header` and `labels.recent.line` present,
+ *   `<recent>` renders after `<self_facts>` whenever the last `memory.recentHours` (72 when
+ *   unset) hold an item this turn may show: `labels.recent.header` (`{hours}`), then the items
+ *   kept, oldest first (see `recentEntries`). The items are chosen by
+ *   src/memory/recent.js#recentView in its order -- the lines `recentAudience` accepts, the ones
+ *   about the trigger's author, the interlocutor or a member asked about first; then up to
+ *   two moments per member inside the window (src/memory/recent.js#RECENT_EPISODES_PER_MEMBER),
+ *   those members first (none without `labels.recent.episode`) -- under `context.caps.recent` (1200
+ *   when unset), ranked right after the chat and the pulled block and ahead of `<people>`; a
+ *   header without an item, or items without the header, make no block. The moments
+ *   `<people>` shows are left out: the interlocutor's that its block keeps and those of a
+ *   member asked about. One that `<people>` cuts comes back here, in the room this block took
+ *   plus what the request has beyond `<people>`'s room, so `<people>` never loses room to it,
+ *   and a member asked about that `<people>` could not place gets the room it frees. A private
+ *   chat shows no member's moment. The switch off, the labels missing, or the input omitted or
+ *   not an array (the mentor's sandbox): no block, the request as before.
+ * @param {(channelId: string|null) => boolean} [input.recentAudience]  Whether a recent line from
+ *   that channel may be shown in this turn (src/behavior/turn.js decides it from the channels'
+ *   audiences). Omitted -> only the lines of `currentChannelId`.
  * @returns {{ messages: object[], stats: object, idByIndex: Map<number, string>, tempo: object,
  *   pictures: object[], textFallback: string|null, pulledIds: Map<string, string>,
- *   pulledKept: { channelId: string, ids: string[], newestId: string, newestTs: number }[] }}
+ *   pulledKept: { channelId: string, ids: string[], newestId: string, newestTs: number }[],
+ *   recent: { lines: number, episodes: number, cut: number, hidden: number, repeated: number,
+ *     unnamed: number }|null }}
  *   `pictures` are the ones attached as image_url parts; `textFallback` is the same user message
  *   with every attached picture rendered blind or described (null when nothing is attached), for
  *   a provider that rejects them. `idByIndex` maps chat AND pulled indices; `pulledIds` maps
@@ -1304,7 +1394,12 @@ function pulledAuthors(pulledFits) {
  *   with the ids of the lines shown and the newest window line shown. `stats.pulled` is the
  *   block's budget line: `used`, `kept` (channels shown), `dropped` (channels offered and not
  *   shown, the budget's cut or a missing header label), `lines` (lines offered) and `linesCut`
- *   (lines offered and not shown).
+ *   (lines offered and not shown). `recent` counts what `<recent>` did, null when it was off or
+ *   its view held nothing (no item, none hidden, repeated or unnamed): `lines` and `episodes`
+ *   shown, `cut` (items offered and not shown), `hidden` (lines `recentAudience` refused),
+ *   `repeated` (moments in the window left out as shown in `<people>`) and `unnamed` (moments
+ *   left out because their member has no name); `stats.recent` (only when an item was offered)
+ *   counts the items, not the header.
  */
 export function buildRequest(input) {
   const { config, prompts, calibrator, mode, forced = false, now, selfName, history, neighbors, trigger, triggerKind, channels = [], currentChannelId = null, descriptions, videos, reads, lookup = null } = input;
@@ -1467,32 +1562,29 @@ export function buildRequest(input) {
     TAG_OVERHEAD;
 
   const episodesOpt = { enabled: episodesOn, cap: caps.interlocutor, cost };
+  const interlocutorShown = renderProfileShown(interlocutor, labels, {
+    interlocutor: true,
+    // The author of an overheard line is not talking to the persona.
+    mark: !overheard,
+    relationships,
+    episodes: episodesOpt,
+    maxInterests: config.memory?.maxInterests,
+    maxDetails: config.memory?.maxDetails,
+    maxAliases: config.memory?.maxAliases,
+    aliasHalfLifeDays: config.memory?.aliasHalfLifeDays,
+    interestHalfLifeDays: config.memory?.interestHalfLifeDays,
+    detailHalfLifeDays: config.memory?.detailHalfLifeDays,
+    confirmAfter: config.memory?.confirmAfter,
+    staleDays: config.memory?.interestStaleDays,
+    now,
+    nameOf,
+  });
+  const fixedSection = { name: 'fixed', required: true, items: [system, fittedTask, formatNow(now, timezone, labels.locale), sensesText, tempoText] };
+  const interlocutorSection = { name: 'interlocutor', cap: caps.interlocutor, items: [interlocutorShown.text].filter(Boolean) };
   // The sections fitted ahead of the chat, in priority order.
   const head = [
-    { name: 'fixed', required: true, items: [system, fittedTask, formatNow(now, timezone, labels.locale), sensesText, tempoText] },
-    {
-      name: 'interlocutor',
-      cap: caps.interlocutor,
-      items: [
-        renderProfile(interlocutor, labels, {
-          interlocutor: true,
-          // The author of an overheard line is not talking to the persona.
-          mark: !overheard,
-          relationships,
-          episodes: episodesOpt,
-          maxInterests: config.memory?.maxInterests,
-          maxDetails: config.memory?.maxDetails,
-          maxAliases: config.memory?.maxAliases,
-          aliasHalfLifeDays: config.memory?.aliasHalfLifeDays,
-          interestHalfLifeDays: config.memory?.interestHalfLifeDays,
-          detailHalfLifeDays: config.memory?.detailHalfLifeDays,
-          confirmAfter: config.memory?.confirmAfter,
-          staleDays: config.memory?.interestStaleDays,
-          now,
-          nameOf,
-        }),
-      ].filter(Boolean),
-    },
+    fixedSection,
+    interlocutorSection,
     // One piece, never split: already bounded by web.search.summaryChars,
     // and ahead of the chat so a tight budget trims old messages first.
     { name: 'lookup', items: [renderLookup(lookup, labels)].filter(Boolean) },
@@ -1602,21 +1694,84 @@ export function buildRequest(input) {
     config.memory?.aliasHalfLifeDays,
     pulledAuthors(pulledFits),
   );
-  // The sections fitted ahead of `<people>`, in priority order: the one list both the main
-  // pass and the room of the asked-about members' episodes (below) are measured on. The
-  // pulled block right after the chat; ahead of it on a routed turn, whose call lives there.
-  const aheadOfPeople = [...head, ...(routed ? [pulledSection, chatSection] : [chatSection, pulledSection])];
   // Each member asked about shows their top `context.askedAboutEpisodes` episodes (0 = off;
-  // none in a private chat: another member's moments never reach it). Episodes only fill
-  // what `<people>` has left once every member asked about is placed without them, as the
-  // budget takes them in order, so no member asked about is ever cut for anyone's episodes;
-  // the earlier members take theirs first, each losing their lightest first. That room is
-  // `caps.people`, or less when the sections ahead of `<people>` leave less; measured only
-  // when an episode may be shown. The compact participants after them get what is left.
+  // none in a private chat: another member's moments never reach it; none with an older labels
+  // file that cannot render one).
   const askedAboutEpisodes = privateChat ? 0 : (config.context.askedAboutEpisodes ?? 3);
   const episodeCount = (profile) => (Array.isArray(profile?.episodes) ? profile.episodes.length : 0);
+  const episodeLabelsOn = Boolean(labels.profile?.episodes && labels.profile?.episode && labels.profile?.episodeNoQuote);
+  const askedEpisodesOn =
+    episodesOn &&
+    episodeLabelsOn &&
+    Number.isInteger(askedAboutEpisodes) &&
+    askedAboutEpisodes > 0 &&
+    askedAbout.some((profile) => episodeCount(profile) > 0);
+  // The keys of the moments `<people>` shows for the members asked about: the top `counts[i]` of each.
+  const askedKeys = (counts) =>
+    new Set(askedAbout.flatMap((profile, i) => topEpisodes(profile.episodes, counts[i]).map((ep) => episodeKey(memberIdOf(profile.id), ep))));
+  const askedIntended = askedKeys(askedAbout.map(() => (askedEpisodesOn ? askedAboutEpisodes : 0)));
+
+  // `<recent>`: the last `memory.recentHours`, built when the caller hands the store's lines
+  // over (an array, empty for a store without one; the mentor's sandbox hands none) with the
+  // switch on and the labels present, and shown when the window holds an item this turn may
+  // show. The lines `recentAudience` accepts (by default this channel's alone), then the
+  // moments of the window (none in a private chat, none without the episode label), the ones
+  // about the people this turn is about first: the trigger's author, the interlocutor and the
+  // members asked about. A moment `<people>` shows is left out: those the interlocutor's block
+  // keeps (none when the budget drops the block), and those of the members asked about --
+  // ranked before `<people>` is fitted, the block first leaves out every moment `<people>` may
+  // show them by and is built again below when `<people>` shows fewer.
+  const recentCfg = recentSettings(config);
+  const recentOn = Boolean(recentCfg && labels.recent?.header && labels.recent?.line && Array.isArray(input.recentLines));
+  const recentCap = caps.recent ?? 1200;
+  const interlocutorId = memberIdOf(interlocutor?.id);
+  const recentFocus = [trigger?.authorId, interlocutorId, ...askedAbout.map((profile) => profile?.id)].map(memberIdOf).filter(Boolean);
+  const recentAudience = typeof input.recentAudience === 'function' ? input.recentAudience : (channelId) => channelId === currentChannelId;
+  const recentProfiles =
+    recentOn && !privateChat && episodesOn && labels.recent.episode && Array.isArray(input.candidateProfiles) ? input.candidateProfiles : [];
+  const interlocutorKeys = new Set(
+    recentProfiles.length > 0 &&
+    interlocutorId !== null &&
+    interlocutorShown.episodes > 0 &&
+    fitSections([fixedSection, interlocutorSection], limit, cost).kept.interlocutor.length > 0
+      ? topEpisodes(interlocutor.episodes, interlocutorShown.episodes).map((ep) => episodeKey(interlocutorId, ep))
+      : [],
+  );
+  const buildRecent = (askedShown) => {
+    const view = recentView({
+      lines: input.recentLines,
+      profiles: recentProfiles,
+      now,
+      hours: recentCfg.hours,
+      focusIds: recentFocus,
+      excludeEpisodeKeys: new Set([...interlocutorKeys, ...askedShown]),
+      isShown: recentAudience,
+      perMember: RECENT_EPISODES_PER_MEMBER,
+    });
+    const { entries, unnamed } = recentEntries(view.items, { labels, timezone, currentChannelId, channels, nameOf });
+    return { header: fill(labels.recent.header, { hours: recentCfg.hours }), entries, hidden: view.hidden, repeated: view.repeated, unnamed };
+  };
+  // One item per entry after the header, in the view's order: the budget keeps them from the top.
+  const recentSectionOf = (built, cap) =>
+    built && built.entries.length > 0 ? { name: 'recent', cap, keep: 'first', items: [built.header, ...built.entries.map((entry) => entry.text)] } : null;
+  let recentBuilt = recentOn ? buildRecent(askedIntended) : null;
+  let recentSection = recentSectionOf(recentBuilt, recentCap);
+
+  // The sections fitted ahead of `<people>`, in priority order: the one list both the main
+  // pass and the room of the asked-about members' episodes (below) are measured on. The
+  // pulled block right after the chat; ahead of it on a routed turn, whose call lives there;
+  // then the last hours.
+  const aheadOfRecent = [...head, ...(routed ? [pulledSection, chatSection] : [chatSection, pulledSection])];
+  let aheadOfPeople = recentSection ? [...aheadOfRecent, recentSection] : aheadOfRecent;
+  // Episodes only fill what `<people>` has left once every member asked about is placed
+  // without them, as the budget takes them in order, so no member asked about is ever cut
+  // for anyone's episodes; the earlier members take theirs first, each losing their lightest
+  // first. That room is `caps.people`, or less when the sections ahead of `<people>` leave
+  // less; measured only when an episode may be shown. The compact participants after them
+  // get what is left.
+  const peopleRoomCap = Number.isFinite(caps.people) ? caps.people : Infinity;
   const renderAsked = (profile, episodes) =>
-    renderProfile(profile, labels, {
+    renderProfileShown(profile, labels, {
       relationships,
       episodes,
       maxInterests: config.memory?.maxInterests,
@@ -1630,10 +1785,15 @@ export function buildRequest(input) {
       now,
       nameOf,
     });
-  const askedAboutBare = askedAbout.map((profile) => renderAsked(profile, undefined));
+  const askedAboutBare = askedAbout.map((profile) => renderAsked(profile, undefined).text);
   let askedAboutItems = askedAboutBare;
-  if (episodesOn && Number.isInteger(askedAboutEpisodes) && askedAboutEpisodes > 0 && askedAbout.some((profile) => episodeCount(profile) > 0)) {
-    let spare = Math.min(Number.isFinite(caps.people) ? caps.people : Infinity, Math.max(0, limit - fitSections(aheadOfPeople, limit, cost).used));
+  // Members asked about the second placement below leaves out (see there): offered, not shown.
+  let askedLeftOut = 0;
+  if (askedEpisodesOn) {
+    const measured = fitSections(aheadOfPeople, limit, cost);
+    const free = Math.max(0, limit - measured.used);
+    const room = Math.min(peopleRoomCap, free);
+    let spare = room;
     // Who the budget keeps without episodes: one that does not fit is skipped, the next tried.
     const placed = askedAboutBare.map((text) => {
       const price = text ? cost(text) : 0;
@@ -1641,21 +1801,56 @@ export function buildRequest(input) {
       spare -= price;
       return true;
     });
+    // How many of each member's top episodes their rendering shows.
+    const shownCounts = askedAbout.map(() => 0);
     askedAboutItems = askedAbout.map((profile, i) => {
       const bare = askedAboutBare[i];
       if (!placed[i]) return bare;
       const base = bare ? cost(bare) : 0;
       // The most of the top episodes whose rendering fits what is spare.
       for (let max = Math.min(askedAboutEpisodes, episodeCount(profile)); max > 0; max -= 1) {
-        const text = renderAsked(profile, { enabled: true, max });
-        const extra = (text ? cost(text) : 0) - base;
+        const shown = renderAsked(profile, { enabled: true, max });
+        const extra = (shown.text ? cost(shown.text) : 0) - base;
         if (extra <= spare) {
           spare -= extra;
-          return text;
+          shownCounts[i] = shown.episodes;
+          return shown.text;
         }
       }
       return bare;
     });
+    const askedShown = askedKeys(shownCounts);
+    if (recentBuilt && askedShown.size < askedIntended.size) {
+      // `<recent>` again, now leaving out only the moments `<people>` shows: the ones it cuts
+      // come back, ranked anew, in the room the block took plus what the request has beyond
+      // `<people>`'s room -- so `<people>` keeps at least the room its members were placed in.
+      recentBuilt = buildRecent(askedShown);
+      recentSection = recentSectionOf(recentBuilt, Math.min(recentCap, (measured.stats.recent?.used ?? 0) + (free - room)));
+      aheadOfPeople = recentSection ? [...aheadOfRecent, recentSection] : aheadOfRecent;
+      // The room `<people>` has now (never less than `room`): the members placed above keep their
+      // rendering, and one that was not is tried bare (their moments are in `<recent>` now) in
+      // what is left, never at the cost of a member placed after it. One that the budget would
+      // still take where it stands, squeezing such a member out, is left out of the block.
+      const roomNow = Math.min(peopleRoomCap, Math.max(0, limit - fitSections(aheadOfPeople, limit, cost).used));
+      const prices = askedAboutItems.map((text) => (text ? cost(text) : 0));
+      let reserved = prices.reduce((sum, price, i) => sum + (placed[i] ? price : 0), 0);
+      let left = roomNow;
+      askedAboutItems = askedAboutItems.map((text, i) => {
+        if (placed[i]) {
+          left -= prices[i];
+          reserved -= prices[i];
+          return text;
+        }
+        if (!text) return text;
+        if (prices[i] <= left - reserved) {
+          left -= prices[i];
+          return text;
+        }
+        if (prices[i] > left) return text;
+        askedLeftOut += 1;
+        return '';
+      });
+    }
   }
 
   const budgetFit = fitSections(
@@ -1707,6 +1902,38 @@ export function buildRequest(input) {
   // The header alone, or entries without their header, make no block.
   if (kept.emoji.length < 2 || kept.emoji[0] !== labels.emoji?.header) kept.emoji = [];
   if (kept.gifs.length < 2 || kept.gifs[0] !== labels.gifs?.header) kept.gifs = [];
+  if (askedLeftOut > 0) stats.people = { ...stats.people, dropped: stats.people.dropped + askedLeftOut };
+  // `<recent>` as one piece: the header, then the entries kept (a subsequence of the offered
+  // ones, in their order) oldest first. The header alone, or entries without it, make no block.
+  let recent = null;
+  if (recentBuilt) {
+    const keptRecent = kept.recent ?? [];
+    const shown = [];
+    if (keptRecent.length >= 2 && keptRecent[0] === recentBuilt.header) {
+      let next = 1;
+      for (const entry of recentBuilt.entries) {
+        if (next < keptRecent.length && keptRecent[next] === entry.text) {
+          shown.push(entry);
+          next += 1;
+        }
+      }
+    }
+    shown.sort((a, b) => a.at - b.at);
+    kept.recent = shown.length > 0 ? [[recentBuilt.header, ...shown.map((entry) => entry.text)].join('\n')] : [];
+    if (stats.recent) stats.recent = { ...stats.recent, kept: shown.length, dropped: recentBuilt.entries.length - shown.length };
+    // Counted only when the view held something: an item, or one hidden, repeated or unnamed.
+    const { entries, hidden, repeated, unnamed } = recentBuilt;
+    if (entries.length > 0 || hidden + repeated + unnamed > 0) {
+      recent = {
+        lines: shown.filter((entry) => entry.kind === 'line').length,
+        episodes: shown.filter((entry) => entry.kind === 'episode').length,
+        cut: entries.length - shown.length,
+        hidden,
+        repeated,
+        unnamed,
+      };
+    }
+  }
   // The pulled channels whose block survived, with what of them was shown.
   const keptPulled = new Set(kept.pulled);
   const pulledKept = pulledFits
@@ -1779,5 +2006,6 @@ export function buildRequest(input) {
     textFallback,
     pulledIds,
     pulledKept,
+    recent,
   };
 }

@@ -1,9 +1,22 @@
 // Tests for src/memory/episodes.js: mergeEpisodes (validation, deduplication,
-// eviction), sortEpisodesForDisplay (rendering order) and topEpisodes (the top N
-// shown for a member asked about). Pure, no I/O.
+// eviction), sortEpisodesForDisplay (rendering order), topEpisodes (the top N
+// shown for a member asked about) and the episode rules other modules share
+// (EPISODE_CHARS, episodeDate in both forms, isSameEpisode). Pure; the
+// import-graph test reads source files only.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mergeEpisodes, sortEpisodesForDisplay, topEpisodes } from '../src/memory/episodes.js';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import {
+  mergeEpisodes,
+  sortEpisodesForDisplay,
+  topEpisodes,
+  EPISODE_CHARS,
+  episodeDate,
+  isSameEpisode,
+} from '../src/memory/episodes.js';
+import { normalizeTopic } from '../src/memory/interests.js';
 
 const NOW = Date.UTC(2026, 8, 21, 12, 0, 0); // 2026-09-21
 
@@ -378,4 +391,122 @@ test('episodes: topEpisodes does not mutate its input', () => {
   const copy = episodes.map((e) => ({ ...e }));
   topEpisodes(episodes, 1);
   assert.deepEqual(episodes, copy);
+});
+
+// ---- the shared episode rules ------------------------------------------------------
+
+test('EPISODE_CHARS: what 200, quote 120, feeling 120, the limits mergeEpisodes cuts to', () => {
+  assert.deepEqual({ ...EPISODE_CHARS }, { what: 200, quote: 120, feeling: 120 });
+  assert.equal(Object.isFrozen(EPISODE_CHARS), true);
+  const long = 'α'.repeat(1000);
+  const [episode] = mergeEpisodes([], [{ what: long, quote: long, feeling: long }], opts({ clampTolerance: 1 })).episodes;
+  assert.equal([...episode.what].length, EPISODE_CHARS.what);
+  assert.equal([...episode.quote].length, EPISODE_CHARS.quote);
+  assert.equal([...episode.feeling].length, EPISODE_CHARS.feeling);
+});
+
+test('episodeDate: a YYYY-MM-DD string is kept, anything else falls back to the UTC day of now', () => {
+  assert.equal(episodeDate('2025-01-01', NOW), '2025-01-01');
+  for (const raw of ['not-a-date', '2025/01/01', ' 2025-01-01', '2025-1-1', '', undefined, null, 20250101, ['2025-01-01']]) {
+    assert.equal(episodeDate(raw, NOW), '2026-09-21', String(raw));
+  }
+  assert.equal(episodeDate(undefined, Date.UTC(2026, 8, 21, 23, 59, 59)), '2026-09-21', 'the UTC day, not a local one');
+});
+
+test('episodeDate: a clock that is given but is no time is an error when the fallback is needed', () => {
+  for (const clock of [NaN, 'τώρα', {}]) assert.throws(() => episodeDate('ποτέ', clock), RangeError, String(clock));
+  for (const clock of [NaN, 'τώρα']) assert.equal(episodeDate('2025-01-01', clock), '2025-01-01', `a usable date never reads the clock: ${clock}`);
+});
+
+test('episodeDate: without a clock it tests a stored date, the date itself or an empty string', () => {
+  assert.equal(episodeDate('2025-01-01'), '2025-01-01');
+  assert.equal(episodeDate('1999-12-31', undefined), '1999-12-31');
+  const unusable = ['ποτέ', '2025/01/01', ' 2025-01-01', '2025-01-01 ', '2025-1-1', '2025-01-01T00:00:00Z', '', undefined, null, 20250101, ['2025-01-01']];
+  for (const raw of unusable) {
+    assert.equal(episodeDate(raw), '', String(raw));
+    assert.equal(episodeDate(raw, undefined), '', `${String(raw)}: an undefined clock is the same form, not an error`);
+  }
+});
+
+test('episodeDate: the two forms agree on what a stored date is', () => {
+  for (const raw of ['2025-01-01', '1999-12-31', '2025-1-1', 'ποτέ', '', undefined, null, 20250101]) {
+    const tested = episodeDate(raw);
+    const stored = episodeDate(raw, NOW);
+    assert.notEqual(stored, '', `a stored date is never empty: ${String(raw)}`);
+    assert.equal(stored === raw, tested !== '', String(raw));
+    if (tested !== '') assert.equal(stored, tested, String(raw));
+  }
+});
+
+test('isSameEpisode: the same date and the same what once trimmed, whitespace-collapsed and lower-cased', () => {
+  const a = { date: '2026-01-01', what: '  Η Zoë  ΤΡΑΓΟΎΔΗΣΕ\tστο κανάλι ', quote: '' };
+  const b = { date: '2026-01-01', what: 'η zoë τραγούδησε στο κανάλι', quote: '' };
+  assert.equal(isSameEpisode(a, b), true);
+  assert.equal(isSameEpisode(b, a), true, 'symmetric');
+  assert.equal(isSameEpisode(a, { ...b, date: '2026-01-02' }), false, 'the same what on another date is another moment');
+  assert.equal(isSameEpisode(a, { ...b, what: 'η zoë τραγούδησε' }), false);
+});
+
+test('isSameEpisode: an identical non-empty quote is the same moment, whatever the date and what', () => {
+  const a = { date: '2026-01-01', what: 'υποσχέθηκε κάτι', quote: 'δεν φεύγω ποτέ' };
+  const b = { date: '2026-05-05', what: 'μια άλλη διατύπωση', quote: 'δεν φεύγω ποτέ' };
+  assert.equal(isSameEpisode(a, b), true);
+  assert.equal(isSameEpisode(a, { ...b, quote: 'Δεν φεύγω ποτέ' }), false, 'a quote is compared verbatim');
+  assert.equal(isSameEpisode({ ...a, quote: '' }, { ...b, quote: '' }), false, 'two empty quotes are no match by themselves');
+});
+
+test('isSameEpisode: what is compared by normalizeTopic, the one text identity', () => {
+  const whats = ['Café  CRÈME', ' café crème ', 'ΣΊΣΥΦΟΣ\nκαι  πέτρα', 'σίσυφος και πέτρα', 'Ζωή', 'ζωη'];
+  for (const x of whats) {
+    for (const y of whats) {
+      const same = normalizeTopic(x) === normalizeTopic(y);
+      assert.equal(isSameEpisode({ date: '2026-01-01', what: x }, { date: '2026-01-01', what: y }), same, `${x} / ${y}`);
+    }
+  }
+});
+
+test('isSameEpisode: a stored entry that is not an object, or has no what, never throws', () => {
+  const candidate = { date: '2026-01-01', what: 'κάτι', quote: '' };
+  for (const junk of [null, undefined, 'κάτι', 42]) {
+    assert.equal(isSameEpisode(junk, candidate), false, String(junk));
+    assert.equal(isSameEpisode(candidate, junk), false, String(junk));
+  }
+  assert.equal(isSameEpisode({ date: '2026-01-01', what: 42 }, candidate), false);
+});
+
+test('mergeEpisodes: a candidate is a duplicate exactly when isSameEpisode says so', () => {
+  const existing = [{ date: '2026-01-01', what: 'Είπε  ΚΑΛΗΜΈΡΑ', quote: 'γεια σας', feeling: '', weight: 3, addedAt: 'a' }];
+  const incoming = [
+    { date: '2026-01-01', what: 'είπε καλημέρα' },
+    { date: '2026-03-03', what: 'κάτι άλλο', quote: 'γεια σας' },
+    { date: '2026-01-02', what: 'είπε καλημέρα' },
+  ];
+  const result = mergeEpisodes(existing, incoming, opts());
+  assert.deepEqual(result.episodes.slice(1).map((e) => [e.date, e.what]), [['2026-01-02', 'είπε καλημέρα']]);
+  for (const raw of incoming) {
+    const kept = result.episodes.slice(1).some((e) => e.date === raw.date && e.what === raw.what);
+    assert.equal(kept, !isSameEpisode(existing[0], { quote: '', ...raw }), raw.what);
+  }
+});
+
+// ---- the import graph: episodes.js stays a leaf toward voice.js and prompt.js ------------
+
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+
+/** Every source file reachable from `file` through static relative imports. */
+function reachableFrom(file, seen = new Set()) {
+  if (seen.has(file)) return seen;
+  seen.add(file);
+  const source = fs.readFileSync(file, 'utf8');
+  for (const match of source.matchAll(/^\s*(?:import|export)\b[^'"]*?from\s+'(\.{1,2}\/[^']+)'/gm)) {
+    reachableFrom(path.resolve(path.dirname(file), match[1]), seen);
+  }
+  return seen;
+}
+
+test('episodes: imports neither voice.js nor prompt.js, directly or through another module', () => {
+  const reached = [...reachableFrom(path.join(ROOT, 'src', 'memory', 'episodes.js'))].map((file) => path.relative(ROOT, file).split(path.sep).join('/'));
+  assert.ok(reached.includes('src/memory/interests.js'), 'the walk follows imports');
+  assert.equal(reached.includes('src/memory/voice.js'), false);
+  assert.equal(reached.includes('src/behavior/prompt.js'), false);
 });

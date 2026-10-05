@@ -238,4 +238,10 @@ export const labels = {
   room: {
     focus: 'message {target} by {author} is put to everyone present',
   },
+  recent: {
+    header: 'what you remember from the last {hours} hours, oldest first:',
+    line: '{date} {time}: {text}',
+    lineIn: '{date} {time} in #{channel}: {text}',
+    episode: '{date}, with {name}: {what}',
+  },
 };

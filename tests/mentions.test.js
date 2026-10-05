@@ -1,8 +1,8 @@
 // Tests for src/memory/mentions.js: toTokens/fromTokens (the analyzer's
-// id-token round trip). Pure, no I/O.
+// id-token round trip) and teacherToken (the lesson teacher rule). Pure, no I/O.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { ID_DIGITS, isWordChar, toTokens, fromTokens, occursAsWholeWord } from '../src/memory/mentions.js';
+import { ID_DIGITS, TEACHER_TOKEN_RE, isWordChar, toTokens, fromTokens, occursAsWholeWord, teacherToken } from '../src/memory/mentions.js';
 
 const ID_A = '123456789012345678';
 const ID_B = '223456789012345678';
@@ -182,6 +182,63 @@ test('occursAsWholeWord: an occurrence inside a longer word does not hide a late
 test('isWordChar: letters, digits and underscore in any script; punctuation, space and undefined are not', () => {
   for (const ch of ['a', 'é', 'λ', '7', '_']) assert.equal(isWordChar(ch), true, ch);
   for (const ch of [' ', ',', '-', '@', undefined]) assert.equal(isWordChar(ch), false, String(ch));
+});
+
+// ---- teacherToken / TEACHER_TOKEN_RE ---------------------------------------------------
+
+const known = (id) => id === ID_A || id === ID_B;
+
+test('teacherToken: one token or one name (id:...) reference of a known id gives the token', () => {
+  const forms = [
+    `<@${ID_A}>`,
+    `Νίκος (id:${ID_A})`,
+    `Νίκος Παπάς (id:${ID_A})`,
+    `Μ. Νίκος (id:${ID_A})`,
+    `nikos_42 (id:${ID_A})`,
+    `(id:${ID_A})`,
+    `  Zoë (id:${ID_A})  `,
+    `\t<@${ID_A}>\n`,
+  ];
+  for (const from of forms) assert.equal(teacherToken(from, known), `<@${ID_A}>`, from);
+  assert.equal(teacherToken(`Ελένη (id:${ID_B})`, known), `<@${ID_B}>`);
+});
+
+test('teacherToken: a bare name, an unknown id, two references or other text around a token is no teacher', () => {
+  const forms = [
+    'Νίκος',
+    '',
+    '   ',
+    `Zoë (id:999999999999999999)`,
+    '<@999999999999999999>',
+    `μαζί με Νίκος (id:${ID_A}) και Ελένη (id:${ID_B})`,
+    `<@${ID_A}> <@${ID_B}>`,
+    `ο <@${ID_A}>`,
+    `<@!${ID_A}>`,
+    `Νίκος (id:${ID_A}) χθες`,
+    `<Νίκος> (id:${ID_A})`,
+    `(id:${ID_A.slice(0, 16)})`,
+  ];
+  for (const from of forms) assert.equal(teacherToken(from, known), undefined, from);
+});
+
+test('teacherToken: not a string, or no isKnownId, gives undefined', () => {
+  for (const from of [undefined, null, 42, { id: ID_A }, [`<@${ID_A}>`]]) assert.equal(teacherToken(from, known), undefined, String(from));
+  assert.equal(teacherToken(`<@${ID_A}>`, undefined), undefined);
+  assert.equal(teacherToken(`<@${ID_A}>`, () => false), undefined);
+});
+
+test('teacherToken: isKnownId is asked about the id alone', () => {
+  const asked = [];
+  teacherToken(`Ελένη Π. (id:${ID_B})`, (id) => (asked.push(id), true));
+  assert.deepEqual(asked, [ID_B]);
+});
+
+test('TEACHER_TOKEN_RE: exactly one <@id> token, the form a teacher is stored in', () => {
+  assert.equal(TEACHER_TOKEN_RE.exec(`<@${ID_A}>`)?.[1], ID_A);
+  for (const value of [` <@${ID_A}>`, `<@${ID_A}> `, `<@!${ID_A}>`, `Νίκος (id:${ID_A})`, ID_A, `<@${ID_A.slice(0, 16)}>`]) {
+    assert.equal(TEACHER_TOKEN_RE.test(value), false, value);
+  }
+  assert.equal(TEACHER_TOKEN_RE.global, false, 'no g flag: a shared pattern keeps no lastIndex between calls');
 });
 
 test('ID_DIGITS: a Discord id of 17 to 20 digits, as a regex source', () => {

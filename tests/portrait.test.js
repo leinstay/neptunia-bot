@@ -1,8 +1,10 @@
 // Tests for src/memory/portrait.js: the pure due rule (portraitDue), the pick order
-// (pickDuePortraits), the settings and their fallbacks (portraitSettings), and the scheduler
-// (createPortraitScheduler) against a fake store and a fake refreshPortrait. The scheduler's
-// work with the real src/memory/warmup.js#refreshPortrait (one history crawl per check) is
-// tested in tests/warmup.test.js. No network, no real prompts.local/ or data/.
+// (pickDuePortraits), the members whose character text waits for the voice model
+// (waitingPortraits), the refresh mode (portraitMode), the settings and their fallbacks
+// (portraitSettings), and the scheduler (createPortraitScheduler) against a fake store and a fake
+// refreshPortrait. The scheduler's work with the real src/memory/warmup.js#refreshPortrait (one
+// history crawl per check) is tested in tests/warmup.test.js. No network, no real prompts.local/
+// or data/.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -18,6 +20,10 @@ import {
   stampMs,
   storedCount,
   llmCapReached,
+  hasText,
+  isQueuedPortrait,
+  waitingPortraits,
+  portraitMode,
 } from '../src/memory/portrait.js';
 import { bumpDaily, utcDay } from '../src/time.js';
 import { withCapturedLogs } from './fixtures/capture-logs.js';
@@ -119,6 +125,43 @@ test('storedCount: a finite count above 0 as it is, anything else 0', () => {
   for (const garbage of [0, -3, Number.NaN, Infinity, '420', null, undefined, {}]) assert.equal(storedCount(garbage), 0);
 });
 
+test('hasText: a string with something in it; blank strings and anything else are not', () => {
+  assert.equal(hasText('μιλάει πολύ'), true);
+  assert.equal(hasText('  ύφος  '), true);
+  for (const blank of ['', '   ', '\n\t', null, undefined, 42, {}, ['κείμενο']]) assert.equal(hasText(blank), false);
+});
+
+// ---------------------------------------------------------------------------
+// waitingPortraits / isQueuedPortrait
+// ---------------------------------------------------------------------------
+
+test('waitingPortraits: the members with a public character item in the voice queue; other kinds, a private layer and garbage are not', () => {
+  const queue = [
+    { kind: 'character', userId: 'a', brief: { add: ['γράφει τη νύχτα'] }, createdAt: NOW },
+    { kind: 'relationship', userId: 'b', brief: ['φίλοι'], createdAt: NOW },
+    { kind: 'character', userId: 'c', layer: 'private', brief: { add: ['κρυφό'] }, createdAt: NOW },
+    { kind: 'character', userId: '', brief: { add: ['κανείς'] }, createdAt: NOW },
+    { kind: 'self', brief: ['μου αρέσει ο καφές'], createdAt: NOW },
+    null,
+    'character',
+  ];
+  assert.deepEqual([...waitingPortraits(queue)], ['a']);
+  assert.deepEqual(queue.map((item) => isQueuedPortrait(item)), [true, false, false, false, false, false, false]);
+  for (const garbage of [null, undefined, {}, 'a']) assert.deepEqual([...waitingPortraits(garbage)], []);
+});
+
+// ---------------------------------------------------------------------------
+// portraitMode
+// ---------------------------------------------------------------------------
+
+test('portraitMode: two only with the switch on and both the portrait and the voice prompt present; otherwise the single request, on the voice model while the switch is on', () => {
+  const prompts = { profile: 'P', portrait: 'A', 'memory-voice': 'V' };
+  assert.deepEqual(portraitMode({}, prompts), { stage: 'single', voiceModel: false, missing: [] });
+  assert.deepEqual(portraitMode({ features: { memoryTwoStage: true } }, prompts), { stage: 'two', voiceModel: false, missing: [] });
+  assert.deepEqual(portraitMode({ features: { memoryTwoStage: true } }, { ...prompts, portrait: '  ' }), { stage: 'single', voiceModel: true, missing: ['portrait'] });
+  assert.deepEqual(portraitMode({ features: { memoryTwoStage: true } }, { profile: 'P' }), { stage: 'single', voiceModel: true, missing: ['portrait', 'memory-voice'] });
+});
+
 // ---------------------------------------------------------------------------
 // llmCapReached
 // ---------------------------------------------------------------------------
@@ -175,6 +218,14 @@ test('pickDuePortraits: garbage entries and entries without an id are skipped', 
   const profiles = [null, 'x', profile({ id: undefined, messageCount: 900 }), profile({ id: 'g', messageCount: 900 })];
   assert.deepEqual(pickDuePortraits(profiles, NOW, CFG, 5), [{ userId: 'g', own: 900, reason: 'due' }]);
   assert.deepEqual(pickDuePortraits(null, NOW, CFG, 5), []);
+});
+
+test('pickDuePortraits: a member whose character text waits for the voice model is not picked', () => {
+  const profiles = [profile({ id: 'a', messageCount: 900 }), profile({ id: 'b', messageCount: 400 }), profile({ id: 'c', character: '', style: '', messageCount: 35 })];
+  assert.deepEqual(pickDuePortraits(profiles, NOW, CFG, 10, { waiting: new Set(['a', 'c']) }), [{ userId: 'b', own: 400, reason: 'due' }]);
+  assert.deepEqual(pickDuePortraits(profiles, NOW, CFG, 1, { waiting: new Set(['a']) }), [{ userId: 'b', own: 400, reason: 'due' }], 'the limit counts the members picked');
+  assert.equal(pickDuePortraits(profiles, NOW, CFG, 10, { waiting: new Set() }).length, 3);
+  assert.equal(pickDuePortraits(profiles, NOW, CFG, 10).length, 3, 'nothing waiting');
 });
 
 // ---------------------------------------------------------------------------
@@ -286,6 +337,39 @@ test('portrait scheduler: tick refreshes at most today\'s free slots, in order, 
   const capped = makeScheduler({ script: (userId) => (userId === 'c' ? { ok: false, reason: 'daily-cap', cap: 'portrait' } : { ok: true }) });
   await capped.scheduler.tick();
   assert.deepEqual(capped.refreshPortrait.calls.map((c) => c.userId), ['b', 'c'], 'the first daily-cap ends the cycle');
+});
+
+test('portrait scheduler: in two-stage mode a member whose character text waits for the voice model is not picked and costs no request; in single mode it is', async () => {
+  const queue = [
+    { kind: 'character', userId: 'b', brief: { add: ['γράφει τη νύχτα'] }, createdAt: NOW - DAY },
+    { kind: 'relationship', userId: 'c', brief: ['φίλοι'], createdAt: NOW - DAY },
+  ];
+  const twoStagePrompts = { profile: 'P', portrait: 'A', 'memory-voice': 'V' };
+  const withQueue = (ctx, { switchOn, prompts }) => {
+    ctx.hot.config.features.memoryTwoStage = switchOn;
+    ctx.hot.prompts = prompts;
+    ctx.store.queueReads = 0;
+    ctx.store.getVoiceQueue = (guildId) => {
+      ctx.store.queueReads += 1;
+      return guildId === 'g1' ? structuredClone(queue) : [];
+    };
+    return ctx;
+  };
+
+  const two = withQueue(makeScheduler({ memory: { portraitRefreshPerDay: 10 } }), { switchOn: true, prompts: twoStagePrompts });
+  const outcome = await two.scheduler.tick();
+  assert.deepEqual(two.refreshPortrait.calls.map((c) => c.userId), ['c', 'a', 'd'], 'b waits for the voice model: never started');
+  assert.deepEqual(outcome, { ran: true, due: 3, started: 3, refreshed: 3, skipped: 0 });
+  assert.equal(two.store.queueReads, 1, 'the queue is read once per look');
+
+  // The switch rolled back, or a two-stage prompt missing: the refresh sends the single request,
+  // which writes the portrait itself and settles the waiting item, so the member is picked.
+  for (const [switchOn, prompts] of [[false, twoStagePrompts], [true, { profile: 'P', portrait: 'A' }]]) {
+    const single = withQueue(makeScheduler({ memory: { portraitRefreshPerDay: 10 } }), { switchOn, prompts });
+    await single.scheduler.tick();
+    assert.deepEqual(single.refreshPortrait.calls.map((c) => c.userId), ['b', 'c', 'a', 'd'], `switch ${switchOn}`);
+    assert.equal(single.store.queueReads, 0, 'the queue is not even read');
+  }
 });
 
 test('portrait scheduler: a member whose refresh sent nothing leaves its slot to the next one', async () => {

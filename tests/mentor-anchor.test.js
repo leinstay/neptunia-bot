@@ -7,9 +7,21 @@
 // normalizeMessage; no network.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { anchorSituations, parseMessageRef, replayMedia, resolveAnchor, snowflakeTime, withSeenMedia } from '../src/mentor/anchor.js';
-import { fetchMoment } from '../src/discord/collect.js';
-import { formatTranscript } from '../src/discord/format.js';
+import { PermissionFlagsBits } from 'discord.js';
+import {
+  anchorSituations,
+  ledgerEntryFor,
+  parseMessageRef,
+  pulledFromStored,
+  replayMedia,
+  resolveAnchor,
+  snowflakeTime,
+  withoutJumpLink,
+  withSeenMedia,
+} from '../src/mentor/anchor.js';
+import { answerReply, liveView } from '../src/mentor/sandbox.js';
+import { fetchHistoryWindow, fetchMoment } from '../src/discord/collect.js';
+import { fill, formatTranscript } from '../src/discord/format.js';
 import { videoUrlCacheKey } from '../src/discord/video-sites.js';
 import { labels } from './fixtures/labels.js';
 
@@ -48,16 +60,25 @@ function raw(n, authorId, text, extra = {}) {
 
 const replyTo = (n) => ({ reference: { messageId: sf(n), channelId: CHANNEL_ID, type: 0 } });
 
-/** A readable guild channel over `raws` (oldest first); `readable: false` takes the history permission away. */
-function fakeChannel(raws, { id = CHANNEL_ID, guildId = GUILD, readable = true, guild = true } = {}) {
+/**
+ * A readable guild channel over `raws` (oldest first); `readable: false` takes the history permission away,
+ * `sendable: false` the send permission. `server` is a shared guild (see fakeServer) the channel joins.
+ */
+function fakeChannel(raws, { id = CHANNEL_ID, guildId = GUILD, readable = true, sendable = true, guild = true, name = 'general', server = null } = {}) {
   const byId = new Map(raws.map((m) => [m.id, m]));
   const fetches = [];
-  return {
+  const channel = {
     id,
+    name,
     fetches,
-    guild: guild ? { id: guildId, members: { me: { id: SELF_ID } } } : null,
+    guild: server ?? (guild ? { id: guildId, members: { me: { id: SELF_ID } } } : null),
     viewable: true,
-    permissionsFor: () => ({ has: () => readable }),
+    isTextBased: () => true,
+    isThread: () => false,
+    get lastMessageId() {
+      return raws.at(-1)?.id ?? null;
+    },
+    permissionsFor: () => ({ has: (flag) => (flag === PermissionFlagsBits.SendMessages ? sendable : readable) }),
     messages: {
       async fetch(arg) {
         fetches.push(arg);
@@ -74,6 +95,13 @@ function fakeChannel(raws, { id = CHANNEL_ID, guildId = GUILD, readable = true, 
       },
     },
   };
+  if (server) server.channels.cache.set(id, channel);
+  return channel;
+}
+
+/** One guild for several channels, its channel cache filled by fakeChannel's `server` option (what the pull rails read). */
+function fakeServer() {
+  return { id: GUILD, members: { me: { id: SELF_ID } }, roles: { everyone: null, cache: new Map() }, channels: { cache: new Map() } };
 }
 
 function fakeClient(channels) {
@@ -101,12 +129,27 @@ function resolve(channel, ref, extra = {}) {
     contextChannelId: CHANNEL_ID,
     selfId: SELF_ID,
     client: fakeClient({ [CHANNEL_ID]: channel, ...extra.channels }),
-    fetchMoment,
+    fetchMoment: extra.fetchMoment ?? fetchMoment,
     limit: extra.limit ?? 30,
     embedTextChars: 300,
     videoSites: extra.videoSites ?? [],
     mediaCache: extra.mediaCache,
+    ledger: extra.ledger,
+    fetchHistoryWindow: extra.fetchHistoryWindow,
+    config: extra.config,
+    labels: extra.labels,
   });
+}
+
+/**
+ * collect.js#fetchMoment as it is today, recording the ledger entry it is handed: the tests of the
+ * ledger's read side hold whatever fetchMoment makes of the entry.
+ */
+function recordingFetchMoment(seen) {
+  return (channel, messageId, { ledgerEntry, ...options }) => {
+    seen.push(ledgerEntry);
+    return fetchMoment(channel, messageId, options);
+  };
 }
 
 // ---- parseMessageRef -----------------------------------------------------------
@@ -389,4 +432,237 @@ test('replayMedia: an anchor without descriptions and nothing cached replays unc
   assert.equal(rendered(anchor.history, media), rendered(anchor.history));
   assert.match(rendered(anchor.history, media), /\[video: clip\.mp4, 0:12\]/);
   assert.equal(replayMedia(anchor.history, { cache: {}, sites: SITES }).descriptions.size, 0);
+});
+
+// ---- what the post answered: the ledger, the routed call, the pulled channels ------------
+
+const SOURCE_ID = '500000000000000002';
+const KITCHEN_ID = '500000000000000003';
+const STAFF_ID = '500000000000000004';
+
+/** A post ledger entry (state.json `postLedger`) for her message `n`. */
+function entry(n, fields = {}) {
+  return { messageId: sf(n), channelId: CHANNEL_ID, mode: 'reply', triggerKind: 'mention', triggerId: sf(n - 1), newestHistoryId: sf(n - 1), sourceChannelId: null, at: START, ...fields };
+}
+
+const at = (channelId, name) => ({ channelId, channel: { name } });
+
+test('ledgerEntryFor: the entry of her message in its channel, the newest first; nothing without a list', () => {
+  const first = entry(7, { triggerKind: 'name' });
+  const second = entry(7, { triggerKind: 'overheard' });
+  const ledger = [entry(4), first, null, 'junk', second, entry(7, { channelId: SOURCE_ID })];
+  assert.equal(ledgerEntryFor(ledger, { channelId: CHANNEL_ID, messageId: sf(7) }), second);
+  assert.equal(ledgerEntryFor(ledger, { channelId: CHANNEL_ID, messageId: sf(5) }), null);
+  assert.equal(ledgerEntryFor(undefined, { channelId: CHANNEL_ID, messageId: sf(7) }), null);
+  assert.equal(ledgerEntryFor({ length: 1 }, { channelId: CHANNEL_ID, messageId: sf(7) }), null);
+});
+
+test('resolveAnchor: a ledger entry goes to fetchMoment and the turn it names is stored; without one the trigger is guessed', async () => {
+  const seen = [];
+  const posted = entry(7, { triggerKind: 'overheard', triggerId: sf(6) });
+  const anchor = await resolve(fakeChannel(dispute()), sf(7), { ledger: [entry(4), posted], fetchMoment: recordingFetchMoment(seen) });
+  assert.deepEqual(seen, [posted]);
+  assert.equal(anchor.triggerId, sf(6));
+  assert.equal(anchor.mode, 'reply');
+  assert.equal(anchor.triggerKind, 'overheard');
+  assert.equal(anchor.sourceChannelId, null);
+  assert.equal('triggerGuessed' in anchor, false);
+  assert.equal('pulled' in anchor, false);
+  // Replayed as what it was: an overheard line, answered in a reply turn.
+  const [situation] = anchorSituations({ anchors: [{ id: 1, ...anchor }] });
+  assert.deepEqual({ mode: situation.mode, kind: situation.kind, triggerId: situation.triggerId }, { mode: 'reply', kind: 'overheard', triggerId: sf(6) });
+
+  // No ledger, or one that does not hold her message: fetchMoment gets no entry, the trigger is guessed.
+  for (const ledger of [undefined, [entry(4)]]) {
+    const asked = [];
+    const guessed = await resolve(fakeChannel(dispute()), sf(7), { ledger, fetchMoment: recordingFetchMoment(asked) });
+    assert.deepEqual(asked, [undefined]);
+    assert.equal(guessed.triggerGuessed, true);
+    for (const key of ['mode', 'triggerKind', 'sourceChannelId']) assert.equal(key in guessed, false, key);
+  }
+});
+
+test('resolveAnchor: an entry whose trigger fetchMoment did not take keeps the turn but marks the trigger guessed', async () => {
+  // The ledger says she answered message 3; today's fetchMoment takes the newest earlier line, message 6.
+  const anchor = await resolve(fakeChannel(dispute()), sf(7), { ledger: [entry(7, { triggerKind: 'followUp', triggerId: sf(3) })], fetchMoment: recordingFetchMoment([]) });
+  assert.equal(anchor.triggerId, sf(6));
+  assert.equal(anchor.triggerKind, 'followUp');
+  assert.equal(anchor.triggerGuessed, true);
+  // A mode or kind the turn does not know is stored as none.
+  const odd = await resolve(fakeChannel(dispute()), sf(7), { ledger: [entry(7, { mode: 'auto', triggerKind: 'shouted', triggerId: sf(6) })], fetchMoment: recordingFetchMoment([]) });
+  assert.equal(odd.mode, null);
+  assert.equal(odd.triggerKind, null);
+});
+
+/**
+ * A routed answer: Bruno calls her in the read-only #announcements; she answers in #general with the
+ * jump link; Alice writes there after the call. The ledger names the call.
+ */
+function routedServer({ joinLink = (text, link) => fill(labels.elsewhere.link, { text, link }) } = {}) {
+  const server = fakeServer();
+  const link = `https://discord.com/channels/${GUILD}/${SOURCE_ID}/${sf(5)}`;
+  const main = fakeChannel(
+    [raw(0, BRUNO, 'καλημέρα'), raw(1, ALICE, 'the café opens late today'), raw(6, SELF_ID, joinLink('ANSWER yes, I am here', link)), raw(7, SELF_ID, 'and the café opens at nine')],
+    { server },
+  );
+  const source = fakeChannel(
+    [
+      raw(2, ALICE, 'ANNOUNCEMENT the market moves to Friday', at(SOURCE_ID, 'announcements')),
+      raw(5, BRUNO, 'CALL are you there?', at(SOURCE_ID, 'announcements')),
+      raw(8, ALICE, 'AFTER the call, unseen', at(SOURCE_ID, 'announcements')),
+    ],
+    { id: SOURCE_ID, name: 'announcements', sendable: false, server },
+  );
+  const ledger = [entry(6, { triggerId: sf(5), newestHistoryId: sf(1), sourceChannelId: SOURCE_ID })];
+  return { main, source, ledger, channels: { [SOURCE_ID]: source } };
+}
+
+test('resolveAnchor: a routed answer stores its source window ending at the call, and its original loses the link', async () => {
+  const { main, ledger, channels } = routedServer();
+  const anchor = await resolve(main, sf(6), { ledger, channels, fetchHistoryWindow, fetchMoment: recordingFetchMoment([]), labels });
+  assert.equal(anchor.triggerId, sf(5));
+  assert.equal(anchor.sourceChannelId, SOURCE_ID);
+  assert.equal(anchor.triggerKind, 'mention');
+  assert.equal('triggerGuessed' in anchor, false, 'the call comes from the ledger');
+  assert.deepEqual(anchor.original, ['ANSWER yes, I am here', 'and the café opens at nine']);
+  assert.equal(anchor.pulled.length, 1);
+  const [window] = anchor.pulled;
+  assert.deepEqual(
+    { channelId: window.channelId, channelName: window.channelName, readOnly: window.readOnly, reason: window.reason, olderNotShown: window.olderNotShown },
+    { channelId: SOURCE_ID, channelName: 'announcements', readOnly: true, reason: 'routed', olderNotShown: false },
+  );
+  assert.deepEqual(window.messages.map((m) => m.content), ['ANNOUNCEMENT the market moves to Friday', 'CALL are you there?']);
+
+  // Without the label the link was joined on its own line; it goes all the same.
+  const plain = routedServer({ joinLink: (text, link) => `${text}\n${link}` });
+  const bare = await resolve(plain.main, sf(6), { ledger: plain.ledger, channels: plain.channels, fetchHistoryWindow, fetchMoment: recordingFetchMoment([]) });
+  assert.deepEqual(bare.original, ['ANSWER yes, I am here', 'and the café opens at nine']);
+});
+
+test('resolveAnchor: a routed answer whose call cannot be read is refused', async () => {
+  const { main, ledger } = routedServer();
+  const unreadable = fakeChannel([], { id: SOURCE_ID, readable: false, sendable: false });
+  for (const channels of [{}, { [SOURCE_ID]: unreadable }]) {
+    await assert.rejects(resolve(main, sf(6), { ledger, channels, fetchHistoryWindow, fetchMoment: recordingFetchMoment([]) }), /call it answered/);
+  }
+  // Nor without a way to read another channel.
+  const { channels } = routedServer();
+  await assert.rejects(resolve(main, sf(6), { ledger, channels, fetchMoment: recordingFetchMoment([]) }), /call it answered/);
+});
+
+test('anchorSituations: a routed anchor replays with a <channel_view> holding the call, answered where she spoke', async () => {
+  const { main, ledger, channels } = routedServer();
+  const anchor = await resolve(main, sf(6), { ledger, channels, fetchHistoryWindow, fetchMoment: recordingFetchMoment([]), labels });
+  const [situation] = anchorSituations({ anchors: [{ id: 1, ...anchor }] });
+  assert.deepEqual(situation.source, { channelId: SOURCE_ID, reason: 'routed' });
+  assert.equal(situation.kind, 'mention');
+  assert.equal(situation.at, START + 6 * 60_000);
+  const hot = {
+    config: {
+      bot: { timezone: 'UTC' },
+      context: { maxMessageChars: 800, gapMarkerMinutes: 20, otherProfiles: 6, caps: {}, vision: {} },
+      llm: { maxRequestTokens: 50000, safetyMargin: 0.9 },
+      features: { memory: false },
+    },
+    prompts: { 'system-prompt': 'SYSTEM', reply: 'REPLY_TASK {{author}}: {{trigger}} {{target}}', labels },
+  };
+  const llm = { calls: [], complete: async (messages) => (llm.calls.push(messages), { text: '<skip/>', usage: null, estimated: 1 }) };
+  const view = liveView({ hot, store: {}, guildId: GUILD });
+  const result = await answerReply({ view, situation, selfId: SELF_ID, selfName: 'Zoë', channel: { id: CHANNEL_ID, name: 'general' }, llm, samples: 1, at: situation.at });
+  assert.match(result.request.user, /<channel_view>\n[^]*CALL are you there\?[^]*\n<\/channel_view>/);
+  assert.ok(!result.request.user.includes('AFTER the call'));
+  assert.ok(result.request.user.includes(fill(labels.elsewhere.called, { channel: 'announcements', destination: 'general' })));
+  assert.ok(result.request.user.includes(`REPLY_TASK Bruno: ${labels.triggers.mention}`));
+});
+
+test('resolveAnchor: a channel named with <#id> in the moment keeps its window, ending before her answer; a refused one keeps none', async () => {
+  const server = fakeServer();
+  const config = { bot: { channels: { allow: [], deny: [STAFF_ID] }, dryRunChannelId: '' }, context: { pull: { sameAudience: false } } };
+  const main = fakeChannel(
+    [
+      raw(0, BRUNO, 'look at #kitchen', { content: `look at <#${KITCHEN_ID}>` }),
+      raw(1, ALICE, 'and #staff', { content: `and <#${STAFF_ID}>` }),
+      raw(4, SELF_ID, 'the oven again'),
+    ],
+    { server },
+  );
+  const kitchen = fakeChannel(
+    [raw(2, ALICE, 'KITCHEN the oven is on', at(KITCHEN_ID, 'kitchen')), raw(3, BRUNO, 'KITCHEN who left it on', at(KITCHEN_ID, 'kitchen')), raw(9, ALICE, 'KITCHEN after her answer', at(KITCHEN_ID, 'kitchen'))],
+    { id: KITCHEN_ID, name: 'kitchen', server },
+  );
+  fakeChannel([raw(2, ALICE, 'STAFF only', at(STAFF_ID, 'staff'))], { id: STAFF_ID, name: 'staff', server });
+  const anchor = await resolve(main, sf(4), { fetchHistoryWindow, config });
+  assert.equal(anchor.pulled.length, 1, 'the denied channel takes no slot');
+  const [window] = anchor.pulled;
+  assert.equal(window.channelId, KITCHEN_ID);
+  assert.equal(window.reason, 'mention');
+  assert.equal(window.readOnly, false);
+  assert.deepEqual(window.messages.map((m) => m.content), ['KITCHEN the oven is on', 'KITCHEN who left it on']);
+  assert.ok(kitchen.fetches.length > 0);
+
+  // features.channelPull off: no channel is kept.
+  const off = await resolve(main, sf(4), { fetchHistoryWindow, config: { ...config, features: { channelPull: false } } });
+  assert.equal('pulled' in off, false);
+});
+
+test('withoutJumpLink: the link a post carried goes, in the label\'s form or the plain one; anything else stays', () => {
+  const link = `https://discord.com/channels/${GUILD}/${SOURCE_ID}/${sf(5)}`;
+  assert.equal(withoutJumpLink(`ναι, εδώ [from ${link}]`, { form: labels.elsewhere.link, guildId: GUILD }), 'ναι, εδώ');
+  assert.equal(withoutJumpLink(`ναι, εδώ\n${link}`, { guildId: GUILD }), 'ναι, εδώ');
+  // A post that was only the link (Discord trims the separator away).
+  assert.equal(withoutJumpLink(link, { guildId: GUILD }), '');
+  // Another server's link, or a link inside the text, stays as written.
+  const other = `see\nhttps://discord.com/channels/${OTHER_GUILD}/${SOURCE_ID}/${sf(5)}`;
+  assert.equal(withoutJumpLink(other, { guildId: GUILD }), other);
+  assert.equal(withoutJumpLink(`${link}\nis where it was said`, { guildId: GUILD }), `${link}\nis where it was said`);
+  assert.equal(withoutJumpLink('no link at all', { form: labels.elsewhere.link, guildId: GUILD }), 'no link at all');
+});
+
+test('anchorSituations: a stored moment carries its mode, kind, source and windows; an older one replays as before', () => {
+  const history = [
+    { id: sf(1), authorId: ALICE, self: false, content: 'a', ts: START + 60_000 },
+    { id: sf(3), authorId: SELF_ID, self: true, content: 'mine, after the call', ts: START + 3 * 60_000 },
+  ];
+  const window = { channelId: SOURCE_ID, channelName: 'announcements', readOnly: true, reason: 'routed', olderNotShown: false, messages: [{ id: sf(4), authorId: BRUNO, self: false, content: 'call', ts: START + 4 * 60_000 }] };
+  const routed = { id: 1, channelId: CHANNEL_ID, messageId: sf(6), triggerId: sf(4), history, original: ['x'], mode: 'reply', triggerKind: 'mention', sourceChannelId: SOURCE_ID, pulled: [window] };
+  const older = { id: 2, channelId: CHANNEL_ID, messageId: 'x', triggerId: sf(1), history: history.slice(0, 1), original: ['y'] };
+  const [first, second, ...rest] = anchorSituations({ anchors: [routed, older] });
+  assert.equal(rest.length, 0);
+  assert.deepEqual(
+    { mode: first.mode, kind: first.kind, triggerId: first.triggerId, source: first.source, pulled: first.pulled },
+    { mode: 'reply', kind: 'mention', triggerId: sf(4), source: { channelId: SOURCE_ID, reason: 'routed' }, pulled: [window] },
+  );
+  // The chat ends with her own line, but the call she answered is newer and not hers: usable, answered after the call.
+  assert.equal(first.at, START + 6 * 60_000);
+  assert.deepEqual({ mode: second.mode, kind: second.kind, source: second.source, pulled: second.pulled }, { mode: null, kind: null, source: null, pulled: [] });
+  assert.equal(second.at, START + 60_000 + 60_000);
+  // A call that is her own line makes the moment unusable.
+  assert.deepEqual(anchorSituations({ anchors: [{ ...routed, triggerId: sf(3) }] }).length, 0);
+});
+
+test('pulledFromStored: rebuilds the channel records a turn shows, captions from what was stored, no ring marks', () => {
+  const pictures = [{ id: '810000000000000011', kind: 'image', name: 'a.png', url: 'u1' }, { id: '810000000000000012', kind: 'image', name: 'b.png', url: 'u2' }];
+  const message = { id: sf(4), channelId: SOURCE_ID, authorId: BRUNO, self: false, content: 'look', ts: START + 4 * 60_000, attachments: pictures, links: [], forwarded: [], stickers: [], emojis: [], mediaSeen: { captions: { '810000000000000011': 'a café at night' } } };
+  const window = { channelId: SOURCE_ID, channelName: 'announcements', readOnly: true, reason: 'routed', olderNotShown: true, messages: [message] };
+  const { pulled, source, readOnlyIds } = pulledFromStored({ pulled: [window], source: { channelId: SOURCE_ID, reason: 'routed' } });
+  assert.equal(pulled.length, 1);
+  const [record] = pulled;
+  assert.deepEqual(
+    { channelId: record.channelId, channelName: record.channelName, readOnly: record.readOnly, reason: record.reason, olderNotShown: record.olderNotShown, picturesNotSeen: record.picturesNotSeen },
+    { channelId: SOURCE_ID, channelName: 'announcements', readOnly: true, reason: 'routed', olderNotShown: true, picturesNotSeen: 1 },
+  );
+  assert.deepEqual(record.messages, window.messages);
+  assert.deepEqual(record.descriptions, new Map([['810000000000000011', 'a café at night']]));
+  assert.deepEqual(record.earlierPingIds, new Set());
+  assert.deepEqual(record.pingState, new Map());
+  assert.deepEqual(source, { channelId: SOURCE_ID, reason: 'routed' });
+  assert.deepEqual(readOnlyIds, new Set([SOURCE_ID]));
+
+  // A source whose window is not stored is no source; nothing stored, nothing shown.
+  for (const situation of [{ pulled: [], source: { channelId: SOURCE_ID, reason: 'routed' } }, undefined, { lines: [] }]) {
+    const none = pulledFromStored(situation);
+    assert.deepEqual(none.pulled, []);
+    assert.equal(none.source, null);
+    assert.deepEqual(none.readOnlyIds, new Set());
+  }
 });

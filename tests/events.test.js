@@ -1269,8 +1269,10 @@ test('events: a reply to the persona in the channel whose turn is running is def
 
 test('events: a name trigger in the channel whose turn is running is not queued; the busy drop is logged', async () => {
   const turns = busyChannelTurns();
+  const tagHistory = countingTagHistory();
   const config = baseConfig({ bot: { nameTriggers: ['νεπτούνια'] } });
-  const handler = makeHandler({ config, turns, sleep: async () => {}, rng: scripted([0.5]) });
+  // No rng value queued: a call dropped as busy is never rolled.
+  const handler = makeHandler({ config, turns, tagHistory, sleep: async () => {}, rng: scripted([]) });
 
   const guild = fakeGuild();
   const channel = fakeChannelWithMessage('c1', guild, 'm1');
@@ -1279,7 +1281,9 @@ test('events: a name trigger in the channel whose turn is running is not queued;
     await new Promise((resolve) => setTimeout(resolve, 0));
   });
 
-  assert.equal(turns.calls.length, 1, 'falls through to runTurn, which answers busy');
+  assert.equal(turns.calls.length, 0, 'dropped before the dice: no turn is asked for');
+  assert.equal(tagHistory.hits, 0, 'a call dropped as busy is not counted toward spam');
+  assert.equal(logs.some((entry) => entry.msg === 'mention: decided'), false, 'no ignore roll');
   const dropped = logs.find((entry) => entry.msg === 'mention: dropped' && entry.reason === 'busy');
   assert.ok(dropped);
   assert.equal(dropped.channel, 'c1');
@@ -1288,14 +1292,15 @@ test('events: a name trigger in the channel whose turn is running is not queued;
 
   turns.finish();
   await handler.drainPending();
-  assert.equal(turns.calls.length, 1, 'nothing was queued');
+  assert.equal(turns.calls.length, 0, 'nothing was queued');
 });
 
 test('events: mention.pendingSameChannel=false restores the busy drop for a same-channel mention, read hot', async () => {
   const turns = busyChannelTurns();
+  const tagHistory = countingTagHistory();
   const config = baseConfig({ mention: { pendingSameChannel: false } });
-  // One value: decideMention on arrival (the old path); the drain must find nothing.
-  const handler = makeHandler({ config, turns, sleep: async () => {}, rng: scripted([0.99]) });
+  // No rng value: the busy drop comes before decideMention; the drain must find nothing.
+  const handler = makeHandler({ config, turns, tagHistory, sleep: async () => {}, rng: scripted([]) });
 
   const guild = fakeGuild();
   const channel = fakeChannelWithMessage('c1', guild, 'm1');
@@ -1304,12 +1309,14 @@ test('events: mention.pendingSameChannel=false restores the busy drop for a same
     await new Promise((resolve) => setTimeout(resolve, 0));
   });
 
-  assert.equal(turns.calls.length, 1, 'decided and handed to runTurn, which answers busy');
+  assert.equal(turns.calls.length, 0, 'dropped before it is decided: no turn is asked for');
+  assert.equal(tagHistory.hits, 0, 'not counted');
+  assert.equal(logs.some((entry) => entry.msg === 'mention: decided'), false, 'no ignore roll');
   assert.ok(logs.some((entry) => entry.msg === 'mention: dropped' && entry.reason === 'busy' && entry.kind === 'mention'));
 
   turns.finish();
   await handler.drainPending();
-  assert.equal(turns.calls.length, 1, 'nothing was queued');
+  assert.equal(turns.calls.length, 0, 'nothing was queued');
 });
 
 test('events: a deferred ping the last speaking turn already had in view is not answered again', async () => {
@@ -1448,7 +1455,7 @@ test('events: the ignore decision is rolled at pick-up time, not when the ping a
   assert.equal(respondedArgs, null, 'rng=0 at pick-up time is below the configured ignoreChance (0.5): ignored');
 });
 
-test('events: a pending ping whose message no longer exists is dropped silently', async () => {
+test('events: a pending ping whose message no longer exists is dropped with reason gone', async () => {
   let called = false;
   const turns = fakeTurns({
     isBusy: () => false,
@@ -1465,9 +1472,61 @@ test('events: a pending ping whose message no longer exists is dropped silently'
   const channel = fakeChannel('c1', guild);
   await handler(directPingMessage({ guild, channel, channelId: 'c1' }));
 
-  await handler.drainPending();
+  const { logs } = await withCapturedLogs(() => handler.drainPending());
 
   assert.equal(called, false);
+  assert.deepEqual(
+    logs.filter((entry) => entry.msg === 'mention: dropped').map(({ channel: id, kind, reason }) => [id, kind, reason]),
+    [['c1', 'mention', 'gone']],
+  );
+  assert.equal(logs.some((entry) => entry.msg === 'mention: decided'), false, 'no ignore roll');
+});
+
+test('events: a pending ping whose message fetch fails is dropped as fetch-failed; a Discord not-found is gone', async () => {
+  const notFound = (message, code) => Object.assign(new Error(message), { status: 404, code });
+  for (const [label, error, reason] of [
+    ['a server error', Object.assign(new Error('Service Unavailable'), { status: 503 }), 'fetch-failed'],
+    ['a rate limit', Object.assign(new Error('Too Many Requests'), { status: 429 }), 'fetch-failed'],
+    ['lost access', Object.assign(new Error('Missing Access'), { status: 403, code: 50001 }), 'fetch-failed'],
+    ['an error without a status', new Error('socket hang up'), 'fetch-failed'],
+    ['Unknown Message', notFound('Unknown Message', 10008), 'gone'],
+    ['Unknown Channel', notFound('Unknown Channel', 10003), 'gone'],
+    // Each sign of a not-found answer is enough on its own (a wrapped error may carry only one).
+    ['the Unknown Message code without a status', Object.assign(new Error('Unknown Message'), { code: 10008 }), 'gone'],
+    ['the Unknown Channel code without a status', Object.assign(new Error('Unknown Channel'), { code: 10003 }), 'gone'],
+    ['a 404 without a code', Object.assign(new Error('Not Found'), { status: 404 }), 'gone'],
+    ['another code without a status', Object.assign(new Error('Missing Access'), { code: 50001 }), 'fetch-failed'],
+  ]) {
+    let called = false;
+    const turns = fakeTurns({
+      isBusy: () => false,
+      isAnyBusy: () => true,
+      runTurn: async () => {
+        called = true;
+        return { outcome: 'spoke' };
+      },
+    });
+    const handler = makeHandler({ turns, sleep: async () => {}, rng: scripted([0.5]) });
+    const guild = fakeGuild();
+    const channel = fakeChannel('c1', guild, {
+      messages: {
+        cache: new Map(),
+        fetch: async () => {
+          throw error;
+        },
+      },
+    });
+    await handler(directPingMessage({ guild, channel, channelId: 'c1' }));
+
+    const { logs } = await withCapturedLogs(() => handler.drainPending());
+
+    assert.equal(called, false, label);
+    assert.deepEqual(
+      logs.filter((entry) => entry.msg === 'mention: dropped').map(({ channel: id, kind, reason: why }) => [id, kind, why]),
+      [['c1', 'mention', reason]],
+      label,
+    );
+  }
 });
 
 for (const { kind, extra } of [
@@ -1883,9 +1942,37 @@ test('follow-up: the classifier request is address.md as system and a <candidate
   assert.equal(options.role, 'classifier.text', 'routed as the text classifier');
   assert.equal(options.countAgainstDailyCap, true);
   assert.equal(options.skipCalibration, true);
+  assert.equal(options.timeoutMs, 30000, 'the shipped llm.helperTimeoutMs, never the turn-length llm.timeoutMs');
+  assert.equal(options.purpose, 'address', 'named on the usage line');
 
   llm.respond('no');
   await p;
+});
+
+test('follow-up: the address classifier timeout is llm.helperTimeoutMs, read at each call, 30 s without the key', async () => {
+  const llm = fakeFollowUpLlm();
+  // Every answer below is "no": the streak limit is kept out of the way.
+  const config = baseConfig({ llm: { timeoutMs: 300000, helperTimeoutMs: 12000 }, mention: { followUpNoStreak: 10 } });
+  const handler = makeHandler({ config, llm, prompts: fakeAddressPrompts() });
+  const guild = fakeGuild('g1', 'Neptunia');
+  const t0 = Date.now();
+  const channel = fakeChannelWithHistory('c1', guild, []);
+  await openFollowUpWindow(handler, { guild, channel, ts: t0 + 1000 });
+
+  const ask = async (id, ts) => {
+    const p = handler(fakeMessage({ id, guild, channel, channelId: 'c1', cleanContent: 'is this for you', createdTimestamp: ts }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    llm.respond('no');
+    await p;
+  };
+  await ask('m-first', t0 + 2000);
+  config.llm.helperTimeoutMs = 7000; // a hot edit between two calls
+  await ask('m-second', t0 + 3000);
+  delete config.llm.helperTimeoutMs; // an older config.local.json layer without the key
+  await ask('m-third', t0 + 4000);
+
+  assert.deepEqual(llm.calls.map((call) => call.options.timeoutMs), [12000, 7000, 30000]);
+  assert.deepEqual(llm.calls.map((call) => call.options.purpose), ['address', 'address', 'address']);
 });
 
 test('follow-up: the address classifier ignores a deprecated llm.classifierModel when classifier.text is null', async () => {
@@ -4051,6 +4138,22 @@ test('follow-up: with mention.followUpOverheard off, an "overheard" answer drops
   assert.equal(logs.find((l) => l.msg === 'follow-up: held message dropped')?.reason, 'turn');
 });
 
+test('follow-up: mention.followUpOverheard switched off while an overheard line waits on a held message starts a followUp turn for it', async () => {
+  const config = baseConfig();
+  const tagHistory = countingTagHistory();
+  const { llm, turns } = await overheardWithHeld({ config, tagHistory });
+  assert.equal(llm.calls.length, 2, 'the held message is being classified');
+  assert.equal(turns.calls.length, 0, 'the overheard line waits on it');
+
+  // The owner turns the overheard kind off before the held message's verdict lands.
+  config.mention.followUpOverheard = false;
+  const logs = await answerFollowUp(llm, 'no');
+
+  assert.deepEqual(startedTurns(turns), [['m1', 'followUp']], 'the kind is read when the waiting line starts');
+  assert.deepEqual(followUpDropped(logs), []);
+  assert.equal(tagHistory.hits, 1, 'counted like any follow-up');
+});
+
 // The waiting overheard line starts after at least one more classifier call: the
 // gate's checks that do not depend on the window are read again at that moment.
 // [what the test calls it, the logged reason, () => ({ options for the scene, block() })]
@@ -4305,6 +4408,43 @@ test("events: forwarding one of the persona's own messages is not a reply to it"
   assert.equal(spontaneous.onMessageCalls.length, 1);
 });
 
+test('events: a message that replies to nothing fetches no message; a reply target missing from the cache is fetched', async () => {
+  const fetched = [];
+  let target = { author: { id: 'self1' } };
+  const guild = fakeGuild();
+  const channel = fakeChannel('c1', guild, {
+    messages: {
+      cache: new Map(),
+      fetch: async (arg) => {
+        fetched.push(arg);
+        if (target instanceof Error) throw target;
+        return target;
+      },
+    },
+  });
+  const turns = recordingTurns();
+  const config = baseConfig({ bot: { nameTriggers: [] } });
+  const handler = makeHandler({ config, turns, rng: () => 0.99 });
+
+  const { logs } = await withCapturedLogs(async () => {
+    await handler(fakeMessage({ id: 'm1', guild, channel, channelId: 'c1', cleanContent: 'καλημέρα' }));
+    assert.deepEqual(fetched, [], 'no reply: nothing to look up, not even a page of the channel');
+
+    await handler(fakeMessage({ id: 'm2', guild, channel, channelId: 'c1', cleanContent: 'ναι', reference: { messageId: 'm0' } }));
+    await settle();
+    assert.deepEqual(fetched, ['m0'], 'the reply target is fetched by its id');
+    assert.deepEqual(turns.calls.map((args) => [args.trigger.id, args.triggerKind]), [['m2', 'reply']]);
+
+    // A target that cannot be fetched is no reply to the persona, and nothing escapes the handler.
+    target = new Error('Service Unavailable');
+    await handler(fakeMessage({ id: 'm3', guild, channel, channelId: 'c1', cleanContent: 'όχι', reference: { messageId: 'm9' } }));
+    await settle();
+  });
+  assert.deepEqual(fetched, ['m0', 'm9']);
+  assert.equal(turns.calls.length, 1, 'the unresolved reply runs no turn');
+  assert.equal(logs.some((entry) => entry.msg === 'events: message handler failed'), false);
+});
+
 test('follow-up: a failure while building the classifier request is not reported as a missing prompts.address', async () => {
   const llm = fakeFollowUpLlm();
   const prompts = fakeAddressPrompts();
@@ -4520,6 +4660,7 @@ function routeScene({
   isWarmingUp,
   rng = () => 0.5,
   prompts,
+  tagHistory,
 } = {}) {
   const config = baseConfig(deepMerge({ memory: { mainChannelIds: ['d1'] }, bot: { nameTriggers: ['νεπτούνια'] } }, overrides));
   const guild = routeGuild();
@@ -4528,7 +4669,7 @@ function routeScene({
   const main = routeChannel(guild, 'd1', { send: mainCanSend });
   const clock = mutableNow(ROUTE_T0);
   const timers = fakeTimers();
-  const handler = makeHandler({ config, turns, store, now: clock, timers, rng, isWarmingUp, prompts, sleep: async () => {} });
+  const handler = makeHandler({ config, turns, store, now: clock, timers, rng, isWarmingUp, prompts, tagHistory, sleep: async () => {} });
   return { config, guild, source, source2, main, sourceViewers, clock, timers, handler, turns, store };
 }
 
@@ -4787,7 +4928,107 @@ test('events: a call another turn already showed and answered is not answered ag
   assert.deepEqual(turns.calls.map((args) => args.trigger.id), ['m3']);
 });
 
-test('events: a call deleted during the settle wait is dropped silently', async () => {
+test('events: a settled call the ring holds as answered starts no turn, though no turn remembers showing it', async () => {
+  // During the wait a turn in the main channel pulled s1 and answered the call (the turn stamps
+  // the ring: src/behavior/turn.js#stampShownCalls); a later turn's view of s1 no longer holds it.
+  const turns = recordingTurns();
+  turns.spokeAfterSeeing = () => false;
+  const scene = routeScene({ turns });
+  await routeSend(scene, scene.source, 0, { id: 'm1' });
+  await routeSend(scene, scene.source, 5, { id: 'm2', authorId: 'u2', authorName: 'Ίων' });
+  scene.store.state.data.elsewherePings.find((entry) => entry.messageId === 'm2').answeredAt = routeAt(40);
+  const dirty = scene.store.dirtyCount;
+  const { logs } = await withCapturedLogs(() => routeFire(scene, 95));
+
+  assert.equal(turns.calls.length, 0);
+  assert.deepEqual(
+    byMsg(logs, 'mention: already answered').map(({ channel, kind, reason }) => [channel, kind, reason]),
+    [['s1', 'mention', 'ring']],
+  );
+  assert.equal(byMsg(logs, 'mention: decided').length, 0, 'never counted or rolled');
+  assert.equal(byMsg(logs, 'mention: dropped').length, 0);
+  // The turn that answered stamped what it showed; nothing is stamped here.
+  assert.deepEqual(ringStates(scene), { m1: 'unanswered', m2: 'answered' });
+  assert.equal(byMsg(logs, 'elsewhere: marked').length, 0);
+  assert.equal(scene.store.dirtyCount, dirty);
+
+  // Only an answer closes a settled call: one the ring holds as skipped (shown in passing) still gets its turn.
+  await routeSend(scene, scene.source, 100, { id: 'm3', authorId: 'u3', authorName: 'Χλόη' });
+  scene.store.state.data.elsewherePings.find((entry) => entry.messageId === 'm3').skippedAt = routeAt(120);
+  await routeFire(scene, 190);
+  assert.deepEqual(turns.calls.map((args) => args.trigger.id), ['m3']);
+});
+
+/** Replace the message lookup of `channel` with `answer`, counted: `count` is how many fetches were made. */
+function countLookups(channel, answer) {
+  const lookups = { count: 0 };
+  channel.messages.fetch = async (...args) => {
+    lookups.count += 1;
+    return answer(...args);
+  };
+  return lookups;
+}
+
+// How the lookup of a call's message can come back empty-handed.
+const LOOKUP_MISSES = [
+  ['deleted', async () => null],
+  [
+    'the fetch fails',
+    async () => {
+      throw Object.assign(new Error('Service Unavailable'), { status: 503 });
+    },
+  ],
+];
+
+test('events: a settled call the ring holds as answered is logged as answered, never as gone or fetch-failed, and costs no lookup', async () => {
+  for (const [label, answer] of LOOKUP_MISSES) {
+    const scene = routeScene();
+    await routeSend(scene, scene.source, 0, { id: 'm1' });
+    // A turn in the main channel pulled s1, answered the call and stamped the ring; then the
+    // call's message left the cache (deleted, or swept) and cannot be looked up any more.
+    scene.store.state.data.elsewherePings[0].answeredAt = routeAt(40);
+    scene.source.messages.cache.delete('m1');
+    const lookups = countLookups(scene.source, answer);
+    const { logs } = await withCapturedLogs(() => routeFire(scene, 90));
+
+    assert.equal(scene.turns.calls.length, 0, label);
+    assert.deepEqual(
+      byMsg(logs, 'mention: already answered').map(({ channel, kind, reason }) => [channel, kind, reason]),
+      [['s1', 'mention', 'ring']],
+      label,
+    );
+    assert.equal(byMsg(logs, 'mention: dropped').length, 0, `${label}: an answered call is not reported as lost`);
+    assert.equal(lookups.count, 0, `${label}: no lookup for a call already answered`);
+    assert.deepEqual(ringStates(scene), { m1: 'answered' }, label);
+  }
+});
+
+test('events: a settled call answered while its message is looked up is not answered again', async () => {
+  for (const [label, answer] of [['found', async () => ({ id: 'm1' })], ...LOOKUP_MISSES]) {
+    const scene = routeScene();
+    await routeSend(scene, scene.source, 0, { id: 'm1' });
+    // Swept from the cache, so the settle has to fetch it. While that fetch is in flight a turn
+    // in the main channel that showed the call speaks and stamps the ring.
+    scene.source.messages.cache.delete('m1');
+    const lookups = countLookups(scene.source, async () => {
+      scene.store.state.data.elsewherePings[0].answeredAt = routeAt(90);
+      return answer();
+    });
+    const { logs } = await withCapturedLogs(() => routeFire(scene, 90));
+
+    assert.equal(lookups.count, 1, label);
+    assert.equal(scene.turns.calls.length, 0, label);
+    assert.deepEqual(
+      byMsg(logs, 'mention: already answered').map(({ channel, kind, reason }) => [channel, kind, reason]),
+      [['s1', 'mention', 'ring']],
+      label,
+    );
+    assert.equal(byMsg(logs, 'mention: dropped').length, 0, label);
+    assert.equal(byMsg(logs, 'mention: decided').length, 0, `${label}: never counted or rolled`);
+  }
+});
+
+test('events: a call deleted during the settle wait is dropped with reason gone', async () => {
   const scene = routeScene();
   await routeSend(scene, scene.source, 0, { id: 'm1' });
   scene.source.messages.cache.delete('m1');
@@ -4795,8 +5036,31 @@ test('events: a call deleted during the settle wait is dropped silently', async 
 
   assert.equal(scene.turns.calls.length, 0);
   assert.equal(byMsg(logs, 'mention: decided').length, 0, 'never counted or rolled');
-  assert.equal(byMsg(logs, 'mention: dropped').length, 0);
+  assert.deepEqual(
+    byMsg(logs, 'mention: dropped').map(({ channel, kind, reason, destination }) => [channel, kind, reason, destination]),
+    [['s1', 'mention', 'gone', undefined]],
+    'dropped before a destination is resolved',
+  );
   assert.equal(byMsg(logs, 'elsewhere: dropped').length, 0);
+});
+
+test('events: a settled call whose message fetch fails is dropped as fetch-failed and stays unanswered', async () => {
+  const scene = routeScene();
+  await routeSend(scene, scene.source, 0, { id: 'm1' });
+  scene.source.messages.cache.delete('m1');
+  scene.source.messages.fetch = async () => {
+    throw Object.assign(new Error('Service Unavailable'), { status: 503 });
+  };
+  const { logs } = await withCapturedLogs(() => routeFire(scene, 90));
+
+  assert.equal(scene.turns.calls.length, 0);
+  assert.deepEqual(
+    byMsg(logs, 'mention: dropped').map(({ channel, kind, reason }) => [channel, kind, reason]),
+    [['s1', 'mention', 'fetch-failed']],
+  );
+  assert.equal(byMsg(logs, 'mention: decided').length, 0);
+  assert.equal(byMsg(logs, 'elsewhere: settle failed').length, 0, 'a failed fetch is a drop, not a settle failure');
+  assert.deepEqual(ringStates(scene), { m1: 'unanswered' });
 });
 
 test('events: stop clears every settle wait, and a timer that fires late starts nothing', async () => {
@@ -5293,6 +5557,95 @@ test('events: a queued routed ping a turn already showed and answered is not ans
   assert.deepEqual(byMsg(logs, 'elsewhere: marked').map(({ message, status }) => [message, status]), [['m1', 'skipped']]);
 });
 
+test('events: a queued routed ping the ring holds as answered is not answered again, though no turn remembers showing it', async () => {
+  let busy = true;
+  const turns = recordingTurns({ outcome: 'spoke' }, { isAnyBusy: () => busy });
+  turns.spokeAfterSeeing = () => false;
+  const scene = routeScene({ turns });
+  await routeSend(scene, scene.source, 0, { id: 'm1' });
+  await routeFire(scene, 90);
+  // The running turn pulled s1 and answered the queued call; it stamped the ring, and the
+  // view a later turn left in memory no longer holds the call.
+  scene.store.state.data.elsewherePings[0].answeredAt = routeAt(95);
+  busy = false;
+  scene.clock.set(routeAt(100));
+  const dirty = scene.store.dirtyCount;
+  const { logs } = await withCapturedLogs(() => scene.handler.drainPending());
+
+  assert.equal(turns.calls.length, 0);
+  assert.deepEqual(
+    byMsg(logs, 'mention: already answered').map(({ channel, kind, reason, destination }) => [channel, kind, reason, destination]),
+    [['s1', 'mention', 'ring', 'd1']],
+  );
+  assert.equal(byMsg(logs, 'mention: decided').length, 0, 'never counted or rolled');
+  assert.deepEqual(ringStates(scene), { m1: 'answered' });
+  assert.equal(byMsg(logs, 'elsewhere: marked').length, 0);
+  assert.equal(scene.store.dirtyCount, dirty);
+});
+
+/** A scene whose call `m1` of s1 settled while a turn was running: it waits in the queue. `release()` ends that turn. */
+async function queuedRouteScene() {
+  let busy = true;
+  const turns = recordingTurns({ outcome: 'spoke' }, { isAnyBusy: () => busy });
+  turns.spokeAfterSeeing = () => false;
+  const scene = routeScene({ turns });
+  await routeSend(scene, scene.source, 0, { id: 'm1' });
+  await routeFire(scene, 90);
+  scene.release = () => {
+    busy = false;
+    scene.clock.set(routeAt(100));
+  };
+  return scene;
+}
+
+test('events: a queued routed ping the ring holds as answered is logged as answered, never as gone or fetch-failed, and costs no lookup', async () => {
+  for (const [label, answer] of LOOKUP_MISSES) {
+    const scene = await queuedRouteScene();
+    // The running turn pulled s1, answered the queued call and stamped the ring; then the call's
+    // message left the cache (deleted, or swept) and cannot be looked up any more.
+    scene.store.state.data.elsewherePings[0].answeredAt = routeAt(95);
+    scene.source.messages.cache.delete('m1');
+    const lookups = countLookups(scene.source, answer);
+    scene.release();
+    const { logs } = await withCapturedLogs(() => scene.handler.drainPending());
+
+    assert.equal(scene.turns.calls.length, 0, label);
+    assert.deepEqual(
+      byMsg(logs, 'mention: already answered').map(({ channel, kind, reason, destination }) => [channel, kind, reason, destination]),
+      [['s1', 'mention', 'ring', 'd1']],
+      label,
+    );
+    assert.equal(byMsg(logs, 'mention: dropped').length, 0, `${label}: an answered call is not reported as lost`);
+    assert.equal(lookups.count, 0, `${label}: no lookup for a call already answered`);
+    assert.deepEqual(ringStates(scene), { m1: 'answered' }, label);
+  }
+});
+
+test('events: a queued routed ping answered while its message is looked up is not answered again', async () => {
+  for (const [label, answer] of [['found', async () => ({ id: 'm1' })], ...LOOKUP_MISSES]) {
+    const scene = await queuedRouteScene();
+    // Swept from the cache, so the drain has to fetch it. While that fetch is in flight another
+    // turn that showed the call speaks and stamps the ring.
+    scene.source.messages.cache.delete('m1');
+    const lookups = countLookups(scene.source, async () => {
+      scene.store.state.data.elsewherePings[0].answeredAt = routeAt(100);
+      return answer();
+    });
+    scene.release();
+    const { logs } = await withCapturedLogs(() => scene.handler.drainPending());
+
+    assert.equal(lookups.count, 1, label);
+    assert.equal(scene.turns.calls.length, 0, label);
+    assert.deepEqual(
+      byMsg(logs, 'mention: already answered').map(({ channel, kind, reason, destination }) => [channel, kind, reason, destination]),
+      [['s1', 'mention', 'ring', 'd1']],
+      label,
+    );
+    assert.equal(byMsg(logs, 'mention: dropped').length, 0, label);
+    assert.equal(byMsg(logs, 'mention: decided').length, 0, `${label}: never counted or rolled`);
+  }
+});
+
 test('events: a queued routed ping dropped as already answered takes the call it replaced in the queue with it', async () => {
   let busy = true;
   const seen = new Set();
@@ -5545,6 +5898,28 @@ test('events: a routed name call while busy is dropped, never queued', async () 
   assert.equal(byMsg(logs, 'mention: deferred').length, 0);
 });
 
+test('events: a routed name call whose main channel is busy is dropped before the dice and stays unanswered', async () => {
+  // oneAtATime off: the turn running in the main channel is the one that holds the call back.
+  const tagHistory = countingTagHistory();
+  const turns = recordingTurns({ outcome: 'spoke' }, { isBusy: (id) => id === 'd1', isAnyBusy: () => true });
+  // No rng value: neither the name-trigger chance nor the ignore chance may be rolled.
+  const scene = routeScene({ turns, tagHistory, rng: scripted([]), config: { mention: { oneAtATime: false, nameTriggerChance: 0.5 } } });
+  await routeSend(scene, scene.source, 0, { id: 'm1', mention: false, content: 'νεπτούνια, δες εδώ' });
+  const { logs } = await withCapturedLogs(() => routeFire(scene, 90));
+
+  assert.equal(turns.calls.length, 0);
+  assert.equal(tagHistory.hits, 0, 'not counted');
+  assert.equal(byMsg(logs, 'mention: decided').length, 0, 'not rolled');
+  assert.deepEqual(
+    byMsg(logs, 'mention: dropped').map(({ channel, kind, reason, destination }) => [channel, kind, reason, destination]),
+    [['s1', 'name', 'busy', 'd1']],
+  );
+  assert.equal(byMsg(logs, 'elsewhere: settle failed').length, 0);
+  // Busy is not her choice: the call is neither answered nor skipped.
+  assert.deepEqual(ringStates(scene), { m1: 'unanswered' });
+  assert.equal(byMsg(logs, 'elsewhere: marked').length, 0);
+});
+
 test('events: a refused routed turn posts the notice in the destination, not as a reply', async () => {
   const limit = { key: 'llm.maxRequestsPerDay', used: 800, cap: 800 };
   // The live path and the drain of a queued call alike.
@@ -5658,6 +6033,30 @@ test('events: a restart during the settle wait loses the timer and leaves the ri
   assert.equal(before.turns.calls.length, 0);
   assert.deepEqual(store.state.data.elsewherePings, [
     { messageId: 'm1', channelId: 's1', ts: routeAt(0), answeredAt: null, skippedAt: null },
+  ]);
+});
+
+test('events: a call answered before a restart is not answered again when the same message reaches the new process', async () => {
+  const store = fakeStateStore();
+  const before = routeScene({ store });
+  await routeSend(before, before.source, 0, { id: 'm1' });
+  await routeFire(before, 90);
+  assert.deepEqual(before.turns.calls.map((args) => args.trigger.id), ['m1']);
+  assert.deepEqual(ringStates(before), { m1: 'answered' });
+
+  // The process restarts: no turn in memory remembers that answer, the ring in state.json does.
+  // The gateway hands the same call over once more.
+  const after = routeScene({ store, rng: scripted([]) });
+  const { logs } = await withCapturedLogs(async () => {
+    await routeSend(after, after.source, 100, { id: 'm1', ts: routeAt(0) });
+    await routeFire(after, 190);
+  });
+
+  assert.equal(after.turns.calls.length, 0);
+  assert.deepEqual(byMsg(logs, 'mention: already answered').map(({ channel, reason }) => [channel, reason]), [['s1', 'ring']]);
+  assert.equal(byMsg(logs, 'mention: decided').length, 0, 'never counted or rolled again');
+  assert.deepEqual(store.state.data.elsewherePings, [
+    { messageId: 'm1', channelId: 's1', ts: routeAt(0), answeredAt: routeAt(90), skippedAt: null },
   ]);
 });
 

@@ -8,6 +8,7 @@ import { block, buildDrawPrompt, buildRequest, hasRequiredLabels, renderProfile,
 import { estimateTokens } from '../src/llm/tokens.js';
 import { fill, formatClock, formatDate, formatDuration } from '../src/discord/format.js';
 import { labels } from './fixtures/labels.js';
+import { tokenIds } from '../src/memory/mentions.js';
 
 const NOW = Date.UTC(2026, 8, 20, 10, 0, 0); // Sun 20 Sep 2026, 13:00 Moscow
 const MIN = 60_000;
@@ -3020,4 +3021,508 @@ test('buildRequest: missing pull labels degrade without throwing', () => {
   assert.ok(view[1].endsWith('Zoé: πρώτη σελίδα'), 'an earlier call without its heading');
   assert.ok(view[2].endsWith('Zoé: δεύτερη σελίδα'), 'an answered call without its mark');
   assert.ok(!view.join('\n').includes('undefined'));
+});
+
+// --- <recent>: the last memory.recentHours (recent lines, and moments by reference) ---------
+
+const HERE = '700000000000000001'; // the channel the turn posts in
+const GARDEN = '700000000000000002'; // another channel of the map
+const ANA_ID = '411111111111111111';
+const NIKOS_ID = '422222222222222222';
+const ZOE_ID = '433333333333333333';
+const RECENT_NAMES = { [ANA_ID]: 'Ana', [NIKOS_ID]: 'Nikos', [ZOE_ID]: 'Zoé' };
+
+/** A live recent line of #here as the store holds it, an hour before NOW unless `fields` say otherwise. */
+function recentLine(id, fields = {}) {
+  const text = fields.text ?? `σημείωση ${id}`;
+  return { id, at: NOW - HOUR, addedAt: new Date(NOW).toISOString(), channelId: HERE, text, who: tokenIds(text), weight: 2, ...fields };
+}
+
+/** A stored moment dated the day before NOW, inside the window. */
+function recentMoment(what, fields = {}) {
+  return { date: '2026-09-19', what, quote: 'λόγια', feeling: 'χαρά', weight: 3, addedAt: 'a', ...fields };
+}
+
+/** `{date}` and `{time}` of a recent line at `ts`. */
+function clockOf(ts) {
+  return { date: formatDate(ts, TZ, labels.locale), time: formatClock(ts, TZ, labels.locale) };
+}
+
+/** `{date}` of a moment dated `date` (it sits at noon UTC of that day). */
+function momentDate(date) {
+  return formatDate(Date.parse(`${date}T12:00:00Z`), TZ, labels.locale);
+}
+
+/** The recent header for the default window. */
+const RECENT_HEADER = fill(labels.recent.header, { hours: 72 });
+
+/**
+ * A turn in #here answering Ana, with `lines` as the store's recent lines, every channel's
+ * lines allowed unless `recentAudience` says otherwise. `llm` overrides the request limit.
+ */
+function recentScene({ lines = [], context = {}, features = {}, memory = {}, llm, ...overrides } = {}) {
+  const trigger = makeMessage(1, NOW - MIN, { authorId: ANA_ID, authorName: 'Ana', channelId: HERE, channelName: 'here', content: 'καλημέρα' });
+  return baseInput({
+    config: fakeConfig({ context, features, memory, llm }),
+    history: [trigger],
+    trigger,
+    triggerKind: 'mention',
+    currentChannelId: HERE,
+    channels: [{ id: GARDEN, name: 'garden' }],
+    nameOf: (id) => RECENT_NAMES[id] ?? null,
+    recentLines: lines,
+    recentAudience: () => true,
+    ...overrides,
+  });
+}
+
+/** The `<recent>` body of a request, or null when it has none. */
+function recentOf(request) {
+  return bodyOf(userText(request), 'recent');
+}
+
+test('prompt: a line from another channel names its channel', () => {
+  const lines = [
+    recentLine(1, { at: NOW - 3 * HOUR, text: 'εδώ το πρωί' }),
+    recentLine(2, { at: NOW - 2 * HOUR, channelId: GARDEN, text: `<@${NIKOS_ID}> πότισε τον κήπο` }),
+    recentLine(3, { at: NOW - HOUR, channelId: '700000000000000009', text: 'κάπου αλλού' }),
+  ];
+  const ana = { id: ANA_ID, names: ['Ana'], character: 'ζωηρή' };
+  const request = buildRequest(recentScene({ lines, interlocutor: ana, guildMemory: { self: ['μου αρέσει το τσάι'] } }));
+  assert.equal(
+    recentOf(request),
+    [
+      RECENT_HEADER,
+      fill(labels.recent.line, { ...clockOf(NOW - 3 * HOUR), text: 'εδώ το πρωί' }),
+      fill(labels.recent.lineIn, { ...clockOf(NOW - 2 * HOUR), channel: 'garden', text: 'Nikos πότισε τον κήπο' }),
+      fill(labels.recent.line, { ...clockOf(NOW - HOUR), text: 'κάπου αλλού' }),
+    ].join('\n'),
+    'this channel and a channel the map does not name take the plain form; tokens become names',
+  );
+  assert.deepEqual(request.recent, { lines: 3, episodes: 0, cut: 0, hidden: 0, repeated: 0, unnamed: 0 });
+  const user = userText(request);
+  assert.ok(user.indexOf('</self_facts>') < user.indexOf('<recent>') && user.indexOf('</recent>') < user.indexOf('<people>'), 'after self_facts, before people');
+  assert.equal(request.stats.recent.kept, 3);
+
+  // Without the lineIn label a line of another channel takes the plain form.
+  const noIn = fakePrompts({ labels: { ...labels, recent: { ...labels.recent, lineIn: undefined } } });
+  const plain = recentOf(buildRequest(recentScene({ lines, prompts: noIn })));
+  assert.ok(plain.includes(fill(labels.recent.line, { ...clockOf(NOW - 2 * HOUR), text: 'Nikos πότισε τον κήπο' })));
+});
+
+test('prompt: no recent labels -> no <recent> block', () => {
+  const nikos = { id: NIKOS_ID, names: ['Nikos'], episodes: [recentMoment('η στιγμή του Nikos')] };
+  const lines = [recentLine(1, { text: 'μια σημείωση' })];
+  const without = buildRequest(recentScene({ recentLines: undefined, candidateProfiles: [nikos] }));
+  for (const recent of [undefined, { ...labels.recent, header: undefined }, { ...labels.recent, line: '' }]) {
+    const request = buildRequest(recentScene({ lines, candidateProfiles: [nikos], prompts: fakePrompts({ labels: { ...labels, recent } }) }));
+    assert.ok(!userText(request).includes('<recent>'), JSON.stringify(recent));
+    assert.equal(request.recent, null);
+    assert.deepEqual(request.messages, without.messages, 'the request built before the recent layer');
+  }
+  // Without the episode label: the lines only, no moment offered at all.
+  const noEpisode = fakePrompts({ labels: { ...labels, recent: { ...labels.recent, episode: undefined } } });
+  const linesOnly = buildRequest(recentScene({ lines, candidateProfiles: [nikos], prompts: noEpisode }));
+  assert.equal(recentOf(linesOnly), [RECENT_HEADER, fill(labels.recent.line, { ...clockOf(NOW - HOUR), text: 'μια σημείωση' })].join('\n'));
+  assert.deepEqual(linesOnly.recent, { lines: 1, episodes: 0, cut: 0, hidden: 0, repeated: 0, unnamed: 0 });
+});
+
+test('prompt: the recent section is trimmed after chat and before people', () => {
+  const nikos = { id: NIKOS_ID, names: ['Nikos'], character: 'ήρεμος' };
+  const said = makeMessage(2, NOW - 3 * MIN, { authorId: NIKOS_ID, authorName: 'Nikos', channelId: HERE, channelName: 'here', content: 'γεια σας' });
+  const trigger = makeMessage(1, NOW - MIN, { authorId: ANA_ID, authorName: 'Ana', channelId: HERE, channelName: 'here', content: 'καλημέρα' });
+  const lines = [1, 2, 3].map((id) => recentLine(id, { at: NOW - id * HOUR, text: `η σημείωση ${id} για όσα έγιναν` }));
+  const scene = (llm) => buildRequest(recentScene({ lines, history: [said, trigger], trigger, otherProfiles: [nikos], llm }));
+  const loose = scene({});
+  const { stats } = loose;
+  assert.ok(stats.people.used > 0 && stats.recent.used > 0 && stats.chat.used > 0);
+  // A limit with room for everything but <people> (safetyMargin 1, no picture, 60 for the tags).
+  const tight = (room) => scene({ maxRequestTokens: room + 60, safetyMargin: 1 });
+
+  const noPeople = tight(stats.used - stats.people.used);
+  assert.equal(recentOf(noPeople), recentOf(loose), 'the recent block outranks <people>');
+  assert.equal(bodyOf(userText(noPeople), 'people'), null);
+
+  const lessRecent = tight(stats.used - stats.people.used - 1);
+  assert.equal(lessRecent.stats.chat.dropped, 0, 'the chat outranks the recent block');
+  assert.equal(lessRecent.stats.recent.kept, stats.recent.kept - 1);
+  assert.equal(lessRecent.recent.cut, 1);
+  assert.ok(lessRecent.stats.used <= lessRecent.stats.limit);
+});
+
+test('recent view: an item about the interlocutor outranks a newer one under a tight cap', () => {
+  const about = recentLine(1, { at: NOW - 20 * HOUR, weight: 1, text: `<@${ANA_ID}> έφερε ένα βατραχάκι` });
+  const newer = recentLine(2, { at: NOW - HOUR, weight: 3, text: 'κάποιος τραγούδησε δυνατά' });
+  const cost = (text) => estimateTokens(text) + 2;
+  const aboutText = fill(labels.recent.line, { ...clockOf(NOW - 20 * HOUR), text: 'Ana έφερε ένα βατραχάκι' });
+  const caps = { ...fakeConfig().context.caps, recent: cost(RECENT_HEADER) + cost(aboutText) };
+  const request = buildRequest(recentScene({ lines: [newer, about], context: { caps } }));
+  assert.equal(recentOf(request), [RECENT_HEADER, aboutText].join('\n'));
+  assert.deepEqual(request.recent, { lines: 1, episodes: 0, cut: 1, hidden: 0, repeated: 0, unnamed: 0 });
+  assert.ok(request.stats.recent.used <= caps.recent);
+  assert.ok(recentOf(buildRequest(recentScene({ lines: [newer, about] }))).includes('κάποιος τραγούδησε δυνατά'), 'both with room');
+});
+
+test('recent view: kept items render oldest first', () => {
+  const lines = [
+    recentLine(1, { at: NOW - 10 * HOUR, weight: 1, text: 'πρώτη' }),
+    recentLine(2, { at: NOW - 2 * HOUR, weight: 3, text: 'τρίτη' }),
+    recentLine(3, { at: NOW - 5 * HOUR, weight: 2, text: 'δεύτερη' }),
+  ];
+  const nikos = { id: NIKOS_ID, names: ['Nikos'], episodes: [recentMoment('η στιγμή του Nikos', { date: '2026-09-18' })] };
+  const body = recentOf(buildRequest(recentScene({ lines, candidateProfiles: [nikos] })));
+  assert.deepEqual(body.split('\n'), [
+    RECENT_HEADER,
+    fill(labels.recent.episode, { date: momentDate('2026-09-18'), name: 'Nikos', what: 'η στιγμή του Nikos' }),
+    fill(labels.recent.line, { ...clockOf(NOW - 10 * HOUR), text: 'πρώτη' }),
+    fill(labels.recent.line, { ...clockOf(NOW - 5 * HOUR), text: 'δεύτερη' }),
+    fill(labels.recent.line, { ...clockOf(NOW - 2 * HOUR), text: 'τρίτη' }),
+  ]);
+});
+
+test("recent view: the interlocutor's own episodes are left out", () => {
+  const ana = { id: ANA_ID, names: ['Ana'], character: 'ζωηρή', episodes: [recentMoment('η στιγμή της Ana')] };
+  const nikos = { id: NIKOS_ID, names: ['Nikos'], episodes: [recentMoment('η στιγμή του Nikos')] };
+  const request = buildRequest(recentScene({ lines: [recentLine(1)], interlocutor: ana, candidateProfiles: [ana, nikos] }));
+  const recent = recentOf(request);
+  assert.ok(recent.includes('η στιγμή του Nikos'), "another member's moment by reference");
+  assert.ok(!recent.includes('η στιγμή της Ana'));
+  assert.ok(bodyOf(userText(request), 'people').includes('η στιγμή της Ana'), 'hers stay in <people>');
+
+  // A spontaneous turn has no interlocutor: her moment is one of the window's.
+  const spontaneous = recentOf(
+    buildRequest(recentScene({ lines: [recentLine(1)], trigger: null, triggerKind: null, mode: 'interject', candidateProfiles: [ana, nikos] })),
+  );
+  assert.ok(spontaneous.includes('η στιγμή της Ana') && spontaneous.includes('η στιγμή του Nikos'));
+});
+
+/**
+ * Zoé, asked about by Ana's trigger, with five moments inside the window unless `episodes` says
+ * otherwise: ζ5 the heaviest. `people` / `recent` list the weights of the moments each block shows.
+ */
+function askedZoeScene({ context = {}, lines = [recentLine(1)], episodes, ...overrides } = {}) {
+  const zoe = {
+    id: ZOE_ID,
+    names: ['Zoé'],
+    character: 'ονειροπόλα',
+    episodes: episodes ?? [1, 2, 3, 4, 5].map((w) => recentMoment(`ζ${w} στιγμή`, { weight: w })),
+  };
+  const trigger = makeMessage(1, NOW - MIN, { authorId: ANA_ID, authorName: 'Ana', channelId: HERE, channelName: 'here', content: 'τι έκανε η Zoé χθες;' });
+  const request = buildRequest(recentScene({ lines, history: [trigger], trigger, candidateProfiles: [zoe], context, ...overrides }));
+  const shown = (body) => [1, 2, 3, 4, 5].filter((w) => (body ?? '').includes(`ζ${w} στιγμή`));
+  return { zoe, request, people: shown(bodyOf(userText(request), 'people')), recent: shown(recentOf(request)) };
+}
+
+test("recent view: an asked-about member's shown episodes are left out, the rest of theirs stay", () => {
+  const { request, people, recent } = askedZoeScene();
+  assert.deepEqual(people, [3, 4, 5], 'askedAboutEpisodes 3: her three heaviest in <people>');
+  assert.deepEqual(recent, [1, 2], 'the next two in <recent>, at most two per member');
+  assert.equal(request.recent.repeated, 3);
+
+  const none = askedZoeScene({ context: { askedAboutEpisodes: 0 } });
+  assert.deepEqual([none.people, none.recent], [[], [4, 5]], 'none shown with her: her two heaviest in <recent>');
+});
+
+test("recent view: an asked-about member's episode cut from <people> is shown in <recent> instead", () => {
+  const cost = (text) => estimateTokens(text) + 2;
+  const { zoe } = askedZoeScene();
+  const zoeWithOne = renderProfile(zoe, labels, { relationships: true, episodes: { enabled: true, max: 1 } });
+  const caps = { ...fakeConfig().context.caps, people: cost(zoeWithOne) };
+  const { request, people, recent } = askedZoeScene({ context: { caps } });
+  assert.deepEqual(people, [5], 'only her heaviest fits <people>');
+  assert.deepEqual(recent, [3, 4], 'the two after it come back in <recent>, never the one shown');
+  assert.equal(bodyOf(userText(request), 'people'), zoeWithOne, 'she keeps her place and her one moment');
+  assert.ok(request.stats.people.used <= caps.people);
+  assert.ok(request.stats.used <= request.stats.limit);
+  assert.equal(request.recent.repeated, 1);
+});
+
+test("recent view: an asked-about member's moments <people> has no room for come back in <recent> while the request has room", () => {
+  const cost = (text) => estimateTokens(text) + 2;
+  const episodes = [recentMoment('ζ1 στιγμή', { weight: 1 }), recentMoment('ζ2 στιγμή', { weight: 2 })];
+  const bare = renderProfile({ id: ZOE_ID, names: ['Zoé'], character: 'ονειροπόλα' }, labels, { relationships: true });
+  const caps = { ...fakeConfig().context.caps, people: cost(bare) };
+  const { request, people, recent } = askedZoeScene({ episodes, context: { caps } });
+  assert.equal(bodyOf(userText(request), 'people'), bare, 'caps.people holds her profile alone');
+  assert.deepEqual([people, recent], [[], [1, 2]], 'both moments, meant for <people>, come back in <recent>');
+  assert.equal(request.recent.repeated, 0, 'repeated counts only the moments <people> shows');
+  assert.ok(request.stats.used <= request.stats.limit);
+
+  // Every line hidden: the block is built for her moments alone.
+  const hidden = askedZoeScene({ episodes, context: { caps }, recentAudience: () => false });
+  assert.deepEqual([hidden.people, hidden.recent], [[], [1, 2]]);
+  assert.deepEqual(hidden.request.recent, { lines: 0, episodes: 2, cut: 0, hidden: 1, repeated: 0, unnamed: 0 });
+});
+
+test('recent view: at a binding request limit <recent> never takes the room <people> placed its members in', () => {
+  const cost = (text) => estimateTokens(text) + 2;
+  const long = (w) => `ζ${w} στιγμή: ${['μια μεγάλη ιστορία', 'μια μεγάλη ιστορία', 'μια μεγάλη ιστορία'].join(', ')}`;
+  const episodes = [
+    recentMoment('ζ1 στιγμή', { weight: 1 }),
+    recentMoment('ζ2 στιγμή', { weight: 2 }),
+    recentMoment(long(3), { weight: 3 }),
+    recentMoment(long(4), { weight: 4 }),
+    recentMoment('ζ5 στιγμή', { weight: 5 }),
+  ];
+  const zoe = { id: ZOE_ID, names: ['Zoé'], character: 'ονειροπόλα', episodes };
+  const zoeWith = (max) => renderProfile(zoe, labels, { relationships: true, episodes: max > 0 ? { enabled: true, max } : undefined });
+  const entry = (what) => cost(fill(labels.recent.episode, { date: momentDate('2026-09-19'), name: 'Zoé', what }));
+  // Loose: <people> shows ζ5, ζ4 and ζ3; <recent> the line, ζ2 and ζ1. Nothing is offered after <people>.
+  const loose = askedZoeScene({ episodes });
+  assert.deepEqual([loose.people, loose.recent], [[3, 4, 5], [1, 2]]);
+  const firstRecent = loose.request.stats.recent.used;
+  const ahead = loose.request.stats.used - firstRecent - loose.request.stats.people.used;
+  // A limit leaving `room` after the sections ahead of <people> (safetyMargin 1, no picture, 60 for the tags).
+  const tight = (room) => askedZoeScene({ episodes, llm: { maxRequestTokens: ahead + firstRecent + room + 60, safetyMargin: 1 } });
+  const shortTwo = entry('ζ1 στιγμή') + entry('ζ2 στιγμή');
+  assert.ok(entry(long(4)) > shortTwo && entry(long(4)) <= shortTwo + cost(zoeWith(1)), 'a long moment fits only with <people>\'s room');
+
+  // Room for her with her heaviest moment: the two after it are cut from <people>, and come back
+  // to <recent> only inside the room it took first -- they do not fit there, and she keeps hers.
+  const one = tight(cost(zoeWith(1)));
+  assert.deepEqual([one.people, one.recent], [[5], []]);
+  assert.equal(bodyOf(userText(one.request), 'people'), zoeWith(1), 'she keeps her place and her moment');
+  assert.ok(one.request.stats.recent.used <= firstRecent, '<recent> never takes more than in the first pass');
+  assert.deepEqual([one.request.recent.repeated, one.request.recent.cut], [1, 2]);
+  assert.ok(one.request.stats.used <= one.request.stats.limit);
+
+  // One token short of her bare profile: she is not placed at first. Her moments are then all
+  // offered to <recent>, where ζ5 alone takes less than ζ2 and ζ1 did: she gets the room it frees.
+  const none = tight(cost(zoeWith(0)) - 1);
+  assert.equal(bodyOf(userText(none.request), 'people'), zoeWith(0), 'placed bare in the room <recent> left');
+  assert.deepEqual([none.people, none.recent], [[], [5]]);
+  assert.deepEqual([none.request.recent.repeated, none.request.stats.people.kept], [0, 1]);
+  assert.ok(none.request.stats.used <= none.request.stats.limit);
+});
+
+test('recent view: the room <recent> frees never costs a member asked about their place in <people>', () => {
+  const cost = (text) => estimateTokens(text) + 2;
+  const long = `ζ4 στιγμή: ${['μια μεγάλη ιστορία', 'μια μεγάλη ιστορία', 'μια μεγάλη ιστορία'].join(', ')}`;
+  const zoe = {
+    id: ZOE_ID,
+    names: ['Zoé'],
+    character: 'ονειροπόλα',
+    episodes: [1, 2, 3, 5].map((w) => recentMoment(`ζ${w} στιγμή`, { weight: w })).concat(recentMoment(long, { weight: 4 })),
+  };
+  const maxime = { id: NIKOS_ID, names: ['Maxime'], character: 'πεισματάρης και θορυβώδης' };
+  const lea = { id: '444444444444444444', names: ['Léa'], character: 'ήσυχη' };
+  const trigger = makeMessage(1, NOW - MIN, { authorId: ANA_ID, authorName: 'Ana', channelId: HERE, channelName: 'here', content: 'τι έκαναν η Zoé, ο Maxime και η Léa;' });
+  const scene = (llm) => buildRequest(recentScene({ lines: [recentLine(1)], history: [trigger], trigger, candidateProfiles: [zoe, maxime, lea], llm }));
+  const bare = (profile) => renderProfile({ ...profile, episodes: [] }, labels, { relationships: true });
+  const entry = (what) => cost(fill(labels.recent.episode, { date: momentDate('2026-09-19'), name: 'Zoé', what }));
+  // Loose: <people> shows ζ5, ζ4 and ζ3 with Zoé; <recent> the line, ζ2 and ζ1.
+  const loose = scene({}).stats;
+  const ahead = loose.used - loose.recent.used - loose.people.used;
+  // Room for Zoé and Léa bare and 2 tokens more: Maxime, between them, does not fit, and no moment of Zoé's does.
+  const room = cost(bare(zoe)) + cost(bare(lea)) + 2;
+  // Zoé's moments then go to <recent>, where ζ5 alone takes less than ζ2 and ζ1 did: room for Maxime only at Léa's cost.
+  const freed = entry('ζ1 στιγμή') + entry('ζ2 στιγμή') - entry('ζ5 στιγμή');
+  const spareAfterZoe = room + freed - cost(bare(zoe));
+  assert.ok(cost(bare(maxime)) <= spareAfterZoe && cost(bare(maxime)) + cost(bare(lea)) > spareAfterZoe, 'precondition: Maxime fits the freed room, not with Léa');
+
+  const request = scene({ maxRequestTokens: ahead + loose.recent.used + room + 60, safetyMargin: 1 });
+  assert.equal(request.stats.recent.used, loose.recent.used - freed, 'the room <recent> freed');
+  assert.equal(bodyOf(userText(request), 'people'), `${bare(zoe)}\n\n${bare(lea)}`, 'Léa, placed first, keeps her place');
+  assert.deepEqual([request.stats.people.kept, request.stats.people.dropped], [2, 1], 'Maxime counts as offered and not shown');
+  assert.ok(recentOf(request).includes('ζ5 στιγμή') && !recentOf(request).includes('ζ1 στιγμή'));
+  assert.ok(request.stats.used <= request.stats.limit);
+});
+
+test('recent view: the lines and moments about a member asked about come first under a tight cap', () => {
+  const cost = (text) => estimateTokens(text) + 2;
+  const trigger = makeMessage(1, NOW - MIN, { authorId: ANA_ID, authorName: 'Ana', channelId: HERE, channelName: 'here', content: 'τι έκανε η Zoé χθες;' });
+  const about = (overrides) => buildRequest(recentScene({ history: [trigger], trigger, ...overrides }));
+  const notAbout = (overrides) => buildRequest(recentScene(overrides));
+  const capFor = (...texts) => ({ ...fakeConfig().context.caps, recent: cost(RECENT_HEADER) + Math.max(...texts.map(cost)) });
+
+  // A light old line about her against a heavier, newer one about nobody.
+  const zoe = { id: ZOE_ID, names: ['Zoé'], character: 'ονειροπόλα' };
+  const lines = [
+    recentLine(1, { at: NOW - 20 * HOUR, weight: 1, text: `<@${ZOE_ID}> έχασε το κλειδί` }),
+    recentLine(2, { at: NOW - HOUR, weight: 3, text: 'κάποιος τραγούδησε δυνατά' }),
+  ];
+  const lineTexts = [
+    fill(labels.recent.line, { ...clockOf(NOW - 20 * HOUR), text: 'Zoé έχασε το κλειδί' }),
+    fill(labels.recent.line, { ...clockOf(NOW - HOUR), text: 'κάποιος τραγούδησε δυνατά' }),
+  ];
+  const lineCaps = capFor(...lineTexts);
+  assert.equal(recentOf(about({ lines, candidateProfiles: [zoe], context: { caps: lineCaps } })), [RECENT_HEADER, lineTexts[0]].join('\n'));
+  assert.equal(recentOf(notAbout({ lines, candidateProfiles: [zoe], context: { caps: lineCaps } })), [RECENT_HEADER, lineTexts[1]].join('\n'));
+
+  // Her light moment against a heavier one of a member nobody asks about (none of hers in <people>).
+  const zoeMoment = { ...zoe, episodes: [recentMoment('η στιγμή της Zoé', { weight: 1 })] };
+  const nikos = { id: NIKOS_ID, names: ['Nikos'], episodes: [recentMoment('η στιγμή του Nikos', { weight: 5 })] };
+  const momentTexts = [
+    fill(labels.recent.episode, { date: momentDate('2026-09-19'), name: 'Zoé', what: 'η στιγμή της Zoé' }),
+    fill(labels.recent.episode, { date: momentDate('2026-09-19'), name: 'Nikos', what: 'η στιγμή του Nikos' }),
+  ];
+  const context = { caps: capFor(...momentTexts), askedAboutEpisodes: 0 };
+  assert.equal(recentOf(about({ lines: [], candidateProfiles: [nikos, zoeMoment], context })), [RECENT_HEADER, momentTexts[0]].join('\n'));
+  assert.equal(recentOf(notAbout({ lines: [], candidateProfiles: [nikos, zoeMoment], context })), [RECENT_HEADER, momentTexts[1]].join('\n'));
+});
+
+test("recent view: an interlocutor's moment her own block does not show comes back in <recent>, one it shows does not", () => {
+  const cost = (text) => estimateTokens(text) + 2;
+  const heavy = recentMoment('παλιά βαριά στιγμή της Ana', { date: '2026-08-01', weight: 5 });
+  const light = recentMoment('χθεσινή στιγμή της Ana', { weight: 1 });
+  const ana = { id: ANA_ID, names: ['Ana'], character: 'ζωηρή', episodes: [heavy, light] };
+  const lightText = fill(labels.recent.episode, { date: momentDate('2026-09-19'), name: 'Ana', what: 'χθεσινή στιγμή της Ana' });
+  const scene = (overrides) => buildRequest(recentScene({ lines: [], interlocutor: ana, candidateProfiles: [ana], ...overrides }));
+
+  const whole = scene({});
+  assert.ok(bodyOf(userText(whole), 'people').includes('χθεσινή στιγμή της Ana'));
+  assert.equal(recentOf(whole), null, 'shown in her block: not repeated');
+  assert.deepEqual(whole.recent, { lines: 0, episodes: 0, cut: 0, hidden: 0, repeated: 1, unnamed: 0 });
+
+  // caps.interlocutor with room for her heaviest moment only: the light one comes back here.
+  const rest = renderProfile({ ...ana, episodes: [] }, labels, { interlocutor: true, relationships: true, episodes: { enabled: true } });
+  const heavyLine = fill(labels.profile.episode, { date: '2026-08-01', what: heavy.what, quote: heavy.quote, feeling: heavy.feeling });
+  const caps = { ...fakeConfig().context.caps, interlocutor: cost(rest) + cost(labels.profile.episodes) + cost(heavyLine) };
+  const trimmed = scene({ context: { caps } });
+  const people = bodyOf(userText(trimmed), 'people');
+  assert.ok(people.includes(heavy.what) && !people.includes(light.what), people);
+  assert.equal(recentOf(trimmed), [RECENT_HEADER, lightText].join('\n'));
+  assert.deepEqual(trimmed.recent, { lines: 0, episodes: 1, cut: 0, hidden: 0, repeated: 0, unnamed: 0 });
+
+  // Her block cut whole near the request limit: her moment of the window is shown here.
+  const big = { ...ana, character: Array.from({ length: 40 }, () => 'ζωηρή και ανήσυχη').join(', ') };
+  const bigScene = (llm) => buildRequest(recentScene({ lines: [], interlocutor: big, candidateProfiles: [big], llm }));
+  const loose = bigScene({}).stats;
+  const without = loose.used - loose.interlocutor.used + cost(RECENT_HEADER) + cost(lightText);
+  assert.ok(loose.interlocutor.used > without - loose.fixed.used, 'her block costs more than all the rest');
+  const dropped = bigScene({ maxRequestTokens: without + 60, safetyMargin: 1 });
+  assert.equal(dropped.stats.interlocutor.kept, 0);
+  assert.equal(recentOf(dropped), [RECENT_HEADER, lightText].join('\n'));
+  assert.equal(dropped.recent.repeated, 0);
+});
+
+test("recent view: with no labels to render an asked-about member's moments in <people>, <recent> shows them", () => {
+  const profile = { ...labels.profile, episodes: undefined };
+  const { request, people, recent } = askedZoeScene({ prompts: fakePrompts({ labels: { ...labels, profile } }) });
+  assert.deepEqual([people, recent], [[], [4, 5]]);
+  assert.equal(request.recent.repeated, 0, 'none shown in <people>: none counted as repeated');
+});
+
+test('prompt: a moment of a member with no name is left out and counted', () => {
+  const nameless = { id: '444444444444444444', names: [], episodes: [recentMoment('στιγμή χωρίς όνομα')] };
+  const request = buildRequest(recentScene({ lines: [recentLine(1)], candidateProfiles: [nameless] }));
+  assert.ok(!recentOf(request).includes('στιγμή χωρίς όνομα'));
+  assert.deepEqual(request.recent, { lines: 1, episodes: 0, cut: 0, hidden: 0, repeated: 0, unnamed: 1 });
+  const named = buildRequest(recentScene({ lines: [recentLine(1)], candidateProfiles: [nameless], nameOf: (id) => (id === nameless.id ? 'Léa' : null) }));
+  assert.ok(recentOf(named).includes(fill(labels.recent.episode, { date: momentDate('2026-09-19'), name: 'Léa', what: 'στιγμή χωρίς όνομα' })));
+});
+
+test('prompt: <recent> offers at most two moments of one member, the heaviest', () => {
+  const nikos = { id: NIKOS_ID, names: ['Nikos'], episodes: [1, 2, 3].map((w) => recentMoment(`ν${w} στιγμή`, { weight: w })) };
+  const zoe = { id: ZOE_ID, names: ['Zoé'], episodes: [1, 2, 3].map((w) => recentMoment(`ζ${w} στιγμή`, { weight: w })) };
+  const body = recentOf(buildRequest(recentScene({ lines: [], candidateProfiles: [nikos, zoe] })));
+  const shown = (prefix) => [1, 2, 3].filter((w) => body.includes(`${prefix}${w} στιγμή`));
+  assert.deepEqual([shown('ν'), shown('ζ')], [[2, 3], [2, 3]], 'two per member, whatever the room');
+});
+
+test('recent view: episodes never crowd out recent lines under the cap', () => {
+  const cost = (text) => estimateTokens(text) + 2;
+  const lines = [recentLine(1, { at: NOW - 2 * HOUR, text: 'μια σημείωση' }), recentLine(2, { at: NOW - HOUR, text: 'άλλη σημείωση' })];
+  const nikos = { id: NIKOS_ID, names: ['Nikos'], episodes: [recentMoment('σύντομη', { weight: 5 })] };
+  const texts = [
+    fill(labels.recent.line, { ...clockOf(NOW - 2 * HOUR), text: 'μια σημείωση' }),
+    fill(labels.recent.line, { ...clockOf(NOW - HOUR), text: 'άλλη σημείωση' }),
+  ];
+  const caps = { ...fakeConfig().context.caps, recent: cost(RECENT_HEADER) + cost(texts[0]) + cost(texts[1]) };
+  const request = buildRequest(recentScene({ lines, candidateProfiles: [nikos], context: { caps } }));
+  assert.equal(recentOf(request), [RECENT_HEADER, ...texts].join('\n'));
+  assert.deepEqual(request.recent, { lines: 2, episodes: 0, cut: 1, hidden: 0, repeated: 0, unnamed: 0 });
+  assert.ok(recentOf(buildRequest(recentScene({ lines, candidateProfiles: [nikos] }))).includes('σύντομη'), 'with room the moment joins');
+});
+
+test("prompt: a line the audience refuses is not shown; without a predicate only this channel's lines are", () => {
+  const lines = [recentLine(1, { at: NOW - 2 * HOUR, text: 'εδώ' }), recentLine(2, { channelId: GARDEN, text: 'στον κήπο' })];
+  const refused = buildRequest(recentScene({ lines, recentAudience: (id) => id === HERE }));
+  assert.equal(recentOf(refused), [RECENT_HEADER, fill(labels.recent.line, { ...clockOf(NOW - 2 * HOUR), text: 'εδώ' })].join('\n'));
+  assert.equal(refused.recent.hidden, 1);
+  const unsaid = buildRequest(recentScene({ lines, recentAudience: undefined }));
+  assert.deepEqual(unsaid.messages, refused.messages);
+
+  // Every line refused and no moment: no block, the counts still say why.
+  const hiddenOnly = buildRequest(recentScene({ lines, recentAudience: () => false }));
+  assert.equal(recentOf(hiddenOnly), null);
+  assert.deepEqual(hiddenOnly.recent, { lines: 0, episodes: 0, cut: 0, hidden: 2, repeated: 0, unnamed: 0 });
+  assert.equal(hiddenOnly.stats.recent, undefined);
+});
+
+test("prompt: a private chat shows only the lines the audience allows and no other member's episodes", () => {
+  const nikos = { id: NIKOS_ID, names: ['Nikos'], episodes: [recentMoment('η στιγμή του Nikos')] };
+  const lines = [recentLine(1, { text: 'δημόσια' }), recentLine(2, { channelId: GARDEN, text: 'κλειστή' })];
+  const dm = (overrides) =>
+    buildRequest(privateScene({ currentChannelId: 'dm1', recentLines: lines, candidateProfiles: [nikos], nameOf: (id) => RECENT_NAMES[id] ?? null, ...overrides }));
+  const shown = dm({ recentAudience: (id) => id === HERE });
+  assert.equal(recentOf(shown), [RECENT_HEADER, fill(labels.recent.line, { ...clockOf(NOW - HOUR), text: 'δημόσια' })].join('\n'));
+  assert.deepEqual(shown.recent, { lines: 1, episodes: 0, cut: 0, hidden: 1, repeated: 0, unnamed: 0 });
+  assert.equal(recentOf(dm({})), null, 'no audience given: a private chat shows no line');
+});
+
+test('prompt: features.recent false, no recentLines or nothing inside the window leaves the request as it was', () => {
+  const nikos = { id: NIKOS_ID, names: ['Nikos'], episodes: [recentMoment('η στιγμή του Nikos')] };
+  const before = buildRequest(recentScene({ recentLines: undefined, candidateProfiles: [nikos] }));
+  assert.ok(!userText(before).includes('<recent>'));
+  assert.equal(before.recent, null);
+  // No store's lines handed over (the mentor's sandbox) or the switch off: no block, a moment in the window or not.
+  for (const overrides of [{ recentLines: 'όχι λίστα' }, { recentLines: [recentLine(1)], features: { recent: false } }]) {
+    const request = buildRequest(recentScene({ candidateProfiles: [nikos], ...overrides }));
+    assert.deepEqual(request.messages, before.messages, JSON.stringify(overrides));
+    assert.deepEqual(request.stats, before.stats, JSON.stringify(overrides));
+    assert.equal(request.recent, null);
+  }
+  // A store's lines handed over, but no line and no moment inside the window.
+  const old = { id: NIKOS_ID, names: ['Nikos'], episodes: [recentMoment('παλιά στιγμή', { date: '2026-09-10' })] };
+  const plain = buildRequest(recentScene({ recentLines: undefined, candidateProfiles: [old] }));
+  const cases = [
+    { recentLines: [] },
+    { recentLines: [recentLine(1, { at: NOW - 73 * HOUR })] },
+    { recentLines: [recentLine(1, { at: NOW - 30 * HOUR })], memory: { recentHours: 24 } },
+  ];
+  for (const overrides of cases) {
+    const request = buildRequest(recentScene({ candidateProfiles: [old], ...overrides }));
+    assert.deepEqual(request.messages, plain.messages, JSON.stringify(overrides));
+    assert.deepEqual(request.stats, plain.stats, JSON.stringify(overrides));
+    assert.equal(request.recent, null, 'nothing offered, hidden or repeated: nothing to count');
+  }
+  // A longer window shows the older line at once, and the header says how long it is.
+  const longer = recentOf(buildRequest(recentScene({ recentLines: [recentLine(1, { at: NOW - 73 * HOUR })], memory: { recentHours: 96 } })));
+  assert.ok(longer.startsWith(fill(labels.recent.header, { hours: 96 })));
+});
+
+test('prompt: the moments of the window show without any line, and a line this turn may not show changes nothing', () => {
+  const nikos = { id: NIKOS_ID, names: ['Nikos'], episodes: [recentMoment('η στιγμή του Nikos')] };
+  const momentText = fill(labels.recent.episode, { date: momentDate('2026-09-19'), name: 'Nikos', what: 'η στιγμή του Nikos' });
+  const noLine = buildRequest(recentScene({ lines: [], candidateProfiles: [nikos] }));
+  assert.equal(recentOf(noLine), [RECENT_HEADER, momentText].join('\n'), 'a quiet store still shows the moments of the last hours');
+  assert.deepEqual(noLine.recent, { lines: 0, episodes: 1, cut: 0, hidden: 0, repeated: 0, unnamed: 0 });
+
+  const hidden = buildRequest(
+    recentScene({ lines: [recentLine(1, { channelId: GARDEN, text: 'κλειστή' })], recentAudience: (id) => id === HERE, candidateProfiles: [nikos] }),
+  );
+  assert.deepEqual(hidden.messages, noLine.messages, 'a hidden line neither switches the moments on nor off');
+  assert.deepEqual(hidden.recent, { ...noLine.recent, hidden: 1 });
+  const past = buildRequest(recentScene({ lines: [recentLine(1, { at: NOW - 73 * HOUR })], candidateProfiles: [nikos] }));
+  assert.deepEqual(past.messages, noLine.messages, 'nor does a line past the window');
+});
+
+test('prompt: near the request limit the recent block is cut, never a token-limit failure', () => {
+  const cost = (text) => estimateTokens(text) + 2;
+  const lines = [1, 2, 3].map((id) => recentLine(id, { at: NOW - id * HOUR, text: `η σημείωση ${id} για όσα έγιναν` }));
+  const loose = buildRequest(recentScene({ lines })).stats;
+  const ahead = loose.used - loose.recent.used;
+  const tight = (room) => buildRequest(recentScene({ lines, llm: { maxRequestTokens: ahead + room + 60, safetyMargin: 1 } }));
+
+  const fewer = tight(loose.recent.used - 1);
+  assert.equal(fewer.recent.lines, 2);
+  assert.ok(fewer.stats.used <= fewer.stats.limit);
+
+  for (const room of [cost(RECENT_HEADER), 3, 0]) {
+    const request = tight(room);
+    assert.equal(recentOf(request), null, `room ${room}: a header alone or lines without it make no block`);
+    assert.deepEqual([request.recent.lines, request.recent.cut], [0, 3]);
+    assert.equal(request.stats.chat.dropped, 0);
+  }
 });

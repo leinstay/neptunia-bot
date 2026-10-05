@@ -34,12 +34,6 @@ test('rank: lastSeen unknown falls back to firstSeen', () => {
   assert.equal(rank(withFirstSeenOnly, 180), rank(withLastSeen, 180));
 });
 
-test('rank: both dates unknown falls back to the epoch (0)', () => {
-  const noDates = { weight: 3, lastSeen: null, firstSeen: null };
-  const atEpoch = { weight: 3, lastSeen: new Date(0).toISOString() };
-  assert.equal(rank(noDates, 180), rank(atEpoch, 180));
-});
-
 test('rank: an unparsable date string is treated the same as a missing one, never throws', () => {
   const garbage = { weight: 3, lastSeen: 'not a date', firstSeen: null };
   const noDates = { weight: 3, lastSeen: null, firstSeen: null };
@@ -47,8 +41,18 @@ test('rank: an unparsable date string is treated the same as a missing one, neve
   assert.equal(rank(garbage, 180), rank(noDates, 180));
 });
 
-test('rank: a missing weight counts as 0', () => {
-  assert.equal(rank({}, 180), Math.log2(0.5));
+test('rank: a missing weight counts as 0, both dates unknown fall back to the epoch (0)', () => {
+  const rows = [
+    ['a missing weight counts as 0', rank({}, 180), Math.log2(0.5)],
+    [
+      'both dates unknown falls back to the epoch (0)',
+      rank({ weight: 3, lastSeen: null, firstSeen: null }, 180),
+      rank({ weight: 3, lastSeen: new Date(0).toISOString() }, 180),
+    ],
+  ];
+  for (const [label, actual, expected] of rows) {
+    assert.equal(actual, expected, label);
+  }
 });
 
 // ---- rank: decay math ------------------------------------------------------

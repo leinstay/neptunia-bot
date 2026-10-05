@@ -10,7 +10,7 @@
 
 import { log } from '../log.js';
 import { isPlainObject } from '../config.js';
-import { bumpDaily, dailyCounter, utcDay } from '../time.js';
+import { bumpDaily, countToday, dailyCounter } from '../time.js';
 import { RETRY_STATUS, apiUrl, backoffMs, dailyCapOf, openRouterHeaders, resolveProvider, sleep } from './openrouter.js';
 
 const MODERATION_STATUS = new Set([400, 403]);
@@ -20,6 +20,8 @@ const MODERATION_MARKERS = /moderation|content_policy|safety/i;
 export const IMAGE_ROLE = 'image';
 /** The state.json fields of the instance-wide daily picture counter. */
 const IMAGE_DAILY = { dayKey: 'imageDay', countKey: 'imageCount' };
+/** One member's slot of `state.data.imageUsers` (`{ day, counts }`) laid out as a counter pair, for a read. */
+const MEMBER_DAILY = { dayKey: 'day', countKey: 'count' };
 
 function isAbort(err) {
   return err?.name === 'AbortError' || err?.name === 'TimeoutError';
@@ -123,15 +125,14 @@ function buildBody({ cfg, byModel, family, prompt, reference }) {
  * @returns {{ generate: Function, quota: Function, familyOf: typeof familyOf }}
  */
 export function createImageGen({ apiKey, getConfig, state, fetchImpl = fetch, now = () => Date.now() }) {
-  function today() {
-    return utcDay(now());
-  }
-
-  /** Today's counters as read, without resetting anything. */
-  function readCounts(userId, day) {
-    const used = state.data.imageDay === day ? (state.data.imageCount ?? 0) : 0;
+  /**
+   * Today's counters as read, without resetting anything (src/time.js#countToday): a count
+   * stored for another day, or one that is not a finite number >= 0, reads as 0.
+   */
+  function readCounts(userId, nowMs) {
+    const used = countToday(state.data, IMAGE_DAILY, nowMs);
     const users = state.data.imageUsers;
-    const userUsed = userId != null && users?.day === day ? (users.counts?.[userId] ?? 0) : 0;
+    const userUsed = userId == null ? 0 : countToday({ day: users?.day, count: users?.counts?.[userId] }, MEMBER_DAILY, nowMs);
     return { used, userUsed };
   }
 
@@ -269,7 +270,7 @@ export function createImageGen({ apiKey, getConfig, state, fetchImpl = fetch, no
    */
   function quota({ userId = null } = {}) {
     const cfg = getConfig().image ?? {};
-    const { used, userUsed } = readCounts(userId, today());
+    const { used, userUsed } = readCounts(userId, now());
     const { cap, userCap } = caps(cfg);
     return {
       used,

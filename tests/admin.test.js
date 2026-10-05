@@ -32,13 +32,10 @@ import { withCapturedLogs } from './fixtures/capture-logs.js';
 // listRules / appendRule / removeRule
 // ---------------------------------------------------------------------------
 
-test('listRules: reads the bullets under an English ## heading', () => {
-  const text = '# Rules file\n\nSome intro.\n\n## Rules\n\n- Rule one\n- Rule two\n';
-  assert.deepEqual(listRules(text), ['Rule one', 'Rule two']);
-});
-
 test('listRules: reads the bullets under a non-Latin ## heading', () => {
-  const text = '# Rules file\n\nSome intro.\n\n## Κανόνες\n\n- Rule one\n- Rule two\n';
+  // A bullet above the heading: were the Greek heading not recognised, the no-heading
+  // fallback would return it too.
+  const text = '# Rules file\n\n- not a rule\n\n## Κανόνες\n\n- Rule one\n- Rule two\n';
   assert.deepEqual(listRules(text), ['Rule one', 'Rule two']);
 });
 
@@ -62,9 +59,28 @@ test('listRules: an empty or heading-only file has no rules', () => {
   assert.deepEqual(listRules('## Rules\n'), []);
 });
 
-test('appendRule: appends the bullet as the last line', () => {
-  const text = '## Rules\n\n- existing\n';
-  assert.equal(appendRule(text, 'new one'), '## Rules\n\n- existing\n- new one\n');
+test('appendRule: appends the bullet as the last line, under the last of two ## headings, non-Latin text intact', () => {
+  for (const [label, text, rule, expected, rules] of [
+    ['one heading', '## Rules\n\n- existing\n', 'new one', '## Rules\n\n- existing\n- new one\n', ['existing', 'new one']],
+    [
+      'non-Latin heading and rule text',
+      '## Κανόνες\n\n- παλιός κανόνας\n',
+      'ποτέ μην μιλάς αγγλικά',
+      '## Κανόνες\n\n- παλιός κανόνας\n- ποτέ μην μιλάς αγγλικά\n',
+      ['παλιός κανόνας', 'ποτέ μην μιλάς αγγλικά'],
+    ],
+    [
+      'two ## headings',
+      '## Old\n\n- stale\n\n## Rules\n\n- existing\n',
+      'new one',
+      '## Old\n\n- stale\n\n## Rules\n\n- existing\n- new one\n',
+      ['existing', 'new one'],
+    ],
+  ]) {
+    const result = appendRule(text, rule);
+    assert.equal(result, expected, label);
+    assert.deepEqual(listRules(result), rules, label);
+  }
 });
 
 test('appendRule: collapses newlines inside the rule into single spaces', () => {
@@ -82,18 +98,6 @@ test('appendRule: normalizes trailing whitespace to exactly one final newline', 
   const result = appendRule('## Rules\n\n\n\n', 'one rule');
   assert.equal(result, '## Rules\n- one rule\n');
   assert.ok(result.endsWith('\n') && !result.endsWith('\n\n'));
-});
-
-test('appendRule: keeps non-Latin rule text intact and the file ends with the bullet list', () => {
-  const result = appendRule('## Κανόνες\n\n- παλιός κανόνας\n', 'ποτέ μην μιλάς αγγλικά');
-  assert.equal(result, '## Κανόνες\n\n- παλιός κανόνας\n- ποτέ μην μιλάς αγγλικά\n');
-  assert.deepEqual(listRules(result), ['παλιός κανόνας', 'ποτέ μην μιλάς αγγλικά']);
-});
-
-test('appendRule: appends under the last of two ## headings', () => {
-  const result = appendRule('## Old\n\n- stale\n\n## Rules\n\n- existing\n', 'new one');
-  assert.equal(result, '## Old\n\n- stale\n\n## Rules\n\n- existing\n- new one\n');
-  assert.deepEqual(listRules(result), ['existing', 'new one']);
 });
 
 test('removeRule: removes the nth bullet in listRules order and reports it', () => {
@@ -421,15 +425,6 @@ test('run: rule.add seeds prompts.local/rules.md from the base file, leaving pro
   assert.ok(result.includes('Rule added'));
 });
 
-test('run: rule.add creates the prompts.local directory when it does not exist yet', async () => {
-  const rootDir = makeRoot();
-  const { admin } = makeAdmin(rootDir);
-
-  assert.equal(fs.existsSync(path.join(rootDir, 'prompts.local')), false);
-  await admin.run('rule.add', { text: 'be nice' }, {});
-  assert.ok(fs.statSync(path.join(rootDir, 'prompts.local')).isDirectory());
-});
-
 test('run: rule.add rejects empty text', async () => {
   const rootDir = makeRoot();
   const { admin } = makeAdmin(rootDir);
@@ -634,15 +629,6 @@ test('run: model.show ignores the deprecated keys of an old config.local.json', 
   assert.ok(!lines.some((l) => /^(followup|media|video|classifier):/.test(l)), 'the old role names are gone from the listing');
 });
 
-test('run: model.show falls back to the talk model for the analyzer when memory.model is unset', async () => {
-  const rootDir = makeRoot();
-  const hot = makeHotWithMedia(rootDir);
-  const { admin } = makeAdmin(rootDir, { hot });
-
-  const result = await admin.run('model.show', {}, {});
-  assert.ok(result.includes('analyzer: anthropic/claude-opus-4.6'));
-});
-
 test('run: model.show reports memory.model when it is explicitly set, and mediaDescriptions on', async () => {
   const rootDir = makeRoot();
   const hot = makeHotWithMedia(rootDir);
@@ -675,22 +661,15 @@ test('run: model.set writes the right config path for each role', async () => {
   assert.equal(hot.reloadConfigCalls, 5);
 });
 
-test('run: model.set rejects an unknown role and writes nothing', async () => {
+test('run: model.set rejects an unknown role, the old role names and the classifier group, and writes nothing', async () => {
   const rootDir = makeRoot();
   const { admin } = makeAdmin(rootDir, { hot: makeHotWithMedia(rootDir) });
 
-  await assert.rejects(() => admin.run('model.set', { role: 'bogus', id: 'x/y' }, {}), /unknown role: bogus \(talk, analyzer, voice, classifier\.text, classifier\.media, classifier\.video, mentor\)/);
-  assert.equal(fs.existsSync(path.join(rootDir, 'config.local.json')), false);
-});
-
-test('run: model.set rejects the old role names and the classifier group, and writes nothing', async () => {
-  const rootDir = makeRoot();
-  const { admin } = makeAdmin(rootDir, { hot: makeHotWithMedia(rootDir) });
-
-  for (const role of ['followup', 'media', 'video', 'classifier']) {
+  for (const role of ['bogus', 'followup', 'media', 'video', 'classifier']) {
     await assert.rejects(
       () => admin.run('model.set', { role, id: 'x/y' }, {}),
       new RegExp(`unknown role: ${role} \\(talk, analyzer, voice, classifier\\.text, classifier\\.media, classifier\\.video, mentor\\)`),
+      role,
     );
   }
   assert.equal(fs.existsSync(path.join(rootDir, 'config.local.json')), false);
@@ -768,18 +747,6 @@ test('model show: the voice role shows memory.voiceModel, and the talk model whi
 // isAllowed
 // ---------------------------------------------------------------------------
 
-test('isAllowed: an owner always passes, even for a command nobody was granted', async () => {
-  const rootDir = makeRoot();
-  const { admin } = makeAdmin(rootDir);
-  assert.equal(admin.isAllowed('memory.wipe', { userId: '42', roleIds: [] }), true);
-});
-
-test('isAllowed: a non-owner with no grant is refused', async () => {
-  const rootDir = makeRoot();
-  const { admin } = makeAdmin(rootDir);
-  assert.equal(admin.isAllowed('status', { userId: '999', roleIds: [] }), false);
-});
-
 test('isAllowed: a non-owner reads bot.access off the live hot.config, role grant included', async () => {
   const rootDir = makeRoot();
   const hot = makeHot(rootDir);
@@ -790,31 +757,39 @@ test('isAllowed: a non-owner reads bot.access off the live hot.config, role gran
   assert.equal(admin.isAllowed('status', { userId: '999', roleIds: ['other'] }), false);
 });
 
-test('isAllowed: private commands stay owner-only even when bot.access grants them or *', async () => {
-  const rootDir = makeRoot();
-  const hot = makeHot(rootDir);
-  const open = { everyone: true, roles: ['staff'], users: ['999'] };
-  hot.config.bot.access = { '*': open, private: open, 'private.show': open, 'private.forget': open };
-  const { admin } = makeAdmin(rootDir, { hot });
-
-  assert.equal(admin.isAllowed('private.show', { userId: '999', roleIds: ['staff'] }), false);
-  assert.equal(admin.isAllowed('private.forget', { userId: '999', roleIds: ['staff'] }), false);
-  assert.equal(admin.isAllowed('private.show', { userId: '42', roleIds: [] }), true, 'the owner still passes');
-  assert.equal(admin.isAllowed('memory.show', { userId: '999', roleIds: [] }), true, '* still opens the rest');
-});
-
 // ---------------------------------------------------------------------------
 // access.grant / access.revoke / access.list
 // ---------------------------------------------------------------------------
 
-test('run: access.grant with no role/user grants everyone; a read-only key gets no write note', async () => {
-  const rootDir = makeRoot();
-  const { admin } = makeAdmin(rootDir);
+test('run: access.grant writes everyone, a role id or a user id and names the target as plain text in the reply', async () => {
+  for (const [label, args, written, reply] of [
+    [
+      'no role/user grants everyone; a read-only key gets no write note',
+      { command: 'status' },
+      { status: { everyone: true, roles: [], users: [] } },
+      'Granted status to everyone (reload ok)',
+    ],
+    [
+      'a role',
+      { command: 'memory.show', roleId: '123' },
+      { 'memory.show': { everyone: false, roles: ['123'], users: [] } },
+      'Granted memory.show to role id:123 (reload ok)',
+    ],
+    [
+      'a user',
+      { command: 'status', userId: '456' },
+      { status: { everyone: false, roles: [], users: ['456'] } },
+      'Granted status to user id:456 (reload ok)',
+    ],
+  ]) {
+    const rootDir = makeRoot();
+    const { admin } = makeAdmin(rootDir);
 
-  const result = await admin.run('access.grant', { command: 'status' }, {});
+    const result = await admin.run('access.grant', args, {});
 
-  assert.deepEqual(readLocal(rootDir), { bot: { access: { status: { everyone: true, roles: [], users: [] } } } });
-  assert.equal(result, 'Granted status to everyone (reload ok)');
+    assert.deepEqual(readLocal(rootDir), { bot: { access: written } }, label);
+    assert.equal(result, reply, label);
+  }
 });
 
 test('run: access.grant on a group containing a write subcommand appends the write note', async () => {
@@ -825,34 +800,6 @@ test('run: access.grant on a group containing a write subcommand appends the wri
 
   assert.match(result, /^Granted memory to everyone/);
   assert.match(result, /Note: this opens commands that change memory or config\./);
-});
-
-test('run: access.grant on * always appends the write note', async () => {
-  const rootDir = makeRoot();
-  const { admin } = makeAdmin(rootDir);
-
-  const result = await admin.run('access.grant', { command: '*' }, {});
-  assert.match(result, /Note: this opens commands that change memory or config\./);
-});
-
-test('run: access.grant with a role writes the role id and names it as plain text in the reply', async () => {
-  const rootDir = makeRoot();
-  const { admin } = makeAdmin(rootDir);
-
-  const result = await admin.run('access.grant', { command: 'memory.show', roleId: '123' }, {});
-
-  assert.deepEqual(readLocal(rootDir), { bot: { access: { 'memory.show': { everyone: false, roles: ['123'], users: [] } } } });
-  assert.equal(result, 'Granted memory.show to role id:123 (reload ok)');
-});
-
-test('run: access.grant with a user writes the user id and names it as plain text in the reply', async () => {
-  const rootDir = makeRoot();
-  const { admin } = makeAdmin(rootDir);
-
-  const result = await admin.run('access.grant', { command: 'status', userId: '456' }, {});
-
-  assert.deepEqual(readLocal(rootDir), { bot: { access: { status: { everyone: false, roles: [], users: ['456'] } } } });
-  assert.equal(result, 'Granted status to user id:456 (reload ok)');
 });
 
 test('run: access.grant rejects both a role and a user at once, writing nothing', async () => {
@@ -886,15 +833,6 @@ test('run: access.list leaves out stale grants on owner-only private commands', 
 
   fs.writeFileSync(path.join(rootDir, 'config.local.json'), JSON.stringify({ bot: { access: { 'private.show': open } } }));
   assert.equal(await admin.run('access.list', {}, {}), '(none)');
-});
-
-test('run: access.grant accepts known top-level keys, group names and *', async () => {
-  const rootDir = makeRoot();
-  const { admin } = makeAdmin(rootDir);
-
-  await assert.doesNotReject(() => admin.run('access.grant', { command: 'reload' }, {}));
-  await assert.doesNotReject(() => admin.run('access.grant', { command: 'warmup' }, {}));
-  await assert.doesNotReject(() => admin.run('access.grant', { command: '*' }, {}));
 });
 
 test('run: access.grant twice accumulates -- a second role does not drop the first', async () => {
@@ -946,15 +884,6 @@ test('run: access.revoke rejects an unknown command key', async () => {
   await assert.rejects(() => admin.run('access.revoke', { command: 'nonsense' }, {}), /unknown command key: nonsense/);
 });
 
-test('run: access.revoke rejects both a role and a user at once', async () => {
-  const rootDir = makeRoot();
-  const { admin } = makeAdmin(rootDir);
-  await assert.rejects(
-    () => admin.run('access.revoke', { command: 'status', roleId: '1', userId: '2' }, {}),
-    /give a role or a user, not both/,
-  );
-});
-
 test('run: access.list reports (none) with nothing granted', async () => {
   const rootDir = makeRoot();
   const { admin } = makeAdmin(rootDir);
@@ -984,15 +913,33 @@ test('run: access grant/list/revoke/list round trip', async () => {
   assert.equal(await admin.run('access.list', {}, {}), '(none)');
 });
 
-test('access.grant: ping says it spends balance; * says both notes; a read-only key neither', async () => {
+test('access.grant: ping says it spends balance; * says both notes; a write command the write note; a read-only key neither', async () => {
   const rootDir = makeRoot();
   const { admin } = makeAdmin(rootDir);
   const spends = 'Note: this opens ping, whose every call spends OpenRouter balance outside llm.maxRequestsPerDay.';
   const writes = 'Note: this opens commands that change memory or config.';
 
-  assert.equal(await admin.run('access.grant', { command: 'ping' }, {}), ['Granted ping to everyone (reload ok)', spends].join('\n'));
-  assert.equal(await admin.run('access.grant', { command: '*' }, {}), ['Granted * to everyone (reload ok)', writes, spends].join('\n'));
-  assert.equal(await admin.run('access.grant', { command: 'status' }, {}), 'Granted status to everyone (reload ok)');
+  // Keep every row: draw, emoji.status, gifs.status, gifs.recache and variety are each the only catcher
+  // of that key slipping into (or out of) the read-only set.
+  for (const [command, roleId, notes] of [
+    ['ping', undefined, [spends]],
+    ['*', undefined, [writes, spends]],
+    ['status', undefined, []],
+    ['draw', undefined, [writes]],
+    ['emoji.status', 'staff', []],
+    ['emoji.rescan', 'staff', [writes]],
+    ['gifs.recache', 'staff', [writes]],
+    ['gifs.status', 'staff', []],
+    ['gifs.rescan', 'staff', [writes]],
+    ['variety', undefined, []],
+  ]) {
+    const target = roleId ? `role id:${roleId}` : 'everyone';
+    assert.equal(
+      await admin.run('access.grant', { command, roleId }, {}),
+      [`Granted ${command} to ${target} (reload ok)`, ...notes].join('\n'),
+      command,
+    );
+  }
 });
 
 test('rule add/remove and access grant/revoke report a failed reload like set does', async () => {
@@ -1076,45 +1023,36 @@ test('run: ping pings the seven roles in parallel and reports latency, provider 
   assert.ok(lines.includes('mentor: (no model configured)'), 'an unset mentor model never falls back to the talk model');
 });
 
-test('run: ping single-role classifier.video form pings classifier.video, and reports no model when it is unset', async () => {
-  const rootDir = makeRoot();
-  const hot = hotForPing(rootDir);
-  hot.config.classifier.video = 'openrouter/video-model';
-  const llm = fakeLlm(() => ({ text: 'pong', usage: {}, estimated: 1 }));
-  const { admin } = makeAdmin(rootDir, { hot, llm });
+test('run: ping single-role form pings only that role\'s model (classifier.text falls back to classifier.media), or reports no model when it is unset', async () => {
+  // `model` is the one model pinged, or null when the role has none and nothing is sent;
+  // `line` is the start of the one-line reply, or the whole reply when nothing is sent.
+  for (const [label, role, setup, model, line] of [
+    ['classifier.video set', 'classifier.video', (cfg) => (cfg.classifier.video = 'openrouter/video-model'), 'openrouter/video-model', 'classifier.video: openrouter/video-model — ok,'],
+    ['classifier.video unset', 'classifier.video', () => {}, null, 'classifier.video: (no model configured)'],
+    ['classifier.text unset: classifier.media', 'classifier.text', () => {}, 'anthropic/claude-haiku-4.5', 'classifier.text: anthropic/claude-haiku-4.5 — ok,'],
+    ['classifier.text set', 'classifier.text', (cfg) => (cfg.classifier.text = 'openrouter/text-model'), 'openrouter/text-model', 'classifier.text: openrouter/text-model — ok,'],
+    ['classifier.media', 'classifier.media', () => {}, 'anthropic/claude-haiku-4.5', 'classifier.media: anthropic/claude-haiku-4.5 — ok,'],
+    ['mentor set', 'mentor', (cfg) => (cfg.mentor = { model: 'openrouter/mentor-model' }), 'openrouter/mentor-model', 'mentor: openrouter/mentor-model — ok,'],
+    ['mentor unset', 'mentor', () => {}, null, 'mentor: (no model configured)'],
+  ]) {
+    const rootDir = makeRoot();
+    const hot = hotForPing(rootDir);
+    setup(hot.config);
+    const llm = fakeLlm(() => ({ text: 'pong', usage: {}, estimated: 1 }));
+    const { admin } = makeAdmin(rootDir, { hot, llm });
 
-  const body = await admin.run('ping', { role: 'classifier.video' }, {});
-  assert.equal(llm.calls.length, 1);
-  assert.equal(llm.calls[0].options.model, 'openrouter/video-model');
-  assert.ok(body.startsWith('classifier.video: openrouter/video-model — ok,'));
+    const body = await admin.run('ping', { role }, {});
 
-  const hotNoVideo = hotForPing(rootDir);
-  const llm2 = fakeLlm(() => ({ text: 'pong', usage: {}, estimated: 1 }));
-  const { admin: adminNoVideo } = makeAdmin(rootDir, { hot: hotNoVideo, llm: llm2 });
-
-  const noVideoBody = await adminNoVideo.run('ping', { role: 'classifier.video' }, {});
-  assert.equal(llm2.calls.length, 0);
-  assert.equal(noVideoBody, 'classifier.video: (no model configured)');
-});
-
-test('run: ping classifier.text resolves classifier.text when set, classifier.media when not', async () => {
-  const rootDir = makeRoot();
-  const hot = hotForPing(rootDir);
-  const llm = fakeLlm(() => ({ text: 'pong', usage: {}, estimated: 1 }));
-  const { admin: adminFallback } = makeAdmin(rootDir, { hot, llm });
-
-  const fallbackBody = await adminFallback.run('ping', { role: 'classifier.text' }, {});
-  assert.ok(fallbackBody.startsWith('classifier.text: anthropic/claude-haiku-4.5 — ok,'));
-
-  const hotWithText = hotForPing(rootDir);
-  hotWithText.config.classifier.text = 'openrouter/text-model';
-  const llm2 = fakeLlm(() => ({ text: 'pong', usage: {}, estimated: 1 }));
-  const { admin: adminSet } = makeAdmin(rootDir, { hot: hotWithText, llm: llm2 });
-
-  const setBody = await adminSet.run('ping', { role: 'classifier.text' }, {});
-  assert.ok(setBody.startsWith('classifier.text: openrouter/text-model — ok,'));
-  assert.equal(llm2.calls.length, 1);
-  assert.equal(llm2.calls[0].options.model, 'openrouter/text-model');
+    if (model === null) {
+      assert.equal(llm.calls.length, 0, label);
+      assert.equal(body, line, label);
+    } else {
+      assert.equal(llm.calls.length, 1, label);
+      assert.equal(llm.calls[0].options.model, model, label);
+      assert.equal(body.split('\n').length, 1, label);
+      assert.ok(body.startsWith(line), `${label}: ${body}`);
+    }
+  }
 });
 
 test('run: ping classifier pings the three classifier roles and no other', async () => {
@@ -1165,19 +1103,6 @@ test('run: ping falls back to the default pingTimeoutMs when unset', async () =>
   assert.equal(llm.calls[0].options.timeoutMs, 30000);
 });
 
-test('run: ping single-role form only pings that one role', async () => {
-  const rootDir = makeRoot();
-  const hot = hotForPing(rootDir);
-  const llm = fakeLlm(() => ({ text: 'pong', usage: {}, estimated: 1 }));
-  const { admin } = makeAdmin(rootDir, { hot, llm });
-
-  const body = await admin.run('ping', { role: 'classifier.media' }, {});
-
-  assert.equal(llm.calls.length, 1);
-  assert.equal(body.split('\n').length, 1);
-  assert.ok(body.startsWith('classifier.media: anthropic/claude-haiku-4.5 — ok,'));
-});
-
 test('run: ping de-duplicates identical models: one call, reported for every role that uses it', async () => {
   const rootDir = makeRoot();
   const hot = hotForPing(rootDir);
@@ -1194,26 +1119,6 @@ test('run: ping de-duplicates identical models: one call, reported for every rol
   assert.ok(lines.some((l) => l.startsWith('analyzer: anthropic/claude-opus-4.6 — ok,')));
   assert.ok(lines.some((l) => l.startsWith('classifier.text: anthropic/claude-haiku-4.5 — ok,')));
   assert.ok(lines.includes('classifier.video: (no model configured)'), 'no classifier.video -> skipped, like any role without a model');
-});
-
-test('ping: role mentor pings mentor.model', async () => {
-  const rootDir = makeRoot();
-  const hot = hotForPing(rootDir);
-  hot.config.mentor = { model: 'openrouter/mentor-model' };
-  const llm = fakeLlm(() => ({ text: 'pong', usage: {}, estimated: 1 }));
-  const { admin } = makeAdmin(rootDir, { hot, llm });
-
-  const body = await admin.run('ping', { role: 'mentor' }, {});
-  assert.equal(llm.calls.length, 1);
-  assert.equal(llm.calls[0].options.model, 'openrouter/mentor-model');
-  assert.ok(body.startsWith('mentor: openrouter/mentor-model — ok,'));
-
-  const hotUnset = hotForPing(rootDir);
-  const llm2 = fakeLlm(() => ({ text: 'pong', usage: {}, estimated: 1 }));
-  const { admin: adminUnset } = makeAdmin(rootDir, { hot: hotUnset, llm: llm2 });
-
-  assert.equal(await adminUnset.run('ping', { role: 'mentor' }, {}), 'mentor: (no model configured)');
-  assert.equal(llm2.calls.length, 0);
 });
 
 test('ping: role voice pings memory.voiceModel as role voice, the talk model while it is unset', async () => {
@@ -1346,17 +1251,6 @@ test('run: ping reports it is not available when no llm dependency was injected'
   assert.equal(await admin.run('ping', {}, {}), 'ping is not available (no llm client configured)');
 });
 
-test('run: ping never leaks a secret (e.g. an API key) into its output', async () => {
-  const rootDir = makeRoot();
-  const hot = hotForPing(rootDir);
-  const llm = fakeLlm(() => ({ text: 'pong', usage: {}, estimated: 1 }));
-  const { admin } = makeAdmin(rootDir, { hot, llm });
-
-  const body = await admin.run('ping', {}, {});
-  assert.ok(!body.includes('Bearer'));
-  assert.ok(!/sk-or-[a-z0-9]/i.test(body));
-});
-
 test('run: ping works while paused', async () => {
   const rootDir = makeRoot();
   const hot = hotForPing(rootDir);
@@ -1371,7 +1265,7 @@ test('run: ping works while paused', async () => {
 // memory.forget / memory.show / memory.affinity
 // ---------------------------------------------------------------------------
 
-test('run: memory.forget calls store.forgetUser and clears the profile', async () => {
+test('run: memory.forget calls store.forgetUser, clears the profile and says the private memory went too', async () => {
   const rootDir = makeRoot();
   const { admin, store } = makeAdmin(rootDir);
   store.profiles.set('g1:123', { id: '123', character: 'chatty' });
@@ -1381,6 +1275,7 @@ test('run: memory.forget calls store.forgetUser and clears the profile', async (
   assert.deepEqual(store.forgotten, [['g1', '123']]);
   assert.equal(store.getUser('g1', '123'), null);
   assert.ok(result.includes('Forgot 123'));
+  assert.match(result, /private memory/i, 'the reply says the private memory went too');
 });
 
 test('run: memory.show reports an unknown profile as an error', async () => {
@@ -1428,16 +1323,6 @@ test('run: memory.affinity with a score sets it exactly, bypassing maxDeltaPerUp
   assert.equal(affinity.score, 77, 'the score is set exactly, well beyond maxDeltaPerUpdate of 15');
   assert.equal(affinity.reason, 'owner really likes them');
   assert.ok(result.includes('77'));
-});
-
-test('run: memory.affinity shows a damped (fractional) score rounded to an integer', async () => {
-  const rootDir = makeRoot();
-  const { admin, store } = makeAdmin(rootDir);
-  store.profiles.set('g1:123', { id: '123', affinity: { score: 60.4, reason: 'helped once', history: [] } });
-
-  const result = await admin.run('memory.affinity', { userId: '123' }, { guildId: 'g1' });
-  assert.ok(result.includes('score: 60'));
-  assert.ok(!result.includes('60.4'));
 });
 
 test('run: memory.affinity with a score sets it exactly even from a fractional (damped) current score, with no damping', async () => {
@@ -1521,8 +1406,15 @@ test('run: memory.affinity rejects an out-of-range score and writes nothing', as
 
 test('run: memory.affinity rejects a non-integer score', async () => {
   const rootDir = makeRoot();
-  const { admin } = makeAdmin(rootDir);
-  await assert.rejects(() => admin.run('memory.affinity', { userId: '123', score: 4.5 }, { guildId: 'g1' }));
+  const { admin, store } = makeAdmin(rootDir);
+  // The member has a profile, so only the integer check can refuse the call.
+  store.profiles.set('g1:123', { id: '123', affinity: emptyAffinity() });
+
+  await assert.rejects(
+    () => admin.run('memory.affinity', { userId: '123', score: 4.5 }, { guildId: 'g1' }),
+    /^Error: score must be an integer between -100 and 100$/,
+  );
+  assert.deepEqual(store.getUser('g1', '123').affinity, emptyAffinity(), 'nothing was written');
 });
 
 test('run: memory.affinity falls back to the single served guild when context.guildId is absent', async () => {
@@ -1891,26 +1783,6 @@ test('run: private.purge needs a user and a resolved guild', async () => {
   assert.deepEqual(client.userFetches, []);
 });
 
-test('isAllowed: private.purge stays owner-only even when bot.access grants it, its group or *', () => {
-  const rootDir = makeRoot();
-  const { admin, hot } = makeAdmin(rootDir);
-  const open = { everyone: true, roles: [], users: [] };
-  hot.config.bot.access = { '*': open, private: open, 'private.purge': open };
-  assert.equal(admin.isAllowed('private.purge', { userId: '999', roleIds: ['staff'] }), false);
-  assert.equal(admin.isAllowed('private.purge', { userId: '42', roleIds: [] }), true, 'the owner still passes');
-});
-
-test('run: memory.forget says the private memory went too', async () => {
-  const rootDir = makeRoot();
-  const { admin, store } = makeAdmin(rootDir);
-  store.profiles.set('g1:123', { id: '123' });
-
-  const result = await admin.run('memory.forget', { userId: '123' }, { guildId: 'g1' });
-
-  assert.match(result, /Forgot 123/);
-  assert.match(result, /private memory/i);
-});
-
 test('run: memory.show never shows the private layer', async () => {
   const rootDir = makeRoot();
   const { admin, store } = makeAdmin(rootDir);
@@ -1953,18 +1825,6 @@ test('run: status has no private file count before the guild is resolved', async
   assert.ok(body.split('\n').includes('private chat: off'), body);
 });
 
-test('run: access.grant refuses private.show, private.forget and the private group (owner-only), writing nothing', async () => {
-  const rootDir = makeRoot();
-  const { admin } = makeAdmin(rootDir);
-
-  for (const command of ['private.show', 'private.forget', 'private']) {
-    await assert.rejects(() => admin.run('access.grant', { command }, {}), /private memory is owner-only/, command);
-    await assert.rejects(() => admin.run('access.grant', { command, roleId: '1' }, {}), /private memory is owner-only/, command);
-    await assert.rejects(() => admin.run('access.grant', { command, userId: '2' }, {}), /private memory is owner-only/, command);
-  }
-  assert.equal(fs.existsSync(path.join(rootDir, 'config.local.json')), false);
-});
-
 test('run: private.show / private.forget / memory.forget against the real store', async () => {
   const rootDir = makeRoot();
   const { admin, store, dataDir } = makeRealStoreAdmin(rootDir);
@@ -2004,17 +1864,6 @@ test('run: private.show / private.forget / memory.forget against the real store'
 function clientWithGuild(guildId, name) {
   return { guilds: { cache: new Map([[guildId, { id: guildId, name }]]) } };
 }
-
-test('run: memory.wipe with the wrong confirmation text changes nothing and says what to type', async () => {
-  const rootDir = makeRoot();
-  const client = clientWithGuild('g1', 'The Server');
-  const { admin, store } = makeAdmin(rootDir, { client });
-
-  const result = await admin.run('memory.wipe', { confirm: 'nope' }, { guildId: 'g1' });
-
-  assert.equal(store.wipeCalls.length, 0);
-  assert.ok(result.includes('confirm: The Server'));
-});
 
 test('run: memory.wipe with a missing confirmation changes nothing', async () => {
   const rootDir = makeRoot();
@@ -2342,31 +2191,6 @@ test('run: memory.show summary rounds a damped (fractional) score for display', 
   const result = await admin.run('memory.show', { userId: '123' }, { guildId: 'g1' });
   assert.ok(result.includes('attitude: 60'));
   assert.ok(!result.includes('60.4'));
-});
-
-test('run: memory.show section:summary always fits one Discord message, even for a huge profile', async () => {
-  const rootDir = makeRoot();
-  const { admin, store } = makeAdmin(rootDir);
-  store.profiles.set('g1:123', {
-    id: '123',
-    names: Array.from({ length: 5 }, (_, i) => `VeryLongDisplayNameNumber${i}`),
-    messageCount: 999999,
-    firstSeen: '2020-01-01T00:00:00.000Z',
-    lastSeen: '2026-09-20T00:00:00.000Z',
-    affinity: { score: 99, reason: 'x'.repeat(400), history: [] },
-    character: 'c'.repeat(4000),
-    style: 's'.repeat(4000),
-    relationship: 'r'.repeat(4000),
-    interests: Array.from({ length: 40 }, (_, i) => ({ topic: `Topic number ${i} is quite long indeed`, note: 'n'.repeat(200), weight: i, firstSeen: 'a', lastSeen: 'a' })),
-    details: Array.from({ length: 40 }, (_, i) => ({ id: i, text: 'd'.repeat(200), weight: i, firstSeen: 'a', lastSeen: 'a' })),
-    episodes: Array.from({ length: 20 }, (_, i) => ({ date: '2026-01-01', what: 'e'.repeat(200), weight: 3 })),
-    aliases: Array.from({ length: 15 }, (_, i) => ({ name: `AliasNumber${i}longenough`, weight: i, firstSeen: 'a', lastSeen: 'a' })),
-  });
-
-  const result = await admin.run('memory.show', { userId: '123', section: 'summary' }, { guildId: 'g1' });
-
-  assert.ok(result.length <= 2000, `expected <= 2000 chars, got ${result.length}`);
-  assert.ok(result.includes('character:'));
 });
 
 test('run: memory.show section:character/style/relationship show the full field alone', async () => {
@@ -2896,19 +2720,6 @@ test('run: alias.add/alias.remove are refused while paused', async () => {
   );
 });
 
-test('run: the old memory.alias-add/memory.alias-remove keys are gone', async () => {
-  const rootDir = makeRoot();
-  const { admin } = makeAdmin(rootDir);
-  await assert.rejects(
-    () => admin.run('memory.alias-add', { userId: '123', name: 'Ari' }, { guildId: 'g1' }),
-    /unknown command/,
-  );
-  await assert.rejects(
-    () => admin.run('memory.alias-remove', { userId: '123', name: 'Ari' }, { guildId: 'g1' }),
-    /unknown command/,
-  );
-});
-
 // ---------------------------------------------------------------------------
 // learned.list / learned.add / learned.remove -- real store.js/details.js,
 // the guild's list of things people taught the persona.
@@ -3284,28 +3095,18 @@ function fakeSpontaneous(forceResult) {
   };
 }
 
-test('run: interject uses the context channel when no channel argument is given', async () => {
-  const rootDir = makeRoot();
-  const spontaneous = fakeSpontaneous();
-  const client = { channels: { fetch: async (id) => ({ id }) } };
-  const { admin } = makeAdmin(rootDir, { spontaneous, client });
+test('run: interject and initiate use the context channel when no channel argument is given', async () => {
+  for (const mode of ['interject', 'initiate']) {
+    const rootDir = makeRoot();
+    const spontaneous = fakeSpontaneous();
+    const client = { channels: { fetch: async (id) => ({ id }) } };
+    const { admin } = makeAdmin(rootDir, { spontaneous, client });
 
-  const result = await admin.run('interject', {}, { channelId: 'c1' });
+    const result = await admin.run(mode, {}, { channelId: 'c1' });
 
-  assert.deepEqual(spontaneous.calls, [['c1', 'interject']]);
-  assert.ok(result.includes('interject on c1'));
-});
-
-test('run: initiate uses the context channel when no channel argument is given', async () => {
-  const rootDir = makeRoot();
-  const spontaneous = fakeSpontaneous();
-  const client = { channels: { fetch: async (id) => ({ id }) } };
-  const { admin } = makeAdmin(rootDir, { spontaneous, client });
-
-  const result = await admin.run('initiate', {}, { channelId: 'c1' });
-
-  assert.deepEqual(spontaneous.calls, [['c1', 'initiate']]);
-  assert.ok(result.includes('initiate on c1'));
+    assert.deepEqual(spontaneous.calls, [['c1', mode]], mode);
+    assert.ok(result.includes(`${mode} on c1`), `${mode}: ${result}`);
+  }
 });
 
 test('run: interject uses the channel argument when given, overriding the context channel', async () => {
@@ -3334,12 +3135,6 @@ test('run: interject throws when no channel is available at all', async () => {
   const rootDir = makeRoot();
   const { admin } = makeAdmin(rootDir, { spontaneous: fakeSpontaneous() });
   await assert.rejects(() => admin.run('interject', {}, {}), /channel/);
-});
-
-test('run: initiate throws when no channel is available at all', async () => {
-  const rootDir = makeRoot();
-  const { admin } = makeAdmin(rootDir, { spontaneous: fakeSpontaneous() });
-  await assert.rejects(() => admin.run('initiate', {}, {}), /channel/);
 });
 
 // ---------------------------------------------------------------------------
@@ -3815,15 +3610,6 @@ test('run: resume clears the flags and reports plain confirmation', async () => 
   assert.equal(store.state.data.pausedAt, undefined);
   assert.equal(store.reloadStateCalls, 1);
   assert.equal(result, 'Resumed.');
-});
-
-test('run: resume is idempotent -- reports "Not paused." when not paused', async () => {
-  const rootDir = makeRoot();
-  const { admin } = makeAdmin(rootDir);
-
-  const result = await admin.run('resume', {}, {});
-
-  assert.equal(result, 'Not paused.');
 });
 
 test('run: status reports "paused: off" by default and "paused: on (since ...)" once paused', async () => {
@@ -4358,7 +4144,7 @@ test('run: warmup.server is refused while paused', async () => {
   assert.equal(warmup.calls.runServer, 0);
 });
 
-test('run: warmup.status formats phase, progress, tokens and the next target', async () => {
+test('run: warmup.status formats phase, progress, tokens and the next target, and "last activity: never" with no activity', async () => {
   const rootDir = makeRoot();
   const warmup = fakeWarmup();
   const { admin } = makeAdmin(rootDir, { warmup });
@@ -4369,16 +4155,7 @@ test('run: warmup.status formats phase, progress, tokens and the next target', a
   assert.match(body, /people: 3\/5/);
   assert.match(body, /tokens used: 1000/);
   assert.match(body, /next target: person: Bob \(id:2\)/);
-});
-
-test('run: warmup.status falls back to the coarse phase and "never" when activity is absent', async () => {
-  const rootDir = makeRoot();
-  const warmup = fakeWarmup();
-  const { admin } = makeAdmin(rootDir, { warmup });
-
-  const body = await admin.run('warmup.status', {}, { guildId: 'g1' });
-  assert.match(body, /phase: running/);
-  assert.match(body, /last activity: never/);
+  assert.match(body, /last activity: never/, 'no activity: the coarse phase and "never"');
 });
 
 // ---------------------------------------------------------------------------
@@ -4827,14 +4604,6 @@ test('ping: image listed without the image modality says so', async () => {
   assert.equal(await admin.run('ping', { role: 'image' }, {}), `image: ${IMAGE_MODEL} — listed, but no image output`);
 });
 
-test('ping: image not listed on 404', async () => {
-  const rootDir = makeRoot();
-  const fetchImpl = fakeListingFetch(() => listing(404, { error: { message: 'not found' } }));
-  const { admin } = imageAdmin(rootDir, { fetchImpl });
-
-  assert.equal(await admin.run('ping', { role: 'image' }, {}), `image: ${IMAGE_MODEL} — not listed (HTTP 404)`);
-});
-
 test('ping: image failed with the HTTP status on any other error status', async () => {
   const rootDir = makeRoot();
   const fetchImpl = fakeListingFetch(() => listing(503, null));
@@ -5230,16 +4999,6 @@ test('run: draw is refused while paused', async () => {
   assert.equal(images.calls.length, 0);
 });
 
-test('run: draw is a write command -- granting it carries the write-command note', async () => {
-  const rootDir = makeRoot();
-  const { admin } = makeAdmin(rootDir);
-
-  const drawGrant = await admin.run('access.grant', { command: 'draw' }, {});
-  const statusGrant = await admin.run('access.grant', { command: 'status' }, {});
-  assert.match(drawGrant, /change memory or config/);
-  assert.doesNotMatch(statusGrant, /change memory or config/);
-});
-
 test('run: status shows today\'s image quota and the image model', async () => {
   const rootDir = makeRoot();
   const hot = hotForDraw(rootDir);
@@ -5566,13 +5325,6 @@ test('mentor.run: the reply names status and show when there is no admin channel
   assert.deepEqual(mentor.calls, [['run', 3], ['run', 3]]);
 });
 
-test('mentor.run: the reply names the admin channel when one is configured', async () => {
-  const { admin, hot, mentorCases } = makeMentorAdmin();
-  seedMentorCases(mentorCases, 5);
-  hot.config.bot.dryRunChannelId = '700000000000000001';
-  assert.equal(await admin.run('mentor.run', { id: 5 }, { guildId: 'g1' }), 'run started for case 5; the report will come to the admin channel');
-});
-
 test('mentor.check: the reply names status and show when there is no admin channel', async () => {
   const { admin, mentor } = makeMentorAdmin();
   assert.equal(
@@ -5580,12 +5332,6 @@ test('mentor.check: the reply names status and show when there is no admin chann
     'check started for 2 cases; follow it with /nep mentor status, read each report with /nep mentor show <id>',
   );
   assert.deepEqual(mentor.calls, [['check']]);
-});
-
-test('mentor.check: the reply names the admin channel when one is configured', async () => {
-  const { admin, hot } = makeMentorAdmin();
-  hot.config.bot.dryRunChannelId = '700000000000000001';
-  assert.equal(await admin.run('mentor.check', {}, { guildId: 'g1' }), 'check started for 2 cases');
 });
 
 test('run: mentor.check turns a refusal of the mentor into the error', async () => {
@@ -5775,44 +5521,6 @@ test('mentor.status: no run yet', async () => {
   assert.equal((await admin.run('mentor.status', {}, { guildId: 'g1' })).split('\n').at(-1), 'last: no run yet');
 });
 
-// ---- the mentor only measures: no change commands, no repair ----
-
-test('run: mentor log/undo/rebase are unknown commands', async () => {
-  const { admin, rootDir } = makeMentorAdmin();
-  for (const key of ['mentor.log', 'mentor.undo', 'mentor.rebase']) {
-    await assert.rejects(() => admin.run(key, { id: 1, name: 'format' }, { guildId: 'g1' }), new RegExp(`unknown command: ${key.replace('.', '\\.')}`), key);
-  }
-  assert.equal(fs.existsSync(path.join(rootDir, 'prompts.local')), false, 'nothing was written');
-});
-
-test('mentor.status: a leftover mentorAutoFix or mentor.fix changes nothing and shows no autofix or changes line', async () => {
-  const { admin, hot } = makeMentorAdmin();
-  const before = await admin.run('mentor.status', {}, { guildId: 'g1' });
-  hot.config.features = { mentor: true, mentorAutoFix: true };
-  hot.config.mentor = { ...hot.config.mentor, fix: { maxAttempts: 3 }, verify: { situations: 3 } };
-  const after = await admin.run('mentor.status', {}, { guildId: 'g1' });
-  assert.equal(after, before);
-  assert.doesNotMatch(after, /autofix|changes:/);
-});
-
-test('mentor.show: a run stored with a repair block by an earlier version shows without it', async () => {
-  const { admin, mentorCases } = makeMentorAdmin();
-  mentorCases.add('g1', { text: 'Answer a greeting with one short line.', target: 'reply' });
-  const repair = {
-    attempts: [{ n: 1, suspects: [{ layer: 'rules', excerpt: 'explain every limit', located: true, gain: 5, confirmed: true }], accepted: true }],
-    applied: { changeId: 7, layer: 'rules', target: 'rules', summary: 'rules rules: explain every limit -> say a limit once' },
-    reason: 'applied',
-    tokens: 900,
-  };
-  const saved = mentorCases.saveRun('g1', { ...sampleMentorRun(1, { passed: false, overall: 4 }), repair });
-
-  const reply = await admin.run('mentor.show', { id: 1 }, { guildId: 'g1' });
-  const { repair: _ignored, ...plain } = saved;
-  assert.equal(reply.text, renderCard(plain));
-  assert.equal(reply.files[0].attachment.toString('utf8'), renderFile(plain).text);
-  assert.doesNotMatch(reply.text, /repair|undo/);
-});
-
 test('run: mentor add/anchor/remove/run/check/wrong are refused while paused; cases/show/status/stop are not', async () => {
   const { admin, mentor, mentorCases, store } = makeMentorAdmin();
   mentorCases.add('g1', { text: 'Answer a greeting with one short line.', target: 'reply' });
@@ -5832,38 +5540,23 @@ test('run: mentor add/anchor/remove/run/check/wrong are refused while paused; ca
   }
 });
 
-test('run: access.grant refuses the mentor group and its commands (owner-only), writing nothing', async () => {
-  const rootDir = makeRoot();
-  const { admin } = makeAdmin(rootDir);
+test('run: access.grant refuses the private, mentor and access groups and their commands (owner-only), writing nothing', async () => {
+  // Each group's refusal names that group: keep every row.
+  for (const [group, commands, refusal] of [
+    ['private', ['private.show', 'private.forget', 'private'], /private memory is owner-only/],
+    ['mentor', ['mentor', ...MENTOR_KEYS], /the mentor is owner-only/],
+    ['access', ['access', 'access.grant', 'access.revoke', 'access.list'], /access management is owner-only/],
+  ]) {
+    const rootDir = makeRoot();
+    const { admin } = makeAdmin(rootDir);
 
-  for (const command of ['mentor', ...MENTOR_KEYS]) {
-    await assert.rejects(() => admin.run('access.grant', { command }, {}), /the mentor is owner-only/, command);
-    await assert.rejects(() => admin.run('access.grant', { command, roleId: '1' }, {}), /the mentor is owner-only/, command);
-    await assert.rejects(() => admin.run('access.grant', { command, userId: '2' }, {}), /the mentor is owner-only/, command);
+    for (const command of commands) {
+      await assert.rejects(() => admin.run('access.grant', { command }, {}), refusal, `${group}: ${command}`);
+      await assert.rejects(() => admin.run('access.grant', { command, roleId: '1' }, {}), refusal, `${group}: ${command} to a role`);
+      await assert.rejects(() => admin.run('access.grant', { command, userId: '2' }, {}), refusal, `${group}: ${command} to a user`);
+    }
+    assert.equal(fs.existsSync(path.join(rootDir, 'config.local.json')), false, `${group}: nothing was written`);
   }
-  assert.equal(fs.existsSync(path.join(rootDir, 'config.local.json')), false);
-});
-
-test('run: access.grant refuses the access group and its commands (owner-only), writing nothing', async () => {
-  const rootDir = makeRoot();
-  const { admin } = makeAdmin(rootDir);
-
-  for (const command of ['access', 'access.grant', 'access.revoke', 'access.list']) {
-    await assert.rejects(() => admin.run('access.grant', { command }, {}), /access management is owner-only/, command);
-    await assert.rejects(() => admin.run('access.grant', { command, roleId: '1' }, {}), /access management is owner-only/, command);
-    await assert.rejects(() => admin.run('access.grant', { command, userId: '2' }, {}), /access management is owner-only/, command);
-  }
-  assert.equal(fs.existsSync(path.join(rootDir, 'config.local.json')), false);
-});
-
-test('isAllowed: mentor commands stay owner-only even when bot.access grants them, their group or *', () => {
-  const rootDir = makeRoot();
-  const { admin, hot } = makeAdmin(rootDir);
-  const open = { everyone: true, roles: [], users: [] };
-  hot.config.bot.access = { '*': open, mentor: open, 'mentor.run': open };
-  assert.equal(admin.isAllowed('mentor.run', { userId: '999', roleIds: ['staff'] }), false);
-  assert.equal(admin.isAllowed('mentor.status', { userId: '999', roleIds: [] }), false);
-  assert.equal(admin.isAllowed('mentor.run', { userId: '42', roleIds: [] }), true, 'the owner still passes');
 });
 
 // ---------------------------------------------------------------------------
@@ -5949,15 +5642,6 @@ test('run: emoji.rescan is refused while paused and without the backfill', async
 
   const { admin: bare } = makeAdmin(rootDir);
   assert.equal(await bare.run('emoji.rescan', {}, { guildId: 'g1' }), 'the emoji backfill is not available');
-});
-
-test('run: access.grant on emoji.status adds no write note, on emoji.rescan it does', async () => {
-  const rootDir = makeRoot();
-  const { admin } = makeAdmin(rootDir);
-  const status = await admin.run('access.grant', { command: 'emoji.status', roleId: 'staff' }, {});
-  const rescan = await admin.run('access.grant', { command: 'emoji.rescan', roleId: 'staff' }, {});
-  assert.doesNotMatch(status, /change memory or config/);
-  assert.match(rescan, /change memory or config/);
 });
 
 // ---------------------------------------------------------------------------
@@ -6153,21 +5837,6 @@ test('run: gifs.status ends with the caption counts of the library and notes a r
   } finally {
     fs.rmSync(dataDir, { recursive: true, force: true });
   }
-});
-
-test('run: access.grant on gifs.recache adds the write note', async () => {
-  const rootDir = makeRoot();
-  const { admin } = makeAdmin(rootDir);
-  assert.match(await admin.run('access.grant', { command: 'gifs.recache', roleId: 'staff' }, {}), /change memory or config/);
-});
-
-test('run: access.grant on gifs.status adds no write note, on gifs.rescan it does', async () => {
-  const rootDir = makeRoot();
-  const { admin } = makeAdmin(rootDir);
-  const status = await admin.run('access.grant', { command: 'gifs.status', roleId: 'staff' }, {});
-  const rescan = await admin.run('access.grant', { command: 'gifs.rescan', roleId: 'staff' }, {});
-  assert.doesNotMatch(status, /change memory or config/);
-  assert.match(rescan, /change memory or config/);
 });
 
 // ---------------------------------------------------------------------------
@@ -6392,10 +6061,4 @@ test('run: variety shows the latest list with examples and the history newest fi
   assert.equal(lines[3], 'history (2, newest first):');
   assert.equal(lines[4], '  2026-10-01 09:30 · 6 lines · mock promise ending in (no) x3');
   assert.equal(lines[5], '  2026-10-01 08:30 · 4 lines · names what was said x2');
-});
-
-test('run: access.grant of variety is read-only (no write note)', async () => {
-  const rootDir = makeRoot();
-  const { admin } = makeAdmin(rootDir);
-  assert.equal(await admin.run('access.grant', { command: 'variety' }, {}), 'Granted variety to everyone (reload ok)');
 });

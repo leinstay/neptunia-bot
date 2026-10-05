@@ -8,6 +8,7 @@
 import { test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
+import { writeFileSync } from 'node:fs';
 import * as fsp from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -128,11 +129,17 @@ function enoent(child) {
   child.emit('error', err);
 }
 
-/** Behaviour that writes `size` bytes to the path after `flag` (or the last arg), then exits 0. */
+/**
+ * Behaviour that writes `size` bytes to the path after `flag` (or the last arg), then exits 0.
+ * Synchronous on purpose: the fake tool writes and exits in the callback the
+ * spawn scheduled, so it has finished before the event loop can reach a tool
+ * timeout, however slow the disk is under a parallel run. A test may therefore
+ * give a finishing tool the short toolTimeoutMs meant for a hung one.
+ */
 function writesOutput(size, flag) {
-  return async (child, command, args) => {
+  return (child, command, args) => {
     const out = flag ? args[args.indexOf(flag) + 1] : args[args.length - 1];
-    await fsp.writeFile(out, Buffer.alloc(size, 7));
+    writeFileSync(out, Buffer.alloc(size, 7));
     child.emit('close', 0, null);
   };
 }
@@ -718,6 +725,7 @@ test('logging: an attachment failure logs source attachment without the signed q
   assert.equal(lines.length, 1);
   assert.equal(lines[0].source, 'attachment');
   assert.equal(lines[0].location, 'cdn.discordapp.com/attachments/1/2/clip.webm');
+  assert.equal(lines[0].status, 403, 'a non-OK download logs its HTTP status');
   const serialized = JSON.stringify(lines[0]);
   assert.ok(!serialized.includes('deadbeef'));
   assert.ok(!serialized.includes('cafef00d'));
@@ -751,14 +759,6 @@ test('logging: a missing tool logs its errno code', async () => {
   assert.equal(line.reason, 'tool');
   assert.equal(line.code, 'ENOENT');
   assert.ok(!JSON.stringify(line).includes('spawn tool'));
-});
-
-test('logging: a non-OK download logs its HTTP status', async () => {
-  const { fetchImpl } = fakeFetch(fakeResponse({ ok: false, status: 403 }));
-  const fetcher = makeFetcher({ fetchImpl, spawnImpl: fakeSpawn(() => {}).spawnImpl, tmpDir });
-  const { logs } = await withCapturedLogs(() => fetcher.fetchAttachment(ATTACHMENT, { ...OPTS, durationSec: 5 }));
-  const [line] = logs.filter((l) => l.msg.startsWith('fetch-video:'));
-  assert.equal(line.status, 403);
 });
 
 // --- probeYoutube ----------------------------------------------------------

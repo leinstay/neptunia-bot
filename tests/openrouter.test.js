@@ -4,10 +4,15 @@
 // below exercise a real retry sleep (~1.5s) -- the backoff sleep in src is not touched.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import {
   createLlm,
   TokenLimitError,
   DailyCapError,
+  LLM_DAILY,
+  llmCountToday,
+  railReason,
+  helperRequestOptions,
   resolveProvider,
   matchRoute,
   RETRY_STATUS,
@@ -206,6 +211,211 @@ test('dailyCapOf: a finite number is the cap as given; anything else is 0', () =
   assert.equal(dailyCapOf(5, 'test.finite'), 5);
   assert.equal(dailyCapOf(0, 'test.finite'), 0);
   for (const value of [undefined, null, Number.NaN, '5', Infinity, {}]) assert.equal(dailyCapOf(value, 'test.other'), 0);
+});
+
+// --- the read-only side of the daily request rail: capLeft, llmCountToday ---
+
+test('capLeft: the slots left under llm.maxRequestsPerDay today, rolling over at 00:00 UTC, with state.data unchanged', async () => {
+  const state = fakeState();
+  state.data = { llmDay: '2026-09-20', llmCount: 3, other: { kept: true } };
+  const before = structuredClone(state.data);
+  let nowMs = Date.UTC(2026, 8, 20, 23, 59, 59);
+  const llm = createLlm({
+    apiKey: 'k',
+    getConfig: () => baseConfig({ maxRequestsPerDay: 5 }),
+    calibrator: fakeCalibrator(),
+    state,
+    fetchImpl: async () => okResponse('x'),
+    now: () => nowMs,
+  });
+
+  assert.equal(llm.capLeft(), 2, 'the injected clock when no time is passed');
+  assert.equal(llm.capLeft(Date.UTC(2026, 8, 20, 12, 0, 0)), 2);
+  assert.equal(llm.capLeft(Date.UTC(2026, 8, 21, 0, 0, 0)), 5, 'a new UTC day starts from the whole cap');
+  nowMs = Date.UTC(2026, 8, 21, 0, 0, 0);
+  assert.equal(llm.capLeft(), 5);
+  assert.deepEqual(state.data, before, 'reading never rolls the stored day over');
+  assert.equal(state.dirty, undefined, 'and never marks the state dirty');
+
+  // The first counted request of the new day is what rolls the pair over.
+  await llm.complete([{ role: 'user', content: 'hi' }]);
+  assert.deepEqual([state.data.llmDay, state.data.llmCount], ['2026-09-21', 1]);
+  assert.equal(llm.capLeft(), 4);
+});
+
+test('capLeft: 0 at or past the cap, the cap read live; Infinity while the cap is not a number', async () => {
+  const state = fakeState();
+  state.data = { llmDay: '2026-09-21', llmCount: 4 };
+  const config = baseConfig({ maxRequestsPerDay: 4 });
+  const llm = createLlm({
+    apiKey: 'k',
+    getConfig: () => config,
+    calibrator: fakeCalibrator(),
+    state,
+    fetchImpl: async () => okResponse('x'),
+    now: () => Date.UTC(2026, 8, 21, 12, 0, 0),
+  });
+  assert.equal(llm.capLeft(), 0);
+  config.llm.maxRequestsPerDay = 3; // lowered live under today's count
+  assert.equal(llm.capLeft(), 0, 'never negative');
+  config.llm.maxRequestsPerDay = 10; // raised live
+  assert.equal(llm.capLeft(), 6);
+  config.llm.maxRequestsPerDay = 0;
+  assert.equal(llm.capLeft(), 0, 'a cap of 0 leaves nothing');
+
+  // A cap that is not a number is the client's own refusal to make (and to log, once): a
+  // read reports no limit instead of answering for it.
+  const { logs } = await withCapturedLogs(async () => {
+    for (const cap of [undefined, null, Number.NaN, '300', Infinity]) {
+      config.llm.maxRequestsPerDay = cap;
+      assert.equal(llm.capLeft(), Infinity, String(cap));
+    }
+  });
+  assert.deepEqual(logs, [], 'a read logs nothing');
+  assert.deepEqual(state.data, { llmDay: '2026-09-21', llmCount: 4 });
+
+  // A stored count that is not a number reads as no use.
+  config.llm.maxRequestsPerDay = 10;
+  state.data.llmCount = 'many';
+  assert.equal(llm.capLeft(), 10);
+});
+
+test('llmCountToday: today\'s counted requests, 0 for a stamp of another day, read only', () => {
+  assert.deepEqual(LLM_DAILY, { dayKey: 'llmDay', countKey: 'llmCount' }, 'the state.json fields of the request counter');
+  const noon = Date.UTC(2026, 8, 21, 12, 0, 0);
+  const data = { llmDay: '2026-09-21', llmCount: 17 };
+  assert.equal(llmCountToday(data, noon), 17);
+  assert.equal(llmCountToday(data, Date.UTC(2026, 8, 22, 0, 0, 0)), 0, 'yesterday\'s count after 00:00 UTC');
+  assert.deepEqual(data, { llmDay: '2026-09-21', llmCount: 17 });
+  for (const empty of [undefined, null, {}]) assert.equal(llmCountToday(empty, noon), 0, String(empty));
+});
+
+test('llmCountToday: reads what complete counted', async () => {
+  const state = fakeState();
+  const noon = Date.UTC(2026, 8, 21, 12, 0, 0);
+  const llm = createLlm({
+    apiKey: 'k',
+    getConfig: () => baseConfig(),
+    calibrator: fakeCalibrator(),
+    state,
+    fetchImpl: async () => okResponse('x'),
+    now: () => noon,
+  });
+  await llm.complete([{ role: 'user', content: 'hi' }]);
+  await llm.complete([{ role: 'user', content: 'hi' }]);
+  await llm.complete([{ role: 'user', content: 'hi' }], { countAgainstDailyCap: false });
+  assert.equal(llmCountToday(state.data, noon), 2);
+  assert.equal(llm.capLeft(), 298);
+});
+
+// --- railReason: the reason code of a refused or failed request ---
+
+test('railReason: daily-cap for a DailyCapError, token-limit for a TokenLimitError, the fallback for anything else', () => {
+  const http = Object.assign(new Error('OpenRouter HTTP 500: x'), { statusCode: 500 });
+  const rows = [
+    [new DailyCapError('daily LLM request cap reached (3)'), undefined, 'daily-cap'],
+    [new TokenLimitError('request estimated at 9 tokens, cap is 5'), undefined, 'token-limit'],
+    [http, undefined, 'llm-error'],
+    [new TypeError('fetch failed'), undefined, 'llm-error'],
+    [Object.assign(new Error('timeout'), { name: 'TimeoutError' }), undefined, 'llm-error'],
+    [undefined, undefined, 'llm-error'],
+    [null, undefined, 'llm-error'],
+    ['daily-cap', undefined, 'llm-error'],
+    [{ name: 'DailyCapError' }, undefined, 'llm-error'],
+    // A caller with its own code for "anything else" keeps it; the two rails never take it.
+    [http, 'llm', 'llm'],
+    [new DailyCapError('x'), 'llm', 'daily-cap'],
+    [new TokenLimitError('x'), 'llm', 'token-limit'],
+  ];
+  for (const [err, fallback, expected] of rows) {
+    const got = fallback === undefined ? railReason(err) : railReason(err, fallback);
+    assert.equal(got, expected, `${err?.constructor?.name ?? String(err)} / ${String(fallback)}`);
+  }
+});
+
+test('railReason: names the errors complete really throws at each rail', async () => {
+  const state = fakeState();
+  state.data = { llmDay: '2026-09-21', llmCount: 1 };
+  const make = (cfg) =>
+    createLlm({
+      apiKey: 'k',
+      getConfig: () => baseConfig(cfg),
+      calibrator: fakeCalibrator(),
+      state,
+      fetchImpl: async () => errorResponse(400, 'bad request'),
+      now: () => Date.UTC(2026, 8, 21, 12, 0, 0),
+    });
+  const reasonOf = (promise) => promise.then(() => 'answered', (err) => railReason(err));
+  assert.equal(await reasonOf(make({ maxRequestsPerDay: 1 }).complete([{ role: 'user', content: 'hi' }])), 'daily-cap');
+  assert.equal(await reasonOf(make({ maxRequestTokens: 1 }).complete([{ role: 'user', content: 'hi' }])), 'token-limit');
+  assert.equal(await reasonOf(make({}).complete([{ role: 'user', content: 'hi' }])), 'llm-error');
+});
+
+// --- helperRequestOptions: the one spelling of an in-turn helper request ---
+
+test('helperRequestOptions: counted, never calibrated, 30 s unless llm.helperTimeoutMs or the caller says otherwise', () => {
+  const shipped = JSON.parse(fs.readFileSync(new URL('../config.json', import.meta.url), 'utf8'));
+  assert.equal(shipped.llm.helperTimeoutMs, 30000, 'the code fallback equals config.json');
+
+  assert.deepEqual(helperRequestOptions({ llm: { timeoutMs: 300000 } }, { role: 'classifier.text', maxOutputTokens: 60, purpose: 'lookup' }), {
+    role: 'classifier.text',
+    maxOutputTokens: 60,
+    countAgainstDailyCap: true,
+    skipCalibration: true,
+    timeoutMs: 30000, // never the turn-length llm.timeoutMs
+    purpose: 'lookup',
+    signal: undefined,
+  });
+
+  const config = { llm: { timeoutMs: 300000, helperTimeoutMs: 12000 } };
+  assert.equal(helperRequestOptions(config, { role: 'classifier.media' }).timeoutMs, 12000);
+  config.llm.helperTimeoutMs = 7000; // a hot edit between two calls: nothing is remembered
+  assert.equal(helperRequestOptions(config, { role: 'classifier.media' }).timeoutMs, 7000);
+  assert.equal(helperRequestOptions(shipped, { role: 'classifier.text' }).timeoutMs, 30000);
+  for (const bare of [undefined, null, {}, { llm: null }, { llm: {} }, { llm: { helperTimeoutMs: null } }]) {
+    assert.equal(helperRequestOptions(bare, { role: 'classifier.text' }).timeoutMs, 30000, JSON.stringify(bare));
+  }
+
+  // A helper with its own clock (the variety pass) passes it, with its abort signal.
+  const controller = new AbortController();
+  const own = helperRequestOptions(config, { role: 'classifier.text', maxOutputTokens: 500, purpose: 'variety', signal: controller.signal, timeoutMs: 8000 });
+  assert.equal(own.timeoutMs, 8000);
+  assert.equal(own.signal, controller.signal);
+
+  // The two rails a helper must never opt out of are not the caller's to set.
+  const forced = helperRequestOptions(config, { role: 'classifier.text', countAgainstDailyCap: false, skipCalibration: false, model: 'x/y' });
+  assert.deepEqual([forced.countAgainstDailyCap, forced.skipCalibration], [true, true]);
+  assert.equal('model' in forced, false, 'the model stays the caller\'s own option');
+  assert.deepEqual(Object.keys(helperRequestOptions(config)).sort(), ['countAgainstDailyCap', 'maxOutputTokens', 'purpose', 'role', 'signal', 'skipCalibration', 'timeoutMs']);
+});
+
+test('helperRequestOptions: complete takes the set as it is -- counted, uncalibrated, on the helper timeout, purpose logged and never sent', async () => {
+  const state = fakeState();
+  const calibrator = fakeCalibrator();
+  const sent = [];
+  const config = baseConfig({ timeoutMs: 100000, helperTimeoutMs: 5 });
+  const llm = createLlm({
+    apiKey: 'k',
+    getConfig: () => config,
+    calibrator,
+    state,
+    fetchImpl: async (url, init) => {
+      sent.push({ body: JSON.parse(init.body), signal: init.signal });
+      return okResponse('yes', { prompt_tokens: 777 });
+    },
+  });
+  const { result, logs } = await withCapturedLogs(() =>
+    llm.complete([{ role: 'user', content: 'hi' }], { model: 'small/model', ...helperRequestOptions(config, { role: 'classifier.text', maxOutputTokens: 60, purpose: 'address' }) }),
+  );
+  assert.equal(result.text, 'yes');
+  assert.equal(state.data.llmCount, 1, 'a helper counts against the daily cap');
+  assert.deepEqual(calibrator.observed, [], 'and never feeds the calibration');
+  assert.deepEqual(Object.keys(sent[0].body).sort(), ['max_tokens', 'messages', 'model', 'temperature']);
+  assert.deepEqual([sent[0].body.model, sent[0].body.max_tokens], ['small/model', 60]);
+  const [line] = logs.filter((l) => l.msg === 'llm: usage');
+  assert.deepEqual([line.role, line.purpose, line.model], ['classifier.text', 'address', 'small/model']);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(sent[0].signal.aborted, true, 'the request signal is cut at llm.helperTimeoutMs, not at llm.timeoutMs');
 });
 
 test('complete: a json.error body after a 200 is thrown and never retried', async () => {
@@ -766,6 +976,7 @@ test('complete: options.signal already aborted before the call is never sent to 
 // followed by a daily quota (below).
 test('complete: retries once on a 503 then succeeds, logging the retried attempt', async () => {
   let calls = 0;
+  let clock = Date.UTC(2026, 8, 21, 12, 0, 0);
   const llm = createLlm({
     apiKey: 'k',
     getConfig: () => baseConfig({ retries: 1 }),
@@ -773,13 +984,16 @@ test('complete: retries once on a 503 then succeeds, logging the retried attempt
     state: fakeState(),
     fetchImpl: async () => {
       calls += 1;
+      clock += 400; // each attempt takes this long on the injected clock
       if (calls === 1) return errorResponse(503, 'temporarily unavailable');
       return okResponse('recovered');
     },
+    now: () => clock,
   });
   const { result, logs } = await withCapturedLogs(() => llm.complete([{ role: 'user', content: 'hi' }]));
   assert.equal(result.text, 'recovered');
   assert.equal(calls, 2);
+  assert.deepEqual(usageLines(logs).map((l) => l.ms), [800], 'one usage line, timed from the first attempt: the failed one is inside it');
   const retries = logs.filter((l) => l.msg === 'llm: retry');
   assert.equal(retries.length, 1);
   assert.equal(retries[0].attempt, 1);
@@ -1059,8 +1273,8 @@ test('complete: llm: retry carries kind when the body names one, never the raw t
 
 // --- one `llm: usage` line per answered request, whatever its role ---
 
-/** The `llm: usage` lines of `logs`, each reduced to its own fields (level/time/msg checked and dropped). */
-function usageFields(logs) {
+/** The `llm: usage` lines of `logs`, each reduced to its own fields (level/time/msg checked and dropped), `ms` included. */
+function usageLines(logs) {
   return logs
     .filter((l) => l.msg === 'llm: usage')
     .map(({ level, time, msg, ...fields }) => {
@@ -1071,11 +1285,25 @@ function usageFields(logs) {
     });
 }
 
+/**
+ * `usageLines` without `ms`: the duration is wall time on the real clock, so here it is only
+ * checked to be a whole number of milliseconds >= 0 and dropped. The tests that inject a clock
+ * pin its value through `usageLines`.
+ */
+function usageFields(logs) {
+  return usageLines(logs).map(({ ms, ...fields }) => {
+    assert.ok(Number.isInteger(ms) && ms >= 0, `ms is a whole count, got ${String(ms)}`);
+    return fields;
+  });
+}
+
 function jsonResponse(json) {
   return { ok: true, status: 200, json: async () => json };
 }
 
 const NO_USAGE = {
+  purpose: null,
+  origin: null,
   provider: null,
   promptTokens: null,
   completionTokens: null,
@@ -1118,6 +1346,8 @@ test('complete: an answered request logs exactly one llm: usage line filled from
   assert.equal(result.provider, 'Google AI Studio');
   assert.deepEqual(usageFields(logs), [{
     role: 'analyzer',
+    purpose: null, // none was named for this request
+    origin: null,
     model: 'google/gemini-x',
     provider: 'Google AI Studio',
     promptTokens: 1200,
@@ -1184,6 +1414,57 @@ test('complete: a refused, failed or json.error request logs no usage line', asy
     await assert.rejects(make(async () => jsonResponse({ error: { message: 'refused' } })).complete([{ role: 'user', content: 'hi' }]));
   });
   assert.deepEqual(usageFields(logs), []);
+});
+
+test('complete: llm: usage carries the request\'s duration, its purpose and its origin; neither option is sent', async () => {
+  let clock = Date.UTC(2026, 8, 21, 12, 0, 0);
+  let answerMs = 1000;
+  const bodies = [];
+  const llm = createLlm({
+    apiKey: 'k',
+    getConfig: () => baseConfig({ provider: { only: ['some-provider'] } }),
+    calibrator: fakeCalibrator(),
+    state: fakeState(),
+    fetchImpl: async (url, init) => {
+      bodies.push(init.body);
+      clock += answerMs; // the provider takes this long to answer ...
+      return {
+        ok: true,
+        status: 200,
+        json: async () => {
+          clock += 234; // ... and the body this long to arrive
+          return { choices: [{ message: { content: 'the answer itself' } }], usage: { prompt_tokens: 42 } };
+        },
+      };
+    },
+    now: () => clock,
+  });
+  const ask = (options) => llm.complete([{ role: 'user', content: 'the prompt itself' }], options);
+  const { logs } = await withCapturedLogs(async () => {
+    await ask({ role: 'classifier.text', purpose: 'rewatch' });
+    await ask({ role: 'talk', origin: 'mentor', countAgainstDailyCap: false });
+    await ask({ role: 'talk' });
+    await ask({ purpose: 7, origin: { text: 'not a code' } });
+    answerMs = -5000; // the clock is stepped back while the request is out: never a negative duration
+    await ask({ role: 'talk', purpose: 'lookup' });
+  });
+  assert.deepEqual(
+    usageLines(logs).map(({ role, purpose, origin, ms }) => ({ role, purpose, origin, ms })),
+    [
+      { role: 'classifier.text', purpose: 'rewatch', origin: null, ms: 1234 },
+      { role: 'talk', purpose: null, origin: 'mentor', ms: 1234 },
+      { role: 'talk', purpose: null, origin: null, ms: 1234 },
+      { role: null, purpose: null, origin: null, ms: 1234 },
+      { role: 'talk', purpose: 'lookup', origin: null, ms: 0 },
+    ],
+  );
+  assert.equal(bodies.length, 5);
+  for (const body of bodies) {
+    assert.deepEqual(Object.keys(JSON.parse(body)).sort(), ['max_tokens', 'messages', 'model', 'provider', 'temperature'], 'no purpose, no origin, no role');
+    for (const word of ['rewatch', 'lookup', 'mentor', 'purpose', 'origin']) assert.ok(!body.includes(word), `${word} is logged only`);
+  }
+  const text = JSON.stringify(logs);
+  assert.ok(!text.includes('the prompt itself') && !text.includes('the answer itself'), 'counts and codes only');
 });
 
 test('complete: options.reasoning (a plain object) is sent verbatim as body.reasoning; anything else omits it', async () => {

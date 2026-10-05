@@ -9,20 +9,69 @@
 // Plus the display order (`sortEpisodesForDisplay`, also behind the owner's
 // view in src/admin.js) and the top-N choice for a member asked about
 // (`topEpisodes`), both used by src/behavior/prompt.js.
+//
+// It is also the one home of the episode rules the two-stage analyzer
+// (src/memory/voice.js#splitDecision) must apply exactly as the store does, so
+// a feeling item's address equals the stored episode: the text limits
+// (`EPISODE_CHARS`), the date rule (`episodeDate`, to store a date or, with
+// no clock, to test one) and the duplicate rule
+// (`isSameEpisode`). This module therefore stays a leaf toward voice.js and
+// src/behavior/prompt.js: importing either would close an import cycle
+// (prompt.js imports this module, voice.js imports prompt.js).
 
 import { clampText } from './clamp.js';
+import { normalizeTopic } from './interests.js';
 import { utcDay } from '../time.js';
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
+/**
+ * The character limits of an episode's texts: `what` and `feeling` before
+ * `memory.clampTolerance`, `quote` always a hard cut (the person's own words).
+ */
+export const EPISODE_CHARS = Object.freeze({ what: 200, quote: 120, feeling: 120 });
+
+/**
+ * The one rule of an episode's date: a stored date is a `YYYY-MM-DD` string and nothing else.
+ * It has two forms, told apart by whether a clock is passed:
+ *
+ * - With a clock (`nowMs` given): the date an episode is stored with. `raw` when it is a stored
+ *   date, else the UTC day of `nowMs` (a missing or malformed date from the model is dated by the
+ *   clock). A clock that is given but is no time (NaN, a string) throws a RangeError
+ *   (src/time.js#utcDay) once the fallback is needed.
+ * - Without one (`nowMs` undefined): a test of a stored date. `raw` when it is a stored date, else
+ *   `''`, which no stored date is, so `episodeDate(raw) !== ''` tells a dated episode from an
+ *   undated one. An undefined clock is not an error: a caller that means to date an episode must
+ *   pass its clock, since a forgotten one is read as this form and yields `''`.
+ *
+ * A usable date never reads the clock, in either form.
+ * @param {unknown} raw
+ * @param {number} [nowMs]  Epoch ms; omit to test `raw` alone.
+ * @returns {string}
+ */
+export function episodeDate(raw, nowMs) {
+  if (typeof raw === 'string' && DATE_RE.test(raw)) return raw;
+  return nowMs === undefined ? '' : utcDay(nowMs);
+}
+
+/**
+ * Whether two episodes are the same moment: the same `date` and the same
+ * `what` by src/memory/interests.js#normalizeTopic (trimmed, whitespace
+ * collapsed, lower-cased), or the same non-empty `quote`, compared verbatim.
+ * Symmetric. Anything that is not an object is no episode and matches nothing.
+ * @param {object} a
+ * @param {object} b
+ * @returns {boolean}
+ */
+export function isSameEpisode(a, b) {
+  if (!a || !b || typeof a !== 'object' || typeof b !== 'object') return false;
+  if (a.date === b.date && normalizeTopic(a.what) === normalizeTopic(b.what)) return true;
+  return Boolean(a.quote && b.quote && a.quote === b.quote);
+}
+
 function clampWeight(raw) {
   const n = Number.isInteger(raw) ? raw : 3;
   return Math.min(5, Math.max(1, n));
-}
-
-/** Lowercased, trimmed, whitespace-collapsed -- for duplicate comparison only, never stored. */
-function normalizeWhat(what) {
-  return what.trim().toLowerCase().replace(/\s+/g, ' ');
 }
 
 /**
@@ -31,30 +80,22 @@ function normalizeWhat(what) {
  * clamped tolerantly via src/memory/clamp.js; `quote` is the person's own
  * words verbatim, so it gets a hard cut (`tolerance: 1`) at a clean boundary
  * instead -- see docs/prompt-contract.md, "Limits are soft for the
- * model, clean in code".
+ * model, clean in code". Limits: `EPISODE_CHARS`; date: `episodeDate`.
  */
 function sanitizeEpisode(raw, nowMs, clampTolerance) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
-  const what = typeof raw.what === 'string' ? clampText(raw.what, 200, { tolerance: clampTolerance }) : '';
+  const what = typeof raw.what === 'string' ? clampText(raw.what, EPISODE_CHARS.what, { tolerance: clampTolerance }) : '';
   if (!what) return null;
-  const quote = typeof raw.quote === 'string' ? clampText(raw.quote, 120, { tolerance: 1 }) : '';
-  const feeling = typeof raw.feeling === 'string' ? clampText(raw.feeling, 120, { tolerance: clampTolerance }) : '';
+  const quote = typeof raw.quote === 'string' ? clampText(raw.quote, EPISODE_CHARS.quote, { tolerance: 1 }) : '';
+  const feeling = typeof raw.feeling === 'string' ? clampText(raw.feeling, EPISODE_CHARS.feeling, { tolerance: clampTolerance }) : '';
   const weight = clampWeight(raw.weight);
-  const date = typeof raw.date === 'string' && DATE_RE.test(raw.date) ? raw.date : utcDay(nowMs);
+  const date = episodeDate(raw.date, nowMs);
   return { date, what, quote, feeling, weight };
 }
 
-/**
- * Whether `candidate` duplicates one of `stored`: same date AND the same
- * `what` once normalized, or an identical non-empty `quote`.
- */
+/** Whether `candidate` is the same moment (`isSameEpisode`) as one of `stored`. */
 function isDuplicate(candidate, stored) {
-  const normWhat = normalizeWhat(candidate.what);
-  return stored.some((s) => {
-    if (s.date === candidate.date && normalizeWhat(String(s.what ?? '')) === normWhat) return true;
-    if (candidate.quote && s.quote && s.quote === candidate.quote) return true;
-    return false;
-  });
+  return stored.some((s) => isSameEpisode(s, candidate));
 }
 
 /** Ascending sort key for eviction: lowest weight first, then oldest first among equals. */

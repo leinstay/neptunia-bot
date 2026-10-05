@@ -149,6 +149,81 @@ test('add: a case may start with a moment, stored as its first anchor', () => {
   }
 });
 
+test('add: a moment whose trigger was guessed keeps the mark and is reported as a warning; nothing else is', () => {
+  const dir = tmpDataDir();
+  try {
+    const store = createCaseStore({ dataDir: dir, now: () => 5000 });
+    const item = store.add('g1', { text: TEXT_A, target: 'reply', anchor: { ...moment(), triggerGuessed: true } });
+    assert.deepEqual(item.warnings, ['trigger-guessed']);
+    const stored = store.get('g1', item.id);
+    assert.equal(stored.anchors[0].triggerGuessed, true);
+    assert.equal('warnings' in stored, false, 'a warning is a reply, never stored');
+    // A moment the ledger named, and a case without a moment, carry no warning.
+    const named = store.add('g1', { text: TEXT_A, target: 'reply', anchor: { ...moment('800000000000000005'), triggerGuessed: false } });
+    assert.deepEqual(named.warnings, []);
+    assert.equal('triggerGuessed' in store.get('g1', named.id).anchors[0], false);
+    assert.equal('warnings' in store.add('g1', { text: TEXT_B, target: 'reply' }), false);
+    // addAnchor reports the same.
+    const added = store.addAnchor('g1', named.id, { ...moment('800000000000000006'), triggerGuessed: true }, { max: 5 });
+    assert.deepEqual(added.warnings, ['trigger-guessed']);
+    assert.equal(added.anchor.triggerGuessed, true);
+    assert.deepEqual(store.addAnchor('g1', named.id, moment('800000000000000007'), { max: 5 }).warnings, []);
+  } finally {
+    cleanup(dir);
+  }
+});
+
+/** A channel window as src/mentor/anchor.js#resolveAnchor stores it. */
+function window(channelId, messages, fields = {}) {
+  return { channelId, channelName: 'announcements', readOnly: true, reason: 'routed', messages, olderNotShown: false, ...fields };
+}
+
+test('add: the turn a moment was is kept -- mode, kind, source and the windows it was shown; anything malformed goes', () => {
+  const dir = tmpDataDir();
+  try {
+    const store = createCaseStore({ dataDir: dir, now: () => 5000 });
+    const source = window('500000000000000002', [{ id: '800000000000000009', authorId: '222', self: false, content: 'are you there?' }]);
+    const anchor = {
+      ...moment(),
+      mode: 'reply',
+      triggerKind: 'overheard',
+      sourceChannelId: '500000000000000002',
+      pulled: [source, window('', [{ id: 'a' }]), window('500000000000000003', []), window('500000000000000004', [{ id: 'b' }], { reason: 'noticed' }), 'junk'],
+      media: { described: 0, none: 0 },
+    };
+    const item = store.add('g1', { text: TEXT_A, target: 'reply', anchor });
+    const [stored] = store.get('g1', item.id).anchors;
+    assert.deepEqual(stored, { id: 1, ...moment(), mode: 'reply', triggerKind: 'overheard', sourceChannelId: '500000000000000002', pulled: [source], addedAt: new Date(5000).toISOString() });
+    // A mode or kind a turn does not have is stored as none.
+    const odd = store.add('g1', { text: TEXT_A, target: 'reply', anchor: { ...moment('800000000000000005'), mode: 'auto', triggerKind: 'shouted', sourceChannelId: '' } });
+    const [oddStored] = store.get('g1', odd.id).anchors;
+    assert.deepEqual({ mode: oddStored.mode, triggerKind: oddStored.triggerKind, sourceChannelId: oddStored.sourceChannelId }, { mode: null, triggerKind: null, sourceChannelId: null });
+  } finally {
+    cleanup(dir);
+  }
+});
+
+test('add: a routed moment is replayable by its call, though its chat ends with the persona; a spontaneous one needs no trigger', () => {
+  const dir = tmpDataDir();
+  try {
+    const store = createCaseStore({ dataDir: dir });
+    const own = { id: '800000000000000002', authorId: 'self-id', self: true, content: 'ναι' };
+    const call = { id: '800000000000000009', authorId: '222', self: false, content: 'are you there?' };
+    const routed = { ...moment(), triggerId: call.id, history: [own], sourceChannelId: '500000000000000002', pulled: [window('500000000000000002', [call])] };
+    assert.equal(store.add('g1', { text: TEXT_A, target: 'reply', anchor: routed }).anchors[0].triggerId, call.id);
+    // The call is her own line: refused.
+    const ownCall = { ...routed, pulled: [window('500000000000000002', [{ ...call, self: true }])] };
+    assert.throws(() => store.add('g1', { text: TEXT_A, target: 'reply', anchor: ownCall }), /moment/);
+    // An unasked turn has no trigger: none needed, whoever wrote last.
+    const unasked = { ...moment('800000000000000005'), mode: 'interject', triggerKind: null, triggerId: null, history: [own] };
+    assert.equal(store.add('g1', { text: TEXT_A, target: 'reply', anchor: unasked }).anchors[0].triggerId, null);
+    // A reply turn still needs one.
+    assert.throws(() => store.add('g1', { text: TEXT_A, target: 'reply', anchor: { ...moment('800000000000000006'), triggerId: null } }), /moment/);
+  } finally {
+    cleanup(dir);
+  }
+});
+
 test('addAnchor: adds moments up to the max, never twice the same message', () => {
   const dir = tmpDataDir();
   try {

@@ -4,13 +4,28 @@
 // its own optional cap, and whatever does not fit is dropped item by item.
 // Rendering order is the caller's business — priority and position in the
 // prompt are independent.
+//
+// The two things every request builder hands to `fitSections` live here too, so
+// there is one copy of each: `requestTokenLimit` (the limit) and `sectionCost`
+// (the price of one item).
+
+import { estimateTokens } from './tokens.js';
+
+// What a broken or missing setting counts as: config.json's `llm.safetyMargin`
+// and `llm.maxRequestTokens`.
+const DEFAULT_SAFETY_MARGIN = 0.9;
+const DEFAULT_MAX_REQUEST_TOKENS = 50000;
 
 /**
  * @typedef {object} Section
  * @property {string} name
  * @property {string[]} items        Independent pieces; one is kept or dropped whole.
- * @property {'first'|'newest'} [keep]  Which end survives trimming: 'first' keeps
- *   items from the start (ranked lists), 'newest' keeps items from the end (chat logs).
+ * @property {'first'|'newest'|'oldest'} [keep]  Which items survive trimming. 'first' (the
+ *   default) walks from the start, skips an item that does not fit and tries the next (ranked
+ *   lists, gaps allowed). 'newest' keeps a contiguous run from the end (chat logs): it stops at
+ *   the first item, walking backwards, that does not fit. 'oldest' keeps a contiguous run from
+ *   the start: it stops at the first item that does not fit, so nothing behind a dropped item is
+ *   ever kept.
  * @property {number} [cap]          Max tokens this section may take.
  * @property {boolean} [required]    Required sections are never trimmed; if they
  *   alone exceed the limit, fitSections throws.
@@ -27,11 +42,50 @@
 export class SectionsTooLargeError extends Error {}
 
 /**
+ * The input budget of one request: `floor(maxRequestTokens * llm.safetyMargin)`. A margin that
+ * is not a number in (0, 1] counts as 0.9 and a token cap that is not a positive finite number
+ * as 50000 (config.json's values), so a partial or broken config still gives a limit
+ * `fitSections` accepts.
+ * @param {object} config  The live config; `config.llm` may be missing.
+ * @param {number} [maxRequestTokens]  The token cap to use instead of `config.llm.maxRequestTokens`
+ *   (the warmup has its own).
+ * @returns {number}  A finite integer >= 0.
+ */
+export function requestTokenLimit(config, maxRequestTokens = config?.llm?.maxRequestTokens) {
+  const given = config?.llm?.safetyMargin;
+  const margin = Number.isFinite(given) && given > 0 && given <= 1 ? given : DEFAULT_SAFETY_MARGIN;
+  const cap = Number.isFinite(maxRequestTokens) && maxRequestTokens > 0 ? maxRequestTokens : DEFAULT_MAX_REQUEST_TOKENS;
+  return Math.floor(cap * margin);
+}
+
+/**
+ * The `cost` function request builders pass to `fitSections`: the calibrated token estimate of
+ * an item plus a flat 2 per item. The calibrator is read at each call, so the price follows its
+ * ratio.
+ * @param {{ apply: (rawEstimate: number) => number }} calibrator  See src/llm/tokens.js#createCalibrator.
+ * @returns {(text: string) => number}
+ */
+export function sectionCost(calibrator) {
+  return (text) => calibrator.apply(estimateTokens(text)) + 2;
+}
+
+/**
  * Fit `sections` into `limit` tokens. `cost(text)` returns the token price of
  * one item. Returns `{ kept, stats, used }` where `kept[name]` is the surviving
  * items in their original order.
+ * @param {Section[]} sections  In priority order.
+ * @param {number} limit  A finite number >= 0.
+ * @param {(text: string) => number} cost
+ * @returns {{ kept: Record<string, string[]>, stats: Record<string, { used: number, kept: number, dropped: number }>, used: number }}
+ * @throws {TypeError} `limit` is not a finite number >= 0. A NaN limit would otherwise trim
+ *   nothing and never report required sections as too large: every comparison with NaN is false.
+ * @throws {SectionsTooLargeError} The required sections alone exceed `limit`.
  */
 export function fitSections(sections, limit, cost) {
+  // Number.isFinite is false for anything that is not a number, a numeric string included.
+  if (!Number.isFinite(limit) || limit < 0) {
+    throw new TypeError(`the token limit must be a finite number >= 0, got ${String(limit)}`);
+  }
   const kept = {};
   const stats = {};
   let remaining = limit;
@@ -51,13 +105,14 @@ export function fitSections(sections, limit, cost) {
     if (section.required) continue;
     const budget = Math.min(section.cap ?? Infinity, remaining);
     const order = section.keep === 'newest' ? [...section.items].reverse() : section.items;
+    // 'newest' and 'oldest' must stay contiguous: once one item does not fit, stop.
+    const contiguous = section.keep === 'newest' || section.keep === 'oldest';
     const taken = [];
     let used = 0;
     for (const item of order) {
       const price = cost(item);
-      // A chat log must stay contiguous: once one message does not fit, stop.
       if (used + price > budget) {
-        if (section.keep === 'newest') break;
+        if (contiguous) break;
         continue;
       }
       taken.push(item);

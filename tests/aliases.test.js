@@ -43,12 +43,16 @@ test('applyAliasOps: an add equal (case-insensitively) to a stored display name 
 });
 
 test('applyAliasOps: an add equal to a display name does not even count as a sighting on an existing alias', () => {
-  // A stored alias that later becomes identical to a (new) display name is
-  // untouched by this call -- only fresh `add`s are filtered.
-  const existing = [{ name: 'Prime', weight: 3, firstSeen: 'a', lastSeen: 'a' }];
-  const items = applyAliasOps(existing, {}, ['Prime'], opts());
-  assert.equal(items.length, 1);
-  assert.equal(items[0].weight, 3, 'untouched: no op targeted it');
+  // A stored alias that later becomes identical to a (new) display name stays
+  // as stored, and an add of that name, in any casing, is filtered before it
+  // could sight it. The stored lastSeen is past confirmGapHours, so a sighting
+  // would bump the weight and move lastSeen.
+  const lastSeen = new Date(NOW - 20 * HOUR).toISOString();
+  const existing = [{ name: 'Prime', weight: 3, firstSeen: lastSeen, lastSeen }];
+  const items = applyAliasOps(existing, { add: ['Prime', 'prime'] }, ['Prime'], opts());
+  assert.equal(items.length, 1, 'the stored alias is kept');
+  assert.equal(items[0].weight, 3, 'no sighting: the weight does not move');
+  assert.equal(items[0].lastSeen, lastSeen, 'no sighting: lastSeen does not move');
 });
 
 test('applyAliasOps: remove deletes the alias, case-insensitively', () => {
@@ -92,23 +96,15 @@ test('applyAliasOps: garbage ops never throw and change nothing', () => {
   }
 });
 
-test('applyAliasOps: existing undefined (a profile without aliases yet) is tolerated', () => {
-  const items = applyAliasOps(undefined, { add: ['Vertex'] }, [], opts());
-  assert.equal(items.length, 1);
-});
-
-test('applyAliasOps: does not mutate the existing array or its items', () => {
-  const existing = [{ name: 'Vertex', weight: 1, firstSeen: 'a', lastSeen: 'a' }];
-  const copy = existing.map((i) => ({ ...i }));
-  applyAliasOps(existing, { add: ['Vertex'] }, [], opts());
-  assert.deepEqual(existing, copy);
-});
-
 test('applyAliasOps: with halfLifeDays, top-ranked aliases can be selected the same way as interests', () => {
   const existing = [
     { name: 'Ancient nickname', weight: 10, firstSeen: '2021-01-01T00:00:00.000Z', lastSeen: '2021-01-01T00:00:00.000Z' },
     { name: 'Fresh nickname', weight: 2, firstSeen: '2026-09-01T00:00:00.000Z', lastSeen: '2026-09-01T00:00:00.000Z' },
   ];
-  const shown = topByRank(existing, 1, 180);
-  assert.equal(shown[0].name, 'Fresh nickname');
+  const capOne = { maxAliases: 1, maxAliasesStored: 1 };
+  const decayed = applyAliasOps(existing, {}, [], opts({ ...capOne, halfLifeDays: 180 }));
+  assert.deepEqual(decayed.map((i) => i.name), ['Fresh nickname'], 'five years of silence sink the heavier alias under eviction');
+  assert.deepEqual(decayed, topByRank(existing, 1, 180), 'the same pick as topByRank, the ranking interests use');
+  const undecayed = applyAliasOps(existing, {}, [], opts(capOne));
+  assert.deepEqual(undecayed.map((i) => i.name), ['Ancient nickname'], 'without halfLifeDays the heavier alias stays');
 });

@@ -2,7 +2,9 @@
 // daily rail kept in state.json (LLM requests, pictures, web reads, posted
 // GIFs, video watches, the mentor's tokens) is a pair of fields -- the UTC
 // day it counts for and the count -- that starts again from zero when the
-// day turns; this module owns that rollover so the rails cannot drift apart.
+// day turns; this module owns that rollover so the rails cannot drift apart:
+// dailyCounter / bumpDaily for the owner that counts, countToday for every
+// reader, which must never write the pair.
 // Pure: the caller passes the clock reading and marks its state dirty.
 
 /** One minute in milliseconds. */
@@ -46,6 +48,30 @@ export function dailyCounter(state, { dayKey, countKey }, nowMs) {
     rolled = true;
   }
   return { day, count: countOf(state[countKey]), rolled };
+}
+
+/**
+ * Today's value of one daily counter, read only: `state[countKey]` when
+ * `state[dayKey]` is the UTC day of `nowMs`, 0 when the pair was stamped for
+ * another day (yesterday's count reads as 0 from 00:00 UTC on) or carries no
+ * stamp. Never writes: the pair is rolled over by dailyCounter / bumpDaily,
+ * when its owner counts. For everything that only looks at a rail -- a
+ * status line, a check before the work a refusal would waste. A missing or
+ * invalid count reads as 0, by dailyCounter's rule; so does a `state` that
+ * is not an object, and a `nowMs` that is neither a time nor a day key.
+ * @param {object|null|undefined} state                  Never mutated.
+ * @param {{ dayKey: string, countKey: string }} keys    The same pair dailyCounter takes.
+ * @param {number|string} nowMs  The clock in epoch ms; a caller that already holds the
+ *   UTC day key (`YYYY-MM-DD`, from utcDay) passes the key itself.
+ * @returns {number}
+ */
+export function countToday(state, { dayKey, countKey }, nowMs) {
+  if (state === null || typeof state !== 'object') return 0;
+  let day = null;
+  if (typeof nowMs === 'string') day = nowMs;
+  else if (Number.isFinite(nowMs)) day = utcDay(nowMs);
+  if (!day || state[dayKey] !== day) return 0;
+  return countOf(state[countKey]);
 }
 
 /**

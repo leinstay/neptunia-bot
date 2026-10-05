@@ -12,7 +12,7 @@
 // src/discord/collect.js, so it can be driven with plain fake objects in
 // tests.
 
-import { normalizeMessage, channelAllowed, canSend, fetchHistory } from './collect.js';
+import { normalizeMessage, channelAllowed, canSend, fetchHistory, fetchMessage } from './collect.js';
 import { audienceAllows } from './pull-fetch.js';
 import { isOwnerId } from './access.js';
 import { collectPictures, collectEmojiItems, collectVideos, collectReadableLinks, isDescribable } from './media.js';
@@ -33,9 +33,10 @@ import { addPending, isExpired, popOldest, requeuePending } from '../behavior/pe
 import { between } from '../behavior/random.js';
 import { fillPromptTemplate } from '../behavior/prompt.js';
 import { usableDestination } from '../behavior/turn.js';
-import { elsewhereSettings, pingsIn, recordPing, settleDueAt, stampPings } from '../behavior/elsewhere.js';
+import { elsewhereSettings, pingsIn, pingStatus, recordPing, settleDueAt, stampPings } from '../behavior/elsewhere.js';
 import { privateGate } from '../behavior/private.js';
 import { isLimitNotice, postLimitNotice } from '../behavior/limits.js';
+import { isVideoVisionOn } from '../memory/youtube-check.js';
 import { log } from '../log.js';
 import { MINUTE_MS, utcDay } from '../time.js';
 
@@ -46,6 +47,8 @@ import { MINUTE_MS, utcDay } from '../time.js';
 const MAX_WARM_LINKS_PER_MESSAGE = 1;
 // Only when web.links.prefillPerUserPerDay is missing (config.json always has it).
 const PREFILL_PER_USER_PER_DAY_FALLBACK = 10;
+// Only when llm.helperTimeoutMs is missing (config.json always has it).
+const HELPER_TIMEOUT_FALLBACK_MS = 30000;
 
 /**
  * How many items of one observed message a prefill may take: `value` (a
@@ -66,6 +69,25 @@ function prefillPerMessage(value, fallback) {
 function callRank(triggerKind) {
   if (triggerKind === 'mention' || triggerKind === 'reply') return 2;
   return triggerKind === 'name' ? 1 : 0;
+}
+
+// Discord's answers for a message that no longer exists: HTTP 404 with the
+// JSON code Unknown Message, or Unknown Channel when its channel went too.
+const UNKNOWN_CHANNEL = 10003;
+const UNKNOWN_MESSAGE = 10008;
+
+/** Whether a failed message fetch said the message (or its channel) is not there any more. */
+function isNotFound(err) {
+  return err?.status === 404 || err?.code === UNKNOWN_MESSAGE || err?.code === UNKNOWN_CHANNEL;
+}
+
+/**
+ * The `mention: dropped` reason for a call messageStillExists did not find:
+ * `gone` (deleted) or `fetch-failed` (the lookup failed; it may still exist).
+ * @param {'gone'|'error'} missing
+ */
+function missingReason(missing) {
+  return missing === 'gone' ? 'gone' : 'fetch-failed';
 }
 
 /**
@@ -140,13 +162,14 @@ export function createMessageHandler({
 }) {
   /**
    * Whether the message `replyToId` (normalizeMessage's: a forward has none)
-   * is one of the persona's own: the channel's cache first, then a fetch.
+   * is one of the persona's own (collect.js#fetchMessage: the channel's cache
+   * first, then a fetch; a failed fetch is no reply). A message that replies
+   * to nothing costs no lookup.
    */
   async function resolveReference(channel, replyToId, selfId) {
+    // Every guild message comes through here: no id, no fetch at all.
     if (!replyToId) return false;
-    const cached = channel.messages.cache.get(replyToId);
-    const ref = cached ?? (await channel.messages.fetch(replyToId).catch(() => null));
-    return ref?.author?.id === selfId;
+    return (await fetchMessage(channel, replyToId))?.author?.id === selfId;
   }
 
   /**
@@ -218,10 +241,8 @@ export function createMessageHandler({
   /** Fire-and-forget like warmMediaCache: watch the message's first videos now, not when a turn needs it. */
   function warmVideoCache(guildId, normalized) {
     const config = hot.config;
-    const features = config.features ?? {};
-    // Both switches, like the senses line (src/behavior/prompt.js#renderSenses); a missing
-    // videoDescriptions counts as on.
-    if (features.mediaDescriptions !== true || features.videoDescriptions === false) return;
+    // Both switches, like the describer and the senses line; a missing videoDescriptions counts as on.
+    if (!isVideoVisionOn(config)) return;
     if (config.media?.video?.prefill !== true) return;
     if (typeof describer.describeVideos !== 'function') return;
     // Watching is far dearer than a picture caption: one video per message by default.
@@ -687,6 +708,13 @@ export function createMessageHandler({
             maxOutputTokens: mentionCfg.followUpMaxOutputTokens,
             countAgainstDailyCap: true,
             skipCalibration: true,
+            // A helper's own short timeout (llm.helperTimeoutMs), never the
+            // turn-length llm.timeoutMs: while this call is in flight it
+            // holds the channel's follow-up slot, and every untagged line
+            // there is only held.
+            timeoutMs: config.llm?.helperTimeoutMs ?? HELPER_TIMEOUT_FALLBACK_MS,
+            // What the request is for, for the usage journal: an option, never part of the request body.
+            purpose: 'address',
           },
         );
         if (String(completion.text ?? '').trim()) {
@@ -867,11 +895,35 @@ export function createMessageHandler({
    * @param {string} messageId
    */
   function skipSeenCalls(sourceId, messageId) {
-    const { pingMaxAgeMs } = elsewhereSettings(hot.config);
-    const seen = pingsIn(store?.state?.data?.elsewherePings, sourceId, { now: now(), maxAgeMs: pingMaxAgeMs })
+    const seen = ringCalls(sourceId)
       .map((entry) => entry.messageId)
       .filter((id) => id !== messageId && turns.spokeAfterSeeing?.(sourceId, id));
     stampRing([messageId, ...seen].map((id) => ({ messageId: id, status: 'skipped' })));
+  }
+
+  /**
+   * The calls of `sourceId` the ring holds (state.json `elsewherePings`, read
+   * now), oldest first, those past elsewhere.pingMaxAgeDays left out
+   * (src/behavior/elsewhere.js#pingsIn). Read-only.
+   * @param {string} sourceId
+   */
+  function ringCalls(sourceId) {
+    const { pingMaxAgeMs } = elsewhereSettings(hot.config);
+    return pingsIn(store?.state?.data?.elsewherePings, sourceId, { now: now(), maxAgeMs: pingMaxAgeMs });
+  }
+
+  /**
+   * Whether the ring holds the routed call `messageId` of `sourceId` as
+   * answered (src/behavior/elsewhere.js#pingStatus): a turn that showed it
+   * spoke and stamped it. Read from state.json, so it holds across a restart
+   * and after a later turn's view of the source (turns.spokeAfterSeeing, in
+   * memory) left the call out. A call the ring does not hold (never recorded,
+   * past its age, no state) is not answered; nor is a skipped one.
+   * @param {string} sourceId
+   * @param {string} messageId
+   */
+  function ringAnswered(sourceId, messageId) {
+    return pingStatus(ringCalls(sourceId).find((entry) => entry.messageId === messageId)) === 'answered';
   }
 
   /**
@@ -953,7 +1005,8 @@ export function createMessageHandler({
   // spoke there already had it in view (turns.spokeAfterSeeing). A routed
   // call (written where the persona cannot write, answered in the main
   // channel) is held the same way once its settle wait is over: under the
-  // channel it was written in, carrying the `destination` its turn posts in.
+  // channel it was written in, carrying the `destination` its turn posts in;
+  // one the ring already holds as answered is not answered again.
   // See src/behavior/pending.js for the plain queue operations. Never persisted.
   let pendingList = [];
   let draining = false; // guards against a re-entrant drainPending() call (see below)
@@ -982,12 +1035,45 @@ export function createMessageHandler({
     });
   }
 
-  /** Same cached-then-fetch existence check `resolveReference` uses, generalised to any message id. */
+  /**
+   * Whether the message `messageId` of `channel` is still there to answer:
+   * `true` (in the channel's cache, or fetched), `'gone'` (the fetch found
+   * nothing, or Discord answered not found: deleted) or `'error'` (any other
+   * failure -- a rate limit, a server error, lost access: it may still exist).
+   * The drain and the settle drop the call either way and log which
+   * (heldCallState, missingReason). Not collect.js#fetchMessage: that answers
+   * null for every failure, and a failed fetch must not read as a deleted
+   * message.
+   * @returns {Promise<true|'gone'|'error'>}
+   */
   async function messageStillExists(channel, messageId) {
-    const cached = channel.messages.cache.get(messageId);
-    if (cached) return true;
-    const fetched = await channel.messages.fetch(messageId).catch(() => null);
-    return Boolean(fetched);
+    if (channel.messages.cache?.get?.(messageId)) return true;
+    try {
+      return (await channel.messages.fetch(messageId)) ? true : 'gone';
+    } catch (err) {
+      return isNotFound(err) ? 'gone' : 'error';
+    }
+  }
+
+  /**
+   * What became of the held call `messageId` written in `channel` while it
+   * waited (a settle wait, the pending queue), read now: `'answered'` when it
+   * is a routed call (`routed`) the ring holds as answered (ringAnswered),
+   * else what messageStillExists says (`true`, `'gone'`, `'error'`). The ring
+   * is read on both sides of the lookup: before it, so a call already
+   * answered costs no fetch and is never reported as lost when its message
+   * cannot be found any more; after it, for a stamp that landed while the
+   * fetch was in flight. An answer wins over a missing message either way.
+   * @param {object} channel  Where the call was written.
+   * @param {string} messageId
+   * @param {boolean} routed  Only a routed call is in the ring.
+   * @returns {Promise<true|'answered'|'gone'|'error'>}
+   */
+  async function heldCallState(channel, messageId, routed) {
+    const answered = () => routed && ringAnswered(channel.id, messageId);
+    if (answered()) return 'answered';
+    const found = await messageStillExists(channel, messageId);
+    return answered() ? 'answered' : found;
   }
 
   /**
@@ -1096,7 +1182,8 @@ export function createMessageHandler({
    * finishes anywhere (src/index.js wires this to src/behavior/turn.js's
    * `setOnIdle`, in the same `finally` that frees the channel). The ignore
    * decision (decideMention) is rolled HERE, not when the ping arrived. A
-   * message deleted meanwhile is dropped silently; a channel that lost send
+   * ping whose message was deleted meanwhile (`gone`) or cannot be fetched
+   * now (`fetch-failed`: messageStillExists), a channel that lost send
    * permission, or a ping the last turn that spoke in its channel already
    * had in its history (turns.spokeAfterSeeing), is dropped with a log line.
    * A ping queued in a channel whose own turn was running is picked up the
@@ -1117,7 +1204,12 @@ export function createMessageHandler({
    * rail, a main channel the bot can send in) -- a route that no longer holds
    * drops it like onMessage step 11 does (`cannot-send` with `route`) -- and
    * its turn posts in the destination resolved now, with its source
-   * (afterCallTurn: the notice there, plain; the ring). A routed call a turn
+   * (afterCallTurn: the notice there, plain; the ring). A routed call the
+   * ring already holds as answered is dropped (`mention: already answered`,
+   * reason `ring`: read from state.json, so it holds across a restart,
+   * whatever the turns remember in memory) -- read before its message is
+   * looked up, so an answered call is never logged as `gone` or
+   * `fetch-failed` (heldCallState). Otherwise, a routed call a turn
    * that spoke already had in view is stamped skipped in the ring with every
    * other call of its source that turn showed (skipSeenCalls); one the ignore
    * roll lets pass, with every call it took the place of (passRoutedCall).
@@ -1163,7 +1255,17 @@ export function createMessageHandler({
           log.info('mention: dropped', { channel: ping.channelId, kind: ping.kind, reason: 'cannot-send', ...routed });
           continue;
         }
-        if (!(await messageStillExists(ping.channel, ping.trigger.id))) continue;
+        const held = await heldCallState(ping.channel, ping.trigger.id, Boolean(ping.destination));
+        // A routed call the ring holds as answered (a turn that showed it
+        // spoke): not answered a second time, whatever the turns remember.
+        if (held === 'answered') {
+          log.info('mention: already answered', { channel: ping.channelId, kind: ping.kind, reason: 'ring', ...routed });
+          continue;
+        }
+        if (held !== true) {
+          log.info('mention: dropped', { channel: ping.channelId, kind: ping.kind, reason: missingReason(held), ...routed });
+          continue;
+        }
         // The turn that ran meanwhile fetched its history after this ping
         // landed and spoke with it in view: not answered a second time (a
         // routed call, and the calls of its source that turn showed, are no
@@ -1275,10 +1377,14 @@ export function createMessageHandler({
    * A routed call is held the same way: queued under the channel it was
    * written in (its source, so it never replaces a ping of its destination),
    * carrying its destination, which the drain posts in, and the calls it
-   * took the place of. A name trigger is never
-   * queued: busy elsewhere it is skipped here; busy in that channel (or with
-   * pendingSameChannel off, any direct call) it falls through and runTurn
-   * itself returns 'busy', logged as a drop.
+   * took the place of. A name trigger is never queued: busy in that channel
+   * or elsewhere it is dropped here (`mention: dropped`, `busy`), and so is a
+   * direct call in a busy channel with pendingSameChannel off -- before it is
+   * counted or rolled, so it neither adds to the spam count (tagHistory) nor
+   * meets the ignore chance. A routed call dropped as busy stays unanswered
+   * in the ring: busy is not the persona's choice, and only a call she chose
+   * to let pass is stamped skipped. Should runTurn itself still answer
+   * 'busy', that is logged as the same drop.
    * Otherwise the call is counted and rolled (decideAndLog) and the reply
    * turn started, never awaited; a routed one carries its `source`
    * (`reason: 'routed'`), and its outcome reaches the ring and its notice the
@@ -1302,7 +1408,12 @@ export function createMessageHandler({
       holdDirect();
       return;
     }
-    const busyElsewhere = oneAtATime && !sameChannelBusy && turns.isAnyBusy();
+    // Not held: dropped before it is counted or rolled, like a call busy elsewhere.
+    if (sameChannelBusy) {
+      dropBusy();
+      return;
+    }
+    const busyElsewhere = oneAtATime && turns.isAnyBusy();
     if (busyElsewhere) {
       if (direct) holdDirect();
       else dropBusy();
@@ -1347,7 +1458,9 @@ export function createMessageHandler({
   // call the turn showed is stamped by the turn itself), the call and those it
   // carries when the ignore roll lets it pass (passRoutedCall), the call and
   // the others of its source a turn that spoke already had in view
-  // (skipSeenCalls). The waits live in memory only: a restart during one loses
+  // (skipSeenCalls). A call the ring already holds as answered is never
+  // answered again (ringAnswered: state.json, so a restart keeps it). The
+  // waits live in memory only: a restart during one loses
   // the call, which stays unanswered in the ring; a pause (clearPending) and
   // shutdown (stop) clear them.
   // source channel id -> { kind, channel, normalized, triggerKind, superseded, firstAt, lastAt, due, moved, timer }
@@ -1468,16 +1581,22 @@ export function createMessageHandler({
    * call takes the ordinary call path (answerCall) toward the destination
    * resolved again now. It is dropped instead, and stays unanswered in the
    * ring, while paused or warming up and when the route no longer holds
-   * (`elsewhere: dropped` with that code), or, as at the pending drain: silently
-   * when the message was deleted meanwhile; when a turn that spoke had it in
-   * view (turns.spokeAfterSeeing -- a pulled block showed it and the persona
+   * (`elsewhere: dropped` with that code), or, as at the pending drain
+   * (heldCallState): when the ring already holds it as answered (`mention:
+   * already answered`, reason `ring`: a turn that showed it answered it --
+   * read from state.json, so it holds across a restart and after a later
+   * turn's view left the call out; read before the lookup below, and once
+   * more after it); when its message was deleted meanwhile or cannot be
+   * fetched now (`mention: dropped`, `gone` / `fetch-failed`:
+   * messageStillExists); when a turn that spoke had it in view
+   * (turns.spokeAfterSeeing -- a pulled block showed it and the persona
    * could answer it there; `mention: already answered`, and the call and the
    * other calls of its source that turn showed are stamped skipped in the
-   * ring: skipSeenCalls); when its channel is no longer allowed (bot.channels)
-   * or its kind's switch was turned off (`mention: dropped`, `channel` /
-   * `off`). The calls it carries (`superseded`) go with it to answerCall. A
-   * timer whose wait already ended (or was removed) does nothing. Never
-   * rejects: it runs from a timer.
+   * ring: skipSeenCalls); when its channel is no longer allowed
+   * (bot.channels) or its kind's switch was turned off (`mention: dropped`,
+   * `channel` / `off`). The calls it carries (`superseded`) go with it to
+   * answerCall. A timer whose wait already ended (or was removed) does
+   * nothing. Never rejects: it runs from a timer.
    */
   async function fireSettle(sourceId, entry) {
     if (settles.get(sourceId) !== entry) return;
@@ -1490,7 +1609,18 @@ export function createMessageHandler({
         log.info('elsewhere: dropped', { source: sourceId, kind, message: normalized.id, reason: muted });
         return;
       }
-      if (!(await messageStillExists(channel, normalized.id))) return;
+      const held = await heldCallState(channel, normalized.id, true);
+      // A turn that showed this call in a pulled block of its source answered
+      // it and stamped the ring (read from state.json: it holds across a
+      // restart): not answered a second time.
+      if (held === 'answered') {
+        log.info('mention: already answered', { channel: sourceId, kind: triggerKind, reason: 'ring' });
+        return;
+      }
+      if (held !== true) {
+        log.info('mention: dropped', { channel: sourceId, kind: triggerKind, reason: missingReason(held) });
+        return;
+      }
       // A turn that spoke meanwhile showed this call in a pulled block of its
       // source: not answered a second time.
       if (turns.spokeAfterSeeing?.(sourceId, normalized.id)) {

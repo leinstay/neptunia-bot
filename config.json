@@ -55,6 +55,7 @@
     "safetyMargin": 0.9,
     "timeoutMs": 300000,
     "pingTimeoutMs": 30000,
+    "helperTimeoutMs": 30000,
     "retries": 2,
     "maxRequestsPerDay": 300,
     "provider": null,
@@ -151,6 +152,12 @@
     "maxNewRecent": 3,
     "recentChars": 160,
     "recentShown": 12,
+    "notesStaleDays": 7,
+    "notesMinLines": 20,
+    "privateMaxAgeMinutes": 360,
+    "channelWritersStored": 20,
+    "channelWritersHalfLifeDays": 30,
+    "reasoning": null,
     "maxNewEpisodes": 3,
     "maxInterests": 12,
     "maxInterestsStored": 40,
@@ -180,7 +187,7 @@
     "portraitRetryHours": 24,
     "portraitCheckMinutes": 60,
     "voiceModel": null,
-    "voice": { "maxItems": 24, "maxPerDay": 100, "maxOutputTokens": 3000, "retryMinutes": 15, "maxAttempts": 4, "queueMax": 100, "queueHours": 24 }
+    "voice": { "maxItems": 24, "maxPerDay": 100, "maxOutputTokens": 3000, "retryMinutes": 15, "maxAttempts": 4, "queueMax": 100, "queueHours": 24, "timeoutMs": 120000 }
   },
   "lore": {
     "maxEntries": 500,
@@ -279,7 +286,7 @@
     "reference": { "days": 7, "samples": 60, "maxMessages": 3000, "rarePer1000": 0.5, "rareMinAuthors": 2 },
     "feedbackExamples": 10,
     "diagnose": true,
-    "anchor": { "max": 5, "contextMessages": 30, "hideLaterMemory": true, "samples": 5 }
+    "anchor": { "max": 5, "contextMessages": 30, "hideLaterMemory": true, "samples": 5, "ledgerSize": 300 }
   },
   "warmup": {
     "enabled": true,

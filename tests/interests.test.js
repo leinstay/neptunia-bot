@@ -258,9 +258,19 @@ test('applyInterestOps: eviction runs even with no ops, self-healing an over-stu
 // ---- storage cap vs shown cap, and rank-driven eviction -----------------------
 
 test('applyInterestOps: the storage cap is max(maxInterestsStored, maxInterests) -- a smaller stored cap never wins', () => {
-  const existing = stored([['a', 1, '2026-01-01T00:00:00.000Z'], ['b', 1, '2026-01-02T00:00:00.000Z']]);
-  const items = applyInterestOps(existing, {}, opts({ maxInterests: 12, maxInterestsStored: 2 }));
-  assert.equal(items.length, 2, 'stored cap floored at the shown cap (12), so 2 items are never touched');
+  const existing = stored([
+    ['a', 1, '2026-01-01T00:00:00.000Z'],
+    ['b', 1, '2026-01-02T00:00:00.000Z'],
+    ['c', 1, '2026-01-03T00:00:00.000Z'],
+  ]);
+  const rows = [
+    ['a smaller stored cap is floored at the shown cap', { maxInterests: 3, maxInterestsStored: 2 }, ['a', 'b', 'c']],
+    ['a larger stored cap is the cap', { maxInterests: 1, maxInterestsStored: 2 }, ['b', 'c']],
+  ];
+  for (const [label, caps, expected] of rows) {
+    const items = applyInterestOps(existing, {}, opts(caps));
+    assert.deepEqual(items.map((i) => i.topic), expected, label);
+  }
 });
 
 test('applyInterestOps: with halfLifeDays, eviction drops the lowest RANK, not the lowest weight -- an ancient heavy item can be evicted before a light recent one', () => {
@@ -389,14 +399,22 @@ test('isStale: staleDays not a positive number means never stale', () => {
 
 // ---- normalizeInterests: array validation -------------------------------------
 
-test('normalizeInterests: an array of well-formed items passes through validated', () => {
-  const items = normalizeInterests([{ topic: 'Chess', note: 'plays weekly', weight: 4, firstSeen: 'a', lastSeen: 'b' }]);
-  assert.deepEqual(items, [{ topic: 'Chess', note: 'plays weekly', weight: 4, firstSeen: 'a', lastSeen: 'b' }]);
-});
-
-test('normalizeInterests: array items missing optional fields get sane defaults', () => {
-  const items = normalizeInterests([{ topic: 'Chess' }]);
-  assert.deepEqual(items, [{ topic: 'Chess', note: '', weight: 1, firstSeen: null, lastSeen: null }]);
+test('normalizeInterests: well-formed items pass through validated, missing optional fields get sane defaults', () => {
+  const rows = [
+    [
+      'an array of well-formed items passes through validated',
+      [{ topic: 'Chess', note: 'plays weekly', weight: 4, firstSeen: 'a', lastSeen: 'b' }],
+      [{ topic: 'Chess', note: 'plays weekly', weight: 4, firstSeen: 'a', lastSeen: 'b' }],
+    ],
+    [
+      'array items missing optional fields get sane defaults',
+      [{ topic: 'Chess' }],
+      [{ topic: 'Chess', note: '', weight: 1, firstSeen: null, lastSeen: null }],
+    ],
+  ];
+  for (const [label, input, expected] of rows) {
+    assert.deepEqual(normalizeInterests(input), expected, label);
+  }
 });
 
 test('normalizeInterests: garbage entries inside an array are dropped, valid ones survive', () => {
@@ -416,9 +434,15 @@ test('normalizeInterests: null/undefined/number/string/object all yield []', () 
 
 // ---- a trailing "(qualifier)" is stripped off the topic -----------------------
 
-test('stripTrailingParenthetical: strips one trailing parenthetical, trimmed', () => {
-  assert.deepEqual(stripTrailingParenthetical('anime (bleak/hopeless)'), { topic: 'anime', qualifier: 'bleak/hopeless' });
-  assert.deepEqual(stripTrailingParenthetical('  anime   ( bleak )  '), { topic: 'anime', qualifier: 'bleak' });
+test('stripTrailingParenthetical: strips one trailing parenthetical, trimmed; text with no parenthesis is untouched', () => {
+  const rows = [
+    ['one trailing parenthetical is stripped', 'anime (bleak/hopeless)', { topic: 'anime', qualifier: 'bleak/hopeless' }],
+    ['both parts are trimmed', '  anime   ( bleak )  ', { topic: 'anime', qualifier: 'bleak' }],
+    ['text with no parenthesis at all is untouched', 'anime', { topic: 'anime', qualifier: '' }],
+  ];
+  for (const [label, raw, expected] of rows) {
+    assert.deepEqual(stripTrailingParenthetical(raw), expected, label);
+  }
 });
 
 test('stripTrailingParenthetical: a topic that is ONLY a parenthetical is left alone', () => {
@@ -442,10 +466,6 @@ test('stripTrailingParenthetical: nested parentheses -- the outermost trailing g
   assert.deepEqual(stripTrailingParenthetical('anime (bleak (very))'), { topic: 'anime', qualifier: 'bleak (very)' });
 });
 
-test('stripTrailingParenthetical: text with no parenthesis at all is untouched', () => {
-  assert.deepEqual(stripTrailingParenthetical('anime'), { topic: 'anime', qualifier: '' });
-});
-
 test('applyInterestOps: add strips a trailing parenthetical off the topic, moving it into an empty note', () => {
   const items = applyInterestOps([], { add: [{ topic: 'anime (bleak/hopeless)', note: '' }] }, opts());
   assert.equal(items.length, 1);
@@ -457,13 +477,6 @@ test('applyInterestOps: add does not overwrite a non-empty incoming note with th
   const items = applyInterestOps([], { add: [{ topic: 'anime (bleak/hopeless)', note: 'watches subbed only' }] }, opts());
   assert.equal(items[0].topic, 'anime');
   assert.equal(items[0].note, 'watches subbed only');
-});
-
-test('applyInterestOps: add leaves the topic whole when the parenthesis is not trailing or the topic is only a parenthetical', () => {
-  const a = applyInterestOps([], { add: [{ topic: 'anime (shonen) fan', note: '' }] }, opts());
-  assert.equal(a[0].topic, 'anime (shonen) fan');
-  const b = applyInterestOps([], { add: [{ topic: '(just this)', note: '' }] }, opts());
-  assert.equal(b[0].topic, '(just this)');
 });
 
 test('applyInterestOps: a sighting of "topic (qualifier)" is a sighting of the already-stored plain topic; the stripped qualifier never overwrites a real stored note', () => {

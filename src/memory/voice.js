@@ -85,6 +85,17 @@ const MAX_BRIEFS = 3;
 // src/memory/update.js#applyMemoryUpdate's `self` list. The first three are exported for the
 // store's voice writes (src/memory/store.js#fillAffinityReason, #fillEpisodeFeeling,
 // #applySelfOps), so a voice text is cut at one limit wherever it is written.
+//
+// TODO: the constants below are copies waiting for their one home, which does not exist yet.
+// Once it does, import them from there, delete the copies here, and keep re-exporting
+// REASON_CHARS, FEELING_CHARS and SELF_CHARS for src/memory/store.js:
+//   REASON_CHARS                    -> src/memory/affinity.js#REASON_CHARS
+//   FEELING_CHARS, WHAT_CHARS,      -> src/memory/episodes.js#EPISODE_CHARS
+//     QUOTE_CHARS                      (`feeling`, `what`, `quote`)
+//   SELF_CHARS                      -> src/memory/text-limits.js#SELF_CHARS
+//   FIELD_CHARS .. CLAMP_TOLERANCE  -> src/memory/text-limits.js#MEMORY_LIMIT_DEFAULTS
+//                                      (`fieldChars`, `learnedChars`, `relationshipChars`,
+//                                      `maxNewEpisodes`, `maxDeltaPerUpdate`, `clampTolerance`)
 
 /** How long an attitude reason may be, in characters (before `memory.clampTolerance`). */
 export const REASON_CHARS = 200;
@@ -111,9 +122,13 @@ const ANSWER_ITEM_OVERHEAD = 8;
 // costlier rate, since the persona's language need not be written in Latin script.
 const NON_ASCII = '\u00e9';
 
+// TODO: a copy of src/memory/episodes.js#sanitizeEpisode's date rule; use
+// src/memory/episodes.js#episodeDate once episodes.js exports it, and delete this.
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 // src/memory/update.js#parseLearnedOps' teacher rule, the same two patterns: exactly one `<@id>`
 // token, or one `name (id:...)` reference (any name, several words, or none).
+// TODO: a copy; use src/memory/mentions.js#teacherToken (and its token pattern for cleanPayload)
+// once mentions.js exports it, and delete these two and `teacherOf`.
 const TEACHER_TOKEN_RE = new RegExp(`^<@(${ID_DIGITS})>$`);
 const TEACHER_REF_RE = new RegExp(`^[^()<>]*\\(id:(${ID_DIGITS})\\)$`);
 
@@ -137,6 +152,8 @@ function kindOn(kind, config) {
   return true;
 }
 
+// TODO: the rule is a copy of applyDelta's; use src/memory/affinity.js#deltaCapOf once
+// affinity.js exports it (keeping the 15 fallback here), and delete the copy.
 /** `relationships.maxDeltaPerUpdate` as src/memory/affinity.js#applyDelta applies it: the
  * fallback is update.js's (config.json's 15), a value that is not a number caps nothing. */
 function deltaCap(config) {
@@ -144,6 +161,8 @@ function deltaCap(config) {
   return Number.isFinite(cap) ? Math.abs(cap) : Infinity;
 }
 
+// TODO: a copy of isDuplicate's rule; use src/memory/episodes.js#isSameEpisode once episodes.js
+// exports it, and delete this.
 /** src/memory/episodes.js#isDuplicate's rule: the same date and `what` (each trimmed, whitespace
  * collapsed, lower-cased: src/memory/interests.js#normalizeTopic, the one text-identity helper),
  * or the same non-empty quote. */
@@ -155,6 +174,21 @@ function sameEpisode(a, b) {
 /** A finite number above 0, else `fallback`. */
 function positive(value, fallback) {
   return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+// TODO: a stand-in for src/llm/budget.js#requestTokenLimit(config), the same rule; import that
+// once budget.js exports it, and delete this.
+/**
+ * The input budget of a voice request, `floor(llm.maxRequestTokens * llm.safetyMargin)`, by the
+ * chat turn's rule (src/behavior/prompt.js#buildRequest): a margin that is not a number in
+ * (0, 1] counts as config.json's 0.9, a token cap that is not a positive number as its 50000.
+ * Taken raw, a null margin gave a limit of 0 (every request refused) and a missing one NaN
+ * (nothing trimmed).
+ */
+function inputLimit(config) {
+  const llm = isPlainObject(config?.llm) ? config.llm : {};
+  const margin = Number.isFinite(llm.safetyMargin) && llm.safetyMargin > 0 && llm.safetyMargin <= 1 ? llm.safetyMargin : 0.9;
+  return Math.floor(positive(llm.maxRequestTokens, 50000) * margin);
 }
 
 /** An integer of at least 1, else `fallback`. */
@@ -344,6 +378,7 @@ function present(value) {
   return typeof value === 'string' ? value.trim() !== '' : true;
 }
 
+// TODO: a copy; replace with src/memory/mentions.js#teacherToken (see TEACHER_TOKEN_RE).
 /** A lesson's teacher as a `<@id>` token, by src/memory/update.js#parseLearnedOps' rule (one
  * `<@id>` token or one `name (id:...)` reference, whatever the name, of an id `isKnownId`
  * accepts), so both analyzer modes keep the same teachers; else undefined. */
@@ -838,7 +873,8 @@ function answerPrices(limits, tolerance, calibrator) {
  *
  * Items are fitted in the order given (dueItems: oldest first) under two budgets, and one that
  * does not fit either is skipped (a later, smaller one may still go) and stays queued untouched:
- * the input, `floor(llm.maxRequestTokens * llm.safetyMargin)`; and the answer,
+ * the input, `floor(llm.maxRequestTokens * llm.safetyMargin)` (a margin that is not a number in
+ * (0, 1] counts as 0.9, a missing token cap as 50000, as for a chat turn); and the answer,
  * `memory.voice.maxOutputTokens` less the answer's own JSON. An item's answer is priced at the
  * longest text it may get back (its kind's limit x `memory.clampTolerance`, non-ASCII, plus its
  * JSON key), calibrated: an answer cut by the output cap fails every item sent with it, and the
@@ -884,8 +920,10 @@ export function buildVoiceRequest({ prompts, config, calibrator, items, selfName
   const widest = String(Math.max(1, list.length)).replace(/\d/g, '9');
   const drafts = views.map((view) => JSON.stringify({ id: widest, ...view }));
 
+  // TODO: a copy of the request builders' section cost; use src/llm/budget.js#sectionCost(calibrator)
+  // once budget.js exports it, and delete this.
   const cost = (text) => calibrator.apply(estimateTokens(text)) + 2;
-  const limit = Math.floor(config.llm.maxRequestTokens * config.llm.safetyMargin);
+  const limit = inputLimit(config);
   // The fixed part is required: alone over the cap it throws, and nothing can be sent.
   const { used } = fitSections(
     [{ name: 'fixed', required: true, items: [system, characterBlock, block('items', '[]')].filter(Boolean) }],
@@ -1042,8 +1080,12 @@ export function applyVoiceItems(worded, items, { config, tokenize = identity, ha
 /**
  * The degraded path of items that expired or overflowed: a feeling keeps stage A's tone (its
  * brief) as the feeling; a lesson and a self fact are stored from the brief; a reason is dropped
- * (stage A already moved the score, the stored reason stays); relationship, patterns and starters
- * are dropped (their stale markers bring them back), and so is an item of a member gone since.
+ * (stage A already moved the score; the stored reason, `affinity.reason`, is left as it was and
+ * nothing words this move later); relationship, patterns and starters are dropped and their
+ * stored texts stay as they were: no stale marker brings a dropped note back (the server notes
+ * have none; a relationship's, src/memory/affinity.js#relationshipStaleOf, fires on how far the
+ * score moved since its text was written, never because an item was dropped), so only a later
+ * batch that proposes the note again rewrites it. An item of a member gone since is dropped too.
  * An item of a kind whose feature is switched off now is counted `off` and never written. A
  * `character` item is never dropped: it comes back in `kept` for the caller to keep queued
  * (expireItems and mergeIntoQueue never hand one over). Texts are clamped like applyVoiceItems'.
