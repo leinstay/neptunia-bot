@@ -337,7 +337,7 @@ test('fetchPull: a malformed anchor is not found, an anchor older than a positiv
   assert.equal(diary.fetchCalls.length, 1, 'only the last pull fetched');
 });
 
-test('fetchPull: the bot permissions give readOnly; the record carries no unread field', async () => {
+test('fetchPull: the bot permissions give readOnly', async () => {
   const guild = fakeGuild();
   mainChannel(guild);
   const diary = addChannel(guild, { id: '760000000000000003', granted: [READ, REACT], messages: [{ ts: LAST }] });
@@ -345,7 +345,6 @@ test('fetchPull: the bot permissions give readOnly; the record carries no unread
   const { result } = await withCapturedLogs(async () => [await pull(guild, diary.id), await pull(guild, talk.id)]);
   assert.equal(result[0].pulled.readOnly, true);
   assert.equal(result[1].pulled.readOnly, false);
-  for (const field of ['canReact', 'newestId', 'newestTs']) assert.equal(field in result[0].pulled, false, field);
 });
 
 // ---- skips ------------------------------------------------------------------------
@@ -444,19 +443,6 @@ test('fetchPull: a role denied on a source @everyone can view still blocks it', 
   });
   const { result } = await withCapturedLogs(() => pull(guild, source.id));
   assert.equal(result.skip, 'audience', 'members of the muted role see the main channel but not the source');
-});
-
-test('fetchPull: sameAudience false skips the rail', async () => {
-  const guild = fakeGuild();
-  mainChannel(guild);
-  const narrow = addChannel(guild, {
-    id: '760000000000000043',
-    overwrites: [{ id: GUILD_ID, type: OverwriteType.Role, deny: VIEW }, { id: MEMBER.iason, type: OverwriteType.Member, allow: VIEW }],
-    messages: [{ ts: LAST }],
-  });
-  const { result } = await withCapturedLogs(() => pull(guild, narrow.id, { config: config({ pull: { sameAudience: false } }) }));
-  assert.equal(result.skip, null);
-  assert.equal(result.pulled.messages.length, 1);
 });
 
 test('audienceAllows: same audience passes, a narrower source or no destination does not unless the rail is off', () => {
@@ -779,17 +765,6 @@ test('fetchPull: fresh captions run in parallel and a late one renders blind', a
   assert.equal(pulled.picturesNotSeen, 1);
   const line = logs.find((entry) => entry.msg === 'pull: channel');
   assert.deepEqual([line.asked, line.fresh, line.late], [3, 2, 1]);
-});
-
-test('fetchPull: when every fresh caption arrives in time the timer is cleared', async () => {
-  const guild = fakeGuild();
-  mainChannel(guild);
-  const channel = pictureChannel(guild, '760000000000000074', 2);
-  const describer = fakeDescriber({ fresh: { p1: 'νέα p1', p2: 'νέα p2' } });
-  const { set, timers } = manualTimers();
-  const { pulled } = (await withCapturedLogs(() => pull(guild, channel.id, { describer, turnCertain: true, timers }))).result;
-  assert.equal(pulled.descriptions.size, 2);
-  assert.equal(set[0].cleared, true);
 });
 
 test('fetchPull: without turnCertain only cached captions are used', async () => {

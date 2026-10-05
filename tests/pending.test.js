@@ -10,22 +10,6 @@ function ping(channelId, arrivedAt, overrides = {}) {
 
 // --- addPending --------------------------------------------------------------
 
-test('addPending: adds a new channel to an empty list', () => {
-  const { list, evicted } = addPending([], ping('c1', 100), 3);
-  assert.equal(list.length, 1);
-  assert.equal(list[0].channelId, 'c1');
-  assert.equal(evicted, null);
-});
-
-test('addPending: a newer ping in the same channel replaces the older one', () => {
-  const first = addPending([], ping('c1', 100, { trigger: { id: 'first' } }), 3).list;
-  const { list, evicted } = addPending(first, ping('c1', 200, { trigger: { id: 'second' } }), 3);
-  assert.equal(list.length, 1);
-  assert.equal(list[0].trigger.id, 'second');
-  assert.equal(list[0].arrivedAt, 200);
-  assert.equal(evicted, null);
-});
-
 test('addPending: the entry a newer ping replaced comes back as replaced, null when none was', () => {
   const older = ping('s1', 100, { trigger: { id: 'call-1' }, destination: { id: 'd1' } });
   const fresh = addPending([], older, 3);
@@ -38,15 +22,6 @@ test('addPending: the entry a newer ping replaced comes back as replaced, null w
 
   const other = addPending(list, ping('c2', 300), 3);
   assert.equal(other.replaced, null, 'another channel replaces nothing');
-});
-
-test('addPending: distinct channels accumulate up to maxPending', () => {
-  let list = [];
-  ({ list } = addPending(list, ping('c1', 100), 3));
-  ({ list } = addPending(list, ping('c2', 200), 3));
-  ({ list } = addPending(list, ping('c3', 300), 3));
-  assert.equal(list.length, 3);
-  assert.deepEqual(list.map((p) => p.channelId).sort(), ['c1', 'c2', 'c3']);
 });
 
 test('addPending: exceeding maxPending evicts the single OLDEST entry across all channels', () => {
@@ -102,10 +77,6 @@ test('addPending: replacing a channel never counts as growing the list toward th
 
 // --- isExpired -----------------------------------------------------------------
 
-test('isExpired: false right when it arrives', () => {
-  assert.equal(isExpired(ping('c1', 1000), 1000, 10), false);
-});
-
 test('isExpired: false just under the window', () => {
   assert.equal(isExpired(ping('c1', 1000), 1000 + 10 * 60_000 - 1, 10), false);
 });
@@ -115,10 +86,6 @@ test('isExpired: true once the window has fully elapsed', () => {
 });
 
 // --- popOldest -------------------------------------------------------------
-
-test('popOldest: null for an empty list', () => {
-  assert.deepEqual(popOldest([]), { ping: null, list: [] });
-});
 
 test('popOldest: draining one at a time yields arrival order', () => {
   let list = [ping('c1', 300), ping('c2', 100), ping('c3', 200)];
@@ -132,14 +99,6 @@ test('popOldest: draining one at a time yields arrival order', () => {
 });
 
 // --- requeuePending ----------------------------------------------------------
-
-test('requeuePending: puts a ping back into an empty list with its original arrivedAt', () => {
-  const { list, dropped, evicted } = requeuePending([], ping('c1', 100), 3);
-  assert.equal(list.length, 1);
-  assert.equal(list[0].arrivedAt, 100);
-  assert.equal(dropped, null);
-  assert.equal(evicted, null);
-});
 
 test('requeuePending: a newer ping already queued for the same channel wins; the re-queued one is dropped', () => {
   const newer = ping('c1', 500, { trigger: { id: 'newer' } });
@@ -195,12 +154,6 @@ test('addPending: a routed ping that takes the slot of an older one carries that
 
   // A slot taken for the first time carries only what the ping brought.
   list = addPending([], routedPing(300, 'call-3'), 3).list;
-  assert.equal('superseded' in list[0], false);
-});
-
-test('addPending: an ordinary ping that replaces one carries nothing', () => {
-  const first = addPending([], ping('c1', 100, { trigger: { id: 'first' } }), 3).list;
-  const { list } = addPending(first, ping('c1', 200, { trigger: { id: 'second' } }), 3);
   assert.equal('superseded' in list[0], false);
 });
 

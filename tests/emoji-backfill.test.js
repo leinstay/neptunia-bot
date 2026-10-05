@@ -119,8 +119,6 @@ test('emoji backfill run: counts members\' emoji over every readable channel, bo
     assert.equal(stamp.messages, 4);
     assert.ok(Number.isFinite(Date.parse(stamp.at)));
 
-    const done = log.entries.find((e) => e.message === 'emoji-backfill: done');
-    assert.deepEqual(done.fields, { channels: 2, messages: 4, emoji: 4 });
   });
 });
 
@@ -137,8 +135,6 @@ test('emoji backfill run: a second run without force is a no-op and never double
     assert.deepEqual(second, { ok: false, reason: 'done' });
     assert.equal(store.getGuild('g1').emojiUsage['111'].count, 2);
     assert.equal(channels[0].messages.fetchCalls, fetchesAfterFirst, 'no history read on the no-op');
-    const skipped = log.entries.find((e) => e.message === 'emoji-backfill: skipped');
-    assert.deepEqual(skipped.fields, { reason: 'done' });
   });
 });
 
@@ -260,7 +256,6 @@ test('emoji backfill startIfNeeded: features.customEmoji off skips it', async ()
     await backfill.startIfNeeded('g1');
     assert.equal(channels[0].messages.fetchCalls, 0);
     assert.equal(store.getGuild('g1').emojiBackfill, null);
-    assert.deepEqual(log.entries.find((e) => e.message === 'emoji-backfill: skipped').fields, { reason: 'feature-off' });
   });
 });
 

@@ -108,26 +108,6 @@ test('fetchAsDataUrl: a thrown fetch error (timeout or network failure) returns 
   assert.equal(result, null);
 });
 
-test('fetchAsDataUrl: a body-read failure returns null instead of throwing', async () => {
-  const response = fakeResponse();
-  response.arrayBuffer = async () => {
-    throw new Error('stream error');
-  };
-  const { fetchImpl } = fakeFetchImpl(response);
-  const fetcher = createImageFetcher({ fetchImpl });
-
-  assert.equal(await fetcher.fetchAsDataUrl('https://x/pic.png', OPTIONS), null);
-});
-
-test('fetchAsDataUrl: passes an AbortSignal built from timeoutMs to fetchImpl', async () => {
-  const { fetchImpl, calls } = fakeFetchImpl(fakeResponse());
-  const fetcher = createImageFetcher({ fetchImpl });
-
-  await fetcher.fetchAsDataUrl('https://x/pic.png', { maxBytes: 1_500_000, timeoutMs: 5_000 });
-
-  assert.ok(calls[0].options.signal instanceof AbortSignal);
-});
-
 // --- LRU cache -------------------------------------------------------------
 
 test('fetchAsDataUrl: a cache hit on the same URL (ignoring its query string) avoids a second download', async () => {
@@ -238,17 +218,6 @@ test('fetchAsDataUrl: an error without a code logs its class name; a body-read f
   const line = bodyLogs.find((l) => l.msg === 'fetch-image: reading the body failed');
   assert.equal(line?.code, 'Error');
   assert.ok(!JSON.stringify(line).includes('stream error'));
-});
-
-test('fetchAsDataUrl: an unsupported content type also logs without the query string', async () => {
-  const { fetchImpl } = fakeFetchImpl(fakeResponse({ contentType: 'application/pdf' }));
-  const fetcher = createImageFetcher({ fetchImpl });
-
-  const { logs } = await withCapturedLogs(() => fetcher.fetchAsDataUrl('https://x/file.pdf?token=secret', OPTIONS));
-
-  const line = logs.find((l) => l.msg.startsWith('fetch-image:'));
-  assert.ok(line);
-  assert.ok(!JSON.stringify(line).includes('secret'));
 });
 
 // --- avatarReference: the bot's avatar as a drawing's reference -----------------

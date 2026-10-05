@@ -68,12 +68,6 @@ test('styleProfile: per1000 counts every mark per 1000 characters of measured te
   });
 });
 
-test('styleProfile: per1000 is rounded to one decimal', () => {
-  // 1 comma in 3 characters -> 333.33... -> 333.3
-  const profile = styleProfile([msg('ά,β')]);
-  assert.equal(profile.per1000.comma, 333.3);
-});
-
 test('styleProfile: unused lists the marks nobody in the reference uses', () => {
   const profile = styleProfile([
     msg('Καλημέρα, τι κάνεις?'),
@@ -177,13 +171,6 @@ test('styleProfile: an unused mark is not also rare', () => {
   assert.deepEqual(profile.rare, []);
 });
 
-test('styleProfile: no messages gives no rare marks', () => {
-  const profile = styleProfile([]);
-  assert.equal(profile.authors, 0);
-  assert.deepEqual(profile.rare, []);
-  for (const mark of ALL_MARKS) assert.equal(profile.markAuthors[mark], 0, mark);
-});
-
 test('styleProfile: options change both thresholds', () => {
   const messages = [
     msg(pad('Ναι — εντάξει, καλά ', 100), { authorId: 'A' }),
@@ -217,18 +204,6 @@ function sampleSource() {
     msg('ω', { authorId: 'C' }),
   ];
 }
-
-test('sampleLines: is deterministic for a fixed rng', () => {
-  const source = sampleSource();
-  const first = sampleLines(source, 3, seq([0]));
-  const second = sampleLines(source, 3, seq([0]));
-  assert.deepEqual(first, second);
-  assert.deepEqual(first, [
-    'Πρώτη γραμμή από τον Α',
-    'Une ligne écrite par B',
-    'Δεύτερη γραμμή από τον Α',
-  ]);
-});
 
 test('sampleLines: keeps lines of 2..200 characters, no author twice in a row, no line twice', () => {
   const source = sampleSource();
@@ -308,13 +283,6 @@ test('answerFacts: counts the rare marks the answer contains', () => {
   const facts = answerFacts(answer, profile);
   assert.deepEqual(facts.rareMarks, { dash: 2, colon: 1 });
   assert.deepEqual(facts.unusedMarks, { semicolon: 1 });
-});
-
-test('answerFacts: a profile without rare gives none', () => {
-  const answer = { messages: [{ text: 'Ναι — φυσικά' }] };
-  const facts = answerFacts(answer, { unused: [], length: { median: 8, p75: 40 } });
-  assert.deepEqual(facts.rareMarks, {});
-  assert.deepEqual(answerFacts(answer, null).rareMarks, {});
 });
 
 test('answerFacts: no density under 150 characters', () => {

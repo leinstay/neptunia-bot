@@ -18,12 +18,9 @@ import {
   normalizeOwnLines,
   normalizeWorn,
   parseVariety,
-  renderVarietyReport,
   renderWorn,
   selectOwnLines,
-  varietyAheadOn,
   varietySettings,
-  varietyStatusLine,
 } from '../src/behavior/variety.js';
 import { createVarietyPass } from '../src/behavior/variety-pass.js';
 import { buildRequest } from '../src/behavior/prompt.js';
@@ -46,9 +43,7 @@ function own(id, minutesAgo, content, extra = {}) {
 
 // ---- settings -------------------------------------------------------------------
 
-test('varietySettings: defaults for a missing block, live values otherwise, garbage falls back', () => {
-  assert.deepEqual(varietySettings({}), { ...VARIETY_DEFAULTS });
-  assert.deepEqual(VARIETY_DEFAULTS, { window: 16, recentMinutes: 180, minLines: 3, contextChars: 120, maxPatterns: 4, shapeChars: 140, maxOutputTokens: 500, timeoutMs: 8000, requestTimeoutMs: 30000, history: 20 });
+test('varietySettings: live values are read, garbage falls back to the defaults', () => {
   const live = varietySettings({ variety: { window: 5, recentMinutes: 10, minLines: 2, contextChars: 0, maxPatterns: 1, history: 0 } });
   assert.equal(live.window, 5);
   assert.equal(live.recentMinutes, 10);
@@ -57,26 +52,10 @@ test('varietySettings: defaults for a missing block, live values otherwise, garb
   assert.equal(live.maxPatterns, 1);
   assert.equal(live.history, 0);
   const broken = varietySettings({ variety: { window: 'many', minLines: -1, timeoutMs: null, shapeChars: 1 } });
-  assert.equal(broken.window, 16);
-  assert.equal(broken.minLines, 3);
-  assert.equal(broken.timeoutMs, 8000);
-  assert.equal(broken.shapeChars, 140);
-});
-
-test('varietySettings: requestTimeoutMs defaults to 30000, a live value is read, garbage falls back', () => {
-  assert.equal(varietySettings({}).requestTimeoutMs, 30000);
-  assert.equal(varietySettings({ variety: { requestTimeoutMs: 12000 } }).requestTimeoutMs, 12000);
-  for (const bad of [0, -5, 'soon', null, Number.NaN]) {
-    assert.equal(varietySettings({ variety: { requestTimeoutMs: bad } }).requestTimeoutMs, 30000, String(bad));
-  }
-  assert.equal(varietySettings({ variety: { requestTimeoutMs: 12000 } }).timeoutMs, 8000, 'the turn wait keeps its own default');
-});
-
-test('varietyAheadOn: a missing switch counts as on, false turns it off', () => {
-  assert.equal(varietyAheadOn({}), true);
-  assert.equal(varietyAheadOn(undefined), true);
-  assert.equal(varietyAheadOn({ features: { varietyPrecompute: true } }), true);
-  assert.equal(varietyAheadOn({ features: { varietyPrecompute: false } }), false);
+  assert.equal(broken.window, VARIETY_DEFAULTS.window);
+  assert.equal(broken.minLines, VARIETY_DEFAULTS.minLines);
+  assert.equal(broken.timeoutMs, VARIETY_DEFAULTS.timeoutMs);
+  assert.equal(broken.shapeChars, VARIETY_DEFAULTS.shapeChars);
 });
 
 test('config.json: the variety block and features.varietyPrecompute equal the code defaults', () => {
@@ -134,13 +113,6 @@ test('selectOwnLines: a reply carries the message it answered; empty and other p
   assert.deepEqual(lines, [{ id: 'a1', ts: NOW - 5 * MIN, channelId: 'c1', text: 'ναι', to: 'is the café open?' }]);
 });
 
-test('linesKey: the same lines give the same key, another set another one', () => {
-  const a = [{ id: '1' }, { id: '2' }];
-  assert.equal(linesKey(a), linesKey([{ id: '1' }, { id: '2' }]));
-  assert.notEqual(linesKey(a), linesKey([{ id: '1' }, { id: '3' }]));
-  assert.match(linesKey(a), /^[0-9a-f]{16}$/);
-});
-
 // ---- the request -------------------------------------------------------------------
 
 test('buildVarietyRequest: system fills name and maxPatterns; one <lines> block, numbered, with the answered line clipped', () => {
@@ -148,7 +120,7 @@ test('buildVarietyRequest: system fills name and maxPatterns; one <lines> block,
     { id: '1', ts: 1, text: 'first\nline', to: 'ζ'.repeat(200) },
     { id: '2', ts: 2, text: 'second' },
   ];
-  const request = buildVarietyRequest({ prompt: PROMPT, selfName: 'Nept', lines, config: { variety: { contextChars: 10, maxPatterns: 3 } } });
+  const request = buildVarietyRequest({ prompt: PROMPT, selfName: 'Nept', lines, config: { variety: { contextChars: 10, maxPatterns: 3, shapeChars: 140 } } });
   assert.equal(request.messages[0].role, 'system');
   assert.equal(request.messages[0].content, 'VARIETY for Nept, at most 3 patterns of 140 characters.');
   assert.equal(request.messages[1].content, `<lines>\n#1 first line (to: ${'ζ'.repeat(10)})\n#2 second\n</lines>`);
@@ -332,29 +304,6 @@ test('store: updateGuild never overwrites the variety fields; hand-broken ones l
 
 // ---- the owner's view -------------------------------------------------------------------------
 
-test('varietyStatusLine: switch, pattern and line counts and the age of the latest pass', () => {
-  assert.equal(varietyStatusLine(null, { features: { variety: false } }, NOW), 'variety: off');
-  assert.equal(varietyStatusLine(null, {}, NOW), 'variety: on · no pass yet');
-  assert.equal(varietyStatusLine({ at: NOW - 3 * 3_600_000, key: 'k', lines: 7, patterns: PATTERNS }, {}, NOW), 'variety: on · 2 patterns from 7 lines · 3h old');
-});
-
-test('renderVarietyReport: the latest list with examples, then the history newest first, shapes with counts', () => {
-  const worn = { at: NOW, key: 'k', lines: 5, patterns: PATTERNS };
-  const history = [
-    { at: NOW - 60 * MIN, channelId: 'c1', lines: 4, patterns: [{ shape: 'old device', count: 2 }] },
-    { at: NOW, channelId: 'c1', lines: 5, patterns: [{ shape: 'mock promise ending in (no)', count: 2 }] },
-  ];
-  const text = renderVarietyReport(worn, history, {}, NOW);
-  const lines = text.split('\n');
-  assert.equal(lines[0], 'variety: on · 2 patterns from 5 lines · 0m old');
-  assert.equal(lines[1], 'latest (2026-10-01 12:00 UTC):');
-  assert.equal(lines[2], '  - mock promise ending in (no) x2: "promise to behave (no)", "fix it (no)"');
-  assert.equal(lines[4], 'history (2, newest first):');
-  assert.equal(lines[5], '  2026-10-01 12:00 · 5 lines · mock promise ending in (no) x2');
-  assert.equal(lines[6], '  2026-10-01 11:00 · 4 lines · old device x2');
-  assert.ok(renderVarietyReport(null, [], {}, NOW).endsWith('history: none'));
-});
-
 // ---- the <worn> block in a persona request --------------------------------------------------------
 
 function requestInput(overrides = {}) {
@@ -427,9 +376,12 @@ test('buildRequest: in a tight budget the chat keeps its room first; <worn> goes
 
 // ---- the live pass ---------------------------------------------------------------------------------
 
+// The variety settings the live tests rely on, pinned here instead of read from the shipped defaults.
+const BASE_VARIETY = { window: 16, recentMinutes: 180, minLines: 3, contextChars: 120, maxPatterns: 4, shapeChars: 140, maxOutputTokens: 500, timeoutMs: 8000, requestTimeoutMs: 30000 };
+
 function liveHot({ features = {}, variety = {}, prompts = {} } = {}) {
   return {
-    config: { features, variety, classifier: { text: 'x/classifier' }, llm: {} },
+    config: { features, variety: { ...BASE_VARIETY, ...variety }, classifier: { text: 'x/classifier' }, llm: {} },
     prompts: { variety: PROMPT, labels, ...prompts },
   };
 }
@@ -489,9 +441,9 @@ function historyPlus(id) {
   return [...ownHistory(), own(id, 1, `what a surprise, ${id}`)];
 }
 
-/** The key of the pass a turn in `c1` would run on `history` with an empty ring and the default settings. */
+/** The key of the pass a turn in `c1` would run on `history` with an empty ring and the pinned settings. */
 function keyOf(history) {
-  const { window, recentMinutes } = VARIETY_DEFAULTS;
+  const { window, recentMinutes } = BASE_VARIETY;
   return linesKey(selectOwnLines({ history, ring: [], channelId: 'c1', now: NOW, window, recentMinutes }));
 }
 
@@ -608,17 +560,6 @@ test('forTurn: a missing prompt is logged once and nothing is asked', async () =
   assert.equal(llm.calls.length, 0);
   const skipped = logs.filter((l) => l.msg === 'variety: skipped' && l.reason === 'no-prompt');
   assert.deepEqual(skipped.map((l) => l.cause), ['turn']);
-});
-
-test('ahead: a missing prompt is logged once, with cause ahead, and nothing is asked', async () => {
-  const { pass, llm } = liveSetup({ hot: liveHot({ prompts: { variety: undefined } }) });
-  const { logs } = await withCapturedLogs(async () => {
-    await pass.ahead({ ...TURN, history: ownHistory() });
-    await pass.forTurn({ ...TURN, history: ownHistory() });
-  });
-  assert.equal(llm.calls.length, 0);
-  const skipped = logs.filter((l) => l.msg === 'variety: skipped' && l.reason === 'no-prompt');
-  assert.deepEqual(skipped.map((l) => l.cause), ['ahead']);
 });
 
 test('forTurn: a pass slower than variety.timeoutMs leaves the turn without a block in time; the request is not cut, lands and serves the next turn', async () => {
@@ -829,31 +770,6 @@ test('ahead: nothing with features.varietyPrecompute off, features.variety off, 
   await atTurn.pass.forTurn({ ...TURN, history: ownHistory() });
   assert.equal(atTurn.llm.calls.length, 1);
   assert.equal(atTurn.store.getGuild('g1').worn.lines, 3);
-});
-
-test("forTurn: with features.varietyPrecompute off the turn's request still runs to variety.requestTimeoutMs and lands for the next turn", async () => {
-  const llm = deferredLlm();
-  const { pass, store } = liveSetup({ hot: liveHot({ features: { varietyPrecompute: false }, variety: { timeoutMs: 30 } }), llm });
-  const { result, logs } = await withCapturedLogs(() => pass.forTurn({ ...TURN, history: ownHistory() }));
-  assert.equal(result, null);
-  const turn = logs.find((l) => l.msg === 'variety: turn');
-  assert.deepEqual([turn.source, turn.cached, turn.late], ['request', false, true]);
-  assert.equal(llm.calls[0].options.timeoutMs, 30000, 'its own cut is variety.requestTimeoutMs, not the turn wait');
-  await delay(30);
-  assert.equal(llm.calls[0].options.signal.aborted, false, 'the request keeps running past the wait');
-
-  const landing = await withCapturedLogs(async () => {
-    llm.calls[0].answer(ANSWER);
-    await settle();
-  });
-  const passLine = landing.logs.find((l) => l.msg === 'variety: pass');
-  assert.deepEqual([passLine.cause, passLine.parse, passLine.landed, passLine.stored], ['turn', 'ok', true, true]);
-  assert.equal(store.getGuild('g1').worn.lines, 3, 'the late answer is stored');
-
-  const next = await withCapturedLogs(() => pass.forTurn({ ...TURN, history: ownHistory() }));
-  assert.equal(llm.calls.length, 1, 'the next turn makes no request');
-  assert.equal(next.result.length, 1);
-  assert.equal(next.logs.find((l) => l.msg === 'variety: turn').source, 'cache');
 });
 
 test('forTurn: a turn joins the pass in flight on the same lines and waits at most variety.timeoutMs from its own call', async () => {

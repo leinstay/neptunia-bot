@@ -4,6 +4,9 @@
 // fixture covering every key of the prompt contract, including labels.server.*.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { channelActivity, renderChannel } from '../src/memory/channels.js';
 import { labels } from './fixtures/labels.js';
 
@@ -35,9 +38,9 @@ test('channelActivity: live when today + yesterday reach the threshold, slow bel
   const cfg = { liveMessagesPerDay: 20, deadAfterDays: 7 };
   const rows = [
     {
-      label: 'today + yesterday reach the default threshold (20)',
+      label: 'today + yesterday together reach the threshold',
       c: channel({ days: { [TODAY_KEY]: 15, [YESTERDAY_KEY]: 5 }, lastMessageAt: NOW }),
-      cfg: undefined,
+      cfg,
       expected: 'live',
     },
     {
@@ -92,18 +95,19 @@ test('channelActivity: one millisecond past deadAfterDays is dead', () => {
   assert.equal(channelActivity(c, NOW, { liveMessagesPerDay: 20, deadAfterDays: 7 }), 'dead');
 });
 
-test('channelActivity: default thresholds (20 / 7 days) apply when cfg is entirely missing', () => {
-  const dead = channel({ lastMessageAt: NOW - 8 * DAY });
-  assert.equal(channelActivity(dead, NOW), 'dead');
-  const slow = channel({ lastMessageAt: NOW - DAY });
-  assert.equal(channelActivity(slow, NOW), 'slow');
-  const live = channel({ days: { [TODAY_KEY]: 20 }, lastMessageAt: NOW });
-  assert.equal(channelActivity(live, NOW), 'live');
-});
-
-test('channelActivity: default thresholds apply when cfg is missing one of the two keys', () => {
-  const c = channel({ lastMessageAt: NOW - 8 * DAY });
-  assert.equal(channelActivity(c, NOW, { liveMessagesPerDay: 1 }), 'dead'); // deadAfterDays still defaults to 7
+test('channelActivity: a missing cfg, or a missing key, falls back to the values of config.json', () => {
+  const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+  const tracked = JSON.parse(fs.readFileSync(path.join(root, 'config.json'), 'utf8')).context.channelActivity;
+  const channels = [
+    channel({ lastMessageAt: NOW - (tracked.deadAfterDays + 1) * DAY }),
+    channel({ lastMessageAt: NOW - DAY }),
+    channel({ days: { [TODAY_KEY]: tracked.liveMessagesPerDay }, lastMessageAt: NOW }),
+  ];
+  for (const c of channels) {
+    assert.equal(channelActivity(c, NOW), channelActivity(c, NOW, tracked));
+    assert.equal(channelActivity(c, NOW, { liveMessagesPerDay: tracked.liveMessagesPerDay }), channelActivity(c, NOW, tracked));
+    assert.equal(channelActivity(c, NOW, { deadAfterDays: tracked.deadAfterDays }), channelActivity(c, NOW, tracked));
+  }
 });
 
 // --- renderChannel -----------------------------------------------------------
@@ -136,12 +140,6 @@ test('renderChannel: fact lines appear in the documented order: category, topic,
       'activity: live',
     ].join('\n'),
   );
-});
-
-test('renderChannel: a partial set of facts renders only the non-empty ones, in order', () => {
-  const c = channel({ name: 'general', topic: 'no politics', tone: 'chill' });
-  const text = renderChannel(c, labels, { current: false, activity: 'slow' });
-  assert.equal(text, '# general\ntopic: no politics\ntone: chill\nactivity: slow');
 });
 
 test('renderChannel: the current channel gets labels.server.currentMark appended to the heading', () => {

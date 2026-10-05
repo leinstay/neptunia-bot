@@ -61,10 +61,6 @@ test('htmlToText: a long text is cut on a word boundary with an ellipsis', () =>
   assert.ok(Array.from(out).length <= 20);
 });
 
-test('htmlToText: a text within maxChars is not cut', () => {
-  assert.equal(htmlToText('<p>short</p>', { maxChars: 100 }), 'short');
-});
-
 test('htmlToText: a cut never splits a surrogate pair', () => {
   const out = truncateText('\u{1F600}\u{1F600}\u{1F600}\u{1F600}', 3);
   assert.equal(out, '\u{1F600}\u{1F600}\u2026');

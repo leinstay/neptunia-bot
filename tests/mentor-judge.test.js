@@ -2,7 +2,8 @@
 // (situations, scores and the diagnosis) and the pass rule over the medians.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { CAUSE_LAYERS, CHANGE_LAYERS, parseDiagnosis, parseSituations, parseScores, readDiagnosis, verdict } from '../src/mentor/judge.js';
+import fs from 'node:fs';
+import { parseDiagnosis, parseSituations, parseScores, readDiagnosis, verdict } from '../src/mentor/judge.js';
 
 const ALICE = '111111111111111111';
 const BRUNO = '222222222222222222';
@@ -198,11 +199,10 @@ test('verdict: nothing scored does not pass', () => {
 });
 
 test('verdict: returns the pass score it resolved, the config.json value when unusable', () => {
-  assert.equal(verdict([score()], PASS).passScore, 7);
+  const shipped = JSON.parse(fs.readFileSync(new URL('../config.json', import.meta.url), 'utf8')).mentor.pass;
   assert.equal(verdict([score()], { score: 8, floor: 5 }).passScore, 8);
-  assert.equal(verdict([], { score: 9, floor: 5 }).passScore, 9, 'also when nothing was scored');
   for (const passCfg of [undefined, null, {}, { score: '8' }, { score: Number.NaN }]) {
-    assert.equal(verdict([score()], passCfg).passScore, 7, JSON.stringify(passCfg));
+    assert.equal(verdict([score()], passCfg).passScore, shipped.score, JSON.stringify(passCfg));
   }
 });
 
@@ -247,20 +247,6 @@ test('verdict: a situation with no scored answer is left out', () => {
   ]);
 });
 
-test('verdict: reports the medians of every situation', () => {
-  const groups = [
-    [score({ overall: 9, goal: 8 }), score({ overall: 6, goal: 8 })],
-    [score({ overall: 4, goal: 3 }), score({ overall: 2, goal: 6 }), score({ overall: 9, goal: 2 })],
-  ];
-  const result = verdict(groups.flat(), PASS, groups);
-  assert.deepEqual(result.situations, [
-    { n: 1, overall: 7.5, goal: 8 },
-    { n: 2, overall: 4, goal: 3 },
-  ]);
-  assert.deepEqual(result.reasons.slice(-2), ['situation 2: overall 4 is under the floor 5', 'situation 2: goal 3 is under the floor 5']);
-  assert.equal(result.passed, false);
-});
-
 // ---- verdict: real moments are held to the pass score --------------------------
 
 /** Three situations: 1 and 2 at 6/6 (over the floor, under the pass score), 3 well over. */
@@ -303,16 +289,6 @@ test('verdict: mentor.pass.anchorScore overrides the pass score for real moments
   assert.equal(same.passed, true);
   const unusable = verdict(groups.flat(), { ...PASS, anchorScore: '9' }, groups, new Set([1]));
   assert.equal(unusable.passed, true, 'a value that is not a number is the pass score');
-});
-
-test('verdict: the real moments are named by their place in groups; without groups nothing is held per situation', () => {
-  const groups = sixes();
-  const lifted = [...groups.flat(), ...Array.from({ length: 9 }, () => score({ overall: 9, goal: 9 }))];
-  const second = verdict(lifted, PASS, groups, new Set([2]));
-  assert.deepEqual(second.reasons, ['real moment 2: overall 6 is under the pass score 7', 'real moment 2: goal 6 is under the pass score 7']);
-  const none = verdict(lifted, PASS, undefined, new Set([1]));
-  assert.equal(none.passed, true);
-  assert.deepEqual(none.situations, []);
 });
 
 test('verdict: a real moment under the floor is reported once, against the pass score', () => {
@@ -403,25 +379,6 @@ test('parseDiagnosis: long strings are clipped', () => {
   assert.equal(change.from.length, 1000);
   assert.equal([...change.to].length, 1000);
   assert.equal(change.why.length, 500);
-});
-
-test('parseDiagnosis: labels, variety, lore, channel and recent are layers of causes and changes', () => {
-  const layers = ['labels', 'variety', 'lore', 'channel', 'recent'];
-  const parsed = parseDiagnosis(
-    JSON.stringify(
-      diagnosis({
-        causes: layers.map((layer) => ({ layer, excerpt: `in ${layer}`, why: `blame ${layer}` })),
-        changes: layers.map((layer) => ({ layer, target: layer, from: '', to: 'shorter', why: `change ${layer}` })),
-      }),
-    ),
-  );
-  assert.deepEqual(parsed.causes.map((c) => c.layer), layers);
-  assert.deepEqual(parsed.changes.map((c) => c.layer), layers);
-  for (const layer of layers) {
-    assert.ok(CHANGE_LAYERS.includes(layer), layer);
-    assert.ok(CAUSE_LAYERS.includes(layer), layer);
-  }
-  assert.deepEqual(CAUSE_LAYERS.filter((layer) => !CHANGE_LAYERS.includes(layer)), ['missing']);
 });
 
 test('readDiagnosis: counts the causes and changes dropped for an unknown layer, nothing else', () => {

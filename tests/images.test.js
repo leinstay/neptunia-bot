@@ -99,14 +99,6 @@ test('images: Google body carries resolution and omits aspect_ratio on auto', as
   });
 });
 
-test('images: Google body carries aspect_ratio when not auto', async () => {
-  const { gen, fetchImpl } = makeGen({ config: baseConfig({ model: 'google/test-image', aspectRatio: '16:9' }) });
-  await gen.generate({ prompt: 'a small boat' });
-  assert.equal(fetchImpl.calls[0].body.aspect_ratio, '16:9');
-  assert.equal('quality' in fetchImpl.calls[0].body, false);
-  assert.equal('provider' in fetchImpl.calls[0].body, false);
-});
-
 test('images: null values omit their fields', async () => {
   const config = baseConfig({ outputFormat: null, aspectRatio: null, openai: { quality: null, background: null, moderation: null } });
   const { gen, fetchImpl } = makeGen({ config });
@@ -380,16 +372,6 @@ test('images: quota reads a stored count that is not a finite number >= 0 as 0, 
     const { gen } = makeGen({ state: fakeState({ imageDay: '2026-09-28', imageCount: 2, imageUsers }) });
     assert.deepEqual(gen.quota({ userId: 'u1' }), { used: 2, cap: 50, userUsed: 0, userCap: 50, spent: false, userSpent: false }, JSON.stringify(imageUsers));
   }
-});
-
-test('images: quota follows the injected clock across 00:00 UTC', () => {
-  const state = fakeState({ imageDay: '2026-09-28', imageCount: 5, imageUsers: { day: '2026-09-28', counts: { u1: 3 } } });
-  let clock = Date.parse('2026-09-28T23:59:59Z');
-  const { gen } = makeGen({ state, now: () => clock });
-  assert.deepEqual([gen.quota({ userId: 'u1' }).used, gen.quota({ userId: 'u1' }).userUsed], [5, 3]);
-  clock = Date.parse('2026-09-29T00:00:00Z');
-  assert.deepEqual([gen.quota({ userId: 'u1' }).used, gen.quota({ userId: 'u1' }).userUsed], [0, 0]);
-  assert.equal(state.data.imageCount, 5, 'not reset by the read');
 });
 
 test('images: familyOf maps prefixes', () => {

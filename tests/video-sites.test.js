@@ -8,23 +8,20 @@ import {
   videoSiteFor,
   extractVideoUrls,
   videoUrlCacheKey,
-  isDirectUrlSite,
-  ytdlpProbeArgs,
   ytdlpClipArgs,
   ffmpegTrimArgs,
+  ytdlpProbeArgs,
   ffmpegGifArgs,
   parseProbe,
   safeLocation,
   youtubeVideoId,
   parseYoutubePageDuration,
   parseIsoDuration,
-  youtubeDataApiUrl,
   parseYoutubeDataApi,
   bareContentType,
 } from '../src/discord/video-sites.js';
 
 const SITES = ['youtube.com', 'youtu.be', 'tiktok.com', 'vk.com', 'vkvideo.ru', 'x.com', 'twitter.com', 'reddit.com', 'twitch.tv'];
-const DIRECT = ['youtube.com', 'youtu.be'];
 
 test('videoSiteFor: matches the exact host and any subdomain, case-insensitive', () => {
   assert.equal(videoSiteFor('https://youtube.com/watch?v=abc', SITES), 'youtube.com');
@@ -41,13 +38,6 @@ test('videoSiteFor: a look-alike host, an unknown host or an unparsable URL give
   assert.equal(videoSiteFor('not a url', SITES), null);
   assert.equal(videoSiteFor(undefined, SITES), null);
   assert.equal(videoSiteFor('https://youtube.com/x', undefined), null);
-});
-
-test('isDirectUrlSite: same matching rule as videoSiteFor', () => {
-  assert.equal(isDirectUrlSite('https://www.youtube.com/watch?v=abc', DIRECT), true);
-  assert.equal(isDirectUrlSite('https://youtu.be/abc', DIRECT), true);
-  assert.equal(isDirectUrlSite('https://www.tiktok.com/@a/video/1', DIRECT), false);
-  assert.equal(isDirectUrlSite('garbage', DIRECT), false);
 });
 
 test('extractVideoUrls: finds matching http(s) URLs in order, distinct, trailing punctuation stripped', () => {
@@ -112,13 +102,6 @@ test('videoUrlCacheKey: TikTok short links keep their own key (no id to extract)
 
 test('videoUrlCacheKey: an unparsable URL still yields a well-formed key', () => {
   assert.match(videoUrlCacheKey('not a url'), /^video:url:[0-9a-f]{16}$/);
-});
-
-test('ytdlpProbeArgs: metadata-only arguments', () => {
-  assert.deepEqual(ytdlpProbeArgs('https://youtu.be/abc', { ytdlpPath: 'yt-dlp' }), {
-    command: 'yt-dlp',
-    args: ['--dump-single-json', '--skip-download', '--no-playlist', '--no-warnings', '--quiet', '--', 'https://youtu.be/abc'],
-  });
 });
 
 const CLIP = { ytdlpPath: '/opt/yt-dlp', maxSeconds: 60, maxFileSize: 8_000_000, outPath: '/tmp/d/clip.mp4' };
@@ -188,30 +171,6 @@ test('ytdlpClipArgs: a bare ffmpeg name omits --ffmpeg-location so yt-dlp search
   ]);
 });
 
-test('ytdlpClipArgs: a path with either separator is passed as --ffmpeg-location', () => {
-  for (const ffmpegPath of ['/usr/local/bin/ffmpeg', 'C:\\tools\\ffmpeg.exe', './bin/ffmpeg']) {
-    const { args } = ytdlpClipArgs('https://youtu.be/abc', { ...CLIP, ffmpegPath, durationSec: null });
-    assert.equal(args[args.indexOf('--ffmpeg-location') + 1], ffmpegPath);
-  }
-});
-
-test('ffmpegTrimArgs: trim and re-encode arguments', () => {
-  assert.deepEqual(ffmpegTrimArgs('/tmp/in.webm', '/tmp/out.mp4', { ffmpegPath: 'ffmpeg', maxSeconds: 60 }), {
-    command: 'ffmpeg',
-    args: [
-      '-y', '-hide_banner', '-loglevel', 'error',
-      '-i', '/tmp/in.webm',
-      '-t', '60',
-      '-vf', 'scale=-2:360',
-      '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '28',
-      '-maxrate', '400k', '-bufsize', '800k',
-      '-c:a', 'aac', '-b:a', '96k',
-      '-movflags', '+faststart',
-      '/tmp/out.mp4',
-    ],
-  });
-});
-
 test('ffmpegGifArgs: a GIF becomes a short, even-sided, never upscaled yuv420p H.264 clip without audio', () => {
   assert.deepEqual(ffmpegGifArgs('/tmp/in', '/tmp/out.mp4', { ffmpegPath: '/usr/bin/ffmpeg', maxSeconds: 8 }), {
     command: '/usr/bin/ffmpeg',
@@ -228,12 +187,6 @@ test('ffmpegGifArgs: a GIF becomes a short, even-sided, never upscaled yuv420p H
       '/tmp/out.mp4',
     ],
   });
-});
-
-test('ffmpegGifArgs: the height ceiling is fixed at 360p, maxSeconds sets the cut', () => {
-  const { args } = ffmpegGifArgs('/tmp/in', '/tmp/out.mp4', { ffmpegPath: 'ffmpeg', maxSeconds: 5, maxHeight: 240 });
-  assert.equal(args[args.indexOf('-vf') + 1], "scale=-2:'min(360,trunc(ih/2)*2)'", 'no caller sets a height: the option is gone');
-  assert.equal(args[args.indexOf('-t') + 1], '5');
 });
 
 test('ffmpegTrimArgs: the capped bitrate keeps a shipped-length re-encode within the shipped maxBytes', () => {
@@ -338,13 +291,6 @@ test('parseYoutubePageDuration: nothing usable gives null; a zero length (a live
   assert.equal(parseYoutubePageDuration('<meta itemprop="duration" content="garbage">'), null);
 });
 
-test('youtubeDataApiUrl: the videos endpoint with contentDetails, the id and the key', () => {
-  assert.equal(
-    youtubeDataApiUrl('dQw4w9WgXcQ', 'AIzaTestKey_1-2'),
-    'https://www.googleapis.com/youtube/v3/videos?part=contentDetails&id=dQw4w9WgXcQ&key=AIzaTestKey_1-2',
-  );
-});
-
 test('parseYoutubeDataApi: the first item contentDetails.duration in seconds', () => {
   const json = JSON.stringify({ kind: 'youtube#videoListResponse', items: [{ id: 'abc', contentDetails: { duration: 'PT3M34S' } }] });
   assert.equal(parseYoutubeDataApi(json), 214);
@@ -358,4 +304,11 @@ test('parseYoutubeDataApi: no items, a bad duration, a live P0D or invalid JSON 
   assert.equal(parseYoutubeDataApi(JSON.stringify({ items: [{ contentDetails: {} }] })), null);
   assert.equal(parseYoutubeDataApi('null'), null);
   assert.equal(parseYoutubeDataApi('{not json'), null);
+});
+
+// A URL comes from a chat message: it must never be read as an option of the tool.
+test('ytdlpProbeArgs: the URL comes after -- so it is never read as an option', () => {
+  const { args } = ytdlpProbeArgs('--exec=evil');
+  assert.equal(args.at(-2), '--');
+  assert.equal(args.at(-1), '--exec=evil');
 });

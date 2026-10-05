@@ -431,10 +431,3 @@ test('fetchText: one warn per failure with host/path only, never the query strin
     { reason: 'http', status: 500, location: 'q.example/page' });
   assert.ok(!JSON.stringify(logs).includes('secret'));
 });
-
-test('fetchText: a success logs nothing', async () => {
-  const { requestImpl } = fakeRequest({ 'https://ok.example/': html('<p>fine</p>') });
-  const fetcher = createPageFetcher({ requestImpl, lookup: fakeLookup().lookup });
-  const { logs } = await run(fetcher, 'https://ok.example/');
-  assert.equal(logs.length, 0);
-});

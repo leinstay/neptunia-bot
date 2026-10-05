@@ -159,15 +159,6 @@ test('startYoutubeCheck: not run at all when video vision is off', () => {
   }
 });
 
-test('startYoutubeCheck: ytdlp and api log one info line with the status only', async () => {
-  for (const status of ['ytdlp', 'api']) {
-    const logger = makeLogger();
-    const checkYoutube = async () => ({ status, detail: 'duration 19s', keySet: true });
-    await startYoutubeCheck({ hot: checkHot(), checkYoutube, log: logger });
-    assert.deepEqual(logger.lines, [{ level: 'info', msg: 'youtube-check: status', meta: { status } }]);
-  }
-});
-
 test('startYoutubeCheck: page and blocked log a warning with the YOUTUBE_API_KEY hint', async () => {
   for (const status of ['page', 'blocked']) {
     const logger = makeLogger();

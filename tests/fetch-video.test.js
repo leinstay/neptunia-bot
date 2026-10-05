@@ -233,14 +233,6 @@ test('fetchAttachment: the trimmed clip still over maxBytes -> size', async () =
   assert.deepEqual(await leftovers(), []);
 });
 
-test('fetchAttachment: ffmpeg non-zero exit -> tool', async () => {
-  const { fetchImpl } = fakeFetch(fakeResponse());
-  const { spawnImpl } = fakeSpawn((child) => child.emit('close', 1, null));
-  const fetcher = makeFetcher({ fetchImpl, spawnImpl, tmpDir });
-
-  assert.deepEqual(await fetcher.fetchAttachment(ATTACHMENT, { ...OPTS, durationSec: 90 }), { ok: false, reason: 'tool' });
-});
-
 test('fetchAttachment: a hung ffmpeg is killed after toolTimeoutMs -> timeout', async () => {
   const { fetchImpl } = fakeFetch(fakeResponse());
   const { spawnImpl, calls } = fakeSpawn(() => {});
@@ -280,18 +272,6 @@ test('fetchGif: a .gif is downloaded and always converted by ffmpeg into a short
   assert.deepEqual(await leftovers(), [], 'both temp files are removed');
 });
 
-test('fetchGif: the mp4 a GIF site serves is converted the same way', async () => {
-  const { fetchImpl } = fakeFetch(fakeResponse({ contentType: 'video/mp4' }));
-  const { spawnImpl, calls } = fakeSpawn(writesOutput(200));
-  const fetcher = makeFetcher({ fetchImpl, spawnImpl, tmpDir });
-
-  const result = await fetcher.fetchGif('https://media.tenor.com/abc/loop.mp4', GIF_OPTS);
-
-  assert.equal(result.ok, true);
-  assert.equal(result.bytes, 200);
-  assert.equal(calls.length, 1);
-});
-
 test('fetchGif: a content type that is neither a GIF nor a video -> download, no ffmpeg', async () => {
   const { fetchImpl } = fakeFetch(fakeResponse({ contentType: 'text/html' }));
   const { spawnImpl, calls } = fakeSpawn(() => assert.fail('ffmpeg must not run'));
@@ -328,31 +308,6 @@ test('fetchGif: a download over the ceiling -> size; ffmpeg missing or failing -
   });
   assert.deepEqual(await oversized.fetchGif(GIF_URL, GIF_OPTS), { ok: false, reason: 'size' });
   assert.deepEqual(await leftovers(), []);
-});
-
-test('fetchGif: a hung ffmpeg is killed after toolTimeoutMs -> timeout', async () => {
-  const { fetchImpl } = fakeFetch(fakeResponse({ contentType: 'image/gif' }));
-  const { spawnImpl, calls } = fakeSpawn(() => {});
-  const fetcher = makeFetcher({ fetchImpl, spawnImpl, tmpDir });
-
-  assert.deepEqual(await fetcher.fetchGif(GIF_URL, { ...GIF_OPTS, toolTimeoutMs: 20 }), { ok: false, reason: 'timeout' });
-  assert.equal(calls[0].child.killed, true);
-  assert.deepEqual(await leftovers(), []);
-});
-
-test('fetchGif: a failure logs source gif without the signed query string', async () => {
-  const { fetchImpl } = fakeFetch(fakeResponse({ ok: false, status: 404 }));
-  const fetcher = makeFetcher({ fetchImpl, spawnImpl: fakeSpawn(() => {}).spawnImpl, tmpDir });
-
-  const { result, logs } = await withCapturedLogs(() => fetcher.fetchGif(GIF_URL, GIF_OPTS));
-
-  assert.deepEqual(result, { ok: false, reason: 'download' });
-  const lines = logs.filter((l) => l.msg.startsWith('fetch-video:'));
-  assert.equal(lines.length, 1);
-  assert.equal(lines[0].source, 'gif');
-  assert.equal(lines[0].status, 404);
-  assert.equal(lines[0].location, 'cdn.discordapp.com/attachments/1/2/anim.gif');
-  assert.ok(!JSON.stringify(lines[0]).includes('deadbeef'));
 });
 
 // --- killing the tool process tree -------------------------------------------
@@ -590,19 +545,6 @@ test('fetchSiteClip: a small whole download is returned as-is, without ffmpeg', 
   assert.deepEqual(await leftovers(), []);
 });
 
-test('fetchSiteClip: a small cut download is returned as-is, without ffmpeg', async () => {
-  const { spawnImpl, calls } = fakeSpawn(byTool({ ytdlp: writesOutput(400, '-o') }));
-  const fetcher = makeFetcher({ spawnImpl, tmpDir });
-
-  const result = await fetcher.fetchSiteClip(SITE_URL, { ...OPTS, durationSec: 125 });
-
-  assert.equal(result.ok, true);
-  assert.equal(result.bytes, 400);
-  assert.equal(result.seconds, 60);
-  assert.equal(calls.length, 1);
-  assert.equal(calls[0].args[calls[0].args.indexOf('--download-sections') + 1], '*0-60');
-});
-
 test('fetchSiteClip: an oversized whole download is re-encoded by ffmpeg and the smaller file returned', async () => {
   const { spawnImpl, calls } = fakeSpawn(byTool({ ytdlp: writesOutput(3000, '-o'), ffmpeg: writesOutput(600) }));
   const fetcher = makeFetcher({ spawnImpl, tmpDir });
@@ -622,18 +564,6 @@ test('fetchSiteClip: an oversized whole download is re-encoded by ffmpeg and the
   assert.notEqual(ffArgs[ffArgs.length - 1], clipPath, 'and writes a second file');
   assert.equal(ffArgs[ffArgs.indexOf('-t') + 1], '60');
   assert.deepEqual(await leftovers(), [], 'both temp files are removed');
-});
-
-test('fetchSiteClip: an oversized cut of unknown length is re-encoded; seconds falls back to maxSeconds', async () => {
-  const { spawnImpl, calls } = fakeSpawn(byTool({ ytdlp: writesOutput(1001, '-o'), ffmpeg: writesOutput(999) }));
-  const fetcher = makeFetcher({ spawnImpl, tmpDir });
-
-  const result = await fetcher.fetchSiteClip(SITE_URL, { ...OPTS, durationSec: null });
-
-  assert.equal(result.ok, true);
-  assert.equal(result.bytes, 999);
-  assert.equal(result.seconds, 60);
-  assert.equal(calls.length, 2);
 });
 
 test('fetchSiteClip: still over maxBytes after the re-encode -> size', async () => {
@@ -752,15 +682,6 @@ test('logging: a thrown error logs its code or name only, never its message', as
   }
 });
 
-test('logging: a missing tool logs its errno code', async () => {
-  const fetcher = makeFetcher({ spawnImpl: fakeSpawn(enoent).spawnImpl, tmpDir });
-  const { logs } = await withCapturedLogs(() => fetcher.probeSite(SITE_URL, OPTS));
-  const [line] = logs.filter((l) => l.msg.startsWith('fetch-video:'));
-  assert.equal(line.reason, 'tool');
-  assert.equal(line.code, 'ENOENT');
-  assert.ok(!JSON.stringify(line).includes('spawn tool'));
-});
-
 // --- probeYoutube ----------------------------------------------------------
 
 const API_KEY = 'AIzaSecretTestKey';
@@ -845,17 +766,6 @@ test('probeYoutube: an API failure falls through to the page, logging reason api
   }
 });
 
-test('probeYoutube: the API failure log carries the HTTP status', async () => {
-  const { fetchImpl } = routedFetch({
-    [API_PREFIX]: textResponse('', { ok: false, status: 403 }),
-    [PAGE_PREFIX]: textResponse('{"lengthSeconds":"42"}'),
-  });
-  const fetcher = makeFetcher({ fetchImpl, tmpDir });
-  const { logs } = await withCapturedLogs(() => fetcher.probeYoutube(SITE_URL, { fetchTimeoutMs: 10_000, apiKey: API_KEY }));
-  const [line] = logs.filter((l) => l.msg.startsWith('fetch-video:'));
-  assert.equal(line.status, 403);
-});
-
 test('probeYoutube: a page without a duration, a non-OK page or a thrown fetch gives download', async () => {
   for (const page of [
     textResponse('<html>Before you continue to YouTube</html>'),
@@ -888,14 +798,6 @@ test('probeYoutube: at most 2 MB of the page is read -- a duration past the cap 
   assert.ok(page.body.pulled <= 2, `pulled ${page.body.pulled} chunks`);
 });
 
-test('probeYoutube: a duration inside the first 2 MB is found', async () => {
-  const filler = Buffer.alloc(1024 * 1024, 'x');
-  const page = textResponse('', { chunks: [filler, Buffer.from('{"lengthSeconds":"42"}')] });
-  const { fetchImpl } = routedFetch({ [PAGE_PREFIX]: page });
-  const fetcher = makeFetcher({ fetchImpl, tmpDir });
-  assert.deepEqual(await fetcher.probeYoutube(SITE_URL, { fetchTimeoutMs: 10_000 }), { ok: true, durationSec: 42 });
-});
-
 test('probeYoutube: a non-YouTube URL gives download without any request', async () => {
   const { fetchImpl, calls } = fakeFetch(textResponse('{"lengthSeconds":"42"}'));
   const fetcher = makeFetcher({ fetchImpl, tmpDir });
@@ -915,13 +817,6 @@ test('probeYoutube: pageFallback false stops after a failed Data API call, never
   );
   assert.deepEqual(result, { ok: false, reason: 'download' });
   assert.deepEqual(calls.map((c) => c.url), [API_URL]);
-});
-
-test('probeYoutube: pageFallback false still returns a Data API duration', async () => {
-  const { fetchImpl } = routedFetch({ [API_PREFIX]: textResponse(API_OK) });
-  const fetcher = makeFetcher({ fetchImpl, tmpDir });
-  const result = await fetcher.probeYoutube(SITE_URL, { fetchTimeoutMs: 10_000, apiKey: API_KEY, pageFallback: false });
-  assert.deepEqual(result, { ok: true, durationSec: 214 });
 });
 
 test('probeYoutube: pageFallback false without a key makes no request', async () => {

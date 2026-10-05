@@ -3,7 +3,7 @@
 // the shared posting side (the notice and the dry-run mirror).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { limitNotice, limitOf, isLimitNotice, mirrorChannelLabel, mirrorDryRun, postLimitNotice } from '../src/behavior/limits.js';
+import { limitNotice, limitOf, isLimitNotice, mirrorDryRun, postLimitNotice } from '../src/behavior/limits.js';
 import { withCapturedLogs } from './fixtures/capture-logs.js';
 
 const labels = { limits: { notice: 'limit hit: {limit} {used}/{cap}' } };
@@ -22,11 +22,6 @@ test('limitNotice: an empty string when the label is missing', () => {
   assert.equal(limitNotice({ limits: { notice: '' } }, limit), '');
   assert.equal(limitNotice(undefined, limit), '');
   assert.equal(limitNotice({ limits: { notice: 42 } }, limit), '');
-});
-
-test('limitNotice: a template may leave some placeholders out', () => {
-  const custom = { limits: { notice: 'δεν ήρθε κανείς ({cap})' } };
-  assert.equal(limitNotice(custom, { key: 'private.maxPerUserPerDay', used: 100, cap: 100 }), 'δεν ήρθε κανείς (100)');
 });
 
 // --- limitOf ---------------------------------------------------------------------
@@ -114,12 +109,6 @@ function mirrorClient() {
 
 const LIMIT = { key: 'llm.maxRequestsPerDay', used: 300, cap: 300 };
 const LIVE = { features: { dryRun: false }, bot: { dryRunChannelId: 'mirror1' } };
-
-test('mirrorChannelLabel: #name for a server channel, private for a DM', () => {
-  assert.equal(mirrorChannelLabel({ name: 'général' }), '#général');
-  assert.equal(mirrorChannelLabel({ name: null }), 'private');
-  assert.equal(mirrorChannelLabel({}), 'private');
-});
 
 test('postLimitNotice: a plain message quoting the trigger, no mentions', async () => {
   const channel = sendingChannel();

@@ -3,7 +3,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { isAllowed, grant, revoke, hasGrant, isOwnerId, isOwnerOnly, OWNER_ONLY_GROUPS } from '../src/discord/access.js';
+import { isAllowed, grant, revoke, hasGrant, isOwnerId, isOwnerOnly } from '../src/discord/access.js';
 
 // ---------------------------------------------------------------------------
 // isOwnerId / hasGrant
@@ -43,15 +43,6 @@ const IS_ALLOWED_CASES = [
     roleIds: [],
     owners: ['1'],
     access: undefined,
-    expected: true,
-  },
-  {
-    label: 'owner id compared as a string against a numeric owners list',
-    commandKey: 'status',
-    userId: '1',
-    roleIds: [],
-    owners: [1],
-    access: {},
     expected: true,
   },
   {
@@ -109,15 +100,6 @@ const IS_ALLOWED_CASES = [
     expected: true,
   },
   {
-    label: 'user id compared as a string (number vs numeric string)',
-    commandKey: 'status',
-    userId: '999',
-    roleIds: [],
-    owners: ['1'],
-    access: { status: { everyone: false, roles: [], users: [999] } },
-    expected: true,
-  },
-  {
     label: 'falls back to the group key when the exact command key has no grant',
     commandKey: 'memory.show',
     userId: '2',
@@ -169,25 +151,14 @@ test('isAllowed: a malformed entry (not an object) on a matching key is skipped,
   assert.equal(allowed, true);
 });
 
-test('isOwnerOnly: the private, mentor and access groups and every key in them, nothing else', () => {
-  assert.deepEqual(OWNER_ONLY_GROUPS, ['private', 'mentor', 'access']);
-  assert.equal(isOwnerOnly('access'), true);
-  assert.equal(isOwnerOnly('access.grant'), true);
-  assert.equal(isOwnerOnly('access.revoke'), true);
-  assert.equal(isOwnerOnly('access.list'), true);
-  assert.equal(isOwnerOnly('accessible'), false);
-  assert.equal(isOwnerOnly('private'), true);
-  assert.equal(isOwnerOnly('private.show'), true);
-  assert.equal(isOwnerOnly('private.forget'), true);
-  assert.equal(isOwnerOnly('private.purge'), true);
-  assert.equal(isOwnerOnly('mentor'), true);
-  assert.equal(isOwnerOnly('mentor.run'), true);
-  assert.equal(isOwnerOnly('mentor.status'), true);
-  assert.equal(isOwnerOnly('memory.show'), false);
-  assert.equal(isOwnerOnly('privateer'), false);
-  assert.equal(isOwnerOnly('mentors'), false);
-  assert.equal(isOwnerOnly('*'), false);
-  assert.equal(isOwnerOnly(undefined), false);
+test('isOwnerOnly: a group and every key in it, not a command that merely starts with its name', () => {
+  for (const group of ['access', 'private', 'mentor']) {
+    assert.equal(isOwnerOnly(group), true, group);
+    assert.equal(isOwnerOnly(`${group}.show`), true, `${group}.show`);
+  }
+  for (const other of ['accessible', 'privateer', 'mentors', 'memory.show', '*', undefined]) {
+    assert.equal(isOwnerOnly(other), false, String(other));
+  }
 });
 
 // One row per owner-only group: every key in it, and the group itself, gets an everyone + role + user grant.

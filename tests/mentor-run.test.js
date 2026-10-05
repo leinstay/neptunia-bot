@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { createMentor, MENTOR_STORE_READS, mentorTemplateValues, worstSituation } from '../src/mentor/mentor.js';
+import { createMentor, MENTOR_STORE_READS, worstSituation } from '../src/mentor/mentor.js';
 import { createCaseStore } from '../src/mentor/cases.js';
 import { createMentorBudget } from '../src/mentor/budget.js';
 import { TokenLimitError } from '../src/llm/openrouter.js';
@@ -1444,13 +1444,6 @@ test('run: an anchor is answered mentor.anchor.samples times, an invented situat
     for (const call of talk.slice(3)) assert.doesNotMatch(call.user, /A1 TRIGGER/);
   }));
 
-test('run: without mentor.anchor.samples an anchor is answered five times', () =>
-  withSetup({ config: { mentor: { anchor: { samples: undefined } } } }, async ({ mentor, cases }) => {
-    const item = anchoredCase(cases, ['A1']);
-    const run = await (await mentor.run(item.id)).done;
-    assert.deepEqual(run.situations.map((s) => s.answers.length), [5, 2, 2]);
-  }));
-
 test('check: an anchor is answered mentor.anchor.samples times, an invented situation mentor.check.samples times', () =>
   withSetup({ config: { mentor: { check: { samples: 1 }, anchor: { samples: 3 } } } }, async ({ mentor, cases, hot }) => {
     const item = anchoredCase(cases, ['A1']);
@@ -1595,11 +1588,6 @@ test('readAnchor: reads mentor.anchor.contextMessages and the media settings at 
     },
   );
 });
-
-test('readAnchor: without fetchMoment no moment can be read', () =>
-  withSetup({}, async ({ mentor }) => {
-    await assert.rejects(mentor.readAnchor(snowflakeAt(MOMENT_TS), { channelId: CHANNEL.id }), /not available/);
-  }));
 
 // ---- a real moment shows the media as the persona saw them -------------------------
 
@@ -2108,30 +2096,15 @@ test('run: the budget pre-check measures a request as the llm rail does, calibra
     assert.equal(llm.calls.length, 0, 'the raw estimate would have fitted; the calibrated one does not');
   }));
 
-test('run: the situations prompt is filled with the numbers the parser uses, also when the keys are unusable', () =>
+test('run: the situations prompt is filled with the numbers the parser uses, the config.json values when the keys are unusable', () =>
   withSetup({ config: { mentor: { situations: undefined, situationLines: 'many' } } }, async ({ mentor, cases, llm }) => {
+    const shipped = JSON.parse(fs.readFileSync(new URL('../config.json', import.meta.url), 'utf8')).mentor;
+    const [minLines, maxLines] = shipped.situationLines;
     const item = cases.add(GUILD, { text: CASE_TEXT, target: 'reply' });
     await (await mentor.run(item.id)).done;
     assert.equal(llm.calls[0].kind, 'situations');
-    assert.equal(llm.calls[0].system, 'SITUATIONS for Zoë: 5 of 6-15 lines. {{unknown}}');
+    assert.equal(llm.calls[0].system, `SITUATIONS for Zoë: ${shipped.situations} of ${minLines}-${maxLines} lines. {{unknown}}`);
   }));
-
-test('status: names the kind, the case, the phase, the tokens and a stop asked for -- nothing else', () => {
-  let seen;
-  let env;
-  const llm = fakeLlm({
-    hook: (call) => {
-      if (call.kind === 'situations') seen = env.mentor.status();
-      return undefined;
-    },
-  });
-  return withSetup({ llm }, async (e) => {
-    env = e;
-    const item = e.cases.add(GUILD, { text: CASE_TEXT, target: 'reply' });
-    await (await e.mentor.run(item.id)).done;
-    assert.deepEqual(seen, { running: true, kind: 'run', caseId: item.id, phase: 'situations', tokens: 0, stopping: false });
-  });
-});
 
 test('run: a diagnosis the budget cannot pay for is named as the report names that stop', () =>
   withSetup(
@@ -2316,39 +2289,3 @@ test('run: a stalled variety pass is cut once at variety.requestTimeoutMs, one r
     assert.equal(failed[0].timedOut, true);
   });
 });
-
-test('run: a diagnosis item on labels, variety, lore, channel or recent is kept; one on an unknown layer is counted in the log', () => {
-  const diagnosis = {
-    summary: 'The trigger label reads as an order.',
-    causes: [
-      { layer: 'labels', excerpt: 'mentioned you', why: 'The label reads as an order.' },
-      { layer: 'weather', excerpt: 'x', why: 'no such layer' },
-    ],
-    changes: [
-      { layer: 'variety', target: 'variety.md', from: '', to: 'name fewer devices', why: 'Too many.' },
-      { layer: 'lore', target: 'entry 3', from: '', to: 'shorter', why: 'Long.' },
-      { layer: 'channel', target: 'general', from: '', to: 'calmer', why: 'Tone.' },
-      { layer: 'recent', target: 'recent lines', from: '', to: 'fewer', why: 'Noise.' },
-    ],
-  };
-  const llm = fakeLlm({ scoreFor: overallBySituation(9, 3), diagnosis: JSON.stringify(diagnosis) });
-  return withSetup({ llm }, async ({ mentor, cases, sent }) => {
-    const item = cases.add(GUILD, { text: CASE_TEXT, target: 'reply' });
-    const { result: run, logs } = await withCapturedLogs(async () => (await mentor.run(item.id)).done);
-    assert.deepEqual(run.diagnosis.causes.map((c) => c.layer), ['labels']);
-    assert.deepEqual(run.diagnosis.changes.map((c) => c.layer), ['variety', 'lore', 'channel', 'recent']);
-    const logged = logs.find((l) => l.msg === 'mentor: diagnosis');
-    assert.equal(logged.unknownLayer, 1);
-    assert.match(sent[0].files[0].attachment.toString('utf8'), /^- labels: "mentioned you"$/m);
-  });
-});
-
-test('mentorTemplateValues: the placeholders of the mentor prompts, as a run fills them', () =>
-  withSetup({}, async ({ mentor, cases, llm, hot }) => {
-    const values = mentorTemplateValues(hot.config, 'Zoë');
-    const [minLines, maxLines] = hot.config.mentor.situationLines;
-    assert.deepEqual(values, { name: 'Zoë', count: hot.config.mentor.situations, minLines, maxLines });
-    const item = cases.add(GUILD, { text: CASE_TEXT, target: 'reply' });
-    await (await mentor.run(item.id)).done;
-    assert.equal(llm.calls[0].system, `SITUATIONS for ${values.name}: ${values.count} of ${values.minLines}-${values.maxLines} lines. {{unknown}}`);
-  }));

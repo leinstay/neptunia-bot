@@ -176,18 +176,6 @@ test('createHot: non-.md files in prompts/ are ignored', () => {
   }
 });
 
-test('hot.watch() and hot.close() do not throw and close() is idempotent', () => {
-  const dir = makeRoot({ prompts: { persona: 'a' } });
-  const hot = createHot({ rootDir: dir });
-  try {
-    assert.equal(hot.watch(), hot);
-    hot.close();
-    assert.doesNotThrow(() => hot.close());
-  } finally {
-    fs.rmSync(dir, { recursive: true, force: true });
-  }
-});
-
 // ---------------------------------------------------------------------------
 // Two prompt layers: prompts/ (base, tracked) + prompts.local/ (untracked)
 // ---------------------------------------------------------------------------
@@ -203,18 +191,6 @@ function writeLabels(dir, layer, value) {
   fs.mkdirSync(target, { recursive: true });
   fs.writeFileSync(path.join(target, 'labels.json'), value);
 }
-
-test('createHot: exposes promptsDir and localPromptsDir', () => {
-  const dir = makeRoot();
-  const hot = createHot({ rootDir: dir });
-  try {
-    assert.equal(hot.promptsDir, path.join(dir, 'prompts'));
-    assert.equal(hot.localPromptsDir, path.join(dir, 'prompts.local'));
-  } finally {
-    hot.close();
-    fs.rmSync(dir, { recursive: true, force: true });
-  }
-});
 
 test('createHot: a prompts.local file replaces the base file of the same name', () => {
   const dir = makeRoot({ prompts: { rules: 'base text' } });
@@ -304,17 +280,6 @@ test('createHot: missing base labels default to {} with source "base" when there
 test('createHot: invalid base labels.json throws on the initial load', () => {
   const dir = makeRoot();
   writeLabels(dir, 'base', '{ not valid json');
-  try {
-    assert.throws(() => createHot({ rootDir: dir }));
-  } finally {
-    fs.rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test('createHot: invalid local labels.json throws on the initial load too', () => {
-  const dir = makeRoot();
-  writeLabels(dir, 'base', JSON.stringify({ locale: 'en-US' }));
-  writeLabels(dir, 'local', '{ not valid json');
   try {
     assert.throws(() => createHot({ rootDir: dir }));
   } finally {

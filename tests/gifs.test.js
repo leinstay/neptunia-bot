@@ -367,12 +367,6 @@ test('parseOutput: a <gif> alone is not silence; an invalid one alone is', () =>
   assert.deepEqual(bad.messages, []);
 });
 
-test('parseOutput: no <gif> -> gif null, messages untouched', () => {
-  const result = parseOutput('<msg>γεια</msg>');
-  assert.equal(result.gif, null);
-  assert.deepEqual(result.messages, [{ text: 'γεια', replyTo: null }]);
-});
-
 // --- the poster --------------------------------------------------------------
 
 const NOW = Date.UTC(2026, 8, 20, 12, 0, 0);

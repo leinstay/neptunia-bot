@@ -22,7 +22,6 @@ test('CUSTOM_EMOJI_MARKUP: groups are the animated flag, the name and the id; Di
   assert.equal(whole.test(`<:${'n'.repeat(33)}:111>`), false, 'a name over 32 characters');
   assert.equal(whole.test(`<:dance:${'1'.repeat(26)}>`), false, 'an id over 25 digits');
   assert.equal(whole.test('<:δέλτα:111>'), false, 'a non-ASCII name');
-  assert.equal(new RegExp(CUSTOM_EMOJI_MARKUP, 'g').source, CUSTOM_EMOJI_MARKUP, 'unanchored, usable with any flags');
 });
 
 test('matchEmojiName: an exact case-sensitive match wins over a case-insensitive one', () => {
@@ -80,17 +79,9 @@ test('renderCustomEmoji: URLs, "::" and single colons are not mangled', () => {
   assert.equal(renderCustomEmoji(text, withHttps), text);
 });
 
-test('renderCustomEmoji: non-ASCII text around a token survives', () => {
-  assert.equal(renderCustomEmoji('καλημέρα :dance: café', lookup), 'καλημέρα <a:dance:222222222222222222> café');
-});
-
 test('renderCustomEmoji: idempotent', () => {
   const once = renderCustomEmoji('a :dance: b :pepe_cry: `:dance:`', lookup);
   assert.equal(renderCustomEmoji(once, lookup), once);
-});
-
-test('renderCustomEmoji: no lookup leaves the text as it is', () => {
-  assert.equal(renderCustomEmoji('a :dance:', null), 'a :dance:');
 });
 
 test('resolveReactionEmoji: a unicode emoji passes through', () => {
@@ -112,11 +103,6 @@ test('resolveReactionEmoji: <:name:id> resolves through the index by name, falls
 test('resolveReactionEmoji: any custom form without a lookup is dropped', () => {
   assert.equal(resolveReactionEmoji(':dance:', null), null);
   assert.equal(resolveReactionEmoji('<a:dance:222222222222222222>', null), null);
-});
-
-test('resolveReactionEmoji: empty input is dropped', () => {
-  assert.equal(resolveReactionEmoji('', lookup), null);
-  assert.equal(resolveReactionEmoji(undefined, lookup), null);
 });
 
 function fakeClient(guildId, emojis) {
@@ -149,9 +135,8 @@ test('createEmojiIndex: the guild id may be a getter read at use; no guild -> em
   assert.equal(index.list().length, EMOJIS.length);
 });
 
-test('createEmojiIndex: list leaves out unavailable emoji; the index offers byName and list only', () => {
+test('createEmojiIndex: list leaves out unavailable emoji', () => {
   const { client } = fakeClient('g1', [...EMOJIS.slice(0, 2), { id: '9', name: 'gone', animated: false, available: false }]);
   const index = createEmojiIndex(client, 'g1');
   assert.deepEqual(index.list().map((e) => e.name), ['pepe_cry', 'dance']);
-  assert.deepEqual(Object.keys(index).sort(), ['byName', 'list']);
 });

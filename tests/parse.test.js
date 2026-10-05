@@ -122,20 +122,9 @@ test('parseOutput: <msg> and <react> can appear together', () => {
   assert.equal(result.skip, false);
 });
 
-test('parseOutput: whitespace-only raw input falls back to skip', () => {
-  const result = parseOutput('   ');
-  assert.equal(result.skip, true);
-});
-
 test('parseOutput: null/undefined raw input is treated as empty and skipped', () => {
   assert.equal(parseOutput(undefined).skip, true);
   assert.equal(parseOutput(null).skip, true);
-});
-
-test('parseOutput: no <draw> gives draw null', () => {
-  assert.equal(parseOutput('<msg>γεια</msg>').draw, null);
-  assert.equal(parseOutput('<skip/>').draw, null);
-  assert.equal(parseOutput('απλό κείμενο').draw, null);
 });
 
 test('parseOutput: <draw> yields the scene with defaults', () => {

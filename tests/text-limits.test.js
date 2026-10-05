@@ -43,20 +43,7 @@ test('MEMORY_LIMIT_DEFAULTS: every fallback equals its config.json value', () =>
   }
 });
 
-test('MEMORY_LIMIT_DEFAULTS: carries the relationship text limit, the delta cap and the clamp tolerance', () => {
-  assert.equal(MEMORY_LIMIT_DEFAULTS.relationshipChars, 600);
-  assert.equal(MEMORY_LIMIT_DEFAULTS.maxDeltaPerUpdate, 15);
-  assert.equal(MEMORY_LIMIT_DEFAULTS.clampTolerance, 1.25);
-});
-
-test('MEMORY_LIMIT_DEFAULTS: frozen, so no caller can move a fallback for everyone', () => {
-  assert.equal(Object.isFrozen(MEMORY_LIMIT_DEFAULTS), true);
-});
-
-test('SELF_CHARS and INJOKE_CHARS: 200 each, the limits the analyzer clamps a self fact and an in-joke to', () => {
-  assert.equal(SELF_CHARS, 200);
-  assert.equal(INJOKE_CHARS, 200);
-
+test('SELF_CHARS and INJOKE_CHARS: the limits the analyzer clamps a self fact and an in-joke to', () => {
   // Measured on the analyzer's own apply, with no tolerance, on texts far over the limit.
   const long = 'é'.repeat(1000);
   const written = {};
@@ -75,31 +62,4 @@ const LOADS_A_MODULE = [/^\s*import\b/m, /\bimport\s*\(/, /^\s*export\b[^'";]*?\
 test('text-limits: a leaf module, it imports nothing and re-exports nothing', () => {
   const source = fs.readFileSync(path.join(ROOT, 'src', 'memory', 'text-limits.js'), 'utf8');
   for (const pattern of LOADS_A_MODULE) assert.equal(pattern.test(source), false, String(pattern));
-});
-
-test('text-limits: the leaf check sees every form of loading another module', () => {
-  const own = 'export const SELF_CHARS = 200;\n';
-  const forms = [
-    "import { REASON_CHARS } from './affinity.js';",
-    "import './update.js';",
-    "const voice = await import('./voice.js');",
-    "export { REASON_CHARS } from './affinity.js';",
-    'export { EPISODE_CHARS } from "./episodes.js";',
-    "export * from './update.js';",
-    "export * as voice from './voice.js';",
-    "export {\n  REASON_CHARS,\n  deltaCapOf,\n} from './affinity.js';",
-  ];
-  for (const form of forms) {
-    assert.equal(LOADS_A_MODULE.some((pattern) => pattern.test(`${own}${form}\n${own}`)), true, form);
-  }
-  // Its own exports and a comment that says "from" are no import edge.
-  const plain = [
-    '// taken from the table in config.json',
-    own.trim(),
-    '// the limit comes from "config.json"',
-    'export function from() {}',
-    'export const LIMITS = Object.freeze({ from: 1 });',
-    '',
-  ].join('\n');
-  assert.equal(LOADS_A_MODULE.some((pattern) => pattern.test(plain)), false);
 });

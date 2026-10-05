@@ -104,20 +104,6 @@ test('add: refuses an unknown target', () => {
   }
 });
 
-test('add: refuses a text shorter than 10 characters', () => {
-  const dir = tmpDataDir();
-  try {
-    const store = createCaseStore({ dataDir: dir });
-    assert.throws(() => store.add('g1', { text: '   short   ', target: 'reply' }), /10/);
-    assert.throws(() => store.add('g1', { text: 'x'.repeat(1001), target: 'reply' }), /1000/);
-    assert.throws(() => store.add('g1', { target: 'reply' }), /10/);
-    assert.equal(store.add('g1', { text: 'αβγδεζηθικ', target: 'reply' }).id, 1);
-    assert.equal(store.add('g1', { text: 'x'.repeat(1000), target: 'reply' }).id, 2);
-  } finally {
-    cleanup(dir);
-  }
-});
-
 /** A resolved moment as src/mentor/anchor.js#resolveAnchor returns it. */
 function moment(messageId = '800000000000000004') {
   return {

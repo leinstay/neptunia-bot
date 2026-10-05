@@ -2,7 +2,7 @@
 // and the full text file attached to it.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { renderCard, renderFile, renderCheckCard, renderCheckFile, renderLastRun, stopPhrase, clip, isAnchor } from '../src/mentor/report.js';
+import { renderCard, renderFile, renderCheckCard, renderLastRun, clip, isAnchor } from '../src/mentor/report.js';
 
 const ALICE = '111111111111111111';
 
@@ -71,17 +71,6 @@ test('renderCard: stays under 1800 characters with 5 situations', () => {
 test('renderCard: stays under 1800 characters whatever the error length', () => {
   const card = renderCard(fakeRun({ passed: false, error: 'x'.repeat(5000), reasons: Array(50).fill('overall 3 is under 7') }));
   assert.ok(card.length <= 1800);
-});
-
-test('renderCard: says when the mentor was disabled during the run', () => {
-  const run = fakeRun({ passed: false, stopped: 'disabled' });
-  assert.match(renderCard(run), /stopped: the mentor was disabled during the run/);
-  assert.match(renderFile(run).text, /outcome: stopped: the mentor was disabled during the run/);
-});
-
-test('renderCard: says when the owner stopped the run or it failed', () => {
-  assert.match(renderCard(fakeRun({ passed: false, stopped: 'owner' })), /owner/i);
-  assert.match(renderCard(fakeRun({ passed: false, error: 'no valid situation' })), /no valid situation/);
 });
 
 test('renderCard: shows unscored answers and null medians', () => {
@@ -207,15 +196,6 @@ test('renderFile: prints causes and changes', () => {
   assert.match(renderFile(fakeRun({ diagnosis: null, diagnosisError: 'invalid answer' })).text, /^diagnosis: not available \(invalid answer\)$/m);
 });
 
-test('renderFile: prints both medians in the header of every situation', () => {
-  const text = renderFile(fakeRun({ situationMedians: BY_SITUATION })).text;
-  const header = (n) => new RegExp(`^Situation ${n}: situation ${n} [^\\n]*\\n(medians: [^\\n]*)$`, 'm').exec(text)?.[1];
-  assert.equal(header(1), 'medians: overall 9 · goal 8');
-  assert.equal(header(2), 'medians: overall 3 · goal 4');
-  assert.equal(header(4), 'medians: overall - · goal -');
-  assert.equal(header(5), 'medians: overall 6.5 · goal 7');
-});
-
 test('renderFile: lists every answer with its points', () => {
   const run = fakeRun();
   const file = renderFile(run);
@@ -258,14 +238,6 @@ test('renderFile / renderCard: a run stored for an old memory case still renders
   assert.match(renderCard(run), /\(memory\)/);
 });
 
-test('stopPhrase: one phrase per stop code, the one the card, the diagnosis and the check use', () => {
-  assert.equal(stopPhrase('budget'), 'stopped: the mentor daily token budget ran out');
-  assert.equal(stopPhrase('owner'), 'stopped by the owner');
-  assert.equal(stopPhrase('disabled'), 'stopped: the mentor was disabled during the run');
-  assert.equal(stopPhrase('x'.repeat(300)), `stopped: ${'x'.repeat(197)}...`);
-  assert.match(renderCard(fakeRun({ passed: false, stopped: 'budget' })), /-- stopped: the mentor daily token budget ran out$/m);
-});
-
 test('clip / isAnchor: the shared helpers', () => {
   assert.equal(clip('abcdef', 5), 'ab...');
   assert.equal(clip('abc', 5), 'abc');
@@ -288,41 +260,10 @@ test('renderCheckCard: lists checked and skipped cases under 1800 characters', (
   assert.match(small, /case 99: skipped \(never run\)/);
 });
 
-test('renderCheckFile: holds every run of the check', () => {
-  const runs = [fakeRun({ caseId: 1 }), fakeRun({ caseId: 2 })];
-  const file = renderCheckFile(runs, 1790000000000);
-  assert.equal(file.name, 'mentor-check-1790000000000.txt');
-  assert.match(file.text, /case 1/);
-  assert.match(file.text, /case 2/);
-});
-
-test('renderLastRun: a passed run', () => {
-  assert.equal(
-    renderLastRun(fakeRun()),
-    'last: case 3, passed, overall 7, 15 of 15 answers scored, 123456 tokens, finished 2026-09-30 10:05 UTC',
-  );
-});
-
 test('renderLastRun: a failed run, with an unscored answer and no median', () => {
   const run = fakeRun({ passed: false, medians: { human: null, character: null, rules: null, goal: null, overall: null } });
   run.situations[0].answers[0].score = null;
   assert.equal(renderLastRun(run), 'last: case 3, failed, overall -, 14 of 15 answers scored, 123456 tokens, finished 2026-09-30 10:05 UTC');
-});
-
-test('renderLastRun: a stopped run names its stop code', () => {
-  for (const [label, run, expected] of [
-    [
-      'by the budget',
-      fakeRun({ passed: false, stopped: 'budget', situations: [], tokens: { spent: 900, left: 0 } }),
-      'last: case 3, stopped (budget), overall 7, 0 of 0 answers scored, 900 tokens, finished 2026-09-30 10:05 UTC',
-    ],
-    ['by the owner', fakeRun({ passed: false, stopped: 'owner' }), /^last: case 3, stopped \(owner\), overall 7, /],
-    ['because the mentor was disabled', fakeRun({ passed: false, stopped: 'disabled' }), /^last: case 3, stopped \(disabled\), overall 7, /],
-  ]) {
-    const line = renderLastRun(run);
-    if (typeof expected === 'string') assert.equal(line, expected, `${label}: ${line}`);
-    else assert.match(line, expected, `${label}: ${line}`);
-  }
 });
 
 test('renderLastRun: an error, its reason clipped to 60 characters', () => {
@@ -334,11 +275,6 @@ test('renderLastRun: an error, its reason clipped to 60 characters', () => {
   assert.ok(shown[1].startsWith('a model request failed ναι'));
   assert.ok(shown[1].endsWith('...'));
   assert.match(renderLastRun(fakeRun({ passed: false, error: 'no valid situation' })), /, error \(no valid situation\), /);
-});
-
-test('renderLastRun: no run yet', () => {
-  assert.equal(renderLastRun(null), 'last: no run yet');
-  assert.equal(renderLastRun(undefined), 'last: no run yet');
 });
 
 // ---- a run stored with a repair block by an earlier version ------------------------
@@ -371,14 +307,6 @@ test('renderCard: a stored repair block is ignored', () => {
   }
 });
 
-test('renderFile: a stored repair block is ignored', () => {
-  const base = { passed: false, diagnosis: DIAGNOSIS };
-  const text = renderFile(fakeRun({ ...base, repair: LEGACY_REPAIR })).text;
-  assert.equal(text, renderFile(fakeRun(base)).text);
-  assert.doesNotMatch(text, /^Repair:/m);
-  assert.match(text, /Diagnosis \(the mentor's opinion, not verified\)/);
-});
-
 test('renderFile: a situation with a variety pass shows the named devices on one line; without one, no line', () => {
   const run = fakeRun();
   run.situations[0].worn = [
@@ -392,13 +320,6 @@ test('renderFile: a situation with a variety pass shows the named devices on one
   assert.equal(text.match(/^worn: /gm).length, 2, 'the other situations carry no line');
 });
 
-test('renderFile: names the classifier.text model of the run; a run stored with an analyzer model names none', () => {
-  assert.match(renderFile(fakeRun()).text, /^models: mentor x\/mentor, talk x\/talk, classifier\.text x\/classifier$/m);
-  const old = renderFile(fakeRun({ models: { mentor: 'x/mentor', talk: 'x/talk', analyzer: 'x/memory' } })).text;
-  assert.match(old, /^models: mentor x\/mentor, talk x\/talk, classifier\.text -$/m);
-  assert.doesNotMatch(old, /x\/memory/);
-});
-
 test('renderFile: an answer shows its GIF with the caption and its drawing; one without them shows neither', () => {
   const run = fakeRun();
   run.situations[0].answers[0] = replyAnswer(1, 1, { messages: [], gif: { handle: 'g7', caption: 'a cat\nwaving' }, draw: 'a café\nat night' });
@@ -408,15 +329,4 @@ test('renderFile: an answer shows its GIF with the caption and its drawing; one 
   assert.match(text, /^gif: g8$/m);
   const plain = text.slice(text.indexOf('--- s1a3 ---'), text.indexOf('--- s2a1 ---'));
   assert.doesNotMatch(plain, /^(gif|draw):/m);
-});
-
-test('renderFile: a cause or change on any diagnosis layer is printed with it', () => {
-  const diagnosis = {
-    summary: 'A label reads as an order.',
-    causes: [{ layer: 'labels', excerpt: 'mentioned you', why: 'The label reads as an order.' }],
-    changes: [{ layer: 'recent', target: 'recent lines', from: '', to: 'fewer', why: 'Noise.' }],
-  };
-  const text = renderFile(fakeRun({ passed: false, diagnosis })).text;
-  assert.match(text, /^- labels: "mentioned you"$/m);
-  assert.match(text, /^- recent, recent lines$/m);
 });

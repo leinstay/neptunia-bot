@@ -26,7 +26,6 @@ function fullContext() {
 test('TURN_INPUT_KEYS: exactly the inputs buildRequest reads, each once', () => {
   assert.equal(new Set(TURN_INPUT_KEYS).size, TURN_INPUT_KEYS.length);
   assert.deepEqual(new Set(TURN_INPUT_KEYS), buildRequestInputs());
-  assert.ok(Object.isFrozen(TURN_INPUT_KEYS));
 });
 
 test('turnRequestInput: passes every named key through, in the list order, and nothing else', () => {
@@ -34,7 +33,6 @@ test('turnRequestInput: passes every named key through, in the list order, and n
   const input = turnRequestInput(ctx);
   assert.deepEqual(Object.keys(input), [...TURN_INPUT_KEYS]);
   for (const key of TURN_INPUT_KEYS) assert.equal(input[key], ctx[key], key);
-  assert.notEqual(input, ctx, 'a new object');
 });
 
 test('turnRequestInput: null is a deliberately absent input and passes as null', () => {

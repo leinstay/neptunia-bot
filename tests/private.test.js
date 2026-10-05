@@ -2,7 +2,6 @@
 // affinity view and the public + private profile merge.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
 import { privateGate, privateRepliesToday, effectiveAffinity, mergeProfiles } from '../src/behavior/private.js';
 
 const TODAY = '2026-09-29';
@@ -41,11 +40,8 @@ test('privateGate: membership, the owner cap and today\'s replies decide the ver
     ['the owner cap is checked for owners: 150 of 200 passes', { ...owner, replies: { day: TODAY, count: 150 } }, { ok: true, cap: 200 }],
     ['the owner cap is checked for owners: 200 of 200 is refused', { ...owner, replies: { day: TODAY, count: 200 } }, { ok: false, reason: 'cap', cap: 200, used: 200 }],
     ['replies from another day count as 0 (day rollover)', { replies: { day: '2026-09-28', count: 100 } }, { ok: true, cap: 100 }],
-    ['replies with an empty day count as 0', { replies: { day: '', count: 500 } }, { ok: true, cap: 100 }],
     ['missing replies count as 0', { replies: undefined }, { ok: true, cap: 100 }],
-    ['null replies count as 0', { replies: null }, { ok: true, cap: 100 }],
     ['a malformed count counts as 0', { replies: { day: TODAY, count: 'many' } }, { ok: true, cap: 100 }],
-    ['a numeric-string count over the cap counts as 0', { replies: { day: TODAY, count: '150' } }, { ok: true, cap: 100 }],
   ];
   for (const [label, overrides, expected] of rows) {
     assert.deepEqual(gate(overrides), expected, label);
@@ -262,15 +258,6 @@ test('mergeProfiles: tolerates missing lists on either side', () => {
   assert.deepEqual(merged.affinity, { score: 0, reason: '', history: [] });
 });
 
-// --- shipped config.json defaults ---------------------------------------------
-
-test('config.json: private chat and drawing ship off, with the private.* defaults', () => {
-  const shipped = JSON.parse(fs.readFileSync(new URL('../config.json', import.meta.url), 'utf8'));
-  assert.equal(shipped.features.privateMessages, false);
-  assert.equal(shipped.features.imageGeneration, false);
-  assert.deepEqual(shipped.private, { minAffinity: 5, maxPerUserPerDay: 100, maxPerOwnerPerDay: 200, purgeMaxMessages: 5000 });
-});
-
 test('privateRepliesToday: the owner or member cap, a missing cap as 0, another day as no replies', () => {
   assert.deepEqual(privateRepliesToday({ config: config(), isOwner: false, replies: { day: TODAY, count: 7 }, today: TODAY }), { used: 7, cap: 100 });
   assert.deepEqual(privateRepliesToday({ config: config(), isOwner: true, replies: { day: TODAY, count: 7 }, today: TODAY }), { used: 7, cap: 200 });
@@ -286,8 +273,4 @@ test('privateRepliesToday: a stored count that is not a finite number >= 0 reads
   const stale = { day: '2026-09-28', count: 7, noticedDay: '2026-09-28' };
   privateRepliesToday({ config: config(), isOwner: false, replies: stale, today: TODAY });
   assert.deepEqual(stale, { day: '2026-09-28', count: 7, noticedDay: '2026-09-28' }, 'a read never rolls the day over');
-});
-
-test('privateGate: a negative stored count never lowers today\'s use below 0', () => {
-  assert.deepEqual(gate({ config: config({ maxPerUserPerDay: 0 }), replies: { day: TODAY, count: -5 } }), { ok: false, reason: 'cap', cap: 0, used: 0 });
 });

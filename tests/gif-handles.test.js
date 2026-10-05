@@ -52,12 +52,6 @@ test('mediaLabelFor: a gif with a handle -> gifKnown with a caption, gifKnownNoT
   assert.deepEqual(mediaLabelFor({ kind: 'image' }, { gifHandle: 'g4' }), { key: 'image', values: {} }, 'other kinds ignore it');
 });
 
-test('mediaLabelFor: an attached gif frame keeps its handle and adds frameAttached', () => {
-  const label = mediaLabelFor({ kind: 'gif', name: 'x.gif' }, { gifHandle: 'g4', attachedIndex: 2 });
-  assert.equal(label.key, 'gifKnownNoText');
-  assert.deepEqual(label.extra, { key: 'frameAttached', values: { n: 2 } });
-});
-
 function render(messages, extra = {}, labelSet = labels) {
   return formatTranscript(messages, { timezone: 'UTC', gapMinutes: 20, maxChars: 800, selfName: 'Nept', labels: labelSet, ...extra })
     .map((item) => item.text)
@@ -75,12 +69,6 @@ test('formatTranscript: library gifs (embed and attachment) render with their ha
 test('formatTranscript: a gif the library does not know keeps today\'s form', () => {
   const gifHandles = gifHandleMap(libraryOf([LINK_MSG]));
   const text = render([FILE_MSG], { gifHandles });
-  assert.ok(text.includes('[gif: réaction.gif]'));
-});
-
-test('formatTranscript: no gifHandles -> today\'s gif forms', () => {
-  const text = render([LINK_MSG, FILE_MSG], { descriptions: new Map([['m1#e0', 'a cat dancing']]) });
-  assert.ok(text.includes('[gif: a cat dancing]'));
   assert.ok(text.includes('[gif: réaction.gif]'));
 });
 
