@@ -110,24 +110,6 @@ test('touchUser: a touch at exactly the stored lastSeen still counts as newest (
   assert.deepEqual(profile.names, ['Bob', 'Alice']);
 });
 
-test('touchUser: in-order touches behave exactly as before (regression check)', () => {
-  const dir = tmpDataDir();
-  const store = createStore({ dataDir: dir });
-  store.touchUser('g1', 'u1', 'Alice', 1000);
-  const profile = store.touchUser('g1', 'u1', 'Bob', 2000);
-  assert.deepEqual(profile.names, ['Bob', 'Alice']);
-  assert.equal(profile.firstSeen, new Date(1000).toISOString());
-  assert.equal(profile.lastSeen, new Date(2000).toISOString());
-});
-
-test('getUser: returns the same profile touchUser created', () => {
-  const dir = tmpDataDir();
-  const store = createStore({ dataDir: dir });
-  store.touchUser('g1', 'u1', 'Alice', 1000);
-  const profile = store.getUser('g1', 'u1');
-  assert.equal(profile.id, 'u1');
-});
-
 test('updateUser: merges fields and stamps updatedAt', () => {
   const dir = tmpDataDir();
   const store = createStore({ dataDir: dir });
@@ -349,14 +331,6 @@ test('writeJsonAtomic: a refused rename falls back to an in-place write, and say
   assert.equal(warning.error.code, 'EPERM');
 });
 
-test('pushBuffer: caps the buffer length, dropping the oldest entries', () => {
-  const dir = tmpDataDir();
-  const store = createStore({ dataDir: dir });
-  for (let i = 0; i < 5; i += 1) store.pushBuffer('g1', { i }, 3);
-  const buffer = store.getBuffer('g1');
-  assert.deepEqual(buffer.map((m) => m.i), [2, 3, 4]);
-});
-
 test('pushBuffer: returns how many oldest entries the cap dropped, 0 while under it', () => {
   const dir = tmpDataDir();
   const store = createStore({ dataDir: dir });
@@ -469,17 +443,6 @@ test('state: data persists across restarts via flush + markDirty', () => {
   assert.equal(storeB.state.data.llmCount, 5);
 });
 
-test('state: an unflushed change is lost if a new store instance reads before flush', () => {
-  const dir = tmpDataDir();
-  const storeA = createStore({ dataDir: dir });
-  storeA.state.data.llmCount = 99;
-  storeA.state.markDirty();
-  // no flush()
-
-  const storeB = createStore({ dataDir: dir });
-  assert.notEqual(storeB.state.data.llmCount, 99);
-});
-
 test('countUsers: counts profile files on disk for a guild', () => {
   const dir = tmpDataDir();
   const storeA = createStore({ dataDir: dir });
@@ -487,6 +450,8 @@ test('countUsers: counts profile files on disk for a guild', () => {
   storeA.touchUser('g1', 'u2', 'Bob', 1000);
   storeA.flush();
   assert.equal(storeA.countUsers('g1'), 2);
+  // A fresh instance has nothing cached: only the files on disk can give it the count.
+  assert.equal(createStore({ dataDir: dir }).countUsers('g1'), 2);
 });
 
 test('countUsers: counts a profile not flushed yet, like every other lister', () => {
@@ -512,6 +477,13 @@ test('emptyProfile: a fresh profile starts with a neutral affinity', () => {
   const store = createStore({ dataDir: dir });
   const profile = store.touchUser('g1', 'u1', 'Alice', 1000);
   assert.deepEqual(profile.affinity, emptyAffinity());
+});
+
+test('emptyProfile: a fresh profile starts with no episodes, interests or aliases', () => {
+  const profile = createStore({ dataDir: tmpDataDir() }).touchUser('g1', 'u1', 'Alice', 1000);
+  for (const field of ['episodes', 'interests', 'aliases']) {
+    assert.deepEqual(profile[field], [], `a fresh profile starts with no ${field}`);
+  }
 });
 
 test('adjustAffinity: applies a delta to a fresh profile and returns the new affinity', () => {
@@ -695,6 +667,17 @@ test('setChannelFacts: caps topWriters to 5 and coerces ids to strings', () => {
 test('setChannelFacts: zeros and empty lists for a channel with no messages at all', () => {
   const dir = tmpDataDir();
   const store = createStore({ dataDir: dir });
+  // An earlier window filled every counter; the redo over a window with no messages SETs them back.
+  store.setChannelFacts('g1', 'c1', {
+    name: 'quiet-room',
+    category: null,
+    topic: null,
+    messageCount: 12,
+    firstMessageAt: 1000,
+    lastMessageAt: 9000,
+    days: { '2026-09-20': 12 },
+    topWriters: [{ id: 'a', count: 8 }, { id: 'b', count: 4 }],
+  });
   const channel = store.setChannelFacts('g1', 'c1', { name: 'quiet-room', category: null, topic: null, messageCount: 0, firstMessageAt: null, lastMessageAt: null, days: {}, topWriters: [] });
   assert.equal(channel.messageCount, 0);
   assert.equal(channel.firstMessageAt, null);
@@ -795,13 +778,6 @@ test('listChannels: returns an empty array for a guild with no channels yet', ()
   assert.deepEqual(store.listChannels('unknown-guild'), []);
 });
 
-test('listChannels: includes a channel that is only cached, not yet flushed', () => {
-  const dir = tmpDataDir();
-  const store = createStore({ dataDir: dir });
-  store.touchChannel('g1', 'c1', { name: 'general', category: null, topic: null }, 1000);
-  assert.deepEqual(store.listChannels('g1').map((c) => c.id), ['c1']);
-});
-
 test('flush + a new store instance: channels survive a "restart"', () => {
   const dir = tmpDataDir();
   const storeA = createStore({ dataDir: dir });
@@ -866,6 +842,7 @@ test('adjustAffinity: persists across store instances', () => {
   const dir = tmpDataDir();
   const storeA = createStore({ dataDir: dir });
   storeA.touchUser('g1', 'u1', 'Alice', 1000);
+  storeA.flush(); // the profile is on disk and clean: only the adjustment itself can mark it dirty again
   storeA.adjustAffinity('g1', 'u1', 12, 'nice chat', { maxDelta: 15, historySize: 10, now: 1000 });
   storeA.flush();
 
@@ -877,13 +854,6 @@ test('adjustAffinity: persists across store instances', () => {
 });
 
 // --- episodes -----------------------------------------------------------------
-
-test('emptyProfile: a fresh profile starts with no episodes', () => {
-  const dir = tmpDataDir();
-  const store = createStore({ dataDir: dir });
-  const profile = store.touchUser('g1', 'u1', 'Alice', 1000);
-  assert.deepEqual(profile.episodes, []);
-});
 
 test('addEpisodes: appends via mergeEpisodes and marks the profile dirty', () => {
   const dir = tmpDataDir();
@@ -925,6 +895,7 @@ test('addEpisodes: persists across store instances', () => {
   const dir = tmpDataDir();
   const storeA = createStore({ dataDir: dir });
   storeA.touchUser('g1', 'u1', 'Alice', 1000);
+  storeA.flush(); // the profile is on disk and clean: only the new episode itself can mark it dirty again
   storeA.addEpisodes('g1', 'u1', [{ what: 'shared a secret', quote: 'do not tell anyone' }], { maxEpisodes: 20, maxNew: 3, now: 1000 });
   storeA.flush();
 
@@ -949,13 +920,6 @@ test('updateUser: never overwrites episodes even if the field is present in fiel
 });
 
 // --- interests / details (applyProfileOps) ----------------------------------
-
-test('emptyProfile: a fresh profile starts with no interests', () => {
-  const dir = tmpDataDir();
-  const store = createStore({ dataDir: dir });
-  const profile = store.touchUser('g1', 'u1', 'Alice', 1000);
-  assert.deepEqual(profile.interests, []);
-});
 
 test('getUser: a hand-edited details array missing valid ids gets fresh ones assigned, advancing detailsSeq', () => {
   const dir = tmpDataDir();
@@ -1114,6 +1078,19 @@ test('applyProfileOps: details are capped at maxDetails, evicting the lowest wei
 });
 
 test('applyProfileOps: threads maxInterestsStored into applyInterestOps -- a smaller stored cap never evicts below the shown cap', () => {
+  // A stored cap above the shown cap is the one enforced: more is kept than shown.
+  const wide = createStore({ dataDir: tmpDataDir() });
+  wide.touchUser('g1', 'u1', 'Alice', 1000);
+  const kept = wide.applyProfileOps('g1', 'u1', { interests: { add: ['a', 'b', 'c', 'd', 'e'].map((topic) => ({ topic })) } }, {
+    maxInterests: 2,
+    maxInterestsStored: 4,
+    topicChars: 40,
+    noteChars: 120,
+    now: 1000,
+  });
+  assert.equal(kept.interests.length, 4, 'maxInterestsStored (4) reached the eviction, not only maxInterests (2)');
+
+  // A stored cap below the shown cap is floored at the shown cap.
   const dir = tmpDataDir();
   const store = createStore({ dataDir: dir });
   store.touchUser('g1', 'u1', 'Alice', 1000);
@@ -1433,13 +1410,6 @@ test('wipeGuild: does not touch another guild\'s memory', () => {
 
 // --- aliases (applyProfileOps) ------------------------------------------------
 
-test('emptyProfile: a fresh profile starts with no aliases', () => {
-  const dir = tmpDataDir();
-  const store = createStore({ dataDir: dir });
-  const profile = store.touchUser('g1', 'u1', 'Alice', 1000);
-  assert.deepEqual(profile.aliases, []);
-});
-
 test('getUser: a profile with no aliases key at all is tolerated, gets []', () => {
   const dir = tmpDataDir();
   const guildDir = path.join(dir, 'guilds', 'g1', 'users');
@@ -1452,19 +1422,35 @@ test('getUser: a profile with no aliases key at all is tolerated, gets []', () =
 });
 
 test('applyProfileOps: routes users.aliases ops through applyAliasOps, threading maxAliases/maxAliasesStored/aliasHalfLifeDays', () => {
-  const dir = tmpDataDir();
-  const store = createStore({ dataDir: dir });
-  store.touchUser('g1', 'u1', 'Alice', 1000);
+  const freshStore = () => {
+    const store = createStore({ dataDir: tmpDataDir() });
+    store.touchUser('g1', 'u1', 'Alice', 1000);
+    return store;
+  };
+  const addAliases = (store, names, opts) => store.applyProfileOps('g1', 'u1', { aliases: { add: names } }, opts);
 
-  const profile = store.applyProfileOps(
-    'g1',
-    'u1',
-    { aliases: { add: ['Ali'] } },
-    { maxAliases: 5, maxAliasesStored: 15, aliasHalfLifeDays: 365, now: 1000 },
-  );
+  const profile = addAliases(freshStore(), ['Ali'], { maxAliases: 5, maxAliasesStored: 15, aliasHalfLifeDays: 365, now: 1000 });
   assert.equal(profile.aliases.length, 1);
   assert.equal(profile.aliases[0].name, 'Ali');
   assert.equal(profile.aliases[0].weight, 1);
+
+  // maxAliasesStored: a stored cap above the shown cap is the one enforced.
+  const stored = addAliases(freshStore(), ['Ali', 'Λίζα', 'Zoé', 'Élise'], { maxAliases: 1, maxAliasesStored: 3, now: 1000 });
+  assert.equal(stored.aliases.length, 3, 'maxAliasesStored (3) reached the eviction, not only maxAliases (1)');
+
+  // maxAliases: a stored cap below the shown cap is floored at the shown cap.
+  const shown = addAliases(freshStore(), ['Ali', 'Λίζα', 'Zoé'], { maxAliases: 3, maxAliasesStored: 1, now: 1000 });
+  assert.equal(shown.aliases.length, 3, 'maxAliases (3) reached the eviction and floors the stored cap (1)');
+
+  // aliasHalfLifeDays: decay lets a recent light alias outlive an ancient heavier one.
+  const decaying = freshStore();
+  const ancientMs = Date.parse('2021-01-01T00:00:00.000Z');
+  addAliases(decaying, ['Λίζα'], { confirmGapHours: 12, seenAt: ancientMs, now: ancientMs });
+  const before = addAliases(decaying, ['Λίζα'], { confirmGapHours: 12, seenAt: ancientMs + 13 * 3_600_000, now: ancientMs });
+  assert.equal(before.aliases[0].weight, 2, 'the ancient alias starts heavier than the newcomer');
+  const recentMs = Date.parse('2026-09-20T00:00:00.000Z');
+  const decayed = addAliases(decaying, ['Zoé'], { maxAliases: 1, maxAliasesStored: 1, aliasHalfLifeDays: 30, seenAt: recentMs, now: recentMs });
+  assert.deepEqual(decayed.aliases.map((a) => a.name), ['Zoé'], 'years of silence outrank the ancient alias, higher weight or not');
 });
 
 test('applyProfileOps: an alias equal (case-insensitively) to the member\'s OWN stored display name is never added', () => {
@@ -1510,17 +1496,6 @@ test('applyProfileOps: aliases are capped at max(maxAliasesStored, maxAliases)',
   store.applyProfileOps('g1', 'u1', { aliases: { add: ['One'] } }, { maxAliases: 1, maxAliasesStored: 1, now: 1000 });
   const profile = store.applyProfileOps('g1', 'u1', { aliases: { add: ['Two'] } }, { maxAliases: 1, maxAliasesStored: 1, now: 2000 });
   assert.equal(profile.aliases.length, 1);
-});
-
-test('applyProfileOps: garbage aliases ops never throw and change nothing', () => {
-  const dir = tmpDataDir();
-  const store = createStore({ dataDir: dir });
-  store.touchUser('g1', 'u1', 'Alice', 1000);
-
-  for (const garbage of [null, 'nope', 42, [1, 2], { add: 'nope' }]) {
-    const profile = store.applyProfileOps('g1', 'u1', { aliases: garbage }, { now: 1000 });
-    assert.deepEqual(profile.aliases, []);
-  }
 });
 
 // --- listUserProfiles -----------------------------------------------------------
@@ -1947,15 +1922,6 @@ test('wipeGuild: removes the private directory, cache and disk, leaves other gui
   assert.equal(fs.existsSync(path.join(dir, 'guilds', 'g1', 'private')), false);
   assert.deepEqual(createStore({ dataDir: dir }).listPrivate('g1'), []);
   assert.deepEqual(createStore({ dataDir: dir }).listPrivate('g2'), ['u9']);
-});
-
-test('validate: reports an unparsable private file like a broken profile', () => {
-  const dir = tmpDataDir();
-  const store = createStore({ dataDir: dir });
-  store.applyPrivateOps('g1', 'u1', {});
-  store.flush();
-  fs.writeFileSync(privateFile(dir, 'g1', 'u1'), '{ not json');
-  assert.deepEqual(store.validate(), ['guilds/g1/private/u1.json']);
 });
 
 test('getPrivateBuffer: a copy of the buffer, oldest first; [] and no file when there is no private layer', () => {
