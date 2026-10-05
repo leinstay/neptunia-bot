@@ -2,10 +2,16 @@
 // poster — see src/discord/media.js#isDescribable) into a plain one-line
 // caption via a cheap vision-capable model, so the persona can react to what
 // is on a picture it did not itself see (features.mediaDescriptions, on by
-// default). One request per NEW picture; results are cached per
+// default). One request per NEW picture: two callers reaching the same new
+// picture at once (a message prefill and a turn) share one download and one
+// request. Results are cached per
 // attachment/embed id in data/guilds/<id>/media.json (src/memory/store.js),
 // LRU-trimmed to `media.cacheEntries`. A failure is cached as a miss for an
-// hour, so a broken picture is not retried on every turn/batch. Descriptions
+// hour, so a broken picture is not retried on every turn/batch -- except a
+// refusal by `llm.maxRequestsPerDay`, which says nothing about the picture.
+// Once that cap is spent (llm.capLeft) nothing is downloaded, no daily video,
+// re-watch or GIF slot is taken and no miss is cached, so the pictures and
+// videos of the last hours are still described after 00:00 UTC. Descriptions
 // are data: never logged. A caption is capped at `media.descriptionChars`
 // (the describe prompt may learn the cap through `{{maxChars}}`).
 //
@@ -72,22 +78,27 @@
 // cached one-frame caption is served as it is; only `watchGif()` (the
 // owner's recache, src/memory/gif-recache.js) replaces it.
 
-import { createHash } from 'node:crypto';
 import { isPlainObject } from '../config.js';
 import { mediaProxyUrl } from '../discord/media.js';
 import { createImageFetcher } from '../discord/fetch-image.js';
 import { createVideoFetcher } from '../discord/fetch-video.js';
 import { isDirectUrlSite, safeLocation, youtubeVideoId } from '../discord/video-sites.js';
-import { TokenLimitError, DailyCapError, VIDEO_TOKENS_PER_SECOND_FALLBACK as STATIC_TOKENS_PER_SECOND_FALLBACK } from '../llm/openrouter.js';
-import { clampText } from './clamp.js';
+import {
+  helperRequestOptions,
+  railReason,
+  VIDEO_TOKENS_PER_SECOND_FALLBACK as STATIC_TOKENS_PER_SECOND_FALLBACK,
+} from '../llm/openrouter.js';
+import { clampText, oneLine } from './clamp.js';
 import { classifierMediaModel, classifierVideoModel } from '../behavior/mention.js';
 import { fillPromptTemplate } from '../behavior/prompt.js';
 import { createYoutubeCheck, isVideoVisionOn } from './youtube-check.js';
 import { gifWatchBlocker as gifWatchBlockerOf, gifWatchCap, gifWatchPrompt } from './gif-watch.js';
 import { log } from '../log.js';
-import { dailyCounter, utcDay } from '../time.js';
+import { countToday as readDailyCount, dailyCounter, MINUTE_MS, utcDay } from '../time.js';
+import { hashedKey, touchKey, trimCache } from '../web/cache.js';
+import { normalizeQuery } from '../web/lookup.js';
 
-const MISS_TTL_MS = 60 * 60_000;
+const MISS_TTL_MS = 60 * MINUTE_MS;
 // Only when media.descriptionChars is missing or invalid (config.json always has it).
 const DESCRIPTION_CHARS_FALLBACK = 200;
 // Only when media.video.errorRetryMinutes is missing or invalid (config.json always has it).
@@ -97,8 +108,14 @@ const VIDEO_URL_PROCESSING_FALLBACK = 'agentic';
 // Only when media.video.summaryChars is missing (config.json always has it, the same value).
 const VIDEO_TEXT_CHARS_FALLBACK = 1500;
 const REWATCH_ANSWER_CHARS_FALLBACK = 1200;
-const REWATCH_TTL_MS = 60 * 60_000;
+const REWATCH_TTL_MS = 60 * MINUTE_MS;
 const PERMANENT_VIDEO_MISSES = new Set(['length', 'size']);
+/** The state.json fields of the daily video counter (every watch and every re-watch attempt). */
+const VIDEO_DAILY = Object.freeze({ dayKey: 'videoDay', countKey: 'videoCount' });
+/** The state.json fields of the daily re-watch counter. */
+const REWATCH_DAILY = Object.freeze({ dayKey: 'rewatchDay', countKey: 'rewatchCount' });
+/** What cachedPicture returns for a picture whose recent failure is still remembered. */
+const FRESH_MISS = Symbol('fresh-miss');
 // Only when media.gif.maxSeconds is missing or invalid (config.json always has it).
 const GIF_MAX_SECONDS_FALLBACK = 8;
 
@@ -124,10 +141,7 @@ function isVideoCandidate(item) {
 
 /** Collapse every run of whitespace to one space, then cap at `maxChars` on a word boundary. */
 function cleanVideoText(raw, maxChars) {
-  const collapsed = String(raw ?? '')
-    .replace(/\s+/gu, ' ')
-    .trim();
-  return clampText(collapsed, maxChars, { tolerance: 1 });
+  return clampText(oneLine(raw), maxChars, { tolerance: 1 });
 }
 
 /** A positive number from the config, else `fallback`. */
@@ -135,14 +149,13 @@ function positiveOr(value, fallback) {
   return typeof value === 'number' && value > 0 ? value : fallback;
 }
 
-/** The cache key of one question's answer: lower-cased, whitespace-collapsed, sha1-prefixed. */
+/**
+ * The cache key of one question's answer: `video:<itemId>:q:` and the sha1
+ * prefix of the question lower-cased and whitespace-collapsed (the search
+ * cache's normalisation).
+ */
 function questionKey(itemId, question) {
-  const normalised = String(question ?? '')
-    .toLowerCase()
-    .replace(/\s+/gu, ' ')
-    .trim();
-  const digest = createHash('sha1').update(normalised).digest('hex').slice(0, 16);
-  return `video:${itemId}:q:${digest}`;
+  return hashedKey(`video:${itemId}:q`, normalizeQuery(question));
 }
 
 /** A stand-in for the persistent state when none is wired (tests, tools): the daily count lives in memory. */
@@ -159,22 +172,7 @@ function safeDetail(message) {
 
 /** The log/outcome code of a failed request: a rail (`token-limit`, `daily-cap`) or `llm-error`. */
 function requestFailureReason(err) {
-  if (err instanceof TokenLimitError) return 'token-limit';
-  if (err instanceof DailyCapError) return 'daily-cap';
-  return 'llm-error';
-}
-
-/** Move `key` to the end of `cache` (most-recently-used), inserting it if new. */
-function touchKey(cache, key, value) {
-  delete cache[key];
-  cache[key] = value;
-}
-
-/** Drop the oldest entries once `cache` holds more than `maxEntries`. */
-function trimCache(cache, maxEntries) {
-  const keys = Object.keys(cache);
-  const overflow = keys.length - Math.max(0, maxEntries);
-  for (let i = 0; i < overflow; i += 1) delete cache[keys[i]];
+  return railReason(err, 'llm-error');
 }
 
 /**
@@ -287,37 +285,86 @@ export function createDescriber({
   }
 
   /**
+   * Whether `llm.maxRequestsPerDay` is spent today (the client's read-only
+   * `capLeft`): the next counted request would be refused, so nothing is
+   * downloaded, reserved or cached for it. A client without `capLeft` never is.
+   */
+  function capSpent() {
+    return typeof llm?.capLeft === 'function' && llm.capLeft() <= 0;
+  }
+
+  /** Whether pictures are described under the live config and prompts (the switch and the describe prompt). */
+  function picturesOn() {
+    return hot.config.features?.mediaDescriptions === true && Boolean(hot.prompts?.describe);
+  }
+
+  /**
+   * The cached state of one picture, synchronously: its caption as a
+   * describe() result (LRU-touched, `cached: true`), FRESH_MISS while a
+   * failure younger than an hour is remembered, or null when it must be
+   * described.
+   */
+  function cachedPicture(guildId, itemId) {
+    const cache = store.getMediaCache(guildId);
+    const cached = cache[itemId];
+    if (!cached) return null;
+    if (cached.miss) return now() - cached.ts < MISS_TTL_MS ? FRESH_MISS : null;
+    touchKey(cache, itemId, cached);
+    store.markMediaCacheDirty(guildId);
+    return { text: cached.text, usage: null, estimated: 0, cached: true };
+  }
+
+  // One in-flight description per guild + picture: a message prefill and a
+  // turn that reach the same new picture at once share one download and one request.
+  const pictureFlights = new Map();
+
+  /**
+   * describe() with describeMany's accounting: `joined` is true when this
+   * call waited on another caller's description of the same picture (its
+   * request was not this call's).
+   */
+  async function describeShared(guildId, item) {
+    if (!picturesOn()) return { result: null, joined: false };
+    const hit = cachedPicture(guildId, item.itemId);
+    if (hit === FRESH_MISS) return { result: null, joined: false };
+    if (hit) return { result: hit, joined: false };
+    const flightKey = `${guildId}:${item.itemId}`;
+    const running = pictureFlights.get(flightKey);
+    if (running) return { result: await running, joined: true };
+    if (capSpent()) return { result: null, joined: false };
+    const promise = describeNow(guildId, item).finally(() => pictureFlights.delete(flightKey));
+    pictureFlights.set(flightKey, promise);
+    return { result: await promise, joined: false };
+  }
+
+  /**
+   * One picture's caption through the cache. A new picture is described once
+   * even when several callers reach it at once (they share the result); with
+   * `llm.maxRequestsPerDay` spent it is not downloaded and nothing is cached.
+   * Every request counts against that cap.
    * @param {string} guildId
    * @param {{ itemId: string, kind: string, url: string }} item  See
    *   src/discord/media.js#collectPictures.
-   * @param {{ countAgainstDailyCap?: boolean }} [options]
    * @returns {Promise<{ text: string, usage: object|null, estimated: number, cached?: boolean }|null>}
    */
-  async function describe(guildId, item, { countAgainstDailyCap = true } = {}) {
-    if (hot.config.features?.mediaDescriptions !== true) return null;
+  async function describe(guildId, item) {
+    return (await describeShared(guildId, item)).result;
+  }
+
+  /** The uncached part of describe(): the GIF watch, else the download and the request; the cache is written here. */
+  async function describeNow(guildId, item) {
     const promptText = hot.prompts?.describe;
     if (!promptText) return null;
-
     const mediaCfg = hot.config.media ?? {};
     const descriptionChars = positiveOr(mediaCfg.descriptionChars, DESCRIPTION_CHARS_FALLBACK);
     const cache = store.getMediaCache(guildId);
-    const cached = cache[item.itemId];
-    if (cached) {
-      if (cached.miss) {
-        if (now() - cached.ts < MISS_TTL_MS) return null;
-      } else {
-        touchKey(cache, item.itemId, cached);
-        store.markMediaCacheDirty(guildId);
-        return { text: cached.text, usage: null, estimated: 0, cached: true };
-      }
-    }
 
     // A GIF is watched like a short video first (see watchGifShared); one
     // that cannot be watched, or whose watch fails, keeps the one-frame
     // description below -- never nothing.
     let watchFailed = false;
     if (item.kind === 'gif') {
-      const watched = await watchGifShared(guildId, item, countAgainstDailyCap);
+      const watched = await watchGifShared(guildId, item);
       if (watched?.state === 'watched') {
         return { text: watched.text, usage: watched.usage ?? null, estimated: watched.estimated ?? 0 };
       }
@@ -367,23 +414,19 @@ export function createDescriber({
           { role: 'system', content: fillPromptTemplate(promptText, { maxChars: descriptionChars, today: todayDate() }) },
           { role: 'user', content: [{ type: 'image_url', image_url: { url: downloaded.dataUrl } }] },
         ],
+        // An in-turn helper (llm.helperTimeoutMs, counted, never calibrated: a
+        // picture is estimated at a flat context.vision.tokensPerImage while the
+        // vision model counts far more).
         {
           model: classifierMediaModel(hot.config),
-          role: 'classifier.media',
-          maxOutputTokens: mediaCfg.maxOutputTokens,
-          countAgainstDailyCap,
-          // A vision request has its own (usually cheap/fast) model, but still
-          // deserves the same chat timeout, not the analyzer's much larger one.
-          timeoutMs: hot.config.llm?.timeoutMs,
-          // A picture is estimated at a flat context.vision.tokensPerImage while
-          // the vision model counts far more: its provider-counted prompt tokens
-          // say nothing about the text ratio every chat request is checked against.
-          skipCalibration: true,
+          ...helperRequestOptions(hot.config, { role: 'classifier.media', maxOutputTokens: mediaCfg.maxOutputTokens, purpose: 'describe' }),
         },
       );
     } catch (err) {
-      log.warn('describe: failed', { kind: item.kind, reason: 'llm-error', status: err.statusCode, detail: safeDetail(err.message) });
-      recordMiss();
+      const reason = requestFailureReason(err);
+      log.warn('describe: failed', { kind: item.kind, reason, status: err.statusCode, detail: safeDetail(err.message) });
+      // A refusal by the daily cap says nothing about the picture: described after the reset.
+      if (reason !== 'daily-cap') recordMiss();
       return null;
     }
 
@@ -434,10 +477,11 @@ export function createDescriber({
    * Resolves `{ state: 'watched', text, usage, estimated }`, `{ state:
    * 'failed', reason }` (the fetch, the conversion, the request or an empty
    * answer) or `{ state: 'unavailable', reason: 'daily'|'daily-cap' }` (a
-   * daily rail is spent: no failure of this GIF). One `describe: gif` log
-   * line, codes only.
+   * daily rail is spent: no failure of this GIF; with `llm.maxRequestsPerDay`
+   * spent before the watch, nothing is fetched and no GIF slot is taken). One
+   * `describe: gif` log line, codes only.
    */
-  async function watchGifNow(guildId, item, source, countAgainstDailyCap) {
+  async function watchGifNow(guildId, item, source) {
     const mediaCfg = hot.config.media ?? {};
     const videoCfg = mediaCfg.video ?? {};
     const maxSeconds = positiveOr(mediaCfg.gif?.maxSeconds, GIF_MAX_SECONDS_FALLBACK);
@@ -454,6 +498,8 @@ export function createDescriber({
       return outcome;
     };
 
+    // The request would be refused: no fetch, no GIF slot.
+    if (capSpent()) return report({ state: 'unavailable', reason: 'daily-cap' });
     // The daily GIF slot, reserved synchronously like a video watch's.
     const watchedToday = countToday('gifWatchDay', 'gifWatchCount');
     if (watchedToday >= gifWatchCap(hot.config)) return report({ state: 'unavailable', reason: 'daily' });
@@ -478,7 +524,7 @@ export function createDescriber({
           { role: 'system', content: gifSystemPrompt(descriptionChars, maxSeconds) },
           { role: 'user', content: [videoPart(videoCfg, clip)] },
         ],
-        videoRequestOptions(videoCfg, clip, { maxOutputTokens: videoCfg.maxOutputTokens, countAgainstDailyCap }),
+        videoRequestOptions(videoCfg, clip, { maxOutputTokens: videoCfg.maxOutputTokens }),
       );
     } catch (err) {
       const reason = requestFailureReason(err);
@@ -511,14 +557,14 @@ export function createDescriber({
    * download (gifAnimationSource); otherwise the outcome, shared with any
    * caller already watching the same GIF of the same guild.
    */
-  function watchGifShared(guildId, item, countAgainstDailyCap) {
+  function watchGifShared(guildId, item) {
     if (gifWatchBlocker() !== null) return null;
     const source = gifAnimationSource(item);
     if (!source) return null;
     const flightKey = `${guildId}:gif:${item.itemId}`;
     const running = inFlight.get(flightKey);
     if (running) return running;
-    const promise = watchGifNow(guildId, item, source, countAgainstDailyCap).finally(() => inFlight.delete(flightKey));
+    const promise = watchGifNow(guildId, item, source).finally(() => inFlight.delete(flightKey));
     inFlight.set(flightKey, promise);
     return promise;
   }
@@ -545,12 +591,11 @@ export function createDescriber({
    * caption gets a miss so marked). Every rail of watchGifNow applies.
    * @param {string} guildId
    * @param {object} item  A gif picture item (src/discord/media.js#collectPictures).
-   * @param {{ countAgainstDailyCap?: boolean }} [options]
    * @returns {Promise<{ state: 'watched', text: string, cached?: true }
    *   | { state: 'failed', reason: string } | { state: 'unavailable', reason: string }>}
    *   `unavailable`: GIFs are not watched now (see gifWatchBlocker) or a daily rail is spent.
    */
-  async function watchGif(guildId, item, { countAgainstDailyCap = true } = {}) {
+  async function watchGif(guildId, item) {
     const blocker = gifWatchBlocker();
     if (blocker !== null) return { state: 'unavailable', reason: blocker };
     const cached = store.getMediaCache(guildId)[item.itemId];
@@ -560,38 +605,66 @@ export function createDescriber({
       log.info('describe: gif', { state: 'failed', reason: 'source' });
       return { state: 'failed', reason: 'source' };
     }
-    const outcome = await watchGifShared(guildId, item, countAgainstDailyCap);
+    const outcome = await watchGifShared(guildId, item);
     if (outcome.state === 'failed') markGifWatchFailed(guildId, item.itemId);
     if (outcome.state === 'watched') return { state: 'watched', text: outcome.text };
     return { state: outcome.state, reason: outcome.reason };
   }
 
   /**
-   * Describe up to `maxNew` NEW (non-cached) pictures of `items`, in the
-   * order given; cache hits are free and never count against `maxNew`.
-   * Returns `{ descriptions, newCount }` — `descriptions` maps `itemId` to
-   * caption text, ready to hand to formatTranscript's `descriptions` option.
-   * `onCharge(result)` is called once per NEW request (successful or not,
-   * whenever the provider actually billed something) so a caller with its
-   * own separate token budget (a history backfill) can account for it.
+   * Describe up to `maxNew` NEW (non-cached) pictures of `items`. The first
+   * `maxNew` items without a cached caption or a fresh miss are picked up
+   * front, in the order given, and every picked item counts toward `maxNew`
+   * whether its description succeeds or fails -- so a run of broken pictures
+   * never turns into a run of requests. The picked items are described in
+   * parallel, at most `concurrency` at a time (every one at once by default);
+   * cached captions anywhere in `items` are filled in without counting, and
+   * an item listed twice is looked at once. Nothing is picked while
+   * `llm.maxRequestsPerDay` is spent (see describe()).
+   * Returns `{ descriptions, newCount }` -- `descriptions` maps `itemId` to
+   * caption text, ready to hand to formatTranscript's `descriptions` option;
+   * `newCount` is the number of picked items.
+   * `onCharge(result)` is called once per successful NEW request of this call
+   * (never for a cache hit or a description shared with another caller) so a
+   * caller with its own separate token budget can account for it.
    * @param {string} guildId
    * @param {object[]} items
-   * @param {{ maxNew?: number, countAgainstDailyCap?: boolean, onCharge?: (r: object) => void }} [options]
+   * @param {{ maxNew?: number, concurrency?: number, onCharge?: (r: object) => void }} [options]
+   * @returns {Promise<{ descriptions: Map<string, string>, newCount: number }>}
    */
-  async function describeMany(guildId, items, { maxNew = Infinity, countAgainstDailyCap = true, onCharge } = {}) {
-    const descriptions = new Map();
-    let newCount = 0;
-    for (const item of items) {
-      if (newCount >= maxNew) break;
-      const result = await describe(guildId, item, { countAgainstDailyCap });
-      if (!result) continue;
-      if (!result.cached) {
-        newCount += 1;
-        onCharge?.(result);
-      }
-      descriptions.set(item.itemId, result.text);
+  async function describeMany(guildId, items, { maxNew = Infinity, concurrency = Infinity, onCharge } = {}) {
+    const found = new Map();
+    const picked = [];
+    const seen = new Set();
+    const on = picturesOn();
+    const spent = on && capSpent();
+    for (const item of on ? (items ?? []) : []) {
+      if (!item?.itemId || seen.has(item.itemId)) continue;
+      seen.add(item.itemId);
+      const hit = cachedPicture(guildId, item.itemId);
+      if (hit === FRESH_MISS) continue;
+      if (hit) found.set(item.itemId, hit.text);
+      else if (!spent && picked.length < maxNew) picked.push(item);
     }
-    return { descriptions, newCount };
+
+    let next = 0;
+    const worker = async () => {
+      while (next < picked.length) {
+        const item = picked[next];
+        next += 1;
+        const { result, joined } = await describeShared(guildId, item);
+        if (!result) continue;
+        if (!result.cached && !joined) onCharge?.(result);
+        found.set(item.itemId, result.text);
+      }
+    };
+    const limit = Number.isFinite(concurrency) && concurrency >= 1 ? Math.floor(concurrency) : picked.length;
+    await Promise.all(Array.from({ length: Math.min(limit, picked.length) }, worker));
+
+    // In the order of `items`, whatever order the requests came back in.
+    const descriptions = new Map();
+    for (const id of seen) if (found.has(id)) descriptions.set(id, found.get(id));
+    return { descriptions, newCount: picked.length };
   }
 
   /**
@@ -661,7 +734,7 @@ export function createDescriber({
   function videoErrorTtlMs() {
     const minutes = hot.config.media?.video?.errorRetryMinutes;
     const valid = typeof minutes === 'number' && Number.isFinite(minutes) && minutes >= 0;
-    return (valid ? minutes : VIDEO_ERROR_RETRY_MINUTES_FALLBACK) * 60_000;
+    return (valid ? minutes : VIDEO_ERROR_RETRY_MINUTES_FALLBACK) * MINUTE_MS;
   }
 
   /**
@@ -676,7 +749,25 @@ export function createDescriber({
 
   /** Today's video count (every watch and every re-watch attempt). */
   function videoCountToday() {
-    return countToday('videoDay', 'videoCount');
+    return countToday(VIDEO_DAILY.dayKey, VIDEO_DAILY.countKey);
+  }
+
+  /**
+   * The video slots left today, read only (the counters are never rolled
+   * over or written here): `video` under `media.video.maxPerDay` (a watch, a
+   * retry and a re-watch each take one) and `rewatch` under
+   * `media.video.rewatch.maxPerDay` (a re-watch also needs a `video` slot).
+   * A cap that is not a number leaves its rail unlimited (Infinity), as the
+   * watch itself reads it. For a turn that skips a classifier whose action
+   * could not run.
+   * @returns {{ video: number, rewatch: number }}
+   */
+  function videoCapsLeft() {
+    const videoCfg = hot.config.media?.video ?? {};
+    const nowMs = now();
+    const left = (cap, keys) =>
+      typeof cap === 'number' && !Number.isNaN(cap) ? Math.max(0, cap - readDailyCount(state.data, keys, nowMs)) : Infinity;
+    return { video: left(videoCfg.maxPerDay, VIDEO_DAILY), rewatch: left(videoCfg.rewatch?.maxPerDay, REWATCH_DAILY) };
   }
 
   /**
@@ -717,7 +808,7 @@ export function createDescriber({
    * URL, the reasoning settings (`media.video.reasoning`, a plain object or
    * nothing), never the text calibration.
    */
-  function videoRequestOptions(videoCfg, media, { maxOutputTokens, countAgainstDailyCap }) {
+  function videoRequestOptions(videoCfg, media, { maxOutputTokens }) {
     return {
       model: classifierVideoModel(hot.config),
       role: 'classifier.video',
@@ -731,7 +822,7 @@ export function createDescriber({
       provider: media.pinned ? videoCfg.provider : undefined,
       // Without it the video model's reasoning can eat the whole output budget.
       reasoning: isPlainObject(videoCfg.reasoning) ? videoCfg.reasoning : undefined,
-      countAgainstDailyCap,
+      countAgainstDailyCap: true,
       // A video's provider-counted prompt tokens say nothing about the
       // text ratio every chat request is checked against.
       skipCalibration: true,
@@ -804,10 +895,13 @@ export function createDescriber({
   /**
    * The uncached part of describeVideo: resolves `{ result, sent, attempted }`.
    * `sent` = a request reached the provider; `attempted` = the media was
-   * fetched (or probed) at all, successful or not -- the daily cap alone is
-   * not an attempt. `forced` only marks the log line.
+   * fetched (or probed) at all, successful or not -- a daily cap alone is
+   * not an attempt. With `llm.maxRequestsPerDay` spent nothing is fetched,
+   * no video slot is taken and nothing is cached (`result` null), and a
+   * request the cap refuses caches no miss either: the video is watched
+   * after the reset. `forced` only marks the log line.
    */
-  async function watchVideo(guildId, item, key, promptText, countAgainstDailyCap, forced = false) {
+  async function watchVideo(guildId, item, key, promptText, forced = false) {
     const videoCfg = hot.config.media?.video ?? {};
     const summaryChars = positiveOr(videoCfg.summaryChars, VIDEO_TEXT_CHARS_FALLBACK);
     const report = (result, extra = {}) => {
@@ -828,6 +922,12 @@ export function createDescriber({
       putVideoEntry(guildId, key, { miss: true, ts: now(), reason: 'error' });
       return report({ state: 'error' }, { ...extra, reason });
     };
+
+    // The request would be refused: no fetch, no slot, no miss.
+    if (capSpent()) {
+      report({ state: 'skipped' }, { reason: 'daily-cap' });
+      return { result: null, sent: false, attempted: false };
+    }
 
     // Reserve the daily slot synchronously, before any await, so concurrent
     // watches can never overshoot maxPerDay. A failed fetch or request keeps
@@ -858,11 +958,15 @@ export function createDescriber({
           { role: 'system', content: fillPromptTemplate(promptText, { maxChars: summaryChars, today: todayDate() }) },
           { role: 'user', content: [videoPart(videoCfg, media)] },
         ],
-        videoRequestOptions(videoCfg, media, { maxOutputTokens: videoCfg.maxOutputTokens, countAgainstDailyCap }),
+        videoRequestOptions(videoCfg, media, { maxOutputTokens: videoCfg.maxOutputTokens }),
       );
     } catch (err) {
-      const railHit = err instanceof TokenLimitError || err instanceof DailyCapError;
-      return { result: errorMiss(requestFailureReason(err), { ...sizes, status: err.statusCode }), sent: !railHit, attempted: true };
+      const reason = requestFailureReason(err);
+      if (reason === 'daily-cap') {
+        report({ state: 'skipped' }, { ...sizes, reason });
+        return { result: null, sent: false, attempted: true };
+      }
+      return { result: errorMiss(reason, { ...sizes, status: err.statusCode }), sent: reason !== 'token-limit', attempted: true };
     }
 
     const text = cleanVideoText(completion.text, summaryChars);
@@ -881,7 +985,7 @@ export function createDescriber({
    * `error` miss (a limit miss and a watched entry still count; every rail
    * still applies).
    */
-  async function describeVideoCharged(guildId, item, { countAgainstDailyCap = true, cacheOnly = false, force = false } = {}) {
+  async function describeVideoCharged(guildId, item, { cacheOnly = false, force = false } = {}) {
     // Video vision needs both switches, like the senses line (src/behavior/prompt.js#renderSenses).
     if (!isVideoVisionOn(hot.config)) return { result: null, sent: false, attempted: false };
     const promptText = hot.prompts?.['describe-video'];
@@ -901,7 +1005,7 @@ export function createDescriber({
       const { result } = await running;
       return { result, sent: false, attempted: true };
     }
-    const promise = watchVideo(guildId, item, key, promptText, countAgainstDailyCap, force).finally(() =>
+    const promise = watchVideo(guildId, item, key, promptText, force).finally(() =>
       inFlight.delete(flightKey),
     );
     inFlight.set(flightKey, promise);
@@ -913,14 +1017,15 @@ export function createDescriber({
    * summarise it in one line, through the shared media cache.
    * @param {string} guildId
    * @param {object} item  One collectVideos candidate.
-   * @param {{ countAgainstDailyCap?: boolean, force?: boolean }} [options]  `force`: try again
+   * @param {{ force?: boolean }} [options]  `force`: try again
    *   despite a cached `error` miss (a limit and a watched entry are still served from the cache).
    * @returns {Promise<{ state: 'watched', text: string, usage: object|null, estimated: number, cached?: true }
    *   | { state: 'limit', reason: 'length'|'size'|'daily' } | { state: 'error' } | null>}  null when the
-   *   feature is off, the prompt is missing or `item` is not a video candidate.
+   *   feature is off, the prompt is missing, `item` is not a video candidate, or `llm.maxRequestsPerDay`
+   *   is spent (nothing fetched or cached).
    */
-  async function describeVideo(guildId, item, { countAgainstDailyCap = true, force = false } = {}) {
-    const { result } = await describeVideoCharged(guildId, item, { countAgainstDailyCap, force });
+  async function describeVideo(guildId, item, { force = false } = {}) {
+    const { result } = await describeVideoCharged(guildId, item, { force });
     return result;
   }
 
@@ -935,14 +1040,14 @@ export function createDescriber({
    * `itemId` to a video state, ready for formatTranscript's `videos` option.
    * @param {string} guildId
    * @param {object[]} items
-   * @param {{ maxNew?: number, countAgainstDailyCap?: boolean, onCharge?: (r: object) => void }} [options]
+   * @param {{ maxNew?: number, onCharge?: (r: object) => void }} [options]
    */
-  async function describeVideos(guildId, items, { maxNew = Infinity, countAgainstDailyCap = true, onCharge } = {}) {
+  async function describeVideos(guildId, items, { maxNew = Infinity, onCharge } = {}) {
     const videos = new Map();
     let newCount = 0;
     for (const item of items) {
       const cacheOnly = newCount >= maxNew;
-      const { result, sent, attempted } = await describeVideoCharged(guildId, item, { countAgainstDailyCap, cacheOnly });
+      const { result, sent, attempted } = await describeVideoCharged(guildId, item, { cacheOnly });
       if (attempted) newCount += 1;
       if (sent) onCharge?.(result);
       if (result) videos.set(item.itemId, result);
@@ -979,7 +1084,8 @@ export function createDescriber({
    * (`media.video.rewatch.maxPerDay` and `media.video.maxPerDay`); both
    * slots are reserved before the fetch and kept on failure. An answer is
    * cached for an hour under `video:<itemId>:q:<hash>`; a failure is never
-   * cached. The question and the answer are data: never logged.
+   * cached. With `llm.maxRequestsPerDay` spent nothing is fetched and no slot
+   * is taken. The question and the answer are data: never logged.
    * @param {string} guildId
    * @param {object} item  One collectVideos candidate.
    * @param {string} question
@@ -1019,8 +1125,13 @@ export function createDescriber({
       store.markMediaCacheDirty(guildId);
     }
 
+    // The request would be refused: no fetch, no slot.
+    if (capSpent()) {
+      report('limit', { reason: 'daily-cap' });
+      return null;
+    }
     // Both rails, both reserved synchronously before any await (like a watch).
-    const rewatchedToday = countToday('rewatchDay', 'rewatchCount');
+    const rewatchedToday = countToday(REWATCH_DAILY.dayKey, REWATCH_DAILY.countKey);
     const videosToday = videoCountToday();
     if (rewatchedToday >= (rewatchCfg.maxPerDay ?? Infinity) || videosToday >= (videoCfg.maxPerDay ?? Infinity)) {
       report('limit', { reason: 'daily' });
@@ -1043,7 +1154,7 @@ export function createDescriber({
           { role: 'system', content: fillPromptTemplate(promptText, { question: asked, maxChars: answerChars, today: todayDate() }) },
           { role: 'user', content: [videoPart(videoCfg, media)] },
         ],
-        videoRequestOptions(videoCfg, media, { maxOutputTokens: rewatchCfg.maxOutputTokens, countAgainstDailyCap: true }),
+        videoRequestOptions(videoCfg, media, { maxOutputTokens: rewatchCfg.maxOutputTokens }),
       );
     } catch (err) {
       report('error', { reason: requestFailureReason(err), seconds: media.seconds ?? null });
@@ -1072,6 +1183,7 @@ export function createDescriber({
     describeVideos,
     cachedVideos,
     rewatchVideo,
+    videoCapsLeft,
     watchGif,
     gifWatchBlocker,
     checkYoutube,

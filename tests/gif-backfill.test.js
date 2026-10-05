@@ -224,7 +224,7 @@ test('gif backfill run: describes the top backfillDescribe entries without a cac
     assert.equal(describer.calls.length, 1);
     const [call] = describer.calls;
     assert.equal(call.guildId, 'g1');
-    assert.deepEqual(call.opts, { countAgainstDailyCap: true });
+    assert.deepEqual(call.opts, { concurrency: 1 }, 'one GIF at a time; every describer request counts, no option to say so');
     assert.deepEqual(
       call.items.map(({ itemId, kind, url }) => ({ itemId, kind, url })),
       [

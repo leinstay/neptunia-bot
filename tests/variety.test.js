@@ -106,6 +106,21 @@ test('selectOwnLines: the turn channel fills the window before any other channel
   assert.deepEqual(lines.map((l) => l.id), ['a2', 'a3']);
 });
 
+test('selectOwnLines: a turn-channel line that slid out of the history comes from the ring, after the history and before other channels', () => {
+  const ring = [
+    { id: 'a0', ts: NOW - 40 * MIN, channelId: 'c1', text: 'slid out' },
+    { id: 'a1', ts: NOW - 30 * MIN, channelId: 'c1', text: 'ένα' },
+    { ts: NOW - 20 * MIN, channelId: 'c1', text: 'no id, cannot be told from its history copy' },
+    { id: 'b1', ts: NOW - 2 * MIN, channelId: 'c2', text: 'τρία' },
+    { id: 'old', ts: NOW - 90 * MIN, channelId: 'c1', text: 'too old' },
+  ];
+  const history = [own('a1', 30, 'ένα'), msg('x', 29, 'hi'), own('a2', 5, 'δύο')];
+  const lines = selectOwnLines({ history, ring, channelId: 'c1', now: NOW, window: 3, recentMinutes: 45 });
+  assert.deepEqual(lines.map((l) => l.id), ['a0', 'a1', 'a2'], 'the slid line fills the window before another channel');
+  const wider = selectOwnLines({ history, ring, channelId: 'c1', now: NOW, window: 8, recentMinutes: 45 });
+  assert.deepEqual(wider.map((l) => l.id), ['a0', 'a1', 'a2', 'b1'], 'each line once, the stale one left out');
+});
+
 test('selectOwnLines: lines older than recentMinutes are left out; without it every line may be taken', () => {
   const history = [own('a1', 60, 'old'), own('a2', 10, 'new')];
   const ring = [{ id: 'b1', ts: NOW - 50 * MIN, channelId: 'c2', text: 'old elsewhere' }];
@@ -508,6 +523,7 @@ test('forTurn: runs the pass on the classifier.text model with the rails, stores
   assert.equal(options.skipCalibration, true);
   assert.equal(options.timeoutMs, 30000, 'each attempt is cut at variety.requestTimeoutMs');
   assert.ok(options.signal instanceof AbortSignal);
+  assert.equal(options.purpose, 'variety', 'named on the usage line');
   const guild = store.getGuild('g1');
   assert.equal(guild.worn.lines, 3);
   assert.deepEqual(guild.worn.patterns, patterns);
@@ -763,6 +779,21 @@ test('ahead: one request on the lines the next turn will see; that turn uses it 
   assert.deepEqual([turn.source, turn.cached, turn.kept], ['cache', true, 1]);
   assert.equal(store.getGuild('g1').worn.lines, 3);
   assert.equal(store.getGuild('g1').wornHistory.length, 1);
+});
+
+test('ahead: an own line that slid out of the next turn\'s history keeps the key, so the pass ahead serves that turn', async () => {
+  const { pass, llm } = liveSetup();
+  const history = ownHistory();
+  for (const line of history.filter((m) => m.self)) pass.record('g1', { id: line.id, ts: line.ts, channelId: 'c1', text: line.content });
+  await pass.ahead({ ...TURN, history });
+  assert.equal(llm.calls.length, 1);
+
+  // Others wrote; the next fetch no longer reaches the oldest own line.
+  const slid = [...history.filter((m) => m.id !== 'a1'), msg('y1', 2, 'and then'), msg('y2', 1, 'καλά')];
+  const { result, logs } = await withCapturedLogs(() => pass.forTurn({ ...TURN, history: slid }));
+  assert.equal(llm.calls.length, 1, 'no second request');
+  assert.equal(result.length, 1);
+  assert.equal(logs.find((l) => l.msg === 'variety: turn').source, 'cache');
 });
 
 test('ahead: lines already answered or in flight start no second request', async () => {

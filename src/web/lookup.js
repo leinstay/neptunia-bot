@@ -15,26 +15,30 @@
 //
 // Both share the media cache (data/guilds/<id>/media.json, LRU-trimmed to
 // `media.cacheEntries`): `read:<link id>` holds an excerpt `{ text, ts }` or a
-// miss `{ miss, ts, reason }` skipped for 6 hours; `search:<sha1 prefix of the
+// miss `{ miss, ts, reason }` skipped for 6 hours (never for a refusal by
+// `llm.maxRequestsPerDay`); `search:<sha1 prefix of the
 // normalized query>` holds `{ query, text, sources, ts }`, served while younger
 // than `web.search.cacheHours`. Both share one daily counter
 // (`state.data.webDay` / `webCount`, `web.maxPerDay`; a cap that is not a
 // finite number counts as 0), reserved before the fetch or the search
 // request and kept when either fails. Every model call
-// goes through llm.complete (its token cap and daily request cap apply).
+// goes through llm.complete (its token cap and daily request cap apply); once
+// that daily request cap is spent (llm.capLeft) no page is fetched, no search
+// is sent and no web slot is taken.
 // Logs carry reason codes, counts and `host/path` -- never page text, an
 // excerpt, a query or the key.
 
+import { siteOf } from '../discord/media.js';
 import { videoSiteFor, safeLocation } from '../discord/video-sites.js';
 import { classifierTextModel } from '../behavior/mention.js';
 import { fillPromptTemplate } from '../behavior/prompt.js';
-import { TokenLimitError, DailyCapError, dailyCapOf } from '../llm/openrouter.js';
-import { clampText } from '../memory/clamp.js';
+import { dailyCapOf, helperRequestOptions, railReason } from '../llm/openrouter.js';
+import { clampText, oneLine } from '../memory/clamp.js';
 import { log } from '../log.js';
-import { bumpDaily, dailyCounter, utcDay } from '../time.js';
+import { bumpDaily, countToday, dailyCounter, MINUTE_MS, utcDay } from '../time.js';
 import { hashedKey, touchKey, trimCache } from './cache.js';
 
-const READ_MISS_TTL_MS = 6 * 60 * 60_000;
+const READ_MISS_TTL_MS = 6 * 60 * MINUTE_MS;
 // An answer this short is the read-link prompt's "no real content" signal.
 const UNREADABLE_MAX_WORDS = 4;
 // Only when a web.* number is missing (config.json always has them).
@@ -65,19 +69,7 @@ function positiveOr(value, fallback) {
 
 /** Collapse whitespace, then cap at `maxChars` on a clean boundary. */
 function cleanText(raw, maxChars) {
-  const collapsed = String(raw ?? '')
-    .replace(/\s+/gu, ' ')
-    .trim();
-  return clampText(collapsed, maxChars, { tolerance: 1 });
-}
-
-/** Hostname without a leading `www.`, or '' for an unparsable URL. */
-function siteOf(url) {
-  try {
-    return new URL(String(url)).hostname.replace(/^www\./i, '');
-  } catch {
-    return '';
-  }
+  return clampText(oneLine(raw), maxChars, { tolerance: 1 });
 }
 
 /** Whether `url`'s path (query and fragment aside) ends with a file extension the reader skips. */
@@ -91,9 +83,7 @@ function isBinaryPath(url) {
 
 /** The safety-rail refusals of llm.complete as reason codes; any other failure is `llm`. */
 function llmFailure(err) {
-  if (err instanceof TokenLimitError) return 'token-limit';
-  if (err instanceof DailyCapError) return 'daily-cap';
-  return 'llm';
+  return railReason(err, 'llm');
 }
 
 /** A stand-in for the persistent state when none is wired (tests, tools). */
@@ -181,6 +171,27 @@ export function createLookup({ hot, store, llm, state = memoryState(), pageFetch
   }
 
   /**
+   * Whether `llm.maxRequestsPerDay` is spent today (the client's read-only
+   * `capLeft`): the condensing request would be refused, so nothing is
+   * fetched or reserved for it. A client without `capLeft` never is.
+   */
+  function capSpent() {
+    return typeof llm?.capLeft === 'function' && llm.capLeft() <= 0;
+  }
+
+  /**
+   * The slots of the shared daily web counter left today (`web.maxPerDay`,
+   * read now; not a finite number counts as 0), read only: the counter is
+   * never rolled over or written here. For a turn that skips the search
+   * classifier when no search could run.
+   * @returns {number}
+   */
+  function webCapLeft() {
+    const cap = dailyCapOf(hot.config.web?.maxPerDay, 'web.maxPerDay');
+    return Math.max(0, cap - countToday(state.data, WEB_DAILY, now()));
+  }
+
+  /**
    * Reserve one slot of the shared daily web counter; false when `web.maxPerDay`
    * (read now; not a finite number counts as 0) is spent.
    */
@@ -238,6 +249,11 @@ export function createLookup({ hot, store, llm, state = memoryState(), pageFetch
       return { result: null, attempted: true };
     };
 
+    // The condensing request would be refused: no fetch, no slot, no miss.
+    if (capSpent()) {
+      report('limit', 'daily-cap');
+      return { result: null, attempted: false };
+    }
     if (!reserveDaily()) {
       report('limit', 'daily');
       return { result: null, attempted: false };
@@ -264,18 +280,23 @@ export function createLookup({ hot, store, llm, state = memoryState(), pageFetch
         ],
         {
           model: classifierTextModel(config),
-          role: 'classifier.text',
-          maxOutputTokens: linksCfg.maxOutputTokens,
-          timeoutMs: config.llm?.timeoutMs,
-          countAgainstDailyCap: true,
-          skipCalibration: true,
+          ...helperRequestOptions(config, { role: 'classifier.text', maxOutputTokens: linksCfg.maxOutputTokens, purpose: 'read-link' }),
         },
       );
     } catch (err) {
-      // A safety-rail refusal is cached as a miss like any other (skipped for
-      // the same 6 hours), so the page is not re-fetched and re-charged on
+      const reason = llmFailure(err);
+      const status = err?.statusCode !== undefined ? { status: err.statusCode } : {};
+      // A refusal by the daily request cap is not the page's fault: nothing is
+      // cached, so the link is read after the reset (the cap check above keeps
+      // it from being fetched again meanwhile).
+      if (reason === 'daily-cap') {
+        report('limit', reason, status);
+        return { result: null, attempted: true };
+      }
+      // Any other failure, the token-cap refusal included, is cached as a miss
+      // (skipped for 6 hours), so the page is not re-fetched and re-charged on
       // every turn that sees the link.
-      return miss(llmFailure(err), err?.statusCode !== undefined ? { status: err.statusCode } : {});
+      return miss(reason, status);
     }
 
     const text = cleanText(completion.text, summaryChars);
@@ -360,7 +381,7 @@ export function createLookup({ hot, store, llm, state = memoryState(), pageFetch
     const key = searchKey(asked);
     const hit = cache[key];
     if (hit && typeof hit.text === 'string') {
-      const maxAgeMs = positiveOr(searchCfg.cacheHours, SEARCH_CACHE_HOURS_FALLBACK) * 60 * 60_000;
+      const maxAgeMs = positiveOr(searchCfg.cacheHours, SEARCH_CACHE_HOURS_FALLBACK) * 60 * MINUTE_MS;
       if (now() - hit.ts < maxAgeMs) {
         touchKey(cache, key, hit);
         store.markMediaCacheDirty(guildId);
@@ -371,6 +392,11 @@ export function createLookup({ hot, store, llm, state = memoryState(), pageFetch
       store.markMediaCacheDirty(guildId);
     }
 
+    // The summary request would be refused: no search, no slot.
+    if (capSpent()) {
+      report('limit', 'daily-cap');
+      return null;
+    }
     if (!reserveDaily()) {
       report('limit', 'daily');
       return null;
@@ -395,11 +421,7 @@ export function createLookup({ hot, store, llm, state = memoryState(), pageFetch
           ],
           {
             model: classifierTextModel(config),
-            role: 'classifier.text',
-            maxOutputTokens: searchCfg.maxOutputTokens,
-            timeoutMs: config.llm?.timeoutMs,
-            countAgainstDailyCap: true,
-            skipCalibration: true,
+            ...helperRequestOptions(config, { role: 'classifier.text', maxOutputTokens: searchCfg.maxOutputTokens, purpose: 'search-summary' }),
           },
         );
       } catch (err) {
@@ -425,5 +447,5 @@ export function createLookup({ hot, store, llm, state = memoryState(), pageFetch
     return typeof braveApiKey === 'string' && braveApiKey.trim().length > 0;
   }
 
-  return { readLinks, search, hasSearch };
+  return { readLinks, search, hasSearch, webCapLeft };
 }

@@ -163,9 +163,12 @@ function lineOfMessage(message, history) {
 /**
  * The persona's own lines a pass looks at, oldest first: up to `window` of
  * them, taken first from the channel of the turn (its `history`, newest
- * first), then from the other channels (`ring`, the stored own lines of the
- * guild, newest first; a line of the turn's channel or one already taken is
- * skipped there). With `recentMinutes` (a live turn) a line older than that
+ * first), then from the ring (`ring`, the stored own lines of the guild,
+ * newest first): the turn channel's ring lines with an id not taken yet --
+ * so a line that slid out of the fetched history stays in the set and the
+ * set's key (linesKey) holds from the pass computed ahead to the next turn
+ * -- then the other channels' lines (one already taken is skipped there).
+ * With `recentMinutes` (a live turn) a line older than that
  * is left out; without it (a sandbox situation, whose own timeline is what
  * counts) every line of the history may be taken. A line answers the message
  * it replied to (`to`) when that message is in the history; a ring line
@@ -191,10 +194,12 @@ export function selectOwnLines({ history = [], ring = [], channelId = null, now,
     if (messages[i]?.self === true) take(lineOfMessage(messages[i], messages));
   }
   const current = channelId === null || channelId === undefined ? null : String(channelId);
-  const others = normalizeOwnLines(ring)
-    .filter((line) => current === null || line.channelId !== current)
-    .sort((a, b) => b.ts - a.ts);
-  for (const line of others) take(line);
+  const stored = normalizeOwnLines(ring).sort((a, b) => b.ts - a.ts);
+  // The turn channel's own ring lines next: only one with an id, which tells it from its history copy.
+  if (current !== null) {
+    for (const line of stored) if (line.channelId === current && line.id) take(line);
+  }
+  for (const line of stored) if (current === null || line.channelId !== current) take(line);
   return taken.sort((a, b) => a.ts - b.ts);
 }
 

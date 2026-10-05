@@ -152,7 +152,7 @@ export function createGifRecache({ hot, store, client, describer = null, isWarmi
         break;
       }
       const item = (await pictureOf(entry)) ?? { itemId: entry.itemId, kind: 'gif' };
-      const outcome = await describer.watchGif(guildId, item, { countAgainstDailyCap: true });
+      const outcome = await describer.watchGif(guildId, item);
       if (outcome.state === 'watched') counts.watched += 1;
       else if (outcome.state === 'failed') counts.failed += 1;
       else {

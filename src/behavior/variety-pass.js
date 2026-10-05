@@ -21,6 +21,7 @@
 
 import { classifierTextModel } from './mention.js';
 import { isLimitNotice } from './limits.js';
+import { helperRequestOptions } from '../llm/openrouter.js';
 import {
   buildVarietyRequest,
   linesKey,
@@ -118,12 +119,14 @@ export function createVarietyPass({ hot, store, llm, now = Date.now }) {
     try {
       return await llm.complete(request.messages, {
         model: classifierTextModel(config),
-        role: 'classifier.text',
-        maxOutputTokens: settings.maxOutputTokens,
-        timeoutMs: settings.requestTimeoutMs,
-        countAgainstDailyCap: true,
-        skipCalibration: true,
-        signal: controller.signal,
+        // The shared helper fields; the pass keeps its own clock (variety.requestTimeoutMs) and abort.
+        ...helperRequestOptions(config, {
+          role: 'classifier.text',
+          maxOutputTokens: settings.maxOutputTokens,
+          purpose: 'variety',
+          timeoutMs: settings.requestTimeoutMs,
+          signal: controller.signal,
+        }),
       });
     } catch (err) {
       const failure = err instanceof Error ? err : new Error('variety pass failed');
