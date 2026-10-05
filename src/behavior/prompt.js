@@ -1556,6 +1556,7 @@ function pulledAuthors(pulledFits) {
  * @returns {{ messages: object[], stats: object, idByIndex: Map<number, string>, tempo: object,
  *   pictures: object[], textFallback: string|null, pulledIds: Map<string, string>,
  *   pulledKept: { channelId: string, ids: string[], newestId: string, newestTs: number }[],
+ *   peopleShown: { id: string, names: string[] }[],
  *   recent: { lines: number, episodes: number, cut: number, hidden: number, repeated: number,
  *     unnamed: number }|null }}
  *   `pictures` are the ones attached as image_url parts; `textFallback` is the same user message
@@ -1563,7 +1564,10 @@ function pulledAuthors(pulledFits) {
  *   a provider that rejects them. `idByIndex` maps chat AND pulled indices; `pulledIds` maps
  *   every pulled line's message id to its channel id (the output side reacts there, never
  *   replies across channels); `pulledKept` lists the channels whose block survived the budget,
- *   with the ids of the lines shown and the newest window line shown. `stats.pulled` is the
+ *   with the ids of the lines shown and the newest window line shown. `peopleShown` lists the
+ *   members whose profile the request shows (the interlocutor when its block was kept, then those
+ *   `<people>` kept, in its order) with their stored names: whose `@name` the reply may resolve
+ *   (src/behavior/turn.js#resolveMentions). `stats.pulled` is the
  *   block's budget line: `used`, `kept` (channels shown), `dropped` (channels offered and not
  *   shown, the budget's cut or a missing header label), `lines` (lines offered) and `linesCut`
  *   (lines offered and not shown). `recent` counts what `<recent>` did, null when it was off or
@@ -2037,28 +2041,31 @@ export function buildRequest(input) {
     }
   }
 
+  // `<people>`'s items, each with the member it renders (an empty rendering is no item).
+  const peopleOffered = [
+    ...askedAbout.map((profile, i) => ({ profile, text: askedAboutItems[i] })),
+    ...participants.map((profile) => ({
+      profile,
+      text: renderProfile(profile, labels, {
+        compact: true,
+        relationships,
+        maxAliases: config.memory?.maxAliases,
+        aliasHalfLifeDays: config.memory?.aliasHalfLifeDays,
+        interestHalfLifeDays: config.memory?.interestHalfLifeDays,
+        confirmAfter: config.memory?.confirmAfter,
+        staleDays: config.memory?.interestStaleDays,
+        now,
+        nameOf,
+      }),
+    })),
+  ].filter((entry) => entry.text);
   const budgetFit = fitSections(
     [
       ...aheadOfPeople,
       {
         name: 'people',
         cap: caps.people,
-        items: [
-          ...askedAboutItems,
-          ...participants.map((profile) =>
-            renderProfile(profile, labels, {
-              compact: true,
-              relationships,
-              maxAliases: config.memory?.maxAliases,
-              aliasHalfLifeDays: config.memory?.aliasHalfLifeDays,
-              interestHalfLifeDays: config.memory?.interestHalfLifeDays,
-              confirmAfter: config.memory?.confirmAfter,
-              staleDays: config.memory?.interestStaleDays,
-              now,
-              nameOf,
-            }),
-          ),
-        ].filter(Boolean),
+        items: peopleOffered.map((entry) => entry.text),
       },
       // One small piece, kept or dropped whole: below the chat and the people, above the rest.
       { name: 'worn', items: [renderWorn(input.worn, labels, config)].filter(Boolean) },
@@ -2116,6 +2123,23 @@ export function buildRequest(input) {
         repeated,
         unnamed,
       };
+    }
+  }
+  // The members whose profile the request shows: the interlocutor when its block was kept, then
+  // the ones `<people>` kept (a subsequence of the offered items, in their order).
+  const peopleShown = [];
+  const showPerson = (profile) => {
+    const id = memberIdOf(profile?.id);
+    const names = Array.isArray(profile?.names) ? profile.names.filter((name) => typeof name === 'string') : [];
+    if (id !== null) peopleShown.push({ id, names });
+  };
+  if ((kept.interlocutor ?? []).length > 0) showPerson(interlocutor);
+  const keptPeople = kept.people ?? [];
+  let nextPerson = 0;
+  for (const entry of peopleOffered) {
+    if (nextPerson < keptPeople.length && keptPeople[nextPerson] === entry.text) {
+      showPerson(entry.profile);
+      nextPerson += 1;
     }
   }
   // The pulled channels whose block survived, with what of them was shown.
@@ -2190,6 +2214,7 @@ export function buildRequest(input) {
     textFallback,
     pulledIds,
     pulledKept,
+    peopleShown,
     recent,
   };
 }

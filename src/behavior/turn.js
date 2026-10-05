@@ -267,9 +267,24 @@ function askedFor(trigger, triggerKind) {
   return Boolean(trigger) && triggerKind !== 'overheard';
 }
 
-/** Turn `@nick` written by the model into real mentions for people seen in the transcript. */
-export function resolveMentions(text, history) {
+/**
+ * Turn `@nick` written by the model into real mentions for people the request showed: the
+ * authors of `history` (the lines shown), then the stored names in `knownNames` (the members
+ * whose profile the request showed, the authors of the pulled lines shown). A transcript
+ * author wins a name a stored profile shares, the last author of a display name wins, and of
+ * two stored profiles sharing a name the first handed over wins. Longer names are matched
+ * first, so a multi-word name is never cut at a shorter one it starts with.
+ * @param {string} text
+ * @param {object[]} history  Normalized lines (`authorName`, `authorId`, `self`, `bot`).
+ * @param {Iterable<{ name: string, id: string }>} [knownNames]
+ * @returns {{ text: string, userIds: string[] }}  `userIds`: the members pinged (allowedMentions).
+ */
+export function resolveMentions(text, history, knownNames = []) {
   const people = new Map();
+  for (const { name, id } of knownNames) {
+    if (typeof name !== 'string' || !name.trim() || id === undefined || id === null || people.has(name)) continue;
+    people.set(name, String(id));
+  }
   for (const message of history) {
     if (!message.self && !message.bot && message.authorName) people.set(message.authorName, message.authorId);
   }
@@ -282,6 +297,31 @@ export function resolveMentions(text, history) {
     userIds.add(people.get(name));
   }
   return { text: resolved, userIds: [...userIds] };
+}
+
+/**
+ * The stored names `@name` may resolve by besides the transcript's display names (see
+ * resolveMentions): every name of each member whose profile the request showed (`peopleShown`,
+ * in its order), then every stored name of each author of the pulled lines shown -- those lines
+ * carry the name Discord gave, often not the one the persona remembers them by.
+ * @param {{ id: string, names: string[] }[]|undefined} peopleShown  buildRequest's `peopleShown`.
+ * @param {object[]} shownLines  The pulled lines the request showed.
+ * @param {(userId: string) => (object|null)} profileOf  The stored profile of a member, or null.
+ * @returns {{ name: string, id: string }[]}
+ */
+function storedNames(peopleShown, shownLines, profileOf) {
+  const known = [];
+  for (const person of peopleShown ?? []) {
+    for (const name of person.names) known.push({ name, id: person.id });
+  }
+  const authors = new Set();
+  for (const line of shownLines) {
+    if (line.self || line.bot || !line.authorId || authors.has(line.authorId)) continue;
+    authors.add(line.authorId);
+    const names = profileOf(line.authorId)?.names;
+    if (Array.isArray(names)) for (const name of names) known.push({ name, id: line.authorId });
+  }
+  return known;
 }
 
 /**
@@ -825,12 +865,13 @@ export function createTurnRunner({
    * names its part (`part <index>/<total>`) after the trigger kind.
    * @param {{ channel: object, parsed: object, idByIndex: Map<number, string>,
    *   mode: string, triggerKind: TriggerKind|null, plain: boolean, selfName: string, pulledIds: Map<string, string>,
-   *   lines: object[], linkFor: (pulledId: string|null) => string|null,
+   *   lines: object[], knownNames: { name: string, id: string }[], linkFor: (pulledId: string|null) => string|null,
    *   part?: { index: number, total: number }|null }} args
    *   `plain`: the turn quotes no chat line (postsPlain); `lines`: the lines shown of the pulled
-   *   channels, then this chat's history (names and authors).
+   *   channels, then this chat's history (names and authors); `knownNames`: the stored names
+   *   `@name` resolves by too (storedNames).
    */
-  async function dryAct({ channel, parsed, idByIndex, mode, triggerKind, plain, selfName, pulledIds, lines, linkFor, part = null }) {
+  async function dryAct({ channel, parsed, idByIndex, mode, triggerKind, plain, selfName, pulledIds, lines, knownNames, linkFor, part = null }) {
     const channelName = channel.name ?? null;
     const where = mirrorChannelLabel(channel);
     // Every triggered turn shares the mode `reply`: the header names its
@@ -862,7 +903,7 @@ export function createTurnRunner({
       const to = answeredId ? ` · to ${authorNameFor(lines, answeredId) ?? '—'}` : '';
       const link = linkFor(pulledId);
       // Same deliberate exception as above: the persona's own output, dry-run only.
-      const text = withLink(renderCustomEmoji(resolveMentions(message.text, lines).text, emojiLookup()), link, labels);
+      const text = withLink(renderCustomEmoji(resolveMentions(message.text, lines, knownNames).text, emojiLookup()), link, labels);
       log.info('dry-run: would send', { channel: channel.id, channelName, mode, trigger: triggerKind ?? null, replyTo: replyId, link, text });
       // The mirror shows @name as the model wrote it: resolving it to a real
       // mention here would ping someone in a channel meant to be invisible to them.
@@ -1152,7 +1193,7 @@ export function createTurnRunner({
    * answering a pulled line posts plain, never as a Discord reply across
    * channels, and each post carries the jump link `linkFor` gives it (a message
    * and the GIF through `labels.elsewhere.link`, read now; the picture as its
-   * content). `@name` resolves over `lines`. Every message is cut to fit one
+   * content). `@name` resolves over `lines`, then `knownNames`. Every message is cut to fit one
    * Discord message once its mentions and custom emoji are expanded (withLink).
    *
    * A message whose send fails ends the posting: `turn: send failed`
@@ -1166,15 +1207,16 @@ export function createTurnRunner({
    * @param {{ channel: object, guildId: string, privateChat: boolean, parsed: object,
    *   idByIndex: Map<number, string>, history: object[], startedAt: number, mode: string,
    *   triggerKind: TriggerKind|null, plain: boolean, trigger: object|null, selfName: string,
-   *   pulledIds: Map<string, string>, lines: object[], linkFor: (pulledId: string|null) => string|null,
-   *   sourceId: string|null }} args
+   *   pulledIds: Map<string, string>, lines: object[], knownNames: { name: string, id: string }[],
+   *   linkFor: (pulledId: string|null) => string|null, sourceId: string|null }} args
    *   `plain`: the turn quotes no chat line (postsPlain); `lines`: the lines shown of the
    *   pulled channels, then `history` (a chat author wins a display name both share);
+   *   `knownNames`: the stored names `@name` resolves by too (storedNames);
    *   `sourceId`: the channel the turn is about (its `source`), logged on every message sent;
    *   with it a refused drawing's limit notice quotes nothing (the trigger of a routed turn
    *   lives in that channel).
    */
-  async function act({ channel, guildId, privateChat, parsed, idByIndex, history, startedAt, mode, triggerKind, plain, trigger, selfName, pulledIds, lines, linkFor, sourceId }) {
+  async function act({ channel, guildId, privateChat, parsed, idByIndex, history, startedAt, mode, triggerKind, plain, trigger, selfName, pulledIds, lines, knownNames, linkFor, sourceId }) {
     const cfg = hot.config.typing;
     const typingOn = hot.config.features?.typingSimulation !== false;
     // Whether anything reached the chat (the caller of a routed turn marks its call by it), and
@@ -1224,7 +1266,7 @@ export function createTurnRunner({
 
       const { replyId, pulledId } = replyTarget(message.replyTo, { plain, idByIndex, pulledIds });
       const link = linkFor(pulledId);
-      const mentioned = resolveMentions(message.text, lines);
+      const mentioned = resolveMentions(message.text, lines, knownNames);
       const { userIds } = mentioned;
       // Custom emoji after the mentions: `<@id>` has no `:name:` in it to break.
       const spoken = renderCustomEmoji(mentioned.text, emojiLookup());
@@ -2846,13 +2888,17 @@ export function createTurnRunner({
       // which post carries a jump link (one rule for act and dryAct). Names resolve over the
       // pulled lines the request showed, then this chat's history: resolveMentions keeps the
       // last author of a display name, so a chat author wins a name both share, and nobody the
-      // model was not shown (a block the budget dropped) is pinged.
+      // model was not shown (a block the budget dropped) is pinged. The stored names of the
+      // members whose profile the request kept and of the pulled lines' authors resolve too,
+      // behind every display name: a pulled line fetched without its member carries the global
+      // name while `<people>` reads the server nickname.
       const pulledIds = request.pulledIds ?? new Map();
       const shownLines = shownPulled.flatMap(({ channelId, ids }) => {
         const shownIds = new Set(ids);
         return (pulled.find((entry) => entry.channelId === channelId)?.messages ?? []).filter((message) => shownIds.has(message.id));
       });
       const lines = shownLines.length > 0 ? [...shownLines, ...history] : history;
+      const knownNames = memoryOn ? storedNames(request.peopleShown, shownLines, (userId) => store.getUser(guildId, userId)) : [];
       const linkFor = createLinker({
         guildId,
         pulledIds,
@@ -2862,7 +2908,7 @@ export function createTurnRunner({
       // model's reply="#n" quotes nothing --, nor does the drawFailed turn after one.
       // A later part of a split message posts plain too: the first part replied to the message.
       const plain = postsPlain(triggerKind) || postsPlain(drawFailedAfter) || plainPosts;
-      const routing = { pulledIds, lines, linkFor, plain };
+      const routing = { pulledIds, lines, knownNames, linkFor, plain };
       // Read fresh right here, not from the `features` snapshot taken at the
       // top of this turn: unlike the other switches this one defaults to OFF,
       // and whether to actually post is the very last decision of a turn.

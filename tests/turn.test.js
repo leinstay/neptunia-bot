@@ -104,6 +104,43 @@ test('resolveMentions: deduplicates authors that appear more than once in histor
   assert.deepEqual(result.userIds, ['u1']);
 });
 
+test('resolveMentions: a stored multi-word name of a member shown resolves', () => {
+  const history = [historyMsg('Whammy', 'u3')];
+  const known = [{ name: 'Más tarde nunca', id: 'u3' }, { name: 'Whammy', id: 'u3' }];
+  const result = resolveMentions('@Más tarde nunca ναι', history, known);
+  assert.equal(result.text, '<@u3> ναι');
+  assert.deepEqual(result.userIds, ['u3']);
+});
+
+test('resolveMentions: a transcript author wins a name a stored profile shares', () => {
+  const history = [historyMsg('Bob', 'u2')];
+  const result = resolveMentions('@Bob ναι', history, [{ name: 'Bob', id: 'u7' }]);
+  assert.equal(result.text, '<@u2> ναι');
+  assert.deepEqual(result.userIds, ['u2']);
+});
+
+test('resolveMentions: a name only a member not handed over carries stays text', () => {
+  // The caller hands over the members the request showed; anyone else is no candidate.
+  const history = [historyMsg('Alice', 'u1')];
+  const result = resolveMentions('@Ταξιάρχης γεια', history, [{ name: 'Αλίκη', id: 'u1' }]);
+  assert.equal(result.text, '@Ταξιάρχης γεια');
+  assert.deepEqual(result.userIds, []);
+});
+
+test('resolveMentions: a stored name containing a shorter transcript name is matched first', () => {
+  const history = [historyMsg('Anna', 'short-id')];
+  const result = resolveMentions('@Anna María, @Anna', history, [{ name: 'Anna María', id: 'long-id' }]);
+  assert.equal(result.text, '<@long-id>, <@short-id>');
+  assert.deepEqual(result.userIds, ['long-id', 'short-id']);
+});
+
+test('resolveMentions: the first member handed over keeps a stored name two share; empty names are skipped', () => {
+  const known = [{ name: 'Zoé', id: 'z1' }, { name: 'Zoé', id: 'z2' }, { name: '', id: 'z3' }, { name: ' ', id: 'z4' }];
+  const result = resolveMentions('@Zoé @ x', [], known);
+  assert.equal(result.text, '<@z1> @ x');
+  assert.deepEqual(result.userIds, ['z1']);
+});
+
 // ---------------------------------------------------------------------------
 // createTurnRunner — integration-style, fake channel/llm/store/hot.
 
@@ -4610,6 +4647,66 @@ test('runTurn: @name of an author whose pulled block the budget dropped stays te
   const [post] = scene.channel.sent;
   assert.equal(post.content, '@Éloïse γεια');
   assert.deepEqual(post.allowedMentions.users, []);
+});
+
+/** A store remembering the diary's author by a nickname of several words (her pulled lines carry her global name). */
+function nicknameStore(extra = {}) {
+  return fakeStore({ userProfiles: { u3: { id: 'u3', names: ['Éloïse de Vaux', 'Éloïse'] }, ...extra } });
+}
+
+test('runTurn: @name of a pulled author resolves by the stored nickname', async () => {
+  const scene = pullScene({ features: { typingSimulation: false }, store: nicknameStore(), llm: fakeLlm('<msg>@Éloïse de Vaux ωραίο μπλε</msg>') });
+
+  await withCapturedLogs(() => scene.turns.runTurn({ channel: scene.channel, mode: 'reply', trigger: scene.trigger, triggerKind: 'mention' }));
+
+  const [post] = scene.channel.sent;
+  assert.equal(post.content, '<@u3> ωραίο μπλε', 'the longer stored name wins over the display name it starts with');
+  assert.deepEqual(post.allowedMentions.users, ['u3']);
+});
+
+test('runTurn: in dry-run the stored nickname of a pulled author resolves the same way', async () => {
+  const scene = pullScene({ features: { typingSimulation: false, dryRun: true }, store: nicknameStore(), llm: fakeLlm('<msg>@Éloïse de Vaux ωραίο μπλε</msg>') });
+
+  const { logs } = await withCapturedLogs(() => scene.turns.runTurn({ channel: scene.channel, mode: 'reply', trigger: scene.trigger, triggerKind: 'mention' }));
+
+  assert.equal(scene.channel.sent.length, 0);
+  assert.equal(logs.find((l) => l.msg === 'dry-run: would send').text, '<@u3> ωραίο μπλε');
+});
+
+test('runTurn: the stored name of a member the request did not show stays text', async () => {
+  const store = nicknameStore({ u9: { id: 'u9', names: ['Ταξιάρχης Μέγας'], character: 'ήσυχος' } });
+  const scene = pullScene({ features: { typingSimulation: false }, store, llm: fakeLlm('<msg>@Ταξιάρχης Μέγας γεια</msg>') });
+
+  await withCapturedLogs(() => scene.turns.runTurn({ channel: scene.channel, mode: 'reply', trigger: scene.trigger, triggerKind: 'mention' }));
+
+  const [post] = scene.channel.sent;
+  assert.equal(post.content, '@Ταξιάρχης Μέγας γεια');
+  assert.deepEqual(post.allowedMentions.users, []);
+});
+
+test('runTurn: the stored nickname of an author whose pulled block the budget dropped stays text', async () => {
+  // Her profile holds names only, so `<people>` has nothing to show of her either.
+  const caps = { interlocutor: 2500, aboutChat: 2500, people: 4000, neighbors: 3000, pulled: 1 };
+  const scene = pullScene({ features: { typingSimulation: false }, context: { caps }, store: nicknameStore(), llm: fakeLlm('<msg>@Éloïse de Vaux γεια</msg>') });
+
+  await withCapturedLogs(() => scene.turns.runTurn({ channel: scene.channel, mode: 'reply', trigger: scene.trigger, triggerKind: 'mention' }));
+
+  assert.equal(channelViewOf(scene.llm), null, 'the block was cut');
+  const [post] = scene.channel.sent;
+  assert.equal(post.content, '@Éloïse de Vaux γεια');
+  assert.deepEqual(post.allowedMentions.users, []);
+});
+
+test('runTurn: @name resolves by a stored name of a member <people> shows', async () => {
+  // Bob speaks in the chat under his display name; the persona remembers him by another one.
+  const store = fakeStore({ userProfiles: { u2: { id: 'u2', names: ['Bob', 'Roberto Sáenz'], character: 'ήρεμος' } } });
+  const scene = pullScene({ features: { typingSimulation: false }, store, llm: fakeLlm('<msg>@Roberto Sáenz ναι</msg>') });
+
+  await withCapturedLogs(() => scene.turns.runTurn({ channel: scene.channel, mode: 'reply', trigger: scene.trigger, triggerKind: 'mention' }));
+
+  const [post] = scene.channel.sent;
+  assert.equal(post.content, '<@u2> ναι');
+  assert.deepEqual(post.allowedMentions.users, ['u2']);
 });
 
 test('runTurn: a noticed turn whose source block the budget dropped posts no link', async () => {
