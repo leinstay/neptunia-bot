@@ -399,6 +399,7 @@ async function shutdown(signal) {
   log.info('index: shutting down', { signal });
   for (const id of timers) clearInterval(id);
   spontaneous.stop();
+  onMessage.stop();
   hot.close();
   store.flush();
   await client.destroy();
