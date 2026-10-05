@@ -466,8 +466,10 @@ export function usableDestination(guild, config, { exceptId = null } = {}) {
  * default: the client's cached guild member, else the bot user's name.
  *
  * `routeChannels` (the route classifier's hook) is optional:
- * `({ guildId, channel, history, trigger, selfName, config }) => Promise<string[]>`,
- * the ids of channels the conversation is about. It is asked on a server turn
+ * `({ guildId, channel, history, trigger, triggerKind, selfName, config }) => Promise<string[]>`,
+ * the ids of channels the conversation is about; `triggerKind` is the turn's
+ * TriggerKind (null on a turn without a trigger), so the hook can decline
+ * kinds it does not serve (src/behavior/route.js#routeAllowed). It is asked on a server turn
  * (never a drawFailed one) with features.channelPull on and the labels able
  * to render the block (`labels.pull.header`) while a
  * `<channel_view>` slot (`context.pull.maxChannels`) is left after the turn's
@@ -1270,7 +1272,7 @@ export function createTurnRunner({
    * @returns {Promise<{ pulled: object[], sourceSkip: string|null }>}  The PulledChannel records,
    *   source first; `sourceSkip` is the skip code of a source that could not be pulled.
    */
-  async function pullChannels({ channel, guildId, history, trigger, source, selfId, selfName, config, now, certain, drawFailure, labelled }) {
+  async function pullChannels({ channel, guildId, history, trigger, triggerKind = null, source, selfId, selfName, config, now, certain, drawFailure, labelled }) {
     const guild = channel.guild;
     const settings = pullSettings(config);
     const channelPull = channelPullOn(config) && labelled;
@@ -1343,7 +1345,7 @@ export function createTurnRunner({
     }
     if (typeof routeChannels === 'function' && channelPull && !drawFailure && targets.length < settings.maxChannels) {
       const routedLines = source?.reason === 'routed' ? sourcePulled?.messages : null;
-      const ids = await routeIds({ guildId, channel, history: routedLines ?? history, trigger, selfName, config });
+      const ids = await routeIds({ guildId, channel, history: routedLines ?? history, trigger, triggerKind, selfName, config });
       judging = 'route';
       if (ids.length > 0) targets = targetsWith(ids);
     }
@@ -1606,7 +1608,7 @@ export function createTurnRunner({
       const pullLabelled = Boolean(hot.prompts?.labels?.pull?.header);
       const pullsPending = isPrivate
         ? Promise.resolve({ pulled: [], sourceSkip: null })
-        : pullChannels({ channel, guildId, history, trigger, source, selfId, selfName, config, now, certain, drawFailure: answersDrawFailure, labelled: pullLabelled })
+        : pullChannels({ channel, guildId, history, trigger, triggerKind, source, selfId, selfName, config, now, certain, drawFailure: answersDrawFailure, labelled: pullLabelled })
             // Never fails the turn: anything unexpected is no pull (and no source).
             .catch((err) => {
               log.warn('pull: failed', { channel: channel.id, error: err });
